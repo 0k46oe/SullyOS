@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { querySwVersion } from '../../utils/swVersion';
-import { APP_VERSION, BUILD_LABEL } from '../../utils/buildInfo';
+import { APP_VERSION, BUILD_LABEL, BUILD_TIME_LABEL } from '../../utils/buildInfo';
 import { isDevDebugAvailable, subscribeDevDebugAvailability, unlockDevDebug } from '../../utils/devDebug';
 
 /**
@@ -10,6 +10,7 @@ import { isDevDebugAvailable, subscribeDevDebugAvailability, unlockDevDebug } fr
  * 这里在**所有**构建（含正式版）里都低调显示，方便用户截图报障时附带版本上下文：
  *   - APP_VERSION：手工维护的产品版本名（之前硬编码的 v2.2）
  *   - build：vite.config 注入的 __BUILD_BRANCH__@__BUILD_COMMIT__
+ *   - built：vite.config 注入的 UTC+8 构建时间
  *   - sw：运行时向 Service Worker 查询的 SW_VERSION
  *
  * 构建全局（__BUILD_BRANCH__ 等）由 vite define 始终注入，prod 也有值，
@@ -78,12 +79,17 @@ const VersionInfo: React.FC = () => {
             >
                 {APP_VERSION}
             </button>
-            <div className="flex items-center gap-1.5 text-[9px] font-mono text-slate-400/80">
-                <span className="px-1.5 py-0.5 rounded-md bg-slate-100 tracking-wide">
-                    build&nbsp;<span className="text-slate-500">{BUILD_LABEL}</span>
-                </span>
-                <span className="px-1.5 py-0.5 rounded-md bg-slate-100 tracking-wide">
-                    sw&nbsp;<span className="text-slate-500">{swVersion}</span>
+            <div className="flex flex-col items-center gap-1 text-[9px] font-mono text-slate-400/80">
+                <div className="flex items-center gap-1.5">
+                    <span className="px-1.5 py-0.5 rounded-md bg-slate-100 tracking-wide">
+                        build&nbsp;<span className="text-slate-500">{BUILD_LABEL}</span>
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded-md bg-slate-100 tracking-wide">
+                        sw&nbsp;<span className="text-slate-500">{swVersion}</span>
+                    </span>
+                </div>
+                <span className="max-w-full px-1.5 py-0.5 rounded-md bg-slate-100 text-center tracking-wide">
+                    built&nbsp;<span className="text-slate-500">{BUILD_TIME_LABEL}</span>
                 </span>
             </div>
             {hint && (
