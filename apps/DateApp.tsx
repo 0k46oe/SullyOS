@@ -36,6 +36,8 @@ const DateApp: React.FC = () => {
 
     // 选择页分页（6 个角色一页，横向翻页）
     const SELECT_PAGE_SIZE = 6;
+    const DATE_SESSION_MESSAGE_LIMIT = 220;
+    const DATE_HISTORY_MESSAGE_LIMIT = 500;
     const pagerRef = useRef<HTMLDivElement>(null);
     const [selectPage, setSelectPage] = useState(0);
     const onPagerScroll = () => {
@@ -77,14 +79,18 @@ const DateApp: React.FC = () => {
 
     const char = characters.find(c => c.id === activeCharacterId);
 
+    const getDateContextFetchLimit = (c: CharacterProfile) => Math.max(c.contextLimit || 500, DATE_SESSION_MESSAGE_LIMIT) + 32;
+    const loadRecentDateMessages = async (charId: string, limit = DATE_SESSION_MESSAGE_LIMIT) => {
+        return (await DB.getRecentMessagesByCharIdAndSource(charId, 'date', limit))
+            .sort((a, b) => a.timestamp - b.timestamp);
+    };
+
     // --- Data Loading ---
     const loadDateMessages = async () => {
         if (char) {
-            // includeProcessed=true：见面记录有自己的 source 维度，
-            // 不能被聊天侧的 memoryPalace 高水位静默吃掉
-            const msgs = await DB.getMessagesByCharId(char.id, true);
-            // 只筛选 source='date' 的消息用于小说模式显示
-            const filtered = msgs.filter(m => m.metadata?.source === 'date').sort((a,b) => a.timestamp - b.timestamp);
+            // 见面记录只取最近窗口，不再把该角色全部聊天 getAll 进内存。
+            // TODO(date-assets): 后续把角色立绘/背景本体迁到 assets store 后，这里还能再把 limit 放宽。
+            const filtered = await loadRecentDateMessages(char.id);
             setDateMessages(filtered);
             
             // 检查数据库中是否已经包含当前的 peekStatus（通过内容比对），避免重复保存
@@ -193,7 +199,7 @@ const DateApp: React.FC = () => {
         setHasSavedOpening(false); 
 
         try {
-            const msgs = await DB.getMessagesByCharId(c.id, true);
+            const msgs = await DB.getRecentMessagesByCharId(c.id, getDateContextFetchLimit(c), true);
             const emojis = await DB.getEmojis();
             const { messages } = DatePrompts.buildPeekPayload({
                 char: c,
@@ -309,11 +315,10 @@ const DateApp: React.FC = () => {
         // 2. Prepare Context
         // Re-fetch messages. Since we saved the opening in handleEnterSession,
         // 'allMsgs' will now correctly contain: [History..., Opening, UserMsg]
-        const allMsgs = await DB.getMessagesByCharId(char.id, true);
+        const allMsgs = await DB.getRecentMessagesByCharId(char.id, getDateContextFetchLimit(char), true);
 
         // Update local state for display
-        const dateFiltered = allMsgs.filter(m => m.metadata?.source === 'date').sort((a,b) => a.timestamp - b.timestamp);
-        setDateMessages(dateFiltered);
+        setDateMessages(await loadRecentDateMessages(char.id));
 
         const emojis = await DB.getEmojis();
         const { messages } = await DatePrompts.buildSessionPayload({
@@ -330,8 +335,7 @@ const DateApp: React.FC = () => {
         await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: content, metadata: { source: 'date' } });
 
         // Refresh local state
-        const freshMsgs = await DB.getMessagesByCharId(char.id, true);
-        setDateMessages(freshMsgs.filter(m => m.metadata?.source === 'date').sort((a,b) => a.timestamp - b.timestamp));
+        setDateMessages(await loadRecentDateMessages(char.id));
 
         // Memory Palace 后台流程（不阻塞返回，与聊天侧一致）
         runMemoryPalacePostHook(char);
@@ -349,9 +353,10 @@ const DateApp: React.FC = () => {
         await DB.deleteMessage(lastMsg.id);
         
         // 2. Find the user input that triggered it
-        const allMsgs = await DB.getMessagesByCharId(char.id, true);
+        const allMsgs = await DB.getRecentMessagesByCharId(char.id, getDateContextFetchLimit(char), true);
         const validMsgs = allMsgs.filter(m => m.id !== lastMsg.id);
-        const lastUserMsg = validMsgs[validMsgs.length - 1];
+        const validDateMsgs = validMsgs.filter(m => m.metadata?.source === 'date');
+        const lastUserMsg = validDateMsgs[validDateMsgs.length - 1];
         
         if (!lastUserMsg || lastUserMsg.role !== 'user') throw new Error("Context lost");
 
@@ -371,8 +376,7 @@ const DateApp: React.FC = () => {
         await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: content, metadata: { source: 'date' } });
 
         // Sync
-        const freshMsgs = await DB.getMessagesByCharId(char.id, true);
-        setDateMessages(freshMsgs.filter(m => m.metadata?.source === 'date').sort((a,b) => a.timestamp - b.timestamp));
+        setDateMessages(await loadRecentDateMessages(char.id));
 
         // Memory Palace 后台流程（Reroll 也算一轮新输出）
         runMemoryPalacePostHook(char);
@@ -465,11 +469,10 @@ const DateApp: React.FC = () => {
 
     const openHistory = async (c: CharacterProfile) => {
         setActiveCharacterId(c.id);
-        // includeProcessed=true：见面历史完全独立于聊天侧高水位，
-        // 否则用户开了向量记忆后老的见面记录会全部"消失"
-        const msgs = await DB.getMessagesByCharId(c.id, true);
+        // 见面历史按 source=date 独立读取，不受聊天侧记忆宫殿高水位影响。
+        const msgs = await DB.getRecentMessagesByCharIdAndSource(c.id, 'date', DATE_HISTORY_MESSAGE_LIMIT);
         // dateMsgs sorted DESCENDING (newest first)
-        const dateMsgs = msgs.filter(m => m.metadata?.source === 'date').sort((a, b) => b.timestamp - a.timestamp);
+        const dateMsgs = msgs.sort((a, b) => b.timestamp - a.timestamp);
         
         const sessions: {date: string, msgs: Message[]}[] = [];
         if (dateMsgs.length > 0) {

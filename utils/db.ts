@@ -545,6 +545,30 @@ export const DB = {
     });
   },
 
+  // DateApp 等按来源展示的轻量历史读取：用 charId 索引倒序扫，只收集目标 source 的最近 N 条。
+  // 这样不会为了渲染见面阅读模式，把该角色全量聊天（含图片/base64消息）一次性 getAll 进内存。
+  getRecentMessagesByCharIdAndSource: async (charId: string, source: string, limit: number): Promise<Message[]> => {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_MESSAGES, 'readonly');
+      const store = transaction.objectStore(STORE_MESSAGES);
+      const index = store.index('charId');
+      const collected: Message[] = [];
+      const cursorReq = index.openCursor(IDBKeyRange.only(charId), 'prev');
+      cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (cursor && collected.length < limit) {
+              const m = cursor.value as Message;
+              if (!m.groupId && m.metadata?.source === source) collected.push(m);
+              cursor.continue();
+          } else {
+              resolve(collected.reverse());
+          }
+      };
+      cursorReq.onerror = () => reject(cursorReq.error);
+    });
+  },
+
   // 彼方动态专用：捞某角色全部 vr_card，不受"最近 N 条窗口"、记忆宫殿高水位
   // （mp_lastMsgId）、归档隐藏起点（char.hideBeforeMessageId）影响。
   // 这些机制只管「LLM 上下文能否看到」；彼方动态是用户自己的浏览界面，

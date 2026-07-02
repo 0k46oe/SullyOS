@@ -1682,8 +1682,14 @@ export interface DateState {
     dialogueQueue: DialogueItem[];
     dialogueBatch: DialogueItem[];
     currentText: string;
-    bgImage: string;
-    currentSprite: string;
+    /** @deprecated 旧版恢复快照会复制背景图，可能是超大 base64；新版恢复优先读角色上的 dateBackground。 */
+    bgImage?: string;
+    /** @deprecated 旧版恢复快照会复制立绘图，可能是超大 base64；新版恢复优先读 currentSpriteKey。 */
+    currentSprite?: string;
+    /** 当前立绘对应的情绪 key，只存引用信息，避免把 base64 立绘重复塞进 savedDateState。 */
+    currentSpriteKey?: string;
+    /** 恢复时优先按当时的皮肤集找 currentSpriteKey，皮肤不存在再回退当前皮肤/默认立绘。 */
+    activeSkinSetId?: string;
     isNovelMode: boolean;
     timestamp: number;
     peekStatus: string;

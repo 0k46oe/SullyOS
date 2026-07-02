@@ -109,6 +109,10 @@ interface DateSessionProps {
     onSettings: () => void;
 }
 
+const NOVEL_MESSAGE_WINDOW_SIZE = 80;
+const NOVEL_MESSAGE_LOAD_STEP = 80;
+const REQUIRED_EMOTIONS_SET = ['normal', 'happy', 'angry', 'sad', 'shy'];
+
 const DateSession: React.FC<DateSessionProps> = ({ 
     char, 
     userProfile,
@@ -129,6 +133,7 @@ const DateSession: React.FC<DateSessionProps> = ({
     const [isNovelMode, setIsNovelMode] = useState(false);
     const [bgImage, setBgImage] = useState<string>(char.dateBackground || '');
     const [currentSprite, setCurrentSprite] = useState<string>('');
+    const [currentSpriteKey, setCurrentSpriteKey] = useState<string>('');
     const [spriteConfig, setSpriteConfig] = useState(char.spriteConfig || { scale: 1, x: 0, y: 0 });
     
     // Dialogue Engine State
@@ -171,6 +176,7 @@ const DateSession: React.FC<DateSessionProps> = ({
     const voiceCacheRef = useRef<Record<string, string>>({});
     const [novelVoiceLoading, setNovelVoiceLoading] = useState<Set<string>>(new Set());
     const [novelPlayingId, setNovelPlayingId] = useState<string | null>(null);
+    const [novelVisibleCount, setNovelVisibleCount] = useState(NOVEL_MESSAGE_WINDOW_SIZE);
     const dateAudioRef = useRef<HTMLAudioElement | null>(null);
     const voiceEnabled = !!char.dateVoiceEnabled;
     const voiceLang = char.dateVoiceLang || '';
@@ -332,6 +338,46 @@ const DateSession: React.FC<DateSessionProps> = ({
         return unregister;
     }, [showSettings, showMenu, showExitModal, registerBackHandler]);
 
+    const dateEmotionKeys = [...REQUIRED_EMOTIONS_SET, ...(char.customDateSprites || [])];
+
+    const getSpritesForSkin = (skinId?: string): Record<string, string> => {
+        const explicitSkin = skinId && char.dateSkinSets?.find(s => s.id === skinId);
+        if (explicitSkin && Object.keys(explicitSkin.sprites || {}).length > 0) return explicitSkin.sprites;
+        if (char.activeSkinSetId && char.dateSkinSets) {
+            const activeSkin = char.dateSkinSets.find(s => s.id === char.activeSkinSetId);
+            if (activeSkin && Object.keys(activeSkin.sprites || {}).length > 0) return activeSkin.sprites;
+        }
+        return char.sprites || {};
+    };
+
+    const activeSprites = React.useMemo(() => getSpritesForSkin(), [char.activeSkinSetId, char.dateSkinSets, char.sprites]);
+
+    const pickFallbackSprite = (sprites: Record<string, string>) => {
+        const key = ['normal', 'default', ...dateEmotionKeys].find(k => sprites[k]);
+        return { key: key || '', src: (key && sprites[key]) || Object.values(sprites).find(v => v) || char.avatar || '' };
+    };
+
+    const inferSpriteKey = (src?: string, skinId?: string): string => {
+        if (!src) return '';
+        const sprites = getSpritesForSkin(skinId);
+        return Object.entries(sprites).find(([, value]) => value === src)?.[0] || '';
+    };
+
+    const resolveSpriteByKey = (key?: string, skinId?: string) => {
+        const sprites = getSpritesForSkin(skinId);
+        if (key && sprites[key]) return { key, src: sprites[key] };
+        return pickFallbackSprite(sprites);
+    };
+
+    const resolveSpriteFromState = (state: DateState) => {
+        const bySavedKey = resolveSpriteByKey(state.currentSpriteKey, state.activeSkinSetId);
+        if (state.currentSpriteKey && bySavedKey.src) return bySavedKey;
+        const legacyKey = inferSpriteKey(state.currentSprite, state.activeSkinSetId) || inferSpriteKey(state.currentSprite);
+        if (legacyKey) return resolveSpriteByKey(legacyKey, state.activeSkinSetId);
+        const fallback = resolveSpriteByKey(undefined, state.activeSkinSetId);
+        return { key: fallback.key, src: state.currentSprite || fallback.src };
+    };
+
     // Filter messages for Novel Mode: Show only current session
     // Logic: Find the LAST message with `isOpening: true`. Show all messages from there onwards.
     const sessionMessages = React.useMemo(() => {
@@ -343,33 +389,33 @@ const DateSession: React.FC<DateSessionProps> = ({
         return messages;
     }, [messages]);
 
+    const visibleSessionMessages = React.useMemo(() => {
+        return sessionMessages.slice(-novelVisibleCount);
+    }, [sessionMessages, novelVisibleCount]);
+    const hiddenNovelMessageCount = Math.max(0, sessionMessages.length - visibleSessionMessages.length);
+
+    useEffect(() => {
+        setNovelVisibleCount(NOVEL_MESSAGE_WINDOW_SIZE);
+    }, [char.id]);
+
     // Initialization
     useEffect(() => {
         if (initialState) {
-            // Resume
-            setBgImage(initialState.bgImage);
-            setCurrentSprite(initialState.currentSprite);
-            setCurrentText(initialState.currentText);
-            setDisplayedText(initialState.currentText);
-            setDialogueQueue(initialState.dialogueQueue);
-            setDialogueBatch(initialState.dialogueBatch);
-            setIsNovelMode(initialState.isNovelMode);
+            // Resume: 新快照只保存 sprite key，不再复制 base64；旧快照的 bg/currentSprite 仍兼容读取一次。
+            const restoredSprite = resolveSpriteFromState(initialState);
+            setBgImage(char.dateBackground || initialState.bgImage || '');
+            setCurrentSprite(restoredSprite.src);
+            setCurrentSpriteKey(restoredSprite.key);
+            setCurrentText(initialState.currentText || '');
+            setDisplayedText(initialState.currentText || '');
+            setDialogueQueue(Array.isArray(initialState.dialogueQueue) ? initialState.dialogueQueue : []);
+            setDialogueBatch(Array.isArray(initialState.dialogueBatch) ? initialState.dialogueBatch : []);
+            setIsNovelMode(!!initialState.isNovelMode);
         } else {
             // New Session - pick initial sprite from active skin set or default sprites
-            const s = (() => {
-                if (char.activeSkinSetId && char.dateSkinSets) {
-                    const skin = char.dateSkinSets.find(sk => sk.id === char.activeSkinSetId);
-                    if (skin && Object.keys(skin.sprites).length > 0) return skin.sprites;
-                }
-                return char.sprites;
-            })();
-            let initSprite = s?.['normal'] || s?.['default'];
-            if (!initSprite && s) {
-                const fallbackKey = dateEmotionKeys.find(k => s[k]);
-                initSprite = fallbackKey ? s[fallbackKey] : Object.values(s).find(v => v) || char.avatar;
-            }
-            if (!initSprite) initSprite = char.avatar;
-            setCurrentSprite(initSprite);
+            const initialSprite = pickFallbackSprite(activeSprites);
+            setCurrentSprite(initialSprite.src);
+            setCurrentSpriteKey(initialSprite.key);
             
             // Parse Peek Status as opening — 先剥出观测块（开了 OBSERVE 才有）
             const startText = peekStatus || "Waiting for connection...";
@@ -394,15 +440,19 @@ const DateSession: React.FC<DateSessionProps> = ({
     // Sprite & Config Sync (If user goes to settings and comes back, this helps)
     useEffect(() => {
         if (char.spriteConfig) setSpriteConfig(char.spriteConfig);
-        if (char.dateBackground) setBgImage(char.dateBackground);
-    }, [char]);
+        if (char.dateBackground || !initialState?.bgImage) setBgImage(char.dateBackground || '');
+        if (currentSpriteKey) {
+            const resolved = resolveSpriteByKey(currentSpriteKey);
+            if (resolved.src) setCurrentSprite(resolved.src);
+        }
+    }, [char, currentSpriteKey]);
 
     // Novel Mode Scroll
     useEffect(() => {
         if (isNovelMode && novelScrollRef.current) {
             novelScrollRef.current.scrollTop = novelScrollRef.current.scrollHeight;
         }
-    }, [sessionMessages.length, isNovelMode, showInputBox]);
+    }, [visibleSessionMessages.length, isNovelMode, showInputBox]);
 
     // Typewriter effect
     useEffect(() => {
@@ -426,19 +476,6 @@ const DateSession: React.FC<DateSessionProps> = ({
 
     // --- Logic ---
 
-    // Only allow date-relevant emotions (required + custom), never chibi or other non-date sprites
-    const REQUIRED_EMOTIONS_SET = ['normal', 'happy', 'angry', 'sad', 'shy'];
-    const dateEmotionKeys = [...REQUIRED_EMOTIONS_SET, ...(char.customDateSprites || [])];
-
-    // Resolve active sprites: if a skin set is active, use its sprites; otherwise fall back to char.sprites
-    const activeSprites = React.useMemo(() => {
-        if (char.activeSkinSetId && char.dateSkinSets) {
-            const skin = char.dateSkinSets.find(s => s.id === char.activeSkinSetId);
-            if (skin) return skin.sprites;
-        }
-        return char.sprites || {};
-    }, [char.activeSkinSetId, char.dateSkinSets, char.sprites]);
-
     const processNextDialogue = (item: DialogueItem, remaining: DialogueItem[]) => {
         setCurrentText(item.text);
         currentLineEmotionRef.current = item.voiceEmotion;
@@ -446,11 +483,15 @@ const DateSession: React.FC<DateSessionProps> = ({
             const emotionKey = item.emotion.toLowerCase();
             if (dateEmotionKeys.includes(emotionKey)) {
                 const nextSprite = activeSprites[emotionKey];
-                if (nextSprite) setCurrentSprite(nextSprite);
+                if (nextSprite) {
+                    setCurrentSprite(nextSprite);
+                    setCurrentSpriteKey(emotionKey);
+                }
             } else {
                 const found = dateEmotionKeys.find(k => emotionKey.includes(k));
                 if (found && activeSprites[found]) {
                     setCurrentSprite(activeSprites[found]);
+                    setCurrentSpriteKey(found);
                 }
             }
         }
@@ -547,8 +588,11 @@ const DateSession: React.FC<DateSessionProps> = ({
         dialogueQueue,
         dialogueBatch,
         currentText,
-        bgImage,
-        currentSprite,
+        // Keep recovery snapshots light: don't duplicate base64 background/sprite data here.
+        // TODO(date-assets): migrate CharacterProfile dateBackground/sprites/dateSkinSets themselves
+        // into the IndexedDB assets store and keep stable asset refs on the character.
+        currentSpriteKey: currentSpriteKey || inferSpriteKey(currentSprite) || undefined,
+        activeSkinSetId: char.activeSkinSetId,
         isNovelMode,
         timestamp: Date.now(),
         peekStatus,
@@ -814,7 +858,24 @@ const DateSession: React.FC<DateSessionProps> = ({
                                     </>
                                 );
                             })()}
-                            {sessionMessages.map((msg) => (
+                            {hiddenNovelMessageCount > 0 && (
+                                <div className="flex justify-center">
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setNovelVisibleCount(count => count + NOVEL_MESSAGE_LOAD_STEP);
+                                        }}
+                                        className={`px-4 py-2 rounded-full text-xs font-bold border active:scale-95 transition-transform ${
+                                            char.dateLightReading
+                                                ? 'bg-stone-100 text-stone-500 border-stone-200'
+                                                : 'bg-white/10 text-white/60 border-white/10'
+                                        }`}
+                                    >
+                                        加载更早见面记录 ({hiddenNovelMessageCount})
+                                    </button>
+                                </div>
+                            )}
+                            {visibleSessionMessages.map((msg) => (
                                 <div
                                     key={msg.id}
                                     className={`group relative rounded-xl transition-colors -mx-4 px-4 py-2 ${char.dateLightReading ? 'active:bg-stone-100' : 'active:bg-white/5'}`}
