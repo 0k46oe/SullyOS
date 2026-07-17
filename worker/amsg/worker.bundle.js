@@ -4005,6 +4005,96 @@ async function dispatchAgenticTool(toolName, args, ctx) {
   }
 }
 
+// node_modules/.pnpm/@rei-standard+amsg-instant@0.10.0/node_modules/@rei-standard/amsg-instant/dist/index.mjs
+var TEXT_ENCODER2 = new TextEncoder();
+var TEXT_DECODER2 = new TextDecoder("utf-8", { fatal: false });
+function utf83(str) {
+  return TEXT_ENCODER2.encode(String(str));
+}
+var KEY_INFO_PREFIX2 = utf83("WebPush: info\0");
+var CEK_INFO2 = utf83("Content-Encoding: aes128gcm\0");
+var NONCE_INFO2 = utf83("Content-Encoding: nonce\0");
+var VAPID_TOKEN_LIFETIME2 = 12 * 3600;
+var PUSH_PAYLOAD_BYTE_ENCODER = new TextEncoder();
+function segmentTextWithProtectedBlocks(text, options) {
+  if (!text) return [];
+  const splitAndSanitize = (plainText) => {
+    const chunks = options.splitText(plainText).filter((c) => c !== "");
+    return chunks.map((chunk) => ({
+      raw: chunk,
+      sanitized: options.sanitizeText ? options.sanitizeText(chunk) : chunk,
+      protect: false
+    }));
+  };
+  if (!options.protectedPatterns || options.protectedPatterns.length === 0) {
+    return splitAndSanitize(text);
+  }
+  const matches = [];
+  for (const p of options.protectedPatterns) {
+    const flags = p.pattern.flags.includes("g") ? p.pattern.flags : p.pattern.flags + "g";
+    const regex = new RegExp(p.pattern.source, flags);
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+      if (match[0].length === 0) {
+        regex.lastIndex++;
+        continue;
+      }
+      matches.push({
+        index: match.index,
+        length: match[0].length,
+        raw: match[0],
+        matchObj: match,
+        patternDef: p
+      });
+    }
+  }
+  matches.sort((a, b) => {
+    if (a.index !== b.index) return a.index - b.index;
+    return b.length - a.length;
+  });
+  const validMatches = [];
+  let lastEnd = 0;
+  for (const m of matches) {
+    if (m.index >= lastEnd) {
+      validMatches.push(m);
+      lastEnd = m.index + m.length;
+    }
+  }
+  const segments = [];
+  let cursor = 0;
+  const resolveField = (field, raw, match) => typeof field === "function" ? field(raw, match) : field;
+  for (const m of validMatches) {
+    if (m.index > cursor) {
+      const plainText = text.substring(cursor, m.index);
+      segments.push(...splitAndSanitize(plainText));
+    }
+    const previewStr = resolveField(m.patternDef.preview, m.raw, m.matchObj);
+    const metaData = resolveField(m.patternDef.meta, m.raw, m.matchObj);
+    let sanitized = previewStr;
+    if (sanitized == null) {
+      sanitized = options.sanitizeText ? options.sanitizeText(m.raw) : m.raw;
+    }
+    const pushSeg = {
+      raw: m.raw,
+      sanitized,
+      protect: true
+    };
+    if (metaData !== void 0) {
+      pushSeg.meta = metaData;
+    }
+    segments.push(pushSeg);
+    cursor = m.index + m.length;
+  }
+  if (cursor < text.length) {
+    const plainText = text.substring(cursor);
+    segments.push(...splitAndSanitize(plainText));
+  }
+  return segments;
+}
+var SSE_ENCODER = new TextEncoder();
+var SSE_KEEPALIVE_BYTES = SSE_ENCODER.encode(": keepalive\n\n");
+var SSE_DONE_BYTES = SSE_ENCODER.encode("event: done\ndata: {}\n\n");
+
 // utils/sanitize.ts
 var stripLiteralBackslashN = (t) => t.replace(/\\n/g, "\n");
 var stripSourceTags = (t) => t.replace(/\s*\[(?:聊天|通话|约会)\]\s*/g, "\n");
@@ -4026,6 +4116,8 @@ var replaceMarkdownLinks = (t) => t.replace(/\[([^\]]+)\]\([^)]+\)/g, "[\u94FE\u
 var replaceSendEmoji = (t) => t.replace(/\[\[SEND_EMOJI:\s*(.+?)\]\]/g, "[\u8868\u60C5\uFF1A$1]");
 var replaceEmojiReverseTag = (t) => t.replace(/\[(?:你|User|用户|System|[\w一-龥]+)\s*发送了表情包[:：]\s*(.*?)\]/g, "[\u8868\u60C5\uFF1A$1]");
 var replaceHtmlBlocks = (t) => t.replace(/\[html\][\s\S]*?\[\/html\]/gi, "[HTML \u5361\u7247]");
+var replaceTranslationForBanner = (t) => t.replace(/<翻译>\s*<原文>([\s\S]*?)<\/原文>\s*<译文>[\s\S]*?<\/译文>\s*<\/翻译>/g, "$1").replace(/<译文>[\s\S]*?<\/译文>/g, "").replace(/<\/?(?:翻译|原文)>/g, "");
+var replaceVoiceForBanner = (t) => t.replace(/<(语音|語音)[^>]*>([\s\S]*?)<\/\1>/g, (_m, _tag, inner) => (inner || "").trim());
 var extractTranslationOriginal = (t) => {
   let result = t.replace(
     /<翻译>\s*<原文>([\s\S]*?)<\/原文>\s*<译文>[\s\S]*?<\/译文>\s*<\/翻译>/g,
@@ -4058,6 +4150,127 @@ function sanitizeForNotification(text) {
   result = stripLegacyTrans(result);
   result = collapseWhitespace(result);
   return result;
+}
+function sanitizeIntoSegments(text) {
+  let cleaned = stripLiteralBackslashN(text);
+  cleaned = stripThinkBlocks(cleaned);
+  const ATOM_MARKER = String.fromCharCode(2);
+  const atomBlocks = [];
+  const atomSegments = segmentTextWithProtectedBlocks(cleaned, {
+    splitText: (plainText) => [plainText],
+    protectedPatterns: [
+      {
+        pattern: /\[html\][\s\S]*?\[\/html\]/i,
+        preview: "[HTML \u5361\u7247]"
+      },
+      {
+        pattern: /<翻译>\s*<原文>([\s\S]*?)<\/原文>\s*<译文>[\s\S]*?<\/译文>\s*<\/翻译>/,
+        preview: (_raw, match) => (match[1] || "").trim() || "[\u7FFB\u8BD1]"
+      },
+      {
+        pattern: /<(语音|語音)[^>]*>([\s\S]*?)<\/\1>/,
+        preview: (_raw, match) => (match[2] || "").trim() || "[\u8BED\u97F3]"
+      }
+    ]
+  });
+  cleaned = atomSegments.map((seg) => {
+    if (!seg.protect) return seg.raw;
+    const idx = atomBlocks.length;
+    atomBlocks.push({
+      raw: seg.raw,
+      sanitized: typeof seg.sanitized === "string" ? seg.sanitized : sanitizeTextForBanner(seg.raw)
+    });
+    return `
+${ATOM_MARKER}B${idx}${ATOM_MARKER}
+`;
+  }).join("");
+  cleaned = extractTranslationOriginal(cleaned);
+  cleaned = stripInnerState(cleaned);
+  cleaned = stripBusinessTagsForNotification(cleaned);
+  cleaned = stripTimestamps(cleaned);
+  cleaned = stripChineseDate(cleaned);
+  cleaned = stripRoleNamePrefix(cleaned);
+  cleaned = stripSourceTags(cleaned);
+  cleaned = stripLegacyTrans(cleaned);
+  cleaned = stripMarkdownDividers(cleaned);
+  const rawChunks = chunkText(cleaned);
+  const SOLO_RE = new RegExp(`^${ATOM_MARKER}B(\\d+)${ATOM_MARKER}$`);
+  const GLOBAL_RE = new RegExp(`${ATOM_MARKER}B(\\d+)${ATOM_MARKER}`, "g");
+  const segments = [];
+  for (const rawChunk of rawChunks) {
+    const soloMatch = rawChunk.trim().match(SOLO_RE);
+    if (soloMatch) {
+      const blk = atomBlocks[Number(soloMatch[1])];
+      if (blk) segments.push({ raw: blk.raw, sanitized: blk.sanitized });
+      continue;
+    }
+    const parts = splitOnSendEmoji(rawChunk);
+    for (const part of parts) {
+      if (part.kind === "emoji") {
+        segments.push({
+          raw: `[[SEND_EMOJI: ${part.name}]]`,
+          sanitized: `[\u8868\u60C5\uFF1A${part.name}]`
+        });
+        continue;
+      }
+      let rawText = part.text.replace(
+        GLOBAL_RE,
+        (_m, n) => atomBlocks[Number(n)]?.raw || ""
+      );
+      rawText = rawText.trim();
+      if (!rawText) continue;
+      const sanitized = sanitizeTextForBanner(rawText).trim();
+      if (!sanitized) continue;
+      segments.push({ raw: rawText, sanitized });
+    }
+  }
+  return segments;
+}
+function sanitizeTextForBanner(text) {
+  let result = text;
+  result = replaceHtmlBlocks(result);
+  result = replaceTranslationForBanner(result);
+  result = replaceVoiceForBanner(result);
+  result = stripQuotes(result);
+  result = replaceEmojiReverseTag(result);
+  result = replaceMarkdownLinks(result);
+  result = stripMarkdownHeaders(result);
+  result = stripMarkdownBold(result);
+  result = stripBackticks(result);
+  result = collapseWhitespace(result);
+  return result;
+}
+function chunkText(text) {
+  const CJK = "\\u4e00-\\u9fff\\u3400-\\u4dbf\\u3000-\\u303f\\uff00-\\uffef\\u2000-\\u206f\\u2e80-\\u2eff\\u3001-\\u3003\\u2018-\\u201f\\u300a-\\u300f\\uff01-\\uff0f\\uff1a-\\uff20";
+  const cjkSplitRe = new RegExp(`([${CJK}])\\s+(?=[${CJK}])`, "g");
+  const SPLIT = String.fromCharCode(1);
+  const lineChunks = text.split(/(?:\r\n|\r|\n|\u2028|\u2029)+/).map((c) => c.trim()).filter((c) => c.length > 0);
+  const SPACE_SENTINEL = String.fromCharCode(0);
+  const out = [];
+  for (const chunk of lineChunks) {
+    const guarded = chunk.replace(/\[{1,2}[^\[\]]*\]{1,2}/g, (m) => m.replace(/\s/g, SPACE_SENTINEL));
+    const sub = guarded.replace(cjkSplitRe, `$1${SPLIT}`).split(SPLIT).map((c) => c.split(SPACE_SENTINEL).join(" ").trim()).filter((c) => c.length > 0);
+    out.push(...sub);
+  }
+  return out;
+}
+function splitOnSendEmoji(chunk) {
+  const re = /\[\[SEND_EMOJI:\s*(.*?)\]\]/g;
+  const parts = [];
+  let lastIndex = 0;
+  let m;
+  while ((m = re.exec(chunk)) !== null) {
+    if (m.index > lastIndex) {
+      parts.push({ kind: "text", text: chunk.slice(lastIndex, m.index) });
+    }
+    parts.push({ kind: "emoji", name: m[1].trim() });
+    lastIndex = m.index + m[0].length;
+  }
+  if (lastIndex < chunk.length) {
+    parts.push({ kind: "text", text: chunk.slice(lastIndex) });
+  }
+  if (parts.length === 0 && chunk) parts.push({ kind: "text", text: chunk });
+  return parts;
 }
 
 // worker/instant-push/src/classifier.ts
@@ -4277,16 +4490,6 @@ function classifyLLMOutput(text) {
 
 // worker/amsg/src/agentic.ts
 var createFireSessionState = () => ({ narrations: [], directives: [] });
-var DEFAULT_SPLIT_REGEX2 = /([。！？!?]+)/;
-var splitMessageIntoSentences2 = (content) => {
-  const out = content.split(DEFAULT_SPLIT_REGEX2).reduce((acc, part, i, arr) => {
-    if (i % 2 === 0 && part.trim()) {
-      acc.push(part.trim() + (arr[i + 1] || ""));
-    }
-    return acc;
-  }, []).filter((s) => s.length > 0);
-  return out.length > 0 ? out : [content];
-};
 function processLLMRound(state, llmOutputText, build) {
   const result = classifyLLMOutput(llmOutputText);
   if (result.kind === "tool-request") {
@@ -4300,34 +4503,36 @@ function processLLMRound(state, llmOutputText, build) {
     return { decision: "tool-request", toolCalls: result.toolCalls };
   }
   const directives = [...state.directives, ...result.directives];
-  const sentences = [...state.narrations, result.cleanedText].filter((part) => part.trim().length > 0).flatMap((part) => splitMessageIntoSentences2(part));
-  if (sentences.length === 0) {
+  const segments = [...state.narrations, result.cleanedText].filter((part) => part.trim().length > 0).flatMap((part) => sanitizeIntoSegments(part));
+  if (segments.length === 0) {
     if (directives.length === 0) return { decision: "skip-push" };
     return {
       decision: "finish",
       pushPayloads: [buildScheduledPush("", build, directives)]
     };
   }
-  const lastIdx = sentences.length - 1;
+  const lastIdx = segments.length - 1;
   return {
     decision: "finish",
-    pushPayloads: sentences.map(
-      (sentence, i) => buildScheduledPush(sentence, build, i === lastIdx ? directives : void 0)
+    pushPayloads: segments.map(
+      (seg, i) => buildScheduledPush(seg.raw, build, i === lastIdx ? directives : void 0, seg.sanitized)
     )
   };
 }
-function buildScheduledPush(message, build, directives) {
+function buildScheduledPush(message, build, directives, bannerBody) {
+  const title = `\u6765\u81EA ${build.contactName}`;
   return {
     messageKind: "content",
     messageType: build.messageType,
     source: "scheduled",
     message,
-    title: `\u6765\u81EA ${build.contactName}`,
+    title,
     contactName: build.contactName,
     avatarUrl: build.avatarUrl,
     messageSubtype: "chat",
     taskId: build.taskId,
-    metadata: directives && directives.length > 0 ? { ...build.metadata, directives } : build.metadata
+    metadata: directives && directives.length > 0 ? { ...build.metadata, directives } : build.metadata,
+    ...bannerBody !== void 0 ? { notification: { title, body: bannerBody } } : {}
   };
 }
 

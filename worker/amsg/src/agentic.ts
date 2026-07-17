@@ -15,6 +15,7 @@
  */
 
 import { classifyLLMOutput, type Directive, type ToolCall } from '../../instant-push/src/classifier';
+import { sanitizeIntoSegments } from '../../../utils/sanitize';
 
 /** 一次 fire 的跨轮累积状态（index.ts 按 sessionId 持有，finish/skip 后丢弃）。 */
 export interface FireSessionState {
@@ -42,26 +43,14 @@ export type RoundDecision =
   | { decision: 'finish'; pushPayloads: Array<Record<string, unknown>> }
   | { decision: 'skip-push' };
 
-/** 和 amsg-server message-processor 的默认分句保持一致（SullyOS 不用 splitPattern）。 */
-const DEFAULT_SPLIT_REGEX = /([。！？!?]+)/;
-export const splitMessageIntoSentences = (content: string): string[] => {
-  const out = content
-    .split(DEFAULT_SPLIT_REGEX)
-    .reduce<string[]>((acc, part, i, arr) => {
-      if (i % 2 === 0 && part.trim()) {
-        acc.push(part.trim() + (arr[i + 1] || ''));
-      }
-      return acc;
-    }, [])
-    .filter((s) => s.length > 0);
-  return out.length > 0 ? out : [content];
-};
-
 /**
  * 处理一轮 LLM 输出（入参已 stripReasoningTags）：
  *   - 有数据标签 → 记下旁白与旁白里的副作用，返回 tool-request；
- *   - 无数据标签 → finish：累积旁白 + 本轮正文按句切 push，
- *     全部 directives 挂最后一条的 metadata；全程无正文且无副作用 → skip-push。
+ *   - 无数据标签 → finish：累积旁白 + 本轮正文经 sanitizeIntoSegments 分段
+ *     （与 instant push / 客户端 chatParser.chunkText 同一份：按换行切、
+ *     [[...]] / [html] / <翻译> / <语音> 等标签块保持原子，不被句读劈碎），
+ *     每段一条 push；全部 directives 挂最后一条的 metadata；
+ *     全程无正文且无副作用 → skip-push。
  */
 export function processLLMRound(
   state: FireSessionState,
@@ -84,11 +73,11 @@ export function processLLMRound(
   }
 
   const directives = [...state.directives, ...result.directives];
-  const sentences = [...state.narrations, result.cleanedText]
+  const segments = [...state.narrations, result.cleanedText]
     .filter((part) => part.trim().length > 0)
-    .flatMap((part) => splitMessageIntoSentences(part));
+    .flatMap((part) => sanitizeIntoSegments(part));
 
-  if (sentences.length === 0) {
+  if (segments.length === 0) {
     if (directives.length === 0) return { decision: 'skip-push' };
     // 整段只有副作用标签：发一条空正文 push 携带 directives。客户端
     // applyAssistantPostProcessing 对空正文产 0 气泡，副作用重放自己产
@@ -99,31 +88,38 @@ export function processLLMRound(
     };
   }
 
-  const lastIdx = sentences.length - 1;
+  const lastIdx = segments.length - 1;
   return {
     decision: 'finish',
-    pushPayloads: sentences.map((sentence, i) =>
-      buildScheduledPush(sentence, build, i === lastIdx ? directives : undefined),
+    pushPayloads: segments.map((seg, i) =>
+      buildScheduledPush(seg.raw, build, i === lastIdx ? directives : undefined, seg.sanitized),
     ),
   };
 }
 
 /**
- * 单句 → 老链路 scheduled push 形状（与 v1 完全一致，只多了可选的
- * metadata.directives）。messageId/sessionId/timestamp/messageIndex/totalMessages
- * 由库的 sendHookPushPayloads 统一补齐/覆写，这里只填业务字段。
+ * 单段 → 老链路 scheduled push 形状（业务字段同 v1，可选多挂
+ * metadata.directives 与 notification）。messageId/sessionId/timestamp/
+ * messageIndex/totalMessages 由库的 sendHookPushPayloads 统一补齐/覆写。
+ *
+ * bannerBody = segment 的 sanitized 文本，塞进 notification.body 给 OS banner
+ * 显示（[[SEND_EMOJI: x]] → [表情：x] 这类可读形态）；message 保留 raw 让客户端
+ * applyAssistantPostProcessing 渲染卡片/表情。不带 notification.show —— SW 对
+ * content push 的默认弹窗行为不变。
  */
 function buildScheduledPush(
   message: string,
   build: PushBuildInput,
   directives?: Directive[],
+  bannerBody?: string,
 ): Record<string, unknown> {
+  const title = `来自 ${build.contactName}`;
   return {
     messageKind: 'content' as const,
     messageType: build.messageType,
     source: 'scheduled' as const,
     message,
-    title: `来自 ${build.contactName}`,
+    title,
     contactName: build.contactName,
     avatarUrl: build.avatarUrl,
     messageSubtype: 'chat',
@@ -131,5 +127,6 @@ function buildScheduledPush(
     metadata: directives && directives.length > 0
       ? { ...build.metadata, directives }
       : build.metadata,
+    ...(bannerBody !== undefined ? { notification: { title, body: bannerBody } } : {}),
   };
 }
