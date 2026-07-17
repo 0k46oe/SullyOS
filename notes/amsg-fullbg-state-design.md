@@ -36,8 +36,8 @@ LLM 每轮要调什么工具是运行时才知道的，所以完备性不能靠�
 | 类型 | 例子 | 云端需要什么 | 说明 |
 |------|------|------------|------|
 | 副作用类 | 表情、poke、转账、日程卡、音乐、XHS 点赞/评论 | **无** | worker 只识别标签 → 塞进 push 的 directive metadata → 客户端收到时重放。LLM 写完标签就继续生成，不等执行结果，链不会断。instant classifier 已是这个模式，直接复用 |
-| 外部服务类 | MCP、web_search、Notion/飞书 | 凭据 + 配置（几行 KV） | 数据在外部服务上，worker 直调。MCP 需要在 worker 里移植 mini client（initialize 握手 + tools/call + SSE 解析，`utils/mcpClient.ts` 里 ~200 行纯 fetch 逻辑）。**硬限制：只有公网可达（或走用户自部署代理）的 MCP 服务器可用**，本地起的服务后台够不着，文档要写明 |
-| 本地数据读取类 | recall 记忆、近期聊天、情绪状态、用户画像、角色卡 | 数据进状态表 | 真正的同步对象。recall 走已有的 Supabase pgvector 远端模式（`utils/memoryPalace/supabaseVector.ts`，内容+向量都在用户自己的 Supabase）+ embedding API 凭据，worker 直查 |
+| 外部服务类 | XHS MCP、web_search、Notion/飞书 | 凭据 + 配置（几行 KV） | 数据在外部服务上，worker 直调。XHS 走现成的 `utils/xhsMcpClient.ts`（零依赖叶子，MCP / Bridge 双模式，worker 原样打包）；搜索 / Notion / 飞书经用户的代理 worker 转发（`utils/realtimeFetchCore.ts`）。**硬限制：只有公网可达（或走用户自部署代理）的服务可用**，本地起的 XHS 服务后台够不着——够不着时工具以失败结果回给 LLM 圆场，链不断 |
+| 本地数据读取类 | recall 记忆（`char.memories` 月度总结） | 数据进状态表（`tool_pack`） | 真正的同步对象。月度总结是几 KB 文本，直接随 tool_pack 上云，worker 本地过滤月份即可，不需要向量检索 |
 
 ## client_state 通用状态表
 
@@ -61,14 +61,17 @@ PRIMARY KEY (user_id, namespace, key)
 脏标记+批量上传 `utils/amsgStateSync.ts`（挂 useChatAI 轮末 finally）、worker 填槽
 `worker/amsg/src/index.ts` 的 onBeforeFire。
 
-**v2 工具循环时再引入的分段**（工具按需取数才需要独立条目）：
+**v2 工具循环分段（已落地）**：
 
-| namespace | 内容 | 写入时机 |
-|-----------|------|---------|
-| `char:<id>:emotion` | 情绪快照（buff/意识流） | 情绪评估落库后 |
-| `profile` | 用户画像 | 变更后 |
-| `mcp:servers` | 启用的 MCP 服务器配置 + token（仅公网可达的） | 设置变更后 |
-| `cred:embedding` / `cred:vector` | embedding API 与 Supabase 凭据（recall 用） | 设置变更后 |
+| namespace | key | 内容 | 写入时机 |
+|-----------|-----|------|---------|
+| `amsg:char:<id>` | `tool_pack` | recall 用的月度总结（`char.memories`）+ `activeMemoryMonths` + XHS 角色开关 + 角色名 | 与 fire_pack 同批 |
+| `amsg:global` | `tool_config` | 搜索 / Notion / 飞书凭据 + XHS MCP 配置 + 代理 worker 地址（realtimeConfig 的工具子集） | 与 fire_pack 同批（快照没带 realtimeConfig 时跳过，不覆盖云端已有凭据） |
+
+数据形状与 parse 都在 `utils/amsgToolPack.ts`（前端 / worker 共用叶子）。设计早期
+设想过的独立分段最终没有出现：recall 实际读 `char.memories` 月度总结（几 KB 文本），
+不需要 embedding / 向量库凭据；情绪快照与用户画像已随 fire_pack 模板整体带上
+（模板 = 完整 chat system prompt），不需要单独条目。
 
 要点：
 
@@ -105,7 +108,7 @@ cron 到点
 | 期 | 内容 | 备注 |
 |----|------|------|
 | v1 | 状态表 + 同步层 + fire 时新鲜组装（无工具） | 满血的主要价值（新鲜上下文/情绪/多气泡）在这一期就兑现 |
-| v2 | 服务端工具循环：副作用 directive + recall + MCP 直调 | classifier 复用 instant 那套标签思路 |
+| v2 | 服务端工具循环：副作用 directive + 九个数据工具就地执行 | **已落地**。classifier 原样复用 instant 那份（`worker/instant-push/src/classifier.ts`）；决策纯逻辑在 `worker/amsg/src/agentic.ts`（旁白 / 副作用跨轮累积，finish 一起出），工具执行走共享的 `utils/agenticTools.ts` dispatch（搜索 / Notion / 飞书的 fetch 核心抽在 `utils/realtimeFetchCore.ts` 叶子里，前端 Manager 委托同一份）。副作用 directives 挂最后一条 push 的 metadata，收侧与 instant 共用重放 |
 
 ## 依赖与坑
 

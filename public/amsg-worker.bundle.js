@@ -2634,7 +2634,1649 @@ var parseFirePack = (value) => {
   return null;
 };
 
-// worker/amsg/src/index.ts
+// utils/proxyWorker.ts
+var DEFAULT_PROXY_WORKER = "https://sullymeow.ccwu.cc";
+var LS_KEY = "sully_proxy_worker_url_v1";
+var STALE_HOSTS = [/sully-n\.qegj567\.workers\.dev/i];
+var normalize = (url) => url.trim().replace(/\/+$/, "");
+var runtimeOverrideUrl = null;
+var setProxyWorkerUrlOverride = (url) => {
+  const trimmed = normalize(url || "");
+  runtimeOverrideUrl = /^https?:\/\//i.test(trimmed) ? trimmed : null;
+};
+var getProxyWorkerUrl = () => {
+  if (runtimeOverrideUrl) return runtimeOverrideUrl;
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return DEFAULT_PROXY_WORKER;
+    const url = normalize(raw);
+    if (!/^https?:\/\//i.test(url)) return DEFAULT_PROXY_WORKER;
+    if (STALE_HOSTS.some((re) => re.test(url))) return DEFAULT_PROXY_WORKER;
+    return url;
+  } catch {
+    return DEFAULT_PROXY_WORKER;
+  }
+};
+
+// utils/amsgToolPack.ts
+var AMSG_TOOL_PACK_KEY = "tool_pack";
+var AMSG_GLOBAL_NAMESPACE = "amsg:global";
+var AMSG_TOOL_CONFIG_KEY = "tool_config";
+var parseToolPack = (value) => {
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || parsed.v !== 1 || typeof parsed.charName !== "string" || !Array.isArray(parsed.activeMemoryMonths) || !Array.isArray(parsed.memories)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+var parseToolConfig = (value) => {
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || parsed.v !== 1 || typeof parsed.proxyWorkerUrl !== "string") {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+// utils/realtimeFetchCore.ts
+var performSearch = async (query, apiKey) => {
+  if (!query || !apiKey) {
+    return { success: false, results: [], message: "\u7F3A\u5C11\u641C\u7D22\u5173\u952E\u8BCD\u6216API Key" };
+  }
+  try {
+    const workerUrl = `${getProxyWorkerUrl()}/search?q=${encodeURIComponent(query)}&count=5`;
+    const response = await fetch(workerUrl, {
+      method: "GET",
+      headers: {
+        "Accept": "application/json",
+        "X-Brave-API-Key": apiKey
+      }
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      console.error("Search API error:", response.status, text);
+      try {
+        const errJson = JSON.parse(text);
+        return { success: false, results: [], message: `\u641C\u7D22\u5931\u8D25: ${errJson.error || response.status}` };
+      } catch {
+        return { success: false, results: [], message: `\u641C\u7D22\u5931\u8D25: ${response.status}` };
+      }
+    }
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      console.error("Search response not JSON:", text.slice(0, 200));
+      return { success: false, results: [], message: "\u641C\u7D22\u8FD4\u56DE\u683C\u5F0F\u9519\u8BEF" };
+    }
+    if (data.web?.results && data.web.results.length > 0) {
+      const results = data.web.results.slice(0, 5).map((item) => ({
+        title: item.title,
+        description: item.description || "",
+        url: item.url
+      }));
+      return { success: true, results, message: "\u641C\u7D22\u6210\u529F" };
+    }
+    return { success: false, results: [], message: "\u6CA1\u6709\u627E\u5230\u76F8\u5173\u7ED3\u679C" };
+  } catch (e) {
+    console.error("Search failed:", e);
+    return { success: false, results: [], message: `\u641C\u7D22\u51FA\u9519: ${e.message}` };
+  }
+};
+var notionGetDiaryByDate = async (apiKey, databaseId, characterName, date) => {
+  try {
+    const response = await fetch(`${getProxyWorkerUrl()}/notion/query`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Notion-API-Key": apiKey
+      },
+      body: JSON.stringify({
+        database_id: databaseId,
+        filter: {
+          and: [
+            {
+              property: "Name",
+              title: { starts_with: `[${characterName}]` }
+            },
+            {
+              property: "Date",
+              date: { equals: date }
+            }
+          ]
+        },
+        sorts: [{ property: "Date", direction: "descending" }],
+        page_size: 10
+      })
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      console.error("Query diary by date failed:", response.status, text);
+      return { success: false, entries: [], message: `\u67E5\u8BE2\u5931\u8D25: ${response.status}` };
+    }
+    const data = JSON.parse(text);
+    if (!data.results || data.results.length === 0) {
+      return { success: true, entries: [], message: `\u6CA1\u6709\u627E\u5230 ${date} \u7684\u65E5\u8BB0` };
+    }
+    const entries = data.results.map((page) => {
+      const title = page.properties?.Name?.title?.[0]?.plain_text || "\u65E0\u6807\u9898";
+      const cleanTitle = title.replace(/^\[.*?\]\s*/, "");
+      return {
+        id: page.id,
+        title: cleanTitle,
+        date: page.properties?.Date?.date?.start || "",
+        url: page.url
+      };
+    });
+    return { success: true, entries, message: `\u627E\u5230 ${entries.length} \u7BC7\u65E5\u8BB0` };
+  } catch (e) {
+    console.error("Get diary by date failed:", e);
+    return { success: false, entries: [], message: `\u67E5\u8BE2\u5931\u8D25: ${e.message}` };
+  }
+};
+var notionReadDiaryContent = async (apiKey, pageId) => {
+  try {
+    const response = await fetch(`${getProxyWorkerUrl()}/notion/blocks/${pageId}`, {
+      method: "GET",
+      headers: {
+        "X-Notion-API-Key": apiKey
+      }
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      console.error("Read diary content failed:", response.status, text);
+      return { success: false, content: "", message: `\u8BFB\u53D6\u5931\u8D25: ${response.status}` };
+    }
+    const data = JSON.parse(text);
+    if (!data.results || data.results.length === 0) {
+      return { success: true, content: "\uFF08\u7A7A\u767D\u65E5\u8BB0\uFF09", message: "\u65E5\u8BB0\u5185\u5BB9\u4E3A\u7A7A" };
+    }
+    const content = notionBlocksToText(data.results);
+    return { success: true, content, message: "\u8BFB\u53D6\u6210\u529F" };
+  } catch (e) {
+    console.error("Read diary content failed:", e);
+    return { success: false, content: "", message: `\u8BFB\u53D6\u5931\u8D25: ${e.message}` };
+  }
+};
+var notionReadNoteContent = notionReadDiaryContent;
+var notionSearchUserNotes = async (apiKey, notesDatabaseId, keyword, limit = 5) => {
+  try {
+    const response = await fetch(`${getProxyWorkerUrl()}/notion/query`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Notion-API-Key": apiKey
+      },
+      body: JSON.stringify({
+        database_id: notesDatabaseId,
+        filter: {
+          property: "Name",
+          title: { contains: keyword }
+        },
+        sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
+        page_size: limit
+      })
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      return { success: false, entries: [], message: `\u641C\u7D22\u5931\u8D25: ${response.status}` };
+    }
+    const data = JSON.parse(text);
+    if (!data.results || data.results.length === 0) {
+      return { success: true, entries: [], message: `\u6CA1\u6709\u627E\u5230\u5173\u4E8E"${keyword}"\u7684\u7B14\u8BB0` };
+    }
+    const entries = data.results.map((page) => {
+      const title = page.properties?.Name?.title?.[0]?.plain_text || page.properties?.["\u540D\u79F0"]?.title?.[0]?.plain_text || page.properties?.Title?.title?.[0]?.plain_text || "\u65E0\u6807\u9898";
+      const date = page.properties?.Date?.date?.start || page.properties?.["\u65E5\u671F"]?.date?.start || page.last_edited_time?.split("T")[0] || "";
+      return {
+        id: page.id,
+        title,
+        date,
+        url: page.url || ""
+      };
+    });
+    return { success: true, entries, message: `\u627E\u5230 ${entries.length} \u7BC7\u7B14\u8BB0` };
+  } catch (e) {
+    console.error("Search user notes failed:", e);
+    return { success: false, entries: [], message: `\u641C\u7D22\u5931\u8D25: ${e.message}` };
+  }
+};
+function notionBlocksToText(blocks) {
+  const lines = [];
+  for (const block of blocks) {
+    const type = block.type;
+    if (type === "divider") {
+      lines.push("---");
+      continue;
+    }
+    const richText = block[type]?.rich_text;
+    if (!richText) continue;
+    const text = richText.map((rt) => rt.plain_text || rt.text?.content || "").join("");
+    if (!text.trim()) continue;
+    switch (type) {
+      case "heading_1":
+        lines.push(`# ${text}`);
+        break;
+      case "heading_2":
+        lines.push(`## ${text}`);
+        break;
+      case "heading_3":
+        lines.push(`### ${text}`);
+        break;
+      case "quote":
+        lines.push(`> ${text}`);
+        break;
+      case "callout":
+        const emoji = block.callout?.icon?.emoji || "\u{1F4CC}";
+        lines.push(`${emoji} ${text}`);
+        break;
+      case "bulleted_list_item":
+        lines.push(`- ${text}`);
+        break;
+      case "numbered_list_item":
+        lines.push(`\xB7 ${text}`);
+        break;
+      case "to_do":
+        const checked = block.to_do?.checked ? "\u2705" : "\u2B1C";
+        lines.push(`${checked} ${text}`);
+        break;
+      case "toggle":
+        lines.push(`\u25B6 ${text}`);
+        break;
+      case "code":
+        lines.push(`\`\`\`
+${text}
+\`\`\``);
+        break;
+      default:
+        lines.push(text);
+    }
+  }
+  return lines.join("\n");
+}
+var feishuTokenCache = null;
+var feishuGetToken = async (appId, appSecret) => {
+  if (feishuTokenCache && feishuTokenCache.expiresAt > Date.now() + 5 * 60 * 1e3) {
+    return { success: true, token: feishuTokenCache.token, message: "\u4F7F\u7528\u7F13\u5B58token" };
+  }
+  try {
+    const response = await fetch(`${getProxyWorkerUrl()}/feishu/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ app_id: appId, app_secret: appSecret })
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      try {
+        const errJson = JSON.parse(text);
+        return { success: false, token: "", message: `\u83B7\u53D6token\u5931\u8D25: ${errJson.msg || errJson.error || response.status}` };
+      } catch {
+        return { success: false, token: "", message: `\u83B7\u53D6token\u5931\u8D25: ${response.status}` };
+      }
+    }
+    const data = JSON.parse(text);
+    if (data.code !== 0) {
+      return { success: false, token: "", message: `\u98DE\u4E66\u9519\u8BEF: ${data.msg || "\u672A\u77E5\u9519\u8BEF"}` };
+    }
+    const token = data.tenant_access_token;
+    const expire = (data.expire || 7200) * 1e3;
+    feishuTokenCache = { token, expiresAt: Date.now() + expire };
+    return { success: true, token, message: "Token\u83B7\u53D6\u6210\u529F" };
+  } catch (e) {
+    return { success: false, token: "", message: `\u7F51\u7EDC\u9519\u8BEF: ${e.message}` };
+  }
+};
+var feishuGetDiaryByDate = async (appId, appSecret, baseId, tableId, characterName, date) => {
+  try {
+    const tokenResult = await feishuGetToken(appId, appSecret);
+    if (!tokenResult.success) {
+      return { success: false, entries: [], message: tokenResult.message };
+    }
+    const dateTimestamp = new Date(date).getTime();
+    const nextDayTimestamp = dateTimestamp + 24 * 60 * 60 * 1e3;
+    const response = await fetch(`${getProxyWorkerUrl()}/feishu/bitable/${baseId}/${tableId}/records/search`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Feishu-Token": tokenResult.token
+      },
+      body: JSON.stringify({
+        filter: {
+          conjunction: "and",
+          conditions: [
+            { field_name: "\u89D2\u8272", operator: "is", value: [characterName] },
+            { field_name: "\u65E5\u671F", operator: "isGreater", value: [dateTimestamp - 1] },
+            { field_name: "\u65E5\u671F", operator: "isLess", value: [nextDayTimestamp] }
+          ]
+        },
+        sort: [{ field_name: "\u65E5\u671F", desc: true }],
+        page_size: 10
+      })
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      return { success: false, entries: [], message: `\u67E5\u8BE2\u5931\u8D25: ${response.status}` };
+    }
+    const data = JSON.parse(text);
+    if (data.code !== 0) {
+      return { success: false, entries: [], message: `\u98DE\u4E66\u9519\u8BEF: ${data.msg || "\u67E5\u8BE2\u5931\u8D25"}` };
+    }
+    const items = data.data?.items || [];
+    if (items.length === 0) {
+      return { success: true, entries: [], message: `\u6CA1\u6709\u627E\u5230 ${date} \u7684\u65E5\u8BB0` };
+    }
+    const entries = items.map((item) => {
+      const fields = item.fields || {};
+      const rawTitle = (Array.isArray(fields["\u6807\u9898"]) ? fields["\u6807\u9898"]?.[0]?.text : fields["\u6807\u9898"]) || "\u65E0\u6807\u9898";
+      const cleanTitle = String(rawTitle).replace(/^\[.*?\]\s*/, "");
+      return {
+        recordId: item.record_id,
+        title: cleanTitle,
+        date,
+        content: (Array.isArray(fields["\u5185\u5BB9"]) ? fields["\u5185\u5BB9"]?.[0]?.text : fields["\u5185\u5BB9"]) || ""
+      };
+    });
+    return { success: true, entries, message: `\u627E\u5230 ${entries.length} \u7BC7\u65E5\u8BB0` };
+  } catch (e) {
+    return { success: false, entries: [], message: `\u67E5\u8BE2\u5931\u8D25: ${e.message}` };
+  }
+};
+
+// utils/xhsMcpClient.ts
+var detectMode = (serverUrl) => {
+  if (serverUrl.includes("/api")) return "bridge";
+  return "mcp";
+};
+var liteCookie = "";
+var resolveLiteCookie = () => {
+  if (liteCookie) return liteCookie;
+  try {
+    const raw = localStorage.getItem("os_realtime_config");
+    if (raw) return JSON.parse(raw)?.xhsMcpConfig?.cookie || "";
+  } catch {
+  }
+  return "";
+};
+var bridgePost = async (serverUrl, endpoint, body = {}) => {
+  const baseUrl = serverUrl.replace(/\/+$/, "").replace(/\/api$/, "");
+  const url = `${baseUrl}/api/${endpoint}`;
+  const headers = { "Content-Type": "application/json" };
+  const ck = resolveLiteCookie();
+  if (ck) headers["x-xhs-cookie"] = ck;
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body)
+    });
+    if (resp.status === 401) {
+      return { success: false, error: "\u672A\u767B\u5F55\uFF0C\u8BF7\u5148\u767B\u5F55\u5C0F\u7EA2\u4E66" };
+    }
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      return { success: false, error: errData.error || `HTTP ${resp.status}` };
+    }
+    const data = await resp.json();
+    if (data.error) {
+      return { success: false, error: data.error };
+    }
+    return { success: true, data };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+};
+var mcpRequestIdCounter = 0;
+var mcpSessionId = null;
+var mcpInitialized = false;
+var mcpDiscoveredTools = [];
+var TOOL_NAME_ALIASES = {
+  "check_login": ["check_login", "checkLogin", "check_login_status", "checkLoginStatus"],
+  "search": ["search", "search_notes", "searchNotes", "search_feeds", "searchFeeds"],
+  "get_recommend": ["get_recommend", "getRecommend", "list_feeds", "listFeeds", "get_feed_list", "getFeedList", "list_notes", "listNotes"],
+  "get_note_detail": ["get_note_detail", "getNoteDetail", "get_feed_detail", "getFeedDetail"],
+  "publish_note": ["publish_note", "publishNote", "publish_post", "publishPost", "publish_content", "publishContent"],
+  "comment": ["comment", "post_comment", "postComment", "post_comment_to_feed", "postCommentToFeed"],
+  "get_user_info": ["get_user_info", "getUserInfo", "get_user_profile", "getUserProfile", "user_profile", "userProfile"],
+  "like_feed": ["like_feed", "likeFeed", "like_note", "likeNote"],
+  "favorite_feed": ["favorite_feed", "favoriteFeed", "favorite_note", "favoriteNote", "collect_note", "collectNote"],
+  "reply_comment": ["reply_comment", "replyComment", "reply_comment_in_feed", "replyCommentInFeed"]
+};
+var mcpResolveToolName = (desiredName) => {
+  if (!mcpDiscoveredTools.length) return desiredName;
+  if (mcpDiscoveredTools.some((t) => t.name === desiredName)) return desiredName;
+  const aliases = TOOL_NAME_ALIASES[desiredName];
+  if (aliases) {
+    for (const alias of aliases) {
+      if (mcpDiscoveredTools.some((t) => t.name === alias)) return alias;
+    }
+  }
+  const norm = (s) => s.replace(/[_-]/g, "").toLowerCase();
+  const desired = norm(desiredName);
+  const match = mcpDiscoveredTools.find((t) => norm(t.name) === desired);
+  if (match) return match.name;
+  console.warn(`[MCP] \u672A\u627E\u5230\u5DE5\u5177 "${desiredName}" \u7684\u5339\u914D\uFF0C\u53EF\u7528: ${mcpDiscoveredTools.map((t) => t.name).join(", ")}`);
+  return desiredName;
+};
+var mcpAdaptParams = (resolvedName, args) => {
+  const norm = resolvedName.replace(/[_-]/g, "").toLowerCase();
+  if (args.url && !args.feed_id) {
+    const feedIdTools = ["getfeeddetail", "getnotedetail", "postcomment", "postcommenttofeed", "replycommentinfeed"];
+    if (feedIdTools.some((n) => norm === n)) {
+      const adapted = { ...args };
+      adapted.feed_id = extractNoteIdFromUrl(args.url);
+      if (!adapted.xsec_token) {
+        const token = extractXsecTokenFromUrl(args.url);
+        if (token) adapted.xsec_token = token;
+      }
+      delete adapted.url;
+      return adapted;
+    }
+  }
+  return args;
+};
+var mcpBuildRequest = (method, params, isNotification = false) => {
+  const req = { jsonrpc: "2.0", method, params };
+  if (!isNotification) req.id = ++mcpRequestIdCounter;
+  return req;
+};
+var mcpParseSseResponse = (text) => {
+  const lines = text.split("\n");
+  const dataLines = [];
+  for (const line of lines) {
+    if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5));
+  }
+  if (dataLines.length === 0) return null;
+  for (let i = dataLines.length - 1; i >= 0; i--) {
+    try {
+      return JSON.parse(dataLines[i]);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+};
+var mcpParseResponse = (text, contentType) => {
+  if (contentType.includes("text/event-stream") || text.trimStart().startsWith("event:") || text.trimStart().startsWith("data:")) {
+    const parsed = mcpParseSseResponse(text);
+    if (parsed) return parsed;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch {
+      }
+    }
+    throw new Error(`MCP: \u65E0\u6CD5\u89E3\u6790\u54CD\u5E94: ${text.slice(0, 300)}`);
+  }
+};
+var mcpPost = async (serverUrl, body, expectResponse = true) => {
+  const headers = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream"
+  };
+  if (mcpSessionId) headers["Mcp-Session-Id"] = mcpSessionId;
+  const resp = await fetch(serverUrl, { method: "POST", headers, body: JSON.stringify(body) });
+  const sessionId = resp.headers.get("Mcp-Session-Id") || resp.headers.get("mcp-session-id");
+  if (resp.status === 202) return { response: null, sessionId };
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => "");
+    throw new Error(`MCP HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+  }
+  if (!expectResponse) return { response: null, sessionId };
+  const contentType = resp.headers.get("content-type") || "";
+  const text = await resp.text();
+  return { response: mcpParseResponse(text, contentType), sessionId };
+};
+var mcpInitialize = async (serverUrl) => {
+  const initReq = mcpBuildRequest("initialize", {
+    protocolVersion: "2024-11-05",
+    capabilities: {},
+    clientInfo: { name: "AetherOS-XhsFreeRoam", version: "1.0.0" }
+  });
+  const { response, sessionId } = await mcpPost(serverUrl, initReq);
+  if (sessionId) mcpSessionId = sessionId;
+  if (response?.error) throw new Error(`MCP Initialize failed: ${response.error.message}`);
+  if (!mcpSessionId) {
+    console.warn(
+      "[MCP] \u26A0\uFE0F \u65E0\u6CD5\u8BFB\u53D6 Mcp-Session-Id \u54CD\u5E94\u5934\uFF08CORS \u9650\u5236\uFF09\u3002\n\u8BF7\u4F7F\u7528 CORS \u4EE3\u7406: node scripts/mcp-proxy.mjs\n\u7136\u540E\u628A MCP URL \u6539\u4E3A http://localhost:18061/mcp"
+    );
+    throw new Error(
+      "MCP \u8FDE\u63A5\u5931\u8D25: \u6D4F\u89C8\u5668 CORS \u9650\u5236\u65E0\u6CD5\u8BFB\u53D6 Session ID\u3002\n\u8BF7\u8FD0\u884C CORS \u4EE3\u7406: node scripts/mcp-proxy.mjs\n\u7136\u540E\u628A\u8BBE\u7F6E\u91CC\u7684 MCP URL \u6539\u4E3A http://localhost:18061/mcp"
+    );
+  }
+  const notifReq = mcpBuildRequest("notifications/initialized", {}, true);
+  await mcpPost(serverUrl, notifReq, false);
+  try {
+    const toolsReq = mcpBuildRequest("tools/list");
+    const { response: toolsResp } = await mcpPost(serverUrl, toolsReq);
+    if (toolsResp?.result?.tools) {
+      mcpDiscoveredTools = toolsResp.result.tools.map((t) => ({ name: t.name, description: t.description }));
+      console.log("[MCP] \u53D1\u73B0\u5DE5\u5177:", mcpDiscoveredTools.map((t) => t.name).join(", "));
+    }
+  } catch (e) {
+    console.warn("[MCP] tools/list \u8C03\u7528\u5931\u8D25\uFF0C\u5C06\u4F7F\u7528\u9ED8\u8BA4\u5DE5\u5177\u540D", e);
+  }
+  mcpInitialized = true;
+};
+var mcpCallTool = async (serverUrl, toolName, args = {}) => {
+  try {
+    if (!mcpInitialized) await mcpInitialize(serverUrl);
+    const resolved = mcpResolveToolName(toolName);
+    const adapted = mcpAdaptParams(resolved, args);
+    if (resolved !== toolName) console.log(`[MCP] \u5DE5\u5177\u540D\u6620\u5C04: ${toolName} \u2192 ${resolved}`);
+    const body = mcpBuildRequest("tools/call", { name: resolved, arguments: adapted });
+    const headers = {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream"
+    };
+    if (mcpSessionId) headers["Mcp-Session-Id"] = mcpSessionId;
+    const resp = await fetch(serverUrl, { method: "POST", headers, body: JSON.stringify(body) });
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => "");
+      return { success: false, error: `MCP HTTP ${resp.status}: ${errText.slice(0, 200)}` };
+    }
+    const contentType = resp.headers.get("content-type") || "";
+    const text = await resp.text();
+    const parsed = mcpParseResponse(text, contentType);
+    if (parsed.error) return { success: false, error: `MCP Error [${parsed.error.code}]: ${parsed.error.message}` };
+    const result = parsed.result;
+    if (result?.content) {
+      const textParts = result.content.filter((c) => c.type === "text").map((c) => c.text);
+      const fullText = textParts.join("\n");
+      if (result.isError) return { success: false, error: fullText || "MCP \u5DE5\u5177\u6267\u884C\u5931\u8D25" };
+      try {
+        const parsed2 = JSON.parse(fullText);
+        console.log(`[MCP] \u5DE5\u5177 ${toolName} \u8FD4\u56DE JSON, \u9876\u5C42 keys: ${typeof parsed2 === "object" && parsed2 ? Object.keys(parsed2).join(",") : typeof parsed2}`);
+        return { success: true, data: parsed2 };
+      } catch {
+        console.log(`[MCP] \u5DE5\u5177 ${toolName} \u8FD4\u56DE\u7EAF\u6587\u672C (${fullText.length} chars)`);
+        return { success: true, data: fullText };
+      }
+    }
+    return { success: true, data: result };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+};
+var extractNoteIdFromUrl = (url) => {
+  const match = url.match(/\/explore\/([a-f0-9]+)/i) || url.match(/\/discovery\/item\/([a-f0-9]+)/i) || url.match(/\/([a-f0-9]{24})/);
+  return match ? match[1] : url;
+};
+var extractXsecTokenFromUrl = (url) => {
+  try {
+    const u = new URL(url);
+    return u.searchParams.get("xsec_token") || void 0;
+  } catch {
+    return void 0;
+  }
+};
+var extractFirstXsecToken = (data) => {
+  if (!data) return void 0;
+  const scanArray = (arr) => {
+    for (const item of arr) {
+      const token = item?.xsec_token || item?.xsecToken || item?.noteCard?.xsec_token || item?.noteCard?.xsecToken;
+      if (token) return token;
+    }
+    return void 0;
+  };
+  if (Array.isArray(data)) return scanArray(data);
+  for (const key of ["items", "notes", "feeds", "data", "list", "results", "note_list", "noteList"]) {
+    if (Array.isArray(data[key])) {
+      const token = scanArray(data[key]);
+      if (token) return token;
+    }
+  }
+  if (data.data && typeof data.data === "object" && !Array.isArray(data.data)) {
+    for (const key of ["items", "notes", "feeds", "list", "results", "note_list", "noteList"]) {
+      if (Array.isArray(data.data[key])) {
+        const token = scanArray(data.data[key]);
+        if (token) return token;
+      }
+    }
+    if (Array.isArray(data.data)) return scanArray(data.data);
+  }
+  if (typeof data === "string") {
+    const match = data.match(/xsec_token[=:]["']?\s*([A-Za-z0-9+/=]+)/);
+    if (match) return match[1];
+  }
+  return void 0;
+};
+var XhsMcpClient = {
+  resetSession: () => {
+    mcpSessionId = null;
+    mcpInitialized = false;
+    mcpRequestIdCounter = 0;
+    mcpDiscoveredTools = [];
+  },
+  // Lite Worker auth: register the XHS cookie used for x-xhs-cookie header.
+  setCookie: (cookie) => {
+    liteCookie = cookie || "";
+  },
+  testConnection: async (serverUrl, cookie) => {
+    if (cookie !== void 0) liteCookie = cookie;
+    const mode = detectMode(serverUrl);
+    if (mode === "bridge") {
+      try {
+        const baseUrl = serverUrl.replace(/\/+$/, "").replace(/\/api$/, "");
+        const healthResp = await fetch(`${baseUrl}/api/health`);
+        if (!healthResp.ok) return { connected: false, error: `Bridge \u670D\u52A1\u672A\u54CD\u5E94 (HTTP ${healthResp.status})` };
+        const loginResult = await bridgePost(serverUrl, "check-login");
+        const tools = ["check-login", "search", "list-feeds", "get-feed-detail", "publish", "publish-video", "long-article", "post-comment", "reply-comment", "like-feed", "favorite-feed", "user-profile", "login", "get-qrcode"];
+        let loggedIn = false, nickname, userId;
+        if (loginResult.success && loginResult.data) {
+          const d = loginResult.data;
+          if (typeof d === "string") {
+            loggedIn = d.includes("\u5DF2\u767B\u5F55") || d.includes("logged");
+            const nameMatch = d.match(/用户名[:：]\s*(.+)/);
+            if (nameMatch) nickname = nameMatch[1].trim();
+            const idMatch = d.match(/(?:用户ID|user_id|userId|red_id|ID)[:：]\s*(\S+)/i);
+            if (idMatch) userId = idMatch[1].trim();
+          } else {
+            loggedIn = !!(d.logged_in || d.loggedIn || d.is_logged_in || d.isLoggedIn || d.logged);
+            nickname = d.nickname || d.name || d.username || d.user_name || void 0;
+            userId = d.user_id || d.userId || d.id || d.red_id || void 0;
+          }
+        }
+        let xsecToken;
+        if (loggedIn) {
+          try {
+            const feedResult = await bridgePost(serverUrl, "list-feeds");
+            if (feedResult.success) xsecToken = extractFirstXsecToken(feedResult.data);
+          } catch {
+          }
+        }
+        return { connected: true, tools, nickname, userId, loggedIn, xsecToken };
+      } catch (e) {
+        return { connected: false, error: e.message };
+      }
+    }
+    try {
+      XhsMcpClient.resetSession();
+      await mcpInitialize(serverUrl);
+      const tools = mcpDiscoveredTools.map((t) => t.name);
+      let nickname, userId, loggedIn = false;
+      try {
+        const loginResult = await mcpCallTool(serverUrl, "check_login");
+        if (loginResult.success && loginResult.data) {
+          const d = loginResult.data;
+          if (typeof d === "string") {
+            loggedIn = d.includes("\u5DF2\u767B\u5F55");
+            const nameMatch = d.match(/用户名[:：]\s*(.+)/);
+            if (nameMatch) nickname = nameMatch[1].trim();
+            const idMatch = d.match(/(?:用户ID|user_id|userId|red_id|ID)[:：]\s*(\S+)/i);
+            if (idMatch) userId = idMatch[1].trim();
+          } else {
+            loggedIn = !!(d.logged_in || d.loggedIn || d.is_logged_in || d.isLoggedIn);
+            nickname = d.nickname || d.name || d.username || void 0;
+            userId = d.user_id || d.userId || d.id || d.red_id || void 0;
+          }
+        }
+      } catch (e) {
+        console.warn("[MCP] \u83B7\u53D6\u767B\u5F55\u72B6\u6001\u5931\u8D25\uFF0C\u8DF3\u8FC7:", e);
+      }
+      let xsecToken;
+      if (loggedIn) {
+        try {
+          console.log("[MCP] \u81EA\u52A8\u83B7\u53D6 xsecToken: \u8C03\u7528 get_recommend...");
+          const feedResult = await mcpCallTool(serverUrl, "get_recommend");
+          if (feedResult.success) {
+            xsecToken = extractFirstXsecToken(feedResult.data);
+            console.log(`[MCP] \u81EA\u52A8\u83B7\u53D6 xsecToken: ${xsecToken ? "\u6210\u529F" : "\u672A\u627E\u5230"}`);
+          }
+        } catch (e) {
+          console.warn("[MCP] \u81EA\u52A8\u83B7\u53D6 xsecToken \u5931\u8D25\uFF08\u4E0D\u5F71\u54CD\u8FDE\u63A5\uFF09:", e);
+        }
+      }
+      return { connected: true, tools, nickname, userId, loggedIn, xsecToken };
+    } catch (e) {
+      return { connected: false, error: e.message };
+    }
+  },
+  ensureInitialized: async (serverUrl) => {
+    if (detectMode(serverUrl) === "mcp" && !mcpInitialized) {
+      XhsMcpClient.resetSession();
+      await mcpInitialize(serverUrl);
+    }
+  },
+  checkLogin: async (serverUrl) => {
+    return detectMode(serverUrl) === "bridge" ? bridgePost(serverUrl, "check-login") : mcpCallTool(serverUrl, "check_login");
+  },
+  search: async (serverUrl, keyword, options) => {
+    return detectMode(serverUrl) === "bridge" ? bridgePost(serverUrl, "search", { keyword, ...options }) : mcpCallTool(serverUrl, "search", { keyword });
+  },
+  getRecommend: async (serverUrl) => {
+    return detectMode(serverUrl) === "bridge" ? bridgePost(serverUrl, "list-feeds") : mcpCallTool(serverUrl, "get_recommend");
+  },
+  getNoteDetail: async (serverUrl, noteUrl, xsecToken, options) => {
+    const feedId = extractNoteIdFromUrl(noteUrl);
+    const token = xsecToken || extractXsecTokenFromUrl(noteUrl) || "";
+    if (detectMode(serverUrl) === "bridge") {
+      return bridgePost(serverUrl, "get-feed-detail", {
+        feed_id: feedId,
+        xsec_token: token,
+        load_all_comments: options?.loadAllComments || false,
+        click_more_replies: options?.loadAllComments || false
+      });
+    }
+    const args = { url: noteUrl };
+    if (xsecToken) args.xsec_token = xsecToken;
+    if (options?.loadAllComments) {
+      args.load_all_comments = true;
+      args.click_more_replies = true;
+    }
+    return mcpCallTool(serverUrl, "get_note_detail", args);
+  },
+  publishNote: async (serverUrl, params) => {
+    if (detectMode(serverUrl) === "bridge") {
+      return bridgePost(serverUrl, "publish", {
+        title: params.title,
+        content: params.content,
+        images: params.images || [],
+        tags: params.tags || [],
+        visibility: params.is_private ? "private" : void 0
+      });
+    }
+    return mcpCallTool(serverUrl, "publish_note", { ...params, images: params.images || [] });
+  },
+  publishVideo: async (serverUrl, params) => {
+    if (detectMode(serverUrl) === "bridge") {
+      return bridgePost(serverUrl, "publish-video", {
+        title: params.title,
+        content: params.content,
+        video: params.video,
+        tags: params.tags || []
+      });
+    }
+    return { success: false, error: "\u89C6\u9891\u53D1\u5E03\u4EC5\u5728 Skills (Bridge) \u6A21\u5F0F\u4E0B\u53EF\u7528" };
+  },
+  publishLongArticle: async (serverUrl, params) => {
+    if (detectMode(serverUrl) === "bridge") {
+      return bridgePost(serverUrl, "long-article", {
+        title: params.title,
+        content: params.content,
+        images: params.images || []
+      });
+    }
+    return { success: false, error: "\u957F\u6587\u53D1\u5E03\u4EC5\u5728 Skills (Bridge) \u6A21\u5F0F\u4E0B\u53EF\u7528" };
+  },
+  comment: async (serverUrl, noteUrl, content, xsecToken) => {
+    if (detectMode(serverUrl) === "bridge") {
+      const feedId = extractNoteIdFromUrl(noteUrl);
+      const token = xsecToken || extractXsecTokenFromUrl(noteUrl) || "";
+      return bridgePost(serverUrl, "post-comment", { feed_id: feedId, xsec_token: token, content });
+    }
+    const args = { url: noteUrl, content };
+    if (xsecToken) args.xsec_token = xsecToken;
+    return mcpCallTool(serverUrl, "comment", args);
+  },
+  likeFeed: async (serverUrl, feedId, xsecToken, unlike = false) => {
+    if (detectMode(serverUrl) === "bridge") {
+      return bridgePost(serverUrl, "like-feed", { feed_id: feedId, xsec_token: xsecToken, unlike });
+    }
+    return mcpCallTool(serverUrl, "like_feed", { feed_id: feedId, xsec_token: xsecToken, ...unlike ? { unlike: true } : {} });
+  },
+  favoriteFeed: async (serverUrl, feedId, xsecToken, unfavorite = false) => {
+    if (detectMode(serverUrl) === "bridge") {
+      return bridgePost(serverUrl, "favorite-feed", { feed_id: feedId, xsec_token: xsecToken, unfavorite });
+    }
+    return mcpCallTool(serverUrl, "favorite_feed", { feed_id: feedId, xsec_token: xsecToken, ...unfavorite ? { unfavorite: true } : {} });
+  },
+  replyComment: async (serverUrl, feedId, xsecToken, content, commentId, userId, parentCommentId) => {
+    if (detectMode(serverUrl) === "bridge") {
+      return bridgePost(serverUrl, "reply-comment", {
+        feed_id: feedId,
+        xsec_token: xsecToken,
+        content,
+        comment_id: commentId,
+        user_id: userId
+      });
+    }
+    const args = { feed_id: feedId, xsec_token: xsecToken, content };
+    if (commentId) args.comment_id = commentId;
+    if (userId) args.user_id = userId;
+    if (parentCommentId) args.parent_comment_id = parentCommentId;
+    return mcpCallTool(serverUrl, "reply_comment", args);
+  },
+  getUserProfile: async (serverUrl, userId, xsecToken) => {
+    if (detectMode(serverUrl) === "bridge") {
+      return bridgePost(serverUrl, "user-profile", { user_id: userId, xsec_token: xsecToken || "" });
+    }
+    const args = { user_id: userId };
+    if (xsecToken) args.xsec_token = xsecToken;
+    return mcpCallTool(serverUrl, "get_user_info", args);
+  },
+  login: async (serverUrl) => {
+    if (detectMode(serverUrl) === "bridge") return bridgePost(serverUrl, "login");
+    return { success: false, error: "\u767B\u5F55\u529F\u80FD\u4EC5\u5728 Skills (Bridge) \u6A21\u5F0F\u4E0B\u53EF\u7528" };
+  },
+  getQrcode: async (serverUrl) => {
+    if (detectMode(serverUrl) === "bridge") return bridgePost(serverUrl, "get-qrcode");
+    return { success: false, error: "\u4E8C\u7EF4\u7801\u529F\u80FD\u4EC5\u5728 Skills (Bridge) \u6A21\u5F0F\u4E0B\u53EF\u7528" };
+  },
+  logout: async (serverUrl) => {
+    if (detectMode(serverUrl) === "bridge") return bridgePost(serverUrl, "delete-cookies");
+    return { success: false, error: "\u767B\u51FA\u529F\u80FD\u4EC5\u5728 Skills (Bridge) \u6A21\u5F0F\u4E0B\u53EF\u7528" };
+  }
+};
+var extractNotesFromMcpData = (data) => {
+  if (!data) return [];
+  if (Array.isArray(data)) {
+    if (data.length > 0 && Array.isArray(data[0])) {
+      console.log(`[XHS] extractNotes: \u68C0\u6D4B\u5230\u5D4C\u5957\u6570\u7EC4\uFF0C\u5C55\u5E73 (${data.length} \u7EC4)`);
+      return data.flat().filter((n) => n && typeof n === "object" && !Array.isArray(n));
+    }
+    return data;
+  }
+  for (const key of ["notes", "items", "feeds", "data", "list", "results", "note_list", "noteList"]) {
+    if (Array.isArray(data[key])) {
+      const arr = data[key];
+      if (arr.length > 0 && Array.isArray(arr[0])) {
+        console.log(`[XHS] extractNotes: data.${key} \u662F\u5D4C\u5957\u6570\u7EC4\uFF0C\u5C55\u5E73`);
+        return arr.flat().filter((n) => n && typeof n === "object" && !Array.isArray(n));
+      }
+      return arr;
+    }
+  }
+  if (data.data && typeof data.data === "object" && !Array.isArray(data.data)) {
+    for (const key of ["notes", "items", "feeds", "list", "results", "note_list", "noteList"]) {
+      if (Array.isArray(data.data[key])) {
+        console.log(`[XHS] extractNotes: \u4ECE data.data.${key} \u627E\u5230\u6570\u7EC4, length=${data.data[key].length}`);
+        return data.data[key];
+      }
+    }
+  }
+  if (typeof data === "object") {
+    const skipKeys = /* @__PURE__ */ new Set(["interactions", "tags", "images", "comments", "replies"]);
+    for (const [key, val] of Object.entries(data)) {
+      if (skipKeys.has(key)) continue;
+      if (Array.isArray(val) && val.length > 0) {
+        const first = val[0];
+        if (first && typeof first === "object" && (first.noteId || first.note_id || first.id || first.noteCard || first.displayTitle || first.title || first.desc || first.cover)) {
+          console.log(`[XHS] extractNotes: \u5728 key "${key}" \u4E2D\u627E\u5230\u7B14\u8BB0\u6570\u7EC4, length=${val.length}`);
+          return val;
+        }
+      }
+    }
+  }
+  if (typeof data === "string") {
+    console.warn("[XHS] extractNotes: data \u662F\u7EAF\u6587\u672C\uFF0C\u65E0\u6CD5\u63D0\u53D6\u7B14\u8BB0:", data.slice(0, 200));
+    return [];
+  }
+  console.warn("[XHS] extractNotes: \u672A\u627E\u5230\u7B14\u8BB0\u6570\u7EC4, data keys:", Object.keys(data));
+  return [];
+};
+var normalizeNote = (n) => {
+  const card = n.noteCard || n.notecard;
+  const coverObj = card?.cover || n.cover || n.image_list?.[0] || card?.image_list?.[0];
+  const rawCoverUrl = typeof coverObj === "string" ? coverObj : coverObj?.urlDefault || coverObj?.url_default || coverObj?.url || coverObj?.urlPre || coverObj?.info_list?.[0]?.url || void 0;
+  const coverUrl = rawCoverUrl?.replace(/^http:\/\//, "https://");
+  const likesRaw = n.likes || n.liked_count || n.interact_info?.liked_count || n.interactInfo?.likedCount || card?.interact_info?.liked_count || card?.interactInfo?.likedCount || 0;
+  return {
+    noteId: n.noteId || n.note_id || n.id || card?.note_id || card?.noteId || card?.noteId || "",
+    title: n.title || n.display_title || n.displayTitle || card?.display_title || card?.displayTitle || "",
+    desc: (n.desc || n.description || n.content || card?.desc || card?.description || card?.title || "").slice(0, 500),
+    author: n.author || n.nickname || n.user?.nickname || n.user?.name || card?.user?.nickname || card?.user?.name || "",
+    authorId: n.authorId || n.author_id || n.user?.user_id || n.user?.userId || card?.user?.user_id || card?.user?.userId || "",
+    likes: typeof likesRaw === "string" ? parseInt(likesRaw, 10) || 0 : likesRaw || 0,
+    xsecToken: n.xsecToken || n.xsec_token || card?.xsec_token || card?.xsecToken || void 0,
+    coverUrl,
+    type: n.type || card?.type || void 0
+  };
+};
+
+// utils/agenticTools.ts
+function resolveXhsConfig(char, realtimeConfig) {
+  const mcpConfig = realtimeConfig?.xhsMcpConfig;
+  const mcpAvailable = !!(mcpConfig?.enabled && mcpConfig?.serverUrl);
+  const mcpUrl = mcpConfig?.serverUrl || "";
+  const loggedInUserId = mcpConfig?.loggedInUserId;
+  const loggedInNickname = mcpConfig?.loggedInNickname;
+  const userXsecToken = mcpConfig?.userXsecToken;
+  return { enabled: !!char.xhsEnabled && mcpAvailable, mcpUrl, loggedInUserId, loggedInNickname, userXsecToken };
+}
+async function runRecall(args, ctx) {
+  const { char } = ctx;
+  const targetMonth = `${args.year}-${args.month.padStart(2, "0")}`;
+  const alreadyActive = !!char.activeMemoryMonths?.includes(targetMonth);
+  if (alreadyActive) {
+    return { ok: true, alreadyActive: true, yearMonth: targetMonth, logsText: null };
+  }
+  if (!char.memories) {
+    return { ok: false, reason: "no_logs", yearMonth: targetMonth };
+  }
+  const logs = char.memories.filter((mem) => {
+    return mem.date.includes(targetMonth) || mem.date.includes(`${args.year}\u5E74${parseInt(args.month)}\u6708`);
+  });
+  if (logs.length === 0) {
+    return { ok: false, reason: "no_logs", yearMonth: targetMonth };
+  }
+  const logsText = logs.map((mem) => `[${mem.date}] (${mem.mood || "normal"}): ${mem.summary}`).join("\n");
+  return { ok: true, alreadyActive: false, yearMonth: targetMonth, logsText };
+}
+async function runSearch(args, ctx) {
+  const { realtimeConfig } = ctx;
+  if (!realtimeConfig?.newsEnabled || !realtimeConfig?.newsApiKey) {
+    return { ok: false, reason: "no_api_key", query: args.query };
+  }
+  const searchResult = await performSearch(args.query, realtimeConfig.newsApiKey);
+  if (!searchResult.success || searchResult.results.length === 0) {
+    return { ok: false, reason: "no_results", query: args.query, message: searchResult.message };
+  }
+  const resultsText = searchResult.results.map(
+    (r, i) => `${i + 1}. ${r.title}
+   ${r.description}`
+  ).join("\n\n");
+  return { ok: true, query: args.query, resultsText, rawResultCount: searchResult.results.length };
+}
+async function runReadDiary(args, ctx) {
+  const { char, realtimeConfig } = ctx;
+  if (!realtimeConfig?.notionEnabled || !realtimeConfig?.notionApiKey || !realtimeConfig?.notionDatabaseId) {
+    return { ok: false, reason: "not_configured", dateInput: args.date };
+  }
+  const targetDate = parseDiaryDate(args.date);
+  if (!targetDate) {
+    return { ok: false, reason: "parse_error", dateInput: args.date };
+  }
+  const findResult = await notionGetDiaryByDate(
+    realtimeConfig.notionApiKey,
+    realtimeConfig.notionDatabaseId,
+    char.name,
+    targetDate
+  );
+  if (!findResult.success || findResult.entries.length === 0) {
+    return { ok: false, reason: "not_found", date: targetDate };
+  }
+  ctx.onProgress?.("diary", `\u627E\u5230 ${findResult.entries.length} \u7BC7\u65E5\u8BB0\uFF0C\u6B63\u5728\u9605\u8BFB...`);
+  const diaryContents = [];
+  for (const entry of findResult.entries) {
+    const readResult = await notionReadDiaryContent(
+      realtimeConfig.notionApiKey,
+      entry.id
+    );
+    if (readResult.success) {
+      diaryContents.push(`\u{1F4D4}\u300C${entry.title}\u300D(${entry.date})
+${readResult.content}`);
+    }
+  }
+  if (diaryContents.length === 0) {
+    return { ok: false, reason: "empty_content", date: targetDate };
+  }
+  const diaryText = diaryContents.join("\n\n---\n\n");
+  return { ok: true, date: targetDate, diaryText, entryCount: findResult.entries.length };
+}
+async function runFsReadDiary(args, ctx) {
+  const { char, realtimeConfig } = ctx;
+  if (!realtimeConfig?.feishuEnabled || !realtimeConfig?.feishuAppId || !realtimeConfig?.feishuAppSecret || !realtimeConfig?.feishuBaseId || !realtimeConfig?.feishuTableId) {
+    return { ok: false, reason: "not_configured", dateInput: args.date };
+  }
+  const targetDate = parseDiaryDate(args.date);
+  if (!targetDate) {
+    return { ok: false, reason: "parse_error", dateInput: args.date };
+  }
+  const findResult = await feishuGetDiaryByDate(
+    realtimeConfig.feishuAppId,
+    realtimeConfig.feishuAppSecret,
+    realtimeConfig.feishuBaseId,
+    realtimeConfig.feishuTableId,
+    char.name,
+    targetDate
+  );
+  if (!findResult.success || findResult.entries.length === 0) {
+    return { ok: false, reason: "not_found", date: targetDate };
+  }
+  ctx.onProgress?.("diary", `\u627E\u5230 ${findResult.entries.length} \u7BC7\u98DE\u4E66\u65E5\u8BB0\uFF0C\u6B63\u5728\u9605\u8BFB...`);
+  const diaryContents = [];
+  for (const entry of findResult.entries) {
+    diaryContents.push(`\u{1F4D2}\u300C${entry.title}\u300D(${entry.date})
+${entry.content}`);
+  }
+  if (diaryContents.length === 0) {
+    return { ok: false, reason: "empty_content", date: targetDate };
+  }
+  const diaryText = diaryContents.join("\n\n---\n\n");
+  return { ok: true, date: targetDate, diaryText, entryCount: findResult.entries.length };
+}
+async function runReadNote(args, ctx) {
+  const { realtimeConfig } = ctx;
+  if (!realtimeConfig?.notionEnabled || !realtimeConfig?.notionApiKey || !realtimeConfig?.notionNotesDatabaseId) {
+    return { ok: false, reason: "not_configured", keyword: args.keyword };
+  }
+  const findResult = await notionSearchUserNotes(
+    realtimeConfig.notionApiKey,
+    realtimeConfig.notionNotesDatabaseId,
+    args.keyword,
+    3
+  );
+  if (!findResult.success || findResult.entries.length === 0) {
+    return { ok: false, reason: "not_found", keyword: args.keyword };
+  }
+  ctx.onProgress?.("diary", `\u627E\u5230 ${findResult.entries.length} \u7BC7\u7B14\u8BB0\uFF0C\u6B63\u5728\u9605\u8BFB...`);
+  const noteContents = [];
+  for (const entry of findResult.entries) {
+    const readResult = await notionReadNoteContent(
+      realtimeConfig.notionApiKey,
+      entry.id
+    );
+    if (readResult.success) {
+      noteContents.push(`\u{1F4DD}\u300C${entry.title}\u300D(${entry.date})
+${readResult.content}`);
+    }
+  }
+  if (noteContents.length === 0) {
+    return { ok: false, reason: "empty_content", keyword: args.keyword };
+  }
+  const noteText = noteContents.join("\n\n---\n\n");
+  return { ok: true, keyword: args.keyword, noteText, entryCount: findResult.entries.length };
+}
+async function xhsSearchImpl(conf, keyword) {
+  const r = await XhsMcpClient.search(conf.mcpUrl, keyword);
+  if (!r.success) return { success: false, notes: [], message: r.error };
+  const raw = extractNotesFromMcpData(r.data);
+  return { success: true, notes: raw.map((n) => normalizeNote(n)) };
+}
+async function xhsBrowseImpl(conf) {
+  const r = await XhsMcpClient.getRecommend(conf.mcpUrl);
+  if (!r.success) return { success: false, notes: [], message: r.error };
+  const unwrapped = r.data?.data && typeof r.data.data === "object" && !Array.isArray(r.data.data) ? r.data.data : r.data;
+  console.log(`\u{1F4D5} [XHS] getRecommend \u54CD\u5E94\u7C7B\u578B: ${typeof r.data}, \u662F\u5426\u6709 data \u5D4C\u5957: ${unwrapped !== r.data}, unwrapped keys: ${unwrapped && typeof unwrapped === "object" ? Object.keys(unwrapped).join(",") : "N/A"}`);
+  const raw = extractNotesFromMcpData(unwrapped);
+  if (raw.length === 0 && unwrapped !== r.data) {
+    console.log(`\u{1F4D5} [XHS] getRecommend unwrapped \u63D0\u53D6\u4E3A\u7A7A\uFF0C\u7528\u539F\u59CB\u6570\u636E\u91CD\u8BD5`);
+    const raw2 = extractNotesFromMcpData(r.data);
+    return { success: true, notes: raw2.map((n) => normalizeNote(n)) };
+  }
+  return { success: true, notes: raw.map((n) => normalizeNote(n)) };
+}
+function cacheXsecTokensImpl(caches, notes) {
+  if (!caches) return;
+  for (const n of notes) {
+    if (n.noteId && n.xsecToken) caches.xsecTokenCache.set(n.noteId, n.xsecToken);
+    if (n.noteId && n.title) caches.noteTitleCache.set(n.noteId, n.title);
+  }
+}
+function findXsecToken(caches, lastXhsNotes, noteId) {
+  const fromNotes = lastXhsNotes.find((n) => n.noteId === noteId)?.xsecToken;
+  if (fromNotes) return fromNotes;
+  return caches?.xsecTokenCache.get(noteId);
+}
+async function runXhsSearch(args, ctx) {
+  const xhsConf = resolveXhsConfig(ctx.char, ctx.realtimeConfig);
+  if (!xhsConf.enabled) {
+    return { ok: false, reason: "not_enabled", keyword: args.keyword };
+  }
+  const result = await xhsSearchImpl(xhsConf, args.keyword);
+  if (!result.success || result.notes.length === 0) {
+    return { ok: false, reason: "no_results", keyword: args.keyword, message: result.message };
+  }
+  if (ctx.lastXhsNotesRef) ctx.lastXhsNotesRef.current = result.notes;
+  cacheXsecTokensImpl(ctx.xhsCaches, result.notes);
+  const notesText = result.notes.map(
+    (n, i) => `${i + 1}. [noteId=${n.noteId}]\u300C${n.title}\u300Dby ${n.author} (${n.likes}\u8D5E)
+   ${n.desc}`
+  ).join("\n\n");
+  return { ok: true, keyword: args.keyword, notesText, notes: result.notes };
+}
+async function runXhsBrowse(args, ctx) {
+  const xhsConf = resolveXhsConfig(ctx.char, ctx.realtimeConfig);
+  if (!xhsConf.enabled) {
+    return { ok: false, reason: "not_enabled", category: args.category };
+  }
+  const result = await xhsBrowseImpl(xhsConf);
+  console.log("\u{1F4D5} [XHS] \u6D4F\u89C8\u7ED3\u679C:", result.success, result.message, result.notes?.length || 0);
+  if (!result.success || result.notes.length === 0) {
+    return { ok: false, reason: "no_results", category: args.category, message: result.message };
+  }
+  if (ctx.lastXhsNotesRef) ctx.lastXhsNotesRef.current = result.notes;
+  cacheXsecTokensImpl(ctx.xhsCaches, result.notes);
+  const notesText = result.notes.map(
+    (n, i) => `${i + 1}. [noteId=${n.noteId}]\u300C${n.title}\u300Dby ${n.author} (${n.likes}\u8D5E)
+   ${n.desc}`
+  ).join("\n\n");
+  return { ok: true, category: args.category, notesText, notes: result.notes };
+}
+async function runXhsMyProfile(_args, ctx) {
+  const xhsConf = resolveXhsConfig(ctx.char, ctx.realtimeConfig);
+  if (!xhsConf.enabled) return { ok: false, reason: "not_enabled" };
+  const nickname = xhsConf.loggedInNickname || "";
+  const userId = xhsConf.loggedInUserId || "";
+  if (!nickname && !userId) {
+    return { ok: false, reason: "no_identity" };
+  }
+  let profileStr = "";
+  let feedsStr = "\uFF08\u83B7\u53D6\u7B14\u8BB0\u5931\u8D25\uFF09";
+  let gotProfile = false;
+  let collectedNotes = [];
+  if (userId) {
+    console.log(`\u{1F4D5} [XHS] \u7528 getUserProfile(${userId}) \u83B7\u53D6\u4E3B\u9875...`);
+    ctx.onProgress?.("xhs", "\u6B63\u5728\u83B7\u53D6\u4E3B\u9875\u4FE1\u606F...");
+    try {
+      const profileResult = await XhsMcpClient.getUserProfile(xhsConf.mcpUrl, userId, xhsConf.userXsecToken);
+      if (profileResult.success && profileResult.data) {
+        const d = profileResult.data;
+        if (typeof d === "string") {
+          profileStr = d.slice(0, 3e3);
+          gotProfile = true;
+        } else {
+          const basicInfo = d.data?.basic_info || d.basic_info;
+          if (basicInfo) {
+            profileStr = JSON.stringify(basicInfo, null, 2).slice(0, 2e3);
+          } else {
+            const { notes: _n, ...rest } = d.data && typeof d.data === "object" ? d.data : d;
+            profileStr = Object.keys(rest).length > 0 ? JSON.stringify(rest, null, 2).slice(0, 2e3) : "\uFF08\u4E3B\u9875\u57FA\u672C\u4FE1\u606F\u6682\u65F6\u65E0\u6CD5\u83B7\u53D6\uFF09";
+          }
+          gotProfile = true;
+          const unwrapped = d.data && typeof d.data === "object" && !Array.isArray(d.data) ? d.data : d;
+          console.log(`\u{1F4D5} [XHS] profile unwrapped keys:`, Object.keys(unwrapped), "notes isArray:", Array.isArray(unwrapped.notes), "notes length:", unwrapped.notes?.length);
+          const notes = extractNotesFromMcpData(unwrapped);
+          console.log(`\u{1F4D5} [XHS] extractNotesFromMcpData \u8FD4\u56DE ${notes.length} \u6761\u7B14\u8BB0`);
+          if (notes.length > 0) {
+            console.log(`\u{1F4D5} [XHS] \u7B2C\u4E00\u6761\u7B14\u8BB0\u539F\u59CB keys:`, Object.keys(notes[0]), "noteCard?", !!notes[0].noteCard, "id?", notes[0].id || notes[0].noteId);
+            const normalized = notes.map((n) => normalizeNote(n));
+            console.log(`\u{1F4D5} [XHS] \u5F52\u4E00\u5316\u540E\u7B2C\u4E00\u6761:`, JSON.stringify(normalized[0]).slice(0, 300));
+            const validNotes = normalized.filter((n) => n.noteId);
+            if (validNotes.length === 0) {
+              console.warn(`\u{1F4D5} [XHS] \u26A0\uFE0F \u6240\u6709\u7B14\u8BB0\u5F52\u4E00\u5316\u540E noteId \u4E3A\u7A7A\uFF01\u539F\u59CB\u6570\u636E:`, JSON.stringify(notes[0]).slice(0, 500));
+            }
+            collectedNotes = validNotes.length > 0 ? validNotes : normalized;
+            cacheXsecTokensImpl(ctx.xhsCaches, collectedNotes);
+            feedsStr = collectedNotes.slice(0, 8).map(
+              (n, i) => `${i + 1}. [noteId=${n.noteId}]\u300C${n.title || "\u65E0\u6807\u9898"}\u300Dby ${n.author || "\u672A\u77E5"} (${n.likes || 0}\u8D5E)
+   ${n.desc || "\uFF08\u65E0\u63CF\u8FF0\uFF09"}`
+            ).join("\n\n");
+            console.log(`\u{1F4D5} [XHS] feedsStr \u9884\u89C8:`, feedsStr.slice(0, 300));
+          } else {
+            console.warn(`\u{1F4D5} [XHS] \u26A0\uFE0F extractNotesFromMcpData \u8FD4\u56DE\u7A7A\u6570\u7EC4! unwrapped:`, JSON.stringify(unwrapped).slice(0, 500));
+          }
+        }
+        console.log(`\u{1F4D5} [XHS] getUserProfile \u6210\u529F\uFF0C\u6570\u636E\u957F\u5EA6: ${profileStr.length}`);
+      }
+    } catch (e) {
+      console.warn("\u{1F4D5} [XHS] getUserProfile \u5931\u8D25\uFF0C\u964D\u7EA7\u5230\u641C\u7D22:", e);
+    }
+  }
+  if (!gotProfile && nickname) {
+    console.log(`\u{1F4D5} [XHS] \u964D\u7EA7: \u7528\u6635\u79F0\u300C${nickname}\u300D\u641C\u7D22...`);
+    ctx.onProgress?.("xhs", "\u6B63\u5728\u641C\u7D22\u4F60\u7684\u7B14\u8BB0...");
+    const searchResult = await xhsSearchImpl(xhsConf, nickname);
+    if (searchResult.success && searchResult.notes.length > 0) {
+      collectedNotes = searchResult.notes;
+      cacheXsecTokensImpl(ctx.xhsCaches, searchResult.notes);
+      feedsStr = searchResult.notes.slice(0, 8).map(
+        (n, i) => `${i + 1}. [noteId=${n.noteId}]\u300C${n.title}\u300Dby ${n.author} (${n.likes}\u8D5E)
+   ${n.desc || "\uFF08\u65E0\u63CF\u8FF0\uFF09"}`
+      ).join("\n\n");
+    } else {
+      feedsStr = "\uFF08\u6CA1\u6709\u641C\u5230\u76F8\u5173\u7B14\u8BB0\uFF09";
+    }
+  }
+  if (ctx.lastXhsNotesRef && collectedNotes.length > 0) {
+    ctx.lastXhsNotesRef.current = collectedNotes;
+  }
+  return { ok: true, nickname, userId, profileStr, feedsStr, gotProfile, notes: collectedNotes };
+}
+async function runXhsDetail(args, ctx) {
+  const xhsConf = resolveXhsConfig(ctx.char, ctx.realtimeConfig);
+  if (!xhsConf.enabled) return { ok: false, reason: "not_enabled", noteId: args.noteId };
+  const lastNotes = ctx.lastXhsNotesRef?.current ?? [];
+  let xsecToken = findXsecToken(ctx.xhsCaches, lastNotes, args.noteId);
+  console.log(`\u{1F4D5} [XHS] AI\u8981\u67E5\u770B\u7B14\u8BB0\u8BE6\u60C5:`, args.noteId, xsecToken ? "(\u6709xsecToken)" : "(\u65E0xsecToken)");
+  let result = await XhsMcpClient.getNoteDetail(xhsConf.mcpUrl, args.noteId, xsecToken, { loadAllComments: true });
+  if (!result.success || !result.data) {
+    const cachedTitle = ctx.xhsCaches?.noteTitleCache.get(args.noteId);
+    if (cachedTitle) {
+      console.log(`\u{1F4D5} [XHS] \u8BE6\u60C5\u5931\u8D25\uFF0C\u5C1D\u8BD5\u91CD\u65B0\u641C\u7D22\u300C${cachedTitle}\u300D\u4EE5\u5237\u65B0 xsecToken...`);
+      ctx.onProgress?.("xhs", "\u6B63\u5728\u5237\u65B0\u8BBF\u95EE\u51ED\u8BC1...");
+      const refreshResult = await xhsSearchImpl(xhsConf, cachedTitle);
+      if (refreshResult.success && refreshResult.notes.length > 0) {
+        cacheXsecTokensImpl(ctx.xhsCaches, refreshResult.notes);
+        if (ctx.lastXhsNotesRef) ctx.lastXhsNotesRef.current = refreshResult.notes;
+        const refreshedNote = refreshResult.notes.find((n) => n.noteId === args.noteId);
+        if (refreshedNote?.xsecToken) {
+          xsecToken = refreshedNote.xsecToken;
+          console.log(`\u{1F4D5} [XHS] \u62FF\u5230\u65B0 xsecToken\uFF0C\u91CD\u8BD5 detail...`);
+          ctx.onProgress?.("xhs", "\u6B63\u5728\u67E5\u770B\u7B14\u8BB0\u8BE6\u60C5...");
+          result = await XhsMcpClient.getNoteDetail(xhsConf.mcpUrl, args.noteId, xsecToken, { loadAllComments: true });
+        } else {
+          console.warn(`\u{1F4D5} [XHS] \u91CD\u65B0\u641C\u7D22\u7ED3\u679C\u4E2D\u672A\u627E\u5230 noteId=${args.noteId}`);
+        }
+      } else {
+        console.warn(`\u{1F4D5} [XHS] \u91CD\u65B0\u641C\u7D22\u300C${cachedTitle}\u300D\u5931\u8D25:`, refreshResult.message);
+      }
+    } else {
+      console.warn(`\u{1F4D5} [XHS] \u8BE6\u60C5\u5931\u8D25\u4E14\u65E0\u7F13\u5B58\u6807\u9898\uFF0C\u65E0\u6CD5\u91CD\u8BD5`);
+    }
+  }
+  if (result.success && result.data && typeof result.data === "object") {
+    const d = result.data;
+    const noteObj = d.note || d;
+    const detailToken = noteObj?.xsecToken || noteObj?.xsec_token || d?.xsecToken;
+    if (detailToken && args.noteId && ctx.xhsCaches) {
+      ctx.xhsCaches.xsecTokenCache.set(args.noteId, detailToken);
+      console.log(`\u{1F4D5} [XHS] \u4ECE detail \u7F13\u5B58 xsecToken: ${args.noteId}`);
+    }
+    if (ctx.xhsCaches) {
+      const caches = ctx.xhsCaches;
+      const cacheComments = (comments, parentId) => {
+        for (const c of comments) {
+          const cid = c.id || c.commentId || c.comment_id;
+          const uid = c.userInfo?.userId || c.userInfo?.user_id || c.user_id || c.userId;
+          const authorName = c.userInfo?.nickname || c.userInfo?.name || c.nickname || c.userName || c.user_name;
+          if (cid && uid) caches.commentUserIdCache.set(cid, uid);
+          if (cid && authorName) caches.commentAuthorNameCache.set(cid, authorName);
+          if (cid && parentId) caches.commentParentIdCache.set(cid, parentId);
+          if (Array.isArray(c.subComments)) cacheComments(c.subComments, cid);
+          if (Array.isArray(c.sub_comments)) cacheComments(c.sub_comments, cid);
+        }
+      };
+      const commentList = d.data?.comments?.list || d.comments?.list || d.data?.comments || d.comments || d.note?.comments?.list || d.note?.comments;
+      if (Array.isArray(commentList)) {
+        cacheComments(commentList);
+        console.log(`\u{1F4D5} [XHS] \u7F13\u5B58\u4E86 ${caches.commentUserIdCache.size} \u6761\u8BC4\u8BBA\u7684 userId, ${caches.commentAuthorNameCache.size} \u6761 authorName`);
+      } else {
+        console.warn(`\u{1F4D5} [XHS] \u672A\u627E\u5230\u8BC4\u8BBA\u6570\u7EC4, d keys:`, Object.keys(d), "d.note keys:", d.note ? Object.keys(d.note) : "N/A");
+      }
+    }
+  }
+  const detailData = result.success ? result.data : null;
+  let detailText;
+  if (detailData) {
+    if (typeof detailData === "string") {
+      if (detailData.includes("\u5931\u8D25") || detailData.includes("not found")) {
+        detailText = `[\u52A0\u8F7D\u5931\u8D25: ${detailData.slice(0, 200)}]`;
+      } else {
+        detailText = detailData.slice(0, 5e3);
+      }
+    } else {
+      const innerData = detailData.data && typeof detailData.data === "object" ? detailData.data : null;
+      const note = innerData?.note || detailData.note || detailData;
+      const noteTitle = note.title || note.displayTitle || note.display_title || "";
+      const noteDesc = (note.desc || note.description || note.content || "").slice(0, 1500);
+      const noteAuthor = note.user?.nickname || note.author || "";
+      const noteLikes = note.interactInfo?.likedCount || note.likes || 0;
+      const noteCollects = note.interactInfo?.collectedCount || note.collects || 0;
+      const noteShareCount = note.interactInfo?.shareCount || 0;
+      const noteCommentCount = note.interactInfo?.commentCount || 0;
+      const noteTime = note.time ? new Date(note.time).toLocaleString("zh-CN") : "";
+      const noteIp = note.ipLocation || "";
+      let noteSection = `\u{1F4DD} \u7B14\u8BB0\u8BE6\u60C5:
+\u6807\u9898: ${noteTitle}
+\u4F5C\u8005: ${noteAuthor}`;
+      if (noteTime) noteSection += `
+\u53D1\u5E03\u65F6\u95F4: ${noteTime}`;
+      if (noteIp) noteSection += `
+ IP: ${noteIp}`;
+      noteSection += `
+\u4E92\u52A8: ${noteLikes}\u8D5E ${noteCollects}\u6536\u85CF ${noteCommentCount}\u8BC4\u8BBA ${noteShareCount}\u5206\u4EAB`;
+      noteSection += `
+
+\u6B63\u6587:
+${noteDesc}`;
+      const rawComments = innerData?.comments?.list || innerData?.comments || detailData.comments?.list || detailData.comments || note.comments?.list || note.comments || [];
+      const commentArr = Array.isArray(rawComments) ? rawComments : [];
+      let commentsSection = "";
+      if (commentArr.length > 0) {
+        const formatComment = (c, indent = "") => {
+          const name = c.userInfo?.nickname || c.nickname || c.userName || "\u533F\u540D";
+          const content = c.content || "";
+          const likes = c.likeCount || c.like_count || c.likes || 0;
+          const cid = c.id || c.commentId || c.comment_id || "";
+          let line = `${indent}${name}: ${content} (${likes}\u8D5E) [commentId=${cid}]`;
+          const subs = c.subComments || c.sub_comments || [];
+          if (Array.isArray(subs) && subs.length > 0) {
+            line += "\n" + subs.slice(0, 10).map((s) => formatComment(s, indent + "  \u21B3 ")).join("\n");
+          }
+          return line;
+        };
+        commentsSection = `
+
+\u{1F4AC} \u8BC4\u8BBA\u533A (${commentArr.length}\u6761):
+` + commentArr.slice(0, 30).map((c) => formatComment(c)).join("\n");
+      } else {
+        commentsSection = "\n\n\u{1F4AC} \u8BC4\u8BBA\u533A: \uFF08\u6682\u65E0\u8BC4\u8BBA\uFF09";
+      }
+      detailText = (noteSection + commentsSection).slice(0, 8e3);
+    }
+  } else {
+    detailText = `[\u52A0\u8F7D\u5931\u8D25: ${result.error || "\u65E0\u6CD5\u83B7\u53D6\u7B14\u8BB0\u8BE6\u60C5\uFF0C\u53EF\u80FD\u9700\u8981\u5148\u5728\u641C\u7D22/\u6D4F\u89C8\u7ED3\u679C\u4E2D\u770B\u5230\u8FD9\u6761\u7B14\u8BB0"}]`;
+  }
+  const failed = detailText.startsWith("[\u52A0\u8F7D\u5931\u8D25");
+  return { ok: true, noteId: args.noteId, detailText, failed };
+}
+function parseDiaryDate(dateInput) {
+  const now = /* @__PURE__ */ new Date();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateInput)) return dateInput;
+  if (dateInput === "\u4ECA\u5929") return now.toISOString().split("T")[0];
+  if (dateInput === "\u6628\u5929") {
+    const d = new Date(now);
+    d.setDate(d.getDate() - 1);
+    return d.toISOString().split("T")[0];
+  }
+  if (dateInput === "\u524D\u5929") {
+    const d = new Date(now);
+    d.setDate(d.getDate() - 2);
+    return d.toISOString().split("T")[0];
+  }
+  const daysAgo = dateInput.match(/^(\d+)天前$/);
+  if (daysAgo) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - parseInt(daysAgo[1]));
+    return d.toISOString().split("T")[0];
+  }
+  const monthDay = dateInput.match(/(\d{1,2})月(\d{1,2})/);
+  if (monthDay) return `${now.getFullYear()}-${monthDay[1].padStart(2, "0")}-${monthDay[2].padStart(2, "0")}`;
+  const parsed = new Date(dateInput);
+  if (!isNaN(parsed.getTime())) return parsed.toISOString().split("T")[0];
+  return "";
+}
+async function dispatchAgenticTool(toolName, args, ctx) {
+  switch (toolName) {
+    case "recall":
+      return runRecall(args, ctx);
+    case "web_search":
+      return runSearch(args, ctx);
+    case "notion_read_diary":
+      return runReadDiary(args, ctx);
+    case "feishu_read_diary":
+      return runFsReadDiary(args, ctx);
+    case "read_note":
+      return runReadNote(args, ctx);
+    case "xhs_search":
+      return runXhsSearch(args, ctx);
+    case "xhs_browse":
+      return runXhsBrowse(args, ctx);
+    case "xhs_my_profile":
+      return runXhsMyProfile(args, ctx);
+    case "xhs_detail":
+      return runXhsDetail(args, ctx);
+    default:
+      throw new Error(`Unknown agentic tool: ${toolName}`);
+  }
+}
+
+// utils/sanitize.ts
+var stripLiteralBackslashN = (t) => t.replace(/\\n/g, "\n");
+var stripSourceTags = (t) => t.replace(/\s*\[(?:聊天|通话|约会)\]\s*/g, "\n");
+var stripTimestamps = (t) => t.replace(/\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\]\s*/g, "").replace(/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s*/gm, "").replace(/（[上下]午\d{1,2}[：:]\d{2}）/g, "").replace(/\(\d{1,2}:\d{2}\s*[AP]M\)/gi, "");
+var stripChineseDate = (t) => t.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, "");
+var stripRoleNamePrefix = (t) => t.replace(/^[\w一-龥]+:\s*/, "");
+var stripBusinessTagsForBubble = (t) => t.replace(/\[\[(?:ACTION|RECALL|SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END|MUSIC_ACTION)[:\s][\s\S]*?\]\]/g, "").replace(/\[schedule_message[^\]]*\]/g, "");
+var stripBusinessTagsForNotification = (t) => stripBusinessTagsForBubble(t).replace(/\[\[(?:READ_NOTE|XHS_[A-Z_]+)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[XHS_[A-Z_]+\]\]/g, "");
+var stripQuotes = (t) => t.replace(/\[\[(?:QU[OA]TE|引用)[：:][\s\S]*?\]\]/g, "").replace(/\[(?:QU[OA]TE|引用)[：:][^\]]*\]/g, "").replace(/\[回复\s*[""“][^""”]*?[""”](?:\.{0,3})\]\s*[：:]?\s*/g, "").replace(/\[[^\[\]\n「」]{0,24}引用了[^\[\]\n「」]{0,24}「[^」\n]*?」[^\[\]\n]{0,24}\]\s*/g, "");
+var stripMarkdownHeaders = (t) => t.replace(/^#{1,6}\s+/gm, "");
+var stripMarkdownBold = (t) => t.replace(/\*{2,}/g, "");
+var stripMarkdownDividers = (t) => t.replace(/^\s*---\s*$/gm, "").replace(/^\s*[-*+]\s*$/gm, "");
+var stripBackticks = (t) => t.replace(/`(\[\[[\s\S]*?\]\])`/g, "$1").replace(/``+/g, "").replace(/(^|\s)`(\s|$)/gm, "$1$2");
+var stripLegacyTrans = (t) => t.replace(/%%TRANS%%[\s\S]*/gi, "");
+var collapseWhitespace = (t) => t.replace(/\n{3,}/g, "\n\n").trim();
+var stripThinkBlocks = (t) => t.replace(/<(think|thinking|thought)>[\s\S]*?<\/\1>/gi, "").replace(/<(?:think|thinking|thought)>[\s\S]*$/gi, "");
+var stripInnerState = (t) => t.replace(/\[\[INNER_STATE:\s*[\s\S]*?\]\]/g, "");
+var replaceMarkdownLinks = (t) => t.replace(/\[([^\]]+)\]\([^)]+\)/g, "[\u94FE\u63A5\uFF1A$1]");
+var replaceSendEmoji = (t) => t.replace(/\[\[SEND_EMOJI:\s*(.+?)\]\]/g, "[\u8868\u60C5\uFF1A$1]");
+var replaceEmojiReverseTag = (t) => t.replace(/\[(?:你|User|用户|System|[\w一-龥]+)\s*发送了表情包[:：]\s*(.*?)\]/g, "[\u8868\u60C5\uFF1A$1]");
+var replaceHtmlBlocks = (t) => t.replace(/\[html\][\s\S]*?\[\/html\]/gi, "[HTML \u5361\u7247]");
+var extractTranslationOriginal = (t) => {
+  let result = t.replace(
+    /<翻译>\s*<原文>([\s\S]*?)<\/原文>\s*<译文>[\s\S]*?<\/译文>\s*<\/翻译>/g,
+    "$1"
+  );
+  result = result.replace(/<译文>[\s\S]*?<\/译文>/g, "");
+  result = result.replace(/<\/?(?:翻译|原文)>/g, "");
+  return result;
+};
+function sanitizeForNotification(text) {
+  let result = text;
+  result = stripLiteralBackslashN(result);
+  result = stripThinkBlocks(result);
+  result = replaceHtmlBlocks(result);
+  result = replaceEmojiReverseTag(result);
+  result = replaceSendEmoji(result);
+  result = extractTranslationOriginal(result);
+  result = stripTimestamps(result);
+  result = stripChineseDate(result);
+  result = stripRoleNamePrefix(result);
+  result = stripSourceTags(result);
+  result = stripInnerState(result);
+  result = stripBusinessTagsForNotification(result);
+  result = stripQuotes(result);
+  result = replaceMarkdownLinks(result);
+  result = stripMarkdownHeaders(result);
+  result = stripMarkdownBold(result);
+  result = stripMarkdownDividers(result);
+  result = stripBackticks(result);
+  result = stripLegacyTrans(result);
+  result = collapseWhitespace(result);
+  return result;
+}
+
+// worker/instant-push/src/classifier.ts
+var DATA_TAGS = [
+  // [[RECALL: 2024-05]] / [[RECALL: 2024年5]]
+  {
+    re: /\[\[RECALL:\s*(\d{4})[-/年](\d{1,2})\]\]/g,
+    toolName: "recall",
+    toArgs: (m) => ({ year: m[1], month: m[2].padStart(2, "0") })
+  },
+  // [[SEARCH: query]]
+  {
+    re: /\[\[SEARCH:\s*(.+?)\]\]/g,
+    toolName: "web_search",
+    toArgs: (m) => ({ query: m[1].trim() })
+  },
+  // [[READ_DIARY: 2024-05-19]] / [[READ_DIARY: 今天]]
+  {
+    re: /\[\[READ_DIARY:\s*(.+?)\]\]/g,
+    toolName: "notion_read_diary",
+    toArgs: (m) => ({ date: m[1].trim() })
+  },
+  // [[FS_READ_DIARY: 2024-05-19]]
+  {
+    re: /\[\[FS_READ_DIARY:\s*(.+?)\]\]/g,
+    toolName: "feishu_read_diary",
+    toArgs: (m) => ({ date: m[1].trim() })
+  },
+  // [[READ_NOTE: keyword]]
+  {
+    re: /\[\[READ_NOTE:\s*(.+?)\]\]/g,
+    toolName: "read_note",
+    toArgs: (m) => ({ keyword: m[1].trim() })
+  },
+  // [[XHS_SEARCH: keyword]]
+  {
+    re: /\[\[XHS_SEARCH:\s*(.+?)\]\]/g,
+    toolName: "xhs_search",
+    toArgs: (m) => ({ keyword: m[1].trim() })
+  },
+  // [[XHS_BROWSE]] / [[XHS_BROWSE: category]]
+  {
+    re: /\[\[XHS_BROWSE(?::\s*(.+?))?\]\]/g,
+    toolName: "xhs_browse",
+    toArgs: (m) => m[1] ? { category: m[1].trim() } : {}
+  },
+  // [[XHS_DETAIL: noteId]]
+  {
+    re: /\[\[XHS_DETAIL:\s*(.+?)\]\]/g,
+    toolName: "xhs_detail",
+    toArgs: (m) => ({ noteId: m[1].trim() })
+  },
+  // [[XHS_MY_PROFILE]]
+  {
+    re: /\[\[XHS_MY_PROFILE\]\]/g,
+    toolName: "xhs_my_profile",
+    toArgs: () => ({})
+  }
+];
+var SIDE_EFFECT_TAGS = [
+  // [[ACTION:POKE]]
+  {
+    re: /\[\[ACTION:POKE\]\]/g,
+    toDirective: () => ({ type: "poke" })
+  },
+  // [[ACTION:TRANSFER:123]]
+  {
+    re: /\[\[ACTION:TRANSFER:(\d+)\]\]/g,
+    toDirective: (m) => ({ type: "transfer", amount: Number(m[1]) })
+  },
+  // [[ACTION:ADD_EVENT|title|date]]
+  {
+    re: /\[\[ACTION:ADD_EVENT\s*\|\s*(.*?)\s*\|\s*(.*?)\]\]/g,
+    toDirective: (m) => ({ type: "add_event", title: m[1], date: m[2] })
+  },
+  // [schedule_message | time | fixed | text]  (note: 单方括号, 跟原 chatParser 一致)
+  {
+    re: /\[schedule_message\s*\|\s*(.+?)\s*\|\s*fixed\s*\|\s*(.+?)\]/g,
+    toDirective: (m) => ({ type: "schedule_message", time: m[1], text: m[2] })
+  },
+  // [[MUSIC_ACTION:verb]] 或 [[MUSIC_ACTION:verb|arg1|arg2]]
+  {
+    re: /\[\[MUSIC_ACTION:(join|add|add_new|join_and_add|join_and_add_new)(?:\|([^\]]*))?\]\]/g,
+    toDirective: (m) => ({
+      type: "music_action",
+      verb: m[1],
+      args: m[2] ? m[2].split("|").map((s) => s.trim()) : []
+    })
+  },
+  // [[XHS_LIKE: noteId]]
+  {
+    re: /\[\[XHS_LIKE:\s*(.+?)\]\]/g,
+    toDirective: (m) => ({ type: "xhs_like", noteId: m[1].trim() })
+  },
+  // [[XHS_FAV: noteId]]
+  {
+    re: /\[\[XHS_FAV:\s*(.+?)\]\]/g,
+    toDirective: (m) => ({ type: "xhs_fav", noteId: m[1].trim() })
+  },
+  // [[XHS_COMMENT: noteId | text]]
+  {
+    re: /\[\[XHS_COMMENT:\s*([^|]+?)\s*\|\s*([^\]]+?)\]\]/g,
+    toDirective: (m) => ({ type: "xhs_comment", noteId: m[1].trim(), text: m[2].trim() })
+  },
+  // [[XHS_REPLY: noteId | commentId | text]]
+  {
+    re: /\[\[XHS_REPLY:\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^\]]+?)\]\]/g,
+    toDirective: (m) => ({
+      type: "xhs_reply",
+      noteId: m[1].trim(),
+      commentId: m[2].trim(),
+      text: m[3].trim()
+    })
+  },
+  // [[XHS_POST: title | content | tags]]   (用 s flag 兼容多行 content)
+  {
+    re: /\[\[XHS_POST:\s*([^|]+?)\s*\|\s*([\s\S]+?)\s*\|\s*([^\]]+?)\]\]/g,
+    toDirective: (m) => ({
+      type: "xhs_post",
+      title: m[1].trim(),
+      content: m[2].trim(),
+      tags: m[3].trim()
+    })
+  },
+  // [[XHS_SHARE: 3]]
+  {
+    re: /\[\[XHS_SHARE:\s*(\d+)\]\]/g,
+    toDirective: (m) => ({ type: "xhs_share", idx: Number(m[1]) })
+  },
+  // 写日记 — 长形态: [[DIARY_START: title|mood]]\n content \n[[DIARY_END]]
+  // 短形态: [[DIARY: title|content]] 或 [[DIARY: content]] (无 title)
+  // 行为跟 applyAssistantPostProcessing.ts:465-495 字节对齐:
+  //   - 长形态 header 含 `|` → title|mood 切, 不含 `|` → 整段 = title
+  //   - 短形态 raw 含 `|` → title|content 切, 不含 `|` → 整段 = content (title 留空, 客户端兜底)
+  // 多行 content 用 [\s\S]*? 跨行, 别用 `s` flag (worker 端 esbuild target 默认 ok 但避免冗余)
+  {
+    re: /\[\[DIARY_START:\s*(.+?)\]\]\n?([\s\S]*?)\[\[DIARY_END\]\]/g,
+    toDirective: (m) => parseDiaryLong(m, "notion_write_diary")
+  },
+  {
+    re: /\[\[DIARY:\s*([\s\S]+?)\]\]/g,
+    toDirective: (m) => parseDiaryShort(m, "notion_write_diary")
+  },
+  // 飞书写日记 — 同形态, FS_ 前缀
+  {
+    re: /\[\[FS_DIARY_START:\s*(.+?)\]\]\n?([\s\S]*?)\[\[FS_DIARY_END\]\]/g,
+    toDirective: (m) => parseDiaryLong(m, "feishu_write_diary")
+  },
+  {
+    re: /\[\[FS_DIARY:\s*([\s\S]+?)\]\]/g,
+    toDirective: (m) => parseDiaryShort(m, "feishu_write_diary")
+  }
+];
+function parseDiaryLong(m, type) {
+  const header = m[1].trim();
+  const content = (m[2] || "").trim();
+  let title = "";
+  let mood = "";
+  if (header.includes("|")) {
+    const parts = header.split("|");
+    title = parts[0].trim();
+    mood = parts.slice(1).join("|").trim();
+  } else {
+    title = header;
+  }
+  return { type, title, content, mood: mood || void 0 };
+}
+function parseDiaryShort(m, type) {
+  const raw = m[1].trim();
+  let title = "";
+  let content = "";
+  if (raw.includes("|")) {
+    const parts = raw.split("|");
+    title = parts[0].trim();
+    content = parts.slice(1).join("|").trim();
+  } else {
+    content = raw;
+  }
+  return { type, title, content };
+}
+function classifyLLMOutput(text) {
+  const toolCalls = [];
+  for (const spec of DATA_TAGS) {
+    const matches = Array.from(text.matchAll(spec.re));
+    for (const m of matches) {
+      const args = spec.toArgs(m);
+      if (!args) continue;
+      toolCalls.push({
+        id: `call_${spec.toolName}_${toolCalls.length}_${Date.now().toString(36)}`,
+        type: "function",
+        function: { name: spec.toolName, arguments: JSON.stringify(args) }
+      });
+    }
+  }
+  if (toolCalls.length > 0) {
+    let prefix = text;
+    for (const spec of DATA_TAGS) prefix = prefix.replace(spec.re, "");
+    prefix = prefix.trim();
+    const sanitizedPrefix = sanitizeForNotification(prefix);
+    return { kind: "tool-request", prefix, sanitizedPrefix, toolCalls };
+  }
+  const directives = [];
+  for (const spec of SIDE_EFFECT_TAGS) {
+    const matches = Array.from(text.matchAll(spec.re));
+    for (const m of matches) {
+      const d = spec.toDirective(m);
+      if (d) directives.push(d);
+    }
+  }
+  let cleanedText = text;
+  for (const spec of DATA_TAGS) cleanedText = cleanedText.replace(spec.re, "");
+  for (const spec of SIDE_EFFECT_TAGS) cleanedText = cleanedText.replace(spec.re, "");
+  cleanedText = cleanedText.trim();
+  const sanitizedBody = sanitizeForNotification(cleanedText);
+  return { kind: "finish", cleanedText, sanitizedBody, directives };
+}
+
+// worker/amsg/src/agentic.ts
+var createFireSessionState = () => ({ narrations: [], directives: [] });
 var DEFAULT_SPLIT_REGEX2 = /([。！？!?]+)/;
 var splitMessageIntoSentences2 = (content) => {
   const out = content.split(DEFAULT_SPLIT_REGEX2).reduce((acc, part, i, arr) => {
@@ -2645,37 +4287,185 @@ var splitMessageIntoSentences2 = (content) => {
   }, []).filter((s) => s.length > 0);
   return out.length > 0 ? out : [content];
 };
+function processLLMRound(state, llmOutputText, build) {
+  const result = classifyLLMOutput(llmOutputText);
+  if (result.kind === "tool-request") {
+    if (result.prefix) {
+      const prefixScan = classifyLLMOutput(result.prefix);
+      if (prefixScan.kind === "finish") {
+        if (prefixScan.cleanedText) state.narrations.push(prefixScan.cleanedText);
+        state.directives.push(...prefixScan.directives);
+      }
+    }
+    return { decision: "tool-request", toolCalls: result.toolCalls };
+  }
+  const directives = [...state.directives, ...result.directives];
+  const sentences = [...state.narrations, result.cleanedText].filter((part) => part.trim().length > 0).flatMap((part) => splitMessageIntoSentences2(part));
+  if (sentences.length === 0) {
+    if (directives.length === 0) return { decision: "skip-push" };
+    return {
+      decision: "finish",
+      pushPayloads: [buildScheduledPush("", build, directives)]
+    };
+  }
+  const lastIdx = sentences.length - 1;
+  return {
+    decision: "finish",
+    pushPayloads: sentences.map(
+      (sentence, i) => buildScheduledPush(sentence, build, i === lastIdx ? directives : void 0)
+    )
+  };
+}
+function buildScheduledPush(message, build, directives) {
+  return {
+    messageKind: "content",
+    messageType: build.messageType,
+    source: "scheduled",
+    message,
+    title: `\u6765\u81EA ${build.contactName}`,
+    contactName: build.contactName,
+    avatarUrl: build.avatarUrl,
+    messageSubtype: "chat",
+    taskId: build.taskId,
+    metadata: directives && directives.length > 0 ? { ...build.metadata, directives } : build.metadata
+  };
+}
+
+// worker/amsg/src/index.ts
+var fireStash = /* @__PURE__ */ new Map();
+var FIRE_STASH_MAX = 8;
+var buildToolCtx = (toolPackRaw, toolConfigRaw, fallbackCharName) => {
+  const pack = toolPackRaw ? parseToolPack(toolPackRaw) : null;
+  const config = toolConfigRaw ? parseToolConfig(toolConfigRaw) : null;
+  const char = {
+    name: pack?.charName || fallbackCharName,
+    xhsEnabled: pack?.xhsEnabled ?? false,
+    activeMemoryMonths: pack?.activeMemoryMonths ?? [],
+    memories: pack?.memories ?? []
+  };
+  const realtimeConfig = config ? {
+    newsEnabled: config.newsEnabled,
+    newsApiKey: config.newsApiKey,
+    notionEnabled: config.notionEnabled,
+    notionApiKey: config.notionApiKey,
+    notionDatabaseId: config.notionDatabaseId,
+    notionNotesDatabaseId: config.notionNotesDatabaseId,
+    feishuEnabled: config.feishuEnabled,
+    feishuAppId: config.feishuAppId,
+    feishuAppSecret: config.feishuAppSecret,
+    feishuBaseId: config.feishuBaseId,
+    feishuTableId: config.feishuTableId,
+    xhsMcpConfig: config.xhsMcpConfig
+  } : void 0;
+  return {
+    toolCtx: {
+      char,
+      userProfile: {},
+      realtimeConfig,
+      // XHS 多步流程（search → detail 的 xsecToken 缓存）在同一次 fire 内共享。
+      xhsCaches: {
+        xsecTokenCache: /* @__PURE__ */ new Map(),
+        noteTitleCache: /* @__PURE__ */ new Map(),
+        commentUserIdCache: /* @__PURE__ */ new Map(),
+        commentAuthorNameCache: /* @__PURE__ */ new Map(),
+        commentParentIdCache: /* @__PURE__ */ new Map()
+      },
+      lastXhsNotesRef: { current: [] }
+    },
+    proxyWorkerUrl: config?.proxyWorkerUrl ?? null,
+    xhsCookie: config?.xhsMcpConfig?.cookie ?? ""
+  };
+};
 var amsgHooks = {
   async onBeforeFire(ctx) {
     const charId = ctx.task?.metadata?.charId;
     if (typeof charId !== "string" || !charId) return null;
-    const rows = await ctx.readState(amsgStateNamespace(charId));
-    const row = rows.find((r) => r.key === AMSG_FIRE_PACK_KEY);
-    if (!row) return null;
-    const pack = parseFirePack(row.value);
+    const charRows = await ctx.readState(amsgStateNamespace(charId));
+    const packRow = charRows.find((r) => r.key === AMSG_FIRE_PACK_KEY);
+    if (!packRow) return null;
+    const pack = parseFirePack(packRow.value);
     if (!pack) return null;
+    if (ctx.task.id != null) {
+      if (fireStash.size >= FIRE_STASH_MAX) fireStash.clear();
+      let toolConfigRaw;
+      try {
+        const globalRows = await ctx.readState(AMSG_GLOBAL_NAMESPACE);
+        toolConfigRaw = globalRows.find((r) => r.key === AMSG_TOOL_CONFIG_KEY)?.value;
+      } catch (error) {
+        console.warn("[amsg:agentic] \u8BFB tool_config \u5931\u8D25\uFF0C\u5DE5\u5177\u6309\u672A\u914D\u7F6E\u7EE7\u7EED", error);
+      }
+      const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(
+        charRows.find((r) => r.key === AMSG_TOOL_PACK_KEY)?.value,
+        toolConfigRaw,
+        typeof ctx.task.contactName === "string" ? ctx.task.contactName : ""
+      );
+      fireStash.set(`sess_task_${ctx.task.id}`, {
+        session: createFireSessionState(),
+        toolCtx,
+        proxyWorkerUrl,
+        xhsCookie
+      });
+    }
     const prompt = renderFirePack(pack, ctx.now.getTime());
     return [{ role: "user", content: prompt }];
   },
   async onLLMOutput(ctx) {
     const content = stripReasoningTags2(ctx.llmOutputText || "").trim();
-    if (!content) return { decision: "skip-push" };
     const taskId = ctx.sessionId.startsWith("sess_task_") ? ctx.sessionId.slice("sess_task_".length) : null;
     const messageType = typeof ctx.metadata?.amsgMode === "string" ? ctx.metadata.amsgMode : "auto";
-    const sentences = splitMessageIntoSentences2(content);
-    const pushPayloads = sentences.map((sentence) => ({
-      messageKind: "content",
-      messageType,
-      source: "scheduled",
-      message: sentence,
-      title: `\u6765\u81EA ${ctx.contactName}`,
+    const stash = fireStash.get(ctx.sessionId);
+    const session = stash?.session ?? createFireSessionState();
+    const decision = processLLMRound(session, content, {
       contactName: ctx.contactName,
       avatarUrl: ctx.avatarUrl ?? null,
-      messageSubtype: "chat",
       taskId,
+      messageType,
       metadata: ctx.metadata
-    }));
-    return { decision: "finish", pushPayloads };
+    });
+    if (decision.decision === "tool-request") {
+      console.log("[amsg:agentic]", {
+        type: "tool_request",
+        sessionId: ctx.sessionId,
+        tools: decision.toolCalls.map((tc) => tc.function.name)
+      });
+    } else {
+      fireStash.delete(ctx.sessionId);
+      console.log("[amsg:agentic]", {
+        type: decision.decision,
+        sessionId: ctx.sessionId,
+        pushes: decision.decision === "finish" ? decision.pushPayloads.length : 0
+      });
+    }
+    return decision;
+  },
+  /**
+   * 服务端工具执行：客户端在 fire 时刻离线，数据工具全部在 worker 内跑完。
+   * 单个工具失败（含抛错）都以失败 JSON 回填给 LLM 让它圆场，不失败整条链。
+   */
+  async executeToolCalls(toolCalls, ctx) {
+    const stash = fireStash.get(ctx.sessionId);
+    setProxyWorkerUrlOverride(stash?.proxyWorkerUrl ?? null);
+    XhsMcpClient.setCookie(stash?.xhsCookie || "");
+    const results = [];
+    for (const toolCall of toolCalls) {
+      const name = toolCall?.function?.name || "";
+      let content;
+      try {
+        const args = toolCall?.function?.arguments ? JSON.parse(toolCall.function.arguments) : {};
+        const result = stash ? await dispatchAgenticTool(name, args, stash.toolCtx) : { ok: false, reason: "no_tool_state", message: "\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684\u5DE5\u5177\u6570\u636E\uFF08tool_pack \u672A\u540C\u6B65\uFF09" };
+        content = JSON.stringify(result);
+        console.log("[amsg:agentic]", { type: "tool_done", sessionId: ctx.sessionId, tool: name });
+      } catch (error) {
+        content = JSON.stringify({
+          ok: false,
+          reason: "tool_error",
+          message: error instanceof Error ? error.message : String(error)
+        });
+        console.warn("[amsg:agentic]", { type: "tool_failed", sessionId: ctx.sessionId, tool: name, error: String(error) });
+      }
+      results.push({ tool_call_id: toolCall.id, role: "tool", content });
+    }
+    return results;
   }
 };
 var src_default = createSingleUserCloudflareWorker((env) => ({
@@ -2695,7 +4485,8 @@ var src_default = createSingleUserCloudflareWorker((env) => ({
   // 前端和 Worker 不同源，带自定义头的请求会先发 CORS 预检，必须放行。
   // 单用户自用默认全开；想收紧就把 '*' 换成自己的 SullyOS 站点 origin。
   cors: { origin: "*" },
-  // 满血 fire-time hooks；v1 无服务端工具（不配 executeToolCalls），轮数/超时用库默认。
+  // 满血 fire-time hooks（onBeforeFire 现场填槽 + onLLMOutput 分类 +
+  // executeToolCalls 服务端工具循环）；轮数/超时用库默认（5 轮 / 240s）。
   hooks: amsgHooks
 }));
 export {

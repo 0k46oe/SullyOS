@@ -13,6 +13,14 @@ AI 模式任务（自动/提示词）走「满血」链路：前端平时把带�
 （老任务/没同步过）时自动回退用排程时冻结的 completePrompt。设计详见
 [`amsg-fullbg-state-design.md`](./amsg-fullbg-state-design.md)。
 
+满血链路带**服务端工具循环**（v2）：LLM 输出里的数据标签（RECALL / SEARCH /
+READ_DIARY / FS_READ_DIARY / READ_NOTE / XHS_*）由 worker 就地执行后回填继续生成
+（默认 5 轮 / 240s，客户端全程不用在线）；副作用标签（POKE / TRANSFER / 写日记 /
+MUSIC_ACTION / XHS 互动等）结构化成 directives 挂最后一条 push 的 metadata，客户端
+收到时重放。classifier 与 instant push 共用同一份（`worker/instant-push/src/classifier.ts`）。
+工具凭据与 recall 数据由前端随 fire_pack 同批上云（tool_pack / tool_config），
+没同步或凭据缺失时工具以正常失败回给 LLM 圆场，不断链。
+
 ## 前端接入点
 
 | 部件 | 文件 | 说明 |
@@ -21,8 +29,10 @@ AI 模式任务（自动/提示词）走「满血」链路：前端平时把带�
 | 全局配置 Modal | `components/settings/ActiveMsgGlobalSettingsModal.tsx` | 「部署 Worker」引导（复制代码 + CF Dashboard 链接 + env 清单 + Master Key 生成）+ 填 Worker 地址 + 共享密钥 + 「连接」+ 「开启推送」。挂在 `apps/Settings.tsx`（Instant Push 那节旁边） |
 | 角色级调度 Modal | `components/chat/ActiveMsg2SettingsModal.tsx` | 每个角色配「固定/自动/提示词」× 「一次/每天/每周」。入口在聊天加号面板「主动消息 2.0」按钮（闹钟图标） |
 | fire_pack 模板 | `utils/amsgFirePack.ts` | 满血链路的 prompt 模板 + 时间槽位渲染，前端兜底与 worker 填槽共用同一份（时间文案单份维护，有回归测试钉住） |
-| 状态同步层 | `utils/amsgStateSync.ts` | 每轮聊完（useChatAI 轮末）打脏标记，去抖 15s / 切后台立即，把 fire_pack 批量 `putClientState` 上云 |
-| Worker 入口（本仓打包） | `worker/amsg/src/index.ts` | 薄入口包 `@rei-standard/amsg-server/cloudflare`；`pnpm build:workers` 产 `worker/amsg/worker.bundle.js` + `public/amsg-worker.bundle.js`（Modal「复制 Worker 代码」读后者） |
+| tool_pack / tool_config | `utils/amsgToolPack.ts` | 服务端工具循环的数据形状：每角色的月度总结 / XHS 开关（tool_pack）+ 全局工具凭据 / 代理地址（tool_config），构建与 parse 前端 worker 共用 |
+| 状态同步层 | `utils/amsgStateSync.ts` | 每轮聊完（useChatAI 轮末）打脏标记，去抖 15s / 切后台立即，把 fire_pack + tool_pack + tool_config 批量 `putClientState` 上云 |
+| 工具实现（共用叶子） | `utils/agenticTools.ts` + `utils/realtimeFetchCore.ts` + `utils/xhsMcpClient.ts` | 九个数据工具的执行体。agenticTools 是 dispatch 入口（前端二轮 LLM / instant 续跑 / amsg worker 三处共用）；搜索 / Notion / 飞书的纯 fetch 核心在 realtimeFetchCore（realtimeContext 的 Manager 委托它）。**这几份是环境无关叶子，别往里加浏览器依赖**——`pnpm build:workers` 会打进 amsg worker bundle |
+| Worker 入口（本仓打包） | `worker/amsg/src/index.ts` + `worker/amsg/src/agentic.ts` | index 配 hooks（onBeforeFire 填槽 + 装工具上下文、executeToolCalls 就地执行）；agentic 是决策纯逻辑（classifier 分类、旁白 / 副作用跨轮累积、finish payload 组装，有单测）。`pnpm build:workers` 产 `worker/amsg/worker.bundle.js` + `public/amsg-worker.bundle.js`（Modal「复制 Worker 代码」读后者） |
 | 本地存储 | `utils/activeMsgStore.ts` | `ActiveMsg2GlobalConfig` 存 IndexedDB；收发消息的 inbox/outbound/reasoning 存储与 Instant Push 共用 |
 | 类型 | `types.ts` | `ActiveMsg2GlobalConfig` = `{ userId, workerUrl, serverToken?, initializedAt?, updatedAt? }` |
 | npm 依赖 | `@rei-standard/amsg-client`（2.9.0-next.1，含 serverToken + getVapidPublicKey）、`amsg-shared` / `amsg-instant` / `amsg-sw`（latest）、`@rei-standard/amsg-server`（2.6.0-next.2，devDep） | amsg-server 只用于打 worker bundle，不进前端运行时 |

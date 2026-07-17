@@ -17,6 +17,13 @@ import {
   amsgStateNamespace,
   renderFirePack,
 } from './amsgFirePack';
+import {
+  AMSG_GLOBAL_NAMESPACE,
+  AMSG_TOOL_CONFIG_KEY,
+  AMSG_TOOL_PACK_KEY,
+  buildToolConfig,
+  buildToolPack,
+} from './amsgToolPack';
 import { ChatPrompts } from './chatPrompts';
 import { DB } from './db';
 import { safeResponseJson } from './safeApi';
@@ -218,6 +225,7 @@ const buildFirePack = async (
     '- 可以用换行拆成多个聊天气泡，但不要写时间戳、名字前缀、系统提示。',
     '- 不要出现“作为AI”“系统提示”等元话语。',
     '- 语气更像真人突然想起对方时发来的私聊，不要像在完成任务。',
+    '- 角色设定里描述的查记忆、读日记、联网搜索、逛小红书等能力照常可用：需要时正常输出对应标签，系统会取回结果后让你继续写。',
     '',
     '【角色系统设定】',
     systemPrompt,
@@ -502,12 +510,28 @@ export const ActiveMsgClient = {
 
     if (firePack) {
       try {
-        await client.putClientState([{
-          namespace: amsgStateNamespace(char.id),
-          key: AMSG_FIRE_PACK_KEY,
-          value: JSON.stringify(firePack),
-          updatedAt: Date.now(),
-        }]);
+        const now = Date.now();
+        await client.putClientState([
+          {
+            namespace: amsgStateNamespace(char.id),
+            key: AMSG_FIRE_PACK_KEY,
+            value: JSON.stringify(firePack),
+            updatedAt: now,
+          },
+          // v2 服务端工具循环的数据（recall 月度总结 / 工具凭据），与 fire_pack 同批上云。
+          {
+            namespace: amsgStateNamespace(char.id),
+            key: AMSG_TOOL_PACK_KEY,
+            value: JSON.stringify(buildToolPack(char)),
+            updatedAt: now,
+          },
+          {
+            namespace: AMSG_GLOBAL_NAMESPACE,
+            key: AMSG_TOOL_CONFIG_KEY,
+            value: JSON.stringify(buildToolConfig(realtimeConfig)),
+            updatedAt: now,
+          },
+        ]);
       } catch (error) {
         // 同步失败不影响任务本身：completePrompt 兜底仍冻结在任务里，worker 走老链路。
         console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 排程后同步 fire_pack 失败（有冻结 prompt 兜底）`, error);
@@ -540,6 +564,24 @@ export const ActiveMsgClient = {
         namespace: amsgStateNamespace(item.char.id),
         key: AMSG_FIRE_PACK_KEY,
         value: JSON.stringify(firePack),
+        updatedAt: now,
+      });
+      // v2 服务端工具循环的角色侧数据（recall 月度总结 / XHS 开关 / 角色名）。
+      entries.push({
+        namespace: amsgStateNamespace(item.char.id),
+        key: AMSG_TOOL_PACK_KEY,
+        value: JSON.stringify(buildToolPack(item.char)),
+        updatedAt: now,
+      });
+    }
+    // 工具凭据是全局一份：取批里第一份带 realtimeConfig 的快照。整批都没带就不写，
+    // 避免把云端已有的可用凭据覆盖成全禁用。
+    const withRealtime = items.find((item) => item.realtimeConfig);
+    if (withRealtime) {
+      entries.push({
+        namespace: AMSG_GLOBAL_NAMESPACE,
+        key: AMSG_TOOL_CONFIG_KEY,
+        value: JSON.stringify(buildToolConfig(withRealtime.realtimeConfig)),
         updatedAt: now,
       });
     }
