@@ -34,3 +34,4 @@ xiaohongshu-skills/
 # git worktrees
 .worktrees/
 .claude/
+.pnpm-store/

@@ -7,13 +7,21 @@
 
 amsg2 = 定时主动消息。运行模型是**单用户 + 自带 worker + 自带 DB**：每个用户自己部署一个 Cloudflare Worker（自带 D1 数据库 + Cron Trigger），SullyOS 前端只填「Worker 地址 + 共享密钥」就能用，跟 Instant Push 一个套路。没有多租户、没有 tenant token、没有 Netlify Functions 后端。
 
+AI 模式任务（自动/提示词）走「满血」链路：前端平时把带时间槽位的完整 prompt
+模板（fire_pack）同步到 worker 的 client_state 表，到点由 worker 现场填槽生成——
+上下文是用户最后一次聊天时的状态，而不是排程那一刻的。worker 读不到 fire_pack
+（老任务/没同步过）时自动回退用排程时冻结的 completePrompt。设计详见
+[`amsg-fullbg-state-design.md`](./amsg-fullbg-state-design.md)。
+
 ## 前端接入点
 
 | 部件 | 文件 | 说明 |
 |------|------|------|
 | 发请求层 | `utils/activeMsgClient.ts` | 包 `@rei-standard/amsg-client` 的 `ReiClient`，构造用 `baseUrl=workerUrl` + `serverToken`。对外方法：`getGlobalConfig` / `getPushStatus` / `ensurePushSubscription` / `connect` / `listTasks` / `cancelTask` / `scheduleCharacterTask` |
 | 全局配置 Modal | `components/settings/ActiveMsgGlobalSettingsModal.tsx` | 「部署 Worker」引导（复制代码 + CF Dashboard 链接 + env 清单 + Master Key 生成）+ 填 Worker 地址 + 共享密钥 + 「连接」+ 「开启推送」。挂在 `apps/Settings.tsx`（Instant Push 那节旁边） |
-| 角色级调度 Modal | `components/chat/ActiveMsg2SettingsModal.tsx` | 每个角色配「固定/自动/提示词」× 「一次/每天/每周」。挂在聊天菜单，未变动 |
+| 角色级调度 Modal | `components/chat/ActiveMsg2SettingsModal.tsx` | 每个角色配「固定/自动/提示词」× 「一次/每天/每周」。入口在聊天加号面板「主动消息 2.0」按钮（闹钟图标） |
+| fire_pack 模板 | `utils/amsgFirePack.ts` | 满血链路的 prompt 模板 + 时间槽位渲染，前端兜底与 worker 填槽共用同一份（时间文案单份维护，有回归测试钉住） |
+| 状态同步层 | `utils/amsgStateSync.ts` | 每轮聊完（useChatAI 轮末）打脏标记，去抖 15s / 切后台立即，把 fire_pack 批量 `putClientState` 上云 |
 | Worker 入口（本仓打包） | `worker/amsg/src/index.ts` | 薄入口包 `@rei-standard/amsg-server/cloudflare`；`pnpm build:workers` 产 `worker/amsg/worker.bundle.js` + `public/amsg-worker.bundle.js`（Modal「复制 Worker 代码」读后者） |
 | 本地存储 | `utils/activeMsgStore.ts` | `ActiveMsg2GlobalConfig` 存 IndexedDB；收发消息的 inbox/outbound/reasoning 存储与 Instant Push 共用 |
 | 类型 | `types.ts` | `ActiveMsg2GlobalConfig` = `{ userId, workerUrl, serverToken?, initializedAt?, updatedAt? }` |
