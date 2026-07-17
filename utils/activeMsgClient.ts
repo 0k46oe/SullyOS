@@ -1,4 +1,4 @@
-﻿import { ReiClient } from '@rei-standard/amsg-client';
+import { ReiClient } from '@rei-standard/amsg-client';
 import {
   ActiveMsg2CharacterConfig,
   ActiveMsg2GlobalConfig,
@@ -8,14 +8,20 @@ import {
   RealtimeConfig,
   UserProfile,
 } from '../types';
+import {
+  AMSG_FIRE_PACK_KEY,
+  AMSG_SLOT_AWAY_HINT,
+  AMSG_SLOT_CURRENT_TIME,
+  AMSG_SLOT_TIME_SINCE_USER,
+  AmsgFirePack,
+  amsgStateNamespace,
+  renderFirePack,
+} from './amsgFirePack';
 import { ChatPrompts } from './chatPrompts';
 import { DB } from './db';
 import { safeResponseJson } from './safeApi';
 import { ActiveMsgStore } from './activeMsgStore';
 import { KeepAlive } from './keepAlive';
-
-const ACTIVE_MSG_VAPID_PUBLIC_KEY = import.meta.env.VITE_AMSG_VAPID_PUBLIC_KEY || '';
-const ACTIVE_MSG_API_BASE_OVERRIDE = (import.meta.env.VITE_AMSG_API_BASE_URL || '').trim();
 
 export interface ActiveMsg2PushStatus {
   supported: boolean;
@@ -25,32 +31,25 @@ export interface ActiveMsg2PushStatus {
   detail?: string;
 }
 
-export interface ActiveMsg2InitTenantResult {
-  tenantId: string;
-  tenantToken: string;
-  cronToken: string;
-  cronWebhookUrl: string;
-  masterKeyFingerprint: string;
-}
-
 type InternalReiClient = ReiClient & {
   _encrypt: (plaintext: string) => Promise<{ iv: string; authTag: string; encryptedData: string }>;
   _decrypt: (payload: { iv: string; authTag: string; encryptedData: string }) => Promise<any>;
+  // amsg-client 2.9.0-next.1：拉本 worker 自己的 VAPID 公钥（带 X-Client-Token），供订阅用。
+  getVapidPublicKey: () => Promise<string>;
 };
 
 const ACTIVE_MSG_RUNTIME_HEADER = '[ActiveMsg2]';
 
-const createClient = (userId: string) => new ReiClient({
-  baseUrl: resolveActiveMsgApiBase(),
-  userId,
-}) as InternalReiClient;
+// 单用户模式：所有请求打到用户自部署的 Cloudflare Worker（config.workerUrl）。
+// 配了 serverToken 就每次带 X-Client-Token；worker 端配了就强制校验，缺/错回 401。
+const normalizeWorkerBase = (workerUrl: string) => workerUrl.trim().replace(/\/+$/, '');
 
-const nowIsoLocal = () => {
-  const now = new Date();
-  const offset = now.getTimezoneOffset();
-  const local = new Date(now.getTime() - offset * 60_000);
-  return local.toISOString().slice(0, 16);
-};
+const createClient = (config: Pick<ActiveMsg2GlobalConfig, 'userId' | 'workerUrl' | 'serverToken'>) =>
+  new ReiClient({
+    baseUrl: normalizeWorkerBase(config.workerUrl),
+    userId: config.userId,
+    serverToken: config.serverToken || undefined,
+  }) as InternalReiClient;
 
 export const getDefaultActiveMsgFirstSendTime = () => {
   const base = new Date();
@@ -60,54 +59,7 @@ export const getDefaultActiveMsgFirstSendTime = () => {
   return local.toISOString().slice(0, 16);
 };
 
-const normalizeActiveMsgApiBase = (value: string) => {
-  const trimmed = value.trim().replace(/\/+$/, '');
-  if (!trimmed) return '';
-  return /\/api\/v1$/i.test(trimmed) ? trimmed : `${trimmed}/api/v1`;
-};
-
-export const resolveActiveMsgApiBase = () => {
-  if (ACTIVE_MSG_API_BASE_OVERRIDE) {
-    return normalizeActiveMsgApiBase(ACTIVE_MSG_API_BASE_OVERRIDE);
-  }
-  const currentDir = new URL('./', window.location.href);
-  return new URL('api/v1/', currentDir).toString().replace(/\/+$/, '');
-};
-
-const detectActiveMsgDbDriver = (databaseUrl: string, fallback: ActiveMsg2GlobalConfig['driver']) => {
-  return /(?:^|[./-])neon\.tech\b/i.test(databaseUrl) ? 'neon' : fallback;
-};
-
-export const sanitizeActiveMsgDatabaseUrl = (value: string) => {
-  const trimmed = value.trim();
-  if (!trimmed) return '';
-
-  const match = trimmed.match(/postgres(?:ql)?:\/\/[^\s'"]+/i);
-  if (match?.[0]) {
-    return match[0].replace(/[;'"]+$/, '');
-  }
-
-  return trimmed
-    .replace(/^psql\s+/i, '')
-    .replace(/^['\"]+/, '')
-    .replace(/['\";]+$/, '')
-    .trim();
-};
-
 const normalizeChatApiUrl = (baseUrl: string) => `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
-
-const buildActiveMsgApiHint = () => {
-  const apiBase = resolveActiveMsgApiBase();
-  if (ACTIVE_MSG_API_BASE_OVERRIDE) {
-    return `当前主动消息 2.0 API 地址是 ${apiBase}。请确认这里对应的是已部署的 Netlify Functions，而不是静态网页。`;
-  }
-
-  if (window.location.hostname.endsWith('github.io') || window.location.protocol === 'file:') {
-    return '你当前打开的是静态站点环境，默认 /api/v1 很可能只会返回网页 HTML。请把项目部署到 Netlify，或者在构建环境里设置 VITE_AMSG_API_BASE_URL 指向你的 Netlify 站点。';
-  }
-
-  return `当前主动消息 2.0 会向 ${apiBase} 发请求。请确认这里确实能访问到 Netlify Functions。`;
-};
 
 const looksLikeHtmlFallbackError = (message: string) => (
   /HTML/i.test(message) ||
@@ -119,26 +71,9 @@ const looksLikeHtmlFallbackError = (message: string) => (
 const normalizeActiveMsgApiError = (error: unknown, phase: string) => {
   const message = error instanceof Error ? error.message : String(error || 'Unknown error');
   if (looksLikeHtmlFallbackError(message)) {
-    return new Error(`主动消息 2.0 的 ${phase} 请求没有打到 API，而是拿到了网页 HTML。${buildActiveMsgApiHint()}`);
+    return new Error(`主动消息 2.0 的 ${phase} 请求没有打到 Worker，而是拿到了网页 HTML。请确认设置里填的是已部署的 amsg Worker 地址，而不是某个网页地址。`);
   }
   return error instanceof Error ? error : new Error(message);
-};
-
-const withAuthorizationPatchedFetch = async <T>(tenantToken: string, fn: () => Promise<T>) => {
-  const originalFetch = window.fetch.bind(window);
-
-  const patchedFetch: typeof window.fetch = (input, init = {}) => {
-    const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
-    headers.set('Authorization', `Bearer ${tenantToken}`);
-    return originalFetch(input, { ...init, headers });
-  };
-
-  (window as typeof window & { fetch: typeof window.fetch }).fetch = patchedFetch;
-  try {
-    return await fn();
-  } finally {
-    (window as typeof window & { fetch: typeof window.fetch }).fetch = originalFetch;
-  }
 };
 
 const ensureGlobalReady = async (): Promise<ActiveMsg2GlobalConfig> => {
@@ -147,16 +82,16 @@ const ensureGlobalReady = async (): Promise<ActiveMsg2GlobalConfig> => {
   return { ...config, userId };
 };
 
-const ensureTenantReady = async () => {
+const ensureWorkerReady = async () => {
   const config = await ensureGlobalReady();
-  if (!config.tenantToken) throw new Error('请先在系统设置里完成“主动消息 2.0”的租户初始化。');
+  if (!config.workerUrl.trim()) throw new Error('请先在系统设置里填写「主动消息 2.0」的 Worker 地址。');
   return config;
 };
 
 const initializeClient = async (config: ActiveMsg2GlobalConfig) => {
-  const client = createClient(config.userId);
+  const client = createClient(config);
   try {
-    await withAuthorizationPatchedFetch(config.tenantToken || '', () => client.init());
+    await client.init();
   } catch (error) {
     throw normalizeActiveMsgApiError(error, '获取用户密钥');
   }
@@ -188,51 +123,23 @@ const buildTimeGapHint = async (charId: string) => {
     message.role === 'user' && !message.metadata?.proactiveHint
   ));
 
-  if (!lastRealUserMessage) {
-    return {
-      timeSinceUser: '你们最近没有新的聊天记录。',
-      recentMessages,
-    };
-  }
-
-  const diffMinutes = Math.max(0, Math.floor((Date.now() - lastRealUserMessage.timestamp) / 60_000));
-  if (diffMinutes < 60) {
-    return {
-      timeSinceUser: `距离用户上次主动发消息大约 ${diffMinutes} 分钟。`,
-      recentMessages,
-    };
-  }
-  if (diffMinutes < 1440) {
-    const hours = Math.floor(diffMinutes / 60);
-    const minutes = diffMinutes % 60;
-    return {
-      timeSinceUser: `距离用户上次主动发消息大约 ${hours} 小时${minutes ? ` ${minutes} 分钟` : ''}。`,
-      recentMessages,
-    };
-  }
-
-  const days = Math.floor(diffMinutes / 1440);
-  const hours = Math.floor((diffMinutes % 1440) / 60);
   return {
-    timeSinceUser: `距离用户上次主动发消息大约 ${days} 天${hours ? ` ${hours} 小时` : ''}。`,
+    // 时间差在渲染时刻才算（formatTimeSinceUser），这里只取原始时间戳——
+    // 满血链路会把它放进 fire_pack，worker 到点用「fire 时刻」重算，不吃排程时的陈旧值。
+    lastUserMessageAt: lastRealUserMessage ? lastRealUserMessage.timestamp : null,
     recentMessages,
   };
 };
 
-const buildLegacyStyleProactiveHint = (
-  targetName: string,
-  currentTime: string,
-  timeSinceUser: string,
-) => {
+// 时间性内容留槽位（AMSG_SLOT_*），由 renderFirePack 统一填——排程兜底路径立即填，
+// 满血路径由 worker 在 fire 时刻填。文案模板本身仍在前端这份代码里维护。
+const buildLegacyStyleProactiveHint = (targetName: string) => {
   const target = targetName || '对方';
-  const awayHint = timeSinceUser.includes('没有新的聊天记录')
-    ? `${target}最近没有主动来找你说话。`
-    : `${target}${timeSinceUser.replace(/^距离用户/, '已经')}`;
 
   return [
     '【1.0 风格主动消息提示】',
-    `现在是 ${currentTime}。`,
-    `${awayHint}`,
+    `现在是 ${AMSG_SLOT_CURRENT_TIME}。`,
+    AMSG_SLOT_AWAY_HINT,
     `这不是 ${target} 正在和你聊天，而是你突然想起了 ${target}，想主动发条消息给他/她。`,
     `像真人随手发消息一样自然一点，可以是分享刚看到的东西、轻轻吐槽、问一句近况、突然想念，或者单纯想找 ${target} 聊两句。`,
     '不要写成汇报近况，不要像在完成任务，也不要解释自己为什么会发这条消息。',
@@ -240,16 +147,18 @@ const buildLegacyStyleProactiveHint = (
   ].join('\n');
 };
 
-const buildCompletePrompt = async (
+// 拼出带时间槽位的完整 prompt 模板（fire_pack）。两条路径共用：
+//   - 排程时：renderFirePack(pack, Date.now()) 立即填槽 → completePrompt 冻结兜底
+//   - 满血同步：pack 原样 putClientState 上云，worker 到点再填槽（上下文不过期）
+const buildFirePack = async (
   char: CharacterProfile,
   config: ActiveMsg2CharacterConfig,
   userProfile: UserProfile,
   groups: GroupProfile[],
-  realtimeConfig: RealtimeConfig,
-) => {
-  const { recentMessages, timeSinceUser } = await buildTimeGapHint(char.id);
-  const currentTime = nowIsoLocal().replace('T', ' ');
-  const legacyHint = buildLegacyStyleProactiveHint(userProfile.name || '对方', currentTime, timeSinceUser);
+  realtimeConfig: RealtimeConfig | undefined,
+): Promise<AmsgFirePack> => {
+  const { recentMessages, lastUserMessageAt } = await buildTimeGapHint(char.id);
+  const legacyHint = buildLegacyStyleProactiveHint(userProfile.name || '对方');
   // 按角色可见性过滤表情包：主动消息不经过 Chat.tsx 的 aiVisibleEmojis/visibleCategories，
   // 必须在这里复用同一套过滤，否则角色会用到只对其他角色开放的表情包。
   const { emojis, categories } = ChatPrompts.filterVisibleEmojis(
@@ -299,7 +208,7 @@ const buildCompletePrompt = async (
     return '这是固定消息模式，不应该走 AI 生成。';
   })();
 
-  return [
+  const template = [
     '你将代表下面这个角色，生成一条“主动发给用户”的私聊消息。',
     '',
     '【重要规则】',
@@ -317,8 +226,8 @@ const buildCompletePrompt = async (
     recentTranscript || '（暂时没有最近聊天记录）',
     '',
     '【当前时刻补充】',
-    `当前本地时间：${currentTime}`,
-    timeSinceUser,
+    `当前本地时间：${AMSG_SLOT_CURRENT_TIME}`,
+    AMSG_SLOT_TIME_SINCE_USER,
     '',
     legacyHint,
     '',
@@ -329,6 +238,25 @@ const buildCompletePrompt = async (
     // 失了 recency。这里在最后一句把它拎回来，让主动消息也从「你这个人」长出来，而不是滑回均值腔。
     `（开口前回到你自己：这条得是 ${char.name} 会发的那一条——语气、用词、节奏都只属于你。哪怕只是随口一句，也要是你。）`,
   ].join('\n');
+
+  return {
+    v: 1,
+    template,
+    lastUserMessageAt,
+    tzOffsetMin: new Date().getTimezoneOffset(),
+    targetName: userProfile.name || '对方',
+  };
+};
+
+const buildCompletePrompt = async (
+  char: CharacterProfile,
+  config: ActiveMsg2CharacterConfig,
+  userProfile: UserProfile,
+  groups: GroupProfile[],
+  realtimeConfig: RealtimeConfig,
+) => {
+  const pack = await buildFirePack(char, config, userProfile, groups, realtimeConfig);
+  return renderFirePack(pack, Date.now());
 };
 
 const ensureFutureTime = (value: string) => {
@@ -342,13 +270,13 @@ const ensureFutureTime = (value: string) => {
   return date.toISOString();
 };
 
-const fetchWithTenant = async (path: string, config: ActiveMsg2GlobalConfig, init: RequestInit, phase = '接口') => {
+const fetchWithAuth = async (path: string, config: ActiveMsg2GlobalConfig, init: RequestInit, phase = '接口') => {
   const headers = new Headers(init.headers);
-  if (config.tenantToken) headers.set('Authorization', `Bearer ${config.tenantToken}`);
+  if (config.serverToken) headers.set('X-Client-Token', config.serverToken);
   headers.set('X-User-Id', config.userId);
 
   try {
-    const response = await fetch(`${resolveActiveMsgApiBase()}/${path}`, {
+    const response = await fetch(`${normalizeWorkerBase(config.workerUrl)}/${path}`, {
       ...init,
       headers,
     });
@@ -368,26 +296,39 @@ const decryptPayload = async (client: InternalReiClient, payload: { iv: string; 
 };
 
 export const ActiveMsgClient = {
-  get vapidPublicKey() {
-    return ACTIVE_MSG_VAPID_PUBLIC_KEY;
-  },
-
-  get apiBaseUrl() {
-    return resolveActiveMsgApiBase();
-  },
-
   async getGlobalConfig() {
     return ensureGlobalReady();
   },
 
+  // 生成 worker env 用的 AMSG_MASTER_KEY（32 字节 → 64 位 hex）。
+  // 只在设置页展示给用户粘进 CF env，前端自己不存也用不到它。
+  generateMasterKey(): string {
+    const buf = new Uint8Array(32);
+    crypto.getRandomValues(buf);
+    return Array.from(buf, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  },
+
+  // 复制最新版 amsg worker bundle 到剪贴板（Dashboard 粘贴部署用）。
+  // 和 instantPushClient.copyInstantWorkerBundleToClipboard 同款套路：
+  // 读站点随 build 发布的 public/amsg-worker.bundle.js，抛原始错误让调用方决定怎么显示。
+  async copyWorkerBundleToClipboard(): Promise<void> {
+    const base = import.meta.env.BASE_URL || '/';
+    const res = await fetch(`${base}amsg-worker.bundle.js`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    await navigator.clipboard.writeText(text);
+  },
+
   async getPushStatus(): Promise<ActiveMsg2PushStatus> {
+    const config = await ensureGlobalReady();
+    const workerConfigured = Boolean(config.workerUrl.trim());
     const supported = 'Notification' in window && 'serviceWorker' in navigator && 'PushManager' in window;
     if (!supported) {
       return {
         supported: false,
         permission: 'unsupported',
         hasSubscription: false,
-        vapidConfigured: Boolean(ACTIVE_MSG_VAPID_PUBLIC_KEY),
+        vapidConfigured: workerConfigured,
         detail: '当前浏览器不支持 Web Push。',
       };
     }
@@ -400,15 +341,16 @@ export const ActiveMsgClient = {
       supported: true,
       permission: Notification.permission,
       hasSubscription: Boolean(subscription),
-      vapidConfigured: Boolean(ACTIVE_MSG_VAPID_PUBLIC_KEY),
-      detail: !ACTIVE_MSG_VAPID_PUBLIC_KEY ? '缺少 VITE_AMSG_VAPID_PUBLIC_KEY。' : undefined,
+      vapidConfigured: workerConfigured,
+      detail: !workerConfigured ? '请先填写 Worker 地址。' : undefined,
     };
   },
 
   async ensurePushSubscription() {
     const pushStatus = await this.getPushStatus();
     if (!pushStatus.supported) throw new Error(pushStatus.detail || '当前环境不支持推送。');
-    if (!ACTIVE_MSG_VAPID_PUBLIC_KEY) throw new Error('缺少 VITE_AMSG_VAPID_PUBLIC_KEY，无法创建推送订阅。');
+
+    const config = await ensureWorkerReady();
 
     let permission = Notification.permission;
     if (permission !== 'granted') {
@@ -418,84 +360,50 @@ export const ActiveMsgClient = {
       throw new Error('通知权限未授予，无法创建主动消息 2.0 的推送订阅。');
     }
 
-    const globalConfig = await ensureGlobalReady();
     await KeepAlive.init();
     const registration = await navigator.serviceWorker.ready;
     const existing = await registration.pushManager.getSubscription();
     if (existing) return existing.toJSON();
 
-    const client = createClient(globalConfig.userId);
-    const subscription = await client.subscribePush(ACTIVE_MSG_VAPID_PUBLIC_KEY, registration);
+    // VAPID 公钥必须来自「这个 worker 自己」签推送用的那对密钥，否则 worker 推不动会 403。
+    // 各用户自部署 worker、各有各的 VAPID，运行时从 worker 拉、不编译进前端。
+    const client = createClient(config);
+    let vapidPublicKey: string;
+    try {
+      vapidPublicKey = await client.getVapidPublicKey();
+    } catch (error) {
+      throw normalizeActiveMsgApiError(error, '获取 Worker VAPID 公钥');
+    }
+    if (!vapidPublicKey) {
+      throw new Error('Worker 没返回 VAPID 公钥，请确认已配置 VAPID 并部署了最新 worker。');
+    }
+    const subscription = await client.subscribePush(vapidPublicKey, registration);
     return subscription.toJSON();
   },
 
-  async initTenant(updates: Pick<ActiveMsg2GlobalConfig, 'driver' | 'databaseUrl' | 'initSecret'>) {
-    const current = await ensureGlobalReady();
-    const databaseUrl = sanitizeActiveMsgDatabaseUrl(updates.databaseUrl);
-    const driver = detectActiveMsgDbDriver(databaseUrl, updates.driver);
-    if (!/^postgres(?:ql)?:\/\//i.test(databaseUrl)) {
-      throw new Error('Database URL 需要填写原始 PostgreSQL/Neon 连接串，不要带 psql 命令前缀。');
+  // 单用户「连接」：先 POST /init-tenant 让 worker 在自己的 D1 里幂等建表
+  // （Dashboard 粘贴部署的用户不用碰 SQL），再拿一次 user key 验证地址与鉴权都通。
+  async connect() {
+    const config = await ensureWorkerReady();
+    const initResponse = await fetchWithAuth('init-tenant', config, { method: 'POST' }, '初始化数据库');
+    if (!initResponse?.success) {
+      throw new Error(initResponse?.error?.message || '主动消息 2.0 初始化数据库失败，请确认 Worker 已绑定 D1（变量名 DB）。');
     }
-
-    const headers = new Headers({ 'Content-Type': 'application/json' });
-    if (updates.initSecret?.trim()) {
-      headers.set('X-Init-Secret', updates.initSecret.trim());
-    }
-
-    try {
-      const response = await fetch(`${resolveActiveMsgApiBase()}/init-tenant`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          driver,
-          databaseUrl,
-        }),
-      });
-      const json = await safeResponseJson(response);
-      if (!response.ok || !json?.success) {
-        throw new Error(json?.error?.message || `鍒濆鍖栧け璐?(HTTP ${response.status})`);
-      }
-
-      const data = json.data as ActiveMsg2InitTenantResult;
-      await ActiveMsgStore.saveGlobalConfig({
-        ...current,
-        ...updates,
-        driver,
-        databaseUrl,
-        tenantId: data.tenantId,
-        tenantToken: data.tenantToken,
-        cronToken: data.cronToken,
-        cronWebhookUrl: data.cronWebhookUrl,
-        masterKeyFingerprint: data.masterKeyFingerprint,
-        initializedAt: Date.now(),
-      });
-
-      return data;
-    } catch (error) {
-      throw normalizeActiveMsgApiError(error, '初始化租户');
-    }
-  },
-
-  async verifyUserKey() {
-    const config = await ensureTenantReady();
     await initializeClient(config);
-    return {
-      ok: true,
-      userId: config.userId,
-      version: 1,
-    };
+    await ActiveMsgStore.saveGlobalConfig({ ...config, initializedAt: Date.now() });
+    return { ok: true, userId: config.userId };
   },
 
   async listTasks() {
-    const config = await ensureTenantReady();
+    const config = await ensureWorkerReady();
     const client = await initializeClient(config);
-    const response = await fetchWithTenant('messages', config, {
+    const response = await fetchWithAuth('messages', config, {
       method: 'GET',
       headers: {
         'X-Response-Encrypted': 'true',
         'X-Encryption-Version': '1',
       },
-    }, '璇诲彇浠诲姟鍒楄〃');
+    }, '读取任务列表');
 
     if (!response?.success || response?.encrypted !== true) {
       return response?.data?.tasks || [];
@@ -506,10 +414,10 @@ export const ActiveMsgClient = {
   },
 
   async cancelTask(taskUuid: string) {
-    const config = await ensureTenantReady();
-    const response = await fetchWithTenant(`cancel-message?id=${encodeURIComponent(taskUuid)}`, config, {
+    const config = await ensureWorkerReady();
+    const response = await fetchWithAuth(`cancel-message?id=${encodeURIComponent(taskUuid)}`, config, {
       method: 'DELETE',
-    }, '鍙栨秷浠诲姟');
+    }, '取消任务');
 
     if (!response?.success) {
       throw new Error(response?.error?.message || '取消主动消息 2.0 任务失败。');
@@ -527,7 +435,7 @@ export const ActiveMsgClient = {
     apiConfig: APIConfig;
   }) {
     const { char, config, userProfile, groups, realtimeConfig, apiConfig } = params;
-    const globalConfig = await ensureTenantReady();
+    const globalConfig = await ensureWorkerReady();
     const client = await initializeClient(globalConfig);
     const pushSubscription = await this.ensurePushSubscription();
 
@@ -552,17 +460,23 @@ export const ActiveMsgClient = {
         charId: char.id,
         charName: char.name,
         source: 'active_msg_2',
+        // worker 满血链路的 onLLMOutput 拿不到任务顶层的 messageType，靠 metadata 透传
+        // 还原 push.messageType（老任务没这字段时 worker 回退 'auto'，收侧只展示不路由）。
+        amsgMode: config.mode,
       },
     };
 
+    // AI 模式同时产两份：renderFirePack 立即填槽 → completePrompt 冻结兜底（老 worker /
+    // 没同步上状态时照旧能跑）；firePack 本体在任务建成后上传 client_state，worker 到点现场填槽。
+    let firePack: AmsgFirePack | null = null;
     if (config.mode === 'fixed') {
       const userMessage = config.userMessage?.trim();
       if (!userMessage) throw new Error('固定消息模式需要填写消息内容。');
       payload.userMessage = userMessage;
     } else {
       const activeApi = resolveApiConfig(char, config, apiConfig);
-      const completePrompt = await buildCompletePrompt(char, config, userProfile, groups, realtimeConfig);
-      payload.completePrompt = completePrompt;
+      firePack = await buildFirePack(char, config, userProfile, groups, realtimeConfig);
+      payload.completePrompt = renderFirePack(firePack, Date.now());
       payload.apiUrl = normalizeChatApiUrl(activeApi.baseUrl);
       payload.apiKey = activeApi.apiKey;
       payload.primaryModel = activeApi.model;
@@ -572,7 +486,7 @@ export const ActiveMsgClient = {
     }
 
     const encrypted = await encryptPayload(client, payload);
-    const response = await fetchWithTenant('schedule-message', globalConfig, {
+    const response = await fetchWithAuth('schedule-message', globalConfig, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -580,23 +494,69 @@ export const ActiveMsgClient = {
         'X-Encryption-Version': '1',
       },
       body: JSON.stringify(encrypted),
-    }, '鍒涘缓浠诲姟');
+    }, '创建任务');
 
     if (!response?.success) {
       throw new Error(response?.error?.message || '主动消息 2.0 任务创建失败。');
     }
 
+    if (firePack) {
+      try {
+        await client.putClientState([{
+          namespace: amsgStateNamespace(char.id),
+          key: AMSG_FIRE_PACK_KEY,
+          value: JSON.stringify(firePack),
+          updatedAt: Date.now(),
+        }]);
+      } catch (error) {
+        // 同步失败不影响任务本身：completePrompt 兜底仍冻结在任务里，worker 走老链路。
+        console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 排程后同步 fire_pack 失败（有冻结 prompt 兜底）`, error);
+      }
+    }
+
     return response.data as { uuid: string; status: string; nextSendAt?: string };
   },
+
+  // 满血同步：把一批角色的最新 fire_pack 合成一次 putClientState 上传（amsgStateSync
+  // 去抖后调用；iOS 切后台只有几秒存活窗口，多角色也必须一次请求写完）。
+  // 老 worker 没有 /client-state 端点会 404 → 抛错由调用方 warn，一切照旧走冻结 prompt。
+  async syncCharFirePacks(items: Array<{
+    char: CharacterProfile;
+    config: ActiveMsg2CharacterConfig;
+    userProfile: UserProfile;
+    groups: GroupProfile[];
+    realtimeConfig?: RealtimeConfig;
+  }>): Promise<void> {
+    if (!items.length) return;
+    const globalConfig = await ensureWorkerReady();
+    const client = await initializeClient(globalConfig);
+    const now = Date.now();
+    const entries = [];
+    for (const item of items) {
+      const firePack = await buildFirePack(
+        item.char, item.config, item.userProfile, item.groups, item.realtimeConfig,
+      );
+      entries.push({
+        namespace: amsgStateNamespace(item.char.id),
+        key: AMSG_FIRE_PACK_KEY,
+        value: JSON.stringify(firePack),
+        updatedAt: now,
+      });
+    }
+    const response = await client.putClientState(entries);
+    if (!response?.success) {
+      throw new Error(response?.error?.message || '上传云端状态失败。');
+    }
+  },
+
+  // 清空该用户在 worker D1 里的全部 client_state（设置页「清除云端状态」按钮）。
+  async clearClientState(): Promise<{ deleted: number }> {
+    const config = await ensureWorkerReady();
+    const client = createClient(config);
+    const response = await client.clearClientState();
+    if (!response?.success) {
+      throw new Error(response?.error?.message || '清除云端状态失败。');
+    }
+    return response.data as { deleted: number };
+  },
 };
-
-
-
-
-
-
-
-
-
-
-

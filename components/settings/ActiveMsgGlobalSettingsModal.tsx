@@ -1,62 +1,60 @@
 import React, { useEffect, useState } from 'react';
 import Modal from '../os/Modal';
 import { ActiveMsg2GlobalConfig } from '../../types';
-import { ActiveMsgClient } from '../../utils/activeMsgClient';
+import { ActiveMsgClient, ActiveMsg2PushStatus } from '../../utils/activeMsgClient';
 import { ActiveMsgStore, maskActiveMsgUserId } from '../../utils/activeMsgStore';
+import { buildCloudflareDashboardUrl } from '../../utils/instantPushClient';
+import { generateClientToken } from '../../utils/vapidGen';
 
 interface ActiveMsgGlobalSettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+  /** 由 Settings 注入：点「去推送凭据面板」时打开顶层 PushVapidSettingsModal */
+  onOpenVapid?: () => void;
 }
 
 const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> = ({
   isOpen,
   onClose,
   addToast,
+  onOpenVapid,
 }) => {
   const [config, setConfig] = useState<ActiveMsg2GlobalConfig | null>(null);
   const [loading, setLoading] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [pushStatus, setPushStatus] = useState<{
-    supported: boolean;
-    permission: NotificationPermission | 'unsupported';
-    hasSubscription: boolean;
-    vapidConfigured: boolean;
-    detail?: string;
-  } | null>(null);
-  const [keyStatus, setKeyStatus] = useState('');
+  const [deployOpen, setDeployOpen] = useState(false);
+  const [pushStatus, setPushStatus] = useState<ActiveMsg2PushStatus | null>(null);
+  // 「生成 Master Key」只在本次打开期间展示，前端不落盘——它是 worker 侧密钥，粘进 CF env 即可。
+  const [generatedMasterKey, setGeneratedMasterKey] = useState('');
 
   const refresh = async () => {
     const nextConfig = await ActiveMsgClient.getGlobalConfig();
     const nextPushStatus = await ActiveMsgClient.getPushStatus();
-    setConfig({
-      ...nextConfig,
-      driver: 'neon',
-    });
+    setConfig(nextConfig);
     setPushStatus(nextPushStatus);
   };
 
   useEffect(() => {
     if (!isOpen) return;
     setAdvancedOpen(false);
+    setDeployOpen(false);
+    setGeneratedMasterKey('');
     void refresh();
   }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen || !config) return;
     void ActiveMsgStore.saveGlobalConfig({
-      driver: 'neon',
-      databaseUrl: config.databaseUrl,
-      initSecret: config.initSecret,
+      workerUrl: config.workerUrl,
+      serverToken: config.serverToken,
     });
-  }, [config?.databaseUrl, config?.initSecret, isOpen]);
+  }, [config?.workerUrl, config?.serverToken, isOpen]);
 
   const patchConfig = (updates: Partial<ActiveMsg2GlobalConfig>) => {
     setConfig((prev) => ({
-      ...(prev || { userId: '', driver: 'neon', databaseUrl: '' }),
+      ...(prev || { userId: '', workerUrl: '' }),
       ...updates,
-      driver: 'neon',
     }));
   };
 
@@ -73,19 +71,15 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     }
   };
 
-  const handleInitTenant = async () => {
-    if (!config?.databaseUrl.trim()) {
-      addToast('先把 Neon 的数据库连接串贴进来。', 'error');
+  const handleConnect = async () => {
+    if (!config?.workerUrl.trim()) {
+      addToast('先把你部署的 Worker 地址填进来。', 'error');
       return;
     }
 
     setLoading(true);
     try {
-      await ActiveMsgClient.initTenant({
-        driver: 'neon',
-        databaseUrl: config.databaseUrl,
-        initSecret: config.initSecret,
-      });
+      await ActiveMsgClient.connect();
       await refresh();
       addToast('已连接成功，主动消息 2.0 可以用了。', 'success');
     } catch (error: any) {
@@ -95,23 +89,47 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     }
   };
 
-  const handleGetUserKey = async () => {
+  const handleCopyWorkerBundle = async () => {
+    try {
+      await ActiveMsgClient.copyWorkerBundleToClipboard();
+      addToast('Worker 代码已复制，去 CF 后台的 Edit code 里粘贴覆盖。', 'success');
+    } catch (error: any) {
+      addToast(`复制失败（${error?.message || error}）。也可以从仓库 worker/amsg/worker.bundle.js 获取。`, 'error');
+    }
+  };
+
+  const handleGenerateMasterKey = async () => {
+    const key = ActiveMsgClient.generateMasterKey();
+    setGeneratedMasterKey(key);
+    try {
+      await navigator.clipboard.writeText(key);
+      addToast('已生成并复制，粘进 Worker 环境变量 AMSG_MASTER_KEY。', 'success');
+    } catch {
+      addToast('已生成，请手动从下方复制。', 'info');
+    }
+  };
+
+  const handleClearClientState = async () => {
+    if (!confirm('确定清空云端状态？Worker D1 里同步的角色上下文（fire_pack）会全部删除。已排程任务不受影响——到点会退回使用排程时冻结的提示词，下次聊天后会重新同步。')) return;
     setLoading(true);
     try {
-      const result = await ActiveMsgClient.verifyUserKey();
-      setKeyStatus(`用户密钥检查通过，版本 v${result.version}。`);
-      addToast('用户密钥获取成功。', 'success');
+      const { deleted } = await ActiveMsgClient.clearClientState();
+      addToast(`已清空云端状态（${deleted} 条）。`, 'success');
     } catch (error: any) {
-      setKeyStatus(error?.message || '用户密钥获取失败。');
-      addToast(error?.message || '用户密钥获取失败。', 'error');
+      addToast(error?.message || '清除云端状态失败。', 'error');
     } finally {
       setLoading(false);
     }
   };
 
+  const handleGenerateServerToken = () => {
+    patchConfig({ serverToken: generateClientToken() });
+    addToast('已生成共享密钥，记得把同样的值填进 Worker 环境变量 AMSG_SERVER_TOKEN。', 'info');
+  };
+
   if (!config) return null;
 
-  const isInitialized = Boolean(config.tenantId && config.tenantToken);
+  const isConnected = Boolean(config.initializedAt);
 
   return (
     <Modal
@@ -131,46 +149,169 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         <div className="bg-violet-50 border border-violet-100 rounded-2xl p-4 space-y-2">
           <div className="flex items-center justify-between gap-3">
             <span className="font-bold text-slate-700">连接方式</span>
-            <span className="px-3 py-1 rounded-full bg-violet-500 text-white text-xs font-bold">Neon</span>
+            <span className="px-3 py-1 rounded-full bg-violet-500 text-white text-xs font-bold">自部署 Worker</span>
           </div>
           <p className="text-xs leading-relaxed text-violet-700">
-            这里默认就是给 Neon 用的。把 Neon 提供的数据库连接串贴进来，然后点一次“连接并启用”就行。
+            角色到点自动给你发消息，App 关着也能收。你自己部署一个 Cloudflare Worker（自带 D1 数据库 + 定时触发），把地址填在下面即可。
           </p>
           <p className="text-[11px] leading-relaxed text-violet-600/80">
-            就算你复制的是 <code>psql 'postgresql://...'</code> 整段，系统也会自动帮你清理成可用的连接串。
+            和「Instant Push」不同：Instant 是你发消息才即时回；这个是到点主动推。
           </p>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
+          <button
+            type="button"
+            onClick={() => setDeployOpen((prev) => !prev)}
+            className="w-full flex items-center justify-between text-left"
+          >
+            <span className="font-bold text-slate-700">部署 Worker（第一次用先做这个）</span>
+            <span className="text-xs font-bold text-slate-400">{deployOpen ? '收起' : '展开'}</span>
+          </button>
+
+          {deployOpen ? (
+            <div className="space-y-3">
+              <ol className="text-xs leading-relaxed text-slate-500 space-y-1.5 list-decimal list-outside pl-4">
+                <li>
+                  点下面「复制 Worker 代码」，去 CF 后台 Create → Worker 建一个空 Worker，
+                  进 <strong>Edit code</strong> 全选粘贴覆盖，点 Deploy。全程不用命令行。
+                </li>
+                <li>
+                  Worker 的 Settings → Bindings 加一个 <strong>D1 database</strong>，
+                  变量名必须是 <code className="font-mono">DB</code>。库没有就现场新建一个空库；
+                  表不用建，下面点「连接」时会自动建好。
+                </li>
+                <li>
+                  Settings → Trigger Events 加 <strong>Cron Trigger</strong>：
+                  <code className="font-mono"> * * * * * </code>（每分钟检查一次到点任务）。
+                </li>
+                <li>Settings → Variables and Secrets 按下面的清单填环境变量，然后重新 Deploy 一次。</li>
+              </ol>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleCopyWorkerBundle()}
+                  className="py-2.5 rounded-xl text-xs font-bold bg-violet-500 text-white active:scale-95 transition-transform"
+                >
+                  复制 Worker 代码
+                </button>
+                <a
+                  href={buildCloudflareDashboardUrl(config.workerUrl.trim() || undefined)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="py-2.5 rounded-xl text-xs font-bold bg-white border border-slate-200 text-slate-600 text-center active:scale-95 transition-transform"
+                >
+                  ↗ CF Dashboard
+                </a>
+              </div>
+
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-2.5 text-xs">
+                <p className="font-bold text-slate-700">环境变量清单</p>
+
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <code className="font-mono text-[11px] text-slate-600">AMSG_MASTER_KEY</code>
+                    <button
+                      type="button"
+                      onClick={() => void handleGenerateMasterKey()}
+                      className="shrink-0 px-3 py-1.5 text-[11px] rounded-xl font-bold bg-white border border-slate-200 text-slate-600 active:scale-95 transition-transform"
+                    >
+                      生成并复制
+                    </button>
+                  </div>
+                  {generatedMasterKey ? (
+                    <p className="font-mono text-[10px] leading-relaxed text-slate-500 break-all bg-white border border-slate-200 rounded-xl px-2 py-1.5">
+                      {generatedMasterKey}
+                    </p>
+                  ) : (
+                    <p className="text-[11px] text-slate-400">加密任务内容用的密钥，只存在 Worker 侧。生成后粘进去即可，本页不保存。</p>
+                  )}
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <code className="font-mono text-[11px] text-slate-600">VAPID_EMAIL / PUBLIC_KEY / PRIVATE_KEY</code>
+                    {onOpenVapid ? (
+                      <button
+                        type="button"
+                        onClick={onOpenVapid}
+                        className="shrink-0 px-3 py-1.5 text-[11px] rounded-xl font-bold bg-white border border-slate-200 text-slate-600 active:scale-95 transition-transform"
+                      >
+                        去推送凭据面板
+                      </button>
+                    ) : null}
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    必须和「推送凭据 (VAPID)」面板里的是<strong>同一对</strong>（和 Instant Push 共用）——
+                    整个站点只有一个浏览器推送订阅，Worker 用别的密钥对签推送会 403。
+                  </p>
+                </div>
+
+                <div className="space-y-1">
+                  <code className="font-mono text-[11px] text-slate-600">AMSG_SERVER_TOKEN（可选）</code>
+                  <p className="text-[11px] text-slate-400">
+                    防止别人滥用你的 Worker。值 = 下面「共享密钥」填的那串，两边一致即可；不配则端点全开。
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
           <div className="flex items-center justify-between gap-3">
             <span className="font-bold text-slate-700">当前状态</span>
-            <span className={`text-xs font-bold ${isInitialized ? 'text-emerald-600' : 'text-amber-600'}`}>
-              {isInitialized ? '已连接' : '未连接'}
+            <span className={`text-xs font-bold ${isConnected ? 'text-emerald-600' : 'text-amber-600'}`}>
+              {isConnected ? '已连接' : '未连接'}
             </span>
           </div>
 
           <div>
             <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">
-              Neon Database URL
+              Worker 地址
             </label>
-            <textarea
-              value={config.databaseUrl}
-              onChange={(event) => patchConfig({ databaseUrl: event.target.value })}
-              placeholder="把 Neon 给你的 postgresql://... 连接串贴在这里"
-              className="w-full h-28 bg-white/70 border border-slate-200 rounded-2xl px-4 py-3 text-xs font-mono resize-none"
+            <input
+              type="text"
+              value={config.workerUrl}
+              onChange={(event) => patchConfig({ workerUrl: event.target.value })}
+              placeholder="https://amsg.你的账号.workers.dev"
+              className="w-full bg-white/70 border border-slate-200 rounded-2xl px-4 py-3 text-xs font-mono"
             />
           </div>
 
+          <div>
+            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">
+              共享密钥（可选）
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="password"
+                value={config.serverToken || ''}
+                onChange={(event) => patchConfig({ serverToken: event.target.value })}
+                placeholder="worker 配了 AMSG_SERVER_TOKEN 才需要填"
+                className="flex-1 bg-white/70 border border-slate-200 rounded-2xl px-4 py-3 text-sm"
+              />
+              <button
+                type="button"
+                onClick={handleGenerateServerToken}
+                className="shrink-0 px-3 py-3 text-xs rounded-2xl font-bold bg-white border border-slate-200 text-slate-600 active:scale-95 transition-transform"
+              >
+                随机
+              </button>
+            </div>
+          </div>
+
           <button
-            onClick={handleInitTenant}
+            onClick={handleConnect}
             disabled={loading}
             className="w-full py-3 bg-slate-900 text-white font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50"
           >
-            {loading ? '处理中...' : isInitialized ? '重新连接并更新' : '连接并启用'}
+            {loading ? '处理中...' : isConnected ? '重新连接并验证' : '连接并启用'}
           </button>
 
           <p className="text-xs leading-relaxed text-slate-500">
-            普通用户只需要这一步。下面那些“密钥 / token / webhook”都是高级信息，不用看。
+            「连接」会自动在你的 D1 里把表建好（幂等，重复点没关系），不用手动执行 SQL。
           </p>
         </div>
 
@@ -198,10 +339,9 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
 
         <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 text-xs leading-relaxed text-amber-700 space-y-2">
           <div className="font-bold text-amber-800">风险说明</div>
-          <p>开了 2.0 以后，主动消息内容、提示词、相关配置，都会进入你填写的 Neon 数据库。</p>
-          <p>数据库管理员有机会看到这些内容。除此之外，按这套信任模型，项目维护者也就是糯米鸡，逻辑上同样属于有权限碰到这些数据的人。</p>
-          <p>如果你不接受这一点，就不要开 2.0，也不要把自己的 API Key、敏感提示词、私密内容放进去。</p>
-          <p>项目不会额外偷偷接一个中心服务器；它走的还是你自己的库。但只要数据进库，就默认数据库管理员和项目维护者是你需要信任的人。</p>
+          <p>开了 2.0 以后，主动消息内容、提示词、相关配置，都会进入你自己部署的 Worker 及其 D1 数据库。</p>
+          <p>这是你自己的 Worker、你自己的库，项目不会额外接一个中心服务器。但只要数据进库，能碰到这台 Worker / 数据库的人（也就是你自己）就能看到这些内容。</p>
+          <p>如果你不接受把私密提示词、API Key 放进自己部署的服务，就不要开 2.0。</p>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
@@ -221,58 +361,24 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
                   <span className="font-semibold text-slate-700">X-User-Id</span>
                   <span className="font-mono text-violet-600">{maskActiveMsgUserId(config.userId)}</span>
                 </div>
-                <div className="flex items-start justify-between gap-3">
-                  <span className="font-semibold text-slate-700">API Base</span>
-                  <span className="font-mono text-[10px] text-violet-600 break-all text-right">{ActiveMsgClient.apiBaseUrl}</span>
-                </div>
               </div>
-
-              <div>
-                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">
-                  Init Secret（可选）
-                </label>
-                <input
-                  type="password"
-                  value={config.initSecret || ''}
-                  onChange={(event) => patchConfig({ initSecret: event.target.value })}
-                  placeholder="只有你自己额外配了 init-secret 才需要填"
-                  className="w-full bg-white/70 border border-slate-200 rounded-2xl px-4 py-3 text-sm"
-                />
-              </div>
-
-              <button
-                onClick={handleGetUserKey}
-                disabled={loading || !config.tenantToken}
-                className="w-full py-3 bg-emerald-500 text-white font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50"
-              >
-                {loading ? '处理中...' : '检查用户密钥'}
-              </button>
-              {keyStatus ? <p className="text-xs text-emerald-600 leading-relaxed">{keyStatus}</p> : null}
-
-              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
-                <div className="font-bold text-slate-700">初始化结果</div>
-                <div className="space-y-2">
-                  <div>
-                    <div className="font-semibold text-slate-500 mb-1">tenantId</div>
-                    <div className="font-mono break-all">{config.tenantId || '未初始化'}</div>
-                  </div>
-                  <div>
-                    <div className="font-semibold text-slate-500 mb-1">tenantToken</div>
-                    <textarea readOnly value={config.tenantToken || ''} className="w-full h-16 bg-white rounded-xl px-3 py-2 font-mono resize-none" />
-                  </div>
-                  <div>
-                    <div className="font-semibold text-slate-500 mb-1">cronToken</div>
-                    <textarea readOnly value={config.cronToken || ''} className="w-full h-16 bg-white rounded-xl px-3 py-2 font-mono resize-none" />
-                  </div>
-                  <div>
-                    <div className="font-semibold text-slate-500 mb-1">cronWebhookUrl</div>
-                    <textarea readOnly value={config.cronWebhookUrl || ''} className="w-full h-16 bg-white rounded-xl px-3 py-2 font-mono resize-none" />
-                  </div>
-                  <div>
-                    <div className="font-semibold text-slate-500 mb-1">masterKeyFingerprint</div>
-                    <div className="font-mono break-all">{config.masterKeyFingerprint || '未生成'}</div>
-                  </div>
-                </div>
+              <p className="text-[11px] leading-relaxed text-slate-500">
+                Worker 侧的环境变量清单见上面「部署 Worker」一节。站点发布的 Worker 代码默认 CORS 全开
+                （<code className="font-mono">origin: '*'</code>），想收紧就在粘贴前把它改成自己站点的域名。
+              </p>
+              <div className="bg-rose-50 border border-rose-100 rounded-2xl p-3 space-y-2">
+                <div className="font-semibold text-rose-700">清除云端状态</div>
+                <p className="text-[11px] leading-relaxed text-rose-600">
+                  删除 Worker D1 里同步的角色上下文（角色卡、最近聊天窗口等）。已排程任务不受影响，
+                  到点退回排程时冻结的提示词；下次聊天后会自动重新同步。
+                </p>
+                <button
+                  onClick={() => void handleClearClientState()}
+                  disabled={loading}
+                  className="w-full py-2.5 bg-rose-500 text-white font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50"
+                >
+                  {loading ? '处理中...' : '清除云端状态'}
+                </button>
               </div>
             </div>
           ) : null}

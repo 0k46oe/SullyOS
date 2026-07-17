@@ -20,6 +20,7 @@ import { loadPushConfig, savePushConfig, registerScheduleOnWorker, startHeartbea
 import { ProactiveChat } from '../utils/proactiveChat';
 import { InstantPushSettingsModal } from '../components/settings/InstantPushSettingsModal';
 import { PushVapidSettingsModal } from '../components/settings/PushVapidSettingsModal';
+import ActiveMsgGlobalSettingsModal from '../components/settings/ActiveMsgGlobalSettingsModal';
 import VersionInfo from '../components/settings/VersionInfo';
 import { isPushVapidReady } from '../utils/pushVapid';
 import ApiCallLogModal from '../components/settings/ApiCallLogModal';
@@ -214,6 +215,7 @@ const Settings: React.FC = () => {
   // "深度重置". 不持久化, 刷新页面归零 (用户原话: "刷新页面正常消失").
   const [ppZombieStreak, setPpZombieStreak] = useState(0);
   const [showInstantModal, setShowInstantModal] = useState(false);
+  const [showAmsg2Modal, setShowAmsg2Modal] = useState(false);
   const [showVapidModal, setShowVapidModal] = useState(false);
   const [vapidReadyTick, setVapidReadyTick] = useState(0); // 关闭 VAPID 弹窗后刷新顶层徽标
 
@@ -1925,6 +1927,29 @@ const Settings: React.FC = () => {
             </p>
         </section>
 
+        {/* ───────── 主动消息 2.0（定时推送） ───────── */}
+        <section className="bg-white/80 rounded-3xl p-5 shadow-sm border border-white/50">
+            <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                    <div className="p-2 bg-violet-100/60 rounded-xl text-violet-600">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                        </svg>
+                    </div>
+                    <h2 className="text-sm font-semibold text-slate-600 tracking-wider">主动消息 2.0</h2>
+                </div>
+                <button
+                    onClick={() => setShowAmsg2Modal(true)}
+                    className="text-[10px] bg-violet-100 text-violet-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform"
+                >
+                    配置
+                </button>
+            </div>
+            <p className="text-xs text-slate-500 leading-relaxed">
+                角色到点自动给你发消息，App 关着也能收。需要你自己部署一个 Cloudflare Worker（自带 D1 数据库 + 定时触发），在配置里填地址即可。与上方 Instant Push（你发消息才即时回）互补。
+            </p>
+        </section>
+
         {/* 自定义网络代理 — 刻意低调的高级入口。默认折叠，不主动指引基本发现不了。
             普通用户无需配置：默认走作者部署的公共 Worker，所有功能开箱即用。 */}
         {!showProxyConfig ? (
@@ -2818,6 +2843,12 @@ const Settings: React.FC = () => {
       <PushVapidSettingsModal
         open={showVapidModal}
         onClose={() => { setShowVapidModal(false); setVapidReadyTick((n) => n + 1); }}
+      />
+      <ActiveMsgGlobalSettingsModal
+        isOpen={showAmsg2Modal}
+        onClose={() => setShowAmsg2Modal(false)}
+        addToast={addToast}
+        onOpenVapid={() => { setShowAmsg2Modal(false); setShowVapidModal(true); }}
       />
 
     </div>

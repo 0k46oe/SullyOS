@@ -31,6 +31,7 @@ import {
 } from '../utils/instantPushClient';
 import { applyAssistantPostProcessing, type XhsCaches } from '../utils/applyAssistantPostProcessing';
 import { ActiveMsgStore } from '../utils/activeMsgStore';
+import { markAmsgStateDirty } from '../utils/amsgStateSync';
 import { applyEmotionEvalRaw } from '../utils/emotionApply';
 import { isEmotionEvalSkipped } from '../utils/devDebug';
 
@@ -1244,6 +1245,10 @@ export const useChatAI = ({
             setSearchStatus('');
             setDiaryStatus('');
             setXhsStatus('');
+
+            // 满血主动消息：一轮聊完把该角色标脏，去抖后 fire_pack 批量同步到 worker 的
+            // client_state（未配 amsg2 任务的角色在 markDirty 内直接忽略，零成本）。
+            markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
 
             // Memory Palace — 后台缓冲区处理（不阻塞 UI，内部有并发锁）
             // 使用全局配置（memoryPalaceConfig）。lightLLM 未配置时回退主 apiConfig；

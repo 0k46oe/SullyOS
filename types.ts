@@ -216,7 +216,6 @@ export interface InstantPushConfig {
 
 export type InstantOversizeTransport = 'multipart' | 'd1';
 
-export type ActiveMsg2DbDriver = 'pg' | 'neon';
 export type ActiveMsg2Mode = 'fixed' | 'auto' | 'prompted';
 export type ActiveMsg2Recurrence = 'none' | 'daily' | 'weekly';
 
@@ -228,14 +227,11 @@ export interface ActiveMsg2ApiConfig {
 
 export interface ActiveMsg2GlobalConfig {
   userId: string;
-  driver: ActiveMsg2DbDriver;
-  databaseUrl: string;
-  initSecret?: string;
-  tenantId?: string;
-  tenantToken?: string;
-  cronToken?: string;
-  cronWebhookUrl?: string;
-  masterKeyFingerprint?: string;
+  /** 单用户 Cloudflare Worker 地址，例如 https://amsg.your-worker.dev */
+  workerUrl: string;
+  /** 与 worker 约定的共享密钥；配了就每次请求带 X-Client-Token，缺/错 worker 返回 401 */
+  serverToken?: string;
+  /** 上次「连接」（在 worker 端建表）成功的时间 */
   initializedAt?: number;
   updatedAt?: number;
 }

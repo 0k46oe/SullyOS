@@ -33,3 +33,4 @@ xiaohongshu-skills/
 
 # git worktrees
 .worktrees/
+.claude/

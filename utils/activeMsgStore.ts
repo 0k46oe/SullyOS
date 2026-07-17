@@ -25,8 +25,7 @@ type KvRecord<T = unknown> = {
 
 const defaultGlobalConfig: ActiveMsg2GlobalConfig = {
   userId: '',
-  driver: 'pg',
-  databaseUrl: '',
+  workerUrl: '',
 };
 
 // 单例连接缓存。同 utils/db.ts 的根因: 原本每个 op 都新开一条 ActiveMsg 连接且从不

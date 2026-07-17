@@ -73,7 +73,7 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
     void (async () => {
       const globalConfig = await ActiveMsgClient.getGlobalConfig();
       const pushStatus = await ActiveMsgClient.getPushStatus();
-      setGlobalReady(Boolean(globalConfig.tenantToken));
+      setGlobalReady(Boolean(globalConfig.workerUrl));
       setPushSummary(pushStatus.supported
         ? `权限：${pushStatus.permission} / 订阅：${pushStatus.hasSubscription ? '已就绪' : '未创建'}`
         : '当前环境不支持 Web Push');
