@@ -7,6 +7,17 @@ import { safeResponseJson } from './safeApi';
 import { DB } from './db';
 import { getProxyWorkerUrl } from './proxyWorker';
 import { nowInTimeZone } from './timezone';
+import {
+    performSearch as performSearchCore,
+    notionGetDiaryByDate,
+    notionReadDiaryContent,
+    notionSearchUserNotes,
+    feishuGetToken,
+    feishuGetDiaryByDate,
+    type SearchResult,
+    type DiaryPreview,
+    type FeishuDiaryPreview,
+} from './realtimeFetchCore';
 
 export interface WeatherData {
     temp: number;
@@ -24,11 +35,10 @@ export interface NewsItem {
     desc?: string;
 }
 
-export interface SearchResult {
-    title: string;
-    description: string;
-    url: string;
-}
+// 搜索 / Notion / 飞书的读取类纯 fetch 核心在 realtimeFetchCore.ts（环境无关叶子，
+// amsg worker 的服务端工具循环共用同一份），这里的 Manager 方法委托过去；
+// 类型原样 re-export，既有 import 路径不用改。
+export type { SearchResult, DiaryPreview, FeishuDiaryPreview } from './realtimeFetchCore';
 
 export interface RealtimeConfig {
     // 天气配置
@@ -619,61 +629,7 @@ export const RealtimeContextManager = {
      * Active Search - Let AI characters actively search for anything
      */
     performSearch: async (query: string, apiKey: string): Promise<{ success: boolean; results: SearchResult[]; message: string }> => {
-        if (!query || !apiKey) {
-            return { success: false, results: [], message: '缺少搜索关键词或API Key' };
-        }
-
-        try {
-            // 使用自建的 Cloudflare Worker 代理
-            const workerUrl = `${getProxyWorkerUrl()}/search?q=${encodeURIComponent(query)}&count=5`;
-
-            const response = await fetch(workerUrl, {
-                method: 'GET',
-                headers: {
-                    'Accept': 'application/json',
-                    'X-Brave-API-Key': apiKey
-                }
-            });
-
-            // 先读取 text，避免非 JSON 响应直接 crash
-            const text = await response.text();
-
-            // 非 2xx 直接抛错
-            if (!response.ok) {
-                console.error('Search API error:', response.status, text);
-                // 尝试解析错误信息
-                try {
-                    const errJson = JSON.parse(text);
-                    return { success: false, results: [], message: `搜索失败: ${errJson.error || response.status}` };
-                } catch {
-                    return { success: false, results: [], message: `搜索失败: ${response.status}` };
-                }
-            }
-
-            // 解析 JSON
-            let data;
-            try {
-                data = JSON.parse(text);
-            } catch (e) {
-                console.error('Search response not JSON:', text.slice(0, 200));
-                return { success: false, results: [], message: '搜索返回格式错误' };
-            }
-
-            // Brave Search API 返回结构
-            if (data.web?.results && data.web.results.length > 0) {
-                const results: SearchResult[] = data.web.results.slice(0, 5).map((item: any) => ({
-                    title: item.title,
-                    description: item.description || '',
-                    url: item.url
-                }));
-                return { success: true, results, message: '搜索成功' };
-            }
-
-            return { success: false, results: [], message: '没有找到相关结果' };
-        } catch (e: any) {
-            console.error('Search failed:', e);
-            return { success: false, results: [], message: `搜索出错: ${e.message}` };
-        }
+        return performSearchCore(query, apiKey);
     }
 };
 
@@ -688,13 +644,6 @@ export interface NotionDiaryEntry {
     date?: string;
     tags?: string[];
     characterName?: string;  // 角色名，用于区分不同角色的日记
-}
-
-export interface DiaryPreview {
-    id: string;
-    title: string;
-    date: string;
-    url: string;
 }
 
 export const NotionManager = {
@@ -876,61 +825,7 @@ export const NotionManager = {
         characterName: string,
         date: string  // YYYY-MM-DD
     ): Promise<{ success: boolean; entries: DiaryPreview[]; message: string }> => {
-        try {
-            const response = await fetch(`${NotionManager.WORKER_URL}/notion/query`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Notion-API-Key': apiKey
-                },
-                body: JSON.stringify({
-                    database_id: databaseId,
-                    filter: {
-                        and: [
-                            {
-                                property: 'Name',
-                                title: { starts_with: `[${characterName}]` }
-                            },
-                            {
-                                property: 'Date',
-                                date: { equals: date }
-                            }
-                        ]
-                    },
-                    sorts: [{ property: 'Date', direction: 'descending' }],
-                    page_size: 10
-                })
-            });
-
-            const text = await response.text();
-
-            if (!response.ok) {
-                console.error('Query diary by date failed:', response.status, text);
-                return { success: false, entries: [], message: `查询失败: ${response.status}` };
-            }
-
-            const data = JSON.parse(text);
-
-            if (!data.results || data.results.length === 0) {
-                return { success: true, entries: [], message: `没有找到 ${date} 的日记` };
-            }
-
-            const entries: DiaryPreview[] = data.results.map((page: any) => {
-                const title = page.properties?.Name?.title?.[0]?.plain_text || '无标题';
-                const cleanTitle = title.replace(/^\[.*?\]\s*/, '');
-                return {
-                    id: page.id,
-                    title: cleanTitle,
-                    date: page.properties?.Date?.date?.start || '',
-                    url: page.url
-                };
-            });
-
-            return { success: true, entries, message: `找到 ${entries.length} 篇日记` };
-        } catch (e: any) {
-            console.error('Get diary by date failed:', e);
-            return { success: false, entries: [], message: `查询失败: ${e.message}` };
-        }
+        return notionGetDiaryByDate(apiKey, databaseId, characterName, date);
     },
 
     /**
@@ -941,34 +836,7 @@ export const NotionManager = {
         apiKey: string,
         pageId: string
     ): Promise<{ success: boolean; content: string; message: string }> => {
-        try {
-            const response = await fetch(`${NotionManager.WORKER_URL}/notion/blocks/${pageId}`, {
-                method: 'GET',
-                headers: {
-                    'X-Notion-API-Key': apiKey
-                }
-            });
-
-            const text = await response.text();
-
-            if (!response.ok) {
-                console.error('Read diary content failed:', response.status, text);
-                return { success: false, content: '', message: `读取失败: ${response.status}` };
-            }
-
-            const data = JSON.parse(text);
-
-            if (!data.results || data.results.length === 0) {
-                return { success: true, content: '（空白日记）', message: '日记内容为空' };
-            }
-
-            // 将 Notion blocks 转换为可读文本
-            const content = notionBlocksToText(data.results);
-            return { success: true, content, message: '读取成功' };
-        } catch (e: any) {
-            console.error('Read diary content failed:', e);
-            return { success: false, content: '', message: `读取失败: ${e.message}` };
-        }
+        return notionReadDiaryContent(apiKey, pageId);
     },
 
     /**
@@ -1053,58 +921,7 @@ export const NotionManager = {
         keyword: string,
         limit: number = 5
     ): Promise<{ success: boolean; entries: DiaryPreview[]; message: string }> => {
-        try {
-            const response = await fetch(`${NotionManager.WORKER_URL}/notion/query`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Notion-API-Key': apiKey
-                },
-                body: JSON.stringify({
-                    database_id: notesDatabaseId,
-                    filter: {
-                        property: 'Name',
-                        title: { contains: keyword }
-                    },
-                    sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
-                    page_size: limit
-                })
-            });
-
-            const text = await response.text();
-
-            if (!response.ok) {
-                return { success: false, entries: [], message: `搜索失败: ${response.status}` };
-            }
-
-            const data = JSON.parse(text);
-
-            if (!data.results || data.results.length === 0) {
-                return { success: true, entries: [], message: `没有找到关于"${keyword}"的笔记` };
-            }
-
-            const entries: DiaryPreview[] = data.results.map((page: any) => {
-                const title = page.properties?.Name?.title?.[0]?.plain_text
-                    || page.properties?.['名称']?.title?.[0]?.plain_text
-                    || page.properties?.Title?.title?.[0]?.plain_text
-                    || '无标题';
-                const date = page.properties?.Date?.date?.start
-                    || page.properties?.['日期']?.date?.start
-                    || page.last_edited_time?.split('T')[0]
-                    || '';
-                return {
-                    id: page.id,
-                    title,
-                    date,
-                    url: page.url || ''
-                };
-            });
-
-            return { success: true, entries, message: `找到 ${entries.length} 篇笔记` };
-        } catch (e: any) {
-            console.error('Search user notes failed:', e);
-            return { success: false, entries: [], message: `搜索失败: ${e.message}` };
-        }
+        return notionSearchUserNotes(apiKey, notesDatabaseId, keyword, limit);
     }
 };
 
@@ -1539,65 +1356,6 @@ function normalizeBlocksForNotion(blocks: any[]): any[] {
 // ============================================
 // Notion Blocks → 可读文本 转换器
 // ============================================
-function notionBlocksToText(blocks: any[]): string {
-    const lines: string[] = [];
-
-    for (const block of blocks) {
-        const type = block.type;
-
-        if (type === 'divider') {
-            lines.push('---');
-            continue;
-        }
-
-        // 提取 rich_text
-        const richText = block[type]?.rich_text;
-        if (!richText) continue;
-
-        const text = richText.map((rt: any) => rt.plain_text || rt.text?.content || '').join('');
-        if (!text.trim()) continue;
-
-        switch (type) {
-            case 'heading_1':
-                lines.push(`# ${text}`);
-                break;
-            case 'heading_2':
-                lines.push(`## ${text}`);
-                break;
-            case 'heading_3':
-                lines.push(`### ${text}`);
-                break;
-            case 'quote':
-                lines.push(`> ${text}`);
-                break;
-            case 'callout':
-                const emoji = block.callout?.icon?.emoji || '📌';
-                lines.push(`${emoji} ${text}`);
-                break;
-            case 'bulleted_list_item':
-                lines.push(`- ${text}`);
-                break;
-            case 'numbered_list_item':
-                lines.push(`· ${text}`);
-                break;
-            case 'to_do':
-                const checked = block.to_do?.checked ? '✅' : '⬜';
-                lines.push(`${checked} ${text}`);
-                break;
-            case 'toggle':
-                lines.push(`▶ ${text}`);
-                break;
-            case 'code':
-                lines.push(`\`\`\`\n${text}\n\`\`\``);
-                break;
-            default:
-                lines.push(text);
-        }
-    }
-
-    return lines.join('\n');
-}
-
 // ============================================
 // 飞书多维表格 集成模块 (中国区 Notion 替代)
 // ============================================
@@ -1609,16 +1367,6 @@ export interface FeishuDiaryEntry {
     date?: string;
     characterName?: string;
 }
-
-export interface FeishuDiaryPreview {
-    recordId: string;
-    title: string;
-    date: string;
-    content: string;
-}
-
-// 飞书 token 缓存
-let feishuTokenCache: { token: string; expiresAt: number } | null = null;
 
 /**
  * 飞书日记内容美化格式化器
@@ -1744,41 +1492,7 @@ export const FeishuManager = {
      * 获取飞书 tenant_access_token（通过 Worker 代理，带缓存）
      */
     getToken: async (appId: string, appSecret: string): Promise<{ success: boolean; token: string; message: string }> => {
-        // 检查缓存是否有效 (提前5分钟过期)
-        if (feishuTokenCache && feishuTokenCache.expiresAt > Date.now() + 5 * 60 * 1000) {
-            return { success: true, token: feishuTokenCache.token, message: '使用缓存token' };
-        }
-
-        try {
-            const response = await fetch(`${FeishuManager.WORKER_URL}/feishu/token`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ app_id: appId, app_secret: appSecret })
-            });
-
-            const text = await response.text();
-            if (!response.ok) {
-                try {
-                    const errJson = JSON.parse(text);
-                    return { success: false, token: '', message: `获取token失败: ${errJson.msg || errJson.error || response.status}` };
-                } catch {
-                    return { success: false, token: '', message: `获取token失败: ${response.status}` };
-                }
-            }
-
-            const data = JSON.parse(text);
-            if (data.code !== 0) {
-                return { success: false, token: '', message: `飞书错误: ${data.msg || '未知错误'}` };
-            }
-
-            const token = data.tenant_access_token;
-            const expire = (data.expire || 7200) * 1000; // 转为毫秒
-            feishuTokenCache = { token, expiresAt: Date.now() + expire };
-
-            return { success: true, token, message: 'Token获取成功' };
-        } catch (e: any) {
-            return { success: false, token: '', message: `网络错误: ${e.message}` };
-        }
+        return feishuGetToken(appId, appSecret);
     },
 
     /**
@@ -1985,67 +1699,7 @@ export const FeishuManager = {
         characterName: string,
         date: string  // YYYY-MM-DD
     ): Promise<{ success: boolean; entries: FeishuDiaryPreview[]; message: string }> => {
-        try {
-            const tokenResult = await FeishuManager.getToken(appId, appSecret);
-            if (!tokenResult.success) {
-                return { success: false, entries: [], message: tokenResult.message };
-            }
-
-            const dateTimestamp = new Date(date).getTime();
-            const nextDayTimestamp = dateTimestamp + 24 * 60 * 60 * 1000;
-
-            const response = await fetch(`${FeishuManager.WORKER_URL}/feishu/bitable/${baseId}/${tableId}/records/search`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Feishu-Token': tokenResult.token
-                },
-                body: JSON.stringify({
-                    filter: {
-                        conjunction: 'and',
-                        conditions: [
-                            { field_name: '角色', operator: 'is', value: [characterName] },
-                            { field_name: '日期', operator: 'isGreater', value: [dateTimestamp - 1] },
-                            { field_name: '日期', operator: 'isLess', value: [nextDayTimestamp] }
-                        ]
-                    },
-                    sort: [{ field_name: '日期', desc: true }],
-                    page_size: 10
-                })
-            });
-
-            const text = await response.text();
-            if (!response.ok) {
-                return { success: false, entries: [], message: `查询失败: ${response.status}` };
-            }
-
-            const data = JSON.parse(text);
-            if (data.code !== 0) {
-                return { success: false, entries: [], message: `飞书错误: ${data.msg || '查询失败'}` };
-            }
-
-            const items = data.data?.items || [];
-            if (items.length === 0) {
-                return { success: true, entries: [], message: `没有找到 ${date} 的日记` };
-            }
-
-            const entries: FeishuDiaryPreview[] = items.map((item: any) => {
-                const fields = item.fields || {};
-                const rawTitle = (Array.isArray(fields['标题']) ? fields['标题']?.[0]?.text : fields['标题']) || '无标题';
-                const cleanTitle = String(rawTitle).replace(/^\[.*?\]\s*/, '');
-
-                return {
-                    recordId: item.record_id,
-                    title: cleanTitle,
-                    date: date,
-                    content: (Array.isArray(fields['内容']) ? fields['内容']?.[0]?.text : fields['内容']) || ''
-                };
-            });
-
-            return { success: true, entries, message: `找到 ${entries.length} 篇日记` };
-        } catch (e: any) {
-            return { success: false, entries: [], message: `查询失败: ${e.message}` };
-        }
+        return feishuGetDiaryByDate(appId, appSecret, baseId, tableId, characterName, date);
     },
 
     /**
