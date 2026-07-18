@@ -12,10 +12,12 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  buildXhsSessionPayload,
   createFireSessionState,
   processLLMRound,
   type PushBuildInput,
 } from './agentic';
+import type { XhsNote } from '../../../utils/realtimeContext';
 
 const build: PushBuildInput = {
   contactName: '小鹿',
@@ -112,8 +114,8 @@ describe('processLLMRound — 数据标签 tool-request 与跨轮累积', () => 
 
     const round1 = processLLMRound(state, '[[ACTION:POKE]]在吗在吗。[[SEARCH: 今晚 流星雨]]', build);
     expect(round1.decision).toBe('tool-request');
-    expect(state.directives).toEqual([{ type: 'poke' }]);
-    expect(state.narrations).toEqual(['在吗在吗。']);
+    // 旁白存原始文本（副作用标签保留），finish 时拼回全文统一扫。
+    expect(state.narrations).toEqual(['[[ACTION:POKE]]在吗在吗。']);
 
     const round2 = processLLMRound(state, '今晚十点有流星雨！[[ACTION:ADD_EVENT|看流星雨|今晚10点]]', build);
     expect(round2.decision).toBe('finish');
@@ -152,5 +154,154 @@ describe('processLLMRound — directive-only 边界', () => {
     expect(round2.decision).toBe('finish');
     if (round2.decision !== 'finish') return;
     expect(round2.pushPayloads.map((p) => p.message)).toEqual(['我查查。']);
+  });
+});
+
+describe('processLLMRound — 副作用标签块被数据标签劈成两轮（实机回归）', () => {
+  it('长形态日记写一半去 RECALL：finish 拼回全文，日记成 directive、裸标签不漏进 push', () => {
+    const state = createFireSessionState();
+
+    // round 1：日记开了头，中途想查记忆 → 数据标签把文本劈开。
+    const round1 = processLLMRound(
+      state,
+      '[[DIARY_START: 专属点读机 | 傲娇]]\n今天那家伙又缠着我。[[RECALL: 2026-06]]',
+      build,
+    );
+    expect(round1.decision).toBe('tool-request');
+
+    // round 2：日记收尾 + 正文。
+    const round2 = processLLMRound(state, '……才、才不是想他！\n[[DIARY_END]]\n写完了，哼。', build);
+    expect(round2.decision).toBe('finish');
+    if (round2.decision !== 'finish') return;
+
+    // 日记整块成了 directive（title/mood/跨轮内容都在），挂最后一条 push。
+    const last = round2.pushPayloads[round2.pushPayloads.length - 1];
+    const directives = (last.metadata as any).directives;
+    expect(directives).toHaveLength(1);
+    expect(directives[0].type).toBe('notion_write_diary');
+    expect(directives[0].title).toBe('专属点读机');
+    expect(directives[0].mood).toBe('傲娇');
+    expect(directives[0].content).toContain('今天那家伙又缠着我。');
+    expect(directives[0].content).toContain('……才、才不是想他！');
+
+    // 正文 push 里不再出现孤立的 DIARY_START / DIARY_END 裸标签。
+    for (const p of round2.pushPayloads) {
+      expect(String(p.message)).not.toContain('DIARY_START');
+      expect(String(p.message)).not.toContain('DIARY_END');
+    }
+    expect(round2.pushPayloads.map((p) => p.message)).toContain('写完了，哼。');
+  });
+
+  it('飞书长形态同款劈裂也能拼回', () => {
+    const state = createFireSessionState();
+    processLLMRound(state, '[[FS_DIARY_START: 今日份|开心]]\n上半段。[[SEARCH: 流星雨]]', build);
+    const round2 = processLLMRound(state, '下半段。\n[[FS_DIARY_END]]', build);
+    expect(round2.decision).toBe('finish');
+    if (round2.decision !== 'finish') return;
+    const last = round2.pushPayloads[round2.pushPayloads.length - 1];
+    const directives = (last.metadata as any).directives;
+    expect(directives?.[0]?.type).toBe('feishu_write_diary');
+    expect(directives?.[0]?.content).toContain('上半段。');
+    expect(directives?.[0]?.content).toContain('下半段。');
+  });
+});
+
+// ─── XHS 笔记随 push 带回（amsg2 round 1 在 worker 跑，客户端缺笔记缓冲） ────────
+
+const makeNote = (n: number, descLen = 10): XhsNote => ({
+  noteId: `note-${n}`,
+  title: `标题${n}`,
+  desc: 'd'.repeat(descLen),
+  likes: n,
+  author: `作者${n}`,
+  authorId: `author-${n}`,
+  xsecToken: `tok-${n}`,
+  coverUrl: `https://img.example.com/${n}.jpg`,
+});
+
+describe('buildXhsSessionPayload — 按 directive 引用挑选最小数据包', () => {
+  const notes = [makeNote(1), makeNote(2), makeNote(3)];
+
+  it('xhs_share 的 idx（1-based）→ 对应笔记；未引用的不带', () => {
+    const payload = buildXhsSessionPayload([{ type: 'xhs_share', idx: 2 }], notes, []);
+    expect(payload).not.toBeNull();
+    expect(payload!.notes).toHaveLength(1);
+    expect(payload!.notes[0].idx).toBe(2);
+    expect(payload!.notes[0].note.noteId).toBe('note-2');
+  });
+
+  it('越界 / 编造的序号取不到笔记 → 跳过；全落空且无 token → null', () => {
+    const payload = buildXhsSessionPayload([{ type: 'xhs_share', idx: 14 }], notes, []);
+    expect(payload).toBeNull();
+  });
+
+  it('desc 截断到 120 字符（防 web push ~4KB payload 超限）', () => {
+    const payload = buildXhsSessionPayload(
+      [{ type: 'xhs_share', idx: 1 }],
+      [makeNote(1, 500)],
+      [],
+    );
+    expect(payload!.notes[0].note.desc).toHaveLength(120);
+    // 原数组的笔记不能被就地改掉（worker 内同 fire 后续还会用）。
+    expect(notes[0].desc).toHaveLength(10);
+  });
+
+  it('点赞/评论引用的 noteId → 只带对应 xsecToken', () => {
+    const payload = buildXhsSessionPayload(
+      [{ type: 'xhs_like', noteId: 'note-3' }],
+      notes,
+      [['note-1', 'tok-1'], ['note-3', 'tok-3']],
+    );
+    expect(payload!.notes).toHaveLength(0);
+    expect(payload!.xsecTokens).toEqual([['note-3', 'tok-3']]);
+  });
+
+  it('无任何 XHS directive → null（poke 等副作用不触发带笔记）', () => {
+    expect(buildXhsSessionPayload([{ type: 'poke' }], notes, [['note-1', 'tok-1']])).toBeNull();
+  });
+
+  it('最多带 4 张（share 刷屏时保 push 送达优先）', () => {
+    const many = [1, 2, 3, 4, 5, 6].map((n) => makeNote(n));
+    const payload = buildXhsSessionPayload(
+      [1, 2, 3, 4, 5, 6].map((idx) => ({ type: 'xhs_share' as const, idx })),
+      many,
+      [],
+    );
+    expect(payload!.notes).toHaveLength(4);
+  });
+});
+
+describe('processLLMRound — metadata.xhsSession 挂载', () => {
+  it('share 引用的笔记与 directives 同挂最后一条 push，其余 push 不挂', () => {
+    const state = createFireSessionState();
+    processLLMRound(state, '我去逛逛。[[XHS_BROWSE]]', build);
+    const round2 = processLLMRound(state, '看到个好玩的！\n[[XHS_SHARE: 1]]', {
+      ...build,
+      xhsNotes: [makeNote(1)],
+      xhsXsecTokens: [['note-1', 'tok-1']],
+    });
+    expect(round2.decision).toBe('finish');
+    if (round2.decision !== 'finish') return;
+    const last = round2.pushPayloads[round2.pushPayloads.length - 1];
+    expect((last.metadata as any).directives).toEqual([{ type: 'xhs_share', idx: 1 }]);
+    expect((last.metadata as any).xhsSession.notes).toEqual([
+      { idx: 1, note: makeNote(1) },
+    ]);
+    for (const p of round2.pushPayloads.slice(0, -1)) {
+      expect((p.metadata as any).xhsSession).toBeUndefined();
+    }
+  });
+
+  it('没有 XHS 引用时 metadata 不多挂 xhsSession 键（形状回归）', () => {
+    const decision = processLLMRound(
+      createFireSessionState(),
+      '[[ACTION:POKE]]在吗',
+      { ...build, xhsNotes: [makeNote(1)], xhsXsecTokens: [['note-1', 'tok-1']] },
+    );
+    expect(decision.decision).toBe('finish');
+    if (decision.decision !== 'finish') return;
+    const last = decision.pushPayloads[decision.pushPayloads.length - 1];
+    expect((last.metadata as any).directives).toEqual([{ type: 'poke' }]);
+    expect((last.metadata as any).xhsSession).toBeUndefined();
   });
 });

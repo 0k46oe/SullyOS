@@ -364,7 +364,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.3_@neondatabase+serverless@1.1.0/node_modules/@rei-standard/amsg-server/dist/chunk-PPPWETND.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2_fbee0734430d2532ec27b8809bde39b2/node_modules/@rei-standard/amsg-server/dist/chunk-PPPWETND.mjs
 function isValidISO8601(dateString) {
   const date = new Date(dateString);
   return date instanceof Date && !isNaN(date.getTime());
@@ -2685,6 +2685,32 @@ var parseToolConfig = (value) => {
   }
 };
 
+// utils/amsgStateChunks.ts
+var AMSG_STATE_VALUE_SAFE_BYTES = 196 * 1024;
+var amsgStateChunkKey = (key, index) => `${key}.${index}`;
+var utf83 = new TextEncoder();
+var parseChunkMeta = (value) => {
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === "object" && parsed.__chunked === 1 && Number.isInteger(parsed.chunks) && parsed.chunks > 0) {
+      return parsed;
+    }
+  } catch {
+  }
+  return null;
+};
+function reassembleStateValue(root, getChunk) {
+  const meta = parseChunkMeta(root);
+  if (!meta) return root;
+  const parts = [];
+  for (let i = 0; i < meta.chunks; i++) {
+    const piece = getChunk(i);
+    if (typeof piece !== "string") return null;
+    parts.push(piece);
+  }
+  return parts.join("");
+}
+
 // utils/realtimeFetchCore.ts
 var performSearch = async (query, apiKey) => {
   if (!query || !apiKey) {
@@ -4008,12 +4034,12 @@ async function dispatchAgenticTool(toolName, args, ctx) {
 // node_modules/.pnpm/@rei-standard+amsg-instant@0.10.0/node_modules/@rei-standard/amsg-instant/dist/index.mjs
 var TEXT_ENCODER2 = new TextEncoder();
 var TEXT_DECODER2 = new TextDecoder("utf-8", { fatal: false });
-function utf83(str) {
+function utf84(str) {
   return TEXT_ENCODER2.encode(String(str));
 }
-var KEY_INFO_PREFIX2 = utf83("WebPush: info\0");
-var CEK_INFO2 = utf83("Content-Encoding: aes128gcm\0");
-var NONCE_INFO2 = utf83("Content-Encoding: nonce\0");
+var KEY_INFO_PREFIX2 = utf84("WebPush: info\0");
+var CEK_INFO2 = utf84("Content-Encoding: aes128gcm\0");
+var NONCE_INFO2 = utf84("Content-Encoding: nonce\0");
 var VAPID_TOKEN_LIFETIME2 = 12 * 3600;
 var PUSH_PAYLOAD_BYTE_ENCODER = new TextEncoder();
 function segmentTextWithProtectedBlocks(text, options) {
@@ -4489,37 +4515,59 @@ function classifyLLMOutput(text) {
 }
 
 // worker/amsg/src/agentic.ts
-var createFireSessionState = () => ({ narrations: [], directives: [] });
+var createFireSessionState = () => ({ narrations: [] });
+var XHS_DESC_MAX = 120;
+var XHS_NOTES_MAX = 4;
+function buildXhsSessionPayload(directives, notes, xsecTokens) {
+  if (directives.length === 0) return null;
+  const sharedIdx = /* @__PURE__ */ new Set();
+  const refNoteIds = /* @__PURE__ */ new Set();
+  for (const d of directives) {
+    if (d.type === "xhs_share") sharedIdx.add(d.idx);
+    else if (d.type === "xhs_like" || d.type === "xhs_fav") refNoteIds.add(d.noteId);
+    else if (d.type === "xhs_comment" || d.type === "xhs_reply") refNoteIds.add(d.noteId);
+  }
+  if (sharedIdx.size === 0 && refNoteIds.size === 0) return null;
+  const pickedNotes = [];
+  for (const idx of [...sharedIdx].sort((a, b) => a - b)) {
+    const note = idx >= 1 ? notes?.[idx - 1] : void 0;
+    if (!note) continue;
+    pickedNotes.push({ idx, note: { ...note, desc: (note.desc || "").slice(0, XHS_DESC_MAX) } });
+    if (pickedNotes.length >= XHS_NOTES_MAX) break;
+  }
+  const pickedTokens = (xsecTokens ?? []).filter(([noteId]) => refNoteIds.has(noteId));
+  if (pickedNotes.length === 0 && pickedTokens.length === 0) return null;
+  return { notes: pickedNotes, xsecTokens: pickedTokens };
+}
 function processLLMRound(state, llmOutputText, build) {
   const result = classifyLLMOutput(llmOutputText);
   if (result.kind === "tool-request") {
-    if (result.prefix) {
-      const prefixScan = classifyLLMOutput(result.prefix);
-      if (prefixScan.kind === "finish") {
-        if (prefixScan.cleanedText) state.narrations.push(prefixScan.cleanedText);
-        state.directives.push(...prefixScan.directives);
-      }
-    }
+    if (result.prefix.trim()) state.narrations.push(result.prefix);
     return { decision: "tool-request", toolCalls: result.toolCalls };
   }
-  const directives = [...state.directives, ...result.directives];
-  const segments = [...state.narrations, result.cleanedText].filter((part) => part.trim().length > 0).flatMap((part) => sanitizeIntoSegments(part));
+  const fullText = [...state.narrations, llmOutputText].filter((part) => part.trim().length > 0).join("\n");
+  const finalScan = classifyLLMOutput(fullText);
+  const cleanedText = finalScan.kind === "finish" ? finalScan.cleanedText : finalScan.prefix;
+  const directives = finalScan.kind === "finish" ? finalScan.directives : [];
+  const xhsSession = buildXhsSessionPayload(directives, build.xhsNotes, build.xhsXsecTokens);
+  const finishMeta = directives.length > 0 ? { directives, ...xhsSession ? { xhsSession } : {} } : void 0;
+  const segments = sanitizeIntoSegments(cleanedText);
   if (segments.length === 0) {
-    if (directives.length === 0) return { decision: "skip-push" };
+    if (!finishMeta) return { decision: "skip-push" };
     return {
       decision: "finish",
-      pushPayloads: [buildScheduledPush("", build, directives)]
+      pushPayloads: [buildScheduledPush("", build, finishMeta)]
     };
   }
   const lastIdx = segments.length - 1;
   return {
     decision: "finish",
     pushPayloads: segments.map(
-      (seg, i) => buildScheduledPush(seg.raw, build, i === lastIdx ? directives : void 0, seg.sanitized)
+      (seg, i) => buildScheduledPush(seg.raw, build, i === lastIdx ? finishMeta : void 0, seg.sanitized)
     )
   };
 }
-function buildScheduledPush(message, build, directives, bannerBody) {
+function buildScheduledPush(message, build, extraMeta, bannerBody) {
   const title = `\u6765\u81EA ${build.contactName}`;
   return {
     messageKind: "content",
@@ -4531,7 +4579,7 @@ function buildScheduledPush(message, build, directives, bannerBody) {
     avatarUrl: build.avatarUrl,
     messageSubtype: "chat",
     taskId: build.taskId,
-    metadata: directives && directives.length > 0 ? { ...build.metadata, directives } : build.metadata,
+    metadata: extraMeta ? { ...build.metadata, ...extraMeta } : build.metadata,
     ...bannerBody !== void 0 ? { notification: { title, body: bannerBody } } : {}
   };
 }
@@ -4588,19 +4636,32 @@ var amsgHooks = {
     const charRows = await ctx.readState(amsgStateNamespace(charId));
     const packRow = charRows.find((r) => r.key === AMSG_FIRE_PACK_KEY);
     if (!packRow) return null;
-    const pack = parseFirePack(packRow.value);
+    const packValue = reassembleStateValue(
+      packRow.value,
+      (i) => charRows.find((r) => r.key === amsgStateChunkKey(AMSG_FIRE_PACK_KEY, i))?.value
+    );
+    const pack = packValue ? parseFirePack(packValue) : null;
     if (!pack) return null;
     if (ctx.task.id != null) {
       if (fireStash.size >= FIRE_STASH_MAX) fireStash.clear();
       let toolConfigRaw;
       try {
         const globalRows = await ctx.readState(AMSG_GLOBAL_NAMESPACE);
-        toolConfigRaw = globalRows.find((r) => r.key === AMSG_TOOL_CONFIG_KEY)?.value;
+        const configRow = globalRows.find((r) => r.key === AMSG_TOOL_CONFIG_KEY);
+        toolConfigRaw = configRow ? reassembleStateValue(
+          configRow.value,
+          (i) => globalRows.find((r) => r.key === amsgStateChunkKey(AMSG_TOOL_CONFIG_KEY, i))?.value
+        ) ?? void 0 : void 0;
       } catch (error) {
         console.warn("[amsg:agentic] \u8BFB tool_config \u5931\u8D25\uFF0C\u5DE5\u5177\u6309\u672A\u914D\u7F6E\u7EE7\u7EED", error);
       }
+      const toolPackRow = charRows.find((r) => r.key === AMSG_TOOL_PACK_KEY);
+      const toolPackRaw = toolPackRow ? reassembleStateValue(
+        toolPackRow.value,
+        (i) => charRows.find((r) => r.key === amsgStateChunkKey(AMSG_TOOL_PACK_KEY, i))?.value
+      ) ?? void 0 : void 0;
       const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(
-        charRows.find((r) => r.key === AMSG_TOOL_PACK_KEY)?.value,
+        toolPackRaw,
         toolConfigRaw,
         typeof ctx.task.contactName === "string" ? ctx.task.contactName : ""
       );
@@ -4625,7 +4686,12 @@ var amsgHooks = {
       avatarUrl: ctx.avatarUrl ?? null,
       taskId,
       messageType,
-      metadata: ctx.metadata
+      metadata: ctx.metadata,
+      // round 1 XHS 工具抓到的笔记 / xsecToken 快照：finish 时按 directive 引用
+      // 挑选后随最后一条 push 带回客户端（客户端离线跑不了 round 1，缺这份
+      // [[XHS_SHARE]] / 点赞 / 评论重放必然 available:0 掉卡片）。
+      xhsNotes: stash?.toolCtx.lastXhsNotesRef?.current,
+      xhsXsecTokens: stash?.toolCtx.xhsCaches ? Array.from(stash.toolCtx.xhsCaches.xsecTokenCache.entries()) : void 0
     });
     if (decision.decision === "tool-request") {
       console.log("[amsg:agentic]", {

@@ -183,6 +183,29 @@ const processInboxMessageWithPostProcessing = async (message: ActiveMsg2InboxMes
     }
   }
 
+  // amsg2 满血 v2: round 1 的 XHS 工具在 worker 里跑, 客户端没有 instantToolRunner 那次
+  // saveXhsSessionNotes 落库. worker 把 directive 引用到的笔记/xsecToken 随最后一条 push 的
+  // metadata.xhsSession 带回来 (稀疏 {idx, note}, idx 1-based, 见 worker/amsg/src/agentic.ts
+  // buildXhsSessionPayload), 这里重建成按序号取卡的数组先落库, 下面的恢复块照旧读回内存单例
+  // ——与 instant 路径共用同一条恢复路, XHS_SHARE / 点赞 / 评论重放不再 available:0.
+  const xhsSession = message.metadata && (message.metadata as any).xhsSession;
+  if (sessionId && xhsSession && Array.isArray(xhsSession.notes) && xhsSession.notes.length > 0) {
+    try {
+      const maxIdx = Math.max(...xhsSession.notes.map((e: any) => Number(e?.idx) || 0));
+      const rebuilt: Array<XhsNote | null> = new Array(Math.max(0, maxIdx)).fill(null);
+      for (const entry of xhsSession.notes) {
+        const i = Number(entry?.idx);
+        if (Number.isInteger(i) && i >= 1 && entry?.note) rebuilt[i - 1] = entry.note as XhsNote;
+      }
+      await ActiveMsgStore.saveXhsSessionNotes(sessionId, {
+        notes: rebuilt as XhsNote[],
+        xsecTokens: Array.isArray(xhsSession.xsecTokens) ? xhsSession.xsecTokens : [],
+      });
+    } catch (e) {
+      console.warn('[ActiveMsg] persist xhsSession from push failed', sessionId, e);
+    }
+  }
+
   // 恢复本 session round 1 工具抓到的 XHS 笔记: instantToolRunner 落了库, 这里读回内存单例.
   // 跨 SW 唤醒 / 页面回收后内存 ref 被清空, 不恢复的话 round 2 的 [[XHS_SHARE]] / 评论 / 点赞
   // 会因 lastXhsNotesRef 为空而静默掉卡片. 持久化优先于内存 (同 session 时两者等价, 重载后只剩持久化).
