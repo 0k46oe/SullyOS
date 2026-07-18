@@ -17,6 +17,7 @@ import {
   amsgStateNamespace,
   renderFirePack,
 } from './amsgFirePack';
+import { buildChunkedStateEntries } from './amsgStateChunks';
 import {
   AMSG_GLOBAL_NAMESPACE,
   AMSG_TOOL_CONFIG_KEY,
@@ -511,26 +512,19 @@ export const ActiveMsgClient = {
     if (firePack) {
       try {
         const now = Date.now();
+        // 大值走分块（<key>.N 子条目 + 根 meta，worker 拼回）：服务端单条 200KB 上限
+        // 不再逼我们裁内容，胖角色的完整角色卡/世界书/最近对话原样上云。
         await client.putClientState([
-          {
-            namespace: amsgStateNamespace(char.id),
-            key: AMSG_FIRE_PACK_KEY,
-            value: JSON.stringify(firePack),
-            updatedAt: now,
-          },
+          ...buildChunkedStateEntries(
+            amsgStateNamespace(char.id), AMSG_FIRE_PACK_KEY, JSON.stringify(firePack), now,
+          ),
           // v2 服务端工具循环的数据（recall 月度总结 / 工具凭据），与 fire_pack 同批上云。
-          {
-            namespace: amsgStateNamespace(char.id),
-            key: AMSG_TOOL_PACK_KEY,
-            value: JSON.stringify(buildToolPack(char)),
-            updatedAt: now,
-          },
-          {
-            namespace: AMSG_GLOBAL_NAMESPACE,
-            key: AMSG_TOOL_CONFIG_KEY,
-            value: JSON.stringify(buildToolConfig(realtimeConfig)),
-            updatedAt: now,
-          },
+          ...buildChunkedStateEntries(
+            amsgStateNamespace(char.id), AMSG_TOOL_PACK_KEY, JSON.stringify(buildToolPack(char)), now,
+          ),
+          ...buildChunkedStateEntries(
+            AMSG_GLOBAL_NAMESPACE, AMSG_TOOL_CONFIG_KEY, JSON.stringify(buildToolConfig(realtimeConfig)), now,
+          ),
         ]);
       } catch (error) {
         // 同步失败不影响任务本身：completePrompt 兜底仍冻结在任务里，worker 走老链路。
@@ -560,31 +554,25 @@ export const ActiveMsgClient = {
       const firePack = await buildFirePack(
         item.char, item.config, item.userProfile, item.groups, item.realtimeConfig,
       );
-      entries.push({
-        namespace: amsgStateNamespace(item.char.id),
-        key: AMSG_FIRE_PACK_KEY,
-        value: JSON.stringify(firePack),
-        updatedAt: now,
-      });
+      // 大值走分块（<key>.N 子条目 + 根 meta，worker 拼回）：服务端单条 200KB 上限
+      // 曾让胖角色整批 413，现在完整内容原样上云、一个字不裁。
+      entries.push(...buildChunkedStateEntries(
+        amsgStateNamespace(item.char.id), AMSG_FIRE_PACK_KEY, JSON.stringify(firePack), now,
+      ));
       // v2 服务端工具循环的角色侧数据（recall 月度总结 / XHS 开关 / 角色名）。
-      entries.push({
-        namespace: amsgStateNamespace(item.char.id),
-        key: AMSG_TOOL_PACK_KEY,
-        value: JSON.stringify(buildToolPack(item.char)),
-        updatedAt: now,
-      });
+      entries.push(...buildChunkedStateEntries(
+        amsgStateNamespace(item.char.id), AMSG_TOOL_PACK_KEY, JSON.stringify(buildToolPack(item.char)), now,
+      ));
     }
     // 工具凭据是全局一份：取批里第一份带 realtimeConfig 的快照。整批都没带就不写，
     // 避免把云端已有的可用凭据覆盖成全禁用。
     const withRealtime = items.find((item) => item.realtimeConfig);
     if (withRealtime) {
-      entries.push({
-        namespace: AMSG_GLOBAL_NAMESPACE,
-        key: AMSG_TOOL_CONFIG_KEY,
-        value: JSON.stringify(buildToolConfig(withRealtime.realtimeConfig)),
-        updatedAt: now,
-      });
+      entries.push(...buildChunkedStateEntries(
+        AMSG_GLOBAL_NAMESPACE, AMSG_TOOL_CONFIG_KEY, JSON.stringify(buildToolConfig(withRealtime.realtimeConfig)), now,
+      ));
     }
+
     const response = await client.putClientState(entries);
     if (!response?.success) {
       throw new Error(response?.error?.message || '上传云端状态失败。');

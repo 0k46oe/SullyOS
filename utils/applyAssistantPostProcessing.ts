@@ -1267,8 +1267,10 @@ export async function applyAssistantPostProcessing(
     const xhsShareMatches: Iterable<RegExpMatchArray> = disabledXhsSideEffects ? [] : aiContent.matchAll(/\[\[XHS_SHARE:\s*(\d+)\]\]/g);
     for (const shareMatch of xhsShareMatches) {
         const idx = parseInt(shareMatch[1]) - 1;
-        if (idx >= 0 && idx < lastXhsNotesRef.current.length) {
-            const note = lastXhsNotesRef.current[idx];
+        // 注意 truthy 判空: amsg2 push 带回的笔记数组是稀疏重建的 (只有 directive 引用到的
+        // 序号有值, 空洞是 null, 见 activeMsgRuntime 的 xhsSession 落库), 越界和空洞同罪.
+        const note = idx >= 0 && idx < lastXhsNotesRef.current.length ? lastXhsNotesRef.current[idx] : undefined;
+        if (note) {
             console.log('📕 [XHS] AI分享笔记卡片:', note.title);
             await DB.saveMessage({
                 charId: char.id,

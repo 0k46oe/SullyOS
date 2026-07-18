@@ -38,6 +38,7 @@ import {
   parseToolConfig,
   parseToolPack,
 } from '../../../utils/amsgToolPack';
+import { amsgStateChunkKey, reassembleStateValue } from '../../../utils/amsgStateChunks';
 import { dispatchAgenticTool, type AgenticToolCtx } from '../../../utils/agenticTools';
 import { setProxyWorkerUrlOverride } from '../../../utils/proxyWorker';
 import { XhsMcpClient } from '../../../utils/xhsMcpClient';
@@ -182,7 +183,13 @@ const amsgHooks = {
     const packRow = charRows.find((r) => r.key === AMSG_FIRE_PACK_KEY);
     if (!packRow) return null;
 
-    const pack = parseFirePack(packRow.value);
+    // 大 fire_pack 是分块上云的（根条目 = chunk meta，内容在 <key>.N 子条目里），
+    // 先拼回原文再 parse；缺块（同步被打断）→ null → 照旧退回冻结提示词。
+    const packValue = reassembleStateValue(
+      packRow.value,
+      (i) => charRows.find((r) => r.key === amsgStateChunkKey(AMSG_FIRE_PACK_KEY, i))?.value,
+    );
+    const pack = packValue ? parseFirePack(packValue) : null;
     if (!pack) return null;
 
     // 工具数据与 prompt 同拍装好，stash 给后面的 onLLMOutput / executeToolCalls。
@@ -193,12 +200,27 @@ const amsgHooks = {
       let toolConfigRaw: string | undefined;
       try {
         const globalRows = await ctx.readState(AMSG_GLOBAL_NAMESPACE);
-        toolConfigRaw = globalRows.find((r) => r.key === AMSG_TOOL_CONFIG_KEY)?.value;
+        const configRow = globalRows.find((r) => r.key === AMSG_TOOL_CONFIG_KEY);
+        toolConfigRaw = configRow
+          ? reassembleStateValue(
+              configRow.value,
+              (i) => globalRows.find((r) => r.key === amsgStateChunkKey(AMSG_TOOL_CONFIG_KEY, i))?.value,
+            ) ?? undefined
+          : undefined;
       } catch (error) {
         console.warn('[amsg:agentic] 读 tool_config 失败，工具按未配置继续', error);
       }
+      // tool_pack 同样可能分块（月度总结多的重角色），拼不回 → undefined → 工具按
+      // 数据未同步的正常失败路径回给 LLM。
+      const toolPackRow = charRows.find((r) => r.key === AMSG_TOOL_PACK_KEY);
+      const toolPackRaw = toolPackRow
+        ? reassembleStateValue(
+            toolPackRow.value,
+            (i) => charRows.find((r) => r.key === amsgStateChunkKey(AMSG_TOOL_PACK_KEY, i))?.value,
+          ) ?? undefined
+        : undefined;
       const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(
-        charRows.find((r) => r.key === AMSG_TOOL_PACK_KEY)?.value,
+        toolPackRaw,
         toolConfigRaw,
         typeof ctx.task.contactName === 'string' ? ctx.task.contactName : '',
       );
@@ -233,6 +255,13 @@ const amsgHooks = {
       taskId,
       messageType,
       metadata: ctx.metadata,
+      // round 1 XHS 工具抓到的笔记 / xsecToken 快照：finish 时按 directive 引用
+      // 挑选后随最后一条 push 带回客户端（客户端离线跑不了 round 1，缺这份
+      // [[XHS_SHARE]] / 点赞 / 评论重放必然 available:0 掉卡片）。
+      xhsNotes: stash?.toolCtx.lastXhsNotesRef?.current,
+      xhsXsecTokens: stash?.toolCtx.xhsCaches
+        ? Array.from(stash.toolCtx.xhsCaches.xsecTokenCache.entries())
+        : undefined,
     });
 
     if (decision.decision === 'tool-request') {
