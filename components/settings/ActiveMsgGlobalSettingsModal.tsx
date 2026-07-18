@@ -6,6 +6,15 @@ import { ActiveMsgStore, maskActiveMsgUserId } from '../../utils/activeMsgStore'
 import { buildCloudflareDashboardUrl } from '../../utils/instantPushClient';
 import { generateClientToken } from '../../utils/vapidGen';
 
+// 满血链路吃满这些 worker 特性（amsg-server 2.6.0-next.4+）。探测不到端点（老部署
+// 404 → null）或缺任何一项，就亮「重新部署」提示——worker 是粘贴部署的，不会自动更新。
+const REQUIRED_WORKER_FEATURES = [
+  'client-state',
+  'client-state-chunking',
+  'agentic-hooks',
+  'agentic-scratch',
+];
+
 interface ActiveMsgGlobalSettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -28,11 +37,25 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   // 「生成 Master Key」只在本次打开期间展示，前端不落盘——它是 worker 侧密钥，粘进 CF env 即可。
   const [generatedMasterKey, setGeneratedMasterKey] = useState('');
 
+  const [workerOutdated, setWorkerOutdated] = useState(false);
+
+  // 特性探测：确认「过老」（端点 404 → null，或缺关键特性）才亮牌；
+  // 探测本身失败（断网 / 密钥不对 / 没填地址）不亮，避免误报。
+  const probeWorkerCaps = async () => {
+    try {
+      const caps = await ActiveMsgClient.getCapabilities();
+      setWorkerOutdated(!caps || REQUIRED_WORKER_FEATURES.some((f) => !caps.features.includes(f)));
+    } catch {
+      setWorkerOutdated(false);
+    }
+  };
+
   const refresh = async () => {
     const nextConfig = await ActiveMsgClient.getGlobalConfig();
     const nextPushStatus = await ActiveMsgClient.getPushStatus();
     setConfig(nextConfig);
     setPushStatus(nextPushStatus);
+    void probeWorkerCaps();
   };
 
   useEffect(() => {
@@ -266,6 +289,13 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
               {isConnected ? '已连接' : '未连接'}
             </span>
           </div>
+
+          {workerOutdated ? (
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 text-xs leading-relaxed text-amber-700">
+              Worker 上跑的还是旧版代码，缺少新特性（大上下文云端存储、服务端工具循环等）。
+              去下方「部署 Worker」重新「复制 Worker 代码」，到 CF 后台粘贴覆盖并 Deploy 即可，已有数据和任务不受影响。
+            </div>
+          ) : null}
 
           <div>
             <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">

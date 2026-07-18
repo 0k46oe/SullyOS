@@ -38,7 +38,6 @@ import {
   parseToolConfig,
   parseToolPack,
 } from '../../../utils/amsgToolPack';
-import { amsgStateChunkKey, reassembleStateValue } from '../../../utils/amsgStateChunks';
 import { dispatchAgenticTool, type AgenticToolCtx } from '../../../utils/agenticTools';
 import { setProxyWorkerUrlOverride } from '../../../utils/proxyWorker';
 import { XhsMcpClient } from '../../../utils/xhsMcpClient';
@@ -59,7 +58,7 @@ interface Env {
   DB: unknown;
 }
 
-// ─── 满血 fire-time hooks（amsg-server 2.6.0-next.3+） ───────────────────────
+// ─── 满血 fire-time hooks（amsg-server 2.6.0-next.4+：含 ctx.scratch / 存储层大值分块） ───
 //
 // AI 任务到点不再吃排程时冻结的 completePrompt，而是读前端平时同步上来的
 // fire_pack（client_state 表，见 utils/amsgFirePack.ts + utils/amsgStateSync.ts），
@@ -90,6 +89,11 @@ interface FireCtx {
   userId: string;
   readState: (namespace: string) => Promise<Array<{ key: string; value: string }>>;
   now: Date;
+  /**
+   * 单次 fire 的宿主便签（amsg-server 2.6.0-next.4+）：与同一次 fire 每轮的
+   * sessionCtx.scratch 是同一个对象引用，fire 结束随调用栈丢弃，库不读不写。
+   */
+  scratch: Record<string, unknown>;
 }
 
 interface SessionCtx {
@@ -99,9 +103,10 @@ interface SessionCtx {
   contactName: string;
   avatarUrl?: string;
   metadata: Record<string, unknown>;
+  scratch?: Record<string, unknown>;
 }
 
-/** 一次 fire 的跨轮状态：工具执行上下文 + 旁白/副作用累积。key = sessionId。 */
+/** 一次 fire 的跨轮状态：工具执行上下文 + 旁白累积。挂在 ctx.scratch.fire 上。 */
 interface FireStash {
   session: FireSessionState;
   toolCtx: AgenticToolCtx;
@@ -109,11 +114,8 @@ interface FireStash {
   xhsCookie: string;
 }
 
-const fireStash = new Map<string, FireStash>();
-
-// 兜底防泄漏：正常路径 finish/skip 后即删；fire 链异常中断（超时/轮数耗尽抛错）
-// 会留下孤儿条目，下次 fire 前超过水位就整体清掉（isolate 本身也活不长）。
-const FIRE_STASH_MAX = 8;
+const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash | undefined =>
+  scratch?.fire as FireStash | undefined;
 
 /**
  * 用云端 tool_pack / tool_config 拼 dispatchAgenticTool 要的 ctx。
@@ -183,54 +185,33 @@ const amsgHooks = {
     const packRow = charRows.find((r) => r.key === AMSG_FIRE_PACK_KEY);
     if (!packRow) return null;
 
-    // 大 fire_pack 是分块上云的（根条目 = chunk meta，内容在 <key>.N 子条目里），
-    // 先拼回原文再 parse；缺块（同步被打断）→ null → 照旧退回冻结提示词。
-    const packValue = reassembleStateValue(
-      packRow.value,
-      (i) => charRows.find((r) => r.key === amsgStateChunkKey(AMSG_FIRE_PACK_KEY, i))?.value,
-    );
-    const pack = packValue ? parseFirePack(packValue) : null;
+    // 大值分块由 amsg-server 2.6.0-next.4+ 在存储层透明处理，readState 拿到的
+    // 已是拼回的原文。（更早的应用层分块格式落库的旧数据 parse 不过 → null →
+    // 照旧退冻结提示词，下轮聊天同步会用新格式覆盖。）
+    const pack = parseFirePack(packRow.value);
     if (!pack) return null;
 
-    // 工具数据与 prompt 同拍装好，stash 给后面的 onLLMOutput / executeToolCalls。
-    // key 必须与库的 sessionId scheme（sess_task_<id>）一致；task.id 异常缺失时
-    // 无法预测 sessionId，跳过 stash——工具会以「数据未同步」失败，链不断。
-    if (ctx.task.id != null) {
-      if (fireStash.size >= FIRE_STASH_MAX) fireStash.clear();
-      let toolConfigRaw: string | undefined;
-      try {
-        const globalRows = await ctx.readState(AMSG_GLOBAL_NAMESPACE);
-        const configRow = globalRows.find((r) => r.key === AMSG_TOOL_CONFIG_KEY);
-        toolConfigRaw = configRow
-          ? reassembleStateValue(
-              configRow.value,
-              (i) => globalRows.find((r) => r.key === amsgStateChunkKey(AMSG_TOOL_CONFIG_KEY, i))?.value,
-            ) ?? undefined
-          : undefined;
-      } catch (error) {
-        console.warn('[amsg:agentic] 读 tool_config 失败，工具按未配置继续', error);
-      }
-      // tool_pack 同样可能分块（月度总结多的重角色），拼不回 → undefined → 工具按
-      // 数据未同步的正常失败路径回给 LLM。
-      const toolPackRow = charRows.find((r) => r.key === AMSG_TOOL_PACK_KEY);
-      const toolPackRaw = toolPackRow
-        ? reassembleStateValue(
-            toolPackRow.value,
-            (i) => charRows.find((r) => r.key === amsgStateChunkKey(AMSG_TOOL_PACK_KEY, i))?.value,
-          ) ?? undefined
-        : undefined;
-      const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(
-        toolPackRaw,
-        toolConfigRaw,
-        typeof ctx.task.contactName === 'string' ? ctx.task.contactName : '',
-      );
-      fireStash.set(`sess_task_${ctx.task.id}`, {
-        session: createFireSessionState(),
-        toolCtx,
-        proxyWorkerUrl,
-        xhsCookie,
-      });
+    // 工具数据与 prompt 同拍装好，挂 ctx.scratch 给同一次 fire 的
+    // onLLMOutput / executeToolCalls（库保证同引用、fire 结束即丢，
+    // 不需要自维护 sessionId → 状态的 Map 和防泄漏水位）。
+    let toolConfigRaw: string | undefined;
+    try {
+      const globalRows = await ctx.readState(AMSG_GLOBAL_NAMESPACE);
+      toolConfigRaw = globalRows.find((r) => r.key === AMSG_TOOL_CONFIG_KEY)?.value;
+    } catch (error) {
+      console.warn('[amsg:agentic] 读 tool_config 失败，工具按未配置继续', error);
     }
+    const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(
+      charRows.find((r) => r.key === AMSG_TOOL_PACK_KEY)?.value,
+      toolConfigRaw,
+      typeof ctx.task.contactName === 'string' ? ctx.task.contactName : '',
+    );
+    ctx.scratch.fire = {
+      session: createFireSessionState(),
+      toolCtx,
+      proxyWorkerUrl,
+      xhsCookie,
+    } satisfies FireStash;
 
     const prompt = renderFirePack(pack, ctx.now.getTime());
     return [{ role: 'user' as const, content: prompt }];
@@ -246,7 +227,7 @@ const amsgHooks = {
       : null;
     const messageType = typeof ctx.metadata?.amsgMode === 'string' ? ctx.metadata.amsgMode : 'auto';
 
-    const stash = fireStash.get(ctx.sessionId);
+    const stash = getFireStash(ctx.scratch);
     const session = stash?.session ?? createFireSessionState();
 
     const decision = processLLMRound(session, content, {
@@ -271,8 +252,7 @@ const amsgHooks = {
         tools: decision.toolCalls.map((tc) => tc.function.name),
       });
     } else {
-      // finish / skip-push：这次 fire 到头了，回收跨轮状态。
-      fireStash.delete(ctx.sessionId);
+      // finish / skip-push：这次 fire 到头，scratch 随调用栈丢弃，无需手动回收。
       console.log('[amsg:agentic]', {
         type: decision.decision,
         sessionId: ctx.sessionId,
@@ -291,7 +271,7 @@ const amsgHooks = {
     toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>,
     ctx: SessionCtx,
   ) {
-    const stash = fireStash.get(ctx.sessionId);
+    const stash = getFireStash(ctx.scratch);
     // 搜索/Notion/飞书经代理 worker 转发；地址来自前端同步的 tool_config
     //（没同步则回默认公共实例）。XHS Lite cookie 同拍注入。
     setProxyWorkerUrlOverride(stash?.proxyWorkerUrl ?? null);

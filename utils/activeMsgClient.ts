@@ -17,7 +17,6 @@ import {
   amsgStateNamespace,
   renderFirePack,
 } from './amsgFirePack';
-import { buildChunkedStateEntries } from './amsgStateChunks';
 import {
   AMSG_GLOBAL_NAMESPACE,
   AMSG_TOOL_CONFIG_KEY,
@@ -44,6 +43,8 @@ type InternalReiClient = ReiClient & {
   _decrypt: (payload: { iv: string; authTag: string; encryptedData: string }) => Promise<any>;
   // amsg-client 2.9.0-next.1：拉本 worker 自己的 VAPID 公钥（带 X-Client-Token），供订阅用。
   getVapidPublicKey: () => Promise<string>;
+  // amsg-client 2.9.0-next.4：worker 特性探测。老 worker 无 /capabilities 端点 → null。
+  getCapabilities: () => Promise<{ serverVersion: string; features: string[] } | null>;
 };
 
 const ACTIVE_MSG_RUNTIME_HEADER = '[ActiveMsg2]';
@@ -512,19 +513,29 @@ export const ActiveMsgClient = {
     if (firePack) {
       try {
         const now = Date.now();
-        // 大值走分块（<key>.N 子条目 + 根 meta，worker 拼回）：服务端单条 200KB 上限
-        // 不再逼我们裁内容，胖角色的完整角色卡/世界书/最近对话原样上云。
+        // 大值（胖角色的完整角色卡/世界书）由 amsg-server 2.6.0-next.4+ 在 worker
+        // 存储层透明分块，客户端整条直传即可；老 worker 会拒超限条目 → 设置页有
+        // capabilities 探测亮「重新部署」牌。
         await client.putClientState([
-          ...buildChunkedStateEntries(
-            amsgStateNamespace(char.id), AMSG_FIRE_PACK_KEY, JSON.stringify(firePack), now,
-          ),
+          {
+            namespace: amsgStateNamespace(char.id),
+            key: AMSG_FIRE_PACK_KEY,
+            value: JSON.stringify(firePack),
+            updatedAt: now,
+          },
           // v2 服务端工具循环的数据（recall 月度总结 / 工具凭据），与 fire_pack 同批上云。
-          ...buildChunkedStateEntries(
-            amsgStateNamespace(char.id), AMSG_TOOL_PACK_KEY, JSON.stringify(buildToolPack(char)), now,
-          ),
-          ...buildChunkedStateEntries(
-            AMSG_GLOBAL_NAMESPACE, AMSG_TOOL_CONFIG_KEY, JSON.stringify(buildToolConfig(realtimeConfig)), now,
-          ),
+          {
+            namespace: amsgStateNamespace(char.id),
+            key: AMSG_TOOL_PACK_KEY,
+            value: JSON.stringify(buildToolPack(char)),
+            updatedAt: now,
+          },
+          {
+            namespace: AMSG_GLOBAL_NAMESPACE,
+            key: AMSG_TOOL_CONFIG_KEY,
+            value: JSON.stringify(buildToolConfig(realtimeConfig)),
+            updatedAt: now,
+          },
         ]);
       } catch (error) {
         // 同步失败不影响任务本身：completePrompt 兜底仍冻结在任务里，worker 走老链路。
@@ -554,29 +565,57 @@ export const ActiveMsgClient = {
       const firePack = await buildFirePack(
         item.char, item.config, item.userProfile, item.groups, item.realtimeConfig,
       );
-      // 大值走分块（<key>.N 子条目 + 根 meta，worker 拼回）：服务端单条 200KB 上限
-      // 曾让胖角色整批 413，现在完整内容原样上云、一个字不裁。
-      entries.push(...buildChunkedStateEntries(
-        amsgStateNamespace(item.char.id), AMSG_FIRE_PACK_KEY, JSON.stringify(firePack), now,
-      ));
+      // 大值由 amsg-server 2.6.0-next.4+ 在 worker 存储层透明分块，整条直传，
+      // 内容一个字不裁；老 worker 拒超限条目 → 设置页 capabilities 探测亮牌。
+      entries.push({
+        namespace: amsgStateNamespace(item.char.id),
+        key: AMSG_FIRE_PACK_KEY,
+        value: JSON.stringify(firePack),
+        updatedAt: now,
+      });
       // v2 服务端工具循环的角色侧数据（recall 月度总结 / XHS 开关 / 角色名）。
-      entries.push(...buildChunkedStateEntries(
-        amsgStateNamespace(item.char.id), AMSG_TOOL_PACK_KEY, JSON.stringify(buildToolPack(item.char)), now,
-      ));
+      entries.push({
+        namespace: amsgStateNamespace(item.char.id),
+        key: AMSG_TOOL_PACK_KEY,
+        value: JSON.stringify(buildToolPack(item.char)),
+        updatedAt: now,
+      });
     }
     // 工具凭据是全局一份：取批里第一份带 realtimeConfig 的快照。整批都没带就不写，
     // 避免把云端已有的可用凭据覆盖成全禁用。
     const withRealtime = items.find((item) => item.realtimeConfig);
     if (withRealtime) {
-      entries.push(...buildChunkedStateEntries(
-        AMSG_GLOBAL_NAMESPACE, AMSG_TOOL_CONFIG_KEY, JSON.stringify(buildToolConfig(withRealtime.realtimeConfig)), now,
-      ));
+      entries.push({
+        namespace: AMSG_GLOBAL_NAMESPACE,
+        key: AMSG_TOOL_CONFIG_KEY,
+        value: JSON.stringify(buildToolConfig(withRealtime.realtimeConfig)),
+        updatedAt: now,
+      });
     }
 
     const response = await client.putClientState(entries);
     if (!response?.success) {
       throw new Error(response?.error?.message || '上传云端状态失败。');
     }
+    // amsg-server 2.6.0-next.4+ 局部失败语义：单个坏条目只拒自己，不连坐同批。
+    // 被拒的条目点名 warn 出来（该角色到点退冻结提示词，其余角色不受影响）。
+    const rejected = (response as { data?: { rejected?: Array<{ namespace: string; key: string; message?: string }> } })
+      .data?.rejected;
+    if (rejected && rejected.length > 0) {
+      console.warn(
+        `${ACTIVE_MSG_RUNTIME_HEADER} 云端状态部分条目被拒（对应角色退冻结提示词兜底）`,
+        rejected.map((r) => `${r.namespace}/${r.key}: ${r.message || 'rejected'}`),
+      );
+    }
+  },
+
+  // worker 特性探测（amsg-server 2.6.0-next.4+ 的 GET /capabilities）。
+  // 老部署没有这个端点 → null。设置页用它亮「worker 需要重新粘贴部署」的牌子，
+  // 防止版本落后时新特性静默降级、用户以为功能坏了。不需要 init（无加密参与）。
+  async getCapabilities(): Promise<{ serverVersion: string; features: string[] } | null> {
+    const globalConfig = await ensureWorkerReady();
+    const client = createClient(globalConfig);
+    return client.getCapabilities();
   },
 
   // 清空该用户在 worker D1 里的全部 client_state（设置页「清除云端状态」按钮）。

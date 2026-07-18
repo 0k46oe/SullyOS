@@ -23,6 +23,10 @@ MUSIC_ACTION / XHS 互动等）结构化成 directives 挂最后一条 push 的 
 push 的 `notification.body` 带净化文本给系统横幅，`message` 保留原始标签给客户端渲染。
 工具凭据与 recall 数据由前端随 fire_pack 同批上云（tool_pack / tool_config），
 没同步或凭据缺失时工具以正常失败回给 LLM 圆场，不断链。
+超 200KB 的大值（胖角色的 fire_pack）由 worker 存储层透明分块
+（amsg-server 2.6.0-next.4+），前端整条直传、读回自动拼好；单个坏条目只拒自己
+不连坐同批。worker 版本落后时前端用 `GET /capabilities` 探测，设置页亮
+「重新粘贴部署」提示，不静默降级。
 
 ## 前端接入点
 
@@ -38,7 +42,7 @@ push 的 `notification.body` 带净化文本给系统横幅，`message` 保留�
 | Worker 入口（本仓打包） | `worker/amsg/src/index.ts` + `worker/amsg/src/agentic.ts` | index 配 hooks（onBeforeFire 填槽 + 装工具上下文、executeToolCalls 就地执行）；agentic 是决策纯逻辑（classifier 分类、旁白 / 副作用跨轮累积、finish payload 组装，有单测）。`pnpm build:workers` 产 `worker/amsg/worker.bundle.js` + `public/amsg-worker.bundle.js`（Modal「复制 Worker 代码」读后者） |
 | 本地存储 | `utils/activeMsgStore.ts` | `ActiveMsg2GlobalConfig` 存 IndexedDB；收发消息的 inbox/outbound/reasoning 存储与 Instant Push 共用 |
 | 类型 | `types.ts` | `ActiveMsg2GlobalConfig` = `{ userId, workerUrl, serverToken?, initializedAt?, updatedAt? }` |
-| npm 依赖 | `@rei-standard/amsg-client`（2.9.0-next.1，含 serverToken + getVapidPublicKey）、`amsg-shared` / `amsg-instant` / `amsg-sw`（latest）、`@rei-standard/amsg-server`（2.6.0-next.2，devDep） | amsg-server 只用于打 worker bundle，不进前端运行时 |
+| npm 依赖 | `@rei-standard/amsg-client`（2.9.0-next.4，含 serverToken + getVapidPublicKey + getCapabilities）、`amsg-shared` / `amsg-instant` / `amsg-sw`（latest）、`@rei-standard/amsg-server`（2.6.0-next.4，devDep，含 ctx.scratch + 存储层大值分块 + /capabilities） | amsg-server 只用于打 worker bundle，不进前端运行时 |
 
 ## 送达层与 Instant Push 共用（收消息侧白送）
 
@@ -53,7 +57,7 @@ worker 推的 web push → Service Worker（`worker/sw-keep-alive.ts`）收 → 
 
 - **主线部署方式 = Dashboard 粘贴**（学 Instant Push，用户不碰终端）：设置 Modal「部署 Worker」点「复制 Worker 代码」拿到 `public/amsg-worker.bundle.js` 全文，去 CF 后台建空 Worker → Edit code 粘贴覆盖 → Deploy。amsg-server 2.6.0-next.2 起全 Web Crypto，bundle 零 node 内置依赖，**不需要 `nodejs_compat` flag**。
 - 备选 CLI 方式（wrangler）：`~/Documents/GitHub/amsg-worker/`（不在本仓，含 DEPLOY.md）。上游源码/示例：ReiStandard `packages/rei-standard-amsg/server/examples/cloudflare-single-user/`。
-- 端点：`POST /init-tenant`（幂等建表，前端「连接」按钮会打它，用户不用手动执行 schema.sql）、`GET /get-user-key`、`POST /schedule-message`、`GET /messages`、`PUT /update-message?id=`、`DELETE /cancel-message?id=`、`GET /vapid-public-key`。定时投递由 Cron Trigger 直接跑 `scheduled()`，无 send-notifications 端点。
+- 端点：`POST /init-tenant`（幂等建表，前端「连接」按钮会打它，用户不用手动执行 schema.sql）、`GET /get-user-key`、`POST /schedule-message`、`GET /messages`、`PUT /update-message?id=`、`DELETE /cancel-message?id=`、`GET /vapid-public-key`、`GET /capabilities`（特性探测：`{ serverVersion, features }`，老部署无此路由 404，前端归一成 null 后亮「重新部署」提示）。定时投递由 Cron Trigger 直接跑 `scheduled()`，无 send-notifications 端点。
 - 部署要配：D1 binding 名 `DB`（空库即可，建表交给「连接」）、cron `* * * * *`、env `AMSG_MASTER_KEY`(32B hex，Modal 里可一键生成) + `VAPID_EMAIL/PUBLIC_KEY/PRIVATE_KEY`（必须和「推送凭据 (VAPID)」面板同一对，见下节）+ 可选 `AMSG_SERVER_TOKEN`。
 - **跨源必须配 CORS**：本仓入口默认 `cors: { origin: '*' }`，想收紧自行改成站点域名。没配 CORS 时浏览器 preflight 被 worker 404。
 - 定时推送 TTL 默认 4 周。
