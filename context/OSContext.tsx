@@ -1,8 +1,11 @@
 
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
-import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, CloudBackupConfig, CloudBackupFile } from '../types';
+import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, CharacterGroup, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, CloudBackupConfig, CloudBackupFile } from '../types';
 import { DB } from '../utils/db';
+import { modelRejectsSamplingParams, stripSamplingParams, isSamplingParamError } from '../utils/samplingParamCompat';
 import { extractImagesInPlace, deepCloneForExport } from '../utils/backupExport';
+import { isBlobRef, getBlobForRef, migrateDataUrlToRef, resolveBlobRefsDeep, BLOBREF_PREFIX } from '../utils/blobRef';
+import { migrateSharkpanAssets } from '../utils/sharkpanAssetMigration';
 import { writeV2Backup, assembleV2Backup, type BackupManifest, type ZipFileWriter, type ZipFileReader } from '../utils/backupFormat';
 import { encodeVectorsForBackup } from '../utils/memoryPalace/db';
 import { ProactiveChat } from '../utils/proactiveChat';
@@ -11,16 +14,22 @@ import { runVRSession } from '../utils/vrWorld/runSession';
 import { VR_DEFAULT_INTERVAL_MIN } from '../utils/vrWorld/constants';
 import { WorldScheduler } from '../utils/worldHome/scheduler';
 import { runWorldEpisode, rerollWorldCharBeat } from '../utils/worldHome/engine';
+import { migrateWorldDaySegs } from '../utils/worldHome/prompts';
 import { ChatParser } from '../utils/chatParser';
 import { safeFetchJson } from '../utils/safeApi';
 import { recordApiCall, setApiCallAmbientContext } from '../utils/apiCallLog';
+import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
+import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
 import { INSTALLED_APPS } from '../constants';
+import { markBackupDone } from '../utils/backupReminder';
 import { normalizeCharacterImpression, normalizeCharacterDefaults } from '../utils/impression';
 import { isScheduleFeatureOn } from '../utils/scheduleGenerator';
 import { evaluateEmotionBackground } from '../hooks/useChatAI';
+import { CHAT_GEN_EVENTS, setChatViewSnapshot } from '../utils/chatGenEvents';
 import { buildChatRequestPayload } from '../utils/chatRequestPayload';
 import { extractHtmlBlocks } from '../utils/htmlPrompt';
-import { loadMusicPlaybackSnapshot } from './MusicContext';
+import { loadMusicHooks, loadMusicPlaybackSnapshot } from './MusicContext';
+import { buildMusicTrackChangeHint, MUSIC_TRACK_CHANGED_EVENT, type MusicTrackChangeDetail } from '../utils/musicTrackChange';
 import { setMinimaxRegion } from '../utils/minimaxEndpoint';
 import { setTtsProvider, setVoicePromptOverrides } from '../utils/ttsProvider';
 import { LocalNotifications } from '@capacitor/local-notifications';
@@ -28,12 +37,22 @@ import { Capacitor } from '@capacitor/core';
 import { formatBytes } from '../utils/format';
 import { isEmotionEvalSkipped } from '../utils/devDebug';
 import { toMountedWorldbook } from '../utils/worldbook';
+import { initLocalStorageMirror } from '../utils/lsMirror';
 // 备份用：把存在 localStorage 的本机配置随导出一起带走（键名须与 importFullData 对齐）
 import { exportPostOfficeLocal } from '../utils/vrWorld/postOffice';
+import { exportSignalLocal } from '../utils/vrWorld/signal';
 import { exportWorldHomeLocal } from '../utils/worldHome/localBackup';
 import { exportLuckinLocal } from '../utils/luckinMcpClient';
 import { exportMcdLocal } from '../utils/mcdMcpClient';
+import { exportDesktopSkinLocal } from '../utils/desktopSkinBackup';
 import { inspectCsyBackup, prepareCsyMigration, type CsyMigrationReport } from '../utils/csyMigration';
+
+type ProactiveRunReason = { kind: 'music-track-change'; detail: MusicTrackChangeDetail };
+
+interface ProactiveQueueEntry {
+  charId: string;
+  reason?: ProactiveRunReason;
+}
 
 const normalizeProactiveAiContent = (raw: string): string => {
   let cleaned = raw;
@@ -225,10 +244,16 @@ interface OSContextType {
   
   characters: CharacterProfile[];
   activeCharacterId: string;
-  addCharacter: () => void;
+  addCharacter: () => Promise<CharacterProfile>;
   updateCharacter: (id: string, updates: Partial<CharacterProfile> | ((prev: CharacterProfile) => Partial<CharacterProfile>)) => void;
   deleteCharacter: (id: string) => void;
   setActiveCharacterId: (id: string) => void;
+
+  // 角色分组（神经链接"文件夹"，与群聊 groups 无关）
+  characterGroups: CharacterGroup[];
+  createCharacterGroup: (name: string) => Promise<CharacterGroup | null>;
+  renameCharacterGroup: (id: string, name: string) => Promise<void>;
+  deleteCharacterGroup: (id: string) => Promise<void>;
   
   // Worldbooks
   worldbooks: Worldbook[];
@@ -348,9 +373,48 @@ interface OSContextType {
   suspendCall: (info: { charId: string; charName: string; charAvatar?: string; startedAt: number; bubbles?: any[]; sessionId?: string; elapsedSeconds?: number; voiceLang?: string }) => void;
   resumeCall: () => void;
   clearSuspendedCall: () => void;
+
+  // 从聊天「见面」按钮跳进见面：携带目标角色，DateApp 挂载时自动进入该角色的见面流程
+  dateAutoStartCharId: string | null;
+  openDateWithChar: (charId: string) => void;
+  consumeDateAutoStart: () => void;
 }
 
 export const DEFAULT_WALLPAPER = 'linear-gradient(135deg, #FFDEE9 0%, #B5FFFC 100%)';
+
+// 壁纸改存 Blob（见 utils/blobRef.ts）：assets store 的 'wallpaper' 记录只存一个指针值
+// （blobref 令牌 / 旧 data: / http url），真正二进制在 blob_assets。内存里 theme.wallpaper
+// 必须是能直接喂给 CSS 的 url，所以令牌要解析成 objectURL。全 OS 只有一张壁纸，用一个模块级
+// 变量记住当前 objectURL，换壁纸时回收上一张，避免泄漏。
+let currentWallpaperObjUrl: string | null = null;
+
+/**
+ * 把「存储值」壁纸解析成可直接渲染的 url，并把指针（令牌）落进 assets 'wallpaper'。
+ *   · blobref 令牌 → 读 Blob 建 objectURL；
+ *   · 旧 data: → 惰性迁移成 Blob 令牌（存量用户下次加载即享空间收益），返回 objectURL；
+ *   · http(s) / 空 / 渐变 → 删除 assets 指针，原样返回。
+ * 传入空字符串（重置）时原样返回，交给上层用 DEFAULT_WALLPAPER 兜底。
+ */
+const resolveWallpaperStoredValue = async (w: string): Promise<string> => {
+    const revokePrev = () => {
+        if (currentWallpaperObjUrl) { try { URL.revokeObjectURL(currentWallpaperObjUrl); } catch { /* ignore */ } currentWallpaperObjUrl = null; }
+    };
+    if (isBlobRef(w) || (w && w.startsWith('data:'))) {
+        const token = isBlobRef(w) ? w : await migrateDataUrlToRef(w);
+        try { await DB.saveAsset('wallpaper', token); } catch { /* ignore */ }
+        const blob = await getBlobForRef(token);
+        revokePrev();
+        if (blob) {
+            currentWallpaperObjUrl = URL.createObjectURL(blob);
+            return currentWallpaperObjUrl;
+        }
+        return w; // Blob 意外缺失：data: 仍可渲染；令牌无解时保底不改
+    }
+    // http(s) 链接 / 重置 / 渐变：没有二进制要存，清掉指针
+    try { await DB.deleteAsset('wallpaper'); } catch { /* ignore */ }
+    revokePrev();
+    return w;
+};
 
 const defaultTheme: OSTheme = {
   hue: 245, // Default Indigo-ish
@@ -388,7 +452,9 @@ const defaultUserProfile: UserProfile = {
 const sullyV2: CharacterProfile = {
   id: 'preset-sully-v2', // Unique ID to prevent duplication
   name: 'Sully',
-  avatar: 'https://sharkpan.xyz/f/BZ3VSa/head.png',
+  // 本地打包资源（public/sully/head.png），同源加载、不依赖图床/CDN，图床挂了也不受影响。
+  // BASE_URL 前缀兼容 GitHub Pages 的相对 base（见 vite.config.ts）。
+  avatar: `${(import.meta as any).env?.BASE_URL ?? '/'}sully/head.png`,
   description: 'AI助理 / 电波系黑客猫猫',
   
   systemPrompt: `[Role Definition]
@@ -441,12 +507,12 @@ Sully是小手机的内置AI。
 `,
 
   sprites: {
-      'normal': 'https://sharkpan.xyz/f/w3QQFq/01.png',
-      'happy': 'https://sharkpan.xyz/f/MKg7ta/02.png',
-      'sad': 'https://sharkpan.xyz/f/3WnMce/03.png',
-      'angry': 'https://sharkpan.xyz/f/5n1xSj/04.png',
-      'shy': 'https://sharkpan.xyz/f/kdwet6/05.png',
-      'chibi': 'https://sharkpan.xyz/f/oWZQF4/S2.png' // Default Room Sprite (家园 Sully chibi)
+      'normal': 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/01.png',
+      'happy': 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/02.png',
+      'sad': 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/03.png',
+      'angry': 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/04.png',
+      'shy': 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/05.png',
+      'chibi': 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/S2.png' // Default Room Sprite (家园 Sully chibi)
   },
   
   spriteConfig: {
@@ -460,12 +526,12 @@ Sully是小手机的内置AI。
           id: 'skin_sully_valentine',
           name: 'Valentine',
           sprites: {
-              'normal': 'https://sharkpan.xyz/f/4rzdtj/VNormal.png',
-              'happy':  'https://sharkpan.xyz/f/m3adhW/Vha.png',
-              'sad':    'https://sharkpan.xyz/f/BZgDfa/Vsad.png',
-              'angry':  'https://sharkpan.xyz/f/NdlVfv/VAn.png',
-              'shy':    'https://sharkpan.xyz/f/VyontY/Vshy.png',
-              'love':   'https://sharkpan.xyz/f/xl8muX/VBl.png',
+              'normal': 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/VNormal.png',
+              'happy':  'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/Vha.png',
+              'sad':    'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/Vsad.png',
+              'angry':  'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/VAn.png',
+              'shy':    'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/Vshy.png',
+              'love':   'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/VBl.png',
           }
       }
   ],
@@ -476,14 +542,14 @@ Sully是小手机的内置AI。
   
   // Default Room Config
   roomConfig: {
-      wallImage: 'https://sharkpan.xyz/f/NdJyhv/b.png', // Updated Background
+      wallImage: 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/b.png', // Updated Background
       floorImage: 'repeating-linear-gradient(90deg, #e7e5e4 0px, #e7e5e4 20px, #d6d3d1 21px)',
       items: [
         {
             id: "item-1768927221380",
             name: "Sully床",
             type: "furniture",
-            image: "https://sharkpan.xyz/f/A3XeUZ/BED.png",
+            image: "https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/BED.png",
             x: 78.45852578067732,
             y: 97.38889754570907,
             scale: 2.4,
@@ -495,7 +561,7 @@ Sully是小手机的内置AI。
             id: "item-1768927255102",
             name: "Sully电脑桌",
             type: "furniture",
-            image: "https://sharkpan.xyz/f/G5n3Ul/DNZ.png",
+            image: "https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/DNZ.png",
             x: 28.853756791175588,
             y: 69.9444485439727,
             scale: 2.4,
@@ -507,7 +573,7 @@ Sully是小手机的内置AI。
             id: "item-1768927271632",
             name: "Sully垃圾桶",
             type: "furniture",
-            image: "https://sharkpan.xyz/f/75Nvsj/LJT.png",
+            image: "https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/LJT.png",
             x: 10.276680026943646,
             y: 80.49999880981437,
             scale: 0.9,
@@ -519,7 +585,7 @@ Sully是小手机的内置AI。
             id: "item-1768927286526",
             name: "Sully洞洞板",
             type: "furniture",
-            image: "https://sharkpan.xyz/f/85K5ij/DDB.png",
+            image: "https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/DDB.png",
             x: 32.608697687684455,
             y: 48.72222587415929,
             scale: 2.6,
@@ -531,7 +597,7 @@ Sully是小手机的内置AI。
             id: "item-1768927303472",
             name: "Sully书柜",
             type: "furniture",
-            image: "https://sharkpan.xyz/f/zlpWS5/SG.png",
+            image: "https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/SG.png",
             x: 79.84189945375853,
             y: 68.94444543117953,
             scale: 2,
@@ -624,7 +690,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     }
   }, [activeCharacterId]);
   
-  const [groups, setGroups] = useState<GroupProfile[]>([]); 
+  const [groups, setGroups] = useState<GroupProfile[]>([]);
+  const [characterGroups, setCharacterGroups] = useState<CharacterGroup[]>([]);
   const [worldbooks, setWorldbooks] = useState<Worldbook[]>([]); 
   const [novels, setNovels] = useState<NovelBook[]>([]); // New
   const [songs, setSongs] = useState<SongSheet[]>([]);
@@ -675,6 +742,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   // Call Suspend
   const [suspendedCall, setSuspendedCall] = useState<{ charId: string; charName: string; charAvatar?: string; startedAt: number; bubbles?: any[]; sessionId?: string; elapsedSeconds?: number; voiceLang?: string } | null>(null);
+  // 聊天「见面」按钮 → 见面：记录目标角色，DateApp 挂载后消费一次并自动进入见面
+  const [dateAutoStartCharId, setDateAutoStartCharId] = useState<string | null>(null);
 
   const sendProactiveNativeNotification = useCallback(async (charId: string, charName: string, body: string) => {
       if (!Capacitor.isNativePlatform()) return;
@@ -746,16 +815,83 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           const urlStr = String(resource);
           const fetchStartedAt = Date.now();
 
+          // 采样参数兼容层（详见 utils/samplingParamCompat.ts）：
+          // 某些模型废弃了 temperature/top_p/top_k，带上直接 400。这里在所有 /chat/completions
+          // 的统一出口做发送前主动摘除，覆盖 Schedule / 记忆 / 见面等全部旁路调用点。
+          let sendArgs: [RequestInfo | URL, RequestInit?] = args;
+          // 透明流式升级状态（utils/streamUpgrade.ts）：请求侧改写 → 响应侧拼回 JSON
+          let streamUpgraded = false;
+          let bodyBeforeStreamUpgrade: string | null = null;
+          if (urlStr.includes('/chat/completions')) {
+              const rawBody = (config as RequestInit | undefined)?.body;
+              if (typeof rawBody === 'string') {
+                  try {
+                      const parsed = JSON.parse(rawBody);
+                      let body = rawBody;
+                      if (modelRejectsSamplingParams(parsed?.model) && stripSamplingParams(parsed)) {
+                          body = JSON.stringify(parsed);
+                      }
+                      // 透明流式升级：主 API 开了 stream 时，把硬编码非流式的旁路调用
+                      // （查手机/记忆宫殿/日程/剧场/群聊…40+ 处）升级为流式**传输**，防网关
+                      // 空闲超时把长生成掐成半截；响应会在下面攒齐拼回标准 JSON，调用方无感。
+                      // 已自带 stream:true 的请求（聊天主路径/见面/情绪评估）不碰。
+                      if (isGlobalStreamEnabled()) {
+                          const upgraded = upgradeChatBodyToStream(body);
+                          if (upgraded) {
+                              bodyBeforeStreamUpgrade = body;
+                              body = upgraded;
+                              streamUpgraded = true;
+                          }
+                      }
+                      if (body !== rawBody) sendArgs = [resource, { ...(config as RequestInit), body }];
+                  } catch { /* 非 JSON body：原样放行 */ }
+              }
+          }
+
           try {
-              const response = await originalFetch(...args);
-              const durationMs = Date.now() - fetchStartedAt;
+              let response = await originalFetch(...sendArgs);
+
+              // 兜底：模型没被上面清单覆盖但仍拒收采样参数时，读 400 报文自愈——摘掉后重试一次。
+              if (!response.ok && response.status === 400 && urlStr.includes('/chat/completions')) {
+                  const sentBody = (sendArgs[1] as RequestInit | undefined)?.body;
+                  if (typeof sentBody === 'string') {
+                      let errText = '';
+                      try { errText = await response.clone().text(); } catch { /* 读不出就算了 */ }
+                      if (isSamplingParamError(errText)) {
+                          try {
+                              const parsed = JSON.parse(sentBody);
+                              if (stripSamplingParams(parsed)) {
+                                  sendArgs = [resource, { ...(sendArgs[1] as RequestInit), body: JSON.stringify(parsed) }];
+                                  response = await originalFetch(...sendArgs);
+                              }
+                          } catch { /* 解析失败：保留原始 400 响应 */ }
+                      }
+                  }
+              }
+
+              // 流式升级自愈：个别中转对 stream/stream_options 直接 4xx → 用升级前的
+              // 原 body 重发一次，行为退回旧版（升级只能赚不能赔）。
+              if (streamUpgraded && !response.ok && (response.status === 400 || response.status === 422) && bodyBeforeStreamUpgrade) {
+                  console.warn('🔁 [StreamUpgrade] 中转拒绝流式升级(HTTP ' + response.status + ')，回退原请求重发');
+                  response = await originalFetch(resource, { ...(config as RequestInit), body: bodyBeforeStreamUpgrade });
+                  streamUpgraded = false;
+              }
+              // 流式升级的响应归一化：SSE 攒齐拼回标准 chat.completion JSON——
+              // 调用方（safeResponseJson / res.json() 均可）拿到与升级前等价的响应。
+              if (streamUpgraded && response.ok) {
+                  response = await assembleUpgradedResponse(response);
+              }
 
               // 「API 调用记录」统一记录入口：所有 /chat/completions（裸 fetch + safeFetchJson
               // 内部 fetch 都会经过这里）都记一笔。meta 优先取调用方挂在 init 上的 __sullyMeta
               // （safeFetchJson 传的精确信息），裸 fetch 没有就由 recordApiCall 用环境兜底。
+              // ⚠️ 耗时必须在 clone 读完**整个响应体**后再算：fetch 在响应头到达时就 resolve，
+              // 流式透传的正文可能再流几十秒——旧版在 headers 处截止，「假流」渠道 6.5s 出头、
+              // 正文 44s 才灌完，卡片却记成 6.5s（实测误导排查）。clone 与调用方并行消费同一
+              // 条流，text() 完成时刻 ≈ 真实收完时刻。
               if (urlStr.includes('/chat/completions')) {
                   const meta = (config as any)?.__sullyMeta;
-                  const body = (config as any)?.body;
+                  const body = (sendArgs[1] as any)?.body;
                   const status = response.status;
                   const ok = response.ok;
                   // clone 出来异步读 usage，不阻塞调用方拿 response
@@ -763,12 +899,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   try { usageClone = response.clone(); } catch { usageClone = null; }
                   if (usageClone) {
                       usageClone.text().then((t) => {
+                          const durationMs = Date.now() - fetchStartedAt;
                           let parsed: any = undefined;
-                          try { parsed = JSON.parse(t); } catch { /* 流式/非 JSON：无 usage，照样记 */ }
-                          recordApiCall({ url: urlStr, body, status, ok, response: parsed, meta, durationMs });
-                      }).catch(() => recordApiCall({ url: urlStr, body, status, ok, meta, durationMs }));
+                          try { parsed = JSON.parse(t); } catch { /* 流式/非 JSON：把原始文本交给 recordApiCall 的 SSE 兜底解析 */ }
+                          recordApiCall({ url: urlStr, body, status, ok, response: parsed, responseText: parsed === undefined ? t : undefined, meta, durationMs });
+                      }).catch(() => recordApiCall({ url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt }));
                   } else {
-                      recordApiCall({ url: urlStr, body, status, ok, meta, durationMs });
+                      recordApiCall({ url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt });
                   }
               }
 
@@ -781,7 +918,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           // 把发出去的请求体摘要也记上 —— 排查"只有点单(带工具)报错"必须看到 model/参数/tools/消息结构
                           let reqSummary = '';
                           try {
-                              const b = (config as any)?.body;
+                              const b = (sendArgs[1] as any)?.body;
                               if (typeof b === 'string') {
                                   const j = JSON.parse(b);
                                   const toolNames = Array.isArray(j.tools) ? j.tools.map((t: any) => t?.function?.name).filter(Boolean) : [];
@@ -813,7 +950,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           } catch (err: any) {
               // Network Failure
               if (urlStr.includes('/chat/completions')) {
-                  recordApiCall({ url: urlStr, body: (config as any)?.body, ok: false, meta: (config as any)?.__sullyMeta, durationMs: Date.now() - fetchStartedAt });
+                  recordApiCall({ url: urlStr, body: (sendArgs[1] as any)?.body, ok: false, meta: (config as any)?.__sullyMeta, durationMs: Date.now() - fetchStartedAt });
               }
               setSystemLogs(prev => [{
                   id: `log-${Date.now()}`,
@@ -845,7 +982,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       console.error = (...args) => {
           originalConsoleError(...args);
           const msg = args.map(a => (a instanceof Error ? a.message : String(a))).join(' ');
-          const detail = args.map(a => (a instanceof Error ? a.stack : '')).join('\n');
+          // detail 只有真拿到堆栈才用堆栈，否则回退完整 msg。
+          // 旧写法 `args.map(a => a instanceof Error ? a.stack : '').join('\n')`
+          // 对「多个非 Error 参数」会产出 "\n"（truthy），把回退短路掉——
+          // 日志面板里只剩被 100 字截断的 message（排查 Embedding 400 这类
+          // 长响应时，关键的服务商完整响应体全丢，detail 只有一个换行符）。
+          const stacks = args
+              .filter((a): a is Error => a instanceof Error)
+              .map(a => a.stack || '')
+              .filter(Boolean)
+              .join('\n');
           if (msg.includes('Warning:')) return;
           setSystemLogs(prev => [{
               id: `log-${Date.now()}-${Math.random()}`,
@@ -853,7 +999,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               type: 'error',
               source: 'Application',
               message: msg.substring(0, 100),
-              detail: detail || msg
+              detail: stacks || msg
           }, ...prev.slice(0, 49)]);
       };
   }, []);
@@ -880,7 +1026,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                  ) {
                      loadedTheme.wallpaper = DEFAULT_WALLPAPER;
                  }
-                 if (loadedTheme.wallpaper.startsWith('data:')) {
+                 // LS 里绝不该有 data:（旧包）或 blob:（上会话临时 objectURL，重启即失效）壁纸——
+                 // 真值在 assets 'wallpaper'，下面会解析覆盖；这里先回退默认避免闪一帧坏图。
+                 if (loadedTheme.wallpaper.startsWith('data:') || loadedTheme.wallpaper.startsWith('blob:')) {
                      loadedTheme.wallpaper = defaultTheme.wallpaper;
                  }
                  // Deprecated legacy fields are forcibly stripped — they never render again.
@@ -900,7 +1048,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         const savedRealtimeConfig = localStorage.getItem('os_realtime_config');
         if (savedRealtimeConfig) {
             try {
-                setRealtimeConfig({ ...defaultRealtimeConfig, ...JSON.parse(savedRealtimeConfig) });
+                const parsed = JSON.parse(savedRealtimeConfig);
+                // 小红书 serverUrl 独立持久化，存量若指向已死的历史 worker 域名则迁到当前实例
+                if (parsed?.xhsMcpConfig?.serverUrl) {
+                    parsed.xhsMcpConfig.serverUrl = rewriteStaleWorkerUrl(parsed.xhsMcpConfig.serverUrl);
+                }
+                setRealtimeConfig({ ...defaultRealtimeConfig, ...parsed });
             } catch (e) {
                 console.error('Failed to load realtime config', e);
             }
@@ -913,9 +1066,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                 assets.forEach(a => assetMap[a.id] = a.data);
 
                 if (assetMap['wallpaper']) {
-                    loadedTheme.wallpaper = assetMap['wallpaper'];
+                    // assets 'wallpaper' 现在存的是指针（blobref 令牌 / 旧 data: / http）。
+                    // 解析成可渲染 url（令牌→objectURL；旧 data: 顺手迁移成 Blob）。
+                    loadedTheme.wallpaper = await resolveWallpaperStoredValue(assetMap['wallpaper']);
                 }
-                
+
                 // Deprecated legacy asset — purge silently so it can never be rendered again.
                 if (assetMap['launcherWidgetImage']) {
                     void DB.deleteAsset('launcherWidgetImage');
@@ -997,7 +1152,20 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
             navigator.storage.persist().catch(() => {});
         }
 
+        // localStorage 镜像回填：部分浏览器/清理工具会只清 localStorage 而留下 IndexedDB，
+        // 导致「主题回初始 / 盲盒收藏册清空 / API 配置丢失」三连。必须在 loadSettings
+        // 读 localStorage 之前完成回填。见 utils/lsMirror.ts。
+        const healedKeys = await initLocalStorageMirror().catch(() => [] as string[]);
+        if (healedKeys.length > 0) {
+            console.warn('[lsMirror] localStorage 疑似被清除，已从 IndexedDB 镜像回填:', healedKeys);
+            setTimeout(() => addToast(`检测到本地设置曾被浏览器清除，已自动恢复 ${healedKeys.length} 项（主题 / API 等）`, 'info'), 2500);
+        }
+
         await loadSettings();
+
+        // 老用户库存的鲨盘图链接就地改写成 jsDelivr（幂等、跑一次）。放在读 characters 之前，
+        // 让下面 getAllCharacters 拿到的就是改好的数据。见 utils/sharkpanAssetMigration.ts。
+        await migrateSharkpanAssets();
 
         // 用 allSettled 而非 all：早期 Promise.all 只要任意一个 store 读取 reject，
         // 整批加载就全挂 → setCharacters / setWorldbooks 都不执行 → 角色和世界书"凭空消失"
@@ -1012,14 +1180,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
             }
         };
 
-        const [dbChars, dbThemes, dbUser, dbGroups, dbWorldbooks, dbNovels, dbSongs] = await Promise.all([
+        const [dbChars, dbThemes, dbUser, dbGroups, dbWorldbooks, dbNovels, dbSongs, dbCharGroups] = await Promise.all([
             settle(DB.getAllCharacters(), 'characters', [] as CharacterProfile[]),
             settle(DB.getThemes(), 'themes', [] as ChatTheme[]),
             settle(DB.getUserProfile(), 'userProfile', null as UserProfile | null),
             settle(DB.getGroups(), 'groups', [] as GroupProfile[]),
             settle(DB.getAllWorldbooks(), 'worldbooks', [] as Worldbook[]),
             settle(DB.getAllNovels(), 'novels', [] as NovelBook[]),
-            settle(DB.getAllSongs(), 'songs', [] as SongSheet[])
+            settle(DB.getAllSongs(), 'songs', [] as SongSheet[]),
+            settle(DB.getCharacterGroups(), 'characterGroups', [] as CharacterGroup[])
         ]);
 
         let finalChars = dbChars;
@@ -1035,11 +1204,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                  const isCorrupted = !currentSprites['normal'] || !currentSprites['chibi'];
                  const needsWallUpdate = existingSully.roomConfig?.wallImage !== sullyV2.roomConfig?.wallImage;
                  const needsSkinSets = !existingSully.dateSkinSets || existingSully.dateSkinSets.length === 0;
+                 // 老用户头像仍是旧图床默认图（不稳定，常拉不到）→ 换成本地打包图；
+                 // 用户自己改过头像的（值不等于旧默认）保持不动。
+                 const OLD_SULLY_AVATAR = 'https://sharkpan.xyz/f/BZ3VSa/head.png';
+                 const needsAvatarUpdate = existingSully.avatar === OLD_SULLY_AVATAR;
                  // 之前误把家园 chibi 替换成了像素小屋的像素立绘 → 还原为原版 sharkpan 立绘
                  const hasMisplacedPixelChibi = typeof currentSprites['chibi'] === 'string'
                      && currentSprites['chibi'].startsWith('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADUAAAA4CAYAAABdeLCu');
 
-                 if (isCorrupted || !existingSully.roomConfig || needsWallUpdate || needsSkinSets || hasMisplacedPixelChibi) {
+                 if (isCorrupted || !existingSully.roomConfig || needsWallUpdate || needsSkinSets || hasMisplacedPixelChibi || needsAvatarUpdate) {
                      const restoredSprites = { ...sullyV2.sprites, ...currentSprites };
 
                      if (!restoredSprites['normal']) restoredSprites['normal'] = sullyV2.sprites!['normal'];
@@ -1069,6 +1242,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
                      const updatedSully = {
                          ...existingSully,
+                         avatar: needsAvatarUpdate ? sullyV2.avatar : existingSully.avatar,
                          sprites: restoredSprites,
                          roomConfig: updatedRoomConfig,
                          dateSkinSets: mergedSkins
@@ -1099,6 +1273,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         }
 
         setGroups(dbGroups);
+        setCharacterGroups(dbCharGroups);
         setWorldbooks(dbWorldbooks);
         setNovels(dbNovels);
         setSongs(dbSongs);
@@ -1147,6 +1322,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       root.style.setProperty('--primary-sat', `${s}%`);
       root.style.setProperty('--primary-lightness', `${l}%`);
 
+      // 聊天表情包尺寸（外观 → 表情包大小，三挡）：小 96 / 中 128 / 大 160（旧版尺寸）。
+      // 私聊 MessageItem 与群聊的表情 img 都用 var(--sully-emoji-size, 96px) 消费。
+      const emojiSize = theme.chatEmojiSize === 'large' ? '160px' : theme.chatEmojiSize === 'medium' ? '128px' : '96px';
+      root.style.setProperty('--sully-emoji-size', emojiSize);
+
       // 桌面皮肤：写到 <html data-skin>，供全局 CSS（index.html）与组件读取。
       root.dataset.skin = theme.skin || 'default';
   }, [theme]);
@@ -1157,6 +1337,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const activeCharIdScheduleRef = useRef(activeCharacterId);
   activeAppRef.current = activeApp;
   activeCharIdScheduleRef.current = activeCharacterId;
+
+  // 当前聊天视图快照 → 模块级 slot（utils/chatGenEvents）。根级 ChatBroadcast 挂在
+  // OSProvider 之外拿不到这两个 state，靠快照判断"用户正看着的会话不弹全局横幅"。
+  useEffect(() => {
+      setChatViewSnapshot(activeApp === AppID.Chat, activeCharacterId ?? null);
+  }, [activeApp, activeCharacterId]);
   // 通话状态（含挂起到后台的通话）——主动消息流程读它来判断"是否正在通话"
   const suspendedCallRef = useRef(suspendedCall);
   suspendedCallRef.current = suspendedCall;
@@ -1378,22 +1564,65 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           }).catch(() => {});
       };
 
+      // 本地 fetch 聊天回复的全局回落：triggerAI 的异步闭包在 Chat 卸载后继续跑完
+      // 并落库，但它捕获的 setMessages 指向已卸载的实例。这里是它跟当前 UI 的唯一桥：
+      //   - replyArrived（后处理管线全部落库后）→ bump lastMsgTimestamp 让当前挂载的
+      //     Chat 重新 reloadMessages；用户不在该会话时补未读 + toast——与 instant push
+      //     的 'active-msg-received' 行为对齐。
+      //   - replyEnd（finally，含失败路径）→ 只 bump 时间戳，把 catch 里落库的
+      //     错误系统消息也刷出来。
+      const chatReplyArrivedHandler = (e: Event) => {
+          const { charId, charName } = ((e as CustomEvent).detail || {}) as { charId?: string; charName?: string };
+          if (!charId) return;
+          setLastMsgTimestamp(Date.now());
+          const isChattingWithThisChar = activeAppRef.current === AppID.Chat && activeCharIdScheduleRef.current === charId;
+          if (!isChattingWithThisChar) {
+              setUnreadMessages(prev => ({ ...prev, [charId]: (prev[charId] || 0) + 1 }));
+              if (document.visibilityState === 'visible') {
+                  addToast(`${charName || '角色'} 回复了消息`, 'success');
+              }
+          }
+      };
+      const chatReplyEndHandler = () => {
+          setLastMsgTimestamp(Date.now());
+      };
+
+      // 情绪评估失败 → toast 告知（每角色 60s 冷却防刷屏）。评估失败过去只写 console，
+      // 用户侧表现是「情绪徽章闪一下就灭、情绪永不更新、没有任何报错」（真实反馈），
+      // 完全没法自查。事件来源：evaluateEmotionBackground（本地请求失败/空响应）、
+      // applyEmotionEvalRaw（解析全灭/落库失败）、activeMsgRuntime（worker 推回空结果）。
+      const emotionFailToastAt: Record<string, number> = {};
+      const emotionFailHandler = (e: Event) => {
+          const { charId, charName, reason } = ((e as CustomEvent).detail || {}) as { charId?: string; charName?: string; reason?: string };
+          if (!charId) return;
+          const now = Date.now();
+          if (now - (emotionFailToastAt[charId] || 0) < 60_000) return;
+          emotionFailToastAt[charId] = now;
+          addToast(`${charName || '角色'}的情绪评估失败：${reason || '未知原因'}（不影响聊天回复）`, 'error');
+      };
+
       window.addEventListener('active-msg-received', handler);
       window.addEventListener('active-msg-progress', progressHandler);
       window.addEventListener('active-msg-open', openHandler);
       window.addEventListener('emotion-updated', buffSyncHandler);
+      window.addEventListener(CHAT_GEN_EVENTS.replyArrived, chatReplyArrivedHandler);
+      window.addEventListener(CHAT_GEN_EVENTS.replyEnd, chatReplyEndHandler);
+      window.addEventListener(CHAT_GEN_EVENTS.emotionFailed, emotionFailHandler);
       document.addEventListener('visibilitychange', onVisible);
       return () => {
           window.removeEventListener('active-msg-received', handler);
           window.removeEventListener('active-msg-progress', progressHandler);
           window.removeEventListener('active-msg-open', openHandler);
           window.removeEventListener('emotion-updated', buffSyncHandler);
+          window.removeEventListener(CHAT_GEN_EVENTS.replyArrived, chatReplyArrivedHandler);
+          window.removeEventListener(CHAT_GEN_EVENTS.replyEnd, chatReplyEndHandler);
+          window.removeEventListener(CHAT_GEN_EVENTS.emotionFailed, emotionFailHandler);
           document.removeEventListener('visibilitychange', onVisible);
       };
   }, [sendProactiveNativeNotification]);
 
   const proactiveRunningRef = useRef(false);
-  const proactiveQueueRef = useRef<string[]>([]);
+  const proactiveQueueRef = useRef<ProactiveQueueEntry[]>([]);
   // Per-character innerState cache for proactive turns — mirrors useChatAI's
   // evolvedNarrative state so consecutive proactive triggers carry continuity.
   const proactiveInnerStateRef = useRef<Map<string, string>>(new Map());
@@ -1430,16 +1659,20 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       if (!isDataLoaded) return;
 
       const drainQueuedProactive = () => {
-          const nextQueuedCharId = proactiveQueueRef.current.shift();
-          if (nextQueuedCharId) {
-              void runProactive(nextQueuedCharId);
+          const next = proactiveQueueRef.current.shift();
+          if (next) {
+              void runProactive(next.charId, next.reason);
           }
       };
 
-      const runProactive = async (charId: string) => {
+      const runProactive = async (charId: string, reason?: ProactiveRunReason) => {
           if (proactiveRunningRef.current) {
-              if (!proactiveQueueRef.current.includes(charId)) {
-                  proactiveQueueRef.current.push(charId);
+              const queuedIndex = proactiveQueueRef.current.findIndex(item => item.charId === charId);
+              if (queuedIndex < 0) {
+                  proactiveQueueRef.current.push({ charId, reason });
+              } else if (reason?.kind === 'music-track-change') {
+                  // 同一角色排队期间再次收到更具体的换歌事件时，以最新歌曲为准。
+                  proactiveQueueRef.current[queuedIndex] = { charId, reason };
               }
               return;
           }
@@ -1457,8 +1690,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               return;
           }
 
-          // Respect per-character proactive config
-          if (char.proactiveConfig && !char.proactiveConfig.enabled) {
+          // 换歌判断属于用户刚刚发起的“一起听”交互，不受定时主动消息开关限制。
+          if (reason?.kind !== 'music-track-change' && char.proactiveConfig && !char.proactiveConfig.enabled) {
               drainQueuedProactive();
               console.log(`🔕 [Proactive/Global] Skipped for ${char.name}: disabled`);
               return;
@@ -1527,9 +1760,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               const justMetOffline = lastRealMsgRaw?.metadata?.source === 'date'
                   && (now.getTime() - lastRealMsgRaw.timestamp) < DATE_AFTERGLOW_MS;
 
-              const hintContent = justMetOffline
-                  ? `[系统提示（非${userName}发言）: 现在是 ${timeStr}。你和${userName}刚刚在线下见过面（如果上下文里有标着 [约会] 的内容，那就是你们见面时发生的事），现在你们暂时分开了，你拿起手机想给${userName}发条消息。请基于刚才的见面来发——可以回味见面里的某个细节、补一句当时没说出口的话、关心${userName}到家了没，或者就是刚分开就有点想念。绝对不要表现得好像很久没联系，更不要对刚才的见面毫不知情。一两句话就好。]`
-                  : `[系统提示（非${userName}发言）: 现在是 ${timeStr}。${timeSinceUser ? `${userName}已经 ${timeSinceUser} 没有找你说话了。` : ''}这是系统给你的一次主动发消息机会——${userName}并没有在跟你说话，是你想主动找${userName}。像真人一样随意地发条消息吧，比如：随手拍了张照片想分享、刚看到个有趣的事想说、突然想到个冷知识、吐槽今天的天气/食物/见闻、或者就是单纯想找${userName}聊几句。不要刻意，不要像在"汇报近况"，就像你真的拿起手机随手发了条消息。一两句话就好。${timeSinceUser && parseInt(timeSinceUser) > 2 ? `（${userName}挺久没找你了，你也可以表达想念、好奇${userName}在干嘛、或者小小地抱怨一下。）` : ''}]`;
+              const hintContent = reason?.kind === 'music-track-change'
+                  ? buildMusicTrackChangeHint(reason.detail, userName)
+                  : justMetOffline
+                      ? `[系统提示（非${userName}发言）: 现在是 ${timeStr}。你和${userName}刚刚在线下见过面（如果上下文里有标着 [约会] 的内容，那就是你们见面时发生的事），现在你们暂时分开了，你拿起手机想给${userName}发条消息。请基于刚才的见面来发——可以回味见面里的某个细节、补一句当时没说出口的话、关心${userName}到家了没，或者就是刚分开就有点想念。绝对不要表现得好像很久没联系，更不要对刚才的见面毫不知情。一两句话就好。]`
+                      : `[系统提示（非${userName}发言）: 现在是 ${timeStr}。${timeSinceUser ? `${userName}已经 ${timeSinceUser} 没有找你说话了。` : ''}这是系统给你的一次主动发消息机会——${userName}并没有在跟你说话，是你想主动找${userName}。像真人一样随意地发条消息吧，比如：随手拍了张照片想分享、刚看到个有趣的事想说、突然想到个冷知识、吐槽今天的天气/食物/见闻、或者就是单纯想找${userName}聊几句。不要刻意，不要像在"汇报近况"，就像你真的拿起手机随手发了条消息。一两句话就好。${timeSinceUser && parseInt(timeSinceUser) > 2 ? `（${userName}挺久没找你了，你也可以表达想念、好奇${userName}在干嘛、或者小小地抱怨一下。）` : ''}]`;
 
               await DB.saveMessage({
                   charId,
@@ -1607,6 +1842,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }, 2, 0, { appName: '消息', charId, charName: char.name, purpose: '主动消息' });
 
               // 5. Process & save response
+              if (reason?.kind === 'music-track-change'
+                  && loadMusicPlaybackSnapshot()?.current?.id !== reason.detail.currentSong.id) {
+                  console.log(`🎵 [Proactive/Global] Skipped stale track-change response for ${char.name}`);
+                  return;
+              }
               let aiContent = data.choices?.[0]?.message?.content || '';
               // 思考链抽取 — 与 useChatAI 保持一致:reasoning_content 字段 + 主 content 里的 <think>/<thinking>/<thought> 块,
               // 拼接后挂到本回合首条 assistant 消息的 metadata.thinkingChain
@@ -1633,6 +1873,26 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               aiContent = aiContent.replace(/\s*\[(?:聊天|通话|约会)\]\s*/g, '\n').trim();
 
               aiContent = normalizeProactiveAiContent(aiContent);
+
+              // 换歌触发只执行 MUSIC_ACTION，不顺带放开主动消息路径里的其他动作。
+              // 卡片由 ChatParser 落库；正文继续走下方原有的主动消息保存流程。
+              let musicActionExecuted = false;
+              const musicActionTagPattern = /\[\[MUSIC_ACTION:(?:join|add|add_new|join_and_add|join_and_add_new)(?:\|[^\]]*)?\]\]/g;
+              const musicActionTags = aiContent.match(musicActionTagPattern);
+              if (reason?.kind === 'music-track-change' && musicActionTags?.length) {
+                  const musicHooks = loadMusicHooks();
+                  if (musicHooks) {
+                      await ChatParser.parseAndExecuteActions(
+                          musicActionTags.join(' '),
+                          charId,
+                          char.name,
+                          () => {},
+                          musicHooks,
+                      );
+                      musicActionExecuted = true;
+                  }
+                  aiContent = aiContent.replace(musicActionTagPattern, '').trim();
+              }
 
               const savedPreviewChunks: string[] = [];
               const baseTimestamp = Date.now();
@@ -1681,43 +1941,62 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   const hasTranslationTags = /<翻译>\s*<原文>[\s\S]*?<\/原文>\s*<译文>[\s\S]*?<\/译文>\s*<\/翻译>/.test(aiContent);
 
                   if (hasTranslationTags) {
-                      // 表情独立抽出,放在文本之后发送
-                      const bilingualEmojis: string[] = [];
-                      let bEm;
-                      const bEmojiPat = /\[\[SEND_EMOJI:\s*(.*?)\]\]/g;
-                      while ((bEm = bEmojiPat.exec(aiContent)) !== null) {
-                          const name = bEm[1].trim();
-                          if (!bilingualEmojis.includes(name)) bilingualEmojis.push(name);
-                      }
-                      aiContent = aiContent.replace(/\[\[SEND_EMOJI:\s*.*?\]\]/g, '').trim();
+                      // 表情包按模型写的位置原地插发（与 applyAssistantPostProcessing 双语分支同款修复）。
+                      // 旧实现先把所有 [[SEND_EMOJI:]] 抽走、正文发完后统一追加到最后（还去了重），
+                      // 表现为「翻译模式下角色永远最后才发表情包」。
+                      const sendEmojiBubble = async (name: string): Promise<void> => {
+                          const foundEmoji = emojis.find(e => e.name === name);
+                          if (!foundEmoji?.url) return;
+                          const meta = consumeThinkingMeta();
+                          await DB.saveMessage({
+                              charId,
+                              role: 'assistant',
+                              type: 'emoji',
+                              content: foundEmoji.url,
+                              timestamp: baseTimestamp + offset,
+                              ...(meta ? { metadata: meta } : {}),
+                          });
+                          offset += 1;
+                      };
+                      // 翻译标签之外的普通文本段：splitResponse 按出现顺序拆出文字 / 表情逐条发
+                      const renderPlainSegment = async (segment: string): Promise<void> => {
+                          for (const part of ChatParser.splitResponse(segment)) {
+                              if (part.type === 'emoji') {
+                                  await sendEmojiBubble(part.content);
+                                  continue;
+                              }
+                              const cleaned = ChatParser.sanitize(part.content);
+                              if (!cleaned || !ChatParser.hasDisplayContent(cleaned)) continue;
+                              for (const chunk of ChatParser.chunkText(cleaned)) {
+                                  if (!chunk) continue;
+                                  const meta = consumeThinkingMeta();
+                                  await DB.saveMessage({
+                                      charId,
+                                      role: 'assistant',
+                                      type: 'text',
+                                      content: chunk,
+                                      timestamp: baseTimestamp + offset,
+                                      ...(meta ? { metadata: meta } : {}),
+                                  });
+                                  savedPreviewChunks.push(chunk);
+                                  offset += 1;
+                              }
+                          }
+                      };
 
                       const tagPattern = /<翻译>\s*<原文>([\s\S]*?)<\/原文>\s*<译文>([\s\S]*?)<\/译文>\s*<\/翻译>/g;
                       let lastIndex = 0;
                       let tagMatch;
                       while ((tagMatch = tagPattern.exec(aiContent)) !== null) {
                           const textBefore = aiContent.slice(lastIndex, tagMatch.index).trim();
-                          if (textBefore) {
-                              const cleaned = ChatParser.sanitize(textBefore);
-                              if (cleaned && ChatParser.hasDisplayContent(cleaned)) {
-                                  for (const chunk of ChatParser.chunkText(cleaned)) {
-                                      if (!chunk) continue;
-                                      const meta = consumeThinkingMeta();
-                                      await DB.saveMessage({
-                                          charId,
-                                          role: 'assistant',
-                                          type: 'text',
-                                          content: chunk,
-                                          timestamp: baseTimestamp + offset,
-                                          ...(meta ? { metadata: meta } : {}),
-                                      });
-                                      savedPreviewChunks.push(chunk);
-                                      offset += 1;
-                                  }
-                              }
-                          }
+                          if (textBefore) await renderPlainSegment(textBefore);
 
-                          const originalText = ChatParser.sanitize(tagMatch[1].trim());
-                          const translatedText = ChatParser.sanitize(tagMatch[2].trim());
+                          // 混进 <原文>/<译文> 里的表情标签剥出来，紧跟这条双语气泡之后发
+                          const inlineEmojis: string[] = [];
+                          const stripInlineEmoji = (s: string): string =>
+                              s.replace(/\[\[SEND_EMOJI:\s*(.*?)\]\]/g, (_m, n) => { inlineEmojis.push(String(n).trim()); return ''; });
+                          const originalText = ChatParser.sanitize(stripInlineEmoji(tagMatch[1]).trim());
+                          const translatedText = ChatParser.sanitize(stripInlineEmoji(tagMatch[2]).trim());
                           if (originalText || translatedText) {
                               const biContent = originalText && translatedText
                                   ? `${originalText}\n%%BILINGUAL%%\n${translatedText}`
@@ -1734,46 +2013,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                               savedPreviewChunks.push(originalText || translatedText);
                               offset += 1;
                           }
+                          for (const name of inlineEmojis) await sendEmojiBubble(name);
 
                           lastIndex = tagMatch.index + tagMatch[0].length;
                       }
 
                       const textAfter = aiContent.slice(lastIndex).trim();
-                      if (textAfter) {
-                          const cleaned = ChatParser.sanitize(textAfter.replace(/<\/?翻译>|<\/?原文>|<\/?译文>/g, '').trim());
-                          if (cleaned && ChatParser.hasDisplayContent(cleaned)) {
-                              for (const chunk of ChatParser.chunkText(cleaned)) {
-                                  if (!chunk) continue;
-                                  const meta = consumeThinkingMeta();
-                                  await DB.saveMessage({
-                                      charId,
-                                      role: 'assistant',
-                                      type: 'text',
-                                      content: chunk,
-                                      timestamp: baseTimestamp + offset,
-                                      ...(meta ? { metadata: meta } : {}),
-                                  });
-                                  savedPreviewChunks.push(chunk);
-                                  offset += 1;
-                              }
-                          }
-                      }
-
-                      for (const emojiName of bilingualEmojis) {
-                          const foundEmoji = emojis.find(e => e.name === emojiName);
-                          if (foundEmoji?.url) {
-                              const meta = consumeThinkingMeta();
-                              await DB.saveMessage({
-                                  charId,
-                                  role: 'assistant',
-                                  type: 'emoji',
-                                  content: foundEmoji.url,
-                                  timestamp: baseTimestamp + offset,
-                                  ...(meta ? { metadata: meta } : {}),
-                              });
-                              offset += 1;
-                          }
-                      }
+                      if (textAfter) await renderPlainSegment(textAfter.replace(/<\/?翻译>|<\/?原文>|<\/?译文>/g, '').trim());
                   } else {
                       const responseParts = ChatParser.splitResponse(aiContent);
 
@@ -1828,9 +2074,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   }
               }
 
-              if (offset > 0) {
+              if (offset > 0 || musicActionExecuted) {
                   const previewSource = savedPreviewChunks.join(' ').trim();
-                  const preview = previewSource.replace(/\s+/g, ' ').trim().slice(0, 120) || `${char.name} sent a proactive message`;
+                  const preview = previewSource.replace(/\s+/g, ' ').trim().slice(0, 120)
+                      || (musicActionExecuted ? `${char.name} 回应了新歌` : `${char.name} sent a proactive message`);
 
                   // 6. Notify OS for unread badge + toast
                   window.dispatchEvent(new CustomEvent('proactive-message-sent', {
@@ -1854,6 +2101,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       ProactiveChat.onTrigger((charId: string) => {
           void runProactive(charId);
       });
+
+      const onMusicTrackChanged = (event: Event) => {
+          const detail = (event as CustomEvent<MusicTrackChangeDetail>).detail;
+          if (!detail?.currentSong || !Array.isArray(detail.charIds)) return;
+          for (const charId of new Set(detail.charIds)) {
+              void runProactive(charId, { kind: 'music-track-change', detail });
+          }
+      };
+      window.addEventListener(MUSIC_TRACK_CHANGED_EVENT, onMusicTrackChanged);
 
       // 「彼方」自主登入 —— 独立调度，复用同一批 refs 拿最新状态
       const runVR = async (charId: string, room?: string, letterId?: string) => {
@@ -1937,11 +2193,17 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       window.addEventListener('world-reroll-request', onRerollRequest as EventListener);
       // 调度表存 localStorage 不随备份迁移，按 IndexedDB 里的世界配置对账
       void DB.getWorlds()
-          .then(worlds => WorldScheduler.reconcile(
-              worlds
-                  .filter(w => (w.offlineTickSlots?.length || 0) > 0)
-                  .map(w => ({ worldId: w.id, slots: w.offlineTickSlots! }))
-          ))
+          .then(async worlds => {
+              // 旧存档（一天三段制）→ 四段制（含凌晨）一次性迁移并写回
+              for (const w of worlds) {
+                  if (migrateWorldDaySegs(w)) await DB.saveWorld(w).catch(() => {});
+              }
+              WorldScheduler.reconcile(
+                  worlds
+                      .filter(w => (w.offlineTickSlots?.length || 0) > 0)
+                      .map(w => ({ worldId: w.id, slots: w.offlineTickSlots! }))
+              );
+          })
           .catch(() => {});
 
       return () => {
@@ -1949,6 +2211,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           ProactiveChat.onTrigger(() => {});
           VRScheduler.onTrigger(() => {});
           WorldScheduler.onTrigger(() => {});
+          window.removeEventListener(MUSIC_TRACK_CHANGED_EVENT, onMusicTrackChanged);
           window.removeEventListener('world-reroll-request', onRerollRequest as EventListener);
       };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1969,16 +2232,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         delete w['br'];
         newTheme.launcherWidgets = Object.keys(w).length > 0 ? w : undefined;
     }
-    setTheme(newTheme);
-
-    // Persist large assets to IndexedDB
+    // 壁纸改存 Blob：把指针（令牌）落库并解析成可渲染 url 后再进 state。
+    // theme.wallpaper 在内存里始终是能直接喂 CSS 的值（objectURL / http / 渐变），
+    // 不是 blobref 令牌。
     if (wallpaper !== undefined) {
-        if (wallpaper && wallpaper.startsWith('data:')) {
-            await DB.saveAsset('wallpaper', wallpaper);
-        } else {
-            await DB.deleteAsset('wallpaper');
-        }
+        newTheme.wallpaper = await resolveWallpaperStoredValue(wallpaper);
     }
+    setTheme(newTheme);
 
     // Legacy single-image asset is permanently banned — always delete, never save.
     await DB.deleteAsset('launcherWidgetImage');
@@ -2036,9 +2296,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         }
     }
 
-    // Save lightweight settings to LocalStorage (strip data URIs)
+    // Save lightweight settings to LocalStorage (strip data URIs & blob object URLs)
+    // blob: objectURL 是本次会话临时的，重启后失效——不能进 LS，清空让加载路径从 assets 重新解析。
     const lsTheme = { ...newTheme };
-    if (lsTheme.wallpaper && lsTheme.wallpaper.startsWith('data:')) lsTheme.wallpaper = '';
+    if (lsTheme.wallpaper && (lsTheme.wallpaper.startsWith('data:') || lsTheme.wallpaper.startsWith('blob:'))) lsTheme.wallpaper = '';
     // Banned legacy field — never persist.
     lsTheme.launcherWidgetImage = undefined;
     // Strip data URIs and deprecated slots from widgets for LS
@@ -2062,7 +2323,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     // Clear data URI font from LS, keep URL font
     if (lsTheme.customFont && lsTheme.customFont.startsWith('data:')) lsTheme.customFont = '';
 
-    localStorage.setItem('os_theme', JSON.stringify(lsTheme));
+    try {
+        localStorage.setItem('os_theme', JSON.stringify(lsTheme));
+    } catch (e) {
+        // quota 满时静默失败 = 用户这次看着正常、下次启动主题回初始。必须让用户知道。
+        console.warn('[updateTheme] localStorage 写入失败', e);
+        addToast('主题没能保存到本地（存储空间可能已满），重启后可能会还原', 'error');
+    }
   };
   const updateApiConfig = (updates: Partial<APIConfig>) => { const newConfig = { ...apiConfig, ...updates }; setApiConfig(newConfig); localStorage.setItem('os_api_config', JSON.stringify(newConfig)); };
   const updateRealtimeConfig = (updates: Partial<RealtimeConfig>) => { const newConfig = { ...realtimeConfig, ...updates }; setRealtimeConfig(newConfig); localStorage.setItem('os_realtime_config', JSON.stringify(newConfig)); };
@@ -2197,10 +2464,59 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     setCharacters(prev => [...prev, newChar]);
     setActiveCharacterId(newChar.id);
     await DB.saveCharacter(newChar);
+    return newChar;
   };
   const updateCharacter = async (id: string, updates: Partial<CharacterProfile> | ((prev: CharacterProfile) => Partial<CharacterProfile>)) => { setCharacters(prev => { const updated = prev.map(c => c.id === id ? normalizeCharacterImpression({ ...c, ...(typeof updates === 'function' ? updates(c) : updates) }) : c); const target = updated.find(c => c.id === id); if (target) DB.saveCharacter(target); return updated; }); };
-  const deleteCharacter = async (id: string) => { setCharacters(prev => { const remaining = prev.filter(c => c.id !== id); if (remaining.length > 0 && activeCharacterId === id) { setActiveCharacterId(remaining[0].id); } return remaining; }); await DB.deleteCharacter(id); };
-  
+  const deleteCharacter = async (id: string) => {
+    setCharacters(prev => { const remaining = prev.filter(c => c.id !== id); if (remaining.length > 0 && activeCharacterId === id) { setActiveCharacterId(remaining[0].id); } return remaining; });
+    await DB.deleteCharacter(id);
+    // 表情分类不随角色级联删除会留下「幽灵专属包」：单聊面板被可见性过滤掉（删不掉），
+    // 群聊面板/提示词却还能看到。删完角色顺手按剩余角色清一次残留（详见 DB.cleanupEmojiResidue）。
+    try {
+        const remainingIds = characters.filter(c => c.id !== id).map(c => c.id);
+        const report = await DB.cleanupEmojiResidue(remainingIds);
+        if (report.removedCategories.length > 0) {
+            addToast(`已连带清理 ta 的专属表情分类：${report.removedCategories.map(c => `「${c.name}」`).join('')}`, 'info');
+        }
+    } catch (err) {
+        console.warn('[deleteCharacter] 表情包残留清理失败（不影响角色删除）', err);
+    }
+  };
+
+  // 角色分组方法（神经链接"文件夹"）
+  const createCharacterGroup = async (name: string): Promise<CharacterGroup | null> => {
+      const trimmed = name.trim();
+      if (!trimmed) return null;
+      const newGroup: CharacterGroup = { id: `cgroup-${Date.now()}`, name: trimmed, createdAt: Date.now() };
+      await DB.saveCharacterGroup(newGroup);
+      setCharacterGroups(prev => [...prev, newGroup]);
+      return newGroup;
+  };
+
+  const renameCharacterGroup = async (id: string, name: string) => {
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      let target: CharacterGroup | undefined;
+      setCharacterGroups(prev => {
+          const updated = prev.map(g => g.id === id ? { ...g, name: trimmed } : g);
+          target = updated.find(g => g.id === id);
+          return updated;
+      });
+      if (target) await DB.saveCharacterGroup(target);
+  };
+
+  // 删分组 = 组内角色回落「未分组」+ 删分组定义本身，角色不受影响
+  const deleteCharacterGroup = async (id: string) => {
+      setCharacters(prev => prev.map(c => {
+          if (c.groupId !== id) return c;
+          const next = { ...c, groupId: undefined };
+          DB.saveCharacter(next);
+          return next;
+      }));
+      await DB.deleteCharacterGroup(id);
+      setCharacterGroups(prev => prev.filter(g => g.id !== id));
+  };
+
   // Group Methods
   const createGroup = async (name: string, members: string[]) => {
       const newGroup: GroupProfile = {
@@ -2217,13 +2533,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const updateGroup = async (id: string, updates: Partial<GroupProfile>) => {
       // 先更新内存中的 groups（列表渲染、再次进群都读这里），再持久化到 DB。
       // 不更新 context 会导致改了群头像/群名退出后又读回旧值（恢复默认）。
-      let target: GroupProfile | undefined;
-      setGroups(prev => {
-          const updated = prev.map(g => g.id === id ? { ...g, ...updates } : g);
-          target = updated.find(g => g.id === id);
-          return updated;
-      });
-      if (target) await DB.saveGroup(target);
+      setGroups(prev => prev.map(g => g.id === id ? { ...g, ...updates } : g));
+      // 持久化对象基于当前已提交的 groups 合成，不在 setGroups 的 updater 里捕获——
+      // React 不保证 updater 同步执行（eager 求值只是优化），旧写法会时而拿到旧值、
+      // 时而整个跳过 saveGroup，表现为"内存已更新、退出重进设置丢失"。
+      const base = groups.find(g => g.id === id);
+      if (base) await DB.saveGroup({ ...base, ...updates });
   };
 
   const deleteGroup = async (id: string) => {
@@ -2345,11 +2660,17 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   // --- APPEARANCE PRESETS ---
   const saveAppearancePreset = async (name: string) => {
+      // theme.wallpaper 在内存里是 blob: objectURL（会话临时），不能存进预设。
+      // 换成 assets 'wallpaper' 里的持久指针（blobref 令牌 / http / 渐变）。
+      const presetTheme: OSTheme = { ...theme };
+      if (presetTheme.wallpaper && presetTheme.wallpaper.startsWith('blob:')) {
+          presetTheme.wallpaper = (await DB.getAsset('wallpaper')) || '';
+      }
       const preset: AppearancePreset = {
           id: `ap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           name,
           createdAt: Date.now(),
-          theme: { ...theme },
+          theme: presetTheme,
           customIcons: Object.keys(customIcons).length > 0 ? { ...customIcons } : undefined,
           chatThemes: customThemes.length > 0 ? [...customThemes] : undefined,
       };
@@ -2370,11 +2691,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           delete w['br'];
           sanitizedPresetTheme.launcherWidgets = Object.keys(w).length > 0 ? w : undefined;
       }
+      // 壁纸改存 Blob：把预设里的指针（blobref 令牌 / 旧 data:）落库并解析成 objectURL 再进 state。
+      if (sanitizedPresetTheme.wallpaper !== undefined && typeof sanitizedPresetTheme.wallpaper === 'string') {
+          sanitizedPresetTheme.wallpaper = await resolveWallpaperStoredValue(sanitizedPresetTheme.wallpaper);
+      }
       // Apply theme
       setTheme(sanitizedPresetTheme);
-      // 写 LS 前必须剥 data URI，否则 base64 壁纸会撑爆 5MB quota
+      // 写 LS 前必须剥 data URI / blob: objectURL，否则 base64 壁纸撑爆 quota、blob: 重启即失效
       const lsTheme: any = { ...sanitizedPresetTheme };
-      if (lsTheme.wallpaper && typeof lsTheme.wallpaper === 'string' && lsTheme.wallpaper.startsWith('data:')) lsTheme.wallpaper = '';
+      if (lsTheme.wallpaper && typeof lsTheme.wallpaper === 'string' && (lsTheme.wallpaper.startsWith('data:') || lsTheme.wallpaper.startsWith('blob:'))) lsTheme.wallpaper = '';
       lsTheme.launcherWidgetImage = undefined;
       if (lsTheme.launcherWidgets) {
           const cleanWidgets: Record<string, string> = {};
@@ -2394,7 +2719,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       try {
           localStorage.setItem('os_theme', JSON.stringify(lsTheme));
       } catch (e) {
+          // 静默跳过 = 预设这次看着已应用、下次启动却回初始主题。必须提示。
           console.warn('[applyAppearancePreset] localStorage 写入失败，已跳过', e);
+          addToast('主题没能保存到本地（存储空间可能已满），重启后可能会还原', 'error');
       }
       applyCustomFont(preset.theme.customFont);
       // Apply custom icons if present
@@ -2419,10 +2746,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               return merged;
           });
       }
-      // Save wallpaper/widgets/decos to assets
-      if (preset.theme.wallpaper && preset.theme.wallpaper.startsWith('data:')) {
-          await DB.saveAsset('wallpaper', preset.theme.wallpaper);
-      }
+      // 壁纸指针已在上面 resolveWallpaperStoredValue 里落库（令牌→assets），此处不再重复写。
       if (preset.theme.desktopDecorations) {
           for (const d of preset.theme.desktopDecorations) {
               if (d.type === 'image' && d.content) {
@@ -2494,8 +2818,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const exportAppearancePreset = async (id: string): Promise<Blob> => {
       const preset = appearancePresets.find(p => p.id === id);
       if (!preset) throw new Error('预设不存在');
+      // 预设里的壁纸可能是 blobref 令牌（本机 blob_assets），导出到别的设备会失效——
+      // 先深拷贝再把令牌解析回 data:image，保证导出文件自包含可移植。
+      const exportPreset = deepCloneForExport(preset);
+      await resolveBlobRefsDeep(exportPreset);
       // 保留原始壁纸画质，把整个预设 JSON 塞进 zip 包压体积
-      const data = JSON.stringify({ type: 'sully_appearance_preset', version: 1, ...preset }, null, 2);
+      const data = JSON.stringify({ type: 'sully_appearance_preset', version: 1, ...exportPreset }, null, 2);
       const JSZip = await loadJSZip();
       const zip = new JSZip();
       (zip as any).file('preset.json', data);
@@ -2554,7 +2882,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // Strip Base64 Images (Recursive) - Used for Text Only Mode
           const stripBase64 = (obj: any): any => {
               if (typeof obj === 'string') {
-                  if (obj.startsWith('data:image')) return '';
+                  // text_only 模式剥掉所有图片：data:image 与 blobref 令牌（令牌无二进制随行，
+                  // 恢复端认不得，等同一张丢失的图）都清空。
+                  if (obj.startsWith('data:image') || obj.startsWith(BLOBREF_PREFIX)) return '';
                   return obj;
               }
               if (Array.isArray(obj)) {
@@ -2619,7 +2949,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // 1. Define Stores to Process based on Mode
           let storesToProcess: string[] = [];
           const allStores = [
-              'characters', 'messages', 'themes', 'emojis', 'emoji_categories', 'assets', 'gallery',
+              // character_groups（角色分组定义）必须与 characters 同进退：
+              // 角色身上的 groupId 指向这张表，漏导会让导入端全员回落「未分组」
+              'characters', 'character_groups', 'messages', 'themes', 'emojis', 'emoji_categories', 'assets', 'gallery',
               'user_profile', 'diaries', 'tasks', 'anniversaries', 'room_todos',
               'room_notes', 'groups', 'journal_stickers', 'social_posts', 'courses', 'games', 'worldbooks', 'novels', 'songs',
               'bank_transactions', 'bank_data',
@@ -2627,6 +2959,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               'quizzes', 'guidebook', 'scheduled_messages', 'life_sim',
               'handbook', 'trackers', 'tracker_entries', 'hotnews_snapshots',
               'memory_nodes', 'memory_vectors', 'memory_links', 'topic_boxes', 'anticipations', 'event_boxes',
+              'room_plates', 'digest_reports',
               'daily_schedule', 'memory_batches',
               'pixel_home_assets', 'pixel_home_layouts',
               // 「彼方」虚拟世界各房间 store —— 早期导出清单漏了，导致备份不含房间数据
@@ -2637,7 +2970,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // 家园（同世界观多角色大世界）——世界定义 + 演绎历史。导入端早已支持恢复
               // （worldHomeLocal 本机配置也已随导出带走），但这两个 store 之前漏在清单外，
               // 导致导出的备份不含家园数据。
-              'worlds', 'world_episodes'
+              'worlds', 'world_episodes',
+              // 生活记录（档案 App：生理期/药盒/锻炼 + 药盒计划 + 设置；记账走 bank_transactions）
+              // 导入端 importFullData 已支持恢复，这里必须同步登记，否则备份不含生活记录。
+              'life_records', 'med_plans', 'life_record_settings'
           ];
 
           if (mode === 'full') {
@@ -2797,13 +3133,22 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               //  · 瑞幸 / 麦当劳 MCP 的点单 token + 启用状态（用户说的「那个码」）
               //  · 邮局身份、家园全局 API + 文风收藏
               vrPostOffice: (mode === 'text_only' || mode === 'full') ? exportPostOfficeLocal() : undefined,
+              vrSignal: (mode === 'text_only' || mode === 'full') ? exportSignalLocal() : undefined, // 信号坠落处：句子归属「你·角色」+ 反复用清单
               worldHomeLocal: (mode === 'text_only' || mode === 'full') ? exportWorldHomeLocal() : undefined,
               luckinLocal: (mode === 'text_only' || mode === 'full') ? exportLuckinLocal() : undefined,
               mcdLocal: (mode === 'text_only' || mode === 'full') ? exportMcdLocal() : undefined,
 
               // 梦境盲盒收藏册（账号级 localStorage，不挂在角色上，需单独随备份带走）
               dreamCollection: (mode === 'text_only' || mode === 'full') ? (() => { try { const s = localStorage.getItem('os_dream_collection'); return s ? JSON.parse(s) : undefined; } catch { return undefined; } })() : undefined,
+
+              // 桌面电子宠物主题的主色调偏好（账号级 localStorage）。room_card 涓流卡片本身
+              // 是普通消息、随 messages store 一起导出，这里只补带走这个纯外观偏好。
+              gotchiAccentHue: (mode === 'text_only' || mode === 'full') ? (() => { try { const s = localStorage.getItem('tama_accent_hue'); return s !== null ? s : undefined; } catch { return undefined; } })() : undefined,
           };
+
+          // 桌面皮肤偏好（电子宠物/手游风的界面配色 + 看板 banner）——异步（看板图令牌需解析为
+          // data URL 才能跨设备），所以在对象字面量外单独 await。text_only 只带配色偏好、跳过看板大图。
+          backupData.desktopSkinLocal = await exportDesktopSkinLocal(mode !== 'text_only');
 
           const totalSteps = storesToProcess.length + 3;
           let currentStep = 0;
@@ -2811,6 +3156,21 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // Pre-process specialized image fields (Social App, Theme)。processObject 是
           // 原地改，所以这里按语句调用、不接返回值，读起来就是「就地处理这个对象」。
           if (mode !== 'text_only') {
+              // 壁纸 / 小屋自定义素材 / 外观预设里可能存的是 blobref 令牌（本机 blob_assets）。
+              // 先把令牌解析回 data:image，再交给下面 processObject 的 data:→zip 抽取管线，
+              // 备份格式与可移植性完全不变。theme.wallpaper 内存里是 blob: objectURL，
+              // resolveBlobRefsDeep 认不得 blob:，所以壁纸单独按令牌指针读 assets 还原。
+              if (backupData.theme) {
+                  const wp = (backupData.theme as any).wallpaper;
+                  if (typeof wp === 'string' && wp.startsWith('blob:')) {
+                      const ptr = await DB.getAsset('wallpaper'); // blobref 令牌 / 旧 data: / http
+                      (backupData.theme as any).wallpaper = ptr || '';
+                  }
+                  await resolveBlobRefsDeep(backupData.theme);
+              }
+              if (backupData.roomCustomAssets) await resolveBlobRefsDeep(backupData.roomCustomAssets);
+              if (backupData.appearancePresets) await resolveBlobRefsDeep(backupData.appearancePresets);
+
               if (backupData.socialAppData?.userProfile) processObject(backupData.socialAppData.userProfile);
               if (backupData.socialAppData?.userBg) processObject(backupData.socialAppData.userBg);
               if (backupData.roomCustomAssets) processObject(backupData.roomCustomAssets);
@@ -2830,6 +3190,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       ?.filter(d => d.type === 'preset')
                       .map(d => ({ id: d.id, content: d.content }));
                   const strippedTheme = stripBase64(backupData.theme) as OSTheme;
+                  // text_only 不带图片：内存里的壁纸是 blob: objectURL（会话临时，恢复端认不得），
+                  // blobref 令牌 stripBase64 已清空——这里补清 blob: 避免导出一个死链接壁纸。
+                  if (strippedTheme.wallpaper && strippedTheme.wallpaper.startsWith('blob:')) strippedTheme.wallpaper = '';
                   backupData.theme = strippedTheme;
                   // Restore preset SVGs and remove image decorations (they have no data in text mode)
                   if (strippedTheme.desktopDecorations && savedPresetDecos) {
@@ -2846,7 +3209,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // Stores that never contain base64 image data — skip recursive traversal
           const noImageStores = new Set([
               'memory_nodes', 'memory_vectors', 'memory_links', 'topic_boxes', 'anticipations', 'event_boxes',
-              'bank_transactions', 'scheduled_messages', 'memory_batches', 'hotnews_snapshots'
+              'room_plates', 'digest_reports',
+              'bank_transactions', 'scheduled_messages', 'memory_batches', 'hotnews_snapshots',
+              'character_groups',
+              'life_records', 'med_plans', 'life_record_settings'
           ]);
 
           // Chunked processObject for large arrays — yields to main thread every 200 items
@@ -2885,6 +3251,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   vectorPayload = encodeVectorsForBackup(Array.isArray(rawData) ? rawData : []);
                   await new Promise(resolve => setTimeout(resolve, 10));
                   continue;
+              }
+
+              // 这些 store 的图片可能存的是 blobref 令牌，媒体/全量模式下先解析回 data:image，
+              // 令后面的 data:→zip 抽取能认得：
+              //  · characters：小屋 roomConfig.wallImage/floorImage/items[].image、sprites.chibi
+              //    （media_only 的 roomItems/backgrounds 提取也依赖已还原成 data:）
+              //  · cc_custom_parts：捏人器自定义部件的 src / shadowSrc
+              if ((storeName === 'characters' || storeName === 'cc_custom_parts') && mode !== 'text_only' && Array.isArray(rawData)) {
+                  for (const c of rawData) await resolveBlobRefsDeep(c);
               }
 
               // --- MODE SPECIFIC FILTERING ---
@@ -2953,6 +3328,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // Assign to Backup Data
               switch(storeName) {
                   case 'characters': if(mode !== 'media_only') backupData.characters = processedData; break;
+                  // 角色分组定义 —— 键名须与 importFullData 读取的字段（data.characterGroups）对齐
+                  case 'character_groups': backupData.characterGroups = processedData; break;
                   case 'messages': backupData.messages = processedData; break;
                   case 'themes': backupData.customThemes = processedData; break;
                   case 'emojis': backupData.savedEmojis = processedData; break;
@@ -2992,6 +3369,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   case 'handbook': backupData.handbooks = processedData; break;
                   case 'trackers': backupData.trackers = processedData; break;
                   case 'tracker_entries': backupData.trackerEntries = processedData; break;
+                  case 'life_records': backupData.lifeRecords = processedData; break;
+                  case 'med_plans': backupData.medPlans = processedData; break;
+                  case 'life_record_settings': backupData.lifeRecordSettings = processedData; break;
                   case 'hotnews_snapshots': backupData.hotNewsSnapshots = processedData; break;
                   case 'memory_nodes': backupData.memoryNodes = processedData; break;
                   // memory_vectors 走二进制旁路（上面已 continue），不在此 switch 落 backupData
@@ -2999,6 +3379,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   case 'topic_boxes': backupData.topicBoxes = processedData; break;
                   case 'anticipations': backupData.anticipations = processedData; break;
                   case 'event_boxes': backupData.eventBoxes = processedData; break;
+                  case 'room_plates': backupData.roomPlates = processedData; break;
+                  case 'digest_reports': backupData.digestReports = processedData; break;
                   case 'daily_schedule': backupData.dailySchedules = processedData; break;
                   case 'memory_batches': backupData.memoryBatches = processedData; break;
                   case 'pixel_home_assets': backupData.pixelHomeAssets = processedData; break;
@@ -3064,6 +3446,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           );
 
           setSysOperation({ status: 'idle', message: '', progress: 100 });
+          // 备份成功 → 推进「该备份啦」提醒的计时（本地导出 / 云备份都走这里，一处覆盖两条路径）
+          markBackupDone();
           return content;
 
       } catch (e: any) {
@@ -3439,6 +3823,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (typeof data.bm25Mode === 'string') localStorage.setItem('bm25_mode', data.bm25Mode);
           if (typeof data.lastActiveCharId === 'string') localStorage.setItem('os_last_active_char_id', data.lastActiveCharId);
           if (data.dreamCollection && typeof data.dreamCollection === 'object') localStorage.setItem('os_dream_collection', JSON.stringify(data.dreamCollection));
+          if (typeof data.gotchiAccentHue === 'string' && /^\d+$/.test(data.gotchiAccentHue)) localStorage.setItem('tama_accent_hue', data.gotchiAccentHue);
           if (data.eventNotifFlags && typeof data.eventNotifFlags === 'object') {
               for (const [key, val] of Object.entries(data.eventNotifFlags)) {
                   // 只允许 sullyos_ 前缀，避免污染其它键
@@ -3537,6 +3922,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const resetSystem = async () => { try { await DB.deleteDB(); localStorage.clear(); window.location.reload(); } catch (e) { console.error(e); addToast('重置失败，请手动清除浏览器数据', 'error'); } };
   const openApp = (appId: AppID) => setActiveApp(appId);
   const closeApp = () => setActiveApp(AppID.Launcher);
+  // 从聊天直接进入某角色的见面：切换当前角色 + 标记自动进入 + 打开见面 App
+  const openDateWithChar = (charId: string) => {
+    setActiveCharacterId(charId);
+    setDateAutoStartCharId(charId);
+    setActiveApp(AppID.Date);
+  };
+  const consumeDateAutoStart = () => setDateAutoStartCharId(null);
   const unlock = () => setIsLocked(false);
 
   const suspendCall = (info: { charId: string; charName: string; charAvatar?: string; startedAt: number; bubbles?: any[]; sessionId?: string; elapsedSeconds?: number; voiceLang?: string }) => {
@@ -3589,6 +3981,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     updateCharacter,
     deleteCharacter,
     setActiveCharacterId,
+    characterGroups,
+    createCharacterGroup,
+    renameCharacterGroup,
+    deleteCharacterGroup,
     worldbooks,
     addWorldbook,
     updateWorldbook,
@@ -3659,7 +4055,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     suspendedCall,
     suspendCall,
     resumeCall,
-    clearSuspendedCall
+    clearSuspendedCall,
+    dateAutoStartCharId,
+    openDateWithChar,
+    consumeDateAutoStart
   };
 
   return (

@@ -9,9 +9,14 @@ import {
     reviveArchivedMemory,
     wipeAllMemoryPalace,
     exportMemoryPalace, importMemoryPalace, isMemoryPalaceExportFile,
+    DigestReportDB, PLATE_TITLES,
+    bootstrapPlatesFromHistory, markPlateBootstrapDone,
+    getBootstrapResume, setBootstrapResume, clearBootstrapResume,
 } from '../utils/memoryPalace';
-import type { Anticipation, MigrationProgress, DigestResult, MemoryLink, EventBox } from '../utils/memoryPalace';
+import type { Anticipation, MigrationProgress, DigestResult, MemoryLink, EventBox, DigestReport } from '../utils/memoryPalace';
+import { confirmExportSafety } from '../utils/exportGuard';
 import type { Message } from '../types';
+import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 
 /** 手动总结面板：每页渲染多少条聊天记录（翻页，避免一次性塞几百条 DOM 卡顿） */
 const RANGE_PAGE_SIZE = 100;
@@ -421,8 +426,9 @@ const labelClass = "text-[10px] font-bold text-slate-400 uppercase tracking-wide
 // ─── 主组件 ───────────────────────────────────────────
 
 export default function MemoryPalaceApp() {
-    const { activeCharacterId, characters, updateCharacter, setActiveCharacterId, closeApp, apiPresets, userProfile, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, updateRemoteVectorConfig, addToast, apiConfig } = useOS();
+    const { activeCharacterId, characters, updateCharacter, setActiveCharacterId, closeApp, apiPresets, userProfile, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, updateRemoteVectorConfig, addToast, apiConfig, characterGroups } = useOS();
     const char = characters.find(c => c.id === activeCharacterId);
+    const [selectGroupId, setSelectGroupId] = useState(GROUP_FILTER_ALL); // 选角色页的分组筛选
 
     const [view, setView] = useState<'picker' | 'palace' | 'room' | 'memory' | 'settings' | 'globalSettings' | 'all' | 'boxes'>('picker');
     const [selectedRoom, setSelectedRoom] = useState<MemoryRoom | null>(null);
@@ -484,6 +490,48 @@ export default function MemoryPalaceApp() {
     // 认知消化状态
     const [digesting, setDigesting] = useState(false);
     const [digestResult, setDigestResult] = useState<string | null>(null);
+    // 消化日志：null=未打开；[]=打开但没有记录
+    const [digestReports, setDigestReports] = useState<DigestReport[] | null>(null);
+    const [expandedReportId, setExpandedReportId] = useState<string | null>(null);
+    useEffect(() => { setDigestReports(null); setExpandedReportId(null); }, [char?.id]);
+    // 门牌历史回填（老用户把积压立牌）
+    const [bootstrapping, setBootstrapping] = useState(false);
+    const [bootstrapStatus, setBootstrapStatus] = useState<string | null>(null);
+
+    const handleBootstrapPlates = async () => {
+        if (!char || bootstrapping) return;
+        const lightApi = memoryPalaceConfig.lightLLM;
+        if (!lightApi?.baseUrl) {
+            setBootstrapStatus('[err]请先在设置中配置副 API');
+            return;
+        }
+        setBootstrapping(true);
+        setBootstrapStatus(null);
+        try {
+            // 每按一次只清一小段（断点续传）：上千条记忆的用户不会被一长串批次吓到，
+            // 也随时可以停——进度存在本地，下次按继续
+            const MANUAL_BATCHES_PER_PRESS = 5;
+            const result = await bootstrapPlatesFromHistory(char.id, char.name, userProfile?.name, lightApi, {
+                startBatch: getBootstrapResume(char.id),
+                maxBatches: MANUAL_BATCHES_PER_PRESS,
+                onProgress: (done, total) => setBootstrapStatus(`正在整理第 ${done}/${total} 批历史记忆…（请留在本页）`),
+            });
+            if (result.totalLines === 0) {
+                setBootstrapStatus('记忆宫殿里还没有可立牌的历史');
+            } else if (result.complete) {
+                markPlateBootstrapDone(char.id);
+                clearBootstrapResume(char.id);
+                setBootstrapStatus(`[ok]历史全部整理完（共 ${result.neededBatches} 批），更新 ${result.updated.length} 块门牌——去神经链接「门牌」页看看`);
+            } else {
+                setBootstrapResume(char.id, result.nextBatch);
+                setBootstrapStatus(`[ok]本次整理了 ${result.batches} 批（总进度 ${result.nextBatch}/${result.neededBatches}），更新 ${result.updated.length} 块门牌。再按一次继续`);
+            }
+        } catch (err: any) {
+            setBootstrapStatus(`[err]整理失败：${err?.message || err}（可再按一次重试，已整理的部分不会重复计入）`);
+        } finally {
+            setBootstrapping(false);
+        }
+    };
 
 
     // 一键清空
@@ -1400,17 +1448,15 @@ export default function MemoryPalaceApp() {
         try {
             const persona = [char.systemPrompt || '', char.worldview || ''].filter(Boolean).join('\n');
             const embApi = memoryPalaceConfig.embedding;
-            const result = await runCognitiveDigestion(char.id, char.name, persona, lightApi, true, userProfile?.name, embApi);
+            const result = await runCognitiveDigestion(
+                char.id, char.name, persona, lightApi, true, userProfile?.name, embApi,
+                (stage) => setDigestResult(stage), // 审视→回填续传→整理门牌, 逐阶段刷给用户看
+            );
             if (!result) {
                 setDigestResult('没有需要消化的内容');
             } else {
-                // 如果产生了新的自我领悟，持久化到角色档案
-                if (result.selfInsights.length > 0) {
-                    const existing = (char as any).selfInsights || [];
-                    const updated = [...existing, ...result.selfInsights];
-                    updateCharacter(char.id, { selfInsights: updated } as any);
-                }
-
+                // 自我领悟的归宿已改为 self_room 门牌（digestion 内部提交），
+                // 不再追加 char.selfInsights；这里只做结果摘要展示
                 const parts: string[] = [];
                 if (result.resolved.length) parts.push(`${result.resolved.length} 条困惑化解`);
                 if (result.deepened.length) parts.push(`${result.deepened.length} 条创伤加深`);
@@ -1421,9 +1467,17 @@ export default function MemoryPalaceApp() {
                 if (result.synthesizedUser.length) parts.push(`${result.synthesizedUser.length} 条用户认知整合`);
                 if (result.selfInsights.length) parts.push(`${result.selfInsights.length} 条自我领悟`);
                 if (result.selfConfused.length) parts.push(`${result.selfConfused.length} 条新困惑`);
+                if (result.worries?.length) parts.push(`${result.worries.length} 条回看担忧`);
+                if (result.aspirations?.length) parts.push(`${result.aspirations.length} 个新期盼`);
+                if (result.distilled?.length) parts.push(`${result.distilled.length} 条沉淀到门牌`);
+                if (result.plateUpdated?.length) parts.push(`${result.plateUpdated.length} 块门牌更新`);
                 setDigestResult(parts.length > 0 ? `[ok]${parts.join('，')}` : '没有变化');
             }
             loadStats();
+            // 消化日志面板开着的话，刷新出刚落的这条报告
+            if (digestReports !== null) {
+                try { setDigestReports(await DigestReportDB.getByCharId(char.id)); } catch { /* ignore */ }
+            }
         } catch (err: any) {
             setDigestResult(`[err]消化失败：${err.message}`);
         } finally {
@@ -1564,6 +1618,8 @@ export default function MemoryPalaceApp() {
                 setExportResult('[warn]当前角色还没有记忆宫殿节点，没什么可导出的');
                 return;
             }
+            // 导出前明文密钥体检 + 二次确认（记忆宫殿正常不含密钥 → 提示「安全，可分享」）。
+            if (!(await confirmExportSafety(data))) return;
             const json = JSON.stringify(data, null, 2);
             const safeName = (char.name || 'character').replace(/[\\/:*?"<>|]/g, '_');
             const fileName = `${safeName}_记忆宫殿_${new Date().toISOString().slice(0, 10)}.json`;
@@ -1611,8 +1667,9 @@ export default function MemoryPalaceApp() {
 
             const result = await importMemoryPalace(data, char.id);
             const vecPart = result.vectors > 0 ? `、${result.vectors} 条向量` : '';
+            const platePart = result.roomPlateEntries > 0 ? `、${result.roomPlateEntries} 条门牌认知` : '';
             setImportResult(
-                `[ok]已导入 ${result.nodes} 条记忆、${result.eventBoxes} 个事件盒、${result.anticipations} 个期盼${vecPart}`
+                `[ok]已导入 ${result.nodes} 条记忆、${result.eventBoxes} 个事件盒、${result.anticipations} 个期盼${vecPart}${platePart}`
                 + (hadVectors ? '' : '（无向量，建议到「全局设置」重建向量后再用语义检索）')
             );
             await loadStats();
@@ -1790,6 +1847,10 @@ export default function MemoryPalaceApp() {
                     </div>
                 </div>
 
+                {/* 分组筛选（没建分组时不渲染） */}
+                <CharacterGroupFilterBar characters={characters} groups={characterGroups}
+                    value={selectGroupId} onChange={setSelectGroupId}
+                    className="mb-4 relative z-[1]" />
                 {characters.length === 0 ? (
                     <div
                         style={{
@@ -1803,7 +1864,7 @@ export default function MemoryPalaceApp() {
                     </div>
                 ) : (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, position: 'relative', zIndex: 1 }}>
-                        {characters.map(c => {
+                        {filterCharactersByGroup(characters, characterGroups, selectGroupId).map(c => {
                             const isActive = c.id === activeCharacterId;
                             const palaceOn = !!(c as any).memoryPalaceEnabled;
                             const autoOn = !!(c as any).autoArchiveEnabled;
@@ -3762,6 +3823,7 @@ create table if not exists memory_vectors (
                     <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 12, lineHeight: 1.6 }}>
                         角色会安静地回想最近的事情：阁楼里的困惑有没有想开？窗台上的期盼实现了吗？
                         反复学到的东西是否已经内化成性格的一部分？聊天每 50 轮自动触发一次，也可以随时手动触发。
+                        整合出的概括（用户认知 / 知识内化 / 自我领悟）会沉淀到房间门牌，不再新增记忆条目。
                     </div>
 
                     {digestResult && (
@@ -3783,6 +3845,106 @@ create table if not exists memory_vectors (
                     >
                         {digesting ? `${char.name}正在静静地回想…` : '手动触发消化'}
                     </button>
+
+                    {/* 门牌历史回填：老用户的积压不该白攒——分批扫全部历史立牌 */}
+                    {bootstrapStatus && (
+                        <div style={{ fontSize: 12, marginTop: 8, color: bootstrapStatus.startsWith('[ok]') ? '#7c3aed' : bootstrapStatus.startsWith('[err]') ? '#dc2626' : '#6b7280' }}>
+                            <StatusMessage msg={bootstrapStatus} />
+                        </div>
+                    )}
+                    <button
+                        onClick={handleBootstrapPlates}
+                        disabled={bootstrapping}
+                        style={{
+                            width: '100%', marginTop: 8, padding: '8px 0',
+                            borderRadius: 10, border: '1px solid #ddd6fe',
+                            fontSize: 12, fontWeight: 600,
+                            color: '#7c3aed', background: 'white',
+                            cursor: bootstrapping ? 'not-allowed' : 'pointer',
+                            opacity: bootstrapping ? 0.6 : 1,
+                        }}
+                    >
+                        {bootstrapping ? '正在整理…' : '整理历史记忆到门牌（每次一小段，可分多次）'}
+                    </button>
+
+                    {/* 消化日志：每次消化到底审视了什么、改了什么、往门牌提交了什么 */}
+                    <button
+                        onClick={async () => {
+                            if (!char || digestReports !== null) { setDigestReports(null); return; }
+                            try {
+                                setDigestReports(await DigestReportDB.getByCharId(char.id));
+                            } catch { setDigestReports([]); }
+                        }}
+                        style={{
+                            width: '100%', marginTop: 8, padding: '8px 0',
+                            borderRadius: 10, border: '1px solid #bbf7d0',
+                            fontSize: 12, fontWeight: 600,
+                            color: '#166534', background: 'white', cursor: 'pointer',
+                        }}
+                    >
+                        {digestReports === null ? '查看消化日志' : '收起消化日志'}
+                    </button>
+
+                    {digestReports !== null && (
+                        <div style={{ marginTop: 10 }}>
+                            {digestReports.length === 0 && (
+                                <div style={{ fontSize: 11, color: '#9ca3af', textAlign: 'center', padding: '12px 0' }}>
+                                    还没有消化记录——触发一次消化后这里会记下它做了什么
+                                </div>
+                            )}
+                            {digestReports.map(report => {
+                                const expanded = expandedReportId === report.id;
+                                const outcomeCount = report.outcomes.reduce((s, sec) => s + sec.items.length, 0);
+                                const submitCount = report.plateSubmissions.reduce((s, sec) => s + sec.items.length, 0);
+                                const examinedCount = report.examined.reduce((s, sec) => s + sec.items.length, 0);
+                                const renderSection = (sec: { label: string; items: string[] }, color: string) => (
+                                    <div key={sec.label} style={{ marginTop: 6 }}>
+                                        <div style={{ fontSize: 10, fontWeight: 700, color }}>{sec.label}</div>
+                                        {sec.items.map((it, i) => (
+                                            <div key={i} style={{ fontSize: 11, color: '#475569', lineHeight: 1.5, padding: '2px 0 2px 8px', borderLeft: `2px solid ${color}22` }}>{it}</div>
+                                        ))}
+                                    </div>
+                                );
+                                return (
+                                    <div
+                                        key={report.id}
+                                        style={{ background: 'white', borderRadius: 10, border: '1px solid #e5e7eb', padding: '8px 10px', marginBottom: 6, cursor: 'pointer' }}
+                                        onClick={() => setExpandedReportId(expanded ? null : report.id)}
+                                    >
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                                            <span style={{ fontSize: 11, fontWeight: 700, color: '#334155' }}>
+                                                {fmtRangeTs(report.createdAt)}
+                                                <span style={{ fontWeight: 400, color: '#94a3b8', marginLeft: 6 }}>{report.trigger === 'auto' ? '自动' : '手动'}</span>
+                                            </span>
+                                            <span style={{ fontSize: 10, color: '#94a3b8' }}>
+                                                审视 {examinedCount} · 变化 {outcomeCount} · 提交门牌 {submitCount}
+                                            </span>
+                                        </div>
+                                        {expanded && (
+                                            <div style={{ marginTop: 4 }} onClick={e => e.stopPropagation()}>
+                                                {examinedCount === 0 && outcomeCount === 0 && submitCount === 0 && (
+                                                    <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>这次没有待消化的内容{report.plateUpdated.length > 0 ? '，但整理了门牌' : ''}</div>
+                                                )}
+                                                {report.examined.map(sec => renderSection(sec, '#0ea5e9'))}
+                                                {report.outcomes.map(sec => renderSection(sec, '#16a34a'))}
+                                                {report.plateSubmissions.map(sec => renderSection(sec, '#8b5cf6'))}
+                                                {report.plateUpdated.length > 0 && (
+                                                    <div style={{ fontSize: 10, color: '#8b5cf6', marginTop: 6 }}>
+                                                        门牌已更新：{report.plateUpdated.map(r => (PLATE_TITLES as Record<string, string>)[r] || r).join('、')}
+                                                    </div>
+                                                )}
+                                                {submitCount > 0 && report.plateUpdated.length === 0 && (
+                                                    <div style={{ fontSize: 10, color: '#f59e0b', marginTop: 6 }}>
+                                                        ⚠️ 本次提交的候选未合并进门牌（整理未跑成或未被采纳）
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
                 </div>
 
                 {/* 导出 / 导入记忆：接入外置记忆库、跨设备迁移 */}
@@ -3793,7 +3955,7 @@ create table if not exists memory_vectors (
                     </div>
                     <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 12, lineHeight: 1.6 }}>
                         把 <b>{char.name}</b> 记忆宫殿里的全部记忆导出成 JSON：含每条记忆的正文、房间、重要性、情绪、标签、时间，
-                        以及事件盒（整合回忆）和窗台期盼。
+                        以及事件盒（整合回忆）、窗台期盼和房间门牌（常驻认知）。
                     </div>
 
                     {/* 是否带向量：长期用同一 embedding 模型就勾上，向量可直接复用免重新向量化 */}

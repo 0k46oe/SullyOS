@@ -10,6 +10,7 @@ import {
 import { runPendingToolCalls } from './instantToolRunner';
 import { drainPendingDiaries } from './pendingDiary';
 import { applyEmotionEvalRaw } from './emotionApply';
+import { CHAT_GEN_EVENTS } from './chatGenEvents';
 import { processNewMessages } from './memoryPalace/pipeline';
 import { loadMusicHooks } from '../context/MusicContext';
 import type { XhsNote } from './realtimeContext';
@@ -483,6 +484,22 @@ const flushInboxToChatImpl = async () => {
         } catch (e) {
           console.warn('[flush:emotion_update] apply failed', e);
         }
+      } else {
+        // worker 端评估失败/空结果时 emotionRaw 是空串（worker 无论成败都推一条用来熄灯）。
+        // 过去这里静默跳过 —— 用户只看到「情绪更新中」灭了、情绪没变、无任何报错（真实反馈）。
+        // 派发失败事件让 OSContext 弹 toast。2026-07-17+ 的 worker 会把具体原因带在
+        // metadata.emotionError（副 API HTTP 状态等）；旧 worker 没这字段就给通用文案。
+        const workerReason = (message.metadata as any)?.emotionError;
+        try {
+          window.dispatchEvent(new CustomEvent(CHAT_GEN_EVENTS.emotionFailed, {
+            detail: {
+              charId: message.charId, charName: '',
+              reason: typeof workerReason === 'string' && workerReason
+                ? `云端评估失败——${workerReason}`
+                : '云端情绪评估无输出（副 API 报错或模型没返回内容，可查 worker 日志）',
+            },
+          }));
+        } catch { /* SSR-safe */ }
       }
       // 无论成功与否都通知 useChatAI 熄灭 "情绪更新中" 徽章 (buff 已落 / 或这轮没结果).
       try {

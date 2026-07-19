@@ -3,6 +3,7 @@ import { DB } from './db';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { CharacterProfile, CharPlaylistSong } from '../types';
 import { sanitizeForBubble } from './sanitize';
+import { executeLifeDirectives } from './lifeRecords';
 
 export interface MusicActionSnapshot {
     songId: number;
@@ -266,6 +267,21 @@ export const ChatParser = {
         }
         content = content.replace(scheduleRegex, '').trim();
 
+        // LIFE — 生活记录代记（生理期/药盒/记账/锻炼）。开关校验、去重、写库、落 life_card
+        // 都在 lifeRecords.ts 里；这里只负责取角色档案。取不到就只剥 tag（静默丢弃）。
+        if (content.includes('[[LIFE:')) {
+            try {
+                const chars = await DB.getAllCharacters();
+                const charProfile = chars.find(c => c.id === charId);
+                content = charProfile
+                    ? await executeLifeDirectives(content, charProfile, addToast)
+                    : content.replace(/\[\[LIFE:[^\]]*\]\]/g, '').trim();
+            } catch (e) {
+                console.error('[LifeRecord] parse failed:', e);
+                content = content.replace(/\[\[LIFE:[^\]]*\]\]/g, '').trim();
+            }
+        }
+
         // RECALL tag removal (handling done in main loop logic, but cleaning here just in case)
         content = content.replace(/\[\[RECALL:.*?\]\]/g, '').trim();
 
@@ -289,7 +305,8 @@ export const ChatParser = {
         const stripped = text
             .replace(/%%BILINGUAL%%/gi, '')
             .replace(/%%TRANS%%[\s\S]*/gi, '')
-            .replace(/<\/?翻译>|<\/?原文>|<\/?译文>/g, '')
+            // 容错版 (对齐 MessageItem stripJunk): 截断/全角/简繁的破翻译标签也不算显示内容
+            .replace(/[<＜]\s*[/／]?\s*(?:翻[译譯]|原文|[译譯]文)\s*[>＞]?/g, '')
             .replace(/^\s*---\s*$/gm, '')
             .replace(/``+/g, '')
             .replace(/(^|\s)`(\s|$)/gm, '$1$2')
@@ -341,8 +358,24 @@ export const ChatParser = {
         const cjkSplitRe = new RegExp(`([${CJK}])\\s+(?=[${CJK}])`, 'g');
         const SPLIT = String.fromCharCode(1);  // CJK 切点标记
 
+        // 0. 保护 <语音…>…</语音> 原子块。外语语音字幕对齐模式下 (见 chatPrompts
+        //    voiceActingGuide) 标签内部常按空行分成好几段，一旦被下面的换行断句切碎，
+        //    <语音> 的开 / 闭标签就会散落到不同气泡里；MessageItem 的 hasVoiceTag 要求
+        //    开闭成对，配不上就当纯文字漏出原始标签，语音条和翻译也全不渲染 (掉格式)。
+        //    跟 worker 端 sanitize.ts 的 Phase 1.5 一样把整块换成独占一行的占位符，
+        //    切分后再原样还原成一个 chunk。
+        const ATOM = String.fromCharCode(2);
+        const voiceBlocks: string[] = [];
+        // 语音块 + 紧邻 <字幕> 块是一个原子单元 (字幕是该语音的中文对照, 拆开就配不上)。
+        // 闭合标签容许空格 / 简繁互换 (normalizeVoiceTags 在 sanitize 阶段已修, 这里是保险)
+        const guardedText = text.replace(/(?:<字幕>[\s\S]*?<\/字幕>\s*)?<[语語]音[^>]*>[\s\S]*?<\/\s*[语語]音\s*>(?:\s*<字幕>[\s\S]*?<\/字幕>)?/g, m => {
+            const idx = voiceBlocks.length;
+            voiceBlocks.push(m);
+            return `\n${ATOM}${idx}${ATOM}\n`;
+        });
+
         // 1. Split on line breaks (AI decides where to break)
-        const lineChunks = text.split(/(?:\r\n|\r|\n|\u2028|\u2029)+/)
+        const lineChunks = guardedText.split(/(?:\r\n|\r|\n|\u2028|\u2029)+/)
             .map(c => c.trim())
             .filter(c => c.length > 0);
 
@@ -352,11 +385,17 @@ export const ChatParser = {
         //    "[[SEND_EMOJI: a b]]") 会被这条规则劈成 "[你" + "交给我吧]" 掉格式.
         //    做法: 先把 [...] / [[...]] 内空格换成占位符, split 后再换回.
         const SENTINEL = String.fromCharCode(0);
+        const ATOM_SOLO = new RegExp(`^${ATOM}(\\d+)${ATOM}$`);
+        const ATOM_GLOBAL = new RegExp(`${ATOM}(\\d+)${ATOM}`, 'g');
+        const restoreVoice = (s: string) => s.replace(ATOM_GLOBAL, (_m, n) => voiceBlocks[Number(n)] ?? '');
         const result: string[] = [];
         for (const chunk of lineChunks) {
+            // 独占一行的语音占位符 → 直接还原成完整语音块，不参与 CJK 空格切分
+            const solo = chunk.match(ATOM_SOLO);
+            if (solo) { result.push(voiceBlocks[Number(solo[1])]); continue; }
             const guarded = chunk.replace(/\[{1,2}[^\[\]]*\]{1,2}/g, m => m.replace(/\s/g, SENTINEL));
             const sub = guarded.replace(cjkSplitRe, `$1${SPLIT}`).split(SPLIT)
-                .map(c => c.split(SENTINEL).join(' ').trim())
+                .map(c => restoreVoice(c.split(SENTINEL).join(' ').trim()))  // 安全网: 同行残留占位符还原
                 .filter(c => c.length > 0);
             result.push(...sub);
         }

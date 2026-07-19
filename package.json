@@ -31,6 +31,7 @@
     "@rei-standard/amsg-instant": "0.10.0",
     "@rei-standard/amsg-shared": "0.3.0",
     "@rei-standard/amsg-sw": "2.3.2",
+    "ag-psd": "^31.0.2",
     "jszip": "^3.10.1",
     "qrcode": "^1.5.4",
     "react": "^18.2.0",

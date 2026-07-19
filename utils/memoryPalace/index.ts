@@ -8,13 +8,14 @@ export type {
     LinkType, MemoryLink, BoxStatus, TopicBox, TopicContinuity,
     AnticipationStatus, Anticipation, MemoryBatch,
     PersonalityStyle, EmbeddingConfig, ScoredMemory, RemoteVectorConfig,
-    EventBox,
+    EventBox, PlateRoom, PlateEntry, RoomPlate,
+    DigestReport, DigestReportSection,
 } from './types';
 
-export { ROOM_CONFIGS, ROOM_LABELS, getRoomLabel, PERSONALITY_WEIGHTS, EVENT_BOX_COMPRESSION_THRESHOLD } from './types';
+export { ROOM_CONFIGS, ROOM_LABELS, getRoomLabel, PERSONALITY_WEIGHTS, EVENT_BOX_COMPRESSION_THRESHOLD, PLATE_ROOMS, PLATE_TITLES, PLATE_ENTRY_CAPS } from './types';
 
 // 数据库
-export { MemoryNodeDB, MemoryVectorDB, MemoryLinkDB, MemoryBatchDB, TopicBoxDB, AnticipationDB, EventBoxDB } from './db';
+export { MemoryNodeDB, MemoryVectorDB, MemoryLinkDB, MemoryBatchDB, TopicBoxDB, AnticipationDB, EventBoxDB, RoomPlateDB, DigestReportDB } from './db';
 
 // Embedding
 export { getEmbedding, getEmbeddings, cosineSimilarity } from './embedding';
@@ -50,7 +51,7 @@ export {
 } from './anticipation';
 
 // 认知消化
-export { runCognitiveDigestion, incrementDigestRound, getDigestRoundCount, detectPersonalityStyle } from './digestion';
+export { runCognitiveDigestion, incrementDigestRound, getDigestRoundCount, getLastDigestTs, detectPersonalityStyle } from './digestion';
 export type { DigestResult } from './digestion';
 
 // 迁移
@@ -66,6 +67,15 @@ export {
 export {
     maybeCompressEventBoxes, compressAllEligibleBoxes,
 } from './eventBoxCompression';
+
+// 房间门牌（情景→语义固化层）
+export {
+    consolidateAllPlates, updatePlateFromBoxSummary,
+    buildRoomPlatesInjection, formatRoomPlatesSection, isPlateRoom,
+    bootstrapPlatesFromHistory, arePlatesEmpty,
+    isPlateBootstrapDone, markPlateBootstrapDone,
+    getBootstrapResume, setBootstrapResume, clearBootstrapResume,
+} from './roomPlates';
 
 // 一键清空（本地 + 云端）
 export { wipeAllMemoryPalace } from './wipe';

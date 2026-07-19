@@ -294,7 +294,7 @@ const PixelAssetGenerator: React.FC<Props> = ({ onGenerated }) => {
   const readyCount = pending.filter(p => p.previewUri).length;
 
   return (
-    <div className="h-full overflow-y-auto px-4 py-4 space-y-4 no-scrollbar">
+    <div className="h-full overflow-y-auto px-4 pt-4 space-y-4 no-scrollbar" style={{ paddingBottom: 'calc(1rem + var(--safe-bottom, 0px))', boxSizing: 'border-box' }}>
       {/* 模式切换 */}
       <div className="flex gap-1 bg-slate-800/60 rounded-xl p-1">
         <button onClick={() => setMode('generate')}

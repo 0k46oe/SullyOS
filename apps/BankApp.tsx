@@ -30,7 +30,7 @@ const INITIAL_STATE: BankFullState = {
             {
                 id: 'staff-001',
                 name: '系统',
-                avatar: 'https://sharkpan.xyz/f/gXayCw/XT.png',
+                avatar: 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/XT.png',
                 role: 'manager',
                 fatigue: 0,
                 maxFatigue: 100,

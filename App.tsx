@@ -7,6 +7,7 @@ import BuildBadge from './components/BuildBadge';
 import DevDebugPanel from './components/DevDebugPanel';
 import VRBroadcast from './components/VRBroadcast';
 import WorldBroadcast from './components/WorldBroadcast';
+import ChatBroadcast from './components/ChatBroadcast';
 import { isIOSStandaloneWebApp } from './utils/iosStandalone';
 import { installDevDebugLifecycleCapture } from './utils/devDebug';
 
@@ -45,6 +46,7 @@ const App: React.FC = () => {
       <DevDebugPanel />
       <VRBroadcast />
       <WorldBroadcast />
+      <ChatBroadcast />
     </>
   );
 };

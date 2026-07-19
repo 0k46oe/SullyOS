@@ -1,6 +1,7 @@
 import React, { useRef } from 'react';
 import { BankFullState, CharacterProfile } from '../../types';
 import BankAssetIcon from './BankAssetIcon';
+import TokenImg from '../os/TokenImg';
 import { processImage } from '../../utils/file';
 
 interface Props {
@@ -115,7 +116,7 @@ const BankDashboard: React.FC<Props> = ({
                     <div className="absolute bottom-[20%] left-[15%] w-16 h-24 flex flex-col items-center animate-fade-in z-10">
                         <div className="relative group/visitor cursor-pointer active:scale-95 transition-transform">
                             {/* Visitor Sprite */}
-                            <img src={visitorChar.sprites?.chibi || visitorChar.avatar} className="w-16 h-16 object-contain drop-shadow-md" />
+                            <TokenImg value={visitorChar.sprites?.chibi || visitorChar.avatar} className="w-16 h-16 object-contain drop-shadow-md" />
                             {/* Dialogue Bubble */}
                             <div className="absolute -top-12 left-1/2 -translate-x-1/2 bg-white px-3 py-2 rounded-xl rounded-bl-none shadow-lg text-[10px] text-slate-700 w-28 whitespace-normal leading-tight z-20 border border-slate-100 opacity-0 group-hover/visitor:opacity-100 transition-opacity pointer-events-none">
                                 {state.shop.activeVisitor?.message}

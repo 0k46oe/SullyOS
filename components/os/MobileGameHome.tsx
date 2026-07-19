@@ -5,6 +5,7 @@ import { AppID, CharacterProfile } from '../../types';
 import { DB } from '../../utils/db';
 import AppIcon from './AppIcon';
 import { getMobileGameArt } from './mobilegameArt';
+import { SCHEMES, hsl, schemePreview, type TgStyle } from './gotchiScheme';
 import { getChibi } from '../../utils/vrWorld/chibi';
 import { isDevDebugAvailable, subscribeDevDebugAvailability } from '../../utils/devDebug';
 
@@ -14,32 +15,104 @@ import { isDevDebugAvailable, subscribeDevDebugAvailability } from '../../utils/
 // 背景透出用户自设壁纸（默认铺梦幻粉紫渐变壁纸）。
 // 等级 / 经验 / 货币为按角色 id 稳定派生的装饰数值。
 
-// —— 调色板（梦幻粉紫）——
+// —— 调色板：全部指向 CSS 变量（根节点按方案生成；默认 = 经典梦幻粉紫）——
 const PAL = {
-    ink: '#6b5b95',     // 主文字 · 深紫
-    grape: '#7a6db0',   // 标题紫
-    lilac: '#a99bd4',   // 次文字 · 浅紫
-    pink: '#f4a6cc',    // 粉
-    hot: '#ea76b4',     // 强调粉（+ / NEW / 高光）
-    peri: '#a8b8e8',    // 蓝紫
-    mist: '#efe9f9',    // 极浅紫
-    cloud: '#faf6ff',   // 近白紫
+    ink: 'var(--mg-ink)',     // 主文字
+    grape: 'var(--mg-grape)', // 标题
+    lilac: 'var(--mg-lilac)', // 次文字
+    pink: 'var(--mg-pink)',   // 强调浅
+    hot: 'var(--mg-hot)',     // 强调深（+ / NEW / 高光）
+    peri: 'var(--mg-peri)',   // 邻色
+    mist: 'var(--mg-mist)',   // 极浅底
+    cloud: 'var(--mg-cloud)', // 近白底
 };
+
+// 方案 → 手游皮肤整套 CSS 变量。明暗两套：亮色=现在的梦幻粉彩（透壁纸），
+// 暗色=深烟卡+亮字+夜空 Hero（有用户就好这口）。角色 S/L 定死只转色相。
+const makeMgVars = (st: TgStyle): React.CSSProperties => {
+    const { hue: h, dark, gold, mute } = st;
+    const sat = (s: number) => (mute ? Math.min(s, 10) : s);
+    const accH = gold ? 45 : h + 69;
+    if (dark) {
+        return {
+            '--mg-ink': hsl(h, 28, 86),
+            '--mg-grape': hsl(h, 42, 90),
+            '--mg-lilac': hsl(h, 20, 66),
+            '--mg-pink': hsl(accH, gold ? 50 : 62, 74),
+            '--mg-hot': hsl(accH, gold ? 54 : 66, 64),
+            '--mg-peri': hsl(h - 37, 38, 70),
+            '--mg-mist': hsl(h, sat(22), 18),
+            '--mg-cloud': hsl(h, sat(22), 23),
+            '--mg-card': hsl(h, sat(24), 14, 0.72),
+            '--mg-card-line': hsl(h, 40, 72, 0.3),
+            '--mg-tile': hsl(h, sat(24), 17),
+            '--mg-glow12': 'rgba(0,0,0,0.28)',
+            '--mg-glow20': 'rgba(0,0,0,0.38)',
+            '--mg-track': 'rgba(255,255,255,0.12)',
+            '--mg-badge1': hsl(h, 35, 40),
+            '--mg-badge2': hsl(h, 35, 30),
+            '--mg-pill': hsl(h, sat(30), 12, 0.55),
+            '--mg-sky': 'linear-gradient(180deg, #232045 0%, #3a3560 55%, #4a4379 100%)',
+            '--mg-dock': hsl(h, sat(24), 15, 0.85),
+            '--mg-dock-line': 'rgba(255,255,255,0.16)',
+            '--mg-drawer': hsl(h, sat(24), 12, 0.94),
+            '--mg-chip': 'rgba(255,255,255,0.12)',
+            '--mg-chip-line': 'rgba(255,255,255,0.25)',
+            '--mg-bg': `linear-gradient(180deg, ${hsl(h, sat(26), 13)} 0%, ${hsl(h, sat(24), 9)} 100%)`,
+        } as React.CSSProperties;
+    }
+    return {
+        '--mg-ink': hsl(h, sat(23), 47),
+        '--mg-grape': hsl(h, sat(30), 56),
+        '--mg-lilac': hsl(h, sat(40), 72),
+        '--mg-pink': hsl(accH, 78, 81),
+        '--mg-hot': hsl(accH, 73, 69),
+        '--mg-peri': hsl(h - 37, sat(59), 78),
+        '--mg-mist': hsl(h, sat(44), 95),
+        '--mg-cloud': hsl(h, sat(56), 98),
+        '--mg-card': 'rgba(255,255,255,0.62)',
+        '--mg-card-line': hsl(h, 42, 76, 0.32),
+        '--mg-tile': hsl(h, sat(60), 99),
+        '--mg-glow12': hsl(h, 35, 55, 0.12),
+        '--mg-glow20': hsl(h, 38, 58, 0.2),
+        '--mg-track': hsl(h, 35, 60, 0.16),
+        '--mg-badge1': hsl(h, sat(30), 56),
+        '--mg-badge2': hsl(h, sat(23), 47),
+        '--mg-pill': 'rgba(255,255,255,0.55)',
+        '--mg-sky': 'linear-gradient(180deg, #cfe0f7 0%, #e4d9f3 42%, #f3d9ec 72%, #f7d2e2 100%)',
+        '--mg-dock': 'rgba(255,255,255,0.7)',
+        '--mg-dock-line': 'rgba(255,255,255,0.9)',
+        '--mg-drawer': hsl(h, 40, 95, 0.92),
+        '--mg-chip': 'rgba(255,255,255,0.7)',
+        '--mg-chip-line': 'rgba(255,255,255,0.9)',
+        '--mg-bg': 'transparent', // 亮色保持透出用户壁纸
+    } as React.CSSProperties;
+};
+
+// 经典梦幻粉紫（本皮肤的出厂默认，亮色）+ 共享 12 方案
+const MG_CLASSIC: TgStyle = { id: 'classic', name: '梦幻粉紫', hue: 262, dark: false, gold: false, mute: false };
+const MG_CHOICES: TgStyle[] = [MG_CLASSIC, ...SCHEMES];
+const MG_STYLE_KEY = 'mg_style_v1';
+
+// 调色盘线描图标（无 emoji）
+const MG_PALETTE_ICON = (
+    <svg viewBox="0 0 24 24" className="w-full h-full" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 3a9 9 0 1 0 0 18c1 0 1.6-.8 1.6-1.6 0-.5-.2-.8-.5-1.2-.3-.3-.5-.7-.5-1.2 0-.9.7-1.6 1.6-1.6H16a5 5 0 0 0 5-5c0-3.9-4-7.4-9-7.4Z" /><circle cx="7.5" cy="11" r="1" fill="currentColor" stroke="none" /><circle cx="10.5" cy="7.5" r="1" fill="currentColor" stroke="none" /><circle cx="14.5" cy="7.5" r="1" fill="currentColor" stroke="none" /><circle cx="17" cy="11" r="1" fill="currentColor" stroke="none" /></svg>
+);
 
 // 扁平手绘卡（二次元风格）：浅色底 + 轻描边 + 很淡的平面投影，不要鼓凸
 const CARD = {
-    background: 'rgba(255,255,255,0.62)',
-    border: '1.5px solid rgba(186,166,224,0.32)',
-    boxShadow: '0 5px 14px rgba(150,120,200,0.12)',
+    background: 'var(--mg-card)',
+    border: '1.5px solid var(--mg-card-line)',
+    boxShadow: '0 5px 14px var(--mg-glow12)',
     backdropFilter: 'blur(10px) saturate(1.05)',
     WebkitBackdropFilter: 'blur(10px) saturate(1.05)',
 } as React.CSSProperties;
 
 // 扁平手绘瓷砖（快捷入口图标底）：干净白底 + 轻描边 + 浅平面投影
 const TILE = {
-    background: '#fbf9ff',
-    border: '1.5px solid rgba(186,166,224,0.34)',
-    boxShadow: '0 5px 12px rgba(150,120,200,0.12)',
+    background: 'var(--mg-tile)',
+    border: '1.5px solid var(--mg-card-line)',
+    boxShadow: '0 5px 12px var(--mg-glow12)',
 } as React.CSSProperties;
 
 const FONT_DISPLAY = `'DM Serif Display', serif`;     // 大时钟 / Lv / 日期数字
@@ -125,6 +198,23 @@ const MobileGameHome: React.FC = () => {
     const [lastMessage, setLastMessage] = useState<string>('');
     const [stat, setStat] = useState({ msgCount: 0, firstTs: 0 });
     const [drawerOpen, setDrawerOpen] = useState(false);
+    // 界面配色方案：localStorage 持久化；默认经典梦幻粉紫（亮）
+    const [mgStyle, setMgStyle] = useState<TgStyle>(() => {
+        try {
+            const raw = localStorage.getItem(MG_STYLE_KEY);
+            if (raw) {
+                const p = JSON.parse(raw);
+                if (typeof p?.hue === 'number') return { id: p.id || 'custom', name: p.name || '自定义', hue: p.hue, dark: !!p.dark, gold: !!p.gold, mute: !!p.mute };
+            }
+        } catch { /* 解析失败走默认 */ }
+        return MG_CLASSIC;
+    });
+    const [mgPaletteOpen, setMgPaletteOpen] = useState(false);
+    const applyMgStyle = (s: TgStyle) => {
+        setMgStyle(s);
+        try { localStorage.setItem(MG_STYLE_KEY, JSON.stringify(s)); } catch { /* ignore */ }
+    };
+    const mgVars = useMemo(() => makeMgVars(mgStyle), [mgStyle]);
 
     const [devDebugVisible, setDevDebugVisible] = useState(() => isDevDebugAvailable());
     useEffect(() => subscribeDevDebugAvailability(setDevDebugVisible), []);
@@ -207,10 +297,12 @@ const MobileGameHome: React.FC = () => {
     );
 
     return (
-        <div className="h-full w-full relative z-10 overflow-hidden select-none" style={{ color: PAL.ink, fontFamily: FONT_CN }}>
-            {/* 极淡叠层：顶部提亮 + 底部微沉，让壁纸透出 */}
-            <div className="absolute inset-0 pointer-events-none"
-                style={{ background: 'linear-gradient(180deg, rgba(255,255,255,0.4) 0%, rgba(255,255,255,0) 22%, rgba(255,255,255,0) 86%, rgba(206,188,232,0.1) 100%)' }} />
+        <div className="h-full w-full relative z-10 overflow-hidden select-none" style={{ ...mgVars, color: PAL.ink, fontFamily: FONT_CN }}>
+            {/* 方案底色层：亮色透明（透出壁纸），暗色铺深烟渐变 */}
+            <div className="absolute inset-0 pointer-events-none" style={{ background: 'var(--mg-bg)' }} />
+            {/* 极淡叠层：顶部提亮 + 底部微沉（仅亮色需要，暗色下几乎不可见，无害） */}
+            {!mgStyle.dark && <div className="absolute inset-0 pointer-events-none"
+                style={{ background: 'linear-gradient(180deg, rgba(255,255,255,0.4) 0%, rgba(255,255,255,0) 22%, rgba(255,255,255,0) 86%, rgba(206,188,232,0.1) 100%)' }} />}
 
             <div className="relative h-full overflow-y-auto no-scrollbar px-5"
                 style={{ paddingTop: 'calc(var(--safe-top, 0px) + 0.75rem)', paddingBottom: '7.5rem' }}>
@@ -222,13 +314,56 @@ const MobileGameHome: React.FC = () => {
                         <span className="text-[11px] font-bold" style={{ color: PAL.grape, letterSpacing: '0.3em' }}>SULLYOS&nbsp;STATION</span>
                         <span className="text-[9px]" style={{ color: PAL.peri }}>✦</span>
                     </div>
-                    <button onClick={() => openApp(AppID.Appearance)} aria-label="菜单" className="flex flex-col items-end gap-[3.5px] py-2 active:opacity-60 transition-opacity">
-                        <span className="w-5 h-[2px] rounded-full" style={{ background: PAL.grape }} />
-                        <span className="w-5 h-[2px] rounded-full" style={{ background: PAL.grape }} />
-                        <span className="w-5 h-[2px] rounded-full" style={{ background: PAL.grape }} />
-                    </button>
+                    <div className="flex items-center gap-3">
+                        <button onClick={() => setMgPaletteOpen(v => !v)} aria-label="界面配色"
+                            className="w-7 h-7 rounded-full flex items-center justify-center active:scale-90 transition-transform"
+                            style={{ background: 'var(--mg-chip)', border: '1px solid var(--mg-chip-line)', color: PAL.grape }}>
+                            <span className="w-4 h-4">{MG_PALETTE_ICON}</span>
+                        </button>
+                        <button onClick={() => openApp(AppID.Appearance)} aria-label="菜单" className="flex flex-col items-end gap-[3.5px] py-2 active:opacity-60 transition-opacity">
+                            <span className="w-5 h-[2px] rounded-full" style={{ background: PAL.grape }} />
+                            <span className="w-5 h-[2px] rounded-full" style={{ background: PAL.grape }} />
+                            <span className="w-5 h-[2px] rounded-full" style={{ background: PAL.grape }} />
+                        </button>
+                    </div>
                 </div>
                 <div className="h-px mt-2" style={{ background: `linear-gradient(90deg, ${PAL.lilac}, transparent)`, opacity: 0.5 }} />
+
+                {/* ===== 🎨 界面配色面板（经典 + 12 方案，含暗色；点外面关闭）===== */}
+                {mgPaletteOpen && (
+                    <>
+                        <div className="fixed inset-0 z-[60]" onClick={() => setMgPaletteOpen(false)} />
+                        <div className="absolute right-0 z-[61] w-[16.5rem] rounded-2xl p-3.5 animate-pop-in"
+                            style={{ top: 'calc(var(--safe-top, 0px) + 2.9rem)', background: 'var(--mg-drawer)', border: '1.5px solid var(--mg-card-line)', boxShadow: '0 10px 26px var(--mg-glow20)' }}>
+                            <div className="flex items-center gap-1.5 mb-2.5">
+                                <span className="w-4 h-4" style={{ color: PAL.grape }}>{MG_PALETTE_ICON}</span>
+                                <span className="text-[12px] font-bold tracking-wide" style={{ fontFamily: FONT_CN, color: PAL.grape }}>界面配色</span>
+                                <span className="text-[8px]" style={{ color: PAL.pink }}>✦</span>
+                            </div>
+                            <div className="grid grid-cols-3 gap-2">
+                                {MG_CHOICES.map(s => {
+                                    const pv = schemePreview(s);
+                                    const active = mgStyle.id === s.id;
+                                    return (
+                                        <button key={s.id} onClick={() => applyMgStyle(s)}
+                                            className="relative flex flex-col items-center gap-1 active:scale-95 transition-transform">
+                                            <span className="relative w-full h-9 rounded-lg overflow-hidden flex items-center justify-center"
+                                                style={{ background: pv.bg, border: active ? `2px solid ${pv.line}` : '1.5px solid rgba(150,140,160,0.35)' }}>
+                                                <span className="absolute inset-x-2 top-1.5 h-[3px] rounded-full" style={{ background: pv.line, opacity: 0.85 }} />
+                                                <span className="absolute inset-x-4 bottom-1.5 h-[2px] rounded-full" style={{ background: pv.line, opacity: 0.5 }} />
+                                                {active && <span className="text-[9px]" style={{ color: pv.line }}>✦</span>}
+                                            </span>
+                                            <span className="text-[8.5px] leading-none" style={{ fontFamily: FONT_CN, color: active ? PAL.grape : PAL.lilac }}>{s.name}</span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                            <p className="text-[8.5px] leading-relaxed mt-2 text-center" style={{ color: PAL.lilac, fontFamily: FONT_CN }}>
+                                暗色方案夜里超好看 ✦ 亮色会透出你的壁纸
+                            </p>
+                        </div>
+                    </>
+                )}
 
                 {/* ===== 角色档案 Profile ===== */}
                 <div className="flex items-center gap-3.5 mt-4 animate-fade-in">
@@ -243,7 +378,7 @@ const MobileGameHome: React.FC = () => {
                             </div>
                         </div>
                         <div className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 px-2.5 py-[1px] rounded-md text-[10px] tracking-wide whitespace-nowrap"
-                            style={{ background: `linear-gradient(135deg, ${PAL.grape}, ${PAL.ink})`, color: '#fff', fontFamily: FONT_DISPLAY, boxShadow: '0 2px 8px rgba(107,91,149,0.4)' }}>
+                            style={{ background: 'linear-gradient(135deg, var(--mg-badge1), var(--mg-badge2))', color: '#fff', fontFamily: FONT_DISPLAY, boxShadow: '0 2px 8px rgba(60,50,90,0.4)' }}>
                             Lv.{stats.level}
                         </div>
                     </div>
@@ -273,7 +408,7 @@ const MobileGameHome: React.FC = () => {
                 {/* EXP 条（全宽）*/}
                 <div className="flex items-center gap-2.5 mt-3.5 animate-fade-in">
                     <span className="text-[11px] font-bold tracking-[0.16em]" style={{ color: PAL.grape }}>EXP</span>
-                    <div className="flex-1 h-[9px] rounded-full overflow-hidden" style={{ background: 'rgba(150,120,200,0.16)', boxShadow: 'inset 0 1px 2px rgba(120,90,170,0.2)' }}>
+                    <div className="flex-1 h-[9px] rounded-full overflow-hidden" style={{ background: 'var(--mg-track)', boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.12)' }}>
                         <div className="h-full rounded-full" style={{ width: `${expPct}%`, background: `linear-gradient(90deg, ${PAL.peri}, ${PAL.lilac}, ${PAL.pink})`, boxShadow: '0 0 8px rgba(244,166,204,0.6)' }} />
                     </div>
                     <span className="text-[11px] tabular-nums whitespace-nowrap font-bold" style={{ color: PAL.lilac }}>{stats.exp} / {stats.expMax}</span>
@@ -283,7 +418,7 @@ const MobileGameHome: React.FC = () => {
                 <div className="relative mt-4 rounded-3xl overflow-hidden animate-fade-in"
                     style={{ height: '13rem', border: '1px solid rgba(255,255,255,0.7)', boxShadow: '0 12px 30px rgba(150,120,200,0.25)' }}>
                     {/* 梦幻天空底 */}
-                    <div className="absolute inset-0" style={{ background: 'linear-gradient(180deg, #cfe0f7 0%, #e4d9f3 42%, #f3d9ec 72%, #f7d2e2 100%)' }} />
+                    <div className="absolute inset-0" style={{ background: 'var(--mg-sky)' }} />
                     <div className="absolute inset-0" style={{ background: 'radial-gradient(80% 60% at 50% 18%, rgba(255,255,255,0.5), transparent 70%)' }} />
                     {/* 云朵 */}
                     <div className="absolute top-6 left-5 w-20 h-8 rounded-full" style={{ background: 'rgba(255,255,255,0.55)', filter: 'blur(7px)' }} />
@@ -297,7 +432,7 @@ const MobileGameHome: React.FC = () => {
 
                     {/* 日期 pill */}
                     <div className="absolute top-3 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full text-[10px] font-bold whitespace-nowrap"
-                        style={{ background: 'rgba(255,255,255,0.55)', color: PAL.grape, letterSpacing: '0.16em', border: '1px solid rgba(255,255,255,0.8)' }}>
+                        style={{ background: 'var(--mg-pill)', color: PAL.grape, letterSpacing: '0.16em', border: '1px solid rgba(255,255,255,0.35)' }}>
                         {dayName} · {dateNum} {monthName}
                     </div>
 
@@ -354,7 +489,7 @@ const MobileGameHome: React.FC = () => {
                         </div>
                         <p className="text-[11px] leading-relaxed line-clamp-2" style={{ color: PAL.lilac }}>{announcement}</p>
                     </div>
-                    <div className="w-8 h-8 shrink-0 rounded-full flex items-center justify-center" style={{ background: 'rgba(255,255,255,0.6)', border: '1px solid rgba(255,255,255,0.85)' }}>
+                    <div className="w-8 h-8 shrink-0 rounded-full flex items-center justify-center" style={{ background: 'var(--mg-chip)', border: '1px solid var(--mg-chip-line)' }}>
                         <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke={PAL.hot} strokeWidth="2.5"><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
                     </div>
                 </button>
@@ -397,13 +532,13 @@ const MobileGameHome: React.FC = () => {
             {/* ===== 底部 Dock ===== */}
             <div className="absolute bottom-0 left-0 w-full px-3.5 z-30 pointer-events-none" style={{ paddingBottom: 'calc(var(--safe-bottom, 0px) + 0.75rem)' }}>
                 <div className="relative pointer-events-auto rounded-[1.9rem] px-3 py-2.5 flex items-end justify-between"
-                    style={{ background: 'rgba(255,255,255,0.7)', border: '1px solid rgba(255,255,255,0.9)', boxShadow: '0 -6px 30px rgba(150,120,200,0.2), inset 0 1px 0 rgba(255,255,255,0.9)', backdropFilter: 'blur(18px)', WebkitBackdropFilter: 'blur(18px)' }}>
+                    style={{ background: 'var(--mg-dock)', border: '1px solid var(--mg-dock-line)', boxShadow: '0 -6px 30px var(--mg-glow20), inset 0 1px 0 var(--mg-dock-line)', backdropFilter: 'blur(18px)', WebkitBackdropFilter: 'blur(18px)' }}>
                     <DockItem id={AppID.Chat} cn="消息" badge={totalUnread} onClick={() => openApp(AppID.Chat)} />
                     <DockItem id={AppID.Character} cn="好友" onClick={() => openApp(AppID.Character)} />
                     {/* 中央罗盘 */}
                     <button onClick={() => setDrawerOpen(true)} aria-label="全部应用" className="-mt-8 w-[4.2rem] h-[4.2rem] rounded-full flex items-center justify-center active:scale-95 transition-transform shrink-0"
                         style={{ background: `linear-gradient(135deg, ${PAL.pink}, ${PAL.peri}, ${PAL.lilac})`, padding: '3px', boxShadow: '0 8px 22px rgba(234,118,180,0.5)' }}>
-                        <div className="w-full h-full rounded-full flex items-center justify-center" style={{ background: `linear-gradient(135deg, #5a4d85, ${PAL.ink})` }}>
+                        <div className="w-full h-full rounded-full flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #5a4d85, #6b5b95)' }}>
                             <StarBurst className="w-8 h-8" fill="#ffffff" />
                         </div>
                     </button>
@@ -414,10 +549,10 @@ const MobileGameHome: React.FC = () => {
 
             {/* ===== 全部应用抽屉 ===== */}
             {drawerOpen && (
-                <div className="absolute inset-0 z-40 flex flex-col animate-fade-in" style={{ background: 'rgba(239,233,249,0.92)', backdropFilter: 'blur(24px)', WebkitBackdropFilter: 'blur(24px)' }} onClick={() => setDrawerOpen(false)}>
+                <div className="absolute inset-0 z-40 flex flex-col animate-fade-in" style={{ background: 'var(--mg-drawer)', backdropFilter: 'blur(24px)', WebkitBackdropFilter: 'blur(24px)' }} onClick={() => setDrawerOpen(false)}>
                     <div className="flex items-center justify-between px-6" style={{ paddingTop: 'calc(var(--safe-top, 0px) + 1.25rem)', paddingBottom: '0.5rem' }}>
                         <h2 className="text-lg tracking-wide" style={{ fontFamily: FONT_CN, color: PAL.grape }}>全部应用</h2>
-                        <button onClick={(e) => { e.stopPropagation(); setDrawerOpen(false); }} aria-label="关闭" className="w-9 h-9 rounded-full flex items-center justify-center active:scale-90 transition-transform" style={{ background: 'rgba(255,255,255,0.7)', border: '1px solid rgba(255,255,255,0.9)' }}>
+                        <button onClick={(e) => { e.stopPropagation(); setDrawerOpen(false); }} aria-label="关闭" className="w-9 h-9 rounded-full flex items-center justify-center active:scale-90 transition-transform" style={{ background: 'var(--mg-chip)', border: '1px solid var(--mg-chip-line)' }}>
                             <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke={PAL.ink} strokeWidth="2.5"><path strokeLinecap="round" d="M6 6l12 12M18 6L6 18" /></svg>
                         </button>
                     </div>

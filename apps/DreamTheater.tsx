@@ -9,6 +9,7 @@ import { isScheduleFeatureOn } from '../utils/scheduleGenerator';
 import { isDevDebugAvailable } from '../utils/devDebug';
 import { useDreamSim, dreamSimStore } from '../utils/dreamSimStore';
 import { safeResponseJson } from '../utils/safeApi';
+import CdnImg from '../components/os/CdnImg';
 import {
     CaretLeft, MoonStars, ArrowClockwise, X, Eye, Sparkle, Lock, Question, Trash,
 } from '@phosphor-icons/react';
@@ -83,7 +84,8 @@ const rollArchetype = (logs: { archetype: DreamArchetype }[] = []): DreamArchety
 //  盲盒收藏册 (Dream Blind Box) — 做完一场梦抽到对应原型的小猫，集齐成图鉴。
 //  图床沿用项目惯例（jsDelivr，定期活动同款），文件名带空格需编码。
 // ============================================================
-const DREAM_BOX_BASE = 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/img/DREAMS/';
+// 仓库相对路径前缀（文件名带空格，encodeURIComponent 后交给 CdnImg 走多 CDN 镜像兜底）。
+const DREAM_BOX_DIR = 'img/DREAMS/';
 const DREAM_BOX_FILE: Record<DreamArchetype, string> = {
     sweet: '01 Sweet Dream .png',
     nightmare: '02 Nightmare .png',
@@ -99,7 +101,7 @@ const DREAM_BOX_FILE: Record<DreamArchetype, string> = {
     lucid: '12 Lucid Dream.png',
     deepsleep: 'Deep Sleep .png',
 };
-const boxImg = (a: DreamArchetype): string => DREAM_BOX_BASE + encodeURIComponent(DREAM_BOX_FILE[a]);
+const boxPath = (a: DreamArchetype): string => DREAM_BOX_DIR + encodeURIComponent(DREAM_BOX_FILE[a]);
 
 // 盲盒系列（目前就这一款；保留结构便于以后扩成多套）
 const DREAM_BOX_SERIES = { id: 'dreamcats-01', title: '小小梦境 · 喵梦盲盒', sub: 'Dream Cats' };
@@ -123,7 +125,7 @@ function unlockCollectible(a: DreamArchetype): { collection: DreamCollection; is
 const BoxCat: React.FC<{ archetype: DreamArchetype; size?: number; className?: string }> = ({ archetype, size = 128, className }) => (
     <div className={`relative flex items-center justify-center ${className || ''}`} style={{ width: size, height: size }}>
         <div className="absolute inset-0 rounded-2xl" style={{ background: `radial-gradient(circle at 50% 40%, ${THEMES[archetype].accent}22, transparent 70%)` }} />
-        <img src={boxImg(archetype)} alt={THEMES[archetype].label} loading="lazy"
+        <CdnImg path={boxPath(archetype)} alt={THEMES[archetype].label} loading="lazy"
             className="relative w-full h-full object-contain"
             style={{ filter: 'drop-shadow(0 8px 22px rgba(0,0,0,0.45))' }}
             onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden'; }} />

@@ -74,6 +74,13 @@ export interface MemoryNode {
     pinnedUntil?: number | null; // 便利贴置顶截止时间（timestamp ms），null/undefined = 不置顶
     sourceId?: string | null;   // 消化衍生记忆的源记忆 ID，null = 非衍生记忆
     origin?: 'extraction' | 'digestion' | 'system'; // 记忆来源：extraction=聊天提取, digestion=认知消化衍生, system=系统生成
+    /**
+     * 消化已消费标记：synthesize_user / internalize / self_insight / self_confuse
+     * 消费过的源节点打上时间戳，不再进入后续消化的候选池。
+     * 历史上这个"已消费"信息靠衍生节点的 sourceId 反查——消化改道门牌后
+     * 不再新建衍生节点，改用此字段显式标记（旧数据仍走 sourceId 反查兜底）。
+     */
+    digestedAt?: number | null;
 
     /**
      * 从 CSY-OS 迁移时保留的原始语义元数据。正文与向量会转换成 SullyOS 原生结构，
@@ -216,6 +223,100 @@ export interface TopicBox {
 
 /** @deprecated */
 export type TopicContinuity = 'continuous' | 'partial_shift' | 'discontinuous';
+
+// ─── 房间门牌（Room Plate — 情景→语义的固化终点） ──────
+
+/**
+ * 门牌：每个房间头上那层常驻的"蒸馏物"。
+ *
+ * 房间装的是情景记忆（一条条带时间戳的事件），门牌写的是这些经历沉淀出的
+ * 认知——不走向量召回、不衰减、每轮常驻注入 System Prompt。
+ * 对应人脑里"海马体情景记忆固化为新皮质语义知识"的那一步。
+ *
+ * 四个房间有门牌：
+ * - user_room「TA的事」  — 用户的稳定事实（家庭、居住、重要他人、雷区）
+ * - self_room「我是谁」  — 角色对自己的稳定认知
+ * - bedroom  「我们之间」— 关系的质地。硬规则：只描述现象，禁止给关系命名
+ * - study    「我的领域」— 会什么、在学什么
+ *
+ * 客厅天生短暂不配门牌；阁楼/窗台已有各自的生命周期机制（本质上就是它们的门牌）。
+ *
+ * 更新时机：
+ * - EventBox 压缩/封盒时 → 本盒所属房间的门牌做一次增量合并
+ * - 认知消化（50轮）时  → 四块门牌做一次全量整理
+ *
+ * 条目是"合并语义"而非"追加语义"：事实会变（搬家、换工作、和某人和好），
+ * 每次 LLM 整理输出的是完整的新条目列表，旧条目不被重新输出即被淘汰——
+ * 硬容量上限让不重要/过时的条目在合并时被自然挤出（gist 记忆的容量压力）。
+ */
+
+export type PlateRoom = 'user_room' | 'self_room' | 'bedroom' | 'study';
+
+export const PLATE_ROOMS: PlateRoom[] = ['user_room', 'self_room', 'bedroom', 'study'];
+
+export interface PlateEntry {
+    id: string;             // pe_xxx
+    text: string;           // 梗概条目，目标 ≤ PLATE_ENTRY_TARGET_CHARS 字
+    firstLearnedAt: number; // 首次蒸馏出这条认知的时间（"你是第三个月才跟我说家里的事"）
+    updatedAt: number;      // 最近一次被合并/改写的时间
+    sourceCount: number;    // 被印证的次数（提过一次 vs 反复出现）
+    /** 2-4 字分类标签（家庭/居住/重要他人/工作/雷区/习惯…），LLM 整理时给出，UI 渲染 chip 与图标 */
+    tag?: string;
+}
+
+export interface RoomPlate {
+    id: string;             // `${charId}:${room}`
+    charId: string;
+    room: PlateRoom;
+    entries: PlateEntry[];
+    updatedAt: number;
+    version: number;        // 每次合并 +1
+}
+
+/** 每块门牌的条目硬上限（容量压力 = 天然的边界纠错器） */
+export const PLATE_ENTRY_CAPS: Record<PlateRoom, number> = {
+    user_room: 12,
+    self_room: 10,
+    bedroom:   10,
+    study:     8,
+};
+
+/** 单条目标字数（prompt 引导）与硬上限（超出截断兜底） */
+export const PLATE_ENTRY_TARGET_CHARS = 50;
+export const PLATE_ENTRY_HARD_MAX_CHARS = 90;
+
+export const PLATE_TITLES: Record<PlateRoom, string> = {
+    user_room: 'TA的事',
+    self_room: '我是谁',
+    bedroom:   '我们之间',
+    study:     '我的领域',
+};
+
+// ─── 消化日志（DigestReport — 认知消化的可回看记录） ───
+
+/**
+ * 每次认知消化落一条报告，回答"这次到底消化了什么"：
+ * 审视了哪些材料 → 状态机改了什么 → 往门牌提交了什么 → 门牌实际更新了哪几块。
+ * 通用 section 结构让 UI 保持傻瓜渲染；每角色只保留最近 DIGEST_REPORT_KEEP 条。
+ */
+export interface DigestReportSection {
+    label: string;      // 如「阁楼困惑」「化解」「提交给门牌·TA的事」
+    items: string[];    // 内容预览（已截断）
+}
+
+export interface DigestReport {
+    id: string;                         // dr_xxx
+    charId: string;
+    createdAt: number;
+    trigger: 'auto' | 'manual';
+    examined: DigestReportSection[];    // 本次审视的材料
+    outcomes: DigestReportSection[];    // 状态机结果（化解/加深/淡忘/实现/落空/新困惑）
+    plateSubmissions: DigestReportSection[]; // 提交给门牌的蒸馏候选
+    plateUpdated: string[];             // 门牌实际更新的房间（PlateRoom）
+}
+
+/** 每角色保留的消化报告条数上限 */
+export const DIGEST_REPORT_KEEP = 30;
 
 // ─── 期盼（窗台） ─────────────────────────────────────
 

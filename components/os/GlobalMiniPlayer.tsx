@@ -118,10 +118,18 @@ const GlobalMiniPlayer: React.FC = () => {
   // 即使用户上次已经手动关掉了球、并且当下并没有在听歌。
   // ref 初始化为当前 playing 值：避免挂载瞬间被误判为 false→true 跳变。
   const prevPlayingRef = useRef(playing);
+  // 本次会话是否真正播放过。冷启动/重新进入项目时，MusicContext 会从 localStorage
+  // 恢复 queue+idx（于是 current 非空），但新建的 <audio> 尚未播放（playing=false）。
+  // 这种"恢复出来但没在放"的暂停态不应该弹出悬浮球——只有真正播放过之后，
+  // 会话内的手动暂停才保留显示。
+  const [everPlayed, setEverPlayed] = useState(playing);
   useEffect(() => {
-    if (playing && !prevPlayingRef.current) {
-      setHidden(false);
-      try { sessionStorage.removeItem(HIDDEN_KEY); } catch {}
+    if (playing) {
+      setEverPlayed(true);
+      if (!prevPlayingRef.current) {
+        setHidden(false);
+        try { sessionStorage.removeItem(HIDDEN_KEY); } catch {}
+      }
     }
     prevPlayingRef.current = playing;
   }, [playing]);
@@ -271,6 +279,8 @@ const GlobalMiniPlayer: React.FC = () => {
   }, []);
 
   if (!current) return null;
+  // 重新进入项目时音乐是暂停的（从未真正播放过本次会话）→ 不显示悬浮球
+  if (!everPlayed && !playing) return null;
   if (activeApp === AppID.Music) return null;
   if (activeApp === AppID.Launcher) return null; // Launcher 的 dock 够用了
   if (activeApp === AppID.Call) return null;     // 通话中不打扰

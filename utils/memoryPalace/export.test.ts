@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { MemoryNodeDB, MemoryVectorDB, EventBoxDB, AnticipationDB } from './db';
+import { MemoryNodeDB, MemoryVectorDB, EventBoxDB, AnticipationDB, RoomPlateDB, plateId } from './db';
 import { exportMemoryPalace, importMemoryPalace, isMemoryPalaceExportFile } from './export';
-import type { MemoryNode, EventBox, Anticipation, MemoryVector } from './types';
+import type { MemoryNode, EventBox, Anticipation, MemoryVector, RoomPlate } from './types';
+import { PLATE_ENTRY_CAPS } from './types';
 
 // fake-indexeddb 已通过 test-setup.ts 注入。
 // 这组用例锁住记忆宫殿「导出 → 导入」往返：内容、向量、以及事件盒↔节点的内部引用
@@ -138,6 +139,61 @@ describe('记忆宫殿导出 / 导入', () => {
         const members = (b: typeof b0) => [b.summaryNodeId, ...b.liveMemoryIds].filter(Boolean) as string[];
         const overlap = members(b0).filter(id => members(b1).includes(id));
         expect(overlap).toHaveLength(0);
+    });
+
+    it('房间门牌随导出走、导入按合并语义并入目标角色（去重 + 容量上限 + 重生成条目 ID）', async () => {
+        const src = 'char_src_plate';
+        await seedChar(src);
+        const srcPlate: RoomPlate = {
+            id: plateId(src, 'user_room'), charId: src, room: 'user_room',
+            entries: [
+                { id: 'pe_a', text: '父母离异，和男友同居', tag: '家庭', firstLearnedAt: 500, updatedAt: 900, sourceCount: 3 },
+                { id: 'pe_b', text: '做设计相关的工作', tag: '工作', firstLearnedAt: 600, updatedAt: 900, sourceCount: 1 },
+            ],
+            updatedAt: 900, version: 2,
+        };
+        await RoomPlateDB.save(srcPlate);
+
+        const file = await exportMemoryPalace([{ id: src, name: '糯米机' }], { includeVectors: false });
+        expect(file.characters[0].counts.roomPlateEntries).toBe(2);
+        expect(file.characters[0].roomPlates).toHaveLength(1);
+
+        // 目标角色已有一块门牌：一条与导入重复、一条独有
+        const dst = 'char_dst_plate';
+        await RoomPlateDB.save({
+            id: plateId(dst, 'user_room'), charId: dst, room: 'user_room',
+            entries: [
+                { id: 'pe_x', text: '父母离异，和男友同居', tag: '家庭', firstLearnedAt: 100, updatedAt: 100, sourceCount: 5 },
+                { id: 'pe_y', text: '养了两只猫', firstLearnedAt: 200, updatedAt: 200, sourceCount: 2 },
+            ],
+            updatedAt: 200, version: 1,
+        });
+
+        const result = await importMemoryPalace(file, dst);
+        expect(result.roomPlateEntries).toBe(1); // 只有"工作"那条是新的
+
+        const merged = (await RoomPlateDB.get(dst, 'user_room'))!;
+        expect(merged.entries).toHaveLength(3);
+        expect(merged.entries.length).toBeLessThanOrEqual(PLATE_ENTRY_CAPS.user_room);
+        // 原有条目原样保留（重复文本没被导入覆盖，sourceCount 还是目标侧的 5）
+        const dup = merged.entries.find(e => e.text === '父母离异，和男友同居')!;
+        expect(dup.id).toBe('pe_x');
+        expect(dup.sourceCount).toBe(5);
+        // 新并入的条目重生成了 ID，但 firstLearnedAt/sourceCount/tag 原样带过来
+        const added = merged.entries.find(e => e.text === '做设计相关的工作')!;
+        expect(added.id).not.toBe('pe_b');
+        expect(added.firstLearnedAt).toBe(600);
+        expect(added.tag).toBe('工作');
+    });
+
+    it('旧版导出文件（无 roomPlates 字段）导入不报错', async () => {
+        const src = 'char_src_legacy';
+        await seedChar(src);
+        const file = await exportMemoryPalace([{ id: src, name: '糯米机' }], { includeVectors: false });
+        delete (file.characters[0] as any).roomPlates; // 模拟旧文件
+        const result = await importMemoryPalace(file, 'char_dst_legacy');
+        expect(result.roomPlateEntries).toBe(0);
+        expect(result.nodes).toBe(2);
     });
 
     it('非法文件被 isMemoryPalaceExportFile 拒绝，importMemoryPalace 抛错', async () => {

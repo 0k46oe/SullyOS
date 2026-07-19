@@ -7,23 +7,32 @@ import {
     GalleryImage, FullBackupData, GroupProfile, SocialPost, StudyCourse, GameSession, Worldbook, NovelBook, Emoji, EmojiCategory,
     BankTransaction, SavingsGoal, BankFullState, DollhouseState, XhsStockImage, XhsActivityRecord, SongSheet, QuizSession, GuidebookSession,
     LifeSimState, HandbookEntry, Tracker, TrackerEntry, HotNewsSnapshot,
+    LifeRecord, MedPlan, LifeRecordSettings, CharacterGroup,
     VRWorldNovel, VRNovelAnnotation, CustomCreatorPart, VRMusicRoomState, VRGuestbookState, VRScript, VRStagedPlay, VRLetter,
     WorldProfile, WorldEpisode
 } from '../types';
 import { exportPostOfficeLocal, importPostOfficeLocal } from './vrWorld/postOffice';
+import { exportSignalLocal, importSignalLocal } from './vrWorld/signal';
 import { exportLuckinLocal, importLuckinLocal } from './luckinMcpClient';
 import { exportMcdLocal, importMcdLocal } from './mcdMcpClient';
+import { exportMcpLocal, importMcpLocal } from './mcpClient';
 import { exportWorldHomeLocal, importWorldHomeLocal } from './worldHome/localBackup';
+import { exportDesktopSkinLocal, importDesktopSkinLocal } from './desktopSkinBackup';
 
 const DB_NAME = 'AetherOS_Data';
-const DB_VERSION = 64; // Bumped: v64 ensure worlds / world_episodes stores exist（v63 漏建：已到 v63 的库不会再触发 upgrade，补一版重建）
+// v67：两条并行线各自用掉了 v65/v66（A线: blob_assets + 生活记录；B线: room_plates 门牌 + digest_reports 消化日志），
+// 合并后统一推到 67——建表全部走幂等的 if(!contains)，任一侧的 v66 老库升级时都会补齐缺的那组表。
+// v68：character_groups 角色分组（神经链接"文件夹"，见 types.ts CharacterGroup）。
+const DB_VERSION = 68;
 
 const STORE_CHARACTERS = 'characters';
+const STORE_CHAR_GROUPS = 'character_groups'; // 角色分组定义（角色通过 groupId 指向；与群聊 groups 无关）
 const STORE_MESSAGES = 'messages';
 const STORE_EMOJIS = 'emojis';
 const STORE_EMOJI_CATEGORIES = 'emoji_categories'; 
 const STORE_THEMES = 'themes';
-const STORE_ASSETS = 'assets'; 
+const STORE_ASSETS = 'assets';
+const STORE_BLOB_ASSETS = 'blob_assets'; // 图片二进制 Blob 存储（key=生成 id，value={id, blob}）；壁纸/小屋等图片改存 Blob 而非 base64，省 ~33% 空间且不占 JS 堆。见 utils/blobRef.ts
 const STORE_SCHEDULED = 'scheduled_messages'; 
 const STORE_GALLERY = 'gallery';
 const STORE_USER = 'user_profile'; 
@@ -65,6 +74,9 @@ const STORE_VR_SETTINGS = 'vr_settings';          // 彼方设置单例：独立
 const STORE_API_CALL_LOG = 'api_call_log';        // 全局 API 调用记录单例（id='log'，保留近 5 天）
 const STORE_WORLDS = 'worlds';                    // 家园·世界定义（成员/NPC/居住/关系/模式）
 const STORE_WORLD_EPISODES = 'world_episodes';    // 家园·演绎历史（每轮一条，index worldId）
+const STORE_LIFE_RECORDS = 'life_records';        // 生活记录：生理期/药盒打卡/锻炼（记账走 bank_transactions）
+const STORE_MED_PLANS = 'med_plans';              // 药盒计划（每天几点吃什么药）
+const STORE_LIFE_SETTINGS = 'life_record_settings'; // 生活记录设置单例（id='main'：周期长度等）
 
 // API 调用记录：保留近 5 天，超期丢弃；再加一个硬上限防止异常情况撑爆
 const API_CALL_LOG_MAX_AGE_MS = 5 * 24 * 60 * 60 * 1000;
@@ -81,14 +93,14 @@ export interface ScheduledMessage {
 // Built-in Presets
 const SULLY_CATEGORY_ID = 'cat_sully_exclusive';
 const SULLY_PRESET_EMOJIS = [
-    { name: 'Sully晚安', url: 'https://sharkpan.xyz/f/pWg6HQ/night.png', categoryId: SULLY_CATEGORY_ID },
-    { name: 'Sully无语', url: 'https://sharkpan.xyz/f/75wvuj/w.png', categoryId: SULLY_CATEGORY_ID },
-    { name: 'Sully偷看', url: 'https://sharkpan.xyz/f/MK77Ia/see.png', categoryId: SULLY_CATEGORY_ID },
-    { name: 'Sully打气', url: 'https://sharkpan.xyz/f/3WwMHe/fight.png', categoryId: SULLY_CATEGORY_ID },
-    { name: 'Sully生气', url: 'https://sharkpan.xyz/f/5nwxCj/an.png', categoryId: SULLY_CATEGORY_ID },
-    { name: 'Sully疑惑', url: 'https://sharkpan.xyz/f/ylWpfN/sDN.png', categoryId: SULLY_CATEGORY_ID },
-    { name: 'Sully道歉', url: 'https://sharkpan.xyz/f/QdnaU6/sorry.png', categoryId: SULLY_CATEGORY_ID },
-    { name: 'Sully等你消息', url: 'https://sharkpan.xyz/f/5nrJsj/wait.png', categoryId: SULLY_CATEGORY_ID },
+    { name: 'Sully晚安', url: 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/night.png', categoryId: SULLY_CATEGORY_ID },
+    { name: 'Sully无语', url: 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/w.png', categoryId: SULLY_CATEGORY_ID },
+    { name: 'Sully偷看', url: 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/see.png', categoryId: SULLY_CATEGORY_ID },
+    { name: 'Sully打气', url: 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/fight.png', categoryId: SULLY_CATEGORY_ID },
+    { name: 'Sully生气', url: 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/an.png', categoryId: SULLY_CATEGORY_ID },
+    { name: 'Sully疑惑', url: 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/sDN.png', categoryId: SULLY_CATEGORY_ID },
+    { name: 'Sully道歉', url: 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/sorry.png', categoryId: SULLY_CATEGORY_ID },
+    { name: 'Sully等你消息', url: 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/wait.png', categoryId: SULLY_CATEGORY_ID },
 ];
 
 // 单例连接缓存。openDB 原本每次调用都新开一条 IDB 连接, 既不复用也不 close ——
@@ -198,6 +210,7 @@ export const openDB = (): Promise<IDBDatabase> => {
       };
 
       createStore(STORE_CHARACTERS, { keyPath: 'id' });
+      createStore(STORE_CHAR_GROUPS, { keyPath: 'id' }); // v68: 角色分组
 
       if (!db.objectStoreNames.contains(STORE_MESSAGES)) {
         const msgStore = db.createObjectStore(STORE_MESSAGES, { keyPath: 'id', autoIncrement: true });
@@ -227,6 +240,7 @@ export const openDB = (): Promise<IDBDatabase> => {
 
       createStore(STORE_THEMES, { keyPath: 'id' });
       createStore(STORE_ASSETS, { keyPath: 'id' });
+      createStore(STORE_BLOB_ASSETS, { keyPath: 'id' }); // v65: 图片二进制 Blob 存储
       
       if (!db.objectStoreNames.contains(STORE_SCHEDULED)) {
         const schedStore = db.createObjectStore(STORE_SCHEDULED, { keyPath: 'id' });
@@ -315,6 +329,15 @@ export const openDB = (): Promise<IDBDatabase> => {
           teStore.createIndex('date', 'date', { unique: false });
       }
 
+      // v65: 生活记录（档案 App）
+      if (!db.objectStoreNames.contains(STORE_LIFE_RECORDS)) {
+          const lrStore = db.createObjectStore(STORE_LIFE_RECORDS, { keyPath: 'id' });
+          lrStore.createIndex('date', 'date', { unique: false });
+          lrStore.createIndex('module', 'module', { unique: false });
+      }
+      createStore(STORE_MED_PLANS, { keyPath: 'id' });
+      createStore(STORE_LIFE_SETTINGS, { keyPath: 'id' });
+
       createStore(STORE_HOTNEWS, { keyPath: 'id' });
 
       // ─── Memory Palace (记忆宫殿) stores ───
@@ -372,6 +395,18 @@ export const openDB = (): Promise<IDBDatabase> => {
       if (!db.objectStoreNames.contains('event_boxes')) {
           const ebStore = db.createObjectStore('event_boxes', { keyPath: 'id' });
           ebStore.createIndex('charId', 'charId', { unique: false });
+      }
+
+      // ─── 房间门牌（v65 新增，情景→语义固化层） ───────
+      if (!db.objectStoreNames.contains('room_plates')) {
+          const rpStore = db.createObjectStore('room_plates', { keyPath: 'id' });
+          rpStore.createIndex('charId', 'charId', { unique: false });
+      }
+
+      // ─── 消化日志（v66 新增，认知消化可回看记录） ─────
+      if (!db.objectStoreNames.contains('digest_reports')) {
+          const drStore = db.createObjectStore('digest_reports', { keyPath: 'id' });
+          drStore.createIndex('charId', 'charId', { unique: false });
       }
 
       // ─── v48 一次性强制清空记忆宫殿（EventBox 体系，旧 boxId 数据不兼容） ───
@@ -488,6 +523,45 @@ export const DB = {
     const db = await openDB();
     const transaction = db.transaction(STORE_CHARACTERS, 'readwrite');
     transaction.objectStore(STORE_CHARACTERS).delete(id);
+  },
+
+  // ---- 角色分组（神经链接"文件夹"，与群聊 groups 无关）----
+
+  getCharacterGroups: async (): Promise<CharacterGroup[]> => {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      if (!db.objectStoreNames.contains(STORE_CHAR_GROUPS)) {
+        resolve([]);
+        return;
+      }
+      const transaction = db.transaction(STORE_CHAR_GROUPS, 'readonly');
+      const request = transaction.objectStore(STORE_CHAR_GROUPS).getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+  },
+
+  saveCharacterGroup: async (group: CharacterGroup): Promise<void> => {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_CHAR_GROUPS, 'readwrite');
+      transaction.objectStore(STORE_CHAR_GROUPS).put(group);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('saveCharacterGroup aborted'));
+    });
+  },
+
+  // 只删分组定义。组内角色的 groupId 回落由 OSContext.deleteCharacterGroup 负责
+  // （角色 state 在 context 里，这里改了 DB 不改 state 会出现"删组后角色还挂在幽灵组里"）。
+  deleteCharacterGroup: async (id: string): Promise<void> => {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_CHAR_GROUPS, 'readwrite');
+      transaction.objectStore(STORE_CHAR_GROUPS).delete(id);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
   },
 
   /**
@@ -738,20 +812,27 @@ export const DB = {
 
   clearMessages: async (charId: string): Promise<void> => {
     const db = await openDB();
-    const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
-    const store = transaction.objectStore(STORE_MESSAGES);
-    const index = store.index('charId');
-    const request = index.openCursor(IDBKeyRange.only(charId));
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (cursor) { 
-          const m = cursor.value as Message;
-          if (!m.groupId) { 
-              store.delete(cursor.primaryKey); 
-          }
-          cursor.continue(); 
-      }
-    };
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
+      const store = transaction.objectStore(STORE_MESSAGES);
+      const index = store.index('charId');
+      const request = index.openCursor(IDBKeyRange.only(charId));
+
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (cursor) {
+            const m = cursor.value as Message;
+            if (!m.groupId) {
+                store.delete(cursor.primaryKey);
+            }
+            cursor.continue();
+        }
+      };
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('clearMessages aborted'));
+    });
   },
 
   getGroups: async (): Promise<GroupProfile[]> => {
@@ -939,6 +1020,64 @@ export const DB = {
       });
   },
 
+  // 「幽灵表情包」清理：删角色不会级联清理表情分类，导致只对已删角色可见的
+  // 专属分类在单聊面板里被过滤掉（看不到也删不掉），却仍会出现在群聊表情面板
+  // 和 AI 提示词里。按「现存角色 id 白名单」做三件事：
+  //   1. 分类绑定里指向已删角色的 id → 剔除（部分失效只修绑定，不动表情）
+  //   2. 剔除后一个角色都不剩的非系统分类 → 整个删除，连同分类下所有表情
+  //   3. categoryId 指向已不存在分类的表情 → 删除（无主表情）
+  // dryRun=true 只扫描统计、不落库，供 UI 做「先扫描再确认」。
+  cleanupEmojiResidue: async (
+      validCharacterIds: string[],
+      options: { dryRun?: boolean } = {}
+  ): Promise<{
+      removedCategories: { id: string; name: string }[];
+      fixedCategories: { id: string; name: string }[];
+      removedEmojiCount: number;
+  }> => {
+      const validIds = new Set(validCharacterIds);
+      const [categories, emojis] = await Promise.all([DB.getEmojiCategories(), DB.getEmojis()]);
+
+      const removedCategories: { id: string; name: string }[] = [];
+      const fixedCategories: EmojiCategory[] = [];
+      for (const cat of categories) {
+          if (!cat.allowedCharacterIds || cat.allowedCharacterIds.length === 0) continue; // 全员可见，不动
+          const alive = cat.allowedCharacterIds.filter(cid => validIds.has(cid));
+          if (alive.length === cat.allowedCharacterIds.length) continue; // 绑定全部有效
+          if (alive.length === 0 && !cat.isSystem) {
+              removedCategories.push({ id: cat.id, name: cat.name });
+          } else {
+              // 系统分类绑定全失效时也走这里：清空绑定回落「全员可见」，绝不删系统分类
+              fixedCategories.push({ ...cat, allowedCharacterIds: alive });
+          }
+      }
+
+      const removedCatIds = new Set(removedCategories.map(c => c.id));
+      const remainingCatIds = new Set(categories.map(c => c.id).filter(id => !removedCatIds.has(id)));
+      const emojisToDelete = emojis.filter(e => e.categoryId && !remainingCatIds.has(e.categoryId));
+
+      if (!options.dryRun && (removedCategories.length || fixedCategories.length || emojisToDelete.length)) {
+          const db = await openDB();
+          const tx = db.transaction([STORE_EMOJI_CATEGORIES, STORE_EMOJIS], 'readwrite');
+          const catStore = tx.objectStore(STORE_EMOJI_CATEGORIES);
+          const emojiStore = tx.objectStore(STORE_EMOJIS);
+          removedCategories.forEach(c => catStore.delete(c.id));
+          fixedCategories.forEach(c => catStore.put(c));
+          emojisToDelete.forEach(e => emojiStore.delete(e.name));
+          await new Promise<void>((resolve, reject) => {
+              tx.oncomplete = () => resolve();
+              tx.onerror = () => reject(tx.error);
+              tx.onabort = () => reject(tx.error);
+          });
+      }
+
+      return {
+          removedCategories,
+          fixedCategories: fixedCategories.map(c => ({ id: c.id, name: c.name })),
+          removedEmojiCount: emojisToDelete.length,
+      };
+  },
+
   initializeEmojiData: async (): Promise<void> => {
       const cats = await DB.getEmojiCategories();
       // 巧妙利用 UI 强制保留 default 分类的特性：
@@ -1003,8 +1142,15 @@ export const DB = {
 
   saveAsset: async (id: string, data: string): Promise<void> => {
     const db = await openDB();
-    const transaction = db.transaction(STORE_ASSETS, 'readwrite');
-    transaction.objectStore(STORE_ASSETS).put({ id, data });
+    // 等事务真正落盘并把失败抛出去：旧实现发完 put 就返回，配额不足（iOS Safari 常见）
+    // 时写入静默丢失，调用方还以为保存成功了。
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_ASSETS, 'readwrite');
+        transaction.objectStore(STORE_ASSETS).put({ id, data });
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error || new Error('IndexedDB transaction aborted'));
+    });
   },
 
   getAssetRaw: async (id: string): Promise<any | null> => {
@@ -1028,6 +1174,39 @@ export const DB = {
     const db = await openDB();
     const transaction = db.transaction(STORE_ASSETS, 'readwrite');
     transaction.objectStore(STORE_ASSETS).delete(id);
+  },
+
+  // ─── Blob 资源（图片二进制，见 utils/blobRef.ts）───────────────
+  // IndexedDB 原生支持存 Blob（结构化克隆），比 base64 省 ~33% 空间、不占 JS 堆，
+  // 读出后用 URL.createObjectURL 渲染即可。旧库（<v65）可能还没有此 store，读操作做空兜底。
+  getBlobAsset: async (id: string): Promise<Blob | null> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_BLOB_ASSETS)) return null;
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_BLOB_ASSETS, 'readonly');
+          const store = transaction.objectStore(STORE_BLOB_ASSETS);
+          const request = store.get(id);
+          request.onsuccess = () => resolve((request.result?.blob as Blob) ?? null);
+          request.onerror = () => reject(request.error);
+      });
+  },
+
+  putBlobAsset: async (id: string, blob: Blob): Promise<void> => {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_BLOB_ASSETS, 'readwrite');
+          transaction.objectStore(STORE_BLOB_ASSETS).put({ id, blob });
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error || new Error('putBlobAsset aborted'));
+      });
+  },
+
+  deleteBlobAsset: async (id: string): Promise<void> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_BLOB_ASSETS)) return;
+      const transaction = db.transaction(STORE_BLOB_ASSETS, 'readwrite');
+      transaction.objectStore(STORE_BLOB_ASSETS).delete(id);
   },
 
   getJournalStickers: async (): Promise<{name: string, url: string}[]> => {
@@ -1559,6 +1738,81 @@ export const DB = {
       const db = await openDB();
       const tx = db.transaction(STORE_TRACKER_ENTRIES, 'readwrite');
       tx.objectStore(STORE_TRACKER_ENTRIES).delete(id);
+  },
+
+  // ─── 生活记录（档案 App：生理期 / 药盒 / 锻炼；记账走 bank_transactions） ───
+  getAllLifeRecords: async (): Promise<LifeRecord[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_LIFE_RECORDS)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_LIFE_RECORDS, 'readonly');
+          const req = tx.objectStore(STORE_LIFE_RECORDS).getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => reject(req.error);
+      });
+  },
+
+  getLifeRecordById: async (id: string): Promise<LifeRecord | null> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_LIFE_RECORDS)) return null;
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_LIFE_RECORDS, 'readonly');
+          const req = tx.objectStore(STORE_LIFE_RECORDS).get(id);
+          req.onsuccess = () => resolve(req.result || null);
+          req.onerror = () => reject(req.error);
+      });
+  },
+
+  saveLifeRecord: async (record: LifeRecord): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_LIFE_RECORDS, 'readwrite');
+      tx.objectStore(STORE_LIFE_RECORDS).put(record);
+  },
+
+  deleteLifeRecord: async (id: string): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_LIFE_RECORDS, 'readwrite');
+      tx.objectStore(STORE_LIFE_RECORDS).delete(id);
+  },
+
+  getAllMedPlans: async (): Promise<MedPlan[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MED_PLANS)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MED_PLANS, 'readonly');
+          const req = tx.objectStore(STORE_MED_PLANS).getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => reject(req.error);
+      });
+  },
+
+  saveMedPlan: async (plan: MedPlan): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MED_PLANS, 'readwrite');
+      tx.objectStore(STORE_MED_PLANS).put(plan);
+  },
+
+  deleteMedPlan: async (id: string): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MED_PLANS, 'readwrite');
+      tx.objectStore(STORE_MED_PLANS).delete(id);
+  },
+
+  getLifeRecordSettings: async (): Promise<LifeRecordSettings | null> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_LIFE_SETTINGS)) return null;
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_LIFE_SETTINGS, 'readonly');
+          const req = tx.objectStore(STORE_LIFE_SETTINGS).get('main');
+          req.onsuccess = () => resolve(req.result || null);
+          req.onerror = () => reject(req.error);
+      });
+  },
+
+  saveLifeRecordSettings: async (settings: LifeRecordSettings): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_LIFE_SETTINGS, 'readwrite');
+      tx.objectStore(STORE_LIFE_SETTINGS).put({ ...settings, id: 'main' });
   },
 
   getAllCourses: async (): Promise<StudyCourse[]> => {
@@ -2320,8 +2574,9 @@ export const DB = {
           });
       };
 
-      const [characters, messages, themes, emojis, emojiCategories, assets, galleryImages, userProfiles, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, journalStickers, socialPosts, courses, games, worldbooks, novels, bankTx, bankData, xhsActivities, xhsStockImages, songs, quizzes, guidebookSessions, scheduledMessages, lifeSimStates, handbooks, trackers, trackerEntries, hotNewsSnapshots, vrNovels, vrAnnotations, customCreatorParts, vrMusic, vrGuestbook, vrScripts, vrStagedPlays, vrPresets, vrLetters, vrSettings, worlds, worldEpisodes] = await Promise.all([
+      const [characters, characterGroups, messages, themes, emojis, emojiCategories, assets, galleryImages, userProfiles, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, journalStickers, socialPosts, courses, games, worldbooks, novels, bankTx, bankData, xhsActivities, xhsStockImages, songs, quizzes, guidebookSessions, scheduledMessages, lifeSimStates, handbooks, trackers, trackerEntries, hotNewsSnapshots, vrNovels, vrAnnotations, customCreatorParts, vrMusic, vrGuestbook, vrScripts, vrStagedPlays, vrPresets, vrLetters, vrSettings, worlds, worldEpisodes, lifeRecords, medPlans, lifeRecordSettings] = await Promise.all([
           getAllFromStore(STORE_CHARACTERS),
+          getAllFromStore(STORE_CHAR_GROUPS),
           getAllFromStore(STORE_MESSAGES),
           getAllFromStore(STORE_THEMES),
           getAllFromStore(STORE_EMOJIS),
@@ -2366,6 +2621,9 @@ export const DB = {
           getAllFromStore(STORE_VR_SETTINGS),
           getAllFromStore(STORE_WORLDS),
           getAllFromStore(STORE_WORLD_EPISODES),
+          getAllFromStore(STORE_LIFE_RECORDS),
+          getAllFromStore(STORE_MED_PLANS),
+          getAllFromStore(STORE_LIFE_SETTINGS),
       ]);
 
       const userProfile = userProfiles.length > 0 ? {
@@ -2378,7 +2636,7 @@ export const DB = {
       const dollhouseRecord = bankData.find((d: any) => d.id === 'dollhouse_state');
 
       return {
-          characters, messages, customThemes: themes, savedEmojis: emojis, emojiCategories, assets, galleryImages, userProfile, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, savedJournalStickers: journalStickers, socialPosts, courses, games, worldbooks, novels,
+          characters, characterGroups, messages, customThemes: themes, savedEmojis: emojis, emojiCategories, assets, galleryImages, userProfile, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, savedJournalStickers: journalStickers, socialPosts, courses, games, worldbooks, novels,
           bankState: mainState ? { ...mainState, id: undefined } : undefined,
           bankDollhouse: dollhouseRecord?.data || undefined,
           bankTransactions: bankTx,
@@ -2392,6 +2650,9 @@ export const DB = {
           handbooks,
           trackers,
           trackerEntries,
+          lifeRecords,
+          medPlans,
+          lifeRecordSettings,
           hotNewsSnapshots,
           vrNovels,
           vrAnnotations,
@@ -2404,11 +2665,14 @@ export const DB = {
           vrLetters,
           vrSettings,
           vrPostOffice: exportPostOfficeLocal(), // 邮局本机配置（身份/后端地址，存 localStorage）
+          vrSignal: exportSignalLocal(),         // 信号坠落处本机记录（句子归属「你·角色」+ 反复用清单，存 localStorage）
           worlds,
           worldEpisodes,
           worldHomeLocal: exportWorldHomeLocal(), // 家园本机配置：全局 API + 文风收藏（存 localStorage）
           luckinLocal: exportLuckinLocal(),       // 瑞幸 token + 启用状态（存 localStorage）
           mcdLocal: exportMcdLocal(),             // 麦当劳 token + 启用状态（存 localStorage）
+          mcpLocal: exportMcpLocal(),             // 通用 MCP 服务器配置（存 localStorage）
+          desktopSkinLocal: await exportDesktopSkinLocal(), // 桌面皮肤：界面配色 + 看板 banner（看板图令牌解析为 data URL）
       };
   },
 
@@ -2429,7 +2693,7 @@ export const DB = {
       const db = await openDB();
       
       const availableStores = [
-          STORE_CHARACTERS, STORE_MESSAGES, STORE_THEMES, STORE_EMOJIS, STORE_EMOJI_CATEGORIES,
+          STORE_CHARACTERS, STORE_CHAR_GROUPS, STORE_MESSAGES, STORE_THEMES, STORE_EMOJIS, STORE_EMOJI_CATEGORIES,
           STORE_ASSETS, STORE_GALLERY, STORE_USER, STORE_DIARIES,
           STORE_TASKS, STORE_ANNIVERSARIES, STORE_ROOM_TODOS, STORE_ROOM_NOTES,
           STORE_GROUPS, STORE_JOURNAL_STICKERS, STORE_SOCIAL_POSTS, STORE_COURSES, STORE_GAMES, STORE_WORLDBOOKS, STORE_NOVELS, STORE_SONGS,
@@ -2443,10 +2707,14 @@ export const DB = {
           STORE_HANDBOOK,
           STORE_TRACKERS,
           STORE_TRACKER_ENTRIES,
+          STORE_LIFE_RECORDS,
+          STORE_MED_PLANS,
+          STORE_LIFE_SETTINGS,
           STORE_HOTNEWS,
           STORE_VR_NOVELS, STORE_VR_ANNOTATIONS, STORE_CC_PARTS, STORE_VR_MUSIC, STORE_VR_GUESTBOOK, STORE_VR_SCRIPTS, STORE_VR_PLAYS, STORE_VR_PRESETS, STORE_VR_LETTERS, STORE_VR_SETTINGS,
           STORE_WORLDS, STORE_WORLD_EPISODES,
           'memory_nodes', 'memory_vectors', 'memory_links', 'topic_boxes', 'anticipations', 'event_boxes',
+          'room_plates', 'digest_reports',
           'memory_batches', 'pixel_home_assets', 'pixel_home_layouts'
       ].filter(name => db.objectStoreNames.contains(name));
 
@@ -2484,6 +2752,7 @@ export const DB = {
 
       const plannedSections = [
           data.characters !== undefined || data.mediaAssets !== undefined,
+          data.characterGroups !== undefined,
           data.messages !== undefined,
           data.customThemes !== undefined,
           data.savedEmojis !== undefined,
@@ -2516,11 +2785,16 @@ export const DB = {
           data.topicBoxes !== undefined,
           data.anticipations !== undefined,
           data.eventBoxes !== undefined,
+          data.roomPlates !== undefined,
+          data.digestReports !== undefined,
           data.memoryBatches !== undefined,
           data.dailySchedules !== undefined,
           data.handbooks !== undefined,
           data.trackers !== undefined,
           data.trackerEntries !== undefined,
+          data.lifeRecords !== undefined,
+          data.medPlans !== undefined,
+          data.lifeRecordSettings !== undefined,
           data.hotNewsSnapshots !== undefined,
           data.vrNovels !== undefined,
           data.vrAnnotations !== undefined,
@@ -2687,6 +2961,11 @@ export const DB = {
           data.mediaAssets = undefined as any;
       }, data.characters?.length || data.mediaAssets?.length || 0);
 
+      await runSection('角色分组', data.characterGroups !== undefined, async () => {
+          await mergeStore(STORE_CHAR_GROUPS, data.characterGroups, '角色分组', false);
+          data.characterGroups = undefined as any;
+      }, data.characterGroups?.length || 0);
+
       await runSection('聊天记录', data.messages !== undefined, async () => {
           if (!hasStore(STORE_MESSAGES)) return;
           const isPatchMode = !hasCharacterBackup;
@@ -2775,7 +3054,9 @@ export const DB = {
           data.vrAnnotations = undefined as any;
       }, data.vrAnnotations?.length || 0);
       await runSection('捏脸自定义部件', data.customCreatorParts !== undefined, async () => {
-          await clearAndAdd(STORE_CC_PARTS, data.customCreatorParts, '捏脸自定义部件', false);
+          // restoreAssets=true：部件 src/shadowSrc 是 data:image，media/full 导出时被抽进 zip，
+          // 导入必须经 beforeWrite 把 assets/*.png 路径还原回 base64，否则部件图裂成死链。
+          await clearAndAdd(STORE_CC_PARTS, data.customCreatorParts, '捏脸自定义部件', true);
           data.customCreatorParts = undefined as any;
       }, data.customCreatorParts?.length || 0);
       await runSection('听歌房', data.vrMusicRoom !== undefined, async () => {
@@ -2812,6 +3093,10 @@ export const DB = {
           importPostOfficeLocal((data as any).vrPostOffice);
           (data as any).vrPostOffice = undefined;
       }, 1);
+      await runSection('信号坠落处', (data as any).vrSignal !== undefined, async () => {
+          importSignalLocal((data as any).vrSignal);
+          (data as any).vrSignal = undefined;
+      }, 1);
       await runSection('家园世界', data.worlds !== undefined, async () => {
           await clearAndAdd(STORE_WORLDS, data.worlds, '家园世界', false);
           data.worlds = undefined as any;
@@ -2831,6 +3116,14 @@ export const DB = {
       await runSection('麦当劳配置', (data as any).mcdLocal !== undefined, async () => {
           importMcdLocal((data as any).mcdLocal); // token + 启用状态
           (data as any).mcdLocal = undefined;
+      }, 1);
+      await runSection('MCP 服务器配置', (data as any).mcpLocal !== undefined, async () => {
+          importMcpLocal((data as any).mcpLocal); // 用户自配的 MCP 服务器列表
+          (data as any).mcpLocal = undefined;
+      }, 1);
+      await runSection('桌面皮肤偏好', (data as any).desktopSkinLocal !== undefined, async () => {
+          await importDesktopSkinLocal((data as any).desktopSkinLocal); // 界面配色 + 看板 banner（data URL→本机 blob）
+          (data as any).desktopSkinLocal = undefined;
       }, 1);
       await runSection('歌曲', data.songs !== undefined, async () => {
           await clearAndAdd(STORE_SONGS, data.songs, '歌曲', false);
@@ -2918,6 +3211,14 @@ export const DB = {
           await clearAndAdd('event_boxes', data.eventBoxes, '事件盒', false);
           data.eventBoxes = undefined as any;
       }, data.eventBoxes?.length || 0);
+      await runSection('房间门牌', data.roomPlates !== undefined, async () => {
+          await clearAndAdd('room_plates', data.roomPlates, '房间门牌', false);
+          data.roomPlates = undefined as any;
+      }, data.roomPlates?.length || 0);
+      await runSection('消化日志', data.digestReports !== undefined, async () => {
+          await clearAndAdd('digest_reports', data.digestReports, '消化日志', false);
+          data.digestReports = undefined as any;
+      }, data.digestReports?.length || 0);
       await runSection('记忆批次', data.memoryBatches !== undefined, async () => {
           await clearAndAdd('memory_batches', data.memoryBatches, '记忆批次', false);
           data.memoryBatches = undefined as any;
@@ -2944,6 +3245,20 @@ export const DB = {
           await clearAndAdd(STORE_TRACKER_ENTRIES, data.trackerEntries, '打卡记录', false);
           data.trackerEntries = undefined as any;
       }, data.trackerEntries?.length || 0);
+
+      // 生活记录（档案 App：生理期/药盒/锻炼 + 药盒计划 + 设置）
+      await runSection('生活记录', data.lifeRecords !== undefined, async () => {
+          await clearAndAdd(STORE_LIFE_RECORDS, data.lifeRecords, '生活记录', false);
+          data.lifeRecords = undefined as any;
+      }, data.lifeRecords?.length || 0);
+      await runSection('药盒计划', data.medPlans !== undefined, async () => {
+          await clearAndAdd(STORE_MED_PLANS, data.medPlans, '药盒计划', false);
+          data.medPlans = undefined as any;
+      }, data.medPlans?.length || 0);
+      await runSection('生活记录设置', data.lifeRecordSettings !== undefined, async () => {
+          await clearAndAdd(STORE_LIFE_SETTINGS, data.lifeRecordSettings, '生活记录设置', false);
+          data.lifeRecordSettings = undefined as any;
+      }, data.lifeRecordSettings?.length || 0);
 
       // 热点快照（全角色共享缓存）
       await runSection('热点快照', data.hotNewsSnapshots !== undefined, async () => {

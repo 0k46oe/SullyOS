@@ -24,11 +24,12 @@ import { DB } from '../utils/db';
 import { getChibi } from '../utils/vrWorld/chibi';
 import { WorldScheduler } from '../utils/worldHome/scheduler';
 import { isWorldRunning, injectWorldCard } from '../utils/worldHome/engine';
-import { worldTimeLabel, isNightWorld, houseOf, NARRATIVE_STYLES, buildNpcRollPrompt, parseRolledNpcs, realObserveTarget } from '../utils/worldHome/prompts';
+import { worldTimeLabel, isNightWorld, houseOf, NARRATIVE_STYLES, buildNpcRollPrompt, parseRolledNpcs, realObserveTarget, migrateWorldDaySegs, SEGMENTS_PER_DAY } from '../utils/worldHome/prompts';
 import { SIM_CHAPTER_DAYS, SIM_CHAPTER_CLOCKS } from '../utils/worldHome/chapters';
 import { dmThreadsOf, groupThreadOf } from '../utils/worldHome/threads';
 import { safeFetchJson } from '../utils/safeApi';
 import { WORLD_API_KEY, WORLD_CUSTOM_STYLE_KEY } from '../utils/worldHome/localBackup';
+import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import type { WorldProfile, WorldEpisode, WorldHomeMode, WorldTimeMode, WorldHouse, WorldThread, WorldChatMessage, WorldNarrativeStyle, CharacterProfile, WorldCharBeat, APIConfig, ApiPreset } from '../types';
 
 /**
@@ -117,7 +118,7 @@ const MODE_INFO: Record<WorldHomeMode, { name: string; short: string; desc: stri
 const TIME_MODE_INFO: Record<WorldTimeMode, { name: string; short: string; desc: string; hint: string; badge: string }> = {
     real: {
         name: '真实时间', short: '真实时间',
-        desc: '早/中/晚跟着现实时钟走，演绎写回各角色的聊天与记忆，和你平时的聊天连成一体。',
+        desc: '早/中/晚/凌晨跟着现实时钟走，演绎写回各角色的聊天与记忆，和你平时的聊天连成一体。',
         hint: '适合「真实系角色」——只能补当天错过的段，过了今天就补不回来；卡片自然不会刷屏。',
         badge: 'bg-emerald-400/90 text-emerald-950',
     },
@@ -581,6 +582,9 @@ const WorldEditor: React.FC<{
 }> = ({ draft, characters, apiConfig, addToast, onSave, onCancel, onDelete }) => {
     const [w, setW] = useState<WorldProfile>(draft);
     const upd = (updates: Partial<WorldProfile>) => setW(prev => ({ ...prev, ...updates }));
+    // 「住进这个世界的角色」多选的分组筛选（只影响显示哪些可选项，已选成员不受影响）
+    const { characterGroups } = useOS();
+    const [memberGroupId, setMemberGroupId] = useState<string>(GROUP_FILTER_ALL);
     const members = useMemo(() => w.memberIds.map(id => characters.find(c => c.id === id)).filter(Boolean) as CharacterProfile[], [w.memberIds, characters]);
 
     // AI roll NPC
@@ -680,7 +684,10 @@ const WorldEditor: React.FC<{
     const labelCls = 'text-[10.5px] font-black text-stone-500 tracking-[0.12em] uppercase';
 
     return (
-        <div className="flex-1 overflow-y-auto no-scrollbar px-4 pb-28 pt-3 space-y-3">
+        <div
+            className="flex-1 overflow-y-auto no-scrollbar px-4 pt-3 space-y-3"
+            style={{ paddingBottom: 'calc(7rem + var(--safe-bottom, 0px))', boxSizing: 'border-box' }}
+        >
             <div className={sectionCls}>
                 <div className={labelCls}>世界名字</div>
                 <input className={inputCls} value={w.name} onChange={e => upd({ name: e.target.value })} placeholder="比如：栗子镇" />
@@ -807,8 +814,11 @@ const WorldEditor: React.FC<{
 
             <div className={sectionCls}>
                 <div className={labelCls}>住进这个世界的角色（同一世界观的放一起）</div>
+                {/* 分组筛选只影响下方显示哪些可选项，已选成员不会因为切组被移除 */}
+                <CharacterGroupFilterBar characters={characters} groups={characterGroups}
+                    value={memberGroupId} onChange={setMemberGroupId} />
                 <div className="flex flex-wrap gap-2">
-                    {characters.map(c => (
+                    {filterCharactersByGroup(characters, characterGroups, memberGroupId).map(c => (
                         <button key={c.id} onClick={() => toggleMember(c.id)}
                             className={`flex items-center gap-1.5 pl-1 pr-2.5 py-1 rounded-full border transition-all ${w.memberIds.includes(c.id) ? 'bg-stone-900 border-stone-900 text-white shadow-md' : 'bg-white border-stone-200 text-stone-700'}`}>
                             <img src={c.avatar} className="w-6 h-6 rounded-full object-cover" alt="" />
@@ -817,6 +827,8 @@ const WorldEditor: React.FC<{
                     ))}
                 </div>
                 {characters.length === 0 && <div className="text-[11px] text-stone-400">还没有角色，先去「神经链接」创建</div>}
+                {characters.length > 0 && filterCharactersByGroup(characters, characterGroups, memberGroupId).length === 0 &&
+                    <div className="text-[11px] text-stone-400">该分组下没有角色</div>}
             </div>
 
             <div className={sectionCls}>
@@ -905,7 +917,7 @@ const WorldEditor: React.FC<{
                         <span className="text-[12px] text-stone-700">把这个世界发生的事同步进和角色的聊天、记忆里</span>
                         <input type="checkbox" checked={w.injectToChat !== false} onChange={e => upd({ injectToChat: e.target.checked })} className="w-4 h-4 accent-amber-500" />
                     </label>
-                    <div className="text-[10px] text-stone-400 leading-snug">世界靠你主动「观测」推进半天（早/午/晚三段时光流逝），需要的时候来点一下就行。</div>
+                    <div className="text-[10px] text-stone-400 leading-snug">世界靠你主动「观测」推进一段（早/午/晚/凌晨四段时光流逝），需要的时候来点一下就行。</div>
                 </div>
             )}
 
@@ -920,7 +932,10 @@ const WorldEditor: React.FC<{
                 ⚠️ 每次「观测」大约会调用 <b>{Math.max(1, w.memberIds.length)}+1</b> 次 API（{w.memberIds.length} 个角色各 1 次 + NPC 世界引擎 1 次{w.timeMode === 'sim' ? '，每 20 天结卷再多 1 次' : ''}）。角色越多越费，请留意用量；建议在右上角 <b>齿轮</b> 给家园单独配一份<b>更轻量/便宜的 API</b>。
             </div>
 
-            <div className="fixed bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-[#f3eee3] via-[#f3eee3]/95 to-transparent flex gap-2.5 max-w-md mx-auto">
+            <div
+                className="fixed bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-[#f3eee3] via-[#f3eee3]/95 to-transparent flex gap-2.5 max-w-md mx-auto"
+                style={{ paddingBottom: 'calc(0.75rem + var(--safe-bottom, 0px))' }}
+            >
                 <button onClick={onCancel} className="flex-1 py-2.5 rounded-2xl bg-white border border-stone-200 text-stone-600 text-[13px] font-bold shadow-sm">取消</button>
                 <button
                     onClick={() => {
@@ -1142,7 +1157,8 @@ const WorldView: React.FC<{
     onEdit: () => void;
     onWorldUpdated: () => void;
     onBack?: () => void;
-}> = ({ world, characters, onEdit, onWorldUpdated, onBack }) => {
+    topSafe?: boolean;
+}> = ({ world, characters, onEdit, onWorldUpdated, onBack, topSafe }) => {
     const { addToast } = useOS();
     const [episodes, setEpisodes] = useState<WorldEpisode[]>([]);
     const [progress, setProgress] = useState<{ done: number; total: number; charName?: string } | null>(
@@ -1202,12 +1218,12 @@ const WorldView: React.FC<{
         if (members.length === 0) { addToast('这个世界还没有住进角色', 'error'); return; }
         // 真实时间：跟着现实早/中/晚走，已追上现实就先等等（过去错过的当天可补、隔天补不了）
         if (world.timeMode !== 'sim' && !realObserveTarget(world)) {
-            addToast('已经跟上现实时间啦——等过了这一段（早/中/晚）再来观测', 'info');
+            addToast('已经跟上现实时间啦——等过了这一段（早/中/晚/凌晨）再来观测', 'info');
             return;
         }
         setProgress({ done: 0, total: members.length });
         WorldScheduler.triggerNow(world.id);
-        addToast(world.timeMode === 'sim' ? '观测开始——世界推进一段（早/中/晚），可以先去做别的' : '观测开始——演绎现实中刚过去的这一段，可以先去做别的', 'success');
+        addToast(world.timeMode === 'sim' ? '观测开始——世界推进一段（早/中/晚/凌晨），可以先去做别的' : '观测开始——演绎现实中刚过去的这一段，可以先去做别的', 'success');
     };
 
     // 单个角色重 roll（仅对最新一轮）：派发事件给 OSContext 用完整 deps 重演这一拍
@@ -1381,7 +1397,15 @@ const WorldView: React.FC<{
     };
 
     return (
-        <div className="flex-1 overflow-y-auto no-scrollbar pb-24" style={{ background: t.pageBg }}>
+        <div
+            className="flex-1 overflow-y-auto no-scrollbar"
+            style={{
+                background: t.pageBg,
+                paddingTop: topSafe ? 'max(3rem, var(--safe-top, 0px))' : undefined,
+                paddingBottom: 'calc(6rem + var(--safe-bottom, 0px))',
+                boxSizing: 'border-box',
+            }}
+        >
             {/* 伏笔删除确认（自定义弹窗，非原生） */}
             {pendingSeed && (
                 <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 backdrop-blur-sm p-6" onClick={() => setPendingSeed(null)}>
@@ -1841,7 +1865,14 @@ const WorldHomeApp: React.FC<{ embedded?: boolean; onFullscreen?: (full: boolean
     const [showApiSettings, setShowApiSettings] = useState(false);
     const resolvedApi = useMemo(() => (worldApi?.baseUrl ? { ...apiConfig, ...worldApi } : apiConfig), [worldApi, apiConfig]);
 
-    const reload = useCallback(async () => { setWorlds(await DB.getWorlds()); }, []);
+    const reload = useCallback(async () => {
+        const all = await DB.getWorlds();
+        // 旧存档（一天三段制）→ 四段制（含凌晨）一次性迁移并写回
+        for (const w of all) {
+            if (migrateWorldDaySegs(w)) await DB.saveWorld(w).catch(() => {});
+        }
+        setWorlds(all);
+    }, []);
     useEffect(() => { reload(); }, [reload]);
     // 内嵌进「小小窝」时：开始玩（进世界/编辑）就让外层隐去三栏，回列表恢复
     useEffect(() => { if (embedded) onFullscreen?.(view !== 'list'); }, [embedded, view, onFullscreen]);
@@ -1852,7 +1883,7 @@ const WorldHomeApp: React.FC<{ embedded?: boolean; onFullscreen?: (full: boolean
         setDraft({
             id: genId('world'), name: '', worldview: '', mode: 'light', timeMode: 'real',
             memberIds: [], npcs: [], houses: [], relationships: [],
-            offlineTickSlots: [], storyClock: 0, injectToChat: true,
+            offlineTickSlots: [], storyClock: 0, clockSegs: SEGMENTS_PER_DAY, injectToChat: true,
             createdAt: Date.now(), updatedAt: Date.now(),
         });
         setView('edit');
@@ -1906,7 +1937,7 @@ const WorldHomeApp: React.FC<{ embedded?: boolean; onFullscreen?: (full: boolean
             {/* 顶栏：内嵌进「小小窝」时，列表页只留齿轮/新建；进世界（正式开始玩）整条隐去做全屏，
                 返回靠世界视图里的浮动返回键。 */}
             {!(embedded && view === 'world') && (
-            <div className="shrink-0 sticky top-0 z-10" style={{ background: headerBg, paddingTop: embedded ? undefined : 'var(--safe-top)' }}>
+            <div className="shrink-0 sticky top-0 z-10" style={{ background: headerBg, paddingTop: embedded && view === 'list' ? undefined : 'var(--safe-top)' }}>
             <div className={embedded ? `${view === 'list' ? 'h-12' : 'h-20'} flex items-end pb-3 px-4` : 'flex items-center px-4 py-3'}>
                 <div className="flex items-center gap-2 w-full">
                     {!(embedded && view === 'list') && (
@@ -1945,7 +1976,10 @@ const WorldHomeApp: React.FC<{ embedded?: boolean; onFullscreen?: (full: boolean
             )}
 
             {view === 'list' && (
-                <div className="flex-1 overflow-y-auto no-scrollbar px-4 pb-24 pt-1 space-y-3">
+                <div
+                    className="flex-1 overflow-y-auto no-scrollbar px-4 pt-1 space-y-3"
+                    style={{ paddingBottom: 'calc(6rem + var(--safe-bottom, 0px))', boxSizing: 'border-box' }}
+                >
                     {/* 游戏封面横幅（淡紫梦幻：月亮 + 云霭 + 星点） */}
                     <div className="relative rounded-3xl overflow-hidden p-5 shadow-[0_10px_30px_rgba(120,100,180,.25)]" style={{ background: 'linear-gradient(150deg,#8e83c4 0%,#a99fd6 52%,#c3c9ea 100%)' }}>
                         <div className="absolute inset-0 pointer-events-none" style={{ backgroundImage: starsBg, animation: 'wh-twinkle 4s ease-in-out infinite' }} />
@@ -1959,7 +1993,7 @@ const WorldHomeApp: React.FC<{ embedded?: boolean; onFullscreen?: (full: boolean
                             <div className="text-[26px] font-black text-white font-serif tracking-[0.18em] mt-1" style={{ textShadow: '0 2px 14px rgba(90,60,140,.45)' }}>家　园</div>
                             <p className="text-[10.5px] leading-[1.7] text-white/85 mt-2" style={{ textShadow: '0 1px 6px rgba(80,60,130,.3)' }}>
                                 把同一世界观的角色放进一个世界，让他们在你不看的时候慢慢生活。
-                                每次<b className="text-amber-100">观测</b>，世界推进一段（早/中/晚）——每个角色独立演绎，绝不上帝视角；
+                                每次<b className="text-amber-100">观测</b>，世界推进一段（早/中/晚/凌晨）——每个角色独立演绎，绝不上帝视角；
                                 NPC 由世界引擎一口气演完。所有故事都会写回各自的聊天与记忆。
                             </p>
                         </div>
@@ -2021,6 +2055,7 @@ const WorldHomeApp: React.FC<{ embedded?: boolean; onFullscreen?: (full: boolean
                     onEdit={() => { setDraft(active); setView('edit'); }}
                     onWorldUpdated={reload}
                     onBack={goBack}
+                    topSafe={!!embedded}
                 />
             )}
         </div>

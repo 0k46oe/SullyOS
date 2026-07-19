@@ -11,6 +11,8 @@ import {
     WORLDBOOK_POSITION_LABELS,
     WORLDBOOK_ROLE_LABELS,
 } from '../utils/worldbook';
+import { confirmExportSafety } from '../utils/exportGuard';
+import { shareOrDownloadFile } from '../utils/shareExport';
 
 const WorldbookApp: React.FC = () => {
     const { closeApp, worldbooks, addWorldbook, updateWorldbook, deleteWorldbook, addToast } = useOS();
@@ -28,6 +30,7 @@ const WorldbookApp: React.FC = () => {
     const [tempTitle, setTempTitle] = useState('');
     const [tempContent, setTempContent] = useState('');
     const [tempCategory, setTempCategory] = useState('');
+    const [showCategoryPicker, setShowCategoryPicker] = useState(false);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [showImportConfirm, setShowImportConfirm] = useState(false);
     const importRef = useRef<HTMLInputElement>(null);
@@ -50,20 +53,30 @@ const WorldbookApp: React.FC = () => {
     const groupedBooks = useMemo(() => {
         const groups: Record<string, Worldbook[]> = {};
         const defaultCat = '未分类设定 (General)';
-        
+
         worldbooks.forEach(wb => {
             const cat = wb.category || defaultCat;
             if (!groups[cat]) groups[cat] = [];
             groups[cat].push(wb);
         });
-        
+
         // Auto-expand the first category if none selected and groups exist
         if (!expandedCategory && Object.keys(groups).length > 0) {
             // setExpandedCategory(Object.keys(groups)[0]); // Optional: Auto open first
         }
-        
+
         return groups;
     }, [worldbooks]);
+
+    const categoryNames = useMemo(() => Object.keys(groupedBooks), [groupedBooks]);
+
+    // 编辑页「已有分组」建议列表：随输入实时过滤。
+    // 不能用原生 datalist —— 分组一多，移动端 WebView 会把候选渲染成撑爆屏幕、无法滚动的巨型下拉。
+    const filteredCategorySuggestions = useMemo(() => {
+        const query = tempCategory.trim().toLowerCase();
+        if (!query) return categoryNames;
+        return categoryNames.filter(cat => cat.toLowerCase().includes(query));
+    }, [categoryNames, tempCategory]);
 
     const handleCreate = () => {
         setEditingBook(null); 
@@ -84,6 +97,7 @@ const WorldbookApp: React.FC = () => {
         setTempProbability(100);
         setTempCaseSensitive(false);
         setTempWholeWords(false);
+        setShowCategoryPicker(false);
         setIsEditing(true);
     };
 
@@ -106,6 +120,7 @@ const WorldbookApp: React.FC = () => {
         setTempProbability(book.probability ?? 100);
         setTempCaseSensitive(book.caseSensitive === true);
         setTempWholeWords(book.matchWholeWords === true);
+        setShowCategoryPicker(false);
         setIsEditing(true);
     };
 
@@ -186,20 +201,21 @@ const WorldbookApp: React.FC = () => {
         importRef.current?.click();
     };
 
-    const handleExportGroup = (event: React.MouseEvent, category: string, books: Worldbook[]) => {
+    const handleExportGroup = async (event: React.MouseEvent, category: string, books: Worldbook[]) => {
         event.stopPropagation();
         const json = serializeStandardWorldbook(books);
-        const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
+        // 导出前明文密钥体检 + 二次确认（世界书正常不含密钥 → 提示「安全，可分享」）。
+        if (!(await confirmExportSafety(JSON.parse(json)))) return;
         const safeName = category.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim() || 'worldbook';
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = `${safeName}.json`;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        URL.revokeObjectURL(url);
-        addToast(`已导出「${category}」共 ${books.length} 条`, 'success');
+        // 原生 / WebView 壳里 `<a download>` 常常点了没反应，强制先拉起分享面板，兜底才走下载。
+        const result = await shareOrDownloadFile({
+            content: json,
+            fileName: `${safeName}.json`,
+            mimeType: 'application/json;charset=utf-8',
+            shareTitle: `导出世界书「${category}」`,
+        });
+        const verb = result === 'shared' ? '已调起分享' : '已导出';
+        addToast(`${verb}「${category}」共 ${books.length} 条`, 'success');
     };
 
     const requestDelete = (e: React.MouseEvent, book: Worldbook) => {
@@ -270,14 +286,40 @@ const WorldbookApp: React.FC = () => {
                                     onChange={e => setTempCategory(e.target.value)}
                                     placeholder="例如: 世界观、人物、地理..."
                                     className="w-full text-sm text-slate-700 bg-slate-50/80 border border-slate-200 rounded-xl px-4 py-3 outline-none focus:bg-white focus:border-indigo-400 focus:ring-4 focus:ring-indigo-50 transition-all"
-                                    list="category-suggestions"
                                 />
-                                <datalist id="category-suggestions">
-                                    {Object.keys(groupedBooks).map(cat => (
-                                        <option key={cat} value={cat} />
-                                    ))}
-                                </datalist>
-                                <p className="text-[10px] text-slate-400 mt-1.5 px-1">同名条目会自动归入已有分组。</p>
+                                {categoryNames.length > 0 && (
+                                    <div className="mt-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowCategoryPicker(v => !v)}
+                                            className="flex items-center gap-1.5 text-[11px] font-bold text-indigo-500 px-1 py-1 active:scale-95 transition-transform"
+                                        >
+                                            <span className={`transition-transform duration-200 inline-block ${showCategoryPicker ? 'rotate-90' : ''}`}>
+                                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path fillRule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clipRule="evenodd" /></svg>
+                                            </span>
+                                            选择已有分组 ({categoryNames.length})
+                                        </button>
+                                        {showCategoryPicker && (
+                                            <div className="mt-1.5 max-h-36 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50/60 p-2 flex flex-wrap gap-1.5 overscroll-contain">
+                                                {filteredCategorySuggestions.length === 0 ? (
+                                                    <span className="text-[10px] text-slate-400 px-1 py-0.5">没有匹配「{tempCategory.trim()}」的分组，保存后将新建。</span>
+                                                ) : (
+                                                    filteredCategorySuggestions.map(cat => (
+                                                        <button
+                                                            key={cat}
+                                                            type="button"
+                                                            onClick={() => { setTempCategory(cat); setShowCategoryPicker(false); }}
+                                                            className={`max-w-full truncate text-[11px] px-2.5 py-1 rounded-full border transition-colors active:scale-95 ${tempCategory.trim() === cat ? 'bg-indigo-500 text-white border-indigo-500' : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300'}`}
+                                                        >
+                                                            {cat}
+                                                        </button>
+                                                    ))
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                                <p className="text-[10px] text-slate-400 mt-1.5 px-1">同名条目会自动归入已有分组；输入文字可过滤上方候选。</p>
                             </div>
                         </div>
 
@@ -438,7 +480,7 @@ const WorldbookApp: React.FC = () => {
                                 <div>
                                     <label className="flex items-center gap-2 text-xs font-bold text-slate-400 mb-2">
                                         <input type="checkbox" checked={tempUseProbability} onChange={e => setTempUseProbability(e.target.checked)} className="accent-indigo-500" />
-                                        使用概率
+                                        启用随机概率
                                     </label>
                                     <input
                                         type="number"
@@ -450,6 +492,10 @@ const WorldbookApp: React.FC = () => {
                                         className="w-full text-sm text-slate-700 bg-slate-50/80 border border-slate-200 rounded-xl px-4 py-3 outline-none focus:bg-white focus:border-indigo-400 focus:ring-4 focus:ring-indigo-50 transition-all disabled:opacity-40"
                                     />
                                 </div>
+                            </div>
+                            <div className="rounded-xl border border-indigo-100 bg-indigo-50/70 px-4 py-3 text-[10px] leading-relaxed text-indigo-700">
+                                <span className="font-bold">未勾选“启用随机概率”不代表条目没有激活。</span>
+                                未勾选时会跳过随机判定：只要条目已启用且满足常驻／关键词条件，就会按 100% 通过；勾选后，才会在条件满足时按上方百分比再次随机判断。
                             </div>
                         </div>
 
@@ -506,6 +552,21 @@ const WorldbookApp: React.FC = () => {
 
             {/* Content List */}
             <div className="flex-1 overflow-y-auto p-5 pb-24 space-y-4 no-scrollbar relative z-0">
+                <div className="rounded-2xl border border-indigo-100/80 bg-white/75 backdrop-blur-md p-4 shadow-sm text-slate-600">
+                    <div className="flex items-center gap-2 text-xs font-bold text-indigo-600">
+                        <BookOpen size={16} weight="bold" /> 世界书是做什么的？
+                    </div>
+                    <p className="mt-2 text-[11px] leading-relaxed">
+                        世界书是一组按条件提供给 AI 的补充设定，可用于世界观、人物关系、地点和规则等内容。它不会自己发消息，也不等同于角色记忆。
+                    </p>
+                    <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+                        创建或导入后，还要在角色编辑页的“扩展设定”中挂载；聊天生成回复时，已启用并满足常驻或关键词条件（以及可选的概率判定）的条目才会注入提示词。
+                    </p>
+                    <p className="mt-2 rounded-xl bg-indigo-50 px-3 py-2 text-[10px] leading-relaxed text-indigo-700">
+                        注意：“启用随机概率”未点亮 = 不使用随机抽取，条件满足时按 100% 通过；并不是“未激活”。
+                    </p>
+                </div>
+
                 {Object.keys(groupedBooks).length === 0 && (
                     <div className="flex flex-col items-center justify-center h-64 text-slate-400 gap-4 opacity-60">
                         <BookOpen size={48} className="text-slate-400" />

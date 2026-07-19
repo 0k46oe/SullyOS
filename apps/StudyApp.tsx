@@ -5,9 +5,10 @@ import { DB } from '../utils/db';
 import { StudyCourse, StudyChapter, CharacterProfile, Message, UserProfile, APIConfig, StudyTutorPreset, QuizQuestion, QuizSession, QuizQuestionNote } from '../types';
 import { ContextBuilder } from '../utils/context';
 import Modal from '../components/os/Modal';
-import { safeResponseJson } from '../utils/safeApi';
+import { safeResponseJson, extractJson } from '../utils/safeApi';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { Notepad, Check, X, CheckCircle, XCircle, Hand } from '@phosphor-icons/react';
+import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 
 type PdfJsLike = {
     getDocument: (src: { data: ArrayBuffer }) => { promise: Promise<any> };
@@ -321,11 +322,12 @@ const BlackboardRenderer: React.FC<{ text: string, isTyping?: boolean, katexRend
 };
 
 const StudyApp: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, updateCharacter } = useOS();
+    const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, updateCharacter, characterGroups } = useOS();
     const [mode, setMode] = useState<'bookshelf' | 'classroom' | 'quiz' | 'quiz_review' | 'practice_book'>('bookshelf');
     const [courses, setCourses] = useState<StudyCourse[]>([]);
     const [activeCourse, setActiveCourse] = useState<StudyCourse | null>(null);
     const [selectedChar, setSelectedChar] = useState<CharacterProfile | null>(null);
+    const [tutorGroupId, setTutorGroupId] = useState<string>(GROUP_FILTER_ALL); // 书架页「当前助教」的分组筛选
     
     // Classroom State
     const [classroomState, setClassroomState] = useState<'idle' | 'teaching' | 'q_and_a' | 'finished'>('idle');
@@ -609,7 +611,11 @@ For each chapter, provide a title, a brief summary of what it covers, and a diff
         if (!response.ok) throw new Error('API Error');
         const data = await safeResponseJson(response);
         const content = data.choices[0].message.content.replace(/```json/g, '').replace(/```/g, '').trim();
-        const json = JSON.parse(content);
+        // 同 generateQuiz：走 extractJson 的多层容错，避免 Claude 未转义字符导致的 parse error。
+        const json = extractJson(content);
+        if (!json || !Array.isArray(json.chapters)) {
+            throw new Error('模型返回的章节格式无法解析，请重试');
+        }
 
         return {
             id: `course-${Date.now()}`,
@@ -978,6 +984,8 @@ ${chunkText.substring(0, 10000)}
 - Provide a brief explanation for each answer
 
 ### Output Format (Strict JSON, no markdown wrapping)
+- Output ONLY the JSON object, no prose before or after.
+- Inside any string value, escape special characters: use \\" for quotes, \\\\ for backslashes (e.g. LaTeX like \\\\frac), and \\n for line breaks. Do NOT put raw newlines or unescaped quotes inside a string.
 {
   "questions": [
     {
@@ -1017,7 +1025,12 @@ ${chunkText.substring(0, 10000)}
             if (!response.ok) throw new Error(`API Error: ${response.status}`);
             const data = await safeResponseJson(response);
             const content = (data.choices?.[0]?.message?.content || data.choices?.[0]?.message?.reasoning_content || '').replace(/```json/g, '').replace(/```/g, '').trim();
-            const json = JSON.parse(content);
+            // Claude 常返回未转义特殊字符（引号 / 反斜杠 / 换行）的 JSON，裸 JSON.parse 会在
+            // line 12 附近炸。走 extractJson 的多层容错（去围栏 / 补尾逗号 / 转义内层引号 / 修复截断）。
+            const json = extractJson(content);
+            if (!json || !Array.isArray(json.questions)) {
+                throw new Error('模型返回的题目格式无法解析，请重试');
+            }
 
             const questions: QuizQuestion[] = (json.questions || []).map((q: any, i: number) => ({
                 id: `q-${Date.now()}-${i}`,
@@ -1609,8 +1622,11 @@ Answer in character. Be helpful and clear. If they're confused about a concept, 
                     {/* Character Selector */}
                     <div className="mb-8">
                         <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">当前助教</h3>
+                        {/* 分组筛选（没建分组时不渲染），横向头像列表太挤，单独放一行 */}
+                        <CharacterGroupFilterBar characters={characters} groups={characterGroups}
+                            value={tutorGroupId} onChange={setTutorGroupId} className="mb-3" />
                         <div className="flex gap-4 overflow-x-auto pb-2 no-scrollbar">
-                            {characters.map(c => (
+                            {filterCharactersByGroup(characters, characterGroups, tutorGroupId).map(c => (
                                 <div key={c.id} onClick={() => setSelectedChar(c)} className={`flex flex-col items-center gap-2 cursor-pointer transition-opacity ${selectedChar?.id === c.id ? 'opacity-100' : 'opacity-50'}`}>
                                     <div className={`w-14 h-14 rounded-full p-[2px] ${selectedChar?.id === c.id ? 'border-2 border-emerald-500' : 'border border-slate-200'}`}>
                                         <img src={c.avatar} className="w-full h-full rounded-full object-cover" />

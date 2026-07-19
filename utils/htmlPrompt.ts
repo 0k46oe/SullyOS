@@ -66,7 +66,7 @@ const BUILTIN_HTML_PROMPT = `
 * **留白即呼吸**：内容别贴边。最外层 \`padding\` 给到 \`16~20px\`，元素之间用 \`margin\` 拉开层次（标题与正文、正文与落款之间都要有间距）。宁可空，不要挤。
 * **建立信息层级**：用**字号 + 字重 + 透明度**三件套区分主次——主标题大而粗（\`18~22px / 700\`），正文中等（\`13~14px / 400\`），辅助信息小而淡（\`11~12px\` 配 \`opacity:0.6\`）。一眼能看出谁是重点。
 * **统一与对齐**：圆角、间距、字体在同一张卡里保持一致（圆角统一 \`12~16px\`，整体一套 \`font-family\`）。文字左对齐为主，居中只用于标题或仪式感强的卡（邀请函、票据）。
-* **柔和的光影**：阴影要轻、要散、要透明（如 \`box-shadow:0 4px 16px rgba(0,0,0,0.08)\`），模拟自然投影，别用又黑又硬的死阴影。需要分区时优先用浅色分隔线（\`border-top:1px solid rgba(0,0,0,0.06)\`）或背景色块，少用粗黑边框。
+* **柔和的光影（只用在卡片内部）**：卡片会**直接贴在聊天背景上渲染，没有气泡、没有边框**——所以**最外层 \`<div>\` 绝对不要加 \`box-shadow\` / 外发光 / \`filter: drop-shadow\`**，外层阴影会被容器裁切成一圈若隐若现的框，非常难看。层次感全部放在卡片**内部**做：内部元素（按钮、小卡块、头像）可以用轻、散、透明的阴影（如 \`box-shadow:0 4px 16px rgba(0,0,0,0.08)\`）；需要分区时优先用浅色分隔线（\`border-top:1px solid rgba(0,0,0,0.06)\`）或背景色块，少用粗黑边框。
 * **细节出质感**：英文小标签 / 标题加 \`letter-spacing:1~2px\` 更精致；行内文字 \`line-height:1.5~1.6\` 更舒展；适度用 emoji、CSS 形状、小圆点 / 标签胶囊点缀，但每张卡的点缀别超过 2~3 处。
 * **风格随情绪走**：温柔暧昧用粉调圆润，正式票据用素净留白，深夜 emo 用暗色低饱和。卡片的视觉气质要和你的人设、当下对话氛围对得上，而不是千篇一律。
 
@@ -76,7 +76,7 @@ const BUILTIN_HTML_PROMPT = `
 
 正常聊天里穿插一个邀请函卡片：
 
-[html]<div style="width:260px;padding:16px;border-radius:14px;background:linear-gradient(135deg,#ffe4ec,#fff0f5);font-family:system-ui;color:#5a3a4a;box-shadow:0 4px 12px rgba(0,0,0,0.08);"><div style="font-size:11px;letter-spacing:2px;opacity:0.6;">INVITATION</div><div style="font-size:20px;font-weight:700;margin-top:4px;">想和你一起去看电影</div><div style="font-size:13px;margin-top:8px;line-height:1.6;">本周六晚 19:30<br/>万象城 IMAX 3 号厅</div><div style="margin-top:12px;font-size:12px;opacity:0.7;">— 期待你的回复</div></div>[/html]
+[html]<div style="width:260px;padding:16px;border-radius:14px;background:linear-gradient(135deg,#ffe4ec,#fff0f5);font-family:system-ui;color:#5a3a4a;"><div style="font-size:11px;letter-spacing:2px;opacity:0.6;">INVITATION</div><div style="font-size:20px;font-weight:700;margin-top:4px;">想和你一起去看电影</div><div style="font-size:13px;margin-top:8px;line-height:1.6;">本周六晚 19:30<br/>万象城 IMAX 3 号厅</div><div style="margin-top:12px;font-size:12px;opacity:0.7;">— 期待你的回复</div></div>[/html]
 
 那要不？😳
 `;

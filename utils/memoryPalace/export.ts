@@ -13,9 +13,9 @@
  *     换了模型则向量作废（vector.model / dimensions 已随每条一起导出，便于核对）。
  */
 
-import { MemoryNodeDB, AnticipationDB, EventBoxDB, MemoryVectorDB } from './db';
-import type { MemoryNode, Anticipation, EventBox, MemoryVector } from './types';
-import { getRoomLabel } from './types';
+import { MemoryNodeDB, AnticipationDB, EventBoxDB, MemoryVectorDB, RoomPlateDB, plateId } from './db';
+import type { MemoryNode, Anticipation, EventBox, MemoryVector, RoomPlate, PlateRoom } from './types';
+import { getRoomLabel, PLATE_ROOMS, PLATE_ENTRY_CAPS } from './types';
 
 /** 导出时随向量一起带上的元信息（便于接入方判断能否复用） */
 export interface ExportedVector {
@@ -31,12 +31,14 @@ export interface ExportedVector {
 export interface CharacterMemoryPalaceExport {
     charId: string;
     charName: string;
-    counts: { nodes: number; eventBoxes: number; anticipations: number; vectors: number };
+    counts: { nodes: number; eventBoxes: number; anticipations: number; vectors: number; roomPlateEntries?: number };
     /** 该角色向量统一用的 embedding 模型/维度（多数情况下整库一致，便于接入方一眼确认） */
     embeddingModels: string[];
     nodes: MemoryNode[];
     eventBoxes: EventBox[];
     anticipations: Anticipation[];
+    /** 房间门牌（常驻语义层）。旧导出文件没有此字段，导入端按可选处理 */
+    roomPlates?: RoomPlate[];
     /** includeVectors=false 时为 undefined */
     vectors?: ExportedVector[];
 }
@@ -66,10 +68,11 @@ async function collectCharacter(
     charName: string,
     includeVectors: boolean,
 ): Promise<CharacterMemoryPalaceExport> {
-    const [nodes, eventBoxes, anticipations] = await Promise.all([
+    const [nodes, eventBoxes, anticipations, roomPlates] = await Promise.all([
         MemoryNodeDB.getByCharId(charId),
         EventBoxDB.getByCharId(charId),
         AnticipationDB.getByCharId(charId),
+        RoomPlateDB.getByCharId(charId),
     ]);
 
     let vectors: ExportedVector[] | undefined;
@@ -98,11 +101,13 @@ async function collectCharacter(
             eventBoxes: eventBoxes.length,
             anticipations: anticipations.length,
             vectors: vectors?.length ?? 0,
+            roomPlateEntries: roomPlates.reduce((s, p) => s + p.entries.length, 0),
         },
         embeddingModels: [...modelSet],
         nodes: enrichedNodes as MemoryNode[],
         eventBoxes,
         anticipations,
+        roomPlates,
         vectors,
     };
 }
@@ -142,6 +147,8 @@ export interface ImportResult {
     eventBoxes: number;
     anticipations: number;
     vectors: number;
+    /** 并入目标角色门牌的条目数（受各门牌容量上限约束，同文本去重） */
+    roomPlateEntries: number;
     /** 文件里带了向量但本次因模型不符等原因未启用语义检索时的提示（保留字段，当前恒空） */
     warning?: string;
 }
@@ -256,10 +263,50 @@ export async function importMemoryPalace(
     if (boxesToSave.length) await EventBoxDB.saveMany(boxesToSave);
     for (const a of antsToSave) await AnticipationDB.save(a);
 
+    // 房间门牌：并入目标角色对应房间的门牌（合并语义——同文本去重、
+    // 尊重各门牌容量上限、条目重新生成 ID；firstLearnedAt/sourceCount 原样保留）
+    let plateEntriesImported = 0;
+    for (const c of file.characters) {
+        for (const p of c.roomPlates || []) {
+            if (!(PLATE_ROOMS as string[]).includes(p.room)) continue;
+            const room = p.room as PlateRoom;
+            const target: RoomPlate = (await RoomPlateDB.get(targetCharId, room)) || {
+                id: plateId(targetCharId, room),
+                charId: targetCharId,
+                room,
+                entries: [],
+                updatedAt: Date.now(),
+                version: 0,
+            };
+            const seenTexts = new Set(target.entries.map(e => e.text));
+            const cap = PLATE_ENTRY_CAPS[room];
+            let added = 0;
+            for (const entry of p.entries || []) {
+                if (target.entries.length >= cap) break;
+                const text = (entry.text || '').trim();
+                if (!text || seenTexts.has(text)) continue;
+                seenTexts.add(text);
+                target.entries.push({
+                    ...entry,
+                    text,
+                    id: `pe_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                });
+                added++;
+            }
+            if (added > 0) {
+                target.updatedAt = Date.now();
+                target.version += 1;
+                await RoomPlateDB.save(target);
+                plateEntriesImported += added;
+            }
+        }
+    }
+
     return {
         nodes: nodesToSave.length,
         eventBoxes: boxesToSave.length,
         anticipations: antsToSave.length,
         vectors: vectorsToSave.length,
+        roomPlateEntries: plateEntriesImported,
     };
 }

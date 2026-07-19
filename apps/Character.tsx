@@ -1,5 +1,5 @@
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useOS } from '../context/OSContext';
 import { AppID, CharacterProfile, CharacterExportData, UserImpression, MemoryFragment } from '../types';
 import { SlidersHorizontal, SpeakerHigh, Books, BookOpen } from '@phosphor-icons/react';
@@ -13,7 +13,10 @@ import { ContextBuilder } from '../utils/context';
 import { formatMessageWithTime, formatMessageForPrompt } from '../utils/messageFormat';
 import { DEFAULT_ARCHIVE_PROMPTS } from '../components/chat/ChatConstants';
 import ImpressionPanel from '../components/character/ImpressionPanel';
+import RoomPlatePanel from '../components/character/RoomPlatePanel';
 import MemoryArchivist from '../components/character/MemoryArchivist';
+import ChibiStudio, { ChibiShelfPanel } from '../components/character/ChibiStudio';
+import { characterLaunch } from '../utils/characterLaunch';
 import { safeFetchJson, extractContent } from '../utils/safeApi';
 import { fetchMiniMaxVoices, MiniMaxVoiceItem } from '../utils/minimaxVoice';
 import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
@@ -21,35 +24,56 @@ import { normalizeUserImpression } from '../utils/impression';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { COMMON_TIMEZONES } from '../utils/timezone';
 import { toMountedWorldbook } from '../utils/worldbook';
+import { stripSensitiveCardFields } from '../utils/characterCard';
+import { confirmExportSafety } from '../utils/exportGuard';
+import { sortCharacterGroups, GROUP_FILTER_UNGROUPED } from '../components/character/CharacterGroupFilter';
+
+// ── 神经链接 · 列表页视觉件（淡紫留白风）────────────────────
+// 之前的「星点 + 玻璃饰带 + 华丽头像框」看久了眼花、低端机也重绘卡。
+// 改成留白为主的干净版：纯淡紫底、圆角方钮、朴素圆头像、素白卡片。
+// 无常驻动画 / 无 filter / 无大模糊阴影，既清爽又省电。仅列表页，编辑页不动。
+
+/** 顶栏圆角方钮（squircle）：白底细紫描边 + 线性图标 + 底部小字标签 */
+const ToolButton: React.FC<{ label: string; title?: string; onClick: () => void; children: React.ReactNode }> = ({ label, title, onClick, children }) => (
+    <button onClick={onClick} title={title} className="flex flex-col items-center gap-1.5 active:scale-90 transition-transform">
+        <span className="w-12 h-12 flex items-center justify-center rounded-2xl bg-white border border-violet-200/80 text-violet-500 shadow-[0_2px_6px_rgba(140,120,200,0.10)]">
+            {children}
+        </span>
+        <span className="text-[11px] text-violet-400/90 font-medium tracking-wider">{label}</span>
+    </button>
+);
 
 const CharacterCard: React.FC<{
     char: CharacterProfile;
+    /** 当前激活（正在聊）的角色走淡紫高亮 */
+    active?: boolean;
     onClick: () => void;
     onDelete: (e: React.MouseEvent) => void;
-}> = ({ char, onClick, onDelete }) => (
+}> = ({ char, active, onClick, onDelete }) => (
     <div
         onClick={onClick}
-        className="relative p-4 rounded-3xl border bg-white/40 border-white/40 hover:bg-white/60 hover:scale-[1.01] transition-all duration-300 cursor-pointer group shadow-sm shrink-0"
+        className={`relative px-4 py-3.5 rounded-3xl border bg-white transition-colors cursor-pointer group shrink-0 shadow-[0_2px_10px_rgba(140,120,200,0.07)] ${
+            active ? 'border-violet-300' : 'border-slate-100 hover:border-violet-200'
+        }`}
     >
         <div className="flex items-center gap-4">
-            <div className="w-14 h-14 rounded-full bg-slate-100 border border-white/50 overflow-hidden relative shadow-inner">
-                <div className="absolute inset-0 bg-slate-100/50"></div> 
-                <img src={char.avatar} className="w-full h-full object-cover relative z-10" alt={char.name} />
+            <div className="w-14 h-14 shrink-0 rounded-full overflow-hidden border border-violet-100 bg-violet-50">
+                <img src={char.avatar} className="w-full h-full object-cover" alt={char.name} />
             </div>
-            <div className="flex-1 min-w-0">
-                <h3 className="font-medium truncate text-slate-700">
+            <div className="flex-1 min-w-0 pr-6">
+                <h3 className="text-lg font-bold truncate text-slate-800">
                     {char.name}
                 </h3>
-                <p className="text-xs text-slate-400 truncate mt-0.5 font-light">
+                <p className="text-xs truncate mt-0.5 text-violet-400/80">
                     {char.description || '暂无描述'}
                 </p>
             </div>
         </div>
-        <button 
+        <button
             onClick={onDelete}
-            className="absolute top-3 right-3 p-2 rounded-full text-slate-300 hover:bg-red-50 hover:text-red-400 active:bg-red-100 active:text-red-500 transition-all z-10"
+            className="absolute top-1/2 -translate-y-1/2 right-4 w-7 h-7 flex items-center justify-center rounded-full bg-slate-50 border border-slate-100 text-slate-300 hover:text-violet-400 hover:border-violet-200 active:scale-90 transition-colors"
         >
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3.5 h-3.5">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
             </svg>
         </button>
@@ -57,17 +81,48 @@ const CharacterCard: React.FC<{
 );
 
 const Character: React.FC = () => {
-  const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, addCharacter, updateCharacter, deleteCharacter, apiConfig, addToast, userProfile, customThemes, addCustomTheme, worldbooks, addWorldbook } = useOS();
-  const [view, setView] = useState<'list' | 'detail'>('list');
-  const [charPage, setCharPage] = useState(0); // 角色列表分页（每页 6 个）
-  const [detailTab, setDetailTab] = useState<'identity' | 'memory' | 'impression'>('identity');
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, addCharacter, updateCharacter, deleteCharacter, characterGroups, createCharacterGroup, renameCharacterGroup, deleteCharacterGroup, apiConfig, addToast, userProfile, worldbooks, addWorldbook } = useOS();
+  const launchIntent = characterLaunch.peek();
+  const [view, setView] = useState<'list' | 'detail'>(() => launchIntent ? 'detail' : 'list');
+  const [charPage, setCharPage] = useState(0); // 角色列表分页（每页 6 个，仅未建分组时）
+  // 分组展开状态：存"已展开"的分组 id（未记录 = 收起）。跨会话记住，key 见下
+  const [expandedGroups, setExpandedGroups] = useState<string[]>(() => {
+      try {
+          const raw = localStorage.getItem('os_char_groups_expanded');
+          if (raw) {
+              const arr = JSON.parse(raw);
+              if (Array.isArray(arr)) return arr;
+          }
+      } catch {}
+      return [GROUP_FILTER_UNGROUPED]; // 首次进入只展开「未分组」，命名分组默认收起
+  });
+  const toggleGroupExpanded = (id: string) => {
+      setExpandedGroups(prev => {
+          const next = prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id];
+          try { localStorage.setItem('os_char_groups_expanded', JSON.stringify(next)); } catch {}
+          return next;
+      });
+  };
+  const [detailTab, setDetailTab] = useState<'identity' | 'memory' | 'impression' | 'plates' | 'chibi'>(() => launchIntent?.openChibiStudio ? 'chibi' : 'identity');
+  // QQ捏人工坊（手办柜）全屏覆盖层
+  const [showChibiStudio, setShowChibiStudio] = useState(() => !!launchIntent?.openChibiStudio);
+  const [editingId, setEditingId] = useState<string | null>(() => launchIntent?.charId || null);
   const [formData, setFormData] = useState<CharacterProfile | null>(null);
   const [isCompressing, setIsCompressing] = useState(false);
   // 头像 URL 输入的 draft, 不逐字 commit 到 formData.avatar —— 否则每输入一个字符,
   // 所有引用 char.avatar 的 <img> 都会拿到不完整字符串当相对路径请求根目录,
   // 导致打字时疯狂 GET / 和满屏破图. 失焦 / 回车才校验 + commit.
   const [avatarUrlDraft, setAvatarUrlDraft] = useState('');
+  // 生活记录被全局隐藏的模块（档案 App 长按页签隐藏）——对应的小开关行直接不显示
+  const [hiddenLifeModules, setHiddenLifeModules] = useState<string[]>([]);
+  useEffect(() => {
+      DB.getLifeRecordSettings()
+          .then(s => setHiddenLifeModules(s?.hiddenModules || []))
+          .catch(() => {});
+  }, []);
+  useEffect(() => {
+      characterLaunch.consume();
+  }, []);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cardImportRef = useRef<HTMLInputElement>(null);
   
@@ -80,6 +135,13 @@ const Character: React.FC = () => {
   const [showBatchModal, setShowBatchModal] = useState(false); 
   const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<string | null>(null);
   const [showWorldbookModal, setShowWorldbookModal] = useState(false); // New Modal
+  // 挂载世界书弹窗：搜索词 + 当前展开的分组（分组默认折叠，避免全量条目一次性渲染卡爆）
+  const [wbModalSearch, setWbModalSearch] = useState('');
+  const [wbModalExpandedCategory, setWbModalExpandedCategory] = useState<string | null>(null);
+  const [showGroupModal, setShowGroupModal] = useState(false); // 角色分组管理
+  const [newGroupName, setNewGroupName] = useState('');
+  // 编辑页「新建分组并指派」的内联输入
+  const [detailGroupDraft, setDetailGroupDraft] = useState<string | null>(null);
 
   const [importText, setImportText] = useState('');
   const [exportText, setExportText] = useState('');
@@ -222,6 +284,28 @@ const Character: React.FC = () => {
       } else closeApp();
   };
 
+  const handleAddGroup = async () => {
+      const name = newGroupName.trim();
+      if (!name) return;
+      if (characterGroups.some(g => g.name === name)) {
+          addToast('已有同名分组', 'error');
+          return;
+      }
+      await createCharacterGroup(name);
+      setNewGroupName('');
+  };
+
+  // 新建角色：建完直接进「设定」编辑页（而非停在列表往未分组里塞一张空白卡，
+  // 那样反直觉——用户点新建就是想马上填人设）。editingId 一设，下方 sync effect
+  // 会从 characters 里找到这张新卡填进 formData。
+  const handleAddCharacter = async () => {
+      const created = await addCharacter();
+      setEditingId(created.id);
+      setFormData(created); // 直接填好，避免跳转瞬间 characters 还没同步导致详情页闪白
+      setDetailTab('identity');
+      setView('detail');
+  };
+
   const handleChange = (field: keyof CharacterProfile, value: any) => {
       // Functional update to prevent stale state issues in simple closures
       setFormData(prev => {
@@ -279,6 +363,36 @@ const Character: React.FC = () => {
       if (!formData) return;
       const currentBooks = formData.mountedWorldbooks || [];
       handleChange('mountedWorldbooks', currentBooks.filter(b => b.id !== bookId));
+  };
+
+  // 挂载弹窗的分组数据。必须 useMemo：之前这段 reduce 内联在 JSX 里，
+  // 弹窗没打开时整个编辑表单每敲一个字都会重新分组一遍全部世界书。
+  const wbModalGroups = useMemo(() => {
+      const groups: Record<string, typeof worldbooks> = {};
+      worldbooks.forEach(wb => {
+          const cat = wb.category || '未分类设定 (General)';
+          if (!groups[cat]) groups[cat] = [];
+          groups[cat].push(wb);
+      });
+      return Object.entries(groups);
+  }, [worldbooks]);
+
+  // 搜索态：按标题/分组名过滤，最多展示前 60 条避免长列表卡顿。
+  const WB_SEARCH_LIMIT = 60;
+  const wbModalSearchResults = useMemo(() => {
+      const query = wbModalSearch.trim().toLowerCase();
+      if (!query) return null;
+      const matched = worldbooks.filter(wb =>
+          wb.title.toLowerCase().includes(query) ||
+          (wb.category || '未分类设定 (General)').toLowerCase().includes(query)
+      );
+      return { books: matched.slice(0, WB_SEARCH_LIMIT), total: matched.length };
+  }, [worldbooks, wbModalSearch]);
+
+  const openWorldbookModal = () => {
+      setWbModalSearch('');
+      setWbModalExpandedCategory(null);
+      setShowWorldbookModal(true);
   };
 
   // ... (Other handlers unchanged)
@@ -800,8 +914,12 @@ ${isInitialGeneration ? `
       
       const {
           id, memories, refinedMemories, activeMemoryMonths, impression, guidebookInsights,
-          ...cardProps
+          ...rest
       } = formData;
+
+      // 只导出「角色」本身：凭据 / 美化 / 语言偏好 / 运行时状态一律剥离，
+      // 绝不把发卡人的 API 密钥等私密字段打包进卡里。清单见 utils/characterCard.ts。
+      const cardProps = stripSensitiveCardFields(rest);
 
       const exportData: CharacterExportData = {
           ...cardProps,
@@ -809,12 +927,8 @@ ${isInitialGeneration ? `
           type: 'sully_character_card'
       };
 
-      if (formData.bubbleStyle) {
-          const customTheme = customThemes.find(t => t.id === formData.bubbleStyle);
-          if (customTheme) {
-              exportData.embeddedTheme = customTheme;
-          }
-      }
+      // 导出前明文密钥体检 + 二次确认：正常为「安全，可分享」；若意外检出密钥则中止并提示上报。
+      if (!(await confirmExportSafety(exportData))) return;
 
       const json = JSON.stringify(exportData, null, 2);
       const fileName = `${formData.name || 'Character'}_Card.json`;
@@ -893,12 +1007,10 @@ ${isInitialGeneration ? `
                   throw new Error('无效的角色卡文件');
               }
 
-              if (data.embeddedTheme) {
-                  const exists = customThemes.some(t => t.id === data.embeddedTheme!.id);
-                  if (!exists) {
-                      addCustomTheme(data.embeddedTheme);
-                  }
-              }
+              // 导入侧同样剥离凭据 / 美化 / 语言 / 运行时状态：即便对方给的是旧版
+              // 角色卡（把 API 密钥等私密字段一起打包了），也不会被写进本地角色，
+              // 不会用发卡人的 key / 主题 / 语言偏好覆盖你自己的。清单见 utils/characterCard.ts。
+              const safeData = stripSensitiveCardFields(data);
 
               // Sync mounted worldbooks into the global worldbook app so they
               // appear under their original category (or the character's name
@@ -923,13 +1035,12 @@ ${isInitialGeneration ? `
               }
 
               const newChar: CharacterProfile = {
-                  ...data,
+                  ...safeData,
                   id: `char-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
                   memories: [],
                   refinedMemories: {},
                   activeMemoryMonths: [],
                   mountedWorldbooks: incomingMounted,
-                  embeddedTheme: undefined
               } as CharacterProfile;
 
               await DB.saveCharacter(newChar);
@@ -955,26 +1066,96 @@ ${isInitialGeneration ? `
   return (
     <div className="h-full w-full bg-slate-50/30 font-light relative">
        {view === 'list' ? (
-           <div className="flex flex-col h-full animate-fade-in">
-               {/* INCREASED PADDING TOP HERE */}
-               {/* safe-area: 原本固定 pt-16(4rem) 顶部留白，改成 max(4rem, 刘海高度)，
-                   既保住原来的呼吸感，又保证内容在更高刘海设备上不被挡。此栏无背景，
-                   透出页面 bg-slate-50/30，安全区条同色无缝 */}
-               <div className="px-6 pb-4 shrink-0 flex items-center justify-between" style={{ paddingTop: 'max(4rem, var(--safe-top))' }}>
-                   <div><h1 className="text-2xl font-light text-slate-800 tracking-tight">神经链接</h1><p className="text-xs text-slate-400 mt-1">已建立 {characters.length} 个角色连接</p></div>
-                   <div className="flex gap-2">
-                        <button onClick={() => cardImportRef.current?.click()} className="p-2 rounded-full bg-white/40 hover:bg-white/80 transition-colors text-slate-600" title="导入角色卡">
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+           <div className="flex flex-col h-full animate-fade-in relative"
+                style={{ background: 'linear-gradient(180deg, #f5f2fb 0%, #ece6f6 100%)' }}>
+               {/* safe-area: pt 用 max(3.5rem, 刘海高度)，保呼吸感同时更高刘海设备不被挡 */}
+               <div className="px-6 pb-4 shrink-0 flex items-start justify-between" style={{ paddingTop: 'max(3.5rem, var(--safe-top))' }}>
+                   <div className="relative">
+                       <span className="absolute -top-3 -left-2 text-violet-300 text-xs select-none">✦</span>
+                       <span className="absolute -top-1 left-9 text-violet-200 text-[10px] select-none">✦</span>
+                       <h1 className="text-[30px] font-serif font-bold tracking-wide leading-tight text-slate-800">神经链接</h1>
+                       <p className="text-xs text-violet-400/90 mt-2">已建立 <span className="font-bold text-violet-500">{characters.length}</span> 个角色连接</p>
+                   </div>
+                   <div className="flex gap-3 pt-1">
+                        <ToolButton label="分组" title="角色分组管理" onClick={() => setShowGroupModal(true)}>
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-5 h-5">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" />
+                            </svg>
+                        </ToolButton>
+                        <ToolButton label="导入" title="导入角色卡" onClick={() => cardImportRef.current?.click()}>
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-5 h-5">
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
                             </svg>
-                        </button>
+                        </ToolButton>
+                        <ToolButton label="关闭" title="关闭" onClick={closeApp}>
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+                        </ToolButton>
                         <input type="file" ref={cardImportRef} className="hidden" accept=".json" onChange={handleImportCard} />
-                        
-                        <button onClick={closeApp} className="p-2 rounded-full bg-white/40 hover:bg-white/80 transition-colors"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 text-slate-600"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" /></svg></button>
                    </div>
                </div>
                <div className="flex-1 overflow-y-auto px-5 pb-20 no-scrollbar flex flex-col gap-3">
                    {(() => {
+                       // 建过分组 → 按组折叠展开（不再分页，分组本身就把列表变短了）；
+                       // 没建过分组 → 维持原来的分页列表，零变化。
+                       if (characterGroups.length > 0) {
+                           const knownGroupIds = new Set(characterGroups.map(g => g.id));
+                           const sections = [
+                               ...sortCharacterGroups(characterGroups).map(g => ({
+                                   id: g.id,
+                                   name: g.name,
+                                   chars: characters.filter(c => c.groupId === g.id),
+                               })),
+                               {
+                                   id: GROUP_FILTER_UNGROUPED,
+                                   name: '未分组',
+                                   // groupId 指向已删分组的角色也归到未分组，不会凭空消失
+                                   chars: characters.filter(c => !c.groupId || !knownGroupIds.has(c.groupId)),
+                               },
+                           ].filter(s => s.id !== GROUP_FILTER_UNGROUPED || s.chars.length > 0);
+                           return (
+                               <>
+                                   {sections.map(section => {
+                                       const expanded = expandedGroups.includes(section.id);
+                                       return (
+                                           <div key={section.id} className="shrink-0">
+                                               {/* 分组条：干净的圆角白卡，左折叠箭头 + 组名 + 数量胶囊，右侧 ">" 指示可展开 */}
+                                               <button onClick={() => toggleGroupExpanded(section.id)}
+                                                   className={`w-full h-14 flex items-center gap-3 px-5 rounded-2xl bg-white border transition-colors active:scale-[0.99] ${expanded ? 'border-violet-200' : 'border-slate-100 hover:border-violet-200'} shadow-[0_2px_10px_rgba(140,120,200,0.07)]`}>
+                                                   <svg viewBox="0 0 12 12" className={`w-3 h-3 text-violet-400 transition-transform ${expanded ? '' : '-rotate-90'}`}>
+                                                       <path d="M2 4l4 5 4-5z" fill="currentColor" />
+                                                   </svg>
+                                                   <span className="text-base font-bold text-slate-700 tracking-wide truncate">{section.name}</span>
+                                                   <span className="min-w-[26px] px-2 py-0.5 rounded-full bg-violet-100/70 text-[12px] text-violet-500 text-center font-medium tabular-nums">{section.chars.length}</span>
+                                                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className={`w-4 h-4 ml-auto text-slate-300 transition-transform ${expanded ? 'rotate-90' : ''}`}><path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" /></svg>
+                                               </button>
+                                               {expanded && (
+                                                   <div className="flex flex-col gap-3 mt-3">
+                                                       {section.chars.map(char => (
+                                                           <CharacterCard
+                                                               key={char.id}
+                                                               char={char}
+                                                               active={char.id === activeCharacterId}
+                                                               onClick={() => { setEditingId(char.id); setView('detail'); }}
+                                                               onDelete={(e) => {
+                                                                   e.stopPropagation();
+                                                                   setDeleteConfirmTarget(char.id);
+                                                               }}
+                                                           />
+                                                       ))}
+                                                       {section.chars.length === 0 && (
+                                                           <div className="text-xs text-violet-300 px-3 pb-1">空分组——在角色「设定」页里指派</div>
+                                                       )}
+                                                   </div>
+                                               )}
+                                           </div>
+                                       );
+                                   })}
+                                   <button onClick={handleAddCharacter} className="w-full py-4 rounded-3xl border border-dashed border-violet-300/70 text-violet-400 text-sm bg-white/50 hover:bg-white transition-colors flex items-center justify-center gap-2 shrink-0">
+                                       <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>新建链接
+                                   </button>
+                               </>
+                           );
+                       }
                        const PAGE_SIZE = 6;
                        const totalPages = Math.max(1, Math.ceil(characters.length / PAGE_SIZE));
                        const page = Math.min(charPage, totalPages - 1);
@@ -985,6 +1166,7 @@ ${isInitialGeneration ? `
                                    <CharacterCard
                                        key={char.id}
                                        char={char}
+                                       active={char.id === activeCharacterId}
                                        onClick={() => { setEditingId(char.id); setView('detail'); }}
                                        onDelete={(e) => {
                                            e.stopPropagation();
@@ -992,18 +1174,18 @@ ${isInitialGeneration ? `
                                        }}
                                    />
                                ))}
-                               <button onClick={addCharacter} className="w-full py-4 rounded-3xl border border-dashed border-slate-300 text-slate-400 text-sm hover:bg-white/30 transition-all flex items-center justify-center gap-2 shrink-0">
+                               <button onClick={handleAddCharacter} className="w-full py-4 rounded-3xl border border-dashed border-violet-300/70 text-violet-400 text-sm bg-white/50 hover:bg-white transition-colors flex items-center justify-center gap-2 shrink-0">
                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>新建链接
                                </button>
                                {totalPages > 1 && (
                                    <div className="flex items-center justify-center gap-3 pt-2 shrink-0">
                                        <button onClick={() => setCharPage(Math.max(0, page - 1))} disabled={page === 0}
-                                           className="w-9 h-9 rounded-full bg-white/60 border border-white/50 shadow-sm flex items-center justify-center text-slate-500 disabled:opacity-30 active:scale-90 transition-all">
+                                           className="w-9 h-9 rounded-full bg-white/70 border border-violet-100 shadow-sm flex items-center justify-center text-violet-400 disabled:opacity-30 active:scale-90 transition-all">
                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                                        </button>
-                                       <span className="text-sm text-slate-500 font-medium tabular-nums min-w-[40px] text-center">{page + 1}/{totalPages}</span>
+                                       <span className="text-sm text-violet-500 font-medium tabular-nums min-w-[40px] text-center">{page + 1}/{totalPages}</span>
                                        <button onClick={() => setCharPage(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1}
-                                           className="w-9 h-9 rounded-full bg-white/60 border border-white/50 shadow-sm flex items-center justify-center text-slate-500 disabled:opacity-30 active:scale-90 transition-all">
+                                           className="w-9 h-9 rounded-full bg-white/70 border border-violet-100 shadow-sm flex items-center justify-center text-violet-400 disabled:opacity-30 active:scale-90 transition-all">
                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" /></svg>
                                        </button>
                                    </div>
@@ -1018,7 +1200,10 @@ ${isInitialGeneration ? `
                {/* safe-area: OUTER 保留渐变背景 + 模糊 + sticky，刘海高度由 paddingTop 让位；
                    INNER 不再用 h-32 沉底——那是老的「做高栏 + 内容沉底」状态栏预留写法，会和 safe-top 叠加出一大块空白。
                    改为内容自然高度、直接贴在 safe-top 下方。 */}
-               <div className="bg-gradient-to-b from-white/90 to-transparent backdrop-blur-sm shrink-0 z-40 sticky top-0" style={{ paddingTop: 'var(--safe-top)' }}>
+               {/* 顶栏 paddingTop 用 max(2.75rem, safe-top) 保底：--safe-top 为 0 的环境
+                   （无刘海/某些 WebView）下也留出状态栏高度，避免「列表/发消息」贴到状态栏。
+                   与列表页及全项目 detail 顶栏惯例（max(rem, var(--safe-top))）一致。 */}
+               <div className="bg-gradient-to-b from-white/90 to-transparent backdrop-blur-sm shrink-0 z-40 sticky top-0" style={{ paddingTop: 'max(2.75rem, var(--safe-top))' }}>
                  <div className="flex flex-col px-5 pt-2 pb-2">
                    <div className="flex justify-between items-center mb-3">
                        <button onClick={handleBack} className="p-2 -ml-2 rounded-full hover:bg-white/60 flex items-center gap-1 text-slate-600"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg><span className="text-sm font-medium">列表</span></button>
@@ -1028,6 +1213,8 @@ ${isInitialGeneration ? `
                        <button onClick={() => setDetailTab('identity')} className={`pb-2 transition-colors relative ${detailTab === 'identity' ? 'text-slate-800' : ''}`}>设定{detailTab === 'identity' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
                        <button onClick={() => setDetailTab('memory')} className={`pb-2 transition-colors relative ${detailTab === 'memory' ? 'text-slate-800' : ''}`}>记忆 ({(formData.memories || []).length}){detailTab === 'memory' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
                        <button onClick={() => setDetailTab('impression')} className={`pb-2 transition-colors relative ${detailTab === 'impression' ? 'text-slate-800' : ''}`}>印象{detailTab === 'impression' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => setDetailTab('plates')} className={`pb-2 transition-colors relative ${detailTab === 'plates' ? 'text-slate-800' : ''}`}>门牌{detailTab === 'plates' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => setDetailTab('chibi')} className={`pb-2 transition-colors relative ${detailTab === 'chibi' ? 'text-slate-800' : ''}`}>手办{detailTab === 'chibi' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
                    </div>
                  </div>
                </div>
@@ -1080,7 +1267,44 @@ ${isInitialGeneration ? `
                                    />
                                </div>
                            </div>
-                           
+
+                           <div>
+                               <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">分组</label>
+                               <div className="flex gap-2 items-center">
+                                   <select
+                                       value={formData.groupId && characterGroups.some(g => g.id === formData.groupId) ? formData.groupId : ''}
+                                       onChange={e => handleChange('groupId', e.target.value || undefined)}
+                                       className="flex-1 bg-white rounded-2xl px-4 py-2.5 text-sm text-slate-700 shadow-sm focus:ring-1 focus:ring-primary/20 outline-none appearance-none"
+                                   >
+                                       <option value="">未分组</option>
+                                       {sortCharacterGroups(characterGroups).map(g => (
+                                           <option key={g.id} value={g.id}>{g.name}</option>
+                                       ))}
+                                   </select>
+                                   {detailGroupDraft === null ? (
+                                       <button onClick={() => setDetailGroupDraft('')} className="px-3 py-2.5 rounded-2xl bg-white text-xs text-slate-500 shadow-sm active:scale-95 transition-transform shrink-0">＋新建</button>
+                                   ) : (
+                                       <input
+                                           autoFocus
+                                           value={detailGroupDraft}
+                                           onChange={e => setDetailGroupDraft(e.target.value)}
+                                           onBlur={async () => {
+                                               const name = detailGroupDraft.trim();
+                                               setDetailGroupDraft(null);
+                                               if (!name) return;
+                                               const existing = characterGroups.find(g => g.name === name);
+                                               // 同名分组直接指派进去，不重复创建
+                                               const group = existing || await createCharacterGroup(name);
+                                               if (group) handleChange('groupId', group.id);
+                                           }}
+                                           onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                                           placeholder="分组名，回车确认"
+                                           className="w-36 px-3 py-2.5 rounded-2xl bg-white text-xs text-slate-700 shadow-sm outline-none focus:ring-1 focus:ring-primary/20 shrink-0"
+                                       />
+                                   )}
+                               </div>
+                           </div>
+
                            <div>
                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">核心指令 (System Prompt)</label>
                                <textarea value={formData.systemPrompt} onChange={(e) => handleChange('systemPrompt', e.target.value)} className="w-full h-40 bg-white rounded-3xl p-5 text-sm shadow-sm resize-none focus:ring-1 focus:ring-primary/20 transition-all vr-reader-scroll" placeholder="设定..." />
@@ -1161,6 +1385,53 @@ ${isInitialGeneration ? `
                                            <div className={`absolute top-0.5 w-6 h-6 bg-white rounded-full shadow-md transition-transform ${formData.dateTimeAwarenessEnabled !== false ? 'translate-x-5' : 'translate-x-0.5'}`}></div>
                                        </button>
                                    </div>
+                               </div>
+                           </div>
+
+                           {/* 生活记录注入：总开关 + 4 个模块小开关（数据在档案 App「生活记录」里维护） */}
+                           <div className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 space-y-4">
+                               <div>
+                                   <label className="text-[10px] font-bold text-rose-500 uppercase tracking-widest block">生活记录注入</label>
+                                   <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">把你在「档案 → 生活记录」里的生理期 / 药盒 / 记账 / 锻炼作为潜意识背景注入给该角色；你明确说出相关事实时，ta 还能帮你顺手记一笔（聊天里会出卡片，可确认 / 否决）。</p>
+                               </div>
+
+                               {/* 总开关 */}
+                               <div className="border-t border-slate-100 pt-3">
+                                   <div className="flex items-center justify-between gap-3">
+                                       <div className="min-w-0">
+                                           <p className="text-xs font-bold text-slate-700">总开关</p>
+                                           <p className="text-[10px] text-slate-400 mt-0.5 leading-relaxed">默认关。关闭时不注入任何生活记录内容，连代记指令的用法都不会教给角色。</p>
+                                       </div>
+                                       <button
+                                           onClick={() => handleChange('lifeRecordEnabled', !formData.lifeRecordEnabled)}
+                                           className={`w-12 h-7 rounded-full transition-colors relative shrink-0 ${formData.lifeRecordEnabled ? 'bg-primary' : 'bg-slate-200'}`}
+                                       >
+                                           <div className={`absolute top-0.5 w-6 h-6 bg-white rounded-full shadow-md transition-transform ${formData.lifeRecordEnabled ? 'translate-x-5' : 'translate-x-0.5'}`}></div>
+                                       </button>
+                                   </div>
+                               </div>
+
+                               {/* 模块小开关（总开关关闭时整体置灰） */}
+                               <div className={`border-t border-slate-100 pt-3 space-y-3 ${formData.lifeRecordEnabled ? '' : 'opacity-40 pointer-events-none'}`}>
+                                   {([
+                                       ['lifeRecordPeriodEnabled', 'period', '生理期', '经期状态 / 周期预测 + 代记「来了 / 结束了」'],
+                                       ['lifeRecordMedEnabled', 'med', '药盒', '今日用药计划与打卡情况 + 代记「吃了 xx 药」'],
+                                       ['lifeRecordExpenseEnabled', 'expense', '记账', '今日支出（与银行 App 打通）+ 代记「花了 xx 钱」'],
+                                       ['lifeRecordExerciseEnabled', 'exercise', '锻炼', '今日 / 本周锻炼情况 + 代记「做了 xx 运动」'],
+                                   ] as const).filter(([, moduleKey]) => !hiddenLifeModules.includes(moduleKey)).map(([field, , label, desc]) => (
+                                       <div key={field} className="flex items-center justify-between gap-3">
+                                           <div className="min-w-0">
+                                               <p className="text-xs font-bold text-slate-700">{label}</p>
+                                               <p className="text-[10px] text-slate-400 mt-0.5 leading-relaxed">{desc}</p>
+                                           </div>
+                                           <button
+                                               onClick={() => handleChange(field, formData[field] === false)}
+                                               className={`w-12 h-7 rounded-full transition-colors relative shrink-0 ${formData[field] !== false ? 'bg-primary' : 'bg-slate-200'}`}
+                                           >
+                                               <div className={`absolute top-0.5 w-6 h-6 bg-white rounded-full shadow-md transition-transform ${formData[field] !== false ? 'translate-x-5' : 'translate-x-0.5'}`}></div>
+                                           </button>
+                                       </div>
+                                   ))}
                                </div>
                            </div>
 
@@ -1285,7 +1556,7 @@ ${isInitialGeneration ? `
                            <div>
                                <div className="flex justify-between items-center mb-2 px-1">
                                    <label className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest block flex items-center gap-1"><Books size={12} /> 扩展设定 (Worldbooks)</label>
-                                   <button onClick={() => setShowWorldbookModal(true)} className="text-[10px] bg-indigo-50 text-indigo-600 px-2 py-1 rounded font-bold hover:bg-indigo-100">+ 挂载</button>
+                                   <button onClick={openWorldbookModal} className="text-[10px] bg-indigo-50 text-indigo-600 px-2 py-1 rounded font-bold hover:bg-indigo-100">+ 挂载</button>
                                 </div>
                                 <div className="space-y-2">
                                    {formData.mountedWorldbooks && formData.mountedWorldbooks.length > 0 ? (
@@ -1360,10 +1631,31 @@ ${isInitialGeneration ? `
                            onDelete={() => handleChange('impression', undefined)}
                        />
                    )}
+
+                   {detailTab === 'chibi' && formData.id && (
+                       <ChibiShelfPanel charId={formData.id} onOpen={() => setShowChibiStudio(true)} />
+                   )}
+
+                   {detailTab === 'plates' && formData.id && (
+                       <RoomPlatePanel charId={formData.id} userName={userProfile.name} />
+                   )}
                </div>
            </div>
        )}
        
+       {/* QQ捏人工坊：直接写库（sprites / vrState / specialMomentRecords / chibiStudio），
+           关闭时把最新角色数据拉回 formData——否则后续编辑会用旧副本 auto-save 盖掉工坊成果 */}
+       {showChibiStudio && formData && (
+           <ChibiStudio
+               charId={formData.id}
+               onClose={() => {
+                   setShowChibiStudio(false);
+                   const latest = characters.find(c => c.id === formData.id);
+                   if (latest) setFormData(latest);
+               }}
+           />
+       )}
+
        {/* Modals ... */}
        <Modal isOpen={showImportModal} title="记忆导入/清洗" onClose={() => setShowImportModal(false)} footer={<><button onClick={() => setShowImportModal(false)} className="flex-1 py-3 bg-slate-100 text-slate-500 font-bold rounded-2xl">取消</button><button onClick={handleImportMemories} disabled={isProcessingMemory} className="flex-1 py-3 bg-primary text-white font-bold rounded-2xl shadow-lg shadow-primary/30 flex items-center justify-center gap-2">{isProcessingMemory && <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>}{isProcessingMemory ? '处理中...' : '开始执行'}</button></>}>
            <div className="space-y-3"><div className="text-xs text-slate-400 leading-relaxed bg-slate-50 p-3 rounded-xl border border-slate-100">AI 将自动整理乱序文本为记忆档案。</div>{importStatus && <div className="text-xs text-primary font-medium">{importStatus}</div>}<textarea value={importText} onChange={e => setImportText(e.target.value)} placeholder="在此粘贴文本..." className="w-full h-32 bg-slate-100 border-none rounded-2xl px-4 py-3 text-sm text-slate-700 resize-none focus:ring-2 focus:ring-primary/20 transition-all"/></div>
@@ -1448,54 +1740,143 @@ ${isInitialGeneration ? `
             title="挂载世界书" 
             onClose={() => setShowWorldbookModal(false)} 
         >
-            <div className="max-h-[50vh] overflow-y-auto no-scrollbar space-y-4 p-1">
+            <div className="max-h-[50vh] overflow-y-auto no-scrollbar space-y-3 p-1">
                 {worldbooks.length === 0 ? (
                     <div className="text-center text-slate-400 text-xs py-8">
                         还没有世界书，请去桌面【世界书】App 创建。
                     </div>
                 ) : (
-                    // Group books for UI
-                    Object.entries(worldbooks.reduce((acc, wb) => {
-                        const cat = wb.category || '未分类设定 (General)';
-                        if (!acc[cat]) acc[cat] = [];
-                        acc[cat].push(wb);
-                        return acc;
-                    }, {} as Record<string, typeof worldbooks>)).map(([category, books]) => (
-                        <div key={category} className="space-y-2">
-                            <div className="flex justify-between items-center px-1">
-                                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">{category}</h4>
-                                <button 
-                                    onClick={() => mountCategory(category)}
-                                    className="text-[10px] bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded font-bold hover:bg-indigo-100"
-                                >
-                                    挂载整组
-                                </button>
+                    <>
+                        <input
+                            value={wbModalSearch}
+                            onChange={e => setWbModalSearch(e.target.value)}
+                            placeholder="搜索世界书标题或分组..."
+                            className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 outline-none focus:bg-white focus:border-indigo-300 transition-all"
+                        />
+                        {wbModalSearchResults ? (
+                            // 搜索态：扁平结果列表
+                            <div className="space-y-2">
+                                {wbModalSearchResults.books.length === 0 ? (
+                                    <div className="text-center text-slate-400 text-xs py-6">没有匹配的世界书。</div>
+                                ) : (
+                                    wbModalSearchResults.books.map(wb => {
+                                        const isMounted = formData?.mountedWorldbooks?.some(m => m.id === wb.id);
+                                        return (
+                                            <button
+                                                key={wb.id}
+                                                onClick={() => !isMounted && mountWorldbook(wb.id)}
+                                                disabled={isMounted}
+                                                className={`w-full p-3 rounded-xl border text-left transition-all ${isMounted ? 'bg-slate-50 border-slate-200 opacity-50 cursor-not-allowed' : 'bg-white border-indigo-100 hover:border-indigo-300 shadow-sm active:scale-95'}`}
+                                            >
+                                                <div className="flex justify-between items-center gap-2">
+                                                    <span className="font-bold text-slate-700 text-sm truncate">{wb.title}</span>
+                                                    {isMounted && <span className="text-[10px] text-slate-400 shrink-0">已挂载</span>}
+                                                </div>
+                                                <div className="text-[10px] text-slate-400 truncate mt-0.5">{wb.category || '未分类设定 (General)'}</div>
+                                            </button>
+                                        );
+                                    })
+                                )}
+                                {wbModalSearchResults.total > wbModalSearchResults.books.length && (
+                                    <div className="text-center text-[10px] text-slate-400 py-1">
+                                        共 {wbModalSearchResults.total} 条匹配，仅显示前 {wbModalSearchResults.books.length} 条，请继续输入缩小范围。
+                                    </div>
+                                )}
                             </div>
-                            {books.map(wb => {
-                                const isMounted = formData?.mountedWorldbooks?.some(m => m.id === wb.id);
+                        ) : (
+                            // 默认态：分组手风琴，只渲染展开分组的条目
+                            wbModalGroups.map(([category, books]) => {
+                                const isExpanded = wbModalExpandedCategory === category;
                                 return (
-                                    <button 
-                                        key={wb.id} 
-                                        onClick={() => !isMounted && mountWorldbook(wb.id)}
-                                        disabled={isMounted}
-                                        className={`w-full p-4 rounded-xl border text-left transition-all ${isMounted ? 'bg-slate-50 border-slate-200 opacity-50 cursor-not-allowed' : 'bg-white border-indigo-100 hover:border-indigo-300 shadow-sm active:scale-95'}`}
-                                    >
-                                        <div className="flex justify-between items-center mb-1">
-                                            <span className="font-bold text-slate-700 text-sm truncate">{wb.title}</span>
-                                            {isMounted && <span className="text-[10px] text-slate-400">已挂载</span>}
+                                    <div key={category} className="rounded-xl border border-slate-100 bg-slate-50/50 overflow-hidden">
+                                        <div
+                                            onClick={() => setWbModalExpandedCategory(isExpanded ? null : category)}
+                                            className="flex items-center gap-2 px-3 py-2.5 cursor-pointer select-none"
+                                        >
+                                            <span className={`transition-transform duration-200 text-slate-400 ${isExpanded ? 'rotate-90' : ''}`}>
+                                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path fillRule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clipRule="evenodd" /></svg>
+                                            </span>
+                                            <h4 className="flex-1 min-w-0 text-xs font-bold text-slate-500 truncate">{category}</h4>
+                                            <span className="text-[10px] text-slate-400 shrink-0">{books.length}</span>
+                                            <button
+                                                onClick={(e) => { e.stopPropagation(); mountCategory(category); }}
+                                                className="text-[10px] bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded font-bold hover:bg-indigo-100 shrink-0"
+                                            >
+                                                挂载整组
+                                            </button>
                                         </div>
-                                    </button>
+                                        {isExpanded && (
+                                            <div className="px-2 pb-2 space-y-2">
+                                                {books.map(wb => {
+                                                    const isMounted = formData?.mountedWorldbooks?.some(m => m.id === wb.id);
+                                                    return (
+                                                        <button
+                                                            key={wb.id}
+                                                            onClick={() => !isMounted && mountWorldbook(wb.id)}
+                                                            disabled={isMounted}
+                                                            className={`w-full p-3 rounded-xl border text-left transition-all ${isMounted ? 'bg-slate-50 border-slate-200 opacity-50 cursor-not-allowed' : 'bg-white border-indigo-100 hover:border-indigo-300 shadow-sm active:scale-95'}`}
+                                                        >
+                                                            <div className="flex justify-between items-center gap-2">
+                                                                <span className="font-bold text-slate-700 text-sm truncate">{wb.title}</span>
+                                                                {isMounted && <span className="text-[10px] text-slate-400 shrink-0">已挂载</span>}
+                                                            </div>
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
                                 );
-                            })}
-                        </div>
-                    ))
+                            })
+                        )}
+                    </>
                 )}
             </div>
         </Modal>
 
-        <Modal 
-            isOpen={!!deleteConfirmTarget} 
-            title="断开连接" 
+        {/* 角色分组管理 */}
+        <Modal isOpen={showGroupModal} title="角色分组管理" onClose={() => { setShowGroupModal(false); setNewGroupName(''); }}>
+            <div className="space-y-3">
+                <div className="flex gap-2">
+                    <input
+                        value={newGroupName}
+                        onChange={e => setNewGroupName(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') handleAddGroup(); }}
+                        placeholder="新分组名称"
+                        className="flex-1 px-4 py-2.5 bg-slate-100 rounded-xl text-sm text-slate-700 outline-none focus:ring-2 focus:ring-primary/20"
+                    />
+                    <button onClick={handleAddGroup} className="px-4 py-2.5 bg-primary text-white text-sm font-bold rounded-xl shadow-sm shadow-primary/30 active:scale-95 transition-transform shrink-0">添加</button>
+                </div>
+                {characterGroups.length === 0 ? (
+                    <div className="text-center text-xs text-slate-400 py-6">还没有分组。建一个试试——角色列表和各处选角色的地方都会按组展示。</div>
+                ) : (
+                    <div className="space-y-2 max-h-64 overflow-y-auto no-scrollbar">
+                        {sortCharacterGroups(characterGroups).map(g => (
+                            <div key={g.id} className="flex items-center gap-2 p-2.5 rounded-xl bg-slate-50 border border-slate-100">
+                                <input
+                                    defaultValue={g.name}
+                                    onBlur={e => { const v = e.target.value.trim(); if (v && v !== g.name) renameCharacterGroup(g.id, v); else e.target.value = g.name; }}
+                                    onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                                    className="flex-1 min-w-0 bg-transparent text-sm text-slate-700 outline-none border-b border-transparent focus:border-slate-300 py-0.5"
+                                />
+                                <span className="text-xs text-slate-400 tabular-nums shrink-0">{characters.filter(c => c.groupId === g.id).length} 个角色</span>
+                                <button
+                                    onClick={() => { deleteCharacterGroup(g.id); addToast(`分组「${g.name}」已删除，组内角色回到未分组`, 'info'); }}
+                                    className="p-1.5 rounded-full text-slate-300 hover:bg-red-50 hover:text-red-400 transition-all shrink-0"
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3.5 h-3.5"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                )}
+                <p className="text-[10px] text-slate-400 leading-relaxed bg-slate-50 p-2.5 rounded-xl">删除分组不会删除角色，组内角色会回到「未分组」。给角色指派分组：进入角色的「设定」页。</p>
+            </div>
+        </Modal>
+
+        <Modal
+            isOpen={!!deleteConfirmTarget}
+            title="断开连接"
             onClose={() => setDeleteConfirmTarget(null)} 
             footer={<div className="flex gap-2 w-full"><button onClick={() => setDeleteConfirmTarget(null)} className="flex-1 py-3 bg-slate-100 text-slate-500 rounded-2xl font-bold">保留</button><button onClick={confirmDeleteCharacter} className="flex-1 py-3 bg-red-500 text-white font-bold rounded-2xl shadow-lg shadow-red-200">确认断开</button></div>}
         >
@@ -1503,7 +1884,8 @@ ${isInitialGeneration ? `
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-12 h-12 text-slate-300"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" /></svg>
                 <p className="text-sm text-slate-600 text-center leading-relaxed">
                     确定要删除与该角色的所有连接吗？<br/>
-                    <span className="text-xs text-red-400 font-bold">该操作不可恢复，记忆将被清空。</span>
+                    <span className="text-xs text-red-400 font-bold">该操作不可恢复，记忆将被清空。</span><br/>
+                    <span className="text-[10px] text-slate-400">仅对 ta 可见的专属表情分类也会一并删除。</span>
                 </p>
             </div>
         </Modal>

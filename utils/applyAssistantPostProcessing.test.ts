@@ -148,3 +148,75 @@ describe('renderAndPersist 模仿历史渲染格式的引用兜底', () => {
         expect(texts[0].replyTo).toBeFalsy();
     }, 20000);
 });
+
+// 锁住双语（翻译模式）分支的表情包位置修复:
+// 旧实现把所有 [[SEND_EMOJI:]] 先抽出、正文发完后统一追加在最后（且去重），
+// 表现为"翻译模式下角色永远最后才发表情包"。修复后表情包按模型写的位置原地插发。
+describe('renderAndPersist 双语分支表情包顺序', () => {
+    const testEmojis = [
+        { id: 1, name: '开心', url: 'https://example.com/happy.png' },
+        { id: 2, name: '疑惑', url: 'https://example.com/confused.png' },
+    ] as any[];
+
+    const makeBiCtx = (charId: string): PostProcessCtx => {
+        const ctx = makeCtx(charId, []);
+        ctx.emojis = testEmojis as any;
+        ctx.instantRender = true;
+        return ctx;
+    };
+
+    it('表情包按出现位置插发，不再统一挪到最后', async () => {
+        const charId = `c-bi-emoji-${Date.now()}`;
+        const raw = [
+            '[[SEND_EMOJI: 开心]]',
+            '<翻译><原文>Hello there</原文><译文>你好呀</译文></翻译>',
+            '[[SEND_EMOJI: 疑惑]]',
+            '<翻译><原文>What happened</原文><译文>发生什么了</译文></翻译>',
+        ].join('\n');
+
+        await applyAssistantPostProcessing(raw, makeBiCtx(charId));
+
+        const msgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(msgs.map(m => m.type)).toEqual(['emoji', 'text', 'emoji', 'text']);
+        expect(msgs[0].content).toBe('https://example.com/happy.png');
+        expect(msgs[1].content).toBe('Hello there\n%%BILINGUAL%%\n你好呀');
+        expect(msgs[2].content).toBe('https://example.com/confused.png');
+        expect(msgs[3].content).toBe('What happened\n%%BILINGUAL%%\n发生什么了');
+    }, 20000);
+
+    it('同一个表情包出现两次时不去重，两次都发', async () => {
+        const charId = `c-bi-emoji-dup-${Date.now()}`;
+        const raw = [
+            '[[SEND_EMOJI: 开心]]',
+            '<翻译><原文>Nice</原文><译文>好耶</译文></翻译>',
+            '[[SEND_EMOJI: 开心]]',
+        ].join('\n');
+
+        await applyAssistantPostProcessing(raw, makeBiCtx(charId));
+
+        const msgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(msgs.map(m => m.type)).toEqual(['emoji', 'text', 'emoji']);
+    }, 20000);
+
+    it('混进 <原文>/<译文> 里的表情标签剥出来紧跟该双语气泡发送', async () => {
+        const charId = `c-bi-emoji-inline-${Date.now()}`;
+        const raw = '<翻译><原文>See you [[SEND_EMOJI: 开心]]</原文><译文>回见</译文></翻译>\n尾巴一句';
+
+        await applyAssistantPostProcessing(raw, makeBiCtx(charId));
+
+        const msgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(msgs.map(m => m.type)).toEqual(['text', 'emoji', 'text']);
+        expect(msgs[0].content).toBe('See you\n%%BILINGUAL%%\n回见');
+        expect(msgs[2].content).toBe('尾巴一句');
+    }, 20000);
+
+    it('表情包在最后时仍最后发（既有行为不回归）', async () => {
+        const charId = `c-bi-emoji-tail-${Date.now()}`;
+        const raw = '<翻译><原文>Bye</原文><译文>拜拜</译文></翻译>\n[[SEND_EMOJI: 疑惑]]';
+
+        await applyAssistantPostProcessing(raw, makeBiCtx(charId));
+
+        const msgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(msgs.map(m => m.type)).toEqual(['text', 'emoji']);
+    }, 20000);
+});

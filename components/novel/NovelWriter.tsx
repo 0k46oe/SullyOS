@@ -10,6 +10,8 @@ import Modal from '../os/Modal';
 import ConfirmDialog from '../os/ConfirmDialog';
 import { useOS } from '../../context/OSContext';
 import { safeResponseJson } from '../../utils/safeApi';
+import { DB } from '../../utils/db';
+import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../character/CharacterGroupFilter';
 
 interface NovelWriterProps {
     activeBook: NovelBook;
@@ -39,16 +41,43 @@ interface PersonaPanelProps {
     updateCharacter: (id: string, updates: Partial<CharacterProfile>) => void;
 }
 
-const PersonaPanel: React.FC<PersonaPanelProps> = ({ 
-    char, userProfile, targetCharId, isTyping, setIsTyping, setConfirmDialog, addToast, apiConfig, updateCharacter 
+const PersonaPanel: React.FC<PersonaPanelProps> = ({
+    char, userProfile, targetCharId, isTyping, setIsTyping, setConfirmDialog, addToast, apiConfig, updateCharacter
 }) => {
     const rawPersona = char.writerPersona || analyzeWriterPersonaSimple(char);
     const sections = parsePersonaMarkdown(rawPersona);
-    
+    const [isEditing, setIsEditing] = useState(false);
+    const [draft, setDraft] = useState('');
+
+    // 切换共创者时退出编辑，避免草稿写进另一个角色
+    useEffect(() => { setIsEditing(false); }, [char.id]);
+
+    const saveDraft = () => {
+        if (!draft.trim()) { addToast('档案内容不能为空', 'error'); return; }
+        updateCharacter(char.id, { writerPersona: draft.trim(), writerPersonaGeneratedAt: Date.now() });
+        setIsEditing(false);
+        addToast('创作档案已保存', 'success');
+    };
+
+    if (isEditing) {
+        return (
+            <div className="bg-gradient-to-b from-slate-50 to-white border-b border-black/5 overflow-hidden">
+                <div className="max-h-[45vh] overflow-y-auto p-4 overscroll-contain">
+                    <textarea value={draft} onChange={e => setDraft(e.target.value)} className="w-full h-56 bg-white border border-slate-200 rounded-2xl p-3 text-sm leading-relaxed resize-none outline-none focus:border-slate-400" />
+                    <button onClick={() => setDraft(analyzeWriterPersonaSimple(char))} className="text-xs text-slate-400 underline mt-1">重置为自动分析</button>
+                </div>
+                <div className="px-4 py-3 border-t border-slate-100 bg-white/80 flex gap-2">
+                    <button onClick={() => setIsEditing(false)} className="flex-1 bg-slate-100 text-slate-500 py-2.5 rounded-xl text-sm font-bold active:scale-95 transition-transform">取消</button>
+                    <button onClick={saveDraft} className="flex-1 bg-slate-800 text-white py-2.5 rounded-xl text-sm font-bold active:scale-95 transition-transform">保存</button>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="bg-gradient-to-b from-slate-50 to-white border-b border-black/5 overflow-hidden">
             <div className="max-h-[45vh] overflow-y-auto p-4 space-y-3 overscroll-contain">
-                {sections.length === 0 ? <div className="text-center py-8 text-slate-400 text-sm">暂无详细风格数据<br/><span className="text-xs">点击下方按钮生成</span></div> : 
+                {sections.length === 0 ? <div className="text-center py-8 text-slate-400 text-sm">暂无详细风格数据<br/><span className="text-xs">点击下方按钮生成</span></div> :
                     sections.map((sec, idx) => (
                         <div key={idx} className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
                             <div className="flex items-center gap-2 mb-2 pb-2 border-b border-slate-100"><span className="text-base">{sec.icon}</span><h4 className="text-sm font-bold text-slate-800">{sec.title}</h4></div>
@@ -57,8 +86,9 @@ const PersonaPanel: React.FC<PersonaPanelProps> = ({
                     ))
                 }
             </div>
-            <div className="px-4 py-3 border-t border-slate-100 bg-white/80">
-                <button onClick={async () => { 
+            <div className="px-4 py-3 border-t border-slate-100 bg-white/80 flex gap-2">
+                <button onClick={() => { setDraft(rawPersona); setIsEditing(true); }} disabled={isTyping} className="flex-1 bg-white border border-slate-200 text-slate-600 py-2.5 rounded-xl text-sm font-bold transition-all active:scale-95 hover:bg-slate-50 disabled:opacity-50">手动编辑</button>
+                <button onClick={async () => {
                     if(!targetCharId) return; 
                     setConfirmDialog({ 
                         isOpen: true, 
@@ -80,7 +110,7 @@ const PersonaPanel: React.FC<PersonaPanelProps> = ({
                             } 
                         } 
                     }); 
-                }} disabled={isTyping} className="w-full bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white py-2.5 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-50">
+                }} disabled={isTyping} className="flex-1 bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white py-2.5 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-50">
                     {isTyping ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : <>深度分析写作风格</>}
                 </button>
             </div>
@@ -93,7 +123,7 @@ const NovelWriter: React.FC<NovelWriterProps> = ({
     apiConfig, onBack, updateCharacter, collaborators,
     targetCharId, setTargetCharId, onOpenSettings
 }) => {
-    const { addToast } = useOS();
+    const { addToast, characterGroups } = useOS();
     const activeTheme = useMemo(() => NOVEL_THEMES.find(t => t.id === activeBook.coverStyle) || NOVEL_THEMES[0], [activeBook.coverStyle]);
     
     // State
@@ -116,6 +146,13 @@ const NovelWriter: React.FC<NovelWriterProps> = ({
     const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
     const [showHistoryModal, setShowHistoryModal] = useState(false);
     const [readingChapterIndex, setReadingChapterIndex] = useState<number | null>(null);
+
+    // 历史章节多选转发（选中的是章节总结段落的 id）
+    const [selectedChapterIds, setSelectedChapterIds] = useState<Set<string>>(new Set());
+    const [showForwardModal, setShowForwardModal] = useState(false);
+    const [forwardTargets, setForwardTargets] = useState<Set<string>>(new Set());
+    const [forwardGroupId, setForwardGroupId] = useState(GROUP_FILTER_ALL);
+    const [isForwarding, setIsForwarding] = useState(false);
 
     const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -386,6 +423,67 @@ ${chapterText.substring(0, 200000)}
         addToast('章节已归档，记忆已同步', 'success');
     };
 
+    // --- 历史章节多选 → 转发到聊天 ---
+    const toggleSelectChapter = (id: string) => {
+        setSelectedChapterIds(prev => {
+            const n = new Set(prev);
+            n.has(id) ? n.delete(id) : n.add(id);
+            return n;
+        });
+    };
+
+    const allChaptersSelected = historicalSummaries.length > 0 && selectedChapterIds.size === historicalSummaries.length;
+    const toggleSelectAllChapters = () => {
+        setSelectedChapterIds(allChaptersSelected ? new Set() : new Set(historicalSummaries.map(s => s.id)));
+    };
+
+    const openForwardModal = () => {
+        if (selectedChapterIds.size === 0) { addToast('请先选择要转发的章节', 'error'); return; }
+        // 默认勾上共创者——他们是最需要"记得这本书"的人
+        setForwardTargets(new Set(activeBook.collaboratorIds.filter(id => characters.some(c => c.id === id))));
+        setForwardGroupId(GROUP_FILTER_ALL);
+        setShowForwardModal(true);
+    };
+
+    // 把选中的章节归档打包成 novel_card，写进每个目标角色的聊天上下文，
+    // 让角色在聊天里"读过"这本一起写的书（与 TRPG trpg_card 同一套机制）
+    const handleForwardChapters = async () => {
+        if (selectedChapterIds.size === 0 || forwardTargets.size === 0) return;
+        setIsForwarding(true);
+        try {
+            const chapters = historicalSummaries
+                .map((s, i) => ({ seg: s, index: i + 1 }))
+                .filter(c => selectedChapterIds.has(c.seg.id))
+                .map(c => ({ index: c.index, summary: c.seg.content }));
+            const novel = {
+                bookTitle: activeBook.title,
+                subtitle: activeBook.subtitle || '',
+                bookSummary: activeBook.summary || '',
+                userName: userProfile.name,
+                collaboratorNames: collaborators.map(c => c.name),
+                chapters,
+                count: chapters.length,
+            };
+            const targets = characters.filter(c => forwardTargets.has(c.id));
+            for (const t of targets) {
+                await DB.saveMessage({
+                    charId: t.id,
+                    role: 'user',
+                    type: 'novel_card',
+                    content: `[笔友会小说]《${activeBook.title}》${chapters.length > 1 ? `${chapters.length} 章归档` : `第 ${chapters[0].index} 章归档`}`,
+                    metadata: { novel },
+                });
+            }
+            addToast(`已转发到 ${targets.length} 位角色的聊天`, 'success');
+            setShowForwardModal(false);
+            setSelectedChapterIds(new Set());
+        } catch (e: any) {
+            addToast(`转发失败: ${e.message}`, 'error');
+        } finally {
+            setIsForwarding(false);
+        }
+    };
+
     return (
         <div className={`h-full w-full flex flex-col font-serif ${activeTheme.bg} transition-colors duration-500 relative`}>
             <ConfirmDialog isOpen={!!confirmDialog} title={confirmDialog?.title || ''} message={confirmDialog?.message || ''} variant={confirmDialog?.variant} confirmText={confirmDialog?.confirmText || (confirmDialog?.onConfirm ? '确认' : 'OK')} onConfirm={confirmDialog?.onConfirm || (() => setConfirmDialog(null))} onCancel={() => setConfirmDialog(null)} />
@@ -517,18 +615,61 @@ ${chapterText.substring(0, 200000)}
             <Modal isOpen={showSummaryModal} title="章节总结" onClose={() => setShowSummaryModal(false)} footer={isGeneratingSummary ? <div className="w-full py-3 bg-slate-100 text-slate-500 font-bold rounded-2xl text-center">AI生成中...</div> : <button onClick={confirmChapterSummary} className="w-full py-3 bg-indigo-500 text-white font-bold rounded-2xl shadow-lg">确认归档并开启新章</button>}>
                 <textarea value={summaryContent} onChange={e => setSummaryContent(e.target.value)} className="w-full h-64 bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm resize-none focus:outline-none leading-relaxed" placeholder="总结生成中..." />
             </Modal>
-            <Modal isOpen={showHistoryModal} title="历史章节" onClose={() => setShowHistoryModal(false)}>
-                <div className="max-h-[60vh] overflow-y-auto space-y-4 p-1">
+            <Modal isOpen={showHistoryModal} title="历史章节" onClose={() => { setShowHistoryModal(false); setSelectedChapterIds(new Set()); }}>
+                {historicalSummaries.length > 0 && (
+                    <div className="flex items-center justify-between mb-3 px-1">
+                        <button onClick={toggleSelectAllChapters} className="text-xs font-bold text-slate-500 hover:text-slate-800 flex items-center gap-1.5 transition-colors">
+                            <span className={`w-4 h-4 rounded border flex items-center justify-center transition-colors ${allChaptersSelected ? 'bg-indigo-500 border-indigo-500 text-white' : 'border-slate-300 bg-white'}`}>{allChaptersSelected && <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path fillRule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clipRule="evenodd" /></svg>}</span>
+                            {allChaptersSelected ? '取消全选' : '全选'}
+                        </button>
+                        <button onClick={openForwardModal} disabled={selectedChapterIds.size === 0} className="text-[10px] bg-indigo-500 text-white px-3 py-1.5 rounded-lg font-bold shadow-sm hover:bg-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center gap-1">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path d="M3.105 2.288a.75.75 0 0 0-.826.95l1.414 4.926A1.5 1.5 0 0 0 5.135 9.25h6.115a.75.75 0 0 1 0 1.5H5.135a1.5 1.5 0 0 0-1.442 1.086l-1.414 4.926a.75.75 0 0 0 .826.95 28.897 28.897 0 0 0 15.293-7.155.75.75 0 0 0 0-1.114A28.897 28.897 0 0 0 3.105 2.288Z" /></svg>
+                            转发到聊天 ({selectedChapterIds.size})
+                        </button>
+                    </div>
+                )}
+                <div className="max-h-[55vh] overflow-y-auto space-y-4 p-1">
                     {historicalSummaries.length === 0 && <div className="text-center text-slate-400 py-4 text-xs">暂无历史章节</div>}
-                    {historicalSummaries.map((s, i) => (
-                        <div key={s.id} className="bg-slate-50 p-4 rounded-xl border border-slate-100">
-                            <div className="flex items-center justify-between mb-2">
-                                <div className="font-bold text-sm text-slate-700">第 {i + 1} 章</div>
-                                <button onClick={() => { setReadingChapterIndex(i); setShowHistoryModal(false); }} className="text-[10px] bg-indigo-50 text-indigo-600 px-2.5 py-1 rounded-lg font-bold hover:bg-indigo-100 border border-indigo-100 transition-colors">阅读原文</button>
+                    {historicalSummaries.map((s, i) => {
+                        const selected = selectedChapterIds.has(s.id);
+                        return (
+                            <div key={s.id} onClick={() => toggleSelectChapter(s.id)} className={`p-4 rounded-xl border cursor-pointer transition-colors ${selected ? 'bg-indigo-50/70 border-indigo-200' : 'bg-slate-50 border-slate-100 hover:border-slate-200'}`}>
+                                <div className="flex items-center justify-between mb-2">
+                                    <div className="flex items-center gap-2">
+                                        <span className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors ${selected ? 'bg-indigo-500 border-indigo-500 text-white' : 'border-slate-300 bg-white'}`}>{selected && <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path fillRule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clipRule="evenodd" /></svg>}</span>
+                                        <div className="font-bold text-sm text-slate-700">第 {i + 1} 章</div>
+                                    </div>
+                                    <button onClick={(e) => { e.stopPropagation(); setReadingChapterIndex(i); setShowHistoryModal(false); }} className="text-[10px] bg-indigo-50 text-indigo-600 px-2.5 py-1 rounded-lg font-bold hover:bg-indigo-100 border border-indigo-100 transition-colors">阅读原文</button>
+                                </div>
+                                <div className="text-xs text-slate-600 leading-relaxed whitespace-pre-wrap line-clamp-4">{s.content}</div>
                             </div>
-                            <div className="text-xs text-slate-600 leading-relaxed whitespace-pre-wrap line-clamp-4">{s.content}</div>
-                        </div>
-                    ))}
+                        );
+                    })}
+                </div>
+            </Modal>
+
+            {/* 转发章节：选择目标角色（默认勾上共创者，也可以分享给圈外角色） */}
+            <Modal isOpen={showForwardModal} title="转发章节到聊天" onClose={() => setShowForwardModal(false)} footer={
+                <button onClick={handleForwardChapters} disabled={isForwarding || forwardTargets.size === 0} className="w-full py-3 bg-indigo-500 text-white font-bold rounded-2xl shadow-lg disabled:opacity-40 flex items-center justify-center gap-2">
+                    {isForwarding ? <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> 转发中...</> : `转发 ${selectedChapterIds.size} 章给 ${forwardTargets.size} 位角色`}
+                </button>
+            }>
+                <p className="text-xs text-slate-400 mb-3">章节归档会进入所选角色的聊天记录，之后聊天时 Ta 就"读过"这本书了。共创者已默认勾选。</p>
+                <CharacterGroupFilterBar characters={characters} groups={characterGroups} value={forwardGroupId} onChange={setForwardGroupId} className="mb-3" />
+                <div className="max-h-[45vh] overflow-y-auto space-y-2 p-1">
+                    {filterCharactersByGroup(characters, characterGroups, forwardGroupId).map(c => {
+                        const checked = forwardTargets.has(c.id);
+                        const isCollab = activeBook.collaboratorIds.includes(c.id);
+                        return (
+                            <button key={c.id} onClick={() => setForwardTargets(prev => { const n = new Set(prev); n.has(c.id) ? n.delete(c.id) : n.add(c.id); return n; })} className={`w-full flex items-center gap-3 p-3 rounded-xl border shadow-sm active:scale-[0.98] transition-all text-left ${checked ? 'bg-indigo-50/70 border-indigo-200' : 'bg-white border-slate-100 hover:border-slate-200'}`}>
+                                <img src={c.avatar} className="w-9 h-9 rounded-full object-cover" />
+                                <div className="flex-1 min-w-0">
+                                    <div className="font-bold text-sm text-slate-700 flex items-center gap-2">{c.name}{isCollab && <span className="text-[9px] bg-amber-50 text-amber-600 border border-amber-100 px-1.5 py-0.5 rounded-full font-bold">共创者</span>}</div>
+                                </div>
+                                <span className={`w-5 h-5 rounded-full border flex items-center justify-center shrink-0 transition-colors ${checked ? 'bg-indigo-500 border-indigo-500 text-white' : 'border-slate-300 bg-white'}`}>{checked && <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path fillRule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clipRule="evenodd" /></svg>}</span>
+                            </button>
+                        );
+                    })}
                 </div>
             </Modal>
 

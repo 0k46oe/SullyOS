@@ -40,6 +40,7 @@ import { KeepAlive } from './keepAlive';
 import {
   SUBSCRIBE_SETTLE_MS,
   bytesToB64u,
+  describePushCapabilityGap,
   isDeadPushEndpoint,
   subscribeWithRetry,
 } from './pushSubscribeShared';
@@ -116,8 +117,9 @@ interface SubscribeAttempt {
 }
 
 export async function getOrCreateSubscription(vapidPublicKey: string): Promise<SubscribeAttempt> {
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-    return { sub: null, reason: '当前浏览器不支持 Service Worker 或 Push API' };
+  const capabilityGap = describePushCapabilityGap();
+  if (capabilityGap) {
+    return { sub: null, reason: capabilityGap };
   }
 
   const reg = await navigator.serviceWorker.ready;
@@ -315,11 +317,9 @@ export async function ensureSubscribed(): Promise<SubscribeResult> {
   if (!isPushVapidReady()) {
     return { ok: false, reason: 'VAPID 公钥未配置, 请到 Settings → Instant Push 生成' };
   }
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-    return { ok: false, reason: '当前浏览器不支持 Service Worker 或 Push API' };
-  }
-  if (typeof Notification === 'undefined') {
-    return { ok: false, reason: '当前环境没有 Notification API' };
+  const capabilityGap = describePushCapabilityGap();
+  if (capabilityGap) {
+    return { ok: false, reason: capabilityGap };
   }
 
   // Request permission first so the popup is tied to the user's click.
@@ -404,8 +404,9 @@ export async function resetSubscription(): Promise<{ ok: boolean; reason?: strin
   if (!isPushVapidReady()) {
     return { ok: false, reason: 'VAPID 公钥未配置, 请到 Settings → Instant Push 生成' };
   }
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-    return { ok: false, reason: '当前浏览器不支持 Service Worker 或 Push API' };
+  const capabilityGap = describePushCapabilityGap();
+  if (capabilityGap) {
+    return { ok: false, reason: capabilityGap };
   }
 
   const reg = await navigator.serviceWorker?.ready?.catch(() => null);
@@ -460,8 +461,9 @@ export async function deepResetSubscription(): Promise<{ ok: boolean; reason?: s
   if (!isPushVapidReady()) {
     return { ok: false, reason: 'VAPID 公钥未配置, 请到 Settings → Instant Push 生成' };
   }
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-    return { ok: false, reason: '当前浏览器不支持 Service Worker 或 Push API' };
+  const capabilityGap = describePushCapabilityGap();
+  if (capabilityGap) {
+    return { ok: false, reason: capabilityGap };
   }
 
   // 1) 拿现有 sub 的 endpoint, 通知 Worker 删 D1 行 (best-effort)

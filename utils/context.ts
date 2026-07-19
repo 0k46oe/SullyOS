@@ -121,6 +121,15 @@ export const ContextBuilder = {
             /** Recent messages used to activate keyword-based worldbook entries. */
             worldbookMessages?: WorldbookScanMessage[];
         },
+        layout?: {
+            /**
+             * 把「每轮/每分钟都会变」的三块（当前时间、记忆宫殿召回、情绪 buff）从本函数输出里
+             * 摘出去，由调用方通过 buildVolatileCoreState 拿到后放到消息数组末尾。
+             * 目的：让 system prompt 前缀稳定，吃到中转的 prompt 前缀缓存（TTFT 直降）。
+             * 只有聊天主路径（chatPrompts.buildSystemPromptParts）用；其他 App 不传，行为不变。
+             */
+            deferVolatile?: boolean;
+        },
     ): string => {
         const skipBookIds = groupOptions?.skipWorldbookIds;
         const filteredBooks = (char.mountedWorldbooks || []).filter(wb => !skipBookIds || !skipBookIds.has(wb.id));
@@ -144,28 +153,10 @@ export const ContextBuilder = {
 
         // 1a. 真实时间感知 (Time Awareness) — 跟随 timeAwarenessEnabled 设置，默认开启。
         // 统一在 buildCoreContext 注入，让所有调用方（私聊/查手机/人际关系/通话/约会…）都知道"现在"。
-        // 自定义时区（异国恋等）：开启后这里的"当前时间"按角色所在时区折算，并附时差提示，
-        // 让查手机/人际关系/通话等所有直连 buildCoreContext 的路径都拿到正确的本地时间。
-        // skipTimeAwareness：见面纯架空时由调用方传入，彻底抑制时间注入（修「线下时间感知」关掉后仍漏时间）。
-        if (char.timeAwarenessEnabled !== false && !timeOptions?.skipTimeAwareness) {
-            const charTz = resolveCharTimeZone(char);
-            const now = nowInTimeZone(charTz);
-            const h = now.getHours();
-            const dayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-            const timeOfDay =
-                h < 5 ? '凌晨' : h < 9 ? '早晨' : h < 12 ? '上午' : h < 14 ? '中午'
-                : h < 17 ? '下午' : h < 19 ? '傍晚' : h < 22 ? '晚上' : '深夜';
-            const dateStr = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日`;
-            const timeStr = `${h.toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-            context += `### 当前时间 (Now)\n`;
-            context += `现在是 ${dateStr} ${dayNames[now.getDay()]} ${timeOfDay} ${timeStr}。请据此自然地拥有真实的时间观念（早晚作息、工作日/周末、距离上次互动多久等），不要凭空假设时间。\n`;
-            const tzNote = tzAwarenessNote(charTz);
-            if (tzNote) context += `${tzNote.trim()}\n`;
-            // 距离上次联系多久（统一口径）：传了 lastInteractionTs 才注入。
-            // 让查手机/人际关系等无内联消息流的路径，也像聊天一样知道「用户多久没联系我了」。
-            const gapNote = interactionGapNote(timeOptions?.lastInteractionTs);
-            if (gapNote) context += gapNote;
-            context += `\n`;
+        // deferVolatile 时不在这里输出（时间精确到分钟、每轮都变，会打断 prompt 前缀缓存），
+        // 改由调用方经 buildVolatileCoreState 放到消息数组末尾。
+        if (!layout?.deferVolatile) {
+            context += ContextBuilder.buildTimeAwarenessBlock(char, timeOptions);
         }
 
         // 1b. 自我领悟词条 (Self Insights) — 消化过程中反刍产生的常驻自我认知
@@ -212,6 +203,14 @@ export const ContextBuilder = {
             if (imp.emotion_schema.stress_signals.length) context += `- 压力信号（ta状态不对的征兆）: ${imp.emotion_schema.stress_signals.join(', ')}\n`;
             context += `- 舒适区: ${imp.emotion_schema.comfort_zone}\n`;
             context += `- 最近观察到的变化: ${imp.observed_changes ? imp.observed_changes.map(c => typeof c === 'string' ? c : (c as any)?.description ? `[${(c as any).period}] ${(c as any).description}` : JSON.stringify(c)).join('; ') : '无'}\n\n`;
+        }
+
+        // 4b. 底色认知（记忆宫殿门牌）— 常驻语义层
+        // 与召回记忆不同：这是每轮都在的"你早已知道的背景"，不走相似度抽取。
+        // 必须用 memoryPalaceEnabled 把关，理由同下方 5b：注入字段会被 saveCharacter
+        // 持久化，宫殿关闭后 injectMemoryPalace 不再刷新它，不校验就会注入残留。
+        if (char.memoryPalaceEnabled && char.roomPlatesInjection && char.roomPlatesInjection.trim()) {
+            context += `${char.roomPlatesInjection}\n`;
         }
 
         // 5. 记忆库 (Memory Bank)
@@ -275,7 +274,8 @@ export const ContextBuilder = {
         // 既不刷新也不清空 char.memoryPalaceInjection，而该字段又会被 saveCharacter
         // 持久化。若此处不校验总开关，关闭后旧的召回结果仍会被注入进 system prompt，
         // 表现为"宫殿已关、后台无召回，角色却还在精准复述记忆"。与下方 Buff 注入同理。
-        if (includeDetailedMemories && char.memoryPalaceEnabled) {
+        // deferVolatile：召回结果每轮都变 → 移交 buildVolatileCoreState。
+        if (!layout?.deferVolatile && includeDetailedMemories && char.memoryPalaceEnabled) {
             const mpContext = char.memoryPalaceInjection || memoryPalaceContext;
             if (mpContext && mpContext.trim()) {
                 context += `${mpContext}\n\n`;
@@ -285,7 +285,8 @@ export const ContextBuilder = {
         // 6. 情绪底色 Buff (Emotion Buff Injection)
         // 放在角色设定之后，使所有调用 ContextBuilder 的 App 都能感知情绪状态
         // 总开关关闭时完全跳过，防止残留 buff 继续污染 prompt
-        if (isScheduleFeatureOn(char) && char.emotionConfig?.enabled && char.buffInjection) {
+        // deferVolatile：buff 每轮情绪评估后都可能变 → 移交 buildVolatileCoreState。
+        if (!layout?.deferVolatile && isScheduleFeatureOn(char) && char.emotionConfig?.enabled && char.buffInjection) {
             context += `${char.buffInjection}\n\n`;
             console.log(`🎭 [Context] Buff injected for ${char.name}:\n`, char.buffInjection);
             console.log(`🎭 [Context] Active buffs:`, JSON.stringify(char.activeBuffs || [], null, 2));
@@ -315,6 +316,72 @@ export const ContextBuilder = {
             console.log(`⚠️ [Context] Missing/empty fields: ${missing.join(', ')} | context_chars=${context.length}`);
         } else {
             console.log(`✅ [Context] All fields present | context_chars=${context.length}`);
+        }
+
+        return context;
+    },
+
+    /**
+     * 真实时间感知块（原 buildCoreContext 1a 段，逐字一致）。
+     * 单独抽出来是为了让聊天主路径能把它挪到消息数组末尾（deferVolatile），
+     * 其余 App 仍由 buildCoreContext 内部调用、位置不变。
+     */
+    buildTimeAwarenessBlock: (
+        char: CharacterProfile,
+        timeOptions?: { lastInteractionTs?: number; skipTimeAwareness?: boolean },
+    ): string => {
+        // skipTimeAwareness：见面纯架空时由调用方传入，彻底抑制时间注入（修「线下时间感知」关掉后仍漏时间）。
+        if (char.timeAwarenessEnabled === false || timeOptions?.skipTimeAwareness) return '';
+        // 自定义时区（异国恋等）：开启后这里的"当前时间"按角色所在时区折算，并附时差提示，
+        // 让查手机/人际关系/通话等所有直连 buildCoreContext 的路径都拿到正确的本地时间。
+        const charTz = resolveCharTimeZone(char);
+        const now = nowInTimeZone(charTz);
+        const h = now.getHours();
+        const dayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+        const timeOfDay =
+            h < 5 ? '凌晨' : h < 9 ? '早晨' : h < 12 ? '上午' : h < 14 ? '中午'
+            : h < 17 ? '下午' : h < 19 ? '傍晚' : h < 22 ? '晚上' : '深夜';
+        const dateStr = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日`;
+        const timeStr = `${h.toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+        let context = `### 当前时间 (Now)\n`;
+        context += `现在是 ${dateStr} ${dayNames[now.getDay()]} ${timeOfDay} ${timeStr}。请据此自然地拥有真实的时间观念（早晚作息、工作日/周末、距离上次互动多久等），不要凭空假设时间。\n`;
+        const tzNote = tzAwarenessNote(charTz);
+        if (tzNote) context += `${tzNote.trim()}\n`;
+        // 距离上次联系多久（统一口径）：传了 lastInteractionTs 才注入。
+        // 让查手机/人际关系等无内联消息流的路径，也像聊天一样知道「用户多久没联系我了」。
+        const gapNote = interactionGapNote(timeOptions?.lastInteractionTs);
+        if (gapNote) context += gapNote;
+        context += `\n`;
+        return context;
+    },
+
+    /**
+     * buildCoreContext(deferVolatile) 的另一半：时间 → 记忆宫殿召回 → 情绪 buff。
+     * 三块的开关判定与 buildCoreContext 内联版完全一致，只是输出位置交给调用方
+     * （聊天主路径放到消息数组末尾的"当前状态" system 消息里）。
+     */
+    buildVolatileCoreState: (
+        char: CharacterProfile,
+        options?: {
+            includeDetailedMemories?: boolean;
+            memoryPalaceContext?: string;
+            timeOptions?: { lastInteractionTs?: number; skipTimeAwareness?: boolean };
+        },
+    ): string => {
+        let context = ContextBuilder.buildTimeAwarenessBlock(char, options?.timeOptions);
+
+        const includeDetailedMemories = options?.includeDetailedMemories ?? true;
+        if (includeDetailedMemories && char.memoryPalaceEnabled) {
+            const mpContext = char.memoryPalaceInjection || options?.memoryPalaceContext;
+            if (mpContext && mpContext.trim()) {
+                context += `${mpContext}\n\n`;
+            }
+        }
+
+        if (isScheduleFeatureOn(char) && char.emotionConfig?.enabled && char.buffInjection) {
+            context += `${char.buffInjection}\n\n`;
+            console.log(`🎭 [Context] Buff injected for ${char.name}:\n`, char.buffInjection);
+            console.log(`🎭 [Context] Active buffs:`, JSON.stringify(char.activeBuffs || [], null, 2));
         }
 
         return context;

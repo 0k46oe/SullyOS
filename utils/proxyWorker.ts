@@ -22,10 +22,12 @@ export const DEFAULT_PROXY_WORKER = 'https://sullymeow.ccwu.cc';
 
 const LS_KEY = 'sully_proxy_worker_url_v1';
 
-// 旧的 *.workers.dev 默认域名 → 自定义域名。老用户 localStorage 里如果还存着
-// 这个，读出来时自动当成"用的是默认"，回落到 DEFAULT_PROXY_WORKER（与
-// MusicContext 的迁移逻辑一致：自定义域名走 CF 边缘到同一个 worker，行为相同）。
-const STALE_HOSTS = [/sully-n\.qegj567\.workers\.dev/i];
+// 已死/弃用的历史公共实例域名。老用户 localStorage 里如果还存着这些，
+// 读出来时自动当成"用的是默认"，回落到 DEFAULT_PROXY_WORKER（与
+// MusicContext 的迁移逻辑一致：都指向同一个 worker，行为相同）。
+//   - sully-n.qegj567.workers.dev：最早的 workers.dev 默认域名（国内超时）
+//   - sullymeow.ccwu213.cc：旧公共自定义域名，注册已过期、DNS 无法解析（2026-07 起）
+const STALE_HOSTS = [/sully-n\.qegj567\.workers\.dev/i, /sullymeow\.ccwu213\.cc/i];
 
 const normalize = (url: string): string => url.trim().replace(/\/+$/, '');
 
@@ -98,3 +100,19 @@ const notifyProxyWorkerChanged = (): void => {
 
 /** 当前是否在用自定义（非默认）worker。用于设置页提示文案。 */
 export const isCustomProxyWorker = (): boolean => getProxyWorkerUrl() !== DEFAULT_PROXY_WORKER;
+
+/**
+ * 把指向已死历史实例的 url 改写到当前生效的 worker（保留路径和 query）；
+ * 其余地址原样返回。给音乐播放器 / 小红书等「独立持久化 worker 地址」的
+ * 模块做存量迁移用——它们各自存的地址不走上面的 LS_KEY，得在自己的读取层调这个。
+ */
+export const rewriteStaleWorkerUrl = (url: string): string => {
+  if (typeof url !== 'string' || !url || !STALE_HOSTS.some((re) => re.test(url))) return url;
+  const base = getProxyWorkerUrl();
+  try {
+    const u = new URL(url);
+    return `${base}${u.pathname === '/' ? '' : u.pathname}${u.search}`;
+  } catch {
+    return base;
+  }
+};

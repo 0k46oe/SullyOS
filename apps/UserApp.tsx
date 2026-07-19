@@ -1,11 +1,14 @@
 
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import { useOS } from '../context/OSContext';
 import { processImage } from '../utils/file';
+import LifeRecordPanel from '../components/lifeRecord/LifeRecordPanel';
+import PerCharAvatarPicker from '../components/user/PerCharAvatarPicker';
 
 const UserApp: React.FC = () => {
     const { closeApp, userProfile, updateUserProfile, addToast } = useOS();
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const [tab, setTab] = useState<'profile' | 'life'>('profile');
 
     const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -32,9 +35,25 @@ const UserApp: React.FC = () => {
                     </button>
                     <h1 className="text-lg font-bold text-slate-700 tracking-wide">个人档案</h1>
                 </div>
+                {/* Tab：我的档案 / 生活记录 */}
+                <div className="flex gap-1.5 px-4 pb-2.5">
+                    {([['profile', '我的档案'], ['life', '生活记录']] as const).map(([key, label]) => (
+                        <button
+                            key={key}
+                            onClick={() => setTab(key)}
+                            className={`px-4 py-1.5 rounded-full text-xs font-bold transition-colors ${
+                                tab === key ? 'bg-primary text-white shadow-sm' : 'bg-slate-100 text-slate-400'
+                            }`}
+                        >
+                            {label}
+                        </button>
+                    ))}
+                </div>
             </div>
 
             <div className="flex-1 overflow-y-auto px-5 pb-10 pt-5 space-y-5">
+                {tab === 'life' && <LifeRecordPanel />}
+                {tab === 'profile' && <>
 
                 {/* Profile name card */}
                 <div className="bg-white rounded-[1.75rem] shadow-[0_10px_30px_-12px_rgba(80,70,120,0.25)] border border-slate-100 overflow-hidden">
@@ -63,6 +82,7 @@ const UserApp: React.FC = () => {
                             </div>
                         </div>
                         <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleAvatarChange} />
+                        <p className="mt-2 text-center text-[10px] text-slate-400">整体头像：所有聊天的默认。想在某个角色那儿换一副面孔？下面「分角色聊天头像」里设。</p>
 
                         {/* Name field */}
                         <div className="mt-4">
@@ -78,6 +98,9 @@ const UserApp: React.FC = () => {
                         </div>
                     </div>
                 </div>
+
+                {/* 分角色聊天头像：上面的整体头像是宏观默认，这里可给每个角色的私聊单独换「你」的头像 */}
+                <PerCharAvatarPicker />
 
                 {/* About / setting card */}
                 <div className="bg-white rounded-[1.75rem] shadow-[0_10px_30px_-12px_rgba(80,70,120,0.18)] border border-slate-100 p-5">
@@ -97,6 +120,7 @@ const UserApp: React.FC = () => {
                         placeholder="描述你自己..."
                     />
                 </div>
+                </>}
             </div>
         </div>
     );

@@ -732,9 +732,15 @@ const MemoryDiveMode: React.FC<Props> = ({
     (!!currentDialogue || dialogueQueue.length > 0);
 
   return (
-    <div className="h-full w-full flex flex-col bg-slate-950 overflow-hidden select-none">
+    <div
+      className="h-full w-full flex flex-col bg-slate-950 overflow-hidden select-none"
+      style={{ paddingBottom: 'var(--safe-bottom, 0px)', boxSizing: 'border-box' }}
+    >
       {/* 顶栏（薄） */}
-      <div className="shrink-0 flex items-center justify-between px-3 pt-11 pb-1.5 bg-black/70 backdrop-blur-sm border-b border-slate-800 z-20">
+      <div
+        className="shrink-0 flex items-center justify-between px-3 pb-1.5 bg-black/70 backdrop-blur-sm border-b border-slate-800 z-20"
+        style={{ paddingTop: 'max(2.75rem, var(--safe-top, 0px))' }}
+      >
         <div className="flex items-center gap-1">
           <button onClick={handleUserExit}
             className="p-1.5 -ml-1 rounded-sm hover:bg-slate-700/60 active:scale-90 transition-all"

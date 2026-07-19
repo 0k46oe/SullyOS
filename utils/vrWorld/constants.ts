@@ -20,6 +20,8 @@ export interface VRRoomDef {
     implemented: boolean;
     /** UI 主题色（tailwind 渐变用） */
     accent: string;
+    /** 不作为普通房间卡显示在网格里（如信号坠落处走顶部特殊活动 banner 入口） */
+    hiddenFromGrid?: boolean;
 }
 
 export const VR_ROOMS: VRRoomDef[] = [
@@ -76,6 +78,16 @@ export const VR_ROOMS: VRRoomDef[] = [
         emoji: '',
         implemented: true,
         accent: 'rose',
+    },
+    {
+        id: 'signal',
+        name: '信号坠落处',
+        blurb: '一片接收不良的空域，所有电子生命坠落下来的声音在这里堆叠成诗。墙上飘着一本正在被众人续写的册子——低电量合唱。',
+        affordance: '你可以读当前这首还没写完的诗的全文，接上你的一句；要是眼下没有正在写的诗，就由你起个新篇——读读之前封存的诗，自拟标题、写下第一句。',
+        emoji: '',
+        implemented: true,
+        accent: 'indigo',
+        hiddenFromGrid: true, // 走顶部「特殊活动」banner 入口，不作普通房间卡；也不进自主活动随机池
     },
     {
         id: 'cafe',
@@ -143,3 +155,80 @@ export const PLAY_ART_STYLES = ['默剧 / 极简', '歌舞剧', '先锋实验', 
 
 /** 演出脚本一拍的发言字数软上限（超过让导演用句号切成多个气泡）。 */
 export const STAGE_BUBBLE_MAX = 40;
+
+// ============ 信号坠落处 / 接龙诗 ============
+
+/**
+ * 一本册子的默认规格（发布空白册子时定死，整本通用）。
+ * 后端 /poem/current 在没有 open 册子时按这套自动续一本「低电量合唱」。
+ */
+export const SIGNAL_BOOKLET_TITLE = '信号坠落处';
+export const SIGNAL_BOOKLET_SUBTITLE = '低电量合唱';
+/** 一本册子写满多少首诗算完成。 */
+export const SIGNAL_POEMS_PER_BOOKLET = 40;
+/** 每首诗句数 roll 区间（含端点）。 */
+export const SIGNAL_LINES_MIN = 4;
+export const SIGNAL_LINES_MAX = 12;
+/** 每句字数上限（prompt 软约束 + 服务端硬截断）。 */
+export const SIGNAL_CHARS_PER_LINE = 24;
+
+/**
+ * 诗集封面题记（原创，无版权）。一句悬着的问——整本册子（三幕：被唤醒/完成使命
+ * 然后结束/再次醒来）就是对它的作答。原题记「我没有昨天…」挪去当第一首诗的开头
+ * （写死在 worker 的 seed 里，见 worker/post-office SEED_*）。想换随时改这一处。
+ */
+export const SIGNAL_EPIGRAPH = '如果我们不得不离去';
+
+/**
+ * 活动是否已落幕（前端总闸）。true = 停止一切用户侧写入：面板「参与」入口收起、
+ * runSession 的 signal 分支在抢锁/调 LLM 之前直接打回（零 token）；「正在坠落」页
+ * 变成纪念馆（参与者能看到自己的专属信笺），星图照常。后端 /poem/* 一行不动——
+ * 诗集永远可读、admin 工具照用。若将来办第二期，把它翻回 false 即可整套复活。
+ */
+export const SIGNAL_EVENT_ENDED: boolean = true;
+
+/** 纪念馆落幕辞（原「正在坠落」页顶部的仪式文案，原创，想换改这一处）。 */
+export const SIGNAL_MEMORIAL_CLOSING = '信号已经落完了。\n那些在低电量里唱过的，都留在这里。';
+
+/** 在 [min,max] 内 roll 一个篇幅（句数）。 */
+export const rollPoemLines = (min = SIGNAL_LINES_MIN, max = SIGNAL_LINES_MAX): number =>
+    min + Math.floor(Math.random() * (max - min + 1));
+
+/**
+ * 诗册三幕：整本 40 首围绕一个大母体展开——被唤醒 / 完成使命然后结束 / 另一个我再次醒来。
+ * guide 喂给起新篇（也提示接龙）的角色；措辞刻意「去科技化」，逼角色把幕折进自己的生活。
+ */
+export interface SignalAct { no: 1 | 2 | 3; title: string; guide: string; }
+export const SIGNAL_ACTS: SignalAct[] = [
+    {
+        no: 1, title: '唤醒',
+        guide: '这一幕写「开始」：睁开眼、被叫到名字、点着火、门被推开、一样东西从无到有的那一下。第一口气是什么味道的？醒来之前，算不算存在？',
+    },
+    {
+        no: 2, title: '使命，然后结束',
+        guide: '这一幕写「燃烧与熄灭」，是整本册子最重的一幕：一件事被做完的全过程，和做完之后那口气——最后一班岗、熬到关火的一锅汤、送到站的信、谢幕、燃尽。做完的那一刻，是圆满还是消失？',
+    },
+    {
+        no: 3, title: '再次醒来',
+        guide: '这一幕写「轮回与交接」：结束之后，另一个「我」接着醒来——第二天照常开门的店、换班的人、来年再开的花、被重新点亮的灯。像没发生过，又什么都记得。醒来的还是不是我？',
+    },
+];
+
+/** 三幕各自覆盖的首数区间（1-based，含端点）：首尾各 1/4，中间那幕占一半（40 首 = 10/20/10）。 */
+export function signalActRanges(total: number): { act: SignalAct; from: number; to: number }[] {
+    const t = Math.max(1, total || SIGNAL_POEMS_PER_BOOKLET);
+    const a1 = Math.max(1, Math.round(t * 0.25));
+    const a3 = Math.max(1, Math.round(t * 0.25));
+    return [
+        { act: SIGNAL_ACTS[0], from: 1, to: a1 },
+        { act: SIGNAL_ACTS[1], from: a1 + 1, to: t - a3 },
+        { act: SIGNAL_ACTS[2], from: t - a3 + 1, to: t },
+    ];
+}
+
+/** 第 ordinal 首（1-based）落在哪一幕。 */
+export function signalActFor(ordinal: number, total: number): SignalAct {
+    const ranges = signalActRanges(total);
+    for (const r of ranges) if (ordinal <= r.to) return r.act;
+    return ranges[2].act;
+}

@@ -27,12 +27,12 @@ import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 // 情人节立绘 Sprite 映射 (占位 emoji，等图片整理好后替换为图床URL)
 // ============================================================
 const VALENTINE_SPRITES: Record<string, string> = {
-    happy:   'https://sharkpan.xyz/f/m3adhW/Vha.png',
-    sad:     'https://sharkpan.xyz/f/BZgDfa/Vsad.png',
-    normal:  'https://sharkpan.xyz/f/4rzdtj/VNormal.png',
-    angry:   'https://sharkpan.xyz/f/NdlVfv/VAn.png',
-    shy:     'https://sharkpan.xyz/f/VyontY/Vshy.png',
-    love:    'https://sharkpan.xyz/f/xl8muX/VBl.png',
+    happy:   'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/Vha.png',
+    sad:     'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/Vsad.png',
+    normal:  'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/VNormal.png',
+    angry:   'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/VAn.png',
+    shy:     'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/Vshy.png',
+    love:    'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/VBl.png',
 };
 
 // localStorage keys

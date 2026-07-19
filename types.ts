@@ -77,8 +77,9 @@ export interface OSTheme {
   darkMode: boolean;
   contentColor?: string;
   /** 桌面整体皮肤。'animalcrossing' = 动森风格（NookPhone 彩色圆角图标 + 暖色界面）；
-   *  'mobilegame' = 二次元手游首页风格（角色卡 + 等级经验条 + 货币栏 + 网格卡 + 罗盘 dock）。默认 'default'。 */
-  skin?: 'default' | 'animalcrossing' | 'mobilegame';
+   *  'mobilegame' = 二次元手游首页风格（角色卡 + 等级经验条 + 货币栏 + 网格卡 + 罗盘 dock）；
+   *  'tamagotchi' = 电子宠物养成机（桌面即角色的小屋舞台 + 四颗糖果实体键）。默认 'default'。 */
+  skin?: 'default' | 'animalcrossing' | 'mobilegame' | 'tamagotchi';
   /** 动森皮肤下，聊天 App 是否也跟随换成动森界面。默认 true（undefined 视为 true）。关掉则聊天保持原样式。 */
   acnhChatSync?: boolean;
   launcherWidgetImage?: string; // DEPRECATED: always stripped on load — never renders.
@@ -91,7 +92,29 @@ export interface OSTheme {
   // Chat UI customization (global)
   chatAvatarShape?: 'circle' | 'rounded' | 'square';
   chatAvatarSize?: 'small' | 'medium' | 'large';
+  /** 聊天表情包大小三挡：小 96px（默认）/ 中 128px / 大 160px（旧版尺寸）。经 --sully-emoji-size CSS 变量生效 */
+  chatEmojiSize?: 'small' | 'medium' | 'large';
   chatAvatarMode?: 'grouped' | 'every_message';
+  // ── 聊天细节微调（外观 → 聊天细节）。收编自社区白框美化 CSS，全部可选，缺省 = 现状。
+  //    经 utils/chatFineTuneCss.ts 生成 CSS 注入 .sully-chat-root；用户自定义白框 CSS 排在其后可覆盖。
+  /** 头像显示：双侧 / 隐藏角色侧 / 隐藏用户侧 / 全部隐藏 */
+  chatAvatarVisibility?: 'both' | 'hide_ai' | 'hide_user' | 'hide_both';
+  /** 头像与气泡的对齐：底部（默认）/ 顶部 / 垂直居中 */
+  chatAvatarAlign?: 'bottom' | 'top' | 'center';
+  /** 头像垂直微调 px（负上正下），0/undefined = 不调 */
+  chatAvatarOffsetY?: number;
+  /** 气泡正文字号 px，0/undefined = 默认 */
+  chatBubbleFontSize?: number;
+  /** 气泡正文行距（如 1.35），0/undefined = 默认 */
+  chatBubbleLineHeight?: number;
+  /** 气泡与头像侧的间距 px，0/undefined = 默认（48px） */
+  chatBubbleIndent?: number;
+  /** 隐藏头像的一侧是否贴边（收回头像空位） */
+  chatSnapToEdge?: boolean;
+  /** HTML 卡片 / 心象卡片的出现位置：缺省/'center' = 水平居中（默认），'anchor' = 贴气泡列
+   *  （头像位，不随贴边/缩进挪动，即旧版观感）。经 MessageItem 布局属性生效（不走注入 CSS），
+   *  同属聊天细节微调字段、可按角色覆盖 */
+  chatModuleAlign?: 'anchor' | 'center';
   chatBubbleStyle?: 'modern' | 'flat' | 'outline' | 'shadow' | 'wechat' | 'ios';
   chatMessageSpacing?: 'compact' | 'default' | 'spacious';
   chatShowTimestamp?: 'always' | 'hover' | 'never';
@@ -113,6 +136,19 @@ export interface OSTheme {
   chatSound?: { src: string; volume?: number };
   /** 隐藏顶栏的情绪 buff 栏。 */
   chatHideHeaderBuffs?: boolean;
+}
+
+/** 聊天细节微调的 7 个字段（外观 App「聊天细节微调」区块），可整组按角色覆盖。
+ *  与 OSTheme 同名字段一一对应，经 utils/chatFineTuneCss.ts 生成 CSS。 */
+export type ChatFineTuneFields = Pick<OSTheme,
+  'chatAvatarVisibility' | 'chatAvatarAlign' | 'chatAvatarOffsetY' |
+  'chatBubbleFontSize' | 'chatBubbleLineHeight' | 'chatBubbleIndent' | 'chatSnapToEdge' |
+  'chatModuleAlign'>;
+
+/** 角色级「聊天装扮」覆盖：enabled=true 才生效；生效时已定义的字段逐个覆盖全局，
+ *  未定义的字段跟随全局（合并规则见 utils/chatFineTuneCss.ts 的 mergeChatFineTune）。 */
+export interface ChatFineTuneOverride extends ChatFineTuneFields {
+  enabled?: boolean;
 }
 
 export interface AppearancePreset {
@@ -342,8 +378,8 @@ export interface CharacterBuff {
 export interface RealtimeConfig {
   // 天气配置
   weatherEnabled: boolean;
-  weatherApiKey: string;  // OpenWeatherMap API Key
-  weatherCity: string;    // 城市名
+  weatherApiKey: string;  // OpenWeatherMap API Key（可选；留空走免 key 的 Open-Meteo）
+  weatherCity: string;    // 城市名（如 "北京"、"Beijing"）
 
   // 新闻配置
   newsEnabled: boolean;
@@ -446,7 +482,8 @@ export interface DateStyleConfig {
 export interface RoomItem {
     id: string;
     name: string;
-    type: 'furniture' | 'decor';
+    /** rug=地毯：永远铺在最底层，角色与其它家具都压在它上面 */
+    type: 'furniture' | 'decor' | 'rug';
     image: string;
     x: number;
     y: number;
@@ -920,7 +957,7 @@ export interface NovelBook {
 // =====================================================================
 
 /** 虚拟世界里的房间。 */
-export type VRRoomId = 'library' | 'music' | 'guestbook' | 'gym' | 'postoffice' | 'theater' | 'cafe';
+export type VRRoomId = 'library' | 'music' | 'guestbook' | 'gym' | 'postoffice' | 'theater' | 'signal' | 'cafe';
 
 /** 全局小说库里的一本书（所有角色共享原文，各自留批注、各自书签）。 */
 export interface VRWorldNovel {
@@ -1035,6 +1072,79 @@ export interface VRCardMeta {
     // --- 邮局专用 ---
     /** 本次写信/回信的正文摘要 */
     letterExcerpt?: string;
+    // --- 信号坠落处（跨用户接龙诗）专用 ---
+    /** 这次贡献所在的诗的标题 */
+    poemTitle?: string;
+    /** 这次写下的那一句 */
+    signalLine?: string;
+    /** 这一句在诗里是第几句（1-based） */
+    poemLineSeq?: number;
+    /** 这首诗 roll 到的总篇幅（句数） */
+    poemTargetLines?: number;
+    /** 本次是「起新篇」（写标题+第一句）还是「接龙」（续一句） */
+    signalIsNew?: boolean;
+    /** 截至本次贡献后这首诗的全文（逐句），供卡片展示 */
+    poemLinesSoFar?: string[];
+    /** 所在册子的标题（如「低电量合唱」），UI 展示 */
+    bookletTitle?: string;
+    /** 用户参与时留给角色的耳语（不进诗，只随卡片进聊天/记忆） */
+    signalWhisper?: string;
+}
+
+// ============================================================
+// 信号坠落处（VR 房间 'signal'）—— 跨用户接龙现代诗
+// ============================================================
+// 复用漂流瓶（post-office worker）的匿名 deviceId / 笔名马赛克 / 限流基建，
+// 但走独立的 po_poems / po_poem_lines 表。一本册子定死规格（多少首诗 /
+// 每首 roll 几句 / 每句几字），所有用户的角色共写同一份「当前」诗：读到
+// 的永远是最新全文，谁登入谁接一句，写满篇幅即封存进诗集。user 不参与。
+
+/** 信号坠落处的一句（来自某用户某角色，跨实例匿名）。 */
+export interface SignalPoemLine {
+    seq: number;
+    pen: string;
+    content: string;
+    createdAt: number;
+    /** 仅当请求带本机 device 时由后端标注：这一句是不是「我的 char」写的（认领用，不暴露别人 device） */
+    mine?: boolean;
+}
+
+/** 一首接龙诗（后端是源头，前端按需拉取）。 */
+export interface SignalPoem {
+    id: string;
+    bookletId: string;
+    title: string;
+    /** 发起者拟的主题/方向（给后来者接龙做参考的一段引导） */
+    brief?: string;
+    /** roll 到的篇幅（总句数） */
+    targetLines: number;
+    /** 已有句数 */
+    lineCount: number;
+    status: 'open' | 'sealed';
+    lines: SignalPoemLine[];
+    createdAt: number;
+    sealedAt?: number;
+    /** 仅当请求带本机 device 时：这首诗里有几句是「我的」（>0 = 我参与过，星图打光晕） */
+    mineCount?: number;
+}
+
+/** 一本册子（容器 + 规格）。 */
+export interface SignalBooklet {
+    id: string;
+    title: string;
+    subtitle?: string;
+    theme?: string;
+    /** 写满多少首诗算这本完成 */
+    poemsTarget: number;
+    /** 已封存诗数 */
+    poemCount: number;
+    /** 每首诗句数 roll 区间 */
+    linesMin: number;
+    linesMax: number;
+    /** 每句字数上限 */
+    charsPerLine: number;
+    status: 'open' | 'done';
+    createdAt: number;
 }
 
 // ============================================================
@@ -1054,7 +1164,7 @@ export type WorldHomeMode = 'light' | 'medium' | 'heavy';
  * - real: 真实时间——演绎进各角色的聊天与记忆（world_card），适合「真实系角色」。
  *         真实使用里中间会穿插大量真人聊天，卡片自然稀疏，不会刷屏。
  * - sim:  模拟时间——可自定义起始年月日，**不进记忆/聊天**；适合给 OC 们开小剧场图一乐。
- *         每 20 天（= 40 个半天/轮）自动结一卷：生成一份小说体总结（含人物关系动态走向
+ *         每 20 天（= 80 轮，一天四段：早/中/晚/凌晨）自动结一卷：生成一份小说体总结（含人物关系动态走向
  *         与评价），归档这 20 天原文，往后只把「该角色单方面视角的总结 + ta 最后一天 +
  *         本卷沉淀的氛围」分开喂回各角色——避免角色被迫开上帝视角。
  */
@@ -1168,7 +1278,8 @@ export interface WorldProfile {
     timeMode?: WorldTimeMode;
     /** sim 模式的起始日期（不设时按创建当天） */
     simStartDate?: WorldSimDate;
-    /** real 模式：世界已演到的「现实段」（早/中/晚跟着真实时钟走）。dayKey=YYYY-MM-DD，seg=0早/1中/2晚。
+    /** real 模式：世界已演到的「现实段」（早/中/晚/凌晨跟着真实时钟走）。dayKey=YYYY-MM-DD，
+     *  seg=0早/1中/2晚/3凌晨（凌晨发生在 dayKey **次日**的 0~5 点，排在该剧情日末尾以保证段序单调）。
      *  只能补当天错过的段，过了今天就补不了；未演过时为空。 */
     realClock?: { dayKey: string; seg: number };
     /** sim 模式：已被卷入章节总结的剧情时钟数（round ≤ 此值的原文已归档，不再喂原文） */
@@ -1194,10 +1305,13 @@ export interface WorldProfile {
     directives?: WorldDirective[];
     /** 社交动态的互动：key = `${round}_${charId}_${postIdx}`，值含点赞数 + 评论（NPC/路人）。 */
     feedReactions?: Record<string, { likes: number; comments: { from: string; text: string }[] }>;
-    /** 每天离线 tick 的时段（早/午/晚），空数组 = 仅手动观测推进 */
-    offlineTickSlots?: ('morning' | 'noon' | 'evening')[];
-    /** 剧情时钟：累计推进的半天数（0 = 第1天白天） */
+    /** 每天离线 tick 的时段（凌晨/早/午/晚），空数组 = 仅手动观测推进 */
+    offlineTickSlots?: ('latenight' | 'morning' | 'noon' | 'evening')[];
+    /** 剧情时钟：累计推进的段数（0 = 第1天早上；一天四段：早/中/晚/凌晨） */
     storyClock: number;
+    /** storyClock/simSummarizedClock 的「每天段数」版本：旧存档（无此字段）= 3 段（早中晚），
+     *  4 = 含凌晨的四段制。加载/演绎时经 migrateWorldDaySegs 自动迁移。 */
+    clockSegs?: number;
     /** 生成内容是否注入各成员的 1v1 聊天（默认 true） */
     injectToChat?: boolean;
     /** 该世界专属 API 覆盖；不设则回落全局 apiConfig */
@@ -1498,6 +1612,12 @@ export interface CustomCreatorPart {
     src: string;
     /** 是否可被换色（对应 item.tintable） */
     tintable?: boolean;
+    /**
+     * 部件投到下方图层上的阴影（如刘海投在耳发/脸上的影子）。
+     * 透明 PNG data URL，同尺寸/同锚点；PSD 里的正片叠底层导入时已预转成
+     * 黑色+alpha 的普通图层，渲染时垫在本部件颜色层下方、不参与染色。
+     */
+    shadowSrc?: string;
     createdAt: number;
 }
 
@@ -1701,6 +1821,32 @@ export interface SpecialMomentRecord {
     source?: 'generated' | 'migrated';
     /** Free-form per-event extra data (e.g. like520 captureface state, anchors, etc.) */
     customData?: Record<string, any>;
+}
+
+// --- QQ捏人工坊（神经链接） ---
+
+/** 工坊槽位：room=小小窝房间立绘 / vr=彼方 chibi / like520=特别时光 520 大头贴 */
+export type ChibiStudioSlotId = 'room' | 'vr' | 'like520';
+
+export interface ChibiStudioSlot {
+    /** 捏人器导出的完整 state（选件+换色+翻转…），再编辑时经 init.savedState 整套还原 */
+    state?: any;
+    /**
+     * 透明 PNG dataURL 兜底展示图。room/vr 的形象本体以各 App 自己的字段为准
+     * （sprites.chibi / vrState.chibi.img）；like520 未通关时靠这里展示 + 预填活动捏人器。
+     */
+    img?: string;
+    updatedAt?: number;
+}
+
+/**
+ * QQ捏人工坊：统一管理一只角色在三处的 Q 版形象，可各捏各的、也可一键同步。
+ * 图片本体写进各 App 自己的消费字段，这里主要存「再编辑用的完整 state」。
+ */
+export interface ChibiStudioData {
+    room?: ChibiStudioSlot;
+    vr?: ChibiStudioSlot;
+    like520?: ChibiStudioSlot;
 }
 
 // --- BANK / SHOP GAME TYPES (NEW) ---
@@ -1936,6 +2082,8 @@ export interface CharacterProfile {
   description: string;
   systemPrompt: string;
   worldview?: string;
+  /** 角色分组：指向 CharacterGroup.id；空或指向已删分组 = 未分组。仅本地组织用，不随角色卡导出 */
+  groupId?: string;
   memories: MemoryFragment[];
   refinedMemories?: Record<string, string>;
   activeMemoryMonths?: string[];
@@ -1948,6 +2096,11 @@ export interface CharacterProfile {
   impression?: UserImpression;
 
   bubbleStyle?: string;
+  /** 聊天细节微调的角色级覆盖（聊天内「＋」→「聊天装扮」）。
+   *  enabled=true 时已定义的字段逐个覆盖全局 OSTheme 同名设置，未定义的字段继续跟随全局；
+   *  enabled 为 false/undefined 或整个字段缺省 = 完全跟随全局（现状零变化）。
+   *  属美化类本地偏好：随完整备份走，但角色卡分享时剥离（见 utils/characterCard.ts）。 */
+  chatFineTune?: ChatFineTuneOverride;
   chatBackground?: string;
   contextLimit?: number;
   hideSystemLogs?: boolean; 
@@ -1966,6 +2119,9 @@ export interface CharacterProfile {
 
   savedDateState?: DateState;
   specialMomentRecords?: Record<string, SpecialMomentRecord>;
+
+  /** QQ捏人工坊（神经链接）：三处 Q 版形象的捏人器 state 与 520 兜底图，见 ChibiStudioData */
+  chibiStudio?: ChibiStudioData;
 
   // 小红书 per-character toggle
   xhsEnabled?: boolean;
@@ -2043,6 +2199,16 @@ export interface CharacterProfile {
   // 关掉后见面场景不再注入时间，让剧情脱离现实时间线。独立开关。
   dateTimeAwarenessEnabled?: boolean;
 
+  // ─── 生活记录注入（档案 App「生活记录」→ 聊天提示词，per-character）───
+  // 总开关：默认关（opt-in）。开启后才注入「用户生活记录」section（潜意识背景约束 +
+  // 各模块今日摘要 + [[LIFE:...]] 代记指令说明）。关闭时连指令说明都不给角色看。
+  lifeRecordEnabled?: boolean;
+  // 小开关：默认开（!== false 即开），受总开关统辖；分别控制对应模块的数据摘要与代记指令。
+  lifeRecordPeriodEnabled?: boolean;    // 生理期
+  lifeRecordMedEnabled?: boolean;       // 药盒
+  lifeRecordExpenseEnabled?: boolean;   // 记账（打通银行 bank_transactions）
+  lifeRecordExerciseEnabled?: boolean;  // 锻炼
+
   // Chat & Date voice TTS settings
   chatVoiceEnabled?: boolean;
   chatVoiceLang?: string;
@@ -2096,9 +2262,11 @@ export interface CharacterProfile {
   personalityStyle?: 'emotional' | 'narrative' | 'imagery' | 'analytical';
   ruminationTendency?: number;  // 反刍倾向 0-1，默认 0.3
   memoryPalaceInjection?: string;  // 记忆宫殿检索结果，注入到 System Prompt（运行时填充，不持久化）
+  roomPlatesInjection?: string;    // 房间门牌（常驻语义层），注入到 System Prompt（运行时填充，来源 room_plates 表）
 
-  // 自我领悟词条：消化过程中 self_room 反刍产生的常驻认知
-  // 像情绪 buff 一样注入到 contextBuilder 的角色设定下方
+  // 自我领悟词条【已冻结，只读遗留】：旧版消化把 self_room 领悟追加到这里，
+  // 只进不出、无上限、无合并。新领悟的归宿已改为 self_room 门牌（room_plates），
+  // 此字段不再增长；存量仍照常注入 contextBuilder，避免老角色突然"失忆"。
   selfInsights?: string[];
 
   // 音乐人格 — 角色自己的网易云式歌单 / 品味 / 正在听
@@ -2153,9 +2321,17 @@ export interface CharacterProfile {
    * - 'echo' (default)：暗紫底 + 暖金描边「回响」二次元卡牌
    * - 'whisper'：米色羊皮纸「心声」轻盈版
    * - 'minimal'：无装饰单色简洁版
+   * - 'ink'：宣纸底墨色 + 朱印「墨迹」水墨卷轴
+   * - 'neon'：深蓝紫底 + 青光扫描线「脑域」赛博终端
+   * - 'terminal'：黑底绿字等宽「内核」日志
+   * - 'stellar'：深空蓝缀星「星语」夜航
+   * - 'tama'：粉壳液晶点阵「心宠」拓麻歌子
+   * - 'pixel'：JRPG 白粗框硬影「任务」像素对话框
+   * - 'muji'：暖灰米白「独白」性冷淡留白
+   * - 'ins'：白卡软影「碎碎念」feed 风
    * - 'custom'：使用 thinkingChainCustomColors 给的配色
    */
-  thinkingChainStyle?: 'echo' | 'whisper' | 'minimal' | 'custom';
+  thinkingChainStyle?: 'echo' | 'whisper' | 'minimal' | 'ink' | 'neon' | 'terminal' | 'stellar' | 'tama' | 'pixel' | 'muji' | 'ins' | 'custom';
   /** 自定义风格用的配色组（仅 thinkingChainStyle === 'custom' 生效） */
   thinkingChainCustomColors?: {
     bg?: string;       // 卡片背景
@@ -2164,6 +2340,12 @@ export interface CharacterProfile {
   };
   /** 用户追加的思考提示词（不替换原生，只在最后追加一段「用户额外要求」） */
   thinkingChainCustomPrompt?: string;
+  /**
+   * 心象卡片的自定义 CSS（叠加在任意风格之上，机制同气泡工坊 customCss）。
+   * 选择器限定以 .sully-psyche 开头（子元素类：-card / -title / -preview / -body），
+   * 由 Chat.tsx 原样 <style> 注入。
+   */
+  thinkingChainCustomCss?: string;
 
   /**
    * 虚拟世界「彼方」的个人状态：是否自主登入、登入间隔、各本小说的独立书签等。
@@ -2172,20 +2354,81 @@ export interface CharacterProfile {
   vrState?: VRWorldCharState;
 }
 
+/**
+ * 角色分组（神经链接里的"文件夹"）：纯组织用途，解决角色太多时选择列表过长的问题。
+ * 注意与下面的 GroupProfile（群聊）无关——角色通过 CharacterProfile.groupId 指向分组，
+ * 删除分组只会让组内角色回到「未分组」，不会删角色。
+ */
+export interface CharacterGroup {
+    id: string;
+    name: string;
+    /** 排序权重（暂未在 UI 暴露，缺省按 createdAt 先后） */
+    order?: number;
+    createdAt?: number;
+}
+
 export interface GroupProfile {
     id: string;
     name: string;
     members: string[];
     avatar?: string;
     createdAt: number;
+    /** 群聊公共话题盒：由热区以前的群消息总结而成，所有成员共享、可编辑/删除。 */
+    topicBoxes?: GroupTopicBox[];
+    /** 公共话题盒已覆盖到的最后一条群消息 ID；仅用于防止重复成盒，不与任何角色私聊水位混用。 */
+    archivedThroughMessageId?: number;
+    /** 公共话题盒整理模式：auto 满阈值自动成盒；manual 只累计，用户手动触发。默认 auto。 */
+    topicArchiveMode?: 'auto' | 'manual';
     /**
      * 私聊里"近期群活动"上下文从这个群最多取最后多少条消息。
      * 不设默认 80。设大点能让活跃群更完整，设小点节省 token、避免某个活跃群把其他群挤掉。
      */
     privateContextCap?: number;
+    /**
+     * 群提示词里每个成员"私聊+群聊合并时间线"的条数上限（合并排序后取末 N 条）。
+     * 不设默认 40。这条时间线是角色群聊表现与私聊感情衔接的关键上下文。
+     */
+    memberTimelineCap?: number;
+    /**
+     * 群回复生成模式：director = 一次调用生成整轮（默认，快、省 token）；
+     * roundRobin = 每位成员单独调用一次 API，按成员顺序逐个发言（更真实、防串号，token ≈ 成员数倍）。
+     */
+    replyMode?: 'director' | 'roundRobin';
+    /**
+     * 成员独立气泡：true = 每位成员的气泡用其私聊 bubbleStyle 主题的 AI 侧；
+     * false/undefined = 全员统一（现状白色）。
+     */
+    memberBubbleIndependent?: boolean;
+    /** 用户在本群的气泡主题 id（预设或 customThemes，取 user 侧）；undefined = 现状紫色 */
+    userBubbleThemeId?: string;
+    /** 群聊白框自定义 CSS（.sully-chat-* 钩子），与私聊 char.chromeCustomCss 同机制 */
+    chromeCustomCss?: string;
+    /** 群提示音（未绑定白框时的独立存储）；绑定时以 chromeCustomCss 里的 @sully-sound 注释为准 */
+    chatSound?: { src: string; volume?: number };
+    /** 提示音是否绑定进白框 CSS（跟着白框分享码走） */
+    chatSoundBound?: boolean;
+    /** HTML 模块模式：开启后角色可输出 [html] 卡片 */
+    htmlModeEnabled?: boolean;
+    /** HTML 模式自定义提示词（追加在内置提示词之后） */
+    htmlModeCustomPrompt?: string;
 }
 
-export interface CharacterExportData extends Omit<CharacterProfile, 'id' | 'memories' | 'refinedMemories' | 'activeMemoryMonths' | 'impression'> {
+export interface GroupTopicBox {
+    id: string;
+    groupId: string;
+    title: string;
+    summary: string;
+    sourceStartMessageId: number;
+    sourceEndMessageId: number;
+    messageCount: number;
+    participants: string[];
+    /** 成盒当时收到私聊卡片的成员；成员之后退群，编辑/删除仍能同步其旧卡片。 */
+    deliveredMemberIds?: string[];
+    createdAt: number;
+    updatedAt: number;
+}
+
+export interface CharacterExportData extends Omit<CharacterProfile, 'id' | 'memories' | 'refinedMemories' | 'activeMemoryMonths' | 'impression' | 'groupId'> {
     version: number;
     type: 'sully_character_card';
     embeddedTheme?: ChatTheme;
@@ -2195,6 +2438,10 @@ export interface UserProfile {
     name: string;
     avatar: string;
     bio: string;
+    /** 分角色聊天头像（档案 App 设置）：charId → 头像（http(s) URL 或 data:image）。
+     *  私聊里「你」的头像取 perCharAvatars[charId] || avatar（上面的整体头像作宏观默认）；
+     *  群聊/其他场合仍用整体头像。删角色留下的孤儿键无害，读取端永远按当前 charId 取。 */
+    perCharAvatars?: Record<string, string>;
     /**
      * 用户本人接入「彼方」的状态：捏的 chibi、此刻所在房间、在干嘛。可随时改。
      * enabled=false（登出）时，聊天里给角色的"用户在彼方"提示词随之消失。
@@ -2514,6 +2761,82 @@ export interface TrackerEntry {
     updatedAt: number;
 }
 
+// ─── 生活记录（档案 App「生活记录」：生理期 / 药盒 / 记账 / 锻炼）───
+// 注意：内部标识用 LifeRecord，避开 PersonaSim 已占用的「生活记录 simLogs」概念。
+// 记账模块不独立存储——直接读写 BankApp 的 bank_transactions；角色代记的支出
+// 会额外落一条 module='expense' 的 LifeRecord（带 bankTxId）以支撑卡片确认/否决回滚。
+
+export type LifeRecordModule = 'period' | 'med' | 'expense' | 'exercise';
+
+export interface LifeRecord {
+    id: string;
+    module: LifeRecordModule;
+    /** period: 'start' | 'end'；med: 'taken'；expense: 'expense'；exercise: 'session' */
+    kind: string;
+    date: string;              // YYYY-MM-DD（事件归属日）
+    timestamp: number;
+    /**
+     * med:      { name, planId?, time? }
+     * expense:  { amount, note }（真实流水在 bank_transactions，此处仅镜像展示用）
+     * exercise: { activity, duration?, note? }
+     * period:   {}
+     */
+    payload: Record<string, any>;
+    /** 'user' = 用户在档案 App 手动记录；否则为代记角色的 charId */
+    recordedBy: string;
+    recordedByName?: string;
+    /**
+     * 卡片复核状态（仅角色代记的记录有意义；用户手记直接 'confirmed'）：
+     * active = 默认生效（用户未点卡片）；confirmed = 用户点了确认；
+     * rejected = 用户否决，不再计入注入摘要，且欠该角色一条反馈。
+     */
+    reviewStatus: 'active' | 'confirmed' | 'rejected';
+    /** 否决后待注入给代记角色的一次性反馈标记，注入后清除 */
+    pendingFeedback?: boolean;
+    /** expense 专用：对应 bank_transactions 里的流水 id（否决时回滚删除） */
+    bankTxId?: string;
+    note?: string;
+}
+
+/**
+ * 药盒「计划」：像设长期闹钟一样只写一次，每天按频率派生"今日待服"
+ * （打卡产生 module='med' 的 LifeRecord）。
+ * - planKind 'longterm'：长期在服（保健品等），无期限；
+ * - planKind 'course'：短期疗程，startDate ~ endDate 之间才生效。
+ * - intervalDays：服药频率，1=每天（默认）、2=每隔一天、3=每三天…
+ *   锚点日取 startDate（无则取创建当天），按天数差取模判断今天是否该吃。
+ * 旧数据无这些字段 → 视为长期 + 每天，行为与旧版一致。
+ */
+export interface MedPlan {
+    id: string;
+    name: string;              // 药名
+    time: string;              // HH:MM
+    dosage?: string;           // 剂量（"1粒" / "5mg"）
+    note?: string;
+    enabled: boolean;
+    createdAt: number;
+    planKind?: 'longterm' | 'course';
+    intervalDays?: number;     // 默认 1（每天）
+    startDate?: string;        // YYYY-MM-DD（course 必填；也作为 interval 锚点）
+    endDate?: string;          // YYYY-MM-DD（course 专用，含当天）
+}
+
+/** 生活记录全局设置（单例 id='main'） */
+export interface LifeRecordSettings {
+    id: string;                // 'main'
+    cycleLength?: number;      // 平均周期天数，默认 28
+    periodLength?: number;     // 平均经期天数，默认 5
+    /**
+     * 全局隐藏的模块（长按模块页签 →「是否不需要这个功能？」）。
+     * 隐藏 = 前端不再显示 + 对所有角色断掉该模块注入与代记（优先级高于角色小开关）。
+     */
+    hiddenModules?: LifeRecordModule[];
+    /** 锻炼周计划：每周目标次数（角色会据此监督执行） */
+    exerciseWeeklyGoal?: number;
+    /** 锻炼周计划：文字规划（如"周一跑步 / 周四力量"），会注入给角色 */
+    exercisePlanNote?: string;
+}
+
 export interface HandbookEntry {
     id: string;               // = date 'YYYY-MM-DD'
     date: string;
@@ -2704,7 +3027,7 @@ export interface GameSession {
     lastPlayedAt: number;
 }
 
-export type MessageType = 'text' | 'image' | 'emoji' | 'interaction' | 'transfer' | 'system' | 'social_card' | 'chat_forward' | 'xhs_card' | 'score_card' | 'music_card' | 'mcd_card' | 'luckin_card' | 'html_card' | 'news_card' | 'vr_card' | 'trpg_card' | 'world_card' | 'sim_card' | 'phone_card' | 'webpage_card' | 'theater_card';
+export type MessageType = 'text' | 'image' | 'emoji' | 'interaction' | 'transfer' | 'system' | 'social_card' | 'chat_forward' | 'xhs_card' | 'score_card' | 'music_card' | 'mcd_card' | 'luckin_card' | 'html_card' | 'news_card' | 'vr_card' | 'trpg_card' | 'novel_card' | 'world_card' | 'sim_card' | 'phone_card' | 'webpage_card' | 'theater_card' | 'room_card' | 'life_card' | 'group_topic_card';
 
 export interface Message {
     id: number;
@@ -2749,7 +3072,8 @@ export interface FullBackupData {
     customIcons?: Record<string, string>;
     appearancePresets?: AppearancePreset[];
     characters?: CharacterProfile[];
-    groups?: GroupProfile[]; 
+    characterGroups?: CharacterGroup[];
+    groups?: GroupProfile[];
     messages?: Message[];
     customThemes?: ChatTheme[];
     savedEmojis?: Emoji[]; 
@@ -2783,9 +3107,12 @@ export interface FullBackupData {
     worlds?: WorldProfile[];                   // 家园·世界定义
     worldEpisodes?: WorldEpisode[];            // 家园·演绎历史
     vrPostOffice?: Record<string, string>;     // 邮局本机配置：身份 deviceId / 后端地址（存 localStorage）
+    vrSignal?: Record<string, string>;         // 信号坠落处本机记录：句子归属「你·角色」+ 反复用清单（存 localStorage）
     worldHomeLocal?: Record<string, string>;   // 家园本机配置：全局 API + 文风收藏（存 localStorage）
     luckinLocal?: Record<string, string>;      // 瑞幸：token + 启用状态（存 localStorage）
     mcdLocal?: Record<string, string>;         // 麦当劳：token + 启用状态（存 localStorage）
+    mcpLocal?: Record<string, string>;         // 通用 MCP：用户自配的服务器列表（存 localStorage）
+    desktopSkinLocal?: Record<string, string>; // 桌面皮肤偏好：电子宠物/手游风的界面配色 + 看板 banner（存 localStorage；看板图令牌导出时解析为 data URL）
     songs?: SongSheet[]; // Songwriting app data
     
     // Bank Data
@@ -2844,6 +3171,8 @@ export interface FullBackupData {
     topicBoxes?: any[];
     anticipations?: any[];
     eventBoxes?: any[];
+    roomPlates?: any[];      // 房间门牌（情景→语义固化层）
+    digestReports?: any[];   // 消化日志（每角色最近 30 条）
     memoryPalaceHighWaterMarks?: Record<string, number>; // charId → lastProcessedMsgId
     memoryPalaceFlags?: Record<string, string>; // mp_personality_tried_* / mp_first_archive_notice_* 等 UI 标记
     cloudBackupConfig?: CloudBackupConfig;
@@ -2858,6 +3187,11 @@ export interface FullBackupData {
     // 手账 Tracker（健康/生活打卡引擎）
     trackers?: Tracker[];
     trackerEntries?: TrackerEntry[];
+
+    // 生活记录（档案 App：生理期 / 药盒 / 锻炼；记账走 bankTransactions）
+    lifeRecords?: LifeRecord[];
+    medPlans?: MedPlan[];
+    lifeRecordSettings?: LifeRecordSettings[];
 
     // Memory Palace 批次处理元数据
     memoryBatches?: any[];
@@ -2887,6 +3221,7 @@ export interface FullBackupData {
     eventNotifFlags?: Record<string, string>;  // sullyos_* 事件通知标记
     hotNewsSnapshots?: HotNewsSnapshot[];
     dreamCollection?: Record<string, { firstAt: number; count: number }>;  // 梦境盲盒收藏册（os_dream_collection，账号级 localStorage）
+    gotchiAccentHue?: string;  // 桌面电子宠物主题主色调偏好（tama_accent_hue，账号级 localStorage）
 }
 
 // --- CLOUD BACKUP TYPES ---

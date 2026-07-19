@@ -194,7 +194,7 @@ async function callCompressionLLM(
                     stream: false,
                 }),
             },
-            2, 0, { appName: '记忆宫殿', purpose: '事件压缩' }
+            2, 120_000, { appName: '记忆宫殿', purpose: '事件压缩' }
         );
 
         const reply = data.choices?.[0]?.message?.content || '';
@@ -277,7 +277,7 @@ async function recompressSummary(
                     stream: false,
                 }),
             },
-            2, 0, { appName: '记忆宫殿', purpose: '事件压缩-二次压缩' }
+            2, 90_000, { appName: '记忆宫殿', purpose: '事件压缩-二次压缩' }
         );
         const reply = (data.choices?.[0]?.message?.content || '').trim();
         // 模型偶尔仍会裹 ``` 代码块，剥掉常见包裹
@@ -395,6 +395,21 @@ async function compressEventBox(
     await EventBoxDB.save(box);
 
     console.log(`✅ [Compression] ${box.id} → summary ${result.content.length}字 "${result.content.slice(0, 30)}…"，已归档 ${liveIds.length} 条${box.sealed ? '，已封盒' : ''}`);
+
+    // 9. 门牌增量合并：盒子的结论落到有门牌的房间时，顺手沉淀进该房间的门牌。
+    //    封盒的沉淀物就是语义事实——这是"情景→语义"固化的即时触发点。
+    try {
+        const { isPlateRoom, updatePlateFromBoxSummary } = await import('./roomPlates');
+        if (isPlateRoom(summaryNode.room)) {
+            await updatePlateFromBoxSummary(
+                box.charId, summaryNode.room, summaryNode.content,
+                llmConfig, charName, userName,
+            );
+        }
+    } catch (e: any) {
+        console.warn(`🚪 [Compression] 门牌增量合并失败（不影响压缩结果）: ${e?.message || e}`);
+    }
+
     return true;
 }
 

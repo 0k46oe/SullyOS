@@ -49,6 +49,30 @@ export function isDeadPushEndpoint(endpoint: string | null | undefined): boolean
 }
 
 /**
+ * Web Push 三件套能力检测: Service Worker / PushManager / Notification。
+ * 全齐返回 null; 缺任何一个返回可直接展示给用户的原因文案。
+ *
+ * 为什么要细分: X浏览器 / Via 这类 WebView 壳浏览器常见「SW 能注册成功但没有
+ * PushManager / Notification」(2026-07 用户实测: 诊断里 sw: active、notif:
+ * unsupported, 却被报"不支持 Service Worker") —— 笼统文案会把用户引去查 SW /
+ * 重装 PWA, 实际是内核没有 Web Push 能力, 只能换浏览器。Notification 也必须
+ * 在这里查掉: 只查 PushManager 的话, 后续 `Notification.permission` 在没有该
+ * API 的环境会直接 ReferenceError。
+ */
+export function describePushCapabilityGap(): string | null {
+  const swSupported = typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
+  const pushSupported = typeof window !== 'undefined' && 'PushManager' in window;
+  const notifSupported = typeof Notification !== 'undefined';
+  if (swSupported && pushSupported && notifSupported) return null;
+  const missing = [
+    !swSupported ? 'Service Worker' : '',
+    !pushSupported ? 'Push API' : '',
+    !notifSupported ? '系统通知接口 (Notification)' : '',
+  ].filter(Boolean).join('、');
+  return `当前浏览器缺少 ${missing}，内核没有网页推送能力（X浏览器 / Via 等 WebView 壳浏览器的通病）—— 请换 Chrome / Edge / Firefox 等完整内核浏览器`;
+}
+
+/**
  * Translate the browser's raw subscribe() rejection into a Chinese,
  * end-user-actionable hint.  The common cases on Android phones without
  * Google Play Services (or in third-party Chromium-based browsers that

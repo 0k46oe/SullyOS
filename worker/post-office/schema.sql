@@ -69,3 +69,50 @@ CREATE TABLE IF NOT EXISTS po_ratelimit (
   count    INTEGER NOT NULL,
   reset_at INTEGER NOT NULL
 );
+
+-- ════════ 信号坠落处 / 跨用户接龙诗 ════════
+-- 复用本后端的匿名 device / 笔名 / 限流；走独立的 po_* 表。
+
+-- 册子：容器 + 规格（多少首诗 / 每首句数 roll 区间 / 每句字数上限）
+CREATE TABLE IF NOT EXISTS po_booklets (
+  id             TEXT    PRIMARY KEY,
+  title          TEXT    NOT NULL,
+  subtitle       TEXT,
+  theme          TEXT,
+  poems_target   INTEGER NOT NULL,             -- 写满多少首算这本完成
+  poem_count     INTEGER NOT NULL DEFAULT 0,   -- 已封存诗数（实算回填）
+  lines_min      INTEGER NOT NULL,             -- 每首句数 roll 下限
+  lines_max      INTEGER NOT NULL,             -- 上限
+  chars_per_line INTEGER NOT NULL,             -- 每句字数上限
+  status         TEXT    NOT NULL DEFAULT 'open', -- open / done
+  created_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_po_booklets_open ON po_booklets(status, created_at);
+
+-- 诗：一首接龙诗（line_count 由 po_poem_lines 实算回填，避免并发自增漂移）
+CREATE TABLE IF NOT EXISTS po_poems (
+  id           TEXT    PRIMARY KEY,
+  booklet_id   TEXT    NOT NULL,
+  title        TEXT    NOT NULL,
+  target_lines INTEGER NOT NULL,               -- roll 到的篇幅（总句数）
+  line_count   INTEGER NOT NULL DEFAULT 0,
+  status       TEXT    NOT NULL DEFAULT 'open', -- open / sealed
+  starter_pen  TEXT,                            -- 起新篇者笔名
+  created_at   INTEGER NOT NULL,
+  sealed_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_po_poems_booklet ON po_poems(booklet_id, status);
+CREATE INDEX IF NOT EXISTS idx_po_poems_sealed  ON po_poems(status, sealed_at);
+
+-- 句：(poem_id, seq) 唯一，并发抢同号时第二条 INSERT 失败 → 天然防错位
+CREATE TABLE IF NOT EXISTS po_poem_lines (
+  id         TEXT    PRIMARY KEY,
+  poem_id    TEXT    NOT NULL,
+  booklet_id TEXT    NOT NULL,
+  seq        INTEGER NOT NULL,                  -- 1-based 句号
+  device     TEXT    NOT NULL,                  -- 贡献者匿名 owner_id
+  pen        TEXT    NOT NULL,                  -- 笔名（马赛克后的角色名）
+  content    TEXT    NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_po_poem_lines_seq ON po_poem_lines(poem_id, seq);

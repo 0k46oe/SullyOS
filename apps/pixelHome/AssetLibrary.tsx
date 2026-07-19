@@ -308,7 +308,7 @@ const AssetLibrary: React.FC<Props> = ({ assets, onChanged, onSelectAsset, isSel
       </div>
 
       {/* 网格 */}
-      <div className="flex-1 overflow-y-auto px-3 pb-3 no-scrollbar">
+      <div className="flex-1 overflow-y-auto px-3 no-scrollbar" style={{ paddingBottom: 'calc(0.75rem + var(--safe-bottom, 0px))' }}>
         <div className="grid grid-cols-3 gap-2">
           {filtered.map(asset => {
             const isSelected = selectedIds.has(asset.id);

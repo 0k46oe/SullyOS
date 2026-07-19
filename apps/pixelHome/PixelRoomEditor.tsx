@@ -836,7 +836,10 @@ const PixelRoomEditor: React.FC<Props> = ({ charId, charName, charSprite, userNa
       </div>
 
       {/* 底部工具栏 */}
-      <div className="shrink-0 bg-slate-800/95 backdrop-blur-sm border-t border-slate-700/50 px-3 py-2 max-h-[50%] overflow-y-auto no-scrollbar">
+      <div
+        className="shrink-0 bg-slate-800/95 backdrop-blur-sm border-t border-slate-700/50 px-3 pt-2 max-h-[50%] overflow-y-auto no-scrollbar"
+        style={{ paddingBottom: 'calc(0.5rem + var(--safe-bottom, 0px))' }}
+      >
         <div className="flex items-center justify-between mb-2">
           <div className="flex gap-1">
             <ModeBtn label="浏览" active={mode === 'view'} onClick={() => { setMode('view'); setSelectedSlot(null); }} />

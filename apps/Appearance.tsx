@@ -3,9 +3,11 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useOS, DEFAULT_WALLPAPER } from '../context/OSContext';
 import { OSTheme, DesktopDecoration, AppearancePreset, Toast } from '../types';
 import { INSTALLED_APPS, Icons } from '../constants';
-import { processImage } from '../utils/file';
+import { processImage, processImageToBlob } from '../utils/file';
+import { putImageBlob } from '../utils/blobRef';
 import { DB } from '../utils/db';
 import { isStatusBarHidden } from '../utils/iosStandalone';
+import { confirmExportSafety } from '../utils/exportGuard';
 import { Sparkle } from '@phosphor-icons/react';
 import { ChatAppearanceEditor as ModularChatAppearanceEditor } from '../components/appearance/ChatAppearanceEditor';
 import { Capacitor } from '@capacitor/core';
@@ -87,58 +89,14 @@ const CATEGORY_LABELS: Record<string, { code: string; label: string }> = {
   'badges': { code: '1f3f7', label: 'Badges' },
 };
 
-// --- Chat Appearance Editor Component ---
-const AVATAR_SHAPES: { value: 'circle' | 'rounded' | 'square'; label: string; preview: string }[] = [
-    { value: 'circle', label: '圆形', preview: 'rounded-full' },
-    { value: 'rounded', label: '圆角', preview: 'rounded-xl' },
-    { value: 'square', label: '方形', preview: 'rounded-none' },
-];
-const AVATAR_SIZES: { value: 'small' | 'medium' | 'large'; label: string; size: string }[] = [
-    { value: 'small', label: '小', size: 'w-7 h-7' },
-    { value: 'medium', label: '中', size: 'w-9 h-9' },
-    { value: 'large', label: '大', size: 'w-12 h-12' },
-];
-const BUBBLE_STYLES: { value: 'modern' | 'flat' | 'outline' | 'shadow'; label: string; desc: string }[] = [
-    { value: 'modern', label: '现代', desc: '圆角气泡+微透明' },
-    { value: 'flat', label: '扁平', desc: '无阴影纯色气泡' },
-    { value: 'outline', label: '描边', desc: '边框线条风格' },
-    { value: 'shadow', label: '立体', desc: '深阴影立体效果' },
-];
-const MSG_SPACINGS: { value: 'compact' | 'default' | 'spacious'; label: string }[] = [
-    { value: 'compact', label: '紧凑' },
-    { value: 'default', label: '默认' },
-    { value: 'spacious', label: '宽松' },
-];
-const HEADER_STYLES: { value: 'default' | 'minimal' | 'gradient'; label: string; desc: string }[] = [
-    { value: 'default', label: '默认', desc: '标准头部' },
-    { value: 'minimal', label: '简约', desc: '仅显示名字' },
-    { value: 'gradient', label: '渐变', desc: '渐变色头部' },
-];
-const INPUT_STYLES: { value: 'default' | 'rounded' | 'flat'; label: string }[] = [
-    { value: 'default', label: '默认' },
-    { value: 'rounded', label: '圆角' },
-    { value: 'flat', label: '扁平' },
-];
-const TIMESTAMP_OPTIONS: { value: 'always' | 'hover' | 'never'; label: string }[] = [
-    { value: 'always', label: '始终显示' },
-    { value: 'hover', label: '悬停显示' },
-    { value: 'never', label: '不显示' },
-];
-
-// Chat Layout Presets (built-in combinations)
-const CHAT_LAYOUT_COMBOS: { name: string; desc: string; config: Partial<OSTheme> }[] = [
-    { name: '默认', desc: '标准聊天界面', config: { chatAvatarShape: 'circle', chatAvatarSize: 'medium', chatBubbleStyle: 'modern', chatMessageSpacing: 'default', chatHeaderStyle: 'default', chatInputStyle: 'default', chatShowTimestamp: 'hover' } },
-    { name: 'QQ风格', desc: '圆角头像+紧凑间距', config: { chatAvatarShape: 'rounded', chatAvatarSize: 'medium', chatBubbleStyle: 'shadow', chatMessageSpacing: 'compact', chatHeaderStyle: 'gradient', chatInputStyle: 'rounded', chatShowTimestamp: 'hover' } },
-    { name: '微信风格', desc: '方形头像+扁平气泡', config: { chatAvatarShape: 'square', chatAvatarSize: 'medium', chatBubbleStyle: 'flat', chatMessageSpacing: 'default', chatHeaderStyle: 'default', chatInputStyle: 'flat', chatShowTimestamp: 'hover' } },
-    { name: 'iMessage', desc: '大圆头像+宽松气泡', config: { chatAvatarShape: 'circle', chatAvatarSize: 'large', chatBubbleStyle: 'modern', chatMessageSpacing: 'spacious', chatHeaderStyle: 'minimal', chatInputStyle: 'rounded', chatShowTimestamp: 'always' } },
-    { name: '简约模式', desc: '小头像+最简界面', config: { chatAvatarShape: 'circle', chatAvatarSize: 'small', chatBubbleStyle: 'flat', chatMessageSpacing: 'compact', chatHeaderStyle: 'minimal', chatInputStyle: 'flat', chatShowTimestamp: 'never' } },
-];
 
 // --- 桌面整机风格（皮肤）---
 // 动森壁纸：NookPhone 同款奶油底（#F8F4E8），底部极淡草色透气。纯 CSS 渐变，让彩色图标平铺更跳。
 const ACNH_WALLPAPER = 'linear-gradient(180deg, #F8F4E8 0%, #F3EFDD 58%, #E6EECE 100%)';
 // 手游主题壁纸：近白底 + 极淡薰衣草/粉光晕（照搬原创参考图，整体偏白不发紫）。
 const MOBILEGAME_WALLPAPER = 'radial-gradient(95% 55% at 85% 0%, #fdeef7 0%, transparent 50%), radial-gradient(85% 55% at 6% 10%, #f6f2fc 0%, transparent 55%), linear-gradient(180deg, #fdfbff 0%, #f9f6fd 55%, #f4f0fa 100%)';
+// 电子宠物主题壁纸：薰衣草奶油（照抄参考稿——柔紫底衬奶油卡片与紫描边）。
+const TAMAGOTCHI_WALLPAPER = 'radial-gradient(85% 50% at 80% 0%, #e6dcf8 0%, transparent 55%), radial-gradient(75% 45% at 12% 10%, #f4edfb 0%, transparent 55%), linear-gradient(180deg, #ded4f4 0%, #d6cbf0 55%, #cfc3ec 100%)';
 
 const DESKTOP_SKINS: { id: string; name: string; desc: string; swatch: string; config: Partial<OSTheme> }[] = [
   {
@@ -155,7 +113,7 @@ const DESKTOP_SKINS: { id: string; name: string; desc: string; swatch: string; c
       chatBubbleStyle: 'modern', chatMessageSpacing: 'spacious',
       chatHeaderStyle: 'default', chatInputStyle: 'rounded',
       chatChromeStyle: 'soft', chatBackgroundStyle: 'paper',
-      chatShowTimestamp: 'hover',
+      chatShowTimestamp: 'always',
     },
   },
   {
@@ -172,7 +130,24 @@ const DESKTOP_SKINS: { id: string; name: string; desc: string; swatch: string; c
       chatBubbleStyle: 'modern', chatMessageSpacing: 'default',
       chatHeaderStyle: 'gradient', chatInputStyle: 'rounded',
       chatChromeStyle: 'soft', chatBackgroundStyle: 'paper',
-      chatShowTimestamp: 'hover',
+      chatShowTimestamp: 'always',
+    },
+  },
+  {
+    id: 'tamagotchi',
+    name: '电子宠物 · 小小窝',
+    desc: '桌面就是一台养成机 · 角色住在自己的小屋里 · 薰衣草奶油',
+    swatch: 'linear-gradient(135deg,#ded4f4 0%,#fdf9f2 52%,#f2a7bb 100%)',
+    config: {
+      skin: 'tamagotchi',
+      hue: 258, saturation: 42, lightness: 66,
+      contentColor: '#7a6cb8',
+      wallpaper: TAMAGOTCHI_WALLPAPER,
+      chatAvatarShape: 'rounded', chatAvatarSize: 'medium',
+      chatBubbleStyle: 'modern', chatMessageSpacing: 'default',
+      chatHeaderStyle: 'default', chatInputStyle: 'rounded',
+      chatChromeStyle: 'soft', chatBackgroundStyle: 'paper',
+      chatShowTimestamp: 'always',
     },
   },
   {
@@ -219,156 +194,6 @@ const buildAcnhLeaves = (): DesktopDecoration[] => ACNH_LEAF_LAYOUT.map((p, i) =
   zIndex: 5 + i, flip: p.flip,
 }));
 
-const ChatAppearanceEditor: React.FC<{ theme: OSTheme; updateTheme: (u: Partial<OSTheme>) => void }> = ({ theme, updateTheme }) => {
-    const avatarShape = theme.chatAvatarShape || 'circle';
-    const avatarSize = theme.chatAvatarSize || 'medium';
-    const bubbleStyle = theme.chatBubbleStyle || 'modern';
-    const msgSpacing = theme.chatMessageSpacing || 'default';
-    const headerStyle = theme.chatHeaderStyle || 'default';
-    const inputStyle = theme.chatInputStyle || 'default';
-    const showTimestamp = theme.chatShowTimestamp || 'hover';
-
-    const OptionButton: React.FC<{ active: boolean; label: string; desc?: string; onClick: () => void }> = ({ active, label, desc, onClick }) => (
-        <button onClick={onClick}
-            className={`px-3 py-2 text-[11px] font-bold rounded-xl border transition-all active:scale-95 ${active ? 'bg-primary/10 text-primary border-primary/30 ring-1 ring-primary/20' : 'bg-white text-slate-500 border-slate-200 hover:border-slate-300'}`}>
-            <div>{label}</div>
-            {desc && <div className="text-[9px] font-normal mt-0.5 opacity-70">{desc}</div>}
-        </button>
-    );
-
-    return (
-        <div className="space-y-5">
-            {/* Quick Combo Presets */}
-            <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-                <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-3">快速风格</h2>
-                <p className="text-[10px] text-slate-400 mb-3">一键切换聊天界面风格组合，包含头像、气泡、间距等全套配置。</p>
-                <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
-                    {CHAT_LAYOUT_COMBOS.map(combo => (
-                        <button key={combo.name} onClick={() => updateTheme(combo.config)}
-                            className="shrink-0 px-4 py-2.5 bg-slate-50 rounded-xl border border-slate-200 hover:border-primary/40 active:scale-95 transition-all text-left">
-                            <div className="text-xs font-bold text-slate-700">{combo.name}</div>
-                            <div className="text-[9px] text-slate-400 mt-0.5">{combo.desc}</div>
-                        </button>
-                    ))}
-                </div>
-            </section>
-
-            {/* Live Preview */}
-            <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-                <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-3">预览</h2>
-                <div className="bg-slate-50 rounded-2xl border border-slate-100 overflow-hidden">
-                    {/* Fake header */}
-                    <div className={`px-4 py-3 flex items-center gap-3 border-b border-slate-100 ${headerStyle === 'gradient' ? 'bg-gradient-to-r from-primary/20 to-primary/5' : headerStyle === 'minimal' ? 'bg-white' : 'bg-slate-50'}`}>
-                        <div className={`${AVATAR_SIZES.find(s => s.value === avatarSize)?.size || 'w-9 h-9'} ${AVATAR_SHAPES.find(s => s.value === avatarShape)?.preview || 'rounded-full'} bg-primary/20 shrink-0`} />
-                        <div>
-                            <div className="text-xs font-bold text-slate-700">角色名</div>
-                            {headerStyle !== 'minimal' && <div className="text-[9px] text-slate-400">在线</div>}
-                        </div>
-                    </div>
-                    {/* Fake messages */}
-                    <div className={`p-3 space-y-${msgSpacing === 'compact' ? '1' : msgSpacing === 'spacious' ? '4' : '2'}`}>
-                        {/* AI message */}
-                        <div className="flex gap-2 items-end">
-                            <div className={`${AVATAR_SIZES.find(s => s.value === avatarSize)?.size || 'w-9 h-9'} ${AVATAR_SHAPES.find(s => s.value === avatarShape)?.preview || 'rounded-full'} bg-pink-200 shrink-0`} />
-                            <div className={`px-3 py-2 text-[11px] max-w-[65%] ${bubbleStyle === 'outline' ? 'bg-transparent border-2 border-slate-300 rounded-2xl rounded-bl-sm' : bubbleStyle === 'shadow' ? 'bg-white shadow-md rounded-2xl rounded-bl-sm' : bubbleStyle === 'flat' ? 'bg-slate-100 rounded-2xl rounded-bl-sm' : 'bg-white/90 backdrop-blur-sm rounded-2xl rounded-bl-sm shadow-sm'}`}>
-                                你好呀，今天过得怎么样？
-                                {showTimestamp === 'always' && <div className="text-[8px] text-slate-300 mt-1 text-right">14:32</div>}
-                            </div>
-                        </div>
-                        {/* User message */}
-                        <div className="flex gap-2 items-end justify-end">
-                            <div className={`px-3 py-2 text-[11px] text-white max-w-[65%] ${bubbleStyle === 'outline' ? 'bg-transparent border-2 border-primary text-primary rounded-2xl rounded-br-sm' : bubbleStyle === 'shadow' ? 'bg-primary shadow-md rounded-2xl rounded-br-sm' : bubbleStyle === 'flat' ? 'bg-primary rounded-2xl rounded-br-sm' : 'bg-primary/90 backdrop-blur-sm rounded-2xl rounded-br-sm shadow-sm'}`}
-                                style={bubbleStyle === 'outline' ? { color: `hsl(${theme.hue}, ${theme.saturation}%, ${theme.lightness}%)` } : undefined}>
-                                挺好的，今天天气不错！
-                                {showTimestamp === 'always' && <div className={`text-[8px] mt-1 text-right ${bubbleStyle === 'outline' ? 'opacity-50' : 'text-white/60'}`}>14:33</div>}
-                            </div>
-                            <div className={`${AVATAR_SIZES.find(s => s.value === avatarSize)?.size || 'w-9 h-9'} ${AVATAR_SHAPES.find(s => s.value === avatarShape)?.preview || 'rounded-full'} bg-primary/30 shrink-0`} />
-                        </div>
-                    </div>
-                    {/* Fake input */}
-                    <div className={`px-3 py-2 border-t border-slate-100 ${inputStyle === 'flat' ? 'bg-slate-50' : 'bg-white'}`}>
-                        <div className={`bg-slate-100 px-4 py-2 text-[10px] text-slate-400 ${inputStyle === 'rounded' ? 'rounded-full' : inputStyle === 'flat' ? 'rounded-none border-b border-slate-200 bg-transparent' : 'rounded-xl'}`}>输入消息...</div>
-                    </div>
-                </div>
-            </section>
-
-            {/* Avatar Shape */}
-            <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-                <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-3">头像形状</h2>
-                <div className="flex gap-2">
-                    {AVATAR_SHAPES.map(s => (
-                        <OptionButton key={s.value} active={avatarShape === s.value} label={s.label} onClick={() => updateTheme({ chatAvatarShape: s.value })} />
-                    ))}
-                </div>
-            </section>
-
-            {/* Avatar Size */}
-            <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-                <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-3">头像大小</h2>
-                <div className="flex gap-2">
-                    {AVATAR_SIZES.map(s => (
-                        <OptionButton key={s.value} active={avatarSize === s.value} label={s.label} onClick={() => updateTheme({ chatAvatarSize: s.value })} />
-                    ))}
-                </div>
-            </section>
-
-            {/* Bubble Style */}
-            <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-                <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-3">气泡风格</h2>
-                <div className="flex gap-2 flex-wrap">
-                    {BUBBLE_STYLES.map(s => (
-                        <OptionButton key={s.value} active={bubbleStyle === s.value} label={s.label} desc={s.desc} onClick={() => updateTheme({ chatBubbleStyle: s.value })} />
-                    ))}
-                </div>
-            </section>
-
-            {/* Message Spacing */}
-            <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-                <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-3">消息间距</h2>
-                <div className="flex gap-2">
-                    {MSG_SPACINGS.map(s => (
-                        <OptionButton key={s.value} active={msgSpacing === s.value} label={s.label} onClick={() => updateTheme({ chatMessageSpacing: s.value })} />
-                    ))}
-                </div>
-            </section>
-
-            {/* Header Style */}
-            <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-                <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-3">聊天头部</h2>
-                <div className="flex gap-2 flex-wrap">
-                    {HEADER_STYLES.map(s => (
-                        <OptionButton key={s.value} active={headerStyle === s.value} label={s.label} desc={s.desc} onClick={() => updateTheme({ chatHeaderStyle: s.value })} />
-                    ))}
-                </div>
-            </section>
-
-            {/* Input Style */}
-            <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-                <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-3">输入框样式</h2>
-                <div className="flex gap-2">
-                    {INPUT_STYLES.map(s => (
-                        <OptionButton key={s.value} active={inputStyle === s.value} label={s.label} onClick={() => updateTheme({ chatInputStyle: s.value })} />
-                    ))}
-                </div>
-            </section>
-
-            {/* Timestamp Display */}
-            <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-                <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-3">时间戳显示</h2>
-                <div className="flex gap-2">
-                    {TIMESTAMP_OPTIONS.map(s => (
-                        <OptionButton key={s.value} active={showTimestamp === s.value} label={s.label} onClick={() => updateTheme({ chatShowTimestamp: s.value })} />
-                    ))}
-                </div>
-            </section>
-
-            <div className="text-[10px] text-slate-400 text-center px-4 pb-4">
-                聊天界面设置全局生效。单个角色的气泡颜色、背景图等可在聊天内的「捏主题」中自定义。
-            </div>
-        </div>
-    );
-};
-
 // --- Preset Manager Component ---
 interface PresetManagerProps {
     presets: AppearancePreset[];
@@ -410,8 +235,10 @@ const PresetManager: React.FC<PresetManagerProps> = ({ presets, onSave, onApply,
 
     const handleExport = async (id: string) => {
         try {
-            const blob = await onExport(id);
             const preset = presets.find(p => p.id === id);
+            // 导出前明文密钥体检 + 二次确认（外观预设正常不含密钥 → 提示「安全，可分享」）。
+            if (!(await confirmExportSafety(preset))) return;
+            const blob = await onExport(id);
             const fileName = `appearance_${preset?.name || 'preset'}.zip`;
             const title = `外观预设 - ${preset?.name || 'preset'}`;
 
@@ -646,7 +473,7 @@ const PresetManager: React.FC<PresetManagerProps> = ({ presets, onSave, onApply,
 };
 
 const Appearance: React.FC = () => {
-  const { theme, updateTheme, closeApp, setCustomIcon, customIcons, addToast, appearancePresets, saveAppearancePreset, applyAppearancePreset, deleteAppearancePreset, renameAppearancePreset, exportAppearancePreset, importAppearancePreset, resetAppearance, characters, updateCharacter } = useOS();
+  const { theme, updateTheme, closeApp, openApp, setCustomIcon, customIcons, addToast, appearancePresets, saveAppearancePreset, applyAppearancePreset, deleteAppearancePreset, renameAppearancePreset, exportAppearancePreset, importAppearancePreset, resetAppearance, characters, updateCharacter } = useOS();
   // 一键还原全部「聊天白框自定义 CSS」：清掉全局 + 每个角色自带的。
   // 兼作救援：单角色的坏 CSS 把聊天界面整崩、进不去该角色设置时，从这里一键全清即可恢复。
   const resetAllChromeCss = () => {
@@ -757,9 +584,10 @@ const Appearance: React.FC = () => {
   const handleWallpaperUpload = async (file: File) => {
       try {
           addToast('正在处理壁纸 (原画质)...', 'info');
-          // Use skipCompression to keep original quality
-          const dataUrl = await processImage(file, { skipCompression: true });
-          updateTheme({ wallpaper: dataUrl });
+          // 改存 Blob：原画质不重绘，二进制进 blob_assets，字段只存 blobref 令牌（省 ~33% 空间、不占 JS 堆）。
+          const blob = await processImageToBlob(file, { skipCompression: true });
+          const ref = await putImageBlob(blob);
+          updateTheme({ wallpaper: ref });
           addToast('壁纸更新成功', 'success');
       } catch (e: any) {
           addToast(e.message, 'error');
@@ -1524,7 +1352,7 @@ const Appearance: React.FC = () => {
                 currentTheme={theme}
             />
         ) : activeTab === 'chat' ? (
-            <ModularChatAppearanceEditor theme={theme} updateTheme={updateTheme} onResetAllChrome={resetAllChromeCss} />
+            <ModularChatAppearanceEditor theme={theme} updateTheme={updateTheme} onResetAllChrome={resetAllChromeCss} onOpenApp={openApp} />
         ) : null}
       </div>
     </div>

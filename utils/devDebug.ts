@@ -40,6 +40,12 @@ export interface DevDebugFlags {
     skipPromptBuild: boolean;
     skipEmotionEval: boolean;
     /**
+     * 把聊天请求里的多条 role:system 合并成开头一条再发送（utils/systemMessageMerge.ts）。
+     * 排查逆向中转对「历史后 system」重复拼接导致 prompt_tokens 膨胀的兼容问题；
+     * 会削弱易变尾段的 recency 注入并破坏前缀缓存，仅作临时 A/B 对照用。
+     */
+    mergeSystemMessages: boolean;
+    /**
      * 日志总开关：关掉时无论勾了哪些类别都不抓，默认关。
      * 跟 captureLogs 配合——是否抓 = captureEnabled && captureLogs.includes(category)。
      */
@@ -81,6 +87,7 @@ const DEV_DEBUG_AVAILABILITY_EVENT = 'sullyos-dev-debug-availability';
 export const DEFAULT_DEV_DEBUG_FLAGS: DevDebugFlags = {
     skipPromptBuild: false,
     skipEmotionEval: false,
+    mergeSystemMessages: false,
     captureEnabled: false,
     captureLogs: [],
     exposeLogDetail: false,
@@ -133,6 +140,7 @@ function normalizeFlags(value: unknown): DevDebugFlags {
     return {
         skipPromptBuild: source.skipPromptBuild === true,
         skipEmotionEval: source.skipEmotionEval === true,
+        mergeSystemMessages: source.mergeSystemMessages === true,
         captureEnabled: source.captureEnabled === true || legacyHasCapture,
         captureLogs,
         exposeLogDetail: source.exposeLogDetail === true,
@@ -251,6 +259,10 @@ export function isPromptBuildSkipped(): boolean {
 
 export function isEmotionEvalSkipped(): boolean {
     return readDevDebugFlags().skipEmotionEval;
+}
+
+export function isSystemMessageMergeEnabled(): boolean {
+    return readDevDebugFlags().mergeSystemMessages;
 }
 
 export function isCaptureEnabled(category: DevDebugCaptureCategory): boolean {
@@ -421,6 +433,10 @@ export interface DevDebugHttpLogInput {
     error?: unknown;
     /** 本次请求从发起到成功 / 报错的耗时 ms（重试场景 = 最后一次 attempt 的耗时）。 */
     durationMs?: number;
+    /** 响应头到达耗时 ms（≈排队 + 服务端开始响应）。与 durationMs 差值 = 收响应体耗时。 */
+    headersMs?: number;
+    /** 第一段正文增量到达耗时 ms（真 TTFT，仅流式响应有）。大头在这 = prefill/排队慢；durationMs-firstDeltaMs 大 = 生成慢。 */
+    firstDeltaMs?: number;
 }
 
 /** 请求体字符数：messages 折叠后日志里看不出请求多大，这个数字补上「体积」维度。 */
@@ -445,6 +461,8 @@ function appendDevDebugHttpLog(category: DevDebugCaptureCategory, input: DevDebu
             method: input.method,
             status: input.status,
             durationMs: input.durationMs,
+            headersMs: input.headersMs,
+            firstDeltaMs: input.firstDeltaMs,
             requestChars: measureRequestChars(input.requestBody),
             request: parseRequestBody(input.requestBody),
             response: input.response,

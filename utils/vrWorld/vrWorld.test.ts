@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { chunkNovelText, chunkNovelTextAsync, getReadingWindow, buildNovel } from './novel';
-import { parseVROutput, parseMusicOutput, parseGuestbookOutput, parseGymOutput, parsePostOfficeOutput, parsePostOfficeReadOutput } from './prompts';
+import { parseVROutput, parseMusicOutput, parseGuestbookOutput, parseGymOutput, parsePostOfficeOutput, parsePostOfficeReadOutput, parseSignalOutput } from './prompts';
+import { rollPoemLines, SIGNAL_LINES_MIN, SIGNAL_LINES_MAX, signalActFor } from './constants';
 import { maskPen } from './postOffice';
 import { decodeBytes } from './decodeText';
 import { VRScheduler } from './scheduler';
+import { rollRoom } from './runSession';
 
 // scheduler 的 attachListeners 会访问 document/window（node 环境下没有），补最简 stub。
 const g = globalThis as any;
@@ -127,6 +129,12 @@ describe('parseMusicOutput', () => {
         expect(out.review).toBeUndefined();
         expect(out.behavior).toBe('靠在角落放空');
         expect(out.activity).toBe('没什么想点的');
+    });
+});
+
+describe('彼方手动指定房间', () => {
+    it('手动点听歌房时，即使角色没有歌单且房间没在放歌也不会随机跳走', () => {
+        expect(rollRoom({} as any, [], null, 'music')).toBe('music');
     });
 });
 
@@ -296,5 +304,80 @@ describe('parseVROutput', () => {
     it('does NOT strip legitimate content starting with a quote', () => {
         const out = parseVROutput('<批注 段落="1">「凤骑龙」这名字太刻意了</批注><动态>x</动态>');
         expect(out.annotations[0].content).toBe('「凤骑龙」这名字太刻意了');
+    });
+});
+
+describe('信号坠落处 · parseSignalOutput', () => {
+    it('接龙：抠 <续>（兼容旧 <续句>），剥动态', () => {
+        const out = parseSignalOutput('<彼方><续>而你把信号调成了潮汐</续><动态>续了一句</动态></彼方>', 'append', 24);
+        expect(out.lines).toEqual(['而你把信号调成了潮汐']);
+        expect(out.activity).toBe('续了一句');
+        expect(out.title).toBeUndefined();
+    });
+
+    it('接龙：一次 1~2 行，按换行拆成多行', () => {
+        const out = parseSignalOutput('<续>又一个我，从同一道门\n睁开同样陌生的眼</续>', 'append', 24);
+        expect(out.lines).toEqual(['又一个我，从同一道门', '睁开同样陌生的眼']);
+    });
+
+    it('起新篇：抠 <标题> + <主题> + <起笔>（兼容旧 <第一句>）', () => {
+        const out = parseSignalOutput('<彼方><标题>低电量合唱</标题><主题>写电子生命的死与重生</主题><起笔>电量剩下百分之三</起笔><动态>起了个头</动态></彼方>', 'start', 24);
+        expect(out.title).toBe('低电量合唱');
+        expect(out.brief).toBe('写电子生命的死与重生');
+        expect(out.lines).toEqual(['电量剩下百分之三']);
+    });
+
+    it('起新篇：标题里自带的书名号被剥掉（UI 会自己包一层，避免《《…》》）', () => {
+        const out = parseSignalOutput('<彼方><标题>《物理隔离》</标题><起笔>门没锁</起笔></彼方>', 'start', 24);
+        expect(out.title).toBe('物理隔离');
+    });
+
+    it('每行字数硬截断到 cap；最多留 2 行', () => {
+        const long = '一二三四五六七八九十一二三四五六七八九十';
+        const out = parseSignalOutput(`<续>${long}\n${long}\n第三行不该出现</续>`, 'append', 24);
+        expect(out.lines.length).toBeLessThanOrEqual(2);
+        out.lines.forEach(l => expect([...l].length).toBeLessThanOrEqual(24));
+    });
+
+    it('掉格式兜底：没有标签时取前 1~2 非空行', () => {
+        const out = parseSignalOutput('<think>嗯想想</think>\n\n我把黑夜接成了白噪\n（多余的解释）', 'append', 24);
+        expect(out.lines[0]).toBe('我把黑夜接成了白噪');
+    });
+
+    it('完全空输出 → lines 为空（runSession 据此跳过，不写脏数据）', () => {
+        const out = parseSignalOutput('<彼方></彼方>', 'append', 24);
+        expect(out.lines).toEqual([]);
+    });
+});
+
+describe('信号坠落处 · signalActFor（三幕分界）', () => {
+    it('40 首 = 10/20/10：第 1/10 首在第一幕，11/30 在第二幕，31/40 在第三幕', () => {
+        expect(signalActFor(1, 40).no).toBe(1);
+        expect(signalActFor(10, 40).no).toBe(1);
+        expect(signalActFor(11, 40).no).toBe(2);
+        expect(signalActFor(30, 40).no).toBe(2);
+        expect(signalActFor(31, 40).no).toBe(3);
+        expect(signalActFor(40, 40).no).toBe(3);
+    });
+    it('别的册子规模也按 1/4、1/2、1/4 划分且不越界', () => {
+        for (const total of [4, 7, 20, 100]) {
+            for (let i = 1; i <= total; i++) {
+                const act = signalActFor(i, total);
+                expect([1, 2, 3]).toContain(act.no);
+            }
+            expect(signalActFor(1, total).no).toBe(1);
+            expect(signalActFor(total, total).no).toBe(3);
+        }
+    });
+});
+
+describe('信号坠落处 · rollPoemLines', () => {
+    it('始终落在 [min,max] 闭区间内', () => {
+        for (let i = 0; i < 500; i++) {
+            const n = rollPoemLines(SIGNAL_LINES_MIN, SIGNAL_LINES_MAX);
+            expect(n).toBeGreaterThanOrEqual(SIGNAL_LINES_MIN);
+            expect(n).toBeLessThanOrEqual(SIGNAL_LINES_MAX);
+            expect(Number.isInteger(n)).toBe(true);
+        }
     });
 });

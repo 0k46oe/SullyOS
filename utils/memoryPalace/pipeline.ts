@@ -19,6 +19,7 @@
 
 import type { Message } from '../../types';
 import type { EmbeddingConfig, PersonalityStyle, RemoteVectorConfig, ScoredMemory } from './types';
+import { countUnprocessedBufferMessages } from './bufferCount';
 
 /** 从 localStorage 读取远程向量配置（避免在每个调用点都传参） */
 function getRemoteVectorConfig(): RemoteVectorConfig | undefined {
@@ -71,6 +72,7 @@ import { rerankDocuments } from './rerank';
 import { MemoryNodeDB, MemoryVectorDB, MemoryLinkDB, AnticipationDB } from './db';
 import { DB } from '../db';
 import { isMessageSemanticallyRelevant, formatMessageForPrompt } from '../messageFormat';
+import { sanitizeQuerySourceMessages } from './querySanitizer';
 
 // ─── 轻量 LLM 配置类型 ───────────────────────────────
 
@@ -311,6 +313,7 @@ export async function retrieveMemories(
     queryOverride?: string,
     userName?: string,
     remoteVectorConfig?: RemoteVectorConfig,
+    charName?: string,
 ): Promise<string> {
     // ── 分段计时：定位 memoryPalace 到底是网络慢还是计算慢 ──
     // tag: NET = 远端 API RTT；IDB = IndexedDB 读写；CPU = 纯本地计算
@@ -337,7 +340,13 @@ export async function retrieveMemories(
         //
         //    context query：assistant 回复 + 更早 user 消息 + queryOverride。
         //                  （背景话题延续，分数 × 0.5 折扣，不会压过 user 意图）
-        const { userIntent, contextTurns, fallbackAll } = splitLastTurnQueries(recentMessages);
+        //
+        //    query 源清洗（querySanitizer）：图片/表情包/语音不进 query——
+        //    图片 content 是几万字符的 base64 data URI，URL_RE 剥不掉，
+        //    切进 spike/rerank/context 会把 Embedding 批量请求顶爆
+        //    （硅基流动 400 code 20015）。卡片类翻成可读文本再参与检索。
+        const querySourceMessages = sanitizeQuerySourceMessages(recentMessages, charName, userName);
+        const { userIntent, contextTurns, fallbackAll } = splitLastTurnQueries(querySourceMessages);
 
         // 抽取每条有意义的 user 消息作为独立 spike + 二次拆分子 spike
         //
@@ -928,7 +937,7 @@ function getEmbeddingConfig(charEmbeddingConfig?: any): EmbeddingConfig | null {
 }
 
 export async function injectMemoryPalace(
-    char: { memoryPalaceEnabled?: boolean; embeddingConfig?: any; activeBuffs?: any[]; personalityStyle?: string; ruminationTendency?: number; id: string; memoryPalaceInjection?: string },
+    char: { memoryPalaceEnabled?: boolean; embeddingConfig?: any; activeBuffs?: any[]; personalityStyle?: string; ruminationTendency?: number; id: string; name?: string; memoryPalaceInjection?: string; roomPlatesInjection?: string },
     recentMessages?: Message[],
     queryHint?: string,
     userName?: string,
@@ -946,6 +955,16 @@ export async function injectMemoryPalace(
         if (!resolvedUserName) {
             try { resolvedUserName = (await DB.getUserProfile())?.name || undefined; } catch {}
         }
+
+        // 门牌（常驻语义层）：纯 IDB 读 + 格式化，不调 LLM。
+        // 无条件赋值（包括 ''）—— 门牌被清空/删除后，persist 过的旧注入必须被冲掉。
+        try {
+            const { buildRoomPlatesInjection } = await import('./roomPlates');
+            char.roomPlatesInjection = await buildRoomPlatesInjection(char.id, resolvedUserName);
+        } catch {
+            char.roomPlatesInjection = '';
+        }
+
         const context = await retrieveMemories(
             msgs, char.id, embeddingConfig,
             currentMood,
@@ -954,6 +973,7 @@ export async function injectMemoryPalace(
             queryHint,
             resolvedUserName,
             getRemoteVectorConfig(),
+            char.name,
         );
         if (context) {
             char.memoryPalaceInjection = context;
@@ -1139,17 +1159,8 @@ const PROCESS_RATIO = 0.85;
  */
 export async function getMemoryPalaceUnprocessedBufferCount(charId: string): Promise<number> {
     const allMessages = await DB.getMessagesByCharId(charId, true);
-    const semantic = allMessages
-        .filter(m => isMessageSemanticallyRelevant(m))
-        .sort((a, b) => a.id - b.id);
-    if (semantic.length <= HOT_ZONE_SIZE) return 0;
-    const hotZoneStartId = semantic[semantic.length - HOT_ZONE_SIZE].id;
-    const hwm = getLastProcessedId(charId);
-    let count = 0;
-    for (const m of semantic) {
-        if (m.id > hwm && m.id < hotZoneStartId) count++;
-    }
-    return count;
+    const semantic = allMessages.filter(m => isMessageSemanticallyRelevant(m));
+    return countUnprocessedBufferMessages(semantic, getLastProcessedId(charId), HOT_ZONE_SIZE);
 }
 
 /** 并发锁：防止多次 AI 回复同时触发 processNewMessages 产生竞态 */

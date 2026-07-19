@@ -197,6 +197,7 @@ const DevDebugPanel: React.FC = () => {
     const activeCount = useMemo(
         () => (flags.skipPromptBuild ? 1 : 0)
             + (flags.skipEmotionEval ? 1 : 0)
+            + (flags.mergeSystemMessages ? 1 : 0)
             // 「在录」= 总开关开 且 至少勾了一类——否则浮球红点会骗人「在录」其实 isCaptureEnabled
             // 任何类别都返 false。
             + (flags.captureEnabled && flags.captureLogs.length > 0 ? 1 : 0)
@@ -395,6 +396,13 @@ const DevDebugPanel: React.FC = () => {
                             detail="主回复仍照常发送，但不启动本地或 Instant Push 的 emotion eval。"
                             checked={flags.skipEmotionEval}
                             onChange={(checked) => updateFlag('skipEmotionEval', checked)}
+                        />
+                        <div className="h-px bg-white/10" />
+                        <ToggleRow
+                            title="合并 system 为一条"
+                            detail="排查中转对多条 system 的计量/兼容问题；开着会让前缀缓存失效。"
+                            checked={flags.mergeSystemMessages}
+                            onChange={(checked) => updateFlag('mergeSystemMessages', checked)}
                         />
                         <div className="h-px bg-white/10" />
 

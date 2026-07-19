@@ -2,20 +2,27 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { CharacterProfile, Message, DateState } from '../types';
+import { CharacterProfile, Message, DateState, AppID } from '../types';
 import { DatePrompts, ApiMessage } from '../utils/datePrompts';
 import { processNewMessages, mergePalaceFragmentsIntoMemories, getMemoryPalaceHighWaterMark } from '../utils/memoryPalace/pipeline';
 import type { PipelineResult } from '../utils/memoryPalace/pipeline';
 import { incrementDigestRound, runCognitiveDigestion } from '../utils/memoryPalace';
 import { getRoomLabel } from '../utils/memoryPalace/types';
-import { safeResponseJson } from '../utils/safeApi';
+import { safeResponseJson, extractContent } from '../utils/safeApi';
 import Modal from '../components/os/Modal';
 import DateSession from '../components/date/DateSession';
 import DateSettings from '../components/date/DateSettings';
+import { armDateResumeAttempt, clearDateResumeAttempt, takeCrashedDateResume } from '../utils/dateSessionRecovery';
 import { BookOpen, Sparkle, CaretLeft, GearSix } from '@phosphor-icons/react';
+import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 
 const DateApp: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, setActiveCharacterId, apiConfig, addToast, updateCharacter, virtualTime, userProfile, memoryPalaceConfig } = useOS();
+    const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, apiConfig, addToast, updateCharacter, virtualTime, userProfile, memoryPalaceConfig, dateAutoStartCharId, consumeDateAutoStart, characterGroups } = useOS();
+
+    // 是否由聊天「见面」按钮进入：为真时，退出见面流程回到聊天而非见面选择页/桌面。
+    // 用本地 state（而非 context）承载：DateApp 切走即卸载，标记随之消失，不会泄漏到
+    // 之后从桌面直接打开的见面会话里。
+    const [cameFromChat, setCameFromChat] = useState(false);
 
     // 记忆宫殿（与聊天侧共用同一套上下文：同 charId、同高水位线）
     // 见面流也需要在 AI 回复后跑一次缓冲区检查 + 自动归档，否则只有"读"没有"写"。
@@ -40,6 +47,7 @@ const DateApp: React.FC = () => {
     const DATE_HISTORY_MESSAGE_LIMIT = 500;
     const pagerRef = useRef<HTMLDivElement>(null);
     const [selectPage, setSelectPage] = useState(0);
+    const [selectGroupId, setSelectGroupId] = useState(GROUP_FILTER_ALL); // 选择页的分组筛选
     const onPagerScroll = () => {
         const el = pagerRef.current;
         if (!el || el.clientWidth === 0) return;
@@ -106,9 +114,25 @@ const DateApp: React.FC = () => {
         }
     }, [char, mode]);
 
+    // 见面「继续上次」崩溃自愈：若上次恢复会话时把 iOS WebKit 内容进程撑崩了
+    // (表现为反复灰屏/白屏「此网页反复出现问题」，非可捕获的 JS 异常)，那份重快照
+    // 的哨兵会残留到本次进见面。这里检出后丢弃有毒的 savedDateState（仅清恢复快照，
+    // 消息历史不动），避免用户永久卡在闪退死循环里。只在 DateApp 挂载时跑一次。
+    useEffect(() => {
+        const crashedCharId = takeCrashedDateResume();
+        if (!crashedCharId) return;
+        const crashed = characters.find(c => c.id === crashedCharId);
+        if (crashed?.savedDateState) {
+            updateCharacter(crashedCharId, { savedDateState: undefined });
+            addToast('上次见面异常退出，已清理存档，可重新开始', 'info');
+        }
+    }, []); // 仅挂载时检查一次
+
     // --- Navigation Helpers ---
     const handleBack = () => {
         if (mode === 'peek') {
+            // 来自聊天：从感知页退出直接回聊天，不落在见面选择页
+            if (cameFromChat) { returnToChat(); return; }
             setMode('select');
             setPeekStatus('');
         } else if (mode === 'history') {
@@ -134,9 +158,13 @@ const DateApp: React.FC = () => {
                 stream: apiConfig.stream ?? false,
             })
         });
-        if (!response.ok) throw new Error('API Error');
+        if (!response.ok) throw new Error(`API Error ${response.status}`);
         const data = await safeResponseJson(response);
-        return data.choices[0].message.content;
+        // 思考型渠道会把正文塞进 reasoning_content、content 留空——直接取 content
+        // 会拿到空串且不报错：感知页黑屏卡死（无按钮可退），会话里则落库空消息。
+        const content = extractContent(data);
+        if (!content) throw new Error('模型返回了空回复，请重试或检查渠道/模型设置');
+        return content;
     };
 
     // --- Resume / Start Logic ---
@@ -148,8 +176,28 @@ const DateApp: React.FC = () => {
         }
     };
 
+    // 从聊天「见面」按钮跳进来：等同于在选择页点击该角色（有存档则弹继续/新开，否则直接感知）
+    // 并记住「来自聊天」，退出见面时回到聊天。
+    useEffect(() => {
+        if (!dateAutoStartCharId) return;
+        const target = characters.find(c => c.id === dateAutoStartCharId);
+        consumeDateAutoStart();
+        setCameFromChat(true);
+        if (target) handleCharClick(target);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [dateAutoStartCharId]);
+
+    // 退出见面流程：来自聊天则回聊天，否则回见面选择页/桌面（由调用方决定）
+    const returnToChat = () => {
+        setCameFromChat(false);
+        openApp(AppID.Chat);
+    };
+
     const handleResumeSession = () => {
         if (!pendingSessionChar) return;
+        // 恢复尝试开始前先武装崩溃哨兵：若这份重快照在 iOS 上把内容进程撑崩，
+        // 哨兵会残留到下次进见面被检出并清理（见挂载时的自愈 effect）。
+        armDateResumeAttempt(pendingSessionChar.id);
         setActiveCharacterId(pendingSessionChar.id);
         setMode('session');
         setPendingSessionChar(null);
@@ -158,6 +206,8 @@ const DateApp: React.FC = () => {
 
     const handleStartNewSession = () => {
         if (!pendingSessionChar) return;
+        // 新会话没有恢复快照可重放，撤销任何残留哨兵。
+        clearDateResumeAttempt();
         updateCharacter(pendingSessionChar.id, { savedDateState: undefined });
         startPeek(pendingSessionChar);
         setPendingSessionChar(null);
@@ -182,6 +232,9 @@ const DateApp: React.FC = () => {
                 setHasSavedOpening(true);
             } catch (e) {
                 console.error("Failed to save opening", e);
+                // 落库失败不能静默：开场白进不了 DB，阅读模式/见面记录会缺这次开场，
+                // 表现和「阅读模式播旧剧情」一样，让用户知道出了什么事
+                addToast('开场白保存失败，本次开场可能不会出现在阅读模式', 'error');
             }
         }
 
@@ -345,23 +398,39 @@ const DateApp: React.FC = () => {
 
     const handleReroll = async (): Promise<string> => {
         if (!char || dateMessages.length === 0) throw new Error("No context");
-        
+
         const lastMsg = dateMessages[dateMessages.length - 1];
         if (lastMsg.role !== 'assistant') throw new Error("Cannot reroll user message");
 
-        // 1. Delete last AI message
-        await DB.deleteMessage(lastMsg.id);
-        
-        // 2. Find the user input that triggered it
+        // Keep the old reply until the replacement request succeeds.
         const allMsgs = await DB.getRecentMessagesByCharId(char.id, getDateContextFetchLimit(char), true);
         const validMsgs = allMsgs.filter(m => m.id !== lastMsg.id);
+        const emojis = await DB.getEmojis();
+
+        // 重掷的是开场白（isOpening 锚点消息）：走感知同款 payload 重新生成开场。
+        // 不能走下面的普通 reroll 路径——开场白前面没有触发它的 user 消息。旧逻辑会
+        // 先删消息再报 "Context lost"（开场白被吞），即使上一条恰好是 user 侥幸续上，
+        // 新消息也不带 isOpening，阅读模式会从上一次见面的开场开始切片，表现为
+        // 「新见面只有立绘模式是新剧情，阅读模式全是旧剧情」。
+        if (lastMsg.metadata?.isOpening === true) {
+            const { messages } = DatePrompts.buildPeekPayload({ char, userProfile, allMsgs: validMsgs, emojis });
+            const content = await callLLM(messages, Math.max(apiConfig.temperature ?? 0.85, 0.9));
+            // 生成成功后才动库：先删旧开场、再带 isOpening 落新开场，请求失败时原剧情不丢
+            await DB.deleteMessage(lastMsg.id);
+            await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content, metadata: { source: 'date', isOpening: true } });
+            // 阅读模式空会话时顶部渲染的开场 & 退出快照里的 peekStatus 同步成新开场
+            setPeekStatus(content);
+
+            const freshMsgs = await DB.getMessagesByCharId(char.id, true);
+            setDateMessages(freshMsgs.filter(m => m.metadata?.source === 'date').sort((a,b) => a.timestamp - b.timestamp));
+            return content;
+        }
+
         const validDateMsgs = validMsgs.filter(m => m.metadata?.source === 'date');
         const lastUserMsg = validDateMsgs[validDateMsgs.length - 1];
-        
         if (!lastUserMsg || lastUserMsg.role !== 'user') throw new Error("Context lost");
 
-        // 3. Call API logic（与 handleSendMessage 共用 buildSessionPayload，只差 variant）
-        const emojis = await DB.getEmojis();
+        // Call API logic（与 handleSendMessage 共用 buildSessionPayload，只差 variant）
         const { messages } = await DatePrompts.buildSessionPayload({
             char,
             userProfile,
@@ -373,6 +442,8 @@ const DateApp: React.FC = () => {
         // Reroll 略调高温度求多样性，但绝不低于用户配置的基线。
         const content = await callLLM(messages, Math.max(apiConfig.temperature ?? 0.85, 0.9));
 
+        // 生成成功后才删旧回复：以前先删后调 API，请求一失败上一条剧情就永久消失
+        await DB.deleteMessage(lastMsg.id);
         await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: content, metadata: { source: 'date' } });
 
         // Sync
@@ -451,10 +522,14 @@ const DateApp: React.FC = () => {
     };
 
     const onExitSession = (finalState: DateState) => {
+        // 用户主动保存并退出 = 干净退出，撤销恢复哨兵。
+        clearDateResumeAttempt();
         if (char) {
             updateCharacter(char.id, { savedDateState: finalState });
             addToast('进度已保存', 'success');
         }
+        // 来自聊天：退出见面回聊天
+        if (cameFromChat) { returnToChat(); return; }
         setMode('select');
         setPeekStatus('');
         setHasSavedOpening(false);
@@ -520,115 +595,127 @@ const DateApp: React.FC = () => {
     // --- Render ---
 
     if (mode === 'select' || !char) {
-        // 6 个角色一页，横向翻页
+        // 6 个角色一页，横向翻页（先按分组筛选，再切页）
+        const selectChars = filterCharactersByGroup(characters, characterGroups, selectGroupId);
         const pages: CharacterProfile[][] = [];
-        for (let i = 0; i < characters.length; i += SELECT_PAGE_SIZE) pages.push(characters.slice(i, i + SELECT_PAGE_SIZE));
+        for (let i = 0; i < selectChars.length; i += SELECT_PAGE_SIZE) pages.push(selectChars.slice(i, i + SELECT_PAGE_SIZE));
         if (pages.length === 0) pages.push([]);
-        // 星点装饰（固定坐标，避免每帧抖动）
-        const stars = [
-            { top: '8%', left: '12%', s: 3, d: 0 }, { top: '14%', left: '82%', s: 2, d: 0.6 },
-            { top: '22%', left: '46%', s: 2, d: 1.2 }, { top: '30%', left: '8%', s: 2, d: 0.3 },
-            { top: '6%', left: '64%', s: 4, d: 0.9 }, { top: '40%', left: '90%', s: 2, d: 1.5 },
-            { top: '52%', left: '4%', s: 3, d: 0.2 }, { top: '60%', left: '72%', s: 2, d: 1.1 },
-            { top: '70%', left: '20%', s: 2, d: 0.7 }, { top: '78%', left: '88%', s: 3, d: 1.4 },
-            { top: '86%', left: '40%', s: 2, d: 0.5 }, { top: '12%', left: '34%', s: 2, d: 1.8 },
-            { top: '46%', left: '56%', s: 2, d: 0.4 }, { top: '64%', left: '48%', s: 3, d: 1.0 },
+        // 浅色主题（参考「小屋 · 小小窝」房间）：薰衣草浅背景 + 柔星点 + 衬线标题 + 罗盘环角色卡
+        const th = {
+            pageBg: 'linear-gradient(180deg,#efe9f7 0%,#f4eff9 45%,#f7f2fb 100%)',
+            stars: 'radial-gradient(1.5px 1.5px at 14% 16%,rgba(190,160,225,.45),transparent),radial-gradient(1px 1px at 80% 12%,rgba(220,190,235,.5),transparent),radial-gradient(1.5px 1.5px at 42% 28%,rgba(180,200,240,.4),transparent),radial-gradient(1px 1px at 86% 42%,rgba(200,175,230,.4),transparent),radial-gradient(1px 1px at 22% 66%,rgba(210,185,235,.35),transparent),radial-gradient(1px 1px at 66% 80%,rgba(200,210,240,.35),transparent)',
+            title: '#6a5790', titleShadow: 'rgba(170,150,220,.4)', line: 'rgba(150,120,190,.5)',
+            cardBorder: 'rgba(170,140,210,.3)', cardShadow: '0 8px 22px rgba(150,120,200,.18)',
+            inner: 'rgba(170,140,210,.22)', gem: 'rgba(190,160,220,.85)',
+            tick: 'rgba(170,140,210,.16)', halo: 'rgba(200,175,235,.3)',
+            ring1: 'rgba(180,150,215,.5)', ring2: 'rgba(180,150,215,.25)', avGlow: 'rgba(190,160,235,.4)',
+        };
+        // 每张卡片按序循环的柔色底——粉/薰衣草/浅蓝渐变（同小小窝浅色卡）
+        const CARD_TINTS = [
+            'linear-gradient(180deg,rgba(250,212,228,.85),rgba(242,228,246,.8))',
+            'linear-gradient(180deg,rgba(232,228,248,.85),rgba(242,238,250,.8))',
+            'linear-gradient(180deg,rgba(226,216,246,.85),rgba(238,230,249,.8))',
+            'linear-gradient(180deg,rgba(212,230,247,.85),rgba(234,240,250,.8))',
+            'linear-gradient(180deg,rgba(226,212,245,.85),rgba(238,228,249,.8))',
+            'linear-gradient(180deg,rgba(234,231,242,.88),rgba(242,240,247,.82))',
         ];
         return (
-            <div className="h-full w-full relative overflow-hidden flex flex-col font-light"
-                 style={{ background: 'linear-gradient(170deg,#241d4a 0%,#352c66 38%,#473b7e 68%,#5b4d94 100%)' }}>
-                {/* 星空装饰层 */}
-                <div className="pointer-events-none absolute inset-0 overflow-hidden">
-                    <div className="absolute -top-24 -right-20 w-72 h-72 rounded-full" style={{ background: 'radial-gradient(circle, rgba(190,170,255,0.25), transparent 70%)' }} />
-                    <div className="absolute top-1/3 -left-16 w-56 h-56 rounded-full" style={{ background: 'radial-gradient(circle, rgba(244,180,255,0.14), transparent 70%)' }} />
-                    {stars.map((st, i) => (
-                        <span key={i} className="absolute rounded-full bg-white animate-pulse"
-                              style={{ top: st.top, left: st.left, width: st.s, height: st.s, opacity: 0.5, animationDelay: `${st.d}s`, boxShadow: '0 0 6px rgba(255,255,255,0.8)' }} />
-                    ))}
-                    <Sparkle size={16} weight="fill" className="absolute top-[18%] left-[24%] text-violet-200/40" />
-                    <Sparkle size={12} weight="fill" className="absolute top-[55%] right-[16%] text-fuchsia-200/40" />
-                    <Sparkle size={14} weight="fill" className="absolute bottom-[10%] left-[14%] text-cyan-100/30" />
-                </div>
+            <div className="h-full w-full relative overflow-hidden flex flex-col font-light" style={{ background: th.pageBg }}>
+                {/* 柔星点氛围 */}
+                <div className="absolute inset-0 pointer-events-none opacity-70" style={{ backgroundImage: th.stars }} />
 
                 {/* 顶栏 + 标题 */}
-                <div className="relative z-10 shrink-0" style={{ paddingTop: 'var(--safe-top)' }}>
-                    <div className="flex items-center justify-between px-5 pt-3">
-                        <button onClick={closeApp} className="w-10 h-10 rounded-full bg-white/12 backdrop-blur-md border border-white/25 flex items-center justify-center text-white active:scale-90 transition-transform shadow-lg">
-                            <CaretLeft size={20} weight="bold" />
+                <div className="relative z-10 shrink-0" style={{ paddingTop: 'max(1.25rem, var(--safe-top))' }}>
+                    <div className="relative flex items-center justify-center px-5 pt-2">
+                        <button onClick={() => { if (cameFromChat) { returnToChat(); } else { closeApp(); } }}
+                                className="absolute left-4 w-9 h-9 rounded-full flex items-center justify-center active:scale-90 transition-all"
+                                style={{ color: '#8f7bb5', background: 'rgba(255,255,255,0.6)', boxShadow: '0 2px 8px rgba(150,120,200,0.15)' }}>
+                            <CaretLeft size={19} weight="bold" />
                         </button>
-                        <div className="w-10" />
+                        <div className="text-center">
+                            <h1 className="text-[26px] tracking-[0.14em]" style={{ fontFamily: `'Noto Serif SC',serif`, color: th.title, textShadow: `0 2px 18px ${th.titleShadow}` }}>选择见面对象</h1>
+                            <div className="flex items-center justify-center gap-2 mt-1.5">
+                                <span className="h-px w-10" style={{ background: `linear-gradient(90deg,transparent,${th.line})` }} />
+                                <span className="text-[9px] tracking-[0.4em] font-bold" style={{ color: 'rgba(150,120,190,0.75)' }}>✦ CHOOSE CHARACTER ✦</span>
+                                <span className="h-px w-10" style={{ background: `linear-gradient(270deg,transparent,${th.line})` }} />
+                            </div>
+                        </div>
                     </div>
-                    <div className="text-center mt-1 mb-3 px-6">
-                        <h1 className="text-[27px] font-bold text-white font-serif tracking-[0.12em] drop-shadow-[0_2px_14px_rgba(180,150,255,0.65)]">选择见面对象</h1>
-                        <div className="text-[9px] tracking-[0.5em] text-violet-200/60 mt-1.5">CHOOSE CHARACTER</div>
-                    </div>
+                    {/* 分组筛选（没建分组时不渲染）。切组后回到第一页 */}
+                    <CharacterGroupFilterBar characters={characters} groups={characterGroups} dark
+                        value={selectGroupId}
+                        onChange={(id) => { setSelectGroupId(id); setSelectPage(0); pagerRef.current?.scrollTo({ left: 0 }); }}
+                        className="px-4 mb-3" />
                 </div>
 
                 {/* 分页卡片区 */}
-                {characters.length === 0 ? (
-                    <div className="relative z-10 flex-1 flex flex-col items-center justify-center text-violet-200/60 gap-3">
+                {selectChars.length === 0 ? (
+                    <div className="relative z-10 flex-1 flex flex-col items-center justify-center gap-3" style={{ color: 'rgba(150,120,190,0.7)' }}>
                         <Sparkle size={40} weight="light" />
-                        <span className="text-xs tracking-wider">还没有可见面的角色</span>
+                        <span className="text-xs tracking-wider">{characters.length ? '该分组下没有角色' : '还没有可见面的角色'}</span>
                     </div>
                 ) : (
                     <div ref={pagerRef} onScroll={onPagerScroll}
                          className="relative z-10 flex-1 min-h-0 flex overflow-x-auto snap-x snap-mandatory no-scrollbar"
                          style={{ scrollSnapType: 'x mandatory' }}>
                         {pages.map((page, pi) => (
-                            <div key={pi} className="w-full shrink-0 snap-start h-full overflow-y-auto no-scrollbar px-4">
-                                <div className="grid grid-cols-2 gap-3.5 pb-6">
-                                    {page.map(c => (
+                            <div key={pi} className="w-full shrink-0 snap-start h-full overflow-y-auto no-scrollbar px-5 pt-4">
+                                <div className="grid grid-cols-2 gap-4 pb-6">
+                                    {page.map((c, idx) => {
+                                        const tint = CARD_TINTS[(pi * SELECT_PAGE_SIZE + idx) % CARD_TINTS.length];
+                                        return (
                                         <div key={c.id} onClick={() => handleCharClick(c)}
-                                             className="relative rounded-[26px] p-3 pt-4 flex flex-col items-center active:scale-95 transition-transform"
-                                             style={{
-                                                 background: 'linear-gradient(160deg, rgba(255,255,255,0.17), rgba(196,176,255,0.10))',
-                                                 border: '1px solid rgba(255,255,255,0.28)',
-                                                 boxShadow: '0 10px 26px rgba(50,32,96,0.32), inset 0 1px 0 rgba(255,255,255,0.45)',
-                                                 backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
-                                             }}>
+                                             className="group relative rounded-2xl px-3 pt-8 pb-5 flex flex-col items-center active:scale-95 transition-all overflow-hidden"
+                                             style={{ background: tint, border: `1px solid ${th.cardBorder}`, boxShadow: th.cardShadow }}>
+                                            {/* 内描框 + 四角宝石 */}
+                                            <div className="absolute inset-[7px] rounded-xl pointer-events-none" style={{ border: `1px solid ${th.inner}` }} />
+                                            <span className="absolute top-[10px] left-[10px] w-1.5 h-1.5 rotate-45" style={{ background: th.gem }} />
+                                            <span className="absolute top-[10px] right-[10px] w-1.5 h-1.5 rotate-45" style={{ background: th.gem }} />
+                                            <span className="absolute bottom-[10px] left-[10px] w-1.5 h-1.5 rotate-45" style={{ background: th.gem }} />
+                                            <span className="absolute bottom-[10px] right-[10px] w-1.5 h-1.5 rotate-45" style={{ background: th.gem }} />
                                             {/* 在线徽标 */}
-                                            <div className="absolute top-2.5 left-2.5 flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-400/20 border border-emerald-300/40 z-10">
+                                            <div className="absolute top-2.5 left-2.5 flex items-center gap-1 px-1.5 py-0.5 rounded-full z-10"
+                                                 style={{ background: 'rgba(255,255,255,0.8)', border: '1px solid rgba(120,200,160,0.4)', boxShadow: '0 1px 4px rgba(120,90,170,0.12)' }}>
                                                 <span className="relative flex h-1.5 w-1.5">
-                                                    <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-300 opacity-70 animate-ping" />
-                                                    <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400" />
+                                                    <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60 animate-ping" />
+                                                    <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500" />
                                                 </span>
-                                                <span className="text-[8px] font-bold text-emerald-50 tracking-wider">在线</span>
+                                                <span className="text-[8px] font-bold text-emerald-600 tracking-wider">在线</span>
                                             </div>
                                             {/* 设置 / 记录（竖排） */}
                                             <div className="absolute top-2 right-2 flex flex-col gap-1 z-20">
                                                 <button onClick={(e) => { e.stopPropagation(); openSettings(c); }} title="布置场景 / 设定立绘 / 观测"
-                                                        className="w-7 h-7 rounded-xl bg-white/85 text-violet-500 shadow-md flex items-center justify-center hover:bg-white active:scale-90 transition-all">
-                                                    <GearSix size={16} weight="fill" />
+                                                        className="w-7 h-7 rounded-lg text-purple-500 flex items-center justify-center active:scale-90 transition-all"
+                                                        style={{ background: 'rgba(255,255,255,0.88)', boxShadow: '0 1px 5px rgba(120,90,170,0.2)' }}>
+                                                    <GearSix size={15} weight="fill" />
                                                 </button>
                                                 <button onClick={(e) => { e.stopPropagation(); openHistory(c); }} title="见面记录"
-                                                        className="w-7 h-7 rounded-xl bg-white/85 text-violet-500 shadow-md flex items-center justify-center hover:bg-white active:scale-90 transition-all">
-                                                    <BookOpen size={16} weight="fill" />
+                                                        className="w-7 h-7 rounded-lg text-purple-500 flex items-center justify-center active:scale-90 transition-all"
+                                                        style={{ background: 'rgba(255,255,255,0.88)', boxShadow: '0 1px 5px rgba(120,90,170,0.2)' }}>
+                                                    <BookOpen size={15} weight="fill" />
                                                 </button>
                                             </div>
-                                            {/* 头像 + 光环 */}
-                                            <div className="relative mt-4 mb-2">
-                                                <div className="absolute -inset-1.5 rounded-full opacity-70" style={{ background: 'conic-gradient(from 120deg, #a78bfa, #f0abfc, #7dd3fc, #a78bfa)', filter: 'blur(6px)' }} />
-                                                <img src={c.avatar} className="relative w-[68px] h-[68px] rounded-full object-cover ring-2 ring-white/70 shadow-lg" />
+                                            {/* 头像 + 罗盘环 + 双层环 + 光晕 */}
+                                            <div className="relative w-[92px] h-[92px] flex items-center justify-center mt-1">
+                                                <div className="absolute w-[124px] h-[124px] rounded-full" style={{ background: `repeating-conic-gradient(from 0deg, ${th.tick} 0deg 2.4deg, transparent 2.4deg 9deg)`, WebkitMaskImage: 'radial-gradient(circle, transparent 40%, #000 44%, #000 50%, transparent 55%)', maskImage: 'radial-gradient(circle, transparent 40%, #000 44%, #000 50%, transparent 55%)' }} />
+                                                <div className="absolute w-[110px] h-[110px] rounded-full" style={{ background: `radial-gradient(circle, ${th.halo}, transparent 62%)` }} />
+                                                <div className="absolute inset-[8px] rounded-full" style={{ border: `1px solid ${th.ring1}` }} />
+                                                <div className="absolute inset-[12px] rounded-full" style={{ border: `1px solid ${th.ring2}` }} />
+                                                <div className="w-[70px] h-[70px] rounded-full overflow-hidden" style={{ boxShadow: `0 0 18px ${th.avGlow}` }}>
+                                                    <img src={c.avatar} className="w-full h-full object-cover" alt={c.name} />
+                                                </div>
                                                 {c.savedDateState && (
-                                                    <span title="有存档" className="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full bg-amber-400 border-2 border-white/90 flex items-center justify-center shadow">
-                                                        <Sparkle size={10} weight="fill" className="text-white" />
-                                                    </span>
+                                                    <div title="有存档" className="absolute bottom-0 right-1.5 w-[22px] h-[22px] rounded-full flex items-center justify-center" style={{ background: '#fbbf24', boxShadow: '0 1px 5px rgba(180,120,20,0.4)' }}>
+                                                        <Sparkle size={12} weight="fill" className="text-white" />
+                                                    </div>
                                                 )}
                                             </div>
-                                            {/* 名字 + 花纹 */}
-                                            <div className="flex items-center gap-1.5 max-w-full">
-                                                <span className="text-violet-200/60 text-[10px]">✦</span>
-                                                <span className="font-bold text-white text-[15px] truncate drop-shadow-[0_1px_4px_rgba(80,50,140,0.5)]">{c.name}</span>
-                                                <span className="text-violet-200/60 text-[10px]">✦</span>
-                                            </div>
-                                            {/* 一句话简介 */}
-                                            {c.description && (
-                                                <div className="mt-1.5 px-2.5 py-1 rounded-full bg-white/12 border border-white/15 max-w-full">
-                                                    <span className="block text-[10px] text-violet-50/80 truncate">{c.description}</span>
-                                                </div>
-                                            )}
+                                            {/* 名字 + 简介 */}
+                                            <span className="mt-3 text-[14px] font-semibold tracking-wide truncate max-w-full" style={{ color: '#4b3b6b', fontFamily: `'Noto Serif SC',serif` }}>{c.name}</span>
+                                            <span className="mt-0.5 text-[10px] truncate max-w-full" style={{ color: c.description ? 'rgba(120,95,160,0.78)' : 'rgba(150,130,185,0.6)' }}>{c.description || '走过去见 ta'}</span>
                                         </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             </div>
                         ))}
@@ -640,12 +727,13 @@ const DateApp: React.FC = () => {
                     <div className="relative z-10 shrink-0 flex justify-center items-center gap-2 py-3">
                         {pages.map((_, pi) => (
                             <button key={pi} onClick={() => goSelectPage(pi)} aria-label={`第 ${pi + 1} 页`}
-                                    className={`h-2 rounded-full transition-all ${pi === selectPage ? 'w-6 bg-white' : 'w-2 bg-white/40 hover:bg-white/60'}`} />
+                                    className="h-2 rounded-full transition-all"
+                                    style={{ width: pi === selectPage ? 24 : 8, background: pi === selectPage ? '#a78bd6' : 'rgba(170,140,210,0.35)' }} />
                         ))}
                     </div>
                 )}
 
-                <Modal isOpen={!!pendingSessionChar} title="发现进度" onClose={() => setPendingSessionChar(null)} footer={<div className="flex gap-3 w-full"><button onClick={handleStartNewSession} className="flex-1 py-3 bg-slate-100 rounded-2xl text-slate-600 font-bold">新的见面</button><button onClick={handleResumeSession} className="flex-1 py-3 bg-green-500 text-white rounded-2xl font-bold shadow-lg shadow-green-200">继续上次</button></div>}>
+                <Modal isOpen={!!pendingSessionChar} title="发现进度" onClose={() => { setPendingSessionChar(null); if (cameFromChat) returnToChat(); }} footer={<div className="flex gap-3 w-full"><button onClick={handleStartNewSession} className="flex-1 py-3 bg-slate-100 rounded-2xl text-slate-600 font-bold">新的见面</button><button onClick={handleResumeSession} className="flex-1 py-3 bg-green-500 text-white rounded-2xl font-bold shadow-lg shadow-green-200">继续上次</button></div>}>
                     <div className="text-center text-slate-500 text-sm py-4">检测到 {pendingSessionChar?.name} 有未结束的见面。<br/><span className="text-xs text-slate-400 mt-2 block">(存档时间: {pendingSessionChar?.savedDateState?.timestamp ? new Date(pendingSessionChar.savedDateState.timestamp).toLocaleString() : 'Unknown'})</span></div>
                 </Modal>
             </div>
@@ -755,6 +843,15 @@ const DateApp: React.FC = () => {
                              </div>
                              <div className="flex flex-col items-center gap-3 text-[10px] text-neutral-600 font-medium tracking-wider"><button onClick={() => { setPreviousMode('peek'); setMode('settings'); }} className="hover:text-neutral-400 transition-colors">布置场景 / 设定立绘</button><button onClick={handleBack} className="hover:text-neutral-400 transition-colors">悄悄离开</button></div>
                         </div>
+                    </div>
+                )}
+                {/* 兜底：感知结束但 peekStatus 为空（历史上模型空回复会走到这）——
+                    以前这里什么都不渲染，页面只剩角色名的纯黑屏，连退出按钮都没有 */}
+                {!peekLoading && !peekStatus && (
+                    <div className="flex-1 flex flex-col items-center justify-center gap-8 -mt-20 z-10 animate-fade-in">
+                        <p className="text-sm font-light text-neutral-500 italic tracking-widest">未能感知到 {char.name} 的状态</p>
+                        <button onClick={() => startPeek(char)} className="h-12 px-10 bg-white text-black rounded-full font-bold tracking-[0.1em] text-sm active:scale-95 transition-transform hover:bg-neutral-200">重新感知</button>
+                        <button onClick={handleBack} className="text-[10px] text-neutral-600 font-medium tracking-wider hover:text-neutral-400 transition-colors">悄悄离开</button>
                     </div>
                 )}
             </div>

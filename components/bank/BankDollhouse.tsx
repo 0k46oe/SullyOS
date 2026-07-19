@@ -7,6 +7,7 @@ import {
     ROOM_LAYOUTS, WALLPAPER_PRESETS, FLOOR_PRESETS, STICKER_LIBRARY, INITIAL_DOLLHOUSE
 } from './BankGameConstants';
 import BankAssetIcon, { isBankAssetUrl } from './BankAssetIcon';
+import TokenImg from '../os/TokenImg';
 import { useOS } from '../../context/OSContext';
 import { DB } from '../../utils/db';
 import { processImage } from '../../utils/file';
@@ -956,7 +957,7 @@ const BankDollhouse: React.FC<Props> = ({
                                 onPointerUp={(e) => { e.stopPropagation(); void handleRoomPointerUp(); }}
                             >
                                 <div className="drop-shadow-md origin-bottom" style={{ transform: `scale(${shopState.activeVisitor?.scale ?? 4})` }}>
-                                    <img src={visitor.sprites?.chibi || visitor.avatar} className="w-10 h-10 object-contain" draggable={false} />
+                                    <TokenImg value={visitor.sprites?.chibi || visitor.avatar} className="w-10 h-10 object-contain" draggable={false} />
                                 </div>
                                 <div className="mt-0.5 px-2 py-0.5 rounded-full bg-white/95 border border-[#D9C1AE] text-[10px] font-bold text-[#8A5A3D] text-center">{visitor.name}</div>
                                 <div className="absolute -right-8 top-0 flex flex-col gap-0.5 opacity-0 group-hover/staff:opacity-100 transition-opacity z-40">

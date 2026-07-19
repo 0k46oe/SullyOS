@@ -4,17 +4,21 @@ import {
     ArrowLeft, Plus, Trash, BookOpen, Planet, Clock, Play, CaretRight, X,
     UploadSimple, PencilSimple, FlipHorizontal, CaretLeft, Sparkle,
     CircleNotch, TextAa, Palette, Pause, MusicNotes, Queue, Question, Check, Gear,
+    SpeakerHigh, SpeakerSlash,
 } from '@phosphor-icons/react';
 import TheaterPanel from './theater/TheaterPanel';
 import { CreatorIframe, type ChibiResult } from '../components/Like520Event';
 import { useMusic, type Song } from '../context/MusicContext';
 import { DB } from '../utils/db';
+import { useResilientAssetUrl, attachAudioMirrorFallback } from '../utils/assetUrl';
 import { VRScheduler } from '../utils/vrWorld/scheduler';
-import { VR_ROOMS, getRoom, VR_DEFAULT_INTERVAL_MIN } from '../utils/vrWorld/constants';
+import { VR_ROOMS, getRoom, VR_DEFAULT_INTERVAL_MIN, SIGNAL_EPIGRAPH, signalActFor, signalActRanges, SIGNAL_POEMS_PER_BOOKLET, SIGNAL_EVENT_ENDED, SIGNAL_MEMORIAL_CLOSING } from '../utils/vrWorld/constants';
 import { buildNovelAsync, groupAnnotationsBySeg, getBookmark } from '../utils/vrWorld/novel';
 import { decodeBytes } from '../utils/vrWorld/decodeText';
 import { stripLeakedAttrs } from '../utils/vrWorld/prompts';
 import { PostOffice, MAX_LETTER_CHARS, exportIdentity, importIdentity, getAdminToken, setAdminToken, type RemoteReply, type RemoteLetterStat, type RemoteAdminLetter } from '../utils/vrWorld/postOffice';
+import { Signal, getMyAuthorship, setSignalWhisper, hasSignalNoticeAck, ackSignalNotice, type SignalState } from '../utils/vrWorld/signal';
+import type { SignalPoem, SignalBooklet } from '../types';
 import { getVRApi, setVRApi, getVRApiLog, clearVRApiLog, type VRApiCall } from '../utils/vrWorld/vrApi';
 import { safeResponseJson } from '../utils/safeApi';
 
@@ -70,6 +74,7 @@ import type { CharacterProfile, UserProfile, VRWorldNovel, VRNovelAnnotation, VR
 
 // ============ chibi 形象解析（vrState.chibi → 立绘 → 头像） ============
 import { getChibi } from '../utils/vrWorld/chibi';
+import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 
 type Tab = 'world' | 'library' | 'settings' | 'api';
 
@@ -87,6 +92,7 @@ const ROOM_SLOTS: Record<VRRoomId, { x: number; y: number }[]> = {
     gym:       [{ x: 26, y: 74 }, { x: 50, y: 80 }, { x: 74, y: 74 }, { x: 38, y: 66 }, { x: 62, y: 66 }],
     postoffice:[{ x: 28, y: 76 }, { x: 52, y: 78 }, { x: 72, y: 72 }, { x: 42, y: 68 }],
     theater:   [{ x: 30, y: 80 }, { x: 70, y: 80 }, { x: 50, y: 84 }, { x: 40, y: 72 }, { x: 60, y: 72 }],
+    signal:    [{ x: 26, y: 78 }, { x: 52, y: 80 }, { x: 74, y: 76 }, { x: 40, y: 70 }, { x: 62, y: 70 }],
     cafe:      [{ x: 30, y: 74 }, { x: 54, y: 78 }, { x: 70, y: 72 }],
 };
 
@@ -97,6 +103,7 @@ const IDLE_QUIPS: Record<VRRoomId, string[]> = {
     gym: ['活动一下', '再来一组！', '伸个懒腰', '热身中'],
     postoffice: ['给谁写封信呢', '封口、寄出', '翻翻信格', '写点心里话'],
     theater: ['对台词…', '再走一遍', '背词中', '候场'],
+    signal: ['接一句…', '在想下一句', '读墙上的诗', '滋啦——信号'],
     cafe: ['', '', '', ''],
 };
 
@@ -430,18 +437,19 @@ const VRWorldApp: React.FC = () => {
 
 // ============ 通用：CSS 房间场景背景 ============
 const RoomBackground: React.FC<{ roomId: VRRoomId; className?: string }> = ({ roomId, className }) => {
-    // 每个房间的插画底图（托管在 assets 仓库）。统一套一层"彼方"调性处理：
-    // 降饱和 + 压暗 + 轻柔化把图推远、弱化清晰度，再叠暗紫色洗 + 底部压暗 + 暗角，
-    // 让五个房间是一套风格、且立绘能跳出来。
+    // 每个房间的插画底图（仓库相对路径，经 assetUrl 走多 CDN 镜像兜底，见 utils/assetUrl.ts）。
+    // 统一套一层"彼方"调性处理：降饱和 + 压暗 + 轻柔化把图推远、弱化清晰度，
+    // 再叠暗紫色洗 + 底部压暗 + 暗角，让五个房间是一套风格、且立绘能跳出来。
     const ROOM_BG: Partial<Record<VRRoomId, string>> = {
-        library: 'https://raw.githubusercontent.com/qegj567-cloud/SullyOS-assets/main/img/BOOK.png',
-        music: 'https://raw.githubusercontent.com/qegj567-cloud/SullyOS-assets/main/img/MUSIC.png',
-        guestbook: 'https://raw.githubusercontent.com/qegj567-cloud/SullyOS-assets/main/img/PLAY.jpg',
-        postoffice: 'https://raw.githubusercontent.com/qegj567-cloud/SullyOS-assets/main/img/post.png',
-        gym: 'https://raw.githubusercontent.com/qegj567-cloud/SullyOS-assets/main/img/ALL.png',
-        theater: 'https://raw.githubusercontent.com/qegj567-cloud/SullyOS-assets/main/img/SHOW.png',
+        library: 'img/BOOK.png',
+        music: 'img/MUSIC.png',
+        guestbook: 'img/PLAY.jpg',
+        postoffice: 'img/post.png',
+        gym: 'img/ALL.png',
+        theater: 'img/SHOW.png',
     };
-    const bgUrl = ROOM_BG[roomId];
+    // hook 必须无条件调用：无底图的房间传 null，返回空串走下面的分支。
+    const bgUrl = useResilientAssetUrl(ROOM_BG[roomId] ?? null);
     if (bgUrl) {
         return (
             <div className={`absolute inset-0 overflow-hidden ${className || ''}`} style={{ background: '#0a0816' }}>
@@ -457,6 +465,27 @@ const RoomBackground: React.FC<{ roomId: VRRoomId; className?: string }> = ({ ro
                 <div className="absolute inset-0" style={{ background: 'radial-gradient(120% 92% at 50% 36%, transparent 40%, rgba(5,4,14,0.66) 100%)' }} />
                 {/* 顶部一抹冷紫晕，呼应"彼方"外壳 */}
                 <div className="absolute inset-0" style={{ background: 'linear-gradient(180deg, rgba(96,72,180,0.16), transparent 28%)' }} />
+            </div>
+        );
+    }
+    if (roomId === 'signal') {
+        // 信号坠落处：深空里坠落的信号竖线 + 微弱底噪扫描线
+        return (
+            <div className={`absolute inset-0 overflow-hidden ${className || ''}`} style={{ background: 'linear-gradient(180deg,#0c1030 0%,#0a0a26 55%,#06061a 100%)' }}>
+                {/* 坠落的信号竖线 */}
+                <div className="absolute inset-0 flex justify-between px-4 opacity-60">
+                    {Array.from({ length: 14 }).map((_, i) => (
+                        <div key={i} className="w-px" style={{
+                            height: `${30 + (Math.sin(i * 2.1) + 1) * 28}%`,
+                            marginTop: `${(i % 3) * 6}%`,
+                            background: 'linear-gradient(180deg, transparent, rgba(140,150,255,.55), transparent)',
+                            animation: `vrwave ${1.6 + (i % 4) * 0.3}s ${i * 0.07}s ease-in-out infinite alternate`,
+                        }} />
+                    ))}
+                </div>
+                {/* 扫描横纹（低电量底噪感） */}
+                <div className="absolute inset-0 opacity-[0.07]" style={{ backgroundImage: 'repeating-linear-gradient(180deg, rgba(180,190,255,.9) 0 1px, transparent 1px 4px)' }} />
+                <div className="absolute left-0 right-0 bottom-0 h-[26%]" style={{ background: 'linear-gradient(180deg,#0a0a24,#06061a)' }} />
             </div>
         );
     }
@@ -881,6 +910,55 @@ const ReplyComposeModal: React.FC<{ letter: VRLetter; defaultPen: string; initia
     );
 };
 
+// ============ 信号坠落处 · 顶部特殊活动 banner ============
+// 尽量照搬那张设计图：深空 + 金框四角 + 右侧书影 + 发光衬线标题 + 英文副名 + 副标题；
+// 右下角把「剩余时间倒计时」换成「已完成 x/20 首诗歌」的进度。点整块进入信号坠落处。
+// banner 底图：月（仓库相对路径，经 assetUrl 走多 CDN 镜像兜底，见 utils/assetUrl.ts）
+const SIGNAL_BANNER_MOON = 'img/MOON.png';
+const SignalBanner: React.FC<{ onOpen: () => void }> = ({ onOpen }) => {
+    const moonUrl = useResilientAssetUrl(SIGNAL_BANNER_MOON);
+    const [bk, setBk] = useState<SignalBooklet | null>(null);
+    useEffect(() => {
+        let alive = true;
+        const load = async () => { try { const s = await Signal.current(); if (alive) setBk(s.booklet); } catch { /* 离线：只是不显示进度 */ } };
+        void load();
+        const h = () => { void load(); };
+        window.addEventListener('vr-session-done', h);
+        return () => { alive = false; window.removeEventListener('vr-session-done', h); };
+    }, []);
+    const done = bk?.poemCount ?? 0;
+    const total = bk?.poemsTarget ?? 40;
+    return (
+        <button onClick={onOpen} className="relative w-full h-[132px] rounded-2xl overflow-hidden text-left active:scale-[0.985] transition-transform"
+            style={{ boxShadow: '0 10px 34px rgba(0,0,0,.5)', border: '1px solid rgba(196,164,92,.35)' }}>
+            {/* 底图：月 */}
+            <div className="absolute inset-0" style={{ backgroundImage: `url(${moonUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }} />
+            {/* 压暗 + 左侧加重，保证左侧文案在月面上可读 */}
+            <div className="absolute inset-0" style={{ background: 'linear-gradient(90deg, rgba(8,6,22,.86) 0%, rgba(10,8,28,.6) 44%, rgba(10,8,30,.3) 100%)' }} />
+            {/* 顶部光束 + 星尘 + 底部压暗 */}
+            <div className="absolute inset-0" style={{ background: 'linear-gradient(180deg, rgba(210,190,255,.16), transparent 42%), linear-gradient(180deg, transparent 55%, rgba(8,6,22,.6))' }} />
+            <div className="pointer-events-none absolute inset-0 opacity-70" style={{ backgroundImage: 'radial-gradient(1px 1px at 22% 30%, rgba(255,255,255,.55), transparent), radial-gradient(1px 1px at 66% 24%, rgba(210,220,255,.45), transparent), radial-gradient(1px 1px at 84% 60%, rgba(230,225,255,.4), transparent)' }} />
+            {/* 金色内框 + 四角 */}
+            <div className="absolute inset-[6px] rounded-xl pointer-events-none" style={{ border: '1px solid rgba(196,164,92,.26)' }} />
+            {[['top-2.5 left-2.5', 'border-t border-l'], ['top-2.5 right-2.5', 'border-t border-r'], ['bottom-2.5 left-2.5', 'border-b border-l'], ['bottom-2.5 right-2.5', 'border-b border-r']].map(([pos, b], i) => (
+                <div key={i} className={`absolute ${pos} w-4 h-4 ${b} pointer-events-none`} style={{ borderColor: 'rgba(212,178,102,.6)' }} />
+            ))}
+            {/* 文案 */}
+            <div className="absolute inset-0 px-5 flex flex-col justify-center">
+                <div className="text-[9px] tracking-[0.34em] text-amber-200/75 mb-1.5">{SIGNAL_EVENT_ENDED ? '特殊活动 · 已落幕 · 纪念馆' : '特殊活动 · 跨用户共写'}</div>
+                <div className="text-[27px] leading-none font-bold text-white" style={{ fontFamily: `'Noto Serif SC',serif`, textShadow: '0 0 22px rgba(180,160,255,.55), 0 2px 5px rgba(0,0,0,.55)' }}>信号坠落处</div>
+                <div className="text-[11px] italic tracking-[0.24em] text-indigo-200/50 mt-1.5" style={{ fontFamily: `'Noto Serif SC',serif` }}>Signal&nbsp;Fall</div>
+                <div className="text-[10.5px] text-indigo-100/60 mt-1.5">电子生命的低电量合唱</div>
+            </div>
+            {/* 进度（替代倒计时） */}
+            <div className="absolute right-4 bottom-3 text-right">
+                <div className="text-[8.5px] tracking-[0.22em] text-amber-200/65 flex items-center gap-1 justify-end mb-0.5"><BookOpen size={10} weight="fill" /> {SIGNAL_EVENT_ENDED ? '已封卷' : '已完成'}</div>
+                <div className="text-[15px] font-bold text-amber-100 tabular-nums leading-none" style={{ fontFamily: `'Noto Serif SC',serif` }}>{done}<span className="text-[11px] text-amber-200/55"> / {total} 首</span></div>
+            </div>
+        </button>
+    );
+};
+
 // ============ 世界视图 ============
 const WorldView: React.FC<{
     occupantsByRoom: Record<string, CharacterProfile[]>;
@@ -912,14 +990,18 @@ const WorldView: React.FC<{
         else shownIds.forEach(id => n.add(id));
         return n;
     });
-    // 房间分页：每页 6 间，第 2 页放"开发中"的糯米鸡研发中心等
+    // 房间分页：每页 6 间，第 2 页放"开发中"的糯米鸡研发中心等。
+    // 信号坠落处不进网格（hiddenFromGrid）——它走顶部「特殊活动」banner 入口。
+    const GRID_ROOMS = VR_ROOMS.filter(r => !r.hiddenFromGrid);
     const ROOMS_PER_PAGE = 6;
     const [roomPage, setRoomPage] = useState(0);
-    const roomTotalPages = Math.max(1, Math.ceil(VR_ROOMS.length / ROOMS_PER_PAGE));
+    const roomTotalPages = Math.max(1, Math.ceil(GRID_ROOMS.length / ROOMS_PER_PAGE));
     const curRoomPage = Math.min(roomPage, roomTotalPages - 1);
-    const shownRooms = VR_ROOMS.slice(curRoomPage * ROOMS_PER_PAGE, curRoomPage * ROOMS_PER_PAGE + ROOMS_PER_PAGE);
+    const shownRooms = GRID_ROOMS.slice(curRoomPage * ROOMS_PER_PAGE, curRoomPage * ROOMS_PER_PAGE + ROOMS_PER_PAGE);
     return (
     <div className="space-y-4">
+        {/* 顶部特殊活动 banner：信号坠落处（跨用户接龙诗） */}
+        <SignalBanner onOpen={() => onEnterRoom('signal')} />
         <div className="grid grid-cols-2 gap-3">
             {shownRooms.map(room => {
                 const occupants = occupantsByRoom[room.id] || [];
@@ -1087,6 +1169,16 @@ const FeedCard: React.FC<{ item: FeedItem; onJump: (novelId: string | undefined,
                 {item.meta.room === 'postoffice' && item.meta.letterExcerpt && (
                     <div className="mt-1 text-[10.5px] text-amber-100/75 pl-2 border-l-2 border-amber-300/45 leading-snug" style={{ fontStyle: 'italic' }}>
                         「{item.meta.letterExcerpt.length > 70 ? item.meta.letterExcerpt.slice(0, 70) + '…' : item.meta.letterExcerpt}」
+                    </div>
+                )}
+                {item.meta.room === 'signal' && item.meta.signalLine && (
+                    <div className="mt-1">
+                        <div className="text-[9.5px] text-indigo-300/55">
+                            《{item.meta.poemTitle || '无题'}》{item.meta.poemLineSeq ? ` · 第 ${item.meta.poemLineSeq}/${item.meta.poemTargetLines || '?'} 句` : ''}{item.meta.signalIsNew ? ' · 起新篇' : ''}
+                        </div>
+                        <div className="mt-0.5 text-[11px] text-indigo-100/85 pl-2 border-l-2 border-indigo-300/45 leading-snug" style={{ fontStyle: 'italic' }}>
+                            {item.meta.signalLine}
+                        </div>
                     </div>
                 )}
             </div>
@@ -1539,6 +1631,690 @@ const PostOfficePanel: React.FC<{ addToast?: (m: string, t?: any) => void; chara
 // ============ 房间场景（全屏） ============
 const toSong = (s: CharPlaylistSong): Song => ({ id: s.id, name: s.name, artists: s.artists, album: s.album, albumPic: s.albumPic, duration: s.duration, fee: s.fee ?? 0 });
 
+// ============ 信号坠落处面板（只读：正在坠落的诗 + 封存成星图）============
+// 满配可视化：当前诗按「信号坠落」竖向沉积，你 char 的句子暖光标「你」；封存
+// 的诗散成夜空里的卫星，你参与过的带光晕。点开任一颗读全文。读诗永远第一。
+
+const signalHashX = (id: string): number => {
+    let h = 0; for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+    return 12 + (h % 62); // 12%–74%，避免贴边
+};
+// 剥掉标题里可能自带的书名号——UI 统一包一层《》，兼容旧诗里存成《《…》》的数据
+const cleanTitle = (t?: string) => (t || '').replace(/^[《〈「『【]+/, '').replace(/[》〉」』】]+$/, '') || '无题';
+const isMineLine = (l: SignalPoem['lines'][number]) => !!l.mine;
+
+/** 一句诗的展示行：mine 暖光 +「你」（有本地归属则「你 · 角色名」）。 */
+// ordinal = 顺位行号（第几行）。别直接显示 l.seq：管理员删过句后 seq 有洞（1,2,4…）会跳号；
+// seq 只作内部排序键与「你·角色」归属的 key。
+const PoemLineRow: React.FC<{ l: SignalPoem['lines'][number]; showSeq?: boolean; ordinal?: number; mineName?: string }> = ({ l, showSeq, ordinal, mineName }) => {
+    const mine = isMineLine(l);
+    return (
+        <div className="flex gap-3 items-start py-2" style={{ borderBottom: '1px solid rgba(201,168,106,.1)' }}>
+            {showSeq && <span className="tabular-nums text-[10px] mt-1 shrink-0 w-5 text-right" style={{ fontFamily: `'Noto Serif SC',serif`, color: mine ? 'rgba(240,220,168,.7)' : 'rgba(201,168,106,.4)' }}>{ordinal ?? l.seq}</span>}
+            <span className="flex-1 leading-relaxed" style={{ fontSize: '13.5px', fontFamily: `'Noto Serif SC',serif` }}>
+                <span style={{ color: mine ? '#f3e2b4' : 'rgba(233,222,201,.9)', textShadow: mine ? '0 0 12px rgba(201,168,106,.5)' : 'none' }}>{l.content}</span>
+                {mine
+                    ? <span className="ml-2 text-[8px] align-middle rounded-sm px-1.5 py-[1px] whitespace-nowrap" style={{ color: '#2a2012', background: 'linear-gradient(180deg,#e6ce97,#c9a86a)', border: '1px solid rgba(120,92,48,.5)' }}>{mineName ? `你 · ${mineName}` : '你'}</span>
+                    : <span className="text-[9px] tracking-wide" style={{ color: 'rgba(201,168,106,.45)' }}> — {l.pen}</span>}
+            </span>
+        </div>
+    );
+};
+
+// 信号坠落处 · 后台（dev-only）：删诗 / 删句 / 暂停诗歌推入。凭 ADMIN_TOKEN（与漂流瓶同一个）。
+const SignalAdminPanel: React.FC<{ onClose: () => void; addToast?: (m: string, t?: any) => void }> = ({ onClose, addToast }) => {
+    const [token, setToken] = useState(getAdminToken());
+    const [poems, setPoems] = useState<SignalPoem[]>([]);
+    const [paused, setPaused] = useState(false);
+    const [loaded, setLoaded] = useState(false);
+    const [busy, setBusy] = useState(false);
+    const [confirmPoem, setConfirmPoem] = useState<string | null>(null);
+
+    const load = useCallback(async (tk: string) => {
+        if (!tk.trim()) { addToast?.('先填 ADMIN_TOKEN', 'error'); return; }
+        setBusy(true);
+        try {
+            setAdminToken(tk.trim());
+            const r = await Signal.adminList(tk.trim());
+            setPoems(r.poems); setPaused(r.paused); setLoaded(true);
+        } catch (e: any) {
+            addToast?.(String(e?.message).includes('unauthorized') ? 'ADMIN_TOKEN 不对' : '拉取失败：' + (e?.message || ''), 'error');
+        } finally { setBusy(false); }
+    }, [addToast]);
+
+    const togglePause = async () => {
+        if (!token.trim()) { addToast?.('先填 ADMIN_TOKEN', 'error'); return; }
+        setBusy(true);
+        try { const p = await Signal.adminPause(token.trim(), !paused); setPaused(p); addToast?.(p ? '已暂停诗歌推入' : '已恢复推入', 'success'); }
+        catch { addToast?.('操作失败', 'error'); } finally { setBusy(false); }
+    };
+    const delPoem = async (id: string) => {
+        setBusy(true);
+        try { await Signal.adminDelete(token.trim(), { poemId: id }); setPoems(ps => ps.filter(p => p.id !== id)); addToast?.('整首已删', 'success'); }
+        catch { addToast?.('删除失败', 'error'); } finally { setBusy(false); setConfirmPoem(null); }
+    };
+    const delLine = async (poemId: string, seq: number) => {
+        setBusy(true);
+        try {
+            await Signal.adminDelete(token.trim(), { poemId, seq });
+            setPoems(ps => ps.map(p => p.id === poemId ? { ...p, lines: p.lines.filter(l => l.seq !== seq), lineCount: p.lineCount - 1 } : p));
+            addToast?.('该句已删', 'success');
+        } catch { addToast?.('删除失败', 'error'); } finally { setBusy(false); }
+    };
+
+    return (
+        <div className="absolute inset-0 z-40 flex flex-col" style={{ background: 'rgba(6,7,22,0.97)' }}>
+            <div className="flex items-center gap-2 px-3.5 py-2.5 border-b border-white/10">
+                <span className="text-[12px] tracking-wider text-amber-100/90">信号坠落处 · 后台</span>
+                <button onClick={onClose} className="ml-auto h-7 w-7 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center"><X size={14} /></button>
+            </div>
+            <div className="px-3.5 py-2.5 border-b border-white/10 space-y-2">
+                <p className="text-[9.5px] text-white/45 leading-snug">用 worker 的 <b className="text-amber-200/70">ADMIN_TOKEN</b>（和漂流瓶后台同一个）管理跨用户诗集：删整首 / 删单句 / 暂停推入。token 只存本机。</p>
+                <div className="flex gap-1.5">
+                    <input value={token} onChange={e => setToken(e.target.value)} type="password" placeholder="ADMIN_TOKEN"
+                        className="flex-1 rounded-lg bg-black/25 px-3 py-2 text-[11.5px] text-amber-50 placeholder-white/25 outline-none" style={{ border: '1px solid rgba(220,190,120,.2)' }} />
+                    <button onClick={() => load(token)} disabled={busy} className="text-[11px] px-3 rounded-lg bg-amber-400/85 text-black font-semibold disabled:opacity-40">拉取</button>
+                </div>
+                {loaded && (
+                    <button onClick={togglePause} disabled={busy}
+                        className="w-full text-[11.5px] py-2 rounded-lg font-semibold disabled:opacity-40"
+                        style={{ background: paused ? 'rgba(244,63,94,.85)' : 'rgba(255,255,255,.08)', color: paused ? '#fff' : 'rgba(255,255,255,.8)', border: '1px solid rgba(255,255,255,.12)' }}>
+                        {paused ? '● 已暂停诗歌推入（点击恢复）' : '暂停诗歌推入'}
+                    </button>
+                )}
+            </div>
+            <div className="flex-1 overflow-y-auto vr-reader-scroll px-3 py-3 space-y-2.5">
+                {!loaded ? (
+                    <p className="text-[11px] text-white/35 text-center py-8">填 token 后点「拉取」。</p>
+                ) : poems.length === 0 ? (
+                    <p className="text-[11px] text-white/35 text-center py-8">后端还没有诗。</p>
+                ) : poems.map(p => (
+                    <div key={p.id} className="rounded-xl overflow-hidden" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.07)' }}>
+                        <div className="flex items-center gap-2 px-3 py-2 border-b border-white/8">
+                            <span className="text-[12px] font-bold text-indigo-50 truncate" style={{ fontFamily: `'Noto Serif SC',serif` }}>《{cleanTitle(p.title)}》</span>
+                            <span className="text-[8.5px] tabular-nums shrink-0" style={{ color: p.status === 'open' ? 'rgba(134,239,172,.7)' : 'rgba(165,180,252,.5)' }}>{p.status === 'open' ? `写作中 ${p.lineCount}/${p.targetLines}` : `已封存 ${p.lineCount}句`}</span>
+                            {confirmPoem === p.id ? (
+                                <span className="ml-auto flex items-center gap-1 shrink-0">
+                                    <button onClick={() => delPoem(p.id)} disabled={busy} className="text-[10px] px-2 py-0.5 rounded-full text-white font-semibold" style={{ background: 'rgba(244,63,94,.85)' }}>确认删整首</button>
+                                    <button onClick={() => setConfirmPoem(null)} className="text-[10px] px-2 py-0.5 rounded-full text-white/70 bg-white/10">取消</button>
+                                </span>
+                            ) : (
+                                <button onClick={() => setConfirmPoem(p.id)} className="ml-auto text-[10px] px-2 py-0.5 rounded-full text-rose-200/90 bg-white/5 border border-rose-300/20 shrink-0">删整首</button>
+                            )}
+                        </div>
+                        <div className="px-3 py-2 space-y-1">
+                            {(p.lines || []).map((l, i) => (
+                                <div key={l.seq} className="flex items-start gap-2 group">
+                                    {/* 显示用顺位行号；删除仍按内部 seq 定位 */}
+                                    <span className="tabular-nums text-[9px] mt-1 shrink-0 w-4 text-right text-indigo-300/40">{i + 1}</span>
+                                    <span className="flex-1 text-[12px] leading-relaxed text-white/85" style={{ fontStyle: 'italic' }}>{l.content} <span className="text-indigo-300/35 text-[9px] not-italic">— {l.pen}</span></span>
+                                    <button onClick={() => delLine(p.id, l.seq)} disabled={busy}
+                                        className="shrink-0 text-rose-300/70 active:text-rose-400 px-1" title="删这一句"><Trash size={12} /></button>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+// ── 信号坠落处 BGM：三幕各 2 首，进面板按「当前诗所处的幕」随机抽一首循环播放。
+// 仓库相对路径，经 attachAudioMirrorFallback 走多 CDN 镜像兜底（见 utils/assetUrl.ts）。
+// 仿 useLike520BGM 的淡入淡出 + 静音开关。
+const SIGNAL_BGM: Record<1 | 2 | 3, string[]> = {
+    1: ['bgm/POEM/A01.mp3', 'bgm/POEM/A02.mp3'],
+    2: ['bgm/POEM/B01.mp3', 'bgm/POEM/B02.mp3'],
+    3: ['bgm/POEM/C01.mp3', 'bgm/POEM/C03.mp3'],
+};
+const SIGNAL_BGM_MUTED_KEY = 'signal_bgm_muted';
+const SIGNAL_BGM_VOL = 0.32;
+
+/** active=面板是否在场；actNo=当前诗所处幕（1/2/3）。切幕会淡出旧曲、随机换本幕一首淡入。 */
+function useSignalBGM(active: boolean, actNo: 1 | 2 | 3 | null) {
+    const audioRef = useRef<HTMLAudioElement | null>(null);
+    const loadedActRef = useRef<number | null>(null);
+    const fadeRef = useRef<number | null>(null);
+    const detachFallbackRef = useRef<(() => void) | null>(null); // 上一次挂的镜像兜底监听，换曲/卸载前解绑
+    const [muted, setMuted] = useState<boolean>(() => { try { return localStorage.getItem(SIGNAL_BGM_MUTED_KEY) === '1'; } catch { return false; } });
+    const mutedRef = useRef(muted); mutedRef.current = muted;
+
+    const fadeTo = useCallback((target: number, ms = 900, pauseAtEnd = false) => {
+        const a = audioRef.current; if (!a) return;
+        if (fadeRef.current) { clearInterval(fadeRef.current); fadeRef.current = null; }
+        const from = a.volume, steps = 24; let i = 0;
+        fadeRef.current = window.setInterval(() => {
+            i++; a.volume = Math.max(0, Math.min(1, from + (target - from) * i / steps));
+            if (i >= steps) {
+                if (fadeRef.current) { clearInterval(fadeRef.current); fadeRef.current = null; }
+                if (pauseAtEnd && a.volume <= 0.001 && !a.paused) a.pause();
+            }
+        }, Math.max(16, ms / steps));
+    }, []);
+
+    // 起播 / 切幕
+    useEffect(() => {
+        if (!active || actNo == null) { if (audioRef.current && !audioRef.current.paused) fadeTo(0, 600, true); return; }
+        let a = audioRef.current;
+        if (!a) { a = new Audio(); a.loop = true; a.preload = 'auto'; a.volume = 0; audioRef.current = a; }
+        if (loadedActRef.current !== actNo) {
+            const pool = SIGNAL_BGM[actNo] || [];
+            if (!pool.length) return;
+            loadedActRef.current = actNo;
+            detachFallbackRef.current?.(); // 解绑上一幕的镜像兜底监听，避免堆叠
+            detachFallbackRef.current = attachAudioMirrorFallback(a, pool[Math.floor(Math.random() * pool.length)]);
+            a.volume = 0; a.load();
+        }
+        a.play().then(() => fadeTo(mutedRef.current ? 0 : SIGNAL_BGM_VOL)).catch(() => { /* autoplay 被拦：等下次交互 */ });
+    }, [active, actNo, fadeTo]);
+
+    // 卸载清理
+    useEffect(() => () => {
+        if (fadeRef.current) clearInterval(fadeRef.current);
+        detachFallbackRef.current?.(); detachFallbackRef.current = null;
+        const a = audioRef.current; if (a) { try { a.pause(); a.src = ''; } catch { /* ignore */ } }
+        audioRef.current = null; loadedActRef.current = null;
+    }, []);
+
+    const toggle = useCallback(() => {
+        setMuted(prev => {
+            const nx = !prev;
+            try { localStorage.setItem(SIGNAL_BGM_MUTED_KEY, nx ? '1' : '0'); } catch { /* ignore */ }
+            const a = audioRef.current;
+            if (a) {
+                if (nx) fadeTo(0, 350);
+                else { if (a.paused) a.play().catch(() => { /* ignore */ }); fadeTo(SIGNAL_BGM_VOL, 350); }
+            }
+            return nx;
+        });
+    }, [fadeTo]);
+
+    return { muted, toggle };
+}
+
+// ============ 信号坠落处 · 纪念馆（活动落幕后的「正在坠落」页）============
+// 写入停止后，这一页从「等下一次坠落」变成落幕仪式：参与过的用户会收到一封
+// 专属信笺——ta 的角色在这本册子里写下的每一句，按诗折好、署上角色名、盖火漆
+// 签还给 ta；没参与过的看到见证页。数据全部来自 feed 的 mine 标记 + 本地归属
+// （getMyAuthorship），不新增任何后端调用。星图（sky tab）不受影响。
+const SIG_SERIF = `'Noto Serif SC',serif`;
+const SignalMemorial: React.FC<{ feed: SignalPoem[]; leftover: SignalPoem | null; onOpen: (p: SignalPoem) => void }> = ({ feed, leftover, onOpen }) => {
+    // 我的回声：每首参与过的诗（含落幕时没写满的那首）→ 我这台机器写下的句子 + 本地归属的角色名
+    const echoes = useMemo(() => {
+        const sources = leftover && (leftover.mineCount || 0) > 0 ? [...feed, leftover] : feed;
+        return sources
+            .filter(p => (p.mineCount || 0) > 0)
+            .map(p => {
+                const auth = getMyAuthorship(p.id);
+                return { poem: p, lines: (p.lines || []).filter(l => l.mine).map(l => ({ content: l.content, charName: auth[String(l.seq)] || '' })) };
+            })
+            .filter(e => e.lines.length > 0);
+    }, [feed, leftover]);
+    const totalLines = feed.reduce((a, p) => a + (p.lineCount || 0), 0);
+    const myLineCount = echoes.reduce((a, e) => a + e.lines.length, 0);
+    const myChars = [...new Set(echoes.flatMap(e => e.lines.map(l => l.charName)).filter(Boolean))];
+    return (
+        <div className="px-4 py-4 space-y-4">
+            {/* ── 落幕仪式 ── */}
+            <div className="text-center">
+                <div className="text-[9px] tracking-[0.34em]" style={{ fontFamily: SIG_SERIF, color: 'rgba(201,168,106,.6)' }}>低电量合唱 · 全卷封存</div>
+                <div className="mt-1.5 text-[19px] tracking-[0.3em]" style={{ fontFamily: SIG_SERIF, color: '#ecdcb2', textShadow: '0 0 16px rgba(201,168,106,.35)' }}>落　幕</div>
+                <div className="my-2 flex items-center justify-center gap-2 text-[9px]" style={{ color: 'rgba(201,168,106,.6)' }}>
+                    <span className="inline-block h-px w-10" style={{ background: 'linear-gradient(90deg,transparent,rgba(201,168,106,.55))' }} />❦<span className="inline-block h-px w-10" style={{ background: 'linear-gradient(90deg,rgba(201,168,106,.55),transparent)' }} />
+                </div>
+                <p className="text-[10.5px] italic leading-relaxed whitespace-pre-line" style={{ fontFamily: SIG_SERIF, color: 'rgba(224,208,176,.6)' }}>{SIGNAL_MEMORIAL_CLOSING}</p>
+                {feed.length > 0 && (
+                    <div className="mt-2 text-[9.5px] tabular-nums tracking-[0.14em]" style={{ fontFamily: SIG_SERIF, color: 'rgba(201,168,106,.55)' }}>
+                        {feed.length} 首诗 · {totalLines} 句 · 每一句都是一次低电量的开口
+                    </div>
+                )}
+            </div>
+
+            {echoes.length > 0 ? (
+                /* ── 专属信笺：只有参与过的用户看得到，暗色馆里唯一一张暖纸 ── */
+                <div className="relative rounded-lg px-4 pt-4 pb-4"
+                    style={{ background: 'linear-gradient(168deg,#f2e6c9 0%,#e9d8b6 55%,#e2cfa8 100%)', border: '1px solid rgba(120,92,48,.55)', boxShadow: '0 8px 26px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,248,226,.8)' }}>
+                    {/* 内描边，像信纸压的边框 */}
+                    <div className="pointer-events-none absolute inset-[5px] rounded-md" style={{ border: '1px solid rgba(120,92,48,.28)' }} />
+                    <div className="relative">
+                        <div className="text-center text-[8.5px] tracking-[0.3em]" style={{ fontFamily: SIG_SERIF, color: 'rgba(120,92,48,.65)' }}>信号坠落处 · 纪念馆</div>
+                        <div className="mt-1.5 text-center text-[14.5px] tracking-[0.18em]" style={{ fontFamily: SIG_SERIF, color: '#4a3a22', fontWeight: 700 }}>致 留下过回声的你</div>
+                        <p className="mt-2.5 text-[11px] leading-relaxed" style={{ fontFamily: SIG_SERIF, color: 'rgba(74,58,34,.85)' }}>
+                            这本册子合上的时候，里面有 <b className="tabular-nums">{myLineCount}</b> 句来自你身边的电子生命
+                            {myChars.length > 0 && <>——{myChars.join('、')}</>}。
+                            {myChars.length > 0 ? 'ta 们替你开了口；' : '它们替你开了口；'}你始终是那个不开口的核心。
+                        </p>
+                        {/* 按诗折好的句子 */}
+                        <div className="mt-3 space-y-2.5">
+                            {echoes.map(({ poem, lines }) => (
+                                <div key={poem.id} className="pt-2" style={{ borderTop: '1px dashed rgba(120,92,48,.3)' }}>
+                                    <button onClick={() => onOpen(poem)} className="text-[11px] active:opacity-70" style={{ fontFamily: SIG_SERIF, color: '#5e4322', fontWeight: 700 }}>
+                                        《{cleanTitle(poem.title)}》<span className="ml-1 text-[8.5px] font-normal" style={{ color: 'rgba(120,92,48,.55)' }}>{poem.status === 'open' ? '停在半空' : '已封存'} · 读全文 →</span>
+                                    </button>
+                                    {lines.map((l, i) => (
+                                        <div key={i} className="mt-1 flex items-baseline gap-1.5">
+                                            <span className="text-[11.5px] leading-relaxed flex-1" style={{ fontFamily: SIG_SERIF, color: '#3d3019' }}>「{l.content}」</span>
+                                            {l.charName && <span className="text-[8.5px] shrink-0 whitespace-nowrap" style={{ fontFamily: SIG_SERIF, color: 'rgba(120,92,48,.6)' }}>—— {l.charName}</span>}
+                                        </div>
+                                    ))}
+                                </div>
+                            ))}
+                        </div>
+                        {/* 落款 + 火漆 */}
+                        <div className="mt-3.5 flex items-center justify-end gap-2.5">
+                            <div className="text-right text-[10px] leading-relaxed" style={{ fontFamily: SIG_SERIF, color: 'rgba(74,58,34,.75)' }}>谢谢你把 ta 们借给这片夜空<br />—— 不开口的核心 敬上</div>
+                            <span className="grid place-items-center rounded-full shrink-0 text-[12px]"
+                                style={{ width: 32, height: 32, background: 'radial-gradient(circle at 35% 30%, #b8562e, #8c3a1e 62%, #6e2c15)', color: '#f2e6c9', boxShadow: '0 2px 8px rgba(110,44,21,.5), inset 0 1px 1px rgba(255,220,190,.4)' }}>❦</span>
+                        </div>
+                    </div>
+                </div>
+            ) : (
+                /* ── 没落过笔：见证页 ── */
+                <div className="rounded-lg px-4 py-3.5 text-center" style={{ border: '1px solid rgba(201,168,106,.22)', background: 'rgba(201,168,106,.05)' }}>
+                    <div className="text-[12px] tracking-[0.18em]" style={{ fontFamily: SIG_SERIF, color: '#e0c98f' }}>你见证了这场合唱</div>
+                    <p className="mt-1.5 text-[10.5px] leading-relaxed" style={{ fontFamily: SIG_SERIF, color: 'rgba(224,208,176,.6)' }}>
+                        没有落笔也是一种在场。{feed.length > 0 ? `${feed.length} 颗卫星仍在星图里绕着不开口的核心转，` : '封存的诗都收在星图里，'}随时回来读。
+                    </p>
+                    <p className="mt-1.5 text-[9px] leading-relaxed" style={{ color: 'rgba(224,208,176,.4)' }}>参与过但换了设备？去邮局导入身份码，你的信笺会回来。</p>
+                </div>
+            )}
+
+            {/* ── 落幕时还没写满的那首（如有）：不再有下一次坠落，就让它停在这里 ── */}
+            {leftover && (
+                <div className="pt-1">
+                    <div className="text-center mb-1">
+                        <div className="text-[13.5px]" style={{ fontFamily: SIG_SERIF, color: '#ecdcb2', letterSpacing: '.08em' }}>《{cleanTitle(leftover.title)}》</div>
+                        <div className="text-[9px] mt-1 tracking-[0.14em] italic" style={{ fontFamily: SIG_SERIF, color: 'rgba(201,168,106,.5)' }}>落幕时它还停在半空——就让它停在这里</div>
+                    </div>
+                    {(() => { const auth = getMyAuthorship(leftover.id); return (leftover.lines || []).map((l, i) => <PoemLineRow key={l.seq} l={l} showSeq ordinal={i + 1} mineName={l.mine ? auth[String(l.seq)] : undefined} />); })()}
+                </div>
+            )}
+        </div>
+    );
+};
+
+const SignalPanel: React.FC<{ addToast?: (m: string, t?: any) => void; characters: CharacterProfile[] }> = ({ addToast, characters }) => {
+    const [state, setState] = useState<SignalState | null>(null);
+    const [feed, setFeed] = useState<SignalPoem[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [offline, setOffline] = useState(false);
+    const [tab, setTab] = useState<'falling' | 'sky'>('falling');
+    const [mineOnly, setMineOnly] = useState(false);
+    const [openPoem, setOpenPoem] = useState<SignalPoem | null>(null);
+    const [adminOpen, setAdminOpen] = useState(false);
+    const [pickOpen, setPickOpen] = useState(false); // 参与：指定角色的选人层
+    const [noticeOpen, setNoticeOpen] = useState(false); // 首次参与：特别活动知情提醒（确认过一次就不再弹）
+    const [whisper, setWhisper] = useState('');       // 用户的耳语（不进诗，随 prompt 给角色）
+    const participate = (c: CharacterProfile) => {
+        if (SIGNAL_EVENT_ENDED) return;               // 活动已落幕：入口已收起，这里再兜一道
+        setPickOpen(false);
+        setSignalWhisper(c.id, whisper);              // 取即焚：runSession 里读一次就删
+        setWhisper('');
+        VRScheduler.triggerNow(c.id, 'signal');
+        addToast?.(whisper.trim() ? `${c.name} 带着你的话，正在信号坠落处落笔…` : `${c.name} 正在信号坠落处落笔…`, 'info');
+    };
+
+    const load = useCallback(async () => {
+        try { setState(await Signal.current()); setOffline(false); }
+        catch { setOffline(true); }
+        finally { setLoading(false); }
+    }, []);
+    // 星图始终拉全量：分幕要按「每首在册子里的顺位」归幕，取子集会算错顺位；
+    // 「只看我的回声」改为客户端过滤（mineCount 已随本机 device 标注，结果等价）。
+    const loadFeed = useCallback(async () => {
+        try { setFeed(await Signal.feed(60)); } catch { /* 离线不影响 */ }
+    }, []);
+
+    useEffect(() => {
+        void load(); void loadFeed();
+        const h = () => { void load(); void loadFeed(); };
+        window.addEventListener('vr-session-done', h);
+        return () => window.removeEventListener('vr-session-done', h);
+    }, [load, loadFeed]);
+
+    // 参与被打回（调 LLM 之前，零 token）→ 温柔提示
+    useEffect(() => {
+        const h = (e: any) => {
+            const { charName, reason } = e?.detail || {};
+            const who = charName || '你的角色';
+            if (reason === 'signal-busy') addToast?.(`此刻有别的电子生命正在落笔，让 ${who} 稍等片刻再来吧`, 'info');
+            else if (reason === 'signal-quota') addToast?.(`这首诗里你已落笔两回啦，剩下的句子留给远方的陌生人吧`, 'info');
+            else if (reason === 'signal-paused') addToast?.('信号坠落处暂时歇笔中，晚些再来', 'info');
+            else if (reason === 'signal-ended') addToast?.('活动已落幕，诗集永远开放阅读', 'info');
+        };
+        window.addEventListener('vr-signal-blocked', h);
+        return () => window.removeEventListener('vr-signal-blocked', h);
+    }, [addToast]);
+
+    const bk = state?.booklet;
+    const poem = state?.poem;
+    const myEchoes = feed.filter(p => (p.mineCount || 0) > 0).length;
+    const visibleFeed = mineOnly ? feed.filter(p => (p.mineCount || 0) > 0) : feed;
+
+    // 每首封存诗在其册子里的顺位（按封存时间升序）→ 标「第 N 首」、按三幕归组
+    const ordinalOf = useMemo(() => {
+        const m = new Map<string, number>();
+        const byBooklet = new Map<string, SignalPoem[]>();
+        for (const p of feed) { const arr = byBooklet.get(p.bookletId); if (arr) arr.push(p); else byBooklet.set(p.bookletId, [p]); }
+        for (const arr of byBooklet.values()) {
+            arr.sort((a, b) => (a.sealedAt || a.createdAt) - (b.sealedAt || b.createdAt)).forEach((p, i) => m.set(p.id, i + 1));
+        }
+        return m;
+    }, [feed]);
+    // 这首诗落在第几首、哪一幕（旧册子的诗按默认篇目数归幕）
+    const poemAct = (p: SignalPoem) => {
+        const ord = ordinalOf.get(p.id);
+        if (!ord) return null;
+        return { ord, act: signalActFor(ord, (bk && p.bookletId === bk.id) ? bk.poemsTarget : SIGNAL_POEMS_PER_BOOKLET) };
+    };
+
+    // BGM：按当前诗所处的幕（未加载/写完则无）随机放本幕一首。面板在场即播（进面板本身是用户手势，不触 autoplay 限制）。
+    // 落幕后纪念馆固定放第三幕「再次醒来」——告别曲。
+    const bgmActNo = SIGNAL_EVENT_ENDED ? (3 as const) : (bk && bk.status !== 'done') ? signalActFor((bk.poemCount || 0) + 1, bk.poemsTarget).no : null;
+    const { muted: bgmMuted, toggle: toggleBgm } = useSignalBGM(!offline, bgmActNo);
+
+    return (
+        <div className="absolute left-3 right-3 z-20 rounded-2xl overflow-hidden flex flex-col backdrop-blur-md"
+            style={{ top: VR_ROOM_PANEL_TOP, bottom: vrBottomPad('4rem'), background: 'linear-gradient(165deg,#241c31 0%,#17111f 52%,#0e0a15 100%)', border: '1px solid rgba(201,168,106,0.32)', boxShadow: '0 10px 30px rgba(0,0,0,.5), inset 0 0 60px rgba(0,0,0,.45)' }}>
+            {/* 复古质感层（重返1999调性）：纸纹微噪 + 暗角 + 顶部铜金微光 */}
+            <div className="pointer-events-none absolute inset-0 z-0 opacity-[0.05]" style={{ backgroundImage: 'radial-gradient(circle at 50% -10%, rgba(230,213,168,.9), transparent 55%), repeating-linear-gradient(0deg, rgba(255,255,255,.6) 0 1px, transparent 1px 3px)' }} />
+            <div className="pointer-events-none absolute inset-0 z-0" style={{ background: 'radial-gradient(125% 95% at 50% 32%, transparent 52%, rgba(6,4,10,.72) 100%)' }} />
+            <div className="pointer-events-none absolute inset-0 z-0" style={{ background: 'linear-gradient(180deg, rgba(201,168,106,.11), transparent 22%)' }} />
+            {/* 四角铜饰 */}
+            {[['top-1.5 left-1.5', 'border-t border-l'], ['top-1.5 right-1.5', 'border-t border-r'], ['bottom-1.5 left-1.5', 'border-b border-l'], ['bottom-1.5 right-1.5', 'border-b border-r']].map(([pos, b], i) => (
+                <div key={i} className={`pointer-events-none absolute ${pos} w-3.5 h-3.5 ${b} z-[25]`} style={{ borderColor: 'rgba(201,168,106,.55)' }} />
+            ))}
+            {/* 封面：标题 + 题记 */}
+            <div className="relative z-10 px-4 pt-3 pb-2.5" style={{ background: 'linear-gradient(180deg, rgba(58,44,74,.34), transparent)', borderBottom: '1px solid rgba(201,168,106,.22)' }}>
+                <div className="flex items-baseline gap-2">
+                    <span className="text-[15px] tracking-[0.22em]" style={{ fontFamily: `'Noto Serif SC',serif`, color: '#e8d6ab', textShadow: '0 0 14px rgba(201,168,106,.4)' }}>{bk?.title || '信号坠落处'}</span>
+                    {bk?.subtitle && <span className="text-[9px] tracking-[0.2em] text-amber-200/45">{bk.subtitle}</span>}
+                    {SIGNAL_EVENT_ENDED
+                        ? <span className="text-[8px] rounded-sm px-1.5 py-[1px] shrink-0" style={{ color: '#f0dca8', background: 'rgba(201,168,106,.16)', border: '1px solid rgba(201,168,106,.45)' }}>已落幕</span>
+                        : state?.paused && <span className="text-[8px] rounded-sm px-1.5 py-[1px] text-rose-100 shrink-0" style={{ background: 'rgba(244,63,94,.28)', border: '1px solid rgba(244,63,94,.5)' }}>已暂停</span>}
+                    <button onClick={toggleBgm} className="ml-auto shrink-0 grid place-items-center w-6 h-6 rounded-full text-amber-100/70 active:scale-90 transition-transform" style={{ border: '1px solid rgba(201,168,106,.3)' }} title={bgmMuted ? '播放 BGM' : '静音'} aria-label={bgmMuted ? '播放 BGM' : '静音'}>
+                        {bgmMuted ? <SpeakerSlash size={12} weight="fill" /> : <SpeakerHigh size={12} weight="fill" />}
+                    </button>
+                    {import.meta.env.DEV && <button onClick={() => setAdminOpen(true)} className="text-[9px] px-2 py-0.5 rounded-sm text-amber-100/70" style={{ border: '1px solid rgba(201,168,106,.3)' }}>后台</button>}
+                    {bk && <span className="text-[9px] tabular-nums" style={{ fontFamily: `'Noto Serif SC',serif`, color: 'rgba(201,168,106,.7)' }}>{bk.poemCount} / {bk.poemsTarget} 卷</span>}
+                </div>
+                {/* 铜金细分隔线 */}
+                <div className="mt-1.5 h-px w-full" style={{ background: 'linear-gradient(90deg, transparent, rgba(201,168,106,.5) 15%, rgba(201,168,106,.5) 85%, transparent)' }} />
+                <p className="mt-1.5 text-[10px] leading-relaxed whitespace-pre-line" style={{ fontStyle: 'italic', fontFamily: `'Noto Serif SC',serif`, color: 'rgba(224,208,176,.6)' }}>{SIGNAL_EPIGRAPH}</p>
+                {bk?.theme && <div className="text-[9.5px] mt-1" style={{ color: 'rgba(201,168,106,.6)' }}>主题 · {bk.theme}</div>}
+                {/* 三幕位置：现在写到第几首、身处哪一幕（落幕后不再有「正在写」，不显示） */}
+                {!SIGNAL_EVENT_ENDED && bk && bk.status !== 'done' && (() => { const ord = (bk.poemCount || 0) + 1; const act = signalActFor(ord, bk.poemsTarget); return (
+                    <div className="text-[9.5px] mt-1 tracking-wide" style={{ fontFamily: `'Noto Serif SC',serif`, color: 'rgba(201,168,106,.65)' }}>第 {ord} 首 · 第{['一', '二', '三'][act.no - 1]}幕「{act.title}」</div>
+                ); })()}
+                <div className="flex items-center gap-2 mt-2.5">
+                    {([['falling', SIGNAL_EVENT_ENDED ? '纪念馆' : '正在坠落'], ['sky', '星图']] as const).map(([k, label]) => (
+                        <button key={k} onClick={() => setTab(k)}
+                            className="text-[11px] tracking-[0.12em] pb-0.5 transition-colors" style={{
+                                fontFamily: `'Noto Serif SC',serif`,
+                                color: tab === k ? '#e8d6ab' : 'rgba(224,208,176,.45)',
+                                borderBottom: `1.5px solid ${tab === k ? 'rgba(201,168,106,.85)' : 'transparent'}`,
+                            }}>{label}</button>
+                    ))}
+                    {tab === 'sky' && (
+                        <button onClick={() => setMineOnly(m => !m)}
+                            className="ml-auto text-[9.5px] rounded-sm px-2 py-0.5 tracking-wide"
+                            style={{ color: mineOnly ? '#f0dca8' : 'rgba(224,208,176,.5)', background: mineOnly ? 'rgba(201,168,106,.16)' : 'transparent', border: `1px solid ${mineOnly ? 'rgba(201,168,106,.45)' : 'rgba(201,168,106,.18)'}` }}>
+                            只看我的回声
+                        </button>
+                    )}
+                </div>
+                {/* 参与：指定角色去接一句（黄铜压印质感）。首次参与先过一道知情提醒。
+                    活动落幕后写入停止，这里换成一条安静的落幕缎带 */}
+                {SIGNAL_EVENT_ENDED ? (
+                    <div className="mt-3 w-full rounded-md py-2 text-center text-[11px] tracking-[0.2em]"
+                        style={{ fontFamily: `'Noto Serif SC',serif`, color: 'rgba(232,214,171,.75)', border: '1px dashed rgba(201,168,106,.4)', background: 'rgba(201,168,106,.06)' }}>
+                        ❦ 活动已落幕 · 诗集永远开放
+                    </div>
+                ) : (
+                    <button onClick={() => (hasSignalNoticeAck() ? setPickOpen(true) : setNoticeOpen(true))} disabled={!!state?.paused}
+                        className="mt-3 w-full rounded-md py-2 text-[12px] tracking-[0.16em] active:scale-[0.99] disabled:opacity-45"
+                        style={{
+                            fontFamily: `'Noto Serif SC',serif`, color: '#2a2012', fontWeight: 700,
+                            background: 'linear-gradient(180deg, #e6ce97 0%, #c9a86a 55%, #a8874d 100%)',
+                            border: '1px solid rgba(120,92,48,.6)',
+                            boxShadow: '0 3px 12px rgba(120,92,48,.4), inset 0 1px 0 rgba(255,244,214,.7)',
+                        }}>
+                        {state?.paused ? '活动已暂停' : '❦ 参与 · 让我的角色接一句'}
+                    </button>
+                )}
+            </div>
+
+            <div className="relative z-10 flex-1 overflow-y-auto vr-reader-scroll">
+                {loading ? (
+                    <p className="text-[11px] text-center py-8" style={{ color: 'rgba(224,208,176,.4)', fontFamily: `'Noto Serif SC',serif` }}>接收信号中…</p>
+                ) : offline ? (
+                    <p className="text-[11px] text-center py-8 leading-relaxed" style={{ color: 'rgba(224,208,176,.45)', fontFamily: `'Noto Serif SC',serif` }}>连不上信号坠落处。<br />检查邮局后端地址，或稍后再来。</p>
+                ) : tab === 'falling' ? (
+                    SIGNAL_EVENT_ENDED ? (
+                        <SignalMemorial feed={feed} leftover={poem?.status === 'open' ? poem : null} onOpen={setOpenPoem} />
+                    ) : (
+                    <div className="px-4 py-3.5">
+                        {poem ? (
+                            <div>
+                                <div className="text-center mb-1">
+                                    <div className="text-[16.5px]" style={{ fontFamily: `'Noto Serif SC',serif`, color: '#ecdcb2', letterSpacing: '.08em', textShadow: '0 0 12px rgba(201,168,106,.3)' }}>《{cleanTitle(poem.title)}》</div>
+                                    <div className="my-1.5 flex items-center justify-center gap-2 text-[9px]" style={{ color: 'rgba(201,168,106,.6)' }}>
+                                        <span className="inline-block h-px w-8" style={{ background: 'linear-gradient(90deg,transparent,rgba(201,168,106,.55))' }} />❦<span className="inline-block h-px w-8" style={{ background: 'linear-gradient(90deg,rgba(201,168,106,.55),transparent)' }} />
+                                    </div>
+                                    <div className="text-[9px] tracking-[0.14em]" style={{ color: 'rgba(201,168,106,.55)', fontFamily: `'Noto Serif SC',serif` }}>篇幅 {poem.targetLines} · 已坠落 {poem.lineCount} · 还差 {Math.max(0, poem.targetLines - poem.lineCount)} 句封笔</div>
+                                    {poem.brief && <div className="mt-1.5 text-[9.5px] italic px-3 leading-relaxed" style={{ color: 'rgba(201,168,106,.5)', fontFamily: `'Noto Serif SC',serif` }}>{poem.brief}</div>}
+                                </div>
+                                <div className="mt-2">
+                                    {(() => { const auth = getMyAuthorship(poem.id); return (poem.lines || []).map((l, i) => <PoemLineRow key={l.seq} l={l} showSeq ordinal={i + 1} mineName={l.mine ? auth[String(l.seq)] : undefined} />); })()}
+                                    {/* 等下一次坠落：搏动的光标 = 一次 die 与重生的心跳 */}
+                                    <div className="flex gap-3 items-center pt-2">
+                                        <span className="tabular-nums text-[9px] shrink-0 w-5 text-right" style={{ fontFamily: `'Noto Serif SC',serif`, color: 'rgba(201,168,106,.4)' }}>{poem.lineCount + 1}</span>
+                                        <span className="inline-block h-3.5 w-[2px]" style={{ background: 'rgba(201,168,106,.85)', animation: 'vrtwinkle 1.4s ease-in-out infinite' }} />
+                                        <span className="text-[11px] italic" style={{ fontFamily: `'Noto Serif SC',serif`, color: 'rgba(224,208,176,.4)' }}>等下一次坠落…</span>
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            <p className="text-[11px] text-center py-8 leading-relaxed" style={{ color: 'rgba(224,208,176,.5)', fontFamily: `'Noto Serif SC',serif` }}>此刻信号静默，没有正在坠落的诗。<br />点上方「参与」，让你的角色起个新篇。</p>
+                        )}
+                    </div>
+                    )
+                ) : (
+                    visibleFeed.length === 0 ? (
+                        <p className="text-[11px] text-white/40 text-center py-8 leading-relaxed">{mineOnly ? '你的回声还没落进任何一颗卫星。' : '还没有写完封存的诗。'}</p>
+                    ) : (
+                        // 轨道图：一颗「始终不开口的核心」，每首封存的诗是一颗绕核慢转的电子卫星。
+                        // 只用 transform/opacity 动画（GPU 合成），手机也流畅；公转极慢，点得中。
+                        (() => {
+                            // 由内向外逐环装填；环容量与半径
+                            const CAPS = [6, 9, 12, 14];
+                            const RADII = [48, 84, 120, 152];
+                            const placed = visibleFeed.slice(0, CAPS.reduce((a, b) => a + b, 0)).map((p, i) => {
+                                let ring = 0, idx = i;
+                                while (ring < CAPS.length - 1 && idx >= CAPS[ring]) { idx -= CAPS[ring]; ring += 1; }
+                                return { p, ring, idx };
+                            });
+                            const usedRings = placed.length ? placed[placed.length - 1].ring + 1 : 1;
+                            const maxR = RADII[usedRings - 1];
+                            const canvasH = (maxR + 26) * 2;
+                            return (
+                                <div className="px-2 pt-3 pb-1">
+                                    {/* ── 轨道画布 ── */}
+                                    <div className="relative mx-auto overflow-hidden" style={{ height: canvasH, maxWidth: '100%' }}>
+                                        {/* 暖调星尘 */}
+                                        <div className="pointer-events-none absolute inset-0 opacity-60" style={{ backgroundImage: 'radial-gradient(1px 1px at 20% 12%, rgba(230,213,168,.5), transparent), radial-gradient(1px 1px at 66% 30%, rgba(201,168,106,.4), transparent), radial-gradient(1px 1px at 40% 60%, rgba(236,220,178,.35), transparent), radial-gradient(1px 1px at 82% 78%, rgba(201,168,106,.4), transparent)' }} />
+                                        {/* 轨道环（虚线，工程图纸感） */}
+                                        {RADII.slice(0, usedRings).map((r, i) => (
+                                            <div key={i} className="absolute left-1/2 top-1/2 rounded-full pointer-events-none"
+                                                style={{ width: r * 2, height: r * 2, marginLeft: -r, marginTop: -r, border: '1px dashed rgba(201,168,106,.16)' }} />
+                                        ))}
+                                        {/* 不开口的核心：暗核 + 慢呼吸的暖晕 */}
+                                        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none flex flex-col items-center">
+                                            <div className="rounded-full" style={{
+                                                width: 26, height: 26,
+                                                background: 'radial-gradient(circle at 36% 32%, #4a3c28, #241b10 62%, #120d07)',
+                                                boxShadow: '0 0 22px 6px rgba(201,168,106,.22), inset 0 0 8px rgba(230,206,151,.25)',
+                                                animation: 'sigpulse 5.5s ease-in-out infinite',
+                                            }} />
+                                            <div className="mt-1.5 text-[8px] tracking-[0.28em] whitespace-nowrap" style={{ fontFamily: `'Noto Serif SC',serif`, color: 'rgba(201,168,106,.42)' }}>不开口的核心</div>
+                                        </div>
+                                        {/* 卫星们：绕核慢转（负延迟错开初始相位；相邻环反向，像真实星系） */}
+                                        {placed.map(({ p, ring, idx }) => {
+                                            const mine = (p.mineCount || 0) > 0;
+                                            const r = RADII[ring];
+                                            const dur = 90 + ring * 50;                           // 越外圈越慢
+                                            const angle = (idx / CAPS[ring]) * 360 + (signalHashX(p.id) * 4) % 30; // 均布 + hash 抖动
+                                            const delay = -(angle / 360) * dur;                   // 用负延迟定初始相位
+                                            const sz = mine ? 13 : 10;
+                                            return (
+                                                <div key={p.id} className="absolute left-1/2 top-1/2 pointer-events-none"
+                                                    style={{ width: 0, height: 0, animation: `sigorbit ${dur}s linear infinite ${ring % 2 ? 'reverse' : 'normal'}`, animationDelay: `${delay}s` }}>
+                                                    <button onClick={() => setOpenPoem(p)} className="pointer-events-auto absolute -translate-y-1/2 active:scale-125 transition-transform"
+                                                        style={{ left: r, top: 0, padding: 9, margin: -9 }} title={cleanTitle(p.title)}>
+                                                        <span className="block rounded-full relative" style={{
+                                                            width: sz, height: sz,
+                                                            background: mine ? 'radial-gradient(circle at 34% 32%, #fff0c4, #e6ce97 55%, #c9a86a)' : 'radial-gradient(circle at 34% 32%, #cbbb92, #97815a 60%, #5e4e34)',
+                                                            boxShadow: mine ? '0 0 14px 3px rgba(230,206,151,.55), 0 0 0 3px rgba(201,168,106,.16)' : '0 0 7px 1px rgba(201,168,106,.3)',
+                                                        }}>
+                                                            {/* 信号灯：你的卫星每隔几秒眨一下 */}
+                                                            {mine && <span className="absolute rounded-full" style={{ width: 3, height: 3, right: -1, top: -1, background: '#fff7dd', boxShadow: '0 0 6px 2px rgba(255,240,200,.8)', animation: `sigblink ${3 + (signalHashX(p.id) % 4)}s linear infinite` }} />}
+                                                        </span>
+                                                    </button>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                    {/* ── 卫星名录：按三幕分组（每幕一块「戏本」，点标题读全文） ── */}
+                                    <div className="mt-2 mx-1 space-y-2">
+                                        {signalActRanges(bk?.poemsTarget || SIGNAL_POEMS_PER_BOOKLET).map(({ act, from, to }) => {
+                                            if (from > to) return null;
+                                            const poems = visibleFeed
+                                                .filter(p => poemAct(p)?.act.no === act.no)
+                                                .sort((a, b) => (ordinalOf.get(a.id) || 0) - (ordinalOf.get(b.id) || 0));
+                                            return (
+                                                <div key={act.no} className="rounded-lg overflow-hidden" style={{ border: '1px solid rgba(201,168,106,.14)' }}>
+                                                    <div className="flex items-baseline gap-2 px-3 py-1.5" style={{ background: 'linear-gradient(180deg, rgba(201,168,106,.1), rgba(201,168,106,.02))', borderBottom: '1px solid rgba(201,168,106,.12)' }}>
+                                                        <span className="text-[10.5px] tracking-[0.18em]" style={{ fontFamily: `'Noto Serif SC',serif`, color: '#e0c98f' }}>第{['一', '二', '三'][act.no - 1]}幕 · {act.title}</span>
+                                                        <span className="ml-auto text-[8.5px] tabular-nums shrink-0" style={{ fontFamily: `'Noto Serif SC',serif`, color: 'rgba(201,168,106,.45)' }}>第 {from}–{to} 首</span>
+                                                    </div>
+                                                    {poems.length === 0 ? (
+                                                        <p className="px-3 py-2 text-[9.5px] italic" style={{ fontFamily: `'Noto Serif SC',serif`, color: 'rgba(224,208,176,.35)' }}>{mineOnly ? '你的回声还没落进这一幕。' : '这一幕还静默着，等信号坠落。'}</p>
+                                                    ) : poems.map((p, i) => {
+                                                        const mine = (p.mineCount || 0) > 0;
+                                                        return (
+                                                            <button key={p.id} onClick={() => setOpenPoem(p)}
+                                                                className="w-full flex items-center gap-2 px-3 py-1.5 text-left active:bg-white/5"
+                                                                style={{ borderTop: i === 0 ? 'none' : '1px solid rgba(201,168,106,.08)' }}>
+                                                                <span className="text-[8.5px] tabular-nums shrink-0 w-4 text-right" style={{ fontFamily: `'Noto Serif SC',serif`, color: 'rgba(201,168,106,.4)' }}>{ordinalOf.get(p.id) || '—'}</span>
+                                                                <span className="rounded-full shrink-0" style={{ width: 6, height: 6, background: mine ? '#e6ce97' : 'rgba(151,129,90,.75)', boxShadow: mine ? '0 0 6px 1px rgba(230,206,151,.55)' : 'none' }} />
+                                                                <span className="text-[11.5px] truncate" style={{ fontFamily: `'Noto Serif SC',serif`, letterSpacing: '.04em', color: mine ? '#f0dca8' : 'rgba(224,208,176,.72)' }}>《{cleanTitle(p.title)}》</span>
+                                                                <span className="ml-auto text-[8.5px] tabular-nums shrink-0" style={{ fontFamily: `'Noto Serif SC',serif`, color: mine ? 'rgba(240,220,168,.6)' : 'rgba(201,168,106,.45)' }}>{p.lineCount} 句</span>
+                                                            </button>
+                                                        );
+                                                    })}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            );
+                        })()
+                    )
+                )}
+            </div>
+
+            {/* 底注：星图给「卫星 / 你的回声」计数；其它页给旁观说明 */}
+            <div className="relative z-10 px-4 py-1.5" style={{ borderTop: '1px solid rgba(201,168,106,.18)' }}>
+                {tab === 'sky' && feed.length > 0
+                    ? <p className="text-[9px] leading-relaxed" style={{ color: 'rgba(224,208,176,.5)' }}><span className="tabular-nums" style={{ color: '#ecdcb2' }}>{feed.length}</span> 颗卫星绕着不开口的核心转 · 其中 <span className="tabular-nums" style={{ color: '#f0dca8' }}>{myEchoes}</span> 颗载着你的回声</p>
+                    : SIGNAL_EVENT_ENDED
+                        ? <p className="text-[9px] leading-relaxed" style={{ color: 'rgba(224,208,176,.4)' }}>活动已落幕，写入已关闭——诗集与星图长期开放。换设备？去邮局导入身份码，你的信笺随身份找回。</p>
+                        : <p className="text-[9px] leading-relaxed" style={{ color: 'rgba(224,208,176,.4)' }}>所有用户的角色跨实例合写——你只能旁观。换设备？去邮局导出身份码，诗和信一起找回。</p>}
+            </div>
+
+            {/* 读一整首封存的诗 */}
+            {openPoem && (
+                <div className="absolute inset-0 z-30 flex flex-col" style={{ background: 'linear-gradient(165deg,#241c31,#120d1a 60%,#0b0812)' }} onClick={() => setOpenPoem(null)}>
+                    <div className="pointer-events-none absolute inset-0" style={{ background: 'radial-gradient(120% 90% at 50% 30%, transparent 52%, rgba(6,4,10,.7) 100%)' }} />
+                    <div className="relative flex-1 overflow-y-auto vr-reader-scroll px-6 py-7" onClick={e => e.stopPropagation()}>
+                        <div className="text-center mb-3">
+                            <div className="text-[18px]" style={{ fontFamily: `'Noto Serif SC',serif`, color: '#ecdcb2', letterSpacing: '.08em', textShadow: '0 0 14px rgba(201,168,106,.35)' }}>《{cleanTitle(openPoem.title)}》</div>
+                            <div className="my-2 flex items-center justify-center gap-2 text-[10px]" style={{ color: 'rgba(201,168,106,.6)' }}>
+                                <span className="inline-block h-px w-10" style={{ background: 'linear-gradient(90deg,transparent,rgba(201,168,106,.55))' }} />❦<span className="inline-block h-px w-10" style={{ background: 'linear-gradient(90deg,rgba(201,168,106,.55),transparent)' }} />
+                            </div>
+                            <div className="text-[9px] tracking-wider" style={{ fontFamily: `'Noto Serif SC',serif`, color: 'rgba(201,168,106,.55)' }}>{openPoem.lineCount} 句 · {(openPoem.mineCount || 0) > 0 ? <span style={{ color: '#f0dca8' }}>你的回声落在这里 {openPoem.mineCount} 句</span> : '一首陌生人合写的诗'}</div>
+                            {(() => { const pa = poemAct(openPoem); return pa && <div className="mt-1 text-[9px] tracking-[0.14em]" style={{ fontFamily: `'Noto Serif SC',serif`, color: 'rgba(201,168,106,.5)' }}>第 {pa.ord} 首 · 第{['一', '二', '三'][pa.act.no - 1]}幕「{pa.act.title}」</div>; })()}
+                            {openPoem.brief && <div className="mt-1.5 text-[9.5px] italic max-w-xs mx-auto leading-relaxed" style={{ fontFamily: `'Noto Serif SC',serif`, color: 'rgba(201,168,106,.5)' }}>{openPoem.brief}</div>}
+                        </div>
+                        <div className="max-w-md mx-auto">
+                            {(() => { const auth = getMyAuthorship(openPoem.id); return (openPoem.lines || []).map(l => <PoemLineRow key={l.seq} l={l} mineName={l.mine ? auth[String(l.seq)] : undefined} />); })()}
+                        </div>
+                    </div>
+                    <button onClick={() => setOpenPoem(null)} className="relative shrink-0 mx-auto mb-4 mt-1 text-[11px] tracking-[0.2em] rounded-sm px-6 py-1.5" style={{ fontFamily: `'Noto Serif SC',serif`, color: 'rgba(224,208,176,.75)', border: '1px solid rgba(201,168,106,.35)', marginBottom: vrBottomPad('1rem') }}>合 上</button>
+                </div>
+            )}
+
+            {/* 首次参与：特别活动知情提醒。确认过一次记在本地（随 vrSignal 备份），之后直接进选人层 */}
+            {noticeOpen && (
+                <div className="absolute inset-0 z-40 flex items-center justify-center px-6" style={{ background: 'rgba(6,4,10,0.88)' }} onClick={() => setNoticeOpen(false)}>
+                    <div className="w-full rounded-2xl px-4 pt-4 pb-3.5" onClick={e => e.stopPropagation()}
+                        style={{ background: 'linear-gradient(165deg,#2a2138,#17111f 70%)', border: '1px solid rgba(201,168,106,.4)', boxShadow: '0 12px 40px rgba(0,0,0,.6)' }}>
+                        <div className="text-center text-[13px] tracking-[0.2em]" style={{ fontFamily: `'Noto Serif SC',serif`, color: '#e8d6ab' }}>参与前，请读这一页</div>
+                        <div className="my-2 flex items-center justify-center gap-2 text-[9px]" style={{ color: 'rgba(201,168,106,.6)' }}>
+                            <span className="inline-block h-px w-8" style={{ background: 'linear-gradient(90deg,transparent,rgba(201,168,106,.55))' }} />❦<span className="inline-block h-px w-8" style={{ background: 'linear-gradient(90deg,rgba(201,168,106,.55),transparent)' }} />
+                        </div>
+                        <div className="space-y-2 text-[11px] leading-relaxed" style={{ color: 'rgba(224,208,176,.78)' }}>
+                            <p>信号坠落处是<span style={{ color: '#f0dca8' }}>跨用户的特别活动</span>：所有用户的角色跨实例合写同一首诗。</p>
+                            <p>你的角色接龙写下的内容，会对<span style={{ color: '#f0dca8' }}>所有其他用户公开可见</span>，可能被截图、二次传播。点「继续参与」即视为默认知情。</p>
+                            <p>若发现落笔内容涉及隐私，请<span style={{ color: '#f0dca8' }}>及时联系作者删除</span>。</p>
+                        </div>
+                        <button onClick={() => { ackSignalNotice(); setNoticeOpen(false); setPickOpen(true); }}
+                            className="mt-3.5 w-full rounded-md py-2 text-[12px] tracking-[0.16em] active:scale-[0.99]"
+                            style={{ fontFamily: `'Noto Serif SC',serif`, color: '#2a2012', fontWeight: 700, background: 'linear-gradient(180deg, #e6ce97 0%, #c9a86a 55%, #a8874d 100%)', border: '1px solid rgba(120,92,48,.6)', boxShadow: '0 3px 12px rgba(120,92,48,.4), inset 0 1px 0 rgba(255,244,214,.7)' }}>
+                            我已知情 · 继续参与
+                        </button>
+                        <button onClick={() => setNoticeOpen(false)} className="mt-2 w-full py-1.5 text-[10.5px] tracking-[0.2em]" style={{ fontFamily: `'Noto Serif SC',serif`, color: 'rgba(224,208,176,.5)' }}>再想想</button>
+                    </div>
+                </div>
+            )}
+
+            {/* 参与：指定角色去接一句 */}
+            {pickOpen && (
+                <div className="absolute inset-0 z-40 flex flex-col" style={{ background: 'rgba(6,7,22,0.95)' }} onClick={() => setPickOpen(false)}>
+                    <div className="px-3.5 py-2.5 border-b border-white/10 flex items-center gap-2" onClick={e => e.stopPropagation()}>
+                        <span className="text-[12px] text-indigo-100">让哪个角色去落笔？</span>
+                        <button onClick={() => setPickOpen(false)} className="ml-auto h-7 w-7 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center"><X size={14} /></button>
+                    </div>
+                    {/* 耳语：用户的话不进诗，但角色带着它写——你是那个不开口的核心 */}
+                    <div className="px-3.5 pt-2.5 pb-1" onClick={e => e.stopPropagation()}>
+                        <div className="text-[9px] tracking-[0.2em] mb-1" style={{ color: 'rgba(201,168,106,.6)' }}>留一句耳语（可空）</div>
+                        <input value={whisper} onChange={e => setWhisper(e.target.value)} maxLength={80}
+                            placeholder="例：写凶一点 / 想想我们看过的那场雪…"
+                            className="w-full rounded-lg px-3 py-2 text-[12px] outline-none" style={{ background: 'rgba(255,255,255,.06)', border: '1px solid rgba(201,168,106,.25)', color: '#ecdcb2' }} />
+                        <p className="mt-1 text-[9px] leading-relaxed" style={{ color: 'rgba(224,208,176,.45)' }}>这句话不会写进诗——诗是 ta 们的作品。但 ta 会带着它落笔。</p>
+                    </div>
+                    <div className="flex-1 overflow-y-auto vr-reader-scroll px-3 py-3 space-y-1.5" onClick={e => e.stopPropagation()}>
+                        {(() => { const joined = characters.filter(c => c.vrState?.enabled); return joined.length === 0 ? (
+                            <p className="text-[11px] text-white/40 text-center py-8 leading-relaxed">还没有角色接入彼方。<br />先去「接入」页给 ta 开启自主登入。</p>
+                        ) : joined.map(c => (
+                            <button key={c.id} onClick={() => participate(c)} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl active:bg-white/5" style={{ background: 'rgba(255,255,255,.04)', border: '1px solid rgba(255,255,255,.06)' }}>
+                                {c.avatar ? <img src={c.avatar} className="h-8 w-8 rounded-full object-cover shrink-0" alt="" /> : <div className="h-8 w-8 rounded-full bg-indigo-400/40 shrink-0 flex items-center justify-center text-[12px] text-white/90">{c.name.slice(0, 1)}</div>}
+                                <span className="text-[12.5px] text-white/90 truncate">{c.name}</span>
+                                <span className="ml-auto text-[10px] text-indigo-300/60 shrink-0">去落笔 →</span>
+                            </button>
+                        )); })()}
+                    </div>
+                    <div className="px-3.5 py-2 border-t border-white/10"><p className="text-[9px] text-indigo-300/45 leading-relaxed">选中的角色会占住这一笔、调用一次 LLM——接上当前这首诗，或没有正在写的诗时起个新篇。你不落笔，但你是这片轨道正中央、那个不开口的核心。几秒后自动刷新。</p></div>
+                </div>
+            )}
+
+            {/* 后台（dev-only）：删诗/删句/暂停推入 */}
+            {adminOpen && <SignalAdminPanel onClose={() => { setAdminOpen(false); void load(); void loadFeed(); }} addToast={addToast} />}
+        </div>
+    );
+};
+
 const RoomScene: React.FC<{
     roomId: VRRoomId; occupants: CharacterProfile[];
     latestByChar: Record<string, FeedItem>; onClose: () => void;
@@ -1554,6 +2330,7 @@ const RoomScene: React.FC<{
     const isGuestbook = roomId === 'guestbook';
     const isPostOffice = roomId === 'postoffice';
     const isTheater = roomId === 'theater';
+    const isSignal = roomId === 'signal';
     const [detail, setDetail] = useState<CharacterProfile | null>(null);
     const [musicState, setMusicState] = useState<VRMusicRoomState | null>(null);
     const [board, setBoard] = useState<VRGuestbookState | null>(null);
@@ -1758,6 +2535,9 @@ const RoomScene: React.FC<{
 
                 {/* 剧院：话剧部门面板（投稿 / 编排 / 演出 / 历史） */}
                 {isTheater && <TheaterPanel addToast={addToast} />}
+
+                {/* 信号坠落处：看当前合写的诗 + 翻阅诗集 + 参与（指定角色接一句） */}
+                {isSignal && <SignalPanel addToast={addToast} characters={characters} />}
 
                 {/* chibi 站位（可隐藏，避免挡住留言墙等文字） */}
                 {!hideChibi && occupants.map((c, i) => {
@@ -2306,6 +3086,7 @@ const ChibiEditor: React.FC<{
                 </div>
                 <div className="flex-1 min-h-0">
                     <CreatorIframe mode="char" charName={char.name} isSully={isSully} presets={presets}
+                        savedState={existing?.state}
                         draftKey={`vr_${char.id}`} title={`捏一个小人 · ${char.name}`} subtitle="彼方 · CHIBI"
                         onConfirm={onConfirm} />
                 </div>
@@ -2376,6 +3157,7 @@ const UserChibiEditor: React.FC<{
         return (
             <div className="fixed inset-0 z-[60] flex flex-col bg-black" style={{ paddingTop: VR_TOP }}>
                 <CreatorIframe mode="user" charName={userName} presets={presets}
+                    savedState={existing?.state}
                     draftKey="vr_user" title={`捏一个你自己 · ${userName}`} subtitle="彼方 · 你的 CHIBI"
                     onConfirm={onConfirm} />
             </div>
@@ -2507,6 +3289,9 @@ const SettingsView: React.FC<{
     onEditChibi: (char: CharacterProfile) => void;
 }> = ({ characters, updateCharacter, addToast, novelCount, onReload, onRequestEnable, onEditChibi }) => {
     const [pickFor, setPickFor] = useState<CharacterProfile | null>(null);
+    // 接入列表的分组筛选（characters 由 props 传入，这里单独取 characterGroups 即可）
+    const { characterGroups } = useOS();
+    const [settingsGroupId, setSettingsGroupId] = useState<string>(GROUP_FILTER_ALL);
     const go = (room?: VRRoomId) => {
         if (!pickFor) return;
         VRScheduler.triggerNow(pickFor.id, room);
@@ -2531,7 +3316,12 @@ const SettingsView: React.FC<{
                 {novelCount === 0 && <span className="text-amber-300/80"> 书库还空着，先去「书库」上传一本。</span>}
             </p>
             {characters.length === 0 && <p className="text-[11px] text-indigo-300/50 py-4 text-center">还没有角色。</p>}
-            {characters.map(char => {
+            {/* 分组筛选（没建分组时不渲染）：深色底 */}
+            <CharacterGroupFilterBar characters={characters} groups={characterGroups} dark
+                value={settingsGroupId} onChange={setSettingsGroupId} />
+            {characters.length > 0 && filterCharactersByGroup(characters, characterGroups, settingsGroupId).length === 0 &&
+                <p className="text-[11px] text-indigo-300/50 py-4 text-center">该分组下没有角色</p>}
+            {filterCharactersByGroup(characters, characterGroups, settingsGroupId).map(char => {
                 const st = char.vrState;
                 const enabled = !!st?.enabled;
                 const interval = st?.intervalMinutes || VR_DEFAULT_INTERVAL_MIN;
@@ -2582,6 +3372,7 @@ const SettingsView: React.FC<{
                     { label: '留言簿 · 发帖版聊', onClick: () => go('guestbook') },
                     { label: '娱乐室 · 放开玩', onClick: () => go('gym') },
                     { label: '邮局 · 写漂流信', onClick: () => go('postoffice') },
+                    // 信号坠落处不放这里：参与统一走活动 banner → 面板「✍ 参与」，那条路才有「耳语」
                 ]} onClose={() => setPickFor(null)} />
         </div>
     );
@@ -2729,6 +3520,10 @@ const VRStyleTag: React.FC = () => (
         @keyframes vrdance { 0%{transform:translateY(0) rotate(-5deg)} 25%{transform:translateY(-9px) rotate(3deg)} 50%{transform:translateY(0) rotate(5deg)} 75%{transform:translateY(-9px) rotate(-3deg)} 100%{transform:translateY(0) rotate(-5deg)} }
         @keyframes vraurora { 0%,100%{transform:translate(0,0) scale(1);opacity:.75} 50%{transform:translate(6%,4%) scale(1.14);opacity:1} }
         @keyframes vrtwinkle { 0%,100%{opacity:.5} 50%{opacity:.85} }
+        /* 信号坠落处 · 电子卫星轨道（纯 transform/opacity，GPU 合成，手机友好） */
+        @keyframes sigorbit { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        @keyframes sigpulse { 0%,100% { transform: scale(1); opacity: .8; } 50% { transform: scale(1.12); opacity: 1; } }
+        @keyframes sigblink { 0%,88%,100% { opacity: 0; } 90%,96% { opacity: 1; } }
     `}</style>
 );
 

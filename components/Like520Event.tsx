@@ -11,8 +11,10 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
+import { creatorPartToBlobRefs, loadCreatorPartsForRender } from '../utils/creatorPartsBlob';
 import { CharacterProfile, SpecialMomentRecord } from '../types';
 import { safeResponseJson } from '../utils/safeApi';
+import { assetMirrors, attachAudioMirrorFallback } from '../utils/assetUrl';
 import {
     runLike520CallA,
     runLike520CallB,
@@ -106,12 +108,12 @@ const TUCAO_OPTIONS: { key: Like520TucaoKey; label: string }[] = [
 // Sully 识别（专属预设）
 // ============================================================
 
-const isSullyChar = (char: CharacterProfile): boolean => {
+export const isSullyChar = (char: CharacterProfile): boolean => {
     return (char.name || '').toLowerCase().includes('sully');
 };
 
-const sullyPresets = (): Record<string, string> => ({
-    skin: 'skin_1',
+export const sullyPresets = (): Record<string, string> => ({
+    skin: 'skin_01',        // 新画风身体（内置素材包 parts/manifest.json；旧 skin_1 已被折叠）
     fronthair: 'fronthair_99',
     back1: 'back1_99',
     eyes: 'eyes_99',
@@ -125,6 +127,8 @@ export interface CreatorIframeProps {
     mode: 'char' | 'user';
     charName?: string;
     presets?: Record<string, any>;
+    /** 捏人器导出的完整 state：整套还原选件+换色+翻转（草稿仍优先；比 presets 优先） */
+    savedState?: any;
     isSully?: boolean;
     /** 唯一草稿键（如彼方按 char.id），让草稿按角色隔离、与 520 互不串 */
     draftKey?: string;
@@ -137,7 +141,7 @@ export interface CreatorIframeProps {
 
 const CHAR_CREATOR_URL = (((import.meta as any).env?.BASE_URL ?? '/') + 'like520/character_creator.html').replace(/\/+/g, '/');
 
-export const CreatorIframe: React.FC<CreatorIframeProps> = ({ mode, charName, presets, isSully, draftKey, title, subtitle, onConfirm }) => {
+export const CreatorIframe: React.FC<CreatorIframeProps> = ({ mode, charName, presets, savedState, isSully, draftKey, title, subtitle, onConfirm }) => {
     const iframeRef = useRef<HTMLIFrameElement>(null);
     // 自定义部件（开发模式上传）—— 异步从 DB 读出
     const extraItemsRef = useRef<any[]>([]);
@@ -146,8 +150,8 @@ export const CreatorIframe: React.FC<CreatorIframeProps> = ({ mode, charName, pr
 
     // 最新参数 / 回调放 ref：让订阅与初始化的 effect 只跑一次，
     // 避免父组件重渲导致反复重发 init（会触发 applyLike520Init 重置当前选择 → "弹回上一个"）
-    const paramsRef = useRef({ mode, charName, presets, isSully, draftKey, title, subtitle });
-    paramsRef.current = { mode, charName, presets, isSully, draftKey, title, subtitle };
+    const paramsRef = useRef({ mode, charName, presets, savedState, isSully, draftKey, title, subtitle });
+    paramsRef.current = { mode, charName, presets, savedState, isSully, draftKey, title, subtitle };
     const onConfirmRef = useRef(onConfirm);
     onConfirmRef.current = onConfirm;
 
@@ -184,9 +188,11 @@ export const CreatorIframe: React.FC<CreatorIframeProps> = ({ mode, charName, pr
         let cancelled = false;
         (async () => {
             try {
-                const parts = await DB.getCustomCreatorParts();
+                // 部件在库里以 Blob 令牌存（省配额），这里解析回 base64 供 iframe 用；
+                // 顺手把存量旧 base64 惰性迁移成令牌。
+                const parts = await loadCreatorPartsForRender();
                 if (cancelled) return;
-                extraItemsRef.current = parts.map(p => ({ categoryKey: p.categoryKey, id: p.id, name: p.name, src: p.src, tintable: !!p.tintable }));
+                extraItemsRef.current = parts.map(p => ({ categoryKey: p.categoryKey, id: p.id, name: p.name, src: p.src, tintable: !!p.tintable, shadowSrc: p.shadowSrc }));
                 if (readyRef.current) postAddItems();
             } catch { /* 没有自定义部件时静默 */ }
         })();
@@ -211,14 +217,16 @@ export const CreatorIframe: React.FC<CreatorIframeProps> = ({ mode, charName, pr
                     state: e.data.payload.state,
                 });
             } else if (e.data.type === 'like520_save_custom_part' && e.data.payload?.part) {
-                // 捏人器界面内上传的自定义部件 → 落库（IndexedDB），刷新/换 app 都还在
+                // 捏人器界面内上传的自定义部件 → 落库（IndexedDB），刷新/换 app 都还在。
+                // 落库前把 base64 src/shadowSrc 转成 Blob 令牌（省配额）；内存里仍留 base64 喂 iframe。
                 const p = e.data.payload.part;
                 const part = {
                     id: p.id, categoryKey: p.categoryKey, name: p.name,
-                    src: p.src, tintable: !!p.tintable, createdAt: Date.now(),
+                    src: p.src, tintable: !!p.tintable, shadowSrc: p.shadowSrc, createdAt: Date.now(),
                 };
-                DB.saveCustomCreatorPart(part)
-                    .then(() => { extraItemsRef.current = [...extraItemsRef.current, { categoryKey: part.categoryKey, id: part.id, name: part.name, src: part.src, tintable: part.tintable }]; })
+                creatorPartToBlobRefs(part)
+                    .then(stored => DB.saveCustomCreatorPart(stored))
+                    .then(() => { extraItemsRef.current = [...extraItemsRef.current, { categoryKey: p.categoryKey, id: p.id, name: p.name, src: p.src, tintable: !!p.tintable, shadowSrc: p.shadowSrc }]; })
                     .catch(() => { /* 落库失败：内存里仍可用，仅本次会话有效 */ });
             } else if (e.data.type === 'like520_delete_custom_part' && e.data.payload?.id) {
                 const id = e.data.payload.id;
@@ -2486,7 +2494,8 @@ const LetterView: React.FC<{ text: string; onNext: () => void; onClose: () => vo
  * 1200×780 左右的横版 520 DAY 装饰框（蕾丝 doily + 爱心/星星/小花），
  * 中间是空白的圆形 doily，让两个 chibi 居中靠下排进去。
  */
-const LIKE520_PHOTO_BG_URL = 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/img/2.png';
+// 拼图合影底图（仓库相对路径，多 CDN 镜像兜底）。canvas 需 CORS，各 CDN 均返回 CORS 头。
+const LIKE520_PHOTO_BG_PATH = 'img/2.png';
 
 async function composePuzzlePhoto(charChibiUrl: string, userChibiUrl: string): Promise<string> {
     const load = (src: string): Promise<HTMLImageElement> => new Promise((resolve, reject) => {
@@ -2496,8 +2505,13 @@ async function composePuzzlePhoto(charChibiUrl: string, userChibiUrl: string): P
         img.onerror = reject;
         img.src = src;
     });
+    // 底图逐个镜像试，拉到就用；用户 chibi 是本机数据、无镜像可切，直接 load。
+    const loadFirst = async (mirrors: string[]): Promise<HTMLImageElement> => {
+        for (const u of mirrors) { try { return await load(u); } catch { /* 换下一个镜像 */ } }
+        throw new Error('拼图底图全部镜像加载失败');
+    };
     const [bg, charImg, userImg] = await Promise.all([
-        load(LIKE520_PHOTO_BG_URL),
+        loadFirst(assetMirrors(LIKE520_PHOTO_BG_PATH)),
         load(charChibiUrl),
         load(userChibiUrl),
     ]);
@@ -2784,28 +2798,12 @@ type BGMGroupKey = 'nieren' | 'yangcheng' | 'jieju' | 'letter';
  *   - letter    读信（letter）
  * 进入活动时各组随机抽一条预加载，phase 切换时在已抽的 4 条之间 crossfade。
  */
+// 仓库相对路径，经 attachAudioMirrorFallback 走多 CDN 镜像兜底（见 utils/assetUrl.ts）。
 const LIKE520_BGM_GROUPS: Record<BGMGroupKey, string[]> = {
-    nieren: [
-        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/nieren/1.mp3',
-        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/nieren/2.mp3',
-    ],
-    yangcheng: [
-        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/yangcheng/1.mp3',
-        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/yangcheng/2.mp3',
-        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/yangcheng/3.mp3',
-        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/yangcheng/4.mp3',
-    ],
-    jieju: [
-        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/jiejuhezhao/1.mp3',
-        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/jiejuhezhao/2.mp3',
-        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/jiejuhezhao/3.mp3',
-    ],
-    letter: [
-        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/letter/1.mp3',
-        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/letter/2.mp3',
-        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/letter/3.mp3',
-        'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/letter/4.mp3',
-    ],
+    nieren: ['bgm/nieren/1.mp3', 'bgm/nieren/2.mp3'],
+    yangcheng: ['bgm/yangcheng/1.mp3', 'bgm/yangcheng/2.mp3', 'bgm/yangcheng/3.mp3', 'bgm/yangcheng/4.mp3'],
+    jieju: ['bgm/jiejuhezhao/1.mp3', 'bgm/jiejuhezhao/2.mp3', 'bgm/jiejuhezhao/3.mp3'],
+    letter: ['bgm/letter/1.mp3', 'bgm/letter/2.mp3', 'bgm/letter/3.mp3', 'bgm/letter/4.mp3'],
 };
 
 const BGM_MUTED_KEY = 'sullyos_like520_bgm_muted';
@@ -2878,8 +2876,8 @@ function useLike520BGM(active: boolean, currentGroup: BGMGroupKey | null) {
 
         console.log('[520][BGM] init | muted=', mutedRef.current, '| HAS_BGM=', HAS_BGM);
         (Object.keys(LIKE520_BGM_GROUPS) as BGMGroupKey[]).forEach(key => {
-            const url = pickRandom(LIKE520_BGM_GROUPS[key]);
-            if (!url) return;
+            const path = pickRandom(LIKE520_BGM_GROUPS[key]);
+            if (!path) return;
             try {
                 const audio = new Audio();
                 audio.loop = true;
@@ -2888,11 +2886,13 @@ function useLike520BGM(active: boolean, currentGroup: BGMGroupKey | null) {
                 audio.addEventListener('error', () => console.warn(`[520][BGM] ${key} audio error`, audio.error?.code, audio.src));
                 audio.addEventListener('canplay', () => console.log(`[520][BGM] ${key} canplay`));
                 // 注：不设 crossOrigin —— HTMLAudioElement 普通播放不需要 CORS，
-                // 设了反而要求 CDN 必须返回 CORS 头，否则整段播放失败
-                audio.src = url;
+                // 设了反而要求 CDN 必须返回 CORS 头，否则整段播放失败。
+                // attachAudioMirrorFallback 设好首源并挂 error 兜底：加载失败自动切下一个 CDN 镜像。
+                // audio 一经创建即固定本组，生命周期内不换曲，兜底监听不会堆叠，无需解绑。
+                attachAudioMirrorFallback(audio, path);
                 audio.load();
                 audiosRef.current[key] = audio;
-                console.log(`[520][BGM] ${key} → ${url}`);
+                console.log(`[520][BGM] ${key} → ${audio.src}`);
             } catch (err) {
                 console.warn(`[520][BGM] failed to init ${key}:`, err);
             }
@@ -3418,6 +3418,7 @@ export const Like520Session: React.FC<SessionProps> = ({ charId, onClose }) => {
                         mode="char"
                         charName={char.name}
                         presets={isSullyChar(char) ? sullyPresets() : undefined}
+                        savedState={char.chibiStudio?.like520?.state ?? existingData?.charChibi?.state}
                         isSully={isSullyChar(char)}
                         onConfirm={handleCharChibiConfirm}
                     />

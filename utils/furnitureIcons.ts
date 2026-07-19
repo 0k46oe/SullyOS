@@ -202,6 +202,27 @@ const pizzaSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72"
   <circle cx="34" cy="52" r="3.5" fill="#16a34a" opacity="0.7"/>
 </svg>`;
 
+const rugSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72" fill="none">
+  <defs>
+    <linearGradient id="rg1" x1="6" y1="24" x2="66" y2="52"><stop stop-color="#fda4af"/><stop offset="1" stop-color="#f43f5e"/></linearGradient>
+  </defs>
+  <rect x="6" y="24" width="60" height="28" rx="5" fill="url(#rg1)"/>
+  <rect x="11" y="28" width="50" height="20" rx="3" fill="#fff1f2" opacity="0.4"/>
+  <rect x="17" y="32" width="38" height="12" rx="2" fill="#be123c" opacity="0.4"/>
+  <rect x="6" y="24" width="60" height="3" fill="white" opacity="0.15"/>
+  <path d="M9 52v4M15 52v4M21 52v4M27 52v4M33 52v4M39 52v4M45 52v4M51 52v4M57 52v4M63 52v4" stroke="#fecdd3" stroke-width="2" stroke-linecap="round"/>
+</svg>`;
+
+const roundRugSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72" fill="none">
+  <defs>
+    <radialGradient id="rr1" cx="0.5" cy="0.45" r="0.6"><stop stop-color="#a5f3fc"/><stop offset="1" stop-color="#06b6d4"/></radialGradient>
+  </defs>
+  <ellipse cx="36" cy="38" rx="30" ry="18" fill="url(#rr1)"/>
+  <ellipse cx="36" cy="38" rx="23" ry="13.5" fill="none" stroke="#ecfeff" stroke-width="2" opacity="0.6"/>
+  <ellipse cx="36" cy="38" rx="15" ry="8.5" fill="none" stroke="#0e7490" stroke-width="2" opacity="0.45"/>
+  <ellipse cx="36" cy="38" rx="7" ry="4" fill="#cffafe" opacity="0.7"/>
+</svg>`;
+
 // ── 导出 Data URI ──────────────────────────────────
 
 export const FURNITURE_ICONS = {
@@ -221,4 +242,6 @@ export const FURNITURE_ICONS = {
     coffee: svgToDataUri(coffeeSvg),
     cake: svgToDataUri(cakeSvg),
     pizza: svgToDataUri(pizzaSvg),
+    rug: svgToDataUri(rugSvg),
+    roundRug: svgToDataUri(roundRugSvg),
 };

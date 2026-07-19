@@ -5,6 +5,7 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useOS } from '../context/OSContext';
 import { ChatTheme, BubbleStyle } from '../types';
 import { processImage } from '../utils/file';
+import { validateScopedCss, runCssRenderabilityCheck, CssValidationResult } from '../utils/scopedCss';
 
 const cloneTheme = (theme: ChatTheme): ChatTheme => {
     if (typeof structuredClone === 'function') {
@@ -262,13 +263,6 @@ type CssSnippet = {
     code: string;
 };
 
-type CssValidationResult = {
-    isValid: boolean;
-    errors: string[];
-    errorLines: number[];
-    importantCount: number;
-};
-
 const TARGET_SELECTOR_REGEX = /^\.sully-bubble-(user|ai)\b/;
 
 const isValidHttpImageUrl = (value: string) => {
@@ -280,110 +274,9 @@ const isValidHttpImageUrl = (value: string) => {
     }
 };
 
-const findLineNumberByIndex = (input: string, index: number) => input.slice(0, index).split('\n').length;
-
-const extractLineFromErrorMessage = (message: string) => {
-    const lineMatch = message.match(/line\s*(\d+)/i);
-    return lineMatch ? parseInt(lineMatch[1], 10) : null;
-};
-
-const validateCustomCss = (css: string): CssValidationResult => {
-    const source = css || '';
-    const errors: string[] = [];
-    const errorLines: number[] = [];
-    const pushError = (message: string, line?: number | null) => {
-        errors.push(message);
-        if (line && !Number.isNaN(line)) {
-            errorLines.push(line);
-        }
-    };
-
-    const importantCount = (source.match(/!important/g) || []).length;
-    if (!source.trim()) {
-        return { isValid: true, errors: [], errorLines: [], importantCount };
-    }
-
-    // Minimal syntax check 1: browser parser
-    try {
-        if (typeof CSSStyleSheet !== 'undefined') {
-            const sheet = new CSSStyleSheet();
-            sheet.replaceSync(source);
-        }
-    } catch (error: any) {
-        pushError(`CSS 语法错误：${error?.message || '请检查语法。'}`, extractLineFromErrorMessage(error?.message || ''));
-    }
-
-    // Minimal syntax check 2: brace balance
-    const braceStack: number[] = [];
-    [...source].forEach((char, index) => {
-        if (char === '{') braceStack.push(index);
-        if (char === '}') {
-            if (braceStack.length === 0) {
-                pushError('发现多余的 `}`，请检查大括号闭合。', findLineNumberByIndex(source, index));
-            } else {
-                braceStack.pop();
-            }
-        }
-    });
-    braceStack.forEach(index => pushError('存在未闭合的 `{`，请补全规则块。', findLineNumberByIndex(source, index)));
-
-    // Scope check: only allow .sully-bubble-user / .sully-bubble-ai
-    // Ignore comments first to avoid false positives like:
-    // /* comment */ .sully-bubble-user { ... }
-    const sourceWithoutComments = source.replace(/\/\*[\s\S]*?\*\//g, '');
-    const selectorRegex = /([^{}]+)\{/g;
-    let selectorMatch = selectorRegex.exec(sourceWithoutComments);
-    while (selectorMatch) {
-        const selectorGroup = selectorMatch[1].trim();
-        if (!selectorGroup.startsWith('@')) {
-            const selectorList = selectorGroup.split(',').map(item => item.trim()).filter(Boolean);
-            selectorList.forEach(selector => {
-                if (!TARGET_SELECTOR_REGEX.test(selector)) {
-                    pushError(
-                        `选择器 \`${selector}\` 超出限定范围，仅允许以 .sully-bubble-user / .sully-bubble-ai 开头。`,
-                        findLineNumberByIndex(sourceWithoutComments, selectorMatch.index)
-                    );
-                }
-            });
-        }
-        selectorMatch = selectorRegex.exec(sourceWithoutComments);
-    }
-
-    return {
-        isValid: errors.length === 0,
-        errors,
-        errorLines,
-        importantCount
-    };
-};
-
-const runCssRenderabilityCheck = (css: string, validation: CssValidationResult) => {
-    if (!validation.isValid) {
-        return {
-            ok: false,
-            message: `CSS 不可渲染：第 ${validation.errorLines[0] || '?'} 行附近存在错误，请先修复。`
-        };
-    }
-
-    if (!css.trim()) {
-        return { ok: true, message: '' };
-    }
-
-    try {
-        const styleEl = document.createElement('style');
-        styleEl.textContent = css;
-        document.head.appendChild(styleEl);
-        const ruleCount = styleEl.sheet?.cssRules?.length ?? 0;
-        styleEl.remove();
-        if (ruleCount === 0) {
-            return { ok: false, message: 'CSS 未生成有效规则，请确认语法和选择器。' };
-        }
-    } catch (error: any) {
-        return { ok: false, message: `CSS 渲染检查失败：${error?.message || '未知错误。'}` };
-    }
-
-    return { ok: true, message: '' };
-};
+// 校验实现挪去 utils/scopedCss.ts（心象卡片的自定义 CSS 复用同一套），这里只绑定气泡作用域
+const validateCustomCss = (css: string): CssValidationResult =>
+    validateScopedCss(css, TARGET_SELECTOR_REGEX, '.sully-bubble-user / .sully-bubble-ai');
 
 const CSS_SCOPE_SNIPPETS: CssSnippet[] = [
     {
@@ -542,7 +435,7 @@ const PREVIEW_SCENES: PreviewScene[] = [
 ];
 
 const ThemeMaker: React.FC = () => {
-    const { closeApp, addCustomTheme, addToast } = useOS();
+    const { closeApp, addCustomTheme, removeCustomTheme, addToast, characters, updateCharacter, customThemes } = useOS();
     const [initialThemeId] = useState(() => `theme-${Date.now()}`);
     const [editingTheme, setEditingTheme] = useState<ChatTheme>({ ...DEFAULT_THEME, id: initialThemeId });
     const [activeTab, setActiveTab] = useState<'user' | 'ai' | 'css'>('user');
@@ -555,6 +448,7 @@ const ThemeMaker: React.FC = () => {
     const [lastSavedTheme, setLastSavedTheme] = useState<ChatTheme>(() => cloneTheme({ ...DEFAULT_THEME, id: initialThemeId }));
     const [isDirty, setIsDirty] = useState(false);
     const [pendingDiscardAction, setPendingDiscardAction] = useState<(() => void) | null>(null);
+    const [pendingDeleteTheme, setPendingDeleteTheme] = useState<ChatTheme | null>(null);
     const [showLowContrastConfirm, setShowLowContrastConfirm] = useState(false);
     const [pendingSaveExit, setPendingSaveExit] = useState(false);
     const [isAppliedToPreview, setIsAppliedToPreview] = useState(false);
@@ -564,12 +458,18 @@ const ThemeMaker: React.FC = () => {
     const [previewToggleTarget, setPreviewToggleTarget] = useState<'A' | 'B'>('A');
     const [lastUsableCss, setLastUsableCss] = useState('');
     const [isPreviewFullscreen, setIsPreviewFullscreen] = useState(false);
+    // 保存后的「应用到角色」弹层：勾选 = 该角色 bubbleStyle 指向本主题，取消勾选 = 回落默认气泡
+    const [showApplySheet, setShowApplySheet] = useState(false);
+    const [applySelection, setApplySelection] = useState<Set<string>>(new Set());
     const [assetUrlDraft, setAssetUrlDraft] = useState<Record<'bg' | 'deco' | 'avatarDeco', string>>({ bg: '', deco: '', avatarDeco: '' });
+    const [isThemeLibraryOpen, setIsThemeLibraryOpen] = useState(false);
+    const [themeLibrarySearch, setThemeLibrarySearch] = useState('');
     
     // Local state for sliders
     const [paddingVal, setPaddingVal] = useState(12);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const themeImportInputRef = useRef<HTMLInputElement>(null);
     const decorationInputRef = useRef<HTMLInputElement>(null);
     const avatarDecoInputRef = useRef<HTMLInputElement>(null);
     const cssTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -623,6 +523,72 @@ const ThemeMaker: React.FC = () => {
     };
 
     const requestClose = () => withDiscardGuard(() => closeApp());
+
+    const editSavedTheme = (theme: ChatTheme) => withDiscardGuard(() => {
+        const copy = cloneTheme(theme);
+        setEditingTheme(copy);
+        setLastSavedTheme(cloneTheme(copy));
+        setIsDirty(false);
+        setIsAppliedToPreview(true);
+        setUndoStack([]);
+        setRedoStack([]);
+        setPaddingVal(extractPaddingFromCss(copy.customCss || ''));
+        addToast(`正在修改「${theme.name}」`, 'info');
+    });
+
+    // 导入别人分享的 .sully-bubble.json（exportSavedTheme 的逆操作，此前只有导出没有入口）。
+    // 兼容两种形态：完整导出包 {kind:'sullyos-chat-theme', theme} 或直接一个 ChatTheme 对象。
+    // 永远发新 id（防覆盖自己已有作品）；CSS 走与保存一致的可渲染性校验，坏 CSS 不入库。
+    const importThemeFile = async (file: File) => {
+        try {
+            const parsed = JSON.parse(await file.text());
+            const raw = (parsed && typeof parsed === 'object' && parsed.kind === 'sullyos-chat-theme') ? parsed.theme : parsed;
+            if (!raw || typeof raw !== 'object' || !raw.user || !raw.ai) {
+                addToast('导入失败：不是有效的气泡主题文件', 'error');
+                return;
+            }
+            const css = typeof raw.customCss === 'string' ? raw.customCss : '';
+            if (css) {
+                const renderability = runCssRenderabilityCheck(css, validateCustomCss(css));
+                if (!renderability.ok) {
+                    addToast(`导入失败：${renderability.message}`, 'error');
+                    return;
+                }
+            }
+            const baseName = String(raw.name || '导入的气泡').slice(0, 30);
+            const name = customThemes.some(t => t.name === baseName) ? `${baseName}（导入）` : baseName;
+            const imported: ChatTheme = { ...raw, id: `custom-${Date.now()}-${Math.floor(Math.random() * 1e4)}`, type: 'custom', name };
+            addCustomTheme(imported);
+            addToast(`已导入「${name}」，在作品区可选用`, 'success');
+        } catch {
+            addToast('导入失败：无法解析文件', 'error');
+        }
+    };
+
+    const exportSavedTheme = (theme: ChatTheme) => {
+        const blob = new Blob([JSON.stringify({ kind: 'sullyos-chat-theme', version: 1, theme }, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `${(theme.name || '自定义气泡').replace(/[\\/:*?\"<>|]/g, '_')}.sully-bubble.json`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
+        addToast(`已导出「${theme.name}」`, 'success');
+    };
+
+    // 删除只移除气泡库里的存档；若正在编辑这套气泡，工坊内容保留为未保存状态，避免用户手滑丢稿。
+    const confirmDeleteTheme = () => {
+        const theme = pendingDeleteTheme;
+        if (!theme) return;
+        setPendingDeleteTheme(null);
+        removeCustomTheme(theme.id);
+        if (editingTheme.id === theme.id) {
+            setIsAppliedToPreview(false);
+        }
+        addToast(`已删除「${theme.name}」`, 'success');
+    };
 
     // Initialize padding state from CSS on load
     useEffect(() => {
@@ -697,8 +663,35 @@ const ThemeMaker: React.FC = () => {
         setLastSavedTheme(cloneTheme(editingTheme));
         setIsDirty(false);
         setIsAppliedToPreview(true);
-        addToast('已保存并应用到当前聊天预览', 'success');
-        if (exitAfterSave) closeApp();
+        addToast('已保存到气泡库', 'success');
+        if (exitAfterSave) { closeApp(); return; }
+        // 保存 ≠ 生效：气泡要指派给角色才会在聊天里出现。保存完直接弹「应用到角色」，
+        // 预勾选已经在用这套气泡的角色（再次保存同名主题时不打乱现状）。
+        if (characters.length > 0) {
+            setApplySelection(new Set(characters.filter(c => (c as any).bubbleStyle === editingTheme.id).map(c => c.id)));
+            setShowApplySheet(true);
+        }
+    };
+
+    const applyThemeToCharacters = () => {
+        let applied = 0;
+        let removed = 0;
+        characters.forEach(c => {
+            const usingThis = (c as any).bubbleStyle === editingTheme.id;
+            if (applySelection.has(c.id) && !usingThis) {
+                updateCharacter(c.id, { bubbleStyle: editingTheme.id } as any);
+                applied += 1;
+            } else if (!applySelection.has(c.id) && usingThis) {
+                updateCharacter(c.id, { bubbleStyle: 'default' } as any);
+                removed += 1;
+            }
+        });
+        setShowApplySheet(false);
+        if (applied || removed) {
+            addToast(`已应用到 ${applySelection.size} 个角色${removed ? `，${removed} 个角色回落默认气泡` : ''}`, 'success');
+        } else {
+            addToast('角色气泡没有变化', 'info');
+        }
     };
 
     const saveTheme = ({ exitAfterSave }: { exitAfterSave: boolean }) => {
@@ -971,11 +964,15 @@ const ThemeMaker: React.FC = () => {
     };
 
     const parsedBgColor = parseColorValue(activeStyle.backgroundColor);
+    const visibleSavedThemes = useMemo(() => {
+        const query = themeLibrarySearch.trim().toLowerCase();
+        return query ? customThemes.filter(theme => (theme.name || '').toLowerCase().includes(query)) : customThemes;
+    }, [customThemes, themeLibrarySearch]);
 
     return (
         <div className="h-full w-full bg-slate-50 flex flex-col font-light relative">
             {/* Header */}
-            <div className="bg-white/70 backdrop-blur-md border-b border-white/40 shrink-0 z-20" style={{ paddingTop: 'var(--safe-top)' }}>
+            <div className="bg-white/70 backdrop-blur-md border-b border-white/40 shrink-0 z-20 sticky top-0" style={{ paddingTop: 'max(var(--safe-top, 0px), env(safe-area-inset-top, 0px))' }}>
             <div className="flex items-center px-4 py-3 justify-between">
                 <div className="flex items-center gap-2">
                     <button onClick={requestClose} className="p-2 -ml-2 rounded-full hover:bg-black/5 active:scale-90 transition-transform">
@@ -987,17 +984,78 @@ const ThemeMaker: React.FC = () => {
                         <h1 className="text-xl font-medium text-slate-700">气泡工坊</h1>
                         <div className="text-[10px] flex items-center gap-1.5 text-slate-500">
                             <span className={`inline-flex w-2 h-2 rounded-full ${isAppliedToPreview && !isDirty ? 'bg-emerald-500' : 'bg-amber-400'}`}></span>
-                            {isAppliedToPreview && !isDirty ? '已应用到当前聊天预览' : '预览未应用最新改动'}
+                            {isAppliedToPreview && !isDirty ? '已保存到气泡库' : '有未保存的改动'}
                         </div>
                     </div>
                 </div>
                 <div className="flex items-center gap-2">
                     <button onClick={() => saveTheme({ exitAfterSave: false })} className="px-4 py-1.5 bg-primary text-white rounded-full text-xs font-bold shadow-lg shadow-primary/30 active:scale-95 transition-all">
-                        保存并应用
+                        保存
                     </button>
                 </div>
             </div>
             </div>
+
+            {/* 用户作品区：保存后的气泡可回到工坊继续编辑，也可单独导出分享。 */}
+            <section className="shrink-0 bg-white/80 border-b border-slate-100 px-4 py-3">
+                <button type="button" onClick={() => setIsThemeLibraryOpen(prev => !prev)} aria-expanded={isThemeLibraryOpen} className="w-full flex items-center justify-between text-left">
+                    <div>
+                        <h2 className="text-xs font-bold text-slate-600">我的自定义气泡</h2>
+                        <p className="text-[10px] text-slate-400 mt-0.5">点击{isThemeLibraryOpen ? '收起' : '展开并选择'} · 可搜索、导入、修改或导出</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-slate-400">{customThemes.length} 套</span>
+                        <span className={`text-slate-400 transition-transform ${isThemeLibraryOpen ? 'rotate-180' : ''}`} aria-hidden>⌄</span>
+                    </div>
+                </button>
+                {isThemeLibraryOpen && (
+                    <div className="mt-2 flex justify-end">
+                        <input
+                            type="file"
+                            ref={themeImportInputRef}
+                            className="hidden"
+                            accept=".json,application/json"
+                            onChange={(e) => { const f = e.target.files?.[0]; if (f) importThemeFile(f); e.target.value = ''; }}
+                        />
+                        <button
+                            onClick={() => themeImportInputRef.current?.click()}
+                            className="px-3 py-1.5 rounded-xl bg-slate-100 text-slate-600 text-[11px] font-bold active:scale-95 transition-transform"
+                        >
+                            ⬆ 导入气泡文件
+                        </button>
+                    </div>
+                )}
+                {isThemeLibraryOpen && (customThemes.length > 0 ? (
+                    <div className="mt-3">
+                        {customThemes.length > 6 && (
+                            <input value={themeLibrarySearch} onChange={e => setThemeLibrarySearch(e.target.value)} placeholder="搜索我的气泡…" className="w-full mb-2.5 px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs outline-none focus:border-indigo-300" />
+                        )}
+                        <div className="grid grid-cols-2 gap-2 max-h-[42vh] overflow-y-auto no-scrollbar pb-1">
+                        {visibleSavedThemes.map((theme: ChatTheme) => (
+                            <div key={theme.id} className={`min-w-0 rounded-2xl border p-2.5 ${editingTheme.id === theme.id ? 'border-indigo-300 bg-indigo-50/70' : 'border-slate-200 bg-white'}`}>
+                                <div className="flex items-center gap-2 min-w-0">
+                                    <span className="flex -space-x-1 shrink-0">
+                                        <span className="w-5 h-5 rounded-full border-2 border-white shadow-sm" style={{ background: theme.user?.backgroundColor || '#6366f1' }} />
+                                        <span className="w-5 h-5 rounded-full border-2 border-white shadow-sm" style={{ background: theme.ai?.backgroundColor || '#fff' }} />
+                                    </span>
+                                    <span className="text-xs font-bold text-slate-700 truncate">{theme.name}</span>
+                                </div>
+                                <div className="grid grid-cols-3 gap-1.5 mt-2.5">
+                                    <button onClick={() => editSavedTheme(theme)} className="py-1.5 rounded-xl bg-indigo-50 text-indigo-600 text-[11px] font-bold">选择载入</button>
+                                    <button onClick={() => exportSavedTheme(theme)} className="py-1.5 rounded-xl bg-slate-100 text-slate-600 text-[11px] font-bold">导出</button>
+                                    <button onClick={() => setPendingDeleteTheme(theme)} className="py-1.5 rounded-xl bg-red-50 text-red-500 text-[11px] font-bold">删除</button>
+                                </div>
+                            </div>
+                        ))}
+                        </div>
+                        {visibleSavedThemes.length === 0 && <div className="py-4 text-center text-[10px] text-slate-400">没有找到「{themeLibrarySearch.trim()}」</div>}
+                    </div>
+                ) : (
+                    <div className="mt-3 rounded-2xl border border-dashed border-slate-200 px-3 py-2.5 text-[11px] text-slate-400">
+                        还没有作品。完成设计并保存后，会陈列在这里。
+                    </div>
+                ))}
+            </section>
 
             {/* Preview Area (Realistic Chat Row) */}
             <div className={`${isPreviewFullscreen ? 'fixed inset-0 z-[120]' : 'flex-1'} relative overflow-hidden flex flex-col p-4 justify-center items-center gap-4 ${isPreviewDark ? 'bg-slate-900' : 'bg-slate-100'}`}>
@@ -1498,6 +1556,20 @@ const ThemeMaker: React.FC = () => {
                 </div>
             )}
 
+            {/* Delete saved theme confirm */}
+            {pendingDeleteTheme && (
+                <div className="absolute inset-0 z-[999] bg-black/40 backdrop-blur-sm flex items-center justify-center px-6">
+                    <div className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl">
+                        <div className="text-base font-bold text-slate-700">删除这套气泡？</div>
+                        <p className="mt-2 text-sm text-slate-500">「{pendingDeleteTheme.name}」将从气泡库中移除，正在使用它的角色会回落到默认气泡。此操作无法撤销，删除前可先导出备份。</p>
+                        <div className="mt-5 flex gap-3">
+                            <button onClick={() => setPendingDeleteTheme(null)} className="flex-1 py-2.5 rounded-2xl bg-slate-100 text-slate-600 font-bold">取消</button>
+                            <button onClick={confirmDeleteTheme} className="flex-1 py-2.5 rounded-2xl bg-red-500 text-white font-bold">删除</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Low contrast confirm */}
             {showLowContrastConfirm && (
                 <div className="absolute inset-0 z-[999] bg-black/40 backdrop-blur-sm flex items-center justify-center px-6">
@@ -1507,6 +1579,75 @@ const ThemeMaker: React.FC = () => {
                         <div className="mt-5 flex gap-3">
                             <button onClick={() => setShowLowContrastConfirm(false)} className="flex-1 py-2.5 rounded-2xl bg-slate-100 text-slate-600 font-bold">再调整一下</button>
                             <button onClick={() => { setShowLowContrastConfirm(false); doSaveTheme(pendingSaveExit); }} className="flex-1 py-2.5 rounded-2xl bg-amber-500 text-white font-bold">仍然保存</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* 保存后的「应用到角色」弹层：保存只是进气泡库，指派给角色才会真正在聊天里生效 */}
+            {showApplySheet && (
+                <div className="absolute inset-0 z-[999] bg-black/40 backdrop-blur-sm flex items-end sm:items-center justify-center" onClick={() => setShowApplySheet(false)}>
+                    <div
+                        className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-3xl shadow-2xl max-h-[80%] flex flex-col"
+                        onClick={e => e.stopPropagation()}
+                    >
+                        <div className="px-5 pt-5 pb-3 border-b border-slate-100 shrink-0">
+                            <div className="text-base font-bold text-slate-700">✅ 已存进气泡库 · 给谁穿上？</div>
+                            <p className="mt-1.5 text-[11px] text-slate-400 leading-relaxed">
+                                勾选角色，「{editingTheme.name}」就会用在 ta 的聊天里；取消勾选则换回默认气泡。
+                                想全局生效就点「全选」。之后也能随时在 <b>聊天 → 顶栏会话面板 → 气泡样式</b> 里切换。
+                            </p>
+                            <p className="mt-1 text-[10px] text-slate-400 leading-relaxed">
+                                气泡主题会盖过「外观 → 聊天界面」的可视化设置；但角色手写的「白框」自定义 CSS 优先级更高，撞上时以 CSS 为准。
+                            </p>
+                            <div className="mt-2.5 flex items-center gap-2">
+                                <button
+                                    onClick={() => setApplySelection(new Set(characters.map(c => c.id)))}
+                                    className="text-[10px] px-2.5 py-1 rounded-lg bg-slate-100 text-slate-500 font-bold active:scale-95 transition"
+                                >
+                                    全选
+                                </button>
+                                <button
+                                    onClick={() => setApplySelection(new Set())}
+                                    className="text-[10px] px-2.5 py-1 rounded-lg bg-slate-100 text-slate-500 font-bold active:scale-95 transition"
+                                >
+                                    全不选
+                                </button>
+                                <span className="text-[10px] text-slate-400 ml-auto">已选 {applySelection.size}/{characters.length}</span>
+                            </div>
+                        </div>
+                        <div className="flex-1 overflow-y-auto no-scrollbar px-5 py-3 space-y-2">
+                            {characters.map(c => {
+                                const checked = applySelection.has(c.id);
+                                const currentBubble = (c as any).bubbleStyle;
+                                const usingThis = currentBubble === editingTheme.id;
+                                return (
+                                    <div
+                                        key={c.id}
+                                        onClick={() => setApplySelection(prev => {
+                                            const next = new Set(prev);
+                                            if (next.has(c.id)) next.delete(c.id); else next.add(c.id);
+                                            return next;
+                                        })}
+                                        className={`flex items-center gap-3 p-2.5 rounded-2xl border cursor-pointer transition-all ${checked ? 'bg-indigo-50/80 border-indigo-200' : 'bg-white border-slate-100'}`}
+                                    >
+                                        <img src={c.avatar} className="w-10 h-10 rounded-xl object-cover shrink-0" alt="" />
+                                        <div className="flex-1 min-w-0">
+                                            <div className="text-[13px] font-bold text-slate-700 truncate">{c.name}</div>
+                                            <div className="text-[10px] text-slate-400 truncate">
+                                                {usingThis ? '正在用这套气泡' : (currentBubble && currentBubble !== 'default' ? '在用其他气泡' : '默认气泡')}
+                                            </div>
+                                        </div>
+                                        <div className={`shrink-0 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${checked ? 'bg-indigo-500 border-indigo-500' : 'border-slate-300'}`}>
+                                            {checked && <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                        <div className="px-5 py-4 border-t border-slate-100 flex gap-3 shrink-0" style={{ paddingBottom: 'calc(1rem + var(--safe-bottom, 0px))' }}>
+                            <button onClick={() => setShowApplySheet(false)} className="flex-1 py-2.5 rounded-2xl bg-slate-100 text-slate-600 font-bold text-sm">稍后再说</button>
+                            <button onClick={applyThemeToCharacters} className="flex-1 py-2.5 rounded-2xl bg-primary text-white font-bold text-sm shadow-lg shadow-primary/30">应用</button>
                         </div>
                     </div>
                 </div>

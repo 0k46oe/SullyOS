@@ -13,6 +13,7 @@ import {
     CHANGELOG_2026_06_14,
     CHANGELOG_2026_06_21,
     CHANGELOG_2026_06_26,
+    CHANGELOG_2026_07_10,
 } from '../components/UpdateNotificationEvent';
 
 const FAQ_DATA = [
@@ -85,6 +86,13 @@ const FAQ_DATA = [
         solution: "1. **严格检查格式**：必须是 `名字--URL`，中间是**两个减号**！\n   错误：`滑稽 http://...`\n   正确：`滑稽--http://...`\n2. **检查链接**：必须是图片直链（.jpg/.png/.gif 结尾）。\n3. **一行一个**：不要把所有内容写在一行里。",
         icon: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f5bc.png",
         color: "bg-cyan-50 text-cyan-700"
+    },
+    {
+        q: "11. 点聊天输入框没反应 / 键盘唤不起来？",
+        reason: "多半是随备份一起导入的美化在捣乱：白框自定义 CSS、气泡主题或聊天背景把输入框盖住/禁用了。这类数据跟着备份走，所以重启、重新导入备份都没用，而全新页面（没导数据）反而正常。",
+        solution: "按顺序排查：\n1. 【外观】→【聊天界面】→ **还原白框美化**（一键清掉全局和所有角色的白框 CSS）。\n2. 点顶部角色名 → 把「气泡样式」换回默认。\n3. 关掉该角色的聊天背景图。\n4. 还不行：换个浏览器（如 Safari）打开同一链接导入备份试试；仍复现请把备份 JSON 按第 7 条发给作者。",
+        icon: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/2328.png",
+        color: "bg-teal-50 text-teal-700"
     }
 ];
 
@@ -98,6 +106,14 @@ interface ChangelogEntry {
 }
 
 const CHANGELOG_ENTRIES: ChangelogEntry[] = [
+    {
+        id: CHANGELOG_2026_07_10,
+        title: '2026 年 7 月 10 日 · 生活统计',
+        subtitle: '档案「生活统计」四模块 + 角色注入代记 · 彼方全服写诗 · 捏人换画风 + PSD 批量导入 + 手办区 · 神经链接角色分组 · 小屋装修大升级 + 家园「凌晨」段 · 记忆宫殿门牌（测试中）· 专属提示铃声 · 壁纸/小屋图改存 Blob · 一大批 iOS 适配与散修',
+        date: '2026-07-10',
+        src: 'changelogs/2026-7-10.html',
+        accent: 'from-rose-100 to-violet-100 border-rose-200',
+    },
     {
         id: CHANGELOG_2026_06_26,
         title: '2026 年 6 月 26 日 · 梦境盲盒',

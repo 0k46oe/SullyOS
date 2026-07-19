@@ -23,8 +23,10 @@ export const UPDATE_NOTIFICATION_KEY_2026_06_05 = 'sullyos_update_2026_06_05_see
 export const UPDATE_NOTIFICATION_KEY_2026_06_14 = 'sullyos_update_2026_06_14_seen';
 // 历史 key —— 6.21 「查手机」翻新 + 人格模拟 · 手游风外观 · 小红书分享
 export const UPDATE_NOTIFICATION_KEY_2026_06_21 = 'sullyos_update_2026_06_21_seen';
-// 本次更新 key —— 6.26 梦境盲盒 · 联系人模式 · char 的小手机 · 见面状态栏 · 时间感知归位 · 鱼声 TTS
+// 历史 key —— 6.26 梦境盲盒 · 联系人模式 · char 的小手机 · 见面状态栏 · 时间感知归位 · 鱼声 TTS
 export const UPDATE_NOTIFICATION_KEY_2026_06_26 = 'sullyos_update_2026_06_26_seen';
+// 本次更新 key —— 7.10 生活统计 · 全服写诗 · 画风重构 · 角色分组 · 记忆宫殿门牌 等
+export const UPDATE_NOTIFICATION_KEY_2026_07_10 = 'sullyos_update_2026_07_10_seen';
 
 export const FAQ_TARGET_SECTION_KEY = 'sullyos_faq_target_section';
 export const CHANGELOG_2026_04 = 'changelog-2026-04';
@@ -36,10 +38,11 @@ export const CHANGELOG_2026_06_05 = 'changelog-2026-06-05';
 export const CHANGELOG_2026_06_14 = 'changelog-2026-06-14';
 export const CHANGELOG_2026_06_21 = 'changelog-2026-06-21';
 export const CHANGELOG_2026_06_26 = 'changelog-2026-06-26';
+export const CHANGELOG_2026_07_10 = 'changelog-2026-07-10';
 
 export const shouldShowUpdateNotification = (): boolean => {
     try {
-        return !localStorage.getItem(UPDATE_NOTIFICATION_KEY_2026_06_26);
+        return !localStorage.getItem(UPDATE_NOTIFICATION_KEY_2026_07_10);
     } catch {
         return false;
     }
@@ -54,15 +57,15 @@ export const UpdateNotificationPopup: React.FC<UpdateNotificationPopupProps> = (
 
     const handleView = () => {
         try {
-            localStorage.setItem(UPDATE_NOTIFICATION_KEY_2026_06_26, Date.now().toString());
-            sessionStorage.setItem(FAQ_TARGET_SECTION_KEY, CHANGELOG_2026_06_26);
+            localStorage.setItem(UPDATE_NOTIFICATION_KEY_2026_07_10, Date.now().toString());
+            sessionStorage.setItem(FAQ_TARGET_SECTION_KEY, CHANGELOG_2026_07_10);
         } catch { /* ignore */ }
         openApp(AppID.FAQ);
         onClose();
     };
 
     const handleDismiss = () => {
-        try { localStorage.setItem(UPDATE_NOTIFICATION_KEY_2026_06_26, Date.now().toString()); } catch { /* ignore */ }
+        try { localStorage.setItem(UPDATE_NOTIFICATION_KEY_2026_07_10, Date.now().toString()); } catch { /* ignore */ }
         onClose();
     };
 
@@ -76,20 +79,20 @@ export const UpdateNotificationPopup: React.FC<UpdateNotificationPopupProps> = (
                         alt="update"
                         className="w-10 h-10 mx-auto mb-2"
                     />
-                    <h2 className="text-lg font-extrabold text-slate-800">新功能上线 · 梦境盲盒</h2>
-                    <p className="text-[11px] text-slate-400 mt-1">2026 年 6 月 26 日 · 7 项更新</p>
+                    <h2 className="text-lg font-extrabold text-slate-800">大版本更新 · 生活统计</h2>
+                    <p className="text-[11px] text-slate-400 mt-1">2026 年 7 月 10 日 · 10 项更新</p>
                 </div>
 
                 <div className="px-6 pb-4 space-y-3">
                     <div className="bg-gradient-to-br from-indigo-50 to-violet-50 border border-indigo-100 rounded-2xl p-4">
                         <p className="text-[13px] text-slate-700 leading-relaxed">
-                            <strong className="text-indigo-600">「小屋」</strong>新增<strong className="text-violet-600">梦境系统</strong>：进角色小屋后刷新，可看 ta 的梦，集齐 <strong>13 款梦境盲盒</strong>。
+                            <strong className="text-indigo-600">「档案」</strong>新增<strong className="text-violet-600">生活统计</strong>：生理期 / 药盒 / 记账 / 锻炼四模块，还能让角色<strong>注入代记</strong>——聊天时随口说吃药了、花了多少，ta 帮你记。
                         </p>
                         <p className="text-[12px] text-slate-500 leading-relaxed mt-2">
-                            <strong className="text-indigo-600">「查手机」</strong>新增<strong>联系人模式</strong>（看人际关系、删好友）与<strong className="text-violet-600">智能体</strong>——char 也有自己的小手机，你还能扮演 ta 酒馆里的 AI。
+                            <strong className="text-indigo-600">「彼方」</strong>开了场<strong>全服写诗</strong>；<strong className="text-violet-600">捏人</strong>换新画风 + PSD 批量导入 + 手办区；<strong>神经链接</strong>支持<strong>角色分组</strong>。
                         </p>
                         <p className="text-[12px] text-slate-500 leading-relaxed mt-2">
-                            还有：<strong>见面</strong>新增可自定义状态栏、设置前移；<strong>日程</strong>看得更细；<strong className="text-violet-600">时间感知</strong>归位到神经链接；<strong>TTS</strong> 新增<strong>鱼声 API</strong>。
+                            还有：<strong>小屋</strong>装修大升级 + 家园新增「凌晨」段；<strong className="text-violet-600">记忆宫殿</strong>门牌（测试中）；<strong>专属提示铃声</strong>；壁纸/小屋图改存 Blob；一大批 iOS 适配与散修。
                         </p>
                     </div>
                     <div className="bg-violet-50 border border-violet-200 rounded-2xl p-3">

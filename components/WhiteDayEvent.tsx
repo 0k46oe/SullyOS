@@ -27,8 +27,8 @@ import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 // 留空则使用纯色占位背景
 // ============================================================
 export const WHITEDAY_ASSETS = {
-    chocolateBottom: 'https://sharkpan.xyz/f/dDzLi8/001.png', // 底层：完整巧克力心形
-    chocolateTop: 'https://sharkpan.xyz/f/lmD6Tx/002.png',    // 顶层：外框（中心透明），覆盖用户照片外缘
+    chocolateBottom: 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/001.png', // 底层：完整巧克力心形
+    chocolateTop: 'https://cdn.jsdelivr.net/gh/qegj567-cloud/SullyOS-assets@main/bgm/SULLY/002.png',    // 顶层：外框（中心透明），覆盖用户照片外缘
 };
 
 // ============================================================

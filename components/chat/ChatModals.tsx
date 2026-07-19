@@ -4,6 +4,7 @@ import Modal from '../os/Modal';
 import { CharacterProfile, Message, EmojiCategory, DailySchedule, ScheduleSlot, ApiPreset, APIConfig } from '../../types';
 import ScheduleCard from '../schedule/ScheduleCard';
 import EmotionSettingsPanel from './EmotionSettingsPanel';
+import { isTranslationLangPreset, normalizeTranslationLangLabel, TRANSLATION_LANG_MAX_LENGTH, TRANSLATION_LANG_PRESETS } from '../../utils/translationLang';
 
 interface ChatModalsProps {
     modalType: string;
@@ -116,6 +117,10 @@ interface ChatModalsProps {
     // Memory Palace force vectorize
     isMemoryPalaceEnabled?: boolean;
     isVectorizing?: boolean;
+    /** 待处理条数（排除热区的真实缓冲区口径）：null=未算出/未开弹窗，0=已全同步 */
+    vectorizePendingCount?: number | null;
+    /** 处理中的逐轮进度文案，如「第 2 轮 · 剩余 340 条」 */
+    vectorizeProgress?: string;
     onForceVectorize?: () => void;
     // Emotion (embedded under schedule modal, synced on/off with scheduleStyle)
     apiPresets?: ApiPreset[];
@@ -123,6 +128,84 @@ interface ChatModalsProps {
     onSaveEmotion?: (config: NonNullable<CharacterProfile['emotionConfig']>) => void;
     onClearBuffs?: () => void;
 }
+
+interface TranslationLanguagePickerProps {
+    label: string;
+    value?: string;
+    tone: 'source' | 'target';
+    inputPlaceholder: string;
+    onSelect?: (lang: string) => void;
+}
+
+const TranslationLanguagePicker: React.FC<TranslationLanguagePickerProps> = ({
+    label,
+    value,
+    tone,
+    inputPlaceholder,
+    onSelect,
+}) => {
+    const [customLang, setCustomLang] = useState('');
+    const selectedClass = tone === 'source' ? 'bg-slate-700 text-white' : 'bg-primary text-white';
+    const customSelected = !!value && !isTranslationLangPreset(value);
+    const normalizedCustomLang = normalizeTranslationLangLabel(customLang);
+
+    const applyCustomLang = () => {
+        if (!normalizedCustomLang) return;
+        onSelect?.(normalizedCustomLang);
+        setCustomLang('');
+    };
+
+    return (
+        <div>
+            <label className="text-[10px] font-bold text-slate-400 mb-1.5 block">{label}</label>
+            <div className="flex flex-wrap gap-1.5">
+                {TRANSLATION_LANG_PRESETS.map(lang => (
+                    <button
+                        type="button"
+                        key={`${tone}-${lang}`}
+                        onClick={() => onSelect?.(lang)}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-all ${value === lang ? selectedClass : 'bg-slate-100 text-slate-500'}`}
+                    >
+                        {lang}
+                    </button>
+                ))}
+                {customSelected && (
+                    <button
+                        type="button"
+                        onClick={() => value && onSelect?.(value)}
+                        className={`max-w-full px-2.5 py-1 rounded-full text-[11px] font-bold transition-all truncate ${selectedClass}`}
+                        title={value}
+                    >
+                        {value}
+                    </button>
+                )}
+            </div>
+            <div className="mt-2 flex gap-1.5">
+                <input
+                    value={customLang}
+                    onChange={e => setCustomLang(e.target.value)}
+                    onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            applyCustomLang();
+                        }
+                    }}
+                    maxLength={TRANSLATION_LANG_MAX_LENGTH}
+                    placeholder={inputPlaceholder}
+                    className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[12px] text-slate-700 outline-none focus:border-primary"
+                />
+                <button
+                    type="button"
+                    onClick={applyCustomLang}
+                    disabled={!normalizedCustomLang}
+                    className={`shrink-0 px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition-all ${normalizedCustomLang ? selectedClass : 'bg-slate-100 text-slate-300'}`}
+                >
+                    套用
+                </button>
+            </div>
+        </div>
+    );
+};
 
 const ChatModals: React.FC<ChatModalsProps> = ({
     modalType, setModalType,
@@ -152,7 +235,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     scheduleData, isScheduleGenerating, onScheduleEdit, onScheduleDelete, onScheduleReroll, onScheduleCoverChange,
     onScheduleStyleChange, onPlayTheater,
     isScheduleFeatureEnabled, onToggleScheduleFeature,
-    isMemoryPalaceEnabled, isVectorizing, onForceVectorize,
+    isMemoryPalaceEnabled, isVectorizing, vectorizePendingCount, vectorizeProgress, onForceVectorize,
     apiPresets, onAddApiPreset, onSaveEmotion, onClearBuffs,
 }) => {
     const bgInputRef = useRef<HTMLInputElement>(null);
@@ -329,36 +412,20 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                          </p>
                          {translationEnabled && (
                              <div className="mt-3 space-y-3">
-                                 {/* Source Language (选) */}
-                                 <div>
-                                     <label className="text-[10px] font-bold text-slate-400 mb-1.5 block">选（气泡显示语言）</label>
-                                     <div className="flex flex-wrap gap-1.5">
-                                         {['中文', 'English', '日本語', '한국어', 'Français', 'Español'].map(lang => (
-                                             <button
-                                                 key={`src-${lang}`}
-                                                 onClick={() => onSetTranslateSourceLang?.(lang)}
-                                                 className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-all ${translateSourceLang === lang ? 'bg-slate-700 text-white' : 'bg-slate-100 text-slate-500'}`}
-                                             >
-                                                 {lang}
-                                             </button>
-                                         ))}
-                                     </div>
-                                 </div>
-                                 {/* Target Language (译) */}
-                                 <div>
-                                     <label className="text-[10px] font-bold text-slate-400 mb-1.5 block">译（翻译目标语言）</label>
-                                     <div className="flex flex-wrap gap-1.5">
-                                         {['中文', 'English', '日本語', '한국어', 'Français', 'Español'].map(lang => (
-                                             <button
-                                                 key={`tgt-${lang}`}
-                                                 onClick={() => onSetTranslateLang?.(lang)}
-                                                 className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-all ${translateTargetLang === lang ? 'bg-primary text-white' : 'bg-slate-100 text-slate-500'}`}
-                                             >
-                                                 {lang}
-                                             </button>
-                                         ))}
-                                     </div>
-                                 </div>
+                                 <TranslationLanguagePicker
+                                     label="选（气泡显示语言）"
+                                     value={translateSourceLang}
+                                     tone="source"
+                                     inputPlaceholder="自定义，如 粤语"
+                                     onSelect={onSetTranslateSourceLang}
+                                 />
+                                 <TranslationLanguagePicker
+                                     label="译（翻译目标语言）"
+                                     value={translateTargetLang}
+                                     tone="target"
+                                     inputPlaceholder="自定义，如 中文（繁體）"
+                                     onSelect={onSetTranslateLang}
+                                 />
                                  {/* Preview */}
                                  <div className="text-[11px] text-center text-slate-500 bg-slate-50 rounded-lg py-2">
                                      选<span className="font-bold text-slate-700">{translateSourceLang || '?'}</span> 译<span className="font-bold text-primary">{translateTargetLang || '?'}</span>
@@ -447,13 +514,20 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                              <button
                                  onClick={onForceVectorize}
                                  disabled={isVectorizing}
-                                 className="w-full py-3 bg-emerald-50 text-emerald-600 font-bold rounded-2xl border border-emerald-200 active:scale-95 transition-transform flex items-center justify-center gap-2"
+                                 className="w-full py-3 bg-emerald-50 text-emerald-600 font-bold rounded-2xl border border-emerald-200 active:scale-95 transition-transform flex items-center justify-center gap-2 disabled:opacity-70"
                              >
-                                 {isVectorizing ? '🏰 存进记忆宫殿中...' : '🏰 一键把所有聊天存进记忆宫殿'}
+                                 {isVectorizing
+                                     ? `🏰 ${vectorizeProgress || '存进记忆宫殿中...'}`
+                                     : (vectorizePendingCount != null && vectorizePendingCount > 0)
+                                         ? `🏰 一键存进记忆宫殿 · 待处理 ${vectorizePendingCount} 条`
+                                         : (vectorizePendingCount === 0)
+                                             ? '🏰 记忆宫殿已同步 · 无待处理'
+                                             : '🏰 一键把所有聊天存进记忆宫殿'}
                              </button>
                              <p className="text-[10px] text-slate-400 mt-2 text-center leading-relaxed">
-                                 将所有未处理的聊天记录交给记忆宫殿处理，完成后可安全清空聊天。<br/>
-                                 <span className="text-slate-300">看不懂这是什么的话不需要操作此按钮。</span>
+                                 {isVectorizing
+                                     ? '正在分批交给副 API 处理，保持应用打开、先别切走～完成前请勿清空聊天。'
+                                     : <>将所有未处理的聊天记录交给记忆宫殿处理，完成后可安全清空聊天。<br/><span className="text-slate-300">看不懂这是什么的话不需要操作此按钮。</span></>}
                              </p>
                          </div>
                      )}

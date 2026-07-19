@@ -15,6 +15,7 @@ import { cachedCall as _cachedCall, invalidate as _invalidateCache, clearAll as 
 import { DB } from '../utils/db';
 import { getProxyWorkerUrl, DEFAULT_PROXY_WORKER, PROXY_WORKER_CHANGED_EVENT } from '../utils/proxyWorker';
 import type { PostProcessMusicHooks } from '../utils/applyAssistantPostProcessing';
+import { createMusicTrackChangeDetail, MUSIC_TRACK_CHANGED_EVENT, type MusicTrackChangeDetail } from '../utils/musicTrackChange';
 
 /* ───────────── 类型 ───────────── */
 export type MusicQuality = 'standard' | 'higher' | 'exhigh' | 'lossless' | 'hires';
@@ -96,11 +97,12 @@ export const MUSIC_DEFAULT_CFG: MusicCfg = {
 /* ───────────── 工具 ───────────── */
 // worker 地址迁移：把"非自定义"的存量地址一律视为"没单独设过" → 跟随中心 worker。
 //   1. 旧的 sully-n.qegj567.workers.dev 默认（国内超时，早就该弃用）；
-//   2. 停在公共默认实例（= 中心配置的默认值）上的——中心没改时这是 no-op，
+//   2. 旧公共域名 sullymeow.ccwu213.cc（注册已过期、DNS 无法解析，2026-07 起）；
+//   3. 停在公共默认实例（= 中心配置的默认值）上的——中心没改时这是 no-op，
 //      中心换成自部署 worker 后，音乐自动跟着切过去。
 // 只有用户在播放器里手填的、跟默认不一样的地址才原样保留。读到需要改写时落盘一次。
 const normalizeHost = (u: string): string => u.trim().replace(/\/+$/, '').toLowerCase();
-const FOLLOW_CENTRAL_HOSTS = [/sully-n\.qegj567\.workers\.dev/i];
+const FOLLOW_CENTRAL_HOSTS = [/sully-n\.qegj567\.workers\.dev/i, /sullymeow\.ccwu213\.cc/i];
 const migrateWorkerUrl = (url: string | undefined): string => {
   const central = musicDefaultWorker();
   if (!url) return central;
@@ -536,16 +538,19 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setListeningTogetherWith(prev => prev.length ? [] : prev);
   }, []);
 
-  // 当 current 歌曲变化（切歌 / 初次播放新歌）→ 清空"一起听"
-  // 这样 char 选择 "join" 仅对当前这一首有效，切到下一首后回到 off
-  const currentSongIdRef = useRef<number | null>(null);
+  // 切歌后清空上一首的"一起听"；新歌真正开始播放后，再通知刚才的 char 重新判断
+  const previousSongRef = useRef<Song | null>(null);
+  const pendingTrackChangeRef = useRef<MusicTrackChangeDetail | null>(null);
   useEffect(() => {
-    const newId = current?.id ?? null;
-    if (currentSongIdRef.current !== null && currentSongIdRef.current !== newId) {
+    const previousSong = previousSongRef.current;
+    const detail = createMusicTrackChangeDetail(previousSong, current, listeningTogetherWith);
+
+    if (previousSong && previousSong.id !== current?.id) {
       setListeningTogetherWith([]);
+      pendingTrackChangeRef.current = detail;
     }
-    currentSongIdRef.current = newId;
-  }, [current]);
+    previousSongRef.current = current;
+  }, [current, listeningTogetherWith]);
 
   // 前进/后退 refs (避免循环依赖 & audio 事件闭包陷阱)
   const queueRef = useRef(queue); queueRef.current = queue;
@@ -561,7 +566,14 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     // 注意: 不要设置 crossOrigin — NetEase CDN 没有 CORS 头，会变成静默加载失败
     audioRef.current = a;
 
-    const onPlay = () => setPlaying(true);
+    const onPlay = () => {
+      setPlaying(true);
+      const detail = pendingTrackChangeRef.current;
+      if (detail) {
+        pendingTrackChangeRef.current = null;
+        window.dispatchEvent(new CustomEvent(MUSIC_TRACK_CHANGED_EVENT, { detail }));
+      }
+    };
     const onPause = () => setPlaying(false);
     const onTime = () => setProgress(a.currentTime);
     const onMeta = () => setDuration(a.duration || 0);

@@ -57,6 +57,34 @@ describe('extractImagesInPlace', () => {
         expect(root[0]).toBe('assets/p.png');
         expect(root[1].img).toBe('assets/p.png');
     });
+
+    // 回归：QQ捏人工坊往整合导出/导入。抽取是全字段递归、无白名单，所以角色里
+    // 深埋在 chibiStudio / vrState.chibi / specialMomentRecords 下的 data:image 都必须
+    // 被抽走（换成 assets/*）。若日后有人给抽取加字段白名单，这条会红。
+    it('角色的 chibiStudio / vrState.chibi / 520 记录里的图都会被递归抽取', () => {
+        const char: any = {
+            id: 'char-1',
+            avatar: IMG,
+            sprites: { chibi: IMG },
+            vrState: { chibi: { img: IMG, state: { selected: { skin: 'skin_1' } } } },
+            chibiStudio: {
+                room: { state: { selected: { fronthair: 'f_1' } } },          // 纯 state 无图，原样保留
+                like520: { img: IMG, state: { selected: {} } },                // 兜底大头贴
+            },
+            specialMomentRecords: {
+                like520_2026: { customData: { charChibi: { dataUrl: IMG } } },
+            },
+        };
+        extractImagesInPlace(char, () => 'assets/p.png');
+        expect(char.avatar).toBe('assets/p.png');
+        expect(char.sprites.chibi).toBe('assets/p.png');
+        expect(char.vrState.chibi.img).toBe('assets/p.png');
+        expect(char.chibiStudio.like520.img).toBe('assets/p.png');
+        expect(char.specialMomentRecords.like520_2026.customData.charChibi.dataUrl).toBe('assets/p.png');
+        // state（选件 JSON）不是图，不动
+        expect(char.chibiStudio.room.state.selected.fronthair).toBe('f_1');
+        expect(char.vrState.chibi.state.selected.skin).toBe('skin_1');
+    });
 });
 
 describe('deepCloneForExport', () => {
