@@ -40,6 +40,7 @@ import {
 } from '../utils/streamPreview';
 import { ActiveMsgStore } from '../utils/activeMsgStore';
 import { markAmsgStateDirty } from '../utils/amsgStateSync';
+import { AMSG2_TOOLS, AMSG2_TOOL_NAMES, executeAmsg2Tool, isAmsg2GlobalReady } from '../utils/amsg2ToolBridge';
 import { applyEmotionEvalRaw, extractAssistantText } from '../utils/emotionApply';
 import { announceChatGen, CHAT_GEN_EVENTS } from '../utils/chatGenEvents';
 import { shouldRequestAmbient, buildAmbientEvalSection } from '../utils/roomAmbient';
@@ -956,6 +957,15 @@ export const useChatAI = ({
                     }
                 }
             }
+            // 主动消息 2.0 本地工具：已配置 worker 时注入 schedule/cancel/list，
+            // 让角色在对话中直接排程定时消息（"提醒我 8 点问好"→ LLM 调 schedule_active_message）。
+            // amsg2 和 instant push 互斥，不需要额外判断。
+            let amsg2ToolsInjected = false;
+            if (await isAmsg2GlobalReady()) {
+                amsg2ToolsInjected = true;
+                baseReqBody.tools = [...(baseReqBody.tools || []), ...AMSG2_TOOLS];
+                if (!baseReqBody.tool_choice) baseReqBody.tool_choice = 'auto';
+            }
 
             // ─── Instant Push 分支 ───
             // 与本地 fetch 对称：sendInstantPushAndAwaitReply 内部完成 sub 获取 / push 监听 /
@@ -1315,7 +1325,7 @@ export const useChatAI = ({
             //       createOrder 被拦截 —— 下单付款必须用户在结账卡上点。
             //     · 通用 MCP: 工具名命中 mcpToolResolve 映射就分发给对应服务器 (utils/mcpClient),
             //       结果只回填循环不落卡片。两类工具可同时在场, 按名字各走各的。
-            if ((payload.flags.luckinChatActive || mcpToolResolve) && data.choices?.[0]?.message?.tool_calls?.length) {
+            if ((payload.flags.luckinChatActive || mcpToolResolve || amsg2ToolsInjected) && data.choices?.[0]?.message?.tool_calls?.length) {
                 const MAX_LOOPS = 6;
                 let loopMessages = [...fullMessages];
                 const loc = luckinChatRef?.current;
@@ -1351,6 +1361,16 @@ export const useChatAI = ({
                                 ? `工具 ${fname} 成功。结果: ${formatMcpToolResult(mcpResult.data)}`
                                 : `工具 ${fname} 失败: ${mcpResult.error}`;
                             loopMessages.push({ role: 'tool', tool_call_id: tc.id, content: mcpMsg } as any);
+                            continue;
+                        }
+                        // 主动消息 2.0 工具
+                        if (AMSG2_TOOL_NAMES.has(fname)) {
+                            setSearchStatus(`正在执行：${fname}...`);
+                            const result = await executeAmsg2Tool(fname, args, {
+                                char, userProfile, groups, realtimeConfig, apiConfig, updateCharacter,
+                            });
+                            loopMessages.push({ role: 'tool', tool_call_id: tc.id, content: result } as any);
+                            setSearchStatus('');
                             continue;
                         }
                         // 只开了 MCP 没开瑞幸时, 幻觉出的未知工具名直接回错误让模型自我纠正
