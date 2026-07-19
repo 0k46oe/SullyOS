@@ -581,18 +581,6 @@ export const ActiveMsgClient = {
         updatedAt: now,
       });
     }
-    // 工具凭据是全局一份：取批里第一份带 realtimeConfig 的快照。整批都没带就不写，
-    // 避免把云端已有的可用凭据覆盖成全禁用。
-    const withRealtime = items.find((item) => item.realtimeConfig);
-    if (withRealtime) {
-      entries.push({
-        namespace: AMSG_GLOBAL_NAMESPACE,
-        key: AMSG_TOOL_CONFIG_KEY,
-        value: JSON.stringify(buildToolConfig(withRealtime.realtimeConfig)),
-        updatedAt: now,
-      });
-    }
-
     const response = await client.putClientState(entries);
     if (!response?.success) {
       throw new Error(response?.error?.message || '上传云端状态失败。');
@@ -606,6 +594,20 @@ export const ActiveMsgClient = {
         `${ACTIVE_MSG_RUNTIME_HEADER} 云端状态部分条目被拒（对应角色退冻结提示词兜底）`,
         rejected.map((r) => `${r.namespace}/${r.key}: ${r.message || 'rejected'}`),
       );
+    }
+  },
+
+  async syncToolConfig(realtimeConfig: RealtimeConfig | undefined): Promise<void> {
+    const globalConfig = await ensureWorkerReady();
+    const client = await initializeClient(globalConfig);
+    const response = await client.putClientState([{
+      namespace: AMSG_GLOBAL_NAMESPACE,
+      key: AMSG_TOOL_CONFIG_KEY,
+      value: JSON.stringify(buildToolConfig(realtimeConfig)),
+      updatedAt: Date.now(),
+    }]);
+    if (!response?.success) {
+      throw new Error(response?.error?.message || '上传工具凭据失败。');
     }
   },
 

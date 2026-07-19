@@ -22,6 +22,7 @@ import { ProactiveChat } from '../utils/proactiveChat';
 import { InstantPushSettingsModal } from '../components/settings/InstantPushSettingsModal';
 import { PushVapidSettingsModal } from '../components/settings/PushVapidSettingsModal';
 import ActiveMsgGlobalSettingsModal from '../components/settings/ActiveMsgGlobalSettingsModal';
+import { ActiveMsgClient } from '../utils/activeMsgClient';
 import VersionInfo from '../components/settings/VersionInfo';
 import { isPushVapidReady } from '../utils/pushVapid';
 import ApiCallLogModal from '../components/settings/ApiCallLogModal';
@@ -1068,7 +1069,7 @@ const Settings: React.FC = () => {
 
   // 保存实时感知配置
   const handleSaveRealtimeConfig = () => {
-      updateRealtimeConfig({
+      const updates = {
           weatherEnabled: rtWeatherEnabled,
           weatherApiKey: rtWeatherKey,
           weatherCity: rtWeatherCity,
@@ -1091,10 +1092,12 @@ const Settings: React.FC = () => {
               cookie: rtXhsMode === 'lite' ? (rtXhsCookie.trim() || undefined) : undefined,
               loggedInNickname: rtXhsNickname || undefined,
               loggedInUserId: rtXhsUserId || undefined,
-              userXsecToken: realtimeConfig.xhsMcpConfig?.userXsecToken, // 保留自动获取的 token
+              userXsecToken: realtimeConfig.xhsMcpConfig?.userXsecToken,
           }
-      });
-      RealtimeContextManager.clearCache(); // 城市/来源改了就别再吐旧缓存
+      };
+      updateRealtimeConfig(updates);
+      RealtimeContextManager.clearCache();
+      ActiveMsgClient.syncToolConfig({ ...realtimeConfig, ...updates }).catch(() => {});
       addToast('实时感知配置已保存', 'success');
       setShowRealtimeModal(false);
   };
@@ -1172,7 +1175,7 @@ const Settings: React.FC = () => {
               // 自动填充：只在用户未手动填写时覆盖
               if (result.nickname && !rtXhsNickname) setRtXhsNickname(result.nickname);
               if (result.userId && !rtXhsUserId) setRtXhsUserId(result.userId);
-              updateRealtimeConfig({
+              const xhsUpdates = {
                   xhsMcpConfig: {
                       enabled: rtXhsMcpEnabled,
                       serverUrl: urlToUse,
@@ -1181,7 +1184,9 @@ const Settings: React.FC = () => {
                       loggedInUserId: rtXhsUserId || result.userId,
                       userXsecToken: result.xsecToken,
                   }
-              });
+              };
+              updateRealtimeConfig(xhsUpdates);
+              ActiveMsgClient.syncToolConfig({ ...realtimeConfig, ...xhsUpdates }).catch(() => {});
           } else {
               setRtTestStatus(`连接失败: ${result.error}`);
           }
