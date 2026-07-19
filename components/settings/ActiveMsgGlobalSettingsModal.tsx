@@ -68,10 +68,13 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
 
   useEffect(() => {
     if (!isOpen || !config) return;
-    void ActiveMsgStore.saveGlobalConfig({
-      workerUrl: config.workerUrl,
-      serverToken: config.serverToken,
-    });
+    const timer = setTimeout(() => {
+      void ActiveMsgStore.saveGlobalConfig({
+        workerUrl: config.workerUrl,
+        serverToken: config.serverToken,
+      });
+    }, 1000);
+    return () => clearTimeout(timer);
   }, [config?.workerUrl, config?.serverToken, isOpen]);
 
   const patchConfig = (updates: Partial<ActiveMsg2GlobalConfig>) => {
@@ -102,6 +105,10 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
 
     setLoading(true);
     try {
+      await ActiveMsgStore.saveGlobalConfig({
+        workerUrl: config.workerUrl,
+        serverToken: config.serverToken,
+      });
       await ActiveMsgClient.connect();
       await refresh();
       addToast('已连接成功，主动消息 2.0 可以用了。', 'success');
