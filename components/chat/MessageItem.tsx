@@ -1706,7 +1706,11 @@ const MessageItem = React.memo(({
     // HTML 卡片（280px 定宽模块）默认位置就是"视觉居中"的约定：包装层打上 sully-html-wrap，
     // 让「聊天细节微调」的贴边/缩进规则 :not() 绕开它——美化怎么开卡片都不挪窝。
     const isHtmlCard = m.type === 'html_card';
-    // 聊天细节微调 chatModuleAlign：HTML 卡片 / 心象卡片默认水平居中，'anchor' 才贴气泡列。
+    // 音乐卡片（一起听 / 收歌单）与 HTML 卡片同为定宽模块，跟随同一套 chatModuleAlign 约定。
+    // 条件与下方渲染分支一致：没有 song 元数据会落回普通气泡，不按模块排版。
+    const isMusicCard = m.type === 'music_card' && !!m.metadata?.song;
+    const isModuleCard = isHtmlCard || isMusicCard;
+    // 聊天细节微调 chatModuleAlign：HTML 卡片 / 心象卡片 / 音乐卡片默认水平居中，'anchor' 才贴气泡列。
     // 心象居中时抽出到气泡行上方的独立行（不带 .group 类，注入的钉位 CSS 自然不命中）。
     const centerModules = moduleAlign !== 'anchor';
     // 心象卡片（思考链）：默认渲染在气泡包装层内、气泡上方；居中模式挪到独立行。
@@ -1772,7 +1776,7 @@ const MessageItem = React.memo(({
                     Added min-w-0 to prevent flexbox overflow issues.
                     Added explicit margins to clear absolute avatars.
                 */}
-                <div className={`relative max-w-[72%] min-w-0 ${isHtmlCard && centerModules ? 'mx-auto' : (!isUser ? 'ml-12' : 'mr-12')} ${isHtmlCard ? 'sully-html-wrap' : ''}`}>
+                <div className={`relative max-w-[72%] min-w-0 ${isModuleCard && centerModules ? 'mx-auto' : (!isUser ? 'ml-12' : 'mr-12')} ${isModuleCard ? 'sully-html-wrap' : ''}`}>
                     <div
                         aria-hidden="true"
                         className={`absolute -right-10 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full flex items-center justify-center pointer-events-none transition-all duration-150 ${isReplyReady ? 'bg-indigo-500 text-white shadow-md shadow-indigo-200' : 'bg-white/90 text-slate-400 shadow-sm'}`}

@@ -111,7 +111,7 @@ export interface OSTheme {
   chatBubbleIndent?: number;
   /** 隐藏头像的一侧是否贴边（收回头像空位） */
   chatSnapToEdge?: boolean;
-  /** HTML 卡片 / 心象卡片的出现位置：缺省/'center' = 水平居中（默认），'anchor' = 贴气泡列
+  /** HTML 卡片 / 心象卡片 / 音乐卡片的出现位置：缺省/'center' = 水平居中（默认），'anchor' = 贴气泡列
    *  （头像位，不随贴边/缩进挪动，即旧版观感）。经 MessageItem 布局属性生效（不走注入 CSS），
    *  同属聊天细节微调字段、可按角色覆盖 */
   chatModuleAlign?: 'anchor' | 'center';

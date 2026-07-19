@@ -23,7 +23,7 @@ import { buildLuckinMiniAppContextBlock, buildLuckinChatSystemBlock } from './lu
 import type { LuckinMiniAppSnapshot, LuckinChatState } from './luckinToolBridge';
 import { isMcpChatAvailable } from './mcpClient';
 import { buildMcpSystemBlock, MCP_TAIL_REMINDER } from './mcpToolBridge';
-import type { MusicCfg, Song, LyricLine, MusicPlaybackSnapshot } from '../context/MusicContext';
+import type { MusicCfg, Song, LyricLine, MusicPlaybackSnapshot, RecentTrackChange } from '../context/MusicContext';
 import { isPromptBuildSkipped, isSystemMessageMergeEnabled } from './devDebug';
 import { mergeSystemMessages } from './systemMessageMerge';
 import { injectWorldbookDepthEntries, resolveWorldbookEntries } from './worldbook';
@@ -68,6 +68,8 @@ export interface BuildChatPayloadInput {
     musicCfg?: MusicCfg;
     /** 备选：传一份原始播放快照，helper 内部按主路径同样的逻辑算 listening 三件套 */
     musicSnapshot?: MusicPlaybackSnapshot | null;
+    /** 最近一次一起听途中换歌的记录（React 主路径显式传；snapshot 路径从快照里取） */
+    recentTrackChange?: RecentTrackChange | null;
 
     // 模式开关
     translationConfig?: TranslationConfig | { enabled: boolean; sourceLang: string; targetLang: string };
@@ -140,6 +142,25 @@ function deriveListeningFromSnapshot(
     }
     const isListeningTogether = !!(userListeningContext && listeningTogetherWith.includes(charId));
     return { userListeningContext, isListeningTogether, musicCfg: cfg };
+}
+
+/** 换歌记录多久内算"刚刚"——超过就不再向 char 提起（一首歌的量级） */
+const TRACK_CHANGE_FRESH_MS = 10 * 60 * 1000;
+
+/**
+ * 把原始换歌记录折算成"该 char 这一轮是否需要察觉换歌"。
+ * 命中条件：char 换歌那刻在一起听名单里、还没重新加入、且换歌发生在刚才。
+ * 导出仅为单测。
+ */
+export function deriveRecentTrackSwitchForChar(
+    record: RecentTrackChange | null | undefined,
+    charId: string,
+    isListeningTogether: boolean,
+): { songName: string; artists: string } | null {
+    if (!record || isListeningTogether) return null;
+    if (!record.charIds.includes(charId)) return null;
+    if (Date.now() - record.at > TRACK_CHANGE_FRESH_MS) return null;
+    return { songName: record.previousSong.name, artists: record.previousSong.artists };
 }
 
 /**
@@ -235,12 +256,16 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
     let userListeningContext = input.userListeningContext;
     let isListeningTogether = input.isListeningTogether;
     let musicCfg = input.musicCfg;
+    let recentTrackChange = input.recentTrackChange;
     if (userListeningContext === undefined && input.musicSnapshot !== undefined) {
         const derived = deriveListeningFromSnapshot(input.musicSnapshot, char.id);
         userListeningContext = derived.userListeningContext;
         isListeningTogether = derived.isListeningTogether;
         musicCfg = derived.musicCfg ?? musicCfg;
+        if (recentTrackChange === undefined) recentTrackChange = input.musicSnapshot?.recentTrackChange ?? null;
     }
+    // 换歌察觉：char 换歌那刻在一起听、还没重新加入 → 下一轮回复里注入"歌切了"的提示
+    const recentTrackSwitch = deriveRecentTrackSwitchForChar(recentTrackChange, char.id, !!isListeningTogether);
 
     // ── 3. buildSystemPromptParts 核心（三段式） ──────────
     // stable → 消息数组第一条 system（前缀稳定，吃 prompt cache）；
@@ -253,6 +278,7 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
         userListeningContext ?? null,
         !!isListeningTogether,
         musicCfg,
+        recentTrackSwitch,
     );
     let systemPrompt = parts.stable;
     let volatileTail = parts.volatileState;

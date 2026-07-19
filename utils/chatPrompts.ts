@@ -193,6 +193,8 @@ export const ChatPrompts = {
         // MusicContext 的 cfg —— 用来给 char 自己的"此刻在听"拉稳定的歌词片段。
         // 不传也能用，只是 char 的 block 2 只有歌名 + 艺人，没有歌词。
         musicCfg?: MusicCfg,
+        // 刚才一起听途中歌被切了（char 还没重新加入）—— 注入"察觉换歌"提示。
+        recentTrackSwitch?: { songName: string; artists: string } | null,
     ): Promise<{ stable: string; volatileState: string; recencyTail: string }> => {
         // ── 分段计时（定位瓶颈用）──
         const perfT0 = performance.now();
@@ -407,6 +409,7 @@ export const ChatPrompts = {
                 userListeningContext || null,
                 charListening,
                 isListeningTogether,
+                recentTrackSwitch,
             );
             if (musicBlock) {
                 volatileState += `\n${musicBlock}\n`;
