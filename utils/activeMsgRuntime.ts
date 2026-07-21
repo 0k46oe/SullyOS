@@ -15,6 +15,7 @@ import { processNewMessages } from './memoryPalace/pipeline';
 import { loadMusicHooks } from '../context/MusicContext';
 import type { XhsNote } from './realtimeContext';
 import { appendDevDebugInstantPushLog, appendDevDebugLog, isCaptureEnabled, makeDebugLogger } from './devDebug';
+import { ACTIVE_CHAT_WINDOW_MS, getLastRealUserMessageAt, hasRealUserMessageBetween, shouldExpireFire } from './amsg2ExpireGuard';
 
 // 同一个 category，两个 tag——保持 console 里现有的 [ActiveMsg] / [amsg] 标签，
 // 方便用户 / 文档里 grep 历史报错信息。两条 tag 都归 instant-push 一类。
@@ -72,6 +73,39 @@ export const pushXhsCaches: XhsCaches = {
   commentParentIdCache: new Map(),
 };
 export const pushLastXhsNotesRef: { current: XhsNote[] } = { current: [] };
+
+// 防穿帮闸·送达判定缓存：一次 fire 的多分段 push 必须同吞同放（不能吞一半），
+// 按「任务 + occurrence」记住首段判定。Web Push/FCM 不保证分段按序到达，逻辑
+// 上的最后一段可能最先到，所以不能在 messageIndex===totalMessages 时立即删除；
+// 保留 5 分钟 TTL，让迟到分段仍复用同一决定。
+// （导出仅为让 activeMsgRuntime.test.ts 用真实 TTL 校验重判边界，运行时不消费。）
+export const EXPIRE_DECISION_TTL_MS = 5 * 60_000;
+type ExpireDecisionEntry = { expired: boolean; expiresAt: number };
+const expireDecisionByFire = new Map<string, ExpireDecisionEntry>();
+
+/**
+ * 送达判定的 get-or-compute（带 TTL 过期清扫）。从吞没闸里抽出来单测：
+ *   - 同一 fireKey 的多次调用只 evaluate 一次——一次 fire 的多分段 push 同吞同放；
+ *   - TTL 过后同 key 才允许重新 evaluate（迟到分段仍复用同一决定）。
+ * cache 由调用方注入：运行时传模块级 expireDecisionByFire，测试传临时 Map 做隔离。
+ * 行为与内联版逐字节对齐（先扫过期、再 get、缺失才 compute-and-set）。
+ */
+export async function resolveFireExpireDecision(
+  cache: Map<string, ExpireDecisionEntry>,
+  fireKey: string,
+  now: number,
+  evaluate: () => Promise<boolean>,
+): Promise<boolean> {
+  for (const [key, entry] of cache) {
+    if (entry.expiresAt <= now) cache.delete(key);
+  }
+  let cached = cache.get(fireKey);
+  if (!cached) {
+    cached = { expired: await evaluate(), expiresAt: now + EXPIRE_DECISION_TTL_MS };
+    cache.set(fireKey, cached);
+  }
+  return cached.expired;
+}
 
 type MemoryPalaceGlobalConfig = {
   embedding: { baseUrl: string; apiKey: string; model: string; dimensions: number };
@@ -319,6 +353,40 @@ function isLastChunk(message: ActiveMsg2InboxMessage): boolean {
   return mi === tm;
 }
 
+/**
+ * 送达时的作废判定（防穿帮闸·客户端兜底层）。worker onBeforeFire 已做同一
+ * 判定，但它读的 fire_pack 随 amsgStateSync 最多滞后 15s+，且判定通过后还有
+ * 10-30s 生成窗口，期间用户又说话就会撞车——这里用本地全量历史再判一次。
+ * 判定所需字段全部来自 push 自带的任务 metadata（排程时打进去的），不依赖
+ * 本地 config——push 在途期间任务被 renew 换锚也不会误判。判不了 → 放行。
+ */
+async function evaluateScheduledPushExpired(message: ActiveMsg2InboxMessage): Promise<boolean> {
+  try {
+    const meta = (message.metadata || {}) as Record<string, any>;
+    const messages = await DB.getRecentMessagesByCharId(message.charId, 200);
+    const policy = typeof meta.amsgExpirePolicy === 'string' ? meta.amsgExpirePolicy : undefined;
+    const recurrence = typeof meta.amsgRecurrence === 'string' ? meta.amsgRecurrence : undefined;
+    const occurrenceMs = typeof meta.amsgOccurrenceMs === 'number' ? meta.amsgOccurrenceMs : null;
+
+    // 循环任务的判定锚定「到点时刻」而不是「送达时刻」（Codex #10）：生成+送达可能
+    // 比到点晚十几分钟，拿 Date.now() 算 10 分钟窗口会把撞上对话的消息误放行。
+    // occurrenceMs 由 worker 随 push 带回；缺失（旧 bundle）时退回送达时刻近似。
+    if (policy === 'expire' && (recurrence === 'daily' || recurrence === 'weekly') && occurrenceMs != null) {
+      return hasRealUserMessageBetween(messages, occurrenceMs - ACTIVE_CHAT_WINDOW_MS, Date.now());
+    }
+    return shouldExpireFire({
+      policy,
+      recurrenceType: recurrence,
+      anchorMs: typeof meta.amsgAnchorMs === 'number' ? meta.amsgAnchorMs : null,
+      lastUserMessageAt: getLastRealUserMessageAt(messages),
+      nowMs: Date.now(),
+    });
+  } catch (e) {
+    console.warn('[ActiveMsg] expire 兜底判定失败，放行', e);
+    return false;
+  }
+}
+
 /** 把 worker 推给的 directives 从 inbox message metadata 里挖出来; 没有就空数组. */
 function extractDirectives(message: ActiveMsg2InboxMessage): PostProcessDirective[] {
   const raw = message.metadata && (message.metadata as any).directives;
@@ -511,6 +579,43 @@ const flushInboxToChatImpl = async () => {
         charId: message.charId,
       });
       continue;
+    }
+
+    // ─── 防穿帮闸·客户端兜底 ───
+    // 只拦定时任务的 push（source==='scheduled' 且带策略字段）；instant 聊天
+    // 回复 source==='instant'，与这道闸无关。吞掉 = 不进聊天流、不重放
+    // directives（作废消息的副作用一并作废）；生成 token 浪费掉，换不穿帮。
+    // 系统通知层面：content push 默认可能在前台/后台先展示；页面线程无权追回
+    // 已弹通知。防通知主力是 worker 预检 + chat_presence 活跃会话租约。
+    // 排程现状块不在这里记——useChatAI 组请求时独立检出，两侧结论一致。
+    if (message.source === 'scheduled' && (message.metadata as any)?.amsgExpirePolicy) {
+      // 缓存键必须含 occurrence（Codex #2）：上游 sessionId 是 sess_task_<行id>，
+      // 循环任务每次 occurrence、同任务重试都复用同一个——裸 sessionId 会把上次
+      // 的判定串给下一次（第一次放行 → 后续永远放行；第一次吞 → 后续全吞）。
+      const meta = (message.metadata || {}) as Record<string, any>;
+      const occ = Number(meta.amsgOccurrenceMs) || 0;
+      const taskIdentity = typeof meta.amsgClientTaskId === 'string'
+        ? meta.amsgClientTaskId
+        : (getInstantSessionId(message) || `msg_${message.messageId}`);
+      const fireKey = `${taskIdentity}:${occ}`;
+      const now = Date.now();
+      // 多分段 push 的一次 fire 共用一个决定（同吞同放）：get-or-compute + TTL 清扫
+      // 抽进 resolveFireExpireDecision，见其单测。
+      const expired = await resolveFireExpireDecision(
+        expireDecisionByFire,
+        fireKey,
+        now,
+        () => evaluateScheduledPushExpired(message),
+      );
+      if (expired) {
+        activeMsgTrace('runtime-expire-swallow', {
+          sessionId: fireKey,
+          messageId: message.messageId,
+          charId: message.charId,
+          taskId: message.taskId,
+        });
+        continue;
+      }
     }
 
     // 白名单制: AI 文本类型基本封闭 (amsg-shared MESSAGE_TYPE 4 个 + SullyOS 3 个 legacy 别名);
