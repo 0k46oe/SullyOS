@@ -39,7 +39,9 @@ import {
     findNewStreamPreviewHandoverIds,
 } from '../utils/streamPreview';
 import { ActiveMsgStore } from '../utils/activeMsgStore';
-import { markAmsgStateDirty } from '../utils/amsgStateSync';
+import { markAmsgStateDirty, startAmsgChatPresence, stopAmsgChatPresence } from '../utils/amsgStateSync';
+import { getLastRealUserMessageAt } from '../utils/amsg2ExpireGuard';
+import { hasActiveAiTask } from '../utils/amsg2Tasks';
 import { AMSG2_TOOLS, AMSG2_TOOL_NAMES, executeAmsg2Tool, isAmsg2GlobalReady } from '../utils/amsg2ToolBridge';
 import { applyEmotionEvalRaw, extractAssistantText } from '../utils/emotionApply';
 import { announceChatGen, CHAT_GEN_EVENTS } from '../utils/chatGenEvents';
@@ -1075,6 +1077,15 @@ export const useChatAI = ({
             // 主请求即将发出 → 立即并行发射情绪评估（错峰延迟已按用户要求取消，见定义处注释）。
             fireLocalEmotionEval?.();
 
+            // 同角色活跃会话租约：本地 fetch 路径本轮真实消息已落库、模型请求即将发出，
+            // 启动心跳告诉 worker「正在和这个角色聊」——到点的 expire AI 任务据此 skip，
+            // 别在用户正聊时又弹主动消息。instant push 路径在上方已 return，天然不重复开 lease。
+            // 只对已排程 AI 任务的角色开租约：其余角色没有 worker 消费，开了纯浪费还刷 warn。
+            const amsg2Cfg = char.activeMsg2Config;
+            if (amsg2Cfg?.enabled && hasActiveAiTask(amsg2Cfg)) {
+                startAmsgChatPresence(char.id, getLastRealUserMessageAt(contextMsgs));
+            }
+
             let data: any;
             try {
                 data = await safeFetchJson(`${baseUrl}/chat/completions`, {
@@ -1596,6 +1607,9 @@ export const useChatAI = ({
         } finally {
             KeepAlive.stop();
             setIsTyping(false);
+            // 本轮生成结束（成功/失败/中断都经过）→ 停止本地续租；远端靠 45s TTL 自然失效。
+            // 未开过租约（instant push / 非 amsg2 角色）时是幂等 no-op。
+            stopAmsgChatPresence(char.id);
             // 全局横幅熄灭（成功/失败/instant 均经过这里；OSContext 同时借它兜底刷新，
             // 覆盖 catch 里落库的错误系统消息）。
             announceChatGen(CHAT_GEN_EVENTS.replyEnd, { charId: char.id, charName: char.name });

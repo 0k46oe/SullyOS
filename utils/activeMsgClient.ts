@@ -1,17 +1,24 @@
 import { ReiClient } from '@rei-standard/amsg-client';
 import {
   ActiveMsg2CharacterConfig,
+  ActiveMsg2ExpirePolicy,
   ActiveMsg2GlobalConfig,
+  ActiveMsg2Mode,
+  ActiveMsg2Recurrence,
   APIConfig,
   CharacterProfile,
   GroupProfile,
   RealtimeConfig,
   UserProfile,
 } from '../types';
+import { getLastRealUserMessageAt } from './amsg2ExpireGuard';
+import { getPendingTasks, MAX_ACTIVE_TASKS_PER_CHAR } from './amsg2Tasks';
+import { AMSG_CHAT_PRESENCE_KEY, AmsgChatPresence } from './amsgChatPresence';
 import {
   AMSG_FIRE_PACK_KEY,
   AMSG_SLOT_AWAY_HINT,
   AMSG_SLOT_CURRENT_TIME,
+  AMSG_SLOT_TASK_INSTRUCTION,
   AMSG_SLOT_TIME_SINCE_USER,
   AmsgFirePack,
   amsgStateNamespace,
@@ -128,14 +135,11 @@ const formatHistoryLine = (role: string, content: any, char: CharacterProfile, u
 
 const buildTimeGapHint = async (charId: string) => {
   const recentMessages = await DB.getRecentMessagesByCharId(charId, 200);
-  const lastRealUserMessage = [...recentMessages].reverse().find((message) => (
-    message.role === 'user' && !message.metadata?.proactiveHint
-  ));
-
   return {
     // 时间差在渲染时刻才算（formatTimeSinceUser），这里只取原始时间戳——
     // 满血链路会把它放进 fire_pack，worker 到点用「fire 时刻」重算，不吃排程时的陈旧值。
-    lastUserMessageAt: lastRealUserMessage ? lastRealUserMessage.timestamp : null,
+    // 「真实用户消息」判定与防穿帮闸共用同一叶子 helper（见 amsg2ExpireGuard）。
+    lastUserMessageAt: getLastRealUserMessageAt(recentMessages),
     recentMessages,
   };
 };
@@ -161,7 +165,6 @@ const buildLegacyStyleProactiveHint = (targetName: string) => {
 //   - 满血同步：pack 原样 putClientState 上云，worker 到点再填槽（上下文不过期）
 const buildFirePack = async (
   char: CharacterProfile,
-  config: ActiveMsg2CharacterConfig,
   userProfile: UserProfile,
   groups: GroupProfile[],
   realtimeConfig: RealtimeConfig | undefined,
@@ -197,26 +200,6 @@ const buildFirePack = async (
     .map((message) => formatHistoryLine(message.role, message.content, char, userProfile))
     .join('\n\n');
 
-  const modeInstruction = (() => {
-    if (config.mode === 'prompted') {
-      return [
-        '这是一条需要 AI 参与生成的主动消息。',
-        '请严格围绕下面的额外提示发起私聊，但仍然保持像真人一样自然，不要像系统任务汇报。',
-        `额外提示：${config.promptHint?.trim() || '无'}`,
-      ].join('\n');
-    }
-
-    if (config.mode === 'auto') {
-      return [
-        '这是一条需要 AI 自主生成的主动消息。',
-        '请结合角色设定、关系状态、最近上下文与当前时间，自然地主动找用户说一到三句私聊消息。',
-        config.promptHint?.trim() ? `可选灵感补充：${config.promptHint.trim()}` : '可选灵感补充：无',
-      ].join('\n');
-    }
-
-    return '这是固定消息模式，不应该走 AI 生成。';
-  })();
-
   const template = [
     '你将代表下面这个角色，生成一条“主动发给用户”的私聊消息。',
     '',
@@ -242,7 +225,7 @@ const buildFirePack = async (
     legacyHint,
     '',
     '【本次任务】',
-    modeInstruction,
+    AMSG_SLOT_TASK_INSTRUCTION,
     '',
     // recency 末位人声锚：上面【角色系统设定】里已带「回到你自己」钢印，但被任务说明压在后面、
     // 失了 recency。这里在最后一句把它拎回来，让主动消息也从「你这个人」长出来，而不是滑回均值腔。
@@ -250,7 +233,7 @@ const buildFirePack = async (
   ].join('\n');
 
   return {
-    v: 1,
+    v: 2,
     template,
     lastUserMessageAt,
     tzOffsetMin: new Date().getTimezoneOffset(),
@@ -258,15 +241,20 @@ const buildFirePack = async (
   };
 };
 
-const buildCompletePrompt = async (
-  char: CharacterProfile,
-  config: ActiveMsg2CharacterConfig,
-  userProfile: UserProfile,
-  groups: GroupProfile[],
-  realtimeConfig: RealtimeConfig,
-) => {
-  const pack = await buildFirePack(char, config, userProfile, groups, realtimeConfig);
-  return renderFirePack(pack, Date.now());
+/** 按任务生成「本次任务」指令——排程时写进 task metadata，worker 到点填槽。 */
+export const buildTaskInstruction = (mode: 'auto' | 'prompted', promptHint?: string): string => {
+  if (mode === 'prompted') {
+    return [
+      '这是一条需要 AI 参与生成的主动消息。',
+      '请严格围绕下面的额外提示发起私聊，但仍然保持像真人一样自然，不要像系统任务汇报。',
+      `额外提示：${promptHint?.trim() || '无'}`,
+    ].join('\n');
+  }
+  return [
+    '这是一条需要 AI 自主生成的主动消息。',
+    '请结合角色设定、关系状态、最近上下文与当前时间，自然地主动找用户说一到三句私聊消息。',
+    promptHint?.trim() ? `可选灵感补充：${promptHint.trim()}` : '可选灵感补充：无',
+  ].join('\n');
 };
 
 const ensureFutureTime = (value: string) => {
@@ -438,33 +426,50 @@ export const ActiveMsgClient = {
 
   async scheduleCharacterTask(params: {
     char: CharacterProfile;
+    /** 角色级共享设置（secondaryApi / maxTokens）。 */
     config: ActiveMsg2CharacterConfig;
+    /** 本次要排的任务。 */
+    task: {
+      mode: ActiveMsg2Mode;
+      firstSendTime: string;
+      recurrenceType: ActiveMsg2Recurrence;
+      promptHint?: string;
+      userMessage?: string;
+      expirePolicy?: ActiveMsg2ExpirePolicy;
+    };
+    /** 编辑/续期时传旧任务 uuid：先取消它再新建（不传 = 纯新建）。 */
+    replaceTaskUuid?: string;
     userProfile: UserProfile;
     groups: GroupProfile[];
     realtimeConfig: RealtimeConfig;
     apiConfig: APIConfig;
   }) {
-    const { char, config, userProfile, groups, realtimeConfig, apiConfig } = params;
+    const { char, config, task, replaceTaskUuid, userProfile, groups, realtimeConfig, apiConfig } = params;
     const globalConfig = await ensureWorkerReady();
     const client = await initializeClient(globalConfig);
     const pushSubscription = await this.ensurePushSubscription();
 
-    if (config.taskUuid) {
-      try {
-        await this.cancelTask(config.taskUuid);
-      } catch (error) {
-        console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} cancel old task failed`, error);
-      }
+    // 数量封顶：待触发任务（不含被替换的那个）满 5 个就拒绝，让角色/用户先清。
+    const pendingOthers = getPendingTasks(config, Date.now())
+      .filter((t) => t.taskUuid !== replaceTaskUuid);
+    if (pendingOthers.length >= MAX_ACTIVE_TASKS_PER_CHAR) {
+      throw new Error(`该角色的待触发任务已达上限 ${MAX_ACTIVE_TASKS_PER_CHAR} 个，请先取消或合并已有任务。`);
     }
 
-    const firstSendTime = ensureFutureTime(config.firstSendTime);
+    const firstSendTime = ensureFutureTime(task.firstSendTime);
+    // 防穿帮闸锚点：排程这一刻的最后一条真实用户消息（见 utils/amsg2ExpireGuard.ts）。
+    const { lastUserMessageAt: anchorMs } = await buildTimeGapHint(char.id);
+    // 任务身份：客户端自造 clientTaskId——远端 uuid 要创建成功后才有，而 metadata
+    // 必须在创建时就带上归属键；push 原样透传，送达归属全靠它。
+    const clientTaskId = crypto.randomUUID();
+
     const payload: Record<string, any> = {
       contactName: char.name,
       avatarUrl: char.avatar,
-      messageType: config.mode,
+      messageType: task.mode,
       messageSubtype: 'chat',
       firstSendTime,
-      recurrenceType: config.recurrenceType,
+      recurrenceType: task.recurrenceType,
       pushSubscription,
       metadata: {
         charId: char.id,
@@ -472,21 +477,30 @@ export const ActiveMsgClient = {
         source: 'active_msg_2',
         // worker 满血链路的 onLLMOutput 拿不到任务顶层的 messageType，靠 metadata 透传
         // 还原 push.messageType（老任务没这字段时 worker 回退 'auto'，收侧只展示不路由）。
-        amsgMode: config.mode,
+        amsgMode: task.mode,
+        // 任务身份 + 防穿帮闸字段：worker onBeforeFire 与客户端送达兜底都从这里读。
+        // fixed 恒为 force——它走不了 worker 闸（taskNeedsLlm=false），语义统一钉死。
+        amsgClientTaskId: clientTaskId,
+        amsgExpirePolicy: task.mode === 'fixed' ? 'force' : (task.expirePolicy ?? 'expire'),
+        amsgRecurrence: task.recurrenceType,
+        amsgAnchorMs: anchorMs ?? 0,
       },
     };
 
     // AI 模式同时产两份：renderFirePack 立即填槽 → completePrompt 冻结兜底（老 worker /
     // 没同步上状态时照旧能跑）；firePack 本体在任务建成后上传 client_state，worker 到点现场填槽。
     let firePack: AmsgFirePack | null = null;
-    if (config.mode === 'fixed') {
-      const userMessage = config.userMessage?.trim();
+    if (task.mode === 'fixed') {
+      const userMessage = task.userMessage?.trim();
       if (!userMessage) throw new Error('固定消息模式需要填写消息内容。');
       payload.userMessage = userMessage;
     } else {
       const activeApi = resolveApiConfig(char, config, apiConfig);
-      firePack = await buildFirePack(char, config, userProfile, groups, realtimeConfig);
-      payload.completePrompt = renderFirePack(firePack, Date.now());
+      // 「本次任务」指令随任务走：metadata 给 worker 填槽，冻结 prompt 兜底同源渲染。
+      const taskInstruction = buildTaskInstruction(task.mode, task.promptHint);
+      payload.metadata.amsgTaskInstruction = taskInstruction;
+      firePack = await buildFirePack(char, userProfile, groups, realtimeConfig);
+      payload.completePrompt = renderFirePack(firePack, Date.now(), { taskInstruction });
       payload.apiUrl = normalizeChatApiUrl(activeApi.baseUrl);
       payload.apiKey = activeApi.apiKey;
       payload.primaryModel = activeApi.model;
@@ -543,7 +557,42 @@ export const ActiveMsgClient = {
       }
     }
 
-    return response.data as { uuid: string; status: string; nextSendAt?: string };
+    // 先建后删（Codex #4）：新任务确认创建成功才取消旧的——反过来一旦创建失败，
+    // 旧任务已删、新任务没建，两头空。取消失败时新旧短暂并存于远端，把状态交还
+    // 调用方（保留旧记录 + 标错 + 可重试），绝不静默。
+    let replacedCancelFailed = false;
+    if (replaceTaskUuid) {
+      try {
+        await this.cancelTask(replaceTaskUuid);
+      } catch (error) {
+        replacedCancelFailed = true;
+        console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 替换后取消旧任务失败（远端新旧并存，待重试）`, error);
+      }
+    }
+
+    return {
+      ...(response.data as { uuid: string; status: string; nextSendAt?: string }),
+      anchorMs: anchorMs ?? 0,
+      clientTaskId,
+      replacedCancelFailed,
+    };
+  },
+
+  // 同角色活跃会话租约：只 PUT 这一条几十字节的 chat_presence，不复用胖 fire_pack。
+  // worker 对 expire AI 任务到点前先读它——新鲜则 skip，避免正在聊天时又弹主动消息。
+  // 写入失败由调用方（amsgStateSync 的 lease timer）只 warn，45s TTL 自然失效。
+  async syncChatPresence(charId: string, presence: AmsgChatPresence): Promise<void> {
+    const globalConfig = await ensureWorkerReady();
+    const client = await initializeClient(globalConfig);
+    const response = await client.putClientState([{
+      namespace: amsgStateNamespace(charId),
+      key: AMSG_CHAT_PRESENCE_KEY,
+      value: JSON.stringify(presence),
+      updatedAt: presence.activeAt,
+    }]);
+    if (!response?.success) {
+      throw new Error(response?.error?.message || '上传活跃会话租约失败。');
+    }
   },
 
   // 满血同步：把一批角色的最新 fire_pack 合成一次 putClientState 上传（amsgStateSync
@@ -563,7 +612,7 @@ export const ActiveMsgClient = {
     const entries = [];
     for (const item of items) {
       const firePack = await buildFirePack(
-        item.char, item.config, item.userProfile, item.groups, item.realtimeConfig,
+        item.char, item.userProfile, item.groups, item.realtimeConfig,
       );
       // 大值由 amsg-server 2.6.0-next.4+ 在 worker 存储层透明分块，整条直传，
       // 内容一个字不裁；老 worker 拒超限条目 → 设置页 capabilities 探测亮牌。
