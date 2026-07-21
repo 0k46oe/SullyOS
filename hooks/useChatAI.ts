@@ -42,6 +42,7 @@ import { ActiveMsgStore } from '../utils/activeMsgStore';
 import { markAmsgStateDirty, startAmsgChatPresence, stopAmsgChatPresence } from '../utils/amsgStateSync';
 import { getLastRealUserMessageAt } from '../utils/amsg2ExpireGuard';
 import { hasActiveAiTask } from '../utils/amsg2Tasks';
+import { collectAmsg2TaskContext } from '../utils/amsg2TaskContext';
 import { AMSG2_TOOLS, AMSG2_TOOL_NAMES, executeAmsg2Tool, isAmsg2GlobalReady } from '../utils/amsg2ToolBridge';
 import { applyEmotionEvalRaw, extractAssistantText } from '../utils/emotionApply';
 import { announceChatGen, CHAT_GEN_EVENTS } from '../utils/chatGenEvents';
@@ -959,14 +960,27 @@ export const useChatAI = ({
                     }
                 }
             }
-            // 主动消息 2.0 本地工具：已配置 worker 时注入 schedule/cancel/list，
-            // 让角色在对话中直接排程定时消息（"提醒我 8 点问好"→ LLM 调 schedule_active_message）。
+            // 主动消息 2.0 本地工具：已配置 worker 时注入 schedule/cancel/renew/list，
+            // 并注入「排程现状」背景块（进行中任务 + 作废待处理，角色自行判断怎么接）。
             // amsg2 和 instant push 互斥，不需要额外判断。
             let amsg2ToolsInjected = false;
+            let amsg2ExpiredIds: string[] = [];
             if (await isAmsg2GlobalReady()) {
                 amsg2ToolsInjected = true;
                 baseReqBody.tools = [...(baseReqBody.tools || []), ...AMSG2_TOOLS];
                 if (!baseReqBody.tool_choice) baseReqBody.tool_choice = 'auto';
+                try {
+                    const taskContext = await collectAmsg2TaskContext(char);
+                    if (taskContext.text) {
+                        amsg2ExpiredIds = taskContext.expiredIds;
+                        baseReqBody.messages = [
+                            ...baseReqBody.messages,
+                            { role: 'system', content: taskContext.text },
+                        ];
+                    }
+                } catch (e) {
+                    console.warn('[amsg2] 排程现状块构建失败，本轮跳过', e);
+                }
             }
 
             // ─── Instant Push 分支 ───
@@ -1588,6 +1602,14 @@ export const useChatAI = ({
             // 对它已失效）会重新 reloadMessages；用户不在该会话时补未读 + toast。
             // instant 路径不发：它的落库回落走 'active-msg-received'（activeMsgRuntime）。
             announceChatGen(CHAT_GEN_EVENTS.replyArrived, { charId: char.id, charName: char.name });
+
+            // 防穿帮闸：仅当这轮请求真的成功、回执确实进了模型上下文并产出已落库的
+            // 回复，才标记已告知；失败/中断路径不标，下轮重新注入（回执不丢）。
+            // 放在 try 成功尾部（回复已 applyAssistantPostProcessing 落库），与 catch/finally 互斥；
+            // amsg2 与 instant 互斥，instant 路径在上方已 return，这里只覆盖本地 fetch 路径。
+            if (amsg2ExpiredIds.length) {
+                void ActiveMsgStore.markExpiredNoticesNotified(char.id, amsg2ExpiredIds);
+            }
 
         } catch (e: any) {
             // 注意: 这个 catch 兜的是「拿到 API 响应之后」的整条后处理管线 (applyAssistantPostProcessing,
