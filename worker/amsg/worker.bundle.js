@@ -392,7 +392,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.4_@neondatabase+serverless@1.1.0/node_modules/@rei-standard/amsg-server/dist/chunk-OVGQHTSE.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.5_@neondatabase+serverless@1.1.0/node_modules/@rei-standard/amsg-server/dist/chunk-ES2HUXYZ.mjs
 function isValidISO8601(dateString) {
   const date = new Date(dateString);
   return date instanceof Date && !isNaN(date.getTime());
@@ -943,7 +943,7 @@ function normalizeBeforeFireResult(result) {
     };
   }
   throw new TypeError(
-    "AGENTIC_BAD_BEFORE_FIRE: onBeforeFire must return ChatMessage[] | { messages, maxToolIterations?, totalTimeoutMs? } | null"
+    "AGENTIC_BAD_BEFORE_FIRE: onBeforeFire must return ChatMessage[] | { messages, maxToolIterations?, totalTimeoutMs? } | { skip: true } | null"
   );
 }
 function firstPositiveInt(values, fallback) {
@@ -987,6 +987,9 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
   });
   const before = await hooks.onBeforeFire(fireCtx);
   if (before == null) return { handled: false };
+  if (typeof before === "object" && before.skip === true) {
+    return { handled: true, result: { success: true, messagesSent: 0, status: "skipped", iterations: 0 } };
+  }
   const normalized = normalizeBeforeFireResult(before);
   const maxToolIterations = firstPositiveInt(
     [normalized.maxToolIterations, ctx.maxToolIterations],
@@ -1749,7 +1752,14 @@ function createMessagesHandler(ctx) {
         status: task.status,
         retryCount: task.retry_count,
         createdAt: task.created_at,
-        updatedAt: task.updated_at
+        updatedAt: task.updated_at,
+        // Character ownership / client-side task identity, pulled from the
+        // scheduling host's metadata so it can filter tasks by character
+        // (contactName can collide across characters). Only these two
+        // metadata fields are surfaced — the rest of metadata may hold
+        // host-private data and stays server-side. Absent → null.
+        charId: decrypted.metadata?.charId ?? null,
+        clientTaskId: decrypted.metadata?.amsgClientTaskId ?? null
       };
     }));
     const responsePayload = {
@@ -2399,7 +2409,7 @@ function createClientStateHandler(ctx) {
   }
   return { PUT, GET, DELETE };
 }
-var SERVER_VERSION = true ? "2.6.0-next.4" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.6.0-next.5" : "0.0.0-dev";
 var SERVER_FEATURES = Object.freeze([
   "client-state",
   "client-state-chunking",
@@ -2794,6 +2804,12 @@ var AMSG_FIRE_PACK_KEY = "fire_pack";
 var AMSG_SLOT_CURRENT_TIME = "{{AMSG_CURRENT_TIME}}";
 var AMSG_SLOT_TIME_SINCE_USER = "{{AMSG_TIME_SINCE_USER}}";
 var AMSG_SLOT_AWAY_HINT = "{{AMSG_AWAY_HINT}}";
+var AMSG_SLOT_TASK_INSTRUCTION = "{{AMSG_TASK_INSTRUCTION}}";
+var DEFAULT_TASK_INSTRUCTION = [
+  "\u8FD9\u662F\u4E00\u6761\u9700\u8981 AI \u81EA\u4E3B\u751F\u6210\u7684\u4E3B\u52A8\u6D88\u606F\u3002",
+  "\u8BF7\u7ED3\u5408\u89D2\u8272\u8BBE\u5B9A\u3001\u5173\u7CFB\u72B6\u6001\u3001\u6700\u8FD1\u4E0A\u4E0B\u6587\u4E0E\u5F53\u524D\u65F6\u95F4\uFF0C\u81EA\u7136\u5730\u4E3B\u52A8\u627E\u7528\u6237\u8BF4\u4E00\u5230\u4E09\u53E5\u79C1\u804A\u6D88\u606F\u3002",
+  "\u53EF\u9009\u7075\u611F\u8865\u5145\uFF1A\u65E0"
+].join("\n");
 var formatLocalTime = (nowMs, tzOffsetMin) => {
   const local = new Date(nowMs - tzOffsetMin * 6e4);
   return local.toISOString().slice(0, 16).replace("T", " ");
@@ -2820,7 +2836,7 @@ var buildAwayHint = (targetName, timeSinceUser) => {
   return timeSinceUser.includes("\u6CA1\u6709\u65B0\u7684\u804A\u5929\u8BB0\u5F55") ? `${target}\u6700\u8FD1\u6CA1\u6709\u4E3B\u52A8\u6765\u627E\u4F60\u8BF4\u8BDD\u3002` : `${target}${timeSinceUser.replace(/^距离用户/, "\u5DF2\u7ECF")}`;
 };
 var fillSlot = (text, slot, value) => text.split(slot).join(value);
-var renderFirePack = (pack, nowMs) => {
+var renderFirePack = (pack, nowMs, opts) => {
   const currentTime = formatLocalTime(nowMs, pack.tzOffsetMin);
   const diffMinutes = pack.lastUserMessageAt == null ? null : Math.max(0, Math.floor((nowMs - pack.lastUserMessageAt) / 6e4));
   const timeSinceUser = formatTimeSinceUser(diffMinutes);
@@ -2829,18 +2845,49 @@ var renderFirePack = (pack, nowMs) => {
   out = fillSlot(out, AMSG_SLOT_CURRENT_TIME, currentTime);
   out = fillSlot(out, AMSG_SLOT_TIME_SINCE_USER, timeSinceUser);
   out = fillSlot(out, AMSG_SLOT_AWAY_HINT, awayHint);
+  out = fillSlot(out, AMSG_SLOT_TASK_INSTRUCTION, opts?.taskInstruction?.trim() || DEFAULT_TASK_INSTRUCTION);
   return out;
 };
 var parseFirePack = (value) => {
   try {
     const parsed = JSON.parse(value);
-    if (parsed && typeof parsed === "object" && parsed.v === 1 && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && typeof parsed.tzOffsetMin === "number" && typeof parsed.targetName === "string") {
+    if (parsed && typeof parsed === "object" && parsed.v === 2 && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && typeof parsed.tzOffsetMin === "number" && typeof parsed.targetName === "string") {
       return parsed;
     }
   } catch {
   }
   return null;
 };
+
+// utils/amsg2ExpireGuard.ts
+var ACTIVE_CHAT_WINDOW_MS = 10 * 6e4;
+var DEFAULT_LOOKBACK_MS = 48 * 36e5;
+function shouldExpireFire(input) {
+  if (input.policy !== "expire") return false;
+  const last = input.lastUserMessageAt;
+  if (last == null) return false;
+  if (input.recurrenceType === "daily" || input.recurrenceType === "weekly") {
+    return input.nowMs - last < ACTIVE_CHAT_WINDOW_MS;
+  }
+  const anchor = input.anchorMs;
+  if (anchor == null) return false;
+  return last > anchor;
+}
+
+// utils/amsgChatPresence.ts
+var AMSG_CHAT_PRESENCE_KEY = "chat_presence";
+var CHAT_PRESENCE_TTL_MS = 45e3;
+var parseAmsgChatPresence = (raw) => {
+  try {
+    const value = raw ? JSON.parse(raw) : null;
+    return value?.v === 1 && typeof value.charId === "string" && typeof value.activeAt === "number" && (value.lastUserMessageAt === null || typeof value.lastUserMessageAt === "number") ? value : null;
+  } catch {
+    return null;
+  }
+};
+var isFreshChatPresence = (value, charId, nowMs) => Boolean(
+  value && value.v === 1 && value.charId === charId && value.activeAt <= nowMs + 1e4 && nowMs - value.activeAt <= CHAT_PRESENCE_TTL_MS
+);
 
 // utils/proxyWorker.ts
 var DEFAULT_PROXY_WORKER = "https://sullymeow.ccwu.cc";
@@ -4859,7 +4906,11 @@ function buildScheduledPush(message, build, extraMeta, bannerBody) {
     avatarUrl: build.avatarUrl,
     messageSubtype: "chat",
     taskId: build.taskId,
-    metadata: extraMeta ? { ...build.metadata, ...extraMeta } : build.metadata,
+    metadata: {
+      ...build.metadata,
+      ...build.occurrenceMs != null ? { amsgOccurrenceMs: build.occurrenceMs } : {},
+      ...extraMeta ?? {}
+    },
     ...bannerBody !== void 0 ? { notification: { title, body: bannerBody } } : {}
   };
 }
@@ -4913,10 +4964,37 @@ var amsgHooks = {
     const charId = ctx.task?.metadata?.charId;
     if (typeof charId !== "string" || !charId) return null;
     const charRows = await ctx.readState(amsgStateNamespace(charId));
+    const taskMeta = ctx.task.metadata ?? {};
+    const policy = typeof taskMeta.amsgExpirePolicy === "string" ? taskMeta.amsgExpirePolicy : void 0;
+    const presence = parseAmsgChatPresence(
+      charRows.find((r) => r.key === AMSG_CHAT_PRESENCE_KEY)?.value
+    );
+    if (policy === "expire" && isFreshChatPresence(presence, charId, ctx.now.getTime())) {
+      console.log("[amsg:expire-skip]", {
+        taskId: ctx.task.id,
+        reason: "active-chat-presence",
+        presenceActiveAt: presence?.activeAt
+      });
+      return { skip: true };
+    }
     const packRow = charRows.find((r) => r.key === AMSG_FIRE_PACK_KEY);
     if (!packRow) return null;
     const pack = parseFirePack(packRow.value);
     if (!pack) return null;
+    const expireInput = {
+      policy,
+      recurrenceType: typeof ctx.task.recurrenceType === "string" ? ctx.task.recurrenceType : typeof taskMeta.amsgRecurrence === "string" ? taskMeta.amsgRecurrence : void 0,
+      anchorMs: typeof taskMeta.amsgAnchorMs === "number" ? taskMeta.amsgAnchorMs : null,
+      lastUserMessageAt: pack.lastUserMessageAt ?? null,
+      nowMs: ctx.now.getTime()
+    };
+    if (shouldExpireFire(expireInput)) {
+      console.log("[amsg:expire-skip]", { taskId: ctx.task.id, ...expireInput });
+      return { skip: true };
+    }
+    if (typeof taskMeta.amsgTaskInstruction !== "string") return null;
+    const parsedOccurrence = ctx.task.nextSendAt ? Date.parse(String(ctx.task.nextSendAt)) : NaN;
+    const occurrenceMs = Number.isFinite(parsedOccurrence) ? parsedOccurrence : null;
     let toolConfigRaw;
     try {
       const globalRows = await ctx.readState(AMSG_GLOBAL_NAMESPACE);
@@ -4933,9 +5011,12 @@ var amsgHooks = {
       session: createFireSessionState(),
       toolCtx,
       proxyWorkerUrl,
-      xhsCookie
+      xhsCookie,
+      occurrenceMs
     };
-    const prompt = renderFirePack(pack, ctx.now.getTime());
+    const prompt = renderFirePack(pack, ctx.now.getTime(), {
+      taskInstruction: taskMeta.amsgTaskInstruction
+    });
     return [{ role: "user", content: prompt }];
   },
   async onLLMOutput(ctx) {
@@ -4950,6 +5031,7 @@ var amsgHooks = {
       taskId,
       messageType,
       metadata: ctx.metadata,
+      occurrenceMs: stash?.occurrenceMs ?? null,
       // round 1 XHS 工具抓到的笔记 / xsecToken 快照：finish 时按 directive 引用
       // 挑选后随最后一条 push 带回客户端（客户端离线跑不了 round 1，缺这份
       // [[XHS_SHARE]] / 点赞 / 评论重放必然 available:0 掉卡片）。

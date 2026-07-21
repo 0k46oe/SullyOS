@@ -31,6 +31,12 @@ import {
   parseFirePack,
   renderFirePack,
 } from '../../../utils/amsgFirePack';
+import { shouldExpireFire } from '../../../utils/amsg2ExpireGuard';
+import {
+  AMSG_CHAT_PRESENCE_KEY,
+  isFreshChatPresence,
+  parseAmsgChatPresence,
+} from '../../../utils/amsgChatPresence';
 import {
   AMSG_GLOBAL_NAMESPACE,
   AMSG_TOOL_CONFIG_KEY,
@@ -84,6 +90,8 @@ interface FireCtx {
   task: {
     id?: string | number | null;
     contactName?: string;
+    recurrenceType?: string;
+    nextSendAt?: string | null;
     metadata?: Record<string, unknown>;
   };
   userId: string;
@@ -112,6 +120,8 @@ interface FireStash {
   toolCtx: AgenticToolCtx;
   proxyWorkerUrl: string | null;
   xhsCookie: string;
+  /** 本次触发时刻（任务行 next_send_at）；透传给每条 push 的 metadata.amsgOccurrenceMs。 */
+  occurrenceMs: number | null;
 }
 
 const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash | undefined =>
@@ -182,6 +192,26 @@ const amsgHooks = {
     if (typeof charId !== 'string' || !charId) return null;
 
     const charRows = await ctx.readState(amsgStateNamespace(charId));
+
+    const taskMeta = (ctx.task.metadata ?? {}) as Record<string, unknown>;
+    const policy = typeof taskMeta.amsgExpirePolicy === 'string'
+      ? taskMeta.amsgExpirePolicy : undefined;
+
+    // 同角色活跃会话租约：一轮对话生成期间客户端每 15s 续租，45s TTL。
+    // 这是 worker 防通知的第一道快速门；缺失/过期/坏数据就继续走 fire_pack 规则。
+    // 必须放在 packRow 空返回之前：新任务即使 fire_pack 同步失败，轻量心跳仍应能阻止正在聊天时生成。
+    const presence = parseAmsgChatPresence(
+      charRows.find((r) => r.key === AMSG_CHAT_PRESENCE_KEY)?.value,
+    );
+    if (policy === 'expire' && isFreshChatPresence(presence, charId, ctx.now.getTime())) {
+      console.log('[amsg:expire-skip]', {
+        taskId: ctx.task.id,
+        reason: 'active-chat-presence',
+        presenceActiveAt: presence?.activeAt,
+      });
+      return { skip: true } as const;
+    }
+
     const packRow = charRows.find((r) => r.key === AMSG_FIRE_PACK_KEY);
     if (!packRow) return null;
 
@@ -190,6 +220,36 @@ const amsgHooks = {
     // 照旧退冻结提示词，下轮聊天同步会用新格式覆盖。）
     const pack = parseFirePack(packRow.value);
     if (!pack) return null;
+
+    // 防穿帮闸·worker 主判定：一次性任务创建后对话已前进 / 循环任务到点时用户
+    // 正在热聊 → { skip: true } 跳过本次 fire（amsg-server skip 出口，任务照常
+    // 推进/删除），一个生成 token 都不花。fire_pack.lastUserMessageAt 随
+    // amsgStateSync 去抖同步、最多滞后十几秒；剩余竞态由客户端送达兜底闸兜住
+    // （activeMsgRuntime 的 runtime-expire-swallow）。缺策略字段的任务不拦。
+    const expireInput = {
+      policy,
+      recurrenceType: typeof ctx.task.recurrenceType === 'string'
+        ? ctx.task.recurrenceType
+        : (typeof taskMeta.amsgRecurrence === 'string' ? taskMeta.amsgRecurrence : undefined),
+      anchorMs: typeof taskMeta.amsgAnchorMs === 'number' ? taskMeta.amsgAnchorMs : null,
+      lastUserMessageAt: pack.lastUserMessageAt ?? null,
+      nowMs: ctx.now.getTime(),
+    };
+    if (shouldExpireFire(expireInput)) {
+      console.log('[amsg:expire-skip]', { taskId: ctx.task.id, ...expireInput });
+      return { skip: true } as const;
+    }
+
+    // 遗留任务（metadata 无 amsgTaskInstruction 的 AI 任务，Codex #8）：不能用 v2 pack
+    // + 默认 auto 指令渲染——那会把 prompted 任务的方向偷换掉。直接回退该任务排程时
+    // 冻结的 completePrompt（按任务各自生成，语义正确，只是上下文停在排程时刻）。
+    if (typeof taskMeta.amsgTaskInstruction !== 'string') return null;
+
+    // 本次触发时刻：任务行 next_send_at（buildHookTask 已摊平提供）。经 scratch 透传
+    // 给每条 push 的 metadata.amsgOccurrenceMs——客户端兜底闸的循环判定与吞放缓存键
+    // 都要它（Codex #2/#10）。
+    const parsedOccurrence = ctx.task.nextSendAt ? Date.parse(String(ctx.task.nextSendAt)) : NaN;
+    const occurrenceMs = Number.isFinite(parsedOccurrence) ? parsedOccurrence : null;
 
     // 工具数据与 prompt 同拍装好，挂 ctx.scratch 给同一次 fire 的
     // onLLMOutput / executeToolCalls（库保证同引用、fire 结束即丢，
@@ -211,9 +271,13 @@ const amsgHooks = {
       toolCtx,
       proxyWorkerUrl,
       xhsCookie,
+      occurrenceMs,
     } satisfies FireStash;
 
-    const prompt = renderFirePack(pack, ctx.now.getTime());
+    // fire_pack v2：「本次任务」指令随任务 metadata 走，这里填槽。
+    const prompt = renderFirePack(pack, ctx.now.getTime(), {
+      taskInstruction: taskMeta.amsgTaskInstruction as string,
+    });
     return [{ role: 'user' as const, content: prompt }];
   },
 
@@ -236,6 +300,7 @@ const amsgHooks = {
       taskId,
       messageType,
       metadata: ctx.metadata,
+      occurrenceMs: stash?.occurrenceMs ?? null,
       // round 1 XHS 工具抓到的笔记 / xsecToken 快照：finish 时按 directive 引用
       // 挑选后随最后一条 push 带回客户端（客户端离线跑不了 round 1，缺这份
       // [[XHS_SHARE]] / 点赞 / 评论重放必然 available:0 掉卡片）。

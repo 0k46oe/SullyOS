@@ -41,6 +41,8 @@ export interface PushBuildInput {
   /** 'auto' | 'prompted'（metadata.amsgMode 透传，缺省 'auto'）。 */
   messageType: string;
   metadata: Record<string, unknown>;
+  /** 本次触发时刻（任务行 next_send_at），随每条 push 的 metadata.amsgOccurrenceMs 带回客户端。 */
+  occurrenceMs?: number | null;
   /**
    * round 1 XHS 工具抓到的笔记快照（stash.toolCtx.lastXhsNotesRef.current）。
    * amsg2 的 round 1 在 worker 里跑，客户端没有 instantToolRunner 那次
@@ -192,7 +194,11 @@ function buildScheduledPush(
     avatarUrl: build.avatarUrl,
     messageSubtype: 'chat',
     taskId: build.taskId,
-    metadata: extraMeta ? { ...build.metadata, ...extraMeta } : build.metadata,
+    metadata: {
+      ...build.metadata,
+      ...(build.occurrenceMs != null ? { amsgOccurrenceMs: build.occurrenceMs } : {}),
+      ...(extraMeta ?? {}),
+    },
     ...(bannerBody !== undefined ? { notification: { title, body: bannerBody } } : {}),
   };
 }
