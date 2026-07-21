@@ -1,0 +1,86 @@
+/**
+ * amsg2 多任务清单的读取/派生工具集（浏览器侧；worker 不需要它）。
+ *
+ * 状态设计：清单只存 'scheduled'（取消即移除记录）。到点后的一次性任务不回写
+ * 状态——「已发送 / 已作废」由消息历史现场推导（amsg2TaskContext），避免
+ * React 之外（push 送达路径）写角色数据引发状态竞争。过点 48h 的一次性任务
+ * 由 pruneStaleTasks 在下一次任务变更落盘时顺手清掉。
+ */
+
+import {
+  ActiveMsg2CharacterConfig,
+  ActiveMsg2TaskRecord,
+} from '../types';
+import { FIRE_GRACE_MS } from './amsg2ExpireGuard';
+
+export const MAX_ACTIVE_TASKS_PER_CHAR = 5;
+
+export const shortTaskId = (taskUuid: string): string => taskUuid.slice(0, 8);
+
+export const findTaskByShortId = (
+  tasks: ActiveMsg2TaskRecord[],
+  shortId: string,
+): ActiveMsg2TaskRecord | undefined =>
+  tasks.find((t) => shortTaskId(t.taskUuid) === shortId || t.taskUuid === shortId);
+
+/** 待触发 = 还会响的任务：循环任务恒真；一次性任务触发点（含宽限）未过。 */
+export const isPendingTask = (task: ActiveMsg2TaskRecord, nowMs: number): boolean => {
+  if (task.status !== 'scheduled') return false;
+  if (task.recurrenceType !== 'none') return true;
+  const fireAt = new Date(task.firstSendTime).getTime();
+  return Number.isFinite(fireAt) && fireAt + FIRE_GRACE_MS > nowMs;
+};
+
+export const getPendingTasks = (
+  config: ActiveMsg2CharacterConfig | undefined,
+  nowMs: number,
+): ActiveMsg2TaskRecord[] =>
+  (config?.tasks ?? []).filter((t) => isPendingTask(t, nowMs));
+
+/** 有没有还会响的 AI 任务（amsgStateSync 的同步门用：fixed 不需要 fire_pack）。 */
+export const hasActiveAiTask = (
+  config: ActiveMsg2CharacterConfig | undefined,
+  nowMs = Date.now(),
+): boolean => getPendingTasks(config, nowMs).some((t) => t.mode !== 'fixed');
+
+/** 过点超过 48h 的一次性任务出清单（排程现状块的回看期也是 48h，一致）。 */
+export const pruneStaleTasks = (
+  tasks: ActiveMsg2TaskRecord[],
+  nowMs: number,
+): ActiveMsg2TaskRecord[] =>
+  tasks.filter((t) => {
+    if (t.recurrenceType !== 'none') return true;
+    const fireAt = new Date(t.firstSendTime).getTime();
+    return !Number.isFinite(fireAt) || fireAt > nowMs - 48 * 3600_000;
+  });
+
+/**
+ * 读取自愈：把开发期旧的单任务形态（顶层 taskUuid/mode/...）包成 tasks[0]。
+ * amsg2 未发布，这不是兼容层，只是让自己设备上已有的任务不用手动重建。
+ */
+export const normalizeActiveMsg2Config = (
+  raw: ActiveMsg2CharacterConfig | undefined,
+): ActiveMsg2CharacterConfig | undefined => {
+  if (!raw) return raw;
+  const legacy = raw as ActiveMsg2CharacterConfig & Record<string, any>;
+  if (legacy.tasks || !legacy.taskUuid) return raw;
+  const migrated: ActiveMsg2TaskRecord = {
+    taskUuid: legacy.taskUuid,
+    // 遗留任务的远端 payload 没有 amsgClientTaskId / amsgTaskInstruction：worker 对它
+    // 回退冻结 completePrompt（不进闸），客户端送达匹配退回时间窗近似；重排后自然升级。
+    clientTaskId: legacy.taskUuid,
+    mode: legacy.mode ?? 'auto',
+    firstSendTime: legacy.firstSendTime ?? new Date().toISOString(),
+    recurrenceType: legacy.recurrenceType ?? 'none',
+    userMessage: legacy.userMessage,
+    promptHint: legacy.promptHint,
+    source: 'user',
+    status: legacy.remoteStatus === 'scheduled' || legacy.remoteStatus === 'sent' ? 'scheduled' : 'cancelled',
+    createdAt: legacy.lastSyncedAt ?? Date.now(),
+  };
+  const {
+    mode: _m, firstSendTime: _f, recurrenceType: _r, userMessage: _u, promptHint: _p,
+    taskUuid: _t, remoteStatus: _s, ...rest
+  } = legacy;
+  return { ...rest, tasks: migrated.status === 'scheduled' ? [migrated] : [] };
+};

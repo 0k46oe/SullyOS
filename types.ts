@@ -272,20 +272,57 @@ export interface ActiveMsg2GlobalConfig {
   updatedAt?: number;
 }
 
-export interface ActiveMsg2CharacterConfig {
-  enabled: boolean;
+export type ActiveMsg2ExpirePolicy = 'expire' | 'force';
+export type ActiveMsg2TaskSource = 'user' | 'character';
+/** scheduled=待触发/循环中；cancelled 仅短暂存在（取消即从清单移除）。到点后的
+ *  一次性任务不改 status——「已发送/已作废」由消息历史现场推导，避免 React 外写角色数据。 */
+export type ActiveMsg2TaskStatus = 'scheduled' | 'cancelled';
+
+export interface ActiveMsg2TaskRecord {
+  taskUuid: string;
+  /** 客户端排程前自造的 uuid v4，与 push metadata 的 amsgClientTaskId 同源——送达归属匹配键。 */
+  clientTaskId?: string;
   mode: ActiveMsg2Mode;
+  /** ISO / datetime-local 字符串，首次触发时间。 */
   firstSendTime: string;
   recurrenceType: ActiveMsg2Recurrence;
+  /** fixed 模式的固定内容。 */
   userMessage?: string;
   promptHint?: string;
+  /** 防穿帮策略，缺省按 'expire'。 */
+  expirePolicy?: ActiveMsg2ExpirePolicy;
+  /** 排程时最后一条真实用户消息的时间戳（作废判定锚点；当时无消息为 0）。 */
+  anchorLastUserMsgAt?: number;
+  source: ActiveMsg2TaskSource;
+  status: ActiveMsg2TaskStatus;
+  createdAt: number;
+  lastError?: string;
+}
+
+export interface ActiveMsg2CharacterConfig {
+  enabled: boolean;
+  /** 多任务清单（用户在面板建的和角色用工具建的并存），见 utils/amsg2Tasks.ts。 */
+  tasks?: ActiveMsg2TaskRecord[];
+  /** ↓ 角色级共享设置（所有任务共用）。 */
   maxTokens?: number;
-  taskUuid?: string;
-  remoteStatus?: 'idle' | 'scheduled' | 'sent' | 'error';
   useSecondaryApi?: boolean;
   secondaryApi?: ActiveMsg2ApiConfig;
   lastSyncedAt?: number;
   lastError?: string;
+}
+
+/** 防穿帮闸的作废回执台账（amsg-local IDB kv，按角色一条数组）。 */
+export interface Amsg2ExpiredNoticeRecord {
+  /** 一次性任务 = taskUuid；循环任务 = `${taskUuid}:${occurrenceMs}`。 */
+  id: string;
+  charId: string;
+  occurrenceMs: number;
+  mode: ActiveMsg2Mode;
+  promptHint?: string;
+  recurrenceType: ActiveMsg2Recurrence;
+  /** 已注入过排程现状块（角色已知情），不再重复注入。 */
+  notifiedAt?: number;
+  createdAt: number;
 }
 
 export interface ActiveMsg2InboxMessage {
