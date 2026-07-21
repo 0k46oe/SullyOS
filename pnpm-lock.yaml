@@ -82,8 +82,8 @@ importers:
         specifier: ^6.0.0
         version: 6.2.1
       '@rei-standard/amsg-server':
-        specifier: 2.6.0-next.4
-        version: 2.6.0-next.4(@neondatabase/serverless@1.1.0)
+        specifier: 2.6.0-next.5
+        version: 2.6.0-next.5(@neondatabase/serverless@1.1.0)
       '@types/qrcode':
         specifier: ^1.5.6
         version: 1.5.6
@@ -808,8 +808,8 @@ packages:
     resolution: {integrity: sha512-GsLzRvSXsp5cbJ/vNwQP+yHoZ4LJiilOvws0LemrzaFoG45ApQ7WW3YHux58DXdXOSN36prT5CsmipA3wUAmQQ==}
     engines: {node: '>=18'}
 
-  '@rei-standard/amsg-server@2.6.0-next.4':
-    resolution: {integrity: sha512-90XZY7Tst+fS0v3zkSGnluGyXftlsrcWHpglPr+/V8WKqkiOR4ZhhSt1OD+64R06hzLvoG3NUPsu4YLZtB1qvQ==}
+  '@rei-standard/amsg-server@2.6.0-next.5':
+    resolution: {integrity: sha512-GLa8nke+Ee1fi8HKFYJ70SR4Oq6+w1+wSc+sW2CgLVINOa5QjcfN2WLe1NSGbNf7fzgadMHPVy1H1ows4vP1MQ==}
     engines: {node: '>=20'}
     peerDependencies:
       '@neondatabase/serverless': '>=0.9.0'
@@ -1060,11 +1060,6 @@ packages:
 
   acorn@8.14.0:
     resolution: {integrity: sha512-cl669nCJTZBsL97OF4kUQm5g5hC2uihk0NxY3WENAC0TYdILVkAyHymAntgxGkl7K+t0cXIrH5siy5S4XkFycA==}
-    engines: {node: '>=0.4.0'}
-    hasBin: true
-
-  acorn@8.16.0:
-    resolution: {integrity: sha512-UVJyE9MttOsBQIDKw1skb9nAwQuR5wuGD3+82K6JgJlm/Y+KI92oNsMNGZCYdDsVtRHSak0pcV5Dno5+4jh9sw==}
     engines: {node: '>=0.4.0'}
     hasBin: true
 
@@ -1527,10 +1522,6 @@ packages:
 
   pako@2.1.0:
     resolution: {integrity: sha512-w+eufiZ1WuJYgPXbV/PO3NCMEc3xqylkKHzp8bxp1uW4qaSNQUkwmLLEc3kKsfz8lpV1F8Ht3U1Cm+9Srog2ug==}
-
-  parse-gitignore@2.0.0:
-    resolution: {integrity: sha512-RmVuCHWsfu0QPNW+mraxh/xjQVw/lhUCUru8Zni3Ctq3AoMhpDTq0OVdKS6iesd6Kqb7viCV3isAL43dciOSog==}
-    engines: {node: '>=14'}
 
   path-exists@4.0.0:
     resolution: {integrity: sha512-ak9Qy5Q7jYb2Wwcey5Fpvg2KoAc/ZIhLSLOSBmRmygPsGwkVVt0fZa0qrtMz+m6tJTAHfZQ8FnmB4MG4LWy7/w==}
@@ -2544,7 +2535,7 @@ snapshots:
     dependencies:
       '@rei-standard/amsg-shared': 0.2.0
 
-  '@rei-standard/amsg-server@2.6.0-next.4(@neondatabase/serverless@1.1.0)':
+  '@rei-standard/amsg-server@2.6.0-next.5(@neondatabase/serverless@1.1.0)':
     dependencies:
       '@netlify/blobs': 8.2.0
       '@rei-standard/amsg-shared': 0.4.0-next.1
@@ -2746,8 +2737,6 @@ snapshots:
   acorn-walk@8.3.2: {}
 
   acorn@8.14.0: {}
-
-  acorn@8.16.0: {}
 
   ag-psd@31.0.2:
     dependencies:
@@ -3199,8 +3188,6 @@ snapshots:
   pako@1.0.11: {}
 
   pako@2.1.0: {}
-
-  parse-gitignore@2.0.0: {}
 
   path-exists@4.0.0: {}
 
