@@ -8,6 +8,8 @@
  *   - worker/amsg/src/index.ts 的 onBeforeFire（fire 时现场渲染）
  * 时间文案只此一份，两条路径产出保证一致。
  *
+ * 多任务共用每角色一份 fire_pack：「本次任务」指令随任务 metadata 走、到点填槽（v2 起）。
+ *
  * 纯函数、零依赖（worker bundle 会打进这份代码，别在这里 import 前端环境的东西）。
  */
 
@@ -18,10 +20,18 @@ export const AMSG_FIRE_PACK_KEY = 'fire_pack';
 export const AMSG_SLOT_CURRENT_TIME = '{{AMSG_CURRENT_TIME}}';
 export const AMSG_SLOT_TIME_SINCE_USER = '{{AMSG_TIME_SINCE_USER}}';
 export const AMSG_SLOT_AWAY_HINT = '{{AMSG_AWAY_HINT}}';
+export const AMSG_SLOT_TASK_INSTRUCTION = '{{AMSG_TASK_INSTRUCTION}}';
+
+/** metadata 里缺任务指令时的兜底（等价旧 auto 模式无灵感补充的文案）。 */
+export const DEFAULT_TASK_INSTRUCTION = [
+  '这是一条需要 AI 自主生成的主动消息。',
+  '请结合角色设定、关系状态、最近上下文与当前时间，自然地主动找用户说一到三句私聊消息。',
+  '可选灵感补充：无',
+].join('\n');
 
 export interface AmsgFirePack {
-  v: 1;
-  /** 完整 prompt 模板，时间性内容留 AMSG_SLOT_* 槽位。 */
+  v: 2;
+  /** 完整 prompt 模板，时间性内容与本次任务指令留 AMSG_SLOT_* 槽位。 */
   template: string;
   /** 用户上次真实主动发消息的时间（epoch ms）；没有聊天记录时为 null。 */
   lastUserMessageAt: number | null;
@@ -67,7 +77,11 @@ export const buildAwayHint = (targetName: string, timeSinceUser: string): string
 const fillSlot = (text: string, slot: string, value: string) => text.split(slot).join(value);
 
 /** 用 nowMs 时刻的时间信息填掉模板里的全部槽位，得到最终可发给 LLM 的 prompt。 */
-export const renderFirePack = (pack: AmsgFirePack, nowMs: number): string => {
+export const renderFirePack = (
+  pack: AmsgFirePack,
+  nowMs: number,
+  opts?: { taskInstruction?: string },
+): string => {
   const currentTime = formatLocalTime(nowMs, pack.tzOffsetMin);
   const diffMinutes = pack.lastUserMessageAt == null
     ? null
@@ -79,6 +93,7 @@ export const renderFirePack = (pack: AmsgFirePack, nowMs: number): string => {
   out = fillSlot(out, AMSG_SLOT_CURRENT_TIME, currentTime);
   out = fillSlot(out, AMSG_SLOT_TIME_SINCE_USER, timeSinceUser);
   out = fillSlot(out, AMSG_SLOT_AWAY_HINT, awayHint);
+  out = fillSlot(out, AMSG_SLOT_TASK_INSTRUCTION, opts?.taskInstruction?.trim() || DEFAULT_TASK_INSTRUCTION);
   return out;
 };
 
@@ -88,7 +103,7 @@ export const parseFirePack = (value: string): AmsgFirePack | null => {
     const parsed = JSON.parse(value);
     if (
       parsed && typeof parsed === 'object' &&
-      parsed.v === 1 &&
+      parsed.v === 2 &&
       typeof parsed.template === 'string' && parsed.template.length > 0 &&
       (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === 'number') &&
       typeof parsed.tzOffsetMin === 'number' &&

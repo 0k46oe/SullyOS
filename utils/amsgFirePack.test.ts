@@ -2,9 +2,11 @@ import { describe, it, expect } from 'vitest';
 import {
   AMSG_SLOT_AWAY_HINT,
   AMSG_SLOT_CURRENT_TIME,
+  AMSG_SLOT_TASK_INSTRUCTION,
   AMSG_SLOT_TIME_SINCE_USER,
   AmsgFirePack,
   buildAwayHint,
+  DEFAULT_TASK_INSTRUCTION,
   formatLocalTime,
   formatTimeSinceUser,
   parseFirePack,
@@ -71,12 +73,13 @@ describe('formatLocalTime', () => {
 
 describe('renderFirePack', () => {
   const basePack: AmsgFirePack = {
-    v: 1,
+    v: 2,
     template: [
       `当前本地时间：${AMSG_SLOT_CURRENT_TIME}`,
       AMSG_SLOT_TIME_SINCE_USER,
       `现在是 ${AMSG_SLOT_CURRENT_TIME}。`,
       AMSG_SLOT_AWAY_HINT,
+      AMSG_SLOT_TASK_INSTRUCTION,
     ].join('\n'),
     lastUserMessageAt: null,
     tzOffsetMin: 0,
@@ -91,6 +94,7 @@ describe('renderFirePack', () => {
       '你们最近没有新的聊天记录。',
       '现在是 2026-07-17 08:30。',
       '楪同学最近没有主动来找你说话。',
+      DEFAULT_TASK_INSTRUCTION,
     ].join('\n'));
     expect(rendered).not.toContain('{{');
   });
@@ -108,7 +112,7 @@ describe('renderFirePack', () => {
 
 describe('parseFirePack', () => {
   const valid: AmsgFirePack = {
-    v: 1, template: 'x', lastUserMessageAt: null, tzOffsetMin: -480, targetName: 'A',
+    v: 2, template: 'x', lastUserMessageAt: null, tzOffsetMin: -480, targetName: 'A',
   };
 
   it('合法 JSON 原样返回', () => {
@@ -122,8 +126,32 @@ describe('parseFirePack', () => {
   it('坏形状 → null（worker 借此回退老链路）', () => {
     expect(parseFirePack('not json')).toBeNull();
     expect(parseFirePack('{}')).toBeNull();
-    expect(parseFirePack(JSON.stringify({ ...valid, v: 2 }))).toBeNull();
+    expect(parseFirePack(JSON.stringify({ ...valid, v: 1 }))).toBeNull();
     expect(parseFirePack(JSON.stringify({ ...valid, template: '' }))).toBeNull();
     expect(parseFirePack(JSON.stringify({ ...valid, tzOffsetMin: 'x' }))).toBeNull();
+  });
+});
+
+describe('fire_pack v2 任务指令槽', () => {
+  const pack: AmsgFirePack = {
+    v: 2,
+    template: `头部\n${AMSG_SLOT_TASK_INSTRUCTION}\n尾部 ${AMSG_SLOT_CURRENT_TIME}`,
+    lastUserMessageAt: null, tzOffsetMin: -480, targetName: '楪同学',
+  };
+
+  it('renderFirePack 用传入的任务指令填槽', () => {
+    const out = renderFirePack(pack, Date.UTC(2026, 6, 21, 1, 0), { taskInstruction: '围绕"问考试"发起私聊' });
+    expect(out).toContain('围绕"问考试"发起私聊');
+    expect(out).not.toContain(AMSG_SLOT_TASK_INSTRUCTION);
+  });
+
+  it('没给指令时填默认自动指令（旧任务 metadata 缺指令的兜底）', () => {
+    const out = renderFirePack(pack, Date.UTC(2026, 6, 21, 1, 0));
+    expect(out).toContain(DEFAULT_TASK_INSTRUCTION);
+  });
+
+  it('parseFirePack 只认 v2；v1 旧包 parse 失败（回退冻结 prompt，下轮同步自愈）', () => {
+    expect(parseFirePack(JSON.stringify(pack))).not.toBeNull();
+    expect(parseFirePack(JSON.stringify({ ...pack, v: 1 }))).toBeNull();
   });
 });
