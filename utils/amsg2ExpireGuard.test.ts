@@ -62,20 +62,11 @@ describe('消息扫描 helpers', () => {
     expect(hasDeliveredProactiveNear([assistantPush(1000)], 1000)).toBe(true);
     expect(hasDeliveredProactiveNear([assistantPush(1000, null)], 1000)).toBe(false); // instant 回复不算
   });
-  it('hasDeliveredProactiveNear 按 clientTaskId 精确归属，缺字段退回时间窗近似', () => {
+  it('hasDeliveredProactiveNear 传 clientTaskId 时按精确 id 归属：id 不同或缺 id 都不算本任务的送达', () => {
     const withCid = { role: 'assistant', timestamp: 1000, metadata: { source: 'active_msg_2', activeMsg2: { taskId: 't1' }, amsgClientTaskId: 'cid-A' } };
     expect(hasDeliveredProactiveNear([withCid], 1000, 'cid-A')).toBe(true);
     expect(hasDeliveredProactiveNear([withCid], 1000, 'cid-B')).toBe(false); // A 的送达不能抹掉 B 的回执
-    expect(hasDeliveredProactiveNear([assistantPush(1000)], 1000, 'cid-A')).toBe(true); // 遗留消息缺字段 → 时间窗近似
-  });
-  it('hasDeliveredProactiveNear requireExactClientTaskId=true：新任务不认缺 id 的遗留送达', () => {
-    const legacy = assistantPush(1000);                       // 无 amsgClientTaskId
-    const matching = { role: 'assistant', timestamp: 1000, metadata: { source: 'active_msg_2', activeMsg2: { taskId: 't1' }, amsgClientTaskId: 'cid-A' } };
-    // 默认（false）：缺 id 的送达仍按时间窗近似命中（遗留任务自查）
-    expect(hasDeliveredProactiveNear([legacy], 1000, 'cid-A')).toBe(true);
-    // requireExact=true：新任务只认自己带 id 的送达
-    expect(hasDeliveredProactiveNear([legacy], 1000, 'cid-A', undefined, true)).toBe(false);
-    expect(hasDeliveredProactiveNear([matching], 1000, 'cid-A', undefined, true)).toBe(true);
+    expect(hasDeliveredProactiveNear([assistantPush(1000)], 1000, 'cid-A')).toBe(false); // 缺 amsgClientTaskId 的消息不是本任务的送达
   });
 });
 

@@ -13,7 +13,7 @@ import { ActiveMsg2TaskRecord, Amsg2ExpiredNoticeRecord, CharacterProfile } from
 import { ActiveMsgStore } from './activeMsgStore';
 import { DB } from './db';
 import { detectExpiredOccurrences, hasDeliveredProactiveNear } from './amsg2ExpireGuard';
-import { getPendingTasks, normalizeActiveMsg2Config, shortTaskId } from './amsg2Tasks';
+import { getPendingTasks, shortTaskId } from './amsg2Tasks';
 
 const describeTask = (t: { mode: string; promptHint?: string; userMessage?: string }): string =>
   t.mode === 'fixed' ? '固定消息'
@@ -66,7 +66,7 @@ export interface Amsg2TaskContextResult {
 }
 
 export async function collectAmsg2TaskContext(char: CharacterProfile): Promise<Amsg2TaskContextResult> {
-  const config = normalizeActiveMsg2Config(char.activeMsg2Config);
+  const config = char.activeMsg2Config;
   const tasks = config?.tasks ?? [];
   const now = Date.now();
 
@@ -83,10 +83,7 @@ export async function collectAmsg2TaskContext(char: CharacterProfile): Promise<A
         anchorMs: t.anchorLastUserMsgAt ?? null,
         messages,
         nowMs: now,
-      }).filter((c) => !hasDeliveredProactiveNear(
-        messages, c.occurrenceMs, t.clientTaskId, undefined,
-        !!t.clientTaskId && t.clientTaskId !== t.taskUuid,   // 新任务(clientTaskId≠taskUuid)要求精确 id 命中；遗留任务(相等)走时间窗近似
-      ))
+      }).filter((c) => !hasDeliveredProactiveNear(messages, c.occurrenceMs, t.clientTaskId))
         .map((c) => ({
           id: c.id, charId: char.id, occurrenceMs: c.occurrenceMs,
           mode: t.mode, promptHint: t.promptHint, recurrenceType: t.recurrenceType,

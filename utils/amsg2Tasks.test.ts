@@ -6,7 +6,6 @@ import {
   getPendingTasks,
   hasActiveAiTask,
   isPendingTask,
-  normalizeActiveMsg2Config,
   pruneStaleTasks,
   shortTaskId,
   toDatetimeLocalValue,
@@ -44,29 +43,6 @@ describe('amsg2Tasks helpers', () => {
     const daily = task({ taskUuid: 'daily000-0000-0000-0000-000000000000', firstSendTime: new Date(now - 100 * H).toISOString(), recurrenceType: 'daily' });
     expect(pruneStaleTasks([stale, recent, daily], now).map((t) => shortTaskId(t.taskUuid)))
       .toEqual(['recent00', 'daily000']);
-  });
-
-  it('normalizeActiveMsg2Config：旧单任务字段自愈成 tasks[0]', () => {
-    const legacy = {
-      enabled: true, mode: 'prompted', firstSendTime: '2026-07-20T09:00',
-      recurrenceType: 'daily', promptHint: '道早安', taskUuid: 'legacy00-0000-0000-0000-000000000000',
-      remoteStatus: 'scheduled', maxTokens: 120,
-    };
-    const out = normalizeActiveMsg2Config(legacy)!;
-    expect(out.tasks).toHaveLength(1);
-    expect(out.tasks![0]).toMatchObject({
-      taskUuid: 'legacy00-0000-0000-0000-000000000000',
-      mode: 'prompted', promptHint: '道早安', recurrenceType: 'daily',
-      source: 'user', status: 'scheduled',
-    });
-    expect(out.maxTokens).toBe(120);
-    expect((out as any).taskUuid).toBeUndefined();
-  });
-
-  it('normalizeActiveMsg2Config：新结构原样返回、undefined 原样返回', () => {
-    const fresh = { enabled: true, tasks: [task()] };
-    expect(normalizeActiveMsg2Config(fresh)).toBe(fresh);
-    expect(normalizeActiveMsg2Config(undefined)).toBeUndefined();
   });
 
   it('封顶常量为 5', () => {

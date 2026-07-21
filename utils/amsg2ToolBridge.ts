@@ -20,7 +20,7 @@ import { ActiveMsgClient } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
 import {
   findTaskByShortId, isPendingTask,
-  normalizeActiveMsg2Config, pruneStaleTasks, shortTaskId,
+  pruneStaleTasks, shortTaskId,
 } from './amsg2Tasks';
 
 // ─── OpenAI tools schema ───
@@ -148,9 +148,9 @@ export const executeAmsg2Tool = async (
   }
 };
 
-/** 读当前角色 config（含旧格式自愈）。 */
+/** 读当前角色 config。 */
 const readConfig = (char: CharacterProfile): ActiveMsg2CharacterConfig =>
-  normalizeActiveMsg2Config(char.activeMsg2Config) ?? { enabled: true, tasks: [] };
+  char.activeMsg2Config ?? { enabled: true, tasks: [] };
 
 /** 任务清单落盘：顺手清过点 48h 的一次性任务。 */
 const persistTasks = (

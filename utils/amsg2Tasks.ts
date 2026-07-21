@@ -66,34 +66,3 @@ export const pruneStaleTasks = (
     const fireAt = new Date(t.firstSendTime).getTime();
     return !Number.isFinite(fireAt) || fireAt > nowMs - 48 * 3600_000;
   });
-
-/**
- * 读取自愈：把开发期旧的单任务形态（顶层 taskUuid/mode/...）包成 tasks[0]。
- * amsg2 未发布，这不是兼容层，只是让自己设备上已有的任务不用手动重建。
- */
-export const normalizeActiveMsg2Config = (
-  raw: ActiveMsg2CharacterConfig | undefined,
-): ActiveMsg2CharacterConfig | undefined => {
-  if (!raw) return raw;
-  const legacy = raw as ActiveMsg2CharacterConfig & Record<string, any>;
-  if (legacy.tasks || !legacy.taskUuid) return raw;
-  const migrated: ActiveMsg2TaskRecord = {
-    taskUuid: legacy.taskUuid,
-    // 遗留任务的远端 payload 没有 amsgClientTaskId / amsgTaskInstruction：worker 对它
-    // 回退冻结 completePrompt（不进闸），客户端送达匹配退回时间窗近似；重排后自然升级。
-    clientTaskId: legacy.taskUuid,
-    mode: legacy.mode ?? 'auto',
-    firstSendTime: legacy.firstSendTime ?? new Date().toISOString(),
-    recurrenceType: legacy.recurrenceType ?? 'none',
-    userMessage: legacy.userMessage,
-    promptHint: legacy.promptHint,
-    source: 'user',
-    status: legacy.remoteStatus === 'scheduled' || legacy.remoteStatus === 'sent' ? 'scheduled' : 'cancelled',
-    createdAt: legacy.lastSyncedAt ?? Date.now(),
-  };
-  const {
-    mode: _m, firstSendTime: _f, recurrenceType: _r, userMessage: _u, promptHint: _p,
-    taskUuid: _t, remoteStatus: _s, ...rest
-  } = legacy;
-  return { ...rest, tasks: migrated.status === 'scheduled' ? [migrated] : [] };
-};

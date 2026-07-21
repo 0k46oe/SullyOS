@@ -84,32 +84,24 @@ export function hasRealUserMessageBetween(
  * 用户才回复」）。定时任务的落库消息带 metadata.activeMsg2.taskId（非空）；
  * instant 聊天回复的 taskId 是 null，不算。
  *
- * requireExactClientTaskId：新任务（有真 clientTaskId）的送达一定带 amsgClientTaskId，
- * 传 true 时缺 id 的遗留送达不再按时间窗近似命中——否则会拿别的任务的送达当本任务的
- * 送达证据，误抹掉本任务的作废回执。遗留任务（自身送达也无 id）传 false 走时间窗近似。
+ * 传了 clientTaskId 时按精确 id 归属：任务的送达一定带同源 amsgClientTaskId，id 不同或
+ * 缺 id 的消息都不算本任务的送达——否则会拿别的任务的送达当证据、误抹掉本任务的作废回执。
+ * 不传 clientTaskId 时只按时间窗近似。
  */
 export function hasDeliveredProactiveNear(
   messages: RealUserMessageLike[],
   occurrenceMs: number,
   clientTaskId?: string,
   windowMs = 30 * 60_000,
-  requireExactClientTaskId = false,
 ): boolean {
   return messages.some((m) => {
     if (m.role !== 'assistant') return false;
     const meta = m.metadata as { activeMsg2?: { taskId?: unknown }; amsgClientTaskId?: unknown } | null | undefined;
     if (meta?.activeMsg2?.taskId == null) return false;
     if (clientTaskId) {
+      // 任务的送达必带同源 amsgClientTaskId；id 不同或缺 id 都不是本任务的送达。
       const msgCid = typeof meta.amsgClientTaskId === 'string' ? meta.amsgClientTaskId : undefined;
-      if (msgCid !== undefined) {
-        // 明确带别的任务 id → 一定不是这个任务的送达
-        if (msgCid !== clientTaskId) return false;
-      } else if (requireExactClientTaskId) {
-        // 新任务（有真 clientTaskId）的送达必带 amsgClientTaskId；缺 id 的消息（遗留任务的送达）
-        // 一定不属于它——不能拿它当本任务的送达证据，否则会误抹掉本任务的作废回执。
-        return false;
-      }
-      // 否则：本任务是遗留任务（自身送达也无 id）→ 落到下面的时间窗近似。
+      if (msgCid !== clientTaskId) return false;
     }
     return m.timestamp >= occurrenceMs - FIRE_GRACE_MS && m.timestamp <= occurrenceMs + windowMs;
   });

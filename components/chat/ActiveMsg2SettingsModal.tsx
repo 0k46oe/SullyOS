@@ -15,7 +15,6 @@ import {
 import { ActiveMsgClient, getDefaultActiveMsgFirstSendTime } from '../../utils/activeMsgClient';
 import {
   isPendingTask,
-  normalizeActiveMsg2Config,
   pruneStaleTasks,
   shortTaskId,
   toDatetimeLocalValue,
@@ -56,7 +55,7 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
   onSave,
   addToast,
 }) => {
-  const saved = normalizeActiveMsg2Config(char.activeMsg2Config);
+  const saved = char.activeMsg2Config;
   const tasks = saved?.tasks ?? [];
 
   const [enabled, setEnabled] = useState(saved?.enabled ?? false);
@@ -85,7 +84,7 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
   useEffect(() => {
     if (!isOpen) return;
 
-    const config = normalizeActiveMsg2Config(char.activeMsg2Config);
+    const config = char.activeMsg2Config;
     const list = config?.tasks ?? [];
     setEnabled(config?.enabled ?? false);
     setMaxTokens(config?.maxTokens ? String(config.maxTokens) : '');
