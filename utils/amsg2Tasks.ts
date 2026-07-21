@@ -17,6 +17,19 @@ export const MAX_ACTIVE_TASKS_PER_CHAR = 5;
 
 export const shortTaskId = (taskUuid: string): string => taskUuid.slice(0, 8);
 
+/**
+ * 把任意可解析的时间折成 datetime-local 输入框认的本地墙钟 'YYYY-MM-DDTHH:mm'。
+ * 任务的 firstSendTime 有两种来源：面板建的本就是 datetime-local，角色用工具建的是
+ * 完整 ISO 8601（带时区）——编辑角色任务时不折算会导致时间框空白。已是该格式的原样
+ * 返回（幂等）；无法解析（空 / 坏值）也原样返回，不抛错。
+ */
+export const toDatetimeLocalValue = (value: string): string => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const offset = date.getTimezoneOffset();
+  return new Date(date.getTime() - offset * 60_000).toISOString().slice(0, 16);
+};
+
 export const findTaskByShortId = (
   tasks: ActiveMsg2TaskRecord[],
   shortId: string,

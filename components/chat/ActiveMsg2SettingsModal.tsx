@@ -1,7 +1,25 @@
 import React, { useEffect, useState } from 'react';
 import Modal from '../os/Modal';
-import { APIConfig, CharacterProfile, GroupProfile, RealtimeConfig, UserProfile } from '../../types';
+import {
+  ActiveMsg2CharacterConfig,
+  ActiveMsg2ExpirePolicy,
+  ActiveMsg2Mode,
+  ActiveMsg2Recurrence,
+  ActiveMsg2TaskRecord,
+  APIConfig,
+  CharacterProfile,
+  GroupProfile,
+  RealtimeConfig,
+  UserProfile,
+} from '../../types';
 import { ActiveMsgClient, getDefaultActiveMsgFirstSendTime } from '../../utils/activeMsgClient';
+import {
+  isPendingTask,
+  normalizeActiveMsg2Config,
+  pruneStaleTasks,
+  shortTaskId,
+  toDatetimeLocalValue,
+} from '../../utils/amsg2Tasks';
 
 interface ActiveMsg2SettingsModalProps {
   isOpen: boolean;
@@ -38,13 +56,15 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
   onSave,
   addToast,
 }) => {
-  const saved = char.activeMsg2Config;
+  const saved = normalizeActiveMsg2Config(char.activeMsg2Config);
+  const tasks = saved?.tasks ?? [];
+
   const [enabled, setEnabled] = useState(saved?.enabled ?? false);
-  const [mode, setMode] = useState<NonNullable<CharacterProfile['activeMsg2Config']>['mode']>(saved?.mode ?? 'auto');
-  const [firstSendTime, setFirstSendTime] = useState(saved?.firstSendTime ?? getDefaultActiveMsgFirstSendTime());
-  const [recurrenceType, setRecurrenceType] = useState(saved?.recurrenceType ?? 'none');
-  const [userMessage, setUserMessage] = useState(saved?.userMessage ?? '');
-  const [promptHint, setPromptHint] = useState(saved?.promptHint ?? '');
+  const [mode, setMode] = useState<ActiveMsg2Mode>('auto');
+  const [firstSendTime, setFirstSendTime] = useState(getDefaultActiveMsgFirstSendTime());
+  const [recurrenceType, setRecurrenceType] = useState<ActiveMsg2Recurrence>('none');
+  const [userMessage, setUserMessage] = useState('');
+  const [promptHint, setPromptHint] = useState('');
   const [maxTokens, setMaxTokens] = useState(String(saved?.maxTokens ?? ''));
   const [useSecondaryApi, setUseSecondaryApi] = useState(saved?.useSecondaryApi ?? false);
   const [secUrl, setSecUrl] = useState(saved?.secondaryApi?.baseUrl ?? '');
@@ -53,22 +73,49 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
   const [globalReady, setGlobalReady] = useState(false);
   const [pushSummary, setPushSummary] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // editingTaskUuid=null → 新建；非 null → 编辑该任务（保存时 replaceTaskUuid）。
+  const [editingTaskUuid, setEditingTaskUuid] = useState<string | null>(null);
+  const [expirePolicy, setExpirePolicy] = useState<ActiveMsg2ExpirePolicy>('expire');
+  // 远端对账：打开面板时拉一次全量任务，只留归属本角色的 uuid。null = 没对上账（读失败/未拉完），
+  // 此时不显示「远端不存在」徽标，免得半个清单误伤。
+  const [remoteUuids, setRemoteUuids] = useState<Set<string> | null>(null);
 
+  // 表单值重置：面板打开或切换编辑对象时，用被编辑任务的字段填表单（新建则填默认值）。
+  // 角色级共享设置（maxTokens / 单独 API）始终跟随保存值。
   useEffect(() => {
     if (!isOpen) return;
 
-    const next = char.activeMsg2Config;
-    setEnabled(next?.enabled ?? false);
-    setMode(next?.mode ?? 'auto');
-    setFirstSendTime(next?.firstSendTime ?? getDefaultActiveMsgFirstSendTime());
-    setRecurrenceType(next?.recurrenceType ?? 'none');
-    setUserMessage(next?.userMessage ?? '');
-    setPromptHint(next?.promptHint ?? '');
-    setMaxTokens(next?.maxTokens ? String(next.maxTokens) : '');
-    setUseSecondaryApi(next?.useSecondaryApi ?? false);
-    setSecUrl(next?.secondaryApi?.baseUrl ?? '');
-    setSecKey(next?.secondaryApi?.apiKey ?? '');
-    setSecModel(next?.secondaryApi?.model ?? '');
+    const config = normalizeActiveMsg2Config(char.activeMsg2Config);
+    const list = config?.tasks ?? [];
+    setEnabled(config?.enabled ?? false);
+    setMaxTokens(config?.maxTokens ? String(config.maxTokens) : '');
+    setUseSecondaryApi(config?.useSecondaryApi ?? false);
+    setSecUrl(config?.secondaryApi?.baseUrl ?? '');
+    setSecKey(config?.secondaryApi?.apiKey ?? '');
+    setSecModel(config?.secondaryApi?.model ?? '');
+
+    const editing = editingTaskUuid ? list.find((t) => t.taskUuid === editingTaskUuid) : undefined;
+    if (editing) {
+      setMode(editing.mode);
+      setFirstSendTime(toDatetimeLocalValue(editing.firstSendTime));
+      setRecurrenceType(editing.recurrenceType);
+      setUserMessage(editing.userMessage ?? '');
+      setPromptHint(editing.promptHint ?? '');
+      setExpirePolicy(editing.mode === 'fixed' ? 'force' : (editing.expirePolicy ?? 'expire'));
+    } else {
+      setMode('auto');
+      setFirstSendTime(getDefaultActiveMsgFirstSendTime());
+      setRecurrenceType('none');
+      setUserMessage('');
+      setPromptHint('');
+      setExpirePolicy('expire');
+    }
+  }, [isOpen, char.id, char.activeMsg2Config, editingTaskUuid]);
+
+  // 打开面板时的 push 状态检查 + 远端对账（只随 isOpen / 角色变化跑，不随编辑对象重复请求）。
+  useEffect(() => {
+    if (!isOpen) return;
+    setRemoteUuids(null);
 
     void (async () => {
       const globalConfig = await ActiveMsgClient.getGlobalConfig();
@@ -78,78 +125,131 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
         ? `权限：${pushStatus.permission} / 订阅：${pushStatus.hasSubscription ? '已就绪' : '未创建'}`
         : '当前环境不支持 Web Push');
     })();
-  }, [isOpen, char.id, char.activeMsg2Config]);
 
-  const buildNextConfig = (): NonNullable<CharacterProfile['activeMsg2Config']> => ({
-    enabled,
-    mode,
-    firstSendTime,
-    recurrenceType,
-    userMessage: userMessage.trim() || undefined,
-    promptHint: promptHint.trim() || undefined,
+    void (async () => {
+      try {
+        const remote = await ActiveMsgClient.listAllTasks();
+        setRemoteUuids(new Set(
+          remote
+            .filter((t: any) => t?.charId === char.id && t?.uuid)
+            .map((t: any) => t.uuid as string),
+        ));
+      } catch {
+        // 对账失败不打扰：null 让「远端不存在」徽标整体不显示。
+        setRemoteUuids(null);
+      }
+    })();
+  }, [isOpen, char.id]);
+
+  // 角色级共享设置（所有任务共用），每次落盘都从当前表单值重建。
+  const charLevelConfig = (): ActiveMsg2CharacterConfig => ({
+    enabled: true,
+    tasks,
     maxTokens: maxTokens.trim() ? Number(maxTokens) : undefined,
-    taskUuid: saved?.taskUuid,
-    remoteStatus: saved?.remoteStatus || 'idle',
     useSecondaryApi: useSecondaryApi && !!secUrl,
-    secondaryApi: useSecondaryApi && secUrl ? {
-      baseUrl: secUrl.trim(),
-      apiKey: secKey.trim(),
-      model: secModel.trim(),
-    } : undefined,
+    secondaryApi: useSecondaryApi && secUrl
+      ? { baseUrl: secUrl.trim(), apiKey: secKey.trim(), model: secModel.trim() }
+      : undefined,
     lastSyncedAt: saved?.lastSyncedAt,
-    lastError: saved?.lastError,
   });
 
-  const handleSubmit = async () => {
-    const nextConfig = buildNextConfig();
-    setIsSubmitting(true);
-
+  const handleCancelTask = async (t: ActiveMsg2TaskRecord) => {
     try {
-      if (!nextConfig.enabled) {
-        if (nextConfig.taskUuid) {
-          await ActiveMsgClient.cancelTask(nextConfig.taskUuid);
+      await ActiveMsgClient.cancelTask(t.taskUuid);
+    } catch (e) {
+      // 远端取消失败不移除本地记录（Codex #4）——否则远端照发、面板却看不见了。
+      console.warn('[ActiveMsg2Modal] 远端取消失败（保留记录待重试）', e);
+      onSave({
+        ...charLevelConfig(),
+        tasks: tasks.map((x) => x.taskUuid === t.taskUuid ? { ...x, lastError: '远端取消失败，可重试' } : x),
+      });
+      addToast(`任务 [${shortTaskId(t.taskUuid)}] 取消失败（远端未确认），稍后重试。`, 'error');
+      return;
+    }
+    if (editingTaskUuid === t.taskUuid) setEditingTaskUuid(null);
+    onSave({ ...charLevelConfig(), tasks: tasks.filter((x) => x.taskUuid !== t.taskUuid), lastSyncedAt: Date.now() });
+    addToast(`任务 [${shortTaskId(t.taskUuid)}] 已取消。`, 'info');
+  };
+
+  const handleSubmit = async () => {
+    setIsSubmitting(true);
+    try {
+      if (!enabled) {
+        // 关闭 2.0 = 取消该角色全部远端任务。以远端 listAllTasks 为准（Codex #4：本地
+        // pending 派生会漏掉「已过点但 Cron 还没消费」的一次性任务）；远端读不到时
+        // 退回本地全量清单。取消失败的保留在本地清单里，下次重开面板可重试。
+        let targets: string[];
+        try {
+          const remote = await ActiveMsgClient.listAllTasks();
+          targets = remote
+            .filter((t: any) => t?.charId === char.id && t?.uuid)
+            .map((t: any) => t.uuid as string);
+          // 上游身份投影不可用时只退回本地清单；禁止用 contactName 匹配，角色可重名。
+          if (!targets.length && tasks.length) targets = tasks.map((t) => t.taskUuid);
+        } catch {
+          targets = tasks.map((t) => t.taskUuid);
+        }
+        const failed = new Set<string>();
+        for (const uuid of targets) {
+          try { await ActiveMsgClient.cancelTask(uuid); } catch { failed.add(uuid); }
         }
         onSave({
-          ...nextConfig,
-          taskUuid: undefined,
-          remoteStatus: 'idle',
+          ...charLevelConfig(),
+          enabled: false,
+          tasks: tasks.filter((t) => failed.has(t.taskUuid))
+            .map((t) => ({ ...t, lastError: '关闭时远端取消失败，可重试' })),
           lastSyncedAt: Date.now(),
-          lastError: undefined,
         });
-        addToast('主动消息 2.0 已关闭。', 'info');
+        addToast(failed.size
+          ? `主动消息 2.0 已关闭，但有 ${failed.size} 个任务远端取消失败，请稍后重开面板重试。`
+          : '主动消息 2.0 已关闭，全部任务已取消。', failed.size ? 'error' : 'info');
         onClose();
         return;
       }
 
-      if (!globalReady) {
-        throw new Error('请先去系统设置里完成“主动消息 2.0”的全局配置。');
-      }
+      if (!globalReady) throw new Error('请先去系统设置里完成“主动消息 2.0”的全局配置。');
 
+      const config = charLevelConfig();
       const result = await ActiveMsgClient.scheduleCharacterTask({
-        char,
-        config: nextConfig,
-        userProfile,
-        groups,
-        realtimeConfig,
-        apiConfig,
+        char, config,
+        task: {
+          mode, firstSendTime, recurrenceType,
+          promptHint: promptHint.trim() || undefined,
+          userMessage: userMessage.trim() || undefined,
+          expirePolicy,
+        },
+        replaceTaskUuid: editingTaskUuid ?? undefined,
+        userProfile, groups, realtimeConfig, apiConfig,
       });
 
-      onSave({
-        ...nextConfig,
+      const record: ActiveMsg2TaskRecord = {
         taskUuid: result.uuid,
-        remoteStatus: result.status === 'sent' ? 'sent' : 'scheduled',
-        lastSyncedAt: Date.now(),
-        lastError: undefined,
-      });
-      addToast('主动消息 2.0 任务已创建。', 'success');
-      onClose();
+        clientTaskId: result.clientTaskId,
+        mode, firstSendTime, recurrenceType,
+        promptHint: promptHint.trim() || undefined,
+        userMessage: userMessage.trim() || undefined,
+        expirePolicy: mode === 'fixed' ? 'force' : expirePolicy,
+        anchorLastUserMsgAt: result.anchorMs,
+        source: 'user',
+        status: 'scheduled',
+        createdAt: Date.now(),
+      };
+      // 和工具路径一致：替换后旧任务取消失败时，旧记录必须保留并标错，
+      // 否则远端新旧并存、面板只显示新的，幽灵任务又回来了。
+      const rest = result.replacedCancelFailed
+        ? tasks.map((t) => t.taskUuid === editingTaskUuid
+          ? { ...t, lastError: '替换时远端取消失败，任务可能仍会触发，可再次取消' }
+          : t)
+        : tasks.filter((t) => t.taskUuid !== editingTaskUuid);
+      onSave({ ...config, tasks: pruneStaleTasks([...rest, record], Date.now()), lastSyncedAt: Date.now() });
+      setEditingTaskUuid(null);
+      addToast(result.replacedCancelFailed
+        ? '新任务已创建，但旧任务取消失败，请稍后重试。'
+        : (editingTaskUuid ? '任务已更新。' : `任务已创建 [${shortTaskId(result.uuid)}]。`),
+      result.replacedCancelFailed ? 'error' : 'success');
     } catch (error: any) {
       const message = error?.message || '主动消息 2.0 保存失败。';
-      onSave({
-        ...nextConfig,
-        remoteStatus: 'error',
-        lastError: message,
-      });
+      onSave({ ...charLevelConfig(), lastError: message });
       addToast(message, 'error');
     } finally {
       setIsSubmitting(false);
@@ -167,7 +267,7 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
             取消
           </button>
           <button onClick={handleSubmit} disabled={isSubmitting} className="flex-1 py-3 bg-fuchsia-500 text-white font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50">
-            {isSubmitting ? '保存中...' : enabled ? '保存并同步' : '关闭 2.0'}
+            {isSubmitting ? '保存中...' : !enabled ? '关闭 2.0' : (editingTaskUuid ? '保存修改' : '新建任务')}
           </button>
         </>
       )}
@@ -190,23 +290,67 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
           </button>
         </div>
 
-        {saved?.taskUuid ? (
-          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs space-y-1">
-            <div>当前任务 UUID：<span className="font-mono break-all">{saved.taskUuid}</span></div>
-            <div>状态：<span className="font-bold">{saved.remoteStatus || 'unknown'}</span></div>
-            {saved.lastError ? <div className="text-red-500">最近错误：{saved.lastError}</div> : null}
+        {enabled && tasks.length > 0 ? (
+          <div>
+            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 block pl-1">
+              任务列表（{tasks.length}）
+            </label>
+            <div className="space-y-2">
+              {tasks.map((t) => {
+                const pending = isPendingTask(t, Date.now());
+                const recurrence = t.recurrenceType === 'daily' ? '每天' : t.recurrenceType === 'weekly' ? '每周' : '一次';
+                const what = t.mode === 'fixed' ? '固定消息' : t.mode === 'prompted' ? (t.promptHint || '提示词') : '自动';
+                const missingRemote = remoteUuids !== null && pending && !remoteUuids.has(t.taskUuid);
+                return (
+                  <div key={t.taskUuid} className={`rounded-2xl border px-4 py-3 text-xs ${editingTaskUuid === t.taskUuid ? 'border-fuchsia-400 bg-fuchsia-50' : 'border-slate-200 bg-white'}`}>
+                    <div className="flex items-center justify-between">
+                      <div className="min-w-0">
+                        <div className="font-bold text-slate-700 truncate">
+                          [{shortTaskId(t.taskUuid)}] {new Date(t.firstSendTime).toLocaleString('zh-CN', { hour12: false })} · {recurrence}
+                        </div>
+                        <div className="text-slate-400 mt-0.5 truncate">
+                          {what} · {(t.expirePolicy ?? 'expire') === 'force' ? '强制发送' : '遇忙作废'}
+                          · {t.source === 'character' ? '角色创建' : '手动创建'} · {pending ? '待触发' : '已到点'}
+                        </div>
+                        {missingRemote ? (
+                          <div className="text-slate-400 mt-1 text-[11px]">⚠ 远端不存在（可能已发送或在别处取消）</div>
+                        ) : null}
+                        {t.lastError ? (
+                          <div className="text-red-500 mt-1 text-[11px]">{t.lastError}</div>
+                        ) : null}
+                      </div>
+                      <div className="flex gap-2 shrink-0 ml-2">
+                        <button onClick={() => setEditingTaskUuid(t.taskUuid)} className="px-2.5 py-1.5 rounded-lg bg-slate-100 text-slate-600 font-bold">编辑</button>
+                        <button onClick={() => void handleCancelTask(t)} className="px-2.5 py-1.5 rounded-lg bg-red-50 text-red-500 font-bold">取消</button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {editingTaskUuid ? (
+              <button onClick={() => setEditingTaskUuid(null)} className="mt-2 text-xs text-fuchsia-500 font-bold pl-1">
+                ＋ 放弃编辑，改为新建任务
+              </button>
+            ) : null}
           </div>
         ) : null}
 
         {enabled ? (
           <>
             <div>
-              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 block pl-1">模式</label>
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 block pl-1">
+                {editingTaskUuid ? '编辑任务' : '新建任务'}
+              </label>
               <div className="space-y-2">
                 {MODE_OPTIONS.map((option) => (
                   <button
                     key={option.id}
-                    onClick={() => setMode(option.id)}
+                    onClick={() => {
+                      setMode(option.id);
+                      // fixed 进不了 worker 闸（taskNeedsLlm=false），策略统一钉成 force。
+                      if (option.id === 'fixed') setExpirePolicy('force');
+                    }}
                     className={`w-full text-left rounded-2xl border px-4 py-3 transition-all ${mode === option.id ? 'bg-fuchsia-500 text-white border-fuchsia-500' : 'bg-white border-slate-200 text-slate-600'}`}
                   >
                     <div className="font-bold">{option.label}</div>
@@ -243,6 +387,27 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
                 2.0 标准版目前只支持：一次 / 每天 / 每周。30 分钟、1 小时、2 小时这类间隔暂时不支持。
               </div>
             </div>
+
+            {mode !== 'fixed' ? (
+              <div>
+                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 block pl-1">到点时用户正在聊天</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    { id: 'expire', label: '自动作废', desc: '转为对话里自然带出' },
+                    { id: 'force', label: '强制发送', desc: '闹钟型，照发' },
+                  ] as const).map((option) => (
+                    <button
+                      key={option.id}
+                      onClick={() => setExpirePolicy(option.id)}
+                      className={`py-2.5 rounded-xl text-xs font-bold border transition-all ${expirePolicy === option.id ? 'bg-fuchsia-500 text-white border-fuchsia-500' : 'bg-white border-slate-200 text-slate-600'}`}
+                    >
+                      {option.label}
+                      <div className={`font-normal mt-0.5 ${expirePolicy === option.id ? 'text-fuchsia-100' : 'text-slate-400'}`}>{option.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
 
             {mode === 'fixed' ? (
               <div>

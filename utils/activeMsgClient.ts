@@ -411,6 +411,49 @@ export const ActiveMsgClient = {
     return decrypted?.tasks || [];
   },
 
+  // 分页全量：循环 messages?limit=100&offset=<n>，每页解密后读 tasks 与 pagination.hasMore，
+  // 拉到最后一页为止。任一页失败整体抛错——不能拿半页结果去判「远端不存在」（会误伤没拉到的任务）。
+  // 每条任务带上游投影的顶层 charId / clientTaskId（amsg-server 2.6.0-next.5+），供按角色对账/关闭全部。
+  // 现有 listTasks 保留给旧调用方；对账与关闭全部只用这个全量方法。
+  async listAllTasks(): Promise<any[]> {
+    const config = await ensureWorkerReady();
+    const client = await initializeClient(config);
+
+    const all: any[] = [];
+    let offset = 0;
+    const limit = 100;
+    // 兜底防死循环：正常按 pagination.hasMore 自然收敛，这里只挡「服务端恒 hasMore」的异常。
+    let guard = 0;
+    while (true) {
+      // guard 触顶 = 分页未收敛（疑似服务端 hasMore 恒真）：宁可抛错，也不返回不完整
+      // 清单——半截清单会让远端对账误判「远端不存在」、让「关闭全部」漏取消留幽灵任务。
+      if (guard++ >= 1000) {
+        throw new Error('读取任务列表分页未收敛，已中止以免返回不完整清单。');
+      }
+      const response = await fetchWithAuth(`messages?limit=${limit}&offset=${offset}`, config, {
+        method: 'GET',
+        headers: {
+          'X-Response-Encrypted': 'true',
+          'X-Encryption-Version': '1',
+        },
+      }, '读取任务列表');
+
+      if (!response?.success) {
+        throw new Error(response?.error?.message || '读取主动消息 2.0 任务列表失败。');
+      }
+
+      const page = response?.encrypted === true
+        ? await decryptPayload(client, response.data)
+        : response?.data;
+      const pageTasks: any[] = page?.tasks || [];
+      all.push(...pageTasks);
+
+      if (!page?.pagination?.hasMore || pageTasks.length === 0) break;
+      offset += limit;
+    }
+    return all;
+  },
+
   async cancelTask(taskUuid: string) {
     const config = await ensureWorkerReady();
     const response = await fetchWithAuth(`cancel-message?id=${encodeURIComponent(taskUuid)}`, config, {

@@ -9,6 +9,7 @@ import {
   normalizeActiveMsg2Config,
   pruneStaleTasks,
   shortTaskId,
+  toDatetimeLocalValue,
 } from './amsg2Tasks';
 import type { ActiveMsg2TaskRecord } from '../types';
 
@@ -84,5 +85,26 @@ describe('amsg2Tasks helpers', () => {
     expect(hasActiveAiTask(config, now)).toBe(true);
     expect(hasActiveAiTask({ enabled: true, tasks: [fixed, past] }, now)).toBe(false);
     expect(hasActiveAiTask(undefined, now)).toBe(false);
+  });
+});
+
+// 防坑：角色用工具建的任务 firstSendTime 是完整 ISO 8601，datetime-local 输入框只认
+// 'YYYY-MM-DDTHH:mm'——不折算编辑角色任务时时间框会空白。断言全部与本机时区无关。
+describe('toDatetimeLocalValue', () => {
+  it('已是 datetime-local 格式 → 原样返回（跨时区恒成立）', () => {
+    expect(toDatetimeLocalValue('2026-07-21T09:00')).toBe('2026-07-21T09:00');
+  });
+  it('完整 ISO（带 Z / 秒 / 毫秒）→ 折成 16 位 YYYY-MM-DDTHH:mm（无 Z 无秒）', () => {
+    const out = toDatetimeLocalValue('2026-07-21T01:00:00.000Z');
+    expect(out).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
+    expect(out).not.toContain('Z');
+  });
+  it('再折一次结果不变（幂等，防重复编辑时间漂移）', () => {
+    const once = toDatetimeLocalValue('2026-07-21T01:00:00.000Z');
+    expect(toDatetimeLocalValue(once)).toBe(once);
+  });
+  it('无法解析 / 空串 → 原样返回，不抛错', () => {
+    expect(toDatetimeLocalValue('')).toBe('');
+    expect(toDatetimeLocalValue('not-a-date')).toBe('not-a-date');
   });
 });
