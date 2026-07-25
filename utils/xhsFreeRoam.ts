@@ -12,7 +12,13 @@
 
 import { CharacterProfile, UserProfile, XhsActivityRecord, XhsFreeRoamSession, APIConfig, RealtimeConfig } from '../types';
 import { ContextBuilder } from './context';
-import { XhsMcpClient, McpToolResult, extractNotesFromMcpData, normalizeNote } from './xhsMcpClient';
+import {
+    XhsMcpClient,
+    McpToolResult,
+    extractNotesFromMcpData,
+    normalizeNote,
+    normalizeXhsLiteDetail,
+} from './xhsMcpClient';
 import { DB } from './db';
 
 // ==================== Types ====================
@@ -200,7 +206,12 @@ ${notesList}
 如果你对某篇帖子特别感兴趣，想看它的完整正文和评论区，可以填 wantToViewDetail。`;
 };
 
-const buildDetailReactionPrompt = (noteTitle: string, noteContent: string, comments: any[]): string => {
+const buildDetailReactionPrompt = (
+    noteTitle: string,
+    noteContent: string,
+    comments: any[],
+    commentsUnavailable = false,
+): string => {
     const commentsList = comments.slice(0, 15).map((c: any, i: number) => {
         const commentId = c.commentId || c.comment_id || c.id || '';
         const author = c.authorName || c.author_name || c.nickname || c.user?.nickname || '匿名';
@@ -213,7 +224,11 @@ const buildDetailReactionPrompt = (noteTitle: string, noteContent: string, comme
 
 正文: ${noteContent.slice(0, 500)}${noteContent.length > 500 ? '...' : ''}
 
-${comments.length > 0 ? `评论区:\n${commentsList}` : '这条帖子还没有评论。'}
+${comments.length > 0
+        ? `真实评论区:\n${commentsList}`
+        : commentsUnavailable
+            ? '真实评论区本次读取失败。不能据此判断帖子没有评论；不要编造、模拟或回复评论。'
+            : '这条帖子还没有评论。'}
 
 你怎么看这条帖子和评论区？
 
@@ -308,6 +323,7 @@ const handleViewDetail = async (
     const data = detailResult.data;
     let noteContent = '';
     let comments: any[] = [];
+    let commentsUnavailable = false;
     if (typeof data === 'string') {
         noteContent = data.slice(0, 1000);
     } else if (data) {
@@ -321,11 +337,20 @@ const handleViewDetail = async (
             || data.comment_list || data.commentList
             || noteObj?.comments?.list || noteObj?.comments || [];
         if (!Array.isArray(comments)) comments = [];
+        const normalized = normalizeXhsLiteDetail(data);
+        comments = normalized.comments || [];
+        commentsUnavailable = normalized.commentReadStatus === 'unavailable';
     }
 
     // Let character react to detail + comments
-    callbacks.onStatus(`${char.name}在看评论区...`);
-    const reactionRaw = await callLlm(apiConfig, systemPrompt, buildDetailReactionPrompt(noteTitle, noteContent, comments));
+    callbacks.onStatus(commentsUnavailable
+        ? `${char.name}看完了正文，评论区暂时读取失败`
+        : `${char.name}在看评论区...`);
+    const reactionRaw = await callLlm(
+        apiConfig,
+        systemPrompt,
+        buildDetailReactionPrompt(noteTitle, noteContent, comments, commentsUnavailable),
+    );
     const reaction = parseJson<LlmDetailReaction>(reactionRaw);
 
     if (reaction?.thinking) {
@@ -342,9 +367,13 @@ const handleViewDetail = async (
             keyword: `查看详情: ${noteTitle}`,
             notesViewed: [normalizeNote(contextNote || { noteId, title: noteTitle })],
         },
-        thinking: reaction?.thinking || `看了「${noteTitle}」的详情和评论区`,
+        thinking: reaction?.thinking || (commentsUnavailable
+            ? `看了「${noteTitle}」的正文，但评论区读取失败`
+            : `看了「${noteTitle}」的详情和评论区`),
         result: 'success',
-        resultMessage: `查看了「${noteTitle}」的详情，${comments.length} 条评论`,
+        resultMessage: commentsUnavailable
+            ? `查看了「${noteTitle}」的详情；真实评论读取失败`
+            : `查看了「${noteTitle}」的详情，${comments.length} 条评论`,
     };
     session.activities.push(detailRecord);
     callbacks.onActivity(detailRecord);
@@ -421,6 +450,7 @@ export const XhsFreeRoamEngine = {
         const mcpUrl = realtimeConfig.xhsMcpConfig?.serverUrl;
         if (!mcpUrl) throw new Error('MCP Server URL 未配置');
         XhsMcpClient.setCookie(realtimeConfig.xhsMcpConfig?.cookie); // lite Worker auth (no-op for local backends)
+        XhsMcpClient.setRnoteApiKey(realtimeConfig.xhsMcpConfig?.rnoteApiKey);
 
         const sessionId = `xfr_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         const session: XhsFreeRoamSession = {

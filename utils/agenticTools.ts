@@ -16,7 +16,12 @@
 
 import { CharacterProfile, UserProfile, Message, RealtimeConfig } from '../types';
 import { RealtimeContextManager, NotionManager, FeishuManager, XhsNote } from './realtimeContext';
-import { XhsMcpClient, extractNotesFromMcpData, normalizeNote } from './xhsMcpClient';
+import {
+    XhsMcpClient,
+    extractNotesFromMcpData,
+    normalizeNote,
+    normalizeXhsComments,
+} from './xhsMcpClient';
 import { getLocalDateKey } from './localDate';
 
 // ─── 共用类型 ────────────────────────────────────────────────────────────────
@@ -469,7 +474,7 @@ export async function runXhsMyProfile(
 // ─── XHS_DETAIL ─────────────────────────────────────────────────────────────
 
 export type XhsDetailResult =
-    | { ok: true; noteId: string; detailText: string; failed: boolean }
+    | { ok: true; noteId: string; detailText: string; failed: boolean; commentsUnavailable: boolean }
     | { ok: false; reason: 'not_enabled'; noteId: string };
 
 /** Throws on network/transport error. */
@@ -550,6 +555,7 @@ export async function runXhsDetail(
 
         const detailData = result.success ? result.data : null;
         let detailText: string;
+        let commentsUnavailable = false;
         if (detailData) {
             if (typeof detailData === 'string') {
                 if (detailData.includes('失败') || detailData.includes('not found')) {
@@ -560,13 +566,14 @@ export async function runXhsDetail(
             } else {
                 const innerData = (detailData as any).data && typeof (detailData as any).data === 'object' ? (detailData as any).data : null;
                 const note = innerData?.note || (detailData as any).note || detailData;
-                const noteTitle = note.title || note.displayTitle || note.display_title || '';
-                const noteDesc = (note.desc || note.description || note.content || '').slice(0, 1500);
-                const noteAuthor = note.user?.nickname || note.author || '';
-                const noteLikes = note.interactInfo?.likedCount || note.likes || 0;
-                const noteCollects = note.interactInfo?.collectedCount || note.collects || 0;
-                const noteShareCount = note.interactInfo?.shareCount || 0;
-                const noteCommentCount = note.interactInfo?.commentCount || 0;
+                const normalizedNote = normalizeNote(note);
+                const noteTitle = normalizedNote.title;
+                const noteDesc = normalizedNote.desc.slice(0, 1500);
+                const noteAuthor = normalizedNote.author;
+                const noteLikes = normalizedNote.likes;
+                const noteCollects = normalizedNote.collects;
+                const noteShareCount = normalizedNote.shareCount;
+                const noteCommentCount = normalizedNote.commentCount;
                 const noteTime = note.time ? new Date(note.time).toLocaleString('zh-CN') : '';
                 const noteIp = note.ipLocation || '';
 
@@ -576,20 +583,24 @@ export async function runXhsDetail(
                 noteSection += `\n互动: ${noteLikes}赞 ${noteCollects}收藏 ${noteCommentCount}评论 ${noteShareCount}分享`;
                 noteSection += `\n\n正文:\n${noteDesc}`;
 
-                const rawComments = innerData?.comments?.list || innerData?.comments
-                    || (detailData as any).comments?.list || (detailData as any).comments
-                    || note.comments?.list || note.comments || [];
-                const commentArr = Array.isArray(rawComments) ? rawComments : [];
+                const commentArr = normalizeXhsComments(detailData);
+                const commentsStatus = innerData?.comments_status
+                    || (detailData as any).comments_status
+                    || innerData?.comment_read_status
+                    || (detailData as any).comment_read_status;
+                commentsUnavailable = commentsStatus === 'unavailable'
+                    || !!innerData?.comments_error
+                    || !!(detailData as any).comments_error;
 
                 let commentsSection = '';
                 if (commentArr.length > 0) {
                     const formatComment = (c: any, indent = '') => {
-                        const name = c.userInfo?.nickname || c.nickname || c.userName || '匿名';
+                        const name = c.author || '匿名';
                         const content = c.content || '';
-                        const likes = c.likeCount || c.like_count || c.likes || 0;
-                        const cid = c.id || c.commentId || c.comment_id || '';
+                        const likes = c.likes || 0;
+                        const cid = c.commentId || '';
                         let line = `${indent}${name}: ${content} (${likes}赞) [commentId=${cid}]`;
-                        const subs = c.subComments || c.sub_comments || [];
+                        const subs = c.subComments || [];
                         if (Array.isArray(subs) && subs.length > 0) {
                             line += '\n' + subs.slice(0, 10).map((s: any) => formatComment(s, indent + '  ↳ ')).join('\n');
                         }
@@ -597,6 +608,8 @@ export async function runXhsDetail(
                     };
                     commentsSection = `\n\n💬 评论区 (${commentArr.length}条):\n` +
                         commentArr.slice(0, 30).map((c: any) => formatComment(c)).join('\n');
+                } else if (commentsUnavailable) {
+                    commentsSection = '\n\n💬 评论区: （读取失败；不能据此判断为没有评论，也不要编造评论内容）';
                 } else {
                     commentsSection = '\n\n💬 评论区: （暂无评论）';
                 }
@@ -608,7 +621,7 @@ export async function runXhsDetail(
         }
 
     const failed = detailText.startsWith('[加载失败');
-    return { ok: true, noteId: args.noteId, detailText, failed };
+    return { ok: true, noteId: args.noteId, detailText, failed, commentsUnavailable };
 }
 
 // ─── 共用日期解析 (READ_DIARY / FS_READ_DIARY 共用) ─────────────────────────

@@ -3367,6 +3367,7 @@ export interface XhsMcpConfig {
     enabled: boolean;
     serverUrl: string;  // MCP: "http://localhost:18060/mcp" | Skills: "http://localhost:18061/api" | Lite Worker: "https://xhs-lite.<acct>.workers.dev/api"
     cookie?: string;    // Lite 模式：登录后的小红书完整 cookie（含 a1 / web_session）。仅 lite Worker 用。
+    rnoteApiKey?: string; // Lite 模式可选：用户自己的 Rnote Key，仅用于读取真实评论。
     loggedInUserId?: string;   // 登录用户的 user_id，连接测试成功后自动获取
     loggedInNickname?: string; // 登录用户的昵称
     userXsecToken?: string;    // 连接测试时从首页推荐自动提取的 xsec_token

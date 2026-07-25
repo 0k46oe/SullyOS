@@ -468,6 +468,7 @@ const Settings: React.FC = () => {
   const [rtXhsNickname, setRtXhsNickname] = useState(realtimeConfig.xhsMcpConfig?.loggedInNickname || '');
   const [rtXhsUserId, setRtXhsUserId] = useState(realtimeConfig.xhsMcpConfig?.loggedInUserId || '');
   const [rtXhsCookie, setRtXhsCookie] = useState(realtimeConfig.xhsMcpConfig?.cookie || '');
+  const [rtXhsRnoteApiKey, setRtXhsRnoteApiKey] = useState(realtimeConfig.xhsMcpConfig?.rnoteApiKey || '');
   const [rtXhsGuideOpen, setRtXhsGuideOpen] = useState(false);
   const [rtTestStatus, setRtTestStatus] = useState('');
 
@@ -1089,6 +1090,7 @@ const Settings: React.FC = () => {
               enabled: rtXhsMcpEnabled,
               serverUrl: rtXhsMode === 'lite' ? XHS_LITE_URL : rtXhsLocalUrl,
               cookie: rtXhsMode === 'lite' ? (rtXhsCookie.trim() || undefined) : undefined,
+              rnoteApiKey: rtXhsMode === 'lite' ? (rtXhsRnoteApiKey.trim() || undefined) : undefined,
               loggedInNickname: rtXhsNickname || undefined,
               loggedInUserId: rtXhsUserId || undefined,
               userXsecToken: realtimeConfig.xhsMcpConfig?.userXsecToken, // 保留自动获取的 token
@@ -1161,7 +1163,11 @@ const Settings: React.FC = () => {
       }
       setRtTestStatus('正在连接...');
       try {
-          const result = await XhsMcpClient.testConnection(urlToUse, cookieToUse);
+          const result = await XhsMcpClient.testConnection(
+              urlToUse,
+              cookieToUse,
+              rtXhsMode === 'lite' ? (rtXhsRnoteApiKey.trim() || undefined) : undefined,
+          );
           if (result.connected) {
               const toolCount = result.tools?.length || 0;
               const tokenInfo = result.xsecToken ? ' | xsecToken 已获取' : '';
@@ -1177,6 +1183,7 @@ const Settings: React.FC = () => {
                       enabled: rtXhsMcpEnabled,
                       serverUrl: urlToUse,
                       cookie: cookieToUse,
+                      rnoteApiKey: rtXhsMode === 'lite' ? (rtXhsRnoteApiKey.trim() || undefined) : undefined,
                       loggedInNickname: rtXhsNickname || result.nickname,
                       loggedInUserId: rtXhsUserId || result.userId,
                       userXsecToken: result.xsecToken,
@@ -2951,6 +2958,24 @@ const Settings: React.FC = () => {
                           <div>
                               <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">小红书 Cookie</label>
                               <textarea value={rtXhsCookie} onChange={e => setRtXhsCookie(e.target.value)} rows={2} className="w-full bg-white/80 border border-rose-200 rounded-xl px-3 py-2 text-[10px] font-mono resize-y" placeholder="a1=...; web_session=...; （从浏览器登录后复制完整 cookie）" />
+                          </div>
+                          <div className="bg-white/70 border border-emerald-200 rounded-xl p-3 space-y-1.5">
+                              <label className="text-[10px] font-bold text-emerald-700 uppercase block">真实评论 API Key（可选 · 推荐）</label>
+                              <input
+                                  type="password"
+                                  value={rtXhsRnoteApiKey}
+                                  onChange={e => setRtXhsRnoteApiKey(e.target.value)}
+                                  className="w-full bg-white border border-emerald-200 rounded-lg px-3 py-2 text-[11px] font-mono"
+                                  placeholder="sk-...（Rnote 用户自己的 Key）"
+                              />
+                              <p className="text-[10px] text-emerald-800/80 leading-relaxed">
+                                  用于读取帖子下方的<b>真实评论</b>，不需要提供额外的小红书账号。
+                                  <a href="https://rnote.dev/auth/register" target="_blank" rel="noopener noreferrer" className="underline ml-1">免费注册</a>
+                                  ，邮箱验证后在 API Keys 页面创建 Key。新用户有试用额度；之后按成功请求计费，失败不扣费。
+                              </p>
+                              <p className="text-[10px] text-slate-400 leading-relaxed">
+                                  Key 仅保存在本机，读取详情时经 HTTPS 临时转发给 Rnote；SullyOS Worker 不保存、不记录。5 分钟内重复打开同一帖子会复用评论缓存。
+                              </p>
                           </div>
                           <button onClick={testXhsMcp} className="w-full py-2 bg-rose-100 text-rose-600 text-xs font-bold rounded-xl active:scale-95 transition-transform">测试连接</button>
                           <div className="grid grid-cols-2 gap-2">

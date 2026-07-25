@@ -28,6 +28,7 @@ const detectMode = (serverUrl: string): BackendMode => {
 // Lite-Worker cookie: set from settings, sent as x-xhs-cookie on bridge calls.
 // Local Bridge/Skills servers ignore the header; the cloud Worker requires it.
 let liteCookie = '';
+let rnoteApiKey = '';
 
 // Resolve the XHS cookie for bridge requests: prefer the explicitly-set value,
 // otherwise read it straight from persisted realtime config. This keeps chat-
@@ -37,6 +38,15 @@ const resolveLiteCookie = (): string => {
     try {
         const raw = localStorage.getItem('os_realtime_config');
         if (raw) return JSON.parse(raw)?.xhsMcpConfig?.cookie || '';
+    } catch { /* ignore */ }
+    return '';
+};
+
+const resolveRnoteApiKey = (): string => {
+    if (rnoteApiKey) return rnoteApiKey;
+    try {
+        const raw = localStorage.getItem('os_realtime_config');
+        if (raw) return JSON.parse(raw)?.xhsMcpConfig?.rnoteApiKey || '';
     } catch { /* ignore */ }
     return '';
 };
@@ -54,6 +64,10 @@ const bridgePost = async (
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const ck = resolveLiteCookie();
     if (ck) headers['x-xhs-cookie'] = ck;
+    if (endpoint === 'get-feed-detail') {
+        const key = resolveRnoteApiKey();
+        if (key) headers['x-rnote-api-key'] = key;
+    }
 
     try {
         const resp = await fetch(url, {
@@ -375,8 +389,14 @@ export const XhsMcpClient = {
         liteCookie = cookie || '';
     },
 
-    testConnection: async (serverUrl: string, cookie?: string): Promise<{ connected: boolean; tools?: string[]; error?: string; nickname?: string; userId?: string; loggedIn?: boolean; xsecToken?: string }> => {
+    // Rnote Key stays in local config and is forwarded only on detail requests.
+    setRnoteApiKey: (apiKey?: string) => {
+        rnoteApiKey = apiKey || '';
+    },
+
+    testConnection: async (serverUrl: string, cookie?: string, userRnoteApiKey?: string): Promise<{ connected: boolean; tools?: string[]; error?: string; nickname?: string; userId?: string; loggedIn?: boolean; xsecToken?: string }> => {
         if (cookie !== undefined) liteCookie = cookie;
+        if (userRnoteApiKey !== undefined) rnoteApiKey = userRnoteApiKey;
         const mode = detectMode(serverUrl);
 
         if (mode === 'bridge') {
@@ -491,6 +511,7 @@ export const XhsMcpClient = {
     getNoteDetail: async (serverUrl: string, noteUrl: string, xsecToken?: string, options?: { loadAllComments?: boolean; xsecSource?: string }): Promise<McpToolResult> => {
         const feedId = extractNoteIdFromUrl(noteUrl);
         const token = xsecToken || extractXsecTokenFromUrl(noteUrl) || '';
+        const loadAllComments = !!options?.loadAllComments;
         let xsecSource = options?.xsecSource || 'pc_feed';
         try {
             xsecSource = new URL(noteUrl).searchParams.get('xsec_source') || xsecSource;
@@ -500,13 +521,13 @@ export const XhsMcpClient = {
             return bridgePost(serverUrl, 'get-feed-detail', {
                 feed_id: feedId, xsec_token: token,
                 xsec_source: xsecSource,
-                load_all_comments: options?.loadAllComments || false,
-                click_more_replies: options?.loadAllComments || false,
+                load_all_comments: loadAllComments,
+                click_more_replies: loadAllComments,
             });
         }
         const args: Record<string, any> = { url: noteUrl };
         if (xsecToken) args.xsec_token = xsecToken;
-        if (options?.loadAllComments) { args.load_all_comments = true; args.click_more_replies = true; }
+        if (loadAllComments) { args.load_all_comments = true; args.click_more_replies = true; }
         return mcpCallTool(serverUrl, 'get_note_detail', args);
     },
 
@@ -686,8 +707,84 @@ export const parseXhsCount = (value: unknown): number => {
     return Math.round(base * multiplier);
 };
 
-export const normalizeNote = (n: any): { noteId: string; title: string; desc: string; author: string; authorId: string; likes: number; xsecToken?: string; coverUrl?: string; type?: string } => {
-    const card = n.noteCard || n.notecard;
+export interface NormalizedXhsComment {
+    commentId: string;
+    userId: string;
+    author: string;
+    content: string;
+    likes: number;
+    parentCommentId?: string;
+    subComments: NormalizedXhsComment[];
+}
+
+export type XhsCommentReadStatus = 'loaded' | 'empty' | 'unavailable' | 'not_requested';
+
+const firstArray = (...values: any[]): any[] | undefined => {
+    for (const value of values) {
+        if (Array.isArray(value)) return value;
+    }
+    return undefined;
+};
+
+export const normalizeXhsComments = (payload: any): NormalizedXhsComment[] => {
+    const root = payload?.data && typeof payload.data === 'object' ? payload.data : payload || {};
+    const note = root.note || payload?.note || {};
+    const rawComments = firstArray(
+        root.comments?.list,
+        root.comments?.comment_list,
+        root.comment_list,
+        Array.isArray(root.comments) ? root.comments : undefined,
+        payload?.comments?.list,
+        payload?.comments?.comment_list,
+        payload?.comment_list,
+        Array.isArray(payload?.comments) ? payload.comments : undefined,
+        note.comments?.list,
+        note.comments?.comment_list,
+        note.comment_list,
+        Array.isArray(note.comments) ? note.comments : undefined,
+    ) || [];
+
+    const normalizeComment = (comment: any, parentCommentId?: string): NormalizedXhsComment => {
+        const user = comment?.userInfo || comment?.user_info || comment?.user || {};
+        const commentId = String(comment?.id || comment?.commentId || comment?.comment_id || '');
+        const replies = firstArray(
+            comment?.subComments,
+            comment?.sub_comments,
+            comment?.sub_comment_list,
+            comment?.replies,
+        ) || [];
+        return {
+            commentId,
+            userId: String(user.userId || user.user_id || comment?.userId || comment?.user_id || ''),
+            author: String(
+                user.nickname || user.name || comment?.nickname || comment?.userName
+                || comment?.user_name || comment?.author_name || comment?.author || '匿名',
+            ),
+            content: String(comment?.content || '').trim(),
+            likes: parseXhsCount(comment?.likeCount ?? comment?.like_count ?? comment?.likes ?? 0),
+            parentCommentId,
+            subComments: replies.map((reply: any) => normalizeComment(reply, commentId || parentCommentId)),
+        };
+    };
+
+    return rawComments.map((comment: any) => normalizeComment(comment));
+};
+
+export const normalizeNote = (n: any): {
+    noteId: string;
+    title: string;
+    desc: string;
+    author: string;
+    authorId: string;
+    likes: number;
+    collects: number;
+    commentCount: number;
+    shareCount: number;
+    xsecToken?: string;
+    coverUrl?: string;
+    type?: string;
+} => {
+    const card = n.noteCard || n.note_card || n.notecard;
     // 封面：cover 对象 / 字符串，或笔记图片列表首图（feed detail 返回 image_list）。
     const coverObj = card?.cover || n.cover || n.image_list?.[0] || card?.image_list?.[0];
     const rawCoverUrl = typeof coverObj === 'string' ? coverObj
@@ -695,9 +792,12 @@ export const normalizeNote = (n: any): { noteId: string; title: string; desc: st
         || coverObj?.info_list?.[0]?.url || undefined;
     const coverUrl = rawCoverUrl?.replace(/^http:\/\//, 'https://');
     // 点赞数：支持 interactInfo.likedCount (profile notes) 和 interact_info.liked_count (search results)
-    const likesRaw = n.likes ?? n.liked_count
-        ?? n.interact_info?.liked_count ?? n.interactInfo?.likedCount
-        ?? card?.interact_info?.liked_count ?? card?.interactInfo?.likedCount ?? 0;
+    const interact = n.interact_info || n.interactInfo
+        || card?.interact_info || card?.interactInfo || {};
+    const likesRaw = n.likes ?? n.liked_count ?? interact.liked_count ?? interact.likedCount ?? 0;
+    const collectsRaw = n.collects ?? n.collected_count ?? interact.collected_count ?? interact.collectedCount ?? 0;
+    const commentCountRaw = n.commentCount ?? n.comment_count ?? interact.comment_count ?? interact.commentCount ?? 0;
+    const shareCountRaw = n.shareCount ?? n.share_count ?? interact.share_count ?? interact.shareCount ?? 0;
     return {
         noteId: n.noteId || n.note_id || n.id || card?.note_id || card?.noteId || card?.noteId || '',
         title: n.title || n.display_title || n.displayTitle || card?.display_title || card?.displayTitle || '',
@@ -705,6 +805,9 @@ export const normalizeNote = (n: any): { noteId: string; title: string; desc: st
         author: n.author || n.nickname || n.user?.nickname || n.user?.name || card?.user?.nickname || card?.user?.name || '',
         authorId: n.authorId || n.author_id || n.user?.user_id || n.user?.userId || card?.user?.user_id || card?.user?.userId || '',
         likes: parseXhsCount(likesRaw),
+        collects: parseXhsCount(collectsRaw),
+        commentCount: parseXhsCount(commentCountRaw),
+        shareCount: parseXhsCount(shareCountRaw),
         xsecToken: n.xsecToken || n.xsec_token || card?.xsec_token || card?.xsecToken || undefined,
         coverUrl,
         type: n.type || card?.type || undefined,
@@ -712,28 +815,46 @@ export const normalizeNote = (n: any): { noteId: string; title: string; desc: st
 };
 
 export const normalizeXhsLiteDetail = (payload: any, commentLimit = 15): ReturnType<typeof normalizeNote> & {
-    comments?: { author: string; content: string; likes: number }[];
+    comments?: { author: string; content: string; likes: number; commentId?: string; userId?: string }[];
+    commentReadStatus: XhsCommentReadStatus;
 } => {
-    const root = payload?.data || payload || {};
-    const note = normalizeNote(root.note || {});
-    const rawComments = Array.isArray(root.comments?.list) ? root.comments.list : [];
-    const comments: { author: string; content: string; likes: number }[] = [];
-    const appendComment = (comment: any) => {
-        const normalized = {
-            author: comment.nickname || comment.user?.nickname || '匿名',
-            content: String(comment.content || '').trim(),
-            likes: parseXhsCount(comment.like_count ?? comment.likes ?? 0),
-        };
-        if (normalized.content && comments.length < commentLimit) comments.push(normalized);
-        const replies = Array.isArray(comment.sub_comments) ? comment.sub_comments : [];
-        for (const reply of replies) {
-            if (comments.length >= commentLimit) break;
-            appendComment(reply);
+    const root = payload?.data && typeof payload.data === 'object' ? payload.data : payload || {};
+    const note = normalizeNote(root.note || payload?.note || payload || {});
+    const comments: { author: string; content: string; likes: number; commentId?: string; userId?: string }[] = [];
+    const appendComments = (items: NormalizedXhsComment[]) => {
+        for (const item of items) {
+            if (comments.length >= commentLimit) return;
+            if (item.content) {
+                comments.push({
+                    author: item.author,
+                    content: item.content,
+                    likes: item.likes,
+                    commentId: item.commentId || undefined,
+                    userId: item.userId || undefined,
+                });
+            }
+            appendComments(item.subComments);
         }
     };
-    for (const comment of rawComments) {
-        if (comments.length >= commentLimit) break;
-        appendComment(comment);
-    }
-    return comments.length ? { ...note, comments } : note;
+    appendComments(normalizeXhsComments(payload));
+
+    const rawCommentArray = firstArray(
+        root.comments?.list,
+        root.comments?.comment_list,
+        root.comment_list,
+        Array.isArray(root.comments) ? root.comments : undefined,
+    );
+    const explicitStatus = root.comments_status || root.comment_read_status || payload?.comments_status;
+    const commentError = root.comments_error || payload?.comments_error;
+    const commentReadStatus: XhsCommentReadStatus = comments.length > 0 || explicitStatus === 'loaded'
+        ? 'loaded'
+        : explicitStatus === 'unavailable' || commentError
+            ? 'unavailable'
+            : rawCommentArray
+                ? 'empty'
+                : 'not_requested';
+
+    return comments.length
+        ? { ...note, comments, commentReadStatus }
+        : { ...note, commentReadStatus };
 };

@@ -15,7 +15,7 @@ function corsHeaders(origin) {
   return {
     "Access-Control-Allow-Origin": origin || "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, Depth, X-Brave-API-Key, X-Notion-API-Key, X-Feishu-Token, X-Xhs-Cookie, X-Netease-Cookie, X-WebDAV-Method, X-WebDAV-Depth, X-WebDAV-Range, X-GitHub-Method, X-GitHub-Api-Version, Mcp-Session-Id, Accept, Range",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, Depth, X-Brave-API-Key, X-Notion-API-Key, X-Feishu-Token, X-Xhs-Cookie, X-Rnote-API-Key, X-Netease-Cookie, X-WebDAV-Method, X-WebDAV-Depth, X-WebDAV-Range, X-GitHub-Method, X-GitHub-Api-Version, Mcp-Session-Id, Accept, Range",
     "Access-Control-Expose-Headers": "Mcp-Session-Id",
     "Access-Control-Max-Age": "86400",
   };
@@ -1466,13 +1466,143 @@ const XHSLite = (() => {
     };
   }
   function normComment(c) {
-    const u = c.user_info || c.user || {};
+    const u = c.user_info || c.userInfo || c.user || {};
+    const id = c.id || c.comment_id || c.commentId || '';
+    const replies = Array.isArray(c.sub_comments) ? c.sub_comments
+      : Array.isArray(c.subComments) ? c.subComments
+      : Array.isArray(c.replies) ? c.replies
+      : [];
     return {
-      id: c.id || '', comment_id: c.id || '', commentId: c.id || '', content: c.content || '',
-      nickname: u.nickname || '', author_name: u.nickname || '',
-      user: { nickname: u.nickname || '', user_id: u.user_id || '' },
-      like_count: c.like_count || '0', likes: c.like_count || '0',
-      sub_comments: Array.isArray(c.sub_comments) ? c.sub_comments.map(normComment) : [],
+      id, comment_id: id, commentId: id, content: c.content || c.text || '',
+      nickname: u.nickname || u.name || '', author_name: u.nickname || u.name || '',
+      user: { nickname: u.nickname || u.name || '', user_id: u.user_id || u.userId || '' },
+      like_count: c.like_count ?? c.likeCount ?? c.likes ?? '0',
+      likes: c.like_count ?? c.likeCount ?? c.likes ?? '0',
+      sub_comments: replies.map(normComment),
+    };
+  }
+
+  function findCommentArray(value, depth = 0) {
+    if (depth > 5 || value == null) return null;
+    if (Array.isArray(value)) {
+      if (value.length === 0) return value;
+      const first = value[0];
+      if (first && typeof first === 'object' &&
+          (first.content != null || first.comment_id || first.commentId || first.id)) {
+        return value;
+      }
+      return null;
+    }
+    if (typeof value !== 'object') return null;
+    for (const key of ['comments', 'comment_list', 'commentList', 'items', 'list']) {
+      const found = findCommentArray(value[key], depth + 1);
+      if (found) return found;
+    }
+    for (const key of ['data', 'result', 'response']) {
+      const found = findCommentArray(value[key], depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  async function getRnoteComments(feedId, env, requestApiKey) {
+    const apiKey = requestApiKey || (env && env.RNOTE_API_KEY);
+    if (!apiKey) return null;
+
+    const providerUrl = new URL('https://rnote.dev/api/v2/crawler/note/comments');
+    providerUrl.searchParams.set('note_id', feedId);
+    providerUrl.searchParams.set('index', '0');
+    providerUrl.searchParams.set('pageArea', 'UNFOLDED');
+    providerUrl.searchParams.set('sort_strategy', 'like_count');
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    try {
+      const resp = await fetch(providerUrl.toString(), {
+        method: 'GET',
+        headers: {
+          accept: 'application/json',
+          'X-API-Key': apiKey,
+        },
+        signal: controller.signal,
+      });
+      const body = await readJsonResponse(resp);
+      if (!resp.ok || body?.success === false) {
+        return {
+          success: false,
+          error: {
+            status: resp.status,
+            code: body?.debug_id || 'COMMENT_PROVIDER_REJECTED',
+            message: body?.error || body?.message || `真实评论服务 HTTP ${resp.status}`,
+          },
+        };
+      }
+      const rawComments = findCommentArray(body?.data ?? body) || [];
+      return {
+        success: true,
+        comments: rawComments.map(normComment).filter((comment) => comment.content),
+        provider: 'rnote',
+      };
+    } catch (e) {
+      return {
+        success: false,
+        error: {
+          code: e?.name === 'AbortError' ? 'COMMENT_PROVIDER_TIMEOUT' : 'COMMENT_PROVIDER_FAILED',
+          message: e instanceof Error ? e.message : String(e),
+        },
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function getManagedComments(feedId, env, requestRnoteApiKey) {
+    const rnoteConfigured = !!(requestRnoteApiKey || env?.RNOTE_API_KEY);
+    if (!rnoteConfigured) {
+      return {
+        success: false,
+        error: {
+          code: 'COMMENT_PROVIDER_NOT_CONFIGURED',
+          message: '真实评论服务尚未配置',
+        },
+      };
+    }
+
+    const cacheKey = new Request(`https://sullyos.invalid/_xhs-comments/${encodeURIComponent(feedId)}`);
+    const cache = globalThis.caches && globalThis.caches.default;
+    if (cache) {
+      const cached = await cache.match(cacheKey);
+      if (cached) {
+        const data = await cached.json();
+        return {
+          success: true,
+          comments: data.comments || [],
+          provider: data.provider || 'managed-cache',
+          cached: true,
+        };
+      }
+    }
+
+    const result = await getRnoteComments(feedId, env, requestRnoteApiKey);
+    if (result?.success) {
+      const comments = result.comments || [];
+      if (cache) {
+        const cacheResponse = new Response(JSON.stringify({
+          comments,
+          provider: result.provider,
+        }), {
+          headers: {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'public, max-age=300',
+          },
+        });
+        await cache.put(cacheKey, cacheResponse);
+      }
+      return { ...result, comments, cached: false };
+    }
+    return result || {
+      success: false,
+      error: { code: 'COMMENT_PROVIDER_NOT_CONFIGURED', message: '真实评论服务尚未配置' },
     };
   }
 
@@ -1506,33 +1636,41 @@ const XHSLite = (() => {
     const items = (r?.data?.items || []).filter((it) => it.id && (it.note_card || it.model_type === 'note'));
     return { feeds: items.map(normItem), success: !!r?.success, msg: r?.msg, raw_error: r?.success ? undefined : r };
   }
-  async function getFeedDetail(cookieStr, feedId, xsecToken, { xsecSource = 'pc_feed', loadComments = true } = {}) {
+  async function getFeedDetail(cookieStr, feedId, xsecToken, {
+    xsecSource = 'pc_feed',
+    loadComments = true,
+    env,
+    requestRnoteApiKey,
+  } = {}) {
     const ck = parseCookies(cookieStr);
     const payload = { source_note_id: feedId, image_formats: IMG_FORMATS, extra: { need_body_topic: '1' }, xsec_source: xsecSource || 'pc_feed', xsec_token: xsecToken || '' };
     const r = await signedPost(EDITH, '/api/sns/web/v1/feed', payload, cookieStr, ck, { 'xy-direction': '13' });
     const nc = r?.data?.items?.[0]?.note_card || {};
     const note = { note_id: feedId, title: nc.title || '', content: nc.desc || '', desc: nc.desc || '', user: nc.user || {}, interact_info: nc.interact_info || {}, image_list: nc.image_list || [], xsec_token: xsecToken || '' };
-    let comments = [];
+    const embeddedComments = findCommentArray(nc?.comments) || [];
+    let comments = embeddedComments.map(normComment).filter((comment) => comment.content);
+    let commentsStatus = comments.length ? 'loaded' : 'not_requested';
     let commentsError;
-    if (loadComments) {
-      try {
-        const commentParams = { note_id: feedId, cursor: '', top_comment_id: '', image_formats: 'jpg,webp,avif', xsec_token: xsecToken || '' };
-        const cr = await signedGet(EDITH, '/api/sns/web/v2/comment/page', commentParams, cookieStr, ck, {}, 'xyw');
-        if (cr?.success) {
-          comments = (cr?.data?.comments || []).map(normComment);
-        } else {
-          commentsError = {
-            status: cr?.http_status,
-            code: cr?.code,
-            message: cr?.msg || cr?.message || 'comment request failed',
-          };
-        }
-      } catch (e) {
-        commentsError = { message: e instanceof Error ? e.message : String(e) };
+    let commentsProvider;
+    if (loadComments && comments.length === 0) {
+      const managed = await getManagedComments(feedId, env, requestRnoteApiKey);
+      if (managed.success) {
+        comments = managed.comments;
+        commentsProvider = managed.provider;
+        commentsStatus = comments.length ? 'loaded' : 'empty';
+      } else {
+        commentsStatus = 'unavailable';
+        commentsError = managed.error;
       }
     }
     return {
-      data: { note, comments: { list: comments }, comments_error: commentsError },
+      data: {
+        note,
+        comments: { list: comments },
+        comments_status: commentsStatus,
+        comments_provider: commentsProvider,
+        comments_error: commentsError,
+      },
       success: !!r?.success,
       msg: r?.msg,
       raw_error: r?.success ? undefined : r,
@@ -1671,12 +1809,17 @@ const XHSLite = (() => {
     return { success: true, note_id: noteId, noteId, msg: '发布成功', raw: r };
   }
 
-  async function handle(command, body, cookie) {
+  async function handle(command, body, cookie, env, requestContext = {}) {
     switch (command) {
       case 'check-login': return checkLogin(cookie);
       case 'search': return search(cookie, body.keyword || '', { sort: body.sort_by, page: body.page });
       case 'list-feeds': return listFeeds(cookie, { category: body.category, cursorScore: body.cursor_score, noteIndex: body.note_index });
-      case 'get-feed-detail': return getFeedDetail(cookie, body.feed_id, body.xsec_token, { xsecSource: body.xsec_source, loadComments: body.load_all_comments !== false });
+      case 'get-feed-detail': return getFeedDetail(cookie, body.feed_id, body.xsec_token, {
+        xsecSource: body.xsec_source,
+        loadComments: body.load_all_comments !== false,
+        env,
+        requestRnoteApiKey: requestContext.rnoteApiKey,
+      });
       case 'post-comment': return postComment(cookie, body.feed_id, body.content, { xsecToken: body.xsec_token });
       case 'reply-comment': return postComment(cookie, body.feed_id, body.content, { targetCommentId: body.comment_id, xsecToken: body.xsec_token });
       case 'like-feed': return likeFeed(cookie, body.feed_id, !!body.unlike);
@@ -1734,7 +1877,9 @@ export default {
       if (!cookie) return jsonResponse({ error: '未配置 cookie。请在 SullyOS 设置里粘贴小红书 cookie。' }, { status: 401, origin });
       if (!cookie.includes('a1=')) return jsonResponse({ error: 'cookie 缺少 a1 字段，请复制完整的小红书 cookie。' }, { status: 400, origin });
       try {
-        const result = await XHSLite.handle(command, body, cookie);
+        const result = await XHSLite.handle(command, body, cookie, env, {
+          rnoteApiKey: request.headers.get('x-rnote-api-key') || '',
+        });
         if (result === null) return jsonResponse({ error: `Unknown command: ${command}` }, { status: 404, origin });
         return jsonResponse(result, { origin });
       } catch (e) {
