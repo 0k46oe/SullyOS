@@ -95,6 +95,8 @@ interface ChatModalsProps {
     // Voice TTS
     chatVoiceEnabled?: boolean;
     onToggleChatVoice?: () => void;
+    chatVoiceAutoPlay?: boolean;
+    onToggleChatVoiceAutoPlay?: () => void;
     chatVoiceLang?: string;
     onSetChatVoiceLang?: (lang: string) => void;
     // Voice generation from long-press
@@ -230,7 +232,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     translationEnabled, onToggleTranslation, translateSourceLang, translateTargetLang, onSetTranslateSourceLang, onSetTranslateLang,
     xhsEnabled, onToggleXhs,
     htmlModeEnabled, onToggleHtmlMode, htmlModeCustomPrompt, setHtmlModeCustomPrompt,
-    chatVoiceEnabled, onToggleChatVoice, chatVoiceLang, onSetChatVoiceLang,
+    chatVoiceEnabled, onToggleChatVoice, chatVoiceAutoPlay, onToggleChatVoiceAutoPlay, chatVoiceLang, onSetChatVoiceLang,
     onGenerateVoice, voiceAvailable, onDownloadVoice, voiceDownloadable,
     scheduleData, isScheduleGenerating, onScheduleEdit, onScheduleDelete, onScheduleReroll, onScheduleCoverChange,
     onScheduleStyleChange, onPlayTheater,
@@ -483,6 +485,19 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                          <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">
                              开启后，AI 回复自动生成语音条（需配置 MiniMax 和角色语音）。
                          </p>
+                         {chatVoiceEnabled && (
+                             <div className="mt-3 pt-3 border-t border-slate-100">
+                                 <div className="flex justify-between items-center cursor-pointer" onClick={onToggleChatVoiceAutoPlay}>
+                                     <label className="text-[10px] font-bold text-slate-400 uppercase pointer-events-none">收到就自动播放</label>
+                                     <div className={`w-9 h-5 rounded-full p-1 transition-colors flex items-center ${chatVoiceAutoPlay ? 'bg-emerald-400' : 'bg-slate-200'}`}>
+                                         <div className={`w-3 h-3 bg-white rounded-full shadow-sm transition-transform ${chatVoiceAutoPlay ? 'translate-x-4' : ''}`}></div>
+                                     </div>
+                                 </div>
+                                 <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">
+                                     关闭时语音条照常出现，点一下才播放（也可以点「转文字」直接看内容）。
+                                 </p>
+                             </div>
+                         )}
                          {chatVoiceEnabled && (
                              <div className="mt-3">
                                  <label className="text-[10px] font-bold text-slate-400 mb-1.5 block">语音语种</label>

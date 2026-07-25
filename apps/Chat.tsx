@@ -42,6 +42,7 @@ import { useChatAI } from '../hooks/useChatAI';
 import { cleanTextForTts, parseVoiceOutput } from '../utils/minimaxTts';
 import { collectVoiceBatchSubtitle, isPoisonedVoiceSubtitle } from '../utils/voiceSubtitle';
 import { synthesizeSpeechDetailed, characterHasVoice } from '../utils/ttsRouter';
+import { shouldAutoPlayGeneratedVoice } from '../utils/voicePlayback';
 import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
 import { resolveFishAudioApiKey, stripFishMarkupForDisplay, cleanTextForTtsFish } from '../utils/fishAudioTts';
 import { resolveTtsProvider } from '../utils/ttsProvider';
@@ -462,12 +463,15 @@ const Chat: React.FC = () => {
             setVoiceDataMap(prev => ({ ...prev, [msg.id]: { url: blobUrl, originalText, spokenText: storedSpokenText, lang: storedLang } }));
             // Persist so the voice bar survives leaving and re-entering the chat.
             persistVoice(msg.id, blobUrl, blob, originalText, storedSpokenText, storedLang);
-            // Auto-play
-            if (!chatAudioRef.current) chatAudioRef.current = new Audio();
-            chatAudioRef.current.src = blobUrl;
-            chatAudioRef.current.onended = () => setPlayingMsgId(null);
-            chatAudioRef.current.play().catch(() => {});
-            setPlayingMsgId(msg.id);
+            // 合成完是否立刻播（规则和来由见 shouldAutoPlayGeneratedVoice）：
+            // AI 自动发来的默认不响、等用户点；用户自己点着要的一定响。
+            if (shouldAutoPlayGeneratedVoice({ autoTriggered, autoPlayEnabled: char.chatVoiceAutoPlay })) {
+                if (!chatAudioRef.current) chatAudioRef.current = new Audio();
+                chatAudioRef.current.src = blobUrl;
+                chatAudioRef.current.onended = () => setPlayingMsgId(null);
+                chatAudioRef.current.play().catch(() => {});
+                setPlayingMsgId(msg.id);
+            }
         } catch (err: any) {
             addToast(`语音生成失败: ${err?.message || '未知错误'}`, 'error');
         } finally {
@@ -2805,6 +2809,8 @@ const Chat: React.FC = () => {
                 setHtmlModeCustomPrompt={setSettingsHtmlModeCustomPrompt}
                 chatVoiceEnabled={!!char.chatVoiceEnabled}
                 onToggleChatVoice={() => updateCharacter(char.id, { chatVoiceEnabled: !char.chatVoiceEnabled })}
+                chatVoiceAutoPlay={!!char.chatVoiceAutoPlay}
+                onToggleChatVoiceAutoPlay={() => updateCharacter(char.id, { chatVoiceAutoPlay: !char.chatVoiceAutoPlay })}
                 chatVoiceLang={char.chatVoiceLang || ''}
                 onSetChatVoiceLang={(lang: string) => updateCharacter(char.id, { chatVoiceLang: lang })}
                 voiceAvailable={characterHasVoice(char, apiConfig)}

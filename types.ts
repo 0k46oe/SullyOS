@@ -2248,6 +2248,9 @@ export interface CharacterProfile {
 
   // Chat & Date voice TTS settings
   chatVoiceEnabled?: boolean;
+  // 收到语音是否自动播放。默认关（不填 = 不自动播）：语音条照常出现，点一下才响。
+  // 只管 AI 自动发来的语音；用户主动点「转换语音」/ 点空语音条生成的，仍然生成完就播。
+  chatVoiceAutoPlay?: boolean;
   chatVoiceLang?: string;
   dateVoiceEnabled?: boolean;
   dateVoiceLang?: string;
