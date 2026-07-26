@@ -8,8 +8,8 @@ vi.mock('./db', () => ({
 }));
 
 import { DB } from './db';
-import { getLocalDailySchedule } from './dailySchedule';
-import type { DailySchedule } from '../types';
+import { getDailyScheduleForChar, getLocalDailySchedule } from './dailySchedule';
+import type { CharacterProfile, DailySchedule } from '../types';
 
 const originalTimeZone = process.env.TZ;
 const getSchedule = vi.mocked(DB.getDailySchedule);
@@ -35,6 +35,36 @@ const schedule = (date: string, generatedAt: number): DailySchedule => ({
 });
 
 describe('local daily schedule compatibility', () => {
+    const losAngelesChar = {
+        id: 'char-1',
+        customTimezoneEnabled: true,
+        customTimezone: 'America/Los_Angeles',
+    } as CharacterProfile;
+
+    it('loads the character-local date key instead of the phone date', async () => {
+        const at = new Date('2026-07-20T16:30:00.000Z'); // 北京 7/21 00:30，洛杉矶 7/20 09:30
+        const current = schedule('2026-07-20', at.getTime());
+        getSchedule.mockResolvedValueOnce(current);
+
+        await expect(getDailyScheduleForChar(losAngelesChar, at)).resolves.toBe(current);
+        expect(getSchedule).toHaveBeenCalledWith('char-1', '2026-07-20');
+    });
+
+    it('rekeys a phone-date record when generatedAt belongs to the character-local day', async () => {
+        const at = new Date('2026-07-20T16:30:00.000Z');
+        const phoneKeyed = schedule('2026-07-21', at.getTime());
+        getSchedule.mockResolvedValueOnce(null).mockResolvedValueOnce(phoneKeyed);
+
+        const result = await getDailyScheduleForChar(losAngelesChar, at);
+        expect(getSchedule).toHaveBeenNthCalledWith(1, 'char-1', '2026-07-20');
+        expect(getSchedule).toHaveBeenNthCalledWith(2, 'char-1', '2026-07-21');
+        expect(result?.date).toBe('2026-07-20');
+        expect(saveSchedule).toHaveBeenCalledWith(expect.objectContaining({
+            id: 'char-1_2026-07-20',
+            date: '2026-07-20',
+        }));
+    });
+
     it('loads the China-local key directly', async () => {
         const at = new Date('2026-07-20T16:30:00.000Z'); // 北京 7/21 00:30
         const current = schedule('2026-07-21', at.getTime());

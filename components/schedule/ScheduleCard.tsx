@@ -1,6 +1,7 @@
 
 import React, { useState, useRef } from 'react';
 import { DailySchedule, ScheduleSlot, CharacterProfile } from '../../types';
+import { getCurrentScheduleSlotIndex, getScheduleWallClock } from '../../utils/scheduleTime';
 
 interface ScheduleCardProps {
     schedule: DailySchedule | null;
@@ -15,19 +16,8 @@ interface ScheduleCardProps {
     isGenerating?: boolean;
 }
 
-const getCurrentSlotIndex = (slots: ScheduleSlot[]): number => {
-    const now = new Date();
-    const currentMinutes = now.getHours() * 60 + now.getMinutes();
-
-    for (let i = slots.length - 1; i >= 0; i--) {
-        const [h, m] = slots[i].startTime.split(':').map(Number);
-        if (currentMinutes >= h * 60 + m) return i;
-    }
-    return -1;
-};
-
-const formatDate = (): string => {
-    const now = new Date();
+const formatDate = (character: CharacterProfile | null): string => {
+    const now = getScheduleWallClock(character);
     const days = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
     const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
     return `${months[now.getMonth()]} ${now.getDate()} · ${days[now.getDay()]}`;
@@ -83,7 +73,7 @@ const ScheduleCard: React.FC<ScheduleCardProps> = ({
         }
     };
 
-    const currentIdx = schedule ? getCurrentSlotIndex(schedule.slots) : -1;
+    const currentIdx = schedule ? getCurrentScheduleSlotIndex(schedule.slots, character) : -1;
     const charAvatar = character?.avatar;
     const charName = character?.name || '角色';
     const coverImage = schedule?.coverImage;
@@ -153,7 +143,7 @@ const ScheduleCard: React.FC<ScheduleCardProps> = ({
                 </div>
                 <div className="flex flex-col items-end gap-1">
                     <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border border-white/20" style={{ background: accentBg }}>
-                        {formatDate()}
+                        {formatDate(character)}
                     </span>
                     {!compact && onReroll && (
                         <button

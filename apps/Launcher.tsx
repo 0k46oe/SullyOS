@@ -9,8 +9,9 @@ import { ScheduleHomeWidget, ScheduleFullscreenViewer } from '../components/sche
 import NowPlayingSquareWidget from '../components/os/NowPlayingSquareWidget';
 import MobileGameHome from '../components/os/MobileGameHome';
 import TamagotchiHome from '../components/os/TamagotchiHome';
-import { getLocalDailySchedule } from '../utils/dailySchedule';
+import { getDailyScheduleForChar } from '../utils/dailySchedule';
 import { useLocalDateKey } from '../hooks/useLocalDateKey';
+import { resolveCharTimeZone } from '../utils/timezone';
 
 // --- Isolated Components to prevent full re-renders ---
 
@@ -469,7 +470,6 @@ let _lastPageIndex = 0;
 
 const Launcher: React.FC = () => {
   const { openApp, characters, activeCharacterId, theme, updateTheme, lastMsgTimestamp, isDataLoaded, unreadMessages } = useOS();
-  const localDateKey = useLocalDateKey();
 
   // Local state for widget data to prevent context trashing
   const [widgetChar, setWidgetChar] = useState<CharacterProfile | null>(null);
@@ -645,11 +645,12 @@ const Launcher: React.FC = () => {
       if (scheduleCharId) return characters.find(c => c.id === scheduleCharId) || characters[0];
       return characters.find(c => c.id === activeCharacterId) || characters[0];
   }, [characters, scheduleCharId, activeCharacterId]);
+  const scheduleDateKey = useLocalDateKey(resolveCharTimeZone(scheduleChar));
 
   useEffect(() => {
       if (!scheduleChar || !isDataLoaded) return;
-      getLocalDailySchedule(scheduleChar.id).then(s => setScheduleData(s)).catch(() => {});
-  }, [scheduleChar, isDataLoaded, localDateKey]);
+      getDailyScheduleForChar(scheduleChar).then(s => setScheduleData(s)).catch(() => {});
+  }, [scheduleChar, isDataLoaded, scheduleDateKey]);
 
   // Restore scroll position BEFORE paint to avoid visible flash/slide
   useLayoutEffect(() => {
