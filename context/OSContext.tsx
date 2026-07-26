@@ -13,7 +13,7 @@ import { ProactiveChat } from '../utils/proactiveChat';
 import { VRScheduler } from '../utils/vrWorld/scheduler';
 import { runVRSession } from '../utils/vrWorld/runSession';
 import { VR_DEFAULT_INTERVAL_MIN } from '../utils/vrWorld/constants';
-import { WorldScheduler } from '../utils/worldHome/scheduler';
+import { WorldScheduler, toTickEntries } from '../utils/worldHome/scheduler';
 import { runWorldEpisode, rerollWorldCharBeat } from '../utils/worldHome/engine';
 import { migrateWorldDaySegs } from '../utils/worldHome/prompts';
 import { ChatParser } from '../utils/chatParser';
@@ -2349,11 +2349,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               for (const w of worlds) {
                   if (migrateWorldDaySegs(w)) await DB.saveWorld(w).catch(() => {});
               }
-              WorldScheduler.reconcile(
-                  worlds
-                      .filter(w => (w.offlineTickSlots?.length || 0) > 0)
-                      .map(w => ({ worldId: w.id, slots: w.offlineTickSlots! }))
-              );
+              WorldScheduler.reconcile(toTickEntries(worlds));
           })
           .catch(() => {});
 
