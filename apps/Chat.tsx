@@ -15,7 +15,7 @@ import { generateSlotTheater } from '../utils/theaterGenerator';
 import TheaterPlayer from '../components/schedule/TheaterPlayer';
 import { formatMessageWithTime, normalizeMessageContent } from '../utils/messageFormat';
 import { getRoomLabel } from '../utils/memoryPalace/types';
-import { XhsMcpClient, extractNotesFromMcpData, normalizeNote, normalizeXhsLiteDetail } from '../utils/xhsMcpClient';
+import { XhsMcpClient, extractNotesFromMcpData, normalizeXhsLiteDetail } from '../utils/xhsMcpClient';
 import { extractWebpageContent, detectFirstUrl, detectXhsShortUrl, extractXhsShareTitle, isXhsUrl, extractXhsNoteId, expandShortUrl, type ExtractedWebpage } from '../utils/webpageExtractor';
 import { isVideoShareUrl, parseVideoShareUrl } from '../utils/videoParser';
 import { isDevDebugAvailable } from '../utils/devDebug';
@@ -1027,17 +1027,13 @@ const Chat: React.FC = () => {
             if (xhsFullNoteId || xhsShortUrl) {
                 let noteId = xhsFullNoteId || '';
                 let xsecToken = text.match(/xsec_token=([^&\s]+)/)?.[1];
-                let expandedNoteUrl = '';
                 let shortLinkError = '';
                 // 短链（xhslink.com / xhslink.cn）不含 id/token —— 先经 sfworker 展开成真实链接再提取。
                 if (!noteId && xhsShortUrl) {
                     try {
                         const finalUrl = await expandShortUrl(xhsShortUrl);
-                        expandedNoteUrl = finalUrl;
                         noteId = extractXhsNoteId(finalUrl) || '';
-                        try {
-                            xsecToken = xsecToken || new URL(finalUrl).searchParams.get('xsec_token') || undefined;
-                        } catch { /* noteId extraction below will handle invalid URLs */ }
+                        xsecToken = xsecToken || finalUrl.match(/xsec_token=([^&\s]+)/)?.[1];
                         if (isDevDebugAvailable()) console.log('[卡片调试] 小红书短链展开 →', finalUrl, '| noteId =', noteId);
                     } catch (e) {
                         console.warn('xhslink 短链展开失败:', e);
@@ -1061,18 +1057,12 @@ const Chat: React.FC = () => {
                     const mcpUrl = realtimeConfig?.xhsMcpConfig?.serverUrl;
                     if (mcpUrl && realtimeConfig?.xhsMcpConfig?.enabled) {
                         try {
-                            const noteUrl = expandedNoteUrl
-                                || `https://www.xiaohongshu.com/explore/${noteId}${xsecToken ? `?xsec_token=${xsecToken}&xsec_source=pc_share` : ''}`;
+                            const noteUrl = `https://www.xiaohongshu.com/explore/${noteId}${xsecToken ? `?xsec_token=${xsecToken}&xsec_source=pc_share` : ''}`;
                             // loadAllComments：和角色自己浏览笔记 (XHS_DETAIL) 一致地把评论区也抓回来，
                             // 否则 user 分享的笔记只有标题/正文，角色读不到评论（char 分享给 user 的却能看到）。
                             const result = await XhsMcpClient.getNoteDetail(mcpUrl, noteUrl, xsecToken, { loadAllComments: true });
                             if (isDevDebugAvailable()) console.log('[卡片调试] 小红书抓取 result =', result);
                             if (result.success && result.data) {
-                                const liteRoot = (result.data as any)?.data || result.data;
-                                if (liteRoot?.comments_error) {
-                                    console.warn('[XHS Lite] 评论区读取失败:', liteRoot.comments_error);
-                                    addToast(`小红书正文已读取，但评论区被拒绝：${liteRoot.comments_error.message || '未知错误'}`, 'info');
-                                }
                                 const fetched = normalizeXhsLiteDetail(result.data);
                                 // 抓到的字段补全基础卡；id/标题/token 保底，标题优先文案标题（更完整可读）。
                                 note = { ...note, ...fetched, noteId: fetched.noteId || note.noteId, title: titleFromText || fetched.title || note.title, xsecToken: fetched.xsecToken || xsecToken };

@@ -21,6 +21,7 @@ import {
     extractNotesFromMcpData,
     normalizeNote,
     normalizeXhsComments,
+    normalizeXhsLiteDetail,
 } from './xhsMcpClient';
 import { getLocalDateKey } from './localDate';
 
@@ -284,7 +285,7 @@ async function xhsSearchImpl(conf: { mcpUrl: string }, keyword: string): Promise
     const r = await XhsMcpClient.search(conf.mcpUrl, keyword);
     if (!r.success) return { success: false, notes: [], message: r.error };
     const raw = extractNotesFromMcpData(r.data);
-    return { success: true, notes: raw.map(n => ({ ...normalizeNote(n), xsecSource: 'pc_search' }) as XhsNote) };
+    return { success: true, notes: raw.map(n => normalizeNote(n) as XhsNote) };
 }
 
 async function xhsBrowseImpl(conf: { mcpUrl: string }): Promise<{ success: boolean; notes: XhsNote[]; message?: string }> {
@@ -296,9 +297,9 @@ async function xhsBrowseImpl(conf: { mcpUrl: string }): Promise<{ success: boole
     if (raw.length === 0 && unwrapped !== r.data) {
         console.log(`📕 [XHS] getRecommend unwrapped 提取为空，用原始数据重试`);
         const raw2 = extractNotesFromMcpData(r.data);
-        return { success: true, notes: raw2.map(n => ({ ...normalizeNote(n), xsecSource: 'pc_feed' }) as XhsNote) };
+        return { success: true, notes: raw2.map(n => normalizeNote(n) as XhsNote) };
     }
-    return { success: true, notes: raw.map(n => ({ ...normalizeNote(n), xsecSource: 'pc_feed' }) as XhsNote) };
+    return { success: true, notes: raw.map(n => normalizeNote(n) as XhsNote) };
 }
 
 /** 将笔记列表的 xsecToken 和 title 存入 xhsCaches */
@@ -520,35 +521,57 @@ export async function runXhsDetail(
         // detail 自带的 xsecToken / 评论结构 写回缓存
         if (result.success && result.data && typeof result.data === 'object') {
             const d = result.data;
-            const noteObj = (d as any).note || d;
-            const detailToken = noteObj?.xsecToken || noteObj?.xsec_token || (d as any)?.xsecToken;
+            const noteObj = (d as any).data?.note || (d as any).note || d;
+            const detailToken = noteObj?.xsecToken || noteObj?.xsec_token
+                || (d as any).data?.xsecToken || (d as any).data?.xsec_token
+                || (d as any).xsecToken || (d as any).xsec_token;
             if (detailToken && args.noteId && ctx.xhsCaches) {
                 ctx.xhsCaches.xsecTokenCache.set(args.noteId, detailToken);
                 console.log(`📕 [XHS] 从 detail 缓存 xsecToken: ${args.noteId}`);
             }
 
+            const normalizedComments = normalizeXhsComments(d);
             if (ctx.xhsCaches) {
                 const caches = ctx.xhsCaches;
-                const cacheComments = (comments: any[], parentId?: string) => {
+                const cacheComments = (comments: ReturnType<typeof normalizeXhsComments>) => {
                     for (const c of comments) {
-                        const cid = c.id || c.commentId || c.comment_id;
-                        const uid = c.userInfo?.userId || c.userInfo?.user_id || c.user_id || c.userId;
-                        const authorName = c.userInfo?.nickname || c.userInfo?.name || c.nickname || c.userName || c.user_name;
-                        if (cid && uid) caches.commentUserIdCache.set(cid, uid);
-                        if (cid && authorName) caches.commentAuthorNameCache.set(cid, authorName);
-                        if (cid && parentId) caches.commentParentIdCache.set(cid, parentId);
-                        if (Array.isArray(c.subComments)) cacheComments(c.subComments, cid);
-                        if (Array.isArray(c.sub_comments)) cacheComments(c.sub_comments, cid);
+                        if (c.commentId && c.userId) caches.commentUserIdCache.set(c.commentId, c.userId);
+                        if (c.commentId && c.author) caches.commentAuthorNameCache.set(c.commentId, c.author);
+                        if (c.commentId && c.parentCommentId) {
+                            caches.commentParentIdCache.set(c.commentId, c.parentCommentId);
+                        }
+                        cacheComments(c.subComments);
                     }
                 };
-                const commentList = (d as any).data?.comments?.list || (d as any).comments?.list
-                    || (d as any).data?.comments || (d as any).comments
-                    || (d as any).note?.comments?.list || (d as any).note?.comments;
-                if (Array.isArray(commentList)) {
-                    cacheComments(commentList);
+                if (normalizedComments.length > 0) {
+                    cacheComments(normalizedComments);
                     console.log(`📕 [XHS] 缓存了 ${caches.commentUserIdCache.size} 条评论的 userId, ${caches.commentAuthorNameCache.size} 条 authorName`);
                 } else {
                     console.warn(`📕 [XHS] 未找到评论数组, d keys:`, Object.keys(d as any), 'd.note keys:', (d as any).note ? Object.keys((d as any).note) : 'N/A');
+                }
+            }
+
+            // XHS_DETAIL 已经拿到正文和评论，补回搜索结果中的同一张卡。
+            // 后续 XHS_SHARE 直接复用这里的数据，不额外发起详情请求。
+            if (ctx.lastXhsNotesRef) {
+                const detailNote = normalizeXhsLiteDetail(d);
+                const matched = ctx.lastXhsNotesRef.current.find(n => n.noteId === args.noteId);
+                const enriched: XhsNote = {
+                    ...matched,
+                    ...detailNote,
+                    noteId: detailNote.noteId || args.noteId,
+                    title: detailNote.title || matched?.title || '',
+                    desc: detailNote.desc || matched?.desc || '',
+                    author: detailNote.author || matched?.author || '',
+                    authorId: detailNote.authorId || matched?.authorId || '',
+                    xsecToken: detailNote.xsecToken || detailToken || xsecToken || matched?.xsecToken,
+                    comments: detailNote.comments || matched?.comments,
+                };
+                const index = ctx.lastXhsNotesRef.current.findIndex(n => n.noteId === args.noteId);
+                if (index >= 0) {
+                    ctx.lastXhsNotesRef.current = ctx.lastXhsNotesRef.current.map((note, i) =>
+                        i === index ? enriched : note
+                    );
                 }
             }
         }
@@ -575,7 +598,7 @@ export async function runXhsDetail(
                 const noteShareCount = normalizedNote.shareCount;
                 const noteCommentCount = normalizedNote.commentCount;
                 const noteTime = note.time ? new Date(note.time).toLocaleString('zh-CN') : '';
-                const noteIp = note.ipLocation || '';
+                const noteIp = note.ipLocation || note.ip_location || '';
 
                 let noteSection = `📝 笔记详情:\n标题: ${noteTitle}\n作者: ${noteAuthor}`;
                 if (noteTime) noteSection += `\n发布时间: ${noteTime}`;

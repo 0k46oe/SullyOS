@@ -30,7 +30,7 @@ import { DB } from './db';
 import { ChatParser } from './chatParser';
 import { NotionManager, FeishuManager, XhsNote } from './realtimeContext';
 import { enqueuePendingDiary, removePendingDiary } from './pendingDiary';
-import { XhsMcpClient, normalizeXhsLiteDetail } from './xhsMcpClient';
+import { XhsMcpClient } from './xhsMcpClient';
 import { safeFetchJson } from './safeApi';
 import { extractHtmlBlocks } from './htmlPrompt';
 import {
@@ -1272,38 +1272,13 @@ export async function applyAssistantPostProcessing(
         const idx = parseInt(shareMatch[1]) - 1;
         if (idx >= 0 && idx < lastXhsNotesRef.current.length) {
             const note = lastXhsNotesRef.current[idx];
-            let sharedNote: any = note;
-            try {
-                const detail = await XhsMcpClient.getNoteDetail(
-                    xhsConf.mcpUrl,
-                    note.noteId,
-                    note.xsecToken,
-                    { loadAllComments: true, xsecSource: note.xsecSource },
-                );
-                if (detail.success && detail.data) {
-                    const liteRoot = (detail.data as any)?.data || detail.data;
-                    if (liteRoot?.comments_error) {
-                        console.warn('📕 [XHS] 分享前读取到正文，但评论区被拒绝:', liteRoot.comments_error);
-                    }
-                    const full = normalizeXhsLiteDetail(detail.data);
-                    sharedNote = {
-                        ...note,
-                        ...full,
-                        noteId: full.noteId || note.noteId,
-                        title: full.title || note.title,
-                        xsecToken: full.xsecToken || note.xsecToken,
-                    };
-                }
-            } catch (e) {
-                console.warn('📕 [XHS] 分享前读取 Lite 详情失败，使用列表摘要:', e);
-            }
-            console.log('📕 [XHS] AI分享笔记卡片:', sharedNote.title);
+            console.log('📕 [XHS] AI分享笔记卡片:', note.title);
             await DB.saveMessage({
                 charId: char.id,
                 role: 'assistant',
                 type: 'xhs_card',
-                content: sharedNote.title || '小红书笔记',
-                metadata: { xhsNote: sharedNote }
+                content: note.title || '小红书笔记',
+                metadata: { xhsNote: note }
             });
             setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
         } else {

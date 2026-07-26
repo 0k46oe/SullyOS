@@ -2213,11 +2213,20 @@ export interface XhsNote {
     title: string;
     desc: string;
     likes: number;
+    collects?: number;
+    commentCount?: number;
+    shareCount?: number;
     author: string;
     authorId: string;
     xsecToken?: string;
-    xsecSource?: string;
     coverUrl?: string;
     type?: string;  // 'normal' | 'video'
+    comments?: {
+        author: string;
+        content: string;
+        likes: number;
+        commentId?: string;
+        userId?: string;
+    }[];
 }
 // XhsManager removed — all XHS ops go through xhsMcpClient.ts

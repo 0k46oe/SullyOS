@@ -802,7 +802,9 @@ export const extractNotesFromMcpData = (data: any): any[] => {
 };
 
 export const parseXhsCount = (value: unknown): number => {
-    if (typeof value === 'number') return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+    }
     if (typeof value !== 'string') return 0;
 
     const normalized = value.trim().replace(/[,\s+]/g, '');
