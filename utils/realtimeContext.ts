@@ -61,6 +61,7 @@ export interface RealtimeConfig {
         enabled: boolean;
         serverUrl: string;
         cookie?: string;        // Lite 模式：登录后的完整小红书 cookie
+        rnoteApiKey?: string;   // Lite 模式：用户自备的 Rnote Key，用于真实评论
         loggedInNickname?: string;
         loggedInUserId?: string;
         userXsecToken?: string; // 从 feed 列表自动获取，用于 getUserProfile 等
@@ -82,7 +83,15 @@ export const defaultRealtimeConfig: RealtimeConfig = {
     notionApiKey: '',
     notionDatabaseId: '',
     xhsEnabled: false,
-    xhsMcpConfig: { enabled: false, serverUrl: `${getProxyWorkerUrl()}/api`, cookie: undefined, loggedInNickname: undefined, loggedInUserId: undefined, userXsecToken: undefined },
+    xhsMcpConfig: {
+        enabled: false,
+        serverUrl: `${getProxyWorkerUrl()}/api`,
+        cookie: undefined,
+        rnoteApiKey: undefined,
+        loggedInNickname: undefined,
+        loggedInUserId: undefined,
+        userXsecToken: undefined,
+    },
     cacheMinutes: 30
 };
 

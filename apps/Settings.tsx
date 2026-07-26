@@ -1161,7 +1161,10 @@ const Settings: React.FC = () => {
       }
       setRtTestStatus('正在连接...');
       try {
-          const result = await XhsMcpClient.testConnection(urlToUse, cookieToUse);
+          const result = await XhsMcpClient.testConnection(
+              urlToUse,
+              cookieToUse,
+          );
           if (result.connected) {
               const toolCount = result.tools?.length || 0;
               const tokenInfo = result.xsecToken ? ' | xsecToken 已获取' : '';
