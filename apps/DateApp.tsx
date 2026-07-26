@@ -15,6 +15,7 @@ import DateSettings from '../components/date/DateSettings';
 import { armDateResumeAttempt, clearDateResumeAttempt, takeCrashedDateResume } from '../utils/dateSessionRecovery';
 import { BookOpen, Sparkle, CaretLeft, GearSix } from '@phosphor-icons/react';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
+import { trimHistoryThrough } from '../utils/dateSessionHistory';
 
 const DateApp: React.FC = () => {
     const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, apiConfig, addToast, updateCharacter, virtualTime, userProfile, memoryPalaceConfig, dateAutoStartCharId, consumeDateAutoStart, characterGroups } = useOS();
@@ -78,6 +79,9 @@ const DateApp: React.FC = () => {
 
     // --- NEW: Editing State lifted to here for DB sync ---
     const [dateMessages, setDateMessages] = useState<Message[]>([]);
+    // 阅读模式「加载更早」用：当前查询 limit 与「库里已经没有更早的了」。
+    const [dateLoadLimit, setDateLoadLimit] = useState(DATE_SESSION_MESSAGE_LIMIT);
+    const [dateHistoryReachedEnd, setDateHistoryReachedEnd] = useState(false);
     const [hasSavedOpening, setHasSavedOpening] = useState(false);
 
     // Edit Modal State
@@ -94,12 +98,14 @@ const DateApp: React.FC = () => {
     };
 
     // --- Data Loading ---
-    const loadDateMessages = async () => {
+    const loadDateMessages = async (limit = dateLoadLimit) => {
         if (char) {
             // 见面记录只取最近窗口，不再把该角色全部聊天 getAll 进内存。
             // TODO(date-assets): 后续把角色立绘/背景本体迁到 assets store 后，这里还能再把 limit 放宽。
-            const filtered = await loadRecentDateMessages(char.id);
+            const filtered = await loadRecentDateMessages(char.id, limit);
             setDateMessages(filtered);
+            // 拿回来的比要的少 = 库里的见面记录已经取完，阅读模式不用再往前翻了。
+            setDateHistoryReachedEnd(filtered.length < limit);
             
             // 检查数据库中是否已经包含当前的 peekStatus（通过内容比对），避免重复保存
             if (peekStatus && filtered.some(m => m.content === peekStatus && m.role === 'assistant')) {
@@ -110,9 +116,20 @@ const DateApp: React.FC = () => {
 
     useEffect(() => {
         if (char && mode === 'session') {
-            loadDateMessages();
+            // 进会话 / 换角色都从初始窗口重来。limit 必须显式传：setState 是异步的，
+            // 靠 dateLoadLimit 闭包会读到上一个角色翻开的深度，和重置后的 state 对不上。
+            setDateLoadLimit(DATE_SESSION_MESSAGE_LIMIT);
+            setDateHistoryReachedEnd(false);
+            loadDateMessages(DATE_SESSION_MESSAGE_LIMIT);
         }
     }, [char, mode]);
+
+
+    /** 阅读模式要更早的记录：limit 递增重取（反向游标，limit 越大够得越远）。 */
+    const handleLoadMoreDateHistory = async (nextLimit: number) => {
+        setDateLoadLimit(nextLimit);
+        await loadDateMessages(nextLimit);
+    };
 
     // 见面「继续上次」崩溃自愈：若上次恢复会话时把 iOS WebKit 内容进程撑崩了
     // (表现为反复灰屏/白屏「此网页反复出现问题」，非可捕获的 JS 异常)，那份重快照
@@ -240,7 +257,7 @@ const DateApp: React.FC = () => {
 
         // 2. 切换模式并刷新数据
         setMode('session');
-        await loadDateMessages();
+        await loadDateMessages(DATE_SESSION_MESSAGE_LIMIT);
     };
 
     // --- Peek (Generation) Logic ---
@@ -431,10 +448,13 @@ const DateApp: React.FC = () => {
         if (!lastUserMsg || lastUserMsg.role !== 'user') throw new Error("Context lost");
 
         // Call API logic（与 handleSendMessage 共用 buildSessionPayload，只差 variant）
+        // 历史裁到被重掷的那一轮为止：见面回复之后用户又在普通聊天里发过消息时，
+        // validMsgs（全来源）的尾巴不是这条 date user，直接传进去会把那条聊天消息当成
+        // 「待重发的最后一条」砍掉，同时 date user 又被追加一次（丢一条、重一条）。
         const { messages } = await DatePrompts.buildSessionPayload({
             char,
             userProfile,
-            allMsgs: validMsgs,
+            allMsgs: trimHistoryThrough(validMsgs, lastUserMsg.id),
             emojis,
             userText: lastUserMsg.content,
             variant: 'reroll',
@@ -878,6 +898,9 @@ const DateApp: React.FC = () => {
                     onDeleteMessage={handleDeleteMessage}
                     onDeleteMessages={handleDeleteMessages}
                     onSettings={() => {}} // Removed parent state change, DateSession handles it internally now
+                    onLoadMoreHistory={handleLoadMoreDateHistory}
+                    historyLoadLimit={dateLoadLimit}
+                    historyReachedEnd={dateHistoryReachedEnd}
                 />
 
                 {/* 记忆整理中 — 顶部浮动胶囊（与聊天侧外观一致） */}

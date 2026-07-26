@@ -12,6 +12,7 @@ import { cleanTextForTts, VALID_EMOTIONS } from '../../utils/minimaxTts';
 import { synthesizeSpeech, characterHasVoice } from '../../utils/ttsRouter';
 import { resolveTtsProvider } from '../../utils/ttsProvider';
 import { cleanTextForTtsFish } from '../../utils/fishAudioTts';
+import { planNovelLoadMore } from '../../utils/dateSessionHistory';
 
 // 语音情绪标记 [v:xxx]：跟立绘情绪 [emotion] 分开的独立通道。立绘的 happy 是
 // 夸张的表情、语音的 happy 是音色情绪，两者强度/语义差异大，不能一概而论。
@@ -109,13 +110,24 @@ interface DateSessionProps {
     onDeleteMessage: (msg: Message) => void;
     onDeleteMessages: (ids: number[]) => Promise<void>;
     onSettings: () => void;
+    /** 阅读模式「加载更早」铺满已加载部分后，回库里取下一批（limit 递增式重取）。 */
+    onLoadMoreHistory?: (nextLimit: number) => Promise<void>;
+    /** 当前查询用的 limit（配合 onLoadMoreHistory 递增）。 */
+    historyLoadLimit?: number;
+    /** 库里的见面记录是否已经取完。 */
+    historyReachedEnd?: boolean;
 }
 
 const NOVEL_MESSAGE_WINDOW_SIZE = 80;
+/** 铺满已加载部分后，每次回库多取多少条见面消息。 */
+const NOVEL_HISTORY_FETCH_STEP = 220;
 const NOVEL_MESSAGE_LOAD_STEP = 80;
 const REQUIRED_EMOTIONS_SET = ['normal', 'happy', 'angry', 'sad', 'shy'];
 
 const DateSession: React.FC<DateSessionProps> = ({ 
+    onLoadMoreHistory,
+    historyLoadLimit = 0,
+    historyReachedEnd = true,
     char, 
     userProfile,
     messages, 
@@ -901,12 +913,23 @@ const DateSession: React.FC<DateSessionProps> = ({
                                     </>
                                 );
                             })()}
-                            {hiddenNovelMessageCount > 0 && (
+                            {(hiddenNovelMessageCount > 0 || !historyReachedEnd) && (
                                 <div className="flex justify-center">
                                     <button
                                         onClick={(e) => {
                                             e.stopPropagation();
-                                            setNovelVisibleCount(count => count + NOVEL_MESSAGE_LOAD_STEP);
+                                            // 本地还有没显示的就只开窗；已经铺满则回库里取更早的一批，
+                                            // 否则初始窗口以外的见面记录在阅读模式里永远够不着。
+                                            const plan = planNovelLoadMore({
+                                                loadedCount: sessionMessages.length,
+                                                visibleCount: novelVisibleCount,
+                                                windowStep: NOVEL_MESSAGE_LOAD_STEP,
+                                                loadLimit: historyLoadLimit,
+                                                loadStep: NOVEL_HISTORY_FETCH_STEP,
+                                                reachedDbEnd: historyReachedEnd,
+                                            });
+                                            setNovelVisibleCount(plan.nextVisibleCount);
+                                            if (plan.nextLoadLimit !== null) void onLoadMoreHistory?.(plan.nextLoadLimit);
                                         }}
                                         className={`px-4 py-2 rounded-full text-xs font-bold border active:scale-95 transition-transform ${
                                             char.dateLightReading
@@ -914,7 +937,7 @@ const DateSession: React.FC<DateSessionProps> = ({
                                                 : 'bg-white/10 text-white/60 border-white/10'
                                         }`}
                                     >
-                                        加载更早见面记录 ({hiddenNovelMessageCount})
+                                        加载更早见面记录{hiddenNovelMessageCount > 0 ? ` (${hiddenNovelMessageCount})` : ''}
                                     </button>
                                 </div>
                             )}
