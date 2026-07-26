@@ -24,8 +24,6 @@
     "@capacitor/local-notifications": "^6.0.0",
     "@capacitor/share": "^6.0.0",
     "@capacitor/status-bar": "^6.0.0",
-    "@neondatabase/serverless": "^1.0.2",
-    "@netlify/functions": "^5.1.5",
     "@phosphor-icons/react": "^2.1.10",
     "@rei-standard/amsg-client": "2.9.0-next.4",
     "@rei-standard/amsg-instant": "0.10.0",
@@ -40,7 +38,7 @@
   },
   "devDependencies": {
     "@capacitor/cli": "^6.0.0",
-    "@rei-standard/amsg-server": "2.6.0-next.5",
+    "@rei-standard/amsg-server": "2.6.0-next.7",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^18.2.43",
     "@types/react-dom": "^18.2.17",

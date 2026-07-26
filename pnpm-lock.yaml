@@ -38,12 +38,6 @@ importers:
       '@capacitor/status-bar':
         specifier: ^6.0.0
         version: 6.0.3(@capacitor/core@6.2.1)
-      '@neondatabase/serverless':
-        specifier: ^1.0.2
-        version: 1.1.0
-      '@netlify/functions':
-        specifier: ^5.1.5
-        version: 5.2.1
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -82,8 +76,8 @@ importers:
         specifier: ^6.0.0
         version: 6.2.1
       '@rei-standard/amsg-server':
-        specifier: 2.6.0-next.5
-        version: 2.6.0-next.5(@neondatabase/serverless@1.1.0)
+        specifier: 2.6.0-next.7
+        version: 2.6.0-next.7
       '@types/qrcode':
         specifier: ^1.5.6
         version: 1.5.6
@@ -773,21 +767,9 @@ packages:
   '@jridgewell/trace-mapping@0.3.9':
     resolution: {integrity: sha512-3Belt6tdc8bPgAtbcmdtNJlirVoTmEb5e2gC94PnkwEW9jI6CAHUeoG85tjWP5WquqfavoMtMwiG4P926ZKKuQ==}
 
-  '@neondatabase/serverless@1.1.0':
-    resolution: {integrity: sha512-r3ZZhRjEcfEdKIZnoB1RusNgvHuaBRqfCzV4Gi+5A9yUX0S4HTws/ASWqt13wL4y4I+0rqsWGdA2w7EQXHi3+Q==}
-    engines: {node: '>=19.0.0'}
-
   '@netlify/blobs@8.2.0':
     resolution: {integrity: sha512-9djLZHBKsoKk8XCgwWSEPK9QnT8qqxEQGuYh48gFIcNLvpBKkLnHbDZuyUxmNemCfDz7h0HnMXgSPnnUVgARhg==}
     engines: {node: ^14.16.0 || >=16.0.0}
-
-  '@netlify/functions@5.2.1':
-    resolution: {integrity: sha512-F1CCXeWC/4E/mj8La38WwFJ6oyymTBeIWYO87nyjN0L8mvb0tugcMsu+V6QkUllMtnBezdM0ApCaY+eWGmnj+g==}
-    engines: {node: '>=18.0.0'}
-
-  '@netlify/types@2.6.0':
-    resolution: {integrity: sha512-yD20EizHJDQxajJ66Vo8RTwLwR2jMNVxufPG8MHd2AScX8jW4z0VPnnJHArq2GYPFTFZRHmiAhDrXr5m8zof6w==}
-    engines: {node: ^18.14.0 || >=20}
 
   '@phosphor-icons/react@2.1.10':
     resolution: {integrity: sha512-vt8Tvq8GLjheAZZYa+YG/pW7HDbov8El/MANW8pOAz4eGxrwhnbfrQZq0Cp4q8zBEu8NIhHdnr+r8thnfRSNYA==}
@@ -808,8 +790,8 @@ packages:
     resolution: {integrity: sha512-GsLzRvSXsp5cbJ/vNwQP+yHoZ4LJiilOvws0LemrzaFoG45ApQ7WW3YHux58DXdXOSN36prT5CsmipA3wUAmQQ==}
     engines: {node: '>=18'}
 
-  '@rei-standard/amsg-server@2.6.0-next.5':
-    resolution: {integrity: sha512-GLa8nke+Ee1fi8HKFYJ70SR4Oq6+w1+wSc+sW2CgLVINOa5QjcfN2WLe1NSGbNf7fzgadMHPVy1H1ows4vP1MQ==}
+  '@rei-standard/amsg-server@2.6.0-next.7':
+    resolution: {integrity: sha512-dhbsL41D3c17FALD4+ot9aD06RwUuqpQz1I7h8Mh7+U4UEOcnPgUDx+eZj5is91OnTNlwqO1dzjmAgTaxOeTLg==}
     engines: {node: '>=20'}
     peerDependencies:
       '@neondatabase/serverless': '>=0.9.0'
@@ -2508,15 +2490,7 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  '@neondatabase/serverless@1.1.0': {}
-
   '@netlify/blobs@8.2.0': {}
-
-  '@netlify/functions@5.2.1':
-    dependencies:
-      '@netlify/types': 2.6.0
-
-  '@netlify/types@2.6.0': {}
 
   '@phosphor-icons/react@2.1.10(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
     dependencies:
@@ -2535,13 +2509,11 @@ snapshots:
     dependencies:
       '@rei-standard/amsg-shared': 0.2.0
 
-  '@rei-standard/amsg-server@2.6.0-next.5(@neondatabase/serverless@1.1.0)':
+  '@rei-standard/amsg-server@2.6.0-next.7':
     dependencies:
       '@netlify/blobs': 8.2.0
       '@rei-standard/amsg-shared': 0.4.0-next.1
       web-push: 3.6.7
-    optionalDependencies:
-      '@neondatabase/serverless': 1.1.0
     transitivePeerDependencies:
       - supports-color
 
