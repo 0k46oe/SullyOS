@@ -15,7 +15,7 @@ function corsHeaders(origin) {
   return {
     "Access-Control-Allow-Origin": origin || "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, Depth, X-Brave-API-Key, X-Notion-API-Key, X-Feishu-Token, X-Xhs-Cookie, X-Rnote-API-Key, X-Netease-Cookie, X-WebDAV-Method, X-WebDAV-Depth, X-WebDAV-Range, X-GitHub-Method, X-GitHub-Api-Version, Mcp-Session-Id, Accept, Range",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, Depth, X-Brave-API-Key, X-Notion-API-Key, X-Feishu-Token, X-Xhs-Cookie, X-Rnote-API-Key, X-Xhs-Experiment-Ack, X-Netease-Cookie, X-WebDAV-Method, X-WebDAV-Depth, X-WebDAV-Range, X-GitHub-Method, X-GitHub-Api-Version, Mcp-Session-Id, Accept, Range",
     "Access-Control-Expose-Headers": "Mcp-Session-Id",
     "Access-Control-Max-Age": "86400",
   };
@@ -864,6 +864,26 @@ const XHSLite = (() => {
   const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0';
   const IMG_FORMATS = ['jpg', 'webp', 'avif'];
   const EDITH = 'https://edith.xiaohongshu.com', CREATOR = 'https://creator.xiaohongshu.com', WWW = 'https://www.xiaohongshu.com';
+  const SPIDER_V3 = Object.freeze({
+    schemaVersion: 1,
+    signVersion: '4.3.7',
+    webBuild: '6.32.2',
+    appId: 'xhs-pc-web',
+    platform: 'Windows',
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
+    secChUa: '"Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"',
+    envConst: 1352,
+    envFpTail: Object.freeze(hexToBytes('f9416767c9b581635e0744fa8415')),
+  });
+  const SPIDER_V3_STRATEGIES = new Set([
+    'no-client-hints',
+    'browser-hints',
+    'legacy-transport',
+  ]);
+  const SPIDER_V3_DSL_URL = 'https://as.xiaohongshu.com/api/sec/v1/ds?appId=xhs-pc-web';
+  const SPIDER_V3_DSL_TTL_MS = 5 * 60 * 1000;
+  const SPIDER_V3_DSLLT_REFRESH_MS = 15 * 60 * 1000;
+  let spiderV3DslCache = { value: '', expiresAt: 0 };
 
   const RNG = {
     randint(a, b) { return a + Math.floor(Math.random() * (b - a + 1)); },
@@ -1069,6 +1089,186 @@ const XHSLite = (() => {
     const xorResult = xorTransform(buildPayloadArray(dValue, mValue, a1Value, appId, contentString, timestampSec));
     const x3sig = encodeX3(xorResult.slice(0, PAYLOAD_LENGTH));
     return XYS_PREFIX + encodeCustomStr(jsonCompact({ ...SIGNATURE_DATA_TEMPLATE, x3: X3_PREFIX + x3sig }));
+  }
+
+  function randomUint32() {
+    const out = new Uint32Array(1);
+    crypto.getRandomValues(out);
+    return out[0] >>> 0;
+  }
+
+  async function sha256Prefix(value) {
+    const digest = await crypto.subtle.digest('SHA-256', utf8(String(value)));
+    return Array.from(new Uint8Array(digest).slice(0, 8), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  function finiteInteger(value, fallback, min, max) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(max, Math.max(min, Math.trunc(parsed)));
+  }
+
+  async function normalizeSpiderV3State(cookieDict, suppliedState, nowMs = Date.now()) {
+    const a1Tag = await sha256Prefix(cookieDict.a1);
+    const supplied = suppliedState && typeof suppliedState === 'object' ? suppliedState : {};
+    const suppliedLoadts = finiteInteger(supplied.loadts, 0, 1, Number.MAX_SAFE_INTEGER);
+    const reusable = supplied.version === SPIDER_V3.schemaVersion
+      && supplied.a1Tag === a1Tag
+      && suppliedLoadts > 0;
+    const cookieLoadts = /^\d{13}$/.test(cookieDict.loadts || '') ? Number(cookieDict.loadts) : 0;
+    const loadts = reusable
+      ? suppliedLoadts
+      : (cookieLoadts || (nowMs - RNG.randint(50, 200)));
+    const b1Seed = reusable
+      ? finiteInteger(supplied.b1Seed, randomUint32(), 0, 0xffffffff)
+      : randomUint32();
+    return {
+      version: SPIDER_V3.schemaVersion,
+      a1Tag,
+      loadts,
+      dsllt: reusable
+        ? finiteInteger(supplied.dsllt, loadts, 1, Number.MAX_SAFE_INTEGER)
+        : loadts,
+      mnsSeq: reusable ? finiteInteger(supplied.mnsSeq, 0, 0, 0x7fffffff) : 0,
+      signCount: reusable ? finiteInteger(supplied.signCount, 0, 0, 0x7fffffff) : 0,
+      b1Seed,
+      timeOrigin: reusable && Number.isFinite(Number(supplied.timeOrigin))
+        ? Number(supplied.timeOrigin)
+        : loadts - (700 + (b1Seed % 1600)),
+      webBuild: String(cookieDict.webBuild || supplied.webBuild || SPIDER_V3.webBuild),
+      reset: !reusable,
+    };
+  }
+
+  function spiderV3Telemetry(state) {
+    const seed = state.b1Seed >>> 0;
+    const mouseCount = 45 + (seed % 11);
+    const clickCount = 1 + ((seed >>> 5) % 3);
+    const focusCount = 3 + ((seed >>> 9) % 4);
+    const blurCount = Math.max(1, focusCount - 1);
+    return `{mt:{to:${state.timeOrigin}},m:{me:${mouseCount},mm:${mouseCount},md:${clickCount},mu:${clickCount},c:${clickCount}},k:{},p:{ulr:1,ps:1,f:${focusCount},b:${blurCount},vc:0,rs:1,sc:0},st:{h:0,f:1,kr:0},ft:{ae:3.3656015629507223,ak:6.231183732330187,cdr:0.4096814442007536,bf:{ar:0.6210873146622735,fr:7.158084478545331},fi:${2151.1 + (seed % 200) / 10}}}`;
+  }
+
+  function generateSpiderV3B1(state, nowMs) {
+    const seed = state.b1Seed >>> 0;
+    const mini = {
+      x33: '0',
+      x34: '0',
+      x35: '0',
+      x36: String(2 + (seed % 3)),
+      x37: '0|0|0|0|0|0|0|0|0|1|0|0|1|0|0|0|0|1|1|0|0|0|0|0',
+      x38: '0|0|1|0|1|0|0|0|0|0|1|0|1|0|1|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0',
+      x39: String(21 + ((seed >>> 4) % 3)),
+      x42: '3.5.4',
+      x43: 'Canvas not supported',
+      x44: String(nowMs),
+      x45: '__SEC_CAV__1-1-1-1-1|',
+      x46: 'false',
+      x48: '',
+      x49: '{list:[],type:}',
+      x50: '131,88,103',
+      x51: '',
+      x52: '',
+      x82: '1|_BHjFmfUMEtxhI|_AUuXfEG27Xa3x|__xhsPendingNotePoint25300ReportMap|__xhsReportedNotePoint25300RecordMap|setImDebugMode|anti_hp_sign_config|__rap_app_id__|__rap_report__|__rap_last_sign_cost__|__rap_last_transform_cost__|__rap_hijack_installed__|__ed1a7dddf7c818e4bd',
+      x84: spiderV3Telemetry(state),
+    };
+    const cipher = rc4(utf8(B1_SECRET_KEY), utf8(jsonCompact(mini)));
+    let binary = '';
+    for (const byte of cipher) binary += String.fromCharCode(byte);
+    return encodeCustom(utf8(binary));
+  }
+
+  function buildSpiderV3Payload(api, a1Value, context) {
+    const a1Bytes = Array.from(utf8(a1Value));
+    if (a1Bytes.length !== A1_LENGTH) {
+      throw new Error(`Spider v3 requires a ${A1_LENGTH}-byte a1 cookie`);
+    }
+    const appBytes = Array.from(utf8(SPIDER_V3.appId));
+    const version = context.version >>> 0;
+    const versionByte = version & 0xff;
+    const timestampBytes = intToLeBytes(context.now, 8);
+    const md5Full = hexToBytes(md5Hex(api));
+    const md5Api = hexToBytes(md5Hex(api));
+    const dsSignature = customHashV2([...timestampBytes, ...md5Api]);
+    const payload = [
+      ...VERSION_BYTES,
+      ...intToLeBytes(version, 4),
+      ...timestampBytes,
+      ...intToLeBytes(context.loadts, 8),
+      ...intToLeBytes(context.seq, 4),
+      ...intToLeBytes(SPIDER_V3.envConst, 4),
+      ...intToLeBytes(utf8(api).length, 4),
+      ...md5Full.slice(0, 8).map((byte) => byte ^ versionByte),
+      a1Bytes.length,
+      ...a1Bytes,
+      appBytes.length,
+      ...appBytes,
+      1,
+      versionByte ^ 115,
+      ...SPIDER_V3.envFpTail,
+      2,
+      97,
+      51,
+      16,
+      ...dsSignature.map((byte) => byte ^ versionByte),
+    ];
+    if (payload.length !== PAYLOAD_LENGTH) {
+      throw new Error(`Spider v3 MNS payload length mismatch: ${payload.length}`);
+    }
+    return payload;
+  }
+
+  function signSpiderV3Comment(api, cookieDict, state, dsl, options = {}) {
+    const nextState = { ...state };
+    nextState.mnsSeq += 1;
+    nextState.signCount += 1;
+    const now = finiteInteger(options.now, Date.now(), 1, Number.MAX_SAFE_INTEGER);
+    if (now - nextState.dsllt >= SPIDER_V3_DSLLT_REFRESH_MS) nextState.dsllt = now;
+    const context = {
+      now,
+      loadts: nextState.loadts,
+      seq: nextState.mnsSeq,
+      version: options.version == null ? randomUint32() : Number(options.version) >>> 0,
+    };
+    const x3 = X3_PREFIX + encodeX3(xorTransform(buildSpiderV3Payload(api, cookieDict.a1, context)));
+    const xs = XYS_PREFIX + encodeCustomStr(jsonCompact({
+      x0: SPIDER_V3.signVersion,
+      x1: SPIDER_V3.appId,
+      x2: SPIDER_V3.platform,
+      x3,
+      x4: '',
+    }));
+    const xt = String(now);
+    const b1 = generateSpiderV3B1(nextState, now);
+    const xsCommon = encodeCustomStr(jsonCompact({
+      s0: 5,
+      s1: '',
+      x0: '1',
+      x1: SPIDER_V3.signVersion,
+      x2: SPIDER_V3.platform,
+      x3: SPIDER_V3.appId,
+      x4: nextState.webBuild,
+      x5: cookieDict.a1,
+      x6: '',
+      x7: '',
+      x8: b1,
+      x9: crc32JsInt(b1),
+      x10: nextState.signCount,
+      x11: 'normal',
+      x12: `${nextState.dsllt};${dsl}`,
+    }));
+    delete nextState.reset;
+    return {
+      state: nextState,
+      headers: {
+        'x-s': xs,
+        'x-t': xt,
+        'x-s-common': xsCommon,
+        'x-b3-traceid': b3TraceId(),
+        'x-xray-traceid': xrayTraceId(now),
+      },
+      debug: { x3Prefix: x3.slice(0, 12), x3Length: x3.length, b1Length: b1.length },
+    };
   }
 
   function bytesToBase64(bytes) {
@@ -1428,6 +1628,171 @@ const XHSLite = (() => {
     }
     return data;
   }
+  async function fetchSpiderV3Dsl(nowMs = Date.now()) {
+    if (spiderV3DslCache.value && spiderV3DslCache.expiresAt > nowMs) {
+      return spiderV3DslCache.value;
+    }
+    try {
+      const response = await fetch(SPIDER_V3_DSL_URL, {
+        method: 'GET',
+        headers: {
+          accept: '*/*',
+          referer: WWW + '/',
+          'user-agent': SPIDER_V3.userAgent,
+        },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const source = await response.text();
+      const match = source.match(/function\s+getdss\s*\(\s*\)\s*\{\s*return\s*['"](\d{13})['"]/);
+      if (!match) throw new Error('getdss timestamp was not found');
+      spiderV3DslCache = { value: match[1], expiresAt: nowMs + SPIDER_V3_DSL_TTL_MS };
+      return match[1];
+    } catch (error) {
+      if (spiderV3DslCache.value) return spiderV3DslCache.value;
+      throw new Error(`Spider v3 DSL unavailable: ${error?.message || error}`);
+    }
+  }
+
+  function spiderV3RequestHeaders(cookieStr, strategy, signedHeaders) {
+    const headers = {
+      accept: 'application/json, text/plain, */*',
+      'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      origin: WWW,
+      referer: WWW + '/',
+      priority: 'u=1, i',
+      'user-agent': SPIDER_V3.userAgent,
+      'sec-fetch-dest': 'empty',
+      'sec-fetch-mode': 'cors',
+      'sec-fetch-site': 'same-site',
+      cookie: cookieStr,
+      ...signedHeaders,
+    };
+    if (strategy === 'browser-hints' || strategy === 'legacy-transport') {
+      headers['sec-ch-ua'] = SPIDER_V3.secChUa;
+      headers['sec-ch-ua-mobile'] = '?0';
+      headers['sec-ch-ua-platform'] = '"Windows"';
+    }
+    if (strategy === 'legacy-transport') headers['x-mns'] = 'unload';
+    return headers;
+  }
+
+  async function experimentalComments(cookieStr, body) {
+    const strategy = String(body.strategy || 'no-client-hints');
+    if (!SPIDER_V3_STRATEGIES.has(strategy)) {
+      return {
+        success: false,
+        error: `Unknown Spider v3 strategy: ${strategy}`,
+        error_code: 'XHS_EXPERIMENT_INVALID_STRATEGY',
+        allowed_strategies: Array.from(SPIDER_V3_STRATEGIES),
+      };
+    }
+    const noteId = String(body.feed_id || body.note_id || '').trim();
+    if (!noteId) {
+      return {
+        success: false,
+        error: 'feed_id is required',
+        error_code: 'XHS_EXPERIMENT_MISSING_FEED_ID',
+      };
+    }
+    const cookieDict = parseCookies(cookieStr);
+    const now = Date.now();
+    const state = await normalizeSpiderV3State(cookieDict, body.session_state, now);
+    const stateWasReset = state.reset;
+    let dsl;
+    try {
+      dsl = await fetchSpiderV3Dsl(now);
+    } catch (error) {
+      const sessionState = { ...state };
+      delete sessionState.reset;
+      return {
+        success: false,
+        error: error?.message || String(error),
+        error_code: 'XHS_EXPERIMENT_DSL_UNAVAILABLE',
+        upstream_requests: { dsl: 1, comments: 0 },
+        retry_performed: false,
+        session_state: sessionState,
+      };
+    }
+    const params = {
+      note_id: noteId,
+      cursor: String(body.cursor || ''),
+      top_comment_id: String(body.top_comment_id || ''),
+      image_formats: 'jpg,webp,avif',
+      xsec_token: String(body.xsec_token || ''),
+    };
+    const uri = '/api/sns/web/v2/comment/page';
+    const api = `${uri}?${buildSignedQuery(params)}`;
+    const signed = signSpiderV3Comment(api, cookieDict, state, dsl);
+    const experiment = {
+      name: 'spider-session-v3',
+      strategy,
+      state_reset: stateWasReset,
+      retry_performed: false,
+      signature: signed.debug,
+    };
+    if (body.dry_run === true) {
+      return {
+        success: true,
+        dry_run: true,
+        experiment,
+        upstream_requests: { dsl: 1, comments: 0 },
+        session_state: signed.state,
+      };
+    }
+    const response = await fetch(EDITH + api, {
+      method: 'GET',
+      headers: spiderV3RequestHeaders(cookieStr, strategy, signed.headers),
+    });
+    let raw;
+    try {
+      raw = await response.json();
+    } catch {
+      raw = { success: false, msg: `HTTP ${response.status} returned a non-JSON response` };
+    }
+    if (response.status === 406) {
+      return {
+        success: false,
+        error: raw?.msg || 'XHS rejected the isolated comment request with HTTP 406',
+        error_code: 'XHS_EXPERIMENT_HTTP_406',
+        http_status: 406,
+        circuit_open: true,
+        retry_performed: false,
+        upstream_requests: { dsl: 1, comments: 1 },
+        experiment,
+        session_state: signed.state,
+      };
+    }
+    if (!response.ok || raw?.success === false) {
+      return {
+        success: false,
+        error: raw?.msg || `XHS comment request failed with HTTP ${response.status}`,
+        error_code: 'XHS_EXPERIMENT_UPSTREAM_REJECTED',
+        http_status: response.status,
+        circuit_open: false,
+        retry_performed: false,
+        upstream_requests: { dsl: 1, comments: 1 },
+        experiment,
+        session_state: signed.state,
+      };
+    }
+    const comments = Array.isArray(raw?.data?.comments) ? raw.data.comments.map(normComment) : [];
+    return {
+      success: true,
+      data: {
+        comments: {
+          list: comments,
+          cursor: raw?.data?.cursor || '',
+          has_more: !!raw?.data?.has_more,
+        },
+        comments_status: 'loaded',
+        comments_provider: 'spider-session-v3',
+      },
+      upstream_requests: { dsl: 1, comments: 1 },
+      experiment,
+      session_state: signed.state,
+    };
+  }
+
   async function signedGet(base, uri, params, cookieStr, ck, extraHeaders = {}, signFormat = 'xys') {
     const query = buildSignedQuery(params);
     const sig = await signHeaders('GET', uri, ck, { params: params || {}, signFormat });
@@ -1820,6 +2185,7 @@ const XHSLite = (() => {
         env,
         requestRnoteApiKey: requestContext.rnoteApiKey,
       });
+      case 'xhs-experimental-comments': return experimentalComments(cookie, body);
       case 'post-comment': return postComment(cookie, body.feed_id, body.content, { xsecToken: body.xsec_token });
       case 'reply-comment': return postComment(cookie, body.feed_id, body.content, { targetCommentId: body.comment_id, xsecToken: body.xsec_token });
       case 'like-feed': return likeFeed(cookie, body.feed_id, !!body.unlike);
@@ -1844,6 +2210,13 @@ const XHSLite = (() => {
       signXsCommon,
       generateB1,
       xRapParam,
+      spiderV3: {
+        normalizeState: normalizeSpiderV3State,
+        signComment: signSpiderV3Comment,
+        generateB1: generateSpiderV3B1,
+        parseCookies,
+        resetDslCache() { spiderV3DslCache = { value: '', expiresAt: 0 }; },
+      },
       _internals: { md5Hex, encodeCustomStr, crc32JsInt, xrapEncryptBlock, xrapXxh32 },
     },
   };
@@ -1873,6 +2246,18 @@ export default {
       }
       let body = {};
       if (request.method === 'POST') { try { body = await request.json(); } catch (e) { /* allow empty */ } }
+      if (
+        command === 'xhs-experimental-comments'
+        && (
+          request.headers.get('x-xhs-experiment-ack') !== 'spider-v3-isolated-cookie'
+          || body.acknowledge_risk !== true
+        )
+      ) {
+        return jsonResponse({
+          error: 'Spider v3 is an isolated experiment and requires explicit risk acknowledgement.',
+          hint: 'Use a disposable test cookie; the normal Lite path never calls this endpoint.',
+        }, { status: 403, origin });
+      }
       const cookie = request.headers.get('x-xhs-cookie') || body.cookie || (env && env.XHS_COOKIE) || '';
       if (!cookie) return jsonResponse({ error: '未配置 cookie。请在 SullyOS 设置里粘贴小红书 cookie。' }, { status: 401, origin });
       if (!cookie.includes('a1=')) return jsonResponse({ error: 'cookie 缺少 a1 字段，请复制完整的小红书 cookie。' }, { status: 400, origin });
@@ -1881,7 +2266,9 @@ export default {
           rnoteApiKey: request.headers.get('x-rnote-api-key') || '',
         });
         if (result === null) return jsonResponse({ error: `Unknown command: ${command}` }, { status: 404, origin });
-        return jsonResponse(result, { origin });
+        const response = jsonResponse(result, { origin });
+        if (command === 'xhs-experimental-comments') response.headers.set('Cache-Control', 'no-store');
+        return response;
       } catch (e) {
         return jsonResponse({ error: e.message || String(e) }, { status: 500, origin });
       }

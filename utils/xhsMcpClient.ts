@@ -15,6 +15,13 @@ export interface McpToolResult {
     data?: any;
     error?: string;
 }
+export const XHS_SPIDER_V3_EXPERIMENT = Object.freeze({
+    optInValue: 'spider-v3-isolated-cookie',
+    strategyKey: 'os_xhs_spider_v3_strategy',
+    sessionKey: 'os_xhs_spider_v3_session',
+    circuitKey: 'os_xhs_spider_v3_circuit',
+});
+
 
 // ==================== Backend Detection ====================
 
@@ -28,7 +35,6 @@ const detectMode = (serverUrl: string): BackendMode => {
 // Lite-Worker cookie: set from settings, sent as x-xhs-cookie on bridge calls.
 // Local Bridge/Skills servers ignore the header; the cloud Worker requires it.
 let liteCookie = '';
-let rnoteApiKey = '';
 
 // Resolve the XHS cookie for bridge requests: prefer the explicitly-set value,
 // otherwise read it straight from persisted realtime config. This keeps chat-
@@ -42,13 +48,127 @@ const resolveLiteCookie = (): string => {
     return '';
 };
 
-const resolveRnoteApiKey = (): string => {
-    if (rnoteApiKey) return rnoteApiKey;
+
+const spiderStorage = (): Storage | null => {
     try {
-        const raw = localStorage.getItem('os_realtime_config');
-        if (raw) return JSON.parse(raw)?.xhsMcpConfig?.rnoteApiKey || '';
+        return typeof localStorage === 'undefined' ? null : localStorage;
+    } catch {
+        return null;
+    }
+};
+
+const readSpiderJson = (key: string): any => {
+    try {
+        const raw = spiderStorage()?.getItem(key);
+        return raw ? JSON.parse(raw) : null;
+    } catch {
+        return null;
+    }
+};
+
+const writeSpiderJson = (key: string, value: any): void => {
+    try {
+        spiderStorage()?.setItem(key, JSON.stringify(value));
+    } catch { /* localStorage unavailable or full */ }
+};
+
+const removeSpiderValue = (key: string): void => {
+    try {
+        spiderStorage()?.removeItem(key);
     } catch { /* ignore */ }
-    return '';
+};
+
+const spiderCookieTag = async (cookie: string): Promise<string> => {
+    const a1 = cookie.match(/(?:^|;\s*)a1=([^;]+)/)?.[1] || '';
+    if (!a1) return '';
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(a1));
+    return Array.from(new Uint8Array(digest).slice(0, 8), byte => byte.toString(16).padStart(2, '0')).join('');
+};
+
+const withSpiderCircuitError = (detail: any, message: string): any => ({
+    ...detail,
+    data: {
+        ...(detail?.data || {}),
+        comments_status: 'unavailable',
+        comments_error: {
+            code: 'SPIDER_V3_CIRCUIT_OPEN',
+            message,
+        },
+    },
+});
+
+const trySpiderV3CommentPatch = async (
+    baseUrl: string,
+    requestBody: Record<string, any>,
+    cookie: string,
+    detail: any,
+): Promise<any> => {
+    const storage = spiderStorage();
+    if (
+        !storage
+        || detail?.data?.comments_status === 'loaded'
+    ) {
+        return detail;
+    }
+
+    const a1Tag = await spiderCookieTag(cookie);
+    if (!a1Tag) return detail;
+    let sessionState = readSpiderJson(XHS_SPIDER_V3_EXPERIMENT.sessionKey);
+    if (sessionState?.a1Tag !== a1Tag) {
+        sessionState = null;
+        removeSpiderValue(XHS_SPIDER_V3_EXPERIMENT.sessionKey);
+        removeSpiderValue(XHS_SPIDER_V3_EXPERIMENT.circuitKey);
+    }
+    const circuit = readSpiderJson(XHS_SPIDER_V3_EXPERIMENT.circuitKey);
+    if (circuit?.a1Tag === a1Tag) {
+        return withSpiderCircuitError(detail, 'Spider v3 received HTTP 406 earlier and is circuit-broken for this cookie.');
+    }
+
+    const requestedStrategy = storage.getItem(XHS_SPIDER_V3_EXPERIMENT.strategyKey) || 'no-client-hints';
+    const strategy = ['no-client-hints', 'browser-hints', 'legacy-transport'].includes(requestedStrategy)
+        ? requestedStrategy
+        : 'no-client-hints';
+    try {
+        const response = await fetch(`${baseUrl}/api/xhs-experimental-comments`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-xhs-cookie': cookie,
+                'x-xhs-experiment-ack': XHS_SPIDER_V3_EXPERIMENT.optInValue,
+            },
+            body: JSON.stringify({
+                acknowledge_risk: true,
+                feed_id: requestBody.feed_id,
+                xsec_token: requestBody.xsec_token || '',
+                strategy,
+                session_state: sessionState || undefined,
+            }),
+        });
+        const experiment = await response.json().catch(() => null);
+        if (experiment?.session_state) {
+            writeSpiderJson(XHS_SPIDER_V3_EXPERIMENT.sessionKey, experiment.session_state);
+        }
+        if (experiment?.error_code === 'XHS_EXPERIMENT_HTTP_406') {
+            writeSpiderJson(XHS_SPIDER_V3_EXPERIMENT.circuitKey, {
+                a1Tag,
+                openedAt: Date.now(),
+                reason: experiment.error_code,
+            });
+            return withSpiderCircuitError(detail, 'Spider v3 was rejected with HTTP 406; automatic comment attempts are now stopped.');
+        }
+        if (!response.ok || !experiment?.success || !experiment?.data) return detail;
+        removeSpiderValue(XHS_SPIDER_V3_EXPERIMENT.circuitKey);
+        return {
+            ...detail,
+            data: {
+                ...(detail?.data || {}),
+                ...experiment.data,
+                comments_error: undefined,
+            },
+        };
+    } catch {
+        return detail;
+    }
 };
 
 // ==================== Bridge Mode (REST) ====================
@@ -64,10 +184,6 @@ const bridgePost = async (
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const ck = resolveLiteCookie();
     if (ck) headers['x-xhs-cookie'] = ck;
-    if (endpoint === 'get-feed-detail') {
-        const key = resolveRnoteApiKey();
-        if (key) headers['x-rnote-api-key'] = key;
-    }
 
     try {
         const resp = await fetch(url, {
@@ -85,9 +201,12 @@ const bridgePost = async (
             return { success: false, error: errData.error || `HTTP ${resp.status}` };
         }
 
-        const data = await resp.json();
+        let data = await resp.json();
         if (data.error) {
             return { success: false, error: data.error };
+        }
+        if (endpoint === 'get-feed-detail' && ck) {
+            data = await trySpiderV3CommentPatch(baseUrl, body, ck, data);
         }
         return { success: true, data };
     } catch (e: any) {
@@ -389,14 +508,9 @@ export const XhsMcpClient = {
         liteCookie = cookie || '';
     },
 
-    // Rnote Key stays in local config and is forwarded only on detail requests.
-    setRnoteApiKey: (apiKey?: string) => {
-        rnoteApiKey = apiKey || '';
-    },
 
-    testConnection: async (serverUrl: string, cookie?: string, userRnoteApiKey?: string): Promise<{ connected: boolean; tools?: string[]; error?: string; nickname?: string; userId?: string; loggedIn?: boolean; xsecToken?: string }> => {
+    testConnection: async (serverUrl: string, cookie?: string): Promise<{ connected: boolean; tools?: string[]; error?: string; nickname?: string; userId?: string; loggedIn?: boolean; xsecToken?: string }> => {
         if (cookie !== undefined) liteCookie = cookie;
-        if (userRnoteApiKey !== undefined) rnoteApiKey = userRnoteApiKey;
         const mode = detectMode(serverUrl);
 
         if (mode === 'bridge') {

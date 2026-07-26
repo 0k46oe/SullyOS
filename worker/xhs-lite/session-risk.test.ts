@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import worker from '../index.js';
+// @ts-expect-error The deployed Worker entry is intentionally plain runtime JavaScript.
+import worker, { __xhsLiteTest } from '../index.js';
 
 const COOKIE = `a1=${'a'.repeat(52)}; web_session=test-session`;
 
@@ -22,9 +23,28 @@ const callLite = (
     env,
     { waitUntil() {} },
   );
+const callExperiment = (
+  body: Record<string, unknown>,
+  ack = 'spider-v3-isolated-cookie',
+) =>
+  worker.fetch(
+    new Request('https://local.test/api/xhs-experimental-comments', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-xhs-cookie': COOKIE,
+        ...(ack ? { 'x-xhs-experiment-ack': ack } : {}),
+      },
+      body: JSON.stringify(body),
+    }),
+    {},
+    { waitUntil() {} },
+  );
+
 
 afterEach(() => {
   vi.restoreAllMocks();
+  __xhsLiteTest.spiderV3.resetDslCache();
 });
 
 describe('XHS Lite session-risk headers', () => {
@@ -179,5 +199,190 @@ describe('XHS Lite session-risk headers', () => {
     expect(body.data.comments_status).toBe('loaded');
     expect(body.data.comments_provider).toBe('rnote');
     expect(body.data.comments.list[0].content).toBe('用户 Key 读取的真实评论');
+  });
+});
+describe('XHS Spider session v3 isolated experiment', () => {
+  it('requires both the private acknowledgement header and body flag', async () => {
+    const upstream = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('must not fetch'));
+
+    const response = await callExperiment({ feed_id: 'note-id' }, '');
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get('cache-control')).toBeNull();
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('uses a client-owned stable session and the safe no-client-hints strategy by default', async () => {
+    const upstream = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.startsWith('https://as.xiaohongshu.com/api/sec/v1/ds')) {
+        return new Response("function getdss(){return '1785079000000';}");
+      }
+      if (url.includes('/api/sns/web/v2/comment/page')) {
+        return new Response(JSON.stringify({
+          success: true,
+          data: {
+            comments: [{
+              id: 'comment-1',
+              content: 'real comment',
+              user_info: { user_id: 'user-1', nickname: 'reader' },
+            }],
+            cursor: 'next',
+            has_more: true,
+          },
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    const first = await callExperiment({
+      acknowledge_risk: true,
+      feed_id: 'note-id',
+      xsec_token: 'token',
+    });
+
+    expect(first.status).toBe(200);
+    expect(first.headers.get('cache-control')).toBe('no-store');
+    expect(upstream).toHaveBeenCalledTimes(2);
+    const [commentUrl, commentInit] = upstream.mock.calls[1];
+    const headers = new Headers(commentInit?.headers);
+    expect(String(commentUrl)).toContain('/api/sns/web/v2/comment/page?note_id=note-id');
+    expect(headers.get('x-s')).toMatch(/^XYS_/);
+    expect(headers.get('x-s-common')).toBeTruthy();
+    expect(headers.get('x-t')).toMatch(/^\d{13}$/);
+    expect(headers.get('user-agent')).toContain('Chrome/150.0.0.0');
+    expect(headers.has('sec-ch-ua')).toBe(false);
+    expect(headers.has('sec-ch-ua-mobile')).toBe(false);
+    expect(headers.has('sec-ch-ua-platform')).toBe(false);
+    expect(headers.has('x-mns')).toBe(false);
+
+    const firstBody = await first.json();
+    expect(firstBody.success).toBe(true);
+    expect(firstBody.data.comments_provider).toBe('spider-session-v3');
+    expect(firstBody.data.comments.list[0]).toEqual(expect.objectContaining({
+      comment_id: 'comment-1',
+      content: 'real comment',
+      nickname: 'reader',
+    }));
+    expect(firstBody.session_state).toEqual(expect.objectContaining({
+      version: 1,
+      mnsSeq: 1,
+      signCount: 1,
+      webBuild: '6.32.2',
+    }));
+    expect(firstBody.session_state).not.toHaveProperty('cookie');
+    expect(firstBody.session_state).not.toHaveProperty('a1');
+
+    const second = await callExperiment({
+      acknowledge_risk: true,
+      feed_id: 'note-id',
+      xsec_token: 'token',
+      session_state: firstBody.session_state,
+    });
+    const secondBody = await second.json();
+
+    expect(upstream).toHaveBeenCalledTimes(3);
+    expect(secondBody.session_state.a1Tag).toBe(firstBody.session_state.a1Tag);
+    expect(secondBody.session_state.loadts).toBe(firstBody.session_state.loadts);
+    expect(secondBody.session_state.mnsSeq).toBe(2);
+    expect(secondBody.session_state.signCount).toBe(2);
+  });
+
+  it('opens the circuit on the first HTTP 406 and never retries comments', async () => {
+    const upstream = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith('https://as.xiaohongshu.com/api/sec/v1/ds')) {
+        return new Response("function getdss(){return '1785079000000';}");
+      }
+      if (url.includes('/api/sns/web/v2/comment/page')) {
+        return new Response(JSON.stringify({ success: false, msg: 'blocked' }), {
+          status: 406,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    const response = await callExperiment({
+      acknowledge_risk: true,
+      feed_id: 'note-id',
+      xsec_token: 'token',
+    });
+    const body = await response.json();
+
+    expect(upstream).toHaveBeenCalledTimes(2);
+    expect(body.success).toBe(false);
+    expect(body.error_code).toBe('XHS_EXPERIMENT_HTTP_406');
+    expect(body.circuit_open).toBe(true);
+    expect(body.retry_performed).toBe(false);
+    expect(body.upstream_requests.comments).toBe(1);
+  });
+
+  it('keeps browser-hints and legacy transport as explicit one-shot A/B strategies', async () => {
+    const upstream = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith('https://as.xiaohongshu.com/api/sec/v1/ds')) {
+        return new Response("function getdss(){return '1785079000000';}");
+      }
+      return new Response(JSON.stringify({
+        success: true,
+        data: { comments: [], cursor: '', has_more: false },
+      }), { headers: { 'content-type': 'application/json' } });
+    });
+
+    const browserHints = await callExperiment({
+      acknowledge_risk: true,
+      feed_id: 'note-id',
+      strategy: 'browser-hints',
+    });
+    const browserBody = await browserHints.json();
+    const browserHeaders = new Headers(upstream.mock.calls[1][1]?.headers);
+    expect(browserHeaders.get('sec-ch-ua')).toContain('Chromium');
+    expect(browserHeaders.has('x-mns')).toBe(false);
+
+    await callExperiment({
+      acknowledge_risk: true,
+      feed_id: 'note-id',
+      strategy: 'legacy-transport',
+      session_state: browserBody.session_state,
+    });
+    const legacyHeaders = new Headers(upstream.mock.calls[2][1]?.headers);
+    expect(legacyHeaders.get('sec-ch-ua')).toContain('Chromium');
+    expect(legacyHeaders.get('x-mns')).toBe('unload');
+    expect(upstream).toHaveBeenCalledTimes(3);
+  });
+
+  it('matches the verified Spider_XHS 4.3.7 fixed signing vector', async () => {
+    const a1 = 'a'.repeat(52);
+    const api = '/api/sns/web/v2/comment/page?note_id=note-id&cursor=&top_comment_id=&image_formats=jpg%2Cwebp%2Cavif&xsec_token=token';
+    const state = {
+      version: 1,
+      a1Tag: 'unused',
+      loadts: 1785079999000,
+      dsllt: 1785079999000,
+      mnsSeq: 0,
+      signCount: 0,
+      b1Seed: 123456789,
+      timeOrigin: 1785079998000,
+      webBuild: '6.32.2',
+    };
+    const signed = __xhsLiteTest.spiderV3.signComment(
+      api,
+      { a1 },
+      state,
+      '1785079000000',
+      { now: 1785080000123, version: 0x12345678 },
+    );
+    const vector = new TextEncoder().encode(
+      `${signed.headers['x-s']}\n${signed.headers['x-s-common']}`,
+    );
+    const digest = await crypto.subtle.digest('SHA-256', vector);
+    const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+
+    expect(signed.debug).toEqual(expect.objectContaining({
+      x3Prefix: 'mns0301_gRaK',
+      x3Length: 200,
+    }));
+    expect(hash).toBe('dbefc44eb80b9dba04fd427e93a4bdae0065cbec907a4fee4d91fe63c6f25b70');
   });
 });
