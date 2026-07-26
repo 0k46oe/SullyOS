@@ -35,6 +35,16 @@ export const tzLabel = (tz: string): string =>
     COMMON_TIMEZONES.find(t => t.id === tz)?.label || tz;
 
 /**
+ * 时区 id → 一个词的地名，给界面上空间紧张的地方用（如日程卡的时钟角标）。
+ * 「纽约 / 多伦多 (UTC-5/-4)」→「纽约」；不在清单里就取 IANA id 的末段。
+ */
+export const tzShortLabel = (tz: string): string => {
+    const label = COMMON_TIMEZONES.find(t => t.id === tz)?.label;
+    if (label) return label.split('/')[0].replace(/\s*\(.*$/, '').trim();
+    return tz.split('/').pop()?.replace(/_/g, ' ') || tz;
+};
+
+/**
  * 返回一个「本地 getter（getHours/getMinutes/getDay/getFullYear…）读出来正好是 `tz`
  * 当地墙上时间」的 Date。tz 为空或非法时，原样返回 base（本机时间）。
  * 这样所有现有用 new Date().getHours() 之类读取的代码都不用改读取方式，只换一下这个源。
