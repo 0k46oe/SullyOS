@@ -11,6 +11,7 @@ import { FISH_VOICE_ACTING_GUIDE, synthesizeSpeechFishDetailed, resolveFishAudio
 import { resolveTtsProvider, getTtsProvider, getVoicePromptOverride } from '../utils/ttsProvider';
 import { startStt, isSttSupported, type SttSession } from '../utils/speechToText';
 import { ContextBuilder } from '../utils/context';
+import { resolveCharTimeZone } from '../utils/timezone';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { RealtimeContextManager } from '../utils/realtimeContext';
 import { DB } from '../utils/db';
@@ -185,10 +186,11 @@ const renderAssistantLine = (text: string, accent = '#8b5cf6') => {
     return <React.Fragment key={`t-${idx}`}>{part}</React.Fragment>;
   });
 };
-const buildCallPrompt = (userName: string, charName?: string, coreContext?: string, voiceLang?: string) => {
+const buildCallPrompt = (userName: string, charName?: string, coreContext?: string, voiceLang?: string, tz?: string) => {
   const resolvedCharName = charName || '你的角色';
-  const time = RealtimeContextManager.getTimeContext();
-  const specialDates = RealtimeContextManager.checkSpecialDates();
+  // 电话里角色说的「现在几点 / 今天什么日子」是 ta 那边的时间，跟角色自定义时区走
+  const time = RealtimeContextManager.getTimeContext(tz);
+  const specialDates = RealtimeContextManager.checkSpecialDates(tz);
   const timeContext = [
     `【当前时间】${time.dateStr} ${time.dayOfWeek} ${time.timeOfDay} ${time.timeStr}`,
     specialDates.length ? `【今日特殊】${specialDates.join('、')}` : '',
@@ -723,7 +725,7 @@ const CallApp: React.FC = () => {
       await injectMemoryPalace(selectedChar, callMsgs);
     }
     const systemPrompt = selectedChar
-      ? buildCallPrompt(userName, selectedChar.name, ContextBuilder.buildCoreContext(selectedChar, userProfile, true), voiceLang || undefined)
+      ? buildCallPrompt(userName, selectedChar.name, ContextBuilder.buildCoreContext(selectedChar, userProfile, true), voiceLang || undefined, resolveCharTimeZone(selectedChar))
       : buildCallPrompt(userName, undefined, undefined, voiceLang || undefined);
     const messages = await buildHistoryMessages(input, skipDbId);
     const chatData = await safeFetchJson(`${baseUrl}/chat/completions`, {
