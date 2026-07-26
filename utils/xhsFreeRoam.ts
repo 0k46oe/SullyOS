@@ -12,6 +12,7 @@
 
 import { CharacterProfile, UserProfile, XhsActivityRecord, XhsFreeRoamSession, APIConfig, RealtimeConfig } from '../types';
 import { ContextBuilder } from './context';
+import { nowInTimeZone, resolveCharTimeZone } from './timezone';
 import {
     XhsMcpClient,
     McpToolResult,
@@ -107,7 +108,10 @@ const buildFreeRoamSystemPrompt = (
 ): string => {
     // 加载完整上下文（含详细记忆和心情标签），让角色在自由活动时保持情感连贯
     const coreContext = ContextBuilder.buildCoreContext(char, user, true);
-    const now = new Date();
+    // 自由活动是角色自己在刷手机，「现在几点」得跟 ta 那边的钟——
+    // coreContext 顶部注入的当前时间已按角色时区折算，这里再用设备时间就会自相矛盾。
+    const charTz = resolveCharTimeZone(char);
+    const now = nowInTimeZone(charTz);
     const timeStr = `${now.getFullYear()}-${(now.getMonth()+1).toString().padStart(2,'0')}-${now.getDate().toString().padStart(2,'0')} ${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
     const hour = now.getHours();
     const timeOfDay = hour < 6 ? '深夜' : hour < 9 ? '清晨' : hour < 12 ? '上午' : hour < 14 ? '中午' : hour < 18 ? '下午' : hour < 22 ? '晚上' : '深夜';
@@ -115,7 +119,8 @@ const buildFreeRoamSystemPrompt = (
     let pastStr = '暂无活动记录。';
     if (pastActivities.length > 0) {
         pastStr = pastActivities.slice(-5).map(a => {
-            const d = new Date(a.timestamp);
+            // 历史活动也报角色当地的钟点，跟上面的「现在」同一把尺子
+            const d = nowInTimeZone(charTz, new Date(a.timestamp));
             const ts = `${d.getMonth()+1}/${d.getDate()} ${d.getHours()}:${d.getMinutes().toString().padStart(2,'0')}`;
             const actionLabel = { post: '发帖', browse: '刷首页', search: '搜索', comment: '评论', save_topic: '收藏话题', idle: '休息' }[a.actionType];
             return `[${ts}] ${actionLabel}: ${a.content.title || a.content.keyword || a.content.body || '无'} (${a.result})`;

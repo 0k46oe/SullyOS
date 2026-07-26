@@ -28,6 +28,7 @@
 import { CharacterProfile, UserProfile, Message, Emoji, RealtimeConfig } from '../types';
 import { DB } from './db';
 import { ChatParser } from './chatParser';
+import { resolveCharTimeZone } from './timezone';
 import { NotionManager, FeishuManager, XhsNote } from './realtimeContext';
 import { enqueuePendingDiary, removePendingDiary } from './pendingDiary';
 import { parseXhsCount, XhsMcpClient } from './xhsMcpClient';
@@ -1827,7 +1828,7 @@ export async function applyAssistantPostProcessing(
     aiContent = aiContent.replace(/\[\[XHS_POST:.*?\]\]/gs, '').trim();
 
     // ─── Step 3: ChatParser.parseAndExecuteActions ───
-    aiContent = await ChatParser.parseAndExecuteActions(aiContent, char.id, char.name, addToast, musicHooks);
+    aiContent = await ChatParser.parseAndExecuteActions(aiContent, char.id, char.name, addToast, musicHooks, resolveCharTimeZone(char));
 
     // ─── Step 4: thinking chain 抽取 (本轮末尾展示用) ───
     // 跑过二轮 (data !== initialData) → 取二轮 data 的 reasoning; 没跑二轮 → 取一轮 (round1ThinkingChain,

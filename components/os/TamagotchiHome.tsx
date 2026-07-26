@@ -1043,7 +1043,10 @@ const TamagotchiHome: React.FC = () => {
         }
     }, [wallImg, floorImg, actorImg, extracting, style, applyStyle, addToast]);
 
-    const night = isNightHour(virtualTime.hours);
+    // 「角色睡没睡」是 ta 那边的作息，按角色时区判；下面 hh/mm 是给用户看的钟，仍走设备时间。
+    // 同文件的心声（getScheduleWallClock）和墙上木牌（getCurrentScheduleSlotIndex）本就按角色时区算，
+    // 这里若用设备钟，会出现小人头顶飘 Zzz、木牌上却写着「11:00 工作」。
+    const night = isNightHour(getScheduleWallClock(char).getHours());
     const hh = virtualTime.hours.toString().padStart(2, '0');
     const mm = virtualTime.minutes.toString().padStart(2, '0');
     const { level, exp, expMax } = deriveStats(stat.msgCount);

@@ -64,6 +64,31 @@ export const nowInTimeZone = (tz?: string, base: Date = new Date()): Date => {
 export const tsInTimeZone = (ts: number, tz?: string): number =>
     tz ? nowInTimeZone(tz, new Date(ts)).getTime() : ts;
 
+/**
+ * `nowInTimeZone` 的逆运算：把一段「角色当地的墙上时间」文本换算回真实时刻。
+ *
+ * 角色写 `[schedule_message | 2026-07-26 21:00:00 | ...]` 时，它唯一看得到的钟是
+ * 自己时区的（prompt 里注入的就是角色当地时间）。直接 `new Date(文本)` 会按**设备**
+ * 时区解释，异国恋角色的定时消息会整体偏一个时差——角色想约今晚，实际可能已经过期。
+ *
+ * tz 为空时行为与 `new Date(文本)` 完全一致。文本非法时返回 NaN，交给调用方判。
+ */
+export const wallClockToTimestamp = (wallClockText: string, tz?: string): number => {
+    // 'YYYY-MM-DD HH:MM:SS' 里的空格换成 T，避免个别引擎把它当非法格式
+    const asDeviceLocal = new Date(wallClockText.trim().replace(' ', 'T')).getTime();
+    if (!tz || Number.isNaN(asDeviceLocal)) return asDeviceLocal;
+
+    // 找真实时刻 t，使 nowInTimeZone(tz, t) 读出来正好是这串墙上时间。
+    // 先按当前猜测算一次时差再修正；跑两轮是为了让夏令时切换附近也收敛。
+    let t = asDeviceLocal;
+    for (let i = 0; i < 2; i++) {
+        const drift = nowInTimeZone(tz, new Date(t)).getTime() - asDeviceLocal;
+        if (drift === 0) break;
+        t -= drift;
+    }
+    return t;
+};
+
 /** 注入聊天 prompt 的时差提示（异国恋核心）。tz 为空时返回空串。 */
 export const tzAwarenessNote = (tz?: string): string => {
     if (!tz) return '';
