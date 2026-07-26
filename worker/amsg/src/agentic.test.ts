@@ -25,6 +25,7 @@ const build: PushBuildInput = {
   taskId: '42',
   messageType: 'auto',
   metadata: { charId: 'char-1', amsgMode: 'auto' },
+  occurrenceMs: Date.UTC(2026, 6, 21, 1, 0),
 };
 
 describe('processLLMRound — 纯文本 finish', () => {
@@ -45,7 +46,8 @@ describe('processLLMRound — 纯文本 finish', () => {
       avatarUrl: 'https://example.com/a.png',
       messageSubtype: 'chat',
       taskId: '42',
-      metadata: { charId: 'char-1', amsgMode: 'auto' },
+      // 每条 push 都带触发时刻——客户端兜底闸的循环判定与吞放缓存键都靠它。
+      metadata: { charId: 'char-1', amsgMode: 'auto', amsgOccurrenceMs: build.occurrenceMs },
       notification: { title: '来自 小鹿', body: '想你了。' },
     });
     // 无副作用时 metadata 原样透传，不额外挂 directives 键。
@@ -260,14 +262,18 @@ describe('buildXhsSessionPayload — 按 directive 引用挑选最小数据包',
     expect(buildXhsSessionPayload([{ type: 'poke' }], notes, [['note-1', 'tok-1']])).toBeNull();
   });
 
-  it('最多带 4 张（share 刷屏时保 push 送达优先）', () => {
+  // 回归守卫：角色说分享了几张就带几张，绝不按张数砍。
+  // 砍过的版本会让用户看到「说分享了 6 张、只出来 4 张卡」——话和内容对不上。
+  // 装不装得进一条 push 由 index.ts 的 offloadOversizedPush 按真实字节算，
+  // 超出的旁路存 client_state，不是丢内容。
+  it('share 引用几张就带几张，不按张数砍', () => {
     const many = [1, 2, 3, 4, 5, 6].map((n) => makeNote(n));
     const payload = buildXhsSessionPayload(
       [1, 2, 3, 4, 5, 6].map((idx) => ({ type: 'xhs_share' as const, idx })),
       many,
       [],
     );
-    expect(payload!.notes).toHaveLength(4);
+    expect(payload!.notes).toHaveLength(6);
   });
 });
 

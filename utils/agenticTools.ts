@@ -16,7 +16,7 @@
 
 // 值 import 只允许环境无关叶子（realtimeFetchCore / xhsMcpClient）——这份文件会被
 // amsg worker bundle 原样打包跑在服务端工具循环里；类型统一 import type，不进 bundle。
-import type { CharacterProfile, UserProfile, RealtimeConfig } from '../types';
+import type { UserProfile } from '../types';
 import type { XhsNote } from './realtimeContext';
 import {
     performSearch,
@@ -48,7 +48,43 @@ export interface XhsConfig {
     userXsecToken?: string;
 }
 
-export function resolveXhsConfig(char: CharacterProfile, realtimeConfig?: RealtimeConfig): XhsConfig {
+/**
+ * 这些工具真正会读的实时配置字段（RealtimeConfig 的凭据子集）。
+ *
+ * 与 AgenticToolChar 同一个道理：amsg worker 到点只有云端 tool_config 那点数据，拼不出
+ * 完整的 RealtimeConfig。声明成窄接口后，浏览器侧传完整 RealtimeConfig 天然满足（结构化
+ * 类型，调用点不用改），worker 侧直接把 AmsgToolConfig 递进来也能被类型检查到。
+ *
+ * 上云的 AmsgToolConfig 直接 extends 这个接口（见 utils/amsgToolPack.ts），所以这里加字段
+ * 那边自动跟上——两份字段表靠人工对齐的话，漏一个就是 worker 侧运行时静默拿 undefined。
+ */
+export interface AgenticToolRealtimeConfig {
+    newsEnabled: boolean;
+    newsApiKey?: string;
+    notionEnabled: boolean;
+    notionApiKey?: string;
+    notionDatabaseId?: string;
+    notionNotesDatabaseId?: string;
+    feishuEnabled: boolean;
+    feishuAppId?: string;
+    feishuAppSecret?: string;
+    feishuBaseId?: string;
+    feishuTableId?: string;
+    xhsMcpConfig?: {
+        enabled?: boolean;
+        serverUrl?: string;
+        loggedInUserId?: string;
+        loggedInNickname?: string;
+        userXsecToken?: string;
+    };
+}
+
+// 只读 char.xhsEnabled 一个字段，所以参数就按这个声明（原来要整个 CharacterProfile，
+// 声明的依赖比真实的宽太多，amsg worker 那种拼不出完整角色的调用方就只能硬转）。
+export function resolveXhsConfig(
+    char: { xhsEnabled?: boolean },
+    realtimeConfig?: AgenticToolRealtimeConfig,
+): XhsConfig {
     const mcpConfig = realtimeConfig?.xhsMcpConfig;
     const mcpAvailable = !!(mcpConfig?.enabled && mcpConfig?.serverUrl);
     const mcpUrl = mcpConfig?.serverUrl || '';
@@ -61,10 +97,33 @@ export function resolveXhsConfig(char: CharacterProfile, realtimeConfig?: Realti
     return { enabled: !!char.xhsEnabled && mcpAvailable, mcpUrl, loggedInUserId, loggedInNickname, userXsecToken };
 }
 
+/**
+ * 这些工具真正会读的角色字段（CharacterProfile 的子集）。
+ *
+ * 为什么单独声明：amsg worker 到点只有云端 tool_pack 那点数据，拼不出完整的
+ * CharacterProfile。以前 worker 侧用 `as unknown as CharacterProfile` 硬转，等于把编译器
+ * 关掉——这边哪天多读一个字段，worker 侧就悄悄拿到 undefined，还不会报错。声明成窄接口后
+ * 浏览器侧传完整 CharacterProfile 天然满足（结构化类型，调用点不用改），worker 侧拼的
+ * 对象也终于能被类型检查到。加字段时记得同步 utils/amsgToolPack.ts 的 AmsgToolPack。
+ */
+export interface AgenticToolChar {
+    name: string;
+    xhsEnabled?: boolean;
+    activeMemoryMonths?: string[];
+    memories?: AgenticToolMemory[];
+}
+
+/** runRecall 会读的月度总结字段（上云的 AmsgToolPack.memories 也是这个形状）。 */
+export interface AgenticToolMemory {
+    date: string;
+    summary: string;
+    mood?: string;
+}
+
 export interface AgenticToolCtx {
-    char: CharacterProfile;
+    char: AgenticToolChar;
     userProfile: UserProfile;
-    realtimeConfig?: RealtimeConfig;
+    realtimeConfig?: AgenticToolRealtimeConfig;
     /** XHS 跨 tool 共享缓存; XHS_SEARCH/BROWSE 写, XHS_DETAIL/COMMENT/REPLY 读 */
     xhsCaches?: XhsCaches;
     /** 上次浏览/搜索得到的笔记列表 (XHS_DETAIL retry 时复用) */

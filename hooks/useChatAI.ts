@@ -41,9 +41,11 @@ import {
 import { ActiveMsgStore } from '../utils/activeMsgStore';
 import { markAmsgStateDirty, startAmsgChatPresence, stopAmsgChatPresence } from '../utils/amsgStateSync';
 import { getLastRealUserMessageAt } from '../utils/amsg2ExpireGuard';
-import { hasActiveAiTask } from '../utils/amsg2Tasks';
+import { hasActiveAiTask, isAmsg2EnabledForChar } from '../utils/amsg2Tasks';
 import { collectAmsg2TaskContext } from '../utils/amsg2TaskContext';
-import { AMSG2_TOOLS, AMSG2_TOOL_NAMES, executeAmsg2Tool, isAmsg2GlobalReady } from '../utils/amsg2ToolBridge';
+import { AMSG2_TOOLS, AMSG2_TOOL_NAMES, createAmsg2ToolSession, executeAmsg2Tool, isAmsg2GlobalReady } from '../utils/amsg2ToolBridge';
+import { shouldSendThinkingParams } from '../utils/thinkingGate';
+import { routeMiniAppToolCall } from '../utils/miniAppToolRoute';
 import { applyEmotionEvalRaw, extractAssistantText } from '../utils/emotionApply';
 import { announceChatGen, CHAT_GEN_EVENTS } from '../utils/chatGenEvents';
 import { shouldRequestAmbient, buildAmbientEvalSection } from '../utils/roomAmbient';
@@ -703,6 +705,21 @@ export const useChatAI = ({
         // Keep the Service Worker alive while we make potentially long AI calls
         await KeepAlive.start();
 
+        // 本轮的 amsg2 工具会话：角色一轮里可能连着排/取消多个任务，任务清单要在这一轮内
+        // 累加，所以由 session 兜住最新 config，别从 char 快照上读写（char 是生成开始的
+        // 那份，updateCharacter 不回写它）。finally 里打脏也要读它，所以声明在 try 外面。
+        const amsg2Session = createAmsg2ToolSession({
+            char, userProfile, groups, realtimeConfig, apiConfig, updateCharacter,
+        });
+        // amsg2 工具在三个工具循环（麦当劳 / 瑞幸 / 通用）里都可能出现，执行方式完全一样，
+        // 只有各自的 loopMessages 不同。
+        const runAmsg2ToolCall = async (tc: any, fname: string, args: any, loopMessages: any[]) => {
+            setSearchStatus(`正在执行：${fname}...`);
+            const result = await executeAmsg2Tool(fname, args, amsg2Session);
+            loopMessages.push({ role: 'tool', tool_call_id: tc.id, content: result } as any);
+            setSearchStatus('');
+        };
+
         try {
             const baseUrl = effectiveApi.baseUrl.replace(/\/+$/, '');
             const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApi.apiKey || 'sk-none'}` };
@@ -903,7 +920,16 @@ export const useChatAI = ({
             //    Gemini 等会直接 400 INVALID_ARGUMENT —— 表现就是"开了思考链的角色一点单就报错,
             //    换个没开思考链的角色就好"。工具循环优先, 思考链这一轮让步。
             const toolModeActive = payload.flags.luckinChatActive || payload.flags.mcdActive || payload.flags.luckinActive || payload.flags.mcpChatActive;
-            if (payload.flags.thinkingActive && !toolModeActive) {
+            // 主动消息 2.0 的工具本轮会不会注入：thinking 门要先知道这件事（工具在下面才真正
+            // 拼进 tools，但参数取舍必须现在就定）。角色级开关关掉的不注入——否则被用户显式
+            // 关掉的功能会被角色一次工具调用重新打开。
+            const amsg2ToolsInjected = isAmsg2EnabledForChar(char) && await isAmsg2GlobalReady();
+            if (shouldSendThinkingParams({
+                thinkingActive: !!payload.flags.thinkingActive,
+                legacyToolModeActive: !!toolModeActive,
+                amsg2ToolsInjected,
+                model: baseReqBody.model || '',
+            })) {
                 const m: string = baseReqBody.model || '';
                 if (/^claude-/i.test(m) && !/-thinking$/i.test(m)) {
                     baseReqBody.model = `${m}-thinking`;
@@ -960,13 +986,12 @@ export const useChatAI = ({
                     }
                 }
             }
-            // 主动消息 2.0 本地工具：已配置 worker 时注入 schedule/cancel/renew/list，
+            // 主动消息 2.0 本地工具：worker 已配置 + 角色没关掉时注入 schedule/cancel/renew/list，
             // 并注入「排程现状」背景块（进行中任务 + 作废待处理，角色自行判断怎么接）。
+            // 是否注入在上面 thinking 门那里就算好了（amsg2ToolsInjected）。
             // amsg2 和 instant push 互斥，不需要额外判断。
-            let amsg2ToolsInjected = false;
             let amsg2ExpiredIds: string[] = [];
-            if (await isAmsg2GlobalReady()) {
-                amsg2ToolsInjected = true;
+            if (amsg2ToolsInjected) {
                 baseReqBody.tools = [...(baseReqBody.tools || []), ...AMSG2_TOOLS];
                 if (!baseReqBody.tool_choice) baseReqBody.tool_choice = 'auto';
                 try {
@@ -1170,7 +1195,15 @@ export const useChatAI = ({
                         } catch (e) {
                             console.warn('🍔 [MCD-MiniApp] propose 参数解析失败:', e);
                         }
-                        if (fname === 'propose_cart_items' && Array.isArray(args.items) && args.items.length) {
+                        // 主动消息 2.0 的排程工具与点单工具会在同一批 tool_calls 里出现:
+                        // 先分流执行, 否则会落进下面的「畸形调用」分支被吃掉, 而续写请求
+                        // 又不带 tools, 角色「点单时顺手排个提醒」就永远不会生效。
+                        const route = routeMiniAppToolCall(fname, args);
+                        if (route === 'amsg2') {
+                            await runAmsg2ToolCall(tc, fname, args, loopMessages);
+                            continue;
+                        }
+                        if (route === 'propose') {
                             // 第一步: 菜单还没加载就直接拒, 不能让模型瞎编 code
                             // 这是导致 calculate-price 返回空列表的根因之一: propose 在 pick 步骤被调用,
                             // 此时 menuMeals 是空的, 旧版 menuKeys.length===0 会直接跳过校验, 烂 code 一路到 cart。
@@ -1272,7 +1305,15 @@ export const useChatAI = ({
                         } catch (e) {
                             console.warn('☕ [Luckin-MiniApp] propose 参数解析失败:', e);
                         }
-                        if (fname === 'propose_cart_items' && Array.isArray(args.items) && args.items.length) {
+                        // 主动消息 2.0 的排程工具与点单工具会在同一批 tool_calls 里出现:
+                        // 先分流执行, 否则会落进下面的「畸形调用」分支被吃掉, 而续写请求
+                        // 又不带 tools, 角色「点单时顺手排个提醒」就永远不会生效。
+                        const route = routeMiniAppToolCall(fname, args);
+                        if (route === 'amsg2') {
+                            await runAmsg2ToolCall(tc, fname, args, loopMessages);
+                            continue;
+                        }
+                        if (route === 'propose') {
                             const menu = luckinMiniSnap?.menuItems || {};
                             const menuKeys = Object.keys(menu);
                             if (menuKeys.length === 0) {
@@ -1390,12 +1431,7 @@ export const useChatAI = ({
                         }
                         // 主动消息 2.0 工具
                         if (AMSG2_TOOL_NAMES.has(fname)) {
-                            setSearchStatus(`正在执行：${fname}...`);
-                            const result = await executeAmsg2Tool(fname, args, {
-                                char, userProfile, groups, realtimeConfig, apiConfig, updateCharacter,
-                            });
-                            loopMessages.push({ role: 'tool', tool_call_id: tc.id, content: result } as any);
-                            setSearchStatus('');
+                            await runAmsg2ToolCall(tc, fname, args, loopMessages);
                             continue;
                         }
                         // 只开了 MCP 没开瑞幸时, 幻觉出的未知工具名直接回错误让模型自我纠正
@@ -1649,7 +1685,13 @@ export const useChatAI = ({
 
             // 满血主动消息：一轮聊完把该角色标脏，去抖后 fire_pack 批量同步到 worker 的
             // client_state（未配 amsg2 任务的角色在 markDirty 内直接忽略，零成本）。
-            markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
+            // 本轮角色自己排过任务时 char 快照上的清单已经过期，得用工具会话里的最新那份
+            // 打脏——否则本轮新建的首个任务过不了 markDirty 的 hasActiveAiTask 门，
+            // fire_pack 会停在排程那一刻、少掉角色排完之后说的这段。
+            markAmsgStateDirty({
+                char: { ...char, activeMsg2Config: amsg2Session.getConfig() },
+                userProfile, groups, realtimeConfig,
+            });
 
             // Memory Palace — 后台缓冲区处理（不阻塞 UI，内部有并发锁）
             // 使用全局配置（memoryPalaceConfig）。lightLLM 未配置时回退主 apiConfig；

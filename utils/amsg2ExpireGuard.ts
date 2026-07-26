@@ -25,6 +25,14 @@ export const FIRE_GRACE_MS = 90_000;
 /** 排程现状块只回看这么久内的触发时刻，太老的不再提。 */
 const DEFAULT_LOOKBACK_MS = 48 * 3600_000;
 
+const DAY_MS = 24 * 3600_000;
+
+/** 循环任务两次触发之间隔多久；一次性任务没有周期，返回 null。 */
+export const recurrencePeriodMs = (recurrenceType: string | undefined): number | null =>
+  recurrenceType === 'daily' ? DAY_MS
+    : recurrenceType === 'weekly' ? 7 * DAY_MS
+      : null;
+
 export interface ExpireFireInput {
   policy: string | undefined;
   recurrenceType: string | undefined;
@@ -33,6 +41,12 @@ export interface ExpireFireInput {
   /** 判定时刻已知的最后一条真实用户消息时间戳。 */
   lastUserMessageAt: number | null | undefined;
   nowMs: number;
+  /**
+   * 本次触发时刻。循环任务的「正在聊天」窗口锚定它而不是 nowMs——生成+送达可能比到点
+   * 晚十几分钟，拿判定时刻算 10 分钟窗会把撞上对话的消息误放行。worker 在到点当时判定
+   * （两者几乎相等），客户端送达兜底则晚得多，所以必须显式给。
+   */
+  occurrenceMs: number;
 }
 
 /**
@@ -45,7 +59,7 @@ export function shouldExpireFire(input: ExpireFireInput): boolean {
   const last = input.lastUserMessageAt;
   if (last == null) return false;
   if (input.recurrenceType === 'daily' || input.recurrenceType === 'weekly') {
-    return input.nowMs - last < ACTIVE_CHAT_WINDOW_MS;
+    return last > input.occurrenceMs - ACTIVE_CHAT_WINDOW_MS && last <= input.nowMs;
   }
   const anchor = input.anchorMs;
   if (anchor == null) return false;
@@ -79,31 +93,28 @@ export function hasRealUserMessageBetween(
     isRealUserMessage(m) && m.timestamp > afterMs && m.timestamp <= beforeMs);
 }
 
+/** 送达判定的回看窗：触发时刻之后这么久内的消息才算这次触发的产物。 */
+const DELIVERED_WINDOW_MS = 30 * 60_000;
+
 /**
  * 某个触发时刻附近是否真的送达过定时主动消息（区分「作废了」和「发出去之后
  * 用户才回复」）。定时任务的落库消息带 metadata.activeMsg2.taskId（非空）；
  * instant 聊天回复的 taskId 是 null，不算。
  *
- * 传了 clientTaskId 时按精确 id 归属：任务的送达一定带同源 amsgClientTaskId，id 不同或
- * 缺 id 的消息都不算本任务的送达——否则会拿别的任务的送达当证据、误抹掉本任务的作废回执。
- * 不传 clientTaskId 时只按时间窗近似。
+ * 按精确 id 归属：任务的送达一定带同源 amsgClientTaskId，id 不同或缺 id 的消息都不算
+ * 本任务的送达——否则会拿别的任务的送达当证据、误抹掉本任务的作废回执。
  */
 export function hasDeliveredProactiveNear(
   messages: RealUserMessageLike[],
   occurrenceMs: number,
-  clientTaskId?: string,
-  windowMs = 30 * 60_000,
+  clientTaskId: string,
 ): boolean {
   return messages.some((m) => {
     if (m.role !== 'assistant') return false;
     const meta = m.metadata as { activeMsg2?: { taskId?: unknown }; amsgClientTaskId?: unknown } | null | undefined;
     if (meta?.activeMsg2?.taskId == null) return false;
-    if (clientTaskId) {
-      // 任务的送达必带同源 amsgClientTaskId；id 不同或缺 id 都不是本任务的送达。
-      const msgCid = typeof meta.amsgClientTaskId === 'string' ? meta.amsgClientTaskId : undefined;
-      if (msgCid !== clientTaskId) return false;
-    }
-    return m.timestamp >= occurrenceMs - FIRE_GRACE_MS && m.timestamp <= occurrenceMs + windowMs;
+    if (meta.amsgClientTaskId !== clientTaskId) return false;
+    return m.timestamp >= occurrenceMs - FIRE_GRACE_MS && m.timestamp <= occurrenceMs + DELIVERED_WINDOW_MS;
   });
 }
 
@@ -135,8 +146,8 @@ export function detectExpiredOccurrences(input: DetectExpiredInput): ExpiredNoti
   if (!Number.isFinite(first)) return [];
   const horizon = input.nowMs - (input.lookbackMs ?? DEFAULT_LOOKBACK_MS);
 
-  const recurring = input.recurrenceType === 'daily' || input.recurrenceType === 'weekly';
-  if (!recurring) {
+  const periodMs = recurrencePeriodMs(input.recurrenceType);
+  if (periodMs === null) {
     if (first > input.nowMs || first < horizon) return [];
     if (input.anchorMs == null) return [];
     // 窗口放宽到 nowMs：worker 的 skip 只看「锚点后有没有用户消息」，与 Cron 何时
@@ -146,7 +157,6 @@ export function detectExpiredOccurrences(input: DetectExpiredInput): ExpiredNoti
     return [{ id: input.taskUuid, occurrenceMs: first }];
   }
 
-  const periodMs = input.recurrenceType === 'daily' ? 24 * 3600_000 : 7 * 24 * 3600_000;
   // 快进到回看期起点，别从几个月前逐个迭代。
   let t = first;
   if (t < horizon) t = first + Math.ceil((horizon - first) / periodMs) * periodMs;

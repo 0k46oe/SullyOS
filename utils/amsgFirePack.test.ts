@@ -6,7 +6,6 @@ import {
   AMSG_SLOT_TIME_SINCE_USER,
   AmsgFirePack,
   buildAwayHint,
-  DEFAULT_TASK_INSTRUCTION,
   formatLocalTime,
   formatTimeSinceUser,
   parseFirePack,
@@ -14,8 +13,8 @@ import {
 } from './amsgFirePack';
 
 // 回归守卫：这些期望值抄的是 activeMsgClient 拆槽位前（buildTimeGapHint /
-// buildLegacyStyleProactiveHint 内联时代）的旧文案。渲染产出必须和排程时冻结
-// completePrompt 的老链路一字不差，改文案前先想清楚两条链路要一起变。
+// buildLegacyStyleProactiveHint 内联时代）的旧文案。模板在前端维护、填槽在 worker 里跑，
+// 改文案时这份测试会挡住手滑——期望值和文案要一起改。
 
 describe('formatTimeSinceUser', () => {
   it('没有聊天记录（null）', () => {
@@ -88,13 +87,13 @@ describe('renderFirePack', () => {
 
   it('填满全部槽位，currentTime 出现多次也全部替换', () => {
     const now = Date.UTC(2026, 6, 17, 8, 30);
-    const rendered = renderFirePack(basePack, now);
+    const rendered = renderFirePack(basePack, now, '本次任务指令');
     expect(rendered).toBe([
       '当前本地时间：2026-07-17 08:30',
       '你们最近没有新的聊天记录。',
       '现在是 2026-07-17 08:30。',
       '楪同学最近没有主动来找你说话。',
-      DEFAULT_TASK_INSTRUCTION,
+      '本次任务指令',
     ].join('\n'));
     expect(rendered).not.toContain('{{');
   });
@@ -104,6 +103,7 @@ describe('renderFirePack', () => {
     const rendered = renderFirePack(
       { ...basePack, lastUserMessageAt: now - 90 * 60_000 },
       now,
+      '本次任务指令',
     );
     expect(rendered).toContain('距离用户上次主动发消息大约 1 小时 30 分钟。');
     expect(rendered).toContain('楪同学已经上次主动发消息大约 1 小时 30 分钟。');
@@ -123,7 +123,7 @@ describe('parseFirePack', () => {
     expect(parseFirePack(JSON.stringify({ ...valid, lastUserMessageAt: 123 }))?.lastUserMessageAt).toBe(123);
   });
 
-  it('坏形状 → null（worker 借此回退老链路）', () => {
+  it('坏形状 → null（worker 借此抛 fire-state 错）', () => {
     expect(parseFirePack('not json')).toBeNull();
     expect(parseFirePack('{}')).toBeNull();
     expect(parseFirePack(JSON.stringify({ ...valid, v: 1 }))).toBeNull();
@@ -140,17 +140,12 @@ describe('fire_pack v2 任务指令槽', () => {
   };
 
   it('renderFirePack 用传入的任务指令填槽', () => {
-    const out = renderFirePack(pack, Date.UTC(2026, 6, 21, 1, 0), { taskInstruction: '围绕"问考试"发起私聊' });
+    const out = renderFirePack(pack, Date.UTC(2026, 6, 21, 1, 0), '围绕"问考试"发起私聊');
     expect(out).toContain('围绕"问考试"发起私聊');
     expect(out).not.toContain(AMSG_SLOT_TASK_INSTRUCTION);
   });
 
-  it('没给指令时填默认自动指令（旧任务 metadata 缺指令的兜底）', () => {
-    const out = renderFirePack(pack, Date.UTC(2026, 6, 21, 1, 0));
-    expect(out).toContain(DEFAULT_TASK_INSTRUCTION);
-  });
-
-  it('parseFirePack 只认 v2；v1 旧包 parse 失败（回退冻结 prompt，下轮同步自愈）', () => {
+  it('parseFirePack 只认 v2；v1 旧包 parse 失败（worker 抛 fire-state 错）', () => {
     expect(parseFirePack(JSON.stringify(pack))).not.toBeNull();
     expect(parseFirePack(JSON.stringify({ ...pack, v: 1 }))).toBeNull();
   });

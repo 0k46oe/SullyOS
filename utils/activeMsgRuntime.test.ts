@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { EXPIRE_DECISION_TTL_MS, resolveFireExpireDecision } from './activeMsgRuntime';
+import {
+  EXPIRE_DECISION_TTL_MS,
+  MAX_INBOX_PROCESS_ATTEMPTS,
+  OrphanedCharacterError,
+  resolveFireExpireDecision,
+  resolveInboxFailureAction,
+} from './activeMsgRuntime';
 
 // resolveFireExpireDecision 是从「防穿帮闸·客户端兜底」吞没闸抽出来的 get-or-compute
 // helper（带 TTL 清扫），单测把闸的关键不变量钉住，防回归：
@@ -56,6 +62,28 @@ describe('resolveFireExpireDecision', () => {
     expect(calls).toBe(2);
   });
 
+  // 回归守卫：判不出来的时候绝不能把「判不了」当成「可以发」缓存下来。
+  // evaluate 抛错时不写缓存，下次才是真的重判——否则一次读取失败会让这次 fire 的
+  // 后续分段全部沿用一个凭空捏造的结论。
+  it('evaluate 抛错 → 不缓存，下次重判', async () => {
+    const cache = new Map<string, { expired: boolean; expiresAt: number }>();
+    const T0 = 1_700_000_000_000;
+
+    let calls = 0;
+    const evaluate = async () => {
+      calls++;
+      if (calls === 1) throw new Error('IndexedDB read failed');
+      return true;
+    };
+
+    await expect(resolveFireExpireDecision(cache, 'task-D:333', T0, evaluate)).rejects.toThrow();
+    expect(cache.size).toBe(0);
+
+    const second = await resolveFireExpireDecision(cache, 'task-D:333', T0, evaluate);
+    expect(calls).toBe(2);
+    expect(second).toBe(true);
+  });
+
   it('同任务不同 occurrence 用不同 fireKey，各判各的（不串判定）', async () => {
     const cache = new Map<string, { expired: boolean; expiresAt: number }>();
     const T0 = 1_700_000_000_000;
@@ -69,5 +97,29 @@ describe('resolveFireExpireDecision', () => {
     expect(calls).toBe(2);      // 两个 occurrence 各判一次
     expect(d1).toBe(true);
     expect(d2).toBe(false);
+  });
+});
+
+// 回归守卫：push 处理失败时的去向。
+// 过去一律就地存原稿——原稿里的表情 / 卡片 / 转账都还是标记形态，渲染时被剥掉，
+// 用户看到残缺版，而角色下一轮读历史会当成「我已经发过了」：一次暂时的本地故障
+// 就此变成永久的错误前提。现在默认留着重试，重试到头才退回存原稿。
+describe('resolveInboxFailureAction', () => {
+  it('角色已不存在 → 孤儿，不重试（重试多少次都没用，该去清远端任务）', () => {
+    const err = new OrphanedCharacterError('char-gone');
+    expect(resolveInboxFailureAction(err, 1)).toBe('orphan');
+    expect(resolveInboxFailureAction(err, MAX_INBOX_PROCESS_ATTEMPTS + 5)).toBe('orphan');
+  });
+
+  it('普通失败且没到上限 → 重试，不把残缺版固化进聊天记录', () => {
+    const err = new Error('IndexedDB transaction aborted');
+    expect(resolveInboxFailureAction(err, 1)).toBe('retry');
+    expect(resolveInboxFailureAction(err, MAX_INBOX_PROCESS_ATTEMPTS - 1)).toBe('retry');
+  });
+
+  it('重试到上限 → 退回存原稿保底（残缺也好过什么都没有）', () => {
+    const err = new Error('IndexedDB transaction aborted');
+    expect(resolveInboxFailureAction(err, MAX_INBOX_PROCESS_ATTEMPTS)).toBe('degrade');
+    expect(resolveInboxFailureAction(err, MAX_INBOX_PROCESS_ATTEMPTS + 1)).toBe('degrade');
   });
 });

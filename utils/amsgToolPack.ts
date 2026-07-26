@@ -16,6 +16,7 @@
  */
 
 import type { CharacterProfile, RealtimeConfig } from '../types';
+import type { AgenticToolMemory, AgenticToolRealtimeConfig } from './agenticTools';
 import { getProxyWorkerUrl } from './proxyWorker';
 
 export const AMSG_TOOL_PACK_KEY = 'tool_pack';
@@ -28,25 +29,21 @@ export interface AmsgToolPack {
   charName: string;
   xhsEnabled: boolean;
   activeMemoryMonths: string[];
-  memories: Array<{ date: string; summary: string; mood?: string }>;
+  memories: AgenticToolMemory[];
 }
 
-/** 工具凭据与配置（RealtimeConfig 的工具子集 + 代理地址）。 */
-export interface AmsgToolConfig {
+/**
+ * 工具凭据与配置（RealtimeConfig 的工具子集 + 代理地址）。
+ *
+ * 凭据字段表直接继承 AgenticToolRealtimeConfig——那边是工具真正会读的字段，这边是把它们
+ * 上云的载体，本来就该一模一样。抄成两份的话，agenticTools 多读一个字段而这边忘了加，
+ * worker 到点就静默拿 undefined（编译期一声不吭），正是窄接口想消灭的那类失配。
+ */
+export interface AmsgToolConfig extends AgenticToolRealtimeConfig {
   v: 1;
   /** 搜索 / Notion / 飞书都经它转发；worker 端用 setProxyWorkerUrlOverride 注入。 */
   proxyWorkerUrl: string;
-  newsEnabled: boolean;
-  newsApiKey?: string;
-  notionEnabled: boolean;
-  notionApiKey?: string;
-  notionDatabaseId?: string;
-  notionNotesDatabaseId?: string;
-  feishuEnabled: boolean;
-  feishuAppId?: string;
-  feishuAppSecret?: string;
-  feishuBaseId?: string;
-  feishuTableId?: string;
+  /** 上云这份比工具侧多一个 cookie（lite 模式的登录态），并且两个开关字段是必填。 */
   xhsMcpConfig?: {
     enabled: boolean;
     serverUrl: string;

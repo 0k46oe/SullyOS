@@ -8,7 +8,6 @@
 
 import {
   ActiveMsg2CharacterConfig,
-  ActiveMsg2ExpirePolicy,
   ActiveMsg2TaskRecord,
   APIConfig,
   CharacterProfile,
@@ -19,8 +18,9 @@ import {
 import { ActiveMsgClient } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
 import {
-  findTaskByShortId, isPendingTask,
-  pruneStaleTasks, shortTaskId,
+  applyScheduledTask, currentOccurrenceMs, describeExpirePolicy, describeRecurrence,
+  describeTaskMode, describeTaskProgress, findTaskByShortId, formatTaskTime,
+  getPendingTasks, pruneStaleTasks, resolveExpirePolicy, shortTaskId,
 } from './amsg2Tasks';
 
 // ─── OpenAI tools schema ───
@@ -122,8 +122,43 @@ export interface Amsg2ToolDeps {
   groups: GroupProfile[];
   realtimeConfig: RealtimeConfig;
   apiConfig: APIConfig;
-  updateCharacter: (charId: string, updates: Partial<CharacterProfile>) => void;
+  /** 读本轮最新的任务清单配置。只由 createAmsg2ToolSession 提供，别自己拼。 */
+  getConfig: () => ActiveMsg2CharacterConfig | undefined;
+  /** 写回任务清单：刷新 getConfig 的来源，同时落 React state / DB。 */
+  setConfig: (config: ActiveMsg2CharacterConfig) => void;
 }
+
+/**
+ * 建一轮工具循环要用的 deps，一轮生成建一次、放在工具循环外面。
+ *
+ * 任务清单不从 char 上读写：char 是生成开始时的那份快照，updateCharacter 只更 React
+ * state、不回写它。所以角色一轮里连建两条任务时，第二次会读着空清单把第一条覆盖掉
+ * （「建俩只显示一个」）。这里用一个本轮局部变量兜住最新 config，schedule / cancel /
+ * renew / list 全部只经 getConfig / setConfig 走，累加就一定对——也不用去就地改
+ * React state 里的角色对象。
+ */
+export const createAmsg2ToolSession = (base: {
+  char: CharacterProfile;
+  userProfile: UserProfile;
+  groups: GroupProfile[];
+  realtimeConfig: RealtimeConfig;
+  apiConfig: APIConfig;
+  updateCharacter: (charId: string, updates: Partial<CharacterProfile>) => void;
+}): Amsg2ToolDeps => {
+  let liveConfig = base.char.activeMsg2Config;
+  return {
+    char: base.char,
+    userProfile: base.userProfile,
+    groups: base.groups,
+    realtimeConfig: base.realtimeConfig,
+    apiConfig: base.apiConfig,
+    getConfig: () => liveConfig,
+    setConfig: (config) => {
+      liveConfig = config;
+      base.updateCharacter(base.char.id, { activeMsg2Config: config });
+    },
+  };
+};
 
 export const executeAmsg2Tool = async (
   toolName: string,
@@ -148,9 +183,14 @@ export const executeAmsg2Tool = async (
   }
 };
 
-/** 读当前角色 config。 */
-const readConfig = (char: CharacterProfile): ActiveMsg2CharacterConfig =>
-  char.activeMsg2Config ?? { enabled: true, tasks: [] };
+/** tasks 已归一化成数组的 config，下面的 handler 直接 `config.tasks` 即可。 */
+type LoadedConfig = ActiveMsg2CharacterConfig & { tasks: ActiveMsg2TaskRecord[] };
+
+/** 读本轮最新 config（含本轮前面几次工具调用刚写进去的任务）。 */
+const readConfig = (deps: Amsg2ToolDeps): LoadedConfig => {
+  const config = deps.getConfig();
+  return { enabled: true, ...config, tasks: config?.tasks ?? [] };
+};
 
 /** 任务清单落盘：顺手清过点 48h 的一次性任务。 */
 const persistTasks = (
@@ -158,26 +198,25 @@ const persistTasks = (
   config: ActiveMsg2CharacterConfig,
   tasks: ActiveMsg2TaskRecord[],
 ) => {
-  deps.updateCharacter(deps.char.id, {
-    activeMsg2Config: {
-      ...config,
-      enabled: true,
-      tasks: pruneStaleTasks(tasks, Date.now()),
-      lastSyncedAt: Date.now(),
-      lastError: undefined,
-    },
+  // enabled 原样保留：工具只在角色开着 2.0 时才注入（见 isAmsg2EnabledForChar），
+  // 这里再强写 true 就成了「一次工具调用替用户把关掉的功能重新打开」。
+  deps.setConfig({
+    ...config,
+    tasks: pruneStaleTasks(tasks, Date.now()),
+    lastSyncedAt: Date.now(),
+    lastError: undefined,
   });
 };
 
 async function handleSchedule(args: Record<string, any>, deps: Amsg2ToolDeps): Promise<string> {
   const { char, userProfile, groups, realtimeConfig, apiConfig } = deps;
-  const config = readConfig(char);
+  const config = readConfig(deps);
   const mode = (args.mode === 'prompted' ? 'prompted' : 'auto') as 'auto' | 'prompted';
   const recurrence = (['daily', 'weekly'].includes(args.recurrence) ? args.recurrence : 'none') as 'none' | 'daily' | 'weekly';
-  const expirePolicy = (args.expire_policy === 'force' ? 'force' : 'expire') as ActiveMsg2ExpirePolicy;
+  const expirePolicy = resolveExpirePolicy(mode, args.expire_policy === 'force' ? 'force' : 'expire');
   const taskInput = {
     mode, firstSendTime: args.send_at, recurrenceType: recurrence,
-    promptHint: mode === 'prompted' ? (args.prompt_hint || '') : (args.prompt_hint || undefined),
+    promptHint: args.prompt_hint || undefined,
     expirePolicy,
   };
 
@@ -196,38 +235,47 @@ async function handleSchedule(args: Record<string, any>, deps: Amsg2ToolDeps): P
     status: 'scheduled',
     createdAt: Date.now(),
   };
-  // 替换成功才移除旧记录；旧任务远端取消失败时保留旧记录并标错——短 id 还在，
-  // 角色/用户可再次 cancel，不给远端留「本地看不见的幽灵任务」。
-  const rest = result.replacedCancelFailed
-    ? (config.tasks ?? []).map((t) => t.taskUuid === args.__replaceTaskUuid
-        ? { ...t, lastError: '替换时远端取消失败，任务可能仍会触发，可再次 cancel' } : t)
-    : (config.tasks ?? []).filter((t) => t.taskUuid !== args.__replaceTaskUuid);
-  persistTasks(deps, config, [...rest, record]);
+  // 并清单的规则（替换成功才移除旧记录；远端取消失败则保留旧记录并标错，短 id 还在、
+  // 角色和用户都还能再取消一次）与设置面板共用 applyScheduledTask。
+  persistTasks(deps, config, applyScheduledTask(
+    config.tasks,
+    record,
+    { replaceTaskUuid: args.__replaceTaskUuid, replacedCancelFailed: result.replacedCancelFailed },
+    Date.now(),
+  ));
 
-  const timeDesc = new Date(args.send_at).toLocaleString('zh-CN', { hour12: false });
-  const recurrenceDesc = recurrence === 'daily' ? '（每天重复）' : recurrence === 'weekly' ? '（每周重复）' : '';
-  return `定时主动消息已创建 [${shortTaskId(result.uuid)}]。将在 ${timeDesc} 开始生成${recurrenceDesc}。模式：${mode === 'auto' ? '自动' : '提示词'}，策略：${expirePolicy === 'force' ? '强制发送' : '遇忙作废'}。`;
+  const recurrenceDesc = recurrence === 'none' ? '' : `（${describeRecurrence(recurrence)}重复）`;
+  // 续期/替换走的是「先建新的再取消旧的」，编号必然换一个。不说清楚的话，角色刚用
+  // 旧编号续了期，却收到一句「已创建 [另一个编号]」，下一轮还会拿旧编号来操作。
+  const oldShortId = args.__replaceTaskUuid ? shortTaskId(args.__replaceTaskUuid) : '';
+  const head = !oldShortId
+    ? `定时主动消息已创建 [${shortTaskId(result.uuid)}]。`
+    : result.replacedCancelFailed
+      ? `新任务 [${shortTaskId(result.uuid)}] 已创建，但原任务 [${oldShortId}] 远端取消失败、可能仍会触发，请再取消一次。`
+      : `原任务 [${oldShortId}] 已换成 [${shortTaskId(result.uuid)}]（改期是重建，编号会变）。`;
+  return `${head}将在 ${formatTaskTime(args.send_at)} 开始生成${recurrenceDesc}。`
+    + `模式：${describeTaskMode(record)}，策略：${describeExpirePolicy(expirePolicy)}。`;
 }
 
 /** 按 task_id 参数（或"只有一个就选它"）解出目标任务；解不出返回给 LLM 的提示文案。 */
 const resolveTargetTask = (
-  config: ActiveMsg2CharacterConfig,
+  config: LoadedConfig,
   taskIdArg: unknown,
 ): { task?: ActiveMsg2TaskRecord; error?: string } => {
-  const tasks = config.tasks ?? [];
+  const tasks = config.tasks;
   if (typeof taskIdArg === 'string' && taskIdArg.trim()) {
     const task = findTaskByShortId(tasks, taskIdArg.trim());
     return task ? { task } : { error: `没有找到短 id 为 ${taskIdArg} 的任务，请先用 list_active_messages 查看。` };
   }
-  const pending = tasks.filter((t) => isPendingTask(t, Date.now()));
+  const pending = getPendingTasks(config, Date.now());
   if (pending.length === 1) return { task: pending[0] };
   if (pending.length === 0 && tasks.length === 1) return { task: tasks[0] };
   return { error: '当前有多个任务，请带 task_id（短 id）指定要操作哪一个。' };
 };
 
 async function handleCancel(args: Record<string, any>, deps: Amsg2ToolDeps): Promise<string> {
-  const config = readConfig(deps.char);
-  if (!(config.tasks ?? []).length) return '当前角色没有排程中的主动消息任务。';
+  const config = readConfig(deps);
+  if (!config.tasks.length) return '当前角色没有排程中的主动消息任务。';
   const { task, error } = resolveTargetTask(config, args.task_id);
   if (!task) return error!;
 
@@ -237,17 +285,17 @@ async function handleCancel(args: Record<string, any>, deps: Amsg2ToolDeps): Pro
     // 远端取消失败绝不静默移除本地记录（Codex #4）——否则远端 recurring 照发、
     // 本地却没了短 id，用户再也无法通过工具取消。
     console.warn('[amsg2ToolBridge] cancel remote task failed（保留本地记录待重试）', e);
-    persistTasks(deps, config, (config.tasks ?? []).map((t) =>
+    persistTasks(deps, config, config.tasks.map((t) =>
       t.taskUuid === task.taskUuid ? { ...t, lastError: '远端取消失败，任务可能仍会触发' } : t));
     return `取消任务 [${shortTaskId(task.taskUuid)}] 失败（远端未确认），稍后可重试。`;
   }
-  persistTasks(deps, config, (config.tasks ?? []).filter((t) => t.taskUuid !== task.taskUuid));
+  persistTasks(deps, config, config.tasks.filter((t) => t.taskUuid !== task.taskUuid));
   return `已取消任务 [${shortTaskId(task.taskUuid)}]。`;
 }
 
 async function handleRenew(args: Record<string, any>, deps: Amsg2ToolDeps): Promise<string> {
-  const config = readConfig(deps.char);
-  if (!(config.tasks ?? []).length) return '当前角色没有可续期的任务，请用 schedule_active_message 新建。';
+  const config = readConfig(deps);
+  if (!config.tasks.length) return '当前角色没有可续期的任务，请用 schedule_active_message 新建。';
   const { task, error } = resolveTargetTask(config, args.task_id);
   if (!task) return error!;
   if (task.mode === 'fixed') return '固定消息任务请在设置面板调整。';
@@ -258,23 +306,23 @@ async function handleRenew(args: Record<string, any>, deps: Amsg2ToolDeps): Prom
     mode: task.mode,
     prompt_hint: task.promptHint,
     recurrence: task.recurrenceType,
-    expire_policy: task.expirePolicy ?? 'expire',
+    expire_policy: task.expirePolicy,
     __replaceTaskUuid: task.taskUuid,
   }, deps);
 }
 
 async function handleList(deps: Amsg2ToolDeps): Promise<string> {
-  const config = readConfig(deps.char);
-  const tasks = config.tasks ?? [];
+  const config = readConfig(deps);
+  const tasks = config.tasks;
   if (!tasks.length) return '当前角色没有任何定时主动消息任务。';
   const now = Date.now();
   const lines = tasks.map((t) => {
-    const time = new Date(t.firstSendTime).toLocaleString('zh-CN', { hour12: false });
-    const recurrence = t.recurrenceType === 'daily' ? '每天' : t.recurrenceType === 'weekly' ? '每周' : '一次性';
-    const what = t.mode === 'fixed' ? '固定消息' : t.mode === 'prompted' ? `提示方向「${t.promptHint || ''}」` : '自动';
-    const state = isPendingTask(t, now) ? '待触发' : '已到点';
-    const policy = (t.expirePolicy ?? 'expire') === 'force' ? '强制发送' : '遇忙作废';
-    return `- [${shortTaskId(t.taskUuid)}] ${time} ${recurrence} · ${what} · ${policy} · ${state}${t.lastError ? ` · ⚠ ${t.lastError}` : ''}`;
+    // 工具侧没有远端底账，进度只能给中性的那档；时间按周期推到「下一次」，
+    // 否则角色查到一条每天的任务显示的是好几天前，会当成已经过去的。
+    const state = describeTaskProgress(t, null, now);
+    return `- [${shortTaskId(t.taskUuid)}] ${formatTaskTime(currentOccurrenceMs(t, now) ?? t.firstSendTime)} ${describeRecurrence(t.recurrenceType)}`
+      + ` · ${describeTaskMode(t)} · ${describeExpirePolicy(t.expirePolicy)} · ${state}`
+      + `${t.lastError ? ` · ⚠ ${t.lastError}` : ''}`;
   });
   return `当前角色的任务列表：\n${lines.join('\n')}`;
 }

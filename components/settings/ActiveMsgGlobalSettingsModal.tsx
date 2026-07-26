@@ -5,15 +5,34 @@ import { ActiveMsgClient, ActiveMsg2PushStatus } from '../../utils/activeMsgClie
 import { ActiveMsgStore, maskActiveMsgUserId } from '../../utils/activeMsgStore';
 import { buildCloudflareDashboardUrl } from '../../utils/instantPushClient';
 import { generateClientToken } from '../../utils/vapidGen';
+import { isAmsgServerVersionAtLeast } from '../../utils/amsgWorkerVersion';
 
 // 满血链路吃满这些 worker 特性（amsg-server 2.6.0-next.4+）。探测不到端点（老部署
-// 404 → null）或缺任何一项，就亮「重新部署」提示——worker 是粘贴部署的，不会自动更新。
+// 404 → null）或缺任何一项，就亮「重新部署」提示——worker 跑在用户自己的账号里，
+// 站点这边发新版不会自动同步过去。
 const REQUIRED_WORKER_FEATURES = [
   'client-state',
   'client-state-chunking',
   'agentic-hooks',
   'agentic-scratch',
 ];
+// features 之外还必须比版本：这波依赖的能力大多没发独立 flag，光查 features 分不出新旧。
+//   next.5 — GET /messages 投影（charId/clientTaskId）、onBeforeFire 的 { skip } 出口
+//   next.6 — 任务占位租约（带工具的 AI 任务常跑过一分钟，没有占位会被相邻 cron tick 重复推）
+//   next.7 — hook 的 writeState（大内容旁路存 client_state）、Web Push payload 大小护栏
+// 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
+const REQUIRED_WORKER_VERSION = '2.6.0-next.7';
+
+/** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
+const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';
+const SETUP_WALKTHROUGH_URL = 'https://github.com/qegj567-cloud/SullyOS/blob/master/docs/amsg2-setup-walkthrough.md';
+
+/** 刚生成的密钥明文：输入框是 password 型，只能在这一处让用户看见并手动复制。 */
+const SecretReveal: React.FC<{ value: string; className?: string }> = ({ value, className = '' }) => (
+  <p className={`font-mono text-[10px] leading-relaxed text-slate-500 break-all bg-white border border-slate-200 rounded-xl px-2 py-1.5 ${className}`}>
+    {value}
+  </p>
+);
 
 interface ActiveMsgGlobalSettingsModalProps {
   isOpen: boolean;
@@ -33,9 +52,12 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   const [loading, setLoading] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [deployOpen, setDeployOpen] = useState(false);
+  // 手动粘贴部署：给没有 GitHub 账号的人留的退路，默认收着不干扰主流程。
+  const [pasteFallbackOpen, setPasteFallbackOpen] = useState(false);
   const [pushStatus, setPushStatus] = useState<ActiveMsg2PushStatus | null>(null);
   // 「生成 Master Key」只在本次打开期间展示，前端不落盘——它是 worker 侧密钥，粘进 CF env 即可。
   const [generatedMasterKey, setGeneratedMasterKey] = useState('');
+  const [generatedServerToken, setGeneratedServerToken] = useState('');
 
   const [workerOutdated, setWorkerOutdated] = useState(false);
 
@@ -44,7 +66,11 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   const probeWorkerCaps = async () => {
     try {
       const caps = await ActiveMsgClient.getCapabilities();
-      setWorkerOutdated(!caps || REQUIRED_WORKER_FEATURES.some((f) => !caps.features.includes(f)));
+      setWorkerOutdated(
+        !caps
+        || REQUIRED_WORKER_FEATURES.some((f) => !caps.features.includes(f))
+        || !isAmsgServerVersionAtLeast(caps.serverVersion, REQUIRED_WORKER_VERSION),
+      );
     } catch {
       setWorkerOutdated(false);
     }
@@ -62,7 +88,10 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     if (!isOpen) return;
     setAdvancedOpen(false);
     setDeployOpen(false);
+    setPasteFallbackOpen(false);
+    // 两个明文密钥都要清：留到下次打开面板还挂在页面上，就是白白多摊一次。
     setGeneratedMasterKey('');
+    setGeneratedServerToken('');
     void refresh();
   }, [isOpen]);
 
@@ -119,6 +148,8 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     }
   };
 
+  // 手动粘贴部署用。主流程是 fork sullyos-workers + 在 CF 连 Git，这条是给没有 GitHub
+  // 账号的人留的退路，所以在面板里收在折叠区里。
   const handleCopyWorkerBundle = async () => {
     try {
       await ActiveMsgClient.copyWorkerBundleToClipboard();
@@ -128,19 +159,26 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     }
   };
 
-  const handleGenerateMasterKey = async () => {
-    const key = ActiveMsgClient.generateMasterKey();
-    setGeneratedMasterKey(key);
+  /**
+   * 把刚生成的密钥交给用户：存进 state 供展示 + 尽量复制到剪贴板。
+   * 输入框是 password 型看不见内容，所以生成时必须把值显示出来，
+   * 否则「把同样的值填进 Worker 环境变量」这一步没法做。
+   */
+  const revealAndCopy = async (value: string, reveal: (v: string) => void, envName: string) => {
+    reveal(value);
     try {
-      await navigator.clipboard.writeText(key);
-      addToast('已生成并复制，粘进 Worker 环境变量 AMSG_MASTER_KEY。', 'success');
+      await navigator.clipboard.writeText(value);
+      addToast(`已生成并复制，粘进 Worker 环境变量 ${envName}。`, 'success');
     } catch {
       addToast('已生成，请手动从下方复制。', 'info');
     }
   };
 
+  const handleGenerateMasterKey = () =>
+    revealAndCopy(ActiveMsgClient.generateMasterKey(), setGeneratedMasterKey, 'AMSG_MASTER_KEY');
+
   const handleClearClientState = async () => {
-    if (!confirm('确定清空云端状态？Worker D1 里同步的角色上下文（fire_pack）会全部删除。已排程任务不受影响——到点会退回使用排程时冻结的提示词，下次聊天后会重新同步。')) return;
+    if (!confirm('确定清空云端状态？Worker D1 里同步的角色上下文（fire_pack）会全部删除。在下一次聊天重新同步之前，已排程的 AI 任务到点会失败；固定消息任务不受影响。')) return;
     setLoading(true);
     try {
       const { deleted } = await ActiveMsgClient.clearClientState();
@@ -153,8 +191,9 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   };
 
   const handleGenerateServerToken = () => {
-    patchConfig({ serverToken: generateClientToken() });
-    addToast('已生成共享密钥，记得把同样的值填进 Worker 环境变量 AMSG_SERVER_TOKEN。', 'info');
+    const token = generateClientToken();
+    patchConfig({ serverToken: token });
+    return revealAndCopy(token, setGeneratedServerToken, 'AMSG_SERVER_TOKEN');
   };
 
   if (!config) return null;
@@ -201,38 +240,65 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
 
           {deployOpen ? (
             <div className="space-y-3">
+              <p className="text-xs leading-relaxed text-slate-500">
+                全程在网页上点，不用装东西也不用敲命令，大约 15 分钟。第一次做建议直接照着
+                <strong>图文教程</strong>走，下面是简版。
+              </p>
+
               <ol className="text-xs leading-relaxed text-slate-500 space-y-1.5 list-decimal list-outside pl-4">
                 <li>
-                  点下面「复制 Worker 代码」，去 CF 后台 Create → Worker 建一个空 Worker，
-                  进 <strong>Edit code</strong> 全选粘贴覆盖，点 Deploy。全程不用命令行。
+                  Fork 后端仓库 <code className="font-mono">sullyos-workers</code>
+                  （页面右上角 Fork → Create fork）。
                 </li>
                 <li>
-                  Worker 的 Settings → Bindings 加一个 <strong>D1 database</strong>，
-                  变量名必须是 <code className="font-mono">DB</code>。库没有就现场新建一个空库；
-                  表不用建，下面点「连接」时会自动建好。
+                  CF 后台 Storage &amp; databases → <strong>D1 SQLite Database</strong> 建一个库，
+                  把它的 <strong>Database ID</strong> 复制下来。表不用建，下面点「连接」时会自动建好。
                 </li>
                 <li>
-                  Settings → Trigger Events 加 <strong>Cron Trigger</strong>：
-                  <code className="font-mono"> * * * * * </code>（每分钟检查一次到点任务）。
+                  CF 后台 Workers &amp; Pages → <strong>Create application</strong> →
+                  <strong> Continue with GitHub</strong>，选中你 fork 的仓库，然后填：
+                  <ul className="mt-1 space-y-0.5 list-disc list-outside pl-4">
+                    <li>Build command：<code className="font-mono">sh ./deploy-prepare.sh</code></li>
+                    <li>Advanced settings → Path：<code className="font-mono">/amsg</code></li>
+                    <li>
+                      Advanced settings 里加一个构建变量
+                      <code className="font-mono"> D1_DATABASE_ID </code>
+                      = 上一步的 Database ID（<strong>别点 Encrypt</strong>，构建时要读它）
+                    </li>
+                  </ul>
                 </li>
-                <li>Settings → Variables and Secrets 按下面的清单填环境变量，然后重新 Deploy 一次。</li>
+                <li>部署完在 Settings → Variables and secrets 按下面的清单填密钥，再 Deploy 一次。</li>
               </ol>
 
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => void handleCopyWorkerBundle()}
-                  className="py-2.5 rounded-xl text-xs font-bold bg-violet-500 text-white active:scale-95 transition-transform"
+              <p className="text-[11px] leading-relaxed text-slate-400">
+                D1 绑定和「每分钟检查一次」的定时触发器都写在仓库里，会自动带上，不用手动加。
+                以后想更新，回你 fork 的仓库点一下 <strong>Sync fork</strong> 就行，CF 会自动重新部署。
+              </p>
+
+              <div className="grid grid-cols-3 gap-2">
+                <a
+                  href={WORKERS_REPO_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="py-2.5 rounded-xl text-xs font-bold bg-violet-500 text-white text-center active:scale-95 transition-transform"
                 >
-                  复制 Worker 代码
-                </button>
+                  ↗ Fork 仓库
+                </a>
+                <a
+                  href={SETUP_WALKTHROUGH_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="py-2.5 rounded-xl text-xs font-bold bg-white border border-slate-200 text-slate-600 text-center active:scale-95 transition-transform"
+                >
+                  ↗ 图文教程
+                </a>
                 <a
                   href={buildCloudflareDashboardUrl(config.workerUrl.trim() || undefined)}
                   target="_blank"
                   rel="noreferrer"
                   className="py-2.5 rounded-xl text-xs font-bold bg-white border border-slate-200 text-slate-600 text-center active:scale-95 transition-transform"
                 >
-                  ↗ CF Dashboard
+                  ↗ CF 面板
                 </a>
               </div>
 
@@ -251,9 +317,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
                     </button>
                   </div>
                   {generatedMasterKey ? (
-                    <p className="font-mono text-[10px] leading-relaxed text-slate-500 break-all bg-white border border-slate-200 rounded-xl px-2 py-1.5">
-                      {generatedMasterKey}
-                    </p>
+                    <SecretReveal value={generatedMasterKey} />
                   ) : (
                     <p className="text-[11px] text-slate-400">加密任务内容用的密钥，只存在 Worker 侧。生成后粘进去即可，本页不保存。</p>
                   )}
@@ -285,6 +349,50 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
                   </p>
                 </div>
               </div>
+
+              <div className="border-t border-slate-100 pt-2.5">
+                <button
+                  type="button"
+                  onClick={() => setPasteFallbackOpen((prev) => !prev)}
+                  className="w-full flex items-center justify-between text-left text-[11px] font-bold text-slate-400"
+                >
+                  <span>没有 GitHub 账号？手动粘贴部署</span>
+                  <span>{pasteFallbackOpen ? '收起' : '展开'}</span>
+                </button>
+
+                {pasteFallbackOpen ? (
+                  <div className="mt-2 space-y-2">
+                    <ol className="text-[11px] leading-relaxed text-slate-500 space-y-1.5 list-decimal list-outside pl-4">
+                      <li>
+                        点下面「复制 Worker 代码」，CF 后台 Create → Worker 建一个空 Worker，
+                        进 <strong>Edit code</strong> 全选粘贴覆盖，Deploy。
+                      </li>
+                      <li>
+                        Settings → Bindings 加一个 <strong>D1 database</strong>，
+                        变量名必须是 <code className="font-mono">DB</code>。
+                      </li>
+                      <li>
+                        Settings → Trigger Events 加 <strong>Cron Trigger</strong>：
+                        <code className="font-mono"> * * * * * </code>（每分钟检查一次到点任务）。
+                      </li>
+                      <li>Settings → Variables and secrets 按上面的清单填密钥，然后重新 Deploy 一次。</li>
+                    </ol>
+
+                    <button
+                      type="button"
+                      onClick={() => void handleCopyWorkerBundle()}
+                      className="w-full py-2.5 rounded-xl text-xs font-bold bg-white border border-slate-200 text-slate-600 active:scale-95 transition-transform"
+                    >
+                      复制 Worker 代码
+                    </button>
+
+                    <p className="text-[11px] leading-relaxed text-slate-400">
+                      这条路每次 Worker 更新都要重新粘一遍，D1 绑定和定时触发器也得自己加，容易漏。
+                      能用 GitHub 的话还是走上面的 fork 流程。
+                    </p>
+                  </div>
+                ) : null}
+              </div>
             </div>
           ) : null}
         </div>
@@ -300,7 +408,9 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
           {workerOutdated ? (
             <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 text-xs leading-relaxed text-amber-700">
               Worker 上跑的还是旧版代码，缺少新特性（大上下文云端存储、服务端工具循环等）。
-              去下方「部署 Worker」重新「复制 Worker 代码」，到 CF 后台粘贴覆盖并 Deploy 即可，已有数据和任务不受影响。
+              回你 fork 的 <code className="font-mono">sullyos-workers</code> 仓库点一下
+              <strong> Sync fork</strong>，CF 会自动重新部署（当初是手动粘贴部署的话，
+              去下方「部署 Worker」里重新复制一次代码粘贴覆盖）。已有数据和任务不受影响。
             </div>
           ) : null}
 
@@ -331,12 +441,15 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
               />
               <button
                 type="button"
-                onClick={handleGenerateServerToken}
+                onClick={() => void handleGenerateServerToken()}
                 className="shrink-0 px-3 py-3 text-xs rounded-2xl font-bold bg-white border border-slate-200 text-slate-600 active:scale-95 transition-transform"
               >
                 随机
               </button>
             </div>
+            {generatedServerToken ? (
+              <SecretReveal value={generatedServerToken} className="mt-1.5" />
+            ) : null}
           </div>
 
           <button
@@ -400,14 +513,14 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
                 </div>
               </div>
               <p className="text-[11px] leading-relaxed text-slate-500">
-                Worker 侧的环境变量清单见上面「部署 Worker」一节。站点发布的 Worker 代码默认 CORS 全开
-                （<code className="font-mono">origin: '*'</code>），想收紧就在粘贴前把它改成自己站点的域名。
+                Worker 侧的环境变量清单见上面「部署 Worker」一节。发布的 Worker 代码默认 CORS 全开
+                （<code className="font-mono">origin: '*'</code>），想收紧就把它改成自己站点的域名再部署。
               </p>
               <div className="bg-rose-50 border border-rose-100 rounded-2xl p-3 space-y-2">
                 <div className="font-semibold text-rose-700">清除云端状态</div>
                 <p className="text-[11px] leading-relaxed text-rose-600">
-                  删除 Worker D1 里同步的角色上下文（角色卡、最近聊天窗口等）。已排程任务不受影响，
-                  到点退回排程时冻结的提示词；下次聊天后会自动重新同步。
+                  删除 Worker D1 里同步的角色上下文（角色卡、最近聊天窗口等）。角色靠它到点现场组消息，
+                  所以在下次聊天自动重新同步之前，已排程的 AI 任务到点会失败；固定消息任务不受影响。
                 </p>
                 <button
                   onClick={() => void handleClearClientState()}

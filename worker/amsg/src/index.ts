@@ -22,12 +22,14 @@
 import {
   createSingleUserCloudflareWorker,
   createWebCryptoWebPush,
+  measurePushPayload,
 } from '@rei-standard/amsg-server/cloudflare';
 import { stripReasoningTags } from '@rei-standard/amsg-shared';
-import type { CharacterProfile, RealtimeConfig, UserProfile } from '../../../types';
+import type { UserProfile } from '../../../types';
 import {
   AMSG_FIRE_PACK_KEY,
   amsgStateNamespace,
+  amsgXhsSessionKey,
   parseFirePack,
   renderFirePack,
 } from '../../../utils/amsgFirePack';
@@ -43,8 +45,10 @@ import {
   AMSG_TOOL_PACK_KEY,
   parseToolConfig,
   parseToolPack,
+  type AmsgToolConfig,
+  type AmsgToolPack,
 } from '../../../utils/amsgToolPack';
-import { dispatchAgenticTool, type AgenticToolCtx } from '../../../utils/agenticTools';
+import { dispatchAgenticTool, type AgenticToolChar, type AgenticToolCtx } from '../../../utils/agenticTools';
 import { setProxyWorkerUrlOverride } from '../../../utils/proxyWorker';
 import { XhsMcpClient } from '../../../utils/xhsMcpClient';
 import {
@@ -66,18 +70,18 @@ interface Env {
 
 // ─── 满血 fire-time hooks（amsg-server 2.6.0-next.4+：含 ctx.scratch / 存储层大值分块） ───
 //
-// AI 任务到点不再吃排程时冻结的 completePrompt，而是读前端平时同步上来的
-// fire_pack（client_state 表，见 utils/amsgFirePack.ts + utils/amsgStateSync.ts），
-// 在 fire 时刻现算时间填槽 → 上下文永远是「用户最后一次聊天时」的状态。
-// 读不到 fire_pack（老任务 / 从没同步过 / 数据坏了）→ onBeforeFire 返回 null，
-// 库自动回退冻结 prompt 老链路，行为和 2.6.0-next.2 完全一致。
+// AI 任务的 prompt 到点才组装：读前端同步上来的 fire_pack（client_state 表，见
+// utils/amsgFirePack.ts + utils/amsgStateSync.ts），在 fire 时刻现算时间填槽 →
+// 上下文永远是「用户最后一次聊天时」的状态。任务体里没有第二份 prompt——排程链保证
+// 「先传云端状态、成功了再建任务」（activeMsgClient 的 putClientStateOrThrow），
+// 所以读不到 fire_pack 就是异常，直接抛错，不降级（见 fireStateError）。
 //
 // v2 服务端工具循环：LLM 输出经 instant 同款业务标签 classifier 分类
 // （见 ./agentic.ts），数据标签由 executeToolCalls 在 worker 内就地执行
 // （recall 读 tool_pack 里的月度总结，搜索 / Notion / 飞书 / XHS 用 tool_config
 // 里的凭据直调，全程不需要客户端在线）；副作用标签结构化成 directives 挂
-// 最后一条 push，客户端收到时重放。tool_pack / tool_config 缺失时工具会以
-// not_configured / no_logs 之类的正常失败回给 LLM 圆场，fire 链不会断。
+// 最后一条 push，客户端收到时重放。tool_pack / tool_config 与 fire_pack 同批上传，
+// 所以和它一样按「读不到就是异常」处理；没配凭据的工具自己会回 not_configured。
 //
 // 刻意只发 content push、不发 reasoning push：hook 路径的 sendHookPushPayloads
 // 会把 pushPayloads 数组整体编号（messageIndex/totalMessages），reasoning 一旦混进
@@ -104,6 +108,12 @@ interface FireCtx {
   scratch: Record<string, unknown>;
 }
 
+/** client_state 的写入口（amsg-server 2.6.0-next.7+）；value 传 null 即删除该 key。 */
+type WriteState = (
+  namespace: string,
+  entries: Array<{ key: string; value: string | null; updatedAt?: number }>,
+) => Promise<{ upserted: number; skipped: number; deleted: number }>;
+
 interface SessionCtx {
   sessionId: string;
   llmResponse: unknown;
@@ -112,6 +122,7 @@ interface SessionCtx {
   avatarUrl?: string;
   metadata: Record<string, unknown>;
   scratch?: Record<string, unknown>;
+  writeState?: WriteState;
 }
 
 /** 一次 fire 的跨轮状态：工具执行上下文 + 旁白累积。挂在 ctx.scratch.fire 上。 */
@@ -121,7 +132,7 @@ interface FireStash {
   proxyWorkerUrl: string | null;
   xhsCookie: string;
   /** 本次触发时刻（任务行 next_send_at）；透传给每条 push 的 metadata.amsgOccurrenceMs。 */
-  occurrenceMs: number | null;
+  occurrenceMs: number;
 }
 
 const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash | undefined =>
@@ -129,48 +140,31 @@ const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash |
 
 /**
  * 用云端 tool_pack / tool_config 拼 dispatchAgenticTool 要的 ctx。
- * 两份数据都可能缺（老前端 / 没同步过）——缺了就给空壳，工具自己会走
- * not_configured / no_logs 的正常失败路径回给 LLM。
+ *
+ * 纯构造：解析与「解析不出来怎么办」都留在 onBeforeFire（它才知道 taskId / charId 这些
+ * 报错上下文），这里只管把两份已经验好的数据装成 ctx。
  */
 const buildToolCtx = (
-  toolPackRaw: string | undefined,
-  toolConfigRaw: string | undefined,
-  fallbackCharName: string,
+  pack: AmsgToolPack,
+  config: AmsgToolConfig,
 ): { toolCtx: AgenticToolCtx; proxyWorkerUrl: string | null; xhsCookie: string } => {
-  const pack = toolPackRaw ? parseToolPack(toolPackRaw) : null;
-  const config = toolConfigRaw ? parseToolConfig(toolConfigRaw) : null;
-
-  // agenticTools 只读这些字段（runRecall / resolveXhsConfig / 日记按角色名查），
-  // 其余 CharacterProfile 字段在 worker 侧不存在也不会被碰。
-  const char = {
-    name: pack?.charName || fallbackCharName,
-    xhsEnabled: pack?.xhsEnabled ?? false,
-    activeMemoryMonths: pack?.activeMemoryMonths ?? [],
-    memories: pack?.memories ?? [],
-  } as unknown as CharacterProfile;
-
-  const realtimeConfig = config
-    ? ({
-        newsEnabled: config.newsEnabled,
-        newsApiKey: config.newsApiKey,
-        notionEnabled: config.notionEnabled,
-        notionApiKey: config.notionApiKey,
-        notionDatabaseId: config.notionDatabaseId,
-        notionNotesDatabaseId: config.notionNotesDatabaseId,
-        feishuEnabled: config.feishuEnabled,
-        feishuAppId: config.feishuAppId,
-        feishuAppSecret: config.feishuAppSecret,
-        feishuBaseId: config.feishuBaseId,
-        feishuTableId: config.feishuTableId,
-        xhsMcpConfig: config.xhsMcpConfig,
-      } as unknown as RealtimeConfig)
-    : undefined;
+  // AgenticToolChar 就是 agenticTools 真正会读的那几个字段（runRecall / resolveXhsConfig /
+  // 日记按角色名查）。用它当类型而不是硬转 CharacterProfile：那边多读一个字段这里就编译不过，
+  // 不会等到 worker 到点才拿到 undefined。
+  const char: AgenticToolChar = {
+    name: pack.charName,
+    xhsEnabled: pack.xhsEnabled,
+    activeMemoryMonths: pack.activeMemoryMonths,
+    memories: pack.memories,
+  };
 
   return {
     toolCtx: {
       char,
       userProfile: {} as UserProfile,
-      realtimeConfig,
+      // AmsgToolConfig 的凭据字段就是 AgenticToolRealtimeConfig，结构化直接满足——
+      // 不用逐字段抄一遍再强转，那样 buildToolConfig 加字段这里不会报错。
+      realtimeConfig: config,
       // XHS 多步流程（search → detail 的 xsecToken 缓存）在同一次 fire 内共享。
       xhsCaches: {
         xsecTokenCache: new Map(),
@@ -181,15 +175,82 @@ const buildToolCtx = (
       },
       lastXhsNotesRef: { current: [] },
     },
-    proxyWorkerUrl: config?.proxyWorkerUrl ?? null,
-    xhsCookie: config?.xhsMcpConfig?.cookie ?? '',
+    proxyWorkerUrl: config.proxyWorkerUrl ?? null,
+    xhsCookie: config.xhsMcpConfig?.cookie ?? '',
   };
 };
 
-const amsgHooks = {
+/**
+ * fire 前置状态不完整时抛这个 —— 不降级。
+ *
+ * 排程链已经保证「先传云端状态、成功了再建任务」（见 activeMsgClient 的
+ * putClientStateOrThrow），所以到点读不到 fire_pack 只有三种可能：云端状态被删了、
+ * 数据坏了、任务是开发期的旧格式。都是异常，不是能悄悄降级的正常分支。
+ *
+ * 为什么抛错而不是 { skip: true }：skip 是「这次故意不发」的出口（防穿帮闸在用），
+ * 用它表达「坏了」会把两件事混在一起，而且循环任务会天天静默不响、只有 worker 日志
+ * 里看得见。抛错走库的投递失败路径（重试 3 次后把任务标 failed），至少留下痕迹。
+ */
+const fireStateError = (reason: string, detail: Record<string, unknown>): Error => {
+  console.error('[amsg:fire-state-missing]', { reason, ...detail });
+  return new Error(`AMSG2_FIRE_STATE_MISSING: ${reason}`);
+};
+
+/**
+ * 一条 push 装不下时，把 XHS 会话数据旁路存进 client_state，payload 里只留引用键。
+ *
+ * Web Push 的 payload 上限是 4096 字节密文（明文 3993，见 measurePushPayload），
+ * 一张笔记连标题带摘要就六七百字节。过去的做法是硬砍到 4 张，于是角色说「分享了 6 张」
+ * 而只出来 4 张卡——话和内容对不上，一眼假。现在改成按真实字节算：装得下就照装
+ * （日常 1-3 张走的就是这条，行为不变），装不下才把整份挪到 client_state，
+ * 客户端上线后按 `metadata.xhsSessionRef` 取回，一张不少。
+ *
+ * 存不进去时**抛错**而不是砍内容：抛错走投递失败重试，砍内容则是当场穿帮且无从察觉。
+ */
+export const offloadOversizedPush = async (
+  payload: Record<string, unknown>,
+  writeState: WriteState | undefined,
+  charId: string,
+  clientTaskId: string,
+): Promise<Record<string, unknown>> => {
+  if (measurePushPayload(JSON.stringify(payload)).withinLimit) return payload;
+
+  const meta = (payload.metadata ?? {}) as Record<string, unknown>;
+  if (!meta.xhsSession) return payload;   // 没有可旁路的东西，交给库抛 PUSH_PAYLOAD_TOO_LARGE
+
+  if (typeof writeState !== 'function') {
+    // 老部署（amsg-server < 2.6.0-next.7）没有写入口。不静默砍卡片——抛错让这次投递
+    // 失败重试，设置页的版本门槛会提示用户重新粘贴部署。
+    throw new Error('AMSG2_WRITE_STATE_UNSUPPORTED: push 超限需要旁路存储，请在设置页重新粘贴部署 worker');
+  }
+
+  const key = amsgXhsSessionKey(clientTaskId);
+  await writeState(amsgStateNamespace(charId), [
+    { key, value: JSON.stringify(meta.xhsSession) },
+  ]);
+  const { xhsSession: _offloaded, ...restMeta } = meta;
+  const slimmed = { ...payload, metadata: { ...restMeta, xhsSessionRef: key } };
+  console.log('[amsg:agentic] XHS 会话数据旁路存储', {
+    key,
+    charId,
+    beforeBytes: measurePushPayload(JSON.stringify(payload)).bytes,
+    afterBytes: measurePushPayload(JSON.stringify(slimmed)).bytes,
+  });
+  return slimmed;
+};
+
+// export 只为单测（见 index.test.ts）：onBeforeFire 的四道门顺序是这个功能最关键的
+// 决策路径，一个判断写错位就是「该拦的没拦」或「全都不发」，必须有回归守卫钉住。
+export const amsgHooks = {
   async onBeforeFire(ctx: FireCtx) {
     const charId = ctx.task?.metadata?.charId;
-    if (typeof charId !== 'string' || !charId) return null;
+    if (typeof charId !== 'string' || !charId) {
+      throw fireStateError('task metadata 缺 charId', { taskId: ctx.task.id });
+    }
+    // 下面每道门的报错都带同一套定位信息，绑一次就好——逐处手抄 detail 的话，
+    // 加一道门就要再抄一遍，漏了就是一条查不到是谁的错误日志。
+    const fail = (reason: string, extra?: Record<string, unknown>) =>
+      fireStateError(reason, { taskId: ctx.task.id, charId, ...extra });
 
     const charRows = await ctx.readState(amsgStateNamespace(charId));
 
@@ -199,7 +260,8 @@ const amsgHooks = {
 
     // 同角色活跃会话租约：一轮对话生成期间客户端每 15s 续租，45s TTL。
     // 这是 worker 防通知的第一道快速门；缺失/过期/坏数据就继续走 fire_pack 规则。
-    // 必须放在 packRow 空返回之前：新任务即使 fire_pack 同步失败，轻量心跳仍应能阻止正在聊天时生成。
+    // 保持在 fire_pack 检查之前：用户正在聊天时应该直接 skip，既省一次状态读，
+    // 也让「状态不完整」的异常任务在用户正忙时安静跳过、而不是抛错刷失败计数。
     const presence = parseAmsgChatPresence(
       charRows.find((r) => r.key === AMSG_CHAT_PRESENCE_KEY)?.value,
     );
@@ -213,13 +275,20 @@ const amsgHooks = {
     }
 
     const packRow = charRows.find((r) => r.key === AMSG_FIRE_PACK_KEY);
-    if (!packRow) return null;
+    if (!packRow) throw fail('云端没有这个角色的 fire_pack');
 
-    // 大值分块由 amsg-server 2.6.0-next.4+ 在存储层透明处理，readState 拿到的
-    // 已是拼回的原文。（更早的应用层分块格式落库的旧数据 parse 不过 → null →
-    // 照旧退冻结提示词，下轮聊天同步会用新格式覆盖。）
+    // 大值分块由 amsg-server 2.6.0-next.4+ 在存储层透明处理，readState 拿到的已是拼回的原文。
     const pack = parseFirePack(packRow.value);
-    if (!pack) return null;
+    if (!pack) throw fail('fire_pack 解析失败（格式不对或数据损坏）');
+
+    // 本次触发时刻：任务行 next_send_at（NOT NULL，buildHookTask 已摊平提供）。防穿帮闸的
+    // 循环判定要拿它当窗口锚点，之后又经 scratch 透传给每条 push 的 metadata.amsgOccurrenceMs
+    // （客户端兜底闸的循环判定与吞放缓存键都要它）。解析不出来说明上游任务行的时间格式变了，
+    // 按状态异常硬失败。
+    const occurrenceMs = Date.parse(String(ctx.task.nextSendAt));
+    if (!Number.isFinite(occurrenceMs)) {
+      throw fail('任务行 next_send_at 解析不出触发时刻', { nextSendAt: ctx.task.nextSendAt });
+    }
 
     // 防穿帮闸·worker 主判定：一次性任务创建后对话已前进 / 循环任务到点时用户
     // 正在热聊 → { skip: true } 跳过本次 fire（amsg-server skip 出口，任务照常
@@ -228,44 +297,40 @@ const amsgHooks = {
     // （activeMsgRuntime 的 runtime-expire-swallow）。缺策略字段的任务不拦。
     const expireInput = {
       policy,
-      recurrenceType: typeof ctx.task.recurrenceType === 'string'
-        ? ctx.task.recurrenceType
-        : (typeof taskMeta.amsgRecurrence === 'string' ? taskMeta.amsgRecurrence : undefined),
+      recurrenceType: ctx.task.recurrenceType,
       anchorMs: typeof taskMeta.amsgAnchorMs === 'number' ? taskMeta.amsgAnchorMs : null,
       lastUserMessageAt: pack.lastUserMessageAt ?? null,
       nowMs: ctx.now.getTime(),
+      occurrenceMs,
     };
     if (shouldExpireFire(expireInput)) {
       console.log('[amsg:expire-skip]', { taskId: ctx.task.id, ...expireInput });
       return { skip: true } as const;
     }
 
-    // 遗留任务（metadata 无 amsgTaskInstruction 的 AI 任务，Codex #8）：不能用 v2 pack
-    // + 默认 auto 指令渲染——那会把 prompted 任务的方向偷换掉。直接回退该任务排程时
-    // 冻结的 completePrompt（按任务各自生成，语义正确，只是上下文停在排程时刻）。
-    if (typeof taskMeta.amsgTaskInstruction !== 'string') return null;
-
-    // 本次触发时刻：任务行 next_send_at（buildHookTask 已摊平提供）。经 scratch 透传
-    // 给每条 push 的 metadata.amsgOccurrenceMs——客户端兜底闸的循环判定与吞放缓存键
-    // 都要它（Codex #2/#10）。
-    const parsedOccurrence = ctx.task.nextSendAt ? Date.parse(String(ctx.task.nextSendAt)) : NaN;
-    const occurrenceMs = Number.isFinite(parsedOccurrence) ? parsedOccurrence : null;
+    // 任务指令缺失（开发期旧格式任务）：不能用默认 auto 指令凑一个渲染——那会把
+    // prompted 任务的方向偷换掉，发出去的内容和用户当初排的不是一回事。
+    if (typeof taskMeta.amsgTaskInstruction !== 'string') {
+      throw fail('任务 metadata 缺 amsgTaskInstruction（旧格式任务）');
+    }
 
     // 工具数据与 prompt 同拍装好，挂 ctx.scratch 给同一次 fire 的
     // onLLMOutput / executeToolCalls（库保证同引用、fire 结束即丢，
     // 不需要自维护 sessionId → 状态的 Map 和防泄漏水位）。
-    let toolConfigRaw: string | undefined;
-    try {
-      const globalRows = await ctx.readState(AMSG_GLOBAL_NAMESPACE);
-      toolConfigRaw = globalRows.find((r) => r.key === AMSG_TOOL_CONFIG_KEY)?.value;
-    } catch (error) {
-      console.warn('[amsg:agentic] 读 tool_config 失败，工具按未配置继续', error);
-    }
-    const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(
-      charRows.find((r) => r.key === AMSG_TOOL_PACK_KEY)?.value,
-      toolConfigRaw,
-      typeof ctx.task.contactName === 'string' ? ctx.task.contactName : '',
-    );
+    const globalRows = await ctx.readState(AMSG_GLOBAL_NAMESPACE);
+    const toolPackRow = charRows.find((r) => r.key === AMSG_TOOL_PACK_KEY);
+    const toolConfigRow = globalRows.find((r) => r.key === AMSG_TOOL_CONFIG_KEY);
+    if (!toolPackRow) throw fail('云端没有这个角色的 tool_pack');
+    if (!toolConfigRow) throw fail('云端没有 tool_config');
+
+    // 两份数据和 fire_pack 同批原子上传（activeMsgClient 的 putClientStateOrThrow），
+    // 所以走到这里必然都在；解析不出来就是云端状态坏了，硬失败不降级。
+    const toolPack = parseToolPack(toolPackRow.value);
+    if (!toolPack) throw fail('tool_pack 解析失败（格式不对或数据损坏）');
+    const toolConfig = parseToolConfig(toolConfigRow.value);
+    if (!toolConfig) throw fail('tool_config 解析失败（格式不对或数据损坏）');
+
+    const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
     ctx.scratch.fire = {
       session: createFireSessionState(),
       toolCtx,
@@ -275,9 +340,7 @@ const amsgHooks = {
     } satisfies FireStash;
 
     // fire_pack v2：「本次任务」指令随任务 metadata 走，这里填槽。
-    const prompt = renderFirePack(pack, ctx.now.getTime(), {
-      taskInstruction: taskMeta.amsgTaskInstruction as string,
-    });
+    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction);
     return [{ role: 'user' as const, content: prompt }];
   },
 
@@ -289,10 +352,23 @@ const amsgHooks = {
     const taskId = ctx.sessionId.startsWith('sess_task_')
       ? ctx.sessionId.slice('sess_task_'.length)
       : null;
+    if (taskId == null) {
+      // 拆不出说明上游 sessionId 格式变了，而后果是静默的：送达消息的
+      // metadata.activeMsg2.taskId 会是 null → 客户端 hasDeliveredProactiveNear 判定
+      // 「这次没送达过」→ 排程现状块给角色注入一条假的「已作废」回执，角色可能把已经
+      // 发出去的事又当没发生。留个日志，别让它只能靠猜。
+      console.warn('[amsg:agentic] sessionId 不是 sess_task_<id> 格式，taskId 置空（送达归属会失效）', ctx.sessionId);
+    }
     const messageType = typeof ctx.metadata?.amsgMode === 'string' ? ctx.metadata.amsgMode : 'auto';
 
+    // onBeforeFire 要么抛错、要么 skip、要么在返回 messages 之前把 stash 挂上，所以
+    // 走到这里 stash 必然存在（库保证 fireCtx.scratch 与每轮 sessionCtx.scratch 同引用）。
+    // 真缺了就是这个前提被打破（比如库不再共享 scratch）——响亮地失败，别静默丢旁白。
     const stash = getFireStash(ctx.scratch);
-    const session = stash?.session ?? createFireSessionState();
+    if (!stash) {
+      throw new Error('AMSG2_FIRE_STASH_MISSING: onLLMOutput 读不到 ctx.scratch.fire，检查 amsg-server 是否仍共享 scratch');
+    }
+    const session = stash.session;
 
     const decision = processLLMRound(session, content, {
       contactName: ctx.contactName,
@@ -300,12 +376,12 @@ const amsgHooks = {
       taskId,
       messageType,
       metadata: ctx.metadata,
-      occurrenceMs: stash?.occurrenceMs ?? null,
+      occurrenceMs: stash.occurrenceMs,
       // round 1 XHS 工具抓到的笔记 / xsecToken 快照：finish 时按 directive 引用
       // 挑选后随最后一条 push 带回客户端（客户端离线跑不了 round 1，缺这份
       // [[XHS_SHARE]] / 点赞 / 评论重放必然 available:0 掉卡片）。
-      xhsNotes: stash?.toolCtx.lastXhsNotesRef?.current,
-      xhsXsecTokens: stash?.toolCtx.xhsCaches
+      xhsNotes: stash.toolCtx.lastXhsNotesRef?.current,
+      xhsXsecTokens: stash.toolCtx.xhsCaches
         ? Array.from(stash.toolCtx.xhsCaches.xsecTokenCache.entries())
         : undefined,
     });
@@ -325,6 +401,22 @@ const amsgHooks = {
       });
     }
 
+    if (decision.decision === 'finish') {
+      // 发之前按真实字节预算过一遍：装不下的 XHS 会话数据旁路存起来，push 只留引用键。
+      // clientTaskId 当存储键（每任务一份、下次触发覆盖），缺了就没法旁路——那时超限会
+      // 由库抛 PUSH_PAYLOAD_TOO_LARGE，照样不会静默丢消息。
+      const clientTaskId = typeof ctx.metadata?.amsgClientTaskId === 'string'
+        ? ctx.metadata.amsgClientTaskId : '';
+      const charId = typeof ctx.metadata?.charId === 'string' ? ctx.metadata.charId : '';
+      if (clientTaskId && charId) {
+        const budgeted = [];
+        for (const payload of decision.pushPayloads) {
+          budgeted.push(await offloadOversizedPush(payload, ctx.writeState, charId, clientTaskId));
+        }
+        return { ...decision, pushPayloads: budgeted };
+      }
+    }
+
     return decision;
   },
 
@@ -337,10 +429,21 @@ const amsgHooks = {
     ctx: SessionCtx,
   ) {
     const stash = getFireStash(ctx.scratch);
-    // 搜索/Notion/飞书经代理 worker 转发；地址来自前端同步的 tool_config
-    //（没同步则回默认公共实例）。XHS Lite cookie 同拍注入。
-    setProxyWorkerUrlOverride(stash?.proxyWorkerUrl ?? null);
-    XhsMcpClient.setCookie(stash?.xhsCookie || '');
+    if (!stash) {
+      throw new Error('AMSG2_FIRE_STASH_MISSING: executeToolCalls 读不到 ctx.scratch.fire，检查 amsg-server 是否仍共享 scratch');
+    }
+    // 搜索/Notion/飞书经代理 worker 转发；地址来自前端同步的 tool_config。XHS Lite cookie 同拍注入。
+    //
+    // 这两个注入写的是 isolate 级全局，而库到点最多并发跑 8 个任务（MAX_CONCURRENT=8）。
+    // 现在安全的前提是：两个值都来自全局 namespace 的 tool_config，所有角色同一份，
+    // 并发写的是同一个值。缺值时不覆盖——tool_config 瞬时读失败的那个 fire 不该把并发中
+    // 另一个 fire 已经注入好的值清成空。
+    //
+    // TODO(按角色配凭据)：应用层目前不支持（realtimeConfig 是全局单份，按角色的只有
+    // char.xhsEnabled 这个开关）。哪天凭据改成按角色配，这里必须改成显式传参——否则
+    // 同一分钟并发的两个角色会互相串凭据，而且不会报错。
+    if (stash.proxyWorkerUrl) setProxyWorkerUrlOverride(stash.proxyWorkerUrl);
+    if (stash.xhsCookie) XhsMcpClient.setCookie(stash.xhsCookie);
 
     const results = [];
     for (const toolCall of toolCalls) {
@@ -348,9 +451,7 @@ const amsgHooks = {
       let content: string;
       try {
         const args = toolCall?.function?.arguments ? JSON.parse(toolCall.function.arguments) : {};
-        const result = stash
-          ? await dispatchAgenticTool(name, args, stash.toolCtx)
-          : { ok: false, reason: 'no_tool_state', message: '云端没有这个角色的工具数据（tool_pack 未同步）' };
+        const result = await dispatchAgenticTool(name, args, stash.toolCtx);
         content = JSON.stringify(result);
         console.log('[amsg:agentic]', { type: 'tool_done', sessionId: ctx.sessionId, tool: name });
       } catch (error) {
@@ -367,24 +468,38 @@ const amsgHooks = {
   },
 };
 
-export default createSingleUserCloudflareWorker((env: Env) => ({
-  // db 缺省时 factory 自动用 createD1Adapter(env.DB)
-  masterKey: env.AMSG_MASTER_KEY,
-  serverToken: env.AMSG_SERVER_TOKEN,
-  vapid: {
-    email: env.VAPID_EMAIL,
+/**
+ * VAPID JWT 的 sub 字段：推送服务只要求它是个合法的 mailto: / https: 联系方式，
+ * 内容不参与签名校验。但 scheduled() 一旦发现 email 为空就会整轮 return（一条任务
+ * 都不处理、前端毫无提示），而「推送凭据」面板复制出来的 env 里 VAPID_EMAIL 是注释
+ * 掉的可选项——照着部署必然缺它。所以这里给个缺省值兜底，配了就用用户配的。
+ * （instant-push worker 一直是这个做法。）
+ */
+export const resolveVapidEmail = (raw: string | undefined): string =>
+  raw?.trim() || 'mailto:noreply@sullyos.app';
+
+/** worker 运行配置；导出便于单测钉住 VAPID 兜底。 */
+export const buildWorkerConfig = (env: Env) => {
+  // vapid 与 webpush 必须同源同一份：两处各读一次 env 时，改了一处漏另一处
+  // 会变成「签名用兜底、校验用空值」这类只在真发推送时才暴露的坑。
+  const vapid = {
+    email: resolveVapidEmail(env.VAPID_EMAIL),
     publicKey: env.VAPID_PUBLIC_KEY,
     privateKey: env.VAPID_PRIVATE_KEY,
-  },
-  webpush: createWebCryptoWebPush({
-    email: env.VAPID_EMAIL,
-    publicKey: env.VAPID_PUBLIC_KEY,
-    privateKey: env.VAPID_PRIVATE_KEY,
-  }),
-  // 前端和 Worker 不同源，带自定义头的请求会先发 CORS 预检，必须放行。
-  // 单用户自用默认全开；想收紧就把 '*' 换成自己的 SullyOS 站点 origin。
-  cors: { origin: '*' },
-  // 满血 fire-time hooks（onBeforeFire 现场填槽 + onLLMOutput 分类 +
-  // executeToolCalls 服务端工具循环）；轮数/超时用库默认（5 轮 / 240s）。
-  hooks: amsgHooks,
-}));
+  };
+  return {
+    // db 缺省时 factory 自动用 createD1Adapter(env.DB)
+    masterKey: env.AMSG_MASTER_KEY,
+    serverToken: env.AMSG_SERVER_TOKEN,
+    vapid,
+    webpush: createWebCryptoWebPush(vapid),
+    // 前端和 Worker 不同源，带自定义头的请求会先发 CORS 预检，必须放行。
+    // 单用户自用默认全开；想收紧就把 '*' 换成自己的 SullyOS 站点 origin。
+    cors: { origin: '*' },
+    // 满血 fire-time hooks（onBeforeFire 现场填槽 + onLLMOutput 分类 +
+    // executeToolCalls 服务端工具循环）；轮数/超时用库默认（5 轮 / 240s）。
+    hooks: amsgHooks,
+  };
+};
+
+export default createSingleUserCloudflareWorker(buildWorkerConfig);

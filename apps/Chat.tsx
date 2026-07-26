@@ -3346,7 +3346,12 @@ const Chat: React.FC = () => {
                     userProfile={userProfile}
                     groups={groups}
                     realtimeConfig={realtimeConfig}
-                    onSave={(config) => updateCharacter(char.id, { activeMsg2Config: config })}
+                    // updater 形态：merge 在 setCharacters 的函数式 updater 里发生，
+                    // 拿到的 prev 是最新排队后的状态，不会被面板的渲染时快照盖掉
+                    // （角色在聊天里用工具排的任务就是这么丢的）。
+                    onSave={(updater) => updateCharacter(char.id, (prev) => ({
+                        activeMsg2Config: updater(prev.activeMsg2Config),
+                    }))}
                     addToast={addToast}
                 />
             )}

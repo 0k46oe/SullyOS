@@ -2,6 +2,8 @@ import { ActiveMsg2InboxMessage, APIConfig, RealtimeConfig, UserProfile } from '
 import { DB } from './db';
 import { ChatPrompts } from './chatPrompts';
 import { ActiveMsgStore } from './activeMsgStore';
+import { ActiveMsgClient } from './activeMsgClient';
+import { amsgStateNamespace } from './amsgFirePack';
 import {
   applyAssistantPostProcessing,
   type PostProcessDirective,
@@ -15,7 +17,8 @@ import { processNewMessages } from './memoryPalace/pipeline';
 import { loadMusicHooks } from '../context/MusicContext';
 import type { XhsNote } from './realtimeContext';
 import { appendDevDebugInstantPushLog, appendDevDebugLog, isCaptureEnabled, makeDebugLogger } from './devDebug';
-import { ACTIVE_CHAT_WINDOW_MS, getLastRealUserMessageAt, hasRealUserMessageBetween, shouldExpireFire } from './amsg2ExpireGuard';
+import { getLastRealUserMessageAt, shouldExpireFire } from './amsg2ExpireGuard';
+import { appendInstantTraceEntry } from './instantTraceLog';
 
 // 同一个 category，两个 tag——保持 console 里现有的 [ActiveMsg] / [amsg] 标签，
 // 方便用户 / 文档里 grep 历史报错信息。两条 tag 都归 instant-push 一类。
@@ -23,8 +26,6 @@ const log = makeDebugLogger('instant-push', 'ActiveMsg');
 const logAmsg = makeDebugLogger('instant-push', 'amsg');
 
 let initialized = false;
-const INSTANT_TRACE_LOG_KEY = 'instant_push_trace_log_v1';
-const INSTANT_TRACE_LOG_LIMIT = 200;
 
 // 三写：console.info + 无条件 localStorage ring + 用户勾控的 devDebug。
 // 参见 instantPushClient.instantTrace 的注释，两边设计一致。
@@ -40,12 +41,7 @@ function activeMsgTrace(event: string, details: Record<string, unknown> = {}): v
   try {
     console.info('[InstantTrace]', entry);
   } catch { /* ignore */ }
-  try {
-    const raw = localStorage.getItem(INSTANT_TRACE_LOG_KEY);
-    const list = raw ? JSON.parse(raw) : [];
-    const next = Array.isArray(list) ? [...list, entry].slice(-INSTANT_TRACE_LOG_LIMIT) : [entry];
-    localStorage.setItem(INSTANT_TRACE_LOG_KEY, JSON.stringify(next));
-  } catch { /* ignore */ }
+  appendInstantTraceEntry(entry);
   // 也挂进 devDebug 的 instant-push 类目：勾了 IP 后，trace 跟 LLM 交换日志一起被
   // 复制 / 下载导出。gate 由 isCaptureEnabled('instant-push') 自动管，未勾时零成本。
   appendDevDebugLog('instant-push', { label: `trace:${event}`, data: entry });
@@ -161,11 +157,77 @@ const loadRealtimeConfigFromLocalStorage = (): RealtimeConfig | undefined => {
  * 副作用类标签 (POKE / TRANSFER / ADD_EVENT / schedule_message / 写日记) 仍会执行。
  * 失败时抛出, 由调用方决定是否重新入队。
  */
+/**
+ * 取回 worker 旁路存下的 XHS 会话数据（push 装不下时才有，见 offloadOversizedPush）。
+ * 落库成功后顺手把云端那份删掉——每任务固定一个键、下次触发会覆盖，及时删只是让
+ * D1 更干净，删不掉也不影响正确性。
+ *
+ * 取不回来就抛错：调用方会把这条消息压回收件箱重试，而不是发一条「说分享了却没有卡片」
+ * 的消息出去。
+ */
+const fetchOffloadedXhsSession = async (message: ActiveMsg2InboxMessage): Promise<any | null> => {
+  const ref = (message.metadata as any)?.xhsSessionRef;
+  if (typeof ref !== 'string' || !ref) return null;
+
+  const namespace = amsgStateNamespace(message.charId);
+  const raw = await ActiveMsgClient.readClientStateValue(namespace, ref);
+  if (raw == null) {
+    // 键不在了：同任务的下一次触发已经把它覆盖/清掉了，这条 push 是迟到的老消息。
+    // 重试也取不回来，按「没有卡片数据」继续——比卡在收件箱里反复重试强。
+    log.warn('旁路存储里没有这份 XHS 会话数据（多半被下一次触发覆盖了）', { ref, charId: message.charId });
+    return null;
+  }
+
+  const parsed = JSON.parse(raw);
+  void ActiveMsgClient.clearClientStateValue(namespace, ref)
+    .catch((e) => log.warn('清空旁路存储失败（下次触发会覆盖，不影响正确性）', { ref, error: e }));
+  return parsed;
+};
+
+/**
+ * 角色在本地已经不存在了：删角色时远端取消失败留下的残留，或者导入备份之后 id 对不上。
+ * 与「暂时读不到」区分开——这种重试多少次都没用，得去把远端那条还在到点跑的任务取消掉。
+ */
+export class OrphanedCharacterError extends Error {
+  constructor(readonly charId: string) {
+    super(`character not found for charId=${charId}`);
+    this.name = 'OrphanedCharacterError';
+  }
+}
+
+/** 处理失败重试几次后放弃（放弃 = 退回存原稿保底，见 resolveInboxFailureAction）。 */
+export const MAX_INBOX_PROCESS_ATTEMPTS = 3;
+
+export type InboxFailureAction = 'orphan' | 'retry' | 'degrade';
+
+/**
+ * 一条 push 处理失败之后该怎么办。
+ *
+ * 默认是**留着重试**而不是就地存原稿：原稿里的表情 / 卡片 / 转账都还是标记形态，存进
+ * 聊天记录后渲染层会把标记剥掉，用户看到的是残缺版，而角色下一轮读历史却会当成
+ * 「我已经发过表情、转过账了」——一次暂时的故障就这么变成永久的错误前提。
+ * 本地存储的故障通常是暂时的，等一会儿重来一遍就好。
+ *
+ * 重试到上限还不行，才退回存原稿：那时候多半是真坏了，让用户看到残缺版也好过什么都没有。
+ */
+export const resolveInboxFailureAction = (
+  error: unknown,
+  attempts: number,
+): InboxFailureAction => {
+  if (error instanceof OrphanedCharacterError) return 'orphan';
+  return attempts < MAX_INBOX_PROCESS_ATTEMPTS ? 'retry' : 'degrade';
+};
+
 const processInboxMessageWithPostProcessing = async (message: ActiveMsg2InboxMessage): Promise<void> => {
   const characters = await DB.getAllCharacters();
   const char = characters.find(c => c.id === message.charId);
   if (!char) {
-    throw new Error(`character not found for charId=${message.charId}`);
+    // 一个角色都读不到，多半是本地存储本身出了问题，而不是「这个角色被删了」——
+    // 按可重试的普通失败处理，别把还在用的任务当孤儿取消掉。
+    if (characters.length === 0) {
+      throw new Error(`character lookup returned empty for charId=${message.charId}`);
+    }
+    throw new OrphanedCharacterError(message.charId);
   }
 
   const userProfile: UserProfile = (await DB.getUserProfile())
@@ -223,7 +285,12 @@ const processInboxMessageWithPostProcessing = async (message: ActiveMsg2InboxMes
   // metadata.xhsSession 带回来 (稀疏 {idx, note}, idx 1-based, 见 worker/amsg/src/agentic.ts
   // buildXhsSessionPayload), 这里重建成按序号取卡的数组先落库, 下面的恢复块照旧读回内存单例
   // ——与 instant 路径共用同一条恢复路, XHS_SHARE / 点赞 / 评论重放不再 available:0.
-  const xhsSession = message.metadata && (message.metadata as any).xhsSession;
+  // 装不进一条 push（4KB 密文上限）的时候 worker 会把整份挪进 client_state、只在
+  // metadata 留一个 xhsSessionRef 指过来（见 worker/amsg/src/index.ts 的
+  // offloadOversizedPush）。这里按键取回，取到就跟内联那份走同一条落库路径。
+  // 取不回来时抛错交给上层重试——静默跳过的话，角色说分享了几张、卡片却少几张。
+  const xhsSession = (message.metadata && (message.metadata as any).xhsSession)
+    || await fetchOffloadedXhsSession(message);
   if (sessionId && xhsSession && Array.isArray(xhsSession.notes) && xhsSession.notes.length > 0) {
     try {
       const maxIdx = Math.max(...xhsSession.notes.map((e: any) => Number(e?.idx) || 0));
@@ -358,33 +425,25 @@ function isLastChunk(message: ActiveMsg2InboxMessage): boolean {
  * 判定，但它读的 fire_pack 随 amsgStateSync 最多滞后 15s+，且判定通过后还有
  * 10-30s 生成窗口，期间用户又说话就会撞车——这里用本地全量历史再判一次。
  * 判定所需字段全部来自 push 自带的任务 metadata（排程时打进去的），不依赖
- * 本地 config——push 在途期间任务被 renew 换锚也不会误判。判不了 → 放行。
+ * 本地 config——push 在途期间任务被 renew 换锚也不会误判。
+ *
+ * **读不到聊天记录时抛错，不猜。** 拿不准就先别开口：调用方会把消息压回收件箱、
+ * 过一会儿等本地存储缓过来再判一次（见 flushInboxToChatImpl 的 expire-unknown 分支）。
+ * 猜「放行」的代价是角色可能当着正在聊天的用户冒出一句定时问候，一眼假。
  */
 async function evaluateScheduledPushExpired(message: ActiveMsg2InboxMessage): Promise<boolean> {
-  try {
-    const meta = (message.metadata || {}) as Record<string, any>;
-    const messages = await DB.getRecentMessagesByCharId(message.charId, 200);
-    const policy = typeof meta.amsgExpirePolicy === 'string' ? meta.amsgExpirePolicy : undefined;
-    const recurrence = typeof meta.amsgRecurrence === 'string' ? meta.amsgRecurrence : undefined;
-    const occurrenceMs = typeof meta.amsgOccurrenceMs === 'number' ? meta.amsgOccurrenceMs : null;
-
-    // 循环任务的判定锚定「到点时刻」而不是「送达时刻」（Codex #10）：生成+送达可能
-    // 比到点晚十几分钟，拿 Date.now() 算 10 分钟窗口会把撞上对话的消息误放行。
-    // occurrenceMs 由 worker 随 push 带回；缺失（旧 bundle）时退回送达时刻近似。
-    if (policy === 'expire' && (recurrence === 'daily' || recurrence === 'weekly') && occurrenceMs != null) {
-      return hasRealUserMessageBetween(messages, occurrenceMs - ACTIVE_CHAT_WINDOW_MS, Date.now());
-    }
-    return shouldExpireFire({
-      policy,
-      recurrenceType: recurrence,
-      anchorMs: typeof meta.amsgAnchorMs === 'number' ? meta.amsgAnchorMs : null,
+  const meta = (message.metadata || {}) as Record<string, any>;
+  const messages = await DB.getRecentMessagesByCharId(message.charId, 200);
+  return shouldExpireFire({
+      policy: meta.amsgExpirePolicy,
+      recurrenceType: meta.amsgRecurrence,
+      anchorMs: meta.amsgAnchorMs,
       lastUserMessageAt: getLastRealUserMessageAt(messages),
       nowMs: Date.now(),
-    });
-  } catch (e) {
-    console.warn('[ActiveMsg] expire 兜底判定失败，放行', e);
-    return false;
-  }
+      // 循环任务的窗口锚定到点时刻而不是送达时刻：生成+送达可能比到点晚十几分钟，
+      // 拿 Date.now() 算 10 分钟窗会把撞上对话的消息误放行。
+    occurrenceMs: meta.amsgOccurrenceMs,
+  });
 }
 
 /** 把 worker 推给的 directives 从 inbox message metadata 里挖出来; 没有就空数组. */
@@ -511,6 +570,63 @@ async function runPushTailPipeline(
   } catch { /* SSR-safe / not browser, ignore */ }
 }
 
+/** 重试前等多久。本地存储的抖动一般几秒就过去了，30s 足够缓过来又不至于让用户干等。 */
+const INBOX_RETRY_DELAY_MS = 30_000;
+let inboxRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 排一次自动重试。
+ * 「等下次打开 App」不能当作重试时机——用户不会为一条没出现的消息去重启，
+ * 在他一直开着 App 聊天的时候，那条消息就永远躺在收件箱里了。
+ */
+const scheduleInboxRetry = () => {
+  if (inboxRetryTimer != null) return;   // 已经排了就不重复排，一次重试会带上全部积压
+  inboxRetryTimer = setTimeout(() => {
+    inboxRetryTimer = null;
+    void flushInboxToChat();
+  }, INBOX_RETRY_DELAY_MS);
+};
+
+/** 写回收件箱等下次处理（带上失败次数），并排一次自动重试。 */
+const requeueForRetry = async (message: ActiveMsg2InboxMessage, attempts: number): Promise<void> => {
+  try {
+    await ActiveMsgStore.saveInboxMessage({ ...message, processAttempts: attempts });
+    scheduleInboxRetry();
+  } catch (reputErr) {
+    // 写回也失败，大概率同一根因（存储关停 / 配额满）。消息到此为止，留个明确的日志。
+    log.error('requeue failed, message lost', { messageId: message.messageId, error: reputErr });
+  }
+};
+
+/**
+ * 告诉用户「有条消息没能正常显示」。
+ * push 路径平时是故意不弹 toast 的（用户没在看这个角色时会很吵），但这里是失败提醒，
+ * 频率极低且用户需要知道，所以照发——由 OSContext 那侧统一节流。
+ */
+const notifyInboxProcessFailed = (
+  message: ActiveMsg2InboxMessage,
+  kind: 'retrying' | 'degraded' | 'swallowed',
+) => {
+  try {
+    window.dispatchEvent(new CustomEvent('active-msg-process-failed', {
+      detail: { charId: message.charId, charName: message.charName, kind },
+    }));
+  } catch { /* SSR-safe */ }
+};
+
+/**
+ * 角色已经不在本地了，把它留在远端的任务清掉——否则这条任务会一直到点触发、
+ * 一直推给一个不存在的角色。取消不掉也不要紧（网络问题），下一条推过来时还会再试一次。
+ */
+const cancelOrphanedRemoteTasks = async (charId: string): Promise<void> => {
+  try {
+    const { targets, failed } = await ActiveMsgClient.cancelAllTasksForChar(charId, []);
+    log.warn('清理远端孤儿任务', { charId, targets: targets.length, failed: failed.size });
+  } catch (e) {
+    log.warn('清理远端孤儿任务失败（下次收到同角色 push 时会再试）', { charId, error: e });
+  }
+};
+
 const flushInboxToChatImpl = async () => {
   const pendingMessages = await ActiveMsgStore.consumeInboxMessages();
   activeMsgTrace('runtime-flush-start', { count: pendingMessages.length });
@@ -592,21 +708,44 @@ const flushInboxToChatImpl = async () => {
       // 缓存键必须含 occurrence（Codex #2）：上游 sessionId 是 sess_task_<行id>，
       // 循环任务每次 occurrence、同任务重试都复用同一个——裸 sessionId 会把上次
       // 的判定串给下一次（第一次放行 → 后续永远放行；第一次吞 → 后续全吞）。
+      // amsgClientTaskId / amsgOccurrenceMs 与 amsgExpirePolicy 写在同一份任务 metadata 里
+      // （activeMsgClient 排程时打进去 + worker 到点补 occurrence），进了这个 if 就一定都在。
       const meta = (message.metadata || {}) as Record<string, any>;
-      const occ = Number(meta.amsgOccurrenceMs) || 0;
-      const taskIdentity = typeof meta.amsgClientTaskId === 'string'
-        ? meta.amsgClientTaskId
-        : (getInstantSessionId(message) || `msg_${message.messageId}`);
-      const fireKey = `${taskIdentity}:${occ}`;
+      const fireKey = `${meta.amsgClientTaskId}:${meta.amsgOccurrenceMs}`;
       const now = Date.now();
       // 多分段 push 的一次 fire 共用一个决定（同吞同放）：get-or-compute + TTL 清扫
       // 抽进 resolveFireExpireDecision，见其单测。
-      const expired = await resolveFireExpireDecision(
-        expireDecisionByFire,
-        fireKey,
-        now,
-        () => evaluateScheduledPushExpired(message),
-      );
+      let expired: boolean;
+      try {
+        expired = await resolveFireExpireDecision(
+          expireDecisionByFire,
+          fireKey,
+          now,
+          () => evaluateScheduledPushExpired(message),
+        );
+      } catch (gateErr) {
+        // 判不出来「用户此刻是不是正在跟这个角色聊天」。压回收件箱等本地存储缓过来再判，
+        // 别猜——猜错的那一面是角色当着正在进行的对话冒出一句定时问候。
+        // （evaluate 抛错时 resolveFireExpireDecision 不写缓存，所以下次是真的重判。）
+        const attempts = (message.processAttempts ?? 0) + 1;
+        if (attempts < MAX_INBOX_PROCESS_ATTEMPTS) {
+          log.warn('防穿帮闸判定失败，压回收件箱稍后重判', { messageId: message.messageId, attempts, error: gateErr });
+          await requeueForRetry(message, attempts);
+          notifyInboxProcessFailed(message, 'retrying');
+          continue;
+        }
+        // 压到上限还是判不了：本地存储这时候基本是真出问题了，让角色继续冒新消息只会更乱。
+        // 按吞掉处理（与闸判定为「已作废」同一个出口），但要明确告诉用户有这么一条被跳过了。
+        log.error('防穿帮闸重试到上限仍判不了，按作废吞掉', { messageId: message.messageId, attempts, error: gateErr });
+        activeMsgTrace('runtime-expire-swallow-unknown', {
+          sessionId: fireKey,
+          messageId: message.messageId,
+          charId: message.charId,
+          taskId: message.taskId,
+        });
+        notifyInboxProcessFailed(message, 'swallowed');
+        continue;
+      }
       if (expired) {
         activeMsgTrace('runtime-expire-swallow', {
           sessionId: fireKey,
@@ -639,12 +778,29 @@ const flushInboxToChatImpl = async () => {
         await processInboxMessageWithPostProcessing(message);
         routed = true;
       } catch (postErr) {
-        log.warn('post-processing failed, falling back to raw save', { messageId: message.messageId, error: postErr });
-        // 落库失败: 有可能 post-processing 中途已经写了部分 chunk 进 DB, 这里再 raw save 一遍
-        // 会重复; 但中途失败时通常是初始化阶段就挂了 (char 找不到 / DB 故障), 部分写入概率低。
-        // 为了不丢消息, 仍尝试 raw save; 若它也失败, 会进下面的 catch 把消息 requeue。
-        // TODO(Phase 2): worker 续跑落地后, 这里的"部分写入 + raw save 重复"窗口要改成基于
-        // sessionId 的 dedupe (worker push payload 会带稳定 id), 而不是依赖低概率假设。
+        const attempts = (message.processAttempts ?? 0) + 1;
+        const action = resolveInboxFailureAction(postErr, attempts);
+
+        if (action === 'orphan') {
+          // 角色都不在了，这条消息没有落点，提醒用户也没有意义。真正该处理的是远端那条
+          // 还在到点跑的任务——不取消掉它，以后每到点都会再推一条（而且每次真烧一轮 LLM）。
+          log.warn('inbox message 的角色已不存在，丢弃并清理远端孤儿任务', { messageId: message.messageId, charId: message.charId });
+          await cancelOrphanedRemoteTasks(message.charId);
+          continue;
+        }
+
+        if (action === 'retry') {
+          // 不就地存原稿：残缺版进了聊天记录是永久的，而这类故障通常是暂时的。
+          log.warn('post-processing failed, requeue for retry', { messageId: message.messageId, attempts, error: postErr });
+          await requeueForRetry(message, attempts);
+          notifyInboxProcessFailed(message, 'retrying');
+          continue;
+        }
+
+        // 重试到头，退回存原稿保底：用户至少看得到内容，代价是表情 / 卡片 / 副作用都没了，
+        // 所以这条要明确告诉用户「可能不完整」，别让它悄悄混进历史。
+        log.error('post-processing failed，重试到上限，退回存原稿', { messageId: message.messageId, attempts, error: postErr });
+        notifyInboxProcessFailed(message, 'degraded');
       }
     }
 

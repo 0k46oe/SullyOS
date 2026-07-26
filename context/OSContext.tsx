@@ -28,6 +28,7 @@ import { evaluateEmotionBackground } from '../hooks/useChatAI';
 import { CHAT_GEN_EVENTS, setChatViewSnapshot } from '../utils/chatGenEvents';
 import { buildChatRequestPayload } from '../utils/chatRequestPayload';
 import { extractHtmlBlocks } from '../utils/htmlPrompt';
+import { ActiveMsgClient } from '../utils/activeMsgClient';
 import { loadMusicPlaybackSnapshot } from './MusicContext';
 import { setMinimaxRegion } from '../utils/minimaxEndpoint';
 import { setTtsProvider, setVoicePromptOverrides } from '../utils/ttsProvider';
@@ -1597,7 +1598,28 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           addToast(`${charName || '角色'}的情绪评估失败：${reason || '未知原因'}（不影响聊天回复）`, 'error');
       };
 
+      // 主动消息处理失败 → 明确告诉用户，别让消息无声无息地不出现。
+      // 平时 push 路径是不弹 toast 的，但这里频率极低（本地存储出问题才会有），
+      // 而且不说的话用户只会觉得「角色今天没理我」。每角色 60s 冷却防连推时刷屏。
+      const inboxFailToastAt: Record<string, number> = {};
+      const inboxFailHandler = (e: Event) => {
+          const { charId, charName, kind } = ((e as CustomEvent).detail || {}) as
+              { charId?: string; charName?: string; kind?: 'retrying' | 'degraded' | 'swallowed' };
+          if (!charId) return;
+          const now = Date.now();
+          if (now - (inboxFailToastAt[charId] || 0) < 60_000) return;
+          inboxFailToastAt[charId] = now;
+          const who = charName || '角色';
+          const text = kind === 'degraded'
+              ? `${who}有一条消息没能正常处理，已按原文显示（表情、卡片这些可能不完整）`
+              : kind === 'swallowed'
+                  ? `${who}有一条定时消息被跳过了：本地存储异常，判不出发出来会不会打断你们当前的对话`
+                  : `${who}有一条消息暂时没能显示，稍后会自动重试`;
+          addToast(text, 'error');
+      };
+
       window.addEventListener('active-msg-received', handler);
+      window.addEventListener('active-msg-process-failed', inboxFailHandler);
       window.addEventListener('active-msg-progress', progressHandler);
       window.addEventListener('active-msg-open', openHandler);
       window.addEventListener('emotion-updated', buffSyncHandler);
@@ -1607,6 +1629,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       document.addEventListener('visibilitychange', onVisible);
       return () => {
           window.removeEventListener('active-msg-received', handler);
+          window.removeEventListener('active-msg-process-failed', inboxFailHandler);
           window.removeEventListener('active-msg-progress', progressHandler);
           window.removeEventListener('active-msg-open', openHandler);
           window.removeEventListener('emotion-updated', buffSyncHandler);
@@ -2423,6 +2446,24 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   };
   const updateCharacter = async (id: string, updates: Partial<CharacterProfile> | ((prev: CharacterProfile) => Partial<CharacterProfile>)) => { setCharacters(prev => { const updated = prev.map(c => c.id === id ? normalizeCharacterImpression({ ...c, ...(typeof updates === 'function' ? updates(c) : updates) }) : c); const target = updated.find(c => c.id === id); if (target) DB.saveCharacter(target); return updated; }); };
   const deleteCharacter = async (id: string) => {
+    // 主动消息 2.0 的任务活在用户自己的 worker 上，不随本地角色删除消失：留着的话
+    // 到点照样跑一整轮生成 + 推送，用户会收到一个已经删掉的角色发来的消息（还每次
+    // 真烧一轮 LLM）。本地记录一删就再没有 uuid 可取消，所以必须赶在删除之前清。
+    // 没排过任务的角色不发任何请求。
+    const localTaskUuids = (characters.find(c => c.id === id)?.activeMsg2Config?.tasks ?? [])
+      .map(t => t.taskUuid);
+    if (localTaskUuids.length > 0) {
+      try {
+        const { failed } = await ActiveMsgClient.cancelAllTasksForChar(id, localTaskUuids);
+        if (failed.size > 0) {
+          addToast(`ta 还有 ${failed.size} 个主动消息任务留在远端没取消掉，可能仍会到点推送——可以去设置里「清除云端状态」兜一下`, 'error');
+        }
+      } catch (err) {
+        console.warn('[deleteCharacter] 远端主动消息任务清理失败', err);
+        addToast('ta 的主动消息任务没能在远端取消，可能仍会到点推送，请检查 Worker 连接', 'error');
+      }
+    }
+
     setCharacters(prev => { const remaining = prev.filter(c => c.id !== id); if (remaining.length > 0 && activeCharacterId === id) { setActiveCharacterId(remaining[0].id); } return remaining; });
     await DB.deleteCharacter(id);
     // 表情分类不随角色级联删除会留下「幽灵专属包」：单聊面板被可见性过滤掉（删不掉），

@@ -22,7 +22,7 @@ import { ProactiveChat } from '../utils/proactiveChat';
 import { InstantPushSettingsModal } from '../components/settings/InstantPushSettingsModal';
 import { PushVapidSettingsModal } from '../components/settings/PushVapidSettingsModal';
 import ActiveMsgGlobalSettingsModal from '../components/settings/ActiveMsgGlobalSettingsModal';
-import { ActiveMsgClient } from '../utils/activeMsgClient';
+import { syncAmsgToolConfigAndPrompts } from '../utils/amsgStateSync';
 import VersionInfo from '../components/settings/VersionInfo';
 import { isPushVapidReady } from '../utils/pushVapid';
 import ApiCallLogModal from '../components/settings/ApiCallLogModal';
@@ -350,6 +350,8 @@ const Settings: React.FC = () => {
       apiPresets, addApiPreset, removeApiPreset,
       sysOperation, // Get progress state
       realtimeConfig, updateRealtimeConfig, // 实时感知配置
+      // 改工具凭据时要连云端提示词一起刷（见 syncAmsgToolConfigAndPrompts）
+      characters, groups, userProfile,
       cloudBackupConfig, updateCloudBackupConfig,
       cloudBackupToWebDAV, cloudRestoreFromWebDAV, listCloudBackups,
   } = useOS();
@@ -1097,7 +1099,9 @@ const Settings: React.FC = () => {
       };
       updateRealtimeConfig(updates);
       RealtimeContextManager.clearCache();
-      ActiveMsgClient.syncToolConfig({ ...realtimeConfig, ...updates }).catch(() => {});
+      const nextRealtimeConfig = { ...realtimeConfig, ...updates };
+      // 云端凭据 + 按配置裁剪过的提示词一起刷，否则角色到点会照着旧提示词调已关掉的工具。
+      syncAmsgToolConfigAndPrompts(nextRealtimeConfig, { characters, userProfile, groups });
       addToast('实时感知配置已保存', 'success');
       setShowRealtimeModal(false);
   };
@@ -1186,7 +1190,8 @@ const Settings: React.FC = () => {
                   }
               };
               updateRealtimeConfig(xhsUpdates);
-              ActiveMsgClient.syncToolConfig({ ...realtimeConfig, ...xhsUpdates }).catch(() => {});
+              const nextConfig = { ...realtimeConfig, ...xhsUpdates };
+              syncAmsgToolConfigAndPrompts(nextConfig, { characters, userProfile, groups });
           } else {
               setRtTestStatus(`连接失败: ${result.error}`);
           }

@@ -19,7 +19,7 @@ const assistantPush = (timestamp: number, taskId: string | null = 't1') => ({
 });
 
 describe('shouldExpireFire', () => {
-  const base = { policy: 'expire', recurrenceType: 'none', anchorMs: 1000, nowMs: 10_000 };
+  const base = { policy: 'expire', recurrenceType: 'none', anchorMs: 1000, nowMs: 10_000, occurrenceMs: 10_000 };
 
   it('一次性：锚点后有用户消息 → 作废', () => {
     expect(shouldExpireFire({ ...base, lastUserMessageAt: 2000 })).toBe(true);
@@ -37,12 +37,22 @@ describe('shouldExpireFire', () => {
     expect(shouldExpireFire({ ...base, anchorMs: null, lastUserMessageAt: 2000 })).toBe(false);
   });
   it('循环：到点前窗口内在聊 → 作废；窗口外聊过 → 放行（昨天聊天不作废今天早安）', () => {
-    const rec = { policy: 'expire', recurrenceType: 'daily', anchorMs: 0, nowMs: 24 * H };
+    const rec = { policy: 'expire', recurrenceType: 'daily', anchorMs: 0, nowMs: 24 * H, occurrenceMs: 24 * H };
     expect(shouldExpireFire({ ...rec, lastUserMessageAt: 24 * H - ACTIVE_CHAT_WINDOW_MS + 1 })).toBe(true);
     expect(shouldExpireFire({ ...rec, lastUserMessageAt: 24 * H - ACTIVE_CHAT_WINDOW_MS - 1 })).toBe(false);
   });
+  it('循环：热聊窗口锚在到点时刻，判定晚十几分钟也不放行（worker 与客户端送达兜底同一口径）', () => {
+    // 到点 24h，客户端送达兜底在 15 分钟后才判：窗口仍是 (到点-10min, now]，
+    // 拿 nowMs 当锚点的话这条 9 分钟前的用户消息会落到窗外被误放行。
+    const late = {
+      policy: 'expire', recurrenceType: 'daily', anchorMs: 0,
+      occurrenceMs: 24 * H, nowMs: 24 * H + 15 * 60_000,
+    };
+    expect(shouldExpireFire({ ...late, lastUserMessageAt: 24 * H - 9 * 60_000 })).toBe(true);
+    expect(shouldExpireFire({ ...late, lastUserMessageAt: 24 * H - 11 * 60_000 })).toBe(false);
+  });
   it('循环 weekly 与 daily 同规则：只看到点前热聊窗口，不看锚点', () => {
-    const rec = { policy: 'expire', recurrenceType: 'weekly', anchorMs: 0, nowMs: 7 * 24 * H };
+    const rec = { policy: 'expire', recurrenceType: 'weekly', anchorMs: 0, nowMs: 7 * 24 * H, occurrenceMs: 7 * 24 * H };
     expect(shouldExpireFire({ ...rec, lastUserMessageAt: 7 * 24 * H - ACTIVE_CHAT_WINDOW_MS + 1 })).toBe(true);
     expect(shouldExpireFire({ ...rec, lastUserMessageAt: 7 * 24 * H - ACTIVE_CHAT_WINDOW_MS - 1 })).toBe(false);
   });
@@ -59,10 +69,14 @@ describe('消息扫描 helpers', () => {
     expect(hasRealUserMessageBetween(msgs, 200, 300)).toBe(false);
   });
   it('hasDeliveredProactiveNear 只认 taskId 非空的 active_msg_2 消息', () => {
-    expect(hasDeliveredProactiveNear([assistantPush(1000)], 1000)).toBe(true);
-    expect(hasDeliveredProactiveNear([assistantPush(1000, null)], 1000)).toBe(false); // instant 回复不算
+    const withCid = (taskId: string | null) => ({
+      role: 'assistant', timestamp: 1000,
+      metadata: { source: 'active_msg_2', activeMsg2: { taskId }, amsgClientTaskId: 'cid-A' },
+    });
+    expect(hasDeliveredProactiveNear([withCid('t1')], 1000, 'cid-A')).toBe(true);
+    expect(hasDeliveredProactiveNear([withCid(null)], 1000, 'cid-A')).toBe(false); // instant 回复不算
   });
-  it('hasDeliveredProactiveNear 传 clientTaskId 时按精确 id 归属：id 不同或缺 id 都不算本任务的送达', () => {
+  it('hasDeliveredProactiveNear 按精确 id 归属：id 不同或缺 id 都不算本任务的送达', () => {
     const withCid = { role: 'assistant', timestamp: 1000, metadata: { source: 'active_msg_2', activeMsg2: { taskId: 't1' }, amsgClientTaskId: 'cid-A' } };
     expect(hasDeliveredProactiveNear([withCid], 1000, 'cid-A')).toBe(true);
     expect(hasDeliveredProactiveNear([withCid], 1000, 'cid-B')).toBe(false); // A 的送达不能抹掉 B 的回执

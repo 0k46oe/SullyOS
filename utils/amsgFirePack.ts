@@ -1,12 +1,12 @@
 /**
  * 主动消息 2.0「满血」fire_pack：前端拼好的 prompt 模板 + 时间槽位的渲染。
  *
- * 满血链路里 prompt 不再在排程时冻结，而是前端把「除时间性内容外的完整模板」
- * 同步到 worker 的 client_state（namespace `amsg:char:<id>`，key `fire_pack`），
- * worker 到点用 renderFirePack 现算时间填槽。这份模块被两边共用：
- *   - 前端 activeMsgClient 的 buildCompletePrompt（排程时的冻结 prompt 兜底路径）
+ * prompt 不在排程时定稿，而是前端把「除时间性内容外的完整模板」同步到 worker 的
+ * client_state（namespace `amsg:char:<id>`，key `fire_pack`），worker 到点用
+ * renderFirePack 现算时间填槽——上下文永远是最后一次聊天的状态。这份模块被两边共用：
+ *   - 前端 activeMsgClient 的 buildFirePack（排程 / 每轮聊完同步时打包）
  *   - worker/amsg/src/index.ts 的 onBeforeFire（fire 时现场渲染）
- * 时间文案只此一份，两条路径产出保证一致。
+ * 时间文案只此一份，两边的槽位定义保证一致。
  *
  * 多任务共用每角色一份 fire_pack：「本次任务」指令随任务 metadata 走、到点填槽（v2 起）。
  *
@@ -17,17 +17,20 @@ export const AMSG_STATE_NAMESPACE_PREFIX = 'amsg:char:';
 export const amsgStateNamespace = (charId: string) => `${AMSG_STATE_NAMESPACE_PREFIX}${charId}`;
 export const AMSG_FIRE_PACK_KEY = 'fire_pack';
 
+/**
+ * 大内容旁路：一条 push 塞不下的 XHS 会话数据（笔记详情 + xsecToken）存这个 key，
+ * push 里只带 `metadata.xhsSessionRef` 指过来，客户端收到后按键取回、用完即删。
+ *
+ * 每个任务固定一份、下次触发直接覆盖——所以就算客户端一直没来取，存量也有上限，
+ * 不需要额外的过期清理。worker 写（onLLMOutput）与客户端读（activeMsgRuntime）
+ * 共用这一份键名，别在任何一侧另起炉灶。
+ */
+export const amsgXhsSessionKey = (clientTaskId: string) => `xhs_session:${clientTaskId}`;
+
 export const AMSG_SLOT_CURRENT_TIME = '{{AMSG_CURRENT_TIME}}';
 export const AMSG_SLOT_TIME_SINCE_USER = '{{AMSG_TIME_SINCE_USER}}';
 export const AMSG_SLOT_AWAY_HINT = '{{AMSG_AWAY_HINT}}';
 export const AMSG_SLOT_TASK_INSTRUCTION = '{{AMSG_TASK_INSTRUCTION}}';
-
-/** metadata 里缺任务指令时的兜底（等价旧 auto 模式无灵感补充的文案）。 */
-export const DEFAULT_TASK_INSTRUCTION = [
-  '这是一条需要 AI 自主生成的主动消息。',
-  '请结合角色设定、关系状态、最近上下文与当前时间，自然地主动找用户说一到三句私聊消息。',
-  '可选灵感补充：无',
-].join('\n');
 
 export interface AmsgFirePack {
   v: 2;
@@ -76,11 +79,15 @@ export const buildAwayHint = (targetName: string, timeSinceUser: string): string
 
 const fillSlot = (text: string, slot: string, value: string) => text.split(slot).join(value);
 
-/** 用 nowMs 时刻的时间信息填掉模板里的全部槽位，得到最终可发给 LLM 的 prompt。 */
+/**
+ * 用 nowMs 时刻的时间信息填掉模板里的全部槽位，得到最终可发给 LLM 的 prompt。
+ * taskInstruction 由排程时写进任务 metadata（见 activeMsgClient.buildTaskInstruction），
+ * worker 读不到就先抛错，所以这里按必填收。
+ */
 export const renderFirePack = (
   pack: AmsgFirePack,
   nowMs: number,
-  opts?: { taskInstruction?: string },
+  taskInstruction: string,
 ): string => {
   const currentTime = formatLocalTime(nowMs, pack.tzOffsetMin);
   const diffMinutes = pack.lastUserMessageAt == null
@@ -93,11 +100,11 @@ export const renderFirePack = (
   out = fillSlot(out, AMSG_SLOT_CURRENT_TIME, currentTime);
   out = fillSlot(out, AMSG_SLOT_TIME_SINCE_USER, timeSinceUser);
   out = fillSlot(out, AMSG_SLOT_AWAY_HINT, awayHint);
-  out = fillSlot(out, AMSG_SLOT_TASK_INSTRUCTION, opts?.taskInstruction?.trim() || DEFAULT_TASK_INSTRUCTION);
+  out = fillSlot(out, AMSG_SLOT_TASK_INSTRUCTION, taskInstruction);
   return out;
 };
 
-/** worker 侧从 client_state 读回的 value 解析成 fire_pack；形状不对返回 null（回退老链路）。 */
+/** worker 侧从 client_state 读回的 value 解析成 fire_pack；形状不对返回 null（调用方抛错）。 */
 export const parseFirePack = (value: string): AmsgFirePack | null => {
   try {
     const parsed = JSON.parse(value);

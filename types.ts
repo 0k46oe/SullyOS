@@ -281,7 +281,7 @@ export type ActiveMsg2TaskStatus = 'scheduled' | 'cancelled';
 export interface ActiveMsg2TaskRecord {
   taskUuid: string;
   /** 客户端排程前自造的 uuid v4，与 push metadata 的 amsgClientTaskId 同源——送达归属匹配键。 */
-  clientTaskId?: string;
+  clientTaskId: string;
   mode: ActiveMsg2Mode;
   /** ISO / datetime-local 字符串，首次触发时间。 */
   firstSendTime: string;
@@ -289,8 +289,8 @@ export interface ActiveMsg2TaskRecord {
   /** fixed 模式的固定内容。 */
   userMessage?: string;
   promptHint?: string;
-  /** 防穿帮策略，缺省按 'expire'。 */
-  expirePolicy?: ActiveMsg2ExpirePolicy;
+  /** 防穿帮策略；fixed 任务恒为 'force'（见 amsg2Tasks.resolveExpirePolicy）。 */
+  expirePolicy: ActiveMsg2ExpirePolicy;
   /** 排程时最后一条真实用户消息的时间戳（作废判定锚点；当时无消息为 0）。 */
   anchorLastUserMsgAt?: number;
   source: ActiveMsg2TaskSource;
@@ -339,6 +339,11 @@ export interface ActiveMsg2InboxMessage {
   metadata?: Record<string, any>;
   sentAt?: number;
   receivedAt: number;
+  /**
+   * 已经尝试处理过几次（见 activeMsgRuntime 的 MAX_INBOX_PROCESS_ATTEMPTS）。
+   * 处理失败时消息会写回收件箱等重试，这个计数决定什么时候放弃重试、退回存原稿保底。
+   */
+  processAttempts?: number;
 }
 
 // Phase 2 Round 1 — Instant Push agentic loop session state, written client-side

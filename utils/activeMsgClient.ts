@@ -7,12 +7,16 @@ import {
   ActiveMsg2Recurrence,
   APIConfig,
   CharacterProfile,
+  Emoji,
+  EmojiCategory,
   GroupProfile,
   RealtimeConfig,
   UserProfile,
 } from '../types';
 import { getLastRealUserMessageAt } from './amsg2ExpireGuard';
-import { getPendingTasks, MAX_ACTIVE_TASKS_PER_CHAR } from './amsg2Tasks';
+import {
+  getPendingTasks, MAX_ACTIVE_TASKS_PER_CHAR, resolveExpirePolicy, toDatetimeLocalValue,
+} from './amsg2Tasks';
 import { AMSG_CHAT_PRESENCE_KEY, AmsgChatPresence } from './amsgChatPresence';
 import {
   AMSG_FIRE_PACK_KEY,
@@ -22,7 +26,6 @@ import {
   AMSG_SLOT_TIME_SINCE_USER,
   AmsgFirePack,
   amsgStateNamespace,
-  renderFirePack,
 } from './amsgFirePack';
 import {
   AMSG_GLOBAL_NAMESPACE,
@@ -33,9 +36,11 @@ import {
 } from './amsgToolPack';
 import { ChatPrompts } from './chatPrompts';
 import { DB } from './db';
+import { copyWorkerBundleToClipboard } from './instantPushClient';
 import { safeResponseJson } from './safeApi';
 import { ActiveMsgStore } from './activeMsgStore';
 import { KeepAlive } from './keepAlive';
+import { describePushCapabilityGap } from './pushSubscribeShared';
 
 export interface ActiveMsg2PushStatus {
   supported: boolean;
@@ -56,6 +61,9 @@ type InternalReiClient = ReiClient & {
 
 const ACTIVE_MSG_RUNTIME_HEADER = '[ActiveMsg2]';
 
+/** amsg-server 的 DELETE /cancel-message 找不到目标行时回的错误码（HTTP 404）。 */
+const REMOTE_TASK_NOT_FOUND_CODE = 'TASK_NOT_FOUND';
+
 // 单用户模式：所有请求打到用户自部署的 Cloudflare Worker（config.workerUrl）。
 // 配了 serverToken 就每次带 X-Client-Token；worker 端配了就强制校验，缺/错回 401。
 const normalizeWorkerBase = (workerUrl: string) => workerUrl.trim().replace(/\/+$/, '');
@@ -67,15 +75,33 @@ const createClient = (config: Pick<ActiveMsg2GlobalConfig, 'userId' | 'workerUrl
     serverToken: config.serverToken || undefined,
   }) as InternalReiClient;
 
-export const getDefaultActiveMsgFirstSendTime = () => {
-  const base = new Date();
-  base.setMinutes(base.getMinutes() + 30);
-  const offset = base.getTimezoneOffset();
-  const local = new Date(base.getTime() - offset * 60_000);
-  return local.toISOString().slice(0, 16);
-};
+/** 面板新建任务的默认时间：半小时后，折成 datetime-local 认的本地墙钟。 */
+export const getDefaultActiveMsgFirstSendTime = () =>
+  toDatetimeLocalValue(new Date(Date.now() + 30 * 60_000).toISOString());
 
 const normalizeChatApiUrl = (baseUrl: string) => `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
+
+/** amsg-server 对 avatarUrl 的长度上限，超了整条会被拒。 */
+const REMOTE_AVATAR_URL_MAX_LENGTH = 2048;
+
+/**
+ * 能交给 worker 当推送通知图标的头像地址，不合格返回 undefined。
+ *
+ * worker 只收公网可访问的 URL（不能是 data: URI，上限 2048 字符）。而本地角色头像基本都是
+ * base64，传过去必被拒，代价是每排一条任务就在 worker 日志里刷一条
+ * `avatarUrl 不合法，已置空`。这里按同一把尺先筛掉——传了本来也是被置空，通知一样退回
+ * 默认图标，少一条噪音而已。
+ */
+export const toRemoteAvatarUrl = (avatar: string | undefined | null): string | undefined => {
+  const value = avatar?.trim();
+  if (!value || value.length > REMOTE_AVATAR_URL_MAX_LENGTH || /^data:/i.test(value)) return undefined;
+  try {
+    const { protocol } = new URL(value);
+    return protocol === 'http:' || protocol === 'https:' ? value : undefined;
+  } catch {
+    return undefined;
+  }
+};
 
 const looksLikeHtmlFallbackError = (message: string) => (
   /HTML/i.test(message) ||
@@ -144,8 +170,8 @@ const buildTimeGapHint = async (charId: string) => {
   };
 };
 
-// 时间性内容留槽位（AMSG_SLOT_*），由 renderFirePack 统一填——排程兜底路径立即填，
-// 满血路径由 worker 在 fire 时刻填。文案模板本身仍在前端这份代码里维护。
+// 时间性内容留槽位（AMSG_SLOT_*），由 worker 在 fire 时刻用 renderFirePack 填。
+// 文案模板本身仍在前端这份代码里维护。
 const buildLegacyStyleProactiveHint = (targetName: string) => {
   const target = targetName || '对方';
 
@@ -160,22 +186,36 @@ const buildLegacyStyleProactiveHint = (targetName: string) => {
   ].join('\n');
 };
 
-// 拼出带时间槽位的完整 prompt 模板（fire_pack）。两条路径共用：
-//   - 排程时：renderFirePack(pack, Date.now()) 立即填槽 → completePrompt 冻结兜底
-//   - 满血同步：pack 原样 putClientState 上云，worker 到点再填槽（上下文不过期）
+// 拼出带时间槽位的完整 prompt 模板（fire_pack）：原样 putClientState 上云，
+// worker 到点用 renderFirePack 填槽（所以上下文永远是最后一次聊天的状态）。
+/**
+ * 表情包全库（按角色过滤前）。批量同步时由调用方读一次传进来——它跟角色无关，
+ * 一个角色读一遍的话，N 个角色就是 N 次全表 getAll，读回来的还是同一份。
+ */
+type EmojiLibrary = { all: Emoji[]; categories: EmojiCategory[] };
+
+const readEmojiLibrary = async (): Promise<EmojiLibrary> => {
+  const [all, categories] = await Promise.all([DB.getEmojis(), DB.getEmojiCategories()]);
+  return { all, categories };
+};
+
 const buildFirePack = async (
   char: CharacterProfile,
   userProfile: UserProfile,
   groups: GroupProfile[],
   realtimeConfig: RealtimeConfig | undefined,
+  emojiLibrary?: EmojiLibrary,
 ): Promise<AmsgFirePack> => {
-  const { recentMessages, lastUserMessageAt } = await buildTimeGapHint(char.id);
+  const [{ recentMessages, lastUserMessageAt }, library] = await Promise.all([
+    buildTimeGapHint(char.id),
+    emojiLibrary ? Promise.resolve(emojiLibrary) : readEmojiLibrary(),
+  ]);
   const legacyHint = buildLegacyStyleProactiveHint(userProfile.name || '对方');
   // 按角色可见性过滤表情包：主动消息不经过 Chat.tsx 的 aiVisibleEmojis/visibleCategories，
   // 必须在这里复用同一套过滤，否则角色会用到只对其他角色开放的表情包。
   const { emojis, categories } = ChatPrompts.filterVisibleEmojis(
-    await DB.getEmojis(),
-    await DB.getEmojiCategories(),
+    library.all,
+    library.categories,
     char.id,
   );
   const systemPrompt = await ChatPrompts.buildSystemPrompt(
@@ -268,6 +308,107 @@ const ensureFutureTime = (value: string) => {
   return date.toISOString();
 };
 
+/**
+ * 任务体里 messages 的占位内容。
+ *
+ * 服务端要求「completePrompt 或 messages」二选一、messages 非空、content 非空字符串，
+ * 所以哪怕真正的 prompt 是到点才由 worker 下发的，排程时也得塞点东西过校验。
+ * 写成一眼能认出来的标记：它要是出现在 worker 日志、模型输出或者聊天气泡里，
+ * 就说明 worker 的 fire hooks 没生效（正常路径下它会被 onBeforeFire 的返回值覆盖）。
+ */
+const AMSG2_PLACEHOLDER_PROMPT =
+  'AMSG2_PLACEHOLDER_PROMPT（正式 prompt 到点由 worker onBeforeFire 下发；看到这条说明 fire hooks 未生效）';
+
+/** client_state 上传每次尝试前等多久：数组长度即总尝试次数（首次不等）。 */
+const CLIENT_STATE_BACKOFF_MS = [0, 400, 1200];
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * 上传一批 client_state 条目：网络抖动重试，最终失败抛错——不降级。
+ *
+ * 为什么这一步是硬要求：worker 到点靠 fire_pack 拿新鲜上下文，「远端有任务、云端
+ * 没状态」是个不该存在的中间态。过去这里失败只 warn，任务照建，到点用排程那一刻
+ * 冻结的 prompt 发——用户不知道自己收到的是旧上下文。现在传不上去就让整个排程失败，
+ * 由用户 / 角色重试。
+ *
+ * 被 worker 点名 rejected（体积超限等结构性原因）不重试：重试不会变好，直接把原因
+ * 抛出来。注意 putClientState 失败有两种形态——抛异常和回 { success: false }，
+ * 两种都要接住，只判 try/catch 会漏掉后者。
+ */
+export const putClientStateOrThrow = async (
+  client: InternalReiClient,
+  entries: Array<{ namespace: string; key: string; value: string; updatedAt: number }>,
+  phase: string,
+): Promise<void> => {
+  let lastError: unknown;
+
+  for (const backoffMs of CLIENT_STATE_BACKOFF_MS) {
+    if (backoffMs) await delay(backoffMs);
+
+    let response: { success?: boolean; data?: { rejected?: Array<{ key: string; message?: string }> }; error?: { message?: string } } | undefined;
+    try {
+      response = await client.putClientState(entries) as typeof response;
+    } catch (error) {
+      lastError = error;
+      continue;
+    }
+
+    if (!response?.success) {
+      lastError = new Error(response?.error?.message || `${phase}失败。`);
+      continue;
+    }
+
+    const rejected = response.data?.rejected;
+    if (rejected?.length) {
+      throw new Error(
+        `${phase}被 Worker 拒绝：${rejected.map((r) => `${r.key}(${r.message || 'rejected'})`).join('、')}。`
+        + '请确认已部署最新的 Worker 代码（设置页有版本探测）。',
+      );
+    }
+    return;
+  }
+
+  throw normalizeActiveMsgApiError(lastError, phase);
+};
+
+/**
+ * 角色侧云端状态的两条条目（fire_pack + tool_pack）。
+ *
+ * 「哪个 namespace 配哪个 key 配哪个 build 函数」只在这里写一遍：排程和批量同步两条路
+ * 都得把同一批东西写上去，各写各的话漏一条就是 worker 到点读不到 → 整条任务硬失败。
+ */
+const buildCharStateEntries = (
+  char: CharacterProfile,
+  firePack: AmsgFirePack,
+  updatedAt: number,
+) => [
+  {
+    namespace: amsgStateNamespace(char.id),
+    key: AMSG_FIRE_PACK_KEY,
+    value: JSON.stringify(firePack),
+    updatedAt,
+  },
+  // v2 服务端工具循环的角色侧数据（recall 月度总结 / XHS 开关 / 角色名）。
+  {
+    namespace: amsgStateNamespace(char.id),
+    key: AMSG_TOOL_PACK_KEY,
+    value: JSON.stringify(buildToolPack(char)),
+    updatedAt,
+  },
+];
+
+/** 全局工具凭据条目（v2 服务端工具循环用的搜索 / Notion / 飞书 / 小红书配置）。 */
+const buildToolConfigEntry = (
+  realtimeConfig: RealtimeConfig | undefined,
+  updatedAt: number,
+) => ({
+  namespace: AMSG_GLOBAL_NAMESPACE,
+  key: AMSG_TOOL_CONFIG_KEY,
+  value: JSON.stringify(buildToolConfig(realtimeConfig)),
+  updatedAt,
+});
+
 const fetchWithAuth = async (path: string, config: ActiveMsg2GlobalConfig, init: RequestInit, phase = '接口') => {
   const headers = new Headers(init.headers);
   if (config.serverToken) headers.set('X-Client-Token', config.serverToken);
@@ -306,28 +447,24 @@ export const ActiveMsgClient = {
     return Array.from(buf, (byte) => byte.toString(16).padStart(2, '0')).join('');
   },
 
-  // 复制最新版 amsg worker bundle 到剪贴板（Dashboard 粘贴部署用）。
-  // 和 instantPushClient.copyInstantWorkerBundleToClipboard 同款套路：
-  // 读站点随 build 发布的 public/amsg-worker.bundle.js，抛原始错误让调用方决定怎么显示。
-  async copyWorkerBundleToClipboard(): Promise<void> {
-    const base = import.meta.env.BASE_URL || '/';
-    const res = await fetch(`${base}amsg-worker.bundle.js`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const text = await res.text();
-    await navigator.clipboard.writeText(text);
+  // 复制站点随 build 发布的 public/amsg-worker.bundle.js（Dashboard 粘贴部署用）。
+  copyWorkerBundleToClipboard(): Promise<void> {
+    return copyWorkerBundleToClipboard('amsg-worker.bundle.js');
   },
 
   async getPushStatus(): Promise<ActiveMsg2PushStatus> {
     const config = await ensureGlobalReady();
     const workerConfigured = Boolean(config.workerUrl.trim());
-    const supported = 'Notification' in window && 'serviceWorker' in navigator && 'PushManager' in window;
-    if (!supported) {
+    // 能力检测与 instant push / proactive push 共用 describePushCapabilityGap：
+    // 它会说清缺的是三件套里的哪一件，「不支持」这三个字用户拿着没法action。
+    const capabilityGap = describePushCapabilityGap();
+    if (capabilityGap) {
       return {
         supported: false,
         permission: 'unsupported',
         hasSubscription: false,
         vapidConfigured: workerConfigured,
-        detail: '当前浏览器不支持 Web Push。',
+        detail: `${capabilityGap}。`,
       };
     }
 
@@ -345,8 +482,10 @@ export const ActiveMsgClient = {
   },
 
   async ensurePushSubscription() {
-    const pushStatus = await this.getPushStatus();
-    if (!pushStatus.supported) throw new Error(pushStatus.detail || '当前环境不支持推送。');
+    // 只需要「支不支持」这一个判断，不走 getPushStatus——那会把 KeepAlive.init /
+    // serviceWorker.ready / getSubscription 整套先跑一遍，下面又原样跑一次。
+    const capabilityGap = describePushCapabilityGap();
+    if (capabilityGap) throw new Error(`${capabilityGap}。`);
 
     const config = await ensureWorkerReady();
 
@@ -392,29 +531,9 @@ export const ActiveMsgClient = {
     return { ok: true, userId: config.userId };
   },
 
-  async listTasks() {
-    const config = await ensureWorkerReady();
-    const client = await initializeClient(config);
-    const response = await fetchWithAuth('messages', config, {
-      method: 'GET',
-      headers: {
-        'X-Response-Encrypted': 'true',
-        'X-Encryption-Version': '1',
-      },
-    }, '读取任务列表');
-
-    if (!response?.success || response?.encrypted !== true) {
-      return response?.data?.tasks || [];
-    }
-
-    const decrypted = await decryptPayload(client, response.data);
-    return decrypted?.tasks || [];
-  },
-
   // 分页全量：循环 messages?limit=100&offset=<n>，每页解密后读 tasks 与 pagination.hasMore，
   // 拉到最后一页为止。任一页失败整体抛错——不能拿半页结果去判「远端不存在」（会误伤没拉到的任务）。
-  // 每条任务带上游投影的顶层 charId / clientTaskId（amsg-server 2.6.0-next.5+），供按角色对账/关闭全部。
-  // 现有 listTasks 保留给旧调用方；对账与关闭全部只用这个全量方法。
+  // 每条任务带上游投影的顶层 charId / clientTaskId，供按角色对账/关闭全部。
   async listAllTasks(): Promise<any[]> {
     const config = await ensureWorkerReady();
     const client = await initializeClient(config);
@@ -422,14 +541,7 @@ export const ActiveMsgClient = {
     const all: any[] = [];
     let offset = 0;
     const limit = 100;
-    // 兜底防死循环：正常按 pagination.hasMore 自然收敛，这里只挡「服务端恒 hasMore」的异常。
-    let guard = 0;
     while (true) {
-      // guard 触顶 = 分页未收敛（疑似服务端 hasMore 恒真）：宁可抛错，也不返回不完整
-      // 清单——半截清单会让远端对账误判「远端不存在」、让「关闭全部」漏取消留幽灵任务。
-      if (guard++ >= 1000) {
-        throw new Error('读取任务列表分页未收敛，已中止以免返回不完整清单。');
-      }
       const response = await fetchWithAuth(`messages?limit=${limit}&offset=${offset}`, config, {
         method: 'GET',
         headers: {
@@ -442,9 +554,7 @@ export const ActiveMsgClient = {
         throw new Error(response?.error?.message || '读取主动消息 2.0 任务列表失败。');
       }
 
-      const page = response?.encrypted === true
-        ? await decryptPayload(client, response.data)
-        : response?.data;
+      const page = await decryptPayload(client, response.data);
       const pageTasks: any[] = page?.tasks || [];
       all.push(...pageTasks);
 
@@ -454,17 +564,70 @@ export const ActiveMsgClient = {
     return all;
   },
 
-  async cancelTask(taskUuid: string) {
+  /**
+   * 某个角色在远端还活着的任务 uuid（对账 / 关闭全部用；上游按任务投影顶层 charId）。
+   *
+   * 老 worker（amsg-server < 2.6.0-next.5）不投影 charId：远端明明有任务，这里却一条都
+   * 匹配不上。空结果此时不是「远端没有」的证据，直接抛错让调用方走各自的降级——面板
+   * 对账整体关掉「远端不存在」徽标，关闭 2.0 退回本地全量清单——而不是拿半份证据误判。
+   */
+  async listRemoteTaskUuidsForChar(charId: string): Promise<string[]> {
+    const tasks = await this.listAllTasks();
+    if (tasks.length > 0 && tasks.every((t) => t?.charId == null)) {
+      throw new Error('worker 版本过旧：任务列表没有 charId 投影，无法按角色对账，请在设置里重新粘贴部署。');
+    }
+    return tasks
+      .filter((t) => t?.charId === charId && typeof t?.uuid === 'string')
+      .map((t) => t.uuid as string);
+  },
+
+  /**
+   * 取消一个远端任务。**幂等**：远端已经没有这一条（一次性任务发完就删行、或在别处
+   * 取消过），amsg-server 回 404 `TASK_NOT_FOUND`，那正是取消要达到的终态，算成功并
+   * 带上 alreadyGone=true 交给调用方——当失败处理会让「取消一条已经发过的任务」显示
+   * 成红色的「远端取消失败，可重试」，其实没有任何东西需要重试。
+   * 其余错误（鉴权、D1 挂了、网络）照常抛，别一起吞掉。
+   */
+  async cancelTask(taskUuid: string): Promise<{ uuid: string; alreadyGone: boolean }> {
     const config = await ensureWorkerReady();
     const response = await fetchWithAuth(`cancel-message?id=${encodeURIComponent(taskUuid)}`, config, {
       method: 'DELETE',
     }, '取消任务');
 
     if (!response?.success) {
+      if (response?.error?.code === REMOTE_TASK_NOT_FOUND_CODE) {
+        return { uuid: taskUuid, alreadyGone: true };
+      }
       throw new Error(response?.error?.message || '取消主动消息 2.0 任务失败。');
     }
 
-    return response.data;
+    return { uuid: taskUuid, alreadyGone: false };
+  },
+
+  /**
+   * 取消某个角色在远端的全部任务（关闭 2.0 / 删角色共用）。
+   *
+   * 以远端清单为准：本地 pending 派生会漏掉「已过点但 Cron 还没消费」的一次性任务，
+   * 只按本地清单取消会留下还会响的幽灵任务。远端读不到（网络故障 / 老 worker 没
+   * charId 投影）才退回调用方给的本地清单——半份证据也比不取消强。
+   *
+   * 逐条取消，单条失败记进 failed 继续跑完其余的：一条网络抖动不该让剩下的任务都留着。
+   */
+  async cancelAllTasksForChar(
+    charId: string,
+    localTaskUuids: string[],
+  ): Promise<{ targets: string[]; failed: Set<string> }> {
+    let targets: string[];
+    try {
+      targets = await this.listRemoteTaskUuidsForChar(charId);
+    } catch {
+      targets = localTaskUuids;
+    }
+    const failed = new Set<string>();
+    for (const uuid of targets) {
+      try { await this.cancelTask(uuid); } catch { failed.add(uuid); }
+    }
+    return { targets, failed };
   },
 
   async scheduleCharacterTask(params: {
@@ -500,15 +663,25 @@ export const ActiveMsgClient = {
     }
 
     const firstSendTime = ensureFutureTime(task.firstSendTime);
+    // AI 模式的 prompt 只有一条来源：firePack 上传 client_state，worker 到点现场填槽。
+    // 任务体里不再冻结一份渲染好的 prompt——读不到 fire_pack 就直接报错，没有第二条路，
+    // 留着那份快照只是白占请求体（完整角色卡 + 世界书）。
+    const firePack = task.mode === 'fixed'
+      ? null
+      : await buildFirePack(char, userProfile, groups, realtimeConfig);
     // 防穿帮闸锚点：排程这一刻的最后一条真实用户消息（见 utils/amsg2ExpireGuard.ts）。
-    const { lastUserMessageAt: anchorMs } = await buildTimeGapHint(char.id);
+    // 与 fire_pack 的 lastUserMessageAt 同源，直接复用——各读各的就是同一段 200 条历史
+    // 扫两遍。fixed 任务恒 force，锚点用不到，也就不必去读。
+    const anchorMs = firePack?.lastUserMessageAt ?? 0;
     // 任务身份：客户端自造 clientTaskId——远端 uuid 要创建成功后才有，而 metadata
     // 必须在创建时就带上归属键；push 原样透传，送达归属全靠它。
     const clientTaskId = crypto.randomUUID();
 
+    const remoteAvatarUrl = toRemoteAvatarUrl(char.avatar);
     const payload: Record<string, any> = {
       contactName: char.name,
-      avatarUrl: char.avatar,
+      // 本地 base64 头像过不了 worker 的校验，不合格干脆不带这个字段（见 toRemoteAvatarUrl）。
+      ...(remoteAvatarUrl ? { avatarUrl: remoteAvatarUrl } : {}),
       messageType: task.mode,
       messageSubtype: 'chat',
       firstSendTime,
@@ -524,32 +697,49 @@ export const ActiveMsgClient = {
         // 任务身份 + 防穿帮闸字段：worker onBeforeFire 与客户端送达兜底都从这里读。
         // fixed 恒为 force——它走不了 worker 闸（taskNeedsLlm=false），语义统一钉死。
         amsgClientTaskId: clientTaskId,
-        amsgExpirePolicy: task.mode === 'fixed' ? 'force' : (task.expirePolicy ?? 'expire'),
+        amsgExpirePolicy: resolveExpirePolicy(task.mode, task.expirePolicy),
         amsgRecurrence: task.recurrenceType,
-        amsgAnchorMs: anchorMs ?? 0,
+        amsgAnchorMs: anchorMs,
       },
     };
 
-    // AI 模式同时产两份：renderFirePack 立即填槽 → completePrompt 冻结兜底（老 worker /
-    // 没同步上状态时照旧能跑）；firePack 本体在任务建成后上传 client_state，worker 到点现场填槽。
-    let firePack: AmsgFirePack | null = null;
     if (task.mode === 'fixed') {
       const userMessage = task.userMessage?.trim();
       if (!userMessage) throw new Error('固定消息模式需要填写消息内容。');
       payload.userMessage = userMessage;
     } else {
       const activeApi = resolveApiConfig(char, config, apiConfig);
-      // 「本次任务」指令随任务走：metadata 给 worker 填槽，冻结 prompt 兜底同源渲染。
-      const taskInstruction = buildTaskInstruction(task.mode, task.promptHint);
-      payload.metadata.amsgTaskInstruction = taskInstruction;
-      firePack = await buildFirePack(char, userProfile, groups, realtimeConfig);
-      payload.completePrompt = renderFirePack(firePack, Date.now(), { taskInstruction });
+      // 「本次任务」指令随任务 metadata 走，worker 到点拿它填 fire_pack 的指令槽。
+      payload.metadata.amsgTaskInstruction = buildTaskInstruction(task.mode, task.promptHint);
+      // 服务端要求「completePrompt 或 messages」二选一，且 messages 必须非空、
+      // content 必须非空字符串，所以这里给一条占位。到点真正发给 LLM 的 messages 由
+      // worker 的 onBeforeFire 返回值覆盖（库用 { ...payload, messages } 调 LLM），
+      // 这条内容永远不参与生成——它要是真出现在哪里，就说明 worker 的 fire hooks 没生效。
+      payload.messages = [{ role: 'user', content: AMSG2_PLACEHOLDER_PROMPT }];
       payload.apiUrl = normalizeChatApiUrl(activeApi.baseUrl);
       payload.apiKey = activeApi.apiKey;
       payload.primaryModel = activeApi.model;
       if (config.maxTokens && config.maxTokens > 0) {
         payload.maxTokens = config.maxTokens;
       }
+    }
+
+    // ── 先传云端状态，成功了再建任务 ──
+    // fire_pack / tool_pack 都按角色存、不依赖任务 id，所以顺序可以倒过来。倒过来的好处：
+    // 上传失败时远端还没有任务，直接抛错就行，既不用回滚、也不会留下「用户看到排程失败、
+    // 远端却会到点触发」的幽灵任务。反过来（先建后传）失败时只剩降级或回滚两条路，都更差。
+    //
+    // 反向的残留是无害的那一侧：上传成功但建任务失败 → 云端多一份没人引用的 fire_pack，
+    // 不会被读（worker 只在 fire 某个任务时读它），下次同步直接覆盖。
+    //
+    // 大值（胖角色的完整角色卡 / 世界书）由 amsg-server 2.6.0-next.4+ 在 worker 存储层
+    // 透明分块，客户端整条直传即可；老 worker 会拒超限条目 → putClientStateOrThrow 抛错。
+    if (firePack) {
+      const now = Date.now();
+      await putClientStateOrThrow(client, [
+        ...buildCharStateEntries(char, firePack, now),
+        buildToolConfigEntry(realtimeConfig, now),
+      ], '上传云端状态');
     }
 
     const encrypted = await encryptPayload(client, payload);
@@ -567,39 +757,6 @@ export const ActiveMsgClient = {
       throw new Error(response?.error?.message || '主动消息 2.0 任务创建失败。');
     }
 
-    if (firePack) {
-      try {
-        const now = Date.now();
-        // 大值（胖角色的完整角色卡/世界书）由 amsg-server 2.6.0-next.4+ 在 worker
-        // 存储层透明分块，客户端整条直传即可；老 worker 会拒超限条目 → 设置页有
-        // capabilities 探测亮「重新部署」牌。
-        await client.putClientState([
-          {
-            namespace: amsgStateNamespace(char.id),
-            key: AMSG_FIRE_PACK_KEY,
-            value: JSON.stringify(firePack),
-            updatedAt: now,
-          },
-          // v2 服务端工具循环的数据（recall 月度总结 / 工具凭据），与 fire_pack 同批上云。
-          {
-            namespace: amsgStateNamespace(char.id),
-            key: AMSG_TOOL_PACK_KEY,
-            value: JSON.stringify(buildToolPack(char)),
-            updatedAt: now,
-          },
-          {
-            namespace: AMSG_GLOBAL_NAMESPACE,
-            key: AMSG_TOOL_CONFIG_KEY,
-            value: JSON.stringify(buildToolConfig(realtimeConfig)),
-            updatedAt: now,
-          },
-        ]);
-      } catch (error) {
-        // 同步失败不影响任务本身：completePrompt 兜底仍冻结在任务里，worker 走老链路。
-        console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 排程后同步 fire_pack 失败（有冻结 prompt 兜底）`, error);
-      }
-    }
-
     // 先建后删（Codex #4）：新任务确认创建成功才取消旧的——反过来一旦创建失败，
     // 旧任务已删、新任务没建，两头空。取消失败时新旧短暂并存于远端，把状态交还
     // 调用方（保留旧记录 + 标错 + 可重试），绝不静默。
@@ -615,7 +772,7 @@ export const ActiveMsgClient = {
 
     return {
       ...(response.data as { uuid: string; status: string; nextSendAt?: string }),
-      anchorMs: anchorMs ?? 0,
+      anchorMs,
       clientTaskId,
       replacedCancelFailed,
     };
@@ -640,7 +797,7 @@ export const ActiveMsgClient = {
 
   // 满血同步：把一批角色的最新 fire_pack 合成一次 putClientState 上传（amsgStateSync
   // 去抖后调用；iOS 切后台只有几秒存活窗口，多角色也必须一次请求写完）。
-  // 老 worker 没有 /client-state 端点会 404 → 抛错由调用方 warn，一切照旧走冻结 prompt。
+  // 这里只是拿最新聊天状态去刷新云端那份，失败由调用方 warn（沿用上一份，上下文旧一点）。
   async syncCharFirePacks(items: Array<{
     char: CharacterProfile;
     config: ActiveMsg2CharacterConfig;
@@ -652,38 +809,30 @@ export const ActiveMsgClient = {
     const globalConfig = await ensureWorkerReady();
     const client = await initializeClient(globalConfig);
     const now = Date.now();
+    // 表情包全库与角色无关，整批读一次就够——放在循环里的话 N 个角色要跑 2N 次全表
+    // getAll（表情记录带图片数据），拿回来的还是同一份。
+    const emojiLibrary = await readEmojiLibrary();
     const entries = [];
+    // 逐个串行：并发跑会同时开 N 个 IDB 事务，正是 instant push 那次超时的连接风暴成因。
     for (const item of items) {
       const firePack = await buildFirePack(
-        item.char, item.userProfile, item.groups, item.realtimeConfig,
+        item.char, item.userProfile, item.groups, item.realtimeConfig, emojiLibrary,
       );
       // 大值由 amsg-server 2.6.0-next.4+ 在 worker 存储层透明分块，整条直传，
       // 内容一个字不裁；老 worker 拒超限条目 → 设置页 capabilities 探测亮牌。
-      entries.push({
-        namespace: amsgStateNamespace(item.char.id),
-        key: AMSG_FIRE_PACK_KEY,
-        value: JSON.stringify(firePack),
-        updatedAt: now,
-      });
-      // v2 服务端工具循环的角色侧数据（recall 月度总结 / XHS 开关 / 角色名）。
-      entries.push({
-        namespace: amsgStateNamespace(item.char.id),
-        key: AMSG_TOOL_PACK_KEY,
-        value: JSON.stringify(buildToolPack(item.char)),
-        updatedAt: now,
-      });
+      entries.push(...buildCharStateEntries(item.char, firePack, now));
     }
     const response = await client.putClientState(entries);
     if (!response?.success) {
       throw new Error(response?.error?.message || '上传云端状态失败。');
     }
     // amsg-server 2.6.0-next.4+ 局部失败语义：单个坏条目只拒自己，不连坐同批。
-    // 被拒的条目点名 warn 出来（该角色到点退冻结提示词，其余角色不受影响）。
+    // 被拒的条目点名 warn 出来（该角色沿用上一份 fire_pack，其余角色不受影响）。
     const rejected = (response as { data?: { rejected?: Array<{ namespace: string; key: string; message?: string }> } })
       .data?.rejected;
     if (rejected && rejected.length > 0) {
       console.warn(
-        `${ACTIVE_MSG_RUNTIME_HEADER} 云端状态部分条目被拒（对应角色退冻结提示词兜底）`,
+        `${ACTIVE_MSG_RUNTIME_HEADER} 云端状态部分条目被拒（对应角色沿用上一份 fire_pack）`,
         rejected.map((r) => `${r.namespace}/${r.key}: ${r.message || 'rejected'}`),
       );
     }
@@ -692,12 +841,7 @@ export const ActiveMsgClient = {
   async syncToolConfig(realtimeConfig: RealtimeConfig | undefined): Promise<void> {
     const globalConfig = await ensureWorkerReady();
     const client = await initializeClient(globalConfig);
-    const response = await client.putClientState([{
-      namespace: AMSG_GLOBAL_NAMESPACE,
-      key: AMSG_TOOL_CONFIG_KEY,
-      value: JSON.stringify(buildToolConfig(realtimeConfig)),
-      updatedAt: Date.now(),
-    }]);
+    const response = await client.putClientState([buildToolConfigEntry(realtimeConfig, Date.now())]);
     if (!response?.success) {
       throw new Error(response?.error?.message || '上传工具凭据失败。');
     }
@@ -710,6 +854,37 @@ export const ActiveMsgClient = {
     const globalConfig = await ensureWorkerReady();
     const client = createClient(globalConfig);
     return client.getCapabilities();
+  },
+
+  /**
+   * 取回 worker 旁路存下的一份云端状态（push 装不下的大内容，见 amsgXhsSessionKey）。
+   * 键不存在、或者内容已被取走清空，都返回 null 交调用方决定——不要在这里编一个空壳
+   * 出来，那会让「数据还没取回」和「本来就没有」变成同一件事。
+   */
+  async readClientStateValue(namespace: string, key: string): Promise<string | null> {
+    const config = await ensureWorkerReady();
+    const client = await initializeClient(config);
+    const response = await client.getClientState(namespace);
+    if (!response?.success) {
+      throw new Error(response?.error?.message || '读取云端状态失败。');
+    }
+    const entries = (response.data?.entries ?? []) as Array<{ key: string; value: string }>;
+    const hit = entries.find((e) => e?.key === key);
+    return hit?.value ? hit.value : null;
+  },
+
+  /**
+   * 取回落库后把云端那份的内容清掉，腾回 D1 空间。
+   *
+   * 这里是**写空串**而不是删除整行：`value: null` 的删除语义只有 hook 侧的
+   * `ctx.writeState` 有，HTTP 的 `PUT /client-state` 会把这条当无效条目跳过、
+   * 内容原封不动（harness S6b 钉住了这个差异）。留一个几字节的空壳无所谓——键是
+   * 每任务固定的，下次触发直接覆盖，存量本来就有上限。
+   */
+  async clearClientStateValue(namespace: string, key: string): Promise<void> {
+    const config = await ensureWorkerReady();
+    const client = await initializeClient(config);
+    await client.putClientState([{ namespace, key, value: '', updatedAt: Date.now() }]);
   },
 
   // 清空该用户在 worker D1 里的全部 client_state（设置页「清除云端状态」按钮）。

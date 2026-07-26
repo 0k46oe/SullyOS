@@ -5,9 +5,10 @@ import type { ActiveMsg2TaskRecord, Amsg2ExpiredNoticeRecord } from '../types';
 
 const H = 3600_000;
 const pendingTask: ActiveMsg2TaskRecord = {
-  taskUuid: 'aabbccdd-0000-0000-0000-000000000000', mode: 'prompted',
+  taskUuid: 'aabbccdd-0000-0000-0000-000000000000', clientTaskId: 'cid-aabb', mode: 'prompted',
   firstSendTime: new Date(Date.now() + H).toISOString(), recurrenceType: 'none',
-  promptHint: '问问考试结果', source: 'character', status: 'scheduled', createdAt: Date.now(),
+  promptHint: '问问考试结果', expirePolicy: 'expire',
+  source: 'character', status: 'scheduled', createdAt: Date.now(),
 };
 const expired: Amsg2ExpiredNoticeRecord = {
   id: 'aabbccdd-0000-0000-0000-000000000000', charId: 'c1',

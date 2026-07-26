@@ -14,8 +14,18 @@ import {
 } from '../../types';
 import { ActiveMsgClient, getDefaultActiveMsgFirstSendTime } from '../../utils/activeMsgClient';
 import {
-  isPendingTask,
-  pruneStaleTasks,
+  applyRemoteTaskDelta,
+  applyScheduledTask,
+  currentOccurrenceMs,
+  describeExpirePolicy,
+  describeRecurrence,
+  describeTaskMode,
+  describeTaskProgress,
+  formatTaskTime,
+  isAmsg2EnabledForChar,
+  isRemoteMissingTask,
+  keepUncancelledTasks,
+  resolveExpirePolicy,
   shortTaskId,
   toDatetimeLocalValue,
 } from '../../utils/amsg2Tasks';
@@ -28,7 +38,17 @@ interface ActiveMsg2SettingsModalProps {
   userProfile: UserProfile;
   groups: GroupProfile[];
   realtimeConfig: RealtimeConfig;
-  onSave: (config: NonNullable<CharacterProfile['activeMsg2Config']>) => void;
+  /**
+   * 落盘任务清单与角色级设置。
+   *
+   * 传的是 updater 而不是整份 config：面板的每次保存都要先 await 网络请求，这期间角色
+   * 可能在聊天里用工具排了新任务（写的是同一个 activeMsg2Config）。拿渲染时的旧快照整份
+   * 盖回去会把它抹掉——远端照发、面板却看不见，就是各处都在防的幽灵任务。
+   * updater 由 OSContext 的函数式 setState 执行，拿到的 prev 是最新排队后的状态。
+   */
+  onSave: (
+    updater: (prev: ActiveMsg2CharacterConfig | undefined) => ActiveMsg2CharacterConfig,
+  ) => void;
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
 
@@ -57,8 +77,11 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
 }) => {
   const saved = char.activeMsg2Config;
   const tasks = saved?.tasks ?? [];
+  // 任务列表的判定基准时刻：一次 render 只取一次，同屏卡片不会踩在不同的时刻上。
+  const now = Date.now();
 
-  const [enabled, setEnabled] = useState(saved?.enabled ?? false);
+  // 开关初值走和工具注入门同一个判定：面板显示「关」而角色其实还能排程，界面就在骗人。
+  const [enabled, setEnabled] = useState(() => isAmsg2EnabledForChar(char));
   const [mode, setMode] = useState<ActiveMsg2Mode>('auto');
   const [firstSendTime, setFirstSendTime] = useState(getDefaultActiveMsgFirstSendTime());
   const [recurrenceType, setRecurrenceType] = useState<ActiveMsg2Recurrence>('none');
@@ -75,9 +98,10 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
   // editingTaskUuid=null → 新建；非 null → 编辑该任务（保存时 replaceTaskUuid）。
   const [editingTaskUuid, setEditingTaskUuid] = useState<string | null>(null);
   const [expirePolicy, setExpirePolicy] = useState<ActiveMsg2ExpirePolicy>('expire');
-  // 远端对账：打开面板时拉一次全量任务，只留归属本角色的 uuid。null = 没对上账（读失败/未拉完），
-  // 此时不显示「远端不存在」徽标，免得半个清单误伤。
-  const [remoteUuids, setRemoteUuids] = useState<Set<string> | null>(null);
+  // 远端对账底账：打开面板时拉一次全量任务，只留归属本角色的 uuid。null = 没对上账
+  // （读失败/未拉完），此时不显示「远端不存在」徽标，免得半个清单误伤。
+  // 之后不重拉，靠 applyRemoteTaskDelta 把每次远端操作的结果记进来（见 amsg2Tasks 注释）。
+  const [knownRemoteUuids, setKnownRemoteUuids] = useState<Set<string> | null>(null);
 
   // 表单值重置：面板打开或切换编辑对象时，用被编辑任务的字段填表单（新建则填默认值）。
   // 角色级共享设置（maxTokens / 单独 API）始终跟随保存值。
@@ -100,7 +124,7 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
       setRecurrenceType(editing.recurrenceType);
       setUserMessage(editing.userMessage ?? '');
       setPromptHint(editing.promptHint ?? '');
-      setExpirePolicy(editing.mode === 'fixed' ? 'force' : (editing.expirePolicy ?? 'expire'));
+      setExpirePolicy(resolveExpirePolicy(editing.mode, editing.expirePolicy));
     } else {
       setMode('auto');
       setFirstSendTime(getDefaultActiveMsgFirstSendTime());
@@ -114,7 +138,7 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
   // 打开面板时的 push 状态检查 + 远端对账（只随 isOpen / 角色变化跑，不随编辑对象重复请求）。
   useEffect(() => {
     if (!isOpen) return;
-    setRemoteUuids(null);
+    setKnownRemoteUuids(null);
 
     void (async () => {
       const globalConfig = await ActiveMsgClient.getGlobalConfig();
@@ -127,78 +151,81 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
 
     void (async () => {
       try {
-        const remote = await ActiveMsgClient.listAllTasks();
-        setRemoteUuids(new Set(
-          remote
-            .filter((t: any) => t?.charId === char.id && t?.uuid)
-            .map((t: any) => t.uuid as string),
-        ));
+        setKnownRemoteUuids(new Set(await ActiveMsgClient.listRemoteTaskUuidsForChar(char.id)));
       } catch {
         // 对账失败不打扰：null 让「远端不存在」徽标整体不显示。
-        setRemoteUuids(null);
+        setKnownRemoteUuids(null);
       }
     })();
   }, [isOpen, char.id]);
 
-  // 角色级共享设置（所有任务共用），每次落盘都从当前表单值重建。
-  const charLevelConfig = (): ActiveMsg2CharacterConfig => ({
+  /**
+   * 拼一份要落盘的 config：
+   *   - 角色级共享设置（enabled / maxTokens / 单独 API）以面板表单为准——只有面板编辑它们；
+   *   - 任务清单以「落盘那一刻的最新清单」为准，面板只通过 tasksOf 声明自己动了哪一条。
+   * 别把渲染时的 tasks 整份传下去，原因见 onSave 的注释。
+   */
+  const buildConfig = (
+    prev: ActiveMsg2CharacterConfig | undefined,
+    tasksOf: (prevTasks: ActiveMsg2TaskRecord[]) => ActiveMsg2TaskRecord[],
+    extra?: Partial<ActiveMsg2CharacterConfig>,
+  ): ActiveMsg2CharacterConfig => ({
     enabled: true,
-    tasks,
+    tasks: tasksOf(prev?.tasks ?? []),
     maxTokens: maxTokens.trim() ? Number(maxTokens) : undefined,
     useSecondaryApi: useSecondaryApi && !!secUrl,
     secondaryApi: useSecondaryApi && secUrl
       ? { baseUrl: secUrl.trim(), apiKey: secKey.trim(), model: secModel.trim() }
       : undefined,
-    lastSyncedAt: saved?.lastSyncedAt,
+    lastSyncedAt: prev?.lastSyncedAt,
+    ...extra,
   });
 
   const handleCancelTask = async (t: ActiveMsg2TaskRecord) => {
+    // alreadyGone = 远端本来就没有这一条（一次性任务发完就删行）。这也是取消成功，
+    // 只是文案上说清楚，免得用户以为自己刚刚拦下了一条还没发的消息。
+    let alreadyGone = false;
     try {
-      await ActiveMsgClient.cancelTask(t.taskUuid);
+      ({ alreadyGone } = await ActiveMsgClient.cancelTask(t.taskUuid));
     } catch (e) {
       // 远端取消失败不移除本地记录（Codex #4）——否则远端照发、面板却看不见了。
       console.warn('[ActiveMsg2Modal] 远端取消失败（保留记录待重试）', e);
-      onSave({
-        ...charLevelConfig(),
-        tasks: tasks.map((x) => x.taskUuid === t.taskUuid ? { ...x, lastError: '远端取消失败，可重试' } : x),
-      });
+      onSave((prev) => buildConfig(prev, (list) =>
+        list.map((x) => x.taskUuid === t.taskUuid ? { ...x, lastError: '远端取消失败，可重试' } : x)));
       addToast(`任务 [${shortTaskId(t.taskUuid)}] 取消失败（远端未确认），稍后重试。`, 'error');
       return;
     }
     if (editingTaskUuid === t.taskUuid) setEditingTaskUuid(null);
-    onSave({ ...charLevelConfig(), tasks: tasks.filter((x) => x.taskUuid !== t.taskUuid), lastSyncedAt: Date.now() });
-    addToast(`任务 [${shortTaskId(t.taskUuid)}] 已取消。`, 'info');
+    setKnownRemoteUuids((prev) => applyRemoteTaskDelta(prev, { gone: [t.taskUuid] }));
+    onSave((prev) => buildConfig(
+      prev,
+      (list) => list.filter((x) => x.taskUuid !== t.taskUuid),
+      { lastSyncedAt: Date.now() },
+    ));
+    addToast(alreadyGone
+      ? `任务 [${shortTaskId(t.taskUuid)}] 在远端已不存在（多半已经发过了），已从列表移除。`
+      : `任务 [${shortTaskId(t.taskUuid)}] 已取消。`, 'info');
   };
 
   const handleSubmit = async () => {
     setIsSubmitting(true);
     try {
       if (!enabled) {
-        // 关闭 2.0 = 取消该角色全部远端任务。以远端 listAllTasks 为准（Codex #4：本地
-        // pending 派生会漏掉「已过点但 Cron 还没消费」的一次性任务）；远端读不到时
-        // 退回本地全量清单。取消失败的保留在本地清单里，下次重开面板可重试。
-        let targets: string[];
-        try {
-          const remote = await ActiveMsgClient.listAllTasks();
-          targets = remote
-            .filter((t: any) => t?.charId === char.id && t?.uuid)
-            .map((t: any) => t.uuid as string);
-          // 上游身份投影不可用时只退回本地清单；禁止用 contactName 匹配，角色可重名。
-          if (!targets.length && tasks.length) targets = tasks.map((t) => t.taskUuid);
-        } catch {
-          targets = tasks.map((t) => t.taskUuid);
-        }
-        const failed = new Set<string>();
-        for (const uuid of targets) {
-          try { await ActiveMsgClient.cancelTask(uuid); } catch { failed.add(uuid); }
-        }
-        onSave({
-          ...charLevelConfig(),
-          enabled: false,
-          tasks: tasks.filter((t) => failed.has(t.taskUuid))
-            .map((t) => ({ ...t, lastError: '关闭时远端取消失败，可重试' })),
-          lastSyncedAt: Date.now(),
-        });
+        // 关闭 2.0 = 取消该角色全部远端任务（远端清单优先的口径见 cancelAllTasksForChar，
+        // 与删角色共用一份）。取消失败的保留在本地清单里，下次重开面板可重试。
+        const { targets, failed } = await ActiveMsgClient.cancelAllTasksForChar(
+          char.id,
+          tasks.map((t) => t.taskUuid),
+        );
+        const attempted = new Set(targets);
+        onSave((prev) => buildConfig(
+          prev,
+          (list) => keepUncancelledTasks(list, attempted, failed, {
+            failed: '关闭时远端取消失败，可重试',
+            appeared: '关闭主动消息时新出现，未被取消，请单独处理',
+          }),
+          { enabled: false, lastSyncedAt: Date.now() },
+        ));
         addToast(failed.size
           ? `主动消息 2.0 已关闭，但有 ${failed.size} 个任务远端取消失败，请稍后重开面板重试。`
           : '主动消息 2.0 已关闭，全部任务已取消。', failed.size ? 'error' : 'info');
@@ -208,7 +235,8 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
 
       if (!globalReady) throw new Error('请先去系统设置里完成“主动消息 2.0”的全局配置。');
 
-      const config = charLevelConfig();
+      // 传给排程接口的这份只用来读角色级设置（封顶校验 / 副 API），不参与落盘。
+      const config = buildConfig(saved, () => tasks);
       const result = await ActiveMsgClient.scheduleCharacterTask({
         char, config,
         task: {
@@ -227,28 +255,39 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
         mode, firstSendTime, recurrenceType,
         promptHint: promptHint.trim() || undefined,
         userMessage: userMessage.trim() || undefined,
-        expirePolicy: mode === 'fixed' ? 'force' : expirePolicy,
+        expirePolicy: resolveExpirePolicy(mode, expirePolicy),
         anchorLastUserMsgAt: result.anchorMs,
         source: 'user',
         status: 'scheduled',
         createdAt: Date.now(),
       };
-      // 和工具路径一致：替换后旧任务取消失败时，旧记录必须保留并标错，
-      // 否则远端新旧并存、面板只显示新的，幽灵任务又回来了。
-      const rest = result.replacedCancelFailed
-        ? tasks.map((t) => t.taskUuid === editingTaskUuid
-          ? { ...t, lastError: '替换时远端取消失败，任务可能仍会触发，可再次取消' }
-          : t)
-        : tasks.filter((t) => t.taskUuid !== editingTaskUuid);
-      onSave({ ...config, tasks: pruneStaleTasks([...rest, record], Date.now()), lastSyncedAt: Date.now() });
+      onSave((prev) => buildConfig(
+        prev,
+        // 并清单的规则（含替换失败时保留旧记录）与角色工具路径共用 applyScheduledTask。
+        (list) => applyScheduledTask(list, record, {
+          replaceTaskUuid: editingTaskUuid ?? undefined,
+          replacedCancelFailed: result.replacedCancelFailed,
+        }, Date.now()),
+        { lastSyncedAt: Date.now() },
+      ));
+      // 排程接口回了 success = 这条在远端确实存在，记进底账，别让它被当成「远端不存在」。
+      // 编辑时旧任务已被取消才出账；取消失败的话远端新旧并存，旧 uuid 要留着。
+      setKnownRemoteUuids((prev) => applyRemoteTaskDelta(prev, {
+        present: [result.uuid],
+        gone: editingTaskUuid && !result.replacedCancelFailed ? [editingTaskUuid] : [],
+      }));
       setEditingTaskUuid(null);
+      // 编辑走的是「先建新的再取消旧的」，编号必然换一个——只说「已更新」的话，
+      // 用户会以为列表里那条陌生编号是多出来的。
       addToast(result.replacedCancelFailed
         ? '新任务已创建，但旧任务取消失败，请稍后重试。'
-        : (editingTaskUuid ? '任务已更新。' : `任务已创建 [${shortTaskId(result.uuid)}]。`),
+        : (editingTaskUuid
+          ? `任务已更新，编号换成 [${shortTaskId(result.uuid)}]。`
+          : `任务已创建 [${shortTaskId(result.uuid)}]。`),
       result.replacedCancelFailed ? 'error' : 'success');
     } catch (error: any) {
       const message = error?.message || '主动消息 2.0 保存失败。';
-      onSave({ ...charLevelConfig(), lastError: message });
+      onSave((prev) => buildConfig(prev, (list) => list, { lastError: message }));
       addToast(message, 'error');
     } finally {
       setIsSubmitting(false);
@@ -294,22 +333,25 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
             <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 block pl-1">
               任务列表（{tasks.length}）
             </label>
+            {/* 一次 render 内所有任务用同一个 now，免得同屏卡片踩在不同的时刻上判定。 */}
             <div className="space-y-2">
               {tasks.map((t) => {
-                const pending = isPendingTask(t, Date.now());
-                const recurrence = t.recurrenceType === 'daily' ? '每天' : t.recurrenceType === 'weekly' ? '每周' : '一次';
-                const what = t.mode === 'fixed' ? '固定消息' : t.mode === 'prompted' ? (t.promptHint || '提示词') : '自动';
-                const missingRemote = remoteUuids !== null && pending && !remoteUuids.has(t.taskUuid);
+                // 循环任务显示的是「下一次」，不是创建时那个锚点（见 currentOccurrenceMs）。
+                const occurrenceMs = currentOccurrenceMs(t, now);
+                const missingRemote = isRemoteMissingTask(t, knownRemoteUuids, now);
                 return (
                   <div key={t.taskUuid} className={`rounded-2xl border px-4 py-3 text-xs ${editingTaskUuid === t.taskUuid ? 'border-fuchsia-400 bg-fuchsia-50' : 'border-slate-200 bg-white'}`}>
                     <div className="flex items-center justify-between">
                       <div className="min-w-0">
                         <div className="font-bold text-slate-700 truncate">
-                          [{shortTaskId(t.taskUuid)}] {new Date(t.firstSendTime).toLocaleString('zh-CN', { hour12: false })} · {recurrence}
+                          [{shortTaskId(t.taskUuid)}] {formatTaskTime(occurrenceMs ?? t.firstSendTime)} · {describeRecurrence(t.recurrenceType)}
                         </div>
+                        {/* 进度排最前：这一行会被截断，而「发没发」是用户最想先看到的一条，
+                            排在末尾的话（模式描述可能很长）它永远看不见。 */}
                         <div className="text-slate-400 mt-0.5 truncate">
-                          {what} · {(t.expirePolicy ?? 'expire') === 'force' ? '强制发送' : '遇忙作废'}
-                          · {t.source === 'character' ? '角色创建' : '手动创建'} · {pending ? '待触发' : '已到点'}
+                          {describeTaskProgress(t, knownRemoteUuids, now)} · {describeTaskMode(t)}
+                          · {describeExpirePolicy(t.expirePolicy)}
+                          · {t.source === 'character' ? '角色创建' : '手动创建'}
                         </div>
                         {missingRemote ? (
                           <div className="text-slate-400 mt-1 text-[11px]">⚠ 远端不存在（可能已发送或在别处取消）</div>

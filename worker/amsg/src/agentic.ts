@@ -42,7 +42,7 @@ export interface PushBuildInput {
   messageType: string;
   metadata: Record<string, unknown>;
   /** 本次触发时刻（任务行 next_send_at），随每条 push 的 metadata.amsgOccurrenceMs 带回客户端。 */
-  occurrenceMs?: number | null;
+  occurrenceMs: number;
   /**
    * round 1 XHS 工具抓到的笔记快照（stash.toolCtx.lastXhsNotesRef.current）。
    * amsg2 的 round 1 在 worker 里跑，客户端没有 instantToolRunner 那次
@@ -63,14 +63,16 @@ export interface XhsSessionPayload {
 
 /** desc 截断长度：卡片预览够用，省 push 配额。 */
 const XHS_DESC_MAX = 120;
-/** 最多带几张笔记：share 正常 1-3 张，超出说明 LLM 在刷屏，保 push 送达优先。 */
-const XHS_NOTES_MAX = 4;
 
 /**
  * 从 finish 时的全部 directives 里挑出 XHS 引用，组客户端重放要的最小数据包：
  *   - xhs_share 的 idx → 对应笔记（越界/编造的序号取不到就跳过，客户端照旧警告）；
  *   - xhs_like / fav / comment / reply 的 noteId → 对应 xsecToken。
  * 没有任何 XHS 引用（或引用全落空）→ null，metadata 不多挂键。
+ *
+ * 这里**不限张数**：角色说分享了几张就带几张。塞不塞得进一条 push 是 index.ts 组装时
+ * 按真实字节预算算的，超出的部分旁路存 client_state（见 offloadOversizedPush），
+ * 客户端取回后照样出卡——不会出现「说分享了 6 张只出来 4 张」。
  */
 export function buildXhsSessionPayload(
   directives: Directive[],
@@ -92,7 +94,6 @@ export function buildXhsSessionPayload(
     const note = idx >= 1 ? notes?.[idx - 1] : undefined;
     if (!note) continue;
     pickedNotes.push({ idx, note: { ...note, desc: (note.desc || '').slice(0, XHS_DESC_MAX) } });
-    if (pickedNotes.length >= XHS_NOTES_MAX) break;
   }
   const pickedTokens = (xsecTokens ?? []).filter(([noteId]) => refNoteIds.has(noteId));
 
@@ -133,10 +134,11 @@ export function processLLMRound(
   // 之前」），本轮正文也没有（有就走上面 tool-request 分支了），所以这次分类必然
   // 落 finish；万一未来 classifier 语义变化落了 tool-request，取其 prefix 兜底，
   // 不让 fire 链在 finish 关头断掉。
+  // 没有旁白（一轮直出，最常见）时全文就是本轮正文，同样的输入不必再扫一遍。
   const fullText = [...state.narrations, llmOutputText]
     .filter((part) => part.trim().length > 0)
     .join('\n');
-  const finalScan = classifyLLMOutput(fullText);
+  const finalScan = fullText === llmOutputText ? result : classifyLLMOutput(fullText);
   const cleanedText = finalScan.kind === 'finish' ? finalScan.cleanedText : finalScan.prefix;
   const directives = finalScan.kind === 'finish' ? finalScan.directives : [];
 
@@ -196,7 +198,7 @@ function buildScheduledPush(
     taskId: build.taskId,
     metadata: {
       ...build.metadata,
-      ...(build.occurrenceMs != null ? { amsgOccurrenceMs: build.occurrenceMs } : {}),
+      amsgOccurrenceMs: build.occurrenceMs,
       ...(extraMeta ?? {}),
     },
     ...(bannerBody !== undefined ? { notification: { title, body: bannerBody } } : {}),
