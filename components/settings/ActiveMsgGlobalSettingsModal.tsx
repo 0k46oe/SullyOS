@@ -3,7 +3,12 @@ import Modal from '../os/Modal';
 import { ActiveMsg2GlobalConfig } from '../../types';
 import { ActiveMsgClient, ActiveMsg2PushStatus } from '../../utils/activeMsgClient';
 import { ActiveMsgStore, maskActiveMsgUserId } from '../../utils/activeMsgStore';
-import { buildCloudflareDashboardUrl } from '../../utils/instantPushClient';
+import {
+  buildCloudflareDashboardUrl,
+  isInstantConfigReady,
+  loadInstantConfig,
+  saveInstantConfig,
+} from '../../utils/instantPushClient';
 import { generateClientToken } from '../../utils/vapidGen';
 import { isAmsgServerVersionAtLeast } from '../../utils/amsgWorkerVersion';
 
@@ -60,6 +65,9 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   const [generatedServerToken, setGeneratedServerToken] = useState('');
 
   const [workerOutdated, setWorkerOutdated] = useState(false);
+  // Instant Push 也开着：聊天会走它，2.0 挂在本地那条路上的几样东西全静默失效（见
+  // amsg2InstantConflict）。开面板时读一次，用户在这里关掉 instant 后立刻更新。
+  const [instantOn, setInstantOn] = useState(false);
 
   // 特性探测：确认「过老」（端点 404 → null，或缺关键特性）才亮牌；
   // 探测本身失败（断网 / 密钥不对 / 没填地址）不亮，避免误报。
@@ -81,7 +89,15 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     const nextPushStatus = await ActiveMsgClient.getPushStatus();
     setConfig(nextConfig);
     setPushStatus(nextPushStatus);
+    setInstantOn(isInstantConfigReady());
     void probeWorkerCaps();
+  };
+
+  /** 关掉 Instant Push 的开关，worker 地址等配置留着——以后想切回去不用重填。 */
+  const disableInstantPush = () => {
+    saveInstantConfig({ ...loadInstantConfig(), enabled: false });
+    setInstantOn(false);
+    addToast('已关闭 Instant Push，聊天回到本地直连。', 'success');
   };
 
   useEffect(() => {
@@ -227,6 +243,35 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
             和「Instant Push」不同：Instant 是你发消息才即时回；这个是到点主动推。
           </p>
         </div>
+
+        {/* 两个都开着时聊天走 Instant，2.0 挂在本地那条路上的东西全静默失效。
+            没有报错也没有提示，只会表现成「这功能怎么不响」——所以在这儿说清楚。 */}
+        {instantOn ? (
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2">
+            <div className="font-bold text-amber-900 text-sm">Instant Push 也开着</div>
+            <p className="text-xs leading-relaxed text-amber-800">
+              两个都开时聊天走 Instant Push，主动消息 2.0 里挂在聊天上的这三样不会生效：
+            </p>
+            <ul className="text-xs leading-relaxed text-amber-800 space-y-1 list-disc list-outside pl-4">
+              <li>角色在聊天里排任务、取消任务（工具不会跟着请求发出去）</li>
+              <li>角色知道自己有哪些任务在排（排程现状同样发不出去）</li>
+              <li>
+                防打断——你正聊着的时候，到点的主动消息不会自动让路，可能直接弹出来
+              </li>
+            </ul>
+            <p className="text-xs leading-relaxed text-amber-800">
+              <strong>到点推送本身照常工作</strong>，受影响的只有上面这些。两边各管一件事：Instant 让「发完消息就关掉 App」
+              也能收到回复，2.0 管到点主动找你，所以并不是谁替代谁，按你更需要哪个来留。
+            </p>
+            <button
+              type="button"
+              onClick={disableInstantPush}
+              className="w-full py-2.5 bg-amber-500 text-white text-xs font-bold rounded-xl active:scale-95 transition-transform"
+            >
+              关掉 Instant Push（保留它的配置）
+            </button>
+          </div>
+        ) : null}
 
         <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
           <button

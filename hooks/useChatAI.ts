@@ -43,6 +43,8 @@ import { markAmsgStateDirty, startAmsgChatPresence, stopAmsgChatPresence } from 
 import { getLastRealUserMessageAt } from '../utils/amsg2ExpireGuard';
 import { hasActiveAiTask, isAmsg2EnabledForChar } from '../utils/amsg2Tasks';
 import { collectAmsg2TaskContext } from '../utils/amsg2TaskContext';
+import { AMSG2_SUPPRESSED_TRACE } from '../utils/amsg2InstantConflict';
+import { appendInstantTraceEntry } from '../utils/instantTraceLog';
 import { AMSG2_TOOLS, AMSG2_TOOL_NAMES, createAmsg2ToolSession, executeAmsg2Tool, isAmsg2GlobalReady } from '../utils/amsg2ToolBridge';
 import { shouldSendThinkingParams } from '../utils/thinkingGate';
 import { routeMiniAppToolCall } from '../utils/miniAppToolRoute';
@@ -1017,6 +1019,12 @@ export const useChatAI = ({
             // instant push 会把请求交给 worker 并在这里提前 return, 工具循环(callLuckinTool 等)根本跑不到,
             // 表现就是"选了城市也没用 / 角色不下单"。这些模式下跳过 instant push, 用本地 fetch 跑工具循环。
             if (isInstantConfigReady() && !payload.flags.luckinChatActive && !payload.flags.mcdActive && !payload.flags.luckinActive && !payload.flags.mcpChatActive) {
+                // 走这条路 = 上面那段 amsg2 的工具、排程现状块都白拼了（instant 发的是原始
+                // fullMessages、请求体不带 tools），下面的活跃会话租约也不会开。三样都是静默
+                // 失效，留一条 trace 让观察窗看得见，别让人对着「功能不响」凭空排查。
+                if (amsg2ToolsInjected) {
+                    appendInstantTraceEntry({ ts: new Date().toISOString(), event: AMSG2_SUPPRESSED_TRACE });
+                }
                 const instantResult = await sendInstantPushAndAwaitReply({
                     contactName: char.name,
                     messages: fullMessages as InstantPushPayload['messages'],
