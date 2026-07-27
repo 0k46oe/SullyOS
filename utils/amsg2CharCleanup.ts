@@ -15,9 +15,10 @@
 
 import { CharacterProfile } from '../types';
 import { ActiveMsgClient } from './activeMsgClient';
+import { ActiveMsgStore } from './activeMsgStore';
 
 export type CharCloudStateCleanup =
-  /** 这个角色没配过主动消息 2.0，云端本来就没有它的数据 —— 一个请求都没发。 */
+  /** 没有云端可清（这个角色没配过 2.0，或者压根没填 worker 地址）—— 一个请求都没发。 */
   | { status: 'skipped' }
   /** 清完了；keys 是实际被清空的条目（本来就空的角色是空数组）。 */
   | { status: 'cleared'; keys: string[] }
@@ -37,11 +38,28 @@ export type CharCloudStateCleanup =
 export const charMayHaveCloudState = (char: CharacterProfile | undefined): boolean =>
   Boolean(char?.activeMsg2Config);
 
-/** 清掉该角色的云端 client_state。永远不抛错（见文件头：不能阻塞角色删除）。 */
+/**
+ * 清掉该角色的云端 client_state。永远不抛错（见文件头：不能阻塞角色删除）。
+ *
+ * 发请求之前先确认真有个 worker 可发。没填地址时云端一个字节都没写过，
+ * 那不是「清理失败」，跳过就好——报成失败会让用户对着一条根本不存在的残留发愁。
+ * （角色身上有 activeMsg2Config 不代表云端有数据：面板保存失败时也会留下一份，
+ * 比如全局还没配好就点了保存。）
+ *
+ * 判断放在发请求之前、而不是靠 catch 里认错误文案：错误文案改一次这里就失效了。
+ */
 export const purgeCharCloudState = async (
   char: CharacterProfile | undefined,
 ): Promise<CharCloudStateCleanup> => {
   if (!charMayHaveCloudState(char)) return { status: 'skipped' };
+
+  try {
+    const globalConfig = await ActiveMsgStore.getGlobalConfig();
+    if (!globalConfig.workerUrl?.trim()) return { status: 'skipped' };
+  } catch {
+    // 连本地配置都读不到，等于无从判断有没有云端；按没有处理，别为它弹错误。
+    return { status: 'skipped' };
+  }
 
   try {
     const keys = await ActiveMsgClient.clearCharClientState(char!.id);
