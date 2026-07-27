@@ -4481,6 +4481,49 @@ async function dispatchAgenticTool(toolName, args, ctx) {
   }
 }
 
+// utils/agenticToolFeedback.ts
+var toolCallFingerprint = (name, args) => {
+  const normalize2 = (value) => {
+    if (Array.isArray(value)) return value.map(normalize2);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, normalize2(v)])
+      );
+    }
+    return value;
+  };
+  return `${name}:${JSON.stringify(normalize2(args ?? {}))}`;
+};
+var TOOL_LABELS = {
+  recall: "\u8C03\u53D6\u67D0\u4E2A\u6708\u7684\u8BB0\u5FC6",
+  web_search: "\u8054\u7F51\u641C\u7D22",
+  notion_read_diary: "\u7FFB\u65E5\u8BB0\uFF08Notion\uFF09",
+  feishu_read_diary: "\u7FFB\u65E5\u8BB0\uFF08\u98DE\u4E66\uFF09",
+  read_note: "\u7FFB\u5BF9\u65B9\u7684\u7B14\u8BB0",
+  xhs_search: "\u5728\u5C0F\u7EA2\u4E66\u641C\u7D22",
+  xhs_browse: "\u5237\u5C0F\u7EA2\u4E66\u9996\u9875",
+  xhs_my_profile: "\u6253\u5F00\u81EA\u5DF1\u7684\u5C0F\u7EA2\u4E66",
+  xhs_detail: "\u70B9\u5F00\u4E00\u6761\u5C0F\u7EA2\u4E66\u7B14\u8BB0"
+};
+var describeTool = (name) => TOOL_LABELS[name] ?? name;
+var buildToolResultMessage = (opts) => {
+  const { name, result, history } = opts;
+  const used = [...new Set(history.map((r) => describeTool(r.name)))];
+  return [
+    `[\u7CFB\u7EDF: \u4F60${describeTool(name)}\uFF0C\u62FF\u56DE\u4E86\u4E0B\u9762\u8FD9\u4E9B]`,
+    JSON.stringify(result),
+    "",
+    `[\u7CFB\u7EDF: \u672C\u6B21\u5DF2\u7ECF\u7528\u8FC7\u7684\u5DE5\u5177\uFF1A${used.join("\u3001")}\u3002\u7ED3\u679C\u90FD\u5728\u4E0A\u9762\u4E86\uFF0C\u540C\u6837\u7684\u8C03\u7528\u4E0D\u8981\u518D\u6765\u4E00\u904D\u3002`,
+    "\u63A5\u4E0B\u6765\u53EA\u6709\u4E24\u6761\u8DEF\uFF1A\u76F4\u63A5\u628A\u8981\u53D1\u7684\u6D88\u606F\u5199\u51FA\u6765\uFF0C\u6216\u8005\u7528\u4E00\u4E2A\u8FD8\u6CA1\u7528\u8FC7\u7684\u5DE5\u5177\u3002",
+    "\u522B\u628A\u5DE5\u5177\u8C03\u7528\u5F53\u6210\u56DE\u7B54\u2014\u2014\u7528\u6237\u7B49\u7684\u662F\u4F60\u8BF4\u7684\u8BDD\u3002]"
+  ].join("\n");
+};
+var buildDuplicateToolMessage = (name) => [
+  `[\u7CFB\u7EDF: \u4F60\u521A\u521A\u5DF2\u7ECF${describeTool(name)}\u8FC7\u4E00\u6B21\u4E86\uFF0C\u53C2\u6570\u5B8C\u5168\u76F8\u540C\uFF0C\u7ED3\u679C\u5C31\u5728\u4E0A\u9762\u3002]`,
+  "[\u7CFB\u7EDF: \u8FD9\u4E00\u6B21\u6CA1\u6709\u518D\u53BB\u67E5\u3002\u522B\u518D\u91CD\u590D\u540C\u6837\u7684\u8C03\u7528\u4E86\u2014\u2014\u73B0\u5728\u628A\u8981\u53D1\u7684\u6D88\u606F\u5199\u51FA\u6765\uFF0C",
+  "\u6216\u8005\u6362\u4E00\u4E2A\u8FD8\u6CA1\u7528\u8FC7\u7684\u5DE5\u5177\u3002]"
+].join("\n");
+
 // node_modules/.pnpm/@rei-standard+amsg-instant@0.10.0/node_modules/@rei-standard/amsg-instant/dist/index.mjs
 var TEXT_ENCODER2 = new TextEncoder();
 var TEXT_DECODER2 = new TextDecoder("utf-8", { fatal: false });
@@ -5063,7 +5106,7 @@ function classifyLLMOutput(text) {
 }
 
 // worker/amsg/src/agentic.ts
-var createFireSessionState = () => ({ narrations: [] });
+var createFireSessionState = () => ({ narrations: [], toolCalls: [] });
 var XHS_DESC_MAX = 120;
 function buildXhsSessionPayload(directives, notes, xsecTokens) {
   if (directives.length === 0) return null;
@@ -5327,8 +5370,19 @@ var amsgHooks = {
       let content;
       try {
         const args = toolCall?.function?.arguments ? JSON.parse(toolCall.function.arguments) : {};
+        const fingerprint = toolCallFingerprint(name, args);
+        if (stash.session.toolCalls.some((r) => r.fingerprint === fingerprint)) {
+          console.log("[amsg:agentic]", { type: "tool_duplicate", sessionId: ctx.sessionId, tool: name });
+          results.push({
+            tool_call_id: toolCall.id,
+            role: "tool",
+            content: buildDuplicateToolMessage(name)
+          });
+          continue;
+        }
         const result = await dispatchAgenticTool(name, args, stash.toolCtx);
-        content = JSON.stringify(result);
+        stash.session.toolCalls.push({ name, fingerprint });
+        content = buildToolResultMessage({ name, result, history: stash.session.toolCalls });
         console.log("[amsg:agentic]", { type: "tool_done", sessionId: ctx.sessionId, tool: name });
       } catch (error) {
         content = JSON.stringify({

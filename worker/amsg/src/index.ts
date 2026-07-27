@@ -50,6 +50,11 @@ import {
   type AmsgToolPack,
 } from '../../../utils/amsgToolPack';
 import { dispatchAgenticTool, type AgenticToolChar, type AgenticToolCtx } from '../../../utils/agenticTools';
+import {
+  buildDuplicateToolMessage,
+  buildToolResultMessage,
+  toolCallFingerprint,
+} from '../../../utils/agenticToolFeedback';
 import { setProxyWorkerUrlOverride } from '../../../utils/proxyWorker';
 import { XhsMcpClient } from '../../../utils/xhsMcpClient';
 import {
@@ -459,8 +464,26 @@ export const amsgHooks = {
       let content: string;
       try {
         const args = toolCall?.function?.arguments ? JSON.parse(toolCall.function.arguments) : {};
+        const fingerprint = toolCallFingerprint(name, args);
+
+        // 同名同参第二次直接打回，一次请求都不发。软提示（下面那段回喂）挡不住时靠它兜底：
+        // 转满上限会抛 AGENTIC_LOOP_EXCEEDED，任务不出清、下一分钟整条从头重跑，代价远大于
+        // 少查一次。只拦完全一样的调用——换月份、换关键词照常放行，多轮能力不受影响。
+        if (stash.session.toolCalls.some((r) => r.fingerprint === fingerprint)) {
+          console.log('[amsg:agentic]', { type: 'tool_duplicate', sessionId: ctx.sessionId, tool: name });
+          results.push({
+            tool_call_id: toolCall.id,
+            role: 'tool' as const,
+            content: buildDuplicateToolMessage(name),
+          });
+          continue;
+        }
+
         const result = await dispatchAgenticTool(name, args, stash.toolCtx);
-        content = JSON.stringify(result);
+        stash.session.toolCalls.push({ name, fingerprint });
+        // 不再回裸 JSON：模型从裸 JSON 里看不出「这一步已经做完了」，提示词里但凡有一句
+        // 常驻的「先去查 X」就会每轮照做。这段话跟前台说的是同一套（见 agenticToolFeedback）。
+        content = buildToolResultMessage({ name, result, history: stash.session.toolCalls });
         console.log('[amsg:agentic]', { type: 'tool_done', sessionId: ctx.sessionId, tool: name });
       } catch (error) {
         content = JSON.stringify({

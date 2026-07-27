@@ -15,6 +15,7 @@
  */
 
 import { classifyLLMOutput, type Directive, type ToolCall } from '../../instant-push/src/classifier';
+import type { ToolCallRecord } from '../../../utils/agenticToolFeedback';
 import { sanitizeIntoSegments } from '../../../utils/sanitize';
 // type-only：编译期擦除，不会把 realtimeContext 的浏览器依赖打进 worker bundle。
 import type { XhsNote } from '../../../utils/realtimeContext';
@@ -28,9 +29,14 @@ export interface FireSessionState {
    * 当正文漏进 push、日记也丢。finish 时拼回全文统一扫一次。
    */
   narrations: string[];
+  /**
+   * 本次 fire 已经跑过的工具调用。两个用处：回喂时把清单报给模型（「这些查过了」），
+   * 以及拦住同名同参的重复调用（见 executeToolCalls）。跨轮累积，fire 结束随 scratch 丢弃。
+   */
+  toolCalls: ToolCallRecord[];
 }
 
-export const createFireSessionState = (): FireSessionState => ({ narrations: [] });
+export const createFireSessionState = (): FireSessionState => ({ narrations: [], toolCalls: [] });
 
 /** 组 push payload 需要的业务字段（都来自 sessionCtx / task metadata）。 */
 export interface PushBuildInput {

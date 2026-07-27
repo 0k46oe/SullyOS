@@ -340,3 +340,70 @@ describe('offloadOversizedPush — push 装不下时旁路存储', () => {
     expect(writeState).not.toHaveBeenCalled();
   });
 });
+
+// 服务端工具循环的编排：跑完一个工具之后跟模型说什么，以及重复调用怎么办。
+// 这段是「amsg2 和前台行为对齐」的落点——前台每次回喂都明说「别再输出这个标签了」，
+// worker 以前只回裸 JSON，模型看不出这一步已经做完，提示词里有句常驻的「先去查 X」
+// 就会每轮照做、跑满上限，然后 AGENTIC_LOOP_EXCEEDED、任务不出清、下一分钟整条重跑。
+describe('executeToolCalls 的工具编排', () => {
+  const toolCall = (id: string, name: string, args: Record<string, unknown>) => ({
+    id,
+    function: { name, arguments: JSON.stringify(args) },
+  });
+
+  /** 造一个跑到 executeToolCalls 那一步的 sessionCtx（scratch.fire 由 onBeforeFire 挂好）。 */
+  const readySession = async () => {
+    const { ctx, scratch } = makeCtx({});
+    await amsgHooks.onBeforeFire(ctx);
+    return { sessionId: 'sess_task_42', scratch } as any;
+  };
+
+  it('回喂的不是裸 JSON，而是带「别重复」引导的一段话', async () => {
+    const session = await readySession();
+    const [out] = await amsgHooks.executeToolCalls(
+      [toolCall('c1', 'recall', { year: '2026', month: '06' })],
+      session,
+    );
+    expect(out.content).not.toMatch(/^\{/);        // 不是裸 JSON
+    expect(out.content).toContain('不要再来一遍');
+    expect(out.content).toContain('调取某个月的记忆');
+  });
+
+  it('同名同参第二次直接打回，不再真跑一遍工具', async () => {
+    const session = await readySession();
+    const call = toolCall('c1', 'recall', { year: '2026', month: '06' });
+    await amsgHooks.executeToolCalls([call], session);
+    const [second] = await amsgHooks.executeToolCalls(
+      [{ ...call, id: 'c2' }],
+      session,
+    );
+    expect(second.content).toContain('没有再去查');
+  });
+
+  // 闸只拦「完全一样」的调用。换个月份是正当的多轮使用，拦了就是把能力砍了。
+  it('换了参数照常放行——多轮能力不受影响', async () => {
+    const session = await readySession();
+    await amsgHooks.executeToolCalls(
+      [toolCall('c1', 'recall', { year: '2026', month: '06' })],
+      session,
+    );
+    const [other] = await amsgHooks.executeToolCalls(
+      [toolCall('c2', 'recall', { year: '2026', month: '07' })],
+      session,
+    );
+    expect(other.content).not.toContain('没有再去查');
+  });
+
+  it('参数字段顺序变了仍算同一次调用', async () => {
+    const session = await readySession();
+    await amsgHooks.executeToolCalls(
+      [toolCall('c1', 'recall', { year: '2026', month: '06' })],
+      session,
+    );
+    const [reordered] = await amsgHooks.executeToolCalls(
+      [toolCall('c2', 'recall', { month: '06', year: '2026' })],
+      session,
+    );
+    expect(reordered.content).toContain('没有再去查');
+  });
+});
