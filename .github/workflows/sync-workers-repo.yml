@@ -18,11 +18,15 @@ name: Sync worker bundles to deploy repo
 on:
   push:
     branches: [main, master]
+    # 整个 utils 目录都算进来，不逐个点名 worker 用到的文件。bundle 实际会打进
+    # agenticToolFeedback / xhsMcpClient / sanitize / proxyWorker 这些，靠人工维护一份
+    # 清单的话，漏一个不会报错、只会静默给用户同步一个过期的 bundle——正是下面那条
+    # 「从源码重打」想避免的事。放宽的代价只是前端提交也白跑一次构建，而内容没变时
+    # 下面的 git diff 判断不会产生空提交，用户那边不会收到无意义的更新。
     paths:
       - 'worker/**'
-      - 'utils/amsg*.ts'
-      - 'utils/agenticTools.ts'
-      - 'utils/realtimeFetchCore.ts'
+      - 'utils/**'
+      - 'types.ts'
       - '.github/workflows/sync-workers-repo.yml'
   workflow_dispatch:
 
