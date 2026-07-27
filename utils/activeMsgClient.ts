@@ -34,6 +34,7 @@ import {
   buildToolConfig,
   buildToolPack,
 } from './amsgToolPack';
+import { listRecallableMonths } from './agenticTools';
 import { ChatPrompts } from './chatPrompts';
 import { DB } from './db';
 import { copyWorkerBundleToClipboard } from './instantPushClient';
@@ -240,6 +241,14 @@ const buildFirePack = async (
     .map((message) => formatHistoryLine(message.role, message.content, char, userProfile))
     .join('\n\n');
 
+  // 记忆库里有哪些月份查得到 —— 提示词一直在教角色用 [[RECALL: 年-月]]，却没说过
+  // 哪些月份有东西。不报菜单的话它多半不查，直接凭空编一段「回忆」出来。
+  // 只写进下面这段主动消息自己的规则里，不动 chatPrompts 那条所有角色每轮都走的主链路。
+  const recallableMonths = listRecallableMonths(char.memories);
+  const recallHint = recallableMonths.length > 0
+    ? `- 你的记忆库里存着这些月份的经历：${recallableMonths.join('、')}。想聊起其中某段时，先输出 [[RECALL: 年-月]] 把细节取回来再写，别凭印象编。`
+    : null;
+
   const template = [
     '你将代表下面这个角色，生成一条“主动发给用户”的私聊消息。',
     '',
@@ -251,6 +260,7 @@ const buildFirePack = async (
     '- 不要出现“作为AI”“系统提示”等元话语。',
     '- 语气更像真人突然想起对方时发来的私聊，不要像在完成任务。',
     '- 角色设定里描述的查记忆、读日记、联网搜索、逛小红书等能力照常可用：需要时正常输出对应标签，系统会取回结果后让你继续写。',
+    ...(recallHint ? [recallHint] : []),
     '',
     '【角色系统设定】',
     systemPrompt,

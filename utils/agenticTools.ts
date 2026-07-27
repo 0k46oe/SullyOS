@@ -138,6 +138,28 @@ export type RecallResult =
     | { ok: true; alreadyActive: boolean; yearMonth: string; logsText: string | null }
     | { ok: false; reason: 'no_logs'; yearMonth: string };
 
+/**
+ * 记忆库里到底存了哪些月份（`YYYY-MM`，升序去重）。
+ *
+ * 提示词里 `[[RECALL: 年-月]]` 是无条件注入的，但从来没告诉过角色「哪些月份查得到」。
+ * 结果就是它不知道有货，多半懒得查，直接凭空编一段"回忆"——要一句一句点名让它查
+ * 某个月，它才会去调。把清单摆出来，它自己就知道什么时候该伸手。
+ *
+ * 匹配的两种日期写法要跟 runRecall 保持一致（`2026-06-15` 和 `2026年6月15日`），
+ * 否则会报出一个查不到的月份，比不报还糟。这两个函数放在同一个文件里就是为了这个。
+ */
+export function listRecallableMonths(memories: AgenticToolMemory[] | undefined): string[] {
+    if (!memories?.length) return [];
+    const months = new Set<string>();
+    for (const mem of memories) {
+        const iso = /(\d{4})-(\d{1,2})/.exec(mem.date);
+        if (iso) months.add(`${iso[1]}-${iso[2].padStart(2, '0')}`);
+        const cn = /(\d{4})年\s*(\d{1,2})\s*月/.exec(mem.date);
+        if (cn) months.add(`${cn[1]}-${cn[2].padStart(2, '0')}`);
+    }
+    return [...months].sort();
+}
+
 export async function runRecall(
     args: { year: string; month: string },
     ctx: AgenticToolCtx,
