@@ -402,6 +402,12 @@ export const clearNamespaceValuesOrThrow = async (
   client: InternalReiClient,
   namespace: string,
 ): Promise<string[]> => {
+  // 全局 namespace 不许走这条路：里面的 tool_config 只在配置变更时才重传，被清成空壳
+  // 之后没有任何一条路会把它补回来，而 worker 到点读不到它就整条任务硬失败。
+  // 这个函数目前只服务「删角色」（每角色一个 namespace），加道护栏免得将来被顺手复用。
+  if (namespace === AMSG_GLOBAL_NAMESPACE) {
+    throw new Error('全局云端状态不能按 namespace 清空（tool_config 清掉就没人补了）。');
+  }
   const response = await client.getClientState(namespace);
   if (!response?.success) {
     throw new Error(response?.error?.message || '读取云端状态失败。');
@@ -965,14 +971,44 @@ export const ActiveMsgClient = {
     return clearNamespaceValuesOrThrow(client, amsgStateNamespace(charId));
   },
 
-  // 清空该用户在 worker D1 里的全部 client_state（设置页「清除云端状态」按钮）。
-  async clearClientState(): Promise<{ deleted: number }> {
+  /**
+   * 清空该用户在 worker D1 里的全部 client_state（设置页「清除云端状态」按钮），
+   * 清完立刻把全局工具凭据补回去。
+   *
+   * 为什么补传这一步是必须的：云端有三份数据，角色上下文与角色工具数据每轮聊完都会
+   * 重新同步（见 syncCharFirePacks），只有全局的 tool_config 是「改的时候才传」——
+   * 它没有别的补写时机。而 worker 到点三份缺一就硬失败（见 worker/amsg/src/index.ts
+   * 的 fireStateError），于是清空之后已排程的 AI 任务会一直失败，聊多少轮天都不会好。
+   *
+   * 清空这个动作本身就是一次「云端凭据变没了」的变更，所以在这里就地补回来，
+   * 不必让每轮同步都白传一遍。任务表跟 client_state 不在一起、不受清空影响，
+   * 所以这也是「任务还活着、凭据却没了」的唯一入口，堵住这里就够。
+   *
+   * 补传失败不算清空失败（清空确实成功了），返回值把结果交给调用方去提示。
+   */
+  async clearClientState(
+    realtimeConfig: RealtimeConfig | undefined,
+  ): Promise<{ deleted: number; toolConfigRestored: boolean }> {
     const config = await ensureWorkerReady();
     const client = createClient(config);
     const response = await client.clearClientState();
     if (!response?.success) {
       throw new Error(response?.error?.message || '清除云端状态失败。');
     }
-    return response.data as { deleted: number };
+    const { deleted } = response.data as { deleted: number };
+
+    let toolConfigRestored = true;
+    try {
+      const authed = await initializeClient(config);
+      await putClientStateOrThrow(
+        authed,
+        [buildToolConfigEntry(realtimeConfig, Date.now())],
+        '重新上传工具凭据',
+      );
+    } catch (error) {
+      console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 清空后补传工具凭据失败`, error);
+      toolConfigRestored = false;
+    }
+    return { deleted, toolConfigRestored };
   },
 };

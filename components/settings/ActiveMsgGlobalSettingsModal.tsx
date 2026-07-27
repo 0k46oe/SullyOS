@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import Modal from '../os/Modal';
-import { ActiveMsg2GlobalConfig } from '../../types';
+import { ActiveMsg2GlobalConfig, RealtimeConfig } from '../../types';
 import { ActiveMsgClient, ActiveMsg2PushStatus } from '../../utils/activeMsgClient';
 import { ActiveMsgStore, maskActiveMsgUserId } from '../../utils/activeMsgStore';
 import {
@@ -43,6 +43,8 @@ interface ActiveMsgGlobalSettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+  /** 「清除云端状态」清完要立刻把工具凭据补传回去，所以这里需要当前这份配置。 */
+  realtimeConfig: RealtimeConfig;
   /** 由 Settings 注入：点「去推送凭据面板」时打开顶层 PushVapidSettingsModal */
   onOpenVapid?: () => void;
 }
@@ -51,6 +53,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   isOpen,
   onClose,
   addToast,
+  realtimeConfig,
   onOpenVapid,
 }) => {
   const [config, setConfig] = useState<ActiveMsg2GlobalConfig | null>(null);
@@ -197,8 +200,15 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     if (!confirm('确定清空云端状态？Worker D1 里同步的角色上下文（fire_pack）会全部删除。在下一次聊天重新同步之前，已排程的 AI 任务到点会失败；固定消息任务不受影响。')) return;
     setLoading(true);
     try {
-      const { deleted } = await ActiveMsgClient.clearClientState();
-      addToast(`已清空云端状态（${deleted} 条）。`, 'success');
+      // 工具凭据在清空的同一步就补回去了（见 clearClientState）：它不像角色上下文那样
+      // 每轮聊天重传，不当场补的话之后没人会补，AI 任务会一直失败。
+      const { deleted, toolConfigRestored } = await ActiveMsgClient.clearClientState(realtimeConfig);
+      addToast(
+        toolConfigRestored
+          ? `已清空云端状态（${deleted} 条）。`
+          : `已清空云端状态（${deleted} 条），但工具凭据没能补传回去——请到「实时感知」里重新保存一次配置，否则已排程的 AI 任务会一直失败。`,
+        toolConfigRestored ? 'success' : 'error',
+      );
     } catch (error: any) {
       addToast(error?.message || '清除云端状态失败。', 'error');
     } finally {

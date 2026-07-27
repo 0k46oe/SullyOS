@@ -4,7 +4,19 @@
 //      prompt 发——用户收到旧上下文却完全不知道。现在网络抖动重试、最终失败必须抛错。
 //   2. 取消任务幂等。远端已经没有那一条时（一次性任务发完就删行）不能报「取消失败」。
 //   3. 按角色对账要认得出「老 worker 没投影 charId」，不能把它当成「远端一条都没有」。
+//   4. 「清除云端状态」清完必须把全局工具凭据补回去（它没有别的补写时机）。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// clearClientState 走的是库客户端而不是 fetchWithAuth，这里把整个客户端换成假的。
+const { reiClient } = vi.hoisted(() => ({
+  reiClient: {
+    init: vi.fn(),
+    clearClientState: vi.fn(),
+    putClientState: vi.fn(),
+    getClientState: vi.fn(),
+  },
+}));
+vi.mock('@rei-standard/amsg-client', () => ({ ReiClient: vi.fn(() => reiClient) }));
 
 import {
   ActiveMsgClient, clearNamespaceValuesOrThrow, putClientStateOrThrow, toRemoteAvatarUrl,
@@ -288,5 +300,78 @@ describe('toRemoteAvatarUrl', () => {
     expect(toRemoteAvatarUrl('   ')).toBeUndefined();
     expect(toRemoteAvatarUrl('./avatars/sully.png')).toBeUndefined();
     expect(toRemoteAvatarUrl('blob:http://localhost/abc')).toBeUndefined();
+  });
+});
+
+// 回归守卫：「清除云端状态」之后 AI 任务必须还能跑。
+//
+// 实测踩过：点完那个按钮，聊多少轮天任务都一直失败。云端有三份数据，角色上下文
+// (fire_pack) 和角色工具数据 (tool_pack) 每轮聊完都会重新同步，只有全局的 tool_config
+// 是「改配置时才传」——清空之后没有任何一条路会补它，而 worker 到点三份缺一就硬失败。
+// 弹窗还写着「下次聊天会重新同步」，等于界面在骗人。
+//
+// 任务表跟 client_state 不在一起、不受清空影响，所以「任务还活着、凭据却没了」
+// 只有这一个入口。补传就放在这里，不必让每轮同步都白传一遍。
+describe('ActiveMsgClient.clearClientState', () => {
+  beforeEach(() => {
+    reiClient.init.mockReset().mockResolvedValue(undefined);
+    reiClient.clearClientState.mockReset().mockResolvedValue({ success: true, data: { deleted: 7 } });
+    reiClient.putClientState.mockReset().mockResolvedValue({ success: true });
+  });
+
+  const toolConfigEntries = () => reiClient.putClientState.mock.calls.flatMap((c: any[]) => c[0]);
+
+  it('清完立刻把全局 tool_config 补回去', async () => {
+    const result = await ActiveMsgClient.clearClientState({ newsEnabled: true } as any);
+
+    expect(result).toEqual({ deleted: 7, toolConfigRestored: true });
+    const entries = toolConfigEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ namespace: 'amsg:global', key: 'tool_config' });
+    expect(JSON.parse(entries[0].value)).toMatchObject({ v: 1, newsEnabled: true });
+  });
+
+  it('顺序是先清后补，别把刚补的又清掉', async () => {
+    const order: string[] = [];
+    reiClient.clearClientState.mockImplementation(async () => {
+      order.push('clear');
+      return { success: true, data: { deleted: 1 } };
+    });
+    reiClient.putClientState.mockImplementation(async () => {
+      order.push('put');
+      return { success: true };
+    });
+
+    await ActiveMsgClient.clearClientState(undefined);
+    expect(order).toEqual(['clear', 'put']);
+  });
+
+  it('没配实时感知也照样补一份（工具全关的凭据也是凭据，缺了 worker 一样硬失败）', async () => {
+    await ActiveMsgClient.clearClientState(undefined);
+    expect(toolConfigEntries()).toHaveLength(1);
+  });
+
+  it('补传失败 → 清空本身仍算成功，用返回值让调用方去提示', async () => {
+    reiClient.putClientState.mockRejectedValue(new Error('offline'));
+    await expect(runWithTimers(ActiveMsgClient.clearClientState(undefined)))
+      .resolves.toEqual({ deleted: 7, toolConfigRestored: false });
+  });
+
+  it('清空本身失败 → 抛错，也不去补传（云端还是原样）', async () => {
+    reiClient.clearClientState.mockResolvedValue({ success: false, error: { message: 'D1 busy' } });
+    await expect(ActiveMsgClient.clearClientState(undefined)).rejects.toThrow(/D1 busy/);
+    expect(reiClient.putClientState).not.toHaveBeenCalled();
+  });
+});
+
+// 回归守卫：按 namespace 写空的清法只服务「删角色」。要是哪天被顺手用在全局
+// namespace 上，tool_config 会被清成空壳 —— 症状跟上面那条一模一样，而且更隐蔽
+// （不是删行，是留个空值，读得到但 parse 不出来）。
+describe('clearNamespaceValuesOrThrow 的全局 namespace 护栏', () => {
+  it('全局 namespace 直接拒绝，一个请求都不发', async () => {
+    const getClientState = vi.fn();
+    await expect(clearNamespaceValuesOrThrow({ getClientState } as any, 'amsg:global'))
+      .rejects.toThrow(/全局云端状态不能按 namespace 清空/);
+    expect(getClientState).not.toHaveBeenCalled();
   });
 });

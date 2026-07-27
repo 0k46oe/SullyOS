@@ -3185,6 +3185,7 @@ const Settings: React.FC = () => {
         isOpen={showAmsg2Modal}
         onClose={() => setShowAmsg2Modal(false)}
         addToast={addToast}
+        realtimeConfig={realtimeConfig}
         onOpenVapid={() => { setShowAmsg2Modal(false); setShowVapidModal(true); }}
       />
 
