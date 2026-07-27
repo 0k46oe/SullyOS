@@ -1,0 +1,556 @@
+/**
+ * amsg2 本地全流程实测 harness（上线前检查用，跑法：`node scripts/amsg2-e2e-harness.mjs`）。
+ *
+ * 跑的是仓库里提交的 **同一份** worker/amsg/worker.bundle.js（用户粘进 CF Dashboard 的就是它），
+ * 外围环境全部真实化：
+ *   - D1 → node:sqlite 内存库（prepare/bind/run/first/all/batch 语义对齐；需要 Node 22+）
+ *   - Web Push → 真实 VAPID + RFC8291 aes128gcm 加密，harness 持有浏览器侧私钥现场解密验内容
+ *   - LLM → mock（按请求内容路由脚本回复，校验请求里的 prompt 是不是 fire-time 现场渲染）
+ *   - HTTP → node:http 桥接 worker.fetch，前端同款 @rei-standard/amsg-client 直连
+ *
+ * 场景：
+ *   S0 鉴权/CORS/capabilities   S1 init-tenant + get-user-key + vapid-public-key
+ *   S2 fixed 一次性任务端到端    S3 满血 v2 多任务（fire_pack 现场填槽 + RECALL 工具循环 +
+ *      directives + occurrenceMs + 大值分块 + daily 推进 + /messages 投影 + cancel）
+ *   S4 防穿帮闸：锚点前进 → skip  S5a 活跃租约新鲜 → skip（无 fire_pack 也拦）
+ *   S5b 租约过期 + 无 fire_pack → 抛错不降级        S6 force 策略 → 全绿灯照发
+ *   S7 clear-client-state
+ *
+ * 有意不进 vitest：它要起真端口、真等 cron 到点（多处 1.4s sleep）、并 mock 全局 fetch，
+ * 是发布前手动跑的端到端体检，不是单测。改 worker/amsg 或升 amsg-server 后跑一次。
+ */
+import { DatabaseSync } from 'node:sqlite';
+import crypto from 'node:crypto';
+import http from 'node:http';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
+
+const REPO = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '');
+const require = createRequire(`${REPO}/package.json`);
+const webpush = require('web-push');
+const { ReiClient } = await import(pathToFileURL(`${REPO}/node_modules/@rei-standard/amsg-client/dist/index.mjs`));
+const b64u = (buf) => Buffer.from(buf).toString('base64url');
+
+// ─── 断言与结果账本 ───
+const results = [];
+let failures = 0;
+const check = (name, cond, detail = '') => {
+  results.push({ name, ok: !!cond, detail });
+  if (!cond) failures++;
+  console.log(`${cond ? '  ✅' : '  ❌'} ${name}${cond ? '' : detail ? `  ← ${detail}` : ''}`);
+};
+const section = (t) => console.log(`\n━━ ${t}`);
+
+// ─── D1 shim（node:sqlite） ───
+class D1Stmt {
+  constructor(db, sql) { this.db = db; this.sql = sql; this.params = []; }
+  bind(...p) { this.params = p.map((v) => v === undefined ? null : v); return this; }
+  async run() {
+    const r = this.db.prepare(this.sql).run(...this.params);
+    return { meta: { changes: Number(r.changes), last_row_id: Number(r.lastInsertRowid) }, results: [] };
+  }
+  async first() { return this.db.prepare(this.sql).get(...this.params) ?? null; }
+  async all() { return { results: this.db.prepare(this.sql).all(...this.params) }; }
+}
+class D1Shim {
+  constructor() { this.db = new DatabaseSync(':memory:'); }
+  prepare(sql) { return new D1Stmt(this.db, sql); }
+  async batch(stmts) { const out = []; for (const s of stmts) out.push(await s.run()); return out; }
+  raw(sql) { return this.db.prepare(sql).all(); }
+}
+
+// ─── 环境（与 CF Dashboard 部署一致的 env） ───
+const vapidKeys = webpush.generateVAPIDKeys();
+const SERVER_TOKEN = 'launch-check-shared-secret';
+const d1 = new D1Shim();
+const env = {
+  AMSG_MASTER_KEY: crypto.randomBytes(32).toString('hex'),
+  VAPID_EMAIL: 'mailto:e2e@example.com',
+  VAPID_PUBLIC_KEY: vapidKeys.publicKey,
+  VAPID_PRIVATE_KEY: vapidKeys.privateKey,
+  AMSG_SERVER_TOKEN: SERVER_TOKEN,
+  DB: d1,
+};
+
+// ─── 浏览器侧 push 订阅密钥（真实 P-256 + auth secret），并实现 RFC8291 解密 ───
+const receiver = crypto.createECDH('prime256v1');
+receiver.generateKeys();
+const authSecret = crypto.randomBytes(16);
+const subscriptionFor = (tag) => ({
+  endpoint: `https://push.test/${tag}`,
+  keys: { p256dh: b64u(receiver.getPublicKey()), auth: b64u(authSecret) },
+});
+const hkdf = (salt, ikm, info, len) => Buffer.from(crypto.hkdfSync('sha256', ikm, salt, info, len));
+function decryptPush(bodyBuf) {
+  const salt = bodyBuf.subarray(0, 16);
+  const idlen = bodyBuf[20];
+  const senderPub = bodyBuf.subarray(21, 21 + idlen);
+  const ct = bodyBuf.subarray(21 + idlen);
+  const shared = receiver.computeSecret(senderPub);
+  const prkInfo = Buffer.concat([Buffer.from('WebPush: info\0'), receiver.getPublicKey(), senderPub]);
+  const ikm = hkdf(authSecret, shared, prkInfo, 32);
+  const cek = hkdf(salt, ikm, Buffer.from('Content-Encoding: aes128gcm\0'), 16);
+  const nonce = hkdf(salt, ikm, Buffer.from('Content-Encoding: nonce\0'), 12);
+  const dec = crypto.createDecipheriv('aes-128-gcm', cek, nonce);
+  dec.setAuthTag(ct.subarray(ct.length - 16));
+  const plain = Buffer.concat([dec.update(ct.subarray(0, ct.length - 16)), dec.final()]);
+  let end = plain.length - 1;
+  while (end >= 0 && plain[end] === 0) end--;
+  if (plain[end] !== 0x02) throw new Error('bad aes128gcm padding delimiter');
+  return JSON.parse(plain.subarray(0, end).toString('utf8'));
+}
+
+// ─── 出网 fetch 拦截：push 端点 + mock LLM，其余透传（本地 http 走 127.0.0.1 不受影响） ───
+const realFetch = globalThis.fetch;
+const pushes = [];            // { tag, headers, payload }
+const llmRequests = [];       // 原始请求体
+globalThis.fetch = async (input, init = {}) => {
+  const url = typeof input === 'string' ? input : input.url;
+  if (url.startsWith('https://push.test/')) {
+    const tag = url.slice('https://push.test/'.length);
+    const headers = init.headers || {};
+    const payload = decryptPush(Buffer.from(init.body));
+    pushes.push({ tag, headers, payload });
+    return new Response(null, { status: 201 });
+  }
+  if (url.startsWith('https://llm.test/')) {
+    const req = JSON.parse(init.body);
+    llmRequests.push(req);
+    const all = req.messages.map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n');
+    const hasToolResult = req.messages.some((m) => m.role === 'tool');
+    let content;
+    if (all.includes('FIREPACK_FRESH_char-full') && !hasToolResult) {
+      content = '（先想想上个月的事）等我翻翻记忆。\n[[RECALL: 2026-06]]';
+    } else if (all.includes('FIREPACK_FRESH_char-full') && hasToolResult) {
+      content = '想起来了，六月那天的烟花真好看。\n今晚也想拉你去河边。\n[[ACTION:POKE]]';
+    } else if (all.includes('FROZEN_char-frozen')) {
+      content = '冻结提示词兜底照发成功。';
+    } else if (all.includes('FIREPACK_FRESH_char-force')) {
+      content = '闹钟型强制发送，正在聊天也照发。';
+    } else {
+      content = '（默认回复：未匹配任何脚本分支）';
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content } }] }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    });
+  }
+  return realFetch(input, init);
+};
+
+// ─── 载入与线上部署同一份的 worker bundle，并起 http 桥 ───
+const worker = (await import(pathToFileURL(`${REPO}/worker/amsg/worker.bundle.js`))).default;
+const server = http.createServer(async (req, res) => {
+  try {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const body = Buffer.concat(chunks);
+    const request = new Request(`http://127.0.0.1${req.url}`, {
+      method: req.method,
+      headers: req.headers,
+      body: ['GET', 'HEAD'].includes(req.method) || body.length === 0 ? undefined : body,
+    });
+    const response = await worker.fetch(request, env);
+    res.writeHead(response.status, Object.fromEntries(response.headers));
+    res.end(Buffer.from(await response.arrayBuffer()));
+  } catch (e) {
+    res.writeHead(500); res.end(String(e && e.stack || e));
+  }
+});
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
+const BASE = `http://127.0.0.1:${server.address().port}`;
+
+const runCron = () => worker.scheduled({ scheduledTime: Date.now(), cron: '* * * * *' }, env);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ─── 前端同款 client ───
+const USER_ID = crypto.randomUUID();
+const client = new ReiClient({ baseUrl: BASE, userId: USER_ID, serverToken: SERVER_TOKEN });
+
+const authedHeaders = (extra = {}) => ({
+  'X-Client-Token': SERVER_TOKEN, 'X-User-Id': USER_ID, ...extra,
+});
+// 复刻 activeMsgClient.fetchWithAuth + encryptPayload 的排程调用
+async function scheduleTask(payload) {
+  const encrypted = await client._encrypt(JSON.stringify(payload));
+  const res = await realFetch(`${BASE}/schedule-message`, {
+    method: 'POST',
+    headers: authedHeaders({
+      'Content-Type': 'application/json',
+      'X-Payload-Encrypted': 'true',
+      'X-Encryption-Version': '1',
+    }),
+    body: JSON.stringify(encrypted),
+  });
+  return res.json();
+}
+async function listAllTasks() {
+  const res = await realFetch(`${BASE}/messages?limit=100&offset=0`, {
+    method: 'GET',
+    headers: authedHeaders({ 'X-Response-Encrypted': 'true', 'X-Encryption-Version': '1' }),
+  });
+  const json = await res.json();
+  if (!json.success) throw new Error('messages failed: ' + JSON.stringify(json.error));
+  const data = json.encrypted === true ? await client._decrypt(json.data) : json.data;
+  return data;
+}
+async function cancelTask(uuid) {
+  const res = await realFetch(`${BASE}/cancel-message?id=${encodeURIComponent(uuid)}`, {
+    method: 'DELETE', headers: authedHeaders(),
+  });
+  return res.json();
+}
+const putState = (entries) => client.putClientState(entries);
+
+// fire_pack / tool_pack / chat_presence 的形状与 key（与 utils/amsgFirePack.ts、
+// utils/amsgToolPack.ts、utils/amsgChatPresence.ts 一致；parse 不过 worker 会静默回退，
+// 场景断言里的 FIREPACK_FRESH 标记会立刻暴露）
+const NS = (charId) => `amsg:char:${charId}`;
+const SLOT_TIME = '{{AMSG_CURRENT_TIME}}';
+const SLOT_SINCE = '{{AMSG_TIME_SINCE_USER}}';
+const SLOT_AWAY = '{{AMSG_AWAY_HINT}}';
+const SLOT_TASK = '{{AMSG_TASK_INSTRUCTION}}';
+const firePack = (marker, lastUserMessageAt, fillerKb = 0) => ({
+  v: 2,
+  template: [
+    `【角色系统设定】${marker} 的完整人设……`,
+    fillerKb > 0 ? `【世界书填充】${'填'.repeat(fillerKb * 512)}【填充结束FILLER_END】` : '',
+    `当前本地时间：${SLOT_TIME}`,
+    SLOT_SINCE,
+    SLOT_AWAY,
+    '【本次任务】',
+    SLOT_TASK,
+  ].join('\n'),
+  lastUserMessageAt,
+  tzOffsetMin: new Date().getTimezoneOffset(),
+  targetName: '测试者',
+});
+const toolPack = (charName) => ({
+  v: 1,
+  charName,
+  xhsEnabled: false,
+  // 2026-06 不在激活月清单 → runRecall 走「取回月度总结」正路（激活月按设计返回 null）
+  activeMemoryMonths: [],
+  memories: [{ date: '2026-06-15', summary: 'RECALL_MEMORY_MARKER 六月一起看了烟花', mood: '开心' }],
+});
+const presence = (charId, activeAt, lastUserMessageAt) => ({ v: 1, charId, activeAt, lastUserMessageAt });
+
+// 复刻 activeMsgClient.scheduleCharacterTask 的 AI 任务 payload（字段一字不差）
+function aiTaskPayload({ charId, charName, mode, firstSendTime, recurrenceType, expirePolicy, anchorMs, taskInstruction, frozenPrompt }) {
+  const clientTaskId = crypto.randomUUID();
+  return {
+    clientTaskId,
+    payload: {
+      contactName: charName,
+      avatarUrl: null,
+      messageType: mode,
+      messageSubtype: 'chat',
+      firstSendTime,
+      recurrenceType,
+      pushSubscription: subscriptionFor(charId),
+      metadata: {
+        charId, charName,
+        source: 'active_msg_2',
+        amsgMode: mode,
+        amsgClientTaskId: clientTaskId,
+        amsgExpirePolicy: expirePolicy,
+        amsgRecurrence: recurrenceType,
+        amsgAnchorMs: anchorMs ?? 0,
+        amsgTaskInstruction: taskInstruction,
+      },
+      completePrompt: frozenPrompt,
+      apiUrl: 'https://llm.test/v1/chat/completions',
+      apiKey: 'sk-e2e',
+      primaryModel: 'mock-model',
+    },
+  };
+}
+
+// ══════════════════════════ 场景 ══════════════════════════
+try {
+  section('S0 鉴权 / CORS / capabilities');
+  {
+    const r1 = await realFetch(`${BASE}/capabilities`);
+    check('无密钥请求被 401 拒绝', r1.status === 401, `got ${r1.status}`);
+    const r2 = await realFetch(`${BASE}/capabilities`, { headers: { 'X-Client-Token': 'wrong' } });
+    check('错误密钥被 401 拒绝', r2.status === 401, `got ${r2.status}`);
+    const pre = await realFetch(`${BASE}/schedule-message`, {
+      method: 'OPTIONS', headers: { origin: 'https://sully.example', 'access-control-request-method': 'POST' },
+    });
+    check('CORS 预检 204 + allow-origin *', pre.status === 204 && pre.headers.get('access-control-allow-origin') === '*',
+      `status=${pre.status} origin=${pre.headers.get('access-control-allow-origin')}`);
+    const caps = await client.getCapabilities();
+    // 与 package.json 声明的 amsg-server 版本对比（不写死）：升依赖后 harness 零改动，
+    // 且能抓住「升了依赖忘了 pnpm build:workers 重打 bundle」——bundle 内嵌的是旧版本号。
+    const declaredServer = String(
+      require(`${REPO}/package.json`).devDependencies['@rei-standard/amsg-server'] || '',
+    ).replace(/^[\^~]/, '');
+    check(`capabilities: serverVersion 与 package.json 声明一致（${declaredServer}）`,
+      !!declaredServer && caps?.serverVersion === declaredServer, JSON.stringify(caps));
+    for (const f of ['client-state', 'client-state-chunking', 'agentic-hooks', 'agentic-scratch', 'vapid-public-key']) {
+      check(`capabilities.features 含 ${f}`, caps?.features?.includes(f));
+    }
+  }
+
+  section('S1 连接流程：init-tenant → get-user-key → vapid-public-key');
+  {
+    const init = await (await realFetch(`${BASE}/init-tenant`, { method: 'POST', headers: authedHeaders() })).json();
+    check('POST /init-tenant 幂等建表成功', init?.success === true, JSON.stringify(init));
+    const init2 = await (await realFetch(`${BASE}/init-tenant`, { method: 'POST', headers: authedHeaders() })).json();
+    check('再次 init-tenant 幂等', init2?.success === true);
+    await client.init();
+    check('client.init() 拿到 user key（加密通道就绪）', true);
+    const vk = await client.getVapidPublicKey();
+    check('GET /vapid-public-key 与 env 一致', vk === vapidKeys.publicKey);
+  }
+
+  section('S2 fixed 一次性任务端到端（排程 → cron → push → 解密验文）');
+  {
+    const clientTaskId = crypto.randomUUID();
+    const sched = await scheduleTask({
+      contactName: '小固', avatarUrl: null,
+      messageType: 'fixed', messageSubtype: 'chat',
+      userMessage: '到点了，这是固定消息正文。',
+      firstSendTime: new Date(Date.now() + 1000).toISOString(),
+      recurrenceType: 'none',
+      pushSubscription: subscriptionFor('char-fixed'),
+      metadata: {
+        charId: 'char-fixed', charName: '小固', source: 'active_msg_2', amsgMode: 'fixed',
+        amsgClientTaskId: clientTaskId, amsgExpirePolicy: 'force', amsgRecurrence: 'none', amsgAnchorMs: 0,
+      },
+    });
+    check('schedule-message(fixed) 成功', sched?.success === true, JSON.stringify(sched?.error || sched));
+    const listed = await listAllTasks();
+    const row = listed.tasks.find((t) => t.uuid === sched.data.uuid);
+    check('GET /messages 投影 charId', row?.charId === 'char-fixed', JSON.stringify(row));
+    check('GET /messages 投影 clientTaskId', row?.clientTaskId === clientTaskId);
+    await sleep(1400);
+    await runCron();
+    const mine = pushes.filter((p) => p.tag === 'char-fixed');
+    check('cron 到点后收到 1 条 push', mine.length === 1, `got ${mine.length}`);
+    const p = mine[0]?.payload;
+    check('push 正文 = 固定消息原文', p?.message === '到点了，这是固定消息正文。', JSON.stringify(p?.message));
+    check('push 元数据带 amsgClientTaskId（送达归属键）', p?.metadata?.amsgClientTaskId === clientTaskId);
+    check('push messageIndex/totalMessages = 1/1', p?.messageIndex === 1 && p?.totalMessages === 1);
+    check('push 带 VAPID Authorization 头', String(mine[0]?.headers?.Authorization || mine[0]?.headers?.authorization || '').startsWith('vapid'));
+    const after = await listAllTasks();
+    check('一次性任务发完即从远端清单消失', !after.tasks.some((t) => t.uuid === sched.data.uuid));
+  }
+
+  section('S3 满血 v2：fire_pack 现场填槽 + RECALL 工具循环 + directives + daily 推进');
+  let s3uuid = null;
+  {
+    const now = Date.now();
+    // 大值：fire_pack 里塞 ~256KB 填充，验证 2.6.0-next.4 存储层透明分块读回
+    await putState([
+      { namespace: NS('char-full'), key: 'fire_pack', value: JSON.stringify(firePack('FIREPACK_FRESH_char-full', now - 3600_000, 512)), updatedAt: now },
+      { namespace: NS('char-full'), key: 'tool_pack', value: JSON.stringify(toolPack('小满')), updatedAt: now },
+      { namespace: 'amsg:global', key: 'tool_config', value: JSON.stringify({ v: 1, proxyWorkerUrl: '', newsEnabled: false, notionEnabled: false, feishuEnabled: false }), updatedAt: now },
+    ]);
+    check('putClientState(fire_pack ~256KB + tool_pack + tool_config) 成功', true);
+
+    const fireAt = new Date(now + 1000);
+    const { payload, clientTaskId } = aiTaskPayload({
+      charId: 'char-full', charName: '小满', mode: 'auto',
+      firstSendTime: fireAt.toISOString(), recurrenceType: 'daily', expirePolicy: 'expire',
+      anchorMs: now - 3600_000, // 锚点=1小时前的最后用户消息；fire_pack.lastUserMessageAt 同值 → 不作废
+      taskInstruction: '这是一条需要 AI 自主生成的主动消息。\nTASK_SLOT_MARKER_FULL\n可选灵感补充：无',
+      frozenPrompt: 'FROZEN_char-full 排程时冻结的完整 prompt（不应被用到）',
+    });
+    const sched = await scheduleTask(payload);
+    check('schedule-message(auto/daily) 成功', sched?.success === true, JSON.stringify(sched?.error || sched));
+    s3uuid = sched?.data?.uuid;
+    const llmBefore = llmRequests.length;
+    await sleep(1400);
+    await runCron();
+
+    const reqs = llmRequests.slice(llmBefore);
+    check('工具循环共 2 轮 LLM 调用', reqs.length === 2, `got ${reqs.length}`);
+    const r1c = reqs[0]?.messages?.map((m) => String(m.content)).join('\n') || '';
+    check('第 1 轮 prompt 来自 fire_pack 现场渲染（非冻结 prompt）', r1c.includes('FIREPACK_FRESH_char-full') && !r1c.includes('FROZEN_char-full'));
+    check('大值分块读回完整（256KB 填充尾标在）', r1c.includes('【填充结束FILLER_END】'));
+    check('时间槽位已在 fire 时刻填值', /当前本地时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(r1c) && !r1c.includes(SLOT_TIME));
+    check('任务指令槽位从 task metadata 填入', r1c.includes('TASK_SLOT_MARKER_FULL') && !r1c.includes(SLOT_TASK));
+    check('时间差文案按 fire 时刻现算（约 1 小时）', /距离用户上次主动发消息大约 1 小时/.test(r1c), r1c.match(/距离用户[^\n]*/)?.[0]);
+    const r2msgs = reqs[1]?.messages || [];
+    const toolMsg = r2msgs.find((m) => m.role === 'tool');
+    check('第 2 轮带回 RECALL 工具结果（月度总结命中）', String(toolMsg?.content || '').includes('RECALL_MEMORY_MARKER'), String(toolMsg?.content || '').slice(0, 120));
+
+    const mine = pushes.filter((p) => p.tag === 'char-full');
+    check('finish 后按行分段推送 3 条', mine.length === 3, `got ${mine.length}`);
+    const [p1, , pLast] = [mine[0]?.payload, mine[1]?.payload, mine[mine.length - 1]?.payload];
+    check('旁白（round-1 prefix）保序排在正文前', String(p1?.message || '').includes('翻翻记忆'), JSON.stringify(p1?.message));
+    check('正文引用工具结果（跨轮上下文连续）', mine.some((m) => String(m.payload?.message || '').includes('烟花')));
+    check('directives 只挂最后一条 push', !!pLast?.metadata?.directives?.length && mine.slice(0, -1).every((m) => !m.payload?.metadata?.directives));
+    check('POKE 副作用被结构化为 directive', JSON.stringify(pLast?.metadata?.directives || []).toLowerCase().includes('poke'));
+    check('正文不再含 [[ACTION:POKE]] 裸标签', mine.every((m) => !String(m.payload?.message || '').includes('[[ACTION:POKE]]')));
+    check('每条 push 带 amsgOccurrenceMs = 本次触发时刻', mine.every((m) => m.payload?.metadata?.amsgOccurrenceMs === fireAt.getTime()),
+      JSON.stringify(mine.map((m) => m.payload?.metadata?.amsgOccurrenceMs)));
+    check('push 元数据带 amsgClientTaskId', mine.every((m) => m.payload?.metadata?.amsgClientTaskId === clientTaskId));
+    check('通知横幅 body 为净化文本', mine.every((m) => typeof m.payload?.notification?.body === 'string' && !m.payload.notification.body.includes('[[')));
+    check('messageIndex 1-based 连续编号', mine.map((m) => m.payload?.messageIndex).join(',') === '1,2,3' && mine.every((m) => m.payload?.totalMessages === 3));
+
+    const listed = await listAllTasks();
+    const row = listed.tasks.find((t) => t.uuid === s3uuid);
+    check('daily 任务 fire 后仍在清单且 next_send_at +24h', !!row && Math.abs(new Date(row.nextSendAt).getTime() - (fireAt.getTime() + 24 * 3600_000)) < 1500,
+      JSON.stringify({ nextSendAt: row?.nextSendAt, expect: new Date(fireAt.getTime() + 24 * 3600_000).toISOString() }));
+    check('清单行仍带 charId/clientTaskId 投影', row?.charId === 'char-full' && row?.clientTaskId === clientTaskId);
+    const cancel = await cancelTask(s3uuid);
+    check('cancel-message 取消 daily 任务成功', cancel?.success === true, JSON.stringify(cancel));
+    const after = await listAllTasks();
+    check('取消后远端清单不再含该任务', !after.tasks.some((t) => t.uuid === s3uuid));
+  }
+
+  section('S4 防穿帮闸：一次性任务锚点后有新用户消息 → onBeforeFire skip');
+  {
+    const now = Date.now();
+    const anchor = now - 3600_000;
+    await putState([
+      // 用户在排程后（锚点后）又说过话：lastUserMessageAt > anchor → 应作废
+      { namespace: NS('char-anchor'), key: 'fire_pack', value: JSON.stringify(firePack('FIREPACK_FRESH_char-anchor', anchor + 60_000)), updatedAt: now },
+    ]);
+    const { payload } = aiTaskPayload({
+      charId: 'char-anchor', charName: '小锚', mode: 'auto',
+      firstSendTime: new Date(now + 1000).toISOString(), recurrenceType: 'none', expirePolicy: 'expire',
+      anchorMs: anchor,
+      taskInstruction: '（skip 场景不应见到这条指令进入 LLM）',
+      frozenPrompt: 'FROZEN_char-anchor（skip 场景不应被调用）',
+    });
+    const sched = await scheduleTask(payload);
+    const uuid = sched?.data?.uuid;
+    const llmBefore = llmRequests.length; const pushBefore = pushes.length;
+    await sleep(1400);
+    await runCron();
+    check('skip：零 LLM 调用', llmRequests.length === llmBefore, `+${llmRequests.length - llmBefore}`);
+    check('skip：零 push', pushes.length === pushBefore, `+${pushes.length - pushBefore}`);
+    const listed = await listAllTasks();
+    check('skip 出口任务照常出清（一次性删除，不再重试）', !listed.tasks.some((t) => t.uuid === uuid));
+  }
+
+  section('S5a 活跃会话租约新鲜 → 无 fire_pack 也拦（第一道快速门）');
+  {
+    const now = Date.now();
+    await putState([
+      { namespace: NS('char-presence'), key: 'chat_presence', value: JSON.stringify(presence('char-presence', now, now - 5000)), updatedAt: now },
+    ]);
+    const { payload } = aiTaskPayload({
+      charId: 'char-presence', charName: '小租', mode: 'auto',
+      firstSendTime: new Date(now + 1000).toISOString(), recurrenceType: 'none', expirePolicy: 'expire',
+      anchorMs: now - 3600_000,
+      taskInstruction: '（presence skip 场景不应进入 LLM）',
+      frozenPrompt: 'FROZEN_char-presence（presence skip 场景不应被调用）',
+    });
+    const sched = await scheduleTask(payload);
+    const uuid = sched?.data?.uuid;
+    const llmBefore = llmRequests.length; const pushBefore = pushes.length;
+    await sleep(1400);
+    await runCron();
+    check('新鲜租约 → 零 LLM / 零 push', llmRequests.length === llmBefore && pushes.length === pushBefore,
+      `llm+${llmRequests.length - llmBefore} push+${pushes.length - pushBefore}`);
+    const listed = await listAllTasks();
+    check('presence skip 后任务出清', !listed.tasks.some((t) => t.uuid === uuid));
+  }
+
+  section('S5b 租约过期 + 无 fire_pack → 抛 AMSG2_FIRE_STATE_MISSING（不降级）');
+  {
+    const now = Date.now();
+    await putState([
+      // 过期租约（2 分钟前）不拦；该角色没有 fire_pack → 云端状态不全，onBeforeFire 直接抛错。
+      // 任务体里那份冻结 prompt 是排程那一刻的上下文，发出去用户根本看不出它是旧的——
+      // 宁可这次不发（走投递失败路径重试），也不拿它顶包。
+      { namespace: NS('char-frozen'), key: 'chat_presence', value: JSON.stringify(presence('char-frozen', now - 120_000, now - 120_000)), updatedAt: now },
+    ]);
+    const { payload } = aiTaskPayload({
+      charId: 'char-frozen', charName: '小冻', mode: 'auto',
+      firstSendTime: new Date(now + 1000).toISOString(), recurrenceType: 'none', expirePolicy: 'expire',
+      anchorMs: now - 3600_000,
+      taskInstruction: '（状态缺失场景不应进入 LLM）',
+      frozenPrompt: 'FROZEN_char-frozen 排程时冻结的完整 prompt，不该再被任何路径吃到。',
+    });
+    const sched = await scheduleTask(payload);
+    const uuid = sched?.data?.uuid;
+    const llmBefore = llmRequests.length; const pushBefore = pushes.length;
+    await sleep(1400);
+    await runCron();
+    const reqs = llmRequests.slice(llmBefore);
+    check('状态缺失 → 零 LLM 调用（不吃冻结 prompt）', reqs.length === 0, `reqs=${reqs.length}`);
+    const mine = pushes.slice(pushBefore).filter((p) => p.tag === 'char-frozen');
+    check('状态缺失 → 零 push', mine.length === 0, JSON.stringify(mine.map((m) => m.payload?.message)));
+    const listed = await listAllTasks();
+    check('任务不被当成发完出清（留在远端等重试）', listed.tasks.some((t) => t.uuid === uuid));
+  }
+
+  section('S6 force 策略：新鲜租约 + 锚点已前进也照发（闹钟语义）');
+  {
+    const now = Date.now();
+    await putState([
+      { namespace: NS('char-force'), key: 'chat_presence', value: JSON.stringify(presence('char-force', now, now)), updatedAt: now },
+      { namespace: NS('char-force'), key: 'fire_pack', value: JSON.stringify(firePack('FIREPACK_FRESH_char-force', now)), updatedAt: now },
+      // tool_pack 与 fire_pack 同批上传，缺一样就是状态异常（worker 直接抛错）。
+      // 这节测的是 force 绕开闸，状态得给齐，别把断言挂在别的原因上。
+      { namespace: NS('char-force'), key: 'tool_pack', value: JSON.stringify(toolPack('小强')), updatedAt: now },
+    ]);
+    const { payload } = aiTaskPayload({
+      charId: 'char-force', charName: '小强', mode: 'auto',
+      firstSendTime: new Date(now + 1000).toISOString(), recurrenceType: 'none', expirePolicy: 'force',
+      anchorMs: now - 3600_000,
+      taskInstruction: 'FORCE_TASK_MARKER 到点必须叫用户',
+      frozenPrompt: 'FROZEN_char-force（不应被用到）',
+    });
+    const sched = await scheduleTask(payload);
+    const uuid = sched?.data?.uuid;
+    const llmBefore = llmRequests.length; const pushBefore = pushes.length;
+    await sleep(1400);
+    await runCron();
+    const reqs = llmRequests.slice(llmBefore);
+    check('force：照走满血链路（fire_pack 渲染 + 任务槽）', reqs.length === 1 && JSON.stringify(reqs[0]).includes('FIREPACK_FRESH_char-force') && JSON.stringify(reqs[0]).includes('FORCE_TASK_MARKER'), `reqs=${reqs.length}`);
+    const mine = pushes.slice(pushBefore).filter((p) => p.tag === 'char-force');
+    check('force：push 送达', mine.length >= 1 && String(mine[0]?.payload?.message || '').includes('照发'));
+    const listed = await listAllTasks();
+    check('force 任务发完出清', !listed.tasks.some((t) => t.uuid === uuid));
+  }
+
+  section('S6b 旁路存储：客户端读回 + 写空值删除（push 装不下时的取回路径）');
+  {
+    // worker 把装不下一条 push 的 XHS 会话数据写进 client_state、push 只带引用键，
+    // 客户端上线后按键取回再删。这里验的就是取回和删除这两步——它们走的是 HTTP
+    // GET/PUT /client-state，跟 hook 的 writeState 是同一张表，两边必须真的通。
+    const ns = NS('char-offload');
+    const key = 'xhs_session:task-offload-1';
+    const value = JSON.stringify({
+      notes: [{ idx: 1, note: { noteId: 'note-1', title: '旁路笔记', desc: '描述', likes: 1, author: 'a', authorId: 'a1' } }],
+      xsecTokens: [['note-1', 'tok-1']],
+    });
+    await putState([{ namespace: ns, key, value, updatedAt: Date.now() }]);
+
+    const read = await client.getClientState(ns);
+    const hit = (read?.data?.entries || []).find((e) => e.key === key);
+    check('按 namespace + key 读回旁路存储，内容逐字一致', hit?.value === value, JSON.stringify(hit?.value || read));
+
+    // 客户端只能把内容清空，删不掉整行：`value: null` 的删除语义是 hook 侧
+    // ctx.writeState 独有的，HTTP PUT 会把这条当无效条目跳过。这条断言就是钉住这个
+    // 差异——别哪天照着 writeState 的用法改客户端，然后以为自己清干净了。
+    await client.putClientState([{ namespace: ns, key, value: null, updatedAt: Date.now() }]);
+    const afterNull = await client.getClientState(ns);
+    const nullNoop = (afterNull?.data?.entries || []).find((e) => e.key === key);
+    check('HTTP PUT 不认 value:null（内容原封不动，删不掉行）', nullNoop?.value === value, JSON.stringify(nullNoop?.value));
+
+    await client.putClientState([{ namespace: ns, key, value: '', updatedAt: Date.now() }]);
+    const afterClear = await client.getClientState(ns);
+    const cleared = (afterClear?.data?.entries || []).find((e) => e.key === key);
+    check('写空串把内容清掉（取回落库后腾回空间）', cleared !== undefined && !cleared.value, JSON.stringify(cleared));
+  }
+
+  section('S7 clear-client-state（设置页「清除云端状态」）');
+  {
+    const r = await client.clearClientState();
+    check('clearClientState 成功且删除了条目', r?.success === true && (r?.data?.deleted ?? 0) > 0, JSON.stringify(r));
+  }
+} catch (e) {
+  failures++;
+  console.error('\n💥 harness 异常中止：', e && e.stack || e);
+} finally {
+  server.close();
+}
+
+console.log(`\n═══ 结果：${results.filter((r) => r.ok).length}/${results.length} 通过，${failures} 失败 ═══`);
+process.exit(failures ? 1 : 0);
