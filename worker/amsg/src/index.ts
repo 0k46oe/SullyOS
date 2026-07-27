@@ -209,6 +209,19 @@ const fireStateError = (reason: string, detail: Record<string, unknown>): Error 
 };
 
 /**
+ * 体积判定要留的余量。
+ *
+ * 这里量的是 hook 交还给库的那份 payload，而库在这之后还会补 messageId / sessionId /
+ * timestamp / messageIndex / totalMessages（见 sendHookPushPayloads）——实测多出一百多
+ * 字节。卡着上限判定的话，量出来「刚好装得下」的那一档补完字段就超了：既没走旁路存储、
+ * 也发不出去，整条消息丢掉，而且每次重试都在同一处失败。
+ *
+ * 取 256 是实际增量的两倍冗余，上游哪天再多补一两个字段也吃得下。代价是本来卡在这
+ * 一档里的消息会多绕一次旁路存储（一次读写，用户无感），比发不出去划算得多。
+ */
+const PUSH_BUDGET_RESERVE_BYTES = 256;
+
+/**
  * 一条 push 装不下时，把 XHS 会话数据旁路存进 client_state，payload 里只留引用键。
  *
  * Web Push 的 payload 上限是 4096 字节密文（明文 3993，见 measurePushPayload），
@@ -225,7 +238,9 @@ export const offloadOversizedPush = async (
   charId: string,
   clientTaskId: string,
 ): Promise<Record<string, unknown>> => {
-  if (measurePushPayload(JSON.stringify(payload)).withinLimit) return payload;
+  if (measurePushPayload(JSON.stringify(payload)).remainingBytes >= PUSH_BUDGET_RESERVE_BYTES) {
+    return payload;
+  }
 
   const meta = (payload.metadata ?? {}) as Record<string, unknown>;
   if (!meta.xhsSession) return payload;   // 没有可旁路的东西，交给库抛 PUSH_PAYLOAD_TOO_LARGE

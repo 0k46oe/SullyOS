@@ -5220,8 +5220,11 @@ var fireStateError = (reason, detail) => {
   console.error("[amsg:fire-state-missing]", { reason, ...detail });
   return new Error(`AMSG2_FIRE_STATE_MISSING: ${reason}`);
 };
+var PUSH_BUDGET_RESERVE_BYTES = 256;
 var offloadOversizedPush = async (payload, writeState, charId, clientTaskId) => {
-  if (measurePushPayload(JSON.stringify(payload)).withinLimit) return payload;
+  if (measurePushPayload(JSON.stringify(payload)).remainingBytes >= PUSH_BUDGET_RESERVE_BYTES) {
+    return payload;
+  }
   const meta = payload.metadata ?? {};
   if (!meta.xhsSession) return payload;
   if (typeof writeState !== "function") {

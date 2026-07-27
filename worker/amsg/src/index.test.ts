@@ -412,6 +412,29 @@ describe('offloadOversizedPush — push 装不下时旁路存储', () => {
     expect(out).toBe(fat);
     expect(writeState).not.toHaveBeenCalled();
   });
+
+  // 回归守卫：判定要留余量。这里量的是 hook 交还给库的那份，库之后还会补
+  // messageId / sessionId / timestamp / messageIndex / totalMessages（sendHookPushPayloads），
+  // 实测多出一百多字节。卡着上限判的话，量出来「刚好装得下」的那一档补完字段就超了：
+  // 既没旁路、也发不出去，整条消息丢掉，而且每次重试都死在同一处。
+  it('贴着上限（余量不足）也走旁路，别等库补完字段才发现超了', async () => {
+    const writeState = vi.fn().mockResolvedValue({ upserted: 1, skipped: 0, deleted: 0 });
+    const utf8Bytes = (v: unknown) => new TextEncoder().encode(JSON.stringify(v)).length;
+
+    // 拿真实形状撑到「限内、但余量不到 256 字节」这一档，逐字节逼近，不写死魔数。
+    const payload = pushWith(1) as any;
+    while (utf8Bytes(payload) < MAX_PUSH_PAYLOAD_BYTES - 200) {
+      payload.message += '一';
+    }
+    expect(utf8Bytes(payload)).toBeLessThanOrEqual(MAX_PUSH_PAYLOAD_BYTES);   // 旧判定会说「装得下」
+
+    const out = await offloadOversizedPush(payload, writeState, CHAR_ID, CLIENT_TASK_ID);
+
+    expect(writeState).toHaveBeenCalledTimes(1);
+    expect((out.metadata as any).xhsSessionRef).toBe(amsgXhsSessionKey(CLIENT_TASK_ID));
+    // 挪走之后要给库补字段留出足够空间。
+    expect(MAX_PUSH_PAYLOAD_BYTES - utf8Bytes(out)).toBeGreaterThanOrEqual(256);
+  });
 });
 
 // 服务端工具循环的编排：跑完一个工具之后跟模型说什么，以及重复调用怎么办。
