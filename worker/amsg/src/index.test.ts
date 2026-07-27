@@ -10,6 +10,7 @@ import { amsgHooks, buildWorkerConfig, offloadOversizedPush, resolveVapidEmail }
 import { MAX_PUSH_PAYLOAD_BYTES } from '@rei-standard/amsg-server/cloudflare';
 import {
   AMSG_FIRE_PACK_KEY,
+  AMSG_LAST_SKIP_KEY,
   AMSG_SLOT_CURRENT_TIME,
   AMSG_SLOT_TASK_INSTRUCTION,
   amsgStateNamespace,
@@ -20,6 +21,7 @@ import { AMSG_CHAT_PRESENCE_KEY } from '../../../utils/amsgChatPresence';
 import { AMSG_TOOL_CONFIG_KEY, AMSG_TOOL_PACK_KEY } from '../../../utils/amsgToolPack';
 
 const CHAR_ID = 'preset-nyah';
+const TASK_UUID = '3637dae1-1461-4444-a747-34e406f67acc';
 const NOW = new Date('2026-07-25T12:00:00.000Z');
 
 const firePackValue = (lastUserMessageAt: number | null = null) => JSON.stringify({
@@ -50,6 +52,8 @@ const makeCtx = (opts: {
   globalRows?: Array<{ key: string; value: string }>;
   recurrenceType?: string;
   nextSendAt?: string | null;
+  /** 写不进 client_state 时的样子：跳过原因写失败不该连累这次 skip。 */
+  writeStateFails?: boolean;
 }) => {
   const charRows = opts.charRows ?? [
     { key: AMSG_FIRE_PACK_KEY, value: firePackValue() },
@@ -58,11 +62,19 @@ const makeCtx = (opts: {
   const globalRows = opts.globalRows ?? [{ key: AMSG_TOOL_CONFIG_KEY, value: toolConfigValue }];
   const readState = vi.fn(async (namespace: string) =>
     namespace.startsWith('amsg:char:') ? charRows : globalRows);
+  const writeState = vi.fn(async (
+    _namespace: string,
+    _entries: Array<{ key: string; value: string | null }>,
+  ) => {
+    if (opts.writeStateFails) throw new Error('write failed');
+    return { upserted: 1, skipped: 0, deleted: 0 };
+  });
   const scratch: Record<string, unknown> = {};
   return {
     ctx: {
       task: {
         id: 42,
+        uuid: TASK_UUID,
         contactName: 'Nyah',
         recurrenceType: opts.recurrenceType ?? 'none',
         nextSendAt: opts.nextSendAt ?? '2026-07-25T12:00:00.000Z',
@@ -75,11 +87,13 @@ const makeCtx = (opts: {
       },
       userId: 'u1',
       readState,
+      writeState,
       now: NOW,
       scratch,
     } as any,
     scratch,
     readState,
+    writeState,
   };
 };
 
@@ -170,6 +184,65 @@ describe('onBeforeFire 四道门', () => {
   it('fire_pack 解析失败 → 抛错（不降级）', async () => {
     const { ctx } = makeCtx({ charRows: [{ key: AMSG_FIRE_PACK_KEY, value: '{"v":1,"template":"老格式"}' }] });
     await expect(amsgHooks.onBeforeFire(ctx)).rejects.toThrow(/AMSG2_FIRE_STATE_MISSING/);
+  });
+
+  // ─── 闸跳过时留一句原因 ───
+  //
+  // 闸判定该让路就直接跳过，一条 push 都不发，而远端那行任务照样被消费掉——客户端事后
+  // 看到的跟「发出去了但没收到」一模一样，用户只会觉得功能坏了。这几条钉住那句解释。
+
+  it('用户正在聊天被拦下 → 写下原因，说明是让路了', async () => {
+    const { ctx, writeState } = makeCtx({
+      charRows: [
+        { key: AMSG_CHAT_PRESENCE_KEY, value: presenceValue(NOW.getTime() - 5_000) },
+        { key: AMSG_FIRE_PACK_KEY, value: firePackValue() },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+    });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
+
+    const call = writeState.mock.calls.find(([, entries]) =>
+      entries.some((e: { key: string }) => e.key === AMSG_LAST_SKIP_KEY));
+    expect(call, '应该写过 last_skip').toBeTruthy();
+    const skip = JSON.parse(String(call![1][0].value));
+    expect(skip.reason).toBe('active-chat-presence');
+    expect(skip.taskUuid).toBe(TASK_UUID);
+  });
+
+  it('对话已经聊到别处被作废 → 原因写成另一种，两者能分开', async () => {
+    const anchor = NOW.getTime() - 3600_000;
+    const { ctx, writeState } = makeCtx({
+      metadata: { amsgAnchorMs: anchor },
+      charRows: [
+        { key: AMSG_FIRE_PACK_KEY, value: firePackValue(anchor + 60_000) },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+    });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
+
+    const call = writeState.mock.calls.find(([, entries]) =>
+      entries.some((e: { key: string }) => e.key === AMSG_LAST_SKIP_KEY));
+    expect(JSON.parse(String(call![1][0].value)).reason).toBe('conversation-moved-on');
+  });
+
+  it('正常触发不留跳过记录（别让上一次的解释赖着不走）', async () => {
+    const { ctx, writeState } = makeCtx({});
+    await amsgHooks.onBeforeFire(ctx);
+    const call = writeState.mock.calls.find(([, entries]) =>
+      entries.some((e: { key: string }) => e.key === AMSG_LAST_SKIP_KEY));
+    expect(call).toBeUndefined();
+  });
+
+  it('原因写失败照样把这次拦下来——闸的效果不能取决于能不能写日志', async () => {
+    const { ctx } = makeCtx({
+      writeStateFails: true,
+      charRows: [
+        { key: AMSG_CHAT_PRESENCE_KEY, value: presenceValue(NOW.getTime() - 5_000) },
+        { key: AMSG_FIRE_PACK_KEY, value: firePackValue() },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+    });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
   });
 
   // ─── 值压缩：前端压过的 fire_pack 要能读出来，没压过的老数据也要照常读 ───

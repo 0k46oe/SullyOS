@@ -28,6 +28,8 @@ import { stripReasoningTags } from '@rei-standard/amsg-shared';
 import type { UserProfile } from '../../../types';
 import {
   AMSG_FIRE_PACK_KEY,
+  AMSG_LAST_SKIP_KEY,
+  type AmsgLastSkip,
   amsgStateNamespace,
   amsgXhsSessionKey,
   parseFirePack,
@@ -99,6 +101,8 @@ interface Env {
 interface FireCtx {
   task: {
     id?: string | number | null;
+    /** 任务行 uuid（客户端清单里的那个）；跳过时留痕要拿它对上是哪一条。 */
+    uuid?: string | null;
     contactName?: string;
     recurrenceType?: string;
     nextSendAt?: string | null;
@@ -106,6 +110,8 @@ interface FireCtx {
   };
   userId: string;
   readState: (namespace: string) => Promise<Array<{ key: string; value: string }>>;
+  /** 与每轮 sessionCtx 上那个是同一套写口（防穿帮闸跳过时用它留一句原因）。 */
+  writeState?: WriteState;
   now: Date;
   /**
    * 单次 fire 的宿主便签（amsg-server 2.6.0-next.4+）：与同一次 fire 每轮的
@@ -245,6 +251,38 @@ export const offloadOversizedPush = async (
   return slimmed;
 };
 
+/**
+ * 防穿帮闸跳过一次触发时，留一句「为什么没响」给客户端。
+ *
+ * 闸是静默工作的：判定该让路就直接跳过，一条 push 都不发，而远端那行任务两种情况下
+ * （真发出去了 / 被闸拦下）都会被消费掉。客户端事后看到的一模一样，用户只会觉得
+ * 「说好的消息呢」。留一条记录，面板就能照实说明。
+ *
+ * best-effort：写不进去不能连累这次 skip 本身——闸该拦还是要拦，少一句解释而已。
+ */
+const recordSkip = async (
+  ctx: FireCtx,
+  charId: string,
+  reason: AmsgLastSkip['reason'],
+  occurrenceMs: number,
+): Promise<void> => {
+  if (typeof ctx.writeState !== 'function') return;
+  const skip: AmsgLastSkip = {
+    v: 1,
+    taskUuid: typeof ctx.task.uuid === 'string' ? ctx.task.uuid : null,
+    occurrenceMs,
+    reason,
+    skippedAt: ctx.now.getTime(),
+  };
+  try {
+    await ctx.writeState(amsgStateNamespace(charId), [
+      { key: AMSG_LAST_SKIP_KEY, value: JSON.stringify(skip) },
+    ]);
+  } catch (error) {
+    console.warn('[amsg:expire-skip] 跳过原因写入失败（闸照常生效，只是面板少一句说明）', error);
+  }
+};
+
 // export 只为单测（见 index.test.ts）：onBeforeFire 的四道门顺序是这个功能最关键的
 // 决策路径，一个判断写错位就是「该拦的没拦」或「全都不发」，必须有回归守卫钉住。
 export const amsgHooks = {
@@ -277,6 +315,11 @@ export const amsgHooks = {
         reason: 'active-chat-presence',
         presenceActiveAt: presence?.activeAt,
       });
+      // 这道门在解析 fire_pack 之前，拿不到 occurrenceMs，用任务行的名义时刻。
+      await recordSkip(
+        ctx, charId, 'active-chat-presence',
+        Date.parse(String(ctx.task.nextSendAt)) || ctx.now.getTime(),
+      );
       return { skip: true } as const;
     }
 
@@ -318,6 +361,7 @@ export const amsgHooks = {
     };
     if (shouldExpireFire(expireInput)) {
       console.log('[amsg:expire-skip]', { taskId: ctx.task.id, ...expireInput });
+      await recordSkip(ctx, charId, 'conversation-moved-on', occurrenceMs);
       return { skip: true } as const;
     }
 

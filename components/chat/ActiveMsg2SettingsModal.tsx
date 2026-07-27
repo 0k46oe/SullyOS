@@ -13,6 +13,7 @@ import {
   UserProfile,
 } from '../../types';
 import { ActiveMsgClient, getDefaultActiveMsgFirstSendTime } from '../../utils/activeMsgClient';
+import { type AmsgLastSkip, describeLastSkip } from '../../utils/amsgFirePack';
 import {
   applyRemoteTaskDelta,
   applyScheduledTask,
@@ -103,6 +104,8 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
   // （读失败/未拉完），此时不显示「远端不存在」徽标，免得半个清单误伤。
   // 之后不重拉，靠 applyRemoteTaskDelta 把每次远端操作的结果记进来（见 amsg2Tasks 注释）。
   const [knownRemoteUuids, setKnownRemoteUuids] = useState<Set<string> | null>(null);
+  // 防穿帮闸最近一次跳过的记录（worker 写的）。null = 没有记录 / 没读到。
+  const [lastSkip, setLastSkip] = useState<AmsgLastSkip | null>(null);
 
   // 表单值重置：面板打开或切换编辑对象时，用被编辑任务的字段填表单（新建则填默认值）。
   // 角色级共享设置（maxTokens / 单独 API）始终跟随保存值。
@@ -149,6 +152,10 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
         ? `权限：${pushStatus.permission} / 订阅：${pushStatus.hasSubscription ? '已就绪' : '未创建'}`
         : '当前环境不支持 Web Push');
     })();
+
+    // 防穿帮闸最近拦下了哪次触发。闸是静默的，不说一声的话「让路了」在用户看来
+    // 跟「没发出去」一模一样。
+    void (async () => setLastSkip(await ActiveMsgClient.readLastSkip(char.id)))();
 
     void (async () => {
       let remote: Set<string>;
@@ -346,6 +353,14 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
             <span className={`absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow transition-all duration-200 ${enabled ? 'translate-x-5' : 'translate-x-0'}`} />
           </button>
         </div>
+
+        {/* 闸拦下一次触发时不发任何推送，远端那行任务却照样被消费掉——不说一声的话，
+            「让路了」在用户看来跟「没发出去 / 功能坏了」完全一样。 */}
+        {enabled && lastSkip ? (
+          <div className="bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-xs leading-relaxed text-slate-600">
+            {describeLastSkip(lastSkip, (ms) => formatTaskTime(new Date(ms).toISOString()))}
+          </div>
+        ) : null}
 
         {enabled && tasks.length > 0 ? (
           <div>

@@ -101,6 +101,52 @@ export const unpackStateValue = async (value: string): Promise<string> => {
   return new TextDecoder().decode(raw);
 };
 
+/**
+ * 防穿帮闸最近一次拦下了哪次触发（每角色一份，新的盖旧的）。
+ *
+ * 闸是完全静默工作的：worker 判定「该让路」之后直接跳过这次 fire，一条 push 都不发。
+ * 对用户来说，「让路了」和「发出去但没收到」「功能坏了」长得一模一样——远端那行任务
+ * 两种情况下都会被消费掉，客户端事后无从分辨。
+ *
+ * 所以让 worker 在跳过时留一句话，客户端读回来照实说明。只留最近一次：这是给人看的
+ * 「刚才为什么没响」，不是审计流水，攒着只会越积越多。
+ */
+export const AMSG_LAST_SKIP_KEY = 'last_skip';
+
+export interface AmsgLastSkip {
+  v: 1;
+  /** 被跳过的那条任务（uuid，拿不到时为 null）。 */
+  taskUuid: string | null;
+  /** 本该触发的时刻。 */
+  occurrenceMs: number;
+  /**
+   * active-chat-presence  到点时用户正跟这个角色聊天
+   * conversation-moved-on 排程之后对话已经往前走了，原本要说的话过时了
+   */
+  reason: 'active-chat-presence' | 'conversation-moved-on';
+  skippedAt: number;
+}
+
+export const parseLastSkip = (value: string): AmsgLastSkip | null => {
+  try {
+    const parsed = JSON.parse(value);
+    if (
+      parsed && typeof parsed === 'object' && parsed.v === 1
+      && typeof parsed.occurrenceMs === 'number'
+      && (parsed.reason === 'active-chat-presence' || parsed.reason === 'conversation-moved-on')
+    ) {
+      return parsed as AmsgLastSkip;
+    }
+  } catch { /* 非 JSON → null */ }
+  return null;
+};
+
+/** 给人看的一句话：为什么那一次没响。 */
+export const describeLastSkip = (skip: AmsgLastSkip, formatTime: (ms: number) => string): string =>
+  skip.reason === 'active-chat-presence'
+    ? `${formatTime(skip.occurrenceMs)} 那次主动消息让路了——到点时你正在和 ta 聊天。`
+    : `${formatTime(skip.occurrenceMs)} 那次主动消息取消了——排程之后你们的对话已经聊到别处，原本要说的话过时了。`;
+
 export const AMSG_SLOT_CURRENT_TIME = '{{AMSG_CURRENT_TIME}}';
 export const AMSG_SLOT_TIME_SINCE_USER = '{{AMSG_TIME_SINCE_USER}}';
 export const AMSG_SLOT_AWAY_HINT = '{{AMSG_AWAY_HINT}}';

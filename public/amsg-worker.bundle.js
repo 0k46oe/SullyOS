@@ -3015,6 +3015,7 @@ var unpackStateValue = async (value) => {
   const raw = await streamThrough(gz, new DecompressionStream("gzip"));
   return new TextDecoder().decode(raw);
 };
+var AMSG_LAST_SKIP_KEY = "last_skip";
 var AMSG_SLOT_CURRENT_TIME = "{{AMSG_CURRENT_TIME}}";
 var AMSG_SLOT_TIME_SINCE_USER = "{{AMSG_TIME_SINCE_USER}}";
 var AMSG_SLOT_AWAY_HINT = "{{AMSG_AWAY_HINT}}";
@@ -5240,6 +5241,23 @@ var offloadOversizedPush = async (payload, writeState, charId, clientTaskId) => 
   });
   return slimmed;
 };
+var recordSkip = async (ctx, charId, reason, occurrenceMs) => {
+  if (typeof ctx.writeState !== "function") return;
+  const skip = {
+    v: 1,
+    taskUuid: typeof ctx.task.uuid === "string" ? ctx.task.uuid : null,
+    occurrenceMs,
+    reason,
+    skippedAt: ctx.now.getTime()
+  };
+  try {
+    await ctx.writeState(amsgStateNamespace(charId), [
+      { key: AMSG_LAST_SKIP_KEY, value: JSON.stringify(skip) }
+    ]);
+  } catch (error) {
+    console.warn("[amsg:expire-skip] \u8DF3\u8FC7\u539F\u56E0\u5199\u5165\u5931\u8D25\uFF08\u95F8\u7167\u5E38\u751F\u6548\uFF0C\u53EA\u662F\u9762\u677F\u5C11\u4E00\u53E5\u8BF4\u660E\uFF09", error);
+  }
+};
 var amsgHooks = {
   async onBeforeFire(ctx) {
     const charId = ctx.task?.metadata?.charId;
@@ -5259,6 +5277,12 @@ var amsgHooks = {
         reason: "active-chat-presence",
         presenceActiveAt: presence?.activeAt
       });
+      await recordSkip(
+        ctx,
+        charId,
+        "active-chat-presence",
+        Date.parse(String(ctx.task.nextSendAt)) || ctx.now.getTime()
+      );
       return { skip: true };
     }
     const packRow = charRows.find((r) => r.key === AMSG_FIRE_PACK_KEY);
@@ -5285,6 +5309,7 @@ var amsgHooks = {
     };
     if (shouldExpireFire(expireInput)) {
       console.log("[amsg:expire-skip]", { taskId: ctx.task.id, ...expireInput });
+      await recordSkip(ctx, charId, "conversation-moved-on", occurrenceMs);
       return { skip: true };
     }
     if (typeof taskMeta.amsgTaskInstruction !== "string") {

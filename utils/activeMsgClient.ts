@@ -23,10 +23,13 @@ import {
   AMSG_SLOT_AWAY_HINT,
   AMSG_SLOT_CURRENT_TIME,
   AMSG_SLOT_TASK_INSTRUCTION,
+  AMSG_LAST_SKIP_KEY,
   AMSG_SLOT_TIME_SINCE_USER,
   AmsgFirePack,
+  type AmsgLastSkip,
   amsgStateNamespace,
   packStateValue,
+  parseLastSkip,
 } from './amsgFirePack';
 import {
   AMSG_GLOBAL_NAMESPACE,
@@ -917,6 +920,22 @@ export const ActiveMsgClient = {
     const entries = (response.data?.entries ?? []) as Array<{ key: string; value: string }>;
     const hit = entries.find((e) => e?.key === key);
     return hit?.value ? hit.value : null;
+  },
+
+  /**
+   * 防穿帮闸最近一次拦下了哪次触发（没有记录 / 读不出来一律 null）。
+   *
+   * 闸跳过一次 fire 时不发任何 push，而远端那行任务照样被消费掉——客户端事后分不出
+   * 「让路了」和「发出去但没收到」。这条记录就是 worker 留下的那句解释，面板照实说明。
+   * 读失败按「没有记录」处理：这是一句锦上添花的说明，不该让面板打不开。
+   */
+  async readLastSkip(charId: string): Promise<AmsgLastSkip | null> {
+    try {
+      const value = await this.readClientStateValue(amsgStateNamespace(charId), AMSG_LAST_SKIP_KEY);
+      return value ? parseLastSkip(value) : null;
+    } catch {
+      return null;
+    }
   },
 
   /**
