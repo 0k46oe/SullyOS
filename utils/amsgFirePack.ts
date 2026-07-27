@@ -10,7 +10,8 @@
  *
  * 多任务共用每角色一份 fire_pack：「本次任务」指令随任务 metadata 走、到点填槽（v2 起）。
  *
- * 纯函数、零依赖（worker bundle 会打进这份代码，别在这里 import 前端环境的东西）。
+ * 零依赖（worker bundle 会打进这份代码，别在这里 import 前端环境的东西）。除了压缩那几个
+ * 函数用 CompressionStream / base64（浏览器和 Workers 运行时都自带），其余都是纯函数。
  */
 
 export const AMSG_STATE_NAMESPACE_PREFIX = 'amsg:char:';
@@ -26,6 +27,79 @@ export const AMSG_FIRE_PACK_KEY = 'fire_pack';
  * 共用这一份键名，别在任何一侧另起炉灶。
  */
 export const amsgXhsSessionKey = (clientTaskId: string) => `xhs_session:${clientTaskId}`;
+
+// ─── client_state 的值压缩 ───
+//
+// fire_pack 是「角色完整系统提示词 + 最近 30 条对话」，一份 40KB 起步，排了任务的角色
+// 每聊完一轮就整份重传一次。压缩必须发生在**交给上游加密之前**：上游 putClientState 是
+// 先加密再发，密文近似随机、gzip 压不动（实测只能抵消 base64 那点膨胀，省 25%），
+// 而在这里先压再交出去，同一份内容实测省 60%，D1 里存的也跟着变小。
+
+/**
+ * 压缩过的值的前缀。
+ *
+ * 不是版本兼容用的，是「这一份到底压没压」的标记：内容太短时压完反而更大，
+ * packStateValue 会原样返回，读侧靠这个前缀分辨该不该解压。
+ */
+const GZIP_VALUE_PREFIX = 'gz1:';
+
+/** 运行时有没有压缩能力（老 Safari 没有 CompressionStream）。 */
+const canCompress = (): boolean =>
+  typeof CompressionStream === 'function' && typeof DecompressionStream === 'function';
+
+// btoa/atob 只吃 latin1 字符串，二进制要一个字节一个字符地喂。整段 apply 展开会在大数据上
+// 爆调用栈，按块拼。
+const CHUNK = 0x8000;
+
+const bytesToBase64 = (bytes: Uint8Array): string => {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+};
+
+const base64ToBytes = (base64: string): Uint8Array => {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+};
+
+const streamThrough = async (data: Uint8Array, transform: TransformStream): Promise<Uint8Array> => {
+  const stream = new Blob([data as BlobPart]).stream().pipeThrough(transform);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+};
+
+/**
+ * 上传前把值压掉。压不动或运行时不支持时原样返回 —— 这个函数永远不该让同步失败，
+ * 云端那份 fire_pack 是角色到点时唯一的上下文来源，为了省流量把它弄丢是本末倒置。
+ */
+export const packStateValue = async (json: string): Promise<string> => {
+  if (!canCompress()) return json;
+  try {
+    const rawBytes = new TextEncoder().encode(json);
+    const gz = await streamThrough(rawBytes, new CompressionStream('gzip'));
+    const packed = `${GZIP_VALUE_PREFIX}${bytesToBase64(gz)}`;
+    // 划算不划算按**字节**比，不能用 .length。fire_pack 几乎全是中文，一个字符占 3 个
+    // UTF-8 字节，而压完的 base64 全是 ASCII（1 字符 = 1 字节）——拿字符数比的话，
+    // 明明省掉一半流量的结果会被判成「压完更大」，于是一份都压不动。
+    return packed.length < rawBytes.length ? packed : json;
+  } catch {
+    return json;
+  }
+};
+
+/**
+ * 读回来的值还原成 JSON 字符串。没有前缀的就是没压过的，原样返回。
+ * 解压失败抛出去 —— 那说明数据真损坏了，不能当成正常内容往下走。
+ */
+export const unpackStateValue = async (value: string): Promise<string> => {
+  if (!value.startsWith(GZIP_VALUE_PREFIX)) return value;
+  const gz = base64ToBytes(value.slice(GZIP_VALUE_PREFIX.length));
+  const raw = await streamThrough(gz, new DecompressionStream('gzip'));
+  return new TextDecoder().decode(raw);
+};
 
 export const AMSG_SLOT_CURRENT_TIME = '{{AMSG_CURRENT_TIME}}';
 export const AMSG_SLOT_TIME_SINCE_USER = '{{AMSG_TIME_SINCE_USER}}';

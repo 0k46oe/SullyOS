@@ -26,6 +26,7 @@ import {
   AMSG_SLOT_TIME_SINCE_USER,
   AmsgFirePack,
   amsgStateNamespace,
+  packStateValue,
 } from './amsgFirePack';
 import {
   AMSG_GLOBAL_NAMESPACE,
@@ -422,7 +423,7 @@ export const clearNamespaceValuesOrThrow = async (
  * 「哪个 namespace 配哪个 key 配哪个 build 函数」只在这里写一遍：排程和批量同步两条路
  * 都得把同一批东西写上去，各写各的话漏一条就是 worker 到点读不到 → 整条任务硬失败。
  */
-const buildCharStateEntries = (
+const buildCharStateEntries = async (
   char: CharacterProfile,
   firePack: AmsgFirePack,
   updatedAt: number,
@@ -430,14 +431,15 @@ const buildCharStateEntries = (
   {
     namespace: amsgStateNamespace(char.id),
     key: AMSG_FIRE_PACK_KEY,
-    value: JSON.stringify(firePack),
+    // 压在加密之前：上游 putClientState 先加密再发，密文压不动（见 amsgFirePack）。
+    value: await packStateValue(JSON.stringify(firePack)),
     updatedAt,
   },
   // v2 服务端工具循环的角色侧数据（recall 月度总结 / XHS 开关 / 角色名）。
   {
     namespace: amsgStateNamespace(char.id),
     key: AMSG_TOOL_PACK_KEY,
-    value: JSON.stringify(buildToolPack(char)),
+    value: await packStateValue(JSON.stringify(buildToolPack(char))),
     updatedAt,
   },
 ];
@@ -781,7 +783,7 @@ export const ActiveMsgClient = {
     if (firePack) {
       const now = Date.now();
       await putClientStateOrThrow(client, [
-        ...buildCharStateEntries(char, firePack, now),
+        ...(await buildCharStateEntries(char, firePack, now)),
         buildToolConfigEntry(realtimeConfig, now),
       ], '上传云端状态');
     }
@@ -864,7 +866,7 @@ export const ActiveMsgClient = {
       );
       // 大值由 amsg-server 2.6.0-next.4+ 在 worker 存储层透明分块，整条直传，
       // 内容一个字不裁；老 worker 拒超限条目 → 设置页 capabilities 探测亮牌。
-      entries.push(...buildCharStateEntries(item.char, firePack, now));
+      entries.push(...(await buildCharStateEntries(item.char, firePack, now)));
     }
     const response = await client.putClientState(entries);
     if (!response?.success) {

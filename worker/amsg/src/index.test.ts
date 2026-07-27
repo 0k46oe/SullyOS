@@ -14,6 +14,7 @@ import {
   AMSG_SLOT_TASK_INSTRUCTION,
   amsgStateNamespace,
   amsgXhsSessionKey,
+  packStateValue,
 } from '../../../utils/amsgFirePack';
 import { AMSG_CHAT_PRESENCE_KEY } from '../../../utils/amsgChatPresence';
 import { AMSG_TOOL_CONFIG_KEY, AMSG_TOOL_PACK_KEY } from '../../../utils/amsgToolPack';
@@ -168,6 +169,39 @@ describe('onBeforeFire 四道门', () => {
 
   it('fire_pack 解析失败 → 抛错（不降级）', async () => {
     const { ctx } = makeCtx({ charRows: [{ key: AMSG_FIRE_PACK_KEY, value: '{"v":1,"template":"老格式"}' }] });
+    await expect(amsgHooks.onBeforeFire(ctx)).rejects.toThrow(/AMSG2_FIRE_STATE_MISSING/);
+  });
+
+  // ─── 值压缩：前端压过的 fire_pack 要能读出来，没压过的老数据也要照常读 ───
+
+  it('前端压过的 fire_pack 照常读出来', async () => {
+    // 真实的 fire_pack 是几万字的角色设定加聊天记录，这里也得凑到那个量级：
+    // 太短的内容压完反而更大，packStateValue 会按设计原样返回、测不到解压路径。
+    const bulky = JSON.stringify({
+      ...JSON.parse(firePackValue()),
+      template: `${'【角色系统设定】你是一个会在深夜突然想起对方的人。\n'.repeat(400)}`
+        + `现在是 ${AMSG_SLOT_CURRENT_TIME}。\n${AMSG_SLOT_TASK_INSTRUCTION}`,
+    });
+    const packed = await packStateValue(bulky);
+    expect(packed.startsWith('gz1:'), '这个量级应该压得动').toBe(true);
+    const { ctx } = makeCtx({
+      charRows: [
+        { key: AMSG_FIRE_PACK_KEY, value: packed },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+    });
+    const messages = await amsgHooks.onBeforeFire(ctx) as Array<{ content: string }>;
+    expect(messages[0].content).toContain('问问对方吃了没');
+    expect(messages[0].content).not.toContain(AMSG_SLOT_CURRENT_TIME);
+  });
+
+  it('压过的值坏掉 → 抛错，不拿半截内容当 prompt 发出去', async () => {
+    const { ctx } = makeCtx({
+      charRows: [
+        { key: AMSG_FIRE_PACK_KEY, value: 'gz1:bm90LWd6aXAtYXQtYWxs' },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+    });
     await expect(amsgHooks.onBeforeFire(ctx)).rejects.toThrow(/AMSG2_FIRE_STATE_MISSING/);
   });
 

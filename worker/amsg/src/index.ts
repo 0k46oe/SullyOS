@@ -32,6 +32,7 @@ import {
   amsgXhsSessionKey,
   parseFirePack,
   renderFirePack,
+  unpackStateValue,
 } from '../../../utils/amsgFirePack';
 import { shouldExpireFire } from '../../../utils/amsg2ExpireGuard';
 import {
@@ -278,7 +279,14 @@ export const amsgHooks = {
     if (!packRow) throw fail('云端没有这个角色的 fire_pack');
 
     // 大值分块由 amsg-server 2.6.0-next.4+ 在存储层透明处理，readState 拿到的已是拼回的原文。
-    const pack = parseFirePack(packRow.value);
+    // 前端压过之后值以 gz1: 开头，unpackStateValue 按前缀解；内容太短没压的原样穿过去。
+    let packJson: string;
+    try {
+      packJson = await unpackStateValue(packRow.value);
+    } catch (error) {
+      throw fail('fire_pack 解压失败（数据损坏）', { error: String(error) });
+    }
+    const pack = parseFirePack(packJson);
     if (!pack) throw fail('fire_pack 解析失败（格式不对或数据损坏）');
 
     // 本次触发时刻：任务行 next_send_at（NOT NULL，buildHookTask 已摊平提供）。防穿帮闸的

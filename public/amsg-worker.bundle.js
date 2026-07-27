@@ -2998,6 +2998,23 @@ var AMSG_STATE_NAMESPACE_PREFIX = "amsg:char:";
 var amsgStateNamespace = (charId) => `${AMSG_STATE_NAMESPACE_PREFIX}${charId}`;
 var AMSG_FIRE_PACK_KEY = "fire_pack";
 var amsgXhsSessionKey = (clientTaskId) => `xhs_session:${clientTaskId}`;
+var GZIP_VALUE_PREFIX = "gz1:";
+var base64ToBytes2 = (base64) => {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+};
+var streamThrough = async (data, transform) => {
+  const stream = new Blob([data]).stream().pipeThrough(transform);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+};
+var unpackStateValue = async (value) => {
+  if (!value.startsWith(GZIP_VALUE_PREFIX)) return value;
+  const gz = base64ToBytes2(value.slice(GZIP_VALUE_PREFIX.length));
+  const raw = await streamThrough(gz, new DecompressionStream("gzip"));
+  return new TextDecoder().decode(raw);
+};
 var AMSG_SLOT_CURRENT_TIME = "{{AMSG_CURRENT_TIME}}";
 var AMSG_SLOT_TIME_SINCE_USER = "{{AMSG_TIME_SINCE_USER}}";
 var AMSG_SLOT_AWAY_HINT = "{{AMSG_AWAY_HINT}}";
@@ -5195,7 +5212,13 @@ var amsgHooks = {
     }
     const packRow = charRows.find((r) => r.key === AMSG_FIRE_PACK_KEY);
     if (!packRow) throw fail("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 fire_pack");
-    const pack = parseFirePack(packRow.value);
+    let packJson;
+    try {
+      packJson = await unpackStateValue(packRow.value);
+    } catch (error) {
+      throw fail("fire_pack \u89E3\u538B\u5931\u8D25\uFF08\u6570\u636E\u635F\u574F\uFF09", { error: String(error) });
+    }
+    const pack = parseFirePack(packJson);
     if (!pack) throw fail("fire_pack \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
     const occurrenceMs = Date.parse(String(ctx.task.nextSendAt));
     if (!Number.isFinite(occurrenceMs)) {
