@@ -29,6 +29,7 @@ import { CHAT_GEN_EVENTS, setChatViewSnapshot } from '../utils/chatGenEvents';
 import { buildChatRequestPayload } from '../utils/chatRequestPayload';
 import { extractHtmlBlocks } from '../utils/htmlPrompt';
 import { ActiveMsgClient } from '../utils/activeMsgClient';
+import { purgeCharCloudState } from '../utils/amsg2CharCleanup';
 import { loadMusicPlaybackSnapshot } from './MusicContext';
 import { setMinimaxRegion } from '../utils/minimaxEndpoint';
 import { setTtsProvider, setVoicePromptOverrides } from '../utils/ttsProvider';
@@ -2446,11 +2447,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   };
   const updateCharacter = async (id: string, updates: Partial<CharacterProfile> | ((prev: CharacterProfile) => Partial<CharacterProfile>)) => { setCharacters(prev => { const updated = prev.map(c => c.id === id ? normalizeCharacterImpression({ ...c, ...(typeof updates === 'function' ? updates(c) : updates) }) : c); const target = updated.find(c => c.id === id); if (target) DB.saveCharacter(target); return updated; }); };
   const deleteCharacter = async (id: string) => {
+    const target = characters.find(c => c.id === id);
     // 主动消息 2.0 的任务活在用户自己的 worker 上，不随本地角色删除消失：留着的话
     // 到点照样跑一整轮生成 + 推送，用户会收到一个已经删掉的角色发来的消息（还每次
     // 真烧一轮 LLM）。本地记录一删就再没有 uuid 可取消，所以必须赶在删除之前清。
     // 没排过任务的角色不发任何请求。
-    const localTaskUuids = (characters.find(c => c.id === id)?.activeMsg2Config?.tasks ?? [])
+    const localTaskUuids = (target?.activeMsg2Config?.tasks ?? [])
       .map(t => t.taskUuid);
     if (localTaskUuids.length > 0) {
       try {
@@ -2462,6 +2464,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         console.warn('[deleteCharacter] 远端主动消息任务清理失败', err);
         addToast('ta 的主动消息任务没能在远端取消，可能仍会到点推送，请检查 Worker 连接', 'error');
       }
+    }
+
+    // 任务取消掉了，云端还留着这个角色的 client_state —— 那里面是完整的角色系统提示词
+    // 加最近 30 条对话原文（fire_pack）。删除确认框写的是「记忆将被清空」，那就得连云端
+    // 那份一起清，不然聊天记录会一直躺在 D1 里、每删一个角色再堆一份。
+    // 清不掉不阻塞删除（详见 purgeCharCloudState：它自己吞异常，这里只按结果提示）。
+    const cloudCleanup = await purgeCharCloudState(target);
+    if (cloudCleanup.status === 'failed') {
+      console.warn('[deleteCharacter] 云端状态清理失败（角色照常删除）', cloudCleanup.error);
+      addToast('ta 在云端的聊天上下文没能清掉，可以去设置里「清除云端状态」兜一下', 'error');
     }
 
     setCharacters(prev => { const remaining = prev.filter(c => c.id !== id); if (remaining.length > 0 && activeCharacterId === id) { setActiveCharacterId(remaining[0].id); } return remaining; });

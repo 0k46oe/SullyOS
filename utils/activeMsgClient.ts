@@ -373,6 +373,40 @@ export const putClientStateOrThrow = async (
 };
 
 /**
+ * 把一个 namespace 下还有内容的条目全部清空，返回被清掉的键名。
+ *
+ * 先读一遍再逐条写空，而不是照着已知键名盲写，有两个原因：
+ *   1. 旁路存储的键名带 clientTaskId（`xhs_session:<id>`），任务记录被
+ *      pruneStaleTasks 清掉之后就再也拼不出来，只能靠读回来才知道有哪些；
+ *   2. 盲写会把本来不存在的条目 upsert 出来 —— putClientState 是 upsert，
+ *      "清理" 反倒变成新建。
+ *
+ * 和 clearClientStateValue 一样是写空串而不是删行（HTTP 的 PUT /client-state 没有
+ * 删除语义，value: null 会被当无效条目跳过），留下的是几字节的空壳，内容本身没了。
+ */
+export const clearNamespaceValuesOrThrow = async (
+  client: InternalReiClient,
+  namespace: string,
+): Promise<string[]> => {
+  const response = await client.getClientState(namespace);
+  if (!response?.success) {
+    throw new Error(response?.error?.message || '读取云端状态失败。');
+  }
+  const entries = (response.data?.entries ?? []) as Array<{ key?: string; value?: string }>;
+  // 已经是空壳的条目跳过：再写一遍不会更干净，只是白占一次请求体。
+  const keys = entries.filter((e) => e?.key && e?.value).map((e) => e.key as string);
+  if (keys.length === 0) return [];
+
+  const now = Date.now();
+  await putClientStateOrThrow(
+    client,
+    keys.map((key) => ({ namespace, key, value: '', updatedAt: now })),
+    '清空云端状态',
+  );
+  return keys;
+};
+
+/**
  * 角色侧云端状态的两条条目（fire_pack + tool_pack）。
  *
  * 「哪个 namespace 配哪个 key 配哪个 build 函数」只在这里写一遍：排程和批量同步两条路
@@ -885,6 +919,19 @@ export const ActiveMsgClient = {
     const config = await ensureWorkerReady();
     const client = await initializeClient(config);
     await client.putClientState([{ namespace, key, value: '', updatedAt: Date.now() }]);
+  },
+
+  /**
+   * 清掉某个角色在云端 client_state 里的全部条目（fire_pack / tool_pack /
+   * 活跃会话租约 / 旁路存的小红书会话），删角色时用。
+   *
+   * 为什么单独有这么一个：设置页的「清除云端状态」是全局的、要用户主动去点，
+   * 删一个角色时该走的是只清这一个角色的路。返回被清掉的键名供调用方记账。
+   */
+  async clearCharClientState(charId: string): Promise<string[]> {
+    const config = await ensureWorkerReady();
+    const client = await initializeClient(config);
+    return clearNamespaceValuesOrThrow(client, amsgStateNamespace(charId));
   },
 
   // 清空该用户在 worker D1 里的全部 client_state（设置页「清除云端状态」按钮）。

@@ -6,7 +6,9 @@
 //   3. 按角色对账要认得出「老 worker 没投影 charId」，不能把它当成「远端一条都没有」。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-import { ActiveMsgClient, putClientStateOrThrow, toRemoteAvatarUrl } from './activeMsgClient';
+import {
+  ActiveMsgClient, clearNamespaceValuesOrThrow, putClientStateOrThrow, toRemoteAvatarUrl,
+} from './activeMsgClient';
 
 const TEST_USER_ID = '3f2b1c8a-9d4e-4a1b-8c2d-000000000001';
 
@@ -192,6 +194,75 @@ describe('ActiveMsgClient.cancelAllTasksForChar', () => {
 
     const { failed } = await ActiveMsgClient.cancelAllTasksForChar('char-1', []);
     expect([...failed]).toEqual(['t2']);
+  });
+});
+
+// 回归守卫：删角色时清云端 client_state 的清法。
+// 一个角色的条目不止 fire_pack / tool_pack —— 还有活跃会话租约，以及键名带 clientTaskId
+// 的旁路存储（`xhs_session:<id>`，任务记录被 prune 掉之后就再也拼不出来）。所以清法是
+// 「先读回来有什么、再把有内容的写空」，而不是照着已知键名盲写：putClientState 是 upsert，
+// 盲写会把本来不存在的条目建出来，清理反倒变成新建。
+describe('clearNamespaceValuesOrThrow', () => {
+  const clientWithState = (entries: any[], put = vi.fn().mockResolvedValue({ success: true })) => ({
+    getClientState: vi.fn().mockResolvedValue({ success: true, data: { entries } }),
+    putClientState: put,
+  } as any);
+
+  it('读回来有什么清什么，一次请求写空（xhs_session 这种拼不出的键也在内）', async () => {
+    const put = vi.fn().mockResolvedValue({ success: true });
+    const client = clientWithState([
+      { key: 'fire_pack', value: '{"v":2}' },
+      { key: 'tool_pack', value: '{}' },
+      { key: 'chat_presence', value: '{}' },
+      { key: 'xhs_session:2f1c-任务id', value: '{"notes":[]}' },
+    ], put);
+
+    const cleared = await clearNamespaceValuesOrThrow(client, 'amsg:char:char-1');
+
+    expect(cleared).toEqual(['fire_pack', 'tool_pack', 'chat_presence', 'xhs_session:2f1c-任务id']);
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(put.mock.calls[0][0].map((e: any) => [e.namespace, e.key, e.value])).toEqual([
+      ['amsg:char:char-1', 'fire_pack', ''],
+      ['amsg:char:char-1', 'tool_pack', ''],
+      ['amsg:char:char-1', 'chat_presence', ''],
+      ['amsg:char:char-1', 'xhs_session:2f1c-任务id', ''],
+    ]);
+  });
+
+  it('namespace 是空的 → 一条都不写（别把不存在的键 upsert 出来）', async () => {
+    const put = vi.fn().mockResolvedValue({ success: true });
+    await expect(clearNamespaceValuesOrThrow(clientWithState([], put), 'amsg:char:char-1'))
+      .resolves.toEqual([]);
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it('已经是空壳的条目跳过（重复删同一个角色不白发请求体）', async () => {
+    const put = vi.fn().mockResolvedValue({ success: true });
+    const client = clientWithState([
+      { key: 'fire_pack', value: '' },
+      { key: 'tool_pack', value: '{}' },
+    ], put);
+
+    await expect(clearNamespaceValuesOrThrow(client, 'amsg:char:char-1')).resolves.toEqual(['tool_pack']);
+    expect(put.mock.calls[0][0]).toHaveLength(1);
+  });
+
+  it('读不到云端状态 → 抛错（调用方按「没清掉」提示，不能当成清干净了）', async () => {
+    const client = {
+      getClientState: vi.fn().mockResolvedValue({ success: false, error: { message: 'D1 busy' } }),
+      putClientState: vi.fn(),
+    } as any;
+    await expect(clearNamespaceValuesOrThrow(client, 'amsg:char:char-1')).rejects.toThrow(/D1 busy/);
+    expect(client.putClientState).not.toHaveBeenCalled();
+  });
+
+  it('写空失败 → 抛错', async () => {
+    const client = clientWithState(
+      [{ key: 'fire_pack', value: '{"v":2}' }],
+      vi.fn().mockRejectedValue(new Error('worker down')),
+    );
+    await expect(runWithTimers(clearNamespaceValuesOrThrow(client, 'amsg:char:char-1')))
+      .rejects.toThrow(/worker down/);
   });
 });
 
