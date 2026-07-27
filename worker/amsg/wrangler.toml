@@ -5,6 +5,16 @@ main = "worker.bundle.js"
 compatibility_date = "2026-01-01"
 # amsg-server 2.6.0-next.2 起全 Web Crypto，不需要 nodejs_compat。
 
+# wrangler deploy 会用本地这份配置整体覆盖 Cloudflare 面板上的设置——
+# 不显式写这段，面板里手动开的 Workers Logs（实时日志）会被一起关掉。
+# amsg2 排障（[amsg:expire-skip] / [amsg:agentic] / [amsg:fire-state-missing]
+# 这些日志）全靠它，所以这里显式声明成开。
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+
 # 主动消息 2.0 的单用户后端：定时任务存 D1，到点由 Cron Trigger 推送。
 #
 # 部署：
