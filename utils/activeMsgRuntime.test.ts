@@ -3,9 +3,12 @@ import {
   EXPIRE_DECISION_TTL_MS,
   MAX_INBOX_PROCESS_ATTEMPTS,
   OrphanedCharacterError,
+  findInboxArtifacts,
+  purgeInboxArtifacts,
   resolveFireExpireDecision,
   resolveInboxFailureAction,
 } from './activeMsgRuntime';
+import { DB } from './db';
 
 // resolveFireExpireDecision 是从「防穿帮闸·客户端兜底」吞没闸抽出来的 get-or-compute
 // helper（带 TTL 清扫），单测把闸的关键不变量钉住，防回归：
@@ -121,5 +124,80 @@ describe('resolveInboxFailureAction', () => {
     const err = new Error('IndexedDB transaction aborted');
     expect(resolveInboxFailureAction(err, MAX_INBOX_PROCESS_ATTEMPTS)).toBe('degrade');
     expect(resolveInboxFailureAction(err, MAX_INBOX_PROCESS_ATTEMPTS + 1)).toBe('degrade');
+  });
+});
+
+// 回归守卫：重试不能把已经写进聊天记录的气泡再写一遍。
+//
+// 后处理是逐条落库的（十几处 DB.saveMessage），第 3 条写失败时前两条已经在库里了。
+// 「失败就整条重跑」最多跑 4 趟（3 次重试 + 最后存原稿保底），不先认领并清掉上一趟的
+// 半成品，用户就会看到同一段话出现三四遍——而重复进了聊天记录是永久的。
+// 认领的依据是每条气泡都继承的 metadata.activeMsg2.messageId（每条 push 唯一）。
+describe('findInboxArtifacts', () => {
+  const bubble = (id: number, messageId: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    role: 'assistant',
+    metadata: { source: 'active_msg_2', activeMsg2: { messageId }, ...extra },
+  });
+
+  it('认出同一条 push 写下的全部气泡', () => {
+    const found = findInboxArtifacts(
+      [bubble(1, 'msg_a'), bubble(2, 'msg_a'), bubble(3, 'msg_b')],
+      'msg_a',
+    );
+    expect(found.map((m) => m.id)).toEqual([1, 2]);
+  });
+
+  it('别的 push / 别的来源一律不动（多分段 push 每段各有各的 messageId）', () => {
+    const messages = [
+      bubble(1, 'msg_b'),
+      { id: 2, role: 'assistant', metadata: { source: 'chat' } },
+      { id: 3, role: 'assistant' },
+      { id: 4, role: 'user', metadata: { activeMsg2: { messageId: 'msg_a' } } },
+    ];
+    expect(findInboxArtifacts(messages as any, 'msg_a')).toEqual([]);
+  });
+
+  it('一趟都没写成（第一条就挂了）→ 空清单，调用方据此判定副作用还得重放', () => {
+    expect(findInboxArtifacts([bubble(1, 'msg_b')], 'msg_a')).toEqual([]);
+  });
+
+  it('退回存原稿那条也带同一个 messageId，所以也认得出来（免得原稿跟残留气泡并排）', () => {
+    const raw = { id: 9, role: 'assistant', metadata: { activeMsg2: { messageId: 'msg_a' } } };
+    expect(findInboxArtifacts([raw] as any, 'msg_a')).toHaveLength(1);
+  });
+});
+
+// 上面那条是纯判定，这条走真库（fake-indexeddb）钉住实际删除行为：
+// 重试前不清场的话，重跑一趟就是把同样的气泡再写一遍，用户看到重复的一段话。
+describe('purgeInboxArtifacts（走真库）', () => {
+  const CHAR = 'char-purge';
+
+  const saveBubble = (content: string, messageId: string | null) => DB.saveMessage({
+    charId: CHAR,
+    role: 'assistant',
+    type: 'text',
+    content,
+    metadata: messageId
+      ? { source: 'active_msg_2', activeMsg2: { messageId } }
+      : { source: 'chat' },
+  } as any);
+
+  it('只删这条 push 写下的气泡，别人的一条不动', async () => {
+    await saveBubble('上一趟写了一半 1', 'msg_a');
+    await saveBubble('上一趟写了一半 2', 'msg_a');
+    await saveBubble('另一条 push 的', 'msg_b');
+    await saveBubble('普通聊天回复', null);
+
+    const removed = await purgeInboxArtifacts({ charId: CHAR, messageId: 'msg_a' } as any);
+
+    expect(removed).toBe(2);
+    const left = await DB.getRecentMessagesByCharId(CHAR, 200);
+    expect(left.map((m) => m.content)).toEqual(['另一条 push 的', '普通聊天回复']);
+  });
+
+  it('一条都没写过 → 删 0 条，也不报错（首次处理走的就是这条）', async () => {
+    await expect(purgeInboxArtifacts({ charId: 'char-empty', messageId: 'msg_x' } as any))
+      .resolves.toBe(0);
   });
 });

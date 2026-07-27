@@ -218,6 +218,50 @@ export const resolveInboxFailureAction = (
   return attempts < MAX_INBOX_PROCESS_ATTEMPTS ? 'retry' : 'degrade';
 };
 
+/**
+ * 已经落库的、属于这条 push 的助手消息。
+ *
+ * 后处理是逐条落库的（十几处 DB.saveMessage），中途失败时前面几条已经在聊天记录里了。
+ * 重试是整条从头再跑，不先把这些清掉就会写重——而重复进了聊天记录是永久的。
+ * 认领的依据是每条气泡都继承的 metadata.activeMsg2.messageId（每条 push 唯一，
+ * 见 processInboxMessageWithPostProcessing 的 mcdInheritMeta）。
+ */
+export const findInboxArtifacts = <T extends { role: string; metadata?: any }>(
+  messages: T[],
+  messageId: string,
+): T[] => messages.filter((m) =>
+  m.role === 'assistant' && m.metadata?.activeMsg2?.messageId === messageId);
+
+/**
+ * 重试前的清场：把上一次跑到一半写进去的气泡删掉，并告诉调用方副作用还要不要重放。
+ *
+ * 后处理的顺序是「先跑副作用（转账 / 加日程 / 戳一戳 / 排程），再渲染气泡」，
+ * 所以**只要看到已落库的气泡，就说明副作用那一步上次已经整段跑完了**。这时重放
+ * 等于转两次账、加两次日程，比丢内容严重得多——所以这一趟只补渲染，不带 directives。
+ * 一条气泡都没有则说明上次死在副作用途中，那时 directives 还得照常带上，
+ * 否则这条消息的副作用就彻底没了。
+ */
+/** 把这条 push 上一趟写下的气泡从聊天记录里删掉，返回删了几条。 */
+export const purgeInboxArtifacts = async (message: ActiveMsg2InboxMessage): Promise<number> => {
+  const recent = await DB.getRecentMessagesByCharId(message.charId, 200);
+  const stale = findInboxArtifacts(recent, message.messageId);
+  if (stale.length > 0) await DB.deleteMessages(stale.map((m) => m.id));
+  return stale.length;
+};
+
+const prepareInboxRetry = async (
+  message: ActiveMsg2InboxMessage,
+): Promise<{ replayDirectives: boolean }> => {
+  if (!(message.processAttempts && message.processAttempts > 0)) return { replayDirectives: true };
+  const removed = await purgeInboxArtifacts(message);
+  if (removed === 0) return { replayDirectives: true };
+  log.warn('重试前清掉上次写了一半的气泡（副作用上次已跑完，本轮不重放）', {
+    messageId: message.messageId,
+    removed,
+  });
+  return { replayDirectives: false };
+};
+
 const processInboxMessageWithPostProcessing = async (message: ActiveMsg2InboxMessage): Promise<void> => {
   const characters = await DB.getAllCharacters();
   const char = characters.find(c => c.id === message.charId);
@@ -229,6 +273,9 @@ const processInboxMessageWithPostProcessing = async (message: ActiveMsg2InboxMes
     }
     throw new OrphanedCharacterError(message.charId);
   }
+
+  // 这是不是一次重试？是的话先清掉上次的半成品，并决定副作用要不要再跑一遍。
+  const { replayDirectives } = await prepareInboxRetry(message);
 
   const userProfile: UserProfile = (await DB.getUserProfile())
     ?? { name: 'User', avatar: '', bio: '' };
@@ -392,7 +439,8 @@ const processInboxMessageWithPostProcessing = async (message: ActiveMsg2InboxMes
     // replay 一次. worker buildPushDecision 把 directives 挂在最后一条 push 上,
     // 这里加 isLastChunk 守卫双保险, 防未来 worker bug 在多条 push 都塞 directives.
     // 老 worker (无 messageIndex/totalMessages 字段) ?? 0 fallback, 0===0 也算 last.
-    directives: isLastChunk(message) ? extractDirectives(message) : [],
+    // replayDirectives=false = 这是重试、且上次已经把副作用跑完了（见 prepareInboxRetry）。
+    directives: replayDirectives && isLastChunk(message) ? extractDirectives(message) : [],
     reasoningContent,
   });
 
@@ -799,7 +847,13 @@ const flushInboxToChatImpl = async () => {
 
         // 重试到头，退回存原稿保底：用户至少看得到内容，代价是表情 / 卡片 / 副作用都没了，
         // 所以这条要明确告诉用户「可能不完整」，别让它悄悄混进历史。
+        // 存原稿前也要清一遍：这一趟同样可能写了几条气泡才挂，不清的话原稿会跟它们并排出现。
         log.error('post-processing failed，重试到上限，退回存原稿', { messageId: message.messageId, attempts, error: postErr });
+        try {
+          await purgeInboxArtifacts(message);
+        } catch (purgeErr) {
+          log.warn('存原稿前清理半成品失败（原稿照存，可能与残留气泡并存）', { messageId: message.messageId, error: purgeErr });
+        }
         notifyInboxProcessFailed(message, 'degraded');
       }
     }
