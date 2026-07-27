@@ -13,6 +13,7 @@ import {
   isPendingTask,
   isRemoteMissingTask,
   keepUncancelledTasks,
+  pruneFiredTasks,
   pruneStaleTasks,
   shortTaskId,
   toDatetimeLocalValue,
@@ -264,5 +265,52 @@ describe('describeTaskProgress', () => {
 
   it('底账没拉到 → 不猜，给中性文案', () => {
     expect(describeTaskProgress(fired, null, now)).toBe('已到点');
+  });
+});
+
+describe('pruneFiredTasks', () => {
+  const now = Date.now();
+  const uuids = (list: ActiveMsg2TaskRecord[]) => list.map((t) => shortTaskId(t.taskUuid));
+  const fired = task({
+    taskUuid: 'ffffffff-0000-0000-0000-000000000000',
+    firstSendTime: new Date(now - 24 * H).toISOString(),
+  });
+  const pending = task({ taskUuid: 'aaaaaaaa-0000-0000-0000-000000000000' });
+
+  it('走完的一次性任务出清单，待触发的留下', () => {
+    expect(uuids(pruneFiredTasks([fired, pending], new Set(), now))).toEqual(['aaaaaaaa']);
+  });
+
+  it('过点了但远端那行还在 → worker 还没处理，留着', () => {
+    expect(uuids(pruneFiredTasks([fired], new Set([fired.taskUuid]), now))).toEqual(['ffffffff']);
+  });
+
+  // 带错误的那行是用户唯一能看见的线索（远端可能还会照发），清掉等于把问题藏起来。
+  it('带 lastError 的即使走完也留着', () => {
+    const broken = { ...fired, lastError: REPLACE_CANCEL_FAILED_NOTE };
+    expect(uuids(pruneFiredTasks([broken], new Set(), now))).toEqual(['ffffffff']);
+  });
+
+  it('底账没拉到时一条都不动', () => {
+    expect(uuids(pruneFiredTasks([fired, pending], null, now))).toEqual(['ffffffff', 'aaaaaaaa']);
+  });
+
+  it('循环任务过点了也不清——它下一轮还会响', () => {
+    const daily = task({
+      taskUuid: 'dddddddd-0000-0000-0000-000000000000',
+      firstSendTime: new Date(now - 24 * H).toISOString(),
+      recurrenceType: 'daily',
+    });
+    expect(uuids(pruneFiredTasks([daily], new Set(), now))).toEqual(['dddddddd']);
+  });
+
+  // 清理口径必须跟面板上那行字一致：写着「已触发」的正是该清掉的那条，
+  // 两边走岔就会出现「显示已触发却清不掉」或者「还在处理却被清了」。
+  it('清理口径与 describeTaskProgress 的「已触发」对齐', () => {
+    for (const t of [fired, pending]) {
+      const remote = new Set<string>();
+      const kept = pruneFiredTasks([t], remote, now).length === 1;
+      expect(kept).toBe(describeTaskProgress(t, remote, now) !== '已触发');
+    }
   });
 });

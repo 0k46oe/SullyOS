@@ -200,6 +200,32 @@ export const isRemoteMissingTask = (
   && !knownRemoteUuids.has(task.taskUuid);
 
 /**
+ * 已经走完的一次性任务出清单。
+ *
+ * 「走完」= 过了触发点、远端底账里也没有这一行。worker 领走任务后就会删掉那行，
+ * 所以底账里找不到它 = 这一次已经处理完了，本地留着只会让清单越积越长（一天测下来
+ * 就能攒出十来条一模一样的「已触发」）。判定跟 describeTaskProgress 是同一把尺：
+ * 那里写「已触发」的，正是这里清掉的。
+ *
+ * 两种情况一律留着：
+ *   - 带 lastError 的（比如替换时远端取消失败，远端可能还会照发）——那行错误是用户
+ *     唯一能看见的线索，自动清掉等于把问题藏起来；
+ *   - 底账没拉到（null）——分不出「远端处理完了」和「压根没读到远端」，一条都不动。
+ *
+ * 循环任务永远还会响，isPendingTask 对它们恒真，不会被这里带走。
+ */
+export const pruneFiredTasks = (
+  tasks: ActiveMsg2TaskRecord[],
+  knownRemoteUuids: Set<string> | null,
+  nowMs: number,
+): ActiveMsg2TaskRecord[] => {
+  if (knownRemoteUuids === null) return tasks;
+  return tasks.filter((task) => Boolean(task.lastError)
+    || isPendingTask(task, nowMs)
+    || knownRemoteUuids.has(task.taskUuid));
+};
+
+/**
  * 排程 / 替换成功后把新记录并进清单。
  *
  * 替换失败时**保留旧记录并标错**，绝不静默丢掉：远端此时新旧并存，本地要是只留新的，

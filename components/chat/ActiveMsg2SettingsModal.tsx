@@ -25,6 +25,7 @@ import {
   isAmsg2EnabledForChar,
   isRemoteMissingTask,
   keepUncancelledTasks,
+  pruneFiredTasks,
   resolveExpirePolicy,
   shortTaskId,
   toDatetimeLocalValue,
@@ -150,13 +151,31 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
     })();
 
     void (async () => {
+      let remote: Set<string>;
       try {
-        setKnownRemoteUuids(new Set(await ActiveMsgClient.listRemoteTaskUuidsForChar(char.id)));
+        remote = new Set(await ActiveMsgClient.listRemoteTaskUuidsForChar(char.id));
       } catch {
-        // 对账失败不打扰：null 让「远端不存在」徽标整体不显示。
+        // 对账失败不打扰：null 让「远端不存在」徽标整体不显示，也不清任何任务。
         setKnownRemoteUuids(null);
+        return;
+      }
+      setKnownRemoteUuids(remote);
+
+      // 对上账的同时把已经走完的一次性任务清出列表，不然发过的任务会一直堆在这儿，
+      // 得手动一条条取消。先拿渲染时这份探一下有没有要清的，避免每次开面板都写一次库。
+      // 真正落盘时在 updater 里用最新的 prev 重算——面板保存要 await 网络请求，
+      // 这期间角色可能在聊天里用工具排了新任务。
+      const current = char.activeMsg2Config?.tasks ?? [];
+      if (pruneFiredTasks(current, remote, Date.now()).length < current.length) {
+        onSave((prev) => ({
+          ...(prev ?? { enabled: true, tasks: [] }),
+          tasks: pruneFiredTasks(prev?.tasks ?? [], remote, Date.now()),
+        }));
       }
     })();
+    // char.activeMsg2Config 只在函数体里读当前值当探针，不进依赖——清理落盘会改它，
+    // 进了依赖就是「清理 → 重跑 → 再清理」的自激循环。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, char.id]);
 
   /**
