@@ -51,6 +51,33 @@ export interface Amsg2DebugTaskView {
 export const nextCronTickMs = (occurrenceMs: number): number =>
   Math.ceil(occurrenceMs / MINUTE_MS) * MINUTE_MS;
 
+/** 面板离视口边缘至少留这么多，四边一致。 */
+export const DEBUG_PANEL_MARGIN_PX = 8;
+
+export interface Amsg2PanelPosition { x: number; y: number }
+export interface Amsg2PanelSize { width: number; height: number }
+
+/**
+ * 把面板落点约束回视口内。拖动过程、松手、视口变化（转屏 / 手机地址栏伸缩）都走这一个口径。
+ *
+ * 面板比视口还大时（小屏 + 长列表）上下界会翻过来，此时取上界——宁可底部溢出，
+ * 也要保证标题栏那排按钮留在屏幕里，不然全屏 / 关闭都点不到了。
+ */
+export const clampPanelPosition = (
+  position: Amsg2PanelPosition,
+  panel: Amsg2PanelSize,
+  viewport: Amsg2PanelSize,
+): Amsg2PanelPosition => {
+  const axis = (value: number, extent: number, available: number) => {
+    const max = available - extent - DEBUG_PANEL_MARGIN_PX;
+    return Math.min(Math.max(value, DEBUG_PANEL_MARGIN_PX), Math.max(DEBUG_PANEL_MARGIN_PX, max));
+  };
+  return {
+    x: axis(position.x, panel.width, viewport.width),
+    y: axis(position.y, panel.height, viewport.height),
+  };
+};
+
 /** 倒计时文案：未到点 T-4m12s，已过点 T+30s。 */
 export const formatCountdown = (deltaMs: number): string => {
   const sign = deltaMs < 0 ? 'T+' : 'T-';

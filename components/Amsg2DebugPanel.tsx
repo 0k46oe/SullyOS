@@ -1,11 +1,14 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CornersIn, CornersOut, X } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
 import {
     buildAmsg2DebugTasks,
+    clampPanelPosition,
     formatCountdown,
+    DEBUG_PANEL_MARGIN_PX,
     type Amsg2DebugTaskView,
+    type Amsg2PanelPosition,
 } from '../utils/amsg2DebugView';
 import { readRecentInstantTraces } from '../utils/instantTraceLog';
 import {
@@ -115,15 +118,26 @@ const HeaderButton: React.FC<{
         type="button"
         aria-label={label}
         onClick={onClick}
+        // 标题栏整条是拖动把手，按钮得把 pointerdown 拦下来，否则点全屏 / 关闭会被当成开始拖。
+        onPointerDown={(event) => event.stopPropagation()}
         style={{ color: C.dim, cursor: 'pointer', display: 'flex', alignItems: 'center' }}
     >
         {children}
     </button>
 );
 
+const getViewportSize = () => ({
+    width: window.visualViewport?.width ?? window.innerWidth,
+    height: window.visualViewport?.height ?? window.innerHeight,
+});
+
 /**
  * amsg2 任务的实时观察窗。入口在 Dev Debug 面板里，打开后常驻右上角小窗，
  * 点一下铺满全屏看长列表；关掉聊天时它还在，随时能瞄一眼下一次触发还有多久。
+ *
+ * 抓标题栏可以把小窗拖到别处：它默认压在右上角，正好盖住聊天页手动触发主动消息的
+ * 那颗按钮，而「开着面板等触发」又恰恰是它最常见的用法。位置只活在本次会话里，
+ * 关掉重开回默认角（同 DevDebugPanel 的浮球）。
  *
  * 任务数据直接取 OSContext 的 characters（面板挂在 Provider 里面），不轮询 IndexedDB——
  * getAllCharacters 会把整库角色连头像、立绘、世界书一起反序列化出来，而这面板正是「等推送
@@ -139,6 +153,10 @@ const Amsg2DebugPanel: React.FC = () => {
     const [fullscreen, setFullscreen] = useState(false);
     const [traces, setTraces] = useState<TraceEntry[]>([]);
     const [nowMs, setNowMs] = useState(() => Date.now());
+    // null = 还没拖过，用默认的右上角；拖过之后记实际坐标。不持久化，关掉重开回默认。
+    const [position, setPosition] = useState<Amsg2PanelPosition | null>(null);
+    const panelRef = useRef<HTMLDivElement | null>(null);
+    const dragRef = useRef<{ pointerId: number; startX: number; startY: number; origin: Amsg2PanelPosition } | null>(null);
 
     useEffect(() => subscribeDevDebugAvailability(setAvailable), []);
     useEffect(() => subscribeDevDebugFlags((flags) => setEnabled(flags.amsg2Panel)), []);
@@ -167,20 +185,94 @@ const Amsg2DebugPanel: React.FC = () => {
         [views],
     );
 
+    // 转屏 / 手机地址栏伸缩会把拖过的面板推到屏幕外，视口一变就拉回来。
+    // 没拖过（position 为 null）时靠 right:8 自己贴边，不用管。
+    useEffect(() => {
+        if (!active) return;
+        const pullBack = () => {
+            const panel = panelRef.current;
+            if (!panel) return;
+            // updater 形式读当前值，不吃闭包里那份——这个 effect 只在 active 变化时重挂。
+            setPosition((current) => (current === null ? null : clampPanelPosition(
+                current,
+                { width: panel.offsetWidth, height: panel.offsetHeight },
+                getViewportSize(),
+            )));
+        };
+        window.addEventListener('resize', pullBack);
+        window.visualViewport?.addEventListener('resize', pullBack);
+        return () => {
+            window.removeEventListener('resize', pullBack);
+            window.visualViewport?.removeEventListener('resize', pullBack);
+        };
+    }, [active]);
+
     const close = () => {
         setFullscreen(false);
+        setPosition(null);
         setEnabled(writeDevDebugFlags({ ...readDevDebugFlags(), amsg2Panel: false }).amsg2Panel);
+    };
+
+    // 全屏时四边都钉死了，没有可拖的余地。
+    const draggable = !fullscreen;
+
+    const dragTo = (event: React.PointerEvent<HTMLDivElement>) => {
+        const drag = dragRef.current;
+        const panel = panelRef.current;
+        if (!drag || !panel || drag.pointerId !== event.pointerId) return null;
+        return clampPanelPosition(
+            { x: drag.origin.x + (event.clientX - drag.startX), y: drag.origin.y + (event.clientY - drag.startY) },
+            { width: panel.offsetWidth, height: panel.offsetHeight },
+            getViewportSize(),
+        );
+    };
+
+    const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (!draggable || (event.pointerType === 'mouse' && event.button !== 0)) return;
+        const panel = panelRef.current;
+        if (!panel) return;
+        // 第一次拖：起点从当前实际位置读（默认态是 right 定位，没有 x/y 可继承），
+        // 否则会从 (0,0) 起跳、面板瞬移到左上角。
+        const rect = panel.getBoundingClientRect();
+        dragRef.current = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            origin: position ?? { x: rect.left, y: rect.top },
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+    };
+
+    const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+        const next = dragTo(event);
+        if (!next) return;
+        event.preventDefault();
+        setPosition(next);
+    };
+
+    const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+        const next = dragTo(event);
+        dragRef.current = null;
+        if (next) setPosition(next);
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+        }
     };
 
     if (!active) return null;
 
     return createPortal(
         <div
+            ref={panelRef}
             style={{
                 position: 'fixed',
-                top: 8,
-                right: 8,
-                ...(fullscreen ? { left: 8, bottom: 8 } : { width: 'min(330px, calc(100vw - 16px))', maxHeight: '78vh' }),
+                // 没拖过就贴右上角；拖过之后改用左上角坐标定位（right 必须让位，否则宽度被两端撑死）。
+                ...(position && !fullscreen
+                    ? { top: position.y, left: position.x }
+                    : { top: DEBUG_PANEL_MARGIN_PX, right: DEBUG_PANEL_MARGIN_PX }),
+                ...(fullscreen
+                    ? { left: DEBUG_PANEL_MARGIN_PX, bottom: DEBUG_PANEL_MARGIN_PX }
+                    : { width: 'min(330px, calc(100vw - 16px))', maxHeight: '78vh' }),
                 zIndex: 2147483645,
                 display: 'flex',
                 flexDirection: 'column',
@@ -196,8 +288,19 @@ const Amsg2DebugPanel: React.FC = () => {
             role="dialog"
             aria-label="amsg2 调试面板"
         >
-            {/* 标题栏固定，内容区自己滚——不然列表一长，切全屏 / 关闭的按钮就滚没了。 */}
-            <div style={{ flexShrink: 0 }}>
+            {/* 标题栏固定，内容区自己滚——不然列表一长，切全屏 / 关闭的按钮就滚没了。
+                这一整条同时是拖动把手：touchAction none 让手机上按住横竖拖都归我们，不被页面滚动抢走。 */}
+            <div
+                style={{
+                    flexShrink: 0,
+                    cursor: draggable ? 'grab' : 'default',
+                    touchAction: draggable ? 'none' : undefined,
+                }}
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                onPointerCancel={handlePointerUp}
+            >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                     <b style={{ color: C.green }}>⏱ amsg2 debug</b>
                     <span style={{ display: 'flex', gap: 10, alignItems: 'center' }}>

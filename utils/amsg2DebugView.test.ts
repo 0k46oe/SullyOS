@@ -2,8 +2,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildAmsg2DebugTasks,
+  clampPanelPosition,
   formatCountdown,
   nextCronTickMs,
+  DEBUG_PANEL_MARGIN_PX,
 } from './amsg2DebugView';
 import { currentOccurrenceMs, isPendingTask } from './amsg2Tasks';
 import { FIRE_GRACE_MS } from './amsg2ExpireGuard';
@@ -216,5 +218,34 @@ describe('buildAmsg2DebugTasks', () => {
   it('没配 amsg2 的角色直接跳过，不报错', () => {
     const plain = { id: 'c9', name: '路人' } as unknown as CharacterProfile;
     expect(buildAmsg2DebugTasks([plain], now)).toEqual([]);
+  });
+});
+
+describe('clampPanelPosition', () => {
+  const PANEL = { width: 330, height: 400 };
+  const VIEWPORT = { width: 390, height: 844 };
+  const M = DEBUG_PANEL_MARGIN_PX;
+
+  it('视口内的落点原样保留', () => {
+    expect(clampPanelPosition({ x: 30, y: 120 }, PANEL, VIEWPORT)).toEqual({ x: 30, y: 120 });
+  });
+
+  it('拖出左上角会被拉回边距处', () => {
+    expect(clampPanelPosition({ x: -500, y: -500 }, PANEL, VIEWPORT)).toEqual({ x: M, y: M });
+  });
+
+  it('拖出右下角时整个面板仍留在视口里', () => {
+    expect(clampPanelPosition({ x: 9999, y: 9999 }, PANEL, VIEWPORT)).toEqual({
+      x: VIEWPORT.width - PANEL.width - M,
+      y: VIEWPORT.height - PANEL.height - M,
+    });
+  });
+
+  // 面板比视口高时上下界会翻过来。让底部溢出、把标题栏留在屏幕里，
+  // 反过来的话标题栏被顶出视口，全屏 / 关闭两颗按钮就再也点不到了。
+  it('面板比视口大时贴住左上角，不把标题栏顶出屏幕', () => {
+    const tall = { width: 330, height: 2000 };
+    expect(clampPanelPosition({ x: 0, y: 0 }, tall, VIEWPORT).y).toBe(M);
+    expect(clampPanelPosition({ x: 0, y: 9999 }, tall, VIEWPORT).y).toBe(M);
   });
 });
