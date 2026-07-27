@@ -39,16 +39,34 @@ const char = (tasks: ActiveMsg2TaskRecord[], extra: Record<string, unknown> = {}
   }) as unknown as CharacterProfile;
 
 describe('nextCronTickMs', () => {
-  // worker 的 cron 是 "* * * * *"（每整分），任务不会在名义时间那一刻发，
-  // 而是等下一个整分。面板显示的「实际最晚」就靠这个。
-  it('名义时间落在分钟中间时进位到下一个整分', () => {
+  // worker 的 cron 是 "* * * * *"，每分钟跑一次，跑起来时把「名义时间已经到了」的任务
+  // 全部领走（底账查询是 next_send_at <= 当前时刻）。这里算的就是：这一次触发
+  // 会被哪一分钟的 cron 领走。
+  it('名义时间压在整分上时，就是这一分钟的 cron 领走它', () => {
+    const fire = new Date('2026-07-26T14:07:00.000Z').getTime();
+    expect(nextCronTickMs(fire)).toBe(new Date('2026-07-26T14:07:00.000Z').getTime());
+  });
+
+  it('名义时间落在分钟中间时，要等下一个整分的 cron', () => {
     const fire = new Date('2026-07-26T14:07:39.000Z').getTime();
     expect(nextCronTickMs(fire)).toBe(new Date('2026-07-26T14:08:00.000Z').getTime());
   });
 
-  it('名义时间正好压在整分上也进位（保守估计，宁可报晚不报早）', () => {
-    const fire = new Date('2026-07-26T14:07:00.000Z').getTime();
+  it('过了整分哪怕只有 1 毫秒，也归下一个整分', () => {
+    const fire = new Date('2026-07-26T14:07:00.001Z').getTime();
     expect(nextCronTickMs(fire)).toBe(new Date('2026-07-26T14:08:00.000Z').getTime());
+  });
+
+  // 钉死两条边界：tick 不能早于名义时间（早了会让人以为任务漏发），
+  // 也不能整整甩开一分钟（晚了会跟同一行的倒计时对不上）。
+  it('算出来的 tick 落在 [名义时间, 名义时间+1分钟) 里', () => {
+    const base = new Date('2026-07-26T14:07:00.000Z').getTime();
+    for (const offset of [0, 1, 999, 1_000, 30_000, 59_999]) {
+      const fire = base + offset;
+      const tick = nextCronTickMs(fire);
+      expect(tick).toBeGreaterThanOrEqual(fire);
+      expect(tick - fire).toBeLessThan(MIN);
+    }
   });
 });
 
@@ -173,6 +191,26 @@ describe('buildAmsg2DebugTasks', () => {
     const dead = task({ taskUuid: 'dead0000-0000-0000-0000-000000000000', firstSendTime: new Date(now - 5 * H).toISOString() });
     const views = buildAmsg2DebugTasks([char([later, dead, soon])], now);
     expect(views.map((v) => v.task.taskUuid.slice(0, 8))).toEqual(['soon0000', 'later000', 'dead0000']);
+  });
+
+  // 面板一行里同时有倒计时和「开跑」时刻，两个数字必须指向同一分钟。
+  it('名义时间压在整分上时，开跑时刻就是倒计时归零的那一刻', () => {
+    const fire = new Date('2026-07-26T14:30:00.000Z').getTime();
+    const views = buildAmsg2DebugTasks(
+      [char([task({ firstSendTime: new Date(fire).toISOString() })])],
+      fire - 5 * MIN,
+    );
+    expect(views[0].occurrenceMs).toBe(fire);
+    expect(views[0].cronTickMs).toBe(fire);
+  });
+
+  it('名义时间带秒数时，开跑时刻是它后面的第一个整分', () => {
+    const fire = new Date('2026-07-26T14:30:21.000Z').getTime();
+    const views = buildAmsg2DebugTasks(
+      [char([task({ firstSendTime: new Date(fire).toISOString() })])],
+      fire - 5 * MIN,
+    );
+    expect(views[0].cronTickMs).toBe(new Date('2026-07-26T14:31:00.000Z').getTime());
   });
 
   it('没配 amsg2 的角色直接跳过，不报错', () => {

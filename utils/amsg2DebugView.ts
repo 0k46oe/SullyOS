@@ -31,19 +31,25 @@ export interface Amsg2DebugTaskView {
   state: Amsg2DebugTaskState;
   /** 当前这一次触发的名义时刻；循环任务已按周期推算。时间串坏掉时为 null。 */
   occurrenceMs: number | null;
-  /** cron 每整分才跑，这是这一次实际最晚会被捞走的时刻。 */
+  /** cron 每分钟跑一次，这是这一次触发会被哪一分钟的 cron 领走。 */
   cronTickMs: number | null;
 }
 
 /**
- * 这一次触发实际最晚会被 cron 捞走的时刻。
+ * 这一次触发会被哪一分钟的 cron 领走。
  *
- * worker 的触发器是 "* * * * *"（见 worker/amsg/wrangler.toml），任务不会在名义时间
- * 那一刻就发，得等下一个整分。压在整分上的名义时间也进位到下一分钟——那一刻的 cron
- * 能不能正好赶上取决于毫秒级先后，报晚了只是白等一分钟，报早了会让人误判成「漏发」。
+ * worker 的触发器是 "* * * * *"（见 worker/amsg/wrangler.toml），每分钟跑一次；跑起来时
+ * 把名义时间已经到了的任务全部领走（底账查询是 next_send_at <= 当前时刻）。所以答案是
+ * 「名义时间之后的第一个整分」，含名义时间自己压在整分上的情况：
+ *
+ *   名义时间 11:47:00 → 11:47 这一分钟的 cron 领走（面板里倒计时归零的同一分钟）
+ *   名义时间 11:47:30 → 11:47 那次跑过去时还没到点，等 11:48 这一分钟的 cron
+ *
+ * cron 实际起跑会比整分晚几秒（平台调度的抖动），这里按整分记——面板要的是「哪一分钟」，
+ * 秒级先后不影响读数。
  */
 export const nextCronTickMs = (occurrenceMs: number): number =>
-  Math.ceil((occurrenceMs + 1) / MINUTE_MS) * MINUTE_MS;
+  Math.ceil(occurrenceMs / MINUTE_MS) * MINUTE_MS;
 
 /** 倒计时文案：未到点 T-4m12s，已过点 T+30s。 */
 export const formatCountdown = (deltaMs: number): string => {
