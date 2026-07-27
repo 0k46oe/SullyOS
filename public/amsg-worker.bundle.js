@@ -5106,7 +5106,12 @@ function classifyLLMOutput(text) {
 }
 
 // worker/amsg/src/agentic.ts
-var createFireSessionState = () => ({ narrations: [], toolCalls: [] });
+var createFireSessionState = () => ({
+  narrations: [],
+  toolCalls: [],
+  duplicateToolCalls: 0
+});
+var MAX_DUPLICATE_TOOL_CALLS = 2;
 var XHS_DESC_MAX = 120;
 function buildXhsSessionPayload(directives, notes, xsecTokens) {
   if (directives.length === 0) return null;
@@ -5132,9 +5137,12 @@ function processLLMRound(state, llmOutputText, build) {
   const result = classifyLLMOutput(llmOutputText);
   if (result.kind === "tool-request") {
     if (result.prefix.trim()) state.narrations.push(result.prefix);
-    return { decision: "tool-request", toolCalls: result.toolCalls };
+    if (state.duplicateToolCalls < MAX_DUPLICATE_TOOL_CALLS) {
+      return { decision: "tool-request", toolCalls: result.toolCalls };
+    }
   }
-  const fullText = [...state.narrations, llmOutputText].filter((part) => part.trim().length > 0).join("\n");
+  const thisRound = result.kind === "tool-request" ? "" : llmOutputText;
+  const fullText = [...state.narrations, thisRound].filter((part) => part.trim().length > 0).join("\n");
   const finalScan = fullText === llmOutputText ? result : classifyLLMOutput(fullText);
   const cleanedText = finalScan.kind === "finish" ? finalScan.cleanedText : finalScan.prefix;
   const directives = finalScan.kind === "finish" ? finalScan.directives : [];
@@ -5372,7 +5380,13 @@ var amsgHooks = {
         const args = toolCall?.function?.arguments ? JSON.parse(toolCall.function.arguments) : {};
         const fingerprint = toolCallFingerprint(name, args);
         if (stash.session.toolCalls.some((r) => r.fingerprint === fingerprint)) {
-          console.log("[amsg:agentic]", { type: "tool_duplicate", sessionId: ctx.sessionId, tool: name });
+          stash.session.duplicateToolCalls += 1;
+          console.log("[amsg:agentic]", {
+            type: "tool_duplicate",
+            sessionId: ctx.sessionId,
+            tool: name,
+            count: stash.session.duplicateToolCalls
+          });
           results.push({
             tool_call_id: toolCall.id,
             role: "tool",

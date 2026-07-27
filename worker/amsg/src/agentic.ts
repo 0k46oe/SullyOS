@@ -34,9 +34,27 @@ export interface FireSessionState {
    * 以及拦住同名同参的重复调用（见 executeToolCalls）。跨轮累积，fire 结束随 scratch 丢弃。
    */
   toolCalls: ToolCallRecord[];
+  /** 被打回的重复调用次数（executeToolCalls 累加）。到阈值就收尾，见 MAX_DUPLICATE_TOOL_CALLS。 */
+  duplicateToolCalls: number;
 }
 
-export const createFireSessionState = (): FireSessionState => ({ narrations: [], toolCalls: [] });
+export const createFireSessionState = (): FireSessionState => ({
+  narrations: [],
+  toolCalls: [],
+  duplicateToolCalls: 0,
+});
+
+/**
+ * 连着重复请求同一个工具这么多次，就不再陪它转了，直接收尾把已有内容发出去。
+ *
+ * 光把重复调用打回去只省下了网络请求，模型该转还是转：提示词里但凡有一句常驻的
+ * 「每轮先去查 X」，回喂里说什么都盖不过它——实测就是连着五轮都在请求同一个 recall，
+ * 最后撞上轮次上限抛 AGENTIC_LOOP_EXCEEDED，任务不出清、下一分钟整条从头重跑。
+ *
+ * 收尾比转到上限好得多：用户至少收到角色已经写出来的那部分，任务也正常出清。
+ * 阈值取 2 —— 第一次重复可能只是模型确认一下，连着两次就是真卡住了。
+ */
+export const MAX_DUPLICATE_TOOL_CALLS = 2;
 
 /** 组 push payload 需要的业务字段（都来自 sessionCtx / task metadata）。 */
 export interface PushBuildInput {
@@ -133,7 +151,11 @@ export function processLLMRound(
     // prefix = 旁白 + 可能只写了一半的副作用标签块。这里不剥不结构化——
     // 等 finish 拼回全文统一扫（见 FireSessionState.narrations 注释）。
     if (result.prefix.trim()) state.narrations.push(result.prefix);
-    return { decision: 'tool-request', toolCalls: result.toolCalls };
+    // 已经连着打回这么多次重复调用了，说明模型卡在同一个工具上出不来。不再给它下一轮，
+    // 就用手上这些内容收尾——转到轮次上限的话整条任务会失败重跑，用户一个字都收不到。
+    if (state.duplicateToolCalls < MAX_DUPLICATE_TOOL_CALLS) {
+      return { decision: 'tool-request', toolCalls: result.toolCalls };
+    }
   }
 
   // 拼回全文再扫一次。中间轮 prefix 里不含数据标签（prefix 定义即「首个数据标签
@@ -141,7 +163,10 @@ export function processLLMRound(
   // 落 finish；万一未来 classifier 语义变化落了 tool-request，取其 prefix 兜底，
   // 不让 fire 链在 finish 关头断掉。
   // 没有旁白（一轮直出，最常见）时全文就是本轮正文，同样的输入不必再扫一遍。
-  const fullText = [...state.narrations, llmOutputText]
+  // 从上面 tool-request 分支穿透下来收尾时，本轮的正文已经进过 narrations 了，
+  // 这里再拼一次 llmOutputText 就会重复一段（而且它还带着那个转不出来的数据标签）。
+  const thisRound = result.kind === 'tool-request' ? '' : llmOutputText;
+  const fullText = [...state.narrations, thisRound]
     .filter((part) => part.trim().length > 0)
     .join('\n');
   const finalScan = fullText === llmOutputText ? result : classifyLLMOutput(fullText);

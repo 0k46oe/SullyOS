@@ -470,7 +470,15 @@ export const amsgHooks = {
         // 转满上限会抛 AGENTIC_LOOP_EXCEEDED，任务不出清、下一分钟整条从头重跑，代价远大于
         // 少查一次。只拦完全一样的调用——换月份、换关键词照常放行，多轮能力不受影响。
         if (stash.session.toolCalls.some((r) => r.fingerprint === fingerprint)) {
-          console.log('[amsg:agentic]', { type: 'tool_duplicate', sessionId: ctx.sessionId, tool: name });
+          // 计数交给 processLLMRound：连着重复到阈值就直接收尾，不陪它转到轮次上限
+          // （上限一到整条任务失败重跑，用户一个字都收不到）。
+          stash.session.duplicateToolCalls += 1;
+          console.log('[amsg:agentic]', {
+            type: 'tool_duplicate',
+            sessionId: ctx.sessionId,
+            tool: name,
+            count: stash.session.duplicateToolCalls,
+          });
           results.push({
             tool_call_id: toolCall.id,
             role: 'tool' as const,

@@ -311,3 +311,53 @@ describe('processLLMRound — metadata.xhsSession 挂载', () => {
     expect((last.metadata as any).xhsSession).toBeUndefined();
   });
 });
+
+// 模型卡在同一个工具上出不来时的止损。
+//
+// 实测过一次最恶劣的情况：提示词里写着「每一轮第一行都要先输出 [[RECALL: 2026-06]]」，
+// 那句话常驻在 system prompt 里、每轮都在模型眼前，工具结果里说什么都盖不过它——连着
+// 五轮都在请求同一个 recall，最后撞上轮次上限抛 AGENTIC_LOOP_EXCEEDED，任务不出清、
+// 下一分钟整条从头重跑，用户一个字都收不到。
+//
+// 打回重复调用只省下网络请求，止不住这个循环；到阈值直接收尾才行。
+describe('processLLMRound — 重复调用到阈值就收尾', () => {
+  it('还没到阈值时照常给下一轮工具机会', () => {
+    const state = createFireSessionState();
+    state.duplicateToolCalls = 1;
+    const decision = processLLMRound(state, '让我想想。\n[[RECALL: 2026-06]]', build);
+    expect(decision.decision).toBe('tool-request');
+  });
+
+  it('到阈值后不再请求工具，直接把已经写出来的内容发出去', () => {
+    const state = createFireSessionState();
+    // 前两轮攒下的旁白
+    processLLMRound(state, '让我想想六月的事。\n[[RECALL: 2026-06]]', build);
+    state.duplicateToolCalls = 2;
+
+    const decision = processLLMRound(state, '再查一下。\n[[RECALL: 2026-06]]', build);
+    expect(decision.decision).toBe('finish');
+    if (decision.decision !== 'finish') return;
+
+    const text = decision.pushPayloads.map((p) => p.message).join('\n');
+    expect(text).toContain('让我想想六月的事');
+    expect(text).toContain('再查一下');
+    // 转不出去的那个标签不能漏进正文
+    expect(text).not.toContain('RECALL');
+  });
+
+  it('收尾时本轮内容只出现一次，不跟暂存的旁白重复', () => {
+    const state = createFireSessionState();
+    state.duplicateToolCalls = 2;
+    const decision = processLLMRound(state, '就说这一句。\n[[RECALL: 2026-06]]', build);
+    expect(decision.decision).toBe('finish');
+    if (decision.decision !== 'finish') return;
+    const text = decision.pushPayloads.map((p) => p.message).join('\n');
+    expect(text.match(/就说这一句/g)?.length).toBe(1);
+  });
+
+  it('卡住时一个字都没写出来 → skip-push，不发空消息', () => {
+    const state = createFireSessionState();
+    state.duplicateToolCalls = 2;
+    expect(processLLMRound(state, '[[RECALL: 2026-06]]', build).decision).toBe('skip-push');
+  });
+});
