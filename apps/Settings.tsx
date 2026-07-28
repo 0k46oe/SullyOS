@@ -2500,6 +2500,11 @@ const Settings: React.FC = () => {
                     只数「哪个页面被打开了、哪个功能被用了一次」，以及记忆条数 / 角色数落在哪个区间。
                     不碰你和角色的任何对话、记忆、设定，不碰你输入的任何文字，不碰 API 和 MCP 配置。
                 </p>
+                <p className="text-xs text-slate-500 leading-relaxed">
+                    SullyOS 的功能已经多到我们自己也扫不完，但「哪些真的有人用、大家配置时卡在哪一步」
+                    基本靠猜。留着这个开关开着能帮我们看清这些，好把精力放在有人用的地方。
+                    不想参与就关掉，功能一点不受影响。
+                </p>
                 <p className="text-[10px] text-slate-400 leading-relaxed">
                     浏览器开了 Do Not Track 的话，不用动这个开关也会自动跳过。
                     关掉之后下次启动连统计脚本都不会加载。想自己核实的话，按 F12 打开 Network 面板，
