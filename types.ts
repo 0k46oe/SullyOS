@@ -127,6 +127,8 @@ export interface OSTheme {
   /** 聊天表情包大小三挡：小 96px（默认）/ 中 128px / 大 160px（旧版尺寸）。经 --sully-emoji-size CSS 变量生效 */
   chatEmojiSize?: 'small' | 'medium' | 'large';
   chatAvatarMode?: 'grouped' | 'every_message';
+  /** 头像位置：气泡旁（默认）/ 每轮消息组上方（固定每轮一次） */
+  chatAvatarPlacement?: 'beside' | 'above_group';
   // ── 聊天细节微调（外观 → 聊天细节）。收编自社区白框美化 CSS，全部可选，缺省 = 现状。
   //    经 utils/chatFineTuneCss.ts 生成 CSS 注入 .sully-chat-root；用户自定义白框 CSS 排在其后可覆盖。
   /** 头像显示：双侧 / 隐藏角色侧 / 隐藏用户侧 / 全部隐藏 */
@@ -160,9 +162,8 @@ export interface OSTheme {
   chatSendButtonStyle?: 'circle' | 'pill' | 'minimal';
   /** Instant Push 用户气泡左侧的"准备中"圆点动画。默认开启。 */
   chatPendingIndicator?: boolean;
-  /** 聊天「白框」自定义 CSS：作用于 .sully-chat-header / .sully-chat-inputbar / .sully-chat-root，
-   *  以及顶栏各零件 .sully-chat-back / .sully-chat-avatar / .sully-chat-name / .sully-chat-status /
-   *  .sully-chat-buffs / .sully-chat-token / .sully-chat-trigger。可换色 / 贴图 / 改外形 / 挪位。 */
+  /** 聊天「白框」自定义 CSS：作用于 .sully-chat-root 下的顶栏、输入栏与消息布局钩子。
+   *  可换色 / 贴图 / 改外形 / 挪位；稳定选择器清单见 ChromeCssEditor。 */
   chatChromeCustomCss?: string;
   /** 全局默认「白框提示音」：某角色未单独设提示音时回落到这里。src 同角色版（内置 key / 音频直链 / data:audio）。 */
   chatSound?: { src: string; volume?: number };
@@ -170,10 +171,10 @@ export interface OSTheme {
   chatHideHeaderBuffs?: boolean;
 }
 
-/** 聊天细节微调的 7 个字段（外观 App「聊天细节微调」区块），可整组按角色覆盖。
+/** 聊天细节微调字段（外观 App「聊天细节微调」区块），可整组按角色覆盖。
  *  与 OSTheme 同名字段一一对应，经 utils/chatFineTuneCss.ts 生成 CSS。 */
 export type ChatFineTuneFields = Pick<OSTheme,
-  'chatAvatarVisibility' | 'chatAvatarAlign' | 'chatAvatarOffsetY' |
+  'chatAvatarVisibility' | 'chatAvatarPlacement' | 'chatAvatarAlign' | 'chatAvatarOffsetY' |
   'chatBubbleFontSize' | 'chatBubbleLineHeight' | 'chatBubbleIndent' | 'chatSnapToEdge' |
   'chatModuleAlign'>;
 
