@@ -21,7 +21,11 @@ import { safeFetchJson } from '../utils/safeApi';
 import { getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext } from '../utils/apiCallLog';
 import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
-import { INSTALLED_APPS } from '../constants';
+import { INSTALLED_APPS, HIDDEN_APP_NAMES } from '../constants';
+import { trackEvent, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, anyCharToggle, presetOrCustom, tweakedOrDefault, readStorageBytes } from '../utils/analytics';
+import { PRESET_THEMES } from '../components/chat/ChatConstants';
+import { BUILTIN_SOUNDS } from '../utils/whiteboxSound';
+import { isStandaloneDisplayMode } from '../utils/iosStandalone';
 import { markBackupDone } from '../utils/backupReminder';
 import { normalizeCharacterImpression, normalizeCharacterDefaults } from '../utils/impression';
 import {
@@ -932,6 +936,150 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       const char = characters.find(c => c.id === activeCharacterId);
       setApiCallAmbientContext({ appId: activeApp, appName, charId: char?.id, charName: char?.name });
   }, [activeApp, activeCharacterId, characters]);
+
+  // --- 匿名统计：打开了哪个 App ---
+  // 挂在 activeApp 上而不是塞进 openApp，是因为进一个 App 有好几条路（桌面点图标、
+  // 从聊天直接进见面、通话挂起后回来…），activeApp 是它们唯一的共同落点。
+  // 回桌面不算「用了某个功能」，跳过。只发功能名，不带角色、不带任何内容。
+  useEffect(() => {
+      if (activeApp === AppID.Launcher) return;
+      const appName = INSTALLED_APPS.find(a => a.id === activeApp)?.name ?? HIDDEN_APP_NAMES[activeApp];
+      if (!appName) return;
+      trackEvent(`打开${appName}`);
+  }, [activeApp]);
+
+  // --- 匿名统计：数据规模档位 ---
+  // 数据加载完之后报一次区间（0 / 1-100 / …），不报精确值、不报任何内容。
+  // 聊天条数走 IndexedDB 的 count()，一条消息都不会被读出来；存储占用是浏览器
+  // 给的字节数。每次会话最多一次，节流标记只在内存里（见 utils/analytics.ts）。
+  const scaleReportedRef = useRef(false);
+  useEffect(() => {
+      if (!isDataLoaded || scaleReportedRef.current) return;
+      scaleReportedRef.current = true;
+      void (async () => {
+          const messageCounts = await Promise.all(
+              characters.map(c => DB.countMessagesByCharId(c.id).catch(() => 0))
+          );
+          const memoryCounts = characters.map(c => c.memories?.length ?? 0);
+          trackDataScaleOnce({
+              characterCount: characters.length,
+              memoryCount: memoryCounts.reduce((a, b) => a + b, 0),
+              maxMemoryCount: Math.max(0, ...memoryCounts),
+              maxMessageCount: Math.max(0, ...messageCounts),
+              storageBytes: await readStorageBytes(),
+              // 用通用的「装成 PWA 独立窗口」判定，不只认 iOS——配合 umami 自带的
+              // 系统字段，查询时就能分出 iOS 全屏、安卓全屏还是桌面装机。
+              standalone: isStandaloneDisplayMode(),
+          });
+      })();
+  }, [isDataLoaded, characters]);
+
+  // --- 匿名统计：当前在用哪套外观 ---
+  // 报「现在用的是哪个」而不是「点过哪个」——后者只有折腾的人会出现，
+  // 拿来决定砍哪个预设会砍反。用户自己捏的主题一律记 custom，不带他起的名字。
+  useEffect(() => {
+      if (!isDataLoaded) return;
+      const activeChar = characters.find(c => c.id === activeCharacterId);
+      const onOff = (v: boolean | undefined, dflt = false) => ((v ?? dflt) ? '开' : '关');
+      trackCurrentAppearanceOnce({
+          // ── 桌面 ──
+          桌面皮肤: theme.skin ?? 'default',
+          桌面版本: theme.desktopVariant ?? 'paper',
+          深色模式: onOff(theme.darkMode),
+          隐藏状态栏: onOff(theme.hideStatusBar),
+          保留图标原轮廓: onOff(theme.preserveCustomIconOutlines),
+          播放卡片浅色: onOff(theme.nowPlayingWidgetLight, true),
+          动森聊天同步: onOff(theme.acnhChatSync, true),
+          // 自定义字体是用户上传的文件或自填 URL，只报用没用，绝不报是什么
+          自定义字体: theme.customFont ? '用了' : '没用',
+          // ── 聊天外观 ──
+          气泡主题: presetOrCustom(activeChar?.bubbleStyle, Object.keys(PRESET_THEMES)),
+          气泡样式: theme.chatBubbleStyle ?? 'modern',
+          聊天壳样式: theme.chatChromeStyle ?? 'soft',
+          顶栏样式: theme.chatHeaderStyle ?? 'default',
+          输入栏样式: theme.chatInputStyle ?? 'default',
+          聊天背景: theme.chatBackgroundStyle ?? 'plain',
+          消息间距: theme.chatMessageSpacing ?? 'default',
+          时间戳显示: theme.chatShowTimestamp ?? 'always',
+          顶栏对齐: theme.chatHeaderAlign ?? 'left',
+          顶栏密度: theme.chatHeaderDensity ?? 'default',
+          状态样式: theme.chatStatusStyle ?? 'subtle',
+          发送键样式: theme.chatSendButtonStyle ?? 'circle',
+          卡片对齐: theme.chatModuleAlign ?? 'center',
+          // ── 头像与表情 ──
+          头像形状: theme.chatAvatarShape ?? 'circle',
+          头像尺寸: theme.chatAvatarSize ?? 'medium',
+          头像显示: theme.chatAvatarVisibility ?? 'both',
+          头像对齐: theme.chatAvatarAlign ?? 'bottom',
+          头像模式: theme.chatAvatarMode ?? 'grouped',
+          表情尺寸: theme.chatEmojiSize ?? 'small',
+          隐藏侧贴边: onOff(theme.chatSnapToEdge),
+          // ── 开关 ──
+          准备中圆点: onOff(theme.chatPendingIndicator, true),
+          隐藏情绪栏: onOff(theme.chatHideHeaderBuffs),
+          // 白框自定义 CSS 是用户写的代码，只报用没用
+          自定义白框CSS: theme.chatChromeCustomCss ? '用了' : '没用',
+          // ── 提示音：内置音效报 key，用户填的直链或上传的音频一律 custom ──
+          提示音: presetOrCustom(theme.chatSound?.src, Object.keys(BUILTIN_SOUNDS), '没设'),
+          // ── 微调数值只报调没调过，不报具体数字 ──
+          气泡字号: tweakedOrDefault(theme.chatBubbleFontSize),
+          气泡行距: tweakedOrDefault(theme.chatBubbleLineHeight),
+          气泡缩进: tweakedOrDefault(theme.chatBubbleIndent),
+          头像微调: tweakedOrDefault(theme.chatAvatarOffsetY),
+      });
+  }, [isDataLoaded, characters, activeCharacterId, theme]);
+
+  // --- 匿名统计：角色级设置 ---
+  // 两种问法，别混：
+  //   · 开关类 → 问「有没有人开过 / 有没有人特意关掉」，看的是这个功能有没有人要
+  //   · 选择类 → 报当前活跃角色选的那个，看的是各选项的占比
+  // 每会话一次。全程只有枚举值和「有/无」，不带角色名、不带任何设定内容。
+  //
+  // 刻意没报的：每个世界一份（家园）、每局一份（跑团）的那些设置。一个用户能有十几个世界，
+  // 报哪个都不代表他，而且这些选择本来就有「选择世界时间模式」这类事件在记。
+  useEffect(() => {
+      if (!isDataLoaded || characters.length === 0) return;
+      const c = characters.find(x => x.id === activeCharacterId) ?? characters[0];
+      const all = characters;
+      const anyOn = (pick: (ch: typeof all[number]) => boolean | undefined, defaultOn = false) =>
+          anyCharToggle(all.map(pick), defaultOn);
+      trackCurrentCharSettingsOnce({
+          // ── 开关：默认关的，问有没有人开过 ──
+          记忆宫殿: anyOn(x => x.memoryPalaceEnabled),
+          自动归档: anyOn(x => x.autoArchiveEnabled),
+          思考过程: anyOn(x => x.showThinkingChain),
+          日程与情绪: anyOn(x => x.scheduleFeatureEnabled),
+          HTML卡片: anyOn(x => x.htmlModeEnabled),
+          角色级聊天装扮: anyOn(x => x.chatFineTune?.enabled),
+          自定义时区: anyOn(x => x.customTimezoneEnabled),
+          生活记录注入: anyOn(x => x.lifeRecordEnabled),
+          小红书: anyOn(x => x.xhsEnabled),
+          隐藏系统日志: anyOn(x => x.hideSystemLogs),
+          见面轻阅读: anyOn(x => x.dateLightReading),
+          观测协议: anyOn(x => x.dateObserve?.enabled),
+          彼方自主登入: anyOn(x => x.vrState?.enabled),
+          提示音绑白框: anyOn(x => x.chatSoundBound),
+          // ── 开关：默认开的，问有没有人特意关掉 ──
+          时间感知: anyOn(x => x.timeAwarenessEnabled, true),
+          见面时间感知: anyOn(x => x.dateTimeAwarenessEnabled, true),
+          查手机同步聊天: anyOn(x => x.phoneState?.sendToChat, true),
+          允许虚构NPC: anyOn(x => x.phoneState?.allowFictionalContacts, true),
+          可读我的音乐: anyOn(x => x.musicProfile?.canReadUserMusic, true),
+          见面深挖引导: anyOn(x => x.dateStyleConfig?.digDeeper, true),
+          // ── 选择：当前活跃角色选了哪个 ──
+          思考链风格: c.thinkingChainStyle ?? 'echo',
+          日程风格: c.scheduleStyle ?? 'lifestyle',
+          认知风格: c.personalityStyle ?? '没设',
+          原文读取策略: c.contextRangeMode ?? 'manual',
+          见面写作风格: c.dateStyleConfig?.style ?? 'cinematic',
+          见面叙事人称: c.dateStyleConfig?.pov ?? '没设',
+          观测HUD样式: c.dateObserve?.style ?? 'hologram',
+          定时消息模式: c.activeMsg2Config?.mode ?? 'auto',
+          定时消息频率: c.activeMsg2Config?.recurrenceType ?? 'none',
+          // 角色专属提示音同样只分「内置哪个 / 自己弄的」
+          角色提示音: presetOrCustom(c.chatSound?.src, Object.keys(BUILTIN_SOUNDS), '没设'),
+      });
+  }, [isDataLoaded, characters, activeCharacterId]);
 
   // --- Global Error Interception ---
   useEffect(() => {
@@ -2528,9 +2676,20 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
           setSysOperation({ status: 'idle', message: '', progress: 100 });
           addToast('云端备份完成', 'success');
+          // provider / mode 都是代码里写死的枚举；连接地址、账号、错误原文一概不带。
+          trackEvent('上传备份到云端', {
+              provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav',
+              mode,
+              result: '成功',
+          });
       } catch (e: any) {
           setSysOperation({ status: 'idle', message: '', progress: 0 });
           addToast(`云端备份失败: ${e.message}`, 'error');
+          trackEvent('上传备份到云端', {
+              provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav',
+              mode,
+              result: '失败',
+          });
           throw e;
       }
   };
@@ -2820,7 +2979,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       else await DB.deleteAsset(`icon_${appId}`);
   };
   const addToast = (message: string, type: Toast['type'] = 'info') => { const id = Date.now().toString(); setToasts(prev => [...prev, { id, message, type }]); setTimeout(() => { setToasts(prev => prev.filter(t => t.id !== id)); }, 3000); };
-  const showError = (title: string, details: string) => { setErrorDialog({ title, details }); };
+  const showError = (title: string, details: string) => {
+      setErrorDialog({ title, details });
+      // showError 是分发型入口，title 由调用方传。这里写显式白名单：
+      // 只有下面这三个写死的 title 会上报，其它（含以后新加的）一律不发，
+      // 也绝不把 title 原样透传出去（免得哪天有人往里塞 URL 或报错原文）。
+      if (title === 'Instant Push 发送失败') trackEvent('弹出报错详情弹窗', { 报错来源: 'Instant Push 发送失败' });
+      else if (title === '导入失败') trackEvent('弹出报错详情弹窗', { 报错来源: '导入失败' });
+      else if (title === '云端恢复失败') trackEvent('弹出报错详情弹窗', { 报错来源: '云端恢复失败' });
+  };
   const dismissError = () => { setErrorDialog(null); };
 
   // --- APPEARANCE PRESETS ---

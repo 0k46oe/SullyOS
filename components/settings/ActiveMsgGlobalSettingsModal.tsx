@@ -3,6 +3,7 @@ import Modal from '../os/Modal';
 import { ActiveMsg2GlobalConfig } from '../../types';
 import { ActiveMsgClient } from '../../utils/activeMsgClient';
 import { ActiveMsgStore, maskActiveMsgUserId } from '../../utils/activeMsgStore';
+import { trackEvent } from '../../utils/analytics';
 
 interface ActiveMsgGlobalSettingsModalProps {
   isOpen: boolean;
@@ -66,8 +67,11 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       await ActiveMsgClient.ensurePushSubscription();
       await refresh();
       addToast('通知权限和推送订阅已准备完成。', 'success');
+      trackEvent('开启通知与推送订阅', { result: 'ok' });
     } catch (error: any) {
       addToast(error?.message || '创建推送订阅失败。', 'error');
+      // 只报成功/失败，错误原文留在 toast 里（可能带 push endpoint）。
+      trackEvent('开启通知与推送订阅', { result: 'failed' });
     } finally {
       setLoading(false);
     }
@@ -88,8 +92,12 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       });
       await refresh();
       addToast('已连接成功，主动消息 2.0 可以用了。', 'success');
+      // 只报「这次连接成没成」。连接串 / tenantToken / 错误原文一概不带，
+      // 也不报「之前配没配过 tenant」——那等于把两项凭据的配置状态压成一位发出去。
+      trackEvent('连接并启用主动消息 2.0', { result: 'ok' });
     } catch (error: any) {
       addToast(error?.message || '连接失败。', 'error');
+      trackEvent('连接并启用主动消息 2.0', { result: 'failed' });
     } finally {
       setLoading(false);
     }
@@ -101,9 +109,12 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       const result = await ActiveMsgClient.verifyUserKey();
       setKeyStatus(`用户密钥检查通过，版本 v${result.version}。`);
       addToast('用户密钥获取成功。', 'success');
+      // 只报成功/失败，版本号和错误原文都不带。
+      trackEvent('检查用户密钥', { result: 'ok' });
     } catch (error: any) {
       setKeyStatus(error?.message || '用户密钥获取失败。');
       addToast(error?.message || '用户密钥获取失败。', 'error');
+      trackEvent('检查用户密钥', { result: 'failed' });
     } finally {
       setLoading(false);
     }

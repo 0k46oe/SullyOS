@@ -19,6 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GITHUB_PAGES: 'true'
+      # 匿名统计。值存在仓库的 Variables 里，不写死在这份 YAML——
+      # fork 出去的仓库继承得到工作流、继承不到 Variables，构建出来就是零统计的版本
+      # （两个变量缺任何一个，统计脚本压根不会加载）。详见 docs/analytics.md。
+      VITE_UMAMI_SCRIPT_URL: ${{ vars.UMAMI_SCRIPT_URL }}
+      VITE_UMAMI_WEBSITE_ID: ${{ vars.UMAMI_WEBSITE_ID }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

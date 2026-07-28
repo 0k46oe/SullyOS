@@ -593,6 +593,21 @@ export const DB = {
     });
   },
 
+  /**
+   * 某个角色的聊天条数。走 charId 索引的 count()，**一条消息都不会被读出来**，
+   * IndexedDB 只回一个数字。匿名统计的规模档位用它，别拿 getMessagesByCharId
+   * 去 length ——那会把整段聊天记录读进内存。
+   */
+  countMessagesByCharId: async (charId: string): Promise<number> => {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_MESSAGES, 'readonly');
+      const request = transaction.objectStore(STORE_MESSAGES).index('charId').count(IDBKeyRange.only(charId));
+      request.onsuccess = () => resolve(request.result || 0);
+      request.onerror = () => reject(request.error);
+    });
+  },
+
   // Performance: Load only the most recent N messages for a character
   getRecentMessagesByCharId: async (charId: string, limit: number, includeProcessed: boolean = false): Promise<Message[]> => {
     const db = await openDB();

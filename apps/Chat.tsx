@@ -50,8 +50,9 @@ import { resolveTtsProvider } from '../utils/ttsProvider';
 import { isInstantConfigReady, loadInstantConfig } from '../utils/instantPushClient';
 import { resolveActiveSound, playWhiteboxSound, unlockWhiteboxAudio, parseWhiteboxSound, upsertWhiteboxSound, stripWhiteboxSoundDirective, WhiteboxSound } from '../utils/whiteboxSound';
 import WhiteboxSoundEditor from '../components/chat/WhiteboxSoundEditor';
-import { normalizeTranslationLangLabel } from '../utils/translationLang';
+import { normalizeTranslationLangLabel, isTranslationLangPreset } from '../utils/translationLang';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
+import { trackEvent, noteMessageSent, presetOrCustom } from '../utils/analytics';
 import {
     CONTEXT_RANGE_POLICY_VERSION,
     computeContextRangeSnapshot,
@@ -547,6 +548,7 @@ const Chat: React.FC = () => {
                 return;
             }
             addToast('语音已开始下载', 'success');
+            trackEvent('下载语音条');
         } catch {
             addToast('语音下载失败', 'error');
         }
@@ -950,6 +952,8 @@ const Chat: React.FC = () => {
 
     const handleSendText = async (customContent?: string, customType?: MessageType, metadata?: any) => {
         if (!char || (!input.trim() && !customContent)) return;
+        // 只累加内存里的计数，这里不发任何请求；页面切走时才按区间报一次。见 utils/analytics.ts
+        noteMessageSent();
         // 借用户"发送"这个手势解锁音频上下文，好让稍后 AI 回复时的白框提示音能顺利播放（移动端自动播放策略）。
         unlockWhiteboxAudio();
         const text = customContent || input.trim();
@@ -970,6 +974,7 @@ const Chat: React.FC = () => {
                 return;
             }
             setMcdAppOpen(true);
+            trackEvent('打开麦当劳点单小程序');
             setShowPanel('none');
             return;
         }
@@ -1236,6 +1241,7 @@ const Chat: React.FC = () => {
         const newHistory = messages.slice(0, index + 1);
         setMessages(newHistory);
         addToast('回溯对话中...', 'info');
+        trackEvent('重新生成回复');
 
         // 重 roll：不注入上一轮残留的情绪 buff 与意识流（innerState），两边独立重新生成。
         triggerAI(newHistory, undefined, undefined, { skipEmotionInjection: true });
@@ -1252,6 +1258,18 @@ const Chat: React.FC = () => {
     };
 
     const handlePanelAction = (type: string, payload?: any) => {
+        // 只统计「打开某个面板 / 开关某个能力」这几个固定入口，名单写死在这里；
+        // 选表情、选分类之类的动作不上报。
+        if ([
+            'transfer', 'archive', 'settings', 'chrome-css', 'chrome-sound', 'fine-tune',
+            'meetup', 'proactive', 'schedule', 'mcd-request', 'luckin-request',
+            'html-mode-toggle', 'html-mode-settings', 'thinking-settings',
+            // 独立小功能：点一下就是用了一次，跟「打开某个面板」同一性质。
+            // send-emoji / select-category 这些是「挑哪一个」，不进名单。
+            'poke', 'emoji-import', 'add-category', 'mcd-end', 'luckin-end',
+        ].includes(type)) {
+            trackEvent('打开聊天功能面板项', { action: type });
+        }
         switch (type) {
             case 'transfer': setModalType('transfer'); break;
             case 'poke': handleSendText('[戳一戳]', 'interaction'); break;
@@ -1277,6 +1295,7 @@ const Chat: React.FC = () => {
                 break;
             case 'mcd-request':
                 setMcdAppOpen(true);
+                trackEvent('打开麦当劳点单小程序');
                 break;
             case 'mcd-end':
                 handleSendText(MCD_DEACTIVATE_TRIGGER, 'text', { mcdDeactivate: true });
@@ -1340,6 +1359,7 @@ const Chat: React.FC = () => {
         luckinChatRef.current = { active: true, longitude: lng, latitude: lat, cityName };
         setLuckinMode(true);
         setShowLuckinLoc(false);
+        trackEvent('开启瑞一杯聊天点单');
         addToast(`瑞一杯已开启 ☕ 定位: ${cityName || '已设置'}`, 'info');
         // 首次启动: 自动弹一次使用说明 (之后收在 banner 的 ? 里)
         try {
@@ -1580,6 +1600,7 @@ const Chat: React.FC = () => {
         if (!char || !scheduleData) return;
         const slot = scheduleData.slots[index];
         if (!slot) return;
+        trackEvent('打开日程小剧场', { mode: forceRegenerate ? 'replay' : 'play' });
         // 命中缓存且非重演：直接打开，不烧 token
         if (!forceRegenerate && slot.theater && slot.theater.lines.length > 0) {
             setTheaterSlotIdx(index);
@@ -1906,6 +1927,7 @@ const Chat: React.FC = () => {
                 setVisibleCount(LOAD_BATCH_SIZE);
                 visibleCountRef.current = LOAD_BATCH_SIZE;
                 addToast(`已安全清理 ${processedMsgs.length} 条已处理记录，保留 ${remaining.length} 条未处理记录`, 'success');
+                trackEvent('清空聊天记录');
                 setModalType('none');
                 return;
             }
@@ -1939,6 +1961,7 @@ const Chat: React.FC = () => {
             visibleCountRef.current = LOAD_BATCH_SIZE;
             addToast('已清空', 'success');
         }
+        trackEvent('清空聊天记录');
         setModalType('none');
     };
 
@@ -2160,6 +2183,7 @@ const Chat: React.FC = () => {
         setShowPanel('none');
         setArchiveProgress(`准备归档 ${datesToProcess.length} 天...`);
         addToast(`开始归档 ${datesToProcess.length} 天聊天记录`, 'info');
+        trackEvent('归档聊天记录');
 
         try {
             let processedCount = 0;
@@ -2274,6 +2298,7 @@ const Chat: React.FC = () => {
         setModalType('none');
         setSelectedMessage(null);
         addToast('消息已删除', 'success');
+        trackEvent('删除一条消息');
     };
 
     const confirmEditMessage = async () => {
@@ -2286,6 +2311,7 @@ const Chat: React.FC = () => {
         setModalType('none');
         setSelectedMessage(null);
         addToast('消息已修改', 'success');
+        trackEvent('编辑一条消息');
     };
 
     const handleQuickReply = useCallback((message: Message) => {
@@ -2293,6 +2319,7 @@ const Chat: React.FC = () => {
             ...message,
             metadata: { ...message.metadata, senderName: message.role === 'user' ? '我' : char.name }
         });
+        trackEvent('引用回复一条消息');
     }, [char.name]);
 
     const handleReplyMessage = () => {
@@ -2307,6 +2334,7 @@ const Chat: React.FC = () => {
         setModalType('none');
         setSelectedMessage(null);
         addToast('已复制到剪贴板', 'success');
+        trackEvent('复制一条消息');
     };
 
     const handleDeleteEmoji = async () => {
@@ -2907,7 +2935,7 @@ const Chat: React.FC = () => {
                 onConfirmEditMessage={confirmEditMessage} onDeleteMessage={handleDeleteMessage} onCopyMessage={handleCopyMessage} onDeleteEmoji={handleDeleteEmoji} onDeleteCategory={handleDeleteCategory}
                 allCharacters={characters} onSaveCategoryVisibility={handleSaveCategoryVisibility}
                 translationEnabled={translationEnabled}
-                onToggleTranslation={() => { const next = !translationEnabled; setTranslationEnabled(next); localStorage.setItem(`chat_translate_enabled_${activeCharacterId}`, JSON.stringify(next)); if (!next) { setShowingTargetIds(new Set()); } }}
+                onToggleTranslation={() => { const next = !translationEnabled; setTranslationEnabled(next); localStorage.setItem(`chat_translate_enabled_${activeCharacterId}`, JSON.stringify(next)); if (next) { trackEvent('开启聊天翻译', { targetLang: isTranslationLangPreset(translateTargetLang) ? translateTargetLang : 'custom' }); } if (!next) { setShowingTargetIds(new Set()); } }}
                 translateSourceLang={translateSourceLang}
                 translateTargetLang={translateTargetLang}
                 onSetTranslateSourceLang={(lang: string) => { const next = normalizeTranslationLangLabel(lang); if (!next) return; setTranslateSourceLang(next); localStorage.setItem(`chat_translate_source_lang_${activeCharacterId}`, next); setShowingTargetIds(new Set()); }}
@@ -3437,6 +3465,15 @@ const Chat: React.FC = () => {
                         updateCharacter(char.id, { proactiveConfig: config });
                         if (config.enabled) {
                             startProactiveChat(config.intervalMinutes);
+                            // 界面只给 7 个档，但这个值是从持久化状态读回来的——导入的备份、
+                            // 老版本写进去的都可能是任意整数。收敛到写死的档位，其余归 custom。
+                            trackEvent('启动主动消息', {
+                                intervalMinutes: presetOrCustom(
+                                    String(config.intervalMinutes),
+                                    ['30', '60', '120', '240', '480', '720', '1440'],
+                                    '没设',
+                                ),
+                            });
                             addToast(`已启动主动消息，每 ${config.intervalMinutes >= 60 ? (config.intervalMinutes / 60) + ' 小时' : config.intervalMinutes + ' 分钟'}发送一次`, 'success');
                         } else {
                             stopProactiveChat();

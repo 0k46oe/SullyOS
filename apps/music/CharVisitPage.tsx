@@ -23,6 +23,7 @@ import { ArrowLeft, MusicNote, Heart, Plus, MagnifyingGlass, Trash, Check } from
 import { getDailyScheduleForChar } from '../../utils/dailySchedule';
 import { useLocalDateKey } from '../../hooks/useLocalDateKey';
 import { resolveCharTimeZone } from '../../utils/timezone';
+import { trackEvent } from '../../utils/analytics';
 
 interface Props {
   charId: string;
@@ -160,6 +161,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
       const newProfile = await CharMusicPersona.initialize(char, userProfile, apiConfig);
       updateCharacter(char.id, { musicProfile: newProfile });
       addToast(`${char.name} 的音乐角落已开启`, 'success');
+      trackEvent('生成角色的音乐人格');
     } catch (e: any) {
       addToast(`初始化失败：${e.message || '未知错误'}`, 'error');
     } finally {
@@ -179,6 +181,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
       const newProfile = await CharMusicPersona.initialize(char, userProfile, apiConfig);
       updateCharacter(char.id, { musicProfile: newProfile });
       addToast(`${char.name} 的音乐人格已重新生成`, 'success');
+      trackEvent('重新生成角色的音乐人格');
     } catch (e: any) {
       addToast(`重新生成失败：${e.message || '未知错误'}`, 'error');
     } finally {
@@ -204,6 +207,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
       musicProfile: { ...profile, playlists: nextPlaylists, updatedAt: Date.now() },
     });
     addToast(`已移除 ${n} 首`, 'success');
+    trackEvent('删除角色歌单里选中的歌');
     exitSelectMode();
   };
 
@@ -294,6 +298,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
       };
       updateCharacter(char.id, { musicProfile: updatedProfile });
       addToast(`已为《${pl.title}》填入 ${picked.length} 首歌`, 'success');
+      trackEvent('让角色按品味挑歌填满歌单');
     } catch (e: any) {
       addToast(`填充失败：${e.message}`, 'error');
     } finally {
@@ -307,6 +312,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
     const startIdx = queue.findIndex(s => s.id === song.id);
     playSong(queue[startIdx], { replaceQueue: queue, startIdx });
     onOpenPlayer();
+    trackEvent('播放角色歌单里的一首歌');
   };
 
   if (!char) {

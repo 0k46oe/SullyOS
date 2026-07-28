@@ -27,6 +27,7 @@ import { isPushVapidReady } from '../utils/pushVapid';
 import ApiCallLogModal from '../components/settings/ApiCallLogModal';
 import { DB } from '../utils/db';
 import { getBackupReminderState, setBackupReminderIntervalDays, daysSinceLastBackup, BACKUP_REMINDER_MIN_DAYS, BACKUP_REMINDER_MAX_DAYS } from '../utils/backupReminder';
+import { bucketRetryCount, isAnalyticsConfigured, isAnalyticsEnabled, setAnalyticsEnabled, trackEvent } from '../utils/analytics';
 
 // hot_news（orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
 const HOTNEWS_PLATFORM_OPTIONS: { key: string; label: string }[] = [
@@ -142,6 +143,19 @@ const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> 
         try {
             const r = await testMcpConnection(server);
             setTestStatus(prev => ({ ...prev, [server.id]: r.ok ? `✅ ${r.message}` : `❌ ${r.message}` }));
+            // 失败原因只上报归类后的固定枚举：原始报错里可能带服务器地址和返回内容，不能外发
+            if (r.ok) {
+                trackEvent('测试 MCP 服务器连接', { result: r.tools?.length ? 'connected' : 'connected-no-tools' });
+            } else {
+                const msg = r.message || '';
+                const failureKind =
+                    /超时/.test(msg) ? 'timeout'
+                    : /鉴权失败/.test(msg) ? 'auth-failed'
+                    : /请求失败/.test(msg) ? 'fetch-failed'
+                    : /MCP HTTP/.test(msg) ? 'http-error'
+                    : 'other';
+                trackEvent('测试 MCP 服务器连接', { result: 'failed', failureKind });
+            }
             if (r.ok && r.tools) {
                 update(server.id, { tools: r.tools });
             }
@@ -176,6 +190,7 @@ const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> 
                         const next = e.target.checked;
                         setUseNativeToolsState(next);
                         setMcpUseNativeTools(next);
+                        trackEvent('关闭原生工具调用（退回文字兼容模式）', { state: next ? 'on' : 'off' });
                     }} className="sr-only peer" />
                     <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-violet-500"></div>
                 </label>
@@ -193,6 +208,7 @@ const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> 
                             <input type="checkbox" checked={server.enabled} onChange={e => {
                                 if (e.target.checked && !(server.tools?.length)) {
                                     addToast('先点「测试连接」拿到工具清单再启用', 'error');
+                                    trackEvent('启用未测通的 MCP 服务器被拦下');
                                     return;
                                 }
                                 update(server.id, { enabled: e.target.checked });
@@ -425,6 +441,7 @@ const Settings: React.FC = () => {
   // 入口刻意低调：默认折叠，普通用户不需要碰，开箱即用。
   const [proxyWorkerInput, setProxyWorkerInput] = useState(getProxyWorkerUrl());
   const [showProxyConfig, setShowProxyConfig] = useState(false);
+  const [analyticsEnabled, setAnalyticsEnabledState] = useState(() => isAnalyticsEnabled());
 
   // 实时感知配置的本地状态
   const [rtWeatherEnabled, setRtWeatherEnabled] = useState(realtimeConfig.weatherEnabled);
@@ -532,8 +549,14 @@ const Settings: React.FC = () => {
       setPpStatus('正在连接 Worker…');
       try {
           const res = await fetch(`${initialPushCfg.workerUrl}/health`);
-          if (!res.ok) { setPpStatus(`失败：Worker HTTP ${res.status}`); setPpBusy(false); return; }
+          if (!res.ok) {
+              trackEvent('启用主动消息 Push 加速', { result: 'fail', failStage: 'worker_health' });
+              trackEvent('启用 Push 加速器的结果', { result: 'worker-unreachable' });
+              setPpStatus(`失败：Worker HTTP ${res.status}`); setPpBusy(false); return;
+          }
       } catch (e: any) {
+          trackEvent('启用主动消息 Push 加速', { result: 'fail', failStage: 'network' });
+          trackEvent('启用 Push 加速器的结果', { result: 'worker-unreachable' });
           setPpStatus(`失败：${e?.message || '网络错误'}`); setPpBusy(false); return;
       }
 
@@ -543,6 +566,8 @@ const Settings: React.FC = () => {
       setPpStatus('正在请求通知权限并创建订阅…');
       const sub = await ensureSubscribed();
       if (!sub.ok) {
+          trackEvent('启用主动消息 Push 加速', { result: 'fail', failStage: 'subscribe' });
+          trackEvent('启用 Push 加速器的结果', { result: 'subscribe-failed' });
           setPpStatus(`失败：${sub.reason || '订阅创建失败'}`);
           setPpBusy(false);
           await refreshPpDiag();
@@ -562,10 +587,16 @@ const Settings: React.FC = () => {
       }
 
       if (schedules.length === 0) {
+          trackEvent('启用主动消息 Push 加速', { result: 'success' });
+          trackEvent('启用 Push 加速器的结果', { result: 'ok-no-schedule' });
           setPpStatus('已启用（订阅已建立。暂无主动消息定时，下次开启角色主动消息时会自动注册）');
       } else if (okCount < schedules.length) {
+          trackEvent('启用主动消息 Push 加速', { result: 'partial' });
+          trackEvent('启用 Push 加速器的结果', { result: 'ok-partial-schedule' });
           setPpStatus(`已启用：${okCount}/${schedules.length} 个定时注册成功`);
       } else {
+          trackEvent('启用主动消息 Push 加速', { result: 'success' });
+          trackEvent('启用 Push 加速器的结果', { result: 'ok' });
           setPpStatus(`已启用，${okCount} 个主动消息定时已注册`);
       }
       setPpBusy(false);
@@ -573,6 +604,7 @@ const Settings: React.FC = () => {
   };
 
   const doDisablePushAccelerator = async () => {
+      trackEvent('关闭主动消息 Push 加速');
       savePushConfig(false);
       setPpEnabled(false);
       stopHeartbeat();
@@ -586,10 +618,16 @@ const Settings: React.FC = () => {
       setPpStatus('正在让 Worker 发一条测试推送…');
       const res = await sendTestPush();
       if (res.ok) {
+          trackEvent('发送测试推送（主动消息加速）', { result: 'sent' });
+          trackEvent('发一条测试推送', { result: 'sent' });
           setPpStatus('测试推送已发出。如果 5 秒内系统通知里没出现"推送测试成功"，说明送达环节有问题——看下方诊断面板。');
       } else if (res.deadSubscription) {
+          trackEvent('发送测试推送（主动消息加速）', { result: 'dead_subscription' });
+          trackEvent('发一条测试推送', { result: 'dead-subscription' });
           setPpStatus('订阅已被浏览器吊销（zombie endpoint）。请点下方"重置订阅"重建一次再测。');
       } else {
+          trackEvent('发送测试推送（主动消息加速）', { result: 'fail' });
+          trackEvent('发一条测试推送', { result: 'failed' });
           setPpStatus(`测试失败：${res.reason || '未知错误'}${res.status ? `（HTTP ${res.status}）` : ''}`);
       }
       setPpTestBusy(false);
@@ -602,6 +640,7 @@ const Settings: React.FC = () => {
       setPpStatus('正在重置订阅…');
       const res = await resetSubscription();
       if (res.ok) {
+          trackEvent('重置推送订阅', { result: 'success', attempt: bucketRetryCount(ppZombieStreak) });
           setPpZombieStreak(0);
           setPpStatus('订阅已重建。可以再点"发一条测试推送"试一下。');
       } else {
@@ -610,6 +649,11 @@ const Settings: React.FC = () => {
           if (/permanently-removed|zombie/i.test(reason)) {
               setPpZombieStreak(c => c + 1);
           }
+          // 只上报归类后的固定枚举，失败原文一个字都不带；重试次数同样先分桶
+          trackEvent('重置推送订阅', {
+              result: /permanently-removed|zombie/i.test(reason) ? 'fail_zombie' : 'fail_other',
+              attempt: bucketRetryCount(ppZombieStreak),
+          });
           setPpStatus(`重置失败：${reason || '未知错误'}`);
       }
       setPpResetBusy(false);
@@ -627,8 +671,10 @@ const Settings: React.FC = () => {
           // ProactiveChat.resume() 把所有 schedule 推回新 SW. deepResetSubscription 内部
           // 不调它是为了避免循环依赖 (ProactiveChat 反向依赖 proactivePushConfig).
           try { ProactiveChat.resume(); } catch (e) { console.warn('[Settings] ProactiveChat.resume failed', e); }
+          trackEvent('深度重置推送订阅', { result: 'success' });
           setPpStatus('订阅已重建。可以再点"发一条测试推送"试一下。');
       } else {
+          trackEvent('深度重置推送订阅', { result: 'fail' });
           setPpStatus(`深度重置失败：${res.reason || '未知错误'}`);
       }
       setPpDeepResetBusy(false);
@@ -840,6 +886,7 @@ const Settings: React.FC = () => {
   };
 
   const handleExport = async (mode: 'text_only' | 'media_only' | 'full') => {
+      trackEvent('导出本地备份', { scope: mode });
       try {
           // 二次确认：整包备份（full / text_only）本就包含你的 API 密钥等设置——这是预期行为，
           // 但绝不能发给别人。media_only 只有媒体、不含密钥，视为可分享。
@@ -848,7 +895,10 @@ const Settings: React.FC = () => {
               const msg = includesSettings
                   ? '该导出数据包含了明文密钥，请不要发送给任何人'
                   : '该导出内容安全，可以用于分享';
-              if (!window.confirm(`${msg}\n\n点「确定」继续导出，「取消」中止。`)) return;
+              if (!window.confirm(`${msg}\n\n点「确定」继续导出，「取消」中止。`)) {
+                  trackEvent('取消导出前的密钥确认', { mode });
+                  return;
+              }
           }
 
           // Trigger export (Context handles loading state UI)
@@ -894,6 +944,7 @@ const Settings: React.FC = () => {
                   console.error("Native write failed", e);
                   // 尽力清掉写了一半的残片，别留下损坏文件。
                   try { await Filesystem.deleteFile({ path: tempName, directory: Directory.Cache }); } catch { /* ignore */ }
+                  trackEvent('保存备份文件到手机失败', { mode });
                   addToast("保存文件失败", "error");
               }
           } else {
@@ -914,6 +965,8 @@ const Settings: React.FC = () => {
               document.body.removeChild(a);
           }
       } catch (e: any) {
+          // 只报导出档位，错误文案是动态串不能进属性
+          trackEvent('导出备份失败', { mode });
           addToast(e.message, 'error');
       }
   };
@@ -925,6 +978,17 @@ const Settings: React.FC = () => {
       // Pass the File object directly to importSystem
       importSystem(file).catch(err => {
           console.error(err);
+          // 只上报归类后的固定枚举：报错原文（可能含文件路径/内容片段）只留在 console
+          const rawMessage = String(err?.message || '');
+          trackEvent('导入备份失败', {
+              source: file.name.toLowerCase().endsWith('.zip') ? 'zip' : 'json',
+              reason:
+                  /无效的文件格式/.test(rawMessage) ? 'invalid_file_format'
+                  : /缺少 data\.json/.test(rawMessage) ? 'missing_data_json'
+                  : /manifest\.json 解析失败/.test(rawMessage) ? 'bad_manifest'
+                  : /JSON 格式错误/.test(rawMessage) ? 'json_syntax'
+                  : 'other',
+          });
           const details = err?.stack || err?.message || String(err || '未知错误');
           showError('导入失败', details);
           addToast('导入失败，错误信息已展开', 'error');
@@ -942,7 +1006,22 @@ const Settings: React.FC = () => {
           const tempConfig = { ...cloudBackupConfig, webdavUrl: cbUrl, username: cbUsername, password: cbPassword, remotePath: cbPath };
           const result = await testConnection(tempConfig);
           setCloudTestResult(result.ok ? `✓ ${result.message}` : `✗ ${result.message}`);
+          // 失败原因收敛成固定几类，地址/账号/密码与原始报错都不上报
+          if (result.ok) {
+              trackEvent('测试 WebDAV 连接', { result: '成功' });
+          } else {
+              const m = result.message || '';
+              trackEvent('测试 WebDAV 连接', {
+                  result: '失败',
+                  failure_kind:
+                      /认证失败/.test(m) ? 'auth_401'
+                      : /无法创建/.test(m) ? 'dir_missing_uncreatable'
+                      : /服务器返回/.test(m) ? 'http_status'
+                      : 'network_error',
+              });
+          }
       } catch (e: any) {
+          trackEvent('测试 WebDAV 连接', { result: '失败', failure_kind: 'network_error' });
           setCloudTestResult(`✗ ${e.message}`);
       }
       setCloudTesting(false);
@@ -964,17 +1043,20 @@ const Settings: React.FC = () => {
       const raw = proxyWorkerInput.trim();
       if (raw && !/^https?:\/\//i.test(raw)) {
           addToast('地址必须以 http:// 或 https:// 开头', 'error');
+          trackEvent('代理地址格式被拒');
           return;
       }
       setProxyWorkerUrl(raw);                 // 传空 / 默认地址 → 自动回落默认
       const applied = getProxyWorkerUrl();
       setProxyWorkerInput(applied);
+      if (applied === DEFAULT_PROXY_WORKER) trackEvent('恢复默认代理 Worker', { via: 'save-empty' });
       addToast(applied === DEFAULT_PROXY_WORKER ? '已恢复为默认 Worker' : 'Worker 地址已保存', 'success');
   };
 
   const handleResetProxyWorker = () => {
       setProxyWorkerUrl('');
       setProxyWorkerInput(getProxyWorkerUrl());
+      trackEvent('恢复默认代理 Worker', { via: 'reset-button' });
       addToast('已恢复为默认 Worker', 'info');
   };
 
@@ -988,7 +1070,11 @@ const Settings: React.FC = () => {
       try {
           const files = await listCloudBackups();
           setCloudBackupFiles(files);
-      } catch { addToast('获取云端备份列表失败', 'error'); }
+          trackEvent('加载云端备份列表', { provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav', result: '成功' });
+      } catch {
+          trackEvent('加载云端备份列表', { provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav', result: '失败' });
+          addToast('获取云端备份列表失败', 'error');
+      }
   };
 
   const handleCloudRestore = async (file: import('../types').CloudBackupFile) => {
@@ -996,6 +1082,11 @@ const Settings: React.FC = () => {
       try {
           await cloudRestoreFromWebDAV(file);
       } catch (err: any) {
+          // 只区分「下载阶段」还是「导入阶段」，报错原文只进 showError / console
+          trackEvent('从云端恢复失败', {
+              provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav',
+              stage: /^恢复失败/.test(String(err?.message || '')) ? 'import' : 'download',
+          });
           const details = err?.stack || err?.message || String(err || '未知错误');
           showError('云端恢复失败', details);
       }
@@ -1004,7 +1095,11 @@ const Settings: React.FC = () => {
   // GitHub backup handlers — single "测试并连接" button does verify-token +
   // ensure-repo, persists owner/login on success so users never type 'owner'.
   const handleTestGithub = async () => {
-      if (!ghToken.trim()) { setGhTestResult('✗ 请先粘贴 Token'); return; }
+      if (!ghToken.trim()) {
+          trackEvent('测试并连接 GitHub', { result: '失败', failure_stage: 'no_token' });
+          setGhTestResult('✗ 请先粘贴 Token');
+          return;
+      }
       setGhTesting(true);
       setGhTestResult('');
       try {
@@ -1016,6 +1111,10 @@ const Settings: React.FC = () => {
               githubUseProxy: ghUseProxy,
           });
           setGhTestResult(result.ok ? `✓ ${result.message}` : `✗ ${result.message}`);
+          // 失败时只报卡在哪一步：token 校验没过 → 没有 login，仓库准备没过 → 有 login
+          trackEvent('测试并连接 GitHub', result.ok
+              ? { result: '成功' }
+              : { result: '失败', failure_stage: result.login ? 'ensure_repo' : 'verify_token' });
           if (result.ok && result.login) {
               updateCloudBackupConfig({
                   enabled: true,
@@ -1027,12 +1126,14 @@ const Settings: React.FC = () => {
               });
           }
       } catch (e: any) {
+          trackEvent('测试并连接 GitHub', { result: '失败', failure_stage: 'exception' });
           setGhTestResult(`✗ ${e?.message || '连接失败'}`);
       }
       setGhTesting(false);
   };
 
   const handleDisableCloud = () => {
+      trackEvent('关闭云端备份', { provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav' });
       updateCloudBackupConfig({ enabled: false });
       setShowCloudModal(false);
       setShowGithubModal(false);
@@ -1045,6 +1146,7 @@ const Settings: React.FC = () => {
   // saved credentials, so old WebDAV users keep their old backups visible
   // when they switch back.
   const switchToGithub = () => {
+      trackEvent('切换云端备份服务商', { to: 'github' });
       if (cloudBackupConfig.githubToken && cloudBackupConfig.githubOwner) {
           updateCloudBackupConfig({ provider: 'github' });
           addToast(`已切换到 GitHub @${cloudBackupConfig.githubOwner}`, 'success');
@@ -1053,6 +1155,7 @@ const Settings: React.FC = () => {
       }
   };
   const switchToWebDAV = () => {
+      trackEvent('切换云端备份服务商', { to: 'webdav' });
       if (cloudBackupConfig.webdavUrl && cloudBackupConfig.username) {
           updateCloudBackupConfig({ provider: 'webdav' });
           addToast('已切换回 WebDAV，旧备份依旧在', 'success');
@@ -1111,8 +1214,11 @@ const Settings: React.FC = () => {
               ? await fetchOwmWeather(rtWeatherCity, rtWeatherKey)
               : await fetchOpenMeteoWeather(rtWeatherCity);
           const source = rtWeatherKey ? 'OpenWeatherMap' : 'Open-Meteo';
+          // 刻意不带数据源名：那等价于「有没有填天气 key」，属于配置状态
+          trackEvent('测试天气数据源连接', { result: 'ok' });
           setRtTestStatus(`连接成功！(${source}) ${weather.city}: ${weather.description}, ${weather.temp}°C`);
       } catch (e: any) {
+          trackEvent('测试天气数据源连接', { result: 'failed' });
           setRtTestStatus(`连接失败: ${e.message}`);
       }
   };
@@ -1126,8 +1232,10 @@ const Settings: React.FC = () => {
       setRtTestStatus('正在测试 Notion 连接...');
       try {
           const result = await NotionManager.testConnection(rtNotionKey, rtNotionDbId);
+          trackEvent('测试 Notion 连接', { result: result.success ? 'ok' : 'failed' });
           setRtTestStatus(result.message);
       } catch (e: any) {
+          trackEvent('测试 Notion 连接', { result: 'network-error' });
           setRtTestStatus(`网络错误: ${e.message}`);
       }
   };
@@ -1141,8 +1249,10 @@ const Settings: React.FC = () => {
       setRtTestStatus('正在测试飞书连接...');
       try {
           const result = await FeishuManager.testConnection(rtFeishuAppId, rtFeishuAppSecret, rtFeishuBaseId, rtFeishuTableId);
+          trackEvent('测试飞书连接', { result: result.success ? 'ok' : 'failed' });
           setRtTestStatus(result.message);
       } catch (e: any) {
+          trackEvent('测试飞书连接', { result: 'network-error' });
           setRtTestStatus(`网络错误: ${e.message}`);
       }
   };
@@ -1166,6 +1276,8 @@ const Settings: React.FC = () => {
               cookieToUse,
           );
           if (result.connected) {
+              // 昵称 / 用户 ID / xsecToken 一律不带
+              trackEvent('测试小红书桥接连接', { mode: rtXhsMode === 'lite' ? 'lite' : 'local', result: 'connected' });
               const toolCount = result.tools?.length || 0;
               const tokenInfo = result.xsecToken ? ' | xsecToken 已获取' : '';
               const loginInfo = result.loggedIn
@@ -1186,9 +1298,11 @@ const Settings: React.FC = () => {
                   }
               });
           } else {
+              trackEvent('测试小红书桥接连接', { mode: rtXhsMode === 'lite' ? 'lite' : 'local', result: 'failed' });
               setRtTestStatus(`连接失败: ${result.error}`);
           }
       } catch (e: any) {
+          trackEvent('测试小红书桥接连接', { mode: rtXhsMode === 'lite' ? 'lite' : 'local', result: 'network-error' });
           setRtTestStatus(`网络错误: ${e.message}`);
       }
   };
@@ -1212,12 +1326,15 @@ const Settings: React.FC = () => {
       try {
           const r = await testMcdConnection();
           if (r.ok) {
+              trackEvent('测试点单 MCP 连接', { provider: 'mcdonalds', result: 'ok' });
               const names = (r.tools || []).map(t => t.name).slice(0, 6).join(', ');
               setMcdTestStatus(`✅ ${r.message}${names ? `\n工具: ${names}${(r.tools || []).length > 6 ? ' ...' : ''}` : ''}`);
           } else {
+              trackEvent('测试点单 MCP 连接', { provider: 'mcdonalds', result: 'failed' });
               setMcdTestStatus(`❌ ${r.message}`);
           }
       } catch (e: any) {
+          trackEvent('测试点单 MCP 连接', { provider: 'mcdonalds', result: 'exception' });
           setMcdTestStatus(`❌ ${e?.message || String(e)}`);
       } finally {
           setMcdTesting(false);
@@ -1243,12 +1360,15 @@ const Settings: React.FC = () => {
       try {
           const r = await testLuckinConnection();
           if (r.ok) {
+              trackEvent('测试点单 MCP 连接', { provider: 'luckin', result: 'ok' });
               const names = (r.tools || []).map(t => t.name).slice(0, 6).join(', ');
               setLuckinTestStatus(`✅ ${r.message}${names ? `\n工具: ${names}${(r.tools || []).length > 6 ? ' ...' : ''}` : ''}`);
           } else {
+              trackEvent('测试点单 MCP 连接', { provider: 'luckin', result: 'failed' });
               setLuckinTestStatus(`❌ ${r.message}`);
           }
       } catch (e: any) {
+          trackEvent('测试点单 MCP 连接', { provider: 'luckin', result: 'exception' });
           setLuckinTestStatus(`❌ ${e?.message || String(e)}`);
       } finally {
           setLuckinTesting(false);
@@ -1394,7 +1514,7 @@ const Settings: React.FC = () => {
                     </p>
                     <div className="grid grid-cols-2 gap-2">
                         <button
-                            onClick={() => setShowGithubModal(true)}
+                            onClick={() => { trackEvent('连接云端备份服务商', { provider: 'github' }); setShowGithubModal(true); }}
                             className="py-3 px-2 bg-gradient-to-br from-slate-800 to-slate-900 text-white rounded-xl text-xs font-bold shadow-sm active:scale-95 transition-all flex flex-col items-center gap-1.5 relative"
                         >
                             <span className="absolute top-1 right-1.5 text-[8px] bg-amber-300 text-slate-800 px-1.5 py-0.5 rounded-full font-bold">推荐</span>
@@ -1403,7 +1523,7 @@ const Settings: React.FC = () => {
                             <span className="text-[9px] text-slate-300 font-normal">不用梯子 · 2GB</span>
                         </button>
                         <button
-                            onClick={() => setShowCloudModal(true)}
+                            onClick={() => { trackEvent('连接云端备份服务商', { provider: 'webdav' }); setShowCloudModal(true); }}
                             className="py-3 px-2 bg-gradient-to-br from-sky-500 to-blue-600 text-white rounded-xl text-xs font-bold shadow-sm active:scale-95 transition-all flex flex-col items-center gap-1.5"
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z" /></svg>
@@ -1979,7 +2099,7 @@ const Settings: React.FC = () => {
                 </div>
             }
             actions={
-                <button onClick={() => setShowRealtimeModal(true)} className="text-[10px] bg-violet-100 text-violet-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
+                <button onClick={() => { trackEvent('打开实时感知配置'); setShowRealtimeModal(true); }} className="text-[10px] bg-violet-100 text-violet-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
                     配置
                 </button>
             }
@@ -2024,11 +2144,11 @@ const Settings: React.FC = () => {
             actions={
                 <>
                     <button
-                        onClick={() => setShowMcpHelp(true)}
+                        onClick={() => { trackEvent('打开「MCP 是什么」说明弹窗'); setShowMcpHelp(true); }}
                         aria-label="MCP 是什么？"
                         className="w-7 h-7 rounded-full border border-slate-200 bg-white text-[12px] font-bold text-slate-400 active:scale-90 transition-all"
                     >?</button>
-                    <button onClick={() => setShowMcpModal(true)} className="text-[10px] bg-violet-100 text-violet-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
+                    <button onClick={() => { trackEvent('打开MCP工具服务器配置'); setShowMcpModal(true); }} className="text-[10px] bg-violet-100 text-violet-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
                         配置
                     </button>
                 </>
@@ -2124,6 +2244,7 @@ const Settings: React.FC = () => {
                     disabled={ppBusy}
                     onClick={() => {
                         if (ppBusy) return;
+                        trackEvent('切换主动消息Push加速', { action: ppEnabled ? 'disable' : 'enable' });
                         if (ppEnabled) {
                             void doDisablePushAccelerator();
                         } else {
@@ -2141,7 +2262,16 @@ const Settings: React.FC = () => {
                 <div className="flex items-center justify-between mb-3">
                     <p className="text-xs font-semibold text-slate-600">Web Push 状态</p>
                     <button
-                        onClick={() => void refreshPpDiag()}
+                        onClick={() => {
+                            // 全部是浏览器/设备状态的固定枚举，不含端点地址、也不含任何用户配置值
+                            trackEvent('刷新 Web Push 诊断', ppDiag ? {
+                                permission: ppDiag.permission,
+                                subscription: !ppDiag.endpoint ? 'none' : ppDiag.endpointDead ? 'dead' : 'active',
+                                swState: ppDiag.swState === 'activated' ? 'activated' : ppDiag.swState === 'none' ? 'none' : 'other',
+                                platform: ppDiag.capacitorNative ? 'capacitor_native' : ppDiag.iosNeedsPwa ? 'ios_needs_pwa' : 'normal',
+                            } : undefined);
+                            void refreshPpDiag();
+                        }}
                         className="text-[10px] px-2.5 py-1 rounded-full bg-white border border-slate-200 text-slate-500 hover:bg-slate-50"
                     >
                         刷新
@@ -2274,7 +2404,7 @@ const Settings: React.FC = () => {
             }
             actions={
                 <button
-                    onClick={() => setShowInstantModal(true)}
+                    onClick={() => { trackEvent('打开Instant Push配置'); setShowInstantModal(true); }}
                     className="text-[10px] bg-indigo-100 text-indigo-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform"
                 >
                     配置
@@ -2336,6 +2466,49 @@ const Settings: React.FC = () => {
             </section>
         )}
 
+        {/* ───────── 匿名统计 ─────────
+            只在配了统计环境变量的构建里显示。自部署实例本来就一个统计请求都不发，
+            给个关不掉也没东西可关的开关只会更让人犯嘀咕。 */}
+        {isAnalyticsConfigured() && (
+        <SettingsSection
+            title="匿名统计"
+            icon={
+                <div className="p-2 bg-slate-100/60 rounded-xl text-slate-500">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
+                    </svg>
+                </div>
+            }
+        >
+            <div className="space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm font-bold text-slate-600">参与匿名统计</span>
+                    <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                        <input
+                            type="checkbox"
+                            checked={analyticsEnabled}
+                            onChange={e => {
+                                setAnalyticsEnabledState(e.target.checked);
+                                setAnalyticsEnabled(e.target.checked);
+                            }}
+                            className="sr-only peer"
+                        />
+                        <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-slate-500"></div>
+                    </label>
+                </div>
+                <p className="text-xs text-slate-500 leading-relaxed">
+                    只数「哪个页面被打开了、哪个功能被用了一次」，以及记忆条数 / 角色数落在哪个区间。
+                    不碰你和角色的任何对话、记忆、设定，不碰你输入的任何文字，不碰 API 和 MCP 配置。
+                </p>
+                <p className="text-[10px] text-slate-400 leading-relaxed">
+                    浏览器开了 Do Not Track 的话，不用动这个开关也会自动跳过。
+                    关掉之后下次启动连统计脚本都不会加载。想自己核实的话，按 F12 打开 Network 面板，
+                    这个页面发出的每一个请求装了什么都在你自己的浏览器里。
+                </p>
+            </div>
+        </SettingsSection>
+        )}
+
         <VersionInfo />
 
         {/* QQ 小群入口不主动曝光：接近水印，仅在 hover / 键盘聚焦 / 按住时略微显现。 */}
@@ -2357,13 +2530,14 @@ const Settings: React.FC = () => {
           footer={
               <div className="flex gap-2 w-full">
                   <button
-                      onClick={() => setShowPpConfirm(false)}
+                      onClick={() => { trackEvent('在 Push 加速启用确认弹窗做出选择', { choice: 'cancel' }); setShowPpConfirm(false); }}
                       className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl"
                   >
                       取消
                   </button>
                   <button
                       onClick={() => {
+                          trackEvent('在 Push 加速启用确认弹窗做出选择', { choice: 'confirm' });
                           setShowPpConfirm(false);
                           void doEnablePushAccelerator();
                       }}
@@ -2458,7 +2632,7 @@ const Settings: React.FC = () => {
                   <button onClick={handleSaveCloudConfig} disabled={!cbUrl || !cbUsername || !cbPassword} className="py-2.5 bg-sky-500 rounded-xl text-xs font-bold text-white disabled:opacity-40">保存配置</button>
               </div>
               {cloudBackupConfig.enabled && (
-                  <button onClick={() => { updateCloudBackupConfig({ enabled: false }); setShowCloudModal(false); addToast('云端备份已关闭', 'info'); }} className="w-full py-2 text-[11px] text-red-400 font-medium">关闭云端备份</button>
+                  <button onClick={() => { trackEvent('关闭云端备份', { provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav' }); updateCloudBackupConfig({ enabled: false }); setShowCloudModal(false); addToast('云端备份已关闭', 'info'); }} className="w-full py-2 text-[11px] text-red-400 font-medium">关闭云端备份</button>
               )}
           </div>
       </Modal>
@@ -2489,6 +2663,7 @@ const Settings: React.FC = () => {
               <a
                   href="https://github.com/settings/tokens/new?scopes=repo&description=Sully%20%E5%A4%87%E4%BB%BD"
                   target="_blank" rel="noopener noreferrer"
+                  onClick={() => trackEvent('跳去 GitHub 创建 Token')}
                   className="block w-full py-3 bg-gradient-to-br from-slate-800 to-slate-900 text-white rounded-xl text-xs font-bold text-center shadow-sm active:scale-95 transition-all"
               >
                   ① 去 GitHub 创建 Token ↗
@@ -2539,7 +2714,7 @@ const Settings: React.FC = () => {
               )}
 
               <button
-                  onClick={() => setGhShowAdvanced(v => !v)}
+                  onClick={() => { if (!ghShowAdvanced) trackEvent('展开 GitHub 高级选项'); setGhShowAdvanced(v => !v); }}
                   className="w-full text-[10px] text-slate-400 underline-offset-2 hover:underline"
               >
                   {ghShowAdvanced ? '收起高级选项 ▲' : '高级选项 ▼'}
@@ -2967,11 +3142,11 @@ const Settings: React.FC = () => {
                               </div>
                           </div>
                           <div>
-                              <button type="button" onClick={() => setRtXhsGuideOpen(v => !v)} className="text-[11px] font-bold text-rose-600 underline">📖 点击获取 cookie 教程 {rtXhsGuideOpen ? '▲' : '▼'}</button>
+                              <button type="button" onClick={() => { if (!rtXhsGuideOpen) trackEvent('展开获取 cookie 教程'); setRtXhsGuideOpen(v => !v); }} className="text-[11px] font-bold text-rose-600 underline">📖 点击获取 cookie 教程 {rtXhsGuideOpen ? '▲' : '▼'}</button>
                               {rtXhsGuideOpen && (
                                   <div className="mt-1 bg-white/70 rounded-lg p-2 space-y-1.5">
                                       <pre className="text-[10px] text-slate-600 whitespace-pre-wrap font-sans leading-relaxed">{XHS_COOKIE_GUIDE}</pre>
-                                      <button type="button" onClick={async () => { try { await navigator.clipboard.writeText(XHS_COOKIE_GUIDE); addToast('教程已复制，可粘贴去问别的 AI', 'success'); } catch { addToast('复制失败，请长按手动选择', 'error'); } }} className="w-full py-1.5 bg-rose-100 text-rose-600 text-[11px] font-bold rounded-lg active:scale-95 transition-transform">复制教程</button>
+                                      <button type="button" onClick={async () => { try { await navigator.clipboard.writeText(XHS_COOKIE_GUIDE); trackEvent('复制 cookie 教程文本', { result: 'copied' }); addToast('教程已复制，可粘贴去问别的 AI', 'success'); } catch { trackEvent('复制 cookie 教程文本', { result: 'clipboard-failed' }); addToast('复制失败，请长按手动选择', 'error'); } }} className="w-full py-1.5 bg-rose-100 text-rose-600 text-[11px] font-bold rounded-lg active:scale-95 transition-transform">复制教程</button>
                                   </div>
                               )}
                           </div>
@@ -3116,14 +3291,15 @@ const Settings: React.FC = () => {
                       href={MCP_USER_GUIDE_URL}
                       target="_blank"
                       rel="noopener noreferrer"
+                      onClick={() => trackEvent('跳转 MCP 完整教程')}
                       className="block w-full py-2.5 bg-violet-500 text-white text-center text-xs font-bold rounded-xl active:scale-95 transition-transform"
                   >📖 打开完整教程（含部署示例）</a>
                   <button
                       type="button"
                       onClick={async () => {
                           const text = `请阅读这份教程，然后一步一步教我把 MCP 工具服务器接入 SullyOS。先问清楚我想接什么工具、准备部署在哪（云端/本地电脑/本地+内网穿透），再给对应路线的步骤：\n${MCP_USER_GUIDE_URL}`;
-                          try { await navigator.clipboard.writeText(text); addToast('已复制，去粘贴给你的 AI 吧', 'success'); }
-                          catch { addToast('复制失败，请手动复制教程链接', 'error'); }
+                          try { await navigator.clipboard.writeText(text); trackEvent('复制 MCP 部署指引给 AI', { result: 'copied' }); addToast('已复制，去粘贴给你的 AI 吧', 'success'); }
+                          catch { trackEvent('复制 MCP 部署指引给 AI', { result: 'clipboard-failed' }); addToast('复制失败，请手动复制教程链接', 'error'); }
                       }}
                       className="w-full py-2.5 bg-violet-100 text-violet-700 text-xs font-bold rounded-xl active:scale-95 transition-transform"
                   >🤖 复制链接给你的 AI，让它带你部署</button>

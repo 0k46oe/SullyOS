@@ -4,6 +4,7 @@ import { useOS } from '../context/OSContext';
 import { processImage } from '../utils/file';
 import LifeRecordPanel from '../components/lifeRecord/LifeRecordPanel';
 import PerCharAvatarPicker from '../components/user/PerCharAvatarPicker';
+import { trackEvent } from '../utils/analytics';
 
 const UserApp: React.FC = () => {
     const { closeApp, userProfile, updateUserProfile, addToast } = useOS();
@@ -40,7 +41,7 @@ const UserApp: React.FC = () => {
                     {([['profile', '我的档案'], ['life', '生活记录']] as const).map(([key, label]) => (
                         <button
                             key={key}
-                            onClick={() => setTab(key)}
+                            onClick={() => { setTab(key); trackEvent('切换个人档案标签页', { tab: key }); }}
                             className={`px-4 py-1.5 rounded-full text-xs font-bold transition-colors ${
                                 tab === key ? 'bg-primary text-white shadow-sm' : 'bg-slate-100 text-slate-400'
                             }`}

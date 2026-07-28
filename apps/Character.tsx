@@ -26,6 +26,7 @@ import { COMMON_TIMEZONES } from '../utils/timezone';
 import { toMountedWorldbook } from '../utils/worldbook';
 import { stripSensitiveCardFields } from '../utils/characterCard';
 import { confirmExportSafety } from '../utils/exportGuard';
+import { trackEvent } from '../utils/analytics';
 import { sortCharacterGroups, GROUP_FILTER_UNGROUPED } from '../components/character/CharacterGroupFilter';
 
 // ── 神经链接 · 列表页视觉件（淡紫留白风）────────────────────
@@ -203,6 +204,7 @@ const Character: React.FC = () => {
           notes: formData.voiceProfile?.notes || '',
       });
       addToast(`已应用音色：${voice.voice_name || voice.voice_id}`, 'success');
+      trackEvent('应用音色到角色', { source });
   };
 
   // Load archive prompts from localStorage (shared with ChatApp)
@@ -331,6 +333,7 @@ const Character: React.FC = () => {
       handleChange('mountedWorldbooks', [...currentBooks, newBookEntry]);
       setShowWorldbookModal(false);
       addToast(`已挂载: ${book.title}`, 'success');
+      trackEvent('给角色挂载世界书');
   };
 
   // New: Mount entire category
@@ -393,6 +396,7 @@ const Character: React.FC = () => {
       setWbModalSearch('');
       setWbModalExpandedCategory(null);
       setShowWorldbookModal(true);
+      trackEvent('打开挂载世界书弹窗');
   };
 
   // ... (Other handlers unchanged)
@@ -430,6 +434,7 @@ const Character: React.FC = () => {
       if (!formData) return;
 
       const targetId = formData.id; // LOCK ID
+      trackEvent('提炼当月核心记忆');
 
       // Build lightweight character identity context (no memories - we're generating those)
       let identityContext = `[角色身份]\n名字: ${formData.name}\n`;
@@ -599,6 +604,7 @@ const Character: React.FC = () => {
       const targetId = formData.id; // LOCK ID
       setIsProcessingMemory(true); 
       setImportStatus('正在链接神经云端进行清洗...'); 
+      trackEvent('执行记忆导入清洗');
       
       try { 
           const prompt = `Task: Convert this text log into a JSON array. Format: [{ "date": "YYYY-MM-DD", "summary": "...", "mood": "..." }] Text: ${importText.substring(0, 8000)}`; 
@@ -634,6 +640,7 @@ const Character: React.FC = () => {
         const targetId = formData.id; // LOCK ID
         setIsBatchProcessing(true);
         setBatchProgress('Initializing...');
+        trackEvent('执行批量记忆总结');
         
         try {
             const msgs = await DB.getMessagesByCharId(targetId, true);
@@ -755,6 +762,7 @@ const Character: React.FC = () => {
       
       const targetId = formData.id; // LOCK ID
       setIsGeneratingImpression(true);
+      trackEvent('生成角色印象', { type });
       try {
           const charName = formData.name;
           const boundUser = userProfile;
@@ -928,6 +936,8 @@ ${isInitialGeneration ? `
       // 导出前明文密钥体检 + 二次确认：正常为「安全，可分享」；若意外检出密钥则中止并提示上报。
       if (!(await confirmExportSafety(exportData))) return;
 
+      trackEvent('导出角色卡');
+
       const json = JSON.stringify(exportData, null, 2);
       const fileName = `${formData.name || 'Character'}_Card.json`;
       
@@ -1042,6 +1052,7 @@ ${isInitialGeneration ? `
               } as CharacterProfile;
 
               await DB.saveCharacter(newChar);
+              trackEvent('导入角色卡');
               // 不要调用 addCharacter()——它不是"刷新"，而是真的新建一个空白
               // "New Character" 并写进 DB，reload 后就会多出一张空白卡。
               // 导入的角色已经存进了 DB（上一行），reload 时 OSContext 会从
@@ -1075,7 +1086,7 @@ ${isInitialGeneration ? `
                        <p className="text-xs text-violet-400/90 mt-2">已建立 <span className="font-bold text-violet-500">{characters.length}</span> 个角色连接</p>
                    </div>
                    <div className="flex gap-3 pt-1">
-                        <ToolButton label="分组" title="角色分组管理" onClick={() => setShowGroupModal(true)}>
+                        <ToolButton label="分组" title="角色分组管理" onClick={() => { setShowGroupModal(true); trackEvent('打开角色分组管理弹窗'); }}>
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-5 h-5">
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" />
                             </svg>
@@ -1208,11 +1219,11 @@ ${isInitialGeneration ? `
                        <button onClick={() => { setActiveCharacterId(formData.id); openApp(AppID.Chat); }} className="text-xs px-3 py-1.5 bg-primary text-white rounded-full font-bold shadow-sm shadow-primary/30 flex items-center gap-1 active:scale-95 transition-transform"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path d="M3.105 2.288a.75.75 0 0 0-.826.95l1.414 4.926H16.5a.75.75 0 0 1 0 1.5H3.693l-1.414 4.926a.75.75 0 0 0 .826.95 28.897 28.897 0 0 0 15.293-7.155.75.75 0 0 0 0-1.114A28.897 28.897 0 0 0 3.105 2.288Z" /></svg>发消息</button>
                    </div>
                    <div className="flex gap-6 text-sm font-medium text-slate-400 pl-1">
-                       <button onClick={() => setDetailTab('identity')} className={`pb-2 transition-colors relative ${detailTab === 'identity' ? 'text-slate-800' : ''}`}>设定{detailTab === 'identity' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
-                       <button onClick={() => setDetailTab('memory')} className={`pb-2 transition-colors relative ${detailTab === 'memory' ? 'text-slate-800' : ''}`}>记忆 ({(formData.memories || []).length}){detailTab === 'memory' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
-                       <button onClick={() => setDetailTab('impression')} className={`pb-2 transition-colors relative ${detailTab === 'impression' ? 'text-slate-800' : ''}`}>印象{detailTab === 'impression' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
-                       <button onClick={() => setDetailTab('plates')} className={`pb-2 transition-colors relative ${detailTab === 'plates' ? 'text-slate-800' : ''}`}>门牌{detailTab === 'plates' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
-                       <button onClick={() => setDetailTab('chibi')} className={`pb-2 transition-colors relative ${detailTab === 'chibi' ? 'text-slate-800' : ''}`}>手办{detailTab === 'chibi' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('identity'); trackEvent('切换角色详情标签页', { tab: 'identity' }); }} className={`pb-2 transition-colors relative ${detailTab === 'identity' ? 'text-slate-800' : ''}`}>设定{detailTab === 'identity' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('memory'); trackEvent('切换角色详情标签页', { tab: 'memory' }); }} className={`pb-2 transition-colors relative ${detailTab === 'memory' ? 'text-slate-800' : ''}`}>记忆 ({(formData.memories || []).length}){detailTab === 'memory' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('impression'); trackEvent('切换角色详情标签页', { tab: 'impression' }); }} className={`pb-2 transition-colors relative ${detailTab === 'impression' ? 'text-slate-800' : ''}`}>印象{detailTab === 'impression' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('plates'); trackEvent('切换角色详情标签页', { tab: 'plates' }); }} className={`pb-2 transition-colors relative ${detailTab === 'plates' ? 'text-slate-800' : ''}`}>门牌{detailTab === 'plates' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('chibi'); trackEvent('切换角色详情标签页', { tab: 'chibi' }); }} className={`pb-2 transition-colors relative ${detailTab === 'chibi' ? 'text-slate-800' : ''}`}>手办{detailTab === 'chibi' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
                    </div>
                  </div>
                </div>
@@ -1401,7 +1412,7 @@ ${isInitialGeneration ? `
                                            <p className="text-[10px] text-slate-400 mt-0.5 leading-relaxed">默认关。关闭时不注入任何生活记录内容，连代记指令的用法都不会教给角色。</p>
                                        </div>
                                        <button
-                                           onClick={() => handleChange('lifeRecordEnabled', !formData.lifeRecordEnabled)}
+                                           onClick={() => { handleChange('lifeRecordEnabled', !formData.lifeRecordEnabled); trackEvent('开启角色生活记录注入', { state: formData.lifeRecordEnabled ? 'off' : 'on' }); }}
                                            className={`w-12 h-7 rounded-full transition-colors relative shrink-0 ${formData.lifeRecordEnabled ? 'bg-primary' : 'bg-slate-200'}`}
                                        >
                                            <div className={`absolute top-0.5 w-6 h-6 bg-white rounded-full shadow-md transition-transform ${formData.lifeRecordEnabled ? 'translate-x-5' : 'translate-x-0.5'}`}></div>
@@ -1597,7 +1608,7 @@ ${isInitialGeneration ? `
                    {detailTab === 'memory' && (
                        <div className="space-y-4 animate-fade-in">
                            <div className="flex justify-center gap-2 mb-4">
-                               <button onClick={() => setShowBatchModal(true)} className="px-4 py-2 bg-white rounded-full text-xs font-semibold text-slate-500 shadow-sm border border-slate-100">批量总结（可指定日期）</button>
+                               <button onClick={() => { setShowBatchModal(true); trackEvent('打开批量记忆总结弹窗'); }} className="px-4 py-2 bg-white rounded-full text-xs font-semibold text-slate-500 shadow-sm border border-slate-100">批量总结（可指定日期）</button>
                                <button onClick={() => setShowImportModal(true)} className="px-4 py-2 bg-white rounded-full text-xs font-semibold text-slate-500 shadow-sm border border-slate-100">导入/清洗</button>
                                <button onClick={handleExportPreview} className="px-4 py-2 bg-white rounded-full text-xs font-semibold text-slate-500 shadow-sm border border-slate-100">备份</button>
                            </div>
@@ -1631,7 +1642,7 @@ ${isInitialGeneration ? `
                    )}
 
                    {detailTab === 'chibi' && formData.id && (
-                       <ChibiShelfPanel charId={formData.id} onOpen={() => setShowChibiStudio(true)} />
+                       <ChibiShelfPanel charId={formData.id} onOpen={() => { setShowChibiStudio(true); trackEvent('打开QQ捏人工坊'); }} />
                    )}
 
                    {detailTab === 'plates' && formData.id && (

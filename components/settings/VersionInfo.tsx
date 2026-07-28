@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { querySwVersion } from '../../utils/swVersion';
 import { APP_VERSION, BUILD_LABEL } from '../../utils/buildInfo';
 import { isDevDebugAvailable, subscribeDevDebugAvailability, unlockDevDebug } from '../../utils/devDebug';
+import { trackEvent } from '../../utils/analytics';
 
 /**
  * Settings 底部的版本信息脚注。
@@ -23,6 +24,10 @@ import { isDevDebugAvailable, subscribeDevDebugAvailability, unlockDevDebug } fr
 const UNLOCK_TAP_COUNT = 5;
 const TAP_RESET_MS = 2000;
 
+// 「SW 有没有应答」每次会话只报一次：设置页反复开关会重复查询，重复上报会把
+// 这项的分母冲淡。标记只存内存变量，标签页一关就没了（跟 utils/analytics.ts 同口径）。
+let swVersionResultReported = false;
+
 const VersionInfo: React.FC = () => {
     const [swVersion, setSwVersion] = useState<string>('…');
     // available = 面板当前是否可用（非 prod 默认 true；prod 解锁后 true；强制关闭后 false）。
@@ -34,7 +39,15 @@ const VersionInfo: React.FC = () => {
 
     useEffect(() => {
         let cancelled = false;
-        querySwVersion().then((v) => { if (!cancelled) setSwVersion(v); });
+        querySwVersion().then((v) => {
+            if (!cancelled) setSwVersion(v);
+            if (!swVersionResultReported) {
+                swVersionResultReported = true;
+                // 只报「SW 有没有回话」。'?' = 没注册 / 被禁用 / 1.5 秒内没回包，
+                // 版本号字符串本身不上报。
+                trackEvent('查询 Service Worker 版本', { 结果: v === '?' ? '无应答' : '已应答' });
+            }
+        });
         return () => { cancelled = true; };
     }, []);
 
@@ -61,6 +74,7 @@ const VersionInfo: React.FC = () => {
         if (remaining <= 0) {
             tapCountRef.current = 0;
             unlockDevDebug();
+            trackEvent('连点版本号解锁调试面板');
             showHint('🔧 调试面板已解锁（刷新即关闭）', 2600);
             return;
         }

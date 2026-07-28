@@ -27,6 +27,7 @@ import {
     getRangeEndpointLabel,
     getRangeSelectionHint,
 } from '../utils/memoryPalace/rangeSelection';
+import { trackEvent } from '../utils/analytics';
 
 /** 手动总结面板：每页渲染多少条聊天记录（翻页，避免一次性塞几百条 DOM 卡顿） */
 const RANGE_PAGE_SIZE = 50;
@@ -532,6 +533,7 @@ export default function MemoryPalaceApp() {
         }
         setBootstrapping(true);
         setBootstrapStatus(null);
+        trackEvent('整理历史记忆到门牌');
         try {
             // 每按一次只清一小段（断点续传）：上千条记忆的用户不会被一长串批次吓到，
             // 也随时可以停——进度存在本地，下次按继续
@@ -737,6 +739,7 @@ export default function MemoryPalaceApp() {
         const detectingCharId = char.id;
         const persona = [char.systemPrompt || '', char.worldview || ''].filter(Boolean).join('\n');
         setDetectingPersonality(true);
+        trackEvent('评估角色认知参数');
         detectPersonalityStyle(detectingCharId, char.name, persona, llm)
             .then(result => {
                 setPendingPersonality(result);
@@ -884,6 +887,7 @@ export default function MemoryPalaceApp() {
 
     const openAllBoxes = async () => {
         if (!char) return;
+        trackEvent('打开事件盒列表');
         const boxes = await EventBoxDB.getByCharId(char.id);
         boxes.sort((a, b) => b.updatedAt - a.updatedAt);
         setAllBoxes(boxes);
@@ -1019,6 +1023,7 @@ export default function MemoryPalaceApp() {
 
     const openRoom = async (room: MemoryRoom) => {
         if (!char) return;
+        trackEvent('打开记忆宫殿房间', { room });
         const nodes = await MemoryNodeDB.getByRoom(char.id, room);
         nodes.sort((a: MemoryNode, b: MemoryNode) => b.createdAt - a.createdAt);
         setRoomNodes(nodes);
@@ -1187,6 +1192,7 @@ export default function MemoryPalaceApp() {
 
     // 切换"记忆宫殿"总开关（picker 卡片上）
     const handleTogglePalaceFromPicker = (charId: string, on: boolean) => {
+        trackEvent('开启记忆宫殿', { enabled: on ? 'on' : 'off' });
         if (on) {
             updateCharacter(charId, { memoryPalaceEnabled: true } as any);
         } else {
@@ -1204,6 +1210,7 @@ export default function MemoryPalaceApp() {
 
     // 切换"全自动记忆"（原 autoArchive）开关：复用原 Character.tsx 中的追平逻辑
     const handleToggleAutoArchiveFromPicker = async (charId: string, on: boolean): Promise<void> => {
+        trackEvent('开启全自动记忆', { enabled: on ? 'on' : 'off' });
         const target = characters.find(c => c.id === charId);
         if (!target) return;
 
@@ -1359,6 +1366,7 @@ export default function MemoryPalaceApp() {
     // 远程向量：同步本地到远程
     const handleSyncToRemote = async () => {
         setRvSyncing(true);
+        trackEvent('同步记忆向量到云端');
         try {
             const { syncLocalToRemote } = await import('../utils/memoryPalace/supabaseVector');
             const { MemoryNodeDB } = await import('../utils/memoryPalace/db');
@@ -1405,6 +1413,7 @@ export default function MemoryPalaceApp() {
     // 打开区间选择弹窗：加载该角色全部聊天记录（含已被自动总结过的）
     const openRangeModal = async () => {
         if (!char) return;
+        trackEvent('打开手动区间总结面板');
         setRangeModalOpen(true);
         setRangeLoading(true);
         setRangeResult(null);
@@ -1467,6 +1476,7 @@ export default function MemoryPalaceApp() {
         setRangeRunning(true);
         setRangeResult(null);
         setRangeProgress('准备中...');
+        trackEvent('运行手动区间总结');
         try {
             const { processMessageRange } = await import('../utils/memoryPalace/pipeline');
             const r = await processMessageRange(
@@ -1552,6 +1562,7 @@ export default function MemoryPalaceApp() {
 
     const handleDigest = async () => {
         if (!char || digesting) return;
+        trackEvent('手动触发认知消化');
         const lightApi = memoryPalaceConfig.lightLLM;
         if (!lightApi?.baseUrl) {
             setDigestResult('[err]请先在设置中配置副 API');
@@ -1687,6 +1698,7 @@ export default function MemoryPalaceApp() {
 
         setWiping(true);
         setWipeResult(null);
+        trackEvent('清空全部记忆数据', { scope: includeRemote ? 'all' : 'local' });
         try {
             const result = await wipeAllMemoryPalace({
                 remoteConfig: includeRemote ? remoteVectorConfig : undefined,
@@ -1748,6 +1760,7 @@ export default function MemoryPalaceApp() {
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
+            trackEvent('导出记忆宫殿备份');
             const vecPart = exportWithVectors ? `、${c.vectors} 条向量` : '';
             setExportResult(`[ok]已导出 ${nodeCount} 条记忆、${c.eventBoxes} 个事件盒、${c.anticipations} 个期盼${vecPart}`);
         } catch (e: any) {
@@ -1782,6 +1795,7 @@ export default function MemoryPalaceApp() {
             )) return;
 
             const result = await importMemoryPalace(data, char.id);
+            trackEvent('导入记忆宫殿备份');
             const vecPart = result.vectors > 0 ? `、${result.vectors} 条向量` : '';
             const platePart = result.roomPlateEntries > 0 ? `、${result.roomPlateEntries} 条门牌认知` : '';
             setImportResult(
@@ -5355,6 +5369,7 @@ create table if not exists memory_vectors (
                                                             // 新版：绑入 EventBox（取代旧的 causal MemoryLink 单边关联）
                                                             const box = await manuallyBindMemories(char!.id, selectedNode.id, node.id);
                                                             if (box) {
+                                                                trackEvent('手动关联两条记忆');
                                                                 // 重新加载兄弟列表，展示最新 box 状态
                                                                 await loadLinkedMemories(selectedNode.id);
                                                             }

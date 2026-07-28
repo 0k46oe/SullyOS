@@ -15,6 +15,7 @@ import {
     writeDevDebugFlags,
 } from '../utils/devDebug';
 import { BUILD_LABEL } from '../utils/buildInfo';
+import { trackEvent } from '../utils/analytics';
 import { resetLoyalRecruitmentForTesting } from '../utils/loyalUserRecruitment';
 import type { DevDebugCaptureCategory, DevDebugFlags, DevDebugFloatingPosition } from '../utils/devDebug';
 
@@ -224,6 +225,7 @@ const DevDebugPanel: React.FC = () => {
                 : current.captureLogs.filter((item) => item !== category),
         };
         setFlags(writeDevDebugFlags(next));
+        trackEvent('勾选调试日志类别', { 类别: category, 状态: checked ? '勾选' : '取消' });
     };
     const resetFlags = () => {
         // 重置 = 回默认（总开关关 + 清空勾选）+ 清空所有日志，比「全不勾」更彻底。
@@ -231,16 +233,19 @@ const DevDebugPanel: React.FC = () => {
         // 是为了「即便上次就是 false」时也保证清干净（重置语义包含清理日志）。
         setFlags(writeDevDebugFlags(DEFAULT_DEV_DEBUG_FLAGS));
         clearDevDebugLog();
+        trackEvent('重置调试面板', { 范围: '开关与日志' });
     };
     const handleForceClose = () => {
         // 「关闭」= 收起 + 位置回默认（纯内存）+ 强制关掉；任意分支生效，里面的开关另存不动。
         setOpen(false);
         setFloatingPosition(getDefaultFloatingPosition());
         closeDevDebug();
+        trackEvent('强制关闭调试面板');
     };
     const resetRecruitment = () => {
         if (!window.confirm('清除本机的社区迁移检测结果并刷新？仅用于测试不同数据集。')) return;
         resetLoyalRecruitmentForTesting();
+        trackEvent('重测社区迁移检测');
         window.location.reload();
     };
     const copyLog = async () => {
@@ -248,6 +253,7 @@ const DevDebugPanel: React.FC = () => {
         if (!text) return;
         await navigator.clipboard.writeText(text);
         setCopied(true);
+        trackEvent('导出调试日志', { 方式: '复制' });
         window.setTimeout(() => setCopied(false), 1200);
     };
     const downloadLog = () => {
@@ -263,6 +269,7 @@ const DevDebugPanel: React.FC = () => {
         anchor.click();
         anchor.remove();
         URL.revokeObjectURL(url);
+        trackEvent('导出调试日志', { 方式: '下载' });
     };
     const handlePointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
         if (open || (event.pointerType === 'mouse' && event.button !== 0)) return;
@@ -324,6 +331,7 @@ const DevDebugPanel: React.FC = () => {
             return;
         }
         setOpen(true);
+        trackEvent('打开调试面板');
     };
 
     if (!available) return null;
@@ -417,7 +425,10 @@ const DevDebugPanel: React.FC = () => {
                         <ToggleRow
                             title="记录日志"
                             checked={flags.captureEnabled}
-                            onChange={(checked) => updateFlag('captureEnabled', checked)}
+                            onChange={(checked) => {
+                                updateFlag('captureEnabled', checked);
+                                trackEvent('切换调试日志录制', { 状态: checked ? '开' : '关' });
+                            }}
                         />
                         {flags.captureEnabled && (
                             <>
@@ -446,7 +457,10 @@ const DevDebugPanel: React.FC = () => {
                                     />
                                     {/* 「清空」只清日志，不动开关 / 勾选；区别于「重置」（连开关一起回默认）和关掉总开关（清完后类型 UI 也收起）。 */}
                                     <LogActionButton
-                                        onClick={() => clearDevDebugLog()}
+                                        onClick={() => {
+                                            clearDevDebugLog();
+                                            trackEvent('重置调试面板', { 范围: '仅日志' });
+                                        }}
                                         disabled={logCount === 0}
                                         icon={<Trash size={13} weight="bold" />}
                                         label="清空"
