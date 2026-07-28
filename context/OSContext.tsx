@@ -937,7 +937,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       setApiCallAmbientContext({ appId: activeApp, appName, charId: char?.id, charName: char?.name });
   }, [activeApp, activeCharacterId, characters]);
 
-  // --- 匿名统计：打开了哪个 App ---
+  // --- 使用统计：打开了哪个 App ---
   // 挂在 activeApp 上而不是塞进 openApp，是因为进一个 App 有好几条路（桌面点图标、
   // 从聊天直接进见面、通话挂起后回来…），activeApp 是它们唯一的共同落点。
   // 回桌面不算「用了某个功能」，跳过。只发功能名，不带角色、不带任何内容。
@@ -948,7 +948,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       trackEvent(`打开${appName}`);
   }, [activeApp]);
 
-  // --- 匿名统计：数据规模档位 ---
+  // --- 使用统计：数据规模档位 ---
   // 数据加载完之后报一次区间（0 / 1-100 / …），不报精确值、不报任何内容。
   // 聊天条数走 IndexedDB 的 count()，一条消息都不会被读出来；存储占用是浏览器
   // 给的字节数。每次会话最多一次，节流标记只在内存里（见 utils/analytics.ts）。
@@ -974,7 +974,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       })();
   }, [isDataLoaded, characters]);
 
-  // --- 匿名统计：当前在用哪套外观 ---
+  // --- 使用统计：当前在用哪套外观 ---
   // 报「现在用的是哪个」而不是「点过哪个」——后者只有折腾的人会出现，
   // 拿来决定砍哪个预设会砍反。用户自己捏的主题一律记 custom，不带他起的名字。
   useEffect(() => {
@@ -1029,7 +1029,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       });
   }, [isDataLoaded, characters, activeCharacterId, theme]);
 
-  // --- 匿名统计：角色级设置 ---
+  // --- 使用统计：角色级设置 ---
   // 两种问法，别混：
   //   · 开关类 → 问「有没有人开过 / 有没有人特意关掉」，看的是这个功能有没有人要
   //   · 选择类 → 报当前活跃角色选的那个，看的是各选项的占比

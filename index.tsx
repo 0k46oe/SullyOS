@@ -23,7 +23,7 @@ KeepAlive.init().then(() => {
 
 installIOSStandaloneWorkaround();
 
-// 匿名聚合统计。构建时没配 VITE_UMAMI_* 就整个不生效，自部署实例默认如此。
+// 使用统计。构建时没配 VITE_UMAMI_* 就整个不生效，自部署实例默认如此。
 // 用户关掉开关、或浏览器开了 DNT，同样在这里就返回，连脚本都不会挂上去。
 initAnalytics();
 

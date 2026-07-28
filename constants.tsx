@@ -118,7 +118,7 @@ export const INSTALLED_APPS: AppConfig[] = [
   // { id: AppID.QQBridge, name: 'QQ 桥', icon: 'QQBridge', color: 'sky' }, // Hidden temporarily
 ];
 
-// 桌面上没有图标、但仍能从别处进去的 App。匿名统计要靠这份补上中文名——
+// 桌面上没有图标、但仍能从别处进去的 App。使用统计要靠这份补上中文名——
 // 只查 INSTALLED_APPS 的话这些 App 会被静默漏掉（比如「家园」是从小小窝进的）。
 export const HIDDEN_APP_NAMES: Partial<Record<AppID, string>> = {
   [AppID.WorldHome]: '家园',

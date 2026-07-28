@@ -2466,12 +2466,12 @@ const Settings: React.FC = () => {
             </section>
         )}
 
-        {/* ───────── 匿名统计 ─────────
+        {/* ───────── 使用统计 ─────────
             只在配了统计环境变量的构建里显示。自部署实例本来就一个统计请求都不发，
             给个关不掉也没东西可关的开关只会更让人犯嘀咕。 */}
         {isAnalyticsConfigured() && (
         <SettingsSection
-            title="匿名统计"
+            title="使用统计"
             icon={
                 <div className="p-2 bg-slate-100/60 rounded-xl text-slate-500">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
@@ -2482,7 +2482,7 @@ const Settings: React.FC = () => {
         >
             <div className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm font-bold text-slate-600">参与匿名统计</span>
+                    <span className="text-sm font-bold text-slate-600">参与使用统计</span>
                     <label className="relative inline-flex items-center cursor-pointer shrink-0">
                         <input
                             type="checkbox"
