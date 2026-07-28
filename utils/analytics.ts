@@ -113,6 +113,13 @@ export function initAnalytics(): void {
   // 上面已经自己挡过一次 DNT 了，这里再挂一道：脚本自己也认这个属性，
   // 万一以后加载路径改了，这层不会跟着一起失效。
   script.setAttribute('data-do-not-track', 'true');
+  // 页面访问只记路径，URL 查询串和 # 后内容不采集。冷启动点开推送通知时，
+  // URL 上挂着 ?openApp=chat&activeMsgCharId=<角色id>（见 sw-keep-alive 的
+  // notificationclick），而清参数的 handleDeepLink 排在好几个 await 之后，
+  // 赶不上脚本加载完就发的那次页面访问。与其赌时序，不如让 tracker 从源头不收——
+  // 角色 id 是稳定标识，进了库就是跨月关联器，一次都不能漏。
+  script.setAttribute('data-exclude-search', 'true');
+  script.setAttribute('data-exclude-hash', 'true');
   // 关掉自动上报，页面访问由下面这行显式发——见文件头注释。
   script.setAttribute('data-auto-track', 'false');
   script.addEventListener('load', () => {

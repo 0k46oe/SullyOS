@@ -134,6 +134,17 @@ describe('tracker 标签', () => {
         expect(domains).toEqual(['qegj567-cloud.github.io', 'sully-os-nu.vercel.app']);
     });
 
+    it('不采集 URL 查询串和 hash —— 推送深链会把角色 id 挂在参数上', async () => {
+        // 冷启动点开推送通知时，URL 是 ?openApp=chat&activeMsgCharId=<角色id>，
+        // 清参数的 handleDeepLink 跑在好几个 await 之后，赶不上脚本加载完就发的页面访问。
+        // 所以必须让 tracker 从源头不收参数，而不是赌清理的时序。
+        const a = await loadModule(true);
+        a.initAnalytics();
+
+        expect(appended[0].attrs['data-exclude-search']).toBe('true');
+        expect(appended[0].attrs['data-exclude-hash']).toBe('true');
+    });
+
     it('脚本加载完才发页面访问，且只发一次', async () => {
         installFakeDom({ withUmami: true });
         const a = await loadModule(true);
