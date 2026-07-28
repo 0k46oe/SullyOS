@@ -551,7 +551,7 @@ const PhoneShell: React.FC = () => {
     if (marker) setImportRecoveryMarker(marker);
   }, [showDisclaimer, importRecoveryDismissed, importRecoveryMarker]);
 
-  // 匿名统计：导入中断提醒弹出来时报一次。只带「失败/中断」和阶段这两个固定枚举，
+  // 使用统计：导入中断提醒弹出来时报一次。只带「失败/中断」和阶段这两个固定枚举，
   // marker 里的报错正文、备份文件名、当前文件名、各种进度数字一概不带。
   useEffect(() => {
     if (showDisclaimer || !showImportRecoveryPrompt) return;

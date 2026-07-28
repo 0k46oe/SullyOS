@@ -595,7 +595,7 @@ export const DB = {
 
   /**
    * 某个角色的聊天条数。走 charId 索引的 count()，**一条消息都不会被读出来**，
-   * IndexedDB 只回一个数字。匿名统计的规模档位用它，别拿 getMessagesByCharId
+   * IndexedDB 只回一个数字。使用统计的规模档位用它，别拿 getMessagesByCharId
    * 去 length ——那会把整段聊天记录读进内存。
    */
   countMessagesByCharId: async (charId: string): Promise<number> => {

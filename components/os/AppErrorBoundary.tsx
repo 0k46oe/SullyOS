@@ -61,7 +61,7 @@ class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundary
 
     componentDidCatch(error: Error, errorInfo: ErrorInfo) {
         console.error('App Crash:', error, errorInfo);
-        // 匿名统计: 只报「哪个 App 崩了 + 是哪一类崩」。报错文本留在 console, 不进上报。
+        // 使用统计: 只报「哪个 App 崩了 + 是哪一类崩」。报错文本留在 console, 不进上报。
         const appName = this.currentAppName();
         trackEvent('触发 App 崩溃兜底页', {
             错误类型: isChunkLoadError(error) ? '资源加载失败' : '运行错误',
