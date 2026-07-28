@@ -69,6 +69,26 @@ export interface DesktopDecoration {
   flip?: boolean;
 }
 
+export type ScheduleCardPresetId =
+  | 'original'
+  | 'cream'
+  | 'sakura'
+  | 'mint'
+  | 'twilight'
+  | 'midnight'
+  | 'custom';
+
+/** 全局日程卡片皮肤：所有桌面组件、房间页与聊天日程弹窗共用。 */
+export interface ScheduleCardAppearance {
+  preset?: ScheduleCardPresetId;
+  /** preset='custom' 时使用；支持颜色或 CSS 渐变。 */
+  background?: string;
+  textColor?: string;
+  accentColor?: string;
+  /** 仅允许 .sully-schedule-* 作用域的进阶美化。 */
+  customCss?: string;
+}
+
 export interface OSTheme {
   hue: number;
   saturation: number;
@@ -96,6 +116,8 @@ export interface OSTheme {
   preserveCustomIconOutlines?: boolean;
   /** 默认皮肤桌面「正在播放」音乐卡片改用浅色系样式（新安装默认 true）。 */
   nowPlayingWidgetLight?: boolean;
+  /** 日程卡片统一皮肤：桌面、全屏、房间与聊天内同步。 */
+  scheduleCardAppearance?: ScheduleCardAppearance;
   desktopDecorations?: DesktopDecoration[];
   customFont?: string;
   hideStatusBar?: boolean;
