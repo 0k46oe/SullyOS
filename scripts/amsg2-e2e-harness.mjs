@@ -621,7 +621,8 @@ try {
     check('clearClientState 成功且删除了条目', r?.success === true && (r?.data?.deleted ?? 0) > 0, JSON.stringify(r));
   }
 
-  // S8 / S8b 共用全局 namespace 的那行 tool_config（后者会覆盖前者），必须顺序跑。
+  // S8 / S8b 共用全局 namespace 的那行 tool_config（后者覆盖前者），必须顺序跑；
+  // 跑完这两段它就停在「带 MCP 配置」的版本，后面再加场景要自己重写这一行。
   section('S8 通用 MCP · native：tools 声明 → 真连服务器 → 结果回喂 → 暗号进 push');
   {
     const now = Date.now();
