@@ -10,6 +10,9 @@ import { ContextBuilder } from '../utils/context';
 import { safeResponseJson } from '../utils/safeApi';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
+import { getCalendarDayDifference, getLocalDateKey } from '../utils/localDate';
+import { useLocalDateKey } from '../hooks/useLocalDateKey';
+import { trackEvent } from '../utils/analytics';
 
 const TWEMOJI_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72';
 const twemojiUrl = (codepoint: string) => `${TWEMOJI_BASE}/${codepoint}.png`;
@@ -75,6 +78,7 @@ const THEMES: Record<ThemeMode, any> = {
 
 const ScheduleApp: React.FC = () => {
     const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, characterGroups } = useOS();
+    const localDateKey = useLocalDateKey();
     const [tasks, setTasks] = useState<Task[]>([]);
     const [anniversaries, setAnniversaries] = useState<Anniversary[]>([]);
     const [activeTab, setActiveTab] = useState<'quest' | 'server_events'>('quest');
@@ -115,6 +119,7 @@ const ScheduleApp: React.FC = () => {
         const nextMode = modes[nextIndex];
         setCurrentThemeMode(nextMode);
         localStorage.setItem('schedule_app_theme', nextMode);
+        trackEvent('切换日程界面主题', { theme: nextMode });
     };
 
     const loadData = async () => {
@@ -225,7 +230,7 @@ const ScheduleApp: React.FC = () => {
              addToast(`${char.name} 正在查阅日历...`, 'info');
         }
 
-        const daysDiff = Math.ceil((new Date(anni.date).getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24));
+        const daysDiff = getCalendarDayDifference(getLocalDateKey(), anni.date) ?? 0;
         const dayText = daysDiff > 0 ? `还有 ${daysDiff} 天` : (daysDiff === 0 ? '就是今天!' : `已经过去 ${Math.abs(daysDiff)} 天了`);
 
         // RESTORED: Full context
@@ -350,17 +355,12 @@ const ScheduleApp: React.FC = () => {
     // --- Render Helpers ---
 
     const getDaysUntil = (dateStr: string) => {
-        const today = new Date();
-        today.setHours(0,0,0,0);
-        const target = new Date(dateStr);
-        target.setHours(0,0,0,0);
-        const diff = target.getTime() - today.getTime();
-        return Math.ceil(diff / (1000 * 60 * 60 * 24));
+        return getCalendarDayDifference(localDateKey, dateStr) ?? Number.POSITIVE_INFINITY;
     };
 
     const upcomingAnni = useMemo(() => {
         return anniversaries.filter(a => getDaysUntil(a.date) >= 0).sort((a, b) => a.date.localeCompare(b.date))[0];
-    }, [anniversaries]);
+    }, [anniversaries, localDateKey]);
 
     // Trigger thoughts for upcoming anniversary on load
     useEffect(() => {
@@ -401,8 +401,8 @@ const ScheduleApp: React.FC = () => {
 
                 {/* Tabs */}
                 <div className={`flex gap-1 p-1 rounded-lg ${currentThemeMode === 'cyber' ? 'bg-black/40 border border-cyan-900/50' : (currentThemeMode === 'minimal' ? 'bg-[#eef2f6] shadow-[inset_2px_2px_5px_#d1d9e6,inset_-2px_-2px_5px_#ffffff]' : 'bg-white/50')}`}>
-                    <button onClick={() => setActiveTab('quest')} className={`px-4 py-1.5 rounded text-xs font-bold transition-all ${activeTab === 'quest' ? `${theme.accent} ${currentThemeMode === 'cyber' ? 'bg-cyan-900/50 shadow-sm' : (currentThemeMode === 'minimal' ? 'shadow-[2px_2px_5px_#d1d9e6,-2px_-2px_5px_#ffffff] bg-[#eef2f6]' : 'bg-white shadow-sm')}` : `${theme.textSub}`}`}>{theme.label}</button>
-                    <button onClick={() => setActiveTab('server_events')} className={`px-4 py-1.5 rounded text-xs font-bold transition-all ${activeTab === 'server_events' ? `${theme.accent} ${currentThemeMode === 'cyber' ? 'bg-cyan-900/50 shadow-sm' : (currentThemeMode === 'minimal' ? 'shadow-[2px_2px_5px_#d1d9e6,-2px_-2px_5px_#ffffff] bg-[#eef2f6]' : 'bg-white shadow-sm')}` : `${theme.textSub}`}`}>{theme.eventLabel}</button>
+                    <button onClick={() => { setActiveTab('quest'); trackEvent('切换日程标签页', { tab: 'quest' }); }} className={`px-4 py-1.5 rounded text-xs font-bold transition-all ${activeTab === 'quest' ? `${theme.accent} ${currentThemeMode === 'cyber' ? 'bg-cyan-900/50 shadow-sm' : (currentThemeMode === 'minimal' ? 'shadow-[2px_2px_5px_#d1d9e6,-2px_-2px_5px_#ffffff] bg-[#eef2f6]' : 'bg-white shadow-sm')}` : `${theme.textSub}`}`}>{theme.label}</button>
+                    <button onClick={() => { setActiveTab('server_events'); trackEvent('切换日程标签页', { tab: 'server_events' }); }} className={`px-4 py-1.5 rounded text-xs font-bold transition-all ${activeTab === 'server_events' ? `${theme.accent} ${currentThemeMode === 'cyber' ? 'bg-cyan-900/50 shadow-sm' : (currentThemeMode === 'minimal' ? 'shadow-[2px_2px_5px_#d1d9e6,-2px_-2px_5px_#ffffff] bg-[#eef2f6]' : 'bg-white shadow-sm')}` : `${theme.textSub}`}`}>{theme.eventLabel}</button>
                 </div>
 
                 {/* Right Actions */}
@@ -415,7 +415,7 @@ const ScheduleApp: React.FC = () => {
                     </button>
 
                     {/* Add Button */}
-                    <button onClick={() => activeTab === 'quest' ? setShowTaskModal(true) : setShowAnniModal(true)} className={`p-2 rounded-full active:scale-90 transition-transform ${theme.accent} ${currentThemeMode === 'minimal' ? 'shadow-[4px_4px_8px_#d1d9e6,-4px_-4px_8px_#ffffff]' : 'hover:bg-white/10'}`}>
+                    <button onClick={() => { activeTab === 'quest' ? setShowTaskModal(true) : setShowAnniModal(true); trackEvent('打开新建条目弹窗', { kind: activeTab }); }} className={`p-2 rounded-full active:scale-90 transition-transform ${theme.accent} ${currentThemeMode === 'minimal' ? 'shadow-[4px_4px_8px_#d1d9e6,-4px_-4px_8px_#ffffff]' : 'hover:bg-white/10'}`}>
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
                     </button>
                 </div>

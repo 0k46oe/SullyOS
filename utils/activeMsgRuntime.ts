@@ -988,6 +988,12 @@ const handleDeepLink = () => {
     window.dispatchEvent(new CustomEvent('active-msg-open', {
       detail: { charId },
     }));
+  }
+
+  // 参数只要出现过就从地址栏清掉，不管齐不齐——角色 id 留在 URL 里，
+  // 收藏、分享、截图都会把它带出去。统计侧另有 data-exclude-search 兜底
+  // （见 utils/analytics.ts），这里管的是地址栏本身。
+  if (charId !== null || openApp !== null) {
     currentUrl.searchParams.delete('openApp');
     currentUrl.searchParams.delete('activeMsgCharId');
     window.history.replaceState({}, '', currentUrl.toString());

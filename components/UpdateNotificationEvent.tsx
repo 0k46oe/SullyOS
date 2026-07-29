@@ -9,6 +9,7 @@
 import React from 'react';
 import { useOS } from '../context/OSContext';
 import { AppID } from '../types';
+import { trackEvent } from '../utils/analytics';
 
 // 历史 key —— 保留, 让老用户的"已看过"状态延续到本月新弹窗判断里
 export const UPDATE_NOTIFICATION_KEY = 'sullyos_update_2026_04_seen';
@@ -55,6 +56,11 @@ interface UpdateNotificationPopupProps {
 export const UpdateNotificationPopup: React.FC<UpdateNotificationPopupProps> = ({ onClose }) => {
     const { openApp } = useOS();
 
+    // 弹窗真正露面时记一次。版本取文件顶部写死的 changelog 常量，不含任何用户数据。
+    React.useEffect(() => {
+        trackEvent('弹出版本更新提醒', { 版本: CHANGELOG_2026_07_10 });
+    }, []);
+
     const handleView = () => {
         try {
             localStorage.setItem(UPDATE_NOTIFICATION_KEY_2026_07_10, Date.now().toString());
@@ -62,11 +68,13 @@ export const UpdateNotificationPopup: React.FC<UpdateNotificationPopupProps> = (
         } catch { /* ignore */ }
         openApp(AppID.FAQ);
         onClose();
+        trackEvent('跳去看更新说明', { 版本: CHANGELOG_2026_07_10 });
     };
 
     const handleDismiss = () => {
         try { localStorage.setItem(UPDATE_NOTIFICATION_KEY_2026_07_10, Date.now().toString()); } catch { /* ignore */ }
         onClose();
+        trackEvent('跳过本次更新说明', { 版本: CHANGELOG_2026_07_10 });
     };
 
     return (

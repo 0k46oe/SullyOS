@@ -11,6 +11,7 @@ import {
 } from '../../utils/instantPushClient';
 import { generateClientToken } from '../../utils/vapidGen';
 import { isAmsgServerVersionAtLeast } from '../../utils/amsgWorkerVersion';
+import { trackEvent } from '../../utils/analytics';
 
 // 满血链路吃满这些 worker 特性（amsg-server 2.6.0-next.4+）。探测不到端点（老部署
 // 404 → null）或缺任何一项，就亮「重新部署」提示——worker 跑在用户自己的账号里，
@@ -141,8 +142,11 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       await ActiveMsgClient.ensurePushSubscription();
       await refresh();
       addToast('通知权限和推送订阅已准备完成。', 'success');
+      trackEvent('开启通知与推送订阅', { result: 'ok' });
     } catch (error: any) {
       addToast(error?.message || '创建推送订阅失败。', 'error');
+      // 只报成功/失败，错误原文留在 toast 里（可能带 push endpoint）。
+      trackEvent('开启通知与推送订阅', { result: 'failed' });
     } finally {
       setLoading(false);
     }
@@ -163,8 +167,12 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       await ActiveMsgClient.connect();
       await refresh();
       addToast('已连接成功，主动消息 2.0 可以用了。', 'success');
+      // 只报「这次连接成没成」。连接串 / tenantToken / 错误原文一概不带，
+      // 也不报「之前配没配过 tenant」——那等于把两项凭据的配置状态压成一位发出去。
+      trackEvent('连接并启用主动消息 2.0', { result: 'ok' });
     } catch (error: any) {
       addToast(error?.message || '连接失败。', 'error');
+      trackEvent('连接并启用主动消息 2.0', { result: 'failed' });
     } finally {
       setLoading(false);
     }

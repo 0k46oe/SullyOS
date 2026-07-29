@@ -16,6 +16,7 @@ import { resolveChatTheme } from '../utils/groupChat/theme';
 import { parseDirectorActions, stripSkipMarker, parseGroupTopicBox } from '../utils/groupChat/parse';
 import { GroupPacketMeta, PacketReceiptMeta, ClaimResult, claimPacket, effectivePacketStatus, makePacketMeta } from '../utils/groupChat/redpacket';
 import { messageLogText } from '../utils/groupChat/format';
+import { trackEvent } from '../utils/analytics';
 import { buildMemberTimeline, DEFAULT_MEMBER_TIMELINE_CAP } from '../utils/groupChat/timeline';
 import { buildEmojiContextStr, buildGroupHistoryBlock, buildDirectorInstruction, buildRoundRobinInstruction, GroupHistoryBlock } from '../utils/groupChat/prompts';
 import { dispatchMemberActions } from '../utils/groupChat/dispatch';
@@ -23,7 +24,7 @@ import { completeGroupChatWithMcp } from '../utils/groupChat/mcp';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 // 群聊输入区/表情面板已改用共享 ChatInputArea（其表情网格自带 useIncrementalReveal 增量渲染），
 // master 上给旧内联表情抽屉加的增量渲染随旧抽屉一并退役。
-import { UsersThree, Money, GearSix, Image as ImageIcon, ArrowsClockwise, PaintBrush, BellSimpleRinging, Code } from '@phosphor-icons/react';
+import { UsersThree, Money, GearSix, Image as ImageIcon, ArrowsClockwise, PaintBrush, BellSimpleRinging, Code, Question } from '@phosphor-icons/react';
 import ChatHeaderShell from '../components/chat/ChatHeaderShell';
 import ChatInputArea from '../components/chat/ChatInputArea';
 import ChromeCssEditor from '../components/chat/ChromeCssEditor';
@@ -394,7 +395,7 @@ const GroupChat: React.FC = () => {
     // UI State — 面板状态对齐私聊 ChatInputArea 的 showPanel 约定
     const [showPanel, setShowPanel] = useState<'none' | 'actions' | 'emojis' | 'chars'>('none');
     const [activeEmojiCategory, setActiveEmojiCategory] = useState('default');
-    const [modalType, setModalType] = useState<'none' | 'create' | 'settings' | 'transfer' | 'member_select' | 'message-options' | 'edit-message' | 'packet-detail' | 'chrome-css' | 'chrome-sound' | 'html-prompt'>('none');
+    const [modalType, setModalType] = useState<'none' | 'create' | 'settings' | 'transfer' | 'member_select' | 'message-options' | 'edit-message' | 'packet-detail' | 'chrome-css' | 'chrome-sound' | 'html-prompt' | 'help'>('none');
     const [tempHtmlPrompt, setTempHtmlPrompt] = useState('');
     const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
     const [replyTarget, setReplyTarget] = useState<Message | null>(null);
@@ -570,6 +571,7 @@ const GroupChat: React.FC = () => {
         setModalType('none');
         setSelectedMessage(null);
         addToast('已复制到剪贴板', 'success');
+        trackEvent('复制一条群消息文字');
     };
 
     const handleEnterSelectionMode = () => {
@@ -588,6 +590,7 @@ const GroupChat: React.FC = () => {
         setModalType('none');
         setSelectedMessage(null);
         addToast('消息已删除', 'success');
+        trackEvent('删除一条群消息');
     };
 
     const handleStartEditMessage = () => {
@@ -603,6 +606,7 @@ const GroupChat: React.FC = () => {
         setModalType('none');
         setSelectedMessage(null);
         addToast('消息已修改', 'success');
+        trackEvent('编辑一条群消息');
     };
 
     const toggleMessageSelection = useCallback((id: number) => {
@@ -643,6 +647,7 @@ const GroupChat: React.FC = () => {
         const newHistory = messages.slice(0, index + 1);
         setMessages(newHistory);
         addToast('回溯对话中...', 'info');
+        trackEvent('重新生成群聊回复');
 
         triggerGroupAI(newHistory);
     };
@@ -752,6 +757,7 @@ const GroupChat: React.FC = () => {
         setTotalMsgCount(remaining.length);
 
         addToast(`已清理 ${msgsToDelete.length} 条记录${preserveContext ? ' (保留最近10条)' : ''}`, 'success');
+        trackEvent('清空群聊记录', { preserve: preserveContext ? 'on' : 'off' });
         setModalType('none');
     };
 
@@ -847,7 +853,7 @@ const GroupChat: React.FC = () => {
     }, []);
 
     const handleGroupImageClick = useCallback((url: string) => window.open(url, '_blank'), []);
-    const handleGroupReply = useCallback((target: Message) => setReplyTarget(target), []);
+    const handleGroupReply = useCallback((target: Message) => { setReplyTarget(target); trackEvent('引用回复一条群消息'); }, []);
 
     // 用户抢/收/退：updater 内重跑状态机（以库内最新 claims 判重，防与 AI 派发并发双写）
     const handleUserPacketAction = async (msg: Message, action: 'claim' | 'return') => {
@@ -887,6 +893,7 @@ const GroupChat: React.FC = () => {
                 metadata: receipt,
             });
             addToast(outcome.action === 'claimed' ? `你抢到了 ¥${outcome.amount}` : '已退回红包', 'success');
+            trackEvent('领取或退回群红包', { action });
         }
         await refreshMessages(activeGroup.id);
     };
@@ -935,6 +942,7 @@ const GroupChat: React.FC = () => {
         if (activeGroup) void loadTopicBoxStats(activeGroup);
         setModalType('settings');
         setShowPanel('none');
+        trackEvent('打开群设置面板');
     };
 
     // ChatInputArea 的面板动作：群聊只处理表情发送/分类切换，
@@ -1421,7 +1429,7 @@ ${memberTimeline || '(暂无互动记录)'}
                     </button>
                     <span className="font-medium text-slate-700 text-lg tracking-wide pl-2">群聊列表</span>
                     <div className="flex-1"></div>
-                    <button onClick={() => { setModalType('create'); setSelectedMembers(new Set()); setTempGroupName(''); setMemberGroupId(GROUP_FILTER_ALL); }} className="p-2 -mr-2 text-violet-500 bg-violet-50 hover:bg-violet-100 rounded-full transition-colors">
+                    <button onClick={() => { setModalType('create'); setSelectedMembers(new Set()); setTempGroupName(''); setMemberGroupId(GROUP_FILTER_ALL); trackEvent('打开创建群聊弹窗'); }} className="p-2 -mr-2 text-violet-500 bg-violet-50 hover:bg-violet-100 rounded-full transition-colors">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
                     </button>
                     </div>
@@ -1544,6 +1552,11 @@ ${memberTimeline || '(暂无互动记录)'}
                 lastTokenUsage={lastTokenUsage}
                 tokenBreakdown={tokenBreakdown}
                 statusText={`${activeGroup?.members.length ?? 0} 成员`}
+                extraAction={{
+                    label: '群聊记忆规则',
+                    icon: <Question className="w-5 h-5" weight="bold" />,
+                    onClick: () => setModalType('help'),
+                }}
                 triggerIcon={isTyping ? 'stop' : 'lightning'}
                 onClose={() => setView('list')}
                 onTriggerAI={() => triggerGroupAI(messages)}
@@ -1650,7 +1663,7 @@ ${memberTimeline || '(暂无互动记录)'}
                         </button>
                         <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleImageUpload} />
 
-                        <button onClick={() => { setModalType('transfer'); setShowPanel('none'); }} className="flex flex-col items-center gap-2 active:scale-95 transition-transform text-slate-600">
+                        <button onClick={() => { setModalType('transfer'); setShowPanel('none'); trackEvent('打开发红包面板'); }} className="flex flex-col items-center gap-2 active:scale-95 transition-transform text-slate-600">
                             <div className="w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border bg-orange-50 text-orange-400 border-orange-100">
                                 <Money className="w-6 h-6" weight="bold" />
                             </div>
@@ -1697,6 +1710,7 @@ ${memberTimeline || '(暂无互动记录)'}
                                 updateGroup(activeGroup.id, { htmlModeEnabled: next });
                                 setActiveGroup({ ...activeGroup, htmlModeEnabled: next });
                                 addToast(next ? 'HTML 模式已开启' : 'HTML 模式已关闭', 'info');
+                                trackEvent('开启群聊 HTML 模式', { state: next ? 'on' : 'off' });
                             }}
                             onContextMenu={(e) => { e.preventDefault(); setTempHtmlPrompt(activeGroup?.htmlModeCustomPrompt || ''); setModalType('html-prompt'); setShowPanel('none'); }}
                             className="flex flex-col items-center gap-2 active:scale-95 transition-transform text-slate-600 relative"
@@ -1735,14 +1749,14 @@ ${memberTimeline || '(暂无互动记录)'}
                         <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 block">回复生成模式</label>
                         <div className="flex flex-col gap-2">
                             <div
-                                onClick={() => setTempReplyMode('director')}
+                                onClick={() => { setTempReplyMode('director'); trackEvent('切换群聊回复生成模式', { mode: 'director' }); }}
                                 className={`p-3 rounded-xl border cursor-pointer transition-all ${tempReplyMode === 'director' ? 'border-violet-400 bg-violet-50 ring-1 ring-violet-400' : 'border-slate-200 bg-white hover:border-slate-300'}`}
                             >
                                 <div className="text-xs font-bold text-slate-700">导演模式（默认）</div>
                                 <p className="text-[9px] text-slate-400 mt-1 leading-tight">一次 API 调用生成整轮群聊。快、省 token，但角色偶尔可能串号。</p>
                             </div>
                             <div
-                                onClick={() => setTempReplyMode('roundRobin')}
+                                onClick={() => { setTempReplyMode('roundRobin'); trackEvent('切换群聊回复生成模式', { mode: 'roundRobin' }); }}
                                 className={`p-3 rounded-xl border cursor-pointer transition-all ${tempReplyMode === 'roundRobin' ? 'border-violet-400 bg-violet-50 ring-1 ring-violet-400' : 'border-slate-200 bg-white hover:border-slate-300'}`}
                             >
                                 <div className="text-xs font-bold text-slate-700">轮询模式</div>
@@ -1824,6 +1838,7 @@ ${memberTimeline || '(暂无互动记录)'}
                                         if (!activeGroup) return;
                                         await updateGroup(activeGroup.id, { topicArchiveMode: option.id });
                                         setActiveGroup({ ...activeGroup, topicArchiveMode: option.id });
+                                        trackEvent('切换群聊总结整理方式', { mode: option.id });
                                     }} className={`rounded-xl px-3 py-2.5 text-left transition-all ${active ? 'bg-white shadow-sm ring-1 ring-violet-100' : 'text-slate-400'}`}>
                                         <div className={`text-[11px] font-bold ${active ? 'text-violet-600' : 'text-slate-500'}`}>{option.title}</div>
                                         <div className="text-[9px] mt-0.5">{option.desc}</div>
@@ -1851,7 +1866,7 @@ ${memberTimeline || '(暂无互动记录)'}
                             </div>
                         </div>
 
-                        <button onClick={() => void createNextGroupTopicBox(true)} disabled={isSummarizing || topicPendingCount === 0} className={`w-full py-3 rounded-2xl border font-bold text-xs flex items-center justify-center gap-2 ${topicPendingCount === 0 ? 'bg-slate-50 border-slate-100 text-slate-300' : 'bg-violet-500 border-violet-500 text-white shadow-lg shadow-violet-200'}`}>
+                        <button onClick={() => { void createNextGroupTopicBox(true); trackEvent('手动整理群话题盒'); }} disabled={isSummarizing || topicPendingCount === 0} className={`w-full py-3 rounded-2xl border font-bold text-xs flex items-center justify-center gap-2 ${topicPendingCount === 0 ? 'bg-slate-50 border-slate-100 text-slate-300' : 'bg-violet-500 border-violet-500 text-white shadow-lg shadow-violet-200'}`}>
                             {isSummarizing ? <><span className="w-4 h-4 rounded-full border-2 border-white/40 border-t-white animate-spin" />{summaryProgress || '正在成盒…'}</> : '立即整理当前可归档内容'}
                         </button>
 
@@ -2153,6 +2168,30 @@ ${memberTimeline || '(暂无互动记录)'}
                     </div>
                 );
             })()}
+
+            {/* 群聊记忆规则 */}
+            <Modal isOpen={modalType === 'help'} title="群聊记忆规则" onClose={() => setModalType('none')}>
+                <div className="space-y-4 text-sm text-slate-600 leading-relaxed">
+                    <div className="rounded-2xl bg-violet-50 border border-violet-100 p-4 text-violet-800">
+                        群聊内容不是排队延迟发送。角色在私聊中“隔天提起”，通常是最近群聊、话题盒或个人群聊记忆被当作本轮话题选中了。
+                    </div>
+                    <div>
+                        <div className="font-bold text-slate-800 mb-1">最近群聊</div>
+                        <p>角色生成私聊回复时，会看到自己参与群聊中的最近一段消息。记录同时带具体日期和“约 N 天前”，避免把旧消息误认成刚刚发生。</p>
+                    </div>
+                    <div>
+                        <div className="font-bold text-slate-800 mb-1">公共话题盒</div>
+                        <p>群聊积累到一定数量后，较旧内容会被压缩成群成员共享的话题盒，并进入各成员的私聊背景。因此旧话题可能在之后再次被提起。</p>
+                    </div>
+                    <div>
+                        <div className="font-bold text-slate-800 mb-1">个人群聊记忆</div>
+                        <p>启用群聊记忆宫殿后，较旧群聊会以第三人称分别整理进参与角色的记忆宫殿。它不会要求角色立刻回复，只提供后续回忆依据。</p>
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 border border-slate-100 p-4 text-xs text-slate-500">
+                        模型看到一段记录，不代表必须马上回应；是否主动提起仍会受当前话题和角色性格影响。
+                    </div>
+                </div>
+            </Modal>
 
             {/* HTML 模式自定义提示词 Modal（瓦片右键/长按进入） */}
             <Modal

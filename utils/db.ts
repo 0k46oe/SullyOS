@@ -593,6 +593,21 @@ export const DB = {
     });
   },
 
+  /**
+   * 某个角色的聊天条数。走 charId 索引的 count()，**一条消息都不会被读出来**，
+   * IndexedDB 只回一个数字。使用统计的规模档位用它，别拿 getMessagesByCharId
+   * 去 length ——那会把整段聊天记录读进内存。
+   */
+  countMessagesByCharId: async (charId: string): Promise<number> => {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_MESSAGES, 'readonly');
+      const request = transaction.objectStore(STORE_MESSAGES).index('charId').count(IDBKeyRange.only(charId));
+      request.onsuccess = () => resolve(request.result || 0);
+      request.onerror = () => reject(request.error);
+    });
+  },
+
   // Performance: Load only the most recent N messages for a character
   getRecentMessagesByCharId: async (charId: string, limit: number, includeProcessed: boolean = false): Promise<Message[]> => {
     const db = await openDB();
@@ -747,7 +762,23 @@ export const DB = {
         const timestamp = typeof msg.timestamp === 'number' ? msg.timestamp : Date.now();
         const { timestamp: _ignored, ...payload } = msg;
         const request = store.add({ ...payload, timestamp });
-        request.onsuccess = () => resolve(request.result as number);
+        request.onsuccess = () => {
+            const newId = request.result as number;
+            // 水位线自愈：新消息的自增 id 必然大于既有一切消息 id，也就必然大于水位线
+            // （水位线本身是某条旧消息的 id）。出现 newId ≤ 水位线，只有一种可能——
+            // IndexedDB 被浏览器清过、自增计数器归零，而 localStorage 里的记忆宫殿水位
+            // 是清库前残留的。不清掉它，该角色所有新消息都会被 hwm 过滤挡在 AI 上下文
+            // 之外（请求只剩 system → 上游 400）。此处直接移除失效水位。
+            try {
+                const staleKeys = [`mp_lastMsgId_${msg.charId}`];
+                if (msg.groupId) staleKeys.push(`mp_lastMsgId_group_${msg.groupId}`);
+                for (const key of staleKeys) {
+                    const hwm = parseInt(localStorage.getItem(key) || '0', 10) || 0;
+                    if (hwm >= newId) localStorage.removeItem(key);
+                }
+            } catch { /* localStorage 不可用时静默跳过 */ }
+            resolve(newId);
+        };
         request.onerror = () => reject(request.error);
     });
   },
@@ -1166,14 +1197,24 @@ export const DB = {
 
   saveAssetRaw: async (id: string, data: any): Promise<void> => {
       const db = await openDB();
-      const transaction = db.transaction(STORE_ASSETS, 'readwrite');
-      transaction.objectStore(STORE_ASSETS).put({ id, data });
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_ASSETS, 'readwrite');
+          transaction.objectStore(STORE_ASSETS).put({ id, data });
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error || new Error('saveAssetRaw transaction aborted'));
+      });
   },
 
   deleteAsset: async (id: string): Promise<void> => {
     const db = await openDB();
-    const transaction = db.transaction(STORE_ASSETS, 'readwrite');
-    transaction.objectStore(STORE_ASSETS).delete(id);
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_ASSETS, 'readwrite');
+      transaction.objectStore(STORE_ASSETS).delete(id);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('deleteAsset aborted'));
+    });
   },
 
   // ─── Blob 资源（图片二进制，见 utils/blobRef.ts）───────────────
@@ -1205,8 +1246,13 @@ export const DB = {
   deleteBlobAsset: async (id: string): Promise<void> => {
       const db = await openDB();
       if (!db.objectStoreNames.contains(STORE_BLOB_ASSETS)) return;
-      const transaction = db.transaction(STORE_BLOB_ASSETS, 'readwrite');
-      transaction.objectStore(STORE_BLOB_ASSETS).delete(id);
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_BLOB_ASSETS, 'readwrite');
+          transaction.objectStore(STORE_BLOB_ASSETS).delete(id);
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error || new Error('deleteBlobAsset aborted'));
+      });
   },
 
   getJournalStickers: async (): Promise<{name: string, url: string}[]> => {
@@ -1562,6 +1608,13 @@ export const DB = {
       const db = await openDB();
       const transaction = db.transaction(STORE_DAILY_SCHEDULE, 'readwrite');
       transaction.objectStore(STORE_DAILY_SCHEDULE).put(schedule);
+  },
+
+  deleteDailySchedule: async (charId: string, date: string): Promise<void> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_DAILY_SCHEDULE)) return;
+      const transaction = db.transaction(STORE_DAILY_SCHEDULE, 'readwrite');
+      transaction.objectStore(STORE_DAILY_SCHEDULE).delete(`${charId}_${date}`);
   },
 
   // ─── 热点快照 (分时段，全角色共享) ───
@@ -2305,27 +2358,51 @@ export const DB = {
   appendApiCallLog: async (entry: any): Promise<void> => {
       const db = await openDB();
       if (!db.objectStoreNames.contains(STORE_API_CALL_LOG)) return;
-      const read = (): Promise<any[]> => new Promise((resolve) => {
-          const tx = db.transaction(STORE_API_CALL_LOG, 'readonly');
-          const req = tx.objectStore(STORE_API_CALL_LOG).get('log');
-          req.onsuccess = () => resolve(req.result?.entries ?? []);
-          req.onerror = () => resolve([]);
+      // 必须在同一个 readwrite 事务里完成“读 → 合并/去重 → 写”。
+      // 旧实现先 readonly、再另开 readwrite；两条 API 同时返回时会读到同一旧数组，
+      // 后写入者把前一条整笔覆盖，表现为供应商有调用而本地日志随机缺行。
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_API_CALL_LOG, 'readwrite');
+          const store = tx.objectStore(STORE_API_CALL_LOG);
+          const req = store.get('log');
+          req.onsuccess = () => {
+              const cur: any[] = req.result?.entries ?? [];
+              const duplicateIndex = cur.findIndex((e) => e?.id && e.id === entry?.id);
+              if (duplicateIndex >= 0) {
+                  // 显式 safeFetch 记录和全局 clone 兜底可能先后抵达；合并非空字段，
+                  // 既不重复计费，也能让后到的 usage/backendModel 补齐早到的简版记录。
+                  const existing = cur[duplicateIndex];
+                  const defined = Object.fromEntries(
+                      Object.entries(entry || {}).filter(([, value]) => value !== undefined),
+                  );
+                  cur[duplicateIndex] = { ...existing, ...defined, id: existing.id };
+              } else {
+                  cur.unshift(entry);
+              }
+              const cutoff = Date.now() - API_CALL_LOG_MAX_AGE_MS;
+              const pruned = cur
+                  .filter((e) => (e?.timestamp ?? 0) > cutoff)
+                  .sort((a, b) => (b?.timestamp ?? 0) - (a?.timestamp ?? 0))
+                  .slice(0, API_CALL_LOG_MAX_ENTRIES);
+              store.put({ id: 'log', entries: pruned });
+          };
+          req.onerror = () => tx.abort();
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error || new Error('appendApiCallLog transaction failed'));
+          tx.onabort = () => reject(tx.error || new Error('appendApiCallLog transaction aborted'));
       });
-      const cur = await read();
-      cur.unshift(entry);
-      const cutoff = Date.now() - API_CALL_LOG_MAX_AGE_MS;
-      const pruned = cur
-          .filter((e) => (e?.timestamp ?? 0) > cutoff)
-          .slice(0, API_CALL_LOG_MAX_ENTRIES);
-      const tx = db.transaction(STORE_API_CALL_LOG, 'readwrite');
-      tx.objectStore(STORE_API_CALL_LOG).put({ id: 'log', entries: pruned });
   },
 
   clearApiCallLog: async (): Promise<void> => {
       const db = await openDB();
       if (!db.objectStoreNames.contains(STORE_API_CALL_LOG)) return;
-      const tx = db.transaction(STORE_API_CALL_LOG, 'readwrite');
-      tx.objectStore(STORE_API_CALL_LOG).put({ id: 'log', entries: [] });
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_API_CALL_LOG, 'readwrite');
+          tx.objectStore(STORE_API_CALL_LOG).put({ id: 'log', entries: [] });
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error || new Error('clearApiCallLog transaction failed'));
+          tx.onabort = () => reject(tx.error || new Error('clearApiCallLog transaction aborted'));
+      });
   },
 
   // 导入备份用：直接写回一条 vr_settings 原始记录（{id, ...}）。

@@ -3,6 +3,7 @@ import { useOS } from '../context/OSContext';
 import { ArrowLeft, ArrowClockwise, Newspaper, WarningCircle, ArrowSquareOut } from '@phosphor-icons/react';
 import { DB } from '../utils/db';
 import { RealtimeContextManager } from '../utils/realtimeContext';
+import { trackEvent } from '../utils/analytics';
 import type { HotNewsSnapshot, HotNewsItem } from '../types';
 
 const SLOT_WINDOW = ['00:00–04:00', '04:00–08:00', '08:00–12:00', '12:00–16:00', '16:00–20:00', '20:00–24:00'];
@@ -34,6 +35,7 @@ const HotNewsApp: React.FC = () => {
     const forceRefresh = useCallback(async () => {
         setLoading(true);
         setError(null);
+        trackEvent('手动刷新热点日报');
         try {
             const { id, date, slot, label } = RealtimeContextManager.getHotNewsSlot();
             const platforms = (realtimeConfig.newsPlatforms && realtimeConfig.newsPlatforms.length > 0)

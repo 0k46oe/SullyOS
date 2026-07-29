@@ -7,6 +7,7 @@ import { ContextBuilder } from '../utils/context';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { isScheduleFeatureOn } from '../utils/scheduleGenerator';
 import { safeResponseJson } from '../utils/safeApi';
+import { trackEvent } from '../utils/analytics';
 import {
     CaretLeft, Play, Pause, FastForward, Lock, MagnifyingGlass, MusicNotes,
     BellRinging, ImageSquare, NotePencil, Globe, CloudSun, ArrowClockwise,
@@ -222,7 +223,8 @@ const PersonaSim: React.FC<Props> = ({ targetChar, onExit, openLifeLog, sim, onS
                 dispatchBuffs ? { detail: { charId: targetChar.id, buffs: dispatchBuffs, buffInjection: '' } }
                               : { detail: { charId: targetChar.id } }));
         }
-    }, [script, mode, theme, beats.length, targetChar, updateCharacter]);
+        addToast('已存入生活记录', 'success');
+    }, [script, mode, theme, beats.length, targetChar, updateCharacter, addToast]);
 
     // ----- advance -----
     const advance = useCallback(() => {
@@ -239,12 +241,6 @@ const PersonaSim: React.FC<Props> = ({ targetChar, onExit, openLifeLog, sim, onS
             persist();
         }
     }, [idx, phase, beat, persist]);
-
-    // 中途退出（点「退出」/ 系统返回 / 切走 App）也要落库：组件卸载时补存这场演出。
-    // persist() 自带 savedRef + script 守卫——没开始播放或已存过都会自动跳过，不会误写。
-    const persistRef = useRef(persist);
-    persistRef.current = persist;
-    useEffect(() => () => { persistRef.current(); }, []);
 
     // ----- autoplay -----
     useEffect(() => {
@@ -298,7 +294,7 @@ const PersonaSim: React.FC<Props> = ({ targetChar, onExit, openLifeLog, sim, onS
         return (
             <Shell wallpaper={wallpaper}>
                 <TopBar onBack={onExit} right={
-                    <button onClick={openLifeLog} className="flex items-center gap-1 text-[11px] text-white/60 active:scale-95 transition">
+                    <button onClick={() => { openLifeLog(); trackEvent('打开生活记录'); }} className="flex items-center gap-1 text-[11px] text-white/60 active:scale-95 transition">
                         <ClockCounterClockwise size={15} /> 生活记录
                     </button>
                 } />
@@ -332,7 +328,7 @@ const PersonaSim: React.FC<Props> = ({ targetChar, onExit, openLifeLog, sim, onS
                     {/* mode tabs */}
                     <div className="flex gap-2 mb-4 p-1 rounded-2xl bg-white/[0.04] border border-white/[0.06]">
                         {(['daily', 'event'] as const).map(m => (
-                            <button key={m} onClick={() => setMode(m)}
+                            <button key={m} onClick={() => { setMode(m); trackEvent('切换人格模拟类型', { mode: m }); }}
                                 className="flex-1 py-2.5 rounded-xl text-[12px] font-semibold transition"
                                 style={mode === m ? { background: ACCENT, color: '#1a1530' } : { color: 'rgba(255,255,255,0.5)' }}>
                                 {m === 'daily' ? '日常模拟' : '事件模拟'}
@@ -353,7 +349,7 @@ const PersonaSim: React.FC<Props> = ({ targetChar, onExit, openLifeLog, sim, onS
                         ] as const).map(o => {
                             const active = presence === o.id;
                             return (
-                                <button key={o.id} onClick={() => setPresence(o.id)}
+                                <button key={o.id} onClick={() => { setPresence(o.id); trackEvent('选择你的存在感', { presence: o.id }); }}
                                     className="rounded-2xl py-2.5 border transition active:scale-[0.98] text-center"
                                     style={active
                                         ? { background: ACCENT, color: '#1a1530', borderColor: 'transparent' }
@@ -376,7 +372,7 @@ const PersonaSim: React.FC<Props> = ({ targetChar, onExit, openLifeLog, sim, onS
                         ] as const).map(o => {
                             const active = tone === o.id;
                             return (
-                                <button key={o.id} onClick={() => setTone(o.id)}
+                                <button key={o.id} onClick={() => { setTone(o.id); trackEvent('选择演出基调', { tone: o.id }); }}
                                     className="rounded-2xl py-2.5 border transition active:scale-[0.98] text-center"
                                     style={active
                                         ? { background: ACCENT, color: '#1a1530', borderColor: 'transparent' }
@@ -539,7 +535,7 @@ const PersonaSim: React.FC<Props> = ({ targetChar, onExit, openLifeLog, sim, onS
                 <div className="flex items-center justify-between">
                     <button onClick={(e) => { e.stopPropagation(); onExit(); }} className="text-[11px] text-white/35">退出</button>
                     <span className="text-[10px] text-white/30">轻触继续 · 长按快进</span>
-                    <button onClick={(e) => { e.stopPropagation(); setAutoplay(a => !a); }}
+                    <button onClick={(e) => { e.stopPropagation(); setAutoplay(a => !a); trackEvent('切换演出自动播放'); }}
                         className="w-9 h-9 rounded-full flex items-center justify-center border border-white/[0.1] text-white/70 active:scale-90 transition"
                         style={autoplay ? { background: ACCENT, color: '#1a1530', borderColor: 'transparent' } : undefined}>
                         {autoplay ? <Pause size={16} weight="fill" /> : <Play size={16} weight="fill" />}
@@ -941,11 +937,32 @@ const TopBar: React.FC<{ onBack: () => void; right?: React.ReactNode; title?: st
 // ============================================================
 //  LIFE LOG (生活记录) — sub-app
 // ============================================================
-export const LifeLog: React.FC<{ targetChar: CharacterProfile; onBack: () => void; onReplay?: (log: PhoneSimLog) => void }> = ({ targetChar, onBack, onReplay }) => {
+export const LifeLog: React.FC<{
+    targetChar: CharacterProfile;
+    onBack: () => void;
+    onReplay?: (log: PhoneSimLog) => void;
+    onRequestDelete?: (log: PhoneSimLog) => void;
+}> = ({ targetChar, onBack, onReplay, onRequestDelete }) => {
     const { addToast } = useOS();
     const logs = targetChar.phoneState?.simLogs || [];
     const [sent, setSent] = useState<Record<string, boolean>>({});
+    const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const fmt = (t: number) => new Date(t).toLocaleString('zh-CN', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+    const cancelLongPress = () => {
+        if (!longPressTimer.current) return;
+        clearTimeout(longPressTimer.current);
+        longPressTimer.current = null;
+    };
+    const startLongPress = (e: React.PointerEvent, log: PhoneSimLog) => {
+        if (!onRequestDelete || (e.target as HTMLElement).closest('button')) return;
+        cancelLongPress();
+        longPressTimer.current = setTimeout(() => {
+            longPressTimer.current = null;
+            onRequestDelete(log);
+        }, 520);
+    };
+    useEffect(() => () => cancelLongPress(), []);
 
     const sendLog = async (log: PhoneSimLog) => {
         if (sent[log.id]) return;
@@ -965,6 +982,7 @@ export const LifeLog: React.FC<{ targetChar: CharacterProfile; onBack: () => voi
             <TopBar onBack={onBack} title="生活记录" />
             <div className="px-6 pb-3 shrink-0">
                 <p className="text-[11px] text-white/40 leading-relaxed">那些你以 TA 的身份活过的片段。TA 不会记得，但你会。</p>
+                {logs.length > 0 && onRequestDelete && <p className="mt-1.5 text-[10px] text-white/25">长按记录可删除</p>}
             </div>
             <div className="flex-1 overflow-y-auto no-scrollbar px-5 pb-10 space-y-3">
                 {logs.length === 0 && (
@@ -974,7 +992,19 @@ export const LifeLog: React.FC<{ targetChar: CharacterProfile; onBack: () => voi
                     </div>
                 )}
                 {logs.map(log => (
-                    <div key={log.id} className="rounded-2xl p-4 bg-white/[0.035] border border-white/[0.06] animate-slide-up">
+                    <div key={log.id}
+                        onPointerDown={(e) => startLongPress(e, log)}
+                        onPointerUp={cancelLongPress}
+                        onPointerLeave={cancelLongPress}
+                        onPointerMove={cancelLongPress}
+                        onPointerCancel={cancelLongPress}
+                        onContextMenu={(e) => {
+                            if (!onRequestDelete || (e.target as HTMLElement).closest('button')) return;
+                            e.preventDefault();
+                            cancelLongPress();
+                            onRequestDelete(log);
+                        }}
+                        className="rounded-2xl p-4 bg-white/[0.035] border border-white/[0.06] animate-slide-up select-none">
                         <div className="flex items-center justify-between mb-1.5">
                             <span className="text-[9px] px-2 py-0.5 rounded-full tracking-wider" style={{ color: ACCENT, background: `${ACCENT}1f` }}>
                                 {log.mode === 'daily' ? '日常' : '事件'} · {log.theme}

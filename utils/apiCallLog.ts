@@ -90,6 +90,11 @@ export function setApiCallAmbientContext(meta: ApiCallMeta): void {
     ambientMeta = meta || {};
 }
 
+/** Snapshot the current fallback context when a request starts. */
+export function getApiCallAmbientContext(): ApiCallMeta {
+    return { ...ambientMeta };
+}
+
 function hasMeta(meta?: ApiCallMeta): boolean {
     return !!meta && Object.values(meta).some((v) => v != null && v !== '');
 }
@@ -418,6 +423,8 @@ export function buildPromptBreakdown(body: unknown): PromptBlockStat[] | undefin
 }
 
 export function recordApiCall(input: {
+    /** 同一条 HTTP 请求在显式记录与全局 fetch 兜底间共享的 ID，用于原子去重。 */
+    requestId?: string;
     url: string;
     body?: unknown;
     status?: number;
@@ -445,7 +452,7 @@ export function recordApiCall(input: {
         }
         const usage = extractUsage(responseForExtract);
         const entry: ApiCallLogEntry = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            id: input.requestId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             timestamp: Date.now(),
             presetName: resolvePresetName(baseUrl, model),
             baseUrl,

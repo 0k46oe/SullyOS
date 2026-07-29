@@ -4,7 +4,8 @@ import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, CharacterGrou
 import { DB } from '../utils/db';
 import { modelRejectsSamplingParams, stripSamplingParams, isSamplingParamError } from '../utils/samplingParamCompat';
 import { extractImagesInPlace, deepCloneForExport } from '../utils/backupExport';
-import { isBlobRef, getBlobForRef, migrateDataUrlToRef, resolveBlobRefsDeep, BLOBREF_PREFIX } from '../utils/blobRef';
+import { isBlobRef, getBlobForRef, migrateDataUrlToRef, migrateAppearancePresetBlobRefs, resolveBlobRefsDeep, BLOBREF_PREFIX, deleteBlobRefIfUnreferenced } from '../utils/blobRef';
+import { LEGACY_DEFAULT_WALLPAPER, isLegacyDefaultWallpaper, shouldPreserveLegacyDefaultWallpaper } from '../utils/wallpaperCompat';
 import { migrateSharkpanAssets } from '../utils/sharkpanAssetMigration';
 import { writeV2Backup, assembleV2Backup, type BackupManifest, type ZipFileWriter, type ZipFileReader } from '../utils/backupFormat';
 import { encodeVectorsForBackup } from '../utils/memoryPalace/db';
@@ -12,25 +13,35 @@ import { ProactiveChat } from '../utils/proactiveChat';
 import { VRScheduler } from '../utils/vrWorld/scheduler';
 import { runVRSession } from '../utils/vrWorld/runSession';
 import { VR_DEFAULT_INTERVAL_MIN } from '../utils/vrWorld/constants';
-import { WorldScheduler } from '../utils/worldHome/scheduler';
+import { WorldScheduler, toTickEntries } from '../utils/worldHome/scheduler';
 import { runWorldEpisode, rerollWorldCharBeat } from '../utils/worldHome/engine';
 import { migrateWorldDaySegs } from '../utils/worldHome/prompts';
 import { ChatParser } from '../utils/chatParser';
 import { safeFetchJson } from '../utils/safeApi';
-import { recordApiCall, setApiCallAmbientContext } from '../utils/apiCallLog';
+import { getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext } from '../utils/apiCallLog';
 import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
-import { INSTALLED_APPS } from '../constants';
+import { INSTALLED_APPS, HIDDEN_APP_NAMES } from '../constants';
+import { trackEvent, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, trackCurrentFeaturesOnce } from '../utils/analytics';
+import { collectAppearance, collectCharSettings, collectDataScale, collectFeatureFlagsAsync } from '../utils/analyticsSnapshot';
 import { markBackupDone } from '../utils/backupReminder';
 import { normalizeCharacterImpression, normalizeCharacterDefaults } from '../utils/impression';
+import {
+  CONTEXT_RANGE_POLICY_VERSION,
+  DEFAULT_MANUAL_CONTEXT_LIMIT,
+  loadCharacterContextRange,
+  migrateCharacterContextRange,
+} from '../utils/chatContextRange';
 import { isScheduleFeatureOn } from '../utils/scheduleGenerator';
 import { evaluateEmotionBackground } from '../hooks/useChatAI';
 import { CHAT_GEN_EVENTS, setChatViewSnapshot } from '../utils/chatGenEvents';
 import { buildChatRequestPayload } from '../utils/chatRequestPayload';
+import { ChatPrompts } from '../utils/chatPrompts';
 import { extractHtmlBlocks } from '../utils/htmlPrompt';
 import { ActiveMsgClient } from '../utils/activeMsgClient';
 import { purgeCharCloudState } from '../utils/amsg2CharCleanup';
 import { loadMusicPlaybackSnapshot } from './MusicContext';
+import { setCharNameRegistry } from '../utils/charNameRegistry';
 import { setMinimaxRegion } from '../utils/minimaxEndpoint';
 import { setTtsProvider, setVoicePromptOverrides } from '../utils/ttsProvider';
 import { LocalNotifications } from '@capacitor/local-notifications';
@@ -45,8 +56,9 @@ import { exportSignalLocal } from '../utils/vrWorld/signal';
 import { exportWorldHomeLocal } from '../utils/worldHome/localBackup';
 import { exportLuckinLocal } from '../utils/luckinMcpClient';
 import { exportMcdLocal } from '../utils/mcdMcpClient';
+import { exportMcpLocal } from '../utils/mcpClient';
 import { exportDesktopSkinLocal } from '../utils/desktopSkinBackup';
-import { inspectCsyBackup, prepareCsyMigration, type CsyMigrationReport } from '../utils/csyMigration';
+import { assertSupportedSullyBackup } from '../utils/backupImportPolicy';
 
 interface ProactiveQueueEntry {
   charId: string;
@@ -232,7 +244,7 @@ interface OSContextType {
   openApp: (appId: AppID) => void;
   closeApp: () => void;
   theme: OSTheme;
-  updateTheme: (updates: Partial<OSTheme>) => void;
+  updateTheme: (updates: Partial<OSTheme>) => Promise<void>;
   virtualTime: VirtualTime;
   apiConfig: APIConfig;
   updateApiConfig: (updates: Partial<APIConfig>) => void;
@@ -328,7 +340,7 @@ interface OSContextType {
 
   // Icons
   customIcons: Record<string, string>;
-  setCustomIcon: (appId: string, iconUrl: string | undefined) => void;
+  setCustomIcon: (appId: string, iconUrl: string | undefined) => Promise<void>;
 
   // Appearance Reset
   resetAppearance: () => Promise<void>;
@@ -353,8 +365,6 @@ interface OSContextType {
   // System
   exportSystem: (mode: 'text_only' | 'media_only' | 'full') => Promise<Blob>;
   importSystem: (fileOrJson: File | string) => Promise<void>; // Accept File or String
-  previewCsySystem: (fileOrJson: File | string) => Promise<CsyMigrationReport>;
-  importCsySystem: (fileOrJson: File | string) => Promise<void>;
   resetSystem: () => Promise<void>;
   sysOperation: { status: 'idle' | 'processing', message: string, progress: number }; // Progress state
 
@@ -378,13 +388,95 @@ interface OSContextType {
   consumeDateAutoStart: () => void;
 }
 
-export const DEFAULT_WALLPAPER = 'linear-gradient(135deg, #FFDEE9 0%, #B5FFFC 100%)';
+const PREVIOUS_DEFAULT_WALLPAPER = [
+  'radial-gradient(120% 85% at 12% 0%, rgba(255,255,255,0.72) 0%, rgba(255,255,255,0) 58%)',
+  'repeating-linear-gradient(0deg, rgba(92,72,49,0.018) 0px, rgba(92,72,49,0.018) 1px, transparent 1px, transparent 4px)',
+  'linear-gradient(145deg, #f3ecdf 0%, #e9dfcf 52%, #dfd2bf 100%)',
+].join(', ');
+
+// 默认桌面使用低对比暖米纸纹：只靠同色系层次与极细纤维感建立质感，
+// 不再用粉绿撞色渐变。字符串同时作为“仍在使用系统默认壁纸”的稳定标记。
+export const DEFAULT_WALLPAPER = [
+  'radial-gradient(120% 85% at 12% 0%, rgba(255,255,255,0.64) 0%, rgba(255,255,255,0) 58%)',
+  'repeating-linear-gradient(0deg, rgba(76,69,60,0.010) 0px, rgba(76,69,60,0.010) 1px, transparent 1px, transparent 4px)',
+  'linear-gradient(145deg, #fdfcf9 0%, #f8f6f1 54%, #f1eee8 100%)',
+].join(', ');
+
+/** 纸感桌面的唯一默认配色来源；外观 App 的“默认风格”也直接复用，避免再次漂回旧粉蓝配置。 */
+export const DEFAULT_PAPER_APPEARANCE = {
+  hue: 88,
+  saturation: 14,
+  lightness: 46,
+  contentColor: '#4b4136',
+  desktopVariant: 'paper',
+} as const;
+
+/** 用户主动选择的最初默认界面：粉绿渐变、白色文字与白色玻璃桌面组件。 */
+export const NOSTALGIA_APPEARANCE = {
+  skin: 'default',
+  desktopVariant: 'nostalgia',
+  hue: 245,
+  saturation: 25,
+  lightness: 65,
+  contentColor: '#ffffff',
+  wallpaper: LEGACY_DEFAULT_WALLPAPER,
+  darkMode: false,
+  nowPlayingWidgetLight: false,
+} as const;
+
+/** 只迁移旧系统默认配色；任一项被用户改过都保留，避免把自定义主题误重置。 */
+const migrateLegacyDefaultPalette = (theme: OSTheme): OSTheme => {
+  const next = { ...theme };
+  next.desktopVariant = 'paper';
+  if (!next.contentColor || next.contentColor.toLowerCase() === '#ffffff') {
+    next.contentColor = DEFAULT_PAPER_APPEARANCE.contentColor;
+  }
+  if (next.hue === 245 && next.saturation === 25 && next.lightness === 65) {
+    next.hue = DEFAULT_PAPER_APPEARANCE.hue;
+    next.saturation = DEFAULT_PAPER_APPEARANCE.saturation;
+    next.lightness = DEFAULT_PAPER_APPEARANCE.lightness;
+  }
+  return next;
+};
+
+export const isPaperWallpaper = (wallpaper?: string) => {
+  if (!wallpaper) return false;
+  if (wallpaper === DEFAULT_WALLPAPER || wallpaper === PREVIOUS_DEFAULT_WALLPAPER) return true;
+  const compact = wallpaper.toLowerCase().replace(/\s+/g, '');
+  return (
+    compact.includes('#f3ecdf') ||
+    compact.includes('rgb(243,236,223)') ||
+    compact.includes('#faf7f1') ||
+    compact.includes('rgb(250,247,241)') ||
+    compact.includes('#fdfcf9') ||
+    compact.includes('rgb(253,252,249)')
+  );
+};
 
 // 壁纸改存 Blob（见 utils/blobRef.ts）：assets store 的 'wallpaper' 记录只存一个指针值
 // （blobref 令牌 / 旧 data: / http url），真正二进制在 blob_assets。内存里 theme.wallpaper
 // 必须是能直接喂给 CSS 的 url，所以令牌要解析成 objectURL。全 OS 只有一张壁纸，用一个模块级
 // 变量记住当前 objectURL，换壁纸时回收上一张，避免泄漏。
 let currentWallpaperObjUrl: string | null = null;
+let currentLockWallpaperObjUrl: string | null = null;
+
+/**
+ * 原子替换壁纸指针；旧令牌在确认已不被桌面、锁屏、外观预设或皮肤备份引用后后台清理。
+ * 清理不阻塞换壁纸渲染，且任何引用检查失败都会保守地保留旧 Blob。
+ */
+const replaceWallpaperAssetPointer = async (assetId: 'wallpaper' | 'lock_wallpaper', next: string | null): Promise<void> => {
+    let previous: string | null = null;
+    try {
+        previous = await DB.getAsset(assetId);
+        if (next) await DB.saveAsset(assetId, next);
+        else await DB.deleteAsset(assetId);
+    } catch {
+        return;
+    }
+    if (previous && previous !== next && isBlobRef(previous)) {
+        void deleteBlobRefIfUnreferenced(previous);
+    }
+};
 
 /**
  * 把「存储值」壁纸解析成可直接渲染的 url，并把指针（令牌）落进 assets 'wallpaper'。
@@ -393,34 +485,78 @@ let currentWallpaperObjUrl: string | null = null;
  *   · http(s) / 空 / 渐变 → 删除 assets 指针，原样返回。
  * 传入空字符串（重置）时原样返回，交给上层用 DEFAULT_WALLPAPER 兜底。
  */
-const resolveWallpaperStoredValue = async (w: string): Promise<string> => {
+const resolveWallpaperStoredValue = async (w: string, preserveLegacyDefault = false): Promise<string> => {
     const revokePrev = () => {
         if (currentWallpaperObjUrl) { try { URL.revokeObjectURL(currentWallpaperObjUrl); } catch { /* ignore */ } currentWallpaperObjUrl = null; }
     };
+    if (isLegacyDefaultWallpaper(w) && !preserveLegacyDefault) {
+        await replaceWallpaperAssetPointer('wallpaper', null);
+        revokePrev();
+        return DEFAULT_WALLPAPER;
+    }
     if (isBlobRef(w) || (w && w.startsWith('data:'))) {
         const token = isBlobRef(w) ? w : await migrateDataUrlToRef(w);
-        try { await DB.saveAsset('wallpaper', token); } catch { /* ignore */ }
         const blob = await getBlobForRef(token);
         revokePrev();
         if (blob) {
+            await replaceWallpaperAssetPointer('wallpaper', token);
             currentWallpaperObjUrl = URL.createObjectURL(blob);
             return currentWallpaperObjUrl;
         }
-        return w; // Blob 意外缺失：data: 仍可渲染；令牌无解时保底不改
+        if (isBlobRef(token)) {
+            await replaceWallpaperAssetPointer('wallpaper', null);
+            return DEFAULT_WALLPAPER;
+        }
+        // data: 迁移失败时仍保留旧格式，保证原图能继续显示。
+        await replaceWallpaperAssetPointer('wallpaper', token);
+        return w;
     }
     // http(s) 链接 / 重置 / 渐变：没有二进制要存，清掉指针
-    try { await DB.deleteAsset('wallpaper'); } catch { /* ignore */ }
+    await replaceWallpaperAssetPointer('wallpaper', null);
     revokePrev();
     return w;
 };
 
 const defaultTheme: OSTheme = {
-  hue: 245, // Default Indigo-ish
-  saturation: 25,
-  lightness: 65,
+  ...DEFAULT_PAPER_APPEARANCE,
   wallpaper: DEFAULT_WALLPAPER,
   darkMode: false,
-  contentColor: '#ffffff', // Default white text
+  preserveCustomIconOutlines: false,
+  nowPlayingWidgetLight: true,
+};
+
+/** 锁屏壁纸使用独立资产槽；undefined 表示继续跟随桌面壁纸。 */
+const resolveLockWallpaperStoredValue = async (w: string | undefined): Promise<string | undefined> => {
+    const revokePrev = () => {
+        if (currentLockWallpaperObjUrl) {
+            try { URL.revokeObjectURL(currentLockWallpaperObjUrl); } catch { /* ignore */ }
+            currentLockWallpaperObjUrl = null;
+        }
+    };
+    if (!w) {
+        await replaceWallpaperAssetPointer('lock_wallpaper', null);
+        revokePrev();
+        return undefined;
+    }
+    if (isBlobRef(w) || w.startsWith('data:')) {
+        const token = isBlobRef(w) ? w : await migrateDataUrlToRef(w);
+        const blob = await getBlobForRef(token);
+        revokePrev();
+        if (blob) {
+            await replaceWallpaperAssetPointer('lock_wallpaper', token);
+            currentLockWallpaperObjUrl = URL.createObjectURL(blob);
+            return currentLockWallpaperObjUrl;
+        }
+        if (isBlobRef(token)) {
+            await replaceWallpaperAssetPointer('lock_wallpaper', null);
+            return undefined;
+        }
+        await replaceWallpaperAssetPointer('lock_wallpaper', token);
+        return w;
+    }
+    await replaceWallpaperAssetPointer('lock_wallpaper', null);
+    revokePrev();
+    return w;
 };
 
 const defaultApiConfig: APIConfig = {
@@ -537,6 +673,8 @@ Sully是小手机的内置AI。
   // Default theme settings
   bubbleStyle: 'default', // Or specific theme ID if we had one
   contextLimit: 1000,
+  contextRangeMode: 'manual',
+  contextRangePolicyVersion: CONTEXT_RANGE_POLICY_VERSION,
   
   // Default Room Config
   roomConfig: {
@@ -800,6 +938,64 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       setApiCallAmbientContext({ appId: activeApp, appName, charId: char?.id, charName: char?.name });
   }, [activeApp, activeCharacterId, characters]);
 
+  // --- 使用统计：打开了哪个 App ---
+  // 挂在 activeApp 上而不是塞进 openApp，是因为进一个 App 有好几条路（桌面点图标、
+  // 从聊天直接进见面、通话挂起后回来…），activeApp 是它们唯一的共同落点。
+  // 回桌面不算「用了某个功能」，跳过。只发功能名，不带角色、不带任何内容。
+  useEffect(() => {
+      if (activeApp === AppID.Launcher) return;
+      const appName = INSTALLED_APPS.find(a => a.id === activeApp)?.name ?? HIDDEN_APP_NAMES[activeApp];
+      if (!appName) return;
+      trackEvent(`打开${appName}`);
+  }, [activeApp]);
+
+  // --- 使用统计：数据规模档位 ---
+  // 数据加载完之后报一次区间（0 / 1-100 / …），不报精确值、不报任何内容。
+  // 聊天条数走 IndexedDB 的 count()，一条消息都不会被读出来；存储占用是浏览器
+  // 给的字节数。每次会话最多一次，节流标记只在内存里（见 utils/analytics.ts）。
+  const scaleReportedRef = useRef(false);
+  useEffect(() => {
+      if (!isDataLoaded || scaleReportedRef.current) return;
+      scaleReportedRef.current = true;
+      void (async () => {
+          trackDataScaleOnce(await collectDataScale(characters));
+      })();
+  }, [isDataLoaded, characters]);
+
+  // --- 使用统计：当前在用哪套外观 / 角色级设置 ---
+  // 报「现在用的是哪个」而不是「点过哪个」——后者只有折腾的人会出现，
+  // 拿来决定砍哪个预设会砍反。取数和收敛都在 utils/analyticsSnapshot.ts 里，
+  // 用户自己捏的主题、字体、白框 CSS 一律收敛成 custom / 用了，不带他起的名字。
+  useEffect(() => {
+      if (!isDataLoaded) return;
+      trackCurrentAppearanceOnce(collectAppearance(theme, characters.find(c => c.id === activeCharacterId)));
+  }, [isDataLoaded, characters, activeCharacterId, theme]);
+
+  useEffect(() => {
+      if (!isDataLoaded || characters.length === 0) return;
+      trackCurrentCharSettingsOnce(collectCharSettings(characters, activeCharacterId));
+  }, [isDataLoaded, characters, activeCharacterId]);
+
+  // --- 使用统计：现在开着哪些功能 ---
+  // 跟「当前外观」一个道理：外部服务这类配置配一次就长期生效，只看「打开过配置页」
+  // 那种流量点的话，配好之后再没进过设置页的人永远不出现，拿来判断「有没有人要」会判反。
+  //
+  // 收敛全在 utils/analyticsSnapshot.ts 里做，这里只负责把 OSContext 手上那几份
+  // state 递过去。地址、密钥、token、账号名一个字都不会进上报。
+  useEffect(() => {
+      if (!isDataLoaded) return;
+      void (async () => {
+          trackCurrentFeaturesOnce(await collectFeatureFlagsAsync({
+              realtimeConfig,
+              cloudBackupConfig,
+              memoryPalaceConfig,
+              remoteVectorConfig,
+              apiConfig,
+              apiPresetCount: apiPresets.length,
+          }));
+      })();
+  }, [isDataLoaded, realtimeConfig, cloudBackupConfig, memoryPalaceConfig, remoteVectorConfig, apiConfig, apiPresets]);
+
   // --- Global Error Interception ---
   useEffect(() => {
       if (interceptorsInitialized.current) return;
@@ -812,6 +1008,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           
           const urlStr = String(resource);
           const fetchStartedAt = Date.now();
+          // Bare fetch calls do not carry explicit metadata. Snapshot the active
+          // App now; reading the ambient value after a long response would label
+          // the request as whichever App the user navigated to in the meantime.
+          const ambientMetaAtStart = getApiCallAmbientContext();
 
           // 采样参数兼容层（详见 utils/samplingParamCompat.ts）：
           // 某些模型废弃了 temperature/top_p/top_k，带上直接 400。这里在所有 /chat/completions
@@ -888,7 +1088,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // 正文 44s 才灌完，卡片却记成 6.5s（实测误导排查）。clone 与调用方并行消费同一
               // 条流，text() 完成时刻 ≈ 真实收完时刻。
               if (urlStr.includes('/chat/completions')) {
-                  const meta = (config as any)?.__sullyMeta;
+                  const meta = (config as any)?.__sullyMeta || ambientMetaAtStart;
+                  const requestId = (config as any)?.__sullyApiCallId;
                   const body = (sendArgs[1] as any)?.body;
                   const status = response.status;
                   const ok = response.ok;
@@ -900,10 +1101,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           const durationMs = Date.now() - fetchStartedAt;
                           let parsed: any = undefined;
                           try { parsed = JSON.parse(t); } catch { /* 流式/非 JSON：把原始文本交给 recordApiCall 的 SSE 兜底解析 */ }
-                          recordApiCall({ url: urlStr, body, status, ok, response: parsed, responseText: parsed === undefined ? t : undefined, meta, durationMs });
-                      }).catch(() => recordApiCall({ url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt }));
+                          recordApiCall({ requestId, url: urlStr, body, status, ok, response: parsed, responseText: parsed === undefined ? t : undefined, meta, durationMs });
+                      }).catch(() => recordApiCall({ requestId, url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt }));
                   } else {
-                      recordApiCall({ url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt });
+                      recordApiCall({ requestId, url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt });
                   }
               }
 
@@ -948,7 +1149,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           } catch (err: any) {
               // Network Failure
               if (urlStr.includes('/chat/completions')) {
-                  recordApiCall({ url: urlStr, body: (sendArgs[1] as any)?.body, ok: false, meta: (config as any)?.__sullyMeta, durationMs: Date.now() - fetchStartedAt });
+                  recordApiCall({ requestId: (config as any)?.__sullyApiCallId, url: urlStr, body: (sendArgs[1] as any)?.body, ok: false, meta: (config as any)?.__sullyMeta || ambientMetaAtStart, durationMs: Date.now() - fetchStartedAt });
               }
               setSystemLogs(prev => [{
                   id: `log-${Date.now()}`,
@@ -1017,6 +1218,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
              try {
                  const parsed = JSON.parse(savedThemeStr);
                  loadedTheme = { ...loadedTheme, ...parsed };
+                 // 仅迁移旧系统默认值；用户自定义过的壁纸、文字色和主题色全部保留。
+                 const preserveNostalgia = shouldPreserveLegacyDefaultWallpaper(loadedTheme.wallpaper, loadedTheme.desktopVariant);
+                 if ((!preserveNostalgia && isLegacyDefaultWallpaper(loadedTheme.wallpaper)) || (isPaperWallpaper(loadedTheme.wallpaper) && loadedTheme.wallpaper !== DEFAULT_WALLPAPER)) {
+                     loadedTheme.wallpaper = DEFAULT_WALLPAPER;
+                     loadedTheme = migrateLegacyDefaultPalette(loadedTheme);
+                 }
                  // Strip the legacy Unsplash hard-coded wallpaper, keep user-imported http(s) URLs
                  if (
                      loadedTheme.wallpaper.includes('unsplash') ||
@@ -1028,6 +1235,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                  // 真值在 assets 'wallpaper'，下面会解析覆盖；这里先回退默认避免闪一帧坏图。
                  if (loadedTheme.wallpaper.startsWith('data:') || loadedTheme.wallpaper.startsWith('blob:')) {
                      loadedTheme.wallpaper = defaultTheme.wallpaper;
+                 }
+                 if (loadedTheme.lockWallpaper?.startsWith('data:') || loadedTheme.lockWallpaper?.startsWith('blob:')) {
+                     loadedTheme.lockWallpaper = undefined;
                  }
                  // Deprecated legacy fields are forcibly stripped — they never render again.
                  loadedTheme.launcherWidgetImage = undefined;
@@ -1066,7 +1276,18 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                 if (assetMap['wallpaper']) {
                     // assets 'wallpaper' 现在存的是指针（blobref 令牌 / 旧 data: / http）。
                     // 解析成可渲染 url（令牌→objectURL；旧 data: 顺手迁移成 Blob）。
-                    loadedTheme.wallpaper = await resolveWallpaperStoredValue(assetMap['wallpaper']);
+                    const legacyAssetWallpaper = isLegacyDefaultWallpaper(assetMap['wallpaper']);
+                    const preserveNostalgia = shouldPreserveLegacyDefaultWallpaper(assetMap['wallpaper'], loadedTheme.desktopVariant);
+                    if ((legacyAssetWallpaper && !preserveNostalgia) || isPaperWallpaper(assetMap['wallpaper'])) {
+                        loadedTheme.wallpaper = DEFAULT_WALLPAPER;
+                        if (legacyAssetWallpaper) loadedTheme = migrateLegacyDefaultPalette(loadedTheme);
+                        await DB.deleteAsset('wallpaper');
+                    } else {
+                        loadedTheme.wallpaper = await resolveWallpaperStoredValue(assetMap['wallpaper'], preserveNostalgia);
+                    }
+                }
+                if (assetMap['lock_wallpaper']) {
+                    loadedTheme.lockWallpaper = await resolveLockWallpaperStoredValue(assetMap['lock_wallpaper']);
                 }
 
                 // Deprecated legacy asset — purge silently so it can never be rendered again.
@@ -1082,20 +1303,23 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                 const DEPRECATED_WIDGET_SLOTS = new Set(['bl', 'br']);
                 const loadedIcons: Record<string, string> = {};
                 const loadedWidgets: Record<string, string> = {};
-                Object.keys(assetMap).forEach(key => {
+                for (const key of Object.keys(assetMap)) {
                     if (key.startsWith('icon_')) {
                         const appId = key.replace('icon_', '');
-                        loadedIcons[appId] = assetMap[key];
+                        const previous = assetMap[key];
+                        const stored = previous.startsWith('data:') ? await migrateDataUrlToRef(previous) : previous;
+                        loadedIcons[appId] = stored;
+                        if (stored !== previous) await DB.saveAsset(key, stored);
                     }
                     if (key.startsWith('widget_')) {
                         const slot = key.replace('widget_', '');
                         if (DEPRECATED_WIDGET_SLOTS.has(slot)) {
                             void DB.deleteAsset(key);
-                            return;
+                            continue;
                         }
                         loadedWidgets[slot] = assetMap[key];
                     }
-                });
+                }
                 setCustomIcons(loadedIcons);
                 // Strip deprecated slots that may have been imported via beautification packs.
                 if (loadedTheme.launcherWidgets) {
@@ -1252,7 +1476,24 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
             }
         }
 
-        finalChars = finalChars.map(c => normalizeCharacterDefaults(normalizeCharacterImpression(c)));
+        let resetAutoContextCount = 0;
+        let migratedContextCount = 0;
+        finalChars = finalChars.map(c => {
+          const normalized = normalizeCharacterDefaults(normalizeCharacterImpression(c));
+          const migration = migrateCharacterContextRange(normalized);
+          if (migration.migrated) migratedContextCount++;
+          if (migration.resetAutoContext) resetAutoContextCount++;
+          return migration.character;
+        });
+        if (migratedContextCount > 0) {
+          await Promise.all(finalChars.map(c => DB.saveCharacter(c)));
+        }
+        if (resetAutoContextCount > 0) {
+          setTimeout(() => addToast(
+            `上下文范围已升级：${resetAutoContextCount} 个全自动记忆角色已恢复为自适应模式。需要读取更多旧原文时，可在聊天设置中手动调整。`,
+            'info',
+          ), 1200);
+        }
 
         if (finalChars.length > 0) {
           setCharacters(finalChars);
@@ -1650,6 +1891,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // Refs to avoid stale closures in proactive callback
   const charactersRef = useRef(characters);
   charactersRef.current = characters;
+
+  // 同步 charId → 角色名 注册表，让 utils 层（群聊背景注入等）能标出真实发言人名。
+  useEffect(() => {
+    setCharNameRegistry(characters);
+  }, [characters]);
   const apiConfigRef = useRef(apiConfig);
   apiConfigRef.current = apiConfig;
 
@@ -1790,9 +2036,20 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
               // 3. Build prompt & message history — 走和 useChatAI / emotion eval 同一个 helper，
               //    保证三家拿到的"材料"完全一致；区别只在前面追加的"现在主动找用户"那条 hint。
-              const allMsgs = await DB.getRecentMessagesByCharId(charId, char.contextLimit || 500);
-              const emojis = await DB.getEmojis();
-              const categories = await DB.getEmojiCategories();
+              const proactiveRange = await loadCharacterContextRange(char);
+              if (proactiveRange.userBreakpointExpired) {
+                  updateCharacter(charId, { contextUserStartMessageId: undefined });
+              }
+              const allMsgs = proactiveRange.messages;
+              // 1.0 本地主动消息不会经过 Chat.tsx 的 aiVisibleEmojis。
+              // 这里既要过滤提示词，也要过滤下方 [[SEND_EMOJI]] 的按名反查：
+              // 只修提示词仍挡不住模型复述旧上下文里的表情名；只修落库则模型仍会看到越权表情。
+              // 2.0 推送路径已在 activeMsgClient / activeMsgRuntime 做同样的双层收口。
+              const { emojis, categories } = ChatPrompts.filterVisibleEmojis(
+                  await DB.getEmojis(),
+                  await DB.getEmojiCategories(),
+                  charId,
+              );
 
               // 上一轮缓存的意识流独白 —— 主路径用 React state，主动消息这里用 ref Map
               const cachedInnerState = proactiveInnerStateRef.current.get(charId) || undefined;
@@ -1801,7 +2058,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   char, userProfile: currentUserProfile!, groups: currentGroups,
                   emojis, categories,
                   historyMsgs: allMsgs,
-                  contextLimit: char.contextLimit || 500,
+                  contextLimit: Math.max(1, allMsgs.length),
                   realtimeConfig: currentRealtimeConfig,
                   innerState: cachedInnerState,
                   // 实时音乐播放状态 —— OSContext 在 MusicProvider 上层用不了 useMusic()，
@@ -2178,11 +2435,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               for (const w of worlds) {
                   if (migrateWorldDaySegs(w)) await DB.saveWorld(w).catch(() => {});
               }
-              WorldScheduler.reconcile(
-                  worlds
-                      .filter(w => (w.offlineTickSlots?.length || 0) > 0)
-                      .map(w => ({ worldId: w.id, slots: w.offlineTickSlots! }))
-              );
+              WorldScheduler.reconcile(toTickEntries(worlds));
           })
           .catch(() => {});
 
@@ -2197,7 +2450,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   }, [isDataLoaded]);
 
   const updateTheme = async (updates: Partial<OSTheme>) => {
-    const { wallpaper, launcherWidgetImage, launcherWidgets, desktopDecorations, customFont, ...styleUpdates } = updates;
+    const { wallpaper, lockWallpaper, launcherWidgetImage, launcherWidgets, desktopDecorations, customFont, ...styleUpdates } = updates;
     // Legacy slots are banned — never let them enter state, regardless of caller intent.
     const sanitizedWidgets = launcherWidgets !== undefined
         ? Object.fromEntries(Object.entries(launcherWidgets).filter(([k]) => k !== 'bl' && k !== 'br'))
@@ -2215,7 +2468,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     // theme.wallpaper 在内存里始终是能直接喂 CSS 的值（objectURL / http / 渐变），
     // 不是 blobref 令牌。
     if (wallpaper !== undefined) {
-        newTheme.wallpaper = await resolveWallpaperStoredValue(wallpaper);
+        const legacyWallpaper = isLegacyDefaultWallpaper(wallpaper);
+        const preserveNostalgia = shouldPreserveLegacyDefaultWallpaper(wallpaper, newTheme.desktopVariant);
+        newTheme.wallpaper = await resolveWallpaperStoredValue(wallpaper, preserveNostalgia);
+        if (legacyWallpaper && !preserveNostalgia) Object.assign(newTheme, migrateLegacyDefaultPalette(newTheme));
+    }
+    if ('lockWallpaper' in updates) {
+        newTheme.lockWallpaper = await resolveLockWallpaperStoredValue(lockWallpaper);
     }
     setTheme(newTheme);
 
@@ -2279,6 +2538,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     // blob: objectURL 是本次会话临时的，重启后失效——不能进 LS，清空让加载路径从 assets 重新解析。
     const lsTheme = { ...newTheme };
     if (lsTheme.wallpaper && (lsTheme.wallpaper.startsWith('data:') || lsTheme.wallpaper.startsWith('blob:'))) lsTheme.wallpaper = '';
+    if (lsTheme.lockWallpaper && (lsTheme.lockWallpaper.startsWith('data:') || lsTheme.lockWallpaper.startsWith('blob:'))) lsTheme.lockWallpaper = undefined;
     // Banned legacy field — never persist.
     lsTheme.launcherWidgetImage = undefined;
     // Strip data URIs and deprecated slots from widgets for LS
@@ -2354,9 +2614,20 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
           setSysOperation({ status: 'idle', message: '', progress: 100 });
           addToast('云端备份完成', 'success');
+          // provider / mode 都是代码里写死的枚举；连接地址、账号、错误原文一概不带。
+          trackEvent('上传备份到云端', {
+              provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav',
+              mode,
+              result: '成功',
+          });
       } catch (e: any) {
           setSysOperation({ status: 'idle', message: '', progress: 0 });
           addToast(`云端备份失败: ${e.message}`, 'error');
+          trackEvent('上传备份到云端', {
+              provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav',
+              mode,
+              result: '失败',
+          });
           throw e;
       }
   };
@@ -2437,7 +2708,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       description: '点击编辑设定...',
       systemPrompt: '',
       memories: [],
-      contextLimit: 500,
+      contextLimit: DEFAULT_MANUAL_CONTEXT_LIMIT,
+      contextRangeMode: 'manual',
+      contextRangePolicyVersion: CONTEXT_RANGE_POLICY_VERSION,
       emotionConfig: { enabled: true },
     };
     setCharacters(prev => [...prev, newChar]);
@@ -2667,9 +2940,27 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const updateUserProfile = async (updates: Partial<UserProfile>) => { setUserProfile(prev => { const next = { ...prev, ...updates }; DB.saveUserProfile(next); return next; }); };
   const addCustomTheme = async (theme: ChatTheme) => { setCustomThemes(prev => { const exists = prev.find(t => t.id === theme.id); if (exists) return prev.map(t => t.id === theme.id ? theme : t); return [...prev, theme]; }); await DB.saveTheme(theme); };
   const removeCustomTheme = async (id: string) => { setCustomThemes(prev => prev.filter(t => t.id !== id)); await DB.deleteTheme(id); };
-  const setCustomIcon = async (appId: string, iconUrl: string | undefined) => { setCustomIcons(prev => { const next = { ...prev }; if (iconUrl) next[appId] = iconUrl; else delete next[appId]; return next; }); if (iconUrl) { await DB.saveAsset(`icon_${appId}`, iconUrl); } else { await DB.deleteAsset(`icon_${appId}`); } };
+  const setCustomIcon = async (appId: string, iconUrl: string | undefined) => {
+      const stored = iconUrl?.startsWith('data:') ? await migrateDataUrlToRef(iconUrl) : iconUrl;
+      setCustomIcons(prev => {
+          const next = { ...prev };
+          if (stored) next[appId] = stored;
+          else delete next[appId];
+          return next;
+      });
+      if (stored) await DB.saveAsset(`icon_${appId}`, stored);
+      else await DB.deleteAsset(`icon_${appId}`);
+  };
   const addToast = (message: string, type: Toast['type'] = 'info') => { const id = Date.now().toString(); setToasts(prev => [...prev, { id, message, type }]); setTimeout(() => { setToasts(prev => prev.filter(t => t.id !== id)); }, 3000); };
-  const showError = (title: string, details: string) => { setErrorDialog({ title, details }); };
+  const showError = (title: string, details: string) => {
+      setErrorDialog({ title, details });
+      // showError 是分发型入口，title 由调用方传。这里写显式白名单：
+      // 只有下面这三个写死的 title 会上报，其它（含以后新加的）一律不发，
+      // 也绝不把 title 原样透传出去（免得哪天有人往里塞 URL 或报错原文）。
+      if (title === 'Instant Push 发送失败') trackEvent('弹出报错详情弹窗', { 报错来源: 'Instant Push 发送失败' });
+      else if (title === '导入失败') trackEvent('弹出报错详情弹窗', { 报错来源: '导入失败' });
+      else if (title === '云端恢复失败') trackEvent('弹出报错详情弹窗', { 报错来源: '云端恢复失败' });
+  };
   const dismissError = () => { setErrorDialog(null); };
 
   // --- APPEARANCE PRESETS ---
@@ -2679,6 +2970,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       const presetTheme: OSTheme = { ...theme };
       if (presetTheme.wallpaper && presetTheme.wallpaper.startsWith('blob:')) {
           presetTheme.wallpaper = (await DB.getAsset('wallpaper')) || '';
+      }
+      if (presetTheme.lockWallpaper?.startsWith('blob:')) {
+          presetTheme.lockWallpaper = (await DB.getAsset('lock_wallpaper')) || undefined;
       }
       const preset: AppearancePreset = {
           id: `ap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -2707,13 +3001,25 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       }
       // 壁纸改存 Blob：把预设里的指针（blobref 令牌 / 旧 data:）落库并解析成 objectURL 再进 state。
       if (sanitizedPresetTheme.wallpaper !== undefined && typeof sanitizedPresetTheme.wallpaper === 'string') {
-          sanitizedPresetTheme.wallpaper = await resolveWallpaperStoredValue(sanitizedPresetTheme.wallpaper);
+          const legacyWallpaper = isLegacyDefaultWallpaper(sanitizedPresetTheme.wallpaper);
+          const preserveNostalgia = shouldPreserveLegacyDefaultWallpaper(
+              sanitizedPresetTheme.wallpaper,
+              sanitizedPresetTheme.desktopVariant,
+          );
+          sanitizedPresetTheme.wallpaper = await resolveWallpaperStoredValue(sanitizedPresetTheme.wallpaper, preserveNostalgia);
+          if (legacyWallpaper && !preserveNostalgia) {
+              Object.assign(sanitizedPresetTheme, migrateLegacyDefaultPalette(sanitizedPresetTheme));
+          }
+      }
+      if ('lockWallpaper' in sanitizedPresetTheme) {
+          sanitizedPresetTheme.lockWallpaper = await resolveLockWallpaperStoredValue(sanitizedPresetTheme.lockWallpaper);
       }
       // Apply theme
       setTheme(sanitizedPresetTheme);
       // 写 LS 前必须剥 data URI / blob: objectURL，否则 base64 壁纸撑爆 quota、blob: 重启即失效
       const lsTheme: any = { ...sanitizedPresetTheme };
       if (lsTheme.wallpaper && typeof lsTheme.wallpaper === 'string' && (lsTheme.wallpaper.startsWith('data:') || lsTheme.wallpaper.startsWith('blob:'))) lsTheme.wallpaper = '';
+      if (lsTheme.lockWallpaper && typeof lsTheme.lockWallpaper === 'string' && (lsTheme.lockWallpaper.startsWith('data:') || lsTheme.lockWallpaper.startsWith('blob:'))) lsTheme.lockWallpaper = undefined;
       lsTheme.launcherWidgetImage = undefined;
       if (lsTheme.launcherWidgets) {
           const cleanWidgets: Record<string, string> = {};
@@ -2740,10 +3046,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       applyCustomFont(preset.theme.customFont);
       // Apply custom icons if present
       if (preset.customIcons) {
-          setCustomIcons(preset.customIcons);
+          const persistedIcons: Record<string, string> = {};
           for (const [appId, iconUrl] of Object.entries(preset.customIcons)) {
-              await DB.saveAsset(`icon_${appId}`, iconUrl);
+              const stored = iconUrl.startsWith('data:') ? await migrateDataUrlToRef(iconUrl) : iconUrl;
+              persistedIcons[appId] = stored;
+              await DB.saveAsset(`icon_${appId}`, stored);
           }
+          setCustomIcons(persistedIcons);
       }
       // Apply chat themes if present
       if (preset.chatThemes) {
@@ -2783,6 +3092,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // 已保存的外观预设不动，用户随时还能切回去。
   const resetAppearance = async () => {
       try {
+          await resolveLockWallpaperStoredValue(undefined);
           setTheme(defaultTheme);
           applyCustomFont(undefined);
 
@@ -2797,6 +3107,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               const id = asset.id;
               if (
                   id === 'wallpaper' ||
+                  id === 'lock_wallpaper' ||
                   id === 'launcherWidgetImage' ||
                   id === 'custom_font_data' ||
                   id.startsWith('widget_') ||
@@ -2863,7 +3174,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           raw = JSON.parse(text);
       }
       if (raw.type !== 'sully_appearance_preset') throw new Error('无效的外观预设文件');
-      const preset: AppearancePreset = {
+      const preset = await migrateAppearancePresetBlobRefs({
           id: `ap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           name: raw.name || '导入的预设',
           createdAt: Date.now(),
@@ -2871,7 +3182,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           customIcons: raw.customIcons,
           chatThemes: raw.chatThemes,
           chatLayout: raw.chatLayout,
-      };
+      } as AppearancePreset);
       setAppearancePresets(prev => [preset, ...prev]);
       await DB.saveAsset(`appearance_preset_${preset.id}`, JSON.stringify(preset));
       addToast(`已导入预设「${preset.name}」`, 'success');
@@ -3151,6 +3462,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               worldHomeLocal: (mode === 'text_only' || mode === 'full') ? exportWorldHomeLocal() : undefined,
               luckinLocal: (mode === 'text_only' || mode === 'full') ? exportLuckinLocal() : undefined,
               mcdLocal: (mode === 'text_only' || mode === 'full') ? exportMcdLocal() : undefined,
+              mcpLocal: (mode === 'text_only' || mode === 'full') ? exportMcpLocal() : undefined,
 
               // 梦境盲盒收藏册（账号级 localStorage，不挂在角色上，需单独随备份带走）
               dreamCollection: (mode === 'text_only' || mode === 'full') ? (() => { try { const s = localStorage.getItem('os_dream_collection'); return s ? JSON.parse(s) : undefined; } catch { return undefined; } })() : undefined,
@@ -3180,9 +3492,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       const ptr = await DB.getAsset('wallpaper'); // blobref 令牌 / 旧 data: / http
                       (backupData.theme as any).wallpaper = ptr || '';
                   }
+                  const lockWp = (backupData.theme as any).lockWallpaper;
+                  if (typeof lockWp === 'string' && lockWp.startsWith('blob:')) {
+                      const ptr = await DB.getAsset('lock_wallpaper');
+                      (backupData.theme as any).lockWallpaper = ptr || undefined;
+                  }
                   await resolveBlobRefsDeep(backupData.theme);
               }
               if (backupData.roomCustomAssets) await resolveBlobRefsDeep(backupData.roomCustomAssets);
+              if (backupData.customIcons) await resolveBlobRefsDeep(backupData.customIcons);
               if (backupData.appearancePresets) await resolveBlobRefsDeep(backupData.appearancePresets);
 
               if (backupData.socialAppData?.userProfile) processObject(backupData.socialAppData.userProfile);
@@ -3471,29 +3789,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       }
   };
 
-  const previewCsySystem = async (fileOrJson: File | string): Promise<CsyMigrationReport> => {
-      let raw: unknown;
-      if (typeof fileOrJson === 'string') {
-          raw = JSON.parse(fileOrJson);
-      } else if (!fileOrJson.name.toLowerCase().endsWith('.zip')) {
-          raw = JSON.parse(await fileOrJson.text());
-      } else {
-          const JSZip = await loadJSZip();
-          const zip = await JSZip.loadAsync(fileOrJson);
-          if (zip.file('manifest.json')) {
-              throw new Error('这是一份 SullyOS 分片备份，不是 CSY-OS 的 data.json 备份。');
-          }
-          const dataFile = zip.file('data.json');
-          if (!dataFile) throw new Error('CSY-OS 备份损坏：缺少 data.json。');
-          raw = JSON.parse(await dataFile.async('string'));
-      }
-      return inspectCsyBackup(raw);
-  };
-
-  const importSystem = async (
-      fileOrJson: File | string,
-      options: { source?: 'sully' | 'csy' } = {},
-  ): Promise<void> => {
+  const importSystem = async (fileOrJson: File | string): Promise<void> => {
       const sourceName = typeof fileOrJson === 'string' ? 'json' : fileOrJson.name;
       const sourceSize = typeof fileOrJson === 'string'
           ? (typeof Blob !== 'undefined' ? new Blob([fileOrJson]).size : fileOrJson.length)
@@ -3561,7 +3857,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       showImportProgress('parsing', '正在解析备份文件...', 1, { current: '解析备份文件', sourceSize });
       try {
           let data: FullBackupData;
-          let csyReport: CsyMigrationReport | undefined;
           let zip: JSZipLike | null = null;
 
           if (typeof fileOrJson === 'string') {
@@ -3612,15 +3907,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }
           }
 
-          if (options.source === 'csy') {
-              if (zip?.file('manifest.json')) {
-                  throw new Error('选择的文件是 SullyOS 备份，不需要走 CSY-OS 迁移入口。');
-              }
-              showImportProgress('converting', '正在转换 CSY-OS 数据...', 32, { current: '转换向量记忆与角色配置' });
-              const prepared = prepareCsyMigration(data);
-              data = prepared.data;
-              csyReport = prepared.report;
-          }
+          // 必须发生在 restoreAssetsInPlace / DB.importFullData 之前：不受支持的第三方
+          // 备份一旦命中特征就整包拒绝，不能出现“导入了一半才报错”的状态。
+          assertSupportedSullyBackup(data);
 
           const hadAssetStoreBackup = data.assets !== undefined;
           const hadCustomIconsBackup = data.customIcons !== undefined;
@@ -3758,13 +4047,19 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }
               if (data.customIcons) {
                   for (const [appId, iconUrl] of Object.entries(data.customIcons)) {
-                      await DB.saveAsset(`icon_${appId}`, iconUrl);
+                      const stored = iconUrl.startsWith('data:') ? await migrateDataUrlToRef(iconUrl) : iconUrl;
+                      await DB.saveAsset(`icon_${appId}`, stored);
                   }
               }
               if (data.appearancePresets) {
+                  const cache = new Map<string, string>();
+                  const migratedPresets: AppearancePreset[] = [];
                   for (const preset of data.appearancePresets) {
-                      await DB.saveAsset(`appearance_preset_${preset.id}`, JSON.stringify(preset));
+                      const migrated = await migrateAppearancePresetBlobRefs(preset, cache);
+                      migratedPresets.push(migrated);
+                      await DB.saveAsset(`appearance_preset_${migrated.id}`, JSON.stringify(migrated));
                   }
+                  data.appearancePresets = migratedPresets;
               }
           }
 
@@ -3881,21 +4176,45 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               const loadedIcons: Record<string, string> = {};
               const loadedPresets: AppearancePreset[] = [];
               if (Array.isArray(assets)) {
-                  assets.forEach(a => {
-                      if (a.id.startsWith('icon_')) loadedIcons[a.id.replace('icon_', '')] = a.data;
+                  for (const a of assets) {
+                      if (a.id.startsWith('icon_')) {
+                          const stored = a.data.startsWith('data:') ? await migrateDataUrlToRef(a.data) : a.data;
+                          loadedIcons[a.id.replace('icon_', '')] = stored;
+                          if (stored !== a.data) await DB.saveAsset(a.id, stored);
+                      }
                       if (a.id.startsWith('appearance_preset_')) {
                           try {
                               loadedPresets.push(JSON.parse(a.data));
                           } catch {}
                       }
-                  });
+                  }
               }
               setCustomIcons(loadedIcons);
               loadedPresets.sort((a, b) => b.createdAt - a.createdAt);
               setAppearancePresets(loadedPresets);
           }
 
-          if (chars.length > 0) setCharacters(chars.map(c => normalizeCharacterDefaults(normalizeCharacterImpression(c))));
+          if (chars.length > 0) {
+              let importedAutoContextCount = 0;
+              let importedContextMigrated = false;
+              const normalizedChars = chars.map(c => {
+                  const normalized = normalizeCharacterDefaults(normalizeCharacterImpression(c));
+                  const migration = migrateCharacterContextRange(normalized);
+                  if (migration.migrated) importedContextMigrated = true;
+                  if (migration.resetAutoContext) importedAutoContextCount++;
+                  return migration.character;
+              });
+              if (importedContextMigrated) {
+                  await Promise.all(normalizedChars.map(c => DB.saveCharacter(c)));
+              }
+              setCharacters(normalizedChars);
+              if (importedAutoContextCount > 0) {
+                  setTimeout(() => addToast(
+                      `导入的旧设置已升级：${importedAutoContextCount} 个全自动记忆角色已使用自适应上下文。`,
+                      'info',
+                  ), 600);
+              }
+          }
           if (groupsList.length > 0) setGroups(groupsList);
           if (themes.length > 0) setCustomThemes(themes);
           if (user) setUserProfile(user);
@@ -3905,12 +4224,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           
           setSysOperation({ status: 'idle', message: '', progress: 100 });
           clearImportInProgress();
-          addToast(
-              csyReport
-                  ? `CSY-OS 迁移完成：${csyReport.vectorMemories} 条记忆，${csyReport.reusableVectors} 条向量已复用。系统即将重启...`
-                  : '恢复成功，系统即将重启...',
-              'success',
-          );
+          addToast('恢复成功，系统即将重启...', 'success');
           setTimeout(() => window.location.reload(), 1500);
 
       } catch (e: any) {
@@ -3929,9 +4243,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           throw new Error(`恢复失败: ${msg}`);
       }
   };
-
-  const importCsySystem = (fileOrJson: File | string): Promise<void> =>
-      importSystem(fileOrJson, { source: 'csy' });
 
   const resetSystem = async () => { try { await DB.deleteDB(); localStorage.clear(); window.location.reload(); } catch (e) { console.error(e); addToast('重置失败，请手动清除浏览器数据', 'error'); } };
   const openApp = (appId: AppID) => setActiveApp(appId);
@@ -4058,8 +4369,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     listCloudBackups,
     exportSystem,
     importSystem,
-    previewCsySystem,
-    importCsySystem,
     resetSystem,
     sysOperation,
     systemLogs,

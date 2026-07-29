@@ -18,6 +18,7 @@ import {
     type DiaryPreview,
     type FeishuDiaryPreview,
 } from './realtimeFetchCore';
+import { getLocalDateKey } from './localDate';
 
 export interface WeatherData {
     temp: number;
@@ -70,6 +71,7 @@ export interface RealtimeConfig {
         enabled: boolean;
         serverUrl: string;
         cookie?: string;        // Lite 模式：登录后的完整小红书 cookie
+        rnoteApiKey?: string;   // Lite 模式：用户自备的 Rnote Key，用于真实评论
         loggedInNickname?: string;
         loggedInUserId?: string;
         userXsecToken?: string; // 从 feed 列表自动获取，用于 getUserProfile 等
@@ -91,7 +93,15 @@ export const defaultRealtimeConfig: RealtimeConfig = {
     notionApiKey: '',
     notionDatabaseId: '',
     xhsEnabled: false,
-    xhsMcpConfig: { enabled: false, serverUrl: `${getProxyWorkerUrl()}/api`, cookie: undefined, loggedInNickname: undefined, loggedInUserId: undefined, userXsecToken: undefined },
+    xhsMcpConfig: {
+        enabled: false,
+        serverUrl: `${getProxyWorkerUrl()}/api`,
+        cookie: undefined,
+        rnoteApiKey: undefined,
+        loggedInNickname: undefined,
+        loggedInUserId: undefined,
+        userXsecToken: undefined,
+    },
     cacheMinutes: 30
 };
 
@@ -553,10 +563,12 @@ export const RealtimeContextManager = {
     },
 
     /**
-     * 检查特殊日期
+     * 检查特殊日期。
+     * tz 非空时按角色所在时区判「今天几号」——否则角色会跟着用户的日历过节：
+     * 用户这边 2/14 早上，角色在纽约还是 13 号晚上，却被告知今天是情人节。
      */
-    checkSpecialDates: (): string[] => {
-        const now = new Date();
+    checkSpecialDates: (tz?: string): string[] => {
+        const now = nowInTimeZone(tz);
         const monthDay = `${(now.getMonth() + 1).toString().padStart(2, '0')}-${now.getDate().toString().padStart(2, '0')}`;
 
         const special: string[] = [];
@@ -626,8 +638,8 @@ export const RealtimeContextManager = {
         const time = RealtimeContextManager.getTimeContext(tz);
         parts.push(`📅 当前真实时间: ${time.dateStr} ${time.dayOfWeek} ${time.timeOfDay} ${time.timeStr}`);
 
-        // 2. 特殊日期
-        const specialDates = RealtimeContextManager.checkSpecialDates();
+        // 2. 特殊日期（跟上面的「当前真实时间」同一个时区，否则同一段里日期和节日会打架）
+        const specialDates = RealtimeContextManager.checkSpecialDates(tz);
         if (specialDates.length > 0) {
             parts.push(`🎉 今日特殊: ${specialDates.join('、')}`);
         }
@@ -792,7 +804,7 @@ export const NotionManager = {
     ): Promise<{ success: boolean; pageId?: string; url?: string; message: string }> => {
         try {
             const now = new Date();
-            const dateStr = entry.date || now.toISOString().split('T')[0];
+            const dateStr = entry.date || getLocalDateKey(now);
 
             // 使用 markdown 解析器生成丰富的 Notion blocks
             const children = parseMarkdownToNotionBlocks(entry.content, entry.mood, entry.characterName);
@@ -1658,7 +1670,7 @@ export const FeishuManager = {
             }
 
             const now = new Date();
-            const dateStr = entry.date || now.toISOString().split('T')[0];
+            const dateStr = entry.date || getLocalDateKey(now);
             const dateTimestamp = new Date(dateStr).getTime();
             const titlePrefix = entry.characterName ? `[${entry.characterName}] ` : '';
 
@@ -1768,7 +1780,17 @@ export const FeishuManager = {
                 const rawTitle = (Array.isArray(fields['标题']) ? fields['标题']?.[0]?.text : fields['标题']) || '无标题';
                 const cleanTitle = String(rawTitle).replace(/^\[.*?\]\s*/, '');
                 const rawDate = fields['日期'];
-                const dateStr = rawDate ? new Date(typeof rawDate === 'number' ? rawDate : rawDate).toISOString().split('T')[0] : '';
+                const rawDateText = typeof rawDate === 'string' ? rawDate.trim() : '';
+                const parsedDate = rawDate && !/^\d{4}-\d{2}-\d{2}$/.test(rawDateText)
+                    ? new Date(rawDate)
+                    : null;
+                const dateStr = rawDate
+                    ? /^\d{4}-\d{2}-\d{2}$/.test(rawDateText)
+                        ? rawDateText
+                        : parsedDate && !Number.isNaN(parsedDate.getTime())
+                            ? getLocalDateKey(parsedDate)
+                            : ''
+                    : '';
 
                 return {
                     recordId: item.record_id,
@@ -1847,10 +1869,20 @@ export interface XhsNote {
     title: string;
     desc: string;
     likes: number;
+    collects?: number;
+    commentCount?: number;
+    shareCount?: number;
     author: string;
     authorId: string;
     xsecToken?: string;
     coverUrl?: string;
     type?: string;  // 'normal' | 'video'
+    comments?: {
+        author: string;
+        content: string;
+        likes: number;
+        commentId?: string;
+        userId?: string;
+    }[];
 }
 // XhsManager removed — all XHS ops go through xhsMcpClient.ts

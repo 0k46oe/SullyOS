@@ -20,6 +20,10 @@ import { removeSongsFromPlaylist } from '../../utils/charPlaylistEdit';
 import { DB } from '../../utils/db';
 import { C, Sparkle, MizuHeader, BokehBg, MiniPlayer } from './MusicUI';
 import { ArrowLeft, MusicNote, Heart, Plus, MagnifyingGlass, Trash, Check } from '@phosphor-icons/react';
+import { getDailyScheduleForChar } from '../../utils/dailySchedule';
+import { useLocalDateKey } from '../../hooks/useLocalDateKey';
+import { resolveCharTimeZone } from '../../utils/timezone';
+import { trackEvent } from '../../utils/analytics';
 
 interface Props {
   charId: string;
@@ -59,6 +63,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
     current, playing, togglePlay, nextSong, prevSong,
   } = useMusic();
   const char = useMemo(() => characters.find(c => c.id === charId), [characters, charId]);
+  const charDateKey = useLocalDateKey(resolveCharTimeZone(char));
 
   const [initializing, setInitializing] = useState(false);
   const [expandedPl, setExpandedPl] = useState<string | null>(null);
@@ -128,8 +133,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
     let cancelled = false;
     (async () => {
       try {
-        const today = new Date().toISOString().slice(0, 10);
-        const schedule = await DB.getDailySchedule(char.id, today);
+        const schedule = await getDailyScheduleForChar(char);
         if (cancelled) return;
         const cur = computeCurrentListening(char, schedule);
         const prev = char.musicProfile!.currentListening;
@@ -148,7 +152,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
       }
     })();
     return () => { cancelled = true; };
-  }, [char?.id, initialized]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [char?.id, char?.customTimezoneEnabled, char?.customTimezone, initialized, charDateKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const doInitialize = useCallback(async () => {
     if (!char || initializing) return;
@@ -157,6 +161,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
       const newProfile = await CharMusicPersona.initialize(char, userProfile, apiConfig);
       updateCharacter(char.id, { musicProfile: newProfile });
       addToast(`${char.name} 的音乐角落已开启`, 'success');
+      trackEvent('生成角色的音乐人格');
     } catch (e: any) {
       addToast(`初始化失败：${e.message || '未知错误'}`, 'error');
     } finally {
@@ -176,6 +181,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
       const newProfile = await CharMusicPersona.initialize(char, userProfile, apiConfig);
       updateCharacter(char.id, { musicProfile: newProfile });
       addToast(`${char.name} 的音乐人格已重新生成`, 'success');
+      trackEvent('重新生成角色的音乐人格');
     } catch (e: any) {
       addToast(`重新生成失败：${e.message || '未知错误'}`, 'error');
     } finally {
@@ -201,6 +207,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
       musicProfile: { ...profile, playlists: nextPlaylists, updatedAt: Date.now() },
     });
     addToast(`已移除 ${n} 首`, 'success');
+    trackEvent('删除角色歌单里选中的歌');
     exitSelectMode();
   };
 
@@ -291,6 +298,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
       };
       updateCharacter(char.id, { musicProfile: updatedProfile });
       addToast(`已为《${pl.title}》填入 ${picked.length} 首歌`, 'success');
+      trackEvent('让角色按品味挑歌填满歌单');
     } catch (e: any) {
       addToast(`填充失败：${e.message}`, 'error');
     } finally {
@@ -304,6 +312,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
     const startIdx = queue.findIndex(s => s.id === song.id);
     playSong(queue[startIdx], { replaceQueue: queue, startIdx });
     onOpenPlayer();
+    trackEvent('播放角色歌单里的一首歌');
   };
 
   if (!char) {
@@ -480,8 +489,8 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
                         )}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className="text-sm font-medium truncate" style={{ color: C.text }}>{pl.title}</div>
-                        <div className="text-[10px] truncate mt-0.5" style={{ color: C.muted }}>
+                        <div className={`text-sm font-medium ${isExpanded ? 'whitespace-normal break-words' : 'truncate'}`} style={{ color: C.text }}>{pl.title}</div>
+                        <div className={`text-[10px] mt-0.5 ${isExpanded ? 'whitespace-pre-wrap break-words leading-relaxed' : 'truncate'}`} style={{ color: C.muted }}>
                           {pl.description || '—'}
                         </div>
                         <div className="text-[9px] mt-0.5" style={{ color: C.faint }}>

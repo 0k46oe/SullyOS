@@ -4,6 +4,8 @@ import { ContextBuilder } from './context';
 import { DB } from './db';
 import { safeResponseJson, extractContent, extractJson } from './safeApi';
 import { injectMemoryPalace } from './memoryPalace/pipeline';
+import { getDailyScheduleForChar } from './dailySchedule';
+import { getScheduleDateKey, getScheduleWallClock } from './scheduleTime';
 
 interface ApiConfig {
     baseUrl: string;
@@ -50,7 +52,7 @@ function formatChatHistoryForSchedule(
 ): string {
     if (!messages || messages.length === 0) return '';
     const lines = messages.map(m => {
-        const d = new Date(m.timestamp);
+        const d = getScheduleWallClock(char, new Date(m.timestamp));
         const mm = String(d.getMonth() + 1).padStart(2, '0');
         const dd = String(d.getDate()).padStart(2, '0');
         const hh = String(d.getHours()).padStart(2, '0');
@@ -244,11 +246,13 @@ export async function generateDailyScheduleForChar(
     // 总开关关闭时直接短路，避免副 API / 兜底调用
     if (!isScheduleFeatureOn(char)) return null;
 
-    const today = new Date().toISOString().split('T')[0];
+    const baseNow = new Date();
+    const now = getScheduleWallClock(char, baseNow);
+    const today = getScheduleDateKey(char, baseNow);
 
     // Check if already exists
     if (!forceRegenerate) {
-        const existing = await DB.getDailySchedule(char.id, today);
+        const existing = await getDailyScheduleForChar(char, baseNow);
         if (existing) return existing;
     }
 
@@ -284,7 +288,6 @@ export async function generateDailyScheduleForChar(
 
     const chatHistoryBlock = formatChatHistoryForSchedule(filteredMessages, char, userProfile);
 
-    const now = new Date();
     const dayOfWeek = ['日', '一', '二', '三', '四', '五', '六'][now.getDay()];
 
     const style = char.scheduleStyle || 'lifestyle';
@@ -381,7 +384,7 @@ export async function evolveFlowNarrative(
     // 总开关关闭时直接短路
     if (!isScheduleFeatureOn(char)) return null;
     const style = char.scheduleStyle || 'lifestyle';
-    const now = new Date();
+    const now = getScheduleWallClock(char);
     const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
 
     // 取最近的对话摘要（不需要全部，最近10条足够感知对话方向）

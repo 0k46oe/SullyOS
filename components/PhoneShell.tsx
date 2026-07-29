@@ -132,8 +132,9 @@ import { UpdateNotificationController, shouldShowUpdateNotification } from './Up
 import { WorkerUpdateReminderController, shouldShowWorkerUpdateReminder, rearmWorkerUpdateReminder } from './WorkerUpdateReminderEvent';
 import { loadInstantConfig, probeInstantWorkerVersion } from '../utils/instantPushClient';
 import { BackupReminderController } from './BackupReminderEvent';
-import { shouldShowBackupReminder, markBackupReminderShown } from '../utils/backupReminder';
+import { shouldShowBackupReminder, markBackupReminderShown, daysSinceLastBackup } from '../utils/backupReminder';
 import { formatBytes } from '../utils/format';
+import { trackEvent } from '../utils/analytics';
 import { AppID } from '../types';
 import { shellHandlesSafeArea } from '../utils/safeAreaApps';
 import { App as CapApp } from '@capacitor/app';
@@ -430,7 +431,7 @@ const AppLoadingFallback: React.FC<{ onReturn?: () => void }> = ({ onReturn }) =
     // Suspense 会永远停在这一屏（不报错 → 错误边界不触发 → 不会自动刷新），用户狂点中心光点却毫无反应。
     // 超过 STALL_MS 仍未加载完 → 把「看着像按钮其实不是」的光点换成真正可点的「刷新/返回」按钮，
     // 既明确告诉用户该点哪里，又把静默卡死变成一键可恢复。只动占位 UI，不碰 import 逻辑。
-    const stall = setTimeout(() => setStalled(true), 7000);
+    const stall = setTimeout(() => { setStalled(true); trackEvent('App 加载卡死超时'); }, 7000);
     return () => { clearTimeout(t); clearTimeout(stall); };
   }, []);
   if (stalled) {
@@ -444,7 +445,7 @@ const AppLoadingFallback: React.FC<{ onReturn?: () => void }> = ({ onReturn }) =
         <div className="flex flex-col gap-3 w-full max-w-xs">
           <button
             type="button"
-            onClick={() => window.location.reload()}
+            onClick={() => { trackEvent('卡死页点刷新恢复'); window.location.reload(); }}
             className="w-full px-6 py-3 bg-red-600 rounded-full font-bold text-sm shadow-lg active:scale-95 transition-transform"
           >
             刷新恢复
@@ -452,7 +453,7 @@ const AppLoadingFallback: React.FC<{ onReturn?: () => void }> = ({ onReturn }) =
           {onReturn && (
             <button
               type="button"
-              onClick={onReturn}
+              onClick={() => { onReturn(); trackEvent('从卡死页返回桌面'); }}
               className="w-full px-4 py-2 bg-slate-700 rounded-full text-xs font-bold active:scale-95 transition-transform"
             >
               返回桌面
@@ -550,10 +551,28 @@ const PhoneShell: React.FC = () => {
     if (marker) setImportRecoveryMarker(marker);
   }, [showDisclaimer, importRecoveryDismissed, importRecoveryMarker]);
 
+  // 使用统计：导入中断提醒弹出来时报一次。只带「失败/中断」和阶段这两个固定枚举，
+  // marker 里的报错正文、备份文件名、当前文件名、各种进度数字一概不带。
+  useEffect(() => {
+    if (showDisclaimer || !showImportRecoveryPrompt) return;
+    const phase = importRecoveryMarker?.phase;
+    // phase 是 marker 里的字符串，只认这五个已知值，其余一律归 other，避免把未知原文发出去。
+    const stage = phase === 'parsing' || phase === 'assets' || phase === 'database' || phase === 'settings' || phase === 'error'
+      ? phase
+      : 'other';
+    const hasError = !!importRecoveryMarker?.error;
+    trackEvent('弹出上次导入未完成提醒', { kind: hasError ? '失败' : '中断', stage });
+    trackEvent('弹出导入中断恢复提醒', {
+      中断类型: hasError ? '导入失败' : '导入被中断',
+      中断阶段: getImportPhaseLabel(phase),
+    });
+  }, [showDisclaimer, showImportRecoveryPrompt, importRecoveryMarker]);
+
   const handleReimportFromRecovery = () => {
     setImportRecoveryDismissed(true);
     setImportRecoveryMarker(null);
     openApp(AppID.Settings);
+    trackEvent('点去重新导入', { kind: importRecoveryMarker?.error ? '失败' : '中断' });
   };
 
   // 「致用户的一封信」已下线：常量置 false，保留变量让下面弹窗链的条件继续成立（恒真/恒不显示）。
@@ -620,17 +639,23 @@ const PhoneShell: React.FC = () => {
   useEffect(() => {
     if (showDisclaimer || showImportRecoveryPrompt || showAuthorLetter || showUpdateNotification || showLike520Popup || showWorkerUpdateReminder) return;
     if (!isDataLoaded || isLocked) return;
-    if (shouldShowBackupReminder()) setShowBackupReminder(true);
+    if (shouldShowBackupReminder()) {
+      setShowBackupReminder(true);
+      // 只报「从未备份 / 已过期」这一个二选一，不报具体天数、也不报用户设的提醒间隔。
+      trackEvent('弹出该备份啦提醒', { state: daysSinceLastBackup() == null ? '从未备份' : '已过期' });
+    }
   }, [showDisclaimer, showImportRecoveryPrompt, showAuthorLetter, showUpdateNotification, showLike520Popup, showWorkerUpdateReminder, isDataLoaded, isLocked]);
 
   const dismissBackupReminder = () => {
     markBackupReminderShown();
     setShowBackupReminder(false);
+    trackEvent('点知道了稍后再说');
   };
   const goBackupFromReminder = () => {
     markBackupReminderShown();
     setShowBackupReminder(false);
     openApp(AppID.Settings);
+    trackEvent('点立即备份');
   };
 
   // Capacitor Native Handling
@@ -718,6 +743,7 @@ const PhoneShell: React.FC = () => {
   };
 
   const bgImageValue = getBgStyle(theme.wallpaper);
+  const lockBgImageValue = getBgStyle(theme.lockWallpaper || theme.wallpaper);
   const contentColor = theme.contentColor || '#ffffff';
   const acnhSkin = theme.skin === 'animalcrossing'; // 动森彩蛋：锁屏换暖色草地点缀
 
@@ -736,7 +762,7 @@ const PhoneShell: React.FC = () => {
             unlock();
         }}
         className="relative w-full h-full bg-cover bg-center cursor-pointer overflow-hidden group font-light select-none overscroll-none"
-        style={{ backgroundImage: bgImageValue, color: contentColor, animation: 'lockReveal 600ms ease-out both' }}
+        style={{ backgroundImage: lockBgImageValue, color: contentColor, animation: 'lockReveal 600ms ease-out both' }}
       >
         {/* 锁屏柔和淡入：与开机「世界入场」退场衔接；body 背景本就是壁纸，故是无缝融入而非硬切。 */}
         <style>{`@keyframes lockReveal{from{opacity:0}to{opacity:1}}`}</style>
@@ -947,7 +973,12 @@ const PhoneShell: React.FC = () => {
        {!showDisclaimer && showImportRecoveryPrompt && (
          <ImportRecoveryPopup
            marker={importRecoveryMarker}
-           onLater={() => { setImportRecoveryDismissed(true); setImportRecoveryMarker(null); }}
+           onLater={() => {
+             setImportRecoveryDismissed(true);
+             setImportRecoveryMarker(null);
+             trackEvent('点稍后再说放着不管', { kind: importRecoveryMarker?.error ? '失败' : '中断' });
+             trackEvent('导入恢复提醒选稍后再说', { 中断阶段: getImportPhaseLabel(importRecoveryMarker?.phase) });
+           }}
            onReimport={handleReimportFromRecovery}
          />
        )}

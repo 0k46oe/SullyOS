@@ -4,6 +4,7 @@ import { ContextBuilder } from './context';
 import { DB } from './db';
 import { formatLifeSimResetCardForContext } from './lifeSimChatCard';
 import { normalizeMessageContent, stickerNameFromUrl, theaterWhenPhrase } from './messageFormat';
+import { formatTransferRecord } from './transferFormat';
 import { computeCurrentListening, getCurrentSlot } from './charMusicSchedule';
 import { getCharLyricSnippet } from './charLyricCache';
 import { MusicCfg, loadMusicCfgStandalone } from '../context/MusicContext';
@@ -14,6 +15,10 @@ import { FISH_VOICE_ACTING_GUIDE } from './fishAudioTts';
 import { getTtsProvider, getVoicePromptOverride } from './ttsProvider';
 import { resolveCharTimeZone, nowInTimeZone } from './timezone';
 import { buildLifeRecordInjection } from './lifeRecords';
+import { getCharNameById } from './charNameRegistry';
+import { getLocalDateKey } from './localDate';
+import { getDailyScheduleForChar } from './dailySchedule';
+import { formatRelativeAge } from './groupChat/relativeTime';
 
 // 语音格式指导按当前 TTS 服务商二选一：用 MiniMax 才注入 MiniMax 那套（含 <#秒#> 停顿标记），
 // 用鱼声则注入鱼声版（去掉 MiniMax 专属标记，改用标点 / 省略号控制停顿）。
@@ -40,6 +45,9 @@ function summarizeGroupMsgContent(m: Message): string {
         case 'image': return '[图片]';
         case 'emoji': return '[表情]';
         case 'interaction': return '[戳了戳]';
+        // 转账保持轻占位符, 不迁 [[记录:TRANSFER]] —— 这里是别人对话的背景叙述, 整片都是
+        // [图片]/[表情] 式短占位, 混重型 tag 破坏局部一致; 对它的模仿 transferFormat 的
+        // BARE_TRANSFER_RE 兜得住。
         case 'transfer': return `[转账${meta.amount ?? ''}]`;
         case 'social_card': return `[分享帖子${meta.post?.title ? '：' + meta.post.title : ''}]`;
         case 'chat_forward': return '[转发的聊天记录]';
@@ -228,9 +236,10 @@ export const ChatPrompts = {
         // ── 并发发起所有独立的异步取数（网络 + IndexedDB），下面按原顺序拼接 ──
         // 原来是 7 段串行 await，总耗时 = 各段之和；现在取 max。
         const config = realtimeConfig || defaultRealtimeConfig;
-        const today = new Date().toISOString().split('T')[0];
-        // 自定义时区：开启后「当前时间」按角色所在时区折算，并附时差提示（异国恋等场景）
+        // 自定义时区：日历日、当前日程与实时上下文全部按角色所在地折算。
         const charTz = resolveCharTimeZone(char);
+        const charNow = nowInTimeZone(charTz);
+        const today = getLocalDateKey(charNow);
 
         // 1. 实时世界信息（天气/新闻/时间）
         const realtimePromise: Promise<string> = (async () => {
@@ -241,7 +250,7 @@ export const ChatPrompts = {
                 }
                 // 基础当前时间 + 时差提示已由 ContextBuilder.buildCoreContext 统一注入（受 timeAwarenessEnabled
                 // 控制，按角色自定义时区折算）；这里只在关闭天气/新闻时补一条"今日特殊节日"，不再重复注入时间/时差，避免双份。
-                const specialDates = RealtimeContextManager.checkSpecialDates();
+                const specialDates = RealtimeContextManager.checkSpecialDates(charTz);
                 if (specialDates.length > 0 && char.timeAwarenessEnabled !== false) {
                     return `\n### 【今日特殊】\n${specialDates.join('、')}\n`;
                 }
@@ -256,7 +265,7 @@ export const ChatPrompts = {
         //    总开关关闭时跳过查询与注入，确保不额外调用任何 LLM 依赖链
         const scheduleFeatureOn = isScheduleFeatureOn(char);
         const schedulePromise: Promise<DailySchedule | null> = scheduleFeatureOn
-            ? DB.getDailySchedule(char.id, today).catch(e => {
+            ? getDailyScheduleForChar(char).catch(e => {
                 console.error('Failed to load daily schedule:', e);
                 return null;
             })
@@ -285,11 +294,21 @@ export const ChatPrompts = {
                 allGroupMsgs.sort((a, b) => a.timestamp - b.timestamp);
                 const recentGroupMsgs = allGroupMsgs;
                 if (recentGroupMsgs.length === 0) return '';
+                // 发言人标真实名字：匿名成 Member 会让角色分不清哪句是谁说的、
+                // 甚至认不出自己的发言，私聊被问起群里的事就接不住。
+                const speakerOf = (m: Message): string => {
+                    if (m.role === 'user') return userProfile.name;
+                    if (m.charId === char.id) return `你（${char.name}）`;
+                    return getCharNameById(m.charId) || '群友';
+                };
                 const groupLogStr = recentGroupMsgs.map(m => {
                     const dateStr = new Date(m.timestamp).toLocaleString([], {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
-                    return `[${dateStr}] [Group: ${m.groupName}] ${m.role === 'user' ? userProfile.name : 'Member'}: ${summarizeGroupMsgContent(m)}`;
+                    const relativeAge = formatRelativeAge(m.timestamp);
+                    return `[${dateStr} · ${relativeAge}] [群：${m.groupName}] ${speakerOf(m)}: ${summarizeGroupMsgContent(m)}`;
                 }).join('\n');
-                return `\n### [Background Context: Recent Group Activities]\n(注意：你是以下群聊的成员...)\n${groupLogStr}\n`;
+                return `\n### 【群聊背景 · 你亲历的近期群聊】
+（以下是你所在群里最近的真实聊天记录，按时间排序，发言人已标注；标「你」的就是你自己说的话。这些事你都亲身经历、记得清楚——私聊里对方问起或话题相关时，自然地接上就好，不要装作不知道；也不必刻意逐条汇报群里的动静。）
+${groupLogStr}\n`;
             } catch (e) {
                 console.error("Failed to load group context", e);
                 return '';
@@ -371,7 +390,7 @@ export const ChatPrompts = {
         // 2a. 日程注入（当前时段 + 意识流独白，每轮都可能变）
         if (schedule) {
             try {
-                const scheduleContext = ContextBuilder.buildScheduleInjection(schedule, evolvedNarrative);
+                const scheduleContext = ContextBuilder.buildScheduleInjection(schedule, evolvedNarrative, charNow);
                 if (scheduleContext) volatileState += `\n${scheduleContext}\n`;
             } catch (e) {
                 console.error('Failed to inject schedule context:', e);
@@ -394,7 +413,7 @@ export const ChatPrompts = {
                     const cfgForLyric = musicCfg?.workerUrl ? musicCfg : loadMusicCfgStandalone();
                     if (cfgForLyric?.workerUrl) {
                         try {
-                            const slot = getCurrentSlot(schedule);
+                            const slot = getCurrentSlot(schedule, charNow);
                             const seed = `${char.id}-${today}-${slot?.startTime || '00:00'}-${cur.songId}`;
                             const snippet = await getCharLyricSnippet(cfgForLyric, cur.songId, seed, 6);
                             if (snippet.length > 0) charListening.lyricSnippet = snippet;
@@ -497,8 +516,9 @@ ${uname} 的化身正挂在《彼方》的【${roomName}】${act ? `，状态写
    - 如果用户发送了图片，请对图片内容进行评论。
 6. **可用动作**:
    - 回戳用户: \`[[ACTION:POKE]]\`
-   - 转账: \`[[ACTION:TRANSFER:100]]\`
-   - **处理用户转账**: 当看到 \`[系统: 用户向你转账 X]\` 时，你可以决定收下或退回。收下: \`[[ACTION:TRANSFER_ACCEPT]]\`；退回: \`[[ACTION:TRANSFER_RETURN]]\`。请结合人设和情境自然选择（比如害羞地退回、开心地收下），并配上一句话。
+   - 转账: 必须使用且只使用 \`[[ACTION:TRANSFER|to=user|amount=100]]\`（to 固定写 user，金额只写数字）；不要写成 \`[系统: 你向某人转账 100]\` 等系统日志文本。
+   - **处理用户转账**: 当历史里出现 \`[[记录:TRANSFER|to=char|...|status=待处理]]\`（用户转给你、还没处理）时，你可以决定收下或退回。收下: \`[[ACTION:TRANSFER_ACCEPT]]\`；退回: \`[[ACTION:TRANSFER_RETURN]]\`。请结合人设和情境自然选择（比如害羞地退回、开心地收下），并配上一句话。
+   - **【重要】\`[[记录:...]]\` 是系统日志**: 历史里以 \`[[记录:\` 开头的标签是已经发生的事实（谁转给谁、什么状态），只供你了解，**严禁**在回复里照抄输出。你要做动作时只能用 \`[[ACTION:...]]\`。
    - 调取记忆: \`[[RECALL: YYYY-MM]]\`，请注意，当用户提及具体某个月份时，或者当你想仔细想某个月份的事情时，欢迎你随时使该动作
    - **添加纪念日**: 如果你觉得今天是个值得纪念的日子（或者你们约定了某天），你可以**主动**将它添加到用户的日历中。单独起一行输出: \`[[ACTION:ADD_EVENT | 标题(Title) | YYYY-MM-DD]]\`。
    - **定时发送消息**: 如果你想在未来某个时间主动发消息（比如晚安、早安或提醒），请单独起一行输出: \`[schedule_message | YYYY-MM-DD HH:MM:SS | fixed | 消息内容]\`，分行可以多输出很多该类消息。
@@ -900,7 +920,12 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
         processedExcludeIds?: Set<number>,
     ) => {
         // Filter Logic
-        let effectiveHistory = messages.filter(m => !char.hideBeforeMessageId || m.id >= char.hideBeforeMessageId);
+        // 新版上下文范围由 chatContextRange 先按「自适应/拉杆最大范围」取窗；
+        // 这里只应用用户额外断点。旧角色尚未完成迁移时才回退 hideBeforeMessageId。
+        const userStartMessageId = (char.contextRangePolicyVersion || 0) >= 1
+            ? char.contextUserStartMessageId
+            : char.hideBeforeMessageId;
+        let effectiveHistory = messages.filter(m => !userStartMessageId || m.id >= userStartMessageId);
         // Memory Palace: 过滤已被记忆宫殿处理过的消息（由向量记忆替代，节省 token）
         if (processedExcludeIds && processedExcludeIds.size > 0) {
             effectiveHistory = effectiveHistory.filter(m => !processedExcludeIds.has(m.id));
@@ -974,24 +999,23 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                 
                 if (index === historySlice.length - 1 && timeGapHint && m.role === 'user') content = `${content}\n\n${timeGapHint}`; 
                 
-                if (m.type === 'interaction') content = `${timeStr} [系统: 用户戳了你一下]`; 
+                // TODO(记录形态): 戳一戳 / 时间间隔提示等其他系统事件, 等转账的 [[记录:TRANSFER]]
+                // 观察一段时间后再迁 (transferFormat.ts 头注) —— 防线已按整个记录命名空间就位。
+                if (m.type === 'interaction') content = `${timeStr} [系统: 用户戳了你一下]`;
                 else if (m.type === 'transfer') {
+                    // 统一记录形态 [[记录:TRANSFER|to=|amount=|status=]] —— 跟输出语法
+                    // [[ACTION:TRANSFER|to=|amount=]] 共用词汇表 (见 transferFormat.ts 头注)。
+                    // 旧的 `[系统: 你向xx转账 N]` 第二人称句式会被模型照抄成正文;
+                    // 记录前缀即幂等哨兵, 抄了也被解析端消费丢弃。
+                    // 顺带修掉旧实现的不一致: 原始转账行现在读 live status (metadata.status),
+                    // 被收/退之后不再永远显示「待你处理」。
                     const tMeta = m.metadata || {};
-                    const amtStr = tMeta.amount !== undefined ? ` ${tMeta.amount}` : '';
-                    const uName = userProfile?.name || '用户';
-                    if (tMeta.receipt === 'accepted') {
-                        content = m.role === 'user'
-                            ? `${timeStr} [系统: ${uName}接收了你的转账${amtStr}]`
-                            : `${timeStr} [系统: 你接收了${uName}的转账${amtStr}]`;
-                    } else if (tMeta.receipt === 'returned') {
-                        content = m.role === 'user'
-                            ? `${timeStr} [系统: ${uName}退回了你的转账${amtStr}]`
-                            : `${timeStr} [系统: 你退回了${uName}的转账${amtStr}]`;
-                    } else {
-                        content = m.role === 'user'
-                            ? `${timeStr} [系统: ${uName}向你转账${amtStr}（待你处理，可收下或退回）]`
-                            : `${timeStr} [系统: 你向${uName}转账${amtStr}]`;
-                    }
+                    content = `${timeStr} ${formatTransferRecord({
+                        role: m.role as 'user' | 'assistant',
+                        amount: tMeta.amount,
+                        receipt: tMeta.receipt,
+                        status: tMeta.status,
+                    })}`;
                 }
                 else if (m.type === 'social_card') {
                     const post = m.metadata?.post || {};
@@ -1040,7 +1064,13 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                     const commentsLine = noteComments.length
                         ? `\n热评: ${noteComments.slice(0, 15).map((c: any) => `${c.author || '匿名'}: ${c.content}`).join(' | ')}`
                         : '';
-                    content = `${timeStr} [${sender}分享了小红书笔记]\n标题: ${note.title || '无标题'}\n作者: ${note.author || '未知'}\n赞: ${note.likes || 0}\n简介: ${note.desc || '无'}${commentsLine}\n${m.role === 'user' ? '(请根据你的性格对这个帖子发表看法)' : ''}`;
+                    const interactions = [
+                        `${note.likes ?? 0}赞`,
+                        note.collects != null ? `${note.collects}收藏` : '',
+                        note.commentCount != null ? `${note.commentCount}评论` : '',
+                        note.shareCount != null ? `${note.shareCount}分享` : '',
+                    ].filter(Boolean).join(' ');
+                    content = `${timeStr} [${sender}分享了小红书笔记]\n标题: ${note.title || '无标题'}\n作者: ${note.author || '未知'}\n互动: ${interactions}\n简介: ${note.desc || '无'}${commentsLine}\n${m.role === 'user' ? '(请根据你的性格对这个帖子发表看法)' : ''}`;
                 }
                 else if ((m.type as string) === 'vr_card') {
                     // vr_card：你自己进入 VR 社交游戏《彼方》时留下的动态。

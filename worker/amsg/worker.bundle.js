@@ -4013,6 +4013,12 @@ var feishuGetDiaryByDate = async (appId, appSecret, baseId, tableId, characterNa
 };
 
 // utils/xhsMcpClient.ts
+var XHS_SPIDER_V3_EXPERIMENT = Object.freeze({
+  optInValue: "spider-v3-isolated-cookie",
+  strategyKey: "os_xhs_spider_v3_strategy",
+  sessionKey: "os_xhs_spider_v3_session",
+  circuitKey: "os_xhs_spider_v3_circuit"
+});
 var detectMode = (serverUrl) => {
   if (serverUrl.includes("/api")) return "bridge";
   return "mcp";
@@ -4026,6 +4032,111 @@ var resolveLiteCookie = () => {
   } catch {
   }
   return "";
+};
+var spiderStorage = () => {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+};
+var readSpiderJson = (key) => {
+  try {
+    const raw = spiderStorage()?.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+};
+var writeSpiderJson = (key, value) => {
+  try {
+    spiderStorage()?.setItem(key, JSON.stringify(value));
+  } catch {
+  }
+};
+var removeSpiderValue = (key) => {
+  try {
+    spiderStorage()?.removeItem(key);
+  } catch {
+  }
+};
+var spiderCookieTag = async (cookie) => {
+  const a1 = cookie.match(/(?:^|;\s*)a1=([^;]+)/)?.[1] || "";
+  if (!a1) return "";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(a1));
+  return Array.from(new Uint8Array(digest).slice(0, 8), (byte) => byte.toString(16).padStart(2, "0")).join("");
+};
+var withSpiderCircuitError = (detail, message) => ({
+  ...detail,
+  data: {
+    ...detail?.data || {},
+    comments_status: "unavailable",
+    comments_error: {
+      code: "SPIDER_V3_CIRCUIT_OPEN",
+      message
+    }
+  }
+});
+var trySpiderV3CommentPatch = async (baseUrl, requestBody, cookie, detail) => {
+  const storage = spiderStorage();
+  if (!storage || detail?.data?.comments_status === "loaded") {
+    return detail;
+  }
+  const a1Tag = await spiderCookieTag(cookie);
+  if (!a1Tag) return detail;
+  let sessionState = readSpiderJson(XHS_SPIDER_V3_EXPERIMENT.sessionKey);
+  if (sessionState?.a1Tag !== a1Tag) {
+    sessionState = null;
+    removeSpiderValue(XHS_SPIDER_V3_EXPERIMENT.sessionKey);
+    removeSpiderValue(XHS_SPIDER_V3_EXPERIMENT.circuitKey);
+  }
+  const circuit = readSpiderJson(XHS_SPIDER_V3_EXPERIMENT.circuitKey);
+  if (circuit?.a1Tag === a1Tag) {
+    return withSpiderCircuitError(detail, "Spider v3 received HTTP 406 earlier and is circuit-broken for this cookie.");
+  }
+  const requestedStrategy = storage.getItem(XHS_SPIDER_V3_EXPERIMENT.strategyKey) || "no-client-hints";
+  const strategy = ["no-client-hints", "browser-hints", "legacy-transport"].includes(requestedStrategy) ? requestedStrategy : "no-client-hints";
+  try {
+    const response = await fetch(`${baseUrl}/api/xhs-experimental-comments`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-xhs-cookie": cookie,
+        "x-xhs-experiment-ack": XHS_SPIDER_V3_EXPERIMENT.optInValue
+      },
+      body: JSON.stringify({
+        acknowledge_risk: true,
+        feed_id: requestBody.feed_id,
+        xsec_token: requestBody.xsec_token || "",
+        strategy,
+        session_state: sessionState || void 0
+      })
+    });
+    const experiment = await response.json().catch(() => null);
+    if (experiment?.session_state) {
+      writeSpiderJson(XHS_SPIDER_V3_EXPERIMENT.sessionKey, experiment.session_state);
+    }
+    if (experiment?.error_code === "XHS_EXPERIMENT_HTTP_406") {
+      writeSpiderJson(XHS_SPIDER_V3_EXPERIMENT.circuitKey, {
+        a1Tag,
+        openedAt: Date.now(),
+        reason: experiment.error_code
+      });
+      return withSpiderCircuitError(detail, "Spider v3 was rejected with HTTP 406; automatic comment attempts are now stopped.");
+    }
+    if (!response.ok || !experiment?.success || !experiment?.data) return detail;
+    removeSpiderValue(XHS_SPIDER_V3_EXPERIMENT.circuitKey);
+    return {
+      ...detail,
+      data: {
+        ...detail?.data || {},
+        ...experiment.data,
+        comments_error: void 0
+      }
+    };
+  } catch {
+    return detail;
+  }
 };
 var bridgePost = async (serverUrl, endpoint, body = {}) => {
   const baseUrl = serverUrl.replace(/\/+$/, "").replace(/\/api$/, "");
@@ -4046,9 +4157,12 @@ var bridgePost = async (serverUrl, endpoint, body = {}) => {
       const errData = await resp.json().catch(() => ({}));
       return { success: false, error: errData.error || `HTTP ${resp.status}` };
     }
-    const data = await resp.json();
+    let data = await resp.json();
     if (data.error) {
       return { success: false, error: data.error };
+    }
+    if (endpoint === "get-feed-detail" && ck) {
+      data = await trySpiderV3CommentPatch(baseUrl, body, ck, data);
     }
     return { success: true, data };
   } catch (e) {
@@ -4395,17 +4509,24 @@ var XhsMcpClient = {
   getNoteDetail: async (serverUrl, noteUrl, xsecToken, options) => {
     const feedId = extractNoteIdFromUrl(noteUrl);
     const token = xsecToken || extractXsecTokenFromUrl(noteUrl) || "";
+    const loadAllComments = !!options?.loadAllComments;
+    let xsecSource = options?.xsecSource || "pc_feed";
+    try {
+      xsecSource = new URL(noteUrl).searchParams.get("xsec_source") || xsecSource;
+    } catch {
+    }
     if (detectMode(serverUrl) === "bridge") {
       return bridgePost(serverUrl, "get-feed-detail", {
         feed_id: feedId,
         xsec_token: token,
-        load_all_comments: options?.loadAllComments || false,
-        click_more_replies: options?.loadAllComments || false
+        xsec_source: xsecSource,
+        load_all_comments: loadAllComments,
+        click_more_replies: loadAllComments
       });
     }
     const args = { url: noteUrl };
     if (xsecToken) args.xsec_token = xsecToken;
-    if (options?.loadAllComments) {
+    if (loadAllComments) {
       args.load_all_comments = true;
       args.click_more_replies = true;
     }
@@ -4550,24 +4671,131 @@ var extractNotesFromMcpData = (data) => {
   console.warn("[XHS] extractNotes: \u672A\u627E\u5230\u7B14\u8BB0\u6570\u7EC4, data keys:", Object.keys(data));
   return [];
 };
+var parseXhsCount = (value) => {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+  }
+  if (typeof value !== "string") return 0;
+  const normalized = value.trim().replace(/[,\s+]/g, "");
+  if (!normalized) return 0;
+  const match = normalized.match(/^(-?\d+(?:\.\d+)?)(万|億|亿|千|[kKmMwW])?/);
+  if (!match) return 0;
+  const base = Number(match[1]);
+  if (!Number.isFinite(base) || base < 0) return 0;
+  const unit = match[2]?.toLowerCase();
+  const multiplier = unit === "\u4E07" || unit === "w" ? 1e4 : unit === "\u5104" || unit === "\u4EBF" ? 1e8 : unit === "\u5343" || unit === "k" ? 1e3 : unit === "m" ? 1e6 : 1;
+  return Math.round(base * multiplier);
+};
+var firstArray = (...values) => {
+  for (const value of values) {
+    if (Array.isArray(value)) return value;
+  }
+  return void 0;
+};
+var normalizeXhsComments = (payload) => {
+  const root = payload?.data && typeof payload.data === "object" ? payload.data : payload || {};
+  const note = root.note || payload?.note || {};
+  const rawComments = firstArray(
+    root.comments?.list,
+    root.comments?.comment_list,
+    root.comment_list,
+    Array.isArray(root.comments) ? root.comments : void 0,
+    payload?.comments?.list,
+    payload?.comments?.comment_list,
+    payload?.comment_list,
+    Array.isArray(payload?.comments) ? payload.comments : void 0,
+    note.comments?.list,
+    note.comments?.comment_list,
+    note.comment_list,
+    Array.isArray(note.comments) ? note.comments : void 0
+  ) || [];
+  const normalizeComment = (comment, parentCommentId) => {
+    const user = comment?.userInfo || comment?.user_info || comment?.user || {};
+    const commentId = String(comment?.id || comment?.commentId || comment?.comment_id || "");
+    const replies = firstArray(
+      comment?.subComments,
+      comment?.sub_comments,
+      comment?.sub_comment_list,
+      comment?.replies
+    ) || [];
+    return {
+      commentId,
+      userId: String(user.userId || user.user_id || comment?.userId || comment?.user_id || ""),
+      author: String(
+        user.nickname || user.name || comment?.nickname || comment?.userName || comment?.user_name || comment?.author_name || comment?.author || "\u533F\u540D"
+      ),
+      content: String(comment?.content || "").trim(),
+      likes: parseXhsCount(comment?.likeCount ?? comment?.like_count ?? comment?.likes ?? 0),
+      parentCommentId,
+      subComments: replies.map((reply) => normalizeComment(reply, commentId || parentCommentId))
+    };
+  };
+  return rawComments.map((comment) => normalizeComment(comment));
+};
 var normalizeNote = (n) => {
-  const card = n.noteCard || n.notecard;
+  const card = n.noteCard || n.note_card || n.notecard;
   const coverObj = card?.cover || n.cover || n.image_list?.[0] || card?.image_list?.[0];
   const rawCoverUrl = typeof coverObj === "string" ? coverObj : coverObj?.urlDefault || coverObj?.url_default || coverObj?.url || coverObj?.urlPre || coverObj?.info_list?.[0]?.url || void 0;
   const coverUrl = rawCoverUrl?.replace(/^http:\/\//, "https://");
-  const likesRaw = n.likes || n.liked_count || n.interact_info?.liked_count || n.interactInfo?.likedCount || card?.interact_info?.liked_count || card?.interactInfo?.likedCount || 0;
+  const interact = n.interact_info || n.interactInfo || card?.interact_info || card?.interactInfo || {};
+  const likesRaw = n.likes ?? n.liked_count ?? interact.liked_count ?? interact.likedCount ?? 0;
+  const collectsRaw = n.collects ?? n.collected_count ?? interact.collected_count ?? interact.collectedCount ?? 0;
+  const commentCountRaw = n.commentCount ?? n.comment_count ?? interact.comment_count ?? interact.commentCount ?? 0;
+  const shareCountRaw = n.shareCount ?? n.share_count ?? interact.share_count ?? interact.shareCount ?? 0;
   return {
     noteId: n.noteId || n.note_id || n.id || card?.note_id || card?.noteId || card?.noteId || "",
     title: n.title || n.display_title || n.displayTitle || card?.display_title || card?.displayTitle || "",
     desc: (n.desc || n.description || n.content || card?.desc || card?.description || card?.title || "").slice(0, 500),
     author: n.author || n.nickname || n.user?.nickname || n.user?.name || card?.user?.nickname || card?.user?.name || "",
     authorId: n.authorId || n.author_id || n.user?.user_id || n.user?.userId || card?.user?.user_id || card?.user?.userId || "",
-    likes: typeof likesRaw === "string" ? parseInt(likesRaw, 10) || 0 : likesRaw || 0,
+    likes: parseXhsCount(likesRaw),
+    collects: parseXhsCount(collectsRaw),
+    commentCount: parseXhsCount(commentCountRaw),
+    shareCount: parseXhsCount(shareCountRaw),
     xsecToken: n.xsecToken || n.xsec_token || card?.xsec_token || card?.xsecToken || void 0,
     coverUrl,
     type: n.type || card?.type || void 0
   };
 };
+var normalizeXhsLiteDetail = (payload, commentLimit = 15) => {
+  const root = payload?.data && typeof payload.data === "object" ? payload.data : payload || {};
+  const note = normalizeNote(root.note || payload?.note || payload || {});
+  const comments = [];
+  const appendComments = (items) => {
+    for (const item of items) {
+      if (comments.length >= commentLimit) return;
+      if (item.content) {
+        comments.push({
+          author: item.author,
+          content: item.content,
+          likes: item.likes,
+          commentId: item.commentId || void 0,
+          userId: item.userId || void 0
+        });
+      }
+      appendComments(item.subComments);
+    }
+  };
+  appendComments(normalizeXhsComments(payload));
+  const rawCommentArray = firstArray(
+    root.comments?.list,
+    root.comments?.comment_list,
+    root.comment_list,
+    Array.isArray(root.comments) ? root.comments : void 0
+  );
+  const explicitStatus = root.comments_status || root.comment_read_status || payload?.comments_status;
+  const commentError = root.comments_error || payload?.comments_error;
+  const commentReadStatus = comments.length > 0 || explicitStatus === "loaded" ? "loaded" : explicitStatus === "unavailable" || commentError ? "unavailable" : rawCommentArray ? "empty" : "not_requested";
+  return comments.length ? { ...note, comments, commentReadStatus } : { ...note, commentReadStatus };
+};
+
+// utils/localDate.ts
+function getLocalDateKey(date = /* @__PURE__ */ new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
 
 // utils/agenticTools.ts
 function resolveXhsConfig(char, realtimeConfig) {
@@ -4893,37 +5121,57 @@ async function runXhsDetail(args, ctx) {
   }
   if (result.success && result.data && typeof result.data === "object") {
     const d = result.data;
-    const noteObj = d.note || d;
-    const detailToken = noteObj?.xsecToken || noteObj?.xsec_token || d?.xsecToken;
+    const noteObj = d.data?.note || d.note || d;
+    const detailToken = noteObj?.xsecToken || noteObj?.xsec_token || d.data?.xsecToken || d.data?.xsec_token || d.xsecToken || d.xsec_token;
     if (detailToken && args.noteId && ctx.xhsCaches) {
       ctx.xhsCaches.xsecTokenCache.set(args.noteId, detailToken);
       console.log(`\u{1F4D5} [XHS] \u4ECE detail \u7F13\u5B58 xsecToken: ${args.noteId}`);
     }
+    const normalizedComments = normalizeXhsComments(d);
     if (ctx.xhsCaches) {
       const caches = ctx.xhsCaches;
-      const cacheComments = (comments, parentId) => {
+      const cacheComments = (comments) => {
         for (const c of comments) {
-          const cid = c.id || c.commentId || c.comment_id;
-          const uid = c.userInfo?.userId || c.userInfo?.user_id || c.user_id || c.userId;
-          const authorName = c.userInfo?.nickname || c.userInfo?.name || c.nickname || c.userName || c.user_name;
-          if (cid && uid) caches.commentUserIdCache.set(cid, uid);
-          if (cid && authorName) caches.commentAuthorNameCache.set(cid, authorName);
-          if (cid && parentId) caches.commentParentIdCache.set(cid, parentId);
-          if (Array.isArray(c.subComments)) cacheComments(c.subComments, cid);
-          if (Array.isArray(c.sub_comments)) cacheComments(c.sub_comments, cid);
+          if (c.commentId && c.userId) caches.commentUserIdCache.set(c.commentId, c.userId);
+          if (c.commentId && c.author) caches.commentAuthorNameCache.set(c.commentId, c.author);
+          if (c.commentId && c.parentCommentId) {
+            caches.commentParentIdCache.set(c.commentId, c.parentCommentId);
+          }
+          cacheComments(c.subComments);
         }
       };
-      const commentList = d.data?.comments?.list || d.comments?.list || d.data?.comments || d.comments || d.note?.comments?.list || d.note?.comments;
-      if (Array.isArray(commentList)) {
-        cacheComments(commentList);
+      if (normalizedComments.length > 0) {
+        cacheComments(normalizedComments);
         console.log(`\u{1F4D5} [XHS] \u7F13\u5B58\u4E86 ${caches.commentUserIdCache.size} \u6761\u8BC4\u8BBA\u7684 userId, ${caches.commentAuthorNameCache.size} \u6761 authorName`);
       } else {
         console.warn(`\u{1F4D5} [XHS] \u672A\u627E\u5230\u8BC4\u8BBA\u6570\u7EC4, d keys:`, Object.keys(d), "d.note keys:", d.note ? Object.keys(d.note) : "N/A");
       }
     }
+    if (ctx.lastXhsNotesRef) {
+      const detailNote = normalizeXhsLiteDetail(d);
+      const matched = ctx.lastXhsNotesRef.current.find((n) => n.noteId === args.noteId);
+      const enriched = {
+        ...matched,
+        ...detailNote,
+        noteId: detailNote.noteId || args.noteId,
+        title: detailNote.title || matched?.title || "",
+        desc: detailNote.desc || matched?.desc || "",
+        author: detailNote.author || matched?.author || "",
+        authorId: detailNote.authorId || matched?.authorId || "",
+        xsecToken: detailNote.xsecToken || detailToken || xsecToken || matched?.xsecToken,
+        comments: detailNote.comments || matched?.comments
+      };
+      const index = ctx.lastXhsNotesRef.current.findIndex((n) => n.noteId === args.noteId);
+      if (index >= 0) {
+        ctx.lastXhsNotesRef.current = ctx.lastXhsNotesRef.current.map(
+          (note, i) => i === index ? enriched : note
+        );
+      }
+    }
   }
   const detailData = result.success ? result.data : null;
   let detailText;
+  let commentsUnavailable = false;
   if (detailData) {
     if (typeof detailData === "string") {
       if (detailData.includes("\u5931\u8D25") || detailData.includes("not found")) {
@@ -4934,15 +5182,16 @@ async function runXhsDetail(args, ctx) {
     } else {
       const innerData = detailData.data && typeof detailData.data === "object" ? detailData.data : null;
       const note = innerData?.note || detailData.note || detailData;
-      const noteTitle = note.title || note.displayTitle || note.display_title || "";
-      const noteDesc = (note.desc || note.description || note.content || "").slice(0, 1500);
-      const noteAuthor = note.user?.nickname || note.author || "";
-      const noteLikes = note.interactInfo?.likedCount || note.likes || 0;
-      const noteCollects = note.interactInfo?.collectedCount || note.collects || 0;
-      const noteShareCount = note.interactInfo?.shareCount || 0;
-      const noteCommentCount = note.interactInfo?.commentCount || 0;
+      const normalizedNote = normalizeNote(note);
+      const noteTitle = normalizedNote.title;
+      const noteDesc = normalizedNote.desc.slice(0, 1500);
+      const noteAuthor = normalizedNote.author;
+      const noteLikes = normalizedNote.likes;
+      const noteCollects = normalizedNote.collects;
+      const noteShareCount = normalizedNote.shareCount;
+      const noteCommentCount = normalizedNote.commentCount;
       const noteTime = note.time ? new Date(note.time).toLocaleString("zh-CN") : "";
-      const noteIp = note.ipLocation || "";
+      const noteIp = note.ipLocation || note.ip_location || "";
       let noteSection = `\u{1F4DD} \u7B14\u8BB0\u8BE6\u60C5:
 \u6807\u9898: ${noteTitle}
 \u4F5C\u8005: ${noteAuthor}`;
@@ -4956,17 +5205,18 @@ async function runXhsDetail(args, ctx) {
 
 \u6B63\u6587:
 ${noteDesc}`;
-      const rawComments = innerData?.comments?.list || innerData?.comments || detailData.comments?.list || detailData.comments || note.comments?.list || note.comments || [];
-      const commentArr = Array.isArray(rawComments) ? rawComments : [];
+      const commentArr = normalizeXhsComments(detailData);
+      const commentsStatus = innerData?.comments_status || detailData.comments_status || innerData?.comment_read_status || detailData.comment_read_status;
+      commentsUnavailable = commentsStatus === "unavailable" || !!innerData?.comments_error || !!detailData.comments_error;
       let commentsSection = "";
       if (commentArr.length > 0) {
         const formatComment = (c, indent = "") => {
-          const name = c.userInfo?.nickname || c.nickname || c.userName || "\u533F\u540D";
+          const name = c.author || "\u533F\u540D";
           const content = c.content || "";
-          const likes = c.likeCount || c.like_count || c.likes || 0;
-          const cid = c.id || c.commentId || c.comment_id || "";
+          const likes = c.likes || 0;
+          const cid = c.commentId || "";
           let line = `${indent}${name}: ${content} (${likes}\u8D5E) [commentId=${cid}]`;
-          const subs = c.subComments || c.sub_comments || [];
+          const subs = c.subComments || [];
           if (Array.isArray(subs) && subs.length > 0) {
             line += "\n" + subs.slice(0, 10).map((s) => formatComment(s, indent + "  \u21B3 ")).join("\n");
           }
@@ -4976,6 +5226,8 @@ ${noteDesc}`;
 
 \u{1F4AC} \u8BC4\u8BBA\u533A (${commentArr.length}\u6761):
 ` + commentArr.slice(0, 30).map((c) => formatComment(c)).join("\n");
+      } else if (commentsUnavailable) {
+        commentsSection = "\n\n\u{1F4AC} \u8BC4\u8BBA\u533A: \uFF08\u8BFB\u53D6\u5931\u8D25\uFF1B\u4E0D\u80FD\u636E\u6B64\u5224\u65AD\u4E3A\u6CA1\u6709\u8BC4\u8BBA\uFF0C\u4E5F\u4E0D\u8981\u7F16\u9020\u8BC4\u8BBA\u5185\u5BB9\uFF09";
       } else {
         commentsSection = "\n\n\u{1F4AC} \u8BC4\u8BBA\u533A: \uFF08\u6682\u65E0\u8BC4\u8BBA\uFF09";
       }
@@ -4985,32 +5237,32 @@ ${noteDesc}`;
     detailText = `[\u52A0\u8F7D\u5931\u8D25: ${result.error || "\u65E0\u6CD5\u83B7\u53D6\u7B14\u8BB0\u8BE6\u60C5\uFF0C\u53EF\u80FD\u9700\u8981\u5148\u5728\u641C\u7D22/\u6D4F\u89C8\u7ED3\u679C\u4E2D\u770B\u5230\u8FD9\u6761\u7B14\u8BB0"}]`;
   }
   const failed = detailText.startsWith("[\u52A0\u8F7D\u5931\u8D25");
-  return { ok: true, noteId: args.noteId, detailText, failed };
+  return { ok: true, noteId: args.noteId, detailText, failed, commentsUnavailable };
 }
 function parseDiaryDate(dateInput) {
   const now = /* @__PURE__ */ new Date();
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateInput)) return dateInput;
-  if (dateInput === "\u4ECA\u5929") return now.toISOString().split("T")[0];
+  if (dateInput === "\u4ECA\u5929") return getLocalDateKey(now);
   if (dateInput === "\u6628\u5929") {
     const d = new Date(now);
     d.setDate(d.getDate() - 1);
-    return d.toISOString().split("T")[0];
+    return getLocalDateKey(d);
   }
   if (dateInput === "\u524D\u5929") {
     const d = new Date(now);
     d.setDate(d.getDate() - 2);
-    return d.toISOString().split("T")[0];
+    return getLocalDateKey(d);
   }
   const daysAgo = dateInput.match(/^(\d+)天前$/);
   if (daysAgo) {
     const d = new Date(now);
     d.setDate(d.getDate() - parseInt(daysAgo[1]));
-    return d.toISOString().split("T")[0];
+    return getLocalDateKey(d);
   }
   const monthDay = dateInput.match(/(\d{1,2})月(\d{1,2})/);
   if (monthDay) return `${now.getFullYear()}-${monthDay[1].padStart(2, "0")}-${monthDay[2].padStart(2, "0")}`;
   const parsed = new Date(dateInput);
-  if (!isNaN(parsed.getTime())) return parsed.toISOString().split("T")[0];
+  if (!isNaN(parsed.getTime())) return getLocalDateKey(parsed);
   return "";
 }
 async function dispatchAgenticTool(toolName, args, ctx) {
@@ -5184,9 +5436,10 @@ var stripSourceTags = (t) => t.replace(/\s*\[(?:聊天|通话|约会)\]\s*/g, "\
 var stripTimestamps = (t) => t.replace(/\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\]\s*/g, "").replace(/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s*/gm, "").replace(/（[上下]午\d{1,2}[：:]\d{2}）/g, "").replace(/\(\d{1,2}:\d{2}\s*[AP]M\)/gi, "");
 var stripChineseDate = (t) => t.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, "");
 var stripRoleNamePrefix = (t) => t.replace(/^[\w一-龥]+:\s*/, "");
-var stripBusinessTagsForBubble = (t) => t.replace(/\[\[(?:ACTION|RECALL|SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END|MUSIC_ACTION)[:\s][\s\S]*?\]\]/g, "").replace(/\[schedule_message[^\]]*\]/g, "");
+var stripBusinessTagsForBubble = (t) => t.replace(/\[\[(?:ACTION|RECALL|SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END|MUSIC_ACTION)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[\s*[记記][录錄]\s*[:：][\s\S]*?\]\]/g, "").replace(/\[schedule_message[^\]]*\]/g, "");
 var stripBusinessTagsForNotification = (t) => stripBusinessTagsForBubble(t).replace(/\[\[(?:READ_NOTE|XHS_[A-Z_]+)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[XHS_[A-Z_]+\]\]/g, "");
 var stripQuotes2 = (t) => t.replace(/\[\[(?:QU[OA]TE|引用)[：:][\s\S]*?\]\]/g, "").replace(/\[(?:QU[OA]TE|引用)[：:][^\]]*\]/g, "").replace(/\[回复\s*[""“][^""”]*?[""”](?:\.{0,3})\]\s*[：:]?\s*/g, "").replace(/\[[^\[\]\n「」]{0,24}引用了[^\[\]\n「」]{0,24}「[^」\n]*?」[^\[\]\n]{0,24}\]\s*/g, "");
+var stripSystemLogLeak = (t) => t.replace(/[\[【]\s*(?:系统|系統|System)\s*(?:提示)?\s*[:：][^\[\]【】]*[\]】]\s*/gi, "").replace(/\[\s*(?:系统|系統)\s*\]\s*/g, "");
 var stripMarkdownHeaders = (t) => t.replace(/^#{1,6}\s+/gm, "");
 var stripMarkdownBold = (t) => t.replace(/\*{2,}/g, "");
 var stripMarkdownDividers = (t) => t.replace(/^\s*---\s*$/gm, "").replace(/^\s*[-*+]\s*$/gm, "");
@@ -5314,6 +5567,7 @@ function sanitizeForNotification(text) {
   result = stripTimestamps(result);
   result = stripChineseDate(result);
   result = stripRoleNamePrefix(result);
+  result = stripSystemLogLeak(result);
   result = stripSourceTags(result);
   result = stripInnerState(result);
   result = stripBusinessTagsForNotification(result);
@@ -5413,6 +5667,7 @@ function sanitizeTextForBanner(text) {
   result = replaceTranslationForBanner(result);
   result = replaceVoiceForBanner(result);
   result = stripQuotes2(result);
+  result = stripSystemLogLeak(result);
   result = replaceEmojiReverseTag(result);
   result = replaceMarkdownLinks(result);
   result = stripMarkdownHeaders(result);
@@ -5452,6 +5707,114 @@ function splitOnSendEmoji(chunk) {
   }
   if (parts.length === 0 && chunk) parts.push({ kind: "text", text: chunk });
   return parts;
+}
+
+// utils/transferFormat.ts
+function parseTransferAmount(raw) {
+  if (typeof raw === "number") return Number.isFinite(raw) && raw > 0 ? raw : null;
+  if (typeof raw !== "string") return null;
+  let s = raw.replace(/[０-９．]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 65248));
+  s = s.replace(/[¥￥$＄]/g, "").replace(/(?:元|块钱|块|圆|RMB|CNY|credits?)/gi, "").replace(/[,，\s]/g, "");
+  if (!/^\d+(?:\.\d+)?$/.test(s)) return null;
+  const n = Number(s);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+function formatTransferAmount(n) {
+  return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100);
+}
+var RECORD_TRANSFER_RE = /\[\[\s*[记記][录錄]\s*[:：]\s*TRANSFER[^\]]*\]\]/gi;
+var ACTION_SEND_KV_RE = /\[\[\s*ACTION\s*[:：]\s*TRANSFER\s*((?:\|[^\]]*)?)\s*\]\]/gi;
+var ACTION_SEND_RE = /\[\[\s*ACTION\s*[:：]\s*TRANSFER\s*[:：]\s*([^\]]*?)\s*\]\]/gi;
+var FORGED_TO_VALUES = /* @__PURE__ */ new Set(["char", "self", "me", "\u89D2\u8272", "\u81EA\u5DF1", "\u6211", "\u81EA\u5206", "\u672C\u4EBA"]);
+function parseKvArgs(argStr) {
+  const out = {};
+  for (const part of argStr.split(/[|｜]/)) {
+    const seg = part.trim();
+    if (!seg) continue;
+    const eq = seg.search(/[=＝]/);
+    if (eq < 0) {
+      if (!("amount" in out) && parseTransferAmount(seg) !== null) out.amount = seg;
+      continue;
+    }
+    const k = seg.slice(0, eq).trim().toLowerCase();
+    const v = seg.slice(eq + 1).trim();
+    if (k) out[k] = v;
+  }
+  return out;
+}
+function kvToSendEvent(argStr) {
+  const kv = parseKvArgs(argStr);
+  const to = (kv.to ?? kv["\u7ED9"] ?? "").toLowerCase();
+  if (to && FORGED_TO_VALUES.has(to)) return null;
+  const amount = parseTransferAmount(kv.amount ?? kv["\u91D1\u989D"]);
+  return amount === null ? null : { kind: "send", amount: formatTransferAmount(amount) };
+}
+var ACTION_ACCEPT_RE = /\[\[\s*ACTION\s*[:：]\s*TRANSFER_ACCEPT\s*\]\]/gi;
+var ACTION_RETURN_RE = /\[\[\s*ACTION\s*[:：]\s*TRANSFER_RETURN\s*\]\]/gi;
+var SYSTEM_LOG_RE = /[\[【]\s*(?:系统|系統|System)\s*(?:提示)?\s*[:：]\s*([^\[\]【】]*?)\s*[\]】]/gi;
+var BARE_TRANSFER_RE = /\[\s*转[账帐]\s*[:：]?\s*([^\[\]]{0,24}?)\s*\]/gi;
+var AMOUNT_FRAGMENT = String.raw`[¥￥$＄]?\s*([0-9０-９][0-9０-９.,，]*)\s*(?:元|块钱|块|圆)?`;
+var LOG_SEND_RE = new RegExp(String.raw`^(?:你|我)\s*(?:向|给).*?转(?:[账帐]了?|了)\s*${AMOUNT_FRAGMENT}`);
+var LOG_ACCEPT_RE = /^你(?:接收|接受|收下|领取)了.*?转[账帐]/;
+var LOG_RETURN_RE = /^你退回了.*?转[账帐]/;
+var LOG_FORGED_RE = /(?:向|给)你转[账帐]|(?:接收|接受|收下|领取|退回)了你的转[账帐]/;
+var LOG_IS_TRANSFER_RE = /转[账帐]|转了?\s*[¥￥$＄]?\s*[0-9０-９]/;
+function classifySystemLog(inner) {
+  const s = inner.trim();
+  if (!LOG_IS_TRANSFER_RE.test(s)) return void 0;
+  if (LOG_ACCEPT_RE.test(s)) return { kind: "accept" };
+  if (LOG_RETURN_RE.test(s)) return { kind: "return" };
+  const m = s.match(LOG_SEND_RE);
+  if (m) {
+    const amount = parseTransferAmount(m[1]);
+    return amount === null ? null : { kind: "send", amount: formatTransferAmount(amount) };
+  }
+  if (LOG_FORGED_RE.test(s)) return null;
+  return null;
+}
+function collect(text, re, toEvent, hits) {
+  re.lastIndex = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const start = m.index;
+    const end = start + m[0].length;
+    if (hits.some((h) => start < h.end && end > h.start)) continue;
+    const event = toEvent(m);
+    if (event === void 0) continue;
+    hits.push({ start, end, event });
+  }
+}
+function extractTransferCommands(content) {
+  const src = String(content ?? "");
+  if (!src) return { text: "", events: [], consumed: 0 };
+  const hits = [];
+  collect(src, RECORD_TRANSFER_RE, () => null, hits);
+  collect(src, ACTION_SEND_KV_RE, (m) => kvToSendEvent(m[1] ?? ""), hits);
+  collect(src, ACTION_SEND_RE, (m) => {
+    const amount = parseTransferAmount(m[1]);
+    return amount === null ? null : { kind: "send", amount: formatTransferAmount(amount) };
+  }, hits);
+  collect(src, ACTION_ACCEPT_RE, () => ({ kind: "accept" }), hits);
+  collect(src, ACTION_RETURN_RE, () => ({ kind: "return" }), hits);
+  collect(src, SYSTEM_LOG_RE, (m) => classifySystemLog(m[1] ?? ""), hits);
+  collect(src, BARE_TRANSFER_RE, (m) => {
+    const amount = parseTransferAmount(m[1]);
+    return amount === null ? null : { kind: "send", amount: formatTransferAmount(amount) };
+  }, hits);
+  hits.sort((a, b) => a.start - b.start);
+  let text = "";
+  let cursor = 0;
+  for (const h of hits) {
+    text += src.slice(cursor, h.start);
+    cursor = h.end;
+  }
+  text += src.slice(cursor);
+  return {
+    text: text.trim(),
+    events: hits.map((h) => h.event).filter((e) => e !== null),
+    consumed: hits.length
+  };
 }
 
 // worker/instant-push/src/classifier.ts
@@ -5517,11 +5880,8 @@ var SIDE_EFFECT_TAGS = [
     re: /\[\[ACTION:POKE\]\]/g,
     toDirective: () => ({ type: "poke" })
   },
-  // [[ACTION:TRANSFER:123]]
-  {
-    re: /\[\[ACTION:TRANSFER:(\d+)\]\]/g,
-    toDirective: (m) => ({ type: "transfer", amount: Number(m[1]) })
-  },
+  // 转账 (TRANSFER / TRANSFER_ACCEPT / TRANSFER_RETURN) 不在这张表里 —— 见 classifyLLMOutput
+  // 里的 extractTransferCommands, 那份解析跟客户端共用一份源码, 且要认模仿历史日志的口语形态。
   // [[ACTION:ADD_EVENT|title|date]]
   {
     re: /\[\[ACTION:ADD_EVENT\s*\|\s*(.*?)\s*\|\s*(.*?)\]\]/g,
@@ -5654,14 +6014,25 @@ function classifyLLMOutput(text) {
     return { kind: "tool-request", prefix, sanitizedPrefix, toolCalls };
   }
   const directives = [];
+  const { text: textAfterTransfers, events: transferEvents } = extractTransferCommands(text);
+  for (const ev of transferEvents) {
+    if (ev.kind === "send") {
+      const amount = parseTransferAmount(ev.amount);
+      if (amount !== null) directives.push({ type: "transfer", amount });
+    } else if (ev.kind === "accept") {
+      directives.push({ type: "transfer_accept" });
+    } else {
+      directives.push({ type: "transfer_return" });
+    }
+  }
   for (const spec of SIDE_EFFECT_TAGS) {
-    const matches = Array.from(text.matchAll(spec.re));
+    const matches = Array.from(textAfterTransfers.matchAll(spec.re));
     for (const m of matches) {
       const d = spec.toDirective(m);
       if (d) directives.push(d);
     }
   }
-  let cleanedText = text;
+  let cleanedText = textAfterTransfers;
   for (const spec of DATA_TAGS) cleanedText = cleanedText.replace(spec.re, "");
   for (const spec of SIDE_EFFECT_TAGS) cleanedText = cleanedText.replace(spec.re, "");
   cleanedText = cleanedText.trim();

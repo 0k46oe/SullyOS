@@ -26,7 +26,14 @@ import { COMMON_TIMEZONES } from '../utils/timezone';
 import { toMountedWorldbook } from '../utils/worldbook';
 import { stripSensitiveCardFields } from '../utils/characterCard';
 import { confirmExportSafety } from '../utils/exportGuard';
+import { trackEvent } from '../utils/analytics';
 import { sortCharacterGroups, GROUP_FILTER_UNGROUPED } from '../components/character/CharacterGroupFilter';
+import {
+    EXTERNAL_MEMORY_MAX_CHARS,
+    extractExternalMemoryText,
+    getExternalMemoryLengthInfo,
+    getExternalMemoryOverLimitMessage,
+} from '../utils/memoryPalace/externalMemory';
 
 // ── 神经链接 · 列表页视觉件（淡紫留白风）────────────────────
 // 之前的「星点 + 玻璃饰带 + 华丽头像框」看久了眼花、低端机也重绘卡。
@@ -147,6 +154,7 @@ const Character: React.FC = () => {
   const [exportText, setExportText] = useState('');
   const [isProcessingMemory, setIsProcessingMemory] = useState(false);
   const [importStatus, setImportStatus] = useState('');
+  const importLengthInfo = useMemo(() => getExternalMemoryLengthInfo(importText), [importText]);
 
   // Batch Summarize State
   const [batchRange, setBatchRange] = useState({ start: '', end: '' });
@@ -203,6 +211,7 @@ const Character: React.FC = () => {
           notes: formData.voiceProfile?.notes || '',
       });
       addToast(`已应用音色：${voice.voice_name || voice.voice_id}`, 'success');
+      trackEvent('应用音色到角色', { source });
   };
 
   // Load archive prompts from localStorage (shared with ChatApp)
@@ -331,6 +340,7 @@ const Character: React.FC = () => {
       handleChange('mountedWorldbooks', [...currentBooks, newBookEntry]);
       setShowWorldbookModal(false);
       addToast(`已挂载: ${book.title}`, 'success');
+      trackEvent('给角色挂载世界书');
   };
 
   // New: Mount entire category
@@ -393,6 +403,7 @@ const Character: React.FC = () => {
       setWbModalSearch('');
       setWbModalExpandedCategory(null);
       setShowWorldbookModal(true);
+      trackEvent('打开挂载世界书弹窗');
   };
 
   // ... (Other handlers unchanged)
@@ -430,6 +441,7 @@ const Character: React.FC = () => {
       if (!formData) return;
 
       const targetId = formData.id; // LOCK ID
+      trackEvent('提炼当月核心记忆');
 
       // Build lightweight character identity context (no memories - we're generating those)
       let identityContext = `[角色身份]\n名字: ${formData.name}\n`;
@@ -595,36 +607,63 @@ const Character: React.FC = () => {
   const handleImportMemories = async () => { 
       if (!importText.trim() || !apiConfig.apiKey) { addToast('请检查输入内容或 API 设置', 'error'); return; } 
       if (!formData) return;
+      if (importLengthInfo.overLimit) {
+          const message = getExternalMemoryOverLimitMessage(importText);
+          setImportStatus(message);
+          addToast(`内容超过 5 万字，建议分 ${importLengthInfo.suggestedBatches} 批导入`, 'error');
+          return;
+      }
       
       const targetId = formData.id; // LOCK ID
       setIsProcessingMemory(true); 
-      setImportStatus('正在链接神经云端进行清洗...'); 
+      setImportStatus('准备清洗：只整理时间和结构，不压缩内容…');
+      trackEvent('执行记忆导入清洗');
       
       try { 
-          const prompt = `Task: Convert this text log into a JSON array. Format: [{ "date": "YYYY-MM-DD", "summary": "...", "mood": "..." }] Text: ${importText.substring(0, 8000)}`; 
-          const data = await safeFetchJson(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` }, body: JSON.stringify({ model: apiConfig.model, messages: [{ role: "user", content: prompt }], temperature: 0.1 }) }, 0);
-          let content = extractContent(data);
-          content = content.replace(/```json/g, '').replace(/```/g, '').trim(); 
-          const firstBracket = content.indexOf('['); 
-          const lastBracket = content.lastIndexOf(']'); 
-          if (firstBracket !== -1 && lastBracket !== -1) { content = content.substring(firstBracket, lastBracket + 1); } 
-          let parsed; try { parsed = JSON.parse(content); } catch (e) { throw new Error('解析返回数据失败'); } 
-          let targetArray = Array.isArray(parsed) ? parsed : (parsed.memories || parsed.data); 
-          
-          if (Array.isArray(targetArray)) { 
-              const newMems = targetArray.map((m: any) => ({ id: `mem-${Date.now()}-${Math.random()}`, date: m.date || '未知', summary: m.summary || '无内容', mood: m.mood || '记录' })); 
-              
-              if (editingIdRef.current === targetId) {
-                  handleChange('memories', [...(formData.memories || []), ...newMems]); 
-                  setShowImportModal(false); 
-                  addToast(`成功导入 ${newMems.length} 条记忆`, 'success'); 
-              } else {
-                  // Background update
-                  const currentMems = characters.find(c => c.id === targetId)?.memories || [];
-                  updateCharacter(targetId, { memories: [...currentMems, ...newMems] });
-                  addToast('后台任务完成：导入记忆已保存', 'success');
-              }
-          } else { throw new Error('结构错误'); } 
+          const result = await extractExternalMemoryText(
+              importText,
+              targetId,
+              formData.name,
+              userProfile.name,
+              {
+                  baseUrl: apiConfig.baseUrl,
+                  apiKey: apiConfig.apiKey,
+                  model: apiConfig.model,
+              },
+              stage => setImportStatus(stage),
+          );
+          const failedBatch = result.batches.find(batch => !batch.ok);
+          if (failedBatch) {
+              throw new Error(
+                  `第 ${failedBatch.index}/${failedBatch.total} 批未能无损清洗：${failedBatch.error || '完整性校验失败'}。本次没有写入任何记忆`,
+              );
+          }
+          if (result.memories.length === 0) {
+              throw new Error('没有整理出可导入的记忆');
+          }
+
+          const pad2 = (value: number) => String(value).padStart(2, '0');
+          const newMems: MemoryFragment[] = result.memories.map(memory => {
+              const date = new Date(memory.createdAt);
+              return {
+                  id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                  date: `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`,
+                  // content 是保真清洗后的完整事件，不再二次概括成短 summary。
+                  summary: memory.content,
+                  mood: memory.mood || '记录',
+              };
+          });
+          if (editingIdRef.current === targetId) {
+              handleChange('memories', [...(formData.memories || []), ...newMems]);
+              setShowImportModal(false);
+              setImportText('');
+              addToast(`成功导入 ${newMems.length} 条记忆`, 'success');
+          } else {
+              // Background update
+              const currentMems = characters.find(c => c.id === targetId)?.memories || [];
+              updateCharacter(targetId, { memories: [...currentMems, ...newMems] });
+              addToast(`后台任务完成：已保存 ${newMems.length} 条导入记忆`, 'success');
+          }
       } catch (e: any) { setImportStatus(`错误: ${e.message || '未知错误'}`); addToast('记忆清洗失败', 'error'); } finally { setIsProcessingMemory(false); } 
   };
   
@@ -634,6 +673,7 @@ const Character: React.FC = () => {
         const targetId = formData.id; // LOCK ID
         setIsBatchProcessing(true);
         setBatchProgress('Initializing...');
+        trackEvent('执行批量记忆总结');
         
         try {
             const msgs = await DB.getMessagesByCharId(targetId, true);
@@ -755,6 +795,7 @@ const Character: React.FC = () => {
       
       const targetId = formData.id; // LOCK ID
       setIsGeneratingImpression(true);
+      trackEvent('生成角色印象', { type });
       try {
           const charName = formData.name;
           const boundUser = userProfile;
@@ -872,11 +913,9 @@ ${isInitialGeneration ? `
                   messages: [{ role: "user", content: prompt }],
                   max_tokens: 8000,
                   temperature: 0.5,
-                  // 印象 prompt 体量大（含完整上下文 + 记忆 + 近期聊天），非流式下要等
-                  // 整段思考链 + JSON 全生成完才返回首字节，常超 60s 撞上中转站空闲超时被
-                  // 掐断（NetworkError）。开流式让连接持续有数据，绕开空闲超时；
-                  // safeResponseJson 会把 SSE 流拼回完整对象，下游 extractContent 无需改动。
-                  stream: true
+                  // 与「设置 → API → 流式输出」保持一致，不在印象功能里强制覆盖用户选择。
+                  // 流式响应由 safeResponseJson 拼回完整对象，下游 extractContent 无需改动。
+                  stream: apiConfig.stream === true
               })
           }, 0);
           let content = extractContent(data);
@@ -929,6 +968,8 @@ ${isInitialGeneration ? `
 
       // 导出前明文密钥体检 + 二次确认：正常为「安全，可分享」；若意外检出密钥则中止并提示上报。
       if (!(await confirmExportSafety(exportData))) return;
+
+      trackEvent('导出角色卡');
 
       const json = JSON.stringify(exportData, null, 2);
       const fileName = `${formData.name || 'Character'}_Card.json`;
@@ -1044,6 +1085,7 @@ ${isInitialGeneration ? `
               } as CharacterProfile;
 
               await DB.saveCharacter(newChar);
+              trackEvent('导入角色卡');
               // 不要调用 addCharacter()——它不是"刷新"，而是真的新建一个空白
               // "New Character" 并写进 DB，reload 后就会多出一张空白卡。
               // 导入的角色已经存进了 DB（上一行），reload 时 OSContext 会从
@@ -1077,7 +1119,7 @@ ${isInitialGeneration ? `
                        <p className="text-xs text-violet-400/90 mt-2">已建立 <span className="font-bold text-violet-500">{characters.length}</span> 个角色连接</p>
                    </div>
                    <div className="flex gap-3 pt-1">
-                        <ToolButton label="分组" title="角色分组管理" onClick={() => setShowGroupModal(true)}>
+                        <ToolButton label="分组" title="角色分组管理" onClick={() => { setShowGroupModal(true); trackEvent('打开角色分组管理弹窗'); }}>
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-5 h-5">
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" />
                             </svg>
@@ -1210,11 +1252,11 @@ ${isInitialGeneration ? `
                        <button onClick={() => { setActiveCharacterId(formData.id); openApp(AppID.Chat); }} className="text-xs px-3 py-1.5 bg-primary text-white rounded-full font-bold shadow-sm shadow-primary/30 flex items-center gap-1 active:scale-95 transition-transform"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path d="M3.105 2.288a.75.75 0 0 0-.826.95l1.414 4.926H16.5a.75.75 0 0 1 0 1.5H3.693l-1.414 4.926a.75.75 0 0 0 .826.95 28.897 28.897 0 0 0 15.293-7.155.75.75 0 0 0 0-1.114A28.897 28.897 0 0 0 3.105 2.288Z" /></svg>发消息</button>
                    </div>
                    <div className="flex gap-6 text-sm font-medium text-slate-400 pl-1">
-                       <button onClick={() => setDetailTab('identity')} className={`pb-2 transition-colors relative ${detailTab === 'identity' ? 'text-slate-800' : ''}`}>设定{detailTab === 'identity' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
-                       <button onClick={() => setDetailTab('memory')} className={`pb-2 transition-colors relative ${detailTab === 'memory' ? 'text-slate-800' : ''}`}>记忆 ({(formData.memories || []).length}){detailTab === 'memory' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
-                       <button onClick={() => setDetailTab('impression')} className={`pb-2 transition-colors relative ${detailTab === 'impression' ? 'text-slate-800' : ''}`}>印象{detailTab === 'impression' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
-                       <button onClick={() => setDetailTab('plates')} className={`pb-2 transition-colors relative ${detailTab === 'plates' ? 'text-slate-800' : ''}`}>门牌{detailTab === 'plates' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
-                       <button onClick={() => setDetailTab('chibi')} className={`pb-2 transition-colors relative ${detailTab === 'chibi' ? 'text-slate-800' : ''}`}>手办{detailTab === 'chibi' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('identity'); trackEvent('切换角色详情标签页', { tab: 'identity' }); }} className={`pb-2 transition-colors relative ${detailTab === 'identity' ? 'text-slate-800' : ''}`}>设定{detailTab === 'identity' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('memory'); trackEvent('切换角色详情标签页', { tab: 'memory' }); }} className={`pb-2 transition-colors relative ${detailTab === 'memory' ? 'text-slate-800' : ''}`}>记忆 ({(formData.memories || []).length}){detailTab === 'memory' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('impression'); trackEvent('切换角色详情标签页', { tab: 'impression' }); }} className={`pb-2 transition-colors relative ${detailTab === 'impression' ? 'text-slate-800' : ''}`}>印象{detailTab === 'impression' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('plates'); trackEvent('切换角色详情标签页', { tab: 'plates' }); }} className={`pb-2 transition-colors relative ${detailTab === 'plates' ? 'text-slate-800' : ''}`}>门牌{detailTab === 'plates' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
+                       <button onClick={() => { setDetailTab('chibi'); trackEvent('切换角色详情标签页', { tab: 'chibi' }); }} className={`pb-2 transition-colors relative ${detailTab === 'chibi' ? 'text-slate-800' : ''}`}>手办{detailTab === 'chibi' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full"></div>}</button>
                    </div>
                  </div>
                </div>
@@ -1403,7 +1445,7 @@ ${isInitialGeneration ? `
                                            <p className="text-[10px] text-slate-400 mt-0.5 leading-relaxed">默认关。关闭时不注入任何生活记录内容，连代记指令的用法都不会教给角色。</p>
                                        </div>
                                        <button
-                                           onClick={() => handleChange('lifeRecordEnabled', !formData.lifeRecordEnabled)}
+                                           onClick={() => { handleChange('lifeRecordEnabled', !formData.lifeRecordEnabled); trackEvent('开启角色生活记录注入', { state: formData.lifeRecordEnabled ? 'off' : 'on' }); }}
                                            className={`w-12 h-7 rounded-full transition-colors relative shrink-0 ${formData.lifeRecordEnabled ? 'bg-primary' : 'bg-slate-200'}`}
                                        >
                                            <div className={`absolute top-0.5 w-6 h-6 bg-white rounded-full shadow-md transition-transform ${formData.lifeRecordEnabled ? 'translate-x-5' : 'translate-x-0.5'}`}></div>
@@ -1599,7 +1641,7 @@ ${isInitialGeneration ? `
                    {detailTab === 'memory' && (
                        <div className="space-y-4 animate-fade-in">
                            <div className="flex justify-center gap-2 mb-4">
-                               <button onClick={() => setShowBatchModal(true)} className="px-4 py-2 bg-white rounded-full text-xs font-semibold text-slate-500 shadow-sm border border-slate-100">批量总结（可指定日期）</button>
+                               <button onClick={() => { setShowBatchModal(true); trackEvent('打开批量记忆总结弹窗'); }} className="px-4 py-2 bg-white rounded-full text-xs font-semibold text-slate-500 shadow-sm border border-slate-100">批量总结（可指定日期）</button>
                                <button onClick={() => setShowImportModal(true)} className="px-4 py-2 bg-white rounded-full text-xs font-semibold text-slate-500 shadow-sm border border-slate-100">导入/清洗</button>
                                <button onClick={handleExportPreview} className="px-4 py-2 bg-white rounded-full text-xs font-semibold text-slate-500 shadow-sm border border-slate-100">备份</button>
                            </div>
@@ -1633,7 +1675,7 @@ ${isInitialGeneration ? `
                    )}
 
                    {detailTab === 'chibi' && formData.id && (
-                       <ChibiShelfPanel charId={formData.id} onOpen={() => setShowChibiStudio(true)} />
+                       <ChibiShelfPanel charId={formData.id} onOpen={() => { setShowChibiStudio(true); trackEvent('打开QQ捏人工坊'); }} />
                    )}
 
                    {detailTab === 'plates' && formData.id && (
@@ -1657,8 +1699,27 @@ ${isInitialGeneration ? `
        )}
 
        {/* Modals ... */}
-       <Modal isOpen={showImportModal} title="记忆导入/清洗" onClose={() => setShowImportModal(false)} footer={<><button onClick={() => setShowImportModal(false)} className="flex-1 py-3 bg-slate-100 text-slate-500 font-bold rounded-2xl">取消</button><button onClick={handleImportMemories} disabled={isProcessingMemory} className="flex-1 py-3 bg-primary text-white font-bold rounded-2xl shadow-lg shadow-primary/30 flex items-center justify-center gap-2">{isProcessingMemory && <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>}{isProcessingMemory ? '处理中...' : '开始执行'}</button></>}>
-           <div className="space-y-3"><div className="text-xs text-slate-400 leading-relaxed bg-slate-50 p-3 rounded-xl border border-slate-100">AI 将自动整理乱序文本为记忆档案。</div>{importStatus && <div className="text-xs text-primary font-medium">{importStatus}</div>}<textarea value={importText} onChange={e => setImportText(e.target.value)} placeholder="在此粘贴文本..." className="w-full h-32 bg-slate-100 border-none rounded-2xl px-4 py-3 text-sm text-slate-700 resize-none focus:ring-2 focus:ring-primary/20 transition-all"/></div>
+       <Modal isOpen={showImportModal} title="记忆导入/清洗" onClose={() => setShowImportModal(false)} footer={<><button onClick={() => setShowImportModal(false)} className="flex-1 py-3 bg-slate-100 text-slate-500 font-bold rounded-2xl">取消</button><button onClick={handleImportMemories} disabled={isProcessingMemory || importLengthInfo.overLimit} className={`flex-1 py-3 text-white font-bold rounded-2xl shadow-lg flex items-center justify-center gap-2 ${importLengthInfo.overLimit ? 'bg-slate-300 cursor-not-allowed shadow-none' : 'bg-primary shadow-primary/30'}`}>{isProcessingMemory && <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>}{isProcessingMemory ? '处理中...' : importLengthInfo.overLimit ? '请先分批' : '开始执行'}</button></>}>
+           <div className="space-y-3">
+               <div className="text-xs text-slate-400 leading-relaxed bg-slate-50 p-3 rounded-xl border border-slate-100">
+                   适合从其它应用“搬家”。最多 5 万字，字数只在本地统计；AI 只整理时间与事件结构，不摘要、不合并、不省略原有细节。5 万字以内会自动分批，无需手动切。
+               </div>
+               {importStatus && <div className="text-xs text-primary font-medium">{importStatus}</div>}
+               <textarea
+                   value={importText}
+                   onChange={e => setImportText(e.target.value)}
+                   placeholder="在此粘贴从别处带来的记忆文本…"
+                   className="w-full h-40 bg-slate-100 border-none rounded-2xl px-4 py-3 text-sm text-slate-700 resize-none focus:ring-2 focus:ring-primary/20 transition-all"
+               />
+               {importLengthInfo.overLimit && (
+                   <div className="text-xs leading-relaxed rounded-xl border border-amber-200 bg-amber-50 p-3 text-amber-700">
+                       {getExternalMemoryOverLimitMessage(importText)}
+                   </div>
+               )}
+               <div className={`text-right text-[10px] ${importLengthInfo.overLimit ? 'text-red-500 font-bold' : 'text-slate-400'}`}>
+                   {importLengthInfo.count.toLocaleString()} / {EXTERNAL_MEMORY_MAX_CHARS.toLocaleString()} 字（本地统计）
+               </div>
+           </div>
        </Modal>
 
        <Modal isOpen={showBatchModal} title="批量记忆总结" onClose={() => { setShowBatchModal(false); setShowPromptEditor(false); }} footer={

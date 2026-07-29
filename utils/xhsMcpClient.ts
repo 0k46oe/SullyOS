@@ -15,6 +15,13 @@ export interface McpToolResult {
     data?: any;
     error?: string;
 }
+export const XHS_SPIDER_V3_EXPERIMENT = Object.freeze({
+    optInValue: 'spider-v3-isolated-cookie',
+    strategyKey: 'os_xhs_spider_v3_strategy',
+    sessionKey: 'os_xhs_spider_v3_session',
+    circuitKey: 'os_xhs_spider_v3_circuit',
+});
+
 
 // ==================== Backend Detection ====================
 
@@ -39,6 +46,129 @@ const resolveLiteCookie = (): string => {
         if (raw) return JSON.parse(raw)?.xhsMcpConfig?.cookie || '';
     } catch { /* ignore */ }
     return '';
+};
+
+
+const spiderStorage = (): Storage | null => {
+    try {
+        return typeof localStorage === 'undefined' ? null : localStorage;
+    } catch {
+        return null;
+    }
+};
+
+const readSpiderJson = (key: string): any => {
+    try {
+        const raw = spiderStorage()?.getItem(key);
+        return raw ? JSON.parse(raw) : null;
+    } catch {
+        return null;
+    }
+};
+
+const writeSpiderJson = (key: string, value: any): void => {
+    try {
+        spiderStorage()?.setItem(key, JSON.stringify(value));
+    } catch { /* localStorage unavailable or full */ }
+};
+
+const removeSpiderValue = (key: string): void => {
+    try {
+        spiderStorage()?.removeItem(key);
+    } catch { /* ignore */ }
+};
+
+const spiderCookieTag = async (cookie: string): Promise<string> => {
+    const a1 = cookie.match(/(?:^|;\s*)a1=([^;]+)/)?.[1] || '';
+    if (!a1) return '';
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(a1));
+    return Array.from(new Uint8Array(digest).slice(0, 8), byte => byte.toString(16).padStart(2, '0')).join('');
+};
+
+const withSpiderCircuitError = (detail: any, message: string): any => ({
+    ...detail,
+    data: {
+        ...(detail?.data || {}),
+        comments_status: 'unavailable',
+        comments_error: {
+            code: 'SPIDER_V3_CIRCUIT_OPEN',
+            message,
+        },
+    },
+});
+
+const trySpiderV3CommentPatch = async (
+    baseUrl: string,
+    requestBody: Record<string, any>,
+    cookie: string,
+    detail: any,
+): Promise<any> => {
+    const storage = spiderStorage();
+    if (
+        !storage
+        || detail?.data?.comments_status === 'loaded'
+    ) {
+        return detail;
+    }
+
+    const a1Tag = await spiderCookieTag(cookie);
+    if (!a1Tag) return detail;
+    let sessionState = readSpiderJson(XHS_SPIDER_V3_EXPERIMENT.sessionKey);
+    if (sessionState?.a1Tag !== a1Tag) {
+        sessionState = null;
+        removeSpiderValue(XHS_SPIDER_V3_EXPERIMENT.sessionKey);
+        removeSpiderValue(XHS_SPIDER_V3_EXPERIMENT.circuitKey);
+    }
+    const circuit = readSpiderJson(XHS_SPIDER_V3_EXPERIMENT.circuitKey);
+    if (circuit?.a1Tag === a1Tag) {
+        return withSpiderCircuitError(detail, 'Spider v3 received HTTP 406 earlier and is circuit-broken for this cookie.');
+    }
+
+    const requestedStrategy = storage.getItem(XHS_SPIDER_V3_EXPERIMENT.strategyKey) || 'no-client-hints';
+    const strategy = ['no-client-hints', 'browser-hints', 'legacy-transport'].includes(requestedStrategy)
+        ? requestedStrategy
+        : 'no-client-hints';
+    try {
+        const response = await fetch(`${baseUrl}/api/xhs-experimental-comments`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-xhs-cookie': cookie,
+                'x-xhs-experiment-ack': XHS_SPIDER_V3_EXPERIMENT.optInValue,
+            },
+            body: JSON.stringify({
+                acknowledge_risk: true,
+                feed_id: requestBody.feed_id,
+                xsec_token: requestBody.xsec_token || '',
+                strategy,
+                session_state: sessionState || undefined,
+            }),
+        });
+        const experiment = await response.json().catch(() => null);
+        if (experiment?.session_state) {
+            writeSpiderJson(XHS_SPIDER_V3_EXPERIMENT.sessionKey, experiment.session_state);
+        }
+        if (experiment?.error_code === 'XHS_EXPERIMENT_HTTP_406') {
+            writeSpiderJson(XHS_SPIDER_V3_EXPERIMENT.circuitKey, {
+                a1Tag,
+                openedAt: Date.now(),
+                reason: experiment.error_code,
+            });
+            return withSpiderCircuitError(detail, 'Spider v3 was rejected with HTTP 406; automatic comment attempts are now stopped.');
+        }
+        if (!response.ok || !experiment?.success || !experiment?.data) return detail;
+        removeSpiderValue(XHS_SPIDER_V3_EXPERIMENT.circuitKey);
+        return {
+            ...detail,
+            data: {
+                ...(detail?.data || {}),
+                ...experiment.data,
+                comments_error: undefined,
+            },
+        };
+    } catch {
+        return detail;
+    }
 };
 
 // ==================== Bridge Mode (REST) ====================
@@ -71,9 +201,12 @@ const bridgePost = async (
             return { success: false, error: errData.error || `HTTP ${resp.status}` };
         }
 
-        const data = await resp.json();
+        let data = await resp.json();
         if (data.error) {
             return { success: false, error: data.error };
+        }
+        if (endpoint === 'get-feed-detail' && ck) {
+            data = await trySpiderV3CommentPatch(baseUrl, body, ck, data);
         }
         return { success: true, data };
     } catch (e: any) {
@@ -393,6 +526,7 @@ export const XhsMcpClient = {
         liteCookie = cookie || '';
     },
 
+
     testConnection: async (serverUrl: string, cookie?: string): Promise<{ connected: boolean; tools?: string[]; error?: string; nickname?: string; userId?: string; loggedIn?: boolean; xsecToken?: string }> => {
         if (cookie !== undefined) liteCookie = cookie;
         const mode = detectMode(serverUrl);
@@ -506,20 +640,26 @@ export const XhsMcpClient = {
             : mcpCallTool(serverUrl, 'get_recommend');
     },
 
-    getNoteDetail: async (serverUrl: string, noteUrl: string, xsecToken?: string, options?: { loadAllComments?: boolean }): Promise<McpToolResult> => {
+    getNoteDetail: async (serverUrl: string, noteUrl: string, xsecToken?: string, options?: { loadAllComments?: boolean; xsecSource?: string }): Promise<McpToolResult> => {
         const feedId = extractNoteIdFromUrl(noteUrl);
         const token = xsecToken || extractXsecTokenFromUrl(noteUrl) || '';
+        const loadAllComments = !!options?.loadAllComments;
+        let xsecSource = options?.xsecSource || 'pc_feed';
+        try {
+            xsecSource = new URL(noteUrl).searchParams.get('xsec_source') || xsecSource;
+        } catch { /* keep the share-link default */ }
 
         if (detectMode(serverUrl) === 'bridge') {
             return bridgePost(serverUrl, 'get-feed-detail', {
                 feed_id: feedId, xsec_token: token,
-                load_all_comments: options?.loadAllComments || false,
-                click_more_replies: options?.loadAllComments || false,
+                xsec_source: xsecSource,
+                load_all_comments: loadAllComments,
+                click_more_replies: loadAllComments,
             });
         }
         const args: Record<string, any> = { url: noteUrl };
         if (xsecToken) args.xsec_token = xsecToken;
-        if (options?.loadAllComments) { args.load_all_comments = true; args.click_more_replies = true; }
+        if (loadAllComments) { args.load_all_comments = true; args.click_more_replies = true; }
         return mcpCallTool(serverUrl, 'get_note_detail', args);
     },
 
@@ -679,8 +819,106 @@ export const extractNotesFromMcpData = (data: any): any[] => {
     return [];
 };
 
-export const normalizeNote = (n: any): { noteId: string; title: string; desc: string; author: string; authorId: string; likes: number; xsecToken?: string; coverUrl?: string; type?: string } => {
-    const card = n.noteCard || n.notecard;
+export const parseXhsCount = (value: unknown): number => {
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+    }
+    if (typeof value !== 'string') return 0;
+
+    const normalized = value.trim().replace(/[,\s+]/g, '');
+    if (!normalized) return 0;
+    const match = normalized.match(/^(-?\d+(?:\.\d+)?)(万|億|亿|千|[kKmMwW])?/);
+    if (!match) return 0;
+
+    const base = Number(match[1]);
+    if (!Number.isFinite(base) || base < 0) return 0;
+    const unit = match[2]?.toLowerCase();
+    const multiplier = unit === '万' || unit === 'w' ? 10_000
+        : unit === '億' || unit === '亿' ? 100_000_000
+        : unit === '千' || unit === 'k' ? 1_000
+        : unit === 'm' ? 1_000_000
+        : 1;
+    return Math.round(base * multiplier);
+};
+
+export interface NormalizedXhsComment {
+    commentId: string;
+    userId: string;
+    author: string;
+    content: string;
+    likes: number;
+    parentCommentId?: string;
+    subComments: NormalizedXhsComment[];
+}
+
+export type XhsCommentReadStatus = 'loaded' | 'empty' | 'unavailable' | 'not_requested';
+
+const firstArray = (...values: any[]): any[] | undefined => {
+    for (const value of values) {
+        if (Array.isArray(value)) return value;
+    }
+    return undefined;
+};
+
+export const normalizeXhsComments = (payload: any): NormalizedXhsComment[] => {
+    const root = payload?.data && typeof payload.data === 'object' ? payload.data : payload || {};
+    const note = root.note || payload?.note || {};
+    const rawComments = firstArray(
+        root.comments?.list,
+        root.comments?.comment_list,
+        root.comment_list,
+        Array.isArray(root.comments) ? root.comments : undefined,
+        payload?.comments?.list,
+        payload?.comments?.comment_list,
+        payload?.comment_list,
+        Array.isArray(payload?.comments) ? payload.comments : undefined,
+        note.comments?.list,
+        note.comments?.comment_list,
+        note.comment_list,
+        Array.isArray(note.comments) ? note.comments : undefined,
+    ) || [];
+
+    const normalizeComment = (comment: any, parentCommentId?: string): NormalizedXhsComment => {
+        const user = comment?.userInfo || comment?.user_info || comment?.user || {};
+        const commentId = String(comment?.id || comment?.commentId || comment?.comment_id || '');
+        const replies = firstArray(
+            comment?.subComments,
+            comment?.sub_comments,
+            comment?.sub_comment_list,
+            comment?.replies,
+        ) || [];
+        return {
+            commentId,
+            userId: String(user.userId || user.user_id || comment?.userId || comment?.user_id || ''),
+            author: String(
+                user.nickname || user.name || comment?.nickname || comment?.userName
+                || comment?.user_name || comment?.author_name || comment?.author || '匿名',
+            ),
+            content: String(comment?.content || '').trim(),
+            likes: parseXhsCount(comment?.likeCount ?? comment?.like_count ?? comment?.likes ?? 0),
+            parentCommentId,
+            subComments: replies.map((reply: any) => normalizeComment(reply, commentId || parentCommentId)),
+        };
+    };
+
+    return rawComments.map((comment: any) => normalizeComment(comment));
+};
+
+export const normalizeNote = (n: any): {
+    noteId: string;
+    title: string;
+    desc: string;
+    author: string;
+    authorId: string;
+    likes: number;
+    collects: number;
+    commentCount: number;
+    shareCount: number;
+    xsecToken?: string;
+    coverUrl?: string;
+    type?: string;
+} => {
+    const card = n.noteCard || n.note_card || n.notecard;
     // 封面：cover 对象 / 字符串，或笔记图片列表首图（feed detail 返回 image_list）。
     const coverObj = card?.cover || n.cover || n.image_list?.[0] || card?.image_list?.[0];
     const rawCoverUrl = typeof coverObj === 'string' ? coverObj
@@ -688,18 +926,69 @@ export const normalizeNote = (n: any): { noteId: string; title: string; desc: st
         || coverObj?.info_list?.[0]?.url || undefined;
     const coverUrl = rawCoverUrl?.replace(/^http:\/\//, 'https://');
     // 点赞数：支持 interactInfo.likedCount (profile notes) 和 interact_info.liked_count (search results)
-    const likesRaw = n.likes || n.liked_count
-        || n.interact_info?.liked_count || n.interactInfo?.likedCount
-        || card?.interact_info?.liked_count || card?.interactInfo?.likedCount || 0;
+    const interact = n.interact_info || n.interactInfo
+        || card?.interact_info || card?.interactInfo || {};
+    const likesRaw = n.likes ?? n.liked_count ?? interact.liked_count ?? interact.likedCount ?? 0;
+    const collectsRaw = n.collects ?? n.collected_count ?? interact.collected_count ?? interact.collectedCount ?? 0;
+    const commentCountRaw = n.commentCount ?? n.comment_count ?? interact.comment_count ?? interact.commentCount ?? 0;
+    const shareCountRaw = n.shareCount ?? n.share_count ?? interact.share_count ?? interact.shareCount ?? 0;
     return {
         noteId: n.noteId || n.note_id || n.id || card?.note_id || card?.noteId || card?.noteId || '',
         title: n.title || n.display_title || n.displayTitle || card?.display_title || card?.displayTitle || '',
         desc: (n.desc || n.description || n.content || card?.desc || card?.description || card?.title || '').slice(0, 500),
         author: n.author || n.nickname || n.user?.nickname || n.user?.name || card?.user?.nickname || card?.user?.name || '',
         authorId: n.authorId || n.author_id || n.user?.user_id || n.user?.userId || card?.user?.user_id || card?.user?.userId || '',
-        likes: typeof likesRaw === 'string' ? parseInt(likesRaw, 10) || 0 : (likesRaw || 0),
+        likes: parseXhsCount(likesRaw),
+        collects: parseXhsCount(collectsRaw),
+        commentCount: parseXhsCount(commentCountRaw),
+        shareCount: parseXhsCount(shareCountRaw),
         xsecToken: n.xsecToken || n.xsec_token || card?.xsec_token || card?.xsecToken || undefined,
         coverUrl,
         type: n.type || card?.type || undefined,
     };
+};
+
+export const normalizeXhsLiteDetail = (payload: any, commentLimit = 15): ReturnType<typeof normalizeNote> & {
+    comments?: { author: string; content: string; likes: number; commentId?: string; userId?: string }[];
+    commentReadStatus: XhsCommentReadStatus;
+} => {
+    const root = payload?.data && typeof payload.data === 'object' ? payload.data : payload || {};
+    const note = normalizeNote(root.note || payload?.note || payload || {});
+    const comments: { author: string; content: string; likes: number; commentId?: string; userId?: string }[] = [];
+    const appendComments = (items: NormalizedXhsComment[]) => {
+        for (const item of items) {
+            if (comments.length >= commentLimit) return;
+            if (item.content) {
+                comments.push({
+                    author: item.author,
+                    content: item.content,
+                    likes: item.likes,
+                    commentId: item.commentId || undefined,
+                    userId: item.userId || undefined,
+                });
+            }
+            appendComments(item.subComments);
+        }
+    };
+    appendComments(normalizeXhsComments(payload));
+
+    const rawCommentArray = firstArray(
+        root.comments?.list,
+        root.comments?.comment_list,
+        root.comment_list,
+        Array.isArray(root.comments) ? root.comments : undefined,
+    );
+    const explicitStatus = root.comments_status || root.comment_read_status || payload?.comments_status;
+    const commentError = root.comments_error || payload?.comments_error;
+    const commentReadStatus: XhsCommentReadStatus = comments.length > 0 || explicitStatus === 'loaded'
+        ? 'loaded'
+        : explicitStatus === 'unavailable' || commentError
+            ? 'unavailable'
+            : rawCommentArray
+                ? 'empty'
+                : 'not_requested';
+
+    return comments.length
+        ? { ...note, comments, commentReadStatus }
+        : { ...note, commentReadStatus };
 };

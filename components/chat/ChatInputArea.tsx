@@ -1,10 +1,12 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Money, BookOpenText, GearSix, Image, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, Alarm, Sparkle, FadersHorizontal } from '@phosphor-icons/react';
+import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Money, BookOpenText, GearSix, Image, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, Alarm, Sparkle, FadersHorizontal, LinkSimple } from '@phosphor-icons/react';
 import { CharacterProfile, ChatTheme, EmojiCategory, Emoji } from '../../types';
 import { PRESET_THEMES } from './ChatConstants';
 import { AcnhActionTile } from '../os/acnhIcons';
 import { isIOSStandaloneWebApp } from '../../utils/iosStandalone';
-import { useIncrementalReveal } from '../../hooks/useIncrementalReveal';
+import { trackEvent } from '../../utils/analytics';
+
+const EMOJI_PAGE_SIZE = 40;
 
 interface ChatInputAreaProps {
     input: string;
@@ -91,8 +93,17 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     const [pendingDeleteThemeId, setPendingDeleteThemeId] = useState<string | null>(null);
     const [emojiSelectionMode, setEmojiSelectionMode] = useState(false);
     const [selectedEmojis, setSelectedEmojis] = useState<any[]>([]);
-    // 表情网格增量渲染：几百张 base64 图一次性挂载会卡爆，滚动到底再补
-    const { count: visibleEmojiCount, hasMore: hasMoreEmojis, sentinelRef: emojiSentinelRef } = useIncrementalReveal(emojis.length, 48, activeCategory);
+    // 手动分页避免旧版/第三方 WebView 不触发 IntersectionObserver，永远卡在「加载中」。
+    const [emojiPage, setEmojiPage] = useState(0);
+    const emojiPageCount = Math.max(1, Math.ceil(emojis.length / EMOJI_PAGE_SIZE));
+    const emojiPageStart = emojiPage * EMOJI_PAGE_SIZE;
+    const visibleEmojis = emojis.slice(emojiPageStart, emojiPageStart + EMOJI_PAGE_SIZE);
+    useEffect(() => {
+        setEmojiPage(0);
+    }, [activeCategory]);
+    useEffect(() => {
+        setEmojiPage(current => Math.min(current, emojiPageCount - 1));
+    }, [emojiPageCount]);
     const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const startPos = useRef({ x: 0, y: 0 });
     const isLongPressTriggered = useRef(false); // Track if long press action fired
@@ -205,8 +216,11 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
         actionsSwipeStart.current = null;
         const SWIPE_THRESHOLD = 40;
         if (Math.abs(dx) > SWIPE_THRESHOLD && Math.abs(dx) > Math.abs(dy)) {
-            if (dx < 0 && actionsPage < 2) setActionsPage((actionsPage + 1) as 1 | 2);
-            else if (dx > 0 && actionsPage > 0) setActionsPage((actionsPage - 1) as 0 | 1);
+            if (dx < 0 && actionsPage < 2) {
+                setActionsPage((actionsPage + 1) as 0 | 1 | 2);
+            } else if (dx > 0 && actionsPage > 0) {
+                setActionsPage((actionsPage - 1) as 0 | 1 | 2);
+            }
         }
     };
 
@@ -398,7 +412,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                 <div className={`p-3 flex gap-2 ${isPixelStyle ? 'bg-[#f3e7d6]' : isDiscordStyle ? 'bg-slate-900/60 backdrop-blur-md' : 'bg-white/50 backdrop-blur-md'}`}>
                     {onForwardSelected && (
                         <button
-                            onClick={onForwardSelected}
+                            onClick={() => { onForwardSelected?.(); trackEvent('转发选中的消息'); }}
                             disabled={selectedCount === 0}
                             className={`flex-1 py-3 font-bold rounded-xl shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2 ${selectedCount === 0 ? 'bg-slate-200 text-slate-400 shadow-none' : 'bg-gradient-to-r from-blue-500 to-indigo-500 text-white shadow-blue-200'}`}
                         >
@@ -407,7 +421,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                         </button>
                     )}
                     <button
-                        onClick={onDeleteSelected}
+                        onClick={() => { onDeleteSelected(); trackEvent('批量删除选中的消息'); }}
                         className={`${onForwardSelected ? 'flex-1' : 'w-full'} py-3 bg-red-500 text-white font-bold rounded-xl shadow-lg active:scale-95 transition-transform flex items-center justify-center gap-2`}
                     >
                         <Trash className="w-5 h-5" weight="bold" />
@@ -548,7 +562,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                     ) : (
                                         <button onClick={() => onPanelAction('emoji-import')} className={emojiImportTileClass}>+</button>
                                     )}
-                                    {emojis.slice(0, visibleEmojiCount).map((e) => {
+                                    {visibleEmojis.map((e) => {
                                         const isSelected = selectedEmojiUrls.has(e.url);
                                         return (
                                         <button
@@ -577,9 +591,29 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                         );
                                     })}
                                 </div>
-                                {hasMoreEmojis && (
-                                    <div ref={emojiSentinelRef} className={`py-3 text-center text-[10px] ${emojiLabelClass}`}>
-                                        加载中... ({visibleEmojiCount}/{emojis.length})
+                                {emojiPageCount > 1 && (
+                                    <div className={`py-3 flex items-center justify-center gap-3 text-[10px] ${emojiLabelClass}`}>
+                                        <button
+                                            type="button"
+                                            aria-label="上一页表情"
+                                            disabled={emojiPage === 0}
+                                            onClick={() => setEmojiPage(page => Math.max(0, page - 1))}
+                                            className="w-8 h-7 rounded-full border border-current/20 disabled:opacity-30 active:scale-95"
+                                        >
+                                            ‹
+                                        </button>
+                                        <span>
+                                            {emojiPage + 1}/{emojiPageCount} 页 · {emojiPageStart + 1}-{Math.min(emojiPageStart + EMOJI_PAGE_SIZE, emojis.length)}/{emojis.length}
+                                        </span>
+                                        <button
+                                            type="button"
+                                            aria-label="下一页表情"
+                                            disabled={emojiPage >= emojiPageCount - 1}
+                                            onClick={() => setEmojiPage(page => Math.min(emojiPageCount - 1, page + 1))}
+                                            className="w-8 h-7 rounded-full border border-current/20 disabled:opacity-30 active:scale-95"
+                                        >
+                                            ›
+                                        </button>
                                     </div>
                                 )}
                             </div>
@@ -592,7 +626,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                             {actionsContent}
                         </div>
                     )}
-                    {/* Actions Panel (paginated: page 0 = 内置功能, page 1 = 外部服务) */}
+                    {/* Actions Panel (paginated: page 0 = 内置功能, page 1 = 外部服务, page 2 = 记忆链接) */}
                     {showPanel === 'actions' && !actionsContent && (
                         <div
                             className="overflow-y-auto no-scrollbar"
@@ -799,6 +833,39 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                   <BellSimpleRinging className="w-6 h-6" weight="bold" />
                               </div>
                               <span className="text-xs font-bold">提示音</span>
+                            </button>
+                          </div>
+
+                          {/* Page 2: 本轮记忆修补。单独成页，避免挤压常用功能。 */}
+                          <div className={`${actionsPage === 2 ? 'flex' : 'hidden'} min-h-[13rem] px-6 py-5 flex-col items-center justify-center text-center`}>
+                            <div className={`mb-3 text-[9px] font-bold uppercase tracking-[.24em] ${isDiscordStyle ? 'text-purple-300/55' : acnh ? 'text-[#8f7658]/65' : 'text-purple-400/55'}`}>
+                              memory repair
+                            </div>
+                            <button
+                              onClick={() => onPanelAction('memory-link')}
+                              className={`group w-full max-w-[19rem] flex items-center gap-4 rounded-[1.4rem] px-5 py-4 text-left active:scale-[.98] transition-all border ${
+                                acnh
+                                  ? 'bg-white/70 border-[#e6dab4] text-[#725d42] shadow-sm'
+                                  : isDiscordStyle
+                                    ? 'bg-slate-800/80 border-purple-400/20 text-slate-100 shadow-[0_12px_32px_rgba(0,0,0,.18)]'
+                                    : 'bg-gradient-to-br from-purple-50 to-indigo-50/70 border-purple-100 text-slate-700 shadow-[0_12px_28px_rgba(124,58,237,.10)]'
+                              }`}
+                            >
+                              <span className={`w-14 h-14 shrink-0 rounded-2xl grid place-items-center transition-transform group-active:scale-95 ${
+                                acnh
+                                  ? 'bg-[#efe5ce] text-[#8f674a]'
+                                  : isDiscordStyle
+                                    ? 'bg-purple-400/10 text-purple-300'
+                                    : 'bg-white/85 text-purple-500 shadow-sm'
+                              }`}>
+                                <LinkSimple className="w-6 h-6" weight="bold" />
+                              </span>
+                              <span className="min-w-0">
+                                <span className="block text-sm font-bold">记忆链接</span>
+                                <span className={`block mt-1 text-[10px] leading-5 ${isDiscordStyle ? 'text-slate-400' : acnh ? 'text-[#8f7658]' : 'text-slate-400'}`}>
+                                  查看刚才经过的记忆，原地修补不准确的地方
+                                </span>
+                              </span>
                             </button>
                           </div>
 
