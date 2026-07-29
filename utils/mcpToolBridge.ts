@@ -3,13 +3,14 @@
  *
  * 职责：
  * 1. 把所有启用 MCP 服务器的已发现工具聚合成 OpenAI function-calling 格式
- * 2. 处理跨服务器工具重名 / OpenAI 工具名字符限制（暴露名 ↔ 真实工具映射）
- * 3. 生成注入 systemPrompt 的说明块
+ * 2. 生成注入 systemPrompt 的说明块与尾部提醒
+ * 3. 中转不认 function calling 时的兼容兜底（降级请求体、前置气泡粗洗）
+ * 重名映射和正文假调用解析住在 mcpFireCore（浏览器与 amsg worker 共用）。
  * 工具循环本体在 hooks/useChatAI.ts（对标 luckinChat 循环）。
  */
 
 import { getEnabledMcpServers, type McpServerConfig, type McpToolDef } from './mcpClient';
-import { buildMcpNameMap, type McpResolvedToolCore } from './mcpFireCore';
+import { buildMcpNameMap, type FakedMcpCall as FakedMcpCallCore, type McpResolvedToolCore } from './mcpFireCore';
 
 // 结果格式化和正文假调用解析都是纯逻辑，住在 mcpFireCore 里给浏览器和 amsg
 // worker 共用；这里按原名转出来，调用方的引用路径不用动。
@@ -19,7 +20,6 @@ export {
     stripTextFakedMcpCalls,
     extractTextFakedMcpCalls,
 } from './mcpFireCore';
-export type { FakedMcpCall } from './mcpFireCore';
 
 export interface OpenAIMcpTool {
     type: 'function';
@@ -32,6 +32,9 @@ export interface OpenAIMcpTool {
 
 /** 名映射条目，server 收窄成前台的完整配置类型（含 proxyUrl 等浏览器侧字段） */
 export type ResolvedMcpTool = McpResolvedToolCore<McpServerConfig>;
+
+/** 正文假调用条目，server 收窄成前台完整配置（callMcpTool 要 proxyUrl/proxyKey） */
+export type FakedMcpCall = FakedMcpCallCore<McpServerConfig>;
 
 /**
  * 聚合启用服务器的工具，返回 OpenAI 工具数组 + 暴露名→真实工具 的映射。

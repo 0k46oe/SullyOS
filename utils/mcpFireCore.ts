@@ -4,10 +4,16 @@
  * mcpClient.ts 管浏览器侧的事（localStorage 配置、代理包装、发现流程）；
  * 这里只放两端都要跑的纯逻辑：工具名映射、JSON-RPC 传输、正文假调用解析、
  * 结果格式化、后台 fire 的提示词块与 tools 数组。
- * （传输与提示词块由后续任务陆续迁入。）
+ * （提示词块与 fire 侧 tools 数组由后续任务迁入。）
+ *
+ * 段落顺序是固定的，新东西插进对应分区，别往文件尾巴追加：
+ *   共用类型 → 工具名与长度预算（含名映射）→ fire 侧服务器过滤
+ *   → 工具结果回填 → 正文假调用解析 → JSON-RPC 传输层
  *
  * 环境无关叶子模块：不 import 任何带浏览器依赖的东西（会进 worker bundle）。
  */
+
+// ========== 共用类型 ==========
 
 export interface McpFireToolDef {
     name: string;
@@ -38,6 +44,8 @@ export interface McpResolvedToolCore<S extends McpFireServer = McpFireServer> {
     tool: McpFireToolDef;
 }
 
+// ========== 工具名与长度预算 ==========
+
 /** OpenAI 工具名的长度上限。 */
 const DEFAULT_MAX_TOOL_NAME_LEN = 64;
 
@@ -52,11 +60,10 @@ export const sanitizeMcpToolName = (name: string, maxLen = DEFAULT_MAX_TOOL_NAME
 
 /** 重名兜底后缀：基名先截到给 `_<i>` 留位的长度，避免截断吃掉计数器后候选名不再变化。 */
 export const withMcpDedupeSuffix = (base: string, i: number, maxLen = DEFAULT_MAX_TOOL_NAME_LEN): string => {
-    const len = Math.max(1, maxLen);
     const suffix = `_${i}`;
     // 预算比后缀本身还短时，留位长度会变负数，slice 会从尾巴倒着截、反而吐出一长串；
     // 夹到 0 之后这种极端情况拿到的是纯后缀，长度仍然可控，计数器也照样能区分。
-    return base.slice(0, Math.max(0, len - suffix.length)) + suffix;
+    return base.slice(0, Math.max(0, maxLen - suffix.length)) + suffix;
 };
 
 const serverSlug = (server: McpFireServer, maxLen = DEFAULT_MAX_TOOL_NAME_LEN): string =>
@@ -91,6 +98,8 @@ export const buildMcpNameMap = <S extends McpFireServer>(
     }
     return resolve;
 };
+
+// ========== fire 侧服务器过滤 ==========
 
 /**
  * fire 时按角色过滤可见服务器（charIds 语义与 getEnabledMcpServers 一致）。

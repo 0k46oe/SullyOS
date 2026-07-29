@@ -53,7 +53,9 @@ describe('buildMcpNameMap', () => {
         expect(map.size).toBe(servers.length);
         expect([...map.keys()].every((k) => k.length <= 59)).toBe(true);
     });
+});
 
+describe('工具名长度预算', () => {
     // 名长预算是调用方算出来的（上限减前缀），算出 0 或负数时不能给出怪结果：
     // 不许返回空名，也不许被 slice 的负数下标反过来吐出一长串。
     it('名长预算被压到 0/负数时仍给出可用的短名字', () => {
