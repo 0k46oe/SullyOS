@@ -1027,6 +1027,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // 条流，text() 完成时刻 ≈ 真实收完时刻。
               if (urlStr.includes('/chat/completions')) {
                   const meta = (config as any)?.__sullyMeta || ambientMetaAtStart;
+                  const requestId = (config as any)?.__sullyApiCallId;
                   const body = (sendArgs[1] as any)?.body;
                   const status = response.status;
                   const ok = response.ok;
@@ -1038,10 +1039,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           const durationMs = Date.now() - fetchStartedAt;
                           let parsed: any = undefined;
                           try { parsed = JSON.parse(t); } catch { /* 流式/非 JSON：把原始文本交给 recordApiCall 的 SSE 兜底解析 */ }
-                          recordApiCall({ url: urlStr, body, status, ok, response: parsed, responseText: parsed === undefined ? t : undefined, meta, durationMs });
-                      }).catch(() => recordApiCall({ url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt }));
+                          recordApiCall({ requestId, url: urlStr, body, status, ok, response: parsed, responseText: parsed === undefined ? t : undefined, meta, durationMs });
+                      }).catch(() => recordApiCall({ requestId, url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt }));
                   } else {
-                      recordApiCall({ url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt });
+                      recordApiCall({ requestId, url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt });
                   }
               }
 
@@ -1086,7 +1087,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           } catch (err: any) {
               // Network Failure
               if (urlStr.includes('/chat/completions')) {
-                  recordApiCall({ url: urlStr, body: (sendArgs[1] as any)?.body, ok: false, meta: (config as any)?.__sullyMeta || ambientMetaAtStart, durationMs: Date.now() - fetchStartedAt });
+                  recordApiCall({ requestId: (config as any)?.__sullyApiCallId, url: urlStr, body: (sendArgs[1] as any)?.body, ok: false, meta: (config as any)?.__sullyMeta || ambientMetaAtStart, durationMs: Date.now() - fetchStartedAt });
               }
               setSystemLogs(prev => [{
                   id: `log-${Date.now()}`,
