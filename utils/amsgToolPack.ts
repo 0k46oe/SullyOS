@@ -152,7 +152,18 @@ export const parseToolConfig = (value: string): AmsgToolConfig | null => {
           typeof s.id === 'string' && typeof s.name === 'string' &&
           typeof s.url === 'string' && Array.isArray(s.tools))
       : undefined;
-    if (cleaned?.length) parsed.mcpServers = cleaned; else delete parsed.mcpServers;
+    // 丢东西要留痕：不然「角色怎么不调这个工具了」只能靠猜。
+    if (cleaned && cleaned.length !== parsed.mcpServers.length) {
+      console.warn('[amsg:tool_config] MCP 清单有条目形状不对，已丢弃',
+        parsed.mcpServers.length - cleaned.length);
+    }
+    if (cleaned?.length) {
+      parsed.mcpServers = cleaned;
+    } else {
+      // 两个字段同进同退（与 buildToolConfig 一致）：没有服务器时留个开关没有意义。
+      delete parsed.mcpServers;
+      delete parsed.mcpUseNativeTools;
+    }
     return parsed as AmsgToolConfig;
   } catch {
     return null;

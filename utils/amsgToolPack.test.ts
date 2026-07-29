@@ -3,7 +3,7 @@
  * 依赖「parse 失败 = 无工具数据继续跑」这个契约，别让它变成抛错）。
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildToolConfig,
   buildToolPack,
@@ -110,8 +110,28 @@ describe('buildToolConfig / parseToolConfig', () => {
     expect(parsed?.mcpServers).toEqual(servers);
     expect(parsed?.mcpUseNativeTools).toBe(false);
 
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const dirty = { ...config, mcpServers: [servers[0], { id: 'bad' }, null, { name: 'x', url: 'u' }] };
     expect(parseToolConfig(JSON.stringify(dirty))?.mcpServers).toEqual(servers);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('整份清单都坏时两个字段一起消失, 并且留一条 warn', () => {
+    const config = buildToolConfig(undefined, {
+      servers: [{ id: 's1', name: '探针', url: 'https://probe.example.com', tools: [] }],
+      useNativeTools: false,
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const parsed = parseToolConfig(JSON.stringify({ ...config, mcpServers: [{ id: 'bad' }, null] }));
+
+    expect(parsed).not.toBeNull();
+    expect('mcpServers' in parsed!).toBe(false);
+    expect('mcpUseNativeTools' in parsed!).toBe(false);
+    // 其余凭据字段不受牵连
+    expect(typeof parsed?.proxyWorkerUrl).toBe('string');
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it('不传 mcp 配置时两个字段都不出现（老 worker 解析零影响）', () => {

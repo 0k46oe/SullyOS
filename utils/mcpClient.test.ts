@@ -522,8 +522,29 @@ describe('collectMcpFireServers', () => {
         expect(out.map((s) => s.id)).toEqual(['a']);
         expect(out[0]).toEqual({
             id: 'a', name: 'ok', url: 'https://mcp.example.com', token: 'tok',
-            charIds: ['c1'], tools: [{ name: 't1', description: undefined, inputSchema: { type: 'object' } }],
+            charIds: ['c1'], tools: [{ name: 't1', inputSchema: { type: 'object' } }],
         });
         expect('proxyUrl' in out[0]).toBe(false);
+    });
+
+    it('其余 worker 够不着的地址一并挡掉（链路本地 / 占位地址 / 局域网域名 / IPv6 ULA）', () => {
+        const blocked = [
+            'http://169.254.1.1/mcp',      // IPv4 链路本地
+            'http://0.0.0.0:8080/mcp',     // 占位地址
+            'http://[::]/mcp',             // 同上, IPv6
+            'http://127.0.0.5:9000/mcp',   // 回环整段 127/8, 不只 127.0.0.1
+            'http://my-nas.local/mcp',     // mDNS
+            'http://foo.localhost/mcp',    // 本机后缀域名
+            'http://[fd12:3456::1]/mcp',   // IPv6 ULA (fd)
+            'http://[fc00::1]/mcp',        // IPv6 ULA (fc)
+            'ftp://files.example.com/mcp', // 非 http(s)
+            '这不是个地址',                  // URL 解析不了
+        ];
+        localStorage.setItem('aetheros.mcp.servers', JSON.stringify([
+            ...blocked.map((url, i) => ({ id: `bad${i}`, name: url, url, enabled: true, tools: [{ name: 't' }], updatedAt: 1 })),
+            { id: 'good', name: 'ok', url: 'https://mcp.example.com/mcp', enabled: true, tools: [{ name: 't' }], updatedAt: 1 },
+        ]));
+
+        expect(collectMcpFireServers().map((s) => s.id)).toEqual(['good']);
     });
 });

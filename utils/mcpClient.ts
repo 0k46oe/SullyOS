@@ -115,14 +115,25 @@ export const getEnabledMcpServers = (charId?: string): McpServerConfig[] =>
 /** 有任何一个启用且已发现工具、对该角色可见的服务器 → 聊天进入 MCP 工具模式 */
 export const isMcpChatAvailable = (charId?: string): boolean => getEnabledMcpServers(charId).length > 0;
 
-/** CF worker 直连打不通的地址（localhost/私网）不上云——上了只会教角色用一个必失败的工具。 */
+/**
+ * CF worker 直连打不通的地址（本机 / 私网 / 链路本地）不上云——上了只会教角色用一个
+ * 必失败的工具。这是体验护栏、不是安全边界：只看字面地址，域名解析到内网之类拦不住。
+ */
 const isWorkerReachableUrl = (url: string): boolean => {
     try {
         const u = new URL(url);
         if (!/^https?:$/.test(u.protocol)) return false;
-        const h = u.hostname;
-        return !(h === 'localhost' || h === '127.0.0.1' || h === '[::1]' ||
-            /^10\./.test(h) || /^192\.168\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h));
+        const h = u.hostname.toLowerCase();
+        // 本机与「没有地址」的占位地址
+        if (h === 'localhost' || h === '0.0.0.0' || h === '[::]' || h === '[::1]') return false;
+        // 只在局域网里能解析的域名后缀（my-nas.local、foo.localhost）
+        if (/\.(local|localhost)$/.test(h)) return false;
+        // IPv4 回环 / 私网 / 链路本地
+        if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h)
+            || /^172\.(1[6-9]|2\d|3[01])\./.test(h) || /^169\.254\./.test(h)) return false;
+        // IPv6 唯一本地地址 fc00::/7（首段以 fc / fd 开头，hostname 带方括号）
+        if (/^\[f[cd]/.test(h)) return false;
+        return true;
     } catch { return false; }
 };
 
@@ -130,6 +141,10 @@ const isWorkerReachableUrl = (url: string): boolean => {
  * 上云给 amsg worker 用的服务器子集。注意不走 getEnabledMcpServers：
  * 那个函数缺 charId 时只回通用服务器，而这里要的是全部 enabled（含绑定角色的），
  * charIds 原样带上、由 worker 在 fire 时按角色过滤。
+ *
+ * 带上 token/customHeaders：走的是 client_state 端到端加密通道、落在用户自己的
+ * amsg worker（不是项目方服务器，与文件头「不走中心 sfworker」的原则不冲突），
+ * 与 notion/飞书凭据同一信任模型。
  */
 export const collectMcpFireServers = (): McpFireServer[] =>
     loadMcpServers()

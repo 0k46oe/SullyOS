@@ -101,16 +101,30 @@ const SettingsSection: React.FC<{
 };
 
 let mcpToolConfigSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingMcpToolConfigSync: (() => Promise<void>) | null = null;
+
+const runMcpToolConfigSync = () => {
+    const sync = pendingMcpToolConfigSync;
+    mcpToolConfigSyncTimer = null;
+    pendingMcpToolConfigSync = null;
+    sync?.().catch(() => { /* 没配主动消息时 ensureWorkerReady 会抛，吞掉即可 */ });
+};
+
 /**
  * MCP 卡片没有「保存」按钮，改一个字就落盘一次；直接每次都上云就变成一次按键一个请求。
  * 攒到停手 800ms 再传一次，中途继续改就顺延。
  */
 const scheduleMcpToolConfigSync = (sync: () => Promise<void>) => {
+    pendingMcpToolConfigSync = sync;
     if (mcpToolConfigSyncTimer) clearTimeout(mcpToolConfigSyncTimer);
-    mcpToolConfigSyncTimer = setTimeout(() => {
-        mcpToolConfigSyncTimer = null;
-        sync().catch(() => { /* 见调用处：没配主动消息时属正常 */ });
-    }, 800);
+    mcpToolConfigSyncTimer = setTimeout(runMcpToolConfigSync, 800);
+};
+
+/** 关掉 MCP 设置就别让那 800ms 继续吊着了，攒着的改动当场传上去。 */
+const flushMcpToolConfigSync = () => {
+    if (!mcpToolConfigSyncTimer) return;
+    clearTimeout(mcpToolConfigSyncTimer);
+    runMcpToolConfigSync();
 };
 
 /**
@@ -3112,7 +3126,7 @@ const Settings: React.FC = () => {
       </Modal>
 
       {/* MCP 工具服务器配置 Modal（高级玩法, 从实时感知里独立出来） */}
-      <Modal isOpen={showMcpModal} title="MCP 工具服务器" onClose={() => setShowMcpModal(false)}>
+      <Modal isOpen={showMcpModal} title="MCP 工具服务器" onClose={() => { setShowMcpModal(false); flushMcpToolConfigSync(); }}>
           <div className="space-y-4">
               <McpServersCard addToast={addToast} onMcpConfigChanged={() => {
                   // MCP 配置变更只需重传 tool_config：提示词块与 tools 数组由 worker 在 fire 时

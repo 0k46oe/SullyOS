@@ -3163,8 +3163,18 @@ var parseToolConfig = (value) => {
       return null;
     }
     const cleaned = Array.isArray(parsed.mcpServers) ? parsed.mcpServers.filter((s) => s && typeof s === "object" && typeof s.id === "string" && typeof s.name === "string" && typeof s.url === "string" && Array.isArray(s.tools)) : void 0;
-    if (cleaned?.length) parsed.mcpServers = cleaned;
-    else delete parsed.mcpServers;
+    if (cleaned && cleaned.length !== parsed.mcpServers.length) {
+      console.warn(
+        "[amsg:tool_config] MCP \u6E05\u5355\u6709\u6761\u76EE\u5F62\u72B6\u4E0D\u5BF9\uFF0C\u5DF2\u4E22\u5F03",
+        parsed.mcpServers.length - cleaned.length
+      );
+    }
+    if (cleaned?.length) {
+      parsed.mcpServers = cleaned;
+    } else {
+      delete parsed.mcpServers;
+      delete parsed.mcpUseNativeTools;
+    }
     return parsed;
   } catch {
     return null;
