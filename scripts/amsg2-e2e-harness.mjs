@@ -15,6 +15,8 @@
  *   S4 防穿帮闸：锚点前进 → skip  S5a 活跃租约新鲜 → skip（无 fire_pack 也拦）
  *   S5b 租约过期 + 无 fire_pack → 抛错不降级        S6 force 策略 → 全绿灯照发
  *   S7 clear-client-state
+ *   S8 通用 MCP native（tools 声明 → 直连真 MCP 服务器 → 结果回喂 → 暗号进 push）
+ *   S8b 通用 MCP 正文兜底（不带 tools，提示词教协议，正文里的调用被识别执行）
  *
  * 有意不进 vitest：它要起真端口、真等 cron 到点（多处 1.4s sleep）、并 mock 全局 fetch，
  * 是发布前手动跑的端到端体检，不是单测。改 worker/amsg 或升 amsg-server 后跑一次。
@@ -123,6 +125,27 @@ globalThis.fetch = async (input, init = {}) => {
       content = '（先想想上个月的事）等我翻翻记忆。\n[[RECALL: 2026-06]]';
     } else if (all.includes('FIREPACK_FRESH_char-full') && hasToolResult) {
       content = '想起来了，六月那天的烟花真好看。\n今晚也想拉你去河边。\n[[ACTION:POKE]]';
+    } else if (all.includes('FIREPACK_FRESH_char-mcp-native') && !hasToolResult) {
+      // native 模式第 1 轮：正文写旁白 + 走 function calling 通道发起 MCP 调用。
+      // 这条要连 tool_calls 一起给，所以不套用下面统一的「只有 content」的包装。
+      return new Response(JSON.stringify({ choices: [{ message: {
+        role: 'assistant', content: '我问问那边今天的暗号。',
+        tool_calls: [{
+          id: 'call_mcp_1', type: 'function',
+          function: { name: 'mcp__get_secret_word', arguments: '{"asked_by":"小满"}' },
+        }],
+      } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    } else if (all.includes('FIREPACK_FRESH_char-mcp-native') && hasToolResult) {
+      const toolText = req.messages.filter((m) => m.role === 'tool').map((m) => String(m.content)).join('\n');
+      const m = toolText.match(/HARNESS-MCP-\w+/);
+      content = `拿到了，今天的暗号是 ${m ? m[0] : '（工具结果里没找到）'}。`;
+    } else if (all.includes('FIREPACK_FRESH_char-mcp-text') && !hasToolResult) {
+      // 正文兜底模式第 1 轮：模型把调用「演」在正文里（不支持 FC 的中转常见形态）
+      content = '我问问那边今天的暗号。\nget_secret_word({"asked_by":"小满"})';
+    } else if (all.includes('FIREPACK_FRESH_char-mcp-text') && hasToolResult) {
+      const toolText = req.messages.filter((m) => m.role === 'tool').map((m) => String(m.content)).join('\n');
+      const m = toolText.match(/HARNESS-MCP-\w+/);
+      content = `拿到了，暗号是 ${m ? m[0] : '（没找到）'}。`;
     } else if (all.includes('FROZEN_char-frozen')) {
       content = '冻结提示词兜底照发成功。';
     } else if (all.includes('FIREPACK_FRESH_char-force')) {
@@ -158,6 +181,58 @@ const server = http.createServer(async (req, res) => {
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const BASE = `http://127.0.0.1:${server.address().port}`;
+
+// ─── S8 的 mock MCP 服务器（真 HTTP；worker 直连，不走 fetch 拦截） ───
+// 地址是 127.0.0.1，上面那层 fetch 拦截只认 push.test / llm.test，所以 worker 发出的
+// JSON-RPC 是真的走到了这个进程内的 HTTP 服务器上——握手、通知、tools/call 一步不少。
+const MCP_PASSPHRASE = 'HARNESS-MCP-7731';
+const mcpSeen = [];           // 收到的 JSON-RPC method 顺序
+const mcpServer = http.createServer(async (req, res) => {
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+  mcpSeen.push(body.method);
+  const reply = (obj, extra = {}) => {
+    res.writeHead(200, { 'content-type': 'application/json', ...extra });
+    res.end(JSON.stringify(obj));
+  };
+  if (body.method === 'initialize') {
+    return reply(
+      {
+        jsonrpc: '2.0', id: body.id,
+        result: {
+          protocolVersion: '2024-11-05', capabilities: { tools: {} },
+          serverInfo: { name: 'harness-mcp', version: '1.0.0' },
+        },
+      },
+      { 'Mcp-Session-Id': 'harness-session' },
+    );
+  }
+  if (String(body.method).startsWith('notifications/')) { res.writeHead(202); return res.end(); }
+  if (body.method === 'tools/call' && body.params?.name === 'get_secret_word') {
+    return reply({
+      jsonrpc: '2.0', id: body.id,
+      result: { content: [{ type: 'text', text: `暗号是 ${MCP_PASSPHRASE}` }] },
+    });
+  }
+  reply({ jsonrpc: '2.0', id: body.id, error: { code: -32601, message: `method not found: ${body.method}` } });
+});
+await new Promise((r) => mcpServer.listen(0, '127.0.0.1', r));
+const MCP_URL = `http://127.0.0.1:${mcpServer.address().port}`;
+// tool_config 直接写字面量（不过 collectMcpFireServers），所以本机地址不会被上云侧的
+// 公网可达性过滤掉。useNative=false 对应前台「兼容模式」：请求不带 tools，改教正文协议。
+const MCP_TOOL_CONFIG = (useNative) => JSON.stringify({
+  v: 1, proxyWorkerUrl: '', newsEnabled: false, notionEnabled: false, feishuEnabled: false,
+  mcpUseNativeTools: useNative,
+  mcpServers: [{
+    id: 'srv1', name: '暗号服务器', url: MCP_URL,
+    tools: [{
+      name: 'get_secret_word',
+      description: '取回今日暗号',
+      inputSchema: { type: 'object', properties: { asked_by: { type: 'string' } } },
+    }],
+  }],
+});
 
 const runCron = () => worker.scheduled({ scheduledTime: Date.now(), cron: '* * * * *' }, env);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -545,11 +620,111 @@ try {
     const r = await client.clearClientState();
     check('clearClientState 成功且删除了条目', r?.success === true && (r?.data?.deleted ?? 0) > 0, JSON.stringify(r));
   }
+
+  // S8 / S8b 共用全局 namespace 的那行 tool_config（后者会覆盖前者），必须顺序跑。
+  section('S8 通用 MCP · native：tools 声明 → 真连服务器 → 结果回喂 → 暗号进 push');
+  {
+    const now = Date.now();
+    await putState([
+      { namespace: NS('char-mcp-native'), key: 'fire_pack', value: JSON.stringify(firePack('FIREPACK_FRESH_char-mcp-native', now - 3600_000)), updatedAt: now },
+      { namespace: NS('char-mcp-native'), key: 'tool_pack', value: JSON.stringify(toolPack('小满')), updatedAt: now },
+      { namespace: 'amsg:global', key: 'tool_config', value: MCP_TOOL_CONFIG(true), updatedAt: now },
+    ]);
+    const { payload } = aiTaskPayload({
+      charId: 'char-mcp-native', charName: '小满', mode: 'auto',
+      firstSendTime: new Date(now + 1000).toISOString(), recurrenceType: 'none', expirePolicy: 'expire',
+      anchorMs: now - 3600_000,
+      taskInstruction: '问一下今天的暗号，然后告诉用户。',
+      frozenPrompt: 'FROZEN_char-mcp-native（不应被用到）',
+    });
+    const sched = await scheduleTask(payload);
+    check('schedule-message(MCP native) 成功', sched?.success === true, JSON.stringify(sched?.error || sched));
+    const llmBefore = llmRequests.length; const pushBefore = pushes.length; const mcpBefore = mcpSeen.length;
+    await sleep(1400);
+    await runCron();
+
+    const reqs = llmRequests.slice(llmBefore);
+    check('native：工具循环共 2 轮 LLM 调用', reqs.length === 2, `got ${reqs.length}`);
+    const declared = Array.isArray(reqs[0]?.tools) ? reqs[0].tools.map((t) => t?.function?.name) : null;
+    check('第 1 轮请求体声明了 mcp__ 工具（native tools 数组）',
+      Array.isArray(reqs[0]?.tools) && declared.includes('mcp__get_secret_word'), JSON.stringify(declared));
+    const r1c = reqs[0]?.messages?.map((m) => String(m.content)).join('\n') || '';
+    check('提示词尾部带 MCP 工具块（列出工具与说明）',
+      r1c.includes('【外部工具') && r1c.includes('- get_secret_word：取回今日暗号'), r1c.slice(-300));
+    check('native 模式不教正文调用协议（教了反而勾引模型往正文写）',
+      !r1c.includes('tool_name({"参数":"值"})') && !r1c.includes('get_secret_word('), r1c.slice(-300));
+    const mcpCalls = mcpSeen.slice(mcpBefore);
+    check('worker 真连了 MCP 服务器（initialize + tools/call）',
+      mcpCalls.includes('initialize') && mcpCalls.includes('tools/call'), JSON.stringify(mcpCalls));
+
+    const r2msgs = reqs[1]?.messages || [];
+    const assistant = r2msgs.find((m) => m.role === 'assistant' && Array.isArray(m.tool_calls));
+    check('第 2 轮 assistant 消息原样带回 native tool_calls',
+      assistant?.tool_calls?.[0]?.id === 'call_mcp_1'
+      && assistant?.tool_calls?.[0]?.function?.name === 'mcp__get_secret_word',
+      JSON.stringify(assistant?.tool_calls));
+    const toolMsg = r2msgs.find((m) => m.role === 'tool');
+    check('tool 消息与 assistant 的 tool_call id 配对', toolMsg?.tool_call_id === 'call_mcp_1', JSON.stringify(toolMsg?.tool_call_id));
+    const toolText = String(toolMsg?.content || '');
+    check('工具结果按暗号原文回喂', toolText.includes(MCP_PASSPHRASE), toolText.slice(0, 160));
+    check('回喂措辞可读，且不漏 mcp__ 内部前缀',
+      toolText.includes('调用「get_secret_word」') && !toolText.includes('mcp__'), toolText.slice(0, 160));
+
+    const mine = pushes.slice(pushBefore).filter((p) => p.tag === 'char-mcp-native');
+    check('native：push 带回暗号', mine.some((m) => String(m.payload?.message || '').includes(MCP_PASSPHRASE)),
+      JSON.stringify(mine.map((m) => m.payload?.message)));
+    check('native：旁白保序排在正文前', String(mine[0]?.payload?.message || '').includes('问问那边'), JSON.stringify(mine[0]?.payload?.message));
+    check('native：正文无工具调用语法残留', mine.every((m) => !String(m.payload?.message || '').includes('get_secret_word(')));
+  }
+
+  section('S8b 通用 MCP · 正文兜底：中转拒 tools → 提示词教协议 → 正文调用被识别');
+  {
+    const now = Date.now();
+    await putState([
+      { namespace: NS('char-mcp-text'), key: 'fire_pack', value: JSON.stringify(firePack('FIREPACK_FRESH_char-mcp-text', now - 3600_000)), updatedAt: now },
+      { namespace: NS('char-mcp-text'), key: 'tool_pack', value: JSON.stringify(toolPack('小满')), updatedAt: now },
+      { namespace: 'amsg:global', key: 'tool_config', value: MCP_TOOL_CONFIG(false), updatedAt: now },
+    ]);
+    const { payload } = aiTaskPayload({
+      charId: 'char-mcp-text', charName: '小满', mode: 'auto',
+      firstSendTime: new Date(now + 1000).toISOString(), recurrenceType: 'none', expirePolicy: 'expire',
+      anchorMs: now - 3600_000,
+      taskInstruction: '问一下今天的暗号，然后告诉用户。',
+      frozenPrompt: 'FROZEN_char-mcp-text（不应被用到）',
+    });
+    const sched = await scheduleTask(payload);
+    check('schedule-message(MCP 正文兜底) 成功', sched?.success === true, JSON.stringify(sched?.error || sched));
+    const llmBefore = llmRequests.length; const pushBefore = pushes.length; const mcpBefore = mcpSeen.length;
+    await sleep(1400);
+    await runCron();
+
+    const reqs = llmRequests.slice(llmBefore);
+    check('正文兜底：工具循环共 2 轮 LLM 调用', reqs.length === 2, `got ${reqs.length}`);
+    check('两轮请求体都不带 tools 参数（中转拒 tools 的场景）',
+      reqs.every((r) => !('tools' in r)), JSON.stringify(reqs.map((r) => Object.keys(r))));
+    const r1c = reqs[0]?.messages?.map((m) => String(m.content)).join('\n') || '';
+    check('提示词改教正文调用协议（带参数签名与写法示例）',
+      r1c.includes('- get_secret_word(asked_by:string)：取回今日暗号') && r1c.includes('tool_name({"参数":"值"})'),
+      r1c.slice(-300));
+    const mcpCalls = mcpSeen.slice(mcpBefore);
+    check('正文里的调用被识别并真跑到了 MCP 服务器',
+      mcpCalls.includes('initialize') && mcpCalls.includes('tools/call'), JSON.stringify(mcpCalls));
+    const toolText = String((reqs[1]?.messages || []).find((m) => m.role === 'tool')?.content || '');
+    check('正文兜底：工具结果按暗号原文回喂', toolText.includes(MCP_PASSPHRASE), toolText.slice(0, 160));
+
+    const mine = pushes.slice(pushBefore).filter((p) => p.tag === 'char-mcp-text');
+    check('正文兜底：push 带回暗号', mine.some((m) => String(m.payload?.message || '').includes(MCP_PASSPHRASE)),
+      JSON.stringify(mine.map((m) => m.payload?.message)));
+    check('正文兜底：调用语法被剥掉，不进 push',
+      mine.length > 0 && mine.every((m) => !String(m.payload?.message || '').includes('get_secret_word(')),
+      JSON.stringify(mine.map((m) => m.payload?.message)));
+  }
 } catch (e) {
   failures++;
   console.error('\n💥 harness 异常中止：', e && e.stack || e);
 } finally {
   server.close();
+  mcpServer.close();
 }
 
 console.log(`\n═══ 结果：${results.filter((r) => r.ok).length}/${results.length} 通过，${failures} 失败 ═══`);
