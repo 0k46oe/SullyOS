@@ -1158,8 +1158,13 @@ export const DB = {
 
   saveAssetRaw: async (id: string, data: any): Promise<void> => {
       const db = await openDB();
-      const transaction = db.transaction(STORE_ASSETS, 'readwrite');
-      transaction.objectStore(STORE_ASSETS).put({ id, data });
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_ASSETS, 'readwrite');
+          transaction.objectStore(STORE_ASSETS).put({ id, data });
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error || new Error('saveAssetRaw transaction aborted'));
+      });
   },
 
   deleteAsset: async (id: string): Promise<void> => {
