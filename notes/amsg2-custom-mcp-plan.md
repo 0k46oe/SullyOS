@@ -699,14 +699,16 @@ export const buildMcpFireTools = <S extends McpFireServer>(
   resolve: Map<string, McpResolvedToolCore<S>>,
 ): Array<{ type: 'function'; function: { name: string; description: string; parameters: any } }> => {
   const tools = [];
-  for (const [exposed, { server, toolName }] of resolve) {
-    const def = (server.tools || []).find((t) => t.name === toolName);
+  // Task 1 修正轮后 McpResolvedToolCore 自带 tool 定义，不再 find 反查（同服务器
+  // 重名工具不会串台）。resolve 必须是用 { maxNameLen: 59 } 建的（见 Task 6）——
+  // 拼上 mcp__ 前缀后不超 OpenAI 的 64 字符工具名上限。
+  for (const [exposed, { server, tool }] of resolve) {
     tools.push({
       type: 'function' as const,
       function: {
         name: `mcp__${exposed}`,
-        description: `[${server.name}] ${(def?.description || '').trim()}`.trim(),
-        parameters: def?.inputSchema || { type: 'object', properties: {} },
+        description: `[${server.name}] ${(tool.description || '').trim()}`.trim(),
+        parameters: tool.inputSchema || { type: 'object', properties: {} },
       },
     });
   }
@@ -729,14 +731,13 @@ export const buildMcpFireBlock = <S extends McpFireServer>(
   if (!resolve.size) return '';
   const userName = opts.userName || '用户';
   const lines: string[] = [];
-  for (const [exposed, { server, toolName }] of resolve) {
-    const def = (server.tools || []).find((t) => t.name === toolName);
-    const desc = (def?.description || '').trim();
+  for (const [exposed, { server, tool }] of resolve) {
+    const desc = (tool.description || '').trim();
     if (opts.mode === 'native') {
       lines.push(`- ${exposed}${desc ? `：${desc}` : ''}${resolve.size > 1 ? `（来源: ${server.name}）` : ''}`);
       continue;
     }
-    const schema = def?.inputSchema || {};
+    const schema = tool.inputSchema || {};
     const required = new Set<string>(Array.isArray(schema.required) ? schema.required : []);
     const args = Object.entries(schema.properties || {}).map(([name, d]: [string, any]) =>
       `${name}${required.has(name) ? '*' : ''}:${d?.type || 'any'}`);
@@ -1009,7 +1010,8 @@ interface FireStash {
     // mcpUseNativeTools=false = 用户的中转拒 tools（前台兼容模式同款开关），
     // 请求不带 tools 参数、提示词块教正文协议，识别走 processLLMRound 第二层。
     const mcpServers = filterMcpServersForChar(toolConfig.mcpServers, charId);
-    const mcpResolve = mcpServers.length ? buildMcpNameMap(mcpServers) : null;
+    // maxNameLen 59：暴露名后面要拼 mcp__ 前缀（5 字符），总长不能超 OpenAI 的 64。
+    const mcpResolve = mcpServers.length ? buildMcpNameMap(mcpServers, { maxNameLen: 59 }) : null;
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
 
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
@@ -1665,5 +1667,5 @@ b. 停用探针服务器 → 再建任务 → 角色表示没有这个工具（�
 ## Self-Review 结论
 
 - 三处断点 ↔ 任务覆盖：断点 1（提示词）= Task 4+6；断点 2（凭证上云）= Task 5；断点 3（执行通道）= Task 0+3+7+8。端到端守卫 = Task 9+11；版本歪斜可见性 = Task 0(capabilities)+6(门槛)。
-- 类型/符号一致性：`McpFireServer` / `McpResolvedToolCore` / `buildMcpNameMap` / `buildMcpFireTools` / `buildMcpFireBlock` / `callMcpToolCore` / `createMcpSessionState` / `buildMcpDirectHeaders` / `filterMcpServersForChar` / `collectMcpFireServers` / `runMcpFireTool` / `McpRoundInput` / `mcp__` 前缀 / `MCP_CALL_TIMEOUT_MS` / `mcpUseNativeTools`，各任务间已对齐。
+- 类型/符号一致性：`McpFireServer` / `McpResolvedToolCore`（含 `tool` 字段）/ `buildMcpNameMap`（`maxNameLen` 可选参）/ `withMcpDedupeSuffix` / `buildMcpFireTools` / `buildMcpFireBlock` / `callMcpToolCore` / `createMcpSessionState` / `buildMcpDirectHeaders` / `filterMcpServersForChar` / `collectMcpFireServers` / `runMcpFireTool` / `McpRoundInput` / `mcp__` 前缀 / `MCP_CALL_TIMEOUT_MS` / `mcpUseNativeTools`，各任务间已对齐。
 - 已知边界（有意为之）：本地/私网服务器不进后台（Task 5 过滤 + 文档）；fire 内不做拒-tools 的 4xx 自动降级（确定性拒绝由用户开关处理，任务失败会带 lastError 可见）；instant-push worker 与前台聊天路径不动。
