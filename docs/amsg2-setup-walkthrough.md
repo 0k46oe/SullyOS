@@ -67,7 +67,7 @@
 env.DB (sullyos-amsg)   D1 Database
 ```
 
-![构建成功](./images/amsg2-setup/build-success.jpg)
+![构建成功](./images/amsg2-setup/build-success.png)
 
 > 数据库绑定和「每分钟检查一次」的定时触发器都写在仓库里，会自动带上，不用手动加。
 
