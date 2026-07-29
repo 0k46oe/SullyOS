@@ -483,8 +483,8 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
                         )}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className="text-sm font-medium truncate" style={{ color: C.text }}>{pl.title}</div>
-                        <div className="text-[10px] truncate mt-0.5" style={{ color: C.muted }}>
+                        <div className={`text-sm font-medium ${isExpanded ? 'whitespace-normal break-words' : 'truncate'}`} style={{ color: C.text }}>{pl.title}</div>
+                        <div className={`text-[10px] mt-0.5 ${isExpanded ? 'whitespace-pre-wrap break-words leading-relaxed' : 'truncate'}`} style={{ color: C.muted }}>
                           {pl.description || '—'}
                         </div>
                         <div className="text-[9px] mt-0.5" style={{ color: C.faint }}>
