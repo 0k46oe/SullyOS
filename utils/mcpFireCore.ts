@@ -745,7 +745,7 @@ export const filterMcpServersForChar = <S extends McpFireServer>(
         (!s.charIds?.length || s.charIds.includes(charId)),
     );
 
-export interface McpFireTool {
+export interface McpFireOpenAITool {
     type: 'function';
     function: { name: string; description: string; parameters: any };
 }
@@ -757,14 +757,19 @@ export interface McpFireTool {
  */
 export const buildMcpFireTools = <S extends McpFireServer>(
     resolve: Map<string, McpResolvedToolCore<S>>,
-): McpFireTool[] => {
-    const tools: McpFireTool[] = [];
+): McpFireOpenAITool[] => {
+    // 只有跨服务器时才标来源（同一台服务器的多个工具之间不需要区分来源），
+    // 与前台 buildMcpOpenAITools 的 servers.length > 1 同判据。按 server.id 去重
+    // ——全仓服务器身份以 id 为准（会话 Map / resetMcpSession 同源）。
+    const multiServer = new Set([...resolve.values()].map(({ server }) => server.id)).size > 1;
+    const tools: McpFireOpenAITool[] = [];
     for (const [exposed, { server, tool }] of resolve) {
+        const desc = (tool.description || '').trim();
         tools.push({
             type: 'function',
             function: {
                 name: `mcp__${exposed}`,
-                description: `[${server.name}] ${(tool.description || '').trim()}`.trim(),
+                description: multiServer ? `[${server.name}] ${desc}`.trim() : desc,
                 parameters: tool.inputSchema || { type: 'object', properties: {} },
             },
         });
@@ -787,18 +792,20 @@ export const buildMcpFireBlock = <S extends McpFireServer>(
 ): string => {
     if (!resolve.size) return '';
     const userName = opts.userName || '用户';
+    // 来源标注的判据同 buildMcpFireTools：只有跨服务器时才标（各算各的，不共享状态）
+    const multiServer = new Set([...resolve.values()].map(({ server }) => server.id)).size > 1;
     const lines: string[] = [];
     for (const [exposed, { server, tool }] of resolve) {
         const desc = (tool.description || '').trim();
         if (opts.mode === 'native') {
-            lines.push(`- ${exposed}${desc ? `：${desc}` : ''}${resolve.size > 1 ? `（来源: ${server.name}）` : ''}`);
+            lines.push(`- ${exposed}${desc ? `：${desc}` : ''}${multiServer ? `（来源: ${server.name}）` : ''}`);
             continue;
         }
         const schema = tool.inputSchema || {};
         const required = new Set<string>(Array.isArray(schema.required) ? schema.required : []);
         const args = Object.entries(schema.properties || {}).map(([name, d]: [string, any]) =>
             `${name}${required.has(name) ? '*' : ''}:${d?.type || 'any'}`);
-        lines.push(`- ${exposed}(${args.join(', ')})${desc ? `：${desc}` : ''}${resolve.size > 1 ? `（来源: ${server.name}）` : ''}`);
+        lines.push(`- ${exposed}(${args.join(', ')})${desc ? `：${desc}` : ''}${multiServer ? `（来源: ${server.name}）` : ''}`);
     }
     const howTo = opts.mode === 'native'
         ? '需要时直接通过系统的工具调用接口发起（系统会自动执行并把结果给你），不要把工具名和参数写进正文。'

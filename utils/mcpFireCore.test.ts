@@ -273,14 +273,39 @@ describe('buildMcpFireBlock / buildMcpFireTools', () => {
         expect(buildMcpFireBlock(new Map(), { mode: 'native' })).toBe('');
     });
 
-    it('fire tools 数组带 mcp__ 前缀与来源标注', () => {
+    // 来源标注看的是服务器台数，不是工具条数——同一台服务器的几个工具之间没什么可区分的。
+    const twoTools = [srv({ tools: [
+        { name: 'get_weather', description: '查天气' },
+        { name: 'get_news', description: '查新闻' },
+    ] })];
+    const twoServers = [
+        srv({ id: 's1', name: '服务器A', tools: [{ name: 'get_weather', description: '查天气' }] }),
+        srv({ id: 's2', name: '服务器B', tools: [{ name: 'get_news', description: '查新闻' }] }),
+    ];
+
+    it('单台服务器的多个工具之间不标来源', () => {
+        expect(buildMcpFireBlock(buildMcpNameMap(twoTools), { mode: 'native' }))
+            .not.toContain('（来源:');
+    });
+
+    it('跨服务器时才标来源', () => {
+        expect(buildMcpFireBlock(buildMcpNameMap(twoServers), { mode: 'native' }))
+            .toContain('（来源: 服务器A）');
+    });
+
+    it('fire tools 数组带 mcp__ 前缀，单台服务器时 description 不缀服务器名', () => {
         const tools = buildMcpFireTools(map);
         expect(tools).toHaveLength(1);
         expect(tools[0]).toMatchObject({
             type: 'function',
-            function: { name: 'mcp__get_weather', description: '[服务器A] 查天气' },
+            function: { name: 'mcp__get_weather', description: '查天气' },
         });
         expect((tools[0].function as any).parameters.required).toEqual(['city']);
+    });
+
+    it('跨服务器时 fire tools 的 description 缀上服务器名', () => {
+        const tools = buildMcpFireTools(buildMcpNameMap(twoServers));
+        expect(tools.map((t) => t.function.description)).toEqual(['[服务器A] 查天气', '[服务器B] 查新闻']);
     });
 
     // 59 是 worker 侧算好的预算（64 上限 - `mcp__` 前缀 5 字符）。这条守的是两边协同：
