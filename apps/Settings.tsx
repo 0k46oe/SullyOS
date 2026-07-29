@@ -23,6 +23,7 @@ import { InstantPushSettingsModal } from '../components/settings/InstantPushSett
 import { PushVapidSettingsModal } from '../components/settings/PushVapidSettingsModal';
 import ActiveMsgGlobalSettingsModal from '../components/settings/ActiveMsgGlobalSettingsModal';
 import { syncAmsgToolConfigAndPrompts } from '../utils/amsgStateSync';
+import { ActiveMsgClient } from '../utils/activeMsgClient';
 import VersionInfo from '../components/settings/VersionInfo';
 import { isPushVapidReady } from '../utils/pushVapid';
 import ApiCallLogModal from '../components/settings/ApiCallLogModal';
@@ -99,12 +100,29 @@ const SettingsSection: React.FC<{
     );
 };
 
+let mcpToolConfigSyncTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * MCP 卡片没有「保存」按钮，改一个字就落盘一次；直接每次都上云就变成一次按键一个请求。
+ * 攒到停手 800ms 再传一次，中途继续改就顺延。
+ */
+const scheduleMcpToolConfigSync = (sync: () => Promise<void>) => {
+    if (mcpToolConfigSyncTimer) clearTimeout(mcpToolConfigSyncTimer);
+    mcpToolConfigSyncTimer = setTimeout(() => {
+        mcpToolConfigSyncTimer = null;
+        sync().catch(() => { /* 见调用处：没配主动消息时属正常 */ });
+    }, 800);
+};
+
 /**
  * 通用 MCP 工具服务器管理卡片（对标麦当劳/瑞幸卡片的样式，但服务器是用户自配的列表）。
  * 配置存 localStorage（utils/mcpClient），启用且发现过工具的服务器会在聊天里
  * 以 function-calling 注入，详见 docs/mcp-client.md。
  */
-const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> = ({ addToast }) => {
+const McpServersCard: React.FC<{
+    addToast: (msg: string, type?: any) => void;
+    /** 服务器清单或「兼容模式」开关变了 → 让主动消息那边把新配置重传上云 */
+    onMcpConfigChanged?: () => void;
+}> = ({ addToast, onMcpConfigChanged }) => {
     const { characters, groups } = useOS();
     const [servers, setServers] = useState<McpServerConfig[]>(() => loadMcpServers());
     const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -115,6 +133,7 @@ const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> 
     const persist = (next: McpServerConfig[]) => {
         setServers(next);
         saveMcpServers(next);
+        onMcpConfigChanged?.();
     };
 
     const update = (id: string, patch: Partial<McpServerConfig>) => {
@@ -177,6 +196,7 @@ const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> 
                         const next = e.target.checked;
                         setUseNativeToolsState(next);
                         setMcpUseNativeTools(next);
+                        onMcpConfigChanged?.();
                     }} className="sr-only peer" />
                     <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-violet-500"></div>
                 </label>
@@ -3094,7 +3114,13 @@ const Settings: React.FC = () => {
       {/* MCP 工具服务器配置 Modal（高级玩法, 从实时感知里独立出来） */}
       <Modal isOpen={showMcpModal} title="MCP 工具服务器" onClose={() => setShowMcpModal(false)}>
           <div className="space-y-4">
-              <McpServersCard addToast={addToast} />
+              <McpServersCard addToast={addToast} onMcpConfigChanged={() => {
+                  // MCP 配置变更只需重传 tool_config：提示词块与 tools 数组由 worker 在 fire 时
+                  // 从 tool_config 现场生成（见 mcpFireCore），不经过 fire_pack，没有陈旧问题，
+                  // 所以不用像实时感知那样连提示词一起刷（syncAmsgToolConfigAndPrompts）。
+                  // 没配主动消息时 ensureWorkerReady 会抛，吞掉即可——与 amsgStateSync 同款。
+                  scheduleMcpToolConfigSync(() => ActiveMsgClient.syncToolConfig(realtimeConfig));
+              }} />
           </div>
       </Modal>
 

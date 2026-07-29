@@ -17,6 +17,7 @@
 
 import type { CharacterProfile, RealtimeConfig } from '../types';
 import type { AgenticToolMemory, AgenticToolRealtimeConfig } from './agenticTools';
+import type { McpFireServer } from './mcpFireCore';
 import { getProxyWorkerUrl } from './proxyWorker';
 
 export const AMSG_TOOL_PACK_KEY = 'tool_pack';
@@ -52,6 +53,13 @@ export interface AmsgToolConfig extends AgenticToolRealtimeConfig {
     loggedInNickname?: string;
     userXsecToken?: string;
   };
+  /**
+   * 用户自配的通用 MCP 服务器（enabled 且已发现工具、worker 够得着的那部分，
+   * 见 mcpClient.collectMcpFireServers）。代理字段不上云——worker 直连没有 CORS。
+   */
+  mcpServers?: McpFireServer[];
+  /** 前台「兼容模式」同款开关：false = 中转拒 tools，worker 退到正文协议。缺省按 true。 */
+  mcpUseNativeTools?: boolean;
 }
 
 export const buildToolPack = (char: CharacterProfile): AmsgToolPack => ({
@@ -67,7 +75,14 @@ export const buildToolPack = (char: CharacterProfile): AmsgToolPack => ({
   })),
 });
 
-export const buildToolConfig = (realtimeConfig: RealtimeConfig | undefined): AmsgToolConfig => {
+/**
+ * mcp 参数由浏览器侧调用方现读现传（本模块是环境无关叶子，不能自己碰 localStorage）。
+ * 不传就一个 mcp 字段都不写——老 worker 解析这份配置时零影响。
+ */
+export const buildToolConfig = (
+  realtimeConfig: RealtimeConfig | undefined,
+  mcp?: { servers: McpFireServer[]; useNativeTools: boolean },
+): AmsgToolConfig => {
   const rc = realtimeConfig;
   const xhs = rc?.xhsMcpConfig;
   return {
@@ -96,6 +111,7 @@ export const buildToolConfig = (realtimeConfig: RealtimeConfig | undefined): Ams
           },
         }
       : {}),
+    ...(mcp?.servers.length ? { mcpServers: mcp.servers, mcpUseNativeTools: mcp.useNativeTools } : {}),
   };
 };
 
@@ -129,6 +145,14 @@ export const parseToolConfig = (value: string): AmsgToolConfig | null => {
     ) {
       return null;
     }
+    // MCP 清单是列表，坏条目单独丢掉就行——整份判 null 会连搜索/Notion 凭据一起赔进去。
+    const cleaned = Array.isArray(parsed.mcpServers)
+      ? parsed.mcpServers.filter((s: any) =>
+          s && typeof s === 'object' &&
+          typeof s.id === 'string' && typeof s.name === 'string' &&
+          typeof s.url === 'string' && Array.isArray(s.tools))
+      : undefined;
+    if (cleaned?.length) parsed.mcpServers = cleaned; else delete parsed.mcpServers;
     return parsed as AmsgToolConfig;
   } catch {
     return null;

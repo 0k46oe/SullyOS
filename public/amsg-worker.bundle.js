@@ -3162,6 +3162,9 @@ var parseToolConfig = (value) => {
     if (!parsed || typeof parsed !== "object" || parsed.v !== 1 || typeof parsed.proxyWorkerUrl !== "string") {
       return null;
     }
+    const cleaned = Array.isArray(parsed.mcpServers) ? parsed.mcpServers.filter((s) => s && typeof s === "object" && typeof s.id === "string" && typeof s.name === "string" && typeof s.url === "string" && Array.isArray(s.tools)) : void 0;
+    if (cleaned?.length) parsed.mcpServers = cleaned;
+    else delete parsed.mcpServers;
     return parsed;
   } catch {
     return null;

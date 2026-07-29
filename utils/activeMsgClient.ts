@@ -42,6 +42,7 @@ import { listRecallableMonths } from './agenticTools';
 import { ChatPrompts } from './chatPrompts';
 import { DB } from './db';
 import { copyWorkerBundleToClipboard } from './instantPushClient';
+import { collectMcpFireServers, getMcpUseNativeTools } from './mcpClient';
 import { safeResponseJson } from './safeApi';
 import { ActiveMsgStore } from './activeMsgStore';
 import { KeepAlive } from './keepAlive';
@@ -453,14 +454,19 @@ const buildCharStateEntries = async (
   },
 ];
 
-/** 全局工具凭据条目（v2 服务端工具循环用的搜索 / Notion / 飞书 / 小红书配置）。 */
+/** 全局工具凭据条目（v2 服务端工具循环用的搜索 / Notion / 飞书 / 小红书 / 自配 MCP 配置）。 */
 const buildToolConfigEntry = (
   realtimeConfig: RealtimeConfig | undefined,
   updatedAt: number,
 ) => ({
   namespace: AMSG_GLOBAL_NAMESPACE,
   key: AMSG_TOOL_CONFIG_KEY,
-  value: JSON.stringify(buildToolConfig(realtimeConfig)),
+  // MCP 配置在这里现读现带：三条上传路径（排程 / fire_pack 冲刷 / 设置保存）
+  // 全走这个咽喉，不会出现某条路漏带的版本分叉。
+  value: JSON.stringify(buildToolConfig(realtimeConfig, {
+    servers: collectMcpFireServers(),
+    useNativeTools: getMcpUseNativeTools(),
+  })),
   updatedAt,
 });
 

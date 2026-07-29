@@ -99,4 +99,24 @@ describe('buildToolConfig / parseToolConfig', () => {
     expect(parseToolConfig('not json')).toBeNull();
     expect(parseToolConfig('{"v":1}')).toBeNull();
   });
+
+  it('mcp 配置随 tool_config 往返, 坏条目被丢弃', () => {
+    const servers = [{
+      id: 's1', name: '探针', url: 'https://probe.example.com',
+      token: 'tok', tools: [{ name: 'get_secret' }],
+    }];
+    const config = buildToolConfig(undefined, { servers, useNativeTools: false });
+    const parsed = parseToolConfig(JSON.stringify(config));
+    expect(parsed?.mcpServers).toEqual(servers);
+    expect(parsed?.mcpUseNativeTools).toBe(false);
+
+    const dirty = { ...config, mcpServers: [servers[0], { id: 'bad' }, null, { name: 'x', url: 'u' }] };
+    expect(parseToolConfig(JSON.stringify(dirty))?.mcpServers).toEqual(servers);
+  });
+
+  it('不传 mcp 配置时两个字段都不出现（老 worker 解析零影响）', () => {
+    const config = buildToolConfig(undefined);
+    expect('mcpServers' in config).toBe(false);
+    expect('mcpUseNativeTools' in config).toBe(false);
+  });
 });

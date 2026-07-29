@@ -22,6 +22,7 @@ import {
     discoverMcpToolsCore,
     normalizeMcpToolArguments,
     MCP_REQUEST_TIMEOUT_MS,
+    type McpFireServer,
     type McpSessionState,
     type McpToolResult,
     type McpTransportTarget,
@@ -113,6 +114,33 @@ export const getEnabledMcpServers = (charId?: string): McpServerConfig[] =>
 
 /** 有任何一个启用且已发现工具、对该角色可见的服务器 → 聊天进入 MCP 工具模式 */
 export const isMcpChatAvailable = (charId?: string): boolean => getEnabledMcpServers(charId).length > 0;
+
+/** CF worker 直连打不通的地址（localhost/私网）不上云——上了只会教角色用一个必失败的工具。 */
+const isWorkerReachableUrl = (url: string): boolean => {
+    try {
+        const u = new URL(url);
+        if (!/^https?:$/.test(u.protocol)) return false;
+        const h = u.hostname;
+        return !(h === 'localhost' || h === '127.0.0.1' || h === '[::1]' ||
+            /^10\./.test(h) || /^192\.168\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h));
+    } catch { return false; }
+};
+
+/**
+ * 上云给 amsg worker 用的服务器子集。注意不走 getEnabledMcpServers：
+ * 那个函数缺 charId 时只回通用服务器，而这里要的是全部 enabled（含绑定角色的），
+ * charIds 原样带上、由 worker 在 fire 时按角色过滤。
+ */
+export const collectMcpFireServers = (): McpFireServer[] =>
+    loadMcpServers()
+        .filter((s) => s.enabled && s.url && (s.tools?.length || 0) > 0 && isWorkerReachableUrl(s.url))
+        .map((s) => ({
+            id: s.id, name: s.name, url: s.url,
+            ...(s.token ? { token: s.token } : {}),
+            ...(s.customHeaders?.length ? { customHeaders: s.customHeaders } : {}),
+            ...(s.charIds?.length ? { charIds: s.charIds } : {}),
+            tools: (s.tools || []).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+        }));
 
 // ── 备份用：随「设置 → 导出/导入备份」一起带走（存 localStorage） ──
 export function exportMcpLocal(): Record<string, string> | undefined {

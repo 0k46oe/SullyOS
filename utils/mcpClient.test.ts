@@ -11,6 +11,7 @@ import {
     isMcpChatAvailable,
     getMcpUseNativeTools,
     setMcpUseNativeTools,
+    collectMcpFireServers,
     callMcpTool,
     normalizeMcpToolArguments,
     MCP_REQUEST_TIMEOUT_MS,
@@ -505,5 +506,24 @@ describe('群聊 MCP 工具循环', () => {
         expect(result.choices[0].message.content).toContain('你掷出了 4');
         expect(result.usage.total_tokens).toBe(29);
         expect(info).toHaveBeenCalled();
+    });
+});
+
+describe('collectMcpFireServers', () => {
+    it('只带 enabled + 已发现工具 + 公网地址; 剥代理字段、留 token', () => {
+        localStorage.setItem('aetheros.mcp.servers', JSON.stringify([
+            { id: 'a', name: 'ok', url: 'https://mcp.example.com', enabled: true, token: 'tok', proxyUrl: 'https://proxy.x', proxyKey: 'pk', charIds: ['c1'], tools: [{ name: 't1', inputSchema: { type: 'object' } }], updatedAt: 1 },
+            { id: 'b', name: 'disabled', url: 'https://x.com', enabled: false, tools: [{ name: 't' }], updatedAt: 1 },
+            { id: 'c', name: 'no-tools', url: 'https://y.com', enabled: true, tools: [], updatedAt: 1 },
+            { id: 'd', name: 'local', url: 'http://localhost:18061/mcp', enabled: true, tools: [{ name: 't' }], updatedAt: 1 },
+            { id: 'e', name: 'lan', url: 'http://192.168.1.5/mcp', enabled: true, tools: [{ name: 't' }], updatedAt: 1 },
+        ]));
+        const out = collectMcpFireServers();
+        expect(out.map((s) => s.id)).toEqual(['a']);
+        expect(out[0]).toEqual({
+            id: 'a', name: 'ok', url: 'https://mcp.example.com', token: 'tok',
+            charIds: ['c1'], tools: [{ name: 't1', description: undefined, inputSchema: { type: 'object' } }],
+        });
+        expect('proxyUrl' in out[0]).toBe(false);
     });
 });
