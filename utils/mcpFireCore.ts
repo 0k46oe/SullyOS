@@ -460,7 +460,6 @@ const postCore = async (
             if (controller.signal.aborted) {
                 throw new Error(`MCP 请求超时（${Math.round(timeoutMs / 1000)} 秒）`);
             }
-            // 直连时 fetch 抛 TypeError 十有八九是 CORS，把排查方向直接告诉用户
             const hint = target.fetchErrorHint || '';
             throw new Error(`MCP 请求失败: ${e?.message || e}。${hint}`);
         }
@@ -654,10 +653,8 @@ const targetHost = (url: string): string => {
 };
 
 /**
- * 调一个工具（会自动补握手；HTTP 400/404 视为 session 失效，重握手再试一次）。
- *
- * opts.resetSession：自定义会话重置。默认就地清空传进来的 session 对象——
- * 自定义实现也必须原地重置这个对象，因为后续步骤仍然用的是它的引用。
+ * 调一个工具（会自动补握手；HTTP 400/404 视为 session 失效，就地重置会话再试一次）。
+ * 重置是原地改传进来的那个 session 对象，持有者手里的引用会跟着更新。
  */
 export const callMcpToolCore = async (
     target: McpTransportTarget,
@@ -669,7 +666,6 @@ export const callMcpToolCore = async (
         inputSchema?: any;
         /** 日志里显示的服务器名，缺省用目标 URL 的主机名 */
         serverLabel?: string;
-        resetSession?: () => void;
     } = {},
 ): Promise<McpToolResult> => {
     const timeoutMs = opts.timeoutMs ?? MCP_REQUEST_TIMEOUT_MS;
@@ -699,7 +695,7 @@ export const callMcpToolCore = async (
         } catch (e: any) {
             // 404/400 常见于服务器重启后 session 失效，重握手再试一次
             if (/HTTP (400|404)/.test(e?.message || '')) {
-                (opts.resetSession ?? (() => { Object.assign(session, createMcpSessionState()); }))();
+                Object.assign(session, createMcpSessionState());
                 await ensureInitializedCore(target, session, timeoutMs);
                 ({ response } = await postCore(
                     target, session,

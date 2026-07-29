@@ -198,13 +198,12 @@ describe('JSON-RPC 传输层（直连路径）', () => {
             return jsonResp({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: 'ok' }] } });
         });
 
+        // 和 mcpClient 的真实用法一致：会话对象由外面拿着，不传任何额外选项
         const session = createMcpSessionState();
-        // 自定义重置也必须原地清空这个对象，core 后面用的还是同一个引用
-        const resetSession = vi.fn(() => { Object.assign(session, createMcpSessionState()); });
-        const result = await callMcpToolCore(directTarget(server), session, 'get_weather', {}, { resetSession });
+        const result = await callMcpToolCore(directTarget(server), session, 'get_weather', {});
 
         expect(result).toMatchObject({ success: true, data: 'ok' });
-        expect(resetSession).toHaveBeenCalledTimes(1);
+        // 握手真的重来了一遍，而不是拿 initialized 的旧会话直接重发
         expect(handshakes).toBe(2);
         expect(toolCalls).toBe(2);
         // 重试带的是新握手拿到的 session，而不是拿失效的那个再撞一次

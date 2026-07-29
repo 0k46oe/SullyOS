@@ -210,8 +210,7 @@ export const discoverMcpTools = async (server: McpServerConfig): Promise<McpTool
 
 /**
  * 调用一个工具（会自动补握手；session 失效自动重试一次）。
- * 不传 resetSession：core 默认就地清空会话对象，而这张表里存的就是同一个对象，
- * 重置后表里的状态自然跟着新的。
+ * 重试前的会话重置是 core 就地做的，改的就是这张表里的那个对象，两边不会走岔。
  */
 export const callMcpTool = async (
     server: McpServerConfig,
