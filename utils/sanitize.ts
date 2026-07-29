@@ -90,7 +90,7 @@ const stripQuotes = (t: string): string =>
  */
 const stripSystemLogLeak = (t: string): string =>
   t
-    .replace(/\[\s*(?:系统|系統|System)\s*(?:提示)?\s*[:：][^\[\]]*\]\s*/gi, '')
+    .replace(/[\[【]\s*(?:系统|系統|System)\s*(?:提示)?\s*[:：][^\[\]【】]*[\]】]\s*/gi, '')
     .replace(/\[\s*(?:系统|系統)\s*\]\s*/g, '');
 
 /** markdown 标题 `# heading` → `heading` (保留文字) */

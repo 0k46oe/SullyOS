@@ -5,6 +5,7 @@ import { CharacterProfile, CharPlaylistSong } from '../types';
 import { sanitizeForBubble } from './sanitize';
 import { extractTransferCommands } from './transferFormat';
 import { executeLifeDirectives } from './lifeRecords';
+import { wallClockToTimestamp } from './timezone';
 
 export interface MusicActionSnapshot {
     songId: number;
@@ -45,6 +46,11 @@ export interface MusicActionHooks {
     ) => Promise<{ playlistTitle: string; created: boolean } | null>;
 }
 
+// 转账的提取（规范标签 + 模型掉格式的系统日志形态）统一在 utils/transferFormat.ts:
+// extractTransferCommands —— 与 worker classifier 共用一份源码。master 上曾有一版
+// 独立实现 extractAssistantTransfers, 合并时其能力（全角括号【】/ 主语「我」/ credits
+// 后缀）已并入 transferFormat, 测试见 utils/chatParser.transfer.test.ts。
+
 export const ChatParser = {
     // Return cleaned content and perform side effects
     parseAndExecuteActions: async (
@@ -53,6 +59,8 @@ export const ChatParser = {
         charName: string,
         addToast: (msg: string, type: 'info'|'success'|'error') => void,
         musicHooks?: MusicActionHooks,
+        /** 角色自定义时区；定时消息里的时间是角色照着自己的钟写的，要按这个还原成真实时刻。 */
+        charTz?: string,
     ) => {
         let content = aiContent;
 
@@ -265,7 +273,9 @@ export const ChatParser = {
         while ((match = scheduleRegex.exec(content)) !== null) {
             const timeStr = match[1].trim();
             const msgContent = match[2].trim();
-            const dueTime = new Date(timeStr).getTime();
+            // 角色照着自己那边的钟写时间，按设备时区解释会整体偏一个时差：
+            // 纽约角色在自己上午说「今晚 21:00 找你」，设备在中国就会算成已经过期。
+            const dueTime = wallClockToTimestamp(timeStr, charTz);
             if (!isNaN(dueTime) && dueTime > Date.now()) {
                 await DB.saveScheduledMessage({ id: `sched-${Date.now()}-${Math.random()}`, charId, content: msgContent, dueAt: dueTime, createdAt: Date.now() });
                 try {

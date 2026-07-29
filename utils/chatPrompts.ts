@@ -17,7 +17,7 @@ import { resolveCharTimeZone, nowInTimeZone } from './timezone';
 import { buildLifeRecordInjection } from './lifeRecords';
 import { getCharNameById } from './charNameRegistry';
 import { getLocalDateKey } from './localDate';
-import { getLocalDailySchedule } from './dailySchedule';
+import { getDailyScheduleForChar } from './dailySchedule';
 
 // 语音格式指导按当前 TTS 服务商二选一：用 MiniMax 才注入 MiniMax 那套（含 <#秒#> 停顿标记），
 // 用鱼声则注入鱼声版（去掉 MiniMax 专属标记，改用标点 / 省略号控制停顿）。
@@ -235,9 +235,10 @@ export const ChatPrompts = {
         // ── 并发发起所有独立的异步取数（网络 + IndexedDB），下面按原顺序拼接 ──
         // 原来是 7 段串行 await，总耗时 = 各段之和；现在取 max。
         const config = realtimeConfig || defaultRealtimeConfig;
-        const today = getLocalDateKey();
-        // 自定义时区：开启后「当前时间」按角色所在时区折算，并附时差提示（异国恋等场景）
+        // 自定义时区：日历日、当前日程与实时上下文全部按角色所在地折算。
         const charTz = resolveCharTimeZone(char);
+        const charNow = nowInTimeZone(charTz);
+        const today = getLocalDateKey(charNow);
 
         // 1. 实时世界信息（天气/新闻/时间）
         const realtimePromise: Promise<string> = (async () => {
@@ -248,7 +249,7 @@ export const ChatPrompts = {
                 }
                 // 基础当前时间 + 时差提示已由 ContextBuilder.buildCoreContext 统一注入（受 timeAwarenessEnabled
                 // 控制，按角色自定义时区折算）；这里只在关闭天气/新闻时补一条"今日特殊节日"，不再重复注入时间/时差，避免双份。
-                const specialDates = RealtimeContextManager.checkSpecialDates();
+                const specialDates = RealtimeContextManager.checkSpecialDates(charTz);
                 if (specialDates.length > 0 && char.timeAwarenessEnabled !== false) {
                     return `\n### 【今日特殊】\n${specialDates.join('、')}\n`;
                 }
@@ -263,7 +264,7 @@ export const ChatPrompts = {
         //    总开关关闭时跳过查询与注入，确保不额外调用任何 LLM 依赖链
         const scheduleFeatureOn = isScheduleFeatureOn(char);
         const schedulePromise: Promise<DailySchedule | null> = scheduleFeatureOn
-            ? getLocalDailySchedule(char.id).catch(e => {
+            ? getDailyScheduleForChar(char).catch(e => {
                 console.error('Failed to load daily schedule:', e);
                 return null;
             })
@@ -387,7 +388,7 @@ ${groupLogStr}\n`;
         // 2a. 日程注入（当前时段 + 意识流独白，每轮都可能变）
         if (schedule) {
             try {
-                const scheduleContext = ContextBuilder.buildScheduleInjection(schedule, evolvedNarrative);
+                const scheduleContext = ContextBuilder.buildScheduleInjection(schedule, evolvedNarrative, charNow);
                 if (scheduleContext) volatileState += `\n${scheduleContext}\n`;
             } catch (e) {
                 console.error('Failed to inject schedule context:', e);
@@ -410,7 +411,7 @@ ${groupLogStr}\n`;
                     const cfgForLyric = musicCfg?.workerUrl ? musicCfg : loadMusicCfgStandalone();
                     if (cfgForLyric?.workerUrl) {
                         try {
-                            const slot = getCurrentSlot(schedule);
+                            const slot = getCurrentSlot(schedule, charNow);
                             const seed = `${char.id}-${today}-${slot?.startTime || '00:00'}-${cur.songId}`;
                             const snippet = await getCharLyricSnippet(cfgForLyric, cur.songId, seed, 6);
                             if (snippet.length > 0) charListening.lyricSnippet = snippet;
@@ -513,7 +514,7 @@ ${uname} 的化身正挂在《彼方》的【${roomName}】${act ? `，状态写
    - 如果用户发送了图片，请对图片内容进行评论。
 6. **可用动作**:
    - 回戳用户: \`[[ACTION:POKE]]\`
-   - 转账: \`[[ACTION:TRANSFER|to=user|amount=100]]\`（to 固定写 user，金额只写数字）
+   - 转账: 必须使用且只使用 \`[[ACTION:TRANSFER|to=user|amount=100]]\`（to 固定写 user，金额只写数字）；不要写成 \`[系统: 你向某人转账 100]\` 等系统日志文本。
    - **处理用户转账**: 当历史里出现 \`[[记录:TRANSFER|to=char|...|status=待处理]]\`（用户转给你、还没处理）时，你可以决定收下或退回。收下: \`[[ACTION:TRANSFER_ACCEPT]]\`；退回: \`[[ACTION:TRANSFER_RETURN]]\`。请结合人设和情境自然选择（比如害羞地退回、开心地收下），并配上一句话。
    - **【重要】\`[[记录:...]]\` 是系统日志**: 历史里以 \`[[记录:\` 开头的标签是已经发生的事实（谁转给谁、什么状态），只供你了解，**严禁**在回复里照抄输出。你要做动作时只能用 \`[[ACTION:...]]\`。
    - 调取记忆: \`[[RECALL: YYYY-MM]]\`，请注意，当用户提及具体某个月份时，或者当你想仔细想某个月份的事情时，欢迎你随时使该动作

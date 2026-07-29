@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Money, BookOpenText, GearSix, Image, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, Sparkle, CaretDown, FadersHorizontal } from '@phosphor-icons/react';
+import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Money, BookOpenText, GearSix, Image, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, Sparkle, CaretDown, FadersHorizontal, LinkSimple } from '@phosphor-icons/react';
 import { CharacterProfile, ChatTheme, EmojiCategory, Emoji } from '../../types';
 import { PRESET_THEMES } from './ChatConstants';
 import { AcnhActionTile } from '../os/acnhIcons';
@@ -83,7 +83,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
 }) => {
     const chatImageInputRef = useRef<HTMLInputElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
-    const [actionsPage, setActionsPage] = useState<0 | 1>(0);
+    const [actionsPage, setActionsPage] = useState<0 | 1 | 2>(0);
     // 气泡样式面板：搜索 + 两步确认删除（防止 hover 小 × 误删）
     const [bubbleSearch, setBubbleSearch] = useState('');
     // 会话面板的主要用途仍是切换聊天；气泡选择作为次级工具默认收起。
@@ -207,8 +207,11 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
         actionsSwipeStart.current = null;
         const SWIPE_THRESHOLD = 40;
         if (Math.abs(dx) > SWIPE_THRESHOLD && Math.abs(dx) > Math.abs(dy)) {
-            if (dx < 0 && actionsPage === 0) setActionsPage(1);
-            else if (dx > 0 && actionsPage === 1) setActionsPage(0);
+            if (dx < 0 && actionsPage < 2) {
+                setActionsPage((actionsPage + 1) as 0 | 1 | 2);
+            } else if (dx > 0 && actionsPage > 0) {
+                setActionsPage((actionsPage - 1) as 0 | 1 | 2);
+            }
         }
     };
 
@@ -638,7 +641,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                             {actionsContent}
                         </div>
                     )}
-                    {/* Actions Panel (paginated: page 0 = 内置功能, page 1 = 外部服务) */}
+                    {/* Actions Panel (paginated: page 0 = 内置功能, page 1 = 外部服务, page 2 = 记忆链接) */}
                     {showPanel === 'actions' && !actionsContent && (
                         <div
                             className="overflow-y-auto no-scrollbar"
@@ -835,6 +838,39 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                             </button>
                           </div>
 
+                          {/* Page 2: 本轮记忆修补。单独成页，避免挤压常用功能。 */}
+                          <div className={`${actionsPage === 2 ? 'flex' : 'hidden'} min-h-[13rem] px-6 py-5 flex-col items-center justify-center text-center`}>
+                            <div className={`mb-3 text-[9px] font-bold uppercase tracking-[.24em] ${isDiscordStyle ? 'text-purple-300/55' : acnh ? 'text-[#8f7658]/65' : 'text-purple-400/55'}`}>
+                              memory repair
+                            </div>
+                            <button
+                              onClick={() => onPanelAction('memory-link')}
+                              className={`group w-full max-w-[19rem] flex items-center gap-4 rounded-[1.4rem] px-5 py-4 text-left active:scale-[.98] transition-all border ${
+                                acnh
+                                  ? 'bg-white/70 border-[#e6dab4] text-[#725d42] shadow-sm'
+                                  : isDiscordStyle
+                                    ? 'bg-slate-800/80 border-purple-400/20 text-slate-100 shadow-[0_12px_32px_rgba(0,0,0,.18)]'
+                                    : 'bg-gradient-to-br from-purple-50 to-indigo-50/70 border-purple-100 text-slate-700 shadow-[0_12px_28px_rgba(124,58,237,.10)]'
+                              }`}
+                            >
+                              <span className={`w-14 h-14 shrink-0 rounded-2xl grid place-items-center transition-transform group-active:scale-95 ${
+                                acnh
+                                  ? 'bg-[#efe5ce] text-[#8f674a]'
+                                  : isDiscordStyle
+                                    ? 'bg-purple-400/10 text-purple-300'
+                                    : 'bg-white/85 text-purple-500 shadow-sm'
+                              }`}>
+                                <LinkSimple className="w-6 h-6" weight="bold" />
+                              </span>
+                              <span className="min-w-0">
+                                <span className="block text-sm font-bold">记忆链接</span>
+                                <span className={`block mt-1 text-[10px] leading-5 ${isDiscordStyle ? 'text-slate-400' : acnh ? 'text-[#8f7658]' : 'text-slate-400'}`}>
+                                  查看刚才经过的记忆，原地修补不准确的地方
+                                </span>
+                              </span>
+                            </button>
+                          </div>
+
                           {/* 翻页指示器 */}
                           <div className="flex items-center justify-center gap-3 pb-3 -mt-2">
                             <button
@@ -848,6 +884,12 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                               aria-label="第 2 页"
                               onClick={() => setActionsPage(1)}
                               className={`w-2 h-2 rounded-full transition-all ${actionsPage === 1 ? (isDiscordStyle ? 'bg-slate-200 w-5' : 'bg-slate-500 w-5') : (isDiscordStyle ? 'bg-slate-600' : 'bg-slate-300')}`}
+                            />
+                            <button
+                              type="button"
+                              aria-label="第 3 页"
+                              onClick={() => setActionsPage(2)}
+                              className={`w-2 h-2 rounded-full transition-all ${actionsPage === 2 ? (isDiscordStyle ? 'bg-slate-200 w-5' : 'bg-purple-500 w-5') : (isDiscordStyle ? 'bg-slate-600' : 'bg-slate-300')}`}
                             />
                           </div>
                         </div>

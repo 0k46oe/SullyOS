@@ -107,7 +107,7 @@ export function parseTransferAmount(raw: unknown): number | null {
     let s = raw.replace(/[０-９．]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
     s = s
         .replace(/[¥￥$＄]/g, '')
-        .replace(/(?:元|块钱|块|圆|RMB|CNY)/gi, '')
+        .replace(/(?:元|块钱|块|圆|RMB|CNY|credits?)/gi, '')
         .replace(/[,，\s]/g, '');
 
     if (!/^\d+(?:\.\d+)?$/.test(s)) return null;
@@ -181,10 +181,11 @@ const ACTION_RETURN_RE = /\[\[\s*ACTION\s*[:：]\s*TRANSFER_RETURN\s*\]\]/gi;
 // ─── 模仿历史渲染的口语形态 ────────────────────────────────────────────────
 
 /**
- * `[系统: ...]` / `[系统：...]` / `[系统提示: ...]` / `[System: ...]` 整块。
- * 内层禁止再出现方括号, 保证不会跨块吞掉正文。
+ * `[系统: ...]` / `[系统：...]` / `[系统提示: ...]` / `[System: ...]` / `【系统：...】` 整块。
+ * 全角括号【】一并认 (master 的 extractAssistantTransfers 覆盖过这个变体, 合并时并入)。
+ * 内层禁止再出现任何一种括号, 保证不会跨块吞掉正文。
  */
-const SYSTEM_LOG_RE = /\[\s*(?:系统|系統|System)\s*(?:提示)?\s*[:：]\s*([^\[\]]*?)\s*\]/gi;
+const SYSTEM_LOG_RE = /[\[【]\s*(?:系统|系統|System)\s*(?:提示)?\s*[:：]\s*([^\[\]【】]*?)\s*[\]】]/gi;
 
 /**
  * 群活动注入到私聊背景时的压缩形态 (chatPrompts.ts summarizeGroupMsgContent): `[转账1999]`。
@@ -195,14 +196,22 @@ const BARE_TRANSFER_RE = /\[\s*转[账帐]\s*[:：]?\s*([^\[\]]{0,24}?)\s*\]/gi;
 /** 金额片段: 可选币种符号 + 数字 (含全角/千分位/小数) + 可选单位 */
 const AMOUNT_FRAGMENT = String.raw`[¥￥$＄]?\s*([0-9０-９][0-9０-９.,，]*)\s*(?:元|块钱|块|圆)?`;
 
-/** 角色 → 用户: `你向xx转账 1999` / `你给xx转了1999` / `你向xx转账了 ￥1,999元` */
-const LOG_SEND_RE = new RegExp(String.raw`^你(?:向|给).*?转(?:[账帐]了?|了)\s*${AMOUNT_FRAGMENT}`);
+/**
+ * 角色 → 用户: `你向xx转账 1999` / `你给xx转了1999` / `我向你转账￥520元`。
+ * 主语锚定「你/我」—— 历史日志用第二人称「你」称呼角色, 而模型以第一人称说话时会写
+ * 「我向你转账」, 这里的「我」同样是角色自己 (说话者是 assistant), 都是合法转账。
+ * 主语是第三方名字 (`用户向你转账`) 的不在此列, 落到 LOG_FORGED_RE。
+ */
+const LOG_SEND_RE = new RegExp(String.raw`^(?:你|我)\s*(?:向|给).*?转(?:[账帐]了?|了)\s*${AMOUNT_FRAGMENT}`);
 /** 角色处理用户的转账: `你接收了xx的转账 520` / `你退回了xx的转账 520` */
 const LOG_ACCEPT_RE = /^你(?:接收|接受|收下|领取)了.*?转[账帐]/;
 const LOG_RETURN_RE = /^你退回了.*?转[账帐]/;
 /**
- * 伪造: 主语是用户。`xx向你转账 1999` 是角色在替用户转账;
+ * 伪造: 主语是用户 (第三方名字)。`xx向你转账 1999` 是角色在替用户转账;
  * `xx接收了你的转账` 是角色在替用户签收。两者都必须拦下, 不能渲染。
+ *
+ * 判定顺序上必须排在 LOG_SEND_RE **之后**: `我向你转账 520` 也含「向你转账」,
+ * 但主语「我」= 角色自己, 是合法 send —— 先按主语锚定认领, 剩下的才算伪造。
  */
 const LOG_FORGED_RE = /(?:向|给)你转[账帐]|(?:接收|接受|收下|领取|退回)了你的转[账帐]/;
 
@@ -220,9 +229,8 @@ function classifySystemLog(inner: string): TransferEvent | null | undefined {
     const s = inner.trim();
     if (!LOG_IS_TRANSFER_RE.test(s)) return undefined;
 
-    // 伪造判定必须最先跑 —— 约束 2
-    if (LOG_FORGED_RE.test(s)) return null;
-
+    // 主语锚定 (^你 / ^我) 的形态先认领 —— `我向你转账` 的「我」是角色自己, 合法 send,
+    // 不能被下面按「向你转账」子串判伪造的规则误杀。
     if (LOG_ACCEPT_RE.test(s)) return { kind: 'accept' };
     if (LOG_RETURN_RE.test(s)) return { kind: 'return' };
 
@@ -231,6 +239,9 @@ function classifySystemLog(inner: string): TransferEvent | null | undefined {
         const amount = parseTransferAmount(m[1]);
         return amount === null ? null : { kind: 'send', amount: formatTransferAmount(amount) };
     }
+
+    // 主语不是你/我的剩余形态: 伪造 (角色替用户转账/签收), 剥掉且零事件 —— 约束 2
+    if (LOG_FORGED_RE.test(s)) return null;
 
     // 其余转账相关日志 (回执的其它措辞等): 剥掉保正文, 不产生事件
     return null;

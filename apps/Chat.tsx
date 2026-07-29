@@ -9,8 +9,9 @@ import { buildChatFineTuneCss, mergeChatFineTune } from '../utils/chatFineTuneCs
 import ChatFineTunePanel from '../components/chat/ChatFineTunePanel';
 import { FadersHorizontal } from '@phosphor-icons/react';
 import { generateDailyScheduleForChar, isScheduleFeatureOn } from '../utils/scheduleGenerator';
-import { getLocalDailySchedule } from '../utils/dailySchedule';
+import { getDailyScheduleForChar } from '../utils/dailySchedule';
 import { useLocalDateKey } from '../hooks/useLocalDateKey';
+import { resolveCharTimeZone } from '../utils/timezone';
 import { generateSlotTheater } from '../utils/theaterGenerator';
 import TheaterPlayer from '../components/schedule/TheaterPlayer';
 import { formatMessageWithTime, normalizeMessageContent } from '../utils/messageFormat';
@@ -35,6 +36,7 @@ import ChatHeader from '../components/chat/ChatHeaderShell';
 import CharacterEntryTransition from '../components/chat/CharacterEntryTransition';
 import ChromeCssEditor from '../components/chat/ChromeCssEditor';
 import ChatInputArea from '../components/chat/ChatInputArea';
+import MemoryRepairPortal from '../components/chat/MemoryRepairPortal';
 import ChatModals from '../components/chat/ChatModals';
 import Modal from '../components/os/Modal';
 import ProactiveSettingsModal from '../components/chat/ProactiveSettingsModal';
@@ -70,7 +72,7 @@ type InstantToolUiStatus = {
 };
 
 const Chat: React.FC = () => {
-    const { characters, activeCharacterId, setActiveCharacterId, updateCharacter, apiConfig, apiPresets, addApiPreset, closeApp, customThemes, removeCustomTheme, addToast, showError, userProfile, lastMsgTimestamp, groups, characterGroups, clearUnread, unreadMessages, realtimeConfig, memoryPalaceConfig, syncEmotionApiToAllCharacters, theme: osTheme, proactiveComposingChars, openDateWithChar } = useOS();
+    const { characters, activeCharacterId, setActiveCharacterId, updateCharacter, apiConfig, apiPresets, addApiPreset, closeApp, customThemes, removeCustomTheme, addToast, showError, userProfile, lastMsgTimestamp, groups, characterGroups, clearUnread, unreadMessages, realtimeConfig, memoryPalaceConfig, remoteVectorConfig, syncEmotionApiToAllCharacters, theme: osTheme, proactiveComposingChars, openDateWithChar } = useOS();
     const isProactiveComposing = !!(activeCharacterId && proactiveComposingChars[activeCharacterId]);
     const localDateKey = useLocalDateKey();
 
@@ -97,6 +99,7 @@ const Chat: React.FC = () => {
     const WINDOW_RADIUS = 25;
     const [input, setInput] = useState('');
     const [showPanel, setShowPanel] = useState<'none' | 'actions' | 'emojis' | 'chars'>('none');
+    const [memoryRepairOpen, setMemoryRepairOpen] = useState(false);
     
     // Emoji State
     const [emojis, setEmojis] = useState<Emoji[]>([]);
@@ -191,6 +194,37 @@ const Chat: React.FC = () => {
     const [showingTargetIds, setShowingTargetIds] = useState<Set<number>>(new Set());
 
     const char = characters.find(c => c.id === activeCharacterId) || characters[0];
+    const memoryRepairRound = useMemo(() => {
+        let assistantIndex = -1;
+        for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === 'assistant') {
+                assistantIndex = i;
+                break;
+            }
+        }
+        if (assistantIndex < 0) {
+            return { sinceTs: Date.now(), userMessage: '', assistantReply: '' };
+        }
+        let userIndex = -1;
+        for (let i = assistantIndex - 1; i >= 0; i--) {
+            if (messages[i].role === 'user') {
+                userIndex = i;
+                break;
+            }
+        }
+        const assistantReply = messages
+            .slice(userIndex + 1)
+            .filter(message => message.role === 'assistant')
+            .map(message => message.content)
+            .join('\n');
+        return {
+            // receipt 在用户消息落库之后、助手回复落库之前产生；留 1 秒时钟误差容差。
+            sinceTs: userIndex >= 0 ? Math.max(0, messages[userIndex].timestamp - 1000) : messages[assistantIndex].timestamp - 60_000,
+            userMessage: userIndex >= 0 ? messages[userIndex].content : '',
+            assistantReply,
+        };
+    }, [messages]);
+    const charDateKey = useLocalDateKey(resolveCharTimeZone(char));
     charRef.current = char; // Keep ref in sync for async callbacks
     const historyContextRange = useMemo(() => {
         if (!char) return undefined;
@@ -812,7 +846,7 @@ const Chat: React.FC = () => {
             setScheduleData(null);
             return;
         }
-        getLocalDailySchedule(char.id).then(existing => {
+        getDailyScheduleForChar(char).then(existing => {
             if (!existing) {
                 // Generate in background, don't block chat
                 generateDailySchedule(char, false);
@@ -820,7 +854,7 @@ const Chat: React.FC = () => {
                 setScheduleData(existing);
             }
         }).catch(() => {});
-    }, [activeCharacterId, char?.scheduleFeatureEnabled, localDateKey]);
+    }, [activeCharacterId, char?.scheduleFeatureEnabled, char?.customTimezoneEnabled, char?.customTimezone, charDateKey]);
 
     // 每次真正打开聊天设置时从角色持久化值重新初始化；避免用户在记忆宫殿页
     // 切换全自动模式后，隐藏着的 Chat 组件仍带着旧拉杆状态。
@@ -1251,6 +1285,7 @@ const Chat: React.FC = () => {
 
     const handlePanelAction = (type: string, payload?: any) => {
         switch (type) {
+            case 'memory-link': setShowPanel('none'); setMemoryRepairOpen(true); break;
             case 'transfer': setModalType('transfer'); break;
             case 'poke': handleSendText('[戳一戳]', 'interaction'); break;
             case 'archive': setModalType('archive-settings'); break;
@@ -1540,7 +1575,7 @@ const Chat: React.FC = () => {
     const loadSchedule = async () => {
         if (!char) return;
         if (!isScheduleFeatureOn(char)) { setScheduleData(null); return; }
-        const s = await getLocalDailySchedule(char.id);
+        const s = await getDailyScheduleForChar(char);
         setScheduleData(s);
     };
 
@@ -1695,7 +1730,7 @@ const Chat: React.FC = () => {
         // 打开后立刻尝试生成（若今日未生成且已选风格）
         const updatedChar = { ...char, ...patch };
         if (updatedChar.scheduleStyle) {
-            const existing = await getLocalDailySchedule(char.id).catch(() => null);
+            const existing = await getDailyScheduleForChar(updatedChar).catch(() => null);
             if (existing) {
                 setScheduleData(existing);
             } else {
@@ -3644,6 +3679,23 @@ const Chat: React.FC = () => {
             {/* 情绪设置已嵌入日程 Modal（与日程强制同步开/关），不再单独渲染 */}
 
             {/* 🍔 麦当劳小程序 - MCP 数据流按钮驱动, 协同聊天走主 pipeline (完整人设/记忆/日程) */}
+            {memoryRepairOpen && char && (
+                <MemoryRepairPortal
+                    char={char}
+                    user={userProfile}
+                    apiConfig={apiConfig}
+                    embeddingConfig={memoryPalaceConfig.embedding}
+                    remoteVectorConfig={remoteVectorConfig}
+                    sinceTs={memoryRepairRound.sinceTs}
+                    userMessage={memoryRepairRound.userMessage}
+                    assistantReply={memoryRepairRound.assistantReply}
+                    onClose={() => {
+                        setMemoryRepairOpen(false);
+                        setShowPanel('none');
+                    }}
+                />
+            )}
+
             <McdMiniApp
                 open={mcdAppOpen}
                 onClose={() => setMcdAppOpen(false)}
