@@ -3209,6 +3209,16 @@ var buildMcpNameMap = (servers, opts = {}) => {
   }
   return resolve;
 };
+var MCP_RESULT_MAX_CHARS = 2e4;
+var formatMcpToolResult = (data) => {
+  let s;
+  try {
+    s = typeof data === "string" ? data : JSON.stringify(data);
+  } catch {
+    s = String(data);
+  }
+  return s.length > MCP_RESULT_MAX_CHARS ? `${s.slice(0, MCP_RESULT_MAX_CHARS)}\u2026[\u7ED3\u679C\u8FC7\u957F\u5DF2\u622A\u65AD, \u5168\u6587\u5171 ${s.length} \u5B57\u7B26]` : s;
+};
 var stripTextFakedMcpCalls = (content, calls) => {
   let cleaned = content;
   for (const call of calls) cleaned = cleaned.split(call.matched).join("");
@@ -3341,6 +3351,312 @@ var extractTextFakedMcpCalls = (content, resolve, opts = {}) => {
     }
   }
   return found.sort((a, b) => a.index - b.index).map(({ index: _index, ...call }) => call);
+};
+var MCP_PROTOCOL_VERSION = "2024-11-05";
+var MCP_REQUEST_TIMEOUT_MS = 6e4;
+var createMcpSessionState = () => ({ sessionId: null, initialized: false, initPromise: null, nextId: 0 });
+var buildRpcRequest = (session, method, params, isNotification = false) => {
+  const req = { jsonrpc: "2.0", method, params };
+  if (!isNotification) req.id = ++session.nextId;
+  return req;
+};
+var parseSse = (text) => {
+  const dataLines = [];
+  for (const line of text.split("\n")) {
+    if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5));
+  }
+  for (let i = dataLines.length - 1; i >= 0; i--) {
+    try {
+      return JSON.parse(dataLines[i]);
+    } catch {
+    }
+  }
+  return null;
+};
+var parseResp = (text, contentType) => {
+  if (contentType.includes("text/event-stream") || /^\s*(event:|data:)/.test(text)) {
+    const parsed = parseSse(text);
+    if (parsed) return parsed;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    const m = text.match(/\{[\s\S]*\}/);
+    if (m) {
+      try {
+        return JSON.parse(m[0]);
+      } catch {
+      }
+    }
+    throw new Error(`MCP: \u65E0\u6CD5\u89E3\u6790\u54CD\u5E94: ${text.slice(0, 300)}`);
+  }
+};
+var readSseResponse = async (resp, expectedId) => {
+  const reader = resp.body?.getReader();
+  if (!reader) return parseResp(await resp.text(), "text/event-stream");
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const parseEvent = (event) => {
+    const data = event.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+    if (!data || data === "[DONE]") return null;
+    try {
+      const parsed = JSON.parse(data);
+      return expectedId == null || parsed.id === expectedId ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const events = buffer.split(/\r?\n\r?\n/);
+      buffer = events.pop() || "";
+      for (const event of events) {
+        const parsed = parseEvent(event);
+        if (parsed) return parsed;
+      }
+      if (done) {
+        const parsed = parseEvent(buffer);
+        if (parsed) return parsed;
+        throw new Error("MCP SSE \u6D41\u7ED3\u675F\uFF0C\u4F46\u6CA1\u6709\u6536\u5230\u672C\u6B21\u8BF7\u6C42\u7684\u54CD\u5E94");
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {
+    });
+  }
+};
+var postCore = async (target, session, body, timeoutMs, expectResponse = true) => {
+  const headers = target.headers(session.sessionId);
+  let resp;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    try {
+      resp = await fetch(target.url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+    } catch (e) {
+      if (controller.signal.aborted) {
+        throw new Error(`MCP \u8BF7\u6C42\u8D85\u65F6\uFF08${Math.round(timeoutMs / 1e3)} \u79D2\uFF09`);
+      }
+      const hint = target.fetchErrorHint || "";
+      throw new Error(`MCP \u8BF7\u6C42\u5931\u8D25: ${e?.message || e}\u3002${hint}`);
+    }
+    const readText = async () => {
+      try {
+        return await resp.text();
+      } catch (e) {
+        if (controller.signal.aborted) {
+          throw new Error(`MCP \u8BF7\u6C42\u8D85\u65F6\uFF08${Math.round(timeoutMs / 1e3)} \u79D2\uFF09`);
+        }
+        throw e;
+      }
+    };
+    const newSid = resp.headers.get("Mcp-Session-Id") || resp.headers.get("mcp-session-id");
+    if (newSid) session.sessionId = newSid;
+    if (resp.status === 401 || resp.status === 403) {
+      const txt = await readText().catch(() => "");
+      throw new Error(`MCP \u9274\u6743\u5931\u8D25 (${resp.status}): Token \u53EF\u80FD\u65E0\u6548\u6216\u8FC7\u671F\u3002${txt.slice(0, 120)}`);
+    }
+    if (resp.status === 202) return { response: null };
+    if (!resp.ok) {
+      const txt = await readText().catch(() => "");
+      throw new Error(`MCP HTTP ${resp.status}: ${txt.slice(0, 200)}`);
+    }
+    if (!expectResponse) return { response: null };
+    const ct = resp.headers.get("content-type") || "";
+    try {
+      if (ct.includes("text/event-stream")) {
+        return { response: await readSseResponse(resp, body.id) };
+      }
+      const text = await readText();
+      return { response: parseResp(text, ct) };
+    } catch (e) {
+      if (controller.signal.aborted) {
+        throw new Error(`MCP \u8BF7\u6C42\u8D85\u65F6\uFF08${Math.round(timeoutMs / 1e3)} \u79D2\uFF09`);
+      }
+      throw e;
+    }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+var initializeCore = async (target, session, timeoutMs) => {
+  const initReq = buildRpcRequest(session, "initialize", {
+    protocolVersion: MCP_PROTOCOL_VERSION,
+    capabilities: {},
+    clientInfo: { name: "SullyOS-MCP", version: "1.0.0" }
+  });
+  const { response } = await postCore(target, session, initReq, timeoutMs);
+  if (response?.error) throw new Error(`Initialize \u5931\u8D25: ${response.error.message}`);
+  const notif = buildRpcRequest(session, "notifications/initialized", {}, true);
+  await postCore(target, session, notif, timeoutMs, false).catch(() => {
+  });
+  session.initialized = true;
+};
+var ensureInitializedCore = async (target, session, timeoutMs) => {
+  if (session.initialized) return;
+  if (!session.initPromise) {
+    session.initPromise = initializeCore(target, session, timeoutMs).catch((e) => {
+      session.initPromise = null;
+      throw e;
+    });
+  }
+  await session.initPromise;
+};
+var isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+var resolveLocalSchemaRef = (schema, rootSchema) => {
+  const ref = typeof schema?.$ref === "string" ? schema.$ref : "";
+  if (!ref.startsWith("#/")) return schema;
+  const resolved = ref.slice(2).split("/").reduce((current, part) => {
+    const key = part.replace(/~1/g, "/").replace(/~0/g, "~");
+    return current?.[key];
+  }, rootSchema);
+  return resolved || schema;
+};
+var schemaAccepts = (schema, kind) => {
+  const types = Array.isArray(schema?.type) ? schema.type : [schema?.type];
+  if (types.includes(kind)) return true;
+  if (kind === "object" && schema?.properties) return true;
+  if (kind === "array" && schema?.items) return true;
+  return [...schema?.oneOf || [], ...schema?.anyOf || []].some((item) => schemaAccepts(item, kind));
+};
+var normalizeMcpValueBySchema = (value, rawSchema, rootSchema, depth) => {
+  if (!rawSchema || depth > 20) return value;
+  const schema = resolveLocalSchemaRef(rawSchema, rootSchema);
+  const acceptsObject = schemaAccepts(schema, "object");
+  const acceptsArray = schemaAccepts(schema, "array");
+  let normalized = value;
+  if (typeof normalized === "string" && (acceptsObject || acceptsArray)) {
+    for (let i = 0; i < 3 && typeof normalized === "string"; i++) {
+      const text = normalized.trim();
+      if (!text) break;
+      try {
+        normalized = JSON.parse(text);
+      } catch {
+        break;
+      }
+    }
+    const decodedMatchesSchema = acceptsObject && isRecord(normalized) || acceptsArray && Array.isArray(normalized);
+    if (!decodedMatchesSchema) normalized = value;
+  }
+  const alternatives = [...schema?.oneOf || [], ...schema?.anyOf || []];
+  if (alternatives.length) {
+    const matching = alternatives.find(
+      (item) => isRecord(normalized) && schemaAccepts(item, "object") || Array.isArray(normalized) && schemaAccepts(item, "array")
+    );
+    if (matching) normalized = normalizeMcpValueBySchema(normalized, matching, rootSchema, depth + 1);
+  }
+  if (isRecord(normalized) && acceptsObject) {
+    const result = { ...normalized };
+    const properties = schema?.properties || {};
+    for (const [key, childSchema] of Object.entries(properties)) {
+      if (key in result) result[key] = normalizeMcpValueBySchema(result[key], childSchema, rootSchema, depth + 1);
+    }
+    if (schema?.additionalProperties && typeof schema.additionalProperties === "object") {
+      for (const key of Object.keys(result)) {
+        if (!(key in properties)) {
+          result[key] = normalizeMcpValueBySchema(result[key], schema.additionalProperties, rootSchema, depth + 1);
+        }
+      }
+    }
+    for (const item of schema?.allOf || []) {
+      const merged = normalizeMcpValueBySchema(result, item, rootSchema, depth + 1);
+      if (isRecord(merged)) Object.assign(result, merged);
+    }
+    return result;
+  }
+  if (Array.isArray(normalized) && acceptsArray && schema?.items) {
+    return normalized.map((item) => normalizeMcpValueBySchema(item, schema.items, rootSchema, depth + 1));
+  }
+  return normalized;
+};
+var normalizeMcpToolArguments = (args, inputSchema) => normalizeMcpValueBySchema(args, inputSchema, inputSchema, 0);
+var targetHost = (url) => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+};
+var callMcpToolCore = async (target, session, toolName, args = {}, opts = {}) => {
+  const timeoutMs = opts.timeoutMs ?? MCP_REQUEST_TIMEOUT_MS;
+  const normalizedArgs = normalizeMcpToolArguments(args, opts.inputSchema);
+  const finish = (result) => {
+    let resultPreview = "";
+    if (result.success) {
+      try {
+        resultPreview = JSON.stringify(result.data).slice(0, 800);
+      } catch {
+        resultPreview = String(result.data).slice(0, 800);
+      }
+    }
+    console.info("\u{1F50C} [MCP] tools/call \u5B8C\u6210", {
+      server: opts.serverLabel ?? targetHost(target.url),
+      tool: toolName,
+      args: normalizedArgs,
+      success: result.success,
+      ...result.success ? { result: resultPreview } : { error: result.error }
+    });
+    return result;
+  };
+  try {
+    await ensureInitializedCore(target, session, timeoutMs);
+    const body = buildRpcRequest(session, "tools/call", { name: toolName, arguments: normalizedArgs });
+    let response;
+    try {
+      ({ response } = await postCore(target, session, body, timeoutMs));
+    } catch (e) {
+      if (/HTTP (400|404)/.test(e?.message || "")) {
+        Object.assign(session, createMcpSessionState());
+        await ensureInitializedCore(target, session, timeoutMs);
+        ({ response } = await postCore(
+          target,
+          session,
+          buildRpcRequest(session, "tools/call", { name: toolName, arguments: normalizedArgs }),
+          timeoutMs
+        ));
+      } else {
+        throw e;
+      }
+    }
+    if (!response) return finish({ success: false, error: "\u7A7A\u54CD\u5E94" });
+    if (response.error) return finish({ success: false, error: `MCP \u9519\u8BEF [${response.error.code}]: ${response.error.message}` });
+    const result = response.result;
+    if (result?.content && Array.isArray(result.content)) {
+      const textParts = result.content.filter((c) => c?.type === "text").map((c) => c.text || "");
+      const fullText = textParts.join("\n").trim();
+      if (result.isError) return finish({ success: false, error: fullText || "MCP \u5DE5\u5177\u6267\u884C\u5931\u8D25", rawText: fullText });
+      try {
+        return finish({ success: true, data: JSON.parse(fullText), rawText: fullText });
+      } catch {
+        return finish({ success: true, data: fullText, rawText: fullText });
+      }
+    }
+    return finish({ success: true, data: result });
+  } catch (e) {
+    return finish({ success: false, error: e?.message || String(e) });
+  }
+};
+var buildMcpDirectHeaders = (server, sessionId) => {
+  const headers = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream"
+  };
+  for (const item of server.customHeaders || []) {
+    const name = String(item?.name || "").trim();
+    const value = String(item?.value || "").trim();
+    if (name && value) headers[name] = value;
+  }
+  if (server.token) headers["Authorization"] = `Bearer ${server.token}`;
+  if (sessionId) headers["Mcp-Session-Id"] = sessionId;
+  return headers;
 };
 var filterMcpServersForChar = (servers, charId) => (servers || []).filter(
   (s) => !!s.url && (s.tools?.length || 0) > 0 && (!s.charIds?.length || s.charIds.includes(charId))
@@ -5514,6 +5830,32 @@ var recordSkip = async (ctx, charId, reason, occurrenceMs) => {
     console.warn("[amsg:expire-skip] \u8DF3\u8FC7\u539F\u56E0\u5199\u5165\u5931\u8D25\uFF08\u95F8\u7167\u5E38\u751F\u6548\uFF0C\u53EA\u662F\u9762\u677F\u5C11\u4E00\u53E5\u8BF4\u660E\uFF09", error);
   }
 };
+var MCP_CALL_TIMEOUT_MS = 25e3;
+var runMcpFireTool = async (stash, name, args) => {
+  const exposed = name.slice("mcp__".length);
+  const hit = stash.mcpResolve?.get(exposed);
+  if (!hit) {
+    return { ok: false, reason: "unknown_tool", message: `\u672A\u914D\u7F6E\u7684 MCP \u5DE5\u5177: ${exposed}` };
+  }
+  let session = stash.mcpSessions.get(hit.server.id);
+  if (!session) {
+    session = createMcpSessionState();
+    stash.mcpSessions.set(hit.server.id, session);
+  }
+  const result = await callMcpToolCore(
+    // worker 侧 fetch 没有 CORS，直连用户配的地址，不经代理。
+    { url: hit.server.url, headers: (sid) => buildMcpDirectHeaders(hit.server, sid) },
+    session,
+    hit.toolName,
+    args,
+    {
+      timeoutMs: MCP_CALL_TIMEOUT_MS,
+      inputSchema: hit.tool.inputSchema,
+      serverLabel: hit.server.name
+    }
+  );
+  return result.success ? { ok: true, source: hit.server.name, data: formatMcpToolResult(result.data) } : { ok: false, reason: "mcp_error", source: hit.server.name, message: result.error };
+};
 var amsgHooks = {
   async onBeforeFire(ctx) {
     const charId = ctx.task?.metadata?.charId;
@@ -5692,7 +6034,7 @@ var amsgHooks = {
           });
           continue;
         }
-        const result = await dispatchAgenticTool(name, args, stash.toolCtx);
+        const result = name.startsWith("mcp__") ? await runMcpFireTool(stash, name, args) : await dispatchAgenticTool(name, args, stash.toolCtx);
         stash.session.toolCalls.push({ name, fingerprint });
         content = buildToolResultMessage({ name, result, history: stash.session.toolCalls });
         console.log("[amsg:agentic]", { type: "tool_done", sessionId: ctx.sessionId, tool: name });
@@ -5736,5 +6078,6 @@ export {
   buildWorkerConfig,
   src_default as default,
   offloadOversizedPush,
-  resolveVapidEmail
+  resolveVapidEmail,
+  runMcpFireTool
 };

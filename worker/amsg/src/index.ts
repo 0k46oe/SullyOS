@@ -52,11 +52,14 @@ import {
   type AmsgToolPack,
 } from '../../../utils/amsgToolPack';
 import {
+  buildMcpDirectHeaders,
   buildMcpFireBlock,
   buildMcpFireTools,
   buildMcpNameMap,
+  callMcpToolCore,
   createMcpSessionState,
   filterMcpServersForChar,
+  formatMcpToolResult,
   type McpResolvedToolCore,
   type McpSessionState,
 } from '../../../utils/mcpFireCore';
@@ -311,6 +314,50 @@ const recordSkip = async (
   } catch (error) {
     console.warn('[amsg:expire-skip] 跳过原因写入失败（闸照常生效，只是面板少一句说明）', error);
   }
+};
+
+/**
+ * 单个 MCP 调用的超时。总 fire 预算 240s / 最多 5 轮，一个慢服务器不能吃光
+ * 整条链（浏览器侧是 60s，那边没有轮次预算压力）。
+ */
+const MCP_CALL_TIMEOUT_MS = 25_000;
+
+/**
+ * 执行一个 mcp__ 前缀的工具调用。永不抛错——失败也以 ok:false 回喂给 LLM
+ * 圆场（与 dispatchAgenticTool 的失败语义对齐，见 executeToolCalls 注释）。
+ * export 只为单测。
+ */
+export const runMcpFireTool = async (
+  stash: Pick<FireStash, 'mcpResolve' | 'mcpSessions'>,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> => {
+  const exposed = name.slice('mcp__'.length);
+  const hit = stash.mcpResolve?.get(exposed);
+  if (!hit) {
+    return { ok: false, reason: 'unknown_tool', message: `未配置的 MCP 工具: ${exposed}` };
+  }
+  // 每台服务器一份会话，单次 fire 内跨轮复用：一次 fire 最多五轮，每轮重握手就是白烧往返。
+  let session = stash.mcpSessions.get(hit.server.id);
+  if (!session) {
+    session = createMcpSessionState();
+    stash.mcpSessions.set(hit.server.id, session);
+  }
+  const result = await callMcpToolCore(
+    // worker 侧 fetch 没有 CORS，直连用户配的地址，不经代理。
+    { url: hit.server.url, headers: (sid) => buildMcpDirectHeaders(hit.server, sid) },
+    session,
+    hit.toolName,
+    args as Record<string, any>,
+    {
+      timeoutMs: MCP_CALL_TIMEOUT_MS,
+      inputSchema: hit.tool.inputSchema,
+      serverLabel: hit.server.name,
+    },
+  );
+  return result.success
+    ? { ok: true, source: hit.server.name, data: formatMcpToolResult(result.data) }
+    : { ok: false, reason: 'mcp_error', source: hit.server.name, message: result.error };
 };
 
 // export 只为单测（见 index.test.ts）：onBeforeFire 的四道门顺序是这个功能最关键的
@@ -591,7 +638,11 @@ export const amsgHooks = {
           continue;
         }
 
-        const result = await dispatchAgenticTool(name, args, stash.toolCtx);
+        // 通用 MCP 走直连（worker 服务端 fetch 无 CORS），其余走内置工具；
+        // 两边失败语义一致，回喂 / 记账 / 日志共用下面这段。
+        const result = name.startsWith('mcp__')
+          ? await runMcpFireTool(stash, name, args)
+          : await dispatchAgenticTool(name, args, stash.toolCtx);
         stash.session.toolCalls.push({ name, fingerprint });
         // 不再回裸 JSON：模型从裸 JSON 里看不出「这一步已经做完了」，提示词里但凡有一句
         // 常驻的「先去查 X」就会每轮照做。这段话跟前台说的是同一套（见 agenticToolFeedback）。
