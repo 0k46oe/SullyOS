@@ -25,8 +25,9 @@ const REQUIRED_WORKER_FEATURES = [
 //   next.5 — GET /messages 投影（charId/clientTaskId）、onBeforeFire 的 { skip } 出口
 //   next.6 — 任务占位租约（带工具的 AI 任务常跑过一分钟，没有占位会被相邻 cron tick 重复推）
 //   next.7 — hook 的 writeState（大内容旁路存 client_state）、Web Push payload 大小护栏
+//   next.8 — fire 循环透传 tools 请求参数（后台调用户自配 MCP 的前置）
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
-const REQUIRED_WORKER_VERSION = '2.6.0-next.7';
+const REQUIRED_WORKER_VERSION = '2.6.0-next.8';
 
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';

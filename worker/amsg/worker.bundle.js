@@ -392,7 +392,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.7/node_modules/@rei-standard/amsg-server/dist/chunk-I7EUMYQ4.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.8/node_modules/@rei-standard/amsg-server/dist/chunk-LEE5KQ7Y.mjs
 function isValidISO8601(dateString) {
   const date = new Date(dateString);
   return date instanceof Date && !isNaN(date.getTime());
@@ -801,6 +801,12 @@ function buildAiRequestBody(payload) {
   } else if (!Array.isArray(payload.messages)) {
     requestBody.temperature = 0.8;
   }
+  if (Array.isArray(payload.tools) && payload.tools.length > 0) {
+    requestBody.tools = payload.tools;
+    if (payload.toolChoice !== void 0 && payload.toolChoice !== null) {
+      requestBody.tool_choice = payload.toolChoice;
+    }
+  }
   if (payload.maxTokens === void 0 || payload.maxTokens === null) {
     return requestBody;
   }
@@ -1010,11 +1016,13 @@ function normalizeBeforeFireResult(result) {
     return {
       messages: result.messages,
       maxToolIterations: result.maxToolIterations,
-      totalTimeoutMs: result.totalTimeoutMs
+      totalTimeoutMs: result.totalTimeoutMs,
+      tools: Array.isArray(result.tools) && result.tools.length > 0 ? result.tools : void 0,
+      toolChoice: result.toolChoice
     };
   }
   throw new TypeError(
-    "AGENTIC_BAD_BEFORE_FIRE: onBeforeFire must return ChatMessage[] | { messages, maxToolIterations?, totalTimeoutMs? } | { skip: true } | null"
+    "AGENTIC_BAD_BEFORE_FIRE: onBeforeFire must return ChatMessage[] | { messages, maxToolIterations?, totalTimeoutMs?, tools?, toolChoice? } | { skip: true } | null"
   );
 }
 function firstPositiveInt(values, fallback) {
@@ -1132,7 +1140,11 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
     }
     const roundTimeoutMs = Math.max(1, Math.min(3e5, deadline - nowFn()));
     const { response: llmResponse } = await callLlm(
-      { ...decryptedPayload, messages },
+      {
+        ...decryptedPayload,
+        messages,
+        ...normalized.tools ? { tools: normalized.tools, toolChoice: normalized.toolChoice } : {}
+      },
       { requireContent: false, timeoutMs: roundTimeoutMs }
     );
     const assistantMessage = extractAssistantMessage(llmResponse);
@@ -1188,7 +1200,10 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
         content: `Tool execution failed: ${error?.message ?? String(error)}`
       }));
     }
-    const assistantWithTools = Array.isArray(assistantMessage.tool_calls) && assistantMessage.tool_calls.length > 0 ? assistantMessage : { ...assistantMessage, tool_calls: toolCalls };
+    const nativeCalls = Array.isArray(assistantMessage.tool_calls) ? assistantMessage.tool_calls : [];
+    const nativeIds = new Set(nativeCalls.map((tc) => tc && tc.id));
+    const synthesized = toolCalls.filter((tc) => !nativeIds.has(tc && tc.id));
+    const assistantWithTools = synthesized.length === 0 ? assistantMessage : { ...assistantMessage, tool_calls: [...nativeCalls, ...synthesized] };
     messages = [...messages.slice(0, -1), assistantWithTools, ...toolResults];
   }
   throw new Error(`AGENTIC_LOOP_EXCEEDED: no finish/skip-push decision within ${maxToolIterations} LLM round(s)`);
@@ -2577,7 +2592,7 @@ function createClientStateHandler(ctx) {
   }
   return { PUT, GET, DELETE };
 }
-var SERVER_VERSION = true ? "2.6.0-next.7" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.6.0-next.8" : "0.0.0-dev";
 var SERVER_FEATURES = Object.freeze([
   "client-state",
   "client-state-chunking",
@@ -2585,6 +2600,7 @@ var SERVER_FEATURES = Object.freeze([
   "agentic-hooks",
   "agentic-scratch",
   "agentic-write-state",
+  "agentic-fire-tools",
   "vapid-public-key"
 ]);
 function createCapabilitiesHandler(ctx) {
