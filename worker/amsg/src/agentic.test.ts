@@ -411,6 +411,21 @@ describe('processLLMRound + MCP', () => {
     expect(d.toolCalls[0].function.name).toBe('mcp__get_secret');
   });
 
+  // 模型经常同一个意图两处都写：native 通道发一份、正文里再"演"一份。
+  // 两份都入列会把同一个工具跑两遍（第二次还会被判成重复调用往收尾计数上加），
+  // 所以 native 在场时正文那份只剥语法、不入列。
+  it('native 与正文同时出现 → 只认 native，正文语法照剥', () => {
+    const state = createFireSessionState();
+    const d = processLLMRound(state, '我去问问。\nget_secret({"who":"小满"})', build, {
+      resolve: mcpResolve,
+      nativeToolCalls: [nativeCall('{"who":"小满"}')],
+    });
+    expect(d.decision).toBe('tool-request');
+    if (d.decision !== 'tool-request') return;
+    expect(d.toolCalls).toEqual([nativeCall('{"who":"小满"}')]);   // 不重复入列
+    expect(state.narrations.join('')).not.toContain('get_secret('); // 语法照剥
+  });
+
   it('native 与数据标签同轮 → 合并进同一个 tool-request', () => {
     const state = createFireSessionState();
     const d = processLLMRound(state, '[[RECALL: 2026-06]]', build, {
