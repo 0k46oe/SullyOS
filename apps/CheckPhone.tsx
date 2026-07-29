@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { CharacterProfile, PhoneEvidence, PhoneCustomApp, PhoneContact, ConvTopic, AiSession, AiServiceKind, TavernCard } from '../types';
+import { CharacterProfile, PhoneEvidence, PhoneCustomApp, PhoneContact, PhoneSimLog, ConvTopic, AiSession, AiServiceKind, TavernCard } from '../types';
 import { ContextBuilder } from '../utils/context';
 import Modal from '../components/os/Modal';
 import { safeResponseJson, extractContent, extractJson } from '../utils/safeApi';
@@ -15,6 +15,7 @@ import PersonaSim, { LifeLog, generatePersonaScript } from './PersonaSim';
 import { usePersonaSim, personaSimStore } from '../utils/personaSimStore';
 import { getLastInnerState } from '../utils/emotionApply';
 import { trackEvent } from '../utils/analytics';
+import { normalizePhoneEvidence, phoneFieldToText } from '../utils/phoneEvidence';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import {
     User, Phone, ChatCircleDots, ChatCircle, ShoppingBag, Hamburger, Compass, GearSix,
@@ -349,7 +350,7 @@ const CheckPhone: React.FC = () => {
     const touchStartY = useRef<number | null>(null);
 
     // Derived state for evidence records
-    const records = targetChar?.phoneState?.records || [];
+    const records = (targetChar?.phoneState?.records || []).map(normalizePhoneEvidence);
     const customApps = targetChar?.phoneState?.customApps || [];
     const contacts = targetChar?.phoneState?.contacts || [];
     const allowFictional = targetChar?.phoneState?.allowFictionalContacts !== false;
@@ -380,11 +381,11 @@ const CheckPhone: React.FC = () => {
                 setTargetChar(updated);
                 if (selectedChatRecord) {
                     const freshRecord = updated.phoneState?.records?.find(r => r.id === selectedChatRecord.id);
-                    if (freshRecord && freshRecord !== selectedChatRecord) setSelectedChatRecord(freshRecord);
+                    if (freshRecord && freshRecord !== selectedChatRecord) setSelectedChatRecord(normalizePhoneEvidence(freshRecord));
                 }
                 if (selectedEvidenceRecord) {
                     const freshRecord = updated.phoneState?.records?.find(r => r.id === selectedEvidenceRecord.id);
-                    if (freshRecord && freshRecord !== selectedEvidenceRecord) setSelectedEvidenceRecord(freshRecord);
+                    if (freshRecord && freshRecord !== selectedEvidenceRecord) setSelectedEvidenceRecord(normalizePhoneEvidence(freshRecord));
                 }
                 if (selectedContact) {
                     const freshContact = updated.phoneState?.contacts?.find(c => c.id === selectedContact.id);
@@ -722,6 +723,7 @@ ${realCharRule}
                     logPrefix = "朋友圈";
                 }
             }
+            promptInstruction += `\n\n**JSON 字段类型硬约束**：每条记录的 "title"、"detail"、"value" 只能是字符串（value 可省略），绝不能返回对象或数组；标签、阅读进度、摘录、批注等结构请先整理成 detail 中的普通文本。`;
 
             const perspectiveLock = `### [视角锁定 · 极重要]
 接下来要生成的是**你（${targetChar.name}）自己手机里的东西**——你自己的生活、社交、记录。
@@ -759,8 +761,10 @@ ${realCharRule}
 
             if (Array.isArray(json)) {
                 for (const item of json) {
-                    const recordTitle = item.title || 'Unknown';
-                    const recordDetail = item.detail || '...';
+                    if (!item || typeof item !== 'object') continue;
+                    const recordTitle = phoneFieldToText(item.title, 'Unknown');
+                    const recordDetail = phoneFieldToText(item.detail, '...');
+                    const recordValue = phoneFieldToText(item.value);
 
                     // ---- 真假甄别 + 联系人 upsert ----
                     let contactId: string | undefined;
@@ -808,13 +812,13 @@ ${realCharRule}
                         // 进角色上下文的措辞：第二人称讲「你自己手机里有啥」，不暗示用户在偷看
                         const cardContent = type === 'chat'
                             ? `[你手机的聊天软件] 你和「${recordTitle}」的对话：${recordDetail.replace(/\n/g, ' ')}`
-                            : `[你手机的${logPrefix}] ${recordTitle}${item.value ? ` · ${item.value}` : ''} — ${recordDetail}`;
+                            : `[你手机的${logPrefix}] ${recordTitle}${recordValue ? ` · ${recordValue}` : ''} — ${recordDetail}`;
                         await DB.saveMessage({
                             charId: targetChar.id,
                             role: 'assistant',
                             type: 'phone_card',
                             content: cardContent,
-                            metadata: { phoneCard: { app: logPrefix, kind: type, title: recordTitle, detail: recordDetail, value: item.value } },
+                            metadata: { phoneCard: { app: logPrefix, kind: type, title: recordTitle, detail: recordDetail, value: recordValue || undefined } },
                         } as any);
                         const currentMsgs = await DB.getMessagesByCharId(targetChar.id);
                         savedMsgId = currentMsgs[currentMsgs.length - 1]?.id;
@@ -825,7 +829,7 @@ ${realCharRule}
                         type: type,
                         title: recordTitle,
                         detail: recordDetail,
-                        value: item.value,
+                        value: recordValue || undefined,
                         timestamp: Date.now(),
                         systemMessageId: savedMsgId,
                         contactId,
@@ -1885,6 +1889,27 @@ ${olderText}
             personaSimStore.set({ status: 'error', mode: m, theme: t, charId: cid, charName: cname });
             addToast('演出生成失败，请重试', 'error');
         }
+    };
+
+    const requestDeleteSimLog = (log: PhoneSimLog) => {
+        if (!targetChar) return;
+        const charId = targetChar.id;
+        askConfirm({
+            title: `删除生活记录「${log.title}」？`,
+            desc: '这条记录和用于重播的演出脚本会一并删除，无法撤销。已经发送给 TA 的回忆不会被撤回。',
+            confirmLabel: '删除',
+            danger: true,
+            onConfirm: () => {
+                updateCharacter(charId, (cur) => ({
+                    phoneState: {
+                        ...cur.phoneState,
+                        records: cur.phoneState?.records || [],
+                        simLogs: (cur.phoneState?.simLogs || []).filter(item => item.id !== log.id),
+                    },
+                }));
+                addToast('已删除生活记录', 'success');
+            },
+        });
     };
 
     // 全局指示条点击后请求深链：直接进入对应角色的演出
@@ -3551,6 +3576,7 @@ ${olderText}
                     )}
                     {activeAppId === 'lifelog' && targetChar && (
                         <LifeLog targetChar={targetChar} onBack={() => setActiveAppId('home')}
+                            onRequestDelete={requestDeleteSimLog}
                             onReplay={(log) => {
                                 if (!log.script) return;
                                 // 用存下来的脚本快照原样回放——直接喂给全局 store 的 ready 态

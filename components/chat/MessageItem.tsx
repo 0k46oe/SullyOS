@@ -3,6 +3,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { Message, ChatTheme } from '../../types';
+import { phoneFieldToText } from '../../utils/phoneEvidence';
 import { tryParseLifeSimResetCard } from '../../utils/lifeSimChatCard';
 import { VALID_INTERJECTION_TAGS, cleanVoiceMarkupForDisplay } from '../../utils/minimaxTts';
 import { stripFishCuesForDisplay } from '../../utils/fishAudioTts';
@@ -1598,34 +1599,40 @@ const MessageItem = React.memo(({
 
     // Render Avatar with potential decoration/frame
     // Removed mb-5 from here, handled via absolute positioning in parent
-    const renderAvatar = (src: string) => (
-        <div className={`relative ${avatarSizeClass} z-0`}>
-            {shouldShowAvatar && (
-                <>
-                    <img
-                        src={src}
-                        className={`w-full h-full ${avatarRadiusClass} object-cover shadow-sm ring-1 ring-black/5 relative z-0`}
-                        alt="avatar"
-                        loading="lazy"
-                        decoding="async"
-                    />
-                    {styleConfig.avatarDecoration && (
+    const renderAvatar = (
+        src: string,
+        options?: { visible?: boolean; className?: string },
+    ) => {
+        const visible = options?.visible ?? shouldShowAvatar;
+        return (
+            <div className={`relative ${avatarSizeClass} z-0 ${options?.className || ''}`}>
+                {visible && (
+                    <>
                         <img
-                            src={styleConfig.avatarDecoration}
-                            className="absolute pointer-events-none z-10 max-w-none"
-                            style={{
-                                left: `${styleConfig.avatarDecorationX ?? 50}%`,
-                                top: `${styleConfig.avatarDecorationY ?? 50}%`,
-                                width: `${avatarSizePx * (styleConfig.avatarDecorationScale ?? 1)}px`,
-                                height: 'auto',
-                                transform: `translate(-50%, -50%) rotate(${styleConfig.avatarDecorationRotate ?? 0}deg)`,
-                            }}
+                            src={src}
+                            className={`sully-chat-message-avatar-img w-full h-full ${avatarRadiusClass} object-cover shadow-sm ring-1 ring-black/5 relative z-0`}
+                            alt="avatar"
+                            loading="lazy"
+                            decoding="async"
                         />
-                    )}
-                </>
-            )}
-        </div>
-    );
+                        {styleConfig.avatarDecoration && (
+                            <img
+                                src={styleConfig.avatarDecoration}
+                                className="absolute pointer-events-none z-10 max-w-none"
+                                style={{
+                                    left: `${styleConfig.avatarDecorationX ?? 50}%`,
+                                    top: `${styleConfig.avatarDecorationY ?? 50}%`,
+                                    width: `${avatarSizePx * (styleConfig.avatarDecorationScale ?? 1)}px`,
+                                    height: 'auto',
+                                    transform: `translate(-50%, -50%) rotate(${styleConfig.avatarDecorationRotate ?? 0}deg)`,
+                                }}
+                            />
+                        )}
+                    </>
+                )}
+            </div>
+        );
+    };
 
     // --- SYSTEM MESSAGE RENDERING ---
     if (isSystem) {
@@ -1908,7 +1915,16 @@ const MessageItem = React.memo(({
                     <div className="w-[72%] max-w-[72%]">{thinkingChainNode}</div>
                 </div>
             )}
-            <div className={`flex items-end ${isUser ? 'justify-end' : 'justify-start'} ${marginBottom} px-3 group select-none relative transition-[padding] duration-300 ${selectionMode ? 'pl-12' : ''}`}>
+            <div className={[
+                'sully-chat-message',
+                isUser ? 'sully-chat-message-user justify-end' : 'sully-chat-message-ai justify-start',
+                isFirstInGroup ? 'sully-chat-message-group-first' : '',
+                isLastInGroup ? 'sully-chat-message-group-last' : '',
+                isModuleCard ? 'sully-chat-message-module' : '',
+                `flex items-end ${marginBottom} px-3 group select-none relative transition-[padding] duration-300`,
+                selectionMode ? 'pl-12' : '',
+            ].filter(Boolean).join(' ')}
+            style={{ '--sully-chat-message-avatar-size': `${avatarSizePx}px` } as React.CSSProperties}>
                 {selectionMode && (
                     <div className="absolute left-3 top-1/2 -translate-y-1/2 cursor-pointer z-20" onClick={() => onToggleSelect(m.id)}>
                         <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'bg-primary border-primary' : 'border-slate-300 bg-white/80'}`}>
@@ -1917,10 +1933,20 @@ const MessageItem = React.memo(({
                     </div>
                 )}
 
+                {/* 白框布局钩子：组首额外挂一份默认隐藏的头像；显示它即可做“每轮一次、头像在气泡上方”。 */}
+                {isFirstInGroup && !isModuleCard && (
+                    <div className={`sully-chat-turn-avatar-slot hidden absolute top-0 z-0 ${isUser ? 'right-3' : (selectionMode ? 'left-14' : 'left-3')}`}>
+                        {renderAvatar(isUser ? userAvatar : charAvatar, {
+                            visible: true,
+                            className: 'sully-chat-turn-avatar',
+                        })}
+                    </div>
+                )}
+
                 {/* HTML / 音乐卡片是独立模块，不继承普通消息外壳的角色头像。卡片内部自己的头像不受影响。 */}
                 {!isUser && !isModuleCard && (
-                    <div className={`absolute bottom-0 z-0 ${selectionMode ? 'left-14' : 'left-3'} transition-[left] duration-300`}>
-                        {renderAvatar(charAvatar)}
+                    <div className={`sully-chat-message-avatar-slot absolute bottom-0 z-0 ${selectionMode ? 'left-14' : 'left-3'} transition-[left] duration-300`}>
+                        {renderAvatar(charAvatar, { className: 'sully-chat-message-avatar' })}
                     </div>
                 )}
 
@@ -1941,7 +1967,7 @@ const MessageItem = React.memo(({
                     Added min-w-0 to prevent flexbox overflow issues.
                     Added explicit margins to clear absolute avatars.
                 */}
-                <div className={`relative max-w-[72%] min-w-0 ${isModuleCard && centerModules ? 'mx-auto' : (!isUser ? 'ml-12' : 'mr-12')} ${isModuleCard ? 'sully-html-wrap' : ''}`}>
+                <div className={`sully-chat-message-content relative max-w-[72%] min-w-0 ${isModuleCard && centerModules ? 'mx-auto' : (!isUser ? 'ml-12' : 'mr-12')} ${isModuleCard ? 'sully-html-wrap' : ''}`}>
                     <div
                         aria-hidden="true"
                         className={`absolute -right-10 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full flex items-center justify-center pointer-events-none transition-all duration-150 ${isReplyReady ? 'bg-indigo-500 text-white shadow-md shadow-indigo-200' : 'bg-white/90 text-slate-400 shadow-sm'}`}
@@ -1979,8 +2005,8 @@ const MessageItem = React.memo(({
 
                 {/* 用户侧若存在导入/历史模块卡，也保持同一条“卡片不带消息外侧头像”规则。 */}
                 {isUser && !isModuleCard && (
-                    <div className={`absolute right-3 bottom-0 z-0 transition-[left] duration-300`}>
-                        {renderAvatar(userAvatar)}
+                    <div className={`sully-chat-message-avatar-slot absolute right-3 bottom-0 z-0 transition-[left] duration-300`}>
+                        {renderAvatar(userAvatar, { className: 'sully-chat-message-avatar' })}
                     </div>
                 )}
             </div>
@@ -2536,7 +2562,20 @@ const MessageItem = React.memo(({
     }
 
     if (m.type === 'phone_card') {
-        const pc: any = m.metadata?.phoneCard || {};
+        const rawPhoneCard: any = m.metadata?.phoneCard || {};
+        const pc: any = {
+            ...rawPhoneCard,
+            kind: phoneFieldToText(rawPhoneCard.kind),
+            service: phoneFieldToText(rawPhoneCard.service),
+            serviceName: phoneFieldToText(rawPhoneCard.serviceName),
+            title: phoneFieldToText(rawPhoneCard.title),
+            detail: phoneFieldToText(rawPhoneCard.detail),
+            value: phoneFieldToText(rawPhoneCard.value),
+            app: phoneFieldToText(rawPhoneCard.app),
+            by: phoneFieldToText(rawPhoneCard.by),
+            contactName: phoneFieldToText(rawPhoneCard.contactName),
+            action: phoneFieldToText(rawPhoneCard.action),
+        };
         const timeStr = new Date(m.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 
         // 智能体卡片（偷看到 TA 在玩 AI：助手 / 树洞 / 酒馆）
