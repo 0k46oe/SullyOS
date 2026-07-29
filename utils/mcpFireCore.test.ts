@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { buildMcpNameMap, filterMcpServersForChar, withMcpDedupeSuffix, type McpFireServer } from './mcpFireCore';
 
@@ -67,5 +68,15 @@ describe('filterMcpServersForChar', () => {
     it('没有 url 或没发现工具的不进清单; 入参 undefined 得空数组', () => {
         expect(filterMcpServersForChar([srv({ url: '' }), srv({ tools: [] })], 'c')).toEqual([]);
         expect(filterMcpServersForChar(undefined, 'c')).toEqual([]);
+    });
+});
+
+describe('叶子纪律', () => {
+    // 这份文件会被打进 amsg worker bundle，import 到带浏览器依赖的模块就会在
+    // worker 里炸。靠源码扫描当场拦住，不用等到构建才发现。
+    it('mcpFireCore 保持环境无关：不 import 任何模块', () => {
+        const src = readFileSync(new URL('./mcpFireCore.ts', import.meta.url), 'utf8');
+        // 后续任务确需引入环境无关叶子时，在这里逐条放开白名单
+        expect(src.match(/^\s*import\s.+$/gm) ?? []).toEqual([]);
     });
 });

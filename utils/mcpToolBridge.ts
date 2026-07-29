@@ -9,7 +9,7 @@
  */
 
 import { getEnabledMcpServers, type McpServerConfig, type McpToolDef } from './mcpClient';
-import { buildMcpNameMap } from './mcpFireCore';
+import { buildMcpNameMap, type McpResolvedToolCore } from './mcpFireCore';
 
 export interface OpenAIMcpTool {
     type: 'function';
@@ -20,10 +20,8 @@ export interface OpenAIMcpTool {
     };
 }
 
-export interface ResolvedMcpTool {
-    server: McpServerConfig;
-    toolName: string;
-}
+/** 名映射条目，server 收窄成前台的完整配置类型（含 proxyUrl 等浏览器侧字段） */
+export type ResolvedMcpTool = McpResolvedToolCore<McpServerConfig>;
 
 /**
  * 聚合启用服务器的工具，返回 OpenAI 工具数组 + 暴露名→真实工具 的映射。
@@ -35,15 +33,13 @@ export const buildMcpOpenAITools = (charId?: string): { tools: OpenAIMcpTool[]; 
     const servers = getEnabledMcpServers(charId);
     const resolve: Map<string, ResolvedMcpTool> = buildMcpNameMap(servers);
     const tools: OpenAIMcpTool[] = [];
-    for (const [exposed, { server, toolName }] of resolve) {
-        const t = (server.tools || []).find(d => d.name === toolName);
-        if (!t) continue;
+    for (const [exposed, { server, tool }] of resolve) {
         tools.push({
             type: 'function',
             function: {
                 name: exposed,
-                description: buildToolDescription(server, t, servers.length > 1),
-                parameters: t.inputSchema || { type: 'object', properties: {} },
+                description: buildToolDescription(server, tool, servers.length > 1),
+                parameters: tool.inputSchema || { type: 'object', properties: {} },
             },
         });
     }
@@ -293,7 +289,7 @@ export const extractTextFakedMcpCalls = (
     const seen = new Set<string>();
 
     for (const [name, { exposed, hit }] of lookup) {
-        const schema = (hit.server.tools || []).find(t => t.name === hit.toolName)?.inputSchema;
+        const schema = hit.tool.inputSchema;
         const esc = escapeRegExp(name);
 
         // 形态1: name(args) —— 前面不能是单词字符/点/斜杠（防止匹配到更长标识符的一部分）

@@ -34,6 +34,8 @@ export interface McpFireServer {
 export interface McpResolvedToolCore<S extends McpFireServer = McpFireServer> {
     server: S;
     toolName: string;
+    /** 工具定义本体，建映射时一并带出，省得调用方再按名字回服务器里反查 */
+    tool: McpFireToolDef;
 }
 
 /** OpenAI 工具名的长度上限。 */
@@ -77,13 +79,17 @@ export const buildMcpNameMap = <S extends McpFireServer>(
                 let i = 2;
                 while (resolve.has(exposed)) exposed = withMcpDedupeSuffix(prefixed, i++, maxLen);
             }
-            resolve.set(exposed, { server, toolName: t.name });
+            resolve.set(exposed, { server, toolName: t.name, tool: t });
         }
     }
     return resolve;
 };
 
-/** fire 时按角色过滤可见服务器（与 getEnabledMcpServers 的 charIds 语义一致）。 */
+/**
+ * fire 时按角色过滤可见服务器（charIds 语义与 getEnabledMcpServers 一致）。
+ * 只管 url / tools / charIds 三项：服务器有没有启用由上云侧的
+ * collectMcpFireServers 把关，传到这里的清单已经只剩启用的。
+ */
 export const filterMcpServersForChar = <S extends McpFireServer>(
     servers: S[] | undefined,
     charId: string,
