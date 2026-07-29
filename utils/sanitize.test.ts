@@ -254,6 +254,16 @@ describe('bubble vs notification differences', () => {
     expect(sanitizeForBubble(once)).toBe(once);
   });
 
+  // [[记录:...]] 命名空间 —— 历史渲染形态 (transferFormat.formatTransferRecord)，
+  // 上游没认领的一律不进气泡/通知。同为对原版的有意分叉。
+  it('[[记录:...]] 整个命名空间在 bubble + notification 都剥', () => {
+    expect(sanitizeForBubble('[[记录:TRANSFER|to=user|amount=1999|status=待处理]]拿去花')).toBe('拿去花');
+    expect(sanitizeForNotification('[[记录:TRANSFER|to=user|amount=1999|status=已收下]]好耶')).toBe('好耶');
+    // 未来的记录类型自动受保护
+    expect(sanitizeForBubble('[[记录:POKE|by=user]]我在')).toBe('我在');
+    expect(sanitizeForBubble('[[記錄:TRANSFER|to=user]]繁体也剥')).toBe('繁体也剥');
+  });
+
   it('bubble 路径不剥 XHS_* / READ_NOTE (老行为)', () => {
     expect(sanitizeForBubble('[[XHS_LIKE: 1]] hi')).toBe('[[XHS_LIKE: 1]] hi');
     expect(sanitizeForBubble('[[READ_NOTE: key]] hi')).toBe('[[READ_NOTE: key]] hi');
@@ -325,6 +335,11 @@ describe('sanitizeIntoSegments', () => {
   it('[系统: ...] 独占一行 → banner 为空, 整块 skip (所以副作用不能靠正文传)', () => {
     const segs = sanitizeIntoSegments('[系统: 你向阿桃转账 1999]\n拿去花');
     expect(segs).toEqual([{ raw: '拿去花', sanitized: '拿去花' }]);
+  });
+
+  it('[[记录:...]] 在 segments 里当业务标签整剥 (worker 已在 directive 通道认领转账, 残留即 leak)', () => {
+    const segs = sanitizeIntoSegments('[[记录:POKE|by=user]]你好\n再见');
+    expect(segs.map((s) => s.raw)).toEqual(['你好', '再见']);
   });
 
   it('[系统: ...] 与正文同行 → raw 保留日志, banner 剥掉', () => {

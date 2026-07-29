@@ -24,6 +24,57 @@
  *     的既有惯例。残留的日志文本落进气泡就是这次 bug 的原样复现。
  */
 
+// ─── 记录形态: 历史渲染与输出语法的统一词汇表 ──────────────────────────────
+//
+// 历史上下文里同一条转账曾有四副面孔 (私聊 `[系统: 你向xx转账 1999]` / 归档第三人称 /
+// 群摘要 `[转账1999]` / 输出语法 `[[ACTION:TRANSFER:100]]`), 模型每次输出都要做一次
+// "从见过的翻译成该写的", 翻译就有失败率 —— 掉格式的根源。统一成共用词汇表:
+//
+//     历史:  [[记录:TRANSFER|to=user|amount=1999|status=已收下]]
+//     输出:  [[ACTION:TRANSFER|to=user|amount=1999]]
+//
+// 字段是包含关系 (ACTION ⊂ 记录): status 只在记录里有 —— 模型没有"替用户宣布已收下"
+// 的权限。前缀差异天然是幂等哨兵: 模型复读历史抄出来的是 [[记录:...]], 解析端消费丢弃,
+// 不产生新转账。to 固定写 user / char 两个词, 不写真名 (改名不炸; 真名在 tag 外的
+// 自然语言里本来就有)。
+//
+// TODO(记录形态推广): 转账这版观察一段时间, 没问题后把戳一戳 (interaction) / 时间间隔
+// 提示等其他系统事件也迁到 [[记录:...]] 形态 —— 幂等哨兵和 sanitize 终线已按整个
+// 记录命名空间实现, 迁移时只需要改渲染端。
+
+export interface TransferRecordInput {
+    /** 消息的 role —— 方向的唯一真理来源 (约束 2) */
+    role: 'user' | 'assistant';
+    amount?: string | number;
+    /** 回执消息 (metadata.receipt) */
+    receipt?: 'accepted' | 'returned';
+    /** 原始转账的 live 状态 (metadata.status) —— 收/退后历史不再显示"待处理" */
+    status?: string;
+}
+
+/**
+ * 把一条 transfer 消息渲染成历史记录行。chatPrompts.buildMessageHistory (私聊历史) 与
+ * messageFormat.normalizeMessageContent (归档 / 记忆宫殿) 共用, 保证全链路一副面孔。
+ *
+ * to 的取值: 原始转账 = role 的对手方 (assistant 发的钱流向 user); 回执 = 出回执一方
+ * 自己 (user 出的回执说明钱当初流向 user)。status 的收/退主语恒为收款方, 无歧义。
+ */
+export function formatTransferRecord(input: TransferRecordInput): string {
+    const { role, amount, receipt } = input;
+    const to = receipt
+        ? (role === 'user' ? 'user' : 'char')
+        : (role === 'user' ? 'char' : 'user');
+    const status = receipt
+        ? (receipt === 'accepted' ? '已收下' : '已退回')
+        : input.status === 'accepted' ? '已收下'
+        : input.status === 'returned' ? '已退回'
+        : '待处理';
+    const amountPart = (amount !== undefined && amount !== null && String(amount).trim() !== '')
+        ? `|amount=${amount}`
+        : '';
+    return `[[记录:TRANSFER|to=${to}${amountPart}|status=${status}]]`;
+}
+
 /** 一条转账相关指令。方向不在这里 —— 见约束 2。 */
 export type TransferEvent =
     /** 角色向用户转账。amount 是规范化后的字符串 (与 metadata.amount 的既有形态一致) */
@@ -75,10 +126,55 @@ export function formatTransferAmount(n: number): string {
 
 // ─── 规范标签 ──────────────────────────────────────────────────────────────
 
-// `[[ACTION:TRANSFER:1999]]` —— 冒号两侧容空白 / 全角, 金额交给 parseTransferAmount。
+// 记录哨兵: `[[记录:TRANSFER|...]]` 是历史渲染形态 (formatTransferRecord), 模型复读历史
+// 会连前缀一起抄出来。消费丢弃、恒不产生事件 —— 复读本来就不该产生新转账, 这个行为是对的。
+const RECORD_TRANSFER_RE = /\[\[\s*[记記][录錄]\s*[:：]\s*TRANSFER[^\]]*\]\]/gi;
+
+// 新 canonical: `[[ACTION:TRANSFER|to=user|amount=520]]` —— 跟记录行只差前缀和少一个
+// status, 模型从"见过的"到"该写的"只换一个词。kv 顺序不敏感, 裸值容错 (`|520` 当 amount)。
+// `(?:\|...)?` 不吃冒号, 所以跟老冒号形态 ACTION_SEND_RE 互不重叠; 也匹配裸
+// `[[ACTION:TRANSFER]]` (无金额 → 剥掉不产生事件, 比漏进气泡好)。
+const ACTION_SEND_KV_RE = /\[\[\s*ACTION\s*[:：]\s*TRANSFER\s*((?:\|[^\]]*)?)\s*\]\]/gi;
+
+// `[[ACTION:TRANSFER:1999]]` (老写法, 永久兼容 —— 存量世界书 / 用户自定义 prompt 还会写它)。
+// 冒号两侧容空白 / 全角, 金额交给 parseTransferAmount。
 // 注意 payload 用 `[^\]]*?` 而不是 `\d+`: 金额非法时也要匹配上, 才能剥掉不留残骸。
 // `TRANSFER` 后必须跟冒号, 所以不会误吃 `[[ACTION:TRANSFER_ACCEPT]]`。
 const ACTION_SEND_RE = /\[\[\s*ACTION\s*[:：]\s*TRANSFER\s*[:：]\s*([^\]]*?)\s*\]\]/gi;
+
+/**
+ * `to=` 的伪造值 —— 明确指向角色自己的写法。命中即整块丢弃 (约束 2: 文本里的方向
+ * 只做校验, 不做授权; 方向永远由 role 决定)。其余取值 (user / 用户 / 任意名字 / 缺省)
+ * 一律放行: 私聊对手方唯一, 写名字大概率就是对方, 不需要把 userName 传进纯函数。
+ */
+const FORGED_TO_VALUES = new Set(['char', 'self', 'me', '角色', '自己', '我', '自分', '本人']);
+
+/** `to=user|amount=520` → { to: 'user', amount: '520' }。裸值 (无 `=`) 且像金额 → 当 amount。 */
+function parseKvArgs(argStr: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const part of argStr.split(/[|｜]/)) {
+        const seg = part.trim();
+        if (!seg) continue;
+        const eq = seg.search(/[=＝]/);
+        if (eq < 0) {
+            if (!('amount' in out) && parseTransferAmount(seg) !== null) out.amount = seg;
+            continue;
+        }
+        const k = seg.slice(0, eq).trim().toLowerCase();
+        const v = seg.slice(eq + 1).trim();
+        if (k) out[k] = v;
+    }
+    return out;
+}
+
+/** kv 形态 → 事件。to 伪造 / 金额非法 → null (剥掉不产生事件)。 */
+function kvToSendEvent(argStr: string): TransferEvent | null {
+    const kv = parseKvArgs(argStr);
+    const to = (kv.to ?? kv['给'] ?? '').toLowerCase();
+    if (to && FORGED_TO_VALUES.has(to)) return null;
+    const amount = parseTransferAmount(kv.amount ?? kv['金额']);
+    return amount === null ? null : { kind: 'send', amount: formatTransferAmount(amount) };
+}
 const ACTION_ACCEPT_RE = /\[\[\s*ACTION\s*[:：]\s*TRANSFER_ACCEPT\s*\]\]/gi;
 const ACTION_RETURN_RE = /\[\[\s*ACTION\s*[:：]\s*TRANSFER_RETURN\s*\]\]/gi;
 
@@ -177,6 +273,9 @@ export function extractTransferCommands(content: string): {
 
     const hits: Hit[] = [];
 
+    // 记录哨兵最先注册 —— 复读历史的记录行在任何其他模式之前被消费掉 (恒零事件)
+    collect(src, RECORD_TRANSFER_RE, () => null, hits);
+    collect(src, ACTION_SEND_KV_RE, m => kvToSendEvent(m[1] ?? ''), hits);
     collect(src, ACTION_SEND_RE, m => {
         const amount = parseTransferAmount(m[1]);
         return amount === null ? null : { kind: 'send', amount: formatTransferAmount(amount) };

@@ -2338,7 +2338,7 @@ var stripSourceTags = (t) => t.replace(/\s*\[(?:聊天|通话|约会)\]\s*/g, "\
 var stripTimestamps = (t) => t.replace(/\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\]\s*/g, "").replace(/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s*/gm, "").replace(/（[上下]午\d{1,2}[：:]\d{2}）/g, "").replace(/\(\d{1,2}:\d{2}\s*[AP]M\)/gi, "");
 var stripChineseDate = (t) => t.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, "");
 var stripRoleNamePrefix = (t) => t.replace(/^[\w一-龥]+:\s*/, "");
-var stripBusinessTagsForBubble = (t) => t.replace(/\[\[(?:ACTION|RECALL|SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END|MUSIC_ACTION)[:\s][\s\S]*?\]\]/g, "").replace(/\[schedule_message[^\]]*\]/g, "");
+var stripBusinessTagsForBubble = (t) => t.replace(/\[\[(?:ACTION|RECALL|SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END|MUSIC_ACTION)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[\s*[记記][录錄]\s*[:：][\s\S]*?\]\]/g, "").replace(/\[schedule_message[^\]]*\]/g, "");
 var stripBusinessTagsForNotification = (t) => stripBusinessTagsForBubble(t).replace(/\[\[(?:READ_NOTE|XHS_[A-Z_]+)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[XHS_[A-Z_]+\]\]/g, "");
 var stripQuotes = (t) => t.replace(/\[\[(?:QU[OA]TE|引用)[：:][\s\S]*?\]\]/g, "").replace(/\[(?:QU[OA]TE|引用)[：:][^\]]*\]/g, "").replace(/\[回复\s*[""“][^""”]*?[""”](?:\.{0,3})\]\s*[：:]?\s*/g, "").replace(/\[[^\[\]\n「」]{0,24}引用了[^\[\]\n「」]{0,24}「[^」\n]*?」[^\[\]\n]{0,24}\]\s*/g, "");
 var stripSystemLogLeak = (t) => t.replace(/\[\s*(?:系统|系統|System)\s*(?:提示)?\s*[:：][^\[\]]*\]\s*/gi, "").replace(/\[\s*(?:系统|系統)\s*\]\s*/g, "");
@@ -2625,7 +2625,33 @@ function parseTransferAmount(raw) {
 function formatTransferAmount(n) {
   return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100);
 }
+var RECORD_TRANSFER_RE = /\[\[\s*[记記][录錄]\s*[:：]\s*TRANSFER[^\]]*\]\]/gi;
+var ACTION_SEND_KV_RE = /\[\[\s*ACTION\s*[:：]\s*TRANSFER\s*((?:\|[^\]]*)?)\s*\]\]/gi;
 var ACTION_SEND_RE = /\[\[\s*ACTION\s*[:：]\s*TRANSFER\s*[:：]\s*([^\]]*?)\s*\]\]/gi;
+var FORGED_TO_VALUES = /* @__PURE__ */ new Set(["char", "self", "me", "\u89D2\u8272", "\u81EA\u5DF1", "\u6211", "\u81EA\u5206", "\u672C\u4EBA"]);
+function parseKvArgs(argStr) {
+  const out = {};
+  for (const part of argStr.split(/[|｜]/)) {
+    const seg = part.trim();
+    if (!seg) continue;
+    const eq = seg.search(/[=＝]/);
+    if (eq < 0) {
+      if (!("amount" in out) && parseTransferAmount(seg) !== null) out.amount = seg;
+      continue;
+    }
+    const k = seg.slice(0, eq).trim().toLowerCase();
+    const v = seg.slice(eq + 1).trim();
+    if (k) out[k] = v;
+  }
+  return out;
+}
+function kvToSendEvent(argStr) {
+  const kv = parseKvArgs(argStr);
+  const to = (kv.to ?? kv["\u7ED9"] ?? "").toLowerCase();
+  if (to && FORGED_TO_VALUES.has(to)) return null;
+  const amount = parseTransferAmount(kv.amount ?? kv["\u91D1\u989D"]);
+  return amount === null ? null : { kind: "send", amount: formatTransferAmount(amount) };
+}
 var ACTION_ACCEPT_RE = /\[\[\s*ACTION\s*[:：]\s*TRANSFER_ACCEPT\s*\]\]/gi;
 var ACTION_RETURN_RE = /\[\[\s*ACTION\s*[:：]\s*TRANSFER_RETURN\s*\]\]/gi;
 var SYSTEM_LOG_RE = /\[\s*(?:系统|系統|System)\s*(?:提示)?\s*[:：]\s*([^\[\]]*?)\s*\]/gi;
@@ -2665,6 +2691,8 @@ function extractTransferCommands(content) {
   const src = String(content ?? "");
   if (!src) return { text: "", events: [], consumed: 0 };
   const hits = [];
+  collect(src, RECORD_TRANSFER_RE, () => null, hits);
+  collect(src, ACTION_SEND_KV_RE, (m) => kvToSendEvent(m[1] ?? ""), hits);
   collect(src, ACTION_SEND_RE, (m) => {
     const amount = parseTransferAmount(m[1]);
     return amount === null ? null : { kind: "send", amount: formatTransferAmount(amount) };

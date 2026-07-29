@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { parseTransferAmount, formatTransferAmount, extractTransferCommands } from './transferFormat';
+import {
+    parseTransferAmount,
+    formatTransferAmount,
+    extractTransferCommands,
+    formatTransferRecord,
+    type TransferRecordInput,
+} from './transferFormat';
+import { sanitizeForBubble, sanitizeForNotification } from './sanitize';
 
 describe('parseTransferAmount', () => {
     it('纯数字', () => {
@@ -172,6 +179,154 @@ describe('extractTransferCommands — 不越界', () => {
     });
 
     it('正文原样保留，只挖走标签', () => {
+        const r0 = extractTransferCommands('前面[[ACTION:TRANSFER:520]]中间[系统: 你向阿桃转账 1]后面');
+        expect(r0.events).toEqual([
+            { kind: 'send', amount: '520' },
+            { kind: 'send', amount: '1' },
+        ]);
+        expect(r0.text).toBe('前面中间后面');
+    });
+});
+
+// ─── 词汇表统一: 记录形态 ↔ ACTION kv 形态 ─────────────────────────────────
+
+describe('formatTransferRecord — 历史渲染', () => {
+    it('原始转账: to = role 的对手方', () => {
+        expect(formatTransferRecord({ role: 'assistant', amount: '1999' }))
+            .toBe('[[记录:TRANSFER|to=user|amount=1999|status=待处理]]');
+        expect(formatTransferRecord({ role: 'user', amount: '520' }))
+            .toBe('[[记录:TRANSFER|to=char|amount=520|status=待处理]]');
+    });
+
+    it('原始转账读 live status —— 被收/退后不再显示待处理 (修掉旧渲染的不一致)', () => {
+        expect(formatTransferRecord({ role: 'assistant', amount: '1999', status: 'accepted' }))
+            .toBe('[[记录:TRANSFER|to=user|amount=1999|status=已收下]]');
+        expect(formatTransferRecord({ role: 'user', amount: '520', status: 'returned' }))
+            .toBe('[[记录:TRANSFER|to=char|amount=520|status=已退回]]');
+    });
+
+    it('回执: to = 出回执一方自己', () => {
+        // 角色出的回执 (收下用户的转账): 钱当初流向 char
+        expect(formatTransferRecord({ role: 'assistant', amount: '520', receipt: 'accepted' }))
+            .toBe('[[记录:TRANSFER|to=char|amount=520|status=已收下]]');
+        // 用户出的回执 (退回角色的转账): 钱当初流向 user
+        expect(formatTransferRecord({ role: 'user', amount: '1999', receipt: 'returned' }))
+            .toBe('[[记录:TRANSFER|to=user|amount=1999|status=已退回]]');
+    });
+
+    it('缺金额的老数据: 省略 amount 字段而不是留空值', () => {
+        expect(formatTransferRecord({ role: 'assistant' }))
+            .toBe('[[记录:TRANSFER|to=user|status=待处理]]');
+    });
+});
+
+describe('往返性质 — 渲染端产出的任何记录行, 解析端恒为消费且零事件, sanitize 恒剥净', () => {
+    // 覆盖 role × receipt × status 的全部组合 —— 这条性质破了, 复读历史就会产生假转账
+    const allCases: TransferRecordInput[] = [];
+    for (const role of ['user', 'assistant'] as const) {
+        for (const amount of ['1999', undefined] as const) {
+            allCases.push({ role, amount });
+            for (const status of ['accepted', 'returned'] as const) allCases.push({ role, amount, status });
+            for (const receipt of ['accepted', 'returned'] as const) allCases.push({ role, amount, receipt });
+        }
+    }
+
+    it(`全部 ${allCases.length} 种记录行: 解析消费 + 零事件 + 正文保留`, () => {
+        for (const rec of allCases) {
+            const line = formatTransferRecord(rec);
+            const r = extractTransferCommands(`${line}拿去花`);
+            expect(r.events, line).toEqual([]);
+            expect(r.consumed, line).toBe(1);
+            expect(r.text, line).toBe('拿去花');
+        }
+    });
+
+    it('sanitize 终线: bubble 与 notification 都剥净记录行', () => {
+        for (const rec of allCases) {
+            const line = formatTransferRecord(rec);
+            expect(sanitizeForBubble(`${line}拿去花`), line).toBe('拿去花');
+            expect(sanitizeForNotification(`${line}拿去花`), line).toBe('拿去花');
+        }
+    });
+
+    it('记录命名空间整体受保护 (未来的记录:POKE 等): sanitize 剥, 解析端只认领 TRANSFER', () => {
+        // 未来事件类型 —— 解析端不消费 (不归转账管), sanitize 终线兜底
+        const future = '[[记录:POKE|by=user]]我在呢';
+        expect(extractTransferCommands(future).consumed).toBe(0);
+        expect(sanitizeForBubble(future)).toBe('我在呢');
+    });
+
+    it('繁体 / 全角冒号变体的记录行同样零事件', () => {
+        for (const v of ['[[記錄:TRANSFER|to=user|amount=1999|status=待处理]]', '[[记录：TRANSFER|to=user|amount=1999]]']) {
+            const r = extractTransferCommands(`${v}拿去`);
+            expect(r.events, v).toEqual([]);
+            expect(r.consumed, v).toBe(1);
+        }
+    });
+});
+
+describe('extractTransferCommands — ACTION kv 形态 (新 canonical)', () => {
+    it('基础形态', () => {
+        const r = extractTransferCommands('给你[[ACTION:TRANSFER|to=user|amount=520]]买杯喝的');
+        expect(r.events).toEqual([{ kind: 'send', amount: '520' }]);
+        expect(r.text).toBe('给你买杯喝的');
+    });
+
+    it('kv 顺序不敏感 / to 缺省 / 金额容错沿用', () => {
+        expect(extractTransferCommands('[[ACTION:TRANSFER|amount=520|to=user]]').events)
+            .toEqual([{ kind: 'send', amount: '520' }]);
+        expect(extractTransferCommands('[[ACTION:TRANSFER|amount=1999]]').events)
+            .toEqual([{ kind: 'send', amount: '1999' }]);
+        expect(extractTransferCommands('[[ACTION:TRANSFER|to=user|amount=1,999元]]').events)
+            .toEqual([{ kind: 'send', amount: '1999' }]);
+    });
+
+    it('裸值容错: [[ACTION:TRANSFER|520]] 当 amount', () => {
+        expect(extractTransferCommands('[[ACTION:TRANSFER|520]]').events)
+            .toEqual([{ kind: 'send', amount: '520' }]);
+    });
+
+    it('to 指向角色自己 → 伪造, 整块丢弃零事件 (方向由 role 决定, 文本只做校验)', () => {
+        for (const to of ['char', 'self', 'me', '角色', '自己', '我', 'CHAR']) {
+            const r = extractTransferCommands(`[[ACTION:TRANSFER|to=${to}|amount=520]]收到`);
+            expect(r.events, `to=${to}`).toEqual([]);
+            expect(r.consumed, `to=${to}`).toBe(1);
+            expect(r.text, `to=${to}`).toBe('收到');
+        }
+    });
+
+    it('to 写名字 / 用户 → 放行 (私聊对手方唯一)', () => {
+        expect(extractTransferCommands('[[ACTION:TRANSFER|to=用户|amount=520]]').events)
+            .toEqual([{ kind: 'send', amount: '520' }]);
+        expect(extractTransferCommands('[[ACTION:TRANSFER|to=阿桃|amount=520]]').events)
+            .toEqual([{ kind: 'send', amount: '520' }]);
+    });
+
+    it('金额缺失 / 非法 / 裸 [[ACTION:TRANSFER]] → 剥掉零事件', () => {
+        for (const s of ['[[ACTION:TRANSFER|to=user]]', '[[ACTION:TRANSFER|amount=很多]]', '[[ACTION:TRANSFER]]']) {
+            const r = extractTransferCommands(`${s}好嘞`);
+            expect(r.events, s).toEqual([]);
+            expect(r.consumed, s).toBe(1);
+            expect(r.text, s).toBe('好嘞');
+        }
+    });
+
+    it('kv 形态不误吃 ACCEPT / RETURN', () => {
+        expect(extractTransferCommands('[[ACTION:TRANSFER_ACCEPT]]谢谢').events).toEqual([{ kind: 'accept' }]);
+        expect(extractTransferCommands('[[ACTION:TRANSFER_RETURN]]不能要').events).toEqual([{ kind: 'return' }]);
+    });
+
+    it('新老形态混用, 各自生效', () => {
+        const r = extractTransferCommands('[[ACTION:TRANSFER|to=user|amount=520]]\n[[ACTION:TRANSFER:1314]]');
+        expect(r.events).toEqual([
+            { kind: 'send', amount: '520' },
+            { kind: 'send', amount: '1314' },
+        ]);
+    });
+});
+
+describe('extractTransferCommands — 老正文回归', () => {
+    it('legacy 正文原样保留，只挖走标签', () => {
         const r = extractTransferCommands('前面[[ACTION:TRANSFER:520]]中间[系统: 你向阿桃转账 1]后面');
         expect(r.events).toEqual([
             { kind: 'send', amount: '520' },
