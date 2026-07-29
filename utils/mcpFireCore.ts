@@ -124,7 +124,8 @@ export const formatMcpToolResult = (data: any): string => {
 //   ask_question: SullyOS             ← 冒号传参（整行）
 //   get_weather({"city": "上海"})     ← 括号传 JSON
 // 与见面观测协议同款思路的两层容错: FC 通道是第一层, 这里兜第二层。
-// 只认已启用服务器的真实工具名（暴露名/原名都认）, 避免误伤普通文字。
+// 只认已启用服务器的真实工具名（暴露名/原名都认, 后台还可以额外认带前缀的写法）,
+// 避免误伤普通文字。
 
 export interface FakedMcpCall<S extends McpFireServer = McpFireServer> {
     exposedName: string;
@@ -227,10 +228,16 @@ const parseFakedArgs = (inner: string, schema: any): Record<string, any> => {
 /**
  * 从 AI 正文里提取"假工具调用"。只匹配 resolve 里已知的工具名（暴露名/真实名）。
  * 返回按出现位置排序、按 matched 文本去重的调用列表。
+ *
+ * alsoMatchPrefix：额外认「前缀 + 暴露名」这种写法。后台 fire 的 native 模式里，
+ * tools 数组给模型看的名字是带 `mcp__` 前缀的（见 buildMcpFireTools），模型掉格式
+ * 把调用演进正文时写的多半也是带前缀那个，不认就只能把调用语法原样推给用户。
+ * 认出来之后 exposedName 仍然回裸名，下游按暴露名查表的逻辑不用改。
  */
 export const extractTextFakedMcpCalls = <S extends McpFireServer>(
     content: string,
     resolve: Map<string, McpResolvedToolCore<S>>,
+    opts: { alsoMatchPrefix?: string } = {},
 ): FakedMcpCall<S>[] => {
     if (!content || !resolve.size) return [];
 
@@ -239,6 +246,7 @@ export const extractTextFakedMcpCalls = <S extends McpFireServer>(
     for (const [exposed, hit] of resolve) {
         lookup.set(exposed, { exposed, hit });
         lookup.set(hit.toolName, { exposed, hit });
+        if (opts.alsoMatchPrefix) lookup.set(`${opts.alsoMatchPrefix}${exposed}`, { exposed, hit });
     }
 
     const found: Array<FakedMcpCall<S> & { index: number }> = [];

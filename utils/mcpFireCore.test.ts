@@ -7,8 +7,10 @@ import {
     buildMcpNameMap,
     callMcpToolCore,
     createMcpSessionState,
+    extractTextFakedMcpCalls,
     filterMcpServersForChar,
     sanitizeMcpToolName,
+    stripTextFakedMcpCalls,
     withMcpDedupeSuffix,
     type McpFireServer,
     type McpTransportTarget,
@@ -256,6 +258,16 @@ describe('buildMcpFireBlock / buildMcpFireTools', () => {
     })];
     const map = buildMcpNameMap(servers);
 
+    // 来源标注看的是服务器台数，不是工具条数——同一台服务器的几个工具之间没什么可区分的。
+    const twoTools = [srv({ tools: [
+        { name: 'get_weather', description: '查天气' },
+        { name: 'get_news', description: '查新闻' },
+    ] })];
+    const twoServers = [
+        srv({ id: 's1', name: '服务器A', tools: [{ name: 'get_weather', description: '查天气' }] }),
+        srv({ id: 's2', name: '服务器B', tools: [{ name: 'get_news', description: '查新闻' }] }),
+    ];
+
     it('native 模式：只讲纪律，不教正文协议', () => {
         const block = buildMcpFireBlock(map, { mode: 'native' });
         expect(block).toContain('get_weather');
@@ -273,23 +285,18 @@ describe('buildMcpFireBlock / buildMcpFireTools', () => {
         expect(buildMcpFireBlock(new Map(), { mode: 'native' })).toBe('');
     });
 
-    // 来源标注看的是服务器台数，不是工具条数——同一台服务器的几个工具之间没什么可区分的。
-    const twoTools = [srv({ tools: [
-        { name: 'get_weather', description: '查天气' },
-        { name: 'get_news', description: '查新闻' },
-    ] })];
-    const twoServers = [
-        srv({ id: 's1', name: '服务器A', tools: [{ name: 'get_weather', description: '查天气' }] }),
-        srv({ id: 's2', name: '服务器B', tools: [{ name: 'get_news', description: '查新闻' }] }),
-    ];
-
     it('单台服务器的多个工具之间不标来源', () => {
         expect(buildMcpFireBlock(buildMcpNameMap(twoTools), { mode: 'native' }))
             .not.toContain('（来源:');
+        expect(buildMcpFireBlock(buildMcpNameMap(twoTools), { mode: 'text' }))
+            .not.toContain('（来源:');
     });
 
+    // native / text 两条分支各自拼行，判据得分别守——只测一条时另一条坏了也照样绿。
     it('跨服务器时才标来源', () => {
         expect(buildMcpFireBlock(buildMcpNameMap(twoServers), { mode: 'native' }))
+            .toContain('（来源: 服务器A）');
+        expect(buildMcpFireBlock(buildMcpNameMap(twoServers), { mode: 'text' }))
             .toContain('（来源: 服务器A）');
     });
 
@@ -318,6 +325,53 @@ describe('buildMcpFireBlock / buildMcpFireTools', () => {
         expect(tools).toHaveLength(wideServers.length);
         expect(tools.every((t) => t.function.name.startsWith('mcp__'))).toBe(true);
         expect(tools.every((t) => t.function.name.length <= 64)).toBe(true);
+    });
+});
+
+// native 模式下 tools 数组里的名字是带 mcp__ 前缀的，模型掉格式把调用演进正文时
+// 写的多半也是带前缀那个。第二层兜底得认它，否则调用语法原样推给用户。
+describe('extractTextFakedMcpCalls 的 mcp__ 前缀兼容', () => {
+    const map = buildMcpNameMap([srv({
+        tools: [{
+            name: 'get_weather',
+            description: '查天气',
+            inputSchema: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
+        }],
+    })]);
+    const withPrefix = { alsoMatchPrefix: 'mcp__' };
+
+    it('括号形态：带前缀的调用被认出来，exposedName 仍回裸名', () => {
+        const content = '等我看看天气哦\nmcp__get_weather({"city":"上海"})';
+        const calls = extractTextFakedMcpCalls(content, map, withPrefix);
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({ exposedName: 'get_weather', toolName: 'get_weather', args: { city: '上海' } });
+        // matched 要含前缀原文，剥完正文才不留残渣
+        expect(calls[0].matched).toContain('mcp__');
+        expect(stripTextFakedMcpCalls(content, calls)).toBe('等我看看天气哦');
+    });
+
+    it('行首冒号形态：带前缀同样认', () => {
+        const content = '我查一下\nmcp__get_weather: 上海';
+        const calls = extractTextFakedMcpCalls(content, map, withPrefix);
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({ exposedName: 'get_weather', args: { city: '上海' } });
+        expect(calls[0].matched).toContain('mcp__');
+        expect(stripTextFakedMcpCalls(content, calls)).toBe('我查一下');
+    });
+
+    // 前台不传 opts，行为必须逐字节不变：带前缀的写法在前台不该被认成调用
+    it('不传 opts 时带前缀的写法不命中（前台行为回归钉）', () => {
+        expect(extractTextFakedMcpCalls('mcp__get_weather({"city":"上海"})', map)).toEqual([]);
+        expect(extractTextFakedMcpCalls('mcp__get_weather: 上海', map)).toEqual([]);
+    });
+
+    it('裸名照旧命中，开不开前缀都一样', () => {
+        const content = 'get_weather({"city":"北京"})';
+        for (const opts of [undefined, withPrefix]) {
+            const calls = extractTextFakedMcpCalls(content, map, opts);
+            expect(calls).toHaveLength(1);
+            expect(calls[0]).toMatchObject({ exposedName: 'get_weather', args: { city: '北京' } });
+        }
     });
 });
 
