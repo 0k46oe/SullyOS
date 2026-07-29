@@ -43,6 +43,7 @@ export const CARD_STRIPPED_FIELDS = [
   'dateVoiceLang',
   'callVoiceLang',
   'chatVoiceEnabled',
+  'chatVoiceAutoPlay',
   'dateVoiceEnabled',
 
   // 4) 运行时状态残留
