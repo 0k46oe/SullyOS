@@ -305,3 +305,443 @@ export const extractTextFakedMcpCalls = <S extends McpFireServer>(
         .sort((a, b) => a.index - b.index)
         .map(({ index: _index, ...call }) => call);
 };
+
+// ========== JSON-RPC 传输层 ==========
+//
+// Streamable HTTP：握手 initialize → 通知 notifications/initialized → tools/list / tools/call。
+// 会话状态和请求目标都是显式传参，所以浏览器（配置在 localStorage、请求包代理）
+// 和 worker（配置随 tool_config 上云、直连服务器）能共用同一套收发逻辑。
+
+/** initialize 握手声明的协议版本。 */
+const MCP_PROTOCOL_VERSION = '2024-11-05';
+
+// 远端 MCP / 用户自建代理都可能保持连接不结束。不能让一次 tools/call
+// 永久卡住整条聊天链路（外层 isTyping 只有等 Promise 结束后才会清掉）。
+export const MCP_REQUEST_TIMEOUT_MS = 60_000;
+
+export interface McpToolResult {
+    success: boolean;
+    data?: any;
+    rawText?: string;
+    error?: string;
+}
+
+interface McpJsonRpcRequest {
+    jsonrpc: '2.0';
+    method: string;
+    params?: any;
+    id?: number;
+}
+
+interface McpJsonRpcResponse {
+    jsonrpc: '2.0';
+    id?: number;
+    result?: any;
+    error?: { code: number; message: string; data?: any };
+}
+
+/**
+ * 一个 MCP 服务器连接的会话状态。持有者自己决定生命周期：
+ * 浏览器 = 模块级 Map（跨轮复用）；worker = 挂在单次 fire 的 stash 上。
+ */
+export interface McpSessionState {
+    sessionId: string | null;
+    initialized: boolean;
+    initPromise: Promise<void> | null;
+    /** JSON-RPC 请求 id，每个会话各数各的 */
+    nextId: number;
+}
+
+export const createMcpSessionState = (): McpSessionState =>
+    ({ sessionId: null, initialized: false, initPromise: null, nextId: 0 });
+
+/** 一次请求的目标：最终 URL + 请求头构造。浏览器侧包代理，worker 侧直连。 */
+export interface McpTransportTarget {
+    url: string;
+    headers: (sessionId: string | null) => Headers | Record<string, string>;
+    /**
+     * fetch 当场抛异常（连不上 / 被浏览器拦下）时，附在报错后面的排查提示。
+     * 代理和 CORS 都是浏览器侧才有的概念，话术由调用方给；worker 直连可以不传。
+     */
+    fetchErrorHint?: string;
+}
+
+const buildRpcRequest = (
+    session: McpSessionState,
+    method: string,
+    params?: any,
+    isNotification = false,
+): McpJsonRpcRequest => {
+    const req: McpJsonRpcRequest = { jsonrpc: '2.0', method, params };
+    if (!isNotification) req.id = ++session.nextId;
+    return req;
+};
+
+const parseSse = (text: string): McpJsonRpcResponse | null => {
+    const dataLines: string[] = [];
+    for (const line of text.split('\n')) {
+        if (line.startsWith('data: ')) dataLines.push(line.slice(6));
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5));
+    }
+    for (let i = dataLines.length - 1; i >= 0; i--) {
+        try { return JSON.parse(dataLines[i]); } catch { /* try previous */ }
+    }
+    return null;
+};
+
+const parseResp = (text: string, contentType: string): McpJsonRpcResponse => {
+    if (contentType.includes('text/event-stream') || /^\s*(event:|data:)/.test(text)) {
+        const parsed = parseSse(text);
+        if (parsed) return parsed;
+    }
+    try { return JSON.parse(text); } catch {
+        const m = text.match(/\{[\s\S]*\}/);
+        if (m) { try { return JSON.parse(m[0]); } catch { /* fall through */ } }
+        throw new Error(`MCP: 无法解析响应: ${text.slice(0, 300)}`);
+    }
+};
+
+/** Streamable HTTP 的 SSE 可能保持连接；读到当前 JSON-RPC id 的结果即可返回。 */
+const readSseResponse = async (resp: Response, expectedId: number | string | undefined): Promise<McpJsonRpcResponse> => {
+    const reader = resp.body?.getReader();
+    if (!reader) return parseResp(await resp.text(), 'text/event-stream');
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const parseEvent = (event: string): McpJsonRpcResponse | null => {
+        const data = event.split(/\r?\n/)
+            .filter(line => line.startsWith('data:'))
+            .map(line => line.slice(5).trimStart())
+            .join('\n');
+        if (!data || data === '[DONE]') return null;
+        try {
+            const parsed = JSON.parse(data) as McpJsonRpcResponse;
+            return expectedId == null || parsed.id === expectedId ? parsed : null;
+        } catch { return null; }
+    };
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            buffer += decoder.decode(value, { stream: !done });
+            const events = buffer.split(/\r?\n\r?\n/);
+            buffer = events.pop() || '';
+            for (const event of events) {
+                const parsed = parseEvent(event);
+                if (parsed) return parsed;
+            }
+            if (done) {
+                const parsed = parseEvent(buffer);
+                if (parsed) return parsed;
+                throw new Error('MCP SSE 流结束，但没有收到本次请求的响应');
+            }
+        }
+    } finally {
+        await reader.cancel().catch(() => { /* 已结束或已 abort */ });
+    }
+};
+
+const postCore = async (
+    target: McpTransportTarget,
+    session: McpSessionState,
+    body: McpJsonRpcRequest,
+    timeoutMs: number,
+    expectResponse = true,
+): Promise<{ response: McpJsonRpcResponse | null }> => {
+    const headers = target.headers(session.sessionId);
+
+    let resp: Response;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        try {
+            resp = await fetch(target.url, {
+                method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal,
+            });
+        } catch (e: any) {
+            if (controller.signal.aborted) {
+                throw new Error(`MCP 请求超时（${Math.round(timeoutMs / 1000)} 秒）`);
+            }
+            // 直连时 fetch 抛 TypeError 十有八九是 CORS，把排查方向直接告诉用户
+            const hint = target.fetchErrorHint || '';
+            throw new Error(`MCP 请求失败: ${e?.message || e}。${hint}`);
+        }
+
+        // fetch 拿到响应头不代表 SSE 响应体已经结束；DeepWiki / 代理若一直不关流，
+        // resp.text() 同样必须受同一个超时控制。
+        const readText = async (): Promise<string> => {
+            try { return await resp.text(); }
+            catch (e) {
+                if (controller.signal.aborted) {
+                    throw new Error(`MCP 请求超时（${Math.round(timeoutMs / 1000)} 秒）`);
+                }
+                throw e;
+            }
+        };
+
+        const newSid = resp.headers.get('Mcp-Session-Id') || resp.headers.get('mcp-session-id');
+        if (newSid) session.sessionId = newSid;
+
+        if (resp.status === 401 || resp.status === 403) {
+            const txt = await readText().catch(() => '');
+            throw new Error(`MCP 鉴权失败 (${resp.status}): Token 可能无效或过期。${txt.slice(0, 120)}`);
+        }
+        if (resp.status === 202) return { response: null };
+        if (!resp.ok) {
+            const txt = await readText().catch(() => '');
+            throw new Error(`MCP HTTP ${resp.status}: ${txt.slice(0, 200)}`);
+        }
+        if (!expectResponse) return { response: null };
+
+        const ct = resp.headers.get('content-type') || '';
+        try {
+            if (ct.includes('text/event-stream')) {
+                return { response: await readSseResponse(resp, body.id) };
+            }
+            const text = await readText();
+            return { response: parseResp(text, ct) };
+        } catch (e) {
+            if (controller.signal.aborted) {
+                throw new Error(`MCP 请求超时（${Math.round(timeoutMs / 1000)} 秒）`);
+            }
+            throw e;
+        }
+    } finally {
+        clearTimeout(timeoutId);
+    }
+};
+
+const initializeCore = async (
+    target: McpTransportTarget,
+    session: McpSessionState,
+    timeoutMs: number,
+): Promise<void> => {
+    const initReq = buildRpcRequest(session, 'initialize', {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'SullyOS-MCP', version: '1.0.0' },
+    });
+    const { response } = await postCore(target, session, initReq, timeoutMs);
+    if (response?.error) throw new Error(`Initialize 失败: ${response.error.message}`);
+
+    // 直连模式下读不到 Session-Id 说明 CORS 没暴露响应头（服务器可能有会话但我们拿不到），
+    // Streamable HTTP 无状态服务器也可能压根不发。这里不硬报错：tools/list 能通就算能用。
+    const notif = buildRpcRequest(session, 'notifications/initialized', {}, true);
+    await postCore(target, session, notif, timeoutMs, false).catch(() => { /* notification 失败不阻塞 */ });
+
+    session.initialized = true;
+};
+
+const ensureInitializedCore = async (
+    target: McpTransportTarget,
+    session: McpSessionState,
+    timeoutMs: number,
+): Promise<void> => {
+    if (session.initialized) return;
+    if (!session.initPromise) {
+        session.initPromise = initializeCore(target, session, timeoutMs).catch((e) => {
+            session.initPromise = null;
+            throw e;
+        });
+    }
+    await session.initPromise;
+};
+
+/**
+ * 握手 + tools/list，返回的工具清单由调用方负责持久化。
+ * 浏览器的「发现工具」按钮走这里；worker 不需要——工具清单随 tool_config 上云。
+ */
+export const discoverMcpToolsCore = async (
+    target: McpTransportTarget,
+    session: McpSessionState,
+    timeoutMs: number,
+): Promise<McpFireToolDef[]> => {
+    await ensureInitializedCore(target, session, timeoutMs);
+    const { response } = await postCore(target, session, buildRpcRequest(session, 'tools/list'), timeoutMs);
+    if (response?.error) throw new Error(`tools/list 失败: ${response.error.message}`);
+    const tools = response?.result?.tools;
+    if (!Array.isArray(tools)) return [];
+    return tools.map((t: any) => ({
+        name: t.name,
+        description: t.description || '',
+        inputSchema: t.inputSchema || t.input_schema || { type: 'object', properties: {} },
+    }));
+};
+
+const isRecord = (value: unknown): value is Record<string, any> =>
+    value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const resolveLocalSchemaRef = (schema: any, rootSchema: any): any => {
+    const ref = typeof schema?.$ref === 'string' ? schema.$ref : '';
+    if (!ref.startsWith('#/')) return schema;
+    const resolved = ref.slice(2).split('/').reduce((current: any, part: string) => {
+        const key = part.replace(/~1/g, '/').replace(/~0/g, '~');
+        return current?.[key];
+    }, rootSchema);
+    return resolved || schema;
+};
+
+const schemaAccepts = (schema: any, kind: 'object' | 'array'): boolean => {
+    const types = Array.isArray(schema?.type) ? schema.type : [schema?.type];
+    if (types.includes(kind)) return true;
+    if (kind === 'object' && schema?.properties) return true;
+    if (kind === 'array' && schema?.items) return true;
+    return [...(schema?.oneOf || []), ...(schema?.anyOf || [])].some((item: any) => schemaAccepts(item, kind));
+};
+
+/**
+ * 部分 OpenAI 兼容中转会把 schema 中的 object / array 再编码成 JSON 字符串。
+ * 只在 schema 明确要求结构类型时还原，避免把 URL、文本等合法 string 误解析。
+ */
+const normalizeMcpValueBySchema = (value: any, rawSchema: any, rootSchema: any, depth: number): any => {
+    if (!rawSchema || depth > 20) return value;
+    const schema = resolveLocalSchemaRef(rawSchema, rootSchema);
+    const acceptsObject = schemaAccepts(schema, 'object');
+    const acceptsArray = schemaAccepts(schema, 'array');
+    let normalized = value;
+
+    if (typeof normalized === 'string' && (acceptsObject || acceptsArray)) {
+        // 最多解三层，兼容整个 arguments 双重编码与嵌套字段额外编码。
+        for (let i = 0; i < 3 && typeof normalized === 'string'; i++) {
+            const text = normalized.trim();
+            if (!text) break;
+            try { normalized = JSON.parse(text); }
+            catch { break; }
+        }
+        const decodedMatchesSchema = (acceptsObject && isRecord(normalized)) || (acceptsArray && Array.isArray(normalized));
+        if (!decodedMatchesSchema) normalized = value;
+    }
+
+    const alternatives = [...(schema?.oneOf || []), ...(schema?.anyOf || [])];
+    if (alternatives.length) {
+        const matching = alternatives.find((item: any) =>
+            (isRecord(normalized) && schemaAccepts(item, 'object'))
+            || (Array.isArray(normalized) && schemaAccepts(item, 'array')),
+        );
+        if (matching) normalized = normalizeMcpValueBySchema(normalized, matching, rootSchema, depth + 1);
+    }
+
+    if (isRecord(normalized) && acceptsObject) {
+        const result = { ...normalized };
+        const properties = schema?.properties || {};
+        for (const [key, childSchema] of Object.entries(properties)) {
+            if (key in result) result[key] = normalizeMcpValueBySchema(result[key], childSchema, rootSchema, depth + 1);
+        }
+        if (schema?.additionalProperties && typeof schema.additionalProperties === 'object') {
+            for (const key of Object.keys(result)) {
+                if (!(key in properties)) {
+                    result[key] = normalizeMcpValueBySchema(result[key], schema.additionalProperties, rootSchema, depth + 1);
+                }
+            }
+        }
+        for (const item of schema?.allOf || []) {
+            const merged = normalizeMcpValueBySchema(result, item, rootSchema, depth + 1);
+            if (isRecord(merged)) Object.assign(result, merged);
+        }
+        return result;
+    }
+
+    if (Array.isArray(normalized) && acceptsArray && schema?.items) {
+        return normalized.map(item => normalizeMcpValueBySchema(item, schema.items, rootSchema, depth + 1));
+    }
+    return normalized;
+};
+
+export const normalizeMcpToolArguments = (args: any, inputSchema: any): any =>
+    normalizeMcpValueBySchema(args, inputSchema, inputSchema, 0);
+
+/** 日志里只留主机名：够定位是哪台服务器，又不至于把完整地址打出来。 */
+const targetHost = (url: string): string => {
+    try { return new URL(url).host; } catch { return ''; }
+};
+
+/**
+ * 调一个工具（会自动补握手；HTTP 400/404 视为 session 失效，重握手再试一次）。
+ *
+ * opts.resetSession：自定义会话重置。默认就地清空传进来的 session 对象——
+ * 自定义实现也必须原地重置这个对象，因为后续步骤仍然用的是它的引用。
+ */
+export const callMcpToolCore = async (
+    target: McpTransportTarget,
+    session: McpSessionState,
+    toolName: string,
+    args: Record<string, any> = {},
+    opts: {
+        timeoutMs?: number;
+        inputSchema?: any;
+        /** 日志里显示的服务器名，缺省用目标 URL 的主机名 */
+        serverLabel?: string;
+        resetSession?: () => void;
+    } = {},
+): Promise<McpToolResult> => {
+    const timeoutMs = opts.timeoutMs ?? MCP_REQUEST_TIMEOUT_MS;
+    const normalizedArgs = normalizeMcpToolArguments(args, opts.inputSchema);
+    const finish = (result: McpToolResult): McpToolResult => {
+        let resultPreview = '';
+        if (result.success) {
+            try { resultPreview = JSON.stringify(result.data).slice(0, 800); }
+            catch { resultPreview = String(result.data).slice(0, 800); }
+        }
+        // 不记录 URL / Token，只证明真实 tools/call 的目标、参数与服务端返回。
+        console.info('🔌 [MCP] tools/call 完成', {
+            server: opts.serverLabel ?? targetHost(target.url),
+            tool: toolName,
+            args: normalizedArgs,
+            success: result.success,
+            ...(result.success ? { result: resultPreview } : { error: result.error }),
+        });
+        return result;
+    };
+    try {
+        await ensureInitializedCore(target, session, timeoutMs);
+        const body = buildRpcRequest(session, 'tools/call', { name: toolName, arguments: normalizedArgs });
+        let response: McpJsonRpcResponse | null;
+        try {
+            ({ response } = await postCore(target, session, body, timeoutMs));
+        } catch (e: any) {
+            // 404/400 常见于服务器重启后 session 失效，重握手再试一次
+            if (/HTTP (400|404)/.test(e?.message || '')) {
+                (opts.resetSession ?? (() => { Object.assign(session, createMcpSessionState()); }))();
+                await ensureInitializedCore(target, session, timeoutMs);
+                ({ response } = await postCore(
+                    target, session,
+                    buildRpcRequest(session, 'tools/call', { name: toolName, arguments: normalizedArgs }),
+                    timeoutMs,
+                ));
+            } else {
+                throw e;
+            }
+        }
+        if (!response) return finish({ success: false, error: '空响应' });
+        if (response.error) return finish({ success: false, error: `MCP 错误 [${response.error.code}]: ${response.error.message}` });
+
+        const result = response.result;
+        if (result?.content && Array.isArray(result.content)) {
+            const textParts = result.content.filter((c: any) => c?.type === 'text').map((c: any) => c.text || '');
+            const fullText = textParts.join('\n').trim();
+            if (result.isError) return finish({ success: false, error: fullText || 'MCP 工具执行失败', rawText: fullText });
+            try {
+                return finish({ success: true, data: JSON.parse(fullText), rawText: fullText });
+            } catch {
+                return finish({ success: true, data: fullText, rawText: fullText });
+            }
+        }
+        return finish({ success: true, data: result });
+    } catch (e: any) {
+        return finish({ success: false, error: e?.message || String(e) });
+    }
+};
+
+/** worker 直连的请求头（浏览器侧那套代理头逻辑留在 mcpClient.buildMcpRequestHeaders）。 */
+export const buildMcpDirectHeaders = (server: McpFireServer, sessionId: string | null): Record<string, string> => {
+    const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
+    };
+    for (const item of server.customHeaders || []) {
+        const name = String(item?.name || '').trim();
+        const value = String(item?.value || '').trim();
+        if (name && value) headers[name] = value;
+    }
+    if (server.token) headers['Authorization'] = `Bearer ${server.token}`;
+    if (sessionId) headers['Mcp-Session-Id'] = sessionId;
+    return headers;
+};
