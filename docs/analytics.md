@@ -452,7 +452,6 @@ tracker 标签上还挂了 `data-do-not-track="true"` 和 `data-domains`（只�
 - 打开 Instant Push 视频教程
 - 打开实际后端字段说明
 - 查询 Service Worker 版本
-- 检查用户密钥
 - 检测 Instant Push Worker 连接
 - 清空 API 调用记录
 - 清空 VAPID 密钥对
@@ -515,6 +514,7 @@ tracker 标签上还挂了 `data-do-not-track="true"` 和 `data-domains`（只�
 - 打开日程小剧场
 - 打开聊天功能面板项
 - 打开麦当劳点单小程序
+- 排程定时消息
 - 清空聊天记录
 - 编辑一条消息
 - 重新生成回复

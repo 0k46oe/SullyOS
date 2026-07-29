@@ -14,6 +14,7 @@ import {
 } from '../../types';
 import { ActiveMsgClient, getDefaultActiveMsgFirstSendTime } from '../../utils/activeMsgClient';
 import { type AmsgLastSkip, describeLastSkip } from '../../utils/amsgFirePack';
+import { trackEvent } from '../../utils/analytics';
 import {
   applyRemoteTaskDelta,
   applyScheduledTask,
@@ -302,6 +303,13 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
         present: [result.uuid],
         gone: editingTaskUuid && !result.replacedCancelFailed ? [editingTaskUuid] : [],
       }));
+      // 只报枚举构成（模式/频率都是写死的取值集合）。内容、时间、编号一概不带。
+      trackEvent('排程定时消息', {
+        mode,
+        recurrence: recurrenceType,
+        source: 'user',
+        isEdit: editingTaskUuid ? 'yes' : 'no',
+      });
       setEditingTaskUuid(null);
       // 编辑走的是「先建新的再取消旧的」，编号必然换一个——只说「已更新」的话，
       // 用户会以为列表里那条陌生编号是多出来的。
