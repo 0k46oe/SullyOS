@@ -36,29 +36,46 @@ export interface McpResolvedToolCore<S extends McpFireServer = McpFireServer> {
     toolName: string;
 }
 
-// OpenAI 工具名只允许 [A-Za-z0-9_-]，最长 64；MCP 工具名可能带点号等
-export const sanitizeMcpToolName = (name: string): string =>
-    (name || 'tool').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64) || 'tool';
+/** OpenAI 工具名的长度上限。 */
+const DEFAULT_MAX_TOOL_NAME_LEN = 64;
 
-const serverSlug = (server: McpFireServer): string =>
-    sanitizeMcpToolName(server.name).slice(0, 20) || 'srv';
+// OpenAI 工具名只允许 [A-Za-z0-9_-]，最长 64；MCP 工具名可能带点号等。
+// maxLen 可收紧：worker 侧要在暴露名前面拼 `mcp__` 前缀，得先给前缀留出位置。
+export const sanitizeMcpToolName = (name: string, maxLen = DEFAULT_MAX_TOOL_NAME_LEN): string =>
+    (name || 'tool').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, maxLen);
+
+/** 重名兜底后缀：基名先截到给 `_<i>` 留位的长度，避免截断吃掉计数器后候选名不再变化。 */
+export const withMcpDedupeSuffix = (base: string, i: number, maxLen = DEFAULT_MAX_TOOL_NAME_LEN): string => {
+    const suffix = `_${i}`;
+    return base.slice(0, maxLen - suffix.length) + suffix;
+};
+
+const serverSlug = (server: McpFireServer, maxLen = DEFAULT_MAX_TOOL_NAME_LEN): string =>
+    sanitizeMcpToolName(server.name, maxLen).slice(0, 20);
 
 /**
  * 暴露名 → 真实工具 的映射。暴露名默认用工具原名（sanitize 后）；
  * 跨服务器重名时后者加 <服务器名>_ 前缀。前台 buildMcpOpenAITools 与
  * worker fire 路径都用这一份，保证两端看到同一套名字。
+ *
+ * maxNameLen：暴露名的长度预算，缺省 64（OpenAI 上限）。worker 侧传更小的值，
+ * 好给后面要拼的 `mcp__` 前缀留位。
  */
 export const buildMcpNameMap = <S extends McpFireServer>(
     servers: S[],
+    opts: { maxNameLen?: number } = {},
 ): Map<string, McpResolvedToolCore<S>> => {
+    const maxLen = opts.maxNameLen ?? DEFAULT_MAX_TOOL_NAME_LEN;
     const resolve = new Map<string, McpResolvedToolCore<S>>();
     for (const server of servers) {
         for (const t of server.tools || []) {
-            let exposed = sanitizeMcpToolName(t.name);
+            let exposed = sanitizeMcpToolName(t.name, maxLen);
             if (resolve.has(exposed)) {
-                exposed = sanitizeMcpToolName(`${serverSlug(server)}_${t.name}`);
+                // 带服务器前缀再试；还撞就在后面挂计数器（计数器由 withMcpDedupeSuffix 保位）
+                const prefixed = sanitizeMcpToolName(`${serverSlug(server, maxLen)}_${t.name}`, maxLen);
+                exposed = prefixed;
                 let i = 2;
-                while (resolve.has(exposed)) exposed = sanitizeMcpToolName(`${serverSlug(server)}_${t.name}_${i++}`);
+                while (resolve.has(exposed)) exposed = withMcpDedupeSuffix(prefixed, i++, maxLen);
             }
             resolve.set(exposed, { server, toolName: t.name });
         }
