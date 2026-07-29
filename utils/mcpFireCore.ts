@@ -49,6 +49,11 @@ export interface McpResolvedToolCore<S extends McpFireServer = McpFireServer> {
 /** OpenAI 工具名的长度上限。 */
 const DEFAULT_MAX_TOOL_NAME_LEN = 64;
 
+/** worker 侧 MCP 工具的暴露名前缀（native 声明与正文解析统一用它路由）。 */
+export const MCP_FIRE_NAME_PREFIX = 'mcp__';
+/** fire 侧名映射的长度预算：拼前缀后不超 OpenAI 工具名 64 上限。 */
+export const MCP_FIRE_NAME_BUDGET = DEFAULT_MAX_TOOL_NAME_LEN - MCP_FIRE_NAME_PREFIX.length;
+
 // OpenAI 工具名只允许 [A-Za-z0-9_-]，最长 64；MCP 工具名可能带点号等。
 // maxLen 可收紧：worker 侧要在暴露名前面拼 `mcp__` 前缀，得先给前缀留出位置。
 // 预算是算出来的（上限减前缀长度），万一算成 0 或负数，这里兜到至少留 1 个字符，
@@ -759,9 +764,10 @@ export interface McpFireOpenAITool {
 }
 
 /**
- * fire 请求的 tools 数组（native 模式）。暴露名直接带 mcp__ 前缀——模型按这个名字
- * 调回来，executeToolCalls 零歧义分流，不会撞内置工具（recall/search/…）的名字。
- * resolve 必须是用 { maxNameLen: 59 } 建的（59 + 前缀 5 = 64，OpenAI 工具名上限）。
+ * fire 请求的 tools 数组（native 模式）。暴露名直接带 MCP_FIRE_NAME_PREFIX——模型按
+ * 这个名字调回来，executeToolCalls 零歧义分流，不会撞内置工具（recall/search/…）的名字。
+ * resolve 必须是用 { maxNameLen: MCP_FIRE_NAME_BUDGET } 建的（预算 + 前缀正好是
+ * OpenAI 工具名的 64 上限）。
  */
 export const buildMcpFireTools = <S extends McpFireServer>(
     resolve: Map<string, McpResolvedToolCore<S>>,
@@ -776,7 +782,7 @@ export const buildMcpFireTools = <S extends McpFireServer>(
         tools.push({
             type: 'function',
             function: {
-                name: `mcp__${exposed}`,
+                name: `${MCP_FIRE_NAME_PREFIX}${exposed}`,
                 description: multiServer ? `[${server.name}] ${desc}`.trim() : desc,
                 parameters: tool.inputSchema || { type: 'object', properties: {} },
             },

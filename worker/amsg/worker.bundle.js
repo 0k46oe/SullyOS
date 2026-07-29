@@ -3183,6 +3183,8 @@ var parseToolConfig = (value) => {
 
 // utils/mcpFireCore.ts
 var DEFAULT_MAX_TOOL_NAME_LEN = 64;
+var MCP_FIRE_NAME_PREFIX = "mcp__";
+var MCP_FIRE_NAME_BUDGET = DEFAULT_MAX_TOOL_NAME_LEN - MCP_FIRE_NAME_PREFIX.length;
 var sanitizeMcpToolName = (name, maxLen = DEFAULT_MAX_TOOL_NAME_LEN) => {
   const len = Math.max(1, maxLen);
   return (name || "tool").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, len);
@@ -3669,7 +3671,7 @@ var buildMcpFireTools = (resolve) => {
     tools.push({
       type: "function",
       function: {
-        name: `mcp__${exposed}`,
+        name: `${MCP_FIRE_NAME_PREFIX}${exposed}`,
         description: multiServer ? `[${server.name}] ${desc}`.trim() : desc,
         parameters: tool.inputSchema || { type: "object", properties: {} }
       }
@@ -5664,7 +5666,8 @@ function classifyLLMOutput(text) {
 var createFireSessionState = () => ({
   narrations: [],
   toolCalls: [],
-  duplicateToolCalls: 0
+  duplicateToolCalls: 0,
+  mcpCallSeq: 0
 });
 var MAX_DUPLICATE_TOOL_CALLS = 2;
 var XHS_DESC_MAX = 120;
@@ -5690,14 +5693,14 @@ function buildXhsSessionPayload(directives, notes, xsecTokens) {
 }
 function processLLMRound(state, llmOutputText, build, mcp) {
   const nativeToolCalls = mcp?.nativeToolCalls ?? [];
-  const textCalls = mcp?.resolve.size ? extractTextFakedMcpCalls(llmOutputText, mcp.resolve, { alsoMatchPrefix: "mcp__" }) : [];
+  const textCalls = mcp?.resolve.size ? extractTextFakedMcpCalls(llmOutputText, mcp.resolve, { alsoMatchPrefix: MCP_FIRE_NAME_PREFIX }) : [];
   const scanText = textCalls.length ? stripTextFakedMcpCalls(llmOutputText, textCalls) : llmOutputText;
-  const mcpToolCalls = nativeToolCalls.length > 0 ? nativeToolCalls : textCalls.map((c, i) => ({
-    // id 只需在一轮的 assistant/tool 消息配对里唯一；用累计工具数做轮间区分度。
-    id: `mcp_${state.toolCalls.length}_${i}`,
+  const mcpToolCalls = nativeToolCalls.length > 0 ? nativeToolCalls : textCalls.map((c) => ({
+    // id 只需在一轮的 assistant/tool 消息配对里唯一；本次 fire 内自增，绝不重号。
+    id: `mcp_${state.mcpCallSeq++}`,
     type: "function",
     // exposedName 恒为裸名（alsoMatchPrefix 的命中也回裸名），统一补前缀即可。
-    function: { name: `mcp__${c.exposedName}`, arguments: JSON.stringify(c.args) }
+    function: { name: `${MCP_FIRE_NAME_PREFIX}${c.exposedName}`, arguments: JSON.stringify(c.args) }
   }));
   const result = classifyLLMOutput(scanText);
   const isToolRound = result.kind === "tool-request" || mcpToolCalls.length > 0;
@@ -5832,7 +5835,7 @@ var recordSkip = async (ctx, charId, reason, occurrenceMs) => {
 };
 var MCP_CALL_TIMEOUT_MS = 25e3;
 var runMcpFireTool = async (stash, name, args) => {
-  const exposed = name.slice("mcp__".length);
+  const exposed = name.slice(MCP_FIRE_NAME_PREFIX.length);
   const hit = stash.mcpResolve?.get(exposed);
   if (!hit) {
     return { ok: false, reason: "unknown_tool", message: `\u672A\u914D\u7F6E\u7684 MCP \u5DE5\u5177: ${exposed}` };
@@ -5923,7 +5926,7 @@ var amsgHooks = {
     const toolConfig = parseToolConfig(toolConfigRow.value);
     if (!toolConfig) throw fail("tool_config \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
     const mcpServers = filterMcpServersForChar(toolConfig.mcpServers, charId);
-    const mcpResolve = mcpServers.length ? buildMcpNameMap(mcpServers, { maxNameLen: 59 }) : null;
+    const mcpResolve = mcpServers.length ? buildMcpNameMap(mcpServers, { maxNameLen: MCP_FIRE_NAME_BUDGET }) : null;
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
     ctx.scratch.fire = {
@@ -5958,8 +5961,14 @@ var amsgHooks = {
     const rawToolCalls = ctx.llmResponse?.choices?.[0]?.message?.tool_calls;
     const nativeMcpCalls = (Array.isArray(rawToolCalls) ? rawToolCalls : []).filter((tc) => {
       const n = tc?.function?.name;
-      const hit = typeof n === "string" && n.startsWith("mcp__") && !!stash.mcpResolve?.has(n.slice("mcp__".length));
-      if (!hit && tc) console.warn("[amsg:agentic] \u4E22\u5F03\u672A\u58F0\u660E\u7684 native tool_call", { name: tc?.function?.name });
+      const hit = typeof n === "string" && n.startsWith(MCP_FIRE_NAME_PREFIX) && !!stash.mcpResolve?.has(n.slice(MCP_FIRE_NAME_PREFIX.length));
+      if (!hit) {
+        console.warn("[amsg:agentic] \u4E22\u5F03\u672A\u58F0\u660E\u7684 native tool_call", {
+          sessionId: ctx.sessionId,
+          name: n ?? null,
+          declared: [...stash.mcpResolve?.keys() ?? []]
+        });
+      }
       return hit;
     });
     const decision = processLLMRound(session, content, {
@@ -6034,7 +6043,7 @@ var amsgHooks = {
           });
           continue;
         }
-        const result = name.startsWith("mcp__") ? await runMcpFireTool(stash, name, args) : await dispatchAgenticTool(name, args, stash.toolCtx);
+        const result = name.startsWith(MCP_FIRE_NAME_PREFIX) ? await runMcpFireTool(stash, name, args) : await dispatchAgenticTool(name, args, stash.toolCtx);
         stash.session.toolCalls.push({ name, fingerprint });
         content = buildToolResultMessage({ name, result, history: stash.session.toolCalls });
         console.log("[amsg:agentic]", { type: "tool_done", sessionId: ctx.sessionId, tool: name });

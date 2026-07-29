@@ -426,6 +426,18 @@ describe('processLLMRound + MCP', () => {
     expect(state.narrations.join('')).not.toContain('get_secret('); // 语法照剥
   });
 
+  // 合成 id 曾用「已跑过的工具数」做轮间区分度，但重复调用被短路、工具抛错这两条路
+  // 都不会往 toolCalls 落账——连着两轮都会拿到同一个 id，assistant/tool 消息配不上对。
+  it('正文合成的 tool_call id 跨轮不重号（轮间没有工具落账也不撞）', () => {
+    const state = createFireSessionState();
+    const r1 = processLLMRound(state, 'get_secret({"who":"甲"})', build, { resolve: mcpResolve });
+    const r2 = processLLMRound(state, 'get_secret({"who":"乙"})', build, { resolve: mcpResolve });
+    expect(r1.decision).toBe('tool-request');
+    expect(r2.decision).toBe('tool-request');
+    if (r1.decision !== 'tool-request' || r2.decision !== 'tool-request') return;
+    expect(r1.toolCalls[0].id).not.toBe(r2.toolCalls[0].id);
+  });
+
   it('native 与数据标签同轮 → 合并进同一个 tool-request', () => {
     const state = createFireSessionState();
     const d = processLLMRound(state, '[[RECALL: 2026-06]]', build, {

@@ -18,6 +18,7 @@ import { classifyLLMOutput, type Directive, type ToolCall } from '../../instant-
 import type { ToolCallRecord } from '../../../utils/agenticToolFeedback';
 import {
   extractTextFakedMcpCalls,
+  MCP_FIRE_NAME_PREFIX,
   stripTextFakedMcpCalls,
   type McpFireServer,
   type McpResolvedToolCore,
@@ -42,12 +43,15 @@ export interface FireSessionState {
   toolCalls: ToolCallRecord[];
   /** 被打回的重复调用次数（executeToolCalls 累加）。到阈值就收尾，见 MAX_DUPLICATE_TOOL_CALLS。 */
   duplicateToolCalls: number;
+  /** 合成 tool_call id 的自增序号（正文那条路用；native 用模型自己的 id）。 */
+  mcpCallSeq: number;
 }
 
 export const createFireSessionState = (): FireSessionState => ({
   narrations: [],
   toolCalls: [],
   duplicateToolCalls: 0,
+  mcpCallSeq: 0,
 });
 
 /**
@@ -169,19 +173,20 @@ export function processLLMRound(
   // 掉格式写进正文时写的也是它）——core 的 alsoMatchPrefix 选项负责，exposedName 回裸名。
   const nativeToolCalls = mcp?.nativeToolCalls ?? [];
   const textCalls = mcp?.resolve.size
-    ? extractTextFakedMcpCalls(llmOutputText, mcp.resolve, { alsoMatchPrefix: 'mcp__' })
+    ? extractTextFakedMcpCalls(llmOutputText, mcp.resolve, { alsoMatchPrefix: MCP_FIRE_NAME_PREFIX })
     : [];
   const scanText = textCalls.length ? stripTextFakedMcpCalls(llmOutputText, textCalls) : llmOutputText;
   // native 在场时正文抠出来的不再入列（同一意图大概率两处都写了；库只给 assistant
-  // 消息合并 decision 里的 toolCalls，native 已含语义）。语法照剥。
+  // 消息合并 decision 里的 toolCalls，native 已含语义）。两份都入列会把同一个工具跑
+  // 两遍，第二次还会被判成重复调用往收尾计数上加。语法照剥。
   const mcpToolCalls: ToolCall[] = nativeToolCalls.length > 0
     ? nativeToolCalls
-    : textCalls.map((c, i) => ({
-        // id 只需在一轮的 assistant/tool 消息配对里唯一；用累计工具数做轮间区分度。
-        id: `mcp_${state.toolCalls.length}_${i}`,
+    : textCalls.map((c) => ({
+        // id 只需在一轮的 assistant/tool 消息配对里唯一；本次 fire 内自增，绝不重号。
+        id: `mcp_${state.mcpCallSeq++}`,
         type: 'function',
         // exposedName 恒为裸名（alsoMatchPrefix 的命中也回裸名），统一补前缀即可。
-        function: { name: `mcp__${c.exposedName}`, arguments: JSON.stringify(c.args) },
+        function: { name: `${MCP_FIRE_NAME_PREFIX}${c.exposedName}`, arguments: JSON.stringify(c.args) },
       }));
 
   const result = classifyLLMOutput(scanText);

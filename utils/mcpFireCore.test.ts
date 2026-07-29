@@ -9,6 +9,8 @@ import {
     createMcpSessionState,
     extractTextFakedMcpCalls,
     filterMcpServersForChar,
+    MCP_FIRE_NAME_BUDGET,
+    MCP_FIRE_NAME_PREFIX,
     sanitizeMcpToolName,
     stripTextFakedMcpCalls,
     withMcpDedupeSuffix,
@@ -58,14 +60,14 @@ describe('buildMcpNameMap', () => {
         expect([...map.keys()].every((k) => k.length <= 64)).toBe(true);
     });
 
-    it('maxNameLen 可收紧预算（给 worker 侧的 mcp__ 前缀留位），收紧后暴露名依然互异', () => {
+    it('maxNameLen 可收紧预算（给 worker 侧的前缀留位），收紧后暴露名依然互异', () => {
         const longTool = 'a'.repeat(43);
         const servers = ['-alpha', '-beta', '-gamma', '-delta'].map((sfx, i) =>
             srv({ id: `s${i}`, name: `MyCompanyToolServer${sfx}`, tools: [{ name: longTool }] }));
-        const map = buildMcpNameMap(servers, { maxNameLen: 59 });
+        const map = buildMcpNameMap(servers, { maxNameLen: MCP_FIRE_NAME_BUDGET });
         // Map 的键天然去重，size 等于工具数就等于「没有互相覆盖」
         expect(map.size).toBe(servers.length);
-        expect([...map.keys()].every((k) => k.length <= 59)).toBe(true);
+        expect([...map.keys()].every((k) => k.length <= MCP_FIRE_NAME_BUDGET)).toBe(true);
     });
 });
 
@@ -315,15 +317,17 @@ describe('buildMcpFireBlock / buildMcpFireTools', () => {
         expect(tools.map((t) => t.function.description)).toEqual(['[服务器A] 查天气', '[服务器B] 查新闻']);
     });
 
-    // 59 是 worker 侧算好的预算（64 上限 - `mcp__` 前缀 5 字符）。这条守的是两边协同：
-    // 名映射按 59 收紧后，fire tools 拼上前缀不能越过 OpenAI 的 64。
-    it('按 maxNameLen: 59 建的映射，拼上 mcp__ 前缀后仍不超 64', () => {
+    // 这条守的是两边协同：名映射按 MCP_FIRE_NAME_BUDGET 收紧后，fire tools 拼上前缀
+    // 不能越过 OpenAI 的 64。两个常量是同一个式子的两头（预算 = 64 − 前缀长），
+    // 谁被单独改一头这条就红。
+    it('按 MCP_FIRE_NAME_BUDGET 建的映射，拼上前缀后仍不超 64', () => {
+        expect(MCP_FIRE_NAME_BUDGET + MCP_FIRE_NAME_PREFIX.length).toBe(64);
         const longTool = 'a'.repeat(43);
         const wideServers = ['-alpha', '-beta', '-gamma', '-delta'].map((sfx, i) =>
             srv({ id: `s${i}`, name: `MyCompanyToolServer${sfx}`, tools: [{ name: longTool }] }));
-        const tools = buildMcpFireTools(buildMcpNameMap(wideServers, { maxNameLen: 59 }));
+        const tools = buildMcpFireTools(buildMcpNameMap(wideServers, { maxNameLen: MCP_FIRE_NAME_BUDGET }));
         expect(tools).toHaveLength(wideServers.length);
-        expect(tools.every((t) => t.function.name.startsWith('mcp__'))).toBe(true);
+        expect(tools.every((t) => t.function.name.startsWith(MCP_FIRE_NAME_PREFIX))).toBe(true);
         expect(tools.every((t) => t.function.name.length <= 64)).toBe(true);
     });
 });

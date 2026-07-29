@@ -60,6 +60,8 @@ import {
   createMcpSessionState,
   filterMcpServersForChar,
   formatMcpToolResult,
+  MCP_FIRE_NAME_BUDGET,
+  MCP_FIRE_NAME_PREFIX,
   type McpResolvedToolCore,
   type McpSessionState,
 } from '../../../utils/mcpFireCore';
@@ -323,7 +325,7 @@ const recordSkip = async (
 const MCP_CALL_TIMEOUT_MS = 25_000;
 
 /**
- * 执行一个 mcp__ 前缀的工具调用。永不抛错——失败也以 ok:false 回喂给 LLM
+ * 执行一个带 MCP_FIRE_NAME_PREFIX 的工具调用。永不抛错——失败也以 ok:false 回喂给 LLM
  * 圆场（与 dispatchAgenticTool 的失败语义对齐，见 executeToolCalls 注释）。
  * export 只为单测。
  */
@@ -332,7 +334,7 @@ export const runMcpFireTool = async (
   name: string,
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown>> => {
-  const exposed = name.slice('mcp__'.length);
+  const exposed = name.slice(MCP_FIRE_NAME_PREFIX.length);
   const hit = stash.mcpResolve?.get(exposed);
   if (!hit) {
     return { ok: false, reason: 'unknown_tool', message: `未配置的 MCP 工具: ${exposed}` };
@@ -469,8 +471,10 @@ export const amsgHooks = {
     // mcpUseNativeTools=false = 用户的中转拒 tools（前台兼容模式同款开关），
     // 请求不带 tools 参数、提示词块教正文协议，识别走 processLLMRound 第二层。
     const mcpServers = filterMcpServersForChar(toolConfig.mcpServers, charId);
-    // maxNameLen 59：暴露名后面要拼 mcp__ 前缀（5 字符），总长不能超 OpenAI 的 64。
-    const mcpResolve = mcpServers.length ? buildMcpNameMap(mcpServers, { maxNameLen: 59 }) : null;
+    // 暴露名后面要拼 MCP_FIRE_NAME_PREFIX，长度预算得先把前缀那几个字符扣掉。
+    const mcpResolve = mcpServers.length
+      ? buildMcpNameMap(mcpServers, { maxNameLen: MCP_FIRE_NAME_BUDGET })
+      : null;
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
 
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
@@ -522,15 +526,24 @@ export const amsgHooks = {
     }
     const session = stash.session;
 
-    // native tool_calls：只认 tools 数组里声明过的 mcp__ 名字。模型幻觉出的
+    // native tool_calls：只认 tools 数组里声明过的 MCP 名字。模型幻觉出的
     // 未声明调用（比如给 tag 工具编一个 native 调用）丢弃并留日志——直接透传
-    // 会让 executeToolCalls 撞上没有 stash 映射的名字。
+    // 会让 executeToolCalls 撞上没有 stash 映射的名字。日志带上当时声明了哪些，
+    // 「模型编的」和「名字映射建歪了」一眼能分开。
     const rawToolCalls = (ctx.llmResponse as { choices?: Array<{ message?: { tool_calls?: unknown } }> })
       ?.choices?.[0]?.message?.tool_calls;
     const nativeMcpCalls = (Array.isArray(rawToolCalls) ? rawToolCalls : []).filter((tc): tc is ToolCall => {
       const n = (tc as ToolCall | undefined)?.function?.name;
-      const hit = typeof n === 'string' && n.startsWith('mcp__') && !!stash.mcpResolve?.has(n.slice('mcp__'.length));
-      if (!hit && tc) console.warn('[amsg:agentic] 丢弃未声明的 native tool_call', { name: (tc as ToolCall)?.function?.name });
+      const hit = typeof n === 'string'
+        && n.startsWith(MCP_FIRE_NAME_PREFIX)
+        && !!stash.mcpResolve?.has(n.slice(MCP_FIRE_NAME_PREFIX.length));
+      if (!hit) {
+        console.warn('[amsg:agentic] 丢弃未声明的 native tool_call', {
+          sessionId: ctx.sessionId,
+          name: n ?? null,
+          declared: [...(stash.mcpResolve?.keys() ?? [])],
+        });
+      }
       return hit;
     });
 
@@ -640,7 +653,7 @@ export const amsgHooks = {
 
         // 通用 MCP 走直连（worker 服务端 fetch 无 CORS），其余走内置工具；
         // 两边失败语义一致，回喂 / 记账 / 日志共用下面这段。
-        const result = name.startsWith('mcp__')
+        const result = name.startsWith(MCP_FIRE_NAME_PREFIX)
           ? await runMcpFireTool(stash, name, args)
           : await dispatchAgenticTool(name, args, stash.toolCtx);
         stash.session.toolCalls.push({ name, fingerprint });
