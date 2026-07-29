@@ -5062,7 +5062,14 @@ var TOOL_LABELS = {
   xhs_my_profile: "\u6253\u5F00\u81EA\u5DF1\u7684\u5C0F\u7EA2\u4E66",
   xhs_detail: "\u70B9\u5F00\u4E00\u6761\u5C0F\u7EA2\u4E66\u7B14\u8BB0"
 };
-var describeTool = (name) => TOOL_LABELS[name] ?? name;
+var describeTool = (name) => {
+  const label = TOOL_LABELS[name];
+  if (label) return label;
+  if (name.startsWith(MCP_FIRE_NAME_PREFIX)) {
+    return `\u8C03\u7528\u300C${name.slice(MCP_FIRE_NAME_PREFIX.length)}\u300D`;
+  }
+  return name;
+};
 var buildToolResultMessage = (opts) => {
   const { name, result, history } = opts;
   const used = [...new Set(history.map((r) => describeTool(r.name)))];
@@ -5834,17 +5841,28 @@ var recordSkip = async (ctx, charId, reason, occurrenceMs) => {
   }
 };
 var MCP_CALL_TIMEOUT_MS = 25e3;
+var MCP_TOTAL_BUDGET_MS = 12e4;
 var runMcpFireTool = async (stash, name, args) => {
   const exposed = name.slice(MCP_FIRE_NAME_PREFIX.length);
   const hit = stash.mcpResolve?.get(exposed);
   if (!hit) {
     return { ok: false, reason: "unknown_tool", message: `\u672A\u914D\u7F6E\u7684 MCP \u5DE5\u5177: ${exposed}` };
   }
+  const remaining = MCP_TOTAL_BUDGET_MS - stash.mcpSpentMs;
+  if (remaining <= 0) {
+    return {
+      ok: false,
+      reason: "mcp_budget_exhausted",
+      source: hit.server.name,
+      message: "MCP \u8C03\u7528\u65F6\u95F4\u9884\u7B97\u5DF2\u7528\u5B8C\uFF0C\u8FD9\u8F6E\u522B\u518D\u8C03\u5916\u90E8\u5DE5\u5177\u4E86\uFF0C\u7528\u624B\u4E0A\u5DF2\u6709\u7684\u4FE1\u606F\u6536\u5C3E\u3002"
+    };
+  }
   let session = stash.mcpSessions.get(hit.server.id);
   if (!session) {
     session = createMcpSessionState();
     stash.mcpSessions.set(hit.server.id, session);
   }
+  const started = Date.now();
   const result = await callMcpToolCore(
     // worker 侧 fetch 没有 CORS，直连用户配的地址，不经代理。
     { url: hit.server.url, headers: (sid) => buildMcpDirectHeaders(hit.server, sid) },
@@ -5852,11 +5870,13 @@ var runMcpFireTool = async (stash, name, args) => {
     hit.toolName,
     args,
     {
-      timeoutMs: MCP_CALL_TIMEOUT_MS,
+      // 剩余预算比单次上限还少时按剩余的来，最后一个调用不会越过总线。
+      timeoutMs: Math.min(MCP_CALL_TIMEOUT_MS, remaining),
       inputSchema: hit.tool.inputSchema,
       serverLabel: hit.server.name
     }
   );
+  stash.mcpSpentMs += Date.now() - started;
   return result.success ? { ok: true, source: hit.server.name, data: formatMcpToolResult(result.data) } : { ok: false, reason: "mcp_error", source: hit.server.name, message: result.error };
 };
 var amsgHooks = {
@@ -5936,7 +5956,8 @@ var amsgHooks = {
       xhsCookie,
       occurrenceMs,
       mcpResolve,
-      mcpSessions: /* @__PURE__ */ new Map()
+      mcpSessions: /* @__PURE__ */ new Map(),
+      mcpSpentMs: 0
     };
     const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction) + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? "native" : "text" }) : "");
     return {

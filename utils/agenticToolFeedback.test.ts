@@ -51,6 +51,12 @@ describe('describeTool', () => {
   it('不认识的工具用原名，不编一个出来', () => {
     expect(describeTool('some_future_tool')).toBe('some_future_tool');
   });
+
+  // 用户自配的 MCP 工具不在标签表里。原名直接回填会拼出「你mcp__get_secret，拿回了…」——
+  // 句子读不通，路由用的前缀还漏进了模型能看见的散文（模型照着学就往正文里写假调用）。
+  it('MCP 工具剥掉路由前缀，凑成读得通的动宾短语', () => {
+    expect(describeTool('mcp__get_secret')).toBe('调用「get_secret」');
+  });
 });
 
 describe('buildToolResultMessage', () => {
@@ -65,6 +71,16 @@ describe('buildToolResultMessage', () => {
       history,
     });
     expect(msg).toContain('六月发生的事');
+  });
+
+  it('MCP 工具的回喂句子读得通，且不把 mcp__ 前缀漏给模型', () => {
+    const msg = buildToolResultMessage({
+      name: 'mcp__get_secret',
+      result: { ok: true, data: '暗号' },
+      history: [{ name: 'mcp__get_secret', fingerprint: toolCallFingerprint('mcp__get_secret', {}) }],
+    });
+    expect(msg).toContain('调用「get_secret」');
+    expect(msg).not.toContain('mcp__');
   });
 
   // 这条是整个改动的意义所在：裸 JSON 里没有任何东西告诉模型「这一步做完了」，

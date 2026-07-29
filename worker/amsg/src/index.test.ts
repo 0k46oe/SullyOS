@@ -616,10 +616,11 @@ describe('runMcpFireTool', () => {
     token: 'tok-1',
     tools: [{ name: 'get_secret', inputSchema: { type: 'object', properties: {} } }],
   };
-  // maxNameLen 与 onBeforeFire 一致（59，给 mcp__ 前缀留位）。
+  // maxNameLen 与 onBeforeFire 一致（给前缀留位）。
   const stashFragment = () => ({
     mcpResolve: buildMcpNameMap([probe], { maxNameLen: MCP_FIRE_NAME_BUDGET }),
     mcpSessions: new Map(),
+    mcpSpentMs: 0,
   });
 
   const rpcOk = (id: number, result: unknown) => new Response(
@@ -679,5 +680,41 @@ describe('runMcpFireTool', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('boom', { status: 500 })));
     const result = await runMcpFireTool(stashFragment(), 'mcp__get_secret', {});
     expect(result).toMatchObject({ ok: false, reason: 'mcp_error', source: '探针' });
+  });
+
+  // 单次超时之外还有一条全 fire 共享的总预算：native FC 一轮能吐好几个调用，
+  // executeToolCalls 串行 await，只卡单次的话 25s × N 照样能顶穿 240s 总预算，
+  // 那就是 AGENTIC_LOOP_EXCEEDED、任务不出清、下一分钟整条从头重跑。
+  it('预算用尽 → 直接 ok:false 早退，一个请求都不发', async () => {
+    const fetchSpy = vi.fn(async () => new Response('never', { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const stash = { ...stashFragment(), mcpSpentMs: 120_000 };
+    const result = await runMcpFireTool(stash, 'mcp__get_secret', {});
+
+    expect(result).toMatchObject({ ok: false, reason: 'mcp_budget_exhausted', source: '探针' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('调用完把耗时记进 mcpSpentMs（后续调用才知道还剩多少）', async () => {
+    // 假时钟：只在服务器回 tools/call 结果那一刻往前拨 700ms，模拟这次调用真的花了这么久。
+    // 不用真等，也不受「这段代码一共读了几次 Date.now」影响。
+    let clock = 1_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    vi.stubGlobal('fetch', vi.fn(async (_: any, init: any) => {
+      const body = JSON.parse(init.body);
+      if (body.method === 'initialize') {
+        return rpcOk(body.id, { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'p', version: '1' } });
+      }
+      if (String(body.method).startsWith('notifications/')) return new Response(null, { status: 202 });
+      clock += 700;
+      return rpcOk(body.id, { content: [{ type: 'text', text: 'x' }] });
+    }));
+
+    const stash = stashFragment();
+    await runMcpFireTool(stash, 'mcp__get_secret', {});
+    nowSpy.mockRestore();
+
+    expect(stash.mcpSpentMs).toBe(700);
   });
 });

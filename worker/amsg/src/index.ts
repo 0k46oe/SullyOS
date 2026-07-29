@@ -165,6 +165,8 @@ interface FireStash {
   mcpResolve: Map<string, McpResolvedToolCore> | null;
   /** 每服务器一份连接会话，单次 fire 内跨轮复用，fire 结束随 scratch 丢弃。 */
   mcpSessions: Map<string, McpSessionState>;
+  /** 本次 fire 已经花在 MCP 调用上的毫秒数，见 MCP_TOTAL_BUDGET_MS。 */
+  mcpSpentMs: number;
 }
 
 const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash | undefined =>
@@ -321,8 +323,18 @@ const recordSkip = async (
 /**
  * 单个 MCP 调用的超时。总 fire 预算 240s / 最多 5 轮，一个慢服务器不能吃光
  * 整条链（浏览器侧是 60s，那边没有轮次预算压力）。
+ *
+ * 单次上限之外还有下面那条共享总预算：native FC 一轮可以吐好几个调用，
+ * executeToolCalls 是串行 await 的，只卡单次的话 25s × N 照样能顶穿 240s。
  */
 const MCP_CALL_TIMEOUT_MS = 25_000;
+
+/**
+ * 单次 fire 内全部 MCP 调用共享的时间预算。总 fire 240s，扣掉 LLM 往返，
+ * MCP 最多吃一半——预算尽了让后续调用早退（ok:false 回喂），比转到轮次上限
+ * 整条任务重跑便宜得多（重跑的代价见 agenticToolFeedback 头注释）。
+ */
+const MCP_TOTAL_BUDGET_MS = 120_000;
 
 /**
  * 执行一个带 MCP_FIRE_NAME_PREFIX 的工具调用。永不抛错——失败也以 ok:false 回喂给 LLM
@@ -330,7 +342,7 @@ const MCP_CALL_TIMEOUT_MS = 25_000;
  * export 只为单测。
  */
 export const runMcpFireTool = async (
-  stash: Pick<FireStash, 'mcpResolve' | 'mcpSessions'>,
+  stash: Pick<FireStash, 'mcpResolve' | 'mcpSessions' | 'mcpSpentMs'>,
   name: string,
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown>> => {
@@ -339,12 +351,24 @@ export const runMcpFireTool = async (
   if (!hit) {
     return { ok: false, reason: 'unknown_tool', message: `未配置的 MCP 工具: ${exposed}` };
   }
+  // 预算尽了就不再发请求，直接把「别调了，收尾吧」回喂给模型——继续排队等超时只会
+  // 把 fire 拖过总预算，那是整条任务重跑，比少查一次贵得多。
+  const remaining = MCP_TOTAL_BUDGET_MS - stash.mcpSpentMs;
+  if (remaining <= 0) {
+    return {
+      ok: false,
+      reason: 'mcp_budget_exhausted',
+      source: hit.server.name,
+      message: 'MCP 调用时间预算已用完，这轮别再调外部工具了，用手上已有的信息收尾。',
+    };
+  }
   // 每台服务器一份会话，单次 fire 内跨轮复用：一次 fire 最多五轮，每轮重握手就是白烧往返。
   let session = stash.mcpSessions.get(hit.server.id);
   if (!session) {
     session = createMcpSessionState();
     stash.mcpSessions.set(hit.server.id, session);
   }
+  const started = Date.now();
   const result = await callMcpToolCore(
     // worker 侧 fetch 没有 CORS，直连用户配的地址，不经代理。
     { url: hit.server.url, headers: (sid) => buildMcpDirectHeaders(hit.server, sid) },
@@ -352,11 +376,14 @@ export const runMcpFireTool = async (
     hit.toolName,
     args as Record<string, any>,
     {
-      timeoutMs: MCP_CALL_TIMEOUT_MS,
+      // 剩余预算比单次上限还少时按剩余的来，最后一个调用不会越过总线。
+      timeoutMs: Math.min(MCP_CALL_TIMEOUT_MS, remaining),
       inputSchema: hit.tool.inputSchema,
       serverLabel: hit.server.name,
     },
   );
+  // 失败/超时的耗时同样记账——烧掉的墙钟时间不因为结果不好就不算。
+  stash.mcpSpentMs += Date.now() - started;
   return result.success
     ? { ok: true, source: hit.server.name, data: formatMcpToolResult(result.data) }
     : { ok: false, reason: 'mcp_error', source: hit.server.name, message: result.error };
@@ -486,6 +513,7 @@ export const amsgHooks = {
       occurrenceMs,
       mcpResolve,
       mcpSessions: new Map(),
+      mcpSpentMs: 0,
     } satisfies FireStash;
 
     // fire_pack v2：「本次任务」指令随任务 metadata 走，这里填槽。

@@ -18,6 +18,8 @@
  * 具体工具怎么跑，所以两边各自的循环形态（前台是流水线、worker 是真循环）都能用。
  */
 
+import { MCP_FIRE_NAME_PREFIX } from './mcpFireCore';
+
 /**
  * 一次工具调用的指纹：工具名 + 规范化后的参数。
  *
@@ -58,7 +60,22 @@ const TOOL_LABELS: Record<string, string> = {
   xhs_detail: '点开一条小红书笔记',
 };
 
-export const describeTool = (name: string): string => TOOL_LABELS[name] ?? name;
+/**
+ * 工具名 → 塞进「你__，拿回了下面这些」这句话里的说法。
+ *
+ * 用户自配的 MCP 工具不在上表里，名字还带着路由用的 mcp__ 前缀。直接回填原名会拼出
+ * 「你mcp__get_secret，拿回了…」——句子读不通，内部前缀也漏进了模型能看见的散文里
+ * （模型照着学，回头就往正文里写 mcp__ 开头的假调用）。所以这类名字剥掉前缀、
+ * 补成完整的动宾短语。内置工具都在表里，走不到这两条分支。
+ */
+export const describeTool = (name: string): string => {
+  const label = TOOL_LABELS[name];
+  if (label) return label;
+  if (name.startsWith(MCP_FIRE_NAME_PREFIX)) {
+    return `调用「${name.slice(MCP_FIRE_NAME_PREFIX.length)}」`;
+  }
+  return name;
+};
 
 /**
  * 工具结果 → 回喂给模型的那段话。
