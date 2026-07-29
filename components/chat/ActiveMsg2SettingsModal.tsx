@@ -303,10 +303,11 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
         present: [result.uuid],
         gone: editingTaskUuid && !result.replacedCancelFailed ? [editingTaskUuid] : [],
       }));
-      // 只报枚举构成（模式/频率都是写死的取值集合）。内容、时间、编号一概不带。
+      // 只报枚举构成，内容、时间、编号一概不带。mode/recurrence 虽有 TS 类型，但编辑路径
+      // 是从持久化任务记录读回来的（导入的备份可携带任意字符串），上报前运行时收敛一遍。
       trackEvent('排程定时消息', {
-        mode,
-        recurrence: recurrenceType,
+        mode: mode === 'fixed' || mode === 'prompted' ? mode : 'auto',
+        recurrence: recurrenceType === 'daily' || recurrenceType === 'weekly' ? recurrenceType : 'none',
         source: 'user',
         isEdit: editingTaskUuid ? 'yes' : 'no',
       });
