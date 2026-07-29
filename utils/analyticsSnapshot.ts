@@ -37,6 +37,7 @@ import { getLuckinToken, isLuckinEnabled } from './luckinMcpClient';
 import { getMcdToken, isMcdEnabled } from './mcdMcpClient';
 import { loadInstantConfig } from './instantPushClient';
 import { isPushVapidReady } from './pushVapid';
+import { getPendingTasks } from './amsg2Tasks';
 import { getVRApi } from './vrWorld/vrApi';
 
 /** 布尔开关转「开 / 关」，带默认值。 */
@@ -178,8 +179,9 @@ export function collectCharSettings(
         见面写作风格: c.dateStyleConfig?.style ?? 'cinematic',
         见面叙事人称: c.dateStyleConfig?.pov ?? '没设',
         观测HUD样式: c.dateObserve?.style ?? 'hologram',
-        定时消息模式: c.activeMsg2Config?.mode ?? 'auto',
-        定时消息频率: c.activeMsg2Config?.recurrenceType ?? 'none',
+        // 定时消息是多任务清单（一个角色可以同时挂多个不同模式的任务），没有角色级的
+        // 单一模式/频率可报；这里报任务规模，模式/频率构成在「排程定时消息」事件里按次记录。
+        定时消息任务数: bucketFewCount(getPendingTasks(c.activeMsg2Config, Date.now()).length),
         // 角色专属提示音同样只分「内置哪个 / 自己弄的」
         角色提示音: presetOrCustom(c.chatSound?.src, Object.keys(BUILTIN_SOUNDS), '没设'),
     };
