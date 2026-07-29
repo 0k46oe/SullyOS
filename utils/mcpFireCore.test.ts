@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { buildMcpNameMap, filterMcpServersForChar, withMcpDedupeSuffix, type McpFireServer } from './mcpFireCore';
+import { buildMcpNameMap, filterMcpServersForChar, sanitizeMcpToolName, withMcpDedupeSuffix, type McpFireServer } from './mcpFireCore';
 
 const srv = (over: Partial<McpFireServer>): McpFireServer => ({
     id: 's1', name: '服务器A', url: 'https://a.example.com/mcp',
@@ -53,6 +53,15 @@ describe('buildMcpNameMap', () => {
         expect(map.size).toBe(servers.length);
         expect([...map.keys()].every((k) => k.length <= 59)).toBe(true);
     });
+
+    // 名长预算是调用方算出来的（上限减前缀），算出 0 或负数时不能给出怪结果：
+    // 不许返回空名，也不许被 slice 的负数下标反过来吐出一长串。
+    it('名长预算被压到 0/负数时仍给出可用的短名字', () => {
+        expect(sanitizeMcpToolName('xyz', 0)).toBe('x');
+        expect(sanitizeMcpToolName('xyz', -5)).toBe('x');
+        expect(withMcpDedupeSuffix('abc', 2, 1)).toBe('_2');
+        expect(withMcpDedupeSuffix('x'.repeat(64), 2, 1).length).toBeLessThanOrEqual('_2'.length);
+    });
 });
 
 describe('filterMcpServersForChar', () => {
@@ -78,5 +87,9 @@ describe('叶子纪律', () => {
         const src = readFileSync(new URL('./mcpFireCore.ts', import.meta.url), 'utf8');
         // 后续任务确需引入环境无关叶子时，在这里逐条放开白名单
         expect(src.match(/^\s*import\s.+$/gm) ?? []).toEqual([]);
+        // 连 `export … 自其它模块` 这种转出写法一起卡（它同样会把别的模块拖进 bundle）
+        expect(src.match(/\bfrom\s*['"]/g) ?? []).toEqual([]);
+        // 动态引入同理，运行期才炸更难查
+        expect(src.match(/\bimport\s*\(/g) ?? []).toEqual([]);
     });
 });
