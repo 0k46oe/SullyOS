@@ -1181,15 +1181,12 @@ export function processLLMRound(
   // 与数据标签同轮出现，最终合并成同一个 tool-request，executeToolCalls 按
   // mcp__ 前缀分流。正文里出现过的调用语法一律剥掉——它不能进旁白/推送。
   //
-  // 解析查找表带上 mcp__ 前缀别名：native 模式下模型在 tools 数组里见到的名字
-  // 就是带前缀的，掉格式写进正文时写的也是它。
-  let textLookup = mcp?.resolve;
-  if (textLookup?.size) {
-    textLookup = new Map(textLookup);
-    for (const [exposed, hit] of mcp!.resolve) textLookup.set(`mcp__${exposed}`, hit);
-  }
+  // 正文解析认 mcp__ 前缀名（native 模式下模型在 tools 数组里见到的名字带前缀，
+  // 掉格式写进正文时写的也是它）——core 的 alsoMatchPrefix 选项负责，exposedName 回裸名。
   const nativeToolCalls = mcp?.nativeToolCalls ?? [];
-  const textCalls = textLookup?.size ? extractTextFakedMcpCalls(llmOutputText, textLookup) : [];
+  const textCalls = mcp?.resolve.size
+    ? extractTextFakedMcpCalls(llmOutputText, mcp.resolve, { alsoMatchPrefix: 'mcp__' })
+    : [];
   const scanText = textCalls.length ? stripTextFakedMcpCalls(llmOutputText, textCalls) : llmOutputText;
   // native 在场时正文抠出来的不再入列（同一意图大概率两处都写了；而且库只给
   // assistant 消息合并 decision 里的 toolCalls，native 已含语义）。语法照剥。
@@ -1199,10 +1196,8 @@ export function processLLMRound(
         // id 只需在一轮的 assistant/tool 消息配对里唯一；用累计工具数做轮间区分度。
         id: `mcp_${state.toolCalls.length}_${i}`,
         type: 'function',
-        function: {
-          name: c.exposedName.startsWith('mcp__') ? c.exposedName : `mcp__${c.exposedName}`,
-          arguments: JSON.stringify(c.args),
-        },
+        // exposedName 恒为裸名（alsoMatchPrefix 的命中也回裸名），统一补前缀即可。
+        function: { name: `mcp__${c.exposedName}`, arguments: JSON.stringify(c.args) },
       }));
 
   const result = classifyLLMOutput(scanText);
@@ -1228,7 +1223,7 @@ export function processLLMRound(
   //   （result 是在 scanText 上算的，比对基准跟着换；无 MCP 时 scanText === llmOutputText，行为不变。）
 ```
 
-（`mcp__` 前缀别名条目的 `exposedName` 是带前缀的，映射时判一下避免 `mcp__mcp__`——上面代码已含。）
+
 
 - [ ] **Step 4: index.ts onLLMOutput 提取 native**
 
