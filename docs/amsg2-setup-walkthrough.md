@@ -4,7 +4,9 @@
 
 它需要一个只属于你的小后端（一个 Cloudflare Worker + 一个数据库）。这份手册把整个过程拆成六步，**全程只在网页上点，不用装任何东西、不用敲命令**。跟着做大约 15 分钟。
 
-需要先准备好两个免费账号：**GitHub** 和 **Cloudflare**。
+需要先准备好两个免费账号：**GitHub（用邮箱就能注册）** 和 **Cloudflare（用GitHub/邮箱就能注册）**。
+
+> 没有 GitHub 账号也能装，看文末的[附录 · 不用 GitHub 怎么装](#附录--不用-github-怎么装)——那条路只要 Cloudflare 一个账号。
 
 ---
 
@@ -183,7 +185,7 @@ env.DB (sullyos-amsg)   D1 Database
 
 **排好的任务到点没反应**
 
-1. Cloudflare → 你的 Worker → **Settings** → 往下找 **Trigger events**，确认有 `* * * * *` 那条。没有的话多半是第三步的 Path 填错了，没指到 `amsg` 目录。
+1. Cloudflare → 你的 Worker → **Settings** → 往下找 **Trigger events**，确认有 `* * * * *` 那条。没有的话：连仓库装的多半是第三步 Path 填错、没指到 `amsg` 目录；照附录手动贴代码装的，就是那条定时触发器还没加（附录 E）。
 2. 还是不行就开日志：同一页往下找 **Observability** → **Logs** 那一行右边的铅笔 → 把开关打开 → **Deploy**。之后到 顶部 **Observability** 标签就能看到每分钟一条的 `* * * * *`，点开能看到那次运行有没有报错。
 
 **看起来都正常，就是收不到消息**
@@ -195,6 +197,10 @@ env.DB (sullyos-amsg)   D1 Database
 - 地址是不是抄全了（要带 `https://`，末尾不要多斜杠）
 - 「共享密钥」和 Cloudflare 里的 `AMSG_SERVER_TOKEN` 是不是一模一样
 - 直接在浏览器打开 `你的地址/capabilities`：如果返回一段 JSON，说明后端活着；如果返回 `INVALID_CLIENT_TOKEN`，说明后端也活着，只是这个地址需要密钥才能访问——两种都算正常，问题在密钥没对上。什么都打不开才是后端没起来，去看第三步的构建日志。
+
+**打开 `你的地址/capabilities` 返回 `INTERNAL_ERROR`**
+
+后端起来了，但钥匙没填全——最常见的是漏了 `AMSG_MASTER_KEY`。回第四步核对那几条。想知道到底缺哪个，去 Worker 顶部的 **Observability** 标签，日志里会直接写出来（形如 `config.masterKey is required`）。
 
 **构建失败，日志里写 `D1_DATABASE_ID 是空的`**
 
@@ -210,3 +216,71 @@ env.DB (sullyos-amsg)   D1 Database
 2. 点 **Sync fork** → **Update branch**
 
 完事。Cloudflare 检测到新提交会自动重新部署，你填的密钥、数据库绑定、Database ID 都不会丢。
+
+> 照附录手动贴代码装的，更新方式见附录最后一节。
+
+---
+
+## 附录 · 不用 GitHub 怎么装
+
+主线那条路先 fork 一个仓库，图的是以后更新只用点一下 **Sync fork**。没有 GitHub 账号也能装：后端代码就是一个文件，从网页上复制下来、贴进 Cloudflare 的在线编辑器就行（GitHub 上的公开文件不登录也能看、也能复制）。代价是**以后每次更新都要重新复制粘贴一遍**。
+
+这条路只替换主线的第一步和第三步，其余步骤——第二步建数据库、第四步填钥匙、第五步连回 SullyOS、第六步排任务——完全一样。
+
+> **先看设备**：这份代码有二十多万个字符。电脑上复制粘贴很轻松；手机浏览器就不一定吃得住，卡住或者贴不进去都有可能。手边只有手机的话，注册个 GitHub 账号走主线反而更省事——那边手机上要做的只是点两下 **Fork**。
+
+### A · 建数据库
+
+照第二步做，但**不用复制 Database ID**：这条路是在面板上按名字挑库，不填 ID。
+
+### B · 建一个空 Worker
+
+1. Cloudflare 左侧 **Compute** → **Workers & Pages** → 右上角 **Create application**
+2. 选 **Start with Hello World!**（这一屏上面那两个是连 GitHub / GitLab 的，跳过）
+3. **Worker name** 填 `sullyos-amsg`——这个名字就是你以后的地址：`sullyos-amsg.xxx.workers.dev`
+4. 点右下角 **Deploy**
+
+十几秒就好。这会儿它还只会回一句 Hello World，下一步把真代码换进去。
+
+### C · 复制后端代码
+
+浏览器打开（不用登录）：<https://github.com/Tosd0/sullyos-workers/blob/main/amsg/worker.bundle.js>
+
+文件上方那排按钮里，**Raw** 右边那个「两个方块叠在一起」的图标就是复制，点它，整份代码就进剪贴板了。
+
+### D · 贴进 Worker
+
+1. 回到刚建好的 Worker 页面，点右上角 **Edit code**
+2. 编辑器里打开的是一个 `worker.js`，在代码区里点一下，全选（Cmd / Ctrl + A）删掉
+3. 粘贴刚才复制的代码
+4. 点右上角的 **Deploy**
+
+### E · 补上数据库和定时器
+
+主线那条路里，数据库绑定和「每分钟检查一次」的定时触发器写在仓库的配置文件里、会自动带上。手动贴代码没有那个文件，这两样要自己加。
+
+**数据库绑定**：Worker 页面顶部 **Bindings** → **Add binding** → 左边列表选 **D1 database** → **Add Binding**，然后：
+
+| 位置 | 填什么 |
+|------|--------|
+| Variable name | `DB`（就这两个字母，别改） |
+| D1 database | 下拉选 A 步建的那个库 |
+
+再点 **Add Binding**。加好后表格里会出现一行 `D1 database / DB / 你的库名`。
+
+**定时触发器**：Worker 页面 **Settings** → 往下找 **Trigger events** → **Add** → 选 **Cron triggers**，然后：
+
+- **Schedule** 那栏：Execute Worker every → 单位选 **Minute(s)**，数字填 `1`
+- 也可以切到 **Cron expression** 直接填 `* * * * *`，一个意思
+
+点 **Add**。加好后 Trigger events 表格里会出现一条 `Cron / scheduled() / * * * * *`。
+
+这两条加完，回主线第四步填钥匙。
+
+> 这样建出来的 Worker，日志默认就是开的——出问题直接去顶部 **Observability** 标签看，不用再去打开什么开关。
+
+### 这条路以后怎么更新
+
+上游发了新版本之后，重做 C、D 两步：复制新代码 → **Edit code** → 全选替换 → **Deploy**。
+
+数据库绑定、定时触发器、填过的钥匙都不会跟着丢，换掉的只有代码。
