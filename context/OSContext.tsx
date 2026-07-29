@@ -22,10 +22,8 @@ import { getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext } fro
 import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
 import { INSTALLED_APPS, HIDDEN_APP_NAMES } from '../constants';
-import { trackEvent, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, anyCharToggle, presetOrCustom, tweakedOrDefault, readStorageBytes } from '../utils/analytics';
-import { PRESET_THEMES } from '../components/chat/ChatConstants';
-import { BUILTIN_SOUNDS } from '../utils/whiteboxSound';
-import { isStandaloneDisplayMode } from '../utils/iosStandalone';
+import { trackEvent, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, trackCurrentFeaturesOnce } from '../utils/analytics';
+import { collectAppearance, collectCharSettings, collectDataScale, collectFeatureFlagsAsync } from '../utils/analyticsSnapshot';
 import { markBackupDone } from '../utils/backupReminder';
 import { normalizeCharacterImpression, normalizeCharacterDefaults } from '../utils/impression';
 import {
@@ -957,129 +955,43 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       if (!isDataLoaded || scaleReportedRef.current) return;
       scaleReportedRef.current = true;
       void (async () => {
-          const messageCounts = await Promise.all(
-              characters.map(c => DB.countMessagesByCharId(c.id).catch(() => 0))
-          );
-          const memoryCounts = characters.map(c => c.memories?.length ?? 0);
-          trackDataScaleOnce({
-              characterCount: characters.length,
-              memoryCount: memoryCounts.reduce((a, b) => a + b, 0),
-              maxMemoryCount: Math.max(0, ...memoryCounts),
-              maxMessageCount: Math.max(0, ...messageCounts),
-              storageBytes: await readStorageBytes(),
-              // 用通用的「装成 PWA 独立窗口」判定，不只认 iOS——配合 umami 自带的
-              // 系统字段，查询时就能分出 iOS 全屏、安卓全屏还是桌面装机。
-              standalone: isStandaloneDisplayMode(),
-          });
+          trackDataScaleOnce(await collectDataScale(characters));
       })();
   }, [isDataLoaded, characters]);
 
-  // --- 使用统计：当前在用哪套外观 ---
+  // --- 使用统计：当前在用哪套外观 / 角色级设置 ---
   // 报「现在用的是哪个」而不是「点过哪个」——后者只有折腾的人会出现，
-  // 拿来决定砍哪个预设会砍反。用户自己捏的主题一律记 custom，不带他起的名字。
+  // 拿来决定砍哪个预设会砍反。取数和收敛都在 utils/analyticsSnapshot.ts 里，
+  // 用户自己捏的主题、字体、白框 CSS 一律收敛成 custom / 用了，不带他起的名字。
   useEffect(() => {
       if (!isDataLoaded) return;
-      const activeChar = characters.find(c => c.id === activeCharacterId);
-      const onOff = (v: boolean | undefined, dflt = false) => ((v ?? dflt) ? '开' : '关');
-      trackCurrentAppearanceOnce({
-          // ── 桌面 ──
-          桌面皮肤: theme.skin ?? 'default',
-          桌面版本: theme.desktopVariant ?? 'paper',
-          深色模式: onOff(theme.darkMode),
-          隐藏状态栏: onOff(theme.hideStatusBar),
-          保留图标原轮廓: onOff(theme.preserveCustomIconOutlines),
-          播放卡片浅色: onOff(theme.nowPlayingWidgetLight, true),
-          动森聊天同步: onOff(theme.acnhChatSync, true),
-          // 自定义字体是用户上传的文件或自填 URL，只报用没用，绝不报是什么
-          自定义字体: theme.customFont ? '用了' : '没用',
-          // ── 聊天外观 ──
-          气泡主题: presetOrCustom(activeChar?.bubbleStyle, Object.keys(PRESET_THEMES)),
-          气泡样式: theme.chatBubbleStyle ?? 'modern',
-          聊天壳样式: theme.chatChromeStyle ?? 'soft',
-          顶栏样式: theme.chatHeaderStyle ?? 'default',
-          输入栏样式: theme.chatInputStyle ?? 'default',
-          聊天背景: theme.chatBackgroundStyle ?? 'plain',
-          消息间距: theme.chatMessageSpacing ?? 'default',
-          时间戳显示: theme.chatShowTimestamp ?? 'always',
-          顶栏对齐: theme.chatHeaderAlign ?? 'left',
-          顶栏密度: theme.chatHeaderDensity ?? 'default',
-          状态样式: theme.chatStatusStyle ?? 'subtle',
-          发送键样式: theme.chatSendButtonStyle ?? 'circle',
-          卡片对齐: theme.chatModuleAlign ?? 'center',
-          // ── 头像与表情 ──
-          头像形状: theme.chatAvatarShape ?? 'circle',
-          头像尺寸: theme.chatAvatarSize ?? 'medium',
-          头像显示: theme.chatAvatarVisibility ?? 'both',
-          头像对齐: theme.chatAvatarAlign ?? 'bottom',
-          头像模式: theme.chatAvatarMode ?? 'grouped',
-          表情尺寸: theme.chatEmojiSize ?? 'small',
-          隐藏侧贴边: onOff(theme.chatSnapToEdge),
-          // ── 开关 ──
-          准备中圆点: onOff(theme.chatPendingIndicator, true),
-          隐藏情绪栏: onOff(theme.chatHideHeaderBuffs),
-          // 白框自定义 CSS 是用户写的代码，只报用没用
-          自定义白框CSS: theme.chatChromeCustomCss ? '用了' : '没用',
-          // ── 提示音：内置音效报 key，用户填的直链或上传的音频一律 custom ──
-          提示音: presetOrCustom(theme.chatSound?.src, Object.keys(BUILTIN_SOUNDS), '没设'),
-          // ── 微调数值只报调没调过，不报具体数字 ──
-          气泡字号: tweakedOrDefault(theme.chatBubbleFontSize),
-          气泡行距: tweakedOrDefault(theme.chatBubbleLineHeight),
-          气泡缩进: tweakedOrDefault(theme.chatBubbleIndent),
-          头像微调: tweakedOrDefault(theme.chatAvatarOffsetY),
-      });
+      trackCurrentAppearanceOnce(collectAppearance(theme, characters.find(c => c.id === activeCharacterId)));
   }, [isDataLoaded, characters, activeCharacterId, theme]);
 
-  // --- 使用统计：角色级设置 ---
-  // 两种问法，别混：
-  //   · 开关类 → 问「有没有人开过 / 有没有人特意关掉」，看的是这个功能有没有人要
-  //   · 选择类 → 报当前活跃角色选的那个，看的是各选项的占比
-  // 每会话一次。全程只有枚举值和「有/无」，不带角色名、不带任何设定内容。
-  //
-  // 刻意没报的：每个世界一份（家园）、每局一份（跑团）的那些设置。一个用户能有十几个世界，
-  // 报哪个都不代表他，而且这些选择本来就有「选择世界时间模式」这类事件在记。
   useEffect(() => {
       if (!isDataLoaded || characters.length === 0) return;
-      const c = characters.find(x => x.id === activeCharacterId) ?? characters[0];
-      const all = characters;
-      const anyOn = (pick: (ch: typeof all[number]) => boolean | undefined, defaultOn = false) =>
-          anyCharToggle(all.map(pick), defaultOn);
-      trackCurrentCharSettingsOnce({
-          // ── 开关：默认关的，问有没有人开过 ──
-          记忆宫殿: anyOn(x => x.memoryPalaceEnabled),
-          自动归档: anyOn(x => x.autoArchiveEnabled),
-          思考过程: anyOn(x => x.showThinkingChain),
-          日程与情绪: anyOn(x => x.scheduleFeatureEnabled),
-          HTML卡片: anyOn(x => x.htmlModeEnabled),
-          角色级聊天装扮: anyOn(x => x.chatFineTune?.enabled),
-          自定义时区: anyOn(x => x.customTimezoneEnabled),
-          生活记录注入: anyOn(x => x.lifeRecordEnabled),
-          小红书: anyOn(x => x.xhsEnabled),
-          隐藏系统日志: anyOn(x => x.hideSystemLogs),
-          见面轻阅读: anyOn(x => x.dateLightReading),
-          观测协议: anyOn(x => x.dateObserve?.enabled),
-          彼方自主登入: anyOn(x => x.vrState?.enabled),
-          提示音绑白框: anyOn(x => x.chatSoundBound),
-          // ── 开关：默认开的，问有没有人特意关掉 ──
-          时间感知: anyOn(x => x.timeAwarenessEnabled, true),
-          见面时间感知: anyOn(x => x.dateTimeAwarenessEnabled, true),
-          查手机同步聊天: anyOn(x => x.phoneState?.sendToChat, true),
-          允许虚构NPC: anyOn(x => x.phoneState?.allowFictionalContacts, true),
-          可读我的音乐: anyOn(x => x.musicProfile?.canReadUserMusic, true),
-          见面深挖引导: anyOn(x => x.dateStyleConfig?.digDeeper, true),
-          // ── 选择：当前活跃角色选了哪个 ──
-          思考链风格: c.thinkingChainStyle ?? 'echo',
-          日程风格: c.scheduleStyle ?? 'lifestyle',
-          认知风格: c.personalityStyle ?? '没设',
-          原文读取策略: c.contextRangeMode ?? 'manual',
-          见面写作风格: c.dateStyleConfig?.style ?? 'cinematic',
-          见面叙事人称: c.dateStyleConfig?.pov ?? '没设',
-          观测HUD样式: c.dateObserve?.style ?? 'hologram',
-          定时消息模式: c.activeMsg2Config?.mode ?? 'auto',
-          定时消息频率: c.activeMsg2Config?.recurrenceType ?? 'none',
-          // 角色专属提示音同样只分「内置哪个 / 自己弄的」
-          角色提示音: presetOrCustom(c.chatSound?.src, Object.keys(BUILTIN_SOUNDS), '没设'),
-      });
+      trackCurrentCharSettingsOnce(collectCharSettings(characters, activeCharacterId));
   }, [isDataLoaded, characters, activeCharacterId]);
+
+  // --- 使用统计：现在开着哪些功能 ---
+  // 跟「当前外观」一个道理：外部服务这类配置配一次就长期生效，只看「打开过配置页」
+  // 那种流量点的话，配好之后再没进过设置页的人永远不出现，拿来判断「有没有人要」会判反。
+  //
+  // 收敛全在 utils/analyticsSnapshot.ts 里做，这里只负责把 OSContext 手上那几份
+  // state 递过去。地址、密钥、token、账号名一个字都不会进上报。
+  useEffect(() => {
+      if (!isDataLoaded) return;
+      void (async () => {
+          trackCurrentFeaturesOnce(await collectFeatureFlagsAsync({
+              realtimeConfig,
+              cloudBackupConfig,
+              memoryPalaceConfig,
+              remoteVectorConfig,
+              apiConfig,
+              apiPresetCount: apiPresets.length,
+          }));
+      })();
+  }, [isDataLoaded, realtimeConfig, cloudBackupConfig, memoryPalaceConfig, remoteVectorConfig, apiConfig, apiPresets]);
 
   // --- Global Error Interception ---
   useEffect(() => {

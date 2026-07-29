@@ -202,6 +202,19 @@ export function bucketRetryCount(count: number): string {
 }
 
 /**
+ * 小计数档位（配了几个 MCP 服务器、存了几条 API 预设这类）。
+ * 裸计数是开放整数，不满足「属性只能是固定枚举」，上报前先分桶。
+ * 1 单独占一档，是因为「只配了一个」和「配了一堆」是两种人：
+ * 前者试了一下，后者已经把它当基础设施在用。
+ */
+export function bucketFewCount(count: number): string {
+  if (count <= 0) return '0';
+  if (count === 1) return '1';
+  if (count <= 3) return '2-3';
+  return '4+';
+}
+
+/**
  * 本地存储占用档位。数字来自 navigator.storage.estimate()，
  * 浏览器只回一个字节数，不涉及任何内容。用来判断要不要做数据清理 / 分片。
  */
@@ -294,6 +307,22 @@ export function trackCurrentCharSettingsOnce(params: Record<string, string>): vo
   if (reportedScales.has('char-settings')) return;
   reportedScales.add('char-settings');
   trackEvent('当前角色设置', params);
+}
+
+/**
+ * 上报「现在开着哪些功能」，每次会话最多一次。
+ *
+ * 跟「当前外观」同样是存量事件，理由也一样：外部服务这类配置配一次就长期生效，
+ * 只看「打开过配置页」这种流量点的话，半年前配好再没动过的人永远不出现，
+ * 拿来判断「这功能有没有人要」会判反。
+ *
+ * 取值全部由 utils/analyticsFeatures.ts 收敛成枚举和档位——地址、密钥、token、
+ * 账号名、服务器名一个字都不进这里。
+ */
+export function trackCurrentFeaturesOnce(params: Record<string, string>): void {
+  if (reportedScales.has('features')) return;
+  reportedScales.add('features');
+  trackEvent('当前功能启用', params);
 }
 
 // ===== 本次会话聊了多少 =====
