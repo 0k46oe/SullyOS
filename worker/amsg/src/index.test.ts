@@ -19,7 +19,7 @@ import {
 } from '../../../utils/amsgFirePack';
 import { AMSG_CHAT_PRESENCE_KEY } from '../../../utils/amsgChatPresence';
 import { AMSG_TOOL_CONFIG_KEY, AMSG_TOOL_PACK_KEY } from '../../../utils/amsgToolPack';
-import { buildMcpNameMap, type McpFireServer } from '../../../utils/mcpFireCore';
+import { buildMcpNameMap, MCP_FIRE_NAME_BUDGET, type McpFireServer } from '../../../utils/mcpFireCore';
 
 const CHAR_ID = 'preset-nyah';
 const TASK_UUID = '3637dae1-1461-4444-a747-34e406f67acc';
@@ -618,7 +618,7 @@ describe('runMcpFireTool', () => {
   };
   // maxNameLen 与 onBeforeFire 一致（59，给 mcp__ 前缀留位）。
   const stashFragment = () => ({
-    mcpResolve: buildMcpNameMap([probe], { maxNameLen: 59 }),
+    mcpResolve: buildMcpNameMap([probe], { maxNameLen: MCP_FIRE_NAME_BUDGET }),
     mcpSessions: new Map(),
   });
 
@@ -641,13 +641,13 @@ describe('runMcpFireTool', () => {
       return rpcOk(body.id, { content: [{ type: 'text', text: '暗号 MARKER-123' }] });
     }));
 
-    const result = await runMcpFireTool(stashFragment() as any, 'mcp__get_secret', {});
+    const result = await runMcpFireTool(stashFragment(), 'mcp__get_secret', {});
 
     expect(result).toMatchObject({ ok: true });
     expect(JSON.stringify(result)).toContain('MARKER-123');
     expect(seen.every((s) => s.url.startsWith('https://probe.example.com/mcp'))).toBe(true);
     expect(seen.every((s) => s.auth === 'Bearer tok-1')).toBe(true);
-    expect(seen.map((s) => s.body.method)).toContain('tools/call');
+    expect(seen.map((s) => s.body.method)).toEqual(['initialize', 'notifications/initialized', 'tools/call']);
   });
 
   // 会话挂在单次 fire 的 stash 上；一次 fire 最多五轮，每轮都重握手就是白烧往返。
@@ -664,20 +664,20 @@ describe('runMcpFireTool', () => {
     }));
 
     const stash = stashFragment();
-    await runMcpFireTool(stash as any, 'mcp__get_secret', {});
-    await runMcpFireTool(stash as any, 'mcp__get_secret', { a: 1 });
+    await runMcpFireTool(stash, 'mcp__get_secret', {});
+    await runMcpFireTool(stash, 'mcp__get_secret', { a: 1 });
 
     expect(handshakes).toBe(1);
   });
 
   it('未配置的工具名 → ok:false 而不是抛错（回喂给模型圆场）', async () => {
-    const result = await runMcpFireTool(stashFragment() as any, 'mcp__nope', {});
+    const result = await runMcpFireTool(stashFragment(), 'mcp__nope', {});
     expect(result).toMatchObject({ ok: false, reason: 'unknown_tool' });
   });
 
   it('服务器错误 → ok:false 带原因（不炸 fire 链）', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('boom', { status: 500 })));
-    const result = await runMcpFireTool(stashFragment() as any, 'mcp__get_secret', {});
-    expect(result).toMatchObject({ ok: false });
+    const result = await runMcpFireTool(stashFragment(), 'mcp__get_secret', {});
+    expect(result).toMatchObject({ ok: false, reason: 'mcp_error', source: '探针' });
   });
 });
