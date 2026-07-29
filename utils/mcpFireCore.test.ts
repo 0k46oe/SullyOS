@@ -1,6 +1,16 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
-import { buildMcpNameMap, filterMcpServersForChar, sanitizeMcpToolName, withMcpDedupeSuffix, type McpFireServer } from './mcpFireCore';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+    buildMcpDirectHeaders,
+    buildMcpNameMap,
+    callMcpToolCore,
+    createMcpSessionState,
+    filterMcpServersForChar,
+    sanitizeMcpToolName,
+    withMcpDedupeSuffix,
+    type McpFireServer,
+    type McpTransportTarget,
+} from './mcpFireCore';
 
 const srv = (over: Partial<McpFireServer>): McpFireServer => ({
     id: 's1', name: '服务器A', url: 'https://a.example.com/mcp',
@@ -79,6 +89,159 @@ describe('filterMcpServersForChar', () => {
     it('没有 url 或没发现工具的不进清单; 入参 undefined 得空数组', () => {
         expect(filterMcpServersForChar([srv({ url: '' }), srv({ tools: [] })], 'c')).toEqual([]);
         expect(filterMcpServersForChar(undefined, 'c')).toEqual([]);
+    });
+});
+
+// 浏览器那条路径由 mcpClient.test.ts 盖住；这里守的是 worker 直连——请求头
+// 自己拼、会话状态自己拿着，所以断言要看真实发出去的请求体和请求头。
+describe('JSON-RPC 传输层（直连路径）', () => {
+    interface SentRequest {
+        url: string;
+        headers: Record<string, string>;
+        body: any;
+    }
+
+    const directServer = (over: Partial<McpFireServer> = {}): McpFireServer => srv({
+        token: 'tk-1',
+        customHeaders: [{ name: 'X-Api-Key', value: 'k1' }],
+        ...over,
+    });
+
+    const directTarget = (server: McpFireServer): McpTransportTarget => ({
+        url: server.url,
+        headers: (sessionId) => buildMcpDirectHeaders(server, sessionId),
+    });
+
+    const jsonResp = (payload: any, extraHeaders: Record<string, string> = {}): Response =>
+        new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json', ...extraHeaders },
+        });
+
+    /** 把每次 fetch 的 URL / 头 / 请求体记下来，由 handler 决定回什么 */
+    const stubFetch = (handler: (sent: SentRequest) => Response): SentRequest[] => {
+        const sent: SentRequest[] = [];
+        vi.stubGlobal('fetch', vi.fn((url: any, init: any) => {
+            const record: SentRequest = {
+                url: String(url),
+                headers: (init?.headers || {}) as Record<string, string>,
+                body: JSON.parse(String(init?.body || '{}')),
+            };
+            sent.push(record);
+            return Promise.resolve(handler(record));
+        }));
+        return sent;
+    };
+
+    beforeEach(() => {
+        vi.spyOn(console, 'info').mockImplementation(() => { /* 别刷屏 */ });
+    });
+
+    afterEach(() => {
+        vi.unstubAllGlobals();
+        vi.restoreAllMocks();
+    });
+
+    it('一次 tools/call 依次发出 initialize → notifications/initialized → tools/call，直连头带鉴权和自定义头', async () => {
+        const server = directServer();
+        const sent = stubFetch(({ body }) => {
+            if (body.method === 'initialize') return jsonResp({ jsonrpc: '2.0', id: body.id, result: {} });
+            if (body.method === 'notifications/initialized') return new Response('', { status: 202 });
+            return jsonResp({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: '{"temp":21}' }] } });
+        });
+
+        const result = await callMcpToolCore(
+            directTarget(server), createMcpSessionState(), 'get_weather', { city: '上海' },
+        );
+
+        expect(result).toMatchObject({ success: true, data: { temp: 21 } });
+        expect(sent.map((s) => s.body.method)).toEqual(['initialize', 'notifications/initialized', 'tools/call']);
+        expect(sent.every((s) => s.url === server.url)).toBe(true);
+        expect(sent[0].headers['Authorization']).toBe('Bearer tk-1');
+        expect(sent[0].headers['X-Api-Key']).toBe('k1');
+        expect(sent[0].headers['Accept']).toBe('application/json, text/event-stream');
+        // 还没握手完，第一发不该凭空带 session
+        expect(sent[0].headers['Mcp-Session-Id']).toBeUndefined();
+        expect(sent[2].body.params).toEqual({ name: 'get_weather', arguments: { city: '上海' } });
+    });
+
+    it('initialize 响应头里的 Mcp-Session-Id 记进会话，之后每一发都带上', async () => {
+        const server = directServer();
+        const sent = stubFetch(({ body }) => {
+            if (body.method === 'initialize') {
+                return jsonResp({ jsonrpc: '2.0', id: body.id, result: {} }, { 'Mcp-Session-Id': 'sess-A' });
+            }
+            if (body.method === 'notifications/initialized') return new Response('', { status: 202 });
+            return jsonResp({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: 'ok' }] } });
+        });
+
+        const session = createMcpSessionState();
+        await callMcpToolCore(directTarget(server), session, 'get_weather', {});
+
+        expect(session.sessionId).toBe('sess-A');
+        expect(sent[1].headers['Mcp-Session-Id']).toBe('sess-A');
+        expect(sent[2].headers['Mcp-Session-Id']).toBe('sess-A');
+    });
+
+    it('tools/call 撞上 HTTP 404 时重置会话、重新握手并重试一次', async () => {
+        const server = directServer();
+        let handshakes = 0;
+        let toolCalls = 0;
+        const sent = stubFetch(({ body }) => {
+            if (body.method === 'initialize') {
+                return jsonResp({ jsonrpc: '2.0', id: body.id, result: {} }, { 'Mcp-Session-Id': `sess-${++handshakes}` });
+            }
+            if (body.method === 'notifications/initialized') return new Response('', { status: 202 });
+            toolCalls++;
+            // 服务器重启后老 session 失效，第一发 tools/call 被判 404
+            if (toolCalls === 1) return new Response('session expired', { status: 404 });
+            return jsonResp({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: 'ok' }] } });
+        });
+
+        const session = createMcpSessionState();
+        // 自定义重置也必须原地清空这个对象，core 后面用的还是同一个引用
+        const resetSession = vi.fn(() => { Object.assign(session, createMcpSessionState()); });
+        const result = await callMcpToolCore(directTarget(server), session, 'get_weather', {}, { resetSession });
+
+        expect(result).toMatchObject({ success: true, data: 'ok' });
+        expect(resetSession).toHaveBeenCalledTimes(1);
+        expect(handshakes).toBe(2);
+        expect(toolCalls).toBe(2);
+        // 重试带的是新握手拿到的 session，而不是拿失效的那个再撞一次
+        expect(sent[sent.length - 1].headers['Mcp-Session-Id']).toBe('sess-2');
+        expect(session.sessionId).toBe('sess-2');
+    });
+
+    it('远端一直不回响应时按 timeoutMs 超时，返回失败结果而不是永久挂着', async () => {
+        vi.stubGlobal('fetch', vi.fn((_url: any, init: any) => new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        })));
+
+        const result = await callMcpToolCore(
+            directTarget(directServer()), createMcpSessionState(), 'get_weather', {}, { timeoutMs: 20 },
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.error).toContain('超时');
+    });
+
+    it('JSON-RPC id 按会话独立计数：两个会话都从 1 起，互不串号', async () => {
+        const server = directServer();
+        const sent = stubFetch(({ body }) => {
+            if (body.method === 'initialize') return jsonResp({ jsonrpc: '2.0', id: body.id, result: {} });
+            if (body.method === 'notifications/initialized') return new Response('', { status: 202 });
+            return jsonResp({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: 'ok' }] } });
+        });
+
+        const first = createMcpSessionState();
+        const second = createMcpSessionState();
+        await callMcpToolCore(directTarget(server), first, 'get_weather', {});
+        await callMcpToolCore(directTarget(server), second, 'get_weather', {});
+
+        // 通知类请求本来就没有 id；两个会话各自数出 1（initialize）和 2（tools/call）
+        expect(sent.map((s) => s.body.id)).toEqual([1, undefined, 2, 1, undefined, 2]);
+        expect(first.nextId).toBe(2);
+        expect(second.nextId).toBe(2);
     });
 });
 
