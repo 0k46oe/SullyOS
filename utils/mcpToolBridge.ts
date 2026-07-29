@@ -9,6 +9,7 @@
  */
 
 import { getEnabledMcpServers, type McpServerConfig, type McpToolDef } from './mcpClient';
+import { buildMcpNameMap } from './mcpFireCore';
 
 export interface OpenAIMcpTool {
     type: 'function';
@@ -24,40 +25,27 @@ export interface ResolvedMcpTool {
     toolName: string;
 }
 
-// OpenAI 工具名只允许 [A-Za-z0-9_-]，最长 64；MCP 工具名可能带点号等
-const sanitizeToolName = (name: string): string =>
-    (name || 'tool').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64) || 'tool';
-
-const serverSlug = (server: McpServerConfig): string =>
-    sanitizeToolName(server.name).slice(0, 20) || 'srv';
-
 /**
  * 聚合启用服务器的工具，返回 OpenAI 工具数组 + 暴露名→真实工具 的映射。
- * 暴露名默认用工具原名（sanitize 后）；跨服务器重名时后者加 <服务器名>_ 前缀。
+ * 暴露名（含重名前缀、非法字符替换）统一由 mcpFireCore.buildMcpNameMap 算，
+ * 保证前台聊天和 amsg worker 后台 fire 看到的是同一套工具名。
  * charId：只聚合对该角色可见的服务器（通用 + 绑定了该角色的）。
  */
 export const buildMcpOpenAITools = (charId?: string): { tools: OpenAIMcpTool[]; resolve: Map<string, ResolvedMcpTool> } => {
-    const tools: OpenAIMcpTool[] = [];
-    const resolve = new Map<string, ResolvedMcpTool>();
     const servers = getEnabledMcpServers(charId);
-    for (const server of servers) {
-        for (const t of server.tools || []) {
-            let exposed = sanitizeToolName(t.name);
-            if (resolve.has(exposed)) {
-                exposed = sanitizeToolName(`${serverSlug(server)}_${t.name}`);
-                let i = 2;
-                while (resolve.has(exposed)) exposed = sanitizeToolName(`${serverSlug(server)}_${t.name}_${i++}`);
-            }
-            resolve.set(exposed, { server, toolName: t.name });
-            tools.push({
-                type: 'function',
-                function: {
-                    name: exposed,
-                    description: buildToolDescription(server, t, servers.length > 1),
-                    parameters: t.inputSchema || { type: 'object', properties: {} },
-                },
-            });
-        }
+    const resolve: Map<string, ResolvedMcpTool> = buildMcpNameMap(servers);
+    const tools: OpenAIMcpTool[] = [];
+    for (const [exposed, { server, toolName }] of resolve) {
+        const t = (server.tools || []).find(d => d.name === toolName);
+        if (!t) continue;
+        tools.push({
+            type: 'function',
+            function: {
+                name: exposed,
+                description: buildToolDescription(server, t, servers.length > 1),
+                parameters: t.inputSchema || { type: 'object', properties: {} },
+            },
+        });
     }
     return { tools, resolve };
 };
