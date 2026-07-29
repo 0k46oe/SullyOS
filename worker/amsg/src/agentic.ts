@@ -16,6 +16,12 @@
 
 import { classifyLLMOutput, type Directive, type ToolCall } from '../../instant-push/src/classifier';
 import type { ToolCallRecord } from '../../../utils/agenticToolFeedback';
+import {
+  extractTextFakedMcpCalls,
+  stripTextFakedMcpCalls,
+  type McpFireServer,
+  type McpResolvedToolCore,
+} from '../../../utils/mcpFireCore';
 import { sanitizeIntoSegments } from '../../../utils/sanitize';
 // type-only：编译期擦除，不会把 realtimeContext 的浏览器依赖打进 worker bundle。
 import type { XhsNote } from '../../../utils/realtimeContext';
@@ -130,31 +136,70 @@ export type RoundDecision =
   | { decision: 'finish'; pushPayloads: Array<Record<string, unknown>> }
   | { decision: 'skip-push' };
 
+/** 本轮的通用 MCP 识别输入（没配 MCP 的角色不传，行为与改动前完全一致）。 */
+export interface McpRoundInput {
+  resolve: Map<string, McpResolvedToolCore<McpFireServer>>;
+  /** 本轮 LLM 响应里已按 mcp__ 前缀过滤好的 native tool_calls；文本模式/无调用时缺省。 */
+  nativeToolCalls?: ToolCall[];
+}
+
 /**
  * 处理一轮 LLM 输出（入参已 stripReasoningTags）：
- *   - 有数据标签 → 原始旁白（prefix）暂存，返回 tool-request；
+ *   - 有数据标签（或本轮有 MCP 调用）→ 原始旁白（prefix）暂存，返回 tool-request；
  *   - 无数据标签 → finish：把全部中间轮旁白 + 本轮正文**拼回一份全文**统一
  *     classify（跨轮被劈开的副作用标签块在这里合体），干净正文经
  *     sanitizeIntoSegments 分段（与 instant push / 客户端 chatParser.chunkText
  *     同一份：按换行切、[[...]] / [html] / <翻译> / <语音> 等标签块保持原子），
  *     每段一条 push；全部 directives 挂最后一条的 metadata；
  *     全程无正文且无副作用 → skip-push。
+ *
+ * 通用 MCP 的调用识别是两层（native tool_calls + 正文协议），与前台同构，见函数体开头。
  */
 export function processLLMRound(
   state: FireSessionState,
   llmOutputText: string,
   build: PushBuildInput,
+  mcp?: McpRoundInput | null,
 ): RoundDecision {
-  const result = classifyLLMOutput(llmOutputText);
+  // 通用 MCP 两层识别（与前台同构）：native tool_calls 优先；没有 native 时
+  // 用前台「兼容模式」同一个解析器从正文抠 tool_name({...})。两种来源都可能
+  // 与数据标签同轮出现，最终合并成同一个 tool-request，executeToolCalls 按
+  // mcp__ 前缀分流。正文里出现过的调用语法一律剥掉——它不能进旁白/推送。
+  // 正文解析认 mcp__ 前缀名（native 模式下模型在 tools 数组里见到的名字带前缀，
+  // 掉格式写进正文时写的也是它）——core 的 alsoMatchPrefix 选项负责，exposedName 回裸名。
+  const nativeToolCalls = mcp?.nativeToolCalls ?? [];
+  const textCalls = mcp?.resolve.size
+    ? extractTextFakedMcpCalls(llmOutputText, mcp.resolve, { alsoMatchPrefix: 'mcp__' })
+    : [];
+  const scanText = textCalls.length ? stripTextFakedMcpCalls(llmOutputText, textCalls) : llmOutputText;
+  // native 在场时正文抠出来的不再入列（同一意图大概率两处都写了；库只给 assistant
+  // 消息合并 decision 里的 toolCalls，native 已含语义）。语法照剥。
+  const mcpToolCalls: ToolCall[] = nativeToolCalls.length > 0
+    ? nativeToolCalls
+    : textCalls.map((c, i) => ({
+        // id 只需在一轮的 assistant/tool 消息配对里唯一；用累计工具数做轮间区分度。
+        id: `mcp_${state.toolCalls.length}_${i}`,
+        type: 'function',
+        // exposedName 恒为裸名（alsoMatchPrefix 的命中也回裸名），统一补前缀即可。
+        function: { name: `mcp__${c.exposedName}`, arguments: JSON.stringify(c.args) },
+      }));
 
-  if (result.kind === 'tool-request') {
+  const result = classifyLLMOutput(scanText);
+  const isToolRound = result.kind === 'tool-request' || mcpToolCalls.length > 0;
+
+  if (isToolRound) {
     // prefix = 旁白 + 可能只写了一半的副作用标签块。这里不剥不结构化——
     // 等 finish 拼回全文统一扫（见 FireSessionState.narrations 注释）。
-    if (result.prefix.trim()) state.narrations.push(result.prefix);
+    // MCP-only 轮没有数据标签，整段剥净后的文本都是旁白（与 tag 轮的 prefix 同角色）。
+    const narration = result.kind === 'tool-request' ? result.prefix : scanText;
+    if (narration.trim()) state.narrations.push(narration);
     // 已经连着打回这么多次重复调用了，说明模型卡在同一个工具上出不来。不再给它下一轮，
     // 就用手上这些内容收尾——转到轮次上限的话整条任务会失败重跑，用户一个字都收不到。
     if (state.duplicateToolCalls < MAX_DUPLICATE_TOOL_CALLS) {
-      return { decision: 'tool-request', toolCalls: result.toolCalls };
+      return {
+        decision: 'tool-request',
+        toolCalls: result.kind === 'tool-request' ? [...result.toolCalls, ...mcpToolCalls] : mcpToolCalls,
+      };
     }
   }
 
@@ -165,11 +210,14 @@ export function processLLMRound(
   // 没有旁白（一轮直出，最常见）时全文就是本轮正文，同样的输入不必再扫一遍。
   // 从上面 tool-request 分支穿透下来收尾时，本轮的正文已经进过 narrations 了，
   // 这里再拼一次 llmOutputText 就会重复一段（而且它还带着那个转不出来的数据标签）。
-  const thisRound = result.kind === 'tool-request' ? '' : llmOutputText;
+  const thisRound = isToolRound ? '' : scanText;
   const fullText = [...state.narrations, thisRound]
     .filter((part) => part.trim().length > 0)
     .join('\n');
-  const finalScan = fullText === llmOutputText ? result : classifyLLMOutput(fullText);
+  // result 是在 scanText（剥掉 MCP 调用语法之后的文本）上算的，比对基准必须跟着换，
+  // 否则 MCP 轮穿透到收尾时会拿错缓存。没有 MCP 参与时 scanText === llmOutputText，
+  // 这里与改动前完全一致。
+  const finalScan = fullText === scanText ? result : classifyLLMOutput(fullText);
   const cleanedText = finalScan.kind === 'finish' ? finalScan.cleanedText : finalScan.prefix;
   const directives = finalScan.kind === 'finish' ? finalScan.directives : [];
 

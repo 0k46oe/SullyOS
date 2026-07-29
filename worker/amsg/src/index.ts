@@ -68,6 +68,8 @@ import {
 } from '../../../utils/agenticToolFeedback';
 import { setProxyWorkerUrlOverride } from '../../../utils/proxyWorker';
 import { XhsMcpClient } from '../../../utils/xhsMcpClient';
+// type-only：编译期擦除，classifier 的实现不会因为这行被拉进 bundle。
+import type { ToolCall } from '../../instant-push/src/classifier';
 import {
   createFireSessionState,
   processLLMRound,
@@ -473,6 +475,18 @@ export const amsgHooks = {
     }
     const session = stash.session;
 
+    // native tool_calls：只认 tools 数组里声明过的 mcp__ 名字。模型幻觉出的
+    // 未声明调用（比如给 tag 工具编一个 native 调用）丢弃并留日志——直接透传
+    // 会让 executeToolCalls 撞上没有 stash 映射的名字。
+    const rawToolCalls = (ctx.llmResponse as { choices?: Array<{ message?: { tool_calls?: unknown } }> })
+      ?.choices?.[0]?.message?.tool_calls;
+    const nativeMcpCalls = (Array.isArray(rawToolCalls) ? rawToolCalls : []).filter((tc): tc is ToolCall => {
+      const n = (tc as ToolCall | undefined)?.function?.name;
+      const hit = typeof n === 'string' && n.startsWith('mcp__') && !!stash.mcpResolve?.has(n.slice('mcp__'.length));
+      if (!hit && tc) console.warn('[amsg:agentic] 丢弃未声明的 native tool_call', { name: (tc as ToolCall)?.function?.name });
+      return hit;
+    });
+
     const decision = processLLMRound(session, content, {
       contactName: ctx.contactName,
       avatarUrl: ctx.avatarUrl ?? null,
@@ -487,7 +501,7 @@ export const amsgHooks = {
       xhsXsecTokens: stash.toolCtx.xhsCaches
         ? Array.from(stash.toolCtx.xhsCaches.xsecTokenCache.entries())
         : undefined,
-    });
+    }, stash.mcpResolve ? { resolve: stash.mcpResolve, nativeToolCalls: nativeMcpCalls } : null);
 
     if (decision.decision === 'tool-request') {
       console.log('[amsg:agentic]', {

@@ -3209,6 +3209,139 @@ var buildMcpNameMap = (servers, opts = {}) => {
   }
   return resolve;
 };
+var stripTextFakedMcpCalls = (content, calls) => {
+  let cleaned = content;
+  for (const call of calls) cleaned = cleaned.split(call.matched).join("");
+  return cleaned.replace(/\n{3,}/g, "\n\n").trim();
+};
+var escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+var stripQuotes = (s) => {
+  const t = s.trim();
+  const m = t.match(/^(['"`「『])([\s\S]*)(['"`」』])$/);
+  return m ? m[2] : t;
+};
+var positionalKeys = (schema) => {
+  const props = schema?.properties ? Object.keys(schema.properties) : [];
+  const req = Array.isArray(schema?.required) ? schema.required.filter((k) => props.includes(k)) : [];
+  return [...req, ...props.filter((k) => !req.includes(k))];
+};
+var coerceBySchema = (value, schema, key) => {
+  const type = schema?.properties?.[key]?.type;
+  const v = stripQuotes(value);
+  if (type === "number" || type === "integer") {
+    const n = Number(v);
+    if (Number.isFinite(n)) return type === "integer" ? Math.trunc(n) : n;
+  }
+  if (type === "boolean") {
+    if (/^(true|是|开)$/i.test(v)) return true;
+    if (/^(false|否|关)$/i.test(v)) return false;
+  }
+  return v;
+};
+var splitTopLevel = (s) => {
+  const out = [];
+  let depth = 0, cur = "", quote = "";
+  for (const ch of s) {
+    if (quote) {
+      cur += ch;
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    if (ch === "{" || ch === "[") depth++;
+    if (ch === "}" || ch === "]") depth--;
+    if (ch === "," && depth === 0) {
+      out.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
+};
+var parseFakedArgs = (inner, schema) => {
+  const t = inner.trim();
+  if (!t) return {};
+  if (t.startsWith("{")) {
+    try {
+      return JSON.parse(t);
+    } catch {
+    }
+    try {
+      return JSON.parse(t.replace(/,\s*([}\]])/g, "$1").replace(/'/g, '"').replace(/([{,]\s*)([a-zA-Z_]\w*)\s*:/g, '$1"$2":'));
+    } catch {
+    }
+  }
+  const parts = splitTopLevel(t);
+  if (parts.every((p) => /^\s*[A-Za-z_]\w*\s*[=:]/.test(p))) {
+    const args2 = {};
+    for (const p of parts) {
+      const m = p.match(/^\s*([A-Za-z_]\w*)\s*[=:]\s*([\s\S]*)$/);
+      if (m) args2[m[1]] = coerceBySchema(m[2], schema, m[1]);
+    }
+    return args2;
+  }
+  const keys = positionalKeys(schema);
+  const args = {};
+  parts.forEach((p, i) => {
+    const key = keys[i];
+    if (key) args[key] = coerceBySchema(p, schema, key);
+  });
+  return args;
+};
+var extractTextFakedMcpCalls = (content, resolve, opts = {}) => {
+  if (!content || !resolve.size) return [];
+  const lookup = /* @__PURE__ */ new Map();
+  for (const [exposed, hit] of resolve) {
+    lookup.set(exposed, { exposed, hit });
+    lookup.set(hit.toolName, { exposed, hit });
+    if (opts.alsoMatchPrefix) lookup.set(`${opts.alsoMatchPrefix}${exposed}`, { exposed, hit });
+  }
+  const found = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const [name, { exposed, hit }] of lookup) {
+    const schema = hit.tool.inputSchema;
+    const esc = escapeRegExp(name);
+    const parenRe = new RegExp(`(^|[^\\w./])${esc}\\s*\\(([^)]*)\\)`, "g");
+    for (const m of content.matchAll(parenRe)) {
+      const matched = m[0].slice(m[1].length);
+      const key = `${exposed}|${matched}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      found.push({
+        exposedName: exposed,
+        server: hit.server,
+        toolName: hit.toolName,
+        args: parseFakedArgs(m[2], schema),
+        matched,
+        index: (m.index ?? 0) + m[1].length
+      });
+    }
+    const colonRe = new RegExp(`(^|\\n)\\s*[>*-]*\\s*\`?${esc}\`?\\s*[:\uFF1A]\\s*([^\\n]+)`, "g");
+    for (const m of content.matchAll(colonRe)) {
+      const matched = m[0].slice(m[1].length);
+      const key = `${exposed}|${matched.trim()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const keys = positionalKeys(schema);
+      const value = stripQuotes(m[2].replace(/[。！？!?…\s]+$/, ""));
+      found.push({
+        exposedName: exposed,
+        server: hit.server,
+        toolName: hit.toolName,
+        args: keys.length ? { [keys[0]]: coerceBySchema(value, schema, keys[0]) } : {},
+        matched,
+        index: (m.index ?? 0) + m[1].length
+      });
+    }
+  }
+  return found.sort((a, b) => a.index - b.index).map(({ index: _index, ...call }) => call);
+};
 var filterMcpServersForChar = (servers, charId) => (servers || []).filter(
   (s) => !!s.url && (s.tools?.length || 0) > 0 && (!s.charIds?.length || s.charIds.includes(charId))
 );
@@ -4728,7 +4861,7 @@ var stripChineseDate = (t) => t.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\
 var stripRoleNamePrefix = (t) => t.replace(/^[\w一-龥]+:\s*/, "");
 var stripBusinessTagsForBubble = (t) => t.replace(/\[\[(?:ACTION|RECALL|SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END|MUSIC_ACTION)[:\s][\s\S]*?\]\]/g, "").replace(/\[schedule_message[^\]]*\]/g, "");
 var stripBusinessTagsForNotification = (t) => stripBusinessTagsForBubble(t).replace(/\[\[(?:READ_NOTE|XHS_[A-Z_]+)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[XHS_[A-Z_]+\]\]/g, "");
-var stripQuotes = (t) => t.replace(/\[\[(?:QU[OA]TE|引用)[：:][\s\S]*?\]\]/g, "").replace(/\[(?:QU[OA]TE|引用)[：:][^\]]*\]/g, "").replace(/\[回复\s*[""“][^""”]*?[""”](?:\.{0,3})\]\s*[：:]?\s*/g, "").replace(/\[[^\[\]\n「」]{0,24}引用了[^\[\]\n「」]{0,24}「[^」\n]*?」[^\[\]\n]{0,24}\]\s*/g, "");
+var stripQuotes2 = (t) => t.replace(/\[\[(?:QU[OA]TE|引用)[：:][\s\S]*?\]\]/g, "").replace(/\[(?:QU[OA]TE|引用)[：:][^\]]*\]/g, "").replace(/\[回复\s*[""“][^""”]*?[""”](?:\.{0,3})\]\s*[：:]?\s*/g, "").replace(/\[[^\[\]\n「」]{0,24}引用了[^\[\]\n「」]{0,24}「[^」\n]*?」[^\[\]\n]{0,24}\]\s*/g, "");
 var stripMarkdownHeaders = (t) => t.replace(/^#{1,6}\s+/gm, "");
 var stripMarkdownBold = (t) => t.replace(/\*{2,}/g, "");
 var stripMarkdownDividers = (t) => t.replace(/^\s*---\s*$/gm, "").replace(/^\s*[-*+]\s*$/gm, "");
@@ -4859,7 +4992,7 @@ function sanitizeForNotification(text) {
   result = stripSourceTags(result);
   result = stripInnerState(result);
   result = stripBusinessTagsForNotification(result);
-  result = stripQuotes(result);
+  result = stripQuotes2(result);
   result = replaceMarkdownLinks(result);
   result = stripMarkdownHeaders(result);
   result = stripMarkdownBold(result);
@@ -4954,7 +5087,7 @@ function sanitizeTextForBanner(text) {
   result = replaceHtmlBlocks(result);
   result = replaceTranslationForBanner(result);
   result = replaceVoiceForBanner(result);
-  result = stripQuotes(result);
+  result = stripQuotes2(result);
   result = replaceEmojiReverseTag(result);
   result = replaceMarkdownLinks(result);
   result = stripMarkdownHeaders(result);
@@ -5239,17 +5372,32 @@ function buildXhsSessionPayload(directives, notes, xsecTokens) {
   if (pickedNotes.length === 0 && pickedTokens.length === 0) return null;
   return { notes: pickedNotes, xsecTokens: pickedTokens };
 }
-function processLLMRound(state, llmOutputText, build) {
-  const result = classifyLLMOutput(llmOutputText);
-  if (result.kind === "tool-request") {
-    if (result.prefix.trim()) state.narrations.push(result.prefix);
+function processLLMRound(state, llmOutputText, build, mcp) {
+  const nativeToolCalls = mcp?.nativeToolCalls ?? [];
+  const textCalls = mcp?.resolve.size ? extractTextFakedMcpCalls(llmOutputText, mcp.resolve, { alsoMatchPrefix: "mcp__" }) : [];
+  const scanText = textCalls.length ? stripTextFakedMcpCalls(llmOutputText, textCalls) : llmOutputText;
+  const mcpToolCalls = nativeToolCalls.length > 0 ? nativeToolCalls : textCalls.map((c, i) => ({
+    // id 只需在一轮的 assistant/tool 消息配对里唯一；用累计工具数做轮间区分度。
+    id: `mcp_${state.toolCalls.length}_${i}`,
+    type: "function",
+    // exposedName 恒为裸名（alsoMatchPrefix 的命中也回裸名），统一补前缀即可。
+    function: { name: `mcp__${c.exposedName}`, arguments: JSON.stringify(c.args) }
+  }));
+  const result = classifyLLMOutput(scanText);
+  const isToolRound = result.kind === "tool-request" || mcpToolCalls.length > 0;
+  if (isToolRound) {
+    const narration = result.kind === "tool-request" ? result.prefix : scanText;
+    if (narration.trim()) state.narrations.push(narration);
     if (state.duplicateToolCalls < MAX_DUPLICATE_TOOL_CALLS) {
-      return { decision: "tool-request", toolCalls: result.toolCalls };
+      return {
+        decision: "tool-request",
+        toolCalls: result.kind === "tool-request" ? [...result.toolCalls, ...mcpToolCalls] : mcpToolCalls
+      };
     }
   }
-  const thisRound = result.kind === "tool-request" ? "" : llmOutputText;
+  const thisRound = isToolRound ? "" : scanText;
   const fullText = [...state.narrations, thisRound].filter((part) => part.trim().length > 0).join("\n");
-  const finalScan = fullText === llmOutputText ? result : classifyLLMOutput(fullText);
+  const finalScan = fullText === scanText ? result : classifyLLMOutput(fullText);
   const cleanedText = finalScan.kind === "finish" ? finalScan.cleanedText : finalScan.prefix;
   const directives = finalScan.kind === "finish" ? finalScan.directives : [];
   const xhsSession = buildXhsSessionPayload(directives, build.xhsNotes, build.xhsXsecTokens);
@@ -5465,6 +5613,13 @@ var amsgHooks = {
       throw new Error("AMSG2_FIRE_STASH_MISSING: onLLMOutput \u8BFB\u4E0D\u5230 ctx.scratch.fire\uFF0C\u68C0\u67E5 amsg-server \u662F\u5426\u4ECD\u5171\u4EAB scratch");
     }
     const session = stash.session;
+    const rawToolCalls = ctx.llmResponse?.choices?.[0]?.message?.tool_calls;
+    const nativeMcpCalls = (Array.isArray(rawToolCalls) ? rawToolCalls : []).filter((tc) => {
+      const n = tc?.function?.name;
+      const hit = typeof n === "string" && n.startsWith("mcp__") && !!stash.mcpResolve?.has(n.slice("mcp__".length));
+      if (!hit && tc) console.warn("[amsg:agentic] \u4E22\u5F03\u672A\u58F0\u660E\u7684 native tool_call", { name: tc?.function?.name });
+      return hit;
+    });
     const decision = processLLMRound(session, content, {
       contactName: ctx.contactName,
       avatarUrl: ctx.avatarUrl ?? null,
@@ -5477,7 +5632,7 @@ var amsgHooks = {
       // [[XHS_SHARE]] / 点赞 / 评论重放必然 available:0 掉卡片）。
       xhsNotes: stash.toolCtx.lastXhsNotesRef?.current,
       xhsXsecTokens: stash.toolCtx.xhsCaches ? Array.from(stash.toolCtx.xhsCaches.xsecTokenCache.entries()) : void 0
-    });
+    }, stash.mcpResolve ? { resolve: stash.mcpResolve, nativeToolCalls: nativeMcpCalls } : null);
     if (decision.decision === "tool-request") {
       console.log("[amsg:agentic]", {
         type: "tool_request",

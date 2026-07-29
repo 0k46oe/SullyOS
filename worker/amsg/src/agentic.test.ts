@@ -17,6 +17,7 @@ import {
   processLLMRound,
   type PushBuildInput,
 } from './agentic';
+import { buildMcpNameMap, type McpFireServer } from '../../../utils/mcpFireCore';
 import type { XhsNote } from '../../../utils/realtimeContext';
 
 const build: PushBuildInput = {
@@ -359,5 +360,84 @@ describe('processLLMRound — 重复调用到阈值就收尾', () => {
     const state = createFireSessionState();
     state.duplicateToolCalls = 2;
     expect(processLLMRound(state, '[[RECALL: 2026-06]]', build).decision).toBe('skip-push');
+  });
+});
+
+// ─── 通用 MCP 的两层识别（native tool_calls 优先，正文协议兜底） ────────────────
+
+const mcpSrv: McpFireServer = {
+  id: 's1',
+  name: '探针',
+  url: 'https://probe.example.com',
+  tools: [{ name: 'get_secret', inputSchema: { type: 'object', properties: { who: { type: 'string' } } } }],
+};
+const mcpResolve = buildMcpNameMap([mcpSrv]);
+const nativeCall = (args = '{}') => ({
+  id: 'call_n1',
+  type: 'function' as const,
+  function: { name: 'mcp__get_secret', arguments: args },
+});
+
+describe('processLLMRound + MCP', () => {
+  it('native tool_calls → tool-request 原样透传, 正文全文入旁白', () => {
+    const state = createFireSessionState();
+    const d = processLLMRound(state, '我去问问暗号。', build, {
+      resolve: mcpResolve,
+      nativeToolCalls: [nativeCall('{"who":"小满"}')],
+    });
+    expect(d.decision).toBe('tool-request');
+    if (d.decision !== 'tool-request') return;
+    expect(d.toolCalls).toEqual([nativeCall('{"who":"小满"}')]);
+    expect(state.narrations.join('')).toContain('我去问问暗号');
+  });
+
+  it('第二层：无 native 时识别正文假调用, 名字带 mcp__ 前缀, 旁白剥净语法', () => {
+    const state = createFireSessionState();
+    const d = processLLMRound(state, '我去问问暗号。\nget_secret({"who":"小满"})', build, {
+      resolve: mcpResolve,
+    });
+    expect(d.decision).toBe('tool-request');
+    if (d.decision !== 'tool-request') return;
+    expect(d.toolCalls[0].function.name).toBe('mcp__get_secret');
+    expect(JSON.parse(d.toolCalls[0].function.arguments)).toEqual({ who: '小满' });
+    expect(state.narrations.join('')).not.toContain('get_secret(');
+  });
+
+  it('模型把带前缀的名字写进正文（native 模式掉格式）也认, 不出现双前缀', () => {
+    const state = createFireSessionState();
+    const d = processLLMRound(state, 'mcp__get_secret({"who":"小满"})', build, { resolve: mcpResolve });
+    expect(d.decision).toBe('tool-request');
+    if (d.decision !== 'tool-request') return;
+    expect(d.toolCalls[0].function.name).toBe('mcp__get_secret');
+  });
+
+  it('native 与数据标签同轮 → 合并进同一个 tool-request', () => {
+    const state = createFireSessionState();
+    const d = processLLMRound(state, '[[RECALL: 2026-06]]', build, {
+      resolve: mcpResolve,
+      nativeToolCalls: [nativeCall()],
+    });
+    expect(d.decision).toBe('tool-request');
+    if (d.decision !== 'tool-request') return;
+    const names = d.toolCalls.map((tc) => tc.function.name);
+    expect(names).toContain('recall');
+    expect(names).toContain('mcp__get_secret');
+  });
+
+  it('无 MCP 参与时行为与不传第 4 参完全一致（回归）', () => {
+    const a = processLLMRound(createFireSessionState(), '正常收尾文本。', build, { resolve: mcpResolve });
+    const b = processLLMRound(createFireSessionState(), '正常收尾文本。', build);
+    expect(a).toEqual(b);
+  });
+
+  it('finish 后最终推送正文不含调用语法（防泄漏回归守卫）', () => {
+    const state = createFireSessionState();
+    processLLMRound(state, '先问暗号。\nget_secret({})', build, { resolve: mcpResolve });
+    const d = processLLMRound(state, '拿到了，暗号是 X。', build, { resolve: mcpResolve });
+    expect(d.decision).toBe('finish');
+    if (d.decision !== 'finish') return;
+    const all = d.pushPayloads.map((p) => String(p.message)).join('\n');
+    expect(all).toContain('先问暗号');
+    expect(all).not.toContain('get_secret(');
   });
 });
