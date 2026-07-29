@@ -20,6 +20,8 @@ const REQUIRED_WORKER_FEATURES = [
   'client-state-chunking',
   'agentic-hooks',
   'agentic-scratch',
+  // 后台 fire 每轮把 tools 参数带给 LLM（角色在主动消息里用得上用户自配的 MCP 工具）。
+  'agentic-fire-tools',
 ];
 // features 之外还必须比版本：这波依赖的能力大多没发独立 flag，光查 features 分不出新旧。
 //   next.5 — GET /messages 投影（charId/clientTaskId）、onBeforeFire 的 { skip } 出口

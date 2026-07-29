@@ -3181,6 +3181,82 @@ var parseToolConfig = (value) => {
   }
 };
 
+// utils/mcpFireCore.ts
+var DEFAULT_MAX_TOOL_NAME_LEN = 64;
+var sanitizeMcpToolName = (name, maxLen = DEFAULT_MAX_TOOL_NAME_LEN) => {
+  const len = Math.max(1, maxLen);
+  return (name || "tool").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, len);
+};
+var withMcpDedupeSuffix = (base, i, maxLen = DEFAULT_MAX_TOOL_NAME_LEN) => {
+  const suffix = `_${i}`;
+  return base.slice(0, Math.max(0, maxLen - suffix.length)) + suffix;
+};
+var serverSlug = (server, maxLen = DEFAULT_MAX_TOOL_NAME_LEN) => sanitizeMcpToolName(server.name, maxLen).slice(0, 20);
+var buildMcpNameMap = (servers, opts = {}) => {
+  const maxLen = opts.maxNameLen ?? DEFAULT_MAX_TOOL_NAME_LEN;
+  const resolve = /* @__PURE__ */ new Map();
+  for (const server of servers) {
+    for (const t of server.tools || []) {
+      let exposed = sanitizeMcpToolName(t.name, maxLen);
+      if (resolve.has(exposed)) {
+        const prefixed = sanitizeMcpToolName(`${serverSlug(server, maxLen)}_${t.name}`, maxLen);
+        exposed = prefixed;
+        let i = 2;
+        while (resolve.has(exposed)) exposed = withMcpDedupeSuffix(prefixed, i++, maxLen);
+      }
+      resolve.set(exposed, { server, toolName: t.name, tool: t });
+    }
+  }
+  return resolve;
+};
+var filterMcpServersForChar = (servers, charId) => (servers || []).filter(
+  (s) => !!s.url && (s.tools?.length || 0) > 0 && (!s.charIds?.length || s.charIds.includes(charId))
+);
+var buildMcpFireTools = (resolve) => {
+  const multiServer = new Set([...resolve.values()].map(({ server }) => server.id)).size > 1;
+  const tools = [];
+  for (const [exposed, { server, tool }] of resolve) {
+    const desc = (tool.description || "").trim();
+    tools.push({
+      type: "function",
+      function: {
+        name: `mcp__${exposed}`,
+        description: multiServer ? `[${server.name}] ${desc}`.trim() : desc,
+        parameters: tool.inputSchema || { type: "object", properties: {} }
+      }
+    });
+  }
+  return tools;
+};
+var buildMcpFireBlock = (resolve, opts) => {
+  if (!resolve.size) return "";
+  const userName = opts.userName || "\u7528\u6237";
+  const multiServer = new Set([...resolve.values()].map(({ server }) => server.id)).size > 1;
+  const lines = [];
+  for (const [exposed, { server, tool }] of resolve) {
+    const desc = (tool.description || "").trim();
+    if (opts.mode === "native") {
+      lines.push(`- ${exposed}${desc ? `\uFF1A${desc}` : ""}${multiServer ? `\uFF08\u6765\u6E90: ${server.name}\uFF09` : ""}`);
+      continue;
+    }
+    const schema = tool.inputSchema || {};
+    const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+    const args = Object.entries(schema.properties || {}).map(([name, d]) => `${name}${required.has(name) ? "*" : ""}:${d?.type || "any"}`);
+    lines.push(`- ${exposed}(${args.join(", ")})${desc ? `\uFF1A${desc}` : ""}${multiServer ? `\uFF08\u6765\u6E90: ${server.name}\uFF09` : ""}`);
+  }
+  const howTo = opts.mode === "native" ? "\u9700\u8981\u65F6\u76F4\u63A5\u901A\u8FC7\u7CFB\u7EDF\u7684\u5DE5\u5177\u8C03\u7528\u63A5\u53E3\u53D1\u8D77\uFF08\u7CFB\u7EDF\u4F1A\u81EA\u52A8\u6267\u884C\u5E76\u628A\u7ED3\u679C\u7ED9\u4F60\uFF09\uFF0C\u4E0D\u8981\u628A\u5DE5\u5177\u540D\u548C\u53C2\u6570\u5199\u8FDB\u6B63\u6587\u3002" : '\u9700\u8981\u5DE5\u5177\u65F6\uFF0C\u5355\u72EC\u8F93\u51FA\u4E00\u884C tool_name({"\u53C2\u6570":"\u503C"})\uFF0C\u7CFB\u7EDF\u4F1A\u4EE3\u4E3A\u6267\u884C\u5E76\u628A\u7ED3\u679C\u7ED9\u4F60\uFF0C\u7136\u540E\u4F60\u7EE7\u7EED\u5199\u3002* \u8868\u793A\u5FC5\u586B\u53C2\u6570\u3002';
+  return [
+    "",
+    "---",
+    `\u3010\u5916\u90E8\u5DE5\u5177 \u2014\u2014 ${userName} \u5728\u8BBE\u7F6E\u91CC\u7ED9\u4F60\u8FDE\u4E86 MCP \u5DE5\u5177\u670D\u52A1\u5668\uFF0C\u4E3B\u52A8\u6D88\u606F\u91CC\u4E5F\u53EF\u4EE5\u7528\u3011`,
+    howTo,
+    "\u7EAA\u5F8B\uFF1A\u4E0D\u9700\u8981\u5C31\u522B\u786C\u8C03\uFF1B\u6CA1\u6536\u5230\u7CFB\u7EDF\u8FD4\u56DE\u524D\u4E0D\u8981\u58F0\u79F0\u5DE5\u5177\u6210\u529F\uFF0C\u4E5F\u4E0D\u8981\u7F16\u9020\u7ED3\u679C\uFF1B\u5DE5\u5177\u5931\u8D25\u5C31\u6362\u4E2A\u65B9\u5F0F\u6216\u5982\u5B9E\u5E26\u8FC7\uFF1B\u7ED3\u679C\u53EA\u6311\u76F8\u5173\u90E8\u5206\u7528\u89D2\u8272\u8BED\u6C14\u8F6C\u8FF0\uFF0C\u522B\u590D\u8BFB JSON\u3002",
+    "\u53EF\u7528\u5DE5\u5177\uFF1A",
+    ...lines,
+    "---"
+  ].join("\n");
+};
+
 // utils/realtimeFetchCore.ts
 var performSearch = async (query, apiKey) => {
   if (!query || !apiKey) {
@@ -5356,16 +5432,26 @@ var amsgHooks = {
     if (!toolPack) throw fail("tool_pack \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
     const toolConfig = parseToolConfig(toolConfigRow.value);
     if (!toolConfig) throw fail("tool_config \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
+    const mcpServers = filterMcpServersForChar(toolConfig.mcpServers, charId);
+    const mcpResolve = mcpServers.length ? buildMcpNameMap(mcpServers, { maxNameLen: 59 }) : null;
+    const mcpNative = toolConfig.mcpUseNativeTools !== false;
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
     ctx.scratch.fire = {
       session: createFireSessionState(),
       toolCtx,
       proxyWorkerUrl,
       xhsCookie,
-      occurrenceMs
+      occurrenceMs,
+      mcpResolve,
+      mcpSessions: /* @__PURE__ */ new Map()
     };
-    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction);
-    return [{ role: "user", content: prompt }];
+    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction) + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? "native" : "text" }) : "");
+    return {
+      messages: [{ role: "user", content: prompt }],
+      // amsg-server 带 agentic-fire-tools feature 的版本起透传给每轮 LLM 请求；
+      // 老 bundle 里不会走到这（tools 是随本次 bundle 一起升上去的）。
+      ...mcpResolve && mcpNative ? { tools: buildMcpFireTools(mcpResolve) } : {}
+    };
   },
   async onLLMOutput(ctx) {
     const content = stripReasoningTags2(ctx.llmOutputText || "").trim();

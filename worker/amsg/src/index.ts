@@ -51,6 +51,15 @@ import {
   type AmsgToolConfig,
   type AmsgToolPack,
 } from '../../../utils/amsgToolPack';
+import {
+  buildMcpFireBlock,
+  buildMcpFireTools,
+  buildMcpNameMap,
+  createMcpSessionState,
+  filterMcpServersForChar,
+  type McpResolvedToolCore,
+  type McpSessionState,
+} from '../../../utils/mcpFireCore';
 import { dispatchAgenticTool, type AgenticToolChar, type AgenticToolCtx } from '../../../utils/agenticTools';
 import {
   buildDuplicateToolMessage,
@@ -145,6 +154,10 @@ interface FireStash {
   xhsCookie: string;
   /** 本次触发时刻（任务行 next_send_at）；透传给每条 push 的 metadata.amsgOccurrenceMs。 */
   occurrenceMs: number;
+  /** 通用 MCP：暴露名 → 服务器/工具。tool_config 里没配（或对该角色不可见）时为 null。 */
+  mcpResolve: Map<string, McpResolvedToolCore> | null;
+  /** 每服务器一份连接会话，单次 fire 内跨轮复用，fire 结束随 scratch 丢弃。 */
+  mcpSessions: Map<string, McpSessionState>;
 }
 
 const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash | undefined =>
@@ -402,6 +415,15 @@ export const amsgHooks = {
     const toolConfig = parseToolConfig(toolConfigRow.value);
     if (!toolConfig) throw fail('tool_config 解析失败（格式不对或数据损坏）');
 
+    // 通用 MCP：提示词块 / tools 数组与凭据同源同拍（都来自这一行 tool_config），
+    // 不存在「教了角色用、凭据却没到」的窗口。charIds 过滤与前台同语义。
+    // mcpUseNativeTools=false = 用户的中转拒 tools（前台兼容模式同款开关），
+    // 请求不带 tools 参数、提示词块教正文协议，识别走 processLLMRound 第二层。
+    const mcpServers = filterMcpServersForChar(toolConfig.mcpServers, charId);
+    // maxNameLen 59：暴露名后面要拼 mcp__ 前缀（5 字符），总长不能超 OpenAI 的 64。
+    const mcpResolve = mcpServers.length ? buildMcpNameMap(mcpServers, { maxNameLen: 59 }) : null;
+    const mcpNative = toolConfig.mcpUseNativeTools !== false;
+
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
     ctx.scratch.fire = {
       session: createFireSessionState(),
@@ -409,11 +431,20 @@ export const amsgHooks = {
       proxyWorkerUrl,
       xhsCookie,
       occurrenceMs,
+      mcpResolve,
+      mcpSessions: new Map(),
     } satisfies FireStash;
 
     // fire_pack v2：「本次任务」指令随任务 metadata 走，这里填槽。
-    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction);
-    return [{ role: 'user' as const, content: prompt }];
+    // MCP 块拼在渲染好的 prompt 之后（同一条 user 消息）。
+    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction)
+      + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? 'native' : 'text' }) : '');
+    return {
+      messages: [{ role: 'user' as const, content: prompt }],
+      // amsg-server 带 agentic-fire-tools feature 的版本起透传给每轮 LLM 请求；
+      // 老 bundle 里不会走到这（tools 是随本次 bundle 一起升上去的）。
+      ...(mcpResolve && mcpNative ? { tools: buildMcpFireTools(mcpResolve) } : {}),
+    };
   },
 
   async onLLMOutput(ctx: SessionCtx) {

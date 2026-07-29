@@ -45,6 +45,22 @@ const toolConfigValue = JSON.stringify({
   v: 1, proxyWorkerUrl: '', newsEnabled: false, notionEnabled: false, feishuEnabled: false,
 });
 
+/** 带一台通用 MCP 服务器的 tool_config（extra 用来改开关 / 服务器可见范围）。 */
+const mcpToolConfigValue = (extra: Record<string, unknown> = {}) => JSON.stringify({
+  v: 1, proxyWorkerUrl: '', newsEnabled: false, notionEnabled: false, feishuEnabled: false,
+  mcpServers: [{
+    id: 'srv-memory',
+    name: '记忆库',
+    url: 'https://mcp.example.com/mcp',
+    tools: [{
+      name: 'search_memory',
+      description: '按关键词查记忆',
+      inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+    }],
+  }],
+  ...extra,
+});
+
 /** 造一个 FireCtx；rows 是 readState 按 namespace 返回的内容。 */
 const makeCtx = (opts: {
   metadata?: Record<string, unknown>;
@@ -97,13 +113,24 @@ const makeCtx = (opts: {
   };
 };
 
+/** onBeforeFire 生成路径的返回值：{ messages, tools? }（skip 那一支各测各的）。 */
+interface FiredResult {
+  messages: Array<{ role: string; content: string }>;
+  tools?: Array<{ function: { name: string; parameters: unknown } }>;
+}
+
+/** 取生成路径的返回值；顺手确认没退回 skip / null，省得每条用例各自强转。 */
+const fired = (result: unknown): FiredResult => {
+  expect(result, '生成路径应该返回 { messages, tools? }').toHaveProperty('messages');
+  return result as FiredResult;
+};
+
 describe('onBeforeFire 四道门', () => {
   it('正常路径：填好槽返回 prompt，并把工具状态挂上 scratch', async () => {
     const { ctx, scratch } = makeCtx({});
     const result = await amsgHooks.onBeforeFire(ctx);
 
-    expect(Array.isArray(result)).toBe(true);
-    const messages = result as Array<{ role: string; content: string }>;
+    const messages = fired(result).messages;
     expect(messages).toHaveLength(1);
     expect(messages[0].role).toBe('user');
     // 槽位必须被填掉，不能把 {{AMSG_*}} 原样发给 LLM
@@ -133,7 +160,7 @@ describe('onBeforeFire 四道门', () => {
       ],
     });
     const result = await amsgHooks.onBeforeFire(ctx);
-    expect(Array.isArray(result)).toBe(true);
+    expect(fired(result).messages).toHaveLength(1);
   });
 
   it('租约过期（超 TTL）不拦', async () => {
@@ -145,7 +172,7 @@ describe('onBeforeFire 四道门', () => {
       ],
     });
     const result = await amsgHooks.onBeforeFire(ctx);
-    expect(Array.isArray(result)).toBe(true);
+    expect(fired(result).messages).toHaveLength(1);
   });
 
   it('防穿帮闸：一次性任务在锚点之后有新用户消息 → skip', async () => {
@@ -171,7 +198,7 @@ describe('onBeforeFire 四道门', () => {
       ],
     });
     const result = await amsgHooks.onBeforeFire(ctx);
-    expect(Array.isArray(result)).toBe(true);
+    expect(fired(result).messages).toHaveLength(1);
   });
 
   // ─── 不降级：状态不完整一律抛错，不再退回排程时冻结的 prompt ───
@@ -263,7 +290,7 @@ describe('onBeforeFire 四道门', () => {
         { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
       ],
     });
-    const messages = await amsgHooks.onBeforeFire(ctx) as Array<{ content: string }>;
+    const messages = fired(await amsgHooks.onBeforeFire(ctx)).messages;
     expect(messages[0].content).toContain('问问对方吃了没');
     expect(messages[0].content).not.toContain(AMSG_SLOT_CURRENT_TIME);
   });
@@ -301,6 +328,79 @@ describe('onBeforeFire 四道门', () => {
   it('任务 metadata 缺 charId → 抛错', async () => {
     const { ctx } = makeCtx({ metadata: { charId: undefined } });
     await expect(amsgHooks.onBeforeFire(ctx)).rejects.toThrow(/charId/);
+  });
+});
+
+// ─── 通用 MCP：到点把工具说明块和 tools 声明一起带上 ───
+//
+// 提示词块和 tools 数组同源同拍（都来自那一行 tool_config），所以这几条一起钉：
+// 教了角色用工具，请求里就得真有工具；没配 MCP 的用户则一个字都不该多出来。
+
+describe('onBeforeFire 注入通用 MCP', () => {
+  it('配了 MCP 服务器 → prompt 尾部带工具块，请求带 mcp__ 前缀的 tools', async () => {
+    const { ctx, scratch } = makeCtx({
+      globalRows: [{ key: AMSG_TOOL_CONFIG_KEY, value: mcpToolConfigValue() }],
+    });
+    const result = fired(await amsgHooks.onBeforeFire(ctx));
+
+    const prompt = result.messages[0].content;
+    expect(prompt).toContain('问问对方吃了没');           // 原来的任务指令还在
+    expect(prompt).toContain('【外部工具');
+    expect(prompt).toContain('search_memory');
+
+    expect(result.tools?.map((t) => t.function.name)).toEqual(['mcp__search_memory']);
+    // 参数表要原样带上，不然模型只能瞎猜字段名
+    expect(result.tools?.[0].function.parameters).toMatchObject({
+      properties: { query: { type: 'string' } },
+    });
+    // 名映射进 scratch，executeToolCalls 按暴露名回查是哪台服务器的哪个工具
+    expect((scratch.fire as any).mcpResolve.get('search_memory').toolName).toBe('search_memory');
+  });
+
+  it('没配 MCP → 一切照旧：不带 tools、prompt 里没有工具块', async () => {
+    const { ctx, scratch } = makeCtx({});
+    const result = fired(await amsgHooks.onBeforeFire(ctx));
+
+    expect(result).not.toHaveProperty('tools');
+    expect(result.messages[0].content).not.toContain('【外部工具');
+    expect((scratch.fire as any).mcpResolve).toBeNull();
+  });
+
+  it('服务器只对别的角色可见 → 当作没配（凭据不该串到不相干的角色身上）', async () => {
+    const { ctx, scratch } = makeCtx({
+      globalRows: [{
+        key: AMSG_TOOL_CONFIG_KEY,
+        value: mcpToolConfigValue({
+          mcpServers: [{
+            id: 'srv-memory', name: '记忆库', url: 'https://mcp.example.com/mcp',
+            charIds: ['别的角色'],
+            tools: [{ name: 'search_memory', inputSchema: { type: 'object', properties: {} } }],
+          }],
+        }),
+      }],
+    });
+    const result = fired(await amsgHooks.onBeforeFire(ctx));
+
+    expect(result).not.toHaveProperty('tools');
+    expect(result.messages[0].content).not.toContain('【外部工具');
+    expect((scratch.fire as any).mcpResolve).toBeNull();
+  });
+
+  it('用户关了兼容模式（中转拒 tools）→ 不带 tools 参数，改用正文协议教一遍', async () => {
+    const { ctx, scratch } = makeCtx({
+      globalRows: [{
+        key: AMSG_TOOL_CONFIG_KEY,
+        value: mcpToolConfigValue({ mcpUseNativeTools: false }),
+      }],
+    });
+    const result = fired(await amsgHooks.onBeforeFire(ctx));
+
+    expect(result).not.toHaveProperty('tools');
+    const prompt = result.messages[0].content;
+    expect(prompt).toContain('tool_name({"参数":"值"})');
+    expect(prompt).toContain('search_memory(query*:string)');
+    // 工具还是要认识的，只是走正文那条路
+    expect((scratch.fire as any).mcpResolve.size).toBe(1);
   });
 });
 
