@@ -2144,8 +2144,10 @@ const Chat: React.FC = () => {
 
         const range = historyContextRange;
         const maxStart = range?.maxRangeStartMessageId;
-        const latestId = range?.messages.at(-1)?.id
-            || allHistoryMessages.at(-1)?.id;
+        // 不用 Array.prototype.at：tsconfig 的 lib 没开 es2022，tsc 会报错
+        const rangeMessages = range?.messages ?? [];
+        const latestId = rangeMessages[rangeMessages.length - 1]?.id
+            || allHistoryMessages[allHistoryMessages.length - 1]?.id;
         if (maxStart === undefined || latestId === undefined || messageId < maxStart || messageId > latestId) {
             const required = countMessagesFrom(allHistoryMessages, messageId);
             const hint = settingsContextRangeMode === 'adaptive'

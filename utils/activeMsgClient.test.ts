@@ -100,9 +100,13 @@ describe('putClientStateOrThrow', () => {
 });
 
 describe('ActiveMsgClient.cancelTask', () => {
-  /** safeResponseJson 只读 status 和 text()，够撑起一个假 Response。 */
+  /** safeResponseJson 读 status、text() 和 headers（content-type），假 Response 三样都要有。 */
   const respondWith = (status: number, body: unknown) => {
-    const fetchMock = vi.fn().mockResolvedValue({ status, text: async () => JSON.stringify(body) });
+    const fetchMock = vi.fn().mockResolvedValue({
+      status,
+      text: async () => JSON.stringify(body),
+      headers: new Headers({ 'content-type': 'application/json' }),
+    });
     vi.stubGlobal('fetch', fetchMock);
     return fetchMock;
   };
