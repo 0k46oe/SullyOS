@@ -688,6 +688,10 @@ Expected: FAIL（未导出）
 
 - [ ] **Step 3: 实现**
 
+（勘误：下面参考代码里的来源标注/描述前缀判据 `resolve.size > 1` 应为「按 server.id 去重后的台数 > 1」，
+与前台 buildToolDescription 的 servers.length > 1 对齐；返回类型具名为 `McpFireOpenAITool`。
+以 Task 4 修正轮的实际代码为准。）
+
 追加到 `utils/mcpFireCore.ts`：
 
 ```ts
