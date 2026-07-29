@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     buildMcpDirectHeaders,
+    buildMcpFireBlock,
+    buildMcpFireTools,
     buildMcpNameMap,
     callMcpToolCore,
     createMcpSessionState,
@@ -241,6 +243,56 @@ describe('JSON-RPC 传输层（直连路径）', () => {
         expect(sent.map((s) => s.body.id)).toEqual([1, undefined, 2, 1, undefined, 2]);
         expect(first.nextId).toBe(2);
         expect(second.nextId).toBe(2);
+    });
+});
+
+describe('buildMcpFireBlock / buildMcpFireTools', () => {
+    const servers = [srv({
+        tools: [{
+            name: 'get_weather',
+            description: '查天气',
+            inputSchema: { type: 'object', properties: { city: { type: 'string' }, days: { type: 'number' } }, required: ['city'] },
+        }],
+    })];
+    const map = buildMcpNameMap(servers);
+
+    it('native 模式：只讲纪律，不教正文协议', () => {
+        const block = buildMcpFireBlock(map, { mode: 'native' });
+        expect(block).toContain('get_weather');
+        expect(block).toContain('不要编造结果');
+        expect(block).not.toContain('tool_name({"参数":"值"})');
+    });
+
+    it('text 模式：签名含必填星标与类型，教正文协议', () => {
+        const block = buildMcpFireBlock(map, { mode: 'text' });
+        expect(block).toContain('get_weather(city*:string, days:number)');
+        expect(block).toContain('tool_name({"参数":"值"})');
+    });
+
+    it('空映射返回空串（不往 prompt 里塞空壳）', () => {
+        expect(buildMcpFireBlock(new Map(), { mode: 'native' })).toBe('');
+    });
+
+    it('fire tools 数组带 mcp__ 前缀与来源标注', () => {
+        const tools = buildMcpFireTools(map);
+        expect(tools).toHaveLength(1);
+        expect(tools[0]).toMatchObject({
+            type: 'function',
+            function: { name: 'mcp__get_weather', description: '[服务器A] 查天气' },
+        });
+        expect((tools[0].function as any).parameters.required).toEqual(['city']);
+    });
+
+    // 59 是 worker 侧算好的预算（64 上限 - `mcp__` 前缀 5 字符）。这条守的是两边协同：
+    // 名映射按 59 收紧后，fire tools 拼上前缀不能越过 OpenAI 的 64。
+    it('按 maxNameLen: 59 建的映射，拼上 mcp__ 前缀后仍不超 64', () => {
+        const longTool = 'a'.repeat(43);
+        const wideServers = ['-alpha', '-beta', '-gamma', '-delta'].map((sfx, i) =>
+            srv({ id: `s${i}`, name: `MyCompanyToolServer${sfx}`, tools: [{ name: longTool }] }));
+        const tools = buildMcpFireTools(buildMcpNameMap(wideServers, { maxNameLen: 59 }));
+        expect(tools).toHaveLength(wideServers.length);
+        expect(tools.every((t) => t.function.name.startsWith('mcp__'))).toBe(true);
+        expect(tools.every((t) => t.function.name.length <= 64)).toBe(true);
     });
 });
 

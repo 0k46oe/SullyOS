@@ -4,11 +4,11 @@
  * mcpClient.ts 管浏览器侧的事（localStorage 配置、代理包装、发现流程）；
  * 这里只放两端都要跑的纯逻辑：工具名映射、JSON-RPC 传输、正文假调用解析、
  * 结果格式化、后台 fire 的提示词块与 tools 数组。
- * （提示词块与 fire 侧 tools 数组由后续任务迁入。）
  *
- * 段落顺序是固定的，新东西插进对应分区，别往文件尾巴追加：
- *   共用类型 → 工具名与长度预算（含名映射）→ fire 侧服务器过滤
- *   → 工具结果回填 → 正文假调用解析 → JSON-RPC 传输层
+ * 段落顺序是固定的，新东西插进对应分区，别随手往文件尾巴追加：
+ *   共用类型 → 工具名与长度预算（含名映射）→ 工具结果回填
+ *   → 正文假调用解析 → JSON-RPC 传输层 → 后台 fire 专用
+ * 传输层是底座、fire 层是它的消费方，所以 fire 那几个函数收在最后一个分区里。
  *
  * 环境无关叶子模块：不 import 任何带浏览器依赖的东西（会进 worker bundle）。
  */
@@ -98,22 +98,6 @@ export const buildMcpNameMap = <S extends McpFireServer>(
     }
     return resolve;
 };
-
-// ========== fire 侧服务器过滤 ==========
-
-/**
- * fire 时按角色过滤可见服务器（charIds 语义与 getEnabledMcpServers 一致）。
- * 只管 url / tools / charIds 三项：服务器有没有启用由上云侧的
- * collectMcpFireServers 把关，传到这里的清单已经只剩启用的。
- */
-export const filterMcpServersForChar = <S extends McpFireServer>(
-    servers: S[] | undefined,
-    charId: string,
-): S[] =>
-    (servers || []).filter((s) =>
-        !!s.url && (s.tools?.length || 0) > 0 &&
-        (!s.charIds?.length || s.charIds.includes(charId)),
-    );
 
 // ========== 工具结果回填 ==========
 
@@ -740,4 +724,93 @@ export const buildMcpDirectHeaders = (server: McpFireServer, sessionId: string |
     if (server.token) headers['Authorization'] = `Bearer ${server.token}`;
     if (sessionId) headers['Mcp-Session-Id'] = sessionId;
     return headers;
+};
+
+// ========== 后台 fire 专用 ==========
+//
+// amsg2 的 worker 到点自己调 LLM，这一段就是那时候要用的三块料：
+// 挑出这个角色能看见的服务器 → 拼 tools 数组 → 拼提示词块。
+
+/**
+ * fire 时按角色过滤可见服务器（charIds 语义与 getEnabledMcpServers 一致）。
+ * 只管 url / tools / charIds 三项：服务器有没有启用由上云侧的
+ * collectMcpFireServers 把关，传到这里的清单已经只剩启用的。
+ */
+export const filterMcpServersForChar = <S extends McpFireServer>(
+    servers: S[] | undefined,
+    charId: string,
+): S[] =>
+    (servers || []).filter((s) =>
+        !!s.url && (s.tools?.length || 0) > 0 &&
+        (!s.charIds?.length || s.charIds.includes(charId)),
+    );
+
+export interface McpFireTool {
+    type: 'function';
+    function: { name: string; description: string; parameters: any };
+}
+
+/**
+ * fire 请求的 tools 数组（native 模式）。暴露名直接带 mcp__ 前缀——模型按这个名字
+ * 调回来，executeToolCalls 零歧义分流，不会撞内置工具（recall/search/…）的名字。
+ * resolve 必须是用 { maxNameLen: 59 } 建的（59 + 前缀 5 = 64，OpenAI 工具名上限）。
+ */
+export const buildMcpFireTools = <S extends McpFireServer>(
+    resolve: Map<string, McpResolvedToolCore<S>>,
+): McpFireTool[] => {
+    const tools: McpFireTool[] = [];
+    for (const [exposed, { server, tool }] of resolve) {
+        tools.push({
+            type: 'function',
+            function: {
+                name: `mcp__${exposed}`,
+                description: `[${server.name}] ${(tool.description || '').trim()}`.trim(),
+                parameters: tool.inputSchema || { type: 'object', properties: {} },
+            },
+        });
+    }
+    return tools;
+};
+
+/**
+ * 后台 fire 的 MCP 工具说明块（worker 到点拼进 user prompt 尾部）。
+ *
+ * native 模式（默认）：tools 参数已随请求声明，这里只列来源和纪律——与前台
+ * buildMcpSystemBlock 的口径一致，不教正文语法（教了反而勾引模型往正文里写）。
+ * text 模式（用户在设置里关掉「兼容模式」开关 = 中转拒 tools 时）：请求不带
+ * tools 参数，这里教正文协议 tool_name({...})，签名格式与前台
+ * buildMcpRejectedToolsFallbackBody 对齐——同一个模型两端见到的长一个样。
+ */
+export const buildMcpFireBlock = <S extends McpFireServer>(
+    resolve: Map<string, McpResolvedToolCore<S>>,
+    opts: { mode: 'native' | 'text'; userName?: string },
+): string => {
+    if (!resolve.size) return '';
+    const userName = opts.userName || '用户';
+    const lines: string[] = [];
+    for (const [exposed, { server, tool }] of resolve) {
+        const desc = (tool.description || '').trim();
+        if (opts.mode === 'native') {
+            lines.push(`- ${exposed}${desc ? `：${desc}` : ''}${resolve.size > 1 ? `（来源: ${server.name}）` : ''}`);
+            continue;
+        }
+        const schema = tool.inputSchema || {};
+        const required = new Set<string>(Array.isArray(schema.required) ? schema.required : []);
+        const args = Object.entries(schema.properties || {}).map(([name, d]: [string, any]) =>
+            `${name}${required.has(name) ? '*' : ''}:${d?.type || 'any'}`);
+        lines.push(`- ${exposed}(${args.join(', ')})${desc ? `：${desc}` : ''}${resolve.size > 1 ? `（来源: ${server.name}）` : ''}`);
+    }
+    const howTo = opts.mode === 'native'
+        ? '需要时直接通过系统的工具调用接口发起（系统会自动执行并把结果给你），不要把工具名和参数写进正文。'
+        : '需要工具时，单独输出一行 tool_name({"参数":"值"})，系统会代为执行并把结果给你，然后你继续写。* 表示必填参数。';
+    return [
+        '',
+        '---',
+        `【外部工具 —— ${userName} 在设置里给你连了 MCP 工具服务器，主动消息里也可以用】`,
+        howTo,
+        '纪律：不需要就别硬调；没收到系统返回前不要声称工具成功，也不要编造结果；工具失败就换个方式或如实带过；结果只挑相关部分用角色语气转述，别复读 JSON。',
+        '可用工具：',
+        ...lines,
+        '---',
+    ].join('\n');
 };
