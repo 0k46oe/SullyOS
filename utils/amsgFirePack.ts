@@ -19,6 +19,19 @@ export const amsgStateNamespace = (charId: string) => `${AMSG_STATE_NAMESPACE_PR
 export const AMSG_FIRE_PACK_KEY = 'fire_pack';
 
 /**
+ * 角色到点自己发出去的那几条正文（每角色一份）。
+ *
+ * fire_pack 的【最近对话上下文】停在「用户最后一次聊天」那一刻，而主动消息发出去之后
+ * 那份不会变——用户离线期间连着触发两次，第二次看到的上下文和第一次逐字一样，角色不知道
+ * 自己刚说过什么，只能把同一句话换个说法再发一遍。worker 每次发完把正文追加到这里，
+ * 下次到点连同 fire_pack 一起读回来，接在对话上下文后面。
+ *
+ * 用户重新聊天后客户端会传一份新的 fire_pack（新历史里本来就含这些消息），那时这份日志
+ * 靠 basePackAt 对不上号自动作废，下一次 fire 直接覆盖成新的一份。
+ */
+export const AMSG_SELF_LOG_KEY = 'self_log';
+
+/**
  * 大内容旁路：一条 push 塞不下的 XHS 会话数据（笔记详情 + xsecToken）存这个 key，
  * push 里只带 `metadata.xhsSessionRef` 指过来，客户端收到后按键取回、用完即删。
  *
@@ -151,6 +164,14 @@ export const AMSG_SLOT_CURRENT_TIME = '{{AMSG_CURRENT_TIME}}';
 export const AMSG_SLOT_TIME_SINCE_USER = '{{AMSG_TIME_SINCE_USER}}';
 export const AMSG_SLOT_AWAY_HINT = '{{AMSG_AWAY_HINT}}';
 export const AMSG_SLOT_TASK_INSTRUCTION = '{{AMSG_TASK_INSTRUCTION}}';
+/**
+ * 「这份上下文之后，角色自己又发过什么」的落点，紧跟在【最近对话上下文】后面。
+ *
+ * 槽位而不是把这段拼在整份 prompt 尾巴上：接在对话记录后面读起来才是一条时间线，
+ * 挂在最后（本次任务指令之后）的话，角色多半会把它当成新指令的一部分。
+ * 老客户端传上来的模板里没有这个槽位，填槽是纯替换，读到就当没有——不会报错。
+ */
+export const AMSG_SLOT_SELF_LOG = '{{AMSG_SELF_LOG}}';
 
 export interface AmsgFirePack {
   v: 2;
@@ -162,6 +183,15 @@ export interface AmsgFirePack {
   tzOffsetMin: number;
   /** 用户称呼（userProfile.name || '对方'），awayHint 文案用。 */
   targetName: string;
+  /**
+   * 这份模板打包的时刻（epoch ms），self_log 拿它当对齐锚点：日志里记的 basePackAt
+   * 和这个值不一样，说明客户端之后又传了一份新模板，那几条正文已经在新的【最近对话上下文】
+   * 里了，日志整份作废（见 selfLogMatchesPack）。
+   *
+   * 可选：老客户端传上来的 pack 没有这个字段，worker 认不出对齐关系，就不启用回写——
+   * 行为退回到「每次 fire 都是最后一次聊天的状态」，跟加这个字段之前一样。
+   */
+  builtAt?: number;
 }
 
 /** 和 activeMsgClient 的 nowIsoLocal 同款换算：UTC now + 时区偏移 → `YYYY-MM-DD HH:mm`。 */
@@ -197,17 +227,109 @@ export const buildAwayHint = (targetName: string, timeSinceUser: string): string
     : `${target}${timeSinceUser.replace(/^距离用户/, '已经')}`;
 };
 
+// ─── self_log：角色自己发出去的那几条 ───
+
+export interface AmsgSelfLogEntry {
+  /**
+   * 这条正文属于哪一次触发（`<clientTaskId>@<触发时刻>`）。
+   *
+   * 有它才能区分「同一次触发重跑」和「真的又发了一条」：fire 抛错会整条重跑
+   * （worker 那边重试三次），追加式记录会把同一条消息记好几遍，角色下次读回来
+   * 以为自己连发了三条。同 id 覆盖，重跑多少次都只留一条。
+   */
+  id: string;
+  /** 发出去的时刻（epoch ms）。 */
+  at: number;
+  /** 正文（多段消息拼成一条记，超长截断）。 */
+  text: string;
+}
+
+export interface AmsgSelfLog {
+  v: 1;
+  /** 写这份日志时云端 fire_pack 的 builtAt，见 AmsgFirePack.builtAt。 */
+  basePackAt: number;
+  entries: AmsgSelfLogEntry[];
+}
+
+/** 最多留几条。再往前的对角色接话没帮助，只是白占 prompt。 */
+export const SELF_LOG_MAX_ENTRIES = 8;
+/** 单条正文留多长。主动消息本来就一两句，超出的部分基本是标签和长引用。 */
+export const SELF_LOG_TEXT_MAX = 200;
+
+export const createSelfLog = (basePackAt: number): AmsgSelfLog => ({
+  v: 1,
+  basePackAt,
+  entries: [],
+});
+
+/** 追加一条（同 id 覆盖、正文截断、只留最近 SELF_LOG_MAX_ENTRIES 条）。空正文原样返回。 */
+export const appendSelfLogEntry = (log: AmsgSelfLog, entry: AmsgSelfLogEntry): AmsgSelfLog => {
+  const text = entry.text.trim().slice(0, SELF_LOG_TEXT_MAX);
+  if (!text) return log;
+  const kept = log.entries.filter((e) => e.id !== entry.id);
+  return { ...log, entries: [...kept, { ...entry, text }].slice(-SELF_LOG_MAX_ENTRIES) };
+};
+
+/**
+ * 云端那份日志还配不配得上当前这份 fire_pack。
+ *
+ * 对不上就整份丢掉：客户端传新模板意味着用户又聊过（或角色资料变了重新打包），
+ * 新模板的【最近对话上下文】是从本地聊天记录重读的，主动消息送达时 SW 已经写进库里，
+ * 所以那几条正文本来就在里面。再叠一份日志就是同一段话在 prompt 里出现两次。
+ */
+export const selfLogMatchesPack = (log: AmsgSelfLog | null, pack: AmsgFirePack): boolean =>
+  !!log && typeof pack.builtAt === 'number' && log.basePackAt === pack.builtAt;
+
+export const parseSelfLog = (value: string): AmsgSelfLog | null => {
+  try {
+    const parsed = JSON.parse(value);
+    if (
+      parsed && typeof parsed === 'object' && parsed.v === 1
+      && typeof parsed.basePackAt === 'number'
+      && Array.isArray(parsed.entries)
+      && parsed.entries.every((e: unknown) => {
+        const entry = e as Partial<AmsgSelfLogEntry> | null;
+        return !!entry && typeof entry.id === 'string'
+          && typeof entry.at === 'number' && typeof entry.text === 'string';
+      })
+    ) {
+      return parsed as AmsgSelfLog;
+    }
+  } catch { /* 非 JSON → null */ }
+  return null;
+};
+
+/**
+ * 渲染进 AMSG_SLOT_SELF_LOG 的那一段。没有可写的就返回空串（槽位被抹掉，模板跟没这回事一样）。
+ *
+ * 开头两个空行是刻意的：槽位紧接在对话记录最后一行后面，不空开的话这段会黏成聊天记录的续行。
+ */
+export const renderSelfLogBlock = (log: AmsgSelfLog | null, tzOffsetMin: number): string => {
+  if (!log || log.entries.length === 0) return '';
+  return [
+    '',
+    '',
+    '【这之后你又主动发过（对方还没回）】',
+    ...log.entries.map((e) => `- ${formatLocalTime(e.at, tzOffsetMin)}　${e.text}`),
+    '（这几条是你自己发出去的，对方一直没回应。往下接着说，别把已经说过的话换个说法再讲一遍，也别假装这些没发生过。）',
+  ].join('\n');
+};
+
 const fillSlot = (text: string, slot: string, value: string) => text.split(slot).join(value);
 
 /**
  * 用 nowMs 时刻的时间信息填掉模板里的全部槽位，得到最终可发给 LLM 的 prompt。
  * taskInstruction 由排程时写进任务 metadata（见 activeMsgClient.buildTaskInstruction），
  * worker 读不到就先抛错，所以这里按必填收。
+ *
+ * selfLog 是「这份上下文之后角色自己发过什么」，由调用方先用 selfLogMatchesPack 对齐过；
+ * 不传（或没有条目）时那个槽位被抹平，输出与没有这回事时一致。
  */
 export const renderFirePack = (
   pack: AmsgFirePack,
   nowMs: number,
   taskInstruction: string,
+  selfLog?: AmsgSelfLog | null,
 ): string => {
   const currentTime = formatLocalTime(nowMs, pack.tzOffsetMin);
   const diffMinutes = pack.lastUserMessageAt == null
@@ -221,6 +343,7 @@ export const renderFirePack = (
   out = fillSlot(out, AMSG_SLOT_TIME_SINCE_USER, timeSinceUser);
   out = fillSlot(out, AMSG_SLOT_AWAY_HINT, awayHint);
   out = fillSlot(out, AMSG_SLOT_TASK_INSTRUCTION, taskInstruction);
+  out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(selfLog ?? null, pack.tzOffsetMin));
   return out;
 };
 
@@ -234,7 +357,10 @@ export const parseFirePack = (value: string): AmsgFirePack | null => {
       typeof parsed.template === 'string' && parsed.template.length > 0 &&
       (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === 'number') &&
       typeof parsed.tzOffsetMin === 'number' &&
-      typeof parsed.targetName === 'string'
+      typeof parsed.targetName === 'string' &&
+      // 老客户端打的包没有 builtAt；有就得是数字，坏成别的类型时按整份不可信处理，
+      // 免得拿一个 NaN/字符串去跟 self_log 对齐、对出个说不清的结果。
+      (parsed.builtAt === undefined || typeof parsed.builtAt === 'number')
     ) {
       return parsed as AmsgFirePack;
     }

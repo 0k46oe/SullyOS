@@ -24,6 +24,7 @@ import {
   AMSG_SLOT_CURRENT_TIME,
   AMSG_SLOT_TASK_INSTRUCTION,
   AMSG_LAST_SKIP_KEY,
+  AMSG_SLOT_SELF_LOG,
   AMSG_SLOT_TIME_SINCE_USER,
   AmsgFirePack,
   type AmsgLastSkip,
@@ -271,7 +272,9 @@ const buildFirePack = async (
     systemPrompt,
     '',
     '【最近对话上下文】',
-    recentTranscript || '（暂时没有最近聊天记录）',
+    // 槽位直接黏在最后一行后面（不单独占一行）：worker 到点没有可写的自述时填空串，
+    // 输出跟没这个槽位一模一样；有内容时那段自带前导空行，见 renderSelfLogBlock。
+    `${recentTranscript || '（暂时没有最近聊天记录）'}${AMSG_SLOT_SELF_LOG}`,
     '',
     '【当前时刻补充】',
     `当前本地时间：${AMSG_SLOT_CURRENT_TIME}`,
@@ -293,6 +296,9 @@ const buildFirePack = async (
     lastUserMessageAt,
     tzOffsetMin: new Date().getTimezoneOffset(),
     targetName: userProfile.name || '对方',
+    // 这份模板的身份戳：worker 用它判断云端那份「角色自己发过什么」还配不配得上
+    // 当前上下文（见 amsgFirePack 的 selfLogMatchesPack）。每打一次包都是新值。
+    builtAt: Date.now(),
   };
 };
 

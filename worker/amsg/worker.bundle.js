@@ -3013,6 +3013,7 @@ function stripReasoningTags2(content) {
 var AMSG_STATE_NAMESPACE_PREFIX = "amsg:char:";
 var amsgStateNamespace = (charId) => `${AMSG_STATE_NAMESPACE_PREFIX}${charId}`;
 var AMSG_FIRE_PACK_KEY = "fire_pack";
+var AMSG_SELF_LOG_KEY = "self_log";
 var amsgXhsSessionKey = (clientTaskId) => `xhs_session:${clientTaskId}`;
 var GZIP_VALUE_PREFIX = "gz1:";
 var base64ToBytes2 = (base64) => {
@@ -3036,6 +3037,7 @@ var AMSG_SLOT_CURRENT_TIME = "{{AMSG_CURRENT_TIME}}";
 var AMSG_SLOT_TIME_SINCE_USER = "{{AMSG_TIME_SINCE_USER}}";
 var AMSG_SLOT_AWAY_HINT = "{{AMSG_AWAY_HINT}}";
 var AMSG_SLOT_TASK_INSTRUCTION = "{{AMSG_TASK_INSTRUCTION}}";
+var AMSG_SLOT_SELF_LOG = "{{AMSG_SELF_LOG}}";
 var formatLocalTime = (nowMs, tzOffsetMin) => {
   const local = new Date(nowMs - tzOffsetMin * 6e4);
   return local.toISOString().slice(0, 16).replace("T", " ");
@@ -3061,8 +3063,45 @@ var buildAwayHint = (targetName, timeSinceUser) => {
   const target = targetName || "\u5BF9\u65B9";
   return timeSinceUser.includes("\u6CA1\u6709\u65B0\u7684\u804A\u5929\u8BB0\u5F55") ? `${target}\u6700\u8FD1\u6CA1\u6709\u4E3B\u52A8\u6765\u627E\u4F60\u8BF4\u8BDD\u3002` : `${target}${timeSinceUser.replace(/^距离用户/, "\u5DF2\u7ECF")}`;
 };
+var SELF_LOG_MAX_ENTRIES = 8;
+var SELF_LOG_TEXT_MAX = 200;
+var createSelfLog = (basePackAt) => ({
+  v: 1,
+  basePackAt,
+  entries: []
+});
+var appendSelfLogEntry = (log, entry) => {
+  const text = entry.text.trim().slice(0, SELF_LOG_TEXT_MAX);
+  if (!text) return log;
+  const kept = log.entries.filter((e) => e.id !== entry.id);
+  return { ...log, entries: [...kept, { ...entry, text }].slice(-SELF_LOG_MAX_ENTRIES) };
+};
+var selfLogMatchesPack = (log, pack) => !!log && typeof pack.builtAt === "number" && log.basePackAt === pack.builtAt;
+var parseSelfLog = (value) => {
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === "object" && parsed.v === 1 && typeof parsed.basePackAt === "number" && Array.isArray(parsed.entries) && parsed.entries.every((e) => {
+      const entry = e;
+      return !!entry && typeof entry.id === "string" && typeof entry.at === "number" && typeof entry.text === "string";
+    })) {
+      return parsed;
+    }
+  } catch {
+  }
+  return null;
+};
+var renderSelfLogBlock = (log, tzOffsetMin) => {
+  if (!log || log.entries.length === 0) return "";
+  return [
+    "",
+    "",
+    "\u3010\u8FD9\u4E4B\u540E\u4F60\u53C8\u4E3B\u52A8\u53D1\u8FC7\uFF08\u5BF9\u65B9\u8FD8\u6CA1\u56DE\uFF09\u3011",
+    ...log.entries.map((e) => `- ${formatLocalTime(e.at, tzOffsetMin)}\u3000${e.text}`),
+    "\uFF08\u8FD9\u51E0\u6761\u662F\u4F60\u81EA\u5DF1\u53D1\u51FA\u53BB\u7684\uFF0C\u5BF9\u65B9\u4E00\u76F4\u6CA1\u56DE\u5E94\u3002\u5F80\u4E0B\u63A5\u7740\u8BF4\uFF0C\u522B\u628A\u5DF2\u7ECF\u8BF4\u8FC7\u7684\u8BDD\u6362\u4E2A\u8BF4\u6CD5\u518D\u8BB2\u4E00\u904D\uFF0C\u4E5F\u522B\u5047\u88C5\u8FD9\u4E9B\u6CA1\u53D1\u751F\u8FC7\u3002\uFF09"
+  ].join("\n");
+};
 var fillSlot = (text, slot, value) => text.split(slot).join(value);
-var renderFirePack = (pack, nowMs, taskInstruction) => {
+var renderFirePack = (pack, nowMs, taskInstruction, selfLog) => {
   const currentTime = formatLocalTime(nowMs, pack.tzOffsetMin);
   const diffMinutes = pack.lastUserMessageAt == null ? null : Math.max(0, Math.floor((nowMs - pack.lastUserMessageAt) / 6e4));
   const timeSinceUser = formatTimeSinceUser(diffMinutes);
@@ -3072,12 +3111,15 @@ var renderFirePack = (pack, nowMs, taskInstruction) => {
   out = fillSlot(out, AMSG_SLOT_TIME_SINCE_USER, timeSinceUser);
   out = fillSlot(out, AMSG_SLOT_AWAY_HINT, awayHint);
   out = fillSlot(out, AMSG_SLOT_TASK_INSTRUCTION, taskInstruction);
+  out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(selfLog ?? null, pack.tzOffsetMin));
   return out;
 };
 var parseFirePack = (value) => {
   try {
     const parsed = JSON.parse(value);
-    if (parsed && typeof parsed === "object" && parsed.v === 2 && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && typeof parsed.tzOffsetMin === "number" && typeof parsed.targetName === "string") {
+    if (parsed && typeof parsed === "object" && parsed.v === 2 && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && typeof parsed.tzOffsetMin === "number" && typeof parsed.targetName === "string" && // 老客户端打的包没有 builtAt；有就得是数字，坏成别的类型时按整份不可信处理，
+    // 免得拿一个 NaN/字符串去跟 self_log 对齐、对出个说不清的结果。
+    (parsed.builtAt === void 0 || typeof parsed.builtAt === "number")) {
       return parsed;
     }
   } catch {
@@ -6211,6 +6253,24 @@ var recordSkip = async (ctx, charId, reason, occurrenceMs) => {
     console.warn("[amsg:expire-skip] \u8DF3\u8FC7\u539F\u56E0\u5199\u5165\u5931\u8D25\uFF08\u95F8\u7167\u5E38\u751F\u6548\uFF0C\u53EA\u662F\u9762\u677F\u5C11\u4E00\u53E5\u8BF4\u660E\uFF09", error);
   }
 };
+var recordSelfLog = async (ctx, stash, charId, clientTaskId, pushPayloads) => {
+  if (!stash.selfLog || !charId || typeof ctx.writeState !== "function") return;
+  const text = pushPayloads.map((p) => typeof p.message === "string" ? p.message : "").filter((message) => message.trim()).join("\n");
+  const next = appendSelfLogEntry(stash.selfLog, {
+    id: `${clientTaskId || "task"}@${stash.occurrenceMs}`,
+    at: stash.occurrenceMs,
+    text
+  });
+  if (next === stash.selfLog) return;
+  stash.selfLog = next;
+  try {
+    await ctx.writeState(amsgStateNamespace(charId), [
+      { key: AMSG_SELF_LOG_KEY, value: JSON.stringify(next) }
+    ]);
+  } catch (error) {
+    console.warn("[amsg:self-log] \u5199\u5165\u5931\u8D25\uFF08\u8FD9\u6B21\u7167\u5E38\u53D1\u9001\uFF0C\u4F46\u4E0B\u4E00\u6B21\u5230\u70B9\u89D2\u8272\u4E0D\u4F1A\u77E5\u9053\u8BF4\u8FC7\u8FD9\u53E5\uFF09", error);
+  }
+};
 var MCP_CALL_TIMEOUT_MS = 25e3;
 var MCP_TOTAL_BUDGET_MS = 12e4;
 var runMcpFireTool = async (stash, name, args) => {
@@ -6319,6 +6379,8 @@ var amsgHooks = {
     const mcpServers = filterMcpServersForChar(toolConfig.mcpServers, charId);
     const mcpResolve = mcpServers.length ? buildMcpNameMap(mcpServers, { maxNameLen: MCP_FIRE_NAME_BUDGET }) : null;
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
+    const storedSelfLog = parseSelfLog(charRows.find((r) => r.key === AMSG_SELF_LOG_KEY)?.value ?? "");
+    const selfLog = selfLogMatchesPack(storedSelfLog, pack) ? storedSelfLog : typeof pack.builtAt === "number" ? createSelfLog(pack.builtAt) : null;
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
     ctx.scratch.fire = {
       session: createFireSessionState(),
@@ -6326,11 +6388,12 @@ var amsgHooks = {
       proxyWorkerUrl,
       xhsCookie,
       occurrenceMs,
+      selfLog,
       mcpResolve,
       mcpSessions: /* @__PURE__ */ new Map(),
       mcpSpentMs: 0
     };
-    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction) + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? "native" : "text" }) : "");
+    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, selfLog) + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? "native" : "text" }) : "");
     return {
       messages: [{ role: "user", content: prompt }],
       // amsg-server 带 agentic-fire-tools feature 的版本起透传给每轮 LLM 请求；
@@ -6392,6 +6455,7 @@ var amsgHooks = {
     if (decision.decision === "finish") {
       const clientTaskId = typeof ctx.metadata?.amsgClientTaskId === "string" ? ctx.metadata.amsgClientTaskId : "";
       const charId = typeof ctx.metadata?.charId === "string" ? ctx.metadata.charId : "";
+      await recordSelfLog(ctx, stash, charId, clientTaskId, decision.pushPayloads);
       if (clientTaskId && charId) {
         const budgeted = [];
         for (const payload of decision.pushPayloads) {

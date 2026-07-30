@@ -11,11 +11,14 @@ import { MAX_PUSH_PAYLOAD_BYTES } from '@rei-standard/amsg-server/cloudflare';
 import {
   AMSG_FIRE_PACK_KEY,
   AMSG_LAST_SKIP_KEY,
+  AMSG_SELF_LOG_KEY,
   AMSG_SLOT_CURRENT_TIME,
+  AMSG_SLOT_SELF_LOG,
   AMSG_SLOT_TASK_INSTRUCTION,
   amsgStateNamespace,
   amsgXhsSessionKey,
   packStateValue,
+  parseSelfLog,
 } from '../../../utils/amsgFirePack';
 import { AMSG_CHAT_PRESENCE_KEY } from '../../../utils/amsgChatPresence';
 import { AMSG_TOOL_CONFIG_KEY, AMSG_TOOL_PACK_KEY } from '../../../utils/amsgToolPack';
@@ -716,5 +719,194 @@ describe('runMcpFireTool', () => {
     nowSpy.mockRestore();
 
     expect(stash.mcpSpentMs).toBe(700);
+  });
+});
+
+// 回归守卫：主动消息的多轮连续性。
+//
+// fire_pack 的【最近对话上下文】停在「用户最后一次聊天」那一刻，用户离线期间不会刷新。
+// 没有这条回写链的话，连着触发两次，角色第二次读到的上下文与第一次逐字一样——它不知道
+// 自己刚说过什么，只会把同一句话换个说法再发一遍，而且全程不报错，静默退化成单轮。
+// 下面这组用例是端到端的：真的跑两次 fire，第二次的 prompt 里必须出现第一次发的正文。
+describe('self_log — 角色自述回写', () => {
+  const CLIENT_TASK_ID = 'client-task-1';
+  const PACK_BUILT_AT = Date.parse('2026-07-25T09:00:00.000Z');
+
+  /** 带自述槽位的 fire_pack（当前客户端打的包长这样）。 */
+  const slottedFirePack = (builtAt: number | null = PACK_BUILT_AT) => JSON.stringify({
+    v: 2,
+    template: `【最近对话上下文】\n用户：先睡了${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
+    lastUserMessageAt: null,
+    tzOffsetMin: -480,
+    targetName: '楪',
+    ...(builtAt === null ? {} : { builtAt }),
+  });
+
+  /** 会真的记住写入的假 client_state：第二次 fire 靠它读回第一次写下的自述。 */
+  const makeStore = (firePack: string) => {
+    const rows = new Map<string, string>([
+      [AMSG_FIRE_PACK_KEY, firePack],
+      [AMSG_TOOL_PACK_KEY, toolPackValue],
+    ]);
+    let writeFails = false;
+    const readState = vi.fn(async (namespace: string) => (
+      namespace.startsWith('amsg:char:')
+        ? [...rows].map(([key, value]) => ({ key, value }))
+        : [{ key: AMSG_TOOL_CONFIG_KEY, value: toolConfigValue }]
+    ));
+    const writeState = vi.fn(async (
+      _namespace: string,
+      entries: Array<{ key: string; value: string | null }>,
+    ) => {
+      if (writeFails) throw new Error('write failed');
+      for (const entry of entries) {
+        if (entry.value === null) rows.delete(entry.key);
+        else rows.set(entry.key, entry.value);
+      }
+      return { upserted: entries.length, skipped: 0, deleted: 0 };
+    });
+    return {
+      rows,
+      readState,
+      writeState,
+      failWrites: () => { writeFails = true; },
+      selfLog: () => parseSelfLog(rows.get(AMSG_SELF_LOG_KEY) ?? ''),
+    };
+  };
+
+  /**
+   * 跑一次完整的 fire：组 prompt → 交一段 LLM 输出 → 走完 finish。
+   * 返回这次实际发给 LLM 的 prompt，第二次调用时用它断言「接上了没有」。
+   */
+  const runFire = async (
+    store: ReturnType<typeof makeStore>,
+    opts: { sendAt: string; llmOutput: string },
+  ) => {
+    const scratch: Record<string, unknown> = {};
+    const fireCtx = {
+      task: {
+        id: 42,
+        uuid: TASK_UUID,
+        contactName: 'Nyah',
+        recurrenceType: 'daily',
+        nextSendAt: opts.sendAt,
+        metadata: {
+          charId: CHAR_ID,
+          amsgExpirePolicy: 'force',
+          amsgTaskInstruction: '想到什么说什么',
+          amsgClientTaskId: CLIENT_TASK_ID,
+        },
+      },
+      userId: 'u1',
+      readState: store.readState,
+      writeState: store.writeState,
+      now: new Date(opts.sendAt),
+      scratch,
+    } as any;
+
+    const prompt = fired(await amsgHooks.onBeforeFire(fireCtx)).messages[0].content;
+
+    const decision = await amsgHooks.onLLMOutput({
+      sessionId: 'sess_task_42',
+      llmResponse: {},
+      llmOutputText: opts.llmOutput,
+      contactName: 'Nyah',
+      metadata: {
+        charId: CHAR_ID,
+        amsgClientTaskId: CLIENT_TASK_ID,
+        amsgMode: 'auto',
+      },
+      scratch,
+      writeState: store.writeState,
+    } as any);
+
+    return { prompt, decision: decision as any };
+  };
+
+  it('第二次触发能看见第一次发了什么（核心回归守卫）', async () => {
+    const store = makeStore(slottedFirePack());
+
+    const first = await runFire(store, {
+      sendAt: '2026-07-25T12:00:00.000Z',
+      llmOutput: '刚看到楼下那只猫又来了',
+    });
+    expect(first.decision.decision).toBe('finish');
+    expect(first.prompt, '第一次当然还没有自述').not.toContain('刚看到楼下那只猫又来了');
+
+    const second = await runFire(store, {
+      sendAt: '2026-07-25T14:00:00.000Z',
+      llmOutput: '它蹲在那儿一直没走',
+    });
+    expect(second.prompt).toContain('刚看到楼下那只猫又来了');
+    expect(second.prompt).toContain('【这之后你又主动发过（对方还没回）】');
+    // 位置：夹在对话上下文和本次任务之间，别跑到指令后面被当成新指令读。
+    expect(second.prompt.indexOf('刚看到楼下那只猫又来了'))
+      .toBeLessThan(second.prompt.indexOf('想到什么说什么'));
+
+    // 两次都记下了，第三次能一路接上去。
+    expect(store.selfLog()?.entries.map((e) => e.text))
+      .toEqual(['刚看到楼下那只猫又来了', '它蹲在那儿一直没走']);
+  });
+
+  it('多段消息合成一条记（用户那边是几条气泡，对角色是一次「我说了这些」）', async () => {
+    const store = makeStore(slottedFirePack());
+    await runFire(store, {
+      sendAt: '2026-07-25T12:00:00.000Z',
+      llmOutput: '喂\n在吗',
+    });
+    expect(store.selfLog()?.entries).toHaveLength(1);
+    expect(store.selfLog()?.entries[0].text).toBe('喂\n在吗');
+  });
+
+  it('同一次触发重跑（投递失败重试）不会记成两条', async () => {
+    const store = makeStore(slottedFirePack());
+    const sendAt = '2026-07-25T12:00:00.000Z';
+    await runFire(store, { sendAt, llmOutput: '第一次生成的话' });
+    await runFire(store, { sendAt, llmOutput: '重跑时生成的话' });
+
+    const entries = store.selfLog()?.entries ?? [];
+    expect(entries).toHaveLength(1);
+    expect(entries[0].text, '同 id 覆盖，留最后一次真正发出去的那份').toBe('重跑时生成的话');
+  });
+
+  it('客户端传了新 fire_pack → 旧自述作废，不会在 prompt 里出现两遍', async () => {
+    const store = makeStore(slottedFirePack());
+    await runFire(store, {
+      sendAt: '2026-07-25T12:00:00.000Z',
+      llmOutput: '刚看到楼下那只猫又来了',
+    });
+
+    // 用户回来聊了一轮：客户端重新打包上传，新模板的对话记录里本来就含那条主动消息。
+    store.rows.set(AMSG_FIRE_PACK_KEY, slottedFirePack(PACK_BUILT_AT + 60_000));
+
+    const next = await runFire(store, {
+      sendAt: '2026-07-25T14:00:00.000Z',
+      llmOutput: '那只猫今天还来吗',
+    });
+    expect(next.prompt).not.toContain('刚看到楼下那只猫又来了');
+    // 日志本身从空的重攒，锚点跟上新的那份包。
+    expect(store.selfLog()?.basePackAt).toBe(PACK_BUILT_AT + 60_000);
+    expect(store.selfLog()?.entries.map((e) => e.text)).toEqual(['那只猫今天还来吗']);
+  });
+
+  it('老客户端的包没有对齐锚点 → 不写自述（写了下次也会被丢掉），但照常发送', async () => {
+    const store = makeStore(slottedFirePack(null));
+    const { decision } = await runFire(store, {
+      sendAt: '2026-07-25T12:00:00.000Z',
+      llmOutput: '在干嘛呢',
+    });
+    expect(decision.decision).toBe('finish');
+    expect(store.rows.has(AMSG_SELF_LOG_KEY)).toBe(false);
+  });
+
+  it('自述写不进去不连累这次投递（消息照发，只是下次接不上）', async () => {
+    const store = makeStore(slottedFirePack());
+    store.failWrites();
+    const { decision } = await runFire(store, {
+      sendAt: '2026-07-25T12:00:00.000Z',
+      llmOutput: '在干嘛呢',
+    });
+    expect(decision.decision).toBe('finish');
+    expect(decision.pushPayloads[0].message).toBe('在干嘛呢');
   });
 });

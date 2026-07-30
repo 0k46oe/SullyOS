@@ -2,15 +2,24 @@ import { describe, it, expect } from 'vitest';
 import {
   AMSG_SLOT_AWAY_HINT,
   AMSG_SLOT_CURRENT_TIME,
+  AMSG_SLOT_SELF_LOG,
   AMSG_SLOT_TASK_INSTRUCTION,
   AMSG_SLOT_TIME_SINCE_USER,
   AmsgFirePack,
+  AmsgSelfLog,
+  SELF_LOG_MAX_ENTRIES,
+  SELF_LOG_TEXT_MAX,
+  appendSelfLogEntry,
   buildAwayHint,
+  createSelfLog,
   formatLocalTime,
   formatTimeSinceUser,
   parseFirePack,
+  parseSelfLog,
   packStateValue,
   renderFirePack,
+  renderSelfLogBlock,
+  selfLogMatchesPack,
   unpackStateValue,
 } from './amsgFirePack';
 
@@ -121,6 +130,13 @@ describe('parseFirePack', () => {
     expect(parseFirePack(JSON.stringify(valid))).toEqual(valid);
   });
 
+  it('builtAt 可以没有（老客户端打的包），有就得是数字', () => {
+    expect(parseFirePack(JSON.stringify(valid))?.builtAt).toBeUndefined();
+    expect(parseFirePack(JSON.stringify({ ...valid, builtAt: 1700000000000 }))?.builtAt)
+      .toBe(1700000000000);
+    expect(parseFirePack(JSON.stringify({ ...valid, builtAt: 'x' }))).toBeNull();
+  });
+
   it('lastUserMessageAt 数字也合法', () => {
     expect(parseFirePack(JSON.stringify({ ...valid, lastUserMessageAt: 123 }))?.lastUserMessageAt).toBe(123);
   });
@@ -131,6 +147,137 @@ describe('parseFirePack', () => {
     expect(parseFirePack(JSON.stringify({ ...valid, v: 1 }))).toBeNull();
     expect(parseFirePack(JSON.stringify({ ...valid, template: '' }))).toBeNull();
     expect(parseFirePack(JSON.stringify({ ...valid, tzOffsetMin: 'x' }))).toBeNull();
+  });
+});
+
+// 回归守卫：主动消息的多轮连续性全靠这份自述日志。它一旦失效，用户离线期间连着触发两次，
+// 角色第二次看到的上下文跟第一次逐字一样，只会把同一句话换个说法再发一遍——而且没有任何
+// 报错，静默退化成「单轮」。下面每条都对着一种具体的退化方式。
+describe('self_log', () => {
+  const packAt = 1_700_000_000_000;
+  const pack: AmsgFirePack = {
+    v: 2, template: 'x', lastUserMessageAt: null, tzOffsetMin: 0, targetName: '楪同学',
+    builtAt: packAt,
+  };
+  const entry = (id: string, text: string, at = packAt) => ({ id, at, text });
+
+  describe('appendSelfLogEntry', () => {
+    it('同 id 覆盖，fire 重跑不会把一条消息记成好几条', () => {
+      let log = createSelfLog(packAt);
+      log = appendSelfLogEntry(log, entry('t1@100', '在干嘛呢'));
+      log = appendSelfLogEntry(log, entry('t1@100', '在干嘛呢'));
+      expect(log.entries).toHaveLength(1);
+    });
+
+    it('不同触发各记一条，按追加顺序排', () => {
+      let log = createSelfLog(packAt);
+      log = appendSelfLogEntry(log, entry('t1@100', '第一条'));
+      log = appendSelfLogEntry(log, entry('t1@200', '第二条'));
+      expect(log.entries.map((e) => e.text)).toEqual(['第一条', '第二条']);
+    });
+
+    it('只留最近 SELF_LOG_MAX_ENTRIES 条，老的挤掉', () => {
+      let log = createSelfLog(packAt);
+      for (let i = 0; i < SELF_LOG_MAX_ENTRIES + 3; i += 1) {
+        log = appendSelfLogEntry(log, entry(`t1@${i}`, `第 ${i} 条`));
+      }
+      expect(log.entries).toHaveLength(SELF_LOG_MAX_ENTRIES);
+      expect(log.entries[0].text).toBe('第 3 条');
+    });
+
+    it('超长正文截断', () => {
+      const log = appendSelfLogEntry(createSelfLog(packAt), entry('t1@1', 'あ'.repeat(500)));
+      expect(log.entries[0].text).toHaveLength(SELF_LOG_TEXT_MAX);
+    });
+
+    it('空正文原样返回（调用方据此跳过一次写库）', () => {
+      const before = createSelfLog(packAt);
+      expect(appendSelfLogEntry(before, entry('t1@1', '   \n '))).toBe(before);
+    });
+  });
+
+  describe('selfLogMatchesPack', () => {
+    it('basePackAt 对得上才算数', () => {
+      expect(selfLogMatchesPack(createSelfLog(packAt), pack)).toBe(true);
+    });
+
+    it('客户端传了新模板（builtAt 变了）→ 整份作废，避免同一段话在 prompt 里出现两次', () => {
+      expect(selfLogMatchesPack(createSelfLog(packAt), { ...pack, builtAt: packAt + 1 })).toBe(false);
+    });
+
+    it('老客户端的包没有 builtAt → 对不上号，不启用', () => {
+      const { builtAt: _dropped, ...legacy } = pack;
+      expect(selfLogMatchesPack(createSelfLog(packAt), legacy)).toBe(false);
+    });
+
+    it('没有日志 → false', () => {
+      expect(selfLogMatchesPack(null, pack)).toBe(false);
+    });
+  });
+
+  describe('parseSelfLog', () => {
+    it('合法 JSON 原样返回', () => {
+      const log = appendSelfLogEntry(createSelfLog(packAt), entry('t1@1', '喂'));
+      expect(parseSelfLog(JSON.stringify(log))).toEqual(log);
+    });
+
+    it('坏形状 → null（调用方当没有、从空的重新攒）', () => {
+      expect(parseSelfLog('')).toBeNull();
+      expect(parseSelfLog('not json')).toBeNull();
+      expect(parseSelfLog(JSON.stringify({ v: 1, basePackAt: packAt }))).toBeNull();
+      expect(parseSelfLog(JSON.stringify({ v: 1, basePackAt: packAt, entries: [{ id: 'a' }] }))).toBeNull();
+    });
+  });
+
+  describe('renderFirePack 注入', () => {
+    const slotted: AmsgFirePack = {
+      ...pack,
+      template: `【最近对话上下文】\n用户：在吗${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
+    };
+
+    it('有自述时接在对话上下文后面，正文原样出现', () => {
+      let log = createSelfLog(packAt);
+      log = appendSelfLogEntry(log, entry('t1@1', '刚看到楼下那只猫又来了', Date.UTC(2026, 6, 30, 21, 30)));
+      const rendered = renderFirePack(slotted, Date.UTC(2026, 6, 30, 23, 0), '本次任务指令', log);
+
+      expect(rendered).toContain('刚看到楼下那只猫又来了');
+      expect(rendered).toContain('2026-07-30 21:30');
+      // 位置：夹在对话上下文和本次任务之间，不能跑到任务指令后面去当新指令读。
+      expect(rendered.indexOf('刚看到楼下那只猫又来了')).toBeGreaterThan(rendered.indexOf('用户：在吗'));
+      expect(rendered.indexOf('刚看到楼下那只猫又来了')).toBeLessThan(rendered.indexOf('本次任务指令'));
+      expect(rendered).not.toContain('{{');
+    });
+
+    it('没有自述时槽位被抹平，输出与没有这回事时一致', () => {
+      const now = Date.UTC(2026, 6, 30, 23, 0);
+      const plain: AmsgFirePack = {
+        ...pack,
+        template: '【最近对话上下文】\n用户：在吗\n\n【本次任务】\n' + AMSG_SLOT_TASK_INSTRUCTION,
+      };
+      expect(renderFirePack(slotted, now, '本次任务指令', createSelfLog(packAt)))
+        .toBe(renderFirePack(plain, now, '本次任务指令'));
+      expect(renderFirePack(slotted, now, '本次任务指令')).not.toContain('{{');
+    });
+
+    it('老客户端的模板没这个槽位也不报错', () => {
+      const legacy: AmsgFirePack = { ...pack, template: `头部\n${AMSG_SLOT_TASK_INSTRUCTION}` };
+      const log = appendSelfLogEntry(createSelfLog(packAt), entry('t1@1', '喂'));
+      expect(renderFirePack(legacy, Date.UTC(2026, 6, 30), '指令', log)).toBe('头部\n指令');
+    });
+  });
+
+  it('renderSelfLogBlock 空日志返回空串', () => {
+    expect(renderSelfLogBlock(null, 0)).toBe('');
+    expect(renderSelfLogBlock(createSelfLog(packAt), 0)).toBe('');
+  });
+
+  it('renderSelfLogBlock 用 pack 的时区换算，不是 UTC', () => {
+    const log: AmsgSelfLog = appendSelfLogEntry(
+      createSelfLog(packAt),
+      entry('t1@1', '睡了', Date.UTC(2026, 6, 30, 14, 0)),
+    );
+    expect(renderSelfLogBlock(log, -480)).toContain('2026-07-30 22:00');   // UTC+8
+    expect(renderSelfLogBlock(log, 0)).toContain('2026-07-30 14:00');
   });
 });
 

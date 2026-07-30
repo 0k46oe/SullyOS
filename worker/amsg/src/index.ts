@@ -29,11 +29,17 @@ import type { UserProfile } from '../../../types';
 import {
   AMSG_FIRE_PACK_KEY,
   AMSG_LAST_SKIP_KEY,
+  AMSG_SELF_LOG_KEY,
   type AmsgLastSkip,
+  type AmsgSelfLog,
   amsgStateNamespace,
   amsgXhsSessionKey,
+  appendSelfLogEntry,
+  createSelfLog,
   parseFirePack,
+  parseSelfLog,
   renderFirePack,
+  selfLogMatchesPack,
   unpackStateValue,
 } from '../../../utils/amsgFirePack';
 import { shouldExpireFire } from '../../../utils/amsg2ExpireGuard';
@@ -161,6 +167,14 @@ interface FireStash {
   xhsCookie: string;
   /** 本次触发时刻（任务行 next_send_at）；透传给每条 push 的 metadata.amsgOccurrenceMs。 */
   occurrenceMs: number;
+  /**
+   * 「角色自己发过什么」的当前版本（已跟本次 fire_pack 对齐过）。onBeforeFire 读进来注入
+   * prompt，onLLMOutput 发完在它上面追加一条写回云端。
+   *
+   * 为 null = 这次不启用回写：客户端传的 fire_pack 没有 builtAt（老版本），对不上号，
+   * 写了下次也会被丢掉。
+   */
+  selfLog: AmsgSelfLog | null;
   /** 通用 MCP：暴露名 → 服务器/工具。tool_config 里没配（或对该角色不可见）时为 null。 */
   mcpResolve: Map<string, McpResolvedToolCore> | null;
   /** 每服务器一份连接会话，单次 fire 内跨轮复用，fire 结束随 scratch 丢弃。 */
@@ -317,6 +331,48 @@ const recordSkip = async (
     ]);
   } catch (error) {
     console.warn('[amsg:expire-skip] 跳过原因写入失败（闸照常生效，只是面板少一句说明）', error);
+  }
+};
+
+/**
+ * 把这次真正发出去的正文追加进云端自述日志，供下一次触发读回。
+ *
+ * 时间戳用本次触发的名义时刻而不是「现在」：一来它跟角色当初排的时间对得上，二来重试
+ * 产生的新 fire 拿到的是同一个值，同 id 覆盖之后连时间都不会漂。
+ *
+ * best-effort：写不进去不能连累这次投递——正文都组好了，为了记一笔让整条 fire 失败重跑
+ * 是本末倒置。代价是下一次到点角色不知道自己说过这句，所以失败要吼一声。
+ */
+const recordSelfLog = async (
+  ctx: SessionCtx,
+  stash: FireStash,
+  charId: string,
+  clientTaskId: string,
+  pushPayloads: Array<Record<string, unknown>>,
+): Promise<void> => {
+  // selfLog 为 null = 客户端那份 fire_pack 没有对齐锚点（老版本），写了下次也会被丢掉。
+  if (!stash.selfLog || !charId || typeof ctx.writeState !== 'function') return;
+
+  // 多段消息在用户那边是连着的几条气泡，对角色而言是一次「我说了这些」，合成一条记。
+  const text = pushPayloads
+    .map((p) => (typeof p.message === 'string' ? p.message : ''))
+    .filter((message) => message.trim())
+    .join('\n');
+  const next = appendSelfLogEntry(stash.selfLog, {
+    id: `${clientTaskId || 'task'}@${stash.occurrenceMs}`,
+    at: stash.occurrenceMs,
+    text,
+  });
+  // 整段只有副作用标签（正文为空）时 append 原样返回——没有话可记，也就不必写一次库。
+  if (next === stash.selfLog) return;
+  stash.selfLog = next;
+
+  try {
+    await ctx.writeState(amsgStateNamespace(charId), [
+      { key: AMSG_SELF_LOG_KEY, value: JSON.stringify(next) },
+    ]);
+  } catch (error) {
+    console.warn('[amsg:self-log] 写入失败（这次照常发送，但下一次到点角色不会知道说过这句）', error);
   }
 };
 
@@ -504,6 +560,14 @@ export const amsgHooks = {
       : null;
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
 
+    // 角色上次到点自己说了什么：跟这份 fire_pack 对得上才算数，对不上（或客户端版本老、
+    // 压根没有对齐锚点）就当没有，从空的一份重新开始攒。判定与「丢弃」的理由见
+    // amsgFirePack 的 selfLogMatchesPack。
+    const storedSelfLog = parseSelfLog(charRows.find((r) => r.key === AMSG_SELF_LOG_KEY)?.value ?? '');
+    const selfLog = selfLogMatchesPack(storedSelfLog, pack)
+      ? storedSelfLog
+      : (typeof pack.builtAt === 'number' ? createSelfLog(pack.builtAt) : null);
+
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
     ctx.scratch.fire = {
       session: createFireSessionState(),
@@ -511,6 +575,7 @@ export const amsgHooks = {
       proxyWorkerUrl,
       xhsCookie,
       occurrenceMs,
+      selfLog,
       mcpResolve,
       mcpSessions: new Map(),
       mcpSpentMs: 0,
@@ -518,7 +583,7 @@ export const amsgHooks = {
 
     // fire_pack v2：「本次任务」指令随任务 metadata 走，这里填槽。
     // MCP 块拼在渲染好的 prompt 之后（同一条 user 消息）。
-    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction)
+    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, selfLog)
       + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? 'native' : 'text' }) : '');
     return {
       messages: [{ role: 'user' as const, content: prompt }],
@@ -613,6 +678,11 @@ export const amsgHooks = {
       const clientTaskId = typeof ctx.metadata?.amsgClientTaskId === 'string'
         ? ctx.metadata.amsgClientTaskId : '';
       const charId = typeof ctx.metadata?.charId === 'string' ? ctx.metadata.charId : '';
+
+      // 先记一笔「我这次说了什么」，下一次到点这份 prompt 里才接得上（见 recordSelfLog）。
+      // 放在旁路存储之前：那一步失败会让整条 fire 重跑，而这笔记录同 id 覆盖，重跑不会记重。
+      await recordSelfLog(ctx, stash, charId, clientTaskId, decision.pushPayloads);
+
       if (clientTaskId && charId) {
         const budgeted = [];
         for (const payload of decision.pushPayloads) {
