@@ -1,7 +1,7 @@
 
 import { CharacterProfile, UserProfile, DailySchedule } from '../types';
 import { normalizeUserImpression } from './impression';
-import { getFlowNarrativeKey, isScheduleFeatureOn } from './scheduleGenerator';
+import { getFlowNarrativeKey, isScheduleFeatureOn } from './scheduleFeature';
 import { resolveCharTimeZone, nowInTimeZone, tzAwarenessNote, interactionGapNote } from './timezone';
 import {
     formatWorldbookSection,
