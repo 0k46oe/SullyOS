@@ -37,7 +37,9 @@ function define(name: string, value: unknown) {
     Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
 }
 
-function installFakeDom(opts: { doNotTrack?: string | null; withUmami?: boolean } = {}) {
+function installFakeDom(
+    opts: { doNotTrack?: string | null; withUmami?: boolean; hostname?: string } = {}
+) {
     appended = [];
     tracked = [];
 
@@ -65,6 +67,8 @@ function installFakeDom(opts: { doNotTrack?: string | null; withUmami?: boolean 
     define('navigator', { doNotTrack: opts.doNotTrack ?? null });
     define('window', {
         doNotTrack: opts.doNotTrack ?? null,
+        // 默认给一个线上域名。用例想测本地开发那道早退时自己传 hostname。
+        location: { hostname: opts.hostname ?? 'sully-os-nu.vercel.app' },
         ...(opts.withUmami
             ? { umami: { track: (name?: string, data?: unknown) => { tracked.push([name, data]); } } }
             : {}),
@@ -118,7 +122,7 @@ describe('构建时门禁', () => {
 });
 
 describe('tracker 标签', () => {
-    it('属性齐全：两条 data-domains、DNT、关掉自动上报', async () => {
+    it('属性齐全：DNT、关掉自动上报', async () => {
         const a = await loadModule(true);
         a.initAnalytics();
 
@@ -129,9 +133,17 @@ describe('tracker 标签', () => {
         expect(el.attrs['data-website-id']).toBe(WEBSITE_ID);
         expect(el.attrs['data-do-not-track']).toBe('true');
         expect(el.attrs['data-auto-track']).toBe('false');
+    });
 
-        const domains = el.attrs['data-domains'].split(',');
-        expect(domains).toEqual(['qegj567-cloud.github.io', 'sully-os-nu.vercel.app']);
+    it('不挂域名白名单 —— 挂自己域名反代官方站的人也要算进来', async () => {
+        // data-domains 是 umami tracker 在浏览器里自己判的白名单：hostname 不在名单里
+        // 就直接 return，连请求都不发。挂上它等于把所有走反代的人静默丢掉。
+        // 开发机由「本地开发不进正式数据」那条单独挡，不靠这个属性顺带。
+        const a = await loadModule(true);
+        a.initAnalytics();
+
+        expect(appended).toHaveLength(1);
+        expect(appended[0].attrs['data-domains']).toBeUndefined();
     });
 
     it('不采集 URL 查询串和 hash —— 推送深链会把角色 id 挂在参数上', async () => {
@@ -203,6 +215,35 @@ describe('Do Not Track', () => {
         expect(a.isAnalyticsEnabled()).toBe(true);
         a.initAnalytics();
         expect(appended).toHaveLength(0);
+    });
+});
+
+describe('本地开发不进正式数据', () => {
+    // 统计不限制域名（反代官方站的人也要算进来），所以开发机得自己挡住，
+    // 否则跑一次 build + preview 就把维护者自己的点击混进库里了。
+    const 本地地址 = ['localhost', 'app.localhost', '127.0.0.1', '::1', '[::1]', '192.168.1.7', '10.0.0.3', '172.20.0.5'];
+
+    for (const hostname of 本地地址) {
+        it(`${hostname} 上不加载脚本`, async () => {
+            installFakeDom({ hostname });
+            const a = await loadModule(true);
+            a.initAnalytics();
+            expect(appended).toHaveLength(0);
+        });
+    }
+
+    it('拿不到 hostname（file:// 打开）时也不加载', async () => {
+        installFakeDom({ hostname: '' });
+        const a = await loadModule(true);
+        a.initAnalytics();
+        expect(appended).toHaveLength(0);
+    });
+
+    it('陌生的公网域名照常统计 —— 这才是走反代的用户', async () => {
+        installFakeDom({ hostname: 'sully.someone-else.com' });
+        const a = await loadModule(true);
+        a.initAnalytics();
+        expect(appended).toHaveLength(1);
     });
 });
 

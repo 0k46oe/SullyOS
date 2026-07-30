@@ -29,12 +29,6 @@
 const SCRIPT_URL = (import.meta.env.VITE_UMAMI_SCRIPT_URL || '').trim();
 const WEBSITE_ID = (import.meta.env.VITE_UMAMI_WEBSITE_ID || '').trim();
 
-/**
- * 只在这两个官方域名上统计。umami 的 data-domains 是主机名白名单，
- * 别人 fork 出去自己部署（哪怕误配了同一个 website id）也不会被计进来。
- */
-const TRACKED_DOMAINS = ['qegj567-cloud.github.io', 'sully-os-nu.vercel.app'];
-
 /** 开关状态存这里，跟 os_theme / os_api_config 一样是本地的用户偏好。 */
 const SETTINGS_KEY = 'os_analytics';
 
@@ -85,6 +79,30 @@ function hasDoNotTrack(): boolean {
   return dnt === 1 || dnt === '1' || dnt === 'yes';
 }
 
+/**
+ * 是不是维护者自己在本地跑（含局域网真机调试）。是的话不统计。
+ *
+ * 统计不限制域名：有人因为网络原因挂自己的域名反代官方站，那也是真实用户，
+ * 得算进来。域名这一层唯一要挡的就是开发机自己——不然跑一次 build + preview，
+ * 自己点的每一下都会混进正式数据里。
+ *
+ * 拿不到 hostname（file:// 打开之类）时按本地算，宁可少发不可错发。
+ */
+function isLocalHostname(): boolean {
+  const host = (typeof window !== 'undefined' && window.location?.hostname) || '';
+  if (!host) return true;
+  return (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host === '::1' ||
+    host === '[::1]' ||
+    /^127\./.test(host) ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+  );
+}
+
 // ===== 加载 =====
 
 let loadAttempted = false;
@@ -96,6 +114,7 @@ let loadAttempted = false;
  *   - 构建时没配环境变量（自部署实例）
  *   - 用户在设置里关掉了
  *   - 浏览器开了 DNT
+ *   - 本地开发 / 局域网真机调试
  */
 export function initAnalytics(): void {
   if (loadAttempted) return;
@@ -103,13 +122,16 @@ export function initAnalytics(): void {
   if (!isAnalyticsConfigured()) return;
   if (!isAnalyticsEnabled()) return;
   if (hasDoNotTrack()) return;
+  if (isLocalHostname()) return;
   loadAttempted = true;
 
   const script = document.createElement('script');
   script.src = SCRIPT_URL;
   script.defer = true;
   script.setAttribute('data-website-id', WEBSITE_ID);
-  script.setAttribute('data-domains', TRACKED_DOMAINS.join(','));
+  // 这里刻意不挂 data-domains（umami 的主机名白名单）：挂了的话，挂自己域名
+  // 反代官方站的人在浏览器里就被 tracker 挡掉了，一条数据都不会有。开发机
+  // 由上面的 isLocalHostname 单独挡。
   // 上面已经自己挡过一次 DNT 了，这里再挂一道：脚本自己也认这个属性，
   // 万一以后加载路径改了，这层不会跟着一起失效。
   script.setAttribute('data-do-not-track', 'true');
