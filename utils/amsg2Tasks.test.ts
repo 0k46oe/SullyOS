@@ -5,6 +5,7 @@ import {
   REPLACE_CANCEL_FAILED_NOTE,
   applyRemoteTaskDelta,
   applyScheduledTask,
+  buildFireTaskListBlock,
   currentOccurrenceMs,
   describeTaskProgress,
   findTaskByShortId,
@@ -312,5 +313,74 @@ describe('pruneFiredTasks', () => {
       const kept = pruneFiredTasks([t], remote, now).length === 1;
       expect(kept).toBe(describeTaskProgress(t, remote, now) !== '已触发');
     }
+  });
+});
+
+// 回归守卫：fire 时刻的排程清单。平时聊天角色每轮都看得到自己挂着什么，到点生成时
+// 以前是瞎的——于是它会把同一件事再排一遍，或者说「等下再告诉你 X」而 X 早就排好了。
+// 这一块跟聊天那份说同一套话，但有三处只属于 fire：时区换算、摘掉正在发的那条、不带作废回执。
+describe('buildFireTaskListBlock', () => {
+  const NOW = Date.UTC(2026, 6, 30, 12, 0);
+  const fireTask = (over: Partial<ActiveMsg2TaskRecord> = {}): ActiveMsg2TaskRecord => ({
+    taskUuid: 'aaaaaaaa-1111-4111-8111-111111111111',
+    clientTaskId: 'client-1',
+    mode: 'auto',
+    firstSendTime: new Date(NOW + 3600_000).toISOString(),
+    recurrenceType: 'none',
+    expirePolicy: 'expire',
+    source: 'user',
+    status: 'scheduled',
+    createdAt: NOW,
+    ...over,
+  });
+
+  it('列出待触发任务，时间按 tzOffsetMin 换算（worker 跑在 UTC，不能用运行时本地时区）', () => {
+    const block = buildFireTaskListBlock([fireTask()], { nowMs: NOW, tzOffsetMin: -480 });
+    expect(block).toContain('2026-07-30 21:00');            // UTC 13:00 → UTC+8 21:00
+    expect(buildFireTaskListBlock([fireTask()], { nowMs: NOW, tzOffsetMin: 0 }))
+      .toContain('2026-07-30 13:00');
+  });
+
+  it('摘掉正在发的那一条——列进去角色会以为还得再排一次', () => {
+    const firing = fireTask({ clientTaskId: 'client-firing' });
+    const other = fireTask({
+      taskUuid: 'bbbbbbbb-2222-4222-8222-222222222222',
+      clientTaskId: 'client-other',
+    });
+    const block = buildFireTaskListBlock([firing, other], {
+      nowMs: NOW, tzOffsetMin: 0, excludeClientTaskId: 'client-firing',
+    });
+    expect(block).toContain(shortTaskId(other.taskUuid));
+    expect(block).not.toContain(shortTaskId(firing.taskUuid));
+  });
+
+  it('过点的一次性任务不列（isPendingTask 同一把尺）', () => {
+    const past = fireTask({ firstSendTime: new Date(NOW - 86_400_000).toISOString() });
+    expect(buildFireTaskListBlock([past], { nowMs: NOW, tzOffsetMin: 0 })).toBe('');
+  });
+
+  it('循环任务写「下一次」的时间，不是好几天前的首次', () => {
+    const daily = fireTask({
+      firstSendTime: new Date(Date.UTC(2026, 6, 20, 13, 0)).toISOString(),
+      recurrenceType: 'daily',
+    });
+    const block = buildFireTaskListBlock([daily], { nowMs: NOW, tzOffsetMin: 0 });
+    expect(block).toContain('2026-07-30 13:00');
+    expect(block).not.toContain('2026-07-20');
+  });
+
+  it('没有可列的 → 空串（槽位被抹平）', () => {
+    expect(buildFireTaskListBlock([], { nowMs: NOW, tzOffsetMin: 0 })).toBe('');
+    expect(buildFireTaskListBlock([fireTask()], {
+      nowMs: NOW, tzOffsetMin: 0, excludeClientTaskId: 'client-1',
+    })).toBe('');
+  });
+
+  it('带上模式与防穿帮策略——角色要据此判断这条会不会被让路', () => {
+    const block = buildFireTaskListBlock([fireTask({ expirePolicy: 'force', mode: 'prompted', promptHint: '叫他起床' })], {
+      nowMs: NOW, tzOffsetMin: 0,
+    });
+    expect(block).toContain('强制发送');
+    expect(block).toContain('叫他起床');
   });
 });

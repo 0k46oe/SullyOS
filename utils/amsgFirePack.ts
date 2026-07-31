@@ -10,9 +10,12 @@
  *
  * 多任务共用每角色一份 fire_pack：「本次任务」指令随任务 metadata 走、到点填槽（v2 起）。
  *
- * 零依赖（worker bundle 会打进这份代码，别在这里 import 前端环境的东西）。除了压缩那几个
- * 函数用 CompressionStream / base64（浏览器和 Workers 运行时都自带），其余都是纯函数。
+ * 零运行时依赖（worker bundle 会打进这份代码，别在这里 import 前端环境的东西；类型引用
+ * 编译期擦除，不算）。除了压缩那几个函数用 CompressionStream / base64（浏览器和 Workers
+ * 运行时都自带），其余都是纯函数。
  */
+
+import type { ActiveMsg2TaskRecord } from '../types';
 
 export const AMSG_STATE_NAMESPACE_PREFIX = 'amsg:char:';
 export const amsgStateNamespace = (charId: string) => `${AMSG_STATE_NAMESPACE_PREFIX}${charId}`;
@@ -172,9 +175,17 @@ export const AMSG_SLOT_TASK_INSTRUCTION = '{{AMSG_TASK_INSTRUCTION}}';
  * 老客户端传上来的模板里没有这个槽位，填槽是纯替换，读到就当没有——不会报错。
  */
 export const AMSG_SLOT_SELF_LOG = '{{AMSG_SELF_LOG}}';
+/**
+ * 「你现在还挂着哪些排程」的落点。
+ *
+ * 平时聊天时角色每轮都能看到这份清单（见 amsg2TaskContext 的排程现状块），到点生成时
+ * 反而看不到——它因此不知道自己已经排了什么，容易把同一件事再排一遍，也没法在说话时
+ * 避开「等下再跟你说 X」而 X 其实早就排在半小时后。这个槽位把同一份信息补到 fire 这边。
+ */
+export const AMSG_SLOT_TASK_LIST = '{{AMSG_TASK_LIST}}';
 
 export interface AmsgFirePack {
-  v: 2;
+  v: 3;
   /** 完整 prompt 模板，时间性内容与本次任务指令留 AMSG_SLOT_* 槽位。 */
   template: string;
   /** 用户上次真实主动发消息的时间（epoch ms）；没有聊天记录时为 null。 */
@@ -187,11 +198,16 @@ export interface AmsgFirePack {
    * 这份模板打包的时刻（epoch ms），self_log 拿它当对齐锚点：日志里记的 basePackAt
    * 和这个值不一样，说明客户端之后又传了一份新模板，那几条正文已经在新的【最近对话上下文】
    * 里了，日志整份作废（见 selfLogMatchesPack）。
-   *
-   * 可选：老客户端传上来的 pack 没有这个字段，worker 认不出对齐关系，就不启用回写——
-   * 行为退回到「每次 fire 都是最后一次聊天的状态」，跟加这个字段之前一样。
    */
-  builtAt?: number;
+  builtAt: number;
+  /**
+   * 打包时该角色还挂着的排程（客户端清单里的原始记录）。worker 到点渲染成
+   * AMSG_SLOT_TASK_LIST 那一段，并把「正在发的这一条」摘掉。
+   *
+   * 和模板其余部分一样是「最后一次聊天时」的快照：用户中途在面板上取消了任务，这份要等
+   * 下次同步才更新。角色到点自己排下的那些不在这里，由 worker 从 self_log 补上。
+   */
+  pendingTasks: ActiveMsg2TaskRecord[];
 }
 
 /** 和 activeMsgClient 的 nowIsoLocal 同款换算：UTC now + 时区偏移 → `YYYY-MM-DD HH:mm`。 */
@@ -278,7 +294,7 @@ export const appendSelfLogEntry = (log: AmsgSelfLog, entry: AmsgSelfLogEntry): A
  * 所以那几条正文本来就在里面。再叠一份日志就是同一段话在 prompt 里出现两次。
  */
 export const selfLogMatchesPack = (log: AmsgSelfLog | null, pack: AmsgFirePack): boolean =>
-  !!log && typeof pack.builtAt === 'number' && log.basePackAt === pack.builtAt;
+  !!log && log.basePackAt === pack.builtAt;
 
 export const parseSelfLog = (value: string): AmsgSelfLog | null => {
   try {
@@ -322,14 +338,17 @@ const fillSlot = (text: string, slot: string, value: string) => text.split(slot)
  * taskInstruction 由排程时写进任务 metadata（见 activeMsgClient.buildTaskInstruction），
  * worker 读不到就先抛错，所以这里按必填收。
  *
- * selfLog 是「这份上下文之后角色自己发过什么」，由调用方先用 selfLogMatchesPack 对齐过；
- * 不传（或没有条目）时那个槽位被抹平，输出与没有这回事时一致。
+ * 另外两块由调用方现算好传进来（都不传时对应槽位被抹平，输出与没有这回事时一致）：
+ *   selfLog       这份上下文之后角色自己发过什么，先用 selfLogMatchesPack 对齐过；
+ *   taskListBlock 「你现在还挂着哪些排程」那一段，见 amsg2Tasks.buildFireTaskListBlock。
+ *   文案住在 amsg2Tasks 而不是这里：那边已经有一整套给人看的任务描述（面板、
+ *   排程现状块、list 工具共用），同一件事不该有第二套说法。
  */
 export const renderFirePack = (
   pack: AmsgFirePack,
   nowMs: number,
   taskInstruction: string,
-  selfLog?: AmsgSelfLog | null,
+  extras?: { selfLog?: AmsgSelfLog | null; taskListBlock?: string },
 ): string => {
   const currentTime = formatLocalTime(nowMs, pack.tzOffsetMin);
   const diffMinutes = pack.lastUserMessageAt == null
@@ -343,7 +362,8 @@ export const renderFirePack = (
   out = fillSlot(out, AMSG_SLOT_TIME_SINCE_USER, timeSinceUser);
   out = fillSlot(out, AMSG_SLOT_AWAY_HINT, awayHint);
   out = fillSlot(out, AMSG_SLOT_TASK_INSTRUCTION, taskInstruction);
-  out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(selfLog ?? null, pack.tzOffsetMin));
+  out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(extras?.selfLog ?? null, pack.tzOffsetMin));
+  out = fillSlot(out, AMSG_SLOT_TASK_LIST, extras?.taskListBlock ?? '');
   return out;
 };
 
@@ -353,14 +373,13 @@ export const parseFirePack = (value: string): AmsgFirePack | null => {
     const parsed = JSON.parse(value);
     if (
       parsed && typeof parsed === 'object' &&
-      parsed.v === 2 &&
+      parsed.v === 3 &&
       typeof parsed.template === 'string' && parsed.template.length > 0 &&
       (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === 'number') &&
       typeof parsed.tzOffsetMin === 'number' &&
       typeof parsed.targetName === 'string' &&
-      // 老客户端打的包没有 builtAt；有就得是数字，坏成别的类型时按整份不可信处理，
-      // 免得拿一个 NaN/字符串去跟 self_log 对齐、对出个说不清的结果。
-      (parsed.builtAt === undefined || typeof parsed.builtAt === 'number')
+      typeof parsed.builtAt === 'number' &&
+      Array.isArray(parsed.pendingTasks)
     ) {
       return parsed as AmsgFirePack;
     }

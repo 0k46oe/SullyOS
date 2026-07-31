@@ -28,12 +28,20 @@ const CHAR_ID = 'preset-nyah';
 const TASK_UUID = '3637dae1-1461-4444-a747-34e406f67acc';
 const NOW = new Date('2026-07-25T12:00:00.000Z');
 
-const firePackValue = (lastUserMessageAt: number | null = null) => JSON.stringify({
-  v: 2,
+const PACK_BUILT_AT = Date.parse('2026-07-25T09:00:00.000Z');
+
+const firePackValue = (
+  lastUserMessageAt: number | null = null,
+  extra: Record<string, unknown> = {},
+) => JSON.stringify({
+  v: 3,
   template: `现在是 ${AMSG_SLOT_CURRENT_TIME}。\n${AMSG_SLOT_TASK_INSTRUCTION}`,
   lastUserMessageAt,
   tzOffsetMin: -480,
   targetName: '楪',
+  builtAt: PACK_BUILT_AT,
+  pendingTasks: [],
+  ...extra,
 });
 
 const presenceValue = (activeAt: number) => JSON.stringify({
@@ -730,16 +738,16 @@ describe('runMcpFireTool', () => {
 // 下面这组用例是端到端的：真的跑两次 fire，第二次的 prompt 里必须出现第一次发的正文。
 describe('self_log — 角色自述回写', () => {
   const CLIENT_TASK_ID = 'client-task-1';
-  const PACK_BUILT_AT = Date.parse('2026-07-25T09:00:00.000Z');
 
   /** 带自述槽位的 fire_pack（当前客户端打的包长这样）。 */
-  const slottedFirePack = (builtAt: number | null = PACK_BUILT_AT) => JSON.stringify({
-    v: 2,
+  const slottedFirePack = (builtAt: number = PACK_BUILT_AT) => JSON.stringify({
+    v: 3,
     template: `【最近对话上下文】\n用户：先睡了${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
     lastUserMessageAt: null,
     tzOffsetMin: -480,
     targetName: '楪',
-    ...(builtAt === null ? {} : { builtAt }),
+    builtAt,
+    pendingTasks: [],
   });
 
   /** 会真的记住写入的假 client_state：第二次 fire 靠它读回第一次写下的自述。 */
@@ -889,13 +897,21 @@ describe('self_log — 角色自述回写', () => {
     expect(store.selfLog()?.entries.map((e) => e.text)).toEqual(['那只猫今天还来吗']);
   });
 
-  it('老客户端的包没有对齐锚点 → 不写自述（写了下次也会被丢掉），但照常发送', async () => {
-    const store = makeStore(slottedFirePack(null));
-    const { decision } = await runFire(store, {
+  // 对齐锚点是必填的，没有它自述日志无从判断新旧。所以缺锚点的包按「云端状态坏了」
+  // 硬失败，而不是悄悄退回单轮——静默降级的话，多轮连续性没了也没人会发现。
+  it('包里缺对齐锚点 → 抛错，不静默退回单轮', async () => {
+    const store = makeStore(JSON.stringify({
+      v: 3,
+      template: `【最近对话上下文】\n用户：先睡了${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
+      lastUserMessageAt: null,
+      tzOffsetMin: -480,
+      targetName: '楪',
+      pendingTasks: [],
+    }));
+    await expect(runFire(store, {
       sendAt: '2026-07-25T12:00:00.000Z',
       llmOutput: '在干嘛呢',
-    });
-    expect(decision.decision).toBe('finish');
+    })).rejects.toThrow('AMSG2_FIRE_STATE_MISSING');
     expect(store.rows.has(AMSG_SELF_LOG_KEY)).toBe(false);
   });
 

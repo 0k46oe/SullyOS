@@ -1,5 +1,10 @@
 /**
- * amsg2 多任务清单的读取/派生工具集（浏览器侧；worker 不需要它）。
+ * amsg2 多任务清单的读取/派生工具集。
+ *
+ * 主要在浏览器侧用；worker bundle 也会打进这份代码（fire 时要渲染「你现在还挂着哪些排程」，
+ * 见 buildFireTaskListBlock）。所以这里只能依赖纯函数叶子，别往上引前端环境的东西。
+ * 另外：worker 跑在 UTC，任何显示给角色看的时间都得按 fire_pack 的 tzOffsetMin 换算，
+ * 不能用 formatTaskTime 那种吃运行时本地时区的写法。
  *
  * 状态设计：清单只存 'scheduled'（取消即移除记录）。到点后的一次性任务不回写
  * 状态——「已发送 / 已作废」由消息历史现场推导（amsg2TaskContext），避免
@@ -16,6 +21,7 @@ import {
   CharacterProfile,
 } from '../types';
 import { FIRE_GRACE_MS, recurrencePeriodMs } from './amsg2ExpireGuard';
+import { formatLocalTime } from './amsgFirePack';
 
 export const MAX_ACTIVE_TASKS_PER_CHAR = 5;
 
@@ -158,6 +164,43 @@ export const hasActiveAiTask = (
   config: ActiveMsg2CharacterConfig | undefined,
   nowMs = Date.now(),
 ): boolean => getPendingTasks(config, nowMs).some((t) => t.mode !== 'fixed');
+
+/**
+ * fire 时刻注进 prompt 的「你现在还挂着哪些排程」。
+ *
+ * 跟平时聊天那份（amsg2TaskContext 的排程现状块）说的是同一件事、用同一套 describeXxx
+ * 文案，差别只有三处，都是 fire 这边特有的：
+ *   1. 时间按 tzOffsetMin 换算 —— worker 跑在 UTC，用运行时本地时区会整体差几个小时；
+ *   2. 摘掉正在发的这一条 —— 它此刻正在被消费，列进「进行中」会让角色以为还得再排一次；
+ *   3. 不含「已作废回执」那一段 —— 那是给对话现场用的，到点生成时提不着。
+ *
+ * 没有可列的（清单空了，或者只剩正在发的这条）→ 返回空串，槽位被抹平。
+ */
+export const buildFireTaskListBlock = (
+  tasks: ActiveMsg2TaskRecord[],
+  opts: { nowMs: number; tzOffsetMin: number; excludeClientTaskId?: string },
+): string => {
+  const listed = tasks
+    .filter((t) => isPendingTask(t, opts.nowMs))
+    .filter((t) => !opts.excludeClientTaskId || t.clientTaskId !== opts.excludeClientTaskId);
+  if (listed.length === 0) return '';
+
+  return [
+    '',
+    '',
+    '【你还挂着这些排程·仅你可见】',
+    ...listed.map((t) => {
+      const occurrenceMs = currentOccurrenceMs(t, opts.nowMs);
+      const when = formatLocalTime(
+        occurrenceMs ?? new Date(t.firstSendTime).getTime(),
+        opts.tzOffsetMin,
+      );
+      return `- [${shortTaskId(t.taskUuid)}] ${when} ${describeRecurrence(t.recurrenceType)}`
+        + ` · ${describeTaskMode(t)} · ${describeExpirePolicy(t.expirePolicy)}`;
+    }),
+    '（这几条到点会自动发出去，别在这条消息里把同一件事再排一遍，也别当它们不存在。）',
+  ].join('\n');
+};
 
 /** 替换任务时远端取消失败的标注文案（面板和工具侧共用一份，两边都会显示给人看）。 */
 export const REPLACE_CANCEL_FAILED_NOTE = '替换时远端取消失败，任务可能仍会触发，可再次取消';

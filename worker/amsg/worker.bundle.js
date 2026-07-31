@@ -3162,6 +3162,7 @@ var AMSG_SLOT_TIME_SINCE_USER = "{{AMSG_TIME_SINCE_USER}}";
 var AMSG_SLOT_AWAY_HINT = "{{AMSG_AWAY_HINT}}";
 var AMSG_SLOT_TASK_INSTRUCTION = "{{AMSG_TASK_INSTRUCTION}}";
 var AMSG_SLOT_SELF_LOG = "{{AMSG_SELF_LOG}}";
+var AMSG_SLOT_TASK_LIST = "{{AMSG_TASK_LIST}}";
 var formatLocalTime = (nowMs, tzOffsetMin) => {
   const local = new Date(nowMs - tzOffsetMin * 6e4);
   return local.toISOString().slice(0, 16).replace("T", " ");
@@ -3200,7 +3201,7 @@ var appendSelfLogEntry = (log, entry) => {
   const kept = log.entries.filter((e) => e.id !== entry.id);
   return { ...log, entries: [...kept, { ...entry, text }].slice(-SELF_LOG_MAX_ENTRIES) };
 };
-var selfLogMatchesPack = (log, pack) => !!log && typeof pack.builtAt === "number" && log.basePackAt === pack.builtAt;
+var selfLogMatchesPack = (log, pack) => !!log && log.basePackAt === pack.builtAt;
 var parseSelfLog = (value) => {
   try {
     const parsed = JSON.parse(value);
@@ -3225,7 +3226,7 @@ var renderSelfLogBlock = (log, tzOffsetMin) => {
   ].join("\n");
 };
 var fillSlot = (text, slot, value) => text.split(slot).join(value);
-var renderFirePack = (pack, nowMs, taskInstruction, selfLog) => {
+var renderFirePack = (pack, nowMs, taskInstruction, extras) => {
   const currentTime = formatLocalTime(nowMs, pack.tzOffsetMin);
   const diffMinutes = pack.lastUserMessageAt == null ? null : Math.max(0, Math.floor((nowMs - pack.lastUserMessageAt) / 6e4));
   const timeSinceUser = formatTimeSinceUser(diffMinutes);
@@ -3235,15 +3236,14 @@ var renderFirePack = (pack, nowMs, taskInstruction, selfLog) => {
   out = fillSlot(out, AMSG_SLOT_TIME_SINCE_USER, timeSinceUser);
   out = fillSlot(out, AMSG_SLOT_AWAY_HINT, awayHint);
   out = fillSlot(out, AMSG_SLOT_TASK_INSTRUCTION, taskInstruction);
-  out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(selfLog ?? null, pack.tzOffsetMin));
+  out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(extras?.selfLog ?? null, pack.tzOffsetMin));
+  out = fillSlot(out, AMSG_SLOT_TASK_LIST, extras?.taskListBlock ?? "");
   return out;
 };
 var parseFirePack = (value) => {
   try {
     const parsed = JSON.parse(value);
-    if (parsed && typeof parsed === "object" && parsed.v === 2 && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && typeof parsed.tzOffsetMin === "number" && typeof parsed.targetName === "string" && // 老客户端打的包没有 builtAt；有就得是数字，坏成别的类型时按整份不可信处理，
-    // 免得拿一个 NaN/字符串去跟 self_log 对齐、对出个说不清的结果。
-    (parsed.builtAt === void 0 || typeof parsed.builtAt === "number")) {
+    if (parsed && typeof parsed === "object" && parsed.v === 3 && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && typeof parsed.tzOffsetMin === "number" && typeof parsed.targetName === "string" && typeof parsed.builtAt === "number" && Array.isArray(parsed.pendingTasks)) {
       return parsed;
     }
   } catch {
@@ -3253,8 +3253,10 @@ var parseFirePack = (value) => {
 
 // utils/amsg2ExpireGuard.ts
 var ACTIVE_CHAT_WINDOW_MS = 10 * 6e4;
+var FIRE_GRACE_MS = 9e4;
 var DEFAULT_LOOKBACK_MS = 48 * 36e5;
 var DAY_MS = 24 * 36e5;
+var recurrencePeriodMs = (recurrenceType) => recurrenceType === "daily" ? DAY_MS : recurrenceType === "weekly" ? 7 * DAY_MS : null;
 function shouldExpireFire(input) {
   if (input.policy !== "expire") return false;
   const last = input.lastUserMessageAt;
@@ -3267,6 +3269,48 @@ function shouldExpireFire(input) {
   return last > anchor;
 }
 var DELIVERED_WINDOW_MS = 30 * 6e4;
+
+// utils/amsg2Tasks.ts
+var shortTaskId = (taskUuid) => taskUuid.slice(0, 8);
+var describeRecurrence = (recurrence) => recurrence === "daily" ? "\u6BCF\u5929" : recurrence === "weekly" ? "\u6BCF\u5468" : "\u4E00\u6B21\u6027";
+var describeExpirePolicy = (policy) => policy === "force" ? "\u5F3A\u5236\u53D1\u9001" : "\u9047\u5FD9\u4F5C\u5E9F";
+var describeTaskMode = (task) => {
+  if (task.mode === "fixed") return "\u56FA\u5B9A\u6D88\u606F";
+  if (task.mode === "prompted") return `\u63D0\u793A\u65B9\u5411\u300C${task.promptHint || ""}\u300D`;
+  return task.promptHint ? `\u81EA\u52A8\uFF08\u7075\u611F\uFF1A${task.promptHint}\uFF09` : "\u81EA\u52A8";
+};
+var isPendingTask = (task, nowMs) => {
+  if (task.status !== "scheduled") return false;
+  if (task.recurrenceType !== "none") return true;
+  const fireAt = new Date(task.firstSendTime).getTime();
+  return Number.isFinite(fireAt) && fireAt + FIRE_GRACE_MS > nowMs;
+};
+var currentOccurrenceMs = (task, nowMs) => {
+  const first = new Date(task.firstSendTime).getTime();
+  if (!Number.isFinite(first)) return null;
+  const periodMs = recurrencePeriodMs(task.recurrenceType);
+  if (periodMs === null) return first;
+  const k = Math.max(0, Math.floor((nowMs - FIRE_GRACE_MS - first) / periodMs) + 1);
+  return first + k * periodMs;
+};
+var buildFireTaskListBlock = (tasks, opts) => {
+  const listed = tasks.filter((t) => isPendingTask(t, opts.nowMs)).filter((t) => !opts.excludeClientTaskId || t.clientTaskId !== opts.excludeClientTaskId);
+  if (listed.length === 0) return "";
+  return [
+    "",
+    "",
+    "\u3010\u4F60\u8FD8\u6302\u7740\u8FD9\u4E9B\u6392\u7A0B\xB7\u4EC5\u4F60\u53EF\u89C1\u3011",
+    ...listed.map((t) => {
+      const occurrenceMs = currentOccurrenceMs(t, opts.nowMs);
+      const when = formatLocalTime(
+        occurrenceMs ?? new Date(t.firstSendTime).getTime(),
+        opts.tzOffsetMin
+      );
+      return `- [${shortTaskId(t.taskUuid)}] ${when} ${describeRecurrence(t.recurrenceType)} \xB7 ${describeTaskMode(t)} \xB7 ${describeExpirePolicy(t.expirePolicy)}`;
+    }),
+    "\uFF08\u8FD9\u51E0\u6761\u5230\u70B9\u4F1A\u81EA\u52A8\u53D1\u51FA\u53BB\uFF0C\u522B\u5728\u8FD9\u6761\u6D88\u606F\u91CC\u628A\u540C\u4E00\u4EF6\u4E8B\u518D\u6392\u4E00\u904D\uFF0C\u4E5F\u522B\u5F53\u5B83\u4EEC\u4E0D\u5B58\u5728\u3002\uFF09"
+  ].join("\n");
+};
 
 // utils/amsgChatPresence.ts
 var AMSG_CHAT_PRESENCE_KEY = "chat_presence";
@@ -6378,7 +6422,7 @@ var recordSkip = async (ctx, charId, reason, occurrenceMs) => {
   }
 };
 var recordSelfLog = async (ctx, stash, charId, clientTaskId, pushPayloads) => {
-  if (!stash.selfLog || !charId || typeof ctx.writeState !== "function") return;
+  if (!charId || typeof ctx.writeState !== "function") return;
   const text = pushPayloads.map((p) => typeof p.message === "string" ? p.message : "").filter((message) => message.trim()).join("\n");
   const next = appendSelfLogEntry(stash.selfLog, {
     id: `${clientTaskId || "task"}@${stash.occurrenceMs}`,
@@ -6504,7 +6548,7 @@ var amsgHooks = {
     const mcpResolve = mcpServers.length ? buildMcpNameMap(mcpServers, { maxNameLen: MCP_FIRE_NAME_BUDGET }) : null;
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
     const storedSelfLog = parseSelfLog(charRows.find((r) => r.key === AMSG_SELF_LOG_KEY)?.value ?? "");
-    const selfLog = selfLogMatchesPack(storedSelfLog, pack) ? storedSelfLog : typeof pack.builtAt === "number" ? createSelfLog(pack.builtAt) : null;
+    const selfLog = selfLogMatchesPack(storedSelfLog, pack) ? storedSelfLog : createSelfLog(pack.builtAt);
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
     ctx.scratch.fire = {
       session: createFireSessionState(),
@@ -6517,7 +6561,15 @@ var amsgHooks = {
       mcpSessions: /* @__PURE__ */ new Map(),
       mcpSpentMs: 0
     };
-    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, selfLog) + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? "native" : "text" }) : "");
+    const taskListBlock = buildFireTaskListBlock(pack.pendingTasks, {
+      nowMs: ctx.now.getTime(),
+      tzOffsetMin: pack.tzOffsetMin,
+      excludeClientTaskId: typeof taskMeta.amsgClientTaskId === "string" ? taskMeta.amsgClientTaskId : void 0
+    });
+    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, {
+      selfLog,
+      taskListBlock
+    }) + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? "native" : "text" }) : "");
     return {
       messages: [{ role: "user", content: prompt }],
       // amsg-server 带 agentic-fire-tools feature 的版本起透传给每轮 LLM 请求；

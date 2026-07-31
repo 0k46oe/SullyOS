@@ -43,6 +43,7 @@ import {
   unpackStateValue,
 } from '../../../utils/amsgFirePack';
 import { shouldExpireFire } from '../../../utils/amsg2ExpireGuard';
+import { buildFireTaskListBlock } from '../../../utils/amsg2Tasks';
 import {
   AMSG_CHAT_PRESENCE_KEY,
   isFreshChatPresence,
@@ -168,13 +169,10 @@ interface FireStash {
   /** 本次触发时刻（任务行 next_send_at）；透传给每条 push 的 metadata.amsgOccurrenceMs。 */
   occurrenceMs: number;
   /**
-   * 「角色自己发过什么」的当前版本（已跟本次 fire_pack 对齐过）。onBeforeFire 读进来注入
-   * prompt，onLLMOutput 发完在它上面追加一条写回云端。
-   *
-   * 为 null = 这次不启用回写：客户端传的 fire_pack 没有 builtAt（老版本），对不上号，
-   * 写了下次也会被丢掉。
+   * 「角色自己发过什么」的当前版本（已跟本次 fire_pack 对齐过；对不上就是空的一份）。
+   * onBeforeFire 读进来注入 prompt，onLLMOutput 发完在它上面追加一条写回云端。
    */
-  selfLog: AmsgSelfLog | null;
+  selfLog: AmsgSelfLog;
   /** 通用 MCP：暴露名 → 服务器/工具。tool_config 里没配（或对该角色不可见）时为 null。 */
   mcpResolve: Map<string, McpResolvedToolCore> | null;
   /** 每服务器一份连接会话，单次 fire 内跨轮复用，fire 结束随 scratch 丢弃。 */
@@ -350,8 +348,7 @@ const recordSelfLog = async (
   clientTaskId: string,
   pushPayloads: Array<Record<string, unknown>>,
 ): Promise<void> => {
-  // selfLog 为 null = 客户端那份 fire_pack 没有对齐锚点（老版本），写了下次也会被丢掉。
-  if (!stash.selfLog || !charId || typeof ctx.writeState !== 'function') return;
+  if (!charId || typeof ctx.writeState !== 'function') return;
 
   // 多段消息在用户那边是连着的几条气泡，对角色而言是一次「我说了这些」，合成一条记。
   const text = pushPayloads
@@ -560,13 +557,12 @@ export const amsgHooks = {
       : null;
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
 
-    // 角色上次到点自己说了什么：跟这份 fire_pack 对得上才算数，对不上（或客户端版本老、
-    // 压根没有对齐锚点）就当没有，从空的一份重新开始攒。判定与「丢弃」的理由见
-    // amsgFirePack 的 selfLogMatchesPack。
+    // 角色上次到点自己说了什么：跟这份 fire_pack 对得上才算数，对不上就当没有、从空的一份
+    // 重新开始攒。判定与「丢弃」的理由见 amsgFirePack 的 selfLogMatchesPack。
     const storedSelfLog = parseSelfLog(charRows.find((r) => r.key === AMSG_SELF_LOG_KEY)?.value ?? '');
     const selfLog = selfLogMatchesPack(storedSelfLog, pack)
-      ? storedSelfLog
-      : (typeof pack.builtAt === 'number' ? createSelfLog(pack.builtAt) : null);
+      ? storedSelfLog as AmsgSelfLog
+      : createSelfLog(pack.builtAt);
 
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
     ctx.scratch.fire = {
@@ -581,9 +577,21 @@ export const amsgHooks = {
       mcpSpentMs: 0,
     } satisfies FireStash;
 
-    // fire_pack v2：「本次任务」指令随任务 metadata 走，这里填槽。
+    // 「你还挂着这些排程」：清单来自打包那一刻的客户端记录，这里现算「哪些还没到点」
+    // 并摘掉正在发的这一条（它此刻正被消费，列进去角色会以为还得再排一次）。
+    const taskListBlock = buildFireTaskListBlock(pack.pendingTasks, {
+      nowMs: ctx.now.getTime(),
+      tzOffsetMin: pack.tzOffsetMin,
+      excludeClientTaskId: typeof taskMeta.amsgClientTaskId === 'string'
+        ? taskMeta.amsgClientTaskId : undefined,
+    });
+
+    // fire_pack v3：「本次任务」指令随任务 metadata 走，这里填槽。
     // MCP 块拼在渲染好的 prompt 之后（同一条 user 消息）。
-    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, selfLog)
+    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, {
+      selfLog,
+      taskListBlock,
+    })
       + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? 'native' : 'text' }) : '');
     return {
       messages: [{ role: 'user' as const, content: prompt }],

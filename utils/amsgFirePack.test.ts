@@ -83,7 +83,7 @@ describe('formatLocalTime', () => {
 
 describe('renderFirePack', () => {
   const basePack: AmsgFirePack = {
-    v: 2,
+    v: 3, builtAt: 1_700_000_000_000, pendingTasks: [],
     template: [
       `当前本地时间：${AMSG_SLOT_CURRENT_TIME}`,
       AMSG_SLOT_TIME_SINCE_USER,
@@ -123,17 +123,19 @@ describe('renderFirePack', () => {
 
 describe('parseFirePack', () => {
   const valid: AmsgFirePack = {
-    v: 2, template: 'x', lastUserMessageAt: null, tzOffsetMin: -480, targetName: 'A',
+    v: 3, template: 'x', lastUserMessageAt: null, tzOffsetMin: -480, targetName: 'A',
+    builtAt: 1_700_000_000_000, pendingTasks: [],
   };
 
   it('合法 JSON 原样返回', () => {
     expect(parseFirePack(JSON.stringify(valid))).toEqual(valid);
   });
 
-  it('builtAt 可以没有（老客户端打的包），有就得是数字', () => {
-    expect(parseFirePack(JSON.stringify(valid))?.builtAt).toBeUndefined();
-    expect(parseFirePack(JSON.stringify({ ...valid, builtAt: 1700000000000 }))?.builtAt)
-      .toBe(1700000000000);
+  it('builtAt / pendingTasks 缺一不可（self_log 对齐与排程清单都靠它们）', () => {
+    const { builtAt: _b, ...noBuiltAt } = valid;
+    const { pendingTasks: _t, ...noTasks } = valid;
+    expect(parseFirePack(JSON.stringify(noBuiltAt))).toBeNull();
+    expect(parseFirePack(JSON.stringify(noTasks))).toBeNull();
     expect(parseFirePack(JSON.stringify({ ...valid, builtAt: 'x' }))).toBeNull();
   });
 
@@ -156,8 +158,8 @@ describe('parseFirePack', () => {
 describe('self_log', () => {
   const packAt = 1_700_000_000_000;
   const pack: AmsgFirePack = {
-    v: 2, template: 'x', lastUserMessageAt: null, tzOffsetMin: 0, targetName: '楪同学',
-    builtAt: packAt,
+    v: 3, template: 'x', lastUserMessageAt: null, tzOffsetMin: 0, targetName: '楪同学',
+    builtAt: packAt, pendingTasks: [],
   };
   const entry = (id: string, text: string, at = packAt) => ({ id, at, text });
 
@@ -205,11 +207,6 @@ describe('self_log', () => {
       expect(selfLogMatchesPack(createSelfLog(packAt), { ...pack, builtAt: packAt + 1 })).toBe(false);
     });
 
-    it('老客户端的包没有 builtAt → 对不上号，不启用', () => {
-      const { builtAt: _dropped, ...legacy } = pack;
-      expect(selfLogMatchesPack(createSelfLog(packAt), legacy)).toBe(false);
-    });
-
     it('没有日志 → false', () => {
       expect(selfLogMatchesPack(null, pack)).toBe(false);
     });
@@ -238,7 +235,7 @@ describe('self_log', () => {
     it('有自述时接在对话上下文后面，正文原样出现', () => {
       let log = createSelfLog(packAt);
       log = appendSelfLogEntry(log, entry('t1@1', '刚看到楼下那只猫又来了', Date.UTC(2026, 6, 30, 21, 30)));
-      const rendered = renderFirePack(slotted, Date.UTC(2026, 6, 30, 23, 0), '本次任务指令', log);
+      const rendered = renderFirePack(slotted, Date.UTC(2026, 6, 30, 23, 0), '本次任务指令', { selfLog: log });
 
       expect(rendered).toContain('刚看到楼下那只猫又来了');
       expect(rendered).toContain('2026-07-30 21:30');
@@ -254,15 +251,15 @@ describe('self_log', () => {
         ...pack,
         template: '【最近对话上下文】\n用户：在吗\n\n【本次任务】\n' + AMSG_SLOT_TASK_INSTRUCTION,
       };
-      expect(renderFirePack(slotted, now, '本次任务指令', createSelfLog(packAt)))
+      expect(renderFirePack(slotted, now, '本次任务指令', { selfLog: createSelfLog(packAt) }))
         .toBe(renderFirePack(plain, now, '本次任务指令'));
       expect(renderFirePack(slotted, now, '本次任务指令')).not.toContain('{{');
     });
 
-    it('老客户端的模板没这个槽位也不报错', () => {
+    it('模板里没有这个槽位时不报错（只是那段无处可去）', () => {
       const legacy: AmsgFirePack = { ...pack, template: `头部\n${AMSG_SLOT_TASK_INSTRUCTION}` };
       const log = appendSelfLogEntry(createSelfLog(packAt), entry('t1@1', '喂'));
-      expect(renderFirePack(legacy, Date.UTC(2026, 6, 30), '指令', log)).toBe('头部\n指令');
+      expect(renderFirePack(legacy, Date.UTC(2026, 6, 30), '指令', { selfLog: log })).toBe('头部\n指令');
     });
   });
 
@@ -281,11 +278,12 @@ describe('self_log', () => {
   });
 });
 
-describe('fire_pack v2 任务指令槽', () => {
+describe('fire_pack 任务指令槽', () => {
   const pack: AmsgFirePack = {
-    v: 2,
+    v: 3,
     template: `头部\n${AMSG_SLOT_TASK_INSTRUCTION}\n尾部 ${AMSG_SLOT_CURRENT_TIME}`,
     lastUserMessageAt: null, tzOffsetMin: -480, targetName: '楪同学',
+    builtAt: 1_700_000_000_000, pendingTasks: [],
   };
 
   it('renderFirePack 用传入的任务指令填槽', () => {
@@ -303,11 +301,13 @@ describe('fire_pack v2 任务指令槽', () => {
 describe('client_state 值压缩', () => {
   // fire_pack 有几万字，随手编一小段压不出效果也测不出真问题，拿重复的中文段落凑量。
   const bigJson = JSON.stringify({
-    v: 2,
+    v: 3,
     template: '【角色系统设定】你是一个会在深夜突然想起对方的人。\n'.repeat(400),
     lastUserMessageAt: 1_700_000_000_000,
     tzOffsetMin: -480,
     targetName: '楪',
+    builtAt: 1_700_000_000_000,
+    pendingTasks: [],
   });
 
   it('压完再解回来，一个字都不差', async () => {

@@ -25,6 +25,7 @@ import {
   AMSG_SLOT_TASK_INSTRUCTION,
   AMSG_LAST_SKIP_KEY,
   AMSG_SLOT_SELF_LOG,
+  AMSG_SLOT_TASK_LIST,
   AMSG_SLOT_TIME_SINCE_USER,
   AmsgFirePack,
   type AmsgLastSkip,
@@ -278,7 +279,9 @@ const buildFirePack = async (
     '',
     '【当前时刻补充】',
     `当前本地时间：${AMSG_SLOT_CURRENT_TIME}`,
-    AMSG_SLOT_TIME_SINCE_USER,
+    // 排程清单跟在时间后面：它整段都在讲「几点会发生什么」，挨着当前时刻读才对得上。
+    // 没有待触发任务时 worker 填空串，这一行连带消失。
+    `${AMSG_SLOT_TIME_SINCE_USER}${AMSG_SLOT_TASK_LIST}`,
     '',
     legacyHint,
     '',
@@ -291,7 +294,7 @@ const buildFirePack = async (
   ].join('\n');
 
   return {
-    v: 2,
+    v: 3,
     template,
     lastUserMessageAt,
     tzOffsetMin: new Date().getTimezoneOffset(),
@@ -299,6 +302,9 @@ const buildFirePack = async (
     // 这份模板的身份戳：worker 用它判断云端那份「角色自己发过什么」还配不配得上
     // 当前上下文（见 amsgFirePack 的 selfLogMatchesPack）。每打一次包都是新值。
     builtAt: Date.now(),
+    // 到点时角色要知道自己还挂着什么，才不会把同一件事再排一遍。这里带原始记录，
+    // 渲染成人话由 worker 现场做（时间要按 tzOffsetMin 换算，且得摘掉正在发的那条）。
+    pendingTasks: getPendingTasks(char.activeMsg2Config, Date.now()),
   };
 };
 
