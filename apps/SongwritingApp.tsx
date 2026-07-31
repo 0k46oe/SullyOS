@@ -886,14 +886,29 @@ const SongwritingApp: React.FC = () => {
 
         setIsCompleting(true);
         setShowPreviewModal(true);
-        setCompletionReview('正在让导师评价...');
+        setCompletionReview('正在等搭档写评语...');
 
         try {
+            await injectMemoryPalace(
+                collaborator,
+                undefined,
+                `${activeSong.title} ${activeSong.theme || ''} ${activeSong.lines.map(line => line.content).join(' ')}`.trim(),
+                userProfile.name,
+            );
+            const systemPrompt = SongPrompts.buildCompletionSystemPrompt(collaborator, userProfile);
             const prompt = SongPrompts.buildCompletionPrompt(collaborator, userProfile, activeSong);
             const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.7, max_tokens: 500 })
+                body: JSON.stringify({
+                    model: apiConfig.model,
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: prompt },
+                    ],
+                    temperature: 0.7,
+                    max_tokens: 500,
+                })
             });
 
             if (response.ok) {
@@ -2192,7 +2207,7 @@ const SongwritingApp: React.FC = () => {
                                     </div>
                                     <div className="text-left flex-1 min-w-0">
                                         <div className="font-bold text-[13px]" style={{ color: MusicC.primary }}>{c.name}</div>
-                                        <div className="text-[10px] truncate leading-snug mt-0.5" style={{ color: MusicC.muted }}>{c.description || '将作为你的音乐导师'}</div>
+                                        <div className="text-[10px] truncate leading-snug mt-0.5" style={{ color: MusicC.muted }}>{c.description || '将作为你的音乐共创搭档'}</div>
                                     </div>
                                     {active && (
                                         <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0"

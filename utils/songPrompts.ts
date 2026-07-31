@@ -705,7 +705,35 @@ ${userInput}
     },
 
     /**
-     * Build prompt for generating a completion summary.
+     * Build the system prompt for the collaborator's final note.
+     * Completion used to run as a lone user prompt containing only the
+     * character's name, which made the model fall back to a generic mentor.
+     */
+    buildCompletionSystemPrompt: (
+        char: CharacterProfile,
+        user: UserProfile,
+    ): string => {
+        const charContext = ContextBuilder.buildCoreContext(char, user, true);
+
+        return `${charContext}
+
+### 【当前场景：写歌工作室 · 完成作品】
+你刚刚以共创搭档的身份和${user.name}完成了一首歌，现在要当面说一段完成评语。
+
+**身份与口吻优先级**：
+- 你始终是${char.name}。完整角色设定、你和${user.name}的关系、相处方式与既有记忆，优先于“专业点评”的通用口吻
+- 这是搭档之间完成作品后的交流，不是老师批作业、评委写鉴定，也不是 AI 助手生成分析报告
+- 歌词判断要专业，但把判断消化成${char.name}自然会说的话；措辞、情绪浓度、亲疏距离和表达习惯都必须符合人设
+- 可以有角色自己的偏爱、犹豫、毒舌、克制或亲昵，但评价依据必须来自眼前这首歌
+- 除非角色原本就会这样说，否则不要使用“作为你的导师”“同学”“创作者你好”“总体而言”“继续加油”“完成度很高”等模板化评审措辞
+- 不要复述角色设定，不要解释自己如何保持人设，不要提及 system、prompt 或指令
+- 不得编造歌词本里没有的句子、共同经历或创作过程，也不要把${user.name}的作品功劳揽到自己身上
+
+请先在心里检查歌词的具体词句、结构推进、意象统一、可唱性与 Hook，再用${char.name}本人的声音给出简短评语。`;
+    },
+
+    /**
+     * Build the user task and song context for generating a completion note.
      */
     buildCompletionPrompt: (
         char: CharacterProfile,
@@ -715,20 +743,27 @@ ${userInput}
         const genreInfo = SONG_GENRES.find(g => g.id === song.genre);
         const moodInfo = SONG_MOODS.find(m => m.id === song.mood);
         const coWritingStyle = getLyricCoWritingStyle(song.lyricCoWritingStyle);
+        const recentComments = song.comments.slice(-5);
+        const collaborationContext = recentComments.length > 0
+            ? `\n\n【最近的共创交流（只用于理解这首歌的讨论过程）】\n${recentComments.map(comment => {
+                const speaker = comment.authorId === 'user' ? user.name : char.name;
+                return `- ${speaker}：${comment.content}`;
+            }).join('\n')}`
+            : '';
 
-        return `你是${char.name}，刚刚和${user.name}一起完成了一首歌。现在请以专业中文歌词编辑的标准做最终短评，同时保持${char.name}本人的说话方式。
-
+        return `【已完成的作品】
 歌名：《${song.title}》
 风格：${genreInfo?.label || song.genre} | 情绪：${moodInfo?.label || song.mood}
 共创写法：${coWritingStyle.label}
 
-${buildLyricNotebookContext(song)}
+${buildLyricNotebookContext(song)}${collaborationContext}
 
-请直接输出3-4句话，不需要 JSON：
+【现在要说的话】
+直接以${char.name}的口吻对${user.name}说3-4句话，不需要标题、项目符号或 JSON：
 1. 引用一个具体词句，指出最有辨识度的画面或 Hook；
 2. 评价结构推进、意象统一和可唱性；
 3. 若仍有一个最值得精修的问题，明确说出位置和原因；若没有，不要强行挑错；
-4. 最后把作品归还给${user.name}，不要把功劳揽到自己身上。
+4. 最后自然地回应这次共同完成作品的时刻，把作品归还给${user.name}。
 禁止只写“很有感染力、很有画面感、继续加油”这类没有依据的套话。`;
     }
 };
