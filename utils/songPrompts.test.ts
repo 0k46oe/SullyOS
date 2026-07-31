@@ -96,6 +96,54 @@ describe('song lyric prompt context', () => {
         expect(prompt).toContain('【本轮唯一任务】\n只生成第2句');
     });
 
+    it('anchors the completion note in the full character context instead of a generic mentor role', () => {
+        const buildCoreContext = vi.spyOn(ContextBuilder, 'buildCoreContext')
+            .mockReturnValue('CHARACTER CONTEXT WITH RELATIONSHIP');
+        const systemPrompt = SongPrompts.buildCompletionSystemPrompt(
+            { id: 'char-1', name: 'C' } as any,
+            { name: 'U' } as any,
+        );
+
+        expect(buildCoreContext).toHaveBeenCalledWith(
+            expect.objectContaining({ name: 'C' }),
+            expect.objectContaining({ name: 'U' }),
+            true,
+        );
+        expect(systemPrompt).toContain('CHARACTER CONTEXT WITH RELATIONSHIP');
+        expect(systemPrompt).toContain('不是老师批作业、评委写鉴定');
+        expect(systemPrompt).toContain('完整角色设定、你和U的关系、相处方式与既有记忆');
+        expect(systemPrompt).toContain('不要使用“作为你的导师”');
+    });
+
+    it('keeps the completed song and recent collaboration in the user task', () => {
+        const prompt = SongPrompts.buildCompletionPrompt(
+            { id: 'char-1', name: 'C' } as any,
+            { name: 'U' } as any,
+            makeSong({
+                lines: [{
+                    id: 'line-1',
+                    authorId: 'user',
+                    content: '雨停在旧站台',
+                    section: 'chorus',
+                    slotIndex: 0,
+                    timestamp: 2,
+                }],
+                comments: [{
+                    id: 'comment-1',
+                    authorId: 'char-1',
+                    type: 'suggestion',
+                    content: '副歌别急着把答案说完。',
+                    timestamp: 3,
+                }],
+            }),
+        );
+
+        expect(prompt).toContain('雨停在旧站台');
+        expect(prompt).toContain('C：副歌别急着把答案说完。');
+        expect(prompt).toContain('直接以C的口吻对U说3-4句话');
+        expect(prompt).not.toContain('你是C');
+    });
+
     it('exposes a useful set of distinct co-writing styles', () => {
         expect(LYRIC_CO_WRITING_STYLES).toHaveLength(25);
         expect(new Set(LYRIC_CO_WRITING_STYLES.map(style => style.id)).size).toBe(25);
