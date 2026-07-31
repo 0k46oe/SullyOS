@@ -35,6 +35,7 @@ import {
   amsgStateNamespace,
   amsgXhsSessionKey,
   appendSelfLogEntry,
+  appendSelfLogTask,
   createSelfLog,
   parseFirePack,
   parseSelfLog,
@@ -43,7 +44,15 @@ import {
   unpackStateValue,
 } from '../../../utils/amsgFirePack';
 import { shouldExpireFire } from '../../../utils/amsg2ExpireGuard';
-import { buildFireTaskListBlock } from '../../../utils/amsg2Tasks';
+import { buildFireTaskListBlock, MAX_ACTIVE_TASKS_PER_CHAR } from '../../../utils/amsg2Tasks';
+import {
+  AMSG_FIRE_SCHEDULE_TOOL,
+  buildFireScheduleBlock,
+  buildFireScheduleTool,
+  MAX_FIRE_SCHEDULES,
+  parseFireScheduleArgs,
+  buildTaskInstruction,
+} from '../../../utils/amsgFireSchedule';
 import {
   AMSG_CHAT_PRESENCE_KEY,
   isFreshChatPresence,
@@ -87,6 +96,7 @@ import {
   processLLMRound,
   type FireSessionState,
 } from './agentic';
+import type { ActiveMsg2TaskRecord } from '../../../types';
 
 interface Env {
   AMSG_MASTER_KEY: string;
@@ -135,6 +145,7 @@ interface FireCtx {
   readState: (namespace: string) => Promise<Array<{ key: string; value: string }>>;
   /** 与每轮 sessionCtx 上那个是同一套写口（防穿帮闸跳过时用它留一句原因）。 */
   writeState?: WriteState;
+  scheduleTask?: ScheduleTask;
   now: Date;
   /**
    * 单次 fire 的宿主便签（amsg-server 2.6.0-next.4+）：与同一次 fire 每轮的
@@ -149,6 +160,22 @@ type WriteState = (
   entries: Array<{ key: string; value: string | null; updatedAt?: number }>,
 ) => Promise<{ upserted: number; skipped: number; deleted: number }>;
 
+/**
+ * 在这次 fire 里再建一条定时任务（amsg-server 2.6.0-next.9+）。
+ * 凭据与投递配置由库从当前任务继承，这里只说「什么时候、说什么方向」。
+ * uuid 撞车不抛错，回 { created: false }——fire 重跑时靠确定性 uuid 天然幂等。
+ */
+type ScheduleTask = (options: {
+  firstSendTime: string;
+  recurrenceType?: string;
+  messageType?: string;
+  metadata?: Record<string, unknown>;
+  uuid?: string;
+}) => Promise<
+  | { created: true; id: number | null; uuid: string; nextSendAt: string }
+  | { created: false; reason: 'duplicate'; uuid: string }
+>;
+
 interface SessionCtx {
   sessionId: string;
   llmResponse: unknown;
@@ -158,6 +185,7 @@ interface SessionCtx {
   metadata: Record<string, unknown>;
   scratch?: Record<string, unknown>;
   writeState?: WriteState;
+  scheduleTask?: ScheduleTask;
 }
 
 /** 一次 fire 的跨轮状态：工具执行上下文 + 旁白累积。挂在 ctx.scratch.fire 上。 */
@@ -179,6 +207,14 @@ interface FireStash {
   mcpSessions: Map<string, McpSessionState>;
   /** 本次 fire 已经花在 MCP 调用上的毫秒数，见 MCP_TOTAL_BUDGET_MS。 */
   mcpSpentMs: number;
+  /** 打包那一刻客户端已知的待触发任务，用来算「还能不能再排」。 */
+  pendingTaskCount: number;
+  /** 角色本次 fire 已经排成功的任务（也是要随 push 带回客户端认领的那些）。 */
+  scheduledTasks: ActiveMsg2TaskRecord[];
+  /** 本次触发用到的角色 id / 任务归属键，排程时要写进新任务的 metadata。 */
+  charId: string;
+  /** 防穿帮闸锚点：这份 fire_pack 记的「用户最后一次开口」。 */
+  anchorMs: number;
 }
 
 const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash | undefined =>
@@ -374,6 +410,129 @@ const recordSelfLog = async (
 };
 
 /**
+ * 把角色这次给自己排下的任务挂到最后一条 push 上，客户端收到时补进本地清单。
+ *
+ * 为什么要带回去：任务是在 D1 里建的，客户端那份清单并不知道它存在——面板不显示、
+ * 用户想取消也找不到。任务本身照常触发（这正是自排的意义：不依赖客户端在线），
+ * 客户端上线认领只是把账对上。
+ *
+ * 挂在**最后一条**：与 directives 同一个位置，收侧的 isLastChunk 守卫保证只重放一次。
+ * 一条 push 都没有（整段被判空）时原样返回——那种情况下这次本来也没东西发出去。
+ */
+export const attachScheduledTasks = (
+  pushPayloads: Array<Record<string, unknown>>,
+  tasks: ActiveMsg2TaskRecord[],
+): Array<Record<string, unknown>> => {
+  if (tasks.length === 0 || pushPayloads.length === 0) return pushPayloads;
+  const lastIdx = pushPayloads.length - 1;
+  return pushPayloads.map((payload, i) => (i === lastIdx
+    ? {
+      ...payload,
+      metadata: { ...(payload.metadata as Record<string, unknown> ?? {}), amsgSelfScheduled: tasks },
+    }
+    : payload));
+};
+
+/**
+ * 执行一次「给自己排下一条」。永不抛错——参数写歪、排满了都以 ok:false 回喂让模型改口，
+ * 跟别的工具一个语义（fire 抛错 = 整条任务重跑 = 用户这次一个字都收不到）。
+ *
+ * 幂等：任务 uuid 由「本次触发 + 第几条」推出来，fire 重跑时上游认出撞车、回 created:false，
+ * 不会每重试一次多排一条。
+ */
+export const runFireScheduleTool = async (
+  stash: FireStash,
+  scheduleTask: ScheduleTask | undefined,
+  args: Record<string, unknown>,
+  nowMs: number,
+): Promise<Record<string, unknown>> => {
+  if (typeof scheduleTask !== 'function') {
+    // 老 worker 部署（amsg-server < 2.6.0-next.9）没有这个口子。设置页的版本门槛会提示
+    // 重新粘贴，这里只需要让角色别以为排上了。
+    return { ok: false, reason: 'not_supported', message: '当前后台版本还不支持给自己排后续，这次就把话说完吧。' };
+  }
+  if (stash.scheduledTasks.length >= MAX_FIRE_SCHEDULES) {
+    return {
+      ok: false,
+      reason: 'fire_limit',
+      message: `这次已经排了 ${MAX_FIRE_SCHEDULES} 条，够了，剩下的话直接写进这条消息里。`,
+    };
+  }
+  const live = stash.pendingTaskCount + stash.scheduledTasks.length;
+  if (live >= MAX_ACTIVE_TASKS_PER_CHAR) {
+    return {
+      ok: false,
+      reason: 'task_limit',
+      message: `你同时挂着的任务已经有 ${live} 个（上限 ${MAX_ACTIVE_TASKS_PER_CHAR}），这次别再排了。`,
+    };
+  }
+
+  const parsed = parseFireScheduleArgs(args, nowMs);
+  if ('ok' in parsed) return parsed as unknown as Record<string, unknown>;
+
+  // 同一次触发内第几条 —— 连同触发时刻构成确定性 uuid，重跑对得上。
+  const seq = stash.scheduledTasks.length;
+  const uuid = `amsgself-${stash.charId}-${stash.occurrenceMs}-${seq}`;
+  const clientTaskId = `${uuid}-c`;
+
+  let result;
+  try {
+    result = await scheduleTask({
+      firstSendTime: parsed.sendAt,
+      recurrenceType: parsed.recurrence,
+      messageType: parsed.mode,
+      uuid,
+      metadata: {
+        charId: stash.charId,
+        source: 'active_msg_2',
+        amsgMode: parsed.mode,
+        amsgClientTaskId: clientTaskId,
+        amsgExpirePolicy: parsed.expirePolicy,
+        // 防穿帮闸锚点：这条排下去之后，用户再开口就算「对话往前走了」。
+        amsgAnchorMs: stash.anchorMs,
+        amsgTaskInstruction: buildTaskInstruction(parsed.mode, parsed.promptHint),
+      },
+    });
+  } catch (error) {
+    // 上游的护栏（时间太近、类型不对、超上限）都抛错。转成回喂，让模型换个时间再试。
+    return {
+      ok: false,
+      reason: 'schedule_rejected',
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  if (!result.created) {
+    // 撞车 = 这一条上次重跑时已经建过了。对模型来说结果一样（那条确实排上了）。
+    return { ok: true, already_scheduled: true, send_at: parsed.sendAt };
+  }
+
+  const record: ActiveMsg2TaskRecord = {
+    taskUuid: result.uuid,
+    clientTaskId,
+    mode: parsed.mode,
+    firstSendTime: parsed.sendAt,
+    recurrenceType: parsed.recurrence,
+    ...(parsed.promptHint ? { promptHint: parsed.promptHint } : {}),
+    expirePolicy: parsed.expirePolicy,
+    anchorLastUserMsgAt: stash.anchorMs,
+    source: 'character',
+    status: 'scheduled',
+    createdAt: nowMs,
+  };
+  stash.scheduledTasks.push(record);
+  stash.selfLog = appendSelfLogTask(stash.selfLog, record);
+  console.log('[amsg:self-schedule]', { uuid: result.uuid, sendAt: parsed.sendAt, mode: parsed.mode });
+
+  return {
+    ok: true,
+    task_id: result.uuid.slice(0, 8),
+    send_at: parsed.sendAt,
+    message: '排好了。到点你会知道自己这次说了什么，接着说就行，现在不用剧透。',
+  };
+};
+
+/**
  * 单个 MCP 调用的超时。总 fire 预算 240s / 最多 5 轮，一个慢服务器不能吃光
  * 整条链（浏览器侧是 60s，那边没有轮次预算压力）。
  *
@@ -564,6 +723,14 @@ export const amsgHooks = {
       ? storedSelfLog as AmsgSelfLog
       : createSelfLog(pack.builtAt);
 
+    // 客户端记录的（打包那一刻的快照）+ 角色自己在之前几次 fire 里排下、客户端还没认领的。
+    // 后者不补上的话，角色排完一条、下次到点又看不见它，很容易把同一件事再排一遍。
+    const livePendingTasks = [...pack.pendingTasks, ...selfLog.tasks];
+
+    // 老 worker 部署（amsg-server < 2.6.0-next.9）没有这个口子。教了也排不成，
+    // 只会让角色说「我等下再找你」然后没有下文——干脆不教。
+    const canSelfSchedule = typeof ctx.scheduleTask === 'function';
+
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
     ctx.scratch.fire = {
       session: createFireSessionState(),
@@ -575,11 +742,18 @@ export const amsgHooks = {
       mcpResolve,
       mcpSessions: new Map(),
       mcpSpentMs: 0,
+      // 「还能不能再排」按客户端已知的 + 角色自己排过还没被认领的一起算，
+      // 不然角色离线期间连排几次就能绕过每角色的任务上限。
+      pendingTaskCount: livePendingTasks.length,
+      scheduledTasks: [],
+      charId,
+      anchorMs: pack.lastUserMessageAt ?? 0,
     } satisfies FireStash;
 
-    // 「你还挂着这些排程」：清单来自打包那一刻的客户端记录，这里现算「哪些还没到点」
-    // 并摘掉正在发的这一条（它此刻正被消费，列进去角色会以为还得再排一次）。
-    const taskListBlock = buildFireTaskListBlock(pack.pendingTasks, {
+    // 「你还挂着这些排程」：客户端记录的（打包那一刻的快照）+ 角色自己在之前几次 fire 里
+    // 排下、客户端还没认领的那些。后者不补上的话，角色排完一条、下次到点又看不见它，
+    // 很容易把同一件事再排一遍。
+    const taskListBlock = buildFireTaskListBlock(livePendingTasks, {
       nowMs: ctx.now.getTime(),
       tzOffsetMin: pack.tzOffsetMin,
       excludeClientTaskId: typeof taskMeta.amsgClientTaskId === 'string'
@@ -592,12 +766,19 @@ export const amsgHooks = {
       selfLog,
       taskListBlock,
     })
-      + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? 'native' : 'text' }) : '');
+      + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? 'native' : 'text' }) : '')
+      // 「给自己排下一条」的说明。跟 MCP 共用一个 native/text 判断：用户的中转拒 tools 时
+      // 两边都得改教正文协议，不然一边声明成 tools、一边教语法，模型会两种都写一遍。
+      + (canSelfSchedule ? buildFireScheduleBlock(mcpNative ? 'native' : 'text') : '');
+    const fireTools = [
+      ...(mcpResolve && mcpNative ? buildMcpFireTools(mcpResolve) : []),
+      ...(canSelfSchedule && mcpNative ? [buildFireScheduleTool()] : []),
+    ];
     return {
       messages: [{ role: 'user' as const, content: prompt }],
       // amsg-server 带 agentic-fire-tools feature 的版本起透传给每轮 LLM 请求；
       // 老 bundle 里不会走到这（tools 是随本次 bundle 一起升上去的）。
-      ...(mcpResolve && mcpNative ? { tools: buildMcpFireTools(mcpResolve) } : {}),
+      ...(fireTools.length ? { tools: fireTools } : {}),
     };
   },
 
@@ -633,8 +814,13 @@ export const amsgHooks = {
     // 「模型编的」和「名字映射建歪了」一眼能分开。
     const rawToolCalls = (ctx.llmResponse as { choices?: Array<{ message?: { tool_calls?: unknown } }> })
       ?.choices?.[0]?.message?.tool_calls;
-    const nativeMcpCalls = (Array.isArray(rawToolCalls) ? rawToolCalls : []).filter((tc): tc is ToolCall => {
+    const allNativeCalls = (Array.isArray(rawToolCalls) ? rawToolCalls : []) as ToolCall[];
+    const nativeScheduleCalls = allNativeCalls.filter(
+      (tc) => tc?.function?.name === AMSG_FIRE_SCHEDULE_TOOL,
+    );
+    const nativeMcpCalls = allNativeCalls.filter((tc): tc is ToolCall => {
       const n = (tc as ToolCall | undefined)?.function?.name;
+      if (n === AMSG_FIRE_SCHEDULE_TOOL) return false;   // 排程工具走上面那条，不算 MCP
       const hit = typeof n === 'string'
         && n.startsWith(MCP_FIRE_NAME_PREFIX)
         && !!stash.mcpResolve?.has(n.slice(MCP_FIRE_NAME_PREFIX.length));
@@ -648,7 +834,7 @@ export const amsgHooks = {
       return hit;
     });
 
-    const decision = processLLMRound(session, content, {
+    let decision = processLLMRound(session, content, {
       contactName: ctx.contactName,
       avatarUrl: ctx.avatarUrl ?? null,
       taskId,
@@ -662,7 +848,10 @@ export const amsgHooks = {
       xhsXsecTokens: stash.toolCtx.xhsCaches
         ? Array.from(stash.toolCtx.xhsCaches.xsecTokenCache.entries())
         : undefined,
-    }, stash.mcpResolve ? { resolve: stash.mcpResolve, nativeToolCalls: nativeMcpCalls } : null);
+    },
+    stash.mcpResolve ? { resolve: stash.mcpResolve, nativeToolCalls: nativeMcpCalls } : null,
+    // 传 null = 这次不认排程（老部署没这口子），正文里写了也不当调用。
+    typeof ctx.scheduleTask === 'function' ? { nativeToolCalls: nativeScheduleCalls } : null);
 
     if (decision.decision === 'tool-request') {
       console.log('[amsg:agentic]', {
@@ -690,6 +879,11 @@ export const amsgHooks = {
       // 先记一笔「我这次说了什么」，下一次到点这份 prompt 里才接得上（见 recordSelfLog）。
       // 放在旁路存储之前：那一步失败会让整条 fire 重跑，而这笔记录同 id 覆盖，重跑不会记重。
       await recordSelfLog(ctx, stash, charId, clientTaskId, decision.pushPayloads);
+
+      // 角色这次给自己排的任务，随最后一条 push 带回客户端认领——不然它们只活在 D1 里，
+      // 面板看不到、用户也没法取消。任务本身照常触发，客户端上线补进清单即可。
+      const withScheduled = attachScheduledTasks(decision.pushPayloads, stash.scheduledTasks);
+      decision = { ...decision, pushPayloads: withScheduled };
 
       if (clientTaskId && charId) {
         const budgeted = [];
@@ -757,11 +951,13 @@ export const amsgHooks = {
           continue;
         }
 
-        // 通用 MCP 走直连（worker 服务端 fetch 无 CORS），其余走内置工具；
-        // 两边失败语义一致，回喂 / 记账 / 日志共用下面这段。
-        const result = name.startsWith(MCP_FIRE_NAME_PREFIX)
-          ? await runMcpFireTool(stash, name, args)
-          : await dispatchAgenticTool(name, args, stash.toolCtx);
+        // 三条去处，失败语义一致（都回 ok:false，不抛），回喂 / 记账 / 日志共用下面这段：
+        //   排程 → 在 D1 里建下一条任务；MCP → 直连用户配的服务器；其余 → 内置数据工具。
+        const result = name === AMSG_FIRE_SCHEDULE_TOOL
+          ? await runFireScheduleTool(stash, ctx.scheduleTask, args, Date.now())
+          : name.startsWith(MCP_FIRE_NAME_PREFIX)
+            ? await runMcpFireTool(stash, name, args)
+            : await dispatchAgenticTool(name, args, stash.toolCtx);
         stash.session.toolCalls.push({ name, fingerprint });
         // 不再回裸 JSON：模型从裸 JSON 里看不出「这一步已经做完了」，提示词里但凡有一句
         // 常驻的「先去查 X」就会每轮照做。这段话跟前台说的是同一套（见 agenticToolFeedback）。

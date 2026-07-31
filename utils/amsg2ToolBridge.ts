@@ -23,6 +23,7 @@ import {
   describeTaskMode, describeTaskProgress, findTaskByShortId, formatTaskTime,
   getPendingTasks, pruneStaleTasks, resolveExpirePolicy, shortTaskId,
 } from './amsg2Tasks';
+import { EXPIRE_POLICY_DESCRIPTION } from './amsgFireSchedule';
 
 // ─── OpenAI tools schema ───
 
@@ -68,7 +69,8 @@ export const AMSG2_TOOLS: OpenAITool[] = [
           expire_policy: {
             type: 'string',
             enum: ['expire', 'force'],
-            description: '防穿帮策略。expire（默认）：到点时若对话在排程后已有新进展（或用户此刻正在聊天），任务自动作废——之后你会在排程现状里看到，由你决定自然带出、续期或放弃。force：无论用户是否正在聊天都照发，只用于用户明确要求的闹钟式定点提醒（如"8点必须叫我"）。',
+            // 与 fire 侧共用一份：同一个策略在两个入口说两套话，角色的选择会跟着入口漂。
+            description: EXPIRE_POLICY_DESCRIPTION,
           },
         },
         required: ['send_at'],

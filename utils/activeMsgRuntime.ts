@@ -1,4 +1,4 @@
-import { ActiveMsg2InboxMessage, APIConfig, RealtimeConfig, UserProfile } from '../types';
+import { ActiveMsg2InboxMessage, ActiveMsg2TaskRecord, APIConfig, RealtimeConfig, UserProfile } from '../types';
 import { DB } from './db';
 import { ChatPrompts } from './chatPrompts';
 import { ActiveMsgStore } from './activeMsgStore';
@@ -18,6 +18,7 @@ import { loadMusicHooks } from '../context/MusicContext';
 import type { XhsNote } from './realtimeContext';
 import { appendDevDebugInstantPushLog, appendDevDebugLog, isCaptureEnabled, makeDebugLogger } from './devDebug';
 import { getLastRealUserMessageAt, shouldExpireFire } from './amsg2ExpireGuard';
+import { pruneStaleTasks } from './amsg2Tasks';
 import { appendInstantTraceEntry } from './instantTraceLog';
 
 // 同一个 category，两个 tag——保持 console 里现有的 [ActiveMsg] / [amsg] 标签，
@@ -355,6 +356,11 @@ const processInboxMessageWithPostProcessing = async (message: ActiveMsg2InboxMes
     }
   }
 
+  // 角色到点自己给自己排的任务: worker 直接在 D1 建了行, 客户端这边并不知道它存在.
+  // 不认领的话任务照常触发, 但面板列不出来、用户也没法取消——账对不上. 挂在最后一条 push
+  // 上(与 directives 同位置), 这里补进本地清单.
+  await adoptSelfScheduledTasks(message);
+
   // 恢复本 session round 1 工具抓到的 XHS 笔记: instantToolRunner 落了库, 这里读回内存单例.
   // 跨 SW 唤醒 / 页面回收后内存 ref 被清空, 不恢复的话 round 2 的 [[XHS_SHARE]] / 评论 / 点赞
   // 会因 lastXhsNotesRef 为空而静默掉卡片. 持久化优先于内存 (同 session 时两者等价, 重载后只剩持久化).
@@ -495,6 +501,40 @@ async function evaluateScheduledPushExpired(message: ActiveMsg2InboxMessage): Pr
 }
 
 /** 把 worker 推给的 directives 从 inbox message metadata 里挖出来; 没有就空数组. */
+/**
+ * 把 worker 带回来的「角色自排任务」补进该角色的本地清单。
+ *
+ * 幂等: 同 uuid 已经在清单里就不重复加(同一条 push 重放、或者 fire 重跑发了两次都可能撞上).
+ * best-effort: 写不进去不影响这条消息本身——任务在远端好好的, 下次面板拉远端清单还能看见,
+ * 只是这一刻本地少一行. 为它抛错会把已经收到的消息一起搞挂.
+ */
+async function adoptSelfScheduledTasks(message: ActiveMsg2InboxMessage): Promise<void> {
+  const incoming = (message.metadata as any)?.amsgSelfScheduled;
+  if (!Array.isArray(incoming) || incoming.length === 0) return;
+  const charId = (message.metadata as any)?.charId;
+  if (typeof charId !== 'string' || !charId) return;
+
+  try {
+    const char = (await DB.getAllCharacters()).find((c) => c.id === charId);
+    if (!char) return;
+    const existing = char.activeMsg2Config?.tasks ?? [];
+    const known = new Set(existing.map((t: ActiveMsg2TaskRecord) => t.taskUuid));
+    const added = incoming.filter((t: any) => t?.taskUuid && !known.has(t.taskUuid));
+    if (added.length === 0) return;
+
+    await DB.saveCharacter({
+      ...char,
+      activeMsg2Config: {
+        ...(char.activeMsg2Config ?? { enabled: true }),
+        tasks: pruneStaleTasks([...existing, ...added], Date.now()),
+      },
+    });
+    console.log('[ActiveMsg] 认领角色自排任务', added.map((t: any) => t.taskUuid));
+  } catch (e) {
+    console.warn('[ActiveMsg] adopt self-scheduled tasks failed', charId, e);
+  }
+}
+
 function extractDirectives(message: ActiveMsg2InboxMessage): PostProcessDirective[] {
   const raw = message.metadata && (message.metadata as any).directives;
   if (!Array.isArray(raw)) return [];

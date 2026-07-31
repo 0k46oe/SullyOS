@@ -24,6 +24,10 @@ import {
   type McpResolvedToolCore,
 } from '../../../utils/mcpFireCore';
 import { sanitizeIntoSegments } from '../../../utils/sanitize';
+import {
+  AMSG_FIRE_SCHEDULE_TOOL,
+  extractFireScheduleTextCalls,
+} from '../../../utils/amsgFireSchedule';
 // type-only：编译期擦除，不会把 realtimeContext 的浏览器依赖打进 worker bundle。
 import type { XhsNote } from '../../../utils/realtimeContext';
 
@@ -148,6 +152,17 @@ export interface McpRoundInput {
 }
 
 /**
+ * 本轮的「给自己排下一条」识别输入。
+ *
+ * 和 MCP 一样两层：native tool_calls 优先（由 index.ts 按工具名过滤好传进来），
+ * 没有 native 时从正文抠 schedule_active_message({...})。两层都命中同一轮时只认 native
+ * ——同一个意图两处都写的话，跑两遍就是排出两条一模一样的任务。
+ */
+export interface ScheduleRoundInput {
+  nativeToolCalls?: ToolCall[];
+}
+
+/**
  * 处理一轮 LLM 输出（入参已 stripReasoningTags）：
  *   - 有数据标签（或本轮有 MCP 调用）→ 原始旁白（prefix）暂存，返回 tool-request；
  *   - 无数据标签 → finish：把全部中间轮旁白 + 本轮正文**拼回一份全文**统一
@@ -164,6 +179,7 @@ export function processLLMRound(
   llmOutputText: string,
   build: PushBuildInput,
   mcp?: McpRoundInput | null,
+  schedule?: ScheduleRoundInput | null,
 ): RoundDecision {
   // 通用 MCP 两层识别（与前台同构）：native tool_calls 优先；没有 native 时
   // 用前台「兼容模式」同一个解析器从正文抠 tool_name({...})。两种来源都可能
@@ -175,7 +191,24 @@ export function processLLMRound(
   const textCalls = mcp?.resolve.size
     ? extractTextFakedMcpCalls(llmOutputText, mcp.resolve, { alsoMatchPrefix: MCP_FIRE_NAME_PREFIX })
     : [];
-  const scanText = textCalls.length ? stripTextFakedMcpCalls(llmOutputText, textCalls) : llmOutputText;
+  // 排程工具同样两层。native 在场时不再扫正文：同一意图两处都写的话，跑两遍就是
+  // 排出两条一模一样的任务（而 MCP 那边重复调用只是白查一次）。
+  const nativeScheduleCalls = schedule?.nativeToolCalls ?? [];
+  const scheduleTextCalls = nativeScheduleCalls.length > 0 || !schedule
+    ? []
+    : extractFireScheduleTextCalls(llmOutputText);
+  const scheduleCalls: ToolCall[] = nativeScheduleCalls.length > 0
+    ? nativeScheduleCalls
+    : scheduleTextCalls.map((c) => ({
+        id: `sched_${state.mcpCallSeq++}`,
+        type: 'function',
+        function: { name: AMSG_FIRE_SCHEDULE_TOOL, arguments: JSON.stringify(c.args) },
+      }));
+
+  const strippedText = scheduleTextCalls.length
+    ? stripTextFakedMcpCalls(llmOutputText, scheduleTextCalls)
+    : llmOutputText;
+  const scanText = textCalls.length ? stripTextFakedMcpCalls(strippedText, textCalls) : strippedText;
   // native 在场时正文抠出来的不再入列（同一意图大概率两处都写了；库只给 assistant
   // 消息合并 decision 里的 toolCalls，native 已含语义）。两份都入列会把同一个工具跑
   // 两遍，第二次还会被判成重复调用往收尾计数上加。语法照剥。
@@ -189,8 +222,11 @@ export function processLLMRound(
         function: { name: `${MCP_FIRE_NAME_PREFIX}${c.exposedName}`, arguments: JSON.stringify(c.args) },
       }));
 
+  // MCP 与排程走同一条工具通道，executeToolCalls 按名字分流。
+  const extraToolCalls = [...mcpToolCalls, ...scheduleCalls];
+
   const result = classifyLLMOutput(scanText);
-  const isToolRound = result.kind === 'tool-request' || mcpToolCalls.length > 0;
+  const isToolRound = result.kind === 'tool-request' || extraToolCalls.length > 0;
 
   if (isToolRound) {
     // prefix = 旁白 + 可能只写了一半的副作用标签块。这里不剥不结构化——
@@ -203,7 +239,7 @@ export function processLLMRound(
     if (state.duplicateToolCalls < MAX_DUPLICATE_TOOL_CALLS) {
       return {
         decision: 'tool-request',
-        toolCalls: result.kind === 'tool-request' ? [...result.toolCalls, ...mcpToolCalls] : mcpToolCalls,
+        toolCalls: result.kind === 'tool-request' ? [...result.toolCalls, ...extraToolCalls] : extraToolCalls,
       };
     }
   }

@@ -6,7 +6,10 @@
 //      → 任务指令存在(否则抛) → 挂 scratch + 填槽返回
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
-import { amsgHooks, buildWorkerConfig, offloadOversizedPush, resolveVapidEmail, runMcpFireTool } from './index';
+import {
+  amsgHooks, attachScheduledTasks, buildWorkerConfig, offloadOversizedPush,
+  resolveVapidEmail, runFireScheduleTool, runMcpFireTool,
+} from './index';
 import { MAX_PUSH_PAYLOAD_BYTES } from '@rei-standard/amsg-server/cloudflare';
 import {
   AMSG_FIRE_PACK_KEY,
@@ -23,6 +26,8 @@ import {
 import { AMSG_CHAT_PRESENCE_KEY } from '../../../utils/amsgChatPresence';
 import { AMSG_TOOL_CONFIG_KEY, AMSG_TOOL_PACK_KEY } from '../../../utils/amsgToolPack';
 import { buildMcpNameMap, MCP_FIRE_NAME_BUDGET, type McpFireServer } from '../../../utils/mcpFireCore';
+import { MAX_FIRE_SCHEDULES } from '../../../utils/amsgFireSchedule';
+import { MAX_ACTIVE_TASKS_PER_CHAR } from '../../../utils/amsg2Tasks';
 
 const CHAR_ID = 'preset-nyah';
 const TASK_UUID = '3637dae1-1461-4444-a747-34e406f67acc';
@@ -924,5 +929,128 @@ describe('self_log — 角色自述回写', () => {
     });
     expect(decision.decision).toBe('finish');
     expect(decision.pushPayloads[0].message).toBe('在干嘛呢');
+  });
+});
+
+// 回归守卫：角色到点给自己排下一条。这是「连续自行回复」的触发端——上面那组 self_log
+// 保证第二次知道第一次说了什么，这组保证第二次会自己发生。
+describe('自排后续任务', () => {
+  const makeStash = (over: Record<string, unknown> = {}) => ({
+    session: { narrations: [], toolCalls: [], duplicateToolCalls: 0, mcpCallSeq: 0 },
+    occurrenceMs: Date.parse('2026-07-25T12:00:00.000Z'),
+    selfLog: { v: 2 as const, basePackAt: 1, entries: [], tasks: [] },
+    pendingTaskCount: 0,
+    scheduledTasks: [],
+    charId: CHAR_ID,
+    anchorMs: 1_700_000_000_000,
+    ...over,
+  }) as any;
+
+  const okSchedule = vi.fn(async (opts: any) => ({
+    created: true as const, id: 7, uuid: opts.uuid, nextSendAt: opts.firstSendTime,
+  }));
+  const NOW_MS = Date.parse('2026-07-25T12:00:00.000Z');
+  const sendAt = new Date(NOW_MS + 90 * 60_000).toISOString();
+
+  afterEach(() => { okSchedule.mockClear(); });
+
+  it('排成功：任务落到远端，也记进自述日志供下次读回', async () => {
+    const stash = makeStash();
+    const out = await runFireScheduleTool(stash, okSchedule, { send_at: sendAt }, NOW_MS);
+
+    expect(out.ok).toBe(true);
+    expect(okSchedule).toHaveBeenCalledTimes(1);
+    const opts = okSchedule.mock.calls[0][0];
+    expect(opts.firstSendTime).toBe(sendAt);
+    expect(opts.metadata.charId).toBe(CHAR_ID);
+    // 到点那条要能走满血链路：任务指令、归属键、防穿帮字段一个都不能少
+    expect(opts.metadata.amsgTaskInstruction).toBeTruthy();
+    expect(opts.metadata.amsgClientTaskId).toBeTruthy();
+    expect(opts.metadata.amsgExpirePolicy).toBe('expire');
+    expect(opts.metadata.amsgAnchorMs).toBe(1_700_000_000_000);
+
+    expect(stash.scheduledTasks).toHaveLength(1);
+    expect(stash.selfLog.tasks).toHaveLength(1);
+    expect(stash.selfLog.tasks[0].source).toBe('character');
+  });
+
+  it('uuid 由触发时刻推出来 —— fire 重跑撞车不会多排一条', async () => {
+    const first = makeStash();
+    await runFireScheduleTool(first, okSchedule, { send_at: sendAt }, NOW_MS);
+    const uuidA = okSchedule.mock.calls[0][0].uuid;
+
+    // 同一次触发重跑：新 stash（fire 重跑会重新挂 scratch），uuid 应该一模一样
+    okSchedule.mockClear();
+    const retry = makeStash();
+    const dup = vi.fn(async (opts: any) => ({ created: false as const, reason: 'duplicate' as const, uuid: opts.uuid }));
+    const out = await runFireScheduleTool(retry, dup, { send_at: sendAt }, NOW_MS);
+
+    expect(dup.mock.calls[0][0].uuid).toBe(uuidA);
+    expect(out.ok, '撞车对模型来说结果一样：那条确实排上了').toBe(true);
+    expect(out.already_scheduled).toBe(true);
+    expect(retry.scheduledTasks, '撞车不重复记账').toHaveLength(0);
+  });
+
+  it('单次 fire 排满就打回，不再调远端', async () => {
+    const stash = makeStash();
+    for (let i = 0; i < MAX_FIRE_SCHEDULES; i += 1) {
+      await runFireScheduleTool(stash, okSchedule, { send_at: new Date(NOW_MS + (90 + i) * 60_000).toISOString() }, NOW_MS);
+    }
+    okSchedule.mockClear();
+    const out = await runFireScheduleTool(stash, okSchedule, { send_at: sendAt }, NOW_MS);
+    expect(out.ok).toBe(false);
+    expect(out.reason).toBe('fire_limit');
+    expect(okSchedule).not.toHaveBeenCalled();
+  });
+
+  it('角色挂着的任务已经到上限 → 打回（离线连排也绕不过每角色上限）', async () => {
+    const stash = makeStash({ pendingTaskCount: MAX_ACTIVE_TASKS_PER_CHAR });
+    const out = await runFireScheduleTool(stash, okSchedule, { send_at: sendAt }, NOW_MS);
+    expect(out.ok).toBe(false);
+    expect(out.reason).toBe('task_limit');
+    expect(okSchedule).not.toHaveBeenCalled();
+  });
+
+  it('参数写歪 → 回喂一句能照做的话，不抛错（抛错等于整条任务重跑）', async () => {
+    const stash = makeStash();
+    const out = await runFireScheduleTool(stash, okSchedule, { send_at: '明天' }, NOW_MS);
+    expect(out.ok).toBe(false);
+    expect(String(out.message)).toContain('ISO 8601');
+    expect(okSchedule).not.toHaveBeenCalled();
+  });
+
+  it('上游护栏抛错 → 转成回喂，不连累这次投递', async () => {
+    const stash = makeStash();
+    const boom = vi.fn(async () => { throw new RangeError('firstSendTime 至少要比现在晚 60 秒'); });
+    const out = await runFireScheduleTool(stash, boom as any, { send_at: sendAt }, NOW_MS);
+    expect(out.ok).toBe(false);
+    expect(out.reason).toBe('schedule_rejected');
+    expect(String(out.message)).toContain('60 秒');
+  });
+
+  it('老部署没有这个口子 → 明确告诉角色排不了，别让它承诺了又没下文', async () => {
+    const out = await runFireScheduleTool(makeStash(), undefined, { send_at: sendAt }, NOW_MS);
+    expect(out.ok).toBe(false);
+    expect(out.reason).toBe('not_supported');
+  });
+});
+
+describe('attachScheduledTasks', () => {
+  const task = { taskUuid: 'u1', clientTaskId: 'c1' } as any;
+
+  it('挂在最后一条 push 上（与 directives 同位置，收侧只重放一次）', () => {
+    const out = attachScheduledTasks(
+      [{ message: 'a', metadata: { charId: CHAR_ID } }, { message: 'b', metadata: { charId: CHAR_ID } }],
+      [task],
+    );
+    expect((out[0].metadata as any).amsgSelfScheduled).toBeUndefined();
+    expect((out[1].metadata as any).amsgSelfScheduled).toEqual([task]);
+    expect((out[1].metadata as any).charId, '原有 metadata 不能被顶掉').toBe(CHAR_ID);
+  });
+
+  it('没排任务 / 没有 push 时原样返回', () => {
+    const payloads = [{ message: 'a' }];
+    expect(attachScheduledTasks(payloads, [])).toBe(payloads);
+    expect(attachScheduledTasks([], [task])).toEqual([]);
   });
 });

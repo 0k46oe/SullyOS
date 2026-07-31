@@ -261,10 +261,22 @@ export interface AmsgSelfLogEntry {
 }
 
 export interface AmsgSelfLog {
-  v: 1;
+  v: 2;
   /** 写这份日志时云端 fire_pack 的 builtAt，见 AmsgFirePack.builtAt。 */
   basePackAt: number;
   entries: AmsgSelfLogEntry[];
+  /**
+   * 角色在这几次 fire 里给自己排下的任务（客户端还不知道它们存在）。
+   *
+   * 用途是让下一次 fire 的排程清单完整：fire_pack.pendingTasks 是打包那一刻的快照，
+   * 之后角色自己排的都不在里面。没有这份的话，角色排完一条、下次到点又看不见它，
+   * 很容易把同一件事再排一遍。
+   *
+   * 客户端上线重放 directive 之后，这些任务会进它的本地清单，下次同步就随
+   * fire_pack.pendingTasks 一起上来——那时这份日志整份作废（basePackAt 对不上），
+   * 不会两边各记一份。
+   */
+  tasks: ActiveMsg2TaskRecord[];
 }
 
 /** 最多留几条。再往前的对角色接话没帮助，只是白占 prompt。 */
@@ -273,9 +285,16 @@ export const SELF_LOG_MAX_ENTRIES = 8;
 export const SELF_LOG_TEXT_MAX = 200;
 
 export const createSelfLog = (basePackAt: number): AmsgSelfLog => ({
-  v: 1,
+  v: 2,
   basePackAt,
   entries: [],
+  tasks: [],
+});
+
+/** 记下角色刚给自己排的任务（同 uuid 覆盖，fire 重跑不会记重）。 */
+export const appendSelfLogTask = (log: AmsgSelfLog, task: ActiveMsg2TaskRecord): AmsgSelfLog => ({
+  ...log,
+  tasks: [...log.tasks.filter((t) => t.taskUuid !== task.taskUuid), task],
 });
 
 /** 追加一条（同 id 覆盖、正文截断、只留最近 SELF_LOG_MAX_ENTRIES 条）。空正文原样返回。 */
@@ -300,8 +319,9 @@ export const parseSelfLog = (value: string): AmsgSelfLog | null => {
   try {
     const parsed = JSON.parse(value);
     if (
-      parsed && typeof parsed === 'object' && parsed.v === 1
+      parsed && typeof parsed === 'object' && parsed.v === 2
       && typeof parsed.basePackAt === 'number'
+      && Array.isArray(parsed.tasks)
       && Array.isArray(parsed.entries)
       && parsed.entries.every((e: unknown) => {
         const entry = e as Partial<AmsgSelfLogEntry> | null;

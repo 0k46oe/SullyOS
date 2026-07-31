@@ -14,6 +14,7 @@ import {
   UserProfile,
 } from '../types';
 import { getLastRealUserMessageAt } from './amsg2ExpireGuard';
+import { buildTaskInstruction } from './amsgFireSchedule';
 import {
   getPendingTasks, MAX_ACTIVE_TASKS_PER_CHAR, resolveExpirePolicy, toDatetimeLocalValue,
 } from './amsg2Tasks';
@@ -308,21 +309,11 @@ const buildFirePack = async (
   };
 };
 
-/** 按任务生成「本次任务」指令——排程时写进 task metadata，worker 到点填槽。 */
-export const buildTaskInstruction = (mode: 'auto' | 'prompted', promptHint?: string): string => {
-  if (mode === 'prompted') {
-    return [
-      '这是一条需要 AI 参与生成的主动消息。',
-      '请严格围绕下面的额外提示发起私聊，但仍然保持像真人一样自然，不要像系统任务汇报。',
-      `额外提示：${promptHint?.trim() || '无'}`,
-    ].join('\n');
-  }
-  return [
-    '这是一条需要 AI 自主生成的主动消息。',
-    '请结合角色设定、关系状态、最近上下文与当前时间，自然地主动找用户说一到三句私聊消息。',
-    promptHint?.trim() ? `可选灵感补充：${promptHint.trim()}` : '可选灵感补充：无',
-  ].join('\n');
-};
+/**
+ * 按任务生成「本次任务」指令——排程时写进 task metadata，worker 到点填槽。
+ * 实现搬到了 amsgFireSchedule（worker 也要用同一份），这里转出去保持调用方不动。
+ */
+export { buildTaskInstruction } from './amsgFireSchedule';
 
 const ensureFutureTime = (value: string) => {
   const date = new Date(value);

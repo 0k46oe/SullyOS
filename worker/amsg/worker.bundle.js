@@ -3191,9 +3191,14 @@ var buildAwayHint = (targetName, timeSinceUser) => {
 var SELF_LOG_MAX_ENTRIES = 8;
 var SELF_LOG_TEXT_MAX = 200;
 var createSelfLog = (basePackAt) => ({
-  v: 1,
+  v: 2,
   basePackAt,
-  entries: []
+  entries: [],
+  tasks: []
+});
+var appendSelfLogTask = (log, task) => ({
+  ...log,
+  tasks: [...log.tasks.filter((t) => t.taskUuid !== task.taskUuid), task]
 });
 var appendSelfLogEntry = (log, entry) => {
   const text = entry.text.trim().slice(0, SELF_LOG_TEXT_MAX);
@@ -3205,7 +3210,7 @@ var selfLogMatchesPack = (log, pack) => !!log && log.basePackAt === pack.builtAt
 var parseSelfLog = (value) => {
   try {
     const parsed = JSON.parse(value);
-    if (parsed && typeof parsed === "object" && parsed.v === 1 && typeof parsed.basePackAt === "number" && Array.isArray(parsed.entries) && parsed.entries.every((e) => {
+    if (parsed && typeof parsed === "object" && parsed.v === 2 && typeof parsed.basePackAt === "number" && Array.isArray(parsed.tasks) && Array.isArray(parsed.entries) && parsed.entries.every((e) => {
       const entry = e;
       return !!entry && typeof entry.id === "string" && typeof entry.at === "number" && typeof entry.text === "string";
     })) {
@@ -3271,6 +3276,7 @@ function shouldExpireFire(input) {
 var DELIVERED_WINDOW_MS = 30 * 6e4;
 
 // utils/amsg2Tasks.ts
+var MAX_ACTIVE_TASKS_PER_CHAR = 5;
 var shortTaskId = (taskUuid) => taskUuid.slice(0, 8);
 var describeRecurrence = (recurrence) => recurrence === "daily" ? "\u6BCF\u5929" : recurrence === "weekly" ? "\u6BCF\u5468" : "\u4E00\u6B21\u6027";
 var describeExpirePolicy = (policy) => policy === "force" ? "\u5F3A\u5236\u53D1\u9001" : "\u9047\u5FD9\u4F5C\u5E9F";
@@ -3310,6 +3316,149 @@ var buildFireTaskListBlock = (tasks, opts) => {
     }),
     "\uFF08\u8FD9\u51E0\u6761\u5230\u70B9\u4F1A\u81EA\u52A8\u53D1\u51FA\u53BB\uFF0C\u522B\u5728\u8FD9\u6761\u6D88\u606F\u91CC\u628A\u540C\u4E00\u4EF6\u4E8B\u518D\u6392\u4E00\u904D\uFF0C\u4E5F\u522B\u5F53\u5B83\u4EEC\u4E0D\u5B58\u5728\u3002\uFF09"
   ].join("\n");
+};
+
+// utils/amsgFireSchedule.ts
+var AMSG_FIRE_SCHEDULE_TOOL = "schedule_active_message";
+var MAX_FIRE_SCHEDULES = 2;
+var EXPIRE_POLICY_DESCRIPTION = [
+  "\u9632\u7A7F\u5E2E\u7B56\u7565\u3002",
+  "expire\uFF08\u9ED8\u8BA4\uFF0C\u5927\u591A\u6570\u60C5\u51B5\u7528\u5B83\uFF09\uFF1A\u5230\u70B9\u65F6\u5982\u679C\u6392\u7A0B\u4E4B\u540E\u5BF9\u8BDD\u5DF2\u6709\u65B0\u8FDB\u5C55\u3001\u6216\u7528\u6237\u6B64\u523B\u6B63\u5728\u804A\u5929\uFF0C\u8FD9\u6761\u81EA\u52A8\u4F5C\u5E9F\u2014\u2014\u4E4B\u540E\u4F60\u4F1A\u5728\u6392\u7A0B\u73B0\u72B6\u91CC\u770B\u5230\uFF0C\u7531\u4F60\u51B3\u5B9A\u81EA\u7136\u5E26\u51FA\u3001\u7EED\u671F\u8FD8\u662F\u653E\u5F03\u3002",
+  "\u6311\u8BDD\u9898\u3001\u60F3\u627E\u4EBA\u804A\u5929\u8FD9\u7C7B\u300C\u60F3\u8BF4\u70B9\u4EC0\u4E48\u300D\u7684\u6392\u7A0B\u4E00\u5F8B\u7528\u5B83\uFF1A\u7528\u6237\u4EBA\u90FD\u56DE\u6765\u4E86\uFF0C\u4F60\u8FD8\u7167\u7740\u51E0\u5C0F\u65F6\u524D\u7684\u60F3\u6CD5\u5F00\u53E3\uFF0C\u4F1A\u5F88\u5047\u3002",
+  'force\uFF1A\u4E0D\u7BA1\u7528\u6237\u5728\u4E0D\u5728\u804A\u5929\u90FD\u7167\u53D1\u3002\u7528\u5728\u300C\u5230\u90A3\u4E2A\u70B9\u5FC5\u987B\u8BF4\u8FD9\u4EF6\u5177\u4F53\u7684\u4E8B\u300D\u4E0A\uFF0C\u4E24\u79CD\u6765\u6E90\u90FD\u7B97\u2014\u2014\u7528\u6237\u660E\u786E\u8981\u6C42\u7684\uFF08\u5982"8\u70B9\u53EB\u6211\u8D77\u5E8A"\uFF09\uFF0C\u4EE5\u53CA\u4F60\u81EA\u5DF1\u8BB8\u4E0B\u7684\uFF08\u5982"\u6C64\u7096\u4E0A\u4E86\uFF0C\u4E24\u5C0F\u65F6\u540E\u597D\u4E86\u53EB\u4F60""\u4F60\u90A3\u4E2A\u4F1A\u6211\u5230\u70B9\u63D0\u9192\u4F60"\uFF09\u3002',
+  "\u8FD9\u7C7B\u5151\u73B0\u7684\u662F\u4E00\u4E2A\u5177\u4F53\u627F\u8BFA\uFF0C\u7528\u6237\u4E2D\u9014\u56DE\u6765\u804A\u8FC7\u5929\u4E5F\u4E0D\u5F71\u54CD\u5B83\u8BE5\u54CD\u3002"
+].join("\n");
+var FIRE_TOOL_DESCRIPTION = [
+  "\u7ED9\u81EA\u5DF1\u6392\u4E0B\u4E00\u6761\u4E3B\u52A8\u6D88\u606F\uFF1A\u5230\u6307\u5B9A\u65F6\u95F4\u540E\u4F60\u4F1A\u518D\u6839\u636E\u90A3\u65F6\u7684\u4E0A\u4E0B\u6587\u751F\u6210\u4E00\u6761\u63A8\u9001\u7ED9\u7528\u6237\u3002",
+  "\u4F60\u73B0\u5728\u6B63\u5728\u53D1\u4E00\u6761\u4E3B\u52A8\u6D88\u606F\uFF0C\u8FD9\u4E2A\u5DE5\u5177\u8BA9\u4F60\u628A\u8BDD\u63A5\u7740\u5F80\u4E0B\u8BF4\u2014\u2014\u6BD4\u5982\u8FD9\u6761\u5148\u8BF4\u4E00\u534A\uFF0C\u8FC7\u4E00\u4E24\u4E2A\u5C0F\u65F6\u518D\u63A5\u4E0A\u53BB\uFF1B\u6216\u8005\u4F60\u8BF4\u4E86\u8981\u53BB\u505A\u67D0\u4EF6\u4E8B\uFF0C\u505A\u5B8C\u7684\u65F6\u95F4\u70B9\u56DE\u6765\u544A\u8BC9\u7528\u6237\u3002",
+  "\u6392\u4E0B\u7684\u8FD9\u6761\u5230\u70B9\u65F6\u4F1A\u77E5\u9053\u4F60\u8FD9\u6B21\u8BF4\u4E86\u4EC0\u4E48\uFF0C\u80FD\u63A5\u5F97\u4E0A\uFF0C\u4E0D\u7528\u5728\u53C2\u6570\u91CC\u590D\u8FF0\u3002",
+  "send_at \u662F\u5F00\u59CB\u751F\u6210\u7684\u65F6\u95F4\uFF0C\u4E0D\u662F\u9001\u8FBE\u65F6\u95F4\uFF08\u751F\u6210\u6709\u5341\u51E0\u79D2\u5EF6\u8FDF\uFF09\uFF0C\u4E14\u5FC5\u987B\u81F3\u5C11\u6BD4\u73B0\u5728\u665A 1 \u5206\u949F\u3002",
+  `\u4E00\u6B21\u6700\u591A\u6392 ${MAX_FIRE_SCHEDULES} \u6761\uFF1B\u6BCF\u4E2A\u89D2\u8272\u540C\u65F6\u6302\u7684\u4EFB\u52A1\u4E5F\u6709\u4E0A\u9650\uFF0C\u6392\u4E0D\u4E0B\u65F6\u4F1A\u544A\u8BC9\u4F60\u3002`,
+  "\u6CA1\u6709\u300C\u63A5\u7740\u8BF4\u300D\u7684\u5FC5\u8981\u5C31\u522B\u6392\u2014\u2014\u4E3A\u4E86\u6392\u800C\u6392\u51FA\u6765\u7684\u540E\u7EED\uFF0C\u7528\u6237\u8BFB\u8D77\u6765\u5C31\u662F\u6CA1\u8BDD\u627E\u8BDD\u3002"
+].join("\n");
+var PARAMETERS = {
+  type: "object",
+  properties: {
+    send_at: {
+      type: "string",
+      description: "\u5F00\u59CB\u751F\u6210\u7684\u65F6\u95F4\uFF0CISO 8601\uFF08\u5982 2026-07-30T23:30:00+08:00\uFF09\u3002\u81F3\u5C11\u6BD4\u5F53\u524D\u65F6\u95F4\u665A 1 \u5206\u949F\u3002"
+    },
+    mode: {
+      type: "string",
+      enum: ["auto", "prompted"],
+      description: "\u751F\u6210\u6A21\u5F0F\u3002auto=\u5230\u70B9\u6839\u636E\u90A3\u65F6\u7684\u4E0A\u4E0B\u6587\u81EA\u7531\u53D1\u6325\uFF1Bprompted=\u56F4\u7ED5 prompt_hint \u7684\u65B9\u5411\u8BF4\u3002\u9ED8\u8BA4 auto\u3002"
+    },
+    prompt_hint: {
+      type: "string",
+      description: '\u7ED9\u672A\u6765\u90A3\u6761\u6D88\u606F\u7684\u65B9\u5411\uFF0C\u5982"\u63A5\u7740\u521A\u624D\u90A3\u53EA\u732B\u7684\u8BDD\u5F80\u4E0B\u8BF4""\u544A\u8BC9\u4ED6\u6C64\u7096\u597D\u4E86"\u3002mode=prompted \u65F6\u5FC5\u586B\u3002'
+    },
+    recurrence: {
+      type: "string",
+      enum: ["none", "daily", "weekly"],
+      description: "\u91CD\u590D\u7C7B\u578B\u3002none=\u4E00\u6B21\u6027\uFF08\u9ED8\u8BA4\uFF09\uFF1Bdaily/weekly=\u6BCF\u5929/\u6BCF\u5468\u540C\u4E00\u65F6\u95F4\u3002"
+    },
+    expire_policy: {
+      type: "string",
+      enum: ["expire", "force"],
+      description: EXPIRE_POLICY_DESCRIPTION
+    }
+  },
+  required: ["send_at"]
+};
+var buildFireScheduleTool = () => ({
+  type: "function",
+  function: {
+    name: AMSG_FIRE_SCHEDULE_TOOL,
+    description: FIRE_TOOL_DESCRIPTION,
+    parameters: PARAMETERS
+  }
+});
+var buildFireScheduleBlock = (mode) => {
+  const howTo = mode === "native" ? `\u9700\u8981\u65F6\u901A\u8FC7\u7CFB\u7EDF\u7684\u5DE5\u5177\u8C03\u7528\u63A5\u53E3\u53D1\u8D77 ${AMSG_FIRE_SCHEDULE_TOOL}\uFF0C\u4E0D\u8981\u628A\u5DE5\u5177\u540D\u548C\u53C2\u6570\u5199\u8FDB\u6B63\u6587\u3002` : `\u9700\u8981\u65F6\u5355\u72EC\u8F93\u51FA\u4E00\u884C ${AMSG_FIRE_SCHEDULE_TOOL}({"send_at":"2026-07-30T23:30:00+08:00","prompt_hint":"\u63A5\u7740\u8BF4"})\uFF0C\u7CFB\u7EDF\u4F1A\u4EE3\u4E3A\u5B89\u6392\u5E76\u628A\u7ED3\u679C\u544A\u8BC9\u4F60\u3002`;
+  return [
+    "",
+    "---",
+    "\u3010\u4F60\u53EF\u4EE5\u7ED9\u81EA\u5DF1\u6392\u4E0B\u4E00\u6761\u3011",
+    "\u8FD9\u6761\u6D88\u606F\u53D1\u5B8C\uFF0C\u5982\u679C\u8FD8\u6709\u8BDD\u8981\u5728\u4E4B\u540E\u67D0\u4E2A\u65F6\u95F4\u70B9\u8BF4\uFF08\u628A\u6CA1\u8BF4\u5B8C\u7684\u63A5\u4E0A\u53BB\u3001\u6216\u8005\u53BB\u505A\u7684\u4E8B\u505A\u5B8C\u4E86\u56DE\u6765\u544A\u8BC9\u4ED6\uFF09\uFF0C",
+    "\u53EF\u4EE5\u73B0\u5728\u5C31\u628A\u90A3\u4E00\u6761\u6392\u597D\u2014\u2014\u4E0D\u9700\u8981\u7528\u6237\u5728\u7EBF\uFF0C\u5230\u70B9\u4F1A\u81EA\u52A8\u53D1\u51FA\u53BB\uFF0C\u800C\u4E14\u90A3\u65F6\u4F60\u4F1A\u77E5\u9053\u81EA\u5DF1\u8FD9\u6B21\u8BF4\u4E86\u4EC0\u4E48\u3002",
+    howTo,
+    "\u6CA1\u5FC5\u8981\u5C31\u522B\u6392\u3002\u4E3A\u4E86\u6392\u800C\u6392\u51FA\u6765\u7684\u540E\u7EED\uFF0C\u8BFB\u8D77\u6765\u5C31\u662F\u6CA1\u8BDD\u627E\u8BDD\u3002"
+  ].join("\n");
+};
+var buildTaskInstruction = (mode, promptHint) => {
+  if (mode === "prompted") {
+    return [
+      "\u8FD9\u662F\u4E00\u6761\u9700\u8981 AI \u53C2\u4E0E\u751F\u6210\u7684\u4E3B\u52A8\u6D88\u606F\u3002",
+      "\u8BF7\u4E25\u683C\u56F4\u7ED5\u4E0B\u9762\u7684\u989D\u5916\u63D0\u793A\u53D1\u8D77\u79C1\u804A\uFF0C\u4F46\u4ECD\u7136\u4FDD\u6301\u50CF\u771F\u4EBA\u4E00\u6837\u81EA\u7136\uFF0C\u4E0D\u8981\u50CF\u7CFB\u7EDF\u4EFB\u52A1\u6C47\u62A5\u3002",
+      `\u989D\u5916\u63D0\u793A\uFF1A${promptHint?.trim() || "\u65E0"}`
+    ].join("\n");
+  }
+  return [
+    "\u8FD9\u662F\u4E00\u6761\u9700\u8981 AI \u81EA\u4E3B\u751F\u6210\u7684\u4E3B\u52A8\u6D88\u606F\u3002",
+    "\u8BF7\u7ED3\u5408\u89D2\u8272\u8BBE\u5B9A\u3001\u5173\u7CFB\u72B6\u6001\u3001\u6700\u8FD1\u4E0A\u4E0B\u6587\u4E0E\u5F53\u524D\u65F6\u95F4\uFF0C\u81EA\u7136\u5730\u4E3B\u52A8\u627E\u7528\u6237\u8BF4\u4E00\u5230\u4E09\u53E5\u79C1\u804A\u6D88\u606F\u3002",
+    promptHint?.trim() ? `\u53EF\u9009\u7075\u611F\u8865\u5145\uFF1A${promptHint.trim()}` : "\u53EF\u9009\u7075\u611F\u8865\u5145\uFF1A\u65E0"
+  ].join("\n");
+};
+var MIN_SCHEDULE_LEAD_MS2 = 6e4;
+var MODES = ["auto", "prompted"];
+var RECURRENCES = ["none", "daily", "weekly"];
+var parseFireScheduleArgs = (args, nowMs) => {
+  const sendAtRaw = args?.send_at;
+  if (typeof sendAtRaw !== "string" || !sendAtRaw.trim()) {
+    return { ok: false, reason: "invalid_send_at", message: "send_at \u5FC5\u586B\uFF0C\u5199\u6210 ISO 8601 \u65F6\u95F4\uFF08\u5982 2026-07-30T23:30:00+08:00\uFF09\u3002" };
+  }
+  const sendAtMs = new Date(sendAtRaw).getTime();
+  if (!Number.isFinite(sendAtMs)) {
+    return { ok: false, reason: "invalid_send_at", message: `send_at\u300C${sendAtRaw}\u300D\u89E3\u6790\u4E0D\u51FA\u65F6\u95F4\uFF0C\u5199\u6210 ISO 8601\uFF08\u5982 2026-07-30T23:30:00+08:00\uFF09\u3002` };
+  }
+  if (sendAtMs < nowMs + MIN_SCHEDULE_LEAD_MS2) {
+    return {
+      ok: false,
+      reason: "send_at_too_soon",
+      message: `send_at \u81F3\u5C11\u8981\u6BD4\u73B0\u5728\u665A 1 \u5206\u949F\uFF08\u73B0\u5728\u662F ${new Date(nowMs).toISOString()}\uFF09\u3002\u60F3\u9A6C\u4E0A\u8BF4\u7684\u8BDD\u76F4\u63A5\u5199\u8FDB\u8FD9\u6761\u6D88\u606F\u91CC\uFF0C\u4E0D\u7528\u6392\u3002`
+    };
+  }
+  const mode = args?.mode == null ? "auto" : args.mode;
+  if (typeof mode !== "string" || !MODES.includes(mode)) {
+    return { ok: false, reason: "invalid_mode", message: "mode \u53EA\u80FD\u662F auto \u6216 prompted\u3002" };
+  }
+  const promptHintRaw = args?.prompt_hint;
+  const promptHint = typeof promptHintRaw === "string" ? promptHintRaw.trim() : "";
+  if (mode === "prompted" && !promptHint) {
+    return { ok: false, reason: "missing_prompt_hint", message: "mode=prompted \u65F6\u8981\u7ED9 prompt_hint\uFF0C\u8BF4\u6E05\u90A3\u6761\u6D88\u606F\u8BE5\u5F80\u54EA\u4E2A\u65B9\u5411\u8BF4\u3002" };
+  }
+  const recurrence = args?.recurrence == null ? "none" : args.recurrence;
+  if (typeof recurrence !== "string" || !RECURRENCES.includes(recurrence)) {
+    return { ok: false, reason: "invalid_recurrence", message: "recurrence \u53EA\u80FD\u662F none / daily / weekly\u3002" };
+  }
+  const expirePolicy = args?.expire_policy == null ? "expire" : args.expire_policy;
+  if (expirePolicy !== "expire" && expirePolicy !== "force") {
+    return { ok: false, reason: "invalid_expire_policy", message: "expire_policy \u53EA\u80FD\u662F expire \u6216 force\u3002" };
+  }
+  return {
+    sendAt: new Date(sendAtMs).toISOString(),
+    mode,
+    ...promptHint ? { promptHint } : {},
+    recurrence,
+    expirePolicy
+  };
+};
+var escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+var extractFireScheduleTextCalls = (content) => {
+  if (!content) return [];
+  const re = new RegExp(`(^|[^\\w./])${escapeRegExp(AMSG_FIRE_SCHEDULE_TOOL)}\\s*\\(([^)]*)\\)`, "g");
+  const calls = [];
+  for (const m of content.matchAll(re)) {
+    const matched = m[0].slice(m[1].length);
+    let args = {};
+    try {
+      const parsed = JSON.parse((m[2] || "").trim() || "{}");
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) args = parsed;
+    } catch {
+    }
+    calls.push({ args, matched });
+  }
+  return calls;
 };
 
 // utils/amsgChatPresence.ts
@@ -3436,7 +3585,7 @@ var stripTextFakedMcpCalls = (content, calls) => {
   for (const call of calls) cleaned = cleaned.split(call.matched).join("");
   return cleaned.replace(/\n{3,}/g, "\n\n").trim();
 };
-var escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+var escapeRegExp2 = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 var stripQuotes = (s) => {
   const t = s.trim();
   const m = t.match(/^(['"`「『])([\s\S]*)(['"`」』])$/);
@@ -3528,7 +3677,7 @@ var extractTextFakedMcpCalls = (content, resolve, opts = {}) => {
   const seen = /* @__PURE__ */ new Set();
   for (const [name, { exposed, hit }] of lookup) {
     const schema = hit.tool.inputSchema;
-    const esc = escapeRegExp(name);
+    const esc = escapeRegExp2(name);
     const parenRe = new RegExp(`(^|[^\\w./])${esc}\\s*\\(([^)]*)\\)`, "g");
     for (const m of content.matchAll(parenRe)) {
       const matched = m[0].slice(m[1].length);
@@ -6279,10 +6428,18 @@ function buildXhsSessionPayload(directives, notes, xsecTokens) {
   if (pickedNotes.length === 0 && pickedTokens.length === 0) return null;
   return { notes: pickedNotes, xsecTokens: pickedTokens };
 }
-function processLLMRound(state, llmOutputText, build, mcp) {
+function processLLMRound(state, llmOutputText, build, mcp, schedule) {
   const nativeToolCalls = mcp?.nativeToolCalls ?? [];
   const textCalls = mcp?.resolve.size ? extractTextFakedMcpCalls(llmOutputText, mcp.resolve, { alsoMatchPrefix: MCP_FIRE_NAME_PREFIX }) : [];
-  const scanText = textCalls.length ? stripTextFakedMcpCalls(llmOutputText, textCalls) : llmOutputText;
+  const nativeScheduleCalls = schedule?.nativeToolCalls ?? [];
+  const scheduleTextCalls = nativeScheduleCalls.length > 0 || !schedule ? [] : extractFireScheduleTextCalls(llmOutputText);
+  const scheduleCalls = nativeScheduleCalls.length > 0 ? nativeScheduleCalls : scheduleTextCalls.map((c) => ({
+    id: `sched_${state.mcpCallSeq++}`,
+    type: "function",
+    function: { name: AMSG_FIRE_SCHEDULE_TOOL, arguments: JSON.stringify(c.args) }
+  }));
+  const strippedText = scheduleTextCalls.length ? stripTextFakedMcpCalls(llmOutputText, scheduleTextCalls) : llmOutputText;
+  const scanText = textCalls.length ? stripTextFakedMcpCalls(strippedText, textCalls) : strippedText;
   const mcpToolCalls = nativeToolCalls.length > 0 ? nativeToolCalls : textCalls.map((c) => ({
     // id 只需在一轮的 assistant/tool 消息配对里唯一；本次 fire 内自增，绝不重号。
     id: `mcp_${state.mcpCallSeq++}`,
@@ -6290,15 +6447,16 @@ function processLLMRound(state, llmOutputText, build, mcp) {
     // exposedName 恒为裸名（alsoMatchPrefix 的命中也回裸名），统一补前缀即可。
     function: { name: `${MCP_FIRE_NAME_PREFIX}${c.exposedName}`, arguments: JSON.stringify(c.args) }
   }));
+  const extraToolCalls = [...mcpToolCalls, ...scheduleCalls];
   const result = classifyLLMOutput(scanText);
-  const isToolRound = result.kind === "tool-request" || mcpToolCalls.length > 0;
+  const isToolRound = result.kind === "tool-request" || extraToolCalls.length > 0;
   if (isToolRound) {
     const narration = result.kind === "tool-request" ? result.prefix : scanText;
     if (narration.trim()) state.narrations.push(narration);
     if (state.duplicateToolCalls < MAX_DUPLICATE_TOOL_CALLS) {
       return {
         decision: "tool-request",
-        toolCalls: result.kind === "tool-request" ? [...result.toolCalls, ...mcpToolCalls] : mcpToolCalls
+        toolCalls: result.kind === "tool-request" ? [...result.toolCalls, ...extraToolCalls] : extraToolCalls
       };
     }
   }
@@ -6439,6 +6597,89 @@ var recordSelfLog = async (ctx, stash, charId, clientTaskId, pushPayloads) => {
     console.warn("[amsg:self-log] \u5199\u5165\u5931\u8D25\uFF08\u8FD9\u6B21\u7167\u5E38\u53D1\u9001\uFF0C\u4F46\u4E0B\u4E00\u6B21\u5230\u70B9\u89D2\u8272\u4E0D\u4F1A\u77E5\u9053\u8BF4\u8FC7\u8FD9\u53E5\uFF09", error);
   }
 };
+var attachScheduledTasks = (pushPayloads, tasks) => {
+  if (tasks.length === 0 || pushPayloads.length === 0) return pushPayloads;
+  const lastIdx = pushPayloads.length - 1;
+  return pushPayloads.map((payload, i) => i === lastIdx ? {
+    ...payload,
+    metadata: { ...payload.metadata ?? {}, amsgSelfScheduled: tasks }
+  } : payload);
+};
+var runFireScheduleTool = async (stash, scheduleTask, args, nowMs) => {
+  if (typeof scheduleTask !== "function") {
+    return { ok: false, reason: "not_supported", message: "\u5F53\u524D\u540E\u53F0\u7248\u672C\u8FD8\u4E0D\u652F\u6301\u7ED9\u81EA\u5DF1\u6392\u540E\u7EED\uFF0C\u8FD9\u6B21\u5C31\u628A\u8BDD\u8BF4\u5B8C\u5427\u3002" };
+  }
+  if (stash.scheduledTasks.length >= MAX_FIRE_SCHEDULES) {
+    return {
+      ok: false,
+      reason: "fire_limit",
+      message: `\u8FD9\u6B21\u5DF2\u7ECF\u6392\u4E86 ${MAX_FIRE_SCHEDULES} \u6761\uFF0C\u591F\u4E86\uFF0C\u5269\u4E0B\u7684\u8BDD\u76F4\u63A5\u5199\u8FDB\u8FD9\u6761\u6D88\u606F\u91CC\u3002`
+    };
+  }
+  const live = stash.pendingTaskCount + stash.scheduledTasks.length;
+  if (live >= MAX_ACTIVE_TASKS_PER_CHAR) {
+    return {
+      ok: false,
+      reason: "task_limit",
+      message: `\u4F60\u540C\u65F6\u6302\u7740\u7684\u4EFB\u52A1\u5DF2\u7ECF\u6709 ${live} \u4E2A\uFF08\u4E0A\u9650 ${MAX_ACTIVE_TASKS_PER_CHAR}\uFF09\uFF0C\u8FD9\u6B21\u522B\u518D\u6392\u4E86\u3002`
+    };
+  }
+  const parsed = parseFireScheduleArgs(args, nowMs);
+  if ("ok" in parsed) return parsed;
+  const seq = stash.scheduledTasks.length;
+  const uuid = `amsgself-${stash.charId}-${stash.occurrenceMs}-${seq}`;
+  const clientTaskId = `${uuid}-c`;
+  let result;
+  try {
+    result = await scheduleTask({
+      firstSendTime: parsed.sendAt,
+      recurrenceType: parsed.recurrence,
+      messageType: parsed.mode,
+      uuid,
+      metadata: {
+        charId: stash.charId,
+        source: "active_msg_2",
+        amsgMode: parsed.mode,
+        amsgClientTaskId: clientTaskId,
+        amsgExpirePolicy: parsed.expirePolicy,
+        // 防穿帮闸锚点：这条排下去之后，用户再开口就算「对话往前走了」。
+        amsgAnchorMs: stash.anchorMs,
+        amsgTaskInstruction: buildTaskInstruction(parsed.mode, parsed.promptHint)
+      }
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "schedule_rejected",
+      message: error instanceof Error ? error.message : String(error)
+    };
+  }
+  if (!result.created) {
+    return { ok: true, already_scheduled: true, send_at: parsed.sendAt };
+  }
+  const record = {
+    taskUuid: result.uuid,
+    clientTaskId,
+    mode: parsed.mode,
+    firstSendTime: parsed.sendAt,
+    recurrenceType: parsed.recurrence,
+    ...parsed.promptHint ? { promptHint: parsed.promptHint } : {},
+    expirePolicy: parsed.expirePolicy,
+    anchorLastUserMsgAt: stash.anchorMs,
+    source: "character",
+    status: "scheduled",
+    createdAt: nowMs
+  };
+  stash.scheduledTasks.push(record);
+  stash.selfLog = appendSelfLogTask(stash.selfLog, record);
+  console.log("[amsg:self-schedule]", { uuid: result.uuid, sendAt: parsed.sendAt, mode: parsed.mode });
+  return {
+    ok: true,
+    task_id: result.uuid.slice(0, 8),
+    send_at: parsed.sendAt,
+    message: "\u6392\u597D\u4E86\u3002\u5230\u70B9\u4F60\u4F1A\u77E5\u9053\u81EA\u5DF1\u8FD9\u6B21\u8BF4\u4E86\u4EC0\u4E48\uFF0C\u63A5\u7740\u8BF4\u5C31\u884C\uFF0C\u73B0\u5728\u4E0D\u7528\u5267\u900F\u3002"
+  };
+};
 var MCP_CALL_TIMEOUT_MS = 25e3;
 var MCP_TOTAL_BUDGET_MS = 12e4;
 var runMcpFireTool = async (stash, name, args) => {
@@ -6549,6 +6790,8 @@ var amsgHooks = {
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
     const storedSelfLog = parseSelfLog(charRows.find((r) => r.key === AMSG_SELF_LOG_KEY)?.value ?? "");
     const selfLog = selfLogMatchesPack(storedSelfLog, pack) ? storedSelfLog : createSelfLog(pack.builtAt);
+    const livePendingTasks = [...pack.pendingTasks, ...selfLog.tasks];
+    const canSelfSchedule = typeof ctx.scheduleTask === "function";
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
     ctx.scratch.fire = {
       session: createFireSessionState(),
@@ -6559,9 +6802,15 @@ var amsgHooks = {
       selfLog,
       mcpResolve,
       mcpSessions: /* @__PURE__ */ new Map(),
-      mcpSpentMs: 0
+      mcpSpentMs: 0,
+      // 「还能不能再排」按客户端已知的 + 角色自己排过还没被认领的一起算，
+      // 不然角色离线期间连排几次就能绕过每角色的任务上限。
+      pendingTaskCount: livePendingTasks.length,
+      scheduledTasks: [],
+      charId,
+      anchorMs: pack.lastUserMessageAt ?? 0
     };
-    const taskListBlock = buildFireTaskListBlock(pack.pendingTasks, {
+    const taskListBlock = buildFireTaskListBlock(livePendingTasks, {
       nowMs: ctx.now.getTime(),
       tzOffsetMin: pack.tzOffsetMin,
       excludeClientTaskId: typeof taskMeta.amsgClientTaskId === "string" ? taskMeta.amsgClientTaskId : void 0
@@ -6569,12 +6818,16 @@ var amsgHooks = {
     const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, {
       selfLog,
       taskListBlock
-    }) + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? "native" : "text" }) : "");
+    }) + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? "native" : "text" }) : "") + (canSelfSchedule ? buildFireScheduleBlock(mcpNative ? "native" : "text") : "");
+    const fireTools = [
+      ...mcpResolve && mcpNative ? buildMcpFireTools(mcpResolve) : [],
+      ...canSelfSchedule && mcpNative ? [buildFireScheduleTool()] : []
+    ];
     return {
       messages: [{ role: "user", content: prompt }],
       // amsg-server 带 agentic-fire-tools feature 的版本起透传给每轮 LLM 请求；
       // 老 bundle 里不会走到这（tools 是随本次 bundle 一起升上去的）。
-      ...mcpResolve && mcpNative ? { tools: buildMcpFireTools(mcpResolve) } : {}
+      ...fireTools.length ? { tools: fireTools } : {}
     };
   },
   async onLLMOutput(ctx) {
@@ -6590,8 +6843,13 @@ var amsgHooks = {
     }
     const session = stash.session;
     const rawToolCalls = ctx.llmResponse?.choices?.[0]?.message?.tool_calls;
-    const nativeMcpCalls = (Array.isArray(rawToolCalls) ? rawToolCalls : []).filter((tc) => {
+    const allNativeCalls = Array.isArray(rawToolCalls) ? rawToolCalls : [];
+    const nativeScheduleCalls = allNativeCalls.filter(
+      (tc) => tc?.function?.name === AMSG_FIRE_SCHEDULE_TOOL
+    );
+    const nativeMcpCalls = allNativeCalls.filter((tc) => {
       const n = tc?.function?.name;
+      if (n === AMSG_FIRE_SCHEDULE_TOOL) return false;
       const hit = typeof n === "string" && n.startsWith(MCP_FIRE_NAME_PREFIX) && !!stash.mcpResolve?.has(n.slice(MCP_FIRE_NAME_PREFIX.length));
       if (!hit) {
         console.warn("[amsg:agentic] \u4E22\u5F03\u672A\u58F0\u660E\u7684 native tool_call", {
@@ -6602,19 +6860,26 @@ var amsgHooks = {
       }
       return hit;
     });
-    const decision = processLLMRound(session, content, {
-      contactName: ctx.contactName,
-      avatarUrl: ctx.avatarUrl ?? null,
-      taskId,
-      messageType,
-      metadata: ctx.metadata,
-      occurrenceMs: stash.occurrenceMs,
-      // round 1 XHS 工具抓到的笔记 / xsecToken 快照：finish 时按 directive 引用
-      // 挑选后随最后一条 push 带回客户端（客户端离线跑不了 round 1，缺这份
-      // [[XHS_SHARE]] / 点赞 / 评论重放必然 available:0 掉卡片）。
-      xhsNotes: stash.toolCtx.lastXhsNotesRef?.current,
-      xhsXsecTokens: stash.toolCtx.xhsCaches ? Array.from(stash.toolCtx.xhsCaches.xsecTokenCache.entries()) : void 0
-    }, stash.mcpResolve ? { resolve: stash.mcpResolve, nativeToolCalls: nativeMcpCalls } : null);
+    let decision = processLLMRound(
+      session,
+      content,
+      {
+        contactName: ctx.contactName,
+        avatarUrl: ctx.avatarUrl ?? null,
+        taskId,
+        messageType,
+        metadata: ctx.metadata,
+        occurrenceMs: stash.occurrenceMs,
+        // round 1 XHS 工具抓到的笔记 / xsecToken 快照：finish 时按 directive 引用
+        // 挑选后随最后一条 push 带回客户端（客户端离线跑不了 round 1，缺这份
+        // [[XHS_SHARE]] / 点赞 / 评论重放必然 available:0 掉卡片）。
+        xhsNotes: stash.toolCtx.lastXhsNotesRef?.current,
+        xhsXsecTokens: stash.toolCtx.xhsCaches ? Array.from(stash.toolCtx.xhsCaches.xsecTokenCache.entries()) : void 0
+      },
+      stash.mcpResolve ? { resolve: stash.mcpResolve, nativeToolCalls: nativeMcpCalls } : null,
+      // 传 null = 这次不认排程（老部署没这口子），正文里写了也不当调用。
+      typeof ctx.scheduleTask === "function" ? { nativeToolCalls: nativeScheduleCalls } : null
+    );
     if (decision.decision === "tool-request") {
       console.log("[amsg:agentic]", {
         type: "tool_request",
@@ -6632,6 +6897,8 @@ var amsgHooks = {
       const clientTaskId = typeof ctx.metadata?.amsgClientTaskId === "string" ? ctx.metadata.amsgClientTaskId : "";
       const charId = typeof ctx.metadata?.charId === "string" ? ctx.metadata.charId : "";
       await recordSelfLog(ctx, stash, charId, clientTaskId, decision.pushPayloads);
+      const withScheduled = attachScheduledTasks(decision.pushPayloads, stash.scheduledTasks);
+      decision = { ...decision, pushPayloads: withScheduled };
       if (clientTaskId && charId) {
         const budgeted = [];
         for (const payload of decision.pushPayloads) {
@@ -6675,7 +6942,7 @@ var amsgHooks = {
           });
           continue;
         }
-        const result = name.startsWith(MCP_FIRE_NAME_PREFIX) ? await runMcpFireTool(stash, name, args) : await dispatchAgenticTool(name, args, stash.toolCtx);
+        const result = name === AMSG_FIRE_SCHEDULE_TOOL ? await runFireScheduleTool(stash, ctx.scheduleTask, args, Date.now()) : name.startsWith(MCP_FIRE_NAME_PREFIX) ? await runMcpFireTool(stash, name, args) : await dispatchAgenticTool(name, args, stash.toolCtx);
         stash.session.toolCalls.push({ name, fingerprint });
         content = buildToolResultMessage({ name, result, history: stash.session.toolCalls });
         console.log("[amsg:agentic]", { type: "tool_done", sessionId: ctx.sessionId, tool: name });
@@ -6716,9 +6983,11 @@ var buildWorkerConfig = (env) => {
 var src_default = createSingleUserCloudflareWorker(buildWorkerConfig);
 export {
   amsgHooks,
+  attachScheduledTasks,
   buildWorkerConfig,
   src_default as default,
   offloadOversizedPush,
   resolveVapidEmail,
+  runFireScheduleTool,
   runMcpFireTool
 };
