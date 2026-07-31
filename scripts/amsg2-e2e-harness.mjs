@@ -150,6 +150,14 @@ globalThis.fetch = async (input, init = {}) => {
       content = '冻结提示词兜底照发成功。';
     } else if (all.includes('FIREPACK_FRESH_char-force')) {
       content = '闹钟型强制发送，正在聊天也照发。';
+    } else if (all.includes('FIREPACK_FRESH_char-selflog')) {
+      // 自述回写：暗号从 prompt 里现取，不写死。读得到（= 上一条正文随 self_log 回来了）
+      // 就接着往下说，读不到就当自己是第一条。回写链断在任何一环，这里都取不到，
+      // 断言会直接红——比事后比对正文更贴近「角色到底看见了没有」。
+      const seen = all.match(/SELFLOG-PASS-\d+/);
+      content = seen
+        ? `接着刚才那条说，暗号还是 ${seen[0]}，这是第二条。`
+        : '这是我主动发的第一条，暗号 SELFLOG-PASS-4417，记好了。';
     } else {
       content = '（默认回复：未匹配任何脚本分支）';
     }
@@ -284,6 +292,9 @@ const SLOT_TIME = '{{AMSG_CURRENT_TIME}}';
 const SLOT_SINCE = '{{AMSG_TIME_SINCE_USER}}';
 const SLOT_AWAY = '{{AMSG_AWAY_HINT}}';
 const SLOT_TASK = '{{AMSG_TASK_INSTRUCTION}}';
+const SLOT_SELF_LOG = '{{AMSG_SELF_LOG}}';
+/** 自述回写那一段的小标题（utils/amsgFirePack.ts renderSelfLogBlock），S9 靠它判断段落到没到。 */
+const SELF_LOG_HEADING = '【这之后你又主动发过（对方还没回）】';
 const firePack = (marker, lastUserMessageAt, fillerKb = 0) => ({
   v: 2,
   template: [
@@ -298,6 +309,31 @@ const firePack = (marker, lastUserMessageAt, fillerKb = 0) => ({
   lastUserMessageAt,
   tzOffsetMin: new Date().getTimezoneOffset(),
   targetName: '测试者',
+});
+/**
+ * 带自述回写锚点的 fire_pack（当前客户端打出来的形状）：比上面那份多了 builtAt，
+ * 模板里也多了紧跟在对话记录后面的 self_log 槽位。
+ *
+ * 两份都留着：上面那份就是「老客户端的包」，回写链对它整条不启用——这条兼容承诺
+ * 靠 S9 最后一段拿它来验。
+ */
+const firePackWithSelfLog = (marker, lastUserMessageAt, builtAt) => ({
+  v: 2,
+  template: [
+    `【角色系统设定】${marker} 的完整人设……`,
+    '【最近对话上下文】',
+    'user: 想起什么就跟我说。',
+    SLOT_SELF_LOG,
+    `当前本地时间：${SLOT_TIME}`,
+    SLOT_SINCE,
+    SLOT_AWAY,
+    '【本次任务】',
+    SLOT_TASK,
+  ].join('\n'),
+  lastUserMessageAt,
+  tzOffsetMin: new Date().getTimezoneOffset(),
+  targetName: '测试者',
+  builtAt,
 });
 const toolPack = (charName) => ({
   v: 1,
@@ -719,6 +755,134 @@ try {
     check('正文兜底：调用语法被剥掉，不进 push',
       mine.length > 0 && mine.every((m) => !String(m.payload?.message || '').includes('get_secret_word(')),
       JSON.stringify(mine.map((m) => m.payload?.message)));
+  }
+
+  section('S9 自述回写：连着两次触发，第二次读得到第一次说过的话');
+  {
+    const ns = NS('char-selflog');
+    const readSelfLog = async (namespace) => {
+      const read = await client.getClientState(namespace);
+      const hit = (read?.data?.entries || []).find((e) => e.key === 'self_log');
+      if (!hit?.value) return null;
+      try { return JSON.parse(hit.value); } catch { return { parseError: hit.value }; }
+    };
+
+    const t0 = Date.now();
+    const builtAt = t0 - 120_000;   // 客户端两分钟前聊完那一轮打的包
+    await putState([
+      { namespace: ns, key: 'fire_pack', value: JSON.stringify(firePackWithSelfLog('FIREPACK_FRESH_char-selflog', t0 - 3600_000, builtAt)), updatedAt: t0 },
+      { namespace: ns, key: 'tool_pack', value: JSON.stringify(toolPack('小续')), updatedAt: t0 },
+      // S8/S8b 把全局那行换成带 MCP 的版本了，这里换回无工具版——本场景只测回写
+      { namespace: 'amsg:global', key: 'tool_config', value: JSON.stringify({ v: 1, proxyWorkerUrl: '', newsEnabled: false, notionEnabled: false, feishuEnabled: false }), updatedAt: t0 },
+    ]);
+
+    // ── 第一次到点：云端还没有日志，那段不该出现在 prompt 里 ──
+    const fire1 = new Date(t0 + 1000);
+    const first = aiTaskPayload({
+      charId: 'char-selflog', charName: '小续', mode: 'auto',
+      firstSendTime: fire1.toISOString(), recurrenceType: 'none', expirePolicy: 'expire',
+      anchorMs: t0 - 3600_000,
+      taskInstruction: '第一条：随口报个暗号。',
+      frozenPrompt: 'FROZEN_char-selflog（不应被用到）',
+    });
+    await scheduleTask(first.payload);
+    let llmBefore = llmRequests.length;
+    await sleep(1400);
+    await runCron();
+    const promptsOf = (from) => llmRequests.slice(from)
+      .map((r) => r.messages.map((m) => String(m.content)).join('\n')).join('\n');
+    const p1 = promptsOf(llmBefore);
+    check('第一次 prompt 无自述段（云端还没日志）',
+      p1.includes('FIREPACK_FRESH_char-selflog') && !p1.includes(SELF_LOG_HEADING), p1.slice(0, 200));
+    check('空日志时槽位被抹平，不裸露给模型', !p1.includes(SLOT_SELF_LOG));
+    const text1 = pushes.filter((p) => p.tag === 'char-selflog')
+      .map((m) => String(m.payload?.message || '')).join('\n');
+    check('第一条 push 带上暗号', text1.includes('SELFLOG-PASS-4417'), text1);
+
+    const log1 = await readSelfLog(ns);
+    check('发完把正文写回云端（1 条）', log1?.v === 1 && log1?.entries?.length === 1, JSON.stringify(log1));
+    check('日志锚在这份 fire_pack 的 builtAt 上',
+      log1?.basePackAt === builtAt, JSON.stringify({ got: log1?.basePackAt, want: builtAt }));
+    check('记的就是刚发出去那条正文',
+      String(log1?.entries?.[0]?.text || '').includes('SELFLOG-PASS-4417'), JSON.stringify(log1?.entries?.[0]));
+    check('时间戳记的是本次触发的名义时刻（重试也不漂）',
+      log1?.entries?.[0]?.at === fire1.getTime(), JSON.stringify({ got: log1?.entries?.[0]?.at, want: fire1.getTime() }));
+    check('条目 id = 任务 + 触发时刻（同一次重跑覆盖，不记成好几条）',
+      log1?.entries?.[0]?.id === `${first.clientTaskId}@${fire1.getTime()}`, String(log1?.entries?.[0]?.id));
+
+    // ── 再排一条，第二次到点：这次应该看得见上一条 ──
+    const fire2 = new Date(Date.now() + 1000);
+    const second = aiTaskPayload({
+      charId: 'char-selflog', charName: '小续', mode: 'auto',
+      firstSendTime: fire2.toISOString(), recurrenceType: 'none', expirePolicy: 'expire',
+      anchorMs: t0 - 3600_000,
+      taskInstruction: '第二条：接着上一条往下说。',
+      frozenPrompt: 'FROZEN_char-selflog（不应被用到）',
+    });
+    await scheduleTask(second.payload);
+    llmBefore = llmRequests.length;
+    const pushBefore = pushes.length;
+    await sleep(1400);
+    await runCron();
+    const p2 = promptsOf(llmBefore);
+    check('第二次 prompt 出现自述段', p2.includes(SELF_LOG_HEADING), p2.slice(0, 300));
+    check('自述段里是第一条的原话', p2.includes('SELFLOG-PASS-4417'));
+    check('自述段落在对话记录之后、本次任务之前（读起来是一条时间线）',
+      p2.indexOf(SELF_LOG_HEADING) > p2.indexOf('【最近对话上下文】')
+      && p2.indexOf(SELF_LOG_HEADING) < p2.indexOf('【本次任务】'));
+    const text2 = pushes.slice(pushBefore).filter((p) => p.tag === 'char-selflog')
+      .map((m) => String(m.payload?.message || '')).join('\n');
+    check('第二条 push 是接着上一条说的（引用了自己报过的暗号）',
+      text2.includes('SELFLOG-PASS-4417') && text2.includes('第二条'), text2);
+    const log2 = await readSelfLog(ns);
+    check('两次触发各记一笔（累计 2 条）',
+      log2?.entries?.length === 2, JSON.stringify(log2?.entries?.map((e) => e.text)));
+    check('日志按角色存，两条任务写进同一份',
+      log2?.basePackAt === builtAt && String(log2?.entries?.[1]?.text || '').includes('第二条'), JSON.stringify(log2?.entries?.[1]));
+
+    // ── 用户又聊过 → 客户端重传新包，锚点对不上，旧日志整份作废 ──
+    const rebuiltAt = Date.now();
+    await putState([
+      { namespace: ns, key: 'fire_pack', value: JSON.stringify(firePackWithSelfLog('FIREPACK_FRESH_char-selflog', rebuiltAt - 1000, rebuiltAt)), updatedAt: rebuiltAt },
+    ]);
+    const fire3 = new Date(Date.now() + 1000);
+    const third = aiTaskPayload({
+      charId: 'char-selflog', charName: '小续', mode: 'auto',
+      firstSendTime: fire3.toISOString(), recurrenceType: 'none', expirePolicy: 'expire',
+      anchorMs: rebuiltAt - 1000,
+      taskInstruction: '第三条：用户刚又聊过，重新打了包。',
+      frozenPrompt: 'FROZEN_char-selflog（不应被用到）',
+    });
+    await scheduleTask(third.payload);
+    llmBefore = llmRequests.length;
+    await sleep(1400);
+    await runCron();
+    const p3 = promptsOf(llmBefore);
+    check('重新打包后旧日志作废，不在 prompt 里出现第二遍',
+      !p3.includes(SELF_LOG_HEADING) && !p3.includes('SELFLOG-PASS-4417'), p3.slice(0, 300));
+    const log3 = await readSelfLog(ns);
+    check('作废后从新锚点重新攒（只剩这次这条）',
+      log3?.basePackAt === rebuiltAt && log3?.entries?.length === 1, JSON.stringify(log3));
+
+    // ── 老客户端的包（没有对齐锚点）：整条回写链不启用，行为与加它之前一样 ──
+    const legacyNs = NS('char-selflog-legacy');
+    const t4 = Date.now();
+    await putState([
+      { namespace: legacyNs, key: 'fire_pack', value: JSON.stringify(firePack('FIREPACK_FRESH_char-selflog-legacy', t4 - 3600_000)), updatedAt: t4 },
+      { namespace: legacyNs, key: 'tool_pack', value: JSON.stringify(toolPack('小旧')), updatedAt: t4 },
+    ]);
+    const legacy = aiTaskPayload({
+      charId: 'char-selflog-legacy', charName: '小旧', mode: 'auto',
+      firstSendTime: new Date(t4 + 1000).toISOString(), recurrenceType: 'none', expirePolicy: 'expire',
+      anchorMs: t4 - 3600_000,
+      taskInstruction: '老客户端排的一条。',
+      frozenPrompt: 'FROZEN_char-selflog-legacy（不应被用到）',
+    });
+    await scheduleTask(legacy.payload);
+    await sleep(1400);
+    await runCron();
+    check('老包照常发送', pushes.some((p) => p.tag === 'char-selflog-legacy'));
+    check('老包不写日志（写了下次也对不上，白占云端）', (await readSelfLog(legacyNs)) === null);
   }
 } catch (e) {
   failures++;

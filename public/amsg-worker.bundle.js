@@ -392,7 +392,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.8/node_modules/@rei-standard/amsg-server/dist/chunk-LEE5KQ7Y.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.9/node_modules/@rei-standard/amsg-server/dist/chunk-S6O3MXQO.mjs
 function isValidISO8601(dateString) {
   const date = new Date(dateString);
   return date instanceof Date && !isNaN(date.getTime());
@@ -984,6 +984,10 @@ async function writeClientStateEntries({ db, userId, userKey, entries }) {
 }
 var DEFAULT_MAX_TOOL_ITERATIONS = 5;
 var DEFAULT_TOTAL_TIMEOUT_MS = 24e4;
+var DEFAULT_MAX_SCHEDULED_TASKS_PER_FIRE = 2;
+var MIN_SCHEDULE_LEAD_MS = 6e4;
+var SCHEDULABLE_MESSAGE_TYPES = /* @__PURE__ */ new Set(["auto", "prompted", "fixed"]);
+var SCHEDULABLE_RECURRENCE_TYPES = /* @__PURE__ */ new Set(["none", "daily", "weekly"]);
 var SLEEP_BETWEEN_MESSAGES_MS = 1500;
 var CREDENTIAL_PAYLOAD_KEYS = /* @__PURE__ */ new Set(["apiKey", "pushSubscription"]);
 var defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1017,6 +1021,9 @@ function normalizeBeforeFireResult(result) {
       messages: result.messages,
       maxToolIterations: result.maxToolIterations,
       totalTimeoutMs: result.totalTimeoutMs,
+      // 归一成「有就是非空数组，否则 undefined」，让下面每轮的透传判断能直接
+      // 用真值。真正决定请求体带不带 tools 的规则住在 llm.js 的
+      // buildAiRequestBody（那边有测试钉着），这层只是不把空数组往下传。
       tools: Array.isArray(result.tools) && result.tools.length > 0 ? result.tools : void 0,
       toolChoice: result.toolChoice
     };
@@ -1108,12 +1115,123 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
     });
     return writeClientStateEntries({ db: ctx.db, userId: task.user_id, userKey, entries: normalized2 });
   };
+  const maxScheduledTasksPerFire = Number.isInteger(ctx.maxScheduledTasksPerFire) && ctx.maxScheduledTasksPerFire >= 0 ? ctx.maxScheduledTasksPerFire : DEFAULT_MAX_SCHEDULED_TASKS_PER_FIRE;
+  let scheduledTaskCount = 0;
+  const scheduleTask = async (options) => {
+    if (!options || typeof options !== "object" || Array.isArray(options)) {
+      throw new TypeError("scheduleTask(options) \u9700\u8981\u4E00\u4E2A\u5BF9\u8C61\uFF0C\u81F3\u5C11\u5305\u542B { firstSendTime }");
+    }
+    if (typeof options.firstSendTime !== "string" || !options.firstSendTime.trim()) {
+      throw new RangeError("scheduleTask: firstSendTime \u5FC5\u586B\uFF0C\u4E14\u5FC5\u987B\u662F ISO 8601 \u5B57\u7B26\u4E32");
+    }
+    const firstSendAt = new Date(options.firstSendTime);
+    if (Number.isNaN(firstSendAt.getTime())) {
+      throw new RangeError(`scheduleTask: firstSendTime \u89E3\u6790\u4E0D\u51FA\u5408\u6CD5\u65F6\u95F4\uFF1A${options.firstSendTime}`);
+    }
+    const earliest = nowFn() + MIN_SCHEDULE_LEAD_MS;
+    if (firstSendAt.getTime() < earliest) {
+      throw new RangeError(
+        `scheduleTask: firstSendTime \u81F3\u5C11\u8981\u6BD4\u73B0\u5728\u665A ${MIN_SCHEDULE_LEAD_MS / 1e3} \u79D2\uFF08\u6700\u65E9\u53EF\u6392 ${new Date(earliest).toISOString()}\uFF0C\u6536\u5230 ${firstSendAt.toISOString()}\uFF09\u2014\u2014cron \u4E00\u5206\u949F\u4E00\u8DF3\uFF0C\u6392\u5F97\u66F4\u8FD1\u7B49\u4E8E\u8BA9\u4E0B\u4E00\u8DF3\u7ACB\u523B\u6361\u8D70`
+      );
+    }
+    const nextSendAt = firstSendAt.toISOString();
+    const inheritedType = options.messageType == null;
+    const messageType = inheritedType ? decryptedPayload.messageType : options.messageType;
+    if (messageType === "instant") {
+      throw new TypeError(
+        "scheduleTask: messageType \u4E0D\u80FD\u662F 'instant'\u2014\u2014instant \u7684\u8BED\u4E49\u662F\u300C\u5EFA\u884C\u7684\u90A3\u4E00\u523B\u5C31\u6295\u9012\u300D\uFF0C\u90A3\u6761\u8DEF\u5F84\u5F52 POST /schedule-message \u7BA1\uFF1B\u4ECE fire \u91CC\u5EFA\u4E00\u6761 instant\uFF0C\u6295\u9012\u65F6\u673A\u53CD\u800C\u8BF4\u4E0D\u6E05\u3002" + (inheritedType ? "\uFF08\u8FD9\u4E2A instant \u662F\u4ECE\u5F53\u524D\u4EFB\u52A1\u7EE7\u627F\u6765\u7684\uFF0C\u663E\u5F0F\u4F20 auto / prompted / fixed \u8986\u76D6\u5B83\u3002\uFF09" : "")
+      );
+    }
+    if (!SCHEDULABLE_MESSAGE_TYPES.has(messageType)) {
+      throw new TypeError(
+        `scheduleTask: messageType \u53EA\u80FD\u662F auto / prompted / fixed\uFF0C\u6536\u5230 ${JSON.stringify(messageType)}`
+      );
+    }
+    const recurrenceType = options.recurrenceType == null ? "none" : options.recurrenceType;
+    if (!SCHEDULABLE_RECURRENCE_TYPES.has(recurrenceType)) {
+      throw new TypeError(
+        `scheduleTask: recurrenceType \u53EA\u80FD\u662F none / daily / weekly\uFF0C\u6536\u5230 ${JSON.stringify(recurrenceType)}`
+      );
+    }
+    const contactName = options.contactName === void 0 ? decryptedPayload.contactName : options.contactName;
+    if (typeof contactName !== "string" || !contactName.trim()) {
+      throw new TypeError("scheduleTask: contactName \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32\uFF08\u9ED8\u8BA4\u7EE7\u627F\u5F53\u524D\u4EFB\u52A1\uFF09");
+    }
+    const userMessage = options.userMessage === void 0 ? decryptedPayload.userMessage ?? null : options.userMessage;
+    if (messageType === "fixed" && (typeof userMessage !== "string" || !userMessage.trim())) {
+      throw new TypeError(
+        "scheduleTask: messageType 'fixed' \u5FC5\u987B\u6709 userMessage\uFF08\u81EA\u5DF1\u4F20\uFF0C\u6216\u4ECE\u5F53\u524D\u4EFB\u52A1\u7EE7\u627F\u5230\uFF09\u2014\u2014\u56FA\u5B9A\u6587\u672C\u4EFB\u52A1\u6CA1\u6709\u6B63\u6587\uFF0C\u5C31\u662F\u4E00\u6761\u6C38\u8FDC\u53D1\u7A7A\u7684\u4EFB\u52A1"
+      );
+    }
+    const metadata = options.metadata === void 0 ? decryptedPayload.metadata || {} : options.metadata;
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+      throw new TypeError("scheduleTask: metadata \u5FC5\u987B\u662F\u666E\u901A\u5BF9\u8C61\uFF08\u6574\u4F53\u66FF\u6362\u5F53\u524D\u4EFB\u52A1\u7684 metadata\uFF0C\u4E0D\u505A\u6DF1\u5408\u5E76\uFF09");
+    }
+    const uuid = options.uuid == null ? randomUUID() : options.uuid;
+    if (typeof uuid !== "string" || !uuid.trim()) {
+      throw new TypeError("scheduleTask: uuid \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32");
+    }
+    if (scheduledTaskCount >= maxScheduledTasksPerFire) {
+      throw new RangeError(
+        `scheduleTask: \u5355\u6B21 fire \u6700\u591A\u5EFA ${maxScheduledTasksPerFire} \u6761\u4EFB\u52A1\uFF08factory \u914D\u7F6E maxScheduledTasksPerFire \u53EF\u8C03\uFF09\uFF0C\u8FD9\u662F\u7B2C ${scheduledTaskCount + 1} \u6761`
+      );
+    }
+    if (!ctx.db || typeof ctx.db.createTask !== "function") {
+      throw new Error("AGENTIC_SCHEDULE_UNSUPPORTED: \u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301\u5EFA\u4EFB\u52A1\uFF08\u7F3A createTask\uFF09");
+    }
+    scheduledTaskCount++;
+    const fullTaskData = {
+      contactName,
+      avatarUrl: options.avatarUrl === void 0 ? decryptedPayload.avatarUrl || null : options.avatarUrl || null,
+      messageType,
+      messageSubtype: (options.messageSubtype === void 0 ? decryptedPayload.messageSubtype : options.messageSubtype) || "chat",
+      userMessage: userMessage || null,
+      firstSendTime: nextSendAt,
+      recurrenceType,
+      apiUrl: decryptedPayload.apiUrl || null,
+      apiKey: decryptedPayload.apiKey || null,
+      primaryModel: decryptedPayload.primaryModel || null,
+      // 见文件头：fire-time hook 每次现场重组 prompt，旧 prompt 带过去只会在新
+      // 任务走回老链路时顶替宿主的意图。
+      completePrompt: null,
+      messages: null,
+      maxTokens: decryptedPayload.maxTokens ?? null,
+      temperature: decryptedPayload.temperature ?? null,
+      splitPattern: decryptedPayload.splitPattern ?? null,
+      pushSubscription: decryptedPayload.pushSubscription,
+      metadata
+    };
+    const encryptedPayload = await encryptForStorage(JSON.stringify(fullTaskData), userKey);
+    let created;
+    try {
+      created = await ctx.db.createTask({
+        user_id: task.user_id,
+        uuid,
+        encrypted_payload: encryptedPayload,
+        next_send_at: nextSendAt,
+        message_type: messageType
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) return { created: false, reason: "duplicate", uuid };
+      throw error;
+    }
+    if (!created) {
+      throw new Error("AGENTIC_SCHEDULE_FAILED: createTask \u6CA1\u6709\u8FD4\u56DE\u65B0\u5EFA\u7684\u4EFB\u52A1\u884C");
+    }
+    return {
+      created: true,
+      id: created.id ?? null,
+      uuid: created.uuid ?? uuid,
+      nextSendAt: created.next_send_at ?? nextSendAt
+    };
+  };
   const scratch = {};
   const fireCtx = Object.freeze({
     task: buildHookTask(task, decryptedPayload),
     userId: task.user_id,
     readState,
     writeState,
+    scheduleTask,
     now: new Date(nowFn()),
     scratch
   });
@@ -1162,7 +1280,8 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
         scratch
       }),
       readState,
-      writeState
+      writeState,
+      scheduleTask
     });
     const decision = await hooks.onLLMOutput(sessionCtx);
     assertValidDecision(decision, { inlineToolCalls: true });
@@ -2592,7 +2711,7 @@ function createClientStateHandler(ctx) {
   }
   return { PUT, GET, DELETE };
 }
-var SERVER_VERSION = true ? "2.6.0-next.8" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.6.0-next.9" : "0.0.0-dev";
 var SERVER_FEATURES = Object.freeze([
   "client-state",
   "client-state-chunking",
@@ -2601,6 +2720,7 @@ var SERVER_FEATURES = Object.freeze([
   "agentic-scratch",
   "agentic-write-state",
   "agentic-fire-tools",
+  "agentic-schedule-task",
   "vapid-public-key"
 ]);
 function createCapabilitiesHandler(ctx) {
@@ -2640,7 +2760,9 @@ function createSingleUserServer(config) {
     hooks: config.hooks || null,
     maxToolIterations: config.maxToolIterations,
     totalTimeoutMs: config.totalTimeoutMs,
-    maxStateValueBytes: config.maxStateValueBytes
+    maxStateValueBytes: config.maxStateValueBytes,
+    // hook 的 ctx.scheduleTask() 单次 fire 建任务的条数上限（默认 2）。
+    maxScheduledTasksPerFire: config.maxScheduledTasksPerFire
   };
   return {
     ctx,
@@ -2974,6 +3096,8 @@ function createSingleUserCloudflareWorker(buildConfig) {
         totalTimeoutMs: cfg.totalTimeoutMs,
         // hook 的 ctx.writeState() 用它判断单条 value 的上限，和 PUT /client-state 同一个配置。
         maxStateValueBytes: cfg.maxStateValueBytes,
+        // hook 的 ctx.scheduleTask() 单次 fire 建任务的条数上限（默认 2）。
+        maxScheduledTasksPerFire: cfg.maxScheduledTasksPerFire,
         // 任务占位租期（默认 10 分钟，随 totalTimeoutMs 抬高）。
         claimLeaseMs: cfg.claimLeaseMs
       });
