@@ -28,7 +28,7 @@ import ApiCallLogModal from '../components/settings/ApiCallLogModal';
 import { DB } from '../utils/db';
 import { getBackupReminderState, setBackupReminderIntervalDays, daysSinceLastBackup, BACKUP_REMINDER_MIN_DAYS, BACKUP_REMINDER_MAX_DAYS } from '../utils/backupReminder';
 
-// hot_news（orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
+// hot_news（news.orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
 const HOTNEWS_PLATFORM_OPTIONS: { key: string; label: string }[] = [
     { key: 'weibo', label: '微博' },
     { key: 'zhihu', label: '知乎' },
