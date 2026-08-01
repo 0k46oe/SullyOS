@@ -35,7 +35,7 @@ const REQUIRED_WORKER_FEATURES = [
 //            `{{AMSG_SELF_LOG}}` 原样发给 LLM，而 SERVER_VERSION 是打包时那份
 //            amsg-server 的版本号，正好能把这类旧粘贴认出来。
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
-const REQUIRED_WORKER_VERSION = '2.6.0-next.9';
+const REQUIRED_WORKER_VERSION = '2.6.0-next.10';
 
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';

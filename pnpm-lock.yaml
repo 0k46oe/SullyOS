@@ -51,8 +51,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0
       '@rei-standard/amsg-sw':
-        specifier: 2.3.2
-        version: 2.3.2
+        specifier: 2.4.0-next.1
+        version: 2.4.0-next.1
       ag-psd:
         specifier: ^31.0.2
         version: 31.0.2
@@ -76,8 +76,8 @@ importers:
         specifier: ^6.0.0
         version: 6.2.1
       '@rei-standard/amsg-server':
-        specifier: 2.6.0-next.9
-        version: 2.6.0-next.9
+        specifier: 2.6.0-next.10
+        version: 2.6.0-next.10
       '@types/qrcode':
         specifier: ^1.5.6
         version: 1.5.6
@@ -790,8 +790,8 @@ packages:
     resolution: {integrity: sha512-GsLzRvSXsp5cbJ/vNwQP+yHoZ4LJiilOvws0LemrzaFoG45ApQ7WW3YHux58DXdXOSN36prT5CsmipA3wUAmQQ==}
     engines: {node: '>=18'}
 
-  '@rei-standard/amsg-server@2.6.0-next.9':
-    resolution: {integrity: sha512-ETPtaE+S074LvCTEHLlvL6uGunht4APt0pKPX8gEMfEiIhUtABB0ChXOYfQgduk3cfMTXwmQIVzU9zpXOBnpsg==}
+  '@rei-standard/amsg-server@2.6.0-next.10':
+    resolution: {integrity: sha512-U8eJOE7i9KZUy6D3pOm9q2I8qeYiQ7npQjDAB9pHry3itD/vu6NkknxvVplVpxCbg2DpGpNmW5RJhHaV3lFsWA==}
     engines: {node: '>=20'}
     peerDependencies:
       '@neondatabase/serverless': '>=0.9.0'
@@ -814,8 +814,12 @@ packages:
     resolution: {integrity: sha512-DgAeqWDmp1onJDIbUNU/66MhJnlVv37HsHuOOeO88ACXU9OgSA89M6iMZGO333RSCMM1eJasxUq12b0xFTbLtA==}
     engines: {node: '>=20'}
 
-  '@rei-standard/amsg-sw@2.3.2':
-    resolution: {integrity: sha512-iaRyowE981qzq/imarISG2ROxwG7sLkBYUUVUtyqbkx+RcKatflIWGqZon+gAJLQRL9S6L0qyqkx4S/GRN2T2g==}
+  '@rei-standard/amsg-shared@0.4.0-next.2':
+    resolution: {integrity: sha512-rapzp4SVfZpB1WDMesWA0rctVFI033lCg6ZTiF48yIeGbCrJ3M2s9N7/BZxgorhHxgeDlp+/PEcZkj6U28sv2g==}
+    engines: {node: '>=20'}
+
+  '@rei-standard/amsg-sw@2.4.0-next.1':
+    resolution: {integrity: sha512-aJBdjx5hY+2y3IwppGgHPl3MtY8InTy4MDF7Z1l9jCfL5AzWJeoSwwzFhiq2VcWbf3f666qXMOp4iI7mVlESNw==}
     engines: {node: '>=20'}
 
   '@rolldown/pluginutils@1.0.0-beta.27':
@@ -2509,10 +2513,10 @@ snapshots:
     dependencies:
       '@rei-standard/amsg-shared': 0.2.0
 
-  '@rei-standard/amsg-server@2.6.0-next.9':
+  '@rei-standard/amsg-server@2.6.0-next.10':
     dependencies:
       '@netlify/blobs': 8.2.0
-      '@rei-standard/amsg-shared': 0.4.0-next.1
+      '@rei-standard/amsg-shared': 0.4.0-next.2
       web-push: 3.6.7
     transitivePeerDependencies:
       - supports-color
@@ -2523,9 +2527,11 @@ snapshots:
 
   '@rei-standard/amsg-shared@0.4.0-next.1': {}
 
-  '@rei-standard/amsg-sw@2.3.2':
+  '@rei-standard/amsg-shared@0.4.0-next.2': {}
+
+  '@rei-standard/amsg-sw@2.4.0-next.1':
     dependencies:
-      '@rei-standard/amsg-shared': 0.3.0
+      '@rei-standard/amsg-shared': 0.4.0-next.2
 
   '@rolldown/pluginutils@1.0.0-beta.27': {}
 
