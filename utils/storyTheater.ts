@@ -786,6 +786,47 @@ export const buildBareTheaterActorContext = (char: CharacterProfile): string => 
     char.worldview?.trim() ? `- 世界观：\n${char.worldview.trim()}` : '',
 ].filter(Boolean).join('\n');
 
+export const buildStoryActorMemoryEnvelope = (
+    characterName: string,
+    recalled: string,
+    originalUserName: string,
+    currentIdentityName: string,
+): string => {
+    const content = recalled.trim();
+    if (!content) return '';
+    const owner = characterName.trim() || '当前角色';
+    const originalUser = originalUserName.trim() || '原本的你';
+    const currentIdentity = currentIdentityName.trim() || originalUser;
+    const identityReminder = currentIdentity === originalUser
+        ? `- 本剧情当前的“你”仍是「${originalUser}」。`
+        : `- 本剧情当前执笔身份是「${currentIdentity}」，不得因此把记忆里的“你”改指为「${currentIdentity}」。`;
+
+    return [
+        `### ${owner} 的专属既有记忆`,
+        `归属规则：以下内容只属于角色「${owner}」，不得归给、共享给或改写成其他角色的亲历记忆。`,
+        `- 记忆片段里的第一人称“我/我的”，默认指「${owner}」。`,
+        `- 记忆片段里的第二人称“你/你的”，若片段没有另行点名，默认指形成记忆时的原互动对象「${originalUser}」。`,
+        identityReminder,
+        `【${owner}专属记忆开始】`,
+        content,
+        `【${owner}专属记忆结束】`,
+    ].join('\n');
+};
+
+export const buildStoryArchiveMemoryEnvelope = (recalled: string): string => {
+    const content = recalled.trim();
+    if (!content) return '';
+    return [
+        '### 本剧情共享档案召回',
+        '归属规则：以下内容是本剧情自己的叙事档案，只用于承接已经发生的剧情；它不属于任何一位角色的个人记忆，也不得写入或冒充角色的神经链接记忆。',
+        '- 片段中的第一、第二人称只保留原文叙事视角；应依据片段内明确出现的姓名与事件判断身份。',
+        '- 无法从片段确定指代时，保持模糊，不得擅自把“我/你”归给当前面具或任一角色。',
+        '【本剧情共享档案开始】',
+        content,
+        '【本剧情共享档案结束】',
+    ].join('\n');
+};
+
 export const buildTheaterPersona = (mask: ResolvedStoryTheaterMask): string => [
     '### 你当前执笔的身份',
     `- 名字：${mask.name || '你'}`,
@@ -969,14 +1010,24 @@ export const parseStoryDisplayBlocks = (content: string): StoryDisplayBlock[] =>
     return blocks;
 };
 
-export const formatActorRecentMessages = (char: CharacterProfile, messages: Message[]): string => {
+export const formatActorRecentMessages = (
+    char: CharacterProfile,
+    messages: Message[],
+    originalUserName?: string,
+    currentIdentityName?: string,
+): string => {
     if (messages.length === 0) return '';
+    const originalUser = originalUserName?.trim() || '你';
+    const currentIdentity = currentIdentityName?.trim() || originalUser;
     const rows = messages.map(message => {
-        const speaker = message.role === 'user' ? '你' : message.role === 'assistant' ? char.name : '系统';
+        const speaker = message.role === 'user' ? `记忆中的你（${originalUser}）` : message.role === 'assistant' ? char.name : '系统';
         const clean = String(message.content || '').replace(/data:[^\s]+/gi, '[媒体]').slice(0, 4000);
         return `- [${new Date(message.timestamp).toLocaleString()}] ${speaker}：${clean}`;
     });
-    return `### ${char.name} 最近携带的原文上下文（${messages.length} 条）\n${rows.join('\n')}`;
+    const identityReminder = currentIdentity === originalUser
+        ? ''
+        : `\n当前执笔身份是「${currentIdentity}」；不得把下列“记忆中的你”重新解释成当前身份。`;
+    return `### ${char.name} 最近携带的专属原文上下文（${messages.length} 条）\n以下记录只属于「${char.name}」与原互动对象「${originalUser}」，不得并入其他角色的经历。${identityReminder}\n${rows.join('\n')}`;
 };
 
 export const buildStoryHistory = (messages: Message[]): StoryApiMessage[] => messages
