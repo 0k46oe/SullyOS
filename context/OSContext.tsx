@@ -3149,7 +3149,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // 角色身上的 groupId 指向这张表，漏导会让导入端全员回落「未分组」
               'characters', 'character_groups', 'messages', 'themes', 'emojis', 'emoji_categories', 'assets', 'gallery',
               'user_profile', 'diaries', 'tasks', 'anniversaries', 'room_todos',
-              'room_notes', 'groups', 'journal_stickers', 'social_posts', 'courses', 'games', 'worldbooks', 'novels', 'songs',
+              'room_notes', 'groups', 'journal_stickers', 'social_posts', 'courses', 'games', 'worldbooks', 'story_theaters', 'story_theater_presets', 'story_theater_masks', 'novels', 'songs',
               'bank_transactions', 'bank_data',
               'xhs_activities', 'xhs_stock',
               'quizzes', 'guidebook', 'scheduled_messages', 'life_sim',
@@ -3415,6 +3415,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               'room_plates', 'digest_reports',
               'bank_transactions', 'scheduled_messages', 'memory_batches', 'hotnews_snapshots',
               'character_groups',
+              'story_theaters', 'story_theater_presets',
               'life_records', 'med_plans', 'life_record_settings'
           ]);
 
@@ -3453,6 +3454,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               courses: 'courses',
               games: 'games',
               worldbooks: 'worldbooks',
+              story_theaters: 'storyTheaters',
+              story_theater_presets: 'storyTheaterPresets',
+              story_theater_masks: 'storyTheaterMasks',
               novels: 'novels',
               songs: 'songs',
               bank_transactions: 'bankTransactions',
@@ -3646,6 +3650,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   case 'courses': backupData.courses = processedData; break;
                   case 'games': backupData.games = processedData; break;
                   case 'worldbooks': backupData.worldbooks = processedData; break;
+                  case 'story_theaters': backupData.storyTheaters = processedData; break;
+                  case 'story_theater_presets': backupData.storyTheaterPresets = processedData; break;
+                  case 'story_theater_masks': backupData.storyTheaterMasks = processedData; break;
                   case 'novels': backupData.novels = processedData; break;
                   case 'songs': backupData.songs = processedData; break;
                   case 'bank_transactions': backupData.bankTransactions = processedData; break;
