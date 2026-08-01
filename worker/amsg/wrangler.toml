@@ -5,6 +5,13 @@ main = "worker.bundle.js"
 compatibility_date = "2026-01-01"
 # amsg-server 2.6.0-next.2 起全 Web Crypto，不需要 nodejs_compat。
 
+# 角色到点调用户自配的 MCP 服务器时要走公网。缺这个 flag，发往同一个 Cloudflare
+# 账号/区域下的地址（自己部署的 mcp-proxy 就是这种）会被当成内网调用直接拒掉，
+# worker 侧看到的是 404 + error code 1042，角色那边表现为「工具连不上」。
+# 与 observability 同理：wrangler deploy 用本地这份配置整体覆盖面板设置，
+# 不写在这里的话，面板上手动加过的这个 flag 会被下一次 deploy 冲掉。
+compatibility_flags = ["global_fetch_strictly_public"]
+
 # wrangler deploy 会用本地这份配置整体覆盖 Cloudflare 面板上的设置——
 # 不显式写这段，面板里手动开的 Workers Logs（实时日志）会被一起关掉。
 # amsg2 排障（[amsg:expire-skip] / [amsg:agentic] / [amsg:fire-state-missing]
