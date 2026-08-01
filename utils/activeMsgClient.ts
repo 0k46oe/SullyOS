@@ -5,6 +5,7 @@ import {
   ActiveMsg2GlobalConfig,
   ActiveMsg2Mode,
   ActiveMsg2Recurrence,
+  ActiveMsg2TaskRecord,
   APIConfig,
   CharacterProfile,
   Emoji,
@@ -16,7 +17,8 @@ import {
 import { getLastRealUserMessageAt } from './amsg2ExpireGuard';
 import { buildTaskInstruction } from './amsgFireSchedule';
 import {
-  getPendingTasks, MAX_ACTIVE_TASKS_PER_CHAR, resolveExpirePolicy, toDatetimeLocalValue,
+  getPendingTasks, isAmsg2EnabledForChar, MAX_ACTIVE_TASKS_PER_CHAR,
+  parseRemoteTaskLastError, RemoteTaskLastError, resolveExpirePolicy, toDatetimeLocalValue,
 } from './amsg2Tasks';
 import { AMSG_CHAT_PRESENCE_KEY, AmsgChatPresence } from './amsgChatPresence';
 import {
@@ -72,6 +74,8 @@ type InternalReiClient = ReiClient & {
   getVapidPublicKey: () => Promise<string>;
   // amsg-client 2.9.0-next.4：worker 特性探测。老 worker 无 /capabilities 端点 → null。
   getCapabilities: () => Promise<{ serverVersion: string; features: string[] } | null>;
+  // PUT /update-message：白名单字段打补丁（凭据/订阅刷新走它，见 refreshXxx 方法）。
+  updateMessage: (uuid: string, updates: Record<string, unknown>) => Promise<any>;
 };
 
 const ACTIVE_MSG_RUNTIME_HEADER = '[ActiveMsg2]';
@@ -164,6 +168,25 @@ const resolveApiConfig = (char: CharacterProfile, config: ActiveMsg2CharacterCon
   }
 
   return source;
+};
+
+/**
+ * 一个角色的 AI 任务此刻该用的凭据补丁（update-message 载荷）。
+ * 生效凭据的算法与排程时同一份 resolveApiConfig：角色开了单独 API 就写单独 API 的值，
+ * 没开才用全局聊天 API——凭据刷新绝不能把单独 API 的任务盖成全局凭据。
+ * 凭据配不齐（比如单独 API 缺字段）沿用 resolveApiConfig 的抛错，调用方按角色记失败。
+ */
+const resolveTaskCredentialUpdates = (
+  char: CharacterProfile,
+  config: ActiveMsg2CharacterConfig,
+  apiConfig: APIConfig,
+): Record<string, unknown> => {
+  const active = resolveApiConfig(char, config, apiConfig);
+  return {
+    apiUrl: normalizeChatApiUrl(active.baseUrl),
+    apiKey: active.apiKey,
+    primaryModel: active.model,
+  };
 };
 
 const formatHistoryLine = (role: string, content: any, char: CharacterProfile, userProfile: UserProfile) => {
@@ -490,6 +513,44 @@ const buildToolConfigEntry = (
   updatedAt,
 });
 
+/**
+ * 现有推送订阅还能不能继续用；不能用的当场退订，返回 null 让调用方重新订阅。
+ *
+ * 两种「留着必失联」的形态：
+ *   1. 死端点——浏览器把订阅僵尸化成 `permanently-removed.invalid` 哨兵，推必失败；
+ *   2. 绑的 VAPID 公钥跟目标 worker 的不一致——换过 VAPID 后旧订阅还签着老公钥，
+ *      worker 发推会被推送服务 403 拒掉。
+ * 退订后要等浏览器清内部 removed 标记（SUBSCRIBE_SETTLE_MS），否则紧接着的
+ * subscribe() 又拿到死哨兵。
+ *
+ * 判定口径与 instantPushClient.getOrCreateInstantSubscription /
+ * proactivePushConfig.getOrCreateSubscription 的内联实现一致；那两处在各自文件里，
+ * 将来合并时以这份抽出来的函数为准。export 供单测 mock pushManager 钉行为。
+ */
+export const dropStaleSubscription = async (
+  sub: PushSubscription | null,
+  targetVapidPublicKey: string,
+): Promise<PushSubscription | null> => {
+  if (!sub) return null;
+  if (isDeadPushEndpoint(sub.endpoint)) {
+    try { await sub.unsubscribe(); } catch { /* ignore */ }
+    await delay(SUBSCRIBE_SETTLE_MS);
+    return null;
+  }
+  try {
+    const existingKey = bytesToB64u(sub.options.applicationServerKey);
+    if (existingKey && existingKey !== targetVapidPublicKey) {
+      await sub.unsubscribe();
+      await delay(SUBSCRIBE_SETTLE_MS);
+      return null;
+    }
+  } catch {
+    // 公钥读不出来（个别浏览器不暴露 options）就按可复用处理——
+    // 与 instant / proactive 两处同款 fall-through。
+  }
+  return sub;
+};
+
 const fetchWithAuth = async (path: string, config: ActiveMsg2GlobalConfig, init: RequestInit, phase = '接口') => {
   const headers = new Headers(init.headers);
   if (config.serverToken) headers.set('X-Client-Token', config.serverToken);
@@ -580,11 +641,12 @@ export const ActiveMsgClient = {
 
     await KeepAlive.init();
     const registration = await navigator.serviceWorker.ready;
-    const existing = await registration.pushManager.getSubscription();
-    if (existing) return existing.toJSON();
 
     // VAPID 公钥必须来自「这个 worker 自己」签推送用的那对密钥，否则 worker 推不动会 403。
     // 各用户自部署 worker、各有各的 VAPID，运行时从 worker 拉、不编译进前端。
+    // **有旧订阅也要拉**：换过 VAPID 后旧订阅绑的还是老公钥，无条件复用等于把一个
+    // 必 403 的订阅继续写进新任务——自检就是拿目标公钥跟旧订阅比对（还有浏览器
+    // 僵尸化的死端点），不合格先退订再重订（见 dropStaleSubscription）。
     const client = createClient(config);
     let vapidPublicKey: string;
     try {
@@ -595,6 +657,11 @@ export const ActiveMsgClient = {
     if (!vapidPublicKey) {
       throw new Error('Worker 没返回 VAPID 公钥，请确认已配置 VAPID 并部署了最新 worker。');
     }
+
+    const existing = await registration.pushManager.getSubscription();
+    const reusable = await dropStaleSubscription(existing, vapidPublicKey);
+    if (reusable) return reusable.toJSON();
+
     const subscription = await client.subscribePush(vapidPublicKey, registration);
     return subscription.toJSON();
   },
@@ -646,20 +713,36 @@ export const ActiveMsgClient = {
   },
 
   /**
-   * 某个角色在远端还活着的任务 uuid（对账 / 关闭全部用；上游按任务投影顶层 charId）。
+   * 某个角色在远端的任务投影（uuid + status + lastError），面板对账 / 失败可见化用。
    *
    * 老 worker（amsg-server < 2.6.0-next.5）不投影 charId：远端明明有任务，这里却一条都
    * 匹配不上。空结果此时不是「远端没有」的证据，直接抛错让调用方走各自的降级——面板
    * 对账整体关掉「远端不存在」徽标，关闭 2.0 退回本地全量清单——而不是拿半份证据误判。
+   *
+   * lastError 是 run-tick 记进 payload 的「上一次为什么没发出去」（2.6.0-next.10 起
+   * GET /messages 透出；旧 worker 没有这字段 → null，界面上就是不显示那行说明）。
    */
-  async listRemoteTaskUuidsForChar(charId: string): Promise<string[]> {
+  async listRemoteTasksForChar(charId: string): Promise<Array<{
+    uuid: string;
+    status?: string;
+    lastError: RemoteTaskLastError | null;
+  }>> {
     const tasks = await this.listAllTasks();
     if (tasks.length > 0 && tasks.every((t) => t?.charId == null)) {
       throw new Error('worker 版本过旧：任务列表没有 charId 投影，无法按角色对账，请在设置里重新粘贴部署。');
     }
     return tasks
       .filter((t) => t?.charId === charId && typeof t?.uuid === 'string')
-      .map((t) => t.uuid as string);
+      .map((t) => ({
+        uuid: t.uuid as string,
+        status: typeof t?.status === 'string' ? t.status as string : undefined,
+        lastError: parseRemoteTaskLastError(t?.lastError),
+      }));
+  },
+
+  /** 只要 uuid 的薄壳（删角色 / 关闭全部这些路径不关心 status / lastError）。 */
+  async listRemoteTaskUuidsForChar(charId: string): Promise<string[]> {
+    return (await this.listRemoteTasksForChar(charId)).map((t) => t.uuid);
   },
 
   /**
@@ -935,6 +1018,136 @@ export const ActiveMsgClient = {
     const globalConfig = await ensureWorkerReady();
     const client = createClient(globalConfig);
     return client.getCapabilities();
+  },
+
+  /**
+   * 逐条 PUT update-message，返回成功数与失败的 uuid。
+   * TASK_NOT_FOUND / TASK_ALREADY_COMPLETED 不算失败——远端已经没有 / 已完结的
+   * 任务本来就没有「刷新」可言，正是不需要动的那一侧。单条失败继续跑完其余的
+   * （口径同 cancelAllTasksForChar：一条网络抖动不该拖累剩下的任务）。
+   */
+  async updatePendingTasksRemote(
+    taskUuids: string[],
+    updates: Record<string, unknown>,
+  ): Promise<{ updated: number; failed: string[] }> {
+    const config = await ensureWorkerReady();
+    const client = await initializeClient(config);
+    let updated = 0;
+    const failed: string[] = [];
+    for (const uuid of taskUuids) {
+      try {
+        const response = await client.updateMessage(uuid, { ...updates });
+        const code = response?.error?.code;
+        if (response?.success) {
+          updated += 1;
+        } else if (code !== 'TASK_NOT_FOUND' && code !== 'TASK_ALREADY_COMPLETED') {
+          failed.push(uuid);
+        }
+      } catch {
+        failed.push(uuid);
+      }
+    }
+    return { updated, failed };
+  },
+
+  /**
+   * 浏览器换掉推送订阅（pushsubscriptionchange）后的兜底：把新订阅逐条写回
+   * 所有还会响的远端任务。任务体里的 pushSubscription 是排程那一刻冻结的，
+   * 订阅一换端点，到点推送全打到作废端点上——静默失联，用户只看到「怎么不来了」。
+   *
+   * 不看角色的 enabled：关闭 2.0 时取消失败残留的任务远端照样会响，响就该推到
+   * 新订阅上。fixed 任务也刷——推送订阅跟模式无关。
+   * 调用方（activeMsgRuntime 的标记消费）按返回值决定清不清标记：
+   * ok / no-tasks 清，partial 留着下次再试。
+   */
+  async refreshPushSubscriptionForPendingTasks(): Promise<{
+    status: 'no-tasks' | 'ok' | 'partial';
+    updated: number;
+    failed: number;
+  }> {
+    const now = Date.now();
+    const chars = await DB.getAllCharacters();
+    const taskUuids = chars.flatMap((char) =>
+      getPendingTasks(char.activeMsg2Config, now).map((t) => t.taskUuid));
+    if (taskUuids.length === 0) return { status: 'no-tasks', updated: 0, failed: 0 };
+
+    const pushSubscription = await this.ensurePushSubscription();
+    const { updated, failed } = await this.updatePendingTasksRemote(taskUuids, { pushSubscription });
+    return { status: failed.length ? 'partial' : 'ok', updated, failed: failed.length };
+  },
+
+  /**
+   * 单角色版凭据刷新：面板保存后用。
+   * 面板手里就有最新的角色级配置（onSave 落库是异步的，读 DB 会拿到旧的），
+   * 所以这里让调用方把 config 和要刷的任务清单直接传进来；fixed 在这里再滤一遍，
+   * 传错也不至于给固定消息塞凭据。
+   */
+  async refreshCharPendingAiTaskCredentials(params: {
+    char: CharacterProfile;
+    config: ActiveMsg2CharacterConfig;
+    apiConfig: APIConfig;
+    tasks: ActiveMsg2TaskRecord[];
+  }): Promise<{
+    status: 'no-tasks' | 'ok' | 'partial';
+    updated: number;
+    failed: number;
+  }> {
+    const aiTaskUuids = params.tasks
+      .filter((t) => t.mode !== 'fixed')
+      .map((t) => t.taskUuid);
+    if (aiTaskUuids.length === 0) return { status: 'no-tasks', updated: 0, failed: 0 };
+
+    const updates = resolveTaskCredentialUpdates(params.char, params.config, params.apiConfig);
+    const { updated, failed } = await this.updatePendingTasksRemote(aiTaskUuids, updates);
+    return { status: failed.length ? 'partial' : 'ok', updated, failed: failed.length };
+  },
+
+  /**
+   * 聊天 API 配置保存后，把新凭据写回还会响的远端 AI 任务（设置页保存路径调）。
+   * 任务体里的 apiUrl / apiKey / primaryModel 是排程那一刻冻结的——换了 Key、
+   * 旧 Key 吊销后，已排程任务到点全部 401，用户只看到「主动消息怎么不来了」。
+   *
+   * 范围：开着 2.0（enabled !== false）且有 pending AI 任务（mode !== 'fixed'）的
+   * 角色。fixed 不走 LLM 用不到凭据；关掉 2.0 的角色残留任务是「待取消」而不是
+   * 「待续命」，不给它们续新凭据。生效凭据按 resolveTaskCredentialUpdates 算——
+   * 开了单独 API 的角色写的是单独 API 的值，不会被全局配置覆盖。
+   */
+  async refreshApiCredentialsForPendingTasks(apiConfig: APIConfig): Promise<{
+    status: 'no-tasks' | 'ok' | 'partial';
+    updated: number;
+    failed: number;
+  }> {
+    const now = Date.now();
+    const targets = (await DB.getAllCharacters())
+      .filter((char) => isAmsg2EnabledForChar(char))
+      .map((char) => ({
+        char,
+        config: char.activeMsg2Config ?? { enabled: true },
+        aiTaskUuids: getPendingTasks(char.activeMsg2Config, now)
+          .filter((t) => t.mode !== 'fixed')
+          .map((t) => t.taskUuid),
+      }))
+      .filter((item) => item.aiTaskUuids.length > 0);
+    // 没有要刷的任务直接返回：没配 2.0 的用户每次保存 API 不该多打一个请求。
+    if (targets.length === 0) return { status: 'no-tasks', updated: 0, failed: 0 };
+
+    let updated = 0;
+    let failed = 0;
+    for (const item of targets) {
+      let updates: Record<string, unknown>;
+      try {
+        updates = resolveTaskCredentialUpdates(item.char, item.config, apiConfig);
+      } catch (error) {
+        // 这个角色的凭据配不齐（多半是单独 API 缺字段），整组记失败，别拦着其他角色。
+        console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 角色凭据解析失败，跳过其任务的凭据刷新`, item.char.id, error);
+        failed += item.aiTaskUuids.length;
+        continue;
+      }
+      const result = await this.updatePendingTasksRemote(item.aiTaskUuids, updates);
+      updated += result.updated;
+      failed += result.failed.length;
+    }
+    return { status: failed ? 'partial' : 'ok', updated, failed };
   },
 
   /**

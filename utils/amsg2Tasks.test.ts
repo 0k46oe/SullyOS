@@ -269,6 +269,76 @@ describe('describeTaskProgress', () => {
   it('底账没拉到 → 不猜，给中性文案', () => {
     expect(describeTaskProgress(fired, null, now)).toBe('已到点');
   });
+
+  // 一次性任务重试用完会被标 'failed' 留在远端，永远不会再被消费——
+  // 这时候还说「待处理」是骗人，它不会有下文了。
+  it('远端那行还在但已是 failed 终态 → 发送失败，不再说「待处理」', () => {
+    expect(describeTaskProgress(fired, new Set([fired.taskUuid]), now, 'failed')).toBe('发送失败');
+    // 非终态的远端 status（pending 等）不改变原口径。
+    expect(describeTaskProgress(fired, new Set([fired.taskUuid]), now, 'pending')).toBe('已到点·待处理');
+  });
+});
+
+// ─── 远端 lastError（上一次没发出去的原因）的收敛与人话 ───
+describe('parseRemoteTaskLastError', () => {
+  it('标准形状（run-tick 写的 {at, occurrence, reason}）原样收敛', () => {
+    expect(parseRemoteTaskLastError({
+      at: '2026-07-30T15:00:10.000Z',
+      occurrence: '2026-07-30T15:00:00.000Z',
+      reason: 'stale',
+    })).toEqual({
+      at: '2026-07-30T15:00:10.000Z',
+      occurrence: '2026-07-30T15:00:00.000Z',
+      reason: 'stale',
+    });
+  });
+
+  it('null / 非对象 / 全空对象 → null（旧 worker 没这字段，界面不显示那行）', () => {
+    expect(parseRemoteTaskLastError(null)).toBeNull();
+    expect(parseRemoteTaskLastError(undefined)).toBeNull();
+    expect(parseRemoteTaskLastError('stale')).toBeNull();
+    expect(parseRemoteTaskLastError({})).toBeNull();
+    expect(parseRemoteTaskLastError({ at: 123, reason: '' })).toBeNull();
+  });
+
+  it('字段残缺时留下能用的部分', () => {
+    expect(parseRemoteTaskLastError({ reason: 'HTTP 403' })).toEqual({
+      at: undefined, occurrence: undefined, reason: 'HTTP 403',
+    });
+  });
+});
+
+describe('describeRemoteLastError', () => {
+  const fmt = (iso: string) => `T(${iso})`;
+
+  it("reason 'stale' → 「到点时已过期太久，跳过了一次」，时间优先用 occurrence", () => {
+    expect(describeRemoteLastError({
+      at: '2026-07-30T15:00:10.000Z',
+      occurrence: '2026-07-30T15:00:00.000Z',
+      reason: 'stale',
+    }, fmt)).toBe('T(2026-07-30T15:00:00.000Z) 到点时已过期太久，跳过了一次');
+  });
+
+  it('其余 reason → 「上次到点没发出去（连续失败）」并带上原因', () => {
+    expect(describeRemoteLastError({
+      occurrence: '2026-07-30T15:00:00.000Z',
+      reason: 'Web Push 返回 HTTP 403',
+    }, fmt)).toBe('T(2026-07-30T15:00:00.000Z) 上次到点没发出去（连续失败：Web Push 返回 HTTP 403）');
+  });
+
+  it('reason 是一长串原始报错时截断，别把整段堆栈糊上卡片', () => {
+    const text = describeRemoteLastError({ reason: 'x'.repeat(500) }, fmt)!;
+    expect(text.length).toBeLessThan(120);
+    expect(text).toContain('上次到点没发出去');
+  });
+
+  it('没有 occurrence 退回 at；两个都没有就不带时间；null → null', () => {
+    expect(describeRemoteLastError({ at: '2026-07-30T15:00:10.000Z', reason: 'boom' }, fmt))
+      .toBe('T(2026-07-30T15:00:10.000Z) 上次到点没发出去（连续失败：boom）');
+    expect(describeRemoteLastError({ reason: 'boom' }, fmt))
+      .toBe('上次到点没发出去（连续失败：boom）');
+    expect(describeRemoteLastError(null, fmt)).toBeNull();
+  });
 });
 
 describe('pruneFiredTasks', () => {

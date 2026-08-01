@@ -1069,6 +1069,85 @@ const backfillReasoningSafely = async (sessionId?: string, charId?: string): Pro
   }
 };
 
+// ─── 订阅变化标记（SW 写，这里读/清）────────────────────────────────────────
+// 浏览器换掉推送订阅时 SW 的 pushsubscriptionchange 会往 ActiveMsg 库 kv store 写
+// 一条固定 key 的标记（见 worker/sw-keep-alive.ts，key 与记录形状两边必须一致）。
+// 这里在启动 / 收到 SW 通知时消费它：把新订阅逐条写回还会响的远端任务
+// （ActiveMsgClient.refreshPushSubscriptionForPendingTasks），全部成功才清标记，
+// 失败 / worker 不支持都留着下次再试。
+
+export const PUSH_SUBSCRIPTION_CHANGED_KV_ID = 'push_subscription_changed_v1';
+const ACTIVE_MSG_DB_NAME = 'ActiveMsg';
+const ACTIVE_MSG_KV_STORE = 'kv';
+
+/**
+ * 不带版本号打开 ActiveMsg 库（跟着现有版本走，永不触发升级/降级冲突）。
+ * 打开前先让 ActiveMsgStore 把 schema 建到当前版本——对一个不存在的库做无版本号
+ * open 会建出没有任何 store 的 v1 空壳，谁先按版本升级谁说了算，kv 可能就没了。
+ * 用完即关：这是一条一次性的旁路连接，别跟单例连接池抢着常驻（连接风暴前科见
+ * activeMsgStore.ts 注释）。
+ */
+const withActiveMsgKv = async <T>(
+  mode: IDBTransactionMode,
+  run: (store: IDBObjectStore) => IDBRequest<T>,
+): Promise<T> => {
+  await ActiveMsgStore.getGlobalConfig();
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(ACTIVE_MSG_DB_NAME);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      const tx = db.transaction(ACTIVE_MSG_KV_STORE, mode);
+      const request = run(tx.objectStore(ACTIVE_MSG_KV_STORE));
+      tx.oncomplete = () => resolve(request.result);
+      tx.onerror = () => reject(tx.error || request.error);
+      tx.onabort = () => reject(tx.error || new Error('ActiveMsg kv tx aborted'));
+    });
+  } finally {
+    try { db.close(); } catch { /* ignore */ }
+  }
+};
+
+const hasPushSubscriptionChangeMarker = async (): Promise<boolean> =>
+  Boolean(await withActiveMsgKv('readonly', (store) => store.get(PUSH_SUBSCRIPTION_CHANGED_KV_ID)));
+
+const clearPushSubscriptionChangeMarker = async (): Promise<void> => {
+  await withActiveMsgKv('readwrite', (store) => store.delete(PUSH_SUBSCRIPTION_CHANGED_KV_ID));
+};
+
+/**
+ * 有「订阅已变化」标记就把新订阅刷回已挂的远端任务；返回值只为单测断言。
+ *   - 'no-marker'：没有标记（或读标记本身失败——那就等下次，别为一句自检拦启动）；
+ *   - 'refreshed'：刷完了（或压根没有任务要刷），标记已清；
+ *   - 'kept'：部分失败 / 抛错，标记保留，下次启动或下次 SW 通知再试。
+ */
+export const refreshPushSubscriptionIfMarked = async (): Promise<'no-marker' | 'refreshed' | 'kept'> => {
+  let marked = false;
+  try {
+    marked = await hasPushSubscriptionChangeMarker();
+  } catch (e) {
+    log.warn('读取订阅变化标记失败，跳过本次订阅自检', { error: e });
+    return 'no-marker';
+  }
+  if (!marked) return 'no-marker';
+
+  try {
+    const result = await ActiveMsgClient.refreshPushSubscriptionForPendingTasks();
+    if (result.status === 'partial') {
+      log.warn('订阅刷新未完成，标记保留下次再试', { status: result.status, failed: result.failed });
+      return 'kept';
+    }
+    await clearPushSubscriptionChangeMarker();
+    log.info('订阅变化已刷回远端任务', { status: result.status, updated: result.updated });
+    return 'refreshed';
+  } catch (e) {
+    log.warn('刷新已挂任务的推送订阅失败，标记保留下次再试', { error: e });
+    return 'kept';
+  }
+};
+
 const handleDeepLink = () => {
   const currentUrl = new URL(window.location.href);
   const charId = currentUrl.searchParams.get('activeMsgCharId');
@@ -1115,6 +1194,14 @@ export const ActiveMsgRuntime = {
           void flushInboxToChat().then(() =>
             backfillReasoningSafely(event.data?.sessionId, event.data?.charId),
           );
+          return;
+        }
+
+        // SW 的 pushsubscriptionchange 写完标记后会通知一声：页面开着就立刻消费，
+        // 不用等下次启动。真正的判定/清理都在 refreshPushSubscriptionIfMarked 里，
+        // 通知丢了也没关系（启动兜底会再查一遍标记）。
+        if (type === 'active-msg-subscription-change') {
+          void refreshPushSubscriptionIfMarked();
           return;
         }
 
@@ -1173,6 +1260,11 @@ export const ActiveMsgRuntime = {
         })();
       });
     }
+
+    // 订阅自检兜底：后台期间 SW 收到 pushsubscriptionchange 写了标记、而通知丢失
+    // （页面没开着）时，启动这里把它消费掉。fire-and-forget——它要打网络请求，
+    // 不能拦着下面的 inbox flush。
+    void refreshPushSubscriptionIfMarked();
 
     // 启动兜底: 先 flush 落库 (含上次被杀进程时卡在 inbox 的 round-1 旁白), 再跑 runner
     // 触发 round-2, 保证冷启动恢复时旁白也排在 round-2 回复之前.

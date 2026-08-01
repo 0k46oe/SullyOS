@@ -794,15 +794,29 @@ const Settings: React.FC = () => {
   };
 
   const handleSaveApi = () => {
-    updateApiConfig({
+    const updates = {
       apiKey: localKey,
       baseUrl: localUrl,
       model: localModel,
       stream: localStream,
       temperature: localTemperature,
-    });
+    };
+    updateApiConfig(updates);
     setStatusMsg('配置已保存');
     setTimeout(() => setStatusMsg(''), 2000);
+    // 已排程的主动消息 2.0 AI 任务里冻结的是排程那一刻的凭据——换 Key / 换模型后
+    // 不重传的话，到点全拿旧凭据打请求（旧 Key 一吊销就是连环 401）。best-effort：
+    // 保存本身不等它，失败只提示；没配 2.0 / 没有 pending AI 任务时它是 no-op。
+    void ActiveMsgClient.refreshApiCredentialsForPendingTasks({ ...apiConfig, ...updates })
+      .then((result) => {
+        if (result.status === 'partial') {
+          addToast(`API 已保存，但有 ${result.failed} 条已排程的主动消息没换上新凭据，稍后再保存一次可重试。`, 'error');
+        }
+      })
+      .catch((error) => {
+        console.warn('[Settings] 刷新已排程任务的 API 凭据失败', error);
+        addToast('API 已保存，但已排程的主动消息凭据刷新失败，稍后再保存一次可重试。', 'error');
+      });
   };
 
   const handleSaveOtherApis = () => {

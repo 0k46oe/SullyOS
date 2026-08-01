@@ -138,15 +138,21 @@ export const currentOccurrenceMs = (
  * 远端底账正好能分辨：那一行还在 = worker 还没消费（cron 慢了或刚过点）；不在了 =
  * worker 已经处理完（发出去了，或者被防穿帮闸作废了，两种情况都会删行）。
  * 底账没拉到（null）时不猜，回到中性的「已到点」。
+ *
+ * remoteStatus 是远端那一行的 status（拉到底账时顺带的投影，没有就不传）：
+ * 一次性任务重试用完会被标 'failed' 留在远端，不会再被消费——这时候还说
+ * 「待处理」是骗人，它不会有下文了。
  */
 export const describeTaskProgress = (
   task: ActiveMsg2TaskRecord,
   knownRemoteUuids: Set<string> | null,
   nowMs: number,
+  remoteStatus?: string,
 ): string => {
   if (isPendingTask(task, nowMs)) return '待触发';
   if (knownRemoteUuids === null) return '已到点';
-  return knownRemoteUuids.has(task.taskUuid) ? '已到点·待处理' : '已触发';
+  if (!knownRemoteUuids.has(task.taskUuid)) return '已触发';
+  return remoteStatus === 'failed' ? '发送失败' : '已到点·待处理';
 };
 
 export const getPendingTasks = (
@@ -202,6 +208,55 @@ export const buildFireTaskListBlock = (
     }),
     '（这几条到点会自动发出去，别在这条消息里把同一件事再排一遍，也别当它们不存在。）',
   ].join('\n');
+};
+
+// ─── 远端 lastError：上一次到点为什么没发出去 ───
+// amsg-server 2.6.0-next.10 起 GET /messages 每条任务多带 lastError（run-tick 在
+// 失败时写进 payload）：{ at: 记录时刻 ISO, occurrence: 那一次的名义触发时刻 ISO,
+// reason: 'stale'（错过触发时刻太久被跳过）| 投递失败的原始错误信息 }。
+// 服务端只在失败时写、之后成功也不清，所以它永远是「最近一次失败」的记录——
+// 显示时必须带上时间，老记录才不会被读成「现在还坏着」。
+
+export interface RemoteTaskLastError {
+  at?: string;
+  occurrence?: string;
+  reason?: string;
+}
+
+/** 远端投影是解密出来的任意 JSON，进 UI 前收敛一遍形状；全空/不是对象 → null。 */
+export const parseRemoteTaskLastError = (raw: unknown): RemoteTaskLastError | null => {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Record<string, unknown>;
+  const pick = (key: string): string | undefined =>
+    typeof value[key] === 'string' && value[key] ? (value[key] as string) : undefined;
+  const parsed: RemoteTaskLastError = {
+    at: pick('at'),
+    occurrence: pick('occurrence'),
+    reason: pick('reason'),
+  };
+  return parsed.at || parsed.occurrence || parsed.reason ? parsed : null;
+};
+
+/** reason 是投递失败时的原始错误信息，可能整段 HTML/堆栈，卡片上截个头就够。 */
+const REMOTE_ERROR_REASON_MAX = 60;
+
+/**
+ * 远端 lastError 的人话（任务卡片上那行说明）。formatTime 由调用方注入
+ * （面板用 formatTaskTime）；时间优先用 occurrence（「哪一次」比「什么时候记的」
+ * 更贴用户想知道的事），没有再退 at。
+ */
+export const describeRemoteLastError = (
+  lastError: RemoteTaskLastError | null | undefined,
+  formatTime: (iso: string) => string,
+): string | null => {
+  if (!lastError) return null;
+  const when = lastError.occurrence || lastError.at;
+  const whenText = when ? `${formatTime(when)} ` : '';
+  if (lastError.reason === 'stale') {
+    return `${whenText}到点时已过期太久，跳过了一次`;
+  }
+  const reason = (lastError.reason || '').slice(0, REMOTE_ERROR_REASON_MAX);
+  return `${whenText}上次到点没发出去（连续失败${reason ? `：${reason}` : ''}）`;
 };
 
 /** 替换任务时远端取消失败的标注文案（面板和工具侧共用一份，两边都会显示给人看）。 */

@@ -352,3 +352,101 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
 // SW 换订阅时往 ActiveMsg 库 kv store 写固定 key 的标记（worker/sw-keep-alive.ts），
 // 这里钉主线程的消费口径：有标记才刷；刷成功才清；不支持 / 部分失败 / 抛错都留着
 // 下次再试（清了就再也没人补——marker 只在 pushsubscriptionchange 那一刻写一次）。
+describe('refreshPushSubscriptionIfMarked', () => {
+  const openAmsgDb = () => new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open('ActiveMsg');
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+
+  /** 按 SW 写入的同款记录形状（KvRecord {id, value}）把标记放进真库。 */
+  const putMarker = async () => {
+    await ActiveMsgStore.getGlobalConfig(); // 先把 schema 建到当前版本（含 kv store）
+    const db = await openAmsgDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put({
+        id: PUSH_SUBSCRIPTION_CHANGED_KV_ID,
+        value: { changedAt: Date.now(), resubscribed: false },
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  };
+
+  const markerExists = async (): Promise<boolean> => {
+    const db = await openAmsgDb();
+    try {
+      return await new Promise<boolean>((resolve, reject) => {
+        const tx = db.transaction('kv', 'readonly');
+        const request = tx.objectStore('kv').get(PUSH_SUBSCRIPTION_CHANGED_KV_ID);
+        request.onsuccess = () => resolve(Boolean(request.result));
+        request.onerror = () => reject(request.error);
+      });
+    } finally {
+      db.close();
+    }
+  };
+
+  const clearMarker = async () => {
+    const db = await openAmsgDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('kv', 'readwrite');
+      tx.objectStore('kv').delete(PUSH_SUBSCRIPTION_CHANGED_KV_ID);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  };
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await clearMarker();
+  });
+
+  it('没有标记 → 不发起刷新', async () => {
+    const refresh = vi.spyOn(ActiveMsgClient, 'refreshPushSubscriptionForPendingTasks')
+      .mockResolvedValue({ status: 'ok', updated: 0, failed: 0 });
+
+    await expect(refreshPushSubscriptionIfMarked()).resolves.toBe('no-marker');
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('有标记 + 全部刷新成功 → 调一次刷新并清掉标记', async () => {
+    await putMarker();
+    const refresh = vi.spyOn(ActiveMsgClient, 'refreshPushSubscriptionForPendingTasks')
+      .mockResolvedValue({ status: 'ok', updated: 2, failed: 0 });
+
+    await expect(refreshPushSubscriptionIfMarked()).resolves.toBe('refreshed');
+    expect(refresh).toHaveBeenCalledTimes(1);
+    await expect(markerExists()).resolves.toBe(false);
+  });
+
+  it('有标记但没有要刷的任务（no-tasks）→ 也算处理完，清标记', async () => {
+    await putMarker();
+    vi.spyOn(ActiveMsgClient, 'refreshPushSubscriptionForPendingTasks')
+      .mockResolvedValue({ status: 'no-tasks', updated: 0, failed: 0 });
+
+    await expect(refreshPushSubscriptionIfMarked()).resolves.toBe('refreshed');
+    await expect(markerExists()).resolves.toBe(false);
+  });
+
+  it('部分失败 → 标记保留下次再试', async () => {
+    await putMarker();
+    vi.spyOn(ActiveMsgClient, 'refreshPushSubscriptionForPendingTasks')
+      .mockResolvedValue({ status: 'partial', updated: 1, failed: 1 });
+
+    await expect(refreshPushSubscriptionIfMarked()).resolves.toBe('kept');
+    await expect(markerExists()).resolves.toBe(true);
+  });
+
+  it('刷新抛错（断网 / 权限被收回）→ 标记保留', async () => {
+    await putMarker();
+    vi.spyOn(ActiveMsgClient, 'refreshPushSubscriptionForPendingTasks')
+      .mockRejectedValue(new Error('offline'));
+
+    await expect(refreshPushSubscriptionIfMarked()).resolves.toBe('kept');
+    await expect(markerExists()).resolves.toBe(true);
+  });
+});

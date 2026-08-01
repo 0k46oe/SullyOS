@@ -464,3 +464,295 @@ const makeSub = (endpoint: string, keyBytes: number[] | null) => ({
   unsubscribe: vi.fn().mockResolvedValue(true),
   toJSON: () => ({ endpoint, keys: { p256dh: 'p', auth: 'a' } }),
 });
+
+describe('dropStaleSubscription（① 死端点 / 公钥不一致先退订）', () => {
+  it('死端点（permanently-removed.invalid）→ 退订并返回 null', async () => {
+    const sub = makeSub('https://permanently-removed.invalid/x', [1, 2, 3]);
+    await expect(runWithTimers(dropStaleSubscription(sub as any, VAPID_AQID))).resolves.toBeNull();
+    expect(sub.unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('绑的公钥与目标 worker 不一致 → 退订并返回 null', async () => {
+    const sub = makeSub('https://fcm.googleapis.com/send/x', [9, 9, 9]);
+    await expect(runWithTimers(dropStaleSubscription(sub as any, VAPID_AQID))).resolves.toBeNull();
+    expect(sub.unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('公钥一致的健康订阅 → 原样复用，不退订', async () => {
+    const sub = makeSub('https://fcm.googleapis.com/send/x', [1, 2, 3]);
+    await expect(dropStaleSubscription(sub as any, VAPID_AQID)).resolves.toBe(sub);
+    expect(sub.unsubscribe).not.toHaveBeenCalled();
+  });
+
+  it('公钥读不出来（options 抛错）→ 按可复用处理（与 instant/proactive 同款 fall-through）', async () => {
+    const sub = {
+      endpoint: 'https://fcm.googleapis.com/send/x',
+      get options(): any { throw new Error('not exposed'); },
+      unsubscribe: vi.fn(),
+      toJSON: () => ({}),
+    };
+    await expect(dropStaleSubscription(sub as any, VAPID_AQID)).resolves.toBe(sub);
+    expect(sub.unsubscribe).not.toHaveBeenCalled();
+  });
+
+  it('没有订阅 → null', async () => {
+    await expect(dropStaleSubscription(null, VAPID_AQID)).resolves.toBeNull();
+  });
+});
+
+describe('ActiveMsgClient.ensurePushSubscription（① 不再无条件复用旧订阅）', () => {
+  const stubPushEnv = (existing: any) => {
+    vi.stubGlobal('navigator', {
+      serviceWorker: {
+        ready: Promise.resolve({
+          pushManager: { getSubscription: vi.fn().mockResolvedValue(existing) },
+        }),
+      },
+    });
+    vi.stubGlobal('window', { PushManager: class {} });
+    vi.stubGlobal('Notification', { permission: 'granted' });
+  };
+
+  beforeEach(() => {
+    reiClient.getVapidPublicKey.mockReset().mockResolvedValue(VAPID_AQID);
+    reiClient.subscribePush.mockReset().mockResolvedValue({
+      toJSON: () => ({ endpoint: 'https://fcm.googleapis.com/send/fresh', keys: { p256dh: 'p2', auth: 'a2' } }),
+    });
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('已有订阅是死端点 → 退订后重订，返回新订阅', async () => {
+    const dead = makeSub('https://permanently-removed.invalid/x', [1, 2, 3]);
+    stubPushEnv(dead);
+
+    const result = await runWithTimers(ActiveMsgClient.ensurePushSubscription());
+
+    expect(dead.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(reiClient.subscribePush).toHaveBeenCalledTimes(1);
+    expect((result as any).endpoint).toBe('https://fcm.googleapis.com/send/fresh');
+  });
+
+  it('已有订阅绑着旧 VAPID 公钥 → 退订后按 worker 当前公钥重订', async () => {
+    const stale = makeSub('https://fcm.googleapis.com/send/x', [9, 9, 9]);
+    stubPushEnv(stale);
+
+    const result = await runWithTimers(ActiveMsgClient.ensurePushSubscription());
+
+    expect(stale.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(reiClient.subscribePush).toHaveBeenCalledWith(VAPID_AQID, expect.anything());
+    expect((result as any).endpoint).toBe('https://fcm.googleapis.com/send/fresh');
+  });
+
+  it('已有订阅健康且公钥一致 → 原样复用，不重订', async () => {
+    const healthy = makeSub('https://fcm.googleapis.com/send/x', [1, 2, 3]);
+    stubPushEnv(healthy);
+
+    const result = await ActiveMsgClient.ensurePushSubscription();
+
+    expect(healthy.unsubscribe).not.toHaveBeenCalled();
+    expect(reiClient.subscribePush).not.toHaveBeenCalled();
+    expect((result as any).endpoint).toBe('https://fcm.googleapis.com/send/x');
+  });
+});
+
+// ─── ②③ 共用的角色/任务夹具 ───
+const FUTURE_ISO = () => new Date(Date.now() + 3600_000).toISOString();
+const PAST_ISO = () => new Date(Date.now() - 24 * 3600_000).toISOString();
+
+const remoteTask = (taskUuid: string, extra: Record<string, unknown> = {}) => ({
+  taskUuid,
+  clientTaskId: `client-${taskUuid}`,
+  mode: 'auto',
+  firstSendTime: FUTURE_ISO(),
+  recurrenceType: 'none',
+  expirePolicy: 'expire',
+  source: 'user',
+  status: 'scheduled',
+  createdAt: 1,
+  ...extra,
+});
+
+describe('ActiveMsgClient.refreshPushSubscriptionForPendingTasks（② 订阅刷新落到已挂任务）', () => {
+  const SUB_JSON = { endpoint: 'https://fcm.googleapis.com/send/new', keys: { p256dh: 'p', auth: 'a' } };
+
+  beforeEach(() => {
+    reiClient.init.mockReset().mockResolvedValue(undefined);
+    reiClient.updateMessage.mockReset().mockResolvedValue({ success: true });
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  const stubChars = () => {
+    vi.spyOn(DB, 'getAllCharacters').mockResolvedValue([
+      // 开着 2.0：AI 任务、fixed 任务都要刷（推送订阅跟模式无关）；过点任务不动。
+      { id: 'char-a', activeMsg2Config: { enabled: true, tasks: [
+        remoteTask('a1'),
+        remoteTask('a2', { mode: 'fixed', expirePolicy: 'force' }),
+        remoteTask('a3', { firstSendTime: PAST_ISO() }),
+      ] } },
+      // 关掉 2.0 但取消失败残留的任务：远端照样会响，响就该推到新订阅上。
+      { id: 'char-b', activeMsg2Config: { enabled: false, tasks: [remoteTask('b1')] } },
+    ] as any);
+  };
+
+  it('对每条还会响的任务逐条 PUT pushSubscription，成功后清标记的判据是 ok', async () => {
+    stubChars();
+    const ensure = vi.spyOn(ActiveMsgClient, 'ensurePushSubscription').mockResolvedValue(SUB_JSON as any);
+
+    const result = await ActiveMsgClient.refreshPushSubscriptionForPendingTasks();
+
+    expect(result).toEqual({ status: 'ok', updated: 3, failed: 0 });
+    expect(ensure).toHaveBeenCalledTimes(1);
+    expect(reiClient.updateMessage.mock.calls.map((c: any[]) => c[0]).sort()).toEqual(['a1', 'a2', 'b1']);
+    for (const call of reiClient.updateMessage.mock.calls) {
+      expect(call[1]).toEqual({ pushSubscription: SUB_JSON });
+    }
+  });
+
+  it('单条失败 → partial（标记保留下次再试），其余照样刷完', async () => {
+    stubChars();
+    vi.spyOn(ActiveMsgClient, 'ensurePushSubscription').mockResolvedValue(SUB_JSON as any);
+    reiClient.updateMessage.mockImplementation(async (uuid: string) =>
+      uuid === 'a2' ? { success: false, error: { code: 'INTERNAL_ERROR' } } : { success: true });
+
+    const result = await ActiveMsgClient.refreshPushSubscriptionForPendingTasks();
+
+    expect(result).toEqual({ status: 'partial', updated: 2, failed: 1 });
+    expect(reiClient.updateMessage).toHaveBeenCalledTimes(3);
+  });
+
+  it('远端已经没有那一条（TASK_NOT_FOUND）不算失败——没有可刷新的正是不用刷的那侧', async () => {
+    stubChars();
+    vi.spyOn(ActiveMsgClient, 'ensurePushSubscription').mockResolvedValue(SUB_JSON as any);
+    reiClient.updateMessage.mockImplementation(async (uuid: string) =>
+      uuid === 'a1' ? { success: false, error: { code: 'TASK_NOT_FOUND' } } : { success: true });
+
+    const result = await ActiveMsgClient.refreshPushSubscriptionForPendingTasks();
+    expect(result).toEqual({ status: 'ok', updated: 2, failed: 0 });
+  });
+
+  it('一条待触发任务都没有 → no-tasks，一个请求都不发（没配 2.0 的用户别白打请求）', async () => {
+    vi.spyOn(DB, 'getAllCharacters').mockResolvedValue([{ id: 'char-x' }] as any);
+    const result = await ActiveMsgClient.refreshPushSubscriptionForPendingTasks();
+    expect(result.status).toBe('no-tasks');
+    expect(reiClient.updateMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('ActiveMsgClient.refreshApiCredentialsForPendingTasks（③ 凭据变更重传）', () => {
+  const API = { baseUrl: 'https://api.example.com/v1', apiKey: 'new-key', model: 'gpt-x' } as any;
+
+  beforeEach(() => {
+    reiClient.init.mockReset().mockResolvedValue(undefined);
+    reiClient.updateMessage.mockReset().mockResolvedValue({ success: true });
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('只刷「开着 2.0 且 pending 的 AI 任务」，三字段载荷；单独 API 的角色写单独 API 的值', async () => {
+    vi.spyOn(DB, 'getAllCharacters').mockResolvedValue([
+      { id: 'char-a', activeMsg2Config: { enabled: true, tasks: [
+        remoteTask('a1'),
+        remoteTask('a2', { mode: 'fixed', expirePolicy: 'force' }),   // fixed 不走 LLM，不动
+        remoteTask('a3', { firstSendTime: PAST_ISO() }),               // 过点，不动
+      ] } },
+      { id: 'char-b', activeMsg2Config: { enabled: false, tasks: [remoteTask('b1')] } }, // 关了 2.0，不动
+      { id: 'char-c', activeMsg2Config: {
+        enabled: true,
+        useSecondaryApi: true,
+        secondaryApi: { baseUrl: 'https://sec.example.com', apiKey: 'sec-key', model: 'sec-model' },
+        tasks: [remoteTask('c1')],
+      } },
+    ] as any);
+
+    const result = await ActiveMsgClient.refreshApiCredentialsForPendingTasks(API);
+
+    expect(result).toEqual({ status: 'ok', updated: 2, failed: 0 });
+    const byUuid = new Map(reiClient.updateMessage.mock.calls.map((c: any[]) => [c[0], c[1]]));
+    expect([...byUuid.keys()].sort()).toEqual(['a1', 'c1']);
+    expect(byUuid.get('a1')).toEqual({
+      apiUrl: 'https://api.example.com/v1/chat/completions',
+      apiKey: 'new-key',
+      primaryModel: 'gpt-x',
+    });
+    expect(byUuid.get('c1')).toEqual({
+      apiUrl: 'https://sec.example.com/chat/completions',
+      apiKey: 'sec-key',
+      primaryModel: 'sec-model',
+    });
+  });
+
+  it('没有 pending AI 任务（只剩 fixed / 全关掉）→ no-tasks，一个请求都不发', async () => {
+    vi.spyOn(DB, 'getAllCharacters').mockResolvedValue([
+      { id: 'char-a', activeMsg2Config: { enabled: true, tasks: [remoteTask('a2', { mode: 'fixed' })] } },
+    ] as any);
+
+    const result = await ActiveMsgClient.refreshApiCredentialsForPendingTasks(API);
+    expect(result.status).toBe('no-tasks');
+    expect(reiClient.updateMessage).not.toHaveBeenCalled();
+  });
+
+  it('某个角色凭据配不齐（单独 API 缺字段）→ 该角色整组记失败，别拦其他角色', async () => {
+    vi.spyOn(DB, 'getAllCharacters').mockResolvedValue([
+      { id: 'char-broken', activeMsg2Config: {
+        enabled: true,
+        useSecondaryApi: true,
+        secondaryApi: { baseUrl: 'https://sec.example.com', apiKey: '', model: '' }, // 缺 Key/Model
+        tasks: [remoteTask('x1')],
+      } },
+      { id: 'char-ok', activeMsg2Config: { enabled: true, tasks: [remoteTask('y1')] } },
+    ] as any);
+
+    const result = await ActiveMsgClient.refreshApiCredentialsForPendingTasks(API);
+
+    expect(result).toEqual({ status: 'partial', updated: 1, failed: 1 });
+    expect(reiClient.updateMessage.mock.calls.map((c: any[]) => c[0])).toEqual(['y1']);
+  });
+});
+
+describe('ActiveMsgClient.refreshCharPendingAiTaskCredentials（③ 面板保存后的单角色版）', () => {
+  beforeEach(() => {
+    reiClient.init.mockReset().mockResolvedValue(undefined);
+    reiClient.updateMessage.mockReset().mockResolvedValue({ success: true });
+  });
+
+  it('fixed 再滤一遍；凭据按传入的 config（面板手里的最新值）算，不读 DB', async () => {
+    const result = await ActiveMsgClient.refreshCharPendingAiTaskCredentials({
+      char: { id: 'char-a' } as any,
+      config: {
+        enabled: true,
+        useSecondaryApi: true,
+        secondaryApi: { baseUrl: 'https://sec.example.com', apiKey: 'sec-key', model: 'sec-model' },
+      } as any,
+      apiConfig: { baseUrl: 'https://api.example.com', apiKey: 'k', model: 'm' } as any,
+      tasks: [remoteTask('t1'), remoteTask('t2', { mode: 'fixed' })] as any,
+    });
+
+    expect(result).toEqual({ status: 'ok', updated: 1, failed: 0 });
+    expect(reiClient.updateMessage).toHaveBeenCalledTimes(1);
+    expect(reiClient.updateMessage.mock.calls[0][0]).toBe('t1');
+    expect(reiClient.updateMessage.mock.calls[0][1]).toEqual({
+      apiUrl: 'https://sec.example.com/chat/completions',
+      apiKey: 'sec-key',
+      primaryModel: 'sec-model',
+    });
+  });
+
+});
+
+// listRemoteTasksForChar 的 lastError 投影（listRemoteTaskUuidsForChar 的老口径由上面的
+// describe 继续钉着——它现在是这份投影的薄壳）。
+describe('ActiveMsgClient.listRemoteTasksForChar', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('带回 status 与收敛后的 lastError（旧 worker 没这字段 → null）', async () => {
+    vi.spyOn(ActiveMsgClient, 'listAllTasks').mockResolvedValue([
+      { uuid: 'task-a', charId: 'char-1', status: 'failed', lastError: { at: '2026-07-30T15:00:10.000Z', occurrence: '2026-07-30T15:00:00.000Z', reason: 'boom' } },
+      { uuid: 'task-b', charId: 'char-1', status: 'pending' },
+      { uuid: 'task-c', charId: 'char-2', status: 'pending' },
+    ]);
+
+    await expect(ActiveMsgClient.listRemoteTasksForChar('char-1')).resolves.toEqual([
+      { uuid: 'task-a', status: 'failed', lastError: { at: '2026-07-30T15:00:10.000Z', occurrence: '2026-07-30T15:00:00.000Z', reason: 'boom' } },
+      { uuid: 'task-b', status: 'pending', lastError: null },
+    ]);
+  });
+});

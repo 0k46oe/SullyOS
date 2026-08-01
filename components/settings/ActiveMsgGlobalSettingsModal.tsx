@@ -546,6 +546,10 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
           <p className="text-xs leading-relaxed text-slate-500">
             这是第二步。只有你真的想让角色在后台主动推送消息时，才需要点。
           </p>
+          <p className="text-xs leading-relaxed text-slate-500">
+            推送跟着「排程时所在的设备」走：每条任务到点后，推给保存这条排程时用的那台设备。
+            换了设备（或者换了浏览器）之后，在新设备上把排程重新保存一次，之后的推送就发到这台。
+          </p>
           {pushStatus?.detail ? (
             <p className="text-xs leading-relaxed text-amber-600">{pushStatus.detail}</p>
           ) : null}
