@@ -7,6 +7,8 @@ import {
     applyStoryPresetChoice,
     BUILTIN_NIGHT_SCREENING_PRESET,
     buildStoryMiniTheaterReminder,
+    buildStoryActorMemoryEnvelope,
+    buildStoryArchiveMemoryEnvelope,
     buildStoryAffinityAwarenessReminder,
     buildStoryBackstageAftermathReminder,
     buildStoryMultiAffinityGuide,
@@ -27,7 +29,43 @@ import {
     resolveStoryTheaterMask,
     selectStoryArchiveBatch,
     storyTheaterMemoryRecipientIds,
+    formatActorRecentMessages,
 } from './storyTheater';
+
+describe('多人剧情记忆的人称与归属', () => {
+    it('把每位角色的召回包进具名专属信封，并阻止把“你”重绑定到面具', () => {
+        const result = buildStoryActorMemoryEnvelope('林星', '我记得你那天留下了伞。', '条条', 'Noir');
+
+        expect(result).toContain('林星 的专属既有记忆');
+        expect(result).toContain('第一人称“我/我的”，默认指「林星」');
+        expect(result).toContain('第二人称“你/你的”');
+        expect(result).toContain('原互动对象「条条」');
+        expect(result).toContain('不得因此把记忆里的“你”改指为「Noir」');
+        expect(result).toContain('不得归给、共享给或改写成其他角色的亲历记忆');
+    });
+
+    it('近期原文显式标出记忆中的你，不把 user 行伪装成当前面具', () => {
+        const actor = { id: 'lin', name: '林星' } as CharacterProfile;
+        const messages = [
+            { id: 1, charId: 'lin', role: 'user', type: 'text', content: '把伞递给他。', timestamp: 1 },
+            { id: 2, charId: 'lin', role: 'assistant', type: 'text', content: '我接住了。', timestamp: 2 },
+        ] as Message[];
+
+        const result = formatActorRecentMessages(actor, messages, '条条', 'Noir');
+        expect(result).toContain('林星 最近携带的专属原文上下文');
+        expect(result).toContain('记忆中的你（条条）：把伞递给他。');
+        expect(result).toContain('林星：我接住了。');
+        expect(result).toContain('不得把下列“记忆中的你”重新解释成当前身份');
+    });
+
+    it('把独立剧情向量召回标成共享档案而不是某个角色的脑内记忆', () => {
+        const result = buildStoryArchiveMemoryEnvelope('我在雨里等你。');
+
+        expect(result).toContain('本剧情共享档案召回');
+        expect(result).toContain('不属于任何一位角色的个人记忆');
+        expect(result).toContain('不得擅自把“我/你”归给当前面具或任一角色');
+    });
+});
 
 describe('糯米机原生剧情预设边界', () => {
     it('内置 V6.14 已经是精简的原生文档', () => {

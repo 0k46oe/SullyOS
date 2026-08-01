@@ -10,6 +10,8 @@ import {
     buildBareTheaterActorContext,
     buildStoryAffinityAwarenessReminder,
     buildStoryBackstageAftermathReminder,
+    buildStoryActorMemoryEnvelope,
+    buildStoryArchiveMemoryEnvelope,
     buildStoryMultiAffinityGuide,
     buildStoryHistory,
     buildStoryMiniTheaterReminder,
@@ -403,7 +405,8 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             let recalled = '';
             const embedding = memoryPalaceConfig.embedding;
             if (actor.memoryPalaceEnabled && embedding?.baseUrl && embedding?.apiKey) {
-                recalled = await retrieveMemories(recent, actor.id, embedding, actor.activeBuffs?.[0]?.name, actor.personalityStyle || 'emotional', actor.ruminationTendency ?? 0.3, query, mask.name, remoteVectorConfig, actor.name);
+                const rawRecall = await retrieveMemories(recent, actor.id, embedding, actor.activeBuffs?.[0]?.name, actor.personalityStyle || 'emotional', actor.ruminationTendency ?? 0.3, query, userProfile.name, remoteVectorConfig, actor.name);
+                recalled = buildStoryActorMemoryEnvelope(actor.name, rawRecall, userProfile.name, mask.name);
             }
             const theaterActor = { ...actor, memoryPalaceInjection: recalled };
             const core = ContextBuilder.buildCoreContext(theaterActor, userProfile, true, recalled, {
@@ -411,7 +414,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                 skipWorldbookIds: allBookIds,
                 headerOverride: `[剧情角色：${actor.name}]`,
             }, { skipTimeAwareness: true });
-            blocks.push(`${core}\n${formatActorRecentMessages(actor, recent)}`.trim());
+            blocks.push(`${core}\n${formatActorRecentMessages(actor, recent, userProfile.name, mask.name)}`.trim());
         }
         return blocks.join('\n\n---\n\n');
     }, [actors, entry.carryCharacterMemory, entry.characterContextLimits, mask.name, memoryPalaceConfig.embedding, remoteVectorConfig, userProfile]);
@@ -425,7 +428,8 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
         let recalled = '';
         const embedding = memoryPalaceConfig.embedding;
         if (maskCharacter.memoryPalaceEnabled && embedding?.baseUrl && embedding?.apiKey) {
-            recalled = await retrieveMemories(recent, maskCharacter.id, embedding, maskCharacter.activeBuffs?.[0]?.name, maskCharacter.personalityStyle || 'emotional', maskCharacter.ruminationTendency ?? 0.3, query, mask.name, remoteVectorConfig, maskCharacter.name);
+            const rawRecall = await retrieveMemories(recent, maskCharacter.id, embedding, maskCharacter.activeBuffs?.[0]?.name, maskCharacter.personalityStyle || 'emotional', maskCharacter.ruminationTendency ?? 0.3, query, userProfile.name, remoteVectorConfig, maskCharacter.name);
+            recalled = buildStoryActorMemoryEnvelope(maskCharacter.name, rawRecall, userProfile.name, mask.name);
         }
         const skipWorldbookIds = new Set([
             ...(maskCharacter.mountedWorldbooks || []).map(book => book.id),
@@ -436,7 +440,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             skipWorldbookIds,
             headerOverride: `[你当前身份的既有记忆：${maskCharacter.name}]`,
         }, { skipTimeAwareness: true });
-        return `${core}\n${formatActorRecentMessages(maskCharacter, recent)}`.trim();
+        return `${core}\n${formatActorRecentMessages(maskCharacter, recent, userProfile.name, mask.name)}`.trim();
     }, [actors, characters, entry.carryCharacterMemory, entry.characterContextLimits, mask.characterId, mask.name, memoryPalaceConfig.embedding, remoteVectorConfig, userProfile]);
 
     const independentRecall = useCallback(async (query: string, recent: Message[]): Promise<string> => {
@@ -583,7 +587,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             const scenario = [
                 `### 当前剧情\n标题：${entry.title}\n前提：${entry.premise || '沿用已经发生的正文自然继续。'}`,
                 summaries ? `### 常驻事件盒\n${summaries}` : '',
-                vectorRecall ? `### 本剧情独立向量召回\n${vectorRecall}` : '',
+                vectorRecall ? buildStoryArchiveMemoryEnvelope(vectorRecall) : '',
             ].filter(Boolean).join('\n\n');
             const worldbookSlots = buildTheaterWorldbookSlots(selectedBooks, visibleHistory.slice(-20).map(message => ({ role: message.role, content: message.content })), mask.name, actors.map(actor => actor.name));
             const compiled = compileStoryPreset({
