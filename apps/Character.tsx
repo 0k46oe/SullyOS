@@ -141,6 +141,10 @@ const Character: React.FC = () => {
   const [showExportModal, setShowExportModal] = useState(false);
   const [showBatchModal, setShowBatchModal] = useState(false); 
   const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<string | null>(null);
+  // 云端 amsg2 任务没清干净、本地删除被拦下的角色 → 弹「重试 / 仍然删除」二次确认。
+  const [cloudCleanupFailTarget, setCloudCleanupFailTarget] = useState<string | null>(null);
+  // 删除要先 await 云端任务取消（名下有 amsg2 任务时），期间锁住按钮防连点。
+  const [isDeleting, setIsDeleting] = useState(false);
   const [showWorldbookModal, setShowWorldbookModal] = useState(false); // New Modal
   // 挂载世界书弹窗：搜索词 + 当前展开的分组（分组默认折叠，避免全量条目一次性渲染卡爆）
   const [wbModalSearch, setWbModalSearch] = useState('');
@@ -940,11 +944,29 @@ ${isInitialGeneration ? `
       }
   };
 
-  const confirmDeleteCharacter = () => {
-      if (deleteConfirmTarget) {
-          deleteCharacter(deleteConfirmTarget);
+  // 真正执行删除。名下有 amsg2 任务的角色 deleteCharacter 会先 await 云端清理，
+  // 清不掉返回 cloud-cleanup-failed 且本地未删 → 转进「重试 / 仍然删除」弹窗；
+  // force=true 是用户在那个弹窗里选了「仍然删除」，放行本地删除。
+  const runDeleteCharacter = async (targetId: string, force = false) => {
+      setIsDeleting(true);
+      try {
+          const result = await deleteCharacter(targetId, force ? { force: true } : undefined);
+          if (result.status === 'cloud-cleanup-failed') {
+              setDeleteConfirmTarget(null);
+              setCloudCleanupFailTarget(targetId);
+              return;
+          }
           setDeleteConfirmTarget(null);
+          setCloudCleanupFailTarget(null);
           addToast('连接已断开', 'success');
+      } finally {
+          setIsDeleting(false);
+      }
+  };
+
+  const confirmDeleteCharacter = () => {
+      if (deleteConfirmTarget && !isDeleting) {
+          void runDeleteCharacter(deleteConfirmTarget);
       }
   };
 
@@ -1938,8 +1960,8 @@ ${isInitialGeneration ? `
         <Modal
             isOpen={!!deleteConfirmTarget}
             title="断开连接"
-            onClose={() => setDeleteConfirmTarget(null)} 
-            footer={<div className="flex gap-2 w-full"><button onClick={() => setDeleteConfirmTarget(null)} className="flex-1 py-3 bg-slate-100 text-slate-500 rounded-2xl font-bold">保留</button><button onClick={confirmDeleteCharacter} className="flex-1 py-3 bg-red-500 text-white font-bold rounded-2xl shadow-lg shadow-red-200">确认断开</button></div>}
+            onClose={() => setDeleteConfirmTarget(null)}
+            footer={<div className="flex gap-2 w-full"><button onClick={() => setDeleteConfirmTarget(null)} className="flex-1 py-3 bg-slate-100 text-slate-500 rounded-2xl font-bold">保留</button><button onClick={confirmDeleteCharacter} disabled={isDeleting} className="flex-1 py-3 bg-red-500 text-white font-bold rounded-2xl shadow-lg shadow-red-200 disabled:opacity-50">{isDeleting ? '断开中...' : '确认断开'}</button></div>}
         >
             <div className="flex flex-col items-center gap-3 py-4">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-12 h-12 text-slate-300"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" /></svg>
@@ -1949,6 +1971,32 @@ ${isInitialGeneration ? `
                     <span className="text-[10px] text-slate-400">仅对 ta 可见的专属表情分类也会一并删除。</span>
                 </p>
             </div>
+        </Modal>
+
+        {/* 云端 amsg2 任务没清干净时删除会被拦下（不然已删角色的推送之后还会弹出来），
+            在这里给出重试或强行放行的选择。 */}
+        <Modal
+            isOpen={!!cloudCleanupFailTarget}
+            title="云端还有任务没清掉"
+            onClose={() => setCloudCleanupFailTarget(null)}
+            footer={<div className="flex gap-2 w-full">
+                <button
+                    onClick={() => { if (cloudCleanupFailTarget && !isDeleting) void runDeleteCharacter(cloudCleanupFailTarget); }}
+                    disabled={isDeleting}
+                    className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-2xl font-bold disabled:opacity-50"
+                >{isDeleting ? '重试中...' : '重试'}</button>
+                <button
+                    onClick={() => { if (cloudCleanupFailTarget && !isDeleting) void runDeleteCharacter(cloudCleanupFailTarget, true); }}
+                    disabled={isDeleting}
+                    className="flex-1 py-3 bg-red-500 text-white font-bold rounded-2xl shadow-lg shadow-red-200 disabled:opacity-50"
+                >仍然删除</button>
+            </div>}
+        >
+            <p className="text-sm text-slate-600 leading-relaxed py-2">
+                ta 名下还有主动消息 2.0 任务没能在云端取消（可能是断网或 Worker 没响应），角色暂时没有删除。<br/>
+                <span className="text-xs text-red-400 font-bold">选「仍然删除」的话，残留的任务之后可能仍会到点推送</span>
+                <span className="text-xs text-slate-400">——届时可去设置里「清除云端状态」兜底。</span>
+            </p>
         </Modal>
     </div>
   );

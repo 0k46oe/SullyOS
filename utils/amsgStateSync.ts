@@ -1,11 +1,17 @@
 /**
  * 主动消息 2.0「满血」的前端状态同步层。
  *
- * 一轮聊完时 useChatAI 调 markAmsgStateDirty 打脏标记（带拼模板所需的数据快照），
- * 去抖后把所有脏角色的 fire_pack 批量上传 worker 的 client_state；切后台
- * （visibilitychange→hidden）立即冲刷——iOS 只给几秒存活窗口，必须一次请求写完。
+ * 打脏入口不止聊完一轮（useChatAI）：改人设 / 改记忆 / 删改消息 / 面板取消任务这些会
+ * 改变 fire_pack 内容的落库路径也会调 markAmsgStateDirty（大多汇在 OSContext 的
+ * updateCharacter 落库点），去抖后把所有脏角色的 fire_pack 批量上传 worker 的
+ * client_state；切后台（visibilitychange→hidden）立即冲刷——iOS 只给几秒存活窗口，
+ * 必须一次请求写完。
  *
  * 只对「已排程 AI 模式 amsg2 任务」的角色生效，其余 markDirty 直接忽略。
+ *
+ * 脏标记有一份极轻量的 localStorage 底账（只存 charId 数组，不存快照本体）：打脏时写入、
+ * 上传成功后移除。去抖窗口内被杀进程的话，下次启动 OSContext 调 resumePendingAmsgStateSync
+ * 按底账重建快照补传一次——否则那次改动云端永远不知道，角色到点带旧上下文说话。
  *
  * 上传失败会**退避重试**，不能一失败就把快照丢掉：云端那份 fire_pack 是到点时角色
  * 唯一的上下文来源，刷不上去就意味着角色带着旧上下文发消息（提的「最近聊的事」其实是
@@ -24,7 +30,8 @@ import { ActiveMsgStore } from './activeMsgStore';
 import { hasActiveAiTask } from './amsg2Tasks';
 import { AmsgChatPresence, CHAT_PRESENCE_HEARTBEAT_MS } from './amsgChatPresence';
 
-const SYNC_DEBOUNCE_MS = 15_000;
+// 10s：比 15s 少一截「聊完就关 App → 快照没传上去」的裸奔窗口，又不至于每个键入都打请求。
+const SYNC_DEBOUNCE_MS = 10_000;
 /** 失败重试的退避起点，逐次翻倍（30s → 60s → 120s）。 */
 const RETRY_BASE_MS = 30_000;
 /** 连续失败几次后放手，等下一轮聊天重新打脏标记——避免离线时无限重排。 */
@@ -45,6 +52,43 @@ let flushing = false;
 let lifecycleBound = false;
 let retryCount = 0;
 
+// ─── 脏标记轻量持久化 ───
+// 内存队列在「打脏 → 去抖窗口内杀进程」时会整个蒸发，重开 App 也不补传。这里只把
+// charId 记进 localStorage 当底账（快照本体下次启动从 DB 重建，存本体只会留一份过期数据）。
+export const AMSG2_PENDING_SYNC_LS_KEY = 'amsg2_pending_sync_char_ids';
+
+const readPendingCharIds = (): string[] => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(AMSG2_PENDING_SYNC_LS_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+};
+
+const writePendingCharIds = (ids: string[]) => {
+  // 存储满 / 隐私模式写不进去就算了：底账只是兜底，失败不能影响内存队列正常同步。
+  try {
+    if (ids.length === 0) localStorage.removeItem(AMSG2_PENDING_SYNC_LS_KEY);
+    else localStorage.setItem(AMSG2_PENDING_SYNC_LS_KEY, JSON.stringify(ids));
+  } catch { /* 见上 */ }
+};
+
+const persistDirtyMark = (charId: string) => {
+  const ids = readPendingCharIds();
+  if (!ids.includes(charId)) writePendingCharIds([...ids, charId]);
+};
+
+/**
+ * 一批快照处理完（上传成功 / 判定无处可传）后清底账。
+ * 只清「内存里已经不脏」的：上传期间同角色又被打脏的话，新标记不能被这批的收尾抹掉。
+ */
+const prunePersistedMarks = (batch: AmsgSyncSnapshot[]) => {
+  const settled = new Set(batch.map((s) => s.char.id).filter((id) => !dirty.has(id)));
+  if (settled.size === 0) return;
+  writePendingCharIds(readPendingCharIds().filter((id) => !settled.has(id)));
+};
+
 const bindLifecycleListener = () => {
   if (lifecycleBound || typeof document === 'undefined') return;
   lifecycleBound = true;
@@ -61,6 +105,7 @@ export const markAmsgStateDirty = (snapshot: AmsgSyncSnapshot) => {
   if (!config?.enabled || !hasActiveAiTask(config)) return;
 
   dirty.set(snapshot.char.id, snapshot);
+  persistDirtyMark(snapshot.char.id);
   bindLifecycleListener();
   if (debounceTimer != null) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => { void flushAmsgState('debounce'); }, SYNC_DEBOUNCE_MS);
@@ -88,8 +133,9 @@ export const flushAmsgState = async (reason: string): Promise<void> => {
   try {
     const globalConfig = await ActiveMsgStore.getGlobalConfig();
     if (!globalConfig.workerUrl?.trim()) {
-      // 没配 worker = 这些快照没有去处，不是「传失败」，清掉即可。
+      // 没配 worker = 这些快照没有去处，不是「传失败」，清掉即可（连底账一起）。
       dirty.clear();
+      prunePersistedMarks(batch);
       return;
     }
 
@@ -102,6 +148,8 @@ export const flushAmsgState = async (reason: string): Promise<void> => {
       realtimeConfig: snapshot.realtimeConfig,
     })));
     retryCount = 0;
+    // 传上去了才清底账；失败路径不清——底账就是给「重试没等到就被杀」兜底的。
+    prunePersistedMarks(batch);
   } catch (error) {
     requeue(batch);
     if (retryCount < MAX_RETRIES) {
@@ -119,6 +167,39 @@ export const flushAmsgState = async (reason: string): Promise<void> => {
   } finally {
     flushing = false;
   }
+};
+
+/**
+ * 启动补传：上次会话打过脏、但没等到上传就被杀进程的角色，按 localStorage 底账重建
+ * 快照再传一次。OSContext 在启动数据加载完成后调用，characters 传的就是刚从 DB 读回
+ * 的全量角色（快照数据源 = DB），上传复用 markDirty → flush → syncCharFirePacks 原路。
+ *
+ * 残留的 charId 可能已经删角色 / 关掉 amsg2 / 任务全发完了——这些直接静默清除底账：
+ * 找不到的角色没得传，markDirty 的门拒掉的角色也不该再赖在底账里。
+ */
+export const resumePendingAmsgStateSync = (scope: {
+  characters: CharacterProfile[];
+  userProfile: UserProfile;
+  groups: GroupProfile[];
+  realtimeConfig?: RealtimeConfig;
+}) => {
+  const pending = readPendingCharIds();
+  if (pending.length === 0) return;
+
+  // 先整个清掉：还该传的角色下面 markDirty 会把 id 重新写回去，不该传的就此了账。
+  writePendingCharIds([]);
+  for (const charId of pending) {
+    const char = scope.characters.find((c) => c.id === charId);
+    if (!char) continue; // 角色已删除，静默跳过
+    markAmsgStateDirty({
+      char,
+      userProfile: scope.userProfile,
+      groups: scope.groups,
+      realtimeConfig: scope.realtimeConfig,
+    });
+  }
+  // 立即冲刷，不等 10s 去抖——这份欠账已经拖了一次进程生死了。
+  if (dirty.size > 0) void flushAmsgState('resume');
 };
 
 // ─── 同角色活跃会话租约（Heartbeat）───

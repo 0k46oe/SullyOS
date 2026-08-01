@@ -39,7 +39,9 @@ import { buildChatRequestPayload } from '../utils/chatRequestPayload';
 import { ChatPrompts } from '../utils/chatPrompts';
 import { extractHtmlBlocks } from '../utils/htmlPrompt';
 import { ActiveMsgClient } from '../utils/activeMsgClient';
-import { purgeCharCloudState } from '../utils/amsg2CharCleanup';
+import { ActiveMsgStore } from '../utils/activeMsgStore';
+import { charMayHaveCloudState, purgeCharCloudState } from '../utils/amsg2CharCleanup';
+import { markAmsgStateDirty, resumePendingAmsgStateSync } from '../utils/amsgStateSync';
 import { loadMusicPlaybackSnapshot } from './MusicContext';
 import { setCharNameRegistry } from '../utils/charNameRegistry';
 import { setMinimaxRegion } from '../utils/minimaxEndpoint';
@@ -239,6 +241,9 @@ const defaultMemoryPalaceConfig: MemoryPalaceGlobalConfig = {
   rerank: { enabled: false, baseUrl: '', apiKey: '', model: 'BAAI/bge-reranker-v2-m3', topN: 5 },
 };
 
+/** deleteCharacter 的结果：cloud-cleanup-failed = 云端还有任务没清掉，本地没删。 */
+export type DeleteCharacterResult = { status: 'deleted' } | { status: 'cloud-cleanup-failed' };
+
 interface OSContextType {
   activeApp: AppID;
   openApp: (appId: AppID) => void;
@@ -256,7 +261,12 @@ interface OSContextType {
   activeCharacterId: string;
   addCharacter: () => Promise<CharacterProfile>;
   updateCharacter: (id: string, updates: Partial<CharacterProfile> | ((prev: CharacterProfile) => Partial<CharacterProfile>)) => void;
-  deleteCharacter: (id: string) => void;
+  /**
+   * 删角色。名下有 amsg2 任务的角色会先 await 云端任务取消 + client_state 清理，
+   * 清不掉返回 cloud-cleanup-failed 且**不删本地**（调用方弹「重试 / 仍然删除」，
+   * 「仍然删除」= 传 { force: true } 放行）。没有任务的角色维持本地直删的快路径。
+   */
+  deleteCharacter: (id: string, options?: { force?: boolean }) => Promise<DeleteCharacterResult>;
   setActiveCharacterId: (id: string) => void;
 
   // 角色分组（神经链接"文件夹"，与群聊 groups 无关）
@@ -1519,6 +1529,23 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         setCustomThemes(dbThemes);
         if (dbUser) setUserProfile(dbUser);
 
+        // amsg2 脏标记兜底补传：上次会话打了脏、但没等到上传就被杀进程的角色（10s 去抖
+        // 窗口内关 App），按 localStorage 底账用刚从 DB 读回的数据重建快照传一次。
+        // realtimeConfig 的 state 此刻可能还没就位，直接读它的持久化来源。
+        try {
+          const savedRealtime = localStorage.getItem('os_realtime_config');
+          resumePendingAmsgStateSync({
+            characters: finalChars,
+            userProfile: dbUser ?? defaultUserProfile,
+            groups: dbGroups,
+            realtimeConfig: savedRealtime
+              ? { ...defaultRealtimeConfig, ...JSON.parse(savedRealtime) }
+              : defaultRealtimeConfig,
+          });
+        } catch (err) {
+          console.warn('[AmsgStateSync] 启动补传失败（不影响启动）', err);
+        }
+
       } catch (err) {
         console.error('Data init failed:', err);
       } finally {
@@ -2718,8 +2745,22 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     await DB.saveCharacter(newChar);
     return newChar;
   };
-  const updateCharacter = async (id: string, updates: Partial<CharacterProfile> | ((prev: CharacterProfile) => Partial<CharacterProfile>)) => { setCharacters(prev => { const updated = prev.map(c => c.id === id ? normalizeCharacterImpression({ ...c, ...(typeof updates === 'function' ? updates(c) : updates) }) : c); const target = updated.find(c => c.id === id); if (target) DB.saveCharacter(target); return updated; }); };
-  const deleteCharacter = async (id: string) => {
+  const updateCharacter = async (id: string, updates: Partial<CharacterProfile> | ((prev: CharacterProfile) => Partial<CharacterProfile>)) => {
+    setCharacters(prev => {
+      const updated = prev.map(c => c.id === id ? normalizeCharacterImpression({ ...c, ...(typeof updates === 'function' ? updates(c) : updates) }) : c);
+      const target = updated.find(c => c.id === id);
+      if (target) {
+        // 落库成功后给 amsg2 云端快照打脏：改人设 / 改记忆 / 面板取消任务等所有落库路径都
+        // 汇到这里，不打的话云端 fire_pack 停在上一轮聊天，角色到点拿旧世界说话。
+        // markDirty 内部自带「没开 2.0 / 没挂 AI 任务就 return」的门，普通角色零成本。
+        DB.saveCharacter(target).then(() => {
+          markAmsgStateDirty({ char: target, userProfile, groups, realtimeConfig });
+        });
+      }
+      return updated;
+    });
+  };
+  const deleteCharacter = async (id: string, options?: { force?: boolean }): Promise<DeleteCharacterResult> => {
     const target = characters.find(c => c.id === id);
     // 主动消息 2.0 的任务活在用户自己的 worker 上，不随本地角色删除消失：留着的话
     // 到点照样跑一整轮生成 + 推送，用户会收到一个已经删掉的角色发来的消息（还每次
@@ -2728,32 +2769,77 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     const localTaskUuids = (target?.activeMsg2Config?.tasks ?? [])
       .map(t => t.taskUuid);
 
-    // 云端善后整段丢后台跑，不挡着本地删除：删角色是个本地操作，worker 地址填错或网慢时
-    // 等在这儿会表现成「点了删除没反应」。要取消的 uuid 已经在上面拿到手了，本地记录
-    // 什么时候消失都不影响它。
-    void (async () => {
-      if (localTaskUuids.length > 0) {
+    // 云端善后挡在本地删除**前面**：早前丢后台跑的版本在断网 / 秒关 App 时根本跑不完，
+    // 任务残留下来，之后「已删角色」的推送还会弹出来。名下真有任务（本地清单有、或远端
+    // 查得到）的角色才付这次等待，清不掉就先不删本地、把选择权交回给调用方；
+    // 从没配过 2.0 或没填 worker 地址的角色一个请求都不发，路径跟原来一样快。
+    if (!options?.force && charMayHaveCloudState(target)) {
+      let workerConfigured = false;
+      try {
+        workerConfigured = Boolean((await ActiveMsgStore.getGlobalConfig()).workerUrl?.trim());
+      } catch { /* 配置读不到按没配处理，与 purgeCharCloudState 同口径 */ }
+
+      if (workerConfigured) {
+        // 有没有任务以远端清单优先（cancelAllTasksForChar 内部先查远端、查不到才退回
+        // 本地清单）——只看本地会漏掉排程记录丢失的幽灵任务。
+        let hadTasks = localTaskUuids.length > 0;
+        let cleanupFailed = false;
         try {
-          const { failed } = await ActiveMsgClient.cancelAllTasksForChar(id, localTaskUuids);
-          if (failed.size > 0) {
-            addToast(`ta 还有 ${failed.size} 个主动消息任务留在远端没取消掉，可能仍会到点推送——可以去设置里「清除云端状态」兜一下`, 'error');
+          const { targets, failed } = await ActiveMsgClient.cancelAllTasksForChar(id, localTaskUuids);
+          hadTasks = hadTasks || targets.length > 0;
+          cleanupFailed = failed.size > 0;
+        } catch (err) {
+          console.warn('[deleteCharacter] 远端主动消息任务清理失败', err);
+          cleanupFailed = true;
+        }
+
+        if (hadTasks) {
+          if (!cleanupFailed) {
+            // 任务取消掉了，云端还留着这个角色的 client_state —— 那里面是完整的角色系统
+            // 提示词加最近 30 条对话原文（fire_pack）。删除确认框写的是「记忆将被清空」，
+            // 那就得连云端那份一起清，不然聊天记录会一直躺在 D1 里、每删一个角色再堆一份。
+            const cloudCleanup = await purgeCharCloudState(target);
+            if (cloudCleanup.status === 'failed') {
+              console.warn('[deleteCharacter] 云端状态清理失败', cloudCleanup.error);
+              cleanupFailed = true;
+            }
+          }
+          if (cleanupFailed) {
+            // 云端没清干净：本地先不删。调用方（角色 App）负责弹「重试 / 仍然删除」。
+            return { status: 'cloud-cleanup-failed' };
+          }
+        } else {
+          // 名下没有任务：不会再有推送，client_state 清理维持旧节奏丢后台，不挡删除。
+          void (async () => {
+            const cloudCleanup = await purgeCharCloudState(target);
+            if (cloudCleanup.status === 'failed') {
+              console.warn('[deleteCharacter] 云端状态清理失败（角色照常删除）', cloudCleanup.error);
+              addToast('ta 在云端的聊天上下文没能清掉，可以去设置里「清除云端状态」兜一下', 'error');
+            }
+          })();
+        }
+      }
+    } else if (options?.force && charMayHaveCloudState(target)) {
+      // 「仍然删除」放行后仍旧尽力清一次：能清掉多少算多少，失败只提示、不再拦。
+      void (async () => {
+        try {
+          if (localTaskUuids.length > 0) {
+            const { failed } = await ActiveMsgClient.cancelAllTasksForChar(id, localTaskUuids);
+            if (failed.size > 0) {
+              addToast(`ta 还有 ${failed.size} 个主动消息任务留在远端没取消掉，可能仍会到点推送——可以去设置里「清除云端状态」兜一下`, 'error');
+            }
+          }
+          const cloudCleanup = await purgeCharCloudState(target);
+          if (cloudCleanup.status === 'failed') {
+            console.warn('[deleteCharacter] 云端状态清理失败（角色照常删除）', cloudCleanup.error);
+            addToast('ta 在云端的聊天上下文没能清掉，可以去设置里「清除云端状态」兜一下', 'error');
           }
         } catch (err) {
           console.warn('[deleteCharacter] 远端主动消息任务清理失败', err);
           addToast('ta 的主动消息任务没能在远端取消，可能仍会到点推送，请检查 Worker 连接', 'error');
         }
-      }
-
-      // 任务取消掉了，云端还留着这个角色的 client_state —— 那里面是完整的角色系统提示词
-      // 加最近 30 条对话原文（fire_pack）。删除确认框写的是「记忆将被清空」，那就得连云端
-      // 那份一起清，不然聊天记录会一直躺在 D1 里、每删一个角色再堆一份。
-      // 清不掉不阻塞删除（详见 purgeCharCloudState：它自己吞异常，这里只按结果提示）。
-      const cloudCleanup = await purgeCharCloudState(target);
-      if (cloudCleanup.status === 'failed') {
-        console.warn('[deleteCharacter] 云端状态清理失败（角色照常删除）', cloudCleanup.error);
-        addToast('ta 在云端的聊天上下文没能清掉，可以去设置里「清除云端状态」兜一下', 'error');
-      }
-    })();
+      })();
+    }
 
     setCharacters(prev => { const remaining = prev.filter(c => c.id !== id); if (remaining.length > 0 && activeCharacterId === id) { setActiveCharacterId(remaining[0].id); } return remaining; });
     await DB.deleteCharacter(id);
@@ -2768,6 +2854,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     } catch (err) {
         console.warn('[deleteCharacter] 表情包残留清理失败（不影响角色删除）', err);
     }
+    return { status: 'deleted' };
   };
 
   // 角色分组方法（神经链接"文件夹"）

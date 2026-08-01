@@ -56,6 +56,7 @@ import WhiteboxSoundEditor from '../components/chat/WhiteboxSoundEditor';
 import { normalizeTranslationLangLabel, isTranslationLangPreset } from '../utils/translationLang';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent, noteMessageSent, presetOrCustom } from '../utils/analytics';
+import { markAmsgStateDirty } from '../utils/amsgStateSync';
 import {
     CONTEXT_RANGE_POLICY_VERSION,
     computeContextRangeSnapshot,
@@ -1276,6 +1277,9 @@ const Chat: React.FC = () => {
 
         await DB.deleteMessages(toDeleteIds);
         discardVoiceForMessages(toDeleteIds);
+        // 重 roll 也删了消息：正常路径下这轮生成结束会再打脏一次，这里先打是兜住
+        // 「触发失败没走到生成收尾」的路径，云端 fire_pack 不能停在删除前。
+        markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
         const newHistory = messages.slice(0, index + 1);
         setMessages(newHistory);
         addToast('回溯对话中...', 'info');
@@ -1961,6 +1965,8 @@ const Chat: React.FC = () => {
                 const processedIds = processedMsgs.map(m => m.id);
                 await DB.deleteMessages(processedIds);
                 discardVoiceForMessages(processedIds);
+                // 清历史同样动了云端 fire_pack 的对话快照来源，落库后打脏（下同）。
+                markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
                 const remaining = allMessages.filter(m => m.id > hwm);
                 setMessages(remaining.slice(-200));
                 setTotalMsgCount(remaining.length);
@@ -2001,6 +2007,7 @@ const Chat: React.FC = () => {
             visibleCountRef.current = LOAD_BATCH_SIZE;
             addToast('已清空', 'success');
         }
+        markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
         trackEvent('清空聊天记录');
         setModalType('none');
     };
@@ -2335,6 +2342,9 @@ const Chat: React.FC = () => {
         const deletedId = selectedMessage.id;
         await DB.deleteMessage(deletedId);
         discardVoiceForMessages([deletedId]);
+        // 满血主动消息：云端 fire_pack 里带最近对话原文，删了消息不打脏的话，角色到点
+        // 还会提起这条已经不存在的消息（快照的消息在 flush 时从 DB 重读，这里只管打脏）。
+        markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
         setMessages(prev => prev.filter(m => m.id !== deletedId));
         setTotalMsgCount(prev => Math.max(0, prev - 1));
         setModalType('none');
@@ -2349,6 +2359,8 @@ const Chat: React.FC = () => {
         await DB.updateMessage(selectedMessage.id, editContent);
         // 内容变了旧语音就作废，否则语音条仍会播放编辑前的音频。
         if (contentChanged) discardVoiceForMessages([selectedMessage.id]);
+        // 同 handleDeleteMessage：正文改了要让云端 fire_pack 跟上。
+        if (contentChanged) markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
         setMessages(prev => prev.map(m => m.id === selectedMessage.id ? { ...m, content: editContent } : m));
         setModalType('none');
         setSelectedMessage(null);

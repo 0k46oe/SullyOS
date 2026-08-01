@@ -16,8 +16,10 @@ vi.mock('./activeMsgStore', () => ({
 }));
 
 import {
+  AMSG2_PENDING_SYNC_LS_KEY,
   flushAmsgState,
   markAmsgStateDirty,
+  resumePendingAmsgStateSync,
   startAmsgChatPresence,
   stopAmsgChatPresence,
 } from './amsgStateSync';
@@ -27,7 +29,7 @@ import { CHAT_PRESENCE_HEARTBEAT_MS } from './amsgChatPresence';
 import type { CharacterProfile } from '../types';
 
 const H = 3600_000;
-const SYNC_DEBOUNCE_MS = 15_000;
+const SYNC_DEBOUNCE_MS = 10_000;
 
 /** 带一个「待触发的 auto 任务」的角色 —— 过同步门的最小形态。 */
 const charWithAiTask = (id: string): CharacterProfile => ({
@@ -52,6 +54,7 @@ const nextCharId = () => `char-${++charSeq}`;
 
 beforeEach(() => {
   vi.useFakeTimers();
+  localStorage.removeItem(AMSG2_PENDING_SYNC_LS_KEY);
   (ActiveMsgClient.syncCharFirePacks as any).mockClear();
   (ActiveMsgClient.syncChatPresence as any).mockClear();
   (ActiveMsgStore.getGlobalConfig as any).mockReset();
@@ -121,6 +124,8 @@ describe('markAmsgStateDirty 同步门', () => {
     markAmsgStateDirty(snapshotOf(char));
     await vi.advanceTimersByTimeAsync(SYNC_DEBOUNCE_MS + 1_000);
     expect(ActiveMsgClient.syncCharFirePacks).not.toHaveBeenCalled();
+    // 没有去处不算「欠着」：底账也一起清，别让下次启动为它白跑一趟补传。
+    expect(JSON.parse(localStorage.getItem(AMSG2_PENDING_SYNC_LS_KEY) || '[]')).not.toContain(char.id);
   });
 
   it('冲刷失败 → 快照留在队列里，下次冲刷把同一个角色重传', async () => {
@@ -178,6 +183,91 @@ describe('markAmsgStateDirty 同步门', () => {
 
     await vi.advanceTimersByTimeAsync(600_000);
     expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(4);
+  });
+});
+
+// 去抖窗口回归守卫：钉住 10s。窗口是「聊完就关 App → 快照没传上去」的裸奔期，
+// 曾经是 15s——这条测试在 15s 的旧行为下会挂（10s 出头等不到冲刷）。
+describe('去抖窗口（10s）', () => {
+  it('打脏 10s 出头就冲刷，不用等到 15s', async () => {
+    const char = charWithAiTask(nextCharId());
+    markAmsgStateDirty(snapshotOf(char));
+
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(ActiveMsgClient.syncCharFirePacks).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
+  });
+});
+
+// 脏标记轻量持久化：localStorage 只存 charId 底账（快照本体启动时从 DB 重建）。
+// 回归守卫：没有这层持久化时，「打脏 → 去抖窗口内杀进程」那份快照就永远丢了。
+describe('脏标记持久化与启动补传', () => {
+  const readMarks = (): string[] =>
+    JSON.parse(localStorage.getItem(AMSG2_PENDING_SYNC_LS_KEY) || '[]');
+
+  it('打脏写入底账，上传成功后移除', async () => {
+    const char = charWithAiTask(nextCharId());
+    markAmsgStateDirty(snapshotOf(char));
+    expect(readMarks()).toContain(char.id);
+
+    await vi.advanceTimersByTimeAsync(SYNC_DEBOUNCE_MS + 1_000);
+    expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
+    expect(readMarks()).not.toContain(char.id);
+  });
+
+  it('过不了同步门的角色不写底账', async () => {
+    const plain = { id: nextCharId(), name: 'x' } as unknown as CharacterProfile;
+    markAmsgStateDirty(snapshotOf(plain));
+    expect(readMarks()).not.toContain(plain.id);
+  });
+
+  it('上传失败底账保留，等重试 / 下次启动补传', async () => {
+    (ActiveMsgClient.syncCharFirePacks as any).mockRejectedValueOnce(new Error('worker down'));
+    const char = charWithAiTask(nextCharId());
+    markAmsgStateDirty(snapshotOf(char));
+    await vi.advanceTimersByTimeAsync(SYNC_DEBOUNCE_MS + 1_000);
+    expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
+    expect(readMarks()).toContain(char.id);
+  });
+
+  it('杀进程模拟：直接构造底账残留 → 启动补传立即重建上传并清底账', async () => {
+    // 上次会话只留下 charId（内存队列已随进程蒸发），启动时用 DB 读回的角色重建快照。
+    const char = charWithAiTask(nextCharId());
+    localStorage.setItem(AMSG2_PENDING_SYNC_LS_KEY, JSON.stringify([char.id]));
+
+    resumePendingAmsgStateSync({ characters: [char], userProfile: {} as any, groups: [] });
+    await vi.advanceTimersByTimeAsync(1); // 补传不等去抖，冲微任务即可
+
+    expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
+    const batch = (ActiveMsgClient.syncCharFirePacks as any).mock.calls[0][0];
+    expect(batch.map((i: any) => i.char.id)).toEqual([char.id]);
+    expect(readMarks()).not.toContain(char.id);
+  });
+
+  it('残留角色已删除 / 已关 2.0 → 静默清除底账，不发请求', async () => {
+    const disabled = charWithAiTask(nextCharId());
+    (disabled.activeMsg2Config as any).enabled = false;
+    localStorage.setItem(AMSG2_PENDING_SYNC_LS_KEY, JSON.stringify(['ghost-已删除', disabled.id]));
+
+    resumePendingAmsgStateSync({ characters: [disabled], userProfile: {} as any, groups: [] });
+    await vi.advanceTimersByTimeAsync(SYNC_DEBOUNCE_MS + 1_000);
+
+    expect(ActiveMsgClient.syncCharFirePacks).not.toHaveBeenCalled();
+    expect(readMarks()).toEqual([]);
+  });
+
+  it('补传失败底账不丢：留给退避重试 / 再下次启动', async () => {
+    (ActiveMsgClient.syncCharFirePacks as any).mockRejectedValueOnce(new Error('offline'));
+    const char = charWithAiTask(nextCharId());
+    localStorage.setItem(AMSG2_PENDING_SYNC_LS_KEY, JSON.stringify([char.id]));
+
+    resumePendingAmsgStateSync({ characters: [char], userProfile: {} as any, groups: [] });
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
+    expect(readMarks()).toContain(char.id);
   });
 });
 
