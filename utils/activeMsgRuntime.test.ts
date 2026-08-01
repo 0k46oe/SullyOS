@@ -1,13 +1,20 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeAll, describe, it, expect, vi } from 'vitest';
 import {
   EXPIRE_DECISION_TTL_MS,
+  INBOX_FRESH_DELIVERY_WINDOW_MS,
   MAX_INBOX_PROCESS_ATTEMPTS,
   OrphanedCharacterError,
+  PUSH_SUBSCRIPTION_CHANGED_KV_ID,
   findInboxArtifacts,
+  flushInboxToChat,
   purgeInboxArtifacts,
+  refreshPushSubscriptionIfMarked,
   resolveFireExpireDecision,
   resolveInboxFailureAction,
+  resolveInboxPersistTimestamp,
 } from './activeMsgRuntime';
+import { ActiveMsgClient } from './activeMsgClient';
+import { ActiveMsgStore } from './activeMsgStore';
 import { DB } from './db';
 
 // resolveFireExpireDecision 是从「防穿帮闸·客户端兜底」吞没闸抽出来的 get-or-compute
@@ -201,3 +208,147 @@ describe('purgeInboxArtifacts（走真库）', () => {
       .resolves.toBe(0);
   });
 });
+
+// 回归守卫：主动消息落库时间戳的「在线送达 vs 离线补收」决策。
+// 过去后处理路径 15 处 DB.saveMessage 都不传 timestamp，一律落写库当刻——用户离线一晚，
+// 昨晚 23:00 的消息中午打开显示中午，和正文里角色说的晚上的话矛盾；这个假时间戳还会喂给
+// amsg2ExpireGuard.hasDeliveredProactiveNear（判定窗 [occurrence-90s, occurrence+30min]），
+// 把明明送达的消息误判成没送到，生成假作废回执。修后：超过阈值的离线补收改落 sentAt。
+describe('resolveInboxPersistTimestamp（边界值）', () => {
+  const NOW = 1_700_000_000_000;
+
+  it('阈值内（在线/准在线送达）→ undefined，落库维持写库当刻', () => {
+    expect(resolveInboxPersistTimestamp(NOW - 60_000, NOW)).toBeUndefined();
+    expect(resolveInboxPersistTimestamp(NOW, NOW)).toBeUndefined();
+  });
+
+  it('恰好等于阈值 → 仍算在线（规则是「超过」才离线补收）', () => {
+    expect(resolveInboxPersistTimestamp(NOW - INBOX_FRESH_DELIVERY_WINDOW_MS, NOW)).toBeUndefined();
+  });
+
+  it('超过阈值 1ms → 离线补收，返回 sentAt', () => {
+    const sentAt = NOW - INBOX_FRESH_DELIVERY_WINDOW_MS - 1;
+    expect(resolveInboxPersistTimestamp(sentAt, NOW)).toBe(sentAt);
+  });
+
+  it('隔夜典型场景：13 小时前的 sentAt 原样返回', () => {
+    const sentAt = NOW - 13 * 3_600_000;
+    expect(resolveInboxPersistTimestamp(sentAt, NOW)).toBe(sentAt);
+  });
+
+  it('sentAt 缺失 / 非法（老 push 可能不带）→ undefined', () => {
+    expect(resolveInboxPersistTimestamp(undefined, NOW)).toBeUndefined();
+    expect(resolveInboxPersistTimestamp(0, NOW)).toBeUndefined();
+    expect(resolveInboxPersistTimestamp(Number.NaN, NOW)).toBeUndefined();
+  });
+
+  it('sentAt 在未来（时钟偏差）→ undefined，别把气泡标到未来', () => {
+    expect(resolveInboxPersistTimestamp(NOW + 5 * 60_000, NOW)).toBeUndefined();
+  });
+
+  it('阈值必须小于 hasDeliveredProactiveNear 的 30 分钟送达判定窗（两条路径都落窗内的前提）', () => {
+    expect(INBOX_FRESH_DELIVERY_WINDOW_MS).toBeLessThan(30 * 60_000);
+  });
+});
+
+// 端到端（走真库 + 真 flush）：钉住主路径（post-processing 逐条落库）和降级存原稿路径
+// 用的是同一个口径——离线补收落 sentAt，在线送达落写库当刻。修复前主路径永远落写库当刻
+// （离线补收用例挂）、降级路径永远落 sentAt（在线送达用例挂），两套口径各错一半。
+describe('flushInboxToChat 落库时间戳（走真库）', () => {
+  beforeAll(async () => {
+    // flush 尾部会 dispatch 'active-msg-received' 等事件；node 测试环境没有 window，
+    // 给个最小 stub（事件本身不在本组断言范围内）。
+    (globalThis as any).window ??= { dispatchEvent: () => true };
+    // 主路径要查得到角色才不会走孤儿分支。
+    await DB.saveCharacter({ id: 'char-ts-main', name: '守夜角色' } as any);
+  });
+
+  const inboxMsg = (over: Record<string, unknown>) => ({
+    charId: 'char-ts-main',
+    charName: '守夜角色',
+    body: '还没睡吗，早点休息',
+    receivedAt: Date.now(),
+    ...over,
+  }) as any;
+
+  const assistantMsgs = async (charId: string) =>
+    (await DB.getRecentMessagesByCharId(charId, 50)).filter((m) => m.role === 'assistant');
+
+  it('主路径·离线补收：sentAt 超过阈值 → 每条气泡都落 sentAt', async () => {
+    const sentAt = Date.now() - 13 * 3_600_000; // 昨晚推的，今天中午才打开
+    await ActiveMsgStore.saveInboxMessage(inboxMsg({
+      messageId: 'msg-ts-main-stale',
+      messageType: 'text', // ASSISTANT_TEXT_TYPES 白名单内 → 走 post-processing 主路径
+      sentAt,
+    }));
+
+    await flushInboxToChat();
+
+    const msgs = await assistantMsgs('char-ts-main');
+    expect(msgs.length).toBeGreaterThan(0);
+    for (const m of msgs) expect(m.timestamp).toBe(sentAt);
+  }, 20000);
+
+  it('主路径·在线送达：sentAt 在阈值内 → 维持写库当刻，不回写 sentAt', async () => {
+    const charId = 'char-ts-main-fresh';
+    await DB.saveCharacter({ id: charId, name: '在线角色' } as any);
+    const sentAt = Date.now() - 60_000;
+    await ActiveMsgStore.saveInboxMessage(inboxMsg({
+      messageId: 'msg-ts-main-fresh',
+      charId,
+      messageType: 'text',
+      sentAt,
+    }));
+
+    const before = Date.now();
+    await flushInboxToChat();
+
+    const msgs = await assistantMsgs(charId);
+    expect(msgs.length).toBeGreaterThan(0);
+    for (const m of msgs) {
+      expect(m.timestamp).toBeGreaterThanOrEqual(before); // 写库当刻，而不是一分钟前
+    }
+  }, 20000);
+
+  it('降级存原稿路径·离线补收：与主路径同口径，落 sentAt', async () => {
+    const charId = 'char-ts-raw-stale';
+    const sentAt = Date.now() - 13 * 3_600_000;
+    await ActiveMsgStore.saveInboxMessage(inboxMsg({
+      messageId: 'msg-ts-raw-stale',
+      charId,
+      messageType: 'forum', // 白名单外 → 不走 post-processing，直接原稿落库
+      sentAt,
+    }));
+
+    await flushInboxToChat();
+
+    const msgs = await assistantMsgs(charId);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].content).toBe('还没睡吗，早点休息');
+    expect(msgs[0].timestamp).toBe(sentAt);
+  }, 20000);
+
+  it('降级存原稿路径·在线送达：不再无条件落 sentAt，与主路径同口径（写库当刻）', async () => {
+    const charId = 'char-ts-raw-fresh';
+    const sentAt = Date.now() - 60_000;
+    await ActiveMsgStore.saveInboxMessage(inboxMsg({
+      messageId: 'msg-ts-raw-fresh',
+      charId,
+      messageType: 'forum',
+      sentAt,
+    }));
+
+    const before = Date.now();
+    await flushInboxToChat();
+
+    const msgs = await assistantMsgs(charId);
+    expect(msgs).toHaveLength(1);
+    // 修复前这里挂：降级路径无条件用 sentAt，落的是一分钟前
+    expect(msgs[0].timestamp).toBeGreaterThanOrEqual(before);
+  }, 20000);
+});
+
+// ─── ② pushsubscriptionchange 标记消费（真库 fake-indexeddb）───
+// SW 换订阅时往 ActiveMsg 库 kv store 写固定 key 的标记（worker/sw-keep-alive.ts），
+// 这里钉主线程的消费口径：有标记才刷；刷成功才清；不支持 / 部分失败 / 抛错都留着
+// 下次再试（清了就再也没人补——marker 只在 pushsubscriptionchange 那一刻写一次）。

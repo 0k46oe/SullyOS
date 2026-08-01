@@ -221,6 +221,46 @@ describe('renderAndPersist 双语分支表情包顺序', () => {
     }, 20000);
 });
 
+// 回归守卫：ctx.messageTimestamp 要一路透传到每条 DB.saveMessage。
+// 修复前 15 处落库都不传 timestamp、一律取写库当刻——主动消息离线补收时昨晚的消息
+// 显示成今天中午。修复后调用方（activeMsgRuntime）可以把 worker 发送时刻传进来，
+// 同一轮拆出的多条气泡（文字 / 表情）共用同一个时间戳。
+describe('messageTimestamp 落库时间戳透传', () => {
+    const testEmojis = [
+        { id: 1, name: '开心', url: 'https://example.com/happy.png' },
+    ] as any[];
+
+    it('传了 messageTimestamp → 文字与表情多条气泡全部落这个时间戳', async () => {
+        const charId = `c-msgts-${Date.now()}`;
+        const ctx = makeCtx(charId, []);
+        ctx.emojis = testEmojis as any;
+        ctx.instantRender = true;
+        const sentAt = Date.now() - 13 * 3_600_000; // 昨晚发的，今天才补收
+        ctx.messageTimestamp = sentAt;
+        const raw = '昨晚看到流星了\n[[SEND_EMOJI: 开心]]\n你猜我许了什么愿';
+
+        await applyAssistantPostProcessing(raw, ctx);
+
+        const msgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(msgs.map(m => m.type)).toEqual(['text', 'emoji', 'text']);
+        // 修复前这里挂：timestamp 是写库当刻（≈ 现在），不是传入的 sentAt
+        for (const m of msgs) expect(m.timestamp).toBe(sentAt);
+    }, 20000);
+
+    it('不传 messageTimestamp → 维持默认写库当刻（既有行为不回归）', async () => {
+        const charId = `c-msgts-default-${Date.now()}`;
+        const ctx = makeCtx(charId, []);
+        ctx.instantRender = true;
+        const before = Date.now();
+
+        await applyAssistantPostProcessing('刚想起来跟你说个事', ctx);
+
+        const msgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(msgs.length).toBeGreaterThan(0);
+        for (const m of msgs) expect(m.timestamp).toBeGreaterThanOrEqual(before);
+    }, 20000);
+});
+
 describe('renderAndPersist XHS mimicked-card fallback', () => {
     it('restores the five-line history format as xhs_card and preserves surrounding text', async () => {
         const charId = `c-xhs-mimic-${Date.now()}`;

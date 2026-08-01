@@ -263,7 +263,12 @@ const prepareInboxRetry = async (
   return { replayDirectives: false };
 };
 
-const processInboxMessageWithPostProcessing = async (message: ActiveMsg2InboxMessage): Promise<void> => {
+const processInboxMessageWithPostProcessing = async (
+  message: ActiveMsg2InboxMessage,
+  // 由 flushInboxToChat 按 resolveInboxPersistTimestamp 算好: 离线补收 = sentAt,
+  // 在线送达 = undefined (落库走 DB.saveMessage 默认的写库当刻)。
+  persistTimestamp?: number,
+): Promise<void> => {
   const characters = await DB.getAllCharacters();
   const char = characters.find(c => c.id === message.charId);
   if (!char) {
@@ -448,6 +453,9 @@ const processInboxMessageWithPostProcessing = async (message: ActiveMsg2InboxMes
     // replayDirectives=false = 这是重试、且上次已经把副作用跑完了（见 prepareInboxRetry）。
     directives: replayDirectives && isLastChunk(message) ? extractDirectives(message) : [],
     reasoningContent,
+    // 离线补收时这条 push 拆出的每条气泡都落 sentAt (跟降级存原稿路径同口径),
+    // 在线送达时是 undefined, 各条维持默认的写库当刻。
+    messageTimestamp: persistTimestamp,
   });
 
   // ─── Phase 2 Round 2 (2f): push 尾段 ───
@@ -658,6 +666,37 @@ async function runPushTailPipeline(
   } catch { /* SSR-safe / not browser, ignore */ }
 }
 
+/**
+ * 「在线送达」与「离线补收」的分界（毫秒）。flush 一条 inbox 消息时，距 worker 发送
+ * 时刻（sentAt）不超过这个窗口就当在线送达，落库维持默认的写库当刻（Date.now()）；
+ * 超过才当离线补收，落库改用 sentAt。取 10 分钟有两个讲究：
+ *   1. 在线/准在线送达的消息显示「刚刚」符合观感——用户就在场，气泡不该平白标成几分钟前；
+ *   2. 必须小于 amsg2ExpireGuard.hasDeliveredProactiveNear 的 30 分钟送达判定窗
+ *      （[occurrence-90s, occurrence+30min]）：在线路径落的 Date.now() ≤ sentAt+本窗口，
+ *      离线路径落的 sentAt ≈ occurrence，两条路的时间戳都稳落在判定窗内——
+ *      已送达的消息不会因为落了个假时间戳被误判成「没送到」而生成假作废回执。
+ */
+export const INBOX_FRESH_DELIVERY_WINDOW_MS = 10 * 60_000;
+
+/**
+ * 算一条 inbox 消息落库该用的时间戳。返回 undefined = 不指定，走 DB.saveMessage
+ * 默认的写库当刻（Date.now()）。
+ *   - 在线/准在线送达（now - sentAt ≤ 窗口）→ undefined，气泡显示「刚刚」；
+ *   - 离线补收（now - sentAt > 窗口）→ 用 sentAt。用户离线一晚，昨晚 23:00 推的消息
+ *     中午打开时就该显示 23:00，跟正文里角色说的晚上的话对得上——此时用户没在聊天，
+ *     不存在与用户消息交错的问题（显示顺序按自增 id，不看 timestamp）。
+ * 主路径（applyAssistantPostProcessing 逐条落库）与降级存原稿路径共用这一个口径，
+ * 别再各算各的。sentAt 缺失/非法（老 push 可能不带）同样返回 undefined。
+ * 纯函数，边界值见 activeMsgRuntime.test.ts。
+ */
+export const resolveInboxPersistTimestamp = (
+  sentAt: number | undefined,
+  now: number,
+): number | undefined => {
+  if (typeof sentAt !== 'number' || !Number.isFinite(sentAt) || sentAt <= 0) return undefined;
+  return now - sentAt > INBOX_FRESH_DELIVERY_WINDOW_MS ? sentAt : undefined;
+};
+
 /** 重试前等多久。本地存储的抖动一般几秒就过去了，30s 足够缓过来又不至于让用户干等。 */
 const INBOX_RETRY_DELAY_MS = 30_000;
 let inboxRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -725,7 +764,16 @@ const flushInboxToChatImpl = async () => {
   // 降级回原来的 "原文一次性 saveMessage" 防止消息丢失。dispatchEvent 始终 fire 一次,
   // 保证 toast / 未读 / 通知 / sendInstantPush resolver 语义不变。
   for (const message of pendingMessages) {
-    const messageTimestamp = message.sentAt || message.receivedAt || Date.now();
+    // 落库时间戳按「在线送达 vs 离线补收」二选一（undefined = 交给 DB.saveMessage 默认取
+    // 写库当刻），主路径与下面的降级存原稿路径共用这一个值，两条路一个口径。
+    // sentAt 缺失时退到 receivedAt（老 worker 的 push 可能不带 sentAt）。
+    const persistTimestamp = resolveInboxPersistTimestamp(
+      message.sentAt || message.receivedAt,
+      Date.now(),
+    );
+    // 'active-msg-received' 事件里的 sentAt 维持原口径（发送时刻优先）：
+    // 它只喂 toast / 未读预览，不进聊天记录，别跟落库口径搅在一起。
+    const eventSentAt = message.sentAt || message.receivedAt || Date.now();
     activeMsgTrace('runtime-inbox-message', {
       sessionId: (message as any).sessionId || (message.metadata as any)?.sessionId,
       messageId: message.messageId,
@@ -863,7 +911,7 @@ const flushInboxToChatImpl = async () => {
     if (looksLikeAssistantText) {
       try {
         await logInstantPushLlmExchange(message);
-        await processInboxMessageWithPostProcessing(message);
+        await processInboxMessageWithPostProcessing(message, persistTimestamp);
         routed = true;
       } catch (postErr) {
         const attempts = (message.processAttempts ?? 0) + 1;
@@ -905,7 +953,7 @@ const flushInboxToChatImpl = async () => {
           role: 'assistant',
           type: 'text',
           content: message.body,
-          timestamp: messageTimestamp,
+          timestamp: persistTimestamp,
           metadata: {
             source: 'active_msg_2',
             activeMsg2: {
@@ -944,7 +992,7 @@ const flushInboxToChatImpl = async () => {
         charName: message.charName,
         body: message.previewBody || message.body,
         avatarUrl: message.avatarUrl,
-        sentAt: messageTimestamp,
+        sentAt: eventSentAt,
       },
     }));
     activeMsgTrace('runtime-active-msg-received-dispatched', {
@@ -963,7 +1011,9 @@ const flushInboxToChatImpl = async () => {
 //      从根上消除跨轮 B 抢在 A 前面入库 (用户看到的 "B+A").
 // 每段都吞掉自身异常, 保证链不被一个失败的 flush 卡死.
 let flushChain: Promise<void> = Promise.resolve();
-const flushInboxToChat = (): Promise<void> => {
+// （导出仅为让 activeMsgRuntime.test.ts 走真库钉「主路径 / 降级路径落库时间戳同口径」，
+//   运行时入口仍是 ActiveMsgRuntime.init 挂的监听器。）
+export const flushInboxToChat = (): Promise<void> => {
   const next = flushChain.then(async () => {
     try {
       await flushInboxToChatImpl();

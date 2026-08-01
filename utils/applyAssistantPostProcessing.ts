@@ -361,6 +361,15 @@ export interface PostProcessCtx {
      * 出来塞到这里. 本地 fetch 路径不传 (Step 4 仍从 initialData.choices[0].message.reasoning_content 读).
      */
     reasoningContent?: string;
+    /**
+     * 本轮所有落库消息统一使用的时间戳 (毫秒)。不传 = 维持 DB.saveMessage 默认
+     * (写库当刻的 Date.now())。主动消息离线补收时由 activeMsgRuntime 传 worker 发送
+     * 时刻 (sentAt) 进来: 昨晚推的消息中午打开时气泡显示昨晚, 跟正文里角色说的话
+     * 对得上; 同一条 push 拆出的文字 / 表情 / 卡片多条气泡也共用同一个值 (显示顺序
+     * 按自增 id, 不看 timestamp, 所以只需一致、不需递增)。
+     * 在线送达 vs 离线补收的判定见 activeMsgRuntime.resolveInboxPersistTimestamp。
+     */
+    messageTimestamp?: number;
 }
 
 // ─── 主入口 ─────────────────────────────────────────────────────────────────
@@ -390,11 +399,17 @@ export async function applyAssistantPostProcessing(
         skipSecondPassLLM,
         directives,
         reasoningContent: pushReasoningContent,
+        messageTimestamp,
     } = ctx;
     const { baseUrl, headers, effectiveApi } = api;
     // 拟人打字延迟：流式预览已实时展示过气泡时（instantRender）跳过，避免二次慢放
     const typingPause = (ms: number): Promise<void> =>
         instantRender ? Promise.resolve() : new Promise(r => setTimeout(r, ms));
+    // 统一落库入口：ctx.messageTimestamp（若有）盖到每条消息上，保证同一轮拆出的
+    // 正文 / 表情 / 卡片 / 系统提示时间戳一致；没传则维持 DB.saveMessage 默认（写库当刻）。
+    // 全函数落库一律走这里，别直接调 DB.saveMessage——漏一处就会出现气泡时间戳互相打架。
+    const persistMessage: typeof DB.saveMessage = (msg) =>
+        DB.saveMessage(messageTimestamp != null ? { ...msg, timestamp: messageTimestamp } : msg);
     const {
         setMessages,
         addToast,
@@ -577,7 +592,7 @@ export async function applyAssistantPostProcessing(
                 const foundEmoji = emojis.find(e => e.name === name);
                 if (!foundEmoji) return;
                 await typingPause(Math.random() * 500 + 300);
-                await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'emoji', content: foundEmoji.url, metadata: takeMeta(mcdInheritMeta) } as any);
+                await persistMessage({ charId: char.id, role: 'assistant', type: 'emoji', content: foundEmoji.url, metadata: takeMeta(mcdInheritMeta) } as any);
                 setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
             };
             // 翻译标签之外的普通文本段：splitResponse 按出现顺序拆出文字 / 表情逐条发
@@ -594,7 +609,7 @@ export async function applyAssistantPostProcessing(
                         if (!chunk) continue;
                         const replyData = globalMsgIndex === 0 ? aiReplyTarget : undefined;
                         await typingPause(Math.min(Math.max(chunk.length * 50, 500), 2000));
-                        await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: chunk, replyTo: replyData, metadata: takeMeta(mcdInheritMeta) } as any);
+                        await persistMessage({ charId: char.id, role: 'assistant', type: 'text', content: chunk, replyTo: replyData, metadata: takeMeta(mcdInheritMeta) } as any);
                         setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
                         globalMsgIndex++;
                     }
@@ -620,7 +635,7 @@ export async function applyAssistantPostProcessing(
                         : (originalText || translatedText);
                     const replyData = globalMsgIndex === 0 ? aiReplyTarget : undefined;
                     await typingPause(Math.min(Math.max(biContent.length * 30, 400), 2000));
-                    await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: biContent, replyTo: replyData, metadata: takeMeta(mcdInheritMeta) } as any);
+                    await persistMessage({ charId: char.id, role: 'assistant', type: 'text', content: biContent, replyTo: replyData, metadata: takeMeta(mcdInheritMeta) } as any);
                     setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
                     globalMsgIndex++;
                 }
@@ -645,7 +660,7 @@ export async function applyAssistantPostProcessing(
                     const foundEmoji = emojis.find(e => e.name === part.content);
                     if (foundEmoji) {
                         await typingPause(Math.random() * 500 + 300);
-                        await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'emoji', content: foundEmoji.url, metadata: takeMeta(mcdInheritMeta) } as any);
+                        await persistMessage({ charId: char.id, role: 'assistant', type: 'emoji', content: foundEmoji.url, metadata: takeMeta(mcdInheritMeta) } as any);
                         setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
                     }
                 } else {
@@ -674,7 +689,7 @@ export async function applyAssistantPostProcessing(
                         if (ChatParser.hasDisplayContent(chunk)) {
                             const cleanChunk = ChatParser.sanitize(chunk);
                             if (cleanChunk) {
-                                await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: cleanChunk, replyTo: replyData, metadata: takeMeta(mcdInheritMeta) } as any);
+                                await persistMessage({ charId: char.id, role: 'assistant', type: 'text', content: cleanChunk, replyTo: replyData, metadata: takeMeta(mcdInheritMeta) } as any);
                                 setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
                                 globalMsgIndex++;
                                 chunkSaved = true;
@@ -865,7 +880,7 @@ export async function applyAssistantPostProcessing(
                 if (result.success) {
                     removePendingDiary(pendingDiaryId);
                     console.log('📔 [Diary] 写入成功:', result.url);
-                    await DB.saveMessage({
+                    await persistMessage({
                         charId: char.id,
                         role: 'system',
                         type: 'text',
@@ -1060,7 +1075,7 @@ export async function applyAssistantPostProcessing(
                 if (result.success) {
                     removePendingDiary(pendingFsDiaryId);
                     console.log('📒 [Feishu] 写入成功:', result.recordId);
-                    await DB.saveMessage({
+                    await persistMessage({
                         charId: char.id,
                         role: 'system',
                         type: 'text',
@@ -1258,7 +1273,7 @@ export async function applyAssistantPostProcessing(
                 updateTokenUsage(data, historyMsgCount, 'xhs-search');
                 aiContent = data.choices?.[0]?.message?.content || '';
                 aiContent = normalizeAiContent(aiContent);
-                await DB.saveMessage({
+                await persistMessage({
                     charId: char.id,
                     role: 'system',
                     type: 'text',
@@ -1335,7 +1350,7 @@ export async function applyAssistantPostProcessing(
         if (note) {
             sharedXhsCardKeys.add(normalizeXhsCardKey(note.title));
             console.log('📕 [XHS] AI分享笔记卡片:', note.title);
-            await DB.saveMessage({
+            await persistMessage({
                 charId: char.id,
                 role: 'assistant',
                 type: 'xhs_card',
@@ -1382,7 +1397,7 @@ export async function applyAssistantPostProcessing(
             shareCount: cachedNote.shareCount ?? parsedNote.shareCount,
         } : parsedNote;
         console.warn('📕 [XHS] 检测到仿卡片文本，已恢复为 xhs_card:', note.title, cachedNote ? '(命中缓存)' : '(文本兜底)');
-        await DB.saveMessage({
+        await persistMessage({
             charId: char.id,
             role: 'assistant',
             type: 'xhs_card',
@@ -1411,7 +1426,7 @@ export async function applyAssistantPostProcessing(
             if (result.success) {
                 console.log('📕 [XHS] 发布成功:', result.noteId);
                 const tagsStr = postTags.length > 0 ? ` #${postTags.join(' #')}` : '';
-                await DB.saveMessage({
+                await persistMessage({
                     charId: char.id,
                     role: 'system',
                     type: 'text',
@@ -1447,7 +1462,7 @@ export async function applyAssistantPostProcessing(
             try {
                 const result = await xhsComment(xhsConf, noteId, commentContent, xsecToken);
                 if (result.success) {
-                    await DB.saveMessage({
+                    await persistMessage({
                         charId: char.id,
                         role: 'system',
                         type: 'text',
@@ -1692,7 +1707,7 @@ export async function applyAssistantPostProcessing(
             try {
                 const result = await xhsComment(xhsConf, noteId, commentContent, xsecToken);
                 if (result.success) {
-                    await DB.saveMessage({
+                    await persistMessage({
                         charId: char.id,
                         role: 'system',
                         type: 'text',
@@ -1822,7 +1837,7 @@ export async function applyAssistantPostProcessing(
             if (result.success) {
                 console.log('📕 [XHS] 发布成功(profile后):', result.noteId);
                 const tagsStr = postTags.length > 0 ? ` #${postTags.join(' #')}` : '';
-                await DB.saveMessage({
+                await persistMessage({
                     charId: char.id,
                     role: 'system',
                     type: 'text',
@@ -1859,7 +1874,7 @@ export async function applyAssistantPostProcessing(
         const { blocks, cleanedContent } = extractHtmlBlocks(aiContent);
         for (const blk of blocks) {
             try {
-                await DB.saveMessage({
+                await persistMessage({
                     charId: char.id,
                     role: 'assistant',
                     type: 'html_card',
