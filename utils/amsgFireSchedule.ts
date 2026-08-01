@@ -10,6 +10,8 @@
  */
 
 import type { ActiveMsg2ExpirePolicy, ActiveMsg2Mode, ActiveMsg2Recurrence } from '../types';
+import { type AmsgTzRef, formatFireTimeShort, wallClockPartsInZone } from './amsgFirePack';
+import { wallClockToTimestamp } from './timezone';
 
 /** 与前台同名，故意的：见文件头。 */
 export const AMSG_FIRE_SCHEDULE_TOOL = 'schedule_active_message';
@@ -54,12 +56,18 @@ export interface FireScheduleToolDef {
   function: { name: string; description: string; parameters: Record<string, unknown> };
 }
 
-const PARAMETERS = {
+/** 工具声明 / 说明块的时间上下文：示例按「明天这个点」现算，参照系跟 fire_pack 走。 */
+export interface FireScheduleTimeOpts {
+  nowMs: number;
+  tz: AmsgTzRef;
+}
+
+const buildParameters = (example: string) => ({
   type: 'object',
   properties: {
     send_at: {
       type: 'string',
-      description: '开始生成的时间，ISO 8601（如 2026-07-30T23:30:00+08:00）。至少比当前时间晚 1 分钟。',
+      description: `开始生成的时间，写你本地的墙钟时间、不带时区后缀（如 ${example}），系统按你所在的时区理解。至少比当前时间晚 1 分钟。`,
     },
     mode: {
       type: 'string',
@@ -82,14 +90,16 @@ const PARAMETERS = {
     },
   },
   required: ['send_at'],
-} as const;
+});
 
-export const buildFireScheduleTool = (): FireScheduleToolDef => ({
+export const buildFireScheduleTool = (opts: FireScheduleTimeOpts): FireScheduleToolDef => ({
   type: 'function',
   function: {
     name: AMSG_FIRE_SCHEDULE_TOOL,
     description: FIRE_TOOL_DESCRIPTION,
-    parameters: PARAMETERS as unknown as Record<string, unknown>,
+    parameters: buildParameters(
+      buildSendAtExample(opts.nowMs, opts.tz),
+    ) as unknown as Record<string, unknown>,
   },
 });
 
@@ -100,10 +110,12 @@ export const buildFireScheduleTool = (): FireScheduleToolDef => ({
  * 反而勾引模型往正文里写（与 buildMcpFireBlock 同一个判断）。text 模式（用户的中转拒
  * tools）才教语法。
  */
-export const buildFireScheduleBlock = (mode: 'native' | 'text'): string => {
+export const buildFireScheduleBlock = (mode: 'native' | 'text', opts: FireScheduleTimeOpts): string => {
   const howTo = mode === 'native'
     ? `需要时通过系统的工具调用接口发起 ${AMSG_FIRE_SCHEDULE_TOOL}，不要把工具名和参数写进正文。`
-    : `需要时单独输出一行 ${AMSG_FIRE_SCHEDULE_TOOL}({"send_at":"2026-07-30T23:30:00+08:00","prompt_hint":"接着说"})，系统会代为安排并把结果告诉你。`;
+    : `需要时单独输出一行 ${AMSG_FIRE_SCHEDULE_TOOL}({"send_at":"${
+      buildSendAtExample(opts.nowMs, opts.tz)
+    }","prompt_hint":"接着说"})（send_at 写你本地的墙钟时间，不带时区后缀），系统会代为安排并把结果告诉你。`;
   return [
     '',
     '---',
@@ -138,6 +150,36 @@ export const buildTaskInstruction = (mode: ActiveMsg2Mode, promptHint?: string):
   ].join('\n');
 };
 
+// ─── send_at 的时间参照系 ───
+//
+// 角色在 prompt 里看到的钟是自己时区的（fire_pack 的 tzId），它写出来的 send_at
+// 也是那个参照系的墙钟。worker 跑在 UTC，直接 new Date('2026-08-01T09:00:00')
+// 会按 UTC 解析——「明早 9 点」实际差整整一个时差。规则：
+//   - 带 Z / ±hh:mm 后缀的照旧按标注的时区解析（模型硬要写也不算错）；
+//   - 裸 datetime 按 tz 参照系的墙钟解析（tzId 走 Intl 逆解，禁手搓偏移）。
+
+const pad2 = (n: number) => n.toString().padStart(2, '0');
+
+/** send_at 串尾带没带显式时区（Z 或 ±hh:mm / ±hhmm）。 */
+const hasExplicitOffset = (s: string): boolean => /(?:Z|[+-]\d{2}:?\d{2})$/i.test(s.trim());
+
+/** ms 在 tz 参照系下的裸墙钟 ISO（无时区后缀），工具描述里的示例 / 打回文案用。 */
+export const wallClockIso = (ms: number, tz: AmsgTzRef): string => {
+  const p = wallClockPartsInZone(ms, tz);
+  return `${p.year}-${pad2(p.month)}-${pad2(p.day)}T${pad2(p.hour)}:${pad2(p.minute)}:00`;
+};
+
+/** 给模型看的 send_at 示例：明天这个点的裸墙钟——别再教它写 +08:00 之类的 offset。 */
+export const buildSendAtExample = (nowMs: number, tz: AmsgTzRef): string =>
+  wallClockIso(nowMs + 24 * 3600_000, tz);
+
+/** send_at 串 → epoch ms（解析不出 NaN）。规则见上面这段注释。 */
+export const resolveSendAtMs = (raw: string, tz: AmsgTzRef): number => {
+  const text = raw.trim();
+  if (hasExplicitOffset(text)) return new Date(text).getTime();
+  return wallClockToTimestamp(text, tz.tzId);
+};
+
 // ─── 参数校验 ───
 
 export interface FireScheduleRequest {
@@ -166,24 +208,29 @@ const RECURRENCES: ActiveMsg2Recurrence[] = ['none', 'daily', 'weekly'];
  *
  * 一律不抛错：这是模型写出来的东西，写歪很正常，回喂让它改比让整条 fire 失败强得多
  * （fire 失败 = 任务重跑 = 用户这一次一个字都收不到）。
+ *
+ * tz 是角色的时间参照系（fire_pack 的 tzId）：裸 send_at 按它的墙钟解析，
+ * 打回文案里的时间也用它说人话。
  */
 export const parseFireScheduleArgs = (
   args: Record<string, unknown>,
   nowMs: number,
+  tz: AmsgTzRef,
 ): FireScheduleRequest | FireScheduleReject => {
+  const example = buildSendAtExample(nowMs, tz);
   const sendAtRaw = args?.send_at;
   if (typeof sendAtRaw !== 'string' || !sendAtRaw.trim()) {
-    return { ok: false, reason: 'invalid_send_at', message: 'send_at 必填，写成 ISO 8601 时间（如 2026-07-30T23:30:00+08:00）。' };
+    return { ok: false, reason: 'invalid_send_at', message: `send_at 必填，写你本地的墙钟时间（如 ${example}）。` };
   }
-  const sendAtMs = new Date(sendAtRaw).getTime();
+  const sendAtMs = resolveSendAtMs(sendAtRaw, tz);
   if (!Number.isFinite(sendAtMs)) {
-    return { ok: false, reason: 'invalid_send_at', message: `send_at「${sendAtRaw}」解析不出时间，写成 ISO 8601（如 2026-07-30T23:30:00+08:00）。` };
+    return { ok: false, reason: 'invalid_send_at', message: `send_at「${sendAtRaw}」解析不出时间，写你本地的墙钟时间（如 ${example}）。` };
   }
   if (sendAtMs < nowMs + MIN_SCHEDULE_LEAD_MS) {
     return {
       ok: false,
       reason: 'send_at_too_soon',
-      message: `send_at 至少要比现在晚 1 分钟（现在是 ${new Date(nowMs).toISOString()}）。想马上说的话直接写进这条消息里，不用排。`,
+      message: `send_at 至少要比现在晚 1 分钟（你那边现在是 ${formatFireTimeShort(nowMs, tz)}）。想马上说的话直接写进这条消息里，不用排。`,
     };
   }
 

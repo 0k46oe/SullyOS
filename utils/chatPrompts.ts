@@ -160,10 +160,14 @@ export const ChatPrompts = {
         } | null,
         isListeningTogether?: boolean,
         musicCfg?: MusicCfg,
+        // 主动消息 fire_pack 打包用：模板里的「现在是 X」由 worker 到点现算填槽，
+        // 烤死在模板里的这份要抑制掉（透传给 buildVolatileCoreState 的 timeOptions）。
+        promptOptions?: { skipTimeAwareness?: boolean },
     ): Promise<string> => {
         const parts = await ChatPrompts.buildSystemPromptParts(
             char, userProfile, groups, emojis, categories, currentMsgs,
             realtimeConfig, evolvedNarrative, userListeningContext, isListeningTogether, musicCfg,
+            undefined, promptOptions,
         );
         return parts.stable + parts.volatileState + parts.recencyTail;
     },
@@ -203,6 +207,8 @@ export const ChatPrompts = {
         musicCfg?: MusicCfg,
         // 刚才一起听途中歌被切了（char 还没重新加入）—— 注入"察觉换歌"提示。
         recentTrackSwitch?: { songName: string; artists: string } | null,
+        // 见 buildSystemPrompt：抑制 volatileState 里的「现在是 X」时间块（fire_pack 模板用）。
+        promptOptions?: { skipTimeAwareness?: boolean },
     ): Promise<{ stable: string; volatileState: string; recencyTail: string }> => {
         // ── 分段计时（定位瓶颈用）──
         const perfT0 = performance.now();
@@ -231,7 +237,10 @@ export const ChatPrompts = {
         // 开头一行框定，让模型明白这条出现在历史之后的 system 消息是"此刻的状态"，
         // 人设与规则仍以最上方的系统设定为准。
         let volatileState = `\n[System: 实时状态 (Live Context)]\n（以下是此刻的实时状态——当前时间、你正在做的事、你的情绪底色、周边动态。你的人设与聊天规则见最上方的系统设定，此处不再重复。）\n\n`;
-        volatileState += ContextBuilder.buildVolatileCoreState(char, { includeDetailedMemories: true });
+        volatileState += ContextBuilder.buildVolatileCoreState(char, {
+            includeDetailedMemories: true,
+            timeOptions: { skipTimeAwareness: promptOptions?.skipTimeAwareness },
+        });
 
         // ── 并发发起所有独立的异步取数（网络 + IndexedDB），下面按原顺序拼接 ──
         // 原来是 7 段串行 await，总耗时 = 各段之和；现在取 max。

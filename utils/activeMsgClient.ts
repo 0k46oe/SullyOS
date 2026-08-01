@@ -43,13 +43,19 @@ import {
 } from './amsgToolPack';
 import { listRecallableMonths } from './agenticTools';
 import { ChatPrompts } from './chatPrompts';
+import { resolveCharTimeZone } from './timezone';
 import { DB } from './db';
 import { copyWorkerBundleToClipboard } from './instantPushClient';
 import { collectMcpFireServers, getMcpUseNativeTools } from './mcpClient';
 import { safeResponseJson } from './safeApi';
 import { ActiveMsgStore } from './activeMsgStore';
 import { KeepAlive } from './keepAlive';
-import { describePushCapabilityGap } from './pushSubscribeShared';
+import {
+  bytesToB64u,
+  describePushCapabilityGap,
+  isDeadPushEndpoint,
+  SUBSCRIBE_SETTLE_MS,
+} from './pushSubscribeShared';
 
 export interface ActiveMsg2PushStatus {
   supported: boolean;
@@ -208,7 +214,8 @@ const readEmojiLibrary = async (): Promise<EmojiLibrary> => {
   return { all, categories };
 };
 
-const buildFirePack = async (
+// export 只为单测（activeMsgClient.test.ts 钉 tzId 取值与模板不烤时间）。
+export const buildFirePack = async (
   char: CharacterProfile,
   userProfile: UserProfile,
   groups: GroupProfile[],
@@ -235,6 +242,13 @@ const buildFirePack = async (
     categories,
     recentMessages,
     realtimeConfig,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    // 模板里不烤「现在是 X」：那是打包时刻的时间，到点渲染早就过期了。
+    // 当前时间由 worker 用 AMSG_SLOT_CURRENT_TIME 槽位在 fire 时刻现算填入。
+    { skipTimeAwareness: true },
   );
   const { apiMessages } = ChatPrompts.buildMessageHistory(
     recentMessages,
@@ -272,6 +286,7 @@ const buildFirePack = async (
     '',
     '【角色系统设定】',
     systemPrompt,
+    '（注意：上面角色设定里的日程、天气、情绪等状态是最近一次聊天时的快照。若它们与当前时刻矛盾，以下方「当前本地时间」为准推断你此刻的现状。）',
     '',
     '【最近对话上下文】',
     // 槽位直接黏在最后一行后面（不单独占一行）：worker 到点没有可写的自述时填空串，
@@ -298,13 +313,15 @@ const buildFirePack = async (
     v: 3,
     template,
     lastUserMessageAt,
-    tzOffsetMin: new Date().getTimezoneOffset(),
+    // 角色的时间参照系：开了自定义时区用角色的，没开用设备的。worker 渲染一切
+    // 给角色看的时间都按它来。
+    tzId: resolveCharTimeZone(char) ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
     targetName: userProfile.name || '对方',
     // 这份模板的身份戳：worker 用它判断云端那份「角色自己发过什么」还配不配得上
     // 当前上下文（见 amsgFirePack 的 selfLogMatchesPack）。每打一次包都是新值。
     builtAt: Date.now(),
     // 到点时角色要知道自己还挂着什么，才不会把同一件事再排一遍。这里带原始记录，
-    // 渲染成人话由 worker 现场做（时间要按 tzOffsetMin 换算，且得摘掉正在发的那条）。
+    // 渲染成人话由 worker 现场做（时间要按 tzId 换算，且得摘掉正在发的那条）。
     pendingTasks: getPendingTasks(char.activeMsg2Config, Date.now()),
   };
 };

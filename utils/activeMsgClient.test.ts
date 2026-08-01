@@ -14,13 +14,23 @@ const { reiClient } = vi.hoisted(() => ({
     clearClientState: vi.fn(),
     putClientState: vi.fn(),
     getClientState: vi.fn(),
+    getCapabilities: vi.fn(),
+    getVapidPublicKey: vi.fn(),
+    subscribePush: vi.fn(),
+    updateMessage: vi.fn(),
   },
 }));
 vi.mock('@rei-standard/amsg-client', () => ({ ReiClient: vi.fn(() => reiClient) }));
+// ensurePushSubscription 会先跑 KeepAlive.init()（注册 SW 等浏览器副作用），测里桩掉。
+vi.mock('./keepAlive', () => ({ KeepAlive: { init: vi.fn().mockResolvedValue(undefined) } }));
 
 import {
-  ActiveMsgClient, clearNamespaceValuesOrThrow, putClientStateOrThrow, toRemoteAvatarUrl,
+  ActiveMsgClient, buildFirePack, clearNamespaceValuesOrThrow, dropStaleSubscription,
+  putClientStateOrThrow, toRemoteAvatarUrl,
 } from './activeMsgClient';
+import { AMSG_SLOT_CURRENT_TIME } from './amsgFirePack';
+import { ChatPrompts } from './chatPrompts';
+import { DB } from './db';
 
 const TEST_USER_ID = '3f2b1c8a-9d4e-4a1b-8c2d-000000000001';
 
@@ -378,4 +388,79 @@ describe('clearNamespaceValuesOrThrow 的全局 namespace 护栏', () => {
       .rejects.toThrow(/全局云端状态不能按 namespace 清空/);
     expect(getClientState).not.toHaveBeenCalled();
   });
+});
+
+// 回归守卫（时区统一 ①）：fire_pack 的时间参照系与「模板不烤时间」。
+//   - tzId：角色开了自定义时区用角色的，没开用设备的（worker 渲染一切时间的参照系）；
+//   - 烤进模板的 buildSystemPrompt 必须收到 skipTimeAwareness——否则「现在是 X」被
+//     烤死在模板里，到点渲染时就是一句过期的时间，和槽位现算的当前时间打架；
+//   - 【角色系统设定】之后补一行「设定是快照，与当前时刻矛盾以当前本地时间为准」；
+//   - 槽位不动：当前时间仍由 worker 到点用 AMSG_SLOT_CURRENT_TIME 现算填入。
+describe('buildFirePack 的时区参照系与模板（①）', () => {
+  const baseChar = (over: Record<string, unknown> = {}) => ({
+    id: 'char-1',
+    name: '小满',
+    memories: [],
+    ...over,
+  }) as any;
+  const user = { name: '楪' } as any;
+
+  // 具体的 MockInstance 泛型跟着 buildSystemPrompt 的 11 个参数走，写全没有信息量。
+  let systemPromptSpy: { mock: { calls: unknown[][] } };
+
+  beforeEach(() => {
+    // 模板本体不在被测范围：桩掉重依赖，测打包逻辑本身。
+    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
+    systemPromptSpy = vi.spyOn(ChatPrompts, 'buildSystemPrompt').mockResolvedValue('SYS_PROMPT_MARKER');
+    vi.spyOn(ChatPrompts, 'buildMessageHistory').mockReturnValue({ apiMessages: [] } as any);
+    vi.spyOn(ChatPrompts, 'filterVisibleEmojis').mockReturnValue({ emojis: [], categories: [] } as any);
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  const pack = (char: any) => buildFirePack(char, user, [], undefined, { all: [], categories: [] });
+
+  it('角色开了自定义时区 → tzId 用角色的', async () => {
+    const out = await pack(baseChar({ customTimezoneEnabled: true, customTimezone: 'Asia/Tokyo' }));
+    expect(out.tzId).toBe('Asia/Tokyo');
+  });
+
+  it('没开自定义时区 → tzId 用设备的', async () => {
+    const out = await pack(baseChar());
+    expect(out.tzId).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+  });
+
+  it('buildSystemPrompt 收到 skipTimeAwareness——模板里不烤「现在是 X」', async () => {
+    await pack(baseChar());
+    expect(systemPromptSpy).toHaveBeenCalledTimes(1);
+    // 第 12 个位置参数是 promptOptions（见 chatPrompts.buildSystemPrompt 签名）。
+    expect(systemPromptSpy.mock.calls[0][11]).toEqual({ skipTimeAwareness: true });
+  });
+
+  it('当前时间槽位保留：worker 到点现算填入（1.0 提示块的「现在是」也是槽位）', async () => {
+    const out = await pack(baseChar());
+    expect(out.template).toContain(`当前本地时间：${AMSG_SLOT_CURRENT_TIME}`);
+    expect(out.template).toContain(`现在是 ${AMSG_SLOT_CURRENT_TIME}`);
+  });
+
+  it('【角色系统设定】之后补快照说明行，位置在设定正文与对话上下文之间', async () => {
+    const out = await pack(baseChar());
+    const noteIdx = out.template.indexOf('最近一次聊天时的快照');
+    expect(noteIdx).toBeGreaterThan(out.template.indexOf('SYS_PROMPT_MARKER'));
+    expect(noteIdx).toBeLessThan(out.template.indexOf('【最近对话上下文】'));
+    expect(out.template).toContain('以下方「当前本地时间」为准');
+  });
+});
+
+// ─── ① 订阅自检 ───
+// 回归守卫：旧实现拿到已有订阅**无条件复用**——换过 VAPID 后绑旧公钥的订阅发推必 403，
+// 浏览器僵尸化的死端点（permanently-removed.invalid）也照单收。这两种都得先退订再重订。
+
+/** bytesToB64u([1,2,3]) === 'AQID'（btoa('\x01\x02\x03')），下面拿它当 VAPID 公钥比对。 */
+const VAPID_AQID = 'AQID';
+
+const makeSub = (endpoint: string, keyBytes: number[] | null) => ({
+  endpoint,
+  options: { applicationServerKey: keyBytes ? Uint8Array.from(keyBytes).buffer : null },
+  unsubscribe: vi.fn().mockResolvedValue(true),
+  toJSON: () => ({ endpoint, keys: { p256dh: 'p', auth: 'a' } }),
 });

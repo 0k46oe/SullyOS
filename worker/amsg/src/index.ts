@@ -32,6 +32,7 @@ import {
   AMSG_SELF_LOG_KEY,
   type AmsgLastSkip,
   type AmsgSelfLog,
+  type AmsgTzRef,
   amsgStateNamespace,
   amsgXhsSessionKey,
   appendSelfLogEntry,
@@ -215,6 +216,15 @@ interface FireStash {
   charId: string;
   /** 防穿帮闸锚点：这份 fire_pack 记的「用户最后一次开口」。 */
   anchorMs: number;
+  /**
+   * 角色的时间参照系（fire_pack 的 tzId）。worker 里一切「给角色看的时间」
+   * ——当前时间槽、self_log 时间戳、排程清单、send_at 解析与打回文案——都从这一份出。
+   */
+  tz: AmsgTzRef;
+  /** 任务行 uuid（skip 留痕要对上是哪一条；拿不到为 null）。 */
+  taskUuid: string | null;
+  /** 任务行 id（字符串化）。onAfterSend 按它对回本次 fire 的 stash，见 pendingSelfLogs。 */
+  taskRowId: string | null;
 }
 
 const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash | undefined =>
@@ -345,68 +355,165 @@ export const offloadOversizedPush = async (
  *
  * best-effort：写不进去不能连累这次 skip 本身——闸该拦还是要拦，少一句解释而已。
  */
+const writeLastSkip = async (
+  writeState: WriteState | undefined,
+  charId: string,
+  skip: AmsgLastSkip,
+): Promise<void> => {
+  if (typeof writeState !== 'function') return;
+  try {
+    await writeState(amsgStateNamespace(charId), [
+      { key: AMSG_LAST_SKIP_KEY, value: JSON.stringify(skip) },
+    ]);
+  } catch (error) {
+    console.warn('[amsg:skip] 跳过原因写入失败（跳过本身照常生效，只是面板少一句说明）', error);
+  }
+};
+
 const recordSkip = async (
   ctx: FireCtx,
   charId: string,
   reason: AmsgLastSkip['reason'],
   occurrenceMs: number,
-): Promise<void> => {
-  if (typeof ctx.writeState !== 'function') return;
-  const skip: AmsgLastSkip = {
+): Promise<void> =>
+  writeLastSkip(ctx.writeState, charId, {
     v: 1,
     taskUuid: typeof ctx.task.uuid === 'string' ? ctx.task.uuid : null,
     occurrenceMs,
     reason,
     skippedAt: ctx.now.getTime(),
-  };
-  try {
-    await ctx.writeState(amsgStateNamespace(charId), [
-      { key: AMSG_LAST_SKIP_KEY, value: JSON.stringify(skip) },
-    ]);
-  } catch (error) {
-    console.warn('[amsg:expire-skip] 跳过原因写入失败（闸照常生效，只是面板少一句说明）', error);
+  });
+
+// ─── self_log 的发送后回写（⑥）───
+//
+// 过去 recordSelfLog 在 onLLMOutput 里、推送发出**之前**调用——LLM 成功但推送全挂时
+// 云端记了「说过」而用户一个字没收到，下次 fire 角色会接着一句不存在的话往下说。
+// 现在改成：onLLMOutput 只把各段正文暂存进 pendingSelfLogs，等库发完（或发挂）后调
+// config 级 hook onAfterSend({ task, sentCount, total, error })（amsg-server
+// 2.6.0-next.10 起；task 是 D1 任务行原样），只把**前 sentCount 段**写进 self_log，
+// entry.at 用实际发送时刻。sentCount=0（一段都没出去）不写——重试的下一条 fire 会
+// 重新生成、重新登记。
+//
+// 并发隔离：worker 单 isolate 内最多并发 8 个 fire，登记表按任务行 id 一格一格分开，
+// onAfterSend 拿 task.id 对号——绝不能做成「谁先到算谁的」的单例。
+
+interface PendingSelfLog {
+  charId: string;
+  clientTaskId: string;
+  occurrenceMs: number;
+  /** 各段正文（与 pushPayloads 一一对应），onAfterSend 按 sentCount 截取。 */
+  texts: string[];
+  /** 本次 fire 的 stash（selfLog 的当前版本挂在上面，写完要更新回去）。 */
+  stash: FireStash;
+  writeState: WriteState;
+  registeredAt: number;
+}
+
+/** 任务行 id（字符串化）→ 待写的 self_log。export 只为单测。 */
+export const pendingSelfLogs = new Map<string, PendingSelfLog>();
+
+/** 登记表兜底清扫线：fire 总预算 240s，远超它还没被认领的条目就是泄漏，别攒着。 */
+const PENDING_SELF_LOG_TTL_MS = 15 * 60_000;
+
+const prunePendingSelfLogs = (nowMs: number): void => {
+  for (const [key, entry] of pendingSelfLogs) {
+    if (nowMs - entry.registeredAt > PENDING_SELF_LOG_TTL_MS) pendingSelfLogs.delete(key);
   }
 };
 
 /**
- * 把这次真正发出去的正文追加进云端自述日志，供下一次触发读回。
+ * 推送发出（或发挂）之后把真正送出去的正文写进云端自述日志（config 级 hook，
+ * 见 buildWorkerConfig）。best-effort：写不进去不能连累投递结果，只是下一次到点
+ * 角色不知道自己说过这句，所以失败要吼一声。
  *
- * 时间戳用本次触发的名义时刻而不是「现在」：一来它跟角色当初排的时间对得上，二来重试
- * 产生的新 fire 拿到的是同一个值，同 id 覆盖之后连时间都不会漂。
+ * entry.at 用实际发送时刻（不是名义 occurrenceMs）：日志给角色读的是「我几点几分
+ * 真的说了这句」，cron 延迟半小时时名义时刻是句谎话。id 仍是
+ * `clientTaskId@occurrenceMs`——去重语义（同一次触发重跑同 id 覆盖）靠它，不动。
  *
- * best-effort：写不进去不能连累这次投递——正文都组好了，为了记一笔让整条 fire 失败重跑
- * 是本末倒置。代价是下一次到点角色不知道自己说过这句，所以失败要吼一声。
+ * 参数按 amsg-server 2.6.0-next.10 的实参形状收：{ task, sentCount, total, error }，task 是 D1 任务行原样
+ * （encrypted_payload 是密文、不含明文凭据），并发对号用 task.id。
  */
-const recordSelfLog = async (
-  ctx: SessionCtx,
-  stash: FireStash,
-  charId: string,
-  clientTaskId: string,
-  pushPayloads: Array<Record<string, unknown>>,
+export const amsgAfterSend = async (
+  info: { task?: { id?: unknown } | null; sentCount?: number; total?: number; error?: unknown },
 ): Promise<void> => {
-  if (!charId || typeof ctx.writeState !== 'function') return;
+  const taskRowId = info?.task?.id != null ? String(info.task.id) : null;
+  if (taskRowId == null) {
+    // 载荷缺 task.id 就没法对号入座（登记表按任务行 id 分格）——宁可不写也不能猜。
+    console.warn('[amsg:self-log] onAfterSend 载荷缺 task.id，无法对号入座，这次不写自述');
+    return;
+  }
+  const entry = pendingSelfLogs.get(taskRowId);
+  if (!entry) return;   // 本次 fire 没登记（无正文/缺 charId），或已被认领过
+  pendingSelfLogs.delete(taskRowId);
+
+  const sentCount = typeof info.sentCount === 'number' ? info.sentCount : 0;
+  if (sentCount <= 0) return;   // 一段都没送出去 = 用户什么都没收到，不能记「说过」
 
   // 多段消息在用户那边是连着的几条气泡，对角色而言是一次「我说了这些」，合成一条记。
-  const text = pushPayloads
-    .map((p) => (typeof p.message === 'string' ? p.message : ''))
+  // 只取前 sentCount 段：部分失败时没送出去的正文绝不能进日志。
+  const text = entry.texts
+    .slice(0, sentCount)
     .filter((message) => message.trim())
     .join('\n');
-  const next = appendSelfLogEntry(stash.selfLog, {
-    id: `${clientTaskId || 'task'}@${stash.occurrenceMs}`,
-    at: stash.occurrenceMs,
+  const next = appendSelfLogEntry(entry.stash.selfLog, {
+    id: `${entry.clientTaskId || 'task'}@${entry.occurrenceMs}`,
+    at: Date.now(),
     text,
   });
   // 整段只有副作用标签（正文为空）时 append 原样返回——没有话可记，也就不必写一次库。
-  if (next === stash.selfLog) return;
-  stash.selfLog = next;
+  if (next === entry.stash.selfLog) return;
+  entry.stash.selfLog = next;
 
   try {
-    await ctx.writeState(amsgStateNamespace(charId), [
+    await entry.writeState(amsgStateNamespace(entry.charId), [
       { key: AMSG_SELF_LOG_KEY, value: JSON.stringify(next) },
     ]);
   } catch (error) {
     console.warn('[amsg:self-log] 写入失败（这次照常发送，但下一次到点角色不会知道说过这句）', error);
   }
+};
+
+// ─── stale 守卫的消费端（⑥）───
+//
+// 上游 run-tick 的补发新鲜度守卫：一次性任务错过触发时刻太久（服务停摆后恢复）不再
+// 补发，任务标 failed 并调 config 级 hook onStaleSkip(task, { reason: 'stale',
+// metadata })。不接这个 hook 的话，用户看到的就是「说好的消息凭空消失」——这里把它
+// 写成 last_skip，面板照实说明（describeLastSkip 的 stale 文案）。
+//
+// 两个现实限制（都 best-effort，写不进去只是少一句解释）：
+//   - task 是 D1 任务行原样，charId 在 encrypted_payload 里解不开。上游把解密后的
+//     payload.metadata 递进第二参（只透传 metadata，凭据不外漏），charId 从那里取；
+//     两条排程路径（客户端排 / 角色自排）建任务时都写了 metadata.charId，取不到
+//     就是真异常，只能放弃留痕。
+//   - config 级 hook 拿不到 writeState，用最近一次 fire 缓存的那份（单用户 worker
+//     里 writeState 对谁都是同一个用户键，跨 fire 复用语义相同）；isolate 冷启动后
+//     一次 fire 都没跑过时缓存为空，只好放弃留痕。
+
+let cachedWriteState: WriteState | null = null;
+
+/** config 级 stale 回执 hook（见 buildWorkerConfig）。export 只为单测。 */
+export const amsgStaleSkip = async (
+  task: { id?: unknown; uuid?: unknown; next_send_at?: unknown } | null | undefined,
+  info?: { reason?: string; metadata?: unknown },
+): Promise<void> => {
+  const meta = (info?.metadata ?? {}) as Record<string, unknown>;
+  const charId = typeof meta.charId === 'string' && meta.charId ? meta.charId : null;
+  if (!charId) {
+    console.warn('[amsg:stale-skip] 任务 metadata 缺 charId，这次过期跳过没法留痕', { taskId: task?.id ?? null });
+    return;
+  }
+  if (!cachedWriteState) {
+    console.warn('[amsg:stale-skip] 还没有可用的 writeState（isolate 冷启动），这次过期跳过没法留痕', { charId });
+    return;
+  }
+  const occurrenceMs = Date.parse(String(task?.next_send_at ?? ''));
+  await writeLastSkip(cachedWriteState, charId, {
+    v: 1,
+    taskUuid: typeof task?.uuid === 'string' ? task.uuid : null,
+    occurrenceMs: Number.isFinite(occurrenceMs) ? occurrenceMs : Date.now(),
+    reason: 'stale',
+    skippedAt: Date.now(),
+  });
 };
 
 /**
@@ -467,7 +574,9 @@ export const runFireScheduleTool = async (
     };
   }
 
-  const parsed = parseFireScheduleArgs(args, nowMs);
+  // 裸 send_at 按角色的时间参照系解析（③）：角色在 prompt 里看到的钟是它自己时区的，
+  // worker 跑在 UTC，不带 tz 的话「明早 9 点」会整整差一个时差。
+  const parsed = parseFireScheduleArgs(args, nowMs, stash.tz);
   if ('ok' in parsed) return parsed as unknown as Record<string, unknown>;
 
   // 同一次触发内第几条 —— 连同触发时刻构成确定性 uuid，重跑对得上。
@@ -731,6 +840,12 @@ export const amsgHooks = {
     // 只会让角色说「我等下再找你」然后没有下文——干脆不教。
     const canSelfSchedule = typeof ctx.scheduleTask === 'function';
 
+    // stale 守卫回执要用的写口缓存（config 级 hook 拿不到 writeState，见 amsgStaleSkip）。
+    if (typeof ctx.writeState === 'function') cachedWriteState = ctx.writeState;
+
+    // 角色的时间参照系：fire_pack 的 tzId（parseFirePack 保证非空，Intl 管夏令时）。
+    const tz: AmsgTzRef = { tzId: pack.tzId };
+
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
     ctx.scratch.fire = {
       session: createFireSessionState(),
@@ -748,6 +863,9 @@ export const amsgHooks = {
       scheduledTasks: [],
       charId,
       anchorMs: pack.lastUserMessageAt ?? 0,
+      tz,
+      taskUuid: typeof ctx.task.uuid === 'string' ? ctx.task.uuid : null,
+      taskRowId: ctx.task.id != null ? String(ctx.task.id) : null,
     } satisfies FireStash;
 
     // 「你还挂着这些排程」：客户端记录的（打包那一刻的快照）+ 角色自己在之前几次 fire 里
@@ -755,7 +873,7 @@ export const amsgHooks = {
     // 很容易把同一件事再排一遍。
     const taskListBlock = buildFireTaskListBlock(livePendingTasks, {
       nowMs: ctx.now.getTime(),
-      tzOffsetMin: pack.tzOffsetMin,
+      tzId: pack.tzId,
       excludeClientTaskId: typeof taskMeta.amsgClientTaskId === 'string'
         ? taskMeta.amsgClientTaskId : undefined,
     });
@@ -769,10 +887,15 @@ export const amsgHooks = {
       + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? 'native' : 'text' }) : '')
       // 「给自己排下一条」的说明。跟 MCP 共用一个 native/text 判断：用户的中转拒 tools 时
       // 两边都得改教正文协议，不然一边声明成 tools、一边教语法，模型会两种都写一遍。
-      + (canSelfSchedule ? buildFireScheduleBlock(mcpNative ? 'native' : 'text') : '');
+      // 时间上下文让 send_at 的示例是「明天这个点」的裸墙钟，别再教模型写 offset。
+      + (canSelfSchedule
+        ? buildFireScheduleBlock(mcpNative ? 'native' : 'text', { nowMs: ctx.now.getTime(), tz })
+        : '');
     const fireTools = [
       ...(mcpResolve && mcpNative ? buildMcpFireTools(mcpResolve) : []),
-      ...(canSelfSchedule && mcpNative ? [buildFireScheduleTool()] : []),
+      ...(canSelfSchedule && mcpNative
+        ? [buildFireScheduleTool({ nowMs: ctx.now.getTime(), tz })]
+        : []),
     ];
     return {
       messages: [{ role: 'user' as const, content: prompt }],
@@ -868,6 +991,19 @@ export const amsgHooks = {
       });
     }
 
+    if (decision.decision === 'skip-push') {
+      // ⑤ 空生成也留痕：模型返回空/纯拒答时上游把任务当成功消费，用户看到的就是
+      // 「说好的消息凭空消失」。写一条 last_skip，面板能照实解释。best-effort，
+      // 写不进去不影响 skip 本身。
+      await writeLastSkip(ctx.writeState, stash.charId, {
+        v: 1,
+        taskUuid: stash.taskUuid,
+        occurrenceMs: stash.occurrenceMs,
+        reason: 'empty-generation',
+        skippedAt: Date.now(),
+      });
+    }
+
     if (decision.decision === 'finish') {
       // 发之前按真实字节预算过一遍：装不下的 XHS 会话数据旁路存起来，push 只留引用键。
       // clientTaskId 当存储键（每任务一份、下次触发覆盖），缺了就没法旁路——那时超限会
@@ -876,9 +1012,20 @@ export const amsgHooks = {
         ? ctx.metadata.amsgClientTaskId : '';
       const charId = typeof ctx.metadata?.charId === 'string' ? ctx.metadata.charId : '';
 
-      // 先记一笔「我这次说了什么」，下一次到点这份 prompt 里才接得上（见 recordSelfLog）。
-      // 放在旁路存储之前：那一步失败会让整条 fire 重跑，而这笔记录同 id 覆盖，重跑不会记重。
-      await recordSelfLog(ctx, stash, charId, clientTaskId, decision.pushPayloads);
+      // 「我这次说了什么」不再在这里写库（那是推送发出前，见 pendingSelfLogs 头注释），
+      // 只把各段正文登记进按任务行隔离的登记表，等 onAfterSend 按真送出去的段数落盘。
+      if (charId && typeof ctx.writeState === 'function' && stash.taskRowId != null) {
+        prunePendingSelfLogs(Date.now());
+        pendingSelfLogs.set(stash.taskRowId, {
+          charId,
+          clientTaskId,
+          occurrenceMs: stash.occurrenceMs,
+          texts: decision.pushPayloads.map((p) => (typeof p.message === 'string' ? p.message : '')),
+          stash,
+          writeState: ctx.writeState,
+          registeredAt: Date.now(),
+        });
+      }
 
       // 角色这次给自己排的任务，随最后一条 push 带回客户端认领——不然它们只活在 D1 里，
       // 面板看不到、用户也没法取消。任务本身照常触发，客户端上线补进清单即可。
@@ -1008,6 +1155,11 @@ export const buildWorkerConfig = (env: Env) => {
     // 满血 fire-time hooks（onBeforeFire 现场填槽 + onLLMOutput 分类 +
     // executeToolCalls 服务端工具循环）；轮数/超时用库默认（5 轮 / 240s）。
     hooks: amsgHooks,
+    // 发送后回执 + 过期跳过回执（amsg-server 2.6.0-next.10 的 config 级 hook）。
+    // onAfterSend: 只把真送出去的段写进 self_log（见 amsgAfterSend / pendingSelfLogs）。
+    // onStaleSkip: 过期不补发时给面板留一句「为什么没响」（见 amsgStaleSkip）。
+    onAfterSend: amsgAfterSend,
+    onStaleSkip: amsgStaleSkip,
   };
 };
 

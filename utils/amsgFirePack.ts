@@ -129,6 +129,14 @@ export const unpackStateValue = async (value: string): Promise<string> => {
  */
 export const AMSG_LAST_SKIP_KEY = 'last_skip';
 
+/** last_skip 的原因枚举（新增值时 describeLastSkip 的人话文案要一起补）。 */
+const LAST_SKIP_REASONS = [
+  'active-chat-presence',
+  'conversation-moved-on',
+  'empty-generation',
+  'stale',
+] as const;
+
 export interface AmsgLastSkip {
   v: 1;
   /** 被跳过的那条任务（uuid，拿不到时为 null）。 */
@@ -138,8 +146,10 @@ export interface AmsgLastSkip {
   /**
    * active-chat-presence  到点时用户正跟这个角色聊天
    * conversation-moved-on 排程之后对话已经往前走了，原本要说的话过时了
+   * empty-generation      模型这次没写出任何能发的正文（空输出 / 纯拒答）
+   * stale                 到点时已经过期太久（服务停摆后恢复），不再补发
    */
-  reason: 'active-chat-presence' | 'conversation-moved-on';
+  reason: (typeof LAST_SKIP_REASONS)[number];
   skippedAt: number;
 }
 
@@ -149,7 +159,7 @@ export const parseLastSkip = (value: string): AmsgLastSkip | null => {
     if (
       parsed && typeof parsed === 'object' && parsed.v === 1
       && typeof parsed.occurrenceMs === 'number'
-      && (parsed.reason === 'active-chat-presence' || parsed.reason === 'conversation-moved-on')
+      && (LAST_SKIP_REASONS as readonly string[]).includes(parsed.reason)
     ) {
       return parsed as AmsgLastSkip;
     }
@@ -158,10 +168,19 @@ export const parseLastSkip = (value: string): AmsgLastSkip | null => {
 };
 
 /** 给人看的一句话：为什么那一次没响。 */
-export const describeLastSkip = (skip: AmsgLastSkip, formatTime: (ms: number) => string): string =>
-  skip.reason === 'active-chat-presence'
-    ? `${formatTime(skip.occurrenceMs)} 那次主动消息让路了——到点时你正在和 ta 聊天。`
-    : `${formatTime(skip.occurrenceMs)} 那次主动消息取消了——排程之后你们的对话已经聊到别处，原本要说的话过时了。`;
+export const describeLastSkip = (skip: AmsgLastSkip, formatTime: (ms: number) => string): string => {
+  const when = formatTime(skip.occurrenceMs);
+  switch (skip.reason) {
+    case 'active-chat-presence':
+      return `${when} 那次主动消息让路了——到点时你正在和 ta 聊天。`;
+    case 'conversation-moved-on':
+      return `${when} 那次主动消息取消了——排程之后你们的对话已经聊到别处，原本要说的话过时了。`;
+    case 'empty-generation':
+      return `${when} 那次主动消息没发出来——ta 到点想了想，这次没写出要说的话。`;
+    case 'stale':
+      return `${when} 那次主动消息没发——到点时已经过去太久（服务中断过），过期的话就不补发了。`;
+  }
+};
 
 export const AMSG_SLOT_CURRENT_TIME = '{{AMSG_CURRENT_TIME}}';
 export const AMSG_SLOT_TIME_SINCE_USER = '{{AMSG_TIME_SINCE_USER}}';
@@ -172,7 +191,6 @@ export const AMSG_SLOT_TASK_INSTRUCTION = '{{AMSG_TASK_INSTRUCTION}}';
  *
  * 槽位而不是把这段拼在整份 prompt 尾巴上：接在对话记录后面读起来才是一条时间线，
  * 挂在最后（本次任务指令之后）的话，角色多半会把它当成新指令的一部分。
- * 老客户端传上来的模板里没有这个槽位，填槽是纯替换，读到就当没有——不会报错。
  */
 export const AMSG_SLOT_SELF_LOG = '{{AMSG_SELF_LOG}}';
 /**
@@ -190,8 +208,12 @@ export interface AmsgFirePack {
   template: string;
   /** 用户上次真实主动发消息的时间（epoch ms）；没有聊天记录时为 null。 */
   lastUserMessageAt: number | null;
-  /** 打包时的 Date.prototype.getTimezoneOffset()（UTC+8 → -480），worker 换算本地时间用。 */
-  tzOffsetMin: number;
+  /**
+   * 角色的 IANA 时区 id（角色开了自定义时区用角色的，没开用打包设备的）。
+   * worker 渲染一切给角色看的时间都以它为参照系（Intl 处理夏令时）。必填：
+   * 缺了整包按格式不对打回（parseFirePack → null，worker 抛 fire-state 错）。
+   */
+  tzId: string;
   /** 用户称呼（userProfile.name || '对方'），awayHint 文案用。 */
   targetName: string;
   /**
@@ -210,10 +232,68 @@ export interface AmsgFirePack {
   pendingTasks: ActiveMsg2TaskRecord[];
 }
 
-/** 和 activeMsgClient 的 nowIsoLocal 同款换算：UTC now + 时区偏移 → `YYYY-MM-DD HH:mm`。 */
-export const formatLocalTime = (nowMs: number, tzOffsetMin: number): string => {
-  const local = new Date(nowMs - tzOffsetMin * 60_000);
-  return local.toISOString().slice(0, 16).replace('T', ' ');
+// ─── 按角色参照系渲染时间（②：worker 给角色看的一切时间只此一份） ───
+
+/** 「角色活在哪个参照系」：fire_pack 的 tzId（IANA 时区 id，Intl 管夏令时）。 */
+export interface AmsgTzRef {
+  tzId: string;
+}
+
+interface WallClockParts {
+  year: number;
+  month: number;
+  day: number;
+  /** 0=周日 … 6=周六。 */
+  weekday: number;
+  hour: number;
+  minute: number;
+}
+
+/**
+ * nowMs 在 tz 参照系下的墙钟读数。全程 Intl（Workers 运行时带完整 ICU，
+ * 严禁手搓时差加减——项目时区文档的红线）。tzId 非法直接抛错：parseFirePack 已经
+ * 保证它非空，还解析不了就是数据坏了，走 fire 失败路径留痕，不静默给一个错的时间。
+ */
+export const wallClockPartsInZone = (nowMs: number, tz: AmsgTzRef): WallClockParts => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz.tzId,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', weekday: 'short', hour12: false,
+  }).formatToParts(new Date(nowMs));
+  const map: Record<string, string> = {};
+  for (const p of parts) map[p.type] = p.value;
+  const weekdayIdx = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(map.weekday);
+  let hour = parseInt(map.hour, 10);
+  if (hour === 24) hour = 0; // 个别环境用 24:00 表示午夜
+  return {
+    year: parseInt(map.year, 10),
+    month: parseInt(map.month, 10),
+    day: parseInt(map.day, 10),
+    weekday: weekdayIdx >= 0 ? weekdayIdx : 0,
+    hour,
+    minute: parseInt(map.minute, 10),
+  };
+};
+
+const WEEKDAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
+/** 时段词分桶照抄 buildTimeAwarenessBlock（utils/context.ts），两边说同一套话。 */
+const timeOfDayWord = (h: number): string =>
+  h < 5 ? '凌晨' : h < 9 ? '早晨' : h < 12 ? '上午' : h < 14 ? '中午'
+  : h < 17 ? '下午' : h < 19 ? '傍晚' : h < 22 ? '晚上' : '深夜';
+
+const pad2 = (n: number) => n.toString().padStart(2, '0');
+
+/** 当前时间槽用的自然中文全格式：`2026年8月1日 周六 早晨 08:00`（与 buildCoreContext 同款）。 */
+export const formatFireTimeFull = (nowMs: number, tz: AmsgTzRef): string => {
+  const p = wallClockPartsInZone(nowMs, tz);
+  return `${p.year}年${p.month}月${p.day}日 ${WEEKDAY_NAMES[p.weekday]} ${timeOfDayWord(p.hour)} ${pad2(p.hour)}:${pad2(p.minute)}`;
+};
+
+/** self_log 时间戳 / 排程清单用的短格式：`8月1日 08:00`（同一参照系，只是省地方）。 */
+export const formatFireTimeShort = (nowMs: number, tz: AmsgTzRef): string => {
+  const p = wallClockPartsInZone(nowMs, tz);
+  return `${p.month}月${p.day}日 ${pad2(p.hour)}:${pad2(p.minute)}`;
 };
 
 /** 「距离用户上次主动发消息……」三档文案；diffMinutes 为 null 表示没有聊天记录。 */
@@ -340,18 +420,28 @@ export const parseSelfLog = (value: string): AmsgSelfLog | null => {
  *
  * 开头两个空行是刻意的：槽位紧接在对话记录最后一行后面，不空开的话这段会黏成聊天记录的续行。
  */
-export const renderSelfLogBlock = (log: AmsgSelfLog | null, tzOffsetMin: number): string => {
+export const renderSelfLogBlock = (log: AmsgSelfLog | null, tz: AmsgTzRef): string => {
   if (!log || log.entries.length === 0) return '';
   return [
     '',
     '',
     '【这之后你又主动发过（对方还没回）】',
-    ...log.entries.map((e) => `- ${formatLocalTime(e.at, tzOffsetMin)}　${e.text}`),
+    ...log.entries.map((e) => `- ${formatFireTimeShort(e.at, tz)}　${e.text}`),
     '（这几条是你自己发出去的，对方一直没回应。往下接着说，别把已经说过的话换个说法再讲一遍，也别假装这些没发生过。）',
   ].join('\n');
 };
 
 const fillSlot = (text: string, slot: string, value: string) => text.split(slot).join(value);
+
+/**
+ * 连排提醒（对方未回应期间的第 x 条）插在哪一行前面。
+ * 【本次任务】是模板里任务指令段的固定标题（activeMsgClient 的模板写死这一行）。
+ */
+const TASK_SECTION_HEADING = '【本次任务】';
+
+/** x ≥ 2 时的边界提醒（不做强制拦截，force/expire 一视同仁）。export 只为单测。 */
+export const buildStreakReminder = (x: number): string =>
+  `（这是你在对方未回应期间发出的第 ${x} 条主动消息。请注意边界：若要继续安排新的消息，考虑对方的需求和实际观感。）`;
 
 /**
  * 用 nowMs 时刻的时间信息填掉模板里的全部槽位，得到最终可发给 LLM 的 prompt。
@@ -363,6 +453,9 @@ const fillSlot = (text: string, slot: string, value: string) => text.split(slot)
  *   taskListBlock 「你现在还挂着哪些排程」那一段，见 amsg2Tasks.buildFireTaskListBlock。
  *   文案住在 amsg2Tasks 而不是这里：那边已经有一整套给人看的任务描述（面板、
  *   排程现状块、list 工具共用），同一件事不该有第二套说法。
+ *
+ * 连排提醒：selfLog 里已有 n 条「对方未回应期间发出的」正文时，本条是第 x = n+1 条；
+ * x ≥ 2 时在【本次任务】前插一行边界提醒（见 buildStreakReminder）。
  */
 export const renderFirePack = (
   pack: AmsgFirePack,
@@ -370,7 +463,8 @@ export const renderFirePack = (
   taskInstruction: string,
   extras?: { selfLog?: AmsgSelfLog | null; taskListBlock?: string },
 ): string => {
-  const currentTime = formatLocalTime(nowMs, pack.tzOffsetMin);
+  const tz: AmsgTzRef = { tzId: pack.tzId };
+  const currentTime = formatFireTimeFull(nowMs, tz);
   const diffMinutes = pack.lastUserMessageAt == null
     ? null
     : Math.max(0, Math.floor((nowMs - pack.lastUserMessageAt) / 60_000));
@@ -378,11 +472,15 @@ export const renderFirePack = (
   const awayHint = buildAwayHint(pack.targetName, timeSinceUser);
 
   let out = pack.template;
+  const streak = (extras?.selfLog?.entries.length ?? 0) + 1;
+  if (streak >= 2) {
+    out = out.replace(TASK_SECTION_HEADING, `${buildStreakReminder(streak)}\n${TASK_SECTION_HEADING}`);
+  }
   out = fillSlot(out, AMSG_SLOT_CURRENT_TIME, currentTime);
   out = fillSlot(out, AMSG_SLOT_TIME_SINCE_USER, timeSinceUser);
   out = fillSlot(out, AMSG_SLOT_AWAY_HINT, awayHint);
   out = fillSlot(out, AMSG_SLOT_TASK_INSTRUCTION, taskInstruction);
-  out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(extras?.selfLog ?? null, pack.tzOffsetMin));
+  out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(extras?.selfLog ?? null, tz));
   out = fillSlot(out, AMSG_SLOT_TASK_LIST, extras?.taskListBlock ?? '');
   return out;
 };
@@ -396,7 +494,7 @@ export const parseFirePack = (value: string): AmsgFirePack | null => {
       parsed.v === 3 &&
       typeof parsed.template === 'string' && parsed.template.length > 0 &&
       (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === 'number') &&
-      typeof parsed.tzOffsetMin === 'number' &&
+      typeof parsed.tzId === 'string' && parsed.tzId.length > 0 &&
       typeof parsed.targetName === 'string' &&
       typeof parsed.builtAt === 'number' &&
       Array.isArray(parsed.pendingTasks)

@@ -11,10 +11,14 @@ import {
   SELF_LOG_TEXT_MAX,
   appendSelfLogEntry,
   buildAwayHint,
+  buildStreakReminder,
   createSelfLog,
-  formatLocalTime,
+  describeLastSkip,
+  formatFireTimeFull,
+  formatFireTimeShort,
   formatTimeSinceUser,
   parseFirePack,
+  parseLastSkip,
   parseSelfLog,
   packStateValue,
   renderFirePack,
@@ -70,14 +74,31 @@ describe('buildAwayHint', () => {
   });
 });
 
-describe('formatLocalTime', () => {
-  it('按 tzOffsetMin 换算本地时间（UTC+8 → offset -480）', () => {
-    // 2026-07-17T12:00:00Z 在 UTC+8 是 20:00
-    expect(formatLocalTime(Date.UTC(2026, 6, 17, 12, 0), -480)).toBe('2026-07-17 20:00');
+describe('formatFireTimeFull / formatFireTimeShort（角色参照系的自然中文时间）', () => {
+  const noonZ = Date.UTC(2026, 6, 17, 12, 0);   // 2026-07-17（周五）12:00Z
+
+  it('tzId 走 Intl（夏令时交给 ICU）', () => {
+    // 纽约 7 月是 EDT(-4)：12:00Z → 08:00 早晨。固定偏移算法（EST -5）会给 07:00。
+    expect(formatFireTimeFull(noonZ, { tzId: 'America/New_York' }))
+      .toBe('2026年7月17日 周五 早晨 08:00');
+    expect(formatFireTimeShort(noonZ, { tzId: 'America/New_York' })).toBe('7月17日 08:00');
   });
 
-  it('offset 0 即 UTC', () => {
-    expect(formatLocalTime(Date.UTC(2026, 6, 17, 12, 34), 0)).toBe('2026-07-17 12:34');
+  it('tzId 非法直接抛错（数据坏了走 fire 失败路径，不静默给一个错的时间）', () => {
+    expect(() => formatFireTimeFull(noonZ, { tzId: 'Not/AZone' })).toThrow();
+  });
+
+  it('时段词分桶与 buildCoreContext 一致（抽查边界）', () => {
+    const at = (h: number) => Date.UTC(2026, 6, 17, h, 0);
+    const word = (h: number) => formatFireTimeFull(at(h), { tzId: 'UTC' }).split(' ')[2];
+    expect(word(4)).toBe('凌晨');
+    expect(word(5)).toBe('早晨');
+    expect(word(9)).toBe('上午');
+    expect(word(13)).toBe('中午');
+    expect(word(16)).toBe('下午');
+    expect(word(18)).toBe('傍晚');
+    expect(word(21)).toBe('晚上');
+    expect(word(23)).toBe('深夜');
   });
 });
 
@@ -92,21 +113,28 @@ describe('renderFirePack', () => {
       AMSG_SLOT_TASK_INSTRUCTION,
     ].join('\n'),
     lastUserMessageAt: null,
-    tzOffsetMin: 0,
+    tzId: 'UTC',
     targetName: '楪同学',
   };
 
-  it('填满全部槽位，currentTime 出现多次也全部替换', () => {
+  it('填满全部槽位，currentTime 出现多次也全部替换（自然中文格式，与 buildCoreContext 同款）', () => {
     const now = Date.UTC(2026, 6, 17, 8, 30);
     const rendered = renderFirePack(basePack, now, '本次任务指令');
     expect(rendered).toBe([
-      '当前本地时间：2026-07-17 08:30',
+      '当前本地时间：2026年7月17日 周五 早晨 08:30',
       '你们最近没有新的聊天记录。',
-      '现在是 2026-07-17 08:30。',
+      '现在是 2026年7月17日 周五 早晨 08:30。',
       '楪同学最近没有主动来找你说话。',
       '本次任务指令',
     ].join('\n'));
     expect(rendered).not.toContain('{{');
+  });
+
+  it('按 pack.tzId 的 IANA 时区渲染（Intl 处理，不吃运行时本地时区）', () => {
+    // 2026-08-01T00:00Z 在 Asia/Shanghai 是周六早上 8 点。
+    const now = Date.UTC(2026, 7, 1, 0, 0);
+    const rendered = renderFirePack({ ...basePack, tzId: 'Asia/Shanghai' }, now, '指令');
+    expect(rendered).toContain('当前本地时间：2026年8月1日 周六 早晨 08:00');
   });
 
   it('lastUserMessageAt 用渲染时刻现算时间差', () => {
@@ -123,7 +151,7 @@ describe('renderFirePack', () => {
 
 describe('parseFirePack', () => {
   const valid: AmsgFirePack = {
-    v: 3, template: 'x', lastUserMessageAt: null, tzOffsetMin: -480, targetName: 'A',
+    v: 3, template: 'x', lastUserMessageAt: null, tzId: 'Asia/Shanghai', targetName: 'A',
     builtAt: 1_700_000_000_000, pendingTasks: [],
   };
 
@@ -143,12 +171,19 @@ describe('parseFirePack', () => {
     expect(parseFirePack(JSON.stringify({ ...valid, lastUserMessageAt: 123 }))?.lastUserMessageAt).toBe(123);
   });
 
+  it('tzId 必填：缺失 / 空串 / 非字符串整包打回（渲染时间没有第二套算法可退）', () => {
+    expect(parseFirePack(JSON.stringify({ ...valid, tzId: 'Asia/Tokyo' }))?.tzId).toBe('Asia/Tokyo');
+    const { tzId: _tz, ...noTzId } = valid;
+    expect(parseFirePack(JSON.stringify(noTzId))).toBeNull();
+    expect(parseFirePack(JSON.stringify({ ...valid, tzId: '' }))).toBeNull();
+    expect(parseFirePack(JSON.stringify({ ...valid, tzId: 42 }))).toBeNull();
+  });
+
   it('坏形状 → null（worker 借此抛 fire-state 错）', () => {
     expect(parseFirePack('not json')).toBeNull();
     expect(parseFirePack('{}')).toBeNull();
     expect(parseFirePack(JSON.stringify({ ...valid, v: 1 }))).toBeNull();
     expect(parseFirePack(JSON.stringify({ ...valid, template: '' }))).toBeNull();
-    expect(parseFirePack(JSON.stringify({ ...valid, tzOffsetMin: 'x' }))).toBeNull();
   });
 });
 
@@ -158,7 +193,7 @@ describe('parseFirePack', () => {
 describe('self_log', () => {
   const packAt = 1_700_000_000_000;
   const pack: AmsgFirePack = {
-    v: 3, template: 'x', lastUserMessageAt: null, tzOffsetMin: 0, targetName: '楪同学',
+    v: 3, template: 'x', lastUserMessageAt: null, tzId: 'UTC', targetName: '楪同学',
     builtAt: packAt, pendingTasks: [],
   };
   const entry = (id: string, text: string, at = packAt) => ({ id, at, text });
@@ -238,7 +273,7 @@ describe('self_log', () => {
       const rendered = renderFirePack(slotted, Date.UTC(2026, 6, 30, 23, 0), '本次任务指令', { selfLog: log });
 
       expect(rendered).toContain('刚看到楼下那只猫又来了');
-      expect(rendered).toContain('2026-07-30 21:30');
+      expect(rendered).toContain('7月30日 21:30');
       // 位置：夹在对话上下文和本次任务之间，不能跑到任务指令后面去当新指令读。
       expect(rendered.indexOf('刚看到楼下那只猫又来了')).toBeGreaterThan(rendered.indexOf('用户：在吗'));
       expect(rendered.indexOf('刚看到楼下那只猫又来了')).toBeLessThan(rendered.indexOf('本次任务指令'));
@@ -264,8 +299,8 @@ describe('self_log', () => {
   });
 
   it('renderSelfLogBlock 空日志返回空串', () => {
-    expect(renderSelfLogBlock(null, 0)).toBe('');
-    expect(renderSelfLogBlock(createSelfLog(packAt), 0)).toBe('');
+    expect(renderSelfLogBlock(null, { tzId: 'UTC' })).toBe('');
+    expect(renderSelfLogBlock(createSelfLog(packAt), { tzId: 'UTC' })).toBe('');
   });
 
   it('renderSelfLogBlock 用 pack 的时区换算，不是 UTC', () => {
@@ -273,8 +308,77 @@ describe('self_log', () => {
       createSelfLog(packAt),
       entry('t1@1', '睡了', Date.UTC(2026, 6, 30, 14, 0)),
     );
-    expect(renderSelfLogBlock(log, -480)).toContain('2026-07-30 22:00');   // UTC+8
-    expect(renderSelfLogBlock(log, 0)).toContain('2026-07-30 14:00');
+    expect(renderSelfLogBlock(log, { tzId: 'Asia/Shanghai' })).toContain('7月30日 22:00');   // UTC+8
+    expect(renderSelfLogBlock(log, { tzId: 'UTC' })).toContain('7月30日 14:00');
+    expect(renderSelfLogBlock(log, { tzId: 'Asia/Tokyo' })).toContain('7月30日 23:00');
+  });
+
+  // ② 的回归守卫：同一个 pack 渲染出来的当前时间 / 自述时间戳必须落在同一参照系。
+  // 旧实现里当前时间和别处各写各的换算，参照系一混角色就会算错「几小时前」。
+  it('同一个 pack 里当前时间与自述时间戳同参照系（tzId 一把尺）', () => {
+    const slotted: AmsgFirePack = {
+      ...pack,
+      tzId: 'Asia/Tokyo',
+      template: `当前 ${AMSG_SLOT_CURRENT_TIME}${AMSG_SLOT_SELF_LOG}\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
+    };
+    const at = Date.UTC(2026, 6, 30, 13, 0);       // 东京 22:00
+    const now = Date.UTC(2026, 6, 30, 14, 0);      // 东京 23:00
+    const log = appendSelfLogEntry(createSelfLog(packAt), entry('t1@1', '睡了', at));
+    const rendered = renderFirePack(slotted, now, '指令', { selfLog: log });
+    expect(rendered).toContain('2026年7月30日 周四 深夜 23:00');
+    expect(rendered).toContain('7月30日 22:00');
+  });
+});
+
+// ④ 连排提醒：对方未回应期间的第 x 条（x = 自述条数 + 1），x ≥ 2 时插在【本次任务】前。
+describe('连排提醒', () => {
+  const packAt = 1_700_000_000_000;
+  const slotted: AmsgFirePack = {
+    v: 3, lastUserMessageAt: null, tzId: 'UTC', targetName: '楪同学',
+    builtAt: packAt, pendingTasks: [],
+    template: `【最近对话上下文】\n用户：在吗${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
+  };
+  const entry = (id: string, text: string) => ({ id, at: packAt, text });
+
+  it('已有 1 条未回应自述 → 本条是第 2 条，提醒插在【本次任务】前', () => {
+    const log = appendSelfLogEntry(createSelfLog(packAt), entry('t1@1', '第一条'));
+    const rendered = renderFirePack(slotted, packAt, '指令', { selfLog: log });
+    expect(rendered).toContain(buildStreakReminder(2));
+    expect(rendered).toContain('第 2 条主动消息');
+    expect(rendered.indexOf(buildStreakReminder(2))).toBeLessThan(rendered.indexOf('【本次任务】'));
+  });
+
+  it('没有未回应自述（第 1 条）→ 不插，输出与改动前一致', () => {
+    expect(renderFirePack(slotted, packAt, '指令', { selfLog: createSelfLog(packAt) }))
+      .not.toContain('条主动消息');
+    expect(renderFirePack(slotted, packAt, '指令')).not.toContain('条主动消息');
+  });
+
+  it('不做强制拦截：x 再大也只是提醒，正文照常渲染', () => {
+    let log = createSelfLog(packAt);
+    for (let i = 0; i < 4; i += 1) log = appendSelfLogEntry(log, entry(`t1@${i}`, `第${i}条`));
+    const rendered = renderFirePack(slotted, packAt, '指令', { selfLog: log });
+    expect(rendered).toContain(buildStreakReminder(5));
+    expect(rendered).toContain('指令');
+  });
+});
+
+// ⑤⑥ 的 last_skip 新原因：空生成 / 过期不补发。parse 认、describe 有对应人话。
+describe('last_skip 新原因', () => {
+  const base = { v: 1 as const, taskUuid: null, occurrenceMs: 1_700_000_000_000, skippedAt: 1_700_000_100_000 };
+  const fmt = (ms: number) => `T${ms}`;
+
+  it('parseLastSkip 认 empty-generation / stale', () => {
+    expect(parseLastSkip(JSON.stringify({ ...base, reason: 'empty-generation' }))?.reason).toBe('empty-generation');
+    expect(parseLastSkip(JSON.stringify({ ...base, reason: 'stale' }))?.reason).toBe('stale');
+    expect(parseLastSkip(JSON.stringify({ ...base, reason: 'nonsense' }))).toBeNull();
+  });
+
+  it('describeLastSkip 对每个原因都有人话（面板一行说明）', () => {
+    expect(describeLastSkip({ ...base, reason: 'empty-generation' }, fmt)).toContain('没写出要说的话');
+    expect(describeLastSkip({ ...base, reason: 'stale' }, fmt)).toContain('过去太久');
+    expect(describeLastSkip({ ...base, reason: 'active-chat-presence' }, fmt)).toContain('让路');
+    expect(describeLastSkip({ ...base, reason: 'conversation-moved-on' }, fmt)).toContain('过时');
   });
 });
 
@@ -282,7 +386,7 @@ describe('fire_pack 任务指令槽', () => {
   const pack: AmsgFirePack = {
     v: 3,
     template: `头部\n${AMSG_SLOT_TASK_INSTRUCTION}\n尾部 ${AMSG_SLOT_CURRENT_TIME}`,
-    lastUserMessageAt: null, tzOffsetMin: -480, targetName: '楪同学',
+    lastUserMessageAt: null, tzId: 'Asia/Shanghai', targetName: '楪同学',
     builtAt: 1_700_000_000_000, pendingTasks: [],
   };
 
@@ -304,7 +408,7 @@ describe('client_state 值压缩', () => {
     v: 3,
     template: '【角色系统设定】你是一个会在深夜突然想起对方的人。\n'.repeat(400),
     lastUserMessageAt: 1_700_000_000_000,
-    tzOffsetMin: -480,
+    tzId: 'Asia/Shanghai',
     targetName: '楪',
     builtAt: 1_700_000_000_000,
     pendingTasks: [],
@@ -356,7 +460,7 @@ describe('client_state 值压缩', () => {
     const packed = await packStateValue(bigJson);
     const pack = parseFirePack(await unpackStateValue(packed));
     expect(pack?.targetName).toBe('楪');
-    expect(pack?.tzOffsetMin).toBe(-480);
+    expect(pack?.tzId).toBe('Asia/Shanghai');
   });
 
   it('数据损坏时解压抛错，不会把半截内容当正常值放过去', async () => {

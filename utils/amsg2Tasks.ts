@@ -3,8 +3,8 @@
  *
  * 主要在浏览器侧用；worker bundle 也会打进这份代码（fire 时要渲染「你现在还挂着哪些排程」，
  * 见 buildFireTaskListBlock）。所以这里只能依赖纯函数叶子，别往上引前端环境的东西。
- * 另外：worker 跑在 UTC，任何显示给角色看的时间都得按 fire_pack 的 tzOffsetMin 换算，
- * 不能用 formatTaskTime 那种吃运行时本地时区的写法。
+ * 另外：worker 跑在 UTC，任何显示给角色看的时间都得按 fire_pack 的时区参照系（tzId）
+ * 换算，不能用 formatTaskTime 那种吃运行时本地时区的写法。
  *
  * 状态设计：清单只存 'scheduled'（取消即移除记录）。到点后的一次性任务不回写
  * 状态——「已发送 / 已作废」由消息历史现场推导（amsg2TaskContext），避免
@@ -21,7 +21,7 @@ import {
   CharacterProfile,
 } from '../types';
 import { FIRE_GRACE_MS, recurrencePeriodMs } from './amsg2ExpireGuard';
-import { formatLocalTime } from './amsgFirePack';
+import { type AmsgTzRef, formatFireTimeShort } from './amsgFirePack';
 
 export const MAX_ACTIVE_TASKS_PER_CHAR = 5;
 
@@ -170,7 +170,8 @@ export const hasActiveAiTask = (
  *
  * 跟平时聊天那份（amsg2TaskContext 的排程现状块）说的是同一件事、用同一套 describeXxx
  * 文案，差别只有三处，都是 fire 这边特有的：
- *   1. 时间按 tzOffsetMin 换算 —— worker 跑在 UTC，用运行时本地时区会整体差几个小时；
+ *   1. 时间按 fire_pack 的时区参照系（tzId）换算——
+ *      worker 跑在 UTC，用运行时本地时区会整体差几个小时；
  *   2. 摘掉正在发的这一条 —— 它此刻正在被消费，列进「进行中」会让角色以为还得再排一次；
  *   3. 不含「已作废回执」那一段 —— 那是给对话现场用的，到点生成时提不着。
  *
@@ -178,8 +179,9 @@ export const hasActiveAiTask = (
  */
 export const buildFireTaskListBlock = (
   tasks: ActiveMsg2TaskRecord[],
-  opts: { nowMs: number; tzOffsetMin: number; excludeClientTaskId?: string },
+  opts: { nowMs: number; tzId: string; excludeClientTaskId?: string },
 ): string => {
+  const tz: AmsgTzRef = { tzId: opts.tzId };
   const listed = tasks
     .filter((t) => isPendingTask(t, opts.nowMs))
     .filter((t) => !opts.excludeClientTaskId || t.clientTaskId !== opts.excludeClientTaskId);
@@ -191,9 +193,9 @@ export const buildFireTaskListBlock = (
     '【你还挂着这些排程·仅你可见】',
     ...listed.map((t) => {
       const occurrenceMs = currentOccurrenceMs(t, opts.nowMs);
-      const when = formatLocalTime(
+      const when = formatFireTimeShort(
         occurrenceMs ?? new Date(t.firstSendTime).getTime(),
-        opts.tzOffsetMin,
+        tz,
       );
       return `- [${shortTaskId(t.taskUuid)}] ${when} ${describeRecurrence(t.recurrenceType)}`
         + ` · ${describeTaskMode(t)} · ${describeExpirePolicy(t.expirePolicy)}`;

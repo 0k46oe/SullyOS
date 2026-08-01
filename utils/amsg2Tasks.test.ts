@@ -7,6 +7,7 @@ import {
   applyScheduledTask,
   buildFireTaskListBlock,
   currentOccurrenceMs,
+  describeRemoteLastError,
   describeTaskProgress,
   findTaskByShortId,
   getPendingTasks,
@@ -14,6 +15,7 @@ import {
   isPendingTask,
   isRemoteMissingTask,
   keepUncancelledTasks,
+  parseRemoteTaskLastError,
   pruneFiredTasks,
   pruneStaleTasks,
   shortTaskId,
@@ -334,11 +336,18 @@ describe('buildFireTaskListBlock', () => {
     ...over,
   });
 
-  it('列出待触发任务，时间按 tzOffsetMin 换算（worker 跑在 UTC，不能用运行时本地时区）', () => {
-    const block = buildFireTaskListBlock([fireTask()], { nowMs: NOW, tzOffsetMin: -480 });
-    expect(block).toContain('2026-07-30 21:00');            // UTC 13:00 → UTC+8 21:00
-    expect(buildFireTaskListBlock([fireTask()], { nowMs: NOW, tzOffsetMin: 0 }))
-      .toContain('2026-07-30 13:00');
+  it('列出待触发任务，时间按 tzId 换算（worker 跑在 UTC，不能用运行时本地时区）', () => {
+    const block = buildFireTaskListBlock([fireTask()], { nowMs: NOW, tzId: 'Asia/Shanghai' });
+    expect(block).toContain('7月30日 21:00');            // UTC 13:00 → UTC+8 21:00
+    expect(buildFireTaskListBlock([fireTask()], { nowMs: NOW, tzId: 'UTC' }))
+      .toContain('7月30日 13:00');
+  });
+
+  it('tzId 与当前时间槽 / self_log 同一参照系（东京钟）', () => {
+    // UTC 13:00 → 东京 22:00。
+    const block = buildFireTaskListBlock([fireTask()], { nowMs: NOW, tzId: 'Asia/Tokyo' });
+    expect(block).toContain('7月30日 22:00');
+    expect(block).not.toContain('13:00');
   });
 
   it('摘掉正在发的那一条——列进去角色会以为还得再排一次', () => {
@@ -348,7 +357,7 @@ describe('buildFireTaskListBlock', () => {
       clientTaskId: 'client-other',
     });
     const block = buildFireTaskListBlock([firing, other], {
-      nowMs: NOW, tzOffsetMin: 0, excludeClientTaskId: 'client-firing',
+      nowMs: NOW, tzId: 'UTC', excludeClientTaskId: 'client-firing',
     });
     expect(block).toContain(shortTaskId(other.taskUuid));
     expect(block).not.toContain(shortTaskId(firing.taskUuid));
@@ -356,7 +365,7 @@ describe('buildFireTaskListBlock', () => {
 
   it('过点的一次性任务不列（isPendingTask 同一把尺）', () => {
     const past = fireTask({ firstSendTime: new Date(NOW - 86_400_000).toISOString() });
-    expect(buildFireTaskListBlock([past], { nowMs: NOW, tzOffsetMin: 0 })).toBe('');
+    expect(buildFireTaskListBlock([past], { nowMs: NOW, tzId: 'UTC' })).toBe('');
   });
 
   it('循环任务写「下一次」的时间，不是好几天前的首次', () => {
@@ -364,21 +373,21 @@ describe('buildFireTaskListBlock', () => {
       firstSendTime: new Date(Date.UTC(2026, 6, 20, 13, 0)).toISOString(),
       recurrenceType: 'daily',
     });
-    const block = buildFireTaskListBlock([daily], { nowMs: NOW, tzOffsetMin: 0 });
-    expect(block).toContain('2026-07-30 13:00');
-    expect(block).not.toContain('2026-07-20');
+    const block = buildFireTaskListBlock([daily], { nowMs: NOW, tzId: 'UTC' });
+    expect(block).toContain('7月30日 13:00');
+    expect(block).not.toContain('7月20日');
   });
 
   it('没有可列的 → 空串（槽位被抹平）', () => {
-    expect(buildFireTaskListBlock([], { nowMs: NOW, tzOffsetMin: 0 })).toBe('');
+    expect(buildFireTaskListBlock([], { nowMs: NOW, tzId: 'UTC' })).toBe('');
     expect(buildFireTaskListBlock([fireTask()], {
-      nowMs: NOW, tzOffsetMin: 0, excludeClientTaskId: 'client-1',
+      nowMs: NOW, tzId: 'UTC', excludeClientTaskId: 'client-1',
     })).toBe('');
   });
 
   it('带上模式与防穿帮策略——角色要据此判断这条会不会被让路', () => {
     const block = buildFireTaskListBlock([fireTask({ expirePolicy: 'force', mode: 'prompted', promptHint: '叫他起床' })], {
-      nowMs: NOW, tzOffsetMin: 0,
+      nowMs: NOW, tzId: 'UTC',
     });
     expect(block).toContain('强制发送');
     expect(block).toContain('叫他起床');
