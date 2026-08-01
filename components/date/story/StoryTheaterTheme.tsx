@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { Moon, Palette, Sparkle, SquaresFour, Sun, X } from '@phosphor-icons/react';
+import { STORY_THEATER_APPEARANCE_STORAGE_KEY } from '../../../utils/storyTheaterBackup';
 
 export type StoryColorMode = 'light' | 'dark';
 export type StoryDecorMode = 'plain' | 'cinema';
@@ -15,7 +16,7 @@ interface StoryThemeContextValue {
     setDecor: (value: StoryDecorMode) => void;
 }
 
-const STORAGE_KEY = 'sully_story_theater_appearance_v1';
+const STORAGE_KEY = STORY_THEATER_APPEARANCE_STORAGE_KEY;
 const DEFAULT_APPEARANCE: StoryAppearance = { color: 'light', decor: 'plain' };
 const StoryThemeContext = createContext<StoryThemeContextValue | null>(null);
 
