@@ -174,7 +174,7 @@ const HotNewsApp: React.FC = () => {
 
                 {snapshot && (
                     <p className="text-center text-[10px] text-stone-400 mt-6 tracking-wide">
-                        — 数据来自 hot_news（orz.ai）多平台热榜 · 每天 6 个时段自动更新 · 点右上角可手动真·刷新 —
+                        — 数据来自 hot_news（news.orz.ai）多平台热榜 · 每天 6 个时段自动更新 · 点右上角可手动真·刷新 —
                     </p>
                 )}
             </div>
