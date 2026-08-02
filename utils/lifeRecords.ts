@@ -188,13 +188,27 @@ export const LIFE_MODULE_LABELS: Record<LifeRecordModule, string> = {
 // 1. 注入（读路径）
 // ═══════════════════════════════════════════════════════════
 
-const buildPeriodSummary = (records: LifeRecord[], settings: LifeRecordSettings | null, today: string): string => {
+/**
+ * absolute = 只写「哪天发生了什么」，不写「今天 / 第 N 天 / 还有几天」。
+ *
+ * 主动消息的提示词是提前打包好上云的，到点才渲染——中间隔了几小时甚至几天。相对说法
+ * 在打包那一刻算出来就冻住了，角色到点会照着念（用户五天没聊天，五天的主动消息都在说
+ * 「你现在生理期第二天」）。绝对日期永不过期，离现在多久由角色对着当前时间自己判断。
+ */
+const buildPeriodSummary = (
+    records: LifeRecord[], settings: LifeRecordSettings | null, today: string, absolute = false,
+): string => {
     const st = computePeriodStatus(records, settings, today);
     if (!st.lastStart) return '- 生理期：暂无记录。';
-    if (st.inPeriod) return `- 生理期：**第 ${st.dayN} 天**（${fmtCN(st.lastStart)}开始）。`;
+    if (st.inPeriod) {
+        return absolute
+            ? `- 生理期：本轮于 ${fmtCN(st.lastStart)} 开始，尚未记录结束。`
+            : `- 生理期：**第 ${st.dayN} 天**（${fmtCN(st.lastStart)}开始）。`;
+    }
     let s = `- 生理期：当前不在经期（上次 ${fmtCN(st.lastStart)}${st.lastEnd ? ` ~ ${fmtCN(st.lastEnd)}` : ''}）`;
     if (st.nextPredicted && st.daysUntilNext !== undefined) {
-        s += st.daysUntilNext >= 0
+        if (absolute) s += `；按周期预测下次约在 ${fmtCN(st.nextPredicted)}`;
+        else s += st.daysUntilNext >= 0
             ? `；预测下次约在 ${fmtCN(st.nextPredicted)}（还有约 ${st.daysUntilNext} 天）`
             : `；按周期预测已推迟约 ${-st.daysUntilNext} 天`;
         // 排卵期只在预测窗口还有意义时给（日历法估算，注明仅供参考）
@@ -206,7 +220,45 @@ const buildPeriodSummary = (records: LifeRecord[], settings: LifeRecordSettings 
     return s;
 };
 
-const buildMedSummary = (plans: MedPlan[], records: LifeRecord[], today: string): string => {
+/** 按日期倒序分组取最近几天，用于 absolute 模式下的「最近 X」列表。 */
+const groupRecentByDate = <T>(
+    items: T[], dateOf: (item: T) => string, today: string, days: number,
+): Array<{ date: string; items: T[] }> => {
+    const byDate = new Map<string, T[]>();
+    for (const item of items) {
+        const d = dateOf(item);
+        if (!d || d > today) continue;   // 未来日期不算「最近发生过」
+        const arr = byDate.get(d) ?? [];
+        arr.push(item);
+        byDate.set(d, arr);
+    }
+    return [...byDate.keys()].sort().reverse().slice(0, days)
+        .map(date => ({ date, items: byDate.get(date)! }));
+};
+
+/** absolute 见 buildPeriodSummary 的说明：不判「今天该不该服」，只给计划表和已发生的记录。 */
+const buildMedSummary = (
+    plans: MedPlan[], records: LifeRecord[], today: string, absolute = false,
+): string => {
+    if (absolute) {
+        const enabled = plans.filter(p => p.enabled).sort((a, b) => a.time.localeCompare(b.time));
+        const taken = groupRecentByDate(
+            effective(records).filter(r => r.module === 'med'), r => r.date, today, 3,
+        );
+        if (enabled.length === 0 && taken.length === 0) return '- 用药：暂无长期用药计划与记录。';
+        const lines: string[] = [];
+        if (enabled.length > 0) {
+            const items = enabled.map(p => {
+                const course = p.planKind === 'course' && p.endDate ? `，疗程至${fmtCN(p.endDate)}` : '';
+                return `${p.time} ${p.name}${p.dosage ? `(${p.dosage})` : ''}（${medFreqLabel(p)}${course}）`;
+            });
+            lines.push(`- 用药计划：${items.join('；')}。对着当前时间看：某个点早就过了、当天却没有对应的服用记录，可以视语境顺口提醒一句，别反复催。`);
+        }
+        lines.push(taken.length > 0
+            ? `- 最近服药记录：${taken.map(g => `${fmtCN(g.date)} ${g.items.map(r => r.payload.name).join('、')}`).join('；')}。`
+            : '- 最近服药记录：暂无。');
+        return lines.join('\n');
+    }
     const duePlans = plans.filter(p => isMedPlanDueToday(p, today)).sort((a, b) => a.time.localeCompare(b.time));
     const todayMeds = effective(records).filter(r => r.module === 'med' && r.date === today);
     if (plans.filter(p => p.enabled).length === 0 && todayMeds.length === 0) return '- 用药：暂无长期用药计划与记录。';
@@ -228,7 +280,19 @@ const buildMedSummary = (plans: MedPlan[], records: LifeRecord[], today: string)
     return lines.join('\n');
 };
 
-const buildExpenseSummary = (txs: BankTransaction[], today: string): string => {
+/** absolute 见 buildPeriodSummary 的说明：写「哪天花了多少」而不是「今日支出」。 */
+const buildExpenseSummary = (txs: BankTransaction[], today: string, absolute = false): string => {
+    if (absolute) {
+        const recent = groupRecentByDate(txs, t => t.dateStr, today, 3);
+        if (recent.length === 0) return '- 记账：近期暂无支出记录。';
+        const parts = recent.map(({ date, items }) => {
+            const total = items.reduce((s, t) => s + t.amount, 0);
+            const detail = items.slice(0, 5).map(t => `${t.note || '未备注'} ${t.amount}`).join('、');
+            const more = items.length > 5 ? ` 等 ${items.length} 笔` : '';
+            return `${fmtCN(date)} 共 ${items.length} 笔、合计 ${total}（${detail}${more}）`;
+        });
+        return `- 最近支出：${parts.join('；')}。`;
+    }
     const todayTx = txs.filter(t => t.dateStr === today);
     if (todayTx.length === 0) return '- 记账：今日暂无支出记录。';
     const total = todayTx.reduce((s, t) => s + t.amount, 0);
@@ -244,8 +308,27 @@ export const weekStartOf = (today: string): string => {
     return addDays(today, -((dow + 6) % 7));
 };
 
-const buildExerciseSummary = (records: LifeRecord[], settings: LifeRecordSettings | null, today: string): string => {
+/** absolute 见 buildPeriodSummary 的说明：列最近几次锻炼的日期，不写「今日 / 本周」。 */
+const buildExerciseSummary = (
+    records: LifeRecord[], settings: LifeRecordSettings | null, today: string, absolute = false,
+): string => {
     const ex = effective(records).filter(r => r.module === 'exercise');
+    const goalNum = settings?.exerciseWeeklyGoal;
+    const planNote = (settings?.exercisePlanNote || '').trim();
+    if (absolute) {
+        const recent = groupRecentByDate(ex, r => r.date, today, 5);
+        const detail = recent
+            .map(g => `${fmtCN(g.date)} ${g.items.map(r => `${r.payload.activity}${r.payload.duration ? ` ${r.payload.duration}` : ''}`).join('、')}`)
+            .join('；');
+        let s = recent.length > 0 ? `- 最近锻炼：${detail}` : '- 最近锻炼：近期没有记录';
+        if (goalNum) s += `（周目标 ${goalNum} 次）`;
+        s += '。';
+        if (planNote) s += `TA 的每周锻炼规划：「${planNote}」。`;
+        if (goalNum || planNote) {
+            s += `这份计划 TA 希望你帮忙盯着执行：对着上面的日期和当前时间估一下进度，落后时按你的方式自然地督促、约练或鼓励（有温度地推一把，不是教练查岗）；跟上了就替 TA 高兴。`;
+        }
+        return s;
+    }
     const todayEx = ex.filter(r => r.date === today);
     const ws = weekStartOf(today);
     const weekSessions = ex.filter(r => r.date >= ws && r.date <= today).length;
@@ -309,12 +392,18 @@ export const buildLifeRecordInjection = async (
     let s = `\n### ${userName} 的生活记录（潜意识背景）\n`;
     s += `以下是 ${userName} 的近期生活状态。这些信息沉淀在你的潜意识里，是你理解 TA 的身体、情绪与状态的背景依据——**不要主动点破、不要逐条复述、不要表现得像在看报表**。只在自然的时机让关心自然流露（例如 TA 说累了，而你"隐约记得"TA 正处在生理期第 2 天）。\n\n`;
 
+    // fire_pack 里一律写绝对日期：这份摘要是打包那一刻存下来的，到点渲染时可能已经隔了
+    // 几小时甚至几天，「今日待服」「第 N 天」那种说法会被角色照着念成过时的事实。
     const dataLines: string[] = [];
-    if (moduleActive('period')) dataLines.push(buildPeriodSummary(records, settings, today));
-    if (moduleActive('med')) dataLines.push(buildMedSummary(plans, records, today));
-    if (moduleActive('expense')) dataLines.push(buildExpenseSummary(txs, today));
-    if (moduleActive('exercise')) dataLines.push(buildExerciseSummary(records, settings, today));
-    s += `${dataLines.join('\n')}\n\n`;
+    if (moduleActive('period')) dataLines.push(buildPeriodSummary(records, settings, today, forFirePack));
+    if (moduleActive('med')) dataLines.push(buildMedSummary(plans, records, today, forFirePack));
+    if (moduleActive('expense')) dataLines.push(buildExpenseSummary(txs, today, forFirePack));
+    if (moduleActive('exercise')) dataLines.push(buildExerciseSummary(records, settings, today, forFirePack));
+    s += `${dataLines.join('\n')}\n`;
+    if (forFirePack) {
+        s += `\n（以上记录截至 ${fmtCN(today)}。请对照当前时间自行判断这些事离现在有多久，不要默认它们就发生在今天。）\n`;
+    }
+    s += '\n';
 
     if (moduleActive('period') || moduleActive('med')) {
         s += `${MEDICAL_TONE_GUIDE}\n\n`;

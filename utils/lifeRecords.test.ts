@@ -323,3 +323,41 @@ describe('EXPENSE 去重窗口（同金额可以是两笔不同消费）', () =>
         expect(txs).toHaveLength(1);
     });
 });
+
+// 主动消息的提示词是提前打包上云、到点才渲染的，中间可能隔几小时甚至几天。相对说法
+// （今日待服 / 生理期第 N 天）在打包那一刻就冻住了，角色到点会照着念成过时的事实：
+// 用户早上八点吃过药、晚上还被问「今天的药还没吃吧」。所以 fire_pack 里一律写绝对日期。
+describe('buildLifeRecordInjection — fire_pack 写绝对日期', () => {
+    afterAll(async () => {
+        await DB.saveLifeRecordSettings({ id: 'main', hiddenModules: [] });
+    });
+
+    it('经期中：前台写「第 N 天」，fire_pack 写起始日期', async () => {
+        await DB.saveLifeRecordSettings({ id: 'main', hiddenModules: [] });
+        // 同文件前面的用例往共享库里写过今天的 PERIOD_END，清干净再造一条今天开始的经期，
+        // 否则状态机判成「已结束」，前台也不会出现「第 N 天」，这条就验不到东西了。
+        const existing = await DB.getAllLifeRecords();
+        await Promise.all(existing.filter(r => r.module === 'period').map(r => DB.deleteLifeRecord(r.id)));
+        await DB.saveLifeRecord(mkPeriod('start', lifeToday()));
+        const char = mkChar();
+
+        const live = await buildLifeRecordInjection(char, '小鱼', { forFirePack: false });
+        const packed = await buildLifeRecordInjection(char, '小鱼', { forFirePack: true });
+
+        expect(live).toContain('生理期：**第');
+        expect(packed).toContain('本轮于');
+        // 注意别用宽泛的 /第 \d+ 天/：开头那段人设说明里有「生理期第 2 天」的举例，
+        // 那是固定文案不是数据，两种模式下都在。
+        expect(packed).not.toContain('生理期：**第');
+        expect(packed).toContain('以上记录截至');
+    });
+
+    it('fire_pack 里不出现任何「今日 X」式的断言', async () => {
+        await DB.saveLifeRecordSettings({ id: 'main', hiddenModules: [] });
+        const packed = await buildLifeRecordInjection(mkChar(), '小鱼', { forFirePack: true });
+
+        for (const stale of ['今日待服', '今日支出', '今日已练', '今日还没练', '今日暂无']) {
+            expect(packed, `fire_pack 不该出现会过期的「${stale}」`).not.toContain(stale);
+        }
+    });
+});
