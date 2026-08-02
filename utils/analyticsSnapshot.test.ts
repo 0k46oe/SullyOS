@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import type { APIConfig, CharacterProfile, CloudBackupConfig, OSTheme, RealtimeConfig } from '../types';
 import {
+    amsg2Stage,
     collectAppearance,
     collectCharSettings,
     collectFeatureFlags,
@@ -92,9 +93,36 @@ function poisonedSources(overrides: Partial<FeatureSources> = {}): FeatureSource
         } as APIConfig,
         apiPresetCount: 2,
         vrIndependentApi: true,
+        characters: [],
+        // Worker 地址和共享密钥同样是用户填的，一起塞毒药。
+        amsg2Global: { workerUrl: POISON.url, initializedAt: 1_700_000_000_000 },
         ...overrides,
     };
 }
+
+/** 在这个角色的 2.0 面板里存过（或角色自己排过任务），挂着 n 条待触发任务。 */
+function amsg2Char(id: string, pendingTasks = 0, enabled = true): CharacterProfile {
+    return {
+        id,
+        name: POISON.myName,
+        activeMsg2Config: {
+            enabled,
+            tasks: Array.from({ length: pendingTasks }, (_, i) => ({
+                taskUuid: `${id}-task-${i}`,
+                clientTaskId: `${id}-client-${i}`,
+                status: 'scheduled',
+                mode: 'auto',
+                recurrenceType: 'none',
+                // 排在明天，免得测试跑着跑着就过点了
+                firstSendTime: new Date(Date.now() + 86_400_000).toISOString(),
+            })),
+        },
+    } as unknown as CharacterProfile;
+}
+
+/** 从没碰过 2.0 的角色：config 整个缺失。 */
+const untouchedChar = (id: string) =>
+    ({ id, name: POISON.myName } as unknown as CharacterProfile);
 
 /** 把一份上报摊平成一个字符串，用来扫毒药。 */
 const flatten = (flags: Record<string, string>) => JSON.stringify(flags);
@@ -207,6 +235,58 @@ describe('当前功能启用 · 开关值的判定', () => {
         expect(flags.连通的MCP服务器).toBe('1');
     });
 
+    it('主动消息 2.0 的四态不能塌：三关卡在哪一关要修的引导不一样', () => {
+        expect(amsg2Stage(false, false, 0)).toBe('没配');
+        expect(amsg2Stage(true, false, 0)).toBe('填了没连上');
+        expect(amsg2Stage(true, true, 0)).toBe('连上没开角色');
+        expect(amsg2Stage(true, true, 2)).toBe('开');
+        // 地址删了但连接记录还在 / 备份里带着开着的角色配置：没地址就不可能工作
+        expect(amsg2Stage(false, true, 3)).toBe('没配');
+    });
+
+    it('2.0 只填了地址没连上 → 不能报成已经在用', () => {
+        const flags = collectFeatureFlags(poisonedSources({
+            amsg2Global: { workerUrl: POISON.url },   // 没有 initializedAt
+            characters: [amsg2Char('c1', 1)],
+        }));
+        expect(flags['主动消息2.0']).toBe('填了没连上');
+    });
+
+    it('从没碰过 2.0 的角色不算「开了」——默认可用不等于用起来了', () => {
+        // isAmsg2EnabledForChar 对 config 缺失的角色返回 true（默认可用），
+        // 拿它数会把角色总数报成 2.0 用户数。
+        const flags = collectFeatureFlags(poisonedSources({
+            characters: [untouchedChar('a'), untouchedChar('b'), untouchedChar('c')],
+        }));
+        expect(flags['开了2.0的角色数']).toBe('0');
+        expect(flags['主动消息2.0']).toBe('连上没开角色');
+    });
+
+    it('在面板里关掉的角色不计入，开着的才数', () => {
+        const flags = collectFeatureFlags(poisonedSources({
+            characters: [amsg2Char('a'), amsg2Char('b', 0, false), untouchedChar('c')],
+        }));
+        expect(flags['开了2.0的角色数']).toBe('1');
+    });
+
+    it('真在用 2.0 的人同时开着 Instant Push → 记一笔（那三样静默失效）', () => {
+        localStorage.setItem('instant_push_config_v1', JSON.stringify({
+            enabled: true, workerUrl: 'https://my-worker.invalid',
+        }));
+        // isPushVapidReady 只看公钥长度（>60），内容无所谓
+        localStorage.setItem('push_vapid_v1', JSON.stringify({
+            vapidPublicKey: 'B'.repeat(87), vapidPrivateKey: 'k'.repeat(43),
+        }));
+        expect(collectFeatureFlags(poisonedSources({
+            characters: [amsg2Char('a', 1)],
+        }))['2.0与InstantPush同开']).toBe('是');
+
+        // 没人真在用 2.0 的话，光开着 instant 不算踩坑
+        expect(collectFeatureFlags(poisonedSources({
+            characters: [untouchedChar('a')],
+        }))['2.0与InstantPush同开']).toBe('否');
+    });
+
     it('不上报已经全局下线的主动消息 Push 加速', () => {
         // 那一层 FORCE_DISABLED 恒为关，报出来会被误读成「没人用」。
         localStorage.setItem('proactive_push_enabled_v1', 'true');
@@ -281,5 +361,15 @@ describe('当前角色设置 · 不泄漏角色内容', () => {
     it('活跃角色找不到时回落到第一个，不崩', () => {
         const flags = collectCharSettings([poisonedChar()], 'not-exist');
         expect(flags.思考链风格).toBe('echo');
+    });
+
+    it('定时消息任务数是全部角色合计，不是当前活跃角色那一个', () => {
+        // 只看活跃角色的话，这里会报 0——而这个人其实挂着 4 条任务。
+        // 一个人挂十几个角色时，活跃角色恰好没排任务的概率很大。
+        const flags = collectCharSettings(
+            [amsg2Char('active', 0), amsg2Char('b', 2), amsg2Char('c', 2)],
+            'active',
+        );
+        expect(flags.定时消息任务数).toBe('4+');
     });
 });

@@ -35,9 +35,10 @@ import { isStandaloneDisplayMode } from './iosStandalone';
 import { loadMcpServers, getMcpUseNativeTools } from './mcpClient';
 import { getLuckinToken, isLuckinEnabled } from './luckinMcpClient';
 import { getMcdToken, isMcdEnabled } from './mcdMcpClient';
-import { loadInstantConfig } from './instantPushClient';
+import { isInstantConfigReady, loadInstantConfig } from './instantPushClient';
 import { isPushVapidReady } from './pushVapid';
 import { getPendingTasks } from './amsg2Tasks';
+import { ActiveMsgStore } from './activeMsgStore';
 import { getVRApi } from './vrWorld/vrApi';
 
 /** 布尔开关转「开 / 关」，带默认值。 */
@@ -148,6 +149,7 @@ export function collectCharSettings(
     const c = characters.find(x => x.id === activeCharacterId) ?? characters[0];
     const anyOn = (pick: (ch: CharacterProfile) => boolean | undefined, defaultOn = false) =>
         anyCharToggle(characters.map(pick), defaultOn);
+    const now = Date.now();
     return {
         // ── 开关：默认关的，问有没有人开过 ──
         记忆宫殿: anyOn(x => x.memoryPalaceEnabled),
@@ -181,7 +183,13 @@ export function collectCharSettings(
         观测HUD样式: c.dateObserve?.style ?? 'hologram',
         // 定时消息是多任务清单（一个角色可以同时挂多个不同模式的任务），没有角色级的
         // 单一模式/频率可报；这里报任务规模，模式/频率构成在「排程定时消息」事件里按次记录。
-        定时消息任务数: bucketFewCount(getPendingTasks(c.activeMsg2Config, Date.now()).length),
+        //
+        // 这一项数的是**全部角色合计**，不是当前活跃角色——主动消息 2.0 是全局功能，
+        // 一个人挂十几个角色时，活跃角色恰好是没排任务的那个的概率很大，
+        // 只看它会把「排了一堆任务的重度用户」报成 0。
+        定时消息任务数: bucketFewCount(
+            characters.reduce((sum, ch) => sum + getPendingTasks(ch.activeMsg2Config, now).length, 0),
+        ),
         // 角色专属提示音同样只分「内置哪个 / 自己弄的」
         角色提示音: presetOrCustom(c.chatSound?.src, Object.keys(BUILTIN_SOUNDS), '没设'),
     };
@@ -216,6 +224,31 @@ export type FeatureTriState = '开' | '配了没开' | '没配';
 export function triState(configured: boolean, enabled: boolean): FeatureTriState {
     if (!configured) return '没配';
     return enabled ? '开' : '配了没开';
+}
+
+/** 主动消息 2.0 配到哪一步了。 */
+export type Amsg2Stage = '没配' | '填了没连上' | '连上没开角色' | '开';
+
+/**
+ * 主动消息 2.0 要连过三关才真的会响：填 Worker 地址 → 连接成功（在用户自己的 D1 里
+ * 建表）→ 至少给一个角色开。所以它报四态，比别处的三态多一档。
+ *
+ * 多出来的那一档是有用的，因为两种半途而废要修的地方完全不同：
+ *   · 填了没连上   —— 卡在那 15 分钟的部署流程里（地址填错、密钥对不上、D1 没绑）
+ *   · 连上没开角色 —— 后端已经弄好了，卡在「不知道还要去聊天里逐个角色打开」
+ * 塞进 triState 的话这两种会混成同一个「配了没开」，看不出该修哪一段引导。
+ *
+ * 地址被删了但连接记录还在（或者导入的备份里带着开着的角色配置）一律算「没配」：
+ * 没有地址就不可能工作，报成后面几档是虚高。
+ */
+export function amsg2Stage(
+    workerConfigured: boolean,
+    connected: boolean,
+    activeCharCount: number,
+): Amsg2Stage {
+    if (!workerConfigured) return '没配';
+    if (!connected) return '填了没连上';
+    return activeCharCount > 0 ? '开' : '连上没开角色';
 }
 
 /** 云端备份服务商白名单。用户装了别的（或数据被改过）一律 custom。 */
@@ -278,6 +311,13 @@ export interface FeatureSources {
     apiPresetCount: number;
     /** 彼方有没有另配独立线路。存在 IndexedDB，得由调用方 await 出来。 */
     vrIndependentApi: boolean;
+    /** 全部角色。只数「开了主动消息 2.0 的有几个」，角色内容一个字都不碰。 */
+    characters: CharacterProfile[];
+    /**
+     * 主动消息 2.0 的全局配置，存 IndexedDB，得由调用方 await 出来。
+     * 只看「地址填没填」「连接成功过没有」两位，Worker 地址和共享密钥本身不进上报。
+     */
+    amsg2Global: { workerUrl?: string; initializedAt?: number };
 }
 
 /**
@@ -292,6 +332,12 @@ export function collectFeatureFlags(src: FeatureSources): Record<string, string>
     const instant = loadInstantConfig();
     const luckinToken = getLuckinToken().length > 0;
     const mcdToken = getMcdToken().length > 0;
+    // 「用起来了的角色」不能用 isAmsg2EnabledForChar 数：那个判定是「没被关掉就算开」，
+    // 从没碰过 2.0 的角色（config 缺失）也返回 true，拿它数等于把角色总数报成 2.0 用户数。
+    // 有 activeMsg2Config = 用户在这个角色的面板里存过、或角色自己排过任务，是真痕迹。
+    const amsg2ActiveChars = src.characters.filter(
+        c => c.activeMsg2Config != null && c.activeMsg2Config.enabled !== false,
+    );
 
     return {
         // ── 外部服务接入 ──
@@ -361,6 +407,27 @@ export function collectFeatureFlags(src: FeatureSources): Record<string, string>
             Boolean(instant.workerUrl?.startsWith('https://')),
             Boolean(instant.enabled && instant.workerUrl?.startsWith('https://') && isPushVapidReady()),
         ),
+
+        // ── 主动消息 2.0 ──
+        // 四态（见 amsg2Stage）：三关里卡在哪一关，要修的引导完全不是一回事。
+        '主动消息2.0': amsg2Stage(
+            Boolean(src.amsg2Global.workerUrl?.trim()),
+            Boolean(src.amsg2Global.initializedAt),
+            amsg2ActiveChars.length,
+        ),
+        // 上面那一档只分「有没有角色在用」，这里补深度：只开了一个是尝鲜，
+        // 好几个才说明真的用起来了。
+        '开了2.0的角色数': bucketFewCount(amsg2ActiveChars.length),
+        // 两个都开着时聊天走 Instant Push，2.0 挂在本地那条路上的三样（角色排任务、
+        // 角色知道自己有任务、防打断）**静默**失效：没报错、没提示，功能就是不响。
+        // 面板里只有一块黄框提醒 + 一个手动关掉的按钮，没有任何强制互斥，所以这个
+        // 状态能长期挂着。这一格数的是真踩在上面的人——占比高的话该做的是把两者
+        // 做成真互斥，而不是继续加提示文案。
+        //
+        // 没有复用聊天路径那个 isAmsg2SuppressedByInstant：它按「这个角色的能力这一轮
+        // 会不会被顶掉」判，而没碰过 2.0 的角色也算开着，用在这里会让答案恒为「是」。
+        // 两处问的问题不同——那边是「要不要留 trace」，这里是「有多少人真受影响」。
+        '2.0与InstantPush同开': amsg2ActiveChars.length > 0 && isInstantConfigReady() ? '是' : '否',
     };
 }
 
@@ -370,11 +437,12 @@ export function collectFeatureFlags(src: FeatureSources): Record<string, string>
  * 存在哪、要不要 await。
  */
 export async function collectFeatureFlagsAsync(
-    src: Omit<FeatureSources, 'vrIndependentApi'>,
+    src: Omit<FeatureSources, 'vrIndependentApi' | 'amsg2Global'>,
 ): Promise<Record<string, string>> {
     // 读不出来就当没配。为一条统计去打断启动流程不值得。
-    const vrIndependentApi = await getVRApi()
-        .then(cfg => Boolean(cfg))
-        .catch(() => false);
-    return collectFeatureFlags({ ...src, vrIndependentApi });
+    const [vrIndependentApi, amsg2Global] = await Promise.all([
+        getVRApi().then(cfg => Boolean(cfg)).catch(() => false),
+        ActiveMsgStore.getGlobalConfig().catch(() => ({ workerUrl: '' })),
+    ]);
+    return collectFeatureFlags({ ...src, vrIndependentApi, amsg2Global });
 }

@@ -1000,8 +1000,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   //
   // 收敛全在 utils/analyticsSnapshot.ts 里做，这里只负责把 OSContext 手上那几份
   // state 递过去。地址、密钥、token、账号名一个字都不会进上报。
+  // 自己拦一道「只跑一次」：上报侧本来就有 once 门，但取数要读两次 IndexedDB
+  // （彼方独立线路、主动消息 2.0 的全局配置），让它跟着 characters 每次变更白跑不值当。
+  const featuresReportedRef = useRef(false);
   useEffect(() => {
-      if (!isDataLoaded) return;
+      if (!isDataLoaded || featuresReportedRef.current) return;
+      featuresReportedRef.current = true;
       void (async () => {
           trackCurrentFeaturesOnce(await collectFeatureFlagsAsync({
               realtimeConfig,
@@ -1010,9 +1014,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               remoteVectorConfig,
               apiConfig,
               apiPresetCount: apiPresets.length,
+              characters,
           }));
       })();
-  }, [isDataLoaded, realtimeConfig, cloudBackupConfig, memoryPalaceConfig, remoteVectorConfig, apiConfig, apiPresets]);
+  }, [isDataLoaded, realtimeConfig, cloudBackupConfig, memoryPalaceConfig, remoteVectorConfig, apiConfig, apiPresets, characters]);
 
   // --- Global Error Interception ---
   useEffect(() => {
