@@ -17,6 +17,7 @@ import { parseDirectorActions, stripSkipMarker, parseGroupTopicBox } from '../ut
 import { GroupPacketMeta, PacketReceiptMeta, ClaimResult, claimPacket, effectivePacketStatus, makePacketMeta } from '../utils/groupChat/redpacket';
 import { messageLogText } from '../utils/groupChat/format';
 import { trackEvent } from '../utils/analytics';
+import { markAmsgStateDirty } from '../utils/amsgStateSync';
 import { buildMemberTimeline, DEFAULT_MEMBER_TIMELINE_CAP } from '../utils/groupChat/timeline';
 import { buildEmojiContextStr, buildGroupHistoryBlock, buildDirectorInstruction, buildRoundRobinInstruction, GroupHistoryBlock } from '../utils/groupChat/prompts';
 import { dispatchMemberActions } from '../utils/groupChat/dispatch';
@@ -366,7 +367,7 @@ const GroupMessageItem = React.memo(({
 // --- Main Component ---
 
 const GroupChat: React.FC = () => {
-    const { closeApp, groups, createGroup, updateGroup, deleteGroup, characters, apiConfig, addToast, userProfile, virtualTime, characterGroups, theme: osTheme, customThemes } = useOS();
+    const { closeApp, groups, createGroup, updateGroup, deleteGroup, characters, apiConfig, addToast, userProfile, virtualTime, characterGroups, theme: osTheme, customThemes, realtimeConfig } = useOS();
     const [view, setView] = useState<'list' | 'chat'>('list');
     const [activeGroup, setActiveGroup] = useState<GroupProfile | null>(null);
     const [messages, setMessages] = useState<Message[]>([]);
@@ -387,6 +388,17 @@ const GroupChat: React.FC = () => {
     // 闭包里的 messages 是触发那一刻的旧值，长度会越算越小
     const messagesRef = useRef<Message[]>([]);
     messagesRef.current = messages;
+
+    // 群里的动静会进每个成员私聊 prompt 的【群聊背景】块，话题盒成盒时还直接往成员私聊
+    // 历史里写卡片 —— 两者都是主动消息 2.0 云端快照（fire_pack）的素材。群里有事就给成员
+    // 逐个打脏，不然角色到点还活在上一次私聊那会儿的群里。去抖会把一轮里的多次调用合并成
+    // 一次上传，没开主动消息的成员被 markAmsgStateDirty 内部的门筛掉。
+    const markGroupMembersDirty = useCallback((memberIds: string[]) => {
+        for (const memberId of memberIds) {
+            const member = charactersRef.current.find(c => c.id === memberId);
+            if (member) markAmsgStateDirty({ char: member, userProfile, groups, realtimeConfig });
+        }
+    }, [userProfile, groups, realtimeConfig]);
 
     // Token 统计 — 对齐私聊 ChatHeader 的 token badge
     const [lastTokenUsage, setLastTokenUsage] = useState<number | null>(null);
@@ -794,7 +806,8 @@ const GroupChat: React.FC = () => {
 
         await DB.saveMessage(newMessage);
         await refreshMessages(activeGroup.id);
-        
+        markGroupMembersDirty(activeGroup.members);
+
         // Close panels
         if (type !== 'text') {
             setShowPanel('none');
@@ -896,6 +909,7 @@ const GroupChat: React.FC = () => {
             trackEvent('领取或退回群红包', { action });
         }
         await refreshMessages(activeGroup.id);
+        markGroupMembersDirty(activeGroup.members);
     };
 
     // --- Logic: 气泡体系 ---
@@ -1126,6 +1140,8 @@ ${memberTimeline || '(暂无互动记录)'}
                 content: `[群聊公共话题盒：${groupForArchive.name}｜${box.title}]\n${box.summary}`,
                 metadata: { groupTopicBox: { ...box, groupName: groupForArchive.name } },
             })));
+            // 话题盒卡片是直接写进成员私聊历史的，也就是 fire_pack 转写的直接来源
+            markGroupMembersDirty(groupForArchive.members);
             const remaining = groupTopicPendingCount(allMsgs, box.sourceEndMessageId);
             setTopicPendingCount(remaining);
             addToast(`「${box.title}」已成盒，并送达 ${groupForArchive.members.length} 位成员私聊`, 'success');
@@ -1279,6 +1295,8 @@ ${memberTimeline || '(暂无互动记录)'}
             setIsTyping(false);
             setMcpStatus('');
             abortRef.current = null;
+            // 中途报错 / 用户点停也照打：已经落库的那几条同样进了成员的私聊背景
+            markGroupMembersDirty(activeGroup.members);
             runGroupTopicArchive();
         }
     };
@@ -1392,6 +1410,8 @@ ${memberTimeline || '(暂无互动记录)'}
             setIsTyping(false);
             setMcpStatus('');
             abortRef.current = null;
+            // 同导演模式：跑到一半被打断也要打脏，已发言成员的话已经落库了
+            markGroupMembersDirty(activeGroup.members);
             runGroupTopicArchive();
         }
     };

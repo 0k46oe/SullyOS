@@ -9,6 +9,9 @@ vi.mock('./activeMsgClient', () => ({
   ActiveMsgClient: {
     syncCharFirePacks: vi.fn().mockResolvedValue(undefined),
     syncChatPresence: vi.fn().mockResolvedValue(undefined),
+    syncToolConfig: vi.fn().mockResolvedValue(undefined),
+    listAllTasks: vi.fn().mockResolvedValue([]),
+    cancelTask: vi.fn().mockResolvedValue({ uuid: '', alreadyGone: false }),
   },
 }));
 vi.mock('./activeMsgStore', () => ({
@@ -17,11 +20,15 @@ vi.mock('./activeMsgStore', () => ({
 
 import {
   AMSG2_PENDING_SYNC_LS_KEY,
+  AMSG2_PENDING_TOOL_CONFIG_LS_KEY,
+  cancelAllRemoteAmsgTasks,
   flushAmsgState,
+  isWorkerUrlCleared,
   markAmsgStateDirty,
   resumePendingAmsgStateSync,
   startAmsgChatPresence,
   stopAmsgChatPresence,
+  syncAmsgToolConfig,
 } from './amsgStateSync';
 import { ActiveMsgClient } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
@@ -55,17 +62,28 @@ const nextCharId = () => `char-${++charSeq}`;
 beforeEach(() => {
   vi.useFakeTimers();
   localStorage.removeItem(AMSG2_PENDING_SYNC_LS_KEY);
+  localStorage.removeItem(AMSG2_PENDING_TOOL_CONFIG_LS_KEY);
   (ActiveMsgClient.syncCharFirePacks as any).mockClear();
   (ActiveMsgClient.syncChatPresence as any).mockClear();
+  (ActiveMsgClient.syncToolConfig as any).mockReset();
+  (ActiveMsgClient.syncToolConfig as any).mockResolvedValue(undefined);
+  (ActiveMsgClient.listAllTasks as any).mockReset();
+  (ActiveMsgClient.listAllTasks as any).mockResolvedValue([]);
+  (ActiveMsgClient.cancelTask as any).mockReset();
+  (ActiveMsgClient.cancelTask as any).mockResolvedValue({ uuid: '', alreadyGone: false });
   (ActiveMsgStore.getGlobalConfig as any).mockReset();
   (ActiveMsgStore.getGlobalConfig as any).mockResolvedValue({ workerUrl: 'https://amsg.example.dev' });
 });
 afterEach(async () => {
   // 待传队列和退避计数都是模块级的：失败用例会留下快照 + 一个重排 timer，
   // 不清干净会串进下一个用例的批次里（batch 长度、退避时长都会对不上）。
+  // tool_config 的欠账同理，冲刷会顺手把它带走。
   (ActiveMsgClient.syncCharFirePacks as any).mockResolvedValue(undefined);
+  (ActiveMsgClient.syncToolConfig as any).mockResolvedValue(undefined);
   await flushAmsgState('cleanup');
+  await vi.advanceTimersByTimeAsync(1);
   await flushAmsgState('cleanup');
+  await vi.advanceTimersByTimeAsync(1);
   vi.clearAllTimers();
   vi.useRealTimers();
 });
@@ -268,6 +286,129 @@ describe('脏标记持久化与启动补传', () => {
 
     expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
     expect(readMarks()).toContain(char.id);
+  });
+});
+
+// 回归守卫：tool_config（搜索/Notion/飞书/MCP 凭据、代理地址）以前是「单发即忘」——
+// 一句 `.catch(() => {})` 就没了，也没有底账。它又不像 fire_pack 那样每轮聊天重传，
+// 传丢一次云端就永远是旧的：用户删掉的 MCP 服务器，worker 半夜照旧带着旧 token 直连。
+describe('工具凭据（tool_config）的重试与底账', () => {
+  const readMark = () => localStorage.getItem(AMSG2_PENDING_TOOL_CONFIG_LS_KEY);
+  const config = { weatherEnabled: true } as any;
+
+  it('传成功 → 只发一次请求，底账清空', async () => {
+    syncAmsgToolConfig(config);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(ActiveMsgClient.syncToolConfig).toHaveBeenCalledTimes(1);
+    expect(ActiveMsgClient.syncToolConfig).toHaveBeenCalledWith(config);
+    expect(readMark()).toBeNull();
+  });
+
+  it('传失败 → 底账留存，退避 30s 后自动重传，成功即清账', async () => {
+    (ActiveMsgClient.syncToolConfig as any).mockRejectedValueOnce(new Error('worker down'));
+    syncAmsgToolConfig(config);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(ActiveMsgClient.syncToolConfig).toHaveBeenCalledTimes(1);
+    expect(readMark()).toBe('1');
+
+    await vi.advanceTimersByTimeAsync(30_000 + 100);
+    expect(ActiveMsgClient.syncToolConfig).toHaveBeenCalledTimes(2);
+    expect(readMark()).toBeNull();
+  });
+
+  it('退避打光仍失败 → 底账不丢，下次冲刷接着补', async () => {
+    (ActiveMsgClient.syncToolConfig as any).mockRejectedValue(new Error('offline'));
+    syncAmsgToolConfig(config);
+    await vi.advanceTimersByTimeAsync(30_000 + 60_000 + 120_000 + 1_000);
+    expect(ActiveMsgClient.syncToolConfig).toHaveBeenCalledTimes(4);
+    expect(readMark()).toBe('1');
+
+    // 网络回来了：下一次 fire_pack 冲刷顺手把它带上去
+    (ActiveMsgClient.syncToolConfig as any).mockResolvedValue(undefined);
+    await flushAmsgState('test');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ActiveMsgClient.syncToolConfig).toHaveBeenCalledTimes(5);
+    expect(readMark()).toBeNull();
+  });
+
+  it('没配 workerUrl → 不发请求，底账也不留（没有去处不算欠着）', async () => {
+    (ActiveMsgStore.getGlobalConfig as any).mockResolvedValue({ workerUrl: '' });
+    syncAmsgToolConfig(config);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(ActiveMsgClient.syncToolConfig).not.toHaveBeenCalled();
+    expect(readMark()).toBeNull();
+  });
+
+  it('杀进程模拟：底账残留 → 启动补传用当前配置传一次并清账', async () => {
+    localStorage.setItem(AMSG2_PENDING_TOOL_CONFIG_LS_KEY, '1');
+    resumePendingAmsgStateSync({
+      characters: [], userProfile: {} as any, groups: [], realtimeConfig: config,
+    });
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(ActiveMsgClient.syncToolConfig).toHaveBeenCalledTimes(1);
+    expect(ActiveMsgClient.syncToolConfig).toHaveBeenCalledWith(config);
+    expect(readMark()).toBeNull();
+  });
+
+  it('上传期间配置又改了 → 不拿旧那份的成功去清新的欠账', async () => {
+    let release: () => void = () => {};
+    (ActiveMsgClient.syncToolConfig as any).mockImplementationOnce(
+      () => new Promise<void>((resolve) => { release = resolve; }));
+    syncAmsgToolConfig(config);
+    await vi.advanceTimersByTimeAsync(1);
+
+    const newer = { weatherEnabled: false } as any;
+    syncAmsgToolConfig(newer);          // 上一次还没回来
+    release();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(readMark()).toBe('1');       // 新的那份还欠着
+    await flushAmsgState('test');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ActiveMsgClient.syncToolConfig).toHaveBeenLastCalledWith(newer);
+    expect(readMark()).toBeNull();
+  });
+});
+
+// 回归守卫：清空 Worker 地址以前是静默存盘。前端这边一切同步停摆，D1 里的任务却一条
+// 没少——cron 每分钟照常消费、照烧 LLM 照推送，用户以为自己关掉了一切。
+describe('清空 Worker 地址前的收尾', () => {
+  it('只有「从非空变空」才触发取消流程', () => {
+    expect(isWorkerUrlCleared('https://amsg.example.dev', '')).toBe(true);
+    expect(isWorkerUrlCleared('https://amsg.example.dev', '   ')).toBe(true);
+    // 换地址、首次填写、本来就空：都不是「关掉」
+    expect(isWorkerUrlCleared('https://a.dev', 'https://b.dev')).toBe(false);
+    expect(isWorkerUrlCleared('', 'https://b.dev')).toBe(false);
+    expect(isWorkerUrlCleared('', '')).toBe(false);
+    expect(isWorkerUrlCleared(undefined, undefined)).toBe(false);
+  });
+
+  it('逐个取消远端任务，单条失败不拖累其余', async () => {
+    (ActiveMsgClient.listAllTasks as any).mockResolvedValue([
+      { uuid: 'u1' }, { uuid: 'u2' }, { uuid: 'u3' }, { notAUuid: true },
+    ]);
+    (ActiveMsgClient.cancelTask as any).mockImplementation(async (uuid: string) => {
+      if (uuid === 'u2') throw new Error('worker 503');
+      return { uuid, alreadyGone: false };
+    });
+
+    const result = await cancelAllRemoteAmsgTasks();
+
+    expect(ActiveMsgClient.cancelTask).toHaveBeenCalledTimes(3);
+    expect(result).toEqual({ total: 3, failed: 1, listed: true });
+  });
+
+  it('清单都读不到 → listed:false，交给界面提示「远端可能还挂着」', async () => {
+    (ActiveMsgClient.listAllTasks as any).mockRejectedValue(new Error('unauthorized'));
+
+    const result = await cancelAllRemoteAmsgTasks();
+
+    expect(result.listed).toBe(false);
+    expect(ActiveMsgClient.cancelTask).not.toHaveBeenCalled();
   });
 });
 

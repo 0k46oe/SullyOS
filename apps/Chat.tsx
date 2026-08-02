@@ -1240,12 +1240,15 @@ const Chat: React.FC = () => {
         if (msg.metadata?.reviewStatus && msg.metadata.reviewStatus !== 'active') return;
         try {
             await resolveLifeRecordCard(msg, action);
+            // 否决会把这条记录踢出注入摘要、回滚银行流水，生活记录是注入给所有开了开关的
+            // 角色的共享素材，所以逐个打脏（同表情库）。
+            markAmsgStateDirtyForAll({ characters, userProfile, groups, realtimeConfig });
             addToast(action === 'confirmed' ? '已确认记录' : '已否决，记录撤销', action === 'confirmed' ? 'success' : 'info');
         } catch (e) {
             console.error('[LifeRecord] resolve failed:', e);
         }
         await reloadMessages(visibleCountRef.current);
-    }, [char, reloadMessages, addToast]);
+    }, [char, reloadMessages, addToast, characters, userProfile, groups, realtimeConfig]);
 
     // 顶栏 ⚡ 手动触发。instant 模式下给"上一条 assistant 之后的所有 user 消息"打上"准备中"
     // 三个点（从写入 DB 到 SSE POST 入队之间），由 onInstantPosted 清除 ——
@@ -1615,6 +1618,8 @@ const Chat: React.FC = () => {
         if (modalType === 'schedule') loadSchedule();
     }, [modalType]);
 
+    // 日程表随 fire_pack 一起上云（角色到点按它说自己在干嘛），改完要让云端那份跟上：
+    // 用户把「健身」改成「在家养病」，角色晚上还说「刚从健身房回来」就穿帮了。
     const handleScheduleEdit = async (index: number, slot: ScheduleSlot) => {
         if (!scheduleData) return;
         const newSlots = [...scheduleData.slots];
@@ -1622,6 +1627,7 @@ const Chat: React.FC = () => {
         const updated = { ...scheduleData, slots: newSlots };
         setScheduleData(updated);
         await DB.saveDailySchedule(updated);
+        markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
     };
 
     const handleScheduleDelete = async (index: number) => {
@@ -1630,6 +1636,7 @@ const Chat: React.FC = () => {
         const updated = { ...scheduleData, slots: newSlots };
         setScheduleData(updated);
         await DB.saveDailySchedule(updated);
+        markAmsgStateDirty({ char, userProfile, groups, realtimeConfig });
     };
 
     const handleScheduleCoverChange = async (dataUrl: string) => {
@@ -1706,7 +1713,11 @@ const Chat: React.FC = () => {
         setIsScheduleGenerating(true);
         try {
             const result = await generateDailyScheduleForChar(targetChar, userProfile, apiConfig, forceRegenerate);
-            if (result) setScheduleData(result);
+            if (result) {
+                setScheduleData(result);
+                // 跨天后台重新生成也要刷云端：不刷的话角色到点照着昨天的作息表说话
+                markAmsgStateDirty({ char: targetChar, userProfile, groups, realtimeConfig });
+            }
         } catch (e) {
             console.error('[Schedule] Generation error:', e);
         } finally {

@@ -20,6 +20,7 @@ import { Message, ChatTheme, AppID } from '../types';
 import { PRESET_THEMES } from '../components/chat/ChatConstants';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent } from '../utils/analytics';
+import { markAmsgStateDirty } from '../utils/amsgStateSync';
 type CallState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | 'ended' | 'error';
 type ViewMode = 'role-select' | 'in-call' | 'history' | 'record-detail';
 type CallBubble = { id: string; dbId?: number; role: 'user' | 'assistant'; text: string; time: string; audioUrl?: string; timestamp: number };
@@ -289,7 +290,7 @@ ${getVoicePromptOverride(getTtsProvider()) ?? (getTtsProvider() === 'fishaudio' 
   return [coreContext, timeContext, callPrompt, voiceLangPrompt].filter(Boolean).join('\n\n');
 };
 const CallApp: React.FC = () => {
-  const { closeApp, openApp, characters, activeCharacterId, addToast, apiConfig, userProfile, customThemes, suspendCall, suspendedCall, clearSuspendedCall, updateCharacter, characterGroups } = useOS();
+  const { closeApp, openApp, characters, activeCharacterId, addToast, apiConfig, userProfile, customThemes, suspendCall, suspendedCall, clearSuspendedCall, updateCharacter, characterGroups, groups, realtimeConfig } = useOS();
 
   const [viewMode, setViewMode] = useState<ViewMode>('role-select');
   const [selectedCharId, setSelectedCharId] = useState<string>(activeCharacterId || characters[0]?.id || '');
@@ -335,6 +336,13 @@ const CallApp: React.FC = () => {
   const longPressTimerRef = useRef<number | null>(null);
   const callTouchStartPos = useRef({ x: 0, y: 0 });
   const selectedChar = useMemo(() => characters.find(c => c.id === selectedCharId) || null, [characters, selectedCharId]);
+  // 通话内容和普通聊天写进同一份历史，也就是主动消息 2.0 云端快照的素材。每轮落库后打一次脏，
+  // 不然打完电话直接关 App，角色到点就当这通电话没发生过（连"这段时间没联系"都会算错）。
+  // 去抖会把一通电话里的多次调用合并成一次上传；快照里的消息在上传时从 DB 重读。
+  const markCallTurnDirty = () => {
+    if (!selectedChar) return;
+    markAmsgStateDirty({ char: selectedChar, userProfile, groups, realtimeConfig });
+  };
   const recordDetail = useMemo(() => callRecords.find(r => r.id === recordDetailId) || null, [callRecords, recordDetailId]);
   // 从角色聊天主题中提取强调色，用于通话界面的按钮和高亮
   const accentColor = useMemo(() => {
@@ -532,6 +540,7 @@ const CallApp: React.FC = () => {
         if (selectedChar?.id) {
           const dbId = await DB.saveMessage({ charId: selectedChar.id, role: 'assistant', type: 'text', content: greetingText, metadata: { source: 'call', callSessionId: currentSessionId } });
           setBubbles(prev => prev.map(b => b.id === greetingBubble.id ? { ...b, dbId: dbId } : b));
+          markCallTurnDirty();
         }
         // 尝试语音合成开场白
         const minimaxApiKey = resolveMiniMaxApiKey(apiConfig);
@@ -690,6 +699,8 @@ const CallApp: React.FC = () => {
         metadata: { source: 'call-end-popup', callSessionId: currentSessionId, ...payload },
       });
       await loadCallRecords(selectedChar.id);
+      // 挂断这一下最要紧：用户多半接着就把 App 关了，去抖窗口里的那些打脏还没冲刷。
+      markCallTurnDirty();
     }
     clearSuspendedCall();
     resetCurrentCall();
@@ -784,6 +795,7 @@ const CallApp: React.FC = () => {
     if (selectedChar?.id) {
       userDbId = await DB.saveMessage({ charId: selectedChar.id, role: 'user', type: 'text', content: input, metadata: { source: 'call', callSessionId: currentSessionId } });
       setBubbles(prev => prev.map(b => (b.id === userBubble.id ? { ...b, dbId: userDbId } : b)));
+      markCallTurnDirty();
     }
     if (!callStartedAt) setCallStartedAt(Date.now());
     setCallState('connecting');
@@ -811,6 +823,7 @@ const CallApp: React.FC = () => {
         if (b.id === assistantBubbleId) return { ...b, dbId: assistantDbId };
         return b;
       }));
+      markCallTurnDirty();
     }
     const hasTimberWeights2 = (selectedChar?.voiceProfile?.timberWeights?.length || 0) > 1;
     if (!canSpeakVoice()) {

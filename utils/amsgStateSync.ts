@@ -22,6 +22,10 @@
  * 它和排程时那次上传的区别只在失败的处理方式：排程那次是硬要求（失败就让整个排程失败，
  * 见 activeMsgClient 的 putClientStateOrThrow），这里退避重试几次，实在传不上去就等
  * 下一轮聊天重新打脏标记。
+ *
+ * 云端还有一份 tool_config（工具凭据 / MCP 服务器 / 代理地址），走的是同一套退避 + 底账，
+ * 入口是 syncAmsgToolConfig（见文件下半部分）。它不像 fire_pack 那样每轮聊天重传，
+ * 所以那一次传丢了就得靠自己补。
  */
 
 import { CharacterProfile, GroupProfile, RealtimeConfig, UserProfile } from '../types';
@@ -150,6 +154,9 @@ const requeue = (batch: AmsgSyncSnapshot[]) => {
 
 /** 把所有脏角色的 fire_pack 批量上传。失败退避重排，快照留在队列里等下次。 */
 export const flushAmsgState = async (reason: string): Promise<void> => {
+  // 工具凭据欠着的话顺手一起补：它和 fire_pack 一样是「云端那份过时了」，
+  // 而且冲刷时机（切后台 / 聊完一轮）正是网络多半又通了的时候。
+  void runToolConfigSync(`flush:${reason}`);
   if (flushing) return;
   // 队列空 = 没有欠着的快照，之前那串失败也就翻篇了，退避计数跟着归零。
   if (dirty.size === 0) { retryCount = 0; return; }
@@ -215,6 +222,11 @@ export const resumePendingAmsgStateSync = (scope: {
   groups: GroupProfile[];
   realtimeConfig?: RealtimeConfig;
 }) => {
+  // 工具凭据的欠账也在这儿补。底账只记「欠着一次」，凭据本体不落 localStorage
+  // （那等于把 token 又抄一份到别的地方），补传用启动时这份最新配置——它本来就是
+  // 云端此刻该有的那一份。
+  if (hasPersistedToolConfigMark()) syncAmsgToolConfig(scope.realtimeConfig);
+
   const pending = readPendingCharIds();
   if (pending.length === 0) return;
 
@@ -266,12 +278,129 @@ export const syncAmsgToolConfigAndPrompts = (
   realtimeConfig: RealtimeConfig,
   scope: { characters: CharacterProfile[]; userProfile: UserProfile; groups: GroupProfile[] },
 ) => {
-  // 上传失败不打断保存：本地配置已经生效，下一轮聊天的 flush 会把云端补上。
-  ActiveMsgClient.syncToolConfig(realtimeConfig).catch(() => {});
+  // 上传失败不打断保存：本地配置已经生效，云端那份由 syncAmsgToolConfig 自己退避重传，
+  // 传不上去也留着底账等下次启动补（fire_pack 那种「下一轮聊天顺手带上」的便车，
+  // tool_config 是坐不了的——冲刷只传 fire_pack）。
+  syncAmsgToolConfig(realtimeConfig);
   for (const char of scope.characters) {
     markAmsgStateDirty({ char, userProfile: scope.userProfile, groups: scope.groups, realtimeConfig });
   }
   void flushAmsgState('tool-config-change');
+};
+
+// ─── 工具凭据（tool_config）的重试与底账 ───
+// fire_pack 每轮聊天都会重传，掉一次下一轮就补上；tool_config 不吃这条便车——它只在
+// 用户保存配置那一刻传一次，那一次失败就再没有人会补。而它偏偏是有对外副作用的一份：
+// 用户删掉的 MCP 服务器、换掉的 token，云端还是旧的，worker 半夜照旧带着旧凭据直连。
+// 所以这里给它配上和 fire_pack 同款的退避重试 + localStorage 底账。
+
+export const AMSG2_PENDING_TOOL_CONFIG_LS_KEY = 'amsg2_pending_tool_config';
+
+/** 待上传的那份配置。undefined 也是合法载荷（= 什么都没配），所以另用 flag 表示「欠着」。 */
+let pendingToolConfig: RealtimeConfig | undefined;
+let hasPendingToolConfig = false;
+let toolConfigSyncing = false;
+let toolConfigRetryCount = 0;
+let toolConfigRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+const writeToolConfigMark = (pending: boolean) => {
+  // 存储满 / 隐私模式写不进去就算了：底账只是给「重试没等到就被杀」兜底的。
+  try {
+    if (pending) localStorage.setItem(AMSG2_PENDING_TOOL_CONFIG_LS_KEY, '1');
+    else localStorage.removeItem(AMSG2_PENDING_TOOL_CONFIG_LS_KEY);
+  } catch { /* 见上 */ }
+};
+
+const hasPersistedToolConfigMark = (): boolean => {
+  try { return localStorage.getItem(AMSG2_PENDING_TOOL_CONFIG_LS_KEY) === '1'; } catch { return false; }
+};
+
+const runToolConfigSync = async (reason: string): Promise<void> => {
+  if (!hasPendingToolConfig || toolConfigSyncing) return;
+  toolConfigSyncing = true;
+  // 记下这次传的是哪一份：上传期间用户又改了配置的话，清账不能把新的那份一起清掉。
+  const snapshot = pendingToolConfig;
+  try {
+    const globalConfig = await ActiveMsgStore.getGlobalConfig();
+    if (!globalConfig.workerUrl?.trim()) {
+      // 没配 worker = 这份凭据没有去处，不是「传失败」，连底账一起清掉。
+      hasPendingToolConfig = false;
+      pendingToolConfig = undefined;
+      writeToolConfigMark(false);
+      return;
+    }
+    await ActiveMsgClient.syncToolConfig(snapshot);
+    if (pendingToolConfig === snapshot) {
+      hasPendingToolConfig = false;
+      pendingToolConfig = undefined;
+      writeToolConfigMark(false);
+    }
+    toolConfigRetryCount = 0;
+  } catch (error) {
+    if (toolConfigRetryCount < MAX_RETRIES) {
+      const delay = RETRY_BASE_MS * 2 ** toolConfigRetryCount;
+      toolConfigRetryCount += 1;
+      console.warn(`${HEADER} tool_config(${reason}) 上传失败，${Math.round(delay / 1000)}s 后重试（第 ${toolConfigRetryCount}/${MAX_RETRIES} 次）`, error);
+      if (toolConfigRetryTimer != null) clearTimeout(toolConfigRetryTimer);
+      toolConfigRetryTimer = setTimeout(() => { void runToolConfigSync('retry'); }, delay);
+    } else {
+      // 退避打光了（多半是离线）。底账留着：下次启动 / 下次冲刷继续补。
+      console.error(`${HEADER} tool_config(${reason}) 连续 ${MAX_RETRIES} 次失败，云端仍是上一份工具配置（后台可能带着已被删掉的服务器或旧 token 调工具）`, error);
+      toolConfigRetryCount = 0;
+    }
+  } finally {
+    toolConfigSyncing = false;
+  }
+};
+
+/**
+ * 工具凭据上云的唯一入口（实时感知保存、MCP 配置变更、代理地址改动都走它）。
+ * 立即传一次，失败退避重试，并在 localStorage 留底账等启动 / 下次冲刷补传。
+ */
+export const syncAmsgToolConfig = (realtimeConfig: RealtimeConfig | undefined): void => {
+  pendingToolConfig = realtimeConfig;
+  hasPendingToolConfig = true;
+  toolConfigRetryCount = 0;
+  if (toolConfigRetryTimer != null) { clearTimeout(toolConfigRetryTimer); toolConfigRetryTimer = null; }
+  writeToolConfigMark(true);
+  void runToolConfigSync('change');
+};
+
+// ─── 清空 Worker 地址前的收尾 ───
+
+/**
+ * 「Worker 地址被清空」的判定。
+ *
+ * 地址一空，前端这边的同步全停了，但 D1 里的任务还在：cron 每分钟照常消费、照烧 LLM
+ * 照推送（推送订阅也还在），只是内容越来越对不上——用户以为自己关掉了一切，实际只是
+ * 把自己变成了看不见的那一方。所以这一步不能静悄悄地存下去。
+ */
+export const isWorkerUrlCleared = (prevUrl: string | undefined, nextUrl: string | undefined): boolean =>
+  Boolean(prevUrl?.trim()) && !nextUrl?.trim();
+
+/**
+ * 取消远端**全部**任务（清空 Worker 地址时用，此时还没换地址，读写的都是旧那台）。
+ *
+ * 尽力而为：逐条取消，单条失败记数继续跑完其余的；清单都读不到（网络 / 鉴权）就
+ * 回 listed:false，交给调用方提示用户「远端可能还挂着」。
+ */
+export const cancelAllRemoteAmsgTasks = async (): Promise<{
+  total: number; failed: number; listed: boolean;
+}> => {
+  let uuids: string[];
+  try {
+    uuids = (await ActiveMsgClient.listAllTasks())
+      .map((task: { uuid?: unknown }) => task?.uuid)
+      .filter((uuid): uuid is string => typeof uuid === 'string' && !!uuid);
+  } catch (error) {
+    console.warn(`${HEADER} 清空地址前读不到远端任务清单，无法确认还剩几条`, error);
+    return { total: 0, failed: 0, listed: false };
+  }
+  let failed = 0;
+  for (const uuid of uuids) {
+    try { await ActiveMsgClient.cancelTask(uuid); } catch { failed += 1; }
+  }
+  return { total: uuids.length, failed, listed: true };
 };
 
 const writeChatPresence = (charId: string, lastUserMessageAt: number | null) => {

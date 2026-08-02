@@ -44,7 +44,7 @@ import { ActiveMsgClient } from '../utils/activeMsgClient';
 import { resolveCharTimeZone } from '../utils/timezone';
 import { ActiveMsgStore } from '../utils/activeMsgStore';
 import { charMayHaveCloudState, purgeCharCloudState } from '../utils/amsg2CharCleanup';
-import { markAmsgStateDirty, resumePendingAmsgStateSync } from '../utils/amsgStateSync';
+import { markAmsgStateDirty, markAmsgStateDirtyForAll, resumePendingAmsgStateSync, syncAmsgToolConfigAndPrompts } from '../utils/amsgStateSync';
 import { loadMusicPlaybackSnapshot } from './MusicContext';
 import { setCharNameRegistry } from '../utils/charNameRegistry';
 import { setMinimaxRegion } from '../utils/minimaxEndpoint';
@@ -1825,21 +1825,41 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           const detail = (e as CustomEvent).detail as { charId?: string; buffs?: unknown; buffInjection?: unknown };
           const charId = detail?.charId;
           if (!charId) return;
+          // 内存同步 + 云端快照打脏合成一步。打脏放这里的理由:
+          //   1. 主链路回合收尾那次打脏跑在情绪评估落库之前, 不补这一下云端那份情绪恒慢一拍;
+          //   2. 情绪广播源不止一个 (本地评估 / 记忆潜水 / instant push 回写), 全汇到这个事件,
+          //      堵这一个点就够, 不用去改每个上游。
+          // 快照要的是合并后的角色, 所以跟 updateCharacter 一样在 updater 里取; 全局状态读 ref
+          // 而不是闭包变量——本 effect 只在 sendProactiveNativeNotification 变化时重建, 闭包里
+          // 的 userProfile / groups / realtimeConfig 会一直停在首帧。
+          const syncBuffIntoMemory = (
+              nextBuffs: CharacterProfile['activeBuffs'],
+              nextInjection: string | undefined,
+          ) => {
+              setCharacters(prev => prev.map(c => {
+                  if (c.id !== charId) return c;
+                  const next = normalizeCharacterImpression({ ...c, activeBuffs: nextBuffs, buffInjection: nextInjection });
+                  markAmsgStateDirty({
+                      char: next,
+                      userProfile: userProfileRef.current,
+                      groups: groupsRef.current,
+                      realtimeConfig: realtimeConfigRef.current,
+                  });
+                  return next;
+              }));
+          };
           if (Array.isArray(detail.buffs)) {
-              const nextBuffs = detail.buffs as CharacterProfile['activeBuffs'];
-              const nextInjection = typeof detail.buffInjection === 'string' ? detail.buffInjection : '';
-              setCharacters(prev => prev.map(c => c.id === charId
-                  ? normalizeCharacterImpression({ ...c, activeBuffs: nextBuffs, buffInjection: nextInjection })
-                  : c));
+              syncBuffIntoMemory(
+                  detail.buffs as CharacterProfile['activeBuffs'],
+                  typeof detail.buffInjection === 'string' ? detail.buffInjection : '',
+              );
               return;
           }
           // 无 buffs 的纯刷新信号 (runPushTailPipeline 等): 从 DB 兜底重读该角色 buff.
           DB.getAllCharacters().then(all => {
               const updated = all.find(c => c.id === charId);
               if (!updated) return;
-              setCharacters(prev => prev.map(c => c.id === charId
-                  ? normalizeCharacterImpression({ ...c, activeBuffs: updated.activeBuffs, buffInjection: updated.buffInjection })
-                  : c));
+              syncBuffIntoMemory(updated.activeBuffs, updated.buffInjection);
           }).catch(() => {});
       };
 
@@ -2489,6 +2509,63 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDataLoaded]);
 
+  // ─── utils 层直写 DB 后的内存回灌 ───
+  // 这两条路都在 React 之外把角色写进了 IndexedDB。不回灌的话内存里那份角色停在旧值，
+  // 之后随便哪个 updateCharacter 都会拿旧内存合并写回，把刚写进去的东西反向抹掉
+  // （情绪 buff 早就踩过这个坑，见上面 buffSyncHandler 的注释），云端快照也跟着停格。
+  useEffect(() => {
+      // 角色自排后续任务被采纳（「汤炖上了，两小时后叫你」）：任务清单只落在 DB，
+      // React 不知情会同时断掉 presence 门、打脏门和面板上的待触发清单三条线。
+      const tasksAdoptedHandler = (e: Event) => {
+          const charId = ((e as CustomEvent).detail || {}).charId as string | undefined;
+          if (!charId) return;
+          void DB.getAllCharacters().then(all => {
+              const fresh = all.find(c => c.id === charId);
+              if (!fresh) return;
+              setCharacters(prev => prev.map(c => {
+                  if (c.id !== charId) return c;
+                  // 只把 activeMsg2Config 这一个字段搬回来：整对象覆盖会让内存里其它更新的
+                  // 字段（比如同一时刻刚落地的情绪）倒退，反过来用旧内存整对象写 DB 又会把
+                  // 刚采纳的任务清单抹掉。
+                  const next = normalizeCharacterImpression({ ...c, activeMsg2Config: fresh.activeMsg2Config });
+                  markAmsgStateDirty({
+                      char: next,
+                      userProfile: userProfileRef.current,
+                      groups: groupsRef.current,
+                      realtimeConfig: realtimeConfigRef.current,
+                  });
+                  return next;
+              }));
+          }).catch(() => {});
+      };
+
+      // 听歌时角色把歌加进自己的歌单（MusicContext 直写 DB）：歌单进 fire_pack，
+      // 不打脏角色到点还以为那首歌没收藏过。
+      const musicProfileSyncHandler = (e: Event) => {
+          const detail = ((e as CustomEvent).detail || {}) as { charId?: string; musicProfile?: CharacterProfile['musicProfile'] };
+          const { charId, musicProfile } = detail;
+          if (!charId || !musicProfile) return;
+          setCharacters(prev => prev.map(c => {
+              if (c.id !== charId) return c;
+              const next = normalizeCharacterImpression({ ...c, musicProfile });
+              markAmsgStateDirty({
+                  char: next,
+                  userProfile: userProfileRef.current,
+                  groups: groupsRef.current,
+                  realtimeConfig: realtimeConfigRef.current,
+              });
+              return next;
+          }));
+      };
+
+      window.addEventListener('amsg2-tasks-adopted', tasksAdoptedHandler);
+      window.addEventListener('char-music-profile-updated', musicProfileSyncHandler);
+      return () => {
+          window.removeEventListener('amsg2-tasks-adopted', tasksAdoptedHandler);
+          window.removeEventListener('char-music-profile-updated', musicProfileSyncHandler);
+      };
+  }, []);
+
   const updateTheme = async (updates: Partial<OSTheme>) => {
     const { wallpaper, lockWallpaper, launcherWidgetImage, launcherWidgets, desktopDecorations, customFont, ...styleUpdates } = updates;
     // Legacy slots are banned — never let them enter state, regardless of caller intent.
@@ -2917,16 +2994,28 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   };
 
   // Group Methods
+
+  // 群的名字和成员名单都会进每个成员的 fire_pack（角色知道自己在哪些群、群里都有谁），
+  // 群一变就要让受影响的成员各刷一次云端快照，否则角色到点还按旧群名 / 旧成员说话。
+  // nextGroups 传变更后的完整 groups 列表：markDirty 存的是快照，拿旧列表等于没改。
+  const markGroupMembersDirty = (memberIds: string[], nextGroups: GroupProfile[]) => {
+      for (const memberId of new Set(memberIds)) {
+          const member = characters.find(c => c.id === memberId);
+          if (member) markAmsgStateDirty({ char: member, userProfile, groups: nextGroups, realtimeConfig });
+      }
+  };
+
   const createGroup = async (name: string, members: string[]) => {
       const newGroup: GroupProfile = {
           id: `group-${Date.now()}`,
           name,
           members,
-          avatar: generateAvatar(name), 
+          avatar: generateAvatar(name),
           createdAt: Date.now()
       };
       await DB.saveGroup(newGroup);
       setGroups(prev => [...prev, newGroup]);
+      markGroupMembersDirty(newGroup.members, [...groups, newGroup]);
   };
 
   const updateGroup = async (id: string, updates: Partial<GroupProfile>) => {
@@ -2937,12 +3026,21 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       // React 不保证 updater 同步执行（eager 求值只是优化），旧写法会时而拿到旧值、
       // 时而整个跳过 saveGroup，表现为"内存已更新、退出重进设置丢失"。
       const base = groups.find(g => g.id === id);
-      if (base) await DB.saveGroup({ ...base, ...updates });
+      if (!base) return;
+      const nextGroup = { ...base, ...updates };
+      await DB.saveGroup(nextGroup);
+      // 老成员也要打脏：被移出群的角色，他那份快照里的群名单同样得把这个群去掉。
+      markGroupMembersDirty(
+          [...base.members, ...nextGroup.members],
+          groups.map(g => g.id === id ? nextGroup : g),
+      );
   };
 
   const deleteGroup = async (id: string) => {
+      const removed = groups.find(g => g.id === id);
       await DB.deleteGroup(id);
       setGroups(prev => prev.filter(g => g.id !== id));
+      if (removed) markGroupMembersDirty(removed.members, groups.filter(g => g.id !== id));
   };
 
   // Worldbook Methods
@@ -2981,7 +3079,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           : m
                   );
                   const newChar = { ...char, mountedWorldbooks: newMounted };
-                  DB.saveCharacter(newChar);
+                  // 这条落库绕开了 updateCharacter，得自己打脏：世界书正文进 fire_pack 的系统
+                  // 提示词，不刷的话角色到点还照着改之前的设定说话。
+                  DB.saveCharacter(newChar).then(() => {
+                      markAmsgStateDirty({ char: newChar, userProfile, groups, realtimeConfig });
+                  });
                   return newChar;
               }
               return char;
@@ -3000,7 +3102,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (char.mountedWorldbooks?.some(m => m.id === id)) {
               const newMounted = char.mountedWorldbooks.filter(m => m.id !== id);
               const newChar = { ...char, mountedWorldbooks: newMounted };
-              DB.saveCharacter(newChar);
+              // 同 updateWorldbook：绕开 updateCharacter 的落库要自己打脏，否则云端提示词
+              // 里还挂着这本已经删掉的世界书。
+              DB.saveCharacter(newChar).then(() => {
+                  markAmsgStateDirty({ char: newChar, userProfile, groups, realtimeConfig });
+              });
               return newChar;
           }
           return char;
@@ -3049,7 +3155,17 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       await DB.deleteSong(id);
   };
 
-  const updateUserProfile = async (updates: Partial<UserProfile>) => { setUserProfile(prev => { const next = { ...prev, ...updates }; DB.saveUserProfile(next); return next; }); };
+  const updateUserProfile = async (updates: Partial<UserProfile>) => {
+      setUserProfile(prev => {
+          const next = { ...prev, ...updates };
+          // 用户资料是所有角色共享的素材（名字、人设直接烤进 fire_pack 模板），改完不打脏的话
+          // 角色到点还按旧名字叫你。仿表情库：逐个打脏，没开 2.0 的角色被 markDirty 的门筛掉。
+          DB.saveUserProfile(next).then(() => {
+              markAmsgStateDirtyForAll({ characters, userProfile: next, groups, realtimeConfig });
+          });
+          return next;
+      });
+  };
   const addCustomTheme = async (theme: ChatTheme) => { setCustomThemes(prev => { const exists = prev.find(t => t.id === theme.id); if (exists) return prev.map(t => t.id === theme.id ? theme : t); return [...prev, theme]; }); await DB.saveTheme(theme); };
   const removeCustomTheme = async (id: string) => { setCustomThemes(prev => prev.filter(t => t.id !== id)); await DB.deleteTheme(id); };
   const setCustomIcon = async (appId: string, iconUrl: string | undefined) => {
@@ -4418,6 +4534,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               setAppearancePresets(loadedPresets);
           }
 
+          // 导入后的角色清单（下面主动消息 2.0 对账要用规范化之后的那份）
+          let importedChars = chars;
           if (chars.length > 0) {
               let importedAutoContextCount = 0;
               let importedContextMigrated = false;
@@ -4432,6 +4550,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   await Promise.all(normalizedChars.map(c => DB.saveCharacter(c)));
               }
               setCharacters(normalizedChars);
+              importedChars = normalizedChars;
               if (importedAutoContextCount > 0) {
                   setTimeout(() => addToast(
                       `导入的旧设置已升级：${importedAutoContextCount} 个全自动记忆角色已使用自适应上下文。`,
@@ -4445,7 +4564,36 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (books.length > 0) setWorldbooks(books);
           if (novelList.length > 0) setNovels(novelList);
           if (songList.length > 0) setSongs(songList);
-          
+
+          // ─── 主动消息 2.0：导入后跟云端对一次账 ───
+          // 导入换掉了整套角色，worker 那边却还停在导入前：旧档角色的远端任务变成无主任务
+          // 到点照样推送，新档角色的 fire_pack 和工具凭据则停格在导入前那一刻。
+          // 整段 best-effort：这是恢复流程的收尾，云端够不着不该让已经写好的本地数据回滚。
+          try {
+              const amsgWorkerUrl = (await ActiveMsgStore.getGlobalConfig()).workerUrl?.trim();
+              if (amsgWorkerUrl) {
+                  const knownCharIds = new Set(importedChars.map(c => c.id));
+                  const remoteTasks = await ActiveMsgClient.listAllTasks();
+                  for (const task of remoteTasks) {
+                      if (typeof task?.uuid !== 'string') continue;
+                      const owner = typeof task?.charId === 'string' ? task.charId : '';
+                      if (owner && knownCharIds.has(owner)) continue;
+                      // 「导入即放弃旧数据」：这条任务的主人在新档里已经不存在了（连主人是谁
+                      // 都没投影出来的同理），它正属于该一起放弃的部分，取消就是对的。
+                      await ActiveMsgClient.cancelTask(task.uuid).catch(() => {});
+                  }
+                  // 留下来的角色逐个刷云端快照，同时把导入进来的实时感知凭据传上去。
+                  // 走同一个入口：云端提示词是按凭据裁过的，两者必须同进同退。
+                  // 有 AI 任务的角色才会真的上传（门在 markAmsgStateDirty 里）。
+                  syncAmsgToolConfigAndPrompts(
+                      data.realtimeConfig || realtimeConfig,
+                      { characters: importedChars, userProfile: user || userProfile, groups: groupsList },
+                  );
+              }
+          } catch (e) {
+              console.warn('[amsg2] 导入后云端对账失败（本地数据已恢复，不受影响）', e);
+          }
+
           setSysOperation({ status: 'idle', message: '', progress: 100 });
           clearImportInProgress();
           addToast('恢复成功，系统即将重启...', 'success');

@@ -17,11 +17,12 @@ import { BookOpen, Sparkle, CaretLeft, GearSix } from '@phosphor-icons/react';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trimHistoryThrough } from '../utils/dateSessionHistory';
 import { trackEvent } from '../utils/analytics';
+import { markAmsgStateDirty } from '../utils/amsgStateSync';
 import StoryTheater from '../components/date/story/StoryTheater';
 import { dateLaunch } from '../utils/dateLaunch';
 
 const DateApp: React.FC = () => {
-    const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, apiConfig, addToast, updateCharacter, virtualTime, userProfile, memoryPalaceConfig, dateAutoStartCharId, consumeDateAutoStart, characterGroups } = useOS();
+    const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, apiConfig, addToast, updateCharacter, virtualTime, userProfile, memoryPalaceConfig, dateAutoStartCharId, consumeDateAutoStart, characterGroups, groups, realtimeConfig } = useOS();
 
     // 是否由聊天「见面」按钮进入：为真时，退出见面流程回到聊天而非见面选择页/桌面。
     // 用本地 state（而非 context）承载：DateApp 切走即卸载，标记随之消失，不会泄漏到
@@ -109,6 +110,14 @@ const DateApp: React.FC = () => {
     const [editContent, setEditContent] = useState('');
 
     const char = characters.find(c => c.id === activeCharacterId);
+
+    // 见面消息和普通聊天共用同一份历史，也就是主动消息 2.0 云端快照（fire_pack）的素材。
+    // 每次落库 / 删改后打一次脏：中途杀 App 时这一场见面就不会在云端整个丢掉，删改过的
+    // 内容也不会被角色到点又提一遍。快照里的消息在上传时从 DB 重读，打脏本身很便宜。
+    const markDateTurnDirty = (target = char) => {
+        if (!target) return;
+        markAmsgStateDirty({ char: target, userProfile, groups, realtimeConfig });
+    };
 
     const getDateContextFetchLimit = (c: CharacterProfile) => Math.max(c.contextLimit || 500, DATE_SESSION_MESSAGE_LIMIT) + 32;
     const loadRecentDateMessages = async (charId: string, limit = DATE_SESSION_MESSAGE_LIMIT) => {
@@ -407,8 +416,9 @@ const DateApp: React.FC = () => {
         if (!isRetry) {
             // 1. Save User Msg
             await DB.saveMessage({ charId: char.id, role: 'user', type: 'text', content: text, metadata: { source: 'date' } });
+            markDateTurnDirty(char);
         }
-        
+
         // 2. Prepare Context
         // Re-fetch messages. Since we saved the opening in handleEnterSession,
         // 'allMsgs' will now correctly contain: [History..., Opening, UserMsg]
@@ -430,6 +440,7 @@ const DateApp: React.FC = () => {
 
         // 3. Save AI Response
         await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: content, metadata: { source: 'date' } });
+        markDateTurnDirty(char);
 
         // Refresh local state
         setDateMessages(await loadRecentDateMessages(char.id));
@@ -462,6 +473,7 @@ const DateApp: React.FC = () => {
             // 生成成功后才动库：先删旧开场、再带 isOpening 落新开场，请求失败时原剧情不丢
             await DB.deleteMessage(lastMsg.id);
             await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content, metadata: { source: 'date', isOpening: true } });
+            markDateTurnDirty(char);
             trackEvent('重掷见面回复', { 目标: '开场白' });
             // 阅读模式空会话时顶部渲染的开场 & 退出快照里的 peekStatus 同步成新开场
             setPeekStatus(content);
@@ -493,6 +505,7 @@ const DateApp: React.FC = () => {
         // 生成成功后才删旧回复：以前先删后调 API，请求一失败上一条剧情就永久消失
         await DB.deleteMessage(lastMsg.id);
         await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: content, metadata: { source: 'date' } });
+        markDateTurnDirty(char);
         trackEvent('重掷见面回复', { 目标: '回复' });
 
         // Sync
@@ -505,9 +518,12 @@ const DateApp: React.FC = () => {
     };
 
     // --- Editing & Deletion ---
+    // 删改同样要打脏（对齐 Chat.tsx 的同款处理器）：云端快照里带着最近对话原文，
+    // 不刷的话角色到点还会提起这条已经被删掉 / 已经改过的消息。
     const handleDeleteMessage = async (msg: Message) => {
         await DB.deleteMessage(msg.id);
         setDateMessages(prev => prev.filter(m => m.id !== msg.id));
+        markDateTurnDirty();
         trackEvent('删除一条见面消息');
     };
 
@@ -515,6 +531,7 @@ const DateApp: React.FC = () => {
         if (ids.length === 0) return;
         await Promise.all(ids.map(id => DB.deleteMessage(id)));
         setDateMessages(prev => prev.filter(m => !ids.includes(m.id)));
+        markDateTurnDirty();
         addToast(`已删除 ${ids.length} 条记录`, 'success');
         trackEvent('批量删除见面消息');
     };
@@ -523,6 +540,7 @@ const DateApp: React.FC = () => {
         if (!editTargetMsg) return;
         await DB.updateMessage(editTargetMsg.id, editContent);
         setDateMessages(prev => prev.map(m => m.id === editTargetMsg.id ? { ...m, content: editContent } : m));
+        markDateTurnDirty();
         setIsEditModalOpen(false);
         setEditTargetMsg(null);
         addToast('已修改', 'success');
@@ -552,6 +570,7 @@ const DateApp: React.FC = () => {
             ...s,
             msgs: s.msgs.filter(m => m.id !== msg.id)
         })).filter(s => s.msgs.length > 0));
+        markDateTurnDirty();
         setHistoryMenuMsg(null);
         addToast('已删除', 'success');
         trackEvent('删除见面记录里的一条消息');
@@ -570,6 +589,7 @@ const DateApp: React.FC = () => {
             ...s,
             msgs: s.msgs.map(m => m.id === historyEditMsg.id ? { ...m, content: historyEditContent } : m)
         })));
+        markDateTurnDirty();
         setHistoryEditMsg(null);
         addToast('已修改', 'success');
         trackEvent('编辑见面记录里的一条消息');

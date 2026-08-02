@@ -22,7 +22,7 @@ import { ProactiveChat } from '../utils/proactiveChat';
 import { InstantPushSettingsModal } from '../components/settings/InstantPushSettingsModal';
 import { PushVapidSettingsModal } from '../components/settings/PushVapidSettingsModal';
 import ActiveMsgGlobalSettingsModal from '../components/settings/ActiveMsgGlobalSettingsModal';
-import { syncAmsgToolConfigAndPrompts } from '../utils/amsgStateSync';
+import { syncAmsgToolConfig, syncAmsgToolConfigAndPrompts } from '../utils/amsgStateSync';
 import { ActiveMsgClient } from '../utils/activeMsgClient';
 import VersionInfo from '../components/settings/VersionInfo';
 import { LoyalUserRecruitmentController } from '../components/LoyalUserRecruitmentEvent';
@@ -103,20 +103,21 @@ const SettingsSection: React.FC<{
 };
 
 let mcpToolConfigSyncTimer: ReturnType<typeof setTimeout> | null = null;
-let pendingMcpToolConfigSync: (() => Promise<void>) | null = null;
+let pendingMcpToolConfigSync: (() => void) | null = null;
 
 const runMcpToolConfigSync = () => {
     const sync = pendingMcpToolConfigSync;
     mcpToolConfigSyncTimer = null;
     pendingMcpToolConfigSync = null;
-    sync?.().catch(() => { /* 没配主动消息时 ensureWorkerReady 会抛，吞掉即可 */ });
+    // 上传本身的失败重试与底账在 syncAmsgToolConfig 里（见 amsgStateSync），这儿只管节流。
+    sync?.();
 };
 
 /**
  * MCP 卡片没有「保存」按钮，改一个字就落盘一次；直接每次都上云就变成一次按键一个请求。
  * 攒到停手 800ms 再传一次，中途继续改就顺延。
  */
-const scheduleMcpToolConfigSync = (sync: () => Promise<void>) => {
+const scheduleMcpToolConfigSync = (sync: () => void) => {
     pendingMcpToolConfigSync = sync;
     if (mcpToolConfigSyncTimer) clearTimeout(mcpToolConfigSyncTimer);
     mcpToolConfigSyncTimer = setTimeout(runMcpToolConfigSync, 800);
@@ -1151,6 +1152,8 @@ const Settings: React.FC = () => {
   };
 
   // 保存 / 恢复主代理 Worker 地址
+  // 主动消息那边的搜索、Notion、飞书全经这个地址转发（tool_config.proxyWorkerUrl），
+  // 所以改完必须把 tool_config 重传一次——不然云端还指着旧地址，角色到点的工具全静默失灵。
   const handleSaveProxyWorker = () => {
       const raw = proxyWorkerInput.trim();
       if (raw && !/^https?:\/\//i.test(raw)) {
@@ -1161,6 +1164,8 @@ const Settings: React.FC = () => {
       setProxyWorkerUrl(raw);                 // 传空 / 默认地址 → 自动回落默认
       const applied = getProxyWorkerUrl();
       setProxyWorkerInput(applied);
+      // 上云那份的 proxyWorkerUrl 是现算的（读 getProxyWorkerUrl），所以要在生效之后再传。
+      syncAmsgToolConfig(realtimeConfig);
       if (applied === DEFAULT_PROXY_WORKER) trackEvent('恢复默认代理 Worker', { via: 'save-empty' });
       addToast(applied === DEFAULT_PROXY_WORKER ? '已恢复为默认 Worker' : 'Worker 地址已保存', 'success');
   };
@@ -1168,6 +1173,7 @@ const Settings: React.FC = () => {
   const handleResetProxyWorker = () => {
       setProxyWorkerUrl('');
       setProxyWorkerInput(getProxyWorkerUrl());
+      syncAmsgToolConfig(realtimeConfig);
       trackEvent('恢复默认代理 Worker', { via: 'reset-button' });
       addToast('已恢复为默认 Worker', 'info');
   };
@@ -3447,8 +3453,9 @@ const Settings: React.FC = () => {
                   // MCP 配置变更只需重传 tool_config：提示词块与 tools 数组由 worker 在 fire 时
                   // 从 tool_config 现场生成（见 mcpFireCore），不经过 fire_pack，没有陈旧问题，
                   // 所以不用像实时感知那样连提示词一起刷（syncAmsgToolConfigAndPrompts）。
-                  // 没配主动消息时 ensureWorkerReady 会抛，吞掉即可——与 amsgStateSync 同款。
-                  scheduleMcpToolConfigSync(() => ActiveMsgClient.syncToolConfig(realtimeConfig));
+                  // 这一份尤其不能传丢：删掉的服务器要是没同步上去，worker 半夜还会带着
+                  // 旧 token 去直连它。重试和底账由 syncAmsgToolConfig 负责。
+                  scheduleMcpToolConfigSync(() => syncAmsgToolConfig(realtimeConfig));
               }} />
           </div>
       </Modal>
