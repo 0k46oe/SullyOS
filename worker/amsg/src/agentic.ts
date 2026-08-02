@@ -142,7 +142,8 @@ export function buildXhsSessionPayload(
 export type RoundDecision =
   | { decision: 'tool-request'; toolCalls: ToolCall[] }
   | { decision: 'finish'; pushPayloads: Array<Record<string, unknown>> }
-  | { decision: 'skip-push' };
+  /** reason 直接进 last_skip，面板照实告诉用户那次为什么没响。 */
+  | { decision: 'skip-push'; reason: 'empty-generation' | 'side-effects-only' };
 
 /** 本轮的通用 MCP 识别输入（没配 MCP 的角色不传，行为与改动前完全一致）。 */
 export interface McpRoundInput {
@@ -170,7 +171,7 @@ export interface ScheduleRoundInput {
  *     sanitizeIntoSegments 分段（与 instant push / 客户端 chatParser.chunkText
  *     同一份：按换行切、[[...]] / [html] / <翻译> / <语音> 等标签块保持原子），
  *     每段一条 push；全部 directives 挂最后一条的 metadata；
- *     全程无正文且无副作用 → skip-push。
+ *     全程无正文 → skip-push（这轮有没有副作用都不发，理由见分支处注释）。
  *
  * 通用 MCP 的调用识别是两层（native tool_calls + 正文协议），与前台同构，见函数体开头。
  */
@@ -270,14 +271,17 @@ export function processLLMRound(
   const segments = sanitizeIntoSegments(cleanedText);
 
   if (segments.length === 0) {
-    if (!finishMeta) return { decision: 'skip-push' };
-    // 整段只有副作用标签：发一条空正文 push 携带 directives。客户端
-    // applyAssistantPostProcessing 对空正文产 0 气泡，副作用重放自己产
-    // system message（与 instant 的 directive-only push 同款处理）。
-    return {
-      decision: 'finish',
-      pushPayloads: [buildScheduledPush('', build, finishMeta)],
-    };
+    // 没有正文就整条不发，这轮有没有副作用都一样。
+    //
+    // 空正文 push 的 banner body 也是空的：用户锁屏收到一条只有标题、正文空白的横幅，
+    // 未读 +1，点进去 0 气泡。而订阅是按 userVisibleOnly:true 建的，用
+    // notification.show:false 压掉横幅等于跟浏览器违约（Firefox 对不展示通知的 push 有
+    // 配额、超了直接退订，iOS 可能撤权限，且都是静默发生），所以「发但不弹」也不是出路。
+    //
+    // 只有副作用标签、没有正文时同样放弃：角色一个字没说却在小红书点了赞、写了日记，
+    // 用户看到的是「ta 什么都没说但做了事」，本身就穿帮。后台产生的副作用该等客户端
+    // 上线时主动拉，不塞进一条没内容的推送里（amsg-sw README 里也是这个结论）。
+    return { decision: 'skip-push', reason: finishMeta ? 'side-effects-only' : 'empty-generation' };
   }
 
   const lastIdx = segments.length - 1;

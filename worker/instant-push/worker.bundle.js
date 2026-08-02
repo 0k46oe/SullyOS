@@ -2525,6 +2525,7 @@ ${ATOM_MARKER}B${idx}${ATOM_MARKER}
   const SOLO_RE = new RegExp(`^${ATOM_MARKER}B(\\d+)${ATOM_MARKER}$`);
   const GLOBAL_RE = new RegExp(`${ATOM_MARKER}B(\\d+)${ATOM_MARKER}`, "g");
   const segments = [];
+  let pendingQuoteRaw = "";
   for (const rawChunk of rawChunks) {
     const soloMatch = rawChunk.trim().match(SOLO_RE);
     if (soloMatch) {
@@ -2548,8 +2549,16 @@ ${ATOM_MARKER}B${idx}${ATOM_MARKER}
       rawText = rawText.trim();
       if (!rawText) continue;
       const sanitized = sanitizeTextForBanner(rawText).trim();
-      if (!sanitized) continue;
-      segments.push({ raw: rawText, sanitized });
+      if (!sanitized) {
+        if (!stripQuotes(rawText).trim()) pendingQuoteRaw += `${rawText}
+`;
+        continue;
+      }
+      segments.push({
+        raw: pendingQuoteRaw ? `${pendingQuoteRaw}${rawText}` : rawText,
+        sanitized
+      });
+      pendingQuoteRaw = "";
     }
   }
   return segments;

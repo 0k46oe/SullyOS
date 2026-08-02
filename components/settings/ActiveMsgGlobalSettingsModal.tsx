@@ -53,8 +53,13 @@ const REQUIRED_WORKER_FEATURES = [
 //            amsg-server 的版本号，正好能把这类旧粘贴认出来。
 //   next.11 — 推送订阅改成按用户存一份：这一档起排程不再携带订阅，前端走
 //            /push-subscription 端点登记，旧 worker 上这个端点不存在。
+//   next.12 — 「角色说过什么」的落盘改挂在 onFireSettled 上（不论这次是发出去了、
+//            跳过了还是抛错了都调一次）。旧 worker 认不得这个 hook，会把它当成
+//            无关配置直接忽略——而 bundle 这边已经不再用 onAfterSend，表现就是
+//            self_log 永远不写：角色到点不知道自己上次说过什么，天天重复同一句。
+//            同一档还带 run-tick 的同角色任务串行（serializeBy）。
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
-const REQUIRED_WORKER_VERSION = '2.6.0-next.11';
+const REQUIRED_WORKER_VERSION = '2.6.0-next.12';
 
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';

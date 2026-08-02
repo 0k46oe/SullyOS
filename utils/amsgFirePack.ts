@@ -135,6 +135,7 @@ const LAST_SKIP_REASONS = [
   'active-chat-presence',
   'conversation-moved-on',
   'empty-generation',
+  'side-effects-only',
   'stale',
 ] as const;
 
@@ -148,6 +149,7 @@ export interface AmsgLastSkip {
    * active-chat-presence  到点时用户正跟这个角色聊天
    * conversation-moved-on 排程之后对话已经往前走了，原本要说的话过时了
    * empty-generation      模型这次没写出任何能发的正文（空输出 / 纯拒答）
+   * side-effects-only     模型这次只做了副作用（点赞、写日记之类）却没说话，整条不发
    * stale                 到点时已经过期太久（服务停摆后恢复），不再补发
    */
   reason: (typeof LAST_SKIP_REASONS)[number];
@@ -188,6 +190,8 @@ export const describeLastSkip = (skip: AmsgLastSkip, formatTime: (ms: number) =>
       return `${when} 那次主动消息取消了——排程之后你们的对话已经聊到别处，原本要说的话过时了。`;
     case 'empty-generation':
       return `${when} 那次主动消息没发出来——ta 到点想了想，这次没写出要说的话。`;
+    case 'side-effects-only':
+      return `${when} 那次主动消息没发出来——ta 到点只顾着做事，一句话都没说，就没打扰你。`;
     case 'stale': {
       // 循环任务只是跳过了攒下的这几次，下一次照常响；一次性任务是真的没了。
       // 两句话分开说，不然用户会以为每日提醒已经死了。

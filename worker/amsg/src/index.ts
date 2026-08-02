@@ -223,6 +223,14 @@ interface FireStash {
    * onBeforeFire 读进来注入 prompt，onLLMOutput 发完在它上面追加一条写回云端。
    */
   selfLog: AmsgSelfLog;
+  /**
+   * selfLog 上有没有还没落盘的改动。收尾时（amsgFireSettled）据此决定要不要写一次库。
+   *
+   * 「角色给自己排了任务」这件事必须靠它落账：任务在 ctx.scheduleTask 那一刻就真的
+   * 建进 D1 了，但如果这轮最终没有正文可发（只做了副作用 / 空生成），账没记下来的话
+   * 客户端认领不到、面板看不见，用户永远取消不掉它，而它会一直按时发下去。
+   */
+  selfLogDirty: boolean;
   /** 通用 MCP：暴露名 → 服务器/工具。tool_config 里没配（或对该角色不可见）时为 null。 */
   mcpResolve: Map<string, McpResolvedToolCore> | null;
   /** 每服务器一份连接会话，单次 fire 内跨轮复用，fire 结束随 scratch 丢弃。 */
@@ -417,46 +425,62 @@ const recordSkip = async (
 // 是同一个引用，所以并发的几个 fire 天然互不串台，也不需要按任务行 id 自建登记表。
 
 /**
- * 推送发出（或发挂）之后把真正送出去的正文写进云端自述日志（config 级 hook，
- * 见 buildWorkerConfig）。best-effort：写不进去不能连累投递结果，只是下一次到点
- * 角色不知道自己说过这句，所以失败要吼一声。
+ * 一次 fire 收尾时把云端自述日志落盘（config 级 hook onFireSettled，见 buildWorkerConfig）。
  *
- * entry.at 用实际发送时刻（不是名义 occurrenceMs）：日志给角色读的是「我几点几分
- * 真的说了这句」，cron 延迟半小时时名义时刻是句谎话。id 仍是
- * `clientTaskId@occurrenceMs`——去重语义（同一次触发重跑同 id 覆盖）靠它，不动。
+ * 挂在 onFireSettled 而不是 onAfterSend 上，因为后者只在「真发出去了」那条路被调用：
+ * skip-push（这轮只做了副作用 / 空生成）、防穿帮闸 skip、中途抛错三条路都不调。而角色
+ * 用工具给自己排的任务在 ctx.scheduleTask 那一刻就已经建进 D1 了——账没落下来的话，
+ * 客户端认领不到、面板看不见、用户取消不掉，它却会一直按时发下去。
+ *
+ * 正文只在真送出去时才记：sentCount 是「实际送达几段」，部分失败时后面几段用户没收到，
+ * 记进去下一次角色就会以为自己说过。
+ *
+ * entry.at 用实际发送时刻（不是名义 occurrenceMs）：日志给角色读的是「我几点几分真的
+ * 说了这句」，cron 延迟半小时时名义时刻是句谎话。id 仍是 `clientTaskId@occurrenceMs`
+ * ——去重语义（同一次触发重跑同 id 覆盖）靠它，不动。
+ *
+ * best-effort：写不进去不能连累投递结果，但下一次到点角色就不知道自己说过这句，要吼一声。
  */
-export const amsgAfterSend = async (
+export const amsgFireSettled = async (
   info: {
-    sentCount: number;
+    /** sent / skipped / failed / not-handled；这里只用它区分「有没有真发出去」。 */
+    status?: string;
+    sentCount?: number;
     scratch: Record<string, unknown>;
     writeState: WriteState;
   },
 ): Promise<void> => {
   const stash = getFireStash(info.scratch);
-  const texts = stash?.selfLogTexts;
-  if (!stash || !texts) return;   // 这次 fire 没生成正文，或者已经写过一次了
-  stash.selfLogTexts = null;
+  if (!stash) return;   // onBeforeFire 没走到挂 stash 那步（比如取 fire_pack 就失败了）
 
-  if (info.sentCount <= 0) return;   // 一段都没送出去 = 用户什么都没收到，不能记「说过」
+  const texts = stash.selfLogTexts;
+  stash.selfLogTexts = null;   // 认领掉，重复调用不会记两遍
+  const sentCount = info.sentCount ?? 0;
+  if (texts && sentCount > 0) {
+    // 多段消息在用户那边是连着的几条气泡，对角色而言是一次「我说了这些」，合成一条记。
+    // 只取前 sentCount 段：部分失败时没送出去的正文绝不能进日志。
+    const text = texts
+      .slice(0, sentCount)
+      .filter((message) => message.trim())
+      .join('\n');
+    const next = appendSelfLogEntry(stash.selfLog, {
+      id: `${stash.clientTaskId || 'task'}@${stash.occurrenceMs}`,
+      at: Date.now(),
+      text,
+    });
+    // 整段只有副作用标签（正文为空）时 append 原样返回——没有话可记。
+    if (next !== stash.selfLog) {
+      stash.selfLog = next;
+      stash.selfLogDirty = true;
+    }
+  }
 
-  // 多段消息在用户那边是连着的几条气泡，对角色而言是一次「我说了这些」，合成一条记。
-  // 只取前 sentCount 段：部分失败时没送出去的正文绝不能进日志。
-  const text = texts
-    .slice(0, info.sentCount)
-    .filter((message) => message.trim())
-    .join('\n');
-  const next = appendSelfLogEntry(stash.selfLog, {
-    id: `${stash.clientTaskId || 'task'}@${stash.occurrenceMs}`,
-    at: Date.now(),
-    text,
-  });
-  // 整段只有副作用标签（正文为空）时 append 原样返回——没有话可记，也就不必写一次库。
-  if (next === stash.selfLog) return;
-  stash.selfLog = next;
+  if (!stash.selfLogDirty) return;   // 这次 fire 什么也没添进日志，不必写库
+  stash.selfLogDirty = false;
 
   try {
     await info.writeState(amsgStateNamespace(stash.charId), [
-      { key: AMSG_SELF_LOG_KEY, value: JSON.stringify(next) },
+      { key: AMSG_SELF_LOG_KEY, value: JSON.stringify(stash.selfLog) },
     ]);
   } catch (error) {
     console.warn('[amsg:self-log] 写入失败（这次照常发送，但下一次到点角色不会知道说过这句）', error);
@@ -636,6 +660,7 @@ export const runFireScheduleTool = async (
   if (!stash.scheduledTasks.some((t) => t.taskUuid === record.taskUuid)) {
     stash.scheduledTasks.push(record);
     stash.selfLog = appendSelfLogTask(stash.selfLog, record);
+    stash.selfLogDirty = true;
   }
   console.log('[amsg:self-schedule]', {
     uuid: result.uuid,
@@ -873,6 +898,7 @@ export const amsgHooks = {
       xhsCookie,
       occurrenceMs,
       selfLog,
+      selfLogDirty: false,
       mcpResolve,
       mcpSessions: new Map(),
       mcpSpentMs: 0,
@@ -975,7 +1001,11 @@ export const amsgHooks = {
     });
 
     let decision = processLLMRound(session, content, {
-      contactName: ctx.contactName,
+      // 名字取 tool_pack 里的那份：它跟着每轮聊天重新上云，改名当天就是新的。
+      // ctx.contactName 是排程那一刻冻进任务行的快照，用户改完名字之后，之前排的
+      // 任务推送出来横幅还顶着旧名字（上游 update-message 也不让改这个字段）。
+      // tool_pack 里没名字时退回任务行那份，别让标题变成「来自 」。
+      contactName: stash.toolCtx.char.name || ctx.contactName,
       avatarUrl: ctx.avatarUrl ?? null,
       taskId,
       messageType,
@@ -1009,14 +1039,14 @@ export const amsgHooks = {
     }
 
     if (decision.decision === 'skip-push') {
-      // ⑤ 空生成也留痕：模型返回空/纯拒答时上游把任务当成功消费，用户看到的就是
-      // 「说好的消息凭空消失」。写一条 last_skip，面板能照实解释。best-effort，
-      // 写不进去不影响 skip 本身。
+      // ⑤ 没发出去也留痕：模型返回空/纯拒答、或者只做了副作用没说话时，上游把任务
+      // 当成功消费，用户看到的就是「说好的消息凭空消失」。写一条 last_skip，面板能
+      // 照实解释是哪种。best-effort，写不进去不影响 skip 本身。
       await writeLastSkip(ctx.writeState, stash.charId, {
         v: 1,
         taskUuid: stash.taskUuid,
         occurrenceMs: stash.occurrenceMs,
-        reason: 'empty-generation',
+        reason: decision.reason,
         skippedAt: Date.now(),
       });
     }
@@ -1159,11 +1189,18 @@ export const buildWorkerConfig = (env: Env) => {
     // 满血 fire-time hooks（onBeforeFire 现场填槽 + onLLMOutput 分类 +
     // executeToolCalls 服务端工具循环）；轮数/超时用库默认（5 轮 / 240s）。
     hooks: amsgHooks,
-    // 发送后回执 + 过期跳过回执（amsg-server 2.6.0-next.10 的 config 级 hook）。
-    // onAfterSend: 只把真送出去的段写进 self_log（见 amsgAfterSend）。
+    // 收尾回执 + 过期跳过回执（config 级 hook）。
+    // onFireSettled: 无论这次 fire 是发出去了、跳过了还是抛错了都会调一次，self_log
+    //   在这里统一落盘（见 amsgFireSettled）。不用 onAfterSend——它只在真发出去那条路
+    //   触发，角色自排任务碰上「只做了副作用没说话」就会漏账变成幽灵任务。
     // onStaleSkip: 过期不补发时给面板留一句「为什么没响」（见 amsgStaleSkip）。
-    onAfterSend: amsgAfterSend,
+    onFireSettled: amsgFireSettled,
     onStaleSkip: amsgStaleSkip,
+    // 同一个角色的多条任务不并发跑：两条撞在一起时用户会收到两条互不知情的消息，
+    // 而且 self_log 是读-改-写整份，后写的会盖掉先写的那条「我说过什么」。分组键取
+    // 角色 id，上游按它同跳去重 + 跨跳看租约，被拦下的任务一个字段都不动，下一跳原样再来。
+    serializeBy: (task: { metadata?: Record<string, unknown> | null }) =>
+      (typeof task.metadata?.charId === 'string' ? task.metadata.charId : null),
   };
 };
 

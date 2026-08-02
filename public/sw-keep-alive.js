@@ -82,7 +82,7 @@ var PUSH_SOURCE = Object.freeze({
 var REASONING_CHUNK_ENCODER = new TextEncoder();
 var REASONING_CHUNK_DECODER = new TextDecoder("utf-8", { fatal: true });
 
-// node_modules/.pnpm/@rei-standard+amsg-sw@2.4.0-next.2/node_modules/@rei-standard/amsg-sw/dist/index.mjs
+// node_modules/.pnpm/@rei-standard+amsg-sw@2.4.0-next.3/node_modules/@rei-standard/amsg-sw/dist/index.mjs
 var REI_SW_DB_NAME = "rei-sw";
 var REI_SW_DB_STORE = "request-outbox";
 var REI_SW_MULTIPART_STORE = "multipart-pending";
@@ -95,6 +95,7 @@ var REI_AMSG_DEDUPE_STORE = "delivery-dedupe";
 var DEFAULT_DEDUPE_TTL_MS = 10 * 6e4;
 var DEFAULT_DEDUPE_CLEANUP_INTERVAL_MS = 6e4;
 var REI_SW_SYNC_TAG = "rei-sw-flush-request-outbox";
+var DEFAULT_NOTIFICATION_BODY = "New message";
 var DEFAULT_MULTIPART_OPTIONS = Object.freeze({
   enabled: true,
   ttlMs: DEFAULT_MULTIPART_TTL_MS,
@@ -110,6 +111,7 @@ var dedupeDbCache = /* @__PURE__ */ new Map();
 function installReiSW(sw2, opts = {}) {
   const defaultIcon = opts.defaultIcon || "/icon-192x192.png";
   const defaultBadge = opts.defaultBadge || "/badge-72x72.png";
+  const defaultBody = opts.defaultBody || DEFAULT_NOTIFICATION_BODY;
   const multipart = normalizeMultipartOptions(opts.multipart);
   const dedupe = normalizeDedupeOptions(opts.dedupe);
   let lastMultipartCleanupAt = 0;
@@ -117,6 +119,7 @@ function installReiSW(sw2, opts = {}) {
   const makeDeliveryContext = (source) => ({
     defaultBadge,
     defaultIcon,
+    defaultBody,
     dedupe,
     multipart,
     onDuplicate: opts.onDuplicate,
@@ -184,6 +187,7 @@ async function handlePushPayload(sw2, payload, ctx) {
   const dispatchResult = await dispatchBusinessPayload(sw2, payload, {
     defaultIcon: ctx.defaultIcon,
     defaultBadge: ctx.defaultBadge,
+    defaultBody: ctx.defaultBody,
     onBusinessPayload: ctx.onBusinessPayload
   }, async (intermediateResult) => {
     await updateDedupeNotificationState(claim, ctx, intermediateResult);
@@ -345,12 +349,18 @@ function readPushPayload(event) {
     }
   }
 }
+function resolveNotificationBody(value, defaults) {
+  const body = typeof value === "string" ? value : "";
+  if (body.trim()) return body;
+  const fallback = defaults && defaults.defaultBody;
+  return typeof fallback === "string" && fallback.trim() ? fallback : DEFAULT_NOTIFICATION_BODY;
+}
 function createNotificationFromPayload(payload, defaults) {
   if (!payload || typeof payload !== "object") {
     return {
       title: "New notification",
       options: {
-        body: String(payload || ""),
+        body: resolveNotificationBody(payload == null ? "" : String(payload), defaults),
         icon: defaults.defaultIcon,
         badge: defaults.defaultBadge
       }
@@ -358,7 +368,10 @@ function createNotificationFromPayload(payload, defaults) {
   }
   const pushNotification = payload.notification && typeof payload.notification === "object" ? payload.notification : {};
   const title = pushNotification.title || payload.title || payload.contactName && `\u6765\u81EA ${payload.contactName}` || "New notification";
-  const body = pushNotification.body || payload.body || payload.message || "";
+  const body = resolveNotificationBody(
+    pushNotification.body || payload.body || payload.message || "",
+    defaults
+  );
   const data = pushNotification.data && typeof pushNotification.data === "object" ? { ...pushNotification.data } : payload.data && typeof payload.data === "object" ? { ...payload.data } : {};
   if (data.payload == null) data.payload = payload;
   return {
@@ -539,7 +552,8 @@ async function maybeShowDuplicateNotification(sw2, payload, claim, ctx) {
   }
   const notification = createNotificationFromPayload(payload, {
     defaultIcon: ctx.defaultIcon,
-    defaultBadge: ctx.defaultBadge
+    defaultBadge: ctx.defaultBadge,
+    defaultBody: ctx.defaultBody
   });
   await sw2.registration.showNotification(notification.title, notification.options);
   const latest = await readDedupeRecord(ctx.dedupe, claim.key);

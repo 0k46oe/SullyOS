@@ -139,15 +139,21 @@ describe('processLLMRound — 数据标签 tool-request 与跨轮累积', () => 
   });
 });
 
-describe('processLLMRound — directive-only 边界', () => {
-  it('全程只有副作用标签：单条空正文 push 携带 directives，不带 notification', () => {
+describe('processLLMRound — 无正文边界', () => {
+  // 空正文的 push 连 banner body 都是空的：用户锁屏收到一条只有标题的空横幅、未读 +1、
+  // 点进去 0 气泡。所以没正文就整条不发，副作用一起放弃，两种成因分开记进 last_skip。
+  it('全程只有副作用标签、没有正文：整条不发，记 side-effects-only', () => {
     const decision = processLLMRound(createFireSessionState(), '[[ACTION:POKE]]', build);
-    expect(decision.decision).toBe('finish');
-    if (decision.decision !== 'finish') return;
-    expect(decision.pushPayloads).toHaveLength(1);
-    expect(decision.pushPayloads[0].message).toBe('');
-    expect((decision.pushPayloads[0].metadata as any).directives).toEqual([{ type: 'poke' }]);
-    expect(decision.pushPayloads[0].notification).toBeUndefined();
+    expect(decision.decision).toBe('skip-push');
+    if (decision.decision !== 'skip-push') return;
+    expect(decision.reason).toBe('side-effects-only');
+  });
+
+  it('既没正文也没副作用：整条不发，记 empty-generation', () => {
+    const decision = processLLMRound(createFireSessionState(), '', build);
+    expect(decision.decision).toBe('skip-push');
+    if (decision.decision !== 'skip-push') return;
+    expect(decision.reason).toBe('empty-generation');
   });
 
   it('工具轮后 LLM 空输出：仍冲刷累积旁白，不静默丢', () => {
@@ -198,7 +204,9 @@ describe('processLLMRound — 副作用标签块被数据标签劈成两轮（�
   it('飞书长形态同款劈裂也能拼回', () => {
     const state = createFireSessionState();
     processLLMRound(state, '[[FS_DIARY_START: 今日份|开心]]\n上半段。[[SEARCH: 流星雨]]', build);
-    const round2 = processLLMRound(state, '下半段。\n[[FS_DIARY_END]]', build);
+    // 末尾这句正文是必要的：日记整块会被剥成 directive，一句话不留的话这轮没有可发的
+    // 正文，走的是「无正文不发」那条路，验不到这里想验的「跨轮拼回」。
+    const round2 = processLLMRound(state, '下半段。\n[[FS_DIARY_END]]\n记好啦。', build);
     expect(round2.decision).toBe('finish');
     if (round2.decision !== 'finish') return;
     const last = round2.pushPayloads[round2.pushPayloads.length - 1];

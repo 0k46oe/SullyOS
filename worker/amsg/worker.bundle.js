@@ -64,6 +64,17 @@ function hexToBytes(hex) {
   }
   return out;
 }
+async function hmacSha256(keyBytes, data) {
+  const key = await globalThis.crypto.subtle.importKey(
+    "raw",
+    toUint8(keyBytes),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await globalThis.crypto.subtle.sign("HMAC", key, toUint8(data));
+  return new Uint8Array(sig);
+}
 function randomBytes(n) {
   const out = new Uint8Array(n);
   globalThis.crypto.getRandomValues(out);
@@ -775,7 +786,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.11/node_modules/@rei-standard/amsg-server/dist/chunk-HZDUURIR.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.12/node_modules/@rei-standard/amsg-server/dist/chunk-RRWCPPOY.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -1467,7 +1478,7 @@ function createStateAccessors({ db, userId, userKey, maxStateValueBytes, now }) 
   };
   return { readState, writeState };
 }
-function projectTask(row, decryptedPayload) {
+function projectTask(row, decryptedPayload, options = {}) {
   const payload = decryptedPayload || {};
   const metadata = payload.metadata && typeof payload.metadata === "object" ? payload.metadata : {};
   return {
@@ -1486,10 +1497,11 @@ function projectTask(row, decryptedPayload) {
     createdAt: row.created_at ?? null,
     updatedAt: row.updated_at ?? null,
     // 角色归属 / 客户端侧的任务身份，取自排程方写进 metadata 的字段，宿主
-    // 靠它按角色过滤（contactName 会跨角色重名）。metadata 的其余部分可能是
-    // 宿主私有数据，留在服务端。缺席 → null。
+    // 靠它按角色过滤（contactName 会跨角色重名）。缺席 → null。
     charId: metadata.charId ?? null,
     clientTaskId: metadata.amsgClientTaskId ?? null,
+    // 整份 metadata 只在单条查询里给（见上面的 includeMetadata）。
+    ...options.includeMetadata ? { metadata: payload.metadata ?? null } : {},
     // 上一次没发出去的原因（run-tick 记进 payload 的 lastError）。
     // reason 'stale' 表示错过触发时刻太久被判定不再补发；其余是投递失败的
     // 错误信息。没有记录 → null。
@@ -1725,9 +1737,64 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
     now: new Date(nowFn()),
     scratch
   });
+  const progress = { sentCount: 0, total: 0, iterations: 0, skipReason: null };
+  let settledStatus = "failed";
+  let settledError = null;
+  try {
+    const outcome = await runFireChain({
+      task,
+      decryptedPayload,
+      userKey,
+      ctx,
+      hooks,
+      nowFn,
+      sleep,
+      readState,
+      writeState,
+      scratch,
+      scheduleTask,
+      fireCtx,
+      progress
+    });
+    settledStatus = !outcome.handled ? "not-handled" : outcome.result.status === "skipped" ? "skipped" : "sent";
+    return outcome;
+  } catch (error) {
+    settledError = error;
+    throw error;
+  } finally {
+    await notifyFireSettled(ctx, {
+      task,
+      status: settledStatus,
+      skipReason: settledStatus === "skipped" ? progress.skipReason : null,
+      sentCount: progress.sentCount,
+      total: progress.total,
+      iterations: progress.iterations,
+      error: settledError,
+      scratch,
+      readState,
+      writeState
+    });
+  }
+}
+async function runFireChain({
+  task,
+  decryptedPayload,
+  userKey,
+  ctx,
+  hooks,
+  nowFn,
+  sleep,
+  readState,
+  writeState,
+  scratch,
+  scheduleTask,
+  fireCtx,
+  progress
+}) {
   const before = await hooks.onBeforeFire(fireCtx);
   if (before == null) return { handled: false };
   if (typeof before === "object" && before.skip === true) {
+    progress.skipReason = "before-fire";
     return { handled: true, result: { success: true, messagesSent: 0, status: "skipped", iterations: 0 } };
   }
   const normalized = normalizeBeforeFireResult(before);
@@ -1747,6 +1814,7 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
     if (nowFn() >= deadline) {
       throw new Error(`AGENTIC_TOTAL_TIMEOUT: fire chain exceeded ${totalTimeoutMs}ms after ${iteration} LLM round(s)`);
     }
+    progress.iterations = iteration + 1;
     const roundTimeoutMs = Math.max(1, Math.min(3e5, deadline - nowFn()));
     const { response: llmResponse } = await callLlm(
       {
@@ -1784,6 +1852,7 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
       continue;
     }
     if (decision.decision === "skip-push") {
+      progress.skipReason = "skip-push";
       return { handled: true, result: { success: true, messagesSent: 0, status: "skipped", iterations: iteration + 1 } };
     }
     if (decision.decision === "finish") {
@@ -1798,7 +1867,8 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
         sleep,
         scratch,
         readState,
-        writeState
+        writeState,
+        progress
       });
       return { handled: true, result: { success: true, messagesSent, status: "finished", iterations: iteration + 1 } };
     }
@@ -1841,6 +1911,14 @@ async function notifyAfterSend(ctx, info) {
     console.warn("[amsg-server] onAfterSend hook \u629B\u9519\uFF08\u5DF2\u5FFD\u7565\uFF09:", hookError && hookError.message);
   }
 }
+async function notifyFireSettled(ctx, info) {
+  if (typeof ctx.onFireSettled !== "function") return;
+  try {
+    await ctx.onFireSettled(info);
+  } catch (hookError) {
+    console.warn("[amsg-server] onFireSettled hook \u629B\u9519\uFF08\u5DF2\u5FFD\u7565\uFF09:", hookError && hookError.message);
+  }
+}
 function stampTaskIdentity(push, task, decryptedPayload, occurrenceMs) {
   push.taskId = task.id ?? null;
   push.taskUuid = task.uuid ?? null;
@@ -1858,10 +1936,12 @@ async function sendHookPushPayloads({
   sleep,
   scratch,
   readState,
-  writeState
+  writeState,
+  progress
 }) {
   const total = pushPayloads.length;
   let sentCount = 0;
+  progress.total = total;
   const afterSendBase = { task, total, scratch, readState, writeState };
   try {
     if (!ctx.vapid || !ctx.vapid.email || !ctx.vapid.publicKey || !ctx.vapid.privateKey) {
@@ -1883,6 +1963,7 @@ async function sendHookPushPayloads({
       stampTaskIdentity(push, task, decryptedPayload, occurrenceMs);
       await ctx.webpush.sendNotification(pushSubscription, JSON.stringify(push));
       sentCount++;
+      progress.sentCount = sentCount;
       if (i < total - 1) await sleep(SLEEP_BETWEEN_MESSAGES_MS);
     }
   } catch (error) {
@@ -2271,10 +2352,14 @@ function positiveNumber(value) {
 function resolveClaimLeaseMs(ctx) {
   return positiveNumber(ctx.claimLeaseMs) || Math.max(DEFAULT_CLAIM_LEASE_MS, positiveNumber(ctx.totalTimeoutMs) + CLAIM_LEASE_MARGIN_MS);
 }
+async function deriveSerializeGroup(userKey, rawKey) {
+  return bytesToBase64Url(await hmacSha256(utf8(userKey), utf8(rawKey)));
+}
 async function runScheduledTick(ctx) {
   const db = ctx.db;
   const masterKey = ctx.masterKey;
   const claimLeaseMs = resolveClaimLeaseMs(ctx);
+  const serializeBy = typeof ctx.serializeBy === "function" ? ctx.serializeBy : null;
   const startTime = Date.now();
   const tasks = await db.getPendingTasks(50);
   const MAX_CONCURRENT = 8;
@@ -2283,19 +2368,47 @@ async function runScheduledTick(ctx) {
     successCount: 0,
     failedCount: 0,
     claimSkippedTasks: 0,
+    serializeSkippedTasks: 0,
     deletedOnceOffTasks: 0,
     updatedRecurringTasks: 0,
     staleTasks: [],
     failedTasks: []
   };
+  const groupsTakenThisTick = /* @__PURE__ */ new Set();
   const supportsClaim = typeof db.claimTask === "function";
-  async function claimForThisTick(task) {
+  async function claimForThisTick(task, serializeGroup) {
     if (!supportsClaim) return true;
     const leaseUntil = new Date(Date.now() + claimLeaseMs).toISOString();
-    return !!await db.claimTask(task.id, task.next_send_at, leaseUntil);
+    return !!await db.claimTask(task.id, task.next_send_at, leaseUntil, serializeGroup);
   }
   async function updateAndRelease(taskId, fields) {
-    return db.updateTaskById(taskId, supportsClaim ? { ...fields, lease_until: null } : fields);
+    return db.updateTaskById(
+      taskId,
+      supportsClaim ? { ...fields, lease_until: null, retry_after: null } : fields
+    );
+  }
+  async function decryptTask(task) {
+    try {
+      const userKey = await deriveUserEncryptionKey(task.user_id, masterKey);
+      const payload = JSON.parse(await decryptFromStorage(task.encrypted_payload, userKey));
+      return { ok: true, userKey, payload };
+    } catch (error) {
+      return { ok: false, error };
+    }
+  }
+  function reserveSerializeGroup(task, decryptedPayload) {
+    if (!serializeBy || !decryptedPayload) return { taken: false, rawKey: null };
+    let rawKey;
+    try {
+      rawKey = serializeBy(buildHookTask(task, decryptedPayload));
+    } catch (hookError) {
+      console.warn("[amsg-server] serializeBy \u629B\u9519\uFF0C\u672C\u8DF3\u8DF3\u8FC7\u8FD9\u6761\u4EFB\u52A1:", hookError && hookError.message);
+      return { taken: true, rawKey: null };
+    }
+    if (typeof rawKey !== "string" || !rawKey) return { taken: false, rawKey: null };
+    if (groupsTakenThisTick.has(rawKey)) return { taken: true, rawKey };
+    groupsTakenThisTick.add(rawKey);
+    return { taken: false, rawKey };
   }
   async function encryptPayloadWithLastError(task, decryptedPayload, userKey, reason, extra) {
     if (!decryptedPayload || !userKey) return null;
@@ -2345,7 +2458,11 @@ async function runScheduledTick(ctx) {
       } else {
         const nextRetryTime = new Date(Date.now() + (task.retry_count + 1) * 2 * 60 * 1e3);
         if (supportsClaim) {
-          await db.updateTaskById(task.id, { lease_until: nextRetryTime.toISOString(), retry_count: task.retry_count + 1 });
+          await db.updateTaskById(task.id, {
+            retry_after: nextRetryTime.toISOString(),
+            lease_until: null,
+            retry_count: task.retry_count + 1
+          });
         } else {
           await db.updateTaskById(task.id, { next_send_at: nextRetryTime.toISOString(), retry_count: task.retry_count + 1 });
         }
@@ -2389,10 +2506,13 @@ async function runScheduledTick(ctx) {
       messageDelivered: true
     });
   }
-  async function processTask(task) {
+  async function processTask({ task, decrypted, serializeKey }) {
+    const decryptedPayload = decrypted.ok ? decrypted.payload : null;
+    const userKey = decrypted.ok ? decrypted.userKey : null;
+    const serializeGroup = serializeKey ? await deriveSerializeGroup(userKey, serializeKey) : null;
     let claimed;
     try {
-      claimed = await claimForThisTick(task);
+      claimed = await claimForThisTick(task, serializeGroup);
     } catch (error) {
       results.failedCount++;
       results.failedTasks.push({ taskId: task.id, reason: error.message || "\u4EFB\u52A1\u5360\u4F4D\u5931\u8D25", status: "claim_failed" });
@@ -2402,13 +2522,8 @@ async function runScheduledTick(ctx) {
       results.claimSkippedTasks++;
       return;
     }
-    let decryptedPayload = null;
-    let userKey = null;
-    try {
-      userKey = await deriveUserEncryptionKey(task.user_id, masterKey);
-      decryptedPayload = JSON.parse(await decryptFromStorage(task.encrypted_payload, userKey));
-    } catch (error) {
-      await handleDeliveryFailure(task, error.message || "\u4EFB\u52A1\u8F7D\u8377\u89E3\u5BC6\u5931\u8D25", null, null, null);
+    if (!decrypted.ok) {
+      await handleDeliveryFailure(task, decrypted.error && decrypted.error.message || "\u4EFB\u52A1\u8F7D\u8377\u89E3\u5BC6\u5931\u8D25", null, null, null);
       return;
     }
     const recurrenceType = decryptedPayload.recurrenceType;
@@ -2504,12 +2619,21 @@ async function runScheduledTick(ctx) {
       await handlePostSendPersistenceFailure(task, error.message || "\u53D1\u9001\u540E\u72B6\u6001\u66F4\u65B0\u5931\u8D25", recurrenceType, tzId);
     }
   }
-  const taskQueue = [...tasks];
+  const taskQueue = [];
+  for (const task of tasks) {
+    const decrypted = await decryptTask(task);
+    const reserved = reserveSerializeGroup(task, decrypted.ok ? decrypted.payload : null);
+    if (reserved.taken) {
+      results.serializeSkippedTasks++;
+      continue;
+    }
+    taskQueue.push({ task, decrypted, serializeKey: reserved.rawKey });
+  }
   const processing = [];
   while (taskQueue.length > 0 || processing.length > 0) {
     while (processing.length < MAX_CONCURRENT && taskQueue.length > 0) {
-      const task = taskQueue.shift();
-      const promise = processTask(task);
+      const entry = taskQueue.shift();
+      const promise = processTask(entry);
       processing.push(promise);
       promise.finally(() => {
         const index = processing.indexOf(promise);
@@ -2530,6 +2654,9 @@ async function runScheduledTick(ctx) {
     executionTime,
     details: {
       claimSkippedTasks: results.claimSkippedTasks,
+      // 分组串行拦下的条数：本跳里同分组已经放行过别的任务。跨跳被拦下的
+      // （分组在别的 tick 里正忙）走的是占位那一步，计在 claimSkippedTasks。
+      serializeSkippedTasks: results.serializeSkippedTasks,
       deletedOnceOffTasks: results.deletedOnceOffTasks,
       updatedRecurringTasks: results.updatedRecurringTasks,
       staleTasks: results.staleTasks,
@@ -2583,6 +2710,9 @@ function createUpdateMessageHandler(ctx) {
     }
     if (updates.nextSendAt && !isValidISO8601(updates.nextSendAt)) {
       return { status: 400, body: { success: false, error: { code: "INVALID_UPDATE_DATA", message: "\u66F4\u65B0\u6570\u636E\u683C\u5F0F\u9519\u8BEF", details: { invalidFields: ["nextSendAt"] } } } };
+    }
+    if (Object.prototype.hasOwnProperty.call(updates, "contactName") && (typeof updates.contactName !== "string" || !updates.contactName.trim())) {
+      return { status: 400, body: { success: false, error: { code: "INVALID_UPDATE_DATA", message: "contactName \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32", details: { invalidFields: ["contactName"] } } } };
     }
     if (updates.recurrenceType && !["none", "daily", "weekly"].includes(updates.recurrenceType)) {
       return { status: 400, body: { success: false, error: { code: "INVALID_UPDATE_DATA", message: "\u66F4\u65B0\u6570\u636E\u683C\u5F0F\u9519\u8BEF", details: { invalidFields: ["recurrenceType"] } } } };
@@ -2641,9 +2771,15 @@ function createUpdateMessageHandler(ctx) {
     const updatedData = {
       ...existingData,
       ...promptUpdates,
+      ...Object.prototype.hasOwnProperty.call(updates, "contactName") && { contactName: updates.contactName },
       ...updates.userMessage && { userMessage: updates.userMessage },
       ...updates.recurrenceType && { recurrenceType: updates.recurrenceType },
       ...Object.prototype.hasOwnProperty.call(updates, "tzId") && { tzId: updates.tzId ?? null },
+      // avatarUrl 走 truthy spread：显式传 null 只是「不改」，不是「清空」。
+      // 与 tzId / splitPattern 那几个 hasOwnProperty 的字段不一样，是因为
+      // §6.2 的软清空策略要求非法头像从 patch 里被摘掉、旧头像原样保留，而
+      // 「摘掉」和「传了个 null」在这一层看起来是同一件事。真要支持清空，得
+      // 先把这两件事区分开，不能只把判断换成 hasOwnProperty。
       ...updates.avatarUrl && { avatarUrl: updates.avatarUrl },
       ...updates.metadata && { metadata: updates.metadata },
       ...updates.apiUrl && { apiUrl: updates.apiUrl },
@@ -2767,6 +2903,55 @@ function createMessagesHandler(ctx) {
   }
   return { GET };
 }
+function createGetMessageHandler(ctx) {
+  async function GET(url, headers) {
+    const tenantResult = await ctx.tenantManager.resolveTenant(headers, { url });
+    if (!tenantResult.ok) {
+      return tenantResult.error;
+    }
+    const tenantCtx = tenantResult.context;
+    const db = tenantCtx.db;
+    const masterKey = tenantCtx.masterKey;
+    const userId = getHeader(headers, "x-user-id");
+    if (!userId) {
+      return {
+        status: 400,
+        body: { success: false, error: { code: "USER_ID_REQUIRED", message: "\u5FC5\u987B\u63D0\u4F9B X-User-Id \u8BF7\u6C42\u5934" } }
+      };
+    }
+    if (!isValidUUIDv4(userId)) {
+      return {
+        status: 400,
+        body: { success: false, error: { code: "INVALID_USER_ID_FORMAT", message: "X-User-Id \u5FC5\u987B\u662F UUID v4 \u683C\u5F0F" } }
+      };
+    }
+    const taskUuid = new URL(url, "https://dummy").searchParams.get("id");
+    if (!taskUuid) {
+      return { status: 400, body: { success: false, error: { code: "TASK_ID_REQUIRED", message: "\u7F3A\u5C11\u4EFB\u52A1ID" } } };
+    }
+    const row = await db.getTaskByUuid(taskUuid, userId);
+    if (!row) {
+      const taskStatus = await db.getTaskStatus(taskUuid, userId);
+      if (!taskStatus) {
+        return { status: 404, body: { success: false, error: { code: "TASK_NOT_FOUND", message: "\u6307\u5B9A\u7684\u4EFB\u52A1\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u5220\u9664" } } };
+      }
+      return { status: 409, body: { success: false, error: { code: "TASK_ALREADY_COMPLETED", message: "\u4EFB\u52A1\u5DF2\u5B8C\u6210\u6216\u5DF2\u5931\u8D25\uFF0C\u65E0\u6CD5\u66F4\u65B0" } } };
+    }
+    const userKey = await deriveUserEncryptionKey(userId, masterKey);
+    const decrypted = JSON.parse(await decryptFromStorage(row.encrypted_payload, userKey));
+    const task = projectTask(row, decrypted, { includeMetadata: true });
+    return {
+      status: 200,
+      body: {
+        success: true,
+        encrypted: true,
+        version: 1,
+        data: await encryptPayload({ task }, userKey)
+      }
+    };
+  }
+  return { GET };
+}
 function err(status, code, message, details) {
   const error = details === void 0 ? { code, message } : { code, message, details };
   return { status, body: { success: false, error } };
@@ -2878,6 +3063,8 @@ var SQLITE_TABLE_SQL = `
     message_type TEXT NOT NULL CHECK (message_type IN ('fixed', 'prompted', 'auto', 'instant')),
     next_send_at TEXT NOT NULL,
     lease_until TEXT,
+    retry_after TEXT,
+    serialize_group TEXT,
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed')),
     retry_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -2889,6 +3076,16 @@ var SQLITE_MIGRATIONS = [
     name: "add_lease_until",
     sql: "ALTER TABLE scheduled_messages ADD COLUMN lease_until TEXT",
     description: "Task claim lease (2.6.0)"
+  },
+  {
+    name: "add_retry_after",
+    sql: "ALTER TABLE scheduled_messages ADD COLUMN retry_after TEXT",
+    description: "Retry backoff, held apart from the claim lease (2.6.0)"
+  },
+  {
+    name: "add_serialize_group",
+    sql: "ALTER TABLE scheduled_messages ADD COLUMN serialize_group TEXT",
+    description: "Serialization group for runScheduledTick serializeBy (2.6.0)"
   }
 ];
 var SQLITE_INDEXES = [
@@ -2930,6 +3127,14 @@ var SQLITE_INDEXES = [
           WHERE uuid IS NOT NULL`,
     description: "UUID uniqueness guard",
     critical: true
+  },
+  {
+    name: "idx_serialize_group_lease",
+    sql: `CREATE INDEX IF NOT EXISTS idx_serialize_group_lease
+          ON scheduled_messages (serialize_group, lease_until)
+          WHERE serialize_group IS NOT NULL AND status = 'pending'`,
+    description: "Serialization group busy-check index (claimTask)",
+    critical: false
   }
 ];
 var CLIENT_STATE_TABLE_SQL = `
@@ -2956,6 +3161,8 @@ var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
   "message_type",
   "next_send_at",
   "lease_until",
+  "retry_after",
+  "serialize_group",
   "status",
   "retry_count",
   "created_at",
@@ -3009,7 +3216,7 @@ var D1Adapter = class {
       );
     }
     return {
-      columnsCreated: 11,
+      columnsCreated: 13,
       indexesCreated: indexResults.filter((r) => r.status === "success").length,
       indexesFailed: indexResults.filter((r) => r.status === "failed").length,
       columns: [],
@@ -3036,7 +3243,7 @@ var D1Adapter = class {
   }
   async getTaskByUuid(uuid, userId) {
     return this._db.prepare(
-      `SELECT id, user_id, uuid, encrypted_payload, message_type, next_send_at, status, retry_count
+      `SELECT id, user_id, uuid, encrypted_payload, message_type, next_send_at, status, retry_count, created_at, updated_at
        FROM scheduled_messages
        WHERE uuid = ? AND user_id = ? AND status = 'pending'
        LIMIT 1`
@@ -3108,9 +3315,10 @@ var D1Adapter = class {
        FROM scheduled_messages
        WHERE status = 'pending' AND next_send_at <= ?
          AND (lease_until IS NULL OR lease_until <= ?)
+         AND (retry_after IS NULL OR retry_after <= ?)
        ORDER BY next_send_at ASC
        LIMIT ?`
-    ).bind(now, now, limit).all();
+    ).bind(now, now, now, limit).all();
     return res.results || [];
   }
   /**
@@ -3134,19 +3342,46 @@ var D1Adapter = class {
    * 着非归一化写法的行（如 +08:00 结尾），归一化后反而对不上，那条任务会永
    * 远领不到。
    *
+   * 带 serializeGroup 时多一道分组门：同一分组里已经有别的行拿着未到期的租
+   * 约，这条就领不走（同一分组同时只跑一条）。判定和写租约在同一条 UPDATE
+   * 里完成，「先查再占」的空档天然不存在——两个 tick 同时来，只有一个改得动
+   * 行。分组门只看租约，不看 `retry_after`：等着重试的任务其实闲着，不该把
+   * 同分组的其他任务一起堵住。
+   *
    * @param {number} taskId
    * @param {string} expectedNextSendAt - 读这行时拿到的 next_send_at 原值
    * @param {string|Date} leaseUntil - 租期末尾
-   * @returns {Promise<boolean>} true = 领到了；false = 别人正拿着租约、排期被改过、或行已不是 pending
+   * @param {string|null} [serializeGroup] - 串行分组标识；空表示不参与分组串行
+   * @returns {Promise<boolean>} true = 领到了；false = 别人正拿着租约、同分组
+   *   有任务正在跑、排期被改过、或行已不是 pending
    */
-  async claimTask(taskId, expectedNextSendAt, leaseUntil) {
+  async claimTask(taskId, expectedNextSendAt, leaseUntil, serializeGroup = null) {
     const expected = typeof expectedNextSendAt === "string" ? expectedNextSendAt : this._iso(expectedNextSendAt);
+    const grouped = typeof serializeGroup === "string" && serializeGroup.length > 0;
+    const now = this._now();
+    const sets = ["lease_until = ?"];
+    const values = [this._iso(leaseUntil)];
+    if (grouped) {
+      sets.push("serialize_group = ?");
+      values.push(serializeGroup);
+    }
+    sets.push("updated_at = ?");
+    values.push(now);
+    let where = `id = ? AND status = 'pending' AND next_send_at = ?
+          AND (lease_until IS NULL OR lease_until <= ?)`;
+    values.push(taskId, expected, now);
+    if (grouped) {
+      where += `
+          AND NOT EXISTS (
+            SELECT 1 FROM scheduled_messages busy
+             WHERE busy.serialize_group = ? AND busy.id <> ?
+               AND busy.status = 'pending' AND busy.lease_until > ?
+          )`;
+      values.push(serializeGroup, taskId, now);
+    }
     const res = await this._db.prepare(
-      `UPDATE scheduled_messages
-          SET lease_until = ?, updated_at = ?
-        WHERE id = ? AND status = 'pending' AND next_send_at = ?
-          AND (lease_until IS NULL OR lease_until <= ?)`
-    ).bind(this._iso(leaseUntil), this._now(), taskId, expected, this._now()).run();
+      `UPDATE scheduled_messages SET ${sets.join(", ")} WHERE ${where}`
+    ).bind(...values).run();
     return (res.meta.changes || 0) > 0;
   }
   async listTasks(userId, opts = {}) {
@@ -3557,7 +3792,7 @@ function createClientStateHandler(ctx) {
   }
   return { PUT, GET, DELETE };
 }
-var SERVER_VERSION = true ? "2.6.0-next.11" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.6.0-next.12" : "0.0.0-dev";
 var SERVER_FEATURES = Object.freeze([
   "client-state",
   "client-state-chunking",
@@ -3590,7 +3825,15 @@ var SERVER_FEATURES = Object.freeze([
   // 任务行支持 tzId：daily / weekly 按该时区的墙钟推进。
   "task-timezone",
   // 推送订阅是用户级的一份（PUT/GET/DELETE /push-subscription），任务不携带。
-  "user-push-subscription"
+  "user-push-subscription",
+  // GET /message?id=<uuid>：单条任务，带完整 metadata（列表只给两个子字段）。
+  "get-message-detail",
+  // PUT /update-message 认 contactName（改了角色名之后旧任务的通知标题跟着改）。
+  "update-message-contact-name",
+  // runScheduledTick 认 serializeBy：同一分组的任务同时只跑一条，跨跳也算。
+  "tick-serialize-by",
+  // 一次 fire 无论什么结局都调 onFireSettled（发完 / 跳过 / 抛错）。
+  "fire-settled-hook"
 ]);
 function createCapabilitiesHandler(ctx) {
   async function GET(url, headers) {
@@ -3632,6 +3875,9 @@ function createSingleUserServer(config) {
     maxStateValueBytes: config.maxStateValueBytes,
     // 推送发出（或发挂）之后的 hook（见 lib/agentic-fire.js 的 notifyAfterSend）。
     onAfterSend: config.onAfterSend,
+    // 一次 fire 收尾的 hook，什么结局都会调一次（见 lib/agentic-fire.js 的
+    // notifyFireSettled）。
+    onFireSettled: config.onFireSettled,
     // hook 的 ctx.scheduleTask() 单次 fire 建任务的条数上限（默认 2）。
     maxScheduledTasksPerFire: config.maxScheduledTasksPerFire
   };
@@ -3644,6 +3890,7 @@ function createSingleUserServer(config) {
       updateMessage: createUpdateMessageHandler(ctx),
       cancelMessage: createCancelMessageHandler(ctx),
       messages: createMessagesHandler(ctx),
+      getMessage: createGetMessageHandler(ctx),
       vapidPublicKey: createVapidPublicKeyHandler(ctx),
       clientState: createClientStateHandler(ctx),
       pushSubscription: createPushSubscriptionHandler(ctx),
@@ -3756,6 +4003,8 @@ function createSingleUserCloudflareWorker(buildConfig) {
         result = await server.handlers.scheduleMessage.POST(headers, await request.text());
       } else if (method === "GET" && pathname.endsWith("/messages")) {
         result = await server.handlers.messages.GET(url, headers);
+      } else if (method === "GET" && pathname.endsWith("/message")) {
+        result = await server.handlers.getMessage.GET(url, headers);
       } else if (method === "PUT" && pathname.endsWith("/update-message")) {
         result = await server.handlers.updateMessage.PUT(url, headers, await request.text());
       } else if (method === "DELETE" && pathname.endsWith("/cancel-message")) {
@@ -3816,6 +4065,14 @@ function createSingleUserCloudflareWorker(buildConfig) {
         // 推送发出（或发挂）之后的 hook：{ task, sentCount, total, error,
         // scratch, readState, writeState }（best-effort，见 lib/agentic-fire.js）。
         onAfterSend: cfg.onAfterSend,
+        // 一次 fire 收尾的 hook：{ task, status, skipReason, sentCount, total,
+        // iterations, error, scratch, readState, writeState }。发完 / 跳过 /
+        // 抛错都会调，宿主用它做「开始时占点什么、结束时放掉」那类收尾
+        //（best-effort，见 lib/agentic-fire.js）。
+        onFireSettled: cfg.onFireSettled,
+        // 分组串行：(task) => 分组标识 | null。同一分组的任务同时只跑一条，
+        // 跨跳也算（见 lib/run-tick.js）。不配 = 全并发，与以前一致。
+        serializeBy: cfg.serializeBy,
         // 任务占位租期（默认 10 分钟，随 totalTimeoutMs 抬高）。
         claimLeaseMs: cfg.claimLeaseMs
       });
@@ -6948,6 +7205,7 @@ ${ATOM_MARKER}B${idx}${ATOM_MARKER}
   const SOLO_RE = new RegExp(`^${ATOM_MARKER}B(\\d+)${ATOM_MARKER}$`);
   const GLOBAL_RE = new RegExp(`${ATOM_MARKER}B(\\d+)${ATOM_MARKER}`, "g");
   const segments = [];
+  let pendingQuoteRaw = "";
   for (const rawChunk of rawChunks) {
     const soloMatch = rawChunk.trim().match(SOLO_RE);
     if (soloMatch) {
@@ -6971,8 +7229,16 @@ ${ATOM_MARKER}B${idx}${ATOM_MARKER}
       rawText = rawText.trim();
       if (!rawText) continue;
       const sanitized = sanitizeTextForBanner(rawText).trim();
-      if (!sanitized) continue;
-      segments.push({ raw: rawText, sanitized });
+      if (!sanitized) {
+        if (!stripQuotes2(rawText).trim()) pendingQuoteRaw += `${rawText}
+`;
+        continue;
+      }
+      segments.push({
+        raw: pendingQuoteRaw ? `${pendingQuoteRaw}${rawText}` : rawText,
+        sanitized
+      });
+      pendingQuoteRaw = "";
     }
   }
   return segments;
@@ -7437,11 +7703,7 @@ function processLLMRound(state, llmOutputText, build, mcp, schedule) {
   const finishMeta = directives.length > 0 ? { directives, ...xhsSession ? { xhsSession } : {} } : void 0;
   const segments = sanitizeIntoSegments(cleanedText);
   if (segments.length === 0) {
-    if (!finishMeta) return { decision: "skip-push" };
-    return {
-      decision: "finish",
-      pushPayloads: [buildScheduledPush("", build, finishMeta)]
-    };
+    return { decision: "skip-push", reason: finishMeta ? "side-effects-only" : "empty-generation" };
   }
   const lastIdx = segments.length - 1;
   return {
@@ -7546,23 +7808,29 @@ var recordSkip = async (ctx, charId, reason, occurrenceMs) => writeLastSkip(ctx.
   reason,
   skippedAt: ctx.now.getTime()
 });
-var amsgAfterSend = async (info) => {
+var amsgFireSettled = async (info) => {
   const stash = getFireStash(info.scratch);
-  const texts = stash?.selfLogTexts;
-  if (!stash || !texts) return;
+  if (!stash) return;
+  const texts = stash.selfLogTexts;
   stash.selfLogTexts = null;
-  if (info.sentCount <= 0) return;
-  const text = texts.slice(0, info.sentCount).filter((message) => message.trim()).join("\n");
-  const next = appendSelfLogEntry(stash.selfLog, {
-    id: `${stash.clientTaskId || "task"}@${stash.occurrenceMs}`,
-    at: Date.now(),
-    text
-  });
-  if (next === stash.selfLog) return;
-  stash.selfLog = next;
+  const sentCount = info.sentCount ?? 0;
+  if (texts && sentCount > 0) {
+    const text = texts.slice(0, sentCount).filter((message) => message.trim()).join("\n");
+    const next = appendSelfLogEntry(stash.selfLog, {
+      id: `${stash.clientTaskId || "task"}@${stash.occurrenceMs}`,
+      at: Date.now(),
+      text
+    });
+    if (next !== stash.selfLog) {
+      stash.selfLog = next;
+      stash.selfLogDirty = true;
+    }
+  }
+  if (!stash.selfLogDirty) return;
+  stash.selfLogDirty = false;
   try {
     await info.writeState(amsgStateNamespace(stash.charId), [
-      { key: AMSG_SELF_LOG_KEY, value: JSON.stringify(next) }
+      { key: AMSG_SELF_LOG_KEY, value: JSON.stringify(stash.selfLog) }
     ]);
   } catch (error) {
     console.warn("[amsg:self-log] \u5199\u5165\u5931\u8D25\uFF08\u8FD9\u6B21\u7167\u5E38\u53D1\u9001\uFF0C\u4F46\u4E0B\u4E00\u6B21\u5230\u70B9\u89D2\u8272\u4E0D\u4F1A\u77E5\u9053\u8BF4\u8FC7\u8FD9\u53E5\uFF09", error);
@@ -7666,6 +7934,7 @@ var runFireScheduleTool = async (stash, scheduleTask, args, nowMs) => {
   if (!stash.scheduledTasks.some((t) => t.taskUuid === record.taskUuid)) {
     stash.scheduledTasks.push(record);
     stash.selfLog = appendSelfLogTask(stash.selfLog, record);
+    stash.selfLogDirty = true;
   }
   console.log("[amsg:self-schedule]", {
     uuid: result.uuid,
@@ -7805,6 +8074,7 @@ var amsgHooks = {
       xhsCookie,
       occurrenceMs,
       selfLog,
+      selfLogDirty: false,
       mcpResolve,
       mcpSessions: /* @__PURE__ */ new Map(),
       mcpSpentMs: 0,
@@ -7874,7 +8144,11 @@ var amsgHooks = {
       session,
       content,
       {
-        contactName: ctx.contactName,
+        // 名字取 tool_pack 里的那份：它跟着每轮聊天重新上云，改名当天就是新的。
+        // ctx.contactName 是排程那一刻冻进任务行的快照，用户改完名字之后，之前排的
+        // 任务推送出来横幅还顶着旧名字（上游 update-message 也不让改这个字段）。
+        // tool_pack 里没名字时退回任务行那份，别让标题变成「来自 」。
+        contactName: stash.toolCtx.char.name || ctx.contactName,
         avatarUrl: ctx.avatarUrl ?? null,
         taskId,
         messageType,
@@ -7908,7 +8182,7 @@ var amsgHooks = {
         v: 1,
         taskUuid: stash.taskUuid,
         occurrenceMs: stash.occurrenceMs,
-        reason: "empty-generation",
+        reason: decision.reason,
         skippedAt: Date.now()
       });
     }
@@ -8002,16 +8276,22 @@ var buildWorkerConfig = (env) => {
     // 满血 fire-time hooks（onBeforeFire 现场填槽 + onLLMOutput 分类 +
     // executeToolCalls 服务端工具循环）；轮数/超时用库默认（5 轮 / 240s）。
     hooks: amsgHooks,
-    // 发送后回执 + 过期跳过回执（amsg-server 2.6.0-next.10 的 config 级 hook）。
-    // onAfterSend: 只把真送出去的段写进 self_log（见 amsgAfterSend）。
+    // 收尾回执 + 过期跳过回执（config 级 hook）。
+    // onFireSettled: 无论这次 fire 是发出去了、跳过了还是抛错了都会调一次，self_log
+    //   在这里统一落盘（见 amsgFireSettled）。不用 onAfterSend——它只在真发出去那条路
+    //   触发，角色自排任务碰上「只做了副作用没说话」就会漏账变成幽灵任务。
     // onStaleSkip: 过期不补发时给面板留一句「为什么没响」（见 amsgStaleSkip）。
-    onAfterSend: amsgAfterSend,
-    onStaleSkip: amsgStaleSkip
+    onFireSettled: amsgFireSettled,
+    onStaleSkip: amsgStaleSkip,
+    // 同一个角色的多条任务不并发跑：两条撞在一起时用户会收到两条互不知情的消息，
+    // 而且 self_log 是读-改-写整份，后写的会盖掉先写的那条「我说过什么」。分组键取
+    // 角色 id，上游按它同跳去重 + 跨跳看租约，被拦下的任务一个字段都不动，下一跳原样再来。
+    serializeBy: (task) => typeof task.metadata?.charId === "string" ? task.metadata.charId : null
   };
 };
 var src_default = createSingleUserCloudflareWorker(buildWorkerConfig);
 export {
-  amsgAfterSend,
+  amsgFireSettled,
   amsgHooks,
   amsgStaleSkip,
   attachScheduledTasks,

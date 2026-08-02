@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import {
-  amsgAfterSend, amsgHooks, amsgStaleSkip, attachScheduledTasks, buildWorkerConfig,
+  amsgFireSettled, amsgHooks, amsgStaleSkip, attachScheduledTasks, buildWorkerConfig,
   offloadOversizedPush,
   resolveVapidEmail, runFireScheduleTool, runMcpFireTool,
 } from './index';
@@ -840,10 +840,14 @@ describe('self_log — 角色自述回写', () => {
       writeState: store.writeState,
     } as any) as any;
 
-    if (decision.decision === 'finish' && !opts.skipAfterSend) {
-      const total = decision.pushPayloads.length;
-      await amsgAfterSend({
-        sentCount: opts.sentCount ?? total,
+    // 上游的 onFireSettled 无论这次 fire 是发出去了、跳过了还是抛错了都会调一次，
+    // 这里照着来——只在 finish 分支调的话，验不到「没正文可发时角色自排的任务还落不落账」。
+    if (!opts.skipAfterSend) {
+      const sent = decision.decision === 'finish';
+      const total = sent ? decision.pushPayloads.length : 0;
+      await amsgFireSettled({
+        status: sent ? 'sent' : 'skipped',
+        sentCount: sent ? (opts.sentCount ?? total) : 0,
         scratch,
         writeState: store.writeState,
       });
@@ -962,7 +966,7 @@ describe('self_log — 角色自述回写', () => {
       expect(store.selfLog(), '推送还没发出去，不能已经记了「说过」').toBeNull();
       expect((scratch.fire as any).selfLogTexts).toEqual(['刚看到楼下那只猫又来了']);
 
-      await amsgAfterSend({ sentCount: 1, scratch, writeState: store.writeState });
+      await amsgFireSettled({ sentCount: 1, scratch, writeState: store.writeState });
       expect(store.selfLog()?.entries.map((e) => e.text)).toEqual(['刚看到楼下那只猫又来了']);
       expect((scratch.fire as any).selfLogTexts, '认领后清空，重复回执不会记两遍').toBeNull();
     });
@@ -1013,7 +1017,7 @@ describe('self_log — 角色自述回写', () => {
         llmOutput: '在干嘛呢',
         skipAfterSend: true,
       });
-      await expect(amsgAfterSend({ sentCount: 1, scratch: {}, writeState: store.writeState }))
+      await expect(amsgFireSettled({ sentCount: 1, scratch: {}, writeState: store.writeState }))
         .resolves.toBeUndefined();
       expect(store.selfLog()).toBeNull();
     });
@@ -1032,11 +1036,11 @@ describe('self_log — 角色自述回写', () => {
         skipAfterSend: true,
       });
 
-      await amsgAfterSend({ sentCount: 1, scratch: b.scratch, writeState: storeB.writeState });
+      await amsgFireSettled({ sentCount: 1, scratch: b.scratch, writeState: storeB.writeState });
       expect(storeB.selfLog()?.entries.map((e) => e.text)).toEqual(['B 的话']);
       expect(storeA.selfLog(), 'B 的回执不能把 A 的正文带走').toBeNull();
 
-      await amsgAfterSend({ sentCount: 1, scratch: a.scratch, writeState: storeA.writeState });
+      await amsgFireSettled({ sentCount: 1, scratch: a.scratch, writeState: storeA.writeState });
       expect(storeA.selfLog()?.entries.map((e) => e.text)).toEqual(['A 的话']);
     });
   });
@@ -1085,6 +1089,41 @@ describe('自排后续任务', () => {
     expect(stash.scheduledTasks).toHaveLength(1);
     expect(stash.selfLog.tasks).toHaveLength(1);
     expect(stash.selfLog.tasks[0].source).toBe('character');
+  });
+
+  // 幽灵任务回归守卫：角色排了任务，但这轮最终一句话都没发出去（只做了副作用 / 空生成 /
+  // 推送全挂）。任务在 scheduleTask 那一刻就真的建进 D1 了 —— 账要是没落下来，客户端认领
+  // 不到、面板看不见、用户取消不掉，它却会一直按时发下去。
+  it('这轮没发出任何正文时，角色自排的任务照样落进 self_log', async () => {
+    const stash = makeStash();
+    await runFireScheduleTool(stash, okSchedule, { send_at: sendAt }, NOW_MS);
+    expect(stash.selfLogDirty, '排完任务就该标记有未落盘改动').toBe(true);
+
+    const writeState = vi.fn(async (
+      _namespace: string,
+      _entries: Array<{ key: string; value: string | null }>,
+    ) => ({ upserted: 1, skipped: 0, deleted: 0 }));
+    await amsgFireSettled({
+      status: 'skipped', sentCount: 0, scratch: { fire: stash }, writeState,
+    } as any);
+
+    const entries = writeState.mock.calls[0][1];
+    const written = JSON.parse(String(entries.find((e) => e.key === AMSG_SELF_LOG_KEY)!.value));
+    expect(written.tasks).toHaveLength(1);
+    expect(written.tasks[0].source).toBe('character');
+    // 一段都没送出去 = 用户什么都没收到，不能记「我说过什么」
+    expect(written.entries ?? []).toHaveLength(0);
+  });
+
+  it('什么都没添进日志时不写库（别为一次空 fire 白打一个请求）', async () => {
+    const writeState = vi.fn(async (
+      _namespace: string,
+      _entries: Array<{ key: string; value: string | null }>,
+    ) => ({ upserted: 1, skipped: 0, deleted: 0 }));
+    await amsgFireSettled({
+      status: 'skipped', sentCount: 0, scratch: { fire: makeStash() }, writeState,
+    } as any);
+    expect(writeState).not.toHaveBeenCalled();
   });
 
   /** 撞车回执：带上已存在那行的脱敏投影（上游 2.6.0-next.11 起）。 */
@@ -1213,16 +1252,16 @@ describe('attachScheduledTasks', () => {
   });
 });
 
-// ⑤ 空生成留痕：模型返回空 / 纯拒答时上游把任务当成功消费，面板过去无从解释。
-// 现在 skip-push 分支写一条 last_skip（reason: empty-generation）。
-describe('空生成写 last_skip', () => {
-  const runEmptyFire = async (opts: { writeStateFails?: boolean } = {}) => {
-    const { ctx, scratch, writeState } = makeCtx({ ...opts });
+// ⑤ 没发出去也留痕：模型返回空 / 纯拒答、或者只做了副作用没说话时，上游都把任务当成功
+// 消费，面板过去无从解释。现在 skip-push 分支写一条 last_skip，两种成因分开记。
+describe('没发出去时写 last_skip', () => {
+  const runEmptyFire = async (opts: { writeStateFails?: boolean; llmOutputText?: string } = {}) => {
+    const { ctx, scratch, writeState } = makeCtx({ writeStateFails: opts.writeStateFails });
     await amsgHooks.onBeforeFire(ctx);
     const decision = await amsgHooks.onLLMOutput({
       sessionId: 'sess_task_42',
       llmResponse: {},
-      llmOutputText: '',
+      llmOutputText: opts.llmOutputText ?? '',
       contactName: 'Nyah',
       metadata: { charId: CHAR_ID, amsgClientTaskId: 'client-task-1', amsgMode: 'auto' },
       scratch,
@@ -1242,6 +1281,18 @@ describe('空生成写 last_skip', () => {
     expect(skip.reason).toBe('empty-generation');
     expect(skip.taskUuid).toBe(TASK_UUID);
     expect(skip.occurrenceMs).toBe(Date.parse('2026-07-25T12:00:00.000Z'));
+  });
+
+  // 只做事不说话的那一轮：空正文 push 的 banner body 也是空的，用户锁屏会收到一条
+  // 只有标题的空横幅、未读 +1、点进去 0 气泡。整条不发，副作用一起放弃。
+  it('只有副作用标签没有正文 → skip-push 且写 last_skip（reason: side-effects-only）', async () => {
+    const { decision, writeState } = await runEmptyFire({ llmOutputText: '[[ACTION:POKE]]' });
+    expect(decision.decision).toBe('skip-push');
+
+    const call = writeState.mock.calls.find(([, entries]) =>
+      entries.some((e: { key: string }) => e.key === AMSG_LAST_SKIP_KEY));
+    expect(call, '应该写过 last_skip').toBeTruthy();
+    expect(JSON.parse(String(call![1][0].value)).reason).toBe('side-effects-only');
   });
 
   it('留痕写失败不影响 skip 本身（best-effort）', async () => {
@@ -1264,6 +1315,38 @@ describe('空生成写 last_skip', () => {
     const call = writeState.mock.calls.find(([, entries]) =>
       entries.some((e: { key: string }) => e.key === AMSG_LAST_SKIP_KEY));
     expect(call).toBeUndefined();
+  });
+});
+
+// 推送横幅上的名字：任务行里那份是排程当天冻进去的，用户改名之后不会跟着变（上游
+// update-message 的可写字段里也没有它）。tool_pack 每轮聊天都重新上云，所以以它为准。
+describe('推送标题跟着当前角色名', () => {
+  it('tool_pack 的 charName 盖过任务行冻结的 contactName', async () => {
+    const { ctx, scratch, writeState } = makeCtx({
+      charRows: [
+        { key: AMSG_FIRE_PACK_KEY, value: firePackValue() },
+        {
+          key: AMSG_TOOL_PACK_KEY,
+          value: JSON.stringify({
+            v: 1, charName: '夜', xhsEnabled: false, activeMemoryMonths: [], memories: [],
+          }),
+        },
+      ],
+    });
+    await amsgHooks.onBeforeFire(ctx);
+    const decision = await amsgHooks.onLLMOutput({
+      sessionId: 'sess_task_42',
+      llmResponse: {},
+      llmOutputText: '睡了吗',
+      contactName: 'Nyah',   // 任务行还顶着改名前的旧名字
+      metadata: { charId: CHAR_ID, amsgClientTaskId: 'client-task-1', amsgMode: 'auto' },
+      scratch,
+      writeState,
+    } as any) as any;
+
+    expect(decision.decision).toBe('finish');
+    expect(decision.pushPayloads[0].title).toBe('来自 夜');
+    expect(decision.pushPayloads[0].contactName).toBe('夜');
   });
 });
 
@@ -1375,7 +1458,13 @@ describe('worker 配置接线', () => {
       VAPID_PRIVATE_KEY: 'priv',
       DB: {},
     } as any);
-    expect(cfg.onAfterSend).toBe(amsgAfterSend);
+    expect(cfg.onFireSettled).toBe(amsgFireSettled);
     expect(cfg.onStaleSkip).toBe(amsgStaleSkip);
+
+    // 同角色的多条任务不并发跑，靠这个分组键。取不到 charId 时返回 null（= 不分组），
+    // 别让一批「认不出属于谁」的任务挤成同一组互相堵。
+    expect(cfg.serializeBy({ metadata: { charId: 'char-a' } })).toBe('char-a');
+    expect(cfg.serializeBy({ metadata: {} })).toBeNull();
+    expect(cfg.serializeBy({})).toBeNull();
   });
 });
