@@ -72,6 +72,16 @@ const stripBusinessTagsForNotification = (t: string): string =>
     .replace(/\[\[(?:READ_NOTE|XHS_[A-Z_]+|LIFE|NEWS_CARD)[:\s][\s\S]*?\]\]/g, '')
     .replace(/\[\[XHS_[A-Z_]+\]\]/g, '');
 
+/**
+ * 剥掉**所有** `[[...]]`, 不看标签名 —— 客户端 `chatParser.hasDisplayContent` 的口径.
+ * 只在段级判空时用, 不参与正文清洗 (白名单之外的标签该不该留给客户端是另一件事).
+ *
+ * 存在的理由: 上面那两条白名单只认识约定好的标签, 模型现编的 `[[拥抱]]` 会原样留下来。
+ * 客户端 hasDisplayContent 剥光一切 `[[...]]` 后判空, 这种段不落库; worker 这边却算它
+ * 「有内容」照发一条 push —— 于是横幅响了一下、点进去一个气泡都没有。
+ */
+const stripAllDoubleBracketTags = (t: string): string => t.replace(/\[\[[\s\S]*?\]\]/g, '');
+
 /** 引用类: `[[QUOTE|引用]] / [QUOTE|引用] / [回复 "..."] / 模仿历史渲染的 [xx引用了xx「…」…]` */
 const stripQuotes = (t: string): string =>
   t
@@ -136,9 +146,13 @@ const stripInnerState = (t: string): string => t.replace(/\[\[INNER_STATE:\s*[\s
 const replaceMarkdownLinks = (t: string): string =>
   t.replace(/\[([^\]]+)\]\([^)]+\)/g, '[链接：$1]');
 
-/** `[[SEND_EMOJI: 名称]]` → `[表情：名称]` */
+/**
+ * `[[SEND_EMOJI: 名称]]` → `[表情：名称]`.
+ * 全角冒号一并容 (`[[SEND_EMOJI：抱抱]]` 是中文输入法下的高频手写变体, 跟
+ * `[[记录：...]]` 那条同一个理由)。
+ */
 const replaceSendEmoji = (t: string): string =>
-  t.replace(/\[\[SEND_EMOJI:\s*(.+?)\]\]/g, '[表情：$1]');
+  t.replace(/\[\[SEND_EMOJI[:：]\s*(.+?)\]\]/g, '[表情：$1]');
 
 /** `[xxx 发送了表情包: 名称]` → `[表情：名称]` (直接转最终展示, 跳过 SEND_EMOJI 中间形态) */
 const replaceEmojiReverseTag = (t: string): string =>
@@ -583,6 +597,10 @@ export function sanitizeIntoSegments(text: string): Segment[] {
         if (!stripQuotes(rawText).trim()) pendingQuoteRaw += `${rawText}\n`;
         continue;
       }
+      // 再按客户端口径判一次空：剥光所有 `[[...]]` 后什么都不剩的段（模型现编的未知
+      // 标签独占一行），客户端不会落成气泡，这边也就别发横幅——两端判空规则一致，
+      // 横幅数才等于气泡数。攒着的引用不消费，会继续顺延到后面真有正文的那一段。
+      if (!stripAllDoubleBracketTags(sanitized).trim()) continue;
       segments.push({
         raw: pendingQuoteRaw ? `${pendingQuoteRaw}${rawText}` : rawText,
         sanitized,
@@ -653,12 +671,15 @@ function chunkText(text: string): string[] {
 /**
  * 把 chunk 里的 `[[SEND_EMOJI: 名称]]` 拆出来当独立 part. 跟客户端
  * `chatParser.splitResponse` 行为对齐 (输出 shape 不同, 这里用 kind 字段区分).
+ *
+ * 冒号容全角 (`[[SEND_EMOJI：抱抱]]`): 拆出来后 raw 按半角规范形态重写, 客户端拿到的
+ * 永远是它认得的那一种。不容的话这段会当普通文字走下去, banner 上直接是裸标签。
  */
 function splitOnSendEmoji(chunk: string): Array<
   | { kind: 'text'; text: string }
   | { kind: 'emoji'; name: string }
 > {
-  const re = /\[\[SEND_EMOJI:\s*(.*?)\]\]/g;
+  const re = /\[\[SEND_EMOJI[:：]\s*(.*?)\]\]/g;
   const parts: Array<{ kind: 'text'; text: string } | { kind: 'emoji'; name: string }> = [];
   let lastIndex = 0;
   let m: RegExpExecArray | null;

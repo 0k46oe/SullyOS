@@ -542,3 +542,40 @@ describe('sanitizeIntoSegments — 独占一行的引用不丢', () => {
     expect(sanitizeIntoSegments('[[QUOTE: 我说的话]]')).toEqual([]);
   });
 });
+
+// 「横幅响了一下、点进去一个气泡都没有」的成因：worker 只认识白名单里的标签，模型现编的
+// `[[拥抱]]` 原样留着就被当成有内容照发；客户端 chatParser.hasDisplayContent 剥光一切
+// `[[...]]` 后判空，这一条不落库。两端判空口径必须一致，横幅数才等于气泡数。
+describe('sanitizeIntoSegments — 未知 [[标签]] 不产生空气泡的横幅', () => {
+  it('模型现编的未知标签独占一行 → 整段丢掉，不发这条 push', () => {
+    expect(sanitizeIntoSegments('你今天还好吗\n[[拥抱]]'))
+      .toEqual([{ raw: '你今天还好吗', sanitized: '你今天还好吗' }]);
+    expect(sanitizeIntoSegments('[[轻轻抱住你]]')).toEqual([]);
+  });
+
+  it('未知标签跟正文同一行 → 照旧发，客户端那边也有正文能成气泡', () => {
+    const segs = sanitizeIntoSegments('抱一下[[拥抱]]');
+    expect(segs).toHaveLength(1);
+    expect(segs[0].raw).toBe('抱一下[[拥抱]]');
+  });
+
+  it('被丢掉的未知标签段不吃掉攒着的引用，引用继续顺延到后面的正文', () => {
+    const segs = sanitizeIntoSegments('[[QUOTE: 我说的话]]\n[[拥抱]]\n我在的');
+    expect(segs).toHaveLength(1);
+    expect(segs[0].raw).toContain('[[QUOTE: 我说的话]]');
+    expect(segs[0].sanitized).toBe('我在的');
+  });
+});
+
+describe('SEND_EMOJI 全角冒号容错', () => {
+  it('[[SEND_EMOJI：xx]] 当表情段处理，raw 按半角规范形态给客户端', () => {
+    expect(sanitizeIntoSegments('[[SEND_EMOJI：抱抱]]'))
+      .toEqual([{ raw: '[[SEND_EMOJI: 抱抱]]', sanitized: '[表情：抱抱]' }]);
+    expect(sanitizeIntoSegments('你看 [[SEND_EMOJI：笑]] 我没事的').map((s) => s.sanitized))
+      .toEqual(['你看', '[表情：笑]', '我没事的']);
+  });
+
+  it('notification 终态路径同样认全角冒号', () => {
+    expect(sanitizeForNotification('[[SEND_EMOJI：抱抱]]')).toBe('[表情：抱抱]');
+  });
+});

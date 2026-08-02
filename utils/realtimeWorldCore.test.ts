@@ -8,6 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+    checkSpecialDates,
     getHotNewsSlot,
     pickRandomNews,
     renderRealtimeWorldBlock,
@@ -89,6 +90,50 @@ describe('平台清单', () => {
     it('比对与顺序无关（快照能不能复用看它）', () => {
         expect(sameHotNewsPlatforms(['a', 'b'], ['b', 'a'])).toBe(true);
         expect(sameHotNewsPlatforms(['a'], ['a', 'b'])).toBe(false);
+    });
+});
+
+// 节日表原本只有公历，春节/除夕当天角色毫无反应。农历日期靠预算好的公历日期表查，
+// 所以这里抽查几个已知日子钉住表没抄错，也钉住「超出年限就静默没有」不会瞎猜。
+describe('checkSpecialDates 农历节日', () => {
+    // 12:00 Asia/Shanghai，避开跨日边界；不受跑测试的机器时区影响
+    const noonInShanghai = (y: number, m: number, d: number) => Date.UTC(y, m - 1, d, 4, 0, 0);
+    const on = (y: number, m: number, d: number) => checkSpecialDates('Asia/Shanghai', noonInShanghai(y, m, d));
+
+    it('抽查几个已知日子：除夕、春节、元宵、端午、七夕、中秋、重阳', () => {
+        expect(on(2026, 2, 16)).toContain('除夕');
+        expect(on(2026, 2, 17)).toContain('春节');
+        expect(on(2026, 3, 3)).toContain('元宵节');
+        expect(on(2026, 6, 19)).toContain('端午节');
+        expect(on(2026, 8, 19)).toContain('七夕');
+        expect(on(2026, 9, 25)).toContain('中秋节');
+        expect(on(2026, 10, 18)).toContain('重阳节');
+        // 换一年也得对上（春节每年浮动，抄错一年整年都歪）
+        expect(on(2027, 2, 6)).toContain('春节');
+        expect(on(2030, 2, 3)).toContain('春节');
+        expect(on(2034, 2, 19)).toContain('春节');
+    });
+
+    it('不是节日的日子什么都不给', () => {
+        expect(on(2026, 2, 18)).toEqual([]);
+        expect(on(2026, 7, 7)).toEqual([]); // 七夕看农历，公历 7/7 不算
+    });
+
+    it('公历跟农历撞一天时两个都给', () => {
+        expect(on(2031, 10, 1)).toEqual(['国庆节', '中秋节']);
+        expect(on(2033, 2, 14)).toEqual(['情人节', '元宵节']);
+    });
+
+    it('超出表覆盖的年份 → 静默没有农历节日，不会拿别年的日子顶上', () => {
+        expect(on(2036, 2, 17)).toEqual([]);
+        expect(on(2025, 2, 17)).toEqual([]);
+    });
+
+    it('农历节日也跟角色所在地的日历走', () => {
+        // 上海 2026-02-17 09:00（春节）== 纽约 2026-02-16 20:00（除夕）
+        const at = Date.UTC(2026, 1, 17, 1, 0, 0);
+        expect(checkSpecialDates('Asia/Shanghai', at)).toContain('春节');
+        expect(checkSpecialDates('America/New_York', at)).toContain('除夕');
     });
 });
 

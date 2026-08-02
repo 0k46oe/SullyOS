@@ -27,6 +27,9 @@ export function getFlowNarrativeKey(hour: number): 'morning' | 'afternoon' | 'ev
     return 'evening';
 }
 
+/** 几点之前算「还在前一夜里」。凌晨 0-5 点属于昨晚的尾巴，不是今天的早晨。 */
+const PRE_DAWN_END_HOUR = 5;
+
 /** 当前时刻落在哪一条日程上，以及紧接着的下一条。都可能为 null（表还没开始 / 表是空的）。 */
 export const resolveScheduleSlots = (
     schedule: RenderableSchedule | null,
@@ -63,6 +66,10 @@ export const buildScheduleInjection = (
     if (!schedule || !schedule.slots || schedule.slots.length === 0) return '';
     const { current: currentSlot, next: nextSlot } = resolveScheduleSlots(schedule, now);
 
+    // 凌晨还没轮到今天第一条日程时，人其实还在昨晚里没睡。主动消息经常在这个点触发，
+    // 按「今天刚要开始」写，半夜一点的角色就会顶着清晨的心境说话。
+    const isPreDawnCarryOver = !currentSlot && now.getHours() < PRE_DAWN_END_HOUR;
+
     // 1. 当前时段硬事实（每轮独立注入）
     let slotHeader = '';
     if (currentSlot) {
@@ -71,7 +78,9 @@ export const buildScheduleInjection = (
         if (nextSlot) slotHeader += `\n之后安排：${nextSlot.startTime} ${nextSlot.activity}`;
         slotHeader += '\n';
     } else if (nextSlot) {
-        slotHeader = `今天还没开始活动，稍后先${nextSlot.activity}（${nextSlot.startTime}）\n`;
+        slotHeader = isPreDawnCarryOver
+            ? `夜深了，今天的安排还没开始，最早的一件是${nextSlot.activity}（${nextSlot.startTime}）\n`
+            : `今天还没开始活动，稍后先${nextSlot.activity}（${nextSlot.startTime}）\n`;
     }
 
     // 2. 意识流独白
@@ -79,7 +88,8 @@ export const buildScheduleInjection = (
     if (evolvedNarrative) {
         narrative = evolvedNarrative;
     } else if (schedule.flowNarrative && Object.keys(schedule.flowNarrative).length > 0) {
-        const key = getFlowNarrativeKey(now.getHours());
+        // 前一夜的延续取「晚」档；其余照一天三档走。
+        const key = isPreDawnCarryOver ? 'evening' : getFlowNarrativeKey(now.getHours());
         narrative = schedule.flowNarrative[key]
             || schedule.flowNarrative['evening']
             || schedule.flowNarrative['afternoon']
