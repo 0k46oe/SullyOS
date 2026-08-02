@@ -8,14 +8,25 @@ describe('剧情剧场数据与糯米机原生预设备份', () => {
             id: 'story-backup-entry',
             title: '雨夜车站',
             premise: '三个人错过末班车。',
+            openingMode: 'assistant',
+            mask: { type: 'custom', id: 'story-mask' },
             characterIds: ['char-a', 'char-b'],
             writesToCharacterMemory: false,
             characterMemoryDates: {},
             carryCharacterMemory: true,
             characterContextLimits: { 'char-a': 100, 'char-b': 80 },
             archiveAfter: 30,
+            archiveKeepRecent: 5,
             archiveStrategy: 'summary',
-            archives: [],
+            archives: [{
+                id: 'archive-1',
+                strategy: 'summary',
+                fromMessageId: 1,
+                toMessageId: 2,
+                messageCount: 2,
+                summary: 'Archived scene summary',
+                createdAt: 15,
+            }],
             selectedWorldbookIds: ['book-a'],
             presetId: 'story-backup-preset',
             createdAt: 10,
@@ -40,18 +51,35 @@ describe('剧情剧场数据与糯米机原生预设备份', () => {
         await DB.saveStoryTheater(entry);
         await DB.saveStoryTheaterPreset(preset);
         await DB.saveStoryTheaterMask(mask);
+        const messageId = await DB.saveMessage({
+            charId: `story-theater:${entry.id}`,
+            role: 'assistant',
+            type: 'text',
+            content: 'The restored story floor',
+            timestamp: 30,
+            metadata: {
+                source: 'story_theater',
+                theaterId: entry.id,
+                theaterAffinityInputs: [{ charId: 'char-a', delta: 2, reason: 'noticed change', awareness: 'noticed' }],
+            },
+        });
         const exported = JSON.parse(JSON.stringify(await DB.exportFullData()));
         expect(exported.storyTheaters).toContainEqual(entry);
         expect(exported.storyTheaterPresets).toContainEqual(preset);
         expect(exported.storyTheaterMasks).toContainEqual(mask);
+        expect(exported.messages).toContainEqual(expect.objectContaining({ id: messageId, charId: `story-theater:${entry.id}`, content: 'The restored story floor' }));
 
         await DB.deleteStoryTheater(entry.id);
         await DB.deleteStoryTheaterPreset(preset.id);
         await DB.deleteStoryTheaterMask(mask.id);
+        await DB.deleteMessages([messageId]);
         await DB.importFullData(exported as any);
 
         expect(await DB.getStoryTheaters()).toContainEqual(entry);
         expect(await DB.getStoryTheaterPresets()).toContainEqual(preset);
         expect(await DB.getStoryTheaterMasks()).toContainEqual(mask);
+        const restoredMessages = await DB.getMessagesByCharId(`story-theater:${entry.id}`, true);
+        const restoredFloor = restoredMessages.find(message => message.id === messageId);
+        expect(restoredFloor?.metadata?.theaterAffinityInputs).toEqual([{ charId: 'char-a', delta: 2, reason: 'noticed change', awareness: 'noticed' }]);
     });
 });
