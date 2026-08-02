@@ -248,6 +248,9 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
       onSave((prev) => buildConfig(prev, (list) =>
         list.map((x) => x.taskUuid === t.taskUuid ? { ...x, lastError: '远端取消失败，可重试' } : x)));
       addToast(`任务 [${shortTaskId(t.taskUuid)}] 取消失败（远端未确认），稍后重试。`, 'error');
+      // 排程有埋点、取消没有的话，任务生命周期只记了一半。三个结果各有各的含义：
+      // failed = 远端照发但面板以为拦下了，是对账不平里最难受的一种。
+      trackEvent('取消定时消息', { result: 'failed' });
       return;
     }
     if (editingTaskUuid === t.taskUuid) setEditingTaskUuid(null);
@@ -263,6 +266,7 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
     addToast(alreadyGone
       ? `任务 [${shortTaskId(t.taskUuid)}] 在远端已不存在（多半已经发过了），已从列表移除。`
       : `任务 [${shortTaskId(t.taskUuid)}] 已取消。`, 'info');
+    trackEvent('取消定时消息', { result: alreadyGone ? '远端已不存在' : 'ok' });
   };
 
   const handleSubmit = async () => {

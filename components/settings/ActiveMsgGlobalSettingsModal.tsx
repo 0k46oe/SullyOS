@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import Modal from '../os/Modal';
 import { ActiveMsg2GlobalConfig, RealtimeConfig } from '../../types';
-import { ActiveMsgClient, ActiveMsg2PushStatus } from '../../utils/activeMsgClient';
+import { ActiveMsgClient, ActiveMsg2PushStatus, readAmsgFailKind } from '../../utils/activeMsgClient';
 import { ActiveMsgStore, maskActiveMsgUserId } from '../../utils/activeMsgStore';
 import {
   buildCloudflareDashboardUrl,
@@ -65,6 +65,10 @@ const REQUIRED_WORKER_VERSION = '2.6.0-next.12';
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';
 const SETUP_WALKTHROUGH_URL = 'https://github.com/qegj567-cloud/SullyOS/blob/master/docs/amsg2-setup-walkthrough.md';
 
+// 探测结果每次会话只报一次。refresh() 在开面板、连接成功、订阅成功后都会跑一遍，
+// 一个连不上、反复点「连接」的人否则能一个人刷出十几条同样的结果，把分布带歪。
+let workerCapsReported = false;
+
 /** 刚生成的密钥明文：输入框是 password 型，只能在这一处让用户看见并手动复制。 */
 const SecretReveal: React.FC<{ value: string; className?: string }> = ({ value, className = '' }) => (
   <p className={`font-mono text-[10px] leading-relaxed text-slate-500 break-all bg-white border border-slate-200 rounded-xl px-2 py-1.5 ${className}`}>
@@ -107,16 +111,27 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
 
   // 特性探测：确认「过老」（端点 404 → null，或缺关键特性）才亮牌；
   // 探测本身失败（断网 / 密钥不对 / 没填地址）不亮，避免误报。
-  const probeWorkerCaps = async () => {
+  const probeWorkerCaps = async (workerConfigured: boolean) => {
+    // 只有配了地址才报：没填地址时这次探测必然失败，那不是版本问题。
+    const shouldReport = workerConfigured && !workerCapsReported;
+    if (shouldReport) workerCapsReported = true;
     try {
       const caps = await ActiveMsgClient.getCapabilities();
-      setWorkerOutdated(
-        !caps
-        || REQUIRED_WORKER_FEATURES.some((f) => !caps.features.includes(f))
-        || !isAmsgServerVersionAtLeast(caps.serverVersion, REQUIRED_WORKER_VERSION),
-      );
+      const missingFeature = !caps || REQUIRED_WORKER_FEATURES.some((f) => !caps.features.includes(f));
+      const versionTooOld = !caps || !isAmsgServerVersionAtLeast(caps.serverVersion, REQUIRED_WORKER_VERSION);
+      setWorkerOutdated(missingFeature || versionTooOld);
+      // 跑着旧 worker 的表现是**静默错**（自述回写不落盘、任务重复推），用户不会来报，
+      // 面板这一句提示是唯一的出口。这里数的就是「有多少人正跑着一个不该跑的版本」。
+      if (shouldReport) {
+        trackEvent('探测 2.0 Worker 能力', {
+          result: !caps ? '端点不存在' : missingFeature ? '缺特性' : versionTooOld ? '版本过旧' : 'ok',
+        });
+      }
     } catch {
       setWorkerOutdated(false);
+      // 探测本身炸了（断网 / 地址不通）不亮牌，免得误报；但它跟「版本旧」是两回事，
+      // 单独占一格，看分布时能一眼把这批人排除掉。
+      if (shouldReport) trackEvent('探测 2.0 Worker 能力', { result: '探测失败' });
     }
   };
 
@@ -126,7 +141,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     setConfig(nextConfig);
     setPushStatus(nextPushStatus);
     setInstantOn(isInstantConfigReady());
-    void probeWorkerCaps();
+    void probeWorkerCaps(Boolean(nextConfig.workerUrl?.trim()));
   };
 
   /** 关掉 Instant Push 的开关，worker 地址等配置留着——以后想切回去不用重填。 */
@@ -174,8 +189,9 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       trackEvent('开启通知与推送订阅', { result: 'ok' });
     } catch (error: any) {
       addToast(error?.message || '创建推送订阅失败。', 'error');
-      // 只报成功/失败，错误原文留在 toast 里（可能带 push endpoint）。
-      trackEvent('开启通知与推送订阅', { result: 'failed' });
+      // 只报抛错那一刻挂上的代号（源码里写死的枚举）。错误原文可能带 push endpoint，
+      // 留在 toast 和 console 里，不进上报。
+      trackEvent('开启通知与推送订阅', { result: readAmsgFailKind(error) });
     } finally {
       setLoading(false);
     }
@@ -196,12 +212,14 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       await ActiveMsgClient.connect();
       await refresh();
       addToast('已连接成功，主动消息 2.0 可以用了。', 'success');
-      // 只报「这次连接成没成」。连接串 / tenantToken / 错误原文一概不带，
+      // 只报「这次连接成没成 / 卡在哪一类」。连接串 / tenantToken / 错误原文一概不带，
       // 也不报「之前配没配过 tenant」——那等于把两项凭据的配置状态压成一位发出去。
+      // 失败代号是抛错时按 HTTP 状态挂上的字面量（见 activeMsgClient 的 AmsgFailKind），
+      // 分开是因为「密钥对不上」和「D1 没绑」要用户去改的地方完全不同。
       trackEvent('连接并启用主动消息 2.0', { result: 'ok' });
     } catch (error: any) {
       addToast(error?.message || '连接失败。', 'error');
-      trackEvent('连接并启用主动消息 2.0', { result: 'failed' });
+      trackEvent('连接并启用主动消息 2.0', { result: readAmsgFailKind(error) });
     } finally {
       setLoading(false);
     }
@@ -213,8 +231,11 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     try {
       await ActiveMsgClient.copyWorkerBundleToClipboard();
       addToast('Worker 代码已复制，去 CF 后台的 Edit code 里粘贴覆盖。', 'success');
+      trackEvent('复制 2.0 Worker 代码', { result: 'ok' });
     } catch (error: any) {
       addToast(`复制失败（${error?.message || error}）。也可以从仓库 worker/amsg/worker.bundle.js 获取。`, 'error');
+      // 剪贴板 API 在非 HTTPS / 部分 WebView 里会直接抛，这条就是那批人的规模。
+      trackEvent('复制 2.0 Worker 代码', { result: 'failed' });
     }
   };
 
@@ -233,8 +254,12 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     }
   };
 
-  const handleGenerateMasterKey = () =>
-    revealAndCopy(ActiveMsgClient.generateMasterKey(), setGeneratedMasterKey, 'AMSG_MASTER_KEY');
+  const handleGenerateMasterKey = () => {
+    // 只报「生成了哪一个」。密钥本体只在这次面板打开期间存在于 state，前端不落盘，
+    // 更不会进上报。
+    trackEvent('生成 2.0 Worker 密钥', { which: 'master_key' });
+    return revealAndCopy(ActiveMsgClient.generateMasterKey(), setGeneratedMasterKey, 'AMSG_MASTER_KEY');
+  };
 
   const handleClearClientState = async () => {
     if (!confirm('确定清空云端状态？Worker D1 里同步的角色上下文（fire_pack）会全部删除。在下一次聊天重新同步之前，已排程的 AI 任务到点会失败；固定消息任务不受影响。')) return;
@@ -259,6 +284,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   const handleGenerateServerToken = () => {
     const token = generateClientToken();
     patchConfig({ serverToken: token });
+    trackEvent('生成 2.0 Worker 密钥', { which: 'server_token' });
     return revealAndCopy(token, setGeneratedServerToken, 'AMSG_SERVER_TOKEN');
   };
 
@@ -326,7 +352,11 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
           <button
             type="button"
-            onClick={() => setDeployOpen((prev) => !prev)}
+            onClick={() => setDeployOpen((prev) => {
+              // 只在展开时记一笔：收起也记的话同一个人会被数两次，漏斗第一格直接虚高一倍。
+              if (!prev) trackEvent('展开 2.0 部署指引', { mode: '主流程' });
+              return !prev;
+            })}
             className="w-full flex items-center justify-between text-left"
           >
             <span className="font-bold text-slate-700">部署 Worker（第一次用先做这个）</span>
@@ -371,10 +401,13 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
               </p>
 
               <div className="grid grid-cols-3 gap-2">
+                {/* 三个出口合成一个事件带 target 枚举：它们是部署流程同一步的三条岔路，
+                    拆成三个事件名只是多占清单行数，看漏斗时还得自己加回去。 */}
                 <a
                   href={WORKERS_REPO_URL}
                   target="_blank"
                   rel="noreferrer"
+                  onClick={() => trackEvent('打开 2.0 部署外链', { target: 'fork仓库' })}
                   className="py-2.5 rounded-xl text-xs font-bold bg-violet-500 text-white text-center active:scale-95 transition-transform"
                 >
                   ↗ Fork 仓库
@@ -383,6 +416,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
                   href={SETUP_WALKTHROUGH_URL}
                   target="_blank"
                   rel="noreferrer"
+                  onClick={() => trackEvent('打开 2.0 部署外链', { target: '图文教程' })}
                   className="py-2.5 rounded-xl text-xs font-bold bg-white border border-slate-200 text-slate-600 text-center active:scale-95 transition-transform"
                 >
                   ↗ 图文教程
@@ -391,6 +425,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
                   href={buildCloudflareDashboardUrl(config.workerUrl.trim() || undefined)}
                   target="_blank"
                   rel="noreferrer"
+                  onClick={() => trackEvent('打开 2.0 部署外链', { target: 'CF面板' })}
                   className="py-2.5 rounded-xl text-xs font-bold bg-white border border-slate-200 text-slate-600 text-center active:scale-95 transition-transform"
                 >
                   ↗ CF 面板
@@ -448,7 +483,10 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
               <div className="border-t border-slate-100 pt-2.5">
                 <button
                   type="button"
-                  onClick={() => setPasteFallbackOpen((prev) => !prev)}
+                  onClick={() => setPasteFallbackOpen((prev) => {
+                    if (!prev) trackEvent('展开 2.0 部署指引', { mode: '手动粘贴' });
+                    return !prev;
+                  })}
                   className="w-full flex items-center justify-between text-left text-[11px] font-bold text-slate-400"
                 >
                   <span>没有 GitHub 账号？手动粘贴部署</span>

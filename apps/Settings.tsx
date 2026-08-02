@@ -2594,7 +2594,7 @@ const Settings: React.FC = () => {
                     <h2 className="text-sm font-semibold text-slate-600 tracking-wider">主动消息 2.0</h2>
                 </div>
                 <button
-                    onClick={() => setShowAmsg2Modal(true)}
+                    onClick={() => { trackEvent('打开主动消息2.0配置'); setShowAmsg2Modal(true); }}
                     className="text-[10px] bg-violet-100 text-violet-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform"
                 >
                     配置
