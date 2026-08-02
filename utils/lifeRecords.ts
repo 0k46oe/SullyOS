@@ -536,7 +536,8 @@ const findDuplicate = async (
 
 /**
  * 解析并执行角色输出里的 [[LIFE:...]] 指令（chatParser 调用）。
- * - 模块开关关闭 / 指令格式非法 → 只剥 tag，静默丢弃。
+ * - 指令格式非法 → 只剥 tag，静默丢弃（模型手滑，没什么可交代的）。
+ * - 生活记录已关 / 模块被隐藏 → 不写库，落一条系统提示说明这笔没记成（角色的话已经说出去了）。
  * - 重复 → 不写库，落一张"已有记录，无需重复"的成功态卡片（角色不算记错）。
  * - 成功 → 写库（expense 同时写银行流水）+ 落可交互 life_card。
  * 返回剥掉所有 LIFE tag 的文本。
@@ -547,28 +548,62 @@ export const executeLifeDirectives = async (
     addToast: (msg: string, type: 'info' | 'success' | 'error') => void,
     /** 这一轮消息该落的时间戳（离线补收时是原始发送时刻）；不传按写库当刻。 */
     messageTimestamp?: number,
+    /** 这一轮消息统一继承的 metadata（主动消息 2.0 的标记，见 chatParser 的同名参数）。 */
+    inheritMeta?: Record<string, any>,
 ): Promise<string> => {
     /** 生活卡跟同一条消息的正文气泡共用一个时间戳，别一条消息两个时间。 */
     const stamp = messageTimestamp != null ? { timestamp: messageTimestamp } : {};
+    /** 卡片自己的字段优先，inheritMeta 只补它没有的键。 */
+    const withInherited = (meta: Record<string, any>) => (inheritMeta ? { ...inheritMeta, ...meta } : meta);
     let content = aiContent;
     if (!content.includes('[[LIFE:')) return content;
 
     const today = lifeToday();
     let executed = 0;
     const MAX_PER_MESSAGE = 4; // 防 LLM 发疯连打十几条
-    // 全局隐藏的模块：即使角色开关全开也静默丢弃（用户长按隐藏 = 不想看到这类内容）
+    // 全局隐藏的模块：即使角色开关全开也不记（用户长按隐藏 = 不想看到这类内容），但会留条提示
     const hidden = getHiddenLifeModules(await DB.getLifeRecordSettings().catch(() => null));
+
+    /**
+     * 想记但没记成（开关关了 / 模块被隐藏）时留一条系统提示。
+     *
+     * 主动消息是提前几小时打包的，打包时开着、送达前用户关掉是常态；角色那句「我帮你记下了」
+     * 已经说满了，动作却静默蒸发，用户只会觉得这功能坏了。写不进去也不拦着后面的指令。
+     */
+    const noteSkipped = async (summary: string, reason: string) => {
+        try {
+            await DB.saveMessage({
+                ...stamp,
+                charId: char.id, role: 'system', type: 'text',
+                content: `[系统: ${char.name}想帮你记「${summary}」，但${reason}，这次没记成]`,
+                metadata: withInherited({ lifeRecordSkipped: true }),
+            });
+        } catch (e) {
+            console.warn('[LifeRecord] 记不成的提示也没落进去:', e);
+        }
+    };
 
     let m: RegExpMatchArray | null;
     while ((m = content.match(LIFE_TAG_RE)) !== null) {
         const [tag, verb, argStr] = m;
         content = content.replace(tag, '').trim();
-        if (!isLifeRecordOn(char) || executed >= MAX_PER_MESSAGE) continue;
+        if (executed >= MAX_PER_MESSAGE) continue;
 
         const args = argStr ? argStr.split('|').slice(1).map(s => s.trim()) : [];
         const d = parseLifeDirective(verb, args);
-        if (!d || !isLifeModuleOn(char, d.module) || hidden.has(d.module)) continue;
+        if (!d) continue;
+        // 记不成的也计数：连打十几条时提示同样会刷屏
         executed++;
+
+        const skipSummary = summarizeLifeRecord(d.module, d.kind, d.payload);
+        if (!isLifeRecordOn(char)) {
+            await noteSkipped(skipSummary, '生活记录功能已关闭');
+            continue;
+        }
+        if (!isLifeModuleOn(char, d.module) || hidden.has(d.module)) {
+            await noteSkipped(skipSummary, `「${LIFE_MODULE_LABELS[d.module]}」已关闭`);
+            continue;
+        }
 
         try {
             const records = await DB.getAllLifeRecords();
@@ -580,10 +615,10 @@ export const executeLifeDirectives = async (
                     ...stamp,
                     charId: char.id, role: 'assistant', type: 'life_card',
                     content: `[生活记录：${summary}（已有记录，未重复添加）]`,
-                    metadata: {
+                    metadata: withInherited({
                         module: d.module, kind: d.kind, summary, dateStr: today,
                         recordedByName: char.name, duplicate: true, duplicateBy: dup.byName,
-                    },
+                    }),
                 });
                 addToast(`${char.name} 想记「${summary}」，已有记录`, 'info');
                 continue;
@@ -618,10 +653,10 @@ export const executeLifeDirectives = async (
                 ...stamp,
                 charId: char.id, role: 'assistant', type: 'life_card',
                 content: `[生活记录：${summary}]`,
-                metadata: {
+                metadata: withInherited({
                     recordId: record.id, module: d.module, kind: d.kind, summary,
                     dateStr: today, recordedByName: char.name, reviewStatus: 'active',
-                },
+                }),
             });
             addToast(`${char.name} 帮你记录了「${summary}」`, 'success');
         } catch (e) {

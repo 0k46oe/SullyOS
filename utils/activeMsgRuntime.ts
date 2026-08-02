@@ -3,7 +3,7 @@ import { DB } from './db';
 import { ChatPrompts } from './chatPrompts';
 import { ActiveMsgStore } from './activeMsgStore';
 import { ActiveMsgClient } from './activeMsgClient';
-import { amsgStateNamespace } from './amsgFirePack';
+import { AMSG_SELF_LOG_KEY, amsgStateNamespace, parseSelfLog } from './amsgFirePack';
 import {
   applyAssistantPostProcessing,
   type PostProcessDirective,
@@ -235,31 +235,55 @@ export const findInboxArtifacts = <T extends { role: string; metadata?: any }>(
   m.role === 'assistant' && m.metadata?.activeMsg2?.messageId === messageId);
 
 /**
+ * 清场时可以删的消息类型——只有「渲染型气泡」：正文、表情包、HTML 卡片。
+ *
+ * 副作用产物（转账卡 / 戳一戳 / 音乐卡 / 新闻卡 / 日程提示 / 生活卡 / 小红书卡…）一律
+ * 留在原地：重试那一趟压根不会再产一遍（副作用要么随 directives 走、本轮不重放，要么像
+ * XHS 那样被 disabledXhsSideEffects 关掉），删了就是永久少一张卡——而钱和日程是真的。
+ *
+ * 白名单制，将来新增的类型默认按「不删」处理：宁可重复一条气泡，也不凭空删掉一张卡。
+ */
+export const PURGEABLE_ARTIFACT_TYPES: ReadonlySet<string> = new Set(['text', 'emoji', 'html_card']);
+
+/**
+ * 把这条 push 上一趟写下的**渲染型气泡**从聊天记录里删掉。
+ *
+ * 返回两个数，别混为一谈：
+ *   - removed：这次真删了几条（只数渲染型气泡）；
+ *   - evidence：上一趟到底有没有留下过东西（连副作用产物一起数）。副作用要不要重放看它。
+ */
+export const purgeInboxArtifacts = async (
+  message: ActiveMsg2InboxMessage,
+): Promise<{ removed: number; evidence: number }> => {
+  const recent = await DB.getRecentMessagesByCharId(message.charId, 200);
+  const stale = findInboxArtifacts(recent, message.messageId);
+  const purgeable = stale.filter((m) => PURGEABLE_ARTIFACT_TYPES.has(m.type));
+  if (purgeable.length > 0) await DB.deleteMessages(purgeable.map((m) => m.id));
+  return { removed: purgeable.length, evidence: stale.length };
+};
+
+/**
  * 重试前的清场：把上一次跑到一半写进去的气泡删掉，并告诉调用方副作用还要不要重放。
  *
  * 后处理的顺序是「先跑副作用（转账 / 加日程 / 戳一戳 / 排程），再渲染气泡」，
- * 所以**只要看到已落库的气泡，就说明副作用那一步上次已经整段跑完了**。这时重放
- * 等于转两次账、加两次日程，比丢内容严重得多——所以这一趟只补渲染，不带 directives。
- * 一条气泡都没有则说明上次死在副作用途中，那时 directives 还得照常带上，
+ * 所以**只要看到上一趟留下的任何一条消息，就说明副作用那一步上次已经整段跑完了**。
+ * 这时重放等于转两次账、加两次日程，比丢内容严重得多——所以这一趟只补渲染，不带 directives。
+ * 一条都没留下才说明上次死在副作用途中，那时 directives 还得照常带上，
  * 否则这条消息的副作用就彻底没了。
+ *
+ * 「凭据」和「删除对象」是两回事：副作用产物（转账卡等）算凭据但不删——它们跟正文气泡
+ * 带着同一个 activeMsg2.messageId，删掉又不重放的话，那张卡就永远回不来了。
  */
-/** 把这条 push 上一趟写下的气泡从聊天记录里删掉，返回删了几条。 */
-export const purgeInboxArtifacts = async (message: ActiveMsg2InboxMessage): Promise<number> => {
-  const recent = await DB.getRecentMessagesByCharId(message.charId, 200);
-  const stale = findInboxArtifacts(recent, message.messageId);
-  if (stale.length > 0) await DB.deleteMessages(stale.map((m) => m.id));
-  return stale.length;
-};
-
 const prepareInboxRetry = async (
   message: ActiveMsg2InboxMessage,
 ): Promise<{ replayDirectives: boolean }> => {
   if (!(message.processAttempts && message.processAttempts > 0)) return { replayDirectives: true };
-  const removed = await purgeInboxArtifacts(message);
-  if (removed === 0) return { replayDirectives: true };
-  log.warn('重试前清掉上次写了一半的气泡（副作用上次已跑完，本轮不重放）', {
+  const { removed, evidence } = await purgeInboxArtifacts(message);
+  if (evidence === 0) return { replayDirectives: true };
+  log.warn('重试前清掉上次写了一半的气泡（副作用上次已跑完，本轮不重放，产物留在原地）', {
     messageId: message.messageId,
     removed,
+    evidence,
   });
   return { replayDirectives: false };
 };
@@ -505,13 +529,77 @@ async function evaluateScheduledPushExpired(message: ActiveMsg2InboxMessage): Pr
   });
 }
 
-/** 把 worker 推给的 directives 从 inbox message metadata 里挖出来; 没有就空数组. */
+/**
+ * 云端自述日志里这条 push 对应的条目 id。
+ *
+ * 格式跟 worker 写日志时用的那一份对齐（`<clientTaskId>@<触发时刻>`，见 amsgFirePack
+ * 的 AmsgSelfLogEntry.id 与 worker/amsg/src/index.ts 的 amsgFireSettled）——两边拼法
+ * 必须一模一样，差一个字符就对不上号。缺任务归属键时 worker 用的是字面量 'task'。
+ * 触发时刻缺失（老 push 不带）返回 null：没有 id 就没法精确认领，宁可不动。
+ */
+export const buildSelfLogEntryId = (message: ActiveMsg2InboxMessage): string | null => {
+  const occurrenceMs = message.occurrenceMs;
+  if (typeof occurrenceMs !== 'number' || !Number.isFinite(occurrenceMs)) return null;
+  const clientTaskId = (message.metadata as any)?.amsgClientTaskId;
+  const owner = typeof clientTaskId === 'string' && clientTaskId ? clientTaskId : 'task';
+  return `${owner}@${occurrenceMs}`;
+};
+
+/**
+ * 被兜底闸吞掉的这条，顺手把云端「我说过什么」里对应的那条也撤掉。
+ *
+ * 不撤的话：worker 发完就把正文记进了 client_state 的 self_log，而这条消息在客户端被吞、
+ * 用户一个字都没看到；下一次到点的 prompt 里【这之后你又主动发过】赫然列着它，角色接着
+ * 往下说一句没人看过的话。
+ *
+ * 只摘被吞的那一条，其余原样留着：日志里别的条目是用户真收到过的话，跟着一起抹掉的话
+ * 角色反而会把说过的再说一遍；角色自排的任务清单同理，缺一块下次就会把同一件事再排一遍。
+ * 摘完整份空了（没有条目也没有任务）就直接写空串——空日志和没有日志对 worker 是同一件事
+ * （parseSelfLog 拿不到 → 重新建一份空的），比留一份空壳 JSON 省事。
+ *
+ * 值是裸 JSON，跟 worker 写这份时的口径一致（amsgFireSettled 里也是 JSON.stringify 直传，
+ * 不走 fire_pack 那套压缩）。
+ *
+ * best-effort：读写失败只留 warn，不影响「吞」这个动作本身（与 worker 侧 writeLastSkip 同语义）。
+ */
+export const revokeSwallowedSelfLogEntry = async (
+  charId: string,
+  entryId: string,
+): Promise<'no-log' | 'not-found' | 'cleared' | 'rewritten'> => {
+  const namespace = amsgStateNamespace(charId);
+  const raw = await ActiveMsgClient.readClientStateValue(namespace, AMSG_SELF_LOG_KEY);
+  const selfLog = parseSelfLog(raw ?? '');
+  if (!selfLog) return 'no-log';
+  if (!selfLog.entries.some((e) => e.id === entryId)) return 'not-found';
+
+  const rest = selfLog.entries.filter((e) => e.id !== entryId);
+  if (rest.length === 0 && selfLog.tasks.length === 0) {
+    await ActiveMsgClient.clearClientStateValue(namespace, AMSG_SELF_LOG_KEY);
+    return 'cleared';
+  }
+  await ActiveMsgClient.writeClientStateValue(
+    namespace,
+    AMSG_SELF_LOG_KEY,
+    JSON.stringify({ ...selfLog, entries: rest }),
+  );
+  return 'rewritten';
+};
+
+/**
+ * 认领到新任务之后广播的事件名。detail 只带 charId，监听方（OSContext）自己重读角色、
+ * 把新任务合并进内存清单并打脏。事件名和 detail 形状是两侧的约定，改这里要同步改那边。
+ */
+export const AMSG2_TASKS_ADOPTED_EVENT = 'amsg2-tasks-adopted';
+
 /**
  * 把 worker 带回来的「角色自排任务」补进该角色的本地清单。
  *
  * 幂等: 同 uuid 已经在清单里就不重复加(同一条 push 重放、或者 fire 重跑发了两次都可能撞上).
  * best-effort: 写不进去不影响这条消息本身——任务在远端好好的, 下次面板拉远端清单还能看见,
  * 只是这一刻本地少一行. 为它抛错会把已经收到的消息一起搞挂.
+ *
+ * 落库之后要广播一声: 这里跑在 React 之外, 只写 IndexedDB 的话内存里那份角色清单还是旧的,
+ * 任务面板列不出这条、按任务数 / 凭据 / 订阅这几道门做判断的地方也都看不见它。
  */
 async function adoptSelfScheduledTasks(message: ActiveMsg2InboxMessage): Promise<void> {
   const incoming = (message.metadata as any)?.amsgSelfScheduled;
@@ -535,11 +623,17 @@ async function adoptSelfScheduledTasks(message: ActiveMsg2InboxMessage): Promise
       },
     });
     console.log('[ActiveMsg] 认领角色自排任务', added.map((t: any) => t.taskUuid));
+    // 只在真的新增了任务时才广播（上面 added.length === 0 已经提前 return），
+    // 免得同一条 push 重放时白白让 UI 重读一遍角色。
+    try {
+      window.dispatchEvent(new CustomEvent(AMSG2_TASKS_ADOPTED_EVENT, { detail: { charId } }));
+    } catch { /* SSR-safe / not browser, ignore */ }
   } catch (e) {
     console.warn('[ActiveMsg] adopt self-scheduled tasks failed', charId, e);
   }
 }
 
+/** 把 worker 推给的 directives 从 inbox message metadata 里挖出来; 没有就空数组. */
 function extractDirectives(message: ActiveMsg2InboxMessage): PostProcessDirective[] {
   const raw = message.metadata && (message.metadata as any).directives;
   if (!Array.isArray(raw)) return [];
@@ -680,11 +774,13 @@ export const INBOX_FRESH_DELIVERY_WINDOW_MS = 10 * 60_000;
  * 默认的写库当刻（Date.now()）。
  *   - 在线/准在线送达（now - sentAt ≤ 窗口）→ undefined，气泡显示「刚刚」；
  *   - 离线补收（now - sentAt > 窗口）→ 用 sentAt。用户离线一晚，昨晚 23:00 推的消息
- *     中午打开时就该显示 23:00，跟正文里角色说的晚上的话对得上——此时用户没在聊天，
- *     不存在与用户消息交错的问题（显示顺序按自增 id，不看 timestamp）。
+ *     中午打开时就该显示 23:00，跟正文里角色说的晚上的话对得上。
  * 主路径（applyAssistantPostProcessing 逐条落库）与降级存原稿路径共用这一个口径，
  * 别再各算各的。sentAt 缺失/非法（老 push 可能不带）同样返回 undefined。
  * 纯函数，边界值见 activeMsgRuntime.test.ts。
+ *
+ * 只按时间差算的这一层不够——补收的消息可能落在用户刚说的话后面（见
+ * resolveBackfillTimestamp），实际落库口径以 resolveInboxPersistTimestampForMessage 为准。
  */
 export const resolveInboxPersistTimestamp = (
   sentAt: number | undefined,
@@ -692,6 +788,51 @@ export const resolveInboxPersistTimestamp = (
 ): number | undefined => {
   if (typeof sentAt !== 'number' || !Number.isFinite(sentAt) || sentAt <= 0) return undefined;
   return now - sentAt > INBOX_FRESH_DELIVERY_WINDOW_MS ? sentAt : undefined;
+};
+
+/**
+ * 补收的时间戳还能不能用（本地已经有更晚的消息就不能）。
+ *
+ * 「打开 App」和「后台补投的 push 送到」之间隔着好几秒，用户来得及先说一句。这时候把
+ * 补收的消息按 sentAt 落库，聊天流里就会出现：08:01 用户说「早安」，下面紧跟着一条标着
+ * 昨晚 23:00 的角色消息（显示顺序按自增 id，时间戳却在往回走）。
+ * 本地已有比它更晚的消息 → 退回写库当刻，时间戳跟着显示顺序走，不倒挂。
+ * 纯函数，两个方向见单测。
+ */
+export const resolveBackfillTimestamp = (
+  persistTimestamp: number | undefined,
+  latestLocalMessageAt: number | undefined,
+): number | undefined => {
+  if (persistTimestamp === undefined) return undefined;
+  if (typeof latestLocalMessageAt !== 'number' || !Number.isFinite(latestLocalMessageAt)) {
+    return persistTimestamp;
+  }
+  return latestLocalMessageAt > persistTimestamp ? undefined : persistTimestamp;
+};
+
+/**
+ * 一条 inbox 消息最终的落库时间戳：先按送达新鲜度二选一，再看本地有没有更晚的消息。
+ * 只有判成离线补收时才去查一次近史——在线送达本来就落写库当刻，没什么可比的。
+ * 查不到近史时沿用补收口径（宁可标 sentAt，也别把隔夜的消息标成现在）。
+ */
+const resolveInboxPersistTimestampForMessage = async (
+  message: ActiveMsg2InboxMessage,
+  now: number,
+): Promise<number | undefined> => {
+  const persistTimestamp = resolveInboxPersistTimestamp(message.sentAt || message.receivedAt, now);
+  if (persistTimestamp === undefined) return undefined;
+  try {
+    const recent = await DB.getRecentMessagesByCharId(message.charId, 200);
+    // 取最大值而不是最后一条：本地消息按自增 id 排，时间戳本来就可能不是单调的。
+    const latest = recent.reduce(
+      (max, m) => (typeof m.timestamp === 'number' && m.timestamp > max ? m.timestamp : max),
+      0,
+    );
+    return resolveBackfillTimestamp(persistTimestamp, latest || undefined);
+  } catch (e) {
+    log.warn('查不到本地最新消息时刻，补收时间戳按 sentAt 落', { messageId: message.messageId, error: e });
+    return persistTimestamp;
+  }
 };
 
 /** 重试前等多久。本地存储的抖动一般几秒就过去了，30s 足够缓过来又不至于让用户干等。 */
@@ -720,6 +861,128 @@ const requeueForRetry = async (message: ActiveMsg2InboxMessage, attempts: number
     // 写回也失败，大概率同一根因（存储关停 / 配额满）。消息到此为止，留个明确的日志。
     log.error('requeue failed, message lost', { messageId: message.messageId, error: reputErr });
   }
+};
+
+// ─── 多段消息的等齐守卫 ───
+//
+// 一次生成可能拆成好几条 push（metadata.messageIndex 从 1 数起），Web Push 不保证按序
+// 到达。App 开着时每收到一条就 flush 一次，两段落进两批的话 consumeInboxMessages 那次
+// 「同批按段序排」根本够不着——聊天记录的显示顺序 = IndexedDB 自增 id = 落库先后，后段
+// 先到就永久颠倒，用户看到的是「后半句 + 前半句」。
+//
+// 所以段序靠后的消息落库前先看一眼：更小的段序是不是都有着落了（在本批里，或者已经
+// 落过库）。没有就写回收件箱等几秒再来一次。**必须有上限**——前段真丢了（worker 只发了
+// 一半 / 那条 push 被系统丢掉）不能永远扣着后段不给用户看。
+
+/** 段序靠后的消息最多扣住几次；超了按现状放行（顺序可能是乱的，但至少不会消失）。 */
+export const MAX_INBOX_ORDER_HOLDS = 3;
+/** 扣住之后隔多久再看一眼。前一段通常就在路上，几秒足够。 */
+const INBOX_ORDER_HOLD_DELAY_MS = 3_000;
+
+/** messageId → 已经扣住几次。释放（落库 / 放行）时删掉，不会无界增长。 */
+const inboxOrderHolds = new Map<string, number>();
+let inboxOrderHoldTimer: ReturnType<typeof setTimeout> | null = null;
+
+const scheduleInboxOrderRecheck = () => {
+  if (inboxOrderHoldTimer != null) return;   // 已经排了就不重复排，一次重看会带上全部积压
+  inboxOrderHoldTimer = setTimeout(() => {
+    inboxOrderHoldTimer = null;
+    void flushInboxToChat();
+  }, INBOX_ORDER_HOLD_DELAY_MS);
+};
+
+/**
+ * 近史里这个 session 已经落过库的段序。
+ *
+ * 认领依据跟 findInboxArtifacts 同款——都是后处理落库时由 mcdInheritMeta 继承下来的
+ * metadata（这里用 sessionId + messageIndex，那里用 activeMsg2.messageId）。
+ * 一条 push 会被拆成好几个气泡，段序相同，去重后返回。
+ */
+export const findPersistedChunkIndexes = <T extends { role: string; metadata?: any }>(
+  messages: T[],
+  sessionId: string,
+): Set<number> => {
+  const indexes = new Set<number>();
+  for (const m of messages) {
+    if (m.role !== 'assistant') continue;
+    if (m.metadata?.sessionId !== sessionId) continue;
+    const idx = Number(m.metadata?.messageIndex ?? 0);
+    if (Number.isFinite(idx) && idx > 0) indexes.add(idx);
+  }
+  return indexes;
+};
+
+/** 这条消息前面还缺哪几段（1 数到 messageIndex-1，凡是没着落的都算）。 */
+export const findMissingChunkIndexes = (messageIndex: number, seen: Set<number>): number[] => {
+  const missing: number[] = [];
+  for (let i = 1; i < messageIndex; i += 1) {
+    if (!seen.has(i)) missing.push(i);
+  }
+  return missing;
+};
+
+/**
+ * 前面的分段还没着落 → 写回收件箱、过几秒再看，返回 true 表示这条这次先不处理。
+ *
+ * 三种情况一律放行（返回 false）：没有 session / 本来就是第一段、前面的段都齐了、
+ * 扣到上限了。查近史或写回收件箱失败也放行——扣住的代价是消息迟迟不出现，比顺序错更重。
+ */
+const holdUntilEarlierChunksLand = async (
+  message: ActiveMsg2InboxMessage,
+  batch: ActiveMsg2InboxMessage[],
+): Promise<boolean> => {
+  const sessionId = getInstantSessionId(message);
+  const messageIndex = getInstantMessageIndex(message);
+  if (!sessionId || messageIndex <= 1) return false;
+
+  let missing: number[];
+  try {
+    const seen = new Set<number>();
+    for (const other of batch) {
+      if (other.messageId !== message.messageId && getInstantSessionId(other) === sessionId) {
+        seen.add(getInstantMessageIndex(other));
+      }
+    }
+    const recent = await DB.getRecentMessagesByCharId(message.charId, 200);
+    for (const idx of findPersistedChunkIndexes(recent, sessionId)) seen.add(idx);
+    missing = findMissingChunkIndexes(messageIndex, seen);
+  } catch (e) {
+    log.warn('等齐守卫查不到近史，这条照常落库', { messageId: message.messageId, error: e });
+    inboxOrderHolds.delete(message.messageId);
+    return false;
+  }
+
+  if (missing.length === 0) {
+    inboxOrderHolds.delete(message.messageId);
+    return false;
+  }
+
+  const holds = (inboxOrderHolds.get(message.messageId) ?? 0) + 1;
+  if (holds > MAX_INBOX_ORDER_HOLDS) {
+    inboxOrderHolds.delete(message.messageId);
+    log.warn('前面的分段一直没来，按现状放行（顺序可能是乱的）', {
+      messageId: message.messageId, sessionId, messageIndex, missing,
+    });
+    activeMsgTrace('runtime-chunk-hold-giveup', {
+      sessionId, messageId: message.messageId, messageIndex, missing,
+    });
+    return false;
+  }
+
+  try {
+    // 原样写回（不动 processAttempts）——「前面那段还没来」不是处理失败。
+    await ActiveMsgStore.saveInboxMessage(message);
+  } catch (e) {
+    log.warn('等齐守卫写回收件箱失败，这条照常落库', { messageId: message.messageId, error: e });
+    inboxOrderHolds.delete(message.messageId);
+    return false;
+  }
+  inboxOrderHolds.set(message.messageId, holds);
+  scheduleInboxOrderRecheck();
+  activeMsgTrace('runtime-chunk-hold', {
+    sessionId, messageId: message.messageId, messageIndex, missing, holds,
+  });
+  return true;
 };
 
 /**
@@ -767,13 +1030,6 @@ const flushInboxToChatImpl = async () => {
   // 降级回原来的 "原文一次性 saveMessage" 防止消息丢失。dispatchEvent 始终 fire 一次,
   // 保证 toast / 未读 / 通知 / sendInstantPush resolver 语义不变。
   for (const message of pendingMessages) {
-    // 落库时间戳按「在线送达 vs 离线补收」二选一（undefined = 交给 DB.saveMessage 默认取
-    // 写库当刻），主路径与下面的降级存原稿路径共用这一个值，两条路一个口径。
-    // sentAt 缺失时退到 receivedAt（老 worker 的 push 可能不带 sentAt）。
-    const persistTimestamp = resolveInboxPersistTimestamp(
-      message.sentAt || message.receivedAt,
-      Date.now(),
-    );
     // 'active-msg-received' 事件里的 sentAt 维持原口径（发送时刻优先）：
     // 它只喂 toast / 未读预览，不进聊天记录，别跟落库口径搅在一起。
     const eventSentAt = message.sentAt || message.receivedAt || Date.now();
@@ -897,9 +1153,28 @@ const flushInboxToChatImpl = async () => {
           charId: message.charId,
           taskId: message.taskId,
         });
+        // 吞掉的是「这次要说的话」，云端那份「我说过什么」也得跟着撤，否则下一次到点
+        // 角色会接着一句没人看过的话往下说。不 await：这是一次网络往返，不能让它拖住
+        // 收件箱里后面几条的落库；失败只 warn（见 revokeSwallowedSelfLogEntry）。
+        const selfLogEntryId = buildSelfLogEntryId(message);
+        if (selfLogEntryId) {
+          void revokeSwallowedSelfLogEntry(message.charId, selfLogEntryId)
+            .catch((e) => log.warn('撤销云端自述日志条目失败（下次重传 fire_pack 时整份作废）', {
+              charId: message.charId, entryId: selfLogEntryId, error: e,
+            }));
+        }
         continue;
       }
     }
+
+    // 多段消息的等齐守卫：前面的段还没着落就先扣住这条（见 holdUntilEarlierChunksLand）。
+    // 排在防穿帮闸后面——这次 fire 整个被吞掉的话，没必要为它的后半段白等几秒。
+    if (await holdUntilEarlierChunksLand(message, pendingMessages)) continue;
+
+    // 落库时间戳按「在线送达 vs 离线补收」二选一（undefined = 交给 DB.saveMessage 默认取
+    // 写库当刻），主路径与下面的降级存原稿路径共用这一个值，两条路一个口径。
+    // sentAt 缺失时退到 receivedAt（老 worker 的 push 可能不带 sentAt）。
+    const persistTimestamp = await resolveInboxPersistTimestampForMessage(message, Date.now());
 
     // 白名单制: AI 文本类型基本封闭 (amsg-shared MESSAGE_TYPE 4 个 + SullyOS 3 个 legacy 别名);
     // 非 AI 类型 (forum / event / system / 未来扩展) 不可枚举, 不进 post-processing 防把它们当 AI 输出乱解析.

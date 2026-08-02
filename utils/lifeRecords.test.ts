@@ -157,20 +157,56 @@ describe('executeLifeDirectives 代记指令', () => {
         expect(card!.metadata.duplicate).toBe(true);
     });
 
-    it('总开关关闭：只剥 tag，不写任何东西', async () => {
+    // 主动消息是提前几小时打包的：打包时开着、送达前用户把开关关掉是常态。角色那句
+    // 「我帮你记下了」已经说满，记录却静默蒸发，用户只会觉得功能坏了 —— 留一条系统提示。
+    it('总开关关闭：不写库，但落一条系统提示说明没记成', async () => {
         const char = mkChar({ lifeRecordEnabled: false });
         const out = await executeLifeDirectives('记好了[[LIFE:MED|阿莫西林]]', char, noToast);
         expect(out).toBe('记好了');
         const records = (await DB.getAllLifeRecords()).filter(r => r.recordedBy === char.id);
         expect(records).toHaveLength(0);
+
+        const msgs = await DB.getMessagesByCharId(char.id, true);
+        expect(msgs.some((m: Message) => m.role === 'system' && m.content.includes('没记成')
+            && m.content.includes('生活记录功能已关闭'))).toBe(true);
     });
 
-    it('模块小开关关闭：该模块指令被静默丢弃', async () => {
+    it('模块小开关关闭：不写库，同样留一条系统提示（带模块名）', async () => {
         const char = mkChar({ lifeRecordExerciseEnabled: false });
         const out = await executeLifeDirectives('[[LIFE:EXERCISE|跑步|30分钟]]', char, noToast);
         expect(out).toBe('');
         const records = (await DB.getAllLifeRecords()).filter(r => r.recordedBy === char.id);
         expect(records).toHaveLength(0);
+
+        const msgs = await DB.getMessagesByCharId(char.id, true);
+        const note = msgs.find((m: Message) => m.role === 'system');
+        expect(note?.content).toContain('锻炼');
+        expect(note?.content).toContain('没记成');
+    });
+
+    it('格式非法的指令仍然静默剥掉（模型手滑，没什么可交代的）', async () => {
+        const char = mkChar();
+        const out = await executeLifeDirectives('[[LIFE:MED|]]好', char, noToast);
+        expect(out).toBe('好');
+        const msgs = await DB.getMessagesByCharId(char.id, true);
+        expect(msgs).toHaveLength(0);
+    });
+
+    it('传了 inheritMeta：生活卡和「没记成」提示都带上这条推送的标记', async () => {
+        const meta = { source: 'active_msg_2', activeMsg2: { messageId: 'push-life' } };
+
+        const charOn = mkChar({ name: '有开关' });
+        await executeLifeDirectives('[[LIFE:EXPENSE|66|奶茶]]', charOn, noToast, undefined, meta);
+        const card = (await DB.getMessagesByCharId(charOn.id, true))
+            .find((m: Message) => m.type === 'life_card');
+        expect(card!.metadata.activeMsg2.messageId).toBe('push-life');
+        expect(card!.metadata.recordId).toBeTruthy();   // 卡片自己的字段没被挤掉
+
+        const charOff = mkChar({ name: '没开关', lifeRecordEnabled: false });
+        await executeLifeDirectives('[[LIFE:MED|布洛芬]]', charOff, noToast, undefined, meta);
+        const note = (await DB.getMessagesByCharId(charOff.id, true))
+            .find((m: Message) => m.role === 'system');
+        expect(note!.metadata.activeMsg2.messageId).toBe('push-life');
     });
 
     it('EXPENSE：同步写银行流水，否决时回滚删除', async () => {
@@ -266,13 +302,16 @@ describe('全局隐藏模块（长按页签隐藏）', () => {
         await DB.saveLifeRecordSettings({ id: 'main', hiddenModules: [] });
     });
 
-    it('隐藏的模块：角色开关全开也不执行代记指令', async () => {
+    it('隐藏的模块：角色开关全开也不执行代记指令，只留一条系统提示', async () => {
         await DB.saveLifeRecordSettings({ id: 'main', hiddenModules: ['med'] });
         const char = mkChar();
         const out = await executeLifeDirectives('记下了[[LIFE:MED|感冒灵]]', char, noToast);
         expect(out).toBe('记下了');
         const records = (await DB.getAllLifeRecords()).filter(r => r.recordedBy === char.id);
         expect(records).toHaveLength(0);
+
+        const msgs = await DB.getMessagesByCharId(char.id, true);
+        expect(msgs.some((m: Message) => m.role === 'system' && m.content.includes('药盒'))).toBe(true);
     });
 
     it('隐藏的模块：注入里不出现对应数据与指令说明', async () => {

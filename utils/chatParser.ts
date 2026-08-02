@@ -46,6 +46,76 @@ export interface MusicActionHooks {
     ) => Promise<{ playlistTitle: string; created: boolean } | null>;
 }
 
+/**
+ * 主动消息 2.0 冻在 music_action directive 里的那首歌（见 worker/amsg 的 attachSceneSong）。
+ *
+ * 为什么要有这一层：定时消息的正文是角色几小时前对着**它自己那时在听的那首**写的，
+ * 而 `[[MUSIC_ACTION:add|歌单标题]]` 标签里只有歌单名、没有歌名。重放时若只能取
+ * 「用户此刻在听的那首」，用户多半早就没在放歌了 —— 正文聊着这首歌，卡片和加歌单
+ * 却整个没发生。worker 到点把那首歌冻进 directive，调用方（applyAssistantPostProcessing）
+ * 再显式传进来。本地聊天 / instant push 路径不传，走原来的实时快照。
+ */
+export interface FrozenMusicSong {
+    id?: number;
+    name: string;
+    artists: string;
+}
+
+/** 冻结的那首歌来自推送 metadata，字段形状不保证；歌名都没有就当没传。 */
+const normalizeFrozenSong = (song?: FrozenMusicSong | null): FrozenMusicSong | null => {
+    if (!song || typeof song.name !== 'string' || !song.name.trim()) return null;
+    return {
+        id: typeof song.id === 'number' ? song.id : undefined,
+        name: song.name,
+        artists: typeof song.artists === 'string' ? song.artists : '',
+    };
+};
+
+/**
+ * 把冻结的那首歌还原成一张完整快照 —— 卡片要封面、加歌单要时长/收费这些字段，
+ * 而 directive 里只带得动 id / 歌名 / 歌手（推送 payload 就那么点额度）。
+ *
+ * 那首歌是从角色自己的歌单抽样池里挑的，所以回角色歌单按 id 找基本必中；id 对不上
+ * （歌单被改过）再按歌名 + 歌手兜一次。都找不到就只用手上这三个字段，封面空着 ——
+ * 也比把用户此刻在听的另一首当成它强。
+ */
+const resolveFrozenSongSnapshot = async (
+    charId: string,
+    frozen: FrozenMusicSong,
+): Promise<MusicActionSnapshot> => {
+    try {
+        const chars = await DB.getAllCharacters();
+        const songs = (chars.find(c => c.id === charId)?.musicProfile?.playlists || [])
+            .flatMap(pl => pl.songs || []);
+        const norm = (s: string) => (s || '').trim().toLowerCase();
+        const hit = (frozen.id != null ? songs.find(s => s.id === frozen.id) : undefined)
+            || songs.find(s => norm(s.name) === norm(frozen.name) && norm(s.artists) === norm(frozen.artists))
+            || songs.find(s => norm(s.name) === norm(frozen.name));
+        if (hit) {
+            return {
+                songId: hit.id,
+                name: hit.name,
+                artists: hit.artists,
+                album: hit.album,
+                albumPic: hit.albumPic,
+                duration: hit.duration,
+                fee: hit.fee,
+            };
+        }
+    } catch (e) {
+        console.warn('[MusicAction] 回角色歌单补歌曲信息失败，只用推送里带的那几个字段:', e);
+    }
+    return {
+        songId: frozen.id ?? 0,
+        name: frozen.name,
+        artists: frozen.artists,
+        album: '',
+        albumPic: '',
+        duration: 0,
+        fee: 0,
+    };
+};
+
 // 转账的提取（规范标签 + 模型掉格式的系统日志形态）统一在 utils/transferFormat.ts:
 // extractTransferCommands —— 与 worker classifier 共用一份源码。master 上曾有一版
 // 独立实现 extractAssistantTransfers, 合并时其能力（全角括号【】/ 主语「我」/ credits
@@ -69,11 +139,31 @@ export const ChatParser = {
          * App 那一刻」，一条消息被劈成两个时间。
          */
         messageTimestamp?: number,
+        /**
+         * 这一轮消息统一继承的 metadata（主动消息 2.0 的 `source` / `activeMsg2.messageId` 等，
+         * 见 applyAssistantPostProcessing 的 mcdInheritMeta）。
+         *
+         * 副作用产物（戳一戳 / 转账卡 / 收款回执 / 音乐卡 / 新闻卡 / 日程系统提示 / 生活记录卡）
+         * 要跟正文气泡带同一个标记：主动消息处理失败后会整条重来，重来前靠
+         * metadata.activeMsg2.messageId 认领「这条推送上一趟已经写下的东西」。副作用跑在正文
+         * 之前，一条都认不出来就会被当成「上次什么都没做」，整套副作用再跑一遍——同一笔转账
+         * 落两张卡、日记写两遍。
+         */
+        inheritMeta?: Record<string, any>,
+        /**
+         * 这一轮 `[[MUSIC_ACTION:…]]` 说的是哪首歌（见 FrozenMusicSong）。
+         * 只有主动消息 2.0 的定时路径传，其余路径不传 = 取用户此刻在听的那首。
+         */
+        frozenMusicSong?: FrozenMusicSong,
     ) => {
         let content = aiContent;
-        /** 落库统一走这里，别直接调 DB.saveMessage —— 漏一处就是一条消息两个时间。 */
-        const persist = (msg: Parameters<typeof DB.saveMessage>[0]) =>
-            DB.saveMessage(messageTimestamp != null ? { ...msg, timestamp: messageTimestamp } : msg);
+        /** 落库统一走这里，别直接调 DB.saveMessage —— 漏一处就是一条消息两个时间、重试时还认不出来。 */
+        const persist = (msg: Parameters<typeof DB.saveMessage>[0]) => DB.saveMessage({
+            ...msg,
+            ...(messageTimestamp != null ? { timestamp: messageTimestamp } : {}),
+            // 卡片自己的字段优先，inheritMeta 只补它没有的键（两边键名本来就不重叠，这里是防御）
+            ...(inheritMeta ? { metadata: { ...inheritMeta, ...(msg.metadata || {}) } } : {}),
+        });
 
         // POKE
         if (content.includes('[[ACTION:POKE]]')) {
@@ -93,10 +183,26 @@ export const ChatParser = {
             let refId: number | undefined;
             try {
                 const all = await DB.getMessagesByCharId(charId, true);
-                const pending = [...all].reverse().find(
+                const pendings = all.filter(
                     x => x.type === 'transfer' && x.role === 'user' && !x.metadata?.receipt
                         && (!x.metadata?.status || x.metadata.status === 'pending'),
                 );
+                // 角色收的是**它说这句话那一刻**看得到的那笔。主动消息补收会把「生成」和「重放」
+                // 拉开几小时：用户早上又转了 1000，按「最新一笔待收」结算就会让角色半夜那句
+                // 「这五块我收下啦」把早上那 1000 给收了。所以先在原始发送时刻之前的待收里取最新，
+                // 一笔都没有再退回老行为（并留一行日志说明这次是按最新一笔结的）。
+                let pending = messageTimestamp != null
+                    ? [...pendings].reverse().find(x => (x.timestamp ?? 0) <= messageTimestamp)
+                    : undefined;
+                if (!pending) {
+                    if (messageTimestamp != null && pendings.length > 0) {
+                        console.warn(
+                            '[Transfer] 这条消息发出时并没有待收的转账，退回按最新一笔结算:',
+                            { charId, messageTimestamp, pendingCount: pendings.length },
+                        );
+                    }
+                    pending = pendings[pendings.length - 1];
+                }
                 if (pending) {
                     amount = pending.metadata?.amount;
                     refId = pending.id;
@@ -165,7 +271,12 @@ export const ChatParser = {
                 }
             }
 
-            const snap = musicHooks.getListeningSnapshot();
+            // 先认「角色写这句话时读到的那首」（定时消息由 worker 冻进 directive、调用方传进来），
+            // 没有这一份才退回「用户此刻在听的那首」——本地聊天走的一直是后者。
+            const frozen = normalizeFrozenSong(frozenMusicSong);
+            const snap = frozen
+                ? await resolveFrozenSongSnapshot(charId, frozen)
+                : musicHooks.getListeningSnapshot();
             if (snap) {
                 let addedToPlaylistTitle: string | undefined;
                 let playlistCreated = false;
@@ -182,7 +293,10 @@ export const ChatParser = {
                             albumPic: snap.albumPic,
                             duration: snap.duration,
                             fee: snap.fee,
-                            source: 'user',
+                            // 'user' 的意思是「这首是从用户那儿听来的」，之后的提示词会照着说
+                            // （见 ContextBuilder 那段「从对方那儿收进来的歌」）。冻结的那首是
+                            // 角色自己在听的，标成 'user' 等于让它以后认错来路。
+                            source: frozen ? 'discovered' : 'user',
                             addedAt: Date.now(),
                         };
                         const added = await musicHooks.addSongToCharPlaylist(charId, playlistSong, target);
@@ -213,6 +327,15 @@ export const ChatParser = {
                     `${charName} 和你一起听，也加到了${playlistSuffix || '歌单'}`,
                     'info'
                 );
+            } else {
+                // 两头都空：推送里没冻歌（比如那一刻角色的日程不在听歌的时段，或者是本地
+                // 聊天路径），用户此刻也没在放歌。剩下的选择只有跳过 —— 但静默跳过的结果是
+                // 「正文在聊这首歌，卡片和歌单动作却整个没发生」，排查时一点线索都没有，
+                // 所以至少留一行。
+                console.warn(
+                    '[MusicAction] 既没有冻结的歌、也取不到"正在听"快照，这条音乐动作跳过:',
+                    { charId, verb, args, messageTimestamp },
+                );
             }
             content = content.replace(musicMatch[0], '').trim();
             // 同类 tag 全清，防止 LLM 一条消息里插多次
@@ -242,8 +365,22 @@ export const ChatParser = {
                 let desc: string | undefined;
                 try {
                     const snap = await DB.getLatestHotNewsSnapshot();
-                    const hit = snap?.items?.find(it => it.title === title)
-                        || snap?.items?.find(it => !!title && (it.title.includes(title) || title.includes(it.title)));
+                    const items = snap?.items || [];
+                    // 先精确匹配。模糊匹配只在**唯一命中**时才用：本地这份快照和角色当时看到的
+                    // 那份常常不是同一刻，热搜里相似标题成堆（同一件事好几条），挑错一条就是卡片
+                    // 标题说 A、点进去是 B。宁可不挂链接——无链接的卡片本来就是既有形态。
+                    let hit = items.find(it => it.title === title);
+                    if (!hit && title) {
+                        const fuzzy = items.filter(it => it.title.includes(title) || title.includes(it.title));
+                        if (fuzzy.length === 1) {
+                            hit = fuzzy[0];
+                        } else if (fuzzy.length > 1) {
+                            console.warn(
+                                '[NewsCard] 本地热搜里有多条标题对得上，这张卡不挂链接:',
+                                { title, matched: fuzzy.map(it => it.title) },
+                            );
+                        }
+                    }
                     if (hit) {
                         url = hit.url;
                         desc = hit.desc;
@@ -320,7 +457,7 @@ export const ChatParser = {
                 const chars = await DB.getAllCharacters();
                 const charProfile = chars.find(c => c.id === charId);
                 content = charProfile
-                    ? await executeLifeDirectives(content, charProfile, addToast, messageTimestamp)
+                    ? await executeLifeDirectives(content, charProfile, addToast, messageTimestamp, inheritMeta)
                     : content.replace(/\[\[LIFE:[^\]]*\]\]/g, '').trim();
             } catch (e) {
                 console.error('[LifeRecord] parse failed:', e);
