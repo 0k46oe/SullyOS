@@ -20,4 +20,16 @@ describe('CompanionHome touch request boundaries', () => {
     expect(source).toContain('data-testid="companion-app-star-panel"');
     expect(source).toContain("{ id: AppID.Call, label: '通话'");
   });
+  it('keeps the editorial dialogue surface unclipped and removes ornamental chrome', () => {
+    const source = readFileSync(path.resolve(__dirname, '../components/os/CompanionHome.tsx'), 'utf8');
+    const dialogueStart = source.indexOf('data-testid="companion-dialogue"');
+    const dialogueEnd = source.indexOf('手游底部主导航', dialogueStart);
+    const dialogueSource = source.slice(dialogueStart, dialogueEnd);
+
+    expect(source).toContain('data-visual-style="editorial-flat"');
+    expect(source).not.toContain('companion-star-pulse');
+    expect(dialogueSource).toContain('data-testid="companion-dialogue-surface"');
+    expect(dialogueSource).not.toContain('clipPath');
+    expect(dialogueSource).not.toContain('absolute -top-');
+  });
 });
