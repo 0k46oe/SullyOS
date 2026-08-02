@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { CharacterProfile, PhoneEvidence, PhoneCustomApp, PhoneContact, ConvTopic, AiSession, AiServiceKind, TavernCard } from '../types';
+import { CharacterProfile, PhoneEvidence, PhoneCustomApp, PhoneContact, PhoneSimLog, ConvTopic, AiSession, AiServiceKind, TavernCard } from '../types';
 import { ContextBuilder } from '../utils/context';
 import Modal from '../components/os/Modal';
 import { safeResponseJson, extractContent, extractJson } from '../utils/safeApi';
@@ -14,6 +14,7 @@ import {
 import PersonaSim, { LifeLog, generatePersonaScript } from './PersonaSim';
 import { usePersonaSim, personaSimStore } from '../utils/personaSimStore';
 import { getLastInnerState } from '../utils/emotionApply';
+import { normalizePhoneEvidence, phoneFieldToText } from '../utils/phoneEvidence';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import {
     User, Phone, ChatCircleDots, ChatCircle, ShoppingBag, Hamburger, Compass, GearSix,
@@ -219,7 +220,11 @@ const EmptyState: React.FC<{ text: string }> = ({ text }) => (
 );
 
 const DelBtn: React.FC<{ onDelete: () => void }> = ({ onDelete }) => (
-    <button onClick={onDelete} className="absolute top-2 right-2 w-5 h-5 bg-rose-500/80 text-white rounded-full flex items-center justify-center text-[11px] leading-none opacity-0 group-hover:opacity-100 transition z-10">×</button>
+    <button
+        aria-label="删除这条记录"
+        onClick={(e) => { e.stopPropagation(); onDelete(); }}
+        className="absolute top-2 right-2 w-6 h-6 bg-rose-500/85 text-white rounded-full flex items-center justify-center text-[13px] leading-none opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition z-10"
+    >×</button>
 );
 
 const HomeCard: React.FC<{
@@ -258,13 +263,17 @@ const CheckPhone: React.FC = () => {
     const [selectPage, setSelectPage] = useState(0); // Target Device 选人界面的翻页（每页 6 人）
     const [selectGroupId, setSelectGroupId] = useState(GROUP_FILTER_ALL); // 选人界面的分组筛选
 
-    // Chat Detail State
+    // Detail State
     const [selectedChatRecord, setSelectedChatRecord] = useState<PhoneEvidence | null>(null);
+    const [selectedEvidenceRecord, setSelectedEvidenceRecord] = useState<PhoneEvidence | null>(null);
+    const [evidenceBackAppId, setEvidenceBackAppId] = useState<string>('home');
     const chatEndRef = useRef<HTMLDivElement>(null);
     const contactEndRef = useRef<HTMLDivElement>(null);
 
     // 人际关系系统 State
     const [selectedContact, setSelectedContact] = useState<PhoneContact | null>(null);
+    const [identityDraft, setIdentityDraft] = useState('');
+    const [editingIdentity, setEditingIdentity] = useState(false);
     const [noteDraft, setNoteDraft] = useState('');
     const [editingNote, setEditingNote] = useState(false);
     const [showContactModal, setShowContactModal] = useState(false);
@@ -340,10 +349,20 @@ const CheckPhone: React.FC = () => {
     const touchStartY = useRef<number | null>(null);
 
     // Derived state for evidence records
-    const records = targetChar?.phoneState?.records || [];
+    const records = (targetChar?.phoneState?.records || []).map(normalizePhoneEvidence);
     const customApps = targetChar?.phoneState?.customApps || [];
     const contacts = targetChar?.phoneState?.contacts || [];
     const allowFictional = targetChar?.phoneState?.allowFictionalContacts !== false;
+    // Keep the contact-chat scroll effect tied to this conversation's actual
+    // content. `records` is normalized into a fresh array on every render, so
+    // depending on the array itself makes unrelated renders snap the user back
+    // to the bottom while they are reading older messages.
+    const selectedContactRecordDetail = selectedContact
+        ? records.find(r => r.type === 'chat' && (
+            r.contactId === selectedContact.id
+            || normName(r.title) === normName(selectedContact.name)
+        ))?.detail
+        : undefined;
     // 智能体 App：偷看到的 AI 会话 / 角色卡
     const aiSessions = targetChar?.phoneState?.aiAgent?.sessions || [];
     const aiCards = targetChar?.phoneState?.aiAgent?.cards || [];
@@ -371,7 +390,11 @@ const CheckPhone: React.FC = () => {
                 setTargetChar(updated);
                 if (selectedChatRecord) {
                     const freshRecord = updated.phoneState?.records?.find(r => r.id === selectedChatRecord.id);
-                    if (freshRecord && freshRecord !== selectedChatRecord) setSelectedChatRecord(freshRecord);
+                    if (freshRecord && freshRecord !== selectedChatRecord) setSelectedChatRecord(normalizePhoneEvidence(freshRecord));
+                }
+                if (selectedEvidenceRecord) {
+                    const freshRecord = updated.phoneState?.records?.find(r => r.id === selectedEvidenceRecord.id);
+                    if (freshRecord && freshRecord !== selectedEvidenceRecord) setSelectedEvidenceRecord(normalizePhoneEvidence(freshRecord));
                 }
                 if (selectedContact) {
                     const freshContact = updated.phoneState?.contacts?.find(c => c.id === selectedContact.id);
@@ -402,7 +425,7 @@ const CheckPhone: React.FC = () => {
             const container = contactEndRef.current.parentElement;
             if (container) container.scrollTop = container.scrollHeight;
         }
-    }, [activeAppId, selectedContact?.id, records, isLoading]);
+    }, [activeAppId, selectedContact?.id, selectedContactRecordDetail, isLoading]);
 
     // 智能体会话：续写 / 进入时滚到底
     useEffect(() => {
@@ -416,6 +439,8 @@ const CheckPhone: React.FC = () => {
         setTargetChar(c);
         setView('phone');
         setActiveAppId('home');
+        setSelectedEvidenceRecord(null);
+        setEvidenceBackAppId('home');
         setPage(0);
     };
 
@@ -423,6 +448,8 @@ const CheckPhone: React.FC = () => {
         setView('select');
         setTargetChar(null);
         setActiveAppId('home');
+        setSelectedEvidenceRecord(null);
+        setEvidenceBackAppId('home');
         setPage(0);
     };
 
@@ -446,6 +473,25 @@ const CheckPhone: React.FC = () => {
         setActiveAppId('chat');
     };
 
+    const openEvidenceRecord = (record: PhoneEvidence, backAppId: string) => {
+        setSelectedEvidenceRecord(record);
+        setEvidenceBackAppId(backAppId);
+        setActiveAppId('evidence_detail');
+    };
+
+    const evidenceEntryProps = (record: PhoneEvidence, backAppId: string) => ({
+        role: 'button' as const,
+        tabIndex: 0,
+        'aria-label': `查看${record.title}详情`,
+        onClick: () => openEvidenceRecord(record, backAppId),
+        onKeyDown: (e: React.KeyboardEvent<HTMLElement>) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                openEvidenceRecord(record, backAppId);
+            }
+        },
+    });
+
     const handleDeleteRecord = async (record: PhoneEvidence) => {
         if (!targetChar) return;
 
@@ -461,6 +507,10 @@ const CheckPhone: React.FC = () => {
         if (selectedChatRecord?.id === record.id) {
             setActiveAppId('chat');
             setSelectedChatRecord(null);
+        }
+        if (selectedEvidenceRecord?.id === record.id) {
+            setActiveAppId(evidenceBackAppId);
+            setSelectedEvidenceRecord(null);
         }
 
         addToast('记录已删除', 'success');
@@ -675,6 +725,7 @@ ${realCharRule}
                     logPrefix = "朋友圈";
                 }
             }
+            promptInstruction += `\n\n**JSON 字段类型硬约束**：每条记录的 "title"、"detail"、"value" 只能是字符串（value 可省略），绝不能返回对象或数组；标签、阅读进度、摘录、批注等结构请先整理成 detail 中的普通文本。`;
 
             const perspectiveLock = `### [视角锁定 · 极重要]
 接下来要生成的是**你（${targetChar.name}）自己手机里的东西**——你自己的生活、社交、记录。
@@ -712,8 +763,10 @@ ${realCharRule}
 
             if (Array.isArray(json)) {
                 for (const item of json) {
-                    const recordTitle = item.title || 'Unknown';
-                    const recordDetail = item.detail || '...';
+                    if (!item || typeof item !== 'object') continue;
+                    const recordTitle = phoneFieldToText(item.title, 'Unknown');
+                    const recordDetail = phoneFieldToText(item.detail, '...');
+                    const recordValue = phoneFieldToText(item.value);
 
                     // ---- 真假甄别 + 联系人 upsert ----
                     let contactId: string | undefined;
@@ -761,13 +814,13 @@ ${realCharRule}
                         // 进角色上下文的措辞：第二人称讲「你自己手机里有啥」，不暗示用户在偷看
                         const cardContent = type === 'chat'
                             ? `[你手机的聊天软件] 你和「${recordTitle}」的对话：${recordDetail.replace(/\n/g, ' ')}`
-                            : `[你手机的${logPrefix}] ${recordTitle}${item.value ? ` · ${item.value}` : ''} — ${recordDetail}`;
+                            : `[你手机的${logPrefix}] ${recordTitle}${recordValue ? ` · ${recordValue}` : ''} — ${recordDetail}`;
                         await DB.saveMessage({
                             charId: targetChar.id,
                             role: 'assistant',
                             type: 'phone_card',
                             content: cardContent,
-                            metadata: { phoneCard: { app: logPrefix, kind: type, title: recordTitle, detail: recordDetail, value: item.value } },
+                            metadata: { phoneCard: { app: logPrefix, kind: type, title: recordTitle, detail: recordDetail, value: recordValue || undefined } },
                         } as any);
                         const currentMsgs = await DB.getMessagesByCharId(targetChar.id);
                         savedMsgId = currentMsgs[currentMsgs.length - 1]?.id;
@@ -778,7 +831,7 @@ ${realCharRule}
                         type: type,
                         title: recordTitle,
                         detail: recordDetail,
-                        value: item.value,
+                        value: recordValue || undefined,
                         timestamp: Date.now(),
                         systemMessageId: savedMsgId,
                         contactId,
@@ -1351,6 +1404,18 @@ ${olderText}
         addToast('备注已保存', 'success');
     };
 
+    // 真人联系人列表显示 identity 作为「备注名」。人工保存后锁定，避免下次扫描被模型覆盖。
+    const handleSaveIdentity = (contact: PhoneContact) => {
+        const identity = identityDraft.trim();
+        mutateContacts(cs => cs.map(c => c.id === contact.id ? {
+            ...c,
+            identity: identity || undefined,
+            identityManual: true,
+        } : c));
+        setEditingIdentity(false);
+        addToast(identity ? '备注名已保存' : '已恢复显示真名', 'success');
+    };
+
     // 彻底移除联系人：连同 TA 的聊天记录 + 私聊里的 phone_card 一起清；
     // 真人联系人（哪怕之前甄别/绑定错了）也把对方手机里的镜像联系人和记录一并删掉。
     const handleRemoveContact = async (contact: PhoneContact) => {
@@ -1820,6 +1885,27 @@ ${olderText}
         }
     };
 
+    const requestDeleteSimLog = (log: PhoneSimLog) => {
+        if (!targetChar) return;
+        const charId = targetChar.id;
+        askConfirm({
+            title: `删除生活记录「${log.title}」？`,
+            desc: '这条记录和用于重播的演出脚本会一并删除，无法撤销。已经发送给 TA 的回忆不会被撤回。',
+            confirmLabel: '删除',
+            danger: true,
+            onConfirm: () => {
+                updateCharacter(charId, (cur) => ({
+                    phoneState: {
+                        ...cur.phoneState,
+                        records: cur.phoneState?.records || [],
+                        simLogs: (cur.phoneState?.simLogs || []).filter(item => item.id !== log.id),
+                    },
+                }));
+                addToast('已删除生活记录', 'success');
+            },
+        });
+    };
+
     // 全局指示条点击后请求深链：直接进入对应角色的演出
     useEffect(() => {
         if (sim.deepLink && sim.charId) {
@@ -2036,6 +2122,119 @@ ${olderText}
         );
     };
 
+    const renderEvidenceDetail = () => {
+        const r = selectedEvidenceRecord;
+        if (!r) return null;
+
+        const customApp = customApps.find(app => app.id === r.type);
+        const layout = customApp?.layout || 'generic';
+        const isCall = r.type === 'call';
+        const isCommerce = r.type === 'order' || r.type === 'delivery' || layout === 'shop';
+        const isSocial = r.type === 'social' || layout === 'feed';
+        const isNovel = layout === 'novel';
+        const accent = customApp?.color || (isCall ? '#4ade80' : r.type === 'order' ? '#ff7a45' : r.type === 'delivery' ? '#fbbf24' : isSocial ? '#c084fc' : '#8b9cff');
+        const title = customApp?.name || appLabel(r.type);
+        const dateText = new Date(r.timestamp).toLocaleString('zh-CN', {
+            year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit',
+        });
+        const isMissed = isCall && (r.value?.includes('未接') || r.value?.includes('Missed'));
+        const isOutgoing = isCall && (r.value?.includes('呼出') || r.value?.includes('Outgoing'));
+        const callDirection = isMissed ? '未接来电' : isOutgoing ? '呼出' : '呼入';
+        const callDuration = r.value?.match(/\((.*?)\)/)?.[1] || (isMissed ? '—' : '未记录');
+        const detailIcon = customApp
+            ? <span className="text-lg">{customApp.icon}</span>
+            : isCall ? <Phone size={20} weight="fill" />
+                : r.type === 'order' ? <ShoppingBag size={20} weight="fill" />
+                    : r.type === 'delivery' ? <Hamburger size={20} weight="fill" />
+                        : <ImagesSquare size={20} weight="fill" />;
+
+        return (
+            <SubAppShell>
+                <TermHeader title={title} sub="record detail" accent={accent}
+                    onBack={() => { setSelectedEvidenceRecord(null); setActiveAppId(evidenceBackAppId); }}
+                    right={<span style={{ color: accent }}>{detailIcon}</span>} />
+                <div className="flex-1 overflow-y-auto no-scrollbar overscroll-contain px-5 pt-3 pb-10">
+                    {isSocial ? (
+                        <article>
+                            <div className="flex items-center gap-3 pb-4 border-b border-white/[0.07]">
+                                {targetChar?.avatar
+                                    ? <img src={targetChar.avatar} alt="" className="w-12 h-12 rounded-full object-cover" />
+                                    : <div className="w-12 h-12 rounded-full flex items-center justify-center text-white font-semibold" style={{ background: accent }}>{charName.slice(0, 1)}</div>}
+                                <div className="min-w-0">
+                                    <div className="text-[15px] font-semibold text-white/95">{charName}</div>
+                                    <div className="text-[11px] text-white/35 mt-0.5">{r.title || dateText}</div>
+                                </div>
+                            </div>
+                            <div className="py-6 text-[15px] leading-8 text-white/85 whitespace-pre-wrap break-words">
+                                {r.detail || '这条动态没有文字内容。'}
+                            </div>
+                            <div className="flex items-center gap-7 py-3 border-y border-white/[0.07] text-white/45">
+                                <span className="flex items-center gap-2 text-[12px]"><Heart size={16} weight="fill" style={{ color: accent }} /> {3 + (r.id.length % 30)} 个赞</span>
+                                <span className="flex items-center gap-2 text-[12px]"><ChatCircle size={16} /> {1 + (r.id.length % 9)} 条互动</span>
+                            </div>
+                        </article>
+                    ) : (
+                        <article>
+                            <div className="flex items-start gap-4 pb-6 border-b border-white/[0.07]">
+                                <div className="w-16 h-16 rounded-2xl flex items-center justify-center shrink-0 text-2xl"
+                                    style={{ color: accent, background: 'linear-gradient(135deg, ' + accent + '33, ' + accent + '0d)' }}>
+                                    {customApp ? customApp.icon : isCall ? <Phone size={27} weight="fill" /> : <Package size={28} weight="light" />}
+                                </div>
+                                <div className="min-w-0 flex-1 pt-0.5">
+                                    <div className="text-[18px] leading-7 font-semibold text-white/95 break-words" style={isNovel ? { fontFamily: "'Shippori Mincho','Noto Sans SC',serif" } : undefined}>{r.title}</div>
+                                    <div className="text-[11px] text-white/35 mt-1.5">{isCall ? callDirection : isCommerce ? '订单记录' : isNovel ? '阅读记录' : '内容记录'}</div>
+                                    {r.value && <div className="text-[18px] font-bold mt-2" style={{ color: accent }}>{r.value}</div>}
+                                </div>
+                            </div>
+
+                            <section className="py-6 border-b border-white/[0.07]">
+                                <div className="text-[10px] tracking-[0.22em] uppercase mb-3" style={{ color: accent }}>
+                                    {isCall ? '通话备注' : isCommerce ? '完整订单信息' : isNovel ? '完整正文' : '完整内容'}
+                                </div>
+                                <div className="text-[14px] leading-7 text-white/75 whitespace-pre-wrap break-words" style={isNovel ? { fontFamily: "'Shippori Mincho','Noto Sans SC',serif" } : undefined}>
+                                    {r.detail || '没有留下更多内容。'}
+                                </div>
+                            </section>
+
+                            {isCall && (
+                                <div className="grid grid-cols-2 gap-6 py-5 border-b border-white/[0.07]">
+                                    <div><div className="text-[10px] text-white/30">通话方向</div><div className="text-[14px] text-white/80 mt-1">{callDirection}</div></div>
+                                    <div><div className="text-[10px] text-white/30">通话时长</div><div className="text-[14px] text-white/80 mt-1">{callDuration}</div></div>
+                                </div>
+                            )}
+                            {isCommerce && (
+                                <div className="py-5 border-b border-white/[0.07]">
+                                    <div className="text-[10px] text-white/30 mb-3">订单进度</div>
+                                    <div className="flex items-center text-[11px] text-white/55">
+                                        {['已下单', '处理中', r.detail?.includes('签收') || r.detail?.includes('送达') ? '已完成' : '等待更新'].map((step, i) => (
+                                            <React.Fragment key={step}>
+                                                {i > 0 && <div className="h-px flex-1 mx-2" style={{ background: accent + '55' }} />}
+                                                <span className="shrink-0" style={{ color: i === 0 ? accent : undefined }}>{step}</span>
+                                            </React.Fragment>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </article>
+                    )}
+
+                    <dl className="py-5 space-y-3 text-[11px]">
+                        <div className="flex justify-between gap-4"><dt className="text-white/30">记录时间</dt><dd className="text-white/60 text-right">{dateText}</dd></div>
+                        <div className="flex justify-between gap-4"><dt className="text-white/30">来源 App</dt><dd className="text-white/60 text-right">{title}</dd></div>
+                        <div className="flex justify-between gap-4"><dt className="text-white/30">记录编号</dt><dd className="text-white/40 text-right font-mono">#{r.id.slice(-8).toUpperCase()}</dd></div>
+                    </dl>
+
+                    <button onClick={() => askConfirm({
+                        title: '删除这条记录？', desc: '删除「' + r.title + '」后无法恢复。', confirmLabel: '删除', danger: true,
+                        onConfirm: () => handleDeleteRecord(r),
+                    })} className="w-full mt-2 py-3 rounded-2xl text-[12px] font-semibold text-rose-200 bg-rose-400/10 border border-rose-400/20 active:scale-[0.99] transition flex items-center justify-center gap-2">
+                        <Trash size={15} weight="bold" /> 删除记录
+                    </button>
+                </div>
+            </SubAppShell>
+        );
+    };
+
     const renderCallList = () => {
         const accent = '#4ade80';
         const list = records.filter(r => r.type === 'call').sort((a, b) => b.timestamp - a.timestamp);
@@ -2049,7 +2248,8 @@ ${olderText}
                         const isOutgoing = r.value?.includes('呼出') || r.value?.includes('Outgoing');
                         const c = isMissed ? '#fb7185' : accent;
                         return (
-                            <div key={r.id} className="group relative flex items-center gap-3.5 rounded-2xl p-3.5 bg-white/[0.035] border border-white/[0.06] animate-fade-in">
+                            <div key={r.id} {...evidenceEntryProps(r, 'call')}
+                                className="group relative flex items-center gap-3.5 rounded-2xl p-3.5 pr-8 bg-white/[0.035] border border-white/[0.06] animate-fade-in cursor-pointer active:scale-[0.99] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60">
                                 <div className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0"
                                     style={{ background: `${c}1f`, color: c }}>
                                     <Phone size={19} weight="fill" />
@@ -2063,7 +2263,7 @@ ${olderText}
                                     {r.detail && <div className="text-[10.5px] text-white/30 mt-1 italic truncate">“{r.detail}”</div>}
                                 </div>
                                 <span className="text-[10px] text-white/30 tabular-nums shrink-0">{fmtClock(r.timestamp)}</span>
-                                <button onClick={() => handleDeleteRecord(r)} className="absolute top-2 right-2 w-5 h-5 bg-rose-500/80 text-white rounded-full flex items-center justify-center text-[11px] leading-none opacity-0 group-hover:opacity-100 transition">×</button>
+                                <DelBtn onDelete={() => handleDeleteRecord(r)} />
                             </div>
                         );
                     })}
@@ -2094,7 +2294,8 @@ ${olderText}
                 <div className="flex-1 overflow-y-auto px-4 pt-1 no-scrollbar pb-28 overscroll-contain space-y-3">
                     {list.length === 0 && <EmptyState text="还没有订单" />}
                     {list.map(r => (
-                        <div key={r.id} className="group relative flex gap-3 rounded-2xl p-3 bg-white/[0.035] border border-white/[0.06] animate-slide-up">
+                        <div key={r.id} {...evidenceEntryProps(r, 'taobao')}
+                            className="group relative flex gap-3 rounded-2xl p-3 pr-8 bg-white/[0.035] border border-white/[0.06] animate-slide-up cursor-pointer active:scale-[0.99] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400/60">
                             <div className="w-16 h-16 rounded-xl shrink-0 flex items-center justify-center"
                                 style={{ background: `linear-gradient(135deg, ${accent}33, ${accent}0d)` }}>
                                 <Package size={26} weight="light" style={{ color: accent }} />
@@ -2104,10 +2305,10 @@ ${olderText}
                                 <div className="text-[10.5px] text-white/40 mt-0.5 line-clamp-1">{r.detail}</div>
                                 <div className="mt-auto flex items-center justify-between pt-1.5">
                                     <span className="text-[14px] font-bold" style={{ color: accent }}>{r.value || '¥ --'}</span>
-                                    <span className="text-[9px] px-2 py-0.5 rounded-full bg-white/[0.06] text-white/50 tracking-wider">已下单</span>
+                                    <span className="text-[9px] px-2 py-0.5 rounded-full bg-white/[0.06] text-white/50 tracking-wider flex items-center gap-0.5">已下单 <CaretRight size={10} /></span>
                                 </div>
                             </div>
-                            <button onClick={() => handleDeleteRecord(r)} className="absolute top-1.5 right-1.5 w-5 h-5 bg-rose-500/80 text-white rounded-full flex items-center justify-center text-[11px] leading-none opacity-0 group-hover:opacity-100 transition">×</button>
+                            <DelBtn onDelete={() => handleDeleteRecord(r)} />
                         </div>
                     ))}
                 </div>
@@ -2126,7 +2327,8 @@ ${olderText}
                 <div className="flex-1 overflow-y-auto px-4 pt-2 no-scrollbar pb-28 overscroll-contain space-y-3">
                     {list.length === 0 && <EmptyState text="还没有外卖记录" />}
                     {list.map(r => (
-                        <div key={r.id} className="group relative rounded-2xl p-3.5 bg-white/[0.035] border border-white/[0.06] animate-slide-up">
+                        <div key={r.id} {...evidenceEntryProps(r, 'waimai')}
+                            className="group relative rounded-2xl p-3.5 pr-8 bg-white/[0.035] border border-white/[0.06] animate-slide-up cursor-pointer active:scale-[0.99] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60">
                             <div className="flex items-center gap-3">
                                 <div className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0"
                                     style={{ background: `linear-gradient(135deg, ${accent}33, ${accent}0d)` }}>
@@ -2141,7 +2343,7 @@ ${olderText}
                             <div className="text-[11.5px] text-white/50 mt-2.5 leading-relaxed pl-1 border-l-2" style={{ borderColor: `${accent}55` }}>
                                 <span className="pl-2">{r.detail}</span>
                             </div>
-                            <button onClick={() => handleDeleteRecord(r)} className="absolute top-2 right-2 w-5 h-5 bg-rose-500/80 text-white rounded-full flex items-center justify-center text-[11px] leading-none opacity-0 group-hover:opacity-100 transition">×</button>
+                            <DelBtn onDelete={() => handleDeleteRecord(r)} />
                         </div>
                     ))}
                 </div>
@@ -2160,7 +2362,8 @@ ${olderText}
                 <div className="flex-1 overflow-y-auto px-4 pt-2 no-scrollbar pb-28 overscroll-contain space-y-3">
                     {list.length === 0 && <EmptyState text="还没有动态" />}
                     {list.map(r => (
-                        <div key={r.id} className="group relative rounded-2xl p-4 bg-white/[0.035] border border-white/[0.06] animate-slide-up">
+                        <div key={r.id} {...evidenceEntryProps(r, 'social')}
+                            className="group relative rounded-2xl p-4 pr-8 bg-white/[0.035] border border-white/[0.06] animate-slide-up cursor-pointer active:scale-[0.99] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60">
                             <div className="flex items-center gap-3 mb-2.5">
                                 {targetChar?.avatar
                                     ? <img src={targetChar.avatar} className="w-9 h-9 rounded-full object-cover" />
@@ -2174,8 +2377,9 @@ ${olderText}
                             <div className="flex items-center gap-5 mt-3 pt-2.5 border-t border-white/[0.06] text-white/40">
                                 <span className="flex items-center gap-1.5 text-[11px]"><Heart size={14} weight="fill" style={{ color: accent }} /> {3 + (r.id.length % 30)}</span>
                                 <span className="flex items-center gap-1.5 text-[11px]"><ChatCircle size={14} /> {1 + (r.id.length % 9)}</span>
+                                <span className="ml-auto flex items-center gap-0.5 text-[10px]" style={{ color: accent }}>查看详情 <CaretRight size={10} /></span>
                             </div>
-                            <button onClick={() => handleDeleteRecord(r)} className="absolute top-2 right-2 w-5 h-5 bg-rose-500/80 text-white rounded-full flex items-center justify-center text-[11px] leading-none opacity-0 group-hover:opacity-100 transition">×</button>
+                            <DelBtn onDelete={() => handleDeleteRecord(r)} />
                         </div>
                     ))}
                 </div>
@@ -2245,7 +2449,7 @@ ${olderText}
                                 onClick={() => {
                                     if (lpFired.current) { lpFired.current = false; return; }
                                     if (contactSelectMode) { toggleContactSelect(c.id); return; }
-                                    setSelectedContact(c); setNoteDraft(c.note || ''); setEditingNote(false); setConvExpanded(false); setAffinityDraft(null); setShowProfile(false); exitMsgSelect(); setActiveAppId('contact_detail');
+                                    setSelectedContact(c); setIdentityDraft(c.identity || ''); setEditingIdentity(false); setNoteDraft(c.note || ''); setEditingNote(false); setConvExpanded(false); setAffinityDraft(null); setShowProfile(false); exitMsgSelect(); setActiveAppId('contact_detail');
                                 }}
                                 className={`group relative flex items-center gap-3 rounded-2xl p-3.5 border active:scale-[0.99] transition cursor-pointer animate-fade-in select-none ${selected ? 'bg-pink-500/10 border-pink-400/40' : 'bg-white/[0.035] border-white/[0.06]'} ${dimmed && !selected ? 'opacity-45' : ''}`}>
                                 {contactSelectMode && (
@@ -2635,7 +2839,7 @@ ${olderText}
         const statusLabel = c.status === 'friend' ? '好友' : c.status === 'deleted' ? '已删除' : c.status === 'blocked' ? '已拉黑' : '待定';
         const aff = affinityDraft ?? c.affinity;
         const commitAff = () => { if (affinityDraft != null) { handleSetAffinity(c, affinityDraft); setAffinityDraft(null); } };
-        const closeProfile = () => { setShowProfile(false); setEditingNote(false); };
+        const closeProfile = () => { setShowProfile(false); setEditingIdentity(false); setEditingNote(false); };
         const avatarNode = (size: string, txt: string) => av
             ? <img src={av} alt="" className={`${size} rounded-2xl object-cover shrink-0`} />
             : <div className={`${size} rounded-2xl flex items-center justify-center shrink-0 text-white font-semibold ${txt}`} style={{ background: `linear-gradient(135deg, ${accent}40, ${accent}10)` }}>{c.name[0]}</div>;
@@ -2769,6 +2973,28 @@ ${olderText}
                                 </div>
                             </div>
 
+                            {/* 真人联系人列表里显示的备注名 / 关系（可人工锁定，后续扫描不覆盖） */}
+                            {isReal && (
+                                <div className="rounded-2xl p-4 bg-white/[0.04] border border-white/[0.06]">
+                                    <div className="flex items-center justify-between mb-1.5">
+                                        <span className="text-[10px] tracking-[0.2em] uppercase text-white/40">备注名 / 关系</span>
+                                        <button onClick={() => { setEditingIdentity(!editingIdentity); setIdentityDraft(c.identity || ''); }} className="text-white/50 active:scale-90 transition" aria-label="编辑备注名">
+                                            <PencilSimple size={14} weight="bold" />
+                                        </button>
+                                    </div>
+                                    {editingIdentity ? (
+                                        <div className="space-y-2">
+                                            <input value={identityDraft} onChange={e => setIdentityDraft(e.target.value)} placeholder="例如：学长、前任、彼方网友"
+                                                className="w-full bg-white/[0.05] border border-white/[0.08] rounded-xl p-2.5 text-[12px] text-white/90" />
+                                            <button onClick={() => handleSaveIdentity(c)} className="w-full py-2 rounded-xl text-[12px] font-semibold text-white" style={{ background: accent }}>保存</button>
+                                            <p className="text-[9.5px] text-white/30">留空保存会恢复显示真名；人工保存后不会被再次扫描覆盖</p>
+                                        </div>
+                                    ) : (
+                                        <p className="text-[12.5px] text-white/70 leading-relaxed">{c.identity || `（显示真名：${linkedCharOf(c)?.name || c.name}）`}</p>
+                                    )}
+                                </div>
+                            )}
+
                             {/* 备注（事实，可编辑） */}
                             <div className="rounded-2xl p-4 bg-white/[0.04] border border-white/[0.06]">
                                 <div className="flex items-center justify-between mb-1.5">
@@ -2884,7 +3110,8 @@ ${olderText}
         switch (layout) {
             case 'shop':
                 return (
-                    <div key={r.id} className="group relative flex gap-3 rounded-2xl p-3 bg-white/[0.035] border border-white/[0.06] animate-slide-up">
+                    <div key={r.id} {...evidenceEntryProps(r, app.id)}
+                        className="group relative flex gap-3 rounded-2xl p-3 pr-8 bg-white/[0.035] border border-white/[0.06] animate-slide-up cursor-pointer active:scale-[0.99] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40">
                         <div className="w-16 h-16 rounded-xl shrink-0 flex items-center justify-center text-2xl" style={{ background: `linear-gradient(135deg, ${accent}33, ${accent}0d)` }}>{app.icon}</div>
                         <div className="flex-1 min-w-0 flex flex-col">
                             <div className="text-[13px] font-medium text-white/95 leading-snug line-clamp-2">{r.title}</div>
@@ -2899,7 +3126,8 @@ ${olderText}
                 );
             case 'feed':
                 return (
-                    <div key={r.id} className="group relative rounded-2xl p-4 bg-white/[0.035] border border-white/[0.06] animate-slide-up">
+                    <div key={r.id} {...evidenceEntryProps(r, app.id)}
+                        className="group relative rounded-2xl p-4 pr-8 bg-white/[0.035] border border-white/[0.06] animate-slide-up cursor-pointer active:scale-[0.99] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40">
                         <div className="flex items-center gap-3 mb-2.5">
                             <div className="w-9 h-9 rounded-full flex items-center justify-center text-lg" style={{ background: `linear-gradient(135deg, ${accent}55, ${accent}15)` }}>{app.icon}</div>
                             <div className="min-w-0">
@@ -2917,7 +3145,8 @@ ${olderText}
                 );
             case 'forum':
                 return (
-                    <div key={r.id} className="group relative rounded-2xl p-4 bg-white/[0.035] border border-white/[0.06] animate-slide-up">
+                    <div key={r.id} {...evidenceEntryProps(r, app.id)}
+                        className="group relative rounded-2xl p-4 pr-8 bg-white/[0.035] border border-white/[0.06] animate-slide-up cursor-pointer active:scale-[0.99] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40">
                         <div className="flex items-start justify-between gap-2 mb-1.5">
                             <span className="text-[14px] font-semibold text-white/95 leading-snug line-clamp-2 flex-1">{r.title}</span>
                             {r.value && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md shrink-0" style={{ color: accent, background: `${accent}1f` }}>{r.value}</span>}
@@ -2933,7 +3162,8 @@ ${olderText}
                 );
             case 'novel':
                 return (
-                    <div key={r.id} className="group relative rounded-2xl p-4 bg-white/[0.035] border border-white/[0.06] animate-slide-up" style={{ boxShadow: `inset 0 0 30px ${accent}10` }}>
+                    <div key={r.id} {...evidenceEntryProps(r, app.id)}
+                        className="group relative rounded-2xl p-4 pr-8 bg-white/[0.035] border border-white/[0.06] animate-slide-up cursor-pointer active:scale-[0.99] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40" style={{ boxShadow: `inset 0 0 30px ${accent}10` }}>
                         <div className="text-[10px] tracking-[0.2em] uppercase mb-1" style={{ color: accent }}>Chapter {total - idx}</div>
                         <div className="text-[15px] font-semibold text-white/95 mb-2" style={{ fontFamily: "'Shippori Mincho','Noto Sans SC',serif" }}>{r.title}</div>
                         <div className="text-[12.5px] text-white/60 leading-loose line-clamp-4 whitespace-pre-wrap" style={{ fontFamily: "'Shippori Mincho','Noto Sans SC',serif" }}>{r.detail}</div>
@@ -2946,7 +3176,8 @@ ${olderText}
                 );
             default:
                 return (
-                    <div key={r.id} className="group relative rounded-2xl p-4 bg-white/[0.035] border border-white/[0.06] animate-slide-up" style={{ boxShadow: `inset 0 0 24px ${accent}14` }}>
+                    <div key={r.id} {...evidenceEntryProps(r, app.id)}
+                        className="group relative rounded-2xl p-4 pr-8 bg-white/[0.035] border border-white/[0.06] animate-slide-up cursor-pointer active:scale-[0.99] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40" style={{ boxShadow: `inset 0 0 24px ${accent}14` }}>
                         <div className="flex justify-between items-start gap-2 mb-1.5">
                             <span className="text-[13.5px] font-semibold text-white/95 line-clamp-1">{r.title}</span>
                             {r.value && <span className="text-[12px] font-bold px-2 py-0.5 rounded-full shrink-0" style={{ color: accent, background: `${accent}1f` }}>{r.value}</span>}
@@ -3323,6 +3554,7 @@ ${olderText}
                 <>
                     {activeAppId === 'chat' && renderChatList()}
                     {activeAppId === 'chat_detail' && renderChatDetail()}
+                    {activeAppId === 'evidence_detail' && renderEvidenceDetail()}
                     {activeAppId === 'contacts' && renderContactsList()}
                     {activeAppId === 'contact_detail' && renderContactDetail()}
                     {activeAppId === 'call' && renderCallList()}
@@ -3337,6 +3569,7 @@ ${olderText}
                     )}
                     {activeAppId === 'lifelog' && targetChar && (
                         <LifeLog targetChar={targetChar} onBack={() => setActiveAppId('home')}
+                            onRequestDelete={requestDeleteSimLog}
                             onReplay={(log) => {
                                 if (!log.script) return;
                                 // 用存下来的脚本快照原样回放——直接喂给全局 store 的 ready 态

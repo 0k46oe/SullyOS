@@ -13,6 +13,7 @@
 
 import type { Message, Emoji } from '../types';
 import { formatLifeSimResetCardForContext } from './lifeSimChatCard';
+import { formatTransferRecord } from './transferFormat';
 import { formatStatCount } from './videoParser';
 
 /**
@@ -22,6 +23,35 @@ import { formatStatCount } from './videoParser';
  */
 export function stickerNameFromUrl(emojis: Emoji[], url: string): string {
     return emojis.find(e => e.url === url)?.name || '未知表情';
+}
+
+/**
+ * 语音消息的音频资源与转写文本可能分别落在 content / metadata 中。
+ * 记忆链路只取可理解的文字，绝不把 blob、data URI 或纯音频 URL 当成上下文。
+ */
+export function getVoiceTranscript(msg: Message): string {
+    const meta = msg.metadata || {};
+    const candidates = [
+        meta.transcript,
+        meta.originalText,
+        meta.spokenText,
+        meta.text,
+        msg.content,
+    ];
+    for (const candidate of candidates) {
+        if (typeof candidate !== 'string') continue;
+        const trimmed = candidate.trim();
+        if (!trimmed) continue;
+        if (/^(?:blob:|data:audio\/)/i.test(trimmed)) continue;
+        if (/^https?:\/\/\S+$/i.test(trimmed)) continue;
+        const cleaned = trimmed
+            .replace(/<\/?(?:语音|語音|字幕)[^>]*>/g, ' ')
+            .replace(/%%BILINGUAL%%/gi, '\n')
+            .replace(/[ \t]{2,}/g, ' ')
+            .trim();
+        if (cleaned) return cleaned;
+    }
+    return '';
 }
 
 /**
@@ -70,21 +100,29 @@ export function normalizeMessageContent(
 ): string {
     const type = msg.type as string;
 
-    // 纯视觉/音频类：给个占位，别让 URL / base64 污染 LLM 上下文
+    // 纯视觉类给占位；语音优先使用配套转写，避免把音频资源地址送进上下文。
     if (type === 'image') return '[图片]';
     if (type === 'emoji') return '[表情包]';
-    if (type === 'voice') return '[语音]';
+    if (type === 'voice') {
+        const transcript = getVoiceTranscript(msg);
+        return transcript ? `[语音转写] ${transcript}` : '[语音]';
+    }
 
     // 系统交互事件
+    // TODO(记录形态): 转账已迁到 [[记录:TRANSFER|...]] (见 transferFormat.ts 头注)，
+    // 戳一戳等其他系统事件观察一段时间后再迁 —— sanitize 终线和幂等哨兵已按整个
+    // 记录命名空间就位，迁移时只需要改这里的渲染。
     if (type === 'interaction') return `[系统: ${userName}戳了${charName}一下]`;
     if (type === 'transfer') {
+        // 与私聊历史 (chatPrompts.buildMessageHistory) 共用同一渲染 —— 全链路一副面孔，
+        // 记忆宫殿/归档的总结器看到的和角色平时看到的是同一形态。to 用固定词不写真名。
         const meta = msg.metadata || {};
-        const amtStr = meta.amount !== undefined ? ` ${meta.amount}` : '';
-        const sender = msg.role === 'user' ? userName : charName;
-        const recipient = msg.role === 'user' ? charName : userName;
-        if (meta.receipt === 'accepted') return `[系统: ${sender}接收了${recipient}的转账${amtStr}]`;
-        if (meta.receipt === 'returned') return `[系统: ${sender}退回了${recipient}的转账${amtStr}]`;
-        return `[系统: ${sender}向${recipient}转账${amtStr}]`;
+        return formatTransferRecord({
+            role: msg.role === 'user' ? 'user' : 'assistant',
+            amount: meta.amount,
+            receipt: meta.receipt,
+            status: meta.status,
+        });
     }
 
     // 结算卡：几种 app 产生，用字段逐一翻成自然文本
@@ -331,12 +369,18 @@ export function formatMessageWithTime(
  * 判断一条消息是否"对 palace / archive 有语义价值"。
  *
  * pipeline 以前的过滤是 `type === 'text'`，这会漏掉 score_card / system /
- * transfer / interaction 等有内容的事件；纯二进制类型（image/emoji/voice）
- * 通过 normalize 会变成短占位符，LLM 看到也没帮助，直接过滤掉。
+ * transfer / interaction 等有内容的事件；image/emoji 这类纯视觉资源直接过滤。
+ * voice 只要带转写文字就属于语义上下文，应该与文字和卡片一起参与统计与总结。
  */
 export function isMessageSemanticallyRelevant(msg: Message): boolean {
     const type = msg.type as string;
-    if (type === 'image' || type === 'emoji' || type === 'voice') return false;
+    if (type === 'image' || type === 'emoji') return false;
+    if (type === 'voice') return !!getVoiceTranscript(msg);
+    // 卡片是其它功能汇入聊天的结构化上下文；即使 content 为空，只要专用格式化器
+    // 能从 metadata 生成可读摘要，也必须参与缓冲区计数和记忆总结。
+    if (type?.endsWith('_card')) {
+        return !!normalizeMessageContent(msg, '角色', '用户').trim();
+    }
     // 有内容或有结构化 metadata 才算
     return !!(msg.content?.trim() || msg.metadata?.scoreCard || msg.metadata?.amount || msg.metadata?.song || msg.metadata?.trpg || msg.metadata?.webpage);
 }

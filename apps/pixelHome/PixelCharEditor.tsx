@@ -14,6 +14,7 @@ import {
   FRONT_HAIR_COUNT, BACK_HAIR_COUNT, EYE_COUNT,
   FRONT_HAIR_NAMES, BACK_HAIR_NAMES, EYE_NAMES,
 } from './pixelCharGenerator';
+import { processImage } from '../../utils/file';
 
 interface Props {
   initial?: PixelCharConfig | null;
@@ -35,6 +36,7 @@ const PixelCharEditor: React.FC<Props> = ({ initial, target = 'char', targetLabe
   const [drawMode, setDrawMode] = useState(false);
   const [drawColor, setDrawColor] = useState('#ff4757');
   const [isEraser, setIsEraser] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const uploadRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -128,14 +130,19 @@ const PixelCharEditor: React.FC<Props> = ({ initial, target = 'char', targetLabe
   }, []);
 
   const handleUploadSprite = useCallback(async (file: File) => {
-    if (!file.type.match(/^image\/(png|jpeg|webp|gif)/)) return;
-    const dataUri = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-    setConfig(prev => ({ ...prev, customSprite: dataUri }));
+    setUploadError(null);
+    try {
+      // 统一走 processImage 而不是直接 readAsDataURL：
+      //  · 手机原图动辄 5~10MB，base64 后更大，整段塞进配置 JSON 会撑爆 iOS Safari 的
+      //    IndexedDB 配额和内存（保存静默失败 / 渲染裂图）。小人展示尺寸只有 24~40px，
+      //    压到 ≤256px 绰绰有余，透明通道（PNG/WebP）会保留。
+      //  · 不支持的格式（如 HEIC）解码失败会抛可读错误，不再静默没反应。
+      //  · GIF 原样保留（不压缩，动图不丢帧）。
+      const dataUri = await processImage(file, { maxWidth: 256, quality: 0.92 });
+      setConfig(prev => ({ ...prev, customSprite: dataUri }));
+    } catch (e: any) {
+      setUploadError(e?.message || '图片处理失败，请换一张试试');
+    }
   }, []);
 
   const clearCustomSprite = useCallback(() => {
@@ -254,6 +261,9 @@ const PixelCharEditor: React.FC<Props> = ({ initial, target = 'char', targetLabe
               </button>
             )}
           </div>
+        )}
+        {uploadError && (
+          <span className="text-[10px] text-red-400">上传失败：{uploadError}</span>
         )}
         <input ref={uploadRef} type="file" accept="image/png,image/webp,image/jpeg,image/gif" className="hidden"
           onChange={e => { if (e.target.files?.[0]) { handleUploadSprite(e.target.files[0]); e.target.value = ''; } }} />

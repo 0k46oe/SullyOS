@@ -1,10 +1,10 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { useOS, DEFAULT_WALLPAPER } from '../context/OSContext';
+import { useOS, DEFAULT_WALLPAPER, DEFAULT_PAPER_APPEARANCE, NOSTALGIA_APPEARANCE } from '../context/OSContext';
 import { OSTheme, DesktopDecoration, AppearancePreset, Toast } from '../types';
 import { INSTALLED_APPS, Icons } from '../constants';
 import { processImage, processImageToBlob } from '../utils/file';
-import { putImageBlob } from '../utils/blobRef';
+import { putImageBlob, useBlobRefUrl } from '../utils/blobRef';
 import { DB } from '../utils/db';
 import { isStatusBarHidden } from '../utils/iosStandalone';
 import { confirmExportSafety } from '../utils/exportGuard';
@@ -13,6 +13,11 @@ import { ChatAppearanceEditor as ModularChatAppearanceEditor } from '../componen
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
+
+const CustomIconImage: React.FC<{ value: string; alt: string; preserveOutline?: boolean }> = ({ value, alt, preserveOutline = false }) => {
+    const url = useBlobRefUrl(value);
+    return url ? <img src={url} className={`w-full h-full ${preserveOutline ? 'object-contain' : 'object-cover rounded-2xl'}`} alt={alt} /> : null;
+};
 
 // Touch-friendly long-press wrapper. `onContextMenu` alone misses iOS Safari /
 // Capacitor WebView, so we also wire pointer/touch timers to fire after ~550ms.
@@ -99,7 +104,9 @@ const MOBILEGAME_WALLPAPER = 'radial-gradient(95% 55% at 85% 0%, #fdeef7 0%, tra
 const TAMAGOTCHI_WALLPAPER = 'radial-gradient(85% 50% at 80% 0%, #e6dcf8 0%, transparent 55%), radial-gradient(75% 45% at 12% 10%, #f4edfb 0%, transparent 55%), linear-gradient(180deg, #ded4f4 0%, #d6cbf0 55%, #cfc3ec 100%)';
 const COMPANION_WALLPAPER = 'radial-gradient(90% 65% at 50% 5%, #6c5a91 0%, transparent 62%), radial-gradient(75% 55% at 100% 50%, #382e5b 0%, transparent 72%), linear-gradient(180deg, #211a36 0%, #100d1c 62%, #080711 100%)';
 
-const DESKTOP_SKINS: { id: string; name: string; desc: string; swatch: string; config: Partial<OSTheme> }[] = [
+type DesktopSkinOption = { id: string; name: string; desc: string; swatch: string; config: Partial<OSTheme> };
+
+const DESKTOP_SKINS: DesktopSkinOption[] = [
   {
     id: 'animalcrossing',
     name: '动森风格',
@@ -107,6 +114,7 @@ const DESKTOP_SKINS: { id: string; name: string; desc: string; swatch: string; c
     swatch: 'linear-gradient(135deg,#BCE7F5 0%,#BBE38F 55%,#7CBA4C 100%)',
     config: {
       skin: 'animalcrossing',
+      desktopVariant: 'paper',
       hue: 95, saturation: 48, lightness: 56,
       contentColor: '#725d42',
       wallpaper: ACNH_WALLPAPER,
@@ -124,6 +132,7 @@ const DESKTOP_SKINS: { id: string; name: string; desc: string; swatch: string; c
     swatch: 'linear-gradient(135deg,#f7d9ec 0%,#d9d4f5 55%,#a8b8e8 100%)',
     config: {
       skin: 'mobilegame',
+      desktopVariant: 'paper',
       hue: 270, saturation: 45, lightness: 70,
       contentColor: '#6b5b95',
       wallpaper: MOBILEGAME_WALLPAPER,
@@ -141,6 +150,7 @@ const DESKTOP_SKINS: { id: string; name: string; desc: string; swatch: string; c
     swatch: 'linear-gradient(135deg,#ded4f4 0%,#fdf9f2 52%,#f2a7bb 100%)',
     config: {
       skin: 'tamagotchi',
+      desktopVariant: 'paper',
       hue: 258, saturation: 42, lightness: 66,
       contentColor: '#7a6cb8',
       wallpaper: TAMAGOTCHI_WALLPAPER,
@@ -171,16 +181,23 @@ const DESKTOP_SKINS: { id: string; name: string; desc: string; swatch: string; c
   {
     id: 'default',
     name: '默认风格',
-    desc: '经典 SullyOS 玻璃拟物界面',
-    swatch: 'linear-gradient(135deg,#FFDEE9 0%,#B5FFFC 100%)',
+    desc: '暖米白纸感桌面 · 低对比柔和配色',
+    swatch: DEFAULT_WALLPAPER,
     config: {
       skin: 'default',
-      hue: 245, saturation: 25, lightness: 65,
-      contentColor: '#ffffff',
+      ...DEFAULT_PAPER_APPEARANCE,
       wallpaper: DEFAULT_WALLPAPER,
     },
   },
 ];
+
+const NOSTALGIA_SKIN: DesktopSkinOption = {
+  id: 'nostalgia',
+  name: '怀旧版',
+  desc: '最初粉绿渐变 · 白色玻璃卡片、图标底与 Dock · 旧版配色',
+  swatch: NOSTALGIA_APPEARANCE.wallpaper,
+  config: { ...NOSTALGIA_APPEARANCE },
+};
 
 // 动森叶子贴纸：切换动森皮肤时自动撒到桌面。用 acnh-leaf- 前缀标记，便于切回时单独清掉而不动用户自己的装饰。
 const ACNH_LEAF_PREFIX = 'acnh-leaf-';
@@ -505,6 +522,8 @@ const Appearance: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'theme' | 'icons' | 'presets' | 'chat'>('theme');
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const [wallpaperUrl, setWallpaperUrl] = useState('');
+  const lockWallpaperInputRef = useRef<HTMLInputElement>(null);
+  const [lockWallpaperUrl, setLockWallpaperUrl] = useState('');
   const widgetInputRef = useRef<HTMLInputElement>(null);
   const [activeWidgetSlot, setActiveWidgetSlot] = useState<string | null>(null);
   const iconInputRef = useRef<HTMLInputElement>(null);
@@ -605,23 +624,47 @@ const Appearance: React.FC = () => {
           // 改存 Blob：原画质不重绘，二进制进 blob_assets，字段只存 blobref 令牌（省 ~33% 空间、不占 JS 堆）。
           const blob = await processImageToBlob(file, { skipCompression: true });
           const ref = await putImageBlob(blob);
-          updateTheme({ wallpaper: ref });
+          await updateTheme({ wallpaper: ref });
           addToast('壁纸更新成功', 'success');
       } catch (e: any) {
           addToast(e.message, 'error');
       }
   };
 
-  const applyWallpaperUrl = () => {
+  const applyWallpaperUrl = async () => {
       const url = wallpaperUrl.trim();
       if (!url) return;
       if (!/^https?:\/\//i.test(url) && !url.startsWith('data:') && !url.startsWith('blob:')) {
           addToast('请填写以 http(s):// 开头的图片地址', 'error');
           return;
       }
-      updateTheme({ wallpaper: url });
+      await updateTheme({ wallpaper: url });
       setWallpaperUrl('');
       addToast('壁纸已应用', 'success');
+  };
+
+  const handleLockWallpaperUpload = async (file: File) => {
+      try {
+          addToast('正在处理锁屏壁纸 (原画质)...', 'info');
+          const blob = await processImageToBlob(file, { skipCompression: true });
+          const ref = await putImageBlob(blob);
+          await updateTheme({ lockWallpaper: ref });
+          addToast('锁屏壁纸更新成功', 'success');
+      } catch (e: any) {
+          addToast(e.message, 'error');
+      }
+  };
+
+  const applyLockWallpaperUrl = async () => {
+      const url = lockWallpaperUrl.trim();
+      if (!url) return;
+      if (!/^https?:\/\//i.test(url) && !url.startsWith('data:') && !url.startsWith('blob:')) {
+          addToast('请填写以 http(s):// 开头的图片地址', 'error');
+          return;
+      }
+      await updateTheme({ lockWallpaper: url });
+      setLockWallpaperUrl('');
+      addToast('锁屏壁纸已应用', 'success');
   };
 
   const handleWidgetUpload = async (file: File) => {
@@ -685,9 +728,12 @@ const Appearance: React.FC = () => {
   // 壁纸处理：进入动森前备份用户原壁纸（data URI 存 IndexedDB，渐变/URL 存 localStorage），
   // 切回默认时还原，避免覆盖用户自己设的桌面壁纸。
   const ACNH_WP_BACKUP_KEY = 'acnh_wallpaper_backup';
-  const applyDesktopSkin = async (skin: { id: string; name: string; config: Partial<OSTheme> }) => {
+  const currentDesktopSkinId = theme.skin && theme.skin !== 'default'
+      ? theme.skin
+      : theme.desktopVariant === 'nostalgia' ? 'nostalgia' : 'default';
+  const applyDesktopSkin = async (skin: DesktopSkinOption) => {
       const goingDefault = skin.id === 'default';
-      const currentlyThemed = (theme.skin || 'default') !== 'default';
+      const currentlyThemed = currentDesktopSkinId !== 'default';
 
       let wallpaper: string;
       if (!goingDefault) {
@@ -721,15 +767,16 @@ const Appearance: React.FC = () => {
       const desktopDecorations = skin.id === 'animalcrossing' ? [...existing, ...buildAcnhLeaves()] : existing;
       // skin.config 里写死的 wallpaper 不用，改用上面算出的（备份/还原后的）值
       const { wallpaper: _ignored, ...restConfig } = skin.config;
-      updateTheme({ ...restConfig, wallpaper, desktopDecorations });
+      await updateTheme({ ...restConfig, wallpaper, desktopDecorations });
       addToast(`已切换到「${skin.name}」`, 'success');
   };
 
   const handleIconUpload = async (file: File) => {
       if (!selectedAppId) return;
       try {
-          const dataUrl = await processImage(file);
-          setCustomIcon(selectedAppId, dataUrl);
+          const blob = await processImageToBlob(file, { maxWidth: 512, quality: 0.92 });
+          const ref = await putImageBlob(blob);
+          await setCustomIcon(selectedAppId, ref);
           addToast('应用图标已更新', 'success');
       } catch (e: any) {
           addToast(e.message, 'error');
@@ -766,7 +813,7 @@ const Appearance: React.FC = () => {
                     <p className="text-[10px] text-slate-400 mb-4">一键切换整机主题：壁纸、配色、图标外观、聊天界面全部联动改变。</p>
                     <div className="grid grid-cols-2 gap-3">
                         {DESKTOP_SKINS.map(skin => {
-                            const active = (theme.skin || 'default') === skin.id;
+                            const active = currentDesktopSkinId === skin.id;
                             return (
                                 <button
                                     key={skin.id}
@@ -783,6 +830,24 @@ const Appearance: React.FC = () => {
                             );
                         })}
                     </div>
+
+                    <button
+                        onClick={() => applyDesktopSkin(NOSTALGIA_SKIN)}
+                        aria-pressed={currentDesktopSkinId === 'nostalgia'}
+                        className={`mt-3 w-full flex items-center gap-3 rounded-2xl p-3 text-left border-2 transition-all active:scale-[0.99] ${currentDesktopSkinId === 'nostalgia' ? 'border-primary ring-2 ring-primary/20' : 'border-slate-200 hover:border-slate-300'}`}
+                    >
+                        <div className="h-14 w-20 shrink-0 rounded-xl shadow-inner" style={{ background: NOSTALGIA_SKIN.swatch }} />
+                        <div className="min-w-0 flex-1">
+                            <div className="text-xs font-bold text-slate-700">
+                                {NOSTALGIA_SKIN.name}
+                                {currentDesktopSkinId === 'nostalgia' && <span className="ml-1 text-[9px] font-bold text-primary">· 当前</span>}
+                            </div>
+                            <div className="text-[9px] text-slate-400 mt-0.5 leading-snug">{NOSTALGIA_SKIN.desc}</div>
+                        </div>
+                        {currentDesktopSkinId !== 'nostalgia' && (
+                            <span className="shrink-0 text-[9px] font-semibold text-slate-400">一键切换</span>
+                        )}
+                    </button>
 
                     {/* 动森模式专属：聊天 App 是否联动 */}
                     {(theme.skin || 'default') === 'animalcrossing' && (
@@ -944,7 +1009,7 @@ const Appearance: React.FC = () => {
                     <div className="flex items-center justify-between">
                         <div>
                             <div className="text-sm font-medium text-slate-700">音乐卡片浅色系</div>
-                            <div className="text-[10px] text-slate-400 mt-0.5">桌面第二页「正在播放」卡片改用浅色样式（默认深色玻璃）。仅默认皮肤生效。</div>
+                            <div className="text-[10px] text-slate-400 mt-0.5">桌面第二页「正在播放」卡片改用浅色样式。仅默认皮肤生效。</div>
                         </div>
                         <button
                             onClick={() => updateTheme({ nowPlayingWidgetLight: !theme.nowPlayingWidgetLight })}
@@ -961,12 +1026,12 @@ const Appearance: React.FC = () => {
                     <LongPressArea
                         className="aspect-[9/16] w-1/2 mx-auto bg-slate-100 rounded-2xl overflow-hidden relative shadow-inner mb-4 group cursor-pointer"
                         onClick={() => wallpaperInputRef.current?.click()}
-                        onLongPress={() => {
+                        onLongPress={async () => {
                             if (theme.wallpaper === DEFAULT_WALLPAPER) {
                                 addToast('当前已是默认壁纸', 'info');
                                 return;
                             }
-                            updateTheme({ wallpaper: DEFAULT_WALLPAPER });
+                            await updateTheme({ wallpaper: DEFAULT_WALLPAPER });
                             addToast('已恢复默认壁纸', 'success');
                         }}
                     >
@@ -1004,6 +1069,74 @@ const Appearance: React.FC = () => {
                             应用网络壁纸
                         </button>
                         <p className="text-[10px] text-slate-400">直接引用网络图片，不占用本地存储</p>
+                    </div>
+                </section>
+
+                {/* Lock Screen Wallpaper Section */}
+                <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+                    <div className="flex items-center justify-between mb-1">
+                        <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest">锁屏壁纸</h2>
+                        <span className="text-[9px] px-2 py-0.5 rounded-full bg-stone-100 text-stone-500 font-bold">
+                            {theme.lockWallpaper ? '独立设置' : '跟随桌面'}
+                        </span>
+                    </div>
+                    <p className="text-[10px] text-slate-400 mb-4">单独设置锁屏画面，不会修改桌面壁纸。</p>
+                    <LongPressArea
+                        className="aspect-[9/16] w-1/2 mx-auto bg-slate-100 rounded-2xl overflow-hidden relative shadow-inner mb-4 group cursor-pointer"
+                        onClick={() => lockWallpaperInputRef.current?.click()}
+                        onLongPress={async () => {
+                            if (!theme.lockWallpaper) {
+                                addToast('锁屏当前已跟随桌面壁纸', 'info');
+                                return;
+                            }
+                            await updateTheme({ lockWallpaper: undefined });
+                            addToast('锁屏已恢复跟随桌面壁纸', 'success');
+                        }}
+                    >
+                        <div
+                            className="w-full h-full"
+                            style={{
+                                background: (() => {
+                                    const value = theme.lockWallpaper || theme.wallpaper;
+                                    if (!value) return '#e2e8f0';
+                                    return (value.startsWith('linear-gradient') || value.startsWith('radial-gradient') || value.startsWith('conic-gradient'))
+                                        ? value
+                                        : `url("${value}") center/cover`;
+                                })(),
+                            }}
+                        />
+                        <div className="absolute inset-0 bg-black/30 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                            <span className="text-white text-xs font-bold bg-black/20 px-3 py-1 rounded-full backdrop-blur-md">更换锁屏</span>
+                        </div>
+                    </LongPressArea>
+                    <input
+                        type="file"
+                        ref={lockWallpaperInputRef}
+                        className="hidden"
+                        accept="image/*"
+                        onChange={(e) => {
+                            if (e.target.files?.[0]) handleLockWallpaperUpload(e.target.files[0]);
+                            e.target.value = '';
+                        }}
+                    />
+                    <p className="text-center text-[10px] text-slate-400 mb-4">点击上传 / 长按恢复跟随桌面</p>
+
+                    <div className="border-t border-slate-100 pt-4 space-y-2">
+                        <p className="text-[11px] font-bold text-slate-500">从 URL 导入</p>
+                        <input
+                            value={lockWallpaperUrl}
+                            onChange={e => setLockWallpaperUrl(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter') applyLockWallpaperUrl(); }}
+                            placeholder="输入锁屏图片地址 (https://...)"
+                            className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-xs outline-none focus:border-primary transition-all"
+                        />
+                        <button
+                            onClick={applyLockWallpaperUrl}
+                            disabled={!lockWallpaperUrl.trim()}
+                            className="w-full py-2 bg-primary text-white font-bold text-xs rounded-xl shadow-md active:scale-95 transition-transform disabled:opacity-40 disabled:active:scale-100"
+                        >
+                            应用网络锁屏壁纸
+                        </button>
                     </div>
                 </section>
 
@@ -1326,24 +1459,41 @@ const Appearance: React.FC = () => {
                 </section>
             </>
         ) : activeTab === 'icons' ? (
-            <div className="grid grid-cols-3 gap-4">
+            <div className="space-y-5">
+              <section className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-slate-700">保留透明图标原轮廓</div>
+                    <div className="text-[10px] text-slate-400 mt-0.5 leading-snug">开启后按图片原轮廓完整显示，不套系统圆角底框；默认关闭。</div>
+                  </div>
+                  <button
+                    onClick={() => updateTheme({ preserveCustomIconOutlines: !theme.preserveCustomIconOutlines })}
+                    className={`w-12 h-7 rounded-full transition-colors relative shrink-0 ${theme.preserveCustomIconOutlines ? 'bg-primary' : 'bg-slate-200'}`}
+                    aria-label="保留透明图标原轮廓"
+                  >
+                    <div className={`absolute top-1 w-5 h-5 bg-white rounded-full shadow-sm transition-transform ${theme.preserveCustomIconOutlines ? 'translate-x-6' : 'translate-x-1'}`} />
+                  </button>
+                </div>
+              </section>
+              <div className="grid grid-cols-3 gap-4">
                 {INSTALLED_APPS.map(app => {
                     const Icon = Icons[app.icon];
                     const customUrl = customIcons[app.id];
+                    const preserveOutline = !!customUrl && theme.preserveCustomIconOutlines === true;
                     return (
                         <div key={app.id} className="flex flex-col items-center gap-2">
-                             <div 
-                                className="w-16 h-16 rounded-2xl shadow-sm bg-slate-200 overflow-hidden relative group cursor-pointer"
+                              <div
+                                className={`w-16 h-16 relative group cursor-pointer ${preserveOutline ? '' : 'rounded-2xl shadow-sm bg-slate-200 overflow-hidden'}`}
                                 onClick={() => { setSelectedAppId(app.id); iconInputRef.current?.click(); }}
-                             >
-                                 {customUrl ? (
-                                     <img src={customUrl} className="w-full h-full object-cover" />
-                                 ) : (
+                              >
+                                  {customUrl ? (
+                                     <CustomIconImage value={customUrl} alt={`${app.name} 自定义图标`} preserveOutline={preserveOutline} />
+                                  ) : (
                                      <div className={`w-full h-full ${app.color} flex items-center justify-center text-white`}>
                                          <Icon className="w-8 h-8" />
                                      </div>
                                  )}
-                                 <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                                 <div className="absolute inset-0 rounded-2xl bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6 text-white"><path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" /></svg>
                                  </div>
                              </div>
@@ -1355,6 +1505,7 @@ const Appearance: React.FC = () => {
                     );
                 })}
                 <input type="file" ref={iconInputRef} className="hidden" accept="image/*" onChange={(e) => e.target.files?.[0] && handleIconUpload(e.target.files[0])} />
+              </div>
             </div>
         ) : activeTab === 'presets' ? (
             <PresetManager

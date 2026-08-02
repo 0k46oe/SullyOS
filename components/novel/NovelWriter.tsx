@@ -12,6 +12,7 @@ import { useOS } from '../../context/OSContext';
 import { safeResponseJson } from '../../utils/safeApi';
 import { DB } from '../../utils/db';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../character/CharacterGroupFilter';
+import { getLocalDateKey } from '../../utils/localDate';
 
 interface NovelWriterProps {
     activeBook: NovelBook;
@@ -41,16 +42,43 @@ interface PersonaPanelProps {
     updateCharacter: (id: string, updates: Partial<CharacterProfile>) => void;
 }
 
-const PersonaPanel: React.FC<PersonaPanelProps> = ({ 
-    char, userProfile, targetCharId, isTyping, setIsTyping, setConfirmDialog, addToast, apiConfig, updateCharacter 
+const PersonaPanel: React.FC<PersonaPanelProps> = ({
+    char, userProfile, targetCharId, isTyping, setIsTyping, setConfirmDialog, addToast, apiConfig, updateCharacter
 }) => {
     const rawPersona = char.writerPersona || analyzeWriterPersonaSimple(char);
     const sections = parsePersonaMarkdown(rawPersona);
-    
+    const [isEditing, setIsEditing] = useState(false);
+    const [draft, setDraft] = useState('');
+
+    // 切换共创者时退出编辑，避免草稿写进另一个角色
+    useEffect(() => { setIsEditing(false); }, [char.id]);
+
+    const saveDraft = () => {
+        if (!draft.trim()) { addToast('档案内容不能为空', 'error'); return; }
+        updateCharacter(char.id, { writerPersona: draft.trim(), writerPersonaGeneratedAt: Date.now() });
+        setIsEditing(false);
+        addToast('创作档案已保存', 'success');
+    };
+
+    if (isEditing) {
+        return (
+            <div className="bg-gradient-to-b from-slate-50 to-white border-b border-black/5 overflow-hidden">
+                <div className="max-h-[45vh] overflow-y-auto p-4 overscroll-contain">
+                    <textarea value={draft} onChange={e => setDraft(e.target.value)} className="w-full h-56 bg-white border border-slate-200 rounded-2xl p-3 text-sm leading-relaxed resize-none outline-none focus:border-slate-400" />
+                    <button onClick={() => setDraft(analyzeWriterPersonaSimple(char))} className="text-xs text-slate-400 underline mt-1">重置为自动分析</button>
+                </div>
+                <div className="px-4 py-3 border-t border-slate-100 bg-white/80 flex gap-2">
+                    <button onClick={() => setIsEditing(false)} className="flex-1 bg-slate-100 text-slate-500 py-2.5 rounded-xl text-sm font-bold active:scale-95 transition-transform">取消</button>
+                    <button onClick={saveDraft} className="flex-1 bg-slate-800 text-white py-2.5 rounded-xl text-sm font-bold active:scale-95 transition-transform">保存</button>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="bg-gradient-to-b from-slate-50 to-white border-b border-black/5 overflow-hidden">
             <div className="max-h-[45vh] overflow-y-auto p-4 space-y-3 overscroll-contain">
-                {sections.length === 0 ? <div className="text-center py-8 text-slate-400 text-sm">暂无详细风格数据<br/><span className="text-xs">点击下方按钮生成</span></div> : 
+                {sections.length === 0 ? <div className="text-center py-8 text-slate-400 text-sm">暂无详细风格数据<br/><span className="text-xs">点击下方按钮生成</span></div> :
                     sections.map((sec, idx) => (
                         <div key={idx} className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
                             <div className="flex items-center gap-2 mb-2 pb-2 border-b border-slate-100"><span className="text-base">{sec.icon}</span><h4 className="text-sm font-bold text-slate-800">{sec.title}</h4></div>
@@ -59,8 +87,9 @@ const PersonaPanel: React.FC<PersonaPanelProps> = ({
                     ))
                 }
             </div>
-            <div className="px-4 py-3 border-t border-slate-100 bg-white/80">
-                <button onClick={async () => { 
+            <div className="px-4 py-3 border-t border-slate-100 bg-white/80 flex gap-2">
+                <button onClick={() => { setDraft(rawPersona); setIsEditing(true); }} disabled={isTyping} className="flex-1 bg-white border border-slate-200 text-slate-600 py-2.5 rounded-xl text-sm font-bold transition-all active:scale-95 hover:bg-slate-50 disabled:opacity-50">手动编辑</button>
+                <button onClick={async () => {
                     if(!targetCharId) return; 
                     setConfirmDialog({ 
                         isOpen: true, 
@@ -82,7 +111,7 @@ const PersonaPanel: React.FC<PersonaPanelProps> = ({
                             } 
                         } 
                     }); 
-                }} disabled={isTyping} className="w-full bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white py-2.5 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-50">
+                }} disabled={isTyping} className="flex-1 bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white py-2.5 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-50">
                     {isTyping ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : <>深度分析写作风格</>}
                 </button>
             </div>
@@ -379,7 +408,7 @@ ${chapterText.substring(0, 200000)}
         setSegments(newSegments);
         await updateNovel(activeBook.id, { segments: newSegments });
         
-        const currentDate = new Date().toISOString().split('T')[0];
+        const currentDate = getLocalDateKey();
         const chapterNum = newSegments.filter(s => s.focus === 'chapter_summary').length;
         const collabNames = collaborators.map(c => c.name).join('、');
 

@@ -4,6 +4,7 @@ import {
     BankTransaction, CharacterProfile, LifeRecord, LifeRecordModule,
     LifeRecordSettings, MedPlan, Message,
 } from '../types';
+import { addLocalDays, getLocalDateKey } from './localDate';
 
 /**
  * 生活记录（档案 App：生理期 / 药盒 / 记账 / 锻炼）
@@ -40,13 +41,13 @@ export const getHiddenLifeModules = (settings: LifeRecordSettings | null | undef
     new Set(settings?.hiddenModules || []);
 
 // ─── 日期工具（与 BankApp 同口径：toISOString 取日期段） ───
-export const lifeToday = (): string => new Date().toISOString().split('T')[0];
+export const lifeToday = (): string => getLocalDateKey();
 
 const parseDate = (s: string): number => new Date(`${s}T00:00:00Z`).getTime();
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** b - a 的整天数（a、b 均为 YYYY-MM-DD） */
 const diffDays = (a: string, b: string): number => Math.round((parseDate(b) - parseDate(a)) / DAY_MS);
-const addDays = (s: string, n: number): string => new Date(parseDate(s) + n * DAY_MS).toISOString().split('T')[0];
+const addDays = (s: string, n: number): string => addLocalDays(s, n);
 /** 面板日历等 UI 侧复用的日期工具 */
 export const lifeDiffDays = diffDays;
 export const lifeAddDays = addDays;
@@ -157,10 +158,11 @@ export const isMedPlanDueToday = (plan: MedPlan, today: string = lifeToday()): b
         if (plan.endDate && today > plan.endDate) return false;
     }
     const interval = Math.max(1, plan.intervalDays || 1);
-    if (interval === 1) return true;
-    const anchor = plan.startDate || new Date(plan.createdAt).toISOString().split('T')[0];
+    const anchor = plan.startDate || getLocalDateKey(new Date(plan.createdAt));
     const diff = diffDays(anchor, today);
-    return diff >= 0 && diff % interval === 0;
+    if (diff < 0) return false;
+    if (interval === 1) return true;
+    return diff % interval === 0;
 };
 
 /** 频率的展示文案 */

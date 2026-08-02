@@ -1,8 +1,9 @@
 
 
 
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Message, ChatTheme } from '../../types';
+import { phoneFieldToText } from '../../utils/phoneEvidence';
 import { tryParseLifeSimResetCard } from '../../utils/lifeSimChatCard';
 import { VALID_INTERJECTION_TAGS, cleanVoiceMarkupForDisplay } from '../../utils/minimaxTts';
 import { stripFishCuesForDisplay } from '../../utils/fishAudioTts';
@@ -419,15 +420,177 @@ export const ThinkingChainBlock: React.FC<{
     onOpenSettings?: () => void;
 }> = ({ chain, styleId, customColors, onOpenSettings }) => {
     const [expanded, setExpanded] = useState(false);
+    const [copyState, setCopyState] = useState<'idle' | 'ready' | 'ok' | 'error'>('idle');
+    const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const pointerIdRef = useRef<number | null>(null);
+    const pointerTypeRef = useRef<React.PointerEvent<HTMLDivElement>['pointerType']>('');
+    const pointerStartRef = useRef({ x: 0, y: 0 });
+    const longPressReadyRef = useRef(false);
+    const suppressNextClickRef = useRef(false);
     const trimmed = (chain || '').trim();
-    if (!trimmed) return null;
     const spec = resolveThinkingChainStyle(styleId, customColors);
     const firstLine = trimmed.replace(/\s+/g, ' ').slice(0, 38);
     const hasMore = trimmed.length > 38;
+
+    const clearCopyTimer = () => {
+        if (copyTimerRef.current) {
+            clearTimeout(copyTimerRef.current);
+            copyTimerRef.current = null;
+        }
+    };
+
+    useEffect(() => () => {
+        clearCopyTimer();
+        if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+    }, []);
+
+    if (!trimmed) return null;
+
+    const copyThinkingChain = async () => {
+        let success = false;
+        try {
+            if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
+            await navigator.clipboard.writeText(trimmed);
+            success = true;
+        } catch {
+            // iOS PWA / 非安全上下文可能拒绝 Clipboard API，保留 textarea 兜底。
+            let textarea: HTMLTextAreaElement | null = null;
+            try {
+                textarea = document.createElement('textarea');
+                textarea.value = trimmed;
+                textarea.setAttribute('readonly', '');
+                textarea.style.position = 'fixed';
+                textarea.style.opacity = '0';
+                textarea.style.pointerEvents = 'none';
+                document.body.appendChild(textarea);
+                textarea.select();
+                textarea.setSelectionRange(0, textarea.value.length);
+                success = document.execCommand('copy');
+            } catch {
+                success = false;
+            } finally {
+                textarea?.remove();
+            }
+        }
+
+        setCopyState(success ? 'ok' : 'error');
+        if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+        feedbackTimerRef.current = setTimeout(() => setCopyState('idle'), 1600);
+    };
+
+    const resetLongPress = () => {
+        clearCopyTimer();
+        longPressReadyRef.current = false;
+        if (copyState === 'ready') setCopyState('idle');
+    };
+
+    // 必须由 pointerup / touchend / contextmenu 这类真实用户手势直接调用。
+    // Safari 会拒绝在长按 setTimeout 回调里发起的剪贴板写入。
+    const finishLongPressCopy = () => {
+        if (!longPressReadyRef.current) return false;
+        clearCopyTimer();
+        longPressReadyRef.current = false;
+        suppressNextClickRef.current = true;
+        void copyThinkingChain();
+        return true;
+    };
+
+    const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+        e.stopPropagation();
+        pointerTypeRef.current = e.pointerType;
+        if (e.button !== 0) return;
+        pointerIdRef.current = e.pointerId;
+        pointerStartRef.current = { x: e.clientX, y: e.clientY };
+        longPressReadyRef.current = false;
+        suppressNextClickRef.current = false;
+        clearCopyTimer();
+        copyTimerRef.current = setTimeout(() => {
+            copyTimerRef.current = null;
+            longPressReadyRef.current = true;
+            setCopyState('ready');
+            try { navigator.vibrate?.(20); } catch { /* vibration is optional */ }
+        }, 450);
+    };
+
+    const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+        e.stopPropagation();
+        if (pointerIdRef.current !== e.pointerId) return;
+        const dx = e.clientX - pointerStartRef.current.x;
+        const dy = e.clientY - pointerStartRef.current.y;
+        if (Math.abs(dx) > 10 || Math.abs(dy) > 10) resetLongPress();
+    };
+
+    const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+        e.stopPropagation();
+        if (pointerIdRef.current !== e.pointerId) return;
+        pointerIdRef.current = null;
+        if (!finishLongPressCopy()) resetLongPress();
+    };
+
+    const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+        e.stopPropagation();
+        if (pointerIdRef.current !== e.pointerId) return;
+        pointerIdRef.current = null;
+        clearCopyTimer();
+        // iOS 弹出原生选区时可能先派发 pointercancel，随后仍会派发 touchend。
+        // 此时保留 ready，让 touchend 仍可在真实用户手势中执行复制。
+        if (e.pointerType !== 'touch' || !longPressReadyRef.current) resetLongPress();
+    };
+
+    const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+        e.stopPropagation();
+        if (suppressNextClickRef.current) {
+            suppressNextClickRef.current = false;
+            e.preventDefault();
+            return;
+        }
+        setExpanded(v => !v);
+    };
+
+    const copyStatusLabel = copyState === 'ok'
+        ? '已复制'
+        : copyState === 'ready'
+            ? '松开复制'
+            : copyState === 'error'
+                ? '请用系统复制'
+                : expanded ? spec.silenceLabel : spec.listenLabel;
+
     return (
         <div
             className="sully-psyche relative mb-2 w-full max-w-full select-text cursor-pointer group"
-            onClick={(e) => { e.stopPropagation(); setExpanded(v => !v); }}
+            role="button"
+            tabIndex={0}
+            aria-label="心象：点击展开，长按复制全文"
+            title="长按复制心象全文"
+            onClick={handleClick}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerCancel}
+            onTouchEnd={(e) => {
+                e.stopPropagation();
+                finishLongPressCopy();
+            }}
+            onContextMenu={(e) => {
+                e.stopPropagation();
+                // 触屏保留 Safari 原生蓝色选区与复制菜单，作为剪贴板权限受限时的兜底。
+                if (pointerTypeRef.current !== 'mouse') return;
+                e.preventDefault();
+                suppressNextClickRef.current = false;
+                void copyThinkingChain();
+            }}
+            onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault();
+                setExpanded(v => !v);
+            }}
+            style={{
+                touchAction: 'pan-y',
+                userSelect: 'text',
+                WebkitUserSelect: 'text',
+                WebkitTouchCallout: 'default',
+            }}
         >
             <div
                 className="sully-psyche-card relative overflow-hidden px-4 py-2.5 transition-all duration-300"
@@ -497,7 +660,7 @@ export const ThinkingChainBlock: React.FC<{
                         className="ml-auto text-[10px] tracking-[0.18em] transition-opacity opacity-65 group-hover:opacity-100"
                         style={{ color: spec.subtext }}
                     >
-                        {expanded ? spec.silenceLabel : spec.listenLabel}
+                        {copyStatusLabel}
                     </span>
                 </div>
 
@@ -1228,7 +1391,7 @@ interface MessageItemProps {
     bubbleVariant?: 'modern' | 'flat' | 'outline' | 'shadow' | 'wechat' | 'ios';
     messageSpacing?: 'compact' | 'default' | 'spacious';
     showTimestamp?: 'always' | 'hover' | 'never';
-    /** HTML 卡片 / 心象卡片的出现位置（聊天细节微调 chatModuleAlign 合并后的生效值）。缺省 = 居中 */
+    /** HTML / 心象 / 音乐卡片的出现位置（聊天细节微调 chatModuleAlign 合并后的生效值）。缺省 = 居中 */
     moduleAlign?: 'anchor' | 'center';
     /** 流式预览无缝接棒时，正式消息首帧已经可见，不应再次从透明态淡入。 */
     suppressEntranceAnimation?: boolean;
@@ -1433,34 +1596,40 @@ const MessageItem = React.memo(({
 
     // Render Avatar with potential decoration/frame
     // Removed mb-5 from here, handled via absolute positioning in parent
-    const renderAvatar = (src: string) => (
-        <div className={`relative ${avatarSizeClass} z-0`}>
-            {shouldShowAvatar && (
-                <>
-                    <img
-                        src={src}
-                        className={`w-full h-full ${avatarRadiusClass} object-cover shadow-sm ring-1 ring-black/5 relative z-0`}
-                        alt="avatar"
-                        loading="lazy"
-                        decoding="async"
-                    />
-                    {styleConfig.avatarDecoration && (
+    const renderAvatar = (
+        src: string,
+        options?: { visible?: boolean; className?: string },
+    ) => {
+        const visible = options?.visible ?? shouldShowAvatar;
+        return (
+            <div className={`relative ${avatarSizeClass} z-0 ${options?.className || ''}`}>
+                {visible && (
+                    <>
                         <img
-                            src={styleConfig.avatarDecoration}
-                            className="absolute pointer-events-none z-10 max-w-none"
-                            style={{
-                                left: `${styleConfig.avatarDecorationX ?? 50}%`,
-                                top: `${styleConfig.avatarDecorationY ?? 50}%`,
-                                width: `${avatarSizePx * (styleConfig.avatarDecorationScale ?? 1)}px`,
-                                height: 'auto',
-                                transform: `translate(-50%, -50%) rotate(${styleConfig.avatarDecorationRotate ?? 0}deg)`,
-                            }}
+                            src={src}
+                            className={`sully-chat-message-avatar-img w-full h-full ${avatarRadiusClass} object-cover shadow-sm ring-1 ring-black/5 relative z-0`}
+                            alt="avatar"
+                            loading="lazy"
+                            decoding="async"
                         />
-                    )}
-                </>
-            )}
-        </div>
-    );
+                        {styleConfig.avatarDecoration && (
+                            <img
+                                src={styleConfig.avatarDecoration}
+                                className="absolute pointer-events-none z-10 max-w-none"
+                                style={{
+                                    left: `${styleConfig.avatarDecorationX ?? 50}%`,
+                                    top: `${styleConfig.avatarDecorationY ?? 50}%`,
+                                    width: `${avatarSizePx * (styleConfig.avatarDecorationScale ?? 1)}px`,
+                                    height: 'auto',
+                                    transform: `translate(-50%, -50%) rotate(${styleConfig.avatarDecorationRotate ?? 0}deg)`,
+                                }}
+                            />
+                        )}
+                    </>
+                )}
+            </div>
+        );
+    };
 
     // --- SYSTEM MESSAGE RENDERING ---
     if (isSystem) {
@@ -1706,7 +1875,11 @@ const MessageItem = React.memo(({
     // HTML 卡片（280px 定宽模块）默认位置就是"视觉居中"的约定：包装层打上 sully-html-wrap，
     // 让「聊天细节微调」的贴边/缩进规则 :not() 绕开它——美化怎么开卡片都不挪窝。
     const isHtmlCard = m.type === 'html_card';
-    // 聊天细节微调 chatModuleAlign：HTML 卡片 / 心象卡片默认水平居中，'anchor' 才贴气泡列。
+    // 音乐卡片（一起听 / 收歌单）与 HTML 卡片同为定宽模块，跟随同一套 chatModuleAlign 约定。
+    // 条件与下方渲染分支一致：没有 song 元数据会落回普通气泡，不按模块排版。
+    const isMusicCard = m.type === 'music_card' && !!m.metadata?.song;
+    const isModuleCard = isHtmlCard || isMusicCard;
+    // 聊天细节微调 chatModuleAlign：HTML 卡片 / 心象卡片 / 音乐卡片默认水平居中，'anchor' 才贴气泡列。
     // 心象居中时抽出到气泡行上方的独立行（不带 .group 类，注入的钉位 CSS 自然不命中）。
     const centerModules = moduleAlign !== 'anchor';
     // 心象卡片（思考链）：默认渲染在气泡包装层内、气泡上方；居中模式挪到独立行。
@@ -1739,7 +1912,16 @@ const MessageItem = React.memo(({
                     <div className="w-[72%] max-w-[72%]">{thinkingChainNode}</div>
                 </div>
             )}
-            <div className={`flex items-end ${isUser ? 'justify-end' : 'justify-start'} ${marginBottom} px-3 group select-none relative transition-[padding] duration-300 ${selectionMode ? 'pl-12' : ''}`}>
+            <div className={[
+                'sully-chat-message',
+                isUser ? 'sully-chat-message-user justify-end' : 'sully-chat-message-ai justify-start',
+                isFirstInGroup ? 'sully-chat-message-group-first' : '',
+                isLastInGroup ? 'sully-chat-message-group-last' : '',
+                isModuleCard ? 'sully-chat-message-module' : '',
+                `flex items-end ${marginBottom} px-3 group select-none relative transition-[padding] duration-300`,
+                selectionMode ? 'pl-12' : '',
+            ].filter(Boolean).join(' ')}
+            style={{ '--sully-chat-message-avatar-size': `${avatarSizePx}px` } as React.CSSProperties}>
                 {selectionMode && (
                     <div className="absolute left-3 top-1/2 -translate-y-1/2 cursor-pointer z-20" onClick={() => onToggleSelect(m.id)}>
                         <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'bg-primary border-primary' : 'border-slate-300 bg-white/80'}`}>
@@ -1748,10 +1930,20 @@ const MessageItem = React.memo(({
                     </div>
                 )}
 
-                {/* Avatar - Absolute Positioned */}
-                {!isUser && (
-                    <div className={`absolute bottom-0 z-0 ${selectionMode ? 'left-14' : 'left-3'} transition-[left] duration-300`}>
-                        {renderAvatar(charAvatar)}
+                {/* 白框布局钩子：组首额外挂一份默认隐藏的头像；显示它即可做“每轮一次、头像在气泡上方”。 */}
+                {isFirstInGroup && !isModuleCard && (
+                    <div className={`sully-chat-turn-avatar-slot hidden absolute top-0 z-0 ${isUser ? 'right-3' : (selectionMode ? 'left-14' : 'left-3')}`}>
+                        {renderAvatar(isUser ? userAvatar : charAvatar, {
+                            visible: true,
+                            className: 'sully-chat-turn-avatar',
+                        })}
+                    </div>
+                )}
+
+                {/* HTML / 音乐卡片是独立模块，不继承普通消息外壳的角色头像。卡片内部自己的头像不受影响。 */}
+                {!isUser && !isModuleCard && (
+                    <div className={`sully-chat-message-avatar-slot absolute bottom-0 z-0 ${selectionMode ? 'left-14' : 'left-3'} transition-[left] duration-300`}>
+                        {renderAvatar(charAvatar, { className: 'sully-chat-message-avatar' })}
                     </div>
                 )}
 
@@ -1772,7 +1964,7 @@ const MessageItem = React.memo(({
                     Added min-w-0 to prevent flexbox overflow issues.
                     Added explicit margins to clear absolute avatars.
                 */}
-                <div className={`relative max-w-[72%] min-w-0 ${isHtmlCard && centerModules ? 'mx-auto' : (!isUser ? 'ml-12' : 'mr-12')} ${isHtmlCard ? 'sully-html-wrap' : ''}`}>
+                <div className={`sully-chat-message-content relative max-w-[72%] min-w-0 ${isModuleCard && centerModules ? 'mx-auto' : (!isUser ? 'ml-12' : 'mr-12')} ${isModuleCard ? 'sully-html-wrap' : ''}`}>
                     <div
                         aria-hidden="true"
                         className={`absolute -right-10 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full flex items-center justify-center pointer-events-none transition-all duration-150 ${isReplyReady ? 'bg-indigo-500 text-white shadow-md shadow-indigo-200' : 'bg-white/90 text-slate-400 shadow-sm'}`}
@@ -1808,10 +2000,10 @@ const MessageItem = React.memo(({
                     </div>
                 </div>
 
-                {/* User Avatar - Absolute Positioned */}
-                {isUser && (
-                    <div className={`absolute right-3 bottom-0 z-0 transition-[left] duration-300`}>
-                        {renderAvatar(userAvatar)}
+                {/* 用户侧若存在导入/历史模块卡，也保持同一条“卡片不带消息外侧头像”规则。 */}
+                {isUser && !isModuleCard && (
+                    <div className={`sully-chat-message-avatar-slot absolute right-3 bottom-0 z-0 transition-[left] duration-300`}>
+                        {renderAvatar(userAvatar, { className: 'sully-chat-message-avatar' })}
                     </div>
                 )}
             </div>
@@ -2367,7 +2559,20 @@ const MessageItem = React.memo(({
     }
 
     if (m.type === 'phone_card') {
-        const pc: any = m.metadata?.phoneCard || {};
+        const rawPhoneCard: any = m.metadata?.phoneCard || {};
+        const pc: any = {
+            ...rawPhoneCard,
+            kind: phoneFieldToText(rawPhoneCard.kind),
+            service: phoneFieldToText(rawPhoneCard.service),
+            serviceName: phoneFieldToText(rawPhoneCard.serviceName),
+            title: phoneFieldToText(rawPhoneCard.title),
+            detail: phoneFieldToText(rawPhoneCard.detail),
+            value: phoneFieldToText(rawPhoneCard.value),
+            app: phoneFieldToText(rawPhoneCard.app),
+            by: phoneFieldToText(rawPhoneCard.by),
+            contactName: phoneFieldToText(rawPhoneCard.contactName),
+            action: phoneFieldToText(rawPhoneCard.action),
+        };
         const timeStr = new Date(m.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 
         // 智能体卡片（偷看到 TA 在玩 AI：助手 / 树洞 / 酒馆）

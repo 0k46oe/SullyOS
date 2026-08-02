@@ -47,6 +47,27 @@ const NovelApp: React.FC = () => {
     const [showPersonaModal, setShowPersonaModal] = useState(false);
     const [libraryPersonaChar, setLibraryPersonaChar] = useState<CharacterProfile | null>(null);
     const [libraryGroupId, setLibraryGroupId] = useState(GROUP_FILTER_ALL); // 角色库的分组筛选
+    const [isEditingPersona, setIsEditingPersona] = useState(false);
+    const [personaDraft, setPersonaDraft] = useState('');
+
+    // 弹窗展示期间角色可能被 updateCharacter 更新（如保存档案后），始终从 characters 取最新数据
+    const libraryChar = useMemo(() => libraryPersonaChar ? (characters.find(c => c.id === libraryPersonaChar.id) || libraryPersonaChar) : null, [libraryPersonaChar, characters]);
+
+    const closePersonaModal = () => { setShowPersonaModal(false); setIsEditingPersona(false); };
+
+    const startEditPersona = () => {
+        if (!libraryChar) return;
+        setPersonaDraft(libraryChar.writerPersona || analyzeWriterPersonaSimple(libraryChar));
+        setIsEditingPersona(true);
+    };
+
+    const savePersonaDraft = () => {
+        if (!libraryChar) return;
+        if (!personaDraft.trim()) { addToast('档案内容不能为空', 'error'); return; }
+        updateCharacter(libraryChar.id, { writerPersona: personaDraft.trim(), writerPersonaGeneratedAt: Date.now() });
+        setIsEditingPersona(false);
+        addToast('创作档案已保存', 'success');
+    };
 
     // Dialog
     const [confirmDialog, setConfirmDialog] = useState<{ isOpen: boolean; title: string; message: string; variant: 'danger' | 'warning' | 'info'; confirmText?: string; onConfirm: () => void; } | null>(null);
@@ -231,9 +252,26 @@ const NovelApp: React.FC = () => {
                     </section>
                 </div>
 
-                <Modal isOpen={showPersonaModal} title={libraryPersonaChar?.name || '角色风格'} onClose={() => setShowPersonaModal(false)}>
+                <Modal isOpen={showPersonaModal} title={libraryChar?.name || '角色风格'} onClose={closePersonaModal} footer={
+                    isEditingPersona ? (<>
+                        <button onClick={() => setIsEditingPersona(false)} className="flex-1 py-3 bg-slate-100 text-slate-500 font-bold rounded-2xl active:scale-95 transition-transform">取消</button>
+                        <button onClick={savePersonaDraft} className="flex-1 py-3 bg-slate-800 text-white font-bold rounded-2xl active:scale-95 transition-transform">保存</button>
+                    </>) : (<>
+                        <button onClick={startEditPersona} className="flex-1 py-3 bg-indigo-50 text-indigo-600 font-bold rounded-2xl active:scale-95 transition-transform">编辑档案</button>
+                        <button onClick={closePersonaModal} className="flex-1 py-3 bg-slate-100 text-slate-500 font-bold rounded-2xl active:scale-95 transition-transform">关闭</button>
+                    </>)
+                }>
                     <div className="max-h-[60vh] overflow-y-auto space-y-4 p-1">
-                        {libraryPersonaChar ? <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 text-sm leading-relaxed text-slate-700 whitespace-pre-wrap">{libraryPersonaChar.writerPersona || analyzeWriterPersonaSimple(libraryPersonaChar)}</div> : null}
+                        {libraryChar ? (
+                            isEditingPersona ? (
+                                <div className="space-y-2">
+                                    <textarea value={personaDraft} onChange={e => setPersonaDraft(e.target.value)} className="w-full h-64 bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm leading-relaxed resize-none outline-none focus:border-slate-400 font-mono" />
+                                    <button onClick={() => setPersonaDraft(analyzeWriterPersonaSimple(libraryChar))} className="text-xs text-slate-400 underline">重置为自动分析</button>
+                                </div>
+                            ) : (
+                                <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 text-sm leading-relaxed text-slate-700 whitespace-pre-wrap">{libraryChar.writerPersona || analyzeWriterPersonaSimple(libraryChar)}</div>
+                            )
+                        ) : null}
                     </div>
                 </Modal>
             </div>

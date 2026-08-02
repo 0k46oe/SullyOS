@@ -7,6 +7,7 @@ import { safeResponseJson } from './safeApi';
 import { DB } from './db';
 import { getProxyWorkerUrl } from './proxyWorker';
 import { nowInTimeZone } from './timezone';
+import { getLocalDateKey } from './localDate';
 
 export interface WeatherData {
     temp: number;
@@ -60,6 +61,7 @@ export interface RealtimeConfig {
         enabled: boolean;
         serverUrl: string;
         cookie?: string;        // Lite 模式：登录后的完整小红书 cookie
+        rnoteApiKey?: string;   // Lite 模式：用户自备的 Rnote Key，用于真实评论
         loggedInNickname?: string;
         loggedInUserId?: string;
         userXsecToken?: string; // 从 feed 列表自动获取，用于 getUserProfile 等
@@ -81,13 +83,24 @@ export const defaultRealtimeConfig: RealtimeConfig = {
     notionApiKey: '',
     notionDatabaseId: '',
     xhsEnabled: false,
-    xhsMcpConfig: { enabled: false, serverUrl: `${getProxyWorkerUrl()}/api`, cookie: undefined, loggedInNickname: undefined, loggedInUserId: undefined, userXsecToken: undefined },
+    xhsMcpConfig: {
+        enabled: false,
+        serverUrl: `${getProxyWorkerUrl()}/api`,
+        cookie: undefined,
+        rnoteApiKey: undefined,
+        loggedInNickname: undefined,
+        loggedInUserId: undefined,
+        userXsecToken: undefined,
+    },
     cacheMinutes: 30
 };
 
 // 缓存
 let weatherCache: { data: WeatherData | null; timestamp: number } = { data: null, timestamp: 0 };
 let newsCache: { data: NewsItem[]; timestamp: number } = { data: [], timestamp: 0 };
+
+// Upstream moved the hot_news API from orz.ai to news.orz.ai on 2026-08-01.
+export const HOTNEWS_API_BASE_URL = 'https://news.orz.ai/api/v1/dailynews';
 
 // Open-Meteo 地名解析缓存：城市名 → 坐标，避免每次取天气都多打一次 geocoding
 const geocodeCache = new Map<string, { latitude: number; longitude: number; name: string }>();
@@ -245,7 +258,7 @@ export const RealtimeContextManager = {
         return weather;
     },
 
-    // hot_news（orz.ai）平台 key → 中文展示名。用于 source 标注，让提示词读起来自然。
+    // hot_news（news.orz.ai）平台 key → 中文展示名。用于 source 标注，让提示词读起来自然。
     HOTNEWS_PLATFORM_LABELS: {
         baidu: '百度', sspai: '少数派', weibo: '微博', zhihu: '知乎', tskr: '36氪',
         ftpojie: '吾爱破解', bilibili: 'B站', douban: '豆瓣', hupu: '虎扑', tieba: '贴吧',
@@ -258,7 +271,7 @@ export const RealtimeContextManager = {
     DEFAULT_HOTNEWS_PLATFORMS: ['weibo', 'zhihu', 'baidu', 'bilibili', 'douyin'],
 
     /**
-     * 使用 hot_news（orz.ai）获取中文多平台热榜。
+     * 使用 hot_news（news.orz.ai）获取中文多平台热榜。
      * 免鉴权、半小时刷新。浏览器端优先直连；若被 CORS 拦截则本调用返回 []，
      * 由 fetchNews 自然回落到 Brave / Hacker News。
      * 多平台并发拉取，每平台取前几条后 round-robin 交错合并，避免单一平台霸屏。
@@ -271,7 +284,7 @@ export const RealtimeContextManager = {
         const perPlatformResults = await Promise.all(list.map(async (p): Promise<NewsItem[]> => {
             const label = RealtimeContextManager.HOTNEWS_PLATFORM_LABELS[p] || p;
             try {
-                const res = await fetch(`https://orz.ai/api/v1/dailynews/?platform=${encodeURIComponent(p)}`, {
+                const res = await fetch(`${HOTNEWS_API_BASE_URL}/?platform=${encodeURIComponent(p)}`, {
                     headers: { 'Accept': 'application/json' },
                 });
                 if (!res.ok) {
@@ -284,8 +297,12 @@ export const RealtimeContextManager = {
                     .filter(it => it && it.title)
                     .slice(0, perPlatform)
                     .map(it => {
-                        const desc = typeof it.desc === 'string' ? it.desc.replace(/\s+/g, ' ').trim() : '';
-                        return { title: String(it.title), source: label, url: it.url, desc: desc || undefined };
+                        const rawDesc = typeof it.desc === 'string'
+                            ? it.desc
+                            : typeof it.content === 'string' ? it.content : '';
+                        const desc = rawDesc.replace(/\s+/g, ' ').trim();
+                        const normalizedDesc = desc && desc !== String(it.title).trim() ? desc : undefined;
+                        return { title: String(it.title), source: label, url: it.url, desc: normalizedDesc };
                     });
                 const withDesc = picked.filter(x => x.desc).length;
                 console.log(`[hot_news] ${label}(${p}) ✓ 取 ${picked.length}/${items.length} 条（含简介 ${withDesc} 条）`);
@@ -543,10 +560,12 @@ export const RealtimeContextManager = {
     },
 
     /**
-     * 检查特殊日期
+     * 检查特殊日期。
+     * tz 非空时按角色所在时区判「今天几号」——否则角色会跟着用户的日历过节：
+     * 用户这边 2/14 早上，角色在纽约还是 13 号晚上，却被告知今天是情人节。
      */
-    checkSpecialDates: (): string[] => {
-        const now = new Date();
+    checkSpecialDates: (tz?: string): string[] => {
+        const now = nowInTimeZone(tz);
         const monthDay = `${(now.getMonth() + 1).toString().padStart(2, '0')}-${now.getDate().toString().padStart(2, '0')}`;
 
         const special: string[] = [];
@@ -616,8 +635,8 @@ export const RealtimeContextManager = {
         const time = RealtimeContextManager.getTimeContext(tz);
         parts.push(`📅 当前真实时间: ${time.dateStr} ${time.dayOfWeek} ${time.timeOfDay} ${time.timeStr}`);
 
-        // 2. 特殊日期
-        const specialDates = RealtimeContextManager.checkSpecialDates();
+        // 2. 特殊日期（跟上面的「当前真实时间」同一个时区，否则同一段里日期和节日会打架）
+        const specialDates = RealtimeContextManager.checkSpecialDates(tz);
         if (specialDates.length > 0) {
             parts.push(`🎉 今日特殊: ${specialDates.join('、')}`);
         }
@@ -843,7 +862,7 @@ export const NotionManager = {
     ): Promise<{ success: boolean; pageId?: string; url?: string; message: string }> => {
         try {
             const now = new Date();
-            const dateStr = entry.date || now.toISOString().split('T')[0];
+            const dateStr = entry.date || getLocalDateKey(now);
 
             // 使用 markdown 解析器生成丰富的 Notion blocks
             const children = parseMarkdownToNotionBlocks(entry.content, entry.mood, entry.characterName);
@@ -1944,7 +1963,7 @@ export const FeishuManager = {
             }
 
             const now = new Date();
-            const dateStr = entry.date || now.toISOString().split('T')[0];
+            const dateStr = entry.date || getLocalDateKey(now);
             const dateTimestamp = new Date(dateStr).getTime();
             const titlePrefix = entry.characterName ? `[${entry.characterName}] ` : '';
 
@@ -2054,7 +2073,17 @@ export const FeishuManager = {
                 const rawTitle = (Array.isArray(fields['标题']) ? fields['标题']?.[0]?.text : fields['标题']) || '无标题';
                 const cleanTitle = String(rawTitle).replace(/^\[.*?\]\s*/, '');
                 const rawDate = fields['日期'];
-                const dateStr = rawDate ? new Date(typeof rawDate === 'number' ? rawDate : rawDate).toISOString().split('T')[0] : '';
+                const rawDateText = typeof rawDate === 'string' ? rawDate.trim() : '';
+                const parsedDate = rawDate && !/^\d{4}-\d{2}-\d{2}$/.test(rawDateText)
+                    ? new Date(rawDate)
+                    : null;
+                const dateStr = rawDate
+                    ? /^\d{4}-\d{2}-\d{2}$/.test(rawDateText)
+                        ? rawDateText
+                        : parsedDate && !Number.isNaN(parsedDate.getTime())
+                            ? getLocalDateKey(parsedDate)
+                            : ''
+                    : '';
 
                 return {
                     recordId: item.record_id,
@@ -2193,10 +2222,20 @@ export interface XhsNote {
     title: string;
     desc: string;
     likes: number;
+    collects?: number;
+    commentCount?: number;
+    shareCount?: number;
     author: string;
     authorId: string;
     xsecToken?: string;
     coverUrl?: string;
     type?: string;  // 'normal' | 'video'
+    comments?: {
+        author: string;
+        content: string;
+        likes: number;
+        commentId?: string;
+        userId?: string;
+    }[];
 }
 // XhsManager removed — all XHS ops go through xhsMcpClient.ts

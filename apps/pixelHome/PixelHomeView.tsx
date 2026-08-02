@@ -107,16 +107,23 @@ const PixelHomeView: React.FC<Props> = ({ charId, charName, charAvatar, userName
 
   // 保存像素小人（按 editorTarget 分别存到角色/用户 key）
   const handleSaveChar = useCallback(async (cfg: PixelCharConfig, imageUri: string) => {
-    if (editorTarget === 'user') {
-      await DB.saveAsset(`pixel_char_user`, JSON.stringify(cfg));
-      setPixelUserConfig(cfg);
-      setPixelUserSprite(imageUri);
-      addToast?.('你的像素形象已保存', 'success');
-    } else {
-      await DB.saveAsset(`pixel_char_${charId}`, JSON.stringify(cfg));
-      setPixelCharConfig(cfg);
-      setPixelCharSprite(imageUri);
-      addToast?.(`${charName}的像素形象已保存`, 'success');
+    try {
+      if (editorTarget === 'user') {
+        await DB.saveAsset(`pixel_char_user`, JSON.stringify(cfg));
+        setPixelUserConfig(cfg);
+        setPixelUserSprite(imageUri);
+        addToast?.('你的像素形象已保存', 'success');
+      } else {
+        await DB.saveAsset(`pixel_char_${charId}`, JSON.stringify(cfg));
+        setPixelCharConfig(cfg);
+        setPixelCharSprite(imageUri);
+        addToast?.(`${charName}的像素形象已保存`, 'success');
+      }
+    } catch (err) {
+      // 写库失败（多为存储配额不足）如实报错，别让用户以为存上了、下次进来形象又没了
+      console.error('❌ [PixelHome] 像素形象保存失败:', err);
+      addToast?.('像素形象保存失败，可能是存储空间不足', 'error');
+      return;
     }
     setViewMode('map');
   }, [charId, charName, editorTarget, addToast]);

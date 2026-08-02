@@ -85,7 +85,36 @@ type GhResponse = {
     headers: Record<string, string>;
     text: () => Promise<string>;
     json: () => Promise<any>;
-    arrayBuffer: () => Promise<ArrayBuffer>;
+    arrayBuffer: (onProgress?: (loadedBytes: number) => void) => Promise<ArrayBuffer>;
+};
+
+/** Read a fetch response incrementally so large release assets can report
+ * real byte progress instead of appearing frozen at the initial 2%. */
+export const readResponseArrayBuffer = async (
+    response: Pick<Response, 'body' | 'arrayBuffer'>,
+    onProgress?: (loadedBytes: number) => void,
+): Promise<ArrayBuffer> => {
+    if (!onProgress || !response.body) return response.arrayBuffer();
+
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let loaded = 0;
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value?.byteLength) continue;
+        chunks.push(value);
+        loaded += value.byteLength;
+        onProgress(loaded);
+    }
+
+    const merged = new Uint8Array(loaded);
+    let offset = 0;
+    for (const chunk of chunks) {
+        merged.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return merged.buffer;
 };
 
 const decodeBinary = (data: any): ArrayBuffer => {
@@ -137,7 +166,7 @@ const ghRequest = async (
             headers: respHeaders,
             text: () => res.text(),
             json: () => res.json(),
-            arrayBuffer: () => res.arrayBuffer(),
+            arrayBuffer: (onProgress) => readResponseArrayBuffer(res, onProgress),
         };
     }
 
@@ -196,7 +225,7 @@ const ghRequest = async (
         headers: respHeaders,
         text: () => res.text(),
         json: () => res.json(),
-        arrayBuffer: () => res.arrayBuffer(),
+        arrayBuffer: (onProgress) => readResponseArrayBuffer(res, onProgress),
     };
 };
 
@@ -537,6 +566,8 @@ export const downloadBackup = async (
     try {
         onProgress?.(2);
         const buffers: ArrayBuffer[] = [];
+        let downloadedBytes = 0;
+        const totalBytes = Math.max(0, Number(file.size) || 0);
         const span = 96 / assetIds.length;
         for (let i = 0; i < assetIds.length; i++) {
             const res = await ghRequest(
@@ -549,9 +580,18 @@ export const downloadBackup = async (
                 },
             );
             if (res.status !== 200 && res.status !== 206) return null;
-            const buf = await res.arrayBuffer();
+            const completedBeforePart = downloadedBytes;
+            const buf = await res.arrayBuffer((partLoadedBytes) => {
+                if (totalBytes > 0) {
+                    const byteFraction = Math.min(1, (completedBeforePart + partLoadedBytes) / totalBytes);
+                    onProgress?.(Math.min(98, Math.max(2, Math.floor(2 + byteFraction * 96))));
+                }
+            });
             buffers.push(buf);
-            onProgress?.(Math.min(99, Math.floor(2 + (i + 1) * span)));
+            downloadedBytes += buf.byteLength;
+            onProgress?.(totalBytes > 0
+                ? Math.min(99, Math.floor(2 + Math.min(1, downloadedBytes / totalBytes) * 96))
+                : Math.min(99, Math.floor(2 + (i + 1) * span)));
         }
         onProgress?.(100);
         return new Blob(buffers, { type: 'application/zip' });

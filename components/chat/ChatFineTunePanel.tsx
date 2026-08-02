@@ -2,7 +2,7 @@ import React from 'react';
 import { ChatFineTuneFields } from '../../types';
 
 /**
- * 聊天细节微调控件组（7 个字段：头像显隐/贴边/对齐/垂直微调、字号、行距、气泡缩进）。
+ * 聊天细节微调控件组（头像显隐/位置/贴边/对齐/垂直微调、字号、行距、气泡缩进等）。
  * 两处复用，交互保持一致（挡位按钮 + 滑杆）：
  *  - 外观 App「聊天细节微调」区块（全局，value = osTheme）
  *  - 聊天内「聊天装扮」弹窗（角色覆盖，value = 合并后的生效值，onChange 写进 char.chatFineTune）
@@ -39,19 +39,28 @@ export const ChatFineTunePanel: React.FC<Props> = ({ value, onChange }) => {
                 )}
             </div>
             <div>
-                <h3 className="text-[11px] font-bold text-slate-500 mb-2">头像对齐气泡</h3>
+                <h3 className="text-[11px] font-bold text-slate-500 mb-2">头像位置</h3>
                 <div className="flex gap-2 flex-wrap">
-                    {([['bottom', '底部（默认）'], ['top', '顶部'], ['center', '垂直居中']] as const).map(([v, label]) => (
-                        <OptionButton key={v} active={(value.chatAvatarAlign || 'bottom') === v} label={label} onClick={() => onChange({ chatAvatarAlign: v })} />
-                    ))}
-                </div>
-                <div className="flex items-center gap-3 mt-2">
-                    <span className="text-[11px] text-slate-500 shrink-0">垂直微调</span>
-                    <input type="range" min={-16} max={16} step={2} value={value.chatAvatarOffsetY || 0}
-                        onChange={(e) => onChange({ chatAvatarOffsetY: Number(e.target.value) })} className="flex-1 accent-current" />
-                    <span className="text-[11px] font-mono text-slate-500 w-10 text-right">{value.chatAvatarOffsetY || 0}px</span>
+                    <OptionButton active={(value.chatAvatarPlacement || 'beside') === 'beside'} label="气泡旁（默认）" desc="跟随头像出现频率" onClick={() => onChange({ chatAvatarPlacement: 'beside' })} />
+                    <OptionButton active={value.chatAvatarPlacement === 'above_group'} label="每轮气泡上方" desc="连续气泡共用一次头像" onClick={() => onChange({ chatAvatarPlacement: 'above_group' })} />
                 </div>
             </div>
+            {(value.chatAvatarPlacement || 'beside') === 'beside' && (
+                <div>
+                    <h3 className="text-[11px] font-bold text-slate-500 mb-2">头像对齐气泡</h3>
+                    <div className="flex gap-2 flex-wrap">
+                        {([['bottom', '底部（默认）'], ['top', '顶部'], ['center', '垂直居中']] as const).map(([v, label]) => (
+                            <OptionButton key={v} active={(value.chatAvatarAlign || 'bottom') === v} label={label} onClick={() => onChange({ chatAvatarAlign: v })} />
+                        ))}
+                    </div>
+                    <div className="flex items-center gap-3 mt-2">
+                        <span className="text-[11px] text-slate-500 shrink-0">垂直微调</span>
+                        <input type="range" min={-16} max={16} step={2} value={value.chatAvatarOffsetY || 0}
+                            onChange={(e) => onChange({ chatAvatarOffsetY: Number(e.target.value) })} className="flex-1 accent-current" />
+                        <span className="text-[11px] font-mono text-slate-500 w-10 text-right">{value.chatAvatarOffsetY || 0}px</span>
+                    </div>
+                </div>
+            )}
             <div>
                 <h3 className="text-[11px] font-bold text-slate-500 mb-2">气泡正文字号</h3>
                 <div className="flex gap-2 flex-wrap">
@@ -80,12 +89,12 @@ export const ChatFineTunePanel: React.FC<Props> = ({ value, onChange }) => {
                 </div>
             </div>
             <div>
-                <h3 className="text-[11px] font-bold text-slate-500 mb-2">HTML / 心象卡片位置</h3>
+                <h3 className="text-[11px] font-bold text-slate-500 mb-2">HTML / 心象 / 音乐卡片位置</h3>
                 <div className="flex gap-2 flex-wrap">
                     <OptionButton active={(value.chatModuleAlign || 'center') === 'center'} label="水平居中（默认）" desc="卡片类内容居中显示" onClick={() => onChange({ chatModuleAlign: 'center' })} />
                     <OptionButton active={value.chatModuleAlign === 'anchor'} label="贴气泡列" desc="跟气泡同侧，旧版观感" onClick={() => onChange({ chatModuleAlign: 'anchor' })} />
                 </div>
-                <p className="mt-1.5 text-[10px] text-slate-400">角色发的 HTML 卡片和心象（思考链）卡片的横向位置。预览里看不到卡片，进聊天看效果。</p>
+                <p className="mt-1.5 text-[10px] text-slate-400">角色发的 HTML 卡片、心象（思考链）卡片和音乐（一起听）卡片的横向位置。预览里看不到卡片，进聊天看效果。</p>
             </div>
         </div>
     );

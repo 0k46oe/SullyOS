@@ -11,6 +11,7 @@ import { FISH_VOICE_ACTING_GUIDE, synthesizeSpeechFishDetailed, resolveFishAudio
 import { resolveTtsProvider, getTtsProvider, getVoicePromptOverride } from '../utils/ttsProvider';
 import { startStt, isSttSupported, type SttSession } from '../utils/speechToText';
 import { ContextBuilder } from '../utils/context';
+import { resolveCharTimeZone } from '../utils/timezone';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { RealtimeContextManager } from '../utils/realtimeContext';
 import { DB } from '../utils/db';
@@ -293,10 +294,18 @@ const renderAssistantLine = (text: string, accent = '#8b5cf6') => {
 };
 // 语音/视频通话共用同一个 prompt 构建器：注入的上下文（核心设定、记忆、时间、
 // 历史）完全一致，mode 只切换开头的场景描写——视频里对方能看见你。
-const buildCallPrompt = (userName: string, charName?: string, coreContext?: string, voiceLang?: string, mode: CallMode = 'voice') => {
+const buildCallPrompt = (
+  userName: string,
+  charName?: string,
+  coreContext?: string,
+  voiceLang?: string,
+  mode: CallMode = 'voice',
+  tz?: string,
+) => {
   const resolvedCharName = charName || '你的角色';
-  const time = RealtimeContextManager.getTimeContext();
-  const specialDates = RealtimeContextManager.checkSpecialDates();
+  // 电话里角色说的「现在几点 / 今天什么日子」是 ta 那边的时间，跟角色自定义时区走
+  const time = RealtimeContextManager.getTimeContext(tz);
+  const specialDates = RealtimeContextManager.checkSpecialDates(tz);
   const timeContext = [
     `【当前时间】${time.dateStr} ${time.dayOfWeek} ${time.timeOfDay} ${time.timeStr}`,
     specialDates.length ? `【今日特殊】${specialDates.join('、')}` : '',
@@ -1385,7 +1394,14 @@ const CallApp: React.FC = () => {
       await injectMemoryPalace(selectedChar, callMsgs);
     }
     const baseCallPrompt = selectedChar
-      ? buildCallPrompt(userName, selectedChar.name, ContextBuilder.buildCoreContext(selectedChar, userProfile, true), voiceLang || undefined, callMode)
+      ? buildCallPrompt(
+          userName,
+          selectedChar.name,
+          ContextBuilder.buildCoreContext(selectedChar, userProfile, true),
+          voiceLang || undefined,
+          callMode,
+          resolveCharTimeZone(selectedChar),
+        )
       : buildCallPrompt(userName, undefined, undefined, voiceLang || undefined, callMode);
     const thinkingPrompt = selectedChar?.showThinkingChain
       ? [
@@ -1398,11 +1414,12 @@ const CallApp: React.FC = () => {
     // 模型专属动作白名单：Live2D 用用户授权的 actions；VRM 用加载时枚举出的
     // 自定义表情（星星眼/黑脸这类，预设之外的全部可用）。
     const allowedModelActions = getAllowedModelActions();
-    const highQualityPerformance = callMode === 'video'
-      && selectedChar?.videoCallPerformanceQuality === 'high';
+    const highQualityPerformance = callMode === 'video' && selectedChar
+      ? buildHighQualityAvatarPerformancePrompt(selectedChar, allowedModelActions)
+      : '';
     const systemPrompt = [
       baseCallPrompt,
-      callMode === 'video' && !highQualityPerformance ? buildAvatarPerformancePrompt(allowedModelActions) : '',
+      highQualityPerformance,
       thinkingPrompt,
     ].filter(Boolean).join('\n\n');
     const touchContext = selectedChar

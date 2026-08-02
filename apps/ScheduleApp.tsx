@@ -10,6 +10,8 @@ import { ContextBuilder } from '../utils/context';
 import { safeResponseJson } from '../utils/safeApi';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
+import { getCalendarDayDifference, getLocalDateKey } from '../utils/localDate';
+import { useLocalDateKey } from '../hooks/useLocalDateKey';
 
 const TWEMOJI_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72';
 const twemojiUrl = (codepoint: string) => `${TWEMOJI_BASE}/${codepoint}.png`;
@@ -75,6 +77,7 @@ const THEMES: Record<ThemeMode, any> = {
 
 const ScheduleApp: React.FC = () => {
     const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, characterGroups } = useOS();
+    const localDateKey = useLocalDateKey();
     const [tasks, setTasks] = useState<Task[]>([]);
     const [anniversaries, setAnniversaries] = useState<Anniversary[]>([]);
     const [activeTab, setActiveTab] = useState<'quest' | 'server_events'>('quest');
@@ -225,7 +228,7 @@ const ScheduleApp: React.FC = () => {
              addToast(`${char.name} 正在查阅日历...`, 'info');
         }
 
-        const daysDiff = Math.ceil((new Date(anni.date).getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24));
+        const daysDiff = getCalendarDayDifference(getLocalDateKey(), anni.date) ?? 0;
         const dayText = daysDiff > 0 ? `还有 ${daysDiff} 天` : (daysDiff === 0 ? '就是今天!' : `已经过去 ${Math.abs(daysDiff)} 天了`);
 
         // RESTORED: Full context
@@ -350,17 +353,12 @@ const ScheduleApp: React.FC = () => {
     // --- Render Helpers ---
 
     const getDaysUntil = (dateStr: string) => {
-        const today = new Date();
-        today.setHours(0,0,0,0);
-        const target = new Date(dateStr);
-        target.setHours(0,0,0,0);
-        const diff = target.getTime() - today.getTime();
-        return Math.ceil(diff / (1000 * 60 * 60 * 24));
+        return getCalendarDayDifference(localDateKey, dateStr) ?? Number.POSITIVE_INFINITY;
     };
 
     const upcomingAnni = useMemo(() => {
         return anniversaries.filter(a => getDaysUntil(a.date) >= 0).sort((a, b) => a.date.localeCompare(b.date))[0];
-    }, [anniversaries]);
+    }, [anniversaries, localDateKey]);
 
     // Trigger thoughts for upcoming anniversary on load
     useEffect(() => {

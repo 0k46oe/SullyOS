@@ -46,7 +46,14 @@ export default defineConfig({
   resolve: {
     // Live2D subclasses Pixi containers, so both the renderer and the engine
     // must share the same Pixi prototype/extension registry in dev and builds.
-    dedupe: ['pixi.js', '@pixi/sound'],
+    dedupe: [
+      'react',
+      'react-dom',
+      'react/jsx-runtime',
+      'react/jsx-dev-runtime',
+      'pixi.js',
+      '@pixi/sound',
+    ],
   },
   plugins: [
     react(),

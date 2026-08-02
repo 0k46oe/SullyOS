@@ -11,7 +11,7 @@
 //   - 全局 fetch 拦截器 + apiCallLog（用户在「设置 → API 调用记录」里看）
 // 后者的 meta 通过下面 safeFetchJson 的第 5 个参数挂到 __sullyMeta 上传出去。
 import { appendDevDebugApiLog, makeDebugLogger } from './devDebug';
-import { type ApiCallMeta } from './apiCallLog';
+import { getApiCallAmbientContext, recordApiCall, type ApiCallMeta } from './apiCallLog';
 
 const log = makeDebugLogger('api', 'SafeAPI');
 
@@ -22,11 +22,28 @@ function isChatCompletionUrl(url: string): boolean {
 /** Parse a fetch Response as JSON safely (text-first, then JSON.parse) */
 export async function safeResponseJson(response: Response): Promise<any> {
     const text = await response.text();
-    return parseRawBodyText(text, response.status);
+    return parseRawBodyText(text, response.status, response.headers.get('content-type'));
+}
+
+/** 判断响应是否是 SSE；兼容 OpenRouter 在首个 data 事件前发送的 ": OPENROUTER PROCESSING" 注释。 */
+export function isSseResponseText(text: string, contentType?: string | null): boolean {
+    const firstLine = text
+        .split(/\r?\n/)
+        .map(line => line.trimStart())
+        .find(line => line.length > 0) || '';
+    const hasSseField = firstLine.startsWith('data:')
+        || firstLine.startsWith(':')
+        || firstLine.startsWith('event:')
+        || firstLine.startsWith('id:')
+        || firstLine.startsWith('retry:');
+    if (hasSseField) return true;
+    // 个别代理会把整包 JSON 错标成 text/event-stream；明确的 JSON/HTML 起始符优先。
+    if (/^[{["<]/.test(firstLine)) return false;
+    return contentType?.toLowerCase().includes('text/event-stream') === true;
 }
 
 /** safeResponseJson 的纯文本内核：HTML/空响应/SSE/JSON 判定与解析（流式路径复用） */
-function parseRawBodyText(text: string, status: number): any {
+function parseRawBodyText(text: string, status: number, contentType?: string | null): any {
     // Detect HTML / XML responses
     const trimmed = text.trimStart();
     if (trimmed.startsWith('<')) {
@@ -44,11 +61,14 @@ function parseRawBodyText(text: string, status: number): any {
     }
 
     // SSE / 流式响应（有些 OpenAI 兼容代理无视 stream:false 强行流式返回）：
-    // 形如 "data: {...}\ndata: {...}\ndata: [DONE]\n"，把 deltas 拼成完整 content
-    if (trimmed.startsWith('data:')) {
+    // 注释/心跳行（以 ":" 开头）由 SseAssembler 忽略，data 事件照常拼成完整 content。
+    if (isSseResponseText(text, contentType)) {
         const assembled = parseSseToCompletion(text);
         if (assembled) return assembled;
-        // 解析不出来 → 继续往下尝试当普通 JSON 抛错，保留原 preview
+        const preview = text.slice(0, 200);
+        throw new Error(
+            `API流式响应未返回有效数据 (HTTP ${status}): ${preview}`
+        );
     }
 
     try {
@@ -234,8 +254,8 @@ export interface StreamHooks {
 
 /**
  * 真·流式读取响应体：边到边解析 SSE 行并回调 onDelta。
- * 首块内容不是 "data:" 开头（代理无视 stream:true 返回整包 JSON / HTML 错误页）时，
- * 自动退化为累积全文后走 parseRawBodyText —— 与非流式路径行为一致。
+ * 支持 data 事件前先到达的 SSE 注释/心跳；代理无视 stream:true 返回整包 JSON / HTML
+ * 错误页时，自动退化为累积全文后走 parseRawBodyText —— 与非流式路径行为一致。
  */
 async function readBodyWithStreaming(
     response: Response,
@@ -251,6 +271,7 @@ async function readBodyWithStreaming(
     let pending = '';       // SSE 模式下未消费完的半行缓冲
     let mode: 'undecided' | 'sse' | 'raw' = 'undecided';
     let sawFirstDelta = false;
+    const contentType = response.headers.get('content-type');
 
     const emit = (delta: SseFeedDelta) => {
         if (delta.content) {
@@ -282,8 +303,16 @@ async function readBodyWithStreaming(
         if (mode === 'undecided') {
             const t = raw.trimStart();
             if (!t) continue;
-            mode = t.startsWith('data:') ? 'sse' : 'raw';
-            if (mode === 'sse') pending = raw;
+            if (isSseResponseText(raw, contentType)) {
+                mode = 'sse';
+                pending = raw;
+            } else if (/^[{["<]/.test(t) || /\r?\n/.test(t)) {
+                // 明确是整包 JSON/HTML，或首行已经完整且不是 SSE。
+                mode = 'raw';
+            } else {
+                // 首块可能只含 "d"/"da" 等 SSE 字段名前缀，等下一块再判断。
+                continue;
+            }
         } else if (mode === 'sse') {
             pending += textChunk;
         }
@@ -301,7 +330,7 @@ async function readBodyWithStreaming(
         if (assembled) return assembled;
         // 一个 chunk 都没解析出来 → 按原始文本兜底（保留原 preview 报错行为）
     }
-    return parseRawBodyText(raw, response.status);
+    return parseRawBodyText(raw, response.status, contentType);
 }
 
 /**
@@ -328,14 +357,18 @@ export async function safeFetchJson(
     const urlStr = String(url);
     let lastStatus: number | undefined;
 
-    // 把 meta 挂到 RequestInit 上（浏览器忽略未知字段），交给全局 fetch 拦截器统一记录
-    // 到「API 调用记录」。这样裸 fetch 和 safeFetchJson 走同一个记录入口，不会重复计。
+    // 显式 meta 挂到 RequestInit 给全局 fetch 兜底；同时快照环境标签，避免长响应期间
+    // 用户切 App 后被错标。safeFetchJson 与全局拦截器以 requestId 原子去重。
     const metaOptions: RequestInit = meta ? { ...options, __sullyMeta: meta } as RequestInit : options;
+    const logMeta = meta || getApiCallAmbientContext();
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        // 全局 fetch 拦截器和这里的“已解析响应兜底”共享 ID。前者覆盖裸 fetch，
+        // 后者不依赖 Response.clone()，避免部分 iOS/WebView 克隆流不结束时漏记。
+        const requestId = `api-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
         // 每次 attempt 建一个独立的 AbortController（仅用于 timeout）
         // 调用方自己的 options.signal 仍然有效，两者任一触发就 abort
-        let attemptOptions = metaOptions;
+        let attemptOptions = { ...metaOptions, __sullyApiCallId: requestId } as RequestInit;
         let timeoutHandle: any = null;
         if (timeoutMs > 0) {
             const ac = new AbortController();
@@ -348,7 +381,7 @@ export async function safeFetchJson(
                 }
                 options.signal.addEventListener('abort', () => ac.abort(), { once: true });
             }
-            attemptOptions = { ...metaOptions, signal: ac.signal };
+            attemptOptions = { ...attemptOptions, signal: ac.signal };
         }
         const attemptStartedAt = Date.now();
         try {
@@ -391,6 +424,18 @@ export async function safeFetchJson(
                     durationMs: totalMs,
                     headersMs,
                     firstDeltaMs: timing.firstDeltaMs,
+                });
+                // 已解析响应是最可靠的日志来源：不再把记账成败押在异步
+                // response.clone().text() 上。全局拦截器仍负责裸 fetch，并以 requestId 去重。
+                recordApiCall({
+                    requestId,
+                    url: urlStr,
+                    body: attemptOptions.body,
+                    status: response.status,
+                    ok: response.ok,
+                    response: data,
+                    meta: logMeta,
+                    durationMs: totalMs,
                 });
             }
             return data;

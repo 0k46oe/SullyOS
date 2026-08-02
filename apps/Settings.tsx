@@ -22,12 +22,13 @@ import { ProactiveChat } from '../utils/proactiveChat';
 import { InstantPushSettingsModal } from '../components/settings/InstantPushSettingsModal';
 import { PushVapidSettingsModal } from '../components/settings/PushVapidSettingsModal';
 import VersionInfo from '../components/settings/VersionInfo';
+import { LoyalUserRecruitmentController } from '../components/LoyalUserRecruitmentEvent';
 import { isPushVapidReady } from '../utils/pushVapid';
 import ApiCallLogModal from '../components/settings/ApiCallLogModal';
 import { DB } from '../utils/db';
 import { getBackupReminderState, setBackupReminderIntervalDays, daysSinceLastBackup, BACKUP_REMINDER_MIN_DAYS, BACKUP_REMINDER_MAX_DAYS } from '../utils/backupReminder';
 
-// hot_news（orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
+// hot_news（news.orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
 const HOTNEWS_PLATFORM_OPTIONS: { key: string; label: string }[] = [
     { key: 'weibo', label: '微博' },
     { key: 'zhihu', label: '知乎' },
@@ -345,7 +346,7 @@ const Settings: React.FC = () => {
   const {
       apiConfig, updateApiConfig, closeApp, availableModels, setAvailableModels,
       exportSystem, importSystem, addToast, showError, resetSystem,
-      apiPresets, addApiPreset, removeApiPreset,
+      apiPresets, addApiPreset, updateApiPreset, removeApiPreset,
       sysOperation, // Get progress state
       realtimeConfig, updateRealtimeConfig, // 实时感知配置
       cloudBackupConfig, updateCloudBackupConfig,
@@ -381,6 +382,10 @@ const Settings: React.FC = () => {
   const [showApiAdvanced, setShowApiAdvanced] = useState(false);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
+  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
+  const [selectedPresetName, setSelectedPresetName] = useState('');
+  const [holdingDeletePresetId, setHoldingDeletePresetId] = useState<string | null>(null);
+  const presetDeleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
   // UI States
   const [showModelModal, setShowModelModal] = useState(false);
@@ -395,6 +400,7 @@ const Settings: React.FC = () => {
   const [showCloudModal, setShowCloudModal] = useState(false);
   const [showGithubModal, setShowGithubModal] = useState(false);
   const [showCloudRestoreModal, setShowCloudRestoreModal] = useState(false);
+  const [showCommunityMigration, setShowCommunityMigration] = useState(false);
   const [cloudBackupFiles, setCloudBackupFiles] = useState<import('../types').CloudBackupFile[]>([]);
   const [cloudTestResult, setCloudTestResult] = useState<string>('');
   const [cloudTesting, setCloudTesting] = useState(false);
@@ -678,7 +684,14 @@ const Settings: React.FC = () => {
       setLocalVoicePromptDate(apiConfig.voicePrompts?.dateVoice || '');
   }, [apiConfig]);
 
+  const selectedApiPreset = useMemo(
+      () => apiPresets.find(preset => preset.id === selectedPresetId) || null,
+      [apiPresets, selectedPresetId],
+  );
+
   const loadPreset = (preset: typeof apiPresets[0]) => {
+      setSelectedPresetId(preset.id);
+      setSelectedPresetName(preset.name);
       setLocalUrl(preset.config.baseUrl);
       setLocalKey(preset.config.apiKey);
       setLocalModel(preset.config.model);
@@ -687,6 +700,43 @@ const Settings: React.FC = () => {
       // MiniMax / AceStep settings are NOT overwritten by presets — typically one user
       // has only one MiniMax / Replicate account regardless of which LLM preset they use.
       addToast(`已加载配置: ${preset.name}`, 'info');
+  };
+
+  const cancelPresetDeleteHold = useCallback(() => {
+      if (presetDeleteTimerRef.current) {
+          clearTimeout(presetDeleteTimerRef.current);
+          presetDeleteTimerRef.current = null;
+      }
+      setHoldingDeletePresetId(null);
+  }, []);
+
+  useEffect(() => () => {
+      if (presetDeleteTimerRef.current) clearTimeout(presetDeleteTimerRef.current);
+  }, []);
+
+  const deleteApiPreset = (id: string, name: string) => {
+      cancelPresetDeleteHold();
+      removeApiPreset(id);
+      if (selectedPresetId === id) {
+          setSelectedPresetId(null);
+          setSelectedPresetName('');
+      }
+      addToast(`已删除预设: ${name}`, 'success');
+  };
+
+  const beginPresetDeleteHold = (id: string, name: string) => {
+      cancelPresetDeleteHold();
+      setHoldingDeletePresetId(id);
+      presetDeleteTimerRef.current = setTimeout(() => {
+          presetDeleteTimerRef.current = null;
+          setHoldingDeletePresetId(null);
+          removeApiPreset(id);
+          if (selectedPresetId === id) {
+              setSelectedPresetId(null);
+              setSelectedPresetName('');
+          }
+          addToast(`已删除预设: ${name}`, 'success');
+      }, 700);
   };
 
   const handleSavePreset = () => {
@@ -707,14 +757,26 @@ const Settings: React.FC = () => {
   };
 
   const handleSaveApi = () => {
-    updateApiConfig({
+    const presetName = selectedPresetName.trim();
+    if (selectedApiPreset && !presetName) {
+      addToast('预设名称不能为空', 'error');
+      return;
+    }
+    const nextConfig = {
       apiKey: localKey,
       baseUrl: localUrl,
       model: localModel,
       stream: localStream,
       temperature: localTemperature,
-    });
-    setStatusMsg('配置已保存');
+    };
+    updateApiConfig(nextConfig);
+    if (selectedApiPreset) {
+      updateApiPreset(selectedApiPreset.id, presetName, {
+        ...selectedApiPreset.config,
+        ...nextConfig,
+      });
+    }
+    setStatusMsg(selectedApiPreset ? '配置和预设已保存' : '配置已保存');
     setTimeout(() => setStatusMsg(''), 2000);
   };
 
@@ -1159,7 +1221,10 @@ const Settings: React.FC = () => {
       }
       setRtTestStatus('正在连接...');
       try {
-          const result = await XhsMcpClient.testConnection(urlToUse, cookieToUse);
+          const result = await XhsMcpClient.testConnection(
+              urlToUse,
+              cookieToUse,
+          );
           if (result.connected) {
               const toolCount = result.tools?.length || 0;
               const tokenInfo = result.xsecToken ? ' | xsecToken 已获取' : '';
@@ -1517,8 +1582,8 @@ const Settings: React.FC = () => {
                 </div>
             }
             actions={
-                <button onClick={() => setShowPresetModal(true)} className="text-[10px] bg-slate-100 text-slate-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
-                    保存为预设
+                <button onClick={() => { setNewPresetName(''); setShowPresetModal(true); }} className="text-[10px] bg-slate-100 text-slate-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
+                    新建预设
                 </button>
             }
         >
@@ -1528,18 +1593,65 @@ const Settings: React.FC = () => {
                     <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 block pl-1">我的预设 (Presets)</label>
                     <div className="flex gap-2 flex-wrap">
                         {apiPresets.map(preset => (
-                            <div key={preset.id} className="flex items-center bg-white border border-slate-200 rounded-lg pl-3 pr-1 py-1 shadow-sm">
-                                <span onClick={() => loadPreset(preset)} className="text-xs font-medium text-slate-600 cursor-pointer hover:text-primary mr-2">{preset.name}</span>
-                                <button onClick={() => removeApiPreset(preset.id)} className="p-1 rounded-full text-slate-300 hover:bg-red-50 hover:text-red-400 transition-colors">
+                            <div key={preset.id} className={`flex items-center rounded-lg pl-3 pr-1 py-1 shadow-sm border transition-colors ${
+                                selectedPresetId === preset.id
+                                    ? 'bg-primary/5 border-primary/30'
+                                    : 'bg-white border-slate-200'
+                            }`}>
+                                <button type="button" onClick={() => loadPreset(preset)}
+                                    className={`text-xs font-medium cursor-pointer mr-2 transition-colors ${
+                                        selectedPresetId === preset.id ? 'text-primary' : 'text-slate-600 hover:text-primary'
+                                    }`}>
+                                    {preset.name}
+                                </button>
+                                <button
+                                    type="button"
+                                    aria-label={`长按或双击删除预设 ${preset.name}`}
+                                    title="长按或双击删除"
+                                    onPointerDown={(event) => { event.stopPropagation(); beginPresetDeleteHold(preset.id, preset.name); }}
+                                    onPointerUp={cancelPresetDeleteHold}
+                                    onPointerCancel={cancelPresetDeleteHold}
+                                    onPointerLeave={cancelPresetDeleteHold}
+                                    onDoubleClick={(event) => { event.stopPropagation(); deleteApiPreset(preset.id, preset.name); }}
+                                    onContextMenu={(event) => event.preventDefault()}
+                                    className={`p-1 rounded-full transition-colors select-none touch-none ${
+                                        holdingDeletePresetId === preset.id
+                                            ? 'bg-red-100 text-red-500 scale-110'
+                                            : 'text-slate-300 hover:bg-red-50 hover:text-red-400'
+                                    }`}>
                                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
                                 </button>
                             </div>
                         ))}
                     </div>
+                    <p className="text-[9px] text-slate-300 mt-1.5 pl-1">点名称加载并编辑；长按或双击 × 才会删除。</p>
                 </div>
             )}
             
             <div className="space-y-4">
+                {selectedApiPreset && (
+                    <div className="rounded-xl border border-primary/20 bg-primary/5 p-3">
+                        <div className="flex items-center justify-between gap-2 mb-1.5">
+                            <label className="text-[10px] font-bold text-primary uppercase tracking-widest">正在编辑预设</label>
+                            <button
+                                type="button"
+                                onClick={() => { setSelectedPresetId(null); setSelectedPresetName(''); }}
+                                className="text-[9px] text-slate-400 hover:text-slate-600 transition-colors"
+                            >
+                                仅作为当前配置
+                            </button>
+                        </div>
+                        <input
+                            type="text"
+                            value={selectedPresetName}
+                            onChange={(event) => setSelectedPresetName(event.target.value)}
+                            placeholder="预设名称"
+                            className="w-full bg-white/80 border border-primary/15 rounded-xl px-3 py-2 text-sm font-medium text-slate-700 focus:bg-white transition-all"
+                        />
+                        <p className="text-[9px] text-slate-400 mt-1.5 leading-relaxed">可直接修改名称及下方 URL、Key、Model；保存配置时会覆盖这个预设，不会新建。</p>
+                    </div>
+                )}
+
                 <div className="group">
                     <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">URL</label>
                     <input type="text" value={localUrl} onChange={(e) => setLocalUrl(e.target.value)} placeholder="https://..." className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
@@ -1620,9 +1732,9 @@ const Settings: React.FC = () => {
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-slate-400 flex-shrink-0"><path fillRule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" /></svg>
                     </button>
                 </div>
-                
+
                 <button onClick={handleSaveApi} className="w-full py-3 rounded-2xl font-bold text-white shadow-lg shadow-primary/20 bg-primary active:scale-95 transition-all mt-2">
-                    {statusMsg || '保存配置'}
+                    {statusMsg || (selectedApiPreset ? `保存配置并更新「${selectedPresetName.trim() || selectedApiPreset.name}」` : '保存配置')}
                 </button>
 
                 <button
@@ -2332,6 +2444,16 @@ const Settings: React.FC = () => {
         )}
 
         <VersionInfo />
+
+        {/* QQ 小群入口不主动曝光：接近水印，仅在 hover / 键盘聚焦 / 按住时略微显现。 */}
+        <button
+            type="button"
+            onClick={() => setShowCommunityMigration(true)}
+            className="mx-auto mt-1 block px-4 py-2 text-center text-[9px] tracking-[0.12em] text-slate-500 opacity-[0.08] transition-opacity duration-500 hover:opacity-25 focus-visible:opacity-40 focus-visible:outline-none active:opacity-40"
+            aria-label="打开社区迁移说明与 QQ 群入口"
+        >
+            · 社区迁移说明 ·
+        </button>
       </div>
 
       {/* 主动消息 Push 加速 · 启用前确认 */}
@@ -2682,7 +2804,7 @@ const Settings: React.FC = () => {
       <ApiCallLogModal isOpen={showApiCallLog} onClose={() => setShowApiCallLog(false)} />
 
       {/* Preset Name Modal */}
-      <Modal isOpen={showPresetModal} title="保存预设" onClose={() => setShowPresetModal(false)} footer={<button onClick={handleSavePreset} className="w-full py-3 bg-primary text-white font-bold rounded-2xl">保存</button>}>
+      <Modal isOpen={showPresetModal} title="新建预设" onClose={() => setShowPresetModal(false)} footer={<button onClick={handleSavePreset} className="w-full py-3 bg-primary text-white font-bold rounded-2xl">新建</button>}>
           <div className="space-y-2">
               <label className="text-[10px] font-bold text-slate-400 uppercase">预设名称 (例如: DeepSeek)</label>
               <input value={newPresetName} onChange={e => setNewPresetName(e.target.value)} className="w-full bg-slate-100 rounded-xl px-4 py-3 text-sm focus:outline-primary" autoFocus placeholder="Name..." />
@@ -3146,6 +3268,10 @@ const Settings: React.FC = () => {
         open={showVapidModal}
         onClose={() => { setShowVapidModal(false); setVapidReadyTick((n) => n + 1); }}
       />
+
+      {showCommunityMigration && (
+        <LoyalUserRecruitmentController onClose={() => setShowCommunityMigration(false)} />
+      )}
 
     </div>
   );

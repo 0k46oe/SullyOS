@@ -1,7 +1,7 @@
 
 import { CharacterProfile, UserProfile, DailySchedule } from '../types';
 import { normalizeUserImpression } from './impression';
-import { getFlowNarrativeKey, isScheduleFeatureOn } from './scheduleGenerator';
+import { getFlowNarrativeKey, isScheduleFeatureOn } from './scheduleFeature';
 import { resolveCharTimeZone, nowInTimeZone, tzAwarenessNote, interactionGapNote } from './timezone';
 import {
     formatWorldbookSection,
@@ -471,10 +471,12 @@ export const ContextBuilder = {
      * 1) 当前时段硬事实——每轮都注入，不受 evolvedNarrative 影响
      * 2) 意识流独白——evolvedNarrative > flowNarrative > 当前 slot innerThought
      */
-    buildScheduleInjection: (schedule: DailySchedule | null, evolvedNarrative?: string): string => {
+    buildScheduleInjection: (
+        schedule: DailySchedule | null,
+        evolvedNarrative?: string,
+        now: Date = new Date(),
+    ): string => {
         if (!schedule || !schedule.slots || schedule.slots.length === 0) return '';
-
-        const now = new Date();
         const currentMinutes = now.getHours() * 60 + now.getMinutes();
 
         // 1. 计算当前 / 下一个时段
@@ -565,6 +567,9 @@ export const ContextBuilder = {
         // 暂停 / 切歌 / 播放出错 / user 显式踢出 都会让 char 从名单里掉出来，
         // 走到这里时就会退回 "对方在听" 的旁观措辞。
         isListeningTogether?: boolean,
+        // 刚才一起听途中歌被切了（本 char 在名单里、还没重新加入）。
+        // 只在下一轮正常回复里让 char "察觉"到换歌，不触发主动消息。
+        recentTrackSwitch?: { songName: string; artists: string } | null,
     ): string => {
         const lines: string[] = [];
 
@@ -576,6 +581,9 @@ export const ContextBuilder = {
                 lines.push(`你正在和 ${userName || '对方'} 一起听《${userListening.songName}》— ${userListening.artists}`);
             } else {
                 lines.push(`${userName || '对方'} 正在听《${userListening.songName}》— ${userListening.artists}`);
+                if (recentTrackSwitch && recentTrackSwitch.songName !== userListening.songName) {
+                    lines.push(`（你们刚才本来在一起听《${recentTrackSwitch.songName}》— ${recentTrackSwitch.artists}，播放器切歌后那次"一起听"自然结束了。你能察觉到歌换成了现在这首；想继续陪 ${userName || '对方'} 听下去就在回复里自然接上并重新加入，不想也不必勉强，顺其自然。）`);
+                }
             }
             if (userListening.lyricWindow.length > 0) {
                 lines.push(`当前播放到（>> 标记正在播放这一行）:`);
