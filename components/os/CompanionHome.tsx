@@ -1240,7 +1240,7 @@ const CompanionHome: React.FC = () => {
 
       {!editing && !touchSettingsOpen && (
         <nav
-          className="absolute inset-x-3 z-40 h-[4.35rem] overflow-visible"
+          className="absolute inset-x-3 z-40 h-[4.85rem] overflow-visible"
           style={{ bottom: 'max(0.5rem, calc(var(--safe-bottom, 0px) + 0.35rem))' }}
           aria-label="陪伴桌面导航"
           data-testid="companion-ornate-dock"
@@ -1249,36 +1249,37 @@ const CompanionHome: React.FC = () => {
           <div
             className="pointer-events-none absolute inset-0 border"
             style={{
-              background: `${palette.panelBottom}ed`,
-              borderColor: `${uiTint}58`,
+              background: `linear-gradient(180deg, ${palette.panelTop}e8 0%, ${palette.panelBottom}f6 100%)`,
+              borderColor: `${uiTint}70`,
               clipPath: 'polygon(0 12px, 12px 0, 37% 0, 42% 9px, 58% 9px, 63% 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%)',
             }}
           />
-          <div className="pointer-events-none absolute inset-x-[7%] top-0 h-px" style={{ background: `linear-gradient(90deg, transparent, ${uiTint}9c 24%, ${uiTint}9c 76%, transparent)` }} />
+          <div className="pointer-events-none absolute inset-x-[7%] top-0 h-px" style={{ background: `linear-gradient(90deg, transparent, ${uiTint}b8 24%, ${uiTint}b8 76%, transparent)` }} />
+          <div className="pointer-events-none absolute inset-x-[12%] bottom-0 h-px" style={{ background: `linear-gradient(90deg, transparent, ${uiTint}52, transparent)` }} />
           <span className="pointer-events-none absolute left-[7%] top-2 text-[6px]" style={{ color: uiTint }} aria-hidden>✦</span>
           <span className="pointer-events-none absolute right-[7%] top-2 text-[5px] text-white/60" aria-hidden>✦</span>
-          <div className="relative z-10 grid h-full grid-cols-5 items-end gap-1 px-2 pb-1 pt-2">
+          <div className="relative z-10 grid h-full grid-cols-5 items-center gap-1 px-2">
             {[
               { id: AppID.Chat, icon: Icons.Chat, label: '聊天' },
               { id: AppID.Schedule, icon: Icons.Schedule, label: '日程' },
             ].map(item => (
-              <button key={item.id} onClick={() => launchCompanionApp(item.id)} className="flex h-full flex-col items-center justify-end gap-1 pb-1 text-white/90 active:scale-[.97]">
+              <button key={item.id} onClick={() => launchCompanionApp(item.id)} className="flex h-full flex-col items-center justify-center gap-1 text-white/90 active:scale-[.97]">
                 <item.icon className="h-[18px] w-[18px]" />
                 <span className="text-[8px] tracking-[0.12em]">{item.label}</span>
               </button>
             ))}
             <button
               onClick={() => setAppStarOpen(open => !open)}
-              className="relative flex h-full flex-col items-center justify-end pb-1 text-white active:scale-[.97]"
+              className="relative flex h-full flex-col items-center justify-center gap-0.5 text-white active:scale-[.97]"
               aria-expanded={appStarOpen}
               data-testid="companion-app-star-button"
             >
-              <span className="absolute bottom-[1.45rem] flex h-12 w-12 items-center justify-center rounded-full border" style={{ borderColor: `${uiTint}c8`, background: `${palette.panelBottom}8f` }}>
-                <span className="absolute -left-2 top-1/2 h-px w-2" style={{ background: `${uiTint}8c` }} />
-                <span className="absolute -right-2 top-1/2 h-px w-2" style={{ background: `${uiTint}8c` }} />
-                <span className="absolute -top-1 left-1/2 h-1 w-px" style={{ background: `${uiTint}8c` }} />
-                <Sparkle className="relative" size={23} weight="fill" />
-                <span className="absolute right-1 top-1 text-[6px] text-white/90">✦</span>
+              <span className="relative flex h-14 w-14 shrink-0 items-center justify-center rounded-full border" style={{ borderColor: `${uiTint}c4`, background: `${palette.panelBottom}f5` }}>
+                <span className="absolute inset-[5px] rounded-full border" style={{ borderColor: `${uiTint}60` }} />
+                <span className="relative flex h-10 w-10 items-center justify-center rounded-full border" style={{ borderColor: `${uiTint}df`, background: `${uiTint}36` }}>
+                  <Sparkle className="relative" size={23} weight="fill" />
+                  <span className="absolute right-0.5 top-0.5 text-[6px] text-white/90">✦</span>
+                </span>
               </span>
               <span className="text-[8px] font-semibold tracking-[0.18em]" style={{ color: uiTint }}>功能</span>
             </button>
@@ -1286,7 +1287,7 @@ const CompanionHome: React.FC = () => {
               { id: AppID.Music, icon: Icons.Music, label: '音乐' },
               { id: AppID.Settings, icon: Icons.Settings, label: '设置' },
             ].map(item => (
-              <button key={item.id} onClick={() => launchCompanionApp(item.id)} className="flex h-full flex-col items-center justify-end gap-1 pb-1 text-white/90 active:scale-[.97]">
+              <button key={item.id} onClick={() => launchCompanionApp(item.id)} className="flex h-full flex-col items-center justify-center gap-1 text-white/90 active:scale-[.97]">
                 <item.icon className="h-[18px] w-[18px]" />
                 <span className="text-[8px] tracking-[0.12em]">{item.label}</span>
               </button>

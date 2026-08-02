@@ -49,6 +49,9 @@ describe('CompanionHome touch request boundaries', () => {
     expect(source).not.toContain('companion-star-pulse');
     expect(dockSource).not.toContain('radial-gradient');
     expect(dockSource).not.toContain('boxShadow');
+    expect(dockSource).toContain('grid h-full grid-cols-5 items-center');
+    expect(dockSource).toContain('flex h-14 w-14 shrink-0 items-center justify-center rounded-full border');
+    expect(dockSource).not.toContain('items-end gap-1');
     expect(dialogueSource).toContain('data-testid="companion-dialogue-surface"');
     expect(dialogueSource).toContain('pointer-events-none absolute inset-0 -z-10 border');
     expect(dialogueSource.indexOf('clipPath')).toBeLessThan(dialogueSource.indexOf('absolute -top-3'));
