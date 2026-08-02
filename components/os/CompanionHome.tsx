@@ -6,21 +6,24 @@ import {
   Gear,
   SlidersHorizontal,
   Sparkle,
+  SpeakerHigh,
   Trash,
   UploadSimple,
 } from '@phosphor-icons/react';
 import { useOS } from '../../context/OSContext';
-import { AppID } from '../../types';
+import { AppID, type CompanionTouchReaction } from '../../types';
 import { Icons } from '../../constants';
 import VRMVideoCallStage from '../call/VRMVideoCallStage';
 import type { AvatarMotionState } from '../call/VRMAvatarCanvas';
 import {
+  applyAvatarTouchForce,
   avatarTouchZoneLabel,
   avatarTouchZoneToastLabel,
   buildImmediateTouchPerformance,
   DEFAULT_COMPANION_TOUCH_ZONES,
   normalizeCompanionDialogue,
   requestAvatarTouchReactionPack,
+  resolveAvatarTouchForce,
   type AvatarTouchHit,
   type AvatarTouchModelAction,
   type AvatarTouchZone,
@@ -32,6 +35,13 @@ import {
 } from '../../utils/avatarPerformance';
 import { deleteBlobRef, isBlobRef, putImageBlob, useBlobRefUrl } from '../../utils/blobRef';
 import { hslToHex, hueFromGradient, hueFromImage, normalizeHue } from '../../utils/dominantHue';
+import { characterHasVoice } from '../../utils/ttsRouter';
+import {
+  cleanupAvatarTouchVoiceAssets,
+  collectAvatarTouchVoiceAssetIds,
+  createAvatarTouchVoiceUrl,
+  generateAvatarTouchVoicePack,
+} from '../../utils/avatarTouchVoice';
 
 // ── 时段氛围：陪伴桌面按虚拟时间换天色（晨曦 / 白日 / 黄昏 / 夜晚）──
 interface DayPeriod {
@@ -282,11 +292,13 @@ const CompanionHome: React.FC = () => {
   const [performance, setPerformance] = useState<AvatarPerformanceDirection>(DEFAULT_AVATAR_PERFORMANCE);
   const [line, setLine] = useState<CompanionLine | null>(null);
   const [lastHit, setLastHit] = useState<AvatarTouchHit | null>(null);
-  const [ripple, setRipple] = useState<{ nonce: number; x: number; y: number } | null>(null);
+  const [ripple, setRipple] = useState<{ nonce: number; x: number; y: number; force: number } | null>(null);
   const [touchBanner, setTouchBanner] = useState<{ nonce: number; text: string; x: number; y: number } | null>(null);
   const [touchSettingsOpen, setTouchSettingsOpen] = useState(false);
   const [appStarOpen, setAppStarOpen] = useState(false);
   const [touchGenerating, setTouchGenerating] = useState(false);
+  const [touchGenerateVoice, setTouchGenerateVoice] = useState(false);
+  const [touchVoiceProgress, setTouchVoiceProgress] = useState<{ completed: number; total: number } | null>(null);
   const [touchDraftZones, setTouchDraftZones] = useState<AvatarTouchZone[]>(DEFAULT_COMPANION_TOUCH_ZONES);
   const [vrmExpressions, setVrmExpressions] = useState<string[]>([]);
   const [editing, setEditing] = useState(false);
@@ -300,10 +312,25 @@ const CompanionHome: React.FC = () => {
   const settleTimerRef = useRef<number | null>(null);
   const touchBannerTimerRef = useRef<number | null>(null);
   const touchDialogueTimerRef = useRef<number | null>(null);
+  const touchVoiceAudioRef = useRef<HTMLAudioElement | null>(null);
+  const touchVoiceUrlRef = useRef<string | null>(null);
+  const touchVoiceNonceRef = useRef(0);
   const hoursRef = useRef(virtualTime.hours);
   hoursRef.current = virtualTime.hours;
 
   const period = periodForHour(virtualTime.hours);
+
+  const stopTouchVoice = () => {
+    if (touchVoiceAudioRef.current) {
+      touchVoiceAudioRef.current.pause();
+      touchVoiceAudioRef.current.src = '';
+      touchVoiceAudioRef.current = null;
+    }
+    if (touchVoiceUrlRef.current) {
+      URL.revokeObjectURL(touchVoiceUrlRef.current);
+      touchVoiceUrlRef.current = null;
+    }
+  };
 
   // ── 主色跟角色走：从头像提取主色相（跟电子宠物小窝同一套提取器）──
   const [charHue, setCharHue] = useState<number | null>(null);
@@ -381,6 +408,8 @@ const CompanionHome: React.FC = () => {
       if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
       if (touchBannerTimerRef.current !== null) window.clearTimeout(touchBannerTimerRef.current);
       if (touchDialogueTimerRef.current !== null) window.clearTimeout(touchDialogueTimerRef.current);
+      touchVoiceNonceRef.current = 0;
+      stopTouchVoice();
     };
   }, []);
   useEffect(() => {
@@ -393,7 +422,11 @@ const CompanionHome: React.FC = () => {
     setAppStarOpen(false);
     if (touchDialogueTimerRef.current !== null) window.clearTimeout(touchDialogueTimerRef.current);
     setTouchGenerating(false);
+    setTouchVoiceProgress(null);
+    setTouchGenerateVoice(Boolean(character?.companionTouchSettings?.voiceEnabled));
     setTouchDraftZones((character?.companionTouchSettings?.enabledZones as AvatarTouchZone[] | undefined) || DEFAULT_COMPANION_TOUCH_ZONES);
+    touchVoiceNonceRef.current = 0;
+    stopTouchVoice();
     touchCursorRef.current = {};
     setVrmExpressions([]);
     setEditing(false);
@@ -488,6 +521,8 @@ const CompanionHome: React.FC = () => {
       (character?.companionTouchSettings?.enabledZones as AvatarTouchZone[] | undefined)
       || DEFAULT_COMPANION_TOUCH_ZONES,
     );
+    setTouchGenerateVoice(Boolean(character?.companionTouchSettings?.voiceEnabled));
+    setTouchVoiceProgress(null);
     setTouchSettingsOpen(true);
   };
 
@@ -505,13 +540,18 @@ const CompanionHome: React.FC = () => {
       addToast('请至少选择一个可触摸部位', 'error');
       return;
     }
+    if (touchGenerateVoice && !characterHasVoice(character, apiConfig)) {
+      addToast('这个角色还没有配置可用音色，先关闭语音勾选或去语音设置配置', 'error');
+      return;
+    }
     const requestToken = ++requestTokenRef.current;
     busyRef.current = true;
     setTouchGenerating(true);
+    setTouchVoiceProgress(null);
     setMotionState('thinking');
     setLine(null);
     try {
-      const reactions = await requestAvatarTouchReactionPack({
+      let reactions = await requestAvatarTouchReactionPack({
         character,
         user: userProfile,
         apiConfig,
@@ -519,15 +559,47 @@ const CompanionHome: React.FC = () => {
         modelActions,
       });
       if (!mountedRef.current || requestToken !== requestTokenRef.current) return;
+
+      let voiceGenerated = 0;
+      let voiceTotal = 0;
+      let voiceFailures = 0;
+      if (touchGenerateVoice) {
+        voiceTotal = Object.values(reactions).reduce((total, items) => total + (items?.length || 0), 0);
+        setTouchVoiceProgress({ completed: 0, total: voiceTotal });
+        const voiceResult = await generateAvatarTouchVoicePack({
+          reactions,
+          character,
+          apiConfig,
+          onProgress: (completed, total) => {
+            if (mountedRef.current && requestToken === requestTokenRef.current) {
+              setTouchVoiceProgress({ completed, total });
+            }
+          },
+        });
+        if (!mountedRef.current || requestToken !== requestTokenRef.current) return;
+        reactions = voiceResult.reactions;
+        voiceGenerated = voiceResult.generated;
+        voiceTotal = voiceResult.total;
+        voiceFailures = voiceResult.failures.length;
+      }
+
       updateCharacter(character.id, {
         companionTouchSettings: {
           enabledZones: touchDraftZones,
           reactions,
+          voiceEnabled: touchGenerateVoice,
+          voiceGeneratedCount: voiceGenerated,
           generatedAt: Date.now(),
         },
       });
+      const keepVoiceIds = collectAvatarTouchVoiceAssetIds(reactions);
+      void cleanupAvatarTouchVoiceAssets(character.companionTouchSettings?.reactions, keepVoiceIds);
       touchCursorRef.current = {};
-      addToast(`已为 ${touchDraftZones.length} 个部位准备本地反馈包`, 'success');
+      const voiceSummary = touchGenerateVoice ? ` · 本地语音 ${voiceGenerated}/${voiceTotal}` : '';
+      addToast(`已为 ${touchDraftZones.length} 个部位准备本地反馈包${voiceSummary}`, 'success');
+      if (voiceFailures) {
+        addToast(`${voiceFailures} 条语音未能保存，触摸时只演动作与台词，不会临时调用 TTS`, 'info');
+      }
     } catch (error: any) {
       if (!mountedRef.current || requestToken !== requestTokenRef.current) return;
       console.warn('[companion] touch reaction pack failed:', error);
@@ -536,9 +608,39 @@ const CompanionHome: React.FC = () => {
       if (requestToken === requestTokenRef.current) {
         busyRef.current = false;
         setTouchGenerating(false);
+        setTouchVoiceProgress(null);
         setMotionState('idle');
         setPerformance(DEFAULT_AVATAR_PERFORMANCE);
       }
+    }
+  };
+
+  const playTouchReactionVoice = async (reaction: CompanionTouchReaction, nonce: number) => {
+    if (!reaction.voiceAssetId) return;
+    const url = await createAvatarTouchVoiceUrl(reaction);
+    if (!url) return;
+    if (!mountedRef.current || touchVoiceNonceRef.current !== nonce) {
+      URL.revokeObjectURL(url);
+      return;
+    }
+    stopTouchVoice();
+    const audio = new Audio(url);
+    touchVoiceAudioRef.current = audio;
+    touchVoiceUrlRef.current = url;
+    const release = () => {
+      if (touchVoiceAudioRef.current === audio) touchVoiceAudioRef.current = null;
+      if (touchVoiceUrlRef.current === url) {
+        URL.revokeObjectURL(url);
+        touchVoiceUrlRef.current = null;
+      }
+    };
+    audio.onended = release;
+    audio.onerror = release;
+    try {
+      await audio.play();
+    } catch (error) {
+      console.warn('[companion] local touch voice playback skipped:', error);
+      release();
     }
   };
 
@@ -550,10 +652,13 @@ const CompanionHome: React.FC = () => {
     if (touchDialogueTimerRef.current !== null) window.clearTimeout(touchDialogueTimerRef.current);
     setAppStarOpen(false);
     setLine(null);
+    touchVoiceNonceRef.current = hit.nonce;
+    stopTouchVoice();
     setLastHit(hit);
-    setRipple({ nonce: hit.nonce, x: hit.normalizedX, y: hit.normalizedY });
+    const touchForce = resolveAvatarTouchForce(hit);
+    setRipple({ nonce: hit.nonce, x: hit.normalizedX, y: hit.normalizedY, force: touchForce });
     showTouchBanner(hit, `你戳了戳${character.name}的${avatarTouchZoneToastLabel(hit.zone)}`);
-    setPerformance(buildImmediateTouchPerformance(hit.zone));
+    setPerformance(applyAvatarTouchForce(buildImmediateTouchPerformance(hit.zone), hit));
     setMotionState('speaking');
 
     const settings = character.companionTouchSettings;
@@ -580,8 +685,14 @@ const CompanionHome: React.FC = () => {
     touchDialogueTimerRef.current = window.setTimeout(() => {
       if (!mountedRef.current) return;
       setLine({ text, label: `触摸 · ${avatarTouchZoneLabel(hit.zone)}`, kind: 'touch' });
-      setPerformance(reaction.performance || buildImmediateTouchPerformance(hit.zone));
+      setPerformance(applyAvatarTouchForce(
+        reaction.performance || buildImmediateTouchPerformance(hit.zone),
+        hit,
+      ));
       setMotionState('speaking');
+      if (settings?.voiceEnabled && reaction.voiceAssetId) {
+        void playTouchReactionVoice(reaction, hit.nonce);
+      }
       settleAfter(text.length);
     }, 420);
   };
@@ -613,6 +724,9 @@ const CompanionHome: React.FC = () => {
   const savedTouchSettings = character.companionTouchSettings;
   const preparedReactionCount = Object.values(savedTouchSettings?.reactions || {})
     .reduce((total, reactions) => total + (reactions?.length || 0), 0);
+  const preparedVoiceCount = Object.values(savedTouchSettings?.reactions || {})
+    .reduce((total, reactions) => total + (reactions?.filter(item => item.voiceAssetId).length || 0), 0);
+  const touchVoiceAvailable = characterHasVoice(character, apiConfig);
   const launchCompanionApp = (id: AppID) => {
     setAppStarOpen(false);
     openApp(id);
@@ -652,10 +766,6 @@ const CompanionHome: React.FC = () => {
           0% { opacity:0; transform:translate(-50%,-50%) scale(.2) rotate(-10deg); }
           35% { opacity:1; transform:translate(-50%,-90%) scale(1.12) rotate(6deg); }
           100% { opacity:0; transform:translate(-50%,-180%) scale(.76) rotate(16deg); }
-        }
-        @keyframes companion-star-pulse {
-          0%,100% { transform:scale(1); opacity:.92; }
-          50% { transform:scale(1.045); opacity:1; }
         }
         @keyframes companion-star-open {
           from { opacity:0; transform:translateY(18px) scale(.94); }
@@ -734,8 +844,10 @@ const CompanionHome: React.FC = () => {
             style={{
               left: `${ripple.x * 100}%`,
               top: `${ripple.y * 100}%`,
-              boxShadow: `0 0 20px ${uiTint}`,
-              animation: 'companion-ripple 700ms ease-out forwards',
+              width: `${38 + ripple.force * 18}px`,
+              height: `${38 + ripple.force * 18}px`,
+              boxShadow: `0 0 ${10 + ripple.force * 22}px ${uiTint}`,
+              animation: `companion-ripple ${580 + ripple.force * 260}ms ease-out forwards`,
             }}
           />
         )}
@@ -834,11 +946,11 @@ const CompanionHome: React.FC = () => {
           data-visual-style="ornate-flat"
         >
           <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 82 356" preserveAspectRatio="none" aria-hidden>
-            <path d="M14 1H67L80 14V338L69 355H13L2 340V13Z" fill={`${palette.panelBottom}8f`} stroke={`${uiTint}31`} strokeWidth="1" />
-            <path d="M8 24V326M74 21V329" fill="none" stroke={`${uiTint}2e`} strokeWidth="0.7" />
-            <path d="M13 1H34M48 1H67M13 355H33M49 355H69" fill="none" stroke={`${uiTint}75`} strokeWidth="0.8" />
-            <path d="M41 39V319" fill="none" stroke={`${uiTint}29`} strokeWidth="0.7" strokeDasharray="2 5" />
-            <path d="M3 78H10M72 63H79M3 274H9M73 292H80" fill="none" stroke={`${uiTint}58`} strokeWidth="0.8" />
+            <path d="M14 1H67L80 14V338L69 355H13L2 340V13Z" fill={`${palette.panelBottom}9e`} stroke={`${uiTint}68`} strokeWidth="1" />
+            <path d="M8 24V326M74 21V329" fill="none" stroke={`${uiTint}48`} strokeWidth="0.7" />
+            <path d="M13 1H34M48 1H67M13 355H33M49 355H69" fill="none" stroke={`${uiTint}b8`} strokeWidth="0.8" />
+            <path d="M41 39V319" fill="none" stroke={`${uiTint}58`} strokeWidth="0.7" strokeDasharray="2 5" />
+            <path d="M3 78H10M72 63H79M3 274H9M73 292H80" fill="none" stroke={`${uiTint}94`} strokeWidth="0.8" />
           </svg>
           <span className="pointer-events-none absolute right-1 top-0 text-[9px] leading-none" style={{ color: uiTint }} aria-hidden>✦</span>
           <span className="pointer-events-none absolute right-3 top-3 text-[5px] leading-none text-white/70" aria-hidden>✦</span>
@@ -852,9 +964,9 @@ const CompanionHome: React.FC = () => {
             {!preparedReactionCount && (
               <span className="absolute right-0 top-0 z-20 h-1.5 w-1.5 rounded-full bg-[#ff5d9e] ring-2 ring-[#1a1028]" aria-label="尚未生成触摸反馈" />
             )}
-            <span className="relative flex h-[3.65rem] w-[3.65rem] rotate-45 items-center justify-center rounded-[1rem] border" style={{ background: `${uiTint}24`, borderColor: `${uiTint}b8` }}>
-              <span className="absolute inset-[4px] rounded-[0.78rem] border" style={{ borderColor: `${uiTint}70` }} />
-              <span className="absolute inset-[8px] rounded-[0.55rem]" style={{ background: `${uiTint}18` }} />
+            <span className="relative flex h-[3.65rem] w-[3.65rem] rotate-45 items-center justify-center rounded-[1rem] border" style={{ background: `${uiTint}50`, borderColor: `${uiTint}ec` }}>
+              <span className="absolute inset-[4px] rounded-[0.78rem] border" style={{ borderColor: `${uiTint}ae` }} />
+              <span className="absolute inset-[8px] rounded-[0.55rem]" style={{ background: `${uiTint}38` }} />
               <span className="relative -rotate-45 text-[19px] text-white">☝</span>
             </span>
             <span className="bg-[#120c20]/92 px-1.5 py-0.5 text-[8px] font-medium tracking-[0.08em] text-white/92">触摸互动</span>
@@ -869,11 +981,11 @@ const CompanionHome: React.FC = () => {
             const Icon = Icons[item.icon];
             return (
               <button key={item.id} onClick={() => openApp(item.id)} className="group relative z-10 flex flex-col items-center gap-1 active:scale-[.97]">
-                <span className="relative flex h-10 w-10 rotate-45 items-center justify-center rounded-[0.72rem] border bg-[#171023]/64" style={{ borderColor: `${uiTint}50` }}>
-                  <span className="absolute inset-[3px] rounded-[0.55rem] border border-white/[0.055]" />
-                  <Icon className="relative h-[17px] w-[17px] -rotate-45 text-white/88" />
+                <span className="relative flex h-10 w-10 rotate-45 items-center justify-center rounded-[0.72rem] border bg-[#171023]/64" style={{ borderColor: `${uiTint}88` }}>
+                  <span className="absolute inset-[3px] rounded-[0.55rem] border" style={{ borderColor: `${uiTint}2f` }} />
+                  <Icon className="relative h-[17px] w-[17px] -rotate-45 text-white/95" />
                 </span>
-                <span className="text-[8px] tracking-[0.1em] text-white/82">{item.label}</span>
+                <span className="text-[8px] tracking-[0.1em] text-white/90">{item.label}</span>
               </button>
             );
           })}
@@ -887,7 +999,7 @@ const CompanionHome: React.FC = () => {
           data-testid="companion-touch-settings"
         >
           <section
-            className="w-full rounded-t-[2rem] border-t border-white/20 px-4 pb-5 pt-3 text-white shadow-[0_-24px_60px_rgba(0,0,0,.5)] backdrop-blur-2xl"
+            className="max-h-[88vh] w-full overflow-y-auto rounded-t-[2rem] border-t border-white/20 px-4 pb-5 pt-3 text-white shadow-[0_-24px_60px_rgba(0,0,0,.5)] backdrop-blur-2xl"
             style={{ background: `linear-gradient(165deg, ${palette.panelTop}f7, ${palette.panelBottom}fc)`, animation: 'companion-drawer-up 260ms ease-out both', paddingBottom: 'max(1.25rem, calc(var(--safe-bottom, 0px) + 1rem))' }}
             onClick={event => event.stopPropagation()}
           >
@@ -941,6 +1053,41 @@ const CompanionHome: React.FC = () => {
             </div>
 
             <button
+              type="button"
+              role="switch"
+              aria-checked={touchGenerateVoice}
+              disabled={touchGenerating || !touchVoiceAvailable}
+              data-testid="companion-touch-generate-voice"
+              onClick={() => setTouchGenerateVoice(current => !current)}
+              className="mt-3 flex w-full items-center gap-3 border px-3 py-2.5 text-left transition active:scale-[.99] disabled:opacity-45"
+              style={{
+                borderColor: touchGenerateVoice ? `${uiTint}9f` : 'rgba(255,255,255,.12)',
+                background: touchGenerateVoice ? `${uiTint}12` : 'rgba(255,255,255,.025)',
+                clipPath: 'polygon(0 7px, 7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%)',
+              }}
+            >
+              <SpeakerHigh size={17} style={{ color: touchGenerateVoice ? uiTint : 'rgba(255,255,255,.55)' }} />
+              <span className="min-w-0 flex-1">
+                <span className="block text-[11px] font-medium text-white/90">同时生成语音</span>
+                <span className="mt-0.5 block text-[8px] leading-relaxed text-white/42">
+                  {touchVoiceAvailable
+                    ? '勾选后预先合成并保存在本地；触摸时不会临时调用 TTS'
+                    : '角色尚未配置可用音色，当前只生成台词与动作'}
+                </span>
+              </span>
+              <span
+                className="flex h-[18px] w-[18px] shrink-0 items-center justify-center border"
+                style={{
+                  borderColor: touchGenerateVoice ? uiTint : 'rgba(255,255,255,.25)',
+                  background: touchGenerateVoice ? uiTint : 'transparent',
+                  color: touchGenerateVoice ? palette.panelBottom : 'transparent',
+                }}
+              >
+                <Check size={12} weight="bold" />
+              </span>
+            </button>
+
+            <button
               onClick={() => { void generateTouchReactionPack(); }}
               disabled={touchGenerating || !touchDraftZones.length}
               data-testid="companion-generate-touch-pack"
@@ -948,12 +1095,16 @@ const CompanionHome: React.FC = () => {
               style={{ background: `linear-gradient(110deg, ${uiTint}, #ffd8ef 58%, #ffffff)` }}
             >
               <Sparkle size={15} weight="fill" />
-              {touchGenerating ? '正在一次生成整包反馈…' : preparedReactionCount ? '重新生成反馈包' : '一次生成反馈包'}
+              {touchGenerating
+                ? touchVoiceProgress
+                  ? `正在合成本地语音 ${touchVoiceProgress.completed}/${touchVoiceProgress.total}…`
+                  : '正在生成台词与动作…'
+                : preparedReactionCount ? '重新生成反馈包' : '一次生成反馈包'}
             </button>
             <div className="mt-2 text-center text-[8px] tracking-wide text-white/30">
               {savedTouchSettings?.generatedAt
-                ? `上次生成 ${new Date(savedTouchSettings.generatedAt).toLocaleString()} · 本地 ${preparedReactionCount} 条`
-                : '正常仅请求一次；若缺少部位，只自动补全一次'}
+                ? `上次生成 ${new Date(savedTouchSettings.generatedAt).toLocaleString()} · 台词 ${preparedReactionCount} 条 · 语音 ${preparedVoiceCount} 条`
+                : '台词动作正常只请求一次；语音仅在勾选时批量预生成'}
             </div>
           </section>
         </div>
@@ -1089,50 +1240,45 @@ const CompanionHome: React.FC = () => {
 
       {!editing && !touchSettingsOpen && (
         <nav
-          className="absolute inset-x-3 z-40 h-[4.55rem] overflow-visible"
+          className="absolute inset-x-3 z-40 h-[4.35rem] overflow-visible"
           style={{ bottom: 'max(0.5rem, calc(var(--safe-bottom, 0px) + 0.35rem))' }}
           aria-label="陪伴桌面导航"
+          data-testid="companion-ornate-dock"
+          data-visual-style="ornate-flat"
         >
           <div
-            className="pointer-events-none absolute inset-0 border border-white/20"
+            className="pointer-events-none absolute inset-0 border"
             style={{
-              background: `linear-gradient(180deg, ${palette.panelTop}ed, ${palette.panelBottom}fa)`,
-              borderColor: `${uiTint}42`,
-              boxShadow: `0 14px 34px ${palette.shadow}ad, inset 0 1px 0 ${uiTint}36`,
+              background: `${palette.panelBottom}ed`,
+              borderColor: `${uiTint}58`,
               clipPath: 'polygon(0 12px, 12px 0, 37% 0, 42% 9px, 58% 9px, 63% 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%)',
             }}
           />
-          <div className="pointer-events-none absolute inset-x-[8%] top-0 h-px" style={{ background: `linear-gradient(90deg, transparent, ${uiTint}57, transparent)` }} />
+          <div className="pointer-events-none absolute inset-x-[7%] top-0 h-px" style={{ background: `linear-gradient(90deg, transparent, ${uiTint}9c 24%, ${uiTint}9c 76%, transparent)` }} />
+          <span className="pointer-events-none absolute left-[7%] top-2 text-[6px]" style={{ color: uiTint }} aria-hidden>✦</span>
+          <span className="pointer-events-none absolute right-[7%] top-2 text-[5px] text-white/60" aria-hidden>✦</span>
           <div className="relative z-10 grid h-full grid-cols-5 items-end gap-1 px-2 pb-1 pt-2">
             {[
               { id: AppID.Chat, icon: Icons.Chat, label: '聊天' },
               { id: AppID.Schedule, icon: Icons.Schedule, label: '日程' },
             ].map(item => (
-              <button key={item.id} onClick={() => launchCompanionApp(item.id)} className="flex h-full flex-col items-center justify-end gap-1 pb-1 text-white/70 active:scale-90">
+              <button key={item.id} onClick={() => launchCompanionApp(item.id)} className="flex h-full flex-col items-center justify-end gap-1 pb-1 text-white/90 active:scale-[.97]">
                 <item.icon className="h-[18px] w-[18px]" />
                 <span className="text-[8px] tracking-[0.12em]">{item.label}</span>
               </button>
             ))}
             <button
               onClick={() => setAppStarOpen(open => !open)}
-              className="relative flex h-full -translate-y-3 flex-col items-center justify-end gap-0.5 text-white active:scale-95"
+              className="relative flex h-full flex-col items-center justify-end pb-1 text-white active:scale-[.97]"
               aria-expanded={appStarOpen}
               data-testid="companion-app-star-button"
             >
-              <span className="relative flex h-[3.85rem] w-[3.85rem] items-center justify-center rounded-full">
-                <span className="absolute -inset-1.5 rounded-full border opacity-60" style={{ borderColor: `${uiTint}84`, boxShadow: `0 0 24px ${uiTint}35` }} />
-                <span
-                  className="relative flex h-[3.35rem] w-[3.35rem] items-center justify-center rounded-full border-2 text-white"
-                  style={{
-                    background: `radial-gradient(circle at 38% 30%, #f8efff 0%, ${uiTint} 35%, ${palette.panelTop} 78%)`,
-                    borderColor: 'rgba(255,255,255,.72)',
-                    boxShadow: `inset 0 0 12px rgba(255,255,255,.28), 0 0 26px ${uiTint}78`,
-                    animation: appStarOpen ? 'none' : 'companion-star-pulse 3.6s ease-in-out infinite',
-                  }}
-                >
-                  <Sparkle size={27} weight="fill" />
-                  <span className="absolute right-1 top-1 text-[7px] text-white">✦</span>
-                </span>
+              <span className="absolute bottom-[1.45rem] flex h-12 w-12 items-center justify-center rounded-full border" style={{ borderColor: `${uiTint}c8`, background: `${palette.panelBottom}8f` }}>
+                <span className="absolute -left-2 top-1/2 h-px w-2" style={{ background: `${uiTint}8c` }} />
+                <span className="absolute -right-2 top-1/2 h-px w-2" style={{ background: `${uiTint}8c` }} />
+                <span className="absolute -top-1 left-1/2 h-1 w-px" style={{ background: `${uiTint}8c` }} />
+                <Sparkle className="relative" size={23} weight="fill" />
+                <span className="absolute right-1 top-1 text-[6px] text-white/90">✦</span>
               </span>
               <span className="text-[8px] font-semibold tracking-[0.18em]" style={{ color: uiTint }}>功能</span>
             </button>
@@ -1140,7 +1286,7 @@ const CompanionHome: React.FC = () => {
               { id: AppID.Music, icon: Icons.Music, label: '音乐' },
               { id: AppID.Settings, icon: Icons.Settings, label: '设置' },
             ].map(item => (
-              <button key={item.id} onClick={() => launchCompanionApp(item.id)} className="flex h-full flex-col items-center justify-end gap-1 pb-1 text-white/70 active:scale-90">
+              <button key={item.id} onClick={() => launchCompanionApp(item.id)} className="flex h-full flex-col items-center justify-end gap-1 pb-1 text-white/90 active:scale-[.97]">
                 <item.icon className="h-[18px] w-[18px]" />
                 <span className="text-[8px] tracking-[0.12em]">{item.label}</span>
               </button>

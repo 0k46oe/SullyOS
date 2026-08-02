@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   appendPendingAvatarTouch,
   buildAvatarTouchSystemPrompt,
+  applyAvatarTouchForce,
   buildPendingAvatarTouchContext,
   buildImmediateTouchPerformance,
   normalizeCompanionDialogue,
@@ -9,6 +10,7 @@ import {
   parseAvatarTouchReactionPackPartial,
   consumePendingAvatarTouches,  isAvatarTouchGesture,
   normalizeAvatarTouchZone,
+  resolveAvatarTouchForce,
   parseAvatarTouchReply,
   type AvatarTouchRecord,
 } from './avatarTouch';
@@ -37,6 +39,17 @@ describe('角色触碰互动', () => {
     expect(isAvatarTouchGesture(18, 220, true)).toBe(false);
     expect(isAvatarTouchGesture(2, 900, true)).toBe(false);
     expect(isAvatarTouchGesture(2, 220, false)).toBe(false);
+  });
+
+  it('优先读取触控压力，并用按压时长为无压力设备补出力度', () => {
+    const lightMouse = resolveAvatarTouchForce({ pointerType: 'mouse', pressure: 0.5, durationMs: 70 });
+    const heldMouse = resolveAvatarTouchForce({ pointerType: 'mouse', pressure: 0.5, durationMs: 560 });
+    const firmPen = resolveAvatarTouchForce({ pointerType: 'pen', pressure: 0.9, durationMs: 90 });
+    expect(lightMouse).toBeLessThan(heldMouse);
+    expect(firmPen).toBeGreaterThan(heldMouse);
+    expect(applyAvatarTouchForce(buildImmediateTouchPerformance('face'), {
+      pointerType: 'pen', pressure: 0.95, durationMs: 80,
+    }).intensity).toBeGreaterThan(buildImmediateTouchPerformance('face').intensity);
   });
 
   it('触碰提示使用完整 ContextBuilder 输入并明确近期关系约束', () => {

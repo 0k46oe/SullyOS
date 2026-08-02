@@ -123,6 +123,8 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
       startY: number;
       startedAt: number;
       maxDistance: number;
+      maxPressure: number;
+      pointerType: AvatarTouchRequest['pointerType'];
     }>;
     pinchDist: number;
   }>({ pointers: new Map(), pinchDist: 0 });
@@ -201,6 +203,10 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
       startY: event.clientY,
       startedAt: window.performance.now(),
       maxDistance: 0,
+      maxPressure: Math.max(0, Math.min(1, event.pressure || 0)),
+      pointerType: event.pointerType === 'mouse' || event.pointerType === 'touch' || event.pointerType === 'pen'
+        ? event.pointerType
+        : 'unknown',
     });
     if (gesture.pointers.size === 2) {
       const [a, b] = [...gesture.pointers.values()];
@@ -219,6 +225,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
       x: event.clientX,
       y: event.clientY,
       maxDistance: Math.max(previous.maxDistance, moved),
+      maxPressure: Math.max(previous.maxPressure, Math.max(0, Math.min(1, event.pressure || 0))),
     });
     const rect = stageBoxRef.current?.getBoundingClientRect();
     if (!rect || !rect.width || !rect.height) return;
@@ -257,6 +264,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
       if (!rect?.width || !rect.height) return;
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
+      const durationMs = Math.max(0, window.performance.now() - pointer.startedAt);
       if (x < 0 || y < 0 || x > rect.width || y > rect.height) return;
       setTouchRequest({
         nonce: Date.now() + Math.random(),
@@ -264,6 +272,9 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
         y,
         normalizedX: x / rect.width,
         normalizedY: y / rect.height,
+        pressure: Math.max(pointer.maxPressure, Math.max(0, Math.min(1, event.pressure || 0))),
+        durationMs,
+        pointerType: pointer.pointerType,
       });
     }
   };

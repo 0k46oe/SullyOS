@@ -2267,6 +2267,9 @@ export type CompanionTouchZone = 'head' | 'face' | 'hand' | 'body' | 'other';
 export interface CompanionTouchReaction {
   id: string;
   text: string;
+  /** Persisted local audio generated together with this reaction. */
+  voiceAssetId?: string;
+  voiceMimeType?: string;
   performance: {
     emotion: 'neutral' | 'happy' | 'sad' | 'angry' | 'fearful' | 'disgusted' | 'surprised' | 'calm' | 'relaxed';
     gesture: 'idle' | 'talk' | 'nod' | 'shake' | 'tilt' | 'explain' | 'wave' | 'shy' | 'lean-in' | 'lean-back';
@@ -2282,6 +2285,9 @@ export interface CompanionTouchReaction {
 export interface CompanionTouchSettings {
   enabledZones: CompanionTouchZone[];
   reactions: Partial<Record<CompanionTouchZone, CompanionTouchReaction[]>>;
+  /** When true, reactions with voiceAssetId play their local pre-generated audio. */
+  voiceEnabled?: boolean;
+  voiceGeneratedCount?: number;
   generatedAt?: number;
 }
 

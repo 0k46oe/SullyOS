@@ -29,6 +29,11 @@ export interface AvatarTouchRequest {
   /** Normalized stage coordinates, 0..1. */
   normalizedX: number;
   normalizedY: number;
+  /** Peak hardware pressure when available (0..1). */
+  pressure?: number;
+  /** Press duration; used as a force fallback on devices without pressure sensors. */
+  durationMs?: number;
+  pointerType?: 'mouse' | 'touch' | 'pen' | 'unknown';
 }
 
 export interface AvatarTouchHit extends AvatarTouchRequest {
@@ -145,6 +150,28 @@ export const isAvatarTouchGesture = (
   && durationMs >= 0
   && durationMs <= 650
 );
+
+export const resolveAvatarTouchForce = (
+  touch: Pick<AvatarTouchRequest, 'pressure' | 'durationMs' | 'pointerType'>,
+): number => {
+  const duration = Math.max(0, Math.min(650, Number(touch.durationMs) || 0));
+  const durationForce = 0.3 + (duration / 650) * 0.62;
+  const hardwarePressure = touch.pointerType === 'mouse'
+    ? 0
+    : Math.max(0, Math.min(1, Number(touch.pressure) || 0));
+  return Math.max(0.3, Math.min(1, Math.max(durationForce, hardwarePressure)));
+};
+
+export const applyAvatarTouchForce = (
+  direction: AvatarPerformanceDirection,
+  touch: Pick<AvatarTouchRequest, 'pressure' | 'durationMs' | 'pointerType'>,
+): AvatarPerformanceDirection => {
+  const force = resolveAvatarTouchForce(touch);
+  return {
+    ...direction,
+    intensity: Math.max(0.25, Math.min(1, direction.intensity * (0.72 + force * 0.46))),
+  };
+};
 
 export const normalizeAvatarTouchZone = (
   rawAreas: string[],
