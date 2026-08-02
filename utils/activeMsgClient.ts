@@ -1203,6 +1203,48 @@ export const ActiveMsgClient = {
   },
 
   /**
+   * 角色资料改了之后，把跟着变的字段写回还会响的远端任务行（角色页保存的路径调）。
+   *
+   * **timeZone**：上游是按任务行里冻结的那份 tzId、以墙钟推进循环任务的下次触发时刻的
+   * （tzId 缺省时才退回死加 24h）。fire_pack 里那份 tzId 每轮聊天都会重传，但它救不了
+   * 任务行——不刷的话「每天 9:00」会一直按排程那天的时区走，角色改到纽约就成了当地晚上
+   * 八九点，跨夏令时还会永久偏一小时；同一次 fire 里 prompt 用新时区、触发时刻用旧时区，
+   * 两个钟直接打架。
+   *
+   * **contactName**：推送横幅标题「来自 X」。AI 模式的 fire 会从 tool_pack 取当前名字
+   * （见 worker 的 onLLMOutput），但 fixed 模式不走 hooks，标题直接读任务行这一份。
+   *
+   * 范围是全部 pending 任务，**含 fixed**：固定文本的循环任务同样按墙钟推进、同样要弹
+   * 横幅，所以不能沿用凭据刷新那边的 `mode !== 'fixed'` 过滤。
+   *
+   * fields 由调用方按「哪些真的变了」逐项开：任务行里存的可能是排程那一刻的快照，跟着
+   * 别的操作顺手全刷的话，用户出差时保存一次配置就会把所有任务的时区悄悄挪走。
+   */
+  async refreshCharPendingTaskRow(
+    char: CharacterProfile,
+    fields: { timeZone?: boolean; contactName?: boolean },
+  ): Promise<{
+    status: 'no-tasks' | 'ok' | 'partial';
+    updated: number;
+    failed: number;
+  }> {
+    const updates: Record<string, unknown> = {};
+    // 关掉自定义时区也走这里：那时该回落到设备时区，跟排程时的算法保持同一份。
+    if (fields.timeZone) {
+      updates.tzId = resolveCharTimeZone(char) ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    }
+    // 上游要求非空字符串，空名字传上去会被打回 400。
+    if (fields.contactName && char.name?.trim()) updates.contactName = char.name;
+    if (Object.keys(updates).length === 0) return { status: 'no-tasks', updated: 0, failed: 0 };
+
+    const uuids = getPendingTasks(char.activeMsg2Config, Date.now()).map((t) => t.taskUuid);
+    if (uuids.length === 0) return { status: 'no-tasks', updated: 0, failed: 0 };
+
+    const { updated, failed } = await this.updatePendingTasksRemote(uuids, updates);
+    return { status: failed.length ? 'partial' : 'ok', updated, failed: failed.length };
+  },
+
+  /**
    * 取回 worker 旁路存下的一份云端状态（push 装不下的大内容，见 amsgXhsSessionKey）。
    * 键不存在、或者内容已被取走清空，都返回 null 交调用方决定——不要在这里编一个空壳
    * 出来，那会让「数据还没取回」和「本来就没有」变成同一件事。

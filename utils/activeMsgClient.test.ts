@@ -756,3 +756,97 @@ describe('ActiveMsgClient.listRemoteTasksForChar', () => {
     ]);
   });
 });
+
+// 上游是按任务行里冻结的 tzId、以墙钟推进循环任务的下次触发时刻的。角色改了时区只刷
+// fire_pack 盖不到这份，「每天 9:00」会一直按排程那天的时区走（改到纽约就成了当地晚上）。
+describe('ActiveMsgClient.refreshCharPendingTaskRow（角色资料变更后同步任务行）', () => {
+  beforeEach(() => {
+    reiClient.init.mockReset().mockResolvedValue(undefined);
+    reiClient.updateMessage.mockReset().mockResolvedValue({ success: true });
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('全部 pending 任务都刷（含 fixed），载荷只有 tzId', async () => {
+    const char = {
+      id: 'char-a',
+      customTimezoneEnabled: true,
+      customTimezone: 'America/New_York',
+      activeMsg2Config: {
+        enabled: true,
+        tasks: [
+          remoteTask('a1'),
+          // fixed 不走 LLM 用不到凭据，但它的循环推进同样看 tzId，所以这条也得刷。
+          remoteTask('a2', { mode: 'fixed', expirePolicy: 'force' }),
+          remoteTask('a3', { firstSendTime: PAST_ISO() }),   // 已过点，不动
+        ],
+      },
+    } as any;
+
+    const result = await ActiveMsgClient.refreshCharPendingTaskRow(char, { timeZone: true });
+
+    expect(result).toEqual({ status: 'ok', updated: 2, failed: 0 });
+    const byUuid = new Map(reiClient.updateMessage.mock.calls.map((c: any[]) => [c[0], c[1]]));
+    expect([...byUuid.keys()].sort()).toEqual(['a1', 'a2']);
+    expect(byUuid.get('a1')).toEqual({ tzId: 'America/New_York' });
+  });
+
+  it('关掉自定义时区 → 回落设备时区，不把旧的自定义时区留在任务行上', async () => {
+    const char = { id: 'char-a', activeMsg2Config: { enabled: true, tasks: [remoteTask('a1')] } } as any;
+
+    await ActiveMsgClient.refreshCharPendingTaskRow(char, { timeZone: true });
+
+    expect(reiClient.updateMessage.mock.calls[0][1]).toEqual({
+      tzId: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    });
+  });
+
+  it('没有 pending 任务 → 一个请求都不发', async () => {
+    const char = { id: 'char-a', activeMsg2Config: { enabled: true, tasks: [] } } as any;
+
+    expect((await ActiveMsgClient.refreshCharPendingTaskRow(char, { timeZone: true })).status).toBe('no-tasks');
+    expect(reiClient.updateMessage).not.toHaveBeenCalled();
+  });
+});
+
+// contactName 补的是 fixed 模式：AI 任务的推送标题由 worker 从 tool_pack 现取，
+// 但 fixed 不走 hooks，标题直接读任务行里冻结的这一份。
+describe('ActiveMsgClient.refreshCharPendingTaskRow — contactName', () => {
+  beforeEach(() => {
+    reiClient.init.mockReset().mockResolvedValue(undefined);
+    reiClient.updateMessage.mockReset().mockResolvedValue({ success: true });
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('改名和改时区同时发生 → 一次 PUT 带两个字段，不打两轮', async () => {
+    const char = {
+      id: 'char-a',
+      name: '夜',
+      customTimezoneEnabled: true,
+      customTimezone: 'America/New_York',
+      activeMsg2Config: { enabled: true, tasks: [remoteTask('a1')] },
+    } as any;
+
+    await ActiveMsgClient.refreshCharPendingTaskRow(char, { timeZone: true, contactName: true });
+
+    expect(reiClient.updateMessage).toHaveBeenCalledTimes(1);
+    expect(reiClient.updateMessage.mock.calls[0][1]).toEqual({
+      tzId: 'America/New_York',
+      contactName: '夜',
+    });
+  });
+
+  it('只改名 → 载荷只有 contactName，不顺手动时区', async () => {
+    const char = { id: 'char-a', name: '夜', activeMsg2Config: { enabled: true, tasks: [remoteTask('a1')] } } as any;
+
+    await ActiveMsgClient.refreshCharPendingTaskRow(char, { contactName: true });
+
+    expect(reiClient.updateMessage.mock.calls[0][1]).toEqual({ contactName: '夜' });
+  });
+
+  it('名字是空的 → 一个请求都不发（上游要求非空，传上去只会被打回 400）', async () => {
+    const char = { id: 'char-a', name: '  ', activeMsg2Config: { enabled: true, tasks: [remoteTask('a1')] } } as any;
+
+    expect((await ActiveMsgClient.refreshCharPendingTaskRow(char, { contactName: true })).status).toBe('no-tasks');
+    expect(reiClient.updateMessage).not.toHaveBeenCalled();
+  });
+});

@@ -39,6 +39,7 @@ import { buildChatRequestPayload } from '../utils/chatRequestPayload';
 import { ChatPrompts } from '../utils/chatPrompts';
 import { extractHtmlBlocks } from '../utils/htmlPrompt';
 import { ActiveMsgClient } from '../utils/activeMsgClient';
+import { resolveCharTimeZone } from '../utils/timezone';
 import { ActiveMsgStore } from '../utils/activeMsgStore';
 import { charMayHaveCloudState, purgeCharCloudState } from '../utils/amsg2CharCleanup';
 import { markAmsgStateDirty, resumePendingAmsgStateSync } from '../utils/amsgStateSync';
@@ -2750,11 +2751,22 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       const updated = prev.map(c => c.id === id ? normalizeCharacterImpression({ ...c, ...(typeof updates === 'function' ? updates(c) : updates) }) : c);
       const target = updated.find(c => c.id === id);
       if (target) {
+        const before = prev.find(c => c.id === id);
         // 落库成功后给 amsg2 云端快照打脏：改人设 / 改记忆 / 面板取消任务等所有落库路径都
         // 汇到这里，不打的话云端 fire_pack 停在上一轮聊天，角色到点拿旧世界说话。
         // markDirty 内部自带「没开 2.0 / 没挂 AI 任务就 return」的门，普通角色零成本。
         DB.saveCharacter(target).then(() => {
           markAmsgStateDirty({ char: target, userProfile, groups, realtimeConfig });
+          // 时区和名字是另一条路：它们冻在远端任务行里，fire_pack 刷新盖不到。
+          // 上游按任务行的 tzId 推进循环任务的下次触发时刻；fixed 模式的推送标题也直接
+          // 读任务行的 contactName。只刷真的变了的那几项，别搭别的操作的便车。
+          const timeZone = resolveCharTimeZone(before) !== resolveCharTimeZone(target);
+          const contactName = !!before && before.name !== target.name;
+          if (timeZone || contactName) {
+            ActiveMsgClient.refreshCharPendingTaskRow(target, { timeZone, contactName }).catch((error) => {
+              console.warn('[amsg2] 角色资料变更后刷新远端任务行失败', target.id, error);
+            });
+          }
         });
       }
       return updated;
