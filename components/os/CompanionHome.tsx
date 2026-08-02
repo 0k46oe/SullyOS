@@ -11,7 +11,7 @@ import {
   UploadSimple,
 } from '@phosphor-icons/react';
 import { useOS } from '../../context/OSContext';
-import { AppID, type CompanionTouchReaction } from '../../types';
+import { AppID, type CompanionTouchReaction, type DailySchedule } from '../../types';
 import { Icons } from '../../constants';
 import VRMVideoCallStage from '../call/VRMVideoCallStage';
 import type { AvatarMotionState } from '../call/VRMAvatarCanvas';
@@ -42,6 +42,13 @@ import {
   createAvatarTouchVoiceUrl,
   generateAvatarTouchVoicePack,
 } from '../../utils/avatarTouchVoice';
+import { DB } from '../../utils/db';
+import { getLastInnerState } from '../../utils/emotionApply';
+import { getFlowNarrativeKey } from '../../utils/scheduleFeature';
+import { getDailyScheduleForChar } from '../../utils/dailySchedule';
+import { useLocalDateKey } from '../../hooks/useLocalDateKey';
+import { resolveCharTimeZone } from '../../utils/timezone';
+import { getCurrentScheduleSlotIndex, getScheduleWallClock } from '../../utils/scheduleTime';
 
 // ── 时段氛围：陪伴桌面按虚拟时间换天色（晨曦 / 白日 / 黄昏 / 夜晚）──
 interface DayPeriod {
@@ -223,7 +230,15 @@ const COMPANION_BG_PRESETS: CompanionBgPreset[] = [
   },
 ];
 
-const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
+const compactCompanionHudText = (value: string | undefined, fallback: string, limit = 54): string => {
+  const clean = (value || '')
+    .replace(/\[[^\]]*\]/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!clean) return fallback;
+  return clean.length > limit ? `${clean.slice(0, limit)}…` : clean;
+};
 
 // ── 打字机：台词逐字浮现（按真实流逝时间推进；用 interval 而不是 rAF，
 // 页面暂时不合成帧（后台/锁屏）也能走完，回到前台不会卡在半截）──
@@ -283,6 +298,8 @@ const CompanionHome: React.FC = () => {
     theme,
     virtualTime,
     updateCharacter,
+    isDataLoaded,
+    lastMsgTimestamp,
   } = useOS();
   const character = useMemo(
     () => characters.find(item => item.id === activeCharacterId) || characters[0] || null,
@@ -319,6 +336,52 @@ const CompanionHome: React.FC = () => {
   hoursRef.current = virtualTime.hours;
 
   const period = periodForHour(virtualTime.hours);
+  const characterDateKey = useLocalDateKey(resolveCharTimeZone(character));
+  const [hudContent, setHudContent] = useState<{ thought: string; recentChat: string; schedule: DailySchedule | null }>({
+    thought: '',
+    recentChat: '',
+    schedule: null,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!isDataLoaded || !character) {
+      setHudContent({ thought: '', recentChat: '', schedule: null });
+      return () => { cancelled = true; };
+    }
+    void Promise.all([
+      DB.getRecentMessagesByCharId(character.id, 12, true),
+      getDailyScheduleForChar(character),
+    ]).then(([messages, schedule]) => {
+      if (cancelled) return;
+      const latestAssistant = [...messages].reverse().find(message =>
+        message.role === 'assistant'
+        && (!message.type || message.type === 'text')
+        && typeof message.content === 'string'
+        && message.content.trim(),
+      );
+      const scheduleThought = schedule?.flowNarrative?.[
+        getFlowNarrativeKey(getScheduleWallClock(character).getHours())
+      ];
+      setHudContent({
+        thought: compactCompanionHudText(getLastInnerState(character.id) || scheduleThought, period.lines[0]),
+        recentChat: compactCompanionHudText(latestAssistant?.content, '还没有聊天记录'),
+        schedule,
+      });
+    }).catch(() => {
+      if (!cancelled) {
+        setHudContent({ thought: period.lines[0], recentChat: '还没有聊天记录', schedule: null });
+      }
+    });
+    return () => { cancelled = true; };
+  }, [character?.id, character?.customTimezoneEnabled, character?.customTimezone, characterDateKey, isDataLoaded, lastMsgTimestamp, period.key]);
+
+  const currentScheduleSlot = useMemo(() => {
+    const slots = hudContent.schedule?.slots || [];
+    if (!slots.length) return null;
+    const index = getCurrentScheduleSlotIndex(slots, character);
+    return slots[index >= 0 ? index : 0] || null;
+  }, [character, hudContent.schedule, virtualTime.hours, virtualTime.minutes]);
 
   const stopTouchVoice = () => {
     if (touchVoiceAudioRef.current) {
@@ -715,7 +778,7 @@ const CompanionHome: React.FC = () => {
 
   const hh = String(virtualTime.hours).padStart(2, '0');
   const mm = String(virtualTime.minutes).padStart(2, '0');
-  const dateNow = new Date();
+
   const framingAdjusted = Boolean(companionFraming) && (
     Math.abs(companionFraming!.scale - 1) > 0.02
     || Math.abs(companionFraming!.offsetX) > 0.01
@@ -882,68 +945,64 @@ const CompanionHome: React.FC = () => {
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-[34%]" style={{ background: `linear-gradient(to top, ${palette.shadow}c7, ${palette.shadow}47 55%, transparent)` }} />
       <div className="pointer-events-none absolute inset-x-0 top-0 h-28" style={{ background: `linear-gradient(to bottom, ${palette.shadow}80, transparent)` }} />
 
-      {/* ── 顶部：角色主页 HUD。信息短而有层级，不再让大时钟抢走角色。 ── */}
+      {/* ── 顶部：统一尺寸的角色内容 HUD。真实心声、聊天和日程直接出现在桌面。 ── */}
       {!editing && (
         <div
-          className="absolute inset-x-3 z-30 flex items-start justify-between gap-2"
+          className="absolute inset-x-3 z-30"
           style={{ top: 'max(2rem, calc(var(--safe-top, 0px) + 0.55rem))', animation: 'companion-hud-in 520ms ease-out both' }}
           data-testid="companion-game-hud"
         >
-          <div
-            className="flex min-w-0 items-center gap-2 border border-white/20 py-1.5 pl-1.5 pr-3 shadow-xl"
-            style={{ background: `${palette.panelBottom}e8`, boxShadow: `0 8px 28px ${palette.shadow}73, inset 0 1px 0 ${uiTint}35`, clipPath: 'polygon(0 10px, 10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px), calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px))' }}
+          <section
+            className="overflow-hidden border border-white/20 text-white"
+            style={{ background: `linear-gradient(135deg, ${palette.panelTop}ef, ${palette.panelBottom}f4)`, boxShadow: `0 10px 30px ${palette.shadow}73, inset 0 1px 0 ${uiTint}35`, clipPath: 'polygon(0 10px, 10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px), calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px))' }}
+            data-testid="companion-context-hud"
+            data-ui-scale="medium"
           >
-            <div className="relative h-11 w-11 shrink-0 border-2 bg-black/20 p-0.5" style={{ borderColor: `${uiTint}c9`, clipPath: 'polygon(20% 0, 80% 0, 100% 20%, 100% 80%, 80% 100%, 20% 100%, 0 80%, 0 20%)' }}>
-              <img src={character.avatar} alt="" className="h-full w-full object-cover" />
-
-            </div>
-            <div className="min-w-0">
-              <div className="text-[7px] font-semibold tracking-[0.2em] text-white/50">ACTIVE PARTNER</div>
-              <div className="max-w-[8.5rem] truncate text-[13px] font-semibold tracking-wide text-white">{character.name}</div>
-              <div className="mt-1 flex items-center gap-1.5">
-                <span className="h-px w-12" style={{ background: `linear-gradient(90deg, ${uiTint}, transparent)` }} />
-                <span className="text-[7px] font-semibold tracking-[0.12em] text-white/55">
-                  {character.videoAvatar?.format === 'live2d' ? 'LIVE2D' : character.videoAvatar?.format === 'vrm' ? 'VRM' : 'PORTRAIT'}
+            <header className="flex h-12 items-center justify-between gap-3 px-3 sm:h-14 sm:px-4">
+              <button onClick={() => openApp(AppID.Character)} className="flex min-w-0 items-center gap-2 text-left active:scale-[.98]">
+                <span className="relative h-8 w-8 shrink-0 overflow-hidden border bg-black/20 p-0.5 sm:h-10 sm:w-10" style={{ borderColor: `${uiTint}c9`, clipPath: 'polygon(20% 0, 80% 0, 100% 20%, 100% 80%, 80% 100%, 20% 100%, 0 80%, 0 20%)' }}>
+                  <img src={character.avatar} alt="" className="h-full w-full object-cover" />
                 </span>
+                <span className="min-w-0">
+                  <span className="block truncate text-[13px] font-semibold tracking-wide sm:text-[15px]">{character.name}</span>
+                  <span className="block text-[8px] tracking-[0.14em] text-white/50 sm:text-[9px]">{period.label} · {character.videoAvatar ? '动作同步中' : '等待模型'}</span>
+                </span>
+              </button>
+              <div className="flex shrink-0 items-center gap-2">
+                <span className="text-[11px] tabular-nums tracking-[0.14em] text-white/75 sm:text-[13px]">{hh}:{mm}</span>
+                <button onClick={() => openApp(AppID.Appearance)} className="flex h-9 w-9 items-center justify-center border bg-black/20 text-white/80 active:scale-[.96] sm:h-11 sm:w-11" style={{ borderColor: `${uiTint}70` }} aria-label="外观设置">
+                  <Gear size={18} />
+                </button>
               </div>
-            </div>
-          </div>
-
-          <div className="flex min-w-0 flex-col items-end gap-1.5">
-            <div className="flex items-center gap-1.5">
-              <div className="rounded-full border border-white/20 bg-black/40 px-2.5 py-1 text-[10px] tracking-[0.12em] text-white/80">
-                {hh}:{mm}
-              </div>
-              <button
-                onClick={() => openApp(AppID.Appearance)}
-                className="flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-black/40 text-white/70 active:scale-90"
-                aria-label="外观设置"
-              >
-                <Gear size={15} />
+            </header>
+            <div className="grid grid-cols-3 border-t border-white/10">
+              <button onClick={() => openApp(AppID.Schedule)} className="min-w-0 border-r border-white/10 px-3 py-2 text-left active:bg-white/5 sm:px-4 sm:py-2.5" data-testid="companion-hud-thought">
+                <span className="flex items-center gap-1 text-[8px] font-semibold tracking-[0.14em] sm:text-[9px]" style={{ color: uiTint }}><Sparkle size={11} weight="fill" />当前心声</span>
+                <span className="mt-1 block h-8 overflow-hidden text-[9px] leading-4 text-white/80 sm:h-9 sm:text-[11px]" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>{hudContent.thought || period.lines[0]}</span>
+              </button>
+              <button onClick={() => openApp(AppID.Chat)} className="min-w-0 border-r border-white/10 px-3 py-2 text-left active:bg-white/5 sm:px-4 sm:py-2.5" data-testid="companion-hud-chat">
+                <span className="flex items-center gap-1 text-[8px] font-semibold tracking-[0.14em] sm:text-[9px]" style={{ color: uiTint }}><Icons.Chat className="h-[11px] w-[11px] sm:h-[13px] sm:w-[13px]" />最近聊天</span>
+                <span className="mt-1 block h-8 overflow-hidden text-[9px] leading-4 text-white/80 sm:h-9 sm:text-[11px]" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>{hudContent.recentChat || '还没有聊天记录'}</span>
+              </button>
+              <button onClick={() => openApp(AppID.Schedule)} className="min-w-0 px-3 py-2 text-left active:bg-white/5 sm:px-4 sm:py-2.5" data-testid="companion-hud-schedule">
+                <span className="flex items-center gap-1 text-[8px] font-semibold tracking-[0.14em] sm:text-[9px]" style={{ color: uiTint }}><Icons.Schedule className="h-[11px] w-[11px] sm:h-[13px] sm:w-[13px]" />此刻日程</span>
+                <span className="mt-1 block h-8 overflow-hidden text-[9px] leading-4 text-white/80 sm:h-9 sm:text-[11px]" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
+                  {currentScheduleSlot ? `${currentScheduleSlot.emoji || '◌'} ${currentScheduleSlot.startTime} ${currentScheduleSlot.activity}` : '今天还没有日程'}
+                </span>
               </button>
             </div>
-            <div className="flex items-center gap-1.5">
-              <div className="rounded-full border border-white/20 bg-black/40 px-2.5 py-1 text-[8px] text-white/70">
-                <span className="mr-1 text-white/40">SYNC</span>{character.videoAvatar ? 'ON' : 'PORTRAIT'}
-              </div>
-              <div className="rounded-full border border-white/20 bg-black/40 px-2.5 py-1 text-[8px] text-white/70">
-                <span className="mr-1 text-white/40">TOUCH</span>{preparedReactionCount}
-              </div>
-            </div>
-            <div className="text-[8px] tracking-[0.12em] text-white/40">
-              {dateNow.getMonth() + 1}.{dateNow.getDate()} · 周{WEEKDAYS[dateNow.getDay()]} · {period.label}
-            </div>
-          </div>
+          </section>
         </div>
       )}
 
-      {/* ── 角色旁边的手游快捷入口。触摸设置是第一优先级。 ── */}
+      {/* ── 角色旁边的手游快捷入口。与底栏共用 40px 控制尺寸。 ── */}
       {!editing && !touchSettingsOpen && !appStarOpen && (
         <aside
-          className="absolute right-1 top-[25%] z-30 flex w-[5.15rem] flex-col items-center gap-1.5 pb-4 pt-3 text-white"
+          className="absolute right-1 top-[28%] z-30 flex w-16 flex-col items-center gap-1.5 pb-3 pt-3 text-white sm:w-20"
           aria-label="角色快捷轨道"
           data-testid="companion-ornate-action-rail"
           data-visual-style="ornate-flat"
+          data-ui-scale="medium"
         >
           <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 82 356" preserveAspectRatio="none" aria-hidden>
             <path d="M14 1H67L80 14V338L69 355H13L2 340V13Z" fill={`${palette.panelBottom}9e`} stroke={`${uiTint}68`} strokeWidth="1" />
@@ -952,24 +1011,15 @@ const CompanionHome: React.FC = () => {
             <path d="M41 39V319" fill="none" stroke={`${uiTint}58`} strokeWidth="0.7" strokeDasharray="2 5" />
             <path d="M3 78H10M72 63H79M3 274H9M73 292H80" fill="none" stroke={`${uiTint}94`} strokeWidth="0.8" />
           </svg>
-          <span className="pointer-events-none absolute right-1 top-0 text-[9px] leading-none" style={{ color: uiTint }} aria-hidden>✦</span>
-          <span className="pointer-events-none absolute right-3 top-3 text-[5px] leading-none text-white/70" aria-hidden>✦</span>
-          <span className="pointer-events-none absolute bottom-3 left-1 text-[7px] leading-none" style={{ color: uiTint }} aria-hidden>✦</span>
+          <span className="pointer-events-none absolute right-1 top-0 text-[8px] leading-none" style={{ color: uiTint }} aria-hidden>✦</span>
 
-          <button
-            onClick={openTouchSettings}
-            className="group relative z-10 flex flex-col items-center gap-1 active:scale-[.97]"
-            data-testid="companion-touch-settings-button"
-          >
-            {!preparedReactionCount && (
-              <span className="absolute right-0 top-0 z-20 h-1.5 w-1.5 rounded-full bg-[#ff5d9e] ring-2 ring-[#1a1028]" aria-label="尚未生成触摸反馈" />
-            )}
-            <span className="relative flex h-[3.65rem] w-[3.65rem] rotate-45 items-center justify-center rounded-[1rem] border" style={{ background: `${uiTint}50`, borderColor: `${uiTint}ec` }}>
-              <span className="absolute inset-[4px] rounded-[0.78rem] border" style={{ borderColor: `${uiTint}ae` }} />
-              <span className="absolute inset-[8px] rounded-[0.55rem]" style={{ background: `${uiTint}38` }} />
-              <span className="relative -rotate-45 text-[19px] text-white">☝</span>
+          <button onClick={openTouchSettings} className="group relative z-10 flex flex-col items-center gap-1 active:scale-[.97]" data-testid="companion-touch-settings-button">
+            {!preparedReactionCount && <span className="absolute right-0 top-0 z-20 h-1.5 w-1.5 rounded-full bg-[#ff5d9e] ring-2 ring-[#1a1028]" aria-label="尚未生成触摸反馈" />}
+            <span className="relative flex h-10 w-10 rotate-45 items-center justify-center rounded-[0.72rem] border sm:h-12 sm:w-12" style={{ background: `${uiTint}50`, borderColor: `${uiTint}ec` }}>
+              <span className="absolute inset-[3px] rounded-[0.55rem] border" style={{ borderColor: `${uiTint}78` }} />
+              <span className="relative -rotate-45 text-[17px] text-white sm:text-[20px]">☝</span>
             </span>
-            <span className="bg-[#120c20]/92 px-1.5 py-0.5 text-[8px] font-medium tracking-[0.08em] text-white/92">触摸互动</span>
+            <span className="text-[8px] tracking-[0.08em] text-white/95 sm:text-[9px]">触摸</span>
           </button>
 
           {[
@@ -981,16 +1031,17 @@ const CompanionHome: React.FC = () => {
             const Icon = Icons[item.icon];
             return (
               <button key={item.id} onClick={() => openApp(item.id)} className="group relative z-10 flex flex-col items-center gap-1 active:scale-[.97]">
-                <span className="relative flex h-10 w-10 rotate-45 items-center justify-center rounded-[0.72rem] border bg-[#171023]/64" style={{ borderColor: `${uiTint}88` }}>
+                <span className="relative flex h-10 w-10 rotate-45 items-center justify-center rounded-[0.72rem] border bg-[#171023]/64 sm:h-12 sm:w-12" style={{ borderColor: `${uiTint}88` }}>
                   <span className="absolute inset-[3px] rounded-[0.55rem] border" style={{ borderColor: `${uiTint}2f` }} />
-                  <Icon className="relative h-[17px] w-[17px] -rotate-45 text-white/95" />
+                  <Icon className="relative h-[17px] w-[17px] -rotate-45 text-white/95 sm:h-5 sm:w-5" />
                 </span>
-                <span className="text-[8px] tracking-[0.1em] text-white/90">{item.label}</span>
+                <span className="text-[8px] tracking-[0.08em] text-white/90 sm:text-[9px]">{item.label}</span>
               </button>
             );
           })}
         </aside>
       )}
+
       {/* ── 触摸设置抽屉：选部位，一次生成，之后只本地轮播。 ── */}
       {touchSettingsOpen && !editing && (
         <div
@@ -1113,7 +1164,7 @@ const CompanionHome: React.FC = () => {
       {dialogVisible && (
         <div
           className="absolute inset-x-4 z-40"
-          style={{ bottom: 'max(5.6rem, calc(var(--safe-bottom, 0px) + 5.4rem))', animation: 'companion-dialog-in 280ms ease-out both' }}
+          style={{ bottom: 'max(6.5rem, calc(var(--safe-bottom, 0px) + 6.3rem))', animation: 'companion-dialog-in 280ms ease-out both' }}
           data-testid="companion-dialogue"
         >
           <div className="relative isolate overflow-visible px-4 pb-3 pt-4 text-white" data-testid="companion-dialogue-surface">
@@ -1184,7 +1235,7 @@ const CompanionHome: React.FC = () => {
           <section
             className="absolute inset-x-3 z-40 max-h-[52vh] overflow-hidden border border-white/20 shadow-2xl backdrop-blur-2xl"
             style={{
-              bottom: 'max(5.3rem, calc(var(--safe-bottom, 0px) + 5.1rem))',
+              bottom: 'max(6.4rem, calc(var(--safe-bottom, 0px) + 6.2rem))',
               background: `linear-gradient(155deg, ${palette.panelTop}f4, ${palette.panelBottom}fa)`,
               boxShadow: `0 24px 64px ${palette.shadow}d9, inset 0 1px 0 ${uiTint}45`,
               clipPath: 'polygon(0 12px, 12px 0, calc(100% - 12px) 0, 100% 12px, 100% calc(100% - 12px), calc(100% - 12px) 100%, 12px 100%, 0 calc(100% - 12px))',
@@ -1240,7 +1291,7 @@ const CompanionHome: React.FC = () => {
 
       {!editing && !touchSettingsOpen && (
         <nav
-          className="absolute inset-x-3 z-40 h-[4.85rem] overflow-visible"
+          className="absolute inset-x-3 z-40 h-[5.65rem] overflow-visible"
           style={{ bottom: 'max(0.5rem, calc(var(--safe-bottom, 0px) + 0.35rem))' }}
           aria-label="陪伴桌面导航"
           data-testid="companion-ornate-dock"
@@ -1264,8 +1315,10 @@ const CompanionHome: React.FC = () => {
               { id: AppID.Schedule, icon: Icons.Schedule, label: '日程' },
             ].map(item => (
               <button key={item.id} onClick={() => launchCompanionApp(item.id)} className="flex h-full flex-col items-center justify-center gap-1 text-white/90 active:scale-[.97]">
-                <item.icon className="h-[18px] w-[18px]" />
-                <span className="text-[8px] tracking-[0.12em]">{item.label}</span>
+                <span className="flex h-10 w-10 rotate-45 items-center justify-center rounded-[0.7rem] border bg-black/15 sm:h-12 sm:w-12" style={{ borderColor: `${uiTint}72` }}>
+                  <item.icon className="h-5 w-5 -rotate-45 sm:h-6 sm:w-6" />
+                </span>
+                <span className="text-[9px] tracking-[0.12em] sm:text-[10px]">{item.label}</span>
               </button>
             ))}
             <button
@@ -1274,22 +1327,24 @@ const CompanionHome: React.FC = () => {
               aria-expanded={appStarOpen}
               data-testid="companion-app-star-button"
             >
-              <span className="relative flex h-14 w-14 shrink-0 items-center justify-center rounded-full border" style={{ borderColor: `${uiTint}c4`, background: `${palette.panelBottom}f5` }}>
+              <span className="relative flex h-14 w-14 shrink-0 items-center justify-center rounded-full border sm:h-[4.25rem] sm:w-[4.25rem]" style={{ borderColor: `${uiTint}c4`, background: `${palette.panelBottom}f5` }}>
                 <span className="absolute inset-[5px] rounded-full border" style={{ borderColor: `${uiTint}60` }} />
-                <span className="relative flex h-10 w-10 items-center justify-center rounded-full border" style={{ borderColor: `${uiTint}df`, background: `${uiTint}36` }}>
+                <span className="relative flex h-10 w-10 items-center justify-center rounded-full border sm:h-12 sm:w-12" style={{ borderColor: `${uiTint}df`, background: `${uiTint}36` }}>
                   <Sparkle className="relative" size={23} weight="fill" />
                   <span className="absolute right-0.5 top-0.5 text-[6px] text-white/90">✦</span>
                 </span>
               </span>
-              <span className="text-[8px] font-semibold tracking-[0.18em]" style={{ color: uiTint }}>功能</span>
+              <span className="text-[9px] font-semibold tracking-[0.18em] sm:text-[10px]" style={{ color: uiTint }}>功能</span>
             </button>
             {[
               { id: AppID.Music, icon: Icons.Music, label: '音乐' },
               { id: AppID.Settings, icon: Icons.Settings, label: '设置' },
             ].map(item => (
               <button key={item.id} onClick={() => launchCompanionApp(item.id)} className="flex h-full flex-col items-center justify-center gap-1 text-white/90 active:scale-[.97]">
-                <item.icon className="h-[18px] w-[18px]" />
-                <span className="text-[8px] tracking-[0.12em]">{item.label}</span>
+                <span className="flex h-10 w-10 rotate-45 items-center justify-center rounded-[0.7rem] border bg-black/15 sm:h-12 sm:w-12" style={{ borderColor: `${uiTint}72` }}>
+                  <item.icon className="h-5 w-5 -rotate-45 sm:h-6 sm:w-6" />
+                </span>
+                <span className="text-[9px] tracking-[0.12em] sm:text-[10px]">{item.label}</span>
               </button>
             ))}
           </div>

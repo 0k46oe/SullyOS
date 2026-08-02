@@ -56,4 +56,17 @@ describe('CompanionHome touch request boundaries', () => {
     expect(dialogueSource).toContain('pointer-events-none absolute inset-0 -z-10 border');
     expect(dialogueSource.indexOf('clipPath')).toBeLessThan(dialogueSource.indexOf('absolute -top-3'));
   });
+
+  it('uses one medium HUD scale and surfaces real character context', () => {
+    const source = readFileSync(path.resolve(__dirname, '../components/os/CompanionHome.tsx'), 'utf8');
+
+    expect(source).toContain('data-testid="companion-context-hud"');
+    expect(source).toContain('data-testid="companion-hud-thought"');
+    expect(source).toContain('data-testid="companion-hud-chat"');
+    expect(source).toContain('data-testid="companion-hud-schedule"');
+    expect(source).toContain('DB.getRecentMessagesByCharId');
+    expect(source).toContain('getLastInnerState(character.id)');
+    expect(source).toContain('getDailyScheduleForChar(character)');
+    expect(source).toContain('data-ui-scale="medium"');
+  });
 });
