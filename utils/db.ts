@@ -1975,6 +1975,11 @@ export const DB = {
       const db = await openDB();
       const transaction = db.transaction(STORE_STORY_THEATERS, 'readwrite');
       transaction.objectStore(STORE_STORY_THEATERS).delete(id);
+      return new Promise((resolve, reject) => {
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error || new Error('deleteStoryTheater aborted'));
+      });
   },
 
   getStoryTheaterPresets: async (): Promise<StoryTheaterPreset[]> => {
