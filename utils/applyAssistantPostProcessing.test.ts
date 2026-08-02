@@ -8,7 +8,7 @@ import { DB } from './db';
 // 修复前解析出的引用目标随这个空 chunk 一起被丢弃, 表现为"引用被后处理吞掉"。
 // 修复后引用目标顺延挂到下一条真正落库的文字气泡。
 
-const makeCtx = (charId: string, contextMsgs: any[]): PostProcessCtx => {
+const makeCtx = (charId: string, contextMsgs: any[], emojis: any[] = []): PostProcessCtx => {
     const xhsCaches: XhsCaches = {
         xsecTokenCache: new Map(),
         noteTitleCache: new Map(),
@@ -19,7 +19,7 @@ const makeCtx = (charId: string, contextMsgs: any[]): PostProcessCtx => {
     return {
         char: { id: charId, name: '测试角色' } as any,
         userProfile: { name: '我' } as any,
-        emojis: [],
+        emojis,
         contextMsgs,
         fullMessages: [],
         initialData: {},
@@ -51,7 +51,13 @@ describe('renderAndPersist 引用解析', () => {
         const charId = `c-quote-${Date.now()}`;
         const raw = '[[QUOTE: 引用我说的话]]\n[[SEND_EMOJI: 有点生气]]\n消失了整整三十六个小时';
 
-        await applyAssistantPostProcessing(raw, makeCtx(charId, [{ ...quotedUserMsg, charId }]));
+        // 表情要真存在，否则走的是「名字对不上落降级文本气泡」那条路，
+        // 第一条 text 会变成降级气泡，验不到这里要验的「引用顺延到正文」。
+        await applyAssistantPostProcessing(raw, makeCtx(
+            charId,
+            [{ ...quotedUserMsg, charId }],
+            [{ name: '有点生气', url: 'blob:emoji-angry' }],
+        ));
 
         const msgs = await DB.getRecentMessagesByCharId(charId, 50);
         const texts = msgs.filter(m => m.role === 'assistant' && m.type === 'text');
@@ -357,5 +363,34 @@ describe('directive 重放: life_record / news_card', () => {
         const text = msgs.filter(m => m.type === 'text').map(m => m.content).join('\n');
         expect(text).toContain('记得吃药哦');
         expect(text).not.toContain('LIFE');
+    }, 20000);
+});
+
+// 表情名对不上时不能静默丢：后台主动消息会把每个 [[SEND_EMOJI]] 切成独立一条 push，
+// 丢了就是整条 0 气泡 —— 而系统横幅（[表情：x]）和未读数照常，用户点进去是空的。
+describe('SEND_EMOJI 名字对不上', () => {
+    it('落一条降级文本气泡，文案与横幅一致', async () => {
+        const charId = `c-emoji-miss-${Date.now()}`;
+
+        await applyAssistantPostProcessing('[[SEND_EMOJI: 查无此表情]]', makeCtx(charId, []));
+
+        const bubbles = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(bubbles).toHaveLength(1);
+        expect(bubbles[0].type).toBe('text');
+        expect(bubbles[0].content).toBe('[表情：查无此表情]');
+    }, 20000);
+
+    it('名字对得上时照常落表情气泡', async () => {
+        const charId = `c-emoji-hit-${Date.now()}`;
+
+        await applyAssistantPostProcessing(
+            '[[SEND_EMOJI: 笑死]]',
+            makeCtx(charId, [], [{ name: '笑死', url: 'blob:emoji-lol' }]),
+        );
+
+        const bubbles = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(bubbles).toHaveLength(1);
+        expect(bubbles[0].type).toBe('emoji');
+        expect(bubbles[0].content).toBe('blob:emoji-lol');
     }, 20000);
 });

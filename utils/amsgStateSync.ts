@@ -112,6 +112,29 @@ export const markAmsgStateDirty = (snapshot: AmsgSyncSnapshot) => {
 };
 
 /**
+ * 全局素材变了（表情库这类不属于某个角色的东西）：每个角色的 fire_pack 里都烤着一份
+ * 打包那会儿的快照，所以逐个打脏。门在 markAmsgStateDirty 里，没开主动消息的角色自己会被筛掉。
+ *
+ * 表情库尤其要紧：角色到点发的 [[SEND_EMOJI]] 引用的是包里那份清单，用户删了 / 改了名字
+ * 之后云端还照着旧清单说话，客户端反查不到就只能落降级文本气泡。
+ */
+export const markAmsgStateDirtyForAll = (scope: {
+  characters: CharacterProfile[];
+  userProfile: UserProfile;
+  groups: GroupProfile[];
+  realtimeConfig: RealtimeConfig;
+}) => {
+  for (const char of scope.characters) {
+    markAmsgStateDirty({
+      char,
+      userProfile: scope.userProfile,
+      groups: scope.groups,
+      realtimeConfig: scope.realtimeConfig,
+    });
+  }
+};
+
+/**
  * 把没传上去的快照放回待传队列。
  * 同角色已经有更新的快照时保留新的——旧快照的唯一价值就是「比云端那份新」，
  * 已经被更新的一份取代后再塞回去只会让下次上传倒退。

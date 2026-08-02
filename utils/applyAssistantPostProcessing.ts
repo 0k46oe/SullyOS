@@ -551,6 +551,23 @@ export async function applyAssistantPostProcessing(
             return merged;
         };
 
+        // 表情按模型写的位置原地插发。名字在表情库里找不到时落一条降级文本气泡，不静默丢：
+        // 后台主动消息会把每个 [[SEND_EMOJI]] 切成独立一条 push，找不到就是整条 0 气泡，而
+        // 系统横幅和未读数照常 +1 —— 用户点进去空空如也。名字对不上有两条常见来路：模型自己
+        // 编了个不存在的名字，或者用户在上次打包之后删了 / 改名了这个表情。
+        // 降级文案跟横幅那边（sanitizeIntoSegments 的 [表情：x]）对齐，锁屏看到什么点进去就是什么。
+        const sendEmojiBubble = async (name: string): Promise<void> => {
+            await typingPause(Math.random() * 500 + 300);
+            const foundEmoji = emojis.find(e => e.name === name);
+            if (foundEmoji) {
+                await persistMessage({ charId: char.id, role: 'assistant', type: 'emoji', content: foundEmoji.url, metadata: takeMeta(mcdInheritMeta) } as any);
+            } else {
+                console.warn('[emoji] 表情库里没有这个名字，落降级文本气泡', { name, charId: char.id });
+                await persistMessage({ charId: char.id, role: 'assistant', type: 'text', content: `[表情：${name}]`, metadata: takeMeta(mcdInheritMeta) } as any);
+            }
+            setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
+        };
+
         // 把 [[QUOTE: ...]] / [回复 "..."] 的引用文本解析成"被回复的那条用户消息"。
         // 开了翻译的外语/粤语角色，引用文本往往是外语、或被 <原文>/<译文> 翻译标签包裹，
         // 跟库里中文用户消息逐字 includes 匹配会失败 → 之前表现为丢引用 / 空引用气泡。
@@ -596,15 +613,9 @@ export async function applyAssistantPostProcessing(
 
         if (hasTranslationTags) {
             // ─── 双语 ───
-            // 表情包按模型写的位置原地插发。旧实现先把所有 [[SEND_EMOJI:]] 抽走、正文发完后
-            // 统一追加到最后（还去了重），表现为「翻译模式下角色永远最后才发表情包」。
-            const sendEmojiBubble = async (name: string): Promise<void> => {
-                const foundEmoji = emojis.find(e => e.name === name);
-                if (!foundEmoji) return;
-                await typingPause(Math.random() * 500 + 300);
-                await persistMessage({ charId: char.id, role: 'assistant', type: 'emoji', content: foundEmoji.url, metadata: takeMeta(mcdInheritMeta) } as any);
-                setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
-            };
+            // 表情包按模型写的位置原地插发（sendEmojiBubble 见函数顶部）。旧实现先把所有
+            // [[SEND_EMOJI:]] 抽走、正文发完后统一追加到最后（还去了重），表现为「翻译模式下
+            // 角色永远最后才发表情包」。
             // 翻译标签之外的普通文本段：splitResponse 按出现顺序拆出文字 / 表情逐条发
             const renderPlainSegment = async (segment: string): Promise<void> => {
                 for (const part of ChatParser.splitResponse(segment)) {
@@ -667,12 +678,7 @@ export async function applyAssistantPostProcessing(
                 const part = parts[partIndex];
 
                 if (part.type === 'emoji') {
-                    const foundEmoji = emojis.find(e => e.name === part.content);
-                    if (foundEmoji) {
-                        await typingPause(Math.random() * 500 + 300);
-                        await persistMessage({ charId: char.id, role: 'assistant', type: 'emoji', content: foundEmoji.url, metadata: takeMeta(mcdInheritMeta) } as any);
-                        setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
-                    }
+                    await sendEmojiBubble(part.content);
                 } else {
                     const rawBlocks = part.content.split(/^\s*---\s*$/m).filter(b => b.trim());
                     const allChunks: string[] = [];

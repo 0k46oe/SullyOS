@@ -548,6 +548,11 @@ export function sanitizeIntoSegments(text: string): Segment[] {
   const SOLO_RE = new RegExp(`^${ATOM_MARKER}B(\\d+)${ATOM_MARKER}$`);
   const GLOBAL_RE = new RegExp(`${ATOM_MARKER}B(\\d+)${ATOM_MARKER}`, 'g');
   const segments: Segment[] = [];
+  // 引用标签独占一行时 banner 侧会被 stripQuotes 剥空，整段丢掉的话 raw 里的引用也跟着没了,
+  // 客户端就配不上 replyTo——而提示词教的写法（回复开头写 [[QUOTE:]]）产出的正是这种形态。
+  // 所以攒着，拼到下一个文字段的 raw 开头，客户端照常解析。表情段不消费它：客户端那边
+  // 表情气泡本来也不挂 replyTo，引用会继续顺延到后面的文字气泡。
+  let pendingQuoteRaw = '';
   for (const rawChunk of rawChunks) {
     const soloMatch = rawChunk.trim().match(SOLO_RE);
     if (soloMatch) {
@@ -573,8 +578,16 @@ export function sanitizeIntoSegments(text: string): Segment[] {
       rawText = rawText.trim();
       if (!rawText) continue;
       const sanitized = sanitizeTextForBanner(rawText).trim();
-      if (!sanitized) continue;
-      segments.push({ raw: rawText, sanitized });
+      if (!sanitized) {
+        // 只有剥掉引用就空了的段才留着顺延；别的剥空成因（纯系统日志 leak 之类）照旧丢。
+        if (!stripQuotes(rawText).trim()) pendingQuoteRaw += `${rawText}\n`;
+        continue;
+      }
+      segments.push({
+        raw: pendingQuoteRaw ? `${pendingQuoteRaw}${rawText}` : rawText,
+        sanitized,
+      });
+      pendingQuoteRaw = '';
     }
   }
   return segments;

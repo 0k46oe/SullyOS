@@ -518,3 +518,27 @@ describe('sanitizeIntoSegments', () => {
     expect(segs2.map((s) => s.sanitized)).toEqual(segs1.map((s) => s.sanitized));
   });
 });
+
+// 引用标签独占一行是提示词教出来的常见形态（回复开头写 [[QUOTE:]]）。banner 侧会把它
+// 剥空，早先整段连 raw 一起丢掉，引用关系就永远到不了客户端——这是唯一一类「角色发了
+// 但用户收不到」的内容。现在攒着顺延到下一个文字段的 raw 开头。
+describe('sanitizeIntoSegments — 独占一行的引用不丢', () => {
+  it('引用行顺延到下一条文字段的 raw，banner 只显示正文', () => {
+    const segs = sanitizeIntoSegments('[[QUOTE: 我说的话]]\n消失了整整三十六个小时');
+    expect(segs).toHaveLength(1);
+    expect(segs[0].raw).toContain('[[QUOTE: 我说的话]]');
+    expect(segs[0].raw).toContain('消失了整整三十六个小时');
+    expect(segs[0].sanitized).toBe('消失了整整三十六个小时');
+  });
+
+  it('引用行后面隔着表情时，引用仍落到再后面的文字段上', () => {
+    const segs = sanitizeIntoSegments('[[QUOTE: 我说的话]]\n[[SEND_EMOJI: 有点生气]]\n你干嘛去了');
+    expect(segs.map((s) => s.sanitized)).toEqual(['[表情：有点生气]', '你干嘛去了']);
+    expect(segs[0].raw).not.toContain('QUOTE');
+    expect(segs[1].raw).toContain('[[QUOTE: 我说的话]]');
+  });
+
+  it('整条只有引用、没有正文 → 没东西可发，照旧不产 segment', () => {
+    expect(sanitizeIntoSegments('[[QUOTE: 我说的话]]')).toEqual([]);
+  });
+});

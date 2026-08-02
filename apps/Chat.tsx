@@ -56,7 +56,7 @@ import WhiteboxSoundEditor from '../components/chat/WhiteboxSoundEditor';
 import { normalizeTranslationLangLabel, isTranslationLangPreset } from '../utils/translationLang';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent, noteMessageSent, presetOrCustom } from '../utils/analytics';
-import { markAmsgStateDirty } from '../utils/amsgStateSync';
+import { markAmsgStateDirty, markAmsgStateDirtyForAll } from '../utils/amsgStateSync';
 import {
     CONTEXT_RANGE_POLICY_VERSION,
     computeContextRangeSnapshot,
@@ -1773,6 +1773,13 @@ const Chat: React.FC = () => {
 
     // --- Modal Handlers ---
 
+    /**
+     * 表情库是全局的：增删改名、删分类、改分类可见范围，都会让每个角色云端 fire_pack 里
+     * 那份表情清单过期。角色到点照旧清单发 [[SEND_EMOJI]]，客户端反查不到就只能落降级
+     * 文本气泡——所以这几个入口都要重新打包。
+     */
+    const markEmojiLibraryChanged = () => markAmsgStateDirtyForAll({ characters, userProfile, groups, realtimeConfig });
+
     const handleAddCategory = async () => {
         if (!newCategoryName.trim()) {
              addToast('请输入分类名称', 'error');
@@ -1803,6 +1810,7 @@ const Chat: React.FC = () => {
             }
         }
         await loadEmojiData();
+        markEmojiLibraryChanged();
         setModalType('none');
         setEmojiImportText('');
         addToast('表情包导入成功', 'success');
@@ -1812,6 +1820,7 @@ const Chat: React.FC = () => {
         if (!selectedCategory) return;
         await DB.deleteEmojiCategory(selectedCategory.id);
         await loadEmojiData();
+        markEmojiLibraryChanged();
         setActiveCategory('default');
         setModalType('none');
         setSelectedCategory(null);
@@ -1823,6 +1832,7 @@ const Chat: React.FC = () => {
         if (!cat) return;
         await DB.saveEmojiCategory({ ...cat, allowedCharacterIds });
         await loadEmojiData();
+        markEmojiLibraryChanged();
         setSelectedCategory(null);
         addToast(allowedCharacterIds ? `已设置 ${allowedCharacterIds.length} 个角色可见` : '已设为所有角色可见', 'success');
     };
@@ -2402,6 +2412,8 @@ const Chat: React.FC = () => {
             addToast('删除表情包失败', 'error');
         } finally {
             await loadEmojiData();
+            // 放 finally：Promise.all 部分失败时也已经删掉了几个，云端那份照样过期了。
+            markEmojiLibraryChanged();
             setModalType('none');
             setSelectedEmoji(null);
         }
@@ -2416,6 +2428,7 @@ const Chat: React.FC = () => {
             await DB.renameEmoji(selectedEmoji.name, newName);
             addToast('表情包名称已修改', 'success');
             await loadEmojiData();
+            markEmojiLibraryChanged();
             setModalType('none');
             setSelectedEmoji(null);
             setNewEmojiName('');
