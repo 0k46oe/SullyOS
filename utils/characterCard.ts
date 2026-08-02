@@ -51,6 +51,7 @@ export const CARD_STRIPPED_FIELDS = [
   'memoryPalaceInjection',
   'videoCallPerformancePersona',
   'videoCallPerformancePersonaGeneratedAt',
+  'companionTouchSettings',
   'savedDateState',
   'savedRoomState',
   'lastRoomDate',

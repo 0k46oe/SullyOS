@@ -4,6 +4,8 @@ import {
   buildAvatarTouchSystemPrompt,
   buildPendingAvatarTouchContext,
   buildImmediateTouchPerformance,
+  normalizeCompanionDialogue,
+  parseAvatarTouchReactionPack,
   consumePendingAvatarTouches,  isAvatarTouchGesture,
   normalizeAvatarTouchZone,
   parseAvatarTouchReply,
@@ -96,4 +98,33 @@ describe('角色触碰互动', () => {
     expect(queued.map(record => record.id)).toEqual(['touch-2', 'touch-3']);
     expect(consumePendingAvatarTouches([first, second, arrivedWhileThinking], [first, second]))
       .toEqual([arrivedWhileThinking]);
-  });});
+  });
+
+  it('cleans dialogue-only text before the typewriter renders it', () => {
+    expect(normalizeCompanionDialogue('**Sully：** “手的......” “呢......”', 'Sully'))
+      .toBe('手的……\n呢……');
+    expect(normalizeCompanionDialogue('```text\n「别闹......会痒。」\n```'))
+      .toBe('别闹……会痒。');
+  });
+
+  it('parses one cached reaction pack for every selected zone', () => {
+    const pack = parseAvatarTouchReactionPack(JSON.stringify({
+      head: [
+        '[[AVATAR: emotion=happy; gesture=tilt; gaze=viewer; intensity=0.7]]\n“别把我的头发揉乱啦......”',
+        '[[AVATAR: emotion=calm; gesture=nod; gaze=viewer; intensity=0.5]]\n再摸一下也不是不可以。',
+      ],
+      hand: [
+        '[[AVATAR: emotion=surprised; gesture=wave; model_action=wave-special]]\n牵住了就别松开。',
+      ],
+    }), ['head', 'hand'], [{ id: 'wave-special', name: '专属挥手' }]);
+
+    expect(pack?.head).toHaveLength(2);
+    expect(pack?.head?.[0].text).toBe('别把我的头发揉乱啦……');
+    expect(pack?.hand?.[0].performance.modelAction).toBe('wave-special');
+  });
+
+  it('rejects an incomplete pack instead of falling back to per-tap requests', () => {
+    expect(parseAvatarTouchReactionPack('{"head":["摸摸头。"]}', ['head', 'face']))
+      .toBeNull();
+  });
+});

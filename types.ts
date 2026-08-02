@@ -2262,6 +2262,29 @@ export interface CharMusicProfile {
     updatedAt: number;
 }
 
+export type CompanionTouchZone = 'head' | 'face' | 'hand' | 'body' | 'other';
+
+export interface CompanionTouchReaction {
+  id: string;
+  text: string;
+  performance: {
+    emotion: 'neutral' | 'happy' | 'sad' | 'angry' | 'fearful' | 'disgusted' | 'surprised' | 'calm' | 'relaxed';
+    gesture: 'idle' | 'talk' | 'nod' | 'shake' | 'tilt' | 'explain' | 'wave' | 'shy' | 'lean-in' | 'lean-back';
+    camera: 'close' | 'medium' | 'wide' | 'push-in' | 'pull-out';
+    gaze: 'viewer' | 'left' | 'right' | 'down';
+    intensity: number;
+    faces?: Array<'wink' | 'grin' | 'pout' | 'blush' | 'eyes-closed' | 'smile-eyes' | 'brow-up' | 'brow-sad' | 'brow-angry'>;
+    modelAction?: string;
+    modelActions?: string[];
+  };
+}
+
+export interface CompanionTouchSettings {
+  enabledZones: CompanionTouchZone[];
+  reactions: Partial<Record<CompanionTouchZone, CompanionTouchReaction[]>>;
+  generatedAt?: number;
+}
+
 export interface CharacterProfile {
   id: string;
   name: string;
@@ -2365,6 +2388,11 @@ export interface CharacterProfile {
    * 图床直链。空 = 默认时段天光。
    */
   companionBackground?: string;
+  /**
+   * 触感陪伴桌面的本地反馈包。用户只在设置中主动生成一次；之后每次触碰
+   * 都从这里轮播台词与演出，不再逐次请求主聊天 API。
+   */
+  companionTouchSettings?: CompanionTouchSettings;
   /**
    * 视频通话演出编排档位：
    * - basic / undefined：主回复模型顺手输出动作指令，不增加请求。

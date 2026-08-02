@@ -164,7 +164,7 @@ const DESKTOP_SKINS: DesktopSkinOption[] = [
   {
     id: 'companion',
     name: '触感陪伴',
-    desc: '角色占据桌面 · 轻触即时动作 · 主模型结合近期记忆认真回应',
+    desc: '角色占据桌面 · 一次生成反馈包 · 轻触后本地轮播演出',
     swatch: 'radial-gradient(circle at 50% 25%,#a993d3 0%,#51436f 42%,#171222 100%)',
     config: {
       skin: 'companion',

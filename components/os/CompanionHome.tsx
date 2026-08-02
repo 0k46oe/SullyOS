@@ -17,10 +17,14 @@ import VRMVideoCallStage from '../call/VRMVideoCallStage';
 import type { AvatarMotionState } from '../call/VRMAvatarCanvas';
 import {
   avatarTouchZoneLabel,
+  avatarTouchZoneToastLabel,
   buildImmediateTouchPerformance,
-  requestAvatarTouchReply,
+  DEFAULT_COMPANION_TOUCH_ZONES,
+  normalizeCompanionDialogue,
+  requestAvatarTouchReactionPack,
   type AvatarTouchHit,
   type AvatarTouchModelAction,
+  type AvatarTouchZone,
 } from '../../utils/avatarTouch';
 import {
   DEFAULT_AVATAR_PERFORMANCE,
@@ -268,6 +272,10 @@ const CompanionHome: React.FC = () => {
   const [line, setLine] = useState<CompanionLine | null>(null);
   const [lastHit, setLastHit] = useState<AvatarTouchHit | null>(null);
   const [ripple, setRipple] = useState<{ nonce: number; x: number; y: number } | null>(null);
+  const [touchBanner, setTouchBanner] = useState<{ nonce: number; text: string; x: number; y: number } | null>(null);
+  const [touchSettingsOpen, setTouchSettingsOpen] = useState(false);
+  const [touchGenerating, setTouchGenerating] = useState(false);
+  const [touchDraftZones, setTouchDraftZones] = useState<AvatarTouchZone[]>(DEFAULT_COMPANION_TOUCH_ZONES);
   const [vrmExpressions, setVrmExpressions] = useState<string[]>([]);
   const [editing, setEditing] = useState(false);
   const editingRef = useRef(false);
@@ -275,8 +283,10 @@ const CompanionHome: React.FC = () => {
   const busyRef = useRef(false);
   const lastTouchAtRef = useRef(0);
   const requestTokenRef = useRef(0);
+  const touchCursorRef = useRef<Partial<Record<AvatarTouchZone, number>>>({});
   const mountedRef = useRef(true);
   const settleTimerRef = useRef<number | null>(null);
+  const touchBannerTimerRef = useRef<number | null>(null);
   const hoursRef = useRef(virtualTime.hours);
   hoursRef.current = virtualTime.hours;
 
@@ -366,6 +376,7 @@ const CompanionHome: React.FC = () => {
     return () => {
       mountedRef.current = false;
       if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+      if (touchBannerTimerRef.current !== null) window.clearTimeout(touchBannerTimerRef.current);
     };
   }, []);
   useEffect(() => {
@@ -373,6 +384,11 @@ const CompanionHome: React.FC = () => {
     busyRef.current = false;
     setLine(null);
     setLastHit(null);
+    setTouchBanner(null);
+    setTouchSettingsOpen(false);
+    setTouchGenerating(false);
+    setTouchDraftZones((character?.companionTouchSettings?.enabledZones as AvatarTouchZone[] | undefined) || DEFAULT_COMPANION_TOUCH_ZONES);
+    touchCursorRef.current = {};
     setVrmExpressions([]);
     setEditing(false);
     setPerformance(DEFAULT_AVATAR_PERFORMANCE);
@@ -454,76 +470,109 @@ const CompanionHome: React.FC = () => {
     input.click();
   };
 
-  const respondToTouch = async (hit: AvatarTouchHit, force = false) => {
-    if (!character || busyRef.current || editingRef.current) return;
-    const now = Date.now();
-    if (!force && now - lastTouchAtRef.current < 1_200) return;
-    busyRef.current = true;
-    const requestToken = ++requestTokenRef.current;
-    lastTouchAtRef.current = now;
-    setLastHit(hit);
-    setRipple({ nonce: hit.nonce, x: hit.normalizedX, y: hit.normalizedY });
-    setLine(null);
-    setPerformance(buildImmediateTouchPerformance(hit.zone));
-    setMotionState('thinking');
+  const showTouchBanner = (hit: AvatarTouchHit, text: string) => {
+    setTouchBanner({ nonce: hit.nonce, text, x: hit.normalizedX, y: hit.normalizedY });
+    if (touchBannerTimerRef.current !== null) window.clearTimeout(touchBannerTimerRef.current);
+    touchBannerTimerRef.current = window.setTimeout(() => setTouchBanner(null), 1_650);
+  };
 
+  const openTouchSettings = () => {
+    setTouchDraftZones(
+      (character?.companionTouchSettings?.enabledZones as AvatarTouchZone[] | undefined)
+      || DEFAULT_COMPANION_TOUCH_ZONES,
+    );
+    setTouchSettingsOpen(true);
+  };
+
+  const toggleTouchZone = (zone: AvatarTouchZone) => {
+    setTouchDraftZones(current => (
+      current.includes(zone)
+        ? current.filter(item => item !== zone)
+        : [...current, zone]
+    ));
+  };
+
+  const generateTouchReactionPack = async () => {
+    if (!character || touchGenerating) return;
+    if (!touchDraftZones.length) {
+      addToast('请至少选择一个可触摸部位', 'error');
+      return;
+    }
+    const requestToken = ++requestTokenRef.current;
+    busyRef.current = true;
+    setTouchGenerating(true);
+    setMotionState('thinking');
+    setLine(null);
     try {
-      const result = await requestAvatarTouchReply({
+      const reactions = await requestAvatarTouchReactionPack({
         character,
         user: userProfile,
         apiConfig,
-        hit,
+        zones: touchDraftZones,
         modelActions,
       });
-      const touchDescription = `[面对面触碰互动] ${userProfile.name || '用户'}轻轻触碰了你的${avatarTouchZoneLabel(hit.zone)}。`;
-      const userTouchId = await DB.saveMessage({
-        charId: character.id,
-        role: 'user',
-        type: 'text',
-        content: touchDescription,
-        metadata: {
-          source: 'avatar-touch',
-          surface: 'desktop',
-          touchZone: hit.zone,
-          touchAreas: hit.rawAreas,
-        },
-      });
-      await DB.saveMessage({
-        charId: character.id,
-        role: 'assistant',
-        type: 'text',
-        content: result.text,
-        metadata: {
-          source: 'avatar-touch',
-          surface: 'desktop',
-          replyToTouchId: userTouchId,
-          touchZone: hit.zone,
-          avatarPerformance: result.performance,
-        },
-      });
-      announceChatGen(CHAT_GEN_EVENTS.replyEnd, {
-        charId: character.id,
-        charName: character.name,
-      });
       if (!mountedRef.current || requestToken !== requestTokenRef.current) return;
-      setLine({ text: result.text, label: `触碰 · ${avatarTouchZoneLabel(hit.zone)}`, kind: 'touch' });
-      setPerformance(result.performance);
-      setMotionState('speaking');
-      settleAfter(result.text.length);
+      updateCharacter(character.id, {
+        companionTouchSettings: {
+          enabledZones: touchDraftZones,
+          reactions,
+          generatedAt: Date.now(),
+        },
+      });
+      touchCursorRef.current = {};
+      addToast(`已为 ${touchDraftZones.length} 个部位准备本地反馈包`, 'success');
     } catch (error: any) {
       if (!mountedRef.current || requestToken !== requestTokenRef.current) return;
-      console.warn('[companion] touch reply failed:', error);
-      setMotionState('idle');
-      setLine({ text: '……刚才好像没能听清。', label: '信号波动', kind: 'touch' });
-      addToast(error?.message || '触碰回应暂时没有接上主模型', 'error');
+      console.warn('[companion] touch reaction pack failed:', error);
+      addToast(error?.message || '触摸反馈包生成失败', 'error');
     } finally {
-      if (requestToken === requestTokenRef.current) busyRef.current = false;
+      if (requestToken === requestTokenRef.current) {
+        busyRef.current = false;
+        setTouchGenerating(false);
+        setMotionState('idle');
+        setPerformance(DEFAULT_AVATAR_PERFORMANCE);
+      }
     }
   };
 
+  const respondToTouch = (hit: AvatarTouchHit, force = false) => {
+    if (!character || touchGenerating || editingRef.current) return;
+    const now = Date.now();
+    if (!force && now - lastTouchAtRef.current < 420) return;
+    lastTouchAtRef.current = now;
+    setLastHit(hit);
+    setRipple({ nonce: hit.nonce, x: hit.normalizedX, y: hit.normalizedY });
+    showTouchBanner(hit, `你戳了戳${character.name}的${avatarTouchZoneToastLabel(hit.zone)}`);
+    setPerformance(buildImmediateTouchPerformance(hit.zone));
+    setMotionState('speaking');
+
+    const settings = character.companionTouchSettings;
+    const enabled = settings?.enabledZones?.includes(hit.zone);
+    const reactions = settings?.reactions?.[hit.zone] || [];
+    if (!enabled || !reactions.length) {
+      settleAfter(18);
+      openTouchSettings();
+      addToast(`先在触摸设置中准备「${avatarTouchZoneLabel(hit.zone)}」的反馈包`, 'info');
+      return;
+    }
+
+    const cursor = touchCursorRef.current[hit.zone] || 0;
+    const reaction = reactions[cursor % reactions.length];
+    touchCursorRef.current[hit.zone] = (cursor + 1) % reactions.length;
+    const text = normalizeCompanionDialogue(reaction.text, character.name);
+    if (!text) {
+      addToast('这条缓存台词为空，请重新生成反馈包', 'error');
+      return;
+    }
+    setLine({ text, label: `触摸 · ${avatarTouchZoneLabel(hit.zone)}`, kind: 'touch' });
+    setPerformance(reaction.performance || buildImmediateTouchPerformance(hit.zone));
+    setMotionState('speaking');
+    settleAfter(text.length);
+  };
   const thinking = motionState === 'thinking';
-  const typed = useTypewriter(line?.text || '');
-  const dialogVisible = (Boolean(line) || thinking) && !editing;
+  const displayLineText = normalizeCompanionDialogue(line?.text || '', character?.name || '');
+  const typed = useTypewriter(displayLineText);
+  const dialogVisible = (Boolean(line) || thinking) && !editing && !touchSettingsOpen;
 
   if (!character) {
     return (
@@ -545,6 +594,9 @@ const CompanionHome: React.FC = () => {
     || Math.abs(companionFraming!.offsetX) > 0.01
     || Math.abs(companionFraming!.offsetY) > 0.01
   );
+  const savedTouchSettings = character.companionTouchSettings;
+  const preparedReactionCount = Object.values(savedTouchSettings?.reactions || {})
+    .reduce((total, reactions) => total + (reactions?.length || 0), 0);
 
   return (
     <div className="relative h-full w-full overflow-hidden select-none">
@@ -570,6 +622,25 @@ const CompanionHome: React.FC = () => {
         }
         @keyframes companion-clock-in {
           from { opacity:0; transform:translateY(-6px); }
+          to { opacity:1; transform:translateY(0); }
+        }
+        @keyframes companion-hud-in {
+          from { opacity:0; transform:translateY(-10px) scale(.98); }
+          to { opacity:1; transform:translateY(0) scale(1); }
+        }
+        @keyframes companion-touch-banner {
+          0% { opacity:0; transform:translate(-50%, 4px) scale(.86); }
+          18% { opacity:1; transform:translate(-50%, -8px) scale(1); }
+          78% { opacity:1; transform:translate(-50%, -30px) scale(1); }
+          100% { opacity:0; transform:translate(-50%, -46px) scale(.96); }
+        }
+        @keyframes companion-heart-pop {
+          0% { opacity:0; transform:translate(-50%,-50%) scale(.2) rotate(-10deg); }
+          35% { opacity:1; transform:translate(-50%,-90%) scale(1.12) rotate(6deg); }
+          100% { opacity:0; transform:translate(-50%,-180%) scale(.76) rotate(16deg); }
+        }
+        @keyframes companion-drawer-up {
+          from { opacity:0; transform:translateY(28px); }
           to { opacity:1; transform:translateY(0); }
         }
       `}</style>
@@ -649,100 +720,227 @@ const CompanionHome: React.FC = () => {
             }}
           />
         )}
+        {touchBanner && !editing && (
+          <div
+            key={touchBanner.nonce}
+            className="pointer-events-none absolute z-50 whitespace-nowrap rounded-full border border-white/40 bg-[#120d25]/88 px-3 py-1.5 text-[11px] font-medium tracking-wide text-white shadow-2xl backdrop-blur-md"
+            style={{
+              left: `${touchBanner.x * 100}%`,
+              top: `${touchBanner.y * 100}%`,
+              animation: 'companion-touch-banner 1.65s ease-out forwards',
+              boxShadow: `0 8px 26px ${palette.shadow}99, 0 0 20px ${uiTint}45`,
+            }}
+          >
+            <span className="mr-1 text-pink-200">~❤</span>{touchBanner.text}<span className="ml-1 text-pink-200">❤~</span>
+          </div>
+        )}
+        {touchBanner && !editing && [0, 1, 2].map(index => (
+          <span
+            key={`${touchBanner.nonce}-heart-${index}`}
+            className="pointer-events-none absolute z-50 text-[15px] text-pink-200 drop-shadow"
+            style={{
+              left: `calc(${touchBanner.x * 100}% + ${(index - 1) * 18}px)`,
+              top: `calc(${touchBanner.y * 100}% - ${index % 2 ? 2 : 12}px)`,
+              animation: `companion-heart-pop 1.15s ease-out ${index * 90}ms forwards`,
+            }}
+          >♡</span>
+        ))}
       </div>
 
       {/* 底部暗角：保证对话框和台词在亮色模型上仍可读（不挡触摸） */}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-[34%]" style={{ background: `linear-gradient(to top, ${palette.shadow}c7, ${palette.shadow}47 55%, transparent)` }} />
       <div className="pointer-events-none absolute inset-x-0 top-0 h-28" style={{ background: `linear-gradient(to bottom, ${palette.shadow}80, transparent)` }} />
 
-      {/* ── 顶部：大时钟 + 日期 + 时段（陪伴系手游首页的排版） ── */}
-      <div className="absolute left-6 z-30" style={{ top: 'max(1.2rem, var(--safe-top))', animation: 'companion-clock-in 700ms ease-out both' }}>
-        <div className="flex items-baseline gap-2">
-          <span className="font-serif text-[3.1rem] leading-none tracking-wide text-white drop-shadow-[0_2px_14px_rgba(0,0,0,.45)]">
-            {hh}<span className="mx-0.5 animate-pulse text-white/60">:</span>{mm}
-          </span>
-        </div>
-        <div className="mt-1.5 flex items-center gap-2 text-[11px] tracking-[0.16em] text-white/70">
-          <span>{dateNow.getMonth() + 1}月{dateNow.getDate()}日</span>
-          <span className="h-3 w-px bg-white/25" />
-          <span>星期{WEEKDAYS[dateNow.getDay()]}</span>
-        </div>
-        <div className="mt-2 inline-flex items-center gap-1.5 rounded-full border py-1 pl-2 pr-2.5 backdrop-blur-md"
-          style={{ background: `${palette.panelBottom}b8`, borderColor: `${uiTint}24` }}>
-          <span
-            className={`h-1.5 w-1.5 rounded-full ${thinking ? 'animate-pulse' : ''}`}
-            style={{ background: uiTint, boxShadow: `0 0 8px ${uiTint}` }}
-          />
-          <span className="text-[10px] tracking-[0.22em] text-white/70">
-            {editing ? '布置桌面中' : `${period.label} · ${thinking ? '正在回应' : `${character.name}陪着你`}`}
-          </span>
-        </div>
-      </div>
-
-      {/* 顶部右侧：布置 + 外观设置 */}
+      {/* ── 顶部：角色主页 HUD。信息短而有层级，不再让大时钟抢走角色。 ── */}
       {!editing && (
-        <div className="absolute right-5 z-30 flex flex-col items-center gap-2" style={{ top: 'max(1.2rem, var(--safe-top))' }}>
-          <button
-            onClick={() => openApp(AppID.Appearance)}
-            className="flex h-9 w-9 items-center justify-center rounded-full border text-white/70 backdrop-blur-md active:scale-90"
-            style={{ background: `${palette.panelBottom}b8`, borderColor: `${uiTint}24` }}
-            aria-label="外观设置"
+        <div
+          className="absolute inset-x-3 z-30 flex items-start justify-between gap-2"
+          style={{ top: 'max(2rem, calc(var(--safe-top, 0px) + 0.55rem))', animation: 'companion-hud-in 520ms ease-out both' }}
+          data-testid="companion-game-hud"
+        >
+          <div
+            className="flex min-w-0 items-center gap-2 rounded-2xl border border-white/20 py-1.5 pl-1.5 pr-3 shadow-xl backdrop-blur-xl"
+            style={{ background: `${palette.panelBottom}d9`, boxShadow: `0 8px 28px ${palette.shadow}73, inset 0 1px 0 ${uiTint}35` }}
           >
-            <Gear size={16} />
-          </button>
-          <button
-            onClick={() => { setLine(null); setEditing(true); }}
-            className="flex h-9 w-9 items-center justify-center rounded-full border text-white/70 backdrop-blur-md active:scale-90"
-            style={{ background: `${palette.panelBottom}b8`, borderColor: `${uiTint}24` }}
-            aria-label="布置桌面"
-          >
-            <SlidersHorizontal size={16} />
-          </button>
+            <div className="relative h-11 w-11 shrink-0 rounded-xl border-2 bg-black/20 p-0.5" style={{ borderColor: `${uiTint}c9` }}>
+              <img src={character.avatar} alt="" className="h-full w-full rounded-[0.55rem] object-cover" />
+              <span className="absolute -bottom-1 -right-1 rounded-full border border-white/40 px-1 text-[7px] font-bold text-white" style={{ background: uiTint }}>01</span>
+            </div>
+            <div className="min-w-0">
+              <div className="text-[7px] font-semibold tracking-[0.2em] text-white/50">PARTNER RANK</div>
+              <div className="max-w-[8.5rem] truncate text-[13px] font-semibold tracking-wide text-white">{character.name}</div>
+              <div className="mt-1 flex items-center gap-1.5">
+                <span className="h-1.5 w-16 overflow-hidden rounded-full bg-white/10">
+                  <span className="block h-full w-full rounded-full" style={{ background: `linear-gradient(90deg, ${uiTint}, #ffd8ef)` }} />
+                </span>
+                <span className="text-[8px] font-semibold text-white/70">LINK</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex min-w-0 flex-col items-end gap-1.5">
+            <div className="flex items-center gap-1.5">
+              <div className="rounded-full border border-white/20 bg-black/40 px-2.5 py-1 text-[10px] tracking-[0.12em] text-white/80 backdrop-blur-md">
+                {hh}:{mm}
+              </div>
+              <button
+                onClick={() => openApp(AppID.Appearance)}
+                className="flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-black/40 text-white/70 backdrop-blur-md active:scale-90"
+                aria-label="外观设置"
+              >
+                <Gear size={15} />
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <div className="rounded-full border border-white/20 bg-black/40 px-2.5 py-1 text-[8px] text-white/70 backdrop-blur-md">
+                <span className="mr-1 text-white/40">SYNC</span>{character.videoAvatar ? 'ON' : 'PORTRAIT'}
+              </div>
+              <div className="rounded-full border border-white/20 bg-black/40 px-2.5 py-1 text-[8px] text-white/70 backdrop-blur-md">
+                <span className="mr-1 text-white/40">TOUCH</span>{preparedReactionCount}
+              </div>
+            </div>
+            <div className="text-[8px] tracking-[0.12em] text-white/40">
+              {dateNow.getMonth() + 1}.{dateNow.getDate()} · 周{WEEKDAYS[dateNow.getDay()]} · {period.label}
+            </div>
+          </div>
         </div>
       )}
 
-      {/* ── 右缘竖排快捷菜单（手游首页风的玻璃圆钮列） ── */}
-      {!editing && (
-        <div className="absolute right-3 top-1/2 z-30 flex -translate-y-1/2 flex-col items-center gap-2.5">
+      {/* ── 角色旁边的手游快捷入口。触摸设置是第一优先级。 ── */}
+      {!editing && !touchSettingsOpen && (
+        <div className="absolute right-2.5 top-[31%] z-30 flex flex-col items-center gap-2.5">
+          <button
+            onClick={openTouchSettings}
+            className="group relative flex flex-col items-center gap-1 active:scale-90"
+            data-testid="companion-touch-settings-button"
+          >
+            {!preparedReactionCount && (
+              <span className="absolute -right-0.5 -top-1 z-10 rounded-full bg-pink-500 px-1.5 py-0.5 text-[7px] font-bold text-white shadow">NEW</span>
+            )}
+            <span
+              className="flex h-12 w-12 items-center justify-center rounded-2xl border-2 text-xl text-white shadow-xl backdrop-blur-xl"
+              style={{ background: `linear-gradient(145deg, ${uiTint}d9, ${palette.panelBottom}ef)`, borderColor: `${uiTint}a8`, boxShadow: `0 7px 22px ${palette.shadow}80, 0 0 18px ${uiTint}26` }}
+            >☝</span>
+            <span className="rounded-full bg-black/40 px-2 py-0.5 text-[9px] font-medium tracking-wide text-white/80 backdrop-blur-sm">触摸设置</span>
+          </button>
           {[
-            { id: AppID.Chat, icon: <ChatCircleDots size={19} weight="fill" />, label: '聊天' },
-            { id: AppID.Call, icon: <Phone size={19} weight="fill" />, label: '通话' },
-            { id: AppID.Character, icon: <Sparkle size={19} weight="fill" />, label: '角色' },
+            { id: AppID.Chat, icon: <ChatCircleDots size={18} weight="fill" />, label: '聊天' },
+            { id: AppID.Call, icon: <Phone size={18} weight="fill" />, label: '通话' },
+            { id: AppID.Character, icon: <Sparkle size={18} weight="fill" />, label: '角色' },
           ].map(item => (
-            <button
-              key={item.id}
-              onClick={() => openApp(item.id)}
-              className="group flex flex-col items-center gap-1 active:scale-90"
-            >
+            <button key={item.id} onClick={() => openApp(item.id)} className="group flex flex-col items-center gap-1 active:scale-90">
               <span
-                className="flex h-11 w-11 items-center justify-center rounded-full border text-white/80 shadow-lg backdrop-blur-md transition group-active:border-white/30"
-                style={{ background: `${palette.panelBottom}c2`, borderColor: `${uiTint}29`, boxShadow: `0 4px 16px ${palette.shadow}59, inset 0 1px 0 ${uiTint}2e` }}
-              >
-                {item.icon}
-              </span>
-              <span className="text-[9px] tracking-[0.14em] text-white/60 drop-shadow">{item.label}</span>
+                className="flex h-10 w-10 items-center justify-center rounded-full border text-white/80 shadow-lg backdrop-blur-md"
+                style={{ background: `${palette.panelBottom}cf`, borderColor: `${uiTint}36`, boxShadow: `0 4px 16px ${palette.shadow}66, inset 0 1px 0 ${uiTint}26` }}
+              >{item.icon}</span>
+              <span className="text-[8px] tracking-[0.12em] text-white/70 drop-shadow">{item.label}</span>
             </button>
           ))}
         </div>
       )}
 
-      {/* ── galgame 对话框：名牌 + 打字机台词（问候与触碰回应共用） ── */}
+      {/* ── 触摸设置抽屉：选部位，一次生成，之后只本地轮播。 ── */}
+      {touchSettingsOpen && !editing && (
+        <div
+          className="absolute inset-0 z-[70] flex items-end bg-black/45 backdrop-blur-[2px]"
+          onClick={() => { if (!touchGenerating) setTouchSettingsOpen(false); }}
+          data-testid="companion-touch-settings"
+        >
+          <section
+            className="w-full rounded-t-[2rem] border-t border-white/20 px-4 pb-5 pt-3 text-white shadow-[0_-24px_60px_rgba(0,0,0,.5)] backdrop-blur-2xl"
+            style={{ background: `linear-gradient(165deg, ${palette.panelTop}f7, ${palette.panelBottom}fc)`, animation: 'companion-drawer-up 260ms ease-out both', paddingBottom: 'max(1.25rem, calc(var(--safe-bottom, 0px) + 1rem))' }}
+            onClick={event => event.stopPropagation()}
+          >
+            <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-white/20" />
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">☝</span>
+                  <h2 className="text-[15px] font-semibold tracking-wide text-white">触摸设置</h2>
+                </div>
+                <p className="mt-1 max-w-[24rem] text-[10px] leading-relaxed text-white/50">
+                  先选可触摸部位，再一次生成整包反馈。以后每次戳戳只轮播本地台词和动作，不会逐次调用 API。
+                </p>
+              </div>
+              <button
+                onClick={() => setTouchSettingsOpen(false)}
+                disabled={touchGenerating}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/20 bg-white/[0.06] text-white/70 disabled:opacity-30"
+                aria-label="关闭触摸设置"
+              ><Check size={15} /></button>
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              {(['head', 'face', 'hand', 'body', 'other'] as AvatarTouchZone[]).map(zone => {
+                const selected = touchDraftZones.includes(zone);
+                const count = savedTouchSettings?.reactions?.[zone]?.length || 0;
+                return (
+                  <button
+                    key={zone}
+                    onClick={() => toggleTouchZone(zone)}
+                    disabled={touchGenerating}
+                    aria-pressed={selected}
+                    data-testid={`companion-touch-zone-${zone}`}
+                    className="flex items-center justify-between rounded-2xl border px-3 py-2.5 text-left transition active:scale-[.98] disabled:opacity-50"
+                    style={{
+                      background: selected ? `${uiTint}20` : 'rgba(255,255,255,.035)',
+                      borderColor: selected ? `${uiTint}8c` : 'rgba(255,255,255,.11)',
+                    }}
+                  >
+                    <span>
+                      <span className="block text-[11px] font-medium text-white/90">{avatarTouchZoneLabel(zone)}</span>
+                      <span className="mt-0.5 block text-[8px] text-white/40">{count ? `已有 ${count} 条` : '尚未生成'}</span>
+                    </span>
+                    <span
+                      className="flex h-5 w-5 items-center justify-center rounded-full border text-[10px]"
+                      style={{ borderColor: selected ? uiTint : 'rgba(255,255,255,.18)', background: selected ? uiTint : 'transparent', color: selected ? '#151023' : 'transparent' }}
+                    >✓</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <button
+              onClick={() => { void generateTouchReactionPack(); }}
+              disabled={touchGenerating || !touchDraftZones.length}
+              data-testid="companion-generate-touch-pack"
+              className="mt-4 flex w-full items-center justify-center gap-2 rounded-2xl py-3 text-[12px] font-semibold tracking-wide text-[#171126] shadow-lg transition active:scale-[.98] disabled:opacity-45"
+              style={{ background: `linear-gradient(110deg, ${uiTint}, #ffd8ef 58%, #ffffff)` }}
+            >
+              <Sparkle size={15} weight="fill" />
+              {touchGenerating ? '正在一次生成整包反馈…' : preparedReactionCount ? '重新生成反馈包' : '一次生成反馈包'}
+            </button>
+            <div className="mt-2 text-center text-[8px] tracking-wide text-white/30">
+              {savedTouchSettings?.generatedAt
+                ? `上次生成 ${new Date(savedTouchSettings.generatedAt).toLocaleString()} · 本地 ${preparedReactionCount} 条`
+                : '仅点击上方按钮时请求一次主聊天 API'}
+            </div>
+          </section>
+        </div>
+      )}
+      {/* ── galgame 对话框：亮色台词板，不再像聊天消息卡。 ── */}
       {dialogVisible && (
         <div
-          className="absolute inset-x-4 z-40"
-          style={{ bottom: 'max(1.1rem, calc(var(--safe-bottom, 0px) + 0.9rem))', animation: 'companion-dialog-in 300ms ease-out both' }}
+          className="absolute inset-x-3 z-40"
+          style={{ bottom: 'max(5.25rem, calc(var(--safe-bottom, 0px) + 5.05rem))', animation: 'companion-dialog-in 280ms ease-out both' }}
+          data-testid="companion-dialogue"
         >
           <div
-            className="relative rounded-[1.4rem] border border-white/20 px-4 pb-3.5 pt-4 shadow-2xl backdrop-blur-xl"
-            style={{ background: `linear-gradient(165deg, ${palette.panelTop}eb, ${palette.panelBottom}f0)`, boxShadow: `0 18px 44px ${palette.shadow}80, inset 0 1px 0 ${uiTint}30` }}
+            className="relative overflow-visible rounded-[1.35rem] border px-4 pb-3 pt-4 shadow-2xl backdrop-blur-xl"
+            style={{
+              color: '#201a2e',
+              background: 'linear-gradient(150deg, rgba(255,255,255,.94), rgba(241,235,250,.91))',
+              borderColor: `${uiTint}a0`,
+              boxShadow: `0 18px 44px ${palette.shadow}8c, inset 0 1px 0 #ffffff`,
+            }}
           >
-            {/* 名牌：悬在对话框左上缘 */}
+            <div className="absolute inset-x-5 top-0 h-px" style={{ background: `linear-gradient(90deg, transparent, ${uiTint}, transparent)` }} />
             <div
-              className="absolute -top-3 left-4 flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-medium tracking-wide text-[#14102a] shadow-lg"
-              style={{ background: `linear-gradient(120deg, ${uiTint}, #ffffff)` }}
+              className="absolute -top-3 left-4 flex items-center gap-1.5 rounded-lg border border-white/20 px-3 py-1 text-[10px] font-semibold tracking-wide text-white shadow-lg"
+              style={{ background: `linear-gradient(120deg, ${palette.panelTop}, ${uiTint}c9)`, boxShadow: `0 5px 16px ${palette.shadow}66` }}
             >
               {character.name}
-              {line?.label && <span className="text-[9px] opacity-60">· {line.label}</span>}
+              {line?.label && <span className="text-[8px] font-normal text-white/60">· {line.label}</span>}
             </div>
 
             {thinking && !line ? (
@@ -750,32 +948,62 @@ const CompanionHome: React.FC = () => {
                 {[0, 1, 2].map(index => (
                   <span
                     key={index}
-                    className="h-1.5 w-1.5 rounded-full bg-white/75"
-                    style={{ animation: `companion-thinking-dot 1.1s ease-in-out ${index * 0.18}s infinite` }}
+                    className="h-1.5 w-1.5 rounded-full"
+                    style={{ background: uiTint, animation: `companion-thinking-dot 1.1s ease-in-out ${index * 0.18}s infinite` }}
                   />
                 ))}
               </div>
             ) : (
-              <div className="min-h-[2.4rem] text-[13.5px] leading-relaxed text-white/90">
+              <div className="min-h-[2.5rem] whitespace-pre-line text-[13px] font-medium leading-[1.72] text-[#272033]">
                 {typed.shown}
                 {!typed.done && (
-                  <span className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] bg-white/85" style={{ animation: 'companion-cursor 800ms step-end infinite' }} />
+                  <span className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px]" style={{ background: uiTint, animation: 'companion-cursor 800ms step-end infinite' }} />
                 )}
               </div>
             )}
 
             {line?.kind === 'touch' && lastHit && !thinking && typed.done && (
               <button
-                onClick={() => { void respondToTouch({ ...lastHit, nonce: Date.now() + Math.random() }, true); }}
-                className="mt-1.5 inline-flex items-center gap-1 text-[10px] text-white/40 active:text-white/80"
+                onClick={() => respondToTouch({ ...lastHit, nonce: Date.now() + Math.random() }, true)}
+                className="mt-1.5 inline-flex items-center gap-1 text-[9px] font-medium active:scale-95"
+                style={{ color: `${palette.panelTop}b8` }}
+                data-testid="companion-next-cached-reaction"
               >
-                <ArrowClockwise size={11} /> 让{character.name}重新回应
+                <ArrowClockwise size={11} /> 换一句 · 本地轮播
               </button>
             )}
           </div>
         </div>
       )}
 
+      {/* ── 手游底部主导航：角色仍是主页主体，功能入口只占一条短栏。 ── */}
+      {!editing && !touchSettingsOpen && (
+        <nav
+          className="absolute inset-x-3 z-40 rounded-[1.45rem] border border-white/20 px-2 py-1.5 shadow-2xl backdrop-blur-2xl"
+          style={{ bottom: 'max(0.55rem, calc(var(--safe-bottom, 0px) + 0.4rem))', background: `${palette.panelBottom}e8`, boxShadow: `0 14px 36px ${palette.shadow}9c, inset 0 1px 0 ${uiTint}2e` }}
+          aria-label="陪伴桌面导航"
+        >
+          <div className="grid grid-cols-5 items-end gap-1">
+            <button className="flex flex-col items-center gap-0.5 py-1 text-white active:scale-90" aria-current="page">
+              <span className="flex h-7 w-9 items-center justify-center rounded-full" style={{ background: `${uiTint}35`, color: uiTint }}><Sparkle size={16} weight="fill" /></span>
+              <span className="text-[8px] font-semibold" style={{ color: uiTint }}>主页</span>
+            </button>
+            <button onClick={() => openApp(AppID.Chat)} className="flex flex-col items-center gap-0.5 py-1 text-white/60 active:scale-90">
+              <span className="flex h-7 items-center"><ChatCircleDots size={17} weight="fill" /></span><span className="text-[8px]">聊天</span>
+            </button>
+            <button onClick={() => openApp(AppID.Call)} className="relative -mt-4 flex flex-col items-center gap-0.5 text-white active:scale-90">
+              <span className="flex h-12 w-12 items-center justify-center rounded-full border-2 border-white/60 shadow-lg" style={{ background: `linear-gradient(145deg, ${uiTint}, #f5c9ff)`, color: '#1b1429', boxShadow: `0 8px 24px ${uiTint}55` }}><Phone size={20} weight="fill" /></span>
+              <span className="text-[8px] text-white/70">通话</span>
+            </button>
+            <button onClick={() => openApp(AppID.Character)} className="flex flex-col items-center gap-0.5 py-1 text-white/60 active:scale-90">
+              <span className="flex h-7 items-center"><Sparkle size={17} /></span><span className="text-[8px]">角色</span>
+            </button>
+            <button onClick={() => { setLine(null); setEditing(true); }} className="flex flex-col items-center gap-0.5 py-1 text-white/60 active:scale-90">
+              <span className="flex h-7 items-center"><SlidersHorizontal size={17} /></span><span className="text-[8px]">布置</span>
+            </button>
+          </div>
+        </nav>
+      )}
       {/* ── 布置模式：位置提示 + 背景选择底栏 ── */}
       {editing && (
         <>
