@@ -29,7 +29,7 @@ vi.mock('./keepAlive', () => ({ KeepAlive: { init: vi.fn().mockResolvedValue(und
 
 import {
   ActiveMsgClient, buildFirePack, clearNamespaceValuesOrThrow, dropStaleSubscription,
-  putClientStateOrThrow, toRemoteAvatarUrl,
+  putClientStateOrThrow, readAmsgFailKind, toRemoteAvatarUrl,
 } from './activeMsgClient';
 import { AMSG_SLOT_CURRENT_TIME, AMSG_SLOT_REALTIME_WORLD, AMSG_SLOT_SCENE } from './amsgFirePack';
 import * as dailySchedule from './dailySchedule';
@@ -156,6 +156,70 @@ describe('ActiveMsgClient.cancelTask', () => {
       error: { code: 'INVALID_CLIENT_TOKEN', message: '客户端令牌无效' },
     });
     await expect(ActiveMsgClient.cancelTask('task-1')).rejects.toThrow(/客户端令牌无效/);
+  });
+});
+
+// 回归守卫：连接失败的归类。使用统计只发这个代号，不发报错原文——
+// 「密钥对不上」「地址不对」「D1 没绑」在图上混成一格的话，看不出该修哪一段引导；
+// 而把 error.message 塞进上报又会带出 Worker 地址。两头都得钉住。
+describe('连接失败的归类（AmsgFailKind）', () => {
+  const respondWith = (status: number, body: unknown) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      status,
+      text: async () => JSON.stringify(body),
+      headers: new Headers({ 'content-type': 'application/json' }),
+    }));
+  };
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  /** 跑一次 connect，把它抛出来的错交出来。 */
+  const connectAndCatch = async (): Promise<unknown> => {
+    try {
+      await ActiveMsgClient.connect();
+      throw new Error('connect 本该失败');
+    } catch (error) {
+      return error;
+    }
+  };
+
+  it.each([
+    [401, '鉴权失败'],
+    [403, '鉴权失败'],
+    [404, '端点不存在'],
+    [500, '建表失败'],
+  ])('init-tenant 回 %i → 代号「%s」', async (status, kind) => {
+    respondWith(status, { success: false, error: { message: 'whatever' } });
+    expect(readAmsgFailKind(await connectAndCatch())).toBe(kind);
+  });
+
+  it('fetch 自己炸了（断网 / DNS / CORS）→ 网络失败', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
+    expect(readAmsgFailKind(await connectAndCatch())).toBe('网络失败');
+  });
+
+  it('地址指到网页而不是 Worker（拿到 HTML）→ 打到网页了', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      status: 200,
+      text: async () => '<!doctype html><html><body>404 Not Found</body></html>',
+      headers: new Headers({ 'content-type': 'text/html' }),
+    }));
+    expect(readAmsgFailKind(await connectAndCatch())).toBe('打到网页了');
+  });
+
+  it('代号只是源码里的字面量，worker 回的报错原文一个字都不带出来', async () => {
+    const secret = 'https://my-private-worker.invalid 的密钥 sk-SECRET 无效';
+    respondWith(401, { success: false, error: { message: secret } });
+    const error = await connectAndCatch();
+    // 原文该留在 toast 里给用户看
+    expect((error as Error).message).toContain(secret);
+    // 但上报只拿得到代号
+    expect(readAmsgFailKind(error)).toBe('鉴权失败');
+  });
+
+  it('没挂代号的错误一律「其他」，不会把异常对象上的东西漏出去', () => {
+    expect(readAmsgFailKind(new Error('sk-LEAKED'))).toBe('其他');
+    expect(readAmsgFailKind(undefined)).toBe('其他');
   });
 });
 

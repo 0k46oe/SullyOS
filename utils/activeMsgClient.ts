@@ -136,12 +136,59 @@ const looksLikeHtmlFallbackError = (message: string) => (
   /<html/i.test(message)
 );
 
+// ─── 失败归类（给使用统计分档用）───
+//
+// 「连接失败」在图上只有一格的话，地址填错、密钥对不上、D1 没绑、纯断网会长成一个样，
+// 而这四种要修的引导完全不同。所以在**抛错的那一刻**按源码里写死的谓词挂一个代号，
+// 上报只带这个代号。
+//
+// 报错原文（可能带 Worker 地址、push endpoint）一个字都不进上报——挂在这里的
+// 永远是下面这个联合类型里的字面量之一，不是从异常对象上读出来的任何东西。
+// 见 docs/analytics.md 「加新埋点的规矩」第 4 条。
+export type AmsgFailKind =
+  | '地址没填'
+  | '打到网页了'
+  | '鉴权失败'
+  | '端点不存在'
+  | '建表失败'
+  | '网络失败'
+  | '权限被拒'
+  | '不支持推送'
+  | 'worker没配VAPID'
+  | '订阅失败'
+  | '其他';
+
+const FAIL_KIND_PROP = '__amsgFailKind';
+
+/** 给错误挂一个失败代号，原样抛回去（不改 message、不改类型）。 */
+const withFailKind = <T extends Error>(error: T, kind: AmsgFailKind): T => {
+  (error as unknown as Record<string, string>)[FAIL_KIND_PROP] = kind;
+  return error;
+};
+
+/**
+ * 读出失败代号，没挂的一律 '其他'。
+ * 上报侧只该调这个，别自己从 error 上取任何字段——那些是运行时字符串。
+ */
+export const readAmsgFailKind = (error: unknown): AmsgFailKind => {
+  const kind = (error as Record<string, unknown> | null | undefined)?.[FAIL_KIND_PROP];
+  return typeof kind === 'string' ? (kind as AmsgFailKind) : '其他';
+};
+
+/** init-tenant 没成功时按 HTTP 状态归类：三种状态要用户去改的地方完全不同。 */
+const resolveInitFailKind = (status: number): AmsgFailKind => {
+  if (status === 401 || status === 403) return '鉴权失败';   // 共享密钥两边对不上
+  if (status === 404) return '端点不存在';                   // 地址不对，或 worker 是旧版
+  return '建表失败';                                         // 多半是没绑 D1（变量名 DB）
+};
+
 const normalizeActiveMsgApiError = (error: unknown, phase: string) => {
   const message = error instanceof Error ? error.message : String(error || 'Unknown error');
   if (looksLikeHtmlFallbackError(message)) {
-    return new Error(`主动消息 2.0 的 ${phase} 请求没有打到 Worker，而是拿到了网页 HTML。请确认设置里填的是已部署的 amsg Worker 地址，而不是某个网页地址。`);
+    return withFailKind(new Error(`主动消息 2.0 的 ${phase} 请求没有打到 Worker，而是拿到了网页 HTML。请确认设置里填的是已部署的 amsg Worker 地址，而不是某个网页地址。`), '打到网页了');
   }
-  return error instanceof Error ? error : new Error(message);
+  // 走到这儿的基本是 fetch 自己抛的（断网 / DNS 挂 / CORS 被拒），归网络。
+  return withFailKind(error instanceof Error ? error : new Error(message), '网络失败');
 };
 
 const ensureGlobalReady = async (): Promise<ActiveMsg2GlobalConfig> => {
@@ -152,7 +199,9 @@ const ensureGlobalReady = async (): Promise<ActiveMsg2GlobalConfig> => {
 
 const ensureWorkerReady = async () => {
   const config = await ensureGlobalReady();
-  if (!config.workerUrl.trim()) throw new Error('请先在系统设置里填写「主动消息 2.0」的 Worker 地址。');
+  if (!config.workerUrl.trim()) {
+    throw withFailKind(new Error('请先在系统设置里填写「主动消息 2.0」的 Worker 地址。'), '地址没填');
+  }
   return config;
 };
 
@@ -599,7 +648,17 @@ export const dropStaleSubscription = async (
   return sub;
 };
 
-const fetchWithAuth = async (path: string, config: ActiveMsg2GlobalConfig, init: RequestInit, phase = '接口') => {
+/**
+ * 带鉴权头请求 worker，同时把 HTTP 状态一起交出来。
+ * 状态只有「连接」那条路用得上（401/404/其它要引导用户去改的地方不同），
+ * 其余调用方走下面那层薄壳，签名跟以前一样只拿 body。
+ */
+const fetchWithAuthRaw = async (
+  path: string,
+  config: ActiveMsg2GlobalConfig,
+  init: RequestInit,
+  phase = '接口',
+): Promise<{ status: number; body: any }> => {
   const headers = new Headers(init.headers);
   if (config.serverToken) headers.set('X-Client-Token', config.serverToken);
   headers.set('X-User-Id', config.userId);
@@ -610,11 +669,14 @@ const fetchWithAuth = async (path: string, config: ActiveMsg2GlobalConfig, init:
       headers,
     });
 
-    return await safeResponseJson(response);
+    return { status: response.status, body: await safeResponseJson(response) };
   } catch (error) {
     throw normalizeActiveMsgApiError(error, phase);
   }
 };
+
+const fetchWithAuth = async (path: string, config: ActiveMsg2GlobalConfig, init: RequestInit, phase = '接口') =>
+  (await fetchWithAuthRaw(path, config, init, phase)).body;
 
 const encryptPayload = async (client: ReiClient, payload: unknown) => {
   return (client as unknown as ReiCryptoBridge)._encrypt(JSON.stringify(payload));
@@ -675,7 +737,7 @@ export const ActiveMsgClient = {
     // 只需要「支不支持」这一个判断，不走 getPushStatus——那会把 KeepAlive.init /
     // serviceWorker.ready / getSubscription 整套先跑一遍，下面又原样跑一次。
     const capabilityGap = describePushCapabilityGap();
-    if (capabilityGap) throw new Error(`${capabilityGap}。`);
+    if (capabilityGap) throw withFailKind(new Error(`${capabilityGap}。`), '不支持推送');
 
     const config = await ensureWorkerReady();
 
@@ -684,7 +746,7 @@ export const ActiveMsgClient = {
       permission = await Notification.requestPermission();
     }
     if (permission !== 'granted') {
-      throw new Error('通知权限未授予，无法创建主动消息 2.0 的推送订阅。');
+      throw withFailKind(new Error('通知权限未授予，无法创建主动消息 2.0 的推送订阅。'), '权限被拒');
     }
 
     await KeepAlive.init();
@@ -703,15 +765,21 @@ export const ActiveMsgClient = {
       throw normalizeActiveMsgApiError(error, '获取 Worker VAPID 公钥');
     }
     if (!vapidPublicKey) {
-      throw new Error('Worker 没返回 VAPID 公钥，请确认已配置 VAPID 并部署了最新 worker。');
+      throw withFailKind(new Error('Worker 没返回 VAPID 公钥，请确认已配置 VAPID 并部署了最新 worker。'), 'worker没配VAPID');
     }
 
     const existing = await registration.pushManager.getSubscription();
     const reusable = await dropStaleSubscription(existing, vapidPublicKey);
     if (reusable) return reusable.toJSON();
 
-    const subscription = await client.subscribePush(vapidPublicKey, registration);
-    return subscription.toJSON();
+    try {
+      const subscription = await client.subscribePush(vapidPublicKey, registration);
+      return subscription.toJSON();
+    } catch (error) {
+      // 浏览器侧的订阅失败（没装 Google 服务的安卓、WebView 壳、FCM 连不上）。
+      // 提示原文由 pushSubscribeShared 翻译好后留在 toast 里，这里只留代号。
+      throw withFailKind(error instanceof Error ? error : new Error(String(error)), '订阅失败');
+    }
   },
 
   /**
@@ -738,9 +806,12 @@ export const ActiveMsgClient = {
   // （Dashboard 粘贴部署的用户不用碰 SQL），再拿一次 user key 验证地址与鉴权都通。
   async connect() {
     const config = await ensureWorkerReady();
-    const initResponse = await fetchWithAuth('init-tenant', config, { method: 'POST' }, '初始化数据库');
+    const { status, body: initResponse } = await fetchWithAuthRaw('init-tenant', config, { method: 'POST' }, '初始化数据库');
     if (!initResponse?.success) {
-      throw new Error(initResponse?.error?.message || '主动消息 2.0 初始化数据库失败，请确认 Worker 已绑定 D1（变量名 DB）。');
+      throw withFailKind(
+        new Error(initResponse?.error?.message || '主动消息 2.0 初始化数据库失败，请确认 Worker 已绑定 D1（变量名 DB）。'),
+        resolveInitFailKind(status),
+      );
     }
     await initializeClient(config);
     await ActiveMsgStore.saveGlobalConfig({ ...config, initializedAt: Date.now() });
