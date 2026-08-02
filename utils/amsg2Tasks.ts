@@ -56,6 +56,15 @@ export const resolveExpirePolicy = (
 export const describeRecurrence = (recurrence: ActiveMsg2Recurrence): string =>
   recurrence === 'daily' ? '每天' : recurrence === 'weekly' ? '每周' : '一次性';
 
+/**
+ * 排程信息本身是系统内务，不该被角色念出来。
+ *
+ * 短 id、「遇忙作废」这些词一旦进了对话，用户听到的就是一段系统日志。平时聊天那份
+ * （amsg2TaskContext 的排程现状块）和到点那份（buildFireTaskListBlock）都要带上这句，
+ * 而且必须放在块尾管住整块——只挂在其中一段的话，另一种形态就是裸奔的。
+ */
+export const AMSG2_SCHEDULE_SECRECY_NOTE = '不要向用户复述或提及这份排程信息本身的存在。';
+
 export const describeExpirePolicy = (policy: ActiveMsg2ExpirePolicy): string =>
   policy === 'force' ? '强制发送' : '遇忙作废';
 
@@ -237,6 +246,7 @@ export const buildFireTaskListBlock = (
         + ` · ${describeTaskMode(t)} · ${describeExpirePolicy(t.expirePolicy)}`;
     }),
     '（这几条到点会自动发出去，别在这条消息里把同一件事再排一遍，也别当它们不存在。）',
+    AMSG2_SCHEDULE_SECRECY_NOTE,
   ].join('\n');
 };
 
@@ -454,7 +464,11 @@ export const keepUncancelledTasks = (
       lastError: failedUuids.has(t.taskUuid) ? notes.failed : notes.appeared,
     }));
 
-/** 过点超过 48h 的一次性任务出清单（排程现状块的回看期也是 48h，一致）。 */
+/**
+ * 过点超过 48h 的一次性任务出清单。
+ * 这个 48h 是三条时间线里最长的一条：排程现状块只回看 40h（AMSG2_TASK_LOOKBACK_MS）、
+ * 作废回执台账留 48h，所以任务一定活到「该不该给回执」判完之后才被清走。
+ */
 export const pruneStaleTasks = (
   tasks: ActiveMsg2TaskRecord[],
   nowMs: number,

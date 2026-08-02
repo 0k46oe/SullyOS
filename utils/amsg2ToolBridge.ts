@@ -98,7 +98,11 @@ export const AMSG2_TOOLS: OpenAITool[] = [
     type: 'function',
     function: {
       name: 'renew_active_message',
-      description: '给一个任务续期：只换触发时间，沿用原有模式与提示方向（含已作废的任务）。若想说的内容或方向已经变了，不要用 renew，改用 cancel_active_message + schedule_active_message 重新创建。',
+      description: [
+        '给一个任务续期：只换触发时间，沿用原有模式与提示方向（含已作废的任务）。',
+        '一次性任务 = 整条改到新时间；循环任务 = 只给这一次补发一条一次性任务，原来的每天/每周节奏和编号都不动。',
+        '想改的是循环任务本身的时间，或者想说的内容、方向已经变了，都不要用 renew，改用 cancel_active_message + schedule_active_message 重新创建。',
+      ].join('\n'),
       parameters: {
         type: 'object',
         properties: {
@@ -270,11 +274,16 @@ async function handleSchedule(args: Record<string, any>, deps: Amsg2ToolDeps): P
   // 续期/替换走的是「先建新的再取消旧的」，编号必然换一个。不说清楚的话，角色刚用
   // 旧编号续了期，却收到一句「已创建 [另一个编号]」，下一轮还会拿旧编号来操作。
   const oldShortId = args.__replaceTaskUuid ? shortTaskId(args.__replaceTaskUuid) : '';
-  const head = !oldShortId
-    ? `定时主动消息已创建 [${shortTaskId(result.uuid)}]。`
-    : result.replacedCancelFailed
-      ? `新任务 [${shortTaskId(result.uuid)}] 已创建，但原任务 [${oldShortId}] 远端取消失败、可能仍会触发，请再取消一次。`
-      : `原任务 [${oldShortId}] 已换成 [${shortTaskId(result.uuid)}]（改期是重建，编号会变）。`;
+  // 循环任务的续期是「补当次」，原序列一条没动——不点明的话，角色会以为自己刚把
+  // 每天的早安整体挪走了，下一轮又去把「原来那条」取消一遍。
+  const makeupForShortId = args.__makeupForTaskUuid ? shortTaskId(args.__makeupForTaskUuid) : '';
+  const head = makeupForShortId
+    ? `已为 [${makeupForShortId}] 的这一次补上一条一次性任务 [${shortTaskId(result.uuid)}]，[${makeupForShortId}] 原来的重复节奏不变。`
+    : !oldShortId
+      ? `定时主动消息已创建 [${shortTaskId(result.uuid)}]。`
+      : result.replacedCancelFailed
+        ? `新任务 [${shortTaskId(result.uuid)}] 已创建，但原任务 [${oldShortId}] 远端取消失败、可能仍会触发，请再取消一次。`
+        : `原任务 [${oldShortId}] 已换成 [${shortTaskId(result.uuid)}]（改期是重建，编号会变）。`;
   // 回话里的时间用折好的绝对时刻按角色时区渲染。拿 args.send_at 原串渲染会折两次
   // （先被 new Date 按设备解析，再换算到角色时区），角色刚排完就把时间说错。
   return `${head}将在 ${formatTaskTime(result.firstSendAt, charTz)} 开始生成${recurrenceDesc}。`
@@ -323,15 +332,21 @@ async function handleRenew(args: Record<string, any>, deps: Amsg2ToolDeps): Prom
   const { task, error } = resolveTargetTask(config, args.task_id);
   if (!task) return error!;
   if (task.mode === 'fixed') return '固定消息任务请在设置面板调整。';
-  // renew 只换时间：复用 schedule 的替换语义（旧任务已被 worker 删掉时 cancel
-  // 失败只 warn）。内容/方向要变就不该走这里——工具描述已引导 cancel + 重建。
+  // 循环任务的续期只补当次：整条改期的话，一条「每天 9:00 的早安」被角色顺手续到
+  // 11:00「晚点补上」，从明天起就永久变成 11:00 了，编号还跟着换一个。所以这里改成
+  // 建一条一次性的补发任务，原序列原样留着继续按自己的节奏响。
+  const isRecurring = task.recurrenceType !== 'none';
+  // 一次性任务照旧复用 schedule 的替换语义（旧任务已被 worker 删掉时 cancel 失败只 warn）。
+  // 内容/方向要变就不该走这里——工具描述已引导 cancel + 重建。
   return handleSchedule({
     send_at: args.send_at,
     mode: task.mode,
     prompt_hint: task.promptHint,
-    recurrence: task.recurrenceType,
+    recurrence: isRecurring ? 'none' : task.recurrenceType,
     expire_policy: task.expirePolicy,
-    __replaceTaskUuid: task.taskUuid,
+    ...(isRecurring
+      ? { __makeupForTaskUuid: task.taskUuid }
+      : { __replaceTaskUuid: task.taskUuid }),
   }, deps);
 }
 

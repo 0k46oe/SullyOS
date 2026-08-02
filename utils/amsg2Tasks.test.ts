@@ -5,6 +5,7 @@ import {
   REPLACE_CANCEL_FAILED_NOTE,
   applyRemoteTaskDelta,
   applyScheduledTask,
+  AMSG2_SCHEDULE_SECRECY_NOTE,
   buildFireTaskListBlock,
   currentOccurrenceMs,
   describeRemoteLastError,
@@ -447,6 +448,14 @@ describe('buildFireTaskListBlock', () => {
     const block = buildFireTaskListBlock([daily], { nowMs: NOW, tzId: 'UTC' });
     expect(block).toContain('7月30日 13:00');
     expect(block).not.toContain('7月20日');
+  });
+
+  // 回归守卫：这一块以前只说「别重复排、也别当它们不存在」，没说「别念出来」。
+  // 短 id 和「遇忙作废」是纯系统腔，被角色照着复述出来就是当场穿帮。
+  it('带防复述约束（跟平时聊天那份共用同一句）', () => {
+    const block = buildFireTaskListBlock([fireTask()], { nowMs: NOW, tzId: 'UTC' });
+    expect(block).toContain(AMSG2_SCHEDULE_SECRECY_NOTE);
+    expect(block).toContain('不要向用户复述');
   });
 
   it('没有可列的 → 空串（槽位被抹平）', () => {

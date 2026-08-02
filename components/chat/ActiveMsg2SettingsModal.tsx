@@ -13,7 +13,9 @@ import {
   UserProfile,
 } from '../../types';
 import { ActiveMsgClient, getDefaultActiveMsgFirstSendTime } from '../../utils/activeMsgClient';
+import { ActiveMsgStore } from '../../utils/activeMsgStore';
 import { type AmsgLastSkip, describeLastSkip } from '../../utils/amsgFirePack';
+import { buildUserCancelledNotices } from '../../utils/amsg2TaskContext';
 import { trackEvent } from '../../utils/analytics';
 import {
   applyRemoteTaskDelta,
@@ -236,6 +238,23 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
     ...extra,
   });
 
+  /**
+   * 给角色留一句「这几条被人工取消了」。
+   *
+   * 聊天历史里那句「明早八点叫你～」是角色自己许的承诺，任务在面板里被删掉之后它并不
+   * 知道——下次聊天照旧说「放心我叫你」。所以取消也写进作废回执台账（按 id 幂等），
+   * 下一轮的排程现状块会把它读出来告诉角色。写失败不打断取消本身：任务确实已经没了。
+   */
+  const writeCancelledNotices = async (cancelled: ActiveMsg2TaskRecord[]) => {
+    const notices = buildUserCancelledNotices(char.id, cancelled, Date.now());
+    if (!notices.length) return;
+    try {
+      await ActiveMsgStore.upsertExpiredNotices(char.id, notices);
+    } catch (e) {
+      console.warn('[ActiveMsg2Modal] 取消回执写入失败（角色可能还以为约定有效）', e);
+    }
+  };
+
   const handleCancelTask = async (t: ActiveMsg2TaskRecord) => {
     // alreadyGone = 远端本来就没有这一条（一次性任务发完就删行）。这也是取消成功，
     // 只是文案上说清楚，免得用户以为自己刚刚拦下了一条还没发的消息。
@@ -254,6 +273,7 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
       return;
     }
     if (editingTaskUuid === t.taskUuid) setEditingTaskUuid(null);
+    await writeCancelledNotices([t]);
     setKnownRemoteUuids((prev) => applyRemoteTaskDelta(prev, { gone: [t.taskUuid] }));
     // 落盘走 onSave → OSContext.updateCharacter，那里在落库成功后会给 amsg2 云端快照
     // 打脏（markAmsgStateDirty）——fire_pack 里角色能看到的排程清单因此不会还留着这条
@@ -280,6 +300,10 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
           tasks.map((t) => t.taskUuid),
         );
         const attempted = new Set(targets);
+        // 真被取消掉的那些（试过且没失败）要给角色一句交代，否则关掉 2.0 之后它还挂着
+        // 一堆没人会兑现的承诺。留在清单里的（取消失败 / 期间新出现的）不写——它们还会响。
+        await writeCancelledNotices(tasks.filter((t) =>
+          attempted.has(t.taskUuid) && !failed.has(t.taskUuid)));
         onSave((prev) => buildConfig(
           prev,
           (list) => keepUncancelledTasks(list, attempted, failed, {

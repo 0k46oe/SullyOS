@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import Modal from '../os/Modal';
 import { ActiveMsg2GlobalConfig, RealtimeConfig } from '../../types';
 import { ActiveMsgClient, ActiveMsg2PushStatus, readAmsgFailKind } from '../../utils/activeMsgClient';
 import { ActiveMsgStore, maskActiveMsgUserId } from '../../utils/activeMsgStore';
+import { cancelAllRemoteAmsgTasks, isWorkerUrlCleared } from '../../utils/amsgStateSync';
 import {
   buildCloudflareDashboardUrl,
   isInstantConfigReady,
@@ -135,9 +136,14 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     }
   };
 
+  // 已经存过盘的那个 Worker 地址。清空确认要用它：确认之前不能换地址，
+  // 取消远端任务的那几个请求还得发到旧那台上去。
+  const savedWorkerUrlRef = useRef('');
+
   const refresh = async () => {
     const nextConfig = await ActiveMsgClient.getGlobalConfig();
     const nextPushStatus = await ActiveMsgClient.getPushStatus();
+    savedWorkerUrlRef.current = nextConfig.workerUrl || '';
     setConfig(nextConfig);
     setPushStatus(nextPushStatus);
     setInstantOn(isInstantConfigReady());
@@ -162,14 +168,46 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     void refresh();
   }, [isOpen]);
 
+  /**
+   * 地址被清空时的收尾：先问一句，再拿**旧地址**把远端任务取消干净，最后才存空值。
+   *
+   * 光存空值的话，前端这边所有同步立刻停摆，D1 里的任务却一条没少：cron 每分钟照常
+   * 消费、照烧 LLM、照推送（推送订阅也还在），只是内容永远停在最后一次同步的样子。
+   * 用户以为自己关掉了一切，实际只是把自己变成了看不见的那一方。
+   */
+  const confirmAndClearRemote = async (): Promise<boolean> => {
+    const ok = confirm('清空 Worker 地址会把远端还挂着的主动消息任务一并取消，确定吗？\n\n不取消的话，那些任务仍会按时触发并给你推送，而这边已经管不到它们了。');
+    if (!ok) return false;
+    const { total, failed, listed } = await cancelAllRemoteAmsgTasks();
+    if (!listed) {
+      addToast('远端任务没能取消，可能还挂在那儿照常触发。建议把地址填回去，到角色的主动消息面板里逐个处理。', 'error');
+    } else if (failed > 0) {
+      addToast(`还有 ${failed} 个远端任务取消失败，建议恢复地址后在面板处理。`, 'error');
+    } else if (total > 0) {
+      addToast(`已取消远端 ${total} 个任务。`, 'info');
+    }
+    return true;
+  };
+
+  const persistGlobalConfig = async () => {
+    if (!config) return;
+    if (isWorkerUrlCleared(savedWorkerUrlRef.current, config.workerUrl)) {
+      if (!await confirmAndClearRemote()) {
+        // 用户反悔：把地址填回输入框，别留一个「界面空着、库里还存着」的错位。
+        patchConfig({ workerUrl: savedWorkerUrlRef.current });
+        return;
+      }
+    }
+    await ActiveMsgStore.saveGlobalConfig({
+      workerUrl: config.workerUrl,
+      serverToken: config.serverToken,
+    });
+    savedWorkerUrlRef.current = config.workerUrl || '';
+  };
+
   useEffect(() => {
     if (!isOpen || !config) return;
-    const timer = setTimeout(() => {
-      void ActiveMsgStore.saveGlobalConfig({
-        workerUrl: config.workerUrl,
-        serverToken: config.serverToken,
-      });
-    }, 1000);
+    const timer = setTimeout(() => { void persistGlobalConfig(); }, 1000);
     return () => clearTimeout(timer);
   }, [config?.workerUrl, config?.serverToken, isOpen]);
 

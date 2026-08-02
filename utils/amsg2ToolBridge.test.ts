@@ -85,10 +85,10 @@ describe('amsg2ToolBridge 同一轮多次调用累加', () => {
     expect(ActiveMsgClient.cancelTask).toHaveBeenCalledWith(UUIDS[1]);
   });
 
-  it('一轮内 schedule 后立刻 renew → 换成新 uuid、旧记录移除、模式沿用', async () => {
+  it('一轮内 schedule 一次性任务后立刻 renew → 换成新 uuid、旧记录移除、模式沿用', async () => {
     const { deps, persisted } = makeSession();
     await executeAmsg2Tool('schedule_active_message', {
-      send_at: future(), mode: 'prompted', prompt_hint: '问问吃了没', recurrence: 'daily',
+      send_at: future(), mode: 'prompted', prompt_hint: '问问吃了没',
     }, deps);
     const renewResult = await executeAmsg2Tool('renew_active_message', {
       send_at: future(), task_id: shortOf(UUIDS[0]),
@@ -101,7 +101,7 @@ describe('amsg2ToolBridge 同一轮多次调用累加', () => {
     expect(tasks[0].taskUuid).toBe(UUIDS[1]);
     expect(tasks[0].mode).toBe('prompted');
     expect(tasks[0].promptHint).toBe('问问吃了没');
-    expect(tasks[0].recurrenceType).toBe('daily');
+    expect(tasks[0].recurrenceType).toBe('none');
     // 旧任务的远端取消由 scheduleCharacterTask 内部「先建后删」负责，bridge 的职责是
     // 把要替换的 uuid 传下去——这里钉的是 bridge 这一侧。
     expect(ActiveMsgClient.scheduleCharacterTask).toHaveBeenLastCalledWith(
@@ -116,6 +116,36 @@ describe('amsg2ToolBridge 同一轮多次调用累加', () => {
 
     expect(listed).toContain(shortOf(UUIDS[0]));
     expect(listed).not.toContain('没有任何定时主动消息任务');
+  });
+
+  // 回归守卫：循环任务的 renew 一度是整条改期（recurrence 原样透传 + replaceTaskUuid）。
+  // 「每天 9:00 的早安」被角色顺手续到 11:00「晚点补上」，从明天起就永久变成 11:00 了，
+  // 编号还跟着换一个。现在改成只补当次，原序列一条不动。
+  it('循环任务 renew → 原任务留着，另加一条一次性补发', async () => {
+    const { deps, persisted } = makeSession();
+    await executeAmsg2Tool('schedule_active_message', {
+      send_at: future(), mode: 'prompted', prompt_hint: '道早安', recurrence: 'daily',
+    }, deps);
+    const renewResult = await executeAmsg2Tool('renew_active_message', {
+      send_at: future(), task_id: shortOf(UUIDS[0]),
+    }, deps);
+
+    const tasks = lastTasks(persisted);
+    expect(tasks).toHaveLength(2);
+    // 原来那条每天的还在，编号和节奏都没变
+    expect(tasks[0].taskUuid).toBe(UUIDS[0]);
+    expect(tasks[0].recurrenceType).toBe('daily');
+    // 新加的是一次性补发，方向沿用
+    expect(tasks[1].taskUuid).toBe(UUIDS[1]);
+    expect(tasks[1].recurrenceType).toBe('none');
+    expect(tasks[1].promptHint).toBe('道早安');
+
+    const scheduleArgs = (ActiveMsgClient.scheduleCharacterTask as any).mock.calls[1][0];
+    expect(scheduleArgs.replaceTaskUuid).toBeUndefined();
+    expect(scheduleArgs.task.recurrenceType).toBe('none');
+    // 回执得说清楚原节奏没动，否则角色下一轮会跑去把「原来那条」再取消一遍
+    expect(renewResult).toContain(shortOf(UUIDS[0]));
+    expect(renewResult).toContain('重复节奏不变');
   });
 
   it('远端取消失败 → 本地记录保留并标错，不留「看不见的幽灵任务」', async () => {
