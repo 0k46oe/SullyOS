@@ -437,15 +437,24 @@ export class AvatarAutonomy {
     } else if (direction.gaze === 'down') {
       targetEyeY = -0.62 * intensity;
       targetHeadY -= 0.18 * intensity;
+    } else if (activity === 'speaking') {
+      // Dialogue defaults to sustained eye contact. Averted gaze must be an
+      // explicit performance direction (left/right/down), not ambient drift.
+      targetEyeX = 0;
+      targetEyeY = 0;
+      targetHeadX *= 0.18;
+      targetHeadY *= 0.42;
+      targetHeadZ *= 0.45;
     } else {
-      const viewerBias = activity === 'speaking' || activity === 'listening' ? 0.66 : 0.16;
+      const viewerBias = activity === 'listening' ? 0.66 : 0.16;
       targetEyeX *= 1 - viewerBias;
       targetEyeY *= 1 - viewerBias;
       targetHeadX *= 1 - viewerBias * 0.34;
     }
 
     const pointerIsFresh = pointer.active && now - pointer.lastMoved < 2_400;
-    if (pointerIsFresh) {
+    const tracksPointer = pointerIsFresh && direction.gaze === 'viewer' && activity !== 'speaking';
+    if (tracksPointer) {
       targetEyeX = pointer.x * 0.88;
       targetEyeY = pointer.y * 0.72;
       targetHeadX = targetHeadX * 0.55 + pointer.x * 0.18;
@@ -557,7 +566,7 @@ export class AvatarAutonomy {
     const lift = this.lift.step(targetLift, dt, 0.5 * (touchSpeed ? 1.3 : 1));
     const rotation = this.rotation.step(targetRotation, dt, 0.48 * (touchSpeed ? 1.3 : 1));
     const breath = (Math.sin(seconds * 1.12 + this.phase * 0.2) + 1) / 2;
-    const pose = pointerIsFresh ? 'pointer' : this.pose;
+    const pose = tracksPointer ? 'pointer' : this.pose;
 
     this.frame = {
       headX,

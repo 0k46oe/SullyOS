@@ -81,6 +81,25 @@ describe('AvatarAutonomy', () => {
     expect(Math.max(...frames.map(frame => frame.speechAccent))).toBeGreaterThan(0.72);
     expect(Math.max(...frames.map(frame => Math.abs(frame.headY)))).toBeGreaterThan(0.03);
   });
+  it('keeps eye contact while speaking unless gaze is explicitly averted', () => {
+    const pointer = { x: 0.95, y: 0.7, active: true, lastMoved: 1_600 };
+    const viewerFrames = run(
+      new AvatarAutonomy(0, seededRandom(47)),
+      1_600,
+      DEFAULT_AVATAR_PERFORMANCE,
+      'speaking',
+      pointer,
+    );
+    const viewer = viewerFrames[viewerFrames.length - 1]!;
+    const leftDirection: AvatarPerformanceDirection = { ...DEFAULT_AVATAR_PERFORMANCE, gaze: 'left' };
+    const avertedFrames = run(new AvatarAutonomy(0, seededRandom(47)), 1_600, leftDirection, 'speaking', pointer);
+    const averted = avertedFrames[avertedFrames.length - 1]!;
+
+    expect(Math.abs(viewer.eyeX)).toBeLessThan(0.08);
+    expect(Math.abs(viewer.eyeY)).toBeLessThan(0.08);
+    expect(viewer.pose).not.toBe('pointer');
+    expect(averted.eyeX).toBeLessThan(-0.5);
+  });
   it('uses a fast touch attack without speeding up ambient call motion', () => {
     const direction: AvatarPerformanceDirection = {
       ...DEFAULT_AVATAR_PERFORMANCE,

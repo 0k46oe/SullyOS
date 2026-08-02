@@ -3,9 +3,7 @@ import {
   ArrowClockwise,
   ArrowsOutCardinal,
   Check,
-  ChatCircleDots,
   Gear,
-  Phone,
   SlidersHorizontal,
   Sparkle,
   Trash,
@@ -235,15 +233,6 @@ const useTypewriter = (text: string, charsPerSecond = 24): { shown: string; done
   return { shown: text.slice(0, count), done: count >= text.length };
 };
 
-// 漂浮光尘：一次性生成固定轨迹，纯 transform/opacity 动画不进主线程布局。
-interface DustMote {
-  left: number;
-  size: number;
-  delay: number;
-  duration: number;
-  drift: number;
-}
-
 interface CompanionLine {
   text: string;
   label: string;
@@ -382,16 +371,6 @@ const CompanionHome: React.FC = () => {
   const uiTint = palette.accent;
   // 氛围色（粒子/地面辉光）：预设场景用场景色，否则时段色。
   const ambientTint = palette.ambient;
-
-  const dustMotes = useMemo<DustMote[]>(() => (
-    Array.from({ length: 9 }, (_, index) => ({
-      left: 6 + ((index * 37 + 13) % 88),
-      size: 2 + ((index * 7) % 3) * 1.4,
-      delay: -((index * 2.63) % 14),
-      duration: 11 + ((index * 5) % 9),
-      drift: ((index % 2 ? 1 : -1) * (8 + ((index * 11) % 22))),
-    }))
-  ), []);
 
   useEffect(() => {
     // StrictMode 会「装载→卸载→再装载」跑一遍 effect：cleanup 把 mounted 打成
@@ -650,12 +629,6 @@ const CompanionHome: React.FC = () => {
           from { opacity:0; transform:translateY(10px); }
           to { opacity:1; transform:translateY(0); }
         }
-        @keyframes companion-dust {
-          0% { opacity:0; transform:translate3d(0,12vh,0) scale(.7); }
-          18% { opacity:.85; }
-          82% { opacity:.5; }
-          100% { opacity:0; transform:translate3d(var(--dust-drift),-58vh,0) scale(1.1); }
-        }
         @keyframes companion-cursor { 0%,100% { opacity:.85; } 50% { opacity:.1; } }
         @keyframes companion-thinking-dot {
           0%,80%,100% { opacity:.25; transform:translateY(0); }
@@ -681,16 +654,12 @@ const CompanionHome: React.FC = () => {
           100% { opacity:0; transform:translate(-50%,-180%) scale(.76) rotate(16deg); }
         }
         @keyframes companion-star-pulse {
-          0%,100% { transform:scale(1) rotate(0deg); filter:brightness(1); }
-          50% { transform:scale(1.08) rotate(8deg); filter:brightness(1.24); }
+          0%,100% { transform:scale(1); opacity:.92; }
+          50% { transform:scale(1.045); opacity:1; }
         }
         @keyframes companion-star-open {
           from { opacity:0; transform:translateY(18px) scale(.94); }
           to { opacity:1; transform:translateY(0) scale(1); }
-        }
-        @keyframes companion-glint {
-          0%,86%,100% { opacity:0; transform:scale(.3) rotate(0deg); }
-          91% { opacity:1; transform:scale(1) rotate(45deg); }
         }
         @keyframes companion-drawer-up {
           from { opacity:0; transform:translateY(28px); }
@@ -721,46 +690,22 @@ const CompanionHome: React.FC = () => {
         <div className="absolute inset-x-0 bottom-0 h-[38%]" style={{ background: `linear-gradient(to top, ${ambientTint}14, transparent)` }} />
       )}
 
-      {/* 漂浮光尘（纯 GPU 动画） */}
-      <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
-        {dustMotes.map((mote, index) => (
-          <span
-            key={index}
-            className="absolute bottom-0 rounded-full"
-            style={{
-              left: `${mote.left}%`,
-              width: mote.size,
-              height: mote.size,
-              background: ambientTint,
-              boxShadow: `0 0 ${mote.size * 3}px ${ambientTint}`,
-              opacity: 0,
-              '--dust-drift': `${mote.drift}px`,
-              animation: `companion-dust ${mote.duration}s linear ${mote.delay}s infinite`,
-            } as React.CSSProperties}
-          />
-        ))}
-      </div>
-
       {/* ── 角色全出血舞台 ── */}
-      <div className="pointer-events-none absolute inset-0 z-[1] overflow-hidden" aria-hidden>
-        <div
-          className="absolute left-1/2 top-[31%] h-[48vw] max-h-[22rem] min-h-[13rem] w-[48vw] max-w-[22rem] min-w-[13rem] -translate-x-1/2 rounded-full border border-white/[0.08]"
-          style={{ boxShadow: `0 0 52px ${uiTint}12, inset 0 0 34px ${uiTint}0d` }}
-        />
-        <div
-          className="absolute left-1/2 top-[34%] h-[34vw] max-h-[16rem] min-h-[10rem] w-[62vw] max-w-[28rem] min-w-[18rem] -translate-x-1/2 rotate-[-17deg] rounded-[50%] border border-white/[0.07]"
-          style={{ borderColor: `${uiTint}2c` }}
-        />
-        <div className="absolute left-[7%] top-[25%] h-[46%] w-px" style={{ background: `linear-gradient(transparent, ${uiTint}4d, transparent)` }} />
-        <div className="absolute right-[8%] top-[20%] h-[50%] w-px" style={{ background: `linear-gradient(transparent, ${uiTint}35, transparent)` }} />
-        {[{ left: '18%', top: '30%', delay: '-1.8s' }, { left: '73%', top: '27%', delay: '-4.4s' }, { left: '78%', top: '59%', delay: '-6.1s' }].map((star, index) => (
-          <span
-            key={`hud-star-${index}`}
-            className="absolute text-[12px]"
-            style={{ left: star.left, top: star.top, color: uiTint, animation: `companion-glint 7s ease-in-out ${star.delay} infinite` }}
-          >✦</span>
-        ))}
-      </div>
+      {!backgroundImageUrl && (
+        <div className="pointer-events-none absolute inset-0 z-[1] overflow-hidden" aria-hidden>
+          <div
+            className="absolute left-1/2 top-[31%] h-[48vw] max-h-[22rem] min-h-[13rem] w-[48vw] max-w-[22rem] min-w-[13rem] -translate-x-1/2 rounded-full border border-white/[0.07]"
+            style={{ boxShadow: `inset 0 0 24px ${uiTint}0b` }}
+          />
+          <div
+            className="absolute left-1/2 top-[34%] h-[34vw] max-h-[16rem] min-h-[10rem] w-[62vw] max-w-[28rem] min-w-[18rem] -translate-x-1/2 rotate-[-17deg] rounded-[50%] border"
+            style={{ borderColor: `${uiTint}20` }}
+          />
+          <span className="absolute left-[18%] top-[30%] text-[10px] opacity-45" style={{ color: uiTint }}>✦</span>
+          <span className="absolute right-[19%] top-[27%] text-[8px] opacity-35" style={{ color: uiTint }}>✦</span>
+          <span className="absolute right-[16%] top-[59%] text-[7px] opacity-30" style={{ color: uiTint }}>✦</span>
+        </div>
+      )}
 
       <div className="absolute inset-0">
         <VRMVideoCallStage
@@ -797,7 +742,7 @@ const CompanionHome: React.FC = () => {
         {touchBanner && !editing && (
           <div
             key={touchBanner.nonce}
-            className="pointer-events-none absolute z-50 whitespace-nowrap rounded-full border border-white/40 bg-[#120d25]/88 px-3 py-1.5 text-[11px] font-medium tracking-wide text-white shadow-2xl backdrop-blur-md"
+            className="pointer-events-none absolute z-50 whitespace-nowrap rounded-full border border-white/40 bg-[#120d25]/88 px-3 py-1.5 text-[11px] font-medium tracking-wide text-white shadow-2xl"
             style={{
               left: `${touchBanner.x * 100}%`,
               top: `${touchBanner.y * 100}%`,
@@ -833,43 +778,43 @@ const CompanionHome: React.FC = () => {
           data-testid="companion-game-hud"
         >
           <div
-            className="flex min-w-0 items-center gap-2 rounded-2xl border border-white/20 py-1.5 pl-1.5 pr-3 shadow-xl backdrop-blur-xl"
-            style={{ background: `${palette.panelBottom}d9`, boxShadow: `0 8px 28px ${palette.shadow}73, inset 0 1px 0 ${uiTint}35` }}
+            className="flex min-w-0 items-center gap-2 border border-white/20 py-1.5 pl-1.5 pr-3 shadow-xl"
+            style={{ background: `${palette.panelBottom}e8`, boxShadow: `0 8px 28px ${palette.shadow}73, inset 0 1px 0 ${uiTint}35`, clipPath: 'polygon(0 10px, 10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px), calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px))' }}
           >
-            <div className="relative h-11 w-11 shrink-0 rounded-xl border-2 bg-black/20 p-0.5" style={{ borderColor: `${uiTint}c9` }}>
-              <img src={character.avatar} alt="" className="h-full w-full rounded-[0.55rem] object-cover" />
-              <span className="absolute -bottom-1 -right-1 rounded-full border border-white/40 px-1 text-[7px] font-bold text-white" style={{ background: uiTint }}>01</span>
+            <div className="relative h-11 w-11 shrink-0 border-2 bg-black/20 p-0.5" style={{ borderColor: `${uiTint}c9`, clipPath: 'polygon(20% 0, 80% 0, 100% 20%, 100% 80%, 80% 100%, 20% 100%, 0 80%, 0 20%)' }}>
+              <img src={character.avatar} alt="" className="h-full w-full object-cover" />
+
             </div>
             <div className="min-w-0">
-              <div className="text-[7px] font-semibold tracking-[0.2em] text-white/50">PARTNER RANK</div>
+              <div className="text-[7px] font-semibold tracking-[0.2em] text-white/50">ACTIVE PARTNER</div>
               <div className="max-w-[8.5rem] truncate text-[13px] font-semibold tracking-wide text-white">{character.name}</div>
               <div className="mt-1 flex items-center gap-1.5">
-                <span className="h-1.5 w-16 overflow-hidden rounded-full bg-white/10">
-                  <span className="block h-full w-full rounded-full" style={{ background: `linear-gradient(90deg, ${uiTint}, #ffd8ef)` }} />
+                <span className="h-px w-12" style={{ background: `linear-gradient(90deg, ${uiTint}, transparent)` }} />
+                <span className="text-[7px] font-semibold tracking-[0.12em] text-white/55">
+                  {character.videoAvatar?.format === 'live2d' ? 'LIVE2D' : character.videoAvatar?.format === 'vrm' ? 'VRM' : 'PORTRAIT'}
                 </span>
-                <span className="text-[8px] font-semibold text-white/70">LINK</span>
               </div>
             </div>
           </div>
 
           <div className="flex min-w-0 flex-col items-end gap-1.5">
             <div className="flex items-center gap-1.5">
-              <div className="rounded-full border border-white/20 bg-black/40 px-2.5 py-1 text-[10px] tracking-[0.12em] text-white/80 backdrop-blur-md">
+              <div className="rounded-full border border-white/20 bg-black/40 px-2.5 py-1 text-[10px] tracking-[0.12em] text-white/80">
                 {hh}:{mm}
               </div>
               <button
                 onClick={() => openApp(AppID.Appearance)}
-                className="flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-black/40 text-white/70 backdrop-blur-md active:scale-90"
+                className="flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-black/40 text-white/70 active:scale-90"
                 aria-label="外观设置"
               >
                 <Gear size={15} />
               </button>
             </div>
             <div className="flex items-center gap-1.5">
-              <div className="rounded-full border border-white/20 bg-black/40 px-2.5 py-1 text-[8px] text-white/70 backdrop-blur-md">
+              <div className="rounded-full border border-white/20 bg-black/40 px-2.5 py-1 text-[8px] text-white/70">
                 <span className="mr-1 text-white/40">SYNC</span>{character.videoAvatar ? 'ON' : 'PORTRAIT'}
               </div>
-              <div className="rounded-full border border-white/20 bg-black/40 px-2.5 py-1 text-[8px] text-white/70 backdrop-blur-md">
+              <div className="rounded-full border border-white/20 bg-black/40 px-2.5 py-1 text-[8px] text-white/70">
                 <span className="mr-1 text-white/40">TOUCH</span>{preparedReactionCount}
               </div>
             </div>
@@ -882,35 +827,53 @@ const CompanionHome: React.FC = () => {
 
       {/* ── 角色旁边的手游快捷入口。触摸设置是第一优先级。 ── */}
       {!editing && !touchSettingsOpen && !appStarOpen && (
-        <div className="absolute right-2.5 top-[31%] z-30 flex flex-col items-center gap-2.5">
+        <aside
+          className="absolute right-2 top-[27%] z-30 flex w-[4.55rem] flex-col items-center gap-2 border px-1.5 pb-3 pt-3 text-white"
+          style={{
+            background: `linear-gradient(180deg, ${palette.panelTop}f2, ${palette.panelBottom}ed)`,
+            borderColor: `${uiTint}42`,
+            boxShadow: `0 14px 34px ${palette.shadow}9c, inset 0 0 22px ${uiTint}0d`,
+            clipPath: 'polygon(12px 0, calc(100% - 12px) 0, 100% 12px, 100% calc(100% - 12px), calc(100% - 12px) 100%, 12px 100%, 0 calc(100% - 12px), 0 12px)',
+          }}
+          aria-label="角色快捷轨道"
+        >
+          <div className="pointer-events-none absolute bottom-5 left-1/2 top-5 w-px -translate-x-1/2" style={{ background: `linear-gradient(transparent, ${uiTint}36, ${uiTint}6e, ${uiTint}36, transparent)` }} />
           <button
             onClick={openTouchSettings}
-            className="group relative flex flex-col items-center gap-1 active:scale-90"
+            className="group relative z-10 flex flex-col items-center gap-1.5 active:scale-90"
             data-testid="companion-touch-settings-button"
           >
             {!preparedReactionCount && (
-              <span className="absolute -right-0.5 -top-1 z-10 rounded-full bg-pink-500 px-1.5 py-0.5 text-[7px] font-bold text-white shadow">NEW</span>
+              <span className="absolute -right-0.5 -top-1.5 z-20 flex h-4 min-w-4 items-center justify-center rounded-full bg-pink-500 px-1 text-[7px] font-bold text-white shadow">!</span>
             )}
             <span
-              className="flex h-12 w-12 items-center justify-center rounded-2xl border-2 text-xl text-white shadow-xl backdrop-blur-xl"
-              style={{ background: `linear-gradient(145deg, ${uiTint}d9, ${palette.panelBottom}ef)`, borderColor: `${uiTint}a8`, boxShadow: `0 7px 22px ${palette.shadow}80, 0 0 18px ${uiTint}26` }}
-            >☝</span>
-            <span className="rounded-full bg-black/40 px-2 py-0.5 text-[9px] font-medium tracking-wide text-white/80 backdrop-blur-sm">触摸设置</span>
+              className="flex h-[3.15rem] w-[3.15rem] rotate-45 items-center justify-center rounded-[0.72rem] border-2"
+              style={{ background: `linear-gradient(145deg, ${uiTint}bd, ${palette.panelTop}f5)`, borderColor: `${uiTint}c7`, boxShadow: `0 0 0 3px ${uiTint}12, 0 0 22px ${uiTint}49, inset 0 1px 0 rgba(255,255,255,.32)` }}
+            >
+              <span className="-rotate-45 text-[19px]">☝</span>
+            </span>
+            <span className="relative bg-[#130d25]/90 px-1.5 py-0.5 text-[8px] font-medium tracking-[0.08em] text-white/90">触摸互动</span>
           </button>
           {[
-            { id: AppID.Chat, icon: <ChatCircleDots size={18} weight="fill" />, label: '聊天' },
-            { id: AppID.Call, icon: <Phone size={18} weight="fill" />, label: '通话' },
-            { id: AppID.Character, icon: <Sparkle size={18} weight="fill" />, label: '角色' },
-          ].map(item => (
-            <button key={item.id} onClick={() => openApp(item.id)} className="group flex flex-col items-center gap-1 active:scale-90">
-              <span
-                className="flex h-10 w-10 items-center justify-center rounded-full border text-white/80 shadow-lg backdrop-blur-md"
-                style={{ background: `${palette.panelBottom}cf`, borderColor: `${uiTint}36`, boxShadow: `0 4px 16px ${palette.shadow}66, inset 0 1px 0 ${uiTint}26` }}
-              >{item.icon}</span>
-              <span className="text-[8px] tracking-[0.12em] text-white/70 drop-shadow">{item.label}</span>
-            </button>
-          ))}
-        </div>
+            { id: AppID.Chat, icon: 'Chat' as const, label: '聊天' },
+            { id: AppID.Call, icon: 'Call' as const, label: '通话' },
+            { id: AppID.Appearance, icon: 'Appearance' as const, label: '换装' },
+            { id: AppID.Character, icon: 'Character' as const, label: '角色' },
+          ].map(item => {
+            const Icon = Icons[item.icon];
+            return (
+              <button key={item.id} onClick={() => openApp(item.id)} className="group relative z-10 flex flex-col items-center gap-1.5 active:scale-90">
+                <span
+                  className="flex h-9 w-9 rotate-45 items-center justify-center rounded-[0.58rem] border bg-[#211631]/95 text-white/85"
+                  style={{ borderColor: `${uiTint}42`, boxShadow: `0 4px 14px ${palette.shadow}72, inset 0 1px 0 ${uiTint}1f` }}
+                >
+                  <Icon className="h-[17px] w-[17px] -rotate-45" />
+                </span>
+                <span className="text-[8px] tracking-[0.1em] text-white/78">{item.label}</span>
+              </button>
+            );
+          })}
+        </aside>
       )}
 
       {/* ── 触摸设置抽屉：选部位，一次生成，之后只本地轮播。 ── */}
@@ -995,23 +958,28 @@ const CompanionHome: React.FC = () => {
       {/* ── galgame 对话框：亮色台词板，不再像聊天消息卡。 ── */}
       {dialogVisible && (
         <div
-          className="absolute inset-x-3 z-40"
-          style={{ bottom: 'max(5.25rem, calc(var(--safe-bottom, 0px) + 5.05rem))', animation: 'companion-dialog-in 280ms ease-out both' }}
+          className="absolute inset-x-4 z-40"
+          style={{ bottom: 'max(5.6rem, calc(var(--safe-bottom, 0px) + 5.4rem))', animation: 'companion-dialog-in 280ms ease-out both' }}
           data-testid="companion-dialogue"
         >
           <div
-            className="relative overflow-visible rounded-[1.35rem] border px-4 pb-3 pt-4 shadow-2xl backdrop-blur-xl"
+            className="relative overflow-visible border px-4 pb-3 pt-4 text-white shadow-2xl"
             style={{
-              color: '#201a2e',
-              background: 'linear-gradient(150deg, rgba(255,255,255,.94), rgba(241,235,250,.91))',
-              borderColor: `${uiTint}a0`,
-              boxShadow: `0 18px 44px ${palette.shadow}8c, inset 0 1px 0 #ffffff`,
+              background: `linear-gradient(145deg, ${palette.panelTop}f0, ${palette.panelBottom}f7)`,
+              borderColor: `${uiTint}9c`,
+              boxShadow: `0 18px 44px ${palette.shadow}b8, inset 0 1px 0 ${uiTint}36`,
+              clipPath: 'polygon(0 12px, 12px 0, calc(100% - 14px) 0, 100% 14px, 100% calc(100% - 10px), calc(100% - 10px) 100%, 16px 100%, 0 calc(100% - 16px))',
             }}
           >
             <div className="absolute inset-x-5 top-0 h-px" style={{ background: `linear-gradient(90deg, transparent, ${uiTint}, transparent)` }} />
+            <div className="pointer-events-none absolute bottom-3 right-4 flex h-4 items-end gap-[2px] opacity-35" aria-hidden>
+              {[5, 9, 4, 12, 7, 14, 8, 5, 10, 4].map((height, index) => (
+                <span key={index} className="w-px" style={{ height, background: uiTint }} />
+              ))}
+            </div>
             <div
-              className="absolute -top-3 left-4 flex items-center gap-1.5 rounded-lg border border-white/20 px-3 py-1 text-[10px] font-semibold tracking-wide text-white shadow-lg"
-              style={{ background: `linear-gradient(120deg, ${palette.panelTop}, ${uiTint}c9)`, boxShadow: `0 5px 16px ${palette.shadow}66` }}
+              className="absolute -top-3 left-4 flex items-center gap-1.5 border border-white/20 px-3 py-1 text-[10px] font-semibold tracking-wide text-white shadow-lg"
+              style={{ background: `linear-gradient(120deg, ${palette.panelTop}, ${uiTint}c9)`, boxShadow: `0 5px 16px ${palette.shadow}66`, clipPath: 'polygon(0 6px, 7px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 7px) 100%, 0 100%)' }}
             >
               {character.name}
               {line?.label && <span className="text-[8px] font-normal text-white/60">· {line.label}</span>}
@@ -1028,7 +996,7 @@ const CompanionHome: React.FC = () => {
                 ))}
               </div>
             ) : (
-              <div className="min-h-[2.5rem] whitespace-pre-line text-[13px] font-medium leading-[1.72] text-[#272033]">
+              <div className="min-h-[2.5rem] whitespace-pre-line text-[13px] font-medium leading-[1.72] text-white/90">
                 {typed.shown}
                 {!typed.done && (
                   <span className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px]" style={{ background: uiTint, animation: 'companion-cursor 800ms step-end infinite' }} />
@@ -1040,7 +1008,7 @@ const CompanionHome: React.FC = () => {
               <button
                 onClick={() => respondToTouch({ ...lastHit, nonce: Date.now() + Math.random() }, true)}
                 className="mt-1.5 inline-flex items-center gap-1 text-[9px] font-medium active:scale-95"
-                style={{ color: `${palette.panelTop}b8` }}
+                style={{ color: uiTint }}
                 data-testid="companion-next-cached-reaction"
               >
                 <ArrowClockwise size={11} /> 换一句 · 本地轮播
@@ -1117,36 +1085,50 @@ const CompanionHome: React.FC = () => {
 
       {!editing && !touchSettingsOpen && (
         <nav
-          className="absolute inset-x-3 z-40 border border-white/20 px-2 py-1.5 shadow-2xl backdrop-blur-2xl"
-          style={{
-            bottom: 'max(0.55rem, calc(var(--safe-bottom, 0px) + 0.4rem))',
-            background: `${palette.panelBottom}ef`,
-            boxShadow: `0 14px 36px ${palette.shadow}b8, inset 0 1px 0 ${uiTint}3d`,
-            clipPath: 'polygon(0 12px, 12px 0, 38% 0, 42% 8px, 58% 8px, 62% 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%)',
-          }}
+          className="absolute inset-x-3 z-40 h-[4.55rem] overflow-visible"
+          style={{ bottom: 'max(0.5rem, calc(var(--safe-bottom, 0px) + 0.35rem))' }}
           aria-label="陪伴桌面导航"
         >
-          <div className="grid grid-cols-5 items-end gap-1">
+          <div
+            className="pointer-events-none absolute inset-0 border border-white/20"
+            style={{
+              background: `linear-gradient(180deg, ${palette.panelTop}ed, ${palette.panelBottom}fa)`,
+              borderColor: `${uiTint}42`,
+              boxShadow: `0 14px 34px ${palette.shadow}ad, inset 0 1px 0 ${uiTint}36`,
+              clipPath: 'polygon(0 12px, 12px 0, 37% 0, 42% 9px, 58% 9px, 63% 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%)',
+            }}
+          />
+          <div className="pointer-events-none absolute inset-x-[8%] top-0 h-px" style={{ background: `linear-gradient(90deg, transparent, ${uiTint}57, transparent)` }} />
+          <div className="relative z-10 grid h-full grid-cols-5 items-end gap-1 px-2 pb-1 pt-2">
             {[
               { id: AppID.Chat, icon: Icons.Chat, label: '聊天' },
               { id: AppID.Schedule, icon: Icons.Schedule, label: '日程' },
             ].map(item => (
-              <button key={item.id} onClick={() => launchCompanionApp(item.id)} className="flex flex-col items-center gap-0.5 py-1 text-white/60 active:scale-90">
-                <span className="flex h-7 items-center"><item.icon className="h-[17px] w-[17px]" /></span><span className="text-[8px]">{item.label}</span>
+              <button key={item.id} onClick={() => launchCompanionApp(item.id)} className="flex h-full flex-col items-center justify-end gap-1 pb-1 text-white/70 active:scale-90">
+                <item.icon className="h-[18px] w-[18px]" />
+                <span className="text-[8px] tracking-[0.12em]">{item.label}</span>
               </button>
             ))}
             <button
               onClick={() => setAppStarOpen(open => !open)}
-              className="relative -mt-5 flex flex-col items-center gap-0.5 text-white active:scale-90"
+              className="relative flex h-full -translate-y-3 flex-col items-center justify-end gap-0.5 text-white active:scale-95"
               aria-expanded={appStarOpen}
               data-testid="companion-app-star-button"
             >
-              <span
-                className="relative flex h-14 w-14 items-center justify-center rounded-full border-2 border-white/65 shadow-lg"
-                style={{ background: `radial-gradient(circle at 35% 28%, #fff, ${uiTint} 34%, ${palette.panelTop} 76%)`, color: palette.panelBottom, boxShadow: `0 0 0 5px ${uiTint}16, 0 0 30px ${uiTint}78`, animation: appStarOpen ? 'none' : 'companion-star-pulse 3.8s ease-in-out infinite' }}
-              >
-                <Sparkle size={26} weight="fill" />
-                <span className="absolute -right-1 top-1 text-[8px] text-white">✦</span>
+              <span className="relative flex h-[3.85rem] w-[3.85rem] items-center justify-center rounded-full">
+                <span className="absolute -inset-1.5 rounded-full border opacity-60" style={{ borderColor: `${uiTint}84`, boxShadow: `0 0 24px ${uiTint}35` }} />
+                <span
+                  className="relative flex h-[3.35rem] w-[3.35rem] items-center justify-center rounded-full border-2 text-white"
+                  style={{
+                    background: `radial-gradient(circle at 38% 30%, #f8efff 0%, ${uiTint} 35%, ${palette.panelTop} 78%)`,
+                    borderColor: 'rgba(255,255,255,.72)',
+                    boxShadow: `inset 0 0 12px rgba(255,255,255,.28), 0 0 26px ${uiTint}78`,
+                    animation: appStarOpen ? 'none' : 'companion-star-pulse 3.6s ease-in-out infinite',
+                  }}
+                >
+                  <Sparkle size={27} weight="fill" />
+                  <span className="absolute right-1 top-1 text-[7px] text-white">✦</span>
+                </span>
               </span>
               <span className="text-[8px] font-semibold tracking-[0.18em]" style={{ color: uiTint }}>功能</span>
             </button>
@@ -1154,8 +1136,9 @@ const CompanionHome: React.FC = () => {
               { id: AppID.Music, icon: Icons.Music, label: '音乐' },
               { id: AppID.Settings, icon: Icons.Settings, label: '设置' },
             ].map(item => (
-              <button key={item.id} onClick={() => launchCompanionApp(item.id)} className="flex flex-col items-center gap-0.5 py-1 text-white/60 active:scale-90">
-                <span className="flex h-7 items-center"><item.icon className="h-[17px] w-[17px]" /></span><span className="text-[8px]">{item.label}</span>
+              <button key={item.id} onClick={() => launchCompanionApp(item.id)} className="flex h-full flex-col items-center justify-end gap-1 pb-1 text-white/70 active:scale-90">
+                <item.icon className="h-[18px] w-[18px]" />
+                <span className="text-[8px] tracking-[0.12em]">{item.label}</span>
               </button>
             ))}
           </div>
@@ -1166,7 +1149,7 @@ const CompanionHome: React.FC = () => {
         <>
           {character.videoAvatar && (
             <div
-              className="pointer-events-none absolute inset-x-6 z-40 rounded-2xl border border-white/20 bg-black/40 px-3 py-2 text-center backdrop-blur-md"
+              className="pointer-events-none absolute inset-x-6 z-40 rounded-2xl border border-white/20 bg-black/40 px-3 py-2 text-center"
               style={{ top: 'max(6.4rem, calc(var(--safe-top) + 5.4rem))' }}
             >
               <span className="text-[11px] leading-relaxed text-white/80">拖动角色摆位置 · 双指捏合 / 滚轮调大小，松手即保存</span>
