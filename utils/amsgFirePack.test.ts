@@ -7,6 +7,8 @@ import {
   AMSG_SLOT_TIME_SINCE_USER,
   AmsgFirePack,
   AmsgSelfLog,
+  FIRE_PACK_VERSION,
+  describeFirePackVersion,
   SELF_LOG_MAX_ENTRIES,
   SELF_LOG_TEXT_MAX,
   appendSelfLogEntry,
@@ -104,7 +106,7 @@ describe('formatFireTimeFull / formatFireTimeShort（角色参照系的自然中
 
 describe('renderFirePack', () => {
   const basePack: AmsgFirePack = {
-    v: 3, builtAt: 1_700_000_000_000, pendingTasks: [],
+    v: 4, builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
     template: [
       `当前本地时间：${AMSG_SLOT_CURRENT_TIME}`,
       AMSG_SLOT_TIME_SINCE_USER,
@@ -151,8 +153,8 @@ describe('renderFirePack', () => {
 
 describe('parseFirePack', () => {
   const valid: AmsgFirePack = {
-    v: 3, template: 'x', lastUserMessageAt: null, tzId: 'Asia/Shanghai', targetName: 'A',
-    builtAt: 1_700_000_000_000, pendingTasks: [],
+    v: 4, template: 'x', lastUserMessageAt: null, tzId: 'Asia/Shanghai', targetName: 'A',
+    builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
   };
 
   it('合法 JSON 原样返回', () => {
@@ -193,8 +195,8 @@ describe('parseFirePack', () => {
 describe('self_log', () => {
   const packAt = 1_700_000_000_000;
   const pack: AmsgFirePack = {
-    v: 3, template: 'x', lastUserMessageAt: null, tzId: 'UTC', targetName: '楪同学',
-    builtAt: packAt, pendingTasks: [],
+    v: 4, template: 'x', lastUserMessageAt: null, tzId: 'UTC', targetName: '楪同学',
+    builtAt: packAt, pendingTasks: [], scene: null,
   };
   const entry = (id: string, text: string, at = packAt) => ({ id, at, text });
 
@@ -334,8 +336,8 @@ describe('self_log', () => {
 describe('连排提醒', () => {
   const packAt = 1_700_000_000_000;
   const slotted: AmsgFirePack = {
-    v: 3, lastUserMessageAt: null, tzId: 'UTC', targetName: '楪同学',
-    builtAt: packAt, pendingTasks: [],
+    v: 4, lastUserMessageAt: null, tzId: 'UTC', targetName: '楪同学',
+    builtAt: packAt, pendingTasks: [], scene: null,
     template: `【最近对话上下文】\n用户：在吗${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
   };
   const entry = (id: string, text: string) => ({ id, at: packAt, text });
@@ -384,10 +386,10 @@ describe('last_skip 新原因', () => {
 
 describe('fire_pack 任务指令槽', () => {
   const pack: AmsgFirePack = {
-    v: 3,
+    v: 4,
     template: `头部\n${AMSG_SLOT_TASK_INSTRUCTION}\n尾部 ${AMSG_SLOT_CURRENT_TIME}`,
     lastUserMessageAt: null, tzId: 'Asia/Shanghai', targetName: '楪同学',
-    builtAt: 1_700_000_000_000, pendingTasks: [],
+    builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
   };
 
   it('renderFirePack 用传入的任务指令填槽', () => {
@@ -396,8 +398,9 @@ describe('fire_pack 任务指令槽', () => {
     expect(out).not.toContain(AMSG_SLOT_TASK_INSTRUCTION);
   });
 
-  it('parseFirePack 只认 v2；v1 旧包 parse 失败（worker 抛 fire-state 错）', () => {
+  it('只认当前版本号，对不上的整包 parse 失败（worker 抛 fire-state 错）', () => {
     expect(parseFirePack(JSON.stringify(pack))).not.toBeNull();
+    expect(parseFirePack(JSON.stringify({ ...pack, v: 3 }))).toBeNull();
     expect(parseFirePack(JSON.stringify({ ...pack, v: 1 }))).toBeNull();
   });
 });
@@ -405,13 +408,14 @@ describe('fire_pack 任务指令槽', () => {
 describe('client_state 值压缩', () => {
   // fire_pack 有几万字，随手编一小段压不出效果也测不出真问题，拿重复的中文段落凑量。
   const bigJson = JSON.stringify({
-    v: 3,
+    v: 4,
     template: '【角色系统设定】你是一个会在深夜突然想起对方的人。\n'.repeat(400),
     lastUserMessageAt: 1_700_000_000_000,
     tzId: 'Asia/Shanghai',
     targetName: '楪',
     builtAt: 1_700_000_000_000,
     pendingTasks: [],
+    scene: null,
   });
 
   it('压完再解回来，一个字都不差', async () => {
@@ -465,5 +469,37 @@ describe('client_state 值压缩', () => {
 
   it('数据损坏时解压抛错，不会把半截内容当正常值放过去', async () => {
     await expect(unpackStateValue('gz1:bm90LWd6aXAtYXQtYWxs')).rejects.toThrow();
+  });
+});
+
+// 回归守卫：升 fire_pack 版本要 worker bundle 和前端一起动，而设置页的版本门槛读的是
+// **上游 amsg-server 库**的版本号——只改 SullyOS 自己那份 worker 代码时那个号不动，门槛不亮。
+// 用户忘了重贴 bundle 时，唯一能看到的线索就是面板上的 lastError，所以这句话得说清该做什么。
+// 注意这里钉的是「说明白」，不是「兼容」：版本对不上照样整包打回。
+describe('fire_pack 版本对不上时说清该做什么', () => {
+  const pack = (v: unknown) => JSON.stringify({
+    v, template: 'x', lastUserMessageAt: null, tzId: 'UTC', targetName: 'A',
+    builtAt: 1, pendingTasks: [], scene: null,
+  });
+
+  it('旧包（worker 新、前端旧）→ 让用户打开一次网页重传', () => {
+    expect(parseFirePack(pack(FIRE_PACK_VERSION - 1))).toBeNull();
+    expect(describeFirePackVersion(pack(FIRE_PACK_VERSION - 1))).toContain('前端比 worker 旧');
+  });
+
+  it('新包（前端新、worker 旧）→ 让用户去重新粘贴部署', () => {
+    expect(parseFirePack(pack(FIRE_PACK_VERSION + 1))).toBeNull();
+    expect(describeFirePackVersion(pack(FIRE_PACK_VERSION + 1))).toContain('重新粘贴部署');
+  });
+
+  it('版本号对得上但别的字段坏了 → 不甩锅给部署', () => {
+    const reason = describeFirePackVersion(pack(FIRE_PACK_VERSION));
+    expect(reason).toContain('数据损坏');
+    expect(reason).not.toContain('粘贴');
+  });
+
+  it('压根不是 JSON / 没版本号', () => {
+    expect(describeFirePackVersion('not json')).toContain('不是合法 JSON');
+    expect(describeFirePackVersion('{}')).toContain('没有版本号');
   });
 });

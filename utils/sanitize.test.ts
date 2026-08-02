@@ -268,6 +268,24 @@ describe('bubble vs notification differences', () => {
     expect(sanitizeForBubble('[[XHS_LIKE: 1]] hi')).toBe('[[XHS_LIKE: 1]] hi');
     expect(sanitizeForBubble('[[READ_NOTE: key]] hi')).toBe('[[READ_NOTE: key]] hi');
   });
+
+  // ─── LIFE / NEWS_CARD 的两条路 ────────────────────────────────────────────
+  // 前台聊天: chatParser.parseAndExecuteActions 直接从原文扫这两个标签执行 (LIFE 见
+  // chatParser.ts LIFE 分支, NEWS_CARD 见 NEWS_CARD_RE), 所以 bubble 侧必须原样留着。
+  // push: 副作用改走 classifier 的 life_record / news_card directive, 正文里剥光,
+  // 否则锁屏横幅直接显示标签源码。
+
+  it('notification 剥 LIFE / NEWS_CARD, bubble 原样保留', () => {
+    expect(sanitizeForNotification('你今天吃药了吗\n[[LIFE:MED|布洛芬]]')).toBe('你今天吃药了吗');
+    expect(sanitizeForNotification('看到个新闻\n[[NEWS_CARD: 微博|某某官宣]]')).toBe('看到个新闻');
+    // 无参形态 (生理期开始/结束) 同样剥掉
+    expect(sanitizeForNotification('记下了[[LIFE:PERIOD_START]]')).toBe('记下了');
+
+    expect(sanitizeForBubble('你今天吃药了吗\n[[LIFE:MED|布洛芬]]'))
+      .toBe('你今天吃药了吗\n[[LIFE:MED|布洛芬]]');
+    expect(sanitizeForBubble('看到个新闻\n[[NEWS_CARD: 微博|某某官宣]]'))
+      .toBe('看到个新闻\n[[NEWS_CARD: 微博|某某官宣]]');
+  });
 });
 
 // ─── sanitizeIntoSegments (amsg-instant 0.8+ pushPayloads) ─────────────────
@@ -474,6 +492,18 @@ describe('sanitizeIntoSegments', () => {
   it('时间戳 leak 跟正文混 → 时间戳 strip 后正文按 chunkText 切', () => {
     const segs = sanitizeIntoSegments('[2026-05-20 13:52] 你好\n（下午1:52）再见');
     expect(segs.map((s) => s.raw)).toEqual(['你好', '再见']);
+  });
+
+  it('LIFE / NEWS_CARD 独占一行时整段消失, 不产生只有标签的 push', () => {
+    // 老行为: 这两个标签既不在 classifier 表里也不在 strip 表里, 于是原样切成独立
+    // segment 发出去 —— 锁屏横幅直接显示 `[[LIFE:MED|布洛芬]]`。
+    expect(sanitizeIntoSegments('你今天吃药了吗\n[[LIFE:MED|布洛芬]]'))
+      .toEqual([{ raw: '你今天吃药了吗', sanitized: '你今天吃药了吗' }]);
+    expect(sanitizeIntoSegments('刷到条新闻\n[[NEWS_CARD: 微博|某某官宣]]'))
+      .toEqual([{ raw: '刷到条新闻', sanitized: '刷到条新闻' }]);
+    // 跟正文同一行时也不留残骸
+    expect(sanitizeIntoSegments('记下啦[[LIFE:EXPENSE|38|打车]]'))
+      .toEqual([{ raw: '记下啦', sanitized: '记下啦' }]);
   });
 
   it('幂等: sanitizeIntoSegments(joinAll) 跟原结果在等价 input 上保持稳定', () => {

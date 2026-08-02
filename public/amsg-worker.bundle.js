@@ -3826,6 +3826,175 @@ function createSingleUserCloudflareWorker(buildConfig) {
   return { fetch: fetch2, scheduled };
 }
 
+// utils/localDate.ts
+function getLocalDateKey(date = /* @__PURE__ */ new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+// utils/timezone.ts
+var nowInTimeZone = (tz, base = /* @__PURE__ */ new Date()) => {
+  if (!tz) return base;
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    }).formatToParts(base);
+    const map = {};
+    for (const p of parts) map[p.type] = p.value;
+    let hour = parseInt(map.hour, 10);
+    if (hour === 24) hour = 0;
+    return new Date(
+      parseInt(map.year, 10),
+      parseInt(map.month, 10) - 1,
+      parseInt(map.day, 10),
+      hour,
+      parseInt(map.minute, 10),
+      parseInt(map.second, 10)
+    );
+  } catch {
+    return base;
+  }
+};
+var wallClockToTimestamp = (wallClockText, tz) => {
+  const asDeviceLocal = new Date(wallClockText.trim().replace(" ", "T")).getTime();
+  if (!tz || Number.isNaN(asDeviceLocal)) return asDeviceLocal;
+  let t = asDeviceLocal;
+  for (let i = 0; i < 2; i++) {
+    const drift = nowInTimeZone(tz, new Date(t)).getTime() - asDeviceLocal;
+    if (drift === 0) break;
+    t -= drift;
+  }
+  return t;
+};
+
+// utils/scheduleInjection.ts
+function getFlowNarrativeKey(hour) {
+  if (hour < 12) return "morning";
+  if (hour < 18) return "afternoon";
+  return "evening";
+}
+var resolveScheduleSlots = (schedule, now) => {
+  if (!schedule?.slots?.length) return { current: null, next: null };
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  for (let i = schedule.slots.length - 1; i >= 0; i--) {
+    const [h, m] = schedule.slots[i].startTime.split(":").map(Number);
+    if (!Number.isFinite(h) || !Number.isFinite(m)) continue;
+    if (currentMinutes >= h * 60 + m) {
+      return {
+        current: schedule.slots[i],
+        next: i < schedule.slots.length - 1 ? schedule.slots[i + 1] : null
+      };
+    }
+  }
+  return { current: null, next: schedule.slots[0] };
+};
+var buildScheduleInjection = (schedule, evolvedNarrative, now = /* @__PURE__ */ new Date()) => {
+  if (!schedule || !schedule.slots || schedule.slots.length === 0) return "";
+  const { current: currentSlot, next: nextSlot } = resolveScheduleSlots(schedule, now);
+  let slotHeader = "";
+  if (currentSlot) {
+    slotHeader = `\u5F53\u524D\u65F6\u6BB5\uFF1A${currentSlot.startTime} \u4F60\u6B63\u5728${currentSlot.activity}`;
+    if (currentSlot.location) slotHeader += `\uFF08${currentSlot.location}\uFF09`;
+    if (nextSlot) slotHeader += `
+\u4E4B\u540E\u5B89\u6392\uFF1A${nextSlot.startTime} ${nextSlot.activity}`;
+    slotHeader += "\n";
+  } else if (nextSlot) {
+    slotHeader = `\u4ECA\u5929\u8FD8\u6CA1\u5F00\u59CB\u6D3B\u52A8\uFF0C\u7A0D\u540E\u5148${nextSlot.activity}\uFF08${nextSlot.startTime}\uFF09
+`;
+  }
+  let narrative = "";
+  if (evolvedNarrative) {
+    narrative = evolvedNarrative;
+  } else if (schedule.flowNarrative && Object.keys(schedule.flowNarrative).length > 0) {
+    const key = getFlowNarrativeKey(now.getHours());
+    narrative = schedule.flowNarrative[key] || schedule.flowNarrative["evening"] || schedule.flowNarrative["afternoon"] || schedule.flowNarrative["morning"] || "";
+  } else if (currentSlot?.innerThought) {
+    narrative = currentSlot.innerThought;
+  }
+  const preamble = `\u6B64\u523B\u4F60\u7684\u5FC3\u4E2D\u76D8\u65CB\u7740\u8FD9\u4E9B\u60F3\u6CD5\u2026\u2026
+`;
+  const footnote = `
+\uFF08\u4E0D\u662F\u53F0\u8BCD\uFF0C\u4E0D\u7528\u8BF4\u51FA\u53E3\u2014\u2014\u8BA9\u5B83\u5F71\u54CD\u4F60\u7684\u8BED\u6C14\u548C\u60C5\u7EEA\u5C31\u597D\u3002\uFF09`;
+  let out = slotHeader;
+  if (narrative) {
+    out += preamble + narrative + footnote;
+  }
+  out += "\n";
+  return out;
+};
+
+// utils/charMusicSchedule.ts
+var LISTENING_KEYWORDS = [
+  "\u542C\u6B4C",
+  "\u542C\u97F3\u4E50",
+  "\u6234\u8033\u673A",
+  "\u6234\u4E0A\u8033\u673A",
+  "\u6234\u7740\u8033\u673A",
+  "\u8033\u673A",
+  "\u5FAA\u73AF",
+  "\u5355\u66F2\u5FAA\u73AF",
+  "\u64AD\u653E",
+  "\u8033\u7554",
+  "\u8033\u65C1",
+  "\u64AD\u653E\u5217\u8868",
+  "\u6B4C\u5355",
+  "\u526F\u6B4C",
+  "\u524D\u594F",
+  "listening",
+  "music",
+  "song",
+  "playlist",
+  "vinyl",
+  "headphone",
+  "\u{1F3B5}",
+  "\u{1F3B6}",
+  "\u{1F3A7}"
+];
+var slotIsListening = (slot) => {
+  if (!slot) return false;
+  const blob = `${slot.activity || ""} ${slot.description || ""} ${slot.innerThought || ""} ${slot.emoji || ""}`.toLowerCase();
+  return LISTENING_KEYWORDS.some((kw) => blob.includes(kw.toLowerCase()));
+};
+var pickSongFromPool = (pool, slotStartTime, today, charId) => {
+  if (pool.length === 0) return null;
+  const seedStr = `${today}-${slotStartTime}-${charId}`;
+  let h = 0;
+  for (const ch of seedStr) h = h * 31 + ch.charCodeAt(0) >>> 0;
+  return pool[h % pool.length];
+};
+
+// utils/amsgFireScene.ts
+var renderFireSceneBlock = (scene, nowMs, tz) => {
+  if (!scene?.schedule?.slots?.length) return "";
+  const wallNow = nowInTimeZone(tz.tzId, new Date(nowMs));
+  const scheduleText = buildScheduleInjection(scene.schedule, scene.evolvedNarrative, wallNow).trim();
+  const lines = [];
+  if (scheduleText) lines.push(scheduleText);
+  const { current } = resolveScheduleSlots(scene.schedule, wallNow);
+  if (current && slotIsListening(current) && scene.songPool.length > 0) {
+    const song = pickSongFromPool(
+      scene.songPool,
+      current.startTime,
+      getLocalDateKey(wallNow),
+      scene.charId
+    );
+    if (song) lines.push(`\u4F60\u6B64\u523B\u5728\u542C\uFF1A\u300A${song.name}\u300B\u2014 ${song.artists}`);
+  }
+  if (lines.length === 0) return "";
+  return `
+
+${lines.join("\n")}`;
+};
+
 // utils/amsgFirePack.ts
 var AMSG_STATE_NAMESPACE_PREFIX = "amsg:char:";
 var amsgStateNamespace = (charId) => `${AMSG_STATE_NAMESPACE_PREFIX}${charId}`;
@@ -3856,6 +4025,7 @@ var AMSG_SLOT_AWAY_HINT = "{{AMSG_AWAY_HINT}}";
 var AMSG_SLOT_TASK_INSTRUCTION = "{{AMSG_TASK_INSTRUCTION}}";
 var AMSG_SLOT_SELF_LOG = "{{AMSG_SELF_LOG}}";
 var AMSG_SLOT_TASK_LIST = "{{AMSG_TASK_LIST}}";
+var AMSG_SLOT_SCENE = "{{AMSG_SCENE}}";
 var wallClockPartsInZone = (nowMs, tz) => {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: tz.tzId,
@@ -3976,12 +4146,30 @@ ${TASK_SECTION_HEADING}`);
   out = fillSlot(out, AMSG_SLOT_TASK_INSTRUCTION, taskInstruction);
   out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(extras?.selfLog ?? null, tz));
   out = fillSlot(out, AMSG_SLOT_TASK_LIST, extras?.taskListBlock ?? "");
+  out = fillSlot(out, AMSG_SLOT_SCENE, renderFireSceneBlock(pack.scene, nowMs, tz));
   return out;
+};
+var FIRE_PACK_VERSION = 4;
+var describeFirePackVersion = (value) => {
+  let v;
+  try {
+    v = JSON.parse(value)?.v;
+  } catch {
+    return "\u4E0D\u662F\u5408\u6CD5 JSON\uFF08\u6570\u636E\u635F\u574F\uFF09";
+  }
+  if (v === FIRE_PACK_VERSION) return "\u7248\u672C\u53F7\u5BF9\u5F97\u4E0A\uFF0C\u662F\u522B\u7684\u5B57\u6BB5\u4E0D\u5408\u683C\u5F0F\uFF08\u6570\u636E\u635F\u574F\uFF09";
+  if (typeof v === "number" && v < FIRE_PACK_VERSION) {
+    return `\u5305\u662F v${v}\u3001worker \u8981 v${FIRE_PACK_VERSION} \u2014\u2014 \u524D\u7AEF\u6BD4 worker \u65E7\uFF0C\u6253\u5F00\u4E00\u6B21\u7F51\u9875\u8BA9\u5B83\u91CD\u65B0\u4E0A\u4F20`;
+  }
+  if (typeof v === "number") {
+    return `\u5305\u662F v${v}\u3001worker \u53EA\u8BA4 v${FIRE_PACK_VERSION} \u2014\u2014 worker bundle \u662F\u65E7\u7684\uFF0C\u53BB\u8BBE\u7F6E\u9875\u91CD\u65B0\u7C98\u8D34\u90E8\u7F72`;
+  }
+  return "\u5305\u91CC\u6CA1\u6709\u7248\u672C\u53F7\uFF08\u6570\u636E\u635F\u574F\uFF09";
 };
 var parseFirePack = (value) => {
   try {
     const parsed = JSON.parse(value);
-    if (parsed && typeof parsed === "object" && parsed.v === 3 && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && typeof parsed.tzId === "string" && parsed.tzId.length > 0 && typeof parsed.targetName === "string" && typeof parsed.builtAt === "number" && Array.isArray(parsed.pendingTasks)) {
+    if (parsed && typeof parsed === "object" && parsed.v === FIRE_PACK_VERSION && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && typeof parsed.tzId === "string" && parsed.tzId.length > 0 && typeof parsed.targetName === "string" && typeof parsed.builtAt === "number" && Array.isArray(parsed.pendingTasks) && (parsed.scene === null || typeof parsed.scene === "object")) {
       return parsed;
     }
   } catch {
@@ -4053,48 +4241,6 @@ var buildFireTaskListBlock = (tasks, opts) => {
     }),
     "\uFF08\u8FD9\u51E0\u6761\u5230\u70B9\u4F1A\u81EA\u52A8\u53D1\u51FA\u53BB\uFF0C\u522B\u5728\u8FD9\u6761\u6D88\u606F\u91CC\u628A\u540C\u4E00\u4EF6\u4E8B\u518D\u6392\u4E00\u904D\uFF0C\u4E5F\u522B\u5F53\u5B83\u4EEC\u4E0D\u5B58\u5728\u3002\uFF09"
   ].join("\n");
-};
-
-// utils/timezone.ts
-var nowInTimeZone = (tz, base = /* @__PURE__ */ new Date()) => {
-  if (!tz) return base;
-  try {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false
-    }).formatToParts(base);
-    const map = {};
-    for (const p of parts) map[p.type] = p.value;
-    let hour = parseInt(map.hour, 10);
-    if (hour === 24) hour = 0;
-    return new Date(
-      parseInt(map.year, 10),
-      parseInt(map.month, 10) - 1,
-      parseInt(map.day, 10),
-      hour,
-      parseInt(map.minute, 10),
-      parseInt(map.second, 10)
-    );
-  } catch {
-    return base;
-  }
-};
-var wallClockToTimestamp = (wallClockText, tz) => {
-  const asDeviceLocal = new Date(wallClockText.trim().replace(" ", "T")).getTime();
-  if (!tz || Number.isNaN(asDeviceLocal)) return asDeviceLocal;
-  let t = asDeviceLocal;
-  for (let i = 0; i < 2; i++) {
-    const drift = nowInTimeZone(tz, new Date(t)).getTime() - asDeviceLocal;
-    if (drift === 0) break;
-    t -= drift;
-  }
-  return t;
 };
 
 // utils/amsgFireSchedule.ts
@@ -5942,14 +6088,6 @@ var normalizeXhsLiteDetail = (payload, commentLimit = 15) => {
   return comments.length ? { ...note, comments, commentReadStatus } : { ...note, commentReadStatus };
 };
 
-// utils/localDate.ts
-function getLocalDateKey(date = /* @__PURE__ */ new Date()) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
 // utils/agenticTools.ts
 function resolveXhsConfig(char, realtimeConfig) {
   const mcpConfig = realtimeConfig?.xhsMcpConfig;
@@ -6131,7 +6269,10 @@ async function runXhsSearch(args, ctx) {
     return { ok: false, reason: "not_enabled", keyword: args.keyword };
   }
   const result = await xhsSearchImpl(xhsConf, args.keyword);
-  if (!result.success || result.notes.length === 0) {
+  if (!result.success) {
+    return { ok: false, reason: "unreachable", keyword: args.keyword, message: result.message };
+  }
+  if (result.notes.length === 0) {
     return { ok: false, reason: "no_results", keyword: args.keyword, message: result.message };
   }
   if (ctx.lastXhsNotesRef) ctx.lastXhsNotesRef.current = result.notes;
@@ -6149,7 +6290,10 @@ async function runXhsBrowse(args, ctx) {
   }
   const result = await xhsBrowseImpl(xhsConf);
   console.log("\u{1F4D5} [XHS] \u6D4F\u89C8\u7ED3\u679C:", result.success, result.message, result.notes?.length || 0);
-  if (!result.success || result.notes.length === 0) {
+  if (!result.success) {
+    return { ok: false, reason: "unreachable", category: args.category, message: result.message };
+  }
+  if (result.notes.length === 0) {
     return { ok: false, reason: "no_results", category: args.category, message: result.message };
   }
   if (ctx.lastXhsNotesRef) ctx.lastXhsNotesRef.current = result.notes;
@@ -6475,13 +6619,41 @@ var describeTool = (name) => {
   }
   return name;
 };
+var NEVER_RAN_REASONS = /* @__PURE__ */ new Set([
+  "unreachable",
+  "not_enabled",
+  "not_configured",
+  "not_supported",
+  "no_api_key",
+  "no_identity",
+  "parse_error",
+  "unknown_tool",
+  "tool_error",
+  "mcp_error",
+  "mcp_budget_exhausted"
+]);
+var neverRan = (result) => {
+  if (!result || typeof result !== "object") return false;
+  const r = result;
+  return r.ok === false && typeof r.reason === "string" && NEVER_RAN_REASONS.has(r.reason);
+};
 var buildToolResultMessage = (opts) => {
   const { name, result, history } = opts;
   const used = [...new Set(history.map((r) => describeTool(r.name)))];
-  return [
-    `[\u7CFB\u7EDF: \u4F60${describeTool(name)}\uFF0C\u62FF\u56DE\u4E86\u4E0B\u9762\u8FD9\u4E9B]`,
+  const label = describeTool(name);
+  const head = neverRan(result) ? [
+    `[\u7CFB\u7EDF: \u4F60\u60F3${label}\uFF0C\u4F46\u8FD9\u6B21\u6CA1\u80FD\u8DD1\u8D77\u6765\u2014\u2014\u4E0B\u9762\u662F\u5931\u8D25\u539F\u56E0]`,
     JSON.stringify(result),
     "",
+    `[\u7CFB\u7EDF: \u8FD9\u4EF6\u4E8B**\u6CA1\u6709\u53D1\u751F**\u3002\u4E0D\u8981\u5728\u6D88\u606F\u91CC\u8BF4\u4F60${label}\u8FC7\u3001\u770B\u5230\u4E86\u4EC0\u4E48\u3001\u6216\u8005\u300C\u67E5\u4E86\u6CA1\u627E\u5230\u300D\u2014\u2014`,
+    "\u90A3\u7B49\u4E8E\u628A\u6CA1\u505A\u8FC7\u7684\u4E8B\u8BF4\u6210\u505A\u8FC7\u4E86\u3002\u5C31\u5F53\u8FD9\u56DE\u6CA1\u67E5\u6210\uFF1A\u8981\u4E48\u6362\u4E2A\u522B\u7684\u8BF4\uFF0C\u8981\u4E48\u76F4\u63A5\u8BF4\u4F60\u73B0\u5728\u4E0D\u65B9\u4FBF\u67E5\u3002]"
+  ] : [
+    `[\u7CFB\u7EDF: \u4F60${label}\uFF0C\u62FF\u56DE\u4E86\u4E0B\u9762\u8FD9\u4E9B]`,
+    JSON.stringify(result),
+    ""
+  ];
+  return [
+    ...head,
     `[\u7CFB\u7EDF: \u672C\u6B21\u5DF2\u7ECF\u7528\u8FC7\u7684\u5DE5\u5177\uFF1A${used.join("\u3001")}\u3002\u7ED3\u679C\u90FD\u5728\u4E0A\u9762\u4E86\uFF0C\u540C\u6837\u7684\u8C03\u7528\u4E0D\u8981\u518D\u6765\u4E00\u904D\u3002`,
     "\u63A5\u4E0B\u6765\u53EA\u6709\u4E24\u6761\u8DEF\uFF1A\u76F4\u63A5\u628A\u8981\u53D1\u7684\u6D88\u606F\u5199\u51FA\u6765\uFF0C\u6216\u8005\u7528\u4E00\u4E2A\u8FD8\u6CA1\u7528\u8FC7\u7684\u5DE5\u5177\u3002",
     "\u522B\u628A\u5DE5\u5177\u8C03\u7528\u5F53\u6210\u56DE\u7B54\u2014\u2014\u7528\u6237\u7B49\u7684\u662F\u4F60\u8BF4\u7684\u8BDD\u3002]"
@@ -6581,7 +6753,7 @@ var stripTimestamps = (t) => t.replace(/\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\]\s*/g
 var stripChineseDate = (t) => t.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, "");
 var stripRoleNamePrefix = (t) => t.replace(/^[\w一-龥]+:\s*/, "");
 var stripBusinessTagsForBubble = (t) => t.replace(/\[\[(?:ACTION|RECALL|SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END|MUSIC_ACTION)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[\s*[记記][录錄]\s*[:：][\s\S]*?\]\]/g, "").replace(/\[schedule_message[^\]]*\]/g, "");
-var stripBusinessTagsForNotification = (t) => stripBusinessTagsForBubble(t).replace(/\[\[(?:READ_NOTE|XHS_[A-Z_]+)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[XHS_[A-Z_]+\]\]/g, "");
+var stripBusinessTagsForNotification = (t) => stripBusinessTagsForBubble(t).replace(/\[\[(?:READ_NOTE|XHS_[A-Z_]+|LIFE|NEWS_CARD)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[XHS_[A-Z_]+\]\]/g, "");
 var stripQuotes2 = (t) => t.replace(/\[\[(?:QU[OA]TE|引用)[：:][\s\S]*?\]\]/g, "").replace(/\[(?:QU[OA]TE|引用)[：:][^\]]*\]/g, "").replace(/\[回复\s*[""“][^""”]*?[""”](?:\.{0,3})\]\s*[：:]?\s*/g, "").replace(/\[[^\[\]\n「」]{0,24}引用了[^\[\]\n「」]{0,24}「[^」\n]*?」[^\[\]\n]{0,24}\]\s*/g, "");
 var stripSystemLogLeak = (t) => t.replace(/[\[【]\s*(?:系统|系統|System)\s*(?:提示)?\s*[:：][^\[\]【】]*[\]】]\s*/gi, "").replace(/\[\s*(?:系统|系統)\s*\]\s*/g, "");
 var stripMarkdownHeaders = (t) => t.replace(/^#{1,6}\s+/gm, "");
@@ -7085,6 +7257,17 @@ var SIDE_EFFECT_TAGS = [
     re: /\[\[XHS_SHARE:\s*(\d+)\]\]/g,
     toDirective: (m) => ({ type: "xhs_share", idx: Number(m[1]) })
   },
+  // [[LIFE:MED|布洛芬]] 生活记录代记 — 跟 chatParser.ts 的 `\[\[LIFE:[^\]]*\]\]` 同口径,
+  // 冒号后整段原样带走, 不在这里拆 verb/args (那份解析在 lifeRecords.parseLifeDirective)。
+  {
+    re: /\[\[LIFE:([^\]]*)\]\]/g,
+    toDirective: (m) => ({ type: "life_record", body: m[1] })
+  },
+  // [[NEWS_CARD: 来源|标题]] 分享热点卡片 — 跟 chatParser.ts:NEWS_CARD_RE 同口径。
+  {
+    re: /\[\[NEWS_CARD:\s*([^\]]*?)\s*\]\]/g,
+    toDirective: (m) => ({ type: "news_card", body: m[1] })
+  },
   // 写日记 — 长形态: [[DIARY_START: title|mood]]\n content \n[[DIARY_END]]
   // 短形态: [[DIARY: title|content]] 或 [[DIARY: content]] (无 title)
   // 行为跟 applyAssistantPostProcessing.ts:465-495 字节对齐:
@@ -7575,7 +7758,7 @@ var amsgHooks = {
       throw fail("fire_pack \u89E3\u538B\u5931\u8D25\uFF08\u6570\u636E\u635F\u574F\uFF09", { error: String(error) });
     }
     const pack = parseFirePack(packJson);
-    if (!pack) throw fail("fire_pack \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
+    if (!pack) throw fail(`fire_pack \u89E3\u6790\u5931\u8D25\uFF1A${describeFirePackVersion(packJson)}`);
     const occurrenceMs = Date.parse(String(ctx.task.nextSendAt));
     if (!Number.isFinite(occurrenceMs)) {
       throw fail("\u4EFB\u52A1\u884C next_send_at \u89E3\u6790\u4E0D\u51FA\u89E6\u53D1\u65F6\u523B", { nextSendAt: ctx.task.nextSendAt });

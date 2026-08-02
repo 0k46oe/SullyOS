@@ -12,6 +12,7 @@
 import { ActiveMsg2TaskRecord, Amsg2ExpiredNoticeRecord, CharacterProfile } from '../types';
 import { ActiveMsgStore } from './activeMsgStore';
 import { DB } from './db';
+import { resolveCharTimeZone } from './timezone';
 import { detectExpiredOccurrences, hasDeliveredProactiveNear } from './amsg2ExpireGuard';
 import {
   canExpire, currentOccurrenceMs, describeExpirePolicy, describeRecurrence,
@@ -23,6 +24,11 @@ export function buildAmsg2TaskContextText(
   pending: ActiveMsg2TaskRecord[],
   expired: Amsg2ExpiredNoticeRecord[],
   nowMs: number = Date.now(),
+  /**
+   * 角色的时间参照系（没开自定义时区时为 undefined，跟着设备走）。
+   * 位置参数不设默认值：这一段是给角色看的，调用方必须显式想过时间该按谁的钟写。
+   */
+  charTz: string | undefined,
 ): string | null {
   if (!pending.length && !expired.length) return null;
   const parts: string[] = ['【你的主动消息排程·仅你可见】'];
@@ -33,7 +39,7 @@ export function buildAmsg2TaskContextText(
       // 循环任务写「下一次」的时间。写 firstSendTime 的话，一条每天的任务在角色眼里
       // 是个好几天前的时刻，它会当成已经过去的排程，然后在对话里说漏嘴或重复排一条。
       const occurrenceMs = currentOccurrenceMs(t, nowMs);
-      parts.push(`- [${shortTaskId(t.taskUuid)}] ${formatTaskTime(occurrenceMs ?? t.firstSendTime)} ${describeRecurrence(t.recurrenceType)}`
+      parts.push(`- [${shortTaskId(t.taskUuid)}] ${formatTaskTime(occurrenceMs ?? t.firstSendTime, charTz)} ${describeRecurrence(t.recurrenceType)}`
         + ` · ${describeTaskMode(t)} · ${describeExpirePolicy(t.expirePolicy)}`);
     }
     parts.push('（想调整就用 schedule/cancel/renew 工具；内容方向变了用 cancel + schedule 重建。）');
@@ -43,7 +49,7 @@ export function buildAmsg2TaskContextText(
     parts.push('已作废（到点时对话正在进行，为避免撞车自动取消）：');
     for (const r of expired) {
       const recurrence = r.recurrenceType === 'daily' ? '（每日循环的当次）' : r.recurrenceType === 'weekly' ? '（每周循环的当次）' : '';
-      parts.push(`- [${shortTaskId(r.id)}] 原定 ${formatTaskTime(r.occurrenceMs)}，${describeTaskMode(r)}${recurrence}`);
+      parts.push(`- [${shortTaskId(r.id)}] 原定 ${formatTaskTime(r.occurrenceMs, charTz)}，${describeTaskMode(r)}${recurrence}`);
     }
     parts.push([
       '作废条目的处理由你判断，三选一：',
@@ -93,7 +99,9 @@ export async function collectAmsg2TaskContext(char: CharacterProfile): Promise<A
   const unnotified = (await ActiveMsgStore.getExpiredNotices(char.id)).filter((r) => !r.notifiedAt);
   const pending = getPendingTasks(config, now);
   return {
-    text: buildAmsg2TaskContextText(pending, unnotified, now),
+    // 时间按角色的钟写：这一段是给角色看的，到点 worker 渲染的那份也是角色时区，
+    // 两边对不上的话，纽约角色会在同一轮里读到差一个时差的两个「同一条任务」。
+    text: buildAmsg2TaskContextText(pending, unnotified, now, resolveCharTimeZone(char)),
     expiredIds: unnotified.map((r) => r.id),
   };
 }

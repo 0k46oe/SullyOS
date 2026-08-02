@@ -274,3 +274,54 @@ describe('classifyLLMOutput', () => {
     }
   });
 });
+
+describe('classifyLLMOutput — LIFE / NEWS_CARD', () => {
+  it('[[LIFE:...]] → life_record directive, 正文剥干净', () => {
+    const r = classifyLLMOutput('你今天吃药了吗\n[[LIFE:MED|布洛芬]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.cleanedText).toBe('你今天吃药了吗');
+      expect(r.sanitizedBody).toBe('你今天吃药了吗');
+      expect(r.directives).toEqual([{ type: 'life_record', body: 'MED|布洛芬' }]);
+    }
+  });
+
+  it('无参形态 [[LIFE:PERIOD_START]] 一样收', () => {
+    const r = classifyLLMOutput('记下了[[LIFE:PERIOD_START]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.cleanedText).toBe('记下了');
+      expect(r.directives).toEqual([{ type: 'life_record', body: 'PERIOD_START' }]);
+    }
+  });
+
+  it('一条消息里多个 LIFE → 逐个收', () => {
+    const r = classifyLLMOutput('[[LIFE:MED|布洛芬]][[LIFE:EXERCISE|跑步|30分钟]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([
+        { type: 'life_record', body: 'MED|布洛芬' },
+        { type: 'life_record', body: 'EXERCISE|跑步|30分钟' },
+      ]);
+    }
+  });
+
+  it('[[NEWS_CARD: 来源|标题]] → news_card directive, 前后空格归一', () => {
+    const r = classifyLLMOutput('刷到条新闻\n[[NEWS_CARD: 微博|某某官宣 ]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.cleanedText).toBe('刷到条新闻');
+      expect(r.sanitizedBody).toBe('刷到条新闻');
+      expect(r.directives).toEqual([{ type: 'news_card', body: '微博|某某官宣' }]);
+    }
+  });
+
+  it('省略来源的 [[NEWS_CARD: 标题]] 也收', () => {
+    const r = classifyLLMOutput('[[NEWS_CARD: 某某官宣]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.cleanedText).toBe('');
+      expect(r.directives).toEqual([{ type: 'news_card', body: '某某官宣' }]);
+    }
+  });
+});

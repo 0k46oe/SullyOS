@@ -15,7 +15,7 @@ import {
   UserProfile,
 } from '../types';
 import { getLastRealUserMessageAt } from './amsg2ExpireGuard';
-import { buildTaskInstruction } from './amsgFireSchedule';
+import { buildTaskInstruction, resolveSendAtMs } from './amsgFireSchedule';
 import {
   getPendingTasks, isAmsg2EnabledForChar, MAX_ACTIVE_TASKS_PER_CHAR,
   parseRemoteTaskLastError, RemoteTaskLastError, type RemoteTaskProjection,
@@ -26,6 +26,7 @@ import {
   AMSG_FIRE_PACK_KEY,
   AMSG_SLOT_AWAY_HINT,
   AMSG_SLOT_CURRENT_TIME,
+  AMSG_SLOT_SCENE,
   AMSG_SLOT_TASK_INSTRUCTION,
   AMSG_LAST_SKIP_KEY,
   AMSG_SLOT_SELF_LOG,
@@ -37,6 +38,10 @@ import {
   packStateValue,
   parseLastSkip,
 } from './amsgFirePack';
+import type { AmsgFireScene } from './amsgFireScene';
+import { buildSongPool } from './charMusicSchedule';
+import { getDailyScheduleForChar } from './dailySchedule';
+import { isScheduleFeatureOn } from './scheduleGenerator';
 import {
   AMSG_GLOBAL_NAMESPACE,
   AMSG_TOOL_CONFIG_KEY,
@@ -246,10 +251,36 @@ export const buildFirePack = async (
   realtimeConfig: RealtimeConfig | undefined,
   emojiLibrary?: EmojiLibrary,
 ): Promise<AmsgFirePack> => {
-  const [{ recentMessages, lastUserMessageAt }, library] = await Promise.all([
+  const [{ recentMessages, lastUserMessageAt }, library, schedule] = await Promise.all([
     buildTimeGapHint(char.id),
     emojiLibrary ? Promise.resolve(emojiLibrary) : readEmojiLibrary(),
+    // 日程随包带原始表（不是渲染好的文字），worker 到点自己挑时段。总开关关掉的角色没有表。
+    isScheduleFeatureOn(char)
+      ? getDailyScheduleForChar(char).catch((e) => {
+          console.warn('[ActiveMsg2] 日程读取失败，这次不带作息表', char.id, e);
+          return null;
+        })
+      : Promise.resolve(null),
   ]);
+  // 只摘渲染会读到的字段：整份日程里还挂着每个时段缓存的小剧场台词和看板图，
+  // 带上去只是白占云端状态的体积（fire_pack 本来就有几万字）。
+  const scene: AmsgFireScene | null = schedule
+    ? {
+        charId: char.id,
+        schedule: {
+          slots: schedule.slots.map((s) => ({
+            startTime: s.startTime,
+            activity: s.activity,
+            ...(s.description ? { description: s.description } : {}),
+            ...(s.emoji ? { emoji: s.emoji } : {}),
+            ...(s.location ? { location: s.location } : {}),
+            ...(s.innerThought ? { innerThought: s.innerThought } : {}),
+          })),
+          ...(schedule.flowNarrative ? { flowNarrative: schedule.flowNarrative } : {}),
+        },
+        songPool: buildSongPool(char).map((s) => ({ id: s.id, name: s.name, artists: s.artists })),
+      }
+    : null;
   const legacyHint = buildLegacyStyleProactiveHint(userProfile.name || '对方');
   // 按角色可见性过滤表情包：主动消息不经过 Chat.tsx 的 aiVisibleEmojis/visibleCategories，
   // 必须在这里复用同一套过滤，否则角色会用到只对其他角色开放的表情包。
@@ -270,9 +301,9 @@ export const buildFirePack = async (
     undefined,
     undefined,
     undefined,
-    // 模板里不烤「现在是 X」：那是打包时刻的时间，到点渲染早就过期了。
-    // 当前时间由 worker 用 AMSG_SLOT_CURRENT_TIME 槽位在 fire 时刻现算填入。
-    { skipTimeAwareness: true },
+    // 模板是现在打好、到点才渲染的，凡是「打包这一刻」的状态都不烤进去。
+    // 具体拿掉哪些块、到点由谁补，见 ChatPrompts.PromptBuildOptions 上的表。
+    { forFirePack: true },
   );
   const { apiMessages } = ChatPrompts.buildMessageHistory(
     recentMessages,
@@ -310,7 +341,7 @@ export const buildFirePack = async (
     '',
     '【角色系统设定】',
     systemPrompt,
-    '（注意：上面角色设定里的日程、天气、情绪等状态是最近一次聊天时的快照。若它们与当前时刻矛盾，以下方「当前本地时间」为准推断你此刻的现状。）',
+    '（注意：上面角色设定里的情绪、印象等状态是最近一次聊天时的快照。此刻的时间、你正在做什么，以下方「当前时刻补充」为准。）',
     '',
     '【最近对话上下文】',
     // 槽位直接黏在最后一行后面（不单独占一行）：worker 到点没有可写的自述时填空串，
@@ -318,7 +349,9 @@ export const buildFirePack = async (
     `${recentTranscript || '（暂时没有最近聊天记录）'}${AMSG_SLOT_SELF_LOG}`,
     '',
     '【当前时刻补充】',
-    `当前本地时间：${AMSG_SLOT_CURRENT_TIME}`,
+    // 「此刻在做什么」紧跟当前时间：日程时段本来就要对着钟读，挨在一起才对得上。
+    // 没日程的角色 worker 填空串，这一行连带消失（那段自带前导空行，见 renderFireSceneBlock）。
+    `当前本地时间：${AMSG_SLOT_CURRENT_TIME}${AMSG_SLOT_SCENE}`,
     // 排程清单跟在时间后面：它整段都在讲「几点会发生什么」，挨着当前时刻读才对得上。
     // 没有待触发任务时 worker 填空串，这一行连带消失。
     `${AMSG_SLOT_TIME_SINCE_USER}${AMSG_SLOT_TASK_LIST}`,
@@ -334,7 +367,7 @@ export const buildFirePack = async (
   ].join('\n');
 
   return {
-    v: 3,
+    v: 4,
     template,
     lastUserMessageAt,
     // 角色的时间参照系：开了自定义时区用角色的，没开用设备的。worker 渲染一切
@@ -347,6 +380,9 @@ export const buildFirePack = async (
     // 到点时角色要知道自己还挂着什么，才不会把同一件事再排一遍。这里带原始记录，
     // 渲染成人话由 worker 现场做（时间要按 tzId 换算，且得摘掉正在发的那条）。
     pendingTasks: getPendingTasks(char.activeMsg2Config, Date.now()),
+    // 「此刻在做什么」也带原始素材：整天的作息表 + 歌单抽样池，worker 到点按 tzId
+    // 挑当前时段。烤成文字的话，凌晨三点触发时角色会说「我在健身房呢」。
+    scene,
   };
 };
 
@@ -356,15 +392,23 @@ export const buildFirePack = async (
  */
 export { buildTaskInstruction } from './amsgFireSchedule';
 
-const ensureFutureTime = (value: string) => {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
+/**
+ * 首次发送时间 → 绝对时刻（UTC ISO）。
+ *
+ * 裸墙钟（`2026-08-03T09:00:00`，datetime-local 输入框和角色用工具排程时给的都是这种）
+ * 按 tz 参照系解释，跟 worker 到点解析 send_at 是同一份规则（amsgFireSchedule.resolveSendAtMs）。
+ * 各解各的话，纽约角色说的「明早九点」，前端按设备的东八区算成绝对时刻，worker 又按
+ * 角色时区去理解，同一句话差整整一个时差。带 Z / ±hh:mm 后缀的照标注解析。
+ */
+const ensureFutureTime = (value: string, tzId: string) => {
+  const ms = resolveSendAtMs(value, { tzId });
+  if (Number.isNaN(ms)) {
     throw new Error('请选择有效的首次发送时间。');
   }
-  if (date.getTime() <= Date.now()) {
+  if (ms <= Date.now()) {
     throw new Error('首次发送时间必须晚于当前时间。');
   }
-  return date.toISOString();
+  return new Date(ms).toISOString();
 };
 
 /**
@@ -850,7 +894,12 @@ export const ActiveMsgClient = {
       throw new Error(`该角色的待触发任务已达上限 ${MAX_ACTIVE_TASKS_PER_CHAR} 个，请先取消或合并已有任务。`);
     }
 
-    const firstSendTime = ensureFutureTime(task.firstSendTime);
+    // 角色的时间参照系：任务行、fire_pack、worker 渲染全用这一个，解析 send_at 也一样。
+    const tzId = resolveCharTimeZone(char) ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    // 裸墙钟在这里被折成绝对时刻。调用方要把这一份存进任务记录（见返回值 firstSendAt），
+    // 别存自己手上那个墙钟串——角色写的是它那边的钟、面板填的是设备的钟，两种串长得一样，
+    // 落盘后谁也认不出该按哪个时区读，本地一律 new Date() 按设备解析就会差一个时差。
+    const firstSendTime = ensureFutureTime(task.firstSendTime, tzId);
     // AI 模式的 prompt 只有一条来源：firePack 上传 client_state，worker 到点现场填槽。
     // 任务体里不再冻结一份渲染好的 prompt——读不到 fire_pack 就直接报错，没有第二条路，
     // 留着那份快照只是白占请求体（完整角色卡 + 世界书）。
@@ -876,7 +925,7 @@ export const ActiveMsgClient = {
       recurrenceType: task.recurrenceType,
       // 角色的时间参照系（与 fire_pack 同一份）。daily / weekly 由 worker 按这个时区的
       // 墙钟推进——固定加 24 小时的话，跨夏令时切换之后每天的触发时刻会永久偏一小时。
-      tzId: resolveCharTimeZone(char) ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+      tzId,
       metadata: {
         charId: char.id,
         charName: char.name,
@@ -966,6 +1015,8 @@ export const ActiveMsgClient = {
       anchorMs,
       clientTaskId,
       replacedCancelFailed,
+      // 解析好的绝对时刻（UTC ISO）。任务记录存这一份，字段口径才只有一种。
+      firstSendAt: firstSendTime,
     };
   },
 

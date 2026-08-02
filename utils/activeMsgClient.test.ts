@@ -31,7 +31,8 @@ import {
   ActiveMsgClient, buildFirePack, clearNamespaceValuesOrThrow, dropStaleSubscription,
   putClientStateOrThrow, toRemoteAvatarUrl,
 } from './activeMsgClient';
-import { AMSG_SLOT_CURRENT_TIME } from './amsgFirePack';
+import { AMSG_SLOT_CURRENT_TIME, AMSG_SLOT_SCENE } from './amsgFirePack';
+import * as dailySchedule from './dailySchedule';
 import { ChatPrompts } from './chatPrompts';
 import { DB } from './db';
 
@@ -432,11 +433,13 @@ describe('buildFirePack 的时区参照系与模板（①）', () => {
     expect(out.tzId).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
   });
 
-  it('buildSystemPrompt 收到 skipTimeAwareness——模板里不烤「现在是 X」', async () => {
+  it('buildSystemPrompt 收到 forFirePack —— 打包时刻的状态一律不烤进模板', async () => {
     await pack(baseChar());
     expect(systemPromptSpy).toHaveBeenCalledTimes(1);
     // 第 12 个位置参数是 promptOptions（见 chatPrompts.buildSystemPrompt 签名）。
-    expect(systemPromptSpy.mock.calls[0][11]).toEqual({ skipTimeAwareness: true });
+    // 这个开关一次性关掉时间块 / 真实世界感知 / 日程 / 音乐 / 刚打完电话 / 群聊相对时间 /
+    // 生活记录代记 / [schedule_message] 教学，清单见 ChatPrompts.PromptBuildOptions。
+    expect(systemPromptSpy.mock.calls[0][11]).toEqual({ forFirePack: true });
   });
 
   it('当前时间槽位保留：worker 到点现算填入（1.0 提示块的「现在是」也是槽位）', async () => {
@@ -445,12 +448,31 @@ describe('buildFirePack 的时区参照系与模板（①）', () => {
     expect(out.template).toContain(`现在是 ${AMSG_SLOT_CURRENT_TIME}`);
   });
 
+  // 「此刻在做什么」不烤成文字，随包带原始作息表让 worker 到点现挑。烤死的话，
+  // 凌晨三点触发时角色会照着中午打的包说「我在健身房呢」。
+  it('作息表随包带原始数据 + 槽位跟在当前时间后面', async () => {
+    vi.spyOn(dailySchedule, 'getDailyScheduleForChar').mockResolvedValue({
+      id: 's', charId: 'char-1', date: '2026-08-02', generatedAt: 0,
+      slots: [{ startTime: '08:00', activity: '晨跑' }],
+    } as any);
+
+    const out = await pack(baseChar({ scheduleFeatureEnabled: true }));
+    expect(out.scene?.schedule?.slots).toHaveLength(1);
+    expect(out.scene?.charId).toBe('char-1');
+    expect(out.template).toContain(`当前本地时间：${AMSG_SLOT_CURRENT_TIME}${AMSG_SLOT_SCENE}`);
+  });
+
+  it('角色没开日程 → scene 为 null（槽位到点被抹平）', async () => {
+    const out = await pack(baseChar());
+    expect(out.scene).toBeNull();
+  });
+
   it('【角色系统设定】之后补快照说明行，位置在设定正文与对话上下文之间', async () => {
     const out = await pack(baseChar());
     const noteIdx = out.template.indexOf('最近一次聊天时的快照');
     expect(noteIdx).toBeGreaterThan(out.template.indexOf('SYS_PROMPT_MARKER'));
     expect(noteIdx).toBeLessThan(out.template.indexOf('【最近对话上下文】'));
-    expect(out.template).toContain('以下方「当前本地时间」为准');
+    expect(out.template).toContain('以下方「当前时刻补充」为准');
   });
 });
 

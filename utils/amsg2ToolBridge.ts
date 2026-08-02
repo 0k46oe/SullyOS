@@ -24,6 +24,7 @@ import {
   getPendingTasks, pruneStaleTasks, resolveExpirePolicy, shortTaskId,
 } from './amsg2Tasks';
 import { EXPIRE_POLICY_DESCRIPTION } from './amsgFireSchedule';
+import { resolveCharTimeZone } from './timezone';
 
 // ─── OpenAI tools schema ───
 
@@ -50,7 +51,10 @@ export const AMSG2_TOOLS: OpenAITool[] = [
         properties: {
           send_at: {
             type: 'string',
-            description: '开始生成消息的时间，ISO 8601 格式（如 2026-07-20T20:00:00+08:00）。必须晚于当前时间。',
+            // 只教裸墙钟：角色照着自己那边的钟写，系统按角色时区还原成绝对时刻
+            // （跟 worker 到点解析 send_at 同一份规则）。教它写 +08:00 这种偏移的话，
+            // 纽约角色会照抄示例里的东八区，说出来的「明早九点」实际差一个时差。
+            description: '开始生成消息的时间，写你本地的墙钟时间，格式 YYYY-MM-DDTHH:mm:ss（如 2026-07-20T20:00:00），不要带时区后缀。必须晚于当前时间。',
           },
           mode: {
             type: 'string',
@@ -98,7 +102,7 @@ export const AMSG2_TOOLS: OpenAITool[] = [
       parameters: {
         type: 'object',
         properties: {
-          send_at: { type: 'string', description: '新的触发时间，ISO 8601 格式，必须晚于当前时间。' },
+          send_at: { type: 'string', description: '新的触发时间，写你本地的墙钟时间，格式 YYYY-MM-DDTHH:mm:ss，不带时区后缀。必须晚于当前时间。' },
           task_id: { type: 'string', description: '要续期的任务短 id（8 位）。只有一个任务时可省略。' },
         },
         required: ['send_at'],
@@ -214,6 +218,9 @@ const persistTasks = (
 async function handleSchedule(args: Record<string, any>, deps: Amsg2ToolDeps): Promise<string> {
   const { char, userProfile, groups, realtimeConfig, apiConfig } = deps;
   const config = readConfig(deps);
+  // 回话里的时间按角色的钟写：到点 worker 渲染排程清单用的也是角色时区，两边对不上的话
+  // 纽约角色刚排的那条，在下一轮的排程现状里会显示成差一个时差的另一个时刻。
+  const charTz = resolveCharTimeZone(char);
   const mode = (args.mode === 'prompted' ? 'prompted' : 'auto') as 'auto' | 'prompted';
   const recurrence = (['daily', 'weekly'].includes(args.recurrence) ? args.recurrence : 'none') as 'none' | 'daily' | 'weekly';
   const expirePolicy = resolveExpirePolicy(mode, args.expire_policy === 'force' ? 'force' : 'expire');
@@ -233,6 +240,9 @@ async function handleSchedule(args: Record<string, any>, deps: Amsg2ToolDeps): P
     taskUuid: result.uuid,
     clientTaskId: result.clientTaskId,
     ...taskInput,
+    // send_at 是角色那边的墙钟，落盘存排程接口折好的绝对时刻。存原串的话，本地读它的地方
+    // （面板卡片、待触发判定、下面这句回话）一律 new Date() 按设备时区解析，异国角色差一个时差。
+    firstSendTime: result.firstSendAt,
     anchorLastUserMsgAt: result.anchorMs,
     source: 'character',
     status: 'scheduled',
@@ -265,7 +275,9 @@ async function handleSchedule(args: Record<string, any>, deps: Amsg2ToolDeps): P
     : result.replacedCancelFailed
       ? `新任务 [${shortTaskId(result.uuid)}] 已创建，但原任务 [${oldShortId}] 远端取消失败、可能仍会触发，请再取消一次。`
       : `原任务 [${oldShortId}] 已换成 [${shortTaskId(result.uuid)}]（改期是重建，编号会变）。`;
-  return `${head}将在 ${formatTaskTime(args.send_at)} 开始生成${recurrenceDesc}。`
+  // 回话里的时间用折好的绝对时刻按角色时区渲染。拿 args.send_at 原串渲染会折两次
+  // （先被 new Date 按设备解析，再换算到角色时区），角色刚排完就把时间说错。
+  return `${head}将在 ${formatTaskTime(result.firstSendAt, charTz)} 开始生成${recurrenceDesc}。`
     + `模式：${describeTaskMode(record)}，策略：${describeExpirePolicy(expirePolicy)}。`;
 }
 
@@ -325,6 +337,7 @@ async function handleRenew(args: Record<string, any>, deps: Amsg2ToolDeps): Prom
 
 async function handleList(deps: Amsg2ToolDeps): Promise<string> {
   const config = readConfig(deps);
+  const charTz = resolveCharTimeZone(deps.char);
   const tasks = config.tasks;
   if (!tasks.length) return '当前角色没有任何定时主动消息任务。';
   const now = Date.now();
@@ -332,7 +345,7 @@ async function handleList(deps: Amsg2ToolDeps): Promise<string> {
     // 工具侧没有远端底账，进度只能给中性的那档；时间按周期推到「下一次」，
     // 否则角色查到一条每天的任务显示的是好几天前，会当成已经过去的。
     const state = describeTaskProgress(t, null, now);
-    return `- [${shortTaskId(t.taskUuid)}] ${formatTaskTime(currentOccurrenceMs(t, now) ?? t.firstSendTime)} ${describeRecurrence(t.recurrenceType)}`
+    return `- [${shortTaskId(t.taskUuid)}] ${formatTaskTime(currentOccurrenceMs(t, now) ?? t.firstSendTime, charTz)} ${describeRecurrence(t.recurrenceType)}`
       + ` · ${describeTaskMode(t)} · ${describeExpirePolicy(t.expirePolicy)} · ${state}`
       + `${t.lastError ? ` · ⚠ ${t.lastError}` : ''}`;
   });

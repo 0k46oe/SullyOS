@@ -84,6 +84,38 @@ export const describeTool = (name: string): string => {
  * 收尾：把本次已经用过的工具点名列出来，并且说死「同样的调用不要再来一遍」。裸 JSON 里
  * 没有任何东西在告诉模型「这一步结束了」，这段话就是。
  */
+/**
+ * 这些 reason 的意思是「这次调用压根没跑到」：没配、没开、连不上、被拦下。
+ *
+ * 跟「跑了但没东西」（no_results / not_found / empty_content / no_logs）必须分开：后者
+ * 角色说「我搜了下没啥」是实话，前者说同一句就是把没发生的事说成发生过。裸 JSON 里
+ * 一个 reason 字段拦不住这件事——模型看见 `ok:false` 只会挑个说法圆过去，所以下面
+ * 明着写一句「不要说你查过」。
+ *
+ * 后台触发时最常走的就是这一类：小红书 / MCP 服务器多半跑在用户自己电脑上，
+ * 人睡了机器关了，worker 那边怎么也连不上。
+ */
+const NEVER_RAN_REASONS = new Set([
+  'unreachable',
+  'not_enabled',
+  'not_configured',
+  'not_supported',
+  'no_api_key',
+  'no_identity',
+  'parse_error',
+  'unknown_tool',
+  'tool_error',
+  'mcp_error',
+  'mcp_budget_exhausted',
+]);
+
+/** 结果是不是「这次没跑成」。形状认不出来时当作跑过了（不硬加一句可能不对的告诫）。 */
+const neverRan = (result: unknown): boolean => {
+  if (!result || typeof result !== 'object') return false;
+  const r = result as { ok?: unknown; reason?: unknown };
+  return r.ok === false && typeof r.reason === 'string' && NEVER_RAN_REASONS.has(r.reason);
+};
+
 export const buildToolResultMessage = (opts: {
   name: string;
   /** dispatchAgenticTool 的返回值，原样序列化给模型看。 */
@@ -93,10 +125,22 @@ export const buildToolResultMessage = (opts: {
 }): string => {
   const { name, result, history } = opts;
   const used = [...new Set(history.map((r) => describeTool(r.name)))];
+  const label = describeTool(name);
+  const head = neverRan(result)
+    ? [
+        `[系统: 你想${label}，但这次没能跑起来——下面是失败原因]`,
+        JSON.stringify(result),
+        '',
+        `[系统: 这件事**没有发生**。不要在消息里说你${label}过、看到了什么、或者「查了没找到」——`,
+        '那等于把没做过的事说成做过了。就当这回没查成：要么换个别的说，要么直接说你现在不方便查。]',
+      ]
+    : [
+        `[系统: 你${label}，拿回了下面这些]`,
+        JSON.stringify(result),
+        '',
+      ];
   return [
-    `[系统: 你${describeTool(name)}，拿回了下面这些]`,
-    JSON.stringify(result),
-    '',
+    ...head,
     `[系统: 本次已经用过的工具：${used.join('、')}。结果都在上面了，同样的调用不要再来一遍。`,
     '接下来只有两条路：直接把要发的消息写出来，或者用一个还没用过的工具。',
     '别把工具调用当成回答——用户等的是你说的话。]',

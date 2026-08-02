@@ -313,3 +313,49 @@ describe('renderAndPersist XHS mimicked-card fallback', () => {
         expect(text).not.toContain('\u4e92\u52a8:');
     }, 20000);
 });
+
+// push 路径上 LIFE / NEWS_CARD 的副作用改走 worker classifier 的 directive 通道
+// (life_record / news_card)。这里钉的是重放这一段: directive → 拼回原 tag →
+// ChatParser.parseAndExecuteActions 执行, 跟本地 fetch 路径同一份代码。
+describe('directive 重放: life_record / news_card', () => {
+    it('news_card directive → 落一张 news_card 消息, 正文不留标签', async () => {
+        const charId = `c-newscard-${Date.now()}`;
+        const ctx = makeCtx(charId, []);
+        ctx.skipSecondPassLLM = true;
+        ctx.directives = [{ type: 'news_card', body: '微博|某某官宣' }];
+
+        await applyAssistantPostProcessing('刷到条新闻，你看过没', ctx);
+
+        const msgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        const cards = msgs.filter(m => m.type === 'news_card');
+        expect(cards).toHaveLength(1);
+        expect(cards[0].metadata?.title).toBe('某某官宣');
+        expect(cards[0].metadata?.source).toBe('微博');
+        const text = msgs.filter(m => m.type === 'text').map(m => m.content).join('\n');
+        expect(text).toContain('刷到条新闻，你看过没');
+        expect(text).not.toContain('NEWS_CARD');
+    }, 20000);
+
+    it('life_record directive → 落一张 life_card, 正文不留标签', async () => {
+        const charId = `c-liferecord-${Date.now()}`;
+        await DB.saveCharacter({
+            id: charId,
+            name: '测试角色',
+            lifeRecordEnabled: true,
+        } as any);
+
+        const ctx = makeCtx(charId, []);
+        ctx.skipSecondPassLLM = true;
+        ctx.directives = [{ type: 'life_record', body: 'MED|布洛芬' }];
+
+        await applyAssistantPostProcessing('记得吃药哦', ctx);
+
+        const msgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        const cards = msgs.filter(m => m.type === 'life_card');
+        expect(cards).toHaveLength(1);
+        expect(cards[0].metadata?.module).toBe('med');
+        const text = msgs.filter(m => m.type === 'text').map(m => m.content).join('\n');
+        expect(text).toContain('记得吃药哦');
+        expect(text).not.toContain('LIFE');
+    }, 20000);
+});

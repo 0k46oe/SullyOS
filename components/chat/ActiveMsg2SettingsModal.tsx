@@ -25,6 +25,7 @@ import {
   describeTaskMode,
   describeTaskProgress,
   formatTaskTime,
+  fromDatetimeLocalValue,
   isAmsg2EnabledForChar,
   isPendingTask,
   isRemoteMissingTask,
@@ -292,12 +293,17 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
 
       if (!globalReady) throw new Error('请先去系统设置里完成“主动消息 2.0”的全局配置。');
 
+      // 时间框里的是用户桌上的钟，先折成绝对时刻再往下传。裸墙钟交出去的话，排程接口
+      // 会按角色时区解释它（那条规则是给角色自己排程用的），角色一开自定义时区就差一个
+      // 时差。落盘也存这一份，面板显示与远端对账因此认的是同一个时刻。
+      const firstSendAt = fromDatetimeLocalValue(firstSendTime);
+
       // 传给排程接口的这份只用来读角色级设置（封顶校验 / 副 API），不参与落盘。
       const config = buildConfig(saved, () => tasks);
       const result = await ActiveMsgClient.scheduleCharacterTask({
         char, config,
         task: {
-          mode, firstSendTime, recurrenceType,
+          mode, firstSendTime: firstSendAt, recurrenceType,
           promptHint: promptHint.trim() || undefined,
           userMessage: userMessage.trim() || undefined,
           expirePolicy,
@@ -309,7 +315,7 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
       const record: ActiveMsg2TaskRecord = {
         taskUuid: result.uuid,
         clientTaskId: result.clientTaskId,
-        mode, firstSendTime, recurrenceType,
+        mode, firstSendTime: result.firstSendAt, recurrenceType,
         promptHint: promptHint.trim() || undefined,
         userMessage: userMessage.trim() || undefined,
         expirePolicy: resolveExpirePolicy(mode, expirePolicy),

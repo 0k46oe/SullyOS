@@ -38,6 +38,7 @@ import {
   appendSelfLogEntry,
   appendSelfLogTask,
   createSelfLog,
+  describeFirePackVersion,
   parseFirePack,
   parseSelfLog,
   renderFirePack,
@@ -777,7 +778,10 @@ export const amsgHooks = {
       throw fail('fire_pack 解压失败（数据损坏）', { error: String(error) });
     }
     const pack = parseFirePack(packJson);
-    if (!pack) throw fail('fire_pack 解析失败（格式不对或数据损坏）');
+    // 失败原因写清楚：升 fire_pack 版本要 worker bundle 和前端一起动，而设置页的版本门槛
+    // 读的是上游 amsg-server 库的版本号，只改 SullyOS 自己这份 worker 代码时它不会亮。
+    // 面板上的 lastError 是用户唯一能看到的线索，得直接说出该做什么。
+    if (!pack) throw fail(`fire_pack 解析失败：${describeFirePackVersion(packJson)}`);
 
     // 本次触发时刻：任务行 next_send_at（NOT NULL，buildHookTask 已摊平提供）。防穿帮闸的
     // 循环判定要拿它当窗口锚点，之后又经 scratch 透传给每条 push 的 metadata.amsgOccurrenceMs

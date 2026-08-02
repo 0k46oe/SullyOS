@@ -413,7 +413,7 @@ function findXsecToken(caches: XhsCaches | undefined, lastXhsNotes: XhsNote[], n
 
 export type XhsSearchResult =
     | { ok: true; keyword: string; notesText: string; notes: XhsNote[] }
-    | { ok: false; reason: 'not_enabled' | 'no_results'; keyword: string; message?: string };
+    | { ok: false; reason: 'not_enabled' | 'unreachable' | 'no_results'; keyword: string; message?: string };
 
 /** Throws on network/transport error. */
 export async function runXhsSearch(
@@ -425,7 +425,13 @@ export async function runXhsSearch(
         return { ok: false, reason: 'not_enabled', keyword: args.keyword };
     }
     const result = await xhsSearchImpl(xhsConf, args.keyword);
-    if (!result.success || result.notes.length === 0) {
+    // 「连不上」和「搜过了但没结果」得分开：两者都归成 no_results 的话，角色会把一次
+    // 根本没发生的搜索说成「我刚在小红书搜了下，没啥好东西」——一句没发生的事说成
+    // 发生过。后台触发时服务器多半就在用户自己电脑上（关机 / 不在同一网络），这条最常走。
+    if (!result.success) {
+        return { ok: false, reason: 'unreachable', keyword: args.keyword, message: result.message };
+    }
+    if (result.notes.length === 0) {
         return { ok: false, reason: 'no_results', keyword: args.keyword, message: result.message };
     }
     if (ctx.lastXhsNotesRef) ctx.lastXhsNotesRef.current = result.notes;
@@ -440,7 +446,7 @@ export async function runXhsSearch(
 
 export type XhsBrowseResult =
     | { ok: true; category?: string; notesText: string; notes: XhsNote[] }
-    | { ok: false; reason: 'not_enabled' | 'no_results'; category?: string; message?: string };
+    | { ok: false; reason: 'not_enabled' | 'unreachable' | 'no_results'; category?: string; message?: string };
 
 /** Throws on network/transport error. */
 export async function runXhsBrowse(
@@ -453,7 +459,11 @@ export async function runXhsBrowse(
     }
     const result = await xhsBrowseImpl(xhsConf);
     console.log('📕 [XHS] 浏览结果:', result.success, result.message, result.notes?.length || 0);
-    if (!result.success || result.notes.length === 0) {
+    // 同 runXhsSearch：连不上 ≠ 刷了但首页是空的。
+    if (!result.success) {
+        return { ok: false, reason: 'unreachable', category: args.category, message: result.message };
+    }
+    if (result.notes.length === 0) {
         return { ok: false, reason: 'no_results', category: args.category, message: result.message };
     }
     if (ctx.lastXhsNotesRef) ctx.lastXhsNotesRef.current = result.notes;

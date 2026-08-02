@@ -40,13 +40,14 @@ const firePackValue = (
   lastUserMessageAt: number | null = null,
   extra: Record<string, unknown> = {},
 ) => JSON.stringify({
-  v: 3,
+  v: 4,
   template: `现在是 ${AMSG_SLOT_CURRENT_TIME}。\n${AMSG_SLOT_TASK_INSTRUCTION}`,
   lastUserMessageAt,
   tzId: 'Asia/Shanghai',
   targetName: '楪',
   builtAt: PACK_BUILT_AT,
   pendingTasks: [],
+  scene: null,
   ...extra,
 });
 
@@ -747,13 +748,14 @@ describe('self_log — 角色自述回写', () => {
 
   /** 带自述槽位的 fire_pack（当前客户端打的包长这样）。 */
   const slottedFirePack = (builtAt: number = PACK_BUILT_AT) => JSON.stringify({
-    v: 3,
+    v: 4,
     template: `【最近对话上下文】\n用户：先睡了${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
     lastUserMessageAt: null,
     tzId: 'Asia/Shanghai',
     targetName: '楪',
     builtAt,
     pendingTasks: [],
+    scene: null,
   });
 
   /** 会真的记住写入的假 client_state：第二次 fire 靠它读回第一次写下的自述。 */
@@ -920,12 +922,13 @@ describe('self_log — 角色自述回写', () => {
   // 硬失败，而不是悄悄退回单轮——静默降级的话，多轮连续性没了也没人会发现。
   it('包里缺对齐锚点 → 抛错，不静默退回单轮', async () => {
     const store = makeStore(JSON.stringify({
-      v: 3,
+      v: 4,
       template: `【最近对话上下文】\n用户：先睡了${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
       lastUserMessageAt: null,
       tzId: 'Asia/Shanghai',
       targetName: '楪',
       pendingTasks: [],
+      scene: null,
     }));
     await expect(runFire(store, {
       sendAt: '2026-07-25T12:00:00.000Z',

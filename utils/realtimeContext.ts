@@ -625,23 +625,32 @@ export const RealtimeContextManager = {
     /**
      * 构建完整的实时上下文（注入到系统提示词）
      */
-    buildFullContext: async (config: RealtimeConfig, tz?: string): Promise<string> => {
+    buildFullContext: async (
+        config: RealtimeConfig,
+        tz: string | undefined,
+        // includeTime=false：角色关掉了「时间感知」。天气/新闻还要，但当前时间和今日节日
+        // 属于时间感知的范畴，这个开关关着就不该从这一段里漏出去。
+        opts: { includeTime: boolean },
+    ): Promise<string> => {
         const parts: string[] = [];
+        const includeTime = opts.includeTime;
 
         // 开头强调：这是真实世界的信息
         parts.push(`### 【真实世界感知系统】`);
         parts.push(`⚠️ 重要：以下信息来自真实世界，不是虚构的。你现在真的能"看到"外面的世界。`);
         parts.push('');
 
-        // 1. 时间信息（总是包含）。tz 非空时按角色所在时区折算。
-        //    时差提示（tzAwarenessNote）统一由 ContextBuilder.buildCoreContext 注入，这里不再追加，避免双份。
-        const time = RealtimeContextManager.getTimeContext(tz);
-        parts.push(`📅 当前真实时间: ${time.dateStr} ${time.dayOfWeek} ${time.timeOfDay} ${time.timeStr}`);
+        if (includeTime) {
+            // 1. 时间信息。tz 非空时按角色所在时区折算。
+            //    时差提示（tzAwarenessNote）统一由 ContextBuilder.buildCoreContext 注入，这里不再追加，避免双份。
+            const time = RealtimeContextManager.getTimeContext(tz);
+            parts.push(`📅 当前真实时间: ${time.dateStr} ${time.dayOfWeek} ${time.timeOfDay} ${time.timeStr}`);
 
-        // 2. 特殊日期（跟上面的「当前真实时间」同一个时区，否则同一段里日期和节日会打架）
-        const specialDates = RealtimeContextManager.checkSpecialDates(tz);
-        if (specialDates.length > 0) {
-            parts.push(`🎉 今日特殊: ${specialDates.join('、')}`);
+            // 2. 特殊日期（跟上面的「当前真实时间」同一个时区，否则同一段里日期和节日会打架）
+            const specialDates = RealtimeContextManager.checkSpecialDates(tz);
+            if (specialDates.length > 0) {
+                parts.push(`🎉 今日特殊: ${specialDates.join('、')}`);
+            }
         }
 
         // 3. 天气信息（有没有 OWM key 都能取：无 key 走 Open-Meteo）

@@ -169,6 +169,10 @@ export type PostProcessDirective =
     | { type: 'xhs_reply'; noteId: string; commentId: string; text: string }
     | { type: 'xhs_post'; title: string; content: string; tags: string }
     | { type: 'xhs_share'; idx: number }
+    // 生活记录代记 / 热点卡片 — body 是冒号后的整段原文, 拼回原 tag 交给 chatParser
+    // (LIFE → lifeRecords.executeLifeDirectives, NEWS_CARD → 落 news_card 消息)。
+    | { type: 'life_record'; body: string }
+    | { type: 'news_card'; body: string }
     // Notion / 飞书 写日记 — worker classifier 提取 title/content/mood, 我们拼回原 tag 给
     // line 465 (Notion) / 649 (飞书) 既有 handler 跑. title 可空, 客户端兜底.
     | { type: 'notion_write_diary'; title: string; content: string; mood?: string }
@@ -231,6 +235,12 @@ function reconstructDirectiveTags(directives: PostProcessDirective[] | undefined
                 break;
             case 'xhs_share':
                 parts.push(`[[XHS_SHARE:${d.idx}]]`);
+                break;
+            case 'life_record':
+                parts.push(`[[LIFE:${d.body}]]`);
+                break;
+            case 'news_card':
+                parts.push(`[[NEWS_CARD: ${d.body}]]`);
                 break;
             case 'notion_write_diary': {
                 // 拼回长形态 [[DIARY_START: title|mood]]\n content \n[[DIARY_END]],
@@ -1856,7 +1866,7 @@ export async function applyAssistantPostProcessing(
     aiContent = aiContent.replace(/\[\[XHS_POST:.*?\]\]/gs, '').trim();
 
     // ─── Step 3: ChatParser.parseAndExecuteActions ───
-    aiContent = await ChatParser.parseAndExecuteActions(aiContent, char.id, char.name, addToast, musicHooks, resolveCharTimeZone(char));
+    aiContent = await ChatParser.parseAndExecuteActions(aiContent, char.id, char.name, addToast, musicHooks, resolveCharTimeZone(char), messageTimestamp);
 
     // ─── Step 4: thinking chain 抽取 (本轮末尾展示用) ───
     // 跑过二轮 (data !== initialData) → 取二轮 data 的 reasoning; 没跑二轮 → 取一轮 (round1ThinkingChain,

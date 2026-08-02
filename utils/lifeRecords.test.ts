@@ -250,7 +250,7 @@ describe('executeLifeDirectives 代记指令', () => {
 
     it('注入的代记说明包含「一件事只记一次」防重复明示', async () => {
         const char = mkChar();
-        const s = await buildLifeRecordInjection(char, '洛洛');
+        const s = await buildLifeRecordInjection(char, '洛洛', { forFirePack: false });
         expect(s).toContain('一件事只记一次');
         expect(s).toContain('已经记过了');
     });
@@ -274,7 +274,7 @@ describe('全局隐藏模块（长按页签隐藏）', () => {
     it('隐藏的模块：注入里不出现对应数据与指令说明', async () => {
         await DB.saveLifeRecordSettings({ id: 'main', hiddenModules: ['med', 'exercise'] });
         const char = mkChar();
-        const text = await buildLifeRecordInjection(char, '小鱼');
+        const text = await buildLifeRecordInjection(char, '小鱼', { forFirePack: false });
         expect(text).toContain('生理期');
         expect(text).not.toContain('今日用药计划');
         expect(text).not.toContain('LIFE:MED');
@@ -285,7 +285,7 @@ describe('全局隐藏模块（长按页签隐藏）', () => {
     it('全部模块隐藏：整段注入为空', async () => {
         await DB.saveLifeRecordSettings({ id: 'main', hiddenModules: ['period', 'med', 'expense', 'exercise'] });
         const char = mkChar();
-        const text = await buildLifeRecordInjection(char, '小鱼');
+        const text = await buildLifeRecordInjection(char, '小鱼', { forFirePack: false });
         expect(text).toBe('');
     });
 });

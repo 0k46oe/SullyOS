@@ -18,16 +18,16 @@ const expired: Amsg2ExpiredNoticeRecord = {
 
 describe('buildAmsg2TaskContextText', () => {
   it('没任务没作废 → null（零噪音）', () => {
-    expect(buildAmsg2TaskContextText([], [])).toBeNull();
+    expect(buildAmsg2TaskContextText([], [], Date.now(), undefined)).toBeNull();
   });
   it('进行中任务列出短 id 与方向', () => {
-    const text = buildAmsg2TaskContextText([pendingTask], [])!;
+    const text = buildAmsg2TaskContextText([pendingTask], [], Date.now(), undefined)!;
     expect(text).toContain('[aabbccdd]');
     expect(text).toContain('问问考试结果');
     expect(text).not.toContain('已作废');
   });
   it('作废段包含三选一引导、时机约束、renew 与重建引导、不复述约束', () => {
-    const text = buildAmsg2TaskContextText([], [expired])!;
+    const text = buildAmsg2TaskContextText([], [expired], Date.now(), undefined)!;
     expect(text).toContain('已作废');
     expect(text).toContain('renew_active_message');
     expect(text).toContain('cancel_active_message + schedule_active_message');

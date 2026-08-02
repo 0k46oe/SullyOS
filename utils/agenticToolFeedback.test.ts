@@ -119,6 +119,49 @@ describe('buildToolResultMessage', () => {
     const msg = buildToolResultMessage({ name: 'recall', result: {}, history });
     expect(msg).toContain('直接把要发的消息写出来');
   });
+
+  // 回归守卫：小红书 / MCP 服务器多半跑在用户自己电脑上，后台到点时人睡了机器关了，
+  // worker 怎么也连不上。以前这种失败跟「搜过了但没结果」共用一个 reason，模型看见
+  // ok:false 就挑个说法圆过去——「我刚在小红书搜了下，没啥好东西诶」。一次根本没发生的
+  // 搜索被说成发生过。现在这类失败的回喂里明写「这件事没有发生，别说你查过」。
+  describe('这次调用没跑起来时，得拦住角色说「我查过了」', () => {
+    const neverRanCases: Array<[string, string]> = [
+      ['xhs_search', 'unreachable'],
+      ['xhs_browse', 'not_enabled'],
+      ['notion_read_diary', 'not_configured'],
+      ['web_search', 'no_api_key'],
+      ['mcp__get_secret', 'mcp_error'],
+    ];
+
+    it.each(neverRanCases)('%s / %s → 明说这件事没发生', (name, reason) => {
+      const msg = buildToolResultMessage({
+        name,
+        result: { ok: false, reason },
+        history: [{ name, fingerprint: toolCallFingerprint(name, {}) }],
+      });
+      expect(msg).toContain('没能跑起来');
+      expect(msg).toContain('这件事**没有发生**');
+      expect(msg).not.toContain('拿回了下面这些');
+    });
+
+    it('「跑了但没东西」不加这句——角色说「我搜了下没啥」是实话', () => {
+      for (const reason of ['no_results', 'not_found', 'empty_content', 'no_logs']) {
+        const msg = buildToolResultMessage({
+          name: 'xhs_search',
+          result: { ok: false, reason },
+          history: [{ name: 'xhs_search', fingerprint: 'a' }],
+        });
+        expect(msg, reason).toContain('拿回了下面这些');
+        expect(msg, reason).not.toContain('没有发生');
+      }
+    });
+
+    it('成功的结果照旧', () => {
+      const msg = buildToolResultMessage({ name: 'xhs_search', result: { ok: true, notes: [] }, history });
+      expect(msg).toContain('拿回了下面这些');
+      expect(msg).not.toContain('没有发生');
+    });
+  });
 });
 
 describe('buildDuplicateToolMessage', () => {

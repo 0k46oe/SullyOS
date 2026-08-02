@@ -62,6 +62,32 @@ export interface AmsgToolConfig extends AgenticToolRealtimeConfig {
   mcpUseNativeTools?: boolean;
 }
 
+/**
+ * CF worker 直连打不通的地址（本机 / 私网 / 链路本地）。这类服务器不上云、也不在
+ * 打包给主动消息的提示词里出现——上了只会教角色用一个必失败的工具，然后它把一次
+ * 根本没发生的搜索说成「我刚搜了下，没啥好东西」。
+ *
+ * 这是体验护栏、不是安全边界：只看字面地址，域名解析到内网之类拦不住。
+ * 住在这个叶子里是因为浏览器侧（MCP 服务器清单、小红书配置）和打包链路都要用同一份判断。
+ */
+export const isWorkerReachableUrl = (url: string): boolean => {
+  try {
+    const u = new URL(url);
+    if (!/^https?:$/.test(u.protocol)) return false;
+    const h = u.hostname.toLowerCase();
+    // 本机与「没有地址」的占位地址
+    if (h === 'localhost' || h === '0.0.0.0' || h === '[::]' || h === '[::1]') return false;
+    // 只在局域网里能解析的域名后缀（my-nas.local、foo.localhost）
+    if (/\.(local|localhost)$/.test(h)) return false;
+    // IPv4 回环 / 私网 / 链路本地
+    if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h)
+      || /^172\.(1[6-9]|2\d|3[01])\./.test(h) || /^169\.254\./.test(h)) return false;
+    // IPv6 唯一本地地址 fc00::/7（首段以 fc / fd 开头，hostname 带方括号）
+    if (/^\[f[cd]/.test(h)) return false;
+    return true;
+  } catch { return false; }
+};
+
 export const buildToolPack = (char: CharacterProfile): AmsgToolPack => ({
   v: 1,
   charName: char.name,
@@ -99,7 +125,9 @@ export const buildToolConfig = (
     ...(rc?.feishuAppSecret ? { feishuAppSecret: rc.feishuAppSecret } : {}),
     ...(rc?.feishuBaseId ? { feishuBaseId: rc.feishuBaseId } : {}),
     ...(rc?.feishuTableId ? { feishuTableId: rc.feishuTableId } : {}),
-    ...(xhs?.serverUrl
+    // 小红书服务器多半就跑在用户自己电脑上（localhost:xxxx）。worker 从 CF 那头连不上，
+    // 这份配置上了云也只是让角色去撞一次必失败的调用，所以够不着的干脆不带。
+    ...(xhs?.serverUrl && isWorkerReachableUrl(xhs.serverUrl)
       ? {
           xhsMcpConfig: {
             enabled: !!xhs.enabled,

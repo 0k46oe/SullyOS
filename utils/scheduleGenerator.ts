@@ -228,14 +228,8 @@ ${chatHistoryBlock ? `**重要：上面给了你最近和「${user.name}」的�
 仅输出JSON，不要其他内容。`;
 }
 
-/**
- * 根据当前小时数返回 flowNarrative 的 key。
- */
-export function getFlowNarrativeKey(hour: number): 'morning' | 'afternoon' | 'evening' {
-    if (hour < 12) return 'morning';
-    if (hour < 18) return 'afternoon';
-    return 'evening';
-}
+// getFlowNarrativeKey 搬去了 utils/scheduleInjection.ts —— 日程渲染那一套要给 worker
+// 共用（主动消息到点生成），得住在不带 DB 依赖的纯叶子里。
 
 export async function generateDailyScheduleForChar(
     char: CharacterProfile,

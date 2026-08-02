@@ -58,13 +58,18 @@ const stripBusinessTagsForBubble = (t: string): string =>
     .replace(/\[schedule_message[^\]]*\]/g, '');
 
 /**
- * notification 路径专用 — 在 stripBusinessTagsForBubble 基础上额外剥 READ_NOTE / XHS_x.
- * 这些标签在 chatParser.sanitize 老路径里被保留 (downstream 由 applyAssistantPostProcessing
- * 重新扫描+执行), 但 push notification 是终态, 不会再有 downstream, 所以剥得更狠.
+ * notification 路径专用 — 在 stripBusinessTagsForBubble 基础上额外剥 READ_NOTE / XHS_x /
+ * LIFE / NEWS_CARD. 这些标签在 chatParser.sanitize 老路径里被保留 (downstream 由
+ * applyAssistantPostProcessing / ChatParser.parseAndExecuteActions 重新扫描+执行),
+ * 但 push notification 是终态, 不会再有 downstream, 所以剥得更狠.
+ *
+ * LIFE / NEWS_CARD 的副作用走 worker classifier 的 directive 通道 (SIDE_EFFECT_TAGS 里
+ * 的 life_record / news_card), 跟 POKE / ADD_EVENT / DIARY 同一条路: 正文里剥光,
+ * 结构化挂在最后一条 push 上, 客户端 reconstructDirectiveTags 拼回原 tag 执行。
  */
 const stripBusinessTagsForNotification = (t: string): string =>
   stripBusinessTagsForBubble(t)
-    .replace(/\[\[(?:READ_NOTE|XHS_[A-Z_]+)[:\s][\s\S]*?\]\]/g, '')
+    .replace(/\[\[(?:READ_NOTE|XHS_[A-Z_]+|LIFE|NEWS_CARD)[:\s][\s\S]*?\]\]/g, '')
     .replace(/\[\[XHS_[A-Z_]+\]\]/g, '');
 
 /** 引用类: `[[QUOTE|引用]] / [QUOTE|引用] / [回复 "..."] / 模仿历史渲染的 [xx引用了xx「…」…]` */

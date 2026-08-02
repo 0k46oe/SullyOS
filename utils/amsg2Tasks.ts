@@ -69,15 +69,22 @@ export const describeTaskMode = (
 };
 
 /**
- * 任务时间的统一显示格式（本地 24 小时制，精确到分）。
+ * 任务时间的统一显示格式（24 小时制，精确到分）。
  * 不显示秒——cron 每整分才捞一次任务，秒位不代表任何东西，却要在窄卡片里占三个字符，
  * 把后面的重复方式和进度挤没。
+ *
+ * tz 是「这个时间给谁看」：
+ *  - 给用户看（设置面板的任务卡、跳过原因）→ 不传，跟着设备走，用户看自己的钟；
+ *  - 给角色看（排程现状块、schedule/list 工具的回话）→ 传角色时区。不传的话，
+ *    纽约角色会在同一份 prompt 里读到两套时间：这边是设备的钟，fire 那边（worker 按
+ *    fire_pack.tzId 渲染）是自己的钟，同一条任务差整整一个时差。
  */
-export const formatTaskTime = (value: number | string): string =>
+export const formatTaskTime = (value: number | string, tz?: string): string =>
   new Date(value).toLocaleString('zh-CN', {
     hour12: false,
     year: 'numeric', month: 'numeric', day: 'numeric',
     hour: '2-digit', minute: '2-digit',
+    ...(tz ? { timeZone: tz } : {}),
   });
 
 /**
@@ -91,6 +98,23 @@ export const toDatetimeLocalValue = (value: string): string => {
   if (Number.isNaN(date.getTime())) return value;
   const offset = date.getTimezoneOffset();
   return new Date(date.getTime() - offset * 60_000).toISOString().slice(0, 16);
+};
+
+/**
+ * datetime-local 输入框的值 → 绝对时刻（UTC ISO）。toDatetimeLocalValue 的逆操作。
+ *
+ * 设置面板的时间框是给**用户**填的，填的是用户桌上的钟。而排程接口拿到裸墙钟
+ * （没有 Z / ±hh:mm 后缀）一律按**角色**时区解释——那条规则是给角色自己排程用的
+ * （纽约角色说「明早九点」就该是纽约的九点）。两边共用同一个字符串的话，角色一开
+ * 自定义时区，用户填的时间就会被当成角色那边的墙钟，同一条任务差整整一个时差。
+ * 所以面板在交出去之前先按设备时区折成绝对时刻，让后面所有环节都只认这一个时刻。
+ *
+ * 无法解析（空 / 坏值）原样返回，交给下游报错，不在这里抛。
+ */
+export const fromDatetimeLocalValue = (value: string): string => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toISOString();
 };
 
 export const findTaskByShortId = (

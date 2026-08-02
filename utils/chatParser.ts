@@ -61,12 +61,23 @@ export const ChatParser = {
         musicHooks?: MusicActionHooks,
         /** 角色自定义时区；定时消息里的时间是角色照着自己的钟写的，要按这个还原成真实时刻。 */
         charTz?: string,
+        /**
+         * 这一轮消息该落的时间戳（离线补收时是原始发送时刻）。不传则各条按写库当刻。
+         *
+         * 必须跟 applyAssistantPostProcessing 的 persistMessage 用同一个值：不然离线补收时
+         * 正文气泡显示凌晨三点、同一条消息拆出来的戳一戳/转账/日程系统提示显示「用户打开
+         * App 那一刻」，一条消息被劈成两个时间。
+         */
+        messageTimestamp?: number,
     ) => {
         let content = aiContent;
+        /** 落库统一走这里，别直接调 DB.saveMessage —— 漏一处就是一条消息两个时间。 */
+        const persist = (msg: Parameters<typeof DB.saveMessage>[0]) =>
+            DB.saveMessage(messageTimestamp != null ? { ...msg, timestamp: messageTimestamp } : msg);
 
         // POKE
         if (content.includes('[[ACTION:POKE]]')) {
-            await DB.saveMessage({ charId, role: 'assistant', type: 'interaction', content: '[戳一戳]' });
+            await persist({ charId, role: 'assistant', type: 'interaction', content: '[戳一戳]' });
             content = content.replace('[[ACTION:POKE]]', '').trim();
         }
 
@@ -99,7 +110,7 @@ export const ChatParser = {
                 console.warn(`[Transfer] 角色想${action === 'accepted' ? '收下' : '退回'}转账，但没有待处理的用户转账，已忽略`);
                 return;
             }
-            await DB.saveMessage({
+            await persist({
                 charId, role: 'assistant', type: 'transfer',
                 content: action === 'accepted' ? '[已收款]' : '[已退回]',
                 metadata: { receipt: action, amount, ref: refId },
@@ -114,7 +125,7 @@ export const ChatParser = {
             if (ev.kind === 'send') {
                 // role 固定 'assistant' —— 方向不由文本决定，文本里的方向信息只在
                 // transferFormat 里做过校验（伪造的已被丢弃）。
-                await DB.saveMessage({ charId, role: 'assistant', type: 'transfer', content: '[转账]', metadata: { amount: ev.amount, status: 'pending' } });
+                await persist({ charId, role: 'assistant', type: 'transfer', content: '[转账]', metadata: { amount: ev.amount, status: 'pending' } });
             } else {
                 await resolveUserTransfer(ev.kind === 'accept' ? 'accepted' : 'returned');
             }
@@ -181,7 +192,7 @@ export const ChatParser = {
                         }
                     } catch { /* 忽略 */ }
                 }
-                await DB.saveMessage({
+                await persist({
                     charId,
                     role: 'assistant',
                     type: 'music_card',
@@ -240,7 +251,7 @@ export const ChatParser = {
                     }
                 } catch { /* 补不到就算了 */ }
                 if (title) {
-                    await DB.saveMessage({
+                    await persist({
                         charId,
                         role: 'assistant',
                         type: 'news_card',
@@ -262,7 +273,7 @@ export const ChatParser = {
                 const anni: any = { id: `anni-${Date.now()}`, title: title, date: date, charId };
                 await DB.saveAnniversary(anni);
                 addToast(`${charName} 添加了新日程: ${title}`, 'success');
-                await DB.saveMessage({ charId, role: 'system', type: 'text', content: `[系统: ${charName} 新增了日程 "${title}" (${date})]` });
+                await persist({ charId, role: 'system', type: 'text', content: `[系统: ${charName} 新增了日程 "${title}" (${date})]` });
             }
             content = content.replace(eventMatch[0], '').trim();
         }
@@ -276,16 +287,29 @@ export const ChatParser = {
             // 角色照着自己那边的钟写时间，按设备时区解释会整体偏一个时差：
             // 纽约角色在自己上午说「今晚 21:00 找你」，设备在中国就会算成已经过期。
             const dueTime = wallClockToTimestamp(timeStr, charTz);
-            if (!isNaN(dueTime) && dueTime > Date.now()) {
-                await DB.saveScheduledMessage({ id: `sched-${Date.now()}-${Math.random()}`, charId, content: msgContent, dueAt: dueTime, createdAt: Date.now() });
-                try {
-                    const hasPerm = await LocalNotifications.checkPermissions();
-                    if (hasPerm.display === 'granted') {
-                        await LocalNotifications.schedule({ notifications: [{ title: charName, body: msgContent, id: Math.floor(Math.random() * 100000), schedule: { at: new Date(dueTime) }, smallIcon: 'ic_stat_icon_config_sample' }] });
-                    }
-                } catch (e) { console.log("Notification schedule skipped (web mode)"); }
-                addToast(`${charName} 似乎打算一会儿找你...`, 'info');
+            // 时间写歪 / 已经过去的一律不排。这两种情况下角色在正文里往往已经把话说出去了
+            // （「我到点叫你」），排不上就是一句空头承诺，所以留一行日志说清是哪条、为什么，
+            // 别让它悄无声息地消失。离线补收时尤其常见：消息是凌晨发的，人第二天早上才打开。
+            if (isNaN(dueTime)) {
+                console.warn('[ScheduledMessage] 时间解析不了，这条不排:', timeStr, '内容:', msgContent);
+                continue;
             }
+            if (dueTime <= Date.now()) {
+                console.warn(
+                    '[ScheduledMessage] 时间已经过去，这条不排:', timeStr,
+                    `(角色时区 ${charTz ?? '设备默认'}，晚了 ${Math.round((Date.now() - dueTime) / 60000)} 分钟)`,
+                    '内容:', msgContent,
+                );
+                continue;
+            }
+            await DB.saveScheduledMessage({ id: `sched-${Date.now()}-${Math.random()}`, charId, content: msgContent, dueAt: dueTime, createdAt: Date.now() });
+            try {
+                const hasPerm = await LocalNotifications.checkPermissions();
+                if (hasPerm.display === 'granted') {
+                    await LocalNotifications.schedule({ notifications: [{ title: charName, body: msgContent, id: Math.floor(Math.random() * 100000), schedule: { at: new Date(dueTime) }, smallIcon: 'ic_stat_icon_config_sample' }] });
+                }
+            } catch (e) { console.log("Notification schedule skipped (web mode)"); }
+            addToast(`${charName} 似乎打算一会儿找你...`, 'info');
         }
         content = content.replace(scheduleRegex, '').trim();
 
@@ -296,7 +320,7 @@ export const ChatParser = {
                 const chars = await DB.getAllCharacters();
                 const charProfile = chars.find(c => c.id === charId);
                 content = charProfile
-                    ? await executeLifeDirectives(content, charProfile, addToast)
+                    ? await executeLifeDirectives(content, charProfile, addToast, messageTimestamp)
                     : content.replace(/\[\[LIFE:[^\]]*\]\]/g, '').trim();
             } catch (e) {
                 console.error('[LifeRecord] parse failed:', e);

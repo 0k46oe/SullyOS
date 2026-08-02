@@ -16,6 +16,7 @@
  */
 
 import type { ActiveMsg2TaskRecord } from '../types';
+import { renderFireSceneBlock, type AmsgFireScene } from './amsgFireScene';
 
 export const AMSG_STATE_NAMESPACE_PREFIX = 'amsg:char:';
 export const amsgStateNamespace = (charId: string) => `${AMSG_STATE_NAMESPACE_PREFIX}${charId}`;
@@ -219,9 +220,16 @@ export const AMSG_SLOT_SELF_LOG = '{{AMSG_SELF_LOG}}';
  * 避开「等下再跟你说 X」而 X 其实早就排在半小时后。这个槽位把同一份信息补到 fire 这边。
  */
 export const AMSG_SLOT_TASK_LIST = '{{AMSG_TASK_LIST}}';
+/**
+ * 「你此刻在做什么」的落点：日程当前时段 + 由日程推出来的此刻在听的歌。
+ *
+ * 这两块以前跟着角色设定一起烤进模板，说的是打包那一刻的事——凌晨三点触发时角色
+ * 会说「我在健身房呢」。改成随包带整天的作息表，worker 到点按角色时区现挑时段。
+ */
+export const AMSG_SLOT_SCENE = '{{AMSG_SCENE}}';
 
 export interface AmsgFirePack {
-  v: 3;
+  v: typeof FIRE_PACK_VERSION;
   /** 完整 prompt 模板，时间性内容与本次任务指令留 AMSG_SLOT_* 槽位。 */
   template: string;
   /** 用户上次真实主动发消息的时间（epoch ms）；没有聊天记录时为 null。 */
@@ -248,6 +256,11 @@ export interface AmsgFirePack {
    * 下次同步才更新。角色到点自己排下的那些不在这里，由 worker 从 self_log 补上。
    */
   pendingTasks: ActiveMsg2TaskRecord[];
+  /**
+   * 「此刻在做什么」的原始素材（作息表 + 歌单抽样池），worker 到点渲染进
+   * AMSG_SLOT_SCENE。没日程的角色为 null，那个槽位被抹平。
+   */
+  scene: AmsgFireScene | null;
 }
 
 // ─── 按角色参照系渲染时间（②：worker 给角色看的一切时间只此一份） ───
@@ -500,7 +513,37 @@ export const renderFirePack = (
   out = fillSlot(out, AMSG_SLOT_TASK_INSTRUCTION, taskInstruction);
   out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(extras?.selfLog ?? null, tz));
   out = fillSlot(out, AMSG_SLOT_TASK_LIST, extras?.taskListBlock ?? '');
+  out = fillSlot(out, AMSG_SLOT_SCENE, renderFireSceneBlock(pack.scene, nowMs, tz));
   return out;
+};
+
+/**
+ * 当前 fire_pack 的版本号。前端打包写它，worker 只认它。
+ *
+ * 版本不匹配一律整包打回，不做任何形状兼容——两边永远同一次发布上线。
+ * 唯一的例外是「说清楚为什么」：见 describeFirePackVersion，worker 拿它拼失败原因，
+ * 面板的 lastError 才能直接告诉用户该重贴 bundle 还是该刷新前端。
+ */
+export const FIRE_PACK_VERSION = 4;
+
+/**
+ * 解析失败时给人看的一句原因。
+ *
+ * 存在的理由：升 fire_pack 版本需要 worker bundle 和前端一起动，而设置页的版本门槛读的是
+ * **上游 amsg-server 库**的版本号——只改 SullyOS 自己的 worker 代码时那个号不动，门槛不会亮。
+ * 没有这句话的话，用户忘了重贴 bundle 时看到的只有「格式不对或数据损坏」，完全不知道该做什么。
+ */
+export const describeFirePackVersion = (value: string): string => {
+  let v: unknown;
+  try { v = JSON.parse(value)?.v; } catch { return '不是合法 JSON（数据损坏）'; }
+  if (v === FIRE_PACK_VERSION) return '版本号对得上，是别的字段不合格式（数据损坏）';
+  if (typeof v === 'number' && v < FIRE_PACK_VERSION) {
+    return `包是 v${v}、worker 要 v${FIRE_PACK_VERSION} —— 前端比 worker 旧，打开一次网页让它重新上传`;
+  }
+  if (typeof v === 'number') {
+    return `包是 v${v}、worker 只认 v${FIRE_PACK_VERSION} —— worker bundle 是旧的，去设置页重新粘贴部署`;
+  }
+  return '包里没有版本号（数据损坏）';
 };
 
 /** worker 侧从 client_state 读回的 value 解析成 fire_pack；形状不对返回 null（调用方抛错）。 */
@@ -509,13 +552,14 @@ export const parseFirePack = (value: string): AmsgFirePack | null => {
     const parsed = JSON.parse(value);
     if (
       parsed && typeof parsed === 'object' &&
-      parsed.v === 3 &&
+      parsed.v === FIRE_PACK_VERSION &&
       typeof parsed.template === 'string' && parsed.template.length > 0 &&
       (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === 'number') &&
       typeof parsed.tzId === 'string' && parsed.tzId.length > 0 &&
       typeof parsed.targetName === 'string' &&
       typeof parsed.builtAt === 'number' &&
-      Array.isArray(parsed.pendingTasks)
+      Array.isArray(parsed.pendingTasks) &&
+      (parsed.scene === null || typeof parsed.scene === 'object')
     ) {
       return parsed as AmsgFirePack;
     }

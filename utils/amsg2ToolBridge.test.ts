@@ -23,10 +23,16 @@ const UUIDS = [
 ];
 const shortOf = (uuid: string) => uuid.slice(0, 8);
 
+// 排程接口把角色写的墙钟折成的绝对时刻（上海 2026-08-03 21:00 / 纽约同日 09:00）。
+const RESOLVED_ISO = '2026-08-03T13:00:00.000Z';
+
 // 模拟 React：updateCharacter 只记录落盘的 config，绝不回写 char——
 // 这样只有「session 自己兜住最新 config」才能让同轮后续调用读到累加结果。
-const makeSession = () => {
-  const char: any = { id: 'preset-x', name: 'Nyah', activeMsg2Config: { enabled: true, tasks: [] } };
+const makeSession = (charOver: Record<string, unknown> = {}) => {
+  const char: any = {
+    id: 'preset-x', name: 'Nyah', activeMsg2Config: { enabled: true, tasks: [] },
+    ...charOver,
+  };
   const persisted: any[] = [];
   const updateCharacter = vi.fn((_id: string, updates: any) => {
     if (updates.activeMsg2Config) persisted.push(updates.activeMsg2Config);
@@ -47,7 +53,11 @@ describe('amsg2ToolBridge 同一轮多次调用累加', () => {
     (ActiveMsgClient.scheduleCharacterTask as any).mockReset();
     (ActiveMsgClient.scheduleCharacterTask as any).mockImplementation(async () => {
       const uuid = UUIDS[n++];
-      return { uuid, clientTaskId: `cid-${uuid.slice(0, 4)}`, anchorMs: 0, replacedCancelFailed: false };
+      return {
+        uuid, clientTaskId: `cid-${uuid.slice(0, 4)}`, anchorMs: 0, replacedCancelFailed: false,
+        // 真接口把 send_at 折成绝对时刻后回传，bridge 该存这一份（见下面的时区用例）。
+        firstSendAt: RESOLVED_ISO,
+      };
     });
     (ActiveMsgClient.cancelTask as any).mockReset();
     (ActiveMsgClient.cancelTask as any).mockResolvedValue({});
@@ -168,5 +178,49 @@ describe('角色级开关 enabled=false', () => {
     await executeAmsg2Tool('schedule_active_message', { send_at: future() }, deps);
 
     expect(persisted[persisted.length - 1].enabled).toBe(false);
+  });
+});
+
+// 回归守卫：角色写的 send_at 是「它那边的墙钟」，不带时区后缀（工具描述里就是这么教的）。
+// 原样落盘的话，本地读它的地方一律 new Date() 按设备时区解析——异国角色的任务卡、待触发
+// 判定、以及下面这句回话全都差一个时差。排程接口已经按角色时区把它折成绝对时刻了，
+// bridge 存的、说的都得是那一份。
+describe('角色排程的时间统一存绝对时刻', () => {
+  beforeEach(() => {
+    let n = 0;
+    (ActiveMsgClient.scheduleCharacterTask as any).mockReset();
+    (ActiveMsgClient.scheduleCharacterTask as any).mockImplementation(async () => ({
+      uuid: UUIDS[n++], clientTaskId: 'cid', anchorMs: 0, replacedCancelFailed: false,
+      firstSendAt: RESOLVED_ISO,
+    }));
+  });
+
+  it('落盘存排程接口折好的绝对时刻，不是角色写的墙钟原串', async () => {
+    const { deps, persisted } = makeSession({
+      customTimezoneEnabled: true, customTimezone: 'America/New_York',
+    });
+    await executeAmsg2Tool(
+      'schedule_active_message',
+      { send_at: '2026-08-03T09:00:00' },   // 纽约角色写的「明早九点」
+      deps,
+    );
+
+    expect(lastTasks(persisted)[0].firstSendTime).toBe(RESOLVED_ISO);
+  });
+
+  it('回话里的时间按角色的钟说，且只折一次', async () => {
+    const { deps } = makeSession({
+      customTimezoneEnabled: true, customTimezone: 'America/New_York',
+    });
+    const reply = await executeAmsg2Tool(
+      'schedule_active_message',
+      { send_at: '2026-08-03T09:00:00' },
+      deps,
+    );
+
+    // 纽约角色说的九点，回话里就该是 09:00
+    expect(reply).toContain('09:00');
+    // 折两次（先按设备解析原串、再换算到纽约）会落在别的钟点上
+    expect(reply).not.toContain('21:00');
   });
 });

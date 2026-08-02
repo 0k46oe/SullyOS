@@ -5,7 +5,8 @@
  *   - DATA tags (RECALL / SEARCH / READ_DIARY / FS_READ_DIARY / READ_NOTE / XHS_*) →
  *     tool-request: worker截断, 推送 toolCalls, 客户端跑工具后 POST /continue.
  *   - SIDE-EFFECT tags (ACTION:POKE / TRANSFER / ADD_EVENT / MUSIC_ACTION / XHS_LIKE /
- *     XHS_FAV / XHS_COMMENT / XHS_REPLY / XHS_POST / XHS_SHARE / schedule_message) →
+ *     XHS_FAV / XHS_COMMENT / XHS_REPLY / XHS_POST / XHS_SHARE / schedule_message /
+ *     DIARY / FS_DIARY / LIFE / NEWS_CARD) →
  *     finish + directive metadata. worker 识别但不执行, 客户端 applyAssistantPostProcessing
  *     看到 directives 非空时只重放、不再扫原文.
  *   - 其他 (结构型 + 纯文本) → finish, 原文给客户端 13 步管线消化.
@@ -44,6 +45,12 @@ export type Directive =
   | { type: 'xhs_reply'; noteId: string; commentId: string; text: string }
   | { type: 'xhs_post'; title: string; content: string; tags: string }
   | { type: 'xhs_share'; idx: number }
+  // 生活记录代记 [[LIFE:MED|布洛芬]] / [[LIFE:PERIOD_START]] / [[LIFE:EXPENSE|38|打车]] ...
+  // body = 冒号后的整段原文, 客户端拼回原 tag 交给 lifeRecords.executeLifeDirectives 解析,
+  // 开关校验 / 去重 / 写库都在那边, 这里不拆字段。
+  | { type: 'life_record'; body: string }
+  // 分享热点卡片 [[NEWS_CARD: 来源|标题]] (来源可省略). body 原样带走, 客户端按 `|` 切。
+  | { type: 'news_card'; body: string }
   // 写日记: 短形态 [[DIARY: title|content]] 或长形态 [[DIARY_START: title|mood]]\n content \n[[DIARY_END]],
   // 飞书同形态 (FS_ 前缀). title 可空 → 客户端兜底用 `${char.name}的日记 - M/D`. mood 可空.
   | { type: 'notion_write_diary'; title: string; content: string; mood?: string }
@@ -214,6 +221,17 @@ const SIDE_EFFECT_TAGS: SideEffectSpec[] = [
   {
     re: /\[\[XHS_SHARE:\s*(\d+)\]\]/g,
     toDirective: (m) => ({ type: 'xhs_share', idx: Number(m[1]) }),
+  },
+  // [[LIFE:MED|布洛芬]] 生活记录代记 — 跟 chatParser.ts 的 `\[\[LIFE:[^\]]*\]\]` 同口径,
+  // 冒号后整段原样带走, 不在这里拆 verb/args (那份解析在 lifeRecords.parseLifeDirective)。
+  {
+    re: /\[\[LIFE:([^\]]*)\]\]/g,
+    toDirective: (m) => ({ type: 'life_record', body: m[1] }),
+  },
+  // [[NEWS_CARD: 来源|标题]] 分享热点卡片 — 跟 chatParser.ts:NEWS_CARD_RE 同口径。
+  {
+    re: /\[\[NEWS_CARD:\s*([^\]]*?)\s*\]\]/g,
+    toDirective: (m) => ({ type: 'news_card', body: m[1] }),
   },
   // 写日记 — 长形态: [[DIARY_START: title|mood]]\n content \n[[DIARY_END]]
   // 短形态: [[DIARY: title|content]] 或 [[DIARY: content]] (无 title)
