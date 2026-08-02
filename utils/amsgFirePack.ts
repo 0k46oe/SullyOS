@@ -231,6 +231,18 @@ export const AMSG_SLOT_TASK_LIST = '{{AMSG_TASK_LIST}}';
  * 会说「我在健身房呢」。改成随包带整天的作息表，worker 到点按角色时区现挑时段。
  */
 export const AMSG_SLOT_SCENE = '{{AMSG_SCENE}}';
+/**
+ * 「外面的世界此刻什么样」的落点：今日节日 + 实时天气 + 热搜。
+ *
+ * 这一段前台每轮都有（见 realtimeWorldCore 的 renderRealtimeWorldBlock），到点生成
+ * 也该有，但绝不能跟着模板一起烤进来——它抬头就写着「以下信息来自真实世界」，
+ * 措辞比任何免责声明都硬，照着打包那一刻的读数说话就是大晴天叫人带伞、第二天还在
+ * 祝七夕快乐。所以留成槽位，worker 到点现拉现填；拉不到就填空串，这一段整个消失。
+ *
+ * 注意这段里不带「当前时间」那一行：时间由 AMSG_SLOT_CURRENT_TIME 给，
+ * 两处都出的话一份 prompt 里就有了两个钟。
+ */
+export const AMSG_SLOT_REALTIME_WORLD = '{{AMSG_REALTIME_WORLD}}';
 
 export interface AmsgFirePack {
   v: typeof FIRE_PACK_VERSION;
@@ -488,6 +500,7 @@ export const buildStreakReminder = (x: number): string =>
  *   taskListBlock 「你现在还挂着哪些排程」那一段，见 amsg2Tasks.buildFireTaskListBlock。
  *   文案住在 amsg2Tasks 而不是这里：那边已经有一整套给人看的任务描述（面板、
  *   排程现状块、list 工具共用），同一件事不该有第二套说法。
+ *   realtimeWorldBlock 到点现拉的节日 / 天气 / 热搜，见 realtimeWorldCore.renderRealtimeWorldBlock。
  *
  * 连排提醒：selfLog 里已有 n 条「对方未回应期间发出的」正文时，本条是第 x = n+1 条；
  * x ≥ 2 时在【本次任务】前插一行边界提醒（见 buildStreakReminder）。
@@ -496,7 +509,7 @@ export const renderFirePack = (
   pack: AmsgFirePack,
   nowMs: number,
   taskInstruction: string,
-  extras?: { selfLog?: AmsgSelfLog | null; taskListBlock?: string },
+  extras?: { selfLog?: AmsgSelfLog | null; taskListBlock?: string; realtimeWorldBlock?: string },
 ): string => {
   const tz: AmsgTzRef = { tzId: pack.tzId };
   const currentTime = formatFireTimeFull(nowMs, tz);
@@ -518,6 +531,10 @@ export const renderFirePack = (
   out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(extras?.selfLog ?? null, tz));
   out = fillSlot(out, AMSG_SLOT_TASK_LIST, extras?.taskListBlock ?? '');
   out = fillSlot(out, AMSG_SLOT_SCENE, renderFireSceneBlock(pack.scene, nowMs, tz));
+  // 实时世界那一段是独立的一整块，前导空行在这里补：拉到东西才隔开成段，
+  // 没拉到（或功能没开）填空串，输出跟没有这个槽位时一模一样。
+  const realtimeWorld = extras?.realtimeWorldBlock?.trim();
+  out = fillSlot(out, AMSG_SLOT_REALTIME_WORLD, realtimeWorld ? `\n\n${realtimeWorld}` : '');
   return out;
 };
 
@@ -528,7 +545,7 @@ export const renderFirePack = (
  * 唯一的例外是「说清楚为什么」：见 describeFirePackVersion，worker 拿它拼失败原因，
  * 面板的 lastError 才能直接告诉用户该重贴 bundle 还是该刷新前端。
  */
-export const FIRE_PACK_VERSION = 4;
+export const FIRE_PACK_VERSION = 5;
 
 /**
  * 解析失败时给人看的一句原因。

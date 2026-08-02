@@ -106,7 +106,7 @@ describe('formatFireTimeFull / formatFireTimeShort（角色参照系的自然中
 
 describe('renderFirePack', () => {
   const basePack: AmsgFirePack = {
-    v: 4, builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
+    v: 5, builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
     template: [
       `当前本地时间：${AMSG_SLOT_CURRENT_TIME}`,
       AMSG_SLOT_TIME_SINCE_USER,
@@ -153,7 +153,7 @@ describe('renderFirePack', () => {
 
 describe('parseFirePack', () => {
   const valid: AmsgFirePack = {
-    v: 4, template: 'x', lastUserMessageAt: null, tzId: 'Asia/Shanghai', targetName: 'A',
+    v: 5, template: 'x', lastUserMessageAt: null, tzId: 'Asia/Shanghai', targetName: 'A',
     builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
   };
 
@@ -195,7 +195,7 @@ describe('parseFirePack', () => {
 describe('self_log', () => {
   const packAt = 1_700_000_000_000;
   const pack: AmsgFirePack = {
-    v: 4, template: 'x', lastUserMessageAt: null, tzId: 'UTC', targetName: '楪同学',
+    v: 5, template: 'x', lastUserMessageAt: null, tzId: 'UTC', targetName: '楪同学',
     builtAt: packAt, pendingTasks: [], scene: null,
   };
   const entry = (id: string, text: string, at = packAt) => ({ id, at, text });
@@ -336,7 +336,7 @@ describe('self_log', () => {
 describe('连排提醒', () => {
   const packAt = 1_700_000_000_000;
   const slotted: AmsgFirePack = {
-    v: 4, lastUserMessageAt: null, tzId: 'UTC', targetName: '楪同学',
+    v: 5, lastUserMessageAt: null, tzId: 'UTC', targetName: '楪同学',
     builtAt: packAt, pendingTasks: [], scene: null,
     template: `【最近对话上下文】\n用户：在吗${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
   };
@@ -386,7 +386,7 @@ describe('last_skip 新原因', () => {
 
 describe('fire_pack 任务指令槽', () => {
   const pack: AmsgFirePack = {
-    v: 4,
+    v: 5,
     template: `头部\n${AMSG_SLOT_TASK_INSTRUCTION}\n尾部 ${AMSG_SLOT_CURRENT_TIME}`,
     lastUserMessageAt: null, tzId: 'Asia/Shanghai', targetName: '楪同学',
     builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
@@ -408,7 +408,7 @@ describe('fire_pack 任务指令槽', () => {
 describe('client_state 值压缩', () => {
   // fire_pack 有几万字，随手编一小段压不出效果也测不出真问题，拿重复的中文段落凑量。
   const bigJson = JSON.stringify({
-    v: 4,
+    v: 5,
     template: '【角色系统设定】你是一个会在深夜突然想起对方的人。\n'.repeat(400),
     lastUserMessageAt: 1_700_000_000_000,
     tzId: 'Asia/Shanghai',

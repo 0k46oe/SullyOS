@@ -26,6 +26,7 @@ import {
   AMSG_FIRE_PACK_KEY,
   AMSG_SLOT_AWAY_HINT,
   AMSG_SLOT_CURRENT_TIME,
+  AMSG_SLOT_REALTIME_WORLD,
   AMSG_SLOT_SCENE,
   AMSG_SLOT_TASK_INSTRUCTION,
   AMSG_LAST_SKIP_KEY,
@@ -354,7 +355,9 @@ export const buildFirePack = async (
     `当前本地时间：${AMSG_SLOT_CURRENT_TIME}${AMSG_SLOT_SCENE}`,
     // 排程清单跟在时间后面：它整段都在讲「几点会发生什么」，挨着当前时刻读才对得上。
     // 没有待触发任务时 worker 填空串，这一行连带消失。
-    `${AMSG_SLOT_TIME_SINCE_USER}${AMSG_SLOT_TASK_LIST}`,
+    // 最后是「外面的世界此刻什么样」（节日 / 天气 / 热搜）：跟时间同属「此刻的读数」，
+    // 一样由 worker 到点现拉现填，拉不到就整段消失。
+    `${AMSG_SLOT_TIME_SINCE_USER}${AMSG_SLOT_TASK_LIST}${AMSG_SLOT_REALTIME_WORLD}`,
     '',
     legacyHint,
     '',
@@ -367,7 +370,7 @@ export const buildFirePack = async (
   ].join('\n');
 
   return {
-    v: 4,
+    v: 5,
     template,
     lastUserMessageAt,
     // 角色的时间参照系：开了自定义时区用角色的，没开用设备的。worker 渲染一切

@@ -61,6 +61,9 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe('forFirePack —— 打包时刻的状态一律不烤进模板', () => {
+    // 这一块不烤进来不等于主动消息看不到天气热搜：模板里留着 AMSG_SLOT_REALTIME_WORLD，
+    // worker 到点自己去拉一次再填（见 worker/amsg 的 realtimeWorld）。这里守的是
+    // 「别把打包那一刻的读数腌进去」。
     it('【真实世界感知系统】整块不进：当前真实时间 / 天气 / 热搜 / 真实世界钢印', async () => {
         const normal = await build(baseChar(), false);
         expect(normal).toContain('真实世界感知系统');

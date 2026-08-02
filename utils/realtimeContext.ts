@@ -18,28 +18,36 @@ import {
     type DiaryPreview,
     type FeishuDiaryPreview,
 } from './realtimeFetchCore';
+import {
+    fetchWeatherWithFallback,
+    generateWeatherAdvice as generateWeatherAdviceCore,
+    checkSpecialDates as checkSpecialDatesCore,
+    clearGeocodeCache,
+    fetchHotNews as fetchHotNewsCore,
+    getHotNewsSlot as getHotNewsSlotCore,
+    resolveHotNewsPlatforms,
+    sameHotNewsPlatforms,
+    pickRandomNews,
+    renderRealtimeWorldBlock,
+    HOTNEWS_PLATFORM_LABELS,
+    DEFAULT_HOTNEWS_PLATFORMS,
+    REALTIME_NEWS_PICK_COUNT,
+    type WeatherData,
+    type NewsItem,
+} from './realtimeWorldCore';
 import { getLocalDateKey } from './localDate';
 
-export interface WeatherData {
-    temp: number;
-    feelsLike: number;
-    humidity: number;
-    description: string;
-    icon: string;
-    city: string;
-}
-
-export interface NewsItem {
-    title: string;
-    source?: string;
-    url?: string;
-    desc?: string;
-}
-
-// 搜索 / Notion / 飞书的读取类纯 fetch 核心在 realtimeFetchCore.ts（环境无关叶子，
-// amsg worker 的服务端工具循环共用同一份），这里的 Manager 方法委托过去；
-// 类型原样 re-export，既有 import 路径不用改。
+// 两份环境无关叶子，amsg worker 共用同一份，这里的 Manager 方法委托过去；
+// 类型与常量原样 re-export，既有 import 路径不用改：
+//   realtimeFetchCore  搜索 / Notion / 飞书的读取类纯 fetch（服务端工具循环用）
+//   realtimeWorldCore  天气 / 热搜 / 节日的取数与成段渲染（到点组 prompt 用）
 export type { SearchResult, DiaryPreview, FeishuDiaryPreview } from './realtimeFetchCore';
+export type { WeatherData, NewsItem } from './realtimeWorldCore';
+export {
+    fetchOwmWeather,
+    fetchOpenMeteoWeather,
+    HOTNEWS_API_BASE_URL,
+} from './realtimeWorldCore';
 
 export interface RealtimeConfig {
     // 天气配置
@@ -109,121 +117,6 @@ export const defaultRealtimeConfig: RealtimeConfig = {
 let weatherCache: { data: WeatherData | null; timestamp: number } = { data: null, timestamp: 0 };
 let newsCache: { data: NewsItem[]; timestamp: number } = { data: [], timestamp: 0 };
 
-// Upstream moved the hot_news API from orz.ai to news.orz.ai on 2026-08-01.
-export const HOTNEWS_API_BASE_URL = 'https://news.orz.ai/api/v1/dailynews';
-
-// Open-Meteo 地名解析缓存：城市名 → 坐标，避免每次取天气都多打一次 geocoding
-const geocodeCache = new Map<string, { latitude: number; longitude: number; name: string }>();
-
-// WMO weather code（Open-Meteo 返回的 weather_code）→ 中文描述 + 近似 OWM icon 码
-// 完整码表见 https://open-meteo.com/en/docs（WMO Weather interpretation codes）
-const WMO_WEATHER_CODES: Record<number, { description: string; icon: string }> = {
-    0: { description: '晴', icon: '01d' },
-    1: { description: '大致晴朗', icon: '02d' },
-    2: { description: '局部多云', icon: '03d' },
-    3: { description: '阴', icon: '04d' },
-    45: { description: '雾', icon: '50d' },
-    48: { description: '雾凇', icon: '50d' },
-    51: { description: '轻微毛毛雨', icon: '09d' },
-    53: { description: '毛毛雨', icon: '09d' },
-    55: { description: '浓密毛毛雨', icon: '09d' },
-    56: { description: '冻毛毛雨', icon: '09d' },
-    57: { description: '强冻毛毛雨', icon: '09d' },
-    61: { description: '小雨', icon: '10d' },
-    63: { description: '中雨', icon: '10d' },
-    65: { description: '大雨', icon: '10d' },
-    66: { description: '冻雨', icon: '13d' },
-    67: { description: '强冻雨', icon: '13d' },
-    71: { description: '小雪', icon: '13d' },
-    73: { description: '中雪', icon: '13d' },
-    75: { description: '大雪', icon: '13d' },
-    77: { description: '雪粒', icon: '13d' },
-    80: { description: '小阵雨', icon: '09d' },
-    81: { description: '阵雨', icon: '09d' },
-    82: { description: '强阵雨', icon: '09d' },
-    85: { description: '小阵雪', icon: '13d' },
-    86: { description: '强阵雪', icon: '13d' },
-    95: { description: '雷阵雨', icon: '11d' },
-    96: { description: '雷阵雨伴小冰雹', icon: '11d' },
-    99: { description: '雷阵雨伴大冰雹', icon: '11d' },
-};
-
-/**
- * OpenWeatherMap 源（需要 API Key）。失败时抛错，由调用方决定是否回落。
- */
-export const fetchOwmWeather = async (city: string, apiKey: string): Promise<WeatherData> => {
-    const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&appid=${apiKey}&units=metric&lang=zh_cn`;
-    const response = await fetch(url);
-    if (!response.ok) {
-        throw new Error(`OpenWeatherMap HTTP ${response.status}`);
-    }
-    const data = await safeResponseJson(response);
-    return {
-        temp: Math.round(data.main.temp),
-        feelsLike: Math.round(data.main.feels_like),
-        humidity: data.main.humidity,
-        description: data.weather[0]?.description || '未知',
-        icon: data.weather[0]?.icon || '01d',
-        city: data.name
-    };
-};
-
-/**
- * Open-Meteo 源（免费、免 key、CORS 友好）。城市名先过官方 geocoding（支持中文），失败时抛错。
- */
-export const fetchOpenMeteoWeather = async (city: string): Promise<WeatherData> => {
-    let geo = geocodeCache.get(city);
-    if (!geo) {
-        const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=zh&format=json`;
-        const geoRes = await fetch(geoUrl);
-        if (!geoRes.ok) {
-            throw new Error(`Open-Meteo geocoding HTTP ${geoRes.status}`);
-        }
-        const geoData = await safeResponseJson(geoRes);
-        const hit = geoData.results?.[0];
-        if (!hit) {
-            throw new Error(`Open-Meteo 找不到城市: ${city}`);
-        }
-        geo = { latitude: hit.latitude, longitude: hit.longitude, name: hit.name };
-        geocodeCache.set(city, geo);
-    }
-
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${geo.latitude}&longitude=${geo.longitude}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code&timezone=auto`;
-    const response = await fetch(url);
-    if (!response.ok) {
-        throw new Error(`Open-Meteo HTTP ${response.status}`);
-    }
-    const data = await safeResponseJson(response);
-    const current = data.current;
-    const wmo = WMO_WEATHER_CODES[current.weather_code] || { description: '未知', icon: '01d' };
-    return {
-        temp: Math.round(current.temperature_2m),
-        feelsLike: Math.round(current.apparent_temperature),
-        humidity: Math.round(current.relative_humidity_2m),
-        description: wmo.description,
-        icon: wmo.icon,
-        city: geo.name
-    };
-};
-
-// 特殊日期表
-const SPECIAL_DATES: Record<string, string> = {
-    '01-01': '元旦',
-    '02-14': '情人节',
-    '03-08': '妇女节',
-    '03-12': '植树节',
-    '03-14': '白色情人节',
-    '04-01': '愚人节',
-    '05-01': '劳动节',
-    '05-04': '青年节',
-    '06-01': '儿童节',
-    '09-10': '教师节',
-    '10-01': '国庆节',
-    '10-31': '万圣节',
-    '11-11': '光棍节',
-    '12-24': '平安夜',
-    '12-25': '圣诞节'
-};
 
 export const RealtimeContextManager = {
 
@@ -243,23 +136,9 @@ export const RealtimeContextManager = {
             return weatherCache.data;
         }
 
-        let weather: WeatherData | null = null;
-
-        if (config.weatherApiKey) {
-            try {
-                weather = await fetchOwmWeather(config.weatherCity, config.weatherApiKey);
-            } catch (e) {
-                console.warn('OpenWeatherMap 失败，回落 Open-Meteo:', e);
-            }
-        }
-
+        const weather = await fetchWeatherWithFallback(config.weatherCity, config.weatherApiKey);
         if (!weather) {
-            try {
-                weather = await fetchOpenMeteoWeather(config.weatherCity);
-            } catch (e) {
-                console.error('Failed to fetch weather:', e);
-                return null;
-            }
+            return null;
         }
 
         // 更新缓存
@@ -268,69 +147,20 @@ export const RealtimeContextManager = {
         return weather;
     },
 
-    // hot_news（news.orz.ai）平台 key → 中文展示名。用于 source 标注，让提示词读起来自然。
-    HOTNEWS_PLATFORM_LABELS: {
-        baidu: '百度', sspai: '少数派', weibo: '微博', zhihu: '知乎', tskr: '36氪',
-        ftpojie: '吾爱破解', bilibili: 'B站', douban: '豆瓣', hupu: '虎扑', tieba: '贴吧',
-        juejin: '掘金', douyin: '抖音', vtex: 'V2EX', jinritoutiao: '今日头条',
-        stackoverflow: 'Stack Overflow', github: 'GitHub', hackernews: 'Hacker News',
-        sina_finance: '新浪财经', eastmoney: '东方财富', xueqiu: '雪球', cls: '财联社',
-        tenxunwang: '腾讯网',
-    } as Record<string, string>,
+    // 平台名表、默认平台、真正的多平台拉取都住在 realtimeWorldCore（主动消息到点
+    // 也要用同一份），这里保留同名入口，「热点」App 与既有调用方不用改。
+    HOTNEWS_PLATFORM_LABELS,
 
-    DEFAULT_HOTNEWS_PLATFORMS: ['weibo', 'zhihu', 'baidu', 'bilibili', 'douyin'],
+    DEFAULT_HOTNEWS_PLATFORMS,
 
     /**
      * 使用 hot_news（news.orz.ai）获取中文多平台热榜。
      * 免鉴权、半小时刷新。浏览器端优先直连；若被 CORS 拦截则本调用返回 []，
      * 由 fetchNews 自然回落到 Brave / Hacker News。
-     * 多平台并发拉取，每平台取前几条后 round-robin 交错合并，避免单一平台霸屏。
      */
     fetchHotNews: async (platforms?: string[], perPlatform = 12, total = 240): Promise<NewsItem[]> => {
-        const list = (platforms && platforms.length > 0)
-            ? platforms
-            : RealtimeContextManager.DEFAULT_HOTNEWS_PLATFORMS;
-
-        const perPlatformResults = await Promise.all(list.map(async (p): Promise<NewsItem[]> => {
-            const label = RealtimeContextManager.HOTNEWS_PLATFORM_LABELS[p] || p;
-            try {
-                const res = await fetch(`${HOTNEWS_API_BASE_URL}/?platform=${encodeURIComponent(p)}`, {
-                    headers: { 'Accept': 'application/json' },
-                });
-                if (!res.ok) {
-                    console.warn(`[hot_news] ${label}(${p}) HTTP ${res.status}`);
-                    return [];
-                }
-                const data = await safeResponseJson(res);
-                const items: any[] = Array.isArray(data?.data) ? data.data : [];
-                const picked = items
-                    .filter(it => it && it.title)
-                    .slice(0, perPlatform)
-                    .map(it => {
-                        const rawDesc = typeof it.desc === 'string'
-                            ? it.desc
-                            : typeof it.content === 'string' ? it.content : '';
-                        const desc = rawDesc.replace(/\s+/g, ' ').trim();
-                        const normalizedDesc = desc && desc !== String(it.title).trim() ? desc : undefined;
-                        return { title: String(it.title), source: label, url: it.url, desc: normalizedDesc };
-                    });
-                const withDesc = picked.filter(x => x.desc).length;
-                console.log(`[hot_news] ${label}(${p}) ✓ 取 ${picked.length}/${items.length} 条（含简介 ${withDesc} 条）`);
-                return picked;
-            } catch (e: any) {
-                console.warn(`[hot_news] ${label}(${p}) ✗ 拉取失败（多半是 CORS / 网络）:`, e?.message || e);
-                return [];
-            }
-        }));
-
-        // round-robin 交错：第1名各平台轮一遍，再第2名……保证各平台都有露出
-        const merged: NewsItem[] = [];
-        for (let rank = 0; rank < perPlatform; rank++) {
-            for (const arr of perPlatformResults) {
-                if (arr[rank]) merged.push(arr[rank]);
-            }
-        }
-        const final = merged.slice(0, total);
+        const list = resolveHotNewsPlatforms(platforms);
+        const final = await fetchHotNewsCore(list, perPlatform, total);
 
         // ── F12 探针：看角色这次到底召回了哪些热点 ──
         try {
@@ -346,13 +176,8 @@ export const RealtimeContextManager = {
         return final;
     },
 
-    // 一天分 6 段（每 4 小时）：0-4 凌晨 / 4-8 清晨 / 8-12 上午 / 12-16 午后 / 16-20 傍晚 / 20-24 夜间。slot = floor(hour/4)
-    getHotNewsSlot: (d: Date = new Date()): { id: string; date: string; slot: number; label: string } => {
-        const slot = Math.min(5, Math.floor(d.getHours() / 4));
-        const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-        const label = ['凌晨', '清晨', '上午', '午后', '傍晚', '夜间'][slot];
-        return { id: `${date}#${slot}`, date, slot, label };
-    },
+    // 一天分 6 段（每 4 小时）：0-4 凌晨 / 4-8 清晨 / 8-12 上午 / 12-16 午后 / 16-20 傍晚 / 20-24 夜间。
+    getHotNewsSlot: (d: Date = new Date()) => getHotNewsSlotCore({ now: d }),
 
     // 同一时段并发只真正发一次请求（群聊 / 多角色同时回复时复用同一 Promise）
     _hotNewsInFlight: new Map<string, Promise<NewsItem[]>>(),
@@ -364,16 +189,12 @@ export const RealtimeContextManager = {
      */
     getSlottedHotNews: async (config: RealtimeConfig): Promise<NewsItem[]> => {
         const { id, date, slot, label } = RealtimeContextManager.getHotNewsSlot();
-        const platforms = (config.newsPlatforms && config.newsPlatforms.length > 0)
-            ? config.newsPlatforms
-            : RealtimeContextManager.DEFAULT_HOTNEWS_PLATFORMS;
-        const samePlatforms = (a: string[] = [], b: string[] = []) =>
-            a.length === b.length && [...a].sort().join(',') === [...b].sort().join(',');
+        const platforms = resolveHotNewsPlatforms(config.newsPlatforms);
 
         // 1. 命中本时段快照（平台一致）→ 复用
         try {
             const snap = await DB.getHotNewsSnapshot(id);
-            if (snap && snap.items?.length > 0 && samePlatforms(snap.platforms, platforms)) {
+            if (snap && snap.items?.length > 0 && sameHotNewsPlatforms(snap.platforms, platforms)) {
                 const mins = Math.round((Date.now() - snap.fetchedAt) / 60000);
                 console.log(`%c[hot_news] 命中今日${label}快照（${snap.items.length} 条，${mins} 分钟前拉的）`, 'color:#16a34a');
                 return snap.items;
@@ -574,63 +395,18 @@ export const RealtimeContextManager = {
      * tz 非空时按角色所在时区判「今天几号」——否则角色会跟着用户的日历过节：
      * 用户这边 2/14 早上，角色在纽约还是 13 号晚上，却被告知今天是情人节。
      */
-    checkSpecialDates: (tz?: string): string[] => {
-        const now = nowInTimeZone(tz);
-        const monthDay = `${(now.getMonth() + 1).toString().padStart(2, '0')}-${now.getDate().toString().padStart(2, '0')}`;
-
-        const special: string[] = [];
-
-        if (SPECIAL_DATES[monthDay]) {
-            special.push(SPECIAL_DATES[monthDay]);
-        }
-
-        // 检查农历节日（简化版，只检查大概日期）
-        // 这里可以后续接入农历API
-
-        return special;
-    },
+    checkSpecialDates: (tz?: string): string[] => checkSpecialDatesCore(tz),
 
     /**
      * 生成天气建议
      */
-    generateWeatherAdvice: (weather: WeatherData): string => {
-        const advices: string[] = [];
-
-        // 温度建议
-        if (weather.temp < 5) {
-            advices.push('天气很冷，记得多穿点');
-        } else if (weather.temp < 15) {
-            advices.push('有点凉，注意保暖');
-        } else if (weather.temp > 30) {
-            advices.push('天气炎热，注意防暑');
-        } else if (weather.temp > 25) {
-            advices.push('天气不错，适合出门');
-        }
-
-        // 天气状况建议
-        const desc = weather.description.toLowerCase();
-        if (desc.includes('雨')) {
-            advices.push('记得带伞');
-        } else if (desc.includes('雪')) {
-            advices.push('路上小心，注意防滑');
-        } else if (desc.includes('雾') || desc.includes('霾')) {
-            advices.push('空气不太好，建议戴口罩');
-        } else if (desc.includes('晴')) {
-            advices.push('阳光明媚');
-        }
-
-        // 湿度建议
-        if (weather.humidity > 80) {
-            advices.push('湿度较高，可能会闷热');
-        } else if (weather.humidity < 30) {
-            advices.push('空气干燥，记得多喝水');
-        }
-
-        return advices.join('，') || '天气正常';
-    },
+    generateWeatherAdvice: (weather: WeatherData): string => generateWeatherAdviceCore(weather),
 
     /**
-     * 构建完整的实时上下文（注入到系统提示词）
+     * 构建完整的实时上下文（注入到系统提示词）。
+     * 取数在这里（天气两源 + 热点分时段快照），拼成话交给 realtimeWorldCore 的
+     * renderRealtimeWorldBlock——主动消息到点生成时 worker 自己取数、调同一个渲染，
+     * 两边说的是同一套话。
      */
     buildFullContext: async (
         config: RealtimeConfig,
@@ -639,97 +415,37 @@ export const RealtimeContextManager = {
         // 属于时间感知的范畴，这个开关关着就不该从这一段里漏出去。
         opts: { includeTime: boolean },
     ): Promise<string> => {
-        const parts: string[] = [];
         const includeTime = opts.includeTime;
 
-        // 开头强调：这是真实世界的信息
-        parts.push(`### 【真实世界感知系统】`);
-        parts.push(`⚠️ 重要：以下信息来自真实世界，不是虚构的。你现在真的能"看到"外面的世界。`);
-        parts.push('');
+        // 1. 时间与节日。tz 非空时按角色所在时区折算，两者同一个时区，否则同一段里
+        //    日期和节日会打架。时差提示（tzAwarenessNote）统一由 ContextBuilder.buildCoreContext
+        //    注入，这里不再追加，避免双份。
+        const time = includeTime ? RealtimeContextManager.getTimeContext(tz) : null;
+        const timeLine = time ? `${time.dateStr} ${time.dayOfWeek} ${time.timeOfDay} ${time.timeStr}` : undefined;
+        const specialDates = includeTime ? RealtimeContextManager.checkSpecialDates(tz) : [];
 
-        if (includeTime) {
-            // 1. 时间信息。tz 非空时按角色所在时区折算。
-            //    时差提示（tzAwarenessNote）统一由 ContextBuilder.buildCoreContext 注入，这里不再追加，避免双份。
-            const time = RealtimeContextManager.getTimeContext(tz);
-            parts.push(`📅 当前真实时间: ${time.dateStr} ${time.dayOfWeek} ${time.timeOfDay} ${time.timeStr}`);
+        // 2. 天气（有没有 OWM key 都能取：无 key 走 Open-Meteo）
+        const weather = config.weatherEnabled ? await RealtimeContextManager.fetchWeather(config) : null;
 
-            // 2. 特殊日期（跟上面的「当前真实时间」同一个时区，否则同一段里日期和节日会打架）
-            const specialDates = RealtimeContextManager.checkSpecialDates(tz);
-            if (specialDates.length > 0) {
-                parts.push(`🎉 今日特殊: ${specialDates.join('、')}`);
+        // 3. 新闻热点（背景认知）
+        //    完整快照存 IndexedDB 给「热点」App；这里每轮随机抽几条打散注入，控 token + 保持新鲜感。
+        const newsPool = config.newsEnabled ? await RealtimeContextManager.fetchNews(config) : [];
+        const picks = pickRandomNews(newsPool, REALTIME_NEWS_PICK_COUNT);
+
+        const fullContext = renderRealtimeWorldBlock({ timeLine, specialDates, weather, news: picks });
+
+        // ── F12 探针：本轮真正注入 prompt 的热点 + 文本量（评估 token 用）──
+        try {
+            const pickDesc = picks.filter(n => n.desc).length;
+            const poolDesc = newsPool.filter(n => n.desc).length;
+            console.groupCollapsed(`%c[hot_news] 本轮注入 prompt：${picks.length} 条热点（带简介 ${pickDesc}）· 整段 ${fullContext.length} 字（池子共 ${newsPool.length} 条，带简介 ${poolDesc}）`, 'color:#7c3aed;font-weight:bold');
+            if (typeof console.table === 'function') {
+                console.table(picks.map((n, i) => ({ '#': i + 1, 平台: n.source || '', 标题: n.title, 简介: n.desc || '—' })));
             }
-        }
+            console.log(fullContext);
+            console.groupEnd();
+        } catch { /* 探针不影响主流程 */ }
 
-        // 3. 天气信息（有没有 OWM key 都能取：无 key 走 Open-Meteo）
-        if (config.weatherEnabled) {
-            const weather = await RealtimeContextManager.fetchWeather(config);
-            if (weather) {
-                parts.push('');
-                parts.push(`🌤️ 【${weather.city}实时天气】`);
-                parts.push(`现在外面: ${weather.description}，气温 ${weather.temp}°C（体感 ${weather.feelsLike}°C），湿度 ${weather.humidity}%`);
-                parts.push(`你的建议: ${RealtimeContextManager.generateWeatherAdvice(weather)}`);
-            }
-        }
-
-        // 4. 新闻热点（背景认知）
-        //    完整快照存 IndexedDB 给「热点」App；这里每轮随机抽 5 条打散注入，控 token + 保持新鲜感。
-        if (config.newsEnabled) {
-            const news = await RealtimeContextManager.fetchNews(config);
-            if (news.length > 0) {
-                // Fisher–Yates 打散后抽前 5（每轮回复都重新 roll，平台全混）
-                const pool = [...news];
-                for (let i = pool.length - 1; i > 0; i--) {
-                    const j = Math.floor(Math.random() * (i + 1));
-                    [pool[i], pool[j]] = [pool[j], pool[i]];
-                }
-                const picks = pool.slice(0, 5);
-                const newsLines: string[] = [];
-                newsLines.push('');
-                newsLines.push(`📰 【最近真实发生的热点 · 你的背景知识】`);
-                newsLines.push(`（以下是现实里真实在发生 / 被热议的事，是你认知的一部分，不是必须播报的清单。`);
-                newsLines.push(`拿捏分寸：当对方明显在放松、闲着打发时间、话头也淡下来时，可以自然地挑一两条你感兴趣的聊起来、活跃下气氛；`);
-                newsLines.push(`但如果对方正在说一件明确的事 / 在认真聊某个话题 / 带着情绪，就别硬插热点，安静当背景知识就好。）`);
-                picks.forEach((n) => {
-                    const source = n.source ? `（${n.source}）` : '';
-                    let line = `- ${n.title}${source}`;
-                    if (n.desc && n.desc !== n.title) {
-                        line += `：${n.desc}`;
-                    }
-                    newsLines.push(line);
-                });
-                newsLines.push('');
-                newsLines.push(`若你想主动把其中某条当作"新闻卡片"分享给对方，可单独输出一行：[[NEWS_CARD: 来源|标题]]（标题照抄上面的）。它会以卡片形式呈现，然后你再就此展开聊。别滥用，自然就好。`);
-
-                // ── F12 探针：本轮真正注入 prompt 的热点 + 文本量（评估 token 用）──
-                try {
-                    const block = newsLines.join('\n');
-                    const pickDesc = picks.filter(n => n.desc).length;
-                    const poolDesc = news.filter(n => n.desc).length;
-                    console.groupCollapsed(`%c[hot_news] 本轮注入 prompt：${picks.length} 条热点（带简介 ${pickDesc}）· ${block.length} 字（池子共 ${news.length} 条，带简介 ${poolDesc}）`, 'color:#7c3aed;font-weight:bold');
-                    if (typeof console.table === 'function') {
-                        console.table(picks.map((n, i) => ({ '#': i + 1, 平台: n.source || '', 标题: n.title, 简介: n.desc || '—' })));
-                    }
-                    console.log(block);
-                    console.groupEnd();
-                } catch { /* 探针不影响主流程 */ }
-
-                parts.push(...newsLines);
-            }
-        }
-
-        // 5. 行为指令（按已开启的能力裁剪，避免注入无关项 + 与新闻块去重）
-        parts.push('');
-        parts.push(`### 【如何使用这些信息】`);
-        const tips: string[] = [];
-        tips.push(`这些信息都是真实的，可以直接引用；如果对方问"你怎么知道的"，就说你刚刷到 / 刚看到的。`);
-        if (config.weatherEnabled) {
-            tips.push(`天气是真实的，可以自然地关心对方（"外面在下雨，带伞了吗？"）。`);
-        }
-        tips.push(`别假装不知道这些，这是你真能感知到的外部世界。`);
-        tips.forEach((t, i) => parts.push(`${i + 1}. ${t}`));
-
-        const fullContext = parts.join('\n');
-        console.log(`%c[hot_news] 实时感知整段注入 ${fullContext.length} 字（含时间/天气/热点/指令）`, 'color:#7c3aed');
         return fullContext;
     },
 
@@ -739,7 +455,7 @@ export const RealtimeContextManager = {
     clearCache: () => {
         weatherCache = { data: null, timestamp: 0 };
         newsCache = { data: [], timestamp: 0 };
-        geocodeCache.clear();
+        clearGeocodeCache();
     },
 
     /**

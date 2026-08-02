@@ -82,7 +82,7 @@ function summarizeGroupMsgContent(m: Message): string {
  * | 块 | 不烤的原因 | 到点谁来补 |
  * |---|---|---|
  * | 「现在是 X」时间块 | 打包时刻的钟，到点已过期 | worker 填 AMSG_SLOT_CURRENT_TIME |
- * | 【真实世界感知系统】（真实时间 / 今日节日 / 天气 / 热搜） | 全是打包那天那一刻的，跨天说错节日、大晴天叫人带伞、同一批旧闻反复当「最近真实发生」 | 不补 |
+ * | 【真实世界感知系统】（今日节日 / 天气 / 热搜） | 全是打包那天那一刻的，跨天说错节日、大晴天叫人带伞、同一批旧闻反复当「最近真实发生」 | worker 填 AMSG_SLOT_REALTIME_WORLD（到点自己去拉一次） |
  * | 日程当前时段 + 此刻在听的歌 | 3am 触发会说「我在健身房呢」 | worker 填 AMSG_SLOT_SCENE（随包带整天作息表现算） |
  * | 「你刚刚和对方结束了一通电话 / 见面」 | 打包时刚挂电话，到点可能是第二天凌晨 | 不补 |
  * | 群聊背景的「约 X 分钟前」 | 打包时的「刚才」到点变成昨天 | 保留绝对时间戳 |
@@ -277,6 +277,10 @@ export const ChatPrompts = {
         // 而且抬头写着「⚠️ 以下信息来自真实世界」，措辞比任何免责声明都硬——跨时段触发时
         // 角色会照着一份过期的世界说话（大晴天叫人带伞、第二天还在祝七夕快乐、
         // 同一批旧闻当成「最近真实发生」说三遍）。
+        //
+        // 主动消息不是因此就没有这一段：模板里留着 AMSG_SLOT_REALTIME_WORLD，worker 到点
+        // 自己去拉一次天气热搜、按角色时区判今天是不是节日，再填进去（见 worker/amsg 的
+        // realtimeWorld）。两边的取数与措辞都来自 realtimeWorldCore，是同一份。
         const realtimePromise: Promise<string> = (async () => {
             if (forFirePack) return '';
             try {

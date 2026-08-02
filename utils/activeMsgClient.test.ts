@@ -31,7 +31,7 @@ import {
   ActiveMsgClient, buildFirePack, clearNamespaceValuesOrThrow, dropStaleSubscription,
   putClientStateOrThrow, toRemoteAvatarUrl,
 } from './activeMsgClient';
-import { AMSG_SLOT_CURRENT_TIME, AMSG_SLOT_SCENE } from './amsgFirePack';
+import { AMSG_SLOT_CURRENT_TIME, AMSG_SLOT_REALTIME_WORLD, AMSG_SLOT_SCENE } from './amsgFirePack';
 import * as dailySchedule from './dailySchedule';
 import { ChatPrompts } from './chatPrompts';
 import { DB } from './db';
@@ -465,6 +465,15 @@ describe('buildFirePack 的时区参照系与模板（①）', () => {
   it('角色没开日程 → scene 为 null（槽位到点被抹平）', async () => {
     const out = await pack(baseChar());
     expect(out.scene).toBeNull();
+  });
+
+  // 天气 / 热搜 / 今日节日跟当前时间一样是「此刻的读数」：模板里只留槽位，worker 到点
+  // 现拉现填。槽位没了的话主动消息就退回到完全感知不到外面世界的样子。
+  it('实时世界留槽位，且模板里没有烤死的天气热搜', async () => {
+    const out = await pack(baseChar());
+    expect(out.template).toContain(AMSG_SLOT_REALTIME_WORLD);
+    expect(out.template).not.toContain('真实世界感知系统');
+    expect(out.template).not.toContain('实时天气');
   });
 
   it('【角色系统设定】之后补快照说明行，位置在设定正文与对话上下文之间', async () => {

@@ -69,6 +69,7 @@ import {
   type AmsgToolConfig,
   type AmsgToolPack,
 } from '../../../utils/amsgToolPack';
+import { buildRealtimeWorldBlock } from './realtimeWorld';
 import {
   buildMcpDirectHeaders,
   buildMcpFireBlock,
@@ -924,11 +925,24 @@ export const amsgHooks = {
       excludeClientTaskId: clientTaskId || undefined,
     });
 
+    // 「外面的世界此刻什么样」：今日节日 + 实时天气 + 热搜，到点现拉现填。
+    // 拉不到 / 超时都只是返回空串，那一段整个消失，这次触发照常往下走。
+    const realtimeWorldBlock = await buildRealtimeWorldBlock({
+      toolConfig,
+      timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
+      tzId: pack.tzId,
+      nowMs: ctx.now.getTime(),
+      globalRows,
+      globalNamespace: AMSG_GLOBAL_NAMESPACE,
+      writeState: ctx.writeState,
+    });
+
     // fire_pack v3：「本次任务」指令随任务 metadata 走，这里填槽。
     // MCP 块拼在渲染好的 prompt 之后（同一条 user 消息）。
     const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, {
       selfLog,
       taskListBlock,
+      realtimeWorldBlock,
     })
       + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? 'native' : 'text' }) : '')
       // 「给自己排下一条」的说明。跟 MCP 共用一个 native/text 判断：用户的中转拒 tools 时

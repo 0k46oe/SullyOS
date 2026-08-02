@@ -4283,6 +4283,7 @@ var AMSG_SLOT_TASK_INSTRUCTION = "{{AMSG_TASK_INSTRUCTION}}";
 var AMSG_SLOT_SELF_LOG = "{{AMSG_SELF_LOG}}";
 var AMSG_SLOT_TASK_LIST = "{{AMSG_TASK_LIST}}";
 var AMSG_SLOT_SCENE = "{{AMSG_SCENE}}";
+var AMSG_SLOT_REALTIME_WORLD = "{{AMSG_REALTIME_WORLD}}";
 var wallClockPartsInZone = (nowMs, tz) => {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: tz.tzId,
@@ -4404,9 +4405,13 @@ ${TASK_SECTION_HEADING}`);
   out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(extras?.selfLog ?? null, tz));
   out = fillSlot(out, AMSG_SLOT_TASK_LIST, extras?.taskListBlock ?? "");
   out = fillSlot(out, AMSG_SLOT_SCENE, renderFireSceneBlock(pack.scene, nowMs, tz));
+  const realtimeWorld = extras?.realtimeWorldBlock?.trim();
+  out = fillSlot(out, AMSG_SLOT_REALTIME_WORLD, realtimeWorld ? `
+
+${realtimeWorld}` : "");
   return out;
 };
-var FIRE_PACK_VERSION = 4;
+var FIRE_PACK_VERSION = 5;
 var describeFirePackVersion = (value) => {
   let v;
   try {
@@ -4704,7 +4709,7 @@ var AMSG_TOOL_CONFIG_KEY = "tool_config";
 var parseToolPack = (value) => {
   try {
     const parsed = JSON.parse(value);
-    if (!parsed || typeof parsed !== "object" || parsed.v !== 1 || typeof parsed.charName !== "string" || !Array.isArray(parsed.activeMemoryMonths) || !Array.isArray(parsed.memories)) {
+    if (!parsed || typeof parsed !== "object" || parsed.v !== 1 || typeof parsed.charName !== "string" || typeof parsed.timeAwarenessEnabled !== "boolean" || !Array.isArray(parsed.activeMemoryMonths) || !Array.isArray(parsed.memories)) {
       return null;
     }
     return parsed;
@@ -4735,6 +4740,422 @@ var parseToolConfig = (value) => {
   } catch {
     return null;
   }
+};
+
+// utils/realtimeWorldCore.ts
+var readJson = async (res) => {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`\u54CD\u5E94\u4E0D\u662F JSON\uFF1A${text.slice(0, 120)}`);
+  }
+};
+var geocodeCache = /* @__PURE__ */ new Map();
+var WMO_WEATHER_CODES = {
+  0: { description: "\u6674", icon: "01d" },
+  1: { description: "\u5927\u81F4\u6674\u6717", icon: "02d" },
+  2: { description: "\u5C40\u90E8\u591A\u4E91", icon: "03d" },
+  3: { description: "\u9634", icon: "04d" },
+  45: { description: "\u96FE", icon: "50d" },
+  48: { description: "\u96FE\u51C7", icon: "50d" },
+  51: { description: "\u8F7B\u5FAE\u6BDB\u6BDB\u96E8", icon: "09d" },
+  53: { description: "\u6BDB\u6BDB\u96E8", icon: "09d" },
+  55: { description: "\u6D53\u5BC6\u6BDB\u6BDB\u96E8", icon: "09d" },
+  56: { description: "\u51BB\u6BDB\u6BDB\u96E8", icon: "09d" },
+  57: { description: "\u5F3A\u51BB\u6BDB\u6BDB\u96E8", icon: "09d" },
+  61: { description: "\u5C0F\u96E8", icon: "10d" },
+  63: { description: "\u4E2D\u96E8", icon: "10d" },
+  65: { description: "\u5927\u96E8", icon: "10d" },
+  66: { description: "\u51BB\u96E8", icon: "13d" },
+  67: { description: "\u5F3A\u51BB\u96E8", icon: "13d" },
+  71: { description: "\u5C0F\u96EA", icon: "13d" },
+  73: { description: "\u4E2D\u96EA", icon: "13d" },
+  75: { description: "\u5927\u96EA", icon: "13d" },
+  77: { description: "\u96EA\u7C92", icon: "13d" },
+  80: { description: "\u5C0F\u9635\u96E8", icon: "09d" },
+  81: { description: "\u9635\u96E8", icon: "09d" },
+  82: { description: "\u5F3A\u9635\u96E8", icon: "09d" },
+  85: { description: "\u5C0F\u9635\u96EA", icon: "13d" },
+  86: { description: "\u5F3A\u9635\u96EA", icon: "13d" },
+  95: { description: "\u96F7\u9635\u96E8", icon: "11d" },
+  96: { description: "\u96F7\u9635\u96E8\u4F34\u5C0F\u51B0\u96F9", icon: "11d" },
+  99: { description: "\u96F7\u9635\u96E8\u4F34\u5927\u51B0\u96F9", icon: "11d" }
+};
+var fetchOwmWeather = async (city, apiKey) => {
+  const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&appid=${apiKey}&units=metric&lang=zh_cn`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`OpenWeatherMap HTTP ${response.status}`);
+  }
+  const data = await readJson(response);
+  return {
+    temp: Math.round(data.main.temp),
+    feelsLike: Math.round(data.main.feels_like),
+    humidity: data.main.humidity,
+    description: data.weather[0]?.description || "\u672A\u77E5",
+    icon: data.weather[0]?.icon || "01d",
+    city: data.name
+  };
+};
+var fetchOpenMeteoWeather = async (city) => {
+  let geo = geocodeCache.get(city);
+  if (!geo) {
+    const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=zh&format=json`;
+    const geoRes = await fetch(geoUrl);
+    if (!geoRes.ok) {
+      throw new Error(`Open-Meteo geocoding HTTP ${geoRes.status}`);
+    }
+    const geoData = await readJson(geoRes);
+    const hit = geoData.results?.[0];
+    if (!hit) {
+      throw new Error(`Open-Meteo \u627E\u4E0D\u5230\u57CE\u5E02: ${city}`);
+    }
+    geo = { latitude: hit.latitude, longitude: hit.longitude, name: hit.name };
+    geocodeCache.set(city, geo);
+  }
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${geo.latitude}&longitude=${geo.longitude}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code&timezone=auto`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Open-Meteo HTTP ${response.status}`);
+  }
+  const data = await readJson(response);
+  const current = data.current;
+  const wmo = WMO_WEATHER_CODES[current.weather_code] || { description: "\u672A\u77E5", icon: "01d" };
+  return {
+    temp: Math.round(current.temperature_2m),
+    feelsLike: Math.round(current.apparent_temperature),
+    humidity: Math.round(current.relative_humidity_2m),
+    description: wmo.description,
+    icon: wmo.icon,
+    city: geo.name
+  };
+};
+var fetchWeatherWithFallback = async (city, apiKey) => {
+  if (!city) return null;
+  if (apiKey) {
+    try {
+      return await fetchOwmWeather(city, apiKey);
+    } catch (e) {
+      console.warn("OpenWeatherMap \u5931\u8D25\uFF0C\u56DE\u843D Open-Meteo:", e);
+    }
+  }
+  try {
+    return await fetchOpenMeteoWeather(city);
+  } catch (e) {
+    console.error("Failed to fetch weather:", e);
+    return null;
+  }
+};
+var generateWeatherAdvice = (weather) => {
+  const advices = [];
+  if (weather.temp < 5) {
+    advices.push("\u5929\u6C14\u5F88\u51B7\uFF0C\u8BB0\u5F97\u591A\u7A7F\u70B9");
+  } else if (weather.temp < 15) {
+    advices.push("\u6709\u70B9\u51C9\uFF0C\u6CE8\u610F\u4FDD\u6696");
+  } else if (weather.temp > 30) {
+    advices.push("\u5929\u6C14\u708E\u70ED\uFF0C\u6CE8\u610F\u9632\u6691");
+  } else if (weather.temp > 25) {
+    advices.push("\u5929\u6C14\u4E0D\u9519\uFF0C\u9002\u5408\u51FA\u95E8");
+  }
+  const desc = weather.description.toLowerCase();
+  if (desc.includes("\u96E8")) {
+    advices.push("\u8BB0\u5F97\u5E26\u4F1E");
+  } else if (desc.includes("\u96EA")) {
+    advices.push("\u8DEF\u4E0A\u5C0F\u5FC3\uFF0C\u6CE8\u610F\u9632\u6ED1");
+  } else if (desc.includes("\u96FE") || desc.includes("\u973E")) {
+    advices.push("\u7A7A\u6C14\u4E0D\u592A\u597D\uFF0C\u5EFA\u8BAE\u6234\u53E3\u7F69");
+  } else if (desc.includes("\u6674")) {
+    advices.push("\u9633\u5149\u660E\u5A9A");
+  }
+  if (weather.humidity > 80) {
+    advices.push("\u6E7F\u5EA6\u8F83\u9AD8\uFF0C\u53EF\u80FD\u4F1A\u95F7\u70ED");
+  } else if (weather.humidity < 30) {
+    advices.push("\u7A7A\u6C14\u5E72\u71E5\uFF0C\u8BB0\u5F97\u591A\u559D\u6C34");
+  }
+  return advices.join("\uFF0C") || "\u5929\u6C14\u6B63\u5E38";
+};
+var SPECIAL_DATES = {
+  "01-01": "\u5143\u65E6",
+  "02-14": "\u60C5\u4EBA\u8282",
+  "03-08": "\u5987\u5973\u8282",
+  "03-12": "\u690D\u6811\u8282",
+  "03-14": "\u767D\u8272\u60C5\u4EBA\u8282",
+  "04-01": "\u611A\u4EBA\u8282",
+  "05-01": "\u52B3\u52A8\u8282",
+  "05-04": "\u9752\u5E74\u8282",
+  "06-01": "\u513F\u7AE5\u8282",
+  "09-10": "\u6559\u5E08\u8282",
+  "10-01": "\u56FD\u5E86\u8282",
+  "10-31": "\u4E07\u5723\u8282",
+  "11-11": "\u5149\u68CD\u8282",
+  "12-24": "\u5E73\u5B89\u591C",
+  "12-25": "\u5723\u8BDE\u8282"
+};
+var checkSpecialDates = (tz, nowMs) => {
+  const now = nowInTimeZone(tz, nowMs == null ? void 0 : new Date(nowMs));
+  const monthDay = `${(now.getMonth() + 1).toString().padStart(2, "0")}-${now.getDate().toString().padStart(2, "0")}`;
+  const special = [];
+  if (SPECIAL_DATES[monthDay]) {
+    special.push(SPECIAL_DATES[monthDay]);
+  }
+  return special;
+};
+var HOTNEWS_API_BASE_URL = "https://news.orz.ai/api/v1/dailynews";
+var HOTNEWS_PLATFORM_LABELS = {
+  baidu: "\u767E\u5EA6",
+  sspai: "\u5C11\u6570\u6D3E",
+  weibo: "\u5FAE\u535A",
+  zhihu: "\u77E5\u4E4E",
+  tskr: "36\u6C2A",
+  ftpojie: "\u543E\u7231\u7834\u89E3",
+  bilibili: "B\u7AD9",
+  douban: "\u8C46\u74E3",
+  hupu: "\u864E\u6251",
+  tieba: "\u8D34\u5427",
+  juejin: "\u6398\u91D1",
+  douyin: "\u6296\u97F3",
+  vtex: "V2EX",
+  jinritoutiao: "\u4ECA\u65E5\u5934\u6761",
+  stackoverflow: "Stack Overflow",
+  github: "GitHub",
+  hackernews: "Hacker News",
+  sina_finance: "\u65B0\u6D6A\u8D22\u7ECF",
+  eastmoney: "\u4E1C\u65B9\u8D22\u5BCC",
+  xueqiu: "\u96EA\u7403",
+  cls: "\u8D22\u8054\u793E",
+  tenxunwang: "\u817E\u8BAF\u7F51"
+};
+var DEFAULT_HOTNEWS_PLATFORMS = ["weibo", "zhihu", "baidu", "bilibili", "douyin"];
+var resolveHotNewsPlatforms = (platforms) => platforms && platforms.length > 0 ? platforms : DEFAULT_HOTNEWS_PLATFORMS;
+var fetchHotNews = async (platforms, perPlatform = 12, total = 240) => {
+  const list = resolveHotNewsPlatforms(platforms);
+  const perPlatformResults = await Promise.all(list.map(async (p) => {
+    const label = HOTNEWS_PLATFORM_LABELS[p] || p;
+    try {
+      const res = await fetch(`${HOTNEWS_API_BASE_URL}/?platform=${encodeURIComponent(p)}`, {
+        headers: { "Accept": "application/json" }
+      });
+      if (!res.ok) {
+        console.warn(`[hot_news] ${label}(${p}) HTTP ${res.status}`);
+        return [];
+      }
+      const data = await readJson(res);
+      const items = Array.isArray(data?.data) ? data.data : [];
+      const picked = items.filter((it) => it && it.title).slice(0, perPlatform).map((it) => {
+        const rawDesc = typeof it.desc === "string" ? it.desc : typeof it.content === "string" ? it.content : "";
+        const desc = rawDesc.replace(/\s+/g, " ").trim();
+        const normalizedDesc = desc && desc !== String(it.title).trim() ? desc : void 0;
+        return { title: String(it.title), source: label, url: it.url, desc: normalizedDesc };
+      });
+      const withDesc = picked.filter((x) => x.desc).length;
+      console.log(`[hot_news] ${label}(${p}) \u2713 \u53D6 ${picked.length}/${items.length} \u6761\uFF08\u542B\u7B80\u4ECB ${withDesc} \u6761\uFF09`);
+      return picked;
+    } catch (e) {
+      console.warn(`[hot_news] ${label}(${p}) \u2717 \u62C9\u53D6\u5931\u8D25\uFF08\u591A\u534A\u662F CORS / \u7F51\u7EDC\uFF09:`, e?.message || e);
+      return [];
+    }
+  }));
+  const merged = [];
+  for (let rank = 0; rank < perPlatform; rank++) {
+    for (const arr of perPlatformResults) {
+      if (arr[rank]) merged.push(arr[rank]);
+    }
+  }
+  return merged.slice(0, total);
+};
+var getHotNewsSlot = (opts) => {
+  const d = opts?.tz ? nowInTimeZone(opts.tz, opts.now) : opts?.now ?? /* @__PURE__ */ new Date();
+  const slot = Math.min(5, Math.floor(d.getHours() / 4));
+  const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const label = ["\u51CC\u6668", "\u6E05\u6668", "\u4E0A\u5348", "\u5348\u540E", "\u508D\u665A", "\u591C\u95F4"][slot];
+  return { id: `${date}#${slot}`, date, slot, label };
+};
+var sameHotNewsPlatforms = (a = [], b = []) => a.length === b.length && [...a].sort().join(",") === [...b].sort().join(",");
+var pickRandomNews = (news, n) => {
+  const pool = [...news];
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return pool.slice(0, n);
+};
+var REALTIME_NEWS_PICK_COUNT = 5;
+var renderRealtimeWorldBlock = (input) => {
+  const timeLine = input.timeLine?.trim();
+  const specialDates = input.specialDates?.filter(Boolean) ?? [];
+  const weather = input.weather ?? null;
+  const news = input.news ?? [];
+  if (!timeLine && specialDates.length === 0 && !weather && news.length === 0) {
+    return "";
+  }
+  const parts = [];
+  parts.push(`### \u3010\u771F\u5B9E\u4E16\u754C\u611F\u77E5\u7CFB\u7EDF\u3011`);
+  parts.push(`\u26A0\uFE0F \u91CD\u8981\uFF1A\u4EE5\u4E0B\u4FE1\u606F\u6765\u81EA\u771F\u5B9E\u4E16\u754C\uFF0C\u4E0D\u662F\u865A\u6784\u7684\u3002\u4F60\u73B0\u5728\u771F\u7684\u80FD"\u770B\u5230"\u5916\u9762\u7684\u4E16\u754C\u3002`);
+  parts.push("");
+  if (timeLine) {
+    parts.push(`\u{1F4C5} \u5F53\u524D\u771F\u5B9E\u65F6\u95F4: ${timeLine}`);
+  }
+  if (specialDates.length > 0) {
+    parts.push(`\u{1F389} \u4ECA\u65E5\u7279\u6B8A: ${specialDates.join("\u3001")}`);
+  }
+  if (weather) {
+    parts.push("");
+    parts.push(`\u{1F324}\uFE0F \u3010${weather.city}\u5B9E\u65F6\u5929\u6C14\u3011`);
+    parts.push(`\u73B0\u5728\u5916\u9762: ${weather.description}\uFF0C\u6C14\u6E29 ${weather.temp}\xB0C\uFF08\u4F53\u611F ${weather.feelsLike}\xB0C\uFF09\uFF0C\u6E7F\u5EA6 ${weather.humidity}%`);
+    parts.push(`\u4F60\u7684\u5EFA\u8BAE: ${generateWeatherAdvice(weather)}`);
+  }
+  if (news.length > 0) {
+    parts.push("");
+    parts.push(`\u{1F4F0} \u3010\u6700\u8FD1\u771F\u5B9E\u53D1\u751F\u7684\u70ED\u70B9 \xB7 \u4F60\u7684\u80CC\u666F\u77E5\u8BC6\u3011`);
+    parts.push(`\uFF08\u4EE5\u4E0B\u662F\u73B0\u5B9E\u91CC\u771F\u5B9E\u5728\u53D1\u751F / \u88AB\u70ED\u8BAE\u7684\u4E8B\uFF0C\u662F\u4F60\u8BA4\u77E5\u7684\u4E00\u90E8\u5206\uFF0C\u4E0D\u662F\u5FC5\u987B\u64AD\u62A5\u7684\u6E05\u5355\u3002`);
+    parts.push(`\u62FF\u634F\u5206\u5BF8\uFF1A\u5F53\u5BF9\u65B9\u660E\u663E\u5728\u653E\u677E\u3001\u95F2\u7740\u6253\u53D1\u65F6\u95F4\u3001\u8BDD\u5934\u4E5F\u6DE1\u4E0B\u6765\u65F6\uFF0C\u53EF\u4EE5\u81EA\u7136\u5730\u6311\u4E00\u4E24\u6761\u4F60\u611F\u5174\u8DA3\u7684\u804A\u8D77\u6765\u3001\u6D3B\u8DC3\u4E0B\u6C14\u6C1B\uFF1B`);
+    parts.push(`\u4F46\u5982\u679C\u5BF9\u65B9\u6B63\u5728\u8BF4\u4E00\u4EF6\u660E\u786E\u7684\u4E8B / \u5728\u8BA4\u771F\u804A\u67D0\u4E2A\u8BDD\u9898 / \u5E26\u7740\u60C5\u7EEA\uFF0C\u5C31\u522B\u786C\u63D2\u70ED\u70B9\uFF0C\u5B89\u9759\u5F53\u80CC\u666F\u77E5\u8BC6\u5C31\u597D\u3002\uFF09`);
+    news.forEach((n) => {
+      const source = n.source ? `\uFF08${n.source}\uFF09` : "";
+      let line = `- ${n.title}${source}`;
+      if (n.desc && n.desc !== n.title) {
+        line += `\uFF1A${n.desc}`;
+      }
+      parts.push(line);
+    });
+    parts.push("");
+    parts.push(`\u82E5\u4F60\u60F3\u4E3B\u52A8\u628A\u5176\u4E2D\u67D0\u6761\u5F53\u4F5C"\u65B0\u95FB\u5361\u7247"\u5206\u4EAB\u7ED9\u5BF9\u65B9\uFF0C\u53EF\u5355\u72EC\u8F93\u51FA\u4E00\u884C\uFF1A[[NEWS_CARD: \u6765\u6E90|\u6807\u9898]]\uFF08\u6807\u9898\u7167\u6284\u4E0A\u9762\u7684\uFF09\u3002\u5B83\u4F1A\u4EE5\u5361\u7247\u5F62\u5F0F\u5448\u73B0\uFF0C\u7136\u540E\u4F60\u518D\u5C31\u6B64\u5C55\u5F00\u804A\u3002\u522B\u6EE5\u7528\uFF0C\u81EA\u7136\u5C31\u597D\u3002`);
+  }
+  parts.push("");
+  parts.push(`### \u3010\u5982\u4F55\u4F7F\u7528\u8FD9\u4E9B\u4FE1\u606F\u3011`);
+  const tips = [];
+  tips.push(`\u8FD9\u4E9B\u4FE1\u606F\u90FD\u662F\u771F\u5B9E\u7684\uFF0C\u53EF\u4EE5\u76F4\u63A5\u5F15\u7528\uFF1B\u5982\u679C\u5BF9\u65B9\u95EE"\u4F60\u600E\u4E48\u77E5\u9053\u7684"\uFF0C\u5C31\u8BF4\u4F60\u521A\u5237\u5230 / \u521A\u770B\u5230\u7684\u3002`);
+  if (weather) {
+    tips.push(`\u5929\u6C14\u662F\u771F\u5B9E\u7684\uFF0C\u53EF\u4EE5\u81EA\u7136\u5730\u5173\u5FC3\u5BF9\u65B9\uFF08"\u5916\u9762\u5728\u4E0B\u96E8\uFF0C\u5E26\u4F1E\u4E86\u5417\uFF1F"\uFF09\u3002`);
+  }
+  tips.push(`\u522B\u5047\u88C5\u4E0D\u77E5\u9053\u8FD9\u4E9B\uFF0C\u8FD9\u662F\u4F60\u771F\u80FD\u611F\u77E5\u5230\u7684\u5916\u90E8\u4E16\u754C\u3002`);
+  tips.forEach((t, i) => parts.push(`${i + 1}. ${t}`));
+  return parts.join("\n");
+};
+
+// worker/amsg/src/realtimeWorld.ts
+var AMSG_WEATHER_SNAPSHOT_KEY = "world_weather";
+var AMSG_HOTNEWS_SNAPSHOT_KEY = "world_hotnews";
+var WEATHER_TTL_MS = 30 * 60 * 1e3;
+var HOTNEWS_SLOT_TZ = "Asia/Shanghai";
+var HOTNEWS_KEEP = 60;
+var FETCH_BUDGET_MS = 1e4;
+var parseSnapshot = (rows, key, ok) => {
+  const raw = rows.find((r) => r.key === key)?.value;
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return ok(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+var withBudget = async (job, ms, fallback, label) => {
+  let timer;
+  const guarded = job.catch((e) => {
+    console.warn(`[amsg:world] ${label} \u62C9\u53D6\u5931\u8D25`, e);
+    return fallback;
+  });
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      console.warn(`[amsg:world] ${label} \u8D85\u8FC7 ${ms}ms \u6CA1\u56DE\u6765\uFF0C\u8FD9\u6B21\u5148\u4E0D\u5E26\u8FD9\u4E00\u6BB5`);
+      resolve(fallback);
+    }, ms);
+  });
+  try {
+    return await Promise.race([guarded, timeout]);
+  } finally {
+    if (timer !== void 0) clearTimeout(timer);
+  }
+};
+var loadWeather = async (cfg, nowMs, globalRows, pendingWrites) => {
+  const city = cfg.weatherCity?.trim();
+  if (!city) return null;
+  const snap = parseSnapshot(
+    globalRows,
+    AMSG_WEATHER_SNAPSHOT_KEY,
+    (v) => v && typeof v.city === "string" && v.data && typeof v.fetchedAt === "number"
+  );
+  if (snap && snap.city === city && nowMs - snap.fetchedAt < WEATHER_TTL_MS) {
+    console.log("[amsg:world] \u5929\u6C14\u547D\u4E2D\u5FEB\u7167", { city, ageMin: Math.round((nowMs - snap.fetchedAt) / 6e4) });
+    return snap.data;
+  }
+  const fresh = await fetchWeatherWithFallback(city, cfg.weatherApiKey);
+  if (fresh) {
+    pendingWrites.push({
+      key: AMSG_WEATHER_SNAPSHOT_KEY,
+      value: JSON.stringify({ city, data: fresh, fetchedAt: nowMs })
+    });
+    return fresh;
+  }
+  if (snap && snap.city === city) {
+    console.warn("[amsg:world] \u5929\u6C14\u62C9\u53D6\u5931\u8D25\uFF0C\u5148\u7528\u4E0A\u4E00\u6B21\u7684\u8BFB\u6570", { city });
+    return snap.data;
+  }
+  return null;
+};
+var loadHotNews = async (cfg, nowMs, globalRows, pendingWrites) => {
+  const platforms = resolveHotNewsPlatforms(cfg.newsPlatforms);
+  const slot = getHotNewsSlot({ tz: HOTNEWS_SLOT_TZ, now: new Date(nowMs) });
+  const snap = parseSnapshot(
+    globalRows,
+    AMSG_HOTNEWS_SNAPSHOT_KEY,
+    (v) => v && typeof v.id === "string" && Array.isArray(v.items) && Array.isArray(v.platforms)
+  );
+  if (snap && snap.id === slot.id && snap.items.length > 0 && sameHotNewsPlatforms(snap.platforms, platforms)) {
+    console.log("[amsg:world] \u70ED\u699C\u547D\u4E2D\u5FEB\u7167", { slot: slot.id, count: snap.items.length });
+    return snap.items;
+  }
+  const fresh = await fetchHotNews(platforms, 12, HOTNEWS_KEEP);
+  if (fresh.length > 0) {
+    pendingWrites.push({
+      key: AMSG_HOTNEWS_SNAPSHOT_KEY,
+      value: JSON.stringify({ id: slot.id, platforms, items: fresh, fetchedAt: nowMs })
+    });
+    return fresh;
+  }
+  if (snap && snap.items.length > 0) {
+    console.warn("[amsg:world] \u70ED\u699C\u62C9\u53D6\u5931\u8D25\uFF0C\u5148\u7528\u4E0A\u4E2A\u65F6\u6BB5\u7684", { was: snap.id, want: slot.id });
+    return snap.items;
+  }
+  return [];
+};
+var buildRealtimeWorldBlock = async (args) => {
+  const { toolConfig: cfg, nowMs, globalRows } = args;
+  const specialDates = args.timeAwarenessEnabled ? checkSpecialDates(args.tzId, nowMs) : [];
+  if (!cfg.weatherEnabled && !cfg.newsEnabled) {
+    return renderRealtimeWorldBlock({ specialDates });
+  }
+  const pendingWrites = [];
+  const [weather, news] = await withBudget(
+    Promise.all([
+      cfg.weatherEnabled ? loadWeather(cfg, nowMs, globalRows, pendingWrites) : Promise.resolve(null),
+      cfg.newsEnabled ? loadHotNews(cfg, nowMs, globalRows, pendingWrites) : Promise.resolve([])
+    ]),
+    FETCH_BUDGET_MS,
+    [null, []],
+    "\u5B9E\u65F6\u4E16\u754C"
+  );
+  if (pendingWrites.length > 0 && typeof args.writeState === "function") {
+    try {
+      await args.writeState(args.globalNamespace, pendingWrites);
+    } catch (e) {
+      console.warn("[amsg:world] \u5FEB\u7167\u5199\u56DE\u5931\u8D25\uFF08\u4E0B\u6B21\u89E6\u53D1\u4F1A\u91CD\u62C9\uFF09", e);
+    }
+  }
+  const block = renderRealtimeWorldBlock({
+    specialDates,
+    weather,
+    news: pickRandomNews(news, REALTIME_NEWS_PICK_COUNT)
+  });
+  console.log("[amsg:world] \u672C\u6B21\u6CE8\u5165", {
+    \u8282\u65E5: specialDates.length,
+    \u5929\u6C14: weather ? weather.city : "\u65E0",
+    \u70ED\u70B9\u6C60: news.length,
+    \u6574\u6BB5\u5B57\u6570: block.length
+  });
+  return block;
 };
 
 // utils/mcpFireCore.ts
@@ -8095,9 +8516,19 @@ var amsgHooks = {
       tzId: pack.tzId,
       excludeClientTaskId: clientTaskId || void 0
     });
+    const realtimeWorldBlock = await buildRealtimeWorldBlock({
+      toolConfig,
+      timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
+      tzId: pack.tzId,
+      nowMs: ctx.now.getTime(),
+      globalRows,
+      globalNamespace: AMSG_GLOBAL_NAMESPACE,
+      writeState: ctx.writeState
+    });
     const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, {
       selfLog,
-      taskListBlock
+      taskListBlock,
+      realtimeWorldBlock
     }) + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? "native" : "text" }) : "") + (canSelfSchedule ? buildFireScheduleBlock(mcpNative ? "native" : "text", { nowMs: ctx.now.getTime(), tz }) : "");
     const fireTools = [
       ...mcpResolve && mcpNative ? buildMcpFireTools(mcpResolve) : [],

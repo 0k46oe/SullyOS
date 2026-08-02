@@ -40,7 +40,7 @@ const firePackValue = (
   lastUserMessageAt: number | null = null,
   extra: Record<string, unknown> = {},
 ) => JSON.stringify({
-  v: 4,
+  v: 5,
   template: `现在是 ${AMSG_SLOT_CURRENT_TIME}。\n${AMSG_SLOT_TASK_INSTRUCTION}`,
   lastUserMessageAt,
   tzId: 'Asia/Shanghai',
@@ -59,9 +59,11 @@ const presenceValue = (activeAt: number) => JSON.stringify({
 // 云端状态异常，走抛错路径（见下面「缺 tool_pack → 抛错」那条）。
 const toolPackValue = JSON.stringify({
   v: 1, charName: 'Nyah', xhsEnabled: false, activeMemoryMonths: [], memories: [],
+  timeAwarenessEnabled: true,
 });
 const toolConfigValue = JSON.stringify({
-  v: 1, proxyWorkerUrl: '', newsEnabled: false, notionEnabled: false, feishuEnabled: false,
+  v: 1, proxyWorkerUrl: '', weatherEnabled: false, newsEnabled: false,
+  notionEnabled: false, feishuEnabled: false,
 });
 
 /** 带一台通用 MCP 服务器的 tool_config（extra 用来改开关 / 服务器可见范围）。 */
@@ -748,7 +750,7 @@ describe('self_log — 角色自述回写', () => {
 
   /** 带自述槽位的 fire_pack（当前客户端打的包长这样）。 */
   const slottedFirePack = (builtAt: number = PACK_BUILT_AT) => JSON.stringify({
-    v: 4,
+    v: 5,
     template: `【最近对话上下文】\n用户：先睡了${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
     lastUserMessageAt: null,
     tzId: 'Asia/Shanghai',
@@ -926,7 +928,7 @@ describe('self_log — 角色自述回写', () => {
   // 硬失败，而不是悄悄退回单轮——静默降级的话，多轮连续性没了也没人会发现。
   it('包里缺对齐锚点 → 抛错，不静默退回单轮', async () => {
     const store = makeStore(JSON.stringify({
-      v: 4,
+      v: 5,
       template: `【最近对话上下文】\n用户：先睡了${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
       lastUserMessageAt: null,
       tzId: 'Asia/Shanghai',
@@ -1329,6 +1331,7 @@ describe('推送标题跟着当前角色名', () => {
           key: AMSG_TOOL_PACK_KEY,
           value: JSON.stringify({
             v: 1, charName: '夜', xhsEnabled: false, activeMemoryMonths: [], memories: [],
+            timeAwarenessEnabled: true,
           }),
         },
       ],

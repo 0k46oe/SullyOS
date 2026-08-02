@@ -31,6 +31,11 @@ export interface AmsgToolPack {
   xhsEnabled: boolean;
   activeMemoryMonths: string[];
   memories: AgenticToolMemory[];
+  /**
+   * 角色的「时间感知」开关。关掉的角色不该知道今天几号，所以到点注入的实时世界里
+   * 也不给今日节日——这个字段不上云的话，前台守着的开关一到主动消息就失效。
+   */
+  timeAwarenessEnabled: boolean;
 }
 
 /**
@@ -44,6 +49,15 @@ export interface AmsgToolConfig extends AgenticToolRealtimeConfig {
   v: 1;
   /** 搜索 / Notion / 飞书都经它转发；worker 端用 setProxyWorkerUrlOverride 注入。 */
   proxyWorkerUrl: string;
+  /**
+   * 实时天气：worker 到点自己去拉一次填进提示词（不是工具，是常驻注入，跟前台一样）。
+   * key 留空走免费的 Open-Meteo，所以只要开关加城市就够。
+   */
+  weatherEnabled: boolean;
+  weatherCity?: string;
+  weatherApiKey?: string;
+  /** 热榜要拉哪几个平台（继承来的 newsEnabled 管开关）。留空 worker 用内置默认。 */
+  newsPlatforms?: string[];
   /** 上云这份比工具侧多一个 cookie（lite 模式的登录态），并且两个开关字段是必填。 */
   xhsMcpConfig?: {
     enabled: boolean;
@@ -99,6 +113,8 @@ export const buildToolPack = (char: CharacterProfile): AmsgToolPack => ({
     summary: mem.summary,
     ...(mem.mood ? { mood: mem.mood } : {}),
   })),
+  // 前台的判定是「没显式关就算开」，这边照抄同一句，别让同一个开关两处读出不同结果。
+  timeAwarenessEnabled: char.timeAwarenessEnabled !== false,
 });
 
 /**
@@ -114,8 +130,12 @@ export const buildToolConfig = (
   return {
     v: 1,
     proxyWorkerUrl: getProxyWorkerUrl(),
+    weatherEnabled: !!rc?.weatherEnabled,
+    ...(rc?.weatherCity ? { weatherCity: rc.weatherCity } : {}),
+    ...(rc?.weatherApiKey ? { weatherApiKey: rc.weatherApiKey } : {}),
     newsEnabled: !!rc?.newsEnabled,
     ...(rc?.newsApiKey ? { newsApiKey: rc.newsApiKey } : {}),
+    ...(rc?.newsPlatforms?.length ? { newsPlatforms: rc.newsPlatforms } : {}),
     notionEnabled: !!rc?.notionEnabled,
     ...(rc?.notionApiKey ? { notionApiKey: rc.notionApiKey } : {}),
     ...(rc?.notionDatabaseId ? { notionDatabaseId: rc.notionDatabaseId } : {}),
@@ -151,6 +171,7 @@ export const parseToolPack = (value: string): AmsgToolPack | null => {
       !parsed || typeof parsed !== 'object' ||
       parsed.v !== 1 ||
       typeof parsed.charName !== 'string' ||
+      typeof parsed.timeAwarenessEnabled !== 'boolean' ||
       !Array.isArray(parsed.activeMemoryMonths) ||
       !Array.isArray(parsed.memories)
     ) {

@@ -63,7 +63,9 @@
 
 改法：拿 `resolveCharTimeZone(char)` 折算；注意别把用来算时间差的 `now` 一起换掉，那个必须继续用真实时刻。
 
-主动消息 2.0 那条链（`utils/activeMsgClient.ts` 的 `buildFirePack`）已经接好了：模板带一个 `tzId`，worker 到点渲染的每个时间都以它为参照系（`utils/amsgFirePack.ts`）。凡是「打包这一刻」的状态都不烤进模板，改由 `AMSG_SLOT_*` 槽位到点现算 —— 当前时间、日程当前时段、此刻在听的歌都走这条路，见 `ChatPrompts.PromptBuildOptions` 上那张表。
+主动消息 2.0 那条链（`utils/activeMsgClient.ts` 的 `buildFirePack`）已经接好了：模板带一个 `tzId`，worker 到点渲染的每个时间都以它为参照系（`utils/amsgFirePack.ts`）。凡是「打包这一刻」的状态都不烤进模板，改由 `AMSG_SLOT_*` 槽位到点现算 —— 当前时间、日程当前时段、此刻在听的歌、今日节日 / 天气 / 热搜都走这条路，见 `ChatPrompts.PromptBuildOptions` 上那张表。
+
+其中今日节日按角色时区判「今天几号」，并且跟着角色的「时间感知」开关走（关掉的角色到点也不会知道今天是圣诞节）——这个开关随 `tool_pack` 上云，见 `worker/amsg/src/realtimeWorld.ts`。热搜的时段划分则固定按 `Asia/Shanghai`：榜单本身就是国内的作息，worker 跑在 UTC 上，不指定的话「今日上午」会差好几个时段。
 
 ### 一组角色共同排日程（feature request）
 

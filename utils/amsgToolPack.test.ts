@@ -37,6 +37,7 @@ describe('buildToolPack / parseToolPack', () => {
         { date: '2026-06-12', summary: '一起看了落日', mood: 'happy' },
         { date: '2026-05-01', summary: '吵了一小架' },
       ],
+      timeAwarenessEnabled: true,
     });
     expect(JSON.stringify(pack)).not.toContain('"id"');
   });
@@ -49,6 +50,7 @@ describe('buildToolPack / parseToolPack', () => {
       xhsEnabled: false,
       activeMemoryMonths: [],
       memories: [],
+      timeAwarenessEnabled: true,
     });
   });
 
@@ -56,6 +58,15 @@ describe('buildToolPack / parseToolPack', () => {
     expect(parseToolPack('not json')).toBeNull();
     expect(parseToolPack('{"v":1}')).toBeNull();
     expect(parseToolPack(JSON.stringify({ v: 2, charName: 'x', activeMemoryMonths: [], memories: [] }))).toBeNull();
+  });
+
+  it('角色关掉时间感知 → 这个开关跟着上云（不然主动消息里照样过节）', () => {
+    const off = buildToolPack({ id: 'c3', name: '零', timeAwarenessEnabled: false } as unknown as CharacterProfile);
+    expect(off.timeAwarenessEnabled).toBe(false);
+    expect(parseToolPack(JSON.stringify(off))?.timeAwarenessEnabled).toBe(false);
+    // 没这个字段的包一律打回：worker 拿不到开关就只能猜，而猜错就是穿帮。
+    const { timeAwarenessEnabled: _dropped, ...missing } = off;
+    expect(parseToolPack(JSON.stringify(missing))).toBeNull();
   });
 });
 
@@ -69,9 +80,10 @@ describe('buildToolConfig / parseToolConfig', () => {
       notionDatabaseId: 'db1',
       feishuEnabled: false,
       xhsMcpConfig: { enabled: true, serverUrl: 'https://xhs.example.com/api', cookie: 'ck' },
-      // 非工具字段不应被带上云
+      // 天气不是工具，但 worker 到点要自己拉一次填进提示词，所以也得上云
       weatherEnabled: true,
       weatherCity: '上海',
+      newsPlatforms: ['weibo', 'zhihu'],
     } as unknown as RealtimeConfig;
 
     const config = buildToolConfig(rc);
@@ -82,7 +94,10 @@ describe('buildToolConfig / parseToolConfig', () => {
     expect(parsed?.xhsMcpConfig).toEqual({ enabled: true, serverUrl: 'https://xhs.example.com/api', cookie: 'ck' });
     expect(typeof parsed?.proxyWorkerUrl).toBe('string');
     expect(parsed?.proxyWorkerUrl).toMatch(/^https?:\/\//);
-    expect(JSON.stringify(config)).not.toContain('weather');
+    // 到点组提示词要用的实时世界配置：天气开关 + 城市 + 热榜平台
+    expect(parsed?.weatherEnabled).toBe(true);
+    expect(parsed?.weatherCity).toBe('上海');
+    expect(parsed?.newsPlatforms).toEqual(['weibo', 'zhihu']);
     // 未配置的可选键不写（省 payload，也避免 undefined 序列化怪态）
     expect('feishuAppId' in config).toBe(false);
   });
@@ -90,6 +105,9 @@ describe('buildToolConfig / parseToolConfig', () => {
   it('无 realtimeConfig 时出全禁用配置（而不是抛错）', () => {
     const config = buildToolConfig(undefined);
     expect(config.newsEnabled).toBe(false);
+    expect(config.weatherEnabled).toBe(false);
+    expect('weatherCity' in config).toBe(false);
+    expect('newsPlatforms' in config).toBe(false);
     expect(config.notionEnabled).toBe(false);
     expect(config.feishuEnabled).toBe(false);
     expect(config.xhsMcpConfig).toBeUndefined();
