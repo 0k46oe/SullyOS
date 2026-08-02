@@ -1,7 +1,7 @@
 
 
 
-import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
 import { IMPORT_IN_PROGRESS_KEY, useOS } from '../context/OSContext';
 import StatusBar from './os/StatusBar';
 import Launcher from '../apps/Launcher';
@@ -580,11 +580,23 @@ const PhoneShell: React.FC = () => {
 
   // 本次版本首映：数据就绪且解锁后出现一次，避免按钮打开的 App 被锁屏挡在背后。
   const [showUpdateNotification, setShowUpdateNotification] = useState(false);
+  /**
+   * 这次开机已经问过一轮了。
+   *
+   * 更新提醒可能不止一条（见 UpdateNotificationController 的队列），用户点「立刻体验」
+   * 跳去别的 App 时，剩下那几条是故意不标已读、留到下次启动的。少了这道闸，弹窗一关
+   * 下面的 effect 就会立刻再问一次「还有没有没看的」，然后把下一条糊在刚打开的页面上。
+   */
+  const updateNoticeAsked = useRef(false);
 
   useEffect(() => {
+    if (updateNoticeAsked.current) return;
     if (showDisclaimer || showImportRecoveryPrompt || showAuthorLetter || showUpdateNotification) return;
     if (!isDataLoaded || isLocked) return;
-    if (shouldShowUpdateNotification()) setShowUpdateNotification(true);
+    if (shouldShowUpdateNotification()) {
+      updateNoticeAsked.current = true;
+      setShowUpdateNotification(true);
+    }
   }, [showDisclaimer, showImportRecoveryPrompt, showAuthorLetter, showUpdateNotification, isDataLoaded, isLocked]);
 
   // 520 特别活动弹窗（2026-05-20 当天，且没被 dismiss / completed）

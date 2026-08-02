@@ -14,6 +14,7 @@ import {
     CHANGELOG_2026_06_21,
     CHANGELOG_2026_06_26,
     CHANGELOG_2026_07_10,
+    CHANGELOG_2026_08_03,
 } from '../components/UpdateNotificationEvent';
 import { trackEvent } from '../utils/analytics';
 
@@ -107,6 +108,14 @@ interface ChangelogEntry {
 }
 
 const CHANGELOG_ENTRIES: ChangelogEntry[] = [
+    {
+        id: CHANGELOG_2026_08_03,
+        title: '2026 年 8 月 3 日 · 主动消息 2.0',
+        subtitle: '角色到点自己发消息，App 关着也收得到 · 三种排任务的方式（面板 / 聊天里说一句 / 角色给自己排）· 到点现取时间天气节日热搜与当天作息 · 连发不重样、只做事时不推空消息 · 后台照样能用 MCP 与搜索 · 想找话说的那类会让路，闹钟和承诺照发 · 需自部署 Cloudflare Worker + D1',
+        date: '2026-08-03',
+        src: 'changelogs/2026-8-3.html',
+        accent: 'from-violet-100 to-sky-100 border-violet-200',
+    },
     {
         id: CHANGELOG_2026_07_10,
         title: '2026 年 7 月 10 日 · 生活统计',
