@@ -1,0 +1,99 @@
+import { describe, expect, it } from 'vitest';
+import {
+  appendPendingAvatarTouch,
+  buildAvatarTouchSystemPrompt,
+  buildPendingAvatarTouchContext,
+  buildImmediateTouchPerformance,
+  consumePendingAvatarTouches,  isAvatarTouchGesture,
+  normalizeAvatarTouchZone,
+  parseAvatarTouchReply,
+  type AvatarTouchRecord,
+} from './avatarTouch';
+
+describe('角色触碰互动', () => {
+  it('优先按模型原生命中区识别语义区域，并在缺失时使用几何回退', () => {
+    expect(normalizeAvatarTouchZone(['HitAreaHead'])).toBe('head');
+    expect(normalizeAvatarTouchZone(['脸颊'])).toBe('face');
+    expect(normalizeAvatarTouchZone(['Arm_L'])).toBe('hand');
+    expect(normalizeAvatarTouchZone([], 0.2, 0.5)).toBe('face');
+    expect(normalizeAvatarTouchZone([], 0.5, 0.1)).toBe('hand');
+    expect(normalizeAvatarTouchZone([], 0.55, 0.5)).toBe('body');
+  });
+
+  it('即时本地反馈不会等待模型台词', () => {
+    expect(buildImmediateTouchPerformance('face')).toMatchObject({
+      emotion: 'surprised',
+      gesture: 'shy',
+      faces: ['blush'],
+    });
+    expect(buildImmediateTouchPerformance('hand').gesture).toBe('wave');
+  });
+
+  it('只把短距离单指点击视为触碰，拖拽和双指不会误触', () => {
+    expect(isAvatarTouchGesture(4, 220, true)).toBe(true);
+    expect(isAvatarTouchGesture(18, 220, true)).toBe(false);
+    expect(isAvatarTouchGesture(2, 900, true)).toBe(false);
+    expect(isAvatarTouchGesture(2, 220, false)).toBe(false);
+  });
+
+  it('触碰提示使用完整 ContextBuilder 输入并明确近期关系约束', () => {
+    const prompt = buildAvatarTouchSystemPrompt(
+      'FULL_CONTEXT_WITH_RECENT_MEMORY',
+      'Sully',
+      '条条',
+      { zone: 'head', rawAreas: ['Head'] },
+      [{ id: 'wave-special', name: '专属挥手' }],
+    );
+    expect(prompt).toContain('FULL_CONTEXT_WITH_RECENT_MEMORY');
+    expect(prompt).toContain('近期对话与记忆');
+    expect(prompt).toContain('wave-special');
+    expect(prompt).not.toContain('表演人格');
+  });
+
+  it('解析台词和演出指令，并丢弃白名单外动作', () => {
+    const allowed = parseAvatarTouchReply({
+      content: '[[AVATAR: emotion=happy; gesture=tilt; model_action=wave-special]]\n别把我的头发揉乱啦。',
+    }, [{ id: 'wave-special', name: '专属挥手' }]);
+    expect(allowed).toMatchObject({
+      text: '别把我的头发揉乱啦。',
+      performance: { emotion: 'happy', gesture: 'tilt', modelAction: 'wave-special' },
+    });
+
+    const blocked = parseAvatarTouchReply({
+      content: '[[AVATAR: emotion=angry; model_action=not-allowed]]\n住手。',
+    }, [{ id: 'wave-special', name: '专属挥手' }]);
+    expect(blocked?.performance.modelAction).toBeUndefined();
+  });
+
+  it('只在下一次正常发言里批量描述尚未回应的戳戳', () => {
+    const records: AvatarTouchRecord[] = [
+      { id: 'touch-1', zone: 'head', rawAreas: ['Hair'], timestamp: 100 },
+      { id: 'touch-2', zone: 'head', rawAreas: ['Hair'], timestamp: 200 },
+      { id: 'touch-3', zone: 'face', rawAreas: ['Face'], timestamp: 300 },
+    ];
+    const context = buildPendingAvatarTouchContext(records, 'Sully', '条条');
+    expect(context).toContain('条条在开口前连续戳了Sully3次');
+    expect(context).toContain('头发2次');
+    expect(context).toContain('脸颊1次');
+    expect(context).toContain('回答用户本轮话语时自然地顺带接住');
+    expect(context).toContain('不要把触碰当成一条单独的新消息');
+    expect(buildPendingAvatarTouchContext([], 'Sully', '条条')).toBe('');
+  });
+
+  it('戳戳队列有上限，并且只消费已经随本轮发出去的快照', () => {
+    const first: AvatarTouchRecord = { id: 'touch-1', zone: 'head', rawAreas: [], timestamp: 100 };
+    const second: AvatarTouchRecord = { id: 'touch-2', zone: 'face', rawAreas: [], timestamp: 200 };
+    const arrivedWhileThinking: AvatarTouchRecord = { id: 'touch-3', zone: 'hand', rawAreas: [], timestamp: 300 };
+    const queued = appendPendingAvatarTouch(
+      appendPendingAvatarTouch(
+        appendPendingAvatarTouch([], first, 2),
+        second,
+        2,
+      ),
+      arrivedWhileThinking,
+      2,
+    );
+    expect(queued.map(record => record.id)).toEqual(['touch-2', 'touch-3']);
+    expect(consumePendingAvatarTouches([first, second, arrivedWhileThinking], [first, second]))
+      .toEqual([arrivedWhileThinking]);
+  });});

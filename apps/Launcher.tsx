@@ -10,6 +10,8 @@ import NowPlayingSquareWidget from '../components/os/NowPlayingSquareWidget';
 import MobileGameHome from '../components/os/MobileGameHome';
 import TamagotchiHome from '../components/os/TamagotchiHome';
 
+const CompanionHome = React.lazy(() => import('../components/os/CompanionHome'));
+
 // --- Isolated Components to prevent full re-renders ---
 
 // 1. Clock Component (Consumes virtualTime)
@@ -642,6 +644,14 @@ const Launcher: React.FC = () => {
   // 电子宠物主题：桌面即养成机——角色真实小屋做舞台 + 四颗糖果实体键（独立组件自渲染）。
   if (theme.skin === 'tamagotchi') {
     return <TamagotchiHome />;
+  }
+
+  if (theme.skin === 'companion') {
+    return (
+      <React.Suspense fallback={<div className="h-full w-full bg-[#100d1c]" />}>
+        <CompanionHome />
+      </React.Suspense>
+    );
   }
 
   return (
