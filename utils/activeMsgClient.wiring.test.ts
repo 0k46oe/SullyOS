@@ -26,8 +26,11 @@ describe('③ 凭据变更重传接线', () => {
     const src = read('../apps/Settings.tsx');
     const fn = sliceBetween(src, 'const handleSaveApi', 'const handleSaveOtherApis');
     expect(fn).toContain('ActiveMsgClient.refreshApiCredentialsForPendingTasks(');
-    // 传的是「保存后的新配置」而不是渲染时的旧 apiConfig 快照。
-    expect(fn).toMatch(/refreshApiCredentialsForPendingTasks\(\{ \.\.\.apiConfig, \.\.\.updates \}\)/);
+    // 传的是「保存后的新配置」而不是渲染时的旧 apiConfig 快照。叠上去的那个变量叫什么
+    // 不重要，重要的是它得是这次保存现组的配置对象——所以顺着名字回查它的声明。
+    const call = fn.match(/refreshApiCredentialsForPendingTasks\(\{ \.\.\.apiConfig, \.\.\.(\w+) \}\)/);
+    expect(call, '凭据重传要把保存后的新配置叠在 apiConfig 上一起传').not.toBeNull();
+    expect(fn).toContain(`const ${call![1]} = {`);
   });
 
   it('ActiveMsg2SettingsModal.handleSubmit：角色级 API 保存后刷同角色其余 pending AI 任务', () => {
