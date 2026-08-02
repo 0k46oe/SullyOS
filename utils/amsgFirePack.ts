@@ -403,7 +403,7 @@ export const formatTimeSinceUser = (diffMinutes: number | null): string => {
 export const buildAwayHint = (targetName: string, timeSinceUser: string): string => {
   const target = targetName || '对方';
   if (timeSinceUser.includes('没有新的聊天记录')) return `${target}最近没有主动来找你说话。`;
-  // 只借用里面那段时长，句子重新拼——照搬原句换个开头会读成「楪同学已经上次主动发消息大约 9 小时」。
+  // 只借用里面那段时长，句子重新拼——照搬原句换个开头会读成「小明同学已经上次主动发消息大约 9 小时」。
   const span = timeSinceUser.match(/大约 (.+?)。?$/)?.[1];
   return span
     ? `${target}已经大约 ${span} 没主动来找你了。`

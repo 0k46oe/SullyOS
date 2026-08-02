@@ -48,7 +48,7 @@ const makeCtx = (char: any, extra: Partial<PostProcessCtx> = {}): PostProcessCtx
     };
     return {
         char,
-        userProfile: { name: '楪' } as any,
+        userProfile: { name: '小明' } as any,
         emojis: [],
         contextMsgs: [],
         fullMessages: [{ role: 'user', content: '在吗' }],

@@ -2331,6 +2331,7 @@ var stripChineseDate = (t) => t.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\
 var stripRoleNamePrefix = (t) => t.replace(/^[\w一-龥]+:\s*/, "");
 var stripBusinessTagsForBubble = (t) => t.replace(/\[\[(?:ACTION|RECALL|SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END|MUSIC_ACTION)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[\s*[记記][录錄]\s*[:：][\s\S]*?\]\]/g, "").replace(/\[schedule_message[^\]]*\]/g, "");
 var stripBusinessTagsForNotification = (t) => stripBusinessTagsForBubble(t).replace(/\[\[(?:READ_NOTE|XHS_[A-Z_]+|LIFE|NEWS_CARD)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[XHS_[A-Z_]+\]\]/g, "");
+var stripAllDoubleBracketTags = (t) => t.replace(/\[\[[\s\S]*?\]\]/g, "");
 var stripQuotes = (t) => t.replace(/\[\[(?:QU[OA]TE|引用)[：:][\s\S]*?\]\]/g, "").replace(/\[(?:QU[OA]TE|引用)[：:][^\]]*\]/g, "").replace(/\[回复\s*[""“][^""”]*?[""”](?:\.{0,3})\]\s*[：:]?\s*/g, "").replace(/\[[^\[\]\n「」]{0,24}引用了[^\[\]\n「」]{0,24}「[^」\n]*?」[^\[\]\n]{0,24}\]\s*/g, "");
 var stripSystemLogLeak = (t) => t.replace(/[\[【]\s*(?:系统|系統|System)\s*(?:提示)?\s*[:：][^\[\]【】]*[\]】]\s*/gi, "").replace(/\[\s*(?:系统|系統)\s*\]\s*/g, "");
 var stripMarkdownHeaders = (t) => t.replace(/^#{1,6}\s+/gm, "");
@@ -2342,7 +2343,7 @@ var collapseWhitespace = (t) => t.replace(/\n{3,}/g, "\n\n").trim();
 var stripThinkBlocks = (t) => t.replace(/<(think|thinking|thought)>[\s\S]*?<\/\1>/gi, "").replace(/<(?:think|thinking|thought)>[\s\S]*$/gi, "");
 var stripInnerState = (t) => t.replace(/\[\[INNER_STATE:\s*[\s\S]*?\]\]/g, "");
 var replaceMarkdownLinks = (t) => t.replace(/\[([^\]]+)\]\([^)]+\)/g, "[\u94FE\u63A5\uFF1A$1]");
-var replaceSendEmoji = (t) => t.replace(/\[\[SEND_EMOJI:\s*(.+?)\]\]/g, "[\u8868\u60C5\uFF1A$1]");
+var replaceSendEmoji = (t) => t.replace(/\[\[SEND_EMOJI[:：]\s*(.+?)\]\]/g, "[\u8868\u60C5\uFF1A$1]");
 var replaceEmojiReverseTag = (t) => t.replace(/\[(?:你|User|用户|System|[\w一-龥]+)\s*发送了表情包[:：]\s*(.*?)\]/g, "[\u8868\u60C5\uFF1A$1]");
 var replaceHtmlBlocks = (t) => t.replace(/\[html\][\s\S]*?\[\/html\]/gi, "[HTML \u5361\u7247]");
 var replaceTranslationForBanner = (t) => t.replace(/<翻译>\s*<原文>([\s\S]*?)<\/原文>\s*<译文>[\s\S]*?<\/译文>\s*<\/翻译>/g, "$1").replace(/<译文>[\s\S]*?<\/译文>/g, "").replace(/<\/?(?:翻译|原文)>/g, "");
@@ -2554,6 +2555,7 @@ ${ATOM_MARKER}B${idx}${ATOM_MARKER}
 `;
         continue;
       }
+      if (!stripAllDoubleBracketTags(sanitized).trim()) continue;
       segments.push({
         raw: pendingQuoteRaw ? `${pendingQuoteRaw}${rawText}` : rawText,
         sanitized
@@ -2593,7 +2595,7 @@ function chunkText(text) {
   return out;
 }
 function splitOnSendEmoji(chunk) {
-  const re = /\[\[SEND_EMOJI:\s*(.*?)\]\]/g;
+  const re = /\[\[SEND_EMOJI[:：]\s*(.*?)\]\]/g;
   const parts = [];
   let lastIndex = 0;
   let m;
@@ -2945,12 +2947,23 @@ function classifyLLMOutput(text) {
       if (d) directives.push(d);
     }
   }
+  const dedupedDirectives = [];
+  const seenDirectives = /* @__PURE__ */ new Set();
+  for (const d of directives) {
+    const key = JSON.stringify(d);
+    if (seenDirectives.has(key)) {
+      console.warn("[classifier] \u540C\u4E00\u6761\u6D88\u606F\u91CC\u91CD\u590D\u7684\u526F\u4F5C\u7528, \u53EA\u4FDD\u7559\u7B2C\u4E00\u4E2A:", key);
+      continue;
+    }
+    seenDirectives.add(key);
+    dedupedDirectives.push(d);
+  }
   let cleanedText = textAfterTransfers;
   for (const spec of DATA_TAGS) cleanedText = cleanedText.replace(spec.re, "");
   for (const spec of SIDE_EFFECT_TAGS) cleanedText = cleanedText.replace(spec.re, "");
   cleanedText = cleanedText.trim();
   const sanitizedBody = sanitizeForNotification(cleanedText);
-  return { kind: "finish", cleanedText, sanitizedBody, directives };
+  return { kind: "finish", cleanedText, sanitizedBody, directives: dedupedDirectives };
 }
 
 // utils/instantWorkerVersion.ts

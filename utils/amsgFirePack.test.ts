@@ -63,8 +63,8 @@ describe('formatTimeSinceUser', () => {
 
 describe('buildAwayHint', () => {
   it('无记录 → 「最近没有主动来找你说话」', () => {
-    expect(buildAwayHint('楪同学', '你们最近没有新的聊天记录。'))
-      .toBe('楪同学最近没有主动来找你说话。');
+    expect(buildAwayHint('小明同学', '你们最近没有新的聊天记录。'))
+      .toBe('小明同学最近没有主动来找你说话。');
   });
 
   it('有记录 → 只借时长、句子重拼', () => {
@@ -125,7 +125,7 @@ describe('renderFirePack', () => {
     lastUserMessageAt: null,
     tzId: 'UTC',
     userTzId: 'UTC',
-    targetName: '楪同学',
+    targetName: '小明同学',
   };
 
   it('填满全部槽位，currentTime 出现多次也全部替换（自然中文格式，与 buildCoreContext 同款）', () => {
@@ -135,7 +135,7 @@ describe('renderFirePack', () => {
       '当前本地时间：2026年7月17日 周五 早晨 08:30',
       '你们最近没有新的聊天记录。',
       '现在是 2026年7月17日 周五 早晨 08:30。',
-      '楪同学最近没有主动来找你说话。',
+      '小明同学最近没有主动来找你说话。',
       '本次任务指令',
     ].join('\n'));
     expect(rendered).not.toContain('{{');
@@ -156,7 +156,7 @@ describe('renderFirePack', () => {
       '本次任务指令',
     );
     expect(rendered).toContain('距离用户上次主动发消息大约 1 小时 30 分钟。');
-    expect(rendered).toContain('楪同学已经大约 1 小时 30 分钟 没主动来找你了。');
+    expect(rendered).toContain('小明同学已经大约 1 小时 30 分钟 没主动来找你了。');
   });
 });
 
@@ -174,13 +174,13 @@ describe('对方那边现在几点（AMSG_SLOT_USER_CLOCK）', () => {
     template: `当前本地时间（你所在地）：${AMSG_SLOT_CURRENT_TIME}${AMSG_SLOT_USER_CLOCK}`,
     tzId: 'America/New_York',
     userTzId: 'Asia/Shanghai',
-    targetName: '楪同学',
+    targetName: '小明同学',
   };
 
   it('两个钟各写各的主语：角色的是「当前本地时间」，用户的点名是「对方所在时区」', () => {
     const out = renderFirePack(nyChar, AT, '指令');
     expect(out).toContain('当前本地时间（你所在地）：2026年8月2日 周日 上午 09:00');
-    expect(out).toContain('对方所在时区参考：楪同学那边现在是 8月2日 晚上 21:00');
+    expect(out).toContain('对方所在时区参考：小明同学那边现在是 8月2日 晚上 21:00');
     expect(out).not.toContain('{{');
   });
 
@@ -190,10 +190,10 @@ describe('对方那边现在几点（AMSG_SLOT_USER_CLOCK）', () => {
   });
 
   it('buildUserClockHint 只认 userTz，不吃运行时本地时区', () => {
-    expect(buildUserClockHint(AT, { tzId: 'UTC' }, { tzId: 'Asia/Tokyo' }, '楪同学'))
-      .toContain('楪同学那边现在是 8月2日 深夜 22:00');
+    expect(buildUserClockHint(AT, { tzId: 'UTC' }, { tzId: 'Asia/Tokyo' }, '小明同学'))
+      .toContain('小明同学那边现在是 8月2日 深夜 22:00');
     // 空 tz（理论上 parseFirePack 已经挡住）→ 不硬编一个时间出来
-    expect(buildUserClockHint(AT, { tzId: 'UTC' }, { tzId: '' }, '楪同学')).toBe('');
+    expect(buildUserClockHint(AT, { tzId: 'UTC' }, { tzId: '' }, '小明同学')).toBe('');
   });
 
   it('没名字回退「对方」', () => {
@@ -254,7 +254,7 @@ describe('parseFirePack', () => {
 describe('self_log', () => {
   const packAt = 1_700_000_000_000;
   const pack: AmsgFirePack = {
-    v: 6, template: 'x', lastUserMessageAt: null, tzId: 'UTC', userTzId: 'UTC', targetName: '楪同学',
+    v: 6, template: 'x', lastUserMessageAt: null, tzId: 'UTC', userTzId: 'UTC', targetName: '小明同学',
     builtAt: packAt, pendingTasks: [], scene: null,
   };
   const entry = (id: string, text: string, at = packAt) => ({ id, at, text });
@@ -395,7 +395,7 @@ describe('self_log', () => {
 describe('连排提醒', () => {
   const packAt = 1_700_000_000_000;
   const slotted: AmsgFirePack = {
-    v: 6, lastUserMessageAt: null, tzId: 'UTC', userTzId: 'UTC', targetName: '楪同学',
+    v: 6, lastUserMessageAt: null, tzId: 'UTC', userTzId: 'UTC', targetName: '小明同学',
     builtAt: packAt, pendingTasks: [], scene: null,
     template: `【最近对话上下文】\n用户：在吗${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
   };
@@ -447,7 +447,7 @@ describe('fire_pack 任务指令槽', () => {
   const pack: AmsgFirePack = {
     v: 6,
     template: `头部\n${AMSG_SLOT_TASK_INSTRUCTION}\n尾部 ${AMSG_SLOT_CURRENT_TIME}`,
-    lastUserMessageAt: null, tzId: 'Asia/Shanghai', userTzId: 'Asia/Shanghai', targetName: '楪同学',
+    lastUserMessageAt: null, tzId: 'Asia/Shanghai', userTzId: 'Asia/Shanghai', targetName: '小明同学',
     builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
   };
 
@@ -472,7 +472,7 @@ describe('client_state 值压缩', () => {
     lastUserMessageAt: 1_700_000_000_000,
     tzId: 'Asia/Shanghai',
     userTzId: 'Asia/Shanghai',
-    targetName: '楪',
+    targetName: '小明',
     builtAt: 1_700_000_000_000,
     pendingTasks: [],
     scene: null,
@@ -523,7 +523,7 @@ describe('client_state 值压缩', () => {
   it('压过的值解出来还能正常 parse 成 fire_pack', async () => {
     const packed = await packStateValue(bigJson);
     const pack = parseFirePack(await unpackStateValue(packed));
-    expect(pack?.targetName).toBe('楪');
+    expect(pack?.targetName).toBe('小明');
     expect(pack?.tzId).toBe('Asia/Shanghai');
   });
 

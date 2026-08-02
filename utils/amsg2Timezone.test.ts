@@ -62,14 +62,14 @@ describe('角色知道对方那边现在几点', () => {
         template: `当前本地时间（你所在地）：${AMSG_SLOT_CURRENT_TIME}${AMSG_SLOT_USER_CLOCK}`,
         tzId: CHAR_TZ,
         userTzId: DEVICE_TZ,
-        targetName: '楪同学',
+        targetName: '小明同学',
     };
 
     it('两个钟一起出现，各自把主语写在文案里（别长成两个打架的时间）', () => {
         const out = renderFirePack(pack, AT, '指令');
         // 角色那边 09:00，用户那边 21:00，同一时刻
         expect(out).toContain('当前本地时间（你所在地）：2026年8月2日 周日 上午 09:00');
-        expect(out).toContain('对方所在时区参考：楪同学那边现在是 8月2日 晚上 21:00');
+        expect(out).toContain('对方所在时区参考：小明同学那边现在是 8月2日 晚上 21:00');
     });
 
     it('两边同一个时区时不重复报钟', () => {

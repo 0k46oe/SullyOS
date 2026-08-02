@@ -503,7 +503,7 @@ describe('buildFirePack 的时区参照系与模板（①）', () => {
     memories: [],
     ...over,
   }) as any;
-  const user = { name: '楪' } as any;
+  const user = { name: '小明' } as any;
 
   // 具体的 MockInstance 泛型跟着 buildSystemPrompt 的 11 个参数走，写全没有信息量。
   let systemPromptSpy: { mock: { calls: unknown[][] } };

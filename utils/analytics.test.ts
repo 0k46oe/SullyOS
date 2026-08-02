@@ -370,7 +370,7 @@ describe('自定义值收敛', () => {
         for (const v of [
             'https://example.com/我的私人音效.mp3',
             'data:audio/mpeg;base64,SUQzBAAAAAA',
-            '给楪同学的专属提示音',
+            '给小明同学的专属提示音',
         ]) {
             expect(a.presetOrCustom(v, BUILTIN)).toBe('custom');
         }
