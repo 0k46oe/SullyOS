@@ -6,6 +6,7 @@ import {
   buildImmediateTouchPerformance,
   normalizeCompanionDialogue,
   parseAvatarTouchReactionPack,
+  parseAvatarTouchReactionPackPartial,
   consumePendingAvatarTouches,  isAvatarTouchGesture,
   normalizeAvatarTouchZone,
   parseAvatarTouchReply,
@@ -126,5 +127,46 @@ describe('角色触碰互动', () => {
   it('rejects an incomplete pack instead of falling back to per-tap requests', () => {
     expect(parseAvatarTouchReactionPack('{"head":["摸摸头。"]}', ['head', 'face']))
       .toBeNull();
+  });
+  it('repairs fenced JSON, trailing commas, aliases, and structured reaction objects', () => {
+    const pack = parseAvatarTouchReactionPack({
+      content: `Here is the pack:
+\`\`\`json
+{
+  "reactions": {
+    "hair": { "items": [
+      { "dialogue": "别把我的头发弄乱。", "performance": { "emotion": "happy", "gesture": "tilt", "intensity": 0.7 } }
+    ] },
+    "arm": [
+      { "reply": "牵住了就别松开。", "emotion": "surprised", "gesture": "wave" }
+    ],
+  },
+}
+\`\`\`
+Thanks!`,
+    }, ['head', 'hand']);
+
+    expect(pack?.head?.[0]).toMatchObject({
+      text: '别把我的头发弄乱。',
+      performance: { emotion: 'happy', gesture: 'tilt' },
+    });
+    expect(pack?.hand?.[0]).toMatchObject({
+      text: '牵住了就别松开。',
+      performance: { emotion: 'surprised', gesture: 'wave' },
+    });
+  });
+
+  it('keeps valid zones from a partial markdown reply so only missing zones need repair', () => {
+    const pack = parseAvatarTouchReactionPackPartial(`
+head:
+- [[AVATAR: emotion=happy; gesture=tilt]] 别揉乱我的头发。
+
+face:
+1. [[AVATAR: emotion=surprised; gesture=shy]] ……别突然碰脸。
+`, ['head', 'face', 'hand']);
+
+    expect(pack.head?.[0].text).toContain('别揉乱');
+    expect(pack.face?.[0].performance.gesture).toBe('shy');
+    expect(pack.hand).toBeUndefined();
   });
 });

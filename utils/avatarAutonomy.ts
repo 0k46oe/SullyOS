@@ -14,6 +14,7 @@ export interface AvatarAttentionPointer {
 }
 
 export type AvatarAutonomyPose = 'turn' | 'glance' | 'lean' | 'think' | 'settle' | 'pointer';
+export type AvatarReactionProfile = 'natural' | 'touch';
 
 export interface AvatarAutonomyFrame {
   headX: number;
@@ -51,6 +52,7 @@ interface Reaction {
   activity: AvatarActivity;
   startedAt: number;
   duration: number;
+  profile: AvatarReactionProfile;
 }
 
 interface SpeechAccent {
@@ -170,18 +172,40 @@ export class AvatarAutonomy {
     ].join('|');
   }
 
-  private react(direction: AvatarPerformanceDirection, activity: AvatarActivity, now: number): void {
+  private react(
+    direction: AvatarPerformanceDirection,
+    activity: AvatarActivity,
+    now: number,
+    profile: AvatarReactionProfile = 'natural',
+  ): void {
     const gesture = direction.gesture;
-    const duration = direction.camera === 'push-in' || direction.camera === 'close'
-      ? 4_000
-      : gesture === 'shy' ? 3_600
-        : gesture === 'lean-in' || gesture === 'lean-back' ? 3_400
-          : gesture === 'explain' ? 3_200
-            : gesture === 'wave' ? 2_700
-              : 2_300;
-    this.reaction = { direction, activity, startedAt: now, duration };
+    const duration = profile === 'touch'
+      ? gesture === 'shy' || gesture === 'lean-back' ? 1_420
+        : gesture === 'wave' ? 1_260
+          : 1_180
+      : direction.camera === 'push-in' || direction.camera === 'close'
+        ? 4_000
+        : gesture === 'shy' ? 3_600
+          : gesture === 'lean-in' || gesture === 'lean-back' ? 3_400
+            : gesture === 'explain' ? 3_200
+              : gesture === 'wave' ? 2_700
+                : 2_300;
+    this.reaction = { direction, activity, startedAt: now, duration, profile };
     this.nextDecisionAt = Math.max(this.nextDecisionAt, now + duration * 0.62);
     if (activity === 'speaking') this.nextSpeechAccentAt = now + this.randomBetween(180, 620);
+  }
+
+  /**
+   * Touch is a discrete game-like impulse, not a faster version of ambient
+   * breathing. Normal autonomy resumes after the short release finishes.
+   */
+  triggerTouchReaction(
+    direction: AvatarPerformanceDirection,
+    activity: AvatarActivity = 'speaking',
+    now = globalThis.performance?.now?.() ?? Date.now(),
+  ): void {
+    this.behaviorKey = this.signature(direction, activity);
+    this.react(direction, activity, now, 'touch');
   }
 
   private chooseNextPose(now: number): void {
@@ -442,10 +466,11 @@ export class AvatarAutonomy {
       if (elapsed >= reaction.duration) {
         this.reaction = undefined;
       } else {
-        const attack = clamp(elapsed / 260, 0, 1);
-        const release = clamp((reaction.duration - elapsed) / 720, 0, 1);
+        const touchProfile = reaction.profile === 'touch';
+        const attack = clamp(elapsed / (touchProfile ? 96 : 260), 0, 1);
+        const release = clamp((reaction.duration - elapsed) / (touchProfile ? 620 : 720), 0, 1);
         gestureEnvelope = Math.min(attack, release) * intensity;
-        const localTime = elapsed / 1000;
+        const localTime = (elapsed / 1000) * (touchProfile ? 1.48 : 1);
         const gesture: AvatarGesture = reaction.direction.gesture;
 
         switch (gesture) {
@@ -518,18 +543,19 @@ export class AvatarAutonomy {
       }
     }
 
-    const headX = this.headX.step(clamp(targetHeadX), dt, 0.72);
-    const headY = this.headY.step(clamp(targetHeadY), dt, 0.68);
-    const headZ = this.headZ.step(clamp(targetHeadZ), dt, 0.64);
-    const bodyX = this.bodyX.step(clamp(headX * 0.62 + microX * 0.8), dt, 0.34);
-    const bodyY = this.bodyY.step(clamp(headY * 0.48 + microY * 0.7), dt, 0.31);
-    const bodyZ = this.bodyZ.step(clamp(headZ * 0.7 + microZ), dt, 0.3);
+    const touchSpeed = this.reaction?.profile === 'touch';
+    const headX = this.headX.step(clamp(targetHeadX), dt, 0.72 * (touchSpeed ? 1.45 : 1));
+    const headY = this.headY.step(clamp(targetHeadY), dt, 0.68 * (touchSpeed ? 1.45 : 1));
+    const headZ = this.headZ.step(clamp(targetHeadZ), dt, 0.64 * (touchSpeed ? 1.45 : 1));
+    const bodyX = this.bodyX.step(clamp(headX * 0.62 + microX * 0.8), dt, 0.34 * (touchSpeed ? 1.2 : 1));
+    const bodyY = this.bodyY.step(clamp(headY * 0.48 + microY * 0.7), dt, 0.31 * (touchSpeed ? 1.2 : 1));
+    const bodyZ = this.bodyZ.step(clamp(headZ * 0.7 + microZ), dt, 0.3 * (touchSpeed ? 1.2 : 1));
     const eyeX = this.eyeX.step(clamp(targetEyeX), dt, 2.4, 0.78);
     const eyeY = this.eyeY.step(clamp(targetEyeY), dt, 2.2, 0.78);
     // lean 允许为负（lean-back 后仰）；正向前倾上限稍高。
-    const lean = this.lean.step(clamp(targetLean, -0.1, 0.14), dt, 0.42);
-    const lift = this.lift.step(targetLift, dt, 0.5);
-    const rotation = this.rotation.step(targetRotation, dt, 0.48);
+    const lean = this.lean.step(clamp(targetLean, -0.1, 0.14), dt, 0.42 * (touchSpeed ? 1.3 : 1));
+    const lift = this.lift.step(targetLift, dt, 0.5 * (touchSpeed ? 1.3 : 1));
+    const rotation = this.rotation.step(targetRotation, dt, 0.48 * (touchSpeed ? 1.3 : 1));
     const breath = (Math.sin(seconds * 1.12 + this.phase * 0.2) + 1) / 2;
     const pose = pointerIsFresh ? 'pointer' : this.pose;
 

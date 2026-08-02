@@ -11,4 +11,13 @@ describe('CompanionHome touch request boundaries', () => {
     expect(source).not.toContain('requestAvatarTouchReply');
     expect(source).not.toContain('DB.saveMessage');
   });
+  it('sequences a local touch impulse and uses the center star for real apps', () => {
+    const source = readFileSync(path.resolve(__dirname, '../components/os/CompanionHome.tsx'), 'utf8');
+
+    expect(source).toContain('touchImpulseNonce={lastHit?.nonce}');
+    expect(source).toContain('touchDialogueTimerRef.current = window.setTimeout');
+    expect(source).toContain('data-testid="companion-app-star-button"');
+    expect(source).toContain('data-testid="companion-app-star-panel"');
+    expect(source).toContain("{ id: AppID.Call, label: '通话'");
+  });
 });

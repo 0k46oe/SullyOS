@@ -48,6 +48,7 @@ interface Live2DAvatarCanvasProps {
   onError?: (message: string) => void;
   onReady?: () => void;
   touchRequest?: AvatarTouchRequest | null;
+  touchImpulseNonce?: number;
   onAvatarTouch?: (hit: AvatarTouchHit) => void;
   /** Desktop companion mode caps rendering work while preserving interaction. */
   maxFps?: number;
@@ -155,6 +156,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   onError,
   onReady,
   touchRequest,
+  touchImpulseNonce,
   onAvatarTouch,
   maxFps,
   parameterPreview,
@@ -166,6 +168,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   const audioFeedRef = useRef(audioFeed);
   const configRef = useRef(config);
   const performanceRef = useRef(performance);
+  const touchImpulseNonceRef = useRef(touchImpulseNonce);
   const performanceQualityRef = useRef(performanceQuality);
   const actionParameterIdsRef = useRef<Record<string, string[]>>({});
   const onLoadingChangeRef = useRef(onLoadingChange);
@@ -186,6 +189,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   useEffect(() => { audioFeedRef.current = audioFeed; }, [audioFeed]);
   useEffect(() => { configRef.current = config; }, [config]);
   useEffect(() => { performanceRef.current = performance; }, [performance]);
+  useEffect(() => { touchImpulseNonceRef.current = touchImpulseNonce; }, [touchImpulseNonce]);
   useEffect(() => { performanceQualityRef.current = performanceQuality; }, [performanceQuality]);
   useEffect(() => { onLoadingChangeRef.current = onLoadingChange; }, [onLoadingChange]);
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
@@ -532,6 +536,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
         const usesVTubeTrackingInputs = hasParameter('xin') && hasParameter('yin');
         const autonomy = new AvatarAutonomy(window.performance.now());
         // 微表情包络的计时基准：导演指令一换就重新起算。
+        let handledTouchImpulseNonce = touchImpulseNonceRef.current;
         let lastDirectionForFaces: AvatarPerformanceDirection | undefined;
         let directionChangedAt = window.performance.now();
         // 自定义参数动作的底值记录：叠加淡出后参数要精确回到模型自身的值。
@@ -596,6 +601,12 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
           const t = now / 1000;
           const speaking = motionStateRef.current === 'speaking';
           const direction = performanceRef.current;
+          const touchNonce = touchImpulseNonceRef.current;
+          if (touchNonce !== undefined && touchNonce !== handledTouchImpulseNonce && direction) {
+            handledTouchImpulseNonce = touchNonce;
+            autonomy.triggerTouchReaction(direction, motionStateRef.current, now);
+            host.dataset.live2dTouchImpulse = String(touchNonce);
+          }
           // One WebAudio sample drives both mouth shapes and body emphasis, so a
           // loud syllable lands as a synchronized nod/gesture instead of random motion.
           const lip = audioFeedRef.current?.sample(now);

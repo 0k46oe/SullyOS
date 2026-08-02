@@ -401,22 +401,184 @@ ${actionList}
 ${JSON.stringify(schema, null, 2)}`;
 };
 
-const readReactionPackJson = (raw: unknown): Record<string, unknown> | null => {
+const TOUCH_ZONE_ALIASES: Record<AvatarTouchZone, string[]> = {
+  head: ['head', 'hair', 'top', '头', '头部', '头顶', '头发'],
+  face: ['face', 'cheek', 'mouth', '脸', '脸颊', '面部'],
+  hand: ['hand', 'arm', 'wrist', '手', '手臂', '胳膊'],
+  body: ['body', 'chest', 'torso', 'shoulder', 'waist', '身体', '肩膀', '胸口', '腰'],
+  other: ['other', 'around', 'else', '其他', '身边'],
+};
+
+const normalizePackKey = (value: string): string => value
+  .toLowerCase()
+  .replace(/[\s_\-.:：·/\\]+/g, '');
+
+const asReactionPackRoot = (value: unknown): Record<string, unknown> | null => {
+  if (typeof value === 'string') {
+    try { return asReactionPackRoot(JSON.parse(value)); } catch { return null; }
+  }
+  if (Array.isArray(value)) {
+    const grouped: Record<string, unknown[]> = {};
+    value.forEach(item => {
+      if (!item || typeof item !== 'object') return;
+      const record = item as Record<string, unknown>;
+      const zone = record.zone || record.part || record.area || record.target;
+      if (typeof zone !== 'string') return;
+      (grouped[zone] ||= []).push(record);
+    });
+    return Object.keys(grouped).length ? grouped : null;
+  }
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  for (const key of ['reactions', 'feedbacks', 'responses', 'pack', 'result', 'data']) {
+    const nested = record[key];
+    if (nested && typeof nested === 'object') return asReactionPackRoot(nested);
+  }
+  return record;
+};
+
+const extractBalancedJson = (content: string): string[] => {
+  const candidates: string[] = [];
+  let start = -1;
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') {
+      quoted = true;
+      continue;
+    }
+    if (char === '{' || char === '[') {
+      if (depth === 0) start = index;
+      depth += 1;
+    } else if ((char === '}' || char === ']') && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        candidates.push(content.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+  return candidates;
+};
+
+const readReactionPackSource = (
+  raw: unknown,
+  zones: AvatarTouchZone[],
+): Record<string, unknown> | null => {
+  const direct = asReactionPackRoot(raw);
   const content = typeof raw === 'string'
     ? raw
     : extractContent(raw as any) || (typeof (raw as any)?.content === 'string' ? (raw as any).content : '');
-  const cleaned = content.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  try {
-    const parsed = JSON.parse(cleaned.slice(start, end + 1));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    const root = (parsed as any).reactions;
-    return root && typeof root === 'object' && !Array.isArray(root) ? root : parsed;
-  } catch {
-    return null;
+  const fenced = [...content.matchAll(/```(?:json|javascript|js)?\s*([\s\S]*?)```/gi)].map(match => match[1]);
+  const cleaned = content.replace(/^\uFEFF/, '').trim();
+  const candidates = [cleaned, ...fenced, ...extractBalancedJson(cleaned)]
+    .filter(Boolean)
+    .flatMap(candidate => [
+      candidate,
+      candidate.replace(/,\s*([}\]])/g, '$1'),
+    ]);
+  for (const candidate of candidates) {
+    try {
+      const root = asReactionPackRoot(JSON.parse(candidate));
+      if (root) return root;
+    } catch { /* try the next conservative repair */ }
   }
+  if (direct && zones.some(zone => {
+    const aliases = TOUCH_ZONE_ALIASES[zone].map(normalizePackKey);
+    return Object.keys(direct).some(key => aliases.includes(normalizePackKey(key)));
+  })) return direct;
+
+  // Last resort for otherwise useful markdown such as "head:\n- line".
+  const sections: Record<string, unknown> = {};
+  const heading = new RegExp(`(?:^|\\n)\\s*(?:#{1,6}\\s*)?(?:["'【[])?(${zones.flatMap(zone => TOUCH_ZONE_ALIASES[zone]).join('|')})(?:["'】\\]])?\\s*[:：]\\s*`, 'gi');
+  const matches = [...cleaned.matchAll(heading)];
+  matches.forEach((match, index) => {
+    const key = match[1];
+    const bodyStart = (match.index || 0) + match[0].length;
+    const bodyEnd = index + 1 < matches.length ? (matches[index + 1].index || cleaned.length) : cleaned.length;
+    const lines = cleaned.slice(bodyStart, bodyEnd)
+      .split('\n')
+      .map(line => line.replace(/^\s*(?:[-*•]|\d+[.)、])\s*/, '').trim())
+      .filter(Boolean);
+    if (lines.length) sections[key] = lines;
+  });
+  return Object.keys(sections).length ? sections : null;
+};
+
+const readZoneValue = (source: Record<string, unknown>, zone: AvatarTouchZone): unknown => {
+  const aliases = TOUCH_ZONE_ALIASES[zone].map(normalizePackKey);
+  const entry = Object.entries(source).find(([key]) => aliases.includes(normalizePackKey(key)));
+  return entry?.[1];
+};
+
+const asReactionItems = (value: unknown): unknown[] => {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') return [value];
+  if (!value || typeof value !== 'object') return [];
+  const record = value as Record<string, unknown>;
+  for (const key of ['items', 'reactions', 'feedbacks', 'responses', 'lines', 'variants']) {
+    const nested = record[key];
+    if (Array.isArray(nested)) return nested;
+    if (typeof nested === 'string') return [nested];
+  }
+  if (['text', 'line', 'dialogue', 'reply', 'content', 'response'].some(key => typeof record[key] === 'string')) {
+    return [record];
+  }
+  return Object.values(record).filter(item => typeof item === 'string' || Boolean(item && typeof item === 'object'));
+};
+
+const structuredPerformanceDirective = (value: unknown): string => {
+  if (typeof value === 'string') return value;
+  if (!value || typeof value !== 'object') return '';
+  const record = value as Record<string, unknown>;
+  const fields = ['emotion', 'gesture', 'camera', 'gaze', 'intensity', 'face', 'faces', 'model_action', 'modelAction']
+    .flatMap(key => {
+      const field = record[key];
+      if (field === undefined || field === null || field === '') return [];
+      const normalizedKey = key === 'modelAction' ? 'model_action' : key === 'faces' ? 'face' : key;
+      return [`${normalizedKey}=${Array.isArray(field) ? field.join(',') : String(field)}`];
+    });
+  return fields.length ? `[[AVATAR: ${fields.join('; ')}]]` : '';
+};
+
+const reactionItemContent = (item: unknown): string => {
+  if (typeof item === 'string') return item;
+  if (!item || typeof item !== 'object') return '';
+  const record = item as Record<string, unknown>;
+  const text = ['text', 'line', 'dialogue', 'reply', 'content', 'response']
+    .map(key => record[key])
+    .find(value => typeof value === 'string');
+  const performance = record.avatar || record.performance || record.direction || record.action || record;
+  return `${structuredPerformanceDirective(performance)}\n${typeof text === 'string' ? text : ''}`.trim();
+};
+
+export const parseAvatarTouchReactionPackPartial = (
+  raw: unknown,
+  zones: AvatarTouchZone[],
+  allowedModelActions: AvatarTouchModelAction[] = [],
+): AvatarTouchReactionPack => {
+  const source = readReactionPackSource(raw, zones);
+  if (!source) return {};
+  const pack: AvatarTouchReactionPack = {};
+  zones.forEach(zone => {
+    const reactions = asReactionItems(readZoneValue(source, zone)).flatMap((item, index): CompanionTouchReaction[] => {
+      const reply = parseAvatarTouchReply({ content: reactionItemContent(item) }, allowedModelActions);
+      if (!reply) return [];
+      const text = normalizeCompanionDialogue(reply.text);
+      if (!text) return [];
+      return [{ id: `${zone}-${index + 1}`, text, performance: reply.performance }];
+    }).slice(0, 6);
+    if (reactions.length) pack[zone] = reactions;
+  });
+  return pack;
 };
 
 export const parseAvatarTouchReactionPack = (
@@ -424,34 +586,7 @@ export const parseAvatarTouchReactionPack = (
   zones: AvatarTouchZone[],
   allowedModelActions: AvatarTouchModelAction[] = [],
 ): AvatarTouchReactionPack | null => {
-  const source = readReactionPackJson(raw);
-  if (!source) return null;
-  const pack: AvatarTouchReactionPack = {};
-  zones.forEach(zone => {
-    const rawZone = source[zone];
-    const items = Array.isArray(rawZone)
-      ? rawZone
-      : rawZone && typeof rawZone === 'object' && Array.isArray((rawZone as any).items)
-        ? (rawZone as any).items
-        : [];
-    const reactions = items.flatMap((item, index): CompanionTouchReaction[] => {
-      const content = typeof item === 'string'
-        ? item
-        : item && typeof item === 'object'
-          ? `${(item as any).avatar || (item as any).performance || ''}\n${(item as any).text || (item as any).line || ''}`
-          : '';
-      const reply = parseAvatarTouchReply({ content }, allowedModelActions);
-      if (!reply) return [];
-      const text = normalizeCompanionDialogue(reply.text);
-      if (!text) return [];
-      return [{
-        id: `${zone}-${index + 1}`,
-        text,
-        performance: reply.performance,
-      }];
-    }).slice(0, 6);
-    if (reactions.length) pack[zone] = reactions;
-  });
+  const pack = parseAvatarTouchReactionPackPartial(raw, zones, allowedModelActions);
   return zones.every(zone => pack[zone]?.length) ? pack : null;
 };
 
@@ -508,38 +643,58 @@ export const requestAvatarTouchReactionPack = async (options: {
     user,
     emojis,
   );
-  const systemPrompt = buildAvatarTouchReactionPackPrompt(
-    coreContext,
-    character.name,
-    user.name || '用户',
-    selectedZones,
-    modelActions,
-    Math.max(3, Math.min(6, reactionsPerZone)),
-  );
-  const data = await safeFetchJson(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiConfig.apiKey || 'sk-none'}`,
-    },
-    body: JSON.stringify({
-      model: apiConfig.model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        ...apiMessages,
-        { role: 'user', content: eventText },
-      ],
-      temperature: 0.92,
-      max_tokens: 3200,
-      stream: false,
-    }),
-  }, 1, 60_000, {
-    appName: '触感陪伴',
-    charId: character.id,
-    charName: character.name,
-    purpose: '一次生成桌面触摸反馈包',
-  });
-  const pack = parseAvatarTouchReactionPack(data, selectedZones, modelActions);
-  if (!pack) throw new Error('主模型返回的反馈包格式不完整，请再生成一次');
+  const boundedReactionCount = Math.max(3, Math.min(6, reactionsPerZone));
+  const requestForZones = async (targetZones: AvatarTouchZone[], repair = false) => {
+    const systemPrompt = buildAvatarTouchReactionPackPrompt(
+      coreContext,
+      character.name,
+      user.name || '用户',
+      targetZones,
+      modelActions,
+      boundedReactionCount,
+    );
+    const repairText = repair
+      ? `[自动补全缺失部位] 上一次回复中只有部分内容可解析。现在只返回 ${targetZones.join(', ')} 的 JSON 对象，不要重复其他部位。`
+      : eventText;
+    return safeFetchJson(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiConfig.apiKey || 'sk-none'}`,
+      },
+      body: JSON.stringify({
+        model: apiConfig.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          ...apiMessages,
+          { role: 'user', content: repairText },
+        ],
+        temperature: repair ? 0.72 : 0.92,
+        max_tokens: repair ? 2200 : 3200,
+        stream: false,
+      }),
+    }, 1, 60_000, {
+      appName: '触感陪伴',
+      charId: character.id,
+      charName: character.name,
+      purpose: repair ? '自动补全缺失触摸反馈' : '一次性生成桌面触摸反馈包',
+    });
+  };
+
+  const firstData = await requestForZones(selectedZones);
+  const pack = parseAvatarTouchReactionPackPartial(firstData, selectedZones, modelActions);
+  const missingZones = selectedZones.filter(zone => !pack[zone]?.length);
+  if (missingZones.length) {
+    const repairData = await requestForZones(missingZones, true);
+    const repaired = parseAvatarTouchReactionPackPartial(repairData, missingZones, modelActions);
+    missingZones.forEach(zone => {
+      if (repaired[zone]?.length) pack[zone] = repaired[zone];
+    });
+  }
+
+  const stillMissing = selectedZones.filter(zone => !pack[zone]?.length);
+  if (stillMissing.length) {
+    throw new Error(`模型两次回复都缺少这些部位：${stillMissing.map(avatarTouchZoneLabel).join('、')}。请重试一次`);
+  }
   return pack;
 };

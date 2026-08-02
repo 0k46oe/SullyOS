@@ -81,4 +81,23 @@ describe('AvatarAutonomy', () => {
     expect(Math.max(...frames.map(frame => frame.speechAccent))).toBeGreaterThan(0.72);
     expect(Math.max(...frames.map(frame => Math.abs(frame.headY)))).toBeGreaterThan(0.03);
   });
+  it('uses a fast touch attack without speeding up ambient call motion', () => {
+    const direction: AvatarPerformanceDirection = {
+      ...DEFAULT_AVATAR_PERFORMANCE,
+      gesture: 'tilt',
+      intensity: 0.9,
+    };
+    const ambient = new AvatarAutonomy(0, seededRandom(53));
+    const touched = new AvatarAutonomy(0, seededRandom(53));
+
+    touched.triggerTouchReaction(direction, 'speaking', 0);
+    ambient.step(0, direction, 'speaking', noPointer);
+    touched.step(0, direction, 'speaking', noPointer);
+    const ambientAttack = ambient.step(96, direction, 'speaking', noPointer);
+    const touchAttack = touched.step(96, direction, 'speaking', noPointer);
+
+    expect(touchAttack.gestureEnvelope).toBeGreaterThan(ambientAttack.gestureEnvelope + 0.4);
+    expect(touched.step(1_500, direction, 'speaking', noPointer).gestureEnvelope).toBe(0);
+    expect(ambient.step(1_500, direction, 'speaking', noPointer).gestureEnvelope).toBeGreaterThan(0.5);
+  });
 });

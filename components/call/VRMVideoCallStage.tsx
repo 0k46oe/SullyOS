@@ -40,6 +40,8 @@ interface VRMVideoCallStageProps {
   /** VRM 模型加载后回传自定义表情名，供 LLM 的 model_action 白名单使用。 */
   onExpressionsDiscovered?: (names: string[]) => void;
   onAvatarTouch?: (hit: AvatarTouchHit) => void;
+  /** Changes only for explicit companion touches; call ambience never sets it. */
+  touchImpulseNonce?: number;
   /** Minimal chrome for the always-on launcher companion. */
   companionMode?: boolean;
   /** 基准构图覆盖：陪伴桌面传 companionFraming，优先于 model.framing 作为静息构图。 */
@@ -82,6 +84,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
   onFaceAnchorChange,
   onExpressionsDiscovered,
   onAvatarTouch,
+  touchImpulseNonce,
   companionMode = false,
   baseFraming,
   framingEditable,
@@ -382,6 +385,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
               performanceQuality={performanceQuality}
               manualAction={manualAction}
               touchRequest={touchRequest}
+              touchImpulseNonce={touchImpulseNonce}
               onAvatarTouch={onAvatarTouch}
               maxFps={maxFps}
               onLoadingChange={(loading, stage) => {
@@ -399,6 +403,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
               framing={framing}
               faceFraming={calibratingFace ? undefined : model?.faceFraming}
               performance={performance}
+              touchImpulseNonce={touchImpulseNonce}
               touchRequest={touchRequest}
               onAvatarTouch={onAvatarTouch}
               maxFps={maxFps}

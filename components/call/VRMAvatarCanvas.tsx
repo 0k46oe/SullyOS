@@ -39,6 +39,7 @@ interface VRMAvatarCanvasProps {
   /** 模型加载后回传自定义表情名（预设之外的），供 LLM 以 model_action 调用。 */
   onExpressionsDiscovered?: (names: string[]) => void;
   touchRequest?: AvatarTouchRequest | null;
+  touchImpulseNonce?: number;
   onAvatarTouch?: (hit: AvatarTouchHit) => void;
   maxFps?: number;
 }
@@ -88,6 +89,7 @@ const VRMAvatarCanvas: React.FC<VRMAvatarCanvasProps> = ({
   onError,
   onExpressionsDiscovered,
   touchRequest,
+  touchImpulseNonce,
   onAvatarTouch,
   maxFps,
 }) => {
@@ -96,11 +98,13 @@ const VRMAvatarCanvas: React.FC<VRMAvatarCanvasProps> = ({
   const onExpressionsDiscoveredRef = useRef(onExpressionsDiscovered);
   const onAvatarTouchRef = useRef(onAvatarTouch);
   const touchResolverRef = useRef<((request: AvatarTouchRequest) => void) | null>(null);
+  const touchImpulseNonceRef = useRef(touchImpulseNonce);
   const motionRef = useRef<MotionSnapshot>({ state: motionState, emotion, performance: performanceDirection, framing, faceFraming });
 
   useEffect(() => { audioFeedRef.current = audioFeed; }, [audioFeed]);
   useEffect(() => { onExpressionsDiscoveredRef.current = onExpressionsDiscovered; }, [onExpressionsDiscovered]);
   useEffect(() => { onAvatarTouchRef.current = onAvatarTouch; }, [onAvatarTouch]);
+  useEffect(() => { touchImpulseNonceRef.current = touchImpulseNonce; }, [touchImpulseNonce]);
   useEffect(() => {
     if (touchRequest) touchResolverRef.current?.(touchRequest);
   }, [touchRequest]);
@@ -123,6 +127,7 @@ const VRMAvatarCanvas: React.FC<VRMAvatarCanvasProps> = ({
     let cameraLookY = 0.82;
     const pointer = { x: 0, y: 0, active: false, lastMoved: 0 };
     const autonomy = new AvatarAutonomy(window.performance.now());
+    let handledTouchImpulseNonce = touchImpulseNonceRef.current;
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(28, 1, 0.01, 20);
     const touchRaycaster = new THREE.Raycaster();
@@ -256,6 +261,12 @@ const VRMAvatarCanvas: React.FC<VRMAvatarCanvasProps> = ({
         const gesture = currentPerformance.gesture;
         const intensity = Math.max(0.2, Math.min(1, currentPerformance.intensity));
         const frameNow = window.performance.now();
+        const touchNonce = touchImpulseNonceRef.current;
+        if (touchNonce !== undefined && touchNonce !== handledTouchImpulseNonce) {
+          handledTouchImpulseNonce = touchNonce;
+          autonomy.triggerTouchReaction(currentPerformance, state, frameNow);
+          host.dataset.avatarTouchImpulse = String(touchNonce);
+        }
         // Sample once per render frame: the same live signal drives both visemes
         // and emphasis beats, keeping head/hands synchronized with the voice.
         const lip = audioFeedRef.current?.sample(frameNow);
