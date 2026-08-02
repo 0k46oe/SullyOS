@@ -32,9 +32,30 @@ describe('shouldExpireFire', () => {
     expect(shouldExpireFire({ ...base, policy: 'force', lastUserMessageAt: 2000 })).toBe(false);
     expect(shouldExpireFire({ ...base, policy: undefined, lastUserMessageAt: 2000 })).toBe(false);
   });
-  it('缺用户消息信息 / 缺锚点 → 放行（判不了就不拦）', () => {
-    expect(shouldExpireFire({ ...base, lastUserMessageAt: null })).toBe(false);
+  it('缺锚点 → 放行（判不了就不拦）', () => {
     expect(shouldExpireFire({ ...base, anchorMs: null, lastUserMessageAt: 2000 })).toBe(false);
+    expect(shouldExpireFire({ ...base, anchorMs: null, lastUserMessageAt: null })).toBe(false);
+  });
+
+  // 用户清空聊天记录之后，云端 fire_pack / 本地历史里都找不到「最后一条用户消息」了。
+  // 放行的话，prompted 任务会指着一段不存在的对话照发，用户点开是一句没头没尾的话。
+  it('排程时有对话、到点却一条用户消息都没有 → 当作对话被清空，作废', () => {
+    expect(shouldExpireFire({ ...base, anchorMs: 1000, lastUserMessageAt: null })).toBe(true);
+  });
+  it('从没聊过就排的任务（锚点 0）不受影响，照发', () => {
+    expect(shouldExpireFire({ ...base, anchorMs: 0, lastUserMessageAt: null })).toBe(false);
+  });
+
+  // 老版本 SW 落的收件箱行没有顶层 recurrenceType / occurrenceMs，循环任务会被当成
+  // 一次性走锚点规则——用户只要在任务创建后聊过天，之后每天的早安都被兜底闸吞掉。
+  // 缺数据 = 判不了 = 放行，跟这个函数别处的哲学一致。
+  it('任务身份字段整组缺失 → 放行（老 SW 的收件箱行不该把循环任务当一次性吞掉）', () => {
+    const stale = {
+      policy: 'expire', anchorMs: 1000, nowMs: 10_000,
+      recurrenceType: undefined, occurrenceMs: undefined,
+    };
+    expect(shouldExpireFire({ ...stale, lastUserMessageAt: 2000 })).toBe(false);
+    expect(shouldExpireFire({ ...stale, lastUserMessageAt: null })).toBe(false);
   });
   it('循环：到点前窗口内在聊 → 作废；窗口外聊过 → 放行（昨天聊天不作废今天早安）', () => {
     const rec = { policy: 'expire', recurrenceType: 'daily', anchorMs: 0, nowMs: 24 * H, occurrenceMs: 24 * H };

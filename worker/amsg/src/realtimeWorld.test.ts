@@ -34,10 +34,10 @@ const weatherSnapshot = (city: string, fetchedAt: number) => ({
     }),
 });
 
-const hotNewsSnapshot = (id: string, platforms: string[], titles: string[]) => ({
+const hotNewsSnapshot = (id: string, platforms: string[], titles: string[], fetchedAt = NOW) => ({
     key: AMSG_HOTNEWS_SNAPSHOT_KEY,
     value: JSON.stringify({
-        id, platforms, fetchedAt: NOW,
+        id, platforms, fetchedAt,
         items: titles.map((t) => ({ title: t, source: '微博' })),
     }),
 });
@@ -150,6 +150,17 @@ describe('天气快照', () => {
         expect(writeState).not.toHaveBeenCalled();
     });
 
+    // 顶一小会儿可以，顶三天不行：这一段抬头写着「以下信息来自真实世界」，
+    // 接口连挂几天就会顶着这块招牌一直播那场早就停了的雨。
+    it('拉失败且旧读数超过保鲜上限 → 整段不说天气', async () => {
+        const out = await run({
+            toolConfig: cfg({ weatherEnabled: true, weatherCity: '上海', weatherApiKey: 'owm-key' }),
+            globalRows: [weatherSnapshot('上海', NOW - 5 * 60 * 60_000)],
+            timeAwarenessEnabled: false,
+        });
+        expect(out).toBe('');
+    });
+
     it('拉失败且旧读数是别的城市 → 宁可不说天气', async () => {
         const out = await run({
             toolConfig: cfg({ weatherEnabled: true, weatherCity: '上海', weatherApiKey: 'owm-key' }),
@@ -194,6 +205,15 @@ describe('热榜快照', () => {
             globalRows: [hotNewsSnapshot('2026-12-25#2', ['weibo'], ['上个时段的'])],
         });
         expect(out).toContain('上个时段的');
+    });
+
+    it('拉不到且快照是隔天的 → 整段不说热搜（那不叫「最近发生的事」了）', async () => {
+        const out = await run({
+            toolConfig: cfg({ newsEnabled: true, newsPlatforms: ['weibo'] }),
+            globalRows: [hotNewsSnapshot('2026-12-23#3', ['weibo'], ['前天的'], NOW - 30 * 60 * 60_000)],
+            timeAwarenessEnabled: false,
+        });
+        expect(out).toBe('');
     });
 });
 

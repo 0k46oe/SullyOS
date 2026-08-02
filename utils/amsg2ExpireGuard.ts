@@ -52,19 +52,29 @@ export interface ExpireFireInput {
 /**
  * fire 时刻该不该作废这次触发。worker onBeforeFire（数据来自 fire_pack /
  * task metadata）与客户端送达兜底（数据来自本地历史 / push metadata）共用。
- * 判不了（缺策略 / 缺数据）一律放行——宁可让兜底层再拦，不误杀。
+ * 判不了（缺策略 / 缺数据）一律放行——宁可让兜底层再拦，不误杀。唯一的例外是
+ * 「排程时有对话、现在一条都没有」，那不是缺数据而是对话被清空了，见函数末尾。
  */
 export function shouldExpireFire(input: ExpireFireInput): boolean {
   if (input.policy !== 'expire') return false;
+  // 任务身份整组缺失（既没有 recurrenceType 也没有 occurrenceMs）：判不了，放行。
+  // 客户端送达兜底闸会碰上——老版本 SW 落的收件箱行没有这两个顶层字段，循环任务会被
+  // 当成一次性走锚点规则，只要用户在排任务之后聊过天就恒吞，每天的早安一条都到不了。
+  // worker 侧走不到这条：occurrenceMs 由 onBeforeFire 解析校验过，恒为有限数。
+  if (input.recurrenceType == null && input.occurrenceMs == null) return false;
   const last = input.lastUserMessageAt;
-  if (last == null) return false;
   if (input.recurrenceType === 'daily' || input.recurrenceType === 'weekly') {
+    if (last == null) return false;
     // 缺触发时刻就算不出窗口，跟缺锚点一样放行——这道闸宁可让兜底层再拦，不误杀。
     if (input.occurrenceMs == null) return false;
     return last > input.occurrenceMs - ACTIVE_CHAT_WINDOW_MS && last <= input.nowMs;
   }
   const anchor = input.anchorMs;
   if (anchor == null) return false;
+  // 排程那一刻对话是存在的（anchor > 0），到点却一条真实用户消息都找不到 = 用户把聊天
+  // 记录清空了。这时候还发，出来就是一条指着不存在的对话往下说的消息，按作废处理（走
+  // 既有 skip + 回执链路，面板照实说明）。anchor 为 0 是「从没聊过就排的任务」，照发。
+  if (last == null) return anchor > 0;
   return last > anchor;
 }
 

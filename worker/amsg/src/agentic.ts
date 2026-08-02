@@ -14,7 +14,12 @@
  * 一起出——用户看到的内容与 instant 模式下逐轮看到的一致，只是一次到齐。
  */
 
-import { classifyLLMOutput, type Directive, type ToolCall } from '../../instant-push/src/classifier';
+import {
+  classifyLLMOutput,
+  type Directive,
+  type MusicActionSong,
+  type ToolCall,
+} from '../../instant-push/src/classifier';
 import type { ToolCallRecord } from '../../../utils/agenticToolFeedback';
 import {
   extractTextFakedMcpCalls,
@@ -49,6 +54,14 @@ export interface FireSessionState {
   duplicateToolCalls: number;
   /** 合成 tool_call id 的自增序号（正文那条路用；native 用模型自己的 id）。 */
   mcpCallSeq: number;
+  /**
+   * 出现 [[XHS_SHARE: n]] 那一轮手上的笔记列表快照（没出现过为 null）。
+   *
+   * 序号 n 指的是**模型写这句话时**看到的那份列表，而 finish 是拿本次 fire 结束时的
+   * lastXhsNotesRef 解引用的——中间只要再搜一次，列表整个被换掉，正文聊的是 A 组第 3 篇
+   * 露营帖、卡片推的却是 B 组第 3 篇口红帖。所以在那一轮就把当时的列表定格下来。
+   */
+  xhsShareNotes: XhsNote[] | null;
 }
 
 export const createFireSessionState = (): FireSessionState => ({
@@ -56,6 +69,7 @@ export const createFireSessionState = (): FireSessionState => ({
   toolCalls: [],
   duplicateToolCalls: 0,
   mcpCallSeq: 0,
+  xhsShareNotes: null,
 });
 
 /**
@@ -69,6 +83,20 @@ export const createFireSessionState = (): FireSessionState => ({
  * 阈值取 2 —— 第一次重复可能只是模型确认一下，连着两次就是真卡住了。
  */
 export const MAX_DUPLICATE_TOOL_CALLS = 2;
+
+/**
+ * 一次 fire 最多几轮 LLM。onBeforeFire 把这个数显式回传给上游（amsg-server 自己的
+ * 默认值也是 5，但它没导出常量，各写各的迟早对不上），worker 这边据此判断「这是最后
+ * 一轮了」。
+ *
+ * 为什么要自己判：上游在最后一轮遇到 tool-request 会直接抛 AGENTIC_LOOP_EXCEEDED，
+ * 这次攒下的旁白全丢、任务不出清、下一分钟整条从头重跑再烧一遍 LLM。到最后一轮就不再
+ * 放行工具请求、用手上的内容收尾，用户至少收得到角色已经写出来的那部分。
+ */
+export const MAX_TOOL_ITERATIONS = 5;
+
+/** 判本轮旁白里有没有 [[XHS_SHARE: n]]（与 classifier 的模式同口径，非全局免得带 lastIndex）。 */
+const XHS_SHARE_TAG_RE = /\[\[XHS_SHARE:\s*\d+\]\]/;
 
 /** 组 push payload 需要的业务字段（都来自 sessionCtx / task metadata）。 */
 export interface PushBuildInput {
@@ -91,6 +119,11 @@ export interface PushBuildInput {
   xhsNotes?: XhsNote[];
   /** xsecToken 缓存快照（[noteId, token][]），点赞/评论/回复重放时客户端要用。 */
   xhsXsecTokens?: Array<[string, string]>;
+  /**
+   * 本次触发时 prompt 里写的「你此刻在听」是哪一首（没渲染那一段时为 null）。
+   * 角色写了 MUSIC_ACTION 就把它冻进 directive，见 attachSceneSong。
+   */
+  sceneSong?: MusicActionSong | null;
 }
 
 /** 挂在最后一条 push metadata.xhsSession 的形状；idx 1-based，与 [[XHS_SHARE: n]] 同基。 */
@@ -139,6 +172,25 @@ export function buildXhsSessionPayload(
   return { notes: pickedNotes, xsecTokens: pickedTokens };
 }
 
+/**
+ * 把「这次角色在听的那首歌」冻进 music_action directive。
+ *
+ * 为什么要冻：正文里那句「我在听《X》」是 worker 到点挑的（renderFireSceneBlock），
+ * 而 `[[MUSIC_ACTION:add|歌单标题]]` 标签里只有歌单名。客户端重放时若只能取「用户此刻
+ * 在听的那首」，定时消息补收的那一刻用户多半什么都没在放 —— 正文聊着这首歌，卡片和加
+ * 歌单却整个没发生；就算用户恰好在听，加的也是用户那首，不是角色说的那首。
+ *
+ * 这次没渲染「此刻在听」（不在听歌的时段 / 歌单空 / 跨天作废）就不附，客户端走它原来的
+ * 实时快照那条路。其余类型的 directive 一概不动。
+ */
+export function attachSceneSong(
+  directives: Directive[],
+  sceneSong: MusicActionSong | null | undefined,
+): Directive[] {
+  if (!sceneSong) return directives;
+  return directives.map((d) => (d.type === 'music_action' ? { ...d, song: sceneSong } : d));
+}
+
 export type RoundDecision =
   | { decision: 'tool-request'; toolCalls: ToolCall[] }
   | { decision: 'finish'; pushPayloads: Array<Record<string, unknown>> }
@@ -173,6 +225,9 @@ export interface ScheduleRoundInput {
  *     每段一条 push；全部 directives 挂最后一条的 metadata；
  *     全程无正文 → skip-push（这轮有没有副作用都不发，理由见分支处注释）。
  *
+ * 还有一条穿透收尾：模型卡在同一个工具上出不来、或者已经是最后一轮时，本轮的工具请求
+ * 不再放行，直接拿之前几轮的内容收尾；这一轮那句「等我查查」会被丢掉（它永远没有下文）。
+ *
  * 通用 MCP 的调用识别是两层（native tool_calls + 正文协议），与前台同构，见函数体开头。
  */
 export function processLLMRound(
@@ -181,7 +236,10 @@ export function processLLMRound(
   build: PushBuildInput,
   mcp?: McpRoundInput | null,
   schedule?: ScheduleRoundInput | null,
+  /** 本轮序号（上游 sessionCtx.iteration，0-based）。到最后一轮就不再放行工具请求。 */
+  iteration?: number,
 ): RoundDecision {
+  const isFinalRound = typeof iteration === 'number' && iteration >= MAX_TOOL_ITERATIONS - 1;
   // 通用 MCP 两层识别（与前台同构）：native tool_calls 优先；没有 native 时
   // 用前台「兼容模式」同一个解析器从正文抠 tool_name({...})。两种来源都可能
   // 与数据标签同轮出现，最终合并成同一个 tool-request，executeToolCalls 按
@@ -234,15 +292,25 @@ export function processLLMRound(
     // 等 finish 拼回全文统一扫（见 FireSessionState.narrations 注释）。
     // MCP-only 轮没有数据标签，整段剥净后的文本都是旁白（与 tag 轮的 prefix 同角色）。
     const narration = result.kind === 'tool-request' ? result.prefix : scanText;
-    if (narration.trim()) state.narrations.push(narration);
-    // 已经连着打回这么多次重复调用了，说明模型卡在同一个工具上出不来。不再给它下一轮，
-    // 就用手上这些内容收尾——转到轮次上限的话整条任务会失败重跑，用户一个字都收不到。
-    if (state.duplicateToolCalls < MAX_DUPLICATE_TOOL_CALLS) {
+    // 还能不能再转一轮：连着打回这么多次重复调用 = 模型卡在同一个工具上出不来；到最后一轮
+    // 再返回 tool-request 则会被上游抛 AGENTIC_LOOP_EXCEEDED。两种情况都不再给下一轮，
+    // 直接用手上的内容收尾——整条任务失败重跑的话，用户一个字都收不到。
+    if (state.duplicateToolCalls < MAX_DUPLICATE_TOOL_CALLS && !isFinalRound) {
+      if (narration.trim()) state.narrations.push(narration);
+      // 这一轮说了「我分享给你」，那 n 指的就是此刻手上这份列表。定格下来，别让后面几轮
+      // 的搜索把它换掉（详见 FireSessionState.xhsShareNotes）。只定格第一次：一次 fire 里
+      // 跨两份列表各分享一张的情况极少，定格第一份至少让先说的那张对得上。
+      if (state.xhsShareNotes === null && XHS_SHARE_TAG_RE.test(narration)) {
+        state.xhsShareNotes = [...(build.xhsNotes ?? [])];
+      }
       return {
         decision: 'tool-request',
         toolCalls: result.kind === 'tool-request' ? [...result.toolCalls, ...extraToolCalls] : extraToolCalls,
       };
     }
+    // 穿透收尾：这一轮的旁白是「等我翻翻记录哈」这种半句，而它请求的工具永远不会跑了。
+    // 发出去用户收到的最后一条就是一句没有下文的话，比少说这句更假——丢掉，只发之前
+    // 几轮已经说完的内容。
   }
 
   // 拼回全文再扫一次。中间轮 prefix 里不含数据标签（prefix 定义即「首个数据标签
@@ -261,10 +329,17 @@ export function processLLMRound(
   // 这里与改动前完全一致。
   const finalScan = fullText === scanText ? result : classifyLLMOutput(fullText);
   const cleanedText = finalScan.kind === 'finish' ? finalScan.cleanedText : finalScan.prefix;
-  const directives = finalScan.kind === 'finish' ? finalScan.directives : [];
+  // 角色写了 MUSIC_ACTION 的话，把 prompt 里那句「你此刻在听」的那首歌冻进去（见 attachSceneSong）。
+  const directives = attachSceneSong(
+    finalScan.kind === 'finish' ? finalScan.directives : [],
+    build.sceneSong,
+  );
 
   // XHS 引用的笔记/token 与 directives 挂同一条 push（最后一条），客户端先落库再重放。
-  const xhsSession = buildXhsSessionPayload(directives, build.xhsNotes, build.xhsXsecTokens);
+  // 笔记列表优先用「说要分享那一轮」定格的快照，没定格过（分享和搜索同一轮或压根没搜过）
+  // 才用最终列表——两者此时是同一份。
+  const xhsSession = buildXhsSessionPayload(
+    directives, state.xhsShareNotes ?? build.xhsNotes, build.xhsXsecTokens);
   const finishMeta = directives.length > 0
     ? { directives, ...(xhsSession ? { xhsSession } : {}) }
     : undefined;

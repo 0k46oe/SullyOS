@@ -34,6 +34,16 @@ export const AMSG_HOTNEWS_SNAPSHOT_KEY = 'world_hotnews';
 const WEATHER_TTL_MS = 30 * 60 * 1000;
 
 /**
+ * 拉不到时旧读数还能顶多久 —— 天气 3 小时、热榜 24 小时，再旧就整段不要。
+ *
+ * 顶一会儿是划算的（半小时前的气温也比只字不提强），但这一段抬头写着「以下信息来自
+ * 真实世界」：接口连挂三天就会顶着这块招牌播三天前的那场雨、聊三天前的同一批热搜。
+ * 「拉不到就整段消失」本来就是这条链的红线，旧读数也得守着它。
+ */
+const WEATHER_FALLBACK_MAX_AGE_MS = 3 * 60 * 60 * 1000;
+const HOTNEWS_FALLBACK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
  * 热榜按「国内现在几点」分时段。worker 跑在 UTC 上，不指定时区的话「今日上午」
  * 会跟榜单自己的作息差好几个时段。
  */
@@ -129,8 +139,8 @@ const loadWeather = async (
     return fresh;
   }
   // 拉不到就用手上这份旧的：半小时前的气温也比「今天天气怎么样都不知道」强，
-  // 而且不写快照，下次触发会再试一次。城市换过了就宁可不说。
-  if (snap && snap.city === city) {
+  // 而且不写快照，下次触发会再试一次。城市换过了、或者旧得过头了就宁可不说。
+  if (snap && snap.city === city && nowMs - snap.fetchedAt <= WEATHER_FALLBACK_MAX_AGE_MS) {
     console.warn('[amsg:world] 天气拉取失败，先用上一次的读数', { city });
     return snap.data;
   }
@@ -148,7 +158,8 @@ const loadHotNews = async (
   const slot = getHotNewsSlot({ tz: HOTNEWS_SLOT_TZ, now: new Date(nowMs) });
 
   const snap = parseSnapshot<HotNewsSnapshot>(globalRows, AMSG_HOTNEWS_SNAPSHOT_KEY,
-    (v) => v && typeof v.id === 'string' && Array.isArray(v.items) && Array.isArray(v.platforms));
+    (v) => v && typeof v.id === 'string' && Array.isArray(v.items) && Array.isArray(v.platforms)
+      && typeof v.fetchedAt === 'number');
   if (snap && snap.id === slot.id && snap.items.length > 0 && sameHotNewsPlatforms(snap.platforms, platforms)) {
     console.log('[amsg:world] 热榜命中快照', { slot: slot.id, count: snap.items.length });
     return snap.items;
@@ -163,7 +174,8 @@ const loadHotNews = async (
     return fresh;
   }
   // 一条都没拉到：用上个时段的顶一下，且不写快照，下次触发重试。
-  if (snap && snap.items.length > 0) {
+  // 隔天的旧闻不顶——那时候「最近发生的事」已经不是最近了。
+  if (snap && snap.items.length > 0 && nowMs - snap.fetchedAt <= HOTNEWS_FALLBACK_MAX_AGE_MS) {
     console.warn('[amsg:world] 热榜拉取失败，先用上个时段的', { was: snap.id, want: slot.id });
     return snap.items;
   }

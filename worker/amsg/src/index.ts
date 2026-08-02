@@ -45,6 +45,7 @@ import {
   selfLogMatchesPack,
   unpackStateValue,
 } from '../../../utils/amsgFirePack';
+import { resolveFireSceneSong } from '../../../utils/amsgFireScene';
 import { shouldExpireFire } from '../../../utils/amsg2ExpireGuard';
 import { buildFireTaskListBlock, MAX_ACTIVE_TASKS_PER_CHAR } from '../../../utils/amsg2Tasks';
 import {
@@ -96,6 +97,7 @@ import { XhsMcpClient } from '../../../utils/xhsMcpClient';
 import type { ToolCall } from '../../instant-push/src/classifier';
 import {
   createFireSessionState,
+  MAX_TOOL_ITERATIONS,
   processLLMRound,
   type FireSessionState,
 } from './agentic';
@@ -203,6 +205,8 @@ interface SessionCtx {
   scratch?: Record<string, unknown>;
   writeState?: WriteState;
   scheduleTask?: ScheduleTask;
+  /** 本次 fire 的第几轮 LLM（0-based）。最后一轮不再放行工具请求，见 MAX_TOOL_ITERATIONS。 */
+  iteration?: number;
   /** 任务行 id；没有任务行的 in-server instant 路径为 null。 */
   taskId: number | string | null;
   /** 任务行 uuid。 */
@@ -262,10 +266,21 @@ interface FireStash {
    * 没生成、或者已经写过一次时为 null。
    */
   selfLogTexts: string[] | null;
+  /**
+   * prompt 里那句「你此刻在听：《X》」写的是哪一首（这一段没渲染时为 null）。
+   *
+   * 在 onBeforeFire 就定下来，用的是填槽那一刻的时间：角色写的 MUSIC_ACTION 说的正是
+   * 它读到的那首歌，onLLMOutput 把它冻进 directive 带给客户端（见 agentic.attachSceneSong）。
+   */
+  sceneSong: { id?: number; name: string; artists: string } | null;
 }
 
 const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash | undefined =>
   scratch?.fire as FireStash | undefined;
+
+/** 两个时间戳取较新的那个；两个都没有为 null。 */
+const laterOf = (a: number | null, b: number | null): number | null =>
+  (a == null ? b : b == null ? a : Math.max(a, b));
 
 /**
  * 用云端 tool_pack / tool_config 拼 dispatchAgenticTool 要的 ctx。
@@ -684,6 +699,19 @@ export const runFireScheduleTool = async (
 };
 
 /**
+ * 倒数第二轮的工具回喂末尾追加的一句。
+ *
+ * 这批结果喂进去之后就是最后一轮了，模型再请求工具只会被硬收尾（processLLMRound 那道
+ * 闸），它写的「等我再查查」会被丢掉。先把话说在前面，让它自己把内容写完——软提示不管用
+ * 时还有硬收尾兜着，两层都在。
+ */
+const FINAL_ROUND_NOTICE = '（提醒：这是最后一轮了，不要再调用任何工具，直接把想说的话写完。）';
+
+/** 本轮的工具结果是不是喂给最后一轮的（ctx.iteration 缺失的老部署不提示）。 */
+const feedsFinalRound = (iteration: number | undefined): boolean =>
+  typeof iteration === 'number' && iteration >= MAX_TOOL_ITERATIONS - 2;
+
+/**
  * 单个 MCP 调用的超时。总 fire 预算 240s / 最多 5 轮，一个慢服务器不能吃光
  * 整条链（浏览器侧是 60s，那边没有轮次预算压力）。
  *
@@ -823,11 +851,17 @@ export const amsgHooks = {
     // 推进/删除），一个生成 token 都不花。fire_pack.lastUserMessageAt 随
     // amsgStateSync 去抖同步、最多滞后十几秒；剩余竞态由客户端送达兜底闸兜住
     // （activeMsgRuntime 的 runtime-expire-swallow）。缺策略字段的任务不拦。
+    //
+    // 「用户最后一次开口」取 fire_pack 和 presence 两份里较新的：presence 行是每轮聊天
+    // 一开场就写的小值，fire_pack 要等去抖 10s + 整包上传才落地，慢得多。presence 过期
+    // （TTL 45s，上面那道门用的就是它）只说明用户此刻不在等回复，不影响「他最后一次开口
+    // 是几点」这个事实，所以这里不看新鲜度，只保留 charId 校验——别拿别的角色的对话当锚点。
+    const presenceLastUserMessageAt = presence?.charId === charId ? presence.lastUserMessageAt : null;
     const expireInput = {
       policy,
       recurrenceType: ctx.task.recurrenceType,
       anchorMs: typeof taskMeta.amsgAnchorMs === 'number' ? taskMeta.amsgAnchorMs : null,
-      lastUserMessageAt: pack.lastUserMessageAt ?? null,
+      lastUserMessageAt: laterOf(pack.lastUserMessageAt ?? null, presenceLastUserMessageAt),
       nowMs: ctx.now.getTime(),
       occurrenceMs,
     };
@@ -914,6 +948,9 @@ export const amsgHooks = {
       taskRowId: ctx.task.id != null ? String(ctx.task.id) : null,
       clientTaskId,
       selfLogTexts: null,
+      // 跟下面 renderFirePack 填「你此刻在听」用的是同一个时刻、同一份 scene、同一个种子
+      // （resolveFireSceneSong 与 renderFireSceneBlock 共用判定），冻的必然是正文里那首。
+      sceneSong: resolveFireSceneSong(pack.scene, ctx.now.getTime(), tz),
     } satisfies FireStash;
 
     // 「你还挂着这些排程」：客户端记录的（打包那一刻的快照）+ 角色自己在之前几次 fire 里
@@ -959,6 +996,9 @@ export const amsgHooks = {
     ];
     return {
       messages: [{ role: 'user' as const, content: prompt }],
+      // 轮次上限显式给一份：worker 要靠同一个数判「这是最后一轮了」（见 onLLMOutput），
+      // 而上游只有内部默认值、没导出常量，各写各的迟早对不上。
+      maxToolIterations: MAX_TOOL_ITERATIONS,
       // amsg-server 带 agentic-fire-tools feature 的版本起透传给每轮 LLM 请求；
       // 老 bundle 里不会走到这（tools 是随本次 bundle 一起升上去的）。
       ...(fireTools.length ? { tools: fireTools } : {}),
@@ -1032,10 +1072,15 @@ export const amsgHooks = {
       xhsXsecTokens: stash.toolCtx.xhsCaches
         ? Array.from(stash.toolCtx.xhsCaches.xsecTokenCache.entries())
         : undefined,
+      // 角色写了 MUSIC_ACTION 的话，把它读到的那首歌一起带给客户端：标签里只有歌单名，
+      // 没有这一份的话客户端只能拿「用户此刻在听的那首」凑（补收时多半是空的）。
+      sceneSong: stash.sceneSong,
     },
     stash.mcpResolve ? { resolve: stash.mcpResolve, nativeToolCalls: nativeMcpCalls } : null,
     // 传 null = 这次不认排程（老部署没这口子），正文里写了也不当调用。
-    typeof ctx.scheduleTask === 'function' ? { nativeToolCalls: nativeScheduleCalls } : null);
+    typeof ctx.scheduleTask === 'function' ? { nativeToolCalls: nativeScheduleCalls } : null,
+    // 最后一轮不再放行工具请求，改成用手上的内容收尾（见 agentic.ts 的 MAX_TOOL_ITERATIONS）。
+    ctx.iteration);
 
     if (decision.decision === 'tool-request') {
       console.log('[amsg:agentic]', {
@@ -1167,6 +1212,12 @@ export const amsgHooks = {
         console.warn('[amsg:agentic]', { type: 'tool_failed', sessionId: ctx.sessionId, tool: name, error: String(error) });
       }
       results.push({ tool_call_id: toolCall.id, role: 'tool' as const, content });
+    }
+
+    // 只挂在最后一条 tool 消息末尾（离模型下一次输出最近），不逐条重复刷屏。
+    if (feedsFinalRound(ctx.iteration) && results.length > 0) {
+      const last = results[results.length - 1];
+      last.content = `${last.content}\n${FINAL_ROUND_NOTICE}`;
     }
     return results;
   },

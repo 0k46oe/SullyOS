@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildXhsSessionPayload,
   createFireSessionState,
+  MAX_TOOL_ITERATIONS,
   processLLMRound,
   type PushBuildInput,
 } from './agentic';
@@ -62,17 +63,19 @@ describe('processLLMRound — 纯文本 finish', () => {
     expect(decision.pushPayloads.map((p) => p.message)).toEqual(['想你了。快回消息！']);
   });
 
+  // 标签用 SEND_EMOJI 这种约定好的：模型现编的标签（`[[分享卡: …]]`）独占一段时会被
+  // sanitize 整段丢掉，那是「横幅响了、点进去 0 气泡」那条规则，跟这里验的劈碎无关。
   it('回归：[[...]] 标签内的句读不再把标签劈碎（曾把「]]」拼进下一条消息）', () => {
     const decision = processLLMRound(
       createFireSessionState(),
-      '看到个热搜。\n[[分享卡: 官宣了！速看]]',
+      '看到个热搜。\n[[SEND_EMOJI: 官宣了！速看]]',
       build,
     );
     expect(decision.decision).toBe('finish');
     if (decision.decision !== 'finish') return;
     expect(decision.pushPayloads.map((p) => p.message)).toEqual([
       '看到个热搜。',
-      '[[分享卡: 官宣了！速看]]',
+      '[[SEND_EMOJI: 官宣了！速看]]',
     ]);
   });
 
@@ -136,6 +139,51 @@ describe('processLLMRound — 数据标签 tool-request 与跨轮累积', () => 
     for (const p of round2.pushPayloads) {
       expect(String(p.message)).not.toContain('[[ACTION');
     }
+  });
+});
+
+// 回归守卫：`[[MUSIC_ACTION:add|歌单标题]]` 里只有歌单名，没有歌名。客户端重放时若只能
+// 取「用户此刻在听的那首」，定时消息补收的那一刻用户多半什么都没在放 —— 正文聊着这首歌，
+// 卡片和加歌单却整个没发生。所以到点渲染「你此刻在听：《X》」时顺手把 X 冻进 directive。
+describe('processLLMRound — MUSIC_ACTION 冻结这次在听的那首歌', () => {
+  const song = { id: 33, name: '夜航星', artists: '某某' };
+  const withSong: PushBuildInput = { ...build, sceneSong: song };
+
+  const directivesOf = (decision: ReturnType<typeof processLLMRound>) => {
+    if (decision.decision !== 'finish') return undefined;
+    const last = decision.pushPayloads[decision.pushPayloads.length - 1];
+    return (last.metadata as any).directives;
+  };
+
+  it('这次渲染挑了歌 → music_action 带上它', () => {
+    const decision = processLLMRound(
+      createFireSessionState(),
+      '这首太好听了，收进歌单。\n[[MUSIC_ACTION:add|深夜]]',
+      withSong,
+    );
+    expect(directivesOf(decision)).toEqual([
+      { type: 'music_action', verb: 'add', args: ['深夜'], song },
+    ]);
+  });
+
+  it('这次没渲染「此刻在听」（不在听歌的时段 / 跨天作废）→ 不附，客户端走实时快照那条路', () => {
+    const decision = processLLMRound(
+      createFireSessionState(),
+      '这首太好听了。\n[[MUSIC_ACTION:add|深夜]]',
+      { ...build, sceneSong: null },
+    );
+    expect(directivesOf(decision)).toEqual([
+      { type: 'music_action', verb: 'add', args: ['深夜'] },
+    ]);
+  });
+
+  it('其余类型的 directive 一概不动', () => {
+    const decision = processLLMRound(
+      createFireSessionState(),
+      '戳你一下。\n[[ACTION:POKE]]',
+      withSong,
+    );
+    expect(directivesOf(decision)).toEqual([{ type: 'poke' }]);
   });
 });
 
@@ -307,6 +355,47 @@ describe('processLLMRound — metadata.xhsSession 挂载', () => {
     }
   });
 
+  // [[XHS_SHARE: n]] 的 n 指的是模型写这句话时手上那份笔记列表。列表在后面的轮次被
+  // 另一次搜索整个换掉之后，还按最终列表解引用就会推错卡片——正文聊的是露营帖、卡片
+  // 推的却是同一序号的口红帖，用户点开一眼假。
+  it('说要分享之后列表又被换掉 → 卡片仍取说这句话那一轮的列表', () => {
+    const state = createFireSessionState();
+    const 露营帖 = [makeNote(1), makeNote(2), makeNote(3)];
+    const 口红帖 = [makeNote(11), makeNote(12), makeNote(13)];
+
+    // 轮 1：先逛一圈，还没有笔记。
+    processLLMRound(state, '我去逛逛。[[XHS_BROWSE]]', build);
+    // 轮 2：拿到露营帖列表，说分享第 3 篇，同一轮又去搜别的。
+    const round2 = processLLMRound(
+      state,
+      '这第三个露营帖太可了！[[XHS_SHARE: 3]]\n[[XHS_SEARCH: 口红]]',
+      { ...build, xhsNotes: 露营帖 },
+    );
+    expect(round2.decision).toBe('tool-request');
+    // 轮 3：手上的列表已经被搜索换成口红帖了，这时候收尾。
+    const round3 = processLLMRound(state, '就这些啦。', { ...build, xhsNotes: 口红帖 });
+
+    expect(round3.decision).toBe('finish');
+    if (round3.decision !== 'finish') return;
+    const last = round3.pushPayloads[round3.pushPayloads.length - 1];
+    expect((last.metadata as any).xhsSession.notes).toEqual([
+      { idx: 3, note: makeNote(3) },
+    ]);
+  });
+
+  it('分享和收尾同一轮（没换过列表）照旧用最终列表', () => {
+    const state = createFireSessionState();
+    processLLMRound(state, '我去逛逛。[[XHS_BROWSE]]', build);
+    const round2 = processLLMRound(state, '看看这个！\n[[XHS_SHARE: 2]]', {
+      ...build,
+      xhsNotes: [makeNote(1), makeNote(2)],
+    });
+    expect(round2.decision).toBe('finish');
+    if (round2.decision !== 'finish') return;
+    const last = round2.pushPayloads[round2.pushPayloads.length - 1];
+    expect((last.metadata as any).xhsSession.notes).toEqual([{ idx: 2, note: makeNote(2) }]);
+  });
+
   it('没有 XHS 引用时 metadata 不多挂 xhsSession 键（形状回归）', () => {
     const decision = processLLMRound(
       createFireSessionState(),
@@ -349,15 +438,15 @@ describe('processLLMRound — 重复调用到阈值就收尾', () => {
 
     const text = decision.pushPayloads.map((p) => p.message).join('\n');
     expect(text).toContain('让我想想六月的事');
-    expect(text).toContain('再查一下');
     // 转不出去的那个标签不能漏进正文
     expect(text).not.toContain('RECALL');
   });
 
-  it('收尾时本轮内容只出现一次，不跟暂存的旁白重复', () => {
+  it('之前几轮的旁白只出现一次，不重复', () => {
     const state = createFireSessionState();
+    processLLMRound(state, '就说这一句。\n[[RECALL: 2026-06]]', build);
     state.duplicateToolCalls = 2;
-    const decision = processLLMRound(state, '就说这一句。\n[[RECALL: 2026-06]]', build);
+    const decision = processLLMRound(state, '再查一次。\n[[RECALL: 2026-06]]', build);
     expect(decision.decision).toBe('finish');
     if (decision.decision !== 'finish') return;
     const text = decision.pushPayloads.map((p) => p.message).join('\n');
@@ -368,6 +457,61 @@ describe('processLLMRound — 重复调用到阈值就收尾', () => {
     const state = createFireSessionState();
     state.duplicateToolCalls = 2;
     expect(processLLMRound(state, '[[RECALL: 2026-06]]', build).decision).toBe('skip-push');
+  });
+});
+
+// 穿透收尾（重复到阈值 / 最后一轮）时，触发穿透那一轮的旁白是「等我翻翻记录哈」这种半句：
+// 它请求的工具永远不会跑了，发出去用户收到的最后一条消息就永远没有下文。
+describe('processLLMRound — 穿透收尾丢掉悬空的「我去查查」', () => {
+  it('触发穿透那一轮的旁白不进正文，之前几轮的照发', () => {
+    const state = createFireSessionState();
+    processLLMRound(state, '今天路过那家店了。\n[[RECALL: 2026-06]]', build);
+    state.duplicateToolCalls = 2;
+
+    const decision = processLLMRound(state, '等我翻翻记录哈。\n[[RECALL: 2026-06]]', build);
+    expect(decision.decision).toBe('finish');
+    if (decision.decision !== 'finish') return;
+    const text = decision.pushPayloads.map((p) => p.message).join('\n');
+    expect(text).toContain('今天路过那家店了');
+    expect(text, '这句后面永远没有下文，不能当结尾发出去').not.toContain('等我翻翻记录哈');
+  });
+
+  it('只有这一句半截话可发 → skip-push，宁可不发', () => {
+    const state = createFireSessionState();
+    state.duplicateToolCalls = 2;
+    const decision = processLLMRound(state, '稍等，我查查看。\n[[SEARCH: 天气]]', build);
+    expect(decision.decision).toBe('skip-push');
+  });
+});
+
+// 上游在最后一轮遇到 tool-request 会直接抛 AGENTIC_LOOP_EXCEEDED：这次攒下的旁白全丢、
+// 任务不出清、下一分钟整条从头重跑再烧一遍 LLM，而用户一个字都收不到。
+describe('processLLMRound — 最后一轮不再放行工具请求', () => {
+  it('最后一轮还想调工具 → 拿之前几轮的内容收尾', () => {
+    const state = createFireSessionState();
+    processLLMRound(state, '我想想六月发生了什么。\n[[RECALL: 2026-06]]', build, null, null, 0);
+    processLLMRound(state, '顺便看看天气。\n[[SEARCH: 明天 天气]]', build, null, null, 1);
+
+    const decision = processLLMRound(
+      state, '还得再查一次。\n[[RECALL: 2026-07]]', build, null, null, MAX_TOOL_ITERATIONS - 1);
+    expect(decision.decision).toBe('finish');
+    if (decision.decision !== 'finish') return;
+    const text = decision.pushPayloads.map((p) => p.message).join('\n');
+    expect(text).toContain('我想想六月发生了什么');
+    expect(text).toContain('顺便看看天气');
+    expect(text).not.toContain('还得再查一次');
+    expect(text).not.toContain('RECALL');
+  });
+
+  it('倒数第二轮照常给工具机会', () => {
+    const decision = processLLMRound(
+      createFireSessionState(), '查一下。\n[[SEARCH: 天气]]', build, null, null, MAX_TOOL_ITERATIONS - 2);
+    expect(decision.decision).toBe('tool-request');
+  });
+
+  it('不传轮次（拿不到 ctx.iteration 的老部署）行为不变', () => {
+    const decision = processLLMRound(createFireSessionState(), '查一下。\n[[SEARCH: 天气]]', build);
+    expect(decision.decision).toBe('tool-request');
   });
 });
 

@@ -11,6 +11,7 @@ import {
   offloadOversizedPush,
   resolveVapidEmail, runFireScheduleTool, runMcpFireTool,
 } from './index';
+import { MAX_TOOL_ITERATIONS } from './agentic';
 import { MAX_PUSH_PAYLOAD_BYTES } from '@rei-standard/amsg-server/cloudflare';
 import {
   AMSG_FIRE_PACK_KEY,
@@ -21,6 +22,7 @@ import {
   AMSG_SLOT_TASK_INSTRUCTION,
   amsgStateNamespace,
   amsgXhsSessionKey,
+  FIRE_PACK_VERSION,
   packStateValue,
   parseSelfLog,
 } from '../../../utils/amsgFirePack';
@@ -40,10 +42,12 @@ const firePackValue = (
   lastUserMessageAt: number | null = null,
   extra: Record<string, unknown> = {},
 ) => JSON.stringify({
-  v: 5,
+  // 版本跟着 amsgFirePack 走：升版是前端 + worker 一起动的事，测试跟着走就行。
+  v: FIRE_PACK_VERSION,
   template: `现在是 ${AMSG_SLOT_CURRENT_TIME}。\n${AMSG_SLOT_TASK_INSTRUCTION}`,
   lastUserMessageAt,
   tzId: 'Asia/Shanghai',
+  userTzId: 'Asia/Shanghai',
   targetName: '楪',
   builtAt: PACK_BUILT_AT,
   pendingTasks: [],
@@ -51,8 +55,14 @@ const firePackValue = (
   ...extra,
 });
 
-const presenceValue = (activeAt: number) => JSON.stringify({
-  v: 1, charId: CHAR_ID, activeAt, lastUserMessageAt: activeAt,
+const presenceValue = (
+  activeAt: number,
+  opts: { lastUserMessageAt?: number | null; charId?: string } = {},
+) => JSON.stringify({
+  v: 1,
+  charId: opts.charId ?? CHAR_ID,
+  activeAt,
+  lastUserMessageAt: opts.lastUserMessageAt === undefined ? activeAt : opts.lastUserMessageAt,
 });
 
 // tool_pack / tool_config 与 fire_pack 同批原子上传，所以默认造齐——缺任何一份都是
@@ -207,6 +217,39 @@ describe('onBeforeFire 四道门', () => {
       ],
     });
     await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
+  });
+
+  // presence 行是每轮聊天一开场就写的小值，fire_pack 要等去抖 10s + 整包上传才落地。
+  // 只看 fire_pack 的话，用户刚说完话、包还没传上来的那十几秒里任务照发，正撞在对话上。
+  it('防穿帮闸：presence 记的用户开口时刻比 fire_pack 新 → 用新的那份判，作废', async () => {
+    const anchor = NOW.getTime() - 3600_000;
+    const { ctx } = makeCtx({
+      metadata: { amsgAnchorMs: anchor },
+      charRows: [
+        // 租约本身已经过期（不吃第一道门），但它记着的「最后一条用户消息」仍然算数
+        { key: AMSG_CHAT_PRESENCE_KEY, value: presenceValue(NOW.getTime() - 120_000, { lastUserMessageAt: anchor + 60_000 }) },
+        { key: AMSG_FIRE_PACK_KEY, value: firePackValue(anchor - 60_000) },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+    });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
+  });
+
+  it('防穿帮闸：presence 是别的角色的 → 不拿来当锚点材料', async () => {
+    const anchor = NOW.getTime() - 3600_000;
+    const { ctx } = makeCtx({
+      metadata: { amsgAnchorMs: anchor },
+      charRows: [
+        {
+          key: AMSG_CHAT_PRESENCE_KEY,
+          value: presenceValue(NOW.getTime() - 120_000, { lastUserMessageAt: anchor + 60_000, charId: 'other-char' }),
+        },
+        { key: AMSG_FIRE_PACK_KEY, value: firePackValue(anchor - 60_000) },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+    });
+    const result = await amsgHooks.onBeforeFire(ctx);
+    expect(fired(result).messages).toHaveLength(1);
   });
 
   it('防穿帮闸：锚点之后没有新用户消息 → 照发', async () => {
@@ -623,6 +666,62 @@ describe('executeToolCalls 的工具编排', () => {
     );
     expect(reordered.content).toContain('没有再去查');
   });
+
+  // 轮次快用完了还在请求工具，上游会抛 AGENTIC_LOOP_EXCEEDED：这次攒的旁白全丢、任务
+  // 不出清、下一分钟整条从头重跑。先在回喂里说一声，模型自己收尾最省。
+  it('倒数第二轮的回喂末尾加一句「这是最后一轮」', async () => {
+    const session = await readySession();
+    const [out] = await amsgHooks.executeToolCalls(
+      [toolCall('c1', 'recall', { year: '2026', month: '06' })],
+      { ...session, iteration: MAX_TOOL_ITERATIONS - 2 },
+    );
+    expect(out.content).toContain('最后一轮');
+  });
+
+  it('还早的轮次不加那句话（别一上来就催着收尾）', async () => {
+    const session = await readySession();
+    const [out] = await amsgHooks.executeToolCalls(
+      [toolCall('c1', 'recall', { year: '2026', month: '06' })],
+      { ...session, iteration: 0 },
+    );
+    expect(out.content).not.toContain('最后一轮');
+  });
+});
+
+// 轮次预算：worker 判「这是最后一轮了」用的数必须和上游真正跑的轮数是同一个，
+// 否则不是提前一轮白收尾、就是照旧撞上 AGENTIC_LOOP_EXCEEDED。
+describe('轮次上限与上游共用同一个数', () => {
+  const sessionCtx = (scratch: Record<string, unknown>, llmOutputText: string, iteration: number) => ({
+    sessionId: 'sess_task_42',
+    taskId: 42,
+    taskUuid: TASK_UUID,
+    llmResponse: {},
+    llmOutputText,
+    contactName: 'Nyah',
+    metadata: { charId: CHAR_ID, amsgMode: 'auto' },
+    scratch,
+    iteration,
+  }) as any;
+
+  it('onBeforeFire 把轮次上限显式回传给上游', async () => {
+    const { ctx } = makeCtx({});
+    const result = await amsgHooks.onBeforeFire(ctx) as { maxToolIterations?: number };
+    expect(result.maxToolIterations).toBe(MAX_TOOL_ITERATIONS);
+  });
+
+  it('最后一轮还想调工具 → 直接收尾，不把 tool-request 交回上游', async () => {
+    const { ctx, scratch } = makeCtx({});
+    await amsgHooks.onBeforeFire(ctx);
+
+    const first = await amsgHooks.onLLMOutput(
+      sessionCtx(scratch, '我先想想六月的事。\n[[RECALL: 2026-06]]', 0)) as any;
+    expect(first.decision).toBe('tool-request');
+
+    const last = await amsgHooks.onLLMOutput(
+      sessionCtx(scratch, '再查一次。\n[[RECALL: 2026-07]]', MAX_TOOL_ITERATIONS - 1)) as any;
+    expect(last.decision).toBe('finish');
+    expect(last.pushPayloads.map((p: any) => p.message).join('\n')).toContain('我先想想六月的事');
+  });
 });
 
 // 通用 MCP 的执行环节：worker 直连用户自己配的服务器（服务端 fetch 没有 CORS，
@@ -750,10 +849,11 @@ describe('self_log — 角色自述回写', () => {
 
   /** 带自述槽位的 fire_pack（当前客户端打的包长这样）。 */
   const slottedFirePack = (builtAt: number = PACK_BUILT_AT) => JSON.stringify({
-    v: 5,
+    v: FIRE_PACK_VERSION,
     template: `【最近对话上下文】\n用户：先睡了${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
     lastUserMessageAt: null,
     tzId: 'Asia/Shanghai',
+    userTzId: 'Asia/Shanghai',
     targetName: '楪',
     builtAt,
     pendingTasks: [],
@@ -928,10 +1028,11 @@ describe('self_log — 角色自述回写', () => {
   // 硬失败，而不是悄悄退回单轮——静默降级的话，多轮连续性没了也没人会发现。
   it('包里缺对齐锚点 → 抛错，不静默退回单轮', async () => {
     const store = makeStore(JSON.stringify({
-      v: 5,
+      v: FIRE_PACK_VERSION,
       template: `【最近对话上下文】\n用户：先睡了${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
       lastUserMessageAt: null,
       tzId: 'Asia/Shanghai',
+      userTzId: 'Asia/Shanghai',
       targetName: '楪',
       pendingTasks: [],
       scene: null,
