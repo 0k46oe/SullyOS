@@ -20,6 +20,7 @@ import { appendDevDebugInstantPushLog, appendDevDebugLog, isCaptureEnabled, make
 import { getLastRealUserMessageAt, shouldExpireFire } from './amsg2ExpireGuard';
 import { pruneStaleTasks } from './amsg2Tasks';
 import { appendInstantTraceEntry } from './instantTraceLog';
+import { trackEvent } from './analytics';
 
 // 同一个 category，两个 tag——保持 console 里现有的 [ActiveMsg] / [amsg] 标签，
 // 方便用户 / 文档里 grep 历史报错信息。两条 tag 都归 instant-push 一类。
@@ -730,6 +731,12 @@ const notifyInboxProcessFailed = (
   message: ActiveMsg2InboxMessage,
   kind: 'retrying' | 'degraded' | 'swallowed',
 ) => {
+  // 送达端唯一的埋点，而且只报失败：成功那条不报，免得攒出一份「谁几点收到过消息」的
+  // 时间线（跟「发消息本身不打点」同一条口径，见 docs/analytics.md）。
+  // 三个代号都是这个函数入参上写死的取值，角色名 / 内容 / messageId 一概不带。
+  trackEvent('主动消息送达失败', {
+    kind: kind === 'degraded' ? '原文降级' : kind === 'swallowed' ? '被跳过' : '重试中',
+  });
   try {
     window.dispatchEvent(new CustomEvent('active-msg-process-failed', {
       detail: { charId: message.charId, charName: message.charName, kind },
@@ -1141,6 +1148,9 @@ export const refreshPushSubscriptionIfMarked = async (): Promise<'no-marker' | '
     return 'refreshed';
   } catch (e) {
     log.warn('登记新的推送订阅失败，标记保留下次再试', { error: e });
+    // 订阅换了却登记不上去 = 之后所有到点推送都石沉大海，而用户这侧一点感觉都没有
+    // （角色就是不说话了）。只报「发生了」，错误原文里可能带 push endpoint，不带。
+    trackEvent('2.0推送订阅自检失败');
     return 'kept';
   }
 };

@@ -29,6 +29,7 @@ import { ActiveMsgClient } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
 import { hasActiveAiTask } from './amsg2Tasks';
 import { AmsgChatPresence, CHAT_PRESENCE_HEARTBEAT_MS } from './amsgChatPresence';
+import { trackEvent } from './analytics';
 
 // 10s：比 15s 少一截「聊完就关 App → 快照没传上去」的裸奔窗口，又不至于每个键入都打请求。
 const SYNC_DEBOUNCE_MS = 10_000;
@@ -51,6 +52,8 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 let flushing = false;
 let lifecycleBound = false;
 let retryCount = 0;
+/** 「退避打光了还是没传上去」每次会话只上报一次。 */
+let staleStateReported = false;
 
 // ─── 脏标记轻量持久化 ───
 // 内存队列在「打脏 → 去抖窗口内杀进程」时会整个蒸发，重开 App 也不补传。这里只把
@@ -185,6 +188,12 @@ export const flushAmsgState = async (reason: string): Promise<void> => {
       // 重排到头了（多半是离线）。快照留在队列里：下次打脏标记 / 切后台都会再试，
       // 在那之前云端仍是上一份，角色到点会带旧上下文——所以这条要吼出来。
       console.error(`${HEADER} flush(${reason}) 连续 ${MAX_RETRIES} 次失败，云端 fire_pack 仍是上一份（角色到点会用旧上下文）`, error);
+      // 用户这一侧完全无感：不报错、不提示，只是角色到点说的话对不上最近发生的事。
+      // 每次会话最多报一次（一轮退避打完才会走到这儿，但一次会话可以有好几轮）。
+      if (!staleStateReported) {
+        staleStateReported = true;
+        trackEvent('2.0云端状态同步失败');
+      }
       retryCount = 0;
     }
   } finally {
