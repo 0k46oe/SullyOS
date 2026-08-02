@@ -119,4 +119,36 @@ describe('AvatarAutonomy', () => {
     expect(touched.step(1_500, direction, 'speaking', noPointer).gestureEnvelope).toBe(0);
     expect(ambient.step(1_500, direction, 'speaking', noPointer).gestureEnvelope).toBeGreaterThan(0.5);
   });
+
+  it('locks an authored startup pose, gaze and body against ambient randomness', () => {
+    const direction: AvatarPerformanceDirection = {
+      ...DEFAULT_AVATAR_PERFORMANCE,
+      gesture: 'idle',
+      precision: {
+        lockAutonomy: true,
+        headX: 0.24,
+        headY: 0.08,
+        headZ: -0.13,
+        eyeX: 0,
+        eyeY: 0,
+        bodyX: 0.05,
+        bodyY: 0.03,
+        bodyZ: -0.04,
+        overshoot: 0.1,
+        settleMs: 880,
+      },
+    };
+    const pointer = { x: -0.95, y: 0.8, active: true, lastMoved: 3_000 };
+    const frames = run(new AvatarAutonomy(0, seededRandom(59)), 3_000, direction, 'speaking', pointer);
+    const final = frames[frames.length - 1]!;
+
+    expect(new Set(frames.map(frame => frame.pose))).toEqual(new Set(['focus']));
+    expect(Math.max(...frames.map(frame => frame.speechAccent))).toBe(0);
+    expect(final.headX).toBeCloseTo(0.24, 1);
+    expect(final.headZ).toBeCloseTo(-0.13, 1);
+    expect(Math.abs(final.eyeX)).toBeLessThan(0.03);
+    expect(Math.abs(final.eyeY)).toBeLessThan(0.03);
+    expect(final.bodyX).toBeCloseTo(0.05, 1);
+    expect(final.bodyZ).toBeCloseTo(-0.04, 1);
+  });
 });

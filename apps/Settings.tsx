@@ -94,7 +94,7 @@ const SettingsSection: React.FC<{
 }> = ({ icon, title, badge, actions, sectionProps, children }) => {
     const [open, setOpen] = useState(false);
     return (
-        <section {...sectionProps} className="bg-white/80 rounded-3xl p-5 shadow-sm border border-white/50">
+        <section {...sectionProps} className="bg-[#fffefe] rounded-3xl p-5 shadow-[0_8px_24px_rgba(15,23,42,0.05)] border border-slate-200/80">
             <div className={`flex items-center justify-between gap-2 ${open ? 'mb-4' : ''}`}>
                 <button type="button" onClick={() => setOpen(v => !v)} className="flex items-center gap-2 flex-1 min-w-0 text-left">
                     {icon}
@@ -1454,7 +1454,7 @@ const Settings: React.FC = () => {
   };
 
   return (
-    <div className="h-full w-full bg-slate-50/50 flex flex-col font-light relative">
+    <div className="h-full w-full bg-[#f3f4f8] flex flex-col font-light relative isolate">
 
       {/* GLOBAL PROGRESS OVERLAY */}
       {sysOperation.status === 'processing' && (
@@ -1472,7 +1472,7 @@ const Settings: React.FC = () => {
       )}
 
       {/* Header */}
-      <div className="bg-white/85 border-b border-white/40 shrink-0 z-10 sticky top-0" style={{ paddingTop: 'var(--safe-top)' }}>
+      <div className="bg-[#fffefe] border-b border-slate-200 shrink-0 z-10 sticky top-0" style={{ paddingTop: 'var(--safe-top)' }}>
         <div className="flex items-center px-4 py-3">
         <div className="flex items-center gap-2 w-full">
             <button onClick={closeApp} className="p-2 -ml-2 rounded-full hover:bg-black/5 active:scale-90 transition-transform">

@@ -198,9 +198,6 @@ const itemZ = (item: RoomItem) => item.type === 'rug' ? 1 + Math.floor(item.y / 
 
 const isNightHour = (h: number) => h < 6 || h >= 23;
 
-// 戳一戳兜底短语（角色还没说过话时用）
-const POKE_FALLBACK = ['嗯？', '干嘛啦…', '我在呢！', '(被戳了一下)', '別戳了别戳了', '✦?', '在想事情…', '要陪我玩吗！'];
-
 // 等级口径与 MobileGameHome 完全一致：每条消息 10 exp，三角曲线升级
 const deriveStats = (msgCount: number) => {
     const totalExp = msgCount * 10;
@@ -439,11 +436,14 @@ const Actor = React.memo<{
             e.stopPropagation();
             setBounce(true);
             setTimeout(() => setBounce(false), 450);
-            // 从聊天里 ta 最近的回复按顺序循环取一条；一条没有就用兜底短语
-            const lines = pokeLines.length > 0 ? pokeLines : POKE_FALLBACK;
-            setPokeText(lines[pokeIdx.current % lines.length]);
-            pokeIdx.current += 1;
-            setTimeout(() => setPokeText(''), 3200);
+            // 只复用角色真实说过的话。没有内容时保留戳戳动效，但绝不由主题冒充角色开口。
+            if (pokeLines.length > 0) {
+                setPokeText(pokeLines[pokeIdx.current % pokeLines.length]);
+                pokeIdx.current += 1;
+                setTimeout(() => setPokeText(''), 3200);
+            } else {
+                setPokeText('');
+            }
             // 迸射 2-3 颗爱心（连戳越快越多，最多 5 颗）
             const nowT = performance.now?.() ?? 0;
             comboRef.current = nowT - comboRef.current.t < 900 ? { n: comboRef.current.n + 1, t: nowT } : { n: 1, t: nowT };

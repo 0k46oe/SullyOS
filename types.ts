@@ -2264,6 +2264,24 @@ export interface CharMusicProfile {
 
 export type CompanionTouchZone = 'head' | 'face' | 'hand' | 'body' | 'other';
 
+export interface CompanionPerformancePrecision {
+  /** Temporarily suspend ambient turns/glances and keep the authored pose authoritative. */
+  lockAutonomy?: boolean;
+  /** Normalized pose targets (-1..1). */
+  headX?: number;
+  headY?: number;
+  headZ?: number;
+  eyeX?: number;
+  eyeY?: number;
+  bodyX?: number;
+  bodyY?: number;
+  bodyZ?: number;
+  /** Small intentional pass beyond the pose before settling, 0..0.2. */
+  overshoot?: number;
+  /** Time used to enter, pass and settle into the pose. */
+  settleMs?: number;
+}
+
 export interface CompanionTouchReaction {
   id: string;
   text: string;
@@ -2279,18 +2297,28 @@ export interface CompanionTouchReaction {
     faces?: Array<'wink' | 'grin' | 'pout' | 'blush' | 'eyes-closed' | 'smile-eyes' | 'brow-up' | 'brow-sad' | 'brow-angry'>;
     modelAction?: string;
     modelActions?: string[];
+    precision?: CompanionPerformancePrecision;
   };
+}
+
+export interface CompanionStartupSettings {
+  enabled: boolean;
+  /** User-authored or character-generated line; never supplied by a desktop theme. */
+  line: string;
+  performance: CompanionTouchReaction['performance'];
+  generatedAt?: number;
+  updatedAt?: number;
 }
 
 export interface CompanionTouchSettings {
   enabledZones: CompanionTouchZone[];
   reactions: Partial<Record<CompanionTouchZone, CompanionTouchReaction[]>>;
+  startup?: CompanionStartupSettings;
   /** When true, reactions with voiceAssetId play their local pre-generated audio. */
   voiceEnabled?: boolean;
   voiceGeneratedCount?: number;
   generatedAt?: number;
 }
-
 export interface CharacterProfile {
   id: string;
   name: string;

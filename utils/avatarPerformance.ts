@@ -14,6 +14,19 @@ export type AvatarCamera = typeof AVATAR_CAMERAS[number];
 export type AvatarGaze = typeof AVATAR_GAZES[number];
 export type AvatarFace = typeof AVATAR_FACES[number];
 
+export interface AvatarPerformancePrecision {
+  lockAutonomy?: boolean;
+  headX?: number;
+  headY?: number;
+  headZ?: number;
+  eyeX?: number;
+  eyeY?: number;
+  bodyX?: number;
+  bodyY?: number;
+  bodyZ?: number;
+  overshoot?: number;
+  settleMs?: number;
+}
 export interface AvatarPerformanceDirection {
   emotion: AvatarEmotion;
   gesture: AvatarGesture;
@@ -29,6 +42,8 @@ export interface AvatarPerformanceDirection {
    * 兼容只支持单个自定义表情的 VRM 和旧版演出记录。
    */
   modelActions?: string[];
+  /** Authored startup pose that temporarily replaces ambient autonomy. */
+  precision?: AvatarPerformancePrecision;
 }
 
 export const DEFAULT_AVATAR_PERFORMANCE: AvatarPerformanceDirection = {

@@ -13,6 +13,11 @@ import { ChatAppearanceEditor as ModularChatAppearanceEditor } from '../componen
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
+import {
+    COMPANION_FRAME_STYLES,
+    loadCompanionFrameStyle,
+    saveCompanionFrameStyle,
+} from '../components/os/companionFrameStyles';
 
 const CustomIconImage: React.FC<{ value: string; alt: string; preserveOutline?: boolean }> = ({ value, alt, preserveOutline = false }) => {
     const url = useBlobRefUrl(value);
@@ -520,6 +525,7 @@ const Appearance: React.FC = () => {
     addToast(n ? `已还原 ${n} 处聊天白框美化` : '没有需要还原的白框美化', n ? 'success' : 'info');
   };
   const [activeTab, setActiveTab] = useState<'theme' | 'icons' | 'presets' | 'chat'>('theme');
+  const [selectedCompanionFrameStyle, setSelectedCompanionFrameStyle] = useState(loadCompanionFrameStyle);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const [wallpaperUrl, setWallpaperUrl] = useState('');
   const lockWallpaperInputRef = useRef<HTMLInputElement>(null);
@@ -867,6 +873,47 @@ const Appearance: React.FC = () => {
                     )}
                 </section>
 
+                {(theme.skin || 'default') === 'companion' && (
+                    <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100" data-testid="companion-frame-style-picker">
+                        <div className="flex items-start justify-between gap-3">
+                            <div>
+                                <h2 className="text-sm font-bold text-slate-500 tracking-widest">陪伴桌面框架</h2>
+                                <p className="mt-1 text-[10px] leading-relaxed text-slate-400">信息位置和按钮尺寸保持一致，只切换框线、角标与装饰语言。</p>
+                            </div>
+                            <span className="shrink-0 rounded-full bg-violet-50 px-2.5 py-1 text-[9px] font-semibold text-violet-500">独立选择</span>
+                        </div>
+                        <div className="mt-4 grid grid-cols-2 gap-3">
+                            {COMPANION_FRAME_STYLES.map(style => {
+                                const active = selectedCompanionFrameStyle === style.id;
+                                return (
+                                    <button
+                                        key={style.id}
+                                        type="button"
+                                        onClick={() => {
+                                            setSelectedCompanionFrameStyle(style.id);
+                                            saveCompanionFrameStyle(style.id);
+                                            addToast(`陪伴桌面已换成「${style.name}」`, 'success');
+                                        }}
+                                        aria-pressed={active}
+                                        data-testid={`companion-frame-style-${style.id}`}
+                                        className={`relative overflow-hidden rounded-2xl border-2 p-2.5 text-left transition active:scale-[.98] ${active ? 'border-violet-400 ring-2 ring-violet-100' : 'border-slate-200'}`}
+                                    >
+                                        <div className="relative h-14 overflow-hidden rounded-xl" style={{ background: style.swatch }}>
+                                            <span className="absolute inset-x-2 top-2 h-4 border border-white/45 bg-black/15" style={{ borderRadius: style.id === 'mobilegame' ? 999 : style.id === 'editorial' ? 0 : 4 }} />
+                                            <span className="absolute bottom-2 right-2 h-6 w-6 border border-white/55 bg-white/10" style={{ borderRadius: style.id === 'mobilegame' ? 999 : style.id === 'editorial' ? 0 : 6, transform: style.id === 'tech' ? 'rotate(45deg)' : 'none' }} />
+                                            {style.id !== 'editorial' && <span className="absolute bottom-2 left-2 text-[9px] text-white/80">✦</span>}
+                                        </div>
+                                        <div className="mt-2 flex items-center gap-1 text-[11px] font-bold text-slate-700">
+                                            {style.name}
+                                            {active && <span className="text-[9px] text-violet-500">· 当前</span>}
+                                        </div>
+                                        <div className="mt-0.5 text-[8px] leading-snug text-slate-400">{style.description}</div>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </section>
+                )}
                 <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
                     <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4">Preset Themes</h2>
                     <div className="flex gap-3 mb-6 overflow-x-auto no-scrollbar pb-1">

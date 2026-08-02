@@ -13,7 +13,7 @@ export interface AvatarAttentionPointer {
   lastMoved: number;
 }
 
-export type AvatarAutonomyPose = 'turn' | 'glance' | 'lean' | 'think' | 'settle' | 'pointer';
+export type AvatarAutonomyPose = 'turn' | 'glance' | 'lean' | 'think' | 'settle' | 'pointer' | 'focus';
 export type AvatarReactionProfile = 'natural' | 'touch';
 
 export interface AvatarAutonomyFrame {
@@ -99,6 +99,7 @@ export class AvatarAutonomy {
   private lastAudioAccentAt = -Infinity;
   private reaction?: Reaction;
   private behaviorKey = '';
+  private focusStartedAt = 0;
   private phase: number;
   private pose: AvatarAutonomyPose = 'turn';
   private target: PoseTarget;
@@ -169,6 +170,7 @@ export class AvatarAutonomy {
       direction.gaze,
       direction.intensity.toFixed(2),
       direction.modelAction || '',
+      direction.precision ? JSON.stringify(direction.precision) : '',
     ].join('|');
   }
 
@@ -379,12 +381,14 @@ export class AvatarAutonomy {
     const behaviorKey = this.signature(direction, activity);
     if (behaviorKey !== this.behaviorKey) {
       this.behaviorKey = behaviorKey;
+      this.focusStartedAt = now;
       this.react(direction, activity, now);
     }
+    const precision = direction.precision?.lockAutonomy ? direction.precision : undefined;
 
     const dt = Math.min(1 / 30, Math.max(1 / 240, (now - this.lastTime) / 1000));
     this.lastTime = now;
-    if (now >= this.nextLeanAt && !this.reaction && activity !== 'thinking') {
+    if (!precision && now >= this.nextLeanAt && !this.reaction && activity !== 'thinking') {
       this.pose = 'lean';
       this.target = {
         headX: this.randomBetween(-0.12, 0.12),
@@ -396,15 +400,15 @@ export class AvatarAutonomy {
       };
       this.nextDecisionAt = now + this.randomBetween(2_800, 4_200);
       this.nextLeanAt = now + this.randomBetween(14_000, 24_000);
-    } else if (now >= this.nextDecisionAt) {
+    } else if (!precision && now >= this.nextDecisionAt) {
       this.chooseNextPose(now);
     }
 
     const seconds = now / 1000;
     const intensity = clamp(direction.intensity, 0.2, 1);
-    const microX = Math.sin(seconds * 0.71 + this.phase) * 0.022 + Math.sin(seconds * 1.37 + 1.9) * 0.009;
-    const microY = Math.sin(seconds * 0.53 + this.phase * 0.7) * 0.016;
-    const microZ = Math.sin(seconds * 0.43 + this.phase + 2.2) * 0.012;
+    const microX = precision ? 0 : Math.sin(seconds * 0.71 + this.phase) * 0.022 + Math.sin(seconds * 1.37 + 1.9) * 0.009;
+    const microY = precision ? 0 : Math.sin(seconds * 0.53 + this.phase * 0.7) * 0.016;
+    const microZ = precision ? 0 : Math.sin(seconds * 0.43 + this.phase + 2.2) * 0.012;
     let targetHeadX = this.target.headX + microX;
     let targetHeadY = this.target.headY + microY;
     let targetHeadZ = this.target.headZ + microZ;
@@ -413,6 +417,9 @@ export class AvatarAutonomy {
     let targetLean = this.target.lean;
     let targetLift = 0;
     let targetRotation = 0;
+    let targetBodyX = 0;
+    let targetBodyY = 0;
+    let targetBodyZ = 0;
 
     if (activity === 'thinking') {
       targetHeadY -= 0.17;
@@ -453,7 +460,7 @@ export class AvatarAutonomy {
     }
 
     const pointerIsFresh = pointer.active && now - pointer.lastMoved < 2_400;
-    const tracksPointer = pointerIsFresh && direction.gaze === 'viewer' && activity !== 'speaking';
+    const tracksPointer = !precision && pointerIsFresh && direction.gaze === 'viewer' && activity !== 'speaking';
     if (tracksPointer) {
       targetEyeX = pointer.x * 0.88;
       targetEyeY = pointer.y * 0.72;
@@ -461,8 +468,26 @@ export class AvatarAutonomy {
       targetHeadY = targetHeadY * 0.62 + pointer.y * 0.12;
     }
 
-    const randomAccent = this.updateSpeechAccent(now, activity);
-    const audioAccent = this.updateAudioAccent(now, activity, speechEnergy);
+    if (precision) {
+      const settleMs = Math.max(320, Math.min(2_400, precision.settleMs ?? 920));
+      const phase = clamp((now - this.focusStartedAt) / settleMs, 0, 1);
+      const overshoot = clamp(precision.overshoot ?? 0.08, 0, 0.2);
+      const smooth = (value: number) => value * value * (3 - 2 * value);
+      const poseFactor = phase < 0.62
+        ? (1 + overshoot) * smooth(phase / 0.62)
+        : 1 + overshoot * (1 - smooth((phase - 0.62) / 0.38));
+      targetHeadX = (precision.headX ?? 0) * poseFactor;
+      targetHeadY = (precision.headY ?? 0) * poseFactor;
+      targetHeadZ = (precision.headZ ?? 0) * poseFactor;
+      targetEyeX = (precision.eyeX ?? 0) * poseFactor;
+      targetEyeY = (precision.eyeY ?? 0) * poseFactor;
+      targetBodyX = (precision.bodyX ?? 0) * poseFactor;
+      targetBodyY = (precision.bodyY ?? 0) * poseFactor;
+      targetBodyZ = (precision.bodyZ ?? 0) * poseFactor;
+    }
+
+    const randomAccent = precision ? { value: 0, side: 0 } : this.updateSpeechAccent(now, activity);
+    const audioAccent = precision ? { value: 0, side: 0 } : this.updateAudioAccent(now, activity, speechEnergy);
     const accent = audioAccent.value > randomAccent.value ? audioAccent : randomAccent;
     targetHeadY += accent.value * 0.11 * intensity;
     targetHeadX += accent.value * accent.side * 0.035 * intensity;
@@ -556,9 +581,10 @@ export class AvatarAutonomy {
     const headX = this.headX.step(clamp(targetHeadX), dt, 0.72 * (touchSpeed ? 1.45 : 1));
     const headY = this.headY.step(clamp(targetHeadY), dt, 0.68 * (touchSpeed ? 1.45 : 1));
     const headZ = this.headZ.step(clamp(targetHeadZ), dt, 0.64 * (touchSpeed ? 1.45 : 1));
-    const bodyX = this.bodyX.step(clamp(headX * 0.62 + microX * 0.8), dt, 0.34 * (touchSpeed ? 1.2 : 1));
-    const bodyY = this.bodyY.step(clamp(headY * 0.48 + microY * 0.7), dt, 0.31 * (touchSpeed ? 1.2 : 1));
-    const bodyZ = this.bodyZ.step(clamp(headZ * 0.7 + microZ), dt, 0.3 * (touchSpeed ? 1.2 : 1));
+    const bodyFrequency = precision ? 0.62 : 0.34 * (touchSpeed ? 1.2 : 1);
+    const bodyX = this.bodyX.step(clamp(precision ? targetBodyX : headX * 0.62 + microX * 0.8), dt, bodyFrequency);
+    const bodyY = this.bodyY.step(clamp(precision ? targetBodyY : headY * 0.48 + microY * 0.7), dt, precision ? 0.58 : 0.31 * (touchSpeed ? 1.2 : 1));
+    const bodyZ = this.bodyZ.step(clamp(precision ? targetBodyZ : headZ * 0.7 + microZ), dt, precision ? 0.56 : 0.3 * (touchSpeed ? 1.2 : 1));
     const eyeX = this.eyeX.step(clamp(targetEyeX), dt, 2.4, 0.78);
     const eyeY = this.eyeY.step(clamp(targetEyeY), dt, 2.2, 0.78);
     // lean 允许为负（lean-back 后仰）；正向前倾上限稍高。
@@ -566,7 +592,7 @@ export class AvatarAutonomy {
     const lift = this.lift.step(targetLift, dt, 0.5 * (touchSpeed ? 1.3 : 1));
     const rotation = this.rotation.step(targetRotation, dt, 0.48 * (touchSpeed ? 1.3 : 1));
     const breath = (Math.sin(seconds * 1.12 + this.phase * 0.2) + 1) / 2;
-    const pose = tracksPointer ? 'pointer' : this.pose;
+    const pose = precision ? 'focus' : tracksPointer ? 'pointer' : this.pose;
 
     this.frame = {
       headX,

@@ -69,4 +69,52 @@ describe('CompanionHome touch request boundaries', () => {
     expect(source).toContain('getDailyScheduleForChar(character)');
     expect(source).toContain('data-ui-scale="medium"');
   });
+
+  it('routes the three context tiles to distinct character destinations', () => {
+    const source = readFileSync(path.resolve(__dirname, '../components/os/CompanionHome.tsx'), 'utf8');
+
+    expect(source).toContain('onClick={() => openApp(AppID.CheckPhone)} className="min-w-0 border-r');
+    expect(source).toContain('onClick={() => openApp(AppID.Chat)} className="min-w-0 border-r');
+    expect(source).toContain('data-testid="companion-hud-schedule"');
+  });
+
+  it('keeps one companion layout while exposing four backed-up frame languages', () => {
+    const source = readFileSync(path.resolve(__dirname, '../components/os/CompanionHome.tsx'), 'utf8');
+    const appearanceSource = readFileSync(path.resolve(__dirname, '../apps/Appearance.tsx'), 'utf8');
+    const frameSource = readFileSync(path.resolve(__dirname, '../components/os/companionFrameStyles.ts'), 'utf8');
+    const backupSource = readFileSync(path.resolve(__dirname, './desktopSkinBackup.ts'), 'utf8');
+
+    expect(source).toContain('data-companion-frame={frameStyle}');
+    expect(appearanceSource).toContain('data-testid="companion-frame-style-picker"');
+    for (const id of ['tech', 'mobilegame', 'storycard', 'editorial']) {
+      expect(frameSource).toContain(`id: '${id}'`);
+    }
+    expect(backupSource).toContain("'companion_frame_style_v1'");
+  });
+
+  it('keeps system settings on opaque neutral surfaces', () => {
+    const source = readFileSync(path.resolve(__dirname, '../apps/Settings.tsx'), 'utf8');
+
+    expect(source).toContain('bg-[#f3f4f8]');
+    expect(source).toContain('bg-[#fffefe]');
+    expect(source).not.toContain('bg-slate-50/50 flex flex-col');
+  });
+
+  it('runs only user-owned startup dialogue with a focused authored performance', () => {
+    const source = readFileSync(path.resolve(__dirname, '../components/os/CompanionHome.tsx'), 'utf8');
+    const startupSource = readFileSync(path.resolve(__dirname, './companionStartup.ts'), 'utf8');
+    const tamagotchiSource = readFileSync(path.resolve(__dirname, '../components/os/TamagotchiHome.tsx'), 'utf8');
+
+    expect(source).toContain('data-testid="companion-startup-enabled"');
+    expect(source).toContain('data-testid="companion-startup-line"');
+    expect(source).toContain('data-testid="companion-startup-precision"');
+    expect(source).toContain('data-testid="companion-save-startup"');
+    expect(source).toContain('requestCompanionStartupDraft');
+    expect(source).toContain("label: '开机自启'");
+    expect(source).not.toContain('period.lines');
+    expect(source).not.toContain('greetPerformance');
+    expect(startupSource).toContain('lockAutonomy: true');
+    expect(startupSource).toContain('不要替桌面主题说话');
+    expect(tamagotchiSource).not.toContain('POKE_FALLBACK');
+  });
 });
