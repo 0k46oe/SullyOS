@@ -16,6 +16,7 @@ import { armDateResumeAttempt, clearDateResumeAttempt, takeCrashedDateResume } f
 import { BookOpen, Sparkle, CaretLeft, GearSix } from '@phosphor-icons/react';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import StoryTheater from '../components/date/story/StoryTheater';
+import { dateLaunch } from '../utils/dateLaunch';
 
 const DateApp: React.FC = () => {
     const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, apiConfig, addToast, updateCharacter, virtualTime, userProfile, memoryPalaceConfig, dateAutoStartCharId, consumeDateAutoStart, characterGroups } = useOS();
@@ -24,7 +25,7 @@ const DateApp: React.FC = () => {
     // 用本地 state（而非 context）承载：DateApp 切走即卸载，标记随之消失，不会泄漏到
     // 之后从桌面直接打开的见面会话里。
     const [cameFromChat, setCameFromChat] = useState(false);
-    const [meetSurface, setMeetSurface] = useState<'companion' | 'story'>('companion');
+    const [meetSurface, setMeetSurface] = useState<'companion' | 'story'>(() => dateLaunch.peek()?.surface ?? 'companion');
 
     // 记忆宫殿（与聊天侧共用同一套上下文：同 charId、同高水位线）
     // 见面流也需要在 AI 回复后跑一次缓冲区检查 + 自动归档，否则只有"读"没有"写"。
@@ -42,6 +43,21 @@ const DateApp: React.FC = () => {
     const [mode, setMode] = useState<'select' | 'peek' | 'session' | 'settings' | 'history'>('select');
     // Track previous mode for Settings back navigation
     const [previousMode, setPreviousMode] = useState<'select' | 'peek'>('select');
+
+    // 全局更新弹窗等入口可直接落到「剧情」。peek 让首次渲染就显示目标页，
+    // subscribe 则覆盖 DateApp 已经打开的情况；应用后立即消费，绝不污染下次普通打开。
+    useEffect(() => {
+        const applyLaunchIntent = (intent: { surface: 'companion' | 'story' }) => {
+            setCameFromChat(false);
+            setMode('select');
+            setMeetSurface(intent.surface);
+            dateLaunch.consume();
+        };
+
+        const initialIntent = dateLaunch.peek();
+        if (initialIntent) applyLaunchIntent(initialIntent);
+        return dateLaunch.subscribe(applyLaunchIntent);
+    }, []);
 
     // 选择页分页（6 个角色一页，横向翻页）
     const SELECT_PAGE_SIZE = 6;
