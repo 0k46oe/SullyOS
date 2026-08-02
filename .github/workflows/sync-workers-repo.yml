@@ -11,7 +11,7 @@ name: Sync worker bundles to deploy repo
 #   1. 建一个空仓库，比如 <你的账号>/sullyos-workers
 #   2. 建一个有该仓库 contents:write 权限的 fine-grained PAT
 #   3. 把 PAT 存进本仓库的 Actions secret：WORKERS_REPO_TOKEN
-#   4. 如果仓库名不叫 sullyos-workers，改下面的 TARGET_REPO
+#   4. 把下面的 TARGET_REPO 改成那个仓库的 owner/name
 #
 # 没配 secret 时这个 workflow 会直接跳过（不报红），所以先合并再配也行。
 
@@ -37,8 +37,10 @@ concurrency:
   group: sync-workers-repo
   cancel-in-progress: true
 
+# 部署仓库的 owner/name 全写：它跟本仓库不在同一个账号下，
+# 界面和文档里给用户的 fork 链接指的也是这个地址。
 env:
-  TARGET_REPO: sullyos-workers
+  TARGET_REPO: Tosd0/sullyos-workers
 
 jobs:
   sync:
@@ -117,7 +119,7 @@ jobs:
           TOKEN: ${{ secrets.WORKERS_REPO_TOKEN }}
         run: |
           set -euo pipefail
-          target="https://x-access-token:${TOKEN}@github.com/${{ github.repository_owner }}/${TARGET_REPO}.git"
+          target="https://x-access-token:${TOKEN}@github.com/${TARGET_REPO}.git"
           git clone --depth 1 "$target" deploy-repo
           # 先清掉旧内容再铺新的：worker 被删除/改名时目标仓库不该留残骸。
           # .git 之外全清；用户 fork 后自己改的 wrangler.toml 不受影响（那是他们仓库的事）。
