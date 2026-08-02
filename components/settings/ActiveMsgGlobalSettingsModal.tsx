@@ -243,14 +243,19 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
    * 把刚生成的密钥交给用户：存进 state 供展示 + 尽量复制到剪贴板。
    * 输入框是 password 型看不见内容，所以生成时必须把值显示出来，
    * 否则「把同样的值填进 Worker 环境变量」这一步没法做。
+   *
+   * 复制和展示的都是 `变量名=值` 整行。Cloudflare 的 Variables and secrets
+   * 认这个格式：粘一行进去会自动拆成变量名和值两栏，不用自己对着抄名字。
+   * 剪贴板不可用时用户是从下方手抄的，所以展示的那份也得带变量名。
    */
   const revealAndCopy = async (value: string, reveal: (v: string) => void, envName: string) => {
-    reveal(value);
+    const envLine = `${envName}=${value}`;
+    reveal(envLine);
     try {
-      await navigator.clipboard.writeText(value);
-      addToast(`已生成并复制，粘进 Worker 环境变量 ${envName}。`, 'success');
+      await navigator.clipboard.writeText(envLine);
+      addToast(`已复制 ${envName} 整行，粘进 Worker 的 Variables 会自动填好名字和值。`, 'success');
     } catch {
-      addToast('已生成，请手动从下方复制。', 'info');
+      addToast('已生成，请手动从下方复制整行。', 'info');
     }
   };
 
@@ -449,7 +454,10 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
                   {generatedMasterKey ? (
                     <SecretReveal value={generatedMasterKey} />
                   ) : (
-                    <p className="text-[11px] text-slate-400">加密任务内容用的密钥，只存在 Worker 侧。生成后粘进去即可，本页不保存。</p>
+                    <p className="text-[11px] text-slate-400">
+                      加密任务内容用的密钥，只存在 Worker 侧。复制出来是 <code className="font-mono">变量名=值</code> 整行，
+                      粘进 CF 的 Variables 会自动分好两栏。本页不保存。
+                    </p>
                   )}
                 </div>
 

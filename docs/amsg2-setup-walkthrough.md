@@ -92,8 +92,8 @@ env.DB (sullyos-amsg)   D1 Database
 
 1. 点这一节右边的 **配置**
 2. 弹窗里点 **部署 Worker（第一次用先做这个）** 右边的 **展开**
-3. 找到 **AMSG_MASTER_KEY** → 点 **生成并复制**，屏幕上会显示一串 64 位的字符，存进记事本
-4. 往下滚到 **共享密钥（可选）** → 点右边的 **随机**，它会生成一串密码并自动填进输入框。**这一串等下也要填到 Cloudflare**，先原样存进记事本（这个框是密码框看不见内容，生成时的提示条会告诉你已复制到剪贴板）
+3. 找到 **AMSG_MASTER_KEY** → 点 **生成并复制**，屏幕上会显示 `AMSG_MASTER_KEY=` 加一串 64 位字符，整行存进记事本
+4. 往下滚到 **共享密钥（可选）** → 点右边的 **随机**，它会生成一串密码自动填进输入框，下方显示 `AMSG_SERVER_TOKEN=` 开头的整行并复制到剪贴板。**这一串等下也要填到 Cloudflare**，同样整行存进记事本（输入框是密码框看不见内容，下方那行就是给你抄的）
 
 > 「共享密钥」的作用：填了以后，别人光知道你的 Worker 地址也调不动它。
 
@@ -102,7 +102,7 @@ env.DB (sullyos-amsg)   D1 Database
 1. 回到 Cloudflare 的 Worker 页面（Workers & Pages → `sullyos-amsg`）
 2. 顶部选 **Settings**
 3. 最上面一块就是 **Variables and secrets**，点右边的 **+ Add**
-4. 右侧滑出的面板里，每一条都是「Type / Variable name / Value」三格。填完一条点下面的 **Add variable** 加下一条，一共五条：
+4. 右侧滑出的面板里，每一条都是「Type / Variable name / Value」三格。记事本里 `变量名=值` 那样的整行可以直接粘进去，Cloudflare 会自动拆开填好名字和值两格。填完一条点下面的 **Add variable** 加下一条，一共五条：
 
    | Type | Variable name | Value |
    |------|---------------|-------|
