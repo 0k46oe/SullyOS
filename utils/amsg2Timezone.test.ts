@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { formatTaskTime, fromDatetimeLocalValue, toDatetimeLocalValue } from './amsg2Tasks';
 import { buildAmsg2TaskContextText } from './amsg2TaskContext';
-import { formatFireTimeShort } from './amsgFirePack';
-import { resolveSendAtMs } from './amsgFireSchedule';
+import {
+    AMSG_SLOT_CURRENT_TIME, AMSG_SLOT_USER_CLOCK,
+    formatFireTimeShort, renderFirePack, type AmsgFirePack,
+} from './amsgFirePack';
+import { buildFireScheduleBlock, buildFireScheduleTool, resolveSendAtMs } from './amsgFireSchedule';
 import type { ActiveMsg2TaskRecord } from '../types';
 
 // 回归守卫：同一条任务，角色在聊天里看到的时间和到点生成时看到的时间必须是同一个钟。
@@ -47,6 +50,39 @@ describe('给角色看的时间跟 fire 侧同一个钟', () => {
         const forUser = formatTaskTime(AT);
         const forChar = formatTaskTime(AT, CHAR_TZ);
         expect(forUser).not.toBe(forChar);
+    });
+});
+
+// 回归守卫：上面那几条钉的是「角色的钟处处一致」，这一组钉的是另一半——**用户的钟**
+// 以前一个字都没上云。角色只看得到自己那边的时间，「晚上九点跟他说一声」在纽约角色
+// 手里就是排到上海用户的凌晨三点，而且它没有任何线索能察觉这件事。
+describe('角色知道对方那边现在几点', () => {
+    const pack: AmsgFirePack = {
+        v: 6, builtAt: 1, pendingTasks: [], scene: null, lastUserMessageAt: null,
+        template: `当前本地时间（你所在地）：${AMSG_SLOT_CURRENT_TIME}${AMSG_SLOT_USER_CLOCK}`,
+        tzId: CHAR_TZ,
+        userTzId: DEVICE_TZ,
+        targetName: '楪同学',
+    };
+
+    it('两个钟一起出现，各自把主语写在文案里（别长成两个打架的时间）', () => {
+        const out = renderFirePack(pack, AT, '指令');
+        // 角色那边 09:00，用户那边 21:00，同一时刻
+        expect(out).toContain('当前本地时间（你所在地）：2026年8月2日 周日 上午 09:00');
+        expect(out).toContain('对方所在时区参考：楪同学那边现在是 8月2日 晚上 21:00');
+    });
+
+    it('两边同一个时区时不重复报钟', () => {
+        expect(renderFirePack({ ...pack, userTzId: CHAR_TZ }, AT, '指令'))
+            .not.toContain('对方所在时区参考');
+    });
+
+    it('自排工具的说明里提醒了时差（排时间前先想想对方那边几点）', () => {
+        const opts = { nowMs: AT, tz: { tzId: CHAR_TZ } };
+        expect(buildFireScheduleBlock('native', opts)).toContain('对方那边是几点');
+        expect(buildFireScheduleBlock('text', opts)).toContain('对方那边是几点');
+        expect(JSON.stringify(buildFireScheduleTool(opts).function.parameters))
+            .toContain('别把消息排到对方的深夜');
     });
 });
 

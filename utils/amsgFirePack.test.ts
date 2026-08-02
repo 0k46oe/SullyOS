@@ -5,6 +5,7 @@ import {
   AMSG_SLOT_SELF_LOG,
   AMSG_SLOT_TASK_INSTRUCTION,
   AMSG_SLOT_TIME_SINCE_USER,
+  AMSG_SLOT_USER_CLOCK,
   AmsgFirePack,
   AmsgSelfLog,
   FIRE_PACK_VERSION,
@@ -14,6 +15,7 @@ import {
   appendSelfLogEntry,
   buildAwayHint,
   buildStreakReminder,
+  buildUserClockHint,
   createSelfLog,
   describeLastSkip,
   formatFireTimeFull,
@@ -65,9 +67,15 @@ describe('buildAwayHint', () => {
       .toBe('楪同学最近没有主动来找你说话。');
   });
 
-  it('有记录 → 「距离用户」换成「已经」', () => {
+  it('有记录 → 只借时长、句子重拼', () => {
     expect(buildAwayHint('小明', '距离用户上次主动发消息大约 3 小时。'))
-      .toBe('小明已经上次主动发消息大约 3 小时。');
+      .toBe('小明已经大约 3 小时 没主动来找你了。');
+    expect(buildAwayHint('小明', '距离用户上次主动发消息大约 1 天 5 小时。'))
+      .toBe('小明已经大约 1 天 5 小时 没主动来找你了。');
+  });
+
+  it('时长取不出来时退回「最近没来找你」，不吐半截句子', () => {
+    expect(buildAwayHint('小明', '格式变了的一句话')).toBe('小明最近没有主动来找你说话。');
   });
 
   it('空名字回退「对方」', () => {
@@ -106,7 +114,7 @@ describe('formatFireTimeFull / formatFireTimeShort（角色参照系的自然中
 
 describe('renderFirePack', () => {
   const basePack: AmsgFirePack = {
-    v: 5, builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
+    v: 6, builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
     template: [
       `当前本地时间：${AMSG_SLOT_CURRENT_TIME}`,
       AMSG_SLOT_TIME_SINCE_USER,
@@ -116,6 +124,7 @@ describe('renderFirePack', () => {
     ].join('\n'),
     lastUserMessageAt: null,
     tzId: 'UTC',
+    userTzId: 'UTC',
     targetName: '楪同学',
   };
 
@@ -147,13 +156,55 @@ describe('renderFirePack', () => {
       '本次任务指令',
     );
     expect(rendered).toContain('距离用户上次主动发消息大约 1 小时 30 分钟。');
-    expect(rendered).toContain('楪同学已经上次主动发消息大约 1 小时 30 分钟。');
+    expect(rendered).toContain('楪同学已经大约 1 小时 30 分钟 没主动来找你了。');
+  });
+});
+
+// 回归守卫：用户那边的钟以前完全没上云——角色只看得到自己那边的时间，
+// 「晚上九点跟他说一声」在异国恋角色手里就是排到用户的凌晨三点，而且它没有任何线索
+// 能察觉这件事。现在随包带 userTzId，到点渲染成一行参考。
+//
+// 另一半同样重要：这一行是**第二个钟**，措辞必须钉死主语，否则一份 prompt 里两个时间
+// 在打架，模型只会随便挑一个信。
+describe('对方那边现在几点（AMSG_SLOT_USER_CLOCK）', () => {
+  // 纽约角色 / 上海用户：2026-08-02T13:00Z = 纽约 09:00、上海 21:00。
+  const AT = Date.UTC(2026, 7, 2, 13, 0);
+  const nyChar: AmsgFirePack = {
+    v: 6, builtAt: 1, pendingTasks: [], scene: null, lastUserMessageAt: null,
+    template: `当前本地时间（你所在地）：${AMSG_SLOT_CURRENT_TIME}${AMSG_SLOT_USER_CLOCK}`,
+    tzId: 'America/New_York',
+    userTzId: 'Asia/Shanghai',
+    targetName: '楪同学',
+  };
+
+  it('两个钟各写各的主语：角色的是「当前本地时间」，用户的点名是「对方所在时区」', () => {
+    const out = renderFirePack(nyChar, AT, '指令');
+    expect(out).toContain('当前本地时间（你所在地）：2026年8月2日 周日 上午 09:00');
+    expect(out).toContain('对方所在时区参考：楪同学那边现在是 8月2日 晚上 21:00');
+    expect(out).not.toContain('{{');
+  });
+
+  it('同一个时区 → 整行消失（同一个钟报两遍就成了两个打架的时间）', () => {
+    const out = renderFirePack({ ...nyChar, userTzId: 'America/New_York' }, AT, '指令');
+    expect(out).toBe('当前本地时间（你所在地）：2026年8月2日 周日 上午 09:00');
+  });
+
+  it('buildUserClockHint 只认 userTz，不吃运行时本地时区', () => {
+    expect(buildUserClockHint(AT, { tzId: 'UTC' }, { tzId: 'Asia/Tokyo' }, '楪同学'))
+      .toContain('楪同学那边现在是 8月2日 深夜 22:00');
+    // 空 tz（理论上 parseFirePack 已经挡住）→ 不硬编一个时间出来
+    expect(buildUserClockHint(AT, { tzId: 'UTC' }, { tzId: '' }, '楪同学')).toBe('');
+  });
+
+  it('没名字回退「对方」', () => {
+    expect(buildUserClockHint(AT, { tzId: 'UTC' }, { tzId: 'Asia/Shanghai' }, ''))
+      .toContain('对方那边现在是');
   });
 });
 
 describe('parseFirePack', () => {
   const valid: AmsgFirePack = {
-    v: 5, template: 'x', lastUserMessageAt: null, tzId: 'Asia/Shanghai', targetName: 'A',
+    v: 6, template: 'x', lastUserMessageAt: null, tzId: 'Asia/Shanghai', userTzId: 'Asia/Shanghai', targetName: 'A',
     builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
   };
 
@@ -181,6 +232,14 @@ describe('parseFirePack', () => {
     expect(parseFirePack(JSON.stringify({ ...valid, tzId: 42 }))).toBeNull();
   });
 
+  it('userTzId 同样必填（缺了就没法说「对方那边现在几点」）', () => {
+    const { userTzId: _u, ...noUserTz } = valid;
+    expect(parseFirePack(JSON.stringify(noUserTz))).toBeNull();
+    expect(parseFirePack(JSON.stringify({ ...valid, userTzId: '' }))).toBeNull();
+    expect(parseFirePack(JSON.stringify({ ...valid, userTzId: 'America/New_York' }))?.userTzId)
+      .toBe('America/New_York');
+  });
+
   it('坏形状 → null（worker 借此抛 fire-state 错）', () => {
     expect(parseFirePack('not json')).toBeNull();
     expect(parseFirePack('{}')).toBeNull();
@@ -195,7 +254,7 @@ describe('parseFirePack', () => {
 describe('self_log', () => {
   const packAt = 1_700_000_000_000;
   const pack: AmsgFirePack = {
-    v: 5, template: 'x', lastUserMessageAt: null, tzId: 'UTC', targetName: '楪同学',
+    v: 6, template: 'x', lastUserMessageAt: null, tzId: 'UTC', userTzId: 'UTC', targetName: '楪同学',
     builtAt: packAt, pendingTasks: [], scene: null,
   };
   const entry = (id: string, text: string, at = packAt) => ({ id, at, text });
@@ -336,7 +395,7 @@ describe('self_log', () => {
 describe('连排提醒', () => {
   const packAt = 1_700_000_000_000;
   const slotted: AmsgFirePack = {
-    v: 5, lastUserMessageAt: null, tzId: 'UTC', targetName: '楪同学',
+    v: 6, lastUserMessageAt: null, tzId: 'UTC', userTzId: 'UTC', targetName: '楪同学',
     builtAt: packAt, pendingTasks: [], scene: null,
     template: `【最近对话上下文】\n用户：在吗${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
   };
@@ -386,9 +445,9 @@ describe('last_skip 新原因', () => {
 
 describe('fire_pack 任务指令槽', () => {
   const pack: AmsgFirePack = {
-    v: 5,
+    v: 6,
     template: `头部\n${AMSG_SLOT_TASK_INSTRUCTION}\n尾部 ${AMSG_SLOT_CURRENT_TIME}`,
-    lastUserMessageAt: null, tzId: 'Asia/Shanghai', targetName: '楪同学',
+    lastUserMessageAt: null, tzId: 'Asia/Shanghai', userTzId: 'Asia/Shanghai', targetName: '楪同学',
     builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
   };
 
@@ -408,10 +467,11 @@ describe('fire_pack 任务指令槽', () => {
 describe('client_state 值压缩', () => {
   // fire_pack 有几万字，随手编一小段压不出效果也测不出真问题，拿重复的中文段落凑量。
   const bigJson = JSON.stringify({
-    v: 5,
+    v: 6,
     template: '【角色系统设定】你是一个会在深夜突然想起对方的人。\n'.repeat(400),
     lastUserMessageAt: 1_700_000_000_000,
     tzId: 'Asia/Shanghai',
+    userTzId: 'Asia/Shanghai',
     targetName: '楪',
     builtAt: 1_700_000_000_000,
     pendingTasks: [],
@@ -478,7 +538,7 @@ describe('client_state 值压缩', () => {
 // 注意这里钉的是「说明白」，不是「兼容」：版本对不上照样整包打回。
 describe('fire_pack 版本对不上时说清该做什么', () => {
   const pack = (v: unknown) => JSON.stringify({
-    v, template: 'x', lastUserMessageAt: null, tzId: 'UTC', targetName: 'A',
+    v, template: 'x', lastUserMessageAt: null, tzId: 'UTC', userTzId: 'UTC', targetName: 'A',
     builtAt: 1, pendingTasks: [], scene: null,
   });
 

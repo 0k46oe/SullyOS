@@ -210,6 +210,16 @@ export const AMSG_SLOT_TIME_SINCE_USER = '{{AMSG_TIME_SINCE_USER}}';
 export const AMSG_SLOT_AWAY_HINT = '{{AMSG_AWAY_HINT}}';
 export const AMSG_SLOT_TASK_INSTRUCTION = '{{AMSG_TASK_INSTRUCTION}}';
 /**
+ * 「对方那边现在几点」的落点，紧跟在角色自己的当前时间后面。
+ *
+ * 角色的钟按 tzId 走，用户的钟按 userTzId 走——异国恋角色排消息时只看得到自己那边的
+ * 时间，很容易把「晚上九点聊两句」排到用户的凌晨三点。这一行给它一个参照。
+ *
+ * 两个时区一样时 worker 填空串（绝大多数角色都是这种），槽位连带消失：同一个钟报两遍
+ * 只会让模型以为 prompt 里有两个打架的时间。
+ */
+export const AMSG_SLOT_USER_CLOCK = '{{AMSG_USER_CLOCK}}';
+/**
  * 「这份上下文之后，角色自己又发过什么」的落点，紧跟在【最近对话上下文】后面。
  *
  * 槽位而不是把这段拼在整份 prompt 尾巴上：接在对话记录后面读起来才是一条时间线，
@@ -256,6 +266,13 @@ export interface AmsgFirePack {
    * 缺了整包按格式不对打回（parseFirePack → null，worker 抛 fire-state 错）。
    */
   tzId: string;
+  /**
+   * 打包这台设备的 IANA 时区 id，也就是「用户那边」的钟。
+   *
+   * 只用来渲染 AMSG_SLOT_USER_CLOCK 那一行参考——角色自己的一切时间仍按 tzId 走，
+   * 这两个绝不能混着用。必填：缺了整包按格式不对打回（跟 tzId 同一条规矩）。
+   */
+  userTzId: string;
   /** 用户称呼（userProfile.name || '对方'），awayHint 文案用。 */
   targetName: string;
   /**
@@ -343,6 +360,26 @@ export const formatFireTimeShort = (nowMs: number, tz: AmsgTzRef): string => {
   return `${p.month}月${p.day}日 ${pad2(p.hour)}:${pad2(p.minute)}`;
 };
 
+/**
+ * 「对方那边现在几点」那一行（填进 AMSG_SLOT_USER_CLOCK）。
+ *
+ * 一份 prompt 里出现两个时间是很危险的，所以这一行把主语写死：上面那行是角色自己的
+ * 当前时间，这一行明说是对方那边的。两个时区相同时返回空串——同一个钟报两遍，模型
+ * 只会觉得这两个时间在打架。
+ */
+export const buildUserClockHint = (
+  nowMs: number,
+  charTz: AmsgTzRef,
+  userTz: AmsgTzRef,
+  targetName: string,
+): string => {
+  if (!userTz.tzId || userTz.tzId === charTz.tzId) return '';
+  const p = wallClockPartsInZone(nowMs, userTz);
+  const target = targetName || '对方';
+  return `\n（对方所在时区参考：${target}那边现在是 ${p.month}月${p.day}日 ${timeOfDayWord(p.hour)} ${pad2(p.hour)}:${pad2(p.minute)}。`
+    + `你们之间有时差，别拿自己这边的钟去推断 ${target} 此刻醒着还是睡着。）`;
+};
+
 /** 「距离用户上次主动发消息……」三档文案；diffMinutes 为 null 表示没有聊天记录。 */
 export const formatTimeSinceUser = (diffMinutes: number | null): string => {
   if (diffMinutes == null) {
@@ -365,9 +402,12 @@ export const formatTimeSinceUser = (diffMinutes: number | null): string => {
 /** legacyHint 里的「对方已经多久没来」变体，从 timeSinceUser 文案变换而来。 */
 export const buildAwayHint = (targetName: string, timeSinceUser: string): string => {
   const target = targetName || '对方';
-  return timeSinceUser.includes('没有新的聊天记录')
-    ? `${target}最近没有主动来找你说话。`
-    : `${target}${timeSinceUser.replace(/^距离用户/, '已经')}`;
+  if (timeSinceUser.includes('没有新的聊天记录')) return `${target}最近没有主动来找你说话。`;
+  // 只借用里面那段时长，句子重新拼——照搬原句换个开头会读成「楪同学已经上次主动发消息大约 9 小时」。
+  const span = timeSinceUser.match(/大约 (.+?)。?$/)?.[1];
+  return span
+    ? `${target}已经大约 ${span} 没主动来找你了。`
+    : `${target}最近没有主动来找你说话。`;
 };
 
 // ─── self_log：角色自己发出去的那几条 ───
@@ -525,6 +565,8 @@ export const renderFirePack = (
     out = out.replace(TASK_SECTION_HEADING, `${buildStreakReminder(streak)}\n${TASK_SECTION_HEADING}`);
   }
   out = fillSlot(out, AMSG_SLOT_CURRENT_TIME, currentTime);
+  // 对方那边的钟：跟上面那行是两个主体各自的时间，文案里各自写清主语（见 buildUserClockHint）。
+  out = fillSlot(out, AMSG_SLOT_USER_CLOCK, buildUserClockHint(nowMs, tz, { tzId: pack.userTzId }, pack.targetName));
   out = fillSlot(out, AMSG_SLOT_TIME_SINCE_USER, timeSinceUser);
   out = fillSlot(out, AMSG_SLOT_AWAY_HINT, awayHint);
   out = fillSlot(out, AMSG_SLOT_TASK_INSTRUCTION, taskInstruction);
@@ -545,7 +587,7 @@ export const renderFirePack = (
  * 唯一的例外是「说清楚为什么」：见 describeFirePackVersion，worker 拿它拼失败原因，
  * 面板的 lastError 才能直接告诉用户该重贴 bundle 还是该刷新前端。
  */
-export const FIRE_PACK_VERSION = 5;
+export const FIRE_PACK_VERSION = 6;
 
 /**
  * 解析失败时给人看的一句原因。
@@ -577,6 +619,7 @@ export const parseFirePack = (value: string): AmsgFirePack | null => {
       typeof parsed.template === 'string' && parsed.template.length > 0 &&
       (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === 'number') &&
       typeof parsed.tzId === 'string' && parsed.tzId.length > 0 &&
+      typeof parsed.userTzId === 'string' && parsed.userTzId.length > 0 &&
       typeof parsed.targetName === 'string' &&
       typeof parsed.builtAt === 'number' &&
       Array.isArray(parsed.pendingTasks) &&

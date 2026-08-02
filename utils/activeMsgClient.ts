@@ -33,6 +33,7 @@ import {
   AMSG_SLOT_SELF_LOG,
   AMSG_SLOT_TASK_LIST,
   AMSG_SLOT_TIME_SINCE_USER,
+  AMSG_SLOT_USER_CLOCK,
   AmsgFirePack,
   type AmsgLastSkip,
   amsgStateNamespace,
@@ -42,6 +43,7 @@ import {
 import type { AmsgFireScene } from './amsgFireScene';
 import { buildSongPool } from './charMusicSchedule';
 import { getDailyScheduleForChar } from './dailySchedule';
+import { getLocalDateKey } from './localDate';
 import { isScheduleFeatureOn } from './scheduleGenerator';
 import {
   AMSG_GLOBAL_NAMESPACE,
@@ -52,7 +54,7 @@ import {
 } from './amsgToolPack';
 import { listRecallableMonths } from './agenticTools';
 import { ChatPrompts } from './chatPrompts';
-import { resolveCharTimeZone } from './timezone';
+import { nowInTimeZone, resolveCharTimeZone, tzAwarenessNote } from './timezone';
 import { DB } from './db';
 import { copyWorkerBundleToClipboard } from './instantPushClient';
 import { collectMcpFireServers, getMcpUseNativeTools } from './mcpClient';
@@ -266,13 +268,14 @@ const buildTimeGapHint = async (charId: string) => {
 
 // 时间性内容留槽位（AMSG_SLOT_*），由 worker 在 fire 时刻用 renderFirePack 填。
 // 文案模板本身仍在前端这份代码里维护。
-const buildLegacyStyleProactiveHint = (targetName: string) => {
+// includeTime：角色关掉「时间感知」时，这一段里报钟的两行连槽位一起不进模板
+// （见 buildFirePack 的同名判断）。
+const buildLegacyStyleProactiveHint = (targetName: string, includeTime: boolean) => {
   const target = targetName || '对方';
 
   return [
     '【1.0 风格主动消息提示】',
-    `现在是 ${AMSG_SLOT_CURRENT_TIME}。`,
-    AMSG_SLOT_AWAY_HINT,
+    ...(includeTime ? [`现在是 ${AMSG_SLOT_CURRENT_TIME}。`, AMSG_SLOT_AWAY_HINT] : []),
     `这不是 ${target} 正在和你聊天，而是你突然想起了 ${target}，想主动发条消息给他/她。`,
     `像真人随手发消息一样自然一点，可以是分享刚看到的东西、轻轻吐槽、问一句近况、突然想念，或者单纯想找 ${target} 聊两句。`,
     '不要写成汇报近况，不要像在完成任务，也不要解释自己为什么会发这条消息。',
@@ -312,11 +315,25 @@ export const buildFirePack = async (
         })
       : Promise.resolve(null),
   ]);
+  // 角色的时间参照系：开了自定义时区用角色的，没开用设备的。worker 渲染一切给角色看的
+  // 时间（当前时间、日程日期、排程清单）都按它来。
+  const charTz = resolveCharTimeZone(char);
+  const tzId = charTz ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // 用户设备自己的钟。跟 tzId 分开存：角色排消息时得知道「对方那边现在几点」，
+  // 不然异国恋角色会把「晚上聊两句」排到用户的凌晨三点，而且没有任何线索能让它避开。
+  const userTzId = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // 时间相关的行整块跟着角色的「时间感知」开关走：关掉的角色在前台连今天几号都读不到
+  // （buildTimeAwarenessBlock 直接返回空串），主动消息这边却精确报出年月日 + 星期，
+  // 是同一个开关的两套行为。关掉时这几行连槽位一起不进模板。
+  // 排程工具的 send_at 说明不受影响（那份在 amsgFireSchedule）：排时间本来就得知道现在几点。
+  const timeAware = char.timeAwarenessEnabled !== false;
   // 只摘渲染会读到的字段：整份日程里还挂着每个时段缓存的小剧场台词和看板图，
   // 带上去只是白占云端状态的体积（fire_pack 本来就有几万字）。
   const scene: AmsgFireScene | null = schedule
     ? {
         charId: char.id,
+        // 这份表是角色当地「今天」的安排，到点先比日期再用（见 renderFireSceneBlock）。
+        dateKey: getLocalDateKey(nowInTimeZone(tzId)),
         schedule: {
           slots: schedule.slots.map((s) => ({
             startTime: s.startTime,
@@ -331,7 +348,12 @@ export const buildFirePack = async (
         songPool: buildSongPool(char).map((s) => ({ id: s.id, name: s.name, artists: s.artists })),
       }
     : null;
-  const legacyHint = buildLegacyStyleProactiveHint(userProfile.name || '对方');
+  const legacyHint = buildLegacyStyleProactiveHint(userProfile.name || '对方', timeAware);
+  // 前台每轮都注入的时差说明（「你身处 X 时区……对方可能在不同时区」）。它是静态文案、
+  // 不随时间变，所以打包时就烤进模板；到点由 AMSG_SLOT_USER_CLOCK 补上「对方那边现在
+  // 几点」。fire 侧的角色设定是 skipTimeAwareness 建的，整块时间感知都被抹掉了，
+  // 不在这里补回来的话，最容易撞用户睡觉的恰恰是主动消息。
+  const tzNote = timeAware ? tzAwarenessNote(charTz).trim() : '';
   // 按角色可见性过滤表情包：主动消息不经过 Chat.tsx 的 aiVisibleEmojis/visibleCategories，
   // 必须在这里复用同一套过滤，否则角色会用到只对其他角色开放的表情包。
   const { emojis, categories } = ChatPrompts.filterVisibleEmojis(
@@ -391,22 +413,29 @@ export const buildFirePack = async (
     '',
     '【角色系统设定】',
     systemPrompt,
-    '（注意：上面角色设定里的情绪、印象等状态是最近一次聊天时的快照。此刻的时间、你正在做什么，以下方「当前时刻补充」为准。）',
+    `（注意：上面角色设定里的情绪、印象等状态是最近一次聊天时的快照。${timeAware ? '此刻的时间、你正在做什么' : '你此刻正在做什么'}，以下方「当前时刻补充」为准。）`,
     '',
     '【最近对话上下文】',
     // 槽位直接黏在最后一行后面（不单独占一行）：worker 到点没有可写的自述时填空串，
     // 输出跟没这个槽位一模一样；有内容时那段自带前导空行，见 renderSelfLogBlock。
     `${recentTranscript || '（暂时没有最近聊天记录）'}${AMSG_SLOT_SELF_LOG}`,
     '',
-    '【当前时刻补充】',
     // 「此刻在做什么」紧跟当前时间：日程时段本来就要对着钟读，挨在一起才对得上。
     // 没日程的角色 worker 填空串，这一行连带消失（那段自带前导空行，见 renderFireSceneBlock）。
-    `当前本地时间：${AMSG_SLOT_CURRENT_TIME}${AMSG_SLOT_SCENE}`,
+    // 时区那两行也挨着钟：静态说明打包时就烤好，「对方那边现在几点」由 worker 到点现算——
+    // 一个是角色自己的钟、一个是用户的钟，各自把主语写在文案里，别让模型以为在打架。
+    ...(timeAware
+      ? [
+          '【当前时刻补充】',
+          `当前本地时间（你所在地）：${AMSG_SLOT_CURRENT_TIME}${tzNote ? `\n${tzNote}` : ''}${AMSG_SLOT_USER_CLOCK}${AMSG_SLOT_SCENE}`,
+        ]
+      // 关了时间感知的架空角色：整段只剩「你在做什么 / 外面什么样」，一个钟都不给。
+      : [`【当前时刻补充】${AMSG_SLOT_SCENE}`]),
     // 排程清单跟在时间后面：它整段都在讲「几点会发生什么」，挨着当前时刻读才对得上。
     // 没有待触发任务时 worker 填空串，这一行连带消失。
     // 最后是「外面的世界此刻什么样」（节日 / 天气 / 热搜）：跟时间同属「此刻的读数」，
     // 一样由 worker 到点现拉现填，拉不到就整段消失。
-    `${AMSG_SLOT_TIME_SINCE_USER}${AMSG_SLOT_TASK_LIST}${AMSG_SLOT_REALTIME_WORLD}`,
+    `${timeAware ? AMSG_SLOT_TIME_SINCE_USER : ''}${AMSG_SLOT_TASK_LIST}${AMSG_SLOT_REALTIME_WORLD}`,
     '',
     legacyHint,
     '',
@@ -419,12 +448,13 @@ export const buildFirePack = async (
   ].join('\n');
 
   return {
-    v: 5,
+    v: 6,
     template,
     lastUserMessageAt,
-    // 角色的时间参照系：开了自定义时区用角色的，没开用设备的。worker 渲染一切
-    // 给角色看的时间都按它来。
-    tzId: resolveCharTimeZone(char) ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+    // 角色的时间参照系（见上面的 tzId / userTzId）：前者是角色自己的钟，后者是用户那边的，
+    // worker 渲染时两者各管各的一行，绝不混用。
+    tzId,
+    userTzId,
     targetName: userProfile.name || '对方',
     // 这份模板的身份戳：worker 用它判断云端那份「角色自己发过什么」还配不配得上
     // 当前上下文（见 amsgFirePack 的 selfLogMatchesPack）。每打一次包都是新值。
@@ -790,6 +820,10 @@ export const ActiveMsgClient = {
    * 碰；反过来说**排程前必须先登记过**，否则 worker 没地方推、直接拒绝建任务。
    *
    * 幂等：重复调用只是把同一份再写一遍，启动自检可以无脑调。
+   *
+   * 「一个用户一份」是有意为之，不是待修的限制：worker 上按 user_id 存单行，后登记的
+   * 设备直接顶掉前一台，主动消息只会推到最后登记的那一台。所以不支持多设备同时收——
+   * 一般也不会有人同时开着两台设备玩，真开了的话，「另一台不响了」就是正常现象。
    */
   async registerPushSubscription(): Promise<void> {
     const config = await ensureWorkerReady();
@@ -1349,6 +1383,25 @@ export const ActiveMsgClient = {
     } catch {
       return null;
     }
+  },
+
+  /**
+   * 往云端 client_state 的某个 namespace/key 上写一份内容（不存在就新建，已有就覆盖）。
+   *
+   * 云端状态的读写都从这个模块走：worker 地址、用户身份、鉴权初始化都在这里一处备齐，
+   * 别处要写云端状态时调这个函数就行，不用自己再建一条连接。
+   *
+   * 写失败会抛错（内部带网络抖动重试），交调用方决定是重试还是放弃——静默吞掉的话
+   * 云端留的就是上一份旧内容，而调用方以为自己已经写成功了。
+   */
+  async writeClientStateValue(namespace: string, key: string, value: string): Promise<void> {
+    const config = await ensureWorkerReady();
+    const client = await initializeClient(config);
+    await putClientStateOrThrow(
+      client,
+      [{ namespace, key, value, updatedAt: Date.now() }],
+      '写入云端状态',
+    );
   },
 
   /**

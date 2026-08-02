@@ -31,7 +31,10 @@ import {
   ActiveMsgClient, buildFirePack, clearNamespaceValuesOrThrow, dropStaleSubscription,
   putClientStateOrThrow, readAmsgFailKind, toRemoteAvatarUrl,
 } from './activeMsgClient';
-import { AMSG_SLOT_CURRENT_TIME, AMSG_SLOT_REALTIME_WORLD, AMSG_SLOT_SCENE } from './amsgFirePack';
+import {
+  AMSG_SLOT_CURRENT_TIME, AMSG_SLOT_REALTIME_WORLD, AMSG_SLOT_SCENE,
+  AMSG_SLOT_TASK_LIST, AMSG_SLOT_TIME_SINCE_USER, AMSG_SLOT_USER_CLOCK,
+} from './amsgFirePack';
 import * as dailySchedule from './dailySchedule';
 import { ChatPrompts } from './chatPrompts';
 import { DB } from './db';
@@ -446,6 +449,35 @@ describe('ActiveMsgClient.clearClientState', () => {
   });
 });
 
+// 云端状态的写口：调用方只给 namespace/key/value，连接与鉴权都在客户端内部备好。
+// 钉住「写到指定 namespace/key」，免得别处为了写一条状态自己另建一条连接。
+describe('ActiveMsgClient.writeClientStateValue', () => {
+  beforeEach(() => {
+    reiClient.init.mockReset().mockResolvedValue(undefined);
+    reiClient.putClientState.mockReset().mockResolvedValue({ success: true });
+  });
+
+  it('把值写到指定的 namespace/key', async () => {
+    await ActiveMsgClient.writeClientStateValue('amsg:char:c1', 'self_log', '{"v":1}');
+
+    expect(reiClient.putClientState).toHaveBeenCalledTimes(1);
+    const entries = reiClient.putClientState.mock.calls[0][0];
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      namespace: 'amsg:char:c1',
+      key: 'self_log',
+      value: '{"v":1}',
+    });
+    expect(entries[0].updatedAt).toEqual(expect.any(Number));
+  });
+
+  it('写失败要抛错，不能静默留着云端的旧内容', async () => {
+    reiClient.putClientState.mockResolvedValue({ success: false, error: { message: 'D1 busy' } });
+    await expect(runWithTimers(ActiveMsgClient.writeClientStateValue('amsg:char:c1', 'self_log', 'x')))
+      .rejects.toThrow(/D1 busy/);
+  });
+});
+
 // 回归守卫：按 namespace 写空的清法只服务「删角色」。要是哪天被顺手用在全局
 // namespace 上，tool_config 会被清成空壳 —— 症状跟上面那条一模一样，而且更隐蔽
 // （不是删行，是留个空值，读得到但 parse 不出来）。
@@ -508,8 +540,73 @@ describe('buildFirePack 的时区参照系与模板（①）', () => {
 
   it('当前时间槽位保留：worker 到点现算填入（1.0 提示块的「现在是」也是槽位）', async () => {
     const out = await pack(baseChar());
-    expect(out.template).toContain(`当前本地时间：${AMSG_SLOT_CURRENT_TIME}`);
+    expect(out.template).toContain(`当前本地时间（你所在地）：${AMSG_SLOT_CURRENT_TIME}`);
     expect(out.template).toContain(`现在是 ${AMSG_SLOT_CURRENT_TIME}`);
+  });
+
+  // 回归守卫：用户设备的时区以前一个字都没上云。角色只看得到自己那边的钟，
+  // 「晚上九点跟他说一声」在异国恋角色手里就是排到用户的凌晨三点，而且它无从察觉。
+  it('随包带上用户设备时区，并在当前时间后面留「对方那边几点」的槽位', async () => {
+    const out = await pack(baseChar({ customTimezoneEnabled: true, customTimezone: 'America/New_York' }));
+    expect(out.userTzId).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    // 两个钟必须挨在一起、各自标明主语，别散落在 prompt 两头长成两个打架的时间。
+    expect(out.template).toContain(`当前本地时间（你所在地）：${AMSG_SLOT_CURRENT_TIME}`);
+    expect(out.template).toContain(AMSG_SLOT_USER_CLOCK);
+    expect(out.template.indexOf(AMSG_SLOT_USER_CLOCK))
+      .toBeGreaterThan(out.template.indexOf(AMSG_SLOT_CURRENT_TIME));
+  });
+
+  // 回归守卫：前台每轮都有「你身处 X 时区……对方可能在不同时区」，而 fire 侧的角色设定是
+  // skipTimeAwareness 建的、整块时间感知都被抹掉了。不在打包时补回来的话，最容易撞用户
+  // 睡觉的恰恰是主动消息。这段文案是静态的，所以直接烤进模板。
+  it('开了自定义时区的角色，时差说明烤进模板', async () => {
+    const out = await pack(baseChar({ customTimezoneEnabled: true, customTimezone: 'America/New_York' }));
+    expect(out.template).toContain('你身处');
+    expect(out.template).toContain('存在时差');
+    // 位置在当前时间之后：那句话说的就是「上面的当前时间是你那边的」。
+    expect(out.template.indexOf('你身处')).toBeGreaterThan(out.template.indexOf(AMSG_SLOT_CURRENT_TIME));
+  });
+
+  it('没开自定义时区的角色不注入时差说明（跟前台一致）', async () => {
+    expect((await pack(baseChar())).template).not.toContain('你身处');
+  });
+
+  // 回归守卫：timeAwarenessEnabled=false 的架空角色在前台连今天几号都读不到
+  // （buildTimeAwarenessBlock 直接返回空串），主动消息这边却精确报出年月日 + 星期。
+  // 同一个开关不能有两套行为。
+  describe('关掉时间感知的角色：模板里一个钟都不给', () => {
+    const noTime = () => pack(baseChar({
+      timeAwarenessEnabled: false,
+      customTimezoneEnabled: true,
+      customTimezone: 'America/New_York',
+    }));
+
+    it('当前时间 / 1.0 提示块的「现在是」/ 距上次多久 / 对方那边几点，全都不进模板', async () => {
+      const { template } = await noTime();
+      expect(template).not.toContain(AMSG_SLOT_CURRENT_TIME);
+      expect(template).not.toContain('当前本地时间');
+      expect(template).not.toContain('现在是');
+      expect(template).not.toContain(AMSG_SLOT_TIME_SINCE_USER);
+      expect(template).not.toContain(AMSG_SLOT_USER_CLOCK);
+      expect(template).not.toContain('你身处');
+    });
+
+    it('跟时间无关的几段照留（别顺手把整个「当前时刻补充」砍掉）', async () => {
+      const { template } = await noTime();
+      expect(template).toContain('【当前时刻补充】');
+      expect(template).toContain(AMSG_SLOT_SCENE);
+      expect(template).toContain(AMSG_SLOT_TASK_LIST);
+      expect(template).toContain(AMSG_SLOT_REALTIME_WORLD);
+      // 1.0 提示块本身还在，只是不报钟了
+      expect(template).toContain('【1.0 风格主动消息提示】');
+    });
+
+    it('时间感知开着的角色照常有这几行（免得上面几条永远成立）', async () => {
+      const { template } = await pack(baseChar());
+      expect(template).toContain(AMSG_SLOT_CURRENT_TIME);
+      expect(template).toContain(AMSG_SLOT_TIME_SINCE_USER);
+      expect(template).toContain(AMSG_SLOT_USER_CLOCK);
+    });
   });
 
   // 「此刻在做什么」不烤成文字，随包带原始作息表让 worker 到点现挑。烤死的话，
@@ -523,7 +620,25 @@ describe('buildFirePack 的时区参照系与模板（①）', () => {
     const out = await pack(baseChar({ scheduleFeatureEnabled: true }));
     expect(out.scene?.schedule?.slots).toHaveLength(1);
     expect(out.scene?.charId).toBe('char-1');
-    expect(out.template).toContain(`当前本地时间：${AMSG_SLOT_CURRENT_TIME}${AMSG_SLOT_SCENE}`);
+    expect(out.template).toContain(`${AMSG_SLOT_USER_CLOCK}${AMSG_SLOT_SCENE}`);
+  });
+
+  // 回归守卫：作息表里只有「几点做什么」，没有日期。周五晚打的包周日上午触发时，
+  // 光按墙钟时分照样挑得出「09:00 晨会」。带上打包那天的日期，到点先比日期再用。
+  it('作息表随包带打包那天的日期（角色当地日历日）', async () => {
+    vi.spyOn(dailySchedule, 'getDailyScheduleForChar').mockResolvedValue({
+      id: 's', charId: 'char-1', date: '2026-08-02', generatedAt: 0,
+      slots: [{ startTime: '08:00', activity: '晨跑' }],
+    } as any);
+
+    const out = await pack(baseChar({
+      scheduleFeatureEnabled: true,
+      customTimezoneEnabled: true,
+      customTimezone: 'America/New_York',
+    }));
+    expect(out.scene?.dateKey).toBe(
+      new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date()),
+    );
   });
 
   it('角色没开日程 → scene 为 null（槽位到点被抹平）', async () => {

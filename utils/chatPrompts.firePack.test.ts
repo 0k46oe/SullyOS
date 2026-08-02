@@ -138,6 +138,41 @@ describe('forFirePack —— 打包时刻的状态一律不烤进模板', () => 
     }, 20000);
 });
 
+// 回归守卫：「用户此刻也在《彼方》里」说的是用户当下挂在哪个房间。烤进模板之后，
+// 用户下线好几个小时了，角色还在说「看你小人挂在听歌房」。worker 够不着用户此刻的
+// 彼方状态，所以这一段没有到点补的槽位，属于「不补」的那一类。
+describe('彼方：用户此刻挂在哪个房间不进打包', () => {
+    const vrChar = () => baseChar({ id: 'char-fp-vr', vrState: { enabled: true } });
+    const vrUser = {
+        name: '条条',
+        vrState: { enabled: true, currentRoom: 'music', activity: '发呆中' },
+    } as any;
+
+    const buildVr = async (forFirePack: boolean) => {
+        const parts = await ChatPrompts.buildSystemPromptParts(
+            vrChar(), vrUser, [], [], [], [],
+            realtimeConfig, undefined, undefined, undefined, undefined, undefined,
+            forFirePack ? { forFirePack: true } : undefined,
+        );
+        return `${parts.stable}\n${parts.volatileState}`;
+    };
+
+    it('前台聊天照常告诉角色用户挂在哪个房间', async () => {
+        const out = await buildVr(false);
+        expect(out).toContain('此刻也在《彼方》');
+        expect(out).toContain('【听歌房】');
+        expect(out).toContain('发呆中');
+    });
+
+    it('打包时整段不进；《彼方》是什么的常驻框定照留（那个不随时间变）', async () => {
+        const out = await buildVr(true);
+        expect(out).not.toContain('此刻也在《彼方》');
+        expect(out).not.toContain('【听歌房】');
+        expect(out).not.toContain('发呆中');
+        expect(out).toContain('关于《彼方》');
+    });
+});
+
 describe('天气开着但角色关了时间感知', () => {
     it('不该从天气块里漏出「当前真实时间」', async () => {
         const char = baseChar({ id: 'char-fp-notime', timeAwarenessEnabled: false });
