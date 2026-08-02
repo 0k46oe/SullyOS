@@ -3,6 +3,7 @@ import Modal from '../os/Modal';
 import { DB } from '../../utils/db';
 import { isSameCoreModel, isFixedPromptBlockLabel } from '../../utils/apiCallLog';
 import type { ApiCallLogEntry, PromptBlockStat } from '../../utils/apiCallLog';
+import { trackEvent } from '../../utils/analytics';
 
 interface ApiCallLogModalProps {
     isOpen: boolean;
@@ -39,6 +40,13 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
             // DB 里已按新→旧 unshift，这里再兜底排一次序
             data.sort((a: ApiCallLogEntry, b: ApiCallLogEntry) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
             setEntries(data);
+            // 这一批记录里只要有一条「实际后端」跟请求的模型对不上，就记一次。
+            // 只记「出现过」这件事，模型名一个字都不带出去。
+            if (data.some((e: ApiCallLogEntry) =>
+                !!e.backendModel && e.backendModel !== e.model && !isSameCoreModel(e.model, e.backendModel)
+            )) {
+                trackEvent('记录里出现模型不符警告');
+            }
         } catch {
             setEntries([]);
         } finally {
@@ -54,6 +62,7 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
         if (!window.confirm('确定清空所有 API 调用记录吗？此操作不可撤销。')) return;
         await DB.clearApiCallLog();
         setEntries([]);
+        trackEvent('清空 API 调用记录');
     }, []);
 
     return (
@@ -84,7 +93,7 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                     只保留最近 <span className="font-semibold text-slate-500">5 天</span>的调用，超期自动丢弃。记录在你本地浏览器，不上传。
                 </p>
                 <button
-                    onClick={() => setShowHelp(v => !v)}
+                    onClick={() => { if (!showHelp) trackEvent('打开实际后端字段说明'); setShowHelp(v => !v); }}
                     className={`shrink-0 w-5 h-5 rounded-full text-[11px] font-bold leading-none flex items-center justify-center transition-colors ${
                         showHelp ? 'bg-primary text-white' : 'bg-slate-200 text-slate-500'
                     }`}
@@ -159,7 +168,7 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                         return (
                             <div
                                 key={e.id}
-                                onClick={hasBreakdown ? () => setExpandedId(expanded ? null : e.id) : undefined}
+                                onClick={hasBreakdown ? () => { if (!expanded) trackEvent('展开单条输入构成'); setExpandedId(expanded ? null : e.id); } : undefined}
                                 className={`rounded-2xl border p-3 ${
                                     e.ok ? 'bg-white/70 border-slate-200/60' : 'bg-rose-50/60 border-rose-200/60'
                                 } ${hasBreakdown ? 'cursor-pointer active:scale-[0.99] transition-transform' : ''}`}
