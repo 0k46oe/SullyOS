@@ -31,6 +31,13 @@ public/instant-worker.bundle.js
 # xiaohongshu-skills (cloned dependency)
 xiaohongshu-skills/
 
+# wrangler 本地开发：.dev.vars 装的是 worker secrets（master key / VAPID 私钥），
+# .wrangler/ 是本地 D1 数据与缓存，两样都不进仓库。
+**/.dev.vars
+**/.dev.vars.*
+!**/.dev.vars.example
+**/.wrangler/
+
 # git worktrees
 .worktrees/
 .claude/
