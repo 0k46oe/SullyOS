@@ -9,7 +9,7 @@ import { computeCurrentListening, getCurrentSlot } from './charMusicSchedule';
 import { getCharLyricSnippet } from './charLyricCache';
 import { MusicCfg, loadMusicCfgStandalone } from '../context/MusicContext';
 import { RealtimeContextManager, NotionManager, FeishuManager, defaultRealtimeConfig } from './realtimeContext';
-import { isScheduleFeatureOn } from './scheduleGenerator';
+import { isScheduleFeatureOn } from './scheduleFeature';
 import { VOICE_ACTING_GUIDE } from './minimaxTts';
 import { FISH_VOICE_ACTING_GUIDE } from './fishAudioTts';
 import { getTtsProvider, getVoicePromptOverride } from './ttsProvider';
@@ -957,6 +957,7 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                     const source = m.metadata?.source;
                     if (source === 'call') return '[通话]';
                     if (source === 'date') return '[约会]';
+                    if (source === 'story_theater_memory') return `[剧情：${m.metadata?.theaterTitle || '共同经历'}]`;
                     return '[聊天]';
                 })();
                 
