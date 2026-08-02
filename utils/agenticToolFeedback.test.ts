@@ -52,6 +52,17 @@ describe('describeTool', () => {
     expect(describeTool('some_future_tool')).toBe('some_future_tool');
   });
 
+  // 后台到点时角色能给自己排下一条消息。漏在标签表外的话，回喂会拼出
+  // 「你schedule_active_message，拿回了…」——内部工具名直接进了模型看得见的散文。
+  it('排下一条消息的工具有人话说法，不把内部工具名漏进散文', () => {
+    expect(describeTool('schedule_active_message')).toBe('给自己排下一条消息');
+    expect(buildToolResultMessage({
+      name: 'schedule_active_message',
+      result: { ok: true },
+      history: [{ name: 'schedule_active_message', fingerprint: 'a' }],
+    })).not.toContain('schedule_active_message');
+  });
+
   // 用户自配的 MCP 工具不在标签表里。原名直接回填会拼出「你mcp__get_secret，拿回了…」——
   // 句子读不通，路由用的前缀还漏进了模型能看见的散文（模型照着学就往正文里写假调用）。
   it('MCP 工具剥掉路由前缀，凑成读得通的动宾短语', () => {
@@ -120,6 +131,29 @@ describe('buildToolResultMessage', () => {
     expect(msg).toContain('直接把要发的消息写出来');
   });
 
+  // 「把要发的消息写出来」很容易被读成「从头再写一遍」：模型把已经说出去的几句连同里面的
+  // 标记一起重抄，下游照着标记再执行一次（转账就真的发两次）。所以得明说接着往下写。
+  it('提醒别重写已经说出去的内容和标签', () => {
+    const msg = buildToolResultMessage({ name: 'recall', result: { ok: true }, history });
+    expect(msg).toContain('前面已经说出去的内容和标签不要重写');
+  });
+
+  // 搜索结果里没有任何时间信息，模型看不出这条是今早的还是三年前的，很容易把旧闻
+  // 当成刚发生的事讲给用户听。
+  it('搜索结果带一句「不一定是最新的」', () => {
+    const msg = buildToolResultMessage({
+      name: 'web_search',
+      result: { ok: true, resultsText: '某某公司发布了新品' },
+      history: [{ name: 'web_search', fingerprint: 'a' }],
+    });
+    expect(msg).toContain('不一定是最新的');
+  });
+
+  it('这句只跟着搜索走，别的工具不加', () => {
+    const msg = buildToolResultMessage({ name: 'recall', result: { ok: true }, history });
+    expect(msg).not.toContain('不一定是最新的');
+  });
+
   // 回归守卫：小红书 / MCP 服务器多半跑在用户自己电脑上，后台到点时人睡了机器关了，
   // worker 怎么也连不上。以前这种失败跟「搜过了但没结果」共用一个 reason，模型看见
   // ok:false 就挑个说法圆过去——「我刚在小红书搜了下，没啥好东西诶」。一次根本没发生的
@@ -131,6 +165,10 @@ describe('buildToolResultMessage', () => {
       ['notion_read_diary', 'not_configured'],
       ['web_search', 'no_api_key'],
       ['mcp__get_secret', 'mcp_error'],
+      // empty_content 看着像「跑了但是空的」，实际只在「条目找到了、正文一篇都没读回来」
+      // 时出现——真的空白日记会带着「（空白日记）」正常返回。所以它也是一次读取失败。
+      ['notion_read_diary', 'empty_content'],
+      ['read_note', 'empty_content'],
     ];
 
     it.each(neverRanCases)('%s / %s → 明说这件事没发生', (name, reason) => {
@@ -145,7 +183,7 @@ describe('buildToolResultMessage', () => {
     });
 
     it('「跑了但没东西」不加这句——角色说「我搜了下没啥」是实话', () => {
-      for (const reason of ['no_results', 'not_found', 'empty_content', 'no_logs']) {
+      for (const reason of ['no_results', 'not_found', 'no_logs']) {
         const msg = buildToolResultMessage({
           name: 'xhs_search',
           result: { ok: false, reason },
@@ -169,5 +207,11 @@ describe('buildDuplicateToolMessage', () => {
     const msg = buildDuplicateToolMessage('recall');
     expect(msg).toContain('调取某个月的记忆');
     expect(msg).toContain('没有再去查');
+  });
+
+  // 同上：被打回之后让它「把要发的消息写出来」，模型很容易连前面说过的话带标记一起重写，
+  // 下游就会照着标记再执行一次。
+  it('提醒别重写已经说出去的内容和标签', () => {
+    expect(buildDuplicateToolMessage('recall')).toContain('前面已经说出去的内容和标签不要重写');
   });
 });

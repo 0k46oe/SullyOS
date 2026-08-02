@@ -58,6 +58,10 @@ const TOOL_LABELS: Record<string, string> = {
   xhs_browse: '刷小红书首页',
   xhs_my_profile: '打开自己的小红书',
   xhs_detail: '点开一条小红书笔记',
+  // 后台到点时角色能给自己排下一条消息（worker 的 fire 循环里就这一个非数据工具）。
+  // 漏在表外的话，回喂会拼出「你schedule_active_message，拿回了…」——内部工具名直接
+  // 进了模型能看见的散文里。
+  schedule_active_message: '给自己排下一条消息',
 };
 
 /**
@@ -87,13 +91,17 @@ export const describeTool = (name: string): string => {
 /**
  * 这些 reason 的意思是「这次调用压根没跑到」：没配、没开、连不上、被拦下。
  *
- * 跟「跑了但没东西」（no_results / not_found / empty_content / no_logs）必须分开：后者
- * 角色说「我搜了下没啥」是实话，前者说同一句就是把没发生的事说成发生过。裸 JSON 里
+ * 跟「跑了但没东西」（no_results / not_found / no_logs）必须分开：后者角色说
+ * 「我搜了下没啥」是实话，前者说同一句就是把没发生的事说成发生过。裸 JSON 里
  * 一个 reason 字段拦不住这件事——模型看见 `ok:false` 只会挑个说法圆过去，所以下面
  * 明着写一句「不要说你查过」。
  *
  * 后台触发时最常走的就是这一类：小红书 / MCP 服务器多半跑在用户自己电脑上，
  * 人睡了机器关了，worker 那边怎么也连不上。
+ *
+ * `empty_content` 看着像「跑了但是空的」，其实不是：日记/笔记类工具只有在「条目找到了、
+ * 每一篇正文都没读回来」时才发它（真的空白日记会带着「（空白日记）」正常返回），
+ * 所以它也是一次读取失败。往这个集合里加名字前先确认语义，别照字面猜。
  */
 const NEVER_RAN_REASONS = new Set([
   'unreachable',
@@ -103,6 +111,7 @@ const NEVER_RAN_REASONS = new Set([
   'no_api_key',
   'no_identity',
   'parse_error',
+  'empty_content',
   'unknown_tool',
   'tool_error',
   'mcp_error',
@@ -114,6 +123,17 @@ const neverRan = (result: unknown): boolean => {
   if (!result || typeof result !== 'object') return false;
   const r = result as { ok?: unknown; reason?: unknown };
   return r.ok === false && typeof r.reason === 'string' && NEVER_RAN_REASONS.has(r.reason);
+};
+
+/**
+ * 少数工具的结果需要额外补一句提醒，跟着结果一起回喂。
+ *
+ * 搜索结果里没有任何时间信息（拿回来的只有标题和摘要），模型看不出这条是今早的还是
+ * 三年前的，很容易把一条旧闻当成刚发生的事讲出来——后台主动消息尤其明显，角色会
+ * 兴冲冲地跟用户说一件早就过去的新闻。
+ */
+const TOOL_RESULT_NOTES: Record<string, string> = {
+  web_search: '[系统: 搜索结果不带日期，不一定是最新的——别把旧闻当成刚发生的事说，也别自己给它安一个时间。]',
 };
 
 export const buildToolResultMessage = (opts: {
@@ -137,12 +157,16 @@ export const buildToolResultMessage = (opts: {
     : [
         `[系统: 你${label}，拿回了下面这些]`,
         JSON.stringify(result),
+        ...(TOOL_RESULT_NOTES[name] ? [TOOL_RESULT_NOTES[name]] : []),
         '',
       ];
   return [
     ...head,
     `[系统: 本次已经用过的工具：${used.join('、')}。结果都在上面了，同样的调用不要再来一遍。`,
     '接下来只有两条路：直接把要发的消息写出来，或者用一个还没用过的工具。',
+    // 「把要发的消息写出来」很容易被读成「从头再写一遍」：模型会把已经说出去的几句连同
+    // 里面的标记一起重抄，下游照着标记再执行一次（转账就会真的发两次）。
+    '前面已经说出去的内容和标签不要重写，接着往下写就行——重写一遍，用户那边就会再收到一遍。',
     '别把工具调用当成回答——用户等的是你说的话。]',
   ].join('\n');
 };
@@ -157,5 +181,5 @@ export const buildToolResultMessage = (opts: {
 export const buildDuplicateToolMessage = (name: string): string => [
   `[系统: 你刚刚已经${describeTool(name)}过一次了，参数完全相同，结果就在上面。]`,
   '[系统: 这一次没有再去查。别再重复同样的调用了——现在把要发的消息写出来，',
-  '或者换一个还没用过的工具。]',
+  '或者换一个还没用过的工具。前面已经说出去的内容和标签不要重写，接着往下写就行。]',
 ].join('\n');

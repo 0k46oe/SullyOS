@@ -196,9 +196,9 @@ export async function runRecall(
 
 export type SearchResult =
     | { ok: true; query: string; resultsText: string; rawResultCount: number }
-    | { ok: false; reason: 'no_api_key' | 'no_results'; query: string; message?: string };
+    | { ok: false; reason: 'no_api_key' | 'unreachable' | 'no_results'; query: string; message?: string };
 
-/** Throws on network/transport error — caller wraps in try/catch for byte-equivalent error logging. */
+/** 不抛异常：performSearch 连网络异常都会 catch 成 success:false（见 realtimeFetchCore）。 */
 export async function runSearch(
     args: { query: string },
     ctx: AgenticToolCtx,
@@ -208,6 +208,12 @@ export async function runSearch(
         return { ok: false, reason: 'no_api_key', query: args.query };
     }
     const searchResult = await performSearch(args.query, realtimeConfig.newsApiKey);
+    // 「请求没跑通」和「搜过了但没结果」得分开（同 runXhsSearch）。performSearch 的
+    // success:false 两种都包：断网、代理 5xx、返回不是 JSON，跟真的零结果混在一起。
+    // 都归 no_results 的话，角色会把一次根本没发出去的搜索说成「我刚搜了下，没什么新鲜的」。
+    if (!searchResult.reached) {
+        return { ok: false, reason: 'unreachable', query: args.query, message: searchResult.message };
+    }
     if (!searchResult.success || searchResult.results.length === 0) {
         return { ok: false, reason: 'no_results', query: args.query, message: searchResult.message };
     }
@@ -221,9 +227,9 @@ export async function runSearch(
 
 export type ReadDiaryResult =
     | { ok: true; date: string; diaryText: string; entryCount: number }
-    | { ok: false; reason: 'not_configured' | 'parse_error' | 'not_found' | 'empty_content'; date?: string; dateInput?: string };
+    | { ok: false; reason: 'not_configured' | 'parse_error' | 'unreachable' | 'not_found' | 'empty_content'; date?: string; dateInput?: string };
 
-/** Throws on network/transport error. */
+/** 不抛异常：notion* 系列连网络异常都会 catch 成 success:false（见 realtimeFetchCore）。 */
 export async function runReadDiary(
     args: { date: string },
     ctx: AgenticToolCtx,
@@ -246,7 +252,13 @@ export async function runReadDiary(
         targetDate,
     );
 
-    if (!findResult.success || findResult.entries.length === 0) {
+    // 「查不动」和「那天真没写」是两回事：Notion 凭据过期 / 代理挂了都会走 success:false，
+    // 跟没写日记归成同一个 not_found 的话，角色张口就是「你昨天没写日记呀」——把一次
+    // 根本没查成的事说成查过了，还顺带替用户断言了一件没发生的事。
+    if (!findResult.success) {
+        return { ok: false, reason: 'unreachable', date: targetDate };
+    }
+    if (findResult.entries.length === 0) {
         return { ok: false, reason: 'not_found', date: targetDate };
     }
 
@@ -263,6 +275,9 @@ export async function runReadDiary(
         }
     }
 
+    // 走到这里说明条目找到了、但一篇正文都没读回来 = 全部读取失败。真的空白日记会带着
+    // 「（空白日记）」正常入列，到不了这一步。所以 empty_content 的意思是"读失败"，
+    // 不是"日记是空的"——agenticToolFeedback 把它当"这次没跑成"处理就是为了这个。
     if (diaryContents.length === 0) {
         return { ok: false, reason: 'empty_content', date: targetDate };
     }
@@ -273,11 +288,13 @@ export async function runReadDiary(
 
 // ─── FS_READ_DIARY (Feishu) ─────────────────────────────────────────────────
 
+// 没有 empty_content：飞书那边正文跟着条目一起返回，找到条目就一定有内容
+// （Notion 要逐篇再读一次正文，才会出现「条目找到了、一篇都没读回来」）。
 export type FsReadDiaryResult =
     | { ok: true; date: string; diaryText: string; entryCount: number }
-    | { ok: false; reason: 'not_configured' | 'parse_error' | 'not_found' | 'empty_content'; date?: string; dateInput?: string };
+    | { ok: false; reason: 'not_configured' | 'parse_error' | 'unreachable' | 'not_found'; date?: string; dateInput?: string };
 
-/** Throws on network/transport error. */
+/** 不抛异常：feishuGetDiaryByDate 连网络异常都会 catch 成 success:false（见 realtimeFetchCore）。 */
 export async function runFsReadDiary(
     args: { date: string },
     ctx: AgenticToolCtx,
@@ -302,22 +319,20 @@ export async function runFsReadDiary(
         targetDate,
     );
 
-    if (!findResult.success || findResult.entries.length === 0) {
+    // 同 runReadDiary：飞书 token 拿不到 / 接口报错都是 success:false，跟「那天没写」分开。
+    if (!findResult.success) {
+        return { ok: false, reason: 'unreachable', date: targetDate };
+    }
+    if (findResult.entries.length === 0) {
         return { ok: false, reason: 'not_found', date: targetDate };
     }
 
     ctx.onProgress?.('diary', `找到 ${findResult.entries.length} 篇飞书日记，正在阅读...`);
 
-    const diaryContents: string[] = [];
-    for (const entry of findResult.entries) {
-        diaryContents.push(`📒「${entry.title}」(${entry.date})\n${entry.content}`);
-    }
-
-    if (diaryContents.length === 0) {
-        return { ok: false, reason: 'empty_content', date: targetDate };
-    }
-
-    const diaryText = diaryContents.join('\n\n---\n\n');
+    // 飞书那边正文是跟着条目一起返回的，不用再逐篇去读。
+    const diaryText = findResult.entries
+        .map(entry => `📒「${entry.title}」(${entry.date})\n${entry.content}`)
+        .join('\n\n---\n\n');
     return { ok: true, date: targetDate, diaryText, entryCount: findResult.entries.length };
 }
 
@@ -325,9 +340,9 @@ export async function runFsReadDiary(
 
 export type ReadNoteResult =
     | { ok: true; keyword: string; noteText: string; entryCount: number }
-    | { ok: false; reason: 'not_configured' | 'not_found' | 'empty_content'; keyword: string };
+    | { ok: false; reason: 'not_configured' | 'unreachable' | 'not_found' | 'empty_content'; keyword: string };
 
-/** Throws on network/transport error. */
+/** 不抛异常：notion* 系列连网络异常都会 catch 成 success:false（见 realtimeFetchCore）。 */
 export async function runReadNote(
     args: { keyword: string },
     ctx: AgenticToolCtx,
@@ -345,7 +360,11 @@ export async function runReadNote(
         3,
     );
 
-    if (!findResult.success || findResult.entries.length === 0) {
+    // 同 runReadDiary：搜不动 ≠ 对方没写过这篇笔记。
+    if (!findResult.success) {
+        return { ok: false, reason: 'unreachable', keyword: args.keyword };
+    }
+    if (findResult.entries.length === 0) {
         return { ok: false, reason: 'not_found', keyword: args.keyword };
     }
 
@@ -362,6 +381,7 @@ export async function runReadNote(
         }
     }
 
+    // 同 runReadDiary：找到条目却一篇都没读回来 = 全部读取失败，不是"笔记是空的"。
     if (noteContents.length === 0) {
         return { ok: false, reason: 'empty_content', keyword: args.keyword };
     }
@@ -478,10 +498,9 @@ export async function runXhsBrowse(
 
 export type XhsMyProfileResult =
     | { ok: true; nickname: string; userId: string; profileStr: string; feedsStr: string; gotProfile: boolean; notes: XhsNote[] }
-    | { ok: false; reason: 'not_enabled' | 'no_identity' };
+    | { ok: false; reason: 'not_enabled' | 'no_identity' | 'unreachable'; message?: string };
 
-/** Throws on network/transport error in the search-fallback path. The getUserProfile inner try/catch
- *  handles the "profile failed → fallback to search" case gracefully (matches original behavior). */
+/** getUserProfile 挂了会降级去搜昵称；主页和降级搜索都没跑通时回 unreachable（见下面的注释）。 */
 export async function runXhsMyProfile(
     _args: Record<string, never>,
     ctx: AgenticToolCtx,
@@ -551,20 +570,32 @@ export async function runXhsMyProfile(
             }
         }
 
-        if (!gotProfile && nickname) {
-            console.log(`📕 [XHS] 降级: 用昵称「${nickname}」搜索...`);
-            ctx.onProgress?.('xhs', '正在搜索你的笔记...');
-            const searchResult = await xhsSearchImpl(xhsConf, nickname);
-            if (searchResult.success && searchResult.notes.length > 0) {
-                collectedNotes = searchResult.notes;
-                cacheXsecTokensImpl(ctx.xhsCaches, searchResult.notes);
-                feedsStr = searchResult.notes.slice(0, 8).map((n, i) =>
-                    `${i + 1}. [noteId=${n.noteId}]「${n.title}」by ${n.author} (${n.likes}赞)\n   ${n.desc || '（无描述）'}`
-                ).join('\n\n');
-            } else {
-                feedsStr = '（没有搜到相关笔记）';
-            }
+    // 主页没打开成功时的退路：拿昵称去搜。这里必须把「搜不动」和「搜过了没有」分开——
+    // 以前两种都写成 feedsStr='（没有搜到相关笔记）' 再回 ok:true，护栏只认 ok:false，
+    // 于是角色照着说「我翻了下我的小红书，一条都没找到」。小红书服务器多半在用户自己
+    // 电脑上，后台到点时人睡了机器关了，这条走得最勤，也就骗得最勤。
+    if (!gotProfile) {
+        if (!nickname) {
+            // 只有 userId，主页请求又挂了，连降级都没得降 —— 这一趟什么都没读到。
+            return { ok: false, reason: 'unreachable' };
         }
+        console.log(`📕 [XHS] 降级: 用昵称「${nickname}」搜索...`);
+        ctx.onProgress?.('xhs', '正在搜索你的笔记...');
+        const searchResult = await xhsSearchImpl(xhsConf, nickname);
+        if (!searchResult.success) {
+            return { ok: false, reason: 'unreachable', message: searchResult.message };
+        }
+        if (searchResult.notes.length > 0) {
+            collectedNotes = searchResult.notes;
+            cacheXsecTokensImpl(ctx.xhsCaches, searchResult.notes);
+            feedsStr = searchResult.notes.slice(0, 8).map((n, i) =>
+                `${i + 1}. [noteId=${n.noteId}]「${n.title}」by ${n.author} (${n.likes}赞)\n   ${n.desc || '（无描述）'}`
+            ).join('\n\n');
+        } else {
+            // 真的搜了、真的一条都没有，这句才说得出口
+            feedsStr = '（没有搜到相关笔记）';
+        }
+    }
 
     if (ctx.lastXhsNotesRef && collectedNotes.length > 0) {
         ctx.lastXhsNotesRef.current = collectedNotes;
@@ -576,10 +607,10 @@ export async function runXhsMyProfile(
 // ─── XHS_DETAIL ─────────────────────────────────────────────────────────────
 
 export type XhsDetailResult =
-    | { ok: true; noteId: string; detailText: string; failed: boolean; commentsUnavailable: boolean }
-    | { ok: false; reason: 'not_enabled'; noteId: string };
+    | { ok: true; noteId: string; detailText: string; commentsUnavailable: boolean }
+    | { ok: false; reason: 'not_enabled' | 'unreachable'; noteId: string; message?: string };
 
-/** Throws on network/transport error. */
+/** 详情没读到时（一个字都没拿回来 / 回了 200 但正文是一句报错）一律回 unreachable。 */
 export async function runXhsDetail(
     args: { noteId: string },
     ctx: AgenticToolCtx,
@@ -682,11 +713,17 @@ export async function runXhsDetail(
         let commentsUnavailable = false;
         if (detailData) {
             if (typeof detailData === 'string') {
+                // 服务器回了 200，正文本身却是一句报错。这跟「一个字都没拿回来」是同一件事：
+                // 这次没读到笔记。走同一条 unreachable，别包成「成功但正文是一句报错」。
                 if (detailData.includes('失败') || detailData.includes('not found')) {
-                    detailText = `[加载失败: ${detailData.slice(0, 200)}]`;
-                } else {
-                    detailText = detailData.slice(0, 5000);
+                    return {
+                        ok: false,
+                        reason: 'unreachable',
+                        noteId: args.noteId,
+                        message: detailData.slice(0, 200),
+                    };
                 }
+                detailText = detailData.slice(0, 5000);
             } else {
                 const innerData = (detailData as any).data && typeof (detailData as any).data === 'object' ? (detailData as any).data : null;
                 const note = innerData?.note || (detailData as any).note || detailData;
@@ -741,11 +778,20 @@ export async function runXhsDetail(
                 detailText = (noteSection + commentsSection).slice(0, 8000);
             }
         } else {
-            detailText = `[加载失败: ${result.error || '无法获取笔记详情，可能需要先在搜索/浏览结果中看到这条笔记'}]`;
+            // 详情一个字都没拿回来（连不上 / 没权限 / 刷新 xsecToken 重试后依然是空）。
+            // 以前这里回 ok:true，正文塞一句「[加载失败: …]」：护栏只认 ok:false，于是这条
+            // 失败被当成正常结果喂给模型——轻则把报错原文抄进消息，重则直接说「我看了这条笔记」。
+            return {
+                ok: false,
+                reason: 'unreachable',
+                noteId: args.noteId,
+                message: result.error || '无法获取笔记详情，可能需要先在搜索/浏览结果中看到这条笔记',
+            };
         }
 
-    const failed = detailText.startsWith('[加载失败');
-    return { ok: true, noteId: args.noteId, detailText, failed, commentsUnavailable };
+    // 走到这里 detailText 一定是真读到的内容：拿不回来和「正文是一句报错」都已经在上面
+    // 回了 ok:false。
+    return { ok: true, noteId: args.noteId, detailText, commentsUnavailable };
 }
 
 // ─── 共用日期解析 (READ_DIARY / FS_READ_DIARY 共用) ─────────────────────────

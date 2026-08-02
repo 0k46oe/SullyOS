@@ -38,10 +38,16 @@ export interface FeishuDiaryPreview {
 /**
  * 主动搜索 - 让AI角色能够主动搜索任意内容
  * Active Search - Let AI characters actively search for anything
+ *
+ * 这个函数任何情况下都不抛异常，网络异常也会被 catch 成 `success: false`。
+ *
+ * 光看 `success` 分不清「请求根本没跑通」和「搜过了，一条都没有」——两者都是 false。
+ * 调用方要是把它们当成同一件事，角色就会把一次没发出去的搜索说成「我刚搜了下，没什么」。
+ * `reached` 就是用来分这两种的：它为 true 才表示真的问到了搜索服务并拿回一份读得懂的结果。
  */
-export const performSearch = async (query: string, apiKey: string): Promise<{ success: boolean; results: SearchResult[]; message: string }> => {
+export const performSearch = async (query: string, apiKey: string): Promise<{ success: boolean; results: SearchResult[]; message: string; reached: boolean }> => {
     if (!query || !apiKey) {
-        return { success: false, results: [], message: '缺少搜索关键词或API Key' };
+        return { success: false, results: [], message: '缺少搜索关键词或API Key', reached: false };
     }
 
     try {
@@ -59,15 +65,15 @@ export const performSearch = async (query: string, apiKey: string): Promise<{ su
         // 先读取 text，避免非 JSON 响应直接 crash
         const text = await response.text();
 
-        // 非 2xx 直接抛错
+        // 非 2xx：没搜成，reached 保持 false
         if (!response.ok) {
             console.error('Search API error:', response.status, text);
             // 尝试解析错误信息
             try {
                 const errJson = JSON.parse(text);
-                return { success: false, results: [], message: `搜索失败: ${errJson.error || response.status}` };
+                return { success: false, results: [], message: `搜索失败: ${errJson.error || response.status}`, reached: false };
             } catch {
-                return { success: false, results: [], message: `搜索失败: ${response.status}` };
+                return { success: false, results: [], message: `搜索失败: ${response.status}`, reached: false };
             }
         }
 
@@ -77,7 +83,8 @@ export const performSearch = async (query: string, apiKey: string): Promise<{ su
             data = JSON.parse(text);
         } catch (e) {
             console.error('Search response not JSON:', text.slice(0, 200));
-            return { success: false, results: [], message: '搜索返回格式错误' };
+            // 回了东西但读不懂，等于不知道搜到了什么，同样不能算"搜过了"
+            return { success: false, results: [], message: '搜索返回格式错误', reached: false };
         }
 
         // Brave Search API 返回结构
@@ -87,13 +94,14 @@ export const performSearch = async (query: string, apiKey: string): Promise<{ su
                 description: item.description || '',
                 url: item.url
             }));
-            return { success: true, results, message: '搜索成功' };
+            return { success: true, results, message: '搜索成功', reached: true };
         }
 
-        return { success: false, results: [], message: '没有找到相关结果' };
+        // 这一条才是真的"搜过了，没有相关结果"
+        return { success: false, results: [], message: '没有找到相关结果', reached: true };
     } catch (e: any) {
         console.error('Search failed:', e);
-        return { success: false, results: [], message: `搜索出错: ${e.message}` };
+        return { success: false, results: [], message: `搜索出错: ${e.message}`, reached: false };
     }
 };
 
@@ -102,6 +110,9 @@ export const performSearch = async (query: string, apiKey: string): Promise<{ su
 /**
  * 按日期查找角色的日记（通过 Worker 代理）
  * 支持一天多篇日记，全部返回
+ *
+ * 不抛异常。`success: false` 只有一个意思：这次查询没跑通（凭据不对 / 代理挂了 / 断网）。
+ * 「那天真的没写日记」是 `success: true` + `entries` 为空——调用方别把这两种混成一件事。
  */
 export const notionGetDiaryByDate = async (
     apiKey: string,
@@ -169,6 +180,9 @@ export const notionGetDiaryByDate = async (
 /**
  * 读取日记页面的完整内容（通过 Worker 代理）
  * 调用 /notion/blocks/:pageId 端点，将 blocks 转换为可读文本
+ *
+ * 不抛异常。`success: false` = 这一篇没读到；页面真的没写字是 `success: true` +
+ * content 为「（空白日记）」。
  */
 export const notionReadDiaryContent = async (
     apiKey: string,
@@ -212,6 +226,8 @@ export const notionReadNoteContent = notionReadDiaryContent;
 
 /**
  * 按关键词搜索用户笔记
+ *
+ * 不抛异常。`success: false` = 这次搜索没跑通；「没有这篇笔记」是 `success: true` + entries 为空。
  */
 export const notionSearchUserNotes = async (
     apiKey: string,
@@ -381,6 +397,9 @@ export const feishuGetToken = async (appId: string, appSecret: string): Promise<
 
 /**
  * 按日期查找角色的日记
+ *
+ * 不抛异常。`success: false` = 这次查询没跑通（拿不到 token / 接口报错 / 断网）；
+ * 「那天真的没写」是 `success: true` + entries 为空。
  */
 export const feishuGetDiaryByDate = async (
     appId: string,
