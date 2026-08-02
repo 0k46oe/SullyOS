@@ -418,7 +418,13 @@ async function saveContentToInbox(payload: any) {
       source: payload?.source,
       messageType: payload?.messageType,
       messageSubtype: payload?.messageSubtype,
+      // 任务身份由库盖在 push 顶层 (taskId / taskUuid / recurrenceType / occurrenceMs),
+      // 客户端端的防穿帮闸与任务认领都读这几个——两条排程路径 (用户排 / 角色自排) 走的
+      // 是同一份, 不会像各自往 metadata 抄那样抄漏一个就判错。
       taskId: payload?.taskId ?? null,
+      taskUuid: payload?.taskUuid ?? null,
+      recurrenceType: payload?.recurrenceType ?? null,
+      occurrenceMs: payload?.occurrenceMs ?? null,
       // sessionId / messageIndex 放到 metadata 里, 主线程 flushInboxToChat 反查 reasoning_buffer
       // + 标记是第几条 (第 1 条才挂 metadata.thinkingChain).
       metadata: {

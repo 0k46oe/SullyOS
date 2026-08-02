@@ -23,6 +23,23 @@ const REQUIRED_WORKER_FEATURES = [
   'agentic-scratch',
   // 后台 fire 每轮把 tools 参数带给 LLM（角色在主动消息里用得上用户自配的 MCP 工具）。
   'agentic-fire-tools',
+  // hook 载荷自带 readState / writeState，配置级 hook 不用再自己攒一份写口。
+  'hook-state-accessors',
+  // onAfterSend 拿到本次 fire 的 scratch：自述回写按真正送出去的段数落账。
+  'after-send-scratch',
+  // 任务身份直接挂在 ctx 和 push 顶层，两条排程路径不用各抄一份 metadata。
+  'fire-task-identity',
+  'push-task-identity',
+  // 库导出信封余量常量，push 体积按「库补完字段之后」的尺寸算。
+  'push-envelope-reserved-bytes',
+  // 角色自排撞车时回已存在那行的投影，重跑那轮也记得下账。
+  'schedule-task-duplicate-row',
+  // 循环任务的过期快进也回调，攒下的那几次跳过在面板上看得见。
+  'recurring-stale-skip-hook',
+  // 任务行带时区，daily / weekly 按角色所在时区的墙钟推进。
+  'task-timezone',
+  // 推送订阅按用户存一份，排程不再携带；换订阅后已排的任务自动跟上。
+  'user-push-subscription',
 ];
 // features 之外还必须比版本：这波依赖的能力大多没发独立 flag，光查 features 分不出新旧。
 //   next.5 — GET /messages 投影（charId/clientTaskId）、onBeforeFire 的 { skip } 出口
@@ -34,8 +51,10 @@ const REQUIRED_WORKER_FEATURES = [
 //            bundle 一起上去的。旧 bundle 收到带槽位的 fire_pack 只会把
 //            `{{AMSG_SELF_LOG}}` 原样发给 LLM，而 SERVER_VERSION 是打包时那份
 //            amsg-server 的版本号，正好能把这类旧粘贴认出来。
+//   next.11 — 推送订阅改成按用户存一份：这一档起排程不再携带订阅，前端走
+//            /push-subscription 端点登记，旧 worker 上这个端点不存在。
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
-const REQUIRED_WORKER_VERSION = '2.6.0-next.10';
+const REQUIRED_WORKER_VERSION = '2.6.0-next.11';
 
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';

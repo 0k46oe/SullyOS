@@ -361,11 +361,6 @@ const processInboxMessageWithPostProcessing = async (
     }
   }
 
-  // 角色到点自己给自己排的任务: worker 直接在 D1 建了行, 客户端这边并不知道它存在.
-  // 不认领的话任务照常触发, 但面板列不出来、用户也没法取消——账对不上. 挂在最后一条 push
-  // 上(与 directives 同位置), 这里补进本地清单.
-  await adoptSelfScheduledTasks(message);
-
   // 恢复本 session round 1 工具抓到的 XHS 笔记: instantToolRunner 落了库, 这里读回内存单例.
   // 跨 SW 唤醒 / 页面回收后内存 ref 被清空, 不恢复的话 round 2 的 [[XHS_SHARE]] / 评论 / 点赞
   // 会因 lastXhsNotesRef 为空而静默掉卡片. 持久化优先于内存 (同 session 时两者等价, 重载后只剩持久化).
@@ -486,8 +481,9 @@ function isLastChunk(message: ActiveMsg2InboxMessage): boolean {
  * 送达时的作废判定（防穿帮闸·客户端兜底层）。worker onBeforeFire 已做同一
  * 判定，但它读的 fire_pack 随 amsgStateSync 最多滞后 15s+，且判定通过后还有
  * 10-30s 生成窗口，期间用户又说话就会撞车——这里用本地全量历史再判一次。
- * 判定所需字段全部来自 push 自带的任务 metadata（排程时打进去的），不依赖
- * 本地 config——push 在途期间任务被 renew 换锚也不会误判。
+ * 判定所需字段全部来自 push 自己带的，不依赖本地 config——push 在途期间任务被 renew
+ * 换锚也不会误判。其中 recurrenceType / occurrenceMs 读 push 顶层那份（库盖的，两条
+ * 排程路径同源）；策略与锚点是应用自己的语义，仍在任务 metadata 里。
  *
  * **读不到聊天记录时抛错，不猜。** 拿不准就先别开口：调用方会把消息压回收件箱、
  * 过一会儿等本地存储缓过来再判一次（见 flushInboxToChatImpl 的 expire-unknown 分支）。
@@ -497,14 +493,14 @@ async function evaluateScheduledPushExpired(message: ActiveMsg2InboxMessage): Pr
   const meta = (message.metadata || {}) as Record<string, any>;
   const messages = await DB.getRecentMessagesByCharId(message.charId, 200);
   return shouldExpireFire({
-      policy: meta.amsgExpirePolicy,
-      recurrenceType: meta.amsgRecurrence,
-      anchorMs: meta.amsgAnchorMs,
-      lastUserMessageAt: getLastRealUserMessageAt(messages),
-      nowMs: Date.now(),
-      // 循环任务的窗口锚定到点时刻而不是送达时刻：生成+送达可能比到点晚十几分钟，
-      // 拿 Date.now() 算 10 分钟窗会把撞上对话的消息误放行。
-    occurrenceMs: meta.amsgOccurrenceMs,
+    policy: meta.amsgExpirePolicy,
+    recurrenceType: message.recurrenceType ?? undefined,
+    anchorMs: meta.amsgAnchorMs,
+    lastUserMessageAt: getLastRealUserMessageAt(messages),
+    nowMs: Date.now(),
+    // 循环任务的窗口锚定到点时刻而不是送达时刻：生成+送达可能比到点晚十几分钟，
+    // 拿 Date.now() 算 10 分钟窗会把撞上对话的消息误放行。
+    occurrenceMs: message.occurrenceMs ?? undefined,
   });
 }
 
@@ -833,6 +829,12 @@ const flushInboxToChatImpl = async () => {
       continue;
     }
 
+    // 角色到点自己给自己排的任务：worker 直接在 D1 建了行，客户端这边并不知道它存在。
+    // 记账排在防穿帮闸**之前**——「这条消息该不该说出口」和「这条任务存不存在」是两回事。
+    // 排在闸后面的话，被吞的那条 push 会把任务认领一起带走：面板列不出来、用户取消不掉，
+    // 而它照常到点触发；订阅登记和凭据刷新也都够不着它，成了推不出去又删不掉的幽灵。
+    await adoptSelfScheduledTasks(message);
+
     // ─── 防穿帮闸·客户端兜底 ───
     // 只拦定时任务的 push（source==='scheduled' 且带策略字段）；instant 聊天
     // 回复 source==='instant'，与这道闸无关。吞掉 = 不进聊天流、不重放
@@ -841,13 +843,12 @@ const flushInboxToChatImpl = async () => {
     // 已弹通知。防通知主力是 worker 预检 + chat_presence 活跃会话租约。
     // 排程现状块不在这里记——useChatAI 组请求时独立检出，两侧结论一致。
     if (message.source === 'scheduled' && (message.metadata as any)?.amsgExpirePolicy) {
-      // 缓存键必须含 occurrence（Codex #2）：上游 sessionId 是 sess_task_<行id>，
-      // 循环任务每次 occurrence、同任务重试都复用同一个——裸 sessionId 会把上次
-      // 的判定串给下一次（第一次放行 → 后续永远放行；第一次吞 → 后续全吞）。
-      // amsgClientTaskId / amsgOccurrenceMs 与 amsgExpirePolicy 写在同一份任务 metadata 里
-      // （activeMsgClient 排程时打进去 + worker 到点补 occurrence），进了这个 if 就一定都在。
+      // 缓存键必须含 occurrence（Codex #2）：sessionId 对循环任务的每次 occurrence、
+      // 对同一次的每次重试都可能重复——裸 sessionId 会把上次的判定串给下一次
+      // （第一次放行 → 后续永远放行；第一次吞 → 后续全吞）。occurrence 读 push 顶层
+      // 那份（库盖的，每条任务 push 都有），归属键仍是应用自己写的 clientTaskId。
       const meta = (message.metadata || {}) as Record<string, any>;
-      const fireKey = `${meta.amsgClientTaskId}:${meta.amsgOccurrenceMs}`;
+      const fireKey = `${meta.amsgClientTaskId}:${message.occurrenceMs ?? ''}`;
       const now = Date.now();
       // 多分段 push 的一次 fire 共用一个决定（同吞同放）：get-or-compute + TTL 清扫
       // 抽进 resolveFireExpireDecision，见其单测。
@@ -1072,9 +1073,9 @@ const backfillReasoningSafely = async (sessionId?: string, charId?: string): Pro
 // ─── 订阅变化标记（SW 写，这里读/清）────────────────────────────────────────
 // 浏览器换掉推送订阅时 SW 的 pushsubscriptionchange 会往 ActiveMsg 库 kv store 写
 // 一条固定 key 的标记（见 worker/sw-keep-alive.ts，key 与记录形状两边必须一致）。
-// 这里在启动 / 收到 SW 通知时消费它：把新订阅逐条写回还会响的远端任务
-// （ActiveMsgClient.refreshPushSubscriptionForPendingTasks），全部成功才清标记，
-// 失败 / worker 不支持都留着下次再试。
+// 这里在启动 / 收到 SW 通知时消费它：把新订阅登记到 worker 上那一份用户级订阅
+// （ActiveMsgClient.registerPushSubscription），成功才清标记，失败留着下次再试。
+// 一次覆盖写就覆盖了全部任务——包括角色自排的那些客户端不知道的任务。
 
 export const PUSH_SUBSCRIPTION_CHANGED_KV_ID = 'push_subscription_changed_v1';
 const ACTIVE_MSG_DB_NAME = 'ActiveMsg';
@@ -1118,10 +1119,10 @@ const clearPushSubscriptionChangeMarker = async (): Promise<void> => {
 };
 
 /**
- * 有「订阅已变化」标记就把新订阅刷回已挂的远端任务；返回值只为单测断言。
+ * 有「订阅已变化」标记就把新订阅登记上去；返回值只为单测断言。
  *   - 'no-marker'：没有标记（或读标记本身失败——那就等下次，别为一句自检拦启动）；
- *   - 'refreshed'：刷完了（或压根没有任务要刷），标记已清；
- *   - 'kept'：部分失败 / 抛错，标记保留，下次启动或下次 SW 通知再试。
+ *   - 'refreshed'：登记成功，标记已清；
+ *   - 'kept'：抛错，标记保留，下次启动或下次 SW 通知再试。
  */
 export const refreshPushSubscriptionIfMarked = async (): Promise<'no-marker' | 'refreshed' | 'kept'> => {
   let marked = false;
@@ -1134,16 +1135,12 @@ export const refreshPushSubscriptionIfMarked = async (): Promise<'no-marker' | '
   if (!marked) return 'no-marker';
 
   try {
-    const result = await ActiveMsgClient.refreshPushSubscriptionForPendingTasks();
-    if (result.status === 'partial') {
-      log.warn('订阅刷新未完成，标记保留下次再试', { status: result.status, failed: result.failed });
-      return 'kept';
-    }
+    await ActiveMsgClient.registerPushSubscription();
     await clearPushSubscriptionChangeMarker();
-    log.info('订阅变化已刷回远端任务', { status: result.status, updated: result.updated });
+    log.info('订阅变化已登记到 worker');
     return 'refreshed';
   } catch (e) {
-    log.warn('刷新已挂任务的推送订阅失败，标记保留下次再试', { error: e });
+    log.warn('登记新的推送订阅失败，标记保留下次再试', { error: e });
     return 'kept';
   }
 };

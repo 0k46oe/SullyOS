@@ -46,7 +46,7 @@ export interface ExpireFireInput {
    * 晚十几分钟，拿判定时刻算 10 分钟窗会把撞上对话的消息误放行。worker 在到点当时判定
    * （两者几乎相等），客户端送达兜底则晚得多，所以必须显式给。
    */
-  occurrenceMs: number;
+  occurrenceMs: number | null | undefined;
 }
 
 /**
@@ -59,6 +59,8 @@ export function shouldExpireFire(input: ExpireFireInput): boolean {
   const last = input.lastUserMessageAt;
   if (last == null) return false;
   if (input.recurrenceType === 'daily' || input.recurrenceType === 'weekly') {
+    // 缺触发时刻就算不出窗口，跟缺锚点一样放行——这道闸宁可让兜底层再拦，不误杀。
+    if (input.occurrenceMs == null) return false;
     return last > input.occurrenceMs - ACTIVE_CHAT_WINDOW_MS && last <= input.nowMs;
   }
   const anchor = input.anchorMs;

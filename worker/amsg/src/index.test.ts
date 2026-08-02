@@ -8,7 +8,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import {
   amsgAfterSend, amsgHooks, amsgStaleSkip, attachScheduledTasks, buildWorkerConfig,
-  offloadOversizedPush, pendingSelfLogs,
+  offloadOversizedPush,
   resolveVapidEmail, runFireScheduleTool, runMcpFireTool,
 } from './index';
 import { MAX_PUSH_PAYLOAD_BYTES } from '@rei-standard/amsg-server/cloudflare';
@@ -823,7 +823,9 @@ describe('self_log — 角色自述回写', () => {
     const prompt = fired(await amsgHooks.onBeforeFire(fireCtx)).messages[0].content;
 
     const decision = await amsgHooks.onLLMOutput({
-      sessionId: 'sess_task_42',
+      sessionId: 'sess_task_42@1',
+      taskId: 42,
+      taskUuid: TASK_UUID,
       llmResponse: {},
       llmOutputText: opts.llmOutput,
       contactName: 'Nyah',
@@ -838,19 +840,15 @@ describe('self_log — 角色自述回写', () => {
 
     if (decision.decision === 'finish' && !opts.skipAfterSend) {
       const total = decision.pushPayloads.length;
-      const sentCount = opts.sentCount ?? total;
       await amsgAfterSend({
-        task: { id: 42 },
-        sentCount,
-        total,
-        error: sentCount < total ? new Error('push failed') : null,
+        sentCount: opts.sentCount ?? total,
+        scratch,
+        writeState: store.writeState,
       });
     }
 
-    return { prompt, decision };
+    return { prompt, decision, scratch };
   };
-
-  afterEach(() => pendingSelfLogs.clear());
 
   it('第二次触发能看见第一次发了什么（核心回归守卫）', async () => {
     const store = makeStore(slottedFirePack());
@@ -950,20 +948,20 @@ describe('self_log — 角色自述回写', () => {
   // ⑥ 的核心回归守卫：写库时机从「推送发出前」挪到「发出后」。旧实现在 onLLMOutput
   // 里就落盘——推送全挂时云端记了「说过」，下次 fire 角色接着一句用户根本没收到的话说。
   describe('发送后才写（onAfterSend 回执）', () => {
-    it('onLLMOutput 只登记不落盘；onAfterSend 才写库', async () => {
+    it('onLLMOutput 只挂到 scratch 上不落盘；onAfterSend 才写库', async () => {
       const store = makeStore(slottedFirePack());
-      const { decision } = await runFire(store, {
+      const { decision, scratch } = await runFire(store, {
         sendAt: '2026-07-25T12:00:00.000Z',
         llmOutput: '刚看到楼下那只猫又来了',
         skipAfterSend: true,
       });
       expect(decision.decision).toBe('finish');
       expect(store.selfLog(), '推送还没发出去，不能已经记了「说过」').toBeNull();
-      expect(pendingSelfLogs.get('42')?.texts).toEqual(['刚看到楼下那只猫又来了']);
+      expect((scratch.fire as any).selfLogTexts).toEqual(['刚看到楼下那只猫又来了']);
 
-      await amsgAfterSend({ task: { id: 42 }, sentCount: 1, total: 1, error: null });
+      await amsgAfterSend({ sentCount: 1, scratch, writeState: store.writeState });
       expect(store.selfLog()?.entries.map((e) => e.text)).toEqual(['刚看到楼下那只猫又来了']);
-      expect(pendingSelfLogs.size, '认领后登记表出清').toBe(0);
+      expect((scratch.fire as any).selfLogTexts, '认领后清空，重复回执不会记两遍').toBeNull();
     });
 
     it('部分失败：只把真送出去的前 sentCount 段写进日志，没送出去的正文不进', async () => {
@@ -981,13 +979,13 @@ describe('self_log — 角色自述回写', () => {
 
     it('sentCount=0（推送全挂）不写——用户什么都没收到，云端不能记「说过」', async () => {
       const store = makeStore(slottedFirePack());
-      await runFire(store, {
+      const { scratch } = await runFire(store, {
         sendAt: '2026-07-25T12:00:00.000Z',
         llmOutput: '一段都没送出去的话',
         sentCount: 0,
       });
       expect(store.selfLog()).toBeNull();
-      expect(pendingSelfLogs.size, '认领过就出清，重试的下一条 fire 会重新登记').toBe(0);
+      expect((scratch.fire as any).selfLogTexts, '认领过就清空，重试的下一条 fire 会重新生成').toBeNull();
     });
 
     it('entry.at 是实际发送时刻，不再是名义 occurrenceMs（cron 迟到半小时时名义时刻是谎话）', async () => {
@@ -1004,45 +1002,38 @@ describe('self_log — 角色自述回写', () => {
       expect(entry?.id).toBe(`${CLIENT_TASK_ID}@${Date.parse('2026-07-25T12:00:00.000Z')}`);
     });
 
-    it('onAfterSend 载荷缺 task.id → 不猜不写，也不炸', async () => {
+    // scratch 上没挂本次 fire 的记录：onBeforeFire 抛错、或者这次走的是 skip 出口。
+    it('scratch 上没有本次 fire 的记录 → 不猜不写，也不炸', async () => {
       const store = makeStore(slottedFirePack());
       await runFire(store, {
         sendAt: '2026-07-25T12:00:00.000Z',
         llmOutput: '在干嘛呢',
         skipAfterSend: true,
       });
-      await expect(amsgAfterSend({ sentCount: 1, total: 1, error: null })).resolves.toBeUndefined();
+      await expect(amsgAfterSend({ sentCount: 1, scratch: {}, writeState: store.writeState }))
+        .resolves.toBeUndefined();
       expect(store.selfLog()).toBeNull();
     });
 
-    it('登记表按任务行 id 隔离——并发 8 个 fire 各认各的', async () => {
+    it('并发的两次 fire 各写各的——scratch 是每次 fire 独有的一份', async () => {
       const storeA = makeStore(slottedFirePack());
-      await runFire(storeA, {
+      const storeB = makeStore(slottedFirePack());
+      const a = await runFire(storeA, {
         sendAt: '2026-07-25T12:00:00.000Z',
         llmOutput: 'A 的话',
         skipAfterSend: true,
       });
-      // 另一个角色/任务行并发登记（手工塞第二格；stash/writeState 都给独立的一份，
-      // runFire 的 task.id 写死 42）。
-      const entry42 = pendingSelfLogs.get('42')!;
-      const writeB = vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 }));
-      pendingSelfLogs.set('77', {
-        ...entry42,
-        charId: 'other-char',
-        clientTaskId: 'client-task-77',
-        texts: ['B 的话'],
-        stash: { ...entry42.stash, selfLog: { v: 2, basePackAt: 1, entries: [], tasks: [] } } as any,
-        writeState: writeB as any,
+      const b = await runFire(storeB, {
+        sendAt: '2026-07-25T12:00:00.000Z',
+        llmOutput: 'B 的话',
+        skipAfterSend: true,
       });
 
-      await amsgAfterSend({ task: { id: 77 }, sentCount: 1, total: 1, error: null });
-      expect(pendingSelfLogs.has('42'), 'B 的回执不能把 A 的登记带走').toBe(true);
-      expect(storeA.selfLog(), 'A 的日志此刻还不该落盘').toBeNull();
-      expect(writeB).toHaveBeenCalledWith('amsg:char:other-char', [
-        expect.objectContaining({ key: AMSG_SELF_LOG_KEY }),
-      ]);
+      await amsgAfterSend({ sentCount: 1, scratch: b.scratch, writeState: storeB.writeState });
+      expect(storeB.selfLog()?.entries.map((e) => e.text)).toEqual(['B 的话']);
+      expect(storeA.selfLog(), 'B 的回执不能把 A 的正文带走').toBeNull();
 
-      await amsgAfterSend({ task: { id: 42 }, sentCount: 1, total: 1, error: null });
+      await amsgAfterSend({ sentCount: 1, scratch: a.scratch, writeState: storeA.writeState });
       expect(storeA.selfLog()?.entries.map((e) => e.text)).toEqual(['A 的话']);
     });
   });
@@ -1093,21 +1084,55 @@ describe('自排后续任务', () => {
     expect(stash.selfLog.tasks[0].source).toBe('character');
   });
 
-  it('uuid 由触发时刻推出来 —— fire 重跑撞车不会多排一条', async () => {
+  /** 撞车回执：带上已存在那行的脱敏投影（上游 2.6.0-next.11 起）。 */
+  const dupSchedule = (over: Record<string, unknown> = {}) => vi.fn(async (opts: any) => ({
+    created: false as const,
+    reason: 'duplicate' as const,
+    uuid: opts.uuid,
+    task: {
+      nextSendAt: sendAt,
+      recurrenceType: 'none',
+      messageType: 'auto',
+      clientTaskId: 'client-dup',
+      ...over,
+    },
+  }));
+
+  it('uuid 由触发时刻推出来 —— fire 重跑撞车不多排一条，但这一轮照样记账', async () => {
     const first = makeStash();
     await runFireScheduleTool(first, okSchedule, { send_at: sendAt }, NOW_MS);
     const uuidA = okSchedule.mock.calls[0][0].uuid;
 
-    // 同一次触发重跑：新 stash（fire 重跑会重新挂 scratch），uuid 应该一模一样
+    // 同一次触发重跑：新 stash（fire 重跑会重新挂 scratch），uuid 应该一模一样。
+    // 重跑的起因通常是投递失败——上一轮记的账随那次失败一起没了。这一轮再不记，任务
+    // 就只活在 D1 里：随 push 带不回客户端、面板列不出来、用户也取消不掉。
     okSchedule.mockClear();
     const retry = makeStash();
-    const dup = vi.fn(async (opts: any) => ({ created: false as const, reason: 'duplicate' as const, uuid: opts.uuid }));
+    const remoteSendAt = new Date(NOW_MS + 95 * 60_000).toISOString();
+    const dup = dupSchedule({ nextSendAt: remoteSendAt });
     const out = await runFireScheduleTool(retry, dup, { send_at: sendAt }, NOW_MS);
 
     expect(dup.mock.calls[0][0].uuid).toBe(uuidA);
     expect(out.ok, '撞车对模型来说结果一样：那条确实排上了').toBe(true);
     expect(out.already_scheduled).toBe(true);
-    expect(retry.scheduledTasks, '撞车不重复记账').toHaveLength(0);
+    expect(retry.scheduledTasks, '这一轮也要记下来').toHaveLength(1);
+    expect(retry.selfLog.tasks).toHaveLength(1);
+    // 真正会响的是远端那行的时间，不是这一轮模型想改成的那个。
+    expect(retry.scheduledTasks[0].firstSendTime).toBe(remoteSendAt);
+    expect(out.send_at).toBe(remoteSendAt);
+  });
+
+  // uuid 的序号取自「这一轮已经排了几条」。撞车不记账的话序号不涨，同一轮里第二次排
+  // 会算出同一个 uuid、再撞一次——模型以为排了两条，实际只有一条。
+  it('撞车之后序号照涨：同一轮第二次排的是新任务，不是又撞回同一条', async () => {
+    const stash = makeStash();
+    const dup = dupSchedule();
+    await runFireScheduleTool(stash, dup, { send_at: sendAt }, NOW_MS);
+    await runFireScheduleTool(
+      stash, dup, { send_at: new Date(NOW_MS + 150 * 60_000).toISOString() }, NOW_MS);
+
+    const uuids = dup.mock.calls.map((c: any[]) => c[0].uuid);
+    expect(new Set(uuids).size, '两次调用不能落到同一个 uuid 上').toBe(2);
   });
 
   it('单次 fire 排满就打回，不再调远端', async () => {
@@ -1203,8 +1228,6 @@ describe('空生成写 last_skip', () => {
     return { decision: decision as any, writeState };
   };
 
-  afterEach(() => pendingSelfLogs.clear());
-
   it('空输出 → skip-push 且写 last_skip（reason: empty-generation，带任务定位）', async () => {
     const { decision, writeState } = await runEmptyFire();
     expect(decision.decision).toBe('skip-push');
@@ -1241,43 +1264,102 @@ describe('空生成写 last_skip', () => {
   });
 });
 
-// ⑥ stale 守卫消费端：上游过期不补发时调 onStaleSkip(task, { reason: 'stale', metadata })，
-// 这里写 last_skip 让面板能解释「说好的消息为什么凭空消失」。
+// ⑥ stale 守卫消费端：上游过期不补发时调 onStaleSkip(task, info)，这里写 last_skip
+// 让面板能解释「说好的消息为什么凭空消失」。
 describe('stale 跳过留痕（onStaleSkip）', () => {
-  // config 级 hook 拿不到 writeState，用最近一次 fire 缓存的那份——先跑一次
-  // onBeforeFire 把缓存喂热（生产里同一 isolate 先后处理任务，语义一致）。
-  const primeWriteState = async () => {
-    const { ctx, writeState } = makeCtx({});
-    await amsgHooks.onBeforeFire(ctx);
-    writeState.mockClear();
-    return writeState;
+  const TASK_ROW_UUID = '3637dae1-1461-4444-a747-34e406f67acc';
+  type SkipEntry = { key: string; value: string | null };
+  const makeWriteState = () => vi.fn(
+    async (_namespace: string, _entries: SkipEntry[]) => ({ upserted: 1, skipped: 0, deleted: 0 }));
+  const lastSkipOf = (writeState: ReturnType<typeof makeWriteState>) => {
+    const call = writeState.mock.calls.find(([, entries]) =>
+      entries.some((e) => e.key === AMSG_LAST_SKIP_KEY));
+    return call
+      ? { namespace: call[0], skip: JSON.parse(String(call[1][0].value)) }
+      : null;
   };
 
   it('charId 取 info.metadata.charId，写 reason: stale + 那一次的名义触发时刻', async () => {
-    const writeState = await primeWriteState();
+    const writeState = makeWriteState();
     const occurrence = '2026-07-25T09:00:00.000Z';
     await amsgStaleSkip(
-      { id: 101, uuid: '3637dae1-1461-4444-a747-34e406f67acc', next_send_at: occurrence },
-      { reason: 'stale', metadata: { charId: CHAR_ID } },
+      { id: 101, uuid: TASK_ROW_UUID },
+      {
+        reason: 'stale',
+        action: 'expired',
+        metadata: { charId: CHAR_ID },
+        occurrenceMs: Date.parse(occurrence),
+        skippedCount: 1,
+        nextSendAt: null,
+        writeState,
+      },
     );
-    const call = writeState.mock.calls.find(([, entries]) =>
-      entries.some((e: { key: string }) => e.key === AMSG_LAST_SKIP_KEY));
-    expect(call, '应该写过 last_skip').toBeTruthy();
-    expect(call![0]).toBe(amsgStateNamespace(CHAR_ID));
-    const skip = JSON.parse(String(call![1][0].value));
-    expect(skip.reason).toBe('stale');
-    expect(skip.occurrenceMs).toBe(Date.parse(occurrence));
+    const written = lastSkipOf(writeState);
+    expect(written, '应该写过 last_skip').toBeTruthy();
+    expect(written!.namespace).toBe(amsgStateNamespace(CHAR_ID));
+    expect(written!.skip.reason).toBe('stale');
+    expect(written!.skip.occurrenceMs).toBe(Date.parse(occurrence));
+    expect(written!.skip.staleAction).toBe('expired');
+  });
+
+  // 循环任务的快进跳过也会调这个 hook。跟一次性任务的过期混为一谈的话，每日提醒断更
+  // 一天会被面板说成「已经彻底没了」——而它下一次照常响。
+  it('循环任务快进：记 fast_forwarded + 跳过次数 + 快进到的下一次', async () => {
+    const writeState = makeWriteState();
+    await amsgStaleSkip(
+      { id: 102, uuid: TASK_ROW_UUID },
+      {
+        reason: 'stale',
+        action: 'fast_forwarded',
+        metadata: { charId: CHAR_ID },
+        occurrenceMs: Date.parse('2026-07-25T09:00:00.000Z'),
+        skippedCount: 4,
+        nextSendAt: '2026-07-29T09:00:00.000Z',
+        writeState,
+      },
+    );
+    const written = lastSkipOf(writeState);
+    expect(written!.skip.staleAction).toBe('fast_forwarded');
+    expect(written!.skip.skippedCount).toBe(4);
+    expect(written!.skip.nextSendAtMs).toBe(Date.parse('2026-07-29T09:00:00.000Z'));
+    // 记的是最早被跳过的那一次，不是快进之后的时间。
+    expect(written!.skip.occurrenceMs).toBe(Date.parse('2026-07-25T09:00:00.000Z'));
   });
 
   it('metadata 缺 charId（真异常）→ warn 放弃留痕，不写也不炸', async () => {
-    const writeState = await primeWriteState();
+    const writeState = makeWriteState();
     await expect(amsgStaleSkip(
-      { id: 100, uuid: '3637dae1-1461-4444-a747-34e406f67acc', next_send_at: '2026-07-25T09:00:00.000Z' },
-      { reason: 'stale' },
+      { id: 100, uuid: TASK_ROW_UUID },
+      {
+        reason: 'stale',
+        action: 'expired',
+        metadata: null,
+        occurrenceMs: Date.parse('2026-07-25T09:00:00.000Z'),
+        skippedCount: 1,
+        nextSendAt: null,
+        writeState,
+      },
     )).resolves.toBeUndefined();
-    const call = writeState.mock.calls.find(([, entries]) =>
-      entries.some((e: { key: string }) => e.key === AMSG_LAST_SKIP_KEY));
-    expect(call).toBeUndefined();
+    expect(lastSkipOf(writeState)).toBeNull();
+  });
+
+  // 写口由回执载荷直接给。攒一份 fire 级写口的老做法在 isolate 冷启动后的第一跳是
+  // 空的，而服务停摆恢复后的第一波过期，正是这个 hook 最该留下痕迹的时候。
+  it('这一跳一次 fire 都没跑过，照样留得下痕', async () => {
+    const writeState = makeWriteState();
+    await amsgStaleSkip(
+      { id: 103, uuid: TASK_ROW_UUID },
+      {
+        reason: 'stale',
+        action: 'expired',
+        metadata: { charId: CHAR_ID },
+        occurrenceMs: Date.parse('2026-07-25T09:00:00.000Z'),
+        skippedCount: 1,
+        nextSendAt: null,
+        writeState,
+      },
+    );
+    expect(lastSkipOf(writeState), 'isolate 冷启动的第一跳也要写得下').toBeTruthy();
   });
 });
 

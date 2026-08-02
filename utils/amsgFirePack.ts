@@ -151,6 +151,16 @@ export interface AmsgLastSkip {
    */
   reason: (typeof LAST_SKIP_REASONS)[number];
   skippedAt: number;
+  /**
+   * reason 为 stale 时补充这条任务的去向：
+   *   expired        一次性任务，这一次永远不会补发了
+   *   fast_forwarded 循环任务，攒下的这几次都跳过，排期已快进到 nextSendAtMs
+   */
+  staleAction?: 'expired' | 'fast_forwarded';
+  /** 一并跳过了几次（含名义那一次）。 */
+  skippedCount?: number;
+  /** 循环任务快进到的下一次触发时刻；一次性任务没有下一次，为 null。 */
+  nextSendAtMs?: number | null;
 }
 
 export const parseLastSkip = (value: string): AmsgLastSkip | null => {
@@ -177,8 +187,16 @@ export const describeLastSkip = (skip: AmsgLastSkip, formatTime: (ms: number) =>
       return `${when} 那次主动消息取消了——排程之后你们的对话已经聊到别处，原本要说的话过时了。`;
     case 'empty-generation':
       return `${when} 那次主动消息没发出来——ta 到点想了想，这次没写出要说的话。`;
-    case 'stale':
+    case 'stale': {
+      // 循环任务只是跳过了攒下的这几次，下一次照常响；一次性任务是真的没了。
+      // 两句话分开说，不然用户会以为每日提醒已经死了。
+      const times = skip.skippedCount && skip.skippedCount > 1 ? `连着 ${skip.skippedCount} 次` : '那次';
+      if (skip.staleAction === 'fast_forwarded') {
+        const next = skip.nextSendAtMs ? `，下一次 ${formatTime(skip.nextSendAtMs)} 照常` : '，下一次照常';
+        return `${when} 起${times}主动消息没发——中间服务中断过，过期的就不补了${next}。`;
+      }
       return `${when} 那次主动消息没发——到点时已经过去太久（服务中断过），过期的话就不补发了。`;
+    }
   }
 };
 

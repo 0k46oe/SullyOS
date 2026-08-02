@@ -289,6 +289,101 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
     for (const m of msgs) expect(m.timestamp).toBe(sentAt);
   }, 20000);
 
+  // 循环判定读的是 push 顶层的 recurrenceType（库盖上去的，用户排的和角色自排的走同
+  // 一份）。任务 metadata 里那份是排程方自己抄的，角色在 fire 里自排那条路径压根不会
+  // 抄——照着 metadata 判的话，每日提醒只要用户开过一次口就会被永远吞掉，而 worker 那边
+  // 照常生成、照常推、照常记「我说过这句」。几天后角色会说「我连着叫你三天你都不理我」。
+  it('角色自排的 daily 任务不被当成一次性吞掉（顶层 recurrenceType 说了算）', async () => {
+    const charId = 'char-selfsched-daily';
+    await DB.saveCharacter({ id: charId, name: '每日提醒角色' } as any);
+
+    const occurrenceMs = Date.now();
+    const anchorMs = occurrenceMs - 3 * 3_600_000;   // 排程那一刻的锚点：三小时前
+    // 用户在锚点之后开过口，但离本次触发还有两小时——一次性任务的判据（锚点之后有新
+    // 消息就作废）会中招，循环任务的窗口（触发时刻前 10 分钟起算）够不着它。
+    await DB.saveMessage({
+      charId, role: 'user', type: 'text', content: '在吗',
+      timestamp: occurrenceMs - 2 * 3_600_000,
+    } as any);
+
+    await ActiveMsgStore.saveInboxMessage(inboxMsg({
+      messageId: 'msg-selfsched-daily',
+      charId,
+      charName: '每日提醒角色',
+      messageType: 'text',
+      source: 'scheduled',
+      recurrenceType: 'daily',   // push 顶层，库盖的
+      occurrenceMs,
+      metadata: {
+        charId,
+        amsgExpirePolicy: 'expire',
+        amsgClientTaskId: 'client-task-selfsched',
+        amsgAnchorMs: anchorMs,
+        // 角色自排那条路径不往 metadata 抄 recurrence，这里刻意留空。
+      },
+      sentAt: occurrenceMs,
+    }));
+
+    await flushInboxToChat();
+
+    const msgs = await assistantMsgs(charId);
+    expect(msgs.length, '循环任务不该被防穿帮闸吞掉').toBeGreaterThan(0);
+  }, 20000);
+
+  // 记账要排在防穿帮闸之前。排在后面的话，被吞掉的那条 push 会把任务认领一起带走：
+  // 任务照常到点触发，面板却列不出来、用户取消不掉，订阅登记和凭据刷新也都够不着它。
+  it('消息被防穿帮闸吞掉，角色自排的任务照样认领下来', async () => {
+    const charId = 'char-adopt-before-gate';
+    await DB.saveCharacter({
+      id: charId, name: '自排角色', activeMsg2Config: { enabled: true, tasks: [] },
+    } as any);
+
+    const occurrenceMs = Date.now();
+    const anchorMs = occurrenceMs - 3_600_000;
+    // 锚点之后用户又开口了 → 一次性任务判作废，这条 push 会被吞。
+    await DB.saveMessage({
+      charId, role: 'user', type: 'text', content: '我在忙',
+      timestamp: occurrenceMs - 60_000,
+    } as any);
+
+    await ActiveMsgStore.saveInboxMessage(inboxMsg({
+      messageId: 'msg-adopt-before-gate',
+      charId,
+      charName: '自排角色',
+      messageType: 'text',
+      source: 'scheduled',
+      recurrenceType: 'none',
+      occurrenceMs,
+      metadata: {
+        charId,
+        amsgExpirePolicy: 'expire',
+        amsgClientTaskId: 'client-task-adopt',
+        amsgAnchorMs: anchorMs,
+        amsgSelfScheduled: [{
+          taskUuid: 'amsgself-adopt-1',
+          clientTaskId: 'client-task-adopt-next',
+          mode: 'auto',
+          firstSendTime: new Date(occurrenceMs + 90 * 60_000).toISOString(),
+          recurrenceType: 'none',
+          expirePolicy: 'expire',
+          source: 'character',
+          status: 'scheduled',
+          createdAt: occurrenceMs,
+        }],
+      },
+      sentAt: occurrenceMs,
+    }));
+
+    await flushInboxToChat();
+
+    expect(await assistantMsgs(charId), '这条消息该被闸吞掉').toHaveLength(0);
+    const char = (await DB.getAllCharacters()).find((c) => c.id === charId);
+    expect(
+      char?.activeMsg2Config?.tasks?.map((t: any) => t.taskUuid),
+      '被吞的是这次要说的话，不是这条任务',
+    ).toContain('amsgself-adopt-1');
+  }, 20000);
+
   it('主路径·在线送达：sentAt 在阈值内 → 维持写库当刻，不回写 sentAt', async () => {
     const charId = 'char-ts-main-fresh';
     await DB.saveCharacter({ id: charId, name: '在线角色' } as any);
@@ -405,45 +500,29 @@ describe('refreshPushSubscriptionIfMarked', () => {
     await clearMarker();
   });
 
-  it('没有标记 → 不发起刷新', async () => {
-    const refresh = vi.spyOn(ActiveMsgClient, 'refreshPushSubscriptionForPendingTasks')
-      .mockResolvedValue({ status: 'ok', updated: 0, failed: 0 });
+  it('没有标记 → 不发起登记', async () => {
+    const register = vi.spyOn(ActiveMsgClient, 'registerPushSubscription')
+      .mockResolvedValue(undefined);
 
     await expect(refreshPushSubscriptionIfMarked()).resolves.toBe('no-marker');
-    expect(refresh).not.toHaveBeenCalled();
+    expect(register).not.toHaveBeenCalled();
   });
 
-  it('有标记 + 全部刷新成功 → 调一次刷新并清掉标记', async () => {
+  // 登记是一次覆盖写，覆盖到的是用户级那一份订阅——本地知不知道有哪些任务、有没有
+  // 任务，都跟它无关。所以只有「成功清标记 / 失败留标记」两种归宿。
+  it('有标记 + 登记成功 → 调一次并清掉标记', async () => {
     await putMarker();
-    const refresh = vi.spyOn(ActiveMsgClient, 'refreshPushSubscriptionForPendingTasks')
-      .mockResolvedValue({ status: 'ok', updated: 2, failed: 0 });
+    const register = vi.spyOn(ActiveMsgClient, 'registerPushSubscription')
+      .mockResolvedValue(undefined);
 
     await expect(refreshPushSubscriptionIfMarked()).resolves.toBe('refreshed');
-    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(register).toHaveBeenCalledTimes(1);
     await expect(markerExists()).resolves.toBe(false);
   });
 
-  it('有标记但没有要刷的任务（no-tasks）→ 也算处理完，清标记', async () => {
+  it('登记抛错（断网 / 权限被收回）→ 标记保留下次再试', async () => {
     await putMarker();
-    vi.spyOn(ActiveMsgClient, 'refreshPushSubscriptionForPendingTasks')
-      .mockResolvedValue({ status: 'no-tasks', updated: 0, failed: 0 });
-
-    await expect(refreshPushSubscriptionIfMarked()).resolves.toBe('refreshed');
-    await expect(markerExists()).resolves.toBe(false);
-  });
-
-  it('部分失败 → 标记保留下次再试', async () => {
-    await putMarker();
-    vi.spyOn(ActiveMsgClient, 'refreshPushSubscriptionForPendingTasks')
-      .mockResolvedValue({ status: 'partial', updated: 1, failed: 1 });
-
-    await expect(refreshPushSubscriptionIfMarked()).resolves.toBe('kept');
-    await expect(markerExists()).resolves.toBe(true);
-  });
-
-  it('刷新抛错（断网 / 权限被收回）→ 标记保留', async () => {
-    await putMarker();
-    vi.spyOn(ActiveMsgClient, 'refreshPushSubscriptionForPendingTasks')
+    vi.spyOn(ActiveMsgClient, 'registerPushSubscription')
       .mockRejectedValue(new Error('offline'));
 
     await expect(refreshPushSubscriptionIfMarked()).resolves.toBe('kept');

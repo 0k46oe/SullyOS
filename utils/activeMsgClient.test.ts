@@ -5,6 +5,8 @@
 //   2. 取消任务幂等。远端已经没有那一条时（一次性任务发完就删行）不能报「取消失败」。
 //   3. 按角色对账要认得出「老 worker 没投影 charId」，不能把它当成「远端一条都没有」。
 //   4. 「清除云端状态」清完必须把全局工具凭据补回去（它没有别的补写时机）。
+//   5. 推送订阅按用户登记一份，跟本地有没有任务无关——角色在 fire 里给自己排的任务
+//      客户端从没见过，照着本地清单刷是刷不到它的。排程载荷也不再带订阅。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // clearClientState 走的是库客户端而不是 fetchWithAuth，这里把整个客户端换成假的。
@@ -18,6 +20,7 @@ const { reiClient } = vi.hoisted(() => ({
     getVapidPublicKey: vi.fn(),
     subscribePush: vi.fn(),
     updateMessage: vi.fn(),
+    putPushSubscription: vi.fn(),
   },
 }));
 vi.mock('@rei-standard/amsg-client', () => ({ ReiClient: vi.fn(() => reiClient) }));
@@ -572,69 +575,44 @@ const remoteTask = (taskUuid: string, extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 
-describe('ActiveMsgClient.refreshPushSubscriptionForPendingTasks（② 订阅刷新落到已挂任务）', () => {
+describe('ActiveMsgClient.registerPushSubscription（② 订阅按用户登记一份）', () => {
   const SUB_JSON = { endpoint: 'https://fcm.googleapis.com/send/new', keys: { p256dh: 'p', auth: 'a' } };
 
   beforeEach(() => {
     reiClient.init.mockReset().mockResolvedValue(undefined);
     reiClient.updateMessage.mockReset().mockResolvedValue({ success: true });
+    reiClient.putPushSubscription.mockReset().mockResolvedValue({ success: true, data: { updatedAt: 1 } });
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
-  const stubChars = () => {
-    vi.spyOn(DB, 'getAllCharacters').mockResolvedValue([
-      // 开着 2.0：AI 任务、fixed 任务都要刷（推送订阅跟模式无关）；过点任务不动。
-      { id: 'char-a', activeMsg2Config: { enabled: true, tasks: [
-        remoteTask('a1'),
-        remoteTask('a2', { mode: 'fixed', expirePolicy: 'force' }),
-        remoteTask('a3', { firstSendTime: PAST_ISO() }),
-      ] } },
-      // 关掉 2.0 但取消失败残留的任务：远端照样会响，响就该推到新订阅上。
-      { id: 'char-b', activeMsg2Config: { enabled: false, tasks: [remoteTask('b1')] } },
-    ] as any);
-  };
-
-  it('对每条还会响的任务逐条 PUT pushSubscription，成功后清标记的判据是 ok', async () => {
-    stubChars();
+  it('把当前订阅覆盖写到 worker 上那一份', async () => {
     const ensure = vi.spyOn(ActiveMsgClient, 'ensurePushSubscription').mockResolvedValue(SUB_JSON as any);
 
-    const result = await ActiveMsgClient.refreshPushSubscriptionForPendingTasks();
+    await ActiveMsgClient.registerPushSubscription();
 
-    expect(result).toEqual({ status: 'ok', updated: 3, failed: 0 });
     expect(ensure).toHaveBeenCalledTimes(1);
-    expect(reiClient.updateMessage.mock.calls.map((c: any[]) => c[0]).sort()).toEqual(['a1', 'a2', 'b1']);
-    for (const call of reiClient.updateMessage.mock.calls) {
-      expect(call[1]).toEqual({ pushSubscription: SUB_JSON });
-    }
+    expect(reiClient.putPushSubscription).toHaveBeenCalledWith(SUB_JSON);
   });
 
-  it('单条失败 → partial（标记保留下次再试），其余照样刷完', async () => {
-    stubChars();
-    vi.spyOn(ActiveMsgClient, 'ensurePushSubscription').mockResolvedValue(SUB_JSON as any);
-    reiClient.updateMessage.mockImplementation(async (uuid: string) =>
-      uuid === 'a2' ? { success: false, error: { code: 'INTERNAL_ERROR' } } : { success: true });
-
-    const result = await ActiveMsgClient.refreshPushSubscriptionForPendingTasks();
-
-    expect(result).toEqual({ status: 'partial', updated: 2, failed: 1 });
-    expect(reiClient.updateMessage).toHaveBeenCalledTimes(3);
-  });
-
-  it('远端已经没有那一条（TASK_NOT_FOUND）不算失败——没有可刷新的正是不用刷的那侧', async () => {
-    stubChars();
-    vi.spyOn(ActiveMsgClient, 'ensurePushSubscription').mockResolvedValue(SUB_JSON as any);
-    reiClient.updateMessage.mockImplementation(async (uuid: string) =>
-      uuid === 'a1' ? { success: false, error: { code: 'TASK_NOT_FOUND' } } : { success: true });
-
-    const result = await ActiveMsgClient.refreshPushSubscriptionForPendingTasks();
-    expect(result).toEqual({ status: 'ok', updated: 2, failed: 0 });
-  });
-
-  it('一条待触发任务都没有 → no-tasks，一个请求都不发（没配 2.0 的用户别白打请求）', async () => {
+  // 订阅刷新曾经是「照本地任务清单逐条 PUT」，本地没有任务就直接收工。角色在 fire 里
+  // 给自己排的任务客户端从没见过，于是永远刷不到——推不出去、状态记不下、客户端更不
+  // 知道它存在。订阅按用户存一份之后，登记跟本地有没有任务彻底无关。
+  it('本地一条任务都没有，订阅照样登记上去', async () => {
     vi.spyOn(DB, 'getAllCharacters').mockResolvedValue([{ id: 'char-x' }] as any);
-    const result = await ActiveMsgClient.refreshPushSubscriptionForPendingTasks();
-    expect(result.status).toBe('no-tasks');
+    vi.spyOn(ActiveMsgClient, 'ensurePushSubscription').mockResolvedValue(SUB_JSON as any);
+
+    await ActiveMsgClient.registerPushSubscription();
+
+    expect(reiClient.putPushSubscription).toHaveBeenCalledWith(SUB_JSON);
+    // 一条任务都没碰：订阅不再挂在任务行上。
     expect(reiClient.updateMessage).not.toHaveBeenCalled();
+  });
+
+  it('登记失败往外抛，调用方据此保留标记下次再试', async () => {
+    vi.spyOn(ActiveMsgClient, 'ensurePushSubscription').mockResolvedValue(SUB_JSON as any);
+    reiClient.putPushSubscription.mockRejectedValue(new Error('worker 拒绝了订阅'));
+
+    await expect(ActiveMsgClient.registerPushSubscription()).rejects.toThrow('worker 拒绝了订阅');
   });
 });
 

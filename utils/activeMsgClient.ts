@@ -18,7 +18,8 @@ import { getLastRealUserMessageAt } from './amsg2ExpireGuard';
 import { buildTaskInstruction } from './amsgFireSchedule';
 import {
   getPendingTasks, isAmsg2EnabledForChar, MAX_ACTIVE_TASKS_PER_CHAR,
-  parseRemoteTaskLastError, RemoteTaskLastError, resolveExpirePolicy, toDatetimeLocalValue,
+  parseRemoteTaskLastError, RemoteTaskLastError, type RemoteTaskProjection,
+  resolveExpirePolicy, toDatetimeLocalValue,
 } from './amsg2Tasks';
 import { AMSG_CHAT_PRESENCE_KEY, AmsgChatPresence } from './amsgChatPresence';
 import {
@@ -67,16 +68,16 @@ export interface ActiveMsg2PushStatus {
   detail?: string;
 }
 
-type InternalReiClient = ReiClient & {
-  _encrypt: (plaintext: string) => Promise<{ iv: string; authTag: string; encryptedData: string }>;
-  _decrypt: (payload: { iv: string; authTag: string; encryptedData: string }) => Promise<any>;
-  // amsg-client 2.9.0-next.1：拉本 worker 自己的 VAPID 公钥（带 X-Client-Token），供订阅用。
-  getVapidPublicKey: () => Promise<string>;
-  // amsg-client 2.9.0-next.4：worker 特性探测。老 worker 无 /capabilities 端点 → null。
-  getCapabilities: () => Promise<{ serverVersion: string; features: string[] } | null>;
-  // PUT /update-message：白名单字段打补丁（凭据/订阅刷新走它，见 refreshXxx 方法）。
-  updateMessage: (uuid: string, updates: Record<string, unknown>) => Promise<any>;
-};
+/**
+ * 库把载荷加解密留成了私有实现，而分页拉任务、init-tenant 这类库没封装的端点
+ * 得自己组加密载荷，所以按运行时的真实形状单独声明一份，在下面两个桥接函数里
+ * 转一次。不能写成 `ReiClient & { _encrypt }`——交叉类型碰上 private 成员会整个
+ * 塌成 never，连带 ReiClient 自己的方法一起查不到。
+ */
+interface ReiCryptoBridge {
+  _encrypt(plaintext: string): Promise<{ iv: string; authTag: string; encryptedData: string }>;
+  _decrypt(payload: { iv: string; authTag: string; encryptedData: string }): Promise<any>;
+}
 
 const ACTIVE_MSG_RUNTIME_HEADER = '[ActiveMsg2]';
 
@@ -92,7 +93,7 @@ const createClient = (config: Pick<ActiveMsg2GlobalConfig, 'userId' | 'workerUrl
     baseUrl: normalizeWorkerBase(config.workerUrl),
     userId: config.userId,
     serverToken: config.serverToken || undefined,
-  }) as InternalReiClient;
+  });
 
 /** 面板新建任务的默认时间：半小时后，折成 datetime-local 认的本地墙钟。 */
 export const getDefaultActiveMsgFirstSendTime = () =>
@@ -395,7 +396,7 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * 两种都要接住，只判 try/catch 会漏掉后者。
  */
 export const putClientStateOrThrow = async (
-  client: InternalReiClient,
+  client: ReiClient,
   entries: Array<{ namespace: string; key: string; value: string; updatedAt: number }>,
   phase: string,
 ): Promise<void> => {
@@ -443,7 +444,7 @@ export const putClientStateOrThrow = async (
  * 删除语义，value: null 会被当无效条目跳过），留下的是几字节的空壳，内容本身没了。
  */
 export const clearNamespaceValuesOrThrow = async (
-  client: InternalReiClient,
+  client: ReiClient,
   namespace: string,
 ): Promise<string[]> => {
   // 全局 namespace 不许走这条路：里面的 tool_config 只在配置变更时才重传，被清成空壳
@@ -568,12 +569,12 @@ const fetchWithAuth = async (path: string, config: ActiveMsg2GlobalConfig, init:
   }
 };
 
-const encryptPayload = async (client: InternalReiClient, payload: unknown) => {
-  return client._encrypt(JSON.stringify(payload));
+const encryptPayload = async (client: ReiClient, payload: unknown) => {
+  return (client as unknown as ReiCryptoBridge)._encrypt(JSON.stringify(payload));
 };
 
-const decryptPayload = async (client: InternalReiClient, payload: { iv: string; authTag: string; encryptedData: string }) => {
-  return client._decrypt(payload);
+const decryptPayload = async (client: ReiClient, payload: { iv: string; authTag: string; encryptedData: string }) => {
+  return (client as unknown as ReiCryptoBridge)._decrypt(payload);
 };
 
 export const ActiveMsgClient = {
@@ -666,6 +667,26 @@ export const ActiveMsgClient = {
     return subscription.toJSON();
   },
 
+  /**
+   * 把当前这个浏览器的推送订阅登记到 worker——一个用户一份，覆盖写。
+   *
+   * worker 到点投递时读的就是这一份，包括角色在 fire 里给自己排的、客户端根本
+   * 不知道存在的那些任务。所以订阅换了端点只要覆盖这一份，已排的任务一条都不用
+   * 碰；反过来说**排程前必须先登记过**，否则 worker 没地方推、直接拒绝建任务。
+   *
+   * 幂等：重复调用只是把同一份再写一遍，启动自检可以无脑调。
+   */
+  async registerPushSubscription(): Promise<void> {
+    const config = await ensureWorkerReady();
+    const client = await initializeClient(config);
+    const subscription = await this.ensurePushSubscription();
+    try {
+      await client.putPushSubscription(subscription);
+    } catch (error) {
+      throw normalizeActiveMsgApiError(error, '登记推送订阅');
+    }
+  },
+
   // 单用户「连接」：先 POST /init-tenant 让 worker 在自己的 D1 里幂等建表
   // （Dashboard 粘贴部署的用户不用碰 SQL），再拿一次 user key 验证地址与鉴权都通。
   async connect() {
@@ -722,11 +743,7 @@ export const ActiveMsgClient = {
    * lastError 是 run-tick 记进 payload 的「上一次为什么没发出去」（2.6.0-next.10 起
    * GET /messages 透出；旧 worker 没有这字段 → null，界面上就是不显示那行说明）。
    */
-  async listRemoteTasksForChar(charId: string): Promise<Array<{
-    uuid: string;
-    status?: string;
-    lastError: RemoteTaskLastError | null;
-  }>> {
+  async listRemoteTasksForChar(charId: string): Promise<RemoteTaskProjection[]> {
     const tasks = await this.listAllTasks();
     if (tasks.length > 0 && tasks.every((t) => t?.charId == null)) {
       throw new Error('worker 版本过旧：任务列表没有 charId 投影，无法按角色对账，请在设置里重新粘贴部署。');
@@ -737,6 +754,12 @@ export const ActiveMsgClient = {
         uuid: t.uuid as string,
         status: typeof t?.status === 'string' ? t.status as string : undefined,
         lastError: parseRemoteTaskLastError(t?.lastError),
+        clientTaskId: typeof t?.clientTaskId === 'string' ? t.clientTaskId : undefined,
+        messageType: typeof t?.messageType === 'string' ? t.messageType : undefined,
+        recurrenceType: typeof t?.recurrenceType === 'string' ? t.recurrenceType : undefined,
+        // 远端算出来的下一次触发时刻。循环任务按角色时区的墙钟推进，本地拿固定周期
+        // 自己乘出来的那个跨夏令时会偏一小时——显示以远端为准，跟真正会响的时刻一致。
+        nextSendAt: typeof t?.nextSendAt === 'string' ? t.nextSendAt : undefined,
       }));
   },
 
@@ -817,7 +840,8 @@ export const ActiveMsgClient = {
     const { char, config, task, replaceTaskUuid, userProfile, groups, realtimeConfig, apiConfig } = params;
     const globalConfig = await ensureWorkerReady();
     const client = await initializeClient(globalConfig);
-    const pushSubscription = await this.ensurePushSubscription();
+    // 任务体不带订阅，worker 到点读用户级那一份——所以建任务前先把它登记上去。
+    await this.registerPushSubscription();
 
     // 数量封顶：待触发任务（不含被替换的那个）满 5 个就拒绝，让角色/用户先清。
     const pendingOthers = getPendingTasks(config, Date.now())
@@ -850,7 +874,9 @@ export const ActiveMsgClient = {
       messageSubtype: 'chat',
       firstSendTime,
       recurrenceType: task.recurrenceType,
-      pushSubscription,
+      // 角色的时间参照系（与 fire_pack 同一份）。daily / weekly 由 worker 按这个时区的
+      // 墙钟推进——固定加 24 小时的话，跨夏令时切换之后每天的触发时刻会永久偏一小时。
+      tzId: resolveCharTimeZone(char) ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
       metadata: {
         charId: char.id,
         charName: char.name,
@@ -858,11 +884,12 @@ export const ActiveMsgClient = {
         // worker 满血链路的 onLLMOutput 拿不到任务顶层的 messageType，靠 metadata 透传
         // 还原 push.messageType（老任务没这字段时 worker 回退 'auto'，收侧只展示不路由）。
         amsgMode: task.mode,
-        // 任务身份 + 防穿帮闸字段：worker onBeforeFire 与客户端送达兜底都从这里读。
+        // 防穿帮闸字段：worker onBeforeFire 与客户端送达兜底都从这里读。
         // fixed 恒为 force——它走不了 worker 闸（taskNeedsLlm=false），语义统一钉死。
+        // recurrenceType / occurrenceMs 不往这儿抄：库会把它们盖在每条 push 顶层，
+        // 角色在 fire 里自排的任务也一样有，抄一份反而多一处会漏写的地方。
         amsgClientTaskId: clientTaskId,
         amsgExpirePolicy: resolveExpirePolicy(task.mode, task.expirePolicy),
-        amsgRecurrence: task.recurrenceType,
         amsgAnchorMs: anchorMs,
       },
     };
@@ -1048,32 +1075,6 @@ export const ActiveMsgClient = {
       }
     }
     return { updated, failed };
-  },
-
-  /**
-   * 浏览器换掉推送订阅（pushsubscriptionchange）后的兜底：把新订阅逐条写回
-   * 所有还会响的远端任务。任务体里的 pushSubscription 是排程那一刻冻结的，
-   * 订阅一换端点，到点推送全打到作废端点上——静默失联，用户只看到「怎么不来了」。
-   *
-   * 不看角色的 enabled：关闭 2.0 时取消失败残留的任务远端照样会响，响就该推到
-   * 新订阅上。fixed 任务也刷——推送订阅跟模式无关。
-   * 调用方（activeMsgRuntime 的标记消费）按返回值决定清不清标记：
-   * ok / no-tasks 清，partial 留着下次再试。
-   */
-  async refreshPushSubscriptionForPendingTasks(): Promise<{
-    status: 'no-tasks' | 'ok' | 'partial';
-    updated: number;
-    failed: number;
-  }> {
-    const now = Date.now();
-    const chars = await DB.getAllCharacters();
-    const taskUuids = chars.flatMap((char) =>
-      getPendingTasks(char.activeMsg2Config, now).map((t) => t.taskUuid));
-    if (taskUuids.length === 0) return { status: 'no-tasks', updated: 0, failed: 0 };
-
-    const pushSubscription = await this.ensurePushSubscription();
-    const { updated, failed } = await this.updatePendingTasksRemote(taskUuids, { pushSubscription });
-    return { status: failed.length ? 'partial' : 'ok', updated, failed: failed.length };
   },
 
   /**

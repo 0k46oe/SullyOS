@@ -30,8 +30,10 @@ import {
   isRemoteMissingTask,
   keepUncancelledTasks,
   pruneFiredTasks,
+  reconcileTasksWithRemote,
   resolveExpirePolicy,
   type RemoteTaskLastError,
+  type RemoteTaskProjection,
   shortTaskId,
   toDatetimeLocalValue,
 } from '../../utils/amsg2Tasks';
@@ -171,10 +173,11 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
 
     void (async () => {
       let remote: Set<string>;
+      let remoteTasks: RemoteTaskProjection[];
       try {
         // 全量投影一次拉齐：uuid 当对账底账，status / lastError 给任务卡片说明
-        // 「上次到点为什么没发出去」（旧 worker 不带 lastError → null，那行不显示）。
-        const remoteTasks = await ActiveMsgClient.listRemoteTasksForChar(char.id);
+        // 「上次到点为什么没发出去」，nextSendAt 给循环任务显示真正会响的时刻。
+        remoteTasks = await ActiveMsgClient.listRemoteTasksForChar(char.id);
         remote = new Set(remoteTasks.map((t) => t.uuid));
         setRemoteTaskInfo(new Map(remoteTasks.map((t) => [
           t.uuid, { status: t.status, lastError: t.lastError },
@@ -186,15 +189,22 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
       }
       setKnownRemoteUuids(remote);
 
-      // 对上账的同时把已经走完的一次性任务清出列表，不然发过的任务会一直堆在这儿，
-      // 得手动一条条取消。先拿渲染时这份探一下有没有要清的，避免每次开面板都写一次库。
+      // 对账两个方向都走：把已经走完的一次性任务清出列表（不然发过的任务会一直堆在
+      // 这儿，得手动一条条取消），同时把远端有、本地没有的接回来——角色自排的任务是
+      // 随 push 认领的，那条 push 推失败或被防穿帮闸吞掉，本地就永远不知道它存在，
+      // 而它照常到点触发。先拿渲染时这份探一下有没有变化，避免每次开面板都写一次库。
       // 真正落盘时在 updater 里用最新的 prev 重算——面板保存要 await 网络请求，
       // 这期间角色可能在聊天里用工具排了新任务。
+      const settle = (tasks: ActiveMsg2TaskRecord[]) =>
+        pruneFiredTasks(reconcileTasksWithRemote(tasks, remoteTasks), remote, Date.now());
       const current = char.activeMsg2Config?.tasks ?? [];
-      if (pruneFiredTasks(current, remote, Date.now()).length < current.length) {
+      const settled = settle(current);
+      const changed = settled.length !== current.length
+        || settled.some((t, i) => t !== current[i]);
+      if (changed) {
         onSave((prev) => ({
           ...(prev ?? { enabled: true, tasks: [] }),
-          tasks: pruneFiredTasks(prev?.tasks ?? [], remote, Date.now()),
+          tasks: settle(prev?.tasks ?? []),
         }));
       }
     })();

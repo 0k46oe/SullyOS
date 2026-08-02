@@ -18,6 +18,7 @@ import {
   parseRemoteTaskLastError,
   pruneFiredTasks,
   pruneStaleTasks,
+  reconcileTasksWithRemote,
   shortTaskId,
   toDatetimeLocalValue,
 } from './amsg2Tasks';
@@ -461,5 +462,72 @@ describe('buildFireTaskListBlock', () => {
     });
     expect(block).toContain('强制发送');
     expect(block).toContain('叫他起床');
+  });
+});
+
+describe('reconcileTasksWithRemote（跟远端底账对一次账）', () => {
+  const remoteRow = (over: Record<string, unknown> = {}) => ({
+    uuid: 'amsgself-char1-1754179200000-0',
+    status: 'scheduled',
+    lastError: null,
+    clientTaskId: 'amsgself-char1-1754179200000-0-c',
+    messageType: 'auto',
+    recurrenceType: 'daily',
+    nextSendAt: '2026-08-03T01:00:00.000Z',
+    ...over,
+  }) as any;
+
+  // 角色在 fire 里给自己排的任务是随 push 认领的。那条 push 推失败、或者被防穿帮闸
+  // 吞掉，认领就跟着没了，而任务在 D1 里照常到点触发——面板列不出来、用户也取消不掉，
+  // 唯一的办法是关掉整个 2.0 或者删角色。
+  it('远端有、本地没有的任务补回清单', () => {
+    const out = reconcileTasksWithRemote([], [remoteRow()]);
+    expect(out.map((t) => t.taskUuid)).toEqual(['amsgself-char1-1754179200000-0']);
+    expect(out[0].source).toBe('character');
+    expect(out[0].recurrenceType).toBe('daily');
+    expect(out[0].nextSendAt).toBe('2026-08-03T01:00:00.000Z');
+  });
+
+  it('本地已有的不重复补，只把远端算的下次触发时刻同步过来', () => {
+    const local = [task({ taskUuid: 'amsgself-char1-1754179200000-0' })];
+    const out = reconcileTasksWithRemote(local, [remoteRow()]);
+    expect(out).toHaveLength(1);
+    expect(out[0].nextSendAt).toBe('2026-08-03T01:00:00.000Z');
+  });
+
+  it('远端那行还没有下次触发时刻 → 不凭空造一条本地记录', () => {
+    expect(reconcileTasksWithRemote([], [remoteRow({ nextSendAt: undefined })])).toEqual([]);
+  });
+
+  it('远端一条都没有 → 原样返回，不动本地清单', () => {
+    const local = [task()];
+    expect(reconcileTasksWithRemote(local, [])).toEqual(local);
+  });
+});
+
+describe('currentOccurrenceMs 跨夏令时', () => {
+  // 循环任务按角色所在时区的墙钟推进（worker 那边用 Intl 算）。本地固定加 24 小时的话，
+  // 纽约的每日任务过一次夏令时切换就永久偏一小时，显示的时刻跟真正会响的对不上。
+  it('对过账就用远端算的那个时刻，不自己按固定周期乘', () => {
+    const dstTask = task({
+      firstSendTime: '2026-03-07T13:00:00.000Z',   // 纽约 3/7 08:00（EST）
+      recurrenceType: 'daily',
+      nextSendAt: '2026-03-08T12:00:00.000Z',      // 纽约 3/8 08:00（EDT，真实间隔 23h）
+    });
+    const now = Date.parse('2026-03-07T14:00:00.000Z');
+
+    expect(currentOccurrenceMs(dstTask, now)).toBe(Date.parse('2026-03-08T12:00:00.000Z'));
+    // 固定 +24h 会算成 13:00Z，也就是纽约的 09:00——那正是旧行为偏掉的那一小时。
+    expect(currentOccurrenceMs(dstTask, now)).not.toBe(Date.parse('2026-03-08T13:00:00.000Z'));
+  });
+
+  it('远端给的那次已经过点 → 退回自己推算（还没对上这一轮的账）', () => {
+    const stale = task({
+      firstSendTime: '2026-03-07T13:00:00.000Z',
+      recurrenceType: 'daily',
+      nextSendAt: '2026-03-08T12:00:00.000Z',
+    });
+    const now = Date.parse('2026-03-20T00:00:00.000Z');
+    expect(currentOccurrenceMs(stale, now)).toBeGreaterThan(now);
   });
 });

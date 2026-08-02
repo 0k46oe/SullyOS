@@ -116,9 +116,15 @@ export const isPendingTask = (task: ActiveMsg2TaskRecord, nowMs: number): boolea
  * isPendingTask 同一把尺，这样刚过点还在发的那一次不会被跳过。
  */
 export const currentOccurrenceMs = (
-  task: Pick<ActiveMsg2TaskRecord, 'firstSendTime' | 'recurrenceType'>,
+  task: Pick<ActiveMsg2TaskRecord, 'firstSendTime' | 'recurrenceType' | 'nextSendAt'>,
   nowMs: number,
 ): number | null => {
+  // 远端对过账就以它为准：循环任务按角色所在时区的墙钟推进，本地按固定周期乘出来的
+  // 那个一跨夏令时就会跟真正会响的时刻差一小时。还没到点的那次才作数——已经过点的
+  // 说明还没对上这一轮的账，照旧自己推。
+  const remoteNext = task.nextSendAt ? new Date(task.nextSendAt).getTime() : NaN;
+  if (Number.isFinite(remoteNext) && remoteNext + FIRE_GRACE_MS > nowMs) return remoteNext;
+
   const first = new Date(task.firstSendTime).getTime();
   if (!Number.isFinite(first)) return null;
 
@@ -284,6 +290,64 @@ export const applyRemoteTaskDelta = (
   delta.gone?.forEach((uuid) => next.delete(uuid));
   delta.present?.forEach((uuid) => next.add(uuid));
   return next;
+};
+
+/** `GET /messages` 的任务投影（worker 侧白名单，不含任何凭据）里用得上的字段。 */
+export interface RemoteTaskProjection {
+  uuid: string;
+  status?: string;
+  lastError: RemoteTaskLastError | null;
+  clientTaskId?: string;
+  messageType?: string;
+  recurrenceType?: string;
+  nextSendAt?: string;
+}
+
+/**
+ * 拿远端全量投影跟本地清单对一次账，两个方向都走。
+ *
+ * **远端有、本地没有 → 补回来。** 会漏账的都是角色在 fire 里给自己排的那些：认领是
+ * 随 push 带回来的，那条 push 推失败、或者被防穿帮闸吞掉，认领就跟着没了。于是任务在
+ * D1 里照常到点触发，本地却列不出来、也取消不掉——用户唯一能清掉它的办法是关掉整个
+ * 2.0 或者删角色。面板每次打开本来就拉一次全量投影，顺手接回来，零额外请求。
+ *
+ * **本地已有 → 同步远端算出来的下一次触发时刻。** 循环任务按角色所在时区的墙钟推进，
+ * 本地拿固定周期乘出来的那个跨夏令时会偏一小时，显示得跟真正会响的时刻一致。
+ */
+export const reconcileTasksWithRemote = (
+  local: ActiveMsg2TaskRecord[],
+  remote: RemoteTaskProjection[],
+): ActiveMsg2TaskRecord[] => {
+  const byUuid = new Map(remote.map((r) => [r.uuid, r]));
+  const known = new Set(local.map((t) => t.taskUuid));
+
+  const synced = local.map((task) => {
+    const row = byUuid.get(task.taskUuid);
+    if (!row?.nextSendAt || row.nextSendAt === task.nextSendAt) return task;
+    return { ...task, nextSendAt: row.nextSendAt };
+  });
+
+  const adopted = remote
+    // 字段不全的行不补：宁可少一条，也别拿默认值凑一条跟远端对不上的记录出来。
+    .filter((row) => !known.has(row.uuid) && row.nextSendAt && row.recurrenceType && row.messageType)
+    .map((row): ActiveMsg2TaskRecord => ({
+      taskUuid: row.uuid,
+      // 归属键是应用自己写进 metadata 的，投影里带回来；非 amsg2 建的任务没有，
+      // 那就拿 uuid 当归属键——它一样是唯一的。
+      clientTaskId: row.clientTaskId ?? row.uuid,
+      mode: row.messageType as ActiveMsg2TaskRecord['mode'],
+      firstSendTime: row.nextSendAt as string,
+      nextSendAt: row.nextSendAt,
+      recurrenceType: row.recurrenceType as ActiveMsg2Recurrence,
+      // 远端投影没有防穿帮策略（那是应用写在 metadata 里的语义，投影不带）。
+      // 补回来的都是角色自排的，那条路径恒为 expire。
+      expirePolicy: 'expire',
+      source: 'character',
+      status: 'scheduled',
+      createdAt: Date.now(),
+    }));
+
+  return adopted.length ? [...synced, ...adopted] : synced;
 };
 
 /**

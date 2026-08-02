@@ -318,6 +318,11 @@ export interface ActiveMsg2TaskRecord {
   mode: ActiveMsg2Mode;
   /** ISO / datetime-local 字符串，首次触发时间。 */
   firstSendTime: string;
+  /**
+   * 远端算出来的下一次触发时刻（对账时同步回来）。循环任务按角色所在时区的墙钟推进，
+   * 本地拿固定周期自己乘出来的那个一跨夏令时就会偏一小时——显示以这份为准。
+   */
+  nextSendAt?: string;
   recurrenceType: ActiveMsg2Recurrence;
   /** fixed 模式的固定内容。 */
   userMessage?: string;
@@ -369,6 +374,15 @@ export interface ActiveMsg2InboxMessage {
   messageType?: string;
   messageSubtype?: string;
   taskId?: string | null;
+  /**
+   * 任务身份，由库盖在 push 顶层带下来（不是排程方写进 metadata 的）。
+   * 两条排程路径——用户在面板排的、角色在 fire 里给自己排的——走的是同一份，
+   * 所以防穿帮闸和任务认领都读这里，不读 metadata 里各自抄的那份。
+   */
+  taskUuid?: string | null;
+  recurrenceType?: string | null;
+  /** 本次触发的名义时刻（epoch 毫秒）。 */
+  occurrenceMs?: number | null;
   metadata?: Record<string, any>;
   sentAt?: number;
   receivedAt: number;
