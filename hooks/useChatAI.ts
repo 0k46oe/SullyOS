@@ -1033,7 +1033,7 @@ export const useChatAI = ({
                 try {
                     // 回执这半边是「检出 + 落台账」的结果，带副作用，一轮只算一次；
                     // 进行中任务那半边每次发请求现取（见下面的 withAmsg2TaskContext）。
-                    const taskContext = await collectAmsg2TaskContext(char);
+                    const taskContext = await collectAmsg2TaskContext(char, userProfile.name);
                     amsg2ExpiredIds = taskContext.expiredIds;
                     amsg2Notices = taskContext.notices;
                 } catch (e) {
@@ -1060,6 +1060,7 @@ export const useChatAI = ({
                     now,
                     resolveCharTimeZone(char),
                     amsg2CreatedThisTurn,
+                    userProfile.name,
                 );
                 // 常驻简介让这一块总是非空：没任务时角色也得知道自己随时能排。
                 return [...messages, { role: 'system', content: text }];
