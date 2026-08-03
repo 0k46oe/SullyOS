@@ -791,14 +791,12 @@ const unsubscribeCurrentPush = async (): Promise<void> => {
 };
 
 /**
- * 重置的公共尾段：拿 worker 的 VAPID → 重新订阅 → 覆盖登记回 worker。
+ * 问 worker 要它自己签推送用的 VAPID 公钥。
  *
- * 订阅走共用的 subscribeWithRetry 而不是 `ReiClient.subscribePush`：后者是裸的
- * `pushManager.subscribe()`，拿到僵尸哨兵会原样交出来，登记上去就是往 worker 里
- * 写一个死端点——用户看到「重置成功」，照样一条消息都收不到。重试仍拿不到活端点
- * 的话挂 '端点僵尸' 代号，设置页据此把按钮升级成「深度重置」。
+ * 各用户自部署 worker、各有各的 VAPID，运行时拉、不编译进前端。拿别人的公钥订阅，
+ * worker 推的时候会 403。
  */
-const resubscribeAndRegister = async (client: ReiClient): Promise<void> => {
+const fetchWorkerVapidKey = async (client: ReiClient): Promise<string> => {
   let vapidPublicKey: string;
   try {
     vapidPublicKey = await client.getVapidPublicKey();
@@ -808,14 +806,35 @@ const resubscribeAndRegister = async (client: ReiClient): Promise<void> => {
   if (!vapidPublicKey) {
     throw withFailKind(new Error('Worker 没返回 VAPID 公钥，请确认已配置 VAPID 并部署了最新 worker。'), 'worker没配VAPID');
   }
+  return vapidPublicKey;
+};
 
-  const registration = await navigator.serviceWorker.ready;
+/**
+ * 建一条新的浏览器推送订阅，拿不到活端点就抛。
+ *
+ * 走共用的 subscribeWithRetry 而不是 `ReiClient.subscribePush`：后者是裸的
+ * `pushManager.subscribe()`，刚退订完的窗口期里浏览器会吐 permanently-removed.invalid
+ * 哨兵，它照单收下——那个死端点一旦被登记进 worker，用户看到「订阅成功」，到点却一条
+ * 都收不到，两边都没有任何报错。重试到底仍是僵尸的话挂 '端点僵尸' 代号，设置页据此
+ * 把「重置订阅」升级成「深度重置」。
+ */
+const subscribeOrThrow = async (
+  registration: ServiceWorkerRegistration,
+  vapidPublicKey: string,
+): Promise<PushSubscription> => {
   const { sub, reason } = await subscribeWithRetry(registration, vapidPublicKey, ACTIVE_MSG_RUNTIME_HEADER);
-  if (!sub) {
-    const message = reason || '订阅创建失败';
-    // 谓词在源码里写死，挂上去的是下面两个字面量之一；reason 原文只留在 toast 里。
-    throw withFailKind(new Error(message), isDeadPushEndpoint(message) ? '端点僵尸' : '订阅失败');
-  }
+  if (sub) return sub;
+  // 提示原文（浏览器能力、重试了几次）留在 toast 和 console 里。谓词写死在源码里，
+  // 挂上去的永远是下面两个字面量之一。
+  const message = reason || '订阅创建失败';
+  throw withFailKind(new Error(message), isDeadPushEndpoint(message) ? '端点僵尸' : '订阅失败');
+};
+
+/** 重置的公共尾段：拿 worker 的 VAPID → 重新订阅 → 覆盖登记回 worker。 */
+const resubscribeAndRegister = async (client: ReiClient): Promise<void> => {
+  const vapidPublicKey = await fetchWorkerVapidKey(client);
+  const registration = await navigator.serviceWorker.ready;
+  const sub = await subscribeOrThrow(registration, vapidPublicKey);
 
   try {
     await client.putPushSubscription(sub);
@@ -928,34 +947,17 @@ export const ActiveMsgClient = {
     await KeepAlive.init();
     const registration = await navigator.serviceWorker.ready;
 
-    // VAPID 公钥必须来自「这个 worker 自己」签推送用的那对密钥，否则 worker 推不动会 403。
-    // 各用户自部署 worker、各有各的 VAPID，运行时从 worker 拉、不编译进前端。
-    // **有旧订阅也要拉**：换过 VAPID 后旧订阅绑的还是老公钥，无条件复用等于把一个
-    // 必 403 的订阅继续写进新任务——自检就是拿目标公钥跟旧订阅比对（还有浏览器
-    // 僵尸化的死端点），不合格先退订再重订（见 dropStaleSubscription）。
+    // **有旧订阅也要拉公钥**：换过 VAPID 后旧订阅绑的还是老公钥，无条件复用等于把一个
+    // 必 403 的订阅继续写进新任务——自检就是拿目标公钥跟旧订阅比对（还有浏览器僵尸化
+    // 的死端点），不合格先退订再重订（见 dropStaleSubscription）。
     const client = createClient(config);
-    let vapidPublicKey: string;
-    try {
-      vapidPublicKey = await client.getVapidPublicKey();
-    } catch (error) {
-      throw normalizeActiveMsgApiError(error, '获取 Worker VAPID 公钥');
-    }
-    if (!vapidPublicKey) {
-      throw withFailKind(new Error('Worker 没返回 VAPID 公钥，请确认已配置 VAPID 并部署了最新 worker。'), 'worker没配VAPID');
-    }
+    const vapidPublicKey = await fetchWorkerVapidKey(client);
 
     const existing = await registration.pushManager.getSubscription();
     const reusable = await dropStaleSubscription(existing, vapidPublicKey);
     if (reusable) return reusable.toJSON();
 
-    try {
-      const subscription = await client.subscribePush(vapidPublicKey, registration);
-      return subscription.toJSON();
-    } catch (error) {
-      // 浏览器侧的订阅失败（没装 Google 服务的安卓、WebView 壳、FCM 连不上）。
-      // 提示原文由 pushSubscribeShared 翻译好后留在 toast 里，这里只留代号。
-      throw withFailKind(error instanceof Error ? error : new Error(String(error)), '订阅失败');
-    }
+    return (await subscribeOrThrow(registration, vapidPublicKey)).toJSON();
   },
 
   /**

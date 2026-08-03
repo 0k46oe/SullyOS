@@ -807,47 +807,89 @@ describe('dropStaleSubscription（① 死端点 / 公钥不一致先退订）', 
   });
 });
 
+// 回归守卫（补）：建订阅这一步不许走 ReiClient.subscribePush——那是裸的
+// pushManager.subscribe()，刚退订完的窗口期里浏览器会吐 permanently-removed.invalid
+// 哨兵，它照单收下。死端点一旦被登记进 worker，用户看到「订阅已准备完成」，到点却一条
+// 都收不到，两边都没有任何报错。这一组钉住「走带重试的共用实现」。
 describe('ActiveMsgClient.ensurePushSubscription（① 不再无条件复用旧订阅）', () => {
-  const stubPushEnv = (existing: any) => {
+  const FRESH_ENDPOINT = 'https://fcm.googleapis.com/send/fresh';
+
+  /** subscribe() 依次吐出 endpoints 里的端点；用尽后一直吐最后一个。 */
+  const stubPushEnv = (existing: any, endpoints: string[] = [FRESH_ENDPOINT]) => {
+    const queue = [...endpoints];
+    const subscribe = vi.fn().mockImplementation(async () => {
+      const endpoint = queue.length > 1 ? queue.shift()! : queue[0];
+      return {
+        endpoint,
+        options: { applicationServerKey: Uint8Array.from([1, 2, 3]).buffer },
+        unsubscribe: vi.fn().mockResolvedValue(true),
+        toJSON: () => ({ endpoint, keys: { p256dh: 'p2', auth: 'a2' } }),
+      };
+    });
     vi.stubGlobal('navigator', {
       serviceWorker: {
         ready: Promise.resolve({
-          pushManager: { getSubscription: vi.fn().mockResolvedValue(existing) },
+          pushManager: { getSubscription: vi.fn().mockResolvedValue(existing), subscribe },
         }),
       },
     });
     vi.stubGlobal('window', { PushManager: class {} });
     vi.stubGlobal('Notification', { permission: 'granted' });
+    return subscribe;
   };
 
   beforeEach(() => {
     reiClient.getVapidPublicKey.mockReset().mockResolvedValue(VAPID_AQID);
-    reiClient.subscribePush.mockReset().mockResolvedValue({
-      toJSON: () => ({ endpoint: 'https://fcm.googleapis.com/send/fresh', keys: { p256dh: 'p2', auth: 'a2' } }),
-    });
+    reiClient.subscribePush.mockReset();
   });
   afterEach(() => { vi.unstubAllGlobals(); });
 
   it('已有订阅是死端点 → 退订后重订，返回新订阅', async () => {
     const dead = makeSub('https://permanently-removed.invalid/x', [1, 2, 3]);
-    stubPushEnv(dead);
+    const subscribe = stubPushEnv(dead);
 
     const result = await runWithTimers(ActiveMsgClient.ensurePushSubscription());
 
     expect(dead.unsubscribe).toHaveBeenCalledTimes(1);
-    expect(reiClient.subscribePush).toHaveBeenCalledTimes(1);
-    expect((result as any).endpoint).toBe('https://fcm.googleapis.com/send/fresh');
+    expect(subscribe).toHaveBeenCalledTimes(1);
+    expect((result as any).endpoint).toBe(FRESH_ENDPOINT);
   });
 
   it('已有订阅绑着旧 VAPID 公钥 → 退订后按 worker 当前公钥重订', async () => {
     const stale = makeSub('https://fcm.googleapis.com/send/x', [9, 9, 9]);
-    stubPushEnv(stale);
+    const subscribe = stubPushEnv(stale);
 
     const result = await runWithTimers(ActiveMsgClient.ensurePushSubscription());
 
     expect(stale.unsubscribe).toHaveBeenCalledTimes(1);
-    expect(reiClient.subscribePush).toHaveBeenCalledWith(VAPID_AQID, expect.anything());
-    expect((result as any).endpoint).toBe('https://fcm.googleapis.com/send/fresh');
+    expect(subscribe).toHaveBeenCalledWith(expect.objectContaining({ userVisibleOnly: true }));
+    expect((result as any).endpoint).toBe(FRESH_ENDPOINT);
+  });
+
+  it('订阅一律不经 ReiClient.subscribePush（它不做僵尸重试）', async () => {
+    stubPushEnv(null);
+
+    await runWithTimers(ActiveMsgClient.ensurePushSubscription());
+
+    expect(reiClient.subscribePush).not.toHaveBeenCalled();
+  });
+
+  it('重订第一次拿到僵尸哨兵、重试拿到活端点 → 返回活的那个', async () => {
+    const subscribe = stubPushEnv(null, ['https://permanently-removed.invalid/x', FRESH_ENDPOINT]);
+
+    const result = await runWithTimers(ActiveMsgClient.ensurePushSubscription());
+
+    expect(subscribe).toHaveBeenCalledTimes(2);
+    expect((result as any).endpoint).toBe(FRESH_ENDPOINT);
+  });
+
+  it('重试到底还是僵尸 → 抛 端点僵尸，绝不把死端点交出去', async () => {
+    stubPushEnv(null, ['https://permanently-removed.invalid/x']);
+
+    const failure = await runWithTimers(ActiveMsgClient.ensurePushSubscription().catch((e) => e));
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(readAmsgFailKind(failure)).toBe('端点僵尸');
   });
 
   it('已有订阅健康且公钥一致 → 原样复用，不重订', async () => {
