@@ -2707,7 +2707,8 @@ const Settings: React.FC = () => {
                     </label>
                 </div>
                 <p className="text-xs text-slate-500 leading-relaxed">
-                    只数「哪个页面被打开了、哪个功能被用了一次」，以及记忆条数 / 角色数落在哪个区间。
+                    只数「哪个页面被打开了、哪个功能被用了一次」，记忆条数 / 角色数落在哪个区间，
+                    以及你这台设备打开页面花了多久（浏览器自己测的毫秒数）。
                     不碰你和角色的任何对话、记忆、设定，不碰你输入的任何文字，不碰 API 和 MCP 配置。
                 </p>
                 <p className="text-xs text-slate-500 leading-relaxed">
@@ -2717,7 +2718,7 @@ const Settings: React.FC = () => {
                 </p>
                 <p className="text-[10px] text-slate-400 leading-relaxed">
                     浏览器开了 Do Not Track 的话，不用动这个开关也会自动跳过。
-                    关掉之后下次启动连统计脚本都不会加载。想自己核实的话，按 F12 打开 Network 面板，
+                    关掉之后当场就不再发，下次启动连统计脚本都不会加载。想自己核实的话，按 F12 打开 Network 面板，
                     这个页面发出的每一个请求装了什么都在你自己的浏览器里。
                 </p>
             </div>
