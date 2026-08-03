@@ -514,11 +514,27 @@ umami 的 tracker 支持一份主机名白名单（`data-domains`）：hostname 
 - 连接并启用主动消息 2.0
 - 连点版本号解锁调试面板
 
-主动消息 2.0 的「连接并启用」「开启通知与推送订阅」两条报的不是成败两态，而是卡在哪一类：
-`ok` / `地址没填` / `打到网页了` / `鉴权失败` / `端点不存在` / `建表失败` / `网络失败` /
-`权限被拒` / `不支持推送` / `worker没配VAPID` / `订阅失败` / `其他`。
+主动消息 2.0 的「连接并启用」「开启通知与推送订阅」「重置推送订阅」「深度重置推送订阅」
+这几条报的不是成败两态，而是卡在哪一类：
+`ok` / `success` / `地址没填` / `打到网页了` / `鉴权失败` / `端点不存在` / `建表失败` /
+`配置缺失` / `网络失败` / `权限被拒` / `不支持推送` / `worker没配VAPID` / `订阅失败` /
+`端点僵尸` / `其他`。
+其中 `配置缺失` 来自连接前那次 `GET /config-check`（worker 自己报缺 D1 绑定或 master key），
+比 `建表失败` 精确——后者是按 HTTP 状态归的类，三种原因混在一格里。
+`端点僵尸` 是重试到底浏览器还是只给 `permanently-removed.invalid`，设置页据此把
+「重置订阅」升级成「深度重置」。
 这些代号在**抛错那一刻**按 HTTP 状态和源码里的谓词挂上，报错原文（可能带 Worker 地址、
 push endpoint）留在 toast 和 console 里，一个字都不进上报。
+
+两条重置事件还带一个 `attempt`，是**分桶后**的连续失败次数（`0` / `1-2` / `3+`），
+不是裸计数。
+
+「刷新 Web Push 诊断」报的是设置页「推送订阅状态」面板当时的读数，全是固定枚举：
+`permission`、`subscription`（`none` / `dead` / `active`）、`swState`（`activated` /
+`none` / `other`）、`platform`（`normal` / `ios_needs_pwa` / `capacitor_native`）、
+`registration`（`worker-unset` / `unreachable` / `missing` / `other-endpoint` / `matched`）。
+`registration` 是「worker 上登记的订阅是不是这台设备」，中间那两档对应的是任务建得成、
+到点却一条都不来的静默失联。端点地址、Worker 地址一概不带。
 
 「探测 2.0 Worker 能力」每次会话最多一次，报 `ok` / `版本过旧` / `缺特性` / `端点不存在` /
 `探测失败`。跑着旧 worker 的表现是静默错（自述回写不落盘、任务重复推），用户不会来报，

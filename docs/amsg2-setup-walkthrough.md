@@ -194,13 +194,27 @@ env.DB (sullyos-amsg)   D1 Database
 
 **SullyOS 里点「连接」失败**
 
+提示里如果直接写了「缺 XXX」，那就是后端自己报的，照着补完再点一次就行（第四步那张表）。
+
+其它情况按这几条排：
+
 - 地址是不是抄全了（要带 `https://`，末尾不要多斜杠）
 - 「共享密钥」和 Cloudflare 里的 `AMSG_SERVER_TOKEN` 是不是一模一样
-- 直接在浏览器打开 `你的地址/capabilities`：如果返回一段 JSON，说明后端活着；如果返回 `INVALID_CLIENT_TOKEN`，说明后端也活着，只是这个地址需要密钥才能访问——两种都算正常，问题在密钥没对上。什么都打不开才是后端没起来，去看第三步的构建日志。
+- 直接在浏览器打开 `你的地址/config-check`：后端会自己列出配置齐不齐。`"ok": true` 就是钥匙都填对了，问题在地址或密钥没对上；`"ok": false` 时后面的 `message` 会写明缺哪一样、去哪儿补。什么都打不开才是后端没起来，去看第三步的构建日志。
 
-**打开 `你的地址/capabilities` 返回 `INTERNAL_ERROR`**
+**连上了，但 `config-check` 的 `warnings` 里有东西**
 
-后端起来了，但钥匙没填全——最常见的是漏了 `AMSG_MASTER_KEY`。回第四步核对那几条。想知道到底缺哪个，去 Worker 顶部的 **Observability** 标签，日志里会直接写出来（形如 `config.masterKey is required`）。
+那几条是「能跑，但有一块是哑的」，界面上看不出来，所以单独列在这儿：
+
+- `VAPID_MISSING`：任务建得成，到点一条都推不出去。回第四步补那两个密钥
+- `MASTER_KEY_FORMAT`：`AMSG_MASTER_KEY` 不是 64 位十六进制，多半是粘贴时少了几位
+- `SERVER_TOKEN_MISSING`：没设共享密钥，这个地址知道的人都能读写你的任务。介意的话回第 4a 步生成一个
+
+**上面都试过还是不行 / 想找人帮忙看**
+
+打开 `你的地址/debug`，把返回的那段 JSON 整个贴给对方。它比 `config-check` 多报数据库和定时任务的状况，一份就够判断问题出在哪。这个地址只读、不需要密钥，也不会返回任何密钥的值、你的用户标识或消息内容，贴出来是安全的。
+
+自己看的话重点是这几项：`storage.missingColumns` 有东西 = 换了新版本没重新点「连接并验证」；`storage.pushSubscriptionRegistered` 是 `false` = 云端没有推送订阅（去把推送开关关掉再打开）；`tick` 是 `stalled` = 有任务到点很久没被处理，多半是定时触发器没配。
 
 **构建失败，日志里写 `D1_DATABASE_ID 是空的`**
 
