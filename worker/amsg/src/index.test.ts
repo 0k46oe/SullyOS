@@ -369,6 +369,63 @@ describe('onBeforeFire 四道门', () => {
     await expect(amsgHooks.onBeforeFire(ctx)).rejects.toThrow(/AMSG2_FIRE_STATE_MISSING/);
   });
 
+  it('前端压过的 tool_pack 照常读出来（带几条月度总结就到压缩量级）', async () => {
+    // 空记忆的 tool_pack 一百来字节、压完反而更大，packStateValue 会原样放行；
+    // 攒了几条月度总结的角色轻松过千字节、必然被压——正是活跃用户的常态形状。
+    const months = ['2026-05', '2026-06', '2026-07'];
+    const bulky = JSON.stringify({
+      ...JSON.parse(toolPackValue),
+      activeMemoryMonths: months,
+      memories: months.map((date) => ({
+        date,
+        summary: '这个月聊了很多工作上的压力，也一起看了两场电影，月底约好下次去海边散心。'.repeat(3),
+      })),
+    });
+    const packed = await packStateValue(bulky);
+    expect(packed.startsWith('gz1:'), '这个量级应该压得动').toBe(true);
+    const { ctx, scratch } = makeCtx({
+      charRows: [
+        { key: AMSG_FIRE_PACK_KEY, value: firePackValue() },
+        { key: AMSG_TOOL_PACK_KEY, value: packed },
+      ],
+    });
+    fired(await amsgHooks.onBeforeFire(ctx));
+    // 光不抛错不够：得确认解出来的是真数据（recall 按这些月份找总结全靠它）
+    expect((scratch.fire as any).toolCtx.char.activeMemoryMonths).toEqual(months);
+  });
+
+  it('压过的 tool_pack 坏掉 → 抛错（和 fire_pack 同款语义，不降级成无工具数据）', async () => {
+    const { ctx } = makeCtx({
+      charRows: [
+        { key: AMSG_FIRE_PACK_KEY, value: firePackValue() },
+        { key: AMSG_TOOL_PACK_KEY, value: 'gz1:bm90LWd6aXAtYXQtYWxs' },
+      ],
+    });
+    await expect(amsgHooks.onBeforeFire(ctx)).rejects.toThrow(/AMSG2_FIRE_STATE_MISSING/);
+  });
+
+  it('压过的 tool_config 也照常读出来（今天前端没压它，但读侧不该赌客户端压哪份）', async () => {
+    const bulky = mcpToolConfigValue({
+      mcpServers: [{
+        id: 'srv-memory',
+        name: '记忆库',
+        url: 'https://mcp.example.com/mcp',
+        tools: [{
+          name: 'search_memory',
+          description: '按关键词在长期记忆库里检索过往对话的要点，返回最相关的几条。'.repeat(8),
+          inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        }],
+      }],
+    });
+    const packed = await packStateValue(bulky);
+    expect(packed.startsWith('gz1:'), '这个量级应该压得动').toBe(true);
+    const { ctx, scratch } = makeCtx({
+      globalRows: [{ key: AMSG_TOOL_CONFIG_KEY, value: packed }],
+    });
+    fired(await amsgHooks.onBeforeFire(ctx));
+    expect((scratch.fire as any).mcpResolve.get('search_memory').toolName).toBe('search_memory');
+  });
+
   it('云端没有 tool_pack → 抛错（和 fire_pack 同批上传，缺了就是状态异常，不给空壳继续）', async () => {
     const { ctx } = makeCtx({ charRows: [{ key: AMSG_FIRE_PACK_KEY, value: firePackValue() }] });
     await expect(amsgHooks.onBeforeFire(ctx)).rejects.toThrow(/tool_pack/);

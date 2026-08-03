@@ -8600,6 +8600,13 @@ var amsgHooks = {
       throw fireStateError("task metadata \u7F3A charId", { taskId: ctx.task.id });
     }
     const fail = (reason, extra) => fireStateError(reason, { taskId: ctx.task.id, charId, ...extra });
+    const unpackOrFail = async (label, value) => {
+      try {
+        return await unpackStateValue(value);
+      } catch (error) {
+        throw fail(`${label} \u89E3\u538B\u5931\u8D25\uFF08\u6570\u636E\u635F\u574F\uFF09`, { error: String(error) });
+      }
+    };
     const charRows = await ctx.readState(amsgStateNamespace(charId));
     const taskMeta = ctx.task.metadata ?? {};
     const policy = typeof taskMeta.amsgExpirePolicy === "string" ? taskMeta.amsgExpirePolicy : void 0;
@@ -8622,12 +8629,7 @@ var amsgHooks = {
     }
     const packRow = charRows.find((r) => r.key === AMSG_FIRE_PACK_KEY);
     if (!packRow) throw fail("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 fire_pack");
-    let packJson;
-    try {
-      packJson = await unpackStateValue(packRow.value);
-    } catch (error) {
-      throw fail("fire_pack \u89E3\u538B\u5931\u8D25\uFF08\u6570\u636E\u635F\u574F\uFF09", { error: String(error) });
-    }
+    const packJson = await unpackOrFail("fire_pack", packRow.value);
     const pack = parseFirePack(packJson);
     if (!pack) throw fail(`fire_pack \u89E3\u6790\u5931\u8D25\uFF1A${describeFirePackVersion(packJson)}`);
     const occurrenceMs = Date.parse(String(ctx.task.nextSendAt));
@@ -8656,9 +8658,9 @@ var amsgHooks = {
     const toolConfigRow = globalRows.find((r) => r.key === AMSG_TOOL_CONFIG_KEY);
     if (!toolPackRow) throw fail("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 tool_pack");
     if (!toolConfigRow) throw fail("\u4E91\u7AEF\u6CA1\u6709 tool_config");
-    const toolPack = parseToolPack(toolPackRow.value);
+    const toolPack = parseToolPack(await unpackOrFail("tool_pack", toolPackRow.value));
     if (!toolPack) throw fail("tool_pack \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
-    const toolConfig = parseToolConfig(toolConfigRow.value);
+    const toolConfig = parseToolConfig(await unpackOrFail("tool_config", toolConfigRow.value));
     if (!toolConfig) throw fail("tool_config \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
     const mcpServers = filterMcpServersForChar(toolConfig.mcpServers, charId);
     const mcpResolve = mcpServers.length ? buildMcpNameMap(mcpServers, { maxNameLen: MCP_FIRE_NAME_BUDGET }) : null;
