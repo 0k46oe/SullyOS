@@ -8920,7 +8920,164 @@ var buildWorkerConfig = (env) => {
     serializeBy: (task) => typeof task.metadata?.charId === "string" ? task.metadata.charId : null
   };
 };
-var src_default = createSingleUserCloudflareWorker(buildWorkerConfig);
+var REQUIRED_ENV = [
+  {
+    key: "DB",
+    label: "D1 \u6570\u636E\u5E93\u7ED1\u5B9A",
+    // D1 绑定不在 Variables and Secrets 那一栏，指错地方比不指还费时间。
+    how: "\u5728 Settings \u2192 Bindings \u91CC\u52A0\u4E00\u6761 D1 database\uFF0C\u53D8\u91CF\u540D\u586B DB",
+    isMissing: (env) => typeof env.DB?.prepare !== "function"
+  },
+  {
+    key: "AMSG_MASTER_KEY",
+    label: "AMSG_MASTER_KEY",
+    how: "\u5728 Settings \u2192 Variables and Secrets \u91CC\u52A0\uFF0C\u7C7B\u578B\u9009 Secret",
+    isMissing: (env) => !env.AMSG_MASTER_KEY?.trim()
+  }
+];
+var inspectWorkerEnv = (env) => {
+  const absent = REQUIRED_ENV.filter((item) => item.isMissing(env));
+  const warnings = [];
+  const masterKey = env.AMSG_MASTER_KEY?.trim();
+  if (masterKey && !/^[0-9a-f]{64}$/i.test(masterKey)) {
+    warnings.push({
+      code: "MASTER_KEY_FORMAT",
+      message: "AMSG_MASTER_KEY \u4E0D\u662F 64 \u4F4D\u5341\u516D\u8FDB\u5236\uFF0C\u53EF\u80FD\u662F\u7C98\u8D34\u65F6\u5C11\u4E86\u51E0\u4F4D\u3002\u5B83\u5FC5\u987B\u548C\u5F53\u521D\u751F\u6210\u7684\u90A3\u4E00\u4E32\u5B8C\u5168\u4E00\u81F4\uFF0C\u6362\u4E00\u4E32\u7684\u8BDD\u5DF2\u5B58\u7684\u4EFB\u52A1\u5C31\u89E3\u4E0D\u5F00\u4E86\u3002"
+    });
+  }
+  if (!env.VAPID_PUBLIC_KEY?.trim() || !env.VAPID_PRIVATE_KEY?.trim()) {
+    warnings.push({
+      code: "VAPID_MISSING",
+      message: "VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY \u6CA1\u914D\u9F50\uFF0C\u5230\u70B9\u6D88\u606F\u4E0D\u4F1A\u63A8\u9001\u51FA\u53BB\u3002\u8FD9\u4E24\u4E2A\u8981\u548C\u7AD9\u70B9\u300C\u63A8\u9001\u51ED\u636E (VAPID)\u300D\u9762\u677F\u91CC\u7684\u662F\u540C\u4E00\u5BF9\u3002"
+    });
+  }
+  if (!env.AMSG_SERVER_TOKEN?.trim()) {
+    warnings.push({
+      code: "SERVER_TOKEN_MISSING",
+      message: "\u6CA1\u8BBE AMSG_SERVER_TOKEN\uFF0C\u8FD9\u4E2A Worker \u5730\u5740\u5BF9\u516C\u7F51\u5F00\u653E\uFF0C\u77E5\u9053\u5730\u5740\u7684\u4EBA\u90FD\u80FD\u8BFB\u5199\u4F60\u7684\u4EFB\u52A1\u3002"
+    });
+  }
+  return {
+    ok: absent.length === 0,
+    missing: absent.map((item) => item.key),
+    message: absent.length ? `Worker \u914D\u7F6E\u4E0D\u5B8C\u6574\uFF1A${absent.map((item) => `\u7F3A ${item.label}\uFF08${item.how}\uFF09`).join("\uFF1B")}\u3002` : "Worker \u914D\u7F6E\u9F50\u5168\u3002",
+    warnings
+  };
+};
+var CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, X-User-Id, X-Payload-Encrypted, X-Encryption-Version, X-Response-Encrypted, X-Client-Token",
+  "Access-Control-Max-Age": "86400"
+};
+var jsonWithCors = (status, body) => new Response(JSON.stringify(body), {
+  status,
+  headers: { "Content-Type": "application/json; charset=utf-8", ...CORS_HEADERS }
+});
+var EXPECTED_TABLES = ["scheduled_messages", "client_state", "push_subscriptions"];
+var EXPECTED_TASK_COLUMNS = ["lease_until", "retry_after", "serialize_group"];
+var TICK_STALL_MINUTES = 5;
+var inspectStorage = async (env) => {
+  const db = env.DB;
+  if (typeof db?.prepare !== "function") return { reachable: false };
+  try {
+    const tables = await db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table'").all();
+    const rows = tables.results || [];
+    const present = new Set(rows.map((row) => row.name));
+    const taskSql = rows.find((row) => row.name === "scheduled_messages")?.sql || "";
+    const missingTables = EXPECTED_TABLES.filter((name) => !present.has(name));
+    const missingColumns = present.has("scheduled_messages") ? EXPECTED_TASK_COLUMNS.filter((column) => !taskSql.includes(column)) : [];
+    if (missingTables.includes("scheduled_messages")) {
+      return { reachable: true, missingTables, missingColumns, schemaReady: false };
+    }
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    const stats = await db.prepare(
+      `SELECT COUNT(*) AS pending,
+                SUM(CASE WHEN next_send_at <= ? THEN 1 ELSE 0 END) AS overdue,
+                MIN(CASE WHEN next_send_at <= ? THEN next_send_at END) AS oldest
+           FROM scheduled_messages WHERE status = 'pending'`
+    ).bind(nowIso, nowIso).first();
+    const pushRow = present.has("push_subscriptions") ? await db.prepare("SELECT COUNT(*) AS n FROM push_subscriptions").first() : null;
+    return {
+      reachable: true,
+      schemaReady: missingTables.length === 0 && missingColumns.length === 0,
+      missingTables,
+      missingColumns,
+      // 单用户 worker 只存一行。到点却发不出去最常见的原因就是这行是空的——
+      // 换了一台 worker 之后云端订阅是空的，而浏览器那侧的订阅一个字都没变。
+      pushSubscriptionRegistered: (pushRow?.n ?? 0) > 0,
+      pendingTasks: stats?.pending ?? 0,
+      overdueTasks: stats?.overdue ?? 0,
+      oldestOverdueMinutes: stats?.oldest ? Math.floor((Date.now() - Date.parse(stats.oldest)) / 6e4) : null
+    };
+  } catch (error) {
+    return { reachable: false, error: error?.name || "QueryFailed" };
+  }
+};
+var judgeTick = (storage) => {
+  if (!storage.reachable || !("pendingTasks" in storage)) return "unknown";
+  if (!storage.pendingTasks) return "idle";
+  const overdueMinutes = storage.oldestOverdueMinutes;
+  if (overdueMinutes === null || overdueMinutes < TICK_STALL_MINUTES) return "healthy";
+  return "stalled";
+};
+var upstream = createSingleUserCloudflareWorker(buildWorkerConfig);
+var readServerVersion = async (request, env) => {
+  if (!inspectWorkerEnv(env).ok) return null;
+  try {
+    const url = new URL(request.url);
+    url.pathname = "/capabilities";
+    url.search = "";
+    const response = await upstream.fetch(new Request(url.toString(), { headers: request.headers }), env);
+    if (response.status !== 200) return null;
+    const body = await response.json();
+    return { version: body.serverVersion ?? null, featureCount: body.features?.length ?? 0 };
+  } catch {
+    return null;
+  }
+};
+var src_default = {
+  async fetch(request, env) {
+    const pathname = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
+    const method = request.method.toUpperCase();
+    if (pathname.endsWith("/config-check")) {
+      if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
+      return jsonWithCors(200, { success: true, data: inspectWorkerEnv(env) });
+    }
+    if (pathname.endsWith("/debug")) {
+      if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
+      const storage = await inspectStorage(env);
+      return jsonWithCors(200, {
+        success: true,
+        data: {
+          now: (/* @__PURE__ */ new Date()).toISOString(),
+          config: inspectWorkerEnv(env),
+          server: await readServerVersion(request, env),
+          storage,
+          tick: judgeTick(storage),
+          vapidPublicKey: env.VAPID_PUBLIC_KEY?.trim() || null
+        }
+      });
+    }
+    const report = inspectWorkerEnv(env);
+    if (!report.ok) {
+      if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
+      return jsonWithCors(503, {
+        success: false,
+        error: { code: "WORKER_CONFIG_MISSING", message: report.message, missing: report.missing }
+      });
+    }
+    return upstream.fetch(request, env);
+  },
+  async scheduled(event, env) {
+    const report = inspectWorkerEnv(env);
+    if (!report.ok) {
+      console.error(`[amsg] \u5B9A\u65F6\u4EFB\u52A1\u6574\u8F6E\u8DF3\u8FC7\uFF1A${report.message}`);
+      return;
+    }
+    return upstream.scheduled(event, env);
+  }
+};
 export {
   amsgFireSettled,
   amsgHooks,
@@ -8928,6 +9085,7 @@ export {
   attachScheduledTasks,
   buildWorkerConfig,
   src_default as default,
+  inspectWorkerEnv,
   offloadOversizedPush,
   resolveVapidEmail,
   runFireScheduleTool,

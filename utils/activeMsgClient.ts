@@ -153,6 +153,7 @@ export type AmsgFailKind =
   | '鉴权失败'
   | '端点不存在'
   | '建表失败'
+  | '配置缺失'
   | '网络失败'
   | '权限被拒'
   | '不支持推送'
@@ -175,6 +176,42 @@ const withFailKind = <T extends Error>(error: T, kind: AmsgFailKind): T => {
 export const readAmsgFailKind = (error: unknown): AmsgFailKind => {
   const kind = (error as Record<string, unknown> | null | undefined)?.[FAIL_KIND_PROP];
   return typeof kind === 'string' ? (kind as AmsgFailKind) : '其他';
+};
+
+/**
+ * worker 自检的回执（`GET /config-check`，见 worker/amsg/src/index.ts 的 inspectWorkerEnv）。
+ * missing 是缺了就跑不起来的，warnings 是能跑但有一块功能是哑的。
+ */
+export interface AmsgWorkerEnvReport {
+  ok: boolean;
+  missing: string[];
+  /** worker 生成的整句，含「去哪儿补」，直接显示给用户。 */
+  message: string;
+  warnings: { code: string; message: string }[];
+}
+
+/**
+ * 问 worker 自己配齐了没。
+ *
+ * 拿不到结论一律返回 null，不抛：这个端点是后加的，旧 worker 会回 404；而网络本身
+ * 不通的话，紧接着的 init-tenant 会用它自己那套分类报出来，在这儿抢先报一遍只会让
+ * 用户同时看到两条口径不同的错误。
+ */
+const inspectWorkerConfig = async (config: ActiveMsg2GlobalConfig): Promise<AmsgWorkerEnvReport | null> => {
+  try {
+    const { status, body } = await fetchWithAuthRaw('config-check', config, { method: 'GET' }, '配置自检');
+    if (status !== 200 || !body?.success) return null;
+    // 只认形状对得上的回执。没有这个端点的 worker 回什么的都有（404 只是其中一种），
+    // 光看 success 就采信的话，会把一台好 worker 判成「配置缺失」——那比不自检还糟，
+    // 用户照着提示改哪儿都改不对。形状不对就当它不支持自检，走原来的流程。
+    const data = body.data;
+    if (typeof data?.ok !== 'boolean' || !Array.isArray(data.missing) || !Array.isArray(data.warnings)) {
+      return null;
+    }
+    return data as AmsgWorkerEnvReport;
+  } catch {
+    return null;
+  }
 };
 
 /** init-tenant 没成功时按 HTTP 状态归类：三种状态要用户去改的地方完全不同。 */
@@ -878,6 +915,15 @@ export const ActiveMsgClient = {
   // 最后把推送订阅补登记上去（换 worker 后云端那份是空的，见 reconcilePushSubscription）。
   async connect() {
     const config = await ensureWorkerReady();
+
+    // 先问 worker 配齐了没：缺 D1 绑定或 master key 的话，下面的 init-tenant 必然失败，
+    // 而那一步只能按 HTTP 状态猜个大概（三种原因共用「建表失败」）。自检能直接说出
+    // 缺的是哪一样、去哪儿补，用户不用再去翻 Cloudflare 的日志。
+    const report = await inspectWorkerConfig(config);
+    if (report && !report.ok) {
+      throw withFailKind(new Error(report.message), '配置缺失');
+    }
+
     const { status, body: initResponse } = await fetchWithAuthRaw('init-tenant', config, { method: 'POST' }, '初始化数据库');
     if (!initResponse?.success) {
       throw withFailKind(
@@ -888,7 +934,9 @@ export const ActiveMsgClient = {
     await initializeClient(config);
     await ActiveMsgStore.saveGlobalConfig({ ...config, initializedAt: Date.now() });
     await this.reconcilePushSubscription();
-    return { ok: true, userId: config.userId };
+    // warnings 是「连上了，但有一块功能是哑的」——比如 VAPID 没配齐，任务能建、到点
+    // 却一条都推不出去。连接本身算成功，交给调用方提示，别拦住流程。
+    return { ok: true, userId: config.userId, warnings: report?.warnings ?? [] };
   },
 
   // 分页全量：循环 messages?limit=100&offset=<n>，每页解密后读 tasks 与 pagination.hasMore，

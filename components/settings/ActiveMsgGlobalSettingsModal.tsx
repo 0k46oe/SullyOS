@@ -250,9 +250,12 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         workerUrl: config.workerUrl,
         serverToken: config.serverToken,
       });
-      await ActiveMsgClient.connect();
+      const { warnings } = await ActiveMsgClient.connect();
       await refresh();
       addToast('已连接成功，主动消息 2.0 可以用了。', 'success');
+      // 连上了但有一块是哑的（最典型是 VAPID 没配齐：任务建得成、到点一条都推不出去，
+      // 而界面上没有任何异常）。这类问题用户自己发现不了，连接这一刻不说就没人说了。
+      warnings.forEach((warning) => addToast(warning.message, 'info'));
       // 只报「这次连接成没成 / 卡在哪一类」。连接串 / tenantToken / 错误原文一概不带，
       // 也不报「之前配没配过 tenant」——那等于把两项凭据的配置状态压成一位发出去。
       // 失败代号是抛错时按 HTTP 状态挂上的字面量（见 activeMsgClient 的 AmsgFailKind），

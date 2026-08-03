@@ -228,6 +228,89 @@ describe('连接失败的归类（AmsgFailKind）', () => {
   });
 });
 
+// 回归守卫：worker 缺 D1 绑定或 master key 时，上游是抛异常 → 被它的全局 catch 吞成
+// 一句「服务器内部错误」，而那个响应不带 CORS 头，浏览器连这句话都不让前端读，用户
+// 只看得到 "Failed to fetch"。connect 先问一次 /config-check，把缺的那一样直接说出来。
+describe('连接前的 worker 配置自检', () => {
+  /** 按路径分流的 fetch：没列到的路径一律当成功，模拟 init-tenant 那步是通的。 */
+  const routeFetch = (routes: Record<string, { status: number; body: unknown }>) => {
+    const spy = vi.fn(async (url: string) => {
+      const hit = Object.entries(routes).find(([path]) => String(url).includes(path));
+      const { status, body } = hit?.[1] ?? { status: 200, body: { success: true, data: {} } };
+      return {
+        status,
+        text: async () => JSON.stringify(body),
+        headers: new Headers({ 'content-type': 'application/json' }),
+      };
+    });
+    vi.stubGlobal('fetch', spy);
+    return spy;
+  };
+
+  const report = (patch: Record<string, unknown>) => ({
+    success: true,
+    data: { ok: true, missing: [], message: 'Worker 配置齐全。', warnings: [], ...patch },
+  });
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('worker 说缺 master key → 报「配置缺失」，并把「去哪儿补」原样交给用户', async () => {
+    routeFetch({
+      'config-check': {
+        status: 200,
+        body: report({
+          ok: false,
+          missing: ['AMSG_MASTER_KEY'],
+          message: 'Worker 配置不完整：缺 AMSG_MASTER_KEY（在 Settings → Variables and Secrets 里加，类型选 Secret）。',
+        }),
+      },
+    });
+
+    const error = await ActiveMsgClient.connect().then(() => null, (e) => e);
+    expect(readAmsgFailKind(error)).toBe('配置缺失');
+    expect((error as Error).message).toContain('AMSG_MASTER_KEY');
+    expect((error as Error).message).toContain('Secret');
+  });
+
+  it('配置缺失时不再去打 init-tenant——那一步注定失败，且只会报回一句更含糊的话', async () => {
+    const spy = routeFetch({
+      'config-check': { status: 200, body: report({ ok: false, missing: ['DB'], message: '缺 D1 绑定' }) },
+    });
+
+    await ActiveMsgClient.connect().catch(() => {});
+    expect(spy.mock.calls.some(([url]) => String(url).includes('init-tenant'))).toBe(false);
+  });
+
+  it('只有警告（VAPID 没配齐）→ 连接照样成功，但把警告带回去让界面提示', async () => {
+    routeFetch({
+      'config-check': {
+        status: 200,
+        body: report({ warnings: [{ code: 'VAPID_MISSING', message: 'VAPID 没配齐，到点消息不会推送出去。' }] }),
+      },
+    });
+
+    const result = await ActiveMsgClient.connect();
+    expect(result.ok).toBe(true);
+    expect(result.warnings.map((w) => w.code)).toEqual(['VAPID_MISSING']);
+  });
+
+  it('旧 worker 没有这个端点（404）→ 当它不支持自检，照常走原来的连接流程', async () => {
+    routeFetch({
+      'config-check': { status: 404, body: { success: false, error: { code: 'NOT_FOUND' } } },
+    });
+
+    await expect(ActiveMsgClient.connect()).resolves.toMatchObject({ ok: true, warnings: [] });
+  });
+
+  it('回执形状对不上就不采信：宁可不自检，也不能把一台好 worker 判成「配置缺失」', async () => {
+    // 未知路径回 200 + 一个没有 ok/missing 的 body。照 success 采信的话，ok 会是
+    // undefined，一台配置完好的 worker 就被判死了，用户照着提示改哪儿都改不对。
+    routeFetch({ 'config-check': { status: 200, body: { success: true, data: {} } } });
+
+    await expect(ActiveMsgClient.connect()).resolves.toMatchObject({ ok: true });
+  });
+});
+
 // 回归守卫：老 worker（< 2.6.0-next.5）的 GET /messages 不投影 charId，按角色过滤会
 // 一条都留不下。要是照直返回空数组，面板会把该角色的任务全标成「远端不存在」，
 // 「关闭 2.0」也会以为没什么要取消——两处都是拿半份证据下结论。
