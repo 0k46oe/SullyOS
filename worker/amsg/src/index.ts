@@ -793,6 +793,18 @@ export const amsgHooks = {
     const fail = (reason: string, extra?: Record<string, unknown>) =>
       fireStateError(reason, { taskId: ctx.task.id, charId, ...extra });
 
+    // 前端上传的云端状态可能被 packStateValue 压过（值以 gz1: 开头），读回来统一先过
+    // 一遍解压——没压过的原样穿过去，读侧不用赌客户端到底压了哪几份。带月度总结的
+    // tool_pack 就在压缩量级上，漏掉这一步整条 fire 链会卡死在「解析失败」。
+    // 解压失败说明数据真损坏了，和解析失败同款硬失败语义。
+    const unpackOrFail = async (label: string, value: string): Promise<string> => {
+      try {
+        return await unpackStateValue(value);
+      } catch (error) {
+        throw fail(`${label} 解压失败（数据损坏）`, { error: String(error) });
+      }
+    };
+
     const charRows = await ctx.readState(amsgStateNamespace(charId));
 
     const taskMeta = (ctx.task.metadata ?? {}) as Record<string, unknown>;
@@ -824,13 +836,7 @@ export const amsgHooks = {
     if (!packRow) throw fail('云端没有这个角色的 fire_pack');
 
     // 大值分块由 amsg-server 2.6.0-next.4+ 在存储层透明处理，readState 拿到的已是拼回的原文。
-    // 前端压过之后值以 gz1: 开头，unpackStateValue 按前缀解；内容太短没压的原样穿过去。
-    let packJson: string;
-    try {
-      packJson = await unpackStateValue(packRow.value);
-    } catch (error) {
-      throw fail('fire_pack 解压失败（数据损坏）', { error: String(error) });
-    }
+    const packJson = await unpackOrFail('fire_pack', packRow.value);
     const pack = parseFirePack(packJson);
     // 失败原因写清楚：升 fire_pack 版本要 worker bundle 和前端一起动，而设置页的版本门槛
     // 读的是上游 amsg-server 库的版本号，只改 SullyOS 自己这份 worker 代码时它不会亮。
@@ -887,10 +893,11 @@ export const amsgHooks = {
     if (!toolConfigRow) throw fail('云端没有 tool_config');
 
     // 两份数据和 fire_pack 同批原子上传（activeMsgClient 的 putClientStateOrThrow），
-    // 所以走到这里必然都在；解析不出来就是云端状态坏了，硬失败不降级。
-    const toolPack = parseToolPack(toolPackRow.value);
+    // 所以走到这里必然都在；和 fire_pack 一样先解压再解析（tool_pack 攒上几条月度总结
+    // 就会被前端压缩）。解析不出来就是云端状态坏了，硬失败不降级。
+    const toolPack = parseToolPack(await unpackOrFail('tool_pack', toolPackRow.value));
     if (!toolPack) throw fail('tool_pack 解析失败（格式不对或数据损坏）');
-    const toolConfig = parseToolConfig(toolConfigRow.value);
+    const toolConfig = parseToolConfig(await unpackOrFail('tool_config', toolConfigRow.value));
     if (!toolConfig) throw fail('tool_config 解析失败（格式不对或数据损坏）');
 
     // 通用 MCP：提示词块 / tools 数组与凭据同源同拍（都来自这一行 tool_config），
