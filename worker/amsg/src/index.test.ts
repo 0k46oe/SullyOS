@@ -694,7 +694,7 @@ describe('executeToolCalls 的工具编排', () => {
       [{ ...call, id: 'c2' }],
       session,
     );
-    expect(second.content).toContain('没有再去查');
+    expect(second.content).toContain('没有再执行');
   });
 
   // 闸只拦「完全一样」的调用。换个月份是正当的多轮使用，拦了就是把能力砍了。
@@ -708,7 +708,7 @@ describe('executeToolCalls 的工具编排', () => {
       [toolCall('c2', 'recall', { year: '2026', month: '07' })],
       session,
     );
-    expect(other.content).not.toContain('没有再去查');
+    expect(other.content).not.toContain('没有再执行');
   });
 
   it('参数字段顺序变了仍算同一次调用', async () => {
@@ -721,7 +721,7 @@ describe('executeToolCalls 的工具编排', () => {
       [toolCall('c2', 'recall', { month: '06', year: '2026' })],
       session,
     );
-    expect(reordered.content).toContain('没有再去查');
+    expect(reordered.content).toContain('没有再执行');
   });
 
   // 轮次快用完了还在请求工具，上游会抛 AGENTIC_LOOP_EXCEEDED：这次攒的旁白全丢、任务

@@ -18,6 +18,16 @@ import {
   type AmsgRemotePushSubscription,
 } from '../../utils/activeMsgClient';
 import { readBrowserPushState, type BrowserPushState } from '../../utils/pushSubscribeShared';
+import {
+  describeElapsed,
+  describePermission,
+  describeServiceWorker,
+  describeSubscription,
+  describeSupport,
+  hasLiveFailure,
+  isSupportBad,
+  liveFailureKind,
+} from '../../utils/pushDiagnosticsView';
 import { bucketRetryCount, trackEvent } from '../../utils/analytics';
 
 interface PushSubscriptionPanelProps {
@@ -34,23 +44,6 @@ const Row: React.FC<{ label: string; value: string; bad?: boolean }> = ({ label,
   </div>
 );
 
-const describePermission = (permission: BrowserPushState['permission']) => {
-  if (permission === 'granted') return '已授权';
-  if (permission === 'denied') return '已拒绝（要去浏览器的站点设置里手动打开）';
-  if (permission === 'default') return '还没决定';
-  return '不可用';
-};
-
-const describeServiceWorker = (state: BrowserPushState) => {
-  if (state.swState === 'none') return '未注册';
-  const scope = state.swScope || '?';
-  return state.swState === 'activated' ? `已激活（scope: ${scope}）` : `${state.swState}（scope: ${scope}）`;
-};
-
-const describeSubscription = (state: BrowserPushState) => {
-  if (!state.endpoint) return '不存在';
-  return state.endpointDead ? '已被浏览器吊销' : '已建立';
-};
 
 const REGISTRATION_TEXT: Record<AmsgPushRegistrationState, { value: string; bad: boolean }> = {
   'worker-unset': { value: '还没填 Worker 地址', bad: true },
@@ -149,6 +142,9 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
                 swState: browser.swState === 'activated' ? 'activated' : browser.swState === 'none' ? 'none' : 'other',
                 platform: browser.capacitorNative ? 'capacitor_native' : browser.iosNeedsPwa ? 'ios_needs_pwa' : 'normal',
                 registration,
+                // 「接口全在但这台设备就是建不出订阅」的唯一可见出口。取的是共用层那个
+                // 固定枚举，不含报错原文。
+                lastFailure: liveFailureKind(browser) ?? 'none',
               } : undefined);
               void refresh();
             }}
@@ -161,15 +157,7 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
 
         {browser ? (
           <div className="space-y-1.5 text-[11px]">
-            <Row
-              label="浏览器支持"
-              value={
-                browser.capacitorNative ? '否（现在跑在 App 里）'
-                  : browser.supported ? '是'
-                  : '否（浏览器缺少推送相关接口）'
-              }
-              bad={!browser.supported || browser.capacitorNative}
-            />
+            <Row label="浏览器支持" value={describeSupport(browser)} bad={isSupportBad(browser)} />
             <Row label="通知权限" value={describePermission(browser.permission)} bad={browser.permission !== 'granted'} />
             <Row label="Service Worker" value={describeServiceWorker(browser)} bad={browser.swState !== 'activated'} />
             <Row
@@ -194,6 +182,24 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
                 {browser.capabilityGap}。
               </div>
             )}
+            {/* 失败原文以前只走 toast，一闪而过就没了——而这类失败恰恰最需要照着原文
+                排查。这里把它固定显示出来，直到订阅真的建起来为止。 */}
+            {hasLiveFailure(browser) && browser.lastSubscribeFailure && (() => {
+              const failure = browser.lastSubscribeFailure!;
+              const elapsed = describeElapsed(failure.at);
+              return (
+                <div className="mt-2 p-2 bg-rose-50 border border-rose-200 rounded-lg text-[10px] text-rose-700 leading-relaxed">
+                  <p className="font-semibold mb-1">上次建订阅失败{elapsed && `（${elapsed}）`}</p>
+                  <p>{failure.text}。</p>
+                  {failure.kind === 'channel-unreachable' && (
+                    <p className="mt-1.5 pt-1.5 border-t border-rose-200">
+                      这一类<b>重试多少次都是一样的结果</b>，问题不在这个站点、也不在权限，
+                      换一个浏览器或换台设备才有用。
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
             {browser.endpointDead && (
               <div className="mt-2 p-2 bg-rose-50 border border-rose-200 rounded-lg text-[10px] text-rose-700 leading-relaxed">
                 订阅地址变成了 <code className="font-mono">permanently-removed.invalid</code>，
@@ -208,7 +214,9 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
                 点「重置订阅」把它改成这台。
               </div>
             )}
-            {registration === 'missing' && (
+            {/* 通道不通 / 内核不支持的时候不提「点重置订阅」：那一步必挂在建订阅上，
+                登记根本轮不到，上面那个失败框才是这台设备真正的结论。 */}
+            {registration === 'missing' && !isSupportBad(browser) && (
               <div className="mt-2 p-2 bg-rose-50 border border-rose-200 rounded-lg text-[10px] text-rose-700 leading-relaxed">
                 Worker 上一份订阅都没有，到点没地方推。点「重置订阅」登记一下这台设备。
               </div>

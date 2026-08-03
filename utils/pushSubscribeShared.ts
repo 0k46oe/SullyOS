@@ -76,6 +76,72 @@ export function describePushCapabilityGap(): string | null {
 }
 
 /**
+ * 订阅建不出来时，是卡在哪一类。面板据此决定「浏览器支持」那行怎么写，
+ * 各推送层据此挂自己的失败代号。
+ *
+ * 'channel-unreachable' 是最难自己看出来的一类：浏览器接口全在、权限也给了，
+ * 但底下那条通往推送服务商的路不通。Chromium 系（Chrome / Edge）安卓版的网页
+ * 推送是转交系统里的谷歌服务（GMS）去注册的，国行安卓机默认不装 GMS，于是
+ * 能力检测全绿、subscribe() 必挂。
+ */
+export type SubscribeFailureKind =
+  | 'channel-unreachable'
+  | 'unsupported'
+  | 'permission'
+  | 'state'
+  | 'zombie'
+  | 'unknown';
+
+export interface SubscribeFailure {
+  kind: SubscribeFailureKind;
+  /** 可直接展示给用户的整句。 */
+  text: string;
+  /** 失败发生的时刻（epoch ms）。面板拿它说「多久之前试的」，避免展示陈年旧账。 */
+  at: number;
+}
+
+const LAST_SUBSCRIBE_FAILURE_KEY = 'push_last_subscribe_failure_v1';
+
+/**
+ * 记下 / 读出 / 清掉「最近一次订阅失败」。
+ *
+ * 为什么要落盘：失败原文以前只走 toast，一闪而过，用户回头想看就没了——而这类
+ * 失败恰恰是最需要照着原文排查的。落盘之后设置页的面板能把它固定显示出来。
+ *
+ * 三条推送链路（主动消息 2.0 / Instant Push / Proactive Push）共用这一份记录，
+ * 因为底下调的是同一个 `pushManager.subscribe()`，失败原因是设备级的、不分链路。
+ *
+ * 写在 subscribeWithRetry 里面而不是各调用方：调用方漏写一处，那条路径的失败就
+ * 又变回一闪而过。localStorage 在 Service Worker 里不存在，所以带 typeof 守卫。
+ */
+export function rememberSubscribeFailure(failure: SubscribeFailure): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(LAST_SUBSCRIBE_FAILURE_KEY, JSON.stringify(failure));
+  } catch { /* 存不下就算了，诊断信息没到丢了要拦流程的地步 */ }
+}
+
+export function readSubscribeFailure(): SubscribeFailure | null {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    const raw = localStorage.getItem(LAST_SUBSCRIBE_FAILURE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.text !== 'string' || typeof parsed.kind !== 'string') return null;
+    return { kind: parsed.kind, text: parsed.text, at: typeof parsed.at === 'number' ? parsed.at : 0 };
+  } catch {
+    return null;
+  }
+}
+
+export function clearSubscribeFailure(): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.removeItem(LAST_SUBSCRIBE_FAILURE_KEY);
+  } catch { /* 同上 */ }
+}
+
+/**
  * 从订阅端点认出推送厂商。端点域名是各厂商写死的，认不出就说「未识别厂商」，
  * 不猜。设置页拿它显示「推送通道」那一行——用户排障时第一句话往往是「我用的
  * Chrome」，能直接对上 Google FCM 就省一轮来回。
@@ -140,6 +206,14 @@ export interface BrowserPushState {
   channel: string;
   iosNeedsPwa: boolean;
   capacitorNative: boolean;
+  /**
+   * 最近一次订阅失败的记录，没失败过是 null。
+   *
+   * 这是判断「接口都在但这台设备实际推不了」的**唯一**可靠依据：能力检测查的是
+   * JS 接口在不在，而 Chromium 的 PushManager 是编译进去的，跟底下有没有推送通道
+   * 无关，所以没 GMS 的安卓机能力检测照样全绿。只有真的试过一次才知道。
+   */
+  lastSubscribeFailure: SubscribeFailure | null;
 }
 
 /**
@@ -183,6 +257,7 @@ export async function readBrowserPushState(): Promise<BrowserPushState> {
     channel: detectPushChannel(endpoint),
     iosNeedsPwa: detectIosNeedsPwa(),
     capacitorNative: detectCapacitorNative(),
+    lastSubscribeFailure: readSubscribeFailure(),
   };
 }
 
@@ -195,23 +270,35 @@ export async function readBrowserPushState(): Promise<BrowserPushState> {
  * reached.  We surface those distinctly so the user knows it's not a
  * permission issue.
  */
-export function explainSubscribeError(e: unknown): string {
+export function explainSubscribeError(e: unknown): Omit<SubscribeFailure, 'at'> {
   const err = e as { name?: string; message?: string } | null;
   const name = err?.name || '';
   const msg = err?.message || String(e || '未知错误');
   if (name === 'NotAllowedError') {
-    return '浏览器拒绝创建订阅（NotAllowedError）——通常是站点权限被拦截或处于隐身模式';
+    return {
+      kind: 'permission',
+      text: '浏览器拒绝创建订阅（NotAllowedError）——通常是站点权限被拦截或处于隐身模式',
+    };
   }
   if (name === 'NotSupportedError') {
-    return '当前浏览器不支持网页推送——常见于没装谷歌服务的国行安卓手机（小米/华为/OPPO/vivo 大多默认就没有），或者手机自带的精简浏览器。换 Chrome / Edge / Firefox 桌面版试试';
+    return {
+      kind: 'unsupported',
+      text: '当前浏览器不支持网页推送——常见于手机自带的精简浏览器，或没装谷歌服务的国行安卓机上的 Chrome / Edge。同一台手机上可以换 Firefox 试试（它的推送不经过谷歌），或者用电脑',
+    };
   }
   if (name === 'AbortError' || /push service|FCM|network/i.test(msg)) {
-    return '连不上推送服务器——这台设备的网页推送链路走不通。最常见两种情况：1) 国行安卓手机没装谷歌服务（小米/华为/OPPO/vivo 默认就没有），系统层面就推不了；2) 当前网络挡住了谷歌的推送服务器。建议：换台装了谷歌服务的设备，或者用电脑上的 Chrome / Edge / Firefox 试试';
+    return {
+      kind: 'channel-unreachable',
+      text: '连不上推送服务器——浏览器接口都在，但底下那条通往推送服务商的路走不通。Chrome / Edge 的网页推送要转交系统里的谷歌服务（GMS）去注册，国行安卓机（华为 / 小米 / OPPO / vivo）出厂就不带 GMS，装了也还得连得上谷歌的服务器。同一台手机上换 Firefox 最有希望（它走 Mozilla 自己的推送服务器，完全不碰谷歌），或者换电脑',
+    };
   }
   if (name === 'InvalidStateError') {
-    return '订阅状态冲突（InvalidStateError）——可能旧订阅没清干净，刷新页面或再点一次"重置订阅"';
+    return {
+      kind: 'state',
+      text: '订阅状态冲突（InvalidStateError）——可能旧订阅没清干净，刷新页面或再点一次「重置订阅」',
+    };
   }
-  return `订阅创建失败（${name || 'Error'}：${msg}）`;
+  return { kind: 'unknown', text: `订阅创建失败（${name || 'Error'}：${msg}）` };
 }
 
 /**
@@ -224,7 +311,15 @@ export async function subscribeWithRetry(
   reg: ServiceWorkerRegistration,
   vapidPublicKey: string,
   logPrefix: string,
-): Promise<{ sub: PushSubscription | null; reason?: string }> {
+): Promise<{ sub: PushSubscription | null; failure?: SubscribeFailure }> {
+  // 成败都要落一次盘：失败留原因给面板显示，成功清掉上一次的，否则修好之后面板
+  // 还挂着一条陈年失败，比不显示更误导。
+  const fail = (partial: Omit<SubscribeFailure, 'at'>) => {
+    const failure: SubscribeFailure = { ...partial, at: Date.now() };
+    rememberSubscribeFailure(failure);
+    return { sub: null, failure };
+  };
+
   for (let attempt = 0; attempt < SUBSCRIBE_ATTEMPTS_MAX; attempt++) {
     let sub: PushSubscription;
     try {
@@ -234,9 +329,12 @@ export async function subscribeWithRetry(
       });
     } catch (e) {
       console.warn(`${logPrefix} pushManager.subscribe failed`, e);
-      return { sub: null, reason: explainSubscribeError(e) };
+      return fail(explainSubscribeError(e));
     }
-    if (!isDeadPushEndpoint(sub.endpoint)) return { sub };
+    if (!isDeadPushEndpoint(sub.endpoint)) {
+      clearSubscribeFailure();
+      return { sub };
+    }
     try { await sub.unsubscribe(); } catch (e) {
       // 如果连 unsubscribe 都抛, 下一次 subscribe() 大概率还是同一个 zombie,
       // 但仍然兜底重试 (重试上限挡着不会死循环).
@@ -249,8 +347,8 @@ export async function subscribeWithRetry(
       await new Promise(r => setTimeout(r, wait));
     }
   }
-  return {
-    sub: null,
-    reason: `浏览器持续返回 permanently-removed.invalid（已尝试 ${SUBSCRIBE_ATTEMPTS_MAX} 次）— 可能是由于站点参与度 (Site Engagement) 过低或浏览器内部数据残留导致。请尝试清理站点数据后重试，或更换设备/浏览器`,
-  };
+  return fail({
+    kind: 'zombie',
+    text: `浏览器持续返回 permanently-removed.invalid（已尝试 ${SUBSCRIBE_ATTEMPTS_MAX} 次）— 可能是由于站点参与度 (Site Engagement) 过低或浏览器内部数据残留导致。请尝试清理站点数据后重试，或更换设备/浏览器`,
+  });
 }
