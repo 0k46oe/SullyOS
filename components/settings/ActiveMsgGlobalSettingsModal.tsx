@@ -100,6 +100,8 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   const [deployOpen, setDeployOpen] = useState(false);
   // 手动粘贴部署：给没有 GitHub 账号的人留的退路，默认收着不干扰主流程。
   const [pasteFallbackOpen, setPasteFallbackOpen] = useState(false);
+  // Deno 门面：workers.dev 在国内连不上时才需要，默认收着。
+  const [denoProxyOpen, setDenoProxyOpen] = useState(false);
   const [pushStatus, setPushStatus] = useState<ActiveMsg2PushStatus | null>(null);
   // 「生成 Master Key」只在本次打开期间展示，前端不落盘——它是 worker 侧密钥，粘进 CF env 即可。
   const [generatedMasterKey, setGeneratedMasterKey] = useState('');
@@ -280,6 +282,19 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       addToast(`复制失败（${error?.message || error}）。也可以从仓库 worker/amsg/worker.bundle.js 获取。`, 'error');
       // 剪贴板 API 在非 HTTPS / 部分 WebView 里会直接抛，这条就是那批人的规模。
       trackEvent('复制 2.0 Worker 代码', { result: 'failed' });
+    }
+  };
+
+  // workers.dev 在国内连不上时的门面脚本。跟上面那份不一样：这份不打包、原样发布，
+  // 用户要照着里面的注释改 UPSTREAM 那一行，所以注释必须留着。
+  const handleCopyDenoProxy = async () => {
+    try {
+      await ActiveMsgClient.copyDenoProxyToClipboard();
+      addToast('代理代码已复制，贴进 Deno Playground 后记得改 UPSTREAM 那一行。', 'success');
+      trackEvent('复制 2.0 Deno 代理代码', { result: 'ok' });
+    } catch (error: any) {
+      addToast(`复制失败（${error?.message || error}）。也可以从仓库 worker/amsg/deno-proxy.ts 获取。`, 'error');
+      trackEvent('复制 2.0 Deno 代理代码', { result: 'failed' });
     }
   };
 
@@ -610,6 +625,71 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
               placeholder="https://amsg.你的账号.workers.dev"
               className="w-full bg-white/70 border border-slate-200 rounded-2xl px-4 py-3 text-xs font-mono"
             />
+
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={() => setDenoProxyOpen((prev) => {
+                  if (!prev) trackEvent('展开 2.0 部署指引', { mode: 'Deno 代理' });
+                  return !prev;
+                })}
+                className="w-full flex items-center justify-between text-left text-[11px] font-bold text-slate-400"
+              >
+                <span>这个地址连不上？在外面套一层 Deno</span>
+                <span>{denoProxyOpen ? '收起' : '展开'}</span>
+              </button>
+
+              {denoProxyOpen ? (
+                <div className="mt-2 space-y-2">
+                  <p className="text-[11px] leading-relaxed text-slate-500">
+                    <code className="font-mono">workers.dev</code> 这个域名在国内连不上。
+                    办法是给它套一个门面：Worker 和数据全都留在 Cloudflare 不动，
+                    只在外面加一层只管转发的 Deno，然后把地址换成 Deno 那个。
+                  </p>
+
+                  <ol className="text-[11px] leading-relaxed text-slate-500 space-y-1.5 list-decimal list-outside pl-4">
+                    <li>
+                      去 Deno 控制台点右上角 <strong>New Playground</strong>。
+                    </li>
+                    <li>
+                      点下面「复制 Deno 代理代码」，在 Playground 里全选粘贴覆盖，
+                      把开头 <code className="font-mono">UPSTREAM</code> 那一行改成你上面填的
+                      Cloudflare 地址，然后 Deploy。
+                    </li>
+                    <li>
+                      把 Deploy 后拿到的 <code className="font-mono">https://xxx.deno.net</code> 地址
+                      填回上面的输入框，替换掉原来那个。
+                    </li>
+                  </ol>
+
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleCopyDenoProxy()}
+                      className="flex-1 py-2.5 rounded-xl text-xs font-bold bg-white border border-slate-200 text-slate-600 active:scale-95 transition-transform"
+                    >
+                      复制 Deno 代理代码
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        trackEvent('打开 Deno 控制台');
+                        window.open('https://console.deno.com', '_blank');
+                      }}
+                      className="shrink-0 px-3 py-2.5 rounded-xl text-xs font-bold bg-white border border-slate-200 text-slate-600 active:scale-95 transition-transform"
+                    >
+                      去 Deno
+                    </button>
+                  </div>
+
+                  <p className="text-[11px] leading-relaxed text-slate-400">
+                    收消息不走这一层——推送是 Cloudflare 直接发给手机的，
+                    所以这层就算挂了也只影响你打开这个面板改配置。
+                    部署好后打开 <code className="font-mono">/__proxy-health</code> 能看它活着没。
+                  </p>
+                </div>
+              ) : null}
+            </div>
           </div>
 
           <div>

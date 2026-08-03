@@ -533,6 +533,7 @@ Performance 标签页看：
 **设置 · 配置弹窗**
 
 - 发送 Instant Push 测试推送
+- 复制 2.0 Deno 代理代码
 - 复制 2.0 Worker 代码
 - 复制 Deno Loader
 - 复制 Instant Push Worker 代码

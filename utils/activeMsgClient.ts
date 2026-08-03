@@ -911,6 +911,13 @@ export const ActiveMsgClient = {
     return copyWorkerBundleToClipboard('amsg-worker.bundle.js');
   },
 
+  // 复制 public/amsg-deno-proxy.ts —— 贴进 Deno Playground 当 worker 的门面用。
+  // 走的是同一套「fetch 站点静态文件 → 剪贴板」，只是这份不打包、原样发布，
+  // 因为用户要照着里面的注释改 UPSTREAM 那一行。
+  copyDenoProxyToClipboard(): Promise<void> {
+    return copyWorkerBundleToClipboard('amsg-deno-proxy.ts');
+  },
+
   async getPushStatus(): Promise<ActiveMsg2PushStatus> {
     const config = await ensureGlobalReady();
     const workerConfigured = Boolean(config.workerUrl.trim());
