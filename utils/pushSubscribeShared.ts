@@ -1,8 +1,11 @@
 /**
- * Shared Web Push subscribe helpers used by both Instant Push and Proactive
- * Push paths. Both flows hit the same browser race / encoding quirks; this
- * file is the single source of truth so a future browser-quirk patch lands
- * in one place instead of two.
+ * Shared Web Push subscribe helpers used by the Instant Push, Proactive Push
+ * and 主动消息 2.0 paths. All of them hit the same browser race / encoding
+ * quirks; this file is the single source of truth so a future browser-quirk
+ * patch lands in one place instead of three.
+ *
+ * 同时也是「浏览器这一侧推送现状」的唯一读法（readBrowserPushState 及它下面那
+ * 几个 detect*）——设置页的状态面板拿它显示，各层不用各写一份厂商判定。
  */
 
 // unsubscribe() resolve 后 Chromium 内部 PushMessagingAppIdentifier 把当前
@@ -70,6 +73,117 @@ export function describePushCapabilityGap(): string | null {
     !notifSupported ? '系统通知接口 (Notification)' : '',
   ].filter(Boolean).join('、');
   return `当前浏览器缺少 ${missing}，内核没有网页推送能力（X浏览器 / Via 等 WebView 壳浏览器的通病）—— 请换 Chrome / Edge / Firefox 等完整内核浏览器`;
+}
+
+/**
+ * 从订阅端点认出推送厂商。端点域名是各厂商写死的，认不出就说「未识别厂商」，
+ * 不猜。设置页拿它显示「推送通道」那一行——用户排障时第一句话往往是「我用的
+ * Chrome」，能直接对上 Google FCM 就省一轮来回。
+ */
+export function detectPushChannel(endpoint: string | null | undefined): string {
+  if (!endpoint) return '未知';
+  if (/fcm\.googleapis\.com|android\.googleapis\.com/i.test(endpoint)) return 'Google FCM (Chrome / Edge / 安卓)';
+  if (/updates\.push\.services\.mozilla\.com/i.test(endpoint)) return 'Mozilla autopush (Firefox)';
+  if (/notify\.windows\.com|wns2/i.test(endpoint)) return 'Windows WNS (Edge)';
+  if (/web\.push\.apple\.com/i.test(endpoint)) return 'Apple APNs (Safari / iOS PWA)';
+  return '未识别厂商';
+}
+
+/**
+ * 页面是不是跑在 Capacitor 打包的原生壳里（安卓/iOS 的 WebView），而不是普通
+ * 浏览器标签页。探全局而不 import `@capacitor/core`，这个文件才能继续被 SW
+ * 侧的打包 tree-shake 掉。
+ */
+export function detectCapacitorNative(): boolean {
+  if (typeof window === 'undefined') return false;
+  const cap = (window as any).Capacitor;
+  if (!cap) return false;
+  if (typeof cap.isNativePlatform === 'function') {
+    try { return !!cap.isNativePlatform(); } catch { /* ignore */ }
+  }
+  // 老版本 Capacitor 没有 isNativePlatform，退回读 platform。
+  return cap.platform === 'android' || cap.platform === 'ios';
+}
+
+/**
+ * 在 iOS Safari 里、但没走「添加到主屏幕」的 PWA 启动。iOS 的 Web Push 只在
+ * 主屏 PWA 里可用，这种情况得先引导用户装到主屏，光讲权限没用。
+ */
+export function detectIosNeedsPwa(): boolean {
+  if (typeof navigator === 'undefined' || typeof window === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const isIos = /iPad|iPhone|iPod/.test(ua) || (ua.includes('Macintosh') && 'ontouchend' in document);
+  if (!isIos) return false;
+  // iOS 老的 navigator.standalone 和 display-mode 媒体查询，任一为真都算已装主屏。
+  const standalone =
+    (navigator as any).standalone === true ||
+    (typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)').matches);
+  return !standalone;
+}
+
+/** 浏览器这一侧的推送现状。跟具体哪台 worker 无关，各推送层都能拿去显示。 */
+export interface BrowserPushState {
+  /** Web Push 三件套齐不齐（SW / Push API / Notification）。 */
+  supported: boolean;
+  /** 缺件时的整句说明，齐了是 null。取自 describePushCapabilityGap。 */
+  capabilityGap: string | null;
+  permission: NotificationPermission | 'unavailable';
+  /** 已注册 SW 的 scope，没注册是 null。 */
+  swScope: string | null;
+  /** 'activated' | 'installing' | 'waiting' | 'redundant' | 'none' */
+  swState: string;
+  /** 当前浏览器订阅的端点，没订阅是 null。 */
+  endpoint: string | null;
+  /** 端点是不是 `permanently-removed.invalid` 僵尸哨兵。 */
+  endpointDead: boolean;
+  /** 推送厂商，见 detectPushChannel。 */
+  channel: string;
+  iosNeedsPwa: boolean;
+  capacitorNative: boolean;
+}
+
+/**
+ * 读一次浏览器侧的推送现状，给设置页的状态面板用。
+ *
+ * 全程只读、不请求权限、不建订阅、不碰任何 worker——面板刷新会反复调它，带副作用
+ * 的话用户点一下「刷新」就可能被弹权限框。探测中途抛错按「读不到」处理，让面板
+ * 显示得出「未注册 / 不存在」，比整块空着强。
+ */
+export async function readBrowserPushState(): Promise<BrowserPushState> {
+  const capabilityGap = describePushCapabilityGap();
+  const supported = capabilityGap === null;
+  const permission: BrowserPushState['permission'] =
+    typeof Notification === 'undefined' ? 'unavailable' : Notification.permission;
+
+  let swScope: string | null = null;
+  let swState = 'none';
+  let endpoint: string | null = null;
+  if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+    try {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg) {
+        swScope = reg.scope;
+        const worker = reg.active || reg.waiting || reg.installing;
+        swState = worker ? worker.state : 'none';
+        // 壳浏览器可能有 SW 却没有 PushManager，这里不能无条件点下去。
+        const sub = await reg.pushManager?.getSubscription();
+        endpoint = sub?.endpoint || null;
+      }
+    } catch { /* 读不到就维持默认值 */ }
+  }
+
+  return {
+    supported,
+    capabilityGap,
+    permission,
+    swScope,
+    swState,
+    endpoint,
+    endpointDead: isDeadPushEndpoint(endpoint),
+    channel: detectPushChannel(endpoint),
+    iosNeedsPwa: detectIosNeedsPwa(),
+    capacitorNative: detectCapacitorNative(),
+  };
 }
 
 /**
