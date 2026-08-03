@@ -565,11 +565,14 @@ Performance 标签页看：
 这几条报的不是成败两态，而是卡在哪一类：
 `ok` / `success` / `地址没填` / `打到网页了` / `鉴权失败` / `端点不存在` / `建表失败` /
 `配置缺失` / `网络失败` / `权限被拒` / `不支持推送` / `worker没配VAPID` / `订阅失败` /
-`端点僵尸` / `其他`。
+`推送通道不通` / `端点僵尸` / `其他`。
 其中 `配置缺失` 来自连接前那次 `GET /config-check`（worker 自己报缺 D1 绑定或 master key），
 比 `建表失败` 精确——后者是按 HTTP 状态归的类，三种原因混在一格里。
 `端点僵尸` 是重试到底浏览器还是只给 `permanently-removed.invalid`，设置页据此把
 「重置订阅」升级成「深度重置」。
+`推送通道不通` 是浏览器接口齐全、权限也给了，但 `subscribe()` 连不上推送服务商——
+Chromium 系安卓版的网页推送要转交系统里的谷歌服务（GMS），没装 GMS 的国行安卓机全落这一格。
+这一格跟 `订阅失败` 分开是因为要修的事完全不同：前者只能换浏览器 / 换设备，重试无用。
 这些代号在**抛错那一刻**按 HTTP 状态和源码里的谓词挂上，报错原文（可能带 Worker 地址、
 push endpoint）留在 toast 和 console 里，一个字都不进上报。
 
@@ -579,9 +582,15 @@ push endpoint）留在 toast 和 console 里，一个字都不进上报。
 「刷新 Web Push 诊断」报的是设置页「推送订阅状态」面板当时的读数，全是固定枚举：
 `permission`、`subscription`（`none` / `dead` / `active`）、`swState`（`activated` /
 `none` / `other`）、`platform`（`normal` / `ios_needs_pwa` / `capacitor_native`）、
-`registration`（`worker-unset` / `unreachable` / `missing` / `other-endpoint` / `matched`）。
+`registration`（`worker-unset` / `unreachable` / `missing` / `other-endpoint` / `matched`）、
+`lastFailure`（`none` / `channel-unreachable` / `unsupported` / `permission` / `state` /
+`zombie` / `unknown`）。
 `registration` 是「worker 上登记的订阅是不是这台设备」，中间那两档对应的是任务建得成、
-到点却一条都不来的静默失联。端点地址、Worker 地址一概不带。
+到点却一条都不来的静默失联。
+`lastFailure` 是最近一次建订阅失败卡在哪类，手上已有活订阅时报 `none`。
+`channel-unreachable` 那一格量大就说明有一批设备（多半是没装谷歌服务的国行安卓机）
+从系统层面就用不了网页推送——这是它唯一能被看见的地方。
+端点地址、Worker 地址、报错原文一概不带。
 
 「探测 2.0 Worker 能力」每次会话最多一次，报 `ok` / `版本过旧` / `缺特性` / `端点不存在` /
 `探测失败`。跑着旧 worker 的表现是静默错（自述回写不落盘、任务重复推），用户不会来报，

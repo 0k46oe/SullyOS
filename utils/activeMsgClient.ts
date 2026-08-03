@@ -67,6 +67,7 @@ import {
   isDeadPushEndpoint,
   subscribeWithRetry,
   SUBSCRIBE_SETTLE_MS,
+  type SubscribeFailureKind,
 } from './pushSubscribeShared';
 
 export interface ActiveMsg2PushStatus {
@@ -196,6 +197,7 @@ export type AmsgFailKind =
   | '不支持推送'
   | 'worker没配VAPID'
   | '订阅失败'
+  | '推送通道不通'
   | '端点僵尸'
   | '其他';
 
@@ -818,16 +820,26 @@ const fetchWorkerVapidKey = async (client: ReiClient): Promise<string> => {
  * 都收不到，两边都没有任何报错。重试到底仍是僵尸的话挂 '端点僵尸' 代号，设置页据此
  * 把「重置订阅」升级成「深度重置」。
  */
+/** 共用层的失败分类 → 上报用的失败代号。两边都是源码里写死的枚举。 */
+const SUBSCRIBE_FAIL_KIND: Record<SubscribeFailureKind, AmsgFailKind> = {
+  'channel-unreachable': '推送通道不通',
+  unsupported: '不支持推送',
+  permission: '权限被拒',
+  state: '订阅失败',
+  zombie: '端点僵尸',
+  unknown: '订阅失败',
+};
+
 const subscribeOrThrow = async (
   registration: ServiceWorkerRegistration,
   vapidPublicKey: string,
 ): Promise<PushSubscription> => {
-  const { sub, reason } = await subscribeWithRetry(registration, vapidPublicKey, ACTIVE_MSG_RUNTIME_HEADER);
+  const { sub, failure } = await subscribeWithRetry(registration, vapidPublicKey, ACTIVE_MSG_RUNTIME_HEADER);
   if (sub) return sub;
-  // 提示原文（浏览器能力、重试了几次）留在 toast 和 console 里。谓词写死在源码里，
-  // 挂上去的永远是下面两个字面量之一。
-  const message = reason || '订阅创建失败';
-  throw withFailKind(new Error(message), isDeadPushEndpoint(message) ? '端点僵尸' : '订阅失败');
+  // 提示原文（浏览器能力、重试了几次）留在 toast 和 console 里。挂上去的代号来自
+  // 上面那张写死的表，不是从异常对象上读出来的任何东西。
+  const message = failure?.text || '订阅创建失败';
+  throw withFailKind(new Error(message), failure ? SUBSCRIBE_FAIL_KIND[failure.kind] : '订阅失败');
 };
 
 /** 重置的公共尾段：拿 worker 的 VAPID → 重新订阅 → 覆盖登记回 worker。 */

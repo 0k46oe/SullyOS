@@ -160,7 +160,7 @@ export async function getOrCreateSubscription(vapidPublicKey: string): Promise<S
       return { sub: null, reason: '通知权限已被拒绝（请到浏览器站点设置里手动开启）' };
     }
     const fresh = await subscribeWithRetry(reg, vapidPublicKey, '[ProactivePush]');
-    if (!fresh.sub) return { sub: null, reason: fresh.reason };
+    if (!fresh.sub) return { sub: null, reason: fresh.failure?.text };
     sub = fresh.sub;
   }
 
