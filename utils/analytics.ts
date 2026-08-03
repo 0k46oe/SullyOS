@@ -30,6 +30,8 @@
  * 审计时看这一个函数加它的调用点就够。
  */
 
+import { APP_VERSION_TAG } from './buildInfo';
+
 // ===== 构建时开关 =====
 // 两个都配齐才会加载统计脚本。官方部署在构建环境里配，自部署默认没有。
 const SCRIPT_URL = (import.meta.env.VITE_UMAMI_SCRIPT_URL || '').trim();
@@ -163,6 +165,11 @@ export function initAnalytics(): void {
   // 真实用户的加载体验：LCP / INP / CLS / FCP / TTFB，由 tracker 在页面隐藏或十秒后
   // 自己发一条，跟着的上下文和页面访问那条一样（也就是被上面两行洗过的路径）。
   script.setAttribute('data-performance', 'true');
+  // 每条记录（含性能那条）都带上当时的产品版本号，面板里能按版本切开看。
+  // 性能数字尤其需要这个轴——两个版本的数据混在一起，「这次优化到底有没有让首屏变快」
+  // 就问不出来了。值写死在 buildInfo 里，同一版的所有人是同一个字符串，不带个人特征，
+  // 也就不会给 docs/analytics.md「这是假名，不是匿名」里说的那个关联窗口添新维度。
+  script.setAttribute('data-tag', APP_VERSION_TAG);
   // 出站前的最后一道闸门，见文件头第 4 条。要在脚本插进 DOM 之前挂好。
   (window as unknown as Record<string, unknown>)[BEFORE_SEND_HOOK] = (
     _type: string,

@@ -5,6 +5,7 @@
  * 只会在别人按 F12 抓包时暴露。所以宁可测得啰嗦一点。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { APP_VERSION } from './buildInfo';
 
 const SCRIPT_URL = 'https://umami.example.com/script.js';
 const WEBSITE_ID = '00000000-0000-0000-0000-000000000000';
@@ -134,6 +135,17 @@ describe('tracker 标签', () => {
         expect(el.attrs['data-do-not-track']).toBe('true');
         expect(el.attrs['data-auto-pageview']).toBe('false');
         expect(el.attrs['data-performance']).toBe('true');
+    });
+
+    it('打上产品版本号，而且只打版本号那半截', async () => {
+        // 标签是拿来在面板里按版本切分数据的（尤其是性能数字，两版混着看等于没看），
+        // 所以要短到能当筛选项用——代号和括号留给设置页展示，别进标签。
+        const a = await loadModule(true);
+        a.initAnalytics();
+
+        const tag = appended[0].attrs['data-tag'];
+        expect(tag).toBe(APP_VERSION.split(' ')[0]);
+        expect(tag).toMatch(/^v[\d.]+$/);
     });
 
     it('不挂 data-auto-track —— 挂了性能指标整个不启动', async () => {
