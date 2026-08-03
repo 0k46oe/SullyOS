@@ -46,3 +46,7 @@ xiaohongshu-skills/
 .worktrees/
 .claude/
 .pnpm-store/
+
+# TIAO-Capacitor local Android toolchain and caches (D: only, never committed)
+.android-sdk/
+.gradle-user-home/
