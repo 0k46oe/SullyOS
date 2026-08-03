@@ -221,7 +221,10 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   const handleCreateSubscription = async () => {
     setLoading(true);
     try {
-      await ActiveMsgClient.ensurePushSubscription();
+      // 建完浏览器订阅还要登记到 worker 上那一份用户级订阅——worker 到点读的是它，
+      // 只在浏览器建订阅的话云端仍是空的，到点会抛 PUSH_SUBSCRIPTION_MISSING，
+      // 而这句 toast 已经报了「准备完成」。
+      await ActiveMsgClient.registerPushSubscription();
       await refresh();
       addToast('通知权限和推送订阅已准备完成。', 'success');
       trackEvent('开启通知与推送订阅', { result: 'ok' });

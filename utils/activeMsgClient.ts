@@ -836,8 +836,46 @@ export const ActiveMsgClient = {
     }
   },
 
+  /**
+   * 「连接并验证」的收尾：把浏览器当前的推送订阅补登记到这台 worker 上。
+   *
+   * 订阅存在 worker 自己的 D1 里（push_subscriptions，一个用户一行）。换一台 worker
+   * 就是换一个空库，而浏览器这侧的订阅一个字都没变——SW 的 pushsubscriptionchange
+   * 不会响，refreshPushSubscriptionIfMarked 也就没有标记可消费。于是面板全绿、连接
+   * 验证通过，worker 到点却读不到订阅，直接抛 PUSH_SUBSCRIPTION_MISSING：消息一条
+   * 都发不出来，用户这侧看不到任何异常。所以连接这一步顺手覆盖写一次。
+   *
+   * 只在**权限已授予且浏览器已有订阅**时补。没订阅说明用户还没走「开启通知与推送
+   * 订阅」那步，那是引导流程该做的事——连接不替用户开推送，也不在这儿弹权限框。
+   *
+   * 返回值只为单测断言：'registered' 补了 / 'skipped' 条件不满足 / 'failed' 补失败了。
+   */
+  async reconcilePushSubscription(): Promise<'registered' | 'skipped' | 'failed'> {
+    try {
+      if (describePushCapabilityGap()) return 'skipped';
+      if (Notification.permission !== 'granted') return 'skipped';
+      await KeepAlive.init();
+      const registration = await navigator.serviceWorker.ready;
+      if (!await registration.pushManager.getSubscription()) return 'skipped';
+    } catch {
+      // 探测本身炸了（SW 没就绪 / 环境不支持）就算了，别为一句自检拦住连接。
+      return 'skipped';
+    }
+
+    try {
+      await this.registerPushSubscription();
+      return 'registered';
+    } catch (error) {
+      // init-tenant 过了、鉴权也通了，连接本身是成功的，这里不能往外抛：否则用户
+      // 会被指去改一堆根本没错的配置。补不上就等排程那步（scheduleTask 也会登记）。
+      console.warn('[ActiveMsg] 连接后补登记推送订阅失败', error);
+      return 'failed';
+    }
+  },
+
   // 单用户「连接」：先 POST /init-tenant 让 worker 在自己的 D1 里幂等建表
-  // （Dashboard 粘贴部署的用户不用碰 SQL），再拿一次 user key 验证地址与鉴权都通。
+  // （Dashboard 粘贴部署的用户不用碰 SQL），再拿一次 user key 验证地址与鉴权都通，
+  // 最后把推送订阅补登记上去（换 worker 后云端那份是空的，见 reconcilePushSubscription）。
   async connect() {
     const config = await ensureWorkerReady();
     const { status, body: initResponse } = await fetchWithAuthRaw('init-tenant', config, { method: 'POST' }, '初始化数据库');
@@ -849,6 +887,7 @@ export const ActiveMsgClient = {
     }
     await initializeClient(config);
     await ActiveMsgStore.saveGlobalConfig({ ...config, initializedAt: Date.now() });
+    await this.reconcilePushSubscription();
     return { ok: true, userId: config.userId };
   },
 

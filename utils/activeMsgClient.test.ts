@@ -50,6 +50,8 @@ vi.mock('./activeMsgStore', () => ({
       workerUrl: 'https://amsg.example.workers.dev',
       serverToken: '',
     }),
+    // connect() 成功那条路会落盘 initializedAt，走失败分支的用例碰不到它。
+    saveGlobalConfig: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -823,6 +825,73 @@ describe('ActiveMsgClient.registerPushSubscription（② 订阅按用户登记�
     reiClient.putPushSubscription.mockRejectedValue(new Error('worker 拒绝了订阅'));
 
     await expect(ActiveMsgClient.registerPushSubscription()).rejects.toThrow('worker 拒绝了订阅');
+  });
+});
+
+// 回归守卫：换一台 worker 就是换一个空的 D1，而浏览器这侧的订阅一个字都没变——
+// SW 的 pushsubscriptionchange 不会响，refreshPushSubscriptionIfMarked 也就没有标记
+// 可消费。于是面板全绿、连接验证通过，worker 到点却读不到那份用户级订阅，直接抛
+// PUSH_SUBSCRIPTION_MISSING：消息一条都发不出来，用户这侧看不到任何异常。
+// 连接这一步必须顺手把当前订阅覆盖写回去。
+describe('ActiveMsgClient.connect（连接后补登记推送订阅）', () => {
+  const stubConnectEnv = (permission: string, existing: any) => {
+    vi.stubGlobal('navigator', {
+      serviceWorker: {
+        ready: Promise.resolve({
+          pushManager: { getSubscription: vi.fn().mockResolvedValue(existing) },
+        }),
+      },
+    });
+    vi.stubGlobal('window', { PushManager: class {} });
+    vi.stubGlobal('Notification', { permission });
+    // init-tenant 一律成功：这一组测的是它之后那步补登记。
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      status: 200,
+      text: async () => JSON.stringify({ success: true, data: {} }),
+      headers: new Headers({ 'content-type': 'application/json' }),
+    }));
+  };
+
+  beforeEach(() => { reiClient.init.mockReset().mockResolvedValue(undefined); });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('浏览器已有订阅 → 连接后把它覆盖写到这台 worker 上', async () => {
+    stubConnectEnv('granted', makeSub('https://fcm.googleapis.com/send/x', [1, 2, 3]));
+    const register = vi.spyOn(ActiveMsgClient, 'registerPushSubscription').mockResolvedValue(undefined);
+
+    await expect(ActiveMsgClient.connect()).resolves.toMatchObject({ ok: true });
+
+    expect(register).toHaveBeenCalledTimes(1);
+  });
+
+  it('通知权限还没授予 → 不补登记，连接时也不弹权限框', async () => {
+    stubConnectEnv('default', null);
+    const register = vi.spyOn(ActiveMsgClient, 'registerPushSubscription').mockResolvedValue(undefined);
+
+    await expect(ActiveMsgClient.connect()).resolves.toMatchObject({ ok: true });
+
+    expect(register).not.toHaveBeenCalled();
+  });
+
+  it('权限有了但还没订阅 → 那是「开启通知与推送订阅」那步的事，连接不替用户开', async () => {
+    stubConnectEnv('granted', null);
+    const register = vi.spyOn(ActiveMsgClient, 'registerPushSubscription').mockResolvedValue(undefined);
+
+    await ActiveMsgClient.connect();
+
+    expect(register).not.toHaveBeenCalled();
+  });
+
+  // init-tenant 过了、鉴权也通了，连接本身就是成功的。补登记只是顺手的一句自检，
+  // 它挂了不该把连接判成失败——否则用户会被指去改一堆根本没错的配置。
+  it('补登记失败 → 连接照样算成功', async () => {
+    stubConnectEnv('granted', makeSub('https://fcm.googleapis.com/send/x', [1, 2, 3]));
+    vi.spyOn(ActiveMsgClient, 'registerPushSubscription').mockRejectedValue(new Error('worker 拒绝了订阅'));
+
+    await expect(ActiveMsgClient.connect()).resolves.toMatchObject({ ok: true });
   });
 });
 
