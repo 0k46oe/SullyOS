@@ -4,11 +4,11 @@
  *
  * useChatAI 每轮组请求时调 collectAmsg2TaskContext：
  *   1. 检出该角色回看期内已作废的排程（每任务独立判定）→ 落台账去重；
- *   2. 把「进行中任务 + 未告知的回执」拼成一段 system 背景块。
+ *   2. 把「常驻能力简介 + 进行中任务 + 未告知的回执」拼成一段 system 背景块。
  * 回执有两种来源：闸自动作废（这里检出）、用户在面板手动取消 / 关掉 2.0
  * （面板调 buildUserCancelledNotices 写进同一本台账）。
- * 没任务也没回执 → null，整块不注入。发送成功后调
- * ActiveMsgStore.markExpiredNoticesNotified 标记，失败下轮重注（回执不丢）。
+ * 常驻简介总在（角色得随时知道自己能给未来排消息），进行中/回执两段有料才出现。
+ * 发送成功后调 ActiveMsgStore.markExpiredNoticesNotified 标记，失败下轮重注（回执不丢）。
  */
 
 import { ActiveMsg2TaskRecord, Amsg2ExpiredNoticeRecord, CharacterProfile } from '../types';
@@ -86,6 +86,25 @@ export function buildUserCancelledNotices(
     }));
 }
 
+/**
+ * 常驻能力简介：平时聊天时就让角色知道「我随时可以给未来排一条主动消息」。
+ *
+ * 只靠 schedule_active_message 的工具 description，角色基本只在用户明说「八点叫我」
+ * 时才想起排程；「聊着聊着自己想到给稍后排一条」得有人在正文里先说一声——fire 侧的
+ * 【你可以给自己排下一条】（amsgFireSchedule.buildFireScheduleBlock）就是同一件事
+ * 在到点侧的那半，这里补的是平时聊天这半。判断口径：听懂对方要放下手机、嘴上许了就
+ * 排成真任务、人设优先不硬排、尊重「别打扰」。语法不在这里教：工具签名已随请求声明，
+ * 正文再教一遍反而勾引模型往正文里写（与 fire 侧 native 模式同一个判断）。
+ */
+export const AMSG2_CHAT_SCHEDULE_BRIEF = [
+  '你随时可以用 schedule_active_message 给未来排一条主动消息：到点后你会带着那时的最新上下文，像突然想起对方一样主动发过去，不需要对方在线。什么时候该想到它：',
+  '- 对方接下来一段时间顾不上手机（去睡觉、上课、上班、打游戏、洗澡、出门……别抠字眼，听懂ta是要放下手机了）。你不必陪着沉默：可以在ta忙的时候排一条分享过去，或者算着ta回来的点候一条。',
+  '- 「到点叫你」「等你忙完跟你说」「回头告诉你结果」——这类话一说出口，就当场排成真任务，别让它停在口头承诺；真没排上就别把话说死。',
+  '- 要不要排只看一条：按你的性格和你们现在的关系，这个时候的你会想给ta发消息吗？会就排，不会就算，不用为了显得贴心硬排。',
+  '- 时间贴着ta的生活估：一局游戏和一觉天亮不是一个时长，想想ta大概什么时候会重新拿起手机；有时差就按ta那边的钟算。',
+  '- ta明确说了别打扰，就安静等ta回来；已经排着差不多的一条，也别再排。',
+].join('\n');
+
 /** 回执条目那一行（自动作废和手动取消长一个样，只是所在的段落不同）。 */
 const describeNoticeLine = (r: Amsg2ExpiredNoticeRecord, charTz: string | undefined): string => {
   const recurrence = r.recurrenceType === 'daily' ? '（每日循环的当次）'
@@ -93,7 +112,7 @@ const describeNoticeLine = (r: Amsg2ExpiredNoticeRecord, charTz: string | undefi
   return `- [${shortTaskId(r.id)}] 原定 ${formatTaskTime(r.occurrenceMs, charTz)}，${describeTaskMode(r)}${recurrence}`;
 };
 
-/** 纯拼文案，方便单测。进行中/回执两段任一非空才产出。 */
+/** 纯拼文案，方便单测。常驻简介总在，进行中/回执两段有料才各自出现。 */
 export function buildAmsg2TaskContextText(
   pending: ActiveMsg2TaskRecord[],
   expired: Amsg2ExpiredNoticeRecord[],
@@ -111,11 +130,10 @@ export function buildAmsg2TaskContextText(
    * 5 条」就有这一份。空集合等于没传：首轮那份是排程前的快照，不该凭空长出提醒。
    */
   createdThisTurn?: ReadonlySet<string>,
-): string | null {
-  if (!pending.length && !expired.length) return null;
+): string {
   const isNewThisTurn = (taskUuid: string) => !!createdThisTurn?.has(taskUuid);
   const hasNewThisTurn = pending.some((t) => isNewThisTurn(t.taskUuid));
-  const parts: string[] = ['【你的主动消息排程·仅你可见】'];
+  const parts: string[] = ['【你的主动消息排程·仅你可见】', AMSG2_CHAT_SCHEDULE_BRIEF];
   // 闸自动作废 / 用户手动取消，两种回执给角色的交代完全不同（前者可以续期补上，
   // 后者是用户不要了），分成两段说。没有 kind 的老记录按自动作废处理。
   const autoExpired = expired.filter((r) => r.kind !== 'user-cancelled');
@@ -165,7 +183,7 @@ export function buildAmsg2TaskContextText(
 }
 
 export interface Amsg2TaskContextResult {
-  text: string | null;
+  text: string;
   /** 本轮注入的回执 id（闸作废的 + 用户手动取消的），发送成功后 markExpiredNoticesNotified。 */
   expiredIds: string[];
   /**

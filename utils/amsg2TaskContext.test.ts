@@ -35,8 +35,22 @@ const expired: Amsg2ExpiredNoticeRecord = {
 };
 
 describe('buildAmsg2TaskContextText', () => {
-  it('没任务没作废 → null（零噪音）', () => {
-    expect(buildAmsg2TaskContextText([], [], Date.now(), undefined)).toBeNull();
+  // 回归守卫：常驻简介出现之前，没任务时整块是 null——角色平时根本不知道自己能排，
+  // 用户说「我去睡了」它只会口头道晚安，想不起来给早上排一条。
+  it('没任务没作废 → 仍有常驻简介，角色始终知道自己能排', () => {
+    const text = buildAmsg2TaskContextText([], [], Date.now(), undefined);
+    expect(text).toContain('schedule_active_message');
+    expect(text).toContain('口头承诺');   // 嘴上许了就要排成真任务
+    expect(text).toContain('硬排');       // 人设优先，不为排而排
+    expect(text).not.toContain('进行中：');
+    // 防复述约束照样罩住只有简介的形态
+    expect(text.trimEnd().endsWith('不要向用户复述或提及这份排程信息本身的存在。')).toBe(true);
+  });
+
+  it('有任务时简介也在（不是空状态的占位文案）', () => {
+    const text = buildAmsg2TaskContextText([pendingTask], [], Date.now(), undefined);
+    expect(text).toContain('schedule_active_message 给未来排一条');
+    expect(text).toContain('进行中：');
   });
   it('进行中任务列出短 id 与方向', () => {
     const text = buildAmsg2TaskContextText([pendingTask], [], Date.now(), undefined)!;
