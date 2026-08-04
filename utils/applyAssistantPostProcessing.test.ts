@@ -394,3 +394,50 @@ describe('SEND_EMOJI 名字对不上', () => {
         expect(bubbles[0].content).toBe('blob:emoji-lol');
     }, 20000);
 });
+
+// 模型偶尔会照抄历史/UI 里的人类可读单括号摘要，而不是 prompt 要求的双括号机器指令。
+// 这三条锁住真实后处理结果，保证普通聊天与主动消息共用的管线都能自愈。
+describe('动作指令单括号掉格式兜底', () => {
+    it('[表情：name] 恢复为真实表情气泡', async () => {
+        const charId = `c-emoji-single-${Date.now()}`;
+        const ctx = makeCtx(charId, [], [{ name: '小狗泪丧', url: 'blob:emoji-dog-cry' }]);
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing('[表情：小狗泪丧]', ctx);
+
+        const bubbles = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(bubbles).toHaveLength(1);
+        expect(bubbles[0].type).toBe('emoji');
+        expect(bubbles[0].content).toBe('blob:emoji-dog-cry');
+    }, 20000);
+
+    it('[ACTION:TRANSFER|...] 恢复为转账卡，正文不留标签', async () => {
+        const charId = `c-transfer-single-${Date.now()}`;
+        const ctx = makeCtx(charId, []);
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing('[ACTION:TRANSFER|to=user|amount=13]\n给你买西瓜汁', ctx);
+
+        const bubbles = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        const cards = bubbles.filter(m => m.type === 'transfer');
+        expect(cards).toHaveLength(1);
+        expect(cards[0].metadata?.amount).toBe('13');
+        expect(bubbles.filter(m => m.type === 'text').map(m => m.content)).toEqual(['给你买西瓜汁']);
+    }, 20000);
+
+    it('[生活记录：支出 ...] 恢复为生活记录卡并写入支出', async () => {
+        const charId = `c-life-summary-${Date.now()}`;
+        await DB.saveCharacter({ id: charId, name: '测试角色', lifeRecordEnabled: true } as any);
+        const ctx = makeCtx(charId, []);
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing('[生活记录：支出 13（西瓜汁-单括号回归）]', ctx);
+
+        const bubbles = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        const cards = bubbles.filter(m => m.type === 'life_card');
+        expect(cards).toHaveLength(1);
+        expect(cards[0].metadata?.module).toBe('expense');
+        expect(cards[0].metadata?.summary).toBe('支出 13（西瓜汁-单括号回归）');
+        expect(bubbles.filter(m => m.type === 'text')).toHaveLength(0);
+    }, 20000);
+});
