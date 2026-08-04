@@ -111,6 +111,9 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   // Instant Push 也开着：聊天会走它，2.0 挂在本地那条路上的几样东西全静默失效（见
   // amsg2InstantConflict）。开面板时读一次，用户在这里关掉 instant 后立刻更新。
   const [instantOn, setInstantOn] = useState(false);
+  // 这台 worker 认不认 /instant-chat。即时对话的**唯一**版本门槛就在这儿，
+  // 别处不做逐调用预检——每发一条消息多探一次网络，探失败还分不清是旧版还是网抖。
+  const [instantChatSupported, setInstantChatSupported] = useState(false);
 
   // 特性探测：确认「过老」（端点 404 → null，或缺关键特性）才亮牌；
   // 探测本身失败（断网 / 密钥不对 / 没填地址）不亮，避免误报。
@@ -150,6 +153,11 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     setPushStatus(nextPushStatus);
     setInstantOn(isInstantConfigReady());
     void probeWorkerCaps(Boolean(nextConfig.workerUrl?.trim()));
+    if (nextConfig.workerUrl?.trim()) {
+      void ActiveMsgClient.probeInstantChatSupport().then(setInstantChatSupported);
+    } else {
+      setInstantChatSupported(false);
+    }
   };
 
   /** 关掉 Instant Push 的开关，worker 地址等配置留着——以后想切回去不用重填。 */
@@ -203,6 +211,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     await ActiveMsgStore.saveGlobalConfig({
       workerUrl: config.workerUrl,
       serverToken: config.serverToken,
+      instantChatEnabled: config.instantChatEnabled,
     });
     savedWorkerUrlRef.current = config.workerUrl || '';
   };
@@ -251,6 +260,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       await ActiveMsgStore.saveGlobalConfig({
         workerUrl: config.workerUrl,
         serverToken: config.serverToken,
+        instantChatEnabled: config.instantChatEnabled,
       });
       const { warnings } = await ActiveMsgClient.connect();
       await refresh();
@@ -371,6 +381,17 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     }
   };
 
+  /**
+   * 开关即时对话。直接落盘而不是走那条 1 秒去抖的自动保存：开关是一次明确的动作，
+   * 点完立刻生效（下一条消息就按新路走），而不是「点完还得等一下」。
+   */
+  const handleToggleInstantChat = async () => {
+    const next = !config?.instantChatEnabled;
+    patchConfig({ instantChatEnabled: next });
+    await ActiveMsgStore.saveGlobalConfig({ instantChatEnabled: next });
+    addToast(next ? '已开启即时对话，之后的聊天在你的 Worker 上生成。' : '已关闭即时对话，聊天回到本地生成。', 'success');
+  };
+
   const handleGenerateServerToken = () => {
     const token = generateClientToken();
     patchConfig({ serverToken: token });
@@ -381,6 +402,21 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   if (!config) return null;
 
   const isConnected = Boolean(config.initializedAt);
+
+  /**
+   * 即时对话开不了的第一个原因（能开时为空串）。按「先补哪个」的顺序排：
+   * 没连上就谈不上推送，没推送权限就算发出去也收不到，worker 太旧则端点根本不存在，
+   * 最后是两条发送路只能留一条。
+   */
+  const instantChatBlockedReason = !isConnected
+    ? '先在上面把 Worker 连上。'
+    : !pushStatus?.hasSubscription
+      ? '先开启通知与推送：回复是靠推送送回来的，没有权限就变成发得出、收不到。'
+      : !instantChatSupported
+        ? 'Worker 上跑的代码还没有这个端点。回你 fork 的 sullyos-workers 点一下 Sync fork，CF 重新部署后再来开。'
+        : instantOn
+          ? 'Instant Push 也开着，两条发送路只能留一条。上面那张黄色卡片里可以把它关掉。'
+          : '';
 
   return (
     <Modal
@@ -779,6 +815,38 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
             className="w-full py-3 bg-violet-500 text-white font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50"
           >
             {loading ? '处理中...' : '开启通知与推送'}
+          </button>
+        </div>
+
+        {/* 即时对话：聊天本身也交给云端跑。四道门缺一不可，缺哪道就把哪道写出来——
+            置灰而不说原因的话，用户只会反复点它。 */}
+        <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-bold text-slate-700">即时对话</span>
+            <span className={`text-xs font-bold ${config.instantChatEnabled ? 'text-emerald-600' : 'text-slate-400'}`}>
+              {config.instantChatEnabled ? '已开启' : '未开启'}
+            </span>
+          </div>
+          <p className="text-xs leading-relaxed text-slate-500">
+            开了以后，你发出的每一条消息都由这台 Worker 去生成回复，回复走推送回来。
+            发完就能切后台、关掉应用，回来时消息已经在那儿了。关掉则回到本地直连生成。
+          </p>
+          {instantChatBlockedReason ? (
+            <p className="text-xs leading-relaxed text-amber-600">{instantChatBlockedReason}</p>
+          ) : (
+            <p className="text-[11px] leading-relaxed text-slate-400">
+              没有逐字吐出，生成期间显示「正在输入…」；超过 5 分钟没等到回复会提示你重发。
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={() => void handleToggleInstantChat()}
+            disabled={loading || (!config.instantChatEnabled && !!instantChatBlockedReason)}
+            className={`w-full py-3 font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-40 ${
+              config.instantChatEnabled ? 'bg-slate-200 text-slate-600' : 'bg-slate-900 text-white'
+            }`}
+          >
+            {config.instantChatEnabled ? '关闭即时对话' : '开启即时对话'}
           </button>
         </div>
 

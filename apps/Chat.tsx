@@ -57,6 +57,7 @@ import { normalizeTranslationLangLabel, isTranslationLangPreset } from '../utils
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent, noteMessageSent, presetOrCustom } from '../utils/analytics';
 import { markAmsgStateDirty, markAmsgStateDirtyForAll } from '../utils/amsgStateSync';
+import { AMSG_INSTANT_CHAT_PENDING_EVENT, getInstantChatPending } from '../utils/amsgInstantChat';
 import {
     CONTEXT_RANGE_POLICY_VERSION,
     computeContextRangeSnapshot,
@@ -91,6 +92,9 @@ const Chat: React.FC = () => {
     // Instant Push 路径："准备中"三个点 = 消息正在拼接+发送; 消失 = SSE POST 已排进
     // 浏览器网络栈. 页面关闭时会主动 abort SSE, 让 worker 尽量走 Web Push fallback。
     const [instantSendingActive, setInstantSendingActive] = useState(false);
+    // 即时对话：这一轮已经交给云端、还没等到回复。它跟 isTyping 不一样——生成不在这台
+    // 设备上跑，所以要扛得住关页面重开（记录落在 localStorage，见 amsgInstantChat）。
+    const [instantChatPending, setInstantChatPending] = useState(false);
     const [instantToolStatus, setInstantToolStatus] = useState<InstantToolUiStatus | null>(null);
     const [totalMsgCount, setTotalMsgCount] = useState(0);
     const [visibleCount, setVisibleCount] = useState(30);
@@ -302,6 +306,15 @@ const Chat: React.FC = () => {
         if (msgs.some(m => m.charId && m.charId !== activeCharIdRef.current)) return;
         setMessages(msgs);
     }, []);
+
+    // 即时对话的「正在输入…」：受理 / 收到回复 / 超时判失败都会广播一次，界面跟着它亮灭。
+    // 进这个角色时先读一次落盘记录——上一轮的回复可能是在应用关着的时候还没回来。
+    useEffect(() => {
+        const sync = () => setInstantChatPending(!!activeCharacterId && !!getInstantChatPending(activeCharacterId));
+        sync();
+        window.addEventListener(AMSG_INSTANT_CHAT_PENDING_EVENT, sync);
+        return () => window.removeEventListener(AMSG_INSTANT_CHAT_PENDING_EVENT, sync);
+    }, [activeCharacterId]);
 
     // --- Initialize Hook ---
     const { isTyping, streamingBubbles, streamingThinking, recallStatus, searchStatus, diaryStatus, emotionStatus, memoryPalaceStatus, memoryPalaceResult, setMemoryPalaceResult, lastDigestResult, setLastDigestResult, lastTokenUsage, tokenBreakdown, setLastTokenUsage, triggerAI, startProactiveChat, stopProactiveChat, isProactiveActive } = useChatAI({
@@ -3417,7 +3430,8 @@ const Chat: React.FC = () => {
                         ))}
                     </>
                 )}
-                {(isTyping || recallStatus || searchStatus || diaryStatus || isProactiveComposing) && !selectionMode && (
+                {/* instantChatPending：这一轮在云端跑，本机可以关页面，指示灯靠落盘记录活着。 */}
+                {(isTyping || instantChatPending || recallStatus || searchStatus || diaryStatus || isProactiveComposing) && !selectionMode && (
                     <div className="flex items-end gap-3 px-3 mb-6 animate-fade-in">
                         <img src={char.avatar} className={chatPendingAvatarClass} />
                         <div className="bg-white px-4 py-3 rounded-2xl shadow-sm">

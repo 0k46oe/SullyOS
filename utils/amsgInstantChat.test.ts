@@ -1,0 +1,451 @@
+// 即时对话（instant chat）客户端这一半的回归守卫。
+//
+// 钉的都是「坏了也不报错、只表现成体验变差」的那类行为：
+//   1. POST 的形状——任务行型 / 任务身份 / fire_pack 带不带 chat 段。错一个字，
+//      worker 到点要么拿主动消息模板去答聊天，要么整条硬失败，而用户只看到「一直在输入」。
+//   2. 只有 202 才算发出去。别的状态一律「没发出去」，绝不静默退回本地生成。
+//   3. 待收记录扛得住重启——它就是「正在输入…」那盏灯的唯一依据。
+//   4. 补收对账：已经上过屏的那条不能再放一遍。
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const TEST_USER_ID = '3f2b1c8a-9d4e-4a1b-8c2d-000000000009';
+
+// _encrypt 换成「原样返回明文」，测里才读得到两个信封里到底装了什么。
+const { reiClient } = vi.hoisted(() => ({
+  reiClient: {
+    init: vi.fn().mockResolvedValue(undefined),
+    _encrypt: vi.fn(async (plaintext: string) => ({
+      iv: 'iv', authTag: 'tag', encryptedData: plaintext,
+    })),
+    putClientState: vi.fn(),
+    getClientState: vi.fn(),
+  },
+}));
+vi.mock('@rei-standard/amsg-client', () => ({ ReiClient: vi.fn(() => reiClient) }));
+vi.mock('./keepAlive', () => ({
+  KeepAlive: { init: vi.fn().mockResolvedValue(undefined), reregister: vi.fn().mockResolvedValue(undefined) },
+}));
+
+const { storeState } = vi.hoisted(() => ({
+  storeState: {
+    config: {
+      userId: '3f2b1c8a-9d4e-4a1b-8c2d-000000000009',
+      workerUrl: 'https://amsg.example.workers.dev',
+      serverToken: '',
+      instantChatEnabled: true,
+    } as Record<string, unknown>,
+    inbox: [] as any[],
+    saved: [] as any[],
+  },
+}));
+vi.mock('./activeMsgStore', () => ({
+  ActiveMsgStore: {
+    ensureUserId: async () => TEST_USER_ID,
+    getGlobalConfig: async () => storeState.config,
+    saveGlobalConfig: vi.fn().mockResolvedValue(undefined),
+    listInboxMessages: async () => storeState.inbox,
+    saveInboxMessage: async (message: any) => { storeState.saved.push(message); },
+  },
+}));
+
+import { ActiveMsgClient } from './activeMsgClient';
+import {
+  AMSG_INSTANT_CHAT_PENDING_LS_KEY,
+  INSTANT_CHAT_PENDING_TIMEOUT_MS,
+  chatOutboxPayloadToInbox,
+  clearInstantChatPending,
+  drainChatOutboxForChar,
+  getInstantChatPending,
+  isInstantChatReady,
+  listExpiredInstantChatPendings,
+  nextInstantChatDeadline,
+  sendInstantChatTurn,
+  setInstantChatPending,
+} from './amsgInstantChat';
+import { FIRE_PACK_VERSION, unpackStateValue } from './amsgFirePack';
+import { INSTANT_SCHEDULE_LEAD_MS } from '../worker/amsg/src/instantChat';
+import { ChatPrompts } from './chatPrompts';
+import { DB } from './db';
+
+const CHAR = { id: 'char-instant-1', name: '小满', memories: [] } as any;
+const USER = { name: '小明' } as any;
+const API = { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-test', model: 'gpt-test' };
+
+const stubFirePackDeps = () => {
+  vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
+  vi.spyOn(ChatPrompts, 'buildSystemPrompt').mockResolvedValue('SYS_PROMPT_MARKER');
+  vi.spyOn(ChatPrompts, 'buildMessageHistory').mockReturnValue({ apiMessages: [] } as any);
+  vi.spyOn(ChatPrompts, 'filterVisibleEmojis').mockReturnValue({ emojis: [], categories: [] } as any);
+};
+
+/** 装一个只认 /instant-chat 的假 fetch，返回它记下来的请求。 */
+const mockInstantChatFetch = (status: number, body: unknown) => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+    calls.push({ url, init });
+    return {
+      status,
+      ok: status >= 200 && status < 300,
+      json: async () => body,
+      text: async () => JSON.stringify(body),
+      headers: { get: () => 'application/json' },
+    } as any;
+  }));
+  return calls;
+};
+
+beforeEach(() => {
+  localStorage.removeItem(AMSG_INSTANT_CHAT_PENDING_LS_KEY);
+  storeState.inbox = [];
+  storeState.saved = [];
+  storeState.config = {
+    userId: TEST_USER_ID,
+    workerUrl: 'https://amsg.example.workers.dev',
+    serverToken: '',
+    instantChatEnabled: true,
+  };
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('POST /instant-chat 的形状', () => {
+  /** 跑一轮，返回解析好的请求体（两个信封已经是明文）。 */
+  const postOnce = async (chatMessages: Array<{ role: string; content: unknown }>, supersedesUuid?: string) => {
+    stubFirePackDeps();
+    const calls = mockInstantChatFetch(202, { status: 'accepted', uuid: 'uuid-1' });
+    const result = await ActiveMsgClient.sendInstantChat({
+      char: CHAR, chatMessages, api: API, maxTokens: 8000,
+      userProfile: USER, groups: [], realtimeConfig: {} as any,
+      ...(supersedesUuid ? { supersedesUuid } : {}),
+    });
+    const body = JSON.parse(String(calls[0].init.body));
+    return {
+      result,
+      call: calls[0],
+      state: JSON.parse(body.statePayload.encryptedData),
+      task: JSON.parse(body.taskPayload.encryptedData),
+      supersedes: body.supersedesUuid,
+    };
+  };
+
+  it('外壳是明文 JSON：两个信封已经加密好，别再给外壳挂加密头', async () => {
+    const { call } = await postOnce([{ role: 'user', content: '在吗' }]);
+    expect(call.url).toContain('/instant-chat');
+    const headers = new Headers(call.init.headers);
+    expect(headers.get('Content-Type')).toBe('application/json');
+    expect(headers.get('X-User-Id')).toBe(TEST_USER_ID);
+    // 挂了的话包装层会把整个外壳当成一整份密文，statePayload / taskPayload 就解不出来。
+    expect(headers.get('X-Payload-Encrypted')).toBeNull();
+    expect(headers.get('X-Encryption-Version')).toBeNull();
+  });
+
+  it('任务行型是 auto + none，身份标着 instant', async () => {
+    const { task } = await postOnce([{ role: 'user', content: '在吗' }]);
+    // 'instant' 在上游是「当场跑完」的行型，走不到 fire hooks，chat 段就白传了。
+    expect(task.messageType).toBe('auto');
+    expect(task.recurrenceType).toBe('none');
+    expect(task.messageSubtype).toBe('chat');
+    expect(task.metadata.amsgMode).toBe('instant');
+    expect(task.metadata.amsgInstantChat).toBe(true);
+    expect(task.metadata.charId).toBe(CHAR.id);
+    expect(typeof task.metadata.amsgClientTaskId).toBe('string');
+    // 防穿帮闸问的是「到点还该不该主动开口」——带上它会把用户正等着的回复吞掉。
+    expect(task.metadata.amsgExpirePolicy).toBeUndefined();
+  });
+
+  it('firstSendTime 留出提前量（上游要求在未来，包装层落库后再拉到期）', async () => {
+    const before = Date.now();
+    const { task } = await postOnce([{ role: 'user', content: '在吗' }]);
+    const lead = Date.parse(task.firstSendTime) - before;
+    expect(lead).toBeGreaterThanOrEqual(INSTANT_SCHEDULE_LEAD_MS - 50);
+    expect(lead).toBeLessThanOrEqual(INSTANT_SCHEDULE_LEAD_MS + 5_000);
+  });
+
+  it('凭据带的是调用方给的那份（本地生成会用的同一份）', async () => {
+    const { task } = await postOnce([{ role: 'user', content: '在吗' }]);
+    expect(task.apiUrl).toBe('https://api.example.com/v1/chat/completions');
+    expect(task.apiKey).toBe('sk-test');
+    expect(task.primaryModel).toBe('gpt-test');
+    expect(task.maxTokens).toBe(8000);
+    expect(task.messages).toHaveLength(1);
+  });
+
+  it('云端状态是 v7 的 fire_pack，chat.messages 就是本地那串 fullMessages', async () => {
+    const fullMessages = [
+      { role: 'system', content: 'SYSTEM' },
+      { role: 'user', content: '今天怎么样' },
+    ];
+    const { state } = await postOnce(fullMessages);
+    const firePackEntry = state.entries.find((e: any) => e.key === 'fire_pack');
+    expect(firePackEntry).toBeTruthy();
+    const pack = JSON.parse(await unpackStateValue(firePackEntry.value));
+    expect(pack.v).toBe(FIRE_PACK_VERSION);
+    expect(pack.chat.messages).toEqual(fullMessages);
+    expect(typeof pack.chat.builtAt).toBe('number');
+    // 排程那条路传的那几样一个都不能少（worker 到点全都要读）。
+    const keys = state.entries.map((e: any) => e.key);
+    expect(keys).toContain('tool_pack');
+    expect(keys).toContain('tool_config');
+  });
+
+  // ── 图片：云端这条路必须跟本地跑出来的一模一样 ──
+  //
+  // 拍平图片曾经是这里的做法，代价是模型看不到用户刚发的那张图，只能对着
+  // 「[User sent an image]」硬答——而且答得挺像回事，用户根本看不出是这条路缺了东西。
+  // 现在原样带上云，只在体积真的过不去时才从最老的开始丢，且当前这轮永不降级。
+
+  /** 造一张「大图」：分段形状是真的，base64 内容用重复字符凑体积。 */
+  const imageMessage = (role: string, kb: number, text = '[User sent an image]') => ({
+    role,
+    content: [
+      { type: 'text', text },
+      { type: 'image_url', image_url: { url: `data:image/png;base64,${'A'.repeat(kb * 1024)}` } },
+    ],
+  });
+
+  const chatOf = async (state: any) => {
+    const entry = state.entries.find((e: any) => e.key === 'fire_pack');
+    return JSON.parse(await unpackStateValue(entry.value)).chat;
+  };
+
+  it('带图片那条原样上云（结构化分段一个字都不动）', async () => {
+    const structured = [
+      { role: 'user', content: [
+        { type: 'text', text: '[User sent an image]' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+      ] },
+    ];
+    const { state } = await postOnce(structured);
+    const chat = await chatOf(state);
+    // 回归守卫：拍平的话这里会变成字符串 '[User sent an image]'，图片就此消失
+    expect(chat.messages).toEqual(structured);
+    expect(JSON.stringify(chat.messages)).toContain('base64');
+  });
+
+  it('体积超标 → 从最老的消息开始丢图片本体，文字段留下', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // 三张 1 MB 的图，预算 2 MiB：最老的那张必然要丢
+    const { state } = await postOnce([
+      imageMessage('user', 1024, '第一张'),
+      imageMessage('assistant', 1024, '第二张'),
+      { role: 'user', content: '最后这句没有图' },
+    ]);
+    const chat = await chatOf(state);
+    expect(chat.messages[0].content).toBe('第一张');          // 丢成文字段
+    expect(typeof chat.messages[0].content).toBe('string');
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('最新那条用户消息的图片永远不丢（这一轮要聊的就是它）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { state } = await postOnce([
+      imageMessage('user', 1024, '很久以前那张'),
+      imageMessage('assistant', 1024, '角色发的那张'),
+      imageMessage('user', 512, '刚发出去的这张'),
+    ]);
+    const chat = await chatOf(state);
+    const newest = chat.messages[2];
+    // 回归守卫：从头往后丢的循环要是没跳过它，用户刚发的图就没了，而回复照样有
+    expect(Array.isArray(newest.content)).toBe(true);
+    expect(newest.content[1].image_url.url).toContain('base64');
+    // 老的两条让位
+    expect(typeof chat.messages[0].content).toBe('string');
+    warn.mockRestore();
+  });
+
+  it('只剩最新那条还是超预算 → 抛错，不悄悄把当前这轮截断', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(postOnce([imageMessage('user', 4096, '一张巨图')]))
+      .rejects.toThrow(/图片太大/);
+    warn.mockRestore();
+  });
+
+  it('顶替上一条：supersedesUuid 原样带上去', async () => {
+    const { supersedes } = await postOnce([{ role: 'user', content: '再补一句' }], 'uuid-prev');
+    expect(supersedes).toBe('uuid-prev');
+  });
+
+  it('没有待顶替的那条时不带这个字段', async () => {
+    const { supersedes } = await postOnce([{ role: 'user', content: '在吗' }]);
+    expect(supersedes).toBeUndefined();
+  });
+});
+
+describe('只有 202 才算发出去', () => {
+  const send = async (status: number, body: unknown) => {
+    stubFirePackDeps();
+    mockInstantChatFetch(status, body);
+    return sendInstantChatTurn({
+      char: CHAR, chatMessages: [{ role: 'user', content: '在吗' }], api: API,
+      userProfile: USER, groups: [], realtimeConfig: {} as any,
+    });
+  };
+
+  it('202 → 记一笔待收记录', async () => {
+    const result = await send(202, { status: 'accepted', uuid: 'uuid-ok' });
+    expect(result.ok).toBe(true);
+    expect(getInstantChatPending(CHAR.id)?.uuid).toBe('uuid-ok');
+  });
+
+  it('200 但没有 uuid → 算没发出去（别把「可能发了」当成发了）', async () => {
+    const result = await send(200, { success: true });
+    expect(result.ok).toBe(false);
+    expect(getInstantChatPending(CHAR.id)).toBeNull();
+  });
+
+  it('401 → 明确告诉用户密钥对不上，不留待收记录', async () => {
+    const result = await send(401, { success: false, error: { code: 'INVALID_CLIENT_TOKEN' } });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('共享密钥');
+    expect(getInstantChatPending(CHAR.id)).toBeNull();
+  });
+
+  it('上游那一步挂了 → 原因带出来，仍然算没发出去', async () => {
+    const result = await send(500, {
+      success: false,
+      error: {
+        code: 'INSTANT_CHAT_STATE_FAILED', message: '云端状态没传上去，这条没发出去',
+        step: 'client-state', upstream: { error: { message: 'D1 timeout' } },
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('INSTANT_CHAT_STATE_FAILED');
+    expect(result.error).toContain('D1 timeout');
+    expect(getInstantChatPending(CHAR.id)).toBeNull();
+  });
+});
+
+describe('待收记录（「正在输入…」那盏灯的唯一依据）', () => {
+  it('落在 localStorage 里，重启后还在', () => {
+    setInstantChatPending('char-a', 'uuid-a', 1_000);
+    // 模块状态每次都从存储读，等价于重开一次应用。
+    expect(getInstantChatPending('char-a')).toEqual({ charId: 'char-a', uuid: 'uuid-a', acceptedAt: 1_000 });
+    expect(localStorage.getItem(AMSG_INSTANT_CHAT_PENDING_LS_KEY)).toContain('uuid-a');
+  });
+
+  it('同角色只留最新一条（顶替之后旧 uuid 没人认领了）', () => {
+    setInstantChatPending('char-a', 'uuid-1', 1_000);
+    setInstantChatPending('char-a', 'uuid-2', 2_000);
+    expect(getInstantChatPending('char-a')?.uuid).toBe('uuid-2');
+  });
+
+  it('销账是幂等的', () => {
+    setInstantChatPending('char-a', 'uuid-a', 1_000);
+    expect(clearInstantChatPending('char-a')).toBe(true);
+    expect(clearInstantChatPending('char-a')).toBe(false);
+    expect(getInstantChatPending('char-a')).toBeNull();
+  });
+
+  it('超时清单按 5 分钟算；没到点的不算', () => {
+    setInstantChatPending('char-a', 'uuid-a', 1_000);
+    expect(listExpiredInstantChatPendings(1_000 + INSTANT_CHAT_PENDING_TIMEOUT_MS - 1)).toHaveLength(0);
+    expect(listExpiredInstantChatPendings(1_000 + INSTANT_CHAT_PENDING_TIMEOUT_MS)).toHaveLength(1);
+  });
+
+  it('没有待收记录时不排看门狗（不给所有人加一条轮询）', () => {
+    expect(nextInstantChatDeadline(Date.now())).toBeNull();
+    setInstantChatPending('char-a', 'uuid-a', 1_000);
+    expect(nextInstantChatDeadline(0)).toBe(1_000 + INSTANT_CHAT_PENDING_TIMEOUT_MS);
+  });
+
+  it('存储里躺着坏数据时当没有，不能把整条路带崩', () => {
+    localStorage.setItem(AMSG_INSTANT_CHAT_PENDING_LS_KEY, '{ 这不是 JSON');
+    expect(getInstantChatPending('char-a')).toBeNull();
+  });
+});
+
+describe('开关', () => {
+  it('设置页开了 + 地址填着 → 走云端', async () => {
+    expect(await isInstantChatReady()).toBe(true);
+  });
+
+  it('开关没开 → 不走（每条消息都读这一份，别处不做第二道门）', async () => {
+    storeState.config = { ...storeState.config, instantChatEnabled: false };
+    expect(await isInstantChatReady()).toBe(false);
+  });
+
+  it('地址空着 → 不走', async () => {
+    storeState.config = { ...storeState.config, workerUrl: '  ' };
+    expect(await isInstantChatReady()).toBe(false);
+  });
+});
+
+describe('推送丢了的补收对账', () => {
+  const outboxPayload = (messageId: string) => ({
+    messageKind: 'content',
+    messageType: 'instant',
+    source: 'scheduled',
+    message: '我在呢',
+    contactName: '小满',
+    messageId,
+    sessionId: 'sess-1',
+    messageIndex: 1,
+    totalMessages: 1,
+    timestamp: new Date(1_700_000_000_000).toISOString(),
+    taskId: 7,
+    occurrenceMs: 1_700_000_000_000,
+    metadata: { charId: CHAR.id, charName: '小满', amsgInstantChat: true },
+  });
+
+  const stubOutbox = (messageIds: string[]) => {
+    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(JSON.stringify({
+      v: 1,
+      entries: messageIds.map((messageId) => ({
+        messageId, sessionId: 'sess-1', at: 1_700_000_000_000, payload: outboxPayload(messageId),
+      })),
+    }));
+  };
+
+  it('没收到的那条写进收件箱，字段跟 SW 收真推送时写的一份对得上', async () => {
+    stubOutbox(['msg_task_7@1700000000000_hook_0']);
+    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
+    const written = await drainChatOutboxForChar(CHAR.id);
+    expect(written).toBe(1);
+    const saved = storeState.saved[0];
+    expect(saved.charId).toBe(CHAR.id);
+    expect(saved.body).toBe('我在呢');
+    expect(saved.messageType).toBe('instant');
+    expect(saved.taskId).toBe(7);
+    expect(saved.metadata.sessionId).toBe('sess-1');
+    expect(saved.sentAt).toBe(1_700_000_000_000);
+  });
+
+  it('已经上过屏的那条不再放一遍（对账读聊天记录里的 messageId）', async () => {
+    const messageId = 'msg_task_7@1700000000000_hook_0';
+    stubOutbox([messageId]);
+    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([
+      { role: 'assistant', type: 'text', content: '我在呢', metadata: { activeMsg2: { messageId } } },
+    ] as any);
+    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
+    expect(storeState.saved).toHaveLength(0);
+  });
+
+  it('还压在收件箱里没冲刷的那条也算收过', async () => {
+    const messageId = 'msg_task_7@1700000000000_hook_0';
+    stubOutbox([messageId]);
+    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
+    storeState.inbox = [{ messageId, charId: CHAR.id }];
+    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
+  });
+
+  it('读不到近史时宁可这次不补收（重复上屏比晚一会儿更糟）', async () => {
+    stubOutbox(['msg_task_7@1700000000000_hook_0']);
+    vi.spyOn(DB, 'getRecentMessagesByCharId').mockRejectedValue(new Error('IDB down'));
+    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
+    expect(storeState.saved).toHaveLength(0);
+  });
+
+  it('云端没有 outbox（或读不出来）→ 静默返回 0，不抛错', async () => {
+    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockRejectedValue(new Error('offline'));
+    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
+  });
+
+  it('推送载荷少了 charId → 没有落点，丢掉而不是造一条无主消息', () => {
+    expect(chatOutboxPayloadToInbox({ message: '孤儿' }, 1)).toBeNull();
+  });
+});

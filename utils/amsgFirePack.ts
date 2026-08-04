@@ -45,6 +45,77 @@ export const AMSG_SELF_LOG_KEY = 'self_log';
  */
 export const amsgXhsSessionKey = (clientTaskId: string) => `xhs_session:${clientTaskId}`;
 
+// ─── 即时对话的收件兜底（chat_outbox） ───
+
+/**
+ * 即时对话这条路上，worker 每轮生成完的推送载荷副本（每角色一份）。
+ *
+ * 推送是会静默丢的：手机换网、系统压制、SW 没醒，用户那边就是「一直在输入中」。
+ * 服务端没有收件箱表（也不新增表），所以定稿的 push 载荷顺手在这里留一份，
+ * 客户端上线 / 页面回到前台 / 等超时之前来拉一次，按 messageId 挑出没收到的补上。
+ *
+ * 环形保留最近 CHAT_OUTBOX_MAX 条，写的时候整份覆盖——它是兜底缓存不是流水账，
+ * 攒着只会把一条 client_state 撑大。
+ */
+export const AMSG_CHAT_OUTBOX_KEY = 'chat_outbox';
+
+/** outbox 最多留几条（超出的从头丢）。 */
+export const CHAT_OUTBOX_MAX = 10;
+
+export interface AmsgChatOutboxEntry {
+  /** 这条推送的 messageId，客户端拿它跟已入库的消息对账。 */
+  messageId: string;
+  /** 同一轮生成的几段共用一个 sessionId。 */
+  sessionId: string;
+  /** 写进 outbox 的时刻（epoch ms）。 */
+  at: number;
+  /** 推送载荷原样（客户端补收时走 inbox 同一条管线入库）。 */
+  payload: Record<string, unknown>;
+}
+
+export interface AmsgChatOutbox {
+  v: 1;
+  entries: AmsgChatOutboxEntry[];
+}
+
+export const createChatOutbox = (): AmsgChatOutbox => ({ v: 1, entries: [] });
+
+/** 读回来的 outbox；形状不对返回 null（调用方按「没有」处理，这是兜底通道不硬失败）。 */
+export const parseChatOutbox = (value: string | null | undefined): AmsgChatOutbox | null => {
+  if (typeof value !== 'string' || !value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (
+      parsed && typeof parsed === 'object' && parsed.v === 1
+      && Array.isArray(parsed.entries)
+      && parsed.entries.every((e: unknown) => {
+        const entry = e as Partial<AmsgChatOutboxEntry> | null;
+        return !!entry && typeof entry.messageId === 'string'
+          && typeof entry.sessionId === 'string' && typeof entry.at === 'number'
+          && !!entry.payload && typeof entry.payload === 'object';
+      })
+    ) {
+      return parsed as AmsgChatOutbox;
+    }
+  } catch { /* 非 JSON → null */ }
+  return null;
+};
+
+/**
+ * 追加这一轮的几条，超出上限的从头丢。同 messageId 视为同一条（fire 重跑会重新生成
+ * 同样的 id），覆盖而不是叠加，免得重试几次就把环形缓冲刷空。
+ */
+export const appendChatOutbox = (
+  outbox: AmsgChatOutbox | null,
+  entries: AmsgChatOutboxEntry[],
+): AmsgChatOutbox => {
+  const base = outbox ?? createChatOutbox();
+  if (entries.length === 0) return base;
+  const incoming = new Set(entries.map((e) => e.messageId));
+  const kept = base.entries.filter((e) => !incoming.has(e.messageId));
+  return { v: 1, entries: [...kept, ...entries].slice(-CHAT_OUTBOX_MAX) };
+};
+
 // ─── client_state 的值压缩 ───
 //
 // fire_pack 是「角色完整系统提示词 + 最近 30 条对话」，一份 40KB 起步，排了任务的角色
@@ -254,6 +325,33 @@ export const AMSG_SLOT_SCENE = '{{AMSG_SCENE}}';
  */
 export const AMSG_SLOT_REALTIME_WORLD = '{{AMSG_REALTIME_WORLD}}';
 
+/**
+ * 「即时对话」这一轮要发给模型的对话消息。
+ *
+ * 和 template 是两条路，不混用：template 是「到点主动找人说话」的提示词，
+ * 这一份是「用户刚说完话、等回复」时本地生成会原样 POST 出去的 fullMessages。
+ * 即时对话的 fire 直接拿它当请求消息，只在末尾追加一块时效内容（当前时间、
+ * 实时世界等），不走 renderFirePack 的模板渲染。
+ */
+/**
+ * 一条对话消息的正文：要么是纯文本，要么是 chat API 那套结构化分段
+ * （带图片的消息本地就长这样：`[{type:'text',…},{type:'image_url',…}]`）。
+ *
+ * 分段里除了 `type` 之外什么样，这一层不管也不该管——那是 chat API 的方言，
+ * worker 只负责原样搬到请求体里。写死字段的话，哪天多模态多出一种分段类型，
+ * 卡住的会是这份「只负责搬运」的代码。
+ */
+export type AmsgFirePackChatContent =
+  | string
+  | Array<{ type: string; [key: string]: unknown }>;
+
+export interface AmsgFirePackChat {
+  /** 本地生成会 POST 给 /chat/completions 的 fullMessages，原样带上来。 */
+  messages: { role: string; content: AmsgFirePackChatContent }[];
+  /** 这份对话消息打包的时刻（epoch ms）。 */
+  builtAt: number;
+}
+
 export interface AmsgFirePack {
   v: typeof FIRE_PACK_VERSION;
   /** 完整 prompt 模板，时间性内容与本次任务指令留 AMSG_SLOT_* 槽位。 */
@@ -294,6 +392,12 @@ export interface AmsgFirePack {
    * AMSG_SLOT_SCENE。没日程的角色为 null，那个槽位被抹平。
    */
   scene: AmsgFireScene | null;
+  /**
+   * 即时对话用的对话消息（见 AmsgFirePackChat）。只有开了即时对话的角色才带，
+   * 定时任务那条路不读它。标了 `amsgInstantChat` 的任务缺这一份 = 按失败处理，
+   * 绝不退回主动消息模板去答聊天。
+   */
+  chat?: AmsgFirePackChat;
 }
 
 // ─── 按角色参照系渲染时间（②：worker 给角色看的一切时间只此一份） ───
@@ -587,7 +691,7 @@ export const renderFirePack = (
  * 唯一的例外是「说清楚为什么」：见 describeFirePackVersion，worker 拿它拼失败原因，
  * 面板的 lastError 才能直接告诉用户该重贴 bundle 还是该刷新前端。
  */
-export const FIRE_PACK_VERSION = 6;
+export const FIRE_PACK_VERSION = 7;
 
 /**
  * 解析失败时给人看的一句原因。
@@ -609,6 +713,31 @@ export const describeFirePackVersion = (value: string): string => {
   return '包里没有版本号（数据损坏）';
 };
 
+/**
+ * 一条消息的正文合不合格：纯文本，或者非空的分段数组、每段带一个字符串 `type`。
+ *
+ * 只查到 `type` 为止：再往里查就是在这边复刻 chat API 的方言，而这份代码对分段
+ * 的内容没有任何主张——它只保证「搬过去的东西还是个消息」。
+ */
+const chatContentOk = (content: unknown): boolean => {
+  if (typeof content === 'string') return true;
+  if (!Array.isArray(content) || content.length === 0) return false;
+  return content.every((part) => !!part && typeof part === 'object' && !Array.isArray(part)
+    && typeof (part as { type?: unknown }).type === 'string');
+};
+
+/** chat 字段：不带就是没开即时对话（合法）；带了就必须是完整形状。 */
+const chatFieldOk = (chat: unknown): boolean => {
+  if (chat === undefined) return true;
+  if (!chat || typeof chat !== 'object' || Array.isArray(chat)) return false;
+  const { messages, builtAt } = chat as Partial<AmsgFirePackChat>;
+  return typeof builtAt === 'number'
+    && Array.isArray(messages) && messages.length > 0
+    && messages.every((m) => !!m && typeof m === 'object'
+      && typeof (m as { role?: unknown }).role === 'string'
+      && chatContentOk((m as { content?: unknown }).content));
+};
+
 /** worker 侧从 client_state 读回的 value 解析成 fire_pack；形状不对返回 null（调用方抛错）。 */
 export const parseFirePack = (value: string): AmsgFirePack | null => {
   try {
@@ -616,6 +745,7 @@ export const parseFirePack = (value: string): AmsgFirePack | null => {
     if (
       parsed && typeof parsed === 'object' &&
       parsed.v === FIRE_PACK_VERSION &&
+      chatFieldOk(parsed.chat) &&
       typeof parsed.template === 'string' && parsed.template.length > 0 &&
       (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === 'number') &&
       typeof parsed.tzId === 'string' && parsed.tzId.length > 0 &&

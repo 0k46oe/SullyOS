@@ -302,6 +302,12 @@ export interface ActiveMsg2GlobalConfig {
   serverToken?: string;
   /** 上次「连接」（在 worker 端建表）成功的时间 */
   initializedAt?: number;
+  /**
+   * 即时对话：聊天的每一轮都交给云端跑（POST /instant-chat），回复走推送回来。
+   * 只在设置页那一处开关（开关本身还有连接 / 通知权限 / worker 能力三道门），
+   * 关掉就是现在的本地直连生成。
+   */
+  instantChatEnabled?: boolean;
   updatedAt?: number;
 }
 

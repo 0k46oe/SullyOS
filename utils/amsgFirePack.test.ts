@@ -8,11 +8,15 @@ import {
   AMSG_SLOT_USER_CLOCK,
   AmsgFirePack,
   AmsgSelfLog,
+  CHAT_OUTBOX_MAX,
   FIRE_PACK_VERSION,
   describeFirePackVersion,
   SELF_LOG_MAX_ENTRIES,
   SELF_LOG_TEXT_MAX,
+  appendChatOutbox,
   appendSelfLogEntry,
+  createChatOutbox,
+  parseChatOutbox,
   buildAwayHint,
   buildStreakReminder,
   buildUserClockHint,
@@ -114,7 +118,7 @@ describe('formatFireTimeFull / formatFireTimeShort（角色参照系的自然中
 
 describe('renderFirePack', () => {
   const basePack: AmsgFirePack = {
-    v: 6, builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
+    v: FIRE_PACK_VERSION, builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
     template: [
       `当前本地时间：${AMSG_SLOT_CURRENT_TIME}`,
       AMSG_SLOT_TIME_SINCE_USER,
@@ -170,7 +174,7 @@ describe('对方那边现在几点（AMSG_SLOT_USER_CLOCK）', () => {
   // 纽约角色 / 上海用户：2026-08-02T13:00Z = 纽约 09:00、上海 21:00。
   const AT = Date.UTC(2026, 7, 2, 13, 0);
   const nyChar: AmsgFirePack = {
-    v: 6, builtAt: 1, pendingTasks: [], scene: null, lastUserMessageAt: null,
+    v: FIRE_PACK_VERSION, builtAt: 1, pendingTasks: [], scene: null, lastUserMessageAt: null,
     template: `当前本地时间（你所在地）：${AMSG_SLOT_CURRENT_TIME}${AMSG_SLOT_USER_CLOCK}`,
     tzId: 'America/New_York',
     userTzId: 'Asia/Shanghai',
@@ -204,7 +208,7 @@ describe('对方那边现在几点（AMSG_SLOT_USER_CLOCK）', () => {
 
 describe('parseFirePack', () => {
   const valid: AmsgFirePack = {
-    v: 6, template: 'x', lastUserMessageAt: null, tzId: 'Asia/Shanghai', userTzId: 'Asia/Shanghai', targetName: 'A',
+    v: FIRE_PACK_VERSION, template: 'x', lastUserMessageAt: null, tzId: 'Asia/Shanghai', userTzId: 'Asia/Shanghai', targetName: 'A',
     builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
   };
 
@@ -254,7 +258,7 @@ describe('parseFirePack', () => {
 describe('self_log', () => {
   const packAt = 1_700_000_000_000;
   const pack: AmsgFirePack = {
-    v: 6, template: 'x', lastUserMessageAt: null, tzId: 'UTC', userTzId: 'UTC', targetName: '小明同学',
+    v: FIRE_PACK_VERSION, template: 'x', lastUserMessageAt: null, tzId: 'UTC', userTzId: 'UTC', targetName: '小明同学',
     builtAt: packAt, pendingTasks: [], scene: null,
   };
   const entry = (id: string, text: string, at = packAt) => ({ id, at, text });
@@ -395,7 +399,7 @@ describe('self_log', () => {
 describe('连排提醒', () => {
   const packAt = 1_700_000_000_000;
   const slotted: AmsgFirePack = {
-    v: 6, lastUserMessageAt: null, tzId: 'UTC', userTzId: 'UTC', targetName: '小明同学',
+    v: FIRE_PACK_VERSION, lastUserMessageAt: null, tzId: 'UTC', userTzId: 'UTC', targetName: '小明同学',
     builtAt: packAt, pendingTasks: [], scene: null,
     template: `【最近对话上下文】\n用户：在吗${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
   };
@@ -445,7 +449,7 @@ describe('last_skip 新原因', () => {
 
 describe('fire_pack 任务指令槽', () => {
   const pack: AmsgFirePack = {
-    v: 6,
+    v: FIRE_PACK_VERSION,
     template: `头部\n${AMSG_SLOT_TASK_INSTRUCTION}\n尾部 ${AMSG_SLOT_CURRENT_TIME}`,
     lastUserMessageAt: null, tzId: 'Asia/Shanghai', userTzId: 'Asia/Shanghai', targetName: '小明同学',
     builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
@@ -467,7 +471,7 @@ describe('fire_pack 任务指令槽', () => {
 describe('client_state 值压缩', () => {
   // fire_pack 有几万字，随手编一小段压不出效果也测不出真问题，拿重复的中文段落凑量。
   const bigJson = JSON.stringify({
-    v: 6,
+    v: FIRE_PACK_VERSION,
     template: '【角色系统设定】你是一个会在深夜突然想起对方的人。\n'.repeat(400),
     lastUserMessageAt: 1_700_000_000_000,
     tzId: 'Asia/Shanghai',
@@ -561,5 +565,129 @@ describe('fire_pack 版本对不上时说清该做什么', () => {
   it('压根不是 JSON / 没版本号', () => {
     expect(describeFirePackVersion('not json')).toContain('不是合法 JSON');
     expect(describeFirePackVersion('{}')).toContain('没有版本号');
+  });
+});
+
+// ─── v7：即时对话的 chat 段 ───
+//
+// 开发期规矩：版本对不上整包打回，不做任何形状兼容。v6 的包被放行的话，标了即时对话
+// 的任务会拿不到 chat 段——而那时 worker 已经走过版本门，只能一路跑到「用主动消息模板
+// 答用户刚说的话」，出来的东西驴唇不对马嘴且没有报错。
+describe('fire_pack v7 的 chat 段', () => {
+  const base: AmsgFirePack = {
+    v: FIRE_PACK_VERSION, template: 'x', lastUserMessageAt: null,
+    tzId: 'Asia/Shanghai', userTzId: 'Asia/Shanghai', targetName: '小明',
+    builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
+  };
+  const chat = { messages: [{ role: 'user', content: '在吗' }], builtAt: 1_700_000_000_000 };
+
+  it('当前版本号是 7（升版要前端和 worker 一起动）', () => {
+    expect(FIRE_PACK_VERSION).toBe(7);
+  });
+
+  it('v6 的包直接拒（不做旧格式兼容）', () => {
+    expect(parseFirePack(JSON.stringify({ ...base, v: 6 }))).toBeNull();
+    expect(describeFirePackVersion(JSON.stringify({ ...base, v: 6 })))
+      .toContain('前端比 worker 旧');
+  });
+
+  it('不带 chat 段照样合法（没开即时对话的角色就是这样）', () => {
+    expect(parseFirePack(JSON.stringify(base))).toEqual(base);
+  });
+
+  it('带了 chat 段就原样返回', () => {
+    const withChat = { ...base, chat };
+    expect(parseFirePack(JSON.stringify(withChat))).toEqual(withChat);
+  });
+
+  it('chat 段形状不对 → 整包打回（半份对话消息比没有更糟）', () => {
+    const bad = (value: unknown) => parseFirePack(JSON.stringify({ ...base, chat: value }));
+    expect(bad(null)).toBeNull();
+    expect(bad({ messages: [], builtAt: 1 })).toBeNull();                     // 空数组
+    expect(bad({ messages: [{ role: 'user' }], builtAt: 1 })).toBeNull();     // 缺 content
+    expect(bad({ messages: [{ content: '在吗' }], builtAt: 1 })).toBeNull();  // 缺 role
+    expect(bad({ messages: chat.messages })).toBeNull();                      // 缺 builtAt
+    expect(bad({ messages: chat.messages, builtAt: 'x' })).toBeNull();
+  });
+
+  // 带图片的消息本地就是结构化分段，云端这条路要原样送到模型面前——parse 认不了
+  // 这种形状的话，整包被打回、fire 硬失败，用户看到的是「一直在输入」。
+  it('结构化分段的 content 照收（图片消息本地就长这样）', () => {
+    const structured = {
+      ...base,
+      chat: {
+        builtAt: 1_700_000_000_000,
+        messages: [
+          { role: 'user', content: [
+            { type: 'text', text: '08:00 [User sent an image]' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+          ] },
+          { role: 'assistant', content: '好可爱' },   // 同一串里混着纯文本也行
+        ],
+      },
+    };
+    expect(parseFirePack(JSON.stringify(structured))).toEqual(structured);
+  });
+
+  it('分段只查到 type 为止（图片那套方言归 chat API 管，这层只负责搬）', () => {
+    const withOddPart = {
+      ...base,
+      chat: {
+        builtAt: 1,
+        messages: [{ role: 'user', content: [{ type: '将来才有的新分段', 随便什么字段: 1 }] }],
+      },
+    };
+    expect(parseFirePack(JSON.stringify(withOddPart))).toEqual(withOddPart);
+  });
+
+  it('分段数组本身不合格 → 整包打回', () => {
+    const bad = (content: unknown) => parseFirePack(JSON.stringify({
+      ...base, chat: { builtAt: 1, messages: [{ role: 'user', content }] },
+    }));
+    expect(bad([])).toBeNull();                          // 空数组 = 没内容
+    expect(bad([{ text: '缺 type' }])).toBeNull();
+    expect(bad([{ type: 123 }])).toBeNull();             // type 不是字符串
+    expect(bad(['纯字符串分段'])).toBeNull();
+    expect(bad([null])).toBeNull();
+    expect(bad([[{ type: 'text' }]])).toBeNull();        // 嵌套数组不算分段对象
+    expect(bad(42)).toBeNull();
+  });
+});
+
+// ─── 即时对话的收件兜底 outbox ───
+describe('chat_outbox', () => {
+  const entry = (id: string) => ({ messageId: id, sessionId: 's', at: 1, payload: { message: id } });
+
+  it('环形只留最近 CHAT_OUTBOX_MAX 条', () => {
+    let outbox = createChatOutbox();
+    for (let i = 0; i < CHAT_OUTBOX_MAX + 5; i += 1) {
+      outbox = appendChatOutbox(outbox, [entry(`m${i}`)]);
+    }
+    expect(outbox.entries).toHaveLength(CHAT_OUTBOX_MAX);
+    expect(outbox.entries[0].messageId).toBe('m5');
+  });
+
+  it('同 messageId 覆盖不叠加（fire 重跑会重新生成同样的 id）', () => {
+    const once = appendChatOutbox(null, [entry('m1'), entry('m2')]);
+    const again = appendChatOutbox(once, [entry('m1'), entry('m2')]);
+    expect(again.entries.map((e) => e.messageId)).toEqual(['m1', 'm2']);
+  });
+
+  it('空的一批原样返回（没东西可记就别白写一次库）', () => {
+    const outbox = appendChatOutbox(null, []);
+    expect(outbox.entries).toEqual([]);
+  });
+
+  it('形状不对 → null，按「没有」处理（兜底通道不硬失败）', () => {
+    expect(parseChatOutbox('')).toBeNull();
+    expect(parseChatOutbox(undefined)).toBeNull();
+    expect(parseChatOutbox('not json')).toBeNull();
+    expect(parseChatOutbox(JSON.stringify({ v: 2, entries: [] }))).toBeNull();
+    expect(parseChatOutbox(JSON.stringify({ v: 1, entries: [{ messageId: 'm' }] }))).toBeNull();
+  });
+
+  it('合法的读回来原样', () => {
+    const outbox = appendChatOutbox(null, [entry('m1')]);
+    expect(parseChatOutbox(JSON.stringify(outbox))).toEqual(outbox);
   });
 });

@@ -4268,6 +4268,30 @@ var amsgStateNamespace = (charId) => `${AMSG_STATE_NAMESPACE_PREFIX}${charId}`;
 var AMSG_FIRE_PACK_KEY = "fire_pack";
 var AMSG_SELF_LOG_KEY = "self_log";
 var amsgXhsSessionKey = (clientTaskId) => `xhs_session:${clientTaskId}`;
+var AMSG_CHAT_OUTBOX_KEY = "chat_outbox";
+var CHAT_OUTBOX_MAX = 10;
+var createChatOutbox = () => ({ v: 1, entries: [] });
+var parseChatOutbox = (value) => {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === "object" && parsed.v === 1 && Array.isArray(parsed.entries) && parsed.entries.every((e) => {
+      const entry = e;
+      return !!entry && typeof entry.messageId === "string" && typeof entry.sessionId === "string" && typeof entry.at === "number" && !!entry.payload && typeof entry.payload === "object";
+    })) {
+      return parsed;
+    }
+  } catch {
+  }
+  return null;
+};
+var appendChatOutbox = (outbox, entries) => {
+  const base = outbox ?? createChatOutbox();
+  if (entries.length === 0) return base;
+  const incoming = new Set(entries.map((e) => e.messageId));
+  const kept = base.entries.filter((e) => !incoming.has(e.messageId));
+  return { v: 1, entries: [...kept, ...entries].slice(-CHAT_OUTBOX_MAX) };
+};
 var GZIP_VALUE_PREFIX = "gz1:";
 var base64ToBytes2 = (base64) => {
   const binary = atob(base64);
@@ -4432,7 +4456,7 @@ ${TASK_SECTION_HEADING}`);
 ${realtimeWorld}` : "");
   return out;
 };
-var FIRE_PACK_VERSION = 6;
+var FIRE_PACK_VERSION = 7;
 var describeFirePackVersion = (value) => {
   let v;
   try {
@@ -4449,10 +4473,21 @@ var describeFirePackVersion = (value) => {
   }
   return "\u5305\u91CC\u6CA1\u6709\u7248\u672C\u53F7\uFF08\u6570\u636E\u635F\u574F\uFF09";
 };
+var chatContentOk = (content) => {
+  if (typeof content === "string") return true;
+  if (!Array.isArray(content) || content.length === 0) return false;
+  return content.every((part) => !!part && typeof part === "object" && !Array.isArray(part) && typeof part.type === "string");
+};
+var chatFieldOk = (chat) => {
+  if (chat === void 0) return true;
+  if (!chat || typeof chat !== "object" || Array.isArray(chat)) return false;
+  const { messages, builtAt } = chat;
+  return typeof builtAt === "number" && Array.isArray(messages) && messages.length > 0 && messages.every((m) => !!m && typeof m === "object" && typeof m.role === "string" && chatContentOk(m.content));
+};
 var parseFirePack = (value) => {
   try {
     const parsed = JSON.parse(value);
-    if (parsed && typeof parsed === "object" && parsed.v === FIRE_PACK_VERSION && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && typeof parsed.tzId === "string" && parsed.tzId.length > 0 && typeof parsed.userTzId === "string" && parsed.userTzId.length > 0 && typeof parsed.targetName === "string" && typeof parsed.builtAt === "number" && Array.isArray(parsed.pendingTasks) && (parsed.scene === null || typeof parsed.scene === "object")) {
+    if (parsed && typeof parsed === "object" && parsed.v === FIRE_PACK_VERSION && chatFieldOk(parsed.chat) && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && typeof parsed.tzId === "string" && parsed.tzId.length > 0 && typeof parsed.userTzId === "string" && parsed.userTzId.length > 0 && typeof parsed.targetName === "string" && typeof parsed.builtAt === "number" && Array.isArray(parsed.pendingTasks) && (parsed.scene === null || typeof parsed.scene === "object")) {
       return parsed;
     }
   } catch {
@@ -8340,6 +8375,233 @@ function buildScheduledPush(message, build, extraMeta, bannerBody) {
   };
 }
 
+// worker/amsg/src/instantChat.ts
+var INSTANT_SCHEDULE_LEAD_MS = 15e3;
+var INSTANT_TICK_FALLBACK_WAIT_MS = INSTANT_SCHEDULE_LEAD_MS + 1e3;
+var INSTANT_TOTAL_TIMEOUT_MS = 6e5;
+var INSTANT_CLAIM_LEASE_MS = INSTANT_TOTAL_TIMEOUT_MS + 12e4;
+var INSTANT_TICK_CRON = "instant-chat";
+var AMSG_INSTANT_CHAT_FLAG = "amsgInstantChat";
+var isInstantChatTask = (metadata) => !!metadata && metadata[AMSG_INSTANT_CHAT_FLAG] === true;
+var buildInstantTimelyBlock = (args) => {
+  const clockHint = buildUserClockHint(args.nowMs, args.tz, { tzId: args.userTzId }, args.targetName);
+  const head = [
+    "\u3010\u6B64\u523B\u7684\u7CFB\u7EDF\u4FE1\u606F\xB7\u4EC5\u4F60\u53EF\u89C1\u3011",
+    `\u73B0\u5728\u662F ${formatFireTimeFull(args.nowMs, args.tz)}\u3002`,
+    // buildUserClockHint 自带前导换行，没时差时返回空串。
+    clockHint
+  ].join("\n");
+  return [head, ...args.blocks.filter((block) => block.trim())].join("\n");
+};
+var NOTIFICATION_WHEN_HIDDEN = "when-hidden";
+var finalizeInstantPush = (payload, index, total, ids) => {
+  const suffix = `@${ids.occurrenceMs}`;
+  const messageIdBase = ids.taskRowId != null ? `msg_task_${ids.taskRowId}${suffix}` : `msg_${ids.randomId}`;
+  const sessionId = ids.taskRowId != null ? `sess_task_${ids.taskRowId}${suffix}` : `sess_${ids.randomId}`;
+  const notification = payload.notification;
+  const hasNotification = !!notification && typeof notification === "object" && !Array.isArray(notification);
+  return {
+    ...payload,
+    ...hasNotification ? { notification: { ...notification, show: NOTIFICATION_WHEN_HIDDEN } } : {},
+    messageId: `${messageIdBase}_hook_${index}`,
+    sessionId,
+    timestamp: new Date(ids.nowMs).toISOString(),
+    messageIndex: index + 1,
+    totalMessages: total,
+    // 库的 stampTaskIdentity 会原样覆写这四个，写成一样的值只是让 outbox 那份也带上。
+    // 任务行 id 在 D1 里是整数，转不出数字就照实报 null，别塞一个 NaN 出去。
+    taskId: ids.taskRowId != null && Number.isFinite(Number(ids.taskRowId)) ? Number(ids.taskRowId) : null,
+    taskUuid: ids.taskUuid,
+    recurrenceType: "none",
+    occurrenceMs: ids.occurrenceMs
+  };
+};
+var toOutboxEntries = (payloads, nowMs) => payloads.map((payload) => ({
+  messageId: String(payload.messageId ?? ""),
+  sessionId: String(payload.sessionId ?? ""),
+  at: nowMs,
+  payload
+}));
+var writeChatOutbox = async (writeState, charId, current, entries) => {
+  if (typeof writeState !== "function" || entries.length === 0) return current;
+  const next = appendChatOutbox(current, entries);
+  try {
+    await writeState(amsgStateNamespace(charId), [
+      { key: AMSG_CHAT_OUTBOX_KEY, value: JSON.stringify(next) }
+    ]);
+    return next;
+  } catch (error) {
+    console.warn("[amsg:instant-chat] outbox \u5199\u5165\u5931\u8D25\uFF08\u8FD9\u6B21\u7167\u5E38\u53D1\u9001\uFF0C\u4F46\u63A8\u9001\u4E22\u4E86\u5BA2\u6237\u7AEF\u8865\u4E0D\u56DE\u6765\uFF09", error);
+    return current;
+  }
+};
+var UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var constantTimeEqual2 = async (a, b) => {
+  const raw = crypto.getRandomValues(new Uint8Array(32));
+  const key = await crypto.subtle.importKey("raw", raw, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const enc = new TextEncoder();
+  const da = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(a)));
+  const db = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(b)));
+  let diff = 0;
+  for (let i = 0; i < da.length; i += 1) diff |= da[i] ^ db[i];
+  return diff === 0;
+};
+var isEncryptedEnvelope2 = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const env = value;
+  return typeof env.iv === "string" && typeof env.authTag === "string" && typeof env.encryptedData === "string";
+};
+var pullTaskDue = async (db, uuid, userId, nowMs) => {
+  const d1 = db;
+  if (typeof d1?.prepare !== "function") return false;
+  const iso = new Date(nowMs).toISOString();
+  try {
+    await d1.prepare(
+      `UPDATE scheduled_messages SET next_send_at = ?, updated_at = ?
+          WHERE uuid = ? AND user_id = ? AND status = 'pending' AND next_send_at > ?`
+    ).bind(iso, iso, uuid, userId, iso).run();
+    return true;
+  } catch (error) {
+    console.warn("[amsg:instant-chat] \u4EFB\u52A1\u884C\u62C9\u5230\u671F\u5931\u8D25\uFF08\u6539\u6210\u7B49\u5230\u70B9\u518D\u8D77\u8DF3\uFF09", error);
+    return false;
+  }
+};
+var delay = (ms) => ms <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
+var handleInstantChat = async (args) => {
+  const { request, env, ctx, upstream: upstream2, json } = args;
+  const now = args.now ?? Date.now;
+  const sleep = args.sleep ?? delay;
+  const fail = (status, code, message, extra) => json(status, { success: false, error: { code, message, ...extra ?? {} } });
+  const token = (env.AMSG_SERVER_TOKEN ?? "").trim();
+  const clientToken = request.headers.get("X-Client-Token") ?? "";
+  if (token) {
+    if (!clientToken || !await constantTimeEqual2(clientToken, token)) {
+      return fail(401, "INVALID_CLIENT_TOKEN", "\u5171\u4EAB\u5BC6\u94A5\u65E0\u6548\u6216\u7F3A\u5931");
+    }
+  }
+  const userId = request.headers.get("X-User-Id") ?? "";
+  if (!userId) return fail(400, "USER_ID_REQUIRED", "\u7F3A\u5C11\u7528\u6237\u6807\u8BC6\u7B26");
+  if (!UUID_V4_RE.test(userId)) return fail(400, "INVALID_USER_ID_FORMAT", "X-User-Id \u5FC5\u987B\u662F UUID v4 \u683C\u5F0F");
+  let body;
+  try {
+    const parsed = await request.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+    body = parsed;
+  } catch {
+    return fail(400, "INVALID_JSON", "\u8BF7\u6C42\u4F53\u4E0D\u662F\u5408\u6CD5\u7684 JSON \u5BF9\u8C61");
+  }
+  if (!isEncryptedEnvelope2(body.statePayload)) {
+    return fail(400, "INVALID_STATE_PAYLOAD", "statePayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
+  }
+  if (!isEncryptedEnvelope2(body.taskPayload)) {
+    return fail(400, "INVALID_TASK_PAYLOAD", "taskPayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
+  }
+  const supersedesUuid = typeof body.supersedesUuid === "string" ? body.supersedesUuid.trim() : "";
+  const requestUrl = new URL(request.url);
+  const mountPath = requestUrl.pathname.replace(/\/+$/, "").replace(/\/instant-chat$/, "");
+  const internalUrl = (path, search = "") => {
+    const url = new URL(request.url);
+    url.pathname = `${mountPath}${path}`;
+    url.search = search;
+    return url.toString();
+  };
+  const encryptedHeaders = {
+    "Content-Type": "application/json",
+    "X-User-Id": userId,
+    "X-Payload-Encrypted": "true",
+    "X-Encryption-Version": "1",
+    ...clientToken ? { "X-Client-Token": clientToken } : {}
+  };
+  const readBody = async (response) => {
+    try {
+      return await response.json();
+    } catch {
+      return null;
+    }
+  };
+  const stateResponse = await upstream2.fetch(
+    new Request(internalUrl("/client-state"), {
+      method: "PUT",
+      headers: encryptedHeaders,
+      body: JSON.stringify(body.statePayload)
+    }),
+    env
+  );
+  if (!stateResponse.ok) {
+    return json(stateResponse.status, {
+      success: false,
+      error: {
+        code: "INSTANT_CHAT_STATE_FAILED",
+        message: "\u4E91\u7AEF\u72B6\u6001\u6CA1\u4F20\u4E0A\u53BB\uFF0C\u8FD9\u6761\u6CA1\u53D1\u51FA\u53BB",
+        step: "client-state",
+        upstream: await readBody(stateResponse)
+      }
+    });
+  }
+  if (supersedesUuid) {
+    try {
+      const cancelled = await upstream2.fetch(
+        new Request(internalUrl("/cancel-message", `?id=${encodeURIComponent(supersedesUuid)}`), {
+          method: "DELETE",
+          headers: {
+            "X-User-Id": userId,
+            ...clientToken ? { "X-Client-Token": clientToken } : {}
+          }
+        }),
+        env
+      );
+      if (!cancelled.ok) {
+        console.log("[amsg:instant-chat] \u9876\u66FF\u4E0A\u4E00\u6761\u6CA1\u6210\uFF08\u7167\u5E38\u7EE7\u7EED\uFF09", {
+          uuid: supersedesUuid,
+          status: cancelled.status
+        });
+      }
+    } catch (error) {
+      console.log("[amsg:instant-chat] \u9876\u66FF\u4E0A\u4E00\u6761\u629B\u9519\uFF08\u7167\u5E38\u7EE7\u7EED\uFF09", error);
+    }
+  }
+  const taskResponse = await upstream2.fetch(
+    new Request(internalUrl("/schedule-message"), {
+      method: "POST",
+      headers: encryptedHeaders,
+      body: JSON.stringify(body.taskPayload)
+    }),
+    env
+  );
+  const taskBody = await readBody(taskResponse);
+  if (!taskResponse.ok) {
+    return json(taskResponse.status, {
+      success: false,
+      error: {
+        code: "INSTANT_CHAT_TASK_FAILED",
+        message: "\u4EFB\u52A1\u6CA1\u5EFA\u8D77\u6765\uFF0C\u8FD9\u6761\u6CA1\u53D1\u51FA\u53BB",
+        step: "schedule-message",
+        upstream: taskBody
+      }
+    });
+  }
+  const uuid = taskBody?.data?.uuid;
+  if (typeof uuid !== "string" || !uuid) {
+    return fail(502, "INSTANT_CHAT_TASK_UUID_MISSING", "\u4E0A\u6E38\u6CA1\u6709\u56DE\u4EFB\u52A1 uuid\uFF0C\u65E0\u6CD5\u8DDF\u8E2A\u8FD9\u4E00\u8F6E", {
+      step: "schedule-message"
+    });
+  }
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil((async () => {
+      try {
+        const due = await pullTaskDue(env.DB, uuid, userId, now());
+        if (!due) await sleep(INSTANT_TICK_FALLBACK_WAIT_MS);
+        await upstream2.scheduled({ scheduledTime: now(), cron: INSTANT_TICK_CRON }, env);
+      } catch (error) {
+        console.warn("[amsg:instant-chat] \u7ACB\u5373\u89E6\u53D1\u5931\u8D25\uFF08\u7B49 cron \u515C\u5E95\uFF09", error);
+      }
+    })());
+  } else {
+    console.warn("[amsg:instant-chat] \u8FD0\u884C\u65F6\u6CA1\u7ED9 ctx\uFF0C\u8DF3\u8FC7\u7ACB\u5373\u89E6\u53D1\uFF0C\u7B49 cron \u515C\u5E95");
+  }
+  return json(202, { status: "accepted", uuid });
+};
+
 // worker/amsg/src/nativeFcm.ts
 var accessTokenCache = null;
 var utf83 = new TextEncoder();
@@ -8748,10 +9010,11 @@ var amsgHooks = {
     const charRows = await ctx.readState(amsgStateNamespace(charId));
     const taskMeta = ctx.task.metadata ?? {};
     const policy = typeof taskMeta.amsgExpirePolicy === "string" ? taskMeta.amsgExpirePolicy : void 0;
+    const instant = isInstantChatTask(taskMeta);
     const presence = parseAmsgChatPresence(
       charRows.find((r) => r.key === AMSG_CHAT_PRESENCE_KEY)?.value
     );
-    if (policy === "expire" && isFreshChatPresence(presence, charId, ctx.now.getTime())) {
+    if (!instant && policy === "expire" && isFreshChatPresence(presence, charId, ctx.now.getTime())) {
       console.log("[amsg:expire-skip]", {
         taskId: ctx.task.id,
         reason: "active-chat-presence",
@@ -8770,6 +9033,9 @@ var amsgHooks = {
     const packJson = await unpackOrFail("fire_pack", packRow.value);
     const pack = parseFirePack(packJson);
     if (!pack) throw fail(`fire_pack \u89E3\u6790\u5931\u8D25\uFF1A${describeFirePackVersion(packJson)}`);
+    if (instant && !pack.chat) {
+      throw fail("\u5373\u65F6\u5BF9\u8BDD\u4EFB\u52A1\u7684 fire_pack \u91CC\u6CA1\u6709 chat \u6BB5\uFF08\u4E91\u7AEF\u72B6\u6001\u6CA1\u8DDF\u4E0A\uFF09");
+    }
     const occurrenceMs = Date.parse(String(ctx.task.nextSendAt));
     if (!Number.isFinite(occurrenceMs)) {
       throw fail("\u4EFB\u52A1\u884C next_send_at \u89E3\u6790\u4E0D\u51FA\u89E6\u53D1\u65F6\u523B", { nextSendAt: ctx.task.nextSendAt });
@@ -8783,12 +9049,12 @@ var amsgHooks = {
       nowMs: ctx.now.getTime(),
       occurrenceMs
     };
-    if (shouldExpireFire(expireInput)) {
+    if (!instant && shouldExpireFire(expireInput)) {
       console.log("[amsg:expire-skip]", { taskId: ctx.task.id, ...expireInput });
       await recordSkip(ctx, charId, "conversation-moved-on", occurrenceMs);
       return { skip: true };
     }
-    if (typeof taskMeta.amsgTaskInstruction !== "string") {
+    if (!instant && typeof taskMeta.amsgTaskInstruction !== "string") {
       throw fail("\u4EFB\u52A1 metadata \u7F3A amsgTaskInstruction\uFF08\u65E7\u683C\u5F0F\u4EFB\u52A1\uFF09");
     }
     const globalRows = await ctx.readState(AMSG_GLOBAL_NAMESPACE);
@@ -8834,7 +9100,10 @@ var amsgHooks = {
       selfLogTexts: null,
       // 跟下面 renderFirePack 填「你此刻在听」用的是同一个时刻、同一份 scene、同一个种子
       // （resolveFireSceneSong 与 renderFireSceneBlock 共用判定），冻的必然是正文里那首。
-      sceneSong: resolveFireSceneSong(pack.scene, ctx.now.getTime(), tz)
+      sceneSong: resolveFireSceneSong(pack.scene, ctx.now.getTime(), tz),
+      instant,
+      // 顺手读进来：发完要在它上面追加写回，这里不读的话 onLLMOutput 得为它单独查一次库。
+      chatOutbox: instant ? parseChatOutbox(charRows.find((r) => r.key === AMSG_CHAT_OUTBOX_KEY)?.value) : null
     };
     const taskListBlock = buildFireTaskListBlock(livePendingTasks, {
       nowMs: ctx.now.getTime(),
@@ -8850,23 +9119,50 @@ var amsgHooks = {
       globalNamespace: AMSG_GLOBAL_NAMESPACE,
       writeState: ctx.writeState
     });
-    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, {
-      selfLog,
-      taskListBlock,
-      realtimeWorldBlock
-    }) + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? "native" : "text" }) : "") + (canSelfSchedule ? buildFireScheduleBlock(mcpNative ? "native" : "text", { nowMs: ctx.now.getTime(), tz }) : "");
+    const mcpBlock = mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? "native" : "text" }) : "";
+    const scheduleBlock = canSelfSchedule ? buildFireScheduleBlock(mcpNative ? "native" : "text", { nowMs: ctx.now.getTime(), tz }) : "";
     const fireTools = [
       ...mcpResolve && mcpNative ? buildMcpFireTools(mcpResolve) : [],
       ...canSelfSchedule && mcpNative ? [buildFireScheduleTool({ nowMs: ctx.now.getTime(), tz })] : []
     ];
+    const common = {
+      maxToolIterations: MAX_TOOL_ITERATIONS,
+      ...fireTools.length ? { tools: fireTools } : {}
+    };
+    if (instant) {
+      return {
+        messages: [
+          // content 原样透传，一个字都不动：带图片的消息本地就是结构化分段
+          // （`[{type:'text'},{type:'image_url'}]`），上游把这个数组整个丢进
+          // /chat/completions 的请求体（amsg-shared 的 buildLlmRequestBody 只做
+          // `messages: llmMessages`，不看 content 的类型）。这里但凡 String() 一下，
+          // 模型收到的就是「[object Object]」而不是那张图。
+          // 每条重新包一层对象只是不把 pack 上那份交出去，content 仍是同一个引用。
+          ...pack.chat.messages.map((m) => ({ role: m.role, content: m.content })),
+          {
+            role: "system",
+            content: buildInstantTimelyBlock({
+              nowMs: ctx.now.getTime(),
+              tz,
+              userTzId: pack.userTzId,
+              targetName: pack.targetName,
+              blocks: [realtimeWorldBlock, renderSelfLogBlock(selfLog, tz), taskListBlock, mcpBlock, scheduleBlock]
+            })
+          }
+        ],
+        ...common,
+        // 用户正盯着「正在输入…」等回复，给足时间把工具循环跑完，别让他重发一遍。
+        totalTimeoutMs: INSTANT_TOTAL_TIMEOUT_MS
+      };
+    }
+    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, {
+      selfLog,
+      taskListBlock,
+      realtimeWorldBlock
+    }) + mcpBlock + scheduleBlock;
     return {
       messages: [{ role: "user", content: prompt }],
-      // 轮次上限显式给一份：worker 要靠同一个数判「这是最后一轮了」（见 onLLMOutput），
-      // 而上游只有内部默认值、没导出常量，各写各的迟早对不上。
-      maxToolIterations: MAX_TOOL_ITERATIONS,
-      // amsg-server 带 agentic-fire-tools feature 的版本起透传给每轮 LLM 请求；
-      // 老 bundle 里不会走到这（tools 是随本次 bundle 一起升上去的）。
-      ...fireTools.length ? { tools: fireTools } : {}
+      ...common
     };
   },
   async onLLMOutput(ctx) {
@@ -8954,11 +9250,10 @@ var amsgHooks = {
       stash.selfLogTexts = decision.pushPayloads.map(
         (p) => typeof p.message === "string" ? p.message : ""
       );
-      const withScheduled = attachScheduledTasks(decision.pushPayloads, stash.scheduledTasks);
-      decision = { ...decision, pushPayloads: withScheduled };
+      let payloads = attachScheduledTasks(decision.pushPayloads, stash.scheduledTasks);
       if (stash.clientTaskId && stash.charId) {
         const budgeted = [];
-        for (const payload of decision.pushPayloads) {
+        for (const payload of payloads) {
           budgeted.push(await offloadOversizedPush(
             payload,
             ctx.writeState,
@@ -8966,8 +9261,26 @@ var amsgHooks = {
             stash.clientTaskId
           ));
         }
-        return { ...decision, pushPayloads: budgeted };
+        payloads = budgeted;
       }
+      if (stash.instant) {
+        const nowMs = Date.now();
+        const ids = {
+          taskRowId: stash.taskRowId,
+          taskUuid: stash.taskUuid,
+          occurrenceMs: stash.occurrenceMs,
+          nowMs,
+          randomId: crypto.randomUUID()
+        };
+        payloads = payloads.map((payload, i) => finalizeInstantPush(payload, i, payloads.length, ids));
+        stash.chatOutbox = await writeChatOutbox(
+          ctx.writeState,
+          stash.charId,
+          stash.chatOutbox,
+          toOutboxEntries(payloads, nowMs)
+        );
+      }
+      return { ...decision, pushPayloads: payloads };
     }
     return decision;
   },
@@ -9045,8 +9358,12 @@ var buildWorkerConfig = (env) => {
     // 单用户自用默认全开；想收紧就把 '*' 换成自己的 SullyOS 站点 origin。
     cors: { origin: "*" },
     // 满血 fire-time hooks（onBeforeFire 现场填槽 + onLLMOutput 分类 +
-    // executeToolCalls 服务端工具循环）；轮数/超时用库默认（5 轮 / 240s）。
+    // executeToolCalls 服务端工具循环）；轮数/超时用库默认（5 轮 / 240s），
+    // 即时对话那条单独把超时抬到 INSTANT_TOTAL_TIMEOUT_MS（onBeforeFire 返回值里给）。
     hooks: amsgHooks,
+    // 认领租期得盖得住最长的那条 fire。库自己按全局 totalTimeoutMs 算，看不见即时对话
+    // 单条抬上去的那份，租约会在它跑完之前过期、下一跳 cron 把同一条又跑一遍。
+    claimLeaseMs: INSTANT_CLAIM_LEASE_MS,
     // 收尾回执 + 过期跳过回执（config 级 hook）。
     // onFireSettled: 无论这次 fire 是发出去了、跳过了还是抛错了都会调一次，self_log
     //   在这里统一落盘（见 amsgFireSettled）。不用 onAfterSend——它只在真发出去那条路
@@ -9185,12 +9502,12 @@ var readServerVersion = async (request, env) => {
   }
 };
 var src_default = {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const pathname = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
     const method = request.method.toUpperCase();
     if (pathname.endsWith("/config-check")) {
       if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
-      return jsonWithCors(200, { success: true, data: inspectWorkerEnv(env) });
+      return jsonWithCors(200, { success: true, data: { ...inspectWorkerEnv(env), instantChat: true } });
     }
     if (pathname.endsWith("/debug")) {
       if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -9215,9 +9532,19 @@ var src_default = {
         error: { code: "WORKER_CONFIG_MISSING", message: report.message, missing: report.missing }
       });
     }
+    if (pathname.endsWith("/instant-chat")) {
+      if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
+      if (method !== "POST") {
+        return jsonWithCors(405, {
+          success: false,
+          error: { code: "METHOD_NOT_ALLOWED", message: "/instant-chat \u53EA\u63A5\u53D7 POST" }
+        });
+      }
+      return handleInstantChat({ request, env, ctx, upstream, json: jsonWithCors });
+    }
     return upstream.fetch(request, env);
   },
-  async scheduled(event, env) {
+  async scheduled(event, env, _ctx) {
     const report = inspectWorkerEnv(env);
     if (!report.ok) {
       console.error(`[amsg] \u5B9A\u65F6\u4EFB\u52A1\u6574\u8F6E\u8DF3\u8FC7\uFF1A${report.message}`);

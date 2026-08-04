@@ -94,8 +94,9 @@ function poisonedSources(overrides: Partial<FeatureSources> = {}): FeatureSource
         apiPresetCount: 2,
         vrIndependentApi: true,
         characters: [],
-        // Worker 地址和共享密钥同样是用户填的，一起塞毒药。
-        amsg2Global: { workerUrl: POISON.url, initializedAt: 1_700_000_000_000 },
+        // Worker 地址和共享密钥同样是用户填的，一起塞毒药。即时对话开关是布尔，
+        // 放个 true 让「即时对话」那一格也走一遍扫毒。
+        amsg2Global: { workerUrl: POISON.url, initializedAt: 1_700_000_000_000, instantChatEnabled: true },
         ...overrides,
     };
 }
@@ -181,6 +182,13 @@ describe('当前功能启用 · 三态不能塌成两态', () => {
         expect(triState(false, false)).toBe('没配');
         // 没配却报开着是自相矛盾的状态，也归到「没配」。
         expect(triState(false, true)).toBe('没配');
+    });
+
+    it('即时对话只报开/关，关着和没配都算关', () => {
+        expect(collectFeatureFlags(poisonedSources()).即时对话).toBe('开');
+        expect(collectFeatureFlags(poisonedSources({
+            amsg2Global: { workerUrl: '', initializedAt: undefined },
+        })).即时对话).toBe('关');
     });
 
     it('填了小红书桥接地址但开关关着 → 配了没开', () => {

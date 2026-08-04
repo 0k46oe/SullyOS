@@ -13,7 +13,9 @@ import worker, {
 } from './index';
 import { MAX_TOOL_ITERATIONS } from './agentic';
 import { MAX_PUSH_PAYLOAD_BYTES } from '@rei-standard/amsg-server/cloudflare';
+import { INSTANT_CLAIM_LEASE_MS, INSTANT_TOTAL_TIMEOUT_MS } from './instantChat';
 import {
+  AMSG_CHAT_OUTBOX_KEY,
   AMSG_FIRE_PACK_KEY,
   AMSG_LAST_SKIP_KEY,
   AMSG_SELF_LOG_KEY,
@@ -22,8 +24,10 @@ import {
   AMSG_SLOT_TASK_INSTRUCTION,
   amsgStateNamespace,
   amsgXhsSessionKey,
+  CHAT_OUTBOX_MAX,
   FIRE_PACK_VERSION,
   packStateValue,
+  parseChatOutbox,
   parseSelfLog,
 } from '../../../utils/amsgFirePack';
 import { AMSG_CHAT_PRESENCE_KEY } from '../../../utils/amsgChatPresence';
@@ -1865,5 +1869,336 @@ describe('/debug — 只读诊断', () => {
     });
     expect(data.storage).toEqual({ reachable: false, error: 'D1Error' });
     expect(JSON.stringify(data)).not.toContain('syntax error');
+  });
+});
+
+// ─── 即时对话（instant chat） ───
+//
+// 这条路和主动消息共用同一套 fire 管线，但语义完全相反：用户刚把话说完、正盯着
+// 「正在输入…」等回复。三道「到点还该不该发」的门（活跃租约、防穿帮闸、本次任务指令）
+// 对它全都不适用，一道没跳过就是「用户发了消息但角色永远不回」；而请求消息要是退回
+// 主动消息模板，出来的东西驴唇不对马嘴，用户还看不出这是坏了。下面每条都对着一种。
+describe('onBeforeFire — 即时对话分支', () => {
+  const CHAT_MESSAGES = [
+    { role: 'system', content: '你是 Nyah。' },
+    { role: 'user', content: '在吗' },
+  ];
+
+  const instantPack = (extra: Record<string, unknown> = {}) => firePackValue(null, {
+    chat: { messages: CHAT_MESSAGES, builtAt: PACK_BUILT_AT },
+    ...extra,
+  });
+
+  /** 即时对话任务：metadata 标 amsgInstantChat，没有 amsgTaskInstruction。 */
+  const instantCtx = (opts: {
+    charRows?: Array<{ key: string; value: string }>;
+    metadata?: Record<string, unknown>;
+  } = {}) => makeCtx({
+    charRows: opts.charRows ?? [
+      { key: AMSG_FIRE_PACK_KEY, value: instantPack() },
+      { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+    ],
+    metadata: {
+      amsgInstantChat: true,
+      amsgMode: 'instant',
+      amsgTaskInstruction: undefined,
+      ...opts.metadata,
+    },
+  });
+
+  it('请求消息 = 客户端打的那串对话原样 + 末尾追加一块时效信息', async () => {
+    const { ctx } = instantCtx();
+    const result = fired(await amsgHooks.onBeforeFire(ctx));
+
+    expect(result.messages).toHaveLength(CHAT_MESSAGES.length + 1);
+    expect(result.messages.slice(0, 2)).toEqual(CHAT_MESSAGES);
+    const appended = result.messages[2];
+    expect(appended.role).toBe('system');
+    // 到点才知道的东西在这一块里：现在几点
+    expect(appended.content).toContain('现在是');
+    // 回归守卫：走模板渲染的话这里会出现主动消息那套措辞，用户刚说的话反而没人答
+    expect(result.messages.map((m) => m.content).join('\n')).not.toContain('本次任务');
+  });
+
+  // 图片消息本地是结构化分段，上游把 onBeforeFire 返回的 messages 整个丢进
+  // /chat/completions 的请求体（amsg-shared 的 buildLlmRequestBody 只写
+  // `messages: llmMessages`，不看 content 的类型）。这里但凡 String() 一下，
+  // 模型收到的就是「[object Object]」——而它照样会答，用户只觉得角色答非所问。
+  it('结构化 content（图片）原样进请求消息，一个字都不动', async () => {
+    const imagePart = { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } };
+    const structured = [
+      { role: 'system', content: '你是 Nyah。' },
+      { role: 'user', content: [{ type: 'text', text: '08:00 [User sent an image]' }, imagePart] },
+    ];
+    const { ctx } = instantCtx({
+      charRows: [
+        { key: AMSG_FIRE_PACK_KEY, value: firePackValue(null, {
+          chat: { messages: structured, builtAt: PACK_BUILT_AT },
+        }) },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+    });
+    const result = fired(await amsgHooks.onBeforeFire(ctx));
+
+    // 逐字相等：不是 [object Object]，也不是被拍平成文字段
+    expect(result.messages.slice(0, 2)).toEqual(structured);
+    const userMessage = result.messages[1] as unknown as { content: unknown[] };
+    expect(Array.isArray(userMessage.content)).toBe(true);
+    expect(userMessage.content[1]).toEqual(imagePart);
+    // 追加的时效块仍然照挂在最后
+    expect(result.messages[2].role).toBe('system');
+    expect(result.messages[2].content).toContain('现在是');
+  });
+
+  it('给足生成时间（库默认 240s 对一轮带工具的对话不够，用户会以为发失败了）', async () => {
+    const { ctx } = instantCtx();
+    const result = await amsgHooks.onBeforeFire(ctx) as { totalTimeoutMs?: number };
+    expect(result.totalTimeoutMs).toBeGreaterThanOrEqual(600_000);
+  });
+
+  it('用户正在热聊也照答（活跃租约那道门是给主动消息让路用的）', async () => {
+    const { ctx } = instantCtx({
+      charRows: [
+        { key: AMSG_CHAT_PRESENCE_KEY, value: presenceValue(NOW.getTime() - 5_000) },
+        { key: AMSG_FIRE_PACK_KEY, value: instantPack() },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+      metadata: { amsgExpirePolicy: 'expire' },
+    });
+    const result = fired(await amsgHooks.onBeforeFire(ctx));
+    expect(result.messages[0]).toEqual(CHAT_MESSAGES[0]);
+  });
+
+  it('防穿帮闸不拦它（「对话往前走了」正是它要回的那句话）', async () => {
+    const anchor = NOW.getTime() - 3600_000;
+    const { ctx } = instantCtx({
+      charRows: [
+        { key: AMSG_FIRE_PACK_KEY, value: firePackValue(anchor + 60_000, {
+          chat: { messages: CHAT_MESSAGES, builtAt: PACK_BUILT_AT },
+        }) },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+      metadata: { amsgAnchorMs: anchor, amsgExpirePolicy: 'expire' },
+    });
+    const result = fired(await amsgHooks.onBeforeFire(ctx));
+    expect(result.messages).toHaveLength(CHAT_MESSAGES.length + 1);
+  });
+
+  it('没有 amsgTaskInstruction 不算异常（即时对话没有「本次任务」这回事）', async () => {
+    const { ctx } = instantCtx();
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toHaveProperty('messages');
+  });
+
+  it('fire_pack 缺 chat 段 → 抛错，绝不退回主动消息模板', async () => {
+    const { ctx } = instantCtx({
+      charRows: [
+        { key: AMSG_FIRE_PACK_KEY, value: firePackValue() },   // 只有模板、没有 chat
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+    });
+    await expect(amsgHooks.onBeforeFire(ctx)).rejects.toThrow('AMSG2_FIRE_STATE_MISSING');
+  });
+
+  it('照常给工具（角色在对话里也能查东西、给自己排后续）', async () => {
+    const { ctx } = makeCtx({
+      charRows: [
+        { key: AMSG_FIRE_PACK_KEY, value: instantPack() },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+      globalRows: [{ key: AMSG_TOOL_CONFIG_KEY, value: mcpToolConfigValue() }],
+      metadata: { amsgInstantChat: true, amsgTaskInstruction: undefined },
+    });
+    // ctx.scheduleTask 存在才教「给自己排下一条」
+    (ctx as any).scheduleTask = async () => ({ created: true, id: 1, uuid: 'u', nextSendAt: 'x' });
+    const result = fired(await amsgHooks.onBeforeFire(ctx));
+    const appended = result.messages[result.messages.length - 1].content;
+    expect(appended).toContain('【外部工具');         // MCP 说明块
+    expect(appended).toContain('search_memory');
+    expect(appended).toContain('给自己排下一条');      // 排程说明块
+    expect(result.tools?.map((t) => t.function.name)).toContain('mcp__search_memory');
+  });
+
+  it('定时任务照旧走模板渲染（没被这个分支带跑）', async () => {
+    const { ctx } = makeCtx({});
+    const result = fired(await amsgHooks.onBeforeFire(ctx));
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0].role).toBe('user');
+    expect(result.messages[0].content).toContain('问问对方吃了没');
+  });
+});
+
+// 推送是会静默丢的：手机换网、系统压制、SW 没醒，用户那边就是「一直在输入中」。
+// outbox 是唯一的补收通道，写晚了（等发送结果）或者写漏了都等于没有。
+describe('即时对话的收件兜底 outbox', () => {
+  const CLIENT_TASK_ID = 'client-instant-1';
+  const CHAT_MESSAGES = [{ role: 'user', content: '在吗' }];
+
+  const makeStore = (instant: boolean) => {
+    const rows = new Map<string, string>([
+      [AMSG_FIRE_PACK_KEY, firePackValue(null, instant
+        ? { chat: { messages: CHAT_MESSAGES, builtAt: PACK_BUILT_AT } }
+        : {})],
+      [AMSG_TOOL_PACK_KEY, toolPackValue],
+    ]);
+    const readState = vi.fn(async (namespace: string) => (
+      namespace.startsWith('amsg:char:')
+        ? [...rows].map(([key, value]) => ({ key, value }))
+        : [{ key: AMSG_TOOL_CONFIG_KEY, value: toolConfigValue }]
+    ));
+    const writeState = vi.fn(async (
+      _namespace: string,
+      entries: Array<{ key: string; value: string | null }>,
+    ) => {
+      for (const entry of entries) {
+        if (entry.value === null) rows.delete(entry.key);
+        else rows.set(entry.key, entry.value);
+      }
+      return { upserted: entries.length, skipped: 0, deleted: 0 };
+    });
+    return { rows, readState, writeState, outbox: () => parseChatOutbox(rows.get(AMSG_CHAT_OUTBOX_KEY)) };
+  };
+
+  const runFire = async (store: ReturnType<typeof makeStore>, instant: boolean, llmOutput: string) => {
+    const scratch: Record<string, unknown> = {};
+    const metadata = {
+      charId: CHAR_ID,
+      amsgClientTaskId: CLIENT_TASK_ID,
+      amsgMode: instant ? 'instant' : 'auto',
+      ...(instant ? { amsgInstantChat: true } : { amsgTaskInstruction: '想到什么说什么' }),
+    };
+    await amsgHooks.onBeforeFire({
+      task: {
+        id: 42, uuid: TASK_UUID, contactName: 'Nyah', recurrenceType: 'none',
+        nextSendAt: '2026-07-25T12:00:00.000Z', metadata,
+      },
+      userId: 'u1',
+      readState: store.readState,
+      writeState: store.writeState,
+      now: NOW,
+      scratch,
+    } as any);
+    return await amsgHooks.onLLMOutput({
+      sessionId: 'sess_task_42@1', taskId: 42, taskUuid: TASK_UUID,
+      llmResponse: {}, llmOutputText: llmOutput, contactName: 'Nyah',
+      metadata, scratch, writeState: store.writeState,
+    } as any) as any;
+  };
+
+  it('生成完就写进 chat_outbox，和真发出去的那份 id 逐字一致', async () => {
+    const store = makeStore(true);
+    const decision = await runFire(store, true, '在的。怎么啦？');
+    expect(decision.decision).toBe('finish');
+
+    const outbox = store.outbox()!;
+    expect(outbox.entries).toHaveLength(decision.pushPayloads.length);
+    // 回归守卫：outbox 里的 messageId 跟推送上的对不上，客户端补收时会把同一条再入库一遍
+    expect(outbox.entries.map((e: any) => e.messageId))
+      .toEqual(decision.pushPayloads.map((p: any) => p.messageId));
+    expect(outbox.entries[0].messageId)
+      .toBe(`msg_task_42@${Date.parse('2026-07-25T12:00:00.000Z')}_hook_0`);
+    expect(outbox.entries[0].payload).toEqual(decision.pushPayloads[0]);
+  });
+
+  it('定时任务不写 outbox（那条路的产物在任务列表里查得到）', async () => {
+    const store = makeStore(false);
+    const decision = await runFire(store, false, '在的。');
+    expect(decision.decision).toBe('finish');
+    expect(store.outbox()).toBeNull();
+    expect(store.rows.has(AMSG_CHAT_OUTBOX_KEY)).toBe(false);
+  });
+
+  // 用户正盯着窗口等这条回复时，锁屏横幅是纯打扰（页面自己会上屏）；窗口不可见时又
+  // 必须弹。SW 的 shouldRenderNotification 按 notification.show 分这两种，worker 表态。
+  it('即时对话的推送标 when-hidden，outbox 里那份也带着', async () => {
+    const store = makeStore(true);
+    const decision = await runFire(store, true, '在的。怎么啦？');
+    for (const push of decision.pushPayloads) {
+      expect((push.notification as any).show).toBe('when-hidden');
+      // 横幅文案还在：show 只是加一个字段，不是把 notification 换掉
+      expect((push.notification as any).body).toBeTruthy();
+    }
+    expect((store.outbox()!.entries[0].payload as any).notification.show).toBe('when-hidden');
+  });
+
+  it('定时任务的推送不标 show（主动消息前台可见时更该弹）', async () => {
+    const store = makeStore(false);
+    const decision = await runFire(store, false, '在的。');
+    for (const push of decision.pushPayloads) {
+      expect(push.notification).toBeTruthy();
+      expect((push.notification as any).show).toBeUndefined();
+    }
+  });
+
+  it('连聊几轮后只留最近 CHAT_OUTBOX_MAX 条', async () => {
+    const store = makeStore(true);
+    for (let i = 0; i < CHAT_OUTBOX_MAX + 2; i += 1) {
+      // 每轮换一次触发时刻，messageId 才跟着变（同一次触发重跑是要覆盖的）
+      const scratch: Record<string, unknown> = {};
+      const metadata = {
+        charId: CHAR_ID, amsgClientTaskId: CLIENT_TASK_ID,
+        amsgMode: 'instant', amsgInstantChat: true,
+      };
+      await amsgHooks.onBeforeFire({
+        task: {
+          id: 40 + i, uuid: TASK_UUID, contactName: 'Nyah', recurrenceType: 'none',
+          nextSendAt: '2026-07-25T12:00:00.000Z', metadata,
+        },
+        userId: 'u1', readState: store.readState, writeState: store.writeState,
+        now: NOW, scratch,
+      } as any);
+      await amsgHooks.onLLMOutput({
+        sessionId: `sess_${i}`, taskId: 40 + i, taskUuid: TASK_UUID,
+        llmResponse: {}, llmOutputText: `第 ${i} 轮`, contactName: 'Nyah',
+        metadata, scratch, writeState: store.writeState,
+      } as any);
+    }
+    expect(store.outbox()!.entries).toHaveLength(CHAT_OUTBOX_MAX);
+  });
+});
+
+describe('即时对话的接线', () => {
+  const fullEnv = {
+    AMSG_MASTER_KEY: 'a'.repeat(64),
+    VAPID_EMAIL: 'mailto:a@b.c',
+    VAPID_PUBLIC_KEY: 'pub',
+    VAPID_PRIVATE_KEY: 'priv',
+    DB: { prepare: () => {} },
+  } as any;
+
+  const call = (url: string, init: RequestInit = {}, env: any = fullEnv) =>
+    (worker as any).fetch(new Request(url, init), env, { waitUntil: () => {} });
+
+  it('/config-check 带包装层能力标志（设置页拿它当唯一的版本门槛）', async () => {
+    const response = await call('https://w.example/config-check');
+    const body = await response.json();
+    expect(body.data.instantChat).toBe(true);
+  });
+
+  it('/instant-chat 的预检要放行，否则带自定义头的正式请求根本发不出去', async () => {
+    const response = await call('https://w.example/instant-chat', { method: 'OPTIONS' });
+    expect(response.status).toBe(204);
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
+  });
+
+  it('/instant-chat 只接受 POST', async () => {
+    const response = await call('https://w.example/instant-chat', { method: 'GET' });
+    expect(response.status).toBe(405);
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
+  });
+
+  it('配置不全时 /instant-chat 也回 503（不进上游、不半路落状态）', async () => {
+    const response = await call(
+      'https://w.example/instant-chat',
+      { method: 'POST', body: '{}' },
+      { AMSG_MASTER_KEY: '', DB: undefined } as any,
+    );
+    expect(response.status).toBe(503);
+    expect((await response.json()).error.code).toBe('WORKER_CONFIG_MISSING');
+  });
+
+  it('认领租期盖得住最长的那条 fire（盖不住 = 同一条被跑两遍，用户收到两份回复）', () => {
+    const cfg = buildWorkerConfig(fullEnv);
+    expect(cfg.claimLeaseMs).toBe(INSTANT_CLAIM_LEASE_MS);
+    expect(cfg.claimLeaseMs).toBeGreaterThan(INSTANT_TOTAL_TIMEOUT_MS);
   });
 });

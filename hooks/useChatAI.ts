@@ -46,6 +46,7 @@ import { getPendingTasks, hasActiveAiTask, isAmsg2EnabledForChar } from '../util
 import { buildAmsg2TaskContextText, collectAmsg2TaskContext } from '../utils/amsg2TaskContext';
 import { resolveCharTimeZone } from '../utils/timezone';
 import { AMSG2_SUPPRESSED_TRACE } from '../utils/amsg2InstantConflict';
+import { isInstantChatReady, sendInstantChatTurn } from '../utils/amsgInstantChat';
 import { appendInstantTraceEntry } from '../utils/instantTraceLog';
 import { AMSG2_TOOLS, AMSG2_TOOL_NAMES, createAmsg2ToolSession, executeAmsg2Tool, isAmsg2GlobalReady } from '../utils/amsg2ToolBridge';
 import { shouldSendThinkingParams } from '../utils/thinkingGate';
@@ -728,6 +729,9 @@ export const useChatAI = ({
         // 本轮里角色自己新排出来的任务。排程现状块每轮现算时靠它把这些点名标出来——不标
         // 的话角色分不清清单上哪条是自己刚排的，回头又排一条一模一样的。
         const amsg2CreatedThisTurn = new Set<string>();
+        // 这一轮走的是即时对话、并且云端已经受理：收尾时不要再打脏重传一次 fire_pack。
+        // POST 上去的那份就是权威的（还多带了 chat 段），再传一遍是同样内容白走一趟网络。
+        let instantChatAccepted = false;
         // amsg2 工具在三个工具循环（麦当劳 / 瑞幸 / 通用）里都可能出现，执行方式完全一样，
         // 只有各自的 loopMessages 不同。
         const runAmsg2ToolCall = async (tc: any, fname: string, args: any, loopMessages: any[]) => {
@@ -1128,6 +1132,62 @@ export const useChatAI = ({
                     announceChatGen(CHAT_GEN_EVENTS.emotionEnd, { charId: char.id, charName: char.name });
                 }
                 return;
+            }
+
+            // ─── 即时对话（主动消息 2.0 云端生成）分支 ───
+            // 和上面的 Instant Push 对称：这一轮的上下文 + 任务一个 POST 上云，云端跑完
+            // 走推送回来（收件箱同一条管线入库），客户端发完那一刻就自由了。
+            // 两个开关同时开着时 Instant Push 先走（它在上面已经 return），设置页那道门
+            // 也不允许同时打开，这里不再重复判定。
+            //
+            // MCP 刻意不在排除名单里：worker fire 时自己解析 tool_config、自己跑后台
+            // MCP（这次 POST 顺手把配置传上去了），云端答得了。排掉它的话，只要全局配着
+            // 一台 enabled 的 MCP 服务器，即时对话就永远静默走回本地——设置页亮着
+            // 「已开启」、界面毫无异样，正是 instant push 静默分流那个坑的复刻。
+            if (await isInstantChatReady()) {
+                // 瑞幸/麦当劳点单是客户端交互式循环（选城市、确认单），云端接不了手，
+                // 这一轮只能留在本地跑（否决后不 return，落回下面的本地路径）。
+                // 但「开着即时对话却走了本地」不能无声无息：console + trace 双写，
+                // 调试面板能看到这一轮为什么没上云。
+                const instantChatVeto = payload.flags.luckinChatActive ? 'luckin-chat'
+                    : payload.flags.mcdActive ? 'mcd'
+                        : payload.flags.luckinActive ? 'luckin' : null;
+                if (instantChatVeto) {
+                    console.warn(`[AmsgInstantChat] 这一轮没上云（${instantChatVeto} 点单流程需要客户端交互），本地生成`);
+                    appendInstantTraceEntry({
+                        ts: new Date().toISOString(),
+                        event: 'instant-chat-veto',
+                        charId: char.id,
+                        reason: instantChatVeto,
+                    });
+                } else {
+                    const instantChatResult = await sendInstantChatTurn({
+                        char,
+                        // 云端要发给模型的就是本地这一份，一个字不改（见 fire_pack 的 chat 段）。
+                        chatMessages: fullMessages as Array<{ role: string; content: unknown }>,
+                        // 凭据用本地这一轮的那份：换成别的等于同一句话由不同模型来答，而用户看不出来。
+                        api: { baseUrl: effectiveApi.baseUrl, apiKey: effectiveApi.apiKey, model: effectiveApi.model },
+                        maxTokens: 8000,
+                        userProfile, groups, realtimeConfig,
+                    });
+                    if (instantChatResult.ok) {
+                        // 这次 POST 已经把权威的那份 fire_pack 传上去了，收尾不必再打脏重传一遍。
+                        instantChatAccepted = true;
+                        // 情绪评估仍在本地跑（副 API，fire & forget）：云端这条链路没有评估这一步，
+                        // 不在这儿发一枪的话，开了即时对话的用户情绪底色和意识流会**悄悄停更**。
+                        // 时机与本地路径一致——都是在主回复出结果之前、用同一份 cleanedApiMessages。
+                        fireLocalEmotionEval?.();
+                    } else {
+                        // 没发出去就是没发出去：明确落一条系统消息 + 弹错，用户可以直接重发。
+                        // **绝不静默退回本地生成** —— 静默分流那种查无可查的坑踩过一次就够了。
+                        const reason = instantChatResult.error || '未知错误';
+                        await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[${reason}]` });
+                        setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
+                        if (showError) showError('即时对话发送失败', reason);
+                        else addToast(reason, 'error');
+                    }
+                    return;
+                }
             }
 
             // 流式预览：仅在用户开了 stream、且非工具/双语模式时启用。
@@ -1761,10 +1821,14 @@ export const useChatAI = ({
             // 本轮角色自己排过任务时 char 快照上的清单已经过期，得用工具会话里的最新那份
             // 打脏——否则本轮新建的首个任务过不了 markDirty 的 hasActiveAiTask 门，
             // fire_pack 会停在排程那一刻、少掉角色排完之后说的这段。
-            markAmsgStateDirty({
-                char: { ...char, activeMsg2Config: amsg2Session.getConfig() },
-                userProfile, groups, realtimeConfig,
-            });
+            // 即时对话受理成功那一轮跳过：那次 POST 已经把这一轮的 fire_pack（还多带了
+            // chat 段）传上去了，这里再打脏就是同样的内容再走一趟网络。
+            if (!instantChatAccepted) {
+                markAmsgStateDirty({
+                    char: { ...char, activeMsg2Config: amsg2Session.getConfig() },
+                    userProfile, groups, realtimeConfig,
+                });
+            }
 
             // Memory Palace — 后台缓冲区处理（不阻塞 UI，内部有并发锁）
             // 使用全局配置（memoryPalaceConfig）。lightLLM 未配置时回退主 apiConfig；

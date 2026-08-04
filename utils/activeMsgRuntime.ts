@@ -18,6 +18,17 @@ import { loadMusicHooks } from '../context/MusicContext';
 import type { XhsNote } from './realtimeContext';
 import { appendDevDebugInstantPushLog, appendDevDebugLog, isCaptureEnabled, makeDebugLogger } from './devDebug';
 import { getLastRealUserMessageAt, shouldExpireFire } from './amsg2ExpireGuard';
+import {
+  AMSG_INSTANT_CHAT_PENDING_EVENT,
+  clearInstantChatPending,
+  drainChatOutboxForChar,
+  drainChatOutboxForPending,
+  failInstantChatPending,
+  getInstantChatPending,
+  listExpiredInstantChatPendings,
+  listInstantChatPendings,
+  nextInstantChatDeadline,
+} from './amsgInstantChat';
 import { pruneStaleTasks } from './amsg2Tasks';
 import { appendInstantTraceEntry } from './instantTraceLog';
 import { trackEvent } from './analytics';
@@ -1313,6 +1324,10 @@ const flushInboxToChatImpl = async () => {
       messageId: message.messageId,
       charId: message.charId,
     });
+
+    // 即时对话的「正在输入…」在这里熄：这个角色开口了，这一轮就算收到了。
+    // 不挑消息类型——欠着的那条回复可能被拆成好几段，第一段到了指示灯就该灭。
+    if (clearInstantChatPending(message.charId)) armInstantChatWatchdog();
   }
 };
 
@@ -1380,6 +1395,65 @@ const backfillReasoningSafely = async (sessionId?: string, charId?: string): Pro
   } catch (e) {
     console.warn('[ActiveMsg] backfill reasoning failed', sessionId, e);
   }
+};
+
+// ─── 即时对话：补收兜底 + 超时看门狗 ──────────────────────────────────────────
+// 推送是会静默丢的（换网、系统压制、SW 没醒），用户那边的表现就是「一直在输入中」。
+// 云端每轮生成完都会在 client_state 留一份推送副本（chat_outbox），这里在三个时机去拉：
+// 冷启动、回到前台、以及「正在输入」快到 5 分钟的时候。**只有真欠着回复时才拉**——
+// 没有待收记录就一个请求都不发，不给所有人加一条轮询。
+
+/** 拉一次 outbox 并把补收到的冲刷进聊天流。返回补收了几条。 */
+const drainInstantChatOutboxAndFlush = async (charId?: string): Promise<number> => {
+  try {
+    const written = charId
+      ? await drainChatOutboxForChar(charId)
+      : await drainChatOutboxForPending();
+    if (written > 0) await flushInboxToChat();
+    return written;
+  } catch (e) {
+    log.warn('即时对话补收失败（等下一次时机再试）', { charId, error: e });
+    return 0;
+  }
+};
+
+let instantChatWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 把看门狗排到「最早那条待收记录到 5 分钟」的时刻。没有待收记录就直接撤掉定时器。
+ *
+ * 每次待收记录变动都重排一次（受理 / 收到回复 / 判失败都会调）。用一个定时器而不是
+ * 周期轮询：绝大多数时候一条待收记录都没有，不该为此每分钟醒一次。
+ */
+const armInstantChatWatchdog = () => {
+  if (instantChatWatchdogTimer != null) {
+    clearTimeout(instantChatWatchdogTimer);
+    instantChatWatchdogTimer = null;
+  }
+  const deadline = nextInstantChatDeadline(Date.now());
+  if (deadline == null) return;
+  instantChatWatchdogTimer = setTimeout(() => {
+    instantChatWatchdogTimer = null;
+    void runInstantChatTimeoutCheck();
+  }, Math.max(0, deadline - Date.now()) + 1_000);
+};
+
+/**
+ * 超时判定：**先拉一次 outbox 再说**。到点没收到最常见的原因是推送丢了而不是生成失败，
+ * 不拉就报失败的话，用户会为一条其实已经生成好的回复重发一遍（再烧一轮 LLM）。
+ * 拉完还是没有，才销账 + 在聊天流里留一句说明。
+ */
+export const runInstantChatTimeoutCheck = async (): Promise<void> => {
+  const expired = listExpiredInstantChatPendings(Date.now());
+  for (const pending of expired) {
+    await drainInstantChatOutboxAndFlush(pending.charId);
+    // 补收那一步如果把回复放进来了，flush 里已经销账了——再查一次现状，别把刚到的判成失败。
+    if (getInstantChatPending(pending.charId)?.uuid === pending.uuid) {
+      log.warn('即时对话超时未收到回复（已提示用户可重发）', { charId: pending.charId, uuid: pending.uuid });
+      await failInstantChatPending(pending.charId);
+    }
+  }
+  armInstantChatWatchdog();
 };
 
 // ─── 订阅变化标记（SW 写，这里读/清）────────────────────────────────────────
@@ -1565,12 +1639,20 @@ export const ActiveMsgRuntime = {
         // 先 await flush 落库 round-1 旁白, 再跑 runner 触发 round-2, 避免 "B+A".
         void (async () => {
           await flushInboxToChat();
+          // 即时对话还欠着回复的话，顺手拉一次云端副本：后台期间推送丢了，这是唯一的补收时机。
+          // 没欠着就一个请求都不发（drainChatOutboxForPending 自己会空转返回）。
+          void drainInstantChatOutboxAndFlush();
           void drainPendingDiaries(loadRealtimeConfigFromLocalStorage(), (charId) => {
             window.dispatchEvent(new CustomEvent('active-msg-progress', { detail: { charId } }));
           });
           void runPendingToolCallsSafely();
         })();
       });
+    }
+
+    // 受理一轮即时对话之后（useChatAI 那边写记录 + 广播），把看门狗重排到新的 5 分钟上。
+    if (typeof window !== 'undefined') {
+      window.addEventListener(AMSG_INSTANT_CHAT_PENDING_EVENT, () => armInstantChatWatchdog());
     }
 
     // 订阅自检兜底：后台期间 SW 收到 pushsubscriptionchange 写了标记、而通知丢失
@@ -1582,6 +1664,14 @@ export const ActiveMsgRuntime = {
     // 触发 round-2, 保证冷启动恢复时旁白也排在 round-2 回复之前.
     await flushInboxToChat();
     await runPendingToolCallsSafely();
+    // 上次会话发出去、回来前进程就没了的那一轮：指示灯靠 localStorage 记录挂回来，
+    // 内容靠这一拉补回来；已经超时的那几条在这里直接判失败（超时判定自带一次补收）。
+    if (listInstantChatPendings().length > 0) {
+      void (async () => {
+        await drainInstantChatOutboxAndFlush();
+        await runInstantChatTimeoutCheck();
+      })();
+    }
     void drainPendingDiaries(loadRealtimeConfigFromLocalStorage(), (charId) => {
       window.dispatchEvent(new CustomEvent('active-msg-progress', { detail: { charId } }));
     });

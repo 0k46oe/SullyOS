@@ -32,9 +32,11 @@ import {
 import { stripReasoningTags } from '@rei-standard/amsg-shared';
 import type { UserProfile } from '../../../types';
 import {
+  AMSG_CHAT_OUTBOX_KEY,
   AMSG_FIRE_PACK_KEY,
   AMSG_LAST_SKIP_KEY,
   AMSG_SELF_LOG_KEY,
+  type AmsgChatOutbox,
   type AmsgLastSkip,
   type AmsgSelfLog,
   type AmsgTzRef,
@@ -44,9 +46,11 @@ import {
   appendSelfLogTask,
   createSelfLog,
   describeFirePackVersion,
+  parseChatOutbox,
   parseFirePack,
   parseSelfLog,
   renderFirePack,
+  renderSelfLogBlock,
   selfLogMatchesPack,
   unpackStateValue,
 } from '../../../utils/amsgFirePack';
@@ -106,6 +110,17 @@ import {
   processLLMRound,
   type FireSessionState,
 } from './agentic';
+import {
+  buildInstantTimelyBlock,
+  finalizeInstantPush,
+  handleInstantChat,
+  INSTANT_CLAIM_LEASE_MS,
+  INSTANT_TOTAL_TIMEOUT_MS,
+  isInstantChatTask,
+  toOutboxEntries,
+  writeChatOutbox,
+  type InstantChatExecutionCtx,
+} from './instantChat';
 import type { ActiveMsg2TaskRecord } from '../../../types';
 import { createHybridPushTransport, isFcmConfigured, type NativeFcmEnv } from './nativeFcm';
 
@@ -279,6 +294,13 @@ interface FireStash {
    * 它读到的那首歌，onLLMOutput 把它冻进 directive 带给客户端（见 agentic.attachSceneSong）。
    */
   sceneSong: { id?: number; name: string; artists: string } | null;
+  /** 这条任务是不是即时对话（用户刚发完消息在等回复）；决定要不要写 outbox。 */
+  instant: boolean;
+  /**
+   * 角色当前的收件兜底 outbox（onBeforeFire 顺手读进来，发完在它上面追加写回）。
+   * 不是即时对话时一直是 null——那条路的产物有任务列表可查，不需要兜底。
+   */
+  chatOutbox: AmsgChatOutbox | null;
 }
 
 const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash | undefined =>
@@ -817,6 +839,11 @@ export const amsgHooks = {
     const policy = typeof taskMeta.amsgExpirePolicy === 'string'
       ? taskMeta.amsgExpirePolicy : undefined;
 
+    // 即时对话：用户刚把话说完、正盯着「正在输入…」等回复。下面三道门问的都是
+    // 「主动消息到点还该不该发」——用户正在聊天所以让路、对话已经往前走所以作废、
+    // 这次任务的方向是什么——对「回一句用户刚说的话」全都不适用，整段跳过。
+    const instant = isInstantChatTask(taskMeta);
+
     // 同角色活跃会话租约：一轮对话生成期间客户端每 15s 续租，45s TTL。
     // 这是 worker 防通知的第一道快速门；缺失/过期/坏数据就继续走 fire_pack 规则。
     // 保持在 fire_pack 检查之前：用户正在聊天时应该直接 skip，既省一次状态读，
@@ -824,7 +851,7 @@ export const amsgHooks = {
     const presence = parseAmsgChatPresence(
       charRows.find((r) => r.key === AMSG_CHAT_PRESENCE_KEY)?.value,
     );
-    if (policy === 'expire' && isFreshChatPresence(presence, charId, ctx.now.getTime())) {
+    if (!instant && policy === 'expire' && isFreshChatPresence(presence, charId, ctx.now.getTime())) {
       console.log('[amsg:expire-skip]', {
         taskId: ctx.task.id,
         reason: 'active-chat-presence',
@@ -848,6 +875,13 @@ export const amsgHooks = {
     // 读的是上游 amsg-server 库的版本号，只改 SullyOS 自己这份 worker 代码时它不会亮。
     // 面板上的 lastError 是用户唯一能看到的线索，得直接说出该做什么。
     if (!pack) throw fail(`fire_pack 解析失败：${describeFirePackVersion(packJson)}`);
+
+    // 即时对话缺 chat 段 = 云端状态和任务对不上（客户端只传了主动消息那半份）。
+    // 硬失败，绝不退回模板渲染：拿「到点主动找人说话」的提示词去答用户刚说的话，
+    // 出来的东西驴唇不对马嘴，而用户完全看不出这是坏了还是角色就这样。
+    if (instant && !pack.chat) {
+      throw fail('即时对话任务的 fire_pack 里没有 chat 段（云端状态没跟上）');
+    }
 
     // 本次触发时刻：任务行 next_send_at（NOT NULL，buildHookTask 已摊平提供）。防穿帮闸的
     // 循环判定要拿它当窗口锚点，之后又经 scratch 透传给每条 push 的 metadata.amsgOccurrenceMs
@@ -877,7 +911,7 @@ export const amsgHooks = {
       nowMs: ctx.now.getTime(),
       occurrenceMs,
     };
-    if (shouldExpireFire(expireInput)) {
+    if (!instant && shouldExpireFire(expireInput)) {
       console.log('[amsg:expire-skip]', { taskId: ctx.task.id, ...expireInput });
       await recordSkip(ctx, charId, 'conversation-moved-on', occurrenceMs);
       return { skip: true } as const;
@@ -885,7 +919,8 @@ export const amsgHooks = {
 
     // 任务指令缺失（开发期旧格式任务）：不能用默认 auto 指令凑一个渲染——那会把
     // prompted 任务的方向偷换掉，发出去的内容和用户当初排的不是一回事。
-    if (typeof taskMeta.amsgTaskInstruction !== 'string') {
+    // 即时对话没有「本次任务」这回事，方向就是回用户刚说的那句话。
+    if (!instant && typeof taskMeta.amsgTaskInstruction !== 'string') {
       throw fail('任务 metadata 缺 amsgTaskInstruction（旧格式任务）');
     }
 
@@ -964,6 +999,11 @@ export const amsgHooks = {
       // 跟下面 renderFirePack 填「你此刻在听」用的是同一个时刻、同一份 scene、同一个种子
       // （resolveFireSceneSong 与 renderFireSceneBlock 共用判定），冻的必然是正文里那首。
       sceneSong: resolveFireSceneSong(pack.scene, ctx.now.getTime(), tz),
+      instant,
+      // 顺手读进来：发完要在它上面追加写回，这里不读的话 onLLMOutput 得为它单独查一次库。
+      chatOutbox: instant
+        ? parseChatOutbox(charRows.find((r) => r.key === AMSG_CHAT_OUTBOX_KEY)?.value)
+        : null,
     } satisfies FireStash;
 
     // 「你还挂着这些排程」：客户端记录的（打包那一刻的快照）+ 角色自己在之前几次 fire 里
@@ -987,34 +1027,71 @@ export const amsgHooks = {
       writeState: ctx.writeState,
     });
 
-    // fire_pack v3：「本次任务」指令随任务 metadata 走，这里填槽。
-    // MCP 块拼在渲染好的 prompt 之后（同一条 user 消息）。
-    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, {
-      selfLog,
-      taskListBlock,
-      realtimeWorldBlock,
-    })
-      + (mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? 'native' : 'text' }) : '')
-      // 「给自己排下一条」的说明。跟 MCP 共用一个 native/text 判断：用户的中转拒 tools 时
-      // 两边都得改教正文协议，不然一边声明成 tools、一边教语法，模型会两种都写一遍。
-      // 时间上下文让 send_at 的示例是「明天这个点」的裸墙钟，别再教模型写 offset。
-      + (canSelfSchedule
-        ? buildFireScheduleBlock(mcpNative ? 'native' : 'text', { nowMs: ctx.now.getTime(), tz })
-        : '');
+    // MCP 说明块 / 「给自己排下一条」说明块：两条路都要，只是挂的位置不同
+    // （主动消息接在渲染好的 prompt 后面，即时对话拼进末尾追加的那个 system 块）。
+    const mcpBlock = mcpResolve
+      ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? 'native' : 'text' })
+      : '';
+    // 跟 MCP 共用一个 native/text 判断：用户的中转拒 tools 时两边都得改教正文协议，
+    // 不然一边声明成 tools、一边教语法，模型会两种都写一遍。
+    // 时间上下文让 send_at 的示例是「明天这个点」的裸墙钟，别再教模型写 offset。
+    const scheduleBlock = canSelfSchedule
+      ? buildFireScheduleBlock(mcpNative ? 'native' : 'text', { nowMs: ctx.now.getTime(), tz })
+      : '';
+
     const fireTools = [
       ...(mcpResolve && mcpNative ? buildMcpFireTools(mcpResolve) : []),
       ...(canSelfSchedule && mcpNative
         ? [buildFireScheduleTool({ nowMs: ctx.now.getTime(), tz })]
         : []),
     ];
+    // 轮次上限显式给一份：worker 要靠同一个数判「这是最后一轮了」（见 onLLMOutput），
+    // 而上游只有内部默认值、没导出常量，各写各的迟早对不上。
+    // tools 由 amsg-server 带 agentic-fire-tools feature 的版本起透传给每轮 LLM 请求。
+    const common = {
+      maxToolIterations: MAX_TOOL_ITERATIONS,
+      ...(fireTools.length ? { tools: fireTools } : {}),
+    };
+
+    // 即时对话：请求消息就是客户端本地生成会发出去的那一串，末尾追加一块时效信息。
+    // 不走模板渲染——那是「到点主动找人说话」的提示词，拿它答用户刚说的话必然跑偏。
+    if (instant) {
+      return {
+        messages: [
+          // content 原样透传，一个字都不动：带图片的消息本地就是结构化分段
+          // （`[{type:'text'},{type:'image_url'}]`），上游把这个数组整个丢进
+          // /chat/completions 的请求体（amsg-shared 的 buildLlmRequestBody 只做
+          // `messages: llmMessages`，不看 content 的类型）。这里但凡 String() 一下，
+          // 模型收到的就是「[object Object]」而不是那张图。
+          // 每条重新包一层对象只是不把 pack 上那份交出去，content 仍是同一个引用。
+          ...pack.chat!.messages.map((m) => ({ role: m.role, content: m.content })),
+          {
+            role: 'system' as const,
+            content: buildInstantTimelyBlock({
+              nowMs: ctx.now.getTime(),
+              tz,
+              userTzId: pack.userTzId,
+              targetName: pack.targetName,
+              blocks: [realtimeWorldBlock, renderSelfLogBlock(selfLog, tz), taskListBlock, mcpBlock, scheduleBlock],
+            }),
+          },
+        ],
+        ...common,
+        // 用户正盯着「正在输入…」等回复，给足时间把工具循环跑完，别让他重发一遍。
+        totalTimeoutMs: INSTANT_TOTAL_TIMEOUT_MS,
+      };
+    }
+
+    // fire_pack v3：「本次任务」指令随任务 metadata 走，这里填槽。
+    // MCP 块拼在渲染好的 prompt 之后（同一条 user 消息）。
+    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction as string, {
+      selfLog,
+      taskListBlock,
+      realtimeWorldBlock,
+    }) + mcpBlock + scheduleBlock;
     return {
       messages: [{ role: 'user' as const, content: prompt }],
-      // 轮次上限显式给一份：worker 要靠同一个数判「这是最后一轮了」（见 onLLMOutput），
-      // 而上游只有内部默认值、没导出常量，各写各的迟早对不上。
-      maxToolIterations: MAX_TOOL_ITERATIONS,
-      // amsg-server 带 agentic-fire-tools feature 的版本起透传给每轮 LLM 请求；
-      // 老 bundle 里不会走到这（tools 是随本次 bundle 一起升上去的）。
-      ...(fireTools.length ? { tools: fireTools } : {}),
+      ...common,
     };
   },
 
@@ -1131,20 +1208,39 @@ export const amsgHooks = {
 
       // 角色这次给自己排的任务，随最后一条 push 带回客户端认领——不然它们只活在 D1 里，
       // 面板看不到、用户也没法取消。任务本身照常触发，客户端上线补进清单即可。
-      const withScheduled = attachScheduledTasks(decision.pushPayloads, stash.scheduledTasks);
-      decision = { ...decision, pushPayloads: withScheduled };
+      let payloads = attachScheduledTasks(decision.pushPayloads, stash.scheduledTasks);
 
       // 发之前按真实字节预算过一遍：装不下的 XHS 会话数据旁路存起来，push 只留引用键。
       // clientTaskId 当存储键（每任务一份、下次触发覆盖），缺了就没法旁路——那时超限会
       // 由库抛 PUSH_PAYLOAD_TOO_LARGE，照样不会静默丢消息。
       if (stash.clientTaskId && stash.charId) {
         const budgeted = [];
-        for (const payload of decision.pushPayloads) {
+        for (const payload of payloads) {
           budgeted.push(await offloadOversizedPush(
             payload, ctx.writeState, stash.charId, stash.clientTaskId));
         }
-        return { ...decision, pushPayloads: budgeted };
+        payloads = budgeted;
       }
+
+      // 即时对话的收件兜底：**不论 push 发得出去发不出去**都在这里留一份。
+      // push 静默丢失（换网、系统压制、SW 没醒）正是要兜的那件事，等发送结果再写就晚了。
+      // 信封先按库的同一套规则补齐，库那边「没有才补」，所以 outbox 和真发出去的逐字一致。
+      if (stash.instant) {
+        const nowMs = Date.now();
+        const ids = {
+          taskRowId: stash.taskRowId,
+          taskUuid: stash.taskUuid,
+          occurrenceMs: stash.occurrenceMs,
+          nowMs,
+          randomId: crypto.randomUUID(),
+        };
+        payloads = payloads.map((payload, i) =>
+          finalizeInstantPush(payload, i, payloads.length, ids));
+        stash.chatOutbox = await writeChatOutbox(
+          ctx.writeState, stash.charId, stash.chatOutbox, toOutboxEntries(payloads, nowMs));
+      }
+
+      return { ...decision, pushPayloads: payloads };
     }
 
     return decision;
@@ -1271,8 +1367,12 @@ export const buildWorkerConfig = (env: Env) => {
     // 单用户自用默认全开；想收紧就把 '*' 换成自己的 SullyOS 站点 origin。
     cors: { origin: '*' },
     // 满血 fire-time hooks（onBeforeFire 现场填槽 + onLLMOutput 分类 +
-    // executeToolCalls 服务端工具循环）；轮数/超时用库默认（5 轮 / 240s）。
+    // executeToolCalls 服务端工具循环）；轮数/超时用库默认（5 轮 / 240s），
+    // 即时对话那条单独把超时抬到 INSTANT_TOTAL_TIMEOUT_MS（onBeforeFire 返回值里给）。
     hooks: amsgHooks,
+    // 认领租期得盖得住最长的那条 fire。库自己按全局 totalTimeoutMs 算，看不见即时对话
+    // 单条抬上去的那份，租约会在它跑完之前过期、下一跳 cron 把同一条又跑一遍。
+    claimLeaseMs: INSTANT_CLAIM_LEASE_MS,
     // 收尾回执 + 过期跳过回执（config 级 hook）。
     // onFireSettled: 无论这次 fire 是发出去了、跳过了还是抛错了都会调一次，self_log
     //   在这里统一落盘（见 amsgFireSettled）。不用 onAfterSend——它只在真发出去那条路
@@ -1519,15 +1619,17 @@ const readServerVersion = async (request: Request, env: Env) => {
 };
 
 /**
- * 在上游 worker 外面包一层配置自检。多出来的三个行为：
- *   GET /config-check  配置齐不齐（只读 env，前端「连接并验证」用的就是它）
- *   GET /debug         上面那些再加库和 cron 的状况，给隔着屏幕帮人排障用
- *   其它请求           配置不全时直接 503 + 说明缺什么，不进上游
+ * 在上游 worker 外面包一层配置自检。多出来的四个行为：
+ *   GET  /config-check  配置齐不齐（只读 env，前端「连接并验证」用的就是它）
+ *   GET  /debug         上面那些再加库和 cron 的状况，给隔着屏幕帮人排障用
+ *   POST /instant-chat  即时对话：一个请求受理一轮聊天（见 ./instantChat）
+ *   其它请求            配置不全时直接 503 + 说明缺什么，不进上游
  */
-// 两个 handler 都不往上游传 ctx —— 上游的签名只收 (request/event, env)，多传一个
-// 参数运行时无害，但类型对不上。CF 传给我们的那份直接丢掉即可。
+// 两个 handler 的第三个参数 ctx 是 CF 给的：/instant-chat 用它的 waitUntil 在回完
+// 202 之后把这一轮立刻跑起来。上游的签名只收 (request/event, env)，所以往上游转发时
+// 照旧只传两个——多传运行时无害，但类型对不上。
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: InstantChatExecutionCtx): Promise<Response> {
     const pathname = new URL(request.url).pathname.replace(/\/+$/, '') || '/';
     const method = request.method.toUpperCase();
 
@@ -1535,7 +1637,11 @@ export default {
       if (method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
       // 刻意不校验 X-Client-Token：worker 配了口令而前端没填正是要诊断的情形之一，
       // 校验了就查不出来。作为交换，这里只回「配没配」，不回任何值。
-      return jsonWithCors(200, { success: true, data: inspectWorkerEnv(env) });
+      //
+      // instantChat 是包装层自己的能力标志：即时对话的路由住在这份代码里，而设置页
+      // 能读到的版本号是**上游库**的，只改 SullyOS 这份 worker 时那个号不动。前端拿
+      // 这个标志做唯一的版本门槛（贴的是旧 bundle 就没有它，开关直接置灰）。
+      return jsonWithCors(200, { success: true, data: { ...inspectWorkerEnv(env), instantChat: true } });
     }
 
     if (pathname.endsWith('/debug')) {
@@ -1568,10 +1674,23 @@ export default {
       });
     }
 
+    // 即时对话：一个请求把「传云端状态 + 建任务」串完，回 202 之后立刻起一跳。
+    // 排在配置门之后，所以走到这里 D1 和密钥必然都在。
+    if (pathname.endsWith('/instant-chat')) {
+      if (method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
+      if (method !== 'POST') {
+        return jsonWithCors(405, {
+          success: false,
+          error: { code: 'METHOD_NOT_ALLOWED', message: '/instant-chat 只接受 POST' },
+        });
+      }
+      return handleInstantChat({ request, env, ctx, upstream, json: jsonWithCors });
+    }
+
     return upstream.fetch(request, env);
   },
 
-  async scheduled(event: CfScheduledEvent, env: Env): Promise<void> {
+  async scheduled(event: CfScheduledEvent, env: Env, _ctx?: InstantChatExecutionCtx): Promise<void> {
     // 定时任务这条路没人看得见，配置不全时上游只会抛一个堆栈。写明白点，
     // wrangler tail 里一眼能看出是配置问题还是任务本身挂了。
     const report = inspectWorkerEnv(env);

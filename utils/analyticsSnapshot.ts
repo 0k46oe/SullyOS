@@ -315,9 +315,10 @@ export interface FeatureSources {
     characters: CharacterProfile[];
     /**
      * 主动消息 2.0 的全局配置，存 IndexedDB，得由调用方 await 出来。
-     * 只看「地址填没填」「连接成功过没有」两位，Worker 地址和共享密钥本身不进上报。
+     * 只看「地址填没填」「连接成功过没有」「即时对话开没开」三位，
+     * Worker 地址和共享密钥本身不进上报。
      */
-    amsg2Global: { workerUrl?: string; initializedAt?: number };
+    amsg2Global: { workerUrl?: string; initializedAt?: number; instantChatEnabled?: boolean };
 }
 
 /**
@@ -418,6 +419,9 @@ export function collectFeatureFlags(src: FeatureSources): Record<string, string>
         // 上面那一档只分「有没有角色在用」，这里补深度：只开了一个是尝鲜，
         // 好几个才说明真的用起来了。
         '开了2.0的角色数': bucketFewCount(amsg2ActiveChars.length),
+        // 聊天主路径搬没搬上云端。只有开/关：配置到哪一步由上面那格四态回答，
+        // 这一格问的是「配好了的人里有多少真把聊天切过去了」。
+        即时对话: onOff(src.amsg2Global.instantChatEnabled),
         // 两个都开着时聊天走 Instant Push，2.0 挂在本地那条路上的三样（角色排任务、
         // 角色知道自己有任务、防打断）**静默**失效：没报错、没提示，功能就是不响。
         // 面板里只有一块黄框提醒 + 一个手动关掉的按钮，没有任何强制互斥，所以这个

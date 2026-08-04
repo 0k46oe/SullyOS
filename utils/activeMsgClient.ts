@@ -24,6 +24,7 @@ import {
 import { AMSG_CHAT_PRESENCE_KEY, AmsgChatPresence } from './amsgChatPresence';
 import {
   AMSG_FIRE_PACK_KEY,
+  FIRE_PACK_VERSION,
   AMSG_SLOT_AWAY_HINT,
   AMSG_SLOT_CURRENT_TIME,
   AMSG_SLOT_REALTIME_WORLD,
@@ -35,6 +36,7 @@ import {
   AMSG_SLOT_TIME_SINCE_USER,
   AMSG_SLOT_USER_CLOCK,
   AmsgFirePack,
+  type AmsgFirePackChatContent,
   type AmsgLastSkip,
   amsgStateNamespace,
   packStateValue,
@@ -52,6 +54,9 @@ import {
   buildToolConfig,
   buildToolPack,
 } from './amsgToolPack';
+// 只取一个常量：客户端算 firstSendTime 时要留的提前量，和包装层「把任务行拉到期」
+// 那一步是同一个数，各写各的就会出现「校验说时间要在未来 / cron 说还没到」的死角。
+import { INSTANT_SCHEDULE_LEAD_MS } from '../worker/amsg/src/instantChat';
 import { listRecallableMonths } from './agenticTools';
 import { ChatPrompts } from './chatPrompts';
 import { nowInTimeZone, resolveCharTimeZone, tzAwarenessNote } from './timezone';
@@ -533,7 +538,9 @@ export const buildFirePack = async (
   ].join('\n');
 
   return {
-    v: 6,
+    // 版本号只有 amsgFirePack 那一份说了算：写死数字的话，升版时 worker 侧的 parseFirePack
+    // 已经在按新号校验，而这里还发着旧号，表现是每条任务到点都硬失败。
+    v: FIRE_PACK_VERSION,
     template,
     lastUserMessageAt,
     // 角色的时间参照系（见上面的 tzId / userTzId）：前者是角色自己的钟，后者是用户那边的，
@@ -588,6 +595,112 @@ const ensureFutureTime = (value: string, tzId: string) => {
  */
 const AMSG2_PLACEHOLDER_PROMPT =
   'AMSG2_PLACEHOLDER_PROMPT（正式 prompt 到点由 worker onBeforeFire 下发；看到这条说明 fire hooks 未生效）';
+
+/**
+ * fire_pack 里 `chat.messages` 的体积上限（对 `JSON.stringify(messages)` 按 UTF-8 字节算）。
+ *
+ * 上限是这么推出来的：
+ *   1. 上游按**条目**卡体积：PUT /client-state 的 validateEntry 拿
+ *      `new TextEncoder().encode(entry.value).length` 跟 maxStateValueBytes 比，超了回
+ *      STATE_VALUE_TOO_LARGE。我们的 worker 没配这个值 → 用库的默认 5 MiB。
+ *      注意它量的是**我们交出去的那个字符串**（服务端落库前的加密不算在内）。
+ *   2. 不能指望压缩帮忙：packStateValue 在运行时没有 CompressionStream（老 Safari）
+ *      或者压完更大时会原样返回，所以按「一点没压」的原始 JSON 算才是诚实的。
+ *   3. fire_pack 里除了这串对话还有别的：完整角色卡 + 世界书 + 最近对话的 template、
+ *      pendingTasks、scene。给它们留 1 MiB。剩 4 MiB。
+ *   4. 再对折留一半余量 —— 同一批字节还要坐 /instant-chat 的请求体，外面套一层
+ *      AES-GCM + base64（涨三分之一）；而这么大的 body 走手机上行，往往在服务端
+ *      来得及判它超没超之前就先被上行超时掐掉了。
+ * → 2 MiB。
+ */
+const CHAT_CONTENT_BUDGET_BYTES = 2 * 1024 * 1024;
+
+const utf8ByteLength = (text: string): number => new TextEncoder().encode(text).length;
+
+/** 结构化分段里有没有图片这类非文字内容（只有文字段的数组拆了也省不下什么）。 */
+const hasNonTextPart = (content: unknown): boolean =>
+  Array.isArray(content) && content.some((part: any) => part?.type !== 'text');
+
+/** 结构化分段 → 只剩文字的那一句（丢掉图片本体时的替代内容）。 */
+const flattenToText = (content: unknown[]): string => {
+  const text = content
+    .map((part: any) => (part?.type === 'text' ? String(part.text ?? '') : ''))
+    .filter(Boolean)
+    .join('\n');
+  return text || '[图片]';
+};
+
+/**
+ * 本地那串 fullMessages → fire_pack 的 `chat.messages`。
+ *
+ * **原样搬运**：带图片的消息本地是结构化的（`[{type:'text'},{type:'image_url'}]`，
+ * 图片是 base64 data URL），这里一个字都不动地带上云——即时对话的整个前提就是
+ * 「云端跑出来的回复和本地跑出来的一模一样」，模型看不看得见图片是这里面差别最大的一项。
+ *
+ * 唯一的例外是体积：一条 client_state 有硬上限（见 CHAT_CONTENT_BUDGET_BYTES）。
+ * 超了就**从最老的消息开始**丢图片本体（换成它自己的文字段，也就是以前那种拍平结果），
+ * 一条一条丢到进预算为止。最新那条用户消息的图片永远不丢——用户刚发的这张图正是
+ * 这一轮要聊的东西，把它丢了等于答非所问，而用户完全看不出来。
+ *
+ * 丢到只剩最新那条还是超预算 → 抛错，走「即时对话发送失败」那条明路，用户看得到
+ * 原因、可以删掉图片重发。绝不悄悄把当前这轮截断。
+ */
+export const toFirePackChatMessages = (
+  messages: Array<{ role: string; content: unknown }>,
+): Array<{ role: string; content: AmsgFirePackChatContent }> => {
+  const result: Array<{ role: string; content: AmsgFirePackChatContent }> = messages.map((message) => {
+    if (typeof message.content === 'string') return { role: message.role, content: message.content };
+    // 结构化分段整段原样带走（分段内部长什么样是 chat API 的方言，这里不解释也不改写）。
+    if (Array.isArray(message.content)) {
+      return { role: message.role, content: message.content as AmsgFirePackChatContent };
+    }
+    return { role: message.role, content: String(message.content ?? '') };
+  });
+
+  const sizeOf = () => utf8ByteLength(JSON.stringify(result));
+  if (sizeOf() <= CHAT_CONTENT_BUDGET_BYTES) return result;
+
+  // 最新那条用户消息 = 用户刚发出去、正在等回复的这一条。它的图片是这一轮的题面。
+  let protectedIdx = -1;
+  for (let i = result.length - 1; i >= 0; i -= 1) {
+    if (result[i].role === 'user') { protectedIdx = i; break; }
+  }
+
+  // 从最老的开始丢：越老的图片对这一轮越不重要，而正文那句「用户发来一张图片」还在，
+  // 模型至少知道当时发生过这件事。
+  for (let i = 0; i < result.length && sizeOf() > CHAT_CONTENT_BUDGET_BYTES; i += 1) {
+    if (i === protectedIdx || !hasNonTextPart(result[i].content)) continue;
+    result[i] = { role: result[i].role, content: flattenToText(result[i].content as unknown[]) };
+    console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 即时对话这轮体积超标，第 ${i + 1} 条消息的图片本体没带上云（文字段保留）`);
+  }
+
+  const finalBytes = sizeOf();
+  if (finalBytes > CHAT_CONTENT_BUDGET_BYTES) {
+    const mb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
+    throw new Error(
+      `即时对话发不出去：这一轮要带的图片太大（约 ${mb(finalBytes)} MB，上限 ${mb(CHAT_CONTENT_BUDGET_BYTES)} MB）。`
+      + '删掉图片、或者换一张小一点的再发。',
+    );
+  }
+  return result;
+};
+
+/** POST /instant-chat 的失败原因（包装层的错误码 → 一句能照着做的话）。 */
+const describeInstantChatFailure = (status: number, body: any): string => {
+  const code = body?.error?.code;
+  const upstream = body?.error?.upstream?.error?.message || body?.error?.upstream?.message;
+  const detail = [body?.error?.message, upstream].filter(Boolean).join('：');
+  if (status === 401 || code === 'INVALID_CLIENT_TOKEN') {
+    return '即时对话没发出去：共享密钥和 Worker 上的对不上，去「主动消息 2.0」设置里核对一下。';
+  }
+  if (status === 405 || status === 404) {
+    return '即时对话没发出去：Worker 上还没有这个端点，去你 fork 的 sullyos-workers 点一下 Sync fork 更新。';
+  }
+  if (status === 503) {
+    return '即时对话没发出去：Worker 的环境变量没配齐（设置页点「重新连接并验证」能看到缺什么）。';
+  }
+  return `即时对话没发出去（HTTP ${status}${code ? ` / ${code}` : ''}）${detail ? `：${detail}` : '。'}`;
+};
 
 /** client_state 上传每次尝试前等多久：数组长度即总尝试次数（首次不等）。 */
 const CLIENT_STATE_BACKOFF_MS = [0, 400, 1200];
@@ -1476,6 +1589,107 @@ export const ActiveMsgClient = {
     };
   },
 
+  /**
+   * 即时对话：把「用户刚按下发送」这一轮交给云端跑，一个请求受理完就返回。
+   *
+   * 请求体里两个信封都是这里加密好的（外壳是明文 JSON，包装层只搬不看）：
+   *   statePayload —— 和 putClientState 逐字节同构的 `{ entries }`，带这一轮的 fire_pack
+   *                   （v7，多一段 chat）+ tool_pack + 全局工具凭据；
+   *   taskPayload  —— 和 scheduleCharacterTask 同构的排程体，标着 amsgInstantChat。
+   *
+   * 只有 202 才算受理。**任何别的状态都是「这条没发出去」**，抛错交调用方明说，
+   * 绝不退回本地生成——静默分流那种查无可查的坑踩过一次就够了。
+   */
+  async sendInstantChat(params: {
+    char: CharacterProfile;
+    /** 本地生成会 POST 给 /chat/completions 的那串 fullMessages，原样带上去。 */
+    chatMessages: Array<{ role: string; content: unknown }>;
+    /**
+     * 这一轮该用的聊天凭据——**必须是本地生成那一轮会用的同一份**（effectiveApi）。
+     * 换成主动消息的「角色单独 API」的话，同一句话开不开即时对话会由不同的模型来答，
+     * 而用户完全看不出这件事发生过。
+     */
+    api: { baseUrl: string; apiKey: string; model: string };
+    maxTokens?: number;
+    userProfile: UserProfile;
+    groups: GroupProfile[];
+    realtimeConfig: RealtimeConfig;
+    /** 上一条还没被认领的即时对话任务，连发两条时用它顶掉（合并成一起回）。 */
+    supersedesUuid?: string;
+  }): Promise<{ uuid: string; clientTaskId: string }> {
+    const { char, chatMessages, api, userProfile, groups, realtimeConfig } = params;
+    if (!api.baseUrl || !api.model) throw new Error('即时对话没发出去：聊天 API 地址或模型没配齐。');
+    const globalConfig = await ensureWorkerReady();
+    const client = await initializeClient(globalConfig);
+
+    const now = Date.now();
+    const tzId = resolveCharTimeZone(char) ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const firePack: AmsgFirePack = {
+      ...(await buildFirePack(char, userProfile, groups, realtimeConfig)),
+      chat: { messages: toFirePackChatMessages(chatMessages), builtAt: now },
+    };
+
+    const clientTaskId = crypto.randomUUID();
+    const remoteAvatarUrl = toRemoteAvatarUrl(char.avatar);
+    const taskPayload: Record<string, unknown> = {
+      contactName: char.name,
+      ...(remoteAvatarUrl ? { avatarUrl: remoteAvatarUrl } : {}),
+      // 用 'auto' 而不是 'instant'：'instant' 在上游是「当场跑完」的行型，走不到 fire hooks，
+      // 到点拿的就不是这份 chat 段。客户端收到的 push.messageType 由 metadata.amsgMode 决定。
+      messageType: 'auto',
+      messageSubtype: 'chat',
+      // 上游校验 firstSendTime 必须在未来，而 cron 只捡已到期的行；先留一点提前量过校验，
+      // 落库之后由包装层把这一行拉到「此刻」（见 worker/amsg/src/instantChat.ts）。
+      firstSendTime: new Date(now + INSTANT_SCHEDULE_LEAD_MS).toISOString(),
+      recurrenceType: 'none',
+      tzId,
+      // 真正要发给模型的消息在 fire_pack.chat 里，这条只为过上游「messages 非空」的校验。
+      messages: [{ role: 'user', content: AMSG2_PLACEHOLDER_PROMPT }],
+      apiUrl: normalizeChatApiUrl(api.baseUrl),
+      apiKey: api.apiKey,
+      primaryModel: api.model,
+      ...(params.maxTokens && params.maxTokens > 0 ? { maxTokens: params.maxTokens } : {}),
+      metadata: {
+        charId: char.id,
+        charName: char.name,
+        source: 'active_msg_2',
+        // push 的 messageType 取自这里（收侧按 'instant' 分轨）。
+        amsgMode: 'instant',
+        // worker 到点靠它认出「这是用户在等回复」，从而跳过那几道主动消息专用的闸。
+        amsgInstantChat: true,
+        amsgClientTaskId: clientTaskId,
+        // 刻意不带 amsgExpirePolicy / amsgAnchorMs：防穿帮闸问的是「到点还该不该主动开口」，
+        // 对「回一句用户刚说的话」不适用，带上去反而会把用户等着的回复吞掉。
+      },
+    };
+
+    const [statePayload, encryptedTask] = await Promise.all([
+      encryptPayload(client, {
+        entries: [
+          ...(await buildCharStateEntries(char, firePack, now)),
+          buildToolConfigEntry(realtimeConfig, now),
+        ],
+      }),
+      encryptPayload(client, taskPayload),
+    ]);
+
+    const { status, body } = await fetchWithAuthRaw('instant-chat', globalConfig, {
+      method: 'POST',
+      // 外壳是明文：里头两个信封已经加密好，别再给外壳挂加密头（包装层会当它是整体密文）。
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        statePayload,
+        taskPayload: encryptedTask,
+        ...(params.supersedesUuid ? { supersedesUuid: params.supersedesUuid } : {}),
+      }),
+    }, '即时对话');
+
+    if (status !== 202 || typeof body?.uuid !== 'string' || !body.uuid) {
+      throw new Error(describeInstantChatFailure(status, body));
+    }
+    return { uuid: body.uuid, clientTaskId };
+  },
+
   // 同角色活跃会话租约：只 PUT 这一条几十字节的 chat_presence，不复用胖 fire_pack。
   // worker 对 expire AI 任务到点前先读它——新鲜则 skip，避免正在聊天时又弹主动消息。
   // 写入失败由调用方（amsgStateSync 的 lease timer）只 warn，45s TTL 自然失效。
@@ -1548,6 +1762,24 @@ export const ActiveMsgClient = {
   // worker 特性探测（amsg-server 2.6.0-next.4+ 的 GET /capabilities）。
   // 老部署没有这个端点 → null。设置页用它亮「worker 需要重新粘贴部署」的牌子，
   // 防止版本落后时新特性静默降级、用户以为功能坏了。不需要 init（无加密参与）。
+  /**
+   * 这台 worker 认不认 `POST /instant-chat`（即时对话的唯一版本门槛）。
+   *
+   * 标志来自 `GET /config-check`，是**包装层**自己报的：即时对话的路由住在 SullyOS 这份
+   * worker 代码里，而 getCapabilities 报的是上游库的版本号——只更新 SullyOS 这份时那个号
+   * 一动不动，靠它分不出新旧。探不到（旧 bundle / 网络不通）一律 false：开关置灰比
+   * 「开着但发一条挂一条」好。
+   */
+  async probeInstantChatSupport(): Promise<boolean> {
+    try {
+      const config = await ensureWorkerReady();
+      const { status, body } = await fetchWithAuthRaw('config-check', config, { method: 'GET' }, '即时对话能力探测');
+      return status === 200 && body?.success === true && body?.data?.instantChat === true;
+    } catch {
+      return false;
+    }
+  },
+
   async getCapabilities(): Promise<{ serverVersion: string; features: string[] } | null> {
     const globalConfig = await ensureWorkerReady();
     const client = createClient(globalConfig);
