@@ -60,6 +60,21 @@ export const isAndroidDevice = (): boolean => {
     return /Android/i.test(navigator.userAgent || '');
 };
 
+export type StatusBarMode = 'standard' | 'compact' | 'hidden';
+
+// 三档状态栏模式。没有新字段的旧存档继续读取 hideStatusBar；两者都没写过时沿用平台默认。
+// compact 会保留 SullyOS 时间/电量，但把它们放入顶部安全区，不再在安全区下方额外占一行。
+export const resolveStatusBarMode = (
+    statusBarMode?: StatusBarMode,
+    legacyHideStatusBar?: boolean,
+    platformDefaultHidden: boolean = isIOSStandaloneWebApp(),
+): StatusBarMode => {
+    if (statusBarMode === 'standard' || statusBarMode === 'compact' || statusBarMode === 'hidden') {
+        return statusBarMode;
+    }
+    return (legacyHideStatusBar ?? platformDefaultHidden) ? 'hidden' : 'standard';
+};
+
 // 顶部时钟/电量条是否隐藏：外观「隐藏顶部时间栏」开关显式设过就听用户的；没设过(undefined)按平台默认——
 // iOS 全屏 PWA 系统状态栏(真实时间/电量)删不掉，默认隐藏 SullyOS 这条避免双显。
 // 必须用 ?? 而非 ||：显式 false（用户主动要显示）不能被平台默认 true 盖掉。

@@ -837,6 +837,24 @@ export const compileStoryPreset = (input: {
     };
 };
 
+/**
+ * 部分 OpenAI 兼容模型硬性要求请求最后一条消息必须是 user，不能接受
+ * SillyTavern 常用的 assistant prefill。把预填充改写成紧邻用户消息前的
+ * system 约束，调用方仍可在返回文本缺失前缀时本地补齐。
+ */
+export const buildStoryPrefillInstruction = (assistantPrefill?: StoryApiMessage): StoryApiMessage | undefined => {
+    const content = assistantPrefill?.content?.trim();
+    if (!content) return undefined;
+    return {
+        role: 'system',
+        content: [
+            '### 回复起始文本（兼容模式）',
+            '你的最终回复必须直接以下列文本开头；不要解释、转述或把它放进代码块：',
+            content,
+        ].join('\n'),
+    };
+};
+
 export const dedupeTheaterWorldbooks = (characters: CharacterProfile[]): MountedWorldbook[] => {
     const seen = new Set<string>();
     const output: MountedWorldbook[] = [];

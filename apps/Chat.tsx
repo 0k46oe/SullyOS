@@ -47,6 +47,7 @@ import { cleanTextForTts, parseVoiceOutput } from '../utils/minimaxTts';
 import { collectVoiceBatchSubtitle, isPoisonedVoiceSubtitle } from '../utils/voiceSubtitle';
 import { synthesizeSpeechDetailed, characterHasVoice } from '../utils/ttsRouter';
 import { shouldAutoGenerateVoice, shouldAutoPlayGeneratedVoice } from '../utils/voicePlayback';
+import { fetchBlobForShare, shareOrDownloadBlob } from '../utils/shareExport';
 import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
 import { resolveFishAudioApiKey, stripFishMarkupForDisplay, cleanTextForTtsFish } from '../utils/fishAudioTts';
 import { resolveTtsProvider } from '../utils/ttsProvider';
@@ -561,32 +562,23 @@ const Chat: React.FC = () => {
         }
     };
 
-    // 长按语音菜单里的「下载」：把已生成的语音音频存到本地。
-    // 优先用持久化的 blob；只有远端 URL（CORS 兜底）时先尝试拉回 blob，拉不到就直接开链接让用户自己存。
+    // 长按语音菜单里的「下载」：移动端优先调系统分享/保存，桌面端才走浏览器下载。
     const handleDownloadVoice = async (msg: Message) => {
         if (!msg?.id) return;
         try {
             const stored = await DB.getAssetRaw(voiceAssetKey(msg.id)) as StoredVoice | null;
             let blob: Blob | null = stored?.blob instanceof Blob ? stored.blob : null;
             if (!blob && stored?.remoteUrl) {
-                try { const r = await fetch(stored.remoteUrl); if (r.ok) blob = await r.blob(); } catch { /* CORS：走下面的兜底 */ }
+                try { blob = await fetchBlobForShare(stored.remoteUrl, 'audio/mpeg'); } catch { /* 下面给出明确提示 */ }
             }
             const fname = `${(char?.name || '语音').replace(/[\\/:*?"<>|]/g, '_')}_语音_${msg.id}.mp3`;
-            const a = document.createElement('a');
-            a.download = fname;
-            if (blob) {
-                const u = URL.createObjectURL(blob);
-                a.href = u;
-                document.body.appendChild(a); a.click(); a.remove();
-                setTimeout(() => { try { URL.revokeObjectURL(u); } catch { /* ignore */ } }, 1000);
-            } else if (stored?.remoteUrl) {
-                a.href = stored.remoteUrl; a.target = '_blank'; a.rel = 'noopener';
-                document.body.appendChild(a); a.click(); a.remove();
-            } else {
+            if (!blob) {
                 addToast('这条还没有可下载的语音', 'error');
                 return;
             }
-            addToast('语音已开始下载', 'success');
+            const result = await shareOrDownloadBlob({ blob, fileName: fname, shareTitle: `${char?.name || '角色'}的语音` });
+            if (result === 'cancelled') return;
+            addToast(result === 'shared' ? '已打开系统保存/分享' : '语音已开始下载', 'success');
             trackEvent('下载语音条');
         } catch {
             addToast('语音下载失败', 'error');

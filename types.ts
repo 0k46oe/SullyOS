@@ -120,6 +120,9 @@ export interface OSTheme {
   scheduleCardAppearance?: ScheduleCardAppearance;
   desktopDecorations?: DesktopDecoration[];
   customFont?: string;
+  /** 顶部时间栏布局：安全显示（安全区下方）/ 紧凑显示（嵌入安全区）/ 完全隐藏。 */
+  statusBarMode?: 'standard' | 'compact' | 'hidden';
+  /** @deprecated 旧版两档开关，仅用于兼容已有存档；新设置写入 statusBarMode。 */
   hideStatusBar?: boolean;
   // Chat UI customization (global)
   chatAvatarShape?: 'circle' | 'rounded' | 'square';
