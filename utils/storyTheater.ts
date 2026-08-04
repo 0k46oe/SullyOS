@@ -131,6 +131,7 @@ export const createStoryTheaterDraft = (now: number = Date.now()): StoryTheaterE
     archiveStrategy: 'summary',
     archives: [],
     selectedWorldbookIds: [],
+    forceUserLastMessage: false,
     createdAt: now,
     updatedAt: now,
 });
@@ -161,6 +162,7 @@ export const normalizeStoryTheater = (entry: StoryTheaterEntry): StoryTheaterEnt
         selectedWorldbookIds: Array.isArray(entry.selectedWorldbookIds) ? entry.selectedWorldbookIds.filter(Boolean) : [],
         presetId: /^builtin-night-screening-v\d/i.test(String(entry.presetId || '')) ? 'builtin-night-screening' : entry.presetId,
         presetOverride: entry.presetOverride?.schema === 'sullyos.story-preset' && Array.isArray(entry.presetOverride.prompts) ? entry.presetOverride : undefined,
+        forceUserLastMessage: entry.forceUserLastMessage === true,
         createdAt: Number(entry.createdAt) || Date.now(),
         updatedAt: Number(entry.updatedAt) || Number(entry.createdAt) || Date.now(),
     };
@@ -853,6 +855,31 @@ export const buildStoryPrefillInstruction = (assistantPrefill?: StoryApiMessage)
             content,
         ].join('\n'),
     };
+};
+
+/**
+ * 默认完整保留原生 assistant prefill；只有用户为当前剧情显式开启 400 兼容模式时，
+ * 才把预填改成 system 约束并让最终消息保持 user。这样个别严格接口不会改变所有人的预设效果。
+ */
+export const appendStoryUserTurn = (
+    messages: StoryApiMessage[],
+    userContent: string,
+    assistantPrefill?: StoryApiMessage,
+    forceUserLastMessage = false,
+): StoryApiMessage[] => {
+    if (forceUserLastMessage) {
+        const instruction = buildStoryPrefillInstruction(assistantPrefill);
+        return [
+            ...messages,
+            ...(instruction ? [instruction] : []),
+            { role: 'user', content: userContent },
+        ];
+    }
+    return [
+        ...messages,
+        { role: 'user', content: userContent },
+        ...(assistantPrefill ? [assistantPrefill] : []),
+    ];
 };
 
 export const dedupeTheaterWorldbooks = (characters: CharacterProfile[]): MountedWorldbook[] => {

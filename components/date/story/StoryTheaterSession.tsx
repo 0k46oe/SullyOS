@@ -7,6 +7,7 @@ import { ContextBuilder } from '../../../utils/context';
 import { safeResponseJson, extractContent } from '../../../utils/safeApi';
 import {
     appendStoryAffinityInputs,
+    appendStoryUserTurn,
     buildBareTheaterActorContext,
     buildStoryAffinityAwarenessReminder,
     buildStoryBackstageAftermathReminder,
@@ -15,7 +16,6 @@ import {
     buildStoryMultiAffinityGuide,
     buildStoryHistory,
     buildStoryIdentityGuard,
-    buildStoryPrefillInstruction,
     buildStoryMiniTheaterReminder,
     buildTheaterPersona,
     buildTheaterWorldbookSlots,
@@ -642,8 +642,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             const affinityAwarenessReminder = affinityInputs.map(item => buildStoryAffinityAwarenessReminder(item, item.characterName || '当前角色')).filter(Boolean).join('\n\n');
             const identityGuard = buildStoryIdentityGuard(effectivePreset.document, promptIdentityName, actors.map(actor => actor.name));
             const modelInput = appendStoryAffinityInputs(text, affinityInputs);
-            const prefillInstruction = buildStoryPrefillInstruction(compiled.assistantPrefill);
-            const payload = [
+            const payloadBeforeTurn = [
                 ...compiled.messages,
                 ...(entry.writesToCharacterMemory ? [{ role: 'system' as const, content: REAL_COMPANION_MEMORY_GUARD }] : []),
                 ...(backstageAftermathReminder ? [{ role: 'system' as const, content: backstageAftermathReminder }] : []),
@@ -652,9 +651,8 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                 ...(affinityEnabled ? [{ role: 'system' as const, content: RELATIONSHIP_TEXTURE_GUIDE }] : []),
                 ...(affinityAwarenessReminder ? [{ role: 'system' as const, content: affinityAwarenessReminder }] : []),
                 { role: 'system' as const, content: identityGuard },
-                ...(prefillInstruction ? [prefillInstruction] : []),
-                { role: 'user' as const, content: modelInput },
             ];
+            const payload = appendStoryUserTurn(payloadBeforeTurn, modelInput, compiled.assistantPrefill, entry.forceUserLastMessage === true);
             let promptTokenCount = estimateStoryTokens(payload.map(message => `${message.role}\n${message.content}`).join('\n'));
             let promptTokenCountExact = false;
             setContextTokens(promptTokenCount);
@@ -684,7 +682,13 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             else void archiveIfNeeded();
         } catch (error: any) {
             console.error('[StoryTheater] send failed', error);
-            addToast(`剧情续写失败：${error?.message || error}`, 'error');
+            const message = String(error?.message || error);
+            addToast(
+                message.includes('API Error 400') && !entry.forceUserLastMessage
+                    ? '剧情续写失败：API 400。若日志提示最后一条必须是 user，可在右上角设置开启“400 兼容模式”；更建议更换模型。'
+                    : `剧情续写失败：${message}`,
+                'error',
+            );
         } finally {
             setSending(false);
             setRerollingId(null);
@@ -722,6 +726,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                     <div><span className='block text-[8px] font-bold text-slate-400'>记忆方式</span><span className='block mt-1 truncate text-slate-600'>{entry.writesToCharacterMemory ? '写入角色记忆' : entry.archiveStrategy === 'summary' ? '独立事件盒' : '独立向量分区'}</span></div>
                     <div><span className='block text-[8px] font-bold text-slate-400'>结尾模块</span><span className='block mt-1 truncate text-slate-600'>{activeMiniTheater?.name || '未启用小剧场'}</span></div>
                     <div><span className='block text-[8px] font-bold text-slate-400'>完整上下文</span><span className='block mt-1 truncate text-slate-600'>{displayedTokenInfo.count > 0 ? `${sending ? '本轮' : '上轮'}${displayedTokenInfo.exact ? '使用' : '估算'} ${displayedTokenInfo.count.toLocaleString()} tokens` : '推进时统计全部内容'}</span></div>
+                    <div><span className='block text-[8px] font-bold text-slate-400'>API 兼容</span><span className={`block mt-1 truncate ${entry.forceUserLastMessage ? 'font-semibold text-amber-700' : 'text-slate-600'}`}>{entry.forceUserLastMessage ? '400 兼容模式' : '原生预填（推荐）'}</span></div>
                 </div>
             </details>
         </header>
