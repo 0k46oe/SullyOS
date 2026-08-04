@@ -3,7 +3,7 @@ import Modal from '../os/Modal';
 import { ActiveMsg2GlobalConfig, RealtimeConfig } from '../../types';
 import { ActiveMsgClient, ActiveMsg2PushStatus, readAmsgFailKind } from '../../utils/activeMsgClient';
 import { ActiveMsgStore, maskActiveMsgUserId } from '../../utils/activeMsgStore';
-import { cancelAllRemoteAmsgTasks, isWorkerUrlCleared } from '../../utils/amsgStateSync';
+import { cancelAllRemoteAmsgTasks, isWorkerUrlCleared, wipeAmsgCloudData } from '../../utils/amsgStateSync';
 import {
   buildCloudflareDashboardUrl,
   isInstantConfigReady,
@@ -81,7 +81,7 @@ interface ActiveMsgGlobalSettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
-  /** 「清除云端状态」清完要立刻把工具凭据补传回去，所以这里需要当前这份配置。 */
+  /** 「清空云端数据」清完要立刻把工具凭据补传回去，所以这里需要当前这份配置。 */
   realtimeConfig: RealtimeConfig;
   /** 由 Settings 注入：点「去推送凭据面板」时打开顶层 PushVapidSettingsModal */
   onOpenVapid?: () => void;
@@ -325,23 +325,49 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     return revealAndCopy(ActiveMsgClient.generateMasterKey(), setGeneratedMasterKey, 'AMSG_MASTER_KEY');
   };
 
-  const handleClearClientState = async () => {
-    if (!confirm('确定清空云端状态？Worker D1 里同步的角色上下文（fire_pack）会全部删除。在下一次聊天重新同步之前，已排程的 AI 任务到点会失败；固定消息任务不受影响。')) return;
+  const handleWipeCloudData = async () => {
+    if (!confirm(
+      '确定清空云端数据？Worker D1 里属于你的这几样会一起删掉：\n\n'
+      + '· 已排程的主动消息任务（含角色自己排的）\n'
+      + '· 同步上去的角色上下文与工具凭据\n'
+      + '· 推送订阅登记\n\n'
+      + '任务删了要重新排。角色上下文下次聊天会自动传回去，工具凭据和推送订阅当场就补登记。'
+    )) return;
     setLoading(true);
     try {
-      // 工具凭据在清空的同一步就补回去了（见 clearClientState）：它不像角色上下文那样
-      // 每轮聊天重传，不当场补的话之后没人会补，AI 任务会一直失败。
-      const { deleted, toolConfigRestored } = await ActiveMsgClient.clearClientState(realtimeConfig);
-      addToast(
-        toolConfigRestored
-          ? `已清空云端状态（${deleted} 条）。`
-          : `已清空云端状态（${deleted} 条），但工具凭据没能补传回去——请到「实时感知」里重新保存一次配置，否则已排程的 AI 任务会一直失败。`,
-        toolConfigRestored ? 'success' : 'error',
-      );
+      const result = await wipeAmsgCloudData(realtimeConfig, {
+        pushRegistered: Boolean(pushStatus?.hasSubscription),
+      });
+
+      // 没清干净的地方逐条说明白：这个按钮多半是在「云端数据已经出问题」时点的，
+      // 含糊一句「部分失败」会让人不知道下一步该干嘛。
+      const problems: string[] = [];
+      if (!result.tasks.listed) {
+        problems.push('任务清单读不出来（换过 AMSG_MASTER_KEY 的话旧任务解不开就会这样），这些任务到点会失败，Worker 会在 7 天后自动清掉它们');
+      } else if (result.tasks.failed > 0) {
+        problems.push(`${result.tasks.failed} 个任务没取消成功，建议到角色的主动消息面板里逐个处理`);
+      }
+      if (result.stateDeleted === null) {
+        problems.push('角色上下文没能删掉');
+      } else if (!result.toolConfigRestored) {
+        problems.push('工具凭据没能补传回去，请到「实时感知」里重新保存一次配置，否则已排程的 AI 任务会一直失败');
+      }
+      if (result.push === 'failed') {
+        problems.push('推送订阅没能收拾干净，建议到上面的推送区域重新订阅一次');
+      }
+
+      if (problems.length > 0) {
+        addToast(`云端数据没能全部清干净：${problems.join('；')}。`, 'error');
+      } else {
+        const done = [`任务 ${result.tasks.total} 个`, `状态 ${result.stateDeleted} 条`];
+        if (result.push === 'reregistered') done.push('推送订阅已重新登记');
+        addToast(`已清空云端数据（${done.join('、')}）。`, 'success');
+      }
     } catch (error: any) {
-      addToast(error?.message || '清除云端状态失败。', 'error');
+      addToast(error?.message || '清空云端数据失败。', 'error');
     } finally {
       setLoading(false);
+      void refresh();
     }
   };
 
@@ -786,17 +812,21 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
                 （<code className="font-mono">origin: '*'</code>），想收紧就把它改成自己站点的域名再部署。
               </p>
               <div className="bg-rose-50 border border-rose-100 rounded-2xl p-3 space-y-2">
-                <div className="font-semibold text-rose-700">清除云端状态</div>
+                <div className="font-semibold text-rose-700">清空云端数据</div>
                 <p className="text-[11px] leading-relaxed text-rose-600">
-                  删除 Worker D1 里同步的角色上下文（角色卡、最近聊天窗口等）。角色靠它到点现场组消息，
-                  所以在下次聊天自动重新同步之前，已排程的 AI 任务到点会失败；固定消息任务不受影响。
+                  把 Worker D1 里属于你的数据全部删掉：已排程的主动消息任务（含角色自己排的）、
+                  同步上去的角色上下文（角色卡、最近聊天窗口等）与工具凭据、推送订阅登记。
+                </p>
+                <p className="text-[11px] leading-relaxed text-rose-600">
+                  清完角色上下文下次聊天会自动传回去，工具凭据和推送订阅当场补登记，任务要自己重新排。
+                  换过 <code className="font-mono">AMSG_MASTER_KEY</code> 之后旧数据解不开，也从这里清干净。
                 </p>
                 <button
-                  onClick={() => void handleClearClientState()}
+                  onClick={() => void handleWipeCloudData()}
                   disabled={loading}
                   className="w-full py-2.5 bg-rose-500 text-white font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50"
                 >
-                  {loading ? '处理中...' : '清除云端状态'}
+                  {loading ? '处理中...' : '清空云端数据'}
                 </button>
               </div>
             </div>
