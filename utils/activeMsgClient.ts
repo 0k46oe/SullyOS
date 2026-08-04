@@ -1032,6 +1032,23 @@ export const ActiveMsgClient = {
   },
 
   /**
+   * 只删掉 worker 上登记的那行订阅，浏览器这边的订阅原样不动。
+   *
+   * 跟 resetPushSubscription 的分工：那个是「收不到推送了」的修复动作，删完要重建
+   * 浏览器订阅再登记回去；这里是清空云端数据时的收尾，本机压根没开推送的话不该顺手
+   * 去申请通知权限，把云端那行删干净、留白就是对的。
+   */
+  async deleteRemotePushSubscription(): Promise<void> {
+    const config = await ensureWorkerReady();
+    const client = await initializeClient(config);
+    try {
+      await client.deletePushSubscription();
+    } catch (error) {
+      throw normalizeActiveMsgApiError(error, '删除推送订阅登记');
+    }
+  },
+
+  /**
    * 重置订阅：清掉现在这条，重新建一条，再覆盖登记回 worker。
    *
    * 三步缺一不可。只在浏览器重订不登记的话，worker 的 push_subscriptions 里还是
@@ -1734,7 +1751,7 @@ export const ActiveMsgClient = {
    * 清掉某个角色在云端 client_state 里的全部条目（fire_pack / tool_pack /
    * 活跃会话租约 / 旁路存的小红书会话），删角色时用。
    *
-   * 为什么单独有这么一个：设置页的「清除云端状态」是全局的、要用户主动去点，
+   * 为什么单独有这么一个：设置页的「清空云端数据」是全局的、要用户主动去点，
    * 删一个角色时该走的是只清这一个角色的路。返回被清掉的键名供调用方记账。
    */
   async clearCharClientState(charId: string): Promise<string[]> {
@@ -1744,8 +1761,8 @@ export const ActiveMsgClient = {
   },
 
   /**
-   * 清空该用户在 worker D1 里的全部 client_state（设置页「清除云端状态」按钮），
-   * 清完立刻把全局工具凭据补回去。
+   * 清空该用户在 worker D1 里的全部 client_state，清完立刻把全局工具凭据补回去。
+   * 设置页「清空云端数据」把它当其中一步用（见 amsgStateSync 的 wipeAmsgCloudData）。
    *
    * 为什么补传这一步是必须的：云端有三份数据，角色上下文与角色工具数据每轮聊完都会
    * 重新同步（见 syncCharFirePacks），只有全局的 tool_config 是「改的时候才传」——
@@ -1753,8 +1770,8 @@ export const ActiveMsgClient = {
    * 的 fireStateError），于是清空之后已排程的 AI 任务会一直失败，聊多少轮天都不会好。
    *
    * 清空这个动作本身就是一次「云端凭据变没了」的变更，所以在这里就地补回来，
-   * 不必让每轮同步都白传一遍。任务表跟 client_state 不在一起、不受清空影响，
-   * 所以这也是「任务还活着、凭据却没了」的唯一入口，堵住这里就够。
+   * 不必让每轮同步都白传一遍。这个方法只碰 client_state、不动任务表，所以它就是
+   * 「任务还活着、凭据却没了」的唯一入口，堵住这里就够。
    *
    * 补传失败不算清空失败（清空确实成功了），返回值把结果交给调用方去提示。
    */

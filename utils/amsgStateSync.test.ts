@@ -12,6 +12,9 @@ vi.mock('./activeMsgClient', () => ({
     syncToolConfig: vi.fn().mockResolvedValue(undefined),
     listAllTasks: vi.fn().mockResolvedValue([]),
     cancelTask: vi.fn().mockResolvedValue({ uuid: '', alreadyGone: false }),
+    clearClientState: vi.fn().mockResolvedValue({ deleted: 0, toolConfigRestored: true }),
+    registerPushSubscription: vi.fn().mockResolvedValue(undefined),
+    deleteRemotePushSubscription: vi.fn().mockResolvedValue(undefined),
   },
 }));
 vi.mock('./activeMsgStore', () => ({
@@ -22,6 +25,7 @@ import {
   AMSG2_PENDING_SYNC_LS_KEY,
   AMSG2_PENDING_TOOL_CONFIG_LS_KEY,
   cancelAllRemoteAmsgTasks,
+  wipeAmsgCloudData,
   flushAmsgState,
   isWorkerUrlCleared,
   markAmsgStateDirty,
@@ -71,6 +75,12 @@ beforeEach(() => {
   (ActiveMsgClient.listAllTasks as any).mockResolvedValue([]);
   (ActiveMsgClient.cancelTask as any).mockReset();
   (ActiveMsgClient.cancelTask as any).mockResolvedValue({ uuid: '', alreadyGone: false });
+  (ActiveMsgClient.clearClientState as any).mockReset();
+  (ActiveMsgClient.clearClientState as any).mockResolvedValue({ deleted: 0, toolConfigRestored: true });
+  (ActiveMsgClient.registerPushSubscription as any).mockReset();
+  (ActiveMsgClient.registerPushSubscription as any).mockResolvedValue(undefined);
+  (ActiveMsgClient.deleteRemotePushSubscription as any).mockReset();
+  (ActiveMsgClient.deleteRemotePushSubscription as any).mockResolvedValue(undefined);
   (ActiveMsgStore.getGlobalConfig as any).mockReset();
   (ActiveMsgStore.getGlobalConfig as any).mockResolvedValue({ workerUrl: 'https://amsg.example.dev' });
 });
@@ -409,6 +419,59 @@ describe('清空 Worker 地址前的收尾', () => {
 
     expect(result.listed).toBe(false);
     expect(ActiveMsgClient.cancelTask).not.toHaveBeenCalled();
+  });
+});
+
+describe('清空云端数据', () => {
+  // 这一组守的是同一条：三样各清各的，谁失败都不许短路后面两样。
+  // 换过 AMSG_MASTER_KEY 之后旧密文全解不开，而「列任务」要逐条解密、必然最先炸，
+  // 偏偏这时候最需要被清掉的是 client_state —— 串行短路的话用户一样都清不成。
+  it('任务清单读不出来时，角色上下文和推送订阅照样收拾干净', async () => {
+    (ActiveMsgClient.listAllTasks as any).mockRejectedValue(new Error('decryption failed'));
+    (ActiveMsgClient.clearClientState as any).mockResolvedValue({ deleted: 7, toolConfigRestored: true });
+
+    const result = await wipeAmsgCloudData(undefined, { pushRegistered: true });
+
+    expect(result.tasks.listed).toBe(false);
+    expect(ActiveMsgClient.clearClientState).toHaveBeenCalledTimes(1);
+    expect(result.stateDeleted).toBe(7);
+    expect(ActiveMsgClient.registerPushSubscription).toHaveBeenCalledTimes(1);
+    expect(result.push).toBe('reregistered');
+  });
+
+  it('角色上下文清不掉时，任务照样取消、推送订阅照样收拾', async () => {
+    (ActiveMsgClient.listAllTasks as any).mockResolvedValue([{ uuid: 'u-1' }, { uuid: 'u-2' }]);
+    (ActiveMsgClient.clearClientState as any).mockRejectedValue(new Error('boom'));
+
+    const result = await wipeAmsgCloudData(undefined, { pushRegistered: true });
+
+    expect(ActiveMsgClient.cancelTask).toHaveBeenCalledTimes(2);
+    expect(result.tasks).toEqual({ total: 2, failed: 0, listed: true });
+    expect(result.stateDeleted).toBeNull();
+    expect(result.toolConfigRestored).toBe(false);
+    expect(result.push).toBe('reregistered');
+  });
+
+  it('推送订阅收拾不了也不影响前两样的结果', async () => {
+    (ActiveMsgClient.listAllTasks as any).mockResolvedValue([{ uuid: 'u-1' }]);
+    (ActiveMsgClient.clearClientState as any).mockResolvedValue({ deleted: 3, toolConfigRestored: true });
+    (ActiveMsgClient.registerPushSubscription as any).mockRejectedValue(new Error('no permission'));
+
+    const result = await wipeAmsgCloudData(undefined, { pushRegistered: true });
+
+    expect(result.tasks).toEqual({ total: 1, failed: 0, listed: true });
+    expect(result.stateDeleted).toBe(3);
+    expect(result.push).toBe('failed');
+  });
+
+  // 本机没订阅还去 registerPushSubscription 的话，会当场向用户要通知权限——
+  // 「清空数据」不该顺手弹权限框，删掉云端那行留白就是对的。
+  it('本机没有推送订阅时只删云端那行，不去重新登记', async () => {
+    const result = await wipeAmsgCloudData(undefined, { pushRegistered: false });
+
+    expect(ActiveMsgClient.deleteRemotePushSubscription).toHaveBeenCalledTimes(1);
+    expect(ActiveMsgClient.registerPushSubscription).not.toHaveBeenCalled();
+    expect(result.push).toBe('deleted');
   });
 });
 

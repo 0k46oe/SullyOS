@@ -403,6 +403,67 @@ export const cancelAllRemoteAmsgTasks = async (): Promise<{
   return { total: uuids.length, failed, listed: true };
 };
 
+/** 「清空云端数据」逐项的结果，界面照着它说清楚哪几样清干净了、哪几样没有。 */
+export interface AmsgCloudWipeResult {
+  /** 任务表：读到清单才有数，listed:false 表示清单压根读不出来。 */
+  tasks: { total: number; failed: number; listed: boolean };
+  /** 角色上下文清掉的条目数；这一步失败时是 null。 */
+  stateDeleted: number | null;
+  /** 工具凭据有没有当场补传回去（它没有别的补写时机）。 */
+  toolConfigRestored: boolean;
+  /** 推送订阅的去向：重新登记了 / 删掉了不再登记 / 没弄成。 */
+  push: 'reregistered' | 'deleted' | 'failed';
+}
+
+/**
+ * 清空这个用户在 worker D1 里的全部数据：已排程的任务、同步上去的角色上下文与
+ * 工具凭据、推送订阅登记。设置页「清空云端数据」按钮走的就是这里。
+ *
+ * 三样各清各的，**一步失败不短路后面两步**。这一条是这个函数存在的意义：换过
+ * AMSG_MASTER_KEY 之后，旧密文全解不开，而「列任务」恰恰要逐条解密（GET /messages），
+ * 于是它必然是最先炸的那一步；偏偏这时候最需要被清掉的是 client_state（不清的话
+ * 读它的接口一直报错）。串行短路的话用户会一样都清不成，正好卡在最需要它的场景里。
+ *
+ * 任务清单读不出来时不用另想办法：解不开的任务到点会失败，worker 每轮 cron 都会删掉
+ * 7 天前的失败任务，它们会自己消失。
+ *
+ * @param options.pushRegistered 本机当前有没有推送订阅。有就覆盖登记一份新的
+ *   （worker 上按 user_id 存单行，PUT 一次就顶掉旧行，不用先删、也就没有「删完没
+ *   登记上」的裸奔窗口）；没有就只把云端那行删掉，不去申请通知权限。
+ */
+export const wipeAmsgCloudData = async (
+  realtimeConfig: RealtimeConfig | undefined,
+  options: { pushRegistered: boolean },
+): Promise<AmsgCloudWipeResult> => {
+  // 先收任务：清空过程中就不会再有任务到点触发，跑到一半的状态不至于被现场读走。
+  const tasks = await cancelAllRemoteAmsgTasks();
+
+  let stateDeleted: number | null = null;
+  let toolConfigRestored = false;
+  try {
+    const cleared = await ActiveMsgClient.clearClientState(realtimeConfig);
+    stateDeleted = cleared.deleted;
+    toolConfigRestored = cleared.toolConfigRestored;
+  } catch (error) {
+    console.warn(`${HEADER} 清空云端状态失败`, error);
+  }
+
+  let push: AmsgCloudWipeResult['push'] = 'failed';
+  try {
+    if (options.pushRegistered) {
+      await ActiveMsgClient.registerPushSubscription();
+      push = 'reregistered';
+    } else {
+      await ActiveMsgClient.deleteRemotePushSubscription();
+      push = 'deleted';
+    }
+  } catch (error) {
+    console.warn(`${HEADER} 推送订阅收尾失败`, error);
+  }
+
+  return { tasks, stateDeleted, toolConfigRestored, push };
+};
+
 const writeChatPresence = (charId: string, lastUserMessageAt: number | null) => {
   const presence: AmsgChatPresence = {
     v: 1,
