@@ -48,12 +48,13 @@ import {
     runXhsDetail,
 } from './agenticTools';
 import { getLocalDateKey } from './localDate';
+import { normalizeAssistantActionFormatting } from './assistantActionFormat';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
 
 /** 第一遍粗洗 — 剥 <think> / 时间戳 / 历史里漏出的 [聊天]/[通话]/[约会] / 表情包反向 tag */
 const normalizeAiContent = (raw: string): string => {
-    let cleaned = raw || '';
+    let cleaned = normalizeAssistantActionFormatting(raw || '');
     // Strip hidden chain-of-thought blocks: <think> / <thinking> / <thought>
     cleaned = cleaned.replace(/<(think|thinking|thought)>[\s\S]*?<\/\1>/gi, '');
     cleaned = cleaned.replace(/<(?:think|thinking|thought)>[\s\S]*$/gi, '');
