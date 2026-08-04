@@ -2027,6 +2027,8 @@ export interface StoryTheaterEntry {
     presetId?: string;
     /** 会话内快速预设只覆盖本剧场，不修改预设库。 */
     presetOverride?: StoryTheaterPresetDocument;
+    /** 仅供拒绝 assistant prefill、要求最后一条消息必须为 user 的接口使用；默认关闭以保留原生预设效果。 */
+    forceUserLastMessage?: boolean;
     createdAt: number;
     updatedAt: number;
 }
