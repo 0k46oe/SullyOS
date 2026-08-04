@@ -12,6 +12,7 @@ import {
     buildStoryAffinityAwarenessReminder,
     buildStoryBackstageAftermathReminder,
     buildStoryIdentityGuard,
+    buildStoryPrefillInstruction,
     buildStoryMultiAffinityGuide,
     compileStoryPreset,
     createStoryTheaterDraft,
@@ -198,6 +199,14 @@ describe('剧情预设发送器', () => {
         expect(joined).not.toContain('不应发送');
         expect(result.assistantPrefill).toEqual({ role: 'assistant', content: '正文：' });
         expect(result.settings).toMatchObject({ temperature: 0.7, top_p: 0.8, max_tokens: 2048 });
+    });
+
+    it('把 assistant prefill 转成 system 约束，让最终请求仍可由 user 收尾', () => {
+        expect(buildStoryPrefillInstruction({ role: 'assistant', content: '<scene_header>\n' })).toEqual({
+            role: 'system',
+            content: expect.stringContaining('<scene_header>'),
+        });
+        expect(buildStoryPrefillInstruction(undefined)).toBeUndefined();
     });
 
     it('内置幕后与余波已合为同一发送条目并确实进入最终消息', () => {

@@ -28,6 +28,7 @@ import { trackEvent, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurren
 import { collectAppearance, collectCharSettings, collectDataScale, collectFeatureFlagsAsync } from '../utils/analyticsSnapshot';
 import { markBackupDone } from '../utils/backupReminder';
 import { normalizeCharacterImpression, normalizeCharacterDefaults } from '../utils/impression';
+import { normalizeModelIds } from '../utils/modelList';
 import {
   CONTEXT_RANGE_POLICY_VERSION,
   DEFAULT_MANUAL_CONTEXT_LIMIT,
@@ -1272,7 +1273,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         }
         
         if (savedApi) setApiConfig(JSON.parse(savedApi));
-        if (savedModels) setAvailableModels(JSON.parse(savedModels));
+        if (savedModels) {
+            try { setAvailableModels(normalizeModelIds(JSON.parse(savedModels))); }
+            catch (error) { console.warn('Model list load error', error); }
+        }
         if (savedPresets) setApiPresets(JSON.parse(savedPresets));
 
         // 加载实时配置
@@ -2807,7 +2811,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     setRemoteVectorConfig(newConfig);
     localStorage.setItem('os_remote_vector_config', JSON.stringify(newConfig));
   };
-  const saveModels = (models: string[]) => { setAvailableModels(models); localStorage.setItem('os_available_models', JSON.stringify(models)); };
+  const saveModels = (models: string[]) => {
+      const safeModels = normalizeModelIds(models);
+      setAvailableModels(safeModels);
+      localStorage.setItem('os_available_models', JSON.stringify(safeModels));
+  };
   const addApiPreset = (name: string, config: APIConfig) => { setApiPresets(prev => { const next = [...prev, { id: Date.now().toString(), name, config }]; localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
   const updateApiPreset = (id: string, name: string, config: APIConfig) => { setApiPresets(prev => { const next = prev.map(p => p.id === id ? { ...p, name, config } : p); localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
   const removeApiPreset = (id: string) => { setApiPresets(prev => { const next = prev.filter(p => p.id !== id); localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };

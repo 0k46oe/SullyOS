@@ -164,6 +164,11 @@
       html.sully-statusbar-hidden {
         --chrome-top: var(--safe-top);
       }
+      /* 紧凑显示：时间/电量嵌入安全区左右两侧，App 顶栏从安全区底部开始。
+         无刘海设备仍至少留 1.5rem 给时间栏；有灵动岛时不把按钮顶进遮挡区。 */
+      html.sully-statusbar-compact {
+        --chrome-top: max(var(--safe-top), 1.5rem);
+      }
       body.ios-standalone {
         min-height: var(--app-height);
         height: var(--app-height);

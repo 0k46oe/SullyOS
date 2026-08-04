@@ -21,6 +21,7 @@ import { PRESET_THEMES } from '../components/chat/ChatConstants';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent } from '../utils/analytics';
 import { markAmsgStateDirty } from '../utils/amsgStateSync';
+import { fetchBlobForShare, shareOrDownloadBlob } from '../utils/shareExport';
 type CallState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | 'ended' | 'error';
 type ViewMode = 'role-select' | 'in-call' | 'history' | 'record-detail';
 type CallBubble = { id: string; dbId?: number; role: 'user' | 'assistant'; text: string; time: string; audioUrl?: string; timestamp: number };
@@ -484,27 +485,19 @@ const CallApp: React.FC = () => {
       addToast(e?.message || '无法启动语音输入', 'error');
     }
   };
-  // 下载某条通话语音（优先把 blob/远端拉成文件下载，CORS 拉不到就开链接让用户自己存）
+  // 下载某条通话语音：移动端优先调系统分享/保存，避免 WebView 的 <a download> 假成功。
   const handleDownloadCallAudio = async (url?: string, ts?: number) => {
     if (!url) { addToast('这条还没有语音', 'error'); return; }
     try {
       const fname = `${(selectedChar?.name || '通话').replace(/[\\/:*?"<>|]/g, '_')}_语音_${ts || Date.now()}.mp3`;
-      let blob: Blob | null = null;
-      try { const r = await fetch(url); if (r.ok) blob = await r.blob(); } catch { /* CORS：走兜底 */ }
-      const a = document.createElement('a');
-      a.download = fname;
-      if (blob) {
-        const u = URL.createObjectURL(blob);
-        a.href = u; document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(u), 1000);
-      } else {
-        a.href = url; a.target = '_blank'; a.rel = 'noopener';
-        document.body.appendChild(a); a.click(); a.remove();
-      }
-      addToast('语音已开始下载', 'success');
+      const blob = await fetchBlobForShare(url, 'audio/mpeg');
+      const result = await shareOrDownloadBlob({ blob, fileName: fname, shareTitle: `${selectedChar?.name || '通话'}的语音` });
+      if (result === 'cancelled') return;
+      addToast(result === 'shared' ? '已打开系统保存/分享' : '语音已开始下载', 'success');
       trackEvent('下载一条通话语音');
-    } catch {
-      addToast('语音下载失败', 'error');
+    } catch (error) {
+      console.error('[Call] download audio failed', error);
+      addToast('语音文件已失效或无法读取，请重新生成后再下载', 'error');
     }
   };
   useEffect(() => {

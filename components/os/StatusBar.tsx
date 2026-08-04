@@ -2,7 +2,7 @@
 import React, { useEffect, useState } from 'react';
 import { useOS } from '../../context/OSContext';
 import Modal from './Modal';
-import { isStatusBarHidden } from '../../utils/iosStandalone';
+import { resolveStatusBarMode } from '../../utils/iosStandalone';
 
 // TypeScript definition for Web Battery API
 interface BatteryManager extends EventTarget {
@@ -65,9 +65,10 @@ const StatusBar: React.FC = () => {
     return text.includes('backing store') || text.includes('indexeddb.open');
   });
 
-  // 时钟/电量条是否隐藏：外观「隐藏顶部时间栏」开关 + 平台默认（iOS 全屏 PWA 系统已有状态栏，默认隐藏避免双显）。
-  // 仅隐藏下面这条时钟/电量条；错误指示器 + 系统调试终端与本开关无关，始终独立渲染。virtualTime 实为真实时间，隐藏不丢信息。
-  const hideOsStatusBar = isStatusBarHidden(theme.hideStatusBar);
+  // 三档状态栏布局；旧版 hideStatusBar 存档仍可解析。错误指示器与本设置无关，始终独立渲染。
+  const statusBarMode = resolveStatusBarMode(theme.statusBarMode, theme.hideStatusBar);
+  const hideOsStatusBar = statusBarMode === 'hidden';
+  const compactStatusBar = statusBarMode === 'compact';
 
   return (
     <>
@@ -78,9 +79,11 @@ const StatusBar: React.FC = () => {
           className="w-full flex justify-between items-start px-6 text-[11px] font-bold z-50 absolute top-0 left-0 bg-transparent transition-colors duration-500 select-none pointer-events-none"
           style={{
               color: textColor,
-              paddingTop: 'max(4px, var(--safe-top))',
+              // 紧凑档把状态信息放进硬件安全区左右两侧；内容仍从 --chrome-top 开始，
+              // 不会把返回键/标题顶进刘海或灵动岛，同时少掉 standard 的额外 1.5rem。
+              paddingTop: compactStatusBar ? '4px' : 'max(4px, var(--safe-top))',
               height: 'auto',
-              minHeight: '2rem'
+              minHeight: compactStatusBar ? 'max(var(--safe-top), 1.5rem)' : '2rem'
           }}
       >
         <div className="w-1/3 pl-2 flex items-center gap-2 pointer-events-auto">

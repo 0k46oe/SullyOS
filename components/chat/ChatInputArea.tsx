@@ -626,7 +626,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                             {actionsContent}
                         </div>
                     )}
-                    {/* Actions Panel (paginated: page 0 = 内置功能, page 1 = 外部服务, page 2 = 记忆链接) */}
+                    {/* Actions Panel (paginated: page 0 = 内置功能, page 1 = 外部服务, page 2 = 更多) */}
                     {showPanel === 'actions' && !actionsContent && (
                         <div
                             className="overflow-y-auto no-scrollbar"
@@ -834,38 +834,16 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                               </div>
                               <span className="text-xs font-bold">提示音</span>
                             </button>
-                          </div>
 
-                          {/* Page 2: 本轮记忆修补。单独成页，避免挤压常用功能。 */}
-                          <div className={`${actionsPage === 2 ? 'flex' : 'hidden'} min-h-[13rem] px-6 py-5 flex-col items-center justify-center text-center`}>
-                            <div className={`mb-3 text-[9px] font-bold uppercase tracking-[.24em] ${isDiscordStyle ? 'text-purple-300/55' : acnh ? 'text-[#8f7658]/65' : 'text-purple-400/55'}`}>
-                              memory repair
-                            </div>
+                            {/* 记忆链接与提示音同级：都是聊天工具入口，不单独占一整块。 */}
                             <button
                               onClick={() => onPanelAction('memory-link')}
-                              className={`group w-full max-w-[19rem] flex items-center gap-4 rounded-[1.4rem] px-5 py-4 text-left active:scale-[.98] transition-all border ${
-                                acnh
-                                  ? 'bg-white/70 border-[#e6dab4] text-[#725d42] shadow-sm'
-                                  : isDiscordStyle
-                                    ? 'bg-slate-800/80 border-purple-400/20 text-slate-100 shadow-[0_12px_32px_rgba(0,0,0,.18)]'
-                                    : 'bg-gradient-to-br from-purple-50 to-indigo-50/70 border-purple-100 text-slate-700 shadow-[0_12px_28px_rgba(124,58,237,.10)]'
-                              }`}
+                              className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}
                             >
-                              <span className={`w-14 h-14 shrink-0 rounded-2xl grid place-items-center transition-transform group-active:scale-95 ${
-                                acnh
-                                  ? 'bg-[#efe5ce] text-[#8f674a]'
-                                  : isDiscordStyle
-                                    ? 'bg-purple-400/10 text-purple-300'
-                                    : 'bg-white/85 text-purple-500 shadow-sm'
-                              }`}>
+                              <span className={`w-14 h-14 rounded-2xl grid place-items-center shadow-sm border ${acnh ? 'bg-white/70 border-[#e6dab4] text-[#8f674a]' : isDiscordStyle ? 'bg-slate-800 text-purple-300 border-purple-400/20' : 'bg-purple-50 text-purple-500 border-purple-100'}`}>
                                 <LinkSimple className="w-6 h-6" weight="bold" />
                               </span>
-                              <span className="min-w-0">
-                                <span className="block text-sm font-bold">记忆链接</span>
-                                <span className={`block mt-1 text-[10px] leading-5 ${isDiscordStyle ? 'text-slate-400' : acnh ? 'text-[#8f7658]' : 'text-slate-400'}`}>
-                                  查看刚才经过的记忆，原地修补不准确的地方
-                                </span>
-                              </span>
+                              <span className="text-xs font-bold">记忆链接</span>
                             </button>
                           </div>
 
