@@ -69,6 +69,8 @@ import {
 } from '../utils/chatContextRange';
 
 const VOICE_LANG_LABELS: Record<string, string> = { en: 'English', ja: '日本語', ko: '한국어', fr: 'Français', es: 'Español' };
+/** 即时对话那一轮回复「推送陆续到齐」的宽限时间，也就是自动合成的补扫窗口有多长（见下面的 auto-TTS effect）。 */
+const INSTANT_VOICE_SCAN_WINDOW_MS = 30_000;
 type InstantToolUiStatus = {
     charId: string;
     phase: 'running' | 'continuing' | 'done' | 'failed';
@@ -356,6 +358,10 @@ const Chat: React.FC = () => {
     const prevInstantPendingRef = useRef(false);
     const instantVoiceScanUntilRef = useRef(0);
     const instantVoiceScanCharRef = useRef<string | undefined>(undefined);
+    // 自动合成失败过的消息 id。扫描窗里每来一条新消息都会重扫一遍，不记下来的话同一条失败的
+    // 消息会被反复重试、每次再弹一个「语音生成失败」。只挡自动那条路：用户自己点「转换语音」
+    // 照样能重试（换了网络/补了 key 之后就该能成）。换角色时清空。
+    const voiceFailedRef = useRef<Set<number>>(new Set());
     // Track blob: URLs we created so we can revoke them on character switch / unmount.
     const voiceBlobUrlsRef = useRef<Set<string>>(new Set());
     // We warn the user at most once (per character) that MiniMax voice isn't configured —
@@ -469,11 +475,13 @@ const Chat: React.FC = () => {
         const isFishTts = resolveTtsProvider(apiConfig) === 'fishaudio';
         const voiceTagContent = parsedVoice.hasVoiceTag ? (isFishTts ? parsedVoice.rawSpeech : parsedVoice.speech) : '';
         const voiceEmotion = parsedVoice.emotion;
-        // F12 调试：打印 LLM 这条消息的带标签原文，方便核对语音标签写法是否正确。
-        console.log('[voice] LLM 原文(带标签):', { provider: isFishTts ? 'fishaudio' : 'minimax', content: msg.content, voiceTagContent, emotion: voiceEmotion });
 
         // Auto-TTS: only generate voice when AI explicitly used <语音> tag
         if (autoTriggered && !parsedVoice.hasVoiceTag) return;
+        // F12 调试：打印 LLM 这条消息的带标签原文，方便核对语音标签写法是否正确。
+        // 放在上面那道门之后：即时对话的扫描窗里每来一条消息都要重扫一遍，
+        // 搁在门前的话没有语音标签的普通消息会被反复打印，控制台直接刷屏。
+        console.log('[voice] LLM 原文(带标签):', { provider: isFishTts ? 'fishaudio' : 'minimax', content: msg.content, voiceTagContent, emotion: voiceEmotion });
 
         // MiniMax not configured for this character: don't attempt synthesis (it would
         // throw and surface an error toast on every message / every tap). Instead remind
@@ -574,6 +582,8 @@ const Chat: React.FC = () => {
                 setPlayingMsgId(msg.id);
             }
         } catch (err: any) {
+            // 记一笔失败：自动那条路下次扫到就跳过（见 voiceFailedRef 的说明）。
+            voiceFailedRef.current.add(msg.id);
             addToast(`语音生成失败: ${err?.message || '未知错误'}`, 'error');
         } finally {
             setVoiceLoading(prev => { const next = new Set(prev); next.delete(msg.id); return next; });
@@ -624,7 +634,6 @@ const Chat: React.FC = () => {
     //     由真变假），熄灭时开一个 30 秒的扫描窗——一轮回复常被拆成好几条推送陆续到，第一条到
     //     就熄灯，后面几条得靠窗口内每次 messages 变化补扫。只扫窗口内，冷启动和翻历史不会把
     //     旧消息整批合成一遍。
-    const INSTANT_VOICE_SCAN_WINDOW_MS = 30_000;
     useEffect(() => {
         const wasTyping = prevIsTypingRef.current;
         prevIsTypingRef.current = isTyping;
@@ -639,6 +648,8 @@ const Chat: React.FC = () => {
             instantVoiceScanUntilRef.current = 0;
             return;
         }
+        // 覆盖范围就到这儿：销账是在页面里发生的，推送落地时人不在这个聊天页的话没有这次
+        // 真→假的转换，那条回复就保持静音（跟「不批量合成历史」是同一个取舍）。
         if (wasPending && !instantChatPending) {
             instantVoiceScanUntilRef.current = Date.now() + INSTANT_VOICE_SCAN_WINDOW_MS;
         }
@@ -660,6 +671,9 @@ const Chat: React.FC = () => {
             if (msg.role !== 'assistant') break;
             if (msg.type !== 'text') continue;
             if (voiceDataMap[msg.id] || voiceLoading.has(msg.id)) continue;
+            // 合成失败过就别再自动重试了：扫描窗里每来一条消息都重扫一遍，
+            // 同一条会一路重试到窗口关闭，还每次弹一个失败提示。用户手点不受影响。
+            if (voiceFailedRef.current.has(msg.id)) continue;
             handleManualTts(msg, true);
         }
     }, [isTyping, instantChatPending, messages]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -732,6 +746,8 @@ const Chat: React.FC = () => {
     useEffect(() => {
         // Reset the "MiniMax not configured" warning so each character gets one reminder.
         minimaxWarnedRef.current = false;
+        // 自动合成的失败记录也跟着换角色清空：这一位的失败不该拦着下一位。
+        voiceFailedRef.current.clear();
         const urls = voiceBlobUrlsRef.current;
         return () => {
             urls.forEach(u => { try { URL.revokeObjectURL(u); } catch { /* ignore */ } });
