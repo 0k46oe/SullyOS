@@ -6,9 +6,9 @@
  * 2. processNewMessages() — 缓冲区机制，AI 回复后后台调用
  *
  * 缓冲区机制（替代旧的 TopicLoom + 封盒方案）：
- * - 热区：最近 200 条消息留在聊天上下文
+ * - 热区：按角色档位保留最近一段消息在聊天上下文
  * - 缓冲区：热区之前、高水位之后的消息
- * - 缓冲区 >= 50 条时触发：LLM 提取记忆 → Embedding → 更新高水位
+ * - 缓冲区达到角色档位阈值时触发：LLM 提取记忆 → Embedding → 更新高水位
  * - 保留缓冲区尾部 15% 作为下次提取的上下文衔接
  *
  * LLM 调用策略：
@@ -17,9 +17,13 @@
  * - 检索管线 → 纯计算，不调 LLM
  */
 
-import type { Message } from '../../types';
+import type { MemoryPalaceWaterlineConfig, Message } from '../../types';
 import type { EmbeddingConfig, PersonalityStyle, RemoteVectorConfig, ScoredMemory } from './types';
 import { countUnprocessedBufferMessages } from './bufferCount';
+import {
+    DEFAULT_MEMORY_PALACE_WATERLINE,
+    resolveMemoryPalaceWaterline,
+} from './waterline';
 
 /** 从 localStorage 读取远程向量配置（避免在每个调用点都传参） */
 function getRemoteVectorConfig(): RemoteVectorConfig | undefined {
@@ -1133,30 +1137,49 @@ export function getMemoryPalaceHighWaterMark(charId: string): number {
 
 // ─── 缓冲区配置 ─────────────────────────────────────
 
-/** 热区大小：最近 N 条消息始终留在聊天上下文，不处理 */
-const HOT_ZONE_SIZE = 200;
-/** 缓冲区阈值：累积超过 N 条消息后触发处理 */
-const BUFFER_THRESHOLD = 100;
 /** 处理比例：取缓冲区前 85%，保留尾部 15% 作为下次总结的上下文 */
 const PROCESS_RATIO = 0.85;
+
+/**
+ * 水位节奏的唯一读取入口。配置跟随 CharacterProfile 存在 IndexedDB；调用方无需
+ * 判断消息来自私聊、见面、通话还是剧情，整个 charId 时间线统一使用同一份档位。
+ */
+async function loadCharacterWaterline(
+    charId: string,
+    override?: MemoryPalaceWaterlineConfig,
+) {
+    if (override) return resolveMemoryPalaceWaterline(override);
+    try {
+        const characters = await DB.getAllCharacters();
+        const character = characters.find(item => item.id === charId);
+        return resolveMemoryPalaceWaterline(character?.memoryPalaceWaterline);
+    } catch (error) {
+        console.warn('🏰 [Pipeline] 读取角色水位档位失败，回退默认 200/100', error);
+        return { ...DEFAULT_MEMORY_PALACE_WATERLINE };
+    }
+}
 
 /**
  * 计算当前"真正可被 pipeline 处理"的缓冲区消息数。
  *
  * 与 processNewMessages 的口径完全一致：
  *   - 只数语义相关消息（排除纯图片/表情和无转写的纯音频；保留有文字的语音与卡片）
- *   - 排除最后 HOT_ZONE_SIZE 条（热区永远不会被处理）
+ *   - 排除角色档位指定的最后 N 条（热区永远不会被处理）
  *   - 只数 id > 高水位标记的部分
  *
- * 切勿用"id > hwm"裸过滤——那会把热区的 200 条也算进未同步，
+ * 切勿用"id > hwm"裸过滤——那会把当前热区也算进未同步，
  * 导致 UI 显示的"未同步条数"远大于 pipeline 实际能处理的量
  * （表现：弹窗说有几百条未同步，点立即追平却跑不出新 hwm）。
  */
-export async function getMemoryPalaceUnprocessedBufferCount(charId: string): Promise<number> {
+export async function getMemoryPalaceUnprocessedBufferCount(
+    charId: string,
+    waterlineOverride?: MemoryPalaceWaterlineConfig,
+): Promise<number> {
     const allMessages = await DB.getMessagesByCharId(charId, true);
-    const semantic = allMessages.filter(m => isMessageSemanticallyRelevant(m));
+    const semantic = allMessages.filter(m => !m.groupId && isMessageSemanticallyRelevant(m));
     const highWaterMark = await getReliableMemoryPalaceHighWaterMark(charId);
-    return countUnprocessedBufferMessages(semantic, highWaterMark, HOT_ZONE_SIZE);
+    const waterline = await loadCharacterWaterline(charId, waterlineOverride);
+    return countUnprocessedBufferMessages(semantic, highWaterMark, waterline.hotZoneSize);
 }
 
 /** 并发锁：防止多次 AI 回复同时触发 processNewMessages 产生竞态 */
@@ -1165,7 +1188,7 @@ const processingLocks = new Set<string>();
 /**
  * 缓冲区机制处理聊天消息：
  *
- * 1. 热区 = 最近 200 条消息（留在聊天上下文，不处理）
+ * 1. 热区 = 角色档位指定的最近 N 条消息（留在聊天上下文，不处理）
  * 2. 缓冲区 = 高水位标记之后、热区之前的消息
  * 3. 缓冲区 >= 阈值时：取前 85% → LLM 提取记忆 → Embedding → 更新高水位
  * 4. 保留尾部 15%，避免下次总结时事件没有起因
@@ -1547,25 +1570,28 @@ export async function processNewMessages(
         //    只排除纯视觉资源和无转写的纯音频，避免 URL / base64 污染 LLM。
         const allMessages = await DB.getMessagesByCharId(charId, true);
         const textMessages = allMessages
-            .filter(m => isMessageSemanticallyRelevant(m))
+            .filter(m => !m.groupId && isMessageSemanticallyRelevant(m))
             .sort((a, b) => a.id - b.id);
 
         const totalCount = textMessages.length;
+        const waterline = await loadCharacterWaterline(charId);
+        const hotZoneSize = waterline.hotZoneSize;
+        const bufferThreshold = waterline.bufferThreshold;
 
-        if (totalCount <= HOT_ZONE_SIZE) {
-            console.log(`🏰 [Pipeline] 跳过：消息总数 ${totalCount} <= 热区 ${HOT_ZONE_SIZE}，无需处理`);
+        if (totalCount <= hotZoneSize) {
+            console.log(`🏰 [Pipeline] 跳过：消息总数 ${totalCount} <= 热区 ${hotZoneSize}（${waterline.preset}），无需处理`);
             return makeSkipResult('hot_zone');
         }
 
-        // 2. 热区 = 最后 HOT_ZONE_SIZE 条
-        const hotZoneStartIdx = totalCount - HOT_ZONE_SIZE;
+        // 2. 热区 = 角色档位指定的最后 N 条
+        const hotZoneStartIdx = totalCount - hotZoneSize;
         const hotZoneStartId = textMessages[hotZoneStartIdx].id;
 
         // 3. 缓冲区 = 高水位标记之后、热区之前
         const lastProcessedId = await getReliableMemoryPalaceHighWaterMark(charId);
         const buffer = textMessages.filter(m => m.id > lastProcessedId && m.id < hotZoneStartId);
 
-        const minThreshold = force ? 10 : BUFFER_THRESHOLD;
+        const minThreshold = force ? 10 : bufferThreshold;
         if (buffer.length < minThreshold) {
             console.log(`🏰 [Pipeline] 跳过：缓冲区 ${buffer.length} 条 < 阈值 ${minThreshold}（hwm=${lastProcessedId}, hotZone起始id=${hotZoneStartId}）`);
             return makeSkipResult('threshold');
@@ -1580,7 +1606,7 @@ export async function processNewMessages(
 
         console.log(`🏰 [Pipeline] 开始处理缓冲区：${toProcess.length} 条消息（保留尾部 ${keptTail} 条）`);
         console.log(`🏰 [Pipeline]   消息ID范围: ${toProcess[0].id} ~ ${toProcess[toProcess.length - 1].id}`);
-        console.log(`🏰 [Pipeline]   总消息: ${totalCount}, 热区: ${HOT_ZONE_SIZE}, 缓冲区: ${buffer.length}, hwm: ${lastProcessedId}`);
+        console.log(`🏰 [Pipeline]   总消息: ${totalCount}, 保留原文: ${hotZoneSize}, 缓冲区: ${buffer.length}/${minThreshold}, 档位: ${waterline.preset}, hwm: ${lastProcessedId}`);
         onProgress?.(`正在整理 ${toProcess.length} 条对话...`);
 
         // 5–8. 构建上下文 → LLM 提取 → 向量化（共用 extractAndStoreMemories）。
