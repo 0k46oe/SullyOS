@@ -351,6 +351,11 @@ const Chat: React.FC = () => {
     const [playingMsgId, setPlayingMsgId] = useState<number | null>(null);
     const chatAudioRef = useRef<HTMLAudioElement | null>(null);
     const prevIsTypingRef = useRef(false);
+    // 即时对话那条路的自动合成扫描窗（用法见下面那个 auto-TTS 的 effect）：
+    // 「正在输入」灯灭的那一下开窗，窗口内每次消息变化都补扫一遍；角色不对就整个作废。
+    const prevInstantPendingRef = useRef(false);
+    const instantVoiceScanUntilRef = useRef(0);
+    const instantVoiceScanCharRef = useRef<string | undefined>(undefined);
     // Track blob: URLs we created so we can revoke them on character switch / unmount.
     const voiceBlobUrlsRef = useRef<Set<string>>(new Set());
     // We warn the user at most once (per character) that MiniMax voice isn't configured —
@@ -611,11 +616,38 @@ const Chat: React.FC = () => {
     // Scans ALL recent assistant messages (not just the last one) because chunkText
     // may split a single AI response into multiple messages, and the <语音> tag could
     // end up in any chunk — not necessarily the final one.
+    //
+    // 两个触发源：
+    //   · 本机生成：打字结束的那一下（wasTyping → !isTyping）。
+    //   · 即时对话：回复在云端生成、靠推送落库，本机的 isTyping 在 POST 完就灭了，永远等不到
+    //     那一下，开了自动播放的角色会一路静音。改看「正在输入」指示灯熄灭（instantChatPending
+    //     由真变假），熄灭时开一个 30 秒的扫描窗——一轮回复常被拆成好几条推送陆续到，第一条到
+    //     就熄灯，后面几条得靠窗口内每次 messages 变化补扫。只扫窗口内，冷启动和翻历史不会把
+    //     旧消息整批合成一遍。
+    const INSTANT_VOICE_SCAN_WINDOW_MS = 30_000;
     useEffect(() => {
         const wasTyping = prevIsTypingRef.current;
         prevIsTypingRef.current = isTyping;
-        // Only trigger when AI just finished typing (wasTyping → !isTyping)
-        if (!wasTyping || isTyping) return;
+        const wasPending = prevInstantPendingRef.current;
+        prevInstantPendingRef.current = instantChatPending;
+        // 换角色先把窗清零：Chat 里切角色不卸载组件，这几个 ref 会跨角色留着。甲还欠着回复时
+        // 切到乙，instantChatPending 会跟着乙的记录变假——那不是「乙的回复到了」，不能拿它开窗，
+        // 更不能拿甲的窗去扫乙的历史消息。两个触发源都要先有一次「变化前」才成立，所以这里直接
+        // 走人不会漏掉任何一次真的触发。
+        if (instantVoiceScanCharRef.current !== char?.id) {
+            instantVoiceScanCharRef.current = char?.id;
+            instantVoiceScanUntilRef.current = 0;
+            return;
+        }
+        if (wasPending && !instantChatPending) {
+            instantVoiceScanUntilRef.current = Date.now() + INSTANT_VOICE_SCAN_WINDOW_MS;
+        }
+        // Only trigger when AI just finished typing (wasTyping → !isTyping)，或者还在即时对话的扫描窗里。
+        // 这道门也是 messages 进依赖之后本机那条路的保险：不在窗里就仍然只在打字结束那一下扫，
+        // 平时每来一条消息不会重扫。
+        const typingJustEnded = wasTyping && !isTyping;
+        const inInstantWindow = Date.now() < instantVoiceScanUntilRef.current;
+        if (!typingJustEnded && !inInstantWindow) return;
         if (!char.chatVoiceEnabled) return;
         // 关着「收到就自动播放」就别提前合成（理由见 shouldAutoGenerateVoice）：
         // 空语音条照常出现，用户点了才合成、合成完直接播。
@@ -630,7 +662,7 @@ const Chat: React.FC = () => {
             if (voiceDataMap[msg.id] || voiceLoading.has(msg.id)) continue;
             handleManualTts(msg, true);
         }
-    }, [isTyping]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [isTyping, instantChatPending, messages]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const canReroll = !isTyping && messages.length > 0 && messages[messages.length - 1].role === 'assistant';
 

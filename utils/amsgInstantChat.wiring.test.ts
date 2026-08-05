@@ -56,6 +56,9 @@ const routingSrc = () => sliceSrc(chatAiSrc, '即时对话路由段', ROUTING_HE
 /** 即时对话分支那一段源码（从判定行到它自己的 return）。 */
 const branchSrc = () => sliceSrc(chatAiSrc, '即时对话分支', INSTANT_CHAT_BRANCH_HEAD, '// 流式预览：');
 
+/** Chat 里自动合成语音那个 effect 的源码（含它的依赖数组）。 */
+const autoTtsSrc = () => sliceSrc(chatSrc, '语音自动合成', '// --- Auto-TTS: when chatVoiceEnabled', 'const canReroll =');
+
 describe('useChatAI 的分流接缝', () => {
   it('MCP 不在排除名单里（worker 会跑后台 MCP；排掉它 = 配了 MCP 的人永远静默走本地）', () => {
     // e2e 实测踩过：只要全局有一台 enabled 的 MCP 服务器，mcpChatActive 对所有角色为真，
@@ -186,6 +189,25 @@ describe('Chat 界面的「正在输入…」', () => {
 
   it('三个点的显示条件带上它（isTyping 在 POST 完就灭了）', () => {
     expect(chatSrc).toMatch(/\(isTyping \|\| instantChatPending \|\|/);
+  });
+});
+
+describe('Chat 界面的语音自动合成', () => {
+  it('云端回来的回复也算数（只认 isTyping 的话，开了自动播放的角色一路静音）', () => {
+    // isTyping 在 POST 完就灭了，即时对话的回复是之后靠推送落库的，永远等不到那一下。
+    // 灯灭（instantChatPending 由真变假）开窗 + messages 进依赖补扫，缺一条都没声音。
+    expect(autoTtsSrc()).toMatch(/wasPending && !instantChatPending/);
+    expect(autoTtsSrc()).toMatch(/\}, \[isTyping, instantChatPending, messages\]\)/);
+  });
+
+  it('不在窗里就还是只在打字结束那一下扫（不然每来一条消息都重扫一遍历史）', () => {
+    expect(autoTtsSrc()).toMatch(/if \(!typingJustEnded && !inInstantWindow\) return;/);
+  });
+
+  it('换角色把扫描窗作废（Chat 里切角色不卸载组件，ref 会跨角色留着）', () => {
+    // 甲还欠着回复时切到乙，指示灯会跟着乙的记录灭——那不是「乙的回复到了」，
+    // 拿它开窗就会把乙的历史消息整批合成一遍。
+    expect(autoTtsSrc()).toContain('instantVoiceScanCharRef');
   });
 });
 
