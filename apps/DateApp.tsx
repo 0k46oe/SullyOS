@@ -407,7 +407,7 @@ const DateApp: React.FC = () => {
 
         // 重发场景：如果 DB 里最后一条已经是这条 user 消息（上一轮发送后 API 失败 / 网络抖动等），
         // 就跳过重复落库，直接走 API。与 chat app 行为对齐，让用户按发送键即可重新触发 LLM。
-        const recentCheck = await DB.getRecentMessagesByCharId(char.id, 1, true);
+        const recentCheck = await DB.getRecentMessagesByCharIdAndSource(char.id, 'date', 1);
         const isRetry = recentCheck.length > 0
             && recentCheck[0].role === 'user'
             && recentCheck[0].content === text

@@ -28,6 +28,7 @@ import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } fr
 import { trackEvent } from '../utils/analytics';
 import { markAmsgStateDirty } from '../utils/amsgStateSync';
 import { fetchBlobForShare, shareOrDownloadBlob } from '../utils/shareExport';
+import { getPendingReplyText } from '../utils/pendingReply';
 type CallState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | 'ended' | 'error';
 type ViewMode = 'role-select' | 'in-call' | 'history' | 'record-detail';
 type CallBubble = { id: string; dbId?: number; role: 'user' | 'assistant'; text: string; time: string; audioUrl?: string; timestamp: number };
@@ -854,21 +855,32 @@ const CallApp: React.FC = () => {
     const minimaxApiKey = resolveMiniMaxApiKey(apiConfig);
     const voiceId = resolveVoiceId();
     if (isListening) { sttSessionRef.current?.stop(); setIsListening(false); }
-    const input = draftInput.trim();
+    const typedInput = draftInput.trim();
+    const retryInput = getPendingReplyText(bubbles);
+    const input = typedInput || retryInput;
     if (!input) return addToast('说点什么吧', 'info');
     if (['connecting', 'thinking'].includes(callState)) return addToast(`${selectedChar?.name || '对方'}还在想，等一等`, 'info');
     if (isAudioPlaying) pauseAudio();
+    const latestBubble = bubbles[bubbles.length - 1];
+    const retryBubble = latestBubble?.role === 'user' && latestBubble.text.trim() === input
+      ? latestBubble
+      : null;
+    const isRetry = !!retryBubble;
     const nowTs = Date.now();
     const now = formatTime();
-    const userBubble: CallBubble = { id: `${nowTs}-u`, role: 'user', text: input, time: now, timestamp: nowTs };
-    setBubbles(prev => [...prev, userBubble]);
+    const userBubble: CallBubble = retryBubble
+      ? retryBubble
+      : { id: `${nowTs}-u`, role: 'user', text: input, time: now, timestamp: nowTs };
+    if (!isRetry) setBubbles(prev => [...prev, userBubble]);
     setDraftInput('');
     setShowInputPanel(false);
-    let userDbId: number | undefined;
+    let userDbId: number | undefined = isRetry ? userBubble.dbId : undefined;
     if (selectedChar?.id) {
-      userDbId = await DB.saveMessage({ charId: selectedChar.id, role: 'user', type: 'text', content: input, metadata: { source: 'call', callSessionId: currentSessionId } });
-      setBubbles(prev => prev.map(b => (b.id === userBubble.id ? { ...b, dbId: userDbId } : b)));
-      markCallTurnDirty();
+      if (!userDbId) {
+        userDbId = await DB.saveMessage({ charId: selectedChar.id, role: 'user', type: 'text', content: input, metadata: { source: 'call', callSessionId: currentSessionId } });
+        setBubbles(prev => prev.map(b => (b.id === userBubble.id ? { ...b, dbId: userDbId } : b)));
+        markCallTurnDirty();
+      }
     }
     if (!callStartedAt) setCallStartedAt(Date.now());
     setCallState('connecting');
@@ -1060,6 +1072,7 @@ const CallApp: React.FC = () => {
     }
   };
   const sendingBusy = ['connecting', 'thinking'].includes(callState);
+  const pendingCallRetryText = getPendingReplyText(bubbles);
   const displayCallState: CallState = isAudioPlaying ? 'speaking' : callState;
   const latestAssistantAudio = [...bubbles].reverse().find(b => b.role === 'assistant' && b.audioUrl)?.audioUrl;
   useEffect(() => {
@@ -1595,10 +1608,11 @@ const CallApp: React.FC = () => {
               value={draftInput}
               onChange={(e) => setDraftInput(e.target.value)}
               className="flex-1 min-w-0 bg-transparent px-2 text-sm outline-none placeholder:text-white/35"
-              placeholder={isListening ? '在听你说……' : sendingBusy ? `${selectedChar?.name || '对方'}正在想……` : `想对${selectedChar?.name || '对方'}说什么？`}
+              placeholder={isListening ? '在听你说……' : sendingBusy ? `${selectedChar?.name || '对方'}正在想……` : pendingCallRetryText ? '上次回复中断，可直接重试' : `想对${selectedChar?.name || '对方'}说什么？`}
             />
-            <button onClick={handleTurn} disabled={sendingBusy} className="shrink-0 px-4 py-2 rounded-xl text-sm font-medium text-white disabled:opacity-40 transition active:scale-95" style={{ backgroundColor: accentColor, boxShadow: `0 0 16px ${accentColor}66` }}>{sendingBusy ? '…' : '说'}</button>
+            <button onClick={handleTurn} disabled={sendingBusy || (!draftInput.trim() && !pendingCallRetryText)} className="shrink-0 px-4 py-2 rounded-xl text-sm font-medium text-white disabled:opacity-40 transition active:scale-95" style={{ backgroundColor: accentColor, boxShadow: `0 0 16px ${accentColor}66` }}>{sendingBusy ? '…' : pendingCallRetryText && !draftInput.trim() ? '重试' : '说'}</button>
           </div>
+          {!sendingBusy && pendingCallRetryText && !draftInput.trim() && <div className="text-[10px] text-amber-200/70 mt-1 px-1">上一句话还没得到回复，点击重试即可继续</div>}
           {isListening && <div className="text-[10px] text-white/40 mt-1 px-1 animate-pulse">正在聆听，点麦克风结束</div>}
         </div>
       )}
