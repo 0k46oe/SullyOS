@@ -794,6 +794,61 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
     }, 20000);
   });
 
+  // worker 把「这一轮跑过哪些工具」挂在最后一条 push 的 metadata.amsgToolTrace 上，
+  // 气泡底下那行灰字照它渲染。它走的是 mcdInheritMeta 这条通道——push 的 metadata 整份
+  // 铺到每条落库的气泡上。铺的时候 `...(message.metadata)` 排在最后，谁也盖不掉它；
+  // 哪天顺序改了，这行灰字会静默消失（用户只看到角色凭空知道了新闻）。
+  describe('云端带回来的工具痕迹', () => {
+    const TRACE = [{ name: 'web_search', count: 2 }, { name: 'recall', count: 1 }];
+
+    it('随 push 回来 → 落到这条 push 拆出的气泡 metadata 上，跟固定那几个字段并存', async () => {
+      const charId = 'char-tooltrace';
+      await DB.saveCharacter({ id: charId, name: '会查东西的角色' } as any);
+      await ActiveMsgStore.saveInboxMessage(inboxMsg({
+        messageId: 'msg-tooltrace',
+        charId,
+        charName: '会查东西的角色',
+        messageType: 'text',
+        body: '我看了下。\n没什么大事。',
+        // 补收（跳过打字节奏），这条用例只关心元数据落到哪
+        receivedAt: Date.now() - 3_600_000,
+        sentAt: Date.now() - 3_600_000,
+        metadata: { charId, amsgToolTrace: TRACE },
+      }));
+
+      await flushInboxToChat();
+
+      const msgs = await assistantMsgs(charId);
+      expect(msgs.length).toBeGreaterThan(0);
+      for (const m of msgs) {
+        expect((m.metadata as any)?.amsgToolTrace).toEqual(TRACE);
+        // 同一份 metadata 里那几个固定字段照旧在（痕迹不是靠盖掉别人挤进来的）
+        expect((m.metadata as any)?.source).toBe('active_msg_2');
+        expect((m.metadata as any)?.activeMsg2?.messageId).toBe('msg-tooltrace');
+      }
+    }, 20000);
+
+    it('没跑工具的那一轮 → 气泡上一个字段都没有', async () => {
+      const charId = 'char-tooltrace-none';
+      await DB.saveCharacter({ id: charId, name: '没查东西的角色' } as any);
+      await ActiveMsgStore.saveInboxMessage(inboxMsg({
+        messageId: 'msg-tooltrace-none',
+        charId,
+        charName: '没查东西的角色',
+        messageType: 'text',
+        receivedAt: Date.now() - 3_600_000,
+        sentAt: Date.now() - 3_600_000,
+        metadata: { charId },
+      }));
+
+      await flushInboxToChat();
+
+      const msgs = await assistantMsgs(charId);
+      expect(msgs.length).toBeGreaterThan(0);
+      for (const m of msgs) expect((m.metadata as any)?.amsgToolTrace).toBeUndefined();
+    }, 20000);
+  });
+
   it('降级存原稿路径·刚送达：与主路径同口径，落 sentAt', async () => {
     const charId = 'char-ts-raw-fresh';
     const sentAt = Date.now() - 60_000;

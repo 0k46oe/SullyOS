@@ -721,6 +721,30 @@ export const attachScheduledTasks = (
 };
 
 /**
+ * 这一轮在云端跑过哪些工具，按第一次出现的顺序压成 `[{ name, count }]`。
+ *
+ * 只留名字和次数：气泡底下那行灰字（「调用了工具：web_search ×2 · recall ×1」）照它渲染，
+ * 参数和结果都不带——那些是角色的内心活动，摊给用户看反而出戏，体积也压不住。
+ *
+ * MCP 工具剥掉内部前缀（`mcp__`）：那是我们拿来分流的，用户在设置里配的是剥完之后
+ * 那个名字，原样显示对不上号。
+ */
+export const condenseToolTrace = (
+  calls: ReadonlyArray<{ name: string }>,
+): Array<{ name: string; count: number }> => {
+  const counts = new Map<string, number>();
+  for (const call of calls) {
+    const raw = call?.name ?? '';
+    const name = raw.startsWith(MCP_FIRE_NAME_PREFIX)
+      ? raw.slice(MCP_FIRE_NAME_PREFIX.length)
+      : raw;
+    if (!name) continue;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return [...counts].map(([name, count]) => ({ name, count }));
+};
+
+/**
  * 执行一次「给自己排下一条」。永不抛错——参数写歪、排满了都以 ok:false 回喂让模型改口，
  * 跟别的工具一个语义（fire 抛错 = 整条任务重跑 = 用户这次一个字都收不到）。
  *
@@ -1390,6 +1414,26 @@ export const amsgHooks = {
               metadata: {
                 ...(payload.metadata as Record<string, unknown> ?? {}),
                 amsgReasoning: session.finalReasoning,
+              },
+            }
+          : payload));
+      }
+
+      // 这一轮在云端跑过的工具随**最后一条** push 回客户端，气泡底下那行灰字照它渲染。
+      // 挂最后一条是因为它跟正文一起收尾：用户读完话才看到「哦，这是查过的」；挂第一条
+      // 就成了还没开口先报备一句「我查了 web_search」。
+      //
+      // 只在即时对话这条路回传。定时任务的气泡是凭空冒出来的（用户没在等这一轮），底下
+      // 再挂一行「调用了工具」等于把后台实现摊开给用户看，跟主动消息要的那点不着痕迹相冲。
+      const toolTrace = stash.instant ? condenseToolTrace(session.toolCalls) : [];
+      if (toolTrace.length > 0 && payloads.length > 0) {
+        const lastIdx = payloads.length - 1;
+        payloads = payloads.map((payload, i) => (i === lastIdx
+          ? {
+              ...payload,
+              metadata: {
+                ...(payload.metadata as Record<string, unknown> ?? {}),
+                amsgToolTrace: toolTrace,
               },
             }
           : payload));

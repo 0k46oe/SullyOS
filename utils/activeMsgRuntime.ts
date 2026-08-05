@@ -522,6 +522,8 @@ const processInboxMessageWithPostProcessing = async (
         sentAt: message.sentAt,
         receivedAt: message.receivedAt,
       },
+      // push 自己那份排最后：worker 随这条 push 捎回来的东西（amsgToolTrace 这类要落到
+      // 气泡上给用户看的）靠它进 metadata，被上面几个固定字段盖掉就静默没了。
       ...(message.metadata || {}),
     },
     xhsCaches: pushXhsCaches,

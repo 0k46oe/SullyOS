@@ -68,6 +68,30 @@ import {
 } from '../utils/chatContextRange';
 
 const VOICE_LANG_LABELS: Record<string, string> = { en: 'English', ja: '日本語', ko: '한국어', fr: 'Français', es: 'Español' };
+
+/**
+ * 即时对话这一轮在云端跑过的工具 → 气泡底下那行灰字里的内容。
+ *
+ * `[{ name: 'web_search', count: 2 }, { name: 'recall', count: 1 }]`
+ *   → `web_search ×2 · recall ×1`（只跑过一次的省掉 ×1，不然一行全是 ×1，反倒看不出
+ *      哪个跑了好几遍）。
+ *
+ * 形状不对就返回空串、这一行整个不画：这份数据是 worker 随 push 捎回来的，
+ * 老版本 worker 压根不带，宁可少一行也不要在气泡底下渲染出 `[object Object]`。
+ */
+const formatAmsgToolTrace = (raw: unknown): string => {
+    if (!Array.isArray(raw)) return '';
+    return raw
+        .map((entry: any) => {
+            const name = typeof entry?.name === 'string' ? entry.name.trim() : '';
+            if (!name) return '';
+            const count = Number(entry?.count);
+            return Number.isFinite(count) && count > 1 ? `${name} ×${count}` : name;
+        })
+        .filter(Boolean)
+        .join(' · ');
+};
+
 type InstantToolUiStatus = {
     charId: string;
     phase: 'running' | 'continuing' | 'done' | 'failed';
@@ -2692,6 +2716,11 @@ const Chat: React.FC = () => {
         onOpenSettings: () => setShowThinkingChainModal(true),
     }), [(char as any)?.thinkingChainStyle, (char as any)?.thinkingChainCustomColors]);
 
+    // 工具痕迹那行灰字要贴着气泡走，所以把气泡自带的组间距（MessageItem 里那组
+    // mb-3 / mb-6 / mb-8）抵掉大半。组内的气泡本来就挨着，不用抵。
+    const toolTracePullClass = osTheme.chatMessageSpacing === 'compact' ? '-mt-2'
+        : osTheme.chatMessageSpacing === 'spacious' ? '-mt-6' : '-mt-5';
+
     // Reset active category if it becomes invisible for the current character
     useEffect(() => {
         if (activeCategory !== 'default' && visibleCategories.length > 0 && !visibleCategories.some(c => c.id === activeCategory)) {
@@ -3283,6 +3312,14 @@ const Chat: React.FC = () => {
                         nextMessage.role !== m.role ||
                         Math.abs(nextMessage.timestamp - m.timestamp) > messageGroupGapMs;
                     const suppressEntranceAnimation = streamPreviewHandoverIdsRef.current.has(m.id);
+                    // 这一轮在云端跑过哪些工具（即时对话才有，worker 挂在最后一条推送上）。
+                    // 一条推送拆出的每条气泡都继承了同一份（metadata 是整份往下铺的，见
+                    // activeMsgRuntime 的 mcdInheritMeta），所以只在这条推送的最后一条底下画，
+                    // 不然一句回复底下能排出三行一模一样的字。
+                    const toolTraceText = formatAmsgToolTrace((m.metadata as any)?.amsgToolTrace);
+                    const pushMessageId = (m.metadata as any)?.activeMsg2?.messageId;
+                    const showToolTrace = !!toolTraceText
+                        && !(pushMessageId && (nextMessage?.metadata as any)?.activeMsg2?.messageId === pushMessageId);
                     return (
                         <div
                             key={m.id || i}
@@ -3335,6 +3372,13 @@ const Chat: React.FC = () => {
                             onResolveLifeRecord={handleResolveLifeRecord}
                             thinkingChainOptions={thinkingChainOptions}
                         />
+                        {showToolTrace && (
+                            <div className={`px-3 mb-4 ${breaksWithNext ? toolTracePullClass : ''}`}>
+                                <div className="ml-12 text-[10px] leading-relaxed text-slate-400">
+                                    调用了工具：{toolTraceText}
+                                </div>
+                            </div>
+                        )}
                         </div>
                     );
                 })}

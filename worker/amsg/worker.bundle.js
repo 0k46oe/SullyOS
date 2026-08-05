@@ -9015,6 +9015,16 @@ var attachScheduledTasks = (pushPayloads, tasks) => {
     metadata: { ...payload.metadata ?? {}, amsgSelfScheduled: tasks }
   } : payload);
 };
+var condenseToolTrace = (calls) => {
+  const counts = /* @__PURE__ */ new Map();
+  for (const call of calls) {
+    const raw = call?.name ?? "";
+    const name = raw.startsWith(MCP_FIRE_NAME_PREFIX) ? raw.slice(MCP_FIRE_NAME_PREFIX.length) : raw;
+    if (!name) continue;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return [...counts].map(([name, count]) => ({ name, count }));
+};
 var runFireScheduleTool = async (stash, scheduleTask, args, nowMs) => {
   if (typeof scheduleTask !== "function") {
     return { ok: false, reason: "not_supported", message: "\u5F53\u524D\u540E\u53F0\u7248\u672C\u8FD8\u4E0D\u652F\u6301\u7ED9\u81EA\u5DF1\u6392\u540E\u7EED\uFF0C\u8FD9\u6B21\u5C31\u628A\u8BDD\u8BF4\u5B8C\u5427\u3002" };
@@ -9427,6 +9437,17 @@ var amsgHooks = {
           }
         } : payload);
       }
+      const toolTrace = stash.instant ? condenseToolTrace(session.toolCalls) : [];
+      if (toolTrace.length > 0 && payloads.length > 0) {
+        const lastIdx = payloads.length - 1;
+        payloads = payloads.map((payload, i) => i === lastIdx ? {
+          ...payload,
+          metadata: {
+            ...payload.metadata ?? {},
+            amsgToolTrace: toolTrace
+          }
+        } : payload);
+      }
       if (stash.instant && stash.emotionEvalPromise && payloads.length > 0) {
         const { raw: evalText, error: evalError } = await stash.emotionEvalPromise;
         const lastIdx = payloads.length - 1;
@@ -9749,6 +9770,7 @@ export {
   amsgStaleSkip,
   attachScheduledTasks,
   buildWorkerConfig,
+  condenseToolTrace,
   src_default as default,
   inspectWorkerEnv,
   offloadOversizedPush,

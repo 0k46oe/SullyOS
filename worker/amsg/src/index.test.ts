@@ -1156,6 +1156,130 @@ describe('云端思考链随首条 push 回客户端', () => {
   });
 });
 
+// 即时对话这一轮在云端跑过哪些工具，要跟着回复一起回到客户端，气泡底下才画得出那行灰字
+// （「调用了工具：web_search ×2 · recall ×1」）。本地那条路全程有搜索状态条，云端这条路
+// 全程静默——不带这份的话，角色突然知道了今天的新闻，用户看不出这是查来的。
+// 它挂在**最后一条** push 上：跟正文一起收尾，用户读完才看到痕迹。
+describe('云端工具痕迹随末条 push 回客户端', () => {
+  const CLIENT_TASK_ID = 'client-task-tooltrace';
+  const CHAT_MESSAGES = [
+    { role: 'system', content: '你是 Nyah。' },
+    { role: 'user', content: '今天有什么新闻' },
+  ];
+  /** 两段正文 → 两条 push，才验得出「只挂最后一条」。 */
+  const TWO_SEGMENT_OUTPUT = '我看了下。\n没什么大事。';
+
+  const toolCall = (id: string, name: string, args: Record<string, unknown>) => ({
+    id,
+    function: { name, arguments: JSON.stringify(args) },
+  });
+
+  /**
+   * 跑一次 fire：onBeforeFire → 依次执行工具 → onLLMOutput 收尾，返回 decision。
+   *
+   * 工具挑的都是「没配就直接 ok:false 返回」的（web_search 缺 key、recall 读 tool_pack
+   * 里那份记忆），一次网络请求都不发，痕迹照样记得下来。
+   */
+  const fireWithTools = async (opts: {
+    instant: boolean;
+    tools: Array<{ name: string; args: Record<string, unknown> }>;
+  }) => {
+    const store = makeFireStore(opts.instant ? CHAT_MESSAGES : undefined);
+    const scratch: Record<string, unknown> = {};
+    const metadata = {
+      charId: CHAR_ID,
+      amsgClientTaskId: CLIENT_TASK_ID,
+      ...(opts.instant
+        ? { amsgMode: 'instant', amsgInstantChat: true }
+        : { amsgMode: 'auto', amsgTaskInstruction: '想到什么说什么' }),
+    };
+    await amsgHooks.onBeforeFire({
+      task: {
+        id: FIRE_TASK_ID, uuid: TASK_UUID, contactName: 'Nyah', recurrenceType: 'none',
+        nextSendAt: FIRE_NEXT_SEND_AT, metadata,
+      },
+      userId: 'u1',
+      readState: store.readState,
+      writeState: store.writeState,
+      now: NOW,
+      scratch,
+    } as any);
+
+    for (const [i, tool] of opts.tools.entries()) {
+      await amsgHooks.executeToolCalls(
+        [toolCall(`c${i}`, tool.name, tool.args)],
+        { sessionId: `sess_task_${FIRE_TASK_ID}@1`, scratch, iteration: 0 } as any,
+      );
+    }
+
+    return await amsgHooks.onLLMOutput({
+      sessionId: `sess_task_${FIRE_TASK_ID}@1`, taskId: FIRE_TASK_ID, taskUuid: TASK_UUID,
+      llmResponse: {}, llmOutputText: TWO_SEGMENT_OUTPUT, contactName: 'Nyah',
+      metadata, scratch, writeState: store.writeState, iteration: 1,
+    } as any) as any;
+  };
+
+  it('同一个工具跑了两次 → 按第一次出现的顺序压成名字 + 次数，只挂最后一条', async () => {
+    const decision = await fireWithTools({
+      instant: true,
+      tools: [
+        { name: 'web_search', args: { query: '今天的新闻' } },
+        { name: 'recall', args: { year: '2026', month: '06' } },
+        { name: 'web_search', args: { query: '明天天气' } },
+      ],
+    });
+
+    expect(decision.decision).toBe('finish');
+    const payloads = decision.pushPayloads as Array<Record<string, any>>;
+    expect(payloads.length).toBeGreaterThanOrEqual(2);
+    const lastMeta = payloads[payloads.length - 1].metadata;
+    expect(lastMeta.amsgToolTrace).toEqual([
+      { name: 'web_search', count: 2 },
+      { name: 'recall', count: 1 },
+    ]);
+    for (const payload of payloads.slice(0, -1)) {
+      expect(payload.metadata.amsgToolTrace).toBeUndefined();
+    }
+  });
+
+  it('这一轮一个工具都没跑 → 一个字段都不挂（气泡底下不该凭空多一行）', async () => {
+    const decision = await fireWithTools({ instant: true, tools: [] });
+
+    expect(decision.decision).toBe('finish');
+    for (const payload of decision.pushPayloads as Array<Record<string, any>>) {
+      expect(payload.metadata.amsgToolTrace).toBeUndefined();
+    }
+  });
+
+  // MCP 工具在云端叫 mcp__xxx，前缀是我们内部拿来分流的。原样显示的话，用户在设置里
+  // 配的那个名字跟气泡底下写的对不上号。
+  it('MCP 工具剥掉内部前缀，显示用户自己配的那个名字', async () => {
+    const decision = await fireWithTools({
+      instant: true,
+      tools: [{ name: 'mcp__get_secret', args: {} }],
+    });
+
+    expect(decision.decision).toBe('finish');
+    const payloads = decision.pushPayloads as Array<Record<string, any>>;
+    expect(payloads[payloads.length - 1].metadata.amsgToolTrace)
+      .toEqual([{ name: 'get_secret', count: 1 }]);
+  });
+
+  // 定时任务那条路的气泡是凭空冒出来的（用户没在等这一轮），底下再挂一行「调用了工具」
+  // 等于把后台实现摊开给用户看。这行灰字先只给即时对话。
+  it('定时任务那条路不带痕迹', async () => {
+    const decision = await fireWithTools({
+      instant: false,
+      tools: [{ name: 'web_search', args: { query: '今天的新闻' } }],
+    });
+
+    expect(decision.decision).toBe('finish');
+    for (const payload of decision.pushPayloads as Array<Record<string, any>>) {
+      expect(payload.metadata.amsgToolTrace).toBeUndefined();
+    }
+  });
+});
+
 // 通用 MCP 的执行环节：worker 直连用户自己配的服务器（服务端 fetch 没有 CORS，
 // 不经代理）。这里钉三件事——真的打到了配置里那个地址并带上凭据、同一次 fire 内
 // 握手只做一次、以及任何失败都以 ok:false 回喂而不是把整条 fire 炸掉。
