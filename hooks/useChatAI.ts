@@ -800,12 +800,31 @@ export const useChatAI = ({
             // fire 时独家供给），本地那份照旧全量。判定材料和下面的 payload.flags 同源：
             // luckinChatActive / mcdActive / luckinActive 就是由这三个值算出来的。
             // IP 还开着（脏配置）时让 IP 先走、按全量构建——别把剥过时效段的 prompt 交给 IP。
+            //
+            // Instant Push 配没配着，一回合只读这一次，下面所有用到的地方都吃这个值。
+            // 从这里到真正分流之间隔着好几个 await（构建 payload、取 amsg2 任务现状…），
+            // 期间用户在设置页存一次盘就能把它翻面；各读各的话会出现「按上云剥掉了时效段
+            // 的 prompt，最后却交给了 IP 或落回本地」——两个钟的问题原样回来。
+            const instantPushConfigured = isInstantConfigReady();
             const luckinChatOn = !!luckinChatRef?.current?.active;
             const instantChatVeto: string | null = luckinChatOn ? 'luckin-chat'
                 : mcdMiniOpen ? 'mcd'
                     : luckinMiniOpen ? 'luckin' : null;
             const instantChatOn = await isInstantChatReady();
-            const instantChatRoute = instantChatOn && !instantChatVeto && !isInstantConfigReady();
+            const instantChatRoute = instantChatOn && !instantChatVeto && !instantPushConfigured;
+            // 开着即时对话、也没被点单流程否决，却还是不上云——只剩「IP 配置也还在」这一种
+            // 可能（脏配置）。这一轮改由上面的 Instant Push 分支接手；它也不接的话（比如配了
+            // MCP，在它的排除名单里）就一路落回本地生成。不留痕的话，用户看到的是「即时对话
+            // 开着、消息照常出来」，查无可查——静默分流那个坑就是这么来的。
+            if (instantChatOn && !instantChatVeto && !instantChatRoute) {
+                console.warn('[AmsgInstantChat] 这一轮没走即时对话（Instant Push 配置仍在，脏配置）：交给 Instant Push，它也不接就落回本地');
+                appendInstantTraceEntry({
+                    ts: new Date().toISOString(),
+                    event: 'instant-chat-veto',
+                    charId: char.id,
+                    reason: 'instant-push-configured',
+                });
+            }
 
             const payload = await stageT('payload', buildChatRequestPayload({
                 char: charForGen, userProfile, groups, emojis, categories,
@@ -880,7 +899,9 @@ export const useChatAI = ({
             //      worker 跑完主回复后跑 eval 并推 emotion_update 回来, 客户端 flush 时落 buff —— 这样前端被杀也算数,
             //      且不会跟客户端 eval 双跑双扣费. 见下方 instant 分支 + worker/instant-push + activeMsgRuntime.
             const emotionEvalEnabled = !!(!promptBuildSkipped && !isEmotionEvalSkipped() && isScheduleFeatureOn(char) && char.emotionConfig?.enabled);
-            const instantOn = isInstantConfigReady();
+            // 同一回合同一个值（见上面路由判定处）：这里要是自己再读一次，可能出现
+            // 「按 instant 模式把评估打包上云了，实际却走本地」——情绪底色从此悄悄停更。
+            const instantOn = instantPushConfigured;
             // 评估跟随全局流式开关（专用情绪 API 自带 stream 字段时以它为准）
             const evalStream: boolean = !!((effectiveApi as any).stream ?? apiConfig.stream ?? false);
             const emotionApi = emotionEvalEnabled
@@ -1093,7 +1114,7 @@ export const useChatAI = ({
             // 表现就是"选了城市也没用 / 角色不下单"。这些模式下跳过 instant push, 用本地 fetch 跑工具循环。
             // 双向互斥后理论上到不了：走到这条 trace 说明两边开关同时亮着（脏配置），当断言告警看。
             const AMSG2_SUPPRESSED_TRACE = 'amsg2-suppressed-by-instant';
-            if (isInstantConfigReady() && !payload.flags.luckinChatActive && !payload.flags.mcdActive && !payload.flags.luckinActive && !payload.flags.mcpChatActive) {
+            if (instantPushConfigured && !payload.flags.luckinChatActive && !payload.flags.mcdActive && !payload.flags.luckinActive && !payload.flags.mcpChatActive) {
                 // 走这条路 = 上面那段 amsg2 的工具、排程现状块都白拼了（instant 发的是原始
                 // fullMessages、请求体不带 tools），下面的活跃会话租约也不会开。三样都是静默
                 // 失效，留一条 trace 让观察窗看得见，别让人对着「功能不响」凭空排查。
@@ -1161,7 +1182,7 @@ export const useChatAI = ({
             // MCP（这次 POST 顺手把配置传上去了），云端答得了。排掉它的话，只要全局配着
             // 一台 enabled 的 MCP 服务器，即时对话就永远静默走回本地——设置页亮着
             // 「已开启」、界面毫无异样，正是 instant push 静默分流那个坑的复刻。
-            if (instantChatOn && !isInstantConfigReady()) {
+            if (instantChatOn && !instantPushConfigured) {
                 // 瑞幸/麦当劳点单是客户端交互式循环（选城市、确认单），云端接不了手，
                 // 这一轮只能留在本地跑（否决后不 return，落回下面的本地路径；这份 payload
                 // 也是按本地全量构建的，时效段一样不缺）。

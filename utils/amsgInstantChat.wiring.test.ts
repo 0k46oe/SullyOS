@@ -23,47 +23,68 @@ const settingsSrc = read('../components/settings/ActiveMsgGlobalSettingsModal.ts
 const instantPushSettingsSrc = read('../components/settings/InstantPushSettingsModal.tsx');
 
 /** 即时对话分支的判定行（分支起点、也是排序基准）。 */
-const INSTANT_CHAT_BRANCH_HEAD = 'if (instantChatOn && !isInstantConfigReady())';
+const INSTANT_CHAT_BRANCH_HEAD = 'if (instantChatOn && !instantPushConfigured)';
+/** Instant Push 分支的判定行（脏配置时它先接手）。 */
+const INSTANT_PUSH_BRANCH_HEAD = 'if (instantPushConfigured && !payload.flags.luckinChatActive';
+/** 路由判定那一段的起点（一回合只读一次 Instant Push 配置，就是从这行开始）。 */
+const ROUTING_HEAD = 'const instantPushConfigured =';
+
+/**
+ * 取 useChatAI.ts 里的一段源码。锚点找不到时报出「哪一段、哪个锚点」——
+ * 这些断言在模块顶层跑过一次，锚点一改名整份文件就以 `expected -1 to be
+ * greater than -1` 集体阵亡，看不出是哪条不变量塌了。
+ */
+const sliceSrc = (label: string, startAnchor: string, endAnchor: string): string => {
+  const start = chatAiSrc.indexOf(startAnchor);
+  if (start < 0) {
+    throw new Error(`[${label}] 在 hooks/useChatAI.ts 里找不到起点锚点 ${JSON.stringify(startAnchor)}。先确认这条不变量本身还在（只是改了名就更新锚点，被删了就是真回归）。`);
+  }
+  const end = chatAiSrc.indexOf(endAnchor, start);
+  if (end <= start) {
+    throw new Error(`[${label}] 起点之后找不到终点锚点 ${JSON.stringify(endAnchor)}，这一段的边界变了。`);
+  }
+  return chatAiSrc.slice(start, end);
+};
 
 /** 路由判定那一段源码（在 buildChatRequestPayload 之前算好，上云与否 + 要不要剥时效段）。 */
-const instantChatRouting = (() => {
-  const start = chatAiSrc.indexOf('const luckinChatOn =');
-  expect(start).toBeGreaterThan(-1);
-  const end = chatAiSrc.indexOf('const payload = await stageT(', start);
-  expect(end).toBeGreaterThan(start);
-  return chatAiSrc.slice(start, end);
-})();
+const routingSrc = () => sliceSrc('即时对话路由段', ROUTING_HEAD, 'const payload = await stageT(');
 
 /** 即时对话分支那一段源码（从判定行到它自己的 return）。 */
-const instantChatBranch = (() => {
-  const start = chatAiSrc.indexOf(INSTANT_CHAT_BRANCH_HEAD);
-  expect(start).toBeGreaterThan(-1);
-  const end = chatAiSrc.indexOf('// 流式预览：', start);
-  expect(end).toBeGreaterThan(start);
-  return chatAiSrc.slice(start, end);
-})();
+const branchSrc = () => sliceSrc('即时对话分支', INSTANT_CHAT_BRANCH_HEAD, '// 流式预览：');
 
 describe('useChatAI 的分流接缝', () => {
   it('MCP 不在排除名单里（worker 会跑后台 MCP；排掉它 = 配了 MCP 的人永远静默走本地）', () => {
     // e2e 实测踩过：只要全局有一台 enabled 的 MCP 服务器，mcpChatActive 对所有角色为真，
     // 排除它的话即时对话开关亮着却永远走本地生成，用户查无可查。
     // 判定挪到构建 payload 之前之后，这条要连路由那一段一起看。
-    expect(instantChatRouting).not.toContain('mcpChatActive');
-    expect(instantChatBranch).not.toContain('mcpChatActive');
+    expect(routingSrc()).not.toContain('mcpChatActive');
+    expect(branchSrc()).not.toContain('mcpChatActive');
   });
 
   it('上云的判定在构建 prompt 之前就定下来，并作为 timelyByWorker 交给 payload', () => {
     // 这一条钉的是「一份 prompt 只剩一个钟」：走云端时前端不烤时钟/节日/天气/热搜/
     // MCP 说明，那几段由 worker 在 fire 时刻独家补。判定要是又挪回分支里现算，
     // payload 就只能按全量构建，模型会同时读到前端快照和 worker 现拉的两份。
-    expect(instantChatRouting).toContain('const instantChatRoute =');
+    expect(routingSrc()).toContain('const instantChatRoute =');
     expect(chatAiSrc).toMatch(/timelyByWorker:\s*instantChatRoute/);
     const routeAt = chatAiSrc.indexOf('const instantChatRoute =');
     const payloadAt = chatAiSrc.indexOf('const payload = await stageT(');
     expect(routeAt).toBeGreaterThan(-1);
     expect(payloadAt).toBeGreaterThan(routeAt);
     // IP 还开着（脏配置）时那份 payload 必须是全量的——剥过时效段的 prompt 不能交给 IP。
-    expect(instantChatRouting).toContain('!isInstantConfigReady()');
+    expect(routingSrc()).toContain('!instantPushConfigured');
+  });
+
+  it('Instant Push 配没配着，一回合只读一次（读两次能读出两个答案）', () => {
+    // 从路由判定到真正分流之间隔着好几个 await，用户在设置页存一次盘就能把它翻面。
+    // 各读各的话：按上云剥掉时效段的 prompt，最后却交给 IP 或落回本地生成。
+    const reads = chatAiSrc.match(/isInstantConfigReady\(\)/g) ?? [];
+    expect(reads.length).toBe(1);
+    expect(routingSrc()).toContain(`${ROUTING_HEAD} isInstantConfigReady()`);
+    // 三个消费方都吃这一个 const（情绪评估的 instantOn 也在内，它决定评估在本地跑还是打包上云）。
+    expect(chatAiSrc).toContain(INSTANT_PUSH_BRANCH_HEAD);
+    expect(chatAiSrc).toContain(INSTANT_CHAT_BRANCH_HEAD);
+    expect(chatAiSrc).toMatch(/const instantOn = instantPushConfigured;/);
   });
 
   it('点单流程否决时留 trace，不许无声走本地', () => {
@@ -71,21 +92,31 @@ describe('useChatAI 的分流接缝', () => {
     // 静默分流那种「三个点照亮、哪条路都看不出」的坑不能再来一遍。
     // 否决现在和 payload.flags 同源、只是算得更早：三个来源就是那三个 flag 的原料。
     for (const source of ['luckinChatRef?.current?.active', 'mcdMiniOpen', 'luckinMiniOpen']) {
-      expect(instantChatRouting).toContain(source);
+      expect(routingSrc()).toContain(source);
     }
-    expect(instantChatRouting).toContain('const instantChatVeto');
-    expect(instantChatBranch).toContain("event: 'instant-chat-veto'");
+    expect(routingSrc()).toContain('const instantChatVeto');
+    expect(branchSrc()).toContain("event: 'instant-chat-veto'");
     // 否决走的是「不 return、落回本地路径」，不能把整个分支 return 掉。
-    const vetoAt = instantChatBranch.indexOf("event: 'instant-chat-veto'");
-    const sendAt = instantChatBranch.indexOf('sendInstantChatTurn');
+    const vetoAt = branchSrc().indexOf("event: 'instant-chat-veto'");
+    const sendAt = branchSrc().indexOf('sendInstantChatTurn');
     expect(vetoAt).toBeGreaterThan(-1);
     expect(sendAt).toBeGreaterThan(vetoAt);
+  });
+
+  it('脏配置那一轮同样留 trace（开着即时对话却没上云，不能只有用户在纳闷）', () => {
+    // 即时对话开着、没被点单否决，却还是不走云端 —— 只剩「IP 配置也还在」这一种可能。
+    // 这一轮由 IP 接手，配了 MCP 的话 IP 也不接、一路落回本地生成。三条路都没动静的话
+    // 界面上完全看不出，跟静默分流那个坑一模一样。
+    const routing = routingSrc();
+    expect(routing).toContain("event: 'instant-chat-veto'");
+    expect(routing).toContain("reason: 'instant-push-configured'");
+    expect(routing).toMatch(/if \(instantChatOn && !instantChatVeto && !instantChatRoute\)/);
   });
 
   it('两个分支都还在，且 Instant Push 排在即时对话前面（历史配置的兜底顺序不变）', () => {
     // 双向互斥后两边理论上不会同时亮着；这条钉的是万一出现脏配置（两个开关都读到
     // true）时谁先接手，顺序变了就是另一种未定义行为。
-    const instantPushAt = chatAiSrc.indexOf('if (isInstantConfigReady() && !payload.flags.luckinChatActive');
+    const instantPushAt = chatAiSrc.indexOf(INSTANT_PUSH_BRANCH_HEAD);
     const instantChatAt = chatAiSrc.indexOf(INSTANT_CHAT_BRANCH_HEAD);
     expect(instantPushAt).toBeGreaterThan(-1);
     expect(instantChatAt).toBeGreaterThan(-1);
@@ -93,36 +124,36 @@ describe('useChatAI 的分流接缝', () => {
   });
 
   it('云端拿到的就是本地要发的那串消息和那份凭据', () => {
-    expect(instantChatBranch).toMatch(/chatMessages:\s*fullMessages/);
-    expect(instantChatBranch).toMatch(/baseUrl:\s*effectiveApi\.baseUrl/);
-    expect(instantChatBranch).toMatch(/model:\s*effectiveApi\.model/);
+    expect(branchSrc()).toMatch(/chatMessages:\s*fullMessages/);
+    expect(branchSrc()).toMatch(/baseUrl:\s*effectiveApi\.baseUrl/);
+    expect(branchSrc()).toMatch(/model:\s*effectiveApi\.model/);
   });
 
   it('失败时不悄悄回本地生成：分支里没有本地 LLM 请求，走完就 return', () => {
-    expect(instantChatBranch).not.toContain('safeFetchJson');
-    expect(instantChatBranch).not.toContain('chat/completions');
-    expect(instantChatBranch).toContain('return;');
+    expect(branchSrc()).not.toContain('safeFetchJson');
+    expect(branchSrc()).not.toContain('chat/completions');
+    expect(branchSrc()).toContain('return;');
   });
 
   it('失败时留下能看见的痕迹（系统消息 + 弹错），不是静默吞掉', () => {
-    expect(instantChatBranch).toContain("role: 'system'");
-    expect(instantChatBranch).toMatch(/showError\(/);
+    expect(branchSrc()).toContain("role: 'system'");
+    expect(branchSrc()).toMatch(/showError\(/);
   });
 
   it('受理成功那一轮不再打脏重传 fire_pack', () => {
-    expect(instantChatBranch).toContain('instantChatAccepted = true');
+    expect(branchSrc()).toContain('instantChatAccepted = true');
     expect(chatAiSrc).toMatch(/if \(!instantChatAccepted\) \{[\s\S]{0,200}markAmsgStateDirty\(/);
   });
 
   it('情绪评估照常在本地发一枪（云端那条链路没有这一步，不发就是悄悄停更）', () => {
-    expect(instantChatBranch).toContain('fireLocalEmotionEval?.()');
+    expect(branchSrc()).toContain('fireLocalEmotionEval?.()');
   });
 
   it('不在这条路上开活跃会话租约（生成不在本机跑，没人需要它举手）', () => {
     // 租约那句排在分支的 return 之后，走这条路根本到不了。
     const leaseAt = chatAiSrc.indexOf('startAmsgChatPresence(char.id');
     expect(leaseAt).toBeGreaterThan(chatAiSrc.indexOf(INSTANT_CHAT_BRANCH_HEAD));
-    expect(instantChatBranch).not.toContain('startAmsgChatPresence');
+    expect(branchSrc()).not.toContain('startAmsgChatPresence');
   });
 });
 

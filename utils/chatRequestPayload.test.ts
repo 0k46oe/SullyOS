@@ -79,6 +79,17 @@ describe('timelyByWorker —— 时效段交给 worker，前端这份不重复�
         expect(normal.flags.mcpChatActive).toBe(true);
     }, 20000);
 
+    it('只裁文本不动 flag：mcpChatActive 照实反映有没有 MCP 可用', async () => {
+        // 上层还要靠这个 flag 决定请求带不带 tools、出错了要不要按 MCP 那套降级重试。
+        // 跟着文字注入一起掐掉的话，这些判断会全部读成「这一轮没有 MCP」。
+        const withMcp = await buildChatRequestPayload({ ...baseInput(), timelyByWorker: true });
+        expect(withMcp.flags.mcpChatActive).toBe(true);
+
+        localStorage.removeItem(MCP_SERVERS_KEY);
+        const withoutMcp = await buildChatRequestPayload({ ...baseInput(), timelyByWorker: true });
+        expect(withoutMcp.flags.mcpChatActive).toBe(false);
+    }, 20000);
+
     it('关掉天气热搜时的「今日特殊」节日兜底同样交给 worker', async () => {
         // 天气/热搜关着时，前端只补一条节日行。worker 的 realtimeWorld 里也有节日
         // （跟着角色的时间感知开关走），两边都写就会看到两遍「今天是七夕」。
