@@ -28,7 +28,7 @@ import {
   getInstantChatPending,
   listInstantChatPendings,
 } from './amsgInstantChat';
-import { describeRemoteLastError, pruneStaleTasks } from './amsg2Tasks';
+import { describeInstantChatFailure, pruneStaleTasks } from './amsg2Tasks';
 import { appendInstantTraceEntry } from './instantTraceLog';
 import { trackEvent } from './analytics';
 
@@ -1480,17 +1480,19 @@ export const runInstantChatStatusCheck = async (): Promise<void> => {
     if (status.state === 'completed') {
       let reason: string | undefined;
       try {
+        // 全量分页 + 逐条解密，几秒起步——这中间用户可能又发了一条。收尾那一步认 uuid，
+        // 迟到的结论碰不到新那一轮。
         const rows = await ActiveMsgClient.listRemoteTasksForChar(pending.charId);
         const row = rows.find((r) => r.uuid === pending.uuid);
-        reason = describeRemoteLastError(row?.lastError ?? null, (iso) => new Date(iso).toLocaleString()) ?? undefined;
+        reason = describeInstantChatFailure(row?.lastError ?? null, row?.retryCount) ?? undefined;
       } catch (e) {
         log.warn('即时对话失败原因取不到（报个笼统的）', { uuid: pending.uuid, error: e });
       }
       log.warn('即时对话云端任务已失败', { charId: pending.charId, uuid: pending.uuid, reason });
-      await failInstantChatPending(pending.charId, reason ?? '任务已失败（未取到失败原因）');
+      await failInstantChatPending(pending.charId, pending.uuid, reason ?? '生成失败（云端没记下原因）');
     } else {
       log.warn('即时对话云端那行已经没了，回复也取不回', { charId: pending.charId, uuid: pending.uuid });
-      await failInstantChatPending(pending.charId);
+      await failInstantChatPending(pending.charId, pending.uuid);
     }
   }
   armInstantChatWatchdog();

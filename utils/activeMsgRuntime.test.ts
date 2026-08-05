@@ -1323,6 +1323,7 @@ describe('即时对话的待收记录（走真库）', () => {
       {
         uuid: 'uuid-failed',
         status: 'failed',
+        retryCount: 3,
         lastError: { at: '2026-08-05T00:00:00.000Z', reason: '上游 502' },
       },
     ] as any);
@@ -1334,6 +1335,43 @@ describe('即时对话的待收记录（走真库）', () => {
     expect(systemMsgs).toHaveLength(1);
     expect(systemMsgs[0].content).toContain('即时对话');
     expect(systemMsgs[0].content, '云端记下的失败原因要带到用户眼前').toContain('上游 502');
+    // 措辞是即时对话自己的：用户刚按下发送，「上次到点没发出去」那套排程口吻不成话。
+    expect(systemMsgs[0].content).toContain('生成失败（重试 3 次后放弃）');
+    expect(systemMsgs[0].content).not.toContain('到点');
+  }, 20000);
+
+  // 查失败原因要拉一次全量任务列表（分页 + 逐条解密，几秒），这中间用户看指示灯不动
+  // 又发了一条是很自然的事。结论回来时不认 uuid 的话，销掉的是新那一轮的账：「正在
+  // 输入」当场熄灭，聊天流里还多一条它其实没失败的说明。
+  it('查失败原因的空档里用户又发了一条 → 迟到的结论不动新那一轮', async () => {
+    const charId = 'char-instant-resend';
+    await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
+    setInstantChatPending(charId, 'uuid-old', Date.now());
+    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
+    vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus').mockResolvedValue({ state: 'completed' });
+    (globalThis as any).window.umami = { track: vi.fn() };
+
+    // 手动掌控那次全量拉取：卡在半路，好让「用户重发」精确插进这个空档。
+    let releaseList!: (rows: unknown[]) => void;
+    const listCalled = new Promise<void>((markCalled) => {
+      vi.spyOn(ActiveMsgClient, 'listRemoteTasksForChar').mockImplementation(() => {
+        markCalled();
+        return new Promise((resolve) => { releaseList = (rows) => resolve(rows as any); });
+      });
+    });
+
+    const timers = captureWatchdogTimers();
+    const sweep = runInstantChatStatusCheck();
+    await listCalled;
+    setInstantChatPending(charId, 'uuid-new'); // 用户重发，待收记录换人
+    releaseList([{ uuid: 'uuid-old', status: 'failed', lastError: { reason: '上游 502' } }]);
+    await sweep;
+    timers.restore();
+
+    expect(getInstantChatPending(charId)?.uuid, '新那一轮还等着，别把它的灯灭了').toBe('uuid-new');
+    const msgs = await DB.getRecentMessagesByCharId(charId, 50);
+    expect(msgs.some((m) => m.role === 'system'), '新那一轮没失败，不该有失败说明').toBe(false);
+    expect((globalThis as any).window.umami.track).not.toHaveBeenCalled();
   }, 20000);
 
   it('云端那行已经没了、outbox 里也没有 → 销账 + 说明「回复没能取回」', async () => {

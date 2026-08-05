@@ -305,11 +305,22 @@ export const drainChatOutboxForPending = async (): Promise<number> => {
  * 只在云端给了明确结论之后调（任务行已失败 / 行没了而 outbox 里也没有），所以这里
  * 不再去 cancel 那条任务——失败的行不会再跑，没了的行也没什么可取消的。
  *
+ * `uuid` 是这个结论说的是哪一轮，**必传**：从查到结论到落这条说明之间隔着网络往返
+ * （查失败原因要拉一次全量任务列表，分页 + 逐条解密要好几秒），这期间用户完全可能
+ * 又发了一条，待收记录已经换成新的 uuid 了。不认 uuid 就动手的话，销掉的是新那一轮
+ * 的账——「正在输入」当场熄灭，聊天流里还多一条它其实没失败的说明。对不上就直接走人，
+ * 让新那一轮自己走完它的判定。
+ *
  * `reason` 是云端记下的失败原因（有就带给用户看）。沿用本地路径失败时那条系统消息的
  * 形态（`[…]` 的方括号系统消息），用户能直接看到发生了什么、也知道可以重发。
  * 写库失败只 warn——指示灯该灭还是得灭。
  */
-export const failInstantChatPending = async (charId: string, reason?: string): Promise<void> => {
+export const failInstantChatPending = async (
+  charId: string,
+  uuid: string,
+  reason?: string,
+): Promise<void> => {
+  if (getInstantChatPending(charId)?.uuid !== uuid) return;
   if (!clearInstantChatPending(charId)) return;
   // 只报失败、只有事件名：云端点名说这一轮没成（或回复取不回来）。这一格涨起来说明
   // 云端生成或推送链路在掉队，比用户来报「一直在输入」早得多。

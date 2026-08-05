@@ -8,6 +8,7 @@ import {
   AMSG2_SCHEDULE_SECRECY_NOTE,
   buildFireTaskListBlock,
   currentOccurrenceMs,
+  describeInstantChatFailure,
   describeRemoteLastError,
   describeTaskProgress,
   findTaskByShortId,
@@ -340,6 +341,29 @@ describe('describeRemoteLastError', () => {
     expect(describeRemoteLastError({ reason: 'boom' }, fmt))
       .toBe('上次到点没发出去（连续失败：boom）');
     expect(describeRemoteLastError(null, fmt)).toBeNull();
+  });
+});
+
+describe('describeInstantChatFailure', () => {
+  // 排程那句是「上次到点没发出去」，说的是一条到点该主动开口的任务。即时对话是用户
+  // 刚按下发送的一条消息，套那个句式读起来不知所云。
+  it('说人话地讲这一轮生成失败，带上重试次数和底层报错，不提「到点」', () => {
+    expect(describeInstantChatFailure({ at: '2026-08-05T00:00:00.000Z', reason: '上游 502' }, 3))
+      .toBe('生成失败（重试 3 次后放弃）：上游 502');
+  });
+
+  it('没重试过就不提重试；没有底层报错就只说生成失败', () => {
+    expect(describeInstantChatFailure({ reason: '上游 502' }, 0)).toBe('生成失败：上游 502');
+    expect(describeInstantChatFailure({ at: '2026-08-05T00:00:00.000Z' })).toBe('生成失败');
+  });
+
+  it("reason 'stale' 是排队太久没轮到，没有底层报错可引", () => {
+    expect(describeInstantChatFailure({ reason: 'stale' }, 2)).toBe('云端排队太久没轮到这一轮（重试 2 次后放弃）');
+  });
+
+  it('一长串原始报错照样截断；没有 lastError → null', () => {
+    expect(describeInstantChatFailure({ reason: 'x'.repeat(500) })!.length).toBeLessThan(120);
+    expect(describeInstantChatFailure(null)).toBeNull();
   });
 });
 

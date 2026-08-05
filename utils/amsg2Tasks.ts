@@ -299,6 +299,23 @@ export const describeRemoteLastError = (
   return `${whenText}上次到点没发出去（连续失败${reason ? `：${reason}` : ''}）`;
 };
 
+/**
+ * 即时对话那一轮失败的人话。读的是同一份 lastError，但换一套说法：那是用户刚按下
+ * 发送的一条消息，「上次到点没发出去」这种排程口吻放在这里不成话。时间也不带——
+ * 就是刚才，写出来只是噪音。retryCount 是远端行上的重试次数（旧 worker 不投影 → 不提）。
+ */
+export const describeInstantChatFailure = (
+  lastError: RemoteTaskLastError | null | undefined,
+  retryCount?: number,
+): string | null => {
+  if (!lastError) return null;
+  const retried = retryCount && retryCount > 0 ? `（重试 ${retryCount} 次后放弃）` : '';
+  // 'stale' 是「排队太久没轮到就被跳过」，没有底层报错可以引。
+  if (lastError.reason === 'stale') return `云端排队太久没轮到这一轮${retried}`;
+  const detail = (lastError.reason || '').slice(0, REMOTE_ERROR_REASON_MAX);
+  return `生成失败${retried}${detail ? `：${detail}` : ''}`;
+};
+
 /** 替换任务时远端取消失败的标注文案（面板和工具侧共用一份，两边都会显示给人看）。 */
 export const REPLACE_CANCEL_FAILED_NOTE = '替换时远端取消失败，任务可能仍会触发，可再次取消';
 
