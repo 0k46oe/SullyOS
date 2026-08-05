@@ -1016,6 +1016,17 @@ const decryptPayload = async (client: ReiClient, payload: { iv: string; authTag:
   return (client as unknown as ReiCryptoBridge)._decrypt(payload);
 };
 
+/**
+ * 单条任务此刻的状态（`getRemoteTaskStatus` 的答案）。
+ *   pending   —— 行在且还会跑（可能正在重试等待里，retryCount>0）
+ *   completed —— 行在但已经出清（对一次性任务就等于失败：发成功的行会被删掉）
+ *   gone      —— 行没了（发成功后被删 / 被取消 / 被顶替）
+ */
+export type RemoteTaskStatus =
+  | { state: 'pending'; retryCount?: number; nextSendAt?: string }
+  | { state: 'completed' }
+  | { state: 'gone' };
+
 export const ActiveMsgClient = {
   async registerNativePushToken(token: string): Promise<void> {
     if (!nativePushBuildEnabled()) throw new Error('当前构建未开启 Capacitor 原生推送');
@@ -1411,19 +1422,12 @@ export const ActiveMsgClient = {
   /**
    * 查一条任务此刻的状态（即时对话「一直等」的判定器）。
    * 比 listAllTasks（全表分页 + 逐行解密）便宜得多，适合回前台时点名查一条。
-   *   pending   —— 行在且还会跑（可能正在重试等待里，retryCount>0）
-   *   completed —— 行在但已经出清（对一次性任务就等于失败：发成功的行会被删掉）
-   *   gone      —— 行没了（发成功后被删 / 被取消 / 被顶替）
    *
    * 只认远端明说的这两个错误码来下结论，不看 HTTP 状态：worker 地址填错时未知路由
    * 同样回 404（错误码是 NOT_FOUND），照状态判就会把「压根没问到」当成「任务没了」。
    * 网络故障、鉴权失败照常抛——调用方据此什么都不结论，继续等。
    */
-  async getRemoteTaskStatus(taskUuid: string): Promise<
-    | { state: 'pending'; retryCount?: number; nextSendAt?: string }
-    | { state: 'completed' }
-    | { state: 'gone' }
-  > {
+  async getRemoteTaskStatus(taskUuid: string): Promise<RemoteTaskStatus> {
     const config = await ensureWorkerReady();
     const response = await fetchWithAuth(`message?id=${encodeURIComponent(taskUuid)}`, config, {
       method: 'GET',

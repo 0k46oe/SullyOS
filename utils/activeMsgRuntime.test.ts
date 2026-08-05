@@ -1207,7 +1207,11 @@ describe('即时对话的待收记录（走真库）', () => {
   beforeEach(() => {
     localStorage.removeItem(AMSG_INSTANT_CHAT_PENDING_LS_KEY);
   });
-  afterEach(() => { vi.restoreAllMocks(); });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    // umami 是直接挂在 window 上的，restoreAllMocks 管不着，留着会串到下一条测试。
+    delete (globalThis as any).window.umami;
+  });
 
   /** 一条云端 outbox 副本：形状跟 worker 定稿的那份推送一致。 */
   const outboxValue = (charId: string, messageId: string) => JSON.stringify({
@@ -1253,13 +1257,18 @@ describe('即时对话的待收记录（走真库）', () => {
   }, 20000);
 
   /**
-   * 看门狗排的那个 60s 定时器只记下来、不真的挂在测试进程上。
-   * 返回排过的间隔清单；用完在断言前 restore，别影响后面的真库读写。
+   * 60s 那个点名定时器只记下来、不真的挂在测试进程上（否则跑完测试还得等它）。
+   * 别的 setTimeout 一律照常走真的——测试里还有别人在用，一起吞掉会把它们弄坏。
+   * 返回排过的间隔清单；用完在断言前 restore。
    */
-  const captureWatchdogTimers = () => {
+  const captureStatusPollTimers = () => {
     const delays: number[] = [];
-    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((_fn: any, ms?: number) => {
-      delays.push(ms ?? 0);
+    const realSetTimeout = globalThis.setTimeout;
+    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      fn: any, ms?: number, ...rest: any[]
+    ) => {
+      if (ms !== INSTANT_CHAT_STATUS_CHECK_INTERVAL_MS) return realSetTimeout(fn, ms, ...rest);
+      delays.push(ms);
       return 0 as any;
     }) as any);
     return { delays, restore: () => spy.mockRestore() };
@@ -1301,7 +1310,7 @@ describe('即时对话的待收记录（走真库）', () => {
     const cancel = vi.spyOn(ActiveMsgClient, 'cancelTask')
       .mockResolvedValue({ uuid: 'uuid-still-running', alreadyGone: false });
 
-    const timers = captureWatchdogTimers();
+    const timers = captureStatusPollTimers();
     await runInstantChatStatusCheck();
     timers.restore();
 
@@ -1360,7 +1369,7 @@ describe('即时对话的待收记录（走真库）', () => {
       });
     });
 
-    const timers = captureWatchdogTimers();
+    const timers = captureStatusPollTimers();
     const sweep = runInstantChatStatusCheck();
     await listCalled;
     setInstantChatPending(charId, 'uuid-new'); // 用户重发，待收记录换人
@@ -1396,7 +1405,7 @@ describe('即时对话的待收记录（走真库）', () => {
     vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
     vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus').mockRejectedValue(new Error('网络断了'));
 
-    const timers = captureWatchdogTimers();
+    const timers = captureStatusPollTimers();
     await runInstantChatStatusCheck();
     timers.restore();
 
@@ -1405,4 +1414,27 @@ describe('即时对话的待收记录（走真库）', () => {
     expect(msgs.some((m) => m.role === 'system')).toBe(false);
     expect(timers.delays, '下一跳还得排上，不然这条待收就没人管了').toContain(INSTANT_CHAT_STATUS_CHECK_INTERVAL_MS);
   }, 20000);
+
+  // 后台每分钟醒一次去打网络毫无意义：用户看不见结果，移动端还会被系统掐。周期由
+  // 回前台那次点名接上，所以不可见时连下一跳都不排。
+  it('页面不可见 → 一个请求都不发，也不排下一跳', async () => {
+    const charId = 'char-instant-hidden';
+    setInstantChatPending(charId, 'uuid-hidden', Date.now() - 30 * 60_000);
+    const read = vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
+    const status = vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus').mockResolvedValue({ state: 'gone' });
+
+    (globalThis as any).document = { visibilityState: 'hidden' };
+    const timers = captureStatusPollTimers();
+    try {
+      await runInstantChatStatusCheck();
+    } finally {
+      timers.restore();
+      delete (globalThis as any).document;
+    }
+
+    expect(read).not.toHaveBeenCalled();
+    expect(status).not.toHaveBeenCalled();
+    expect(getInstantChatPending(charId)?.uuid).toBe('uuid-hidden');
+    expect(timers.delays, '后台不排下一跳，等回前台那次点名把周期接上').not.toContain(INSTANT_CHAT_STATUS_CHECK_INTERVAL_MS);
+  });
 });

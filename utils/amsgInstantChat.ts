@@ -331,8 +331,8 @@ export const failInstantChatPending = async (
       role: 'system',
       type: 'text',
       content: reason
-        ? `[即时对话失败：云端报告 ${reason}。可以重新发一次。]`
-        : '[即时对话失败：云端已处理这条消息，但回复没能取回（推送和云端副本都没拿到）。可以重新发一次。]',
+        ? `[即时对话没能完成：${reason}。可以重新发一次。]`
+        : '[即时对话没能完成：云端已处理这条消息，但回复没能取回（推送和云端副本都没拿到）。可以重新发一次。]',
     });
     window.dispatchEvent(new CustomEvent('active-msg-progress', { detail: { charId } }));
   } catch (error) {

@@ -9,10 +9,14 @@
   `node_modules/@rei-standard/amsg-server/dist/chunk-RRWCPPOY.mjs`，只读参考，不动）。
   全部改动落在本仓库：`worker/amsg/src/`（包装层）、`utils/` 叶子模块、前端。
 - 防双跑复用上游 `claimTask` 的 `lease_until` 条件更新；每分钟 cron 是兜底捡漏者。
-- 任务行型：`message_type = 'auto'` + `metadata: { amsgMode: 'instant',
-  amsgInstantChat: true, charId }`。用 'auto' 是为了确定走 hooks + LLM 的 fire
-  管线；push 载荷的 `messageType` 期望取自 `metadata.amsgMode`（见 V4），
-  这样客户端收到的是 `messageType: 'instant'`。
+- 任务行型：`message_type = 'auto'` + `messageSubtype: 'instant-chat'`
+  + `metadata: { amsgMode: 'instant', amsgInstantChat: true, charId }`。
+  用 'auto' 是为了确定走 hooks + LLM 的 fire 管线；push 载荷的 `messageType`
+  期望取自 `metadata.amsgMode`（见 V4），这样客户端收到的是
+  `messageType: 'instant'`。`messageSubtype` 上游只当自由文本标签原样透传，
+  客户端拿它做面板对账的过滤判据：即时对话的行不补进任务清单（连同
+  `status = 'failed'` 的行一起排除），否则用户正等着的这一轮会显示成待触发的
+  排程任务、还可能被「取消全部」顺手掐掉。
 - **durability 原则**：202 之前任务行必须已落 D1。`ctx.waitUntil` 只负责快，
   cron 负责稳。isolate 死了 → lease 过期 → cron 重跑，消息不丢。
 
@@ -105,6 +109,7 @@
 - 客户端「正在输入」的主判定是**云端任务状态**：还欠着回复时每 60s 查一次
   `GET /message?id=<uuid>`，`pending` 就继续等，行已失败 / 行没了才收尾；
   查询本身失败（网络、鉴权）不下任何结论，等下一跳。下结论前先拉一次 outbox。
+  **只在前台查**：页面不可见时既不查也不排下一跳，回前台立刻点一次名把周期接上。
 - worker 侧若现有 hook（如 `onFireSettled`）拿得到失败结局且拿得到 push 发送
   能力 → 尽力补发一条 `messageKind: 'error'`（SW 已有该分轨）。拿不到就算了，
   别为此改上游。
