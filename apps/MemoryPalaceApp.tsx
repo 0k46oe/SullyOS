@@ -521,9 +521,9 @@ const MemoryWaterlineEditor: React.FC<{
                     }}
                 >
                     <span style={{ minWidth: 0 }}>
-                        <span style={{ display: 'block', fontSize: 11, fontWeight: 800, color: '#9d174d' }}>记忆处理节奏</span>
+                        <span style={{ display: 'block', fontSize: 11, fontWeight: 800, color: '#9d174d' }}>聊天记忆整理节奏</span>
                         <span style={{ display: 'block', marginTop: 2, fontSize: 10, color: '#9ca3af' }}>
-                            {WATERLINE_PRESET_COPY[resolved.preset].label} · 保留 {resolved.hotZoneSize} 条 / 缓冲 {resolved.bufferThreshold} 条
+                            {WATERLINE_PRESET_COPY[resolved.preset].label} · AI 直接读最近 {resolved.hotZoneSize} 条 · 每攒 {resolved.bufferThreshold} 条整理
                         </span>
                     </span>
                     <span style={{ color: '#be185d', fontSize: 14, transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>⌄</span>
@@ -553,14 +553,20 @@ const MemoryWaterlineEditor: React.FC<{
                     }}
                     onClick={e => e.stopPropagation()}
                 >
-                    <div style={{ fontSize: 11, fontWeight: 900, color: '#9d174d', marginBottom: 5 }}>把聊天想成一条向前流的河</div>
-                    <div><b style={{ color: '#7c3aed' }}>最近原文</b>是眼前还看得见的一段河面，AI 每次都会直接读。</div>
-                    <div><b style={{ color: '#7c3aed' }}>缓冲</b>是水闸前排队的内容；攒够后，较早的 85% 会被整理进记忆宫殿，留下 15% 衔接下一段。</div>
-                    <div><b style={{ color: '#7c3aed' }}>水位线</b>就是“已经整理到这里”的标记。线以前的消息仍保存在数据库里，并没有删除，只是不再每轮整段塞给 AI，需要时会从记忆宫殿召回。</div>
-                    <div style={{ marginTop: 6, padding: '7px 8px', borderRadius: 9, background: '#faf5ff', color: '#6d28d9' }}>
-                        例如 50 / 20：保留最近 50 条原文；更早的新内容攒到 20 条后，约 17 条被整理、3 条留下衔接。一问一答通常约 2 条消息。
+                    <div style={{ fontSize: 11, fontWeight: 900, color: '#9d174d', marginBottom: 6 }}>聊天会按时间排在同一条线上</div>
+                    <div style={{ padding: '7px 8px', borderRadius: 9, background: '#faf5ff', color: '#6d28d9', fontWeight: 800, textAlign: 'center' }}>
+                        较旧　已向量化整理　｜水位线｜　等待整理　·　最近原文　较新
                     </div>
-                    <div style={{ marginTop: 6, color: '#9ca3af' }}>所有来源共用同一条河：私聊、见面、通话和剧情不分开计算。</div>
+                    <div style={{ marginTop: 7 }}><b style={{ color: '#7c3aed' }}>水位线前（较旧的一侧）</b>：聊天已经经过向量化，被整理进记忆宫殿。原记录仍在数据库里，没有删除；AI 平时不再整段重读，需要时会从记忆宫殿召回。</div>
+                    <div style={{ marginTop: 4 }}><b style={{ color: '#7c3aed' }}>水位线后（较新的一侧）</b>：聊天暂时保留为原文，包括正在等待整理的内容，以及 AI 每次直接读取的最近原文。</div>
+                    <div style={{ marginTop: 4 }}>等待区攒够设定条数后，较早的约 85% 会被向量化并移到水位线前，留下约 15% 衔接下一次整理。</div>
+                    <div style={{ marginTop: 6, padding: '7px 8px', borderRadius: 9, background: '#faf5ff', color: '#6d28d9' }}>
+                        例如 50 / 20：AI 每次直接读最近 50 条；在这 50 条之外又攒够 20 条等待内容时，约 17 条会被向量化、进入水位线前，约 3 条留下衔接。一问一答通常约 2 条消息。
+                    </div>
+                    <div style={{ marginTop: 7, padding: '7px 8px', borderRadius: 9, background: '#fff1f7', color: '#9d174d' }}>
+                        <b>见面、剧情里的内容也会被整理吗？会。</b><br />
+                        私聊、见面、通话、剧情、主动消息、小屋、彼方，只要其中有可读内容并进入这个角色的上下文时间线，就都会排进这里，之后跨过同一条水位线进入记忆宫殿。不是只有私聊会整理，也不是每个入口各算一条线。
+                    </div>
                 </div>
             )}
 
@@ -591,7 +597,7 @@ const MemoryWaterlineEditor: React.FC<{
                                     <span style={{ display: 'block', fontSize: 10, fontWeight: 800 }}>{WATERLINE_PRESET_COPY[preset].label}</span>
                                     <span style={{ display: 'block', marginTop: 2, fontSize: 9, opacity: 0.72 }}>
                                         {presetNumbers
-                                            ? `${presetNumbers.hotZoneSize} / ${presetNumbers.bufferThreshold}`
+                                            ? `最近 ${presetNumbers.hotZoneSize} · 攒 ${presetNumbers.bufferThreshold}`
                                             : WATERLINE_PRESET_COPY[preset].short}
                                     </span>
                                 </button>
@@ -606,7 +612,7 @@ const MemoryWaterlineEditor: React.FC<{
                     {resolved.preset === 'custom' && (
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 6, alignItems: 'end', marginTop: 8 }}>
                             <label style={{ minWidth: 0 }}>
-                                <span style={{ display: 'block', fontSize: 9, color: '#9ca3af', marginBottom: 3 }}>保留原文（20–500）</span>
+                                <span style={{ display: 'block', fontSize: 9, color: '#9ca3af', marginBottom: 3 }}>AI 直接读最近原文（20–500）</span>
                                 <input
                                     type="number"
                                     min={MIN_MEMORY_HOT_ZONE_SIZE}
@@ -618,7 +624,7 @@ const MemoryWaterlineEditor: React.FC<{
                                 />
                             </label>
                             <label style={{ minWidth: 0 }}>
-                                <span style={{ display: 'block', fontSize: 9, color: '#9ca3af', marginBottom: 3 }}>触发缓冲（10–200）</span>
+                                <span style={{ display: 'block', fontSize: 9, color: '#9ca3af', marginBottom: 3 }}>攒够多少条开始整理（10–200）</span>
                                 <input
                                     type="number"
                                     min={MIN_MEMORY_BUFFER_THRESHOLD}
