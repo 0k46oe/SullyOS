@@ -26,6 +26,13 @@ describe('countUnprocessedBufferMessages（记忆宫殿未同步口径）', () =
         expect(countUnprocessedBufferMessages(makeMsgs(5), 0, 3)).toBe(2);
     });
 
+    it('三档热区都沿用同一条角色时间线计算', () => {
+        const msgs = makeMsgs(300);
+        expect(countUnprocessedBufferMessages(msgs, 0, 200)).toBe(100);
+        expect(countUnprocessedBufferMessages(msgs, 0, 100)).toBe(200);
+        expect(countUnprocessedBufferMessages(msgs, 0, 50)).toBe(250);
+    });
+
     it('乱序输入也按 id 排序后计算，结果一致', () => {
         const shuffled = [{ id: 5 }, { id: 1 }, { id: 3 }, { id: 2 }, { id: 4 }] as any;
         expect(countUnprocessedBufferMessages(shuffled, 0, 3)).toBe(2);
