@@ -59,4 +59,16 @@ describe('one-shot API request capture persistence', () => {
         expect(await DB.getApiRequestCapture()).toBeNull();
         expect((await DB.getApiCallLog()).some(entry => entry.id === logId)).toBe(true);
     });
+
+    it('patches usage only when the response belongs to the current capture', async () => {
+        await DB.saveApiRequestCapture({ id: 'current', usageStatus: 'pending' });
+
+        expect(await DB.patchApiRequestCapture('stale', { promptTokens: 999 })).toBe(false);
+        expect(await DB.patchApiRequestCapture('current', { promptTokens: 321, usageStatus: 'reported' })).toBe(true);
+        expect(await DB.getApiRequestCapture()).toMatchObject({
+            id: 'current',
+            promptTokens: 321,
+            usageStatus: 'reported',
+        });
+    });
 });

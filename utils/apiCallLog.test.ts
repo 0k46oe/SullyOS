@@ -2,7 +2,9 @@ import { describe, it, expect, vi } from 'vitest';
 import {
     buildApiRequestCapture,
     buildPromptBreakdown,
+    captureApiRequestOnce,
     coreModelName,
+    extractApiTokenUsage,
     formatApiRequestCaptureTxt,
     getApiCallAmbientContext,
     getApiRequestCaptureSectionContent,
@@ -13,6 +15,7 @@ import {
     scanSseForLog,
     setApiRequestCaptureArmed,
     setApiCallAmbientContext,
+    updateApiRequestCaptureUsage,
 } from './apiCallLog';
 
 describe('one-shot full API request capture', () => {
@@ -62,6 +65,87 @@ describe('one-shot full API request capture', () => {
         expect(JSON.stringify(capture.payload)).toContain('今天还去吗');
     });
 
+    it('classifies group-chat background separately instead of calling it a system prompt', () => {
+        const content = [
+            '## 行为规范',
+            '普通规则',
+            '### 【群聊背景 · 你亲历的近期群聊】',
+            '[2026-08-05 12:00] [群：朋友们] 小夏：晚上吃什么？',
+            '### 群聊场景共享设定 (Group Scene)',
+            '本群成员都知道今天下雨。',
+        ].join('\n');
+        const capture = buildApiRequestCapture({
+            url: 'https://example.com/v1/chat/completions',
+            body: { model: 'gpt-test', messages: [{ role: 'system', content }] },
+        });
+
+        const groupSections = capture.sections.filter(section => section.kind === 'group');
+        expect(groupSections).toHaveLength(2);
+        expect(groupSections.every(section => getApiRequestCaptureSectionSource(section).includes('群聊'))).toBe(true);
+        expect(capture.sections.filter(section => section.kind === 'system')).toHaveLength(1);
+        expect(capture.sections
+            .filter(section => section.messageIndex != null)
+            .reduce((sum, section) => sum + section.chars, 0)).toBe(content.length);
+    });
+
+    it('classifies embedded full conversation history separately from system prompts', () => {
+        const capture = buildApiRequestCapture({
+            url: 'https://example.com/v1/chat/completions',
+            body: {
+                model: 'gpt-test',
+                messages: [{
+                    role: 'user',
+                    content: [
+                        `## 角色此刻看到的完整上下文\n${'设定'.repeat(3000)}`,
+                        `## 完整对话历史（与主 API 看到的消息历史一致）\n${'[用户] 你好\n[角色] 嗨\n'.repeat(300)}`,
+                        '## 任务\n分析当前情绪。',
+                    ].join('\n'),
+                }],
+            },
+        });
+
+        const history = capture.sections.find(section => section.kind === 'history');
+        expect(history).toBeTruthy();
+        expect(history?.label).toContain('完整对话历史');
+        expect(getApiRequestCaptureSectionSource(history!)).toContain('既往用户与角色对话');
+    });
+
+    it('reads real token usage from common OpenAI, Anthropic and Gemini-compatible fields', () => {
+        expect(extractApiTokenUsage({ usage: { prompt_tokens: 123, completion_tokens: 45, total_tokens: 168 } }))
+            .toEqual({ prompt: 123, completion: 45, total: 168 });
+        expect(extractApiTokenUsage({ usage: { input_tokens: 70, output_tokens: 20 } }))
+            .toEqual({ prompt: 70, completion: 20, total: undefined });
+        expect(extractApiTokenUsage({ usageMetadata: { promptTokenCount: 80, candidatesTokenCount: 10, totalTokenCount: 90 } }))
+            .toEqual({ prompt: 80, completion: 10, total: 90 });
+    });
+
+    it('backfills the real response usage into the same one-shot capture', async () => {
+        const { DB } = await import('./db');
+        await DB.clearApiRequestCapture();
+        setApiRequestCaptureArmed(true);
+        const captureId = captureApiRequestOnce({
+            url: 'https://example.com/v1/chat/completions',
+            body: { model: 'gpt-test', messages: [{ role: 'user', content: '你好' }] },
+        });
+        expect(captureId).toEqual(expect.any(String));
+
+        updateApiRequestCaptureUsage({
+            captureId,
+            ok: true,
+            response: { usage: { prompt_tokens: 456, completion_tokens: 78, total_tokens: 534 } },
+        });
+
+        await vi.waitFor(async () => {
+            expect(await DB.getApiRequestCapture()).toMatchObject({
+                id: captureId,
+                promptTokens: 456,
+                completionTokens: 78,
+                totalTokens: 534,
+                usageStatus: 'reported',
+            });
+        });
+    });
+
     it('exports a readable TXT report with source ranking, paths, section content and raw JSON', () => {
         const capture = buildApiRequestCapture({
             url: 'https://example.com/v1/chat/completions',
@@ -83,6 +167,7 @@ describe('one-shot full API request capture', () => {
         expect(txt).toContain('记忆正文');
         expect(txt).toContain('完整原始请求 JSON');
         expect(txt).toContain('"content": "用户正文"');
+        expect(txt).toContain('请求体总字符（不是 Token）');
     });
 
     it('replaces oversized inline binary data but preserves its original size for diagnosis', () => {
