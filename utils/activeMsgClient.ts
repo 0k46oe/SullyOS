@@ -1369,6 +1369,8 @@ export const ActiveMsgClient = {
         lastError: parseRemoteTaskLastError(t?.lastError),
         clientTaskId: typeof t?.clientTaskId === 'string' ? t.clientTaskId : undefined,
         messageType: typeof t?.messageType === 'string' ? t.messageType : undefined,
+        // 排程方写进 payload 的自由文本标签，即时对话的行标着 'instant-chat'。
+        messageSubtype: typeof t?.messageSubtype === 'string' ? t.messageSubtype : undefined,
         recurrenceType: typeof t?.recurrenceType === 'string' ? t.recurrenceType : undefined,
         // 远端算出来的下一次触发时刻。循环任务按角色时区的墙钟推进，本地拿固定周期
         // 自己乘出来的那个跨夏令时会偏一小时——显示以远端为准，跟真正会响的时刻一致。
@@ -1685,7 +1687,9 @@ export const ActiveMsgClient = {
       // 用 'auto' 而不是 'instant'：'instant' 在上游是「当场跑完」的行型，走不到 fire hooks，
       // 到点拿的就不是这份 chat 段。客户端收到的 push.messageType 由 metadata.amsgMode 决定。
       messageType: 'auto',
-      messageSubtype: 'chat',
+      // 上游只把它当自由文本标签原样带进推送，不据此分支；本地拿它把即时对话的行跟
+      // 定时任务的行分开——不然一条失败的即时对话行会被面板对账当成排程任务补进清单。
+      messageSubtype: 'instant-chat',
       // 上游校验 firstSendTime 必须在未来，而 cron 只捡已到期的行；先留一点提前量过校验，
       // 落库之后由包装层把这一行拉到「此刻」（见 worker/amsg/src/instantChat.ts）。
       firstSendTime: new Date(now + INSTANT_SCHEDULE_LEAD_MS).toISOString(),

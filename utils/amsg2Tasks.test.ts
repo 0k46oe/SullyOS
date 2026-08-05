@@ -512,6 +512,18 @@ describe('reconcileTasksWithRemote（跟远端底账对一次账）', () => {
     const local = [task()];
     expect(reconcileTasksWithRemote(local, [])).toEqual(local);
   });
+
+  // 失败的行会在远端留 7 天（一次性任务发成功才删行），照单全收的话，清单上会多出
+  // 一条永远等不到的幽灵任务。
+  it('远端那行已经失败 → 不补进清单', () => {
+    expect(reconcileTasksWithRemote([], [remoteRow({ status: 'failed' })])).toEqual([]);
+  });
+
+  // 即时对话的行是「用户此刻正等着的一轮聊天」，不是排程：补进清单会显示成待触发的
+  // 任务，还可能被「取消全部」把用户正等着的回复顺手掐掉。
+  it('远端那行是即时对话 → 不补进清单', () => {
+    expect(reconcileTasksWithRemote([], [remoteRow({ messageSubtype: 'instant-chat' })])).toEqual([]);
+  });
 });
 
 describe('currentOccurrenceMs 跨夏令时', () => {

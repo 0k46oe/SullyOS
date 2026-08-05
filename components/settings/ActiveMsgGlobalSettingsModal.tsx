@@ -825,7 +825,8 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
             <p className="text-xs leading-relaxed text-amber-600">{instantChatBlockedReason}</p>
           ) : (
             <p className="text-[11px] leading-relaxed text-slate-400">
-              没有逐字吐出，生成期间显示「正在输入…」；超过 5 分钟没等到回复会提示你重发。
+              没有逐字吐出，生成期间显示「正在输入…」；云端明确报错才会提示重发，
+              只要还在生成或重试就一直等（LLM 慢不算失败）。
             </p>
           )}
           <button

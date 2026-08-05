@@ -20,11 +20,11 @@ import {
   resolveInboxFailureAction,
   resolveInboxPersistTimestamp,
   revokeSwallowedSelfLogEntry,
-  runInstantChatTimeoutCheck,
+  runInstantChatStatusCheck,
 } from './activeMsgRuntime';
 import {
   AMSG_INSTANT_CHAT_PENDING_LS_KEY,
-  INSTANT_CHAT_PENDING_TIMEOUT_MS,
+  INSTANT_CHAT_STATUS_CHECK_INTERVAL_MS,
   getInstantChatPending,
   setInstantChatPending,
 } from './amsgInstantChat';
@@ -1192,9 +1192,12 @@ describe('重试清场·只留下副作用产物的半成品（走真库）', ()
 
 // ─── 即时对话：待收记录的生命周期（走真库）───
 //
-// 「正在输入…」那盏灯挂在待收记录上，而生成不在本机跑——所以两件事必须钉死：
+// 「正在输入…」那盏灯挂在待收记录上，而生成不在本机跑——所以三件事必须钉死：
 //   1. 角色一开口就销账（灯灭），别让用户对着一条已经收到的回复继续等；
-//   2. 超时**先拉一次云端副本再说**。推送静默丢是常态，不拉就报失败的话，用户会为
+//   2. **等多久都不是判据**。只有云端点名回来的结论（任务已失败 / 行没了）才收尾，
+//      云端还说 pending 就一直等——worker 一次 fire 能跑 10 分钟，失败还要按
+//      2/4/6 分钟重试，任何客户端定时宣判都会抢在结论前把还在路上的回复判死；
+//   3. 下结论前**先拉一次云端副本**。推送静默丢是常态，不拉就报失败的话，用户会为
 //      一条其实已经生成好的回复重发一遍（再烧一轮 LLM）。
 describe('即时对话的待收记录（走真库）', () => {
   beforeAll(() => {
@@ -1249,67 +1252,119 @@ describe('即时对话的待收记录（走真库）', () => {
     expect(getInstantChatPending(charId)).toBeNull();
   }, 20000);
 
-  it('超时但云端 outbox 里有那条 → 补收上屏，不报失败', async () => {
+  /**
+   * 看门狗排的那个 60s 定时器只记下来、不真的挂在测试进程上。
+   * 返回排过的间隔清单；用完在断言前 restore，别影响后面的真库读写。
+   */
+  const captureWatchdogTimers = () => {
+    const delays: number[] = [];
+    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((_fn: any, ms?: number) => {
+      delays.push(ms ?? 0);
+      return 0 as any;
+    }) as any);
+    return { delays, restore: () => spy.mockRestore() };
+  };
+
+  it('云端 outbox 里有那条 → 补收上屏，不查状态也不报失败', async () => {
     const charId = 'char-instant-outbox';
     const messageId = 'msg_task_9@1700000000000_hook_0';
     await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
-    setInstantChatPending(charId, 'uuid-outbox', Date.now() - INSTANT_CHAT_PENDING_TIMEOUT_MS - 1);
+    setInstantChatPending(charId, 'uuid-outbox', Date.now());
     vi.spyOn(ActiveMsgClient, 'readClientStateValue')
       .mockResolvedValue(outboxValue(charId, messageId));
+    const status = vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus')
+      .mockResolvedValue({ state: 'gone' });
     const cancel = vi.spyOn(ActiveMsgClient, 'cancelTask')
       .mockResolvedValue({ uuid: 'uuid-outbox', alreadyGone: true });
 
-    await runInstantChatTimeoutCheck();
+    await runInstantChatStatusCheck();
 
     const msgs = await DB.getRecentMessagesByCharId(charId, 50);
     expect(msgs.some((m) => m.role === 'assistant'), '推送丢了的那条该被补回来').toBe(true);
     expect(msgs.some((m) => m.role === 'system'), '补收成功就不该再报失败').toBe(false);
     expect(getInstantChatPending(charId)).toBeNull();
-    // 补收成功 = 那条任务其实跑完了（行已被 worker 删掉），没有失败可言，不该去取消。
+    // 补收就把账销了，这一轮已经有结论，不用再去问云端，也没有任何东西要取消。
+    expect(status).not.toHaveBeenCalled();
     expect(cancel).not.toHaveBeenCalled();
   }, 20000);
 
-  it('超时且云端也没有 → 销账 + 取消云端任务行 + 留一句能看见的说明（用户可以重发）', async () => {
-    const charId = 'char-instant-timeout';
+  it('云端仍是 pending → 不销账、不落失败说明、不取消任务（等多久都不是判据）', async () => {
+    const charId = 'char-instant-still-running';
     await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
-    setInstantChatPending(charId, 'uuid-timeout', Date.now() - INSTANT_CHAT_PENDING_TIMEOUT_MS - 1);
+    // 受理时刻故意放到半小时前：worker 一次 fire 能跑 10 分钟，失败还要按 2/4/6 分钟
+    // 重试，等了多久本身不构成任何结论。
+    setInstantChatPending(charId, 'uuid-still-running', Date.now() - 30 * 60_000);
     vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
+    const status = vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus')
+      // nextSendAt 已经过去是重试中的常态（云端只往前推 retry_after），不是放弃的信号。
+      .mockResolvedValue({ state: 'pending', retryCount: 2, nextSendAt: new Date(Date.now() - 60_000).toISOString() });
     const cancel = vi.spyOn(ActiveMsgClient, 'cancelTask')
-      .mockResolvedValue({ uuid: 'uuid-timeout', alreadyGone: false });
+      .mockResolvedValue({ uuid: 'uuid-still-running', alreadyGone: false });
 
-    await runInstantChatTimeoutCheck();
+    const timers = captureWatchdogTimers();
+    await runInstantChatStatusCheck();
+    timers.restore();
+
+    expect(status).toHaveBeenCalledWith('uuid-still-running');
+    expect(getInstantChatPending(charId)?.uuid, '云端还在跑，账不能销').toBe('uuid-still-running');
+    const msgs = await DB.getRecentMessagesByCharId(charId, 50);
+    expect(msgs.some((m) => m.role === 'system'), '还在跑就不该留失败说明').toBe(false);
+    expect(cancel, '客户端不再替云端宣判，更不许把还在跑的任务掐掉').not.toHaveBeenCalled();
+    expect(timers.delays).toContain(INSTANT_CHAT_STATUS_CHECK_INTERVAL_MS);
+  }, 20000);
+
+  it('云端说任务已失败 → 再补收一次仍没有 → 销账 + 落带失败原因的说明', async () => {
+    const charId = 'char-instant-failed';
+    await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
+    setInstantChatPending(charId, 'uuid-failed', Date.now());
+    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
+    vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus').mockResolvedValue({ state: 'completed' });
+    vi.spyOn(ActiveMsgClient, 'listRemoteTasksForChar').mockResolvedValue([
+      {
+        uuid: 'uuid-failed',
+        status: 'failed',
+        lastError: { at: '2026-08-05T00:00:00.000Z', reason: '上游 502' },
+      },
+    ] as any);
+
+    await runInstantChatStatusCheck();
 
     expect(getInstantChatPending(charId)).toBeNull();
-    // e2e 踩过的坑当回归守卫：只销客户端的账、不取消 D1 里那条 pending 行的话，
-    // 下一跳会把它捡起来迟到地再答一遍，或者硬失败占掉这个角色的串行名额。
-    expect(cancel).toHaveBeenCalledWith('uuid-timeout');
     const systemMsgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter((m) => m.role === 'system');
     expect(systemMsgs).toHaveLength(1);
     expect(systemMsgs[0].content).toContain('即时对话');
+    expect(systemMsgs[0].content, '云端记下的失败原因要带到用户眼前').toContain('上游 502');
   }, 20000);
 
-  it('取消云端任务行失败 → 不拦销账和说明（取消是尽力而为）', async () => {
-    const charId = 'char-instant-cancel-fail';
+  it('云端那行已经没了、outbox 里也没有 → 销账 + 说明「回复没能取回」', async () => {
+    const charId = 'char-instant-gone';
     await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
-    setInstantChatPending(charId, 'uuid-cancel-fail', Date.now() - INSTANT_CHAT_PENDING_TIMEOUT_MS - 1);
+    setInstantChatPending(charId, 'uuid-gone', Date.now());
     vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
-    vi.spyOn(ActiveMsgClient, 'cancelTask').mockRejectedValue(new Error('worker 掉线'));
+    vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus').mockResolvedValue({ state: 'gone' });
 
-    await runInstantChatTimeoutCheck();
+    await runInstantChatStatusCheck();
 
     expect(getInstantChatPending(charId)).toBeNull();
     const systemMsgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter((m) => m.role === 'system');
     expect(systemMsgs).toHaveLength(1);
+    expect(systemMsgs[0].content).toContain('回复没能取回');
   }, 20000);
 
-  it('还没到 5 分钟 → 一个请求都不发，记录留着', async () => {
-    const charId = 'char-instant-young';
-    setInstantChatPending(charId, 'uuid-young', Date.now());
-    const read = vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
+  it('状态查不到（网络断了）→ 什么都不做，等下一跳', async () => {
+    const charId = 'char-instant-offline';
+    await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
+    setInstantChatPending(charId, 'uuid-offline', Date.now() - 30 * 60_000);
+    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
+    vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus').mockRejectedValue(new Error('网络断了'));
 
-    await runInstantChatTimeoutCheck();
+    const timers = captureWatchdogTimers();
+    await runInstantChatStatusCheck();
+    timers.restore();
 
-    expect(read).not.toHaveBeenCalled();
-    expect(getInstantChatPending(charId)?.uuid).toBe('uuid-young');
-  });
+    expect(getInstantChatPending(charId)?.uuid, '问不到就什么都不结论').toBe('uuid-offline');
+    const msgs = await DB.getRecentMessagesByCharId(charId, 50);
+    expect(msgs.some((m) => m.role === 'system')).toBe(false);
+    expect(timers.delays, '下一跳还得排上，不然这条待收就没人管了').toContain(INSTANT_CHAT_STATUS_CHECK_INTERVAL_MS);
+  }, 20000);
 });

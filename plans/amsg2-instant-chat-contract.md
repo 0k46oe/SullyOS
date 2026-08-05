@@ -97,12 +97,14 @@
   `{ messageId, sessionId, at, payload }`。
 - 写入点：push 载荷定稿处（**不论 push 发送成败都写**——push 静默丢失正是要兜的）。
   只记 instant 任务的产物即可（v1 范围）。
-- 客户端（agent 2）：启动时、visibility 转 visible 时、「正在输入」超时前，
+- 客户端（agent 2）：启动时、visibility 转 visible 时、每一跳状态点名时，
   拉 `chat_outbox`，按 messageId 过滤已收，未收的走 inbox 同一条管线入库。
 
 ## 失败路径
 
-- 客户端「正在输入」**5 分钟超时是主判定**；超时先拉一次 outbox 再报失败。
+- 客户端「正在输入」的主判定是**云端任务状态**：还欠着回复时每 60s 查一次
+  `GET /message?id=<uuid>`，`pending` 就继续等，行已失败 / 行没了才收尾；
+  查询本身失败（网络、鉴权）不下任何结论，等下一跳。下结论前先拉一次 outbox。
 - worker 侧若现有 hook（如 `onFireSettled`）拿得到失败结局且拿得到 push 发送
   能力 → 尽力补发一条 `messageKind: 'error'`（SW 已有该分轨）。拿不到就算了，
   别为此改上游。

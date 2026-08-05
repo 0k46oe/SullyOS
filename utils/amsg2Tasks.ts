@@ -333,6 +333,8 @@ export interface RemoteTaskProjection {
   lastError: RemoteTaskLastError | null;
   clientTaskId?: string;
   messageType?: string;
+  /** 排程方写的自由文本标签；即时对话的行是 'instant-chat'，定时任务是 'chat'。 */
+  messageSubtype?: string;
   recurrenceType?: string;
   nextSendAt?: string;
   /** 远端行上的重试计数（旧 worker 不投影这字段 → undefined）。 */
@@ -365,7 +367,15 @@ export const reconcileTasksWithRemote = (
 
   const adopted = remote
     // 字段不全的行不补：宁可少一条，也别拿默认值凑一条跟远端对不上的记录出来。
-    .filter((row) => !known.has(row.uuid) && row.nextSendAt && row.recurrenceType && row.messageType)
+    // 已经失败的行也不补：它不会再响，补进来就是清单上一条永远等不到的幽灵任务。
+    // 即时对话的行同样不补：那是用户此刻正等着的一轮聊天，不是排程，进了清单会显示成
+    // 「待触发的任务」，还可能被「取消全部」顺手掐掉。
+    .filter((row) => (
+      !known.has(row.uuid)
+      && row.nextSendAt && row.recurrenceType && row.messageType
+      && row.status !== 'failed'
+      && row.messageSubtype !== 'instant-chat'
+    ))
     .map((row): ActiveMsg2TaskRecord => ({
       taskUuid: row.uuid,
       // 归属键是应用自己写进 metadata 的，投影里带回来；非 amsg2 建的任务没有，

@@ -10,7 +10,8 @@
  *   2. 「这一轮还欠着一条回复」的待收记录——它得**扛得住重启**，不然重开 App
  *      指示灯就没了，用户以为消息丢了；
  *   3. 推送丢了的兜底：拉云端 outbox，把没收到的塞回收件箱走原路入库；
- *   4. 超时（5 分钟）：先拉一次 outbox，还是没有才算这一轮失败、允许重发。
+ *   4. 收尾：云端点名说这条任务已经失败（或那行已经没了）时，先拉一次 outbox，
+ *      还是没有才算这一轮失败、允许重发。等了多久本身不构成结论。
  *
  * 刻意不在这里 flush 收件箱：flushInboxToChat 住在 activeMsgRuntime，那边反过来要用
  * 这里的记录，互相 import 会成环。所以这里只管「写进收件箱」，冲刷由调用方接着做。
@@ -25,11 +26,8 @@ import { DB } from './db';
 
 const HEADER = '[AmsgInstantChat]';
 
-/**
- * 「正在输入…」最多挂多久。到点先拉一次 outbox（推送静默丢了就在那儿），
- * 还是没有才认定这一轮没成，提示用户可以重发。
- */
-export const INSTANT_CHAT_PENDING_TIMEOUT_MS = 5 * 60_000;
+/** 还欠着回复时，前台每隔这么久去云端点名问一次任务状态。不到明确报错不放弃。 */
+export const INSTANT_CHAT_STATUS_CHECK_INTERVAL_MS = 60_000;
 
 /** 待收记录的落盘位置。存 localStorage 而不是内存：重启后指示灯要还在。 */
 export const AMSG_INSTANT_CHAT_PENDING_LS_KEY = 'amsg2_instant_chat_pending';
@@ -41,7 +39,7 @@ export interface AmsgInstantChatPending {
   charId: string;
   /** 这一轮在云端那条任务的 uuid；连发下一条时用它顶掉未认领的这条。 */
   uuid: string;
-  /** 受理时刻（epoch ms），超时判定的起点。 */
+  /** 受理时刻（epoch ms），排查时看「这一轮等了多久」用。 */
   acceptedAt: number;
 }
 
@@ -100,21 +98,6 @@ export const clearInstantChatPending = (charId: string): boolean => {
   writePendingMap(map);
   announcePendingChanged(charId);
   return true;
-};
-
-/** 已经超时的那几条（调用方先拉 outbox 再判失败）。 */
-export const listExpiredInstantChatPendings = (now: number): AmsgInstantChatPending[] =>
-  listInstantChatPendings().filter((p) => now - p.acceptedAt >= INSTANT_CHAT_PENDING_TIMEOUT_MS);
-
-/**
- * 下一次该醒来查超时的时刻（没有待收记录时 null）。
- * 看门狗按它排一个 setTimeout 就够，不需要为所有人加一条轮询。
- */
-export const nextInstantChatDeadline = (now: number): number | null => {
-  const pendings = listInstantChatPendings();
-  if (pendings.length === 0) return null;
-  const earliest = Math.min(...pendings.map((p) => p.acceptedAt + INSTANT_CHAT_PENDING_TIMEOUT_MS));
-  return Math.max(earliest, now);
 };
 
 // ─── 开关 ───
@@ -317,37 +300,31 @@ export const drainChatOutboxForPending = async (): Promise<number> => {
 };
 
 /**
- * 这一轮判定为「没等到回复」的收尾：销账 + 在聊天流里留一条说明。
+ * 这一轮收尾成「没等到回复」：销账 + 在聊天流里留一条说明。
  *
- * 沿用本地路径失败时那条系统消息的形态（`[…]` 的方括号系统消息），用户能直接看到
- * 发生了什么、也知道可以重发。写库失败只 warn——指示灯该灭还是得灭。
+ * 只在云端给了明确结论之后调（任务行已失败 / 行没了而 outbox 里也没有），所以这里
+ * 不再去 cancel 那条任务——失败的行不会再跑，没了的行也没什么可取消的。
+ *
+ * `reason` 是云端记下的失败原因（有就带给用户看）。沿用本地路径失败时那条系统消息的
+ * 形态（`[…]` 的方括号系统消息），用户能直接看到发生了什么、也知道可以重发。
+ * 写库失败只 warn——指示灯该灭还是得灭。
  */
-export const failInstantChatPending = async (charId: string): Promise<void> => {
-  const pending = getInstantChatPending(charId);
+export const failInstantChatPending = async (charId: string, reason?: string): Promise<void> => {
   if (!clearInstantChatPending(charId)) return;
-  // 只报失败、只有事件名：受理成功之后 5 分钟没等到推送、补拉一次 outbox 也没有。
-  // 这一格涨起来说明云端生成或推送链路在掉队，比用户来报「一直在输入」早得多。
-  trackEvent('即时对话超时未收到回复');
-  // 云端那条任务行也要销掉（尽力而为）：客户端这边判了失败，行还 pending 躺在 D1 里
-  // 的话，下一跳 tick/cron 会把它捡起来——要么拿彼时的上下文迟到地再答一遍（用户已经
-  // 重发过，收到两条相近回复），要么因为 fire_pack 已被后续上传覆盖而硬失败、还占掉
-  // 这个角色一跳的串行名额。404（已被顶替/已跑掉）无妨，取消失败只 warn 不拦流程。
-  if (pending?.uuid) {
-    try {
-      await ActiveMsgClient.cancelTask(pending.uuid);
-    } catch (error) {
-      console.warn(`${HEADER} 超时后取消云端任务失败（那条行可能会迟到地再答一遍）`, { uuid: pending.uuid, error });
-    }
-  }
+  // 只报失败、只有事件名：云端点名说这一轮没成（或回复取不回来）。这一格涨起来说明
+  // 云端生成或推送链路在掉队，比用户来报「一直在输入」早得多。
+  trackEvent('即时对话云端任务失败');
   try {
     await DB.saveMessage({
       charId,
       role: 'system',
       type: 'text',
-      content: '[即时对话没等到回复：超过 5 分钟云端都没有把回复推回来。可能是生成失败或推送丢了，可以重新发一次。]',
+      content: reason
+        ? `[即时对话失败：云端报告 ${reason}。可以重新发一次。]`
+        : '[即时对话失败：云端已处理这条消息，但回复没能取回（推送和云端副本都没拿到）。可以重新发一次。]',
     });
     window.dispatchEvent(new CustomEvent('active-msg-progress', { detail: { charId } }));
   } catch (error) {
-    console.warn(`${HEADER} 超时说明写入失败`, { charId, error });
+    console.warn(`${HEADER} 失败说明写入失败`, { charId, error });
   }
 };

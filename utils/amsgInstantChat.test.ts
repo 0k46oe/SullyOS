@@ -51,14 +51,11 @@ vi.mock('./activeMsgStore', () => ({
 import { ActiveMsgClient } from './activeMsgClient';
 import {
   AMSG_INSTANT_CHAT_PENDING_LS_KEY,
-  INSTANT_CHAT_PENDING_TIMEOUT_MS,
   chatOutboxPayloadToInbox,
   clearInstantChatPending,
   drainChatOutboxForChar,
   getInstantChatPending,
   isInstantChatReady,
-  listExpiredInstantChatPendings,
-  nextInstantChatDeadline,
   sendInstantChatTurn,
   setInstantChatPending,
 } from './amsgInstantChat';
@@ -148,7 +145,9 @@ describe('POST /instant-chat 的形状', () => {
     // 'instant' 在上游是「当场跑完」的行型，走不到 fire hooks，chat 段就白传了。
     expect(task.messageType).toBe('auto');
     expect(task.recurrenceType).toBe('none');
-    expect(task.messageSubtype).toBe('chat');
+    // 标着 instant-chat 而不是 chat：面板对账靠这个标签把「用户正等着的这一轮」
+    // 跟定时任务的行分开，不然它会被当成排程补进任务清单。
+    expect(task.messageSubtype).toBe('instant-chat');
     expect(task.metadata.amsgMode).toBe('instant');
     expect(task.metadata.amsgInstantChat).toBe(true);
     expect(task.metadata.charId).toBe(CHAR.id);
@@ -339,18 +338,6 @@ describe('待收记录（「正在输入…」那盏灯的唯一依据）', () =
     expect(clearInstantChatPending('char-a')).toBe(true);
     expect(clearInstantChatPending('char-a')).toBe(false);
     expect(getInstantChatPending('char-a')).toBeNull();
-  });
-
-  it('超时清单按 5 分钟算；没到点的不算', () => {
-    setInstantChatPending('char-a', 'uuid-a', 1_000);
-    expect(listExpiredInstantChatPendings(1_000 + INSTANT_CHAT_PENDING_TIMEOUT_MS - 1)).toHaveLength(0);
-    expect(listExpiredInstantChatPendings(1_000 + INSTANT_CHAT_PENDING_TIMEOUT_MS)).toHaveLength(1);
-  });
-
-  it('没有待收记录时不排看门狗（不给所有人加一条轮询）', () => {
-    expect(nextInstantChatDeadline(Date.now())).toBeNull();
-    setInstantChatPending('char-a', 'uuid-a', 1_000);
-    expect(nextInstantChatDeadline(0)).toBe(1_000 + INSTANT_CHAT_PENDING_TIMEOUT_MS);
   });
 
   it('存储里躺着坏数据时当没有，不能把整条路带崩', () => {

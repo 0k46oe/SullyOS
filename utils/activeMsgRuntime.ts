@@ -20,16 +20,15 @@ import { appendDevDebugInstantPushLog, appendDevDebugLog, isCaptureEnabled, make
 import { getLastRealUserMessageAt, shouldExpireFire } from './amsg2ExpireGuard';
 import {
   AMSG_INSTANT_CHAT_PENDING_EVENT,
+  INSTANT_CHAT_STATUS_CHECK_INTERVAL_MS,
   clearInstantChatPending,
   drainChatOutboxForChar,
   drainChatOutboxForPending,
   failInstantChatPending,
   getInstantChatPending,
-  listExpiredInstantChatPendings,
   listInstantChatPendings,
-  nextInstantChatDeadline,
 } from './amsgInstantChat';
-import { pruneStaleTasks } from './amsg2Tasks';
+import { describeRemoteLastError, pruneStaleTasks } from './amsg2Tasks';
 import { appendInstantTraceEntry } from './instantTraceLog';
 import { trackEvent } from './analytics';
 
@@ -1397,10 +1396,10 @@ const backfillReasoningSafely = async (sessionId?: string, charId?: string): Pro
   }
 };
 
-// ─── 即时对话：补收兜底 + 超时看门狗 ──────────────────────────────────────────
+// ─── 即时对话：补收兜底 + 状态点名 ──────────────────────────────────────────
 // 推送是会静默丢的（换网、系统压制、SW 没醒），用户那边的表现就是「一直在输入中」。
 // 云端每轮生成完都会在 client_state 留一份推送副本（chat_outbox），这里在三个时机去拉：
-// 冷启动、回到前台、以及「正在输入」快到 5 分钟的时候。**只有真欠着回复时才拉**——
+// 冷启动、回到前台、以及还欠着回复时每 60s 的那一跳。**只有真欠着回复时才拉**——
 // 没有待收记录就一个请求都不发，不给所有人加一条轮询。
 
 /** 拉一次 outbox 并把补收到的冲刷进聊天流。返回补收了几条。 */
@@ -1420,36 +1419,77 @@ const drainInstantChatOutboxAndFlush = async (charId?: string): Promise<number> 
 let instantChatWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
- * 把看门狗排到「最早那条待收记录到 5 分钟」的时刻。没有待收记录就直接撤掉定时器。
+ * 还欠着回复时，把下一跳点名排到 60s 后；一条都不欠就直接撤掉定时器。
  *
- * 每次待收记录变动都重排一次（受理 / 收到回复 / 判失败都会调）。用一个定时器而不是
- * 周期轮询：绝大多数时候一条待收记录都没有，不该为此每分钟醒一次。
+ * 每次待收记录变动都重排一次（受理 / 收到回复 / 判失败都会调）。绝大多数时候一条
+ * 待收记录都没有，那时一个定时器都不留，不给所有人加一条轮询。
  */
 const armInstantChatWatchdog = () => {
   if (instantChatWatchdogTimer != null) {
     clearTimeout(instantChatWatchdogTimer);
     instantChatWatchdogTimer = null;
   }
-  const deadline = nextInstantChatDeadline(Date.now());
-  if (deadline == null) return;
+  if (listInstantChatPendings().length === 0) return;
   instantChatWatchdogTimer = setTimeout(() => {
     instantChatWatchdogTimer = null;
-    void runInstantChatTimeoutCheck();
-  }, Math.max(0, deadline - Date.now()) + 1_000);
+    void runInstantChatStatusCheck();
+  }, INSTANT_CHAT_STATUS_CHECK_INTERVAL_MS);
 };
 
 /**
- * 超时判定：**先拉一次 outbox 再说**。到点没收到最常见的原因是推送丢了而不是生成失败，
+ * 即时对话的「一直等」状态机。客户端不按时长宣判——worker 一次 fire 最长 10 分钟、
+ * 失败重试间隔 2/4/6 分钟，任何固定的客户端超时都会抢在云端结论之前把还在路上的
+ * 回复判死（甚至顺手 cancel 掉）。这里的做法是：还欠着回复时，前台每 60s 点名问一次
+ * 那条任务行：
+ *   pending → 继续等（云端还在跑或在排队重试；nextSendAt 过期是重试中的常态，不当信号）；
+ *   completed（一次性任务 = 已失败）→ 补收兜底后落一条带 lastError 的失败说明；
+ *   gone → 补收兜底后要么已收到（销账在 flush 里做掉了），要么明确告知取不回；
+ *   查询失败（网络）→ 什么都不做，等下一跳。
+ * 页面不可见时不查（省电；回前台与冷启动各有一次兜底检查）。
+ *
+ * 每一轮下结论前都先拉一次 outbox：到点没收到最常见的原因是推送丢了而不是生成失败，
  * 不拉就报失败的话，用户会为一条其实已经生成好的回复重发一遍（再烧一轮 LLM）。
- * 拉完还是没有，才销账 + 在聊天流里留一句说明。
  */
-export const runInstantChatTimeoutCheck = async (): Promise<void> => {
-  const expired = listExpiredInstantChatPendings(Date.now());
-  for (const pending of expired) {
+export const runInstantChatStatusCheck = async (): Promise<void> => {
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+    armInstantChatWatchdog();
+    return;
+  }
+  for (const pending of listInstantChatPendings()) {
     await drainInstantChatOutboxAndFlush(pending.charId);
-    // 补收那一步如果把回复放进来了，flush 里已经销账了——再查一次现状，别把刚到的判成失败。
-    if (getInstantChatPending(pending.charId)?.uuid === pending.uuid) {
-      log.warn('即时对话超时未收到回复（已提示用户可重发）', { charId: pending.charId, uuid: pending.uuid });
+    // 补收那一步如果把回复放进来了，flush 里已经销账了——这一轮就此结束。
+    if (getInstantChatPending(pending.charId)?.uuid !== pending.uuid) continue;
+
+    let status: Awaited<ReturnType<typeof ActiveMsgClient.getRemoteTaskStatus>>;
+    try {
+      status = await ActiveMsgClient.getRemoteTaskStatus(pending.uuid);
+    } catch (e) {
+      log.warn('即时对话状态查询失败（等下一跳）', { uuid: pending.uuid, error: e });
+      continue;
+    }
+
+    if (status.state === 'pending') {
+      if (status.retryCount) log.warn('即时对话云端在重试', { uuid: pending.uuid, retryCount: status.retryCount });
+      continue;
+    }
+
+    // completed / gone：再兜一次 outbox（写 outbox 与删行之间有窗口），仍没有才下结论。
+    await drainInstantChatOutboxAndFlush(pending.charId);
+    if (getInstantChatPending(pending.charId)?.uuid !== pending.uuid) continue;
+
+    if (status.state === 'completed') {
+      let reason: string | undefined;
+      try {
+        const rows = await ActiveMsgClient.listRemoteTasksForChar(pending.charId);
+        const row = rows.find((r) => r.uuid === pending.uuid);
+        reason = describeRemoteLastError(row?.lastError ?? null, (iso) => new Date(iso).toLocaleString()) ?? undefined;
+      } catch (e) {
+        log.warn('即时对话失败原因取不到（报个笼统的）', { uuid: pending.uuid, error: e });
+      }
+      log.warn('即时对话云端任务已失败', { charId: pending.charId, uuid: pending.uuid, reason });
+      await failInstantChatPending(pending.charId, reason ?? '任务已失败（未取到失败原因）');
+    } else {
+      log.warn('即时对话云端那行已经没了，回复也取不回', { charId: pending.charId, uuid: pending.uuid });
       await failInstantChatPending(pending.charId);
     }
   }
@@ -1642,6 +1682,8 @@ export const ActiveMsgRuntime = {
           // 即时对话还欠着回复的话，顺手拉一次云端副本：后台期间推送丢了，这是唯一的补收时机。
           // 没欠着就一个请求都不发（drainChatOutboxForPending 自己会空转返回）。
           void drainInstantChatOutboxAndFlush();
+          // 后台期间点名那一跳只会撞上不可见守卫、原地重排，回前台把周期接回来。
+          armInstantChatWatchdog();
           void drainPendingDiaries(loadRealtimeConfigFromLocalStorage(), (charId) => {
             window.dispatchEvent(new CustomEvent('active-msg-progress', { detail: { charId } }));
           });
@@ -1650,7 +1692,7 @@ export const ActiveMsgRuntime = {
       });
     }
 
-    // 受理一轮即时对话之后（useChatAI 那边写记录 + 广播），把看门狗重排到新的 5 分钟上。
+    // 受理一轮即时对话之后（useChatAI 那边写记录 + 广播），把点名周期排上。
     if (typeof window !== 'undefined') {
       window.addEventListener(AMSG_INSTANT_CHAT_PENDING_EVENT, () => armInstantChatWatchdog());
     }
@@ -1665,11 +1707,12 @@ export const ActiveMsgRuntime = {
     await flushInboxToChat();
     await runPendingToolCallsSafely();
     // 上次会话发出去、回来前进程就没了的那一轮：指示灯靠 localStorage 记录挂回来，
-    // 内容靠这一拉补回来；已经超时的那几条在这里直接判失败（超时判定自带一次补收）。
+    // 内容靠这一拉补回来；补收不到的在这里去云端点一次名（点名自带一次补收），
+    // 顺带把 60s 的点名周期排上。
     if (listInstantChatPendings().length > 0) {
       void (async () => {
         await drainInstantChatOutboxAndFlush();
-        await runInstantChatTimeoutCheck();
+        await runInstantChatStatusCheck();
       })();
     }
     void drainPendingDiaries(loadRealtimeConfigFromLocalStorage(), (charId) => {
