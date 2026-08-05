@@ -3,14 +3,14 @@
  *
  * 打脏入口不止聊完一轮（useChatAI）：改人设 / 改记忆 / 删改消息 / 面板取消任务这些会
  * 改变 fire_pack 内容的落库路径也会调 markAmsgStateDirty（大多汇在 OSContext 的
- * updateCharacter 落库点），去抖后把所有脏角色的 fire_pack 批量上传 worker 的
- * client_state；切后台（visibilitychange→hidden）立即冲刷——iOS 只给几秒存活窗口，
+ * updateCharacter 落库点），打脏后立即把所有脏角色的 fire_pack 批量上传 worker 的
+ * client_state；切后台（visibilitychange→hidden）也冲刷一次——iOS 只给几秒存活窗口，
  * 必须一次请求写完。
  *
  * 只对「已排程 AI 模式 amsg2 任务」的角色生效，其余 markDirty 直接忽略。
  *
  * 脏标记有一份极轻量的 localStorage 底账（只存 charId 数组，不存快照本体）：打脏时写入、
- * 上传成功后移除。去抖窗口内被杀进程的话，下次启动 OSContext 调 resumePendingAmsgStateSync
+ * 上传成功后移除。请求还在路上就被杀进程的话，下次启动 OSContext 调 resumePendingAmsgStateSync
  * 按底账重建快照补传一次——否则那次改动云端永远不知道，角色到点带旧上下文说话。
  *
  * 上传失败会**退避重试**，不能一失败就把快照丢掉：云端那份 fire_pack 是到点时角色
@@ -35,8 +35,6 @@ import { hasActiveAiTask } from './amsg2Tasks';
 import { AmsgChatPresence, CHAT_PRESENCE_HEARTBEAT_MS } from './amsgChatPresence';
 import { trackEvent } from './analytics';
 
-// 10s：比 15s 少一截「聊完就关 App → 快照没传上去」的裸奔窗口，又不至于每个键入都打请求。
-const SYNC_DEBOUNCE_MS = 10_000;
 /** 失败重试的退避起点，逐次翻倍（30s → 60s → 120s）。 */
 const RETRY_BASE_MS = 30_000;
 /** 连续失败几次后放手，等下一轮聊天重新打脏标记——避免离线时无限重排。 */
@@ -52,15 +50,33 @@ export interface AmsgSyncSnapshot {
 
 // charId → 最新快照。同角色多轮聊天只留最后一份，flush 永远用最新状态拼模板。
 const dirty = new Map<string, AmsgSyncSnapshot>();
-let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let flushing = false;
 let lifecycleBound = false;
 let retryCount = 0;
 /** 「退避打光了还是没传上去」每次会话只上报一次。 */
 let staleStateReported = false;
 
+// ─── 打脏即传的两个合并开关 ───
+// 一轮聊天不止打一次脏（收尾一次、情绪 buff 落库又一次），中间还有群聊逐个成员打脏这种
+// 连环调用。没有窗口去抖之后，用这两个开关收口：同一个事件循环里的连环打脏合并成一次
+// 上传；上传途中来的打脏等这次传完再补跑一次（丢弃的话那份快照就永远躺在队列里了）。
+/** 已经排了一个微任务等着冲刷，别重复排。 */
+let flushQueued = false;
+/** 冲刷进行中又有人打脏，这次传完得再跑一轮。 */
+let reflushRequested = false;
+
+const queueFlush = () => {
+  if (flushQueued) return;
+  flushQueued = true;
+  queueMicrotask(() => {
+    flushQueued = false;
+    void flushAmsgState('dirty');
+  });
+};
+
 // ─── 脏标记轻量持久化 ───
-// 内存队列在「打脏 → 去抖窗口内杀进程」时会整个蒸发，重开 App 也不补传。这里只把
+// 内存队列在「打脏 → 请求还没回来就被杀进程」时会整个蒸发，重开 App 也不补传。这里只把
 // charId 记进 localStorage 当底账（快照本体下次启动从 DB 重建，存本体只会留一份过期数据）。
 export const AMSG2_PENDING_SYNC_LS_KEY = 'amsg2_pending_sync_char_ids';
 
@@ -114,8 +130,7 @@ export const markAmsgStateDirty = (snapshot: AmsgSyncSnapshot) => {
   dirty.set(snapshot.char.id, snapshot);
   persistDirtyMark(snapshot.char.id);
   bindLifecycleListener();
-  if (debounceTimer != null) clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => { void flushAmsgState('debounce'); }, SYNC_DEBOUNCE_MS);
+  queueFlush();
 };
 
 /**
@@ -157,10 +172,12 @@ export const flushAmsgState = async (reason: string): Promise<void> => {
   // 工具凭据欠着的话顺手一起补：它和 fire_pack 一样是「云端那份过时了」，
   // 而且冲刷时机（切后台 / 聊完一轮）正是网络多半又通了的时候。
   void runToolConfigSync(`flush:${reason}`);
-  if (flushing) return;
+  // 已经有一次在飞：这次的脏数据留在队列里，等那次落地后由 finally 补跑（直接 return
+  // 的话，上传期间打的脏就此搁浅，等不到任何人来传）。
+  if (flushing) { reflushRequested = true; return; }
   // 队列空 = 没有欠着的快照，之前那串失败也就翻篇了，退避计数跟着归零。
   if (dirty.size === 0) { retryCount = 0; return; }
-  if (debounceTimer != null) { clearTimeout(debounceTimer); debounceTimer = null; }
+  if (retryTimer != null) { clearTimeout(retryTimer); retryTimer = null; }
   flushing = true;
   const batch = [...dirty.values()];
   try {
@@ -189,8 +206,8 @@ export const flushAmsgState = async (reason: string): Promise<void> => {
       const delay = RETRY_BASE_MS * 2 ** retryCount;
       retryCount += 1;
       console.warn(`${HEADER} flush(${reason}) 失败，${Math.round(delay / 1000)}s 后重试（第 ${retryCount}/${MAX_RETRIES} 次）`, error);
-      if (debounceTimer != null) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => { void flushAmsgState('retry'); }, delay);
+      if (retryTimer != null) clearTimeout(retryTimer);
+      retryTimer = setTimeout(() => { void flushAmsgState('retry'); }, delay);
     } else {
       // 重排到头了（多半是离线）。快照留在队列里：下次打脏标记 / 切后台都会再试，
       // 在那之前云端仍是上一份，角色到点会带旧上下文——所以这条要吼出来。
@@ -205,6 +222,12 @@ export const flushAmsgState = async (reason: string): Promise<void> => {
     }
   } finally {
     flushing = false;
+    if (reflushRequested) {
+      reflushRequested = false;
+      // 两种情况不用补跑：队列空（上面那批把它一起带走了）；已经排了退避重传
+      // （重传本来就带上队列里的全部快照，此刻再打一次只是立刻重蹈覆辙，还白吃一次退避额度）。
+      if (dirty.size > 0 && retryTimer == null) void flushAmsgState('reflush');
+    }
   }
 };
 
@@ -242,7 +265,7 @@ export const resumePendingAmsgStateSync = (scope: {
       realtimeConfig: scope.realtimeConfig,
     });
   }
-  // 立即冲刷，不等 10s 去抖——这份欠账已经拖了一次进程生死了。
+  // 当场冲刷，不等 markDirty 排的那个微任务——这份欠账已经拖了一次进程生死了。
   if (dirty.size > 0) void flushAmsgState('resume');
 };
 
