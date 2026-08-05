@@ -28,15 +28,15 @@ export const MAX_ACTIVE_TASKS_PER_CHAR = 5;
 /**
  * 这个角色是否开着主动消息 2.0。
  *
- * 设置面板「关闭」会持久化 enabled:false，注入工具前必须过这道判定——否则被关掉的角色
- * 照样能调 schedule_active_message。从没配过的角色（config 缺失）算开启：默认可用，
- * 不需要先进面板点一下。
+ * 只有在设置面板里把开关打开过（持久化 enabled:true）才算开。从没配过的角色
+ * （config 缺失）算关——注入工具前必须过这道判定，否则用户还没表态要不要用，
+ * 角色已经能调 schedule_active_message 给他排定时消息了。
  *
  * 面板的开关初值和工具注入门都读这一个判定，别各写各的三元——两处答案不一致的话，
  * 面板显示「关」而角色其实照样能排程，界面就成了骗人的那一方。
  */
 export const isAmsg2EnabledForChar = (char: CharacterProfile): boolean =>
-  char.activeMsg2Config?.enabled !== false;
+  char.activeMsg2Config?.enabled === true;
 
 export const shortTaskId = (taskUuid: string): string => taskUuid.slice(0, 8);
 

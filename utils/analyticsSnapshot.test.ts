@@ -260,9 +260,8 @@ describe('当前功能启用 · 开关值的判定', () => {
         expect(flags['主动消息2.0']).toBe('填了没连上');
     });
 
-    it('从没碰过 2.0 的角色不算「开了」——默认可用不等于用起来了', () => {
-        // isAmsg2EnabledForChar 对 config 缺失的角色返回 true（默认可用），
-        // 拿它数会把角色总数报成 2.0 用户数。
+    it('从没碰过 2.0 的角色不算「开了」', () => {
+        // config 缺失 = 用户在这个角色上没表过态，拿它数会把角色总数报成 2.0 用户数。
         const flags = collectFeatureFlags(poisonedSources({
             characters: [untouchedChar('a'), untouchedChar('b'), untouchedChar('c')],
         }));

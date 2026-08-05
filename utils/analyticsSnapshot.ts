@@ -37,7 +37,7 @@ import { getLuckinToken, isLuckinEnabled } from './luckinMcpClient';
 import { getMcdToken, isMcdEnabled } from './mcdMcpClient';
 import { isInstantConfigReady, loadInstantConfig } from './instantPushClient';
 import { isPushVapidReady } from './pushVapid';
-import { getPendingTasks } from './amsg2Tasks';
+import { getPendingTasks, isAmsg2EnabledForChar } from './amsg2Tasks';
 import { ActiveMsgStore } from './activeMsgStore';
 import { getVRApi } from './vrWorld/vrApi';
 
@@ -333,12 +333,9 @@ export function collectFeatureFlags(src: FeatureSources): Record<string, string>
     const instant = loadInstantConfig();
     const luckinToken = getLuckinToken().length > 0;
     const mcdToken = getMcdToken().length > 0;
-    // 「用起来了的角色」不能用 isAmsg2EnabledForChar 数：那个判定是「没被关掉就算开」，
-    // 从没碰过 2.0 的角色（config 缺失）也返回 true，拿它数等于把角色总数报成 2.0 用户数。
-    // 有 activeMsg2Config = 用户在这个角色的面板里存过、或角色自己排过任务，是真痕迹。
-    const amsg2ActiveChars = src.characters.filter(
-        c => c.activeMsg2Config != null && c.activeMsg2Config.enabled !== false,
-    );
+    // 「用起来了的角色」= 在面板里把开关打开过的（enabled:true 是用户表过态的真痕迹），
+    // 与工具注入门同一个判定。
+    const amsg2ActiveChars = src.characters.filter(isAmsg2EnabledForChar);
 
     return {
         // ── 外部服务接入 ──

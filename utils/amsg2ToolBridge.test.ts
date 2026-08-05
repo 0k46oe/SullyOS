@@ -176,10 +176,10 @@ describe('amsg2ToolBridge 同一轮多次调用累加', () => {
 });
 
 // ─── 角色级开关 ───
-// 设置面板「关闭 2.0」会持久化 activeMsg2Config.enabled=false。工具注入这条路要是只看
-// 全局 workerUrl，被关掉的角色照样拿得到 schedule_active_message；再加上落盘时强写
-// enabled:true，一次工具调用就把用户显式关掉的功能又打开了。两头都得钉住。
-describe('角色级开关 enabled=false', () => {
+// 工具注入这条路要是只看全局 workerUrl，没在面板里开过 2.0 的角色照样拿得到
+// schedule_active_message；再加上落盘时强写 enabled:true，一次工具调用就把用户
+// 没表态过的功能替他打开了。两头都得钉住。
+describe('角色级开关', () => {
   const charWith = (config: any) => ({ id: 'preset-x', name: 'Nyah', activeMsg2Config: config } as any);
 
   it('关掉的角色不给注入工具', () => {
@@ -190,8 +190,8 @@ describe('角色级开关 enabled=false', () => {
     expect(isAmsg2EnabledForChar(charWith({ enabled: true, tasks: [] }))).toBe(true);
   });
 
-  it('从没配过 2.0 的角色算开启（默认可用，不需要先进面板点一下）', () => {
-    expect(isAmsg2EnabledForChar(charWith(undefined))).toBe(true);
+  it('从没配过 2.0 的角色算关闭（要先进面板把开关打开）', () => {
+    expect(isAmsg2EnabledForChar(charWith(undefined))).toBe(false);
   });
 
   it('落盘不把 enabled 改写成 true（工具调用不得替用户重新开启功能）', async () => {

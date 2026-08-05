@@ -130,7 +130,9 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
 
     const config = char.activeMsg2Config;
     const list = config?.tasks ?? [];
-    setEnabled(config?.enabled ?? false);
+    // 跟 useState 初值同一个判定：这里自己写三元的话，面板显示的开关状态就会跟
+    // 工具注入门分家（见 isAmsg2EnabledForChar 的注释）。
+    setEnabled(isAmsg2EnabledForChar(char));
     setMaxTokens(config?.maxTokens ? String(config.maxTokens) : '');
     setUseSecondaryApi(config?.useSecondaryApi ?? false);
     setSecUrl(config?.secondaryApi?.baseUrl ?? '');

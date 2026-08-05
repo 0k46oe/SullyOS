@@ -1847,7 +1847,7 @@ export const ActiveMsgClient = {
    * 任务体里的 apiUrl / apiKey / primaryModel 是排程那一刻冻结的——换了 Key、
    * 旧 Key 吊销后，已排程任务到点全部 401，用户只看到「主动消息怎么不来了」。
    *
-   * 范围：开着 2.0（enabled !== false）且有 pending AI 任务（mode !== 'fixed'）的
+   * 范围：开着 2.0（enabled:true）且有 pending AI 任务（mode !== 'fixed'）的
    * 角色。fixed 不走 LLM 用不到凭据；关掉 2.0 的角色残留任务是「待取消」而不是
    * 「待续命」，不给它们续新凭据。生效凭据按 resolveTaskCredentialUpdates 算——
    * 开了单独 API 的角色写的是单独 API 的值，不会被全局配置覆盖。
