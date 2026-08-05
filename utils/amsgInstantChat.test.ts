@@ -391,14 +391,14 @@ describe('零推送收尾时也要熄灭情绪徽章', () => {
     (globalThis as any).window ??= { dispatchEvent: () => true };
   });
 
+  /** 记下这一段派了哪些事件（spy 而不是手工换函数：restore 交给 vitest，漏还原不了）。 */
   const captureEvents = () => {
     const seen: Array<{ type: string; detail: any }> = [];
-    const original = window.dispatchEvent;
-    (window as any).dispatchEvent = (event: any) => {
+    const spy = vi.spyOn(window, 'dispatchEvent').mockImplementation((event: any) => {
       seen.push({ type: event?.type, detail: event?.detail });
       return true;
-    };
-    return { seen, restore: () => { (window as any).dispatchEvent = original; } };
+    });
+    return { seen, restore: () => spy.mockRestore() };
   };
 
   it('销账成功 → 发一次 instant-emotion-done（徽章的熄灭信号）', async () => {

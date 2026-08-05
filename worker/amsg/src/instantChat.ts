@@ -108,6 +108,11 @@ export const buildInstantTimelyBlock = (args: {
   /** 其余按顺序拼上去的块：实时世界、自述日志、排程清单、MCP、给自己排下一条。 */
   blocks: string[];
 }): string => {
+  const blocks = args.blocks.filter((block) => block.trim());
+  // 关了时间感知、其余几块又都是空的（没日程没排程没 MCP、实时世界也没拉到）——
+  // 这一块就没有任何内容可说了，整块不要。空块整块跳过是这里一贯的做法，只剩一行
+  // 光秃秃的标题挂在对话末尾，模型只会当成没说完的乱码。
+  if (!args.timeAwarenessEnabled && blocks.length === 0) return '';
   const head = args.timeAwarenessEnabled
     ? [
         '【此刻的系统信息·仅你可见】',
@@ -116,7 +121,7 @@ export const buildInstantTimelyBlock = (args: {
         buildUserClockHint(args.nowMs, args.tz, { tzId: args.userTzId }, args.targetName),
       ].join('\n')
     : '【此刻的系统信息·仅你可见】';
-  return [head, ...args.blocks.filter((block) => block.trim())].join('\n');
+  return [head, ...blocks].join('\n');
 };
 
 // ─── 收件兜底 outbox ───

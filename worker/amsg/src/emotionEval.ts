@@ -14,7 +14,8 @@
  * 两个 worker 是各自打包部署的 bundle，共享只能走 utils/ 叶子，而这段逻辑贴着 amsg 的
  * chat 段形状，放在 amsg 侧更贴。
  *
- * 失败一律返回 null，绝不连累主回复——用户等的是那句话，情绪只是附赠。
+ * 失败绝不连累主回复——用户等的是那句话，情绪只是附赠；跑挂了就带一句短原因回去，
+ * 让客户端能照实说明白，而不是丢一句「可查 worker 日志」。
  *
  * 零浏览器依赖（这份代码会被打进 worker bundle）。
  */
@@ -31,7 +32,7 @@ const SYSTEM_SLOT = '__EMOTION_EVAL_SYSTEM_PROMPT__';
 const HISTORY_SLOT = '__EMOTION_EVAL_HISTORY__';
 
 /** 单次评估请求的上限；副 API 卡住的话，主回复不该跟着一起被扣在这儿。 */
-export const EMOTION_EVAL_TIMEOUT_MS = 120_000;
+const EMOTION_EVAL_TIMEOUT_MS = 120_000;
 
 /**
  * 评估结果太大、一条 push 装不下时的旁路存储键（同 XHS 那套，见 amsgXhsSessionKey）。
@@ -41,7 +42,7 @@ export const EMOTION_EVAL_TIMEOUT_MS = 120_000;
 export const amsgEmotionUpdateKey = (clientTaskId: string) => `emotion_update:${clientTaskId}`;
 
 /** 这份配置能不能用来发请求（缺哪一样都发不出去）。 */
-export const isUsableEvalSpec = (spec: unknown): spec is AmsgEmotionEvalSpec => {
+const isUsableEvalSpec = (spec: unknown): spec is AmsgEmotionEvalSpec => {
   const s = spec as AmsgEmotionEvalSpec | undefined;
   return !!s
     && typeof s.prompt === 'string' && !!s.prompt
@@ -148,9 +149,33 @@ export const restoreEvalPrompt = (
     .replace(HISTORY_SLOT, () => recentLines);
 };
 
+/** 一次评估的结局：拿到原文，或者一句能给用户看的短失败原因。 */
+export interface AmsgEmotionEvalOutcome {
+  /** 评估模型的输出原文；没跑出来时为 null。 */
+  raw: string | null;
+  /** 没跑出来的原因（人话、一句话）；成功时为 null。 */
+  error: string | null;
+}
+
+/** 报错正文最多带回这么长——够定位是限流还是鉴权就行，不是日志转发通道。 */
+const ERROR_SNIPPET_MAX = 120;
+
 /**
- * 跑一次评估，返回模型输出的原文（解析交给客户端的 applyEmotionEvalRaw，
- * 与本地路径共用同一套容错）。跑不出来一律 null。
+ * 从失败响应里摘一句能给用户看的原因。
+ *
+ * **绝不能带出 apiKey**：个别中转会把整个请求（含 Authorization 头）回显在错误页里，
+ * 而这句话最终要走 push 出门。摘之前先按 key 本身过一遍，命中就打码。
+ */
+const describeEvalFailure = (status: number, body: string, apiKey: string): string => {
+  let snippet = body.replace(/\s+/g, ' ').trim().slice(0, ERROR_SNIPPET_MAX);
+  if (apiKey && snippet.includes(apiKey)) snippet = snippet.split(apiKey).join('***');
+  return `副 API HTTP ${status}${snippet ? `：${snippet}` : ''}`;
+};
+
+/**
+ * 跑一次评估。成功给原文（解析交给客户端的 applyEmotionEvalRaw，与本地路径共用同一套
+ * 容错），失败给一句短原因——它会跟着「评估有结论了」的信号回到客户端，替掉过去那句
+ * 「可查 worker 日志」。用户自己部署的 worker，日志不是人人都会看。
  *
  * `chatMessages` 要传**主生成真正看到的那一串**（含末尾追加的时效块），
  * 少了那一块评估模型连现在几点都不知道，判出来的情绪会对不上角色刚说的话。
@@ -160,7 +185,7 @@ export const runAmsgEmotionEval = async (
   chatMessages: Array<{ role: string; content: unknown }>,
   charName: string,
   timeoutMs: number = EMOTION_EVAL_TIMEOUT_MS,
-): Promise<string | null> => {
+): Promise<AmsgEmotionEvalOutcome> => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -183,8 +208,11 @@ export const runAmsgEmotionEval = async (
       signal: controller.signal,
     });
     if (!res.ok) {
+      // 正文可能是 HTML 错误页，截一小段够定位即可（与 instant push worker 同一套）。
+      let body = '';
+      try { body = await res.text(); } catch { /* 读不出正文就只报状态码 */ }
       console.warn('[amsg:emotion] 副 API 拒了这次评估（主回复不受影响）', res.status);
-      return null;
+      return { raw: null, error: describeEvalFailure(res.status, body, spec.api.apiKey) };
     }
     const data = await res.json() as any;
     // 个别中转把全部输出塞进 reasoning_content 而 content 留空——与客户端
@@ -192,10 +220,20 @@ export const runAmsgEmotionEval = async (
     const message = data?.choices?.[0]?.message;
     const raw = flattenContent(message?.content)
       || (typeof message?.reasoning_content === 'string' ? message.reasoning_content : '');
-    return raw.trim() ? raw : null;
+    if (!raw.trim()) {
+      return {
+        raw: null,
+        error: `评估模型没有输出内容（finish_reason: ${data?.choices?.[0]?.finish_reason ?? '?'}）`,
+      };
+    }
+    return { raw, error: null };
   } catch (error) {
     console.warn('[amsg:emotion] 评估失败（主回复不受影响）', error);
-    return null;
+    // 只带异常名/消息，不带栈：这句要走 push 出门，短一点、也别把内部路径抖出去。
+    const reason = controller.signal.aborted
+      ? `评估超时（${Math.round(timeoutMs / 1000)} 秒没回来）`
+      : `评估请求没发出去：${(error instanceof Error ? error.message : String(error)).slice(0, ERROR_SNIPPET_MAX)}`;
+    return { raw: null, error: reason };
   } finally {
     clearTimeout(timer);
   }

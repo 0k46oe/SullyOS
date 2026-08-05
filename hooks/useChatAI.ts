@@ -635,7 +635,7 @@ export const useChatAI = ({
         };
         window.addEventListener('emotion-innerstate-updated', innerStateHandler);
 
-        // worker 的 emotion_update 落库后 activeMsgRuntime fire 'instant-emotion-done' → 熄灭 "情绪更新中".
+        // 上云的评估有结论了（worker 推回后由 activeMsgRuntime / 收尾判定派发）→ 熄灭 "情绪更新中".
         const emotionDoneHandler = (e: Event) => {
             const detail = (e as CustomEvent).detail;
             if (detail?.charId !== charIdAtMount) return;
@@ -645,7 +645,7 @@ export const useChatAI = ({
                 instantEmotionTimerRef.current = null;
             }
         };
-        window.addEventListener('instant-emotion-done', emotionDoneHandler);
+        window.addEventListener(CHAT_GEN_EVENTS.emotionDone, emotionDoneHandler);
 
         // 2. 离线路径兜底: mount 时检查这个 char 有没有 pending (老版本 / 非 worker-eval 路径残留的 push)
         void ActiveMsgStore.getPendingEmotionEval(charIdAtMount).then((pending) => {
@@ -655,7 +655,7 @@ export const useChatAI = ({
         return () => {
             window.removeEventListener('post-push-emotion-eval', handler);
             window.removeEventListener('emotion-innerstate-updated', innerStateHandler);
-            window.removeEventListener('instant-emotion-done', emotionDoneHandler);
+            window.removeEventListener(CHAT_GEN_EVENTS.emotionDone, emotionDoneHandler);
         };
     }, [char?.id]);
 
@@ -950,21 +950,42 @@ export const useChatAI = ({
 
             // 上云的情绪评估在 worker 跑 (副 API), 客户端看不到 LLM 调用时机, 但仍要给用户一个
             // "情绪更新中" 的可见信号 (header 徽章, 跟本地模式一致), 否则 "发送中" 消失后一片空白像死了.
-            // 从这里点亮, 到 worker 把结果推回来 (activeMsgRuntime fire 'instant-emotion-done')
-            // 或安全超时 (worker 旧/失败/前端被杀) 时熄灭.
+            //
+            // 正常的熄灭信号只有一个: worker 把结论推回来之后派发的 CHAT_GEN_EVENTS.emotionDone
+            // (Chat 页的徽章和全局横幅各自监听, 都不依赖本 hook 存活 —— 用户切走 Chat 也能正常熄灭).
+            // 剩下两种情况自己收场: 这一轮压根没发出去 —— 下面两个失败分支当场调
+            // extinguishCloudEmotionBadge; 结论永远没回来 (worker 被杀 / 推送丢了 / 用户部署的是旧版)
+            // —— 徽章的 setTimeout 和横幅的 TTL 同时到点, 两边用的是同一个数.
+            //
+            // 这个数按各自 worker 最长能跑多久给:
+            //   · Instant Push: 一个请求里跑完就回, 90s 足够;
+            //   · 即时对话: worker 那条 fire 的总时长上限是 600s (工具循环也算在内), 评估结果
+            //     又是跟着主回复的最后一条推送回来的, 90s 会在人家还没跑完时就误报「超时无回音」。
+            //     给 660s = 600s 上限 + 一分钟推送在途的余量。
+            const cloudEvalTimeoutMs = instantChatRoute ? 660_000 : 90_000;
+            /**
+             * 熄灭「情绪更新中」的三件套：撤掉安全网、灭页内徽章、灭全局横幅。
+             *
+             * 这一轮没发出去时两个失败分支都要调它 —— 云端根本不会跑评估，那个正常的熄灭信号
+             * 永远不会来。少调一处的表现是：徽章亮着直到安全网到点，然后弹一句
+             * 「worker 可能是旧版」的提示，而真实原因是这条消息压根没发出去。
+             */
+            const extinguishCloudEmotionBadge = () => {
+                if (instantEmotionTimerRef.current) {
+                    clearTimeout(instantEmotionTimerRef.current);
+                    instantEmotionTimerRef.current = null;
+                }
+                setEmotionStatus('');
+                announceChatGen(CHAT_GEN_EVENTS.emotionEnd, { charId: char.id, charName: char.name });
+            };
             if (cloudEmotionEval) {
                 setEmotionStatus('evaluating');
-                // 全局横幅同步点灯; 熄灭信号是 worker 推回后 activeMsgRuntime 的
-                // 'instant-emotion-done' (ChatBroadcast 直接监听) + 横幅自身 TTL 兜底,
-                // 都不依赖本 hook 存活 —— 用户切走 Chat 也能正常熄灭。
-                announceChatGen(CHAT_GEN_EVENTS.emotionStart, { charId: char.id, charName: char.name });
+                // 横幅这一条的存活上限跟徽章同一个数：不带的话横幅按自己那档默认值（本地评估的
+                // 量级）扫，即时对话会出现「横幅先没了、徽章还亮着」，看着像出了两次故障。
+                announceChatGen(CHAT_GEN_EVENTS.emotionStart, {
+                    charId: char.id, charName: char.name, ttlMs: cloudEvalTimeoutMs,
+                });
                 if (instantEmotionTimerRef.current) clearTimeout(instantEmotionTimerRef.current);
-                // 两条路的安全网长短不一样，按各自 worker 最长能跑多久给：
-                //   · Instant Push：一个请求里跑完就回，90s 足够；
-                //   · 即时对话：worker 那条 fire 的总时长上限是 600s（工具循环也算在内），
-                //     评估结果又是跟着主回复的最后一条推送回来的，90s 会在还没跑完时就误报
-                //     「超时无回音」。给 660s = 600s 上限 + 一分钟推送在途的余量。
-                const cloudEvalTimeoutMs = instantChatRoute ? 660_000 : 90_000;
                 instantEmotionTimerRef.current = setTimeout(() => {
                     setEmotionStatus('');
                     instantEmotionTimerRef.current = null;
@@ -977,7 +998,7 @@ export const useChatAI = ({
                             ? '云端情绪评估超时无回音——worker 可能是旧版（不支持情绪评估），请到 设置→主动消息 2.0 重新部署 worker 后重试'
                             : '云端情绪评估超时无回音——worker 可能是旧版（不支持情绪评估），请到 设置→Instant 消息设置 更新 worker 后重试',
                     });
-                }, cloudEvalTimeoutMs);  // 安全网: 正常情况下 worker 推回结果会 fire 'instant-emotion-done' 提前熄灭; 只在 worker 旧版/被杀/推送丢失时兜底.
+                }, cloudEvalTimeoutMs);
             }
 
             // 发送前汇总计时
@@ -1183,11 +1204,8 @@ export const useChatAI = ({
                         addToast(`Instant Push: ${errMsg}`, 'error');
                     }
                 }
-                // 发送失败/取消 → worker 不会跑情绪评估, 'instant-emotion-done' 永不到达,
-                // 主动熄灭全局横幅 (否则要等 TTL 兜底)。
-                if (!instantResult.ok && cloudEmotionEval) {
-                    announceChatGen(CHAT_GEN_EVENTS.emotionEnd, { charId: char.id, charName: char.name });
-                }
+                // 发送失败/取消 → worker 不会跑情绪评估，那个正常的熄灭信号永不到达，当场自己熄。
+                if (!instantResult.ok && cloudEmotionEval) extinguishCloudEmotionBadge();
                 return;
             }
 
@@ -1232,16 +1250,9 @@ export const useChatAI = ({
                     setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
                     if (showError) showError('即时对话发送失败', reason);
                     else addToast(reason, 'error');
-                    // 没发出去 → 云端不会跑评估，'instant-emotion-done' 永不到达。主动熄灯，
-                    // 否则「情绪更新中」要挂满 11 分钟才由 TTL 兜底灭掉。
-                    if (cloudEmotionEval) {
-                        if (instantEmotionTimerRef.current) {
-                            clearTimeout(instantEmotionTimerRef.current);
-                            instantEmotionTimerRef.current = null;
-                        }
-                        setEmotionStatus('');
-                        announceChatGen(CHAT_GEN_EVENTS.emotionEnd, { charId: char.id, charName: char.name });
-                    }
+                    // 没发出去 → 云端不会跑评估，那个正常的熄灭信号永不到达。当场自己熄，
+                    // 否则「情绪更新中」要一直亮到 11 分钟后安全网到点。
+                    if (cloudEmotionEval) extinguishCloudEmotionBadge();
                 }
                 return;
             }

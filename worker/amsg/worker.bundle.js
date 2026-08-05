@@ -8421,6 +8421,12 @@ var restoreEvalPrompt = (template, chatMessages, charName) => {
   }).join("\n");
   return String(template).replace(SYSTEM_SLOT, () => systemPromptText).replace(HISTORY_SLOT, () => recentLines);
 };
+var ERROR_SNIPPET_MAX = 120;
+var describeEvalFailure = (status, body, apiKey) => {
+  let snippet = body.replace(/\s+/g, " ").trim().slice(0, ERROR_SNIPPET_MAX);
+  if (apiKey && snippet.includes(apiKey)) snippet = snippet.split(apiKey).join("***");
+  return `\u526F API HTTP ${status}${snippet ? `\uFF1A${snippet}` : ""}`;
+};
 var runAmsgEmotionEval = async (spec, chatMessages, charName, timeoutMs = EMOTION_EVAL_TIMEOUT_MS) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -8444,16 +8450,28 @@ var runAmsgEmotionEval = async (spec, chatMessages, charName, timeoutMs = EMOTIO
       signal: controller.signal
     });
     if (!res.ok) {
+      let body = "";
+      try {
+        body = await res.text();
+      } catch {
+      }
       console.warn("[amsg:emotion] \u526F API \u62D2\u4E86\u8FD9\u6B21\u8BC4\u4F30\uFF08\u4E3B\u56DE\u590D\u4E0D\u53D7\u5F71\u54CD\uFF09", res.status);
-      return null;
+      return { raw: null, error: describeEvalFailure(res.status, body, spec.api.apiKey) };
     }
     const data = await res.json();
     const message = data?.choices?.[0]?.message;
     const raw = flattenContent(message?.content) || (typeof message?.reasoning_content === "string" ? message.reasoning_content : "");
-    return raw.trim() ? raw : null;
+    if (!raw.trim()) {
+      return {
+        raw: null,
+        error: `\u8BC4\u4F30\u6A21\u578B\u6CA1\u6709\u8F93\u51FA\u5185\u5BB9\uFF08finish_reason: ${data?.choices?.[0]?.finish_reason ?? "?"}\uFF09`
+      };
+    }
+    return { raw, error: null };
   } catch (error) {
     console.warn("[amsg:emotion] \u8BC4\u4F30\u5931\u8D25\uFF08\u4E3B\u56DE\u590D\u4E0D\u53D7\u5F71\u54CD\uFF09", error);
-    return null;
+    const reason = controller.signal.aborted ? `\u8BC4\u4F30\u8D85\u65F6\uFF08${Math.round(timeoutMs / 1e3)} \u79D2\u6CA1\u56DE\u6765\uFF09` : `\u8BC4\u4F30\u8BF7\u6C42\u6CA1\u53D1\u51FA\u53BB\uFF1A${(error instanceof Error ? error.message : String(error)).slice(0, ERROR_SNIPPET_MAX)}`;
+    return { raw: null, error: reason };
   } finally {
     clearTimeout(timer);
   }
@@ -8468,13 +8486,15 @@ var INSTANT_TICK_CRON = "instant-chat";
 var AMSG_INSTANT_CHAT_FLAG = "amsgInstantChat";
 var isInstantChatTask = (metadata) => !!metadata && metadata[AMSG_INSTANT_CHAT_FLAG] === true;
 var buildInstantTimelyBlock = (args) => {
+  const blocks = args.blocks.filter((block) => block.trim());
+  if (!args.timeAwarenessEnabled && blocks.length === 0) return "";
   const head = args.timeAwarenessEnabled ? [
     "\u3010\u6B64\u523B\u7684\u7CFB\u7EDF\u4FE1\u606F\xB7\u4EC5\u4F60\u53EF\u89C1\u3011",
     `\u73B0\u5728\u662F ${formatFireTimeFull(args.nowMs, args.tz)}\u3002`,
     // buildUserClockHint 自带前导换行，没时差时返回空串。
     buildUserClockHint(args.nowMs, args.tz, { tzId: args.userTzId }, args.targetName)
   ].join("\n") : "\u3010\u6B64\u523B\u7684\u7CFB\u7EDF\u4FE1\u606F\xB7\u4EC5\u4F60\u53EF\u89C1\u3011";
-  return [head, ...args.blocks.filter((block) => block.trim())].join("\n");
+  return [head, ...blocks].join("\n");
 };
 var NOTIFICATION_WHEN_HIDDEN = "when-hidden";
 var finalizeInstantPush = (payload, index, total, ids) => {
@@ -9233,6 +9253,14 @@ var amsgHooks = {
       ...fireTools.length ? { tools: fireTools } : {}
     };
     if (instant) {
+      const timelyBlock = buildInstantTimelyBlock({
+        nowMs: ctx.now.getTime(),
+        tz,
+        userTzId: pack.userTzId,
+        targetName: pack.targetName,
+        timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
+        blocks: [realtimeWorldBlock, renderSelfLogBlock(selfLog, tz), taskListBlock, mcpBlock, scheduleBlock]
+      });
       const instantMessages = [
         // content 原样透传，一个字都不动：带图片的消息本地就是结构化分段
         // （`[{type:'text'},{type:'image_url'}]`），上游把这个数组整个丢进
@@ -9241,17 +9269,7 @@ var amsgHooks = {
         // 模型收到的就是「[object Object]」而不是那张图。
         // 每条重新包一层对象只是不把 pack 上那份交出去，content 仍是同一个引用。
         ...pack.chat.messages.map((m) => ({ role: m.role, content: m.content })),
-        {
-          role: "system",
-          content: buildInstantTimelyBlock({
-            nowMs: ctx.now.getTime(),
-            tz,
-            userTzId: pack.userTzId,
-            targetName: pack.targetName,
-            timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
-            blocks: [realtimeWorldBlock, renderSelfLogBlock(selfLog, tz), taskListBlock, mcpBlock, scheduleBlock]
-          })
-        }
+        ...timelyBlock ? [{ role: "system", content: timelyBlock }] : []
       ];
       if (emotionEvalSpec) {
         stash.emotionEvalPromise = runAmsgEmotionEval(
@@ -9366,14 +9384,15 @@ var amsgHooks = {
       );
       let payloads = attachScheduledTasks(decision.pushPayloads, stash.scheduledTasks);
       if (stash.instant && stash.emotionEvalPromise && payloads.length > 0) {
-        const evalText = await stash.emotionEvalPromise;
+        const { raw: evalText, error: evalError } = await stash.emotionEvalPromise;
         const lastIdx = payloads.length - 1;
         payloads = payloads.map((payload, i) => i === lastIdx ? {
           ...payload,
           metadata: {
             ...payload.metadata ?? {},
             amsgEmotionDone: true,
-            ...evalText ? { amsgEmotionUpdate: evalText } : {}
+            ...evalText ? { amsgEmotionUpdate: evalText } : {},
+            ...!evalText && evalError ? { amsgEmotionError: evalError } : {}
           }
         } : payload);
       }

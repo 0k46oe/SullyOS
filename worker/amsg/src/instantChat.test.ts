@@ -403,6 +403,16 @@ describe('buildInstantTimelyBlock', () => {
     expect(block).toContain('【热搜】');
   });
 
+  // 时间感知关着、其余几块又都是空的：这一块没有任何内容可说，整块都不该有。
+  // 留一行光秃秃的标题挂在对话末尾，模型只会当成没说完的乱码。
+  it('没时间也没别的可说 → 整块返回空串（调用方据此一条都不追加）', () => {
+    expect(buildInstantTimelyBlock({
+      ...base, timeAwarenessEnabled: false, blocks: ['', '  ', '\n\n'],
+    })).toBe('');
+    // 时间感知开着时不受影响：报时本身就是内容
+    expect(buildInstantTimelyBlock({ ...base, blocks: [] })).toContain('现在是');
+  });
+
   it('空块整块跳过（拉不到实时世界时不能留一行空标题）', () => {
     const block = buildInstantTimelyBlock({ ...base, blocks: ['', '  ', '\n\n【热搜】\n- 某某'] });
     expect(block).toContain('【热搜】');

@@ -601,14 +601,14 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
   // 同一个 'instant-emotion-done' 熄灯。漏了这一段，用户看到的是「回复来了、情绪永远不更新、
   // 头顶那盏『情绪更新中』亮满十一分钟」。
   describe('即时对话带回来的情绪评估', () => {
+    /** 记下这一段派了哪些事件（spy 而不是手工换函数：restore 交给 vitest，漏还原不了）。 */
     const captureEvents = () => {
       const seen: Array<{ type: string; detail: any }> = [];
-      const original = (globalThis as any).window.dispatchEvent;
-      (globalThis as any).window.dispatchEvent = (event: any) => {
+      const spy = vi.spyOn(window, 'dispatchEvent').mockImplementation((event: any) => {
         seen.push({ type: event?.type, detail: event?.detail });
         return true;
-      };
-      return { seen, restore: () => { (globalThis as any).window.dispatchEvent = original; } };
+      });
+      return { seen, restore: () => spy.mockRestore() };
     };
 
     it('评估原文随回复一起到 → 落 buff + 熄灯（跟 emotion_update 同一条链）', async () => {
@@ -648,13 +648,39 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
       expect((await assistantMsgs(charId)).length).toBeGreaterThan(0);
     }, 20000);
 
-    it('云端评估没跑出东西 → 照样熄灯并报一句原因（不静默留着灯）', async () => {
+    it('云端评估没跑出东西 → 照样熄灯，并把 worker 捎回来的原因原样给用户看', async () => {
       const charId = 'char-emotion-empty';
       await DB.saveCharacter({ id: charId, name: '空评估角色' } as any);
       await ActiveMsgStore.saveInboxMessage(inboxMsg({
         messageId: 'msg-emotion-empty',
         charId,
         charName: '空评估角色',
+        messageType: 'text',
+        metadata: { charId, amsgEmotionDone: true, amsgEmotionError: '副 API HTTP 401：no credit' },
+      }));
+
+      const { seen, restore } = captureEvents();
+      try {
+        await flushInboxToChat();
+      } finally {
+        restore();
+      }
+
+      expect(seen.some((e) => e.type === 'instant-emotion-done' && e.detail?.charId === charId)).toBe(true);
+      const failed = seen.find((e) => e.type === CHAT_GEN_EVENTS.emotionFailed && e.detail?.charId === charId);
+      expect(failed).toBeTruthy();
+      // 「可查 worker 日志」对自己部署 worker 的用户等于没说；具体状态码才查得下去
+      expect(failed!.detail.reason).toContain('副 API HTTP 401');
+      expect(failed!.detail.reason).toContain('no credit');
+    }, 20000);
+
+    it('老 worker 没带原因 → 退回那句笼统的（不至于什么都不说）', async () => {
+      const charId = 'char-emotion-noreason';
+      await DB.saveCharacter({ id: charId, name: '旧版角色' } as any);
+      await ActiveMsgStore.saveInboxMessage(inboxMsg({
+        messageId: 'msg-emotion-noreason',
+        charId,
+        charName: '旧版角色',
         messageType: 'text',
         metadata: { charId, amsgEmotionDone: true },
       }));
@@ -666,8 +692,8 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
         restore();
       }
 
-      expect(seen.some((e) => e.type === 'instant-emotion-done' && e.detail?.charId === charId)).toBe(true);
-      expect(seen.some((e) => e.type === CHAT_GEN_EVENTS.emotionFailed && e.detail?.charId === charId)).toBe(true);
+      const failed = seen.find((e) => e.type === CHAT_GEN_EVENTS.emotionFailed && e.detail?.charId === charId);
+      expect(failed!.detail.reason).toContain('云端情绪评估无输出');
     }, 20000);
 
     it('装不下时挪进 client_state：按 amsgEmotionRef 取回来照样落 buff，用完就删', async () => {

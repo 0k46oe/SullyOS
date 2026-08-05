@@ -115,6 +115,7 @@ import {
   runAmsgEmotionEval,
   stripEmotionEvalSpec,
   takeEmotionEvalSpec,
+  type AmsgEmotionEvalOutcome,
 } from './emotionEval';
 import {
   buildInstantTimelyBlock,
@@ -309,11 +310,11 @@ interface FireStash {
   chatOutbox: AmsgChatOutbox | null;
   /**
    * 这一轮的情绪评估（副 API）。onBeforeFire 起跑、onLLMOutput 收尾时 await，
-   * 结果挂上最后一条 push。没配评估 / 不是即时对话时是 null。
+   * 结论挂上最后一条 push。没配评估 / 不是即时对话时是 null。
    *
    * 存 promise 而不是结果：评估和主生成是并行跑的，等到收尾时多半早就跑完了。
    */
-  emotionEvalPromise: Promise<string | null> | null;
+  emotionEvalPromise: Promise<AmsgEmotionEvalOutcome> | null;
 }
 
 const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash | undefined =>
@@ -1107,6 +1108,16 @@ export const amsgHooks = {
     // 即时对话：请求消息就是客户端本地生成会发出去的那一串，末尾追加一块时效信息。
     // 不走模板渲染——那是「到点主动找人说话」的提示词，拿它答用户刚说的话必然跑偏。
     if (instant) {
+      // 到点才知道的那些事（现在几点、外面在下雨、还挂着哪些排程…）。一件都没有时是空串，
+      // 那就一条都不追加——空的系统消息挂在对话末尾只会让模型以为话没说完。
+      const timelyBlock = buildInstantTimelyBlock({
+        nowMs: ctx.now.getTime(),
+        tz,
+        userTzId: pack.userTzId,
+        targetName: pack.targetName,
+        timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
+        blocks: [realtimeWorldBlock, renderSelfLogBlock(selfLog, tz), taskListBlock, mcpBlock, scheduleBlock],
+      });
       const instantMessages = [
         // content 原样透传，一个字都不动：带图片的消息本地就是结构化分段
         // （`[{type:'text'},{type:'image_url'}]`），上游把这个数组整个丢进
@@ -1115,17 +1126,7 @@ export const amsgHooks = {
         // 模型收到的就是「[object Object]」而不是那张图。
         // 每条重新包一层对象只是不把 pack 上那份交出去，content 仍是同一个引用。
         ...pack.chat!.messages.map((m) => ({ role: m.role, content: m.content })),
-        {
-          role: 'system' as const,
-          content: buildInstantTimelyBlock({
-            nowMs: ctx.now.getTime(),
-            tz,
-            userTzId: pack.userTzId,
-            targetName: pack.targetName,
-            timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
-            blocks: [realtimeWorldBlock, renderSelfLogBlock(selfLog, tz), taskListBlock, mcpBlock, scheduleBlock],
-          }),
-        },
+        ...(timelyBlock ? [{ role: 'system' as const, content: timelyBlock }] : []),
       ];
 
       // 情绪评估（副 API）：跟主生成**并行**跑，等 onLLMOutput 收尾时 await——那时
@@ -1282,9 +1283,11 @@ export const amsgHooks = {
       // 排在旁路存储之前，装不下时才能连它一起挪走。
       //
       // 评估挂了也要挂一个 amsgEmotionDone：客户端从用户按下发送那一刻就点着「情绪更新中」，
-      // 只在有结果时才带信号的话，评估一失败那盏灯就得亮到十几分钟后由 TTL 兜底才灭。
+      // 只在有结果时才带信号的话，评估一失败那盏灯就得亮到十几分钟后才由安全网熄。
+      // 挂了还捎一句短原因（amsgEmotionError），客户端照实说明白——用户自己部署的 worker，
+      // 「可查 worker 日志」对多数人等于没说。原因里绝不含凭据（见 describeEvalFailure）。
       if (stash.instant && stash.emotionEvalPromise && payloads.length > 0) {
-        const evalText = await stash.emotionEvalPromise;
+        const { raw: evalText, error: evalError } = await stash.emotionEvalPromise;
         const lastIdx = payloads.length - 1;
         payloads = payloads.map((payload, i) => (i === lastIdx
           ? {
@@ -1293,6 +1296,7 @@ export const amsgHooks = {
                 ...(payload.metadata as Record<string, unknown> ?? {}),
                 amsgEmotionDone: true,
                 ...(evalText ? { amsgEmotionUpdate: evalText } : {}),
+                ...(!evalText && evalError ? { amsgEmotionError: evalError } : {}),
               },
             }
           : payload));

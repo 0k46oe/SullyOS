@@ -22,6 +22,7 @@ import { ActiveMsgClient } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
 import { AMSG_CHAT_OUTBOX_KEY, amsgStateNamespace, parseChatOutbox } from './amsgFirePack';
 import { trackEvent } from './analytics';
+import { announceEmotionDone } from './chatGenEvents';
 import { DB } from './db';
 import type { AmsgEmotionEvalSpec } from '../worker/amsg/src/emotionEval';
 
@@ -337,12 +338,8 @@ export const failInstantChatPending = async (
   // 安全网，中途还会弹一句「worker 可能是旧版」的误导提示。云端已经点名说这一轮没成，
   // 就是最确定的熄灯时机。
   //
-  // 事件名与形状跟收侧那处逐字一致（activeMsgRuntime 的 announceEmotionDone）；
-  // 不直接复用那个 helper 是因为 activeMsgRuntime 反过来 import 本模块，会成环。
   // 派在写库之前：写库失败只 warn，灯不该被它连累（同上面那句注释的口径）。
-  try {
-    window.dispatchEvent(new CustomEvent('instant-emotion-done', { detail: { charId } }));
-  } catch { /* SSR-safe */ }
+  announceEmotionDone(charId);
   // 只报失败、只有事件名：云端点名说这一轮没成（或回复取不回来）。这一格涨起来说明
   // 云端生成或推送链路在掉队，比用户来报「一直在输入」早得多。
   trackEvent('即时对话云端任务失败');

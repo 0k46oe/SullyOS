@@ -161,6 +161,78 @@ const fired = (result: unknown): FiredResult => {
   return result as FiredResult;
 };
 
+const FIRE_TASK_ID = 42;
+const FIRE_NEXT_SEND_AT = '2026-07-25T12:00:00.000Z';
+
+/**
+ * 会记账的 client_state 夹具：readState / writeState 打在同一个 Map 上，
+ * 这一轮写进去的东西下一轮读得到（outbox 累积、self_log 回写这些都要它）。
+ *
+ * 给了 chatMessages 就是即时对话那种 fire_pack（带 chat 段），不给就是定时任务那种。
+ */
+const makeFireStore = (chatMessages?: Array<{ role: string; content: unknown }>) => {
+  const rows = new Map<string, string>([
+    [AMSG_FIRE_PACK_KEY, firePackValue(null, chatMessages
+      ? { chat: { messages: chatMessages, builtAt: PACK_BUILT_AT } }
+      : {})],
+    [AMSG_TOOL_PACK_KEY, toolPackValue],
+  ]);
+  const readState = vi.fn(async (namespace: string) => (
+    namespace.startsWith('amsg:char:')
+      ? [...rows].map(([key, value]) => ({ key, value }))
+      : [{ key: AMSG_TOOL_CONFIG_KEY, value: toolConfigValue }]
+  ));
+  const writeState = vi.fn(async (
+    _namespace: string,
+    entries: Array<{ key: string; value: string | null }>,
+  ) => {
+    for (const entry of entries) {
+      if (entry.value === null) rows.delete(entry.key);
+      else rows.set(entry.key, entry.value);
+    }
+    return { upserted: entries.length, skipped: 0, deleted: 0 };
+  });
+  return { rows, readState, writeState, outbox: () => parseChatOutbox(rows.get(AMSG_CHAT_OUTBOX_KEY)) };
+};
+
+/**
+ * 完整跑一次 fire：onBeforeFire → onLLMOutput。
+ *
+ * metadata 一并交还，而且**两个 hook 收到的是同一个对象引用**——上游就是这么传的
+ * （见 chunk-RRWCPPOY 的 buildHookTask 浅拷贝），照搬才验得出「就地删凭据」那类行为。
+ */
+const runFire = async (
+  store: ReturnType<typeof makeFireStore>,
+  opts: {
+    metadata: Record<string, unknown>;
+    llmOutput: string;
+    /** 同一个 store 连跑几轮时换一下，messageId 才跟着变。 */
+    taskId?: number;
+    sessionId?: string;
+  },
+) => {
+  const scratch: Record<string, unknown> = {};
+  const metadata = { charId: CHAR_ID, ...opts.metadata };
+  const taskId = opts.taskId ?? FIRE_TASK_ID;
+  await amsgHooks.onBeforeFire({
+    task: {
+      id: taskId, uuid: TASK_UUID, contactName: 'Nyah', recurrenceType: 'none',
+      nextSendAt: FIRE_NEXT_SEND_AT, metadata,
+    },
+    userId: 'u1',
+    readState: store.readState,
+    writeState: store.writeState,
+    now: NOW,
+    scratch,
+  } as any);
+  const decision = await amsgHooks.onLLMOutput({
+    sessionId: opts.sessionId ?? `sess_task_${taskId}@1`, taskId, taskUuid: TASK_UUID,
+    llmResponse: {}, llmOutputText: opts.llmOutput, contactName: 'Nyah',
+    metadata, scratch, writeState: store.writeState,
+  } as any) as any;
+  return { decision, metadata };
+};
+
 describe('onBeforeFire 四道门', () => {
   it('正常路径：填好槽返回 prompt，并把工具状态挂上 scratch', async () => {
     const { ctx, scratch } = makeCtx({});
@@ -2074,60 +2146,18 @@ describe('即时对话的收件兜底 outbox', () => {
   const CLIENT_TASK_ID = 'client-instant-1';
   const CHAT_MESSAGES = [{ role: 'user', content: '在吗' }];
 
-  const makeStore = (instant: boolean) => {
-    const rows = new Map<string, string>([
-      [AMSG_FIRE_PACK_KEY, firePackValue(null, instant
-        ? { chat: { messages: CHAT_MESSAGES, builtAt: PACK_BUILT_AT } }
-        : {})],
-      [AMSG_TOOL_PACK_KEY, toolPackValue],
-    ]);
-    const readState = vi.fn(async (namespace: string) => (
-      namespace.startsWith('amsg:char:')
-        ? [...rows].map(([key, value]) => ({ key, value }))
-        : [{ key: AMSG_TOOL_CONFIG_KEY, value: toolConfigValue }]
-    ));
-    const writeState = vi.fn(async (
-      _namespace: string,
-      entries: Array<{ key: string; value: string | null }>,
-    ) => {
-      for (const entry of entries) {
-        if (entry.value === null) rows.delete(entry.key);
-        else rows.set(entry.key, entry.value);
-      }
-      return { upserted: entries.length, skipped: 0, deleted: 0 };
-    });
-    return { rows, readState, writeState, outbox: () => parseChatOutbox(rows.get(AMSG_CHAT_OUTBOX_KEY)) };
-  };
+  const makeStore = (instant: boolean) => makeFireStore(instant ? CHAT_MESSAGES : undefined);
 
-  const runFire = async (store: ReturnType<typeof makeStore>, instant: boolean, llmOutput: string) => {
-    const scratch: Record<string, unknown> = {};
-    const metadata = {
-      charId: CHAR_ID,
-      amsgClientTaskId: CLIENT_TASK_ID,
-      amsgMode: instant ? 'instant' : 'auto',
-      ...(instant ? { amsgInstantChat: true } : { amsgTaskInstruction: '想到什么说什么' }),
-    };
-    await amsgHooks.onBeforeFire({
-      task: {
-        id: 42, uuid: TASK_UUID, contactName: 'Nyah', recurrenceType: 'none',
-        nextSendAt: '2026-07-25T12:00:00.000Z', metadata,
-      },
-      userId: 'u1',
-      readState: store.readState,
-      writeState: store.writeState,
-      now: NOW,
-      scratch,
-    } as any);
-    return await amsgHooks.onLLMOutput({
-      sessionId: 'sess_task_42@1', taskId: 42, taskUuid: TASK_UUID,
-      llmResponse: {}, llmOutputText: llmOutput, contactName: 'Nyah',
-      metadata, scratch, writeState: store.writeState,
-    } as any) as any;
-  };
+  /** 这一组只按「即时对话 / 定时任务」分两种任务身份，别的都走模块级那份 runFire。 */
+  const fireMeta = (instant: boolean) => ({
+    amsgClientTaskId: CLIENT_TASK_ID,
+    amsgMode: instant ? 'instant' : 'auto',
+    ...(instant ? { amsgInstantChat: true } : { amsgTaskInstruction: '想到什么说什么' }),
+  });
 
   it('生成完就写进 chat_outbox，和真发出去的那份 id 逐字一致', async () => {
     const store = makeStore(true);
-    const decision = await runFire(store, true, '在的。怎么啦？');
+    const { decision } = await runFire(store, { metadata: fireMeta(true), llmOutput: '在的。怎么啦？' });
     expect(decision.decision).toBe('finish');
 
     const outbox = store.outbox()!;
@@ -2142,7 +2172,7 @@ describe('即时对话的收件兜底 outbox', () => {
 
   it('定时任务不写 outbox（那条路的产物在任务列表里查得到）', async () => {
     const store = makeStore(false);
-    const decision = await runFire(store, false, '在的。');
+    const { decision } = await runFire(store, { metadata: fireMeta(false), llmOutput: '在的。' });
     expect(decision.decision).toBe('finish');
     expect(store.outbox()).toBeNull();
     expect(store.rows.has(AMSG_CHAT_OUTBOX_KEY)).toBe(false);
@@ -2152,7 +2182,7 @@ describe('即时对话的收件兜底 outbox', () => {
   // 必须弹。SW 的 shouldRenderNotification 按 notification.show 分这两种，worker 表态。
   it('即时对话的推送标 when-hidden，outbox 里那份也带着', async () => {
     const store = makeStore(true);
-    const decision = await runFire(store, true, '在的。怎么啦？');
+    const { decision } = await runFire(store, { metadata: fireMeta(true), llmOutput: '在的。怎么啦？' });
     for (const push of decision.pushPayloads) {
       expect((push.notification as any).show).toBe('when-hidden');
       // 横幅文案还在：show 只是加一个字段，不是把 notification 换掉
@@ -2163,7 +2193,7 @@ describe('即时对话的收件兜底 outbox', () => {
 
   it('定时任务的推送不标 show（主动消息前台可见时更该弹）', async () => {
     const store = makeStore(false);
-    const decision = await runFire(store, false, '在的。');
+    const { decision } = await runFire(store, { metadata: fireMeta(false), llmOutput: '在的。' });
     for (const push of decision.pushPayloads) {
       expect(push.notification).toBeTruthy();
       expect((push.notification as any).show).toBeUndefined();
@@ -2173,25 +2203,11 @@ describe('即时对话的收件兜底 outbox', () => {
   it('连聊几轮后只留最近 CHAT_OUTBOX_MAX 条', async () => {
     const store = makeStore(true);
     for (let i = 0; i < CHAT_OUTBOX_MAX + 2; i += 1) {
-      // 每轮换一次触发时刻，messageId 才跟着变（同一次触发重跑是要覆盖的）
-      const scratch: Record<string, unknown> = {};
-      const metadata = {
-        charId: CHAR_ID, amsgClientTaskId: CLIENT_TASK_ID,
-        amsgMode: 'instant', amsgInstantChat: true,
-      };
-      await amsgHooks.onBeforeFire({
-        task: {
-          id: 40 + i, uuid: TASK_UUID, contactName: 'Nyah', recurrenceType: 'none',
-          nextSendAt: '2026-07-25T12:00:00.000Z', metadata,
-        },
-        userId: 'u1', readState: store.readState, writeState: store.writeState,
-        now: NOW, scratch,
-      } as any);
-      await amsgHooks.onLLMOutput({
-        sessionId: `sess_${i}`, taskId: 40 + i, taskUuid: TASK_UUID,
-        llmResponse: {}, llmOutputText: `第 ${i} 轮`, contactName: 'Nyah',
-        metadata, scratch, writeState: store.writeState,
-      } as any);
+      // 每轮换一个任务行 id，messageId 才跟着变（同一次触发重跑是要覆盖的）
+      await runFire(store, {
+        metadata: fireMeta(true), llmOutput: `第 ${i} 轮`,
+        taskId: 40 + i, sessionId: `sess_${i}`,
+      });
     }
     expect(store.outbox()!.entries).toHaveLength(CHAT_OUTBOX_MAX);
   });
@@ -2224,66 +2240,22 @@ describe('即时对话的云端情绪评估', () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
-  const makeStore = () => {
-    const rows = new Map<string, string>([
-      [AMSG_FIRE_PACK_KEY, firePackValue(null, {
-        chat: { messages: CHAT_MESSAGES, builtAt: PACK_BUILT_AT },
-      })],
-      [AMSG_TOOL_PACK_KEY, toolPackValue],
-    ]);
-    const readState = vi.fn(async (namespace: string) => (
-      namespace.startsWith('amsg:char:')
-        ? [...rows].map(([key, value]) => ({ key, value }))
-        : [{ key: AMSG_TOOL_CONFIG_KEY, value: toolConfigValue }]
-    ));
-    const writeState = vi.fn(async (
-      _namespace: string,
-      entries: Array<{ key: string; value: string | null }>,
-    ) => {
-      for (const entry of entries) {
-        if (entry.value === null) rows.delete(entry.key);
-        else rows.set(entry.key, entry.value);
-      }
-      return { upserted: entries.length, skipped: 0, deleted: 0 };
-    });
-    return { rows, readState, writeState };
-  };
+  const makeStore = () => makeFireStore(CHAT_MESSAGES);
 
-  const runFire = async (
+  /** 这一组的任务身份是固定的即时对话，只有评估配置那部分按用例变。 */
+  const evalFire = (
     store: ReturnType<typeof makeStore>,
     extraMeta: Record<string, unknown>,
     llmOutput = TWO_SEGMENT_OUTPUT,
-  ) => {
-    const scratch: Record<string, unknown> = {};
-    const metadata = {
-      charId: CHAR_ID,
+  ) => runFire(store, {
+    metadata: {
       amsgClientTaskId: CLIENT_TASK_ID,
       amsgMode: 'instant',
       amsgInstantChat: true,
       ...extraMeta,
-    };
-    await amsgHooks.onBeforeFire({
-      task: {
-        id: 42, uuid: TASK_UUID, contactName: 'Nyah', recurrenceType: 'none',
-        nextSendAt: '2026-07-25T12:00:00.000Z', metadata,
-      },
-      userId: 'u1',
-      readState: store.readState,
-      writeState: store.writeState,
-      now: NOW,
-      scratch,
-    } as any);
-    const decision = await amsgHooks.onLLMOutput({
-      sessionId: 'sess_task_42@1', taskId: 42, taskUuid: TASK_UUID,
-      llmResponse: {}, llmOutputText: llmOutput, contactName: 'Nyah',
-      metadata, scratch, writeState: store.writeState,
-    } as any) as any;
-    // metadata 一并交出去：上游把这**同一个对象**按引用喂给 onBeforeFire 的
-    // task.metadata、onLLMOutput 的 ctx.metadata，以及 hook 不接手时那条模板路径
-    // （见 chunk-RRWCPPOY 的 buildHookTask 浅拷贝 + `push.metadata = args.metadata`）。
-    // 这里照搬同一个引用，才能真验出「捕获点就地删」有没有生效。
-    return { decision, metadata };
-  };
+    },
+    llmOutput,
+  });
 
   it('评估结果随最后一条 push 回去，而副 API 凭据一条都不带出门', async () => {
     const seen: Array<{ url: string; auth: string | null; body: any }> = [];
@@ -2299,7 +2271,7 @@ describe('即时对话的云端情绪评估', () => {
     }));
 
     const store = makeStore();
-    const { decision, metadata } = await runFire(store, { amsgEmotionEval: EVAL_SPEC });
+    const { decision, metadata } = await evalFire(store, { amsgEmotionEval: EVAL_SPEC });
     expect(decision.decision).toBe('finish');
     const payloads = decision.pushPayloads as Array<Record<string, any>>;
     expect(payloads.length).toBeGreaterThanOrEqual(2);
@@ -2343,7 +2315,7 @@ describe('即时对话的云端情绪评估', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('boom', { status: 500 })));
 
     const store = makeStore();
-    const { decision, metadata } = await runFire(store, { amsgEmotionEval: EVAL_SPEC });
+    const { decision, metadata } = await evalFire(store, { amsgEmotionEval: EVAL_SPEC });
     expect(decision.decision).toBe('finish');
     const payloads = decision.pushPayloads as Array<Record<string, any>>;
     expect(payloads.length).toBeGreaterThanOrEqual(2);
@@ -2353,10 +2325,44 @@ describe('即时对话的云端情绪评估', () => {
       expect(payload.metadata).not.toHaveProperty('amsgEmotionEval');
     }
     // 但「这一轮的评估有结论了」照样要带回去 —— 否则客户端那盏「情绪更新中」
-    // 要一直亮到十几分钟后由 TTL 兜底才灭，用户只看到情绪永远不更新。
-    expect(payloads[payloads.length - 1].metadata.amsgEmotionDone).toBe(true);
+    // 要一直亮到十几分钟后才由安全网熄，用户只看到情绪永远不更新。
+    const lastMeta = payloads[payloads.length - 1].metadata;
+    expect(lastMeta.amsgEmotionDone).toBe(true);
+    // 还捎一句短原因给客户端照实说明白（用户自己部署的 worker，「可查日志」等于没说）
+    expect(lastMeta.amsgEmotionError).toContain('副 API HTTP 500');
     // 评估跑挂了也照删不误（凭据的去留跟评估成不成功无关）
     expect(metadata).not.toHaveProperty('amsgEmotionEval');
+  });
+
+  // 报错正文里带回一小段够定位是限流还是鉴权就行，但**绝不能把 key 带出来**：
+  // 个别中转会把整个请求（含 Authorization 头）回显在错误页里，而这句话要走 push 出门。
+  it('失败原因里的凭据打码（中转把请求回显在错误页里也不漏）', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      'Unauthorized for Bearer sk-secondary-KEYLEAK on model eval-mini', { status: 401 })));
+
+    const store = makeStore();
+    const { decision } = await evalFire(store, { amsgEmotionEval: EVAL_SPEC });
+    const payloads = decision.pushPayloads as Array<Record<string, any>>;
+    const reason = String(payloads[payloads.length - 1].metadata.amsgEmotionError);
+
+    expect(reason).toContain('副 API HTTP 401');
+    expect(reason).toContain('***');
+    expect(reason).not.toContain('sk-secondary-KEYLEAK');
+    expect(JSON.stringify(payloads)).not.toContain('sk-secondary-KEYLEAK');
+  });
+
+  it('评估模型没吐东西 → 原因说清是「没输出」，不是网络问题', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: '' }, finish_reason: 'length' }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+
+    const store = makeStore();
+    const { decision } = await evalFire(store, { amsgEmotionEval: EVAL_SPEC });
+    const lastMeta = (decision.pushPayloads as Array<Record<string, any>>).slice(-1)[0].metadata;
+    expect(lastMeta.amsgEmotionDone).toBe(true);
+    expect(lastMeta.amsgEmotionUpdate).toBeUndefined();
+    expect(lastMeta.amsgEmotionError).toContain('评估模型没有输出内容');
+    expect(lastMeta.amsgEmotionError).toContain('length');
   });
 
   // 上游判「这次 hook 不接手」的依据就是 onBeforeFire 返回 null/undefined，那之后走的
@@ -2393,7 +2399,7 @@ describe('即时对话的云端情绪评估', () => {
   it('只摘走评估配置，别的任务字段一个不动', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('nope', { status: 500 })));
     const store = makeStore();
-    const { metadata } = await runFire(store, {
+    const { metadata } = await evalFire(store, {
       amsgEmotionEval: EVAL_SPEC,
       amsgAnchorMs: 1_700_000_000_000,
     });
@@ -2412,7 +2418,7 @@ describe('即时对话的云端情绪评估', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     const store = makeStore();
-    const { decision } = await runFire(store, {});
+    const { decision } = await evalFire(store, {});
     expect(decision.decision).toBe('finish');
     expect(fetchSpy).not.toHaveBeenCalled();
     for (const payload of decision.pushPayloads as Array<Record<string, any>>) {
