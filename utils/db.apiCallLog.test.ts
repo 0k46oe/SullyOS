@@ -37,3 +37,26 @@ describe('API call log atomic persistence', () => {
         expect(stored[0]).toMatchObject({ backendModel: 'm-backend', totalTokens: 123 });
     });
 });
+
+describe('one-shot API request capture persistence', () => {
+    beforeEach(async () => {
+        await DB.clearApiRequestCapture();
+    });
+
+    it('keeps only the newest full request capture', async () => {
+        await DB.saveApiRequestCapture({ id: 'first', payload: { messages: ['old'] } });
+        await DB.saveApiRequestCapture({ id: 'second', payload: { messages: ['new'] } });
+
+        expect(await DB.getApiRequestCapture()).toEqual({ id: 'second', payload: { messages: ['new'] } });
+    });
+
+    it('clears the full capture without clearing normal call logs', async () => {
+        const logId = `kept-${Date.now()}`;
+        await DB.appendApiCallLog({ id: logId, timestamp: Date.now(), model: 'm', ok: true });
+        await DB.saveApiRequestCapture({ id: 'capture' });
+        await DB.clearApiRequestCapture();
+
+        expect(await DB.getApiRequestCapture()).toBeNull();
+        expect((await DB.getApiCallLog()).some(entry => entry.id === logId)).toBe(true);
+    });
+});

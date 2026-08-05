@@ -1,5 +1,103 @@
-import { describe, it, expect } from 'vitest';
-import { scanSseForLog, coreModelName, isSameCoreModel, buildPromptBreakdown, isFixedPromptBlockLabel, getApiCallAmbientContext, setApiCallAmbientContext } from './apiCallLog';
+import { describe, it, expect, vi } from 'vitest';
+import {
+    buildApiRequestCapture,
+    buildPromptBreakdown,
+    coreModelName,
+    formatApiRequestCaptureTxt,
+    getApiCallAmbientContext,
+    getApiRequestCaptureSectionContent,
+    getApiRequestCaptureSectionSource,
+    isApiRequestCaptureArmed,
+    isFixedPromptBlockLabel,
+    isSameCoreModel,
+    scanSseForLog,
+    setApiRequestCaptureArmed,
+    setApiCallAmbientContext,
+} from './apiCallLog';
+
+describe('one-shot full API request capture', () => {
+    it('uses the in-memory armed flag on the disabled hot path instead of reading localStorage per request', () => {
+        vi.stubGlobal('localStorage', {
+            getItem: () => { throw new Error('isApiRequestCaptureArmed must not read storage'); },
+            setItem: () => {},
+            removeItem: () => {},
+        });
+        setApiRequestCaptureArmed(true);
+        expect(isApiRequestCaptureArmed()).toBe(true);
+        setApiRequestCaptureArmed(false);
+        expect(isApiRequestCaptureArmed()).toBe(false);
+        vi.unstubAllGlobals();
+    });
+
+    it('keeps the complete payload and indexes memory, worldbook, history, tools and options', () => {
+        const capture = buildApiRequestCapture({
+            url: 'https://example.com/v1/chat/completions',
+            body: JSON.stringify({
+                model: 'gpt-test',
+                temperature: 0.7,
+                messages: [
+                    { role: 'system', content: '## 行为规范\n规则正文\n## 记忆召回\n昨天一起看了海。\n## 世界书\n海边城市设定。' },
+                    { role: 'user', content: '今天还去吗？' },
+                    { role: 'assistant', content: '当然。' },
+                ],
+                tools: [{ type: 'function', function: { name: 'read_calendar' } }],
+            }),
+            meta: { appName: '消息', charName: '测试角色' },
+            capturedAt: 1234,
+        });
+
+        expect(capture.model).toBe('gpt-test');
+        expect(capture.messageCount).toBe(3);
+        expect(capture.meta.charName).toBe('测试角色');
+        expect(capture.sections.some(section => section.kind === 'memory')).toBe(true);
+        expect(capture.sections.some(section => section.kind === 'worldbook')).toBe(true);
+        expect(capture.sections.some(section => section.kind === 'tools')).toBe(true);
+        expect(capture.sections.some(section => section.kind === 'user')).toBe(true);
+
+        const memory = capture.sections.find(section => section.kind === 'memory')!;
+        expect(getApiRequestCaptureSectionContent(capture, memory)).toContain('昨天一起看了海');
+        expect(getApiRequestCaptureSectionSource(memory)).toContain('记忆系统召回');
+        expect(memory.path).toBe('messages[0].content · 分块 2');
+        expect(JSON.stringify(capture.payload)).toContain('read_calendar');
+        expect(JSON.stringify(capture.payload)).toContain('今天还去吗');
+    });
+
+    it('exports a readable TXT report with source ranking, paths, section content and raw JSON', () => {
+        const capture = buildApiRequestCapture({
+            url: 'https://example.com/v1/chat/completions',
+            body: {
+                model: 'gpt-test',
+                messages: [
+                    { role: 'system', content: '## 记忆召回\n记忆正文' },
+                    { role: 'user', content: '用户正文' },
+                ],
+            },
+            meta: { appName: '消息', purpose: '聊天回复' },
+            capturedAt: 1234,
+        });
+        const txt = formatApiRequestCaptureTxt(capture);
+
+        expect(txt).toContain('来源体积排行');
+        expect(txt).toContain('记忆系统召回后注入本次请求的内容');
+        expect(txt).toContain('位置：messages[0].content · 分块 1');
+        expect(txt).toContain('记忆正文');
+        expect(txt).toContain('完整原始请求 JSON');
+        expect(txt).toContain('"content": "用户正文"');
+    });
+
+    it('replaces oversized inline binary data but preserves its original size for diagnosis', () => {
+        const dataUrl = `data:image/png;base64,${'a'.repeat(5000)}`;
+        const capture = buildApiRequestCapture({
+            url: 'https://example.com/v1/chat/completions',
+            body: { model: 'vision', messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl } }] }] },
+        });
+
+        expect(capture.binaryPlaceholders).toBe(1);
+        const raw = JSON.stringify(capture.payload);
+        expect(raw).toContain('原始 5,022 字符');
+        expect(raw).not.toContain('a'.repeat(100));
+    });
+});
 
 describe('API call ambient context snapshots', () => {
     it('keeps the request-start App even after ambient navigation changes', () => {
