@@ -2524,6 +2524,27 @@ export const DB = {
       });
   },
 
+  patchApiRequestCapture: async (captureId: string, patch: Record<string, unknown>): Promise<boolean> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_API_CALL_LOG)) return false;
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_API_CALL_LOG, 'readwrite');
+          const store = tx.objectStore(STORE_API_CALL_LOG);
+          const req = store.get('one-shot-capture');
+          let updated = false;
+          req.onsuccess = () => {
+              const current = req.result?.capture;
+              if (!current || current.id !== captureId) return;
+              store.put({ id: 'one-shot-capture', capture: { ...current, ...patch } });
+              updated = true;
+          };
+          req.onerror = () => reject(req.error || new Error('patchApiRequestCapture read failed'));
+          tx.oncomplete = () => resolve(updated);
+          tx.onerror = () => reject(tx.error || new Error('patchApiRequestCapture transaction failed'));
+          tx.onabort = () => reject(tx.error || new Error('patchApiRequestCapture transaction aborted'));
+      });
+  },
+
   clearApiRequestCapture: async (): Promise<void> => {
       const db = await openDB();
       if (!db.objectStoreNames.contains(STORE_API_CALL_LOG)) return;

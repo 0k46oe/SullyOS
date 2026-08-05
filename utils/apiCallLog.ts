@@ -81,6 +81,8 @@ export type ApiRequestCaptureSectionKind =
     | 'system'
     | 'memory'
     | 'worldbook'
+    | 'group'
+    | 'history'
     | 'context'
     | 'user'
     | 'assistant'
@@ -117,6 +119,11 @@ export interface ApiRequestCapture {
     meta: ApiCallMeta;
     payload: unknown;
     totalChars: number;
+    /** 模型/中转响应 usage 中自报的真实输入 Token；对方不返回时为空。 */
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+    usageStatus?: 'pending' | 'reported' | 'not-reported' | 'failed';
     messageCount: number;
     binaryPlaceholders: number;
     sections: ApiRequestCaptureSection[];
@@ -266,14 +273,15 @@ function resolvePresetName(baseUrl: string, model: string): string {
  * 在 safeFetchJson 里对 `/chat/completions` 的成功与失败都会调用。
  */
 /** 从 OpenAI 兼容响应里抠 usage（各家代理大多遵循这个字段）。 */
-function extractUsage(response: unknown): { prompt?: number; completion?: number; total?: number } {
-    const usage = (response as any)?.usage;
+export function extractApiTokenUsage(response: unknown): { prompt?: number; completion?: number; total?: number } {
+    const root = response as any;
+    const usage = root?.usage || root?.usage_metadata || root?.usageMetadata;
     if (!usage || typeof usage !== 'object') return {};
     const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
     return {
-        prompt: num(usage.prompt_tokens),
-        completion: num(usage.completion_tokens),
-        total: num(usage.total_tokens),
+        prompt: num(usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokenCount),
+        completion: num(usage.completion_tokens ?? usage.output_tokens ?? usage.candidatesTokenCount),
+        total: num(usage.total_tokens ?? usage.totalTokenCount),
     };
 }
 
@@ -593,8 +601,10 @@ function splitCaptureTextBlocks(text: string): CaptureTextBlock[] {
 }
 
 function captureKindForLabel(label: string): ApiRequestCaptureSectionKind {
-    if (/记忆|回忆|召回|memory|event\s*box|事件盒/i.test(label)) return 'memory';
+    if (/记忆|回忆|召回|话题盒|memory|event\s*box|topic\s*box|事件盒/i.test(label)) return 'memory';
     if (/世界书|world\s*book|worldbook|lore/i.test(label)) return 'worldbook';
+    if (/群聊|群组聊天|group\s*(?:chat|scene|conversation)/i.test(label)) return 'group';
+    if (/完整对话|对话历史|历史对话|聊天历史|conversation\s*history|chat\s*history|dialogue\s*history/i.test(label)) return 'history';
     if (/角色|关系|状态|上下文|character|relationship|context/i.test(label)) return 'context';
     return 'system';
 }
@@ -605,6 +615,8 @@ const CAPTURE_SOURCE_DESCRIPTIONS: Record<ApiRequestCaptureSectionKind, string> 
     system: '当前功能的预设、规则或系统提示词',
     memory: '记忆系统召回后注入本次请求的内容',
     worldbook: '世界书命中后注入本次请求的设定',
+    group: '近期群聊、群聊场景或公共聊天背景注入的内容',
+    history: '随请求发送给模型的既往用户与角色对话内容',
     context: '角色资料、关系状态或实时环境上下文',
     user: '本轮用户输入，或功能发起任务时使用的用户提示词',
     assistant: '随上下文一起发送的历史角色回复',
@@ -713,6 +725,7 @@ export function buildApiRequestCapture(input: {
         meta,
         payload,
         totalChars: jsonLength(payload),
+        usageStatus: 'pending',
         messageCount: messages.length,
         binaryPlaceholders: stats.binaryPlaceholders,
         sections,
@@ -762,7 +775,7 @@ export function formatApiRequestCaptureTxt(capture: ApiRequestCapture): string {
         .sort((a, b) => b[1].chars - a[1].chars)
         .map(([kind, item], index) => {
             const pct = item.chars / classifiedChars * 100;
-            return `${index + 1}. ${CAPTURE_SOURCE_DESCRIPTIONS[kind]}\n   ${fmt(item.chars)} 字 · ${pct < 1 ? '<1' : Math.round(pct)}% · ${item.count} 个分区`;
+            return `${index + 1}. ${CAPTURE_SOURCE_DESCRIPTIONS[kind]}\n   ${fmt(item.chars)} 字符 · ${pct < 1 ? '<1' : Math.round(pct)}% · ${item.count} 个分区`;
         });
 
     const sectionRows = capture.sections.map((section, index) => {
@@ -772,7 +785,7 @@ export function formatApiRequestCaptureTxt(capture: ApiRequestCapture): string {
             `类型：${section.kind}`,
             `来源：${getApiRequestCaptureSectionSource(section)}`,
             `位置：${section.path || (section.messageIndex != null ? `messages[${section.messageIndex}]` : '请求体')}`,
-            `大小：${fmt(section.chars)} 字`,
+            `大小：${fmt(section.chars)} 字符`,
             '',
             content || '（空内容）',
         ].join('\n');
@@ -787,14 +800,17 @@ export function formatApiRequestCaptureTxt(capture: ApiRequestCapture): string {
         `角色：${capture.meta.charName || '—'}`,
         `API：${capture.presetName || capture.baseUrl || '—'}`,
         `模型：${capture.model || '—'}`,
-        `请求体总字符：${fmt(capture.totalChars)}`,
+        `输入 Token（模型响应自报）：${capture.promptTokens != null ? fmt(capture.promptTokens) : capture.usageStatus === 'pending' ? '等待响应' : capture.usageStatus === 'failed' ? '请求失败，无法取得' : '接口未返回 usage'}`,
+        `输出 Token：${capture.completionTokens != null ? fmt(capture.completionTokens) : '—'}`,
+        `总 Token：${capture.totalTokens != null ? fmt(capture.totalTokens) : '—'}`,
+        `请求体总字符（不是 Token）：${fmt(capture.totalChars)}`,
         `消息数：${capture.messageCount}`,
         `分区数：${capture.sections.length}`,
         capture.binaryPlaceholders > 0
             ? `二进制占位：${capture.binaryPlaceholders} 个（图片/音频正文未保存，已保留原始长度）`
             : '二进制占位：0',
         '',
-        '===== 来源体积排行（按可归类正文字符估算） =====',
+        '===== 来源体积排行（按正文字符统计，不是 Token） =====',
         ...sourceRows,
         '',
         '===== 分区正文（按实际发送顺序） =====',
@@ -806,19 +822,57 @@ export function formatApiRequestCaptureTxt(capture: ApiRequestCapture): string {
     ].join('\n');
 }
 
-/** 抢占并保存下一次请求；返回 true 表示本次请求拿到了抓包资格。 */
-export function captureApiRequestOnce(input: { url: string; body?: unknown; meta?: ApiCallMeta }): boolean {
-    if (!claimApiRequestCapture()) return false;
+/** 抢占并保存下一次请求；成功时返回抓包 ID，未开启时返回 null。 */
+let captureSaveInFlight: { id: string; promise: Promise<void> } | null = null;
+
+export function captureApiRequestOnce(input: { url: string; body?: unknown; meta?: ApiCallMeta }): string | null {
+    if (!claimApiRequestCapture()) return null;
     try {
         const capture = buildApiRequestCapture(input);
-        import('./db')
-            .then(({ DB }) => DB.saveApiRequestCapture(capture))
-            .then(() => emitCaptureChange('saved'))
-            .catch(() => emitCaptureChange('error'));
-        return true;
+        const savePromise = import('./db').then(({ DB }) => DB.saveApiRequestCapture(capture));
+        captureSaveInFlight = { id: capture.id, promise: savePromise };
+        savePromise.then(
+            () => emitCaptureChange('saved'),
+            () => emitCaptureChange('error'),
+        );
+        return capture.id;
     } catch {
         emitCaptureChange('error');
-        return false;
+        return null;
+    }
+}
+
+/** 响应完整读完后，把同一次请求的真实 usage 回填到一次性抓包。 */
+export function updateApiRequestCaptureUsage(input: {
+    captureId: string | null;
+    ok: boolean;
+    response?: unknown;
+    responseText?: string;
+}): void {
+    if (!input.captureId) return;
+    try {
+        let responseForUsage = input.response;
+        if (responseForUsage === undefined && typeof input.responseText === 'string') {
+            const scanned = scanSseForLog(input.responseText);
+            if (scanned.usage) responseForUsage = { usage: scanned.usage };
+        }
+        const usage = extractApiTokenUsage(responseForUsage);
+        const patch: Partial<ApiRequestCapture> = {
+            promptTokens: usage.prompt,
+            completionTokens: usage.completion,
+            totalTokens: usage.total,
+            usageStatus: !input.ok ? 'failed' : usage.prompt != null ? 'reported' : 'not-reported',
+        };
+        const pending = captureSaveInFlight?.id === input.captureId
+            ? captureSaveInFlight.promise.catch(() => {})
+            : Promise.resolve();
+        pending
+            .then(() => import('./db'))
+            .then(({ DB }) => DB.patchApiRequestCapture(input.captureId!, patch))
+            .then(updated => { if (updated) emitCaptureChange('saved'); })
+            .catch(() => emitCaptureChange('error'));
+    } catch {
+        emitCaptureChange('error');
     }
 }
 
@@ -850,7 +904,7 @@ export function recordApiCall(input: {
             backendModel = scanned.model;
             if (scanned.usage) responseForExtract = { usage: scanned.usage };
         }
-        const usage = extractUsage(responseForExtract);
+        const usage = extractApiTokenUsage(responseForExtract);
         const entry: ApiCallLogEntry = {
             id: input.requestId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             timestamp: Date.now(),

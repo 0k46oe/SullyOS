@@ -298,6 +298,8 @@ const CAPTURE_KIND_LABEL: Record<ApiRequestCaptureSectionKind, string> = {
     system: '系统提示词',
     memory: '记忆召回',
     worldbook: '世界书',
+    group: '群聊背景',
+    history: '对话历史',
     context: '角色上下文',
     user: '用户消息',
     assistant: '角色历史',
@@ -310,6 +312,8 @@ const CAPTURE_KIND_STYLE: Record<ApiRequestCaptureSectionKind, string> = {
     system: 'bg-violet-50 text-violet-600',
     memory: 'bg-amber-50 text-amber-700',
     worldbook: 'bg-emerald-50 text-emerald-700',
+    group: 'bg-fuchsia-50 text-fuchsia-700',
+    history: 'bg-orange-50 text-orange-700',
     context: 'bg-indigo-50 text-indigo-600',
     user: 'bg-blue-50 text-blue-600',
     assistant: 'bg-rose-50 text-rose-600',
@@ -374,6 +378,17 @@ const OneShotCapturePanel: React.FC<{
     const fmt = (n: number) => n.toLocaleString('en-US');
     const rawId = '__raw_request__';
     const txtReport = useMemo(() => capture ? formatApiRequestCaptureTxt(capture) : '', [capture]);
+    const promptTokenValue = !capture
+        ? '—'
+        : capture.promptTokens != null
+            ? fmt(capture.promptTokens)
+            : capture.usageStatus === 'pending'
+                ? '等待响应…'
+                : capture.usageStatus === 'failed'
+                    ? '请求失败'
+                    : capture.usageStatus == null
+                        ? '旧记录未采集'
+                        : '接口未返回';
     const sourceStats = useMemo(() => {
         if (!capture) return [];
         const grouped = new Map<ApiRequestCaptureSectionKind, { chars: number; count: number; source: string }>();
@@ -446,22 +461,28 @@ const OneShotCapturePanel: React.FC<{
                             <Field label="角色" value={capture.meta.charName} />
                             <div className="col-span-2"><Field label="模型" value={capture.model} mono wrap /></div>
                         </div>
-                        <div className="mt-3 flex items-center justify-around border-y border-emerald-100/80 py-2 text-center">
-                            <div>
-                                <div className="text-[9px] text-slate-400">请求体字符</div>
+                        <div className="mt-3 grid grid-cols-2 border-y border-emerald-100/80 text-center">
+                            <div className="border-b border-r border-emerald-100/80 py-2">
+                                <div className="text-[9px] text-slate-400">输入 Token（响应自报）</div>
+                                <div className="text-xs font-bold text-slate-600">{promptTokenValue}</div>
+                            </div>
+                            <div className="border-b border-emerald-100/80 py-2">
+                                <div className="text-[9px] text-slate-400">请求体字符（非 Token）</div>
                                 <div className="text-xs font-bold text-slate-600">{fmt(capture.totalChars)}</div>
                             </div>
-                            <div className="h-6 w-px bg-emerald-100" />
-                            <div>
+                            <div className="border-r border-emerald-100/80 py-2">
                                 <div className="text-[9px] text-slate-400">消息数</div>
                                 <div className="text-xs font-bold text-slate-600">{capture.messageCount}</div>
                             </div>
-                            <div className="h-6 w-px bg-emerald-100" />
-                            <div>
+                            <div className="py-2">
                                 <div className="text-[9px] text-slate-400">分区数</div>
                                 <div className="text-xs font-bold text-slate-600">{capture.sections.length}</div>
                             </div>
                         </div>
+
+                        <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
+                            这里的“字符”只是请求文字长度，不是模型计费的 Token 数。
+                        </p>
 
                         <p className="mt-2 text-[10px] leading-relaxed text-amber-700/80">
                             内容仅保存在本机，可能含聊天和记忆隐私。发给别人排查前请先检查。
@@ -489,7 +510,7 @@ const OneShotCapturePanel: React.FC<{
                             <div className="mt-4 border-t border-slate-200/70 pt-3">
                                 <div className="flex items-baseline justify-between gap-2">
                                     <h4 className="text-[11px] font-bold text-slate-600">来源体积排行</h4>
-                                    <span className="text-[9px] text-slate-400">按可归类正文字符估算</span>
+                                    <span className="text-[9px] text-slate-400">按正文字符统计 · 非 Token</span>
                                 </div>
                                 <p className="mt-1 text-[9px] leading-relaxed text-slate-400">
                                     来源由消息角色和分区标题自动识别；无法确认的内容统一归到“系统提示词”，可展开正文核对。
@@ -502,7 +523,7 @@ const OneShotCapturePanel: React.FC<{
                                                     {CAPTURE_KIND_LABEL[item.kind]}
                                                 </span>
                                                 <span className="shrink-0 font-mono text-[9px] text-slate-400">
-                                                    {fmt(item.chars)} 字 · {item.pct < 1 ? '<1' : Math.round(item.pct)}%
+                                                    {fmt(item.chars)} 字符 · {item.pct < 1 ? '<1' : Math.round(item.pct)}%
                                                 </span>
                                             </div>
                                             <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-100">
@@ -541,7 +562,7 @@ const OneShotCapturePanel: React.FC<{
                                             <span className="min-w-0 flex-1">
                                                 <span className="flex items-baseline gap-2">
                                                     <span className="min-w-0 flex-1 truncate text-[10px] font-semibold text-slate-600" title={section.label}>{section.label}</span>
-                                                    <span className="shrink-0 font-mono text-[9px] text-slate-400">{fmt(section.chars)} 字</span>
+                                                    <span className="shrink-0 font-mono text-[9px] text-slate-400">{fmt(section.chars)} 字符</span>
                                                 </span>
                                                 <span className="mt-0.5 block break-words text-[9px] leading-relaxed text-slate-400">
                                                     来自：{getApiRequestCaptureSectionSource(section)}
