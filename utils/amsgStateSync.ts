@@ -226,6 +226,8 @@ export const flushAmsgState = async (reason: string): Promise<void> => {
       reflushRequested = false;
       // 两种情况不用补跑：队列空（上面那批把它一起带走了）；已经排了退避重传
       // （重传本来就带上队列里的全部快照，此刻再打一次只是立刻重蹈覆辙，还白吃一次退避额度）。
+      // 失败也不是一律不补跑：退避打光那条路不留 timer，此时飞行中打的脏会当场补跑一次
+      // 并重开一轮退避——有新数据值得再试，且退避上限管着，不会变成死循环。
       if (dirty.size > 0 && retryTimer == null) void flushAmsgState('reflush');
     }
   }

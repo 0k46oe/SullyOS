@@ -221,6 +221,23 @@ describe('即时冲刷', () => {
     expect((ActiveMsgClient.syncCharFirePacks as any).mock.calls[0][0]).toHaveLength(2);
   });
 
+  it('同一个角色同 tick 打两次脏只传最新那份', async () => {
+    const id = nextCharId();
+    const stale = charWithAiTask(id);
+    stale.name = '旧快照';
+    const fresh = charWithAiTask(id);
+    fresh.name = '新快照';
+
+    markAmsgStateDirty(snapshotOf(stale));
+    markAmsgStateDirty(snapshotOf(fresh));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
+    const batch = (ActiveMsgClient.syncCharFirePacks as any).mock.calls[0][0];
+    expect(batch).toHaveLength(1);
+    expect(batch[0].char.name).toBe('新快照');
+  });
+
   it('冲刷进行中再打脏，冲刷完成后自动补跑一次（不搁浅）', async () => {
     // 旧的丢弃式防重入（if (flushing) return）下这条会挂：第二份快照
     // 会一直躺在队列里，等不到任何人来传。
