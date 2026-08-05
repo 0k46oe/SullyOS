@@ -7,8 +7,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import worker, {
-  amsgFireSettled, amsgHooks, amsgStaleSkip, attachScheduledTasks, buildWorkerConfig,
-  inspectWorkerEnv, offloadOversizedPush,
+  amsgFireSettled, amsgHooks, amsgReasoningKey, amsgStaleSkip, attachScheduledTasks,
+  buildWorkerConfig, inspectWorkerEnv, offloadOversizedPush,
   resolveVapidEmail, runFireScheduleTool, runMcpFireTool,
 } from './index';
 import { MAX_TOOL_ITERATIONS } from './agentic';
@@ -206,6 +206,8 @@ const runFire = async (
   opts: {
     metadata: Record<string, unknown>;
     llmOutput: string;
+    /** 整个响应体；把思考放在 reasoning_content 字段的模型（deepseek-r1 那类）用它塞。 */
+    llmResponse?: Record<string, unknown>;
     /** 同一个 store 连跑几轮时换一下，messageId 才跟着变。 */
     taskId?: number;
     sessionId?: string;
@@ -227,7 +229,7 @@ const runFire = async (
   } as any);
   const decision = await amsgHooks.onLLMOutput({
     sessionId: opts.sessionId ?? `sess_task_${taskId}@1`, taskId, taskUuid: TASK_UUID,
-    llmResponse: {}, llmOutputText: opts.llmOutput, contactName: 'Nyah',
+    llmResponse: opts.llmResponse ?? {}, llmOutputText: opts.llmOutput, contactName: 'Nyah',
     metadata, scratch, writeState: store.writeState,
   } as any) as any;
   return { decision, metadata };
@@ -760,6 +762,57 @@ describe('offloadOversizedPush — push 装不下时旁路存储', () => {
     expect(utf8Bytes(out)).toBeLessThanOrEqual(MAX_PUSH_PAYLOAD_BYTES);
   });
 
+  // 思考链也是一整段模型输出，而且常常比评估结果还长，所以排在最前面挪。
+  it('思考链撑爆一条 push → 先挪它，push 换成 amsgReasoningRef', async () => {
+    const writeState = vi.fn().mockResolvedValue({ upserted: 1, skipped: 0, deleted: 0 });
+    const reasoning = '他这句话背后想说的是'.repeat(300);
+    const payload = {
+      messageKind: 'content',
+      message: '在的。',
+      metadata: { charId: CHAR_ID, amsgClientTaskId: CLIENT_TASK_ID, amsgReasoning: reasoning },
+    };
+    const utf8Bytes = (v: unknown) => new TextEncoder().encode(JSON.stringify(v)).length;
+    expect(utf8Bytes(payload)).toBeGreaterThan(MAX_PUSH_PAYLOAD_BYTES);
+
+    const out = await offloadOversizedPush(payload as any, writeState, CHAR_ID, CLIENT_TASK_ID);
+
+    const key = amsgReasoningKey(CLIENT_TASK_ID);
+    // 存原文：客户端取回来直接当思考链渲染
+    expect(writeState).toHaveBeenCalledWith(amsgStateNamespace(CHAR_ID), [{ key, value: reasoning }]);
+    const meta = (out.metadata ?? {}) as Record<string, unknown>;
+    expect(meta.amsgReasoningRef).toBe(key);
+    expect(meta.amsgReasoning).toBeUndefined();
+    expect(utf8Bytes(out)).toBeLessThanOrEqual(MAX_PUSH_PAYLOAD_BYTES);
+  });
+
+  // 回归守卫：接力要一棒接一棒。第二棒若是从原始 metadata 重新起算，第一棒挪走的思考链
+  // 会被原样塞回 push、引用键也丢——push 照样超限，而日志上看着「两份都挪了」。
+  it('思考链和评估结果都得挪 → 两个引用键都在，原文一个不留', async () => {
+    const writeState = vi.fn().mockResolvedValue({ upserted: 1, skipped: 0, deleted: 0 });
+    const payload = {
+      messageKind: 'content',
+      message: '在的。',
+      metadata: {
+        charId: CHAR_ID,
+        amsgClientTaskId: CLIENT_TASK_ID,
+        // 两份各自都撑得爆一条 push：只挪走一份还是超限，才逼得出接力那一步。
+        amsgReasoning: '他这句话背后想说的是'.repeat(300),
+        amsgEmotionUpdate: `{"changed":true,"innerState":"${'想'.repeat(1500)}"}`,
+      },
+    };
+
+    const out = await offloadOversizedPush(payload as any, writeState, CHAR_ID, CLIENT_TASK_ID);
+
+    expect(writeState).toHaveBeenCalledTimes(2);
+    const meta = (out.metadata ?? {}) as Record<string, unknown>;
+    expect(meta.amsgReasoningRef).toBe(amsgReasoningKey(CLIENT_TASK_ID));
+    expect(meta.amsgEmotionRef).toBe(amsgEmotionUpdateKey(CLIENT_TASK_ID));
+    expect(meta.amsgReasoning).toBeUndefined();
+    expect(meta.amsgEmotionUpdate).toBeUndefined();
+    expect(new TextEncoder().encode(JSON.stringify(out)).length)
+      .toBeLessThanOrEqual(MAX_PUSH_PAYLOAD_BYTES);
+  });
+
   it('挪完评估还是装不下 → XHS 那份接着挪（两个引用键都留在 push 上）', async () => {
     const writeState = vi.fn().mockResolvedValue({ upserted: 1, skipped: 0, deleted: 0 });
     const payload = pushWith(8) as any;
@@ -895,6 +948,91 @@ describe('轮次上限与上游共用同一个数', () => {
       sessionCtx(scratch, '再查一次。\n[[RECALL: 2026-07]]', MAX_TOOL_ITERATIONS - 1)) as any;
     expect(last.decision).toBe('finish');
     expect(last.pushPayloads.map((p: any) => p.message).join('\n')).toContain('我先想想六月的事');
+  });
+});
+
+// 云端生成的思考链要跟着回复一起回到客户端，否则聊天走即时对话这条路时思考链卡片整个缺席
+// （用户开着「显示思考链」，本地路径有、云端路径没有，看上去就是角色这次没想）。
+// 它挂在**第一条** push 的 metadata 上：卡片渲染在第一条气泡上，收侧也只在
+// messageIndex<=1 时认领。
+describe('云端思考链随首条 push 回客户端', () => {
+  const CLIENT_TASK_ID = 'client-task-reasoning';
+  /** 两段正文 → 两条 push，才验得出「只挂第一条」。 */
+  const TWO_SEGMENT_OUTPUT = '在的。\n怎么啦？';
+
+  const reasoningFire = (
+    store: ReturnType<typeof makeFireStore>,
+    opts: { llmOutput: string; llmResponse?: Record<string, unknown> },
+  ) => runFire(store, {
+    metadata: {
+      amsgClientTaskId: CLIENT_TASK_ID,
+      amsgMode: 'auto',
+      amsgTaskInstruction: '想到什么说什么',
+    },
+    ...opts,
+  });
+
+  it('响应字段里的 reasoning_content → 挂第一条 push，正文不带 <think>', async () => {
+    const { decision } = await reasoningFire(makeFireStore(), {
+      llmOutput: TWO_SEGMENT_OUTPUT,
+      llmResponse: {
+        choices: [{
+          message: { content: TWO_SEGMENT_OUTPUT, reasoning_content: '他这句问得很轻，先接住再问一句。' },
+        }],
+      },
+    });
+
+    expect(decision.decision).toBe('finish');
+    const payloads = decision.pushPayloads as Array<Record<string, any>>;
+    expect(payloads.length).toBeGreaterThanOrEqual(2);
+    expect(payloads[0].metadata.amsgReasoning).toContain('先接住再问一句');
+    for (const payload of payloads.slice(1)) {
+      expect(payload.metadata.amsgReasoning).toBeUndefined();
+    }
+    expect(JSON.stringify(payloads)).not.toContain('<think>');
+  });
+
+  it('只有正文内联 <think> 的模型也拿得到（正文照旧剥干净）', async () => {
+    const { decision } = await reasoningFire(makeFireStore(), {
+      llmOutput: '<think>他好像有点累了。</think>在的。\n怎么啦？',
+    });
+
+    expect(decision.decision).toBe('finish');
+    const payloads = decision.pushPayloads as Array<Record<string, any>>;
+    expect(payloads.length).toBeGreaterThanOrEqual(2);
+    expect(payloads[0].metadata.amsgReasoning).toContain('他好像有点累了');
+    for (const payload of payloads.slice(1)) {
+      expect(payload.metadata.amsgReasoning).toBeUndefined();
+    }
+    expect(payloads.map((p) => p.message)).toEqual(['在的。', '怎么啦？']);
+    expect(JSON.stringify(payloads)).not.toContain('<think>');
+  });
+
+  // 工具循环一次 fire 跑好几轮，每轮都有自己的思考。留最后一轮的：用户看到的正文就是
+  // 那一轮写的，配上「我先去查一下」的中间轮思考等于答非所问。
+  it('多轮工具循环 → 留下产出正文那一轮的思考', async () => {
+    const { ctx, scratch } = makeCtx({});
+    await amsgHooks.onBeforeFire(ctx);
+
+    const roundCtx = (llmOutputText: string, reasoning: string, iteration: number) => ({
+      sessionId: 'sess_task_42', taskId: 42, taskUuid: TASK_UUID,
+      llmResponse: { choices: [{ message: { content: llmOutputText, reasoning_content: reasoning } }] },
+      llmOutputText, contactName: 'Nyah',
+      metadata: { charId: CHAR_ID, amsgMode: 'auto' },
+      scratch, iteration,
+    }) as any;
+
+    const first = await amsgHooks.onLLMOutput(
+      roundCtx('等我想想。\n[[RECALL: 2026-06]]', '第一轮：先去翻六月的记忆。', 0)) as any;
+    expect(first.decision).toBe('tool-request');
+
+    const last = await amsgHooks.onLLMOutput(
+      roundCtx('想起来了，那天你说想去看海。', '第二轮：翻到了那天的事，说给他听。', 1)) as any;
+    expect(last.decision).toBe('finish');
+
+    const meta = last.pushPayloads[0].metadata;
+    expect(meta.amsgReasoning).toContain('第二轮');
+    expect(meta.amsgReasoning).not.toContain('第一轮');
   });
 });
 

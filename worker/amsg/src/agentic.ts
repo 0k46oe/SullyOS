@@ -62,6 +62,12 @@ export interface FireSessionState {
    * 露营帖、卡片推的却是 B 组第 3 篇口红帖。所以在那一轮就把当时的列表定格下来。
    */
   xhsShareNotes: XhsNote[] | null;
+  /**
+   * 最后一轮 LLM 的思考链（reasoning_content + 正文内联 `<think>`，见 index.ts 的
+   * onLLMOutput）。每轮覆盖，finish 时随第一条 push 的 metadata 回客户端渲染思考链卡片。
+   * 一轮都没给过思考的模型留 null，那时候一个字段都不挂。
+   */
+  finalReasoning: string | null;
 }
 
 export const createFireSessionState = (): FireSessionState => ({
@@ -70,6 +76,7 @@ export const createFireSessionState = (): FireSessionState => ({
   duplicateToolCalls: 0,
   mcpCallSeq: 0,
   xhsShareNotes: null,
+  finalReasoning: null,
 });
 
 /**

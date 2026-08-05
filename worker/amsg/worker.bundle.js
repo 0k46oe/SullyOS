@@ -8262,7 +8262,8 @@ var createFireSessionState = () => ({
   toolCalls: [],
   duplicateToolCalls: 0,
   mcpCallSeq: 0,
-  xhsShareNotes: null
+  xhsShareNotes: null,
+  finalReasoning: null
 });
 var MAX_DUPLICATE_TOOL_CALLS = 2;
 var MAX_TOOL_ITERATIONS = 5;
@@ -8871,27 +8872,54 @@ var fireStateError = (reason, detail) => {
   console.error("[amsg:fire-state-missing]", { reason, ...detail });
   return new Error(`AMSG2_FIRE_STATE_MISSING: ${reason}`);
 };
+var INLINE_THINK_RE = /<(think|thinking|thought)>([\s\S]*?)<\/\1>/gi;
+var extractInlineThink = (text) => {
+  if (!text.includes("<")) return "";
+  const blocks = [];
+  for (const match of text.matchAll(INLINE_THINK_RE)) {
+    const inner = match[2].trim();
+    if (inner) blocks.push(inner);
+  }
+  return blocks.join("\n\n");
+};
+var amsgReasoningKey = (clientTaskId) => `reasoning:${clientTaskId}`;
 var pushFits = (payload) => measurePushPayload(JSON.stringify(payload), { reserveEnvelope: true }).withinLimit;
 var offloadOversizedPush = async (payload, writeState, charId, clientTaskId) => {
   if (pushFits(payload)) return payload;
   const meta = payload.metadata ?? {};
+  const reasoning = typeof meta.amsgReasoning === "string" ? meta.amsgReasoning : "";
   const emotionUpdate = typeof meta.amsgEmotionUpdate === "string" ? meta.amsgEmotionUpdate : "";
-  if (!emotionUpdate && !meta.xhsSession) return payload;
+  if (!reasoning && !emotionUpdate && !meta.xhsSession) return payload;
   if (typeof writeState !== "function") {
     throw new Error("AMSG2_WRITE_STATE_UNSUPPORTED: push \u8D85\u9650\u9700\u8981\u65C1\u8DEF\u5B58\u50A8\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u9875\u91CD\u65B0\u7C98\u8D34\u90E8\u7F72 worker");
   }
   let current = payload;
+  if (reasoning) {
+    const key2 = amsgReasoningKey(clientTaskId);
+    await writeState(amsgStateNamespace(charId), [{ key: key2, value: reasoning }]);
+    const { amsgReasoning: _movedReasoning, ...restMeta2 } = current.metadata ?? {};
+    const slimmed2 = { ...current, metadata: { ...restMeta2, amsgReasoningRef: key2 } };
+    console.log("[amsg:reasoning] \u601D\u8003\u94FE\u65C1\u8DEF\u5B58\u50A8", {
+      key: key2,
+      charId,
+      beforeBytes: measurePushPayload(JSON.stringify(current)).bytes,
+      afterBytes: measurePushPayload(JSON.stringify(slimmed2)).bytes
+    });
+    current = slimmed2;
+    if (pushFits(current)) return current;
+  }
   if (emotionUpdate) {
     const key2 = amsgEmotionUpdateKey(clientTaskId);
     await writeState(amsgStateNamespace(charId), [{ key: key2, value: emotionUpdate }]);
-    const { amsgEmotionUpdate: _moved, ...restMeta2 } = meta;
-    current = { ...current, metadata: { ...restMeta2, amsgEmotionRef: key2 } };
+    const { amsgEmotionUpdate: _moved, ...restMeta2 } = current.metadata ?? {};
+    const slimmed2 = { ...current, metadata: { ...restMeta2, amsgEmotionRef: key2 } };
     console.log("[amsg:emotion] \u8BC4\u4F30\u7ED3\u679C\u65C1\u8DEF\u5B58\u50A8", {
       key: key2,
       charId,
-      beforeBytes: measurePushPayload(JSON.stringify(payload)).bytes,
-      afterBytes: measurePushPayload(JSON.stringify(current)).bytes
+      beforeBytes: measurePushPayload(JSON.stringify(current)).bytes,
+      afterBytes: measurePushPayload(JSON.stringify(slimmed2)).bytes
     });
+    current = slimmed2;
     if (pushFits(current)) return current;
   }
   const currentMeta = current.metadata ?? {};
@@ -9307,6 +9335,9 @@ var amsgHooks = {
       throw new Error("AMSG2_FIRE_STASH_MISSING: onLLMOutput \u8BFB\u4E0D\u5230 ctx.scratch.fire\uFF0C\u68C0\u67E5 amsg-server \u662F\u5426\u4ECD\u5171\u4EAB scratch");
     }
     const session = stash.session;
+    const nativeReasoning = ctx.llmResponse?.choices?.[0]?.message?.reasoning_content;
+    const roundReasoning = [nativeReasoning, extractInlineThink(ctx.llmOutputText || "")].filter((s) => typeof s === "string" && !!s.trim()).map((s) => s.trim()).join("\n\n");
+    if (roundReasoning) session.finalReasoning = roundReasoning;
     const rawToolCalls = ctx.llmResponse?.choices?.[0]?.message?.tool_calls;
     const allNativeCalls = Array.isArray(rawToolCalls) ? rawToolCalls : [];
     const nativeScheduleCalls = allNativeCalls.filter(
@@ -9383,6 +9414,15 @@ var amsgHooks = {
         (p) => typeof p.message === "string" ? p.message : ""
       );
       let payloads = attachScheduledTasks(decision.pushPayloads, stash.scheduledTasks);
+      if (session.finalReasoning && payloads.length > 0) {
+        payloads = payloads.map((payload, i) => i === 0 ? {
+          ...payload,
+          metadata: {
+            ...payload.metadata ?? {},
+            amsgReasoning: session.finalReasoning
+          }
+        } : payload);
+      }
       if (stash.instant && stash.emotionEvalPromise && payloads.length > 0) {
         const { raw: evalText, error: evalError } = await stash.emotionEvalPromise;
         const lastIdx = payloads.length - 1;
@@ -9701,6 +9741,7 @@ var src_default = {
 export {
   amsgFireSettled,
   amsgHooks,
+  amsgReasoningKey,
   amsgStaleSkip,
   attachScheduledTasks,
   buildWorkerConfig,

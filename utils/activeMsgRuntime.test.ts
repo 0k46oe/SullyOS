@@ -727,6 +727,73 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
     }, 20000);
   });
 
+  // 聊天走即时对话时，思考是在 worker 里生成的，客户端手上没有那份 reasoning。
+  // worker 把它挂在第一条 push 的 metadata.amsgReasoning 上；收侧不认的话，用户开着
+  // 「显示思考链」却只在本地生成时看得到卡片，云端这条路整个缺席。
+  describe('云端带回来的思考链', () => {
+    const thinkingChainOf = async (charId: string) =>
+      (await assistantMsgs(charId)).map((m: any) => m.metadata?.thinkingChain).filter(Boolean);
+
+    it('随第一条 push 回来 → 挂到第一条气泡的 thinkingChain 上', async () => {
+      const charId = 'char-reasoning-inline';
+      await DB.saveCharacter({ id: charId, name: '会思考的角色', showThinkingChain: true } as any);
+      await ActiveMsgStore.saveInboxMessage(inboxMsg({
+        messageId: 'msg-reasoning-inline',
+        charId,
+        charName: '会思考的角色',
+        messageType: 'text',
+        metadata: { charId, messageIndex: 1, amsgReasoning: '他这句问得很轻，先接住。' },
+      }));
+
+      await flushInboxToChat();
+
+      expect(await thinkingChainOf(charId)).toEqual(['他这句问得很轻，先接住。']);
+    }, 20000);
+
+    it('太长挪进了 client_state → 按 amsgReasoningRef 取回来，用完就删', async () => {
+      const charId = 'char-reasoning-ref';
+      await DB.saveCharacter({ id: charId, name: '想很多的角色', showThinkingChain: true } as any);
+      const ref = 'reasoning:client-task-reasoning';
+      const readSpy = vi.spyOn(ActiveMsgClient, 'readClientStateValue')
+        .mockResolvedValue('想了很久才决定这么说。');
+      const clearSpy = vi.spyOn(ActiveMsgClient, 'clearClientStateValue').mockResolvedValue(undefined as any);
+
+      await ActiveMsgStore.saveInboxMessage(inboxMsg({
+        messageId: 'msg-reasoning-ref',
+        charId,
+        charName: '想很多的角色',
+        messageType: 'text',
+        metadata: { charId, messageIndex: 1, amsgReasoningRef: ref },
+      }));
+
+      await flushInboxToChat();
+
+      expect(readSpy).toHaveBeenCalledWith(amsgStateNamespace(charId), ref);
+      expect(await thinkingChainOf(charId)).toEqual(['想了很久才决定这么说。']);
+      expect(clearSpy).toHaveBeenCalledWith(amsgStateNamespace(charId), ref);
+      readSpy.mockRestore();
+      clearSpy.mockRestore();
+    }, 20000);
+
+    // 卡片只能挂第一条气泡。后面几段要是也认，同一段思考会在这轮对话里重复冒出来。
+    it('后面几段 push 不认（哪怕 worker 出 bug 每条都挂）', async () => {
+      const charId = 'char-reasoning-late';
+      await DB.saveCharacter({ id: charId, name: '第二段角色', showThinkingChain: true } as any);
+      await ActiveMsgStore.saveInboxMessage(inboxMsg({
+        messageId: 'msg-reasoning-late',
+        charId,
+        charName: '第二段角色',
+        messageType: 'text',
+        metadata: { charId, messageIndex: 2, amsgReasoning: '这段不该出现在卡片里。' },
+      }));
+
+      await flushInboxToChat();
+
+      expect((await assistantMsgs(charId)).length).toBeGreaterThan(0);   // 正文照常上屏
+      expect(await thinkingChainOf(charId)).toEqual([]);
+    }, 20000);
+  });
+
   it('降级存原稿路径·刚送达：与主路径同口径，落 sentAt', async () => {
     const charId = 'char-ts-raw-fresh';
     const sentAt = Date.now() - 60_000;

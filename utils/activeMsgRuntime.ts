@@ -225,6 +225,34 @@ const fetchOffloadedEmotionUpdate = async (message: ActiveMsg2InboxMessage): Pro
 };
 
 /**
+ * 取回 worker 旁路存下的思考链（这一段撑爆一条 push 时才有，见 worker 的
+ * offloadOversizedPush）。
+ *
+ * 取不回来只返回 null、**不抛错**：角色说的那句话已经完整送到了，为了一张思考链卡片
+ * 把它压回收件箱反复重试，用户看到的是回复迟迟不上屏——那才是真丢东西。
+ */
+const fetchOffloadedReasoning = async (message: ActiveMsg2InboxMessage): Promise<string | null> => {
+  const ref = (message.metadata as any)?.amsgReasoningRef;
+  if (typeof ref !== 'string' || !ref) return null;
+
+  const namespace = amsgStateNamespace(message.charId);
+  try {
+    const raw = await ActiveMsgClient.readClientStateValue(namespace, ref);
+    if (raw == null) {
+      // 键不在了：同角色的下一轮已经把它覆盖/清掉了，这条是迟到的老消息。
+      log.warn('旁路存储里没有这份思考链（多半被下一轮覆盖了）', { ref, charId: message.charId });
+      return null;
+    }
+    void ActiveMsgClient.clearClientStateValue(namespace, ref)
+      .catch((e) => log.warn('清空旁路存储失败（下次触发会覆盖，不影响正确性）', { ref, error: e }));
+    return raw;
+  } catch (error) {
+    log.warn('取旁路存储的思考链失败（这条没有思考链卡片，回复照常）', { ref, error });
+    return null;
+  }
+};
+
+/**
  * 云端跑出来的一份评估原文 → 落 buff + 把 innerState 广播给下一轮。
  *
  * 两条云端路径共用这一处：Instant Push 把结果推成单独一条 emotion_update 消息，
@@ -409,13 +437,25 @@ const processInboxMessageWithPostProcessing = async (
   const messageIndex: number = (message as any).messageIndex
     ?? (message.metadata && (message.metadata as any).messageIndex)
     ?? 0;
+  // amsg2（即时对话 / 主动消息）走的是另一条：worker 不单发 reasoning push，而是把这次
+  // 生成的思考链挂在第一条 content push 的 metadata.amsgReasoning 上（太长时挪进
+  // client_state、只留 amsgReasoningRef，见 worker/amsg/src/index.ts 的
+  // offloadOversizedPush）。有它就用它，没有再回到上面那条 IP 的 buffer 路。
   let reasoningContent: string | undefined;
-  if (sessionId && messageIndex <= 1) {
-    try {
-      const buffered = await ActiveMsgStore.claimReasoning(sessionId);
-      reasoningContent = buffered?.reasoningContent;
-    } catch (e) {
-      console.warn('[ActiveMsg] claimReasoning failed', sessionId, e);
+  if (messageIndex <= 1) {
+    const inlineReasoning = (message.metadata as any)?.amsgReasoning;
+    const metaReasoning = typeof inlineReasoning === 'string' && inlineReasoning
+      ? inlineReasoning
+      : await fetchOffloadedReasoning(message);
+    if (typeof metaReasoning === 'string' && metaReasoning.trim()) {
+      reasoningContent = metaReasoning;
+    } else if (sessionId) {
+      try {
+        const buffered = await ActiveMsgStore.claimReasoning(sessionId);
+        reasoningContent = buffered?.reasoningContent;
+      } catch (e) {
+        console.warn('[ActiveMsg] claimReasoning failed', sessionId, e);
+      }
     }
   }
 

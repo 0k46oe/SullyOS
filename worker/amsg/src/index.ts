@@ -157,12 +157,13 @@ interface Env extends NativeFcmEnv {
 // 最后一条 push，客户端收到时重放。tool_pack / tool_config 与 fire_pack 同批上传，
 // 所以和它一样按「读不到就是异常」处理；没配凭据的工具自己会回 not_configured。
 //
-// 刻意只发 content push、不发 reasoning push：hook 路径的 sendHookPushPayloads
-// 会把 pushPayloads 数组整体编号（messageIndex/totalMessages），reasoning 一旦混进
-// 数组，第一条 content 的 messageIndex 就变 2，前端 activeMsgRuntime「index<=1 才
-// claim reasoning」的判定会静默丢 thinking chain 卡片。content-only 时编号和老链路
-// 完全一致，收侧（与 instant push 共用）零改动。reasoning 内容直接丢弃，正文里的
-// <think> 标签照旧 strip 防泄漏。
+// 思考链走 metadata、不占一条 push：只发 content push，把这次生成的 reasoning 挂在
+// **第一条** push 的 metadata.amsgReasoning 上，客户端在那条上渲染思考链卡片
+// （收侧与 instant push 共用同一处认领，见 utils/activeMsgRuntime.ts）。
+// 这么走的好处是编号不动：hook 路径的 sendHookPushPayloads 会把 pushPayloads 数组整体
+// 编号（messageIndex/totalMessages），多插一条 reasoning push 就会把第一条 content
+// 顶到 messageIndex=2，多段消息的等齐、补收、directive 重放全跟着编号走。
+// 正文里的 <think> 标签照旧 strip，只是剥之前先抄一份当思考链。
 
 interface FireCtx {
   task: {
@@ -382,6 +383,32 @@ const fireStateError = (reason: string, detail: Record<string, unknown>): Error 
   return new Error(`AMSG2_FIRE_STATE_MISSING: ${reason}`);
 };
 
+/** 内联思考块的成对标签，跟 stripReasoningTags 认的是同一批。 */
+const INLINE_THINK_RE = /<(think|thinking|thought)>([\s\S]*?)<\/\1>/gi;
+
+/**
+ * 把正文里内联的思考块抄出来拼成一段（没有就是空串）。
+ *
+ * 只认闭合的成对标签，跟 stripReasoningTags 一个口径：没闭合的那种它剥不掉、原样留在
+ * 正文里，这边再抄一份的话，同一段话会在思考链卡片和气泡里各出现一遍。
+ */
+const extractInlineThink = (text: string): string => {
+  if (!text.includes('<')) return '';
+  const blocks: string[] = [];
+  for (const match of text.matchAll(INLINE_THINK_RE)) {
+    const inner = match[2].trim();
+    if (inner) blocks.push(inner);
+  }
+  return blocks.join('\n\n');
+};
+
+/**
+ * 思考链太长、一条 push 装不下时的旁路存储键（同 XHS / 情绪评估那套，见
+ * amsgXhsSessionKey / amsgEmotionUpdateKey）。push 里只留 `metadata.amsgReasoningRef`
+ * 指过来，客户端按键取回、用完即删。每任务固定一份、下次触发覆盖。
+ */
+export const amsgReasoningKey = (clientTaskId: string) => `reasoning:${clientTaskId}`;
+
 // 体积判定按「库补完信封字段之后」的尺寸算：hook 交还 payload 之后，库还会补
 // messageId / sessionId / timestamp / messageIndex / totalMessages 和四个任务身份
 // 字段。卡着上限判的话，量出来「刚好装得下」的那一档补完就超了——既没走旁路存储、
@@ -401,9 +428,9 @@ const pushFits = (payload: Record<string, unknown>): boolean =>
  * （日常 1-3 张走的就是这条，行为不变），装不下才把整份挪到 client_state，
  * 客户端上线后按引用键取回，一张不少。
  *
- * 挪的顺序是「情绪评估结果 → XHS 会话数据」：评估结果是一整段模型输出（几百到几千字），
- * 超限时多半是它撑爆的，而且客户端拿它只是落 buff，晚一步取回来不影响这条消息本身；
- * 挪完还是装不下才动 XHS 那份。
+ * 挪的顺序是「思考链 → 情绪评估结果 → XHS 会话数据」：思考链和评估结果都是整段模型输出
+ * （几百到几千字），超限时多半是它俩撑爆的，而且客户端拿它们只是渲染卡片 / 落 buff，
+ * 晚一步取回来不影响这条消息本身；挪完还是装不下才动 XHS 那份。
  *
  * 存不进去时**抛错**而不是砍内容：抛错走投递失败重试，砍内容则是当场穿帮且无从察觉。
  */
@@ -416,9 +443,10 @@ export const offloadOversizedPush = async (
   if (pushFits(payload)) return payload;
 
   const meta = (payload.metadata ?? {}) as Record<string, unknown>;
+  const reasoning = typeof meta.amsgReasoning === 'string' ? meta.amsgReasoning : '';
   const emotionUpdate = typeof meta.amsgEmotionUpdate === 'string' ? meta.amsgEmotionUpdate : '';
   // 没有可旁路的东西，交给库抛 PUSH_PAYLOAD_TOO_LARGE
-  if (!emotionUpdate && !meta.xhsSession) return payload;
+  if (!reasoning && !emotionUpdate && !meta.xhsSession) return payload;
 
   if (typeof writeState !== 'function') {
     // 老部署（amsg-server < 2.6.0-next.7）没有写入口。不静默砍卡片——抛错让这次投递
@@ -427,17 +455,33 @@ export const offloadOversizedPush = async (
   }
 
   let current = payload;
+  if (reasoning) {
+    const key = amsgReasoningKey(clientTaskId);
+    await writeState(amsgStateNamespace(charId), [{ key, value: reasoning }]);
+    const { amsgReasoning: _movedReasoning, ...restMeta } = (current.metadata ?? {}) as Record<string, unknown>;
+    const slimmed = { ...current, metadata: { ...restMeta, amsgReasoningRef: key } };
+    console.log('[amsg:reasoning] 思考链旁路存储', {
+      key,
+      charId,
+      beforeBytes: measurePushPayload(JSON.stringify(current)).bytes,
+      afterBytes: measurePushPayload(JSON.stringify(slimmed)).bytes,
+    });
+    current = slimmed;
+    if (pushFits(current)) return current;
+  }
+
   if (emotionUpdate) {
     const key = amsgEmotionUpdateKey(clientTaskId);
     await writeState(amsgStateNamespace(charId), [{ key, value: emotionUpdate }]);
-    const { amsgEmotionUpdate: _moved, ...restMeta } = meta;
-    current = { ...current, metadata: { ...restMeta, amsgEmotionRef: key } };
+    const { amsgEmotionUpdate: _moved, ...restMeta } = (current.metadata ?? {}) as Record<string, unknown>;
+    const slimmed = { ...current, metadata: { ...restMeta, amsgEmotionRef: key } };
     console.log('[amsg:emotion] 评估结果旁路存储', {
       key,
       charId,
-      beforeBytes: measurePushPayload(JSON.stringify(payload)).bytes,
-      afterBytes: measurePushPayload(JSON.stringify(current)).bytes,
+      beforeBytes: measurePushPayload(JSON.stringify(current)).bytes,
+      afterBytes: measurePushPayload(JSON.stringify(slimmed)).bytes,
     });
+    current = slimmed;
     if (pushFits(current)) return current;
   }
 
@@ -1184,6 +1228,20 @@ export const amsgHooks = {
     }
     const session = stash.session;
 
+    // 思考链两个来源：响应字段（deepseek-r1 / GLM 这些总会带）+ 正文内联 <think>。
+    // 抄的是没 strip 过的原文（上面那个 content 是剥完的）。每轮覆盖——最终留下的是
+    // 产出正文那一轮的思考，中间轮那句「我先去查一下」配不上用户看到的正文。
+    // 请求端不主动开 thinking 参数：fire 请求带 tools（MCP / 排程），thinking + tools
+    // 同发 Gemini 系直接 400，与本地路径工具模式的取舍一致。
+    const nativeReasoning = (ctx.llmResponse as {
+      choices?: Array<{ message?: { reasoning_content?: unknown } }>;
+    })?.choices?.[0]?.message?.reasoning_content;
+    const roundReasoning = [nativeReasoning, extractInlineThink(ctx.llmOutputText || '')]
+      .filter((s): s is string => typeof s === 'string' && !!s.trim())
+      .map((s) => s.trim())
+      .join('\n\n');
+    if (roundReasoning) session.finalReasoning = roundReasoning;
+
     // native tool_calls：只认 tools 数组里声明过的 MCP 名字。模型幻觉出的
     // 未声明调用（比如给 tag 工具编一个 native 调用）丢弃并留日志——直接透传
     // 会让 executeToolCalls 撞上没有 stash 映射的名字。日志带上当时声明了哪些，
@@ -1277,6 +1335,21 @@ export const amsgHooks = {
       // 角色这次给自己排的任务，随最后一条 push 带回客户端认领——不然它们只活在 D1 里，
       // 面板看不到、用户也没法取消。任务本身照常触发，客户端上线补进清单即可。
       let payloads = attachScheduledTasks(decision.pushPayloads, stash.scheduledTasks);
+
+      // 这次生成的思考链随**第一条** push 回客户端：思考链卡片渲染在第一条气泡上，
+      // 收侧也只在 messageIndex<=1 那条上认领（见 utils/activeMsgRuntime.ts）。
+      // 同样排在旁路存储之前，装不下时才能连它一起挪走。
+      if (session.finalReasoning && payloads.length > 0) {
+        payloads = payloads.map((payload, i) => (i === 0
+          ? {
+              ...payload,
+              metadata: {
+                ...(payload.metadata as Record<string, unknown> ?? {}),
+                amsgReasoning: session.finalReasoning,
+              },
+            }
+          : payload));
+      }
 
       // 情绪评估的结果随最后一条 push 回客户端（客户端拿 applyEmotionEvalRaw 落 buff，
       // 与本地路径共用同一套解析）。评估是 onBeforeFire 就起跑的，这里多半已经跑完；
