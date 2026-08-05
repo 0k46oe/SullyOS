@@ -836,6 +836,42 @@ describe('buildFirePack 的时区参照系与模板（①）', () => {
     expect(noteIdx).toBeLessThan(out.template.indexOf('【最近对话上下文】'));
     expect(out.template).toContain('以下方「当前时刻补充」为准');
   });
+
+  // 回归守卫：历史消息 content 是数组时（视觉模型的 [{type:'text'},{type:'image_url'}] 格式），
+  // 转写进【最近对话上下文】的那一行不能把整段 data:image/...;base64,... 塞进模板——真机一张图
+  // 轻松几百 KB base64，排程任务的载荷直接被撑成体积炸弹，模型也用不着读 base64 才知道有图。
+  // 参照 worker 侧 restoreEvalPrompt 的 flattenContent：文本部分照抄，image_url 部分压成
+  // [图片]，别的类型丢弃。
+  it('历史里的图片消息压成 [图片] 占位，不把 base64 编进模板', async () => {
+    const longBase64 = 'data:image/png;base64,' + 'A'.repeat(500);
+    vi.spyOn(ChatPrompts, 'buildMessageHistory').mockReturnValue({
+      apiMessages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: '你看这张图' },
+            { type: 'image_url', image_url: { url: longBase64 } },
+          ],
+        },
+      ],
+    } as any);
+
+    const out = await pack(baseChar());
+    expect(out.template).toContain('[图片]');
+    expect(out.template).toContain('你看这张图');
+    expect(out.template).not.toContain('data:');
+  });
+
+  it('纯文本数组内容照常保留原文', async () => {
+    vi.spyOn(ChatPrompts, 'buildMessageHistory').mockReturnValue({
+      apiMessages: [
+        { role: 'user', content: [{ type: 'text', text: '早上好呀' }] },
+      ],
+    } as any);
+
+    const out = await pack(baseChar());
+    expect(out.template).toContain('早上好呀');
+  });
 });
 
 // ─── ① 订阅自检 ───

@@ -340,8 +340,22 @@ const resolveTaskCredentialUpdates = (
 
 const formatHistoryLine = (role: string, content: any, char: CharacterProfile, userProfile: UserProfile) => {
   const speaker = role === 'assistant' ? char.name : role === 'user' ? userProfile.name : '系统';
+  // 富内容（视觉模型的 [{type:'text'},{type:'image_url'}] 格式）按 part 类型拍平：
+  // 文本部分照抄，图片部分压成 [图片] 占位，别的类型丢掉——不能整段 JSON.stringify，
+  // 那样会把 image_url 里几百 KB 的 base64 一字不差焊进模板，排程任务的载荷直接体积炸弹。
+  // 与 worker 侧 restoreEvalPrompt 用的 flattenContent（worker/amsg/src/emotionEval.ts）
+  // 同一套压法，但这里保留原有的 '\n' 分段（这份模板本来就一行一段，跟 worker 那边
+  // 拼单行摘要的 ' ' 连接不是同一个用途，故不跟随其分隔符）。
   const text = Array.isArray(content)
-    ? content.map((part) => typeof part === 'string' ? part : JSON.stringify(part)).join('\n')
+    ? content
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (part?.type === 'text') return part.text || '';
+        if (part?.type === 'image_url') return '[图片]';
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n')
     : String(content || '');
   return `【${speaker}】\n${text.trim()}`;
 };
