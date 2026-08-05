@@ -3,7 +3,7 @@
 // char 是生成开始时的快照，updateCharacter 只更 React state 不回写它——清单要是从
 // char 上读写，第二次 schedule 就会读着空清单把第一条覆盖掉（「建俩只显示一个」）。
 // 累加由 createAmsg2ToolSession 的本轮局部变量兜住，下面的用例钉的就是这件事。
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('./activeMsgClient', () => ({
   ActiveMsgClient: { scheduleCharacterTask: vi.fn(), cancelTask: vi.fn() },
@@ -25,6 +25,16 @@ const shortOf = (uuid: string) => uuid.slice(0, 8);
 
 // 排程接口把角色写的墙钟折成的绝对时刻（上海 2026-08-03 21:00 / 纽约同日 09:00）。
 const RESOLVED_ISO = '2026-08-03T13:00:00.000Z';
+
+// persistTasks 会用 Date.now() 跑 48h 清理，一次性任务过期就被清空——夹具里这个
+// 绝对时刻写死了，系统时钟往前走两天它就会被当成陈旧任务扫掉，测试跟着莫名其妙全红。
+// 这里把时钟钉在 RESOLVED_ISO 之前，让这份夹具时间永远不会「过期」。
+beforeEach(() => {
+  vi.useFakeTimers({ now: new Date('2026-08-03T05:00:00.000Z') });
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 // 模拟 React：updateCharacter 只记录落盘的 config，绝不回写 char——
 // 这样只有「session 自己兜住最新 config」才能让同轮后续调用读到累加结果。
