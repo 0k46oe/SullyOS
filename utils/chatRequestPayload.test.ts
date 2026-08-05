@@ -66,7 +66,7 @@ describe('timelyByWorker —— 时效段交给 worker，前端这份不重复�
         expect(joined).toContain('[System: 实时状态 (Live Context)]');
         // 只掐文字注入，不改「这一轮算不算 MCP 模式」——上层还靠它决定要不要带 tools。
         expect(withMode.flags.mcpChatActive).toBe(true);
-    }, 20000);
+    });
 
     it('默认构建（不带 timelyByWorker）行为不变：时间块照常注入', async () => {
         const normal = await buildChatRequestPayload({ ...baseInput() });
@@ -77,7 +77,7 @@ describe('timelyByWorker —— 时效段交给 worker，前端这份不重复�
         expect(joined).toContain('[外部工具已接入');
         expect(joined).toContain('[MCP 工具 ON');
         expect(normal.flags.mcpChatActive).toBe(true);
-    }, 20000);
+    });
 
     it('只裁文本不动 flag：mcpChatActive 照实反映有没有 MCP 可用', async () => {
         // 上层还要靠这个 flag 决定请求带不带 tools、出错了要不要按 MCP 那套降级重试。
@@ -88,7 +88,7 @@ describe('timelyByWorker —— 时效段交给 worker，前端这份不重复�
         localStorage.removeItem(MCP_SERVERS_KEY);
         const withoutMcp = await buildChatRequestPayload({ ...baseInput(), timelyByWorker: true });
         expect(withoutMcp.flags.mcpChatActive).toBe(false);
-    }, 20000);
+    });
 
     it('关掉天气热搜时的「今日特殊」节日兜底同样交给 worker', async () => {
         // 天气/热搜关着时，前端只补一条节日行。worker 的 realtimeWorld 里也有节日
@@ -103,5 +103,5 @@ describe('timelyByWorker —— 时效段交给 worker，前端这份不重复�
             ...baseInput(), realtimeConfig: quietConfig, timelyByWorker: true,
         });
         expect(joinMessages(withMode.fullMessages)).not.toContain('【今日特殊】');
-    }, 20000);
+    });
 });

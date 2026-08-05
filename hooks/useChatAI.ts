@@ -798,7 +798,8 @@ export const useChatAI = ({
             // ─── 即时对话的路由在构建 payload 之前就定下来 ───
             // 走云端的那份 prompt 不烤前端时效段（时钟/节日/天气/热搜/MCP 说明由 worker
             // fire 时独家供给），本地那份照旧全量。判定材料和下面的 payload.flags 同源：
-            // luckinChatActive / mcdActive / luckinActive 就是由这三个值算出来的。
+            // luckinChatActive / mcdActive / luckinActive 就是由这三个值算出来的
+            // （skipPromptBuild 那个 dev 开关下 flags 会整片置 false，那时只有这边的 ref 是准的）。
             // IP 还开着（脏配置）时让 IP 先走、按全量构建——别把剥过时效段的 prompt 交给 IP。
             //
             // Instant Push 配没配着，一回合只读这一次，下面所有用到的地方都吃这个值。
@@ -812,17 +813,24 @@ export const useChatAI = ({
                     : luckinMiniOpen ? 'luckin' : null;
             const instantChatOn = await isInstantChatReady();
             const instantChatRoute = instantChatOn && !instantChatVeto && !instantPushConfigured;
-            // 开着即时对话、也没被点单流程否决，却还是不上云——只剩「IP 配置也还在」这一种
-            // 可能（脏配置）。这一轮改由上面的 Instant Push 分支接手；它也不接的话（比如配了
-            // MCP，在它的排除名单里）就一路落回本地生成。不留痕的话，用户看到的是「即时对话
-            // 开着、消息照常出来」，查无可查——静默分流那个坑就是这么来的。
-            if (instantChatOn && !instantChatVeto && !instantChatRoute) {
-                console.warn('[AmsgInstantChat] 这一轮没走即时对话（Instant Push 配置仍在，脏配置）：交给 Instant Push，它也不接就落回本地');
+            // 「即时对话开着、这一轮却没上云」的所有情形都在这一处留痕，两种原因去向不同：
+            //   · 点单流程否决：瑞幸/麦当劳是客户端交互式循环（选城市、确认单），云端接不了
+            //     手，这一轮留在本地跑是对的；
+            //   · IP 配置也还在（脏配置）：这一轮交给上面的 Instant Push 分支，它也不接的话
+            //     （比如配了 MCP，在它的排除名单里）就一路落回本地。
+            // 两个原因同时成立时报点单那个——它更具体，也更可能是用户真正想问的。
+            // 不留痕的话，用户看到的是「开关亮着、消息照常出来」，查无可查——静默分流那个坑
+            // 就是这么来的。这里只报不拦：拦不拦已经由 instantChatRoute 说了算。
+            if (instantChatOn && !instantChatRoute) {
+                const skipReason = instantChatVeto ?? 'instant-push-configured';
+                console.warn(instantChatVeto
+                    ? `[AmsgInstantChat] 这一轮没上云（${instantChatVeto} 点单流程需要客户端交互），本地生成`
+                    : '[AmsgInstantChat] 这一轮没走即时对话（Instant Push 配置仍在，脏配置）：交给 Instant Push，它也不接就落回本地');
                 appendInstantTraceEntry({
                     ts: new Date().toISOString(),
                     event: 'instant-chat-veto',
                     charId: char.id,
-                    reason: 'instant-push-configured',
+                    reason: skipReason,
                 });
             }
 
@@ -1174,56 +1182,45 @@ export const useChatAI = ({
             // 和上面的 Instant Push 对称：这一轮的上下文 + 任务一个 POST 上云，云端跑完
             // 走推送回来（收件箱同一条管线入库），客户端发完那一刻就自由了。
             // 设置页那道门已经把两条路做成双向互斥，正常情况下不可能两个都开；
-            // 上面的 Instant Push 分支只为历史配置兜底保留。这里跟着上面那段路由判定
-            // （instantChatOn / instantChatVeto，见 payload 构建之前）走，不重新算一遍——
-            // 判定要和「这份 prompt 剥没剥时效段」严丝合缝地对上。
+            // 上面的 Instant Push 分支只为历史配置兜底保留。
+            //
+            // 走不走这条路，构建 payload 之前的 instantChatRoute 已经算完了，这里只认它
+            // 一个值：「这份 prompt 剥没剥时效段」和「这一轮走不走云端」必须是同一个判断，
+            // 各算各的话两边总有一天会不同意，剥过的那份 prompt 就落到别的路上去了。
+            // 没上云的那些情形（点单否决 / IP 配置也还在）在那一段里已经报过 trace，
+            // 这边不重复报，也不重复拦。
             //
             // MCP 刻意不在排除名单里：worker fire 时自己解析 tool_config、自己跑后台
             // MCP（这次 POST 顺手把配置传上去了），云端答得了。排掉它的话，只要全局配着
             // 一台 enabled 的 MCP 服务器，即时对话就永远静默走回本地——设置页亮着
             // 「已开启」、界面毫无异样，正是 instant push 静默分流那个坑的复刻。
-            if (instantChatOn && !instantPushConfigured) {
-                // 瑞幸/麦当劳点单是客户端交互式循环（选城市、确认单），云端接不了手，
-                // 这一轮只能留在本地跑（否决后不 return，落回下面的本地路径；这份 payload
-                // 也是按本地全量构建的，时效段一样不缺）。
-                // 但「开着即时对话却走了本地」不能无声无息：console + trace 双写，
-                // 调试面板能看到这一轮为什么没上云。
-                if (instantChatVeto) {
-                    console.warn(`[AmsgInstantChat] 这一轮没上云（${instantChatVeto} 点单流程需要客户端交互），本地生成`);
-                    appendInstantTraceEntry({
-                        ts: new Date().toISOString(),
-                        event: 'instant-chat-veto',
-                        charId: char.id,
-                        reason: instantChatVeto,
-                    });
+            if (instantChatRoute) {
+                const instantChatResult = await sendInstantChatTurn({
+                    char,
+                    // 云端要发给模型的就是本地这一份，一个字不改（见 fire_pack 的 chat 段）。
+                    chatMessages: fullMessages as Array<{ role: string; content: unknown }>,
+                    // 凭据用本地这一轮的那份：换成别的等于同一句话由不同模型来答，而用户看不出来。
+                    api: { baseUrl: effectiveApi.baseUrl, apiKey: effectiveApi.apiKey, model: effectiveApi.model },
+                    maxTokens: 8000,
+                    userProfile, groups, realtimeConfig,
+                });
+                if (instantChatResult.ok) {
+                    // 这次 POST 已经把权威的那份 fire_pack 传上去了，收尾不必再打脏重传一遍。
+                    instantChatAccepted = true;
+                    // 情绪评估仍在本地跑（副 API，fire & forget）：云端这条链路没有评估这一步，
+                    // 不在这儿发一枪的话，开了即时对话的用户情绪底色和意识流会**悄悄停更**。
+                    // 时机与本地路径一致——都是在主回复出结果之前、用同一份 cleanedApiMessages。
+                    fireLocalEmotionEval?.();
                 } else {
-                    const instantChatResult = await sendInstantChatTurn({
-                        char,
-                        // 云端要发给模型的就是本地这一份，一个字不改（见 fire_pack 的 chat 段）。
-                        chatMessages: fullMessages as Array<{ role: string; content: unknown }>,
-                        // 凭据用本地这一轮的那份：换成别的等于同一句话由不同模型来答，而用户看不出来。
-                        api: { baseUrl: effectiveApi.baseUrl, apiKey: effectiveApi.apiKey, model: effectiveApi.model },
-                        maxTokens: 8000,
-                        userProfile, groups, realtimeConfig,
-                    });
-                    if (instantChatResult.ok) {
-                        // 这次 POST 已经把权威的那份 fire_pack 传上去了，收尾不必再打脏重传一遍。
-                        instantChatAccepted = true;
-                        // 情绪评估仍在本地跑（副 API，fire & forget）：云端这条链路没有评估这一步，
-                        // 不在这儿发一枪的话，开了即时对话的用户情绪底色和意识流会**悄悄停更**。
-                        // 时机与本地路径一致——都是在主回复出结果之前、用同一份 cleanedApiMessages。
-                        fireLocalEmotionEval?.();
-                    } else {
-                        // 没发出去就是没发出去：明确落一条系统消息 + 弹错，用户可以直接重发。
-                        // **绝不静默退回本地生成** —— 静默分流那种查无可查的坑踩过一次就够了。
-                        const reason = instantChatResult.error || '未知错误';
-                        await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[${reason}]` });
-                        setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
-                        if (showError) showError('即时对话发送失败', reason);
-                        else addToast(reason, 'error');
-                    }
-                    return;
+                    // 没发出去就是没发出去：明确落一条系统消息 + 弹错，用户可以直接重发。
+                    // **绝不静默退回本地生成** —— 静默分流那种查无可查的坑踩过一次就够了。
+                    const reason = instantChatResult.error || '未知错误';
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[${reason}]` });
+                    setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
+                    if (showError) showError('即时对话发送失败', reason);
+                    else addToast(reason, 'error');
                 }
+                return;
             }
 
             // 流式预览：仅在用户开了 stream、且非工具/双语模式时启用。
