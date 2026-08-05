@@ -57,6 +57,7 @@ import {
 // 只取一个常量：客户端算 firstSendTime 时要留的提前量，和包装层「把任务行拉到期」
 // 那一步是同一个数，各写各的就会出现「校验说时间要在未来 / cron 说还没到」的死角。
 import { INSTANT_SCHEDULE_LEAD_MS } from '../worker/amsg/src/instantChat';
+import type { AmsgEmotionEvalSpec } from '../worker/amsg/src/emotionEval';
 import { listRecallableMonths } from './agenticTools';
 import { ChatPrompts } from './chatPrompts';
 import { nowInTimeZone, resolveCharTimeZone, tzAwarenessNote } from './timezone';
@@ -1668,6 +1669,11 @@ export const ActiveMsgClient = {
     userProfile: UserProfile;
     groups: GroupProfile[];
     realtimeConfig: RealtimeConfig;
+    /**
+     * 这一轮的情绪评估（副 API 提示词 + 凭据），交给云端跑。
+     * 走 taskPayload —— 那份是端到端加密的信封，凭据不会以明文出门。
+     */
+    emotionEval?: AmsgEmotionEvalSpec;
     /** 上一条还没被认领的即时对话任务，连发两条时用它顶掉（合并成一起回）。 */
     supersedesUuid?: string;
   }): Promise<{ uuid: string; clientTaskId: string }> {
@@ -1714,6 +1720,10 @@ export const ActiveMsgClient = {
         // worker 到点靠它认出「这是用户在等回复」，从而跳过那几道主动消息专用的闸。
         amsgInstantChat: true,
         amsgClientTaskId: clientTaskId,
+        // 情绪评估交给云端跑：worker 到点和主回复并行发起，结果随最后一条推送回来
+        // （见 worker/amsg/src/emotionEval.ts）。它里头有副 API 的 apiKey，只能待在
+        // 这个加密信封里——worker 组推送前会把它摘掉，一个字节都不许跟着 push 出门。
+        ...(params.emotionEval ? { amsgEmotionEval: params.emotionEval } : {}),
         // 刻意不带 amsgExpirePolicy / amsgAnchorMs：防穿帮闸问的是「到点还该不该主动开口」，
         // 对「回一句用户刚说的话」不适用，带上去反而会把用户等着的回复吞掉。
       },

@@ -373,6 +373,7 @@ describe('buildInstantTimelyBlock', () => {
     tz: { tzId: 'Asia/Shanghai' },
     userTzId: 'Asia/Shanghai',
     targetName: '小明',
+    timeAwarenessEnabled: true,
   };
 
   it('写清「现在几点」，用的是角色自己的时区', () => {
@@ -384,6 +385,22 @@ describe('buildInstantTimelyBlock', () => {
     expect(buildInstantTimelyBlock({ ...base, userTzId: 'America/New_York', blocks: [] }))
       .toContain('对方所在时区参考');
     expect(buildInstantTimelyBlock({ ...base, blocks: [] })).not.toContain('对方所在时区参考');
+  });
+
+  // 关了时间感知的架空角色在前台连今天几号都读不到，云端这条路也不能偷偷报时。
+  // 一个开关两套行为的话，同一个角色在聊天里说不出日期、在即时对话里却精确到分钟。
+  it('关了时间感知就一个钟都不给（其余块照常拼）', () => {
+    const block = buildInstantTimelyBlock({
+      ...base,
+      userTzId: 'America/New_York',
+      timeAwarenessEnabled: false,
+      blocks: ['\n\n【热搜】\n- 某某'],
+    });
+    expect(block).not.toContain('现在是');
+    expect(block).not.toContain('2026年8月1日');
+    expect(block).not.toContain('对方所在时区参考');
+    expect(block).toContain('【此刻的系统信息·仅你可见】');
+    expect(block).toContain('【热搜】');
   });
 
   it('空块整块跳过（拉不到实时世界时不能留一行空标题）', () => {

@@ -197,6 +197,64 @@ const fetchOffloadedXhsSession = async (message: ActiveMsg2InboxMessage): Promis
 };
 
 /**
+ * 取回 worker 旁路存下的情绪评估原文（评估结果撑爆一条 push 时才有，
+ * 见 worker/amsg/src/index.ts 的 offloadOversizedPush）。
+ *
+ * 取不回来只返回 null、**不抛错**：这条消息本身（角色说的那句话）已经完整送到了，
+ * 为了一次情绪更新把它压回收件箱反复重试，得不偿失——用户会看到回复迟迟不上屏。
+ */
+const fetchOffloadedEmotionUpdate = async (message: ActiveMsg2InboxMessage): Promise<string | null> => {
+  const ref = (message.metadata as any)?.amsgEmotionRef;
+  if (typeof ref !== 'string' || !ref) return null;
+
+  const namespace = amsgStateNamespace(message.charId);
+  try {
+    const raw = await ActiveMsgClient.readClientStateValue(namespace, ref);
+    if (raw == null) {
+      // 键不在了：同角色的下一轮已经把它覆盖/清掉了，这条是迟到的老消息。
+      log.warn('旁路存储里没有这份情绪评估（多半被下一轮覆盖了）', { ref, charId: message.charId });
+      return null;
+    }
+    void ActiveMsgClient.clearClientStateValue(namespace, ref)
+      .catch((e) => log.warn('清空旁路存储失败（下次触发会覆盖，不影响正确性）', { ref, error: e }));
+    return raw;
+  } catch (error) {
+    log.warn('取旁路存储的情绪评估失败（这一轮情绪不更新，回复照常）', { ref, error });
+    return null;
+  }
+};
+
+/**
+ * 一份评估原文 → 落 buff + 把 innerState 广播给下一轮。
+ *
+ * 两条云端路径共用这一处：Instant Push 把结果推成单独一条 emotion_update 消息，
+ * 即时对话（amsg2）把它挂在最后一条回复的 metadata.amsgEmotionUpdate 上。
+ * 解析只认 applyEmotionEvalRaw 这一套（与本地评估路径同一份），别在任何一侧另写一个。
+ */
+const applyEmotionUpdateRaw = async (charId: string, raw: string): Promise<void> => {
+  try {
+    const chars = await DB.getAllCharacters();
+    const ch = chars.find((c) => c.id === charId);
+    if (!ch) return;
+    const innerState = await applyEmotionEvalRaw(String(raw), ch);
+    if (innerState) {
+      window.dispatchEvent(new CustomEvent('emotion-innerstate-updated', {
+        detail: { charId, innerState },
+      }));
+    }
+  } catch (e) {
+    console.warn('[flush:emotion_update] apply failed', e);
+  }
+};
+
+/** 熄灭「情绪更新中」徽章 / 全局横幅（成功与否都要发，不然它一直亮着）。 */
+const announceEmotionDone = (charId: string): void => {
+  try {
+    window.dispatchEvent(new CustomEvent('instant-emotion-done', { detail: { charId } }));
+  } catch { /* SSR-safe */ }
+};
+
+/**
  * 角色在本地已经不存在了：删角色时远端取消失败留下的残留，或者导入备份之后 id 对不上。
  * 与「暂时读不到」区分开——这种重试多少次都没用，得去把远端那条还在到点跑的任务取消掉。
  */
@@ -490,6 +548,46 @@ const processInboxMessageWithPostProcessing = async (
     // 慢放只会让用户干等, 期间他插的话还会把时间戳倒挂的口子撑开。实时收到的照旧慢放。
     instantRender: !isFreshInboxDelivery(message.receivedAt, Date.now()),
   });
+
+  // ─── 即时对话（amsg2）的情绪评估结果 ───
+  // 云端跟主回复并行跑完的那份，挂在最后一条 push 的 metadata 上（装不下时挪进
+  // client_state、只留 amsgEmotionRef，见 worker 的 offloadOversizedPush）。
+  // 走的是 Instant Push 的 emotion_update 同一条消费链：同一个 applyEmotionEvalRaw
+  // 落 buff、同一个 'emotion-innerstate-updated' 喂下一轮、同一个 'instant-emotion-done'
+  // 熄灯，不另写第二套解析。
+  //
+  // 排在正文落库之后：这一条消息的本体是角色说的那句话，情绪只是附赠，
+  // 顺序反了的话正文出问题时情绪已经先落了。
+  //
+  // amsgEmotionDone 是「这一轮的评估已经有结论了」，成败都带：只在有结果时才发信号的话，
+  // 评估一失败徽章就得亮到十几分钟后由 TTL 兜底才灭，而用户看到的是「情绪永远不更新」。
+  const emotionDone = (message.metadata as any)?.amsgEmotionDone === true;
+  const inlineEmotionUpdate = (message.metadata as any)?.amsgEmotionUpdate;
+  const emotionUpdateRaw = typeof inlineEmotionUpdate === 'string' && inlineEmotionUpdate
+    ? inlineEmotionUpdate
+    : await fetchOffloadedEmotionUpdate(message);
+  if (emotionUpdateRaw) {
+    await applyEmotionUpdateRaw(message.charId, emotionUpdateRaw);
+  } else if (emotionDone) {
+    // 云端跑了但没跑出东西（副 API 报错 / 模型没返回内容）。不静默熄灯——弹一条 toast，
+    // 否则用户只看到「情绪更新中」灭了、情绪没变、没有任何解释。
+    try {
+      window.dispatchEvent(new CustomEvent(CHAT_GEN_EVENTS.emotionFailed, {
+        detail: {
+          charId: message.charId, charName: message.charName || '',
+          reason: '云端情绪评估无输出（副 API 报错或模型没返回内容，可查 worker 日志）',
+        },
+      }));
+    } catch { /* SSR-safe */ }
+  }
+  if (emotionDone || emotionUpdateRaw) {
+    announceEmotionDone(message.charId);
+    activeMsgTrace('runtime-emotion-done', {
+      sessionId: getInstantSessionId(message),
+      messageId: message.messageId,
+      charId: message.charId,
+    });
+  }
 
   // ─── Phase 2 Round 2 (2f): push 尾段 ───
   // Memory Palace 缓冲区处理仍在这里 (跟本地 fetch 路径 finally 段对齐, 不依赖 React).
@@ -1089,20 +1187,7 @@ const flushInboxToChatImpl = async () => {
     if (message.messageType === 'emotion_update' || (message.metadata as any)?.emotionRaw) {
       const emotionRaw = (message.metadata as any)?.emotionRaw;
       if (emotionRaw) {
-        try {
-          const chars = await DB.getAllCharacters();
-          const ch = chars.find((c) => c.id === message.charId);
-          if (ch) {
-            const innerState = await applyEmotionEvalRaw(String(emotionRaw), ch);
-            if (innerState) {
-              window.dispatchEvent(new CustomEvent('emotion-innerstate-updated', {
-                detail: { charId: message.charId, innerState },
-              }));
-            }
-          }
-        } catch (e) {
-          console.warn('[flush:emotion_update] apply failed', e);
-        }
+        await applyEmotionUpdateRaw(message.charId, String(emotionRaw));
       } else {
         // worker 端评估失败/空结果时 emotionRaw 是空串（worker 无论成败都推一条用来熄灯）。
         // 过去这里静默跳过 —— 用户只看到「情绪更新中」灭了、情绪没变、无任何报错（真实反馈）。
@@ -1121,9 +1206,7 @@ const flushInboxToChatImpl = async () => {
         } catch { /* SSR-safe */ }
       }
       // 无论成功与否都通知 useChatAI 熄灭 "情绪更新中" 徽章 (buff 已落 / 或这轮没结果).
-      try {
-        window.dispatchEvent(new CustomEvent('instant-emotion-done', { detail: { charId: message.charId } }));
-      } catch { /* SSR-safe */ }
+      announceEmotionDone(message.charId);
       activeMsgTrace('runtime-emotion-done', {
         sessionId: (message as any).sessionId || (message.metadata as any)?.sessionId,
         messageId: message.messageId,

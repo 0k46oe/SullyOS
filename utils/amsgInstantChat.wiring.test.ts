@@ -157,8 +157,15 @@ describe('useChatAI 的分流接缝', () => {
     expect(chatAiSrc).toMatch(/if \(!instantChatAccepted\) \{[\s\S]{0,200}markAmsgStateDirty\(/);
   });
 
-  it('情绪评估照常在本地发一枪（云端那条链路没有这一步，不发就是悄悄停更）', () => {
-    expect(branchSrc()).toContain('fireLocalEmotionEval?.()');
+  // 情绪评估跟着这一轮一起上云：用户发完就能关页面，评估在 worker 里跑完，结果随
+  // 最后一条推送回来。留在本地发一枪的话，页面一关情绪底色和意识流就悄悄停更了。
+  it('情绪评估跟着一起交给云端，不在本地再发一枪', () => {
+    expect(branchSrc()).toContain('emotionEval: cloudEmotionEval');
+    expect(branchSrc()).not.toContain('fireLocalEmotionEval');
+    // 本地那一枪的开关也得认这条路：cloudGenRoute 把即时对话算进去，
+    // 不然两边会同时跑评估（双扣费，而且后落的那份会盖掉先落的）。
+    expect(chatAiSrc).toMatch(/const cloudGenRoute = instantOn \|\| instantChatRoute;/);
+    expect(chatAiSrc).toMatch(/const fireLocalEmotionEval = \(emotionEvalEnabled && !cloudGenRoute/);
   });
 
   it('不在这条路上开活跃会话租约（生成不在本机跑，没人需要它举手）', () => {

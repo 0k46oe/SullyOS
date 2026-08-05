@@ -903,13 +903,15 @@ export const useChatAI = ({
             //    未单独配置情绪 API 时回退到主 apiConfig。
             //    ── 路径分叉 ──
             //    - 本地 fetch 模式: 客户端 fire-and-forget 跑 eval (前端活着).
-            //    - instant 模式: 不在客户端跑, 改把 eval prompt + 副 API 凭据塞进 instant 请求 (emotionEval 字段),
-            //      worker 跑完主回复后跑 eval 并推 emotion_update 回来, 客户端 flush 时落 buff —— 这样前端被杀也算数,
-            //      且不会跟客户端 eval 双跑双扣费. 见下方 instant 分支 + worker/instant-push + activeMsgRuntime.
+            //    - 上云模式 (Instant Push / 即时对话): 不在客户端跑, 改把 eval prompt + 副 API 凭据
+            //      一起交给 worker, worker 跑完把结果推回来, 客户端 flush 时落 buff —— 这样前端被杀
+            //      也算数, 且不会跟客户端 eval 双跑双扣费. 见下方两个上云分支 + activeMsgRuntime.
             const emotionEvalEnabled = !!(!promptBuildSkipped && !isEmotionEvalSkipped() && isScheduleFeatureOn(char) && char.emotionConfig?.enabled);
             // 同一回合同一个值（见上面路由判定处）：这里要是自己再读一次，可能出现
-            // 「按 instant 模式把评估打包上云了，实际却走本地」——情绪底色从此悄悄停更。
+            // 「按上云模式把评估打包走了，实际却走本地」——情绪底色从此悄悄停更。
             const instantOn = instantPushConfigured;
+            // 这一轮的生成在云端跑（两条路互斥，见 instantChatRoute 的算法）。
+            const cloudGenRoute = instantOn || instantChatRoute;
             // 评估跟随全局流式开关（专用情绪 API 自带 stream 字段时以它为准）
             const evalStream: boolean = !!((effectiveApi as any).stream ?? apiConfig.stream ?? false);
             const emotionApi = emotionEvalEnabled
@@ -920,8 +922,8 @@ export const useChatAI = ({
             // 本地路径的情绪评估：主 fetch 发出后立即发射（见下方调用点）。
             // 历史备注：曾为串行中转做过 1.5s 错峰（评估抢跑会把主回复压后一个评估时长），
             // 用户侧已排查确认当前渠道无该并发问题，2026-07 应用户要求取消延迟。
-            // instant 模式不受影响：worker 端本来就是主回复跑完才跑评估（天然串行）。
-            const fireLocalEmotionEval = (emotionEvalEnabled && !instantOn && emotionApi) ? () => {
+            // 上云模式不受影响：worker 那边自己安排评估的时机。
+            const fireLocalEmotionEval = (emotionEvalEnabled && !cloudGenRoute && emotionApi) ? () => {
                 setEmotionStatus('evaluating');
                 evaluateEmotionBackground(charForGen, userProfile, systemPrompt, cleanedApiMessages, emotionApi)
                     .then((innerState) => {
@@ -931,7 +933,10 @@ export const useChatAI = ({
                         setEmotionStatus('');
                     });
             } : null;
-            const instantEmotionEval = (emotionEvalEnabled && instantOn && emotionApi)
+            // 交给云端跑的那份评估配置。两条上云路径共用同一个形状（提示词模板 + 副 API 凭据），
+            // 只是搭在各自请求体的不同位置上：Instant Push 放顶层 emotionEval 字段，
+            // 即时对话放任务 metadata.amsgEmotionEval（那份走加密信封）。
+            const cloudEmotionEval = (emotionEvalEnabled && cloudGenRoute && emotionApi)
                 ? {
                     // includeContext=false: 不嵌 system prompt + 对话历史 (worker 复用本次请求的 messages 作前文),
                     // 把 emotionEval 块压到最小, 让请求体留在 keepalive 64KB 上限内 (关前端也能跑完).
@@ -943,28 +948,36 @@ export const useChatAI = ({
                 }
                 : undefined;
 
-            // instant 情绪评估在 worker 跑 (副 API), 客户端看不到 LLM 调用时机, 但仍要给用户一个
+            // 上云的情绪评估在 worker 跑 (副 API), 客户端看不到 LLM 调用时机, 但仍要给用户一个
             // "情绪更新中" 的可见信号 (header 徽章, 跟本地模式一致), 否则 "发送中" 消失后一片空白像死了.
-            // 从这里点亮, 到 worker 推回 emotion_update (activeMsgRuntime fire 'instant-emotion-done')
+            // 从这里点亮, 到 worker 把结果推回来 (activeMsgRuntime fire 'instant-emotion-done')
             // 或安全超时 (worker 旧/失败/前端被杀) 时熄灭.
-            if (instantEmotionEval) {
+            if (cloudEmotionEval) {
                 setEmotionStatus('evaluating');
                 // 全局横幅同步点灯; 熄灭信号是 worker 推回后 activeMsgRuntime 的
                 // 'instant-emotion-done' (ChatBroadcast 直接监听) + 横幅自身 TTL 兜底,
                 // 都不依赖本 hook 存活 —— 用户切走 Chat 也能正常熄灭。
                 announceChatGen(CHAT_GEN_EVENTS.emotionStart, { charId: char.id, charName: char.name });
                 if (instantEmotionTimerRef.current) clearTimeout(instantEmotionTimerRef.current);
+                // 两条路的安全网长短不一样，按各自 worker 最长能跑多久给：
+                //   · Instant Push：一个请求里跑完就回，90s 足够；
+                //   · 即时对话：worker 那条 fire 的总时长上限是 600s（工具循环也算在内），
+                //     评估结果又是跟着主回复的最后一条推送回来的，90s 会在还没跑完时就误报
+                //     「超时无回音」。给 660s = 600s 上限 + 一分钟推送在途的余量。
+                const cloudEvalTimeoutMs = instantChatRoute ? 660_000 : 90_000;
                 instantEmotionTimerRef.current = setTimeout(() => {
                     setEmotionStatus('');
                     instantEmotionTimerRef.current = null;
                     // 超时无回音最常见的原因是用户部署的 worker 版本过旧（不支持情绪评估、
-                    // 压根不会推 emotion_update），其次是 worker 被杀/推送丢失。过去这里
+                    // 压根不会推结果回来），其次是 worker 被杀/推送丢失。过去这里
                     // 静默熄灯, 用户只看到「情绪永远不更新」—— 给一条可操作的提示。
                     announceChatGen(CHAT_GEN_EVENTS.emotionFailed, {
                         charId: char.id, charName: char.name,
-                        reason: '云端情绪评估超时无回音——worker 可能是旧版（不支持情绪评估），请到 设置→Instant 消息设置 更新 worker 后重试',
+                        reason: instantChatRoute
+                            ? '云端情绪评估超时无回音——worker 可能是旧版（不支持情绪评估），请到 设置→主动消息 2.0 重新部署 worker 后重试'
+                            : '云端情绪评估超时无回音——worker 可能是旧版（不支持情绪评估），请到 设置→Instant 消息设置 更新 worker 后重试',
                     });
-                }, 90_000);  // 安全网: 正常情况下 worker 推回 emotion_update 会 fire 'instant-emotion-done' 提前熄灭; 只在 worker 旧版/被杀/推送丢失时兜底.
+                }, cloudEvalTimeoutMs);  // 安全网: 正常情况下 worker 推回结果会 fire 'instant-emotion-done' 提前熄灭; 只在 worker 旧版/被杀/推送丢失时兜底.
             }
 
             // 发送前汇总计时
@@ -1144,7 +1157,7 @@ export const useChatAI = ({
                     metadata: { source: 'sullyos-chat', charId: char.id },
                     // 副 API 情绪评估: worker 跑完主回复后用这套跑 eval, 推 emotion_update 回来 (见 worker 包装层).
                     // 放顶层字段, 不进 metadata —— 框架不会回显它, 副 API apiKey 不会泄进 push.
-                    ...(instantEmotionEval ? { emotionEval: instantEmotionEval } : {}),
+                    ...(cloudEmotionEval ? { emotionEval: cloudEmotionEval } : {}),
                 }, char.id, undefined, onInstantPosted);
                 if (!instantResult.ok && instantResult.outcome !== 'cancelled') {
                     // 长报错 (worker 400 校验信息 + CF 错误页可能很长) 走弹窗, 手机用户能
@@ -1172,7 +1185,7 @@ export const useChatAI = ({
                 }
                 // 发送失败/取消 → worker 不会跑情绪评估, 'instant-emotion-done' 永不到达,
                 // 主动熄灭全局横幅 (否则要等 TTL 兜底)。
-                if (!instantResult.ok && instantEmotionEval) {
+                if (!instantResult.ok && cloudEmotionEval) {
                     announceChatGen(CHAT_GEN_EVENTS.emotionEnd, { charId: char.id, charName: char.name });
                 }
                 return;
@@ -1203,14 +1216,14 @@ export const useChatAI = ({
                     api: { baseUrl: effectiveApi.baseUrl, apiKey: effectiveApi.apiKey, model: effectiveApi.model },
                     maxTokens: 8000,
                     userProfile, groups, realtimeConfig,
+                    // 情绪评估也交给云端：worker 到点和主回复并行跑，结果随最后一条推送回来
+                    // （见 worker/amsg/src/emotionEval.ts）。放在这里而不是本地 fire 一枪，
+                    // 是因为用户发完就能关页面——留在本地的话，页面一关情绪底色就停更了。
+                    ...(cloudEmotionEval ? { emotionEval: cloudEmotionEval } : {}),
                 });
                 if (instantChatResult.ok) {
                     // 这次 POST 已经把权威的那份 fire_pack 传上去了，收尾不必再打脏重传一遍。
                     instantChatAccepted = true;
-                    // 情绪评估仍在本地跑（副 API，fire & forget）：云端这条链路没有评估这一步，
-                    // 不在这儿发一枪的话，开了即时对话的用户情绪底色和意识流会**悄悄停更**。
-                    // 时机与本地路径一致——都是在主回复出结果之前、用同一份 cleanedApiMessages。
-                    fireLocalEmotionEval?.();
                 } else {
                     // 没发出去就是没发出去：明确落一条系统消息 + 弹错，用户可以直接重发。
                     // **绝不静默退回本地生成** —— 静默分流那种查无可查的坑踩过一次就够了。
@@ -1219,6 +1232,16 @@ export const useChatAI = ({
                     setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
                     if (showError) showError('即时对话发送失败', reason);
                     else addToast(reason, 'error');
+                    // 没发出去 → 云端不会跑评估，'instant-emotion-done' 永不到达。主动熄灯，
+                    // 否则「情绪更新中」要挂满 11 分钟才由 TTL 兜底灭掉。
+                    if (cloudEmotionEval) {
+                        if (instantEmotionTimerRef.current) {
+                            clearTimeout(instantEmotionTimerRef.current);
+                            instantEmotionTimerRef.current = null;
+                        }
+                        setEmotionStatus('');
+                        announceChatGen(CHAT_GEN_EVENTS.emotionEnd, { charId: char.id, charName: char.name });
+                    }
                 }
                 return;
             }

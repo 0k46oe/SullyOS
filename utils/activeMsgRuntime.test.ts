@@ -31,6 +31,7 @@ import {
 import { ActiveMsgClient } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
 import { AMSG_SELF_LOG_KEY, amsgStateNamespace } from './amsgFirePack';
+import { CHAT_GEN_EVENTS } from './chatGenEvents';
 import { DB } from './db';
 
 // resolveFireExpireDecision 是从「防穿帮闸·客户端兜底」吞没闸抽出来的 get-or-compute
@@ -594,6 +595,111 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
     expect(freshMs, '实时送达该保留打字节奏').toBeGreaterThan(400);
     expect(staleMs, '补收该跳过打字延迟').toBeLessThan(400);
   }, 20000);
+
+  // 即时对话的情绪评估在 worker 里跟主回复并行跑，结果挂在最后一条推送的 metadata 上。
+  // 收侧得走 Instant Push 那条 emotion_update 同一条链：同一个 applyEmotionEvalRaw 落 buff、
+  // 同一个 'instant-emotion-done' 熄灯。漏了这一段，用户看到的是「回复来了、情绪永远不更新、
+  // 头顶那盏『情绪更新中』亮满十一分钟」。
+  describe('即时对话带回来的情绪评估', () => {
+    const captureEvents = () => {
+      const seen: Array<{ type: string; detail: any }> = [];
+      const original = (globalThis as any).window.dispatchEvent;
+      (globalThis as any).window.dispatchEvent = (event: any) => {
+        seen.push({ type: event?.type, detail: event?.detail });
+        return true;
+      };
+      return { seen, restore: () => { (globalThis as any).window.dispatchEvent = original; } };
+    };
+
+    it('评估原文随回复一起到 → 落 buff + 熄灯（跟 emotion_update 同一条链）', async () => {
+      const charId = 'char-emotion-inline';
+      await DB.saveCharacter({ id: charId, name: '情绪角色' } as any);
+      await ActiveMsgStore.saveInboxMessage(inboxMsg({
+        messageId: 'msg-emotion-inline',
+        charId,
+        charName: '情绪角色',
+        messageType: 'text',
+        metadata: {
+          charId,
+          amsgEmotionDone: true,
+          amsgEmotionUpdate: JSON.stringify({
+            changed: true,
+            buffs: [{ label: '雀跃', emoji: '✨', intensity: 3 }],
+            injection: '你此刻心情很好。',
+            innerState: '他记得我说过的话。',
+          }),
+        },
+      }));
+
+      const { seen, restore } = captureEvents();
+      try {
+        await flushInboxToChat();
+      } finally {
+        restore();
+      }
+
+      const updated = (await DB.getAllCharacters()).find((c) => c.id === charId)!;
+      expect(updated.activeBuffs?.map((b: any) => b.label)).toContain('雀跃');
+      expect(updated.buffInjection).toContain('心情很好');
+      // 意识流喂给下一轮 + 徽章熄灭，两个事件都得发（点灯的那一侧只认它们）
+      expect(seen.some((e) => e.type === 'emotion-innerstate-updated' && e.detail?.charId === charId)).toBe(true);
+      expect(seen.some((e) => e.type === 'instant-emotion-done' && e.detail?.charId === charId)).toBe(true);
+      // 正文照常上屏：情绪只是附赠，不能把这条消息带跑
+      expect((await assistantMsgs(charId)).length).toBeGreaterThan(0);
+    }, 20000);
+
+    it('云端评估没跑出东西 → 照样熄灯并报一句原因（不静默留着灯）', async () => {
+      const charId = 'char-emotion-empty';
+      await DB.saveCharacter({ id: charId, name: '空评估角色' } as any);
+      await ActiveMsgStore.saveInboxMessage(inboxMsg({
+        messageId: 'msg-emotion-empty',
+        charId,
+        charName: '空评估角色',
+        messageType: 'text',
+        metadata: { charId, amsgEmotionDone: true },
+      }));
+
+      const { seen, restore } = captureEvents();
+      try {
+        await flushInboxToChat();
+      } finally {
+        restore();
+      }
+
+      expect(seen.some((e) => e.type === 'instant-emotion-done' && e.detail?.charId === charId)).toBe(true);
+      expect(seen.some((e) => e.type === CHAT_GEN_EVENTS.emotionFailed && e.detail?.charId === charId)).toBe(true);
+    }, 20000);
+
+    it('装不下时挪进 client_state：按 amsgEmotionRef 取回来照样落 buff，用完就删', async () => {
+      const charId = 'char-emotion-ref';
+      await DB.saveCharacter({ id: charId, name: '旁路角色' } as any);
+      const ref = 'emotion_update:client-task-ref';
+      const readSpy = vi.spyOn(ActiveMsgClient, 'readClientStateValue')
+        .mockResolvedValue(JSON.stringify({
+          changed: true,
+          buffs: [{ label: '安心', emoji: '🍵', intensity: 2 }],
+          injection: '你此刻很安心。',
+        }));
+      const clearSpy = vi.spyOn(ActiveMsgClient, 'clearClientStateValue').mockResolvedValue(undefined as any);
+
+      await ActiveMsgStore.saveInboxMessage(inboxMsg({
+        messageId: 'msg-emotion-ref',
+        charId,
+        charName: '旁路角色',
+        messageType: 'text',
+        metadata: { charId, amsgEmotionDone: true, amsgEmotionRef: ref },
+      }));
+
+      await flushInboxToChat();
+
+      expect(readSpy).toHaveBeenCalledWith(amsgStateNamespace(charId), ref);
+      const updated = (await DB.getAllCharacters()).find((c) => c.id === charId)!;
+      expect(updated.activeBuffs?.map((b: any) => b.label)).toContain('安心');
+      expect(clearSpy).toHaveBeenCalledWith(amsgStateNamespace(charId), ref);
+      readSpy.mockRestore();
+      clearSpy.mockRestore();
+    }, 20000);
+  });
 
   it('降级存原稿路径·刚送达：与主路径同口径，落 sentAt', async () => {
     const charId = 'char-ts-raw-fresh';

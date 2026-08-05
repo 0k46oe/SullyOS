@@ -164,6 +164,38 @@ describe('POST /instant-chat 的形状', () => {
     expect(lead).toBeLessThanOrEqual(INSTANT_SCHEDULE_LEAD_MS + 5_000);
   });
 
+  // 情绪评估要跟这一轮一起上云（worker 跑完随最后一条推送把结果送回来）。它里头有
+  // 用户副 API 的 apiKey，落点必须是加密的 taskPayload —— 掉进外壳明文或 statePayload
+  // 都等于把凭据摊在网络上。
+  it('情绪评估配置进的是加密的任务信封，明文外壳里一个字节都没有', async () => {
+    stubFirePackDeps();
+    const calls = mockInstantChatFetch(202, { status: 'accepted', uuid: 'uuid-1' });
+    const emotionEval = {
+      prompt: '你是一个角色情绪分析系统。__EMOTION_EVAL_SYSTEM_PROMPT__\n__EMOTION_EVAL_HISTORY__',
+      api: { baseUrl: 'https://eval.example.com/v1', apiKey: 'sk-secondary-KEYLEAK', model: 'eval-mini' },
+    };
+    await ActiveMsgClient.sendInstantChat({
+      char: CHAR, chatMessages: [{ role: 'user', content: '在吗' }], api: API,
+      userProfile: USER, groups: [], realtimeConfig: {} as any,
+      emotionEval,
+    });
+
+    const rawBody = String(calls[0].init.body);
+    const body = JSON.parse(rawBody);
+    const task = JSON.parse(body.taskPayload.encryptedData);
+    expect(task.metadata.amsgEmotionEval).toEqual(emotionEval);
+    // 外壳（除去两个信封本身）不许出现副 API 的 key
+    const shell = { ...body, statePayload: undefined, taskPayload: undefined };
+    expect(JSON.stringify(shell)).not.toContain('sk-secondary-KEYLEAK');
+    // 云端状态那份也不该有：它跟任务信封是两码事，评估配置只跟着这一轮的任务走
+    expect(body.statePayload.encryptedData).not.toContain('sk-secondary-KEYLEAK');
+  });
+
+  it('没配情绪评估就不带这个键（不是塞个空对象上去）', async () => {
+    const { task } = await postOnce([{ role: 'user', content: '在吗' }]);
+    expect(task.metadata.amsgEmotionEval).toBeUndefined();
+  });
+
   it('凭据带的是调用方给的那份（本地生成会用的同一份）', async () => {
     const { task } = await postOnce([{ role: 'user', content: '在吗' }]);
     expect(task.apiUrl).toBe('https://api.example.com/v1/chat/completions');

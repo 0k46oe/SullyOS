@@ -8375,6 +8375,82 @@ function buildScheduledPush(message, build, extraMeta, bannerBody) {
   };
 }
 
+// worker/amsg/src/emotionEval.ts
+var SYSTEM_SLOT = "__EMOTION_EVAL_SYSTEM_PROMPT__";
+var HISTORY_SLOT = "__EMOTION_EVAL_HISTORY__";
+var EMOTION_EVAL_TIMEOUT_MS = 12e4;
+var amsgEmotionUpdateKey = (clientTaskId) => `emotion_update:${clientTaskId}`;
+var isUsableEvalSpec = (spec) => {
+  const s = spec;
+  return !!s && typeof s.prompt === "string" && !!s.prompt && !!s.api && typeof s.api.baseUrl === "string" && !!s.api.baseUrl && typeof s.api.model === "string" && !!s.api.model;
+};
+var stripEmotionEvalSpec = (metadata) => {
+  const { amsgEmotionEval: _secret, ...rest } = metadata ?? {};
+  return rest;
+};
+var readEmotionEvalSpec = (metadata) => {
+  const spec = metadata?.amsgEmotionEval;
+  return isUsableEvalSpec(spec) ? spec : null;
+};
+var flattenContent = (content) => {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map((part) => part?.type === "text" ? part.text || "" : part?.type === "image_url" ? "[\u56FE\u7247]" : "").filter(Boolean).join(" ");
+  }
+  return "";
+};
+var restoreEvalPrompt = (template, chatMessages, charName) => {
+  const messages = Array.isArray(chatMessages) ? chatMessages : [];
+  let systemPromptText = "";
+  let conversation = messages;
+  if (messages.length > 0 && messages[0]?.role === "system") {
+    systemPromptText = flattenContent(messages[0].content);
+    conversation = messages.slice(1);
+  }
+  const recentLines = conversation.map((m) => {
+    const role = m.role === "user" ? "\u7528\u6237" : m.role === "assistant" ? charName : "\u7CFB\u7EDF";
+    return `[${role}]: ${flattenContent(m.content)}`;
+  }).join("\n");
+  return String(template).replace(SYSTEM_SLOT, () => systemPromptText).replace(HISTORY_SLOT, () => recentLines);
+};
+var runAmsgEmotionEval = async (spec, chatMessages, charName, timeoutMs = EMOTION_EVAL_TIMEOUT_MS) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const baseUrl = String(spec.api.baseUrl).replace(/\/+$/, "");
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${spec.api.apiKey || "sk-none"}`
+      },
+      body: JSON.stringify({
+        model: spec.api.model,
+        messages: [{ role: "user", content: restoreEvalPrompt(spec.prompt, chatMessages, charName) }],
+        temperature: 0.85,
+        // 显式给足输出额度：部分中转不传 max_tokens 时默认很小，评估输出很长，
+        // 会被截成半截 JSON（与 instant push worker 同一个数）。
+        max_tokens: 8e3,
+        stream: false
+      }),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      console.warn("[amsg:emotion] \u526F API \u62D2\u4E86\u8FD9\u6B21\u8BC4\u4F30\uFF08\u4E3B\u56DE\u590D\u4E0D\u53D7\u5F71\u54CD\uFF09", res.status);
+      return null;
+    }
+    const data = await res.json();
+    const message = data?.choices?.[0]?.message;
+    const raw = flattenContent(message?.content) || (typeof message?.reasoning_content === "string" ? message.reasoning_content : "");
+    return raw.trim() ? raw : null;
+  } catch (error) {
+    console.warn("[amsg:emotion] \u8BC4\u4F30\u5931\u8D25\uFF08\u4E3B\u56DE\u590D\u4E0D\u53D7\u5F71\u54CD\uFF09", error);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 // worker/amsg/src/instantChat.ts
 var INSTANT_SCHEDULE_LEAD_MS = 15e3;
 var INSTANT_TICK_FALLBACK_WAIT_MS = INSTANT_SCHEDULE_LEAD_MS + 1e3;
@@ -8384,13 +8460,12 @@ var INSTANT_TICK_CRON = "instant-chat";
 var AMSG_INSTANT_CHAT_FLAG = "amsgInstantChat";
 var isInstantChatTask = (metadata) => !!metadata && metadata[AMSG_INSTANT_CHAT_FLAG] === true;
 var buildInstantTimelyBlock = (args) => {
-  const clockHint = buildUserClockHint(args.nowMs, args.tz, { tzId: args.userTzId }, args.targetName);
-  const head = [
+  const head = args.timeAwarenessEnabled ? [
     "\u3010\u6B64\u523B\u7684\u7CFB\u7EDF\u4FE1\u606F\xB7\u4EC5\u4F60\u53EF\u89C1\u3011",
     `\u73B0\u5728\u662F ${formatFireTimeFull(args.nowMs, args.tz)}\u3002`,
     // buildUserClockHint 自带前导换行，没时差时返回空串。
-    clockHint
-  ].join("\n");
+    buildUserClockHint(args.nowMs, args.tz, { tzId: args.userTzId }, args.targetName)
+  ].join("\n") : "\u3010\u6B64\u523B\u7684\u7CFB\u7EDF\u4FE1\u606F\xB7\u4EC5\u4F60\u53EF\u89C1\u3011";
   return [head, ...args.blocks.filter((block) => block.trim())].join("\n");
 };
 var NOTIFICATION_WHEN_HIDDEN = "when-hidden";
@@ -8768,25 +8843,41 @@ var fireStateError = (reason, detail) => {
   console.error("[amsg:fire-state-missing]", { reason, ...detail });
   return new Error(`AMSG2_FIRE_STATE_MISSING: ${reason}`);
 };
+var pushFits = (payload) => measurePushPayload(JSON.stringify(payload), { reserveEnvelope: true }).withinLimit;
 var offloadOversizedPush = async (payload, writeState, charId, clientTaskId) => {
-  if (measurePushPayload(JSON.stringify(payload), { reserveEnvelope: true }).withinLimit) {
-    return payload;
-  }
+  if (pushFits(payload)) return payload;
   const meta = payload.metadata ?? {};
-  if (!meta.xhsSession) return payload;
+  const emotionUpdate = typeof meta.amsgEmotionUpdate === "string" ? meta.amsgEmotionUpdate : "";
+  if (!emotionUpdate && !meta.xhsSession) return payload;
   if (typeof writeState !== "function") {
     throw new Error("AMSG2_WRITE_STATE_UNSUPPORTED: push \u8D85\u9650\u9700\u8981\u65C1\u8DEF\u5B58\u50A8\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u9875\u91CD\u65B0\u7C98\u8D34\u90E8\u7F72 worker");
   }
+  let current = payload;
+  if (emotionUpdate) {
+    const key2 = amsgEmotionUpdateKey(clientTaskId);
+    await writeState(amsgStateNamespace(charId), [{ key: key2, value: emotionUpdate }]);
+    const { amsgEmotionUpdate: _moved, ...restMeta2 } = meta;
+    current = { ...current, metadata: { ...restMeta2, amsgEmotionRef: key2 } };
+    console.log("[amsg:emotion] \u8BC4\u4F30\u7ED3\u679C\u65C1\u8DEF\u5B58\u50A8", {
+      key: key2,
+      charId,
+      beforeBytes: measurePushPayload(JSON.stringify(payload)).bytes,
+      afterBytes: measurePushPayload(JSON.stringify(current)).bytes
+    });
+    if (pushFits(current)) return current;
+  }
+  const currentMeta = current.metadata ?? {};
+  if (!currentMeta.xhsSession) return current;
   const key = amsgXhsSessionKey(clientTaskId);
   await writeState(amsgStateNamespace(charId), [
-    { key, value: JSON.stringify(meta.xhsSession) }
+    { key, value: JSON.stringify(currentMeta.xhsSession) }
   ]);
-  const { xhsSession: _offloaded, ...restMeta } = meta;
-  const slimmed = { ...payload, metadata: { ...restMeta, xhsSessionRef: key } };
+  const { xhsSession: _offloaded, ...restMeta } = currentMeta;
+  const slimmed = { ...current, metadata: { ...restMeta, xhsSessionRef: key } };
   console.log("[amsg:agentic] XHS \u4F1A\u8BDD\u6570\u636E\u65C1\u8DEF\u5B58\u50A8", {
     key,
     charId,
-    beforeBytes: measurePushPayload(JSON.stringify(payload)).bytes,
+    beforeBytes: measurePushPayload(JSON.stringify(current)).bytes,
     afterBytes: measurePushPayload(JSON.stringify(slimmed)).bytes
   });
   return slimmed;
@@ -9076,7 +9167,7 @@ var amsgHooks = {
     const tz = { tzId: pack.tzId };
     const clientTaskId = typeof taskMeta.amsgClientTaskId === "string" ? taskMeta.amsgClientTaskId : "";
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
-    ctx.scratch.fire = {
+    const stash = {
       session: createFireSessionState(),
       toolCtx,
       proxyWorkerUrl,
@@ -9103,8 +9194,11 @@ var amsgHooks = {
       sceneSong: resolveFireSceneSong(pack.scene, ctx.now.getTime(), tz),
       instant,
       // 顺手读进来：发完要在它上面追加写回，这里不读的话 onLLMOutput 得为它单独查一次库。
-      chatOutbox: instant ? parseChatOutbox(charRows.find((r) => r.key === AMSG_CHAT_OUTBOX_KEY)?.value) : null
+      chatOutbox: instant ? parseChatOutbox(charRows.find((r) => r.key === AMSG_CHAT_OUTBOX_KEY)?.value) : null,
+      // 下面即时对话那一支起跑（要等请求消息拼完才知道给评估喂什么）。
+      emotionEvalPromise: null
     };
+    ctx.scratch.fire = stash;
     const taskListBlock = buildFireTaskListBlock(livePendingTasks, {
       nowMs: ctx.now.getTime(),
       tzId: pack.tzId,
@@ -9130,26 +9224,36 @@ var amsgHooks = {
       ...fireTools.length ? { tools: fireTools } : {}
     };
     if (instant) {
+      const instantMessages = [
+        // content 原样透传，一个字都不动：带图片的消息本地就是结构化分段
+        // （`[{type:'text'},{type:'image_url'}]`），上游把这个数组整个丢进
+        // /chat/completions 的请求体（amsg-shared 的 buildLlmRequestBody 只做
+        // `messages: llmMessages`，不看 content 的类型）。这里但凡 String() 一下，
+        // 模型收到的就是「[object Object]」而不是那张图。
+        // 每条重新包一层对象只是不把 pack 上那份交出去，content 仍是同一个引用。
+        ...pack.chat.messages.map((m) => ({ role: m.role, content: m.content })),
+        {
+          role: "system",
+          content: buildInstantTimelyBlock({
+            nowMs: ctx.now.getTime(),
+            tz,
+            userTzId: pack.userTzId,
+            targetName: pack.targetName,
+            timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
+            blocks: [realtimeWorldBlock, renderSelfLogBlock(selfLog, tz), taskListBlock, mcpBlock, scheduleBlock]
+          })
+        }
+      ];
+      const evalSpec = readEmotionEvalSpec(taskMeta);
+      if (evalSpec) {
+        stash.emotionEvalPromise = runAmsgEmotionEval(
+          evalSpec,
+          instantMessages,
+          toolPack.charName || ctx.task.contactName || "\u89D2\u8272"
+        );
+      }
       return {
-        messages: [
-          // content 原样透传，一个字都不动：带图片的消息本地就是结构化分段
-          // （`[{type:'text'},{type:'image_url'}]`），上游把这个数组整个丢进
-          // /chat/completions 的请求体（amsg-shared 的 buildLlmRequestBody 只做
-          // `messages: llmMessages`，不看 content 的类型）。这里但凡 String() 一下，
-          // 模型收到的就是「[object Object]」而不是那张图。
-          // 每条重新包一层对象只是不把 pack 上那份交出去，content 仍是同一个引用。
-          ...pack.chat.messages.map((m) => ({ role: m.role, content: m.content })),
-          {
-            role: "system",
-            content: buildInstantTimelyBlock({
-              nowMs: ctx.now.getTime(),
-              tz,
-              userTzId: pack.userTzId,
-              targetName: pack.targetName,
-              blocks: [realtimeWorldBlock, renderSelfLogBlock(selfLog, tz), taskListBlock, mcpBlock, scheduleBlock]
-            })
-          }
-        ],
+        messages: instantMessages,
         ...common,
         // 用户正盯着「正在输入…」等回复，给足时间把工具循环跑完，别让他重发一遍。
         totalTimeoutMs: INSTANT_TOTAL_TIMEOUT_MS
@@ -9207,7 +9311,9 @@ var amsgHooks = {
         avatarUrl: ctx.avatarUrl ?? null,
         taskId,
         messageType,
-        metadata: ctx.metadata,
+        // 摘掉评估配置再交出去：它里头是用户副 API 的 apiKey，而 metadata 会被整个
+        // 摊进每条 push 的 payload（见 agentic 的 buildScheduledPush）。见 stripEmotionEvalSpec。
+        metadata: stripEmotionEvalSpec(ctx.metadata),
         occurrenceMs: stash.occurrenceMs,
         // round 1 XHS 工具抓到的笔记 / xsecToken 快照：finish 时按 directive 引用
         // 挑选后随最后一条 push 带回客户端（客户端离线跑不了 round 1，缺这份
@@ -9251,6 +9357,18 @@ var amsgHooks = {
         (p) => typeof p.message === "string" ? p.message : ""
       );
       let payloads = attachScheduledTasks(decision.pushPayloads, stash.scheduledTasks);
+      if (stash.instant && stash.emotionEvalPromise && payloads.length > 0) {
+        const evalText = await stash.emotionEvalPromise;
+        const lastIdx = payloads.length - 1;
+        payloads = payloads.map((payload, i) => i === lastIdx ? {
+          ...payload,
+          metadata: {
+            ...payload.metadata ?? {},
+            amsgEmotionDone: true,
+            ...evalText ? { amsgEmotionUpdate: evalText } : {}
+          }
+        } : payload);
+      }
       if (stash.clientTaskId && stash.charId) {
         const budgeted = [];
         for (const payload of payloads) {

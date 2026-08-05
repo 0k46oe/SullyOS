@@ -111,6 +111,12 @@ import {
   type FireSessionState,
 } from './agentic';
 import {
+  amsgEmotionUpdateKey,
+  readEmotionEvalSpec,
+  runAmsgEmotionEval,
+  stripEmotionEvalSpec,
+} from './emotionEval';
+import {
   buildInstantTimelyBlock,
   finalizeInstantPush,
   handleInstantChat,
@@ -301,6 +307,13 @@ interface FireStash {
    * 不是即时对话时一直是 null——那条路的产物有任务列表可查，不需要兜底。
    */
   chatOutbox: AmsgChatOutbox | null;
+  /**
+   * 这一轮的情绪评估（副 API）。onBeforeFire 起跑、onLLMOutput 收尾时 await，
+   * 结果挂上最后一条 push。没配评估 / 不是即时对话时是 null。
+   *
+   * 存 promise 而不是结果：评估和主生成是并行跑的，等到收尾时多半早就跑完了。
+   */
+  emotionEvalPromise: Promise<string | null> | null;
 }
 
 const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash | undefined =>
@@ -374,14 +387,22 @@ const fireStateError = (reason: string, detail: Record<string, unknown>): Error 
 // 也发不出去，整条消息丢掉，而且每次重试都卡在同一处。余量由库导出
 // （PUSH_ENVELOPE_RESERVED_BYTES），跟着它自己补的字段走，不用这边手猜。
 
+/** 这一份 payload 现在装得下吗（按库补完信封字段之后的尺寸算）。 */
+const pushFits = (payload: Record<string, unknown>): boolean =>
+  measurePushPayload(JSON.stringify(payload), { reserveEnvelope: true }).withinLimit;
+
 /**
- * 一条 push 装不下时，把 XHS 会话数据旁路存进 client_state，payload 里只留引用键。
+ * 一条 push 装不下时，把大块附加数据旁路存进 client_state，payload 里只留引用键。
  *
  * Web Push 的 payload 上限是 4096 字节密文（明文 3993，见 measurePushPayload），
  * 一张笔记连标题带摘要就六七百字节。过去的做法是硬砍到 4 张，于是角色说「分享了 6 张」
  * 而只出来 4 张卡——话和内容对不上，一眼假。现在改成按真实字节算：装得下就照装
  * （日常 1-3 张走的就是这条，行为不变），装不下才把整份挪到 client_state，
- * 客户端上线后按 `metadata.xhsSessionRef` 取回，一张不少。
+ * 客户端上线后按引用键取回，一张不少。
+ *
+ * 挪的顺序是「情绪评估结果 → XHS 会话数据」：评估结果是一整段模型输出（几百到几千字），
+ * 超限时多半是它撑爆的，而且客户端拿它只是落 buff，晚一步取回来不影响这条消息本身；
+ * 挪完还是装不下才动 XHS 那份。
  *
  * 存不进去时**抛错**而不是砍内容：抛错走投递失败重试，砍内容则是当场穿帮且无从察觉。
  */
@@ -391,12 +412,12 @@ export const offloadOversizedPush = async (
   charId: string,
   clientTaskId: string,
 ): Promise<Record<string, unknown>> => {
-  if (measurePushPayload(JSON.stringify(payload), { reserveEnvelope: true }).withinLimit) {
-    return payload;
-  }
+  if (pushFits(payload)) return payload;
 
   const meta = (payload.metadata ?? {}) as Record<string, unknown>;
-  if (!meta.xhsSession) return payload;   // 没有可旁路的东西，交给库抛 PUSH_PAYLOAD_TOO_LARGE
+  const emotionUpdate = typeof meta.amsgEmotionUpdate === 'string' ? meta.amsgEmotionUpdate : '';
+  // 没有可旁路的东西，交给库抛 PUSH_PAYLOAD_TOO_LARGE
+  if (!emotionUpdate && !meta.xhsSession) return payload;
 
   if (typeof writeState !== 'function') {
     // 老部署（amsg-server < 2.6.0-next.7）没有写入口。不静默砍卡片——抛错让这次投递
@@ -404,16 +425,34 @@ export const offloadOversizedPush = async (
     throw new Error('AMSG2_WRITE_STATE_UNSUPPORTED: push 超限需要旁路存储，请在设置页重新粘贴部署 worker');
   }
 
+  let current = payload;
+  if (emotionUpdate) {
+    const key = amsgEmotionUpdateKey(clientTaskId);
+    await writeState(amsgStateNamespace(charId), [{ key, value: emotionUpdate }]);
+    const { amsgEmotionUpdate: _moved, ...restMeta } = meta;
+    current = { ...current, metadata: { ...restMeta, amsgEmotionRef: key } };
+    console.log('[amsg:emotion] 评估结果旁路存储', {
+      key,
+      charId,
+      beforeBytes: measurePushPayload(JSON.stringify(payload)).bytes,
+      afterBytes: measurePushPayload(JSON.stringify(current)).bytes,
+    });
+    if (pushFits(current)) return current;
+  }
+
+  const currentMeta = (current.metadata ?? {}) as Record<string, unknown>;
+  if (!currentMeta.xhsSession) return current;
+
   const key = amsgXhsSessionKey(clientTaskId);
   await writeState(amsgStateNamespace(charId), [
-    { key, value: JSON.stringify(meta.xhsSession) },
+    { key, value: JSON.stringify(currentMeta.xhsSession) },
   ]);
-  const { xhsSession: _offloaded, ...restMeta } = meta;
-  const slimmed = { ...payload, metadata: { ...restMeta, xhsSessionRef: key } };
+  const { xhsSession: _offloaded, ...restMeta } = currentMeta;
+  const slimmed = { ...current, metadata: { ...restMeta, xhsSessionRef: key } };
   console.log('[amsg:agentic] XHS 会话数据旁路存储', {
     key,
     charId,
-    beforeBytes: measurePushPayload(JSON.stringify(payload)).bytes,
+    beforeBytes: measurePushPayload(JSON.stringify(current)).bytes,
     afterBytes: measurePushPayload(JSON.stringify(slimmed)).bytes,
   });
   return slimmed;
@@ -894,14 +933,15 @@ export const amsgHooks = {
 
     // 防穿帮闸·worker 主判定：一次性任务创建后对话已前进 / 循环任务到点时用户
     // 正在热聊 → { skip: true } 跳过本次 fire（amsg-server skip 出口，任务照常
-    // 推进/删除），一个生成 token 都不花。fire_pack.lastUserMessageAt 随
-    // amsgStateSync 去抖同步、最多滞后十几秒；剩余竞态由客户端送达兜底闸兜住
-    // （activeMsgRuntime 的 runtime-expire-swallow）。缺策略字段的任务不拦。
+    // 推进/删除），一个生成 token 都不花。fire_pack.lastUserMessageAt 随 amsgStateSync
+    // 在微任务里冲刷，滞后的只有一次上传往返（慢网下也是几秒量级）；这点残余竞态由客户端
+    // 送达兜底闸兜住（activeMsgRuntime 的 runtime-expire-swallow）。缺策略字段的任务不拦。
     //
     // 「用户最后一次开口」取 fire_pack 和 presence 两份里较新的：presence 行是每轮聊天
-    // 一开场就写的小值，fire_pack 要等去抖 10s + 整包上传才落地，慢得多。presence 过期
-    // （TTL 45s，上面那道门用的就是它）只说明用户此刻不在等回复，不影响「他最后一次开口
-    // 是几点」这个事实，所以这里不看新鲜度，只保留 charId 校验——别拿别的角色的对话当锚点。
+    // 一开场就写的小值，几十字节就发完了；fire_pack 是整包几十 KB，同样是打脏即发，
+    // 但传完总要慢一截。presence 过期（TTL 45s，上面那道门用的就是它）只说明用户此刻不在
+    // 等回复，不影响「他最后一次开口是几点」这个事实，所以这里不看新鲜度，只保留 charId
+    // 校验——别拿别的角色的对话当锚点。
     const presenceLastUserMessageAt = presence?.charId === charId ? presence.lastUserMessageAt : null;
     const expireInput = {
       policy,
@@ -974,7 +1014,9 @@ export const amsgHooks = {
     const clientTaskId = typeof taskMeta.amsgClientTaskId === 'string' ? taskMeta.amsgClientTaskId : '';
 
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
-    ctx.scratch.fire = {
+    // 显式标注而不是 satisfies：下面即时对话那一支要往 emotionEvalPromise 上写 promise，
+    // 用 satisfies 的话这个字段会被推成字面量 null 类型，写不进去。
+    const stash: FireStash = {
       session: createFireSessionState(),
       toolCtx,
       proxyWorkerUrl,
@@ -1004,7 +1046,10 @@ export const amsgHooks = {
       chatOutbox: instant
         ? parseChatOutbox(charRows.find((r) => r.key === AMSG_CHAT_OUTBOX_KEY)?.value)
         : null,
-    } satisfies FireStash;
+      // 下面即时对话那一支起跑（要等请求消息拼完才知道给评估喂什么）。
+      emotionEvalPromise: null,
+    };
+    ctx.scratch.fire = stash;
 
     // 「你还挂着这些排程」：客户端记录的（打包那一刻的快照）+ 角色自己在之前几次 fire 里
     // 排下、客户端还没认领的那些。后者不补上的话，角色排完一条、下次到点又看不见它，
@@ -1056,26 +1101,41 @@ export const amsgHooks = {
     // 即时对话：请求消息就是客户端本地生成会发出去的那一串，末尾追加一块时效信息。
     // 不走模板渲染——那是「到点主动找人说话」的提示词，拿它答用户刚说的话必然跑偏。
     if (instant) {
+      const instantMessages = [
+        // content 原样透传，一个字都不动：带图片的消息本地就是结构化分段
+        // （`[{type:'text'},{type:'image_url'}]`），上游把这个数组整个丢进
+        // /chat/completions 的请求体（amsg-shared 的 buildLlmRequestBody 只做
+        // `messages: llmMessages`，不看 content 的类型）。这里但凡 String() 一下，
+        // 模型收到的就是「[object Object]」而不是那张图。
+        // 每条重新包一层对象只是不把 pack 上那份交出去，content 仍是同一个引用。
+        ...pack.chat!.messages.map((m) => ({ role: m.role, content: m.content })),
+        {
+          role: 'system' as const,
+          content: buildInstantTimelyBlock({
+            nowMs: ctx.now.getTime(),
+            tz,
+            userTzId: pack.userTzId,
+            targetName: pack.targetName,
+            timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
+            blocks: [realtimeWorldBlock, renderSelfLogBlock(selfLog, tz), taskListBlock, mcpBlock, scheduleBlock],
+          }),
+        },
+      ];
+
+      // 情绪评估（副 API）：跟主生成**并行**跑，等 onLLMOutput 收尾时 await——那时
+      // 多半早就跑完了，等于零额外延迟。挂了返回 null，主回复照发。
+      //
+      // 喂给它的是主生成看到的同一串消息（含末尾那块时效信息）：客户端打包的 chat 段
+      // 里已经没有「现在几点」了（那部分留给到点现填），只喂原串的话评估模型连时间都
+      // 不知道，判出来的情绪跟角色刚说的话对不上。
+      const evalSpec = readEmotionEvalSpec(taskMeta);
+      if (evalSpec) {
+        stash.emotionEvalPromise = runAmsgEmotionEval(
+          evalSpec, instantMessages, toolPack.charName || ctx.task.contactName || '角色');
+      }
+
       return {
-        messages: [
-          // content 原样透传，一个字都不动：带图片的消息本地就是结构化分段
-          // （`[{type:'text'},{type:'image_url'}]`），上游把这个数组整个丢进
-          // /chat/completions 的请求体（amsg-shared 的 buildLlmRequestBody 只做
-          // `messages: llmMessages`，不看 content 的类型）。这里但凡 String() 一下，
-          // 模型收到的就是「[object Object]」而不是那张图。
-          // 每条重新包一层对象只是不把 pack 上那份交出去，content 仍是同一个引用。
-          ...pack.chat!.messages.map((m) => ({ role: m.role, content: m.content })),
-          {
-            role: 'system' as const,
-            content: buildInstantTimelyBlock({
-              nowMs: ctx.now.getTime(),
-              tz,
-              userTzId: pack.userTzId,
-              targetName: pack.targetName,
-              blocks: [realtimeWorldBlock, renderSelfLogBlock(selfLog, tz), taskListBlock, mcpBlock, scheduleBlock],
-            }),
-          },
-        ],
+        messages: instantMessages,
         ...common,
         // 用户正盯着「正在输入…」等回复，给足时间把工具循环跑完，别让他重发一遍。
         totalTimeoutMs: INSTANT_TOTAL_TIMEOUT_MS,
@@ -1153,7 +1213,9 @@ export const amsgHooks = {
       avatarUrl: ctx.avatarUrl ?? null,
       taskId,
       messageType,
-      metadata: ctx.metadata,
+      // 摘掉评估配置再交出去：它里头是用户副 API 的 apiKey，而 metadata 会被整个
+      // 摊进每条 push 的 payload（见 agentic 的 buildScheduledPush）。见 stripEmotionEvalSpec。
+      metadata: stripEmotionEvalSpec(ctx.metadata),
       occurrenceMs: stash.occurrenceMs,
       // round 1 XHS 工具抓到的笔记 / xsecToken 快照：finish 时按 directive 引用
       // 挑选后随最后一条 push 带回客户端（客户端离线跑不了 round 1，缺这份
@@ -1209,6 +1271,27 @@ export const amsgHooks = {
       // 角色这次给自己排的任务，随最后一条 push 带回客户端认领——不然它们只活在 D1 里，
       // 面板看不到、用户也没法取消。任务本身照常触发，客户端上线补进清单即可。
       let payloads = attachScheduledTasks(decision.pushPayloads, stash.scheduledTasks);
+
+      // 情绪评估的结果随最后一条 push 回客户端（客户端拿 applyEmotionEvalRaw 落 buff，
+      // 与本地路径共用同一套解析）。评估是 onBeforeFire 就起跑的，这里多半已经跑完；
+      // 排在旁路存储之前，装不下时才能连它一起挪走。
+      //
+      // 评估挂了也要挂一个 amsgEmotionDone：客户端从用户按下发送那一刻就点着「情绪更新中」，
+      // 只在有结果时才带信号的话，评估一失败那盏灯就得亮到十几分钟后由 TTL 兜底才灭。
+      if (stash.instant && stash.emotionEvalPromise && payloads.length > 0) {
+        const evalText = await stash.emotionEvalPromise;
+        const lastIdx = payloads.length - 1;
+        payloads = payloads.map((payload, i) => (i === lastIdx
+          ? {
+              ...payload,
+              metadata: {
+                ...(payload.metadata as Record<string, unknown> ?? {}),
+                amsgEmotionDone: true,
+                ...(evalText ? { amsgEmotionUpdate: evalText } : {}),
+              },
+            }
+          : payload));
+      }
 
       // 发之前按真实字节预算过一遍：装不下的 XHS 会话数据旁路存起来，push 只留引用键。
       // clientTaskId 当存储键（每任务一份、下次触发覆盖），缺了就没法旁路——那时超限会

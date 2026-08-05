@@ -23,6 +23,7 @@ import { ActiveMsgStore } from './activeMsgStore';
 import { AMSG_CHAT_OUTBOX_KEY, amsgStateNamespace, parseChatOutbox } from './amsgFirePack';
 import { trackEvent } from './analytics';
 import { DB } from './db';
+import type { AmsgEmotionEvalSpec } from '../worker/amsg/src/emotionEval';
 
 const HEADER = '[AmsgInstantChat]';
 
@@ -143,6 +144,11 @@ export const sendInstantChatTurn = async (params: {
   userProfile: UserProfile;
   groups: GroupProfile[];
   realtimeConfig: RealtimeConfig;
+  /**
+   * 这一轮的情绪评估，一起交给云端跑（提示词模板 + 副 API 凭据）。
+   * 不传就是这一轮不评估（角色没开情绪评估 / 本轮跳过）。
+   */
+  emotionEval?: AmsgEmotionEvalSpec;
 }): Promise<InstantChatSendResult> => {
   const supersedes = getInstantChatPending(params.char.id);
   try {
@@ -154,6 +160,7 @@ export const sendInstantChatTurn = async (params: {
       userProfile: params.userProfile,
       groups: params.groups,
       realtimeConfig: params.realtimeConfig,
+      ...(params.emotionEval ? { emotionEval: params.emotionEval } : {}),
       ...(supersedes ? { supersedesUuid: supersedes.uuid } : {}),
     });
     setInstantChatPending(params.char.id, uuid);

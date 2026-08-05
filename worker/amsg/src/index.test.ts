@@ -13,6 +13,7 @@ import worker, {
 } from './index';
 import { MAX_TOOL_ITERATIONS } from './agentic';
 import { MAX_PUSH_PAYLOAD_BYTES } from '@rei-standard/amsg-server/cloudflare';
+import { amsgEmotionUpdateKey } from './emotionEval';
 import { INSTANT_CLAIM_LEASE_MS, INSTANT_TOTAL_TIMEOUT_MS } from './instantChat';
 import {
   AMSG_CHAT_OUTBOX_KEY,
@@ -223,8 +224,9 @@ describe('onBeforeFire 四道门', () => {
     await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
   });
 
-  // presence 行是每轮聊天一开场就写的小值，fire_pack 要等去抖 10s + 整包上传才落地。
-  // 只看 fire_pack 的话，用户刚说完话、包还没传上来的那十几秒里任务照发，正撞在对话上。
+  // presence 行是每轮聊天一开场就写的小值，几十字节就发完了；fire_pack 是整包几十 KB，
+  // 同样是打脏即发，但传完总要慢一截。只看 fire_pack 的话，用户刚说完话、包还在路上的
+  // 那几秒里任务照发，正撞在对话上。
   it('防穿帮闸：presence 记的用户开口时刻比 fire_pack 新 → 用新的那份判，作废', async () => {
     const anchor = NOW.getTime() - 3600_000;
     const { ctx } = makeCtx({
@@ -659,6 +661,45 @@ describe('offloadOversizedPush — push 装不下时旁路存储', () => {
     expect((out.metadata as any).xhsSessionRef).toBe(amsgXhsSessionKey(CLIENT_TASK_ID));
     // 挪走之后要给库补字段留出足够空间。
     expect(MAX_PUSH_PAYLOAD_BYTES - utf8Bytes(out)).toBeGreaterThanOrEqual(256);
+  });
+
+  // 云端情绪评估的结果是一整段模型输出，撑爆一条 push 很正常。它得跟 XHS 那份一样能
+  // 旁路走，而且**排在前面**：客户端拿它只是落 buff，晚一步取回来不影响这条消息本身，
+  // 而 XHS 数据关系到这条消息里的卡片能不能出来。
+  it('情绪评估结果撑爆一条 push → 先挪它，push 换成 amsgEmotionRef', async () => {
+    const writeState = vi.fn().mockResolvedValue({ upserted: 1, skipped: 0, deleted: 0 });
+    const evalRaw = `{"changed":true,"innerState":"${'想'.repeat(1500)}"}`;
+    const payload = {
+      messageKind: 'content',
+      message: '在的。',
+      metadata: { charId: CHAR_ID, amsgClientTaskId: CLIENT_TASK_ID, amsgEmotionUpdate: evalRaw },
+    };
+    const utf8Bytes = (v: unknown) => new TextEncoder().encode(JSON.stringify(v)).length;
+    expect(utf8Bytes(payload)).toBeGreaterThan(MAX_PUSH_PAYLOAD_BYTES);
+
+    const out = await offloadOversizedPush(payload as any, writeState, CHAR_ID, CLIENT_TASK_ID);
+
+    const key = amsgEmotionUpdateKey(CLIENT_TASK_ID);
+    // 存原文（不再包一层 JSON）：客户端取回来直接喂 applyEmotionEvalRaw
+    expect(writeState).toHaveBeenCalledWith(amsgStateNamespace(CHAR_ID), [{ key, value: evalRaw }]);
+    const meta = (out.metadata ?? {}) as Record<string, unknown>;
+    expect(meta.amsgEmotionRef).toBe(key);
+    expect(meta.amsgEmotionUpdate).toBeUndefined();
+    expect(utf8Bytes(out)).toBeLessThanOrEqual(MAX_PUSH_PAYLOAD_BYTES);
+  });
+
+  it('挪完评估还是装不下 → XHS 那份接着挪（两个引用键都留在 push 上）', async () => {
+    const writeState = vi.fn().mockResolvedValue({ upserted: 1, skipped: 0, deleted: 0 });
+    const payload = pushWith(8) as any;
+    payload.metadata.amsgEmotionUpdate = `{"changed":true,"innerState":"${'想'.repeat(300)}"}`;
+
+    const out = await offloadOversizedPush(payload, writeState, CHAR_ID, CLIENT_TASK_ID);
+
+    expect(writeState).toHaveBeenCalledTimes(2);
+    const meta = (out.metadata ?? {}) as Record<string, unknown>;
+    expect(meta.amsgEmotionRef).toBe(amsgEmotionUpdateKey(CLIENT_TASK_ID));
+    expect(meta.xhsSessionRef).toBe(amsgXhsSessionKey(CLIENT_TASK_ID));
+    expect(meta.directives).toHaveLength(8);
   });
 });
 
@@ -2153,6 +2194,168 @@ describe('即时对话的收件兜底 outbox', () => {
       } as any);
     }
     expect(store.outbox()!.entries).toHaveLength(CHAT_OUTBOX_MAX);
+  });
+});
+
+// 情绪评估从浏览器搬进 worker：用户发完就能关页面，情绪底色照样更新。
+//
+// 两条底线各占一条用例：
+//   ① 评估结果得随最后一条 push 回到客户端；而带着副 API apiKey 的那份**评估配置**
+//      一个字节都不许出现在任何一条 push 的 metadata 里（push 出了这台 worker 就是
+//      推送服务的事了，密钥跟着走等于把用户的副 API 送人）。
+//   ② 评估挂了不能连累主回复——用户等的是那句话，情绪只是附赠。
+describe('即时对话的云端情绪评估', () => {
+  const CLIENT_TASK_ID = 'client-instant-eval';
+  const CHAT_MESSAGES = [
+    { role: 'system', content: '你是 Nyah。' },
+    { role: 'user', content: '在吗' },
+  ];
+  const EVAL_PROMPT = [
+    '你是一个角色情绪分析系统。',
+    '__EMOTION_EVAL_SYSTEM_PROMPT__',
+    '__EMOTION_EVAL_HISTORY__',
+  ].join('\n');
+  const EVAL_SPEC = {
+    prompt: EVAL_PROMPT,
+    api: { baseUrl: 'https://eval.example.com/v1', apiKey: 'sk-secondary-KEYLEAK', model: 'eval-mini' },
+  };
+  /** 两段正文 → 两条 push，才能验「只挂最后一条」。 */
+  const TWO_SEGMENT_OUTPUT = '在的。\n怎么啦？';
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  const makeStore = () => {
+    const rows = new Map<string, string>([
+      [AMSG_FIRE_PACK_KEY, firePackValue(null, {
+        chat: { messages: CHAT_MESSAGES, builtAt: PACK_BUILT_AT },
+      })],
+      [AMSG_TOOL_PACK_KEY, toolPackValue],
+    ]);
+    const readState = vi.fn(async (namespace: string) => (
+      namespace.startsWith('amsg:char:')
+        ? [...rows].map(([key, value]) => ({ key, value }))
+        : [{ key: AMSG_TOOL_CONFIG_KEY, value: toolConfigValue }]
+    ));
+    const writeState = vi.fn(async (
+      _namespace: string,
+      entries: Array<{ key: string; value: string | null }>,
+    ) => {
+      for (const entry of entries) {
+        if (entry.value === null) rows.delete(entry.key);
+        else rows.set(entry.key, entry.value);
+      }
+      return { upserted: entries.length, skipped: 0, deleted: 0 };
+    });
+    return { rows, readState, writeState };
+  };
+
+  const runFire = async (
+    store: ReturnType<typeof makeStore>,
+    extraMeta: Record<string, unknown>,
+    llmOutput = TWO_SEGMENT_OUTPUT,
+  ) => {
+    const scratch: Record<string, unknown> = {};
+    const metadata = {
+      charId: CHAR_ID,
+      amsgClientTaskId: CLIENT_TASK_ID,
+      amsgMode: 'instant',
+      amsgInstantChat: true,
+      ...extraMeta,
+    };
+    await amsgHooks.onBeforeFire({
+      task: {
+        id: 42, uuid: TASK_UUID, contactName: 'Nyah', recurrenceType: 'none',
+        nextSendAt: '2026-07-25T12:00:00.000Z', metadata,
+      },
+      userId: 'u1',
+      readState: store.readState,
+      writeState: store.writeState,
+      now: NOW,
+      scratch,
+    } as any);
+    return await amsgHooks.onLLMOutput({
+      sessionId: 'sess_task_42@1', taskId: 42, taskUuid: TASK_UUID,
+      llmResponse: {}, llmOutputText: llmOutput, contactName: 'Nyah',
+      metadata, scratch, writeState: store.writeState,
+    } as any) as any;
+  };
+
+  it('评估结果随最后一条 push 回去，而副 API 凭据一条都不带出门', async () => {
+    const seen: Array<{ url: string; auth: string | null; body: any }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: any, init: any) => {
+      seen.push({
+        url: String(input),
+        auth: new Headers(init.headers).get('Authorization'),
+        body: JSON.parse(init.body),
+      });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: '{"changed":true,"buffs":[]} EVAL-RAW-MARKER' } }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }));
+
+    const store = makeStore();
+    const decision = await runFire(store, { amsgEmotionEval: EVAL_SPEC });
+    expect(decision.decision).toBe('finish');
+    const payloads = decision.pushPayloads as Array<Record<string, any>>;
+    expect(payloads.length).toBeGreaterThanOrEqual(2);
+
+    // 评估真的发出去了：打给副 API、带副 API 的 key、占位符已经被本次对话还原掉
+    expect(seen).toHaveLength(1);
+    expect(seen[0].url).toBe('https://eval.example.com/v1/chat/completions');
+    expect(seen[0].auth).toBe('Bearer sk-secondary-KEYLEAK');
+    const evalContent = String(seen[0].body.messages[0].content);
+    expect(evalContent).not.toContain('__EMOTION_EVAL_SYSTEM_PROMPT__');
+    expect(evalContent).not.toContain('__EMOTION_EVAL_HISTORY__');
+    expect(evalContent).toContain('你是 Nyah。');
+    expect(evalContent).toContain('[用户]: 在吗');
+    // 主生成看得到的时效块，评估也得看到（不然它连现在几点都不知道）
+    expect(evalContent).toContain('现在是');
+
+    // 结果只挂最后一条
+    const last = payloads[payloads.length - 1];
+    expect(last.metadata.amsgEmotionUpdate).toContain('EVAL-RAW-MARKER');
+    expect(last.metadata.amsgEmotionDone).toBe(true);
+    for (const payload of payloads.slice(0, -1)) {
+      expect(payload.metadata.amsgEmotionUpdate).toBeUndefined();
+      expect(payload.metadata.amsgEmotionDone).toBeUndefined();
+    }
+
+    // 红线：任何一条 push 的 metadata 都不许带评估配置（里头是副 API 的 apiKey）
+    for (const payload of payloads) {
+      expect(payload.metadata).not.toHaveProperty('amsgEmotionEval');
+    }
+    expect(JSON.stringify(payloads)).not.toContain('sk-secondary-KEYLEAK');
+  });
+
+  it('评估挂了照发主回复（一条 amsgEmotionUpdate 都不挂）', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('boom', { status: 500 })));
+
+    const store = makeStore();
+    const decision = await runFire(store, { amsgEmotionEval: EVAL_SPEC });
+    expect(decision.decision).toBe('finish');
+    const payloads = decision.pushPayloads as Array<Record<string, any>>;
+    expect(payloads.length).toBeGreaterThanOrEqual(2);
+    expect(payloads.map((p) => p.message)).toEqual(['在的。', '怎么啦？']);
+    for (const payload of payloads) {
+      expect(payload.metadata.amsgEmotionUpdate).toBeUndefined();
+      expect(payload.metadata).not.toHaveProperty('amsgEmotionEval');
+    }
+    // 但「这一轮的评估有结论了」照样要带回去 —— 否则客户端那盏「情绪更新中」
+    // 要一直亮到十几分钟后由 TTL 兜底才灭，用户只看到情绪永远不更新。
+    expect(payloads[payloads.length - 1].metadata.amsgEmotionDone).toBe(true);
+  });
+
+  it('没配评估就一个请求都不发（老配置 / 没开情绪评估的角色）', async () => {
+    const fetchSpy = vi.fn(async () => new Response('never', { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const store = makeStore();
+    const decision = await runFire(store, {});
+    expect(decision.decision).toBe('finish');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    for (const payload of decision.pushPayloads as Array<Record<string, any>>) {
+      expect(payload.metadata.amsgEmotionUpdate).toBeUndefined();
+    }
   });
 });
 

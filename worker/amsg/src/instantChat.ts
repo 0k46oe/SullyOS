@@ -99,16 +99,23 @@ export const buildInstantTimelyBlock = (args: {
   tz: AmsgTzRef;
   userTzId: string;
   targetName: string;
+  /**
+   * 角色的「时间感知」开关（tool_pack.timeAwarenessEnabled）。关掉的角色在前台连今天
+   * 几号都读不到，云端这条路也一个钟都不给——两条路是同一个开关，不能各行其是。
+   * 主动消息那条路的做法一样（打包时时间行整段不进模板，见 activeMsgClient 的 timeAware）。
+   */
+  timeAwarenessEnabled: boolean;
   /** 其余按顺序拼上去的块：实时世界、自述日志、排程清单、MCP、给自己排下一条。 */
   blocks: string[];
 }): string => {
-  const clockHint = buildUserClockHint(args.nowMs, args.tz, { tzId: args.userTzId }, args.targetName);
-  const head = [
-    '【此刻的系统信息·仅你可见】',
-    `现在是 ${formatFireTimeFull(args.nowMs, args.tz)}。`,
-    // buildUserClockHint 自带前导换行，没时差时返回空串。
-    clockHint,
-  ].join('\n');
+  const head = args.timeAwarenessEnabled
+    ? [
+        '【此刻的系统信息·仅你可见】',
+        `现在是 ${formatFireTimeFull(args.nowMs, args.tz)}。`,
+        // buildUserClockHint 自带前导换行，没时差时返回空串。
+        buildUserClockHint(args.nowMs, args.tz, { tzId: args.userTzId }, args.targetName),
+      ].join('\n')
+    : '【此刻的系统信息·仅你可见】';
   return [head, ...args.blocks.filter((block) => block.trim())].join('\n');
 };
 
