@@ -23,6 +23,8 @@ const { reiClient } = vi.hoisted(() => ({
     putPushSubscription: vi.fn(),
     getPushSubscription: vi.fn(),
     deletePushSubscription: vi.fn(),
+    // 加密响应的解包（库的私有方法，客户端通过桥接类型调）。
+    _decrypt: vi.fn(),
   },
 }));
 vi.mock('@rei-standard/amsg-client', () => ({ ReiClient: vi.fn(() => reiClient) }));
@@ -170,6 +172,76 @@ describe('ActiveMsgClient.cancelTask', () => {
       error: { code: 'INVALID_CLIENT_TOKEN', message: '客户端令牌无效' },
     });
     await expect(ActiveMsgClient.cancelTask('task-1')).rejects.toThrow(/客户端令牌无效/);
+  });
+});
+
+// 回归守卫：即时对话「一直等」靠这个判定器决定要不要停下来。三种结论各有各的后果，
+// 而「问不到」必须抛错 —— 静悄悄当成 gone 的话，云端还在生成的一轮就被判成没了。
+describe('ActiveMsgClient.getRemoteTaskStatus', () => {
+  const respondWith = (status: number, body: unknown) => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status,
+      text: async () => JSON.stringify(body),
+      headers: new Headers({ 'content-type': 'application/json' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  };
+
+  beforeEach(() => {
+    reiClient.init.mockReset().mockResolvedValue(undefined);
+    reiClient._decrypt.mockReset();
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('行还在 → pending，带上远端的重试计数与下次触发时刻', async () => {
+    const fetchMock = respondWith(200, {
+      success: true,
+      encrypted: true,
+      version: 1,
+      data: { iv: 'iv', authTag: 'tag', encryptedData: 'blob' },
+    });
+    reiClient._decrypt.mockResolvedValue({
+      task: { uuid: 'task-1', status: 'pending', retryCount: 2, nextSendAt: '2026-08-05T10:00:00.000Z' },
+    });
+
+    await expect(ActiveMsgClient.getRemoteTaskStatus('task-1')).resolves.toEqual({
+      state: 'pending',
+      retryCount: 2,
+      nextSendAt: '2026-08-05T10:00:00.000Z',
+    });
+    expect(fetchMock.mock.calls[0][0]).toContain('/message?id=task-1');
+  });
+
+  it('行没了（发完被删 / 被取消）→ gone', async () => {
+    respondWith(404, {
+      success: false,
+      error: { code: 'TASK_NOT_FOUND', message: '指定的任务不存在或已被删除' },
+    });
+    await expect(ActiveMsgClient.getRemoteTaskStatus('task-gone')).resolves.toEqual({ state: 'gone' });
+  });
+
+  it('行还在但已出清 → completed', async () => {
+    respondWith(409, {
+      success: false,
+      error: { code: 'TASK_ALREADY_COMPLETED', message: '任务已完成或已失败，无法更新' },
+    });
+    await expect(ActiveMsgClient.getRemoteTaskStatus('task-done')).resolves.toEqual({ state: 'completed' });
+  });
+
+  it('网络故障要抛，不能悄悄当成 gone', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
+    await expect(ActiveMsgClient.getRemoteTaskStatus('task-1')).rejects.toThrow(/Failed to fetch/);
+  });
+
+  // 地址填错时 worker 对未知路由也回 404，只是错误码不同。照 HTTP 状态判就会把
+  // 「压根没问到这台 worker」当成「任务没了」，等着的那一轮就此被判死。
+  it('未知路由的 404 要抛，不能当成任务没了', async () => {
+    respondWith(404, {
+      success: false,
+      error: { code: 'NOT_FOUND', message: 'Unknown route' },
+    });
+    await expect(ActiveMsgClient.getRemoteTaskStatus('task-1')).rejects.toThrow(/Unknown route/);
   });
 });
 

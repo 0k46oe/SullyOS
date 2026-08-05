@@ -335,6 +335,8 @@ export interface RemoteTaskProjection {
   messageType?: string;
   recurrenceType?: string;
   nextSendAt?: string;
+  /** 远端行上的重试计数（旧 worker 不投影这字段 → undefined）。 */
+  retryCount?: number;
 }
 
 /**

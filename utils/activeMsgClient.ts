@@ -140,6 +140,8 @@ const ACTIVE_MSG_RUNTIME_HEADER = '[ActiveMsg2]';
 
 /** amsg-server 的 DELETE /cancel-message 找不到目标行时回的错误码（HTTP 404）。 */
 const REMOTE_TASK_NOT_FOUND_CODE = 'TASK_NOT_FOUND';
+/** 行还在、但已经跑完出清（sent / failed）时回的错误码（HTTP 409）。 */
+const REMOTE_TASK_ALREADY_COMPLETED_CODE = 'TASK_ALREADY_COMPLETED';
 
 // 单用户模式：所有请求打到用户自部署的 Cloudflare Worker（config.workerUrl）。
 // 配了 serverToken 就每次带 X-Client-Token；worker 端配了就强制校验，缺/错回 401。
@@ -1371,6 +1373,8 @@ export const ActiveMsgClient = {
         // 远端算出来的下一次触发时刻。循环任务按角色时区的墙钟推进，本地拿固定周期
         // 自己乘出来的那个跨夏令时会偏一小时——显示以远端为准，跟真正会响的时刻一致。
         nextSendAt: typeof t?.nextSendAt === 'string' ? t.nextSendAt : undefined,
+        // 已经重试过几次（远端行上的计数）。旧 worker 不投影这字段 → undefined。
+        retryCount: typeof t?.retryCount === 'number' ? t.retryCount : undefined,
       }));
   },
 
@@ -1400,6 +1404,50 @@ export const ActiveMsgClient = {
     }
 
     return { uuid: taskUuid, alreadyGone: false };
+  },
+
+  /**
+   * 查一条任务此刻的状态（即时对话「一直等」的判定器）。
+   * 比 listAllTasks（全表分页 + 逐行解密）便宜得多，适合回前台时点名查一条。
+   *   pending   —— 行在且还会跑（可能正在重试等待里，retryCount>0）
+   *   completed —— 行在但已经出清（对一次性任务就等于失败：发成功的行会被删掉）
+   *   gone      —— 行没了（发成功后被删 / 被取消 / 被顶替）
+   *
+   * 只认远端明说的这两个错误码来下结论，不看 HTTP 状态：worker 地址填错时未知路由
+   * 同样回 404（错误码是 NOT_FOUND），照状态判就会把「压根没问到」当成「任务没了」。
+   * 网络故障、鉴权失败照常抛——调用方据此什么都不结论，继续等。
+   */
+  async getRemoteTaskStatus(taskUuid: string): Promise<
+    | { state: 'pending'; retryCount?: number; nextSendAt?: string }
+    | { state: 'completed' }
+    | { state: 'gone' }
+  > {
+    const config = await ensureWorkerReady();
+    const response = await fetchWithAuth(`message?id=${encodeURIComponent(taskUuid)}`, config, {
+      method: 'GET',
+      headers: {
+        'X-Response-Encrypted': 'true',
+        'X-Encryption-Version': '1',
+      },
+    }, '查询任务状态');
+
+    if (!response?.success) {
+      const code = response?.error?.code;
+      if (code === REMOTE_TASK_NOT_FOUND_CODE) return { state: 'gone' };
+      if (code === REMOTE_TASK_ALREADY_COMPLETED_CODE) return { state: 'completed' };
+      throw new Error(response?.error?.message || '查询任务状态失败。');
+    }
+
+    // 能回 200 的行必然是 pending（上游那条 SQL 写死了 status='pending'）。
+    // 响应整体加密，解出来是 { task }，字段在里头。解密要用户密钥，所以拖到这一步
+    // 才建客户端——判定成 gone / completed 的那两条路省掉一次 get-user-key 往返。
+    const client = await initializeClient(config);
+    const task = (await decryptPayload(client, response.data))?.task ?? {};
+    return {
+      state: 'pending',
+      ...(typeof task.retryCount === 'number' ? { retryCount: task.retryCount } : {}),
+      ...(typeof task.nextSendAt === 'string' ? { nextSendAt: task.nextSendAt } : {}),
+    };
   },
 
   /**
@@ -1708,7 +1756,7 @@ export const ActiveMsgClient = {
   },
 
   // 满血同步：把一批角色的最新 fire_pack 合成一次 putClientState 上传（amsgStateSync
-  // 去抖后调用；iOS 切后台只有几秒存活窗口，多角色也必须一次请求写完）。
+  // 打脏后在微任务里合批调用；iOS 切后台只有几秒存活窗口，多角色也必须一次请求写完）。
   // 这里只是拿最新聊天状态去刷新云端那份，失败由调用方 warn（沿用上一份，上下文旧一点）。
   async syncCharFirePacks(items: Array<{
     char: CharacterProfile;
