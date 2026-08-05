@@ -94,6 +94,19 @@
   - `pack.chat` 缺失而 metadata 标了 instant → 按失败处理（防止拿主动消息模板
     错答聊天）。
 
+## push metadata 扩展字段
+
+即时对话往返用到的 metadata 键，一并记在这（发侧走加密信封，回程随 push 明文 metadata）：
+
+- 发侧（任务 metadata，走加密信封）：`amsgEmotionEval`（评估模板 + 副 API 凭据；worker
+  在 `onBeforeFire` 捕获后就地删除，喂给 push 构建前再剥一层——凭据绝不进任何 push/outbox）。
+- 回程（push metadata）：`amsgEmotionUpdate` / `amsgEmotionDone` / `amsgEmotionError`
+  （评估结果 / 熄灯信号 / 脱敏后的失败原因）、`amsgReasoning`（思考链，只挂第一条 push、
+  只在即时对话轮）、`amsgToolTrace`（`[{name,count}]`，只数真跑过的调用、只挂末条 push、
+  只在即时对话轮）。
+- 超限旁路：`amsgEmotionRef` / `amsgReasoningRef`（值挪进 client_state，键
+  `emotion_update:<clientTaskId>` / `reasoning:<clientTaskId>`）。
+
 ## outbox（push 丢失的拉取兜底）
 
 - 服务端没有收件箱表，也不新增表（D1 schema 漂移坑）。用 char namespace 的
@@ -124,8 +137,9 @@
 - push 成功后、行删除前 isolate 死掉 → cron 重跑 → 重复回复。窗口极小，
   与现有定时任务同类，接受。
 - 群聊不动（收件箱按 charId 路由，群聊没有 charId）。
-- presence / dirty-sync 机制**保留不退役**（开关关闭的用户仍走本地路径需要它们）；
-  instant 分支天然绕开：不起 presence 心跳，POST 即上传所以不 markDirty。
+- presence / dirty-sync 机制**保留不退役**（开关关闭的用户仍走本地路径需要它们，
+  打脏后微任务内立即上传，同一轮的连环打脏合并成一次）；instant 分支天然绕开：
+  不起 presence 心跳，POST 即上传所以不 markDirty。
 
 ## 分工与边界
 

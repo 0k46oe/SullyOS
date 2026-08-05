@@ -391,8 +391,8 @@ const GroupChat: React.FC = () => {
 
     // 群里的动静会进每个成员私聊 prompt 的【群聊背景】块，话题盒成盒时还直接往成员私聊
     // 历史里写卡片 —— 两者都是主动消息 2.0 云端快照（fire_pack）的素材。群里有事就给成员
-    // 逐个打脏，不然角色到点还活在上一次私聊那会儿的群里。去抖会把一轮里的多次调用合并成
-    // 一次上传，没开主动消息的成员被 markAmsgStateDirty 内部的门筛掉。
+    // 逐个打脏，不然角色到点还活在上一次私聊那会儿的群里。同一轮里的多次调用会在微任务内
+    // 合并成一次上传，没开主动消息的成员被 markAmsgStateDirty 内部的门筛掉。
     const markGroupMembersDirty = useCallback((memberIds: string[]) => {
         for (const memberId of memberIds) {
             const member = charactersRef.current.find(c => c.id === memberId);

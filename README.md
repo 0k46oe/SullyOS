@@ -243,6 +243,8 @@ VITE_HIDE_BUILD_BADGE=1 npm run build
 
 ### Instant Push 走独立 Worker
 
+聊天上云的主力是主动消息 2.0 的即时对话；Instant Push 为独立可选部署（与即时对话在设置页互斥）。
+
 Instant Push 是基于 `@rei-standard/amsg-instant 0.8` 的 LLM-driven Web Push 通道
 （跟上面 sfworker 里的 push 加速器是两套独立链路）。每个 fork 用户自己部署一个
 Cloudflare Worker，跟仓库作者的 sully-n / 备份 Worker 完全无关。零数据库、零 cron、
