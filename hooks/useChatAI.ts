@@ -45,7 +45,6 @@ import { getLastRealUserMessageAt } from '../utils/amsg2ExpireGuard';
 import { getPendingTasks, hasActiveAiTask, isAmsg2EnabledForChar } from '../utils/amsg2Tasks';
 import { buildAmsg2TaskContextText, collectAmsg2TaskContext } from '../utils/amsg2TaskContext';
 import { resolveCharTimeZone } from '../utils/timezone';
-import { AMSG2_SUPPRESSED_TRACE } from '../utils/amsg2InstantConflict';
 import { isInstantChatReady, sendInstantChatTurn } from '../utils/amsgInstantChat';
 import { appendInstantTraceEntry } from '../utils/instantTraceLog';
 import { AMSG2_TOOLS, AMSG2_TOOL_NAMES, createAmsg2ToolSession, executeAmsg2Tool, isAmsg2GlobalReady } from '../utils/amsg2ToolBridge';
@@ -1079,6 +1078,8 @@ export const useChatAI = ({
             // 瑞幸聊天点单 / 麦当劳 / 瑞幸小程序 这些"客户端工具循环"模式必须走本地 fetch:
             // instant push 会把请求交给 worker 并在这里提前 return, 工具循环(callLuckinTool 等)根本跑不到,
             // 表现就是"选了城市也没用 / 角色不下单"。这些模式下跳过 instant push, 用本地 fetch 跑工具循环。
+            // 双向互斥后理论上到不了：走到这条 trace 说明两边开关同时亮着（脏配置），当断言告警看。
+            const AMSG2_SUPPRESSED_TRACE = 'amsg2-suppressed-by-instant';
             if (isInstantConfigReady() && !payload.flags.luckinChatActive && !payload.flags.mcdActive && !payload.flags.luckinActive && !payload.flags.mcpChatActive) {
                 // 走这条路 = 上面那段 amsg2 的工具、排程现状块都白拼了（instant 发的是原始
                 // fullMessages、请求体不带 tools），下面的活跃会话租约也不会开。三样都是静默

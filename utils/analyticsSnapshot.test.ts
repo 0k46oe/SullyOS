@@ -276,24 +276,6 @@ describe('当前功能启用 · 开关值的判定', () => {
         expect(flags['开了2.0的角色数']).toBe('1');
     });
 
-    it('真在用 2.0 的人同时开着 Instant Push → 记一笔（那三样静默失效）', () => {
-        localStorage.setItem('instant_push_config_v1', JSON.stringify({
-            enabled: true, workerUrl: 'https://my-worker.invalid',
-        }));
-        // isPushVapidReady 只看公钥长度（>60），内容无所谓
-        localStorage.setItem('push_vapid_v1', JSON.stringify({
-            vapidPublicKey: 'B'.repeat(87), vapidPrivateKey: 'k'.repeat(43),
-        }));
-        expect(collectFeatureFlags(poisonedSources({
-            characters: [amsg2Char('a', 1)],
-        }))['2.0与InstantPush同开']).toBe('是');
-
-        // 没人真在用 2.0 的话，光开着 instant 不算踩坑
-        expect(collectFeatureFlags(poisonedSources({
-            characters: [untouchedChar('a')],
-        }))['2.0与InstantPush同开']).toBe('否');
-    });
-
     it('不上报已经全局下线的主动消息 Push 加速', () => {
         // 那一层 FORCE_DISABLED 恒为关，报出来会被误读成「没人用」。
         localStorage.setItem('proactive_push_enabled_v1', 'true');

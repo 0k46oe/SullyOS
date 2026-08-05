@@ -19,6 +19,7 @@ const read = (relative: string) =>
 const chatAiSrc = read('../hooks/useChatAI.ts');
 const chatSrc = read('../apps/Chat.tsx');
 const settingsSrc = read('../components/settings/ActiveMsgGlobalSettingsModal.tsx');
+const instantPushSettingsSrc = read('../components/settings/InstantPushSettingsModal.tsx');
 
 /** 即时对话分支那一段源码（从判定行到它自己的 return）。 */
 const instantChatBranch = (() => {
@@ -50,10 +51,13 @@ describe('useChatAI 的分流接缝', () => {
     expect(sendAt).toBeGreaterThan(vetoAt);
   });
 
-  it('排在 Instant Push 分支后面（两个都开时 Instant Push 先走）', () => {
+  it('两个分支都还在，且 Instant Push 排在即时对话前面（历史配置的兜底顺序不变）', () => {
+    // 双向互斥后两边理论上不会同时亮着；这条钉的是万一出现脏配置（两个开关都读到
+    // true）时谁先接手，顺序变了就是另一种未定义行为。
     const instantPushAt = chatAiSrc.indexOf('if (isInstantConfigReady() && !payload.flags.luckinChatActive');
     const instantChatAt = chatAiSrc.indexOf('if (await isInstantChatReady()');
     expect(instantPushAt).toBeGreaterThan(-1);
+    expect(instantChatAt).toBeGreaterThan(-1);
     expect(instantChatAt).toBeGreaterThan(instantPushAt);
   });
 
@@ -126,5 +130,22 @@ describe('设置页那一道门', () => {
     for (const save of saves) {
       expect(save).toContain('instantChatEnabled');
     }
+  });
+});
+
+describe('设置页双向互斥门', () => {
+  // 互斥是两个文件各持一半的跨文件约定：amsg2 面板挡「IP 开着时开即时对话」，
+  // Instant Push 面板挡反过来那半。哪边被重构丢了，另一边都感觉不到——两个开关
+  // 会一起亮着，聊天悄悄只走其中一条，用户完全看不出来。这里两条都要钉住。
+  it('正向门：amsg2 面板读 isInstantConfigReady 判断 IP 是否开着', () => {
+    expect(settingsSrc).toContain('isInstantConfigReady');
+  });
+
+  it('反向门：Instant Push 面板读 isInstantChatReady，且 handleSave 里有存档兜底', () => {
+    expect(instantPushSettingsSrc).toContain('isInstantChatReady');
+    // raceBlocked：存档前用最新读回的即时对话状态再夹一次 enabled，堵掉「modal 刚打开、
+    // isInstantChatReady() 还没读回来」那一小段时间窗口里手快把 IP 勾上就保存的抢跑。
+    const handleSave = instantPushSettingsSrc.slice(instantPushSettingsSrc.indexOf('const handleSave'));
+    expect(handleSave).toContain('raceBlocked');
   });
 });
