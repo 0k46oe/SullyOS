@@ -108,8 +108,8 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   const [generatedServerToken, setGeneratedServerToken] = useState('');
 
   const [workerOutdated, setWorkerOutdated] = useState(false);
-  // Instant Push 也开着：聊天会走它，2.0 挂在本地那条路上的几样东西全静默失效（见
-  // amsg2InstantConflict）。开面板时读一次，用户在这里关掉 instant 后立刻更新。
+  // Instant Push 也开着：聊天会走它，2.0 挂在本地那条路上的几样东西全静默失效——设置页
+  // 两道双向门通常已经拦住这种组合，这里读一次是给漏网脏配置兜底，关掉后立刻更新。
   const [instantOn, setInstantOn] = useState(false);
   // 这台 worker 认不认 /instant-chat。即时对话的**唯一**版本门槛就在这儿，
   // 别处不做逐调用预检——每发一条消息多探一次网络，探失败还分不清是旧版还是网抖。
