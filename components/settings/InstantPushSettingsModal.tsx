@@ -15,6 +15,7 @@ import {
   normalizeWorkerUrl,
 } from '../../utils/instantPushClient';
 import { isPushVapidReady } from '../../utils/pushVapid';
+import { isInstantChatReady } from '../../utils/amsgInstantChat';
 import {
   markWorkerBuildSeen,
 } from '../WorkerUpdateReminderEvent';
@@ -47,6 +48,10 @@ export const InstantPushSettingsModal: React.FC<InstantPushSettingsModalProps> =
   const [d1CheckedWorkerUrl, setD1CheckedWorkerUrl] = useState('');
 
   const [vapidReady, setVapidReady] = useState(false);
+  // 即时对话（主动消息 2.0）已取代 Instant Push，两条发送路互斥。对面（amsg2 面板）
+  // 有一道同款的门，这里是反方向那一半：少了它，用户可以先开即时对话、再回这里把
+  // IP 勾回来，聊天就会静默走 IP、即时对话开关亮着却不生效。
+  const [instantChatOn, setInstantChatOn] = useState(false);
 
   const [testStatus, setTestStatus] = useState('');
   const [testBusy, setTestBusy] = useState(false);
@@ -90,6 +95,7 @@ export const InstantPushSettingsModal: React.FC<InstantPushSettingsModalProps> =
     setDenoCopyStatus('');
     setVersionCheck('idle');
     setVersionCheckDetail('');
+    void isInstantChatReady().then(setInstantChatOn).catch(() => setInstantChatOn(false));
   }, [open]);
 
   const normalizedWorkerUrl = normalizeWorkerUrl(workerUrl);
@@ -431,15 +437,21 @@ export const InstantPushSettingsModal: React.FC<InstantPushSettingsModalProps> =
             </div>
           </div>
 
-          <label className="flex items-center gap-2 cursor-pointer">
+          <label className={`flex items-center gap-2 ${instantChatOn && !enabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>
             <input
               type="checkbox"
               checked={enabled}
+              disabled={instantChatOn && !enabled}
               onChange={(e) => setEnabled(e.target.checked)}
               className="accent-indigo-500"
             />
             <span className="text-[12px] text-slate-600 font-medium">启用 Instant Push</span>
           </label>
+          {instantChatOn && !enabled && (
+            <p className="text-[11px] text-amber-600 leading-relaxed">
+              主动消息 2.0 的「即时对话」已经接管了聊天上云，这里不用再开。想换回 Instant Push 的话，先去 2.0 设置里关掉即时对话。
+            </p>
+          )}
 
           <label className="flex items-start gap-2 cursor-pointer">
             <input
