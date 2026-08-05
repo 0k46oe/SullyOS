@@ -1820,7 +1820,7 @@ export const useChatAI = ({
             setDiaryStatus('');
             setXhsStatus('');
 
-            // 满血主动消息：一轮聊完把该角色标脏，去抖后 fire_pack 批量同步到 worker 的
+            // 满血主动消息：一轮聊完把该角色标脏，fire_pack 随即批量同步到 worker 的
             // client_state（未配 amsg2 任务的角色在 markDirty 内直接忽略，零成本）。
             // 本轮角色自己排过任务时 char 快照上的清单已经过期，得用工具会话里的最新那份
             // 打脏——否则本轮新建的首个任务过不了 markDirty 的 hasActiveAiTask 门，

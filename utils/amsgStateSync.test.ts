@@ -40,8 +40,12 @@ import { CHAT_PRESENCE_HEARTBEAT_MS } from './amsgChatPresence';
 import type { CharacterProfile } from '../types';
 
 const H = 3600_000;
-/** 「一个请求都不该发出」那类用例的观察窗：多等一会儿，冒出任何请求都算漏。 */
-const IDLE_WINDOW_MS = 11_000;
+/**
+ * 「一个请求都不该发出」那类用例的观察窗。
+ * 特意开到一级退避（30s）之外：不光要看当场没发，连「过一会儿才冒出来」的延迟请求
+ * 也一并算漏。假时钟推的，等多久都不花真时间。
+ */
+const IDLE_WINDOW_MS = 31_000;
 
 /** 带一个「待触发的 auto 任务」的角色 —— 过同步门的最小形态。 */
 const charWithAiTask = (id: string): CharacterProfile => ({
@@ -89,11 +93,13 @@ afterEach(async () => {
   // 待传队列和退避计数都是模块级的：失败用例会留下快照 + 一个重排 timer，
   // 不清干净会串进下一个用例的批次里（batch 长度、退避时长都会对不上）。
   // tool_config 的欠账同理，冲刷会顺手把它带走。
-  // 先 mockReset 再给默认实现：用例里排的 xxxOnce（尤其是那个手动 release 的挂起
-  // Promise）如果没被消费掉，会被下面这次收尾冲刷领走，然后一直挂着不返回。
+  // 先 mockReset 再给默认实现：用例里排的 xxxOnce 如果没被消费掉（比如那几个手动
+  // release 的挂起 Promise 碰上用例中途失败），会被下面这次收尾冲刷领走然后一直挂着。
+  // 现有用例都自己消费干净了，这行是给以后写的人留的保险。
   (ActiveMsgClient.syncCharFirePacks as any).mockReset();
   (ActiveMsgClient.syncCharFirePacks as any).mockResolvedValue(undefined);
   (ActiveMsgClient.syncToolConfig as any).mockResolvedValue(undefined);
+  // 跑两轮：第一轮冲刷可能触发补跑（flushing 期间又打脏那条路），第二轮把补跑落下的收干净。
   await flushAmsgState('cleanup');
   await vi.advanceTimersByTimeAsync(1);
   await flushAmsgState('cleanup');
@@ -280,10 +286,49 @@ describe('即时冲刷', () => {
     expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(2);
     expect((ActiveMsgClient.syncCharFirePacks as any).mock.calls[1][0]).toHaveLength(2);
   });
+
+  it('退避打光那次冲刷里打的脏，当场补跑并重开一轮退避', async () => {
+    const mock = ActiveMsgClient.syncCharFirePacks as any;
+    // 前三次直接失败，把 30 / 60 / 120 三级退避走完；第四次（额度已经用光那次）挂在
+    // 半空，好在它还在飞的时候打一次脏；第五次是补跑，也让它失败，用来验退避从头重开。
+    mock.mockRejectedValueOnce(new Error('offline'));
+    mock.mockRejectedValueOnce(new Error('offline'));
+    mock.mockRejectedValueOnce(new Error('offline'));
+    let failLast!: () => void;
+    mock.mockImplementationOnce(
+      () => new Promise<void>((_, reject) => { failLast = () => reject(new Error('offline')); }),
+    );
+    mock.mockRejectedValueOnce(new Error('offline'));
+
+    const doomed = charWithAiTask(nextCharId());
+    markAmsgStateDirty(snapshotOf(doomed));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(30_000 + 60_000 + 120_000 + 1_000);
+    expect(mock).toHaveBeenCalledTimes(4);           // 第四次挂在半空
+
+    const later = charWithAiTask(nextCharId());
+    markAmsgStateDirty(snapshotOf(later));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mock).toHaveBeenCalledTimes(4);           // 撞上 flushing，先记账
+
+    failLast();
+    await vi.advanceTimersByTimeAsync(0);
+    // 退避打光那条路不留 timer，没有别人会来接手 → 这次必须当场补跑，
+    // 并把欠着的两份（回队的旧账 + 刚打的新脏）一起带上。
+    expect(mock).toHaveBeenCalledTimes(5);
+    expect(mock.mock.calls[4][0].map((s: any) => s.char.id).sort())
+      .toEqual([doomed.id, later.id].sort());
+
+    // 补跑再失败的话退避从 30s 重新起步：既不是接着上一轮的 120s，也不是从此没人再试。
+    await vi.advanceTimersByTimeAsync(29_000);
+    expect(mock).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(mock).toHaveBeenCalledTimes(6);
+  });
 });
 
 // 脏标记轻量持久化：localStorage 只存 charId 底账（快照本体启动时从 DB 重建）。
-// 回归守卫：没有这层持久化时，「打脏 → 去抖窗口内杀进程」那份快照就永远丢了。
+// 回归守卫：没有这层持久化时，「打脏 → 请求还没落地就被杀进程」那份快照就永远丢了。
 describe('脏标记持久化与启动补传', () => {
   const readMarks = (): string[] =>
     JSON.parse(localStorage.getItem(AMSG2_PENDING_SYNC_LS_KEY) || '[]');
@@ -319,7 +364,7 @@ describe('脏标记持久化与启动补传', () => {
     localStorage.setItem(AMSG2_PENDING_SYNC_LS_KEY, JSON.stringify([char.id]));
 
     resumePendingAmsgStateSync({ characters: [char], userProfile: {} as any, groups: [] });
-    await vi.advanceTimersByTimeAsync(1); // 补传不等去抖，冲微任务即可
+    await vi.advanceTimersByTimeAsync(1); // 补传当场发，advance 只为让异步体落地
 
     expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
     const batch = (ActiveMsgClient.syncCharFirePacks as any).mock.calls[0][0];
