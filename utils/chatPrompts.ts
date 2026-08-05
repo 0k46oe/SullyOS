@@ -92,6 +92,15 @@ function summarizeGroupMsgContent(m: Message): string {
  */
 export interface PromptBuildOptions {
     forFirePack?: boolean;
+    /**
+     * `timelyByWorker` = 这份 prompt 会交给 amsg worker 在 fire 时刻补时效段
+     * （即时对话路径）。与 forFirePack 的区别：只裁「worker 那边有对应槽位」的
+     * 时效块——当前时间块、【真实世界感知系统】（节日/天气/热搜）；本地私有的
+     * 易变段（召回/buff/音乐/日程/群聊/彼方）照常保留，它们在发送时刻是新鲜的，
+     * 而 worker 拿不到。不裁的话，模型会在一份 prompt 里看到两个钟、两份互不
+     * 重叠的热搜（前端快照版 + worker 现拉版），且两段都自称「来自真实世界」。
+     */
+    timelyByWorker?: boolean;
 }
 
 export const ChatPrompts = {
@@ -232,6 +241,9 @@ export const ChatPrompts = {
         // 主动消息的模板是最后一次聊天时打好、到点才渲染的，凡是「打包这一刻」的状态
         // 到触发时都已经过期，一律不烤进模板。见 PromptBuildOptions 的清单。
         const forFirePack = promptOptions?.forFirePack === true;
+        // 即时对话：这一轮交给 worker 生成，时钟和真实世界块由它在 fire 时刻补。
+        // 本地私有的易变段照常烤进去（worker 拿不到，而这一刻它们是新鲜的）。
+        const timelyByWorker = promptOptions?.timelyByWorker === true;
         // ── 分段计时（定位瓶颈用）──
         const perfT0 = performance.now();
         const timings: Record<string, number> = {};
@@ -261,7 +273,7 @@ export const ChatPrompts = {
         let volatileState = `\n[System: 实时状态 (Live Context)]\n（以下是此刻的实时状态——当前时间、你正在做的事、你的情绪底色、周边动态。你的人设与聊天规则见最上方的系统设定，此处不再重复。）\n\n`;
         volatileState += ContextBuilder.buildVolatileCoreState(char, {
             includeDetailedMemories: true,
-            timeOptions: { skipTimeAwareness: forFirePack },
+            timeOptions: { skipTimeAwareness: forFirePack || timelyByWorker },
         });
 
         // ── 并发发起所有独立的异步取数（网络 + IndexedDB），下面按原顺序拼接 ──
@@ -282,8 +294,13 @@ export const ChatPrompts = {
         // 主动消息不是因此就没有这一段：模板里留着 AMSG_SLOT_REALTIME_WORLD，worker 到点
         // 自己去拉一次天气热搜、按角色时区判今天是不是节日，再填进去（见 worker/amsg 的
         // realtimeWorld）。两边的取数与措辞都来自 realtimeWorldCore，是同一份。
+        //
+        // 即时对话（timelyByWorker）同理：这一轮的回复也在 worker 上生成，它那边照样会
+        // 现拉一次天气热搜、按角色时区判节日。前端这份留着就是两份互不重叠的热搜、
+        // 两句自称「来自真实世界」——包括天气热搜关掉时那条「今日特殊」节日兜底，
+        // worker 的 realtimeWorld 里也有它（同样跟着角色的时间感知开关走）。
         const realtimePromise: Promise<string> = (async () => {
-            if (forFirePack) return '';
+            if (forFirePack || timelyByWorker) return '';
             try {
                 if (config.weatherEnabled || config.newsEnabled) {
                     // 时间行跟着角色的「时间感知」开关走：关掉的角色不该从天气块里读到

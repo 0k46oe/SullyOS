@@ -795,6 +795,18 @@ export const useChatAI = ({
             const luckinMiniSnap = luckinMiniAppRef?.current;
             const luckinMiniOpen = !!luckinMiniSnap?.open;
 
+            // ─── 即时对话的路由在构建 payload 之前就定下来 ───
+            // 走云端的那份 prompt 不烤前端时效段（时钟/节日/天气/热搜/MCP 说明由 worker
+            // fire 时独家供给），本地那份照旧全量。判定材料和下面的 payload.flags 同源：
+            // luckinChatActive / mcdActive / luckinActive 就是由这三个值算出来的。
+            // IP 还开着（脏配置）时让 IP 先走、按全量构建——别把剥过时效段的 prompt 交给 IP。
+            const luckinChatOn = !!luckinChatRef?.current?.active;
+            const instantChatVeto: string | null = luckinChatOn ? 'luckin-chat'
+                : mcdMiniOpen ? 'mcd'
+                    : luckinMiniOpen ? 'luckin' : null;
+            const instantChatOn = await isInstantChatReady();
+            const instantChatRoute = instantChatOn && !instantChatVeto && !isInstantConfigReady();
+
             const payload = await stageT('payload', buildChatRequestPayload({
                 char: charForGen, userProfile, groups, emojis, categories,
                 historyMsgs: contextMsgs,
@@ -835,7 +847,8 @@ export const useChatAI = ({
                 thinkingChain: { enabled: !!(char as any).showThinkingChain, customPrompt: (char as any).thinkingChainCustomPrompt },
                 mcdMiniSnap: mcdMiniOpen ? mcdMiniSnap : undefined,
                 luckinMiniSnap: luckinMiniOpen ? luckinMiniSnap : undefined,
-                luckinChat: luckinChatRef?.current?.active ? luckinChatRef.current : undefined,
+                luckinChat: luckinChatOn ? luckinChatRef?.current : undefined,
+                timelyByWorker: instantChatRoute,
             }));
             const systemPrompt = payload.systemPrompt;
             const cleanedApiMessages = payload.cleanedApiMessages;
@@ -1140,21 +1153,20 @@ export const useChatAI = ({
             // 和上面的 Instant Push 对称：这一轮的上下文 + 任务一个 POST 上云，云端跑完
             // 走推送回来（收件箱同一条管线入库），客户端发完那一刻就自由了。
             // 设置页那道门已经把两条路做成双向互斥，正常情况下不可能两个都开；
-            // 上面的 Instant Push 分支只为历史配置兜底保留，真走到会在那边先 return，
-            // 这里不用再重复判定。
+            // 上面的 Instant Push 分支只为历史配置兜底保留。这里跟着上面那段路由判定
+            // （instantChatOn / instantChatVeto，见 payload 构建之前）走，不重新算一遍——
+            // 判定要和「这份 prompt 剥没剥时效段」严丝合缝地对上。
             //
             // MCP 刻意不在排除名单里：worker fire 时自己解析 tool_config、自己跑后台
             // MCP（这次 POST 顺手把配置传上去了），云端答得了。排掉它的话，只要全局配着
             // 一台 enabled 的 MCP 服务器，即时对话就永远静默走回本地——设置页亮着
             // 「已开启」、界面毫无异样，正是 instant push 静默分流那个坑的复刻。
-            if (await isInstantChatReady()) {
+            if (instantChatOn && !isInstantConfigReady()) {
                 // 瑞幸/麦当劳点单是客户端交互式循环（选城市、确认单），云端接不了手，
-                // 这一轮只能留在本地跑（否决后不 return，落回下面的本地路径）。
+                // 这一轮只能留在本地跑（否决后不 return，落回下面的本地路径；这份 payload
+                // 也是按本地全量构建的，时效段一样不缺）。
                 // 但「开着即时对话却走了本地」不能无声无息：console + trace 双写，
                 // 调试面板能看到这一轮为什么没上云。
-                const instantChatVeto = payload.flags.luckinChatActive ? 'luckin-chat'
-                    : payload.flags.mcdActive ? 'mcd'
-                        : payload.flags.luckinActive ? 'luckin' : null;
                 if (instantChatVeto) {
                     console.warn(`[AmsgInstantChat] 这一轮没上云（${instantChatVeto} 点单流程需要客户端交互），本地生成`);
                     appendInstantTraceEntry({

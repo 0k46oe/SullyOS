@@ -65,6 +65,8 @@
   ```ts
   chat?: {
     // 本地生成会 POST 给 /chat/completions 的 fullMessages 原样。
+    // chat.messages 不含前端时效段（时钟/节日/天气/热搜/MCP 说明），这些由 worker
+    // 在 fire 时刻的时效块独家供给。
     // content 允许结构化片段数组（图片消息的 text + image_url），worker 只搬运不解释；
     // 超出 client_state 单条预算时从最旧的消息开始把 image_url 降回文字段，
     // 最新一条用户消息的图片永不降级，仍超预算则整轮明确报错。

@@ -8,7 +8,8 @@
 //   · 分流条件漏了工具循环的排除 → 瑞一杯/麦当劳选完城市没反应（请求交给 worker 了）；
 //   · 失败时悄悄回本地跑 → 用户以为云端在跑，其实每条都在本地生成，查无可查；
 //   · 收尾还打脏 → 同一份 fire_pack 再传一遍，白走一趟网络；
-//   · 「正在输入…」不看落盘记录 → 关一次页面灯就没了，用户以为消息丢了。
+//   · 「正在输入…」不看落盘记录 → 关一次页面灯就没了，用户以为消息丢了；
+//   · 路由不在构建 prompt 之前定下来 → 上云那份也烤前端时效段，一份 prompt 两个钟。
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -21,9 +22,21 @@ const chatSrc = read('../apps/Chat.tsx');
 const settingsSrc = read('../components/settings/ActiveMsgGlobalSettingsModal.tsx');
 const instantPushSettingsSrc = read('../components/settings/InstantPushSettingsModal.tsx');
 
+/** 即时对话分支的判定行（分支起点、也是排序基准）。 */
+const INSTANT_CHAT_BRANCH_HEAD = 'if (instantChatOn && !isInstantConfigReady())';
+
+/** 路由判定那一段源码（在 buildChatRequestPayload 之前算好，上云与否 + 要不要剥时效段）。 */
+const instantChatRouting = (() => {
+  const start = chatAiSrc.indexOf('const luckinChatOn =');
+  expect(start).toBeGreaterThan(-1);
+  const end = chatAiSrc.indexOf('const payload = await stageT(', start);
+  expect(end).toBeGreaterThan(start);
+  return chatAiSrc.slice(start, end);
+})();
+
 /** 即时对话分支那一段源码（从判定行到它自己的 return）。 */
 const instantChatBranch = (() => {
-  const start = chatAiSrc.indexOf('if (await isInstantChatReady()');
+  const start = chatAiSrc.indexOf(INSTANT_CHAT_BRANCH_HEAD);
   expect(start).toBeGreaterThan(-1);
   const end = chatAiSrc.indexOf('// 流式预览：', start);
   expect(end).toBeGreaterThan(start);
@@ -34,15 +47,33 @@ describe('useChatAI 的分流接缝', () => {
   it('MCP 不在排除名单里（worker 会跑后台 MCP；排掉它 = 配了 MCP 的人永远静默走本地）', () => {
     // e2e 实测踩过：只要全局有一台 enabled 的 MCP 服务器，mcpChatActive 对所有角色为真，
     // 排除它的话即时对话开关亮着却永远走本地生成，用户查无可查。
+    // 判定挪到构建 payload 之前之后，这条要连路由那一段一起看。
+    expect(instantChatRouting).not.toContain('mcpChatActive');
     expect(instantChatBranch).not.toContain('mcpChatActive');
+  });
+
+  it('上云的判定在构建 prompt 之前就定下来，并作为 timelyByWorker 交给 payload', () => {
+    // 这一条钉的是「一份 prompt 只剩一个钟」：走云端时前端不烤时钟/节日/天气/热搜/
+    // MCP 说明，那几段由 worker 在 fire 时刻独家补。判定要是又挪回分支里现算，
+    // payload 就只能按全量构建，模型会同时读到前端快照和 worker 现拉的两份。
+    expect(instantChatRouting).toContain('const instantChatRoute =');
+    expect(chatAiSrc).toMatch(/timelyByWorker:\s*instantChatRoute/);
+    const routeAt = chatAiSrc.indexOf('const instantChatRoute =');
+    const payloadAt = chatAiSrc.indexOf('const payload = await stageT(');
+    expect(routeAt).toBeGreaterThan(-1);
+    expect(payloadAt).toBeGreaterThan(routeAt);
+    // IP 还开着（脏配置）时那份 payload 必须是全量的——剥过时效段的 prompt 不能交给 IP。
+    expect(instantChatRouting).toContain('!isInstantConfigReady()');
   });
 
   it('点单流程否决时留 trace，不许无声走本地', () => {
     // 瑞幸/麦当劳是客户端交互式循环，这一轮留在本地是对的；但否决必须可观测——
     // 静默分流那种「三个点照亮、哪条路都看不出」的坑不能再来一遍。
-    for (const flag of ['luckinChatActive', 'mcdActive', 'luckinActive']) {
-      expect(instantChatBranch).toContain(`payload.flags.${flag}`);
+    // 否决现在和 payload.flags 同源、只是算得更早：三个来源就是那三个 flag 的原料。
+    for (const source of ['luckinChatRef?.current?.active', 'mcdMiniOpen', 'luckinMiniOpen']) {
+      expect(instantChatRouting).toContain(source);
     }
+    expect(instantChatRouting).toContain('const instantChatVeto');
     expect(instantChatBranch).toContain("event: 'instant-chat-veto'");
     // 否决走的是「不 return、落回本地路径」，不能把整个分支 return 掉。
     const vetoAt = instantChatBranch.indexOf("event: 'instant-chat-veto'");
@@ -55,7 +86,7 @@ describe('useChatAI 的分流接缝', () => {
     // 双向互斥后两边理论上不会同时亮着；这条钉的是万一出现脏配置（两个开关都读到
     // true）时谁先接手，顺序变了就是另一种未定义行为。
     const instantPushAt = chatAiSrc.indexOf('if (isInstantConfigReady() && !payload.flags.luckinChatActive');
-    const instantChatAt = chatAiSrc.indexOf('if (await isInstantChatReady()');
+    const instantChatAt = chatAiSrc.indexOf(INSTANT_CHAT_BRANCH_HEAD);
     expect(instantPushAt).toBeGreaterThan(-1);
     expect(instantChatAt).toBeGreaterThan(-1);
     expect(instantChatAt).toBeGreaterThan(instantPushAt);
@@ -90,7 +121,7 @@ describe('useChatAI 的分流接缝', () => {
   it('不在这条路上开活跃会话租约（生成不在本机跑，没人需要它举手）', () => {
     // 租约那句排在分支的 return 之后，走这条路根本到不了。
     const leaseAt = chatAiSrc.indexOf('startAmsgChatPresence(char.id');
-    expect(leaseAt).toBeGreaterThan(chatAiSrc.indexOf('if (await isInstantChatReady()'));
+    expect(leaseAt).toBeGreaterThan(chatAiSrc.indexOf(INSTANT_CHAT_BRANCH_HEAD));
     expect(instantChatBranch).not.toContain('startAmsgChatPresence');
   });
 });

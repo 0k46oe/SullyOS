@@ -89,6 +89,12 @@ export interface BuildChatPayloadInput {
      * 只是把上下文撑爆的噪声（与群聊注入"不要把媒体当文本塞"同一约定）。
      */
     stripImages?: boolean;
+    /**
+     * 这一轮交给 amsg worker 在 fire 时刻生成（即时对话）。时钟 / 真实世界块 /
+     * MCP 说明由 worker 那边独家供给，前端这份就不再烤进去，免得一份 prompt 里
+     * 出现两个钟、两份热搜、两套工具名。
+     */
+    timelyByWorker?: boolean;
 }
 
 export interface BuildChatPayloadResult {
@@ -253,6 +259,7 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
         !!isListeningTogether,
         musicCfg,
         recentTrackSwitch,
+        input.timelyByWorker ? { timelyByWorker: true } : undefined,
     );
     let systemPrompt = parts.stable;
     let volatileTail = parts.volatileState;
@@ -349,8 +356,12 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
 
     // ── 9d. 通用 MCP 工具模式 (用户自配的远程 MCP 服务器, 见 docs/mcp-client.md) ──
     // 工具清单来自持久化的发现结果，变化很慢 → 稳定段。
+    //
+    // 即时对话路径：MCP 说明由 worker 的 buildMcpFireBlock 独家供给（与凭据同源同拍），
+    // 前端这份不注入——两份工具说明两套工具名，模型会两种都写一遍。
+    // mcpChatActive 的取值不受影响：它还要告诉上层「这一轮算不算 MCP 模式」。
     const mcpChatActive = isMcpChatAvailable(char.id);
-    if (mcpChatActive) {
+    if (mcpChatActive && !input.timelyByWorker) {
         const block = buildMcpSystemBlock(userProfile?.name || '用户', char.id);
         if (block) {
             systemPrompt += block;
@@ -378,7 +389,7 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
             content: `[Reminder: 每句话必须用 <翻译><原文>...</原文><译文>...</译文></翻译> 标签包裹。一句一个标签。绝对不能省略。]`,
         });
     }
-    if (mcpChatActive) {
+    if (mcpChatActive && !input.timelyByWorker) {
         fullMessages.push({ role: 'system', content: MCP_TAIL_REMINDER });
     }
 
