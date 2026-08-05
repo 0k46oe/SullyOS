@@ -8884,59 +8884,62 @@ var extractInlineThink = (text) => {
 };
 var amsgReasoningKey = (clientTaskId) => `reasoning:${clientTaskId}`;
 var pushFits = (payload) => measurePushPayload(JSON.stringify(payload), { reserveEnvelope: true }).withinLimit;
+var OFFLOAD_BATONS = [
+  {
+    field: "amsgReasoning",
+    refField: "amsgReasoningRef",
+    key: amsgReasoningKey,
+    log: "[amsg:reasoning] \u601D\u8003\u94FE\u65C1\u8DEF\u5B58\u50A8"
+  },
+  {
+    field: "amsgEmotionUpdate",
+    refField: "amsgEmotionRef",
+    key: amsgEmotionUpdateKey,
+    log: "[amsg:emotion] \u8BC4\u4F30\u7ED3\u679C\u65C1\u8DEF\u5B58\u50A8"
+  },
+  {
+    field: "xhsSession",
+    refField: "xhsSessionRef",
+    key: amsgXhsSessionKey,
+    log: "[amsg:agentic] XHS \u4F1A\u8BDD\u6570\u636E\u65C1\u8DEF\u5B58\u50A8"
+  }
+];
 var offloadOversizedPush = async (payload, writeState, charId, clientTaskId) => {
   if (pushFits(payload)) return payload;
-  const meta = payload.metadata ?? {};
-  const reasoning = typeof meta.amsgReasoning === "string" ? meta.amsgReasoning : "";
-  const emotionUpdate = typeof meta.amsgEmotionUpdate === "string" ? meta.amsgEmotionUpdate : "";
-  if (!reasoning && !emotionUpdate && !meta.xhsSession) return payload;
+  if (!clientTaskId) {
+    console.warn("[amsg:offload] push \u8D85\u9650\u5374\u6CA1\u6709 clientTaskId\uFF0C\u65C1\u8DEF\u5B58\u50A8\u7528\u4E0D\u4E0A", {
+      charId,
+      bytes: measurePushPayload(JSON.stringify(payload)).bytes
+    });
+    return payload;
+  }
+  const hasOffloadable = (value) => typeof value === "string" ? !!value : value != null;
+  const readMeta = (p) => p.metadata ?? {};
+  if (!OFFLOAD_BATONS.some((baton) => hasOffloadable(readMeta(payload)[baton.field]))) return payload;
   if (typeof writeState !== "function") {
     throw new Error("AMSG2_WRITE_STATE_UNSUPPORTED: push \u8D85\u9650\u9700\u8981\u65C1\u8DEF\u5B58\u50A8\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u9875\u91CD\u65B0\u7C98\u8D34\u90E8\u7F72 worker");
   }
   let current = payload;
-  if (reasoning) {
-    const key2 = amsgReasoningKey(clientTaskId);
-    await writeState(amsgStateNamespace(charId), [{ key: key2, value: reasoning }]);
-    const { amsgReasoning: _movedReasoning, ...restMeta2 } = current.metadata ?? {};
-    const slimmed2 = { ...current, metadata: { ...restMeta2, amsgReasoningRef: key2 } };
-    console.log("[amsg:reasoning] \u601D\u8003\u94FE\u65C1\u8DEF\u5B58\u50A8", {
-      key: key2,
+  for (const baton of OFFLOAD_BATONS) {
+    const meta = readMeta(current);
+    const value = meta[baton.field];
+    if (!hasOffloadable(value)) continue;
+    const key = baton.key(clientTaskId);
+    await writeState(amsgStateNamespace(charId), [
+      { key, value: typeof value === "string" ? value : JSON.stringify(value) }
+    ]);
+    const { [baton.field]: _moved, ...restMeta } = meta;
+    const slimmed = { ...current, metadata: { ...restMeta, [baton.refField]: key } };
+    console.log(baton.log, {
+      key,
       charId,
       beforeBytes: measurePushPayload(JSON.stringify(current)).bytes,
-      afterBytes: measurePushPayload(JSON.stringify(slimmed2)).bytes
+      afterBytes: measurePushPayload(JSON.stringify(slimmed)).bytes
     });
-    current = slimmed2;
+    current = slimmed;
     if (pushFits(current)) return current;
   }
-  if (emotionUpdate) {
-    const key2 = amsgEmotionUpdateKey(clientTaskId);
-    await writeState(amsgStateNamespace(charId), [{ key: key2, value: emotionUpdate }]);
-    const { amsgEmotionUpdate: _moved, ...restMeta2 } = current.metadata ?? {};
-    const slimmed2 = { ...current, metadata: { ...restMeta2, amsgEmotionRef: key2 } };
-    console.log("[amsg:emotion] \u8BC4\u4F30\u7ED3\u679C\u65C1\u8DEF\u5B58\u50A8", {
-      key: key2,
-      charId,
-      beforeBytes: measurePushPayload(JSON.stringify(current)).bytes,
-      afterBytes: measurePushPayload(JSON.stringify(slimmed2)).bytes
-    });
-    current = slimmed2;
-    if (pushFits(current)) return current;
-  }
-  const currentMeta = current.metadata ?? {};
-  if (!currentMeta.xhsSession) return current;
-  const key = amsgXhsSessionKey(clientTaskId);
-  await writeState(amsgStateNamespace(charId), [
-    { key, value: JSON.stringify(currentMeta.xhsSession) }
-  ]);
-  const { xhsSession: _offloaded, ...restMeta } = currentMeta;
-  const slimmed = { ...current, metadata: { ...restMeta, xhsSessionRef: key } };
-  console.log("[amsg:agentic] XHS \u4F1A\u8BDD\u6570\u636E\u65C1\u8DEF\u5B58\u50A8", {
-    key,
-    charId,
-    beforeBytes: measurePushPayload(JSON.stringify(current)).bytes,
-    afterBytes: measurePushPayload(JSON.stringify(slimmed)).bytes
-  });
-  return slimmed;
+  return current;
 };
 var writeLastSkip = async (writeState, charId, skip) => {
   if (typeof writeState !== "function") return;
@@ -9335,9 +9338,10 @@ var amsgHooks = {
       throw new Error("AMSG2_FIRE_STASH_MISSING: onLLMOutput \u8BFB\u4E0D\u5230 ctx.scratch.fire\uFF0C\u68C0\u67E5 amsg-server \u662F\u5426\u4ECD\u5171\u4EAB scratch");
     }
     const session = stash.session;
-    const nativeReasoning = ctx.llmResponse?.choices?.[0]?.message?.reasoning_content;
+    const llmMessage = ctx.llmResponse?.choices?.[0]?.message;
+    const nativeReasoning = llmMessage?.reasoning_content ?? llmMessage?.reasoning ?? llmMessage?.thinking;
     const roundReasoning = [nativeReasoning, extractInlineThink(ctx.llmOutputText || "")].filter((s) => typeof s === "string" && !!s.trim()).map((s) => s.trim()).join("\n\n");
-    if (roundReasoning) session.finalReasoning = roundReasoning;
+    session.finalReasoning = roundReasoning || null;
     const rawToolCalls = ctx.llmResponse?.choices?.[0]?.message?.tool_calls;
     const allNativeCalls = Array.isArray(rawToolCalls) ? rawToolCalls : [];
     const nativeScheduleCalls = allNativeCalls.filter(
@@ -9414,7 +9418,7 @@ var amsgHooks = {
         (p) => typeof p.message === "string" ? p.message : ""
       );
       let payloads = attachScheduledTasks(decision.pushPayloads, stash.scheduledTasks);
-      if (session.finalReasoning && payloads.length > 0) {
+      if (stash.instant && session.finalReasoning && payloads.length > 0) {
         payloads = payloads.map((payload, i) => i === 0 ? {
           ...payload,
           metadata: {
@@ -9436,7 +9440,7 @@ var amsgHooks = {
           }
         } : payload);
       }
-      if (stash.clientTaskId && stash.charId) {
+      if (stash.charId) {
         const budgeted = [];
         for (const payload of payloads) {
           budgeted.push(await offloadOversizedPush(

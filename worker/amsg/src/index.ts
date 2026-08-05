@@ -389,8 +389,10 @@ const INLINE_THINK_RE = /<(think|thinking|thought)>([\s\S]*?)<\/\1>/gi;
 /**
  * 把正文里内联的思考块抄出来拼成一段（没有就是空串）。
  *
- * 只认闭合的成对标签，跟 stripReasoningTags 一个口径：没闭合的那种它剥不掉、原样留在
- * 正文里，这边再抄一份的话，同一段话会在思考链卡片和气泡里各出现一遍。
+ * 只认闭合的成对标签：抄的范围要跟正文剥掉的范围对得上（stripReasoningTags 主判的就是
+ * 成对标签），也跟客户端渲染那份同口径——本地的 extractThinkingChain 只在**全文一个闭合
+ * 标签都没有**时才走 open-only 兜底。没闭合的那种照旧交给正文侧兜：sanitize 有自己的
+ * 未闭合兜底，整段只有一个没闭合的思考块时这一轮压根不发 push。
  */
 const extractInlineThink = (text: string): string => {
   if (!text.includes('<')) return '';
@@ -419,6 +421,46 @@ export const amsgReasoningKey = (clientTaskId: string) => `reasoning:${clientTas
 const pushFits = (payload: Record<string, unknown>): boolean =>
   measurePushPayload(JSON.stringify(payload), { reserveEnvelope: true }).withinLimit;
 
+/** 旁路存储的一棒：metadata 上的哪个字段整份挪走、挪完留哪个引用键、存到哪个键下。 */
+interface OffloadBaton {
+  /** metadata 上要挪走的字段名。 */
+  field: string;
+  /** 挪完留在 metadata 上的引用键字段名，客户端照着它取回。 */
+  refField: string;
+  /** client_state 里的存储键（每任务一份，下次触发覆盖）。 */
+  key: (clientTaskId: string) => string;
+  /** 日志前缀，`wrangler tail` 上一眼看出是哪一棒挪的。 */
+  log: string;
+}
+
+/**
+ * 挪的顺序：思考链 → 情绪评估结果 → XHS 会话数据。
+ *
+ * 前两样都是整段模型输出（几百到几千字），超限时多半是它俩撑爆的，而且客户端拿它们
+ * 只是渲染卡片 / 落 buff，晚一步取回来不影响这条消息本身；XHS 那份关系到这条消息里的
+ * 卡片能不能出来，所以排最后，挪完还是装不下才动它。
+ */
+const OFFLOAD_BATONS: OffloadBaton[] = [
+  {
+    field: 'amsgReasoning',
+    refField: 'amsgReasoningRef',
+    key: amsgReasoningKey,
+    log: '[amsg:reasoning] 思考链旁路存储',
+  },
+  {
+    field: 'amsgEmotionUpdate',
+    refField: 'amsgEmotionRef',
+    key: amsgEmotionUpdateKey,
+    log: '[amsg:emotion] 评估结果旁路存储',
+  },
+  {
+    field: 'xhsSession',
+    refField: 'xhsSessionRef',
+    key: amsgXhsSessionKey,
+    log: '[amsg:agentic] XHS 会话数据旁路存储',
+  },
+];
+
 /**
  * 一条 push 装不下时，把大块附加数据旁路存进 client_state，payload 里只留引用键。
  *
@@ -428,9 +470,7 @@ const pushFits = (payload: Record<string, unknown>): boolean =>
  * （日常 1-3 张走的就是这条，行为不变），装不下才把整份挪到 client_state，
  * 客户端上线后按引用键取回，一张不少。
  *
- * 挪的顺序是「思考链 → 情绪评估结果 → XHS 会话数据」：思考链和评估结果都是整段模型输出
- * （几百到几千字），超限时多半是它俩撑爆的，而且客户端拿它们只是渲染卡片 / 落 buff，
- * 晚一步取回来不影响这条消息本身；挪完还是装不下才动 XHS 那份。
+ * 挪哪几样、按什么顺序挪见 OFFLOAD_BATONS。
  *
  * 存不进去时**抛错**而不是砍内容：抛错走投递失败重试，砍内容则是当场穿帮且无从察觉。
  */
@@ -442,11 +482,23 @@ export const offloadOversizedPush = async (
 ): Promise<Record<string, unknown>> => {
   if (pushFits(payload)) return payload;
 
-  const meta = (payload.metadata ?? {}) as Record<string, unknown>;
-  const reasoning = typeof meta.amsgReasoning === 'string' ? meta.amsgReasoning : '';
-  const emotionUpdate = typeof meta.amsgEmotionUpdate === 'string' ? meta.amsgEmotionUpdate : '';
+  if (!clientTaskId) {
+    // 存储键是按 clientTaskId 编的，没有它就没法旁路。两条建任务路径和角色自排那条
+    // 都必带 amsgClientTaskId，走到这里说明任务行是坏的——接下来库会抛
+    // PUSH_PAYLOAD_TOO_LARGE 把整条消息卡住，光看那个错认不出根因，先吼一声。
+    console.warn('[amsg:offload] push 超限却没有 clientTaskId，旁路存储用不上', {
+      charId,
+      bytes: measurePushPayload(JSON.stringify(payload)).bytes,
+    });
+    return payload;
+  }
+
+  const hasOffloadable = (value: unknown): boolean =>
+    (typeof value === 'string' ? !!value : value != null);
+  const readMeta = (p: Record<string, unknown>) => (p.metadata ?? {}) as Record<string, unknown>;
+
   // 没有可旁路的东西，交给库抛 PUSH_PAYLOAD_TOO_LARGE
-  if (!reasoning && !emotionUpdate && !meta.xhsSession) return payload;
+  if (!OFFLOAD_BATONS.some((baton) => hasOffloadable(readMeta(payload)[baton.field]))) return payload;
 
   if (typeof writeState !== 'function') {
     // 老部署（amsg-server < 2.6.0-next.7）没有写入口。不静默砍卡片——抛错让这次投递
@@ -454,13 +506,22 @@ export const offloadOversizedPush = async (
     throw new Error('AMSG2_WRITE_STATE_UNSUPPORTED: push 超限需要旁路存储，请在设置页重新粘贴部署 worker');
   }
 
+  // 一棒接一棒：每棒都从**上一棒的结果**上读，装得下了就收手。各挪各的字段，
+  // 从原始 payload 重新起算的话，前一棒挪走的会被原样塞回去、引用键也丢。
   let current = payload;
-  if (reasoning) {
-    const key = amsgReasoningKey(clientTaskId);
-    await writeState(amsgStateNamespace(charId), [{ key, value: reasoning }]);
-    const { amsgReasoning: _movedReasoning, ...restMeta } = (current.metadata ?? {}) as Record<string, unknown>;
-    const slimmed = { ...current, metadata: { ...restMeta, amsgReasoningRef: key } };
-    console.log('[amsg:reasoning] 思考链旁路存储', {
+  for (const baton of OFFLOAD_BATONS) {
+    const meta = readMeta(current);
+    const value = meta[baton.field];
+    if (!hasOffloadable(value)) continue;
+
+    const key = baton.key(clientTaskId);
+    // 字符串原样存（客户端取回来直接用），对象序列化一份。
+    await writeState(amsgStateNamespace(charId), [
+      { key, value: typeof value === 'string' ? value : JSON.stringify(value) },
+    ]);
+    const { [baton.field]: _moved, ...restMeta } = meta;
+    const slimmed = { ...current, metadata: { ...restMeta, [baton.refField]: key } };
+    console.log(baton.log, {
       key,
       charId,
       beforeBytes: measurePushPayload(JSON.stringify(current)).bytes,
@@ -469,38 +530,7 @@ export const offloadOversizedPush = async (
     current = slimmed;
     if (pushFits(current)) return current;
   }
-
-  if (emotionUpdate) {
-    const key = amsgEmotionUpdateKey(clientTaskId);
-    await writeState(amsgStateNamespace(charId), [{ key, value: emotionUpdate }]);
-    const { amsgEmotionUpdate: _moved, ...restMeta } = (current.metadata ?? {}) as Record<string, unknown>;
-    const slimmed = { ...current, metadata: { ...restMeta, amsgEmotionRef: key } };
-    console.log('[amsg:emotion] 评估结果旁路存储', {
-      key,
-      charId,
-      beforeBytes: measurePushPayload(JSON.stringify(current)).bytes,
-      afterBytes: measurePushPayload(JSON.stringify(slimmed)).bytes,
-    });
-    current = slimmed;
-    if (pushFits(current)) return current;
-  }
-
-  const currentMeta = (current.metadata ?? {}) as Record<string, unknown>;
-  if (!currentMeta.xhsSession) return current;
-
-  const key = amsgXhsSessionKey(clientTaskId);
-  await writeState(amsgStateNamespace(charId), [
-    { key, value: JSON.stringify(currentMeta.xhsSession) },
-  ]);
-  const { xhsSession: _offloaded, ...restMeta } = currentMeta;
-  const slimmed = { ...current, metadata: { ...restMeta, xhsSessionRef: key } };
-  console.log('[amsg:agentic] XHS 会话数据旁路存储', {
-    key,
-    charId,
-    beforeBytes: measurePushPayload(JSON.stringify(current)).bytes,
-    afterBytes: measurePushPayload(JSON.stringify(slimmed)).bytes,
-  });
-  return slimmed;
+  return current;
 };
 
 /**
@@ -1228,19 +1258,27 @@ export const amsgHooks = {
     }
     const session = stash.session;
 
-    // 思考链两个来源：响应字段（deepseek-r1 / GLM 这些总会带）+ 正文内联 <think>。
-    // 抄的是没 strip 过的原文（上面那个 content 是剥完的）。每轮覆盖——最终留下的是
-    // 产出正文那一轮的思考，中间轮那句「我先去查一下」配不上用户看到的正文。
+    // 思考链两个来源：响应字段 + 正文内联 <think>。抄的是没 strip 过的原文
+    // （上面那个 content 是剥完的）。字段名认三个，跟本地路径一样宽
+    // （见 utils/safeApi.ts）：reasoning_content 是 deepseek-r1 / GLM 那批的写法，
+    // OpenRouter 转出来叫 reasoning，还有渠道写 thinking——只认一个就会静默没有卡片。
+    // 不复用上游的 readReasoningContent：它是「原生**或**第一个内联块」，这里要的是
+    // 「原生**加**全部内联块」，跟客户端渲染的那份对齐。
+    //
+    // 每轮**覆盖**（包括覆盖成空）：留下的必须是产出正文那一轮的思考。中间轮那句
+    // 「我先去查一下」跟用户看到的正文对不上，最后一轮没思考时也不能拿它顶上。
+    //
     // 请求端不主动开 thinking 参数：fire 请求带 tools（MCP / 排程），thinking + tools
     // 同发 Gemini 系直接 400，与本地路径工具模式的取舍一致。
-    const nativeReasoning = (ctx.llmResponse as {
-      choices?: Array<{ message?: { reasoning_content?: unknown } }>;
-    })?.choices?.[0]?.message?.reasoning_content;
+    const llmMessage = (ctx.llmResponse as {
+      choices?: Array<{ message?: Record<string, unknown> }>;
+    })?.choices?.[0]?.message;
+    const nativeReasoning = llmMessage?.reasoning_content ?? llmMessage?.reasoning ?? llmMessage?.thinking;
     const roundReasoning = [nativeReasoning, extractInlineThink(ctx.llmOutputText || '')]
       .filter((s): s is string => typeof s === 'string' && !!s.trim())
       .map((s) => s.trim())
       .join('\n\n');
-    if (roundReasoning) session.finalReasoning = roundReasoning;
+    session.finalReasoning = roundReasoning || null;
 
     // native tool_calls：只认 tools 数组里声明过的 MCP 名字。模型幻觉出的
     // 未声明调用（比如给 tag 工具编一个 native 调用）丢弃并留日志——直接透传
@@ -1339,7 +1377,13 @@ export const amsgHooks = {
       // 这次生成的思考链随**第一条** push 回客户端：思考链卡片渲染在第一条气泡上，
       // 收侧也只在 messageIndex<=1 那条上认领（见 utils/activeMsgRuntime.ts）。
       // 同样排在旁路存储之前，装不下时才能连它一起挪走。
-      if (session.finalReasoning && payloads.length > 0) {
+      //
+      // 只在即时对话这条路回传。那一轮的 prompt 里带着「心象」提示词（客户端
+      // buildThinkingChainPrompt 打进 fire_pack 的 chat 段），模型的 thinking 写出来是
+      // 角色脑内的嘟囔，当卡片正合适。定时任务这条路的 prompt 是 renderFirePack 现拼的，
+      // 没有那段提示词，thinking 就是原始推理腔（「用户三小时没说话了，我应该……」）——
+      // 那个放进心象卡片就是穿帮。等哪天给 fire_pack 也注入那段提示词，再把这道门放开。
+      if (stash.instant && session.finalReasoning && payloads.length > 0) {
         payloads = payloads.map((payload, i) => (i === 0
           ? {
               ...payload,
@@ -1375,10 +1419,11 @@ export const amsgHooks = {
           : payload));
       }
 
-      // 发之前按真实字节预算过一遍：装不下的 XHS 会话数据旁路存起来，push 只留引用键。
+      // 发之前按真实字节预算过一遍：装不下的大块数据旁路存起来，push 只留引用键。
       // clientTaskId 当存储键（每任务一份、下次触发覆盖），缺了就没法旁路——那时超限会
-      // 由库抛 PUSH_PAYLOAD_TOO_LARGE，照样不会静默丢消息。
-      if (stash.clientTaskId && stash.charId) {
+      // 由库抛 PUSH_PAYLOAD_TOO_LARGE，照样不会静默丢消息。缺了照样走一趟，是为了让
+      // offloadOversizedPush 把「为什么没法旁路」吼出来，别只留一个光秃秃的超限错。
+      if (stash.charId) {
         const budgeted = [];
         for (const payload of payloads) {
           budgeted.push(await offloadOversizedPush(

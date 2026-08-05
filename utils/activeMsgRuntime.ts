@@ -197,42 +197,24 @@ const fetchOffloadedXhsSession = async (message: ActiveMsg2InboxMessage): Promis
 };
 
 /**
- * 取回 worker 旁路存下的情绪评估原文（评估结果撑爆一条 push 时才有，
- * 见 worker/amsg/src/index.ts 的 offloadOversizedPush）。
+ * 取回 worker 旁路存下的一段附赠内容（情绪评估原文 / 思考链——它俩撑爆一条 push 时
+ * worker 会整段挪进 client_state、只在 metadata 留个引用键，见 worker 的
+ * offloadOversizedPush）。取到就顺手把云端那份删掉。
  *
  * 取不回来只返回 null、**不抛错**：这条消息本身（角色说的那句话）已经完整送到了，
- * 为了一次情绪更新把它压回收件箱反复重试，得不偿失——用户会看到回复迟迟不上屏。
- */
-const fetchOffloadedEmotionUpdate = async (message: ActiveMsg2InboxMessage): Promise<string | null> => {
-  const ref = (message.metadata as any)?.amsgEmotionRef;
-  if (typeof ref !== 'string' || !ref) return null;
-
-  const namespace = amsgStateNamespace(message.charId);
-  try {
-    const raw = await ActiveMsgClient.readClientStateValue(namespace, ref);
-    if (raw == null) {
-      // 键不在了：同角色的下一轮已经把它覆盖/清掉了，这条是迟到的老消息。
-      log.warn('旁路存储里没有这份情绪评估（多半被下一轮覆盖了）', { ref, charId: message.charId });
-      return null;
-    }
-    void ActiveMsgClient.clearClientStateValue(namespace, ref)
-      .catch((e) => log.warn('清空旁路存储失败（下次触发会覆盖，不影响正确性）', { ref, error: e }));
-    return raw;
-  } catch (error) {
-    log.warn('取旁路存储的情绪评估失败（这一轮情绪不更新，回复照常）', { ref, error });
-    return null;
-  }
-};
-
-/**
- * 取回 worker 旁路存下的思考链（这一段撑爆一条 push 时才有，见 worker 的
- * offloadOversizedPush）。
+ * 为了一次情绪更新 / 一张心象卡片把它压回收件箱反复重试，用户看到的是回复迟迟不上屏。
  *
- * 取不回来只返回 null、**不抛错**：角色说的那句话已经完整送到了，为了一张思考链卡片
- * 把它压回收件箱反复重试，用户看到的是回复迟迟不上屏——那才是真丢东西。
+ * XHS 那份不走这里：卡片数据缺了角色的话就和内容对不上，得抛错重试，见
+ * fetchOffloadedXhsSession。
  */
-const fetchOffloadedReasoning = async (message: ActiveMsg2InboxMessage): Promise<string | null> => {
-  const ref = (message.metadata as any)?.amsgReasoningRef;
+const fetchOffloadedExtra = async (
+  message: ActiveMsg2InboxMessage,
+  /** metadata 上的引用键字段名。 */
+  refField: 'amsgEmotionRef' | 'amsgReasoningRef',
+  /** 日志里怎么称呼它 + 取不到时这一轮少了什么。 */
+  labels: { what: string; whenMissing: string },
+): Promise<string | null> => {
+  const ref = (message.metadata as any)?.[refField];
   if (typeof ref !== 'string' || !ref) return null;
 
   const namespace = amsgStateNamespace(message.charId);
@@ -240,17 +222,27 @@ const fetchOffloadedReasoning = async (message: ActiveMsg2InboxMessage): Promise
     const raw = await ActiveMsgClient.readClientStateValue(namespace, ref);
     if (raw == null) {
       // 键不在了：同角色的下一轮已经把它覆盖/清掉了，这条是迟到的老消息。
-      log.warn('旁路存储里没有这份思考链（多半被下一轮覆盖了）', { ref, charId: message.charId });
+      log.warn(`旁路存储里没有这份${labels.what}（多半被下一轮覆盖了）`, { ref, charId: message.charId });
       return null;
     }
     void ActiveMsgClient.clearClientStateValue(namespace, ref)
       .catch((e) => log.warn('清空旁路存储失败（下次触发会覆盖，不影响正确性）', { ref, error: e }));
     return raw;
   } catch (error) {
-    log.warn('取旁路存储的思考链失败（这条没有思考链卡片，回复照常）', { ref, error });
+    log.warn(`取旁路存储的${labels.what}失败（${labels.whenMissing}）`, { ref, error });
     return null;
   }
 };
+
+const fetchOffloadedEmotionUpdate = (message: ActiveMsg2InboxMessage) =>
+  fetchOffloadedExtra(message, 'amsgEmotionRef', {
+    what: '情绪评估', whenMissing: '这一轮情绪不更新，回复照常',
+  });
+
+const fetchOffloadedReasoning = (message: ActiveMsg2InboxMessage) =>
+  fetchOffloadedExtra(message, 'amsgReasoningRef', {
+    what: '思考链', whenMissing: '这条没有心象卡片，回复照常',
+  });
 
 /**
  * 云端跑出来的一份评估原文 → 落 buff + 把 innerState 广播给下一轮。
@@ -437,10 +429,12 @@ const processInboxMessageWithPostProcessing = async (
   const messageIndex: number = (message as any).messageIndex
     ?? (message.metadata && (message.metadata as any).messageIndex)
     ?? 0;
-  // amsg2（即时对话 / 主动消息）走的是另一条：worker 不单发 reasoning push，而是把这次
-  // 生成的思考链挂在第一条 content push 的 metadata.amsgReasoning 上（太长时挪进
-  // client_state、只留 amsgReasoningRef，见 worker/amsg/src/index.ts 的
-  // offloadOversizedPush）。有它就用它，没有再回到上面那条 IP 的 buffer 路。
+  // amsg2 的即时对话走的是另一条：worker 不单发 reasoning push，而是把这次生成的思考链
+  // 挂在第一条 content push 的 metadata.amsgReasoning 上（太长时挪进 client_state、
+  // 只留 amsgReasoningRef，见 worker/amsg/src/index.ts 的 offloadOversizedPush）。
+  // 有它就用它，没有再回到上面那条 IP 的 buffer 路。
+  // 定时任务那条路 worker 刻意不带思考（prompt 里没有「心象」提示词，原始推理腔当卡片
+  // 是穿帮），所以这里也不会有值——收侧不用另设门。
   let reasoningContent: string | undefined;
   if (messageIndex <= 1) {
     const inlineReasoning = (message.metadata as any)?.amsgReasoning;

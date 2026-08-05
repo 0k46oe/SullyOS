@@ -706,6 +706,21 @@ describe('offloadOversizedPush — push 装不下时旁路存储', () => {
       .rejects.toThrow(/AMSG2_WRITE_STATE_UNSUPPORTED/);
   });
 
+  // 存储键是按 clientTaskId 编的，缺了就没法旁路。这时候库会抛 PUSH_PAYLOAD_TOO_LARGE
+  // 把整条消息卡住，光看那个错认不出根因——所以先吼一声，wrangler tail 上一眼看得见。
+  it('超限但没有 clientTaskId → 吼一声说清「旁路用不上」，别只留一个超限错', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const writeState = vi.fn();
+    const payload = pushWith(8) as any;
+
+    const out = await offloadOversizedPush(payload, writeState, CHAR_ID, '');
+
+    expect(out).toBe(payload);
+    expect(writeState).not.toHaveBeenCalled();
+    expect(warn.mock.calls.some(([msg]) => String(msg).includes('没有 clientTaskId'))).toBe(true);
+    warn.mockRestore();
+  });
+
   it('超限但没有可旁路的内容 → 原样交给库抛 PUSH_PAYLOAD_TOO_LARGE，不假装成功', async () => {
     const writeState = vi.fn();
     const fat = { messageKind: 'content', message: '正'.repeat(2000), metadata: { charId: CHAR_ID } };
@@ -957,45 +972,92 @@ describe('轮次上限与上游共用同一个数', () => {
 // messageIndex<=1 时认领。
 describe('云端思考链随首条 push 回客户端', () => {
   const CLIENT_TASK_ID = 'client-task-reasoning';
+  const CHAT_MESSAGES = [
+    { role: 'system', content: '你是 Nyah。' },
+    { role: 'user', content: '在吗' },
+  ];
   /** 两段正文 → 两条 push，才验得出「只挂第一条」。 */
   const TWO_SEGMENT_OUTPUT = '在的。\n怎么啦？';
 
-  const reasoningFire = (
-    store: ReturnType<typeof makeFireStore>,
-    opts: { llmOutput: string; llmResponse?: Record<string, unknown> },
-  ) => runFire(store, {
-    metadata: {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** 一轮 LLM：正文 + 可选的思考（放在哪个响应字段里也能挑）。 */
+  interface Round {
+    output: string;
+    reasoning?: string;
+    /** 思考放哪个字段，默认 reasoning_content。 */
+    field?: 'reasoning_content' | 'reasoning' | 'thinking';
+  }
+
+  /**
+   * 跑一次即时对话的 fire，可以连喂好几轮（工具循环）；返回最后一轮的 decision。
+   * 走即时对话是因为思考链只在这条路回传——定时任务那条见下面单独一条用例。
+   */
+  const instantFire = async (rounds: Round[], extraMeta: Record<string, unknown> = {}) => {
+    const store = makeFireStore(CHAT_MESSAGES);
+    const scratch: Record<string, unknown> = {};
+    const metadata = {
+      charId: CHAR_ID,
       amsgClientTaskId: CLIENT_TASK_ID,
-      amsgMode: 'auto',
-      amsgTaskInstruction: '想到什么说什么',
-    },
-    ...opts,
-  });
-
-  it('响应字段里的 reasoning_content → 挂第一条 push，正文不带 <think>', async () => {
-    const { decision } = await reasoningFire(makeFireStore(), {
-      llmOutput: TWO_SEGMENT_OUTPUT,
-      llmResponse: {
-        choices: [{
-          message: { content: TWO_SEGMENT_OUTPUT, reasoning_content: '他这句问得很轻，先接住再问一句。' },
-        }],
+      amsgMode: 'instant',
+      amsgInstantChat: true,
+      ...extraMeta,
+    };
+    await amsgHooks.onBeforeFire({
+      task: {
+        id: FIRE_TASK_ID, uuid: TASK_UUID, contactName: 'Nyah', recurrenceType: 'none',
+        nextSendAt: FIRE_NEXT_SEND_AT, metadata,
       },
-    });
+      userId: 'u1',
+      readState: store.readState,
+      writeState: store.writeState,
+      now: NOW,
+      scratch,
+    } as any);
 
-    expect(decision.decision).toBe('finish');
-    const payloads = decision.pushPayloads as Array<Record<string, any>>;
-    expect(payloads.length).toBeGreaterThanOrEqual(2);
-    expect(payloads[0].metadata.amsgReasoning).toContain('先接住再问一句');
-    for (const payload of payloads.slice(1)) {
-      expect(payload.metadata.amsgReasoning).toBeUndefined();
+    let decision: any;
+    for (const [iteration, round] of rounds.entries()) {
+      decision = await amsgHooks.onLLMOutput({
+        sessionId: `sess_task_${FIRE_TASK_ID}@1`, taskId: FIRE_TASK_ID, taskUuid: TASK_UUID,
+        llmResponse: {
+          choices: [{
+            message: {
+              content: round.output,
+              ...(round.reasoning ? { [round.field ?? 'reasoning_content']: round.reasoning } : {}),
+            },
+          }],
+        },
+        llmOutputText: round.output, contactName: 'Nyah',
+        metadata, scratch, writeState: store.writeState, iteration,
+      } as any);
     }
-    expect(JSON.stringify(payloads)).not.toContain('<think>');
-  });
+    return decision;
+  };
+
+  // 字段名各家不一样：reasoning_content 是 deepseek-r1 / GLM 那批，OpenRouter 转出来叫
+  // reasoning，还有渠道写 thinking。只认一个的话，换个渠道就静默没有卡片了。
+  it.each(['reasoning_content', 'reasoning', 'thinking'] as const)(
+    '响应字段 %s 里的思考 → 挂第一条 push，正文不带 <think>',
+    async (field) => {
+      const decision = await instantFire([{
+        output: TWO_SEGMENT_OUTPUT,
+        reasoning: '他这句问得很轻，先接住再问一句。',
+        field,
+      }]);
+
+      expect(decision.decision).toBe('finish');
+      const payloads = decision.pushPayloads as Array<Record<string, any>>;
+      expect(payloads.length).toBeGreaterThanOrEqual(2);
+      expect(payloads[0].metadata.amsgReasoning).toContain('先接住再问一句');
+      for (const payload of payloads.slice(1)) {
+        expect(payload.metadata.amsgReasoning).toBeUndefined();
+      }
+      expect(JSON.stringify(payloads)).not.toContain('<think>');
+    },
+  );
 
   it('只有正文内联 <think> 的模型也拿得到（正文照旧剥干净）', async () => {
-    const { decision } = await reasoningFire(makeFireStore(), {
-      llmOutput: '<think>他好像有点累了。</think>在的。\n怎么啦？',
-    });
+    const decision = await instantFire([{ output: '<think>他好像有点累了。</think>在的。\n怎么啦？' }]);
 
     expect(decision.decision).toBe('finish');
     const payloads = decision.pushPayloads as Array<Record<string, any>>;
@@ -1011,28 +1073,86 @@ describe('云端思考链随首条 push 回客户端', () => {
   // 工具循环一次 fire 跑好几轮，每轮都有自己的思考。留最后一轮的：用户看到的正文就是
   // 那一轮写的，配上「我先去查一下」的中间轮思考等于答非所问。
   it('多轮工具循环 → 留下产出正文那一轮的思考', async () => {
-    const { ctx, scratch } = makeCtx({});
-    await amsgHooks.onBeforeFire(ctx);
+    const decision = await instantFire([
+      { output: '等我想想。\n[[RECALL: 2026-06]]', reasoning: '第一轮：先去翻六月的记忆。' },
+      { output: '想起来了，那天你说想去看海。', reasoning: '第二轮：翻到了那天的事，说给他听。' },
+    ]);
 
-    const roundCtx = (llmOutputText: string, reasoning: string, iteration: number) => ({
-      sessionId: 'sess_task_42', taskId: 42, taskUuid: TASK_UUID,
-      llmResponse: { choices: [{ message: { content: llmOutputText, reasoning_content: reasoning } }] },
-      llmOutputText, contactName: 'Nyah',
-      metadata: { charId: CHAR_ID, amsgMode: 'auto' },
-      scratch, iteration,
-    }) as any;
-
-    const first = await amsgHooks.onLLMOutput(
-      roundCtx('等我想想。\n[[RECALL: 2026-06]]', '第一轮：先去翻六月的记忆。', 0)) as any;
-    expect(first.decision).toBe('tool-request');
-
-    const last = await amsgHooks.onLLMOutput(
-      roundCtx('想起来了，那天你说想去看海。', '第二轮：翻到了那天的事，说给他听。', 1)) as any;
-    expect(last.decision).toBe('finish');
-
-    const meta = last.pushPayloads[0].metadata;
+    expect(decision.decision).toBe('finish');
+    const meta = decision.pushPayloads[0].metadata;
     expect(meta.amsgReasoning).toContain('第二轮');
     expect(meta.amsgReasoning).not.toContain('第一轮');
+  });
+
+  // 「留最后一轮的」包括最后一轮没思考的情形：这时候一个字段都不挂。拿中间轮那句
+  // 「我先去查一下」顶上的话，卡片里写的是查资料，正文说的是看海。
+  it('最后一轮没思考 → 中间轮那句不许顶上来', async () => {
+    const decision = await instantFire([
+      { output: '等我想想。\n[[RECALL: 2026-06]]', reasoning: '第一轮：先去翻六月的记忆。' },
+      { output: '想起来了，那天你说想去看海。' },
+    ]);
+
+    expect(decision.decision).toBe('finish');
+    for (const payload of decision.pushPayloads as Array<Record<string, any>>) {
+      expect(payload.metadata.amsgReasoning).toBeUndefined();
+    }
+  });
+
+  // 定时任务这条路的 prompt 是 renderFirePack 现拼的，没有「心象」那段提示词，模型的
+  // thinking 就是原始推理腔（「用户三小时没说话了，我应该……」）。那个当心象卡片放出去
+  // 是穿帮，所以这道门先只对即时对话开。
+  it('定时任务的那份思考不回传（没有心象提示词，推理腔不当心象）', async () => {
+    const { decision } = await runFire(makeFireStore(), {
+      metadata: {
+        amsgClientTaskId: CLIENT_TASK_ID,
+        amsgMode: 'auto',
+        amsgTaskInstruction: '想到什么说什么',
+      },
+      llmOutput: TWO_SEGMENT_OUTPUT,
+      llmResponse: {
+        choices: [{
+          message: {
+            content: TWO_SEGMENT_OUTPUT,
+            reasoning_content: '用户三小时没说话了，我应该主动关心一下。',
+          },
+        }],
+      },
+    });
+
+    expect(decision.decision).toBe('finish');
+    const payloads = decision.pushPayloads as Array<Record<string, any>>;
+    expect(payloads.length).toBeGreaterThanOrEqual(2);
+    for (const payload of payloads) {
+      expect(payload.metadata.amsgReasoning).toBeUndefined();
+    }
+    expect(JSON.stringify(payloads)).not.toContain('我应该主动关心');
+  });
+
+  // 只有一段正文时，思考链（挂第一条）和情绪评估（挂最后一条）落在同一条 push 上。
+  // 两次挂载各自 spread 一遍 metadata，谁把谁盖掉都是静默的：要么没有心象卡片、
+  // 要么情绪永远不更新，而日志上什么都看不出来。
+  it('只有一条 push 时思考链和情绪评估同时挂上，谁也不盖谁', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: '{"changed":true,"buffs":[]} EVAL-RAW-MARKER' } }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+
+    const decision = await instantFire(
+      [{ output: '在的。', reasoning: '他终于开口了。' }],
+      {
+        amsgEmotionEval: {
+          prompt: '你是一个角色情绪分析系统。',
+          api: { baseUrl: 'https://eval.example.com/v1', apiKey: 'sk-eval', model: 'eval-mini' },
+        },
+      },
+    );
+
+    expect(decision.decision).toBe('finish');
+    const payloads = decision.pushPayloads as Array<Record<string, any>>;
+    expect(payloads).toHaveLength(1);
+    const meta = payloads[0].metadata;
+    expect(meta.amsgReasoning).toContain('他终于开口了');
+    expect(meta.amsgEmotionUpdate).toContain('EVAL-RAW-MARKER');
+    expect(meta.amsgEmotionDone).toBe(true);
   });
 });
 
