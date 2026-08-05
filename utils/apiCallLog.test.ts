@@ -15,6 +15,7 @@ import {
     scanSseForLog,
     setApiRequestCaptureArmed,
     setApiCallAmbientContext,
+    summarizeApiRequestCaptureDuplicates,
     updateApiRequestCaptureUsage,
 } from './apiCallLog';
 
@@ -146,6 +147,28 @@ describe('one-shot full API request capture', () => {
         });
     });
 
+    it('detects duplicated long prompt blocks in the client request without flagging short reminders', () => {
+        const duplicated = `## 固定规则\n${'不要重复发送这段提示词。'.repeat(30)}`;
+        const capture = buildApiRequestCapture({
+            url: 'https://example.com/v1/chat/completions',
+            body: {
+                model: 'gpt-test',
+                messages: [
+                    { role: 'system', content: duplicated },
+                    { role: 'system', content: duplicated },
+                    { role: 'system', content: '短提醒' },
+                    { role: 'system', content: '短提醒' },
+                ],
+            },
+        });
+
+        const summary = summarizeApiRequestCaptureDuplicates(capture);
+        expect(summary.groups).toBe(1);
+        expect(summary.repeatedSections).toBe(2);
+        expect(summary.extraChars).toBe(duplicated.length);
+        expect(summary.examples[0]).toMatchObject({ occurrences: 2, chars: duplicated.length });
+    });
+
     it('exports a readable TXT report with source ranking, paths, section content and raw JSON', () => {
         const capture = buildApiRequestCapture({
             url: 'https://example.com/v1/chat/completions',
@@ -168,6 +191,8 @@ describe('one-shot full API request capture', () => {
         expect(txt).toContain('完整原始请求 JSON');
         expect(txt).toContain('"content": "用户正文"');
         expect(txt).toContain('请求体总字符（不是 Token）');
+        expect(txt).toContain('客户端发出前重复检查');
+        expect(txt).toContain('未发现完全相同的长文本被客户端重复发送');
     });
 
     it('replaces oversized inline binary data but preserves its original size for diagnosis', () => {

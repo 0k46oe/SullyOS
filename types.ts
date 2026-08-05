@@ -2377,6 +2377,11 @@ export interface CharacterProfile {
    * - manual：用户拉杆决定最多读取最近 contextLimit 条完整原文。
    */
   contextRangeMode?: 'adaptive' | 'manual';
+  /**
+   * 用户主动点「一键存进记忆宫殿」后，让原文范围继续跟随记忆水位线。
+   * 与全自动归档开关独立；未使用该按钮的旧角色保持 undefined，不改变既有行为。
+   */
+  contextFollowsMemoryPalaceHwm?: boolean;
   /** 上下文范围结构版本；用于把旧版「5000 条 + 自动水位隐藏」一次性迁移到自适应模式。 */
   contextRangePolicyVersion?: number;
   /**
