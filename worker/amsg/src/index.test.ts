@@ -1157,9 +1157,10 @@ describe('云端思考链随首条 push 回客户端', () => {
 });
 
 // 即时对话这一轮在云端跑过哪些工具，要跟着回复一起回到客户端，气泡底下才画得出那行灰字
-// （「调用了工具：web_search ×2 · recall ×1」）。本地那条路全程有搜索状态条，云端这条路
-// 全程静默——不带这份的话，角色突然知道了今天的新闻，用户看不出这是查来的。
+// （「调用了工具：搜索网页 ×2」）。本地那条路全程有搜索状态条，云端这条路全程静默——
+// 不带这份的话，角色突然知道了今天的新闻，用户看不出这是查来的。
 // 它挂在**最后一条** push 上：跟正文一起收尾，用户读完才看到痕迹。
+// 线上传的是原始工具名 + 次数，翻译成人话是客户端的事（见 utils/amsgToolTrace.ts）。
 describe('云端工具痕迹随末条 push 回客户端', () => {
   const CLIENT_TASK_ID = 'client-task-tooltrace';
   const CHAT_MESSAGES = [
@@ -1177,8 +1178,8 @@ describe('云端工具痕迹随末条 push 回客户端', () => {
   /**
    * 跑一次 fire：onBeforeFire → 依次执行工具 → onLLMOutput 收尾，返回 decision。
    *
-   * 工具挑的都是「没配就直接 ok:false 返回」的（web_search 缺 key、recall 读 tool_pack
-   * 里那份记忆），一次网络请求都不发，痕迹照样记得下来。
+   * 一次网络请求都不发也能验完整条：这套夹具里 recall 读 tool_pack 里那份记忆（真跑了，
+   * 只是没查到）、web_search 缺 key 直接打回（压根没跑）、排程走注进去的 scheduleTask 桩。
    */
   const fireWithTools = async (opts: {
     instant: boolean;
@@ -1186,6 +1187,9 @@ describe('云端工具痕迹随末条 push 回客户端', () => {
   }) => {
     const store = makeFireStore(opts.instant ? CHAT_MESSAGES : undefined);
     const scratch: Record<string, unknown> = {};
+    const scheduleTask = async (o: any) => ({
+      created: true as const, id: 7, uuid: o.uuid, nextSendAt: o.firstSendTime,
+    });
     const metadata = {
       charId: CHAR_ID,
       amsgClientTaskId: CLIENT_TASK_ID,
@@ -1203,29 +1207,32 @@ describe('云端工具痕迹随末条 push 回客户端', () => {
       writeState: store.writeState,
       now: NOW,
       scratch,
+      scheduleTask,
     } as any);
 
     for (const [i, tool] of opts.tools.entries()) {
       await amsgHooks.executeToolCalls(
         [toolCall(`c${i}`, tool.name, tool.args)],
-        { sessionId: `sess_task_${FIRE_TASK_ID}@1`, scratch, iteration: 0 } as any,
+        { sessionId: `sess_task_${FIRE_TASK_ID}@1`, scratch, iteration: 0, scheduleTask } as any,
       );
     }
 
     return await amsgHooks.onLLMOutput({
       sessionId: `sess_task_${FIRE_TASK_ID}@1`, taskId: FIRE_TASK_ID, taskUuid: TASK_UUID,
       llmResponse: {}, llmOutputText: TWO_SEGMENT_OUTPUT, contactName: 'Nyah',
-      metadata, scratch, writeState: store.writeState, iteration: 1,
+      metadata, scratch, writeState: store.writeState, iteration: 1, scheduleTask,
     } as any) as any;
   };
+
+  const SEND_AT = new Date(NOW.getTime() + 90 * 60_000).toISOString();
 
   it('同一个工具跑了两次 → 按第一次出现的顺序压成名字 + 次数，只挂最后一条', async () => {
     const decision = await fireWithTools({
       instant: true,
       tools: [
-        { name: 'web_search', args: { query: '今天的新闻' } },
         { name: 'recall', args: { year: '2026', month: '06' } },
-        { name: 'web_search', args: { query: '明天天气' } },
+        { name: 'schedule_active_message', args: { send_at: SEND_AT } },
+        { name: 'recall', args: { year: '2026', month: '07' } },
       ],
     });
 
@@ -1234,12 +1241,41 @@ describe('云端工具痕迹随末条 push 回客户端', () => {
     expect(payloads.length).toBeGreaterThanOrEqual(2);
     const lastMeta = payloads[payloads.length - 1].metadata;
     expect(lastMeta.amsgToolTrace).toEqual([
-      { name: 'web_search', count: 2 },
-      { name: 'recall', count: 1 },
+      { name: 'recall', count: 2 },
+      { name: 'schedule_active_message', count: 1 },
     ]);
     for (const payload of payloads.slice(0, -1)) {
       expect(payload.metadata.amsgToolTrace).toBeUndefined();
     }
+  });
+
+  // 这行灰字要防的就是「角色说了句我查过」而其实什么都没发生。没配 key / 连不上 /
+  // 服务器没开机的调用一个请求都没发出去，记进痕迹等于自己造了个新的穿帮点。
+  it('没配就没跑的调用不算数（web_search 缺 key，一个请求都没发）', async () => {
+    const decision = await fireWithTools({
+      instant: true,
+      tools: [{ name: 'web_search', args: { query: '今天的新闻' } }],
+    });
+
+    expect(decision.decision).toBe('finish');
+    for (const payload of decision.pushPayloads as Array<Record<string, any>>) {
+      expect(payload.metadata.amsgToolTrace).toBeUndefined();
+    }
+  });
+
+  // 「跑了没查到」跟「压根没跑」是两回事：前者角色说「我翻了下没找到」是实话，
+  // 痕迹也该记上——它是真去翻了。
+  it('跑了但没查到东西的照样算', async () => {
+    const decision = await fireWithTools({
+      instant: true,
+      // 夹具里 memories 是空的 → recall 返回 no_logs（跑到了，只是这个月没东西）
+      tools: [{ name: 'recall', args: { year: '2026', month: '06' } }],
+    });
+
+    expect(decision.decision).toBe('finish');
+    const payloads = decision.pushPayloads as Array<Record<string, any>>;
+    expect(payloads[payloads.length - 1].metadata.amsgToolTrace)
+      .toEqual([{ name: 'recall', count: 1 }]);
   });
 
   it('这一轮一个工具都没跑 → 一个字段都不挂（气泡底下不该凭空多一行）', async () => {
@@ -1251,26 +1287,12 @@ describe('云端工具痕迹随末条 push 回客户端', () => {
     }
   });
 
-  // MCP 工具在云端叫 mcp__xxx，前缀是我们内部拿来分流的。原样显示的话，用户在设置里
-  // 配的那个名字跟气泡底下写的对不上号。
-  it('MCP 工具剥掉内部前缀，显示用户自己配的那个名字', async () => {
-    const decision = await fireWithTools({
-      instant: true,
-      tools: [{ name: 'mcp__get_secret', args: {} }],
-    });
-
-    expect(decision.decision).toBe('finish');
-    const payloads = decision.pushPayloads as Array<Record<string, any>>;
-    expect(payloads[payloads.length - 1].metadata.amsgToolTrace)
-      .toEqual([{ name: 'get_secret', count: 1 }]);
-  });
-
   // 定时任务那条路的气泡是凭空冒出来的（用户没在等这一轮），底下再挂一行「调用了工具」
   // 等于把后台实现摊开给用户看。这行灰字先只给即时对话。
   it('定时任务那条路不带痕迹', async () => {
     const decision = await fireWithTools({
       instant: false,
-      tools: [{ name: 'web_search', args: { query: '今天的新闻' } }],
+      tools: [{ name: 'recall', args: { year: '2026', month: '06' } }],
     });
 
     expect(decision.decision).toBe('finish');

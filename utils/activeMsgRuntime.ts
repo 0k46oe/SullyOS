@@ -522,8 +522,10 @@ const processInboxMessageWithPostProcessing = async (
         sentAt: message.sentAt,
         receivedAt: message.receivedAt,
       },
-      // push 自己那份排最后：worker 随这条 push 捎回来的东西（amsgToolTrace 这类要落到
-      // 气泡上给用户看的）靠它进 metadata，被上面几个固定字段盖掉就静默没了。
+      // push 自己那份也得铺进去：worker 随这条 push 捎回来、要落到气泡上给用户看的东西
+      // （amsgToolTrace 这类）只有这一条路进 metadata，漏了就静默没了。
+      // 注意它排在最后，同名字段会盖掉上面那几个固定的——worker 哪天往 push metadata 里
+      // 塞了个叫 source / activeMsg2 的字段，重试认领就会跟着歪。
       ...(message.metadata || {}),
     },
     xhsCaches: pushXhsCaches,

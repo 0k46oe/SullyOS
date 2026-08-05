@@ -98,7 +98,9 @@ import { dispatchAgenticTool, type AgenticToolChar, type AgenticToolCtx } from '
 import {
   buildDuplicateToolMessage,
   buildToolResultMessage,
+  neverRan,
   toolCallFingerprint,
+  type ToolCallRecord,
 } from '../../../utils/agenticToolFeedback';
 import { setProxyWorkerUrlOverride } from '../../../utils/proxyWorker';
 import { XhsMcpClient } from '../../../utils/xhsMcpClient';
@@ -721,25 +723,23 @@ export const attachScheduledTasks = (
 };
 
 /**
- * 这一轮在云端跑过哪些工具，按第一次出现的顺序压成 `[{ name, count }]`。
+ * 这一轮在云端**真跑起来**的工具，按第一次出现的顺序压成 `[{ name, count }]`。
  *
- * 只留名字和次数：气泡底下那行灰字（「调用了工具：web_search ×2 · recall ×1」）照它渲染，
- * 参数和结果都不带——那些是角色的内心活动，摊给用户看反而出戏，体积也压不住。
+ * 只留原始工具名和次数：参数和结果都不带（那些是角色的内心活动，摊给用户看反而出戏），
+ * 翻译成人话也不在这儿——那是显示的事，归客户端（见 utils/amsgToolTrace.ts）。
  *
- * MCP 工具剥掉内部前缀（`mcp__`）：那是我们拿来分流的，用户在设置里配的是剥完之后
- * 那个名字，原样显示对不上号。
+ * 没跑起来的不算数。没配 key、连不上、MCP 服务器没开机的那些调用一个请求都没发出去，
+ * 记进痕迹的话，气泡底下就会写着「调用了工具：搜索网页」而其实什么都没查——这行字
+ * 本来就是为了防这种穿帮的，自己先造一个就本末倒置了。「跑了但没查到」照算：
+ * 它是真去查了。
  */
-export const condenseToolTrace = (
-  calls: ReadonlyArray<{ name: string }>,
+const condenseToolTrace = (
+  calls: ReadonlyArray<ToolCallRecord>,
 ): Array<{ name: string; count: number }> => {
   const counts = new Map<string, number>();
   for (const call of calls) {
-    const raw = call?.name ?? '';
-    const name = raw.startsWith(MCP_FIRE_NAME_PREFIX)
-      ? raw.slice(MCP_FIRE_NAME_PREFIX.length)
-      : raw;
-    if (!name) continue;
-    counts.set(name, (counts.get(name) ?? 0) + 1);
+    if (call.ran === false) continue;
+    counts.set(call.name, (counts.get(call.name) ?? 0) + 1);
   }
   return [...counts].map(([name, count]) => ({ name, count }));
 };
@@ -1421,7 +1421,7 @@ export const amsgHooks = {
 
       // 这一轮在云端跑过的工具随**最后一条** push 回客户端，气泡底下那行灰字照它渲染。
       // 挂最后一条是因为它跟正文一起收尾：用户读完话才看到「哦，这是查过的」；挂第一条
-      // 就成了还没开口先报备一句「我查了 web_search」。
+      // 就成了还没开口先报备一句「我搜了网页」。
       //
       // 只在即时对话这条路回传。定时任务的气泡是凭空冒出来的（用户没在等这一轮），底下
       // 再挂一行「调用了工具」等于把后台实现摊开给用户看，跟主动消息要的那点不着痕迹相冲。
@@ -1561,7 +1561,10 @@ export const amsgHooks = {
           : name.startsWith(MCP_FIRE_NAME_PREFIX)
             ? await runMcpFireTool(stash, name, args)
             : await dispatchAgenticTool(name, args, stash.toolCtx);
-        stash.session.toolCalls.push({ name, fingerprint });
+        // ran 记的是「这次到底跑没跑起来」：没配 key / 连不上 / 服务器没开机的那些
+        // 一个请求都没发出去。回喂给模型的措辞早就分开讲了（见 buildToolResultMessage），
+        // 给用户看的那行工具痕迹也要照着筛（见 condenseToolTrace）。
+        stash.session.toolCalls.push({ name, fingerprint, ran: !neverRan(result) });
         // 不再回裸 JSON：模型从裸 JSON 里看不出「这一步已经做完了」，提示词里但凡有一句
         // 常驻的「先去查 X」就会每轮照做。这段话跟前台说的是同一套（见 agenticToolFeedback）。
         content = buildToolResultMessage({ name, result, history: stash.session.toolCalls });

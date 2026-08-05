@@ -9018,10 +9018,8 @@ var attachScheduledTasks = (pushPayloads, tasks) => {
 var condenseToolTrace = (calls) => {
   const counts = /* @__PURE__ */ new Map();
   for (const call of calls) {
-    const raw = call?.name ?? "";
-    const name = raw.startsWith(MCP_FIRE_NAME_PREFIX) ? raw.slice(MCP_FIRE_NAME_PREFIX.length) : raw;
-    if (!name) continue;
-    counts.set(name, (counts.get(name) ?? 0) + 1);
+    if (call.ran === false) continue;
+    counts.set(call.name, (counts.get(call.name) ?? 0) + 1);
   }
   return [...counts].map(([name, count]) => ({ name, count }));
 };
@@ -9528,7 +9526,7 @@ var amsgHooks = {
           continue;
         }
         const result = name === AMSG_FIRE_SCHEDULE_TOOL ? await runFireScheduleTool(stash, ctx.scheduleTask, args, Date.now()) : name.startsWith(MCP_FIRE_NAME_PREFIX) ? await runMcpFireTool(stash, name, args) : await dispatchAgenticTool(name, args, stash.toolCtx);
-        stash.session.toolCalls.push({ name, fingerprint });
+        stash.session.toolCalls.push({ name, fingerprint, ran: !neverRan(result) });
         content = buildToolResultMessage({ name, result, history: stash.session.toolCalls });
         console.log("[amsg:agentic]", { type: "tool_done", sessionId: ctx.sessionId, tool: name });
       } catch (error) {
@@ -9770,7 +9768,6 @@ export {
   amsgStaleSkip,
   attachScheduledTasks,
   buildWorkerConfig,
-  condenseToolTrace,
   src_default as default,
   inspectWorkerEnv,
   offloadOversizedPush,

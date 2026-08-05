@@ -796,8 +796,8 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
 
   // worker 把「这一轮跑过哪些工具」挂在最后一条 push 的 metadata.amsgToolTrace 上，
   // 气泡底下那行灰字照它渲染。它走的是 mcdInheritMeta 这条通道——push 的 metadata 整份
-  // 铺到每条落库的气泡上。铺的时候 `...(message.metadata)` 排在最后，谁也盖不掉它；
-  // 哪天顺序改了，这行灰字会静默消失（用户只看到角色凭空知道了新闻）。
+  // 铺到每条落库的气泡上。这一份必须铺进去，哪天漏了，这行灰字会静默消失
+  // （用户只看到角色凭空知道了新闻）。
   describe('云端带回来的工具痕迹', () => {
     const TRACE = [{ name: 'web_search', count: 2 }, { name: 'recall', count: 1 }];
 
@@ -822,7 +822,7 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
       expect(msgs.length).toBeGreaterThan(0);
       for (const m of msgs) {
         expect((m.metadata as any)?.amsgToolTrace).toEqual(TRACE);
-        // 同一份 metadata 里那几个固定字段照旧在（痕迹不是靠盖掉别人挤进来的）
+        // 同一份 metadata 里那几个固定字段照旧在：痕迹是加进来的，不是挤掉别人换来的
         expect((m.metadata as any)?.source).toBe('active_msg_2');
         expect((m.metadata as any)?.activeMsg2?.messageId).toBe('msg-tooltrace');
       }
