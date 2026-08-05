@@ -1028,7 +1028,8 @@ export const useChatAI = ({
             // 主动消息 2.0 本地工具：worker 已配置 + 角色没关掉时注入 schedule/cancel/renew/list，
             // 并注入「排程现状」背景块（常驻能力简介 + 进行中任务 + 作废待处理，角色自行判断怎么接）。
             // 是否注入在上面 thinking 门那里就算好了（amsg2ToolsInjected）。
-            // amsg2 和 instant push 互斥，不需要额外判断。
+            // amsg2 和 Instant Push 在设置页已经是双向互斥，正常情况下不可能两个都开，
+            // 这里不需要额外判断（下面的 Instant Push 分支只为历史配置兜底保留）。
             let amsg2ExpiredIds: string[] = [];
             let amsg2Notices: Amsg2ExpiredNoticeRecord[] = [];
             if (amsg2ToolsInjected) {
@@ -1137,8 +1138,9 @@ export const useChatAI = ({
             // ─── 即时对话（主动消息 2.0 云端生成）分支 ───
             // 和上面的 Instant Push 对称：这一轮的上下文 + 任务一个 POST 上云，云端跑完
             // 走推送回来（收件箱同一条管线入库），客户端发完那一刻就自由了。
-            // 两个开关同时开着时 Instant Push 先走（它在上面已经 return），设置页那道门
-            // 也不允许同时打开，这里不再重复判定。
+            // 设置页那道门已经把两条路做成双向互斥，正常情况下不可能两个都开；
+            // 上面的 Instant Push 分支只为历史配置兜底保留，真走到会在那边先 return，
+            // 这里不用再重复判定。
             //
             // MCP 刻意不在排除名单里：worker fire 时自己解析 tool_config、自己跑后台
             // MCP（这次 POST 顺手把配置传上去了），云端答得了。排掉它的话，只要全局配着
@@ -1775,7 +1777,8 @@ export const useChatAI = ({
             // 防穿帮闸：仅当这轮请求真的成功、回执确实进了模型上下文并产出已落库的
             // 回复，才标记已告知；失败/中断路径不标，下轮重新注入（回执不丢）。
             // 放在 try 成功尾部（回复已 applyAssistantPostProcessing 落库），与 catch/finally 互斥；
-            // amsg2 与 instant 互斥，instant 路径在上方已 return，这里只覆盖本地 fetch 路径。
+            // amsg2 与 Instant Push 设置页双向互斥，instant 路径在上方已 return（那条分支
+            // 只为历史配置兜底保留），这里只覆盖本地 fetch 路径。
             if (amsg2ExpiredIds.length) {
                 void ActiveMsgStore.markExpiredNoticesNotified(char.id, amsg2ExpiredIds);
             }

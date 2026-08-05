@@ -442,7 +442,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
             角色到点自动给你发消息，App 关着也能收。你自己部署一个 Cloudflare Worker（自带 D1 数据库 + 定时触发），把地址填在下面即可。
           </p>
           <p className="text-[11px] leading-relaxed text-violet-600/80">
-            和「Instant Push」不同：Instant 是你发消息才即时回；这个是到点主动推。
+            即时对话：你发消息，这一轮整个交给云端跑，发完就能关页面。到点主动推的定时消息与它共用同一条云端管线。
           </p>
         </div>
 
@@ -452,18 +452,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
           <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2">
             <div className="font-bold text-amber-900 text-sm">Instant Push 也开着</div>
             <p className="text-xs leading-relaxed text-amber-800">
-              两个都开时聊天走 Instant Push，主动消息 2.0 里挂在聊天上的这三样不会生效：
-            </p>
-            <ul className="text-xs leading-relaxed text-amber-800 space-y-1 list-disc list-outside pl-4">
-              <li>角色在聊天里排任务、取消任务（工具不会跟着请求发出去）</li>
-              <li>角色知道自己有哪些任务在排（排程现状同样发不出去）</li>
-              <li>
-                防打断——你正聊着的时候，到点的主动消息不会自动让路，可能直接弹出来
-              </li>
-            </ul>
-            <p className="text-xs leading-relaxed text-amber-800">
-              <strong>到点推送本身照常工作</strong>，受影响的只有上面这些。两边各管一件事：Instant 让「发完消息就关掉 App」
-              也能收到回复，2.0 管到点主动找你，所以并不是谁替代谁，按你更需要哪个来留。
+              检测到 Instant Push 还开着。即时对话已经覆盖了它的能力（发完就自由、云端跑工具、断网补收），两条路只能留一条。点下面把 Instant Push 关掉，聊天就交给 2.0。
             </p>
             <button
               type="button"
