@@ -759,6 +759,51 @@ export function getApiRequestCaptureSectionContent(
     }
 }
 
+export interface ApiRequestCaptureDuplicateSummary {
+    groups: number;
+    repeatedSections: number;
+    extraChars: number;
+    examples: Array<{ label: string; occurrences: number; chars: number }>;
+}
+
+/**
+ * 检查客户端实际请求里是否有完全相同的长文本被重复塞入。
+ * 只比较正文分区，忽略请求参数/tools 和短句，避免把常见短提醒误报成提示词重复。
+ */
+export function summarizeApiRequestCaptureDuplicates(
+    capture: ApiRequestCapture,
+    minChars = 160,
+): ApiRequestCaptureDuplicateSummary {
+    const byContent = new Map<string, Array<ApiRequestCaptureSection>>();
+    capture.sections.forEach(section => {
+        if (section.kind === 'request' || section.kind === 'tools' || section.chars < minChars) return;
+        const content = getApiRequestCaptureSectionContent(capture, section)
+            .replace(/\r\n/g, '\n')
+            .replace(/[ \t]+$/gm, '')
+            .trim();
+        if (content.length < minChars) return;
+        const matches = byContent.get(content) || [];
+        matches.push(section);
+        byContent.set(content, matches);
+    });
+
+    const duplicates = [...byContent.entries()]
+        .filter(([, sections]) => sections.length > 1)
+        .map(([content, sections]) => ({
+            label: sections[0].label,
+            occurrences: sections.length,
+            chars: content.length,
+        }))
+        .sort((a, b) => (b.chars * (b.occurrences - 1)) - (a.chars * (a.occurrences - 1)));
+
+    return {
+        groups: duplicates.length,
+        repeatedSections: duplicates.reduce((sum, item) => sum + item.occurrences, 0),
+        extraChars: duplicates.reduce((sum, item) => sum + item.chars * (item.occurrences - 1), 0),
+        examples: duplicates.slice(0, 3),
+    };
+}
+
 /** 生成适合用户直接发给开发者排查的可读 TXT；不额外落库，只在复制/下载时即时拼装。 */
 export function formatApiRequestCaptureTxt(capture: ApiRequestCapture): string {
     const fmt = (value: number) => value.toLocaleString('en-US');
@@ -771,6 +816,7 @@ export function formatApiRequestCaptureTxt(capture: ApiRequestCapture): string {
         grouped.set(section.kind, current);
     });
     const classifiedChars = [...grouped.values()].reduce((sum, item) => sum + item.chars, 0) || 1;
+    const duplicateSummary = summarizeApiRequestCaptureDuplicates(capture);
     const sourceRows = [...grouped.entries()]
         .sort((a, b) => b[1].chars - a[1].chars)
         .map(([kind, item], index) => {
@@ -809,6 +855,12 @@ export function formatApiRequestCaptureTxt(capture: ApiRequestCapture): string {
         capture.binaryPlaceholders > 0
             ? `二进制占位：${capture.binaryPlaceholders} 个（图片/音频正文未保存，已保留原始长度）`
             : '二进制占位：0',
+        '',
+        '===== 客户端发出前重复检查 =====',
+        duplicateSummary.groups === 0
+            ? '未发现完全相同的长文本被客户端重复发送。'
+            : `发现 ${duplicateSummary.groups} 组完全相同的长文本；重复部分额外 ${fmt(duplicateSummary.extraChars)} 字符。`,
+        '说明：这里只能证明客户端实际发出了什么，无法检查中转站收到请求后的二次拼接。',
         '',
         '===== 来源体积排行（按正文字符统计，不是 Token） =====',
         ...sourceRows,

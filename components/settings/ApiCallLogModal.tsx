@@ -10,10 +10,12 @@ import {
     isSameCoreModel,
     isFixedPromptBlockLabel,
     setApiRequestCaptureArmed,
+    summarizeApiRequestCaptureDuplicates,
 } from '../../utils/apiCallLog';
 import type {
     ApiCallLogEntry,
     ApiRequestCapture,
+    ApiRequestCaptureSection,
     ApiRequestCaptureSectionKind,
     PromptBlockStat,
 } from '../../utils/apiCallLog';
@@ -357,10 +359,12 @@ const OneShotCapturePanel: React.FC<{
     onClear: () => void;
 }> = ({ capture, armed, onToggle, onClear }) => {
     const [expandedSectionId, setExpandedSectionId] = useState<string | null>(null);
+    const [showFixedSections, setShowFixedSections] = useState(false);
     const [copyNotice, setCopyNotice] = useState('');
 
     useEffect(() => {
         setExpandedSectionId(null);
+        setShowFixedSections(false);
         setCopyNotice('');
     }, [capture?.id]);
 
@@ -389,10 +393,24 @@ const OneShotCapturePanel: React.FC<{
                     : capture.usageStatus == null
                         ? '旧记录未采集'
                         : '接口未返回';
+    const fixedSections = useMemo(
+        () => capture?.sections.filter(section => section.kind === 'system') || [],
+        [capture],
+    );
+    const detailSections = useMemo(
+        () => capture?.sections.filter(section => section.kind !== 'system') || [],
+        [capture],
+    );
+    const duplicateSummary = useMemo(
+        () => capture ? summarizeApiRequestCaptureDuplicates(capture) : null,
+        [capture],
+    );
     const sourceStats = useMemo(() => {
         if (!capture) return [];
         const grouped = new Map<ApiRequestCaptureSectionKind, { chars: number; count: number; source: string }>();
-        capture.sections.forEach(section => {
+        capture.sections
+            .filter(section => section.kind !== 'system' && section.kind !== 'request' && section.kind !== 'tools')
+            .forEach(section => {
             const current = grouped.get(section.kind) || {
                 chars: 0,
                 count: 0,
@@ -401,7 +419,7 @@ const OneShotCapturePanel: React.FC<{
             current.chars += section.chars;
             current.count++;
             grouped.set(section.kind, current);
-        });
+            });
         const total = [...grouped.values()].reduce((sum, item) => sum + item.chars, 0) || 1;
         return [...grouped.entries()]
             .map(([kind, item]) => ({ ...item, kind, pct: item.chars / total * 100 }))
@@ -414,6 +432,43 @@ const OneShotCapturePanel: React.FC<{
         setCopyNotice('TXT 已导出');
         window.setTimeout(() => setCopyNotice(''), 1600);
     }, [capture, txtReport]);
+
+    const renderSection = (section: ApiRequestCaptureSection) => {
+        const expanded = expandedSectionId === section.id;
+        return (
+            <div key={section.id} className="overflow-hidden rounded-xl border border-slate-200/70 bg-white/80">
+                <button
+                    type="button"
+                    onClick={() => setExpandedSectionId(expanded ? null : section.id)}
+                    className="flex w-full items-start gap-2 px-3 py-2.5 text-left"
+                >
+                    <span className={`mt-0.5 shrink-0 rounded-md px-1.5 py-0.5 text-[9px] font-semibold ${CAPTURE_KIND_STYLE[section.kind]}`}>
+                        {CAPTURE_KIND_LABEL[section.kind]}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                        <span className="flex items-baseline gap-2">
+                            <span className="min-w-0 flex-1 truncate text-[10px] font-semibold text-slate-600" title={section.label}>{section.label}</span>
+                            <span className="shrink-0 font-mono text-[9px] text-slate-400">{fmt(section.chars)} 字符</span>
+                        </span>
+                        <span className="mt-0.5 block break-words text-[9px] leading-relaxed text-slate-400">
+                            来自：{getApiRequestCaptureSectionSource(section)}
+                        </span>
+                        <span className="mt-0.5 block truncate font-mono text-[8px] text-slate-300" title={section.path || ''}>
+                            {section.path || (section.messageIndex != null ? `messages[${section.messageIndex}]` : '请求体')}
+                        </span>
+                    </span>
+                    <span className="mt-0.5 shrink-0 text-[9px] text-slate-300">{expanded ? '▲' : '▼'}</span>
+                </button>
+                {expanded && (
+                    <CaptureSectionContent
+                        content={getApiRequestCaptureSectionContent(capture!, section)}
+                        mono={section.kind === 'request' || section.kind === 'tools' || section.kind === 'tool'}
+                        onCopy={value => copy(value, '本区已复制')}
+                    />
+                )}
+            </div>
+        );
+    };
 
     return (
         <section className="mb-4 border-y border-slate-200/70 py-4" aria-labelledby="one-shot-capture-title">
@@ -461,28 +516,40 @@ const OneShotCapturePanel: React.FC<{
                             <Field label="角色" value={capture.meta.charName} />
                             <div className="col-span-2"><Field label="模型" value={capture.model} mono wrap /></div>
                         </div>
-                        <div className="mt-3 grid grid-cols-2 border-y border-emerald-100/80 text-center">
-                            <div className="border-b border-r border-emerald-100/80 py-2">
-                                <div className="text-[9px] text-slate-400">输入 Token（响应自报）</div>
-                                <div className="text-xs font-bold text-slate-600">{promptTokenValue}</div>
+                        <div className="mt-3 border-y border-emerald-100/80 py-3">
+                            <div className="flex items-end justify-between gap-4">
+                                <div>
+                                    <div className="text-[9px] font-semibold text-slate-400">本次输入 Token</div>
+                                    <div className="mt-0.5 text-xl font-bold tracking-tight text-slate-700">{promptTokenValue}</div>
+                                </div>
+                                <div className="pb-0.5 text-right text-[9px] leading-relaxed text-slate-400">
+                                    <div>模型响应自报</div>
+                                    <div>不是字符换算</div>
+                                </div>
                             </div>
-                            <div className="border-b border-emerald-100/80 py-2">
-                                <div className="text-[9px] text-slate-400">请求体字符（非 Token）</div>
-                                <div className="text-xs font-bold text-slate-600">{fmt(capture.totalChars)}</div>
-                            </div>
-                            <div className="border-r border-emerald-100/80 py-2">
-                                <div className="text-[9px] text-slate-400">消息数</div>
-                                <div className="text-xs font-bold text-slate-600">{capture.messageCount}</div>
-                            </div>
-                            <div className="py-2">
-                                <div className="text-[9px] text-slate-400">分区数</div>
-                                <div className="text-xs font-bold text-slate-600">{capture.sections.length}</div>
+                            <div className="mt-2 border-t border-emerald-100/70 pt-2 text-[9px] leading-relaxed text-slate-400">
+                                辅助计数：请求 JSON {fmt(capture.totalChars)} 字符（非 Token） · {capture.messageCount} 条消息 · {capture.sections.length} 个分区
                             </div>
                         </div>
 
-                        <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
-                            这里的“字符”只是请求文字长度，不是模型计费的 Token 数。
-                        </p>
+                        {duplicateSummary && (
+                            <div className={`mt-3 border-l-2 py-1.5 pl-3 ${
+                                duplicateSummary.groups === 0 ? 'border-emerald-400' : 'border-amber-400'
+                            }`}>
+                                <div className={`text-[10px] font-bold ${
+                                    duplicateSummary.groups === 0 ? 'text-emerald-700' : 'text-amber-700'
+                                }`}>
+                                    {duplicateSummary.groups === 0
+                                        ? '✓ 客户端发出前未发现完全重复的大段内容'
+                                        : `! 客户端请求内发现 ${duplicateSummary.groups} 组重复大段`}
+                                </div>
+                                <p className="mt-0.5 text-[9px] leading-relaxed text-slate-500">
+                                    {duplicateSummary.groups === 0
+                                        ? '若服务商后台仍显示同一提示词出现两份，重复发生在请求离开客户端之后。'
+                                        : `重复内容额外占用 ${fmt(duplicateSummary.extraChars)} 字符；请在下方逐段核对来源。`}
+                                </p>
+                            </div>
+                        )}
 
                         <p className="mt-2 text-[10px] leading-relaxed text-amber-700/80">
                             内容仅保存在本机，可能含聊天和记忆隐私。发给别人排查前请先检查。
@@ -509,14 +576,14 @@ const OneShotCapturePanel: React.FC<{
                         {sourceStats.length > 0 && (
                             <div className="mt-4 border-t border-slate-200/70 pt-3">
                                 <div className="flex items-baseline justify-between gap-2">
-                                    <h4 className="text-[11px] font-bold text-slate-600">来源体积排行</h4>
-                                    <span className="text-[9px] text-slate-400">按正文字符统计 · 非 Token</span>
+                                    <h4 className="text-[11px] font-bold text-slate-600">可变化内容组成</h4>
+                                    <span className="text-[9px] text-slate-400">仅比较动态内容 · 非 Token</span>
                                 </div>
                                 <p className="mt-1 text-[9px] leading-relaxed text-slate-400">
-                                    来源由消息角色和分区标题自动识别；无法确认的内容统一归到“系统提示词”，可展开正文核对。
+                                    这里关注会随聊天变化的历史、记忆和场景；固定基础指令已单独收起，不参与占比。
                                 </p>
                                 <div className="mt-2.5 space-y-2.5">
-                                    {sourceStats.map((item, index) => (
+                                    {sourceStats.map(item => (
                                         <div key={item.kind}>
                                             <div className="flex items-baseline gap-2">
                                                 <span className="min-w-0 flex-1 truncate text-[10px] font-semibold text-slate-600" title={item.source}>
@@ -528,7 +595,7 @@ const OneShotCapturePanel: React.FC<{
                                             </div>
                                             <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-100">
                                                 <div
-                                                    className={`h-full rounded-full ${index === 0 && item.pct >= 35 ? 'bg-amber-400' : 'bg-primary/55'}`}
+                                                    className="h-full rounded-full bg-primary/55"
                                                     style={{ width: `${Math.max(item.pct, 1.5)}%` }}
                                                 />
                                             </div>
@@ -541,48 +608,42 @@ const OneShotCapturePanel: React.FC<{
                             </div>
                         )}
 
+                        {fixedSections.length > 0 && (
+                            <div className="mt-4 border-t border-slate-200/70 pt-3">
+                                <button
+                                    type="button"
+                                    onClick={() => setShowFixedSections(value => !value)}
+                                    className="flex w-full items-start gap-3 text-left"
+                                >
+                                    <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-violet-300" />
+                                    <span className="min-w-0 flex-1">
+                                        <span className="flex items-center gap-2">
+                                            <span className="text-[11px] font-bold text-slate-600">基础固定指令</span>
+                                            <span className="rounded-full bg-violet-50 px-1.5 py-0.5 text-[8px] font-semibold text-violet-500">稳定基线</span>
+                                        </span>
+                                        <span className="mt-0.5 block text-[9px] leading-relaxed text-slate-400">
+                                            应用和预设正常工作所需，通常不会随聊天轮数持续增长；已合并显示，不作为首要膨胀项。
+                                        </span>
+                                    </span>
+                                    <span className="shrink-0 pt-0.5 text-[9px] font-semibold text-violet-500">
+                                        {showFixedSections ? '收起' : '查看明细'}
+                                    </span>
+                                </button>
+                                {showFixedSections && (
+                                    <div className="mt-2 space-y-1.5 border-l border-violet-100 pl-3">
+                                        {fixedSections.map(renderSection)}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
                         <div className="mt-4 border-t border-slate-200/70 pt-3">
                             <div className="mb-2">
-                                <h4 className="text-[11px] font-bold text-slate-600">按发送顺序逐段查看</h4>
-                                <p className="mt-0.5 text-[9px] text-slate-400">每段都标明来源和它在原始请求中的位置。</p>
+                                <h4 className="text-[11px] font-bold text-slate-600">动态内容与请求配置</h4>
+                                <p className="mt-0.5 text-[9px] text-slate-400">按实际发送顺序列出；每段都标明来源和原始请求位置。</p>
                             </div>
                             <div className="space-y-1.5">
-                            {capture.sections.map(section => {
-                                const expanded = expandedSectionId === section.id;
-                                return (
-                                    <div key={section.id} className="overflow-hidden rounded-xl border border-slate-200/70 bg-white/80">
-                                        <button
-                                            type="button"
-                                            onClick={() => setExpandedSectionId(expanded ? null : section.id)}
-                                            className="flex w-full items-start gap-2 px-3 py-2.5 text-left"
-                                        >
-                                            <span className={`mt-0.5 shrink-0 rounded-md px-1.5 py-0.5 text-[9px] font-semibold ${CAPTURE_KIND_STYLE[section.kind]}`}>
-                                                {CAPTURE_KIND_LABEL[section.kind]}
-                                            </span>
-                                            <span className="min-w-0 flex-1">
-                                                <span className="flex items-baseline gap-2">
-                                                    <span className="min-w-0 flex-1 truncate text-[10px] font-semibold text-slate-600" title={section.label}>{section.label}</span>
-                                                    <span className="shrink-0 font-mono text-[9px] text-slate-400">{fmt(section.chars)} 字符</span>
-                                                </span>
-                                                <span className="mt-0.5 block break-words text-[9px] leading-relaxed text-slate-400">
-                                                    来自：{getApiRequestCaptureSectionSource(section)}
-                                                </span>
-                                                <span className="mt-0.5 block truncate font-mono text-[8px] text-slate-300" title={section.path || ''}>
-                                                    {section.path || (section.messageIndex != null ? `messages[${section.messageIndex}]` : '请求体')}
-                                                </span>
-                                            </span>
-                                            <span className="mt-0.5 shrink-0 text-[9px] text-slate-300">{expanded ? '▲' : '▼'}</span>
-                                        </button>
-                                        {expanded && (
-                                            <CaptureSectionContent
-                                                content={getApiRequestCaptureSectionContent(capture, section)}
-                                                mono={section.kind === 'request' || section.kind === 'tools' || section.kind === 'tool'}
-                                                onCopy={value => copy(value, '本区已复制')}
-                                            />
-                                        )}
-                                    </div>
-                                );
-                            })}
+                            {detailSections.map(renderSection)}
 
                             <div className="overflow-hidden rounded-xl border border-slate-200/70 bg-white/80">
                                 <button
