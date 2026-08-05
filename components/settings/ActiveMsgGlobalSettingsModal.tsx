@@ -446,8 +446,9 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
           </p>
         </div>
 
-        {/* 两个都开着时聊天走 Instant，2.0 挂在本地那条路上的东西全静默失效。
-            没有报错也没有提示，只会表现成「这功能怎么不响」——所以在这儿说清楚。 */}
+        {/* 正常情况下两道双向门会拦住「两个都开」，能走到这儿全是脏配置遗留。
+            脏配置照样会让聊天悄悄走 Instant，2.0 挂在本地那条路上的东西全静默失效——
+            没有报错也没有提示，只会表现成「这功能怎么不响」，这张卡就是收拾它的入口。 */}
         {instantOn ? (
           <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2">
             <div className="font-bold text-amber-900 text-sm">Instant Push 也开着</div>
