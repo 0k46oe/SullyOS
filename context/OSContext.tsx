@@ -20,7 +20,7 @@ import { runWorldEpisode, rerollWorldCharBeat } from '../utils/worldHome/engine'
 import { migrateWorldDaySegs } from '../utils/worldHome/prompts';
 import { ChatParser } from '../utils/chatParser';
 import { safeFetchJson } from '../utils/safeApi';
-import { getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext } from '../utils/apiCallLog';
+import { captureApiRequestOnce, getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext } from '../utils/apiCallLog';
 import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
 import { INSTALLED_APPS, HIDDEN_APP_NAMES } from '../constants';
@@ -1068,6 +1068,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       if (body !== rawBody) sendArgs = [resource, { ...(config as RequestInit), body }];
                   } catch { /* 非 JSON body：原样放行 */ }
               }
+          }
+
+          // 用户手动开启的「本次发送统计」：只抢占下一条请求，并在真正发出前立即自动关闭。
+          // 取兼容层处理后的 sendArgs，展示内容与本次实际提交给服务端的请求体一致。
+          if (urlStr.includes('/chat/completions')) {
+              const captureMeta = (sendArgs[1] as any)?.__sullyMeta || ambientMetaAtStart;
+              captureApiRequestOnce({ url: urlStr, body: (sendArgs[1] as any)?.body, meta: captureMeta });
           }
 
           try {

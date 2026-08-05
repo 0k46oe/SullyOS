@@ -1,8 +1,22 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import Modal from '../os/Modal';
 import { DB } from '../../utils/db';
-import { isSameCoreModel, isFixedPromptBlockLabel } from '../../utils/apiCallLog';
-import type { ApiCallLogEntry, PromptBlockStat } from '../../utils/apiCallLog';
+import {
+    API_REQUEST_CAPTURE_EVENT,
+    formatApiRequestCaptureTxt,
+    getApiRequestCaptureSectionContent,
+    getApiRequestCaptureSectionSource,
+    isApiRequestCaptureArmed,
+    isSameCoreModel,
+    isFixedPromptBlockLabel,
+    setApiRequestCaptureArmed,
+} from '../../utils/apiCallLog';
+import type {
+    ApiCallLogEntry,
+    ApiRequestCapture,
+    ApiRequestCaptureSectionKind,
+    PromptBlockStat,
+} from '../../utils/apiCallLog';
 import { trackEvent } from '../../utils/analytics';
 
 interface ApiCallLogModalProps {
@@ -32,14 +46,21 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
     const [loading, setLoading] = useState(false);
     const [showHelp, setShowHelp] = useState(false);
     const [expandedId, setExpandedId] = useState<string | null>(null);
+    const [capture, setCapture] = useState<ApiRequestCapture | null>(null);
+    const [captureArmed, setCaptureArmedState] = useState(() => isApiRequestCaptureArmed());
 
     const load = useCallback(async () => {
         setLoading(true);
         try {
-            const data = await DB.getApiCallLog();
+            const [data, savedCapture] = await Promise.all([
+                DB.getApiCallLog(),
+                DB.getApiRequestCapture(),
+            ]);
             // DB 里已按新→旧 unshift，这里再兜底排一次序
             data.sort((a: ApiCallLogEntry, b: ApiCallLogEntry) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
             setEntries(data);
+            setCapture(savedCapture);
+            setCaptureArmedState(isApiRequestCaptureArmed());
             // 这一批记录里只要有一条「实际后端」跟请求的模型对不上，就记一次。
             // 只记「出现过」这件事，模型名一个字都不带出去。
             if (data.some((e: ApiCallLogEntry) =>
@@ -58,11 +79,33 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
         if (isOpen) load();
     }, [isOpen, load]);
 
+    useEffect(() => {
+        const handleCaptureChange = async (event: Event) => {
+            setCaptureArmedState(isApiRequestCaptureArmed());
+            if ((event as CustomEvent)?.detail?.status === 'saved') {
+                setCapture(await DB.getApiRequestCapture());
+            }
+        };
+        window.addEventListener(API_REQUEST_CAPTURE_EVENT, handleCaptureChange);
+        return () => window.removeEventListener(API_REQUEST_CAPTURE_EVENT, handleCaptureChange);
+    }, []);
+
     const handleClear = useCallback(async () => {
         if (!window.confirm('确定清空所有 API 调用记录吗？此操作不可撤销。')) return;
         await DB.clearApiCallLog();
         setEntries([]);
         trackEvent('清空 API 调用记录');
+    }, []);
+
+    const handleCaptureToggle = useCallback(() => {
+        setApiRequestCaptureArmed(!captureArmed);
+        setCaptureArmedState(isApiRequestCaptureArmed());
+    }, [captureArmed]);
+
+    const handleCaptureClear = useCallback(async () => {
+        if (!window.confirm('确定清除这一次的完整发送内容吗？')) return;
+        await DB.clearApiRequestCapture();
+        setCapture(null);
     }, []);
 
     return (
@@ -126,6 +169,13 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                     </p>
                 </div>
             )}
+
+            <OneShotCapturePanel
+                capture={capture}
+                armed={captureArmed}
+                onToggle={handleCaptureToggle}
+                onClear={handleCaptureClear}
+            />
 
             {entries.length > 0 && (() => {
                 const totalTok = entries.reduce((s, e) => s + (e.totalTokens ?? 0), 0);
@@ -241,6 +291,325 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
         </Modal>
     );
 };
+
+const CAPTURE_KIND_LABEL: Record<ApiRequestCaptureSectionKind, string> = {
+    request: '参数',
+    tools: '工具',
+    system: '系统提示词',
+    memory: '记忆召回',
+    worldbook: '世界书',
+    context: '角色上下文',
+    user: '用户消息',
+    assistant: '角色历史',
+    tool: '工具结果',
+};
+
+const CAPTURE_KIND_STYLE: Record<ApiRequestCaptureSectionKind, string> = {
+    request: 'bg-slate-100 text-slate-500',
+    tools: 'bg-sky-50 text-sky-600',
+    system: 'bg-violet-50 text-violet-600',
+    memory: 'bg-amber-50 text-amber-700',
+    worldbook: 'bg-emerald-50 text-emerald-700',
+    context: 'bg-indigo-50 text-indigo-600',
+    user: 'bg-blue-50 text-blue-600',
+    assistant: 'bg-rose-50 text-rose-600',
+    tool: 'bg-cyan-50 text-cyan-700',
+};
+
+async function copyCaptureText(value: string): Promise<void> {
+    if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+        return;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+}
+
+function downloadCaptureTxt(capture: ApiRequestCapture, content: string): void {
+    const d = new Date(capture.capturedAt);
+    const pad = (value: number) => String(value).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+    const blob = new Blob(['\uFEFF', content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `SullyOS-LLM本次发送统计-${stamp}.txt`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+}
+
+const OneShotCapturePanel: React.FC<{
+    capture: ApiRequestCapture | null;
+    armed: boolean;
+    onToggle: () => void;
+    onClear: () => void;
+}> = ({ capture, armed, onToggle, onClear }) => {
+    const [expandedSectionId, setExpandedSectionId] = useState<string | null>(null);
+    const [copyNotice, setCopyNotice] = useState('');
+
+    useEffect(() => {
+        setExpandedSectionId(null);
+        setCopyNotice('');
+    }, [capture?.id]);
+
+    const copy = useCallback(async (value: string, notice: string) => {
+        try {
+            await copyCaptureText(value);
+            setCopyNotice(notice);
+            window.setTimeout(() => setCopyNotice(''), 1600);
+        } catch {
+            setCopyNotice('复制失败，请展开后手动复制');
+        }
+    }, []);
+
+    const capturedTime = capture ? formatTime(capture.capturedAt) : null;
+    const fmt = (n: number) => n.toLocaleString('en-US');
+    const rawId = '__raw_request__';
+    const txtReport = useMemo(() => capture ? formatApiRequestCaptureTxt(capture) : '', [capture]);
+    const sourceStats = useMemo(() => {
+        if (!capture) return [];
+        const grouped = new Map<ApiRequestCaptureSectionKind, { chars: number; count: number; source: string }>();
+        capture.sections.forEach(section => {
+            const current = grouped.get(section.kind) || {
+                chars: 0,
+                count: 0,
+                source: getApiRequestCaptureSectionSource(section),
+            };
+            current.chars += section.chars;
+            current.count++;
+            grouped.set(section.kind, current);
+        });
+        const total = [...grouped.values()].reduce((sum, item) => sum + item.chars, 0) || 1;
+        return [...grouped.entries()]
+            .map(([kind, item]) => ({ ...item, kind, pct: item.chars / total * 100 }))
+            .sort((a, b) => b.chars - a.chars);
+    }, [capture]);
+
+    const exportTxt = useCallback(() => {
+        if (!capture || !txtReport) return;
+        downloadCaptureTxt(capture, txtReport);
+        setCopyNotice('TXT 已导出');
+        window.setTimeout(() => setCopyNotice(''), 1600);
+    }, [capture, txtReport]);
+
+    return (
+        <section className="mb-4 border-y border-slate-200/70 py-4" aria-labelledby="one-shot-capture-title">
+            <div className="flex items-start justify-between gap-4 px-1">
+                <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                        <h3 id="one-shot-capture-title" className="text-sm font-bold text-slate-700">本次发送统计</h3>
+                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-semibold text-slate-400">一次后自动关闭</span>
+                    </div>
+                    <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+                        开启后，完整记录下一次发给 LLM 的内容，用来查是哪段记忆、提示词或历史撑大了上下文。
+                    </p>
+                </div>
+                <button
+                    type="button"
+                    role="switch"
+                    aria-checked={armed}
+                    aria-label="本次发送统计"
+                    onClick={onToggle}
+                    className={`relative mt-0.5 h-6 w-11 shrink-0 rounded-full transition-colors ${armed ? 'bg-primary' : 'bg-slate-200'}`}
+                >
+                    <span className={`absolute left-0 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${armed ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                </button>
+            </div>
+
+            <div className={`mt-3 rounded-2xl border px-4 py-3 ${
+                armed ? 'border-primary/25 bg-primary/5' : capture ? 'border-emerald-200/70 bg-emerald-50/40' : 'border-slate-200/60 bg-slate-50/60'
+            }`}>
+                <div className="flex items-center gap-2 text-[11px] font-semibold">
+                    <span className={`h-2 w-2 rounded-full ${armed ? 'animate-pulse bg-primary' : capture ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                    <span className={armed ? 'text-primary' : capture ? 'text-emerald-700' : 'text-slate-500'}>
+                        {armed ? '等待下一次 LLM 调用…' : capture ? '已抓取，开关已自动关闭' : '尚未开启抓取'}
+                    </span>
+                </div>
+                {armed && capture && (
+                    <p className="mt-1 pl-4 text-[10px] text-slate-400">下面是上一次结果；下一次调用会覆盖它。</p>
+                )}
+
+                {capture && (
+                    <div className="mt-3">
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[10px]">
+                            <Field label="时间" value={`${capturedTime?.day} ${capturedTime?.time}`} />
+                            <Field label="App" value={capture.meta.appName} />
+                            <Field label="用途" value={capture.meta.purpose} />
+                            <Field label="角色" value={capture.meta.charName} />
+                            <div className="col-span-2"><Field label="模型" value={capture.model} mono wrap /></div>
+                        </div>
+                        <div className="mt-3 flex items-center justify-around border-y border-emerald-100/80 py-2 text-center">
+                            <div>
+                                <div className="text-[9px] text-slate-400">请求体字符</div>
+                                <div className="text-xs font-bold text-slate-600">{fmt(capture.totalChars)}</div>
+                            </div>
+                            <div className="h-6 w-px bg-emerald-100" />
+                            <div>
+                                <div className="text-[9px] text-slate-400">消息数</div>
+                                <div className="text-xs font-bold text-slate-600">{capture.messageCount}</div>
+                            </div>
+                            <div className="h-6 w-px bg-emerald-100" />
+                            <div>
+                                <div className="text-[9px] text-slate-400">分区数</div>
+                                <div className="text-xs font-bold text-slate-600">{capture.sections.length}</div>
+                            </div>
+                        </div>
+
+                        <p className="mt-2 text-[10px] leading-relaxed text-amber-700/80">
+                            内容仅保存在本机，可能含聊天和记忆隐私。发给别人排查前请先检查。
+                            {capture.binaryPlaceholders > 0 && ` ${capture.binaryPlaceholders} 个图片/音频二进制只保留了类型和原始长度。`}
+                        </p>
+
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                            <button
+                                type="button"
+                                onClick={() => copy(txtReport, '完整 TXT 报告已复制')}
+                                className="rounded-xl bg-primary px-3 py-2.5 text-[10px] font-bold text-white active:scale-[0.98] transition-transform"
+                            >
+                                复制完整报告
+                            </button>
+                            <button
+                                type="button"
+                                onClick={exportTxt}
+                                className="rounded-xl border border-primary/20 bg-white px-3 py-2.5 text-[10px] font-bold text-primary active:scale-[0.98] transition-transform"
+                            >
+                                导出 TXT
+                            </button>
+                        </div>
+
+                        {sourceStats.length > 0 && (
+                            <div className="mt-4 border-t border-slate-200/70 pt-3">
+                                <div className="flex items-baseline justify-between gap-2">
+                                    <h4 className="text-[11px] font-bold text-slate-600">来源体积排行</h4>
+                                    <span className="text-[9px] text-slate-400">按可归类正文字符估算</span>
+                                </div>
+                                <p className="mt-1 text-[9px] leading-relaxed text-slate-400">
+                                    来源由消息角色和分区标题自动识别；无法确认的内容统一归到“系统提示词”，可展开正文核对。
+                                </p>
+                                <div className="mt-2.5 space-y-2.5">
+                                    {sourceStats.map((item, index) => (
+                                        <div key={item.kind}>
+                                            <div className="flex items-baseline gap-2">
+                                                <span className="min-w-0 flex-1 truncate text-[10px] font-semibold text-slate-600" title={item.source}>
+                                                    {CAPTURE_KIND_LABEL[item.kind]}
+                                                </span>
+                                                <span className="shrink-0 font-mono text-[9px] text-slate-400">
+                                                    {fmt(item.chars)} 字 · {item.pct < 1 ? '<1' : Math.round(item.pct)}%
+                                                </span>
+                                            </div>
+                                            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                                                <div
+                                                    className={`h-full rounded-full ${index === 0 && item.pct >= 35 ? 'bg-amber-400' : 'bg-primary/55'}`}
+                                                    style={{ width: `${Math.max(item.pct, 1.5)}%` }}
+                                                />
+                                            </div>
+                                            <p className="mt-0.5 break-words text-[9px] leading-relaxed text-slate-400">
+                                                来自：{item.source} · {item.count} 个分区
+                                            </p>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="mt-4 border-t border-slate-200/70 pt-3">
+                            <div className="mb-2">
+                                <h4 className="text-[11px] font-bold text-slate-600">按发送顺序逐段查看</h4>
+                                <p className="mt-0.5 text-[9px] text-slate-400">每段都标明来源和它在原始请求中的位置。</p>
+                            </div>
+                            <div className="space-y-1.5">
+                            {capture.sections.map(section => {
+                                const expanded = expandedSectionId === section.id;
+                                return (
+                                    <div key={section.id} className="overflow-hidden rounded-xl border border-slate-200/70 bg-white/80">
+                                        <button
+                                            type="button"
+                                            onClick={() => setExpandedSectionId(expanded ? null : section.id)}
+                                            className="flex w-full items-start gap-2 px-3 py-2.5 text-left"
+                                        >
+                                            <span className={`mt-0.5 shrink-0 rounded-md px-1.5 py-0.5 text-[9px] font-semibold ${CAPTURE_KIND_STYLE[section.kind]}`}>
+                                                {CAPTURE_KIND_LABEL[section.kind]}
+                                            </span>
+                                            <span className="min-w-0 flex-1">
+                                                <span className="flex items-baseline gap-2">
+                                                    <span className="min-w-0 flex-1 truncate text-[10px] font-semibold text-slate-600" title={section.label}>{section.label}</span>
+                                                    <span className="shrink-0 font-mono text-[9px] text-slate-400">{fmt(section.chars)} 字</span>
+                                                </span>
+                                                <span className="mt-0.5 block break-words text-[9px] leading-relaxed text-slate-400">
+                                                    来自：{getApiRequestCaptureSectionSource(section)}
+                                                </span>
+                                                <span className="mt-0.5 block truncate font-mono text-[8px] text-slate-300" title={section.path || ''}>
+                                                    {section.path || (section.messageIndex != null ? `messages[${section.messageIndex}]` : '请求体')}
+                                                </span>
+                                            </span>
+                                            <span className="mt-0.5 shrink-0 text-[9px] text-slate-300">{expanded ? '▲' : '▼'}</span>
+                                        </button>
+                                        {expanded && (
+                                            <CaptureSectionContent
+                                                content={getApiRequestCaptureSectionContent(capture, section)}
+                                                mono={section.kind === 'request' || section.kind === 'tools' || section.kind === 'tool'}
+                                                onCopy={value => copy(value, '本区已复制')}
+                                            />
+                                        )}
+                                    </div>
+                                );
+                            })}
+
+                            <div className="overflow-hidden rounded-xl border border-slate-200/70 bg-white/80">
+                                <button
+                                    type="button"
+                                    onClick={() => setExpandedSectionId(expandedSectionId === rawId ? null : rawId)}
+                                    className="flex w-full items-center gap-2 px-3 py-2 text-left"
+                                >
+                                    <span className="shrink-0 rounded-md bg-slate-800 px-1.5 py-0.5 text-[9px] font-semibold text-white">原始</span>
+                                    <span className="min-w-0 flex-1 truncate text-[10px] text-slate-600">完整请求 JSON（核对所有字段）</span>
+                                    <span className="shrink-0 text-[9px] text-slate-300">{expandedSectionId === rawId ? '▲' : '▼'}</span>
+                                </button>
+                                {expandedSectionId === rawId && (
+                                    <CaptureSectionContent
+                                        content={JSON.stringify(capture.payload, null, 2)}
+                                        mono
+                                        onCopy={value => copy(value, '完整请求已复制')}
+                                    />
+                                )}
+                            </div>
+                            </div>
+                        </div>
+
+                        <div className="mt-3 flex items-center justify-between gap-3">
+                            <span className="text-[10px] font-semibold text-primary">{copyNotice}</span>
+                            <button type="button" onClick={onClear} className="ml-auto text-[10px] font-semibold text-rose-500">清除本次详情</button>
+                        </div>
+                    </div>
+                )}
+            </div>
+        </section>
+    );
+};
+
+const CaptureSectionContent: React.FC<{ content: string; mono?: boolean; onCopy: (value: string) => void }> = ({ content, mono, onCopy }) => (
+    <div className="border-t border-slate-100 bg-slate-50/70 p-2.5">
+        <div className="mb-2 flex justify-end">
+            <button type="button" onClick={() => onCopy(content)} className="rounded-lg bg-white px-2 py-1 text-[9px] font-semibold text-primary shadow-sm">
+                复制本区
+            </button>
+        </div>
+        <pre
+            tabIndex={0}
+            className={`max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-slate-200/70 bg-white p-3 text-[10px] leading-5 text-slate-700 select-text ${mono ? 'font-mono' : 'font-sans'}`}
+        >
+            {content || '（空内容）'}
+        </pre>
+    </div>
+);
 
 /**
  * 输入构成面板：按字数降序列出每块（system 的 ### 段落 / 聚合的聊天历史），
