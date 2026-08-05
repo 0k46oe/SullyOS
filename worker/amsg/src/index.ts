@@ -112,9 +112,9 @@ import {
 } from './agentic';
 import {
   amsgEmotionUpdateKey,
-  readEmotionEvalSpec,
   runAmsgEmotionEval,
   stripEmotionEvalSpec,
+  takeEmotionEvalSpec,
 } from './emotionEval';
 import {
   buildInstantTimelyBlock,
@@ -878,6 +878,12 @@ export const amsgHooks = {
     const policy = typeof taskMeta.amsgExpirePolicy === 'string'
       ? taskMeta.amsgExpirePolicy : undefined;
 
+    // 副 API 凭据落地即取走：这一份 metadata 对象上游还要按引用往下传（onLLMOutput 的
+    // ctx.metadata、以及 hook 不接手时那条会把整份 metadata 直接挂上推送的模板路径），
+    // 在最早的地方摘掉，后面谁也漏不出去。取完还要用——即时对话那一支下面拿它起跑评估。
+    // 这里不分支：定时任务上本来就不该有这个键，真有也一样删掉。见 takeEmotionEvalSpec。
+    const emotionEvalSpec = takeEmotionEvalSpec(ctx.task.metadata);
+
     // 即时对话：用户刚把话说完、正盯着「正在输入…」等回复。下面三道门问的都是
     // 「主动消息到点还该不该发」——用户正在聊天所以让路、对话已经往前走所以作废、
     // 这次任务的方向是什么——对「回一句用户刚说的话」全都不适用，整段跳过。
@@ -1128,10 +1134,9 @@ export const amsgHooks = {
       // 喂给它的是主生成看到的同一串消息（含末尾那块时效信息）：客户端打包的 chat 段
       // 里已经没有「现在几点」了（那部分留给到点现填），只喂原串的话评估模型连时间都
       // 不知道，判出来的情绪跟角色刚说的话对不上。
-      const evalSpec = readEmotionEvalSpec(taskMeta);
-      if (evalSpec) {
+      if (emotionEvalSpec) {
         stash.emotionEvalPromise = runAmsgEmotionEval(
-          evalSpec, instantMessages, toolPack.charName || ctx.task.contactName || '角色');
+          emotionEvalSpec, instantMessages, toolPack.charName || ctx.task.contactName || '角色');
       }
 
       return {

@@ -6,7 +6,7 @@
 //   2. 只有 202 才算发出去。别的状态一律「没发出去」，绝不静默退回本地生成。
 //   3. 待收记录扛得住重启——它就是「正在输入…」那盏灯的唯一依据。
 //   4. 补收对账：已经上过屏的那条不能再放一遍。
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const TEST_USER_ID = '3f2b1c8a-9d4e-4a1b-8c2d-000000000009';
 
@@ -54,6 +54,7 @@ import {
   chatOutboxPayloadToInbox,
   clearInstantChatPending,
   drainChatOutboxForChar,
+  failInstantChatPending,
   getInstantChatPending,
   isInstantChatReady,
   sendInstantChatTurn,
@@ -375,6 +376,56 @@ describe('待收记录（「正在输入…」那盏灯的唯一依据）', () =
   it('存储里躺着坏数据时当没有，不能把整条路带崩', () => {
     localStorage.setItem(AMSG_INSTANT_CHAT_PENDING_LS_KEY, '{ 这不是 JSON');
     expect(getInstantChatPending('char-a')).toBeNull();
+  });
+});
+
+// 这一轮以「没等到回复」收尾时，「情绪更新中」那盏灯也得跟着灭。
+//
+// 情绪评估的结果是搭最后一条回复的推送回来的（metadata.amsgEmotionDone）。可这一轮
+// 要是**一条推送都没有**——模型空输出/纯拒答被 worker 判成 skip-push，或者整条 fire
+// 硬失败——那个信号永远不会到，灯只能等 660 秒的安全网熄，期间还会弹一句「worker 可能
+// 是旧版」的误导提示。云端已经点名说这一轮没成，就是最确定的熄灯时机。
+describe('零推送收尾时也要熄灭情绪徽章', () => {
+  // node 环境没有 window，给个最小 stub（这一组只关心派了哪些事件）。
+  beforeAll(() => {
+    (globalThis as any).window ??= { dispatchEvent: () => true };
+  });
+
+  const captureEvents = () => {
+    const seen: Array<{ type: string; detail: any }> = [];
+    const original = window.dispatchEvent;
+    (window as any).dispatchEvent = (event: any) => {
+      seen.push({ type: event?.type, detail: event?.detail });
+      return true;
+    };
+    return { seen, restore: () => { (window as any).dispatchEvent = original; } };
+  };
+
+  it('销账成功 → 发一次 instant-emotion-done（徽章的熄灭信号）', async () => {
+    setInstantChatPending('char-emo', 'uuid-emo', 1_000);
+    const { seen, restore } = captureEvents();
+    try {
+      await failInstantChatPending('char-emo', 'uuid-emo', '云端生成失败');
+    } finally {
+      restore();
+    }
+    const done = seen.filter((e) => e.type === 'instant-emotion-done');
+    expect(done).toHaveLength(1);
+    expect(done[0].detail).toEqual({ charId: 'char-emo' });
+  });
+
+  // 结论迟到、用户已经又发了一条时，销的是新那一轮的账才叫出事——灯也一样：
+  // 新那一轮的评估还在云端跑着，这时候熄灯等于骗人。
+  it('结论对不上当前这一轮 → 一个事件都不发（新那一轮的灯不许碰）', async () => {
+    setInstantChatPending('char-emo', 'uuid-new', 2_000);
+    const { seen, restore } = captureEvents();
+    try {
+      await failInstantChatPending('char-emo', 'uuid-old', '迟到的结论');
+    } finally {
+      restore();
+    }
+    expect(seen.some((e) => e.type === 'instant-emotion-done')).toBe(false);
+    expect(getInstantChatPending('char-emo')?.uuid).toBe('uuid-new');
   });
 });
 

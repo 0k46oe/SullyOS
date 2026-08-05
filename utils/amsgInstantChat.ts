@@ -329,6 +329,20 @@ export const failInstantChatPending = async (
 ): Promise<void> => {
   if (getInstantChatPending(charId)?.uuid !== uuid) return;
   if (!clearInstantChatPending(charId)) return;
+  // 「情绪更新中」那盏灯也在这里熄。
+  //
+  // 平时它的熄灭信号搭在最后一条回复的推送上（metadata.amsgEmotionDone，见
+  // activeMsgRuntime 收侧）。可这一轮要是一条推送都没有——模型空输出/纯拒答被 worker
+  // 判成 skip-push，或者整条 fire 硬失败——那个信号永远不会到，灯只能干等 660 秒的
+  // 安全网，中途还会弹一句「worker 可能是旧版」的误导提示。云端已经点名说这一轮没成，
+  // 就是最确定的熄灯时机。
+  //
+  // 事件名与形状跟收侧那处逐字一致（activeMsgRuntime 的 announceEmotionDone）；
+  // 不直接复用那个 helper 是因为 activeMsgRuntime 反过来 import 本模块，会成环。
+  // 派在写库之前：写库失败只 warn，灯不该被它连累（同上面那句注释的口径）。
+  try {
+    window.dispatchEvent(new CustomEvent('instant-emotion-done', { detail: { charId } }));
+  } catch { /* SSR-safe */ }
   // 只报失败、只有事件名：云端点名说这一轮没成（或回复取不回来）。这一格涨起来说明
   // 云端生成或推送链路在掉队，比用户来报「一直在输入」早得多。
   trackEvent('即时对话云端任务失败');

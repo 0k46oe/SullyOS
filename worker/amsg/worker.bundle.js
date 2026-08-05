@@ -8388,8 +8388,16 @@ var stripEmotionEvalSpec = (metadata) => {
   const { amsgEmotionEval: _secret, ...rest } = metadata ?? {};
   return rest;
 };
-var readEmotionEvalSpec = (metadata) => {
-  const spec = metadata?.amsgEmotionEval;
+var takeEmotionEvalSpec = (metadata) => {
+  const bag = metadata;
+  if (!bag || typeof bag !== "object") return null;
+  const spec = bag.amsgEmotionEval;
+  if (spec === void 0) return null;
+  try {
+    delete bag.amsgEmotionEval;
+  } catch (error) {
+    console.warn("[amsg:emotion] \u8BC4\u4F30\u914D\u7F6E\u5220\u4E0D\u6389\uFF08metadata \u88AB\u51BB\u7ED3\uFF1F\uFF09\uFF0C\u53EA\u5269\u7EC4 push \u524D\u90A3\u9053\u9632\u7EBF", error);
+  }
   return isUsableEvalSpec(spec) ? spec : null;
 };
 var flattenContent = (content) => {
@@ -9101,6 +9109,7 @@ var amsgHooks = {
     const charRows = await ctx.readState(amsgStateNamespace(charId));
     const taskMeta = ctx.task.metadata ?? {};
     const policy = typeof taskMeta.amsgExpirePolicy === "string" ? taskMeta.amsgExpirePolicy : void 0;
+    const emotionEvalSpec = takeEmotionEvalSpec(ctx.task.metadata);
     const instant = isInstantChatTask(taskMeta);
     const presence = parseAmsgChatPresence(
       charRows.find((r) => r.key === AMSG_CHAT_PRESENCE_KEY)?.value
@@ -9244,10 +9253,9 @@ var amsgHooks = {
           })
         }
       ];
-      const evalSpec = readEmotionEvalSpec(taskMeta);
-      if (evalSpec) {
+      if (emotionEvalSpec) {
         stash.emotionEvalPromise = runAmsgEmotionEval(
-          evalSpec,
+          emotionEvalSpec,
           instantMessages,
           toolPack.charName || ctx.task.contactName || "\u89D2\u8272"
         );

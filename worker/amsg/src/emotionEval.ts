@@ -64,11 +64,38 @@ export const stripEmotionEvalSpec = (
   return rest;
 };
 
-/** 任务 metadata 里那份评估配置（没有 / 不完整时为 null）。 */
-export const readEmotionEvalSpec = (
+/**
+ * 取出任务 metadata 里那份评估配置，**并就地从这个对象上删掉**（没有 / 不完整时返回 null，
+ * 键照删——不完整的那份同样带着 apiKey）。
+ *
+ * 为什么是「取完就删」而不是只读：上游把解密后的 payload.metadata 按引用一路传下去——
+ * `buildHookTask` 只做浅拷贝（`Object.freeze` 也只冻最外层），`onLLMOutput` 的
+ * `ctx.metadata`、以及**没有 hook 接手时那条模板路径**读的都是同一个对象，而模板路径
+ * 里 `push.metadata = args.metadata` 是直接引用赋值。也就是说，只要 `onBeforeFire`
+ * 哪天在某个分支返回了 undefined（上游据此判「这次 hook 不接」），整份解密 metadata
+ * 连副 API 的 apiKey 一起就会被塞进每一条推送。
+ *
+ * 在捕获点就地删掉，那条路径便无从可漏：这一跳的内存对象里根本没有这个键了。
+ * D1 里的 encrypted_payload 一个字节没动，投递失败重跑时会重新解密出完整的一份，
+ * 所以重试那一轮照样评估得了。
+ *
+ * 组 push 之前还有第二道 `stripEmotionEvalSpec`——两道都留着，别因为「上面已经删过」
+ * 把哪一道拆了。
+ */
+export const takeEmotionEvalSpec = (
   metadata: Record<string, unknown> | undefined | null,
 ): AmsgEmotionEvalSpec | null => {
-  const spec = (metadata as Record<string, unknown> | undefined)?.amsgEmotionEval;
+  const bag = metadata as Record<string, unknown> | undefined | null;
+  if (!bag || typeof bag !== 'object') return null;
+  const spec = bag.amsgEmotionEval;
+  if (spec === undefined) return null;
+  try {
+    delete bag.amsgEmotionEval;
+  } catch (error) {
+    // 上游哪天把 metadata 也冻上了（严格模式下 delete 冻结属性会抛）。纵深防御的这一层
+    // 自己绝不能变成故障源——记一笔就走，组 push 之前那道 strip 仍然拦得住。
+    console.warn('[amsg:emotion] 评估配置删不掉（metadata 被冻结？），只剩组 push 前那道防线', error);
+  }
   return isUsableEvalSpec(spec) ? spec : null;
 };
 

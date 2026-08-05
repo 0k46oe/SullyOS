@@ -2273,11 +2273,16 @@ describe('即时对话的云端情绪评估', () => {
       now: NOW,
       scratch,
     } as any);
-    return await amsgHooks.onLLMOutput({
+    const decision = await amsgHooks.onLLMOutput({
       sessionId: 'sess_task_42@1', taskId: 42, taskUuid: TASK_UUID,
       llmResponse: {}, llmOutputText: llmOutput, contactName: 'Nyah',
       metadata, scratch, writeState: store.writeState,
     } as any) as any;
+    // metadata 一并交出去：上游把这**同一个对象**按引用喂给 onBeforeFire 的
+    // task.metadata、onLLMOutput 的 ctx.metadata，以及 hook 不接手时那条模板路径
+    // （见 chunk-RRWCPPOY 的 buildHookTask 浅拷贝 + `push.metadata = args.metadata`）。
+    // 这里照搬同一个引用，才能真验出「捕获点就地删」有没有生效。
+    return { decision, metadata };
   };
 
   it('评估结果随最后一条 push 回去，而副 API 凭据一条都不带出门', async () => {
@@ -2294,7 +2299,7 @@ describe('即时对话的云端情绪评估', () => {
     }));
 
     const store = makeStore();
-    const decision = await runFire(store, { amsgEmotionEval: EVAL_SPEC });
+    const { decision, metadata } = await runFire(store, { amsgEmotionEval: EVAL_SPEC });
     expect(decision.decision).toBe('finish');
     const payloads = decision.pushPayloads as Array<Record<string, any>>;
     expect(payloads.length).toBeGreaterThanOrEqual(2);
@@ -2325,13 +2330,20 @@ describe('即时对话的云端情绪评估', () => {
       expect(payload.metadata).not.toHaveProperty('amsgEmotionEval');
     }
     expect(JSON.stringify(payloads)).not.toContain('sk-secondary-KEYLEAK');
+
+    // 纵深防御第一道：onBeforeFire 在捕获点就把这个键从**任务 metadata 对象本身**删了。
+    // 上游把同一个对象按引用喂给「hook 不接手时」那条模板路径，那条路径会 `push.metadata
+    // = args.metadata` 直接挂上去——只要哪天 onBeforeFire 在某个分支返回了 undefined，
+    // 整份凭据就随每条推送出门。删干净了，那条路径也就无从可漏。
+    expect(metadata).not.toHaveProperty('amsgEmotionEval');
+    expect(JSON.stringify(metadata)).not.toContain('sk-secondary-KEYLEAK');
   });
 
   it('评估挂了照发主回复（一条 amsgEmotionUpdate 都不挂）', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('boom', { status: 500 })));
 
     const store = makeStore();
-    const decision = await runFire(store, { amsgEmotionEval: EVAL_SPEC });
+    const { decision, metadata } = await runFire(store, { amsgEmotionEval: EVAL_SPEC });
     expect(decision.decision).toBe('finish');
     const payloads = decision.pushPayloads as Array<Record<string, any>>;
     expect(payloads.length).toBeGreaterThanOrEqual(2);
@@ -2343,6 +2355,56 @@ describe('即时对话的云端情绪评估', () => {
     // 但「这一轮的评估有结论了」照样要带回去 —— 否则客户端那盏「情绪更新中」
     // 要一直亮到十几分钟后由 TTL 兜底才灭，用户只看到情绪永远不更新。
     expect(payloads[payloads.length - 1].metadata.amsgEmotionDone).toBe(true);
+    // 评估跑挂了也照删不误（凭据的去留跟评估成不成功无关）
+    expect(metadata).not.toHaveProperty('amsgEmotionEval');
+  });
+
+  // 上游判「这次 hook 不接手」的依据就是 onBeforeFire 返回 null/undefined，那之后走的
+  // 模板路径会把整份解密 metadata 直接挂上每条推送。即时对话这条路绝不能落到那儿——
+  // 一是凭据，二是那条路会拿主动消息的模板去答用户刚说的话。
+  it('即时对话永远不返回 undefined（返回了就等于把整轮交给上游模板路径）', async () => {
+    // 评估会真发一个请求，这里只关心返回值，随便挡掉（不挡就去解真域名，慢且看网络脸色）
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('nope', { status: 500 })));
+    const store = makeStore();
+    const scratch: Record<string, unknown> = {};
+    const metadata = {
+      charId: CHAR_ID, amsgClientTaskId: CLIENT_TASK_ID,
+      amsgMode: 'instant', amsgInstantChat: true,
+      amsgEmotionEval: EVAL_SPEC,
+    };
+    const result = await amsgHooks.onBeforeFire({
+      task: {
+        id: 42, uuid: TASK_UUID, contactName: 'Nyah', recurrenceType: 'none',
+        nextSendAt: '2026-07-25T12:00:00.000Z', metadata,
+      },
+      userId: 'u1', readState: store.readState, writeState: store.writeState,
+      now: NOW, scratch,
+    } as any);
+
+    expect(result).not.toBeUndefined();
+    expect(result).not.toBeNull();
+    expect(result).toHaveProperty('messages');
+    // 就算哪天真漏出去了，凭据也已经不在那个对象上了（第一道防线的意义就在这儿）
+    expect(metadata).not.toHaveProperty('amsgEmotionEval');
+  });
+
+  // 只删这一个键：别的字段（防穿帮闸的锚点、任务归属键、amsgMode…）后面还要用，
+  // 顺手删多了会以静默走样的方式坏掉——比如 amsgMode 没了，推送就成了 'auto'。
+  it('只摘走评估配置，别的任务字段一个不动', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('nope', { status: 500 })));
+    const store = makeStore();
+    const { metadata } = await runFire(store, {
+      amsgEmotionEval: EVAL_SPEC,
+      amsgAnchorMs: 1_700_000_000_000,
+    });
+    expect(metadata).not.toHaveProperty('amsgEmotionEval');
+    expect(metadata).toMatchObject({
+      charId: CHAR_ID,
+      amsgClientTaskId: CLIENT_TASK_ID,
+      amsgMode: 'instant',
+      amsgInstantChat: true,
+      amsgAnchorMs: 1_700_000_000_000,
+    });
   });
 
   it('没配评估就一个请求都不发（老配置 / 没开情绪评估的角色）', async () => {
@@ -2350,7 +2412,7 @@ describe('即时对话的云端情绪评估', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     const store = makeStore();
-    const decision = await runFire(store, {});
+    const { decision } = await runFire(store, {});
     expect(decision.decision).toBe('finish');
     expect(fetchSpy).not.toHaveBeenCalled();
     for (const payload of decision.pushPayloads as Array<Record<string, any>>) {
