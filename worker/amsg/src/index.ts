@@ -614,6 +614,34 @@ const recordSkip = async (
  *
  * best-effort：写不进去不能连累投递结果，但下一次到点角色就不知道自己说过这句，要吼一声。
  */
+/**
+ * chat_fail 留痕的统一出口（即时对话失败原因，客户端 60s 点名判到行已出清后读回）。
+ * 三个写入点共用：fire 收尾（amsgFireSettled）、过期跳过（amsgStaleSkip）、以及
+ * onBeforeFire 抛错那一刻（fail 的副作用——最典型的失败都发生在挂 stash 之前，
+ * 只靠收尾那份的话这些路径一条痕都留不下）。每次覆盖写，最终留下最后一跳的原因。
+ * best-effort：写不进去只是失败原因退化成笼统一句，绝不连累调用方。
+ */
+const writeChatFail = async (
+  writeState: WriteState,
+  charId: string,
+  record: { uuid: string; reason: string; retryCount: number },
+): Promise<void> => {
+  const full: AmsgChatFailRecord = {
+    v: 1,
+    uuid: record.uuid,
+    reason: record.reason.slice(0, 500),
+    retryCount: record.retryCount,
+    at: Date.now(),
+  };
+  try {
+    await writeState(amsgStateNamespace(charId), [
+      { key: AMSG_CHAT_FAIL_KEY, value: JSON.stringify(full) },
+    ]);
+  } catch (error) {
+    console.warn('[amsg:instant-chat] 失败留痕写不进去（客户端只能报笼统原因）', error);
+  }
+};
+
 export const amsgFireSettled = async (
   info: {
     /** sent / skipped / failed / not-handled；区分「有没有真发出去」和「这跳挂了」。 */
@@ -635,23 +663,11 @@ export const amsgFireSettled = async (
   // 交代为什么没发出去——不用再按角色扫全量任务列表逐条解密（几秒起步）。
   // best-effort：写不进去只是失败原因退化成笼统的一句，不能连累收尾其他动作。
   if (stash.instant && info.status === 'failed' && stash.taskUuid) {
-    const reason = info.error instanceof Error
-      ? info.error.message
-      : String(info.error ?? '未知错误');
-    const record: AmsgChatFailRecord = {
-      v: 1,
+    await writeChatFail(info.writeState, stash.charId, {
       uuid: stash.taskUuid,
-      reason: reason.slice(0, 500),
+      reason: info.error instanceof Error ? info.error.message : String(info.error ?? '未知错误'),
       retryCount: typeof info.task?.retry_count === 'number' ? info.task.retry_count : 0,
-      at: Date.now(),
-    };
-    try {
-      await info.writeState(amsgStateNamespace(stash.charId), [
-        { key: AMSG_CHAT_FAIL_KEY, value: JSON.stringify(record) },
-      ]);
-    } catch (error) {
-      console.warn('[amsg:instant-chat] 失败留痕写不进去（客户端只能报笼统原因）', error);
-    }
+    });
   }
 
   const texts = stash.selfLogTexts;
@@ -730,16 +746,7 @@ export const amsgStaleSkip = async (
   // 被过期跳过的是即时对话（服务停摆恢复时可能发生）→ 也写一份 chat_fail：
   // 客户端点名判到「行已出清」后靠它说出「排队太久没轮到」，而不是笼统的生成失败。
   if (isInstantChatTask(meta) && typeof task?.uuid === 'string' && task.uuid) {
-    const record: AmsgChatFailRecord = {
-      v: 1, uuid: task.uuid, reason: 'stale', retryCount: 0, at: Date.now(),
-    };
-    try {
-      await info.writeState(amsgStateNamespace(charId), [
-        { key: AMSG_CHAT_FAIL_KEY, value: JSON.stringify(record) },
-      ]);
-    } catch (error) {
-      console.warn('[amsg:instant-chat] stale 留痕写不进去（客户端只能报笼统原因）', error);
-    }
+    await writeChatFail(info.writeState, charId, { uuid: task.uuid, reason: 'stale', retryCount: 0 });
   }
   const nextSendAtMs = Date.parse(String(info.nextSendAt ?? ''));
   await writeLastSkip(info.writeState, charId, {
@@ -1027,10 +1034,29 @@ export const amsgHooks = {
     if (typeof charId !== 'string' || !charId) {
       throw fireStateError('task metadata 缺 charId', { taskId: ctx.task.id });
     }
+    // 提前到这儿算（下面那段注释仍在原位）：fail 的留痕副作用要用它。
+    const instant = isInstantChatTask((ctx.task.metadata ?? {}) as Record<string, unknown>);
+
     // 下面每道门的报错都带同一套定位信息，绑一次就好——逐处手抄 detail 的话，
     // 加一道门就要再抄一遍，漏了就是一条查不到是谁的错误日志。
-    const fail = (reason: string, extra?: Record<string, unknown>) =>
-      fireStateError(reason, { taskId: ctx.task.id, charId, ...extra });
+    // 即时对话的失败还在抛出那一刻就写 chat_fail：最典型的失败（fire_pack 缺失 /
+    // 解析不过 / 缺 chat 段）都发生在挂 stash 之前，onFireSettled 那份留痕拿不到
+    // stash、一条都写不了，用户等完全部重试只会得到「云端没记下原因」。fire-and-forget，
+    // 不拦 throw；挂 stash 之后的失败会被收尾那份用最后一跳的原因覆盖，语义不变。
+    const fail = (reason: string, extra?: Record<string, unknown>) => {
+      // writeState 在老版本上游的 FireCtx 上可能不存在——那就退回没有留痕的老行为。
+      if (instant && typeof ctx.writeState === 'function'
+        && typeof ctx.task.uuid === 'string' && ctx.task.uuid) {
+        void writeChatFail(ctx.writeState, charId, {
+          uuid: ctx.task.uuid,
+          reason,
+          retryCount: typeof (ctx.task as { retry_count?: unknown }).retry_count === 'number'
+            ? (ctx.task as { retry_count: number }).retry_count
+            : 0,
+        });
+      }
+      return fireStateError(reason, { taskId: ctx.task.id, charId, ...extra });
+    };
 
     // 前端上传的云端状态可能被 packStateValue 压过（值以 gz1: 开头），读回来统一先过
     // 一遍解压——没压过的原样穿过去，读侧不用赌客户端到底压了哪几份。带月度总结的
@@ -1059,7 +1085,7 @@ export const amsgHooks = {
     // 即时对话：用户刚把话说完、正盯着「正在输入…」等回复。下面三道门问的都是
     // 「主动消息到点还该不该发」——用户正在聊天所以让路、对话已经往前走所以作废、
     // 这次任务的方向是什么——对「回一句用户刚说的话」全都不适用，整段跳过。
-    const instant = isInstantChatTask(taskMeta);
+    // （instant 本体在上面 fail 之前就算好了，这里只是叙事位置。）
 
     // 同角色活跃会话租约：一轮对话生成期间客户端每 15s 续租，45s TTL。
     // 这是 worker 防通知的第一道快速门；缺失/过期/坏数据就继续走 fire_pack 规则。
@@ -1197,9 +1223,15 @@ export const amsgHooks = {
     // 后者不补上的话，角色排完一条、下次到点又看不见它，很容易把同一件事再排一遍。
     const livePendingTasks = [...pack.pendingTasks, ...selfLog.tasks];
 
+    // 角色级 2.0 开关（pack.selfScheduleEnabled，打包时取 isAmsg2EnabledForChar）。
+    // 关着 = 排程说明块、排程工具、任务清单一概不注入：本地路径这道闸在 useChatAI 的
+    // amsg2ToolsInjected——用户显式关掉的功能不能被云端聊天轮绕开重排任务。
+    // 缺省当 true（旧包 / 定时任务路径的包只会来自开着 2.0 的角色）。
+    const selfScheduleAllowed = pack.selfScheduleEnabled !== false;
+
     // 老 worker 部署（amsg-server < 2.6.0-next.9）没有这个口子。教了也排不成，
     // 只会让角色说「我等下再找你」然后没有下文——干脆不教。
-    const canSelfSchedule = typeof ctx.scheduleTask === 'function';
+    const canSelfSchedule = typeof ctx.scheduleTask === 'function' && selfScheduleAllowed;
 
     // 角色的时间参照系：fire_pack 的 tzId（parseFirePack 保证非空，Intl 管夏令时）。
     const tz: AmsgTzRef = { tzId: pack.tzId };
@@ -1252,11 +1284,16 @@ export const amsgHooks = {
     // 「你还挂着这些排程」：客户端记录的（打包那一刻的快照）+ 角色自己在之前几次 fire 里
     // 排下、客户端还没认领的那些。后者不补上的话，角色排完一条、下次到点又看不见它，
     // 很容易把同一件事再排一遍。
-    const taskListBlock = buildFireTaskListBlock(livePendingTasks, {
-      nowMs: ctx.now.getTime(),
-      tzId: pack.tzId,
-      excludeClientTaskId: clientTaskId || undefined,
-    });
+    // 角色级 2.0 开关关着时整块不给（跟排程工具同一道闸，但不看 scheduleTask 能力：
+    // 老 worker 只是排不了新任务，已有清单照旧要给）。本地路径关着开关连任务清单都
+    // 不注入，云端给了就是「看得见任务」的半截能力，反而引导角色去聊它。
+    const taskListBlock = selfScheduleAllowed
+      ? buildFireTaskListBlock(livePendingTasks, {
+        nowMs: ctx.now.getTime(),
+        tzId: pack.tzId,
+        excludeClientTaskId: clientTaskId || undefined,
+      })
+      : '';
 
     // 「外面的世界此刻什么样」：今日节日 + 实时天气 + 热搜，到点现拉现填。
     // 拉不到 / 超时都只是返回空串，那一段整个消失，这次触发照常往下走。
@@ -1389,8 +1426,12 @@ export const amsgHooks = {
     // 每轮**覆盖**（包括覆盖成空）：留下的必须是产出正文那一轮的思考。中间轮那句
     // 「我先去查一下」跟用户看到的正文对不上，最后一轮没思考时也不能拿它顶上。
     //
-    // 请求端不主动开 thinking 参数：fire 请求带 tools（MCP / 排程），thinking + tools
-    // 同发 Gemini 系直接 400，与本地路径工具模式的取舍一致。
+    // 包装层不主动开 thinking 参数——该不该开由客户端定：本地那一轮会发的三件套
+    // （thinking / reasoning_effort / extra_body）随 taskPayload 顶层 llmExtraBody
+    // 上云（含 Gemini 让步在内的判定都在 useChatAI 的 shouldSendThinkingParams），
+    // 由上游 buildLlmRequestBody 展开进请求体；上游没认领这个字段时退化为只有
+    // -thinking 模型名后缀生效。这里替客户端多开一份的话，Gemini 系 thinking + tools
+    // 同发直接 400。
     const llmMessage = (ctx.llmResponse as {
       choices?: Array<{ message?: Record<string, unknown> }>;
     })?.choices?.[0]?.message;
@@ -1495,6 +1536,14 @@ export const amsgHooks = {
       // 面板看不到、用户也没法取消。任务本身照常触发，客户端上线补进清单即可。
       let payloads = attachScheduledTasks(decision.pushPayloads, stash.scheduledTasks);
 
+      // 往指定那一条 push 的 metadata 上追加字段（其余条原样）。下面三处挂载共用：
+      // 展开顺序固定「旧 metadata 在前、新字段在后」，键冲突时新值赢。
+      const attachMetaAt = (
+        list: typeof payloads, idx: number, extra: Record<string, unknown>,
+      ): typeof payloads => list.map((payload, i) => (i === idx
+        ? { ...payload, metadata: { ...(payload.metadata as Record<string, unknown> ?? {}), ...extra } }
+        : payload));
+
       // 这次生成的思考链随**第一条** push 回客户端：思考链卡片渲染在第一条气泡上，
       // 收侧也只在 messageIndex<=1 那条上认领（见 utils/activeMsgRuntime.ts）。
       // 同样排在旁路存储之前，装不下时才能连它一起挪走。
@@ -1505,59 +1554,36 @@ export const amsgHooks = {
       // 没有那段提示词，thinking 就是原始推理腔（「用户三小时没说话了，我应该……」）——
       // 那个放进心象卡片就是穿帮。等哪天给 fire_pack 也注入那段提示词，再把这道门放开。
       if (stash.instant && session.finalReasoning && payloads.length > 0) {
-        payloads = payloads.map((payload, i) => (i === 0
-          ? {
-              ...payload,
-              metadata: {
-                ...(payload.metadata as Record<string, unknown> ?? {}),
-                amsgReasoning: session.finalReasoning,
-              },
-            }
-          : payload));
+        payloads = attachMetaAt(payloads, 0, { amsgReasoning: session.finalReasoning });
       }
 
-      // 这一轮在云端跑过的工具随**最后一条** push 回客户端，气泡底下那行灰字照它渲染。
-      // 挂最后一条是因为它跟正文一起收尾：用户读完话才看到「哦，这是查过的」；挂第一条
-      // 就成了还没开口先报备一句「我搜了网页」。
+      // 末条 push 的挂载合成一次：工具痕迹 + 情绪评估结果都跟正文一起收尾。
       //
+      // 工具痕迹：气泡底下那行灰字照它渲染。挂最后一条是因为用户读完话才看到
+      // 「哦，这是查过的」；挂第一条就成了还没开口先报备一句「我搜了网页」。
       // 只在即时对话这条路回传。定时任务的气泡是凭空冒出来的（用户没在等这一轮），底下
       // 再挂一行「调用了工具」等于把后台实现摊开给用户看，跟主动消息要的那点不着痕迹相冲。
-      const toolTrace = stash.instant ? condenseToolTrace(session.toolCalls) : [];
-      if (toolTrace.length > 0 && payloads.length > 0) {
-        const lastIdx = payloads.length - 1;
-        payloads = payloads.map((payload, i) => (i === lastIdx
-          ? {
-              ...payload,
-              metadata: {
-                ...(payload.metadata as Record<string, unknown> ?? {}),
-                amsgToolTrace: toolTrace,
-              },
-            }
-          : payload));
-      }
-
-      // 情绪评估的结果随最后一条 push 回客户端（客户端拿 applyEmotionEvalRaw 落 buff，
-      // 与本地路径共用同一套解析）。评估是 onBeforeFire 就起跑的，这里多半已经跑完；
-      // 排在旁路存储之前，装不下时才能连它一起挪走。
       //
-      // 评估挂了也要挂一个 amsgEmotionDone：客户端从用户按下发送那一刻就点着「情绪更新中」，
-      // 只在有结果时才带信号的话，评估一失败那盏灯就得亮到十几分钟后才由安全网熄。
-      // 挂了还捎一句短原因（amsgEmotionError），客户端照实说明白——用户自己部署的 worker，
-      // 「可查 worker 日志」对多数人等于没说。原因里绝不含凭据（见 describeEvalFailure）。
-      if (stash.instant && stash.emotionEvalPromise && payloads.length > 0) {
-        const { raw: evalText, error: evalError } = await stash.emotionEvalPromise;
-        const lastIdx = payloads.length - 1;
-        payloads = payloads.map((payload, i) => (i === lastIdx
-          ? {
-              ...payload,
-              metadata: {
-                ...(payload.metadata as Record<string, unknown> ?? {}),
-                amsgEmotionDone: true,
-                ...(evalText ? { amsgEmotionUpdate: evalText } : {}),
-                ...(!evalText && evalError ? { amsgEmotionError: evalError } : {}),
-              },
-            }
-          : payload));
+      // 情绪评估（客户端拿 applyEmotionEvalRaw 落 buff，与本地路径共用同一套解析）：
+      // 评估是 onBeforeFire 就起跑的，这里 await 时多半已经跑完。评估挂了也要挂一个
+      // amsgEmotionDone——客户端从按下发送那一刻就点着「情绪更新中」，只在有结果时才带
+      // 信号的话，评估一失败那盏灯就得亮到十几分钟后才由安全网熄。挂了还捎一句短原因
+      // （amsgEmotionError），原因里绝不含凭据（见 describeEvalFailure）。
+      //
+      // 两样都排在旁路存储之前，装不下时才能连它们一起挪走。
+      if (stash.instant && payloads.length > 0) {
+        const lastMeta: Record<string, unknown> = {};
+        const toolTrace = condenseToolTrace(session.toolCalls);
+        if (toolTrace.length > 0) lastMeta.amsgToolTrace = toolTrace;
+        if (stash.emotionEvalPromise) {
+          const { raw: evalText, error: evalError } = await stash.emotionEvalPromise;
+          lastMeta.amsgEmotionDone = true;
+          if (evalText) lastMeta.amsgEmotionUpdate = evalText;
+          else if (evalError) lastMeta.amsgEmotionError = evalError;
+        }
+        if (Object.keys(lastMeta).length > 0) {
+          payloads = attachMetaAt(payloads, payloads.length - 1, lastMeta);
+        }
       }
 
       // 发之前按真实字节预算过一遍：装不下的大块数据旁路存起来，push 只留引用键。

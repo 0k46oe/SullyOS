@@ -20,10 +20,9 @@ export interface AmsgToolTraceEntry {
 }
 
 /**
- * 内置工具 → 给用户看的说法。
- *
- * 用词跟聊天里那条「正在搜索网页…」的状态条对齐（见 utils/instantToolRunner.ts 的
- * getToolStatusLabel）：同一件事在等待时和事后回看时该是同一个说法。改这里记得对着改那边。
+ * 内置工具 → 给用户看的说法。**唯一词表**：聊天里那条「正在搜索网页…」的状态条
+ * （utils/instantToolRunner.ts 的 getToolStatusLabel）也从这里取词——同一件事在等待时
+ * 和事后回看时必须是同一个说法，过去两张手抄表靠注释互相提醒，迟早漂。
  *
  * 表外的名字原样显示，不编——露个英文名总好过给用户一个错的说法。
  */
@@ -48,8 +47,10 @@ const TOOL_DISPLAY_LABELS: Record<string, string> = {
  *
  * MCP 工具剥掉内部前缀就直接用：那是用户自己接进来的服务器，只有他知道那工具是干嘛的，
  * 我们编不出比原名更准的说法；前缀又是我们拿来分流的，露出去跟他在设置里填的对不上号。
+ *
+ * export 给状态条那边共用（见 TOOL_DISPLAY_LABELS 注释）。
  */
-const describeToolForUser = (rawName: unknown): string => {
+export const describeToolForUser = (rawName: unknown): string => {
   if (typeof rawName !== 'string') return '';
   const name = rawName.trim();
   if (!name) return '';

@@ -1573,9 +1573,12 @@ describe('即时对话的待收记录（走真库）', () => {
     expect(msgs.some((m) => m.role === 'assistant'), '推送丢了的那条该被补回来').toBe(true);
     expect(msgs.some((m) => m.role === 'system'), '补收成功就不该再报失败').toBe(false);
     expect(getInstantChatPending(charId)).toBeNull();
-    // 补收就把账销了，这一轮已经有结论，不用再去问云端，也没有任何东西要取消。
+    // 补收就把账销了，这一轮已经有结论，不用再去问云端。
     expect(status).not.toHaveBeenCalled();
-    expect(cancel).not.toHaveBeenCalled();
+    // 但要尽力取消那条任务行：回复是从 outbox 捡回来的 = 真推送没送到 = 行多半还挂在
+    // 2/4/6 分钟的重试队列里，不取消的话重试跑起来就是同一轮的第二份回复（段数更多时
+    // 多出的段成孤儿气泡）。行已经删掉的场景取消打到 404，一样安静。
+    expect(cancel).toHaveBeenCalledWith('uuid-outbox');
   }, 20000);
 
   it('云端仍是 pending → 不销账、不落失败说明、不取消任务（等多久都不是判据）', async () => {

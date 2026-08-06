@@ -419,27 +419,32 @@ export const handleInstantChat = async (args: {
 
   // ② 顶掉上一条还没被认领的任务（连发两条时合并成一起回）。尽力而为：
   //    404（已经跑掉了 / 本来就不存在）一律忽略，它不该拦住这一条。
-  if (supersedesUuid) {
-    try {
-      const cancelled = await upstream.fetch(
-        new Request(internalUrl('/cancel-message', `?id=${encodeURIComponent(supersedesUuid)}`), {
-          method: 'DELETE',
-          headers: {
-            'X-User-Id': userId,
-            ...(clientToken ? { 'X-Client-Token': clientToken } : {}),
-          },
-        }),
-        env,
-      );
-      if (!cancelled.ok) {
-        console.log('[amsg:instant-chat] 顶替上一条没成（照常继续）', {
-          uuid: supersedesUuid, status: cancelled.status,
-        });
+  //    和 ③ 并行跑：取消的目标是另一行、结果本就不影响主流程，串行 await 只是给
+  //    连发场景（正是用户在等的场景）的 202 多背一个上游往返。返回 202 前仍会
+  //    等它 settle——立即跳在 202 之后才起，取消先落地的语义不变。
+  const cancelPromise = supersedesUuid
+    ? (async () => {
+      try {
+        const cancelled = await upstream.fetch(
+          new Request(internalUrl('/cancel-message', `?id=${encodeURIComponent(supersedesUuid)}`), {
+            method: 'DELETE',
+            headers: {
+              'X-User-Id': userId,
+              ...(clientToken ? { 'X-Client-Token': clientToken } : {}),
+            },
+          }),
+          env,
+        );
+        if (!cancelled.ok) {
+          console.log('[amsg:instant-chat] 顶替上一条没成（照常继续）', {
+            uuid: supersedesUuid, status: cancelled.status,
+          });
+        }
+      } catch (error) {
+        console.log('[amsg:instant-chat] 顶替上一条抛错（照常继续）', error);
       }
-    } catch (error) {
-      console.log('[amsg:instant-chat] 顶替上一条抛错（照常继续）', error);
-    }
-  }
+    })()
+    : null;
 
   // ③ 任务落库 = 受理。到这一步返回 202 之前，行已经在 D1 里了，
   //    下面那一跳只是让它快点跑起来，跑不成还有每分钟的 cron。
@@ -451,6 +456,7 @@ export const handleInstantChat = async (args: {
     }),
     env,
   );
+  if (cancelPromise) await cancelPromise;
   const taskBody = await readBody(taskResponse);
   if (!taskResponse.ok) {
     return json(taskResponse.status, {

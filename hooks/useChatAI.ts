@@ -46,6 +46,9 @@ import { getPendingTasks, hasActiveAiTask, isAmsg2EnabledForChar } from '../util
 import { buildAmsg2NoticesText, buildAmsg2TaskContextText, collectAmsg2TaskContext } from '../utils/amsg2TaskContext';
 import { resolveCharTimeZone } from '../utils/timezone';
 import { isInstantChatReady, sendInstantChatTurn } from '../utils/amsgInstantChat';
+// worker 模块的常量叶子（同 activeMsgClient import INSTANT_SCHEDULE_LEAD_MS 的先例）：
+// 云端 fire 的总时长上限，安全网超时从它推导，worker 调预算时前端自动跟上。
+import { INSTANT_TOTAL_TIMEOUT_MS } from '../worker/amsg/src/instantChat';
 import { appendInstantTraceEntry } from '../utils/instantTraceLog';
 import { AMSG2_TOOLS, AMSG2_TOOL_NAMES, createAmsg2ToolSession, executeAmsg2Tool, isAmsg2GlobalReady } from '../utils/amsg2ToolBridge';
 import { shouldSendThinkingParams } from '../utils/thinkingGate';
@@ -907,11 +910,10 @@ export const useChatAI = ({
             //      一起交给 worker, worker 跑完把结果推回来, 客户端 flush 时落 buff —— 这样前端被杀
             //      也算数, 且不会跟客户端 eval 双跑双扣费. 见下方两个上云分支 + activeMsgRuntime.
             const emotionEvalEnabled = !!(!promptBuildSkipped && !isEmotionEvalSkipped() && isScheduleFeatureOn(char) && char.emotionConfig?.enabled);
-            // 同一回合同一个值（见上面路由判定处）：这里要是自己再读一次，可能出现
-            // 「按上云模式把评估打包走了，实际却走本地」——情绪底色从此悄悄停更。
-            const instantOn = instantPushConfigured;
             // 这一轮的生成在云端跑（两条路互斥，见 instantChatRoute 的算法）。
-            const cloudGenRoute = instantOn || instantChatRoute;
+            // instantPushConfigured 是路由判定处冻结的同一回合终值——这里绝不自己再读
+            // 一次，否则可能「按上云模式把评估打包走了，实际却走本地」，情绪底色悄悄停更。
+            const cloudGenRoute = instantPushConfigured || instantChatRoute;
             // 评估跟随全局流式开关（专用情绪 API 自带 stream 字段时以它为准）
             const evalStream: boolean = !!((effectiveApi as any).stream ?? apiConfig.stream ?? false);
             const emotionApi = emotionEvalEnabled
@@ -959,10 +961,11 @@ export const useChatAI = ({
             //
             // 这个数按各自 worker 最长能跑多久给:
             //   · Instant Push: 一个请求里跑完就回, 90s 足够;
-            //   · 即时对话: worker 那条 fire 的总时长上限是 600s (工具循环也算在内), 评估结果
-            //     又是跟着主回复的最后一条推送回来的, 90s 会在人家还没跑完时就误报「超时无回音」。
-            //     给 660s = 600s 上限 + 一分钟推送在途的余量。
-            const cloudEvalTimeoutMs = instantChatRoute ? 660_000 : 90_000;
+            //   · 即时对话: worker 那条 fire 的总时长上限是 INSTANT_TOTAL_TIMEOUT_MS（工具循环
+            //     也算在内），评估结果又是跟着主回复的最后一条推送回来的——直接从 worker 模块
+            //     import 那个数 + 一分钟推送在途余量，worker 侧调预算时这里自动跟上
+            //     （ChatBroadcast 的横幅 TTL 同样从它推导，见那边注释）。
+            const cloudEvalTimeoutMs = instantChatRoute ? INSTANT_TOTAL_TIMEOUT_MS + 60_000 : 90_000;
             /**
              * 熄灭「情绪更新中」的三件套：撤掉安全网、灭页内徽章、灭全局横幅。
              *
@@ -1245,7 +1248,21 @@ export const useChatAI = ({
                     // 开思考时把温度删掉了——云端要的就是「本地这一轮会发出去的那份」。
                     api: { baseUrl: effectiveApi.baseUrl, apiKey: effectiveApi.apiKey, model: baseReqBody.model },
                     ...(typeof baseReqBody.temperature === 'number' ? { temperature: baseReqBody.temperature } : {}),
-                    maxTokens: 8000,
+                    maxTokens: baseReqBody.max_tokens,
+                    // 思考链三件套同理取终值：shouldSendThinkingParams 通过时本地会带
+                    // thinking / reasoning_effort / extra_body 三个入口（不同代理认不同的），
+                    // 云端不带的话，凡是靠请求体参数激活思考的渠道（Anthropic 原生、
+                    // OpenAI 系、LiteLLM 桥——即除了 -thinking 模型名后缀之外的全部）
+                    // 一开即时对话思考就静默消失，心象卡片跟着没了。
+                    ...(baseReqBody.thinking || baseReqBody.reasoning_effort || baseReqBody.extra_body
+                        ? {
+                            extraBody: {
+                                ...(baseReqBody.thinking ? { thinking: baseReqBody.thinking } : {}),
+                                ...(baseReqBody.reasoning_effort ? { reasoning_effort: baseReqBody.reasoning_effort } : {}),
+                                ...(baseReqBody.extra_body ? { extra_body: baseReqBody.extra_body } : {}),
+                            },
+                        }
+                        : {}),
                     userProfile, groups, realtimeConfig,
                     // 情绪评估也交给云端：worker 到点和主回复并行跑，结果随最后一条推送回来
                     // （见 worker/amsg/src/emotionEval.ts）。放在这里而不是本地 fire 一枪，

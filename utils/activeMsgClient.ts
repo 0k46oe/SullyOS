@@ -30,6 +30,7 @@ import {
   AMSG_SLOT_REALTIME_WORLD,
   AMSG_SLOT_SCENE,
   AMSG_SLOT_TASK_INSTRUCTION,
+  AMSG_INSTANT_CHAT_SUBTYPE,
   AMSG_LAST_SKIP_KEY,
   AMSG_SLOT_SELF_LOG,
   AMSG_SLOT_TASK_LIST,
@@ -574,6 +575,9 @@ export const buildFirePack = async (
     ...(typeof char.activeMsg2Config?.maxUnansweredSends === 'number'
       ? { maxUnansweredSends: char.activeMsg2Config.maxUnansweredSends }
       : {}),
+    // 角色级 2.0 开关随包上云：关着的角色即便走即时对话（全局开关是另一颗），云端
+    // fire 也不给排程能力——本地的 amsg2ToolsInjected 闸门在云端的对应物就是它。
+    selfScheduleEnabled: isAmsg2EnabledForChar(char),
     // 到点时角色要知道自己还挂着什么，才不会把同一件事再排一遍。这里带原始记录，
     // 渲染成人话由 worker 现场做（时间要按 tzId 换算，且得摘掉正在发的那条）。
     pendingTasks: getPendingTasks(char.activeMsg2Config, Date.now()),
@@ -1710,6 +1714,13 @@ export const ActiveMsgClient = {
      */
     temperature?: number;
     maxTokens?: number;
+    /**
+     * 本地这一轮会额外发进请求体的字段（思考链三件套：thinking / reasoning_effort /
+     * extra_body，由 useChatAI 的 shouldSendThinkingParams 分支决定）。worker 组请求体
+     * 时原样展开、核心字段（model/messages 等）优先——两条路发出去的请求体必须一致，
+     * 不然开思考的角色一开即时对话，心象卡片就静默消失。
+     */
+    extraBody?: Record<string, unknown>;
     userProfile: UserProfile;
     groups: GroupProfile[];
     realtimeConfig: RealtimeConfig;
@@ -1743,10 +1754,10 @@ export const ActiveMsgClient = {
       messageType: 'auto',
       // 上游只把它当自由文本标签原样带进推送，不据此分支；本地拿它把即时对话的行跟
       // 定时任务的行分开——不然一条失败的即时对话行会被面板对账当成排程任务补进清单。
-      messageSubtype: 'instant-chat',
-      // 上游校验 firstSendTime 必须在未来，而 cron 只捡已到期的行；先留一点提前量过校验，
-      // 落库之后由包装层把这一行拉到「此刻」（见 worker/amsg/src/instantChat.ts）。
-      firstSendTime: new Date(now + INSTANT_SCHEDULE_LEAD_MS).toISOString(),
+      // 常量与面板对账的过滤端共用（amsgFirePack 的 AMSG_INSTANT_CHAT_SUBTYPE）。
+      messageSubtype: AMSG_INSTANT_CHAT_SUBTYPE,
+      // firstSendTime 在下面紧邻加密前才盖（见 encryptPayload 那段）：这里先占个位。
+      firstSendTime: '',
       recurrenceType: 'none',
       tzId,
       // 真正要发给模型的消息在 fire_pack.chat 里，这条只为过上游「messages 非空」的校验。
@@ -1758,6 +1769,14 @@ export const ActiveMsgClient = {
       // 少了它，同一句话云端会落到供应商默认温度（常为 1.0），回复风格和本地对不上。
       ...(typeof params.temperature === 'number' ? { temperature: params.temperature } : {}),
       ...(params.maxTokens && params.maxTokens > 0 ? { maxTokens: params.maxTokens } : {}),
+      // 思考链三件套（thinking / reasoning_effort / extra_body）放行顶层，随加密信封
+      // 到 fire 时刻由上游 buildLlmRequestBody 展开进请求体（核心字段 model/messages
+      // 等优先）。⚠️ 依赖上游 amsg-server 认领这个字段（/schedule-message 的
+      // fullTaskData 白名单 + buildLlmRequestBody 的展开）；旧版上游会把它剥掉——
+      // 那时行为退回「只有 -thinking 模型名后缀生效」，即本次改动前的样子，不会更糟。
+      ...(params.extraBody && Object.keys(params.extraBody).length > 0
+        ? { llmExtraBody: params.extraBody }
+        : {}),
       metadata: {
         charId: char.id,
         charName: char.name,
@@ -1776,13 +1795,21 @@ export const ActiveMsgClient = {
       },
     };
 
+    // 状态信封的重活（拼 entries，含 MB 级 stringify）先做完，taskPayload 的时间戳
+    // 最后一刻才盖：上游校验 firstSendTime 必须在未来，30s 提前量是给**网络在途**
+    // 留的（worker/amsg/src/instantChat.ts 的 INSTANT_SCHEDULE_LEAD_MS 注释）——
+    // 在流程开头就定格的话，低端机 + 带图大包的 buildFirePack/stringify/加密会把
+    // 提前量预支掉，慢网上传完直接被 400 INVALID_TIMESTAMP 打回，而同一轮走本地
+    // 路径毫无问题。加密本身是毫秒级，留在时间戳之后无妨。
+    const stateEntries = {
+      entries: [
+        ...(await buildCharStateEntries(char, firePack, now)),
+        buildToolConfigEntry(realtimeConfig, now),
+      ],
+    };
+    taskPayload.firstSendTime = new Date(Date.now() + INSTANT_SCHEDULE_LEAD_MS).toISOString();
     const [statePayload, encryptedTask] = await Promise.all([
-      encryptPayload(client, {
-        entries: [
-          ...(await buildCharStateEntries(char, firePack, now)),
-          buildToolConfigEntry(realtimeConfig, now),
-        ],
-      }),
+      encryptPayload(client, stateEntries),
       encryptPayload(client, taskPayload),
     ]);
 

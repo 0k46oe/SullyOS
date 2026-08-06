@@ -33,7 +33,7 @@ import { ActiveMsgClient } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
 import { hasActiveAiTask } from './amsg2Tasks';
 import { AmsgChatPresence, CHAT_PRESENCE_HEARTBEAT_MS } from './amsgChatPresence';
-import { getInstantChatPending } from './amsgInstantChat';
+import { getInstantChatPending, isInstantChatSendInFlight } from './amsgInstantChat';
 import { trackEvent } from './analytics';
 
 /** 失败重试的退避起点，逐次翻倍（30s → 60s → 120s）。 */
@@ -186,18 +186,20 @@ export const flushAmsgState = async (reason: string): Promise<void> => {
   // 队列空 = 没有欠着的快照，之前那串失败也就翻篇了，退避计数跟着归零。
   if (dirty.size === 0) { retryCount = 0; return; }
   if (retryTimer != null) { clearTimeout(retryTimer); retryTimer = null; }
-  // 欠着即时对话回复的角色这次挂起不传：那一轮的 fire_pack 是 POST /instant-chat
-  // 带上去的、多一段 chat（worker 到点全靠它拿这轮的对话），常规重建的包没有 chat 段，
-  // 现在覆盖上去的话 worker 到点只会硬失败（fire_pack 里没有 chat 段）。快照连底账
-  // 一起留在队列里，销账后的下一次冲刷（含下面那个定时回看）照传不误。
+  // 欠着即时对话回复（含 POST 还在飞、202 未回）的角色这次挂起不传：那一轮的 fire_pack
+  // 是 POST /instant-chat 带上去的、多一段 chat（worker 到点全靠它拿这轮的对话），
+  // 常规重建的包没有 chat 段，现在覆盖上去的话 worker 到点只会硬失败（fire_pack 里
+  // 没有 chat 段）。占位从按下发送那一刻就生效——待收记录要 202 才有，光认它的话
+  // 慢网上传的那几秒正好是敞着的。快照连底账一起留在队列里，销账后的下一次冲刷
+  // （含下面那个定时回看）照传不误。
   const deferredIds = new Set(
-    [...dirty.keys()].filter((charId) => !!getInstantChatPending(charId)),
+    [...dirty.keys()].filter(
+      (charId) => !!getInstantChatPending(charId) || isInstantChatSendInFlight(charId),
+    ),
   );
   if (deferredIds.size === dirty.size) {
-    // 全都欠着回复：这次一个都传不了，排个回看就走。
-    if (retryTimer == null) {
-      retryTimer = setTimeout(() => { void flushAmsgState('instant-chat-deferred'); }, INSTANT_DEFER_RECHECK_MS);
-    }
+    // 全都欠着回复：这次一个都传不了，排个回看就走（retryTimer 刚在上面清空过，直接排）。
+    scheduleDeferredRecheck();
     return;
   }
   flushing = true;
@@ -255,10 +257,13 @@ export const flushAmsgState = async (reason: string): Promise<void> => {
       if (dirty.size > 0 && retryTimer == null) void flushAmsgState('reflush');
     }
     // 还有挂起（欠即时对话回复）的快照时排个回看，销账后把它们传掉。
-    if (deferredIds.size > 0 && retryTimer == null) {
-      retryTimer = setTimeout(() => { void flushAmsgState('instant-chat-deferred'); }, INSTANT_DEFER_RECHECK_MS);
-    }
+    if (deferredIds.size > 0 && retryTimer == null) scheduleDeferredRecheck();
   }
+};
+
+/** 排一个「即时对话销账后回来传挂起快照」的回看。占用 retryTimer 这一个槽。 */
+const scheduleDeferredRecheck = () => {
+  retryTimer = setTimeout(() => { void flushAmsgState('instant-chat-deferred'); }, INSTANT_DEFER_RECHECK_MS);
 };
 
 /**

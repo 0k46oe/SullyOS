@@ -27,7 +27,10 @@ import {
   failInstantChatPending,
   getInstantChatPending,
   listInstantChatPendings,
+  trackInFlightInboxMessageIds,
+  untrackInFlightInboxMessageIds,
 } from './amsgInstantChat';
+import { flushAmsgState } from './amsgStateSync';
 import { describeInstantChatFailure, pruneStaleTasks } from './amsg2Tasks';
 import { appendInstantTraceEntry } from './instantTraceLog';
 import { trackEvent } from './analytics';
@@ -1196,6 +1199,13 @@ const cancelOrphanedRemoteTasks = async (charId: string): Promise<void> => {
 const flushInboxToChatImpl = async () => {
   const pendingMessages = await ActiveMsgStore.consumeInboxMessages();
   activeMsgTrace('runtime-flush-start', { count: pendingMessages.length });
+  // 先 ack 后处理意味着这批消息有几秒（拟人打字延迟）既不在收件箱也不在聊天记录——
+  // 恰好撞上 60s 点名的 outbox 对账时会被当成「没收到」重新入库、二次上屏。
+  // 处理期间把 messageId 登记给对账那边（collectReceivedMessageIds 会并进「已收」），
+  // finally 里撤掉：落库成功的那时聊天记录已经查得到；requeue 回收件箱的那几条
+  // 也重新出现在 listInboxMessages 里，两条腿都接上了才撤。
+  trackInFlightInboxMessageIds(pendingMessages.map((m) => m.messageId));
+  try {
   // consumeInboxMessages 是 "先 ack 后处理" 语义 —— inbox 已经原子地清空。
   // 这里 per-message try/catch: 单条处理抛错 (quota / DB 故障 / postprocess 异常) 不连累
   // 后续条目。Phase 1 改成: 先尝试走 applyAssistantPostProcessing (与本地 fetch 路径
@@ -1442,15 +1452,51 @@ const flushInboxToChatImpl = async () => {
       charId: message.charId,
     });
 
-    // 即时对话的「正在输入…」在这里熄：**欠着的那一轮**（认 taskUuid）的回复到了。
-    // 不挑消息类型——欠着的那条回复可能被拆成好几段，第一段到了指示灯就该灭。
+    // 即时对话的「正在输入…」在这里熄：**欠着的那一轮**（认 taskUuid）的**末段**到了。
     // 只认 uuid、不认「这个角色开口了」：定时任务的主动消息、被顶掉的上一轮迟到的
     // 回复都可能先落地，它们不是用户在等的那一轮——按角色销账的话，60s 点名连同
     // outbox 兜底当场全停，这一轮的推送真丢了就再也没人去补。
+    // 认末段（messageIndex >= totalMessages）而不是随便哪一段：第一段就销账的话，
+    // 后续段丢在路上时兜底同样全停，用户永远只看到半截回复。段号缺失（单段消息 /
+    // 旧 worker）当末段处理，保持旧行为。
     const pendingForChar = getInstantChatPending(message.charId);
     if (pendingForChar && message.taskUuid === pendingForChar.uuid) {
-      if (clearInstantChatPending(message.charId)) scheduleNextInstantChatStatusCheck();
+      const segIndex = Number((message.metadata as any)?.messageIndex);
+      const segTotal = Number((message.metadata as any)?.totalMessages);
+      const isLastSegment = !Number.isFinite(segTotal) || segTotal <= 1
+        || (Number.isFinite(segIndex) && segIndex >= segTotal);
+      if (isLastSegment && clearInstantChatPending(message.charId)) {
+        scheduleNextInstantChatStatusCheck();
+        // 这条回复是从 outbox 补收回来的 = 真推送没送到 = 那条任务行多半正挂在
+        // 2/4/6 分钟的重试队列里，跑起来就是同一轮的第二份回复。尽力取消；
+        // 正常送达的路不带这个标记（行发完即删，也无从取消），一个多余请求都不发。
+        if ((message.metadata as any)?.amsgOutboxBackfill) {
+          ActiveMsgClient.cancelTask(pendingForChar.uuid).catch(() => {});
+        }
+        // 末段先到、中段还丢在路上的乱序场景：销账后 pending 没了，常规兜底不会再看
+        // 这一轮——离场前按这轮的 uuid 补扫一次 outbox，把缺的段捡回来。
+        void sweepSettledInstantRound(message.charId, pendingForChar.uuid);
+        // 挂起没传的 fire_pack（销账前挡板拦下的那些）现在可以走了，别等 60s 回看。
+        void flushAmsgState('instant-chat-settled');
+      }
     }
+  }
+  } finally {
+    untrackInFlightInboxMessageIds(pendingMessages.map((m) => m.messageId));
+  }
+};
+
+/**
+ * 一轮即时对话销账后的补扫：按**这一轮**的 uuid 再拉一次 outbox。末段先到时中段可能
+ * 还丢在路上，而销账后所有按 pending 走的兜底都不会再看这一轮。写进来的段落走原冲刷
+ * 管线（保序 hold 会把它插回正确位置）。尽力而为：失败就算了，正常路径什么都扫不到。
+ */
+const sweepSettledInstantRound = async (charId: string, uuid: string): Promise<void> => {
+  try {
+    const swept = await drainChatOutboxForChar(charId, { uuids: [uuid] });
+    if (swept != null && swept > 0) await flushInboxToChat();
+  } catch (e) {
+    log.warn('即时对话销账后补扫失败（缺段只能等下一轮顺带）', { charId, uuid, error: e });
   }
 };
 
