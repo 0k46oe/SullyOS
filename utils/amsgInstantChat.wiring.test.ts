@@ -138,10 +138,23 @@ describe('useChatAI 的分流接缝', () => {
     expect(instantChatAt).toBeGreaterThan(instantPushAt);
   });
 
-  it('云端拿到的就是本地要发的那串消息和那份凭据', () => {
-    expect(branchSrc()).toMatch(/chatMessages:\s*fullMessages/);
+  it('云端拿到的就是本地要发的那串消息和那份凭据（回执块只附在末尾，不动原消息）', () => {
+    // 基底永远是 fullMessages；有作废回执时单独成块贴在末尾（云端到点自己渲染排程
+    // 清单和能力简介，chat 段只补回执这一样，别和 timely block 撞车）。
+    expect(branchSrc()).toMatch(/\[\.\.\.fullMessages, \{ role: 'system', content: amsg2NoticesBlock \}\]/);
+    expect(branchSrc()).toMatch(/:\s*fullMessages\)/);
+    expect(branchSrc()).toMatch(/buildAmsg2NoticesText\(/);
     expect(branchSrc()).toMatch(/baseUrl:\s*effectiveApi\.baseUrl/);
-    expect(branchSrc()).toMatch(/model:\s*effectiveApi\.model/);
+    // model / temperature 取 baseReqBody 的终值：本地那套 thinking 后缀（claude 系
+    // -thinking）和「开思考删温度」跑完是什么，云端就发什么——同一句话两条路才是
+    // 同一个模型、同一个温度。回退成 effectiveApi 原始值就是行为分叉的开始。
+    expect(branchSrc()).toMatch(/model:\s*baseReqBody\.model/);
+    expect(branchSrc()).toMatch(/temperature:\s*baseReqBody\.temperature/);
+  });
+
+  it('作废回执随受理销账：markExpiredNoticesNotified 只在 202 之后调', () => {
+    // 回执随 chat 段冻上云、受理即告知；失败路径不销，下轮重注（回执不丢）。
+    expect(branchSrc()).toMatch(/instantChatResult\.ok[\s\S]{0,600}markExpiredNoticesNotified/);
   });
 
   it('失败时不悄悄回本地生成：分支里没有本地 LLM 请求，走完就 return', () => {

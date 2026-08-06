@@ -43,7 +43,7 @@ import { ActiveMsgStore } from '../utils/activeMsgStore';
 import { markAmsgStateDirty, startAmsgChatPresence, stopAmsgChatPresence } from '../utils/amsgStateSync';
 import { getLastRealUserMessageAt } from '../utils/amsg2ExpireGuard';
 import { getPendingTasks, hasActiveAiTask, isAmsg2EnabledForChar } from '../utils/amsg2Tasks';
-import { buildAmsg2TaskContextText, collectAmsg2TaskContext } from '../utils/amsg2TaskContext';
+import { buildAmsg2NoticesText, buildAmsg2TaskContextText, collectAmsg2TaskContext } from '../utils/amsg2TaskContext';
 import { resolveCharTimeZone } from '../utils/timezone';
 import { isInstantChatReady, sendInstantChatTurn } from '../utils/amsgInstantChat';
 import { appendInstantTraceEntry } from '../utils/instantTraceLog';
@@ -1226,12 +1226,25 @@ export const useChatAI = ({
             // 一台 enabled 的 MCP 服务器，即时对话就永远静默走回本地——设置页亮着
             // 「已开启」、界面毫无异样，正是 instant push 静默分流那个坑的复刻。
             if (instantChatRoute) {
+                // 作废回执跟着 chat 段上云：检出（collectAmsg2TaskContext，带落台账的副作用）
+                // 在上面已经跑过了，本地路径靠 withAmsg2TaskContext 注入的排程清单和能力
+                // 简介到点由 worker 的 instant timely block 现算现渲，唯独回执云端没有——
+                // 只把这一样单独成块贴上，不带清单不带简介，别和到点渲染的那份撞车。
+                const amsg2NoticesBlock = amsg2ToolsInjected && amsg2Notices.length
+                    ? buildAmsg2NoticesText(amsg2Notices, resolveCharTimeZone(char), userProfile.name)
+                    : null;
                 const instantChatResult = await sendInstantChatTurn({
                     char,
                     // 云端要发给模型的就是本地这一份，一个字不改（见 fire_pack 的 chat 段）。
-                    chatMessages: fullMessages as Array<{ role: string; content: unknown }>,
+                    chatMessages: (amsg2NoticesBlock
+                        ? [...fullMessages, { role: 'system', content: amsg2NoticesBlock }]
+                        : fullMessages) as Array<{ role: string; content: unknown }>,
                     // 凭据用本地这一轮的那份：换成别的等于同一句话由不同模型来答，而用户看不出来。
-                    api: { baseUrl: effectiveApi.baseUrl, apiKey: effectiveApi.apiKey, model: effectiveApi.model },
+                    // model / temperature 取 baseReqBody 的终值而不是 effectiveApi 的原始值：
+                    // 上面那段已经按本地规则把 thinking 后缀（claude 系 -thinking）拼好、
+                    // 开思考时把温度删掉了——云端要的就是「本地这一轮会发出去的那份」。
+                    api: { baseUrl: effectiveApi.baseUrl, apiKey: effectiveApi.apiKey, model: baseReqBody.model },
+                    ...(typeof baseReqBody.temperature === 'number' ? { temperature: baseReqBody.temperature } : {}),
                     maxTokens: 8000,
                     userProfile, groups, realtimeConfig,
                     // 情绪评估也交给云端：worker 到点和主回复并行跑，结果随最后一条推送回来
@@ -1242,6 +1255,12 @@ export const useChatAI = ({
                 if (instantChatResult.ok) {
                     // 这次 POST 已经把权威的那份 fire_pack 传上去了，收尾不必再打脏重传一遍。
                     instantChatAccepted = true;
+                    // 回执已随 chat 段冻进云端，worker 到点（含它自己的重试）都会带着它——
+                    // 受理即算告知。极小概率云端整轮失败时这份回执随之作罢：那条路用户会
+                    // 收到明确的失败说明并重发，比失败后下一轮把陈年回执再端出来强。
+                    if (amsg2ExpiredIds.length) {
+                        void ActiveMsgStore.markExpiredNoticesNotified(char.id, amsg2ExpiredIds);
+                    }
                 } else {
                     // 没发出去就是没发出去：明确落一条系统消息 + 弹错，用户可以直接重发。
                     // **绝不静默退回本地生成** —— 静默分流那种查无可查的坑踩过一次就够了。

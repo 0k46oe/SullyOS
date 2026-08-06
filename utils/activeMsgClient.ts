@@ -674,8 +674,14 @@ export const toFirePackChatMessages = (
     return { role: message.role, content: String(message.content ?? '') };
   });
 
-  const sizeOf = () => utf8ByteLength(JSON.stringify(result));
-  if (sizeOf() <= CHAT_CONTENT_BUDGET_BYTES) return result;
+  // 体积账做增量：全量 stringify 只做这一次。整串 JSON 是「[ 条目,条目,… ]」，
+  // 换掉第 i 条时分隔符一个字节都不动，总字节的变化就恰好是这条自身序列化字节的差。
+  // 把全量 stringify 放进下面循环的条件里的话，每压平一条都要翻搅一遍整串
+  // （带图历史动辄数 MB），发生在用户刚按下发送的主线程上，一次就是秒级卡顿。
+  const entryBytes = (entry: { role: string; content: AmsgFirePackChatContent }) =>
+    utf8ByteLength(JSON.stringify(entry));
+  let totalBytes = utf8ByteLength(JSON.stringify(result));
+  if (totalBytes <= CHAT_CONTENT_BUDGET_BYTES) return result;
 
   // 最新那条用户消息 = 用户刚发出去、正在等回复的这一条。它的图片是这一轮的题面。
   let protectedIdx = -1;
@@ -685,17 +691,18 @@ export const toFirePackChatMessages = (
 
   // 从最老的开始丢：越老的图片对这一轮越不重要，而正文那句「用户发来一张图片」还在，
   // 模型至少知道当时发生过这件事。
-  for (let i = 0; i < result.length && sizeOf() > CHAT_CONTENT_BUDGET_BYTES; i += 1) {
+  for (let i = 0; i < result.length && totalBytes > CHAT_CONTENT_BUDGET_BYTES; i += 1) {
     if (i === protectedIdx || !hasNonTextPart(result[i].content)) continue;
+    const bytesBefore = entryBytes(result[i]);
     result[i] = { role: result[i].role, content: flattenToText(result[i].content as unknown[]) };
+    totalBytes -= bytesBefore - entryBytes(result[i]);
     console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 即时对话这轮体积超标，第 ${i + 1} 条消息的图片本体没带上云（文字段保留）`);
   }
 
-  const finalBytes = sizeOf();
-  if (finalBytes > CHAT_CONTENT_BUDGET_BYTES) {
+  if (totalBytes > CHAT_CONTENT_BUDGET_BYTES) {
     const mb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
     throw new Error(
-      `即时对话发不出去：这一轮要带的图片太大（约 ${mb(finalBytes)} MB，上限 ${mb(CHAT_CONTENT_BUDGET_BYTES)} MB）。`
+      `即时对话发不出去：这一轮要带的图片太大（约 ${mb(totalBytes)} MB，上限 ${mb(CHAT_CONTENT_BUDGET_BYTES)} MB）。`
       + '删掉图片、或者换一张小一点的再发。',
     );
   }
@@ -715,6 +722,14 @@ const describeInstantChatFailure = (status: number, body: any): string => {
   }
   if (status === 503) {
     return '即时对话没发出去：Worker 的环境变量没配齐（设置页点「重新连接并验证」能看到缺什么）。';
+  }
+  // 上游打回「时间必须在未来」：firstSendTime 是设备的钟加提前量算出来的，被打回
+  // 说明提前量在路上被吃光了——要么整包状态上传得太慢，要么设备时钟本身偏慢。
+  // 这两种用户能做的事是一样的：重试，或去检查自动对时。别让它掉进下面那句
+  // 光秃秃的 HTTP 400。
+  if (body?.error?.upstream?.error?.code === 'INVALID_TIMESTAMP') {
+    return '即时对话没发出去：没赶上服务端的时间校验——网络太慢，或设备时钟偏慢。'
+      + '重试一次通常就好；每次都这样的话，检查一下设备的「自动设置时间」开没开。';
   }
   return `即时对话没发出去（HTTP ${status}${code ? ` / ${code}` : ''}）${detail ? `：${detail}` : '。'}`;
 };
@@ -1679,6 +1694,11 @@ export const ActiveMsgClient = {
      * 而用户完全看不出这件事发生过。
      */
     api: { baseUrl: string; apiKey: string; model: string };
+    /**
+     * 本地这一轮会发的采样温度。不传就是本地也不发（开思考时本地会删掉温度）——
+     * 上游 buildLlmRequestBody 对空温度整个省略该字段，两边落到同一个供应商默认值。
+     */
+    temperature?: number;
     maxTokens?: number;
     userProfile: UserProfile;
     groups: GroupProfile[];
@@ -1724,6 +1744,9 @@ export const ActiveMsgClient = {
       apiUrl: normalizeChatApiUrl(api.baseUrl),
       apiKey: api.apiKey,
       primaryModel: api.model,
+      // 温度跟着本地走：本地发多少云端发多少，本地不发（开思考时）云端也不发。
+      // 少了它，同一句话云端会落到供应商默认温度（常为 1.0），回复风格和本地对不上。
+      ...(typeof params.temperature === 'number' ? { temperature: params.temperature } : {}),
       ...(params.maxTokens && params.maxTokens > 0 ? { maxTokens: params.maxTokens } : {}),
       metadata: {
         charId: char.id,
