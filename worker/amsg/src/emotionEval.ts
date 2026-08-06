@@ -167,8 +167,11 @@ const ERROR_SNIPPET_MAX = 120;
  * 而这句话最终要走 push 出门。摘之前先按 key 本身过一遍，命中就打码。
  */
 const describeEvalFailure = (status: number, body: string, apiKey: string): string => {
-  let snippet = body.replace(/\s+/g, ' ').trim().slice(0, ERROR_SNIPPET_MAX);
+  // 打码必须在截断之前：先截的话，切口正好落在 key 中间时整串就查不到 key，
+  // 半截凭据原样带出去。
+  let snippet = body.replace(/\s+/g, ' ').trim();
   if (apiKey && snippet.includes(apiKey)) snippet = snippet.split(apiKey).join('***');
+  snippet = snippet.slice(0, ERROR_SNIPPET_MAX);
   return `副 API HTTP ${status}${snippet ? `：${snippet}` : ''}`;
 };
 

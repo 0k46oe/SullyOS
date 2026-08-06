@@ -4,9 +4,9 @@
 // 留成占位符发上来，worker 用本次请求已有的消息填回原位。填错一个字，评估看到的
 // 就不是角色真正看到的那份上下文，判出来的情绪对不上它刚说的话——而这种偏差在
 // 界面上完全看不出来，只会表现为「情绪越来越不准」。
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 
-import { restoreEvalPrompt } from './emotionEval';
+import { restoreEvalPrompt, runAmsgEmotionEval } from './emotionEval';
 
 const TEMPLATE = [
   '## 角色此刻看到的完整上下文',
@@ -86,5 +86,36 @@ describe('restoreEvalPrompt', () => {
     expect(out).toContain('[用户]: 在吗');
     // 设定槽位填空串：没有就是没有，不能拿第一条用户消息顶上去
     expect(out).toContain('## 角色此刻看到的完整上下文\n\n## 完整对话历史');
+  });
+});
+
+// 失败原因这句话最终要走 push 出门（评估失败信号带给客户端），里头绝不能有 apiKey。
+// 个别中转会把整个请求（含 Authorization 头）回显在错误页里，所以打码必须先于截断：
+// 先截的话，切口正好落在 key 中间时整串里查不到完整 key，半截凭据就原样带出去了。
+describe('评估失败原因的脱敏', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('错误正文里的 apiKey 被截断切中也不许漏出半截（先打码后截断）', async () => {
+    const apiKey = 'sk-secondary-0123456789abcdef0123456789abcdef';
+    // 110 个填充字符 + key：120 字符的切口正好穿过 key 的前半截。
+    const body = 'x'.repeat(110) + apiKey + ' tail';
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      text: async () => body,
+    })));
+
+    const outcome = await runAmsgEmotionEval(
+      { prompt: TEMPLATE, api: { baseUrl: 'https://eval.example.com/v1', apiKey, model: 'eval-mini' } },
+      [{ role: 'user', content: '在吗' }],
+      'Nyah',
+    );
+
+    expect(outcome.raw).toBeNull();
+    expect(outcome.error).toContain('副 API HTTP 401');
+    expect(outcome.error).toContain('***');
+    expect(outcome.error, 'key 的前缀一个字节都不许出门').not.toContain(apiKey.slice(0, 10));
   });
 });
