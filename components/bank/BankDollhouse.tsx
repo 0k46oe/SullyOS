@@ -12,6 +12,7 @@ import { useOS } from '../../context/OSContext';
 import { DB } from '../../utils/db';
 import { processImage } from '../../utils/file';
 import { Armchair, PaintBucket, SquaresFour, Image as ImageIcon, HouseSimple, PencilSimple } from '@phosphor-icons/react';
+import type { Icon as PhosphorIcon } from '@phosphor-icons/react';
 
 const ROOM_UNLOCK_COSTS: Record<string, number> = {
     'room-1f-left': 0,
@@ -27,7 +28,7 @@ const CUSTOM_FURNITURE_ASSET_KEY = 'bank_custom_furniture_assets_v1';
 
 type DecorTab = 'layout' | 'rename' | 'wallpaper' | 'furniture' | 'floor' | 'roomTexture';
 
-const DECOR_TAB_ICONS: Record<DecorTab, React.FC<{ size?: number; weight?: string; className?: string }>> = {
+const DECOR_TAB_ICONS: Record<DecorTab, PhosphorIcon> = {
     furniture: Armchair,
     wallpaper: PaintBucket,
     floor: SquaresFour,

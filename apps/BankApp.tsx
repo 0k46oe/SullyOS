@@ -798,7 +798,7 @@ ${previousGuestbook}
                     <BankDollhouse
                         shopState={state.shop}
                         dollhouseState={dollhouseState}
-                        onDollhouseChange={persistDollhouseUpdate}
+                        onDollhouseChange={async (updater) => { await persistDollhouseUpdate(updater); }}
                         characters={characters}
                         userProfile={userProfile}
                         apiConfig={apiConfig}
