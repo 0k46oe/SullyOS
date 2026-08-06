@@ -565,9 +565,15 @@ export const buildFirePack = async (
     tzId,
     userTzId,
     targetName: userProfile.name || '对方',
-    // 这份模板的身份戳：worker 用它判断云端那份「角色自己发过什么」还配不配得上
-    // 当前上下文（见 amsgFirePack 的 selfLogMatchesPack）。每打一次包都是新值。
+    // 这份模板的身份戳：worker 用它判断云端自述日志里哪些正文已经进了新转写、
+    // 自排任务备账还配不配得上当前清单（见 amsgFirePack 的 reconcileSelfLogWithPack）。
+    // 每打一次包都是新值。
     builtAt: Date.now(),
+    // 用户主权连发上限（0 = 不限；没设就不带，worker 用默认值）。worker 拿它拦两处：
+    // 排程工具打回超额自排、角色自排任务到点兜底作废。用户面板排的任务不受它管。
+    ...(typeof char.activeMsg2Config?.maxUnansweredSends === 'number'
+      ? { maxUnansweredSends: char.activeMsg2Config.maxUnansweredSends }
+      : {}),
     // 到点时角色要知道自己还挂着什么，才不会把同一件事再排一遍。这里带原始记录，
     // 渲染成人话由 worker 现场做（时间要按 tzId 换算，且得摘掉正在发的那条）。
     pendingTasks: getPendingTasks(char.activeMsg2Config, Date.now()),
@@ -1524,6 +1530,8 @@ export const ActiveMsgClient = {
       promptHint?: string;
       userMessage?: string;
       expirePolicy?: ActiveMsg2ExpirePolicy;
+      /** 角色自己排的（工具桥传 true）。带上 metadata 标记，连发上限的到点兜底闸只拦它。 */
+      selfScheduled?: boolean;
     };
     /** 编辑/续期时传旧任务 uuid：先取消它再新建（不传 = 纯新建）。 */
     replaceTaskUuid?: string;
@@ -1593,6 +1601,8 @@ export const ActiveMsgClient = {
         amsgClientTaskId: clientTaskId,
         amsgExpirePolicy: resolveExpirePolicy(task.mode, task.expirePolicy),
         amsgAnchorMs: anchorMs,
+        // 自排标记：到点兜底闸只拦带它的任务（用户面板排的不带、不受连发上限管）。
+        ...(task.selfScheduled ? { amsgSelfScheduled: true } : {}),
       },
     };
 

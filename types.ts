@@ -349,6 +349,12 @@ export interface ActiveMsg2CharacterConfig {
   tasks?: ActiveMsg2TaskRecord[];
   /** ↓ 角色级共享设置（所有任务共用）。 */
   maxTokens?: number;
+  /**
+   * 「我没回的时候，TA 最多连续主动发几条」。0 = 不限；没设 = 默认值
+   * （amsgFirePack.DEFAULT_MAX_UNANSWERED_SENDS）。管的是角色自己排的后续
+   * （含 fire 里的自排链），用户在面板里亲手排的任务不受它管；用户一回复就重新计数。
+   */
+  maxUnansweredSends?: number;
   useSecondaryApi?: boolean;
   secondaryApi?: ActiveMsg2ApiConfig;
   lastSyncedAt?: number;

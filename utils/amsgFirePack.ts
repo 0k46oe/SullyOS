@@ -248,6 +248,7 @@ const LAST_SKIP_REASONS = [
   'empty-generation',
   'side-effects-only',
   'stale',
+  'unanswered-limit',
 ] as const;
 
 export interface AmsgLastSkip {
@@ -262,6 +263,7 @@ export interface AmsgLastSkip {
    * empty-generation      模型这次没写出任何能发的正文（空输出 / 纯拒答）
    * side-effects-only     模型这次只做了副作用（点赞、写日记之类）却没说话，整条不发
    * stale                 到点时已经过期太久（服务停摆后恢复），不再补发
+   * unanswered-limit      角色自排的任务到点时，用户未回复期间的连发条数已到用户设的上限
    */
   reason: (typeof LAST_SKIP_REASONS)[number];
   skippedAt: number;
@@ -313,6 +315,8 @@ export const describeLastSkip = (skip: AmsgLastSkip, formatTime: (ms: number) =>
       }
       return `${when} 那次主动消息没发——到点时已经过去太久（服务中断过），过期的话就不补发了。`;
     }
+    case 'unanswered-limit':
+      return `${when} 那次主动消息暂停了——你未回复期间 ta 的连发条数已到你设置的连发上限，等你回复后恢复。`;
   }
 };
 
@@ -414,9 +418,10 @@ export interface AmsgFirePack {
   /** 用户称呼（userProfile.name || '对方'），awayHint 文案用。 */
   targetName: string;
   /**
-   * 这份模板打包的时刻（epoch ms），self_log 拿它当对齐锚点：日志里记的 basePackAt
-   * 和这个值不一样，说明客户端之后又传了一份新模板，那几条正文已经在新的【最近对话上下文】
-   * 里了，日志整份作废（见 selfLogMatchesPack）。
+   * 这份模板打包的时刻（epoch ms），self_log 的 tasks 段拿它当对齐锚点：日志里记的
+   * basePackAt 和这个值不一样，说明客户端之后又传了一份新模板，自排任务已随
+   * pendingTasks 回来，tasks 段作废；连发记录（entries）不看它，只认用户有没有开口
+   * （见 reconcileSelfLogWithPack）。
    */
   builtAt: number;
   /**
@@ -438,6 +443,12 @@ export interface AmsgFirePack {
    * 绝不退回主动消息模板去答聊天。
    */
   chat?: AmsgFirePackChat;
+  /**
+   * 用户设的「未回复期间最多连发几条」（角色级设置，见 ActiveMsg2CharacterConfig 同名字段）。
+   * 0 = 不限；缺省 = worker 用 DEFAULT_MAX_UNANSWERED_SENDS。worker 拿它拦两处：
+   * 排程工具打回、以及角色自排任务到点时的兜底作废（用户面板排的任务不受它管）。
+   */
+  maxUnansweredSends?: number;
 }
 
 // ─── 按角色参照系渲染时间（②：worker 给角色看的一切时间只此一份） ───
@@ -569,12 +580,25 @@ export interface AmsgSelfLogEntry {
   at: number;
   /** 正文（多段消息拼成一条记，超长截断）。 */
   text: string;
+  /**
+   * 即时对话的回复（用户刚说了话、这条是在答它）。列进自述块保持连续性，
+   * 但不算「主动连发」——连发计数（countUnansweredSends）只数没这个标记的条目。
+   */
+  reply?: boolean;
 }
 
 export interface AmsgSelfLog {
-  v: 2;
+  v: 3;
   /** 写这份日志时云端 fire_pack 的 builtAt，见 AmsgFirePack.builtAt。 */
   basePackAt: number;
+  /**
+   * 连发记录的锚：entries 记的是「用户这次开口之后」角色发出的消息。
+   * fire 时发现 lastUserMessageAt 比它新 → 用户开口过 → entries 清空、锚前进
+   * （见 reconcileSelfLogWithPack）。刻意不跟 basePackAt 挂钩：客户端每认领一条
+   * 推送就会重传 fire_pack，挂那上面的话计数会被角色自己发的消息洗回零，
+   * 连发提醒和上限在用户在线时全部失效——2026-08 炸屏事故的成因之一。
+   */
+  anchorUserMsgAt: number | null;
   entries: AmsgSelfLogEntry[];
   /**
    * 角色在这几次 fire 里给自己排下的任务（客户端还不知道它们存在）。
@@ -584,8 +608,8 @@ export interface AmsgSelfLog {
    * 很容易把同一件事再排一遍。
    *
    * 客户端上线重放 directive 之后，这些任务会进它的本地清单，下次同步就随
-   * fire_pack.pendingTasks 一起上来——那时这份日志整份作废（basePackAt 对不上），
-   * 不会两边各记一份。
+   * fire_pack.pendingTasks 一起上来——那时 tasks 段作废（basePackAt 对不上，
+   * 见 reconcileSelfLogWithPack），不会两边各记一份。
    */
   tasks: ActiveMsg2TaskRecord[];
 }
@@ -595,12 +619,53 @@ export const SELF_LOG_MAX_ENTRIES = 8;
 /** 单条正文留多长。主动消息本来就一两句，超出的部分基本是标签和长引用。 */
 export const SELF_LOG_TEXT_MAX = 200;
 
-export const createSelfLog = (basePackAt: number): AmsgSelfLog => ({
-  v: 2,
+export const createSelfLog = (basePackAt: number, anchorUserMsgAt: number | null = null): AmsgSelfLog => ({
+  v: 3,
   basePackAt,
+  anchorUserMsgAt,
   entries: [],
   tasks: [],
 });
+
+/** 未回复期间连发上限的缺省值（用户没设时 worker 用它）。 */
+export const DEFAULT_MAX_UNANSWERED_SENDS = 3;
+
+/** 用户设置 → 生效上限：0 = 不限（Infinity），没设/坏值 = 默认，其余取正整数。 */
+export const resolveMaxUnansweredSends = (value: unknown): number => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_MAX_UNANSWERED_SENDS;
+  if (value === 0) return Infinity;
+  if (value < 1) return DEFAULT_MAX_UNANSWERED_SENDS;
+  return Math.min(99, Math.floor(value));
+};
+
+/** 连发计数：用户未回复期间角色主动发出的条数（即时对话的回复不算）。 */
+export const countUnansweredSends = (log: AmsgSelfLog | null): number =>
+  log ? log.entries.filter((e) => !e.reply).length : 0;
+
+/**
+ * fire 开场把云端存的自述日志对齐到本次的 fire_pack 与用户发言状态。两段各管各的生死：
+ *
+ * - entries（连发记录）只认「用户开口了」：lastUserMessageAt 比锚新就清空、锚前进。
+ *   fire_pack 换代**不**清它——换代多半只是客户端认领了角色自己发的推送（打脏重传），
+ *   计数要是跟着清，连发提醒和上限在用户在线时就永远不会生效。
+ * - tasks（自排任务备账）只认「fire_pack 换代」：客户端认领后这些任务已随
+ *   pack.pendingTasks 回来，再留一份就会被记成两条。
+ */
+export const reconcileSelfLogWithPack = (
+  stored: AmsgSelfLog | null,
+  pack: AmsgFirePack,
+  lastUserMessageAt: number | null,
+): AmsgSelfLog => {
+  let log = stored ?? createSelfLog(pack.builtAt, lastUserMessageAt);
+  if (lastUserMessageAt != null
+    && (log.anchorUserMsgAt == null || lastUserMessageAt > log.anchorUserMsgAt)) {
+    log = { ...log, anchorUserMsgAt: lastUserMessageAt, entries: [] };
+  }
+  if (log.basePackAt !== pack.builtAt) {
+    log = { ...log, basePackAt: pack.builtAt, tasks: [] };
+  }
+  return log;
+};
 
 /** 记下角色刚给自己排的任务（同 uuid 覆盖，fire 重跑不会记重）。 */
 export const appendSelfLogTask = (log: AmsgSelfLog, task: ActiveMsg2TaskRecord): AmsgSelfLog => ({
@@ -616,22 +681,13 @@ export const appendSelfLogEntry = (log: AmsgSelfLog, entry: AmsgSelfLogEntry): A
   return { ...log, entries: [...kept, { ...entry, text }].slice(-SELF_LOG_MAX_ENTRIES) };
 };
 
-/**
- * 云端那份日志还配不配得上当前这份 fire_pack。
- *
- * 对不上就整份丢掉：客户端传新模板意味着用户又聊过（或角色资料变了重新打包），
- * 新模板的【最近对话上下文】是从本地聊天记录重读的，主动消息送达时 SW 已经写进库里，
- * 所以那几条正文本来就在里面。再叠一份日志就是同一段话在 prompt 里出现两次。
- */
-export const selfLogMatchesPack = (log: AmsgSelfLog | null, pack: AmsgFirePack): boolean =>
-  !!log && log.basePackAt === pack.builtAt;
-
 export const parseSelfLog = (value: string): AmsgSelfLog | null => {
   try {
     const parsed = JSON.parse(value);
     if (
-      parsed && typeof parsed === 'object' && parsed.v === 2
+      parsed && typeof parsed === 'object' && parsed.v === 3
       && typeof parsed.basePackAt === 'number'
+      && (parsed.anchorUserMsgAt === null || typeof parsed.anchorUserMsgAt === 'number')
       && Array.isArray(parsed.tasks)
       && Array.isArray(parsed.entries)
       && parsed.entries.every((e: unknown) => {
@@ -647,32 +703,62 @@ export const parseSelfLog = (value: string): AmsgSelfLog | null => {
 };
 
 /**
+ * 「多久之前」的自然写法。一天之内用相对口径——「3分钟前」比「13:05」更能让模型
+ * 看见发送频率本身（连发提醒的主要信息量就在这）；更久的退回按角色时区的绝对时刻。
+ */
+const formatAgo = (atMs: number, nowMs: number, tz: AmsgTzRef): string => {
+  const diff = nowMs - atMs;
+  if (diff < 60_000) return '刚刚';
+  if (diff < 60 * 60_000) return `${Math.floor(diff / 60_000)}分钟前`;
+  if (diff < 24 * 60 * 60_000) return `${Math.floor(diff / (60 * 60_000))}小时前`;
+  return formatFireTimeShort(atMs, tz);
+};
+
+/**
  * 渲染进 AMSG_SLOT_SELF_LOG 的那一段。没有可写的就返回空串（槽位被抹掉，模板跟没这回事一样）。
  *
  * 开头两个空行是刻意的：槽位紧接在对话记录最后一行后面，不空开的话这段会黏成聊天记录的续行。
+ *
+ * 结尾那行连发计数是软提醒的主体：把「已连发几条 / 上限几条」摆在几条相对时间戳的正下方，
+ * 模型看到的是频率事实而不是一句抽象劝告。硬拦不在这（见 worker 的排程工具闸与到点兜底闸）。
  */
-export const renderSelfLogBlock = (log: AmsgSelfLog | null, tz: AmsgTzRef): string => {
+export const renderSelfLogBlock = (
+  log: AmsgSelfLog | null,
+  nowMs: number,
+  tz: AmsgTzRef,
+  maxUnanswered: number = DEFAULT_MAX_UNANSWERED_SENDS,
+): string => {
   if (!log || log.entries.length === 0) return '';
+  // 正文只渲染还没进【最近对话上下文】的那些（发出时刻晚于本次 fire_pack 打包时刻）；
+  // 更早的条目客户端已经写进聊天记录、随新转写回来了，这里再抄一遍就是同一段话出现两次。
+  // 计数不跟着过滤——连发额度问的是「用户没回期间总共发了几条」，跟正文在哪无关。
+  const fresh = log.entries.filter((e) => e.at > log.basePackAt);
+  const sends = countUnansweredSends(log);
+  const limitHalf = Number.isFinite(maxUnanswered)
+    ? `，上限 ${maxUnanswered} 条，到上限后你自己排的后续会暂停、等对方回复才恢复`
+    : '';
+  if (fresh.length === 0) {
+    if (sends === 0) return '';
+    // 正文都在转写里了，这里只补频率事实。
+    return [
+      '',
+      '',
+      `（对方未回应期间你已连发 ${sends} 条主动消息${limitHalf}。别把已经说过的话换个说法再讲一遍。）`,
+    ].join('\n');
+  }
+  const countLine = sends >= 1
+    ? `（对方一直没回应，其中主动发起的你已连发 ${sends} 条${limitHalf}。往下接着说，别把已经说过的话换个说法再讲一遍，也别假装这些没发生过。）`
+    : '（这几条是你发出去的，对方还没回应。往下接着说，别把已经说过的话换个说法再讲一遍，也别假装这些没发生过。）';
   return [
     '',
     '',
-    '【这之后你又主动发过（对方还没回）】',
-    ...log.entries.map((e) => `- ${formatFireTimeShort(e.at, tz)}　${e.text}`),
-    '（这几条是你自己发出去的，对方一直没回应。往下接着说，别把已经说过的话换个说法再讲一遍，也别假装这些没发生过。）',
+    '【这之后你又发过（对方还没回）】',
+    ...fresh.map((e) => `- ${formatAgo(e.at, nowMs, tz)}　${e.text}`),
+    countLine,
   ].join('\n');
 };
 
 const fillSlot = (text: string, slot: string, value: string) => text.split(slot).join(value);
-
-/**
- * 连排提醒（对方未回应期间的第 x 条）插在哪一行前面。
- * 【本次任务】是模板里任务指令段的固定标题（activeMsgClient 的模板写死这一行）。
- */
-const TASK_SECTION_HEADING = '【本次任务】';
-
-/** x ≥ 2 时的边界提醒（不做强制拦截，force/expire 一视同仁）。export 只为单测。 */
-export const buildStreakReminder = (x: number): string =>
-  `（这是你在对方未回应期间发出的第 ${x} 条主动消息。请注意边界：若要继续安排新的消息，考虑对方的需求和实际观感。）`;
 
 /**
  * 用 nowMs 时刻的时间信息填掉模板里的全部槽位，得到最终可发给 LLM 的 prompt。
@@ -680,14 +766,13 @@ export const buildStreakReminder = (x: number): string =>
  * worker 读不到就先抛错，所以这里按必填收。
  *
  * 另外两块由调用方现算好传进来（都不传时对应槽位被抹平，输出与没有这回事时一致）：
- *   selfLog       这份上下文之后角色自己发过什么，先用 selfLogMatchesPack 对齐过；
+ *   selfLog       这份上下文之后角色自己发过什么，先用 reconcileSelfLogWithPack 对齐过；
  *   taskListBlock 「你现在还挂着哪些排程」那一段，见 amsg2Tasks.buildFireTaskListBlock。
  *   文案住在 amsg2Tasks 而不是这里：那边已经有一整套给人看的任务描述（面板、
  *   排程现状块、list 工具共用），同一件事不该有第二套说法。
  *   realtimeWorldBlock 到点现拉的节日 / 天气 / 热搜，见 realtimeWorldCore.renderRealtimeWorldBlock。
  *
- * 连排提醒：selfLog 里已有 n 条「对方未回应期间发出的」正文时，本条是第 x = n+1 条；
- * x ≥ 2 时在【本次任务】前插一行边界提醒（见 buildStreakReminder）。
+ * 连发提醒长在自述块里（renderSelfLogBlock 的计数行），上限取 pack.maxUnansweredSends。
  */
 export const renderFirePack = (
   pack: AmsgFirePack,
@@ -704,17 +789,15 @@ export const renderFirePack = (
   const awayHint = buildAwayHint(pack.targetName, timeSinceUser);
 
   let out = pack.template;
-  const streak = (extras?.selfLog?.entries.length ?? 0) + 1;
-  if (streak >= 2) {
-    out = out.replace(TASK_SECTION_HEADING, `${buildStreakReminder(streak)}\n${TASK_SECTION_HEADING}`);
-  }
   out = fillSlot(out, AMSG_SLOT_CURRENT_TIME, currentTime);
   // 对方那边的钟：跟上面那行是两个主体各自的时间，文案里各自写清主语（见 buildUserClockHint）。
   out = fillSlot(out, AMSG_SLOT_USER_CLOCK, buildUserClockHint(nowMs, tz, { tzId: pack.userTzId }, pack.targetName));
   out = fillSlot(out, AMSG_SLOT_TIME_SINCE_USER, timeSinceUser);
   out = fillSlot(out, AMSG_SLOT_AWAY_HINT, awayHint);
   out = fillSlot(out, AMSG_SLOT_TASK_INSTRUCTION, taskInstruction);
-  out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(extras?.selfLog ?? null, tz));
+  out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(
+    extras?.selfLog ?? null, nowMs, tz, resolveMaxUnansweredSends(pack.maxUnansweredSends),
+  ));
   out = fillSlot(out, AMSG_SLOT_TASK_LIST, extras?.taskListBlock ?? '');
   out = fillSlot(out, AMSG_SLOT_SCENE, renderFireSceneBlock(pack.scene, nowMs, tz));
   // 实时世界那一段是独立的一整块，前导空行在这里补：拉到东西才隔开成段，
@@ -793,7 +876,11 @@ export const parseFirePack = (value: string): AmsgFirePack | null => {
       typeof parsed.targetName === 'string' &&
       typeof parsed.builtAt === 'number' &&
       Array.isArray(parsed.pendingTasks) &&
-      (parsed.scene === null || typeof parsed.scene === 'object')
+      (parsed.scene === null || typeof parsed.scene === 'object') &&
+      (parsed.maxUnansweredSends === undefined
+        || (typeof parsed.maxUnansweredSends === 'number'
+          && Number.isFinite(parsed.maxUnansweredSends)
+          && parsed.maxUnansweredSends >= 0))
     ) {
       return parsed as AmsgFirePack;
     }

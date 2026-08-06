@@ -1041,7 +1041,7 @@ describe('revokeSwallowedSelfLogEntry', () => {
   const cloudLog = (
     entries: Array<{ id: string; at: number; text: string }>,
     tasks: unknown[] = [],
-  ) => JSON.stringify({ v: 2, basePackAt: 1_700_000_000_000, entries, tasks });
+  ) => JSON.stringify({ v: 3, basePackAt: 1_700_000_000_000, anchorUserMsgAt: null, entries, tasks });
 
   const entry = (id: string) => ({ id, at: 1_700_000_000_000, text: '在忙吗' });
 
@@ -1144,8 +1144,9 @@ describe('防穿帮闸吞掉消息后撤销云端自述日志（走真库）', (
 
     const entryId = `client-task-swallow@${occurrenceMs}`;
     vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(JSON.stringify({
-      v: 2,
+      v: 3,
       basePackAt: 1_700_000_000_000,
+      anchorUserMsgAt: null,
       entries: [{ id: entryId, at: occurrenceMs, text: '刚看到楼下那只猫又来了' }],
       tasks: [],
     }));

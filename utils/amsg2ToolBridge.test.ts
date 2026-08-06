@@ -121,6 +121,14 @@ describe('amsg2ToolBridge 同一轮多次调用累加', () => {
     );
   });
 
+  it('角色排的任务带 selfScheduled 标记（连发上限的到点兜底闸认它；面板排的不带）', async () => {
+    const { deps } = makeSession();
+    await executeAmsg2Tool('schedule_active_message', { send_at: future() }, deps);
+    expect(ActiveMsgClient.scheduleCharacterTask).toHaveBeenLastCalledWith(
+      expect.objectContaining({ task: expect.objectContaining({ selfScheduled: true }) }),
+    );
+  });
+
   it('一轮内 schedule 后 list → 列得出刚建的那条', async () => {
     const { deps } = makeSession();
     await executeAmsg2Tool('schedule_active_message', { send_at: future() }, deps);

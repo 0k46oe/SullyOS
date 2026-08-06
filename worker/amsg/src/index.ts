@@ -46,19 +46,20 @@ import {
   amsgXhsSessionKey,
   appendSelfLogEntry,
   appendSelfLogTask,
-  createSelfLog,
+  countUnansweredSends,
   describeFirePackVersion,
   parseChatOutbox,
   parseFirePack,
   parseSelfLog,
+  reconcileSelfLogWithPack,
   renderFirePack,
   renderSelfLogBlock,
-  selfLogMatchesPack,
+  resolveMaxUnansweredSends,
   unpackStateValue,
 } from '../../../utils/amsgFirePack';
 import { resolveFireSceneSong } from '../../../utils/amsgFireScene';
 import { shouldExpireFire } from '../../../utils/amsg2ExpireGuard';
-import { buildFireTaskListBlock, MAX_ACTIVE_TASKS_PER_CHAR } from '../../../utils/amsg2Tasks';
+import { buildFireTaskListBlock, isPendingTask, MAX_ACTIVE_TASKS_PER_CHAR } from '../../../utils/amsg2Tasks';
 import {
   AMSG_FIRE_SCHEDULE_TOOL,
   buildFireScheduleBlock,
@@ -279,6 +280,16 @@ interface FireStash {
   pendingTaskCount: number;
   /** 角色本次 fire 已经排成功的任务（也是要随 push 带回客户端认领的那些）。 */
   scheduledTasks: ActiveMsg2TaskRecord[];
+  /**
+   * 用户设的「未回复期间最多连发几条」（已解析：0 → Infinity、缺省 → 默认值）。
+   * 排程工具用它打回超额的自排；到点兜底闸在 onBeforeFire 里直接用 pack 上的原始值。
+   */
+  maxUnansweredSends: number;
+  /**
+   * fire 开场时还没响的自排任务条数（pendingTasks + selfLog.tasks 里 source='character'
+   * 且时间在未来的）。它们到点各会消耗一条连发额度，排程工具算「还能不能再排」要连它一起数。
+   */
+  plannedSelfSends: number;
   /** 本次触发用到的角色 id / 任务归属键，排程时要写进新任务的 metadata。 */
   charId: string;
   /** 防穿帮闸锚点：这份 fire_pack 记的「用户最后一次开口」。 */
@@ -657,6 +668,9 @@ export const amsgFireSettled = async (
       id: `${stash.clientTaskId || 'task'}@${stash.occurrenceMs}`,
       at: Date.now(),
       text,
+      // 即时对话是在答用户刚说的话——列进自述块保持连续性，但不占「主动连发」的额度
+      // （countUnansweredSends 只数没这个标记的条目）。
+      ...(stash.instant ? { reply: true } : {}),
     });
     // 整段只有副作用标签（正文为空）时 append 原样返回——没有话可记。
     if (next !== stash.selfLog) {
@@ -806,6 +820,19 @@ export const runFireScheduleTool = async (
     // 重新粘贴，这里只需要让角色别以为排上了。
     return { ok: false, reason: 'not_supported', message: '当前后台版本还不支持给自己排后续，这次就把话说完吧。' };
   }
+  // 连发上限·排程闸（用户主权）：已发的 + 先前排了还没响的 + 这次已排的，加上这条会超
+  // 就打回。到点兜底闸（onBeforeFire）是它的另一半——先排满再触发的在那边拦。
+  // 直造的旧 stash 可能没有这两个字段，缺省当不限，别让 undefined 比较把排程整个禁掉。
+  const unansweredLimit = stash.maxUnansweredSends ?? Infinity;
+  const committedSends = countUnansweredSends(stash.selfLog)
+    + (stash.plannedSelfSends ?? 0) + stash.scheduledTasks.length;
+  if (committedSends + 1 > unansweredLimit) {
+    return {
+      ok: false,
+      reason: 'unanswered_limit',
+      message: `对方还没回复，这期间你已经发了/排了 ${committedSends} 条，用户设置的连发上限是 ${unansweredLimit} 条——这次别排了，等 ta 回复再说。`,
+    };
+  }
   if (stash.scheduledTasks.length >= MAX_FIRE_SCHEDULES) {
     return {
       ok: false,
@@ -850,6 +877,8 @@ export const runFireScheduleTool = async (
         // 防穿帮闸锚点：这条排下去之后，用户再开口就算「对话往前走了」。
         amsgAnchorMs: stash.anchorMs,
         amsgTaskInstruction: buildTaskInstruction(parsed.mode, parsed.promptHint),
+        // 自排标记：到点兜底闸只拦带它的任务（用户面板排的不受连发上限管）。
+        amsgSelfScheduled: true,
       },
     });
   } catch (error) {
@@ -1141,12 +1170,28 @@ export const amsgHooks = {
       : null;
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
 
-    // 角色上次到点自己说了什么：跟这份 fire_pack 对得上才算数，对不上就当没有、从空的一份
-    // 重新开始攒。判定与「丢弃」的理由见 amsgFirePack 的 selfLogMatchesPack。
+    // 角色上次到点自己说了什么：对齐到本次的 fire_pack 与用户发言状态。
+    // 连发记录（entries）只在用户开口时清零，fire_pack 换代只作废 tasks 段
+    // ——两段生死分开的理由见 amsgFirePack 的 reconcileSelfLogWithPack。
     const storedSelfLog = parseSelfLog(charRows.find((r) => r.key === AMSG_SELF_LOG_KEY)?.value ?? '');
-    const selfLog = selfLogMatchesPack(storedSelfLog, pack)
-      ? storedSelfLog as AmsgSelfLog
-      : createSelfLog(pack.builtAt);
+    const selfLog = reconcileSelfLogWithPack(storedSelfLog, pack, expireInput.lastUserMessageAt);
+
+    // 连发上限·到点兜底闸（用户主权）：用户未回复期间，角色自己排的任务最多响这么多次。
+    // 只拦自排（amsgSelfScheduled）——用户面板排的是明确意愿，不受自己的防骚扰上限误伤；
+    // 即时对话在答用户刚说的话，更不归它管。排程工具那半边只能拦「再排新的」，
+    // 先排满再触发的绕不过它，得在这里兜住。用户一回话 entries 清零，闸自动解除。
+    const maxUnansweredSends = resolveMaxUnansweredSends(pack.maxUnansweredSends);
+    if (!instant && taskMeta.amsgSelfScheduled === true
+      && countUnansweredSends(selfLog) >= maxUnansweredSends) {
+      console.log('[amsg:unanswered-limit-skip]', {
+        taskId: ctx.task.id,
+        charId,
+        sends: countUnansweredSends(selfLog),
+        limit: maxUnansweredSends,
+      });
+      await recordSkip(ctx, charId, 'unanswered-limit', occurrenceMs);
+      return { skip: true } as const;
+    }
 
     // 客户端记录的（打包那一刻的快照）+ 角色自己在之前几次 fire 里排下、客户端还没认领的。
     // 后者不补上的话，角色排完一条、下次到点又看不见它，很容易把同一件事再排一遍。
@@ -1180,6 +1225,10 @@ export const amsgHooks = {
       // 不然角色离线期间连排几次就能绕过每角色的任务上限。
       pendingTaskCount: livePendingTasks.length,
       scheduledTasks: [],
+      maxUnansweredSends,
+      plannedSelfSends: livePendingTasks
+        .filter((t) => t.source === 'character' && isPendingTask(t, ctx.now.getTime()))
+        .length,
       charId,
       anchorMs: pack.lastUserMessageAt ?? 0,
       tz,
@@ -1258,7 +1307,11 @@ export const amsgHooks = {
         userTzId: pack.userTzId,
         targetName: pack.targetName,
         timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
-        blocks: [realtimeWorldBlock, renderSelfLogBlock(selfLog, tz), taskListBlock, mcpBlock, scheduleBlock],
+        blocks: [
+          realtimeWorldBlock,
+          renderSelfLogBlock(selfLog, ctx.now.getTime(), tz, maxUnansweredSends),
+          taskListBlock, mcpBlock, scheduleBlock,
+        ],
       });
       const instantMessages = [
         // content 原样透传，一个字都不动：带图片的消息本地就是结构化分段

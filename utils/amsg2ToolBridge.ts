@@ -283,7 +283,9 @@ async function handleSchedule(args: Record<string, any>, deps: Amsg2ToolDeps): P
   };
 
   const result = await ActiveMsgClient.scheduleCharacterTask({
-    char, config, task: taskInput,
+    // selfScheduled：角色自己排的要带标记进任务 metadata——连发上限的到点兜底闸只拦
+    // 带它的任务，用户在面板里亲手排的不带、不受限（面板走的是同一个入口但不传这个）。
+    char, config, task: { ...taskInput, selfScheduled: true },
     replaceTaskUuid: args.__replaceTaskUuid,   // renew 内部复用，LLM 不感知
     userProfile, groups, realtimeConfig, apiConfig,
   });

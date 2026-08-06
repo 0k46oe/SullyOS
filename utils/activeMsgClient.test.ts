@@ -710,6 +710,15 @@ describe('buildFirePack 的时区参照系与模板（①）', () => {
     expect(out.template).toContain(`现在是 ${AMSG_SLOT_CURRENT_TIME}`);
   });
 
+  it('随包带上用户设的连发上限；没设就不带（worker 侧用默认值）', async () => {
+    const withLimit = await pack(baseChar({ activeMsg2Config: { enabled: true, maxUnansweredSends: 5 } }));
+    expect(withLimit.maxUnansweredSends).toBe(5);
+    const unlimited = await pack(baseChar({ activeMsg2Config: { enabled: true, maxUnansweredSends: 0 } }));
+    expect(unlimited.maxUnansweredSends).toBe(0);
+    const unset = await pack(baseChar());
+    expect(unset.maxUnansweredSends).toBeUndefined();
+  });
+
   // 回归守卫：用户设备的时区以前一个字都没上云。角色只看得到自己那边的钟，
   // 「晚上九点跟他说一声」在异国恋角色手里就是排到用户的凌晨三点，而且它无从察觉。
   it('随包带上用户设备时区，并在当前时间后面留「对方那边几点」的槽位', async () => {

@@ -532,6 +532,91 @@ describe('onBeforeFire 四道门', () => {
   });
 });
 
+// ─── 连发上限：用户主权硬闸（2026-08 炸屏事故的到点兜底半边）───
+//
+// 语义：「用户未回复期间，角色自己排的任务最多响 N 次」。只拦 metadata 标了
+// amsgSelfScheduled 的任务——用户面板排的是明确意愿，不受自己的防骚扰上限误伤；
+// 即时对话是在答用户刚说的话，也不拦。计数随「用户开口」清零，不随 fire_pack
+// 重传清零（后者正是当年提醒失效的回路）。
+describe('连发上限（到点兜底闸）', () => {
+  /** 造一份 v3 自述日志：n 条主动 + 可选几条即时回复。 */
+  const selfLogValue = (sends: number, opts: { replies?: number; basePackAt?: number } = {}) => {
+    const entries = [
+      ...Array.from({ length: sends }, (_, i) => ({ id: `s@${i}`, at: NOW.getTime() - (sends - i) * 60_000, text: `主动第${i + 1}条` })),
+      ...Array.from({ length: opts.replies ?? 0 }, (_, i) => ({ id: `r@${i}`, at: NOW.getTime() - 30_000, text: `回复${i + 1}`, reply: true })),
+    ];
+    return JSON.stringify({
+      v: 3, basePackAt: opts.basePackAt ?? PACK_BUILT_AT, anchorUserMsgAt: null, entries, tasks: [],
+    });
+  };
+
+  const rowsWith = (selfLog: string, packExtra: Record<string, unknown> = {}, lastUserMessageAt: number | null = null) => [
+    { key: AMSG_FIRE_PACK_KEY, value: firePackValue(lastUserMessageAt, packExtra) },
+    { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+    { key: AMSG_SELF_LOG_KEY, value: selfLog },
+  ];
+
+  const lastSkipReason = (writeState: ReturnType<typeof vi.fn>) => {
+    const call = writeState.mock.calls.find(([, entries]) =>
+      entries.some((e: { key: string }) => e.key === AMSG_LAST_SKIP_KEY));
+    return call ? JSON.parse(String(call[1][0].value)).reason : undefined;
+  };
+
+  it('自排任务到点、连发已达默认上限(3) → skip 并留 unanswered-limit 痕', async () => {
+    const { ctx, writeState } = makeCtx({
+      metadata: { amsgSelfScheduled: true },
+      charRows: rowsWith(selfLogValue(3)),
+    });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
+    expect(lastSkipReason(writeState)).toBe('unanswered-limit');
+  });
+
+  it('用户面板排的任务不受上限管：同样 3 条连发，照常生成', async () => {
+    const { ctx } = makeCtx({ charRows: rowsWith(selfLogValue(3)) });
+    fired(await amsgHooks.onBeforeFire(ctx));
+  });
+
+  it('用户开口后计数清零：自排任务照常发', async () => {
+    // fire_pack 记录的 lastUserMessageAt 比日志锚新 → reconcile 清空 entries。
+    const { ctx } = makeCtx({
+      metadata: { amsgSelfScheduled: true },
+      charRows: rowsWith(selfLogValue(3), {}, NOW.getTime() - 10 * 60_000),
+    });
+    fired(await amsgHooks.onBeforeFire(ctx));
+  });
+
+  it('炸屏回归守卫：客户端认领重传（fire_pack 换代）不清计数，自排任务仍被拦', async () => {
+    const { ctx, writeState } = makeCtx({
+      metadata: { amsgSelfScheduled: true },
+      charRows: rowsWith(selfLogValue(3, { basePackAt: PACK_BUILT_AT - 1000 })),
+    });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
+    expect(lastSkipReason(writeState)).toBe('unanswered-limit');
+  });
+
+  it('用户自设上限按用户的来：设 5 时第 4 条照常发、0（不限）永不拦', async () => {
+    const looser = makeCtx({
+      metadata: { amsgSelfScheduled: true },
+      charRows: rowsWith(selfLogValue(3), { maxUnansweredSends: 5 }),
+    });
+    fired(await amsgHooks.onBeforeFire(looser.ctx));
+
+    const unlimited = makeCtx({
+      metadata: { amsgSelfScheduled: true },
+      charRows: rowsWith(selfLogValue(9), { maxUnansweredSends: 0 }),
+    });
+    fired(await amsgHooks.onBeforeFire(unlimited.ctx));
+  });
+
+  it('即时对话的回复（reply 条目）不算连发', async () => {
+    const { ctx } = makeCtx({
+      metadata: { amsgSelfScheduled: true },
+      charRows: rowsWith(selfLogValue(2, { replies: 3 })),
+    });
+    fired(await amsgHooks.onBeforeFire(ctx));
+  });
+});
+
 // ─── 通用 MCP：到点把工具说明块和 tools 声明一起带上 ───
 //
 // 提示词块和 tools 数组同源同拍（都来自那一行 tool_config），所以这几条一起钉：
@@ -1551,7 +1636,7 @@ describe('self_log — 角色自述回写', () => {
       llmOutput: '它蹲在那儿一直没走',
     });
     expect(second.prompt).toContain('刚看到楼下那只猫又来了');
-    expect(second.prompt).toContain('【这之后你又主动发过（对方还没回）】');
+    expect(second.prompt).toContain('【这之后你又发过（对方还没回）】');
     // 位置：夹在对话上下文和本次任务之间，别跑到指令后面被当成新指令读。
     expect(second.prompt.indexOf('刚看到楼下那只猫又来了'))
       .toBeLessThan(second.prompt.indexOf('想到什么说什么'));
@@ -1582,24 +1667,27 @@ describe('self_log — 角色自述回写', () => {
     expect(entries[0].text, '同 id 覆盖，留最后一次真正发出去的那份').toBe('重跑时生成的话');
   });
 
-  it('客户端传了新 fire_pack → 旧自述作废，不会在 prompt 里出现两遍', async () => {
+  it('客户端传了新 fire_pack → 旧正文不再重复渲染，但连发计数保留', async () => {
     const store = makeStore(slottedFirePack());
     await runFire(store, {
       sendAt: '2026-07-25T12:00:00.000Z',
       llmOutput: '刚看到楼下那只猫又来了',
     });
 
-    // 用户回来聊了一轮：客户端重新打包上传，新模板的对话记录里本来就含那条主动消息。
-    store.rows.set(AMSG_FIRE_PACK_KEY, slottedFirePack(PACK_BUILT_AT + 60_000));
+    // 客户端认领那条推送后重新打包上传（打脏即传）：新转写的对话记录里本来就含那条
+    // 主动消息，正文不能再抄一遍；但用户并没有开口，连发计数必须留着——
+    // 挂在换代上清零正是 2026-08 炸屏时连发提醒失效的回路。
+    store.rows.set(AMSG_FIRE_PACK_KEY, slottedFirePack(Date.now() + 60_000));
 
     const next = await runFire(store, {
       sendAt: '2026-07-25T14:00:00.000Z',
       llmOutput: '那只猫今天还来吗',
     });
-    expect(next.prompt).not.toContain('刚看到楼下那只猫又来了');
-    // 日志本身从空的重攒，锚点跟上新的那份包。
-    expect(store.selfLog()?.basePackAt).toBe(PACK_BUILT_AT + 60_000);
-    expect(store.selfLog()?.entries.map((e) => e.text)).toEqual(['那只猫今天还来吗']);
+    expect(next.prompt).not.toContain('- 刚刚　刚看到楼下那只猫又来了');
+    expect(next.prompt).toContain('你已连发 1 条');
+    // 锚点跟上新的那份包（tasks 段作废），连发记录两条都在。
+    expect(store.selfLog()?.entries.map((e) => e.text))
+      .toEqual(['刚看到楼下那只猫又来了', '那只猫今天还来吗']);
   });
 
   // 对齐锚点是必填的，没有它自述日志无从判断新旧。所以缺锚点的包按「云端状态坏了」
@@ -1733,7 +1821,7 @@ describe('自排后续任务', () => {
   const makeStash = (over: Record<string, unknown> = {}) => ({
     session: { narrations: [], toolCalls: [], duplicateToolCalls: 0, mcpCallSeq: 0 },
     occurrenceMs: Date.parse('2026-07-25T12:00:00.000Z'),
-    selfLog: { v: 2 as const, basePackAt: 1, entries: [], tasks: [] },
+    selfLog: { v: 3 as const, basePackAt: 1, anchorUserMsgAt: null, entries: [], tasks: [] },
     pendingTaskCount: 0,
     scheduledTasks: [],
     charId: CHAR_ID,
@@ -1741,6 +1829,10 @@ describe('自排后续任务', () => {
     tz: { tzId: 'Asia/Shanghai' },
     taskUuid: TASK_UUID,
     taskRowId: '42',
+    instant: false,
+    // 连发上限相关：单测夹具默认不限，上限行为由「连发上限」那组用例单独钉。
+    maxUnansweredSends: Infinity,
+    plannedSelfSends: 0,
     ...over,
   }) as any;
 
@@ -1751,6 +1843,80 @@ describe('自排后续任务', () => {
   const sendAt = new Date(NOW_MS + 90 * 60_000).toISOString();
 
   afterEach(() => { okSchedule.mockClear(); });
+
+  it('连发到上限：排程工具直接打回，一条任务都不建', async () => {
+    const stash = makeStash({
+      maxUnansweredSends: 3,
+      selfLog: {
+        v: 3, basePackAt: 1, anchorUserMsgAt: null, tasks: [],
+        entries: [
+          { id: 's@1', at: NOW_MS - 3 * 60_000, text: '一' },
+          { id: 's@2', at: NOW_MS - 2 * 60_000, text: '二' },
+          { id: 's@3', at: NOW_MS - 60_000, text: '三' },
+        ],
+      },
+    });
+    const out = await runFireScheduleTool(stash, okSchedule, { send_at: sendAt }, NOW_MS);
+    expect(out.ok).toBe(false);
+    expect(out.reason).toBe('unanswered_limit');
+    expect(okSchedule).not.toHaveBeenCalled();
+  });
+
+  it('已发 2 条 + 先前自排的 1 条还没响，上限 3 → 第 4 条打回', async () => {
+    const stash = makeStash({
+      maxUnansweredSends: 3,
+      plannedSelfSends: 1,
+      selfLog: {
+        v: 3, basePackAt: 1, anchorUserMsgAt: null, tasks: [],
+        entries: [
+          { id: 's@1', at: NOW_MS - 2 * 60_000, text: '一' },
+          { id: 's@2', at: NOW_MS - 60_000, text: '二' },
+        ],
+      },
+    });
+    const out = await runFireScheduleTool(stash, okSchedule, { send_at: sendAt }, NOW_MS);
+    expect(out.ok).toBe(false);
+    expect(out.reason).toBe('unanswered_limit');
+  });
+
+  it('即时对话的回复不占连发额度：2 回复 + 2 主动，上限 3 → 还能排', async () => {
+    const stash = makeStash({
+      maxUnansweredSends: 3,
+      selfLog: {
+        v: 3, basePackAt: 1, anchorUserMsgAt: null, tasks: [],
+        entries: [
+          { id: 'r@1', at: NOW_MS - 4 * 60_000, text: '在的', reply: true },
+          { id: 'r@2', at: NOW_MS - 3 * 60_000, text: '嗯嗯', reply: true },
+          { id: 's@1', at: NOW_MS - 2 * 60_000, text: '一' },
+          { id: 's@2', at: NOW_MS - 60_000, text: '二' },
+        ],
+      },
+    });
+    const out = await runFireScheduleTool(stash, okSchedule, { send_at: sendAt }, NOW_MS);
+    expect(out.ok).toBe(true);
+  });
+
+  it('自排任务的 metadata 带 amsgSelfScheduled 标记（到点兜底闸认它）', async () => {
+    const stash = makeStash();
+    await runFireScheduleTool(stash, okSchedule, { send_at: sendAt }, NOW_MS);
+    expect(okSchedule.mock.calls[0][0].metadata.amsgSelfScheduled).toBe(true);
+  });
+
+  it('即时对话的回复记进 self_log 带 reply 标记，定时任务的不带', async () => {
+    const written = async (stash: any) => {
+      const writeState = vi.fn(async (
+        _namespace: string,
+        _entries: Array<{ key: string; value: string | null }>,
+      ) => ({ upserted: 1, skipped: 0, deleted: 0 }));
+      await amsgFireSettled({ status: 'sent', sentCount: 1, scratch: { fire: stash }, writeState } as any);
+      const entries = writeState.mock.calls[0][1];
+      return JSON.parse(String(entries.find((e) => e.key === AMSG_SELF_LOG_KEY)!.value));
+    };
+    const instantLog = await written(makeStash({ instant: true, selfLogTexts: ['嗯我在'] }));
+    expect(instantLog.entries[0].reply).toBe(true);
+    const timerLog = await written(makeStash({ selfLogTexts: ['突然想你了'] }));
+    expect(timerLog.entries[0].reply).toBeUndefined();
+  });
 
   it('排成功：任务落到远端，也记进自述日志供下次读回', async () => {
     const stash = makeStash();
