@@ -350,6 +350,29 @@ describe('只有 202 才算发出去', () => {
     expect(result.error).toContain('D1 timeout');
     expect(getInstantChatPending(CHAR.id)).toBeNull();
   });
+
+  // firstSendTime 是设备的钟加提前量算的，上游按自己的钟校验「必须在未来」——
+  // 慢网大包上传或设备时钟偏慢都会把提前量吃光。这种失败要指条路（重试 / 查自动
+  // 对时），不能掉进一句没人看得懂的 HTTP 400。
+  it('上游打回「时间必须在未来」→ 文案指向网络慢 / 时钟偏慢', async () => {
+    const result = await send(400, {
+      success: false,
+      error: {
+        code: 'INSTANT_CHAT_TASK_FAILED', message: '任务没建起来，这条没发出去',
+        step: 'schedule-message',
+        upstream: {
+          success: false,
+          error: {
+            code: 'INVALID_TIMESTAMP', message: '时间必须在未来',
+            details: { field: 'firstSendTime', reason: 'must be in the future' },
+          },
+        },
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('时钟');
+    expect(getInstantChatPending(CHAR.id)).toBeNull();
+  });
 });
 
 describe('待收记录（「正在输入…」那盏灯的唯一依据）', () => {
@@ -503,16 +526,16 @@ describe('推送丢了的补收对账', () => {
     expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
   });
 
-  it('读不到近史时宁可这次不补收（重复上屏比晚一会儿更糟）', async () => {
+  it('读不到近史时宁可这次不补收（重复上屏比晚一会儿更糟），对外报 null', async () => {
     stubOutbox(['msg_task_7@1700000000000_hook_0']);
     vi.spyOn(DB, 'getRecentMessagesByCharId').mockRejectedValue(new Error('IDB down'));
-    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
+    expect(await drainChatOutboxForChar(CHAR.id)).toBeNull();
     expect(storeState.saved).toHaveLength(0);
   });
 
-  it('云端没有 outbox（或读不出来）→ 静默返回 0，不抛错', async () => {
+  it('云端 outbox 读失败 → 返回 null（「没读到」≠「读到了、确实没有」），不抛错', async () => {
     vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockRejectedValue(new Error('offline'));
-    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
+    expect(await drainChatOutboxForChar(CHAR.id)).toBeNull();
   });
 
   it('推送载荷少了 charId → 没有落点，丢掉而不是造一条无主消息', () => {

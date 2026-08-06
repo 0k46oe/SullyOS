@@ -1467,8 +1467,8 @@ describe('即时对话的待收记录（走真库）', () => {
     delete (globalThis as any).window.umami;
   });
 
-  /** 一条云端 outbox 副本：形状跟 worker 定稿的那份推送一致。 */
-  const outboxValue = (charId: string, messageId: string) => JSON.stringify({
+  /** 一条云端 outbox 副本：形状跟 worker 定稿的那份推送一致（含任务身份 taskUuid）。 */
+  const outboxValue = (charId: string, messageId: string, taskUuid: string) => JSON.stringify({
     v: 1,
     entries: [{
       messageId,
@@ -1484,13 +1484,14 @@ describe('即时对话的待收记录（走真库）', () => {
         sessionId: 'sess-instant',
         messageIndex: 1,
         totalMessages: 1,
+        taskUuid,
         timestamp: new Date().toISOString(),
         metadata: { charId, charName: '即时角色', amsgInstantChat: true },
       },
     }],
   });
 
-  it('角色开口 → 待收记录销账（灯灭）', async () => {
+  it('欠着的那一轮回复到了 → 待收记录销账（灯灭）', async () => {
     const charId = 'char-instant-clear';
     await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
     setInstantChatPending(charId, 'uuid-clear');
@@ -1501,6 +1502,7 @@ describe('即时对话的待收记录（走真库）', () => {
       charName: '即时角色',
       body: '在的',
       messageType: 'instant',
+      taskUuid: 'uuid-clear',
       receivedAt: Date.now(),
       sentAt: Date.now(),
       metadata: { charId },
@@ -1508,6 +1510,30 @@ describe('即时对话的待收记录（走真库）', () => {
     await flushInboxToChat();
 
     expect(getInstantChatPending(charId)).toBeNull();
+  }, 20000);
+
+  // 销账认 taskUuid，不认「这个角色开口了」：定时任务的主动消息、被顶掉的上一轮迟到
+  // 的回复都可能先落地。按角色销账的话，60s 点名连同 outbox 兜底当场全停——这一轮的
+  // 推送真丢了就再也没人去补，用户对着灭掉的灯以为没事，其实回复正躺在 outbox 里。
+  it('同角色的别的消息（定时主动消息 / 旧一轮迟到的回复）→ 不销账、灯不灭', async () => {
+    const charId = 'char-instant-unrelated';
+    await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
+    setInstantChatPending(charId, 'uuid-awaited');
+
+    await ActiveMsgStore.saveInboxMessage({
+      messageId: 'msg-scheduled-1',
+      charId,
+      charName: '即时角色',
+      body: '到点想你了',
+      messageType: 'auto',
+      taskUuid: 'uuid-some-scheduled-task',
+      receivedAt: Date.now(),
+      sentAt: Date.now(),
+      metadata: { charId },
+    } as any);
+    await flushInboxToChat();
+
+    expect(getInstantChatPending(charId)?.uuid, '别的消息不能替这一轮销账').toBe('uuid-awaited');
   }, 20000);
 
   /**
@@ -1534,7 +1560,7 @@ describe('即时对话的待收记录（走真库）', () => {
     await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
     setInstantChatPending(charId, 'uuid-outbox', Date.now());
     vi.spyOn(ActiveMsgClient, 'readClientStateValue')
-      .mockResolvedValue(outboxValue(charId, messageId));
+      .mockResolvedValue(outboxValue(charId, messageId, 'uuid-outbox'));
     const status = vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus')
       .mockResolvedValue({ state: 'gone' });
     const cancel = vi.spyOn(ActiveMsgClient, 'cancelTask')
@@ -1580,16 +1606,13 @@ describe('即时对话的待收记录（走真库）', () => {
     const charId = 'char-instant-failed';
     await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
     setInstantChatPending(charId, 'uuid-failed', Date.now());
-    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
+    // 失败原因从 chat_fail 留痕一次点名读回（worker fire 收尾时写的），不再全量拉任务列表。
+    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockImplementation(async (_ns, key) => (
+      key === 'chat_fail'
+        ? JSON.stringify({ v: 1, uuid: 'uuid-failed', reason: '上游 502', retryCount: 3, at: Date.now() })
+        : null
+    ));
     vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus').mockResolvedValue({ state: 'completed' });
-    vi.spyOn(ActiveMsgClient, 'listRemoteTasksForChar').mockResolvedValue([
-      {
-        uuid: 'uuid-failed',
-        status: 'failed',
-        retryCount: 3,
-        lastError: { at: '2026-08-05T00:00:00.000Z', reason: '上游 502' },
-      },
-    ] as any);
 
     await runInstantChatStatusCheck();
 
@@ -1603,31 +1626,32 @@ describe('即时对话的待收记录（走真库）', () => {
     expect(systemMsgs[0].content).not.toContain('到点');
   }, 20000);
 
-  // 查失败原因要拉一次全量任务列表（分页 + 逐条解密，几秒），这中间用户看指示灯不动
-  // 又发了一条是很自然的事。结论回来时不认 uuid 的话，销掉的是新那一轮的账：「正在
-  // 输入」当场熄灭，聊天流里还多一条它其实没失败的说明。
+  // 查失败原因要去云端点名读一份 chat_fail 留痕，这中间用户看指示灯不动又发了一条
+  // 是很自然的事。结论回来时不认 uuid 的话，销掉的是新那一轮的账：「正在输入」当场
+  // 熄灭，聊天流里还多一条它其实没失败的说明。
   it('查失败原因的空档里用户又发了一条 → 迟到的结论不动新那一轮', async () => {
     const charId = 'char-instant-resend';
     await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
     setInstantChatPending(charId, 'uuid-old', Date.now());
-    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
     vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus').mockResolvedValue({ state: 'completed' });
     (globalThis as any).window.umami = { track: vi.fn() };
 
-    // 手动掌控那次全量拉取：卡在半路，好让「用户重发」精确插进这个空档。
-    let releaseList!: (rows: unknown[]) => void;
-    const listCalled = new Promise<void>((markCalled) => {
-      vi.spyOn(ActiveMsgClient, 'listRemoteTasksForChar').mockImplementation(() => {
+    // 手动掌控 chat_fail 那次点名：卡在半路，好让「用户重发」精确插进这个空档。
+    // outbox 兜底的读照常立即回空——卡住的必须只是失败原因那一步。
+    let releaseFail!: (raw: string | null) => void;
+    const failCalled = new Promise<void>((markCalled) => {
+      vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockImplementation((_ns, key) => {
+        if (key !== 'chat_fail') return Promise.resolve(null);
         markCalled();
-        return new Promise((resolve) => { releaseList = (rows) => resolve(rows as any); });
+        return new Promise((resolve) => { releaseFail = resolve; });
       });
     });
 
     const timers = captureStatusPollTimers();
     const sweep = runInstantChatStatusCheck();
-    await listCalled;
+    await failCalled;
     setInstantChatPending(charId, 'uuid-new'); // 用户重发，待收记录换人
-    releaseList([{ uuid: 'uuid-old', status: 'failed', lastError: { reason: '上游 502' } }]);
+    releaseFail(JSON.stringify({ v: 1, uuid: 'uuid-old', reason: '上游 502', retryCount: 3, at: Date.now() }));
     await sweep;
     timers.restore();
 
@@ -1650,6 +1674,27 @@ describe('即时对话的待收记录（走真库）', () => {
     const systemMsgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter((m) => m.role === 'system');
     expect(systemMsgs).toHaveLength(1);
     expect(systemMsgs[0].content).toContain('回复没能取回');
+  }, 20000);
+
+  // 「取不回」的结论 = 行没了 **且 outbox 读到了、里面确实没有**。outbox 那一步读失败
+  // 时（网络抖、worker 500），结论就建立在一次失败的读上——回复可能正躺在 outbox 里。
+  // 这时判死的话：用户看到「生成失败」重发一遍（再烧一轮），下一跳补收又把原回复放
+  // 出来，聊天流里失败说明后面跟着两条几乎一样的回复。
+  it('云端那行已经没了、但 outbox 读失败 → 这一跳不下结论，等下一跳', async () => {
+    const charId = 'char-instant-gone-unreadable';
+    await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
+    setInstantChatPending(charId, 'uuid-gone-unreadable', Date.now());
+    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockRejectedValue(new Error('worker 500'));
+    vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus').mockResolvedValue({ state: 'gone' });
+
+    const timers = captureStatusPollTimers();
+    await runInstantChatStatusCheck();
+    timers.restore();
+
+    expect(getInstantChatPending(charId)?.uuid, 'outbox 没读成就不许判死').toBe('uuid-gone-unreadable');
+    const msgs = await DB.getRecentMessagesByCharId(charId, 50);
+    expect(msgs.some((m) => m.role === 'system'), '一次失败的读不构成「生成失败」').toBe(false);
+    expect(timers.delays, '下一跳还得排上').toContain(INSTANT_CHAT_STATUS_CHECK_INTERVAL_MS);
   }, 20000);
 
   it('状态查不到（网络断了）→ 什么都不做，等下一跳', async () => {

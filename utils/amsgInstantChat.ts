@@ -141,6 +141,8 @@ export const sendInstantChatTurn = async (params: {
   chatMessages: Array<{ role: string; content: unknown }>;
   /** 本地生成这一轮会用的凭据（effectiveApi），云端必须用同一份。 */
   api: { baseUrl: string; apiKey: string; model: string };
+  /** 本地这一轮会发的采样温度；开思考时本地不发温度，这里也就不传。 */
+  temperature?: number;
   maxTokens?: number;
   userProfile: UserProfile;
   groups: GroupProfile[];
@@ -157,6 +159,7 @@ export const sendInstantChatTurn = async (params: {
       char: params.char,
       chatMessages: params.chatMessages,
       api: params.api,
+      ...(typeof params.temperature === 'number' ? { temperature: params.temperature } : {}),
       ...(params.maxTokens ? { maxTokens: params.maxTokens } : {}),
       userProfile: params.userProfile,
       groups: params.groups,
@@ -253,18 +256,21 @@ const collectReceivedMessageIds = async (charId: string): Promise<Set<string>> =
 };
 
 /**
- * 拉一次这个角色的 outbox，把没收到的写进收件箱。返回补收了几条。
+ * 拉一次这个角色的 outbox，把没收到的写进收件箱。返回补收了几条；
+ * **对不了账时返回 null**（云端 outbox 读失败，或 outbox 里有东西但本地近史读不出来）。
+ * 「没读到」和「读到了、确实没有」是两个结论：调用方要拿它下「回复取不回」的判决时
+ * 只能认后者——catch 不许直接变成送达判定（docs/instant-push-dual-channel.md 那条铁律）。
  *
  * 调用方拿到 >0 之后要自己 flush 一次收件箱（见文件头注：不在这里 flush 是为了避免
  * 和 activeMsgRuntime 成环）。
  */
-export const drainChatOutboxForChar = async (charId: string): Promise<number> => {
+export const drainChatOutboxForChar = async (charId: string): Promise<number | null> => {
   let raw: string | null;
   try {
     raw = await ActiveMsgClient.readClientStateValue(amsgStateNamespace(charId), AMSG_CHAT_OUTBOX_KEY);
   } catch (error) {
     console.warn(`${HEADER} 读云端 outbox 失败（这次没补收）`, { charId, error });
-    return 0;
+    return null;
   }
   const outbox = parseChatOutbox(raw);
   if (!outbox || outbox.entries.length === 0) return 0;
@@ -273,7 +279,9 @@ export const drainChatOutboxForChar = async (charId: string): Promise<number> =>
   try {
     seen = await collectReceivedMessageIds(charId);
   } catch {
-    return 0;
+    // outbox 里有条目、但本地近史读不出来——分不清哪条是新的，宁可这次不补收，
+    // 也不重复上屏。对外同样报 null：这时说「outbox 里没有」一样站不住。
+    return null;
   }
 
   const missing = outbox.entries.filter((entry) => entry.messageId && !seen.has(entry.messageId));
@@ -302,7 +310,9 @@ export const drainChatOutboxForPending = async (): Promise<number> => {
   let written = 0;
   // 串行：并发拉会同时开多条连接读 IndexedDB 近史，正是 instant push 那次超时的连接风暴成因。
   for (const pending of pendings) {
-    written += await drainChatOutboxForChar(pending.charId);
+    // 批量拉是尽力而为（冷启动 / 回前台），单个角色对不了账（null）当 0 记；
+    // 要按「读没读成」下结论的地方走的是单角色那条（runInstantChatStatusCheck）。
+    written += (await drainChatOutboxForChar(pending.charId)) ?? 0;
   }
   return written;
 };
@@ -314,7 +324,7 @@ export const drainChatOutboxForPending = async (): Promise<number> => {
  * 不再去 cancel 那条任务——失败的行不会再跑，没了的行也没什么可取消的。
  *
  * `uuid` 是这个结论说的是哪一轮，**必传**：从查到结论到落这条说明之间隔着网络往返
- * （查失败原因要拉一次全量任务列表，分页 + 逐条解密要好几秒），这期间用户完全可能
+ * （查失败原因要去云端点名读一份 chat_fail 留痕），这期间用户完全可能
  * 又发了一条，待收记录已经换成新的 uuid 了。不认 uuid 就动手的话，销掉的是新那一轮
  * 的账——「正在输入」当场熄灭，聊天流里还多一条它其实没失败的说明。对不上就直接走人，
  * 让新那一轮自己走完它的判定。

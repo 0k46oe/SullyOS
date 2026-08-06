@@ -3,7 +3,7 @@ import { DB } from './db';
 import { ChatPrompts } from './chatPrompts';
 import { ActiveMsgStore } from './activeMsgStore';
 import { ActiveMsgClient, type RemoteTaskStatus } from './activeMsgClient';
-import { AMSG_SELF_LOG_KEY, amsgStateNamespace, parseSelfLog } from './amsgFirePack';
+import { AMSG_CHAT_FAIL_KEY, AMSG_SELF_LOG_KEY, amsgStateNamespace, parseChatFailRecord, parseSelfLog } from './amsgFirePack';
 import {
   applyAssistantPostProcessing,
   type PostProcessDirective,
@@ -1442,9 +1442,15 @@ const flushInboxToChatImpl = async () => {
       charId: message.charId,
     });
 
-    // 即时对话的「正在输入…」在这里熄：这个角色开口了，这一轮就算收到了。
+    // 即时对话的「正在输入…」在这里熄：**欠着的那一轮**（认 taskUuid）的回复到了。
     // 不挑消息类型——欠着的那条回复可能被拆成好几段，第一段到了指示灯就该灭。
-    if (clearInstantChatPending(message.charId)) scheduleNextInstantChatStatusCheck();
+    // 只认 uuid、不认「这个角色开口了」：定时任务的主动消息、被顶掉的上一轮迟到的
+    // 回复都可能先落地，它们不是用户在等的那一轮——按角色销账的话，60s 点名连同
+    // outbox 兜底当场全停，这一轮的推送真丢了就再也没人去补。
+    const pendingForChar = getInstantChatPending(message.charId);
+    if (pendingForChar && message.taskUuid === pendingForChar.uuid) {
+      if (clearInstantChatPending(message.charId)) scheduleNextInstantChatStatusCheck();
+    }
   }
 };
 
@@ -1520,17 +1526,17 @@ const backfillReasoningSafely = async (sessionId?: string, charId?: string): Pro
 // 冷启动、回到前台、以及还欠着回复时每 60s 的那一跳——三个时机共用 runInstantChatStatusCheck
 // 这一个入口。**只有真欠着回复时才拉**——没有待收记录就一个请求都不发，不给所有人加一条轮询。
 
-/** 拉一次 outbox 并把补收到的冲刷进聊天流。返回补收了几条。 */
-const drainInstantChatOutboxAndFlush = async (charId?: string): Promise<number> => {
+/** 拉一次 outbox 并把补收到的冲刷进聊天流。返回补收了几条；对不了账时 null（见 drainChatOutboxForChar）。 */
+const drainInstantChatOutboxAndFlush = async (charId?: string): Promise<number | null> => {
   try {
     const written = charId
       ? await drainChatOutboxForChar(charId)
       : await drainChatOutboxForPending();
-    if (written > 0) await flushInboxToChat();
+    if (written != null && written > 0) await flushInboxToChat();
     return written;
   } catch (e) {
     log.warn('即时对话补收失败（等下一次时机再试）', { charId, error: e });
-    return 0;
+    return null;
   }
 };
 
@@ -1592,7 +1598,7 @@ export const runInstantChatStatusCheck = async (): Promise<void> => {
     }
 
     // completed / gone：再兜一次 outbox（写 outbox 与删行之间有窗口），仍没有才下结论。
-    await drainInstantChatOutboxAndFlush(pending.charId);
+    const drained = await drainInstantChatOutboxAndFlush(pending.charId);
     if (getInstantChatPending(pending.charId)?.uuid !== pending.uuid) continue;
 
     // 上游的 completed = 行还在、但已经出了 pending 队列（sent / failed 都算这个码）。
@@ -1600,17 +1606,33 @@ export const runInstantChatStatusCheck = async (): Promise<void> => {
     if (status.state === 'completed') {
       let reason: string | undefined;
       try {
-        // 全量分页 + 逐条解密，几秒起步——这中间用户可能又发了一条。收尾那一步认 uuid，
-        // 迟到的结论碰不到新那一轮。
-        const rows = await ActiveMsgClient.listRemoteTasksForChar(pending.charId);
-        const row = rows.find((r) => r.uuid === pending.uuid);
-        reason = describeInstantChatFailure(row?.lastError ?? null, row?.retryCount) ?? undefined;
+        // 失败原因从 chat_fail 一次点名读回：worker 在 fire 收尾 / 过期跳过时留的痕
+        // （见 amsgFirePack 的 AMSG_CHAT_FAIL_KEY），不用按角色扫全量任务列表逐条解密。
+        // 记录认 uuid：读到的是别轮的（比如上一轮失败的陈痕）就当没有，报笼统原因。
+        // 收尾那一步照旧认 uuid——网络读再快也有空档，迟到的结论不许碰新那一轮。
+        const raw = await ActiveMsgClient.readClientStateValue(
+          amsgStateNamespace(pending.charId), AMSG_CHAT_FAIL_KEY,
+        );
+        const record = parseChatFailRecord(raw);
+        if (record?.uuid === pending.uuid) {
+          reason = describeInstantChatFailure(
+            { at: new Date(record.at).toISOString(), reason: record.reason },
+            record.retryCount,
+          ) ?? undefined;
+        }
       } catch (e) {
         log.warn('即时对话失败原因取不到（报个笼统的）', { uuid: pending.uuid, error: e });
       }
       log.warn('即时对话云端任务已失败', { charId: pending.charId, uuid: pending.uuid, reason });
       await failInstantChatPending(pending.charId, pending.uuid, reason ?? '生成失败（云端没记下原因）');
     } else {
+      // 「取不回」的结论 = 行没了 **且 outbox 读到了、里面确实没有**。outbox 这一步
+      // 没读成（null）的话，结论就建立在一次失败的网络读上——等下一跳再问，
+      // 别把一次抖动判成生成失败（用户会重发、再烧一轮，随后补收又把原回复放出来）。
+      if (drained === null) {
+        log.warn('即时对话云端那行已经没了，但 outbox 没读成——这一跳不下结论', { charId: pending.charId, uuid: pending.uuid });
+        continue;
+      }
       log.warn('即时对话云端那行已经没了，回复也取不回', { charId: pending.charId, uuid: pending.uuid });
       await failInstantChatPending(pending.charId, pending.uuid);
     }

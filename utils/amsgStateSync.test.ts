@@ -37,6 +37,11 @@ import {
 import { ActiveMsgClient } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
 import { CHAT_PRESENCE_HEARTBEAT_MS } from './amsgChatPresence';
+import {
+  AMSG_INSTANT_CHAT_PENDING_LS_KEY,
+  clearInstantChatPending,
+  setInstantChatPending,
+} from './amsgInstantChat';
 import type { CharacterProfile } from '../types';
 
 const H = 3600_000;
@@ -72,6 +77,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   localStorage.removeItem(AMSG2_PENDING_SYNC_LS_KEY);
   localStorage.removeItem(AMSG2_PENDING_TOOL_CONFIG_LS_KEY);
+  localStorage.removeItem(AMSG_INSTANT_CHAT_PENDING_LS_KEY);
   (ActiveMsgClient.syncCharFirePacks as any).mockClear();
   (ActiveMsgClient.syncChatPresence as any).mockClear();
   (ActiveMsgClient.syncToolConfig as any).mockReset();
@@ -324,6 +330,45 @@ describe('即时冲刷', () => {
     expect(mock).toHaveBeenCalledTimes(5);
     await vi.advanceTimersByTimeAsync(1_500);
     expect(mock).toHaveBeenCalledTimes(6);
+  });
+});
+
+// 欠着即时对话回复的角色，fire_pack 挂起不传：那一轮的包是 POST /instant-chat 带上去
+// 的、多一段 chat（worker 到点全靠它），常规重建的包没有 chat 段，覆盖上去 worker 到点
+// 只会硬失败。回归守卫：没有这层挂起时，等回复期间任何一次打脏（改人设 / 群聊 / 表情库
+// 变更）都会把用户正等着的那条回复变成「fire_pack 里没有 chat 段」。
+describe('即时对话挂起（chat 段不许被常规冲刷覆盖）', () => {
+  it('欠着回复的角色这次不传；销账后回看那一跳把欠的传掉', async () => {
+    const char = charWithAiTask(nextCharId());
+    setInstantChatPending(char.id, 'uuid-instant-defer');
+    markAmsgStateDirty(snapshotOf(char));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ActiveMsgClient.syncCharFirePacks, '等回复期间一个包都不许传').not.toHaveBeenCalled();
+
+    clearInstantChatPending(char.id);
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
+    expect((ActiveMsgClient.syncCharFirePacks as any).mock.calls[0][0].map((s: any) => s.char.id))
+      .toEqual([char.id]);
+  });
+
+  it('同批里没欠着的照传，欠着的不搭车', async () => {
+    const owing = charWithAiTask(nextCharId());
+    const free = charWithAiTask(nextCharId());
+    setInstantChatPending(owing.id, 'uuid-instant-owing');
+    markAmsgStateDirty(snapshotOf(owing));
+    markAmsgStateDirty(snapshotOf(free));
+    await vi.advanceTimersByTimeAsync(1);
+
+    const mock = ActiveMsgClient.syncCharFirePacks as any;
+    expect(mock).toHaveBeenCalledTimes(1);
+    expect(mock.mock.calls[0][0].map((s: any) => s.char.id)).toEqual([free.id]);
+
+    // 收尾：销账并让回看把欠的传掉，别把挂起的快照留给下一个用例。
+    clearInstantChatPending(owing.id);
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(mock).toHaveBeenCalledTimes(2);
+    expect(mock.mock.calls[1][0].map((s: any) => s.char.id)).toEqual([owing.id]);
   });
 });
 
