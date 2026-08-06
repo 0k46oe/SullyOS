@@ -32,10 +32,12 @@ import {
 import { stripReasoningTags } from '@rei-standard/amsg-shared';
 import type { UserProfile } from '../../../types';
 import {
+  AMSG_CHAT_FAIL_KEY,
   AMSG_CHAT_OUTBOX_KEY,
   AMSG_FIRE_PACK_KEY,
   AMSG_LAST_SKIP_KEY,
   AMSG_SELF_LOG_KEY,
+  type AmsgChatFailRecord,
   type AmsgChatOutbox,
   type AmsgLastSkip,
   type AmsgSelfLog,
@@ -603,15 +605,43 @@ const recordSkip = async (
  */
 export const amsgFireSettled = async (
   info: {
-    /** sent / skipped / failed / not-handled；这里只用它区分「有没有真发出去」。 */
+    /** sent / skipped / failed / not-handled；区分「有没有真发出去」和「这跳挂了」。 */
     status?: string;
     sentCount?: number;
+    /** D1 任务行原样（上游 notifyFireSettled 透传；retry_count 是明文列）。 */
+    task?: { retry_count?: unknown } | null;
+    /** 这一跳抛出的错误（status 'failed' 时才有）。 */
+    error?: unknown;
     scratch: Record<string, unknown>;
     writeState: WriteState;
   },
 ): Promise<void> => {
   const stash = getFireStash(info.scratch);
   if (!stash) return;   // onBeforeFire 没走到挂 stash 那步（比如取 fire_pack 就失败了）
+
+  // 即时对话这一跳挂了 → 失败原因留痕（chat_fail），每次失败尝试覆盖写，最终留下的
+  // 就是最后一跳的原因。客户端 60s 点名判到「行已出清」后一次点名读回这份，向用户
+  // 交代为什么没发出去——不用再按角色扫全量任务列表逐条解密（几秒起步）。
+  // best-effort：写不进去只是失败原因退化成笼统的一句，不能连累收尾其他动作。
+  if (stash.instant && info.status === 'failed' && stash.taskUuid) {
+    const reason = info.error instanceof Error
+      ? info.error.message
+      : String(info.error ?? '未知错误');
+    const record: AmsgChatFailRecord = {
+      v: 1,
+      uuid: stash.taskUuid,
+      reason: reason.slice(0, 500),
+      retryCount: typeof info.task?.retry_count === 'number' ? info.task.retry_count : 0,
+      at: Date.now(),
+    };
+    try {
+      await info.writeState(amsgStateNamespace(stash.charId), [
+        { key: AMSG_CHAT_FAIL_KEY, value: JSON.stringify(record) },
+      ]);
+    } catch (error) {
+      console.warn('[amsg:instant-chat] 失败留痕写不进去（客户端只能报笼统原因）', error);
+    }
+  }
 
   const texts = stash.selfLogTexts;
   stash.selfLogTexts = null;   // 认领掉，重复调用不会记两遍
@@ -682,6 +712,20 @@ export const amsgStaleSkip = async (
   if (!charId) {
     console.warn('[amsg:stale-skip] 任务 metadata 缺 charId，这次过期跳过没法留痕', { taskId: task?.id ?? null });
     return;
+  }
+  // 被过期跳过的是即时对话（服务停摆恢复时可能发生）→ 也写一份 chat_fail：
+  // 客户端点名判到「行已出清」后靠它说出「排队太久没轮到」，而不是笼统的生成失败。
+  if (isInstantChatTask(meta) && typeof task?.uuid === 'string' && task.uuid) {
+    const record: AmsgChatFailRecord = {
+      v: 1, uuid: task.uuid, reason: 'stale', retryCount: 0, at: Date.now(),
+    };
+    try {
+      await info.writeState(amsgStateNamespace(charId), [
+        { key: AMSG_CHAT_FAIL_KEY, value: JSON.stringify(record) },
+      ]);
+    } catch (error) {
+      console.warn('[amsg:instant-chat] stale 留痕写不进去（客户端只能报笼统原因）', error);
+    }
   }
   const nextSendAtMs = Date.parse(String(info.nextSendAt ?? ''));
   await writeLastSkip(info.writeState, charId, {

@@ -1807,6 +1807,39 @@ describe('自排后续任务', () => {
     expect(writeState).not.toHaveBeenCalled();
   });
 
+  // 即时对话这一跳挂了 → chat_fail 留痕：客户端点名判到「行已出清」后靠它向用户交代
+  // 原因，不再按角色扫全量任务列表逐条解密（几秒起步 + 竞态窗口）。
+  it('即时对话 fire 失败 → 原因写进 chat_fail（带 uuid 和重试计数）', async () => {
+    const writeState = vi.fn(async (
+      _namespace: string,
+      _entries: Array<{ key: string; value: string | null }>,
+    ) => ({ upserted: 1, skipped: 0, deleted: 0 }));
+    await amsgFireSettled({
+      status: 'failed', sentCount: 0,
+      task: { retry_count: 3 },
+      error: new Error('LLM HTTP 502'),
+      scratch: { fire: makeStash({ instant: true }) }, writeState,
+    } as any);
+
+    const entries = writeState.mock.calls.flatMap((c) => c[1] as Array<{ key: string; value: string }>);
+    const record = JSON.parse(String(entries.find((e) => e.key === 'chat_fail')!.value));
+    expect(record.uuid).toBe(TASK_UUID);
+    expect(record.reason).toBe('LLM HTTP 502');
+    expect(record.retryCount).toBe(3);
+  });
+
+  it('定时任务 fire 失败不写 chat_fail（那条路走面板对账，不占即时通道）', async () => {
+    const writeState = vi.fn(async (
+      _namespace: string,
+      _entries: Array<{ key: string; value: string | null }>,
+    ) => ({ upserted: 1, skipped: 0, deleted: 0 }));
+    await amsgFireSettled({
+      status: 'failed', sentCount: 0, error: new Error('x'),
+      scratch: { fire: makeStash() }, writeState,
+    } as any);
+    expect(writeState).not.toHaveBeenCalled();
+  });
+
   /** 撞车回执：带上已存在那行的脱敏投影（上游 2.6.0-next.11 起）。 */
   const dupSchedule = (over: Record<string, unknown> = {}) => vi.fn(async (opts: any) => ({
     created: false as const,

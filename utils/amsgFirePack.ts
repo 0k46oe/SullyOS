@@ -80,6 +80,46 @@ export interface AmsgChatOutbox {
 
 export const createChatOutbox = (): AmsgChatOutbox => ({ v: 1, entries: [] });
 
+// ─── 即时对话的失败留痕（chat_fail） ───
+
+/**
+ * 即时对话整轮失败时的原因留痕（每角色一份，新的覆盖旧的）。
+ *
+ * 客户端 60s 点名判到「任务行已出清」后要向用户交代失败原因，而 lastError 埋在任务行
+ * 的加密 payload 里——按角色扫全量任务列表（分页 + 逐条解密）几秒起步。worker 在
+ * fire 收尾（amsgFireSettled，每次失败尝试覆盖写）和过期跳过（amsgStaleSkip）时顺手
+ * 在这里留一份，客户端一次点名读回。记录带 uuid：读到的不是自己等的那一轮就当没有。
+ */
+export const AMSG_CHAT_FAIL_KEY = 'chat_fail';
+
+export interface AmsgChatFailRecord {
+  v: 1;
+  /** 失败的是哪一轮（任务行 uuid）；客户端只认和待收记录对得上的那份。 */
+  uuid: string;
+  /** 失败原因（fire 抛错的 message；过期跳过固定为 'stale'）。 */
+  reason: string;
+  /** 失败那一跳时任务行上的重试计数。 */
+  retryCount: number;
+  /** 写入时刻（epoch ms）。 */
+  at: number;
+}
+
+/** 读回来的失败留痕；形状不对返回 null（这是提示通道不硬失败，没有就报笼统原因）。 */
+export const parseChatFailRecord = (value: string | null | undefined): AmsgChatFailRecord | null => {
+  if (typeof value !== 'string' || !value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<AmsgChatFailRecord> | null;
+    if (
+      parsed && typeof parsed === 'object' && parsed.v === 1
+      && typeof parsed.uuid === 'string' && typeof parsed.reason === 'string'
+      && typeof parsed.retryCount === 'number' && typeof parsed.at === 'number'
+    ) {
+      return parsed as AmsgChatFailRecord;
+    }
+  } catch { /* 非 JSON → null */ }
+  return null;
+};
+
 /** 读回来的 outbox；形状不对返回 null（调用方按「没有」处理，这是兜底通道不硬失败）。 */
 export const parseChatOutbox = (value: string | null | undefined): AmsgChatOutbox | null => {
   if (typeof value !== 'string' || !value) return null;
