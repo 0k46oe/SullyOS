@@ -157,12 +157,29 @@ describe('POST /instant-chat 的形状', () => {
     expect(task.metadata.amsgExpirePolicy).toBeUndefined();
   });
 
-  it('firstSendTime 留出提前量（上游要求在未来，包装层落库后再拉到期）', async () => {
+  it('firstSendTime 留出提前量（老 worker 兼容路：上游要求在未来，包装层落库后再拉到期）', async () => {
     const before = Date.now();
     const { task } = await postOnce([{ role: 'user', content: '在吗' }]);
     const lead = Date.parse(task.firstSendTime) - before;
     expect(lead).toBeGreaterThanOrEqual(INSTANT_SCHEDULE_LEAD_MS - 50);
     expect(lead).toBeLessThanOrEqual(INSTANT_SCHEDULE_LEAD_MS + 5_000);
+  });
+
+  it('immediate: true 随信封上云（新 worker 落库即到期，不吃 30s 提前量）', async () => {
+    const { task } = await postOnce([{ role: 'user', content: '在吗' }]);
+    expect(task.immediate).toBe(true);
+  });
+
+  it('顶替 uuid 两份都带：信封内走原子事务（新 worker），外壳明文走旧取消路（老 worker）', async () => {
+    const { task, supersedes } = await postOnce([{ role: 'user', content: '在吗' }], 'uuid-prev');
+    expect(task.supersedesUuid).toBe('uuid-prev');
+    expect(supersedes).toBe('uuid-prev');
+  });
+
+  it('没有可顶替的上一条时，两处都不带这个键', async () => {
+    const { task, supersedes } = await postOnce([{ role: 'user', content: '在吗' }]);
+    expect(task.supersedesUuid).toBeUndefined();
+    expect(supersedes).toBeUndefined();
   });
 
   // 情绪评估要跟这一轮一起上云（worker 跑完随最后一条推送把结果送回来）。它里头有

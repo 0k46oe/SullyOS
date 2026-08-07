@@ -59,8 +59,14 @@ const REQUIRED_WORKER_FEATURES = [
 //            无关配置直接忽略——而 bundle 这边已经不再用 onAfterSend，表现就是
 //            self_log 永远不写：角色到点不知道自己上次说过什么，天天重复同一句。
 //            同一档还带 run-tick 的同角色任务串行（serializeBy）。
+//   next.15 — 这一档能力密集，而且 bundle 里的 wrapper 已经按新上游行为改写：
+//            即时对话 immediate 落库即到期 + supersedesUuid 原子顶替；llmExtraBody
+//            （思考链三件套上云）；租约心跳续租（wrapper 不再配 claimLeaseMs，旧
+//            上游没有心跳 → 退回 10 分钟死租约，isolate 死后任务干等）；fire ctx
+//            的 cancelTask / renewTask（角色取消 / 改期自己的排程）；client_state
+//            条件写（旧包不盖新包）；任务行 last_error（失败原因可查）。
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
-const REQUIRED_WORKER_VERSION = '2.6.0-next.12';
+const REQUIRED_WORKER_VERSION = '2.6.0-next.15';
 
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';

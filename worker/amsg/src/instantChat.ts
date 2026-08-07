@@ -34,15 +34,15 @@ import {
 /**
  * 客户端算 `firstSendTime` 时要往后留的提前量（毫秒）。
  *
- * 上游 `/schedule-message` 校验「firstSendTime 必须在未来」（严格大于收到请求的那一刻），
- * 而 cron 捡任务的条件是「next_send_at 已经到了」——两个条件互斥，所以先留一点提前量
- * 让校验过得去，落库之后包装层再把这一行拉到「此刻」（见 pullTaskDue）。
+ * **兼容用途**：客户端从 amsg-server 2.6.0-next.15 起随任务带 `immediate: true`，
+ * 新 worker 上任务落库即到期，firstSendTime 只做 ISO 格式校验、不再参与排期——
+ * 提前量被吃穿的 INVALID_TIMESTAMP 在新 worker 上从根上消失。这个常量和下面那套
+ * 「拉到期」舞步是给**旧 worker**（immediate 被白名单剥掉）留的退路，等门槛版本
+ * 铺开后可以连同 pullTaskDue 一起拆。
  *
- * 留 30 秒是给两样东西共用的余量：一是上行——这一个请求要背着整包云端状态
- * （chat 段可到几 MB）上传，慢网下走完「上传 + 写 client_state」才轮到校验；
- * 二是设备时钟——firstSendTime 用的是设备的钟，钟偏慢多少就吃掉多少余量。
- * 余量不够就会被打回「时间必须在未来」。拉到期这一步成功的话，这 30 秒一秒都
- * 不会等；代价只在拉到期失败的兜底路上（见 INSTANT_TICK_FALLBACK_WAIT_MS）。
+ * 旧路语义：上游校验「firstSendTime 必须在未来」，而 cron 捡任务的条件是
+ * 「next_send_at 已经到了」——两个条件互斥，所以先留 30 秒提前量让校验过得去
+ * （慢网上传 + 设备时钟偏差共用），落库之后包装层再把这一行拉到「此刻」（见 pullTaskDue）。
  */
 export const INSTANT_SCHEDULE_LEAD_MS = 30_000;
 
@@ -62,16 +62,6 @@ export const INSTANT_TICK_FALLBACK_WAIT_MS = INSTANT_SCHEDULE_LEAD_MS + 1_000;
  * 上限压在 cron 的墙钟预算（15 分钟）之内。
  */
 export const INSTANT_TOTAL_TIMEOUT_MS = 600_000;
-
-/**
- * 任务认领租期（毫秒）。上游默认是 `max(10 分钟, totalTimeoutMs + 2 分钟)`，
- * 而它算的是全局那个 240s，看不见即时对话单条抬上去的 600s——租约会在 fire 还没
- * 跑完时就过期，下一跳 cron 把同一条又捡起来跑一遍，用户收到两份回复。
- *
- * 所以按即时对话那档显式配一份：600s + 2 分钟。代价是任何一条任务（含定时任务）
- * 中途连 isolate 一起没了之后，要多等 2 分钟才会被别的跳接手。
- */
-export const INSTANT_CLAIM_LEASE_MS = INSTANT_TOTAL_TIMEOUT_MS + 120_000;
 
 /** 合成 cron 事件的标记；wrangler tail 里一眼能看出这一跳是谁起的。 */
 export const INSTANT_TICK_CRON = 'instant-chat';
@@ -287,7 +277,9 @@ const isEncryptedEnvelope = (value: unknown): boolean => {
 /**
  * 把刚落库的任务行拉到「此刻到期」。
  *
- * 客户端给的 firstSendTime 必须落在未来（上游校验），而 cron 只捡已经到期的行——
+ * 新客户端（带 immediate: true）的任务落库即到期，这条 UPDATE 的
+ * `next_send_at > ?` 条件匹配不到行、纯 no-op 返回 true，直接起跳——零额外等待。
+ * 旧客户端（按 firstSendTime 排在 30s 后）才真的需要拉：cron 只捡已经到期的行，
  * 不拉这一下，最快也要等到那个提前量过去才会开跑。next_send_at 是明文列，
  * 拉动它就是这条任务真正的语义：用户已经把话说完了，现在就该答。
  *

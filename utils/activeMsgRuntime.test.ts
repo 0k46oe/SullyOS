@@ -1027,6 +1027,74 @@ describe('认领角色自排任务后广播 amsg2-tasks-adopted', () => {
 
     expect(events.filter((e) => e.type === AMSG2_TASKS_ADOPTED_EVENT)).toHaveLength(0);
   }, 20000);
+
+  // 对称的消账侧：角色在 fire 里取消 / 改期掉的既有任务（amsgTaskMutations）。
+  // D1 行已经没了（或换了时间），本地清单不跟着动的话，面板会一直列着一条
+  // 永远不会响（或时间不对）的任务。
+  it('取消 + 改期随 amsgTaskMutations 落到本地清单，并广播一次', async () => {
+    const charId = 'char-mutations';
+    const now = Date.now();
+    const keep = selfScheduledTask('amsgself-mut-keep', now);
+    const gone = selfScheduledTask('amsgself-mut-gone', now);
+    const moved = selfScheduledTask('amsgself-mut-moved', now);
+    const newSendAt = new Date(now + 5 * 3600_000).toISOString();
+    await DB.saveCharacter({
+      id: charId, name: '自排角色', activeMsg2Config: { enabled: true, tasks: [keep, gone, moved] },
+    } as any);
+    await ActiveMsgStore.saveInboxMessage({
+      messageId: 'msg-mutations-1',
+      charId,
+      charName: '自排角色',
+      body: '那条不用等了',
+      messageType: 'forum',
+      receivedAt: Date.now(),
+      metadata: {
+        charId,
+        amsgTaskMutations: {
+          cancelled: ['amsgself-mut-gone'],
+          renewed: [{ taskUuid: 'amsgself-mut-moved', sendAt: newSendAt }],
+        },
+      },
+    } as any);
+
+    const events = captureEvents();
+    await flushInboxToChat();
+
+    const chars = await DB.getAllCharacters();
+    const tasks = chars.find((c: any) => c.id === charId)?.activeMsg2Config?.tasks ?? [];
+    expect(tasks.map((t: any) => t.taskUuid).sort()).toEqual(['amsgself-mut-keep', 'amsgself-mut-moved']);
+    const renewed = tasks.find((t: any) => t.taskUuid === 'amsgself-mut-moved');
+    expect(renewed?.firstSendTime).toBe(newSendAt);
+    expect(renewed?.nextSendAt).toBe(newSendAt);
+    expect(events.filter((e) => e.type === AMSG2_TASKS_ADOPTED_EVENT)).toHaveLength(1);
+  }, 20000);
+
+  it('账已经平了（重放同一份 mutations）→ 不写库不广播', async () => {
+    const charId = 'char-mutations-replay';
+    const now = Date.now();
+    await DB.saveCharacter({
+      id: charId, name: '自排角色',
+      activeMsg2Config: { enabled: true, tasks: [selfScheduledTask('amsgself-mut-r', now)] },
+    } as any);
+    await ActiveMsgStore.saveInboxMessage({
+      messageId: 'msg-mutations-replay-1',
+      charId,
+      charName: '自排角色',
+      body: '……',
+      messageType: 'forum',
+      receivedAt: Date.now(),
+      metadata: {
+        charId,
+        // 取消的那条本地早就没有了 → 清单不变，什么都不该发生
+        amsgTaskMutations: { cancelled: ['amsgself-mut-already-gone'] },
+      },
+    } as any);
+
+    const events = captureEvents();
+    await flushInboxToChat();
+
+    expect(events.filter((e) => e.type === AMSG2_TASKS_ADOPTED_EVENT)).toHaveLength(0);
+  }, 20000);
 });
 
 // ─── ④ 被吞掉的消息，云端「我说过什么」也要跟着撤 ───

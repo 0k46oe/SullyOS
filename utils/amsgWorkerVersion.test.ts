@@ -77,18 +77,11 @@ describe('compareAmsgServerVersions', () => {
 describe('设置页门槛值', () => {
   const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8');
 
-  // 例外：2.6.0-next.13 只改了 fetch() 配置构建失败时的错误响应（补上降级 CORS 头，
-  // 让浏览器能看到 500 而不是一个 CORS 报错）——纯诊断改进，旧部署没有静默缺陷，
-  // 不值得逼所有人重贴。门槛留在 next.12；下次带能力的升级把门槛跟上并删掉这条例外。
-  const FLOOR_LAG_ALLOWED: Record<string, string> = {
-    '2.6.0-next.13': '2.6.0-next.12',
-  };
-
-  it('与 package.json 声明的 amsg-server 版本一致（或在例外表里写明理由）', () => {
+  it('与 package.json 声明的 amsg-server 版本一致', () => {
     const floor = /REQUIRED_WORKER_VERSION = '([^']+)'/
       .exec(read('../components/settings/ActiveMsgGlobalSettingsModal.tsx'))?.[1];
     const declared = JSON.parse(read('../package.json'))
       .devDependencies['@rei-standard/amsg-server'];
-    expect(floor).toBe(FLOOR_LAG_ALLOWED[declared] ?? declared);
+    expect(floor).toBe(declared);
   });
 });

@@ -1064,7 +1064,12 @@ const decryptPayload = async (client: ReiClient, payload: { iv: string; authTag:
  */
 export type RemoteTaskStatus =
   | { state: 'pending'; retryCount?: number; nextSendAt?: string }
-  | { state: 'completed' }
+  /**
+   * lastError：amsg-server 2.6.0-next.15 起 409 的 error.details 带的行级失败摘要
+   * （查询本来就按 uuid 点名，必然是这一行的）。旧 worker 不带 → null，调用方退回
+   * chat_fail 留痕那条路。
+   */
+  | { state: 'completed'; lastError?: RemoteTaskLastError | null }
   | { state: 'gone' };
 
 export const ActiveMsgClient = {
@@ -1480,7 +1485,11 @@ export const ActiveMsgClient = {
     if (!response?.success) {
       const code = response?.error?.code;
       if (code === REMOTE_TASK_NOT_FOUND_CODE) return { state: 'gone' };
-      if (code === REMOTE_TASK_ALREADY_COMPLETED_CODE) return { state: 'completed' };
+      if (code === REMOTE_TASK_ALREADY_COMPLETED_CODE) {
+        // 失败摘要跟着 409 一起来（新 worker 的 details.lastError；明文列，无凭据）。
+        const details = (response.error as { details?: { lastError?: unknown } } | undefined)?.details;
+        return { state: 'completed', lastError: parseRemoteTaskLastError(details?.lastError) };
+      }
       throw new Error(response?.error?.message || '查询任务状态失败。');
     }
 
@@ -1756,6 +1765,15 @@ export const ActiveMsgClient = {
       // 定时任务的行分开——不然一条失败的即时对话行会被面板对账当成排程任务补进清单。
       // 常量与面板对账的过滤端共用（amsgFirePack 的 AMSG_INSTANT_CHAT_SUBTYPE）。
       messageSubtype: AMSG_INSTANT_CHAT_SUBTYPE,
+      // amsg-server 2.6.0-next.15 起认 immediate：任务落库即到期，不用再靠 30s 提前量 +
+      // 包装层拉到期那套舞步（慢网/低端机把提前量吃穿的 INVALID_TIMESTAMP 从根上消失）。
+      // firstSendTime 仍然照旧盖（下面紧邻加密前）：老 worker 会把 immediate 剥掉、
+      // 按 firstSendTime 走旧舞步，新 worker 只把它当合法 ISO 校验、实际用「此刻」。
+      immediate: true,
+      // 同版本起 supersedesUuid 进加密信封、在建新任务的同一事务里取消旧的（原子顶替）。
+      // 外壳明文那份 supersedesUuid 也继续带：老 worker 只认外壳；新 worker 两条都跑，
+      // 双重取消是幂等的 DELETE，无害。
+      ...(params.supersedesUuid ? { supersedesUuid: params.supersedesUuid } : {}),
       // firstSendTime 在下面紧邻加密前才盖（见 encryptPayload 那段）：这里先占个位。
       firstSendTime: '',
       recurrenceType: 'none',
@@ -1886,6 +1904,17 @@ export const ActiveMsgClient = {
       console.warn(
         `${ACTIVE_MSG_RUNTIME_HEADER} 云端状态部分条目被拒（对应角色沿用上一份 fire_pack）`,
         rejected.map((r) => `${r.namespace}/${r.key}: ${r.message || 'rejected'}`),
+      );
+    }
+    // amsg-server 2.6.0-next.15 起服务端按 updatedAt 做条件写（旧不盖新）。被拦 = 云端
+    // 已有**更新**的一份（多设备 / 多标签页竞写时晚到的旧包），是保护生效而不是错误，
+    // log 一句留个排障线索就好。
+    const skipped = (response as { data?: { skippedEntries?: Array<{ namespace: string; key: string }> } })
+      .data?.skippedEntries;
+    if (skipped && skipped.length > 0) {
+      console.log(
+        `${ACTIVE_MSG_RUNTIME_HEADER} 云端已有更新的一份，这批旧条目被拦下（条件写保护）`,
+        skipped.map((s) => `${s.namespace}/${s.key}`),
       );
     }
   },

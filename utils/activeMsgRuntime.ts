@@ -782,6 +782,60 @@ async function adoptSelfScheduledTasks(message: ActiveMsg2InboxMessage): Promise
   }
 }
 
+/**
+ * 把 worker 带回来的「角色取消 / 改期了既有任务」落到本地清单（amsgTaskMutations，
+ * 与 adoptSelfScheduledTasks 对称的消账侧）。
+ *
+ * 幂等：取消的 uuid 本地已经没有、改期的时间已经一致时都是 no-op（同一条 push 重放安全）。
+ * best-effort：失败只 warn——远端行已经删掉 / 改掉了，本地这一刻没跟上只是面板显示旧，
+ * 下次对账还能拉平，为它抛错会把已经收到的消息一起搞挂。
+ */
+async function applyRemoteTaskMutations(message: ActiveMsg2InboxMessage): Promise<void> {
+  const raw = (message.metadata as any)?.amsgTaskMutations;
+  if (!raw || typeof raw !== 'object') return;
+  const cancelled: string[] = Array.isArray(raw.cancelled)
+    ? raw.cancelled.filter((u: unknown) => typeof u === 'string' && u)
+    : [];
+  const renewed: Array<{ taskUuid: string; sendAt: string }> = Array.isArray(raw.renewed)
+    ? raw.renewed.filter((r: any) => typeof r?.taskUuid === 'string' && typeof r?.sendAt === 'string')
+    : [];
+  if (cancelled.length === 0 && renewed.length === 0) return;
+  const charId = (message.metadata as any)?.charId;
+  if (typeof charId !== 'string' || !charId) return;
+
+  try {
+    const char = (await DB.getAllCharacters()).find((c) => c.id === charId);
+    const existing = char?.activeMsg2Config?.tasks ?? [];
+    if (!char || existing.length === 0) return;
+
+    const gone = new Set(cancelled);
+    const renewedAt = new Map(renewed.map((r) => [r.taskUuid, r.sendAt]));
+    const next = existing
+      .filter((t: ActiveMsg2TaskRecord) => !gone.has(t.taskUuid))
+      .map((t: ActiveMsg2TaskRecord) => {
+        const sendAt = renewedAt.get(t.taskUuid);
+        return sendAt && t.nextSendAt !== sendAt
+          ? { ...t, firstSendTime: sendAt, nextSendAt: sendAt }
+          : t;
+      });
+    const changed = next.length !== existing.length
+      || next.some((t: ActiveMsg2TaskRecord, i: number) => t !== existing[i]);
+    if (!changed) return;
+
+    await DB.saveCharacter({
+      ...char,
+      activeMsg2Config: { ...(char.activeMsg2Config ?? { enabled: true }), tasks: next },
+    });
+    console.log('[ActiveMsg] 消账角色取消/改期的任务', { cancelled, renewed });
+    // 与认领共用同一个事件：监听方（OSContext）做的是「重读角色」，增删改对它是一回事。
+    try {
+      window.dispatchEvent(new CustomEvent(AMSG2_TASKS_ADOPTED_EVENT, { detail: { charId } }));
+    } catch { /* SSR-safe / not browser, ignore */ }
+  } catch (e) {
+    console.warn('[ActiveMsg] apply remote task mutations failed', charId, e);
+  }
+}
+
 /** 把 worker 推给的 directives 从 inbox message metadata 里挖出来; 没有就空数组. */
 function extractDirectives(message: ActiveMsg2InboxMessage): PostProcessDirective[] {
   const raw = message.metadata && (message.metadata as any).directives;
@@ -1265,6 +1319,9 @@ const flushInboxToChatImpl = async () => {
     // 排在闸后面的话，被吞的那条 push 会把任务认领一起带走：面板列不出来、用户取消不掉，
     // 而它照常到点触发；订阅登记和凭据刷新也都够不着它，成了推不出去又删不掉的幽灵。
     await adoptSelfScheduledTasks(message);
+    // 对称的另一半：角色在 fire 里取消 / 改期掉的既有任务，本地清单跟着消账。
+    // 同样排在闸之前——D1 行已经没了（或换了时间），消息被吞不改变这个事实。
+    await applyRemoteTaskMutations(message);
 
     // ─── 防穿帮闸·客户端兜底 ───
     // 只拦定时任务的 push（source==='scheduled' 且带策略字段）；instant 聊天
@@ -1668,6 +1725,11 @@ export const runInstantChatStatusCheck = async (): Promise<void> => {
         }
       } catch (e) {
         log.warn('即时对话失败原因取不到（报个笼统的）', { uuid: pending.uuid, error: e });
+      }
+      // chat_fail 没留下（isolate 连人带痕一起没了那种）时退回 409 捎来的行级
+      // lastError（amsg-server 2.6.0-next.15 起；查询按 uuid 点名，必然是这一行的）。
+      if (!reason && status.lastError) {
+        reason = describeInstantChatFailure(status.lastError) ?? undefined;
       }
       log.warn('即时对话云端任务已失败', { charId: pending.charId, uuid: pending.uuid, reason });
       await failInstantChatPending(pending.charId, pending.uuid, reason ?? '生成失败（云端没记下原因）');
