@@ -1487,6 +1487,22 @@ const flushInboxToChatImpl = async () => {
         // requeue 后跳过这条消息的 dispatchEvent —— UI 不该误以为收到了
         continue;
       }
+      // 情绪附赠也要在这里消费：结果就挂在这条 push 的 metadata 上，而全仓库唯一的
+      // 消费点在 post-processing 内部——走到降级这条路说明那边失败到头了，光把 metadata
+      // 原样抄进聊天记录的话结果永远无人再读：「情绪更新中」徽章亮满十来分钟的安全网，
+      // 然后弹「worker 可能是旧版」的假告警，其实结论早就到了本地。best-effort：情绪是
+      // 附赠，消费失败不能连累「原稿已落库」这个事实（与上面销账块同一口径）。
+      try {
+        const degradedEmotionDone = (message.metadata as any)?.amsgEmotionDone === true;
+        const degradedInline = (message.metadata as any)?.amsgEmotionUpdate;
+        const degradedUpdateRaw = typeof degradedInline === 'string' && degradedInline
+          ? degradedInline
+          : await fetchOffloadedEmotionUpdate(message);
+        if (degradedUpdateRaw) await landCloudEmotionResult(message.charId, degradedUpdateRaw);
+        if (degradedEmotionDone || degradedUpdateRaw) announceEmotionDone(message.charId);
+      } catch (e) {
+        log.warn('降级存原稿路径消费情绪结果失败（原稿已落库，不受影响）', { messageId: message.messageId, error: e });
+      }
     }
 
     // 不管走 post-processing 还是 raw fallback, 单条 inbox message 触发一次 'active-msg-received',
@@ -1645,6 +1661,17 @@ const drainInstantChatOutboxAndFlush = async (charId?: string): Promise<number |
 
 let instantChatStatusPollTimer: ReturnType<typeof setTimeout> | null = null;
 
+// ─── 状态查询连续失败的判死线 ───
+// 「不按时长宣判」只对**云端还答得上话**的等待成立（pending 是云端亲口说的，等多久都对）。
+// 但 worker 被删（未知路由回 HTML 页）、共享密钥被换（401）这类用户自己动过环境的场景，
+// 查询这一步会永远抛错——云端的结论永远问不出来，待收记录就永远销不了账：「正在输入…」
+// 跨重启常亮、每 60s 空转一跳、该角色的 fire_pack 同步被无限期挂起。联网状态下连续
+// 多次问不出话，就把这一轮明确判死并告诉用户去检查 worker 配置，不再无限等。
+// 计数按任务 uuid 记，查询成功或换了轮次就清零；断网（navigator.onLine=false）不计数
+// ——那是这台设备暂时没网，不是 worker 的错。
+const instantStatusCheckFailures = new Map<string, number>();
+const INSTANT_STATUS_CHECK_MAX_FAILURES = 5;
+
 /**
  * 还欠着回复时，把下一跳点名排到 60s 后；一条都不欠就直接撤掉定时器。
  *
@@ -1682,7 +1709,13 @@ const scheduleNextInstantChatStatusCheck = () => {
  */
 export const runInstantChatStatusCheck = async (): Promise<void> => {
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-  for (const pending of listInstantChatPendings()) {
+  const pendings = listInstantChatPendings();
+  // 计数器只留还在等的轮次（销账走别的路时这里顺手清，别攒垃圾）。
+  const activeUuids = new Set(pendings.map((p) => p.uuid));
+  for (const uuid of [...instantStatusCheckFailures.keys()]) {
+    if (!activeUuids.has(uuid)) instantStatusCheckFailures.delete(uuid);
+  }
+  for (const pending of pendings) {
     await drainInstantChatOutboxAndFlush(pending.charId);
     // 补收那一步如果把回复放进来了，flush 里已经销账了——这一轮就此结束。
     if (getInstantChatPending(pending.charId)?.uuid !== pending.uuid) continue;
@@ -1691,9 +1724,28 @@ export const runInstantChatStatusCheck = async (): Promise<void> => {
     try {
       status = await ActiveMsgClient.getRemoteTaskStatus(pending.uuid);
     } catch (e) {
-      log.warn('即时对话状态查询失败（等下一跳）', { uuid: pending.uuid, error: e });
+      // 设备自己没网不算 worker 的失败——这种失败攒不出「worker 失联」的结论。
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        log.warn('即时对话状态查询失败（设备离线，等下一跳）', { uuid: pending.uuid, error: e });
+        continue;
+      }
+      const count = (instantStatusCheckFailures.get(pending.uuid) ?? 0) + 1;
+      if (count < INSTANT_STATUS_CHECK_MAX_FAILURES) {
+        instantStatusCheckFailures.set(pending.uuid, count);
+        log.warn('即时对话状态查询失败（等下一跳）', { uuid: pending.uuid, count, error: e });
+        continue;
+      }
+      // 联网状态下连问 N 次都问不出话：worker 多半已经不在了（被删 / 密钥换了 / 路由变了）。
+      // 明确判死这一轮，别让「正在输入」永亮、fire_pack 同步无限期挂起。
+      instantStatusCheckFailures.delete(pending.uuid);
+      const lastError = e instanceof Error ? e.message : String(e);
+      log.warn('即时对话状态查询连续失败，按云端失联收场', { uuid: pending.uuid, count, error: e });
+      await failInstantChatPending(pending.charId, pending.uuid,
+        `联系不上云端 worker（连续 ${count} 次状态查询失败：${lastError.slice(0, 120)}）。`
+        + 'worker 可能已被删除或共享密钥已变，去「设置 → 主动消息 2.0」重新连接并验证');
       continue;
     }
+    instantStatusCheckFailures.delete(pending.uuid);
 
     if (status.state === 'pending') {
       if (status.retryCount) log.warn('即时对话云端在重试', { uuid: pending.uuid, retryCount: status.retryCount });
@@ -1707,25 +1759,7 @@ export const runInstantChatStatusCheck = async (): Promise<void> => {
     // 上游的 completed = 行还在、但已经出了 pending 队列（sent / failed 都算这个码）。
     // 而一次性任务发成功会把行删掉、查出来是 gone——所以还查得到的 completed 行只可能是 failed。
     if (status.state === 'completed') {
-      let reason: string | undefined;
-      try {
-        // 失败原因从 chat_fail 一次点名读回：worker 在 fire 收尾 / 过期跳过时留的痕
-        // （见 amsgFirePack 的 AMSG_CHAT_FAIL_KEY），不用按角色扫全量任务列表逐条解密。
-        // 记录认 uuid：读到的是别轮的（比如上一轮失败的陈痕）就当没有，报笼统原因。
-        // 收尾那一步照旧认 uuid——网络读再快也有空档，迟到的结论不许碰新那一轮。
-        const raw = await ActiveMsgClient.readClientStateValue(
-          amsgStateNamespace(pending.charId), AMSG_CHAT_FAIL_KEY,
-        );
-        const record = parseChatFailRecord(raw);
-        if (record?.uuid === pending.uuid) {
-          reason = describeInstantChatFailure(
-            { at: new Date(record.at).toISOString(), reason: record.reason },
-            record.retryCount,
-          ) ?? undefined;
-        }
-      } catch (e) {
-        log.warn('即时对话失败原因取不到（报个笼统的）', { uuid: pending.uuid, error: e });
-      }
+      let reason = await readInstantChatFailReason(pending.charId, pending.uuid);
       // chat_fail 没留下（isolate 连人带痕一起没了那种）时退回 409 捎来的行级
       // lastError（amsg-server 2.6.0-next.15 起；查询按 uuid 点名，必然是这一行的）。
       if (!reason && status.lastError) {
@@ -1741,11 +1775,38 @@ export const runInstantChatStatusCheck = async (): Promise<void> => {
         log.warn('即时对话云端那行已经没了，但 outbox 没读成——这一跳不下结论', { charId: pending.charId, uuid: pending.uuid });
         continue;
       }
-      log.warn('即时对话云端那行已经没了，回复也取不回', { charId: pending.charId, uuid: pending.uuid });
-      await failInstantChatPending(pending.charId, pending.uuid);
+      // gone 不都是「发成功后行被删」：skip-push（模型空输出 / 纯拒答 / 只做副作用）的
+      // 一次性行同样被上游当成功消费删掉，worker 在那一刻写过 chat_fail。不读的话给
+      // 用户的解释是「云端已处理但回复没能取回」——把「没生成出来」说成了「取不回」。
+      const reason = await readInstantChatFailReason(pending.charId, pending.uuid);
+      log.warn('即时对话云端那行已经没了，回复也取不回', { charId: pending.charId, uuid: pending.uuid, reason });
+      await failInstantChatPending(pending.charId, pending.uuid, reason);
     }
   }
   scheduleNextInstantChatStatusCheck();
+};
+
+/**
+ * 云端 chat_fail 留痕的一次点名读，翻成给用户看的人话；读不到 / uuid 对不上 / 网络
+ * 失败都返回 undefined（这是提示通道，绝不硬失败）。completed 和 gone 两个分支共用：
+ * worker 在 fire 收尾失败、过期跳过、以及 skip-push（空输出）三处都会留痕。
+ * 记录认 uuid：读到的是别轮的（比如上一轮失败的陈痕）就当没有，报笼统原因。
+ */
+const readInstantChatFailReason = async (charId: string, uuid: string): Promise<string | undefined> => {
+  try {
+    const raw = await ActiveMsgClient.readClientStateValue(
+      amsgStateNamespace(charId), AMSG_CHAT_FAIL_KEY,
+    );
+    const record = parseChatFailRecord(raw);
+    if (record?.uuid !== uuid) return undefined;
+    return describeInstantChatFailure(
+      { at: new Date(record.at).toISOString(), reason: record.reason },
+      record.retryCount,
+    ) ?? undefined;
+  } catch (e) {
+    log.warn('即时对话失败原因取不到（报个笼统的）', { uuid, error: e });
+    return undefined;
+  }
 };
 
 // ─── 订阅变化标记（SW 写，这里读/清）────────────────────────────────────────

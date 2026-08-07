@@ -725,6 +725,44 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
       readSpy.mockRestore();
       clearSpy.mockRestore();
     }, 20000);
+
+    // 降级存原稿（post-processing 失败到头 / 白名单外类型）也要消费情绪附赠：全仓库
+    // 唯一的消费点在主路径里面，降级只把 metadata 原样抄进聊天记录的话，结果永远无人
+    // 再读——徽章亮满十来分钟的安全网，然后弹「worker 可能是旧版」的假告警，其实结论
+    // 早就到了本地。
+    it('降级存原稿路径 → 照样落 buff + 熄灯（结果不能躺在 metadata 里烂掉）', async () => {
+      const charId = 'char-emotion-degraded';
+      await DB.saveCharacter({ id: charId, name: '降级角色' } as any);
+      await ActiveMsgStore.saveInboxMessage(inboxMsg({
+        messageId: 'msg-emotion-degraded',
+        charId,
+        charName: '降级角色',
+        messageType: 'forum', // 白名单外 → 不走 post-processing，直接原稿落库（routed=false）
+        metadata: {
+          charId,
+          amsgEmotionDone: true,
+          amsgEmotionUpdate: JSON.stringify({
+            changed: true,
+            buffs: [{ label: '释然', emoji: '🌿', intensity: 2 }],
+            injection: '你此刻很释然。',
+          }),
+        },
+      }));
+
+      const { seen, restore } = captureEvents();
+      try {
+        await flushInboxToChat();
+      } finally {
+        restore();
+      }
+
+      const updated = (await DB.getAllCharacters()).find((c) => c.id === charId)!;
+      expect(updated.activeBuffs?.map((b: any) => b.label), '降级路径也要落 buff').toContain('释然');
+      expect(seen.some((e) => e.type === 'instant-emotion-done' && e.detail?.charId === charId),
+        '降级路径也要熄灯，别把安全网的假告警等出来').toBe(true);
+      // 原稿本体照常上屏
+      expect((await assistantMsgs(charId)).length).toBeGreaterThan(0);
+    }, 20000);
   });
 
   // 聊天走即时对话时，思考是在 worker 里生成的，客户端手上没有那份 reasoning。
@@ -1746,6 +1784,80 @@ describe('即时对话的待收记录（走真库）', () => {
     const systemMsgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter((m) => m.role === 'system');
     expect(systemMsgs).toHaveLength(1);
     expect(systemMsgs[0].content).toContain('回复没能取回');
+  }, 20000);
+
+  // gone 不都是「发成功后行被删」：模型空输出 / 纯拒答被 worker 判 skip-push 时，一次性
+  // 行同样被上游当成功消费删掉，worker 在那一刻写过 chat_fail。gone 分支不读它的话，
+  // 给用户的解释是「云端已处理但回复没能取回」——把「没生成出来」说成了「取不回」，
+  // 用户以为是投递故障白重发，其实该知道的是模型这轮没说话。
+  it('行没了 + outbox 为空 + chat_fail 说是 skip → 照实说「模型这轮没有生成内容」', async () => {
+    const charId = 'char-instant-skip';
+    await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
+    setInstantChatPending(charId, 'uuid-skip', Date.now());
+    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockImplementation(async (_ns, key) => (
+      key === 'chat_fail'
+        ? JSON.stringify({ v: 1, uuid: 'uuid-skip', reason: 'empty-generation', retryCount: 0, at: Date.now() })
+        : null
+    ));
+    vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus').mockResolvedValue({ state: 'gone' });
+
+    await runInstantChatStatusCheck();
+
+    expect(getInstantChatPending(charId)).toBeNull();
+    const systemMsgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter((m) => m.role === 'system');
+    expect(systemMsgs).toHaveLength(1);
+    expect(systemMsgs[0].content).toContain('模型这轮没有生成内容');
+    expect(systemMsgs[0].content, '不许把「没生成」说成「取不回」').not.toContain('回复没能取回');
+  }, 20000);
+
+  // 「不按时长宣判」只对云端还答得上话的等待成立。worker 被删（未知路由回 HTML 页）、
+  // 共享密钥被换（401）这类用户自己动过环境的场景，状态查询永远抛错——不设线的话
+  // 「正在输入…」跨重启常亮、每 60s 空转、该角色 fire_pack 同步被无限期挂起。
+  it('联网状态下状态查询连续失败到第 5 次 → 明确判失联收场，不再无限等', async () => {
+    const charId = 'char-instant-unreachable';
+    await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
+    setInstantChatPending(charId, 'uuid-unreachable', Date.now());
+    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
+    vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus').mockRejectedValue(new Error('Unexpected token < in JSON'));
+
+    const timers = captureStatusPollTimers();
+    try {
+      for (let i = 0; i < 4; i += 1) {
+        await runInstantChatStatusCheck();
+        expect(getInstantChatPending(charId)?.uuid, `第 ${i + 1} 次失败还不够判死`).toBe('uuid-unreachable');
+      }
+      await runInstantChatStatusCheck();
+    } finally {
+      timers.restore();
+    }
+
+    expect(getInstantChatPending(charId), '连续 5 次问不出话就该收场').toBeNull();
+    const systemMsgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter((m) => m.role === 'system');
+    expect(systemMsgs).toHaveLength(1);
+    expect(systemMsgs[0].content).toContain('联系不上云端 worker');
+    expect(systemMsgs[0].content, '要给用户指条能走的路').toContain('重新连接并验证');
+  }, 20000);
+
+  // 断网的失败是这台设备的问题，攒不出「worker 失联」的结论——恢复网络后从头计。
+  it('设备离线时的查询失败不计入失联判定', async () => {
+    const charId = 'char-instant-airplane';
+    await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
+    setInstantChatPending(charId, 'uuid-airplane', Date.now());
+    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
+    vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus').mockRejectedValue(new Error('Failed to fetch'));
+    vi.stubGlobal('navigator', { onLine: false });
+
+    const timers = captureStatusPollTimers();
+    try {
+      for (let i = 0; i < 6; i += 1) await runInstantChatStatusCheck();
+    } finally {
+      timers.restore();
+      vi.unstubAllGlobals();
+    }
+
+    expect(getInstantChatPending(charId)?.uuid, '离线失败次数再多也不许判死').toBe('uuid-airplane');
+    const msgs = await DB.getRecentMessagesByCharId(charId, 50);
+    expect(msgs.some((m) => m.role === 'system')).toBe(false);
   }, 20000);
 
   // 「取不回」的结论 = 行没了 **且 outbox 读到了、里面确实没有**。outbox 那一步读失败

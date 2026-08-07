@@ -9470,6 +9470,18 @@ var handleInstantChat = async (args) => {
       }
     });
   }
+  const stateBody = await readBody(stateResponse);
+  const skippedEntries = stateBody?.data?.skippedEntries;
+  if (Array.isArray(skippedEntries) && skippedEntries.some((entry) => entry?.key === AMSG_FIRE_PACK_KEY)) {
+    return json(409, {
+      success: false,
+      error: {
+        code: "INSTANT_CHAT_STATE_STALE",
+        message: "\u4E91\u7AEF\u62D2\u6536\u4E86\u8FD9\u8F6E\u7684\u6700\u65B0\u72B6\u6001\uFF08\u4E91\u7AEF\u5DF2\u6709\u66F4\u65B0\u7684\u4E00\u4EFD\uFF09\u2014\u2014\u8BBE\u5907\u65F6\u949F\u53EF\u80FD\u88AB\u56DE\u62E8\u8FC7\uFF0C\u68C0\u67E5\u7CFB\u7EDF\u65F6\u95F4\u540E\u518D\u53D1\u4E00\u6B21",
+        step: "client-state"
+      }
+    });
+  }
   const taskResponse = await upstream2.fetch(
     new Request(internalUrl("/schedule-message"), {
       method: "POST",
@@ -10379,6 +10391,13 @@ var amsgHooks = {
         reason: decision.reason,
         skippedAt: Date.now()
       });
+      if (stash.instant && stash.taskUuid && ctx.writeState) {
+        await writeChatFail(ctx.writeState, stash.charId, {
+          uuid: stash.taskUuid,
+          reason: decision.reason,
+          retryCount: 0
+        });
+      }
     }
     if (decision.decision === "finish") {
       stash.selfLogTexts = decision.pushPayloads.map(

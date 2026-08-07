@@ -312,6 +312,10 @@ export const describeInstantChatFailure = (
   const retried = retryCount && retryCount > 0 ? `（重试 ${retryCount} 次后放弃）` : '';
   // 'stale' 是「排队太久没轮到就被跳过」，没有底层报错可以引。
   if (lastError.reason === 'stale') return `云端排队太久没轮到这一轮${retried}`;
+  // skip-push 的两种（worker 在 chat_fail 里留的机器码）：这一轮云端跑完了，但没有
+  // 能推给用户的正文。照实说，别掉进下面「生成失败」的口径——生成没失败，是没产出。
+  if (lastError.reason === 'empty-generation') return '模型这轮没有生成内容（空输出或拒答）';
+  if (lastError.reason === 'side-effects-only') return '角色这轮只做了动作，没有文字回复';
   const detail = (lastError.reason || '').slice(0, REMOTE_ERROR_REASON_MAX);
   return `生成失败${retried}${detail ? `：${detail}` : ''}`;
 };

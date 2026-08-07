@@ -1711,6 +1711,16 @@ export const amsgHooks = {
         reason: decision.reason,
         skippedAt: Date.now(),
       });
+      // 即时对话被 skip：一次性行会被上游当成功消费删掉，客户端点名只能看到「行没了、
+      // outbox 也空」，落下的说明是「回复没能取回」——把「没生成出来」说成了「取不回」。
+      // 也写一份 chat_fail（认 uuid），客户端 gone 分支读回后能照实说「模型这轮没说话」。
+      if (stash.instant && stash.taskUuid && ctx.writeState) {
+        await writeChatFail(ctx.writeState, stash.charId, {
+          uuid: stash.taskUuid,
+          reason: decision.reason,
+          retryCount: 0,
+        });
+      }
     }
 
     if (decision.decision === 'finish') {

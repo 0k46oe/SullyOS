@@ -16,6 +16,7 @@ import { MAX_PUSH_PAYLOAD_BYTES } from '@rei-standard/amsg-server/cloudflare';
 import { amsgEmotionUpdateKey } from './emotionEval';
 import { INSTANT_TOTAL_TIMEOUT_MS } from './instantChat';
 import {
+  AMSG_CHAT_FAIL_KEY,
   AMSG_CHAT_OUTBOX_KEY,
   AMSG_FIRE_PACK_KEY,
   AMSG_LAST_SKIP_KEY,
@@ -2378,6 +2379,44 @@ describe('没发出去时写 last_skip', () => {
   it('留痕写失败不影响 skip 本身（best-effort）', async () => {
     const { decision } = await runEmptyFire({ writeStateFails: true });
     expect(decision.decision).toBe('skip-push');
+  });
+
+  // 即时对话被 skip 时一次性行会被上游当成功消费删掉，客户端点名只能看到 gone + 空
+  // outbox——不写 chat_fail 的话，给用户的解释是「回复没能取回」，把「没生成出来」说成
+  // 了「取不回」。定时任务不用写：那条路没有人在等着销账，last_skip 就够面板解释了。
+  it('即时对话空输出 → 除 last_skip 外还写 chat_fail（认 uuid，客户端 gone 分支照实解释）', async () => {
+    const { ctx, scratch, writeState } = makeCtx({
+      metadata: { amsgInstantChat: true, amsgMode: 'instant', amsgTaskInstruction: undefined },
+      charRows: [
+        { key: AMSG_FIRE_PACK_KEY, value: firePackValue(null, { chat: { messages: [{ role: 'user', content: '在吗' }], builtAt: PACK_BUILT_AT } }) },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+    });
+    await amsgHooks.onBeforeFire(ctx);
+    const decision = await amsgHooks.onLLMOutput({
+      sessionId: 'sess_task_42',
+      llmResponse: {},
+      llmOutputText: '',
+      contactName: 'Nyah',
+      metadata: { charId: CHAR_ID, amsgClientTaskId: 'client-task-1', amsgMode: 'instant', amsgInstantChat: true },
+      scratch,
+      writeState,
+    } as any);
+    expect((decision as any).decision).toBe('skip-push');
+
+    const call = writeState.mock.calls.find(([, entries]) =>
+      entries.some((e: { key: string }) => e.key === AMSG_CHAT_FAIL_KEY));
+    expect(call, '应该写过 chat_fail').toBeTruthy();
+    const fail = JSON.parse(String(call![1].find((e: { key: string }) => e.key === AMSG_CHAT_FAIL_KEY)!.value));
+    expect(fail.uuid).toBe(TASK_UUID);
+    expect(fail.reason).toBe('empty-generation');
+  });
+
+  it('定时任务空输出 → 只写 last_skip，不写 chat_fail', async () => {
+    const { writeState } = await runEmptyFire();
+    const call = writeState.mock.calls.find(([, entries]) =>
+      entries.some((e: { key: string }) => e.key === AMSG_CHAT_FAIL_KEY));
+    expect(call).toBeFalsy();
   });
 
   it('正常出正文的 fire 不写 empty-generation', async () => {
