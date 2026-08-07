@@ -21,7 +21,7 @@ import {
   CharacterProfile,
 } from '../types';
 import { FIRE_GRACE_MS, recurrencePeriodMs } from './amsg2ExpireGuard';
-import { type AmsgTzRef, formatFireTimeShort } from './amsgFirePack';
+import { AMSG_INSTANT_CHAT_SUBTYPE, type AmsgTzRef, formatFireTimeShort } from './amsgFirePack';
 
 export const MAX_ACTIVE_TASKS_PER_CHAR = 5;
 
@@ -391,7 +391,7 @@ export const reconcileTasksWithRemote = (
       !known.has(row.uuid)
       && row.nextSendAt && row.recurrenceType && row.messageType
       && row.status !== 'failed'
-      && row.messageSubtype !== 'instant-chat'
+      && row.messageSubtype !== AMSG_INSTANT_CHAT_SUBTYPE
     ))
     .map((row): ActiveMsg2TaskRecord => ({
       taskUuid: row.uuid,

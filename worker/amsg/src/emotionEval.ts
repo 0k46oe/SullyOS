@@ -161,17 +161,24 @@ export interface AmsgEmotionEvalOutcome {
 const ERROR_SNIPPET_MAX = 120;
 
 /**
+ * 「先打码、后截断」的唯一出口：所有会随 push 出门的失败文案（HTTP 分支、catch 分支）
+ * 都要过这里。打码在截断之前——先截的话，切口正好落在 key 中间时整串就查不到 key，
+ * 半截凭据原样带出去。
+ */
+const maskAndSnip = (text: string, apiKey: string): string => {
+  let snippet = text.replace(/\s+/g, ' ').trim();
+  if (apiKey && snippet.includes(apiKey)) snippet = snippet.split(apiKey).join('***');
+  return snippet.slice(0, ERROR_SNIPPET_MAX);
+};
+
+/**
  * 从失败响应里摘一句能给用户看的原因。
  *
  * **绝不能带出 apiKey**：个别中转会把整个请求（含 Authorization 头）回显在错误页里，
  * 而这句话最终要走 push 出门。摘之前先按 key 本身过一遍，命中就打码。
  */
 const describeEvalFailure = (status: number, body: string, apiKey: string): string => {
-  // 打码必须在截断之前：先截的话，切口正好落在 key 中间时整串就查不到 key，
-  // 半截凭据原样带出去。
-  let snippet = body.replace(/\s+/g, ' ').trim();
-  if (apiKey && snippet.includes(apiKey)) snippet = snippet.split(apiKey).join('***');
-  snippet = snippet.slice(0, ERROR_SNIPPET_MAX);
+  const snippet = maskAndSnip(body, apiKey);
   return `副 API HTTP ${status}${snippet ? `：${snippet}` : ''}`;
 };
 
@@ -233,9 +240,12 @@ export const runAmsgEmotionEval = async (
   } catch (error) {
     console.warn('[amsg:emotion] 评估失败（主回复不受影响）', error);
     // 只带异常名/消息，不带栈：这句要走 push 出门，短一点、也别把内部路径抖出去。
+    // 异常消息同样过打码（凭据绝不进 push 的红线不分分支）：fetch 异常一般不含
+    // 请求头，但 URL 解析类错误会回显传入的地址，用户把 key 拼在 baseUrl 里时
+    // 不打码就漏了。
     const reason = controller.signal.aborted
       ? `评估超时（${Math.round(timeoutMs / 1000)} 秒没回来）`
-      : `评估请求没发出去：${(error instanceof Error ? error.message : String(error)).slice(0, ERROR_SNIPPET_MAX)}`;
+      : `评估请求没发出去：${maskAndSnip(error instanceof Error ? error.message : String(error), spec.api.apiKey)}`;
     return { raw: null, error: reason };
   } finally {
     clearTimeout(timer);

@@ -30,6 +30,7 @@ import {
   AMSG_SLOT_REALTIME_WORLD,
   AMSG_SLOT_SCENE,
   AMSG_SLOT_TASK_INSTRUCTION,
+  AMSG_INSTANT_CHAT_SUBTYPE,
   AMSG_LAST_SKIP_KEY,
   AMSG_SLOT_SELF_LOG,
   AMSG_SLOT_TASK_LIST,
@@ -56,7 +57,6 @@ import {
 } from './amsgToolPack';
 // 只取一个常量：客户端算 firstSendTime 时要留的提前量，和包装层「把任务行拉到期」
 // 那一步是同一个数，各写各的就会出现「校验说时间要在未来 / cron 说还没到」的死角。
-import { INSTANT_SCHEDULE_LEAD_MS } from '../worker/amsg/src/instantChat';
 import type { AmsgEmotionEvalSpec } from '../worker/amsg/src/emotionEval';
 import { listRecallableMonths } from './agenticTools';
 import { ChatPrompts } from './chatPrompts';
@@ -574,6 +574,9 @@ export const buildFirePack = async (
     ...(typeof char.activeMsg2Config?.maxUnansweredSends === 'number'
       ? { maxUnansweredSends: char.activeMsg2Config.maxUnansweredSends }
       : {}),
+    // 角色级 2.0 开关随包上云：关着的角色即便走即时对话（全局开关是另一颗），云端
+    // fire 也不给排程能力——本地的 amsg2ToolsInjected 闸门在云端的对应物就是它。
+    selfScheduleEnabled: isAmsg2EnabledForChar(char),
     // 到点时角色要知道自己还挂着什么，才不会把同一件事再排一遍。这里带原始记录，
     // 渲染成人话由 worker 现场做（时间要按 tzId 换算，且得摘掉正在发的那条）。
     pendingTasks: getPendingTasks(char.activeMsg2Config, Date.now()),
@@ -1060,7 +1063,12 @@ const decryptPayload = async (client: ReiClient, payload: { iv: string; authTag:
  */
 export type RemoteTaskStatus =
   | { state: 'pending'; retryCount?: number; nextSendAt?: string }
-  | { state: 'completed' }
+  /**
+   * lastError：amsg-server 2.6.0-next.15 起 409 的 error.details 带的行级失败摘要
+   * （查询本来就按 uuid 点名，必然是这一行的）。旧 worker 不带 → null，调用方退回
+   * chat_fail 留痕那条路。
+   */
+  | { state: 'completed'; lastError?: RemoteTaskLastError | null }
   | { state: 'gone' };
 
 export const ActiveMsgClient = {
@@ -1476,7 +1484,11 @@ export const ActiveMsgClient = {
     if (!response?.success) {
       const code = response?.error?.code;
       if (code === REMOTE_TASK_NOT_FOUND_CODE) return { state: 'gone' };
-      if (code === REMOTE_TASK_ALREADY_COMPLETED_CODE) return { state: 'completed' };
+      if (code === REMOTE_TASK_ALREADY_COMPLETED_CODE) {
+        // 失败摘要跟着 409 一起来（新 worker 的 details.lastError；明文列，无凭据）。
+        const details = (response.error as { details?: { lastError?: unknown } } | undefined)?.details;
+        return { state: 'completed', lastError: parseRemoteTaskLastError(details?.lastError) };
+      }
       throw new Error(response?.error?.message || '查询任务状态失败。');
     }
 
@@ -1710,6 +1722,13 @@ export const ActiveMsgClient = {
      */
     temperature?: number;
     maxTokens?: number;
+    /**
+     * 本地这一轮会额外发进请求体的字段（思考链三件套：thinking / reasoning_effort /
+     * extra_body，由 useChatAI 的 shouldSendThinkingParams 分支决定）。worker 组请求体
+     * 时原样展开、核心字段（model/messages 等）优先——两条路发出去的请求体必须一致，
+     * 不然开思考的角色一开即时对话，心象卡片就静默消失。
+     */
+    extraBody?: Record<string, unknown>;
     userProfile: UserProfile;
     groups: GroupProfile[];
     realtimeConfig: RealtimeConfig;
@@ -1743,10 +1762,15 @@ export const ActiveMsgClient = {
       messageType: 'auto',
       // 上游只把它当自由文本标签原样带进推送，不据此分支；本地拿它把即时对话的行跟
       // 定时任务的行分开——不然一条失败的即时对话行会被面板对账当成排程任务补进清单。
-      messageSubtype: 'instant-chat',
-      // 上游校验 firstSendTime 必须在未来，而 cron 只捡已到期的行；先留一点提前量过校验，
-      // 落库之后由包装层把这一行拉到「此刻」（见 worker/amsg/src/instantChat.ts）。
-      firstSendTime: new Date(now + INSTANT_SCHEDULE_LEAD_MS).toISOString(),
+      // 常量与面板对账的过滤端共用（amsgFirePack 的 AMSG_INSTANT_CHAT_SUBTYPE）。
+      messageSubtype: AMSG_INSTANT_CHAT_SUBTYPE,
+      // 落库即到期（不带 firstSendTime）：用户已经把话说完了，现在就该答。
+      // 排未来时刻的话，打包/上传的耗时都要预支提前量，慢网低端机会被
+      // 「时间必须在未来」打回，而同一轮走本地路径毫无问题。
+      immediate: true,
+      // 顶替上一条还没被认领的任务（连发两条时合并成一起回）：上游在建新任务的
+      // 同一事务里取消旧的，原子、无第二个请求。
+      ...(params.supersedesUuid ? { supersedesUuid: params.supersedesUuid } : {}),
       recurrenceType: 'none',
       tzId,
       // 真正要发给模型的消息在 fire_pack.chat 里，这条只为过上游「messages 非空」的校验。
@@ -1758,6 +1782,14 @@ export const ActiveMsgClient = {
       // 少了它，同一句话云端会落到供应商默认温度（常为 1.0），回复风格和本地对不上。
       ...(typeof params.temperature === 'number' ? { temperature: params.temperature } : {}),
       ...(params.maxTokens && params.maxTokens > 0 ? { maxTokens: params.maxTokens } : {}),
+      // 思考链三件套（thinking / reasoning_effort / extra_body）放行顶层，随加密信封
+      // 到 fire 时刻由上游 buildLlmRequestBody 展开进请求体（核心字段 model/messages
+      // 等优先）。⚠️ 依赖上游 amsg-server 认领这个字段（/schedule-message 的
+      // fullTaskData 白名单 + buildLlmRequestBody 的展开）；旧版上游会把它剥掉——
+      // 那时行为退回「只有 -thinking 模型名后缀生效」，即本次改动前的样子，不会更糟。
+      ...(params.extraBody && Object.keys(params.extraBody).length > 0
+        ? { llmExtraBody: params.extraBody }
+        : {}),
       metadata: {
         charId: char.id,
         charName: char.name,
@@ -1776,13 +1808,14 @@ export const ActiveMsgClient = {
       },
     };
 
+    const stateEntries = {
+      entries: [
+        ...(await buildCharStateEntries(char, firePack, now)),
+        buildToolConfigEntry(realtimeConfig, now),
+      ],
+    };
     const [statePayload, encryptedTask] = await Promise.all([
-      encryptPayload(client, {
-        entries: [
-          ...(await buildCharStateEntries(char, firePack, now)),
-          buildToolConfigEntry(realtimeConfig, now),
-        ],
-      }),
+      encryptPayload(client, stateEntries),
       encryptPayload(client, taskPayload),
     ]);
 
@@ -1790,11 +1823,7 @@ export const ActiveMsgClient = {
       method: 'POST',
       // 外壳是明文：里头两个信封已经加密好，别再给外壳挂加密头（包装层会当它是整体密文）。
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        statePayload,
-        taskPayload: encryptedTask,
-        ...(params.supersedesUuid ? { supersedesUuid: params.supersedesUuid } : {}),
-      }),
+      body: JSON.stringify({ statePayload, taskPayload: encryptedTask }),
     }, '即时对话');
 
     if (status !== 202 || typeof body?.uuid !== 'string' || !body.uuid) {
@@ -1859,6 +1888,17 @@ export const ActiveMsgClient = {
       console.warn(
         `${ACTIVE_MSG_RUNTIME_HEADER} 云端状态部分条目被拒（对应角色沿用上一份 fire_pack）`,
         rejected.map((r) => `${r.namespace}/${r.key}: ${r.message || 'rejected'}`),
+      );
+    }
+    // amsg-server 2.6.0-next.15 起服务端按 updatedAt 做条件写（旧不盖新）。被拦 = 云端
+    // 已有**更新**的一份（多设备 / 多标签页竞写时晚到的旧包），是保护生效而不是错误，
+    // log 一句留个排障线索就好。
+    const skipped = (response as { data?: { skippedEntries?: Array<{ namespace: string; key: string }> } })
+      .data?.skippedEntries;
+    if (skipped && skipped.length > 0) {
+      console.log(
+        `${ACTIVE_MSG_RUNTIME_HEADER} 云端已有更新的一份，这批旧条目被拦下（条件写保护）`,
+        skipped.map((s) => `${s.namespace}/${s.key}`),
       );
     }
   },

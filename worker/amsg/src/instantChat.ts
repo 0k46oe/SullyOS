@@ -7,10 +7,10 @@
  *   2. 即时对话那条 fire 用的「时效信息」块（当前时间 / 实时世界 / 排程说明拼一起）
  *   3. 收件兜底 outbox 的推送信封定稿（push 丢了客户端能按 messageId 补收）
  *
- * 为什么要在包装层做而不是直接调上游的三个端点：这三步有严格的先后和「前面失败就
- * 不能落任务」的语义（云端状态没传上去，到点的 fire 读到的还是上一轮的上下文，
- * 角色会对着旧对话回话）。放在客户端串三个请求的话，中间断网就会留下一条注定答错
- * 的任务；放在这里，客户端只有一次「成了 / 没成」。
+ * 为什么要在包装层做而不是让客户端直接调上游的两个端点：两步有严格的先后和
+ * 「前面失败就不能落任务」的语义（云端状态没传上去，到点的 fire 读到的还是上一轮的
+ * 上下文，角色会对着旧对话回话）。放在客户端串两个请求的话，中间断网就会留下一条
+ * 注定答错的任务；放在这里，客户端只有一次「成了 / 没成」。
  *
  * 加密由客户端做完，这里只搬运：两个信封原样转发给上游，上游照常解密和鉴权，
  * 它仍然是权威。包装层不碰用户密钥，也解不开这两个信封。
@@ -32,29 +32,6 @@ import {
 // ─── 时间参数 ───
 
 /**
- * 客户端算 `firstSendTime` 时要往后留的提前量（毫秒）。
- *
- * 上游 `/schedule-message` 校验「firstSendTime 必须在未来」（严格大于收到请求的那一刻），
- * 而 cron 捡任务的条件是「next_send_at 已经到了」——两个条件互斥，所以先留一点提前量
- * 让校验过得去，落库之后包装层再把这一行拉到「此刻」（见 pullTaskDue）。
- *
- * 留 30 秒是给两样东西共用的余量：一是上行——这一个请求要背着整包云端状态
- * （chat 段可到几 MB）上传，慢网下走完「上传 + 写 client_state」才轮到校验；
- * 二是设备时钟——firstSendTime 用的是设备的钟，钟偏慢多少就吃掉多少余量。
- * 余量不够就会被打回「时间必须在未来」。拉到期这一步成功的话，这 30 秒一秒都
- * 不会等；代价只在拉到期失败的兜底路上（见 INSTANT_TICK_FALLBACK_WAIT_MS）。
- */
-export const INSTANT_SCHEDULE_LEAD_MS = 30_000;
-
-/**
- * 拉到期那一步没成时，起跳前先等多久。
- *
- * 任务行还挂在客户端给的那个时刻上，早跳一步只会空跑一轮，等过那个点再跳。
- * 再兜底还有每分钟的 cron。
- */
-export const INSTANT_TICK_FALLBACK_WAIT_MS = INSTANT_SCHEDULE_LEAD_MS + 1_000;
-
-/**
  * 即时对话这条 fire 的总时长上限（毫秒），由 onBeforeFire 单条返回、只对即时对话生效。
  *
  * 定时任务那条路仍用库默认的 240s：它到点没跑完还有下一分钟的 cron 接着来，
@@ -62,16 +39,6 @@ export const INSTANT_TICK_FALLBACK_WAIT_MS = INSTANT_SCHEDULE_LEAD_MS + 1_000;
  * 上限压在 cron 的墙钟预算（15 分钟）之内。
  */
 export const INSTANT_TOTAL_TIMEOUT_MS = 600_000;
-
-/**
- * 任务认领租期（毫秒）。上游默认是 `max(10 分钟, totalTimeoutMs + 2 分钟)`，
- * 而它算的是全局那个 240s，看不见即时对话单条抬上去的 600s——租约会在 fire 还没
- * 跑完时就过期，下一跳 cron 把同一条又捡起来跑一遍，用户收到两份回复。
- *
- * 所以按即时对话那档显式配一份：600s + 2 分钟。代价是任何一条任务（含定时任务）
- * 中途连 isolate 一起没了之后，要多等 2 分钟才会被别的跳接手。
- */
-export const INSTANT_CLAIM_LEASE_MS = INSTANT_TOTAL_TIMEOUT_MS + 120_000;
 
 /** 合成 cron 事件的标记；wrangler tail 里一眼能看出这一跳是谁起的。 */
 export const INSTANT_TICK_CRON = 'instant-chat';
@@ -249,13 +216,7 @@ export interface InstantChatExecutionCtx {
 
 interface InstantChatEnv {
   AMSG_SERVER_TOKEN?: string;
-  DB?: unknown;
 }
-
-/** 只用得上「跑一条带参数的 UPDATE」这一种能力，不为它引 workers-types。 */
-type D1RunLike = {
-  prepare(sql: string): { bind(...values: unknown[]): { run(): Promise<unknown> } };
-};
 
 /** 上游的 UUID v4 判定（照抄它的正则，前端拿同一个 X-User-Id 跑两边）。 */
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -285,47 +246,14 @@ const isEncryptedEnvelope = (value: unknown): boolean => {
 };
 
 /**
- * 把刚落库的任务行拉到「此刻到期」。
- *
- * 客户端给的 firstSendTime 必须落在未来（上游校验），而 cron 只捡已经到期的行——
- * 不拉这一下，最快也要等到那个提前量过去才会开跑。next_send_at 是明文列，
- * 拉动它就是这条任务真正的语义：用户已经把话说完了，现在就该答。
- *
- * best-effort：拉不动（D1 抽风、行已被别的跳认领）就返回 false，调用方改成等过
- * 那个时刻再起跳，消息不会丢。
- */
-export const pullTaskDue = async (
-  db: unknown,
-  uuid: string,
-  userId: string,
-  nowMs: number,
-): Promise<boolean> => {
-  const d1 = db as D1RunLike | undefined;
-  if (typeof d1?.prepare !== 'function') return false;
-  const iso = new Date(nowMs).toISOString();
-  try {
-    await d1
-      .prepare(
-        `UPDATE scheduled_messages SET next_send_at = ?, updated_at = ?
-          WHERE uuid = ? AND user_id = ? AND status = 'pending' AND next_send_at > ?`,
-      )
-      .bind(iso, iso, uuid, userId, iso)
-      .run();
-    return true;
-  } catch (error) {
-    console.warn('[amsg:instant-chat] 任务行拉到期失败（改成等到点再起跳）', error);
-    return false;
-  }
-};
-
-const delay = (ms: number): Promise<void> =>
-  ms <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
  * `POST /instant-chat` 的处理：鉴权 → 严格顺序转发 → 202 → 立刻起一跳。
  *
  * 顺序不能换：云端状态先落地，任务才允许存在。反过来的话，状态那一步失败时 D1 里
  * 已经躺着一条注定拿旧上下文答话的任务，而且没人拦得住它。
+ *
+ * 任务体带 `immediate: true`（客户端 sendInstantChat 固定写）：上游落库即到期，
+ * 202 之后的那一跳直接就能捡走；顶替上一条也在任务体里（`supersedesUuid`，
+ * 上游在建新任务的同一事务里取消旧的），包装层不再有第二条取消请求。
  */
 export const handleInstantChat = async (args: {
   request: Request;
@@ -335,11 +263,9 @@ export const handleInstantChat = async (args: {
   /** 带 CORS 头的 JSON 响应器（CORS 头只在 index.ts 存一份）。 */
   json: (status: number, body: unknown) => Response;
   now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
 }): Promise<Response> => {
   const { request, env, ctx, upstream, json } = args;
   const now = args.now ?? Date.now;
-  const sleep = args.sleep ?? delay;
 
   const fail = (status: number, code: string, message: string, extra?: Record<string, unknown>) =>
     json(status, { success: false, error: { code, message, ...(extra ?? {}) } });
@@ -372,15 +298,14 @@ export const handleInstantChat = async (args: {
   if (!isEncryptedEnvelope(body.taskPayload)) {
     return fail(400, 'INVALID_TASK_PAYLOAD', 'taskPayload 必须是加密信封（iv / authTag / encryptedData）');
   }
-  const supersedesUuid = typeof body.supersedesUuid === 'string' ? body.supersedesUuid.trim() : '';
 
   // ── 内部转发：路径跟着本次请求的挂载点走（上游按后缀匹配，worker 可能挂在子路径下）。
   const requestUrl = new URL(request.url);
   const mountPath = requestUrl.pathname.replace(/\/+$/, '').replace(/\/instant-chat$/, '');
-  const internalUrl = (path: string, search = ''): string => {
+  const internalUrl = (path: string): string => {
     const url = new URL(request.url);
     url.pathname = `${mountPath}${path}`;
-    url.search = search;
+    url.search = '';
     return url.toString();
   };
   // 上游自己的头约定原样带上（含客户端给的口令），它会再验一遍。
@@ -417,31 +342,8 @@ export const handleInstantChat = async (args: {
     });
   }
 
-  // ② 顶掉上一条还没被认领的任务（连发两条时合并成一起回）。尽力而为：
-  //    404（已经跑掉了 / 本来就不存在）一律忽略，它不该拦住这一条。
-  if (supersedesUuid) {
-    try {
-      const cancelled = await upstream.fetch(
-        new Request(internalUrl('/cancel-message', `?id=${encodeURIComponent(supersedesUuid)}`), {
-          method: 'DELETE',
-          headers: {
-            'X-User-Id': userId,
-            ...(clientToken ? { 'X-Client-Token': clientToken } : {}),
-          },
-        }),
-        env,
-      );
-      if (!cancelled.ok) {
-        console.log('[amsg:instant-chat] 顶替上一条没成（照常继续）', {
-          uuid: supersedesUuid, status: cancelled.status,
-        });
-      }
-    } catch (error) {
-      console.log('[amsg:instant-chat] 顶替上一条抛错（照常继续）', error);
-    }
-  }
-
-  // ③ 任务落库 = 受理。到这一步返回 202 之前，行已经在 D1 里了，
+  // ② 任务落库 = 受理（顶替上一条也在这一步里：任务体的 supersedesUuid 由上游在
+  //    同一事务里处理）。到这一步返回 202 之前，行已经在 D1 里了，
   //    下面那一跳只是让它快点跑起来，跑不成还有每分钟的 cron。
   const taskResponse = await upstream.fetch(
     new Request(internalUrl('/schedule-message'), {
@@ -470,18 +372,15 @@ export const handleInstantChat = async (args: {
     });
   }
 
-  // ④ 立刻起一跳把它捡走。isolate 被回收就退回 cron 兜底，正确性两头都在。
+  // ③ 立刻起一跳把它捡走（immediate 任务落库即到期）。isolate 被回收就退回
+  //    cron 兜底，正确性两头都在。
   if (ctx && typeof ctx.waitUntil === 'function') {
-    ctx.waitUntil((async () => {
-      try {
-        const due = await pullTaskDue(env.DB, uuid, userId, now());
-        if (!due) await sleep(INSTANT_TICK_FALLBACK_WAIT_MS);
-        await upstream.scheduled({ scheduledTime: now(), cron: INSTANT_TICK_CRON }, env);
-      } catch (error) {
+    ctx.waitUntil(
+      upstream.scheduled({ scheduledTime: now(), cron: INSTANT_TICK_CRON }, env).catch((error) => {
         // 这一跳只是「快」，跑挂了下一分钟的 cron 照样会捡起来，不该影响已经回出去的 202。
         console.warn('[amsg:instant-chat] 立即触发失败（等 cron 兜底）', error);
-      }
-    })());
+      }),
+    );
   } else {
     console.warn('[amsg:instant-chat] 运行时没给 ctx，跳过立即触发，等 cron 兜底');
   }

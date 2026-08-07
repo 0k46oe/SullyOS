@@ -61,7 +61,6 @@ import {
   setInstantChatPending,
 } from './amsgInstantChat';
 import { FIRE_PACK_VERSION, unpackStateValue } from './amsgFirePack';
-import { INSTANT_SCHEDULE_LEAD_MS } from '../worker/amsg/src/instantChat';
 import { ChatPrompts } from './chatPrompts';
 import { DB } from './db';
 
@@ -157,12 +156,21 @@ describe('POST /instant-chat 的形状', () => {
     expect(task.metadata.amsgExpirePolicy).toBeUndefined();
   });
 
-  it('firstSendTime 留出提前量（上游要求在未来，包装层落库后再拉到期）', async () => {
-    const before = Date.now();
+  it('immediate: true 且不带 firstSendTime（落库即到期，慢机吃提前量的 400 无从发生）', async () => {
     const { task } = await postOnce([{ role: 'user', content: '在吗' }]);
-    const lead = Date.parse(task.firstSendTime) - before;
-    expect(lead).toBeGreaterThanOrEqual(INSTANT_SCHEDULE_LEAD_MS - 50);
-    expect(lead).toBeLessThanOrEqual(INSTANT_SCHEDULE_LEAD_MS + 5_000);
+    expect(task.immediate).toBe(true);
+    expect(task.firstSendTime).toBeUndefined();
+  });
+
+  it('顶替 uuid 只在加密信封里（上游同一事务原子取消），外壳明文不带', async () => {
+    const { task, supersedes } = await postOnce([{ role: 'user', content: '在吗' }], 'uuid-prev');
+    expect(task.supersedesUuid).toBe('uuid-prev');
+    expect(supersedes).toBeUndefined();
+  });
+
+  it('没有可顶替的上一条时不带这个键', async () => {
+    const { task } = await postOnce([{ role: 'user', content: '在吗' }]);
+    expect(task.supersedesUuid).toBeUndefined();
   });
 
   // 情绪评估要跟这一轮一起上云（worker 跑完随最后一条推送把结果送回来）。它里头有
@@ -297,15 +305,6 @@ describe('POST /instant-chat 的形状', () => {
     warn.mockRestore();
   });
 
-  it('顶替上一条：supersedesUuid 原样带上去', async () => {
-    const { supersedes } = await postOnce([{ role: 'user', content: '再补一句' }], 'uuid-prev');
-    expect(supersedes).toBe('uuid-prev');
-  });
-
-  it('没有待顶替的那条时不带这个字段', async () => {
-    const { supersedes } = await postOnce([{ role: 'user', content: '在吗' }]);
-    expect(supersedes).toBeUndefined();
-  });
 });
 
 describe('只有 202 才算发出去', () => {
@@ -481,9 +480,14 @@ describe('推送丢了的补收对账', () => {
     totalMessages: 1,
     timestamp: new Date(1_700_000_000_000).toISOString(),
     taskId: 7,
+    taskUuid: 'uuid-round-1',
     occurrenceMs: 1_700_000_000_000,
     metadata: { charId: CHAR.id, charName: '小满', amsgInstantChat: true },
   });
+
+  // 补收只对账目标轮（欠着回复的那一轮 / 显式点名的 uuid）：outbox 是跨轮环形数组，
+  // 不过滤的话被重 roll / 手动删掉的旧轮回复会因「本地查无此 id」复活。
+  beforeEach(() => setInstantChatPending(CHAR.id, 'uuid-round-1', 1_000));
 
   const stubOutbox = (messageIds: string[]) => {
     vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(JSON.stringify({
@@ -524,6 +528,29 @@ describe('推送丢了的补收对账', () => {
     vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
     storeState.inbox = [{ messageId, charId: CHAR.id }];
     expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
+  });
+
+  it('不是目标轮的旧条目不复活（重 roll / 删除过的轮次已不在 pending 里）', async () => {
+    clearInstantChatPending(CHAR.id);
+    setInstantChatPending(CHAR.id, 'uuid-round-2', 2_000);   // 正在等的是新一轮
+    stubOutbox(['msg_task_7@1700000000000_hook_0']);          // outbox 里只有旧轮（uuid-round-1）
+    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
+    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
+    expect(storeState.saved).toHaveLength(0);
+  });
+
+  it('一条都不欠、也没显式点名 → 直接 0，一个请求都不发', async () => {
+    clearInstantChatPending(CHAR.id);
+    const read = vi.spyOn(ActiveMsgClient, 'readClientStateValue');
+    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('显式点名 uuid（销账后的末段补扫）时不依赖 pending 存在', async () => {
+    clearInstantChatPending(CHAR.id);
+    stubOutbox(['msg_task_7@1700000000000_hook_0']);
+    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
+    expect(await drainChatOutboxForChar(CHAR.id, { uuids: ['uuid-round-1'] })).toBe(1);
   });
 
   it('读不到近史时宁可这次不补收（重复上屏比晚一会儿更糟），对外报 null', async () => {

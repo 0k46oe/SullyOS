@@ -32,19 +32,20 @@
   ```jsonc
   {
     "statePayload": "<加密信封：即 PUT /client-state 的完整 body>",
-    "taskPayload": "<加密信封：即 POST /schedule-message 的完整 body>",
-    "supersedesUuid": "<可选：要顶替的上一条 instant 任务 uuid>"
+    "taskPayload": "<加密信封：即 POST /schedule-message 的完整 body>"
   }
   ```
 
-- 处理步骤（严格顺序，前两个 await 失败即向客户端返回明确错误，不落任务）：
+  taskPayload（信封内）固定带 `immediate: true`（amsg-server 2.6.0-next.15 起：
+  落库即到期，不带 `firstSendTime`）；顶替上一条时带 `supersedesUuid`（上游在
+  建新任务的同一事务里取消旧的，原子）。外壳不再有明文 supersedesUuid。
+
+- 处理步骤（严格顺序，两个 await 失败即向客户端返回明确错误，不落任务）：
   1. 内部 `upstream.fetch` 转发 `PUT /client-state`（statePayload）→ 必须成功。
-  2. 有 `supersedesUuid` 则内部转发 `DELETE /cancel-message` 尽力取消（404/已认领
-     一律忽略，不影响主流程）。
-  3. 内部转发 `POST /schedule-message`（taskPayload，`next_send_at` ≈ now）→
-     必须成功，拿到 uuid。
-  4. 返回 `202 { status: 'accepted', uuid }`。
-  5. `ctx.waitUntil(upstream.scheduled(合成 event, env))` 立即触发一次 tick，
+  2. 内部转发 `POST /schedule-message`（taskPayload）→ 必须成功，拿到 uuid
+     （顶替在上游事务内完成）。
+  3. 返回 `202 { status: 'accepted', uuid }`。
+  4. `ctx.waitUntil(upstream.scheduled(合成 event, env))` 立即触发一次 tick，
      捡起刚落的行（与真 cron 并发时由 claim/lease 天然互斥）。
 - `export default` 的 `fetch` / `scheduled` 签名补上第三个参数 `ctx`
   （上游签名只收两个参数，多传无害；`index.ts:1509-1510` 的注释要同步改）。

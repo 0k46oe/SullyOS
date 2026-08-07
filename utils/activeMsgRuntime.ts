@@ -27,7 +27,10 @@ import {
   failInstantChatPending,
   getInstantChatPending,
   listInstantChatPendings,
+  trackInFlightInboxMessageIds,
+  untrackInFlightInboxMessageIds,
 } from './amsgInstantChat';
+import { flushAmsgState } from './amsgStateSync';
 import { describeInstantChatFailure, pruneStaleTasks } from './amsg2Tasks';
 import { appendInstantTraceEntry } from './instantTraceLog';
 import { trackEvent } from './analytics';
@@ -779,6 +782,60 @@ async function adoptSelfScheduledTasks(message: ActiveMsg2InboxMessage): Promise
   }
 }
 
+/**
+ * 把 worker 带回来的「角色取消 / 改期了既有任务」落到本地清单（amsgTaskMutations，
+ * 与 adoptSelfScheduledTasks 对称的消账侧）。
+ *
+ * 幂等：取消的 uuid 本地已经没有、改期的时间已经一致时都是 no-op（同一条 push 重放安全）。
+ * best-effort：失败只 warn——远端行已经删掉 / 改掉了，本地这一刻没跟上只是面板显示旧，
+ * 下次对账还能拉平，为它抛错会把已经收到的消息一起搞挂。
+ */
+async function applyRemoteTaskMutations(message: ActiveMsg2InboxMessage): Promise<void> {
+  const raw = (message.metadata as any)?.amsgTaskMutations;
+  if (!raw || typeof raw !== 'object') return;
+  const cancelled: string[] = Array.isArray(raw.cancelled)
+    ? raw.cancelled.filter((u: unknown) => typeof u === 'string' && u)
+    : [];
+  const renewed: Array<{ taskUuid: string; sendAt: string }> = Array.isArray(raw.renewed)
+    ? raw.renewed.filter((r: any) => typeof r?.taskUuid === 'string' && typeof r?.sendAt === 'string')
+    : [];
+  if (cancelled.length === 0 && renewed.length === 0) return;
+  const charId = (message.metadata as any)?.charId;
+  if (typeof charId !== 'string' || !charId) return;
+
+  try {
+    const char = (await DB.getAllCharacters()).find((c) => c.id === charId);
+    const existing = char?.activeMsg2Config?.tasks ?? [];
+    if (!char || existing.length === 0) return;
+
+    const gone = new Set(cancelled);
+    const renewedAt = new Map(renewed.map((r) => [r.taskUuid, r.sendAt]));
+    const next = existing
+      .filter((t: ActiveMsg2TaskRecord) => !gone.has(t.taskUuid))
+      .map((t: ActiveMsg2TaskRecord) => {
+        const sendAt = renewedAt.get(t.taskUuid);
+        return sendAt && t.nextSendAt !== sendAt
+          ? { ...t, firstSendTime: sendAt, nextSendAt: sendAt }
+          : t;
+      });
+    const changed = next.length !== existing.length
+      || next.some((t: ActiveMsg2TaskRecord, i: number) => t !== existing[i]);
+    if (!changed) return;
+
+    await DB.saveCharacter({
+      ...char,
+      activeMsg2Config: { ...(char.activeMsg2Config ?? { enabled: true }), tasks: next },
+    });
+    console.log('[ActiveMsg] 消账角色取消/改期的任务', { cancelled, renewed });
+    // 与认领共用同一个事件：监听方（OSContext）做的是「重读角色」，增删改对它是一回事。
+    try {
+      window.dispatchEvent(new CustomEvent(AMSG2_TASKS_ADOPTED_EVENT, { detail: { charId } }));
+    } catch { /* SSR-safe / not browser, ignore */ }
+  } catch (e) {
+    console.warn('[ActiveMsg] apply remote task mutations failed', charId, e);
+  }
+}
+
 /** 把 worker 推给的 directives 从 inbox message metadata 里挖出来; 没有就空数组. */
 function extractDirectives(message: ActiveMsg2InboxMessage): PostProcessDirective[] {
   const raw = message.metadata && (message.metadata as any).directives;
@@ -1196,6 +1253,13 @@ const cancelOrphanedRemoteTasks = async (charId: string): Promise<void> => {
 const flushInboxToChatImpl = async () => {
   const pendingMessages = await ActiveMsgStore.consumeInboxMessages();
   activeMsgTrace('runtime-flush-start', { count: pendingMessages.length });
+  // 先 ack 后处理意味着这批消息有几秒（拟人打字延迟）既不在收件箱也不在聊天记录——
+  // 恰好撞上 60s 点名的 outbox 对账时会被当成「没收到」重新入库、二次上屏。
+  // 处理期间把 messageId 登记给对账那边（collectReceivedMessageIds 会并进「已收」），
+  // finally 里撤掉：落库成功的那时聊天记录已经查得到；requeue 回收件箱的那几条
+  // 也重新出现在 listInboxMessages 里，两条腿都接上了才撤。
+  trackInFlightInboxMessageIds(pendingMessages.map((m) => m.messageId));
+  try {
   // consumeInboxMessages 是 "先 ack 后处理" 语义 —— inbox 已经原子地清空。
   // 这里 per-message try/catch: 单条处理抛错 (quota / DB 故障 / postprocess 异常) 不连累
   // 后续条目。Phase 1 改成: 先尝试走 applyAssistantPostProcessing (与本地 fetch 路径
@@ -1255,6 +1319,9 @@ const flushInboxToChatImpl = async () => {
     // 排在闸后面的话，被吞的那条 push 会把任务认领一起带走：面板列不出来、用户取消不掉，
     // 而它照常到点触发；订阅登记和凭据刷新也都够不着它，成了推不出去又删不掉的幽灵。
     await adoptSelfScheduledTasks(message);
+    // 对称的另一半：角色在 fire 里取消 / 改期掉的既有任务，本地清单跟着消账。
+    // 同样排在闸之前——D1 行已经没了（或换了时间），消息被吞不改变这个事实。
+    await applyRemoteTaskMutations(message);
 
     // ─── 防穿帮闸·客户端兜底 ───
     // 只拦定时任务的 push（source==='scheduled' 且带策略字段）；instant 聊天
@@ -1442,15 +1509,51 @@ const flushInboxToChatImpl = async () => {
       charId: message.charId,
     });
 
-    // 即时对话的「正在输入…」在这里熄：**欠着的那一轮**（认 taskUuid）的回复到了。
-    // 不挑消息类型——欠着的那条回复可能被拆成好几段，第一段到了指示灯就该灭。
+    // 即时对话的「正在输入…」在这里熄：**欠着的那一轮**（认 taskUuid）的**末段**到了。
     // 只认 uuid、不认「这个角色开口了」：定时任务的主动消息、被顶掉的上一轮迟到的
     // 回复都可能先落地，它们不是用户在等的那一轮——按角色销账的话，60s 点名连同
     // outbox 兜底当场全停，这一轮的推送真丢了就再也没人去补。
+    // 认末段（messageIndex >= totalMessages）而不是随便哪一段：第一段就销账的话，
+    // 后续段丢在路上时兜底同样全停，用户永远只看到半截回复。段号缺失（单段消息 /
+    // 旧 worker）当末段处理，保持旧行为。
     const pendingForChar = getInstantChatPending(message.charId);
     if (pendingForChar && message.taskUuid === pendingForChar.uuid) {
-      if (clearInstantChatPending(message.charId)) scheduleNextInstantChatStatusCheck();
+      const segIndex = Number((message.metadata as any)?.messageIndex);
+      const segTotal = Number((message.metadata as any)?.totalMessages);
+      const isLastSegment = !Number.isFinite(segTotal) || segTotal <= 1
+        || (Number.isFinite(segIndex) && segIndex >= segTotal);
+      if (isLastSegment && clearInstantChatPending(message.charId)) {
+        scheduleNextInstantChatStatusCheck();
+        // 这条回复是从 outbox 补收回来的 = 真推送没送到 = 那条任务行多半正挂在
+        // 2/4/6 分钟的重试队列里，跑起来就是同一轮的第二份回复。尽力取消；
+        // 正常送达的路不带这个标记（行发完即删，也无从取消），一个多余请求都不发。
+        if ((message.metadata as any)?.amsgOutboxBackfill) {
+          ActiveMsgClient.cancelTask(pendingForChar.uuid).catch(() => {});
+        }
+        // 末段先到、中段还丢在路上的乱序场景：销账后 pending 没了，常规兜底不会再看
+        // 这一轮——离场前按这轮的 uuid 补扫一次 outbox，把缺的段捡回来。
+        void sweepSettledInstantRound(message.charId, pendingForChar.uuid);
+        // 挂起没传的 fire_pack（销账前挡板拦下的那些）现在可以走了，别等 60s 回看。
+        void flushAmsgState('instant-chat-settled');
+      }
     }
+  }
+  } finally {
+    untrackInFlightInboxMessageIds(pendingMessages.map((m) => m.messageId));
+  }
+};
+
+/**
+ * 一轮即时对话销账后的补扫：按**这一轮**的 uuid 再拉一次 outbox。末段先到时中段可能
+ * 还丢在路上，而销账后所有按 pending 走的兜底都不会再看这一轮。写进来的段落走原冲刷
+ * 管线（保序 hold 会把它插回正确位置）。尽力而为：失败就算了，正常路径什么都扫不到。
+ */
+const sweepSettledInstantRound = async (charId: string, uuid: string): Promise<void> => {
+  try {
+    const swept = await drainChatOutboxForChar(charId, { uuids: [uuid] });
+    if (swept != null && swept > 0) await flushInboxToChat();
+  } catch (e) {
+    log.warn('即时对话销账后补扫失败（缺段只能等下一轮顺带）', { charId, uuid, error: e });
   }
 };
 
@@ -1622,6 +1725,11 @@ export const runInstantChatStatusCheck = async (): Promise<void> => {
         }
       } catch (e) {
         log.warn('即时对话失败原因取不到（报个笼统的）', { uuid: pending.uuid, error: e });
+      }
+      // chat_fail 没留下（isolate 连人带痕一起没了那种）时退回 409 捎来的行级
+      // lastError（amsg-server 2.6.0-next.15 起；查询按 uuid 点名，必然是这一行的）。
+      if (!reason && status.lastError) {
+        reason = describeInstantChatFailure(status.lastError) ?? undefined;
       }
       log.warn('即时对话云端任务已失败', { charId: pending.charId, uuid: pending.uuid, reason });
       await failInstantChatPending(pending.charId, pending.uuid, reason ?? '生成失败（云端没记下原因）');

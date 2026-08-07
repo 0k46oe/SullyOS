@@ -9,12 +9,12 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import worker, {
   amsgFireSettled, amsgHooks, amsgReasoningKey, amsgStaleSkip, attachScheduledTasks,
   buildWorkerConfig, inspectWorkerEnv, offloadOversizedPush,
-  resolveVapidEmail, runFireScheduleTool, runMcpFireTool,
+  resolveVapidEmail, runFireCancelTool, runFireRenewTool, runFireScheduleTool, runMcpFireTool,
 } from './index';
 import { MAX_TOOL_ITERATIONS } from './agentic';
 import { MAX_PUSH_PAYLOAD_BYTES } from '@rei-standard/amsg-server/cloudflare';
 import { amsgEmotionUpdateKey } from './emotionEval';
-import { INSTANT_CLAIM_LEASE_MS, INSTANT_TOTAL_TIMEOUT_MS } from './instantChat';
+import { INSTANT_TOTAL_TIMEOUT_MS } from './instantChat';
 import {
   AMSG_CHAT_OUTBOX_KEY,
   AMSG_FIRE_PACK_KEY,
@@ -350,6 +350,14 @@ describe('onBeforeFire 四道门', () => {
   it('云端没有 fire_pack → 抛错（不降级）', async () => {
     const { ctx } = makeCtx({ charRows: [] });
     await expect(amsgHooks.onBeforeFire(ctx)).rejects.toThrow(/AMSG2_FIRE_STATE_MISSING/);
+  });
+
+  // 这批失败是确定性的状态问题，重试三次只是让等回复的用户白等六分钟。
+  // permanent: true 是上游 isNonRetryableError 认的鸭子契约 → 直接终审处置。
+  it('状态类失败标 permanent，上游不再走重试阶梯', async () => {
+    const { ctx } = makeCtx({ charRows: [] });
+    const error = await amsgHooks.onBeforeFire(ctx).then(() => null, (e: unknown) => e);
+    expect((error as { permanent?: boolean }).permanent).toBe(true);
   });
 
   it('fire_pack 解析失败 → 抛错（不降级）', async () => {
@@ -2132,6 +2140,198 @@ describe('attachScheduledTasks', () => {
   });
 });
 
+// 取消 / 改期开到 fire 侧（amsg-server 2.6.0-next.15 的 ctx.cancelTask / renewTask）。
+// 语义与前台同名工具对齐：短 id 指定、只有一条时可省略；账目两头消
+// （selfLog.tasks + 随末条 push 的 amsgTaskMutations 回客户端）。
+describe('fire 侧取消 / 改期任务', () => {
+  const NOW_MS = Date.parse('2026-07-25T12:00:00.000Z');
+  const taskRec = (uuid: string, over: Record<string, unknown> = {}) => ({
+    taskUuid: uuid,
+    clientTaskId: `${uuid}-c`,
+    mode: 'auto',
+    firstSendTime: new Date(NOW_MS + 3600_000).toISOString(),
+    recurrenceType: 'none',
+    expirePolicy: 'expire',
+    source: 'user',
+    status: 'scheduled',
+    createdAt: NOW_MS - 3600_000,
+    ...over,
+  }) as any;
+
+  const makeStash = (over: Record<string, unknown> = {}) => ({
+    session: { narrations: [], toolCalls: [], duplicateToolCalls: 0, mcpCallSeq: 0 },
+    toolCtx: { char: { name: 'Nyah' } },
+    occurrenceMs: NOW_MS,
+    selfLog: { v: 3 as const, basePackAt: 1, anchorUserMsgAt: null, entries: [], tasks: [] },
+    pendingTaskCount: 0,
+    pendingTasks: [],
+    scheduledTasks: [],
+    cancelledTasks: [],
+    renewedTasks: [],
+    charId: CHAR_ID,
+    anchorMs: 1_700_000_000_000,
+    tz: { tzId: 'Asia/Shanghai' },
+    taskUuid: TASK_UUID,
+    taskRowId: '42',
+    instant: false,
+    maxUnansweredSends: Infinity,
+    plannedSelfSends: 0,
+    ...over,
+  }) as any;
+
+  const okCancel = () => vi.fn(async (_uuid: string) => ({ cancelled: true }));
+  const okRenew = () => vi.fn(async (uuid: string, nextSendAt: string) => ({
+    renewed: true as const, uuid, nextSendAt,
+  }));
+  const newSendAt = new Date(NOW_MS + 2 * 3600_000).toISOString();
+
+  it('短 id 找目标、全 uuid 传给 ctx.cancelTask，账记进 cancelledTasks', async () => {
+    const cancel = okCancel();
+    const stash = makeStash({ pendingTasks: [taskRec('11112222-aaaa-4bbb-8ccc-000000000001')] });
+    const out = await runFireCancelTool(stash, cancel, { task_id: '11112222' });
+    expect(out.ok).toBe(true);
+    expect(cancel).toHaveBeenCalledWith('11112222-aaaa-4bbb-8ccc-000000000001');
+    expect(stash.cancelledTasks).toEqual(['11112222-aaaa-4bbb-8ccc-000000000001']);
+  });
+
+  it('只有一条时可省略 task_id；多条时打回 ambiguous、一条都不动', async () => {
+    const cancel = okCancel();
+    const one = makeStash({ pendingTasks: [taskRec('u-only')] });
+    expect((await runFireCancelTool(one, cancel, {})).ok).toBe(true);
+
+    const many = makeStash({ pendingTasks: [taskRec('u-a'), taskRec('u-b')] });
+    const out = await runFireCancelTool(many, cancel, {});
+    expect(out.reason).toBe('ambiguous_task');
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('当前正在 fire 的这条不在可取消视图里（它的收尾归 run-tick 管）', async () => {
+    const cancel = okCancel();
+    const stash = makeStash({ pendingTasks: [taskRec(TASK_UUID)] });
+    const out = await runFireCancelTool(stash, cancel, { task_id: TASK_UUID.slice(0, 8) });
+    expect(out.ok).toBe(false);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('取消掉 selfLog 里备着账的自排任务：日志同步摘除并打脏', async () => {
+    const rec = taskRec('u-selflog', { source: 'character' });
+    const stash = makeStash({
+      pendingTasks: [rec],
+      selfLog: { v: 3, basePackAt: 1, anchorUserMsgAt: null, entries: [], tasks: [rec] },
+    });
+    await runFireCancelTool(stash, okCancel(), { task_id: 'u-selflog' });
+    expect(stash.selfLog.tasks).toEqual([]);
+    expect(stash.selfLogDirty).toBe(true);
+  });
+
+  it('本轮刚排的那条允许当场反悔：scheduledTasks 一并摘掉', async () => {
+    const rec = taskRec('u-fresh', { source: 'character' });
+    const stash = makeStash({ scheduledTasks: [rec] });
+    const out = await runFireCancelTool(stash, okCancel(), { task_id: 'u-fresh' });
+    expect(out.ok).toBe(true);
+    expect(stash.scheduledTasks).toEqual([]);
+  });
+
+  it('行已经不在了（cancelled:false）→ 照实说、不记账', async () => {
+    const cancel = vi.fn(async () => ({ cancelled: false }));
+    const stash = makeStash({ pendingTasks: [taskRec('u-gone')] });
+    const out = await runFireCancelTool(stash, cancel, { task_id: 'u-gone' });
+    expect(out.ok).toBe(true);
+    expect(out.already_gone).toBe(true);
+    expect(stash.cancelledTasks).toEqual([]);
+  });
+
+  it('老部署没有 ctx.cancelTask → not_supported，一句能照做的话', async () => {
+    const out = await runFireCancelTool(makeStash({ pendingTasks: [taskRec('u-x')] }), undefined, {});
+    expect(out.reason).toBe('not_supported');
+  });
+
+  it('一次性任务改期：ctx.renewTask 原地换时间，账记进 renewedTasks、selfLog 跟着改', async () => {
+    const rec = taskRec('u-renew', { source: 'character' });
+    const renew = okRenew();
+    const stash = makeStash({
+      pendingTasks: [rec],
+      selfLog: { v: 3, basePackAt: 1, anchorUserMsgAt: null, entries: [], tasks: [rec] },
+    });
+    const out = await runFireRenewTool(stash, { renewTask: renew }, { send_at: newSendAt }, NOW_MS);
+    expect(out.ok).toBe(true);
+    expect(renew).toHaveBeenCalledWith('u-renew', newSendAt);
+    expect(stash.renewedTasks).toEqual([{ taskUuid: 'u-renew', sendAt: newSendAt }]);
+    expect(stash.selfLog.tasks[0].firstSendTime).toBe(newSendAt);
+  });
+
+  it('循环任务改期 = 补发一条一次性（走排程工具的完整入口），原序列不动', async () => {
+    const renew = okRenew();
+    const schedule = vi.fn(async (o: any) => ({
+      created: true as const, id: 7, uuid: o.uuid, nextSendAt: o.firstSendTime,
+    }));
+    const rec = taskRec('u-daily', { recurrenceType: 'daily', promptHint: '说早安' });
+    const stash = makeStash({ pendingTasks: [rec] });
+    const out = await runFireRenewTool(
+      stash, { renewTask: renew, scheduleTask: schedule }, { send_at: newSendAt }, NOW_MS);
+    expect(out.ok).toBe(true);
+    expect(renew).not.toHaveBeenCalled();
+    expect(schedule).toHaveBeenCalledTimes(1);
+    expect(schedule.mock.calls[0][0].recurrenceType).toBe('none');
+    expect(schedule.mock.calls[0][0].metadata.amsgTaskInstruction).toContain('说早安');
+    // 原序列没被记成取消或改期
+    expect(stash.cancelledTasks).toEqual([]);
+    expect(stash.renewedTasks).toEqual([]);
+  });
+
+  it('fixed 任务不让动；send_at 太近打回；行没了回 task_gone', async () => {
+    const fixedOut = await runFireRenewTool(
+      makeStash({ pendingTasks: [taskRec('u-fx', { mode: 'fixed' })] }),
+      { renewTask: okRenew() }, { send_at: newSendAt }, NOW_MS);
+    expect(fixedOut.reason).toBe('fixed_task');
+
+    const soonOut = await runFireRenewTool(
+      makeStash({ pendingTasks: [taskRec('u-soon')] }),
+      { renewTask: okRenew() }, { send_at: new Date(NOW_MS + 10_000).toISOString() }, NOW_MS);
+    expect(soonOut.reason).toBe('send_at_too_soon');
+
+    const gone = vi.fn(async () => ({ renewed: false as const, reason: 'not_found' }));
+    const goneOut = await runFireRenewTool(
+      makeStash({ pendingTasks: [taskRec('u-gone2')] }),
+      { renewTask: gone }, { send_at: newSendAt }, NOW_MS);
+    expect(goneOut.reason).toBe('task_gone');
+  });
+
+  it('usage 随末条 push 的 amsgUsage 回客户端（只挑两个数，不透传供应商私有字段）', async () => {
+    const stash = makeStash({ instant: true });
+    const decision = await amsgHooks.onLLMOutput({
+      sessionId: 'sess_task_42', taskId: FIRE_TASK_ID, taskUuid: TASK_UUID,
+      llmResponse: {}, llmOutputText: '在的。', contactName: 'Nyah',
+      metadata: { charId: CHAR_ID, amsgClientTaskId: 'ct-u', amsgMode: 'instant', amsgInstantChat: true },
+      scratch: { fire: stash },
+      usage: { prompt_tokens: 1234, completion_tokens: 56, total_tokens: 1290, provider_secret_detail: 'x' },
+      writeState: vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 })),
+    } as any) as any;
+    const last = decision.pushPayloads[decision.pushPayloads.length - 1];
+    expect(last.metadata.amsgUsage).toEqual({ promptTokens: 1234, completionTokens: 56 });
+  });
+
+  it('取消 / 改期的账随末条 push 的 amsgTaskMutations 回客户端（首条不带）', async () => {
+    const stash = makeStash({
+      cancelledTasks: ['u-cancelled'],
+      renewedTasks: [{ taskUuid: 'u-renewed', sendAt: newSendAt }],
+    });
+    const decision = await amsgHooks.onLLMOutput({
+      sessionId: 'sess_task_42', taskId: FIRE_TASK_ID, taskUuid: TASK_UUID,
+      llmResponse: {}, llmOutputText: '好，改好了。\n到时候见。', contactName: 'Nyah',
+      metadata: { charId: CHAR_ID, amsgClientTaskId: 'ct-1', amsgMode: 'auto' },
+      scratch: { fire: stash },
+      writeState: vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 })),
+    } as any) as any;
+    expect(decision.pushPayloads).toHaveLength(2);
+    expect(decision.pushPayloads[0].metadata.amsgTaskMutations).toBeUndefined();
+    expect(decision.pushPayloads[1].metadata.amsgTaskMutations).toEqual({
+      cancelled: ['u-cancelled'],
+      renewed: [{ taskUuid: 'u-renewed', sendAt: newSendAt }],
+    });
+  });
+});
+
 // ⑤ 没发出去也留痕：模型返回空 / 纯拒答、或者只做了副作用没说话时，上游都把任务当成功
 // 消费，面板过去无从解释。现在 skip-push 分支写一条 last_skip，两种成因分开记。
 describe('没发出去时写 last_skip', () => {
@@ -3070,9 +3270,11 @@ describe('即时对话的接线', () => {
     expect((await response.json()).error.code).toBe('WORKER_CONFIG_MISSING');
   });
 
-  it('认领租期盖得住最长的那条 fire（盖不住 = 同一条被跑两遍，用户收到两份回复）', () => {
-    const cfg = buildWorkerConfig(fullEnv);
-    expect(cfg.claimLeaseMs).toBe(INSTANT_CLAIM_LEASE_MS);
-    expect(cfg.claimLeaseMs).toBeGreaterThan(INSTANT_TOTAL_TIMEOUT_MS);
+  it('不再显式配 claimLeaseMs：租约交给上游的心跳续租（30s 一跳滚动，isolate 死后 ~90s 接手）', () => {
+    // 回归守卫：把 claimLeaseMs 加回来会关不掉心跳（上游按「配置了就用你的」处理的是
+    // 无心跳分支的 TTL），isolate 死亡恢复窗又变回按最长 fire 定格的十几分钟。
+    // 心跳自己会盖住即时对话 600s 的 fire——fire 跑多久租约就滚多久。
+    const cfg = buildWorkerConfig(fullEnv) as Record<string, unknown>;
+    expect(cfg.claimLeaseMs).toBeUndefined();
   });
 });

@@ -221,12 +221,32 @@ describe('ActiveMsgClient.getRemoteTaskStatus', () => {
     await expect(ActiveMsgClient.getRemoteTaskStatus('task-gone')).resolves.toEqual({ state: 'gone' });
   });
 
-  it('行还在但已出清 → completed', async () => {
+  it('行还在但已出清 → completed（老 worker 不带 details，lastError 报 null）', async () => {
     respondWith(409, {
       success: false,
       error: { code: 'TASK_ALREADY_COMPLETED', message: '任务已完成或已失败，无法更新' },
     });
-    await expect(ActiveMsgClient.getRemoteTaskStatus('task-done')).resolves.toEqual({ state: 'completed' });
+    await expect(ActiveMsgClient.getRemoteTaskStatus('task-done')).resolves.toEqual({
+      state: 'completed', lastError: null,
+    });
+  });
+
+  it('409 捎带的行级失败摘要透传（amsg-server 2.6.0-next.15 的 details.lastError）', async () => {
+    respondWith(409, {
+      success: false,
+      error: {
+        code: 'TASK_ALREADY_COMPLETED',
+        message: '任务已完成或已失败，无法更新',
+        details: {
+          status: 'failed',
+          lastError: { at: '2026-08-05T10:00:00.000Z', occurrence: '2026-08-05T09:58:00.000Z', reason: 'LLM_HTTP_500' },
+        },
+      },
+    });
+    await expect(ActiveMsgClient.getRemoteTaskStatus('task-failed')).resolves.toEqual({
+      state: 'completed',
+      lastError: { at: '2026-08-05T10:00:00.000Z', occurrence: '2026-08-05T09:58:00.000Z', reason: 'LLM_HTTP_500' },
+    });
   });
 
   it('网络故障要抛，不能悄悄当成 gone', async () => {
