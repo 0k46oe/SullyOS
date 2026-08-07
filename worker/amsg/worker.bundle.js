@@ -5129,10 +5129,11 @@ var buildAwayHint = (targetName, timeSinceUser) => {
 var SELF_LOG_MAX_ENTRIES = 8;
 var SELF_LOG_TEXT_MAX = 200;
 var createSelfLog = (basePackAt, anchorUserMsgAt = null) => ({
-  v: 3,
+  v: 4,
   basePackAt,
   anchorUserMsgAt,
   entries: [],
+  unansweredSends: 0,
   tasks: []
 });
 var DEFAULT_MAX_UNANSWERED_SENDS = 3;
@@ -5142,11 +5143,11 @@ var resolveMaxUnansweredSends = (value) => {
   if (value < 1) return DEFAULT_MAX_UNANSWERED_SENDS;
   return Math.min(99, Math.floor(value));
 };
-var countUnansweredSends = (log) => log ? log.entries.filter((e) => !e.reply).length : 0;
+var countUnansweredSends = (log) => log ? log.unansweredSends : 0;
 var reconcileSelfLogWithPack = (stored, pack, lastUserMessageAt) => {
   let log = stored ?? createSelfLog(pack.builtAt, lastUserMessageAt);
   if (lastUserMessageAt != null && (log.anchorUserMsgAt == null || lastUserMessageAt > log.anchorUserMsgAt)) {
-    log = { ...log, anchorUserMsgAt: lastUserMessageAt, entries: [] };
+    log = { ...log, anchorUserMsgAt: lastUserMessageAt, entries: [], unansweredSends: 0 };
   }
   if (log.basePackAt !== pack.builtAt) {
     log = { ...log, basePackAt: pack.builtAt, tasks: [] };
@@ -5160,13 +5161,18 @@ var appendSelfLogTask = (log, task) => ({
 var appendSelfLogEntry = (log, entry) => {
   const text = entry.text.trim().slice(0, SELF_LOG_TEXT_MAX);
   if (!text) return log;
+  const alreadyLogged = log.entries.some((e) => e.id === entry.id);
   const kept = log.entries.filter((e) => e.id !== entry.id);
-  return { ...log, entries: [...kept, { ...entry, text }].slice(-SELF_LOG_MAX_ENTRIES) };
+  return {
+    ...log,
+    entries: [...kept, { ...entry, text }].slice(-SELF_LOG_MAX_ENTRIES),
+    unansweredSends: log.unansweredSends + (entry.reply || alreadyLogged ? 0 : 1)
+  };
 };
 var parseSelfLog = (value) => {
   try {
     const parsed = JSON.parse(value);
-    if (parsed && typeof parsed === "object" && parsed.v === 3 && typeof parsed.basePackAt === "number" && (parsed.anchorUserMsgAt === null || typeof parsed.anchorUserMsgAt === "number") && Array.isArray(parsed.tasks) && Array.isArray(parsed.entries) && parsed.entries.every((e) => {
+    if (parsed && typeof parsed === "object" && parsed.v === 4 && typeof parsed.basePackAt === "number" && (parsed.anchorUserMsgAt === null || typeof parsed.anchorUserMsgAt === "number") && typeof parsed.unansweredSends === "number" && Array.isArray(parsed.tasks) && Array.isArray(parsed.entries) && parsed.entries.every((e) => {
       const entry = e;
       return !!entry && typeof entry.id === "string" && typeof entry.at === "number" && typeof entry.text === "string";
     })) {
@@ -6207,24 +6213,37 @@ function resolveScriptName(env, requestUrl) {
   const name = host.split(".")[0];
   return name || null;
 }
-async function resolveAccountId(env, token) {
+async function locateScript(env, token, scriptName) {
+  const settingsPath = (accountId) => `/accounts/${accountId}/workers/scripts/${encodeURIComponent(scriptName)}/settings`;
   const configured = env.CF_ACCOUNT_ID?.trim();
-  if (configured) return { ok: true, id: configured };
+  if (configured) {
+    const settings = await cf(token, settingsPath(configured));
+    if (!settings.ok) {
+      return {
+        ok: false,
+        message: `\u5728 CF_ACCOUNT_ID \u6307\u5B9A\u7684\u8D26\u53F7\u91CC\u8BFB\u4E0D\u5230\u8FD9\u4E2A Worker \u7684\u914D\u7F6E\uFF08${settings.detail}\uFF09\u3002`
+      };
+    }
+    return { ok: true, accountId: configured, settings: settings.result };
+  }
   const listed = await cf(token, "/accounts");
   if (!listed.ok) {
     return {
       ok: false,
-      message: `\u95EE\u4E0D\u5230\u8D26\u53F7 ID\uFF08${listed.detail}\uFF09\u3002\u7ED9 Worker \u52A0\u4E00\u6761 CF_ACCOUNT_ID \u53D8\u91CF\u5373\u53EF\u7ED5\u8FC7\u8FD9\u4E00\u6B65\u3002`
+      message: `\u95EE\u4E0D\u5230\u8D26\u53F7\u5217\u8868\uFF08${listed.detail}\uFF09\u3002\u7ED9 Worker \u52A0\u4E00\u6761 CF_ACCOUNT_ID \u53D8\u91CF\u5373\u53EF\u8DF3\u8FC7\u8FD9\u4E00\u6B65\u3002`
     };
   }
   const accounts = Array.isArray(listed.result) ? listed.result : [];
-  if (accounts.length === 1) return { ok: true, id: accounts[0].id };
-  if (accounts.length === 0) {
+  if (!accounts.length) {
     return { ok: false, message: "\u8FD9\u679A token \u4E00\u4E2A\u8D26\u53F7\u90FD\u8BFB\u4E0D\u5230\uFF0C\u591A\u534A\u662F\u6743\u9650\u6CA1\u7ED9\u5168\u6216\u8005\u5DF2\u7ECF\u8FC7\u671F\u3002" };
+  }
+  for (const account of accounts) {
+    const settings = await cf(token, settingsPath(account.id));
+    if (settings.ok) return { ok: true, accountId: account.id, settings: settings.result };
   }
   return {
     ok: false,
-    message: "\u8FD9\u679A token \u80FD\u78B0\u5230\u4E0D\u6B62\u4E00\u4E2A\u8D26\u53F7\uFF0C\u5206\u4E0D\u6E05\u8BE5\u66F4\u65B0\u54EA\u4E2A\u3002\u7ED9 Worker \u52A0\u4E00\u6761 CF_ACCOUNT_ID \u53D8\u91CF\u6307\u660E\u3002"
+    message: `\u5728\u8FD9\u679A token \u80FD\u78B0\u5230\u7684 ${accounts.length} \u4E2A\u8D26\u53F7\u91CC\u90FD\u6CA1\u627E\u5230\u540D\u4E3A ${scriptName} \u7684 Worker\u3002\u8981\u4E48 token \u7684\u6743\u9650\u6CA1\u8986\u76D6\u5230\u5B83\u6240\u5728\u7684\u8D26\u53F7\uFF0C\u8981\u4E48 Worker \u540D\u5B57\u5BF9\u4E0D\u4E0A\uFF08\u53EF\u7528 CF_SCRIPT_NAME \u6307\u5B9A\uFF09\u3002`
   };
 }
 async function fetchLatestBundle() {
@@ -6288,20 +6307,12 @@ async function handleSelfUpdate(request, env) {
       "\u8BA4\u4E0D\u51FA\u8FD9\u4E2A Worker \u53EB\u4EC0\u4E48\uFF08\u591A\u534A\u662F\u5957\u4E86\u4EE3\u7406\u57DF\u540D\uFF09\u3002\u7ED9\u5B83\u52A0\u4E00\u6761 CF_SCRIPT_NAME \u53D8\u91CF\uFF0C\u503C\u586B Worker \u7684\u540D\u5B57\u3002"
     );
   }
-  const account = await resolveAccountId(env, token);
-  if (!account.ok) return fail("ACCOUNT_UNKNOWN", account.message);
+  const located = await locateScript(env, token, scriptName);
+  if (!located.ok) return fail("SCRIPT_NOT_LOCATED", located.message);
+  const account = { id: located.accountId };
+  const settings = { result: located.settings };
   const bundle = await fetchLatestBundle();
   if (!bundle.ok) return fail("BUNDLE_INVALID", bundle.message);
-  const settings = await cf(
-    token,
-    `/accounts/${account.id}/workers/scripts/${encodeURIComponent(scriptName)}/settings`
-  );
-  if (!settings.ok) {
-    return fail(
-      "SETTINGS_UNREADABLE",
-      `\u8BFB\u4E0D\u5230\u8FD9\u4E2A Worker \u73B0\u5728\u7684\u914D\u7F6E\uFF08${settings.detail}\uFF09\u3002\u6CA1\u6709\u8986\u76D6\uFF0C\u5F53\u524D\u7248\u672C\u4E0D\u52A8\u3002`
-    );
-  }
   const rebuilt = rebuildBindings(
     settings.result?.bindings ?? [],
     env
@@ -6341,7 +6352,6 @@ async function handleSelfUpdate(request, env) {
     message: "\u5DF2\u7ECF\u66F4\u65B0\u5230\u6700\u65B0\u7248\u672C\u3002",
     bundleHash: hash,
     bundleBytes: bytes,
-    versionId: uploaded.result?.id,
     scriptName
   };
 }

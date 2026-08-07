@@ -54,7 +54,6 @@ export interface SelfUpdateResult {
   /** 新代码的指纹（sha-256 前 12 位），给前端显示「现在跑的是哪一版」。 */
   bundleHash?: string;
   bundleBytes?: number;
-  versionId?: string;
   scriptName?: string;
 }
 
@@ -120,28 +119,54 @@ export function resolveScriptName(env: SelfUpdateEnv, requestUrl: string): strin
   return name || null;
 }
 
-async function resolveAccountId(
+/**
+ * 找出「我住在哪个账号下」，顺带把这个账号的配置读回来。
+ *
+ * `GET /accounts` 是用户级端点，返回的是这个人名下的**所有**账号，跟 token 限定了哪个账号
+ * 没关系。所以同时有工作号和个人号的人在这儿会拿到好几条，光看列表分不出该更新哪个。
+ * 办法是挨个问一句「你这儿有没有这个 Worker」——能读出配置的那个就是。
+ */
+async function locateScript(
   env: SelfUpdateEnv,
   token: string,
-): Promise<{ ok: true; id: string } | { ok: false; message: string }> {
+  scriptName: string,
+): Promise<{ ok: true; accountId: string; settings: any } | { ok: false; message: string }> {
+  const settingsPath = (accountId: string) =>
+    `/accounts/${accountId}/workers/scripts/${encodeURIComponent(scriptName)}/settings`;
+
   const configured = env.CF_ACCOUNT_ID?.trim();
-  if (configured) return { ok: true, id: configured };
+  if (configured) {
+    const settings = await cf(token, settingsPath(configured));
+    if (!settings.ok) {
+      return {
+        ok: false,
+        message: `在 CF_ACCOUNT_ID 指定的账号里读不到这个 Worker 的配置（${settings.detail}）。`,
+      };
+    }
+    return { ok: true, accountId: configured, settings: settings.result };
+  }
 
   const listed = await cf(token, '/accounts');
   if (!listed.ok) {
     return {
       ok: false,
-      message: `问不到账号 ID（${listed.detail}）。给 Worker 加一条 CF_ACCOUNT_ID 变量即可绕过这一步。`,
+      message: `问不到账号列表（${listed.detail}）。给 Worker 加一条 CF_ACCOUNT_ID 变量即可跳过这一步。`,
     };
   }
   const accounts: any[] = Array.isArray(listed.result) ? listed.result : [];
-  if (accounts.length === 1) return { ok: true, id: accounts[0].id };
-  if (accounts.length === 0) {
+  if (!accounts.length) {
     return { ok: false, message: '这枚 token 一个账号都读不到，多半是权限没给全或者已经过期。' };
+  }
+
+  for (const account of accounts) {
+    const settings = await cf(token, settingsPath(account.id));
+    if (settings.ok) return { ok: true, accountId: account.id, settings: settings.result };
   }
   return {
     ok: false,
-    message: '这枚 token 能碰到不止一个账号，分不清该更新哪个。给 Worker 加一条 CF_ACCOUNT_ID 变量指明。',
+    message:
+      `在这枚 token 能碰到的 ${accounts.length} 个账号里都没找到名为 ${scriptName} 的 Worker。` +
+      '要么 token 的权限没覆盖到它所在的账号，要么 Worker 名字对不上（可用 CF_SCRIPT_NAME 指定）。',
   };
 }
 
@@ -232,24 +257,16 @@ export async function handleSelfUpdate(
     );
   }
 
-  const account = await resolveAccountId(env, token);
-  if (!account.ok) return fail('ACCOUNT_UNKNOWN', account.message);
+  // ② 定位自己住在哪个账号下，同时把现有配置读回来：binding、兼容性日期都照搬，
+  //    免得自更新顺手改了运行时行为。
+  const located = await locateScript(env, token, scriptName);
+  if (!located.ok) return fail('SCRIPT_NOT_LOCATED', located.message);
+  const account = { id: located.accountId };
+  const settings = { result: located.settings };
 
-  // ② 先把新代码拿到手并验明正身，再碰线上的东西。
+  // ③ 新代码先拿到手并验明正身，再碰线上的东西。
   const bundle = await fetchLatestBundle();
   if (!bundle.ok) return fail('BUNDLE_INVALID', bundle.message);
-
-  // ③ 读现有配置：binding、兼容性日期这些都照搬，避免自更新顺手改了运行时行为。
-  const settings = await cf(
-    token,
-    `/accounts/${account.id}/workers/scripts/${encodeURIComponent(scriptName)}/settings`,
-  );
-  if (!settings.ok) {
-    return fail(
-      'SETTINGS_UNREADABLE',
-      `读不到这个 Worker 现在的配置（${settings.detail}）。没有覆盖，当前版本不动。`,
-    );
-  }
 
   // 密钥的名字要到运行时才知道（读回来的 binding 列表说了算），所以这里按名取值，
   // 类型上就只能当成一袋 key-value 看。
@@ -300,7 +317,6 @@ export async function handleSelfUpdate(
     message: '已经更新到最新版本。',
     bundleHash: hash,
     bundleBytes: bytes,
-    versionId: uploaded.result?.id,
     scriptName,
   };
 }
