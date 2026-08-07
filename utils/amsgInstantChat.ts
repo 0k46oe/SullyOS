@@ -5,12 +5,14 @@
  * 「正在输入…」→ 云端跑完把回复推回来 → 收件箱同一条管线入库、指示灯灭。
  * 客户端发完那一刻就自由了，切后台、杀进程都行。
  *
- * 这份模块管四件事：
+ * 这份模块管五件事：
  *   1. 开关（唯一门槛在设置页，运行时只读这一份存下来的配置）；
  *   2. 「这一轮还欠着一条回复」的待收记录——它得**扛得住重启**，不然重开 App
  *      指示灯就没了，用户以为消息丢了；
- *   3. 推送丢了的兜底：拉云端 outbox，把没收到的塞回收件箱走原路入库；
- *   4. 收尾：云端点名说这条任务已经失败（或那行已经没了）时，先拉一次 outbox，
+ *   3. 「这一轮还欠着哪几条作废回执」的台账：回执随 chat 段上了云，但要等回复真的
+ *      落库才销账，云端整轮失败时它们得退回未告知、下轮重注；
+ *   4. 推送丢了的兜底：拉云端 outbox，把没收到的塞回收件箱走原路入库；
+ *   5. 收尾：云端点名说这条任务已经失败（或那行已经没了）时，先拉一次 outbox，
  *      还是没有才算这一轮失败、允许重发。等了多久本身不构成结论。
  *
  * 刻意不在这里 flush 收件箱：flushInboxToChat 住在 activeMsgRuntime，那边反过来要用
@@ -116,23 +118,146 @@ export const clearInstantChatPending = (charId: string): boolean => {
   return true;
 };
 
-// ─── 开关 ───
+// ─── 随这一轮上云的作废回执 ───
 
 /**
- * 即时对话此刻走不走得通：设置页开了、而且 Worker 地址填着。
+ * 防穿帮闸作废掉的任务，要在下一轮聊天里告诉角色一声（「那条任务没了」）。这些回执
+ * 随即时对话的 chat 段冻进云端那一轮，但**回复真的落库之前不能销账**：云端整轮失败
+ * （模型空输出被判 skip-push、fire 重试打光）时回执不会重来，角色永远不知道自己许下
+ * 的那件事已经作废，既不会续期也不会解释。
  *
- * 版本门槛（worker 支不支持这个端点）只在设置页那一处探测——开发期规矩是门槛只留一处，
- * 不做逐调用 capability 预检。这里再探一次的话，每发一条消息都要多一次网络往返，
- * 而且探测失败时到底算「不支持」还是「网络抖了一下」没有正确答案。
+ * 所以这里只是个「这一轮欠着哪几条回执」的台账，落 localStorage（跨得过刷新，
+ * 云端那一轮本来就可能横跨一次重启）。真正销账（写 notifiedAt）由落库那一侧点名调
+ * settleInstantChatExpiredNotices；判定失败走 discard，回执退回未告知、下轮重注。
  */
-export const isInstantChatReady = async (): Promise<boolean> => {
+export const AMSG_INSTANT_CHAT_STAGED_NOTICES_LS_KEY = 'amsg2_instant_chat_staged_notices';
+
+interface StagedNotices {
+  charId: string;
+  /** 这些回执跟着云端哪一轮走的。销账时对不上就不动——那是上一轮的账。 */
+  uuid: string;
+  ids: string[];
+}
+
+type StagedNoticesMap = Record<string, StagedNotices>;
+
+const readStagedNotices = (): StagedNoticesMap => {
   try {
-    const config = await ActiveMsgStore.getGlobalConfig();
-    return !!config.instantChatEnabled && !!config.workerUrl?.trim();
+    const parsed = JSON.parse(localStorage.getItem(AMSG_INSTANT_CHAT_STAGED_NOTICES_LS_KEY) || '{}');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const result: StagedNoticesMap = {};
+    for (const [charId, value] of Object.entries(parsed as Record<string, unknown>)) {
+      const record = value as Partial<StagedNotices> | null;
+      if (record && typeof record.uuid === 'string' && Array.isArray(record.ids)) {
+        const ids = record.ids.filter((id): id is string => typeof id === 'string' && !!id);
+        if (ids.length) result[charId] = { charId, uuid: record.uuid, ids };
+      }
+    }
+    return result;
   } catch {
-    return false;
+    return {};
   }
 };
+
+const writeStagedNotices = (map: StagedNoticesMap) => {
+  // 写不进去（存储满 / 隐私模式）就当这一轮没记：回执会在下一轮重新注入，不会丢。
+  try {
+    if (Object.keys(map).length === 0) localStorage.removeItem(AMSG_INSTANT_CHAT_STAGED_NOTICES_LS_KEY);
+    else localStorage.setItem(AMSG_INSTANT_CHAT_STAGED_NOTICES_LS_KEY, JSON.stringify(map));
+  } catch { /* 见上 */ }
+};
+
+/**
+ * 记一笔「这几条回执跟着 uuid 这一轮上云了，还没销账」。同角色只留最新一轮：
+ * 连发时新那一轮会把老回执连同新的一起重新注入（它们还没被标记告知过）。
+ */
+export const stageInstantChatExpiredNotices = (charId: string, uuid: string, ids: string[]): void => {
+  const kept = ids.filter(Boolean);
+  const map = readStagedNotices();
+  if (kept.length === 0) delete map[charId];
+  else map[charId] = { charId, uuid, ids: kept };
+  writeStagedNotices(map);
+};
+
+/** 这个角色此刻欠着哪一轮的哪几条回执（没有 = null）。排查和测试用。 */
+export const getStagedInstantChatExpiredNotices = (charId: string): StagedNotices | null =>
+  readStagedNotices()[charId] ?? null;
+
+/** 从台账里取出并删掉这一轮的记录；uuid 对不上（已经是新一轮了）返回空数组、不动记录。 */
+const popStagedNotices = (charId: string, uuid?: string): string[] => {
+  const map = readStagedNotices();
+  const record = map[charId];
+  if (!record) return [];
+  if (uuid && record.uuid !== uuid) return [];
+  delete map[charId];
+  writeStagedNotices(map);
+  return record.ids;
+};
+
+/**
+ * 这一轮的回复真的落库了 → 把随它上云的作废回执销账（写 notifiedAt，下轮不再注入）。
+ *
+ * **由落库那一侧调**：即时对话的回复是走推送、经收件箱冲刷管线进 DB 的，销账时机只有
+ * 那边知道（activeMsgRuntime 认末段到齐、销掉待收记录的同一处）。uuid 传这一轮的
+ * taskUuid，对不上就什么都不做——那是上一轮的账，销掉等于把新一轮的回执也吞了。
+ *
+ * 返回真正销掉的 id（没有可销的返回空数组）。写库失败只 warn：台账已经取走，
+ * 最坏情况是这几条回执下轮再说一遍，比反复销不掉卡住整条路强。
+ */
+export const settleInstantChatExpiredNotices = async (charId: string, uuid?: string): Promise<string[]> => {
+  const ids = popStagedNotices(charId, uuid);
+  if (ids.length === 0) return [];
+  try {
+    await ActiveMsgStore.markExpiredNoticesNotified(charId, ids);
+  } catch (error) {
+    console.warn(`${HEADER} 作废回执销账失败（下一轮会再说一遍）`, { charId, ids, error });
+  }
+  return ids;
+};
+
+/** 这一轮没成 → 台账作废、回执退回「未告知」，下一轮重新注入（回执不丢）。 */
+export const discardInstantChatExpiredNotices = (charId: string, uuid?: string): string[] =>
+  popStagedNotices(charId, uuid);
+
+// ─── 开关 ───
+
+/** ready=false 时卡在哪一道。config-unreadable 是异常，不是「用户没开」。 */
+export type InstantChatReadinessReason = 'disabled' | 'no-worker-url' | 'config-unreadable';
+
+export interface InstantChatReadiness {
+  ready: boolean;
+  reason?: InstantChatReadinessReason;
+}
+
+/**
+ * 即时对话此刻走不走得通，外加「走不通是因为什么」。
+ *
+ * 门槛只有两道：设置页开了、Worker 地址填着。版本门槛（worker 支不支持这个端点）只在
+ * 设置页那一处探测——开发期规矩是门槛只留一处，不做逐调用 capability 预检。这里再探
+ * 一次的话，每发一条消息都要多一次网络往返，而且探测失败时到底算「不支持」还是「网络
+ * 抖了一下」没有正确答案。
+ *
+ * 配置读不出来（IndexedDB 被别的标签页 versionchange 卡住、iOS 存储压力…）单独成一档：
+ * 它不等于「用户没开」。当成没开的话这一轮会悄悄退回本地直连生成——用户按完发送随手
+ * 锁屏，本地 fetch 被系统掐掉，回来时既没有回复也没有报错，设置页还写着「已开启」。
+ * 所以这里就地 warn 一声，调用方再按这个 reason 决定要不要留一条 trace。
+ */
+export const resolveInstantChatReadiness = async (): Promise<InstantChatReadiness> => {
+  let config: Awaited<ReturnType<typeof ActiveMsgStore.getGlobalConfig>>;
+  try {
+    config = await ActiveMsgStore.getGlobalConfig();
+  } catch (error) {
+    console.warn(`${HEADER} 全局配置读不出来，这一轮判断不了即时对话开没开（按走不通处理，但这不是「没开」）`, error);
+    return { ready: false, reason: 'config-unreadable' };
+  }
+  if (!config.instantChatEnabled) return { ready: false, reason: 'disabled' };
+  if (!config.workerUrl?.trim()) return { ready: false, reason: 'no-worker-url' };
+  return { ready: true };
+};
+
+/** 只关心「走不走得通」的调用点用这个（设置页的互斥门）。要区分原因走上面那个。 */
+export const isInstantChatReady = async (): Promise<boolean> =>
+  (await resolveInstantChatReadiness()).ready;
 
 // ─── 发这一轮 ───
 
@@ -414,6 +539,9 @@ export const failInstantChatPending = async (
 ): Promise<void> => {
   if (getInstantChatPending(charId)?.uuid !== uuid) return;
   if (!clearInstantChatPending(charId)) return;
+  // 这一轮随 chat 段上云的作废回执跟着作废：没销账 = 还是「未告知」，下一轮会重新
+  // 注入。销掉的话角色永远不知道那条任务被作废过，聊天里许下的承诺就这么没了。
+  discardInstantChatExpiredNotices(charId, uuid);
   // 「情绪更新中」那盏灯也在这里熄。
   //
   // 平时它的熄灭信号搭在最后一条回复的推送上（metadata.amsgEmotionDone，见

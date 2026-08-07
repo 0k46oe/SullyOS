@@ -60,12 +60,35 @@ const branchSrc = () => sliceSrc(chatAiSrc, '即时对话分支', INSTANT_CHAT_B
 const autoTtsSrc = () => sliceSrc(chatSrc, '语音自动合成', '// --- Auto-TTS: when chatVoiceEnabled', 'const canReroll =');
 
 describe('useChatAI 的分流接缝', () => {
-  it('MCP 不在排除名单里（worker 会跑后台 MCP；排掉它 = 配了 MCP 的人永远静默走本地）', () => {
+  it('MCP 本身不在排除名单里（worker 会跑后台 MCP；整片排掉 = 配了 MCP 的人永远静默走本地）', () => {
     // e2e 实测踩过：只要全局有一台 enabled 的 MCP 服务器，mcpChatActive 对所有角色为真，
-    // 排除它的话即时对话开关亮着却永远走本地生成，用户查无可查。
+    // 拿它当排除条件的话，即时对话开关亮着却永远走本地生成，用户查无可查。
     // 判定挪到构建 payload 之前之后，这条要连路由那一段一起看。
+    // （地址 worker 够不着的那几台是另一回事，见下面那条。）
     expect(routingSrc()).not.toContain('mcpChatActive');
     expect(branchSrc()).not.toContain('mcpChatActive');
+  });
+
+  it('本机/内网地址的 MCP 服务器否决这一轮上云（上云会让角色掉工具）', () => {
+    // 上云那一轮前端不注入 MCP 说明块（chatRequestPayload 的 timelyByWorker 分支），
+    // 而上云清单 collectMcpFireServers 恰好把 localhost / 私网地址过滤掉了——两边都不说，
+    // 角色这一轮彻底不知道自己有工具，设置页却还显示 MCP 已连接、聊天界面毫无异常。
+    // 判据是「这一轮上云会掉能力就别上云」，所以它得是个 veto、且带 char.id（服务器可绑角色）。
+    const routing = routingSrc();
+    expect(routing).toContain('hasWorkerUnreachableMcpServer(char.id)');
+    expect(routing).toContain("'mcp-worker-unreachable'");
+    // 否决也要留痕：走的是下面那条统一的 instant-chat-veto trace（reason 带着它）。
+    expect(routing).toMatch(/instantChatVeto \?\? 'instant-push-configured'/);
+  });
+
+  it('全局配置读不出来单独留一条 trace（它不是「用户没开」）', () => {
+    // 读失败时 instantChatOn 天然为假，veto 那条 trace 的条件够不到它。不单独留痕的话，
+    // 这一轮悄悄退回本地直连生成，用户按完发送锁屏就什么都收不到，观察窗里还查无此事。
+    const routing = routingSrc();
+    expect(routing).toContain('resolveInstantChatReadiness');
+    expect(routing).toContain("reason === 'config-unreadable'");
+    expect(routing).toContain("event: 'instant-chat-config-unreadable'");
+    // 跟 veto 一样只报不拦（那条 return 的守卫在下面「留痕只此一处」那条里）。
   });
 
   it('上云的判定在构建 prompt 之前就定下来，并作为 timelyByWorker 交给 payload', () => {
@@ -152,9 +175,14 @@ describe('useChatAI 的分流接缝', () => {
     expect(branchSrc()).toMatch(/temperature:\s*baseReqBody\.temperature/);
   });
 
-  it('作废回执随受理销账：markExpiredNoticesNotified 只在 202 之后调', () => {
-    // 回执随 chat 段冻上云、受理即告知；失败路径不销，下轮重注（回执不丢）。
-    expect(branchSrc()).toMatch(/instantChatResult\.ok[\s\S]{0,600}markExpiredNoticesNotified/);
+  it('作废回执在 202 之后只记账不销账（受理 ≠ 角色读到过）', () => {
+    // 202 只说明云端收下了。那一轮照样可能空输出被判 skip-push、或 fire 重试打光标 failed，
+    // 回执不会重新注入——用户只收到「[即时对话没能完成…]」并重发，而重发那一轮已经没有
+    // 回执可注入，角色永远不知道那条任务被作废过，聊天里许下的承诺就这么消失。
+    // 正确时机是回复真的落库之后（跟本地路径同一口径），所以这里只落台账。
+    const branch = branchSrc();
+    expect(branch).not.toContain('markExpiredNoticesNotified');
+    expect(branch).toMatch(/instantChatResult\.ok[\s\S]{0,800}stageInstantChatExpiredNotices/);
   });
 
   it('失败时不悄悄回本地生成：分支里没有本地 LLM 请求，走完就 return', () => {

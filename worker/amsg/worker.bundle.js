@@ -5310,7 +5310,6 @@ var describeTaskMode = (task) => {
   if (task.mode === "prompted") return `\u63D0\u793A\u65B9\u5411\u300C${task.promptHint || ""}\u300D`;
   return task.promptHint ? `\u81EA\u52A8\uFF08\u7075\u611F\uFF1A${task.promptHint}\uFF09` : "\u81EA\u52A8";
 };
-var findTaskByShortId = (tasks, shortId) => tasks.find((t) => shortTaskId(t.taskUuid) === shortId || t.taskUuid === shortId);
 var isPendingTask = (task, nowMs) => {
   if (task.status !== "scheduled") return false;
   if (task.recurrenceType !== "none") return true;
@@ -5530,13 +5529,41 @@ var parseFireScheduleArgs = (args, nowMs, tz) => {
     expirePolicy
   };
 };
-var resolveFireTargetTask = (tasks, taskIdArg, nowMs) => {
+var fnv1a32Hex = (input) => {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+};
+var buildSelfScheduleUuid = (charId, occurrenceMs, seq) => `${fnv1a32Hex(`${charId}|${occurrenceMs}|${seq}`)}-amsgself-${charId}-${occurrenceMs}-${seq}`;
+var matchTasksByTaskId = (tasks, taskId) => {
+  const exact = tasks.find((t) => t.taskUuid === taskId);
+  if (exact) return [exact];
+  return tasks.filter((t) => shortTaskId(t.taskUuid) === taskId);
+};
+var describeTaskWhen = (task, nowMs, tz) => formatFireTimeShort(
+  currentOccurrenceMs(task, nowMs) ?? new Date(task.firstSendTime).getTime(),
+  tz
+);
+var resolveFireTargetTask = (tasks, taskIdArg, nowMs, tz) => {
   if (tasks.length === 0) {
     return { ok: false, reason: "no_tasks", message: "\u4F60\u73B0\u5728\u6CA1\u6709\u6302\u7740\u4EFB\u4F55\u6392\u7A0B\u4EFB\u52A1\u3002" };
   }
   if (typeof taskIdArg === "string" && taskIdArg.trim()) {
-    const task = findTaskByShortId(tasks, taskIdArg.trim());
-    return task ? { task } : { ok: false, reason: "task_not_found", message: `\u6CA1\u6709\u627E\u5230\u77ED id \u4E3A ${taskIdArg.trim()} \u7684\u4EFB\u52A1\u2014\u2014\u77ED id \u5728\u6392\u7A0B\u6E05\u5355\u91CC\uFF0C\u7167\u7740\u90A3\u91CC\u7684\u5199\u3002` };
+    const taskId = taskIdArg.trim();
+    const hits = matchTasksByTaskId(tasks, taskId);
+    if (hits.length === 1) return { task: hits[0] };
+    if (hits.length === 0) {
+      return { ok: false, reason: "task_not_found", message: `\u6CA1\u6709\u627E\u5230\u77ED id \u4E3A ${taskId} \u7684\u4EFB\u52A1\u2014\u2014\u77ED id \u5728\u6392\u7A0B\u6E05\u5355\u91CC\uFF0C\u7167\u7740\u90A3\u91CC\u7684\u5199\u3002` };
+    }
+    const candidates = hits.map((t) => `${describeTaskWhen(t, nowMs, tz)} \u90A3\u6761\u7684\u5B8C\u6574 id \u662F ${t.taskUuid}`).join("\uFF1B");
+    return {
+      ok: false,
+      reason: "ambiguous_task",
+      message: `\u77ED id ${taskId} \u540C\u65F6\u5BF9\u5E94 ${hits.length} \u4E2A\u4EFB\u52A1\uFF0C\u8FD9\u4E48\u5199\u4F1A\u52A8\u9519\u4EBA\u3002\u6311\u4E00\u4E2A\uFF0C\u628A\u5B8C\u6574 id \u586B\u8FDB task_id \u518D\u6765\u4E00\u6B21\uFF1A${candidates}\u3002`
+    };
   }
   const pending = tasks.filter((t) => isPendingTask(t, nowMs));
   if (pending.length === 1) return { task: pending[0] };
@@ -10012,7 +10039,7 @@ var amsgFireSettled = async (info) => {
       at: Date.now(),
       text,
       // 即时对话是在答用户刚说的话——列进自述块保持连续性，但不占「主动连发」的额度
-      // （countUnansweredSends 只数没这个标记的条目）。
+      // （带这个标记的条目不会让 selfLog.unansweredSends 加一）。
       ...stash.instant ? { reply: true } : {}
     });
     if (next !== stash.selfLog) {
@@ -10062,6 +10089,16 @@ var attachScheduledTasks = (pushPayloads, tasks) => {
     metadata: { ...payload.metadata ?? {}, amsgSelfScheduled: tasks }
   } : payload);
 };
+var TASK_MUTATING_TOOLS = /* @__PURE__ */ new Set([
+  AMSG_FIRE_SCHEDULE_TOOL,
+  AMSG_FIRE_CANCEL_TOOL,
+  AMSG_FIRE_RENEW_TOOL
+]);
+var toolDidSomething = (name, result) => {
+  if (!result || typeof result !== "object") return true;
+  if (TASK_MUTATING_TOOLS.has(name)) return result.ok !== false;
+  return !neverRan(result);
+};
 var condenseToolTrace = (calls) => {
   const counts = /* @__PURE__ */ new Map();
   for (const call of calls) {
@@ -10069,6 +10106,20 @@ var condenseToolTrace = (calls) => {
     counts.set(call.name, (counts.get(call.name) ?? 0) + 1);
   }
   return [...counts].map(([name, count]) => ({ name, count }));
+};
+var EMOTION_EVAL_RIDE_ALONG_MS = 1e4;
+var EMOTION_EVAL_LATE_REASON = "\u60C5\u7EEA\u8BC4\u4F30\u6CA1\u8D76\u4E0A\u8FD9\u6761\u56DE\u590D\uFF08\u526F API \u592A\u6162\uFF09\uFF0C\u8FD9\u4E00\u8F6E\u5148\u4E0D\u66F4\u65B0";
+var raceEmotionEval = (promise) => {
+  let timer;
+  const late = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      console.warn("[amsg:emotion] \u8BC4\u4F30\u6CA1\u8D76\u4E0A\u8FD9\u6761\u56DE\u590D\uFF0C\u5148\u628A\u8BDD\u53D1\u51FA\u53BB\uFF08\u8FD9\u4E00\u8F6E\u4E0D\u66F4\u65B0\u60C5\u7EEA\uFF09");
+      resolve(null);
+    }, EMOTION_EVAL_RIDE_ALONG_MS);
+  });
+  return Promise.race([promise, late]).finally(() => {
+    if (timer !== void 0) clearTimeout(timer);
+  });
 };
 var runFireScheduleTool = async (stash, scheduleTask, args, nowMs) => {
   if (typeof scheduleTask !== "function") {
@@ -10101,7 +10152,7 @@ var runFireScheduleTool = async (stash, scheduleTask, args, nowMs) => {
   const parsed = parseFireScheduleArgs(args, nowMs, stash.tz);
   if ("ok" in parsed) return parsed;
   const seq = stash.scheduledTasks.length;
-  const uuid = `amsgself-${stash.charId}-${stash.occurrenceMs}-${seq}`;
+  const uuid = buildSelfScheduleUuid(stash.charId, stash.occurrenceMs, seq);
   const clientTaskId = `${uuid}-c`;
   let result;
   try {
@@ -10185,7 +10236,7 @@ var runFireCancelTool = async (stash, cancelTask, args, nowMs) => {
   if (typeof cancelTask !== "function") {
     return { ok: false, reason: "not_supported", message: "\u5F53\u524D\u540E\u53F0\u7248\u672C\u8FD8\u4E0D\u652F\u6301\u53D6\u6D88\u4EFB\u52A1\uFF0C\u5148\u5F53\u5B83\u4F1A\u7167\u5E38\u54CD\uFF0C\u628A\u8981\u8BF4\u7684\u8BDD\u8BF4\u6E05\u695A\u3002" };
   }
-  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id, nowMs);
+  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id, nowMs, stash.tz);
   if ("ok" in resolved) return resolved;
   const target = resolved.task;
   let result;
@@ -10207,7 +10258,7 @@ var runFireRenewTool = async (stash, fireCtx, args, nowMs) => {
   if (typeof fireCtx.renewTask !== "function") {
     return { ok: false, reason: "not_supported", message: "\u5F53\u524D\u540E\u53F0\u7248\u672C\u8FD8\u4E0D\u652F\u6301\u6539\u671F\uFF0C\u8981\u4E48\u53D6\u6D88\u91CD\u6392\uFF0C\u8981\u4E48\u5148\u5F53\u5B83\u4F1A\u7167\u5E38\u54CD\u3002" };
   }
-  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id, nowMs);
+  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id, nowMs, stash.tz);
   if ("ok" in resolved) return resolved;
   const target = resolved.task;
   if (target.mode === "fixed") {
@@ -10637,10 +10688,11 @@ var amsgHooks = {
           }
         }
         if (stash.emotionEvalPromise) {
-          const { raw: evalText, error: evalError } = await stash.emotionEvalPromise;
+          const outcome = await raceEmotionEval(stash.emotionEvalPromise);
           lastMeta.amsgEmotionDone = true;
-          if (evalText) lastMeta.amsgEmotionUpdate = evalText;
-          else if (evalError) lastMeta.amsgEmotionError = evalError;
+          if (outcome === null) lastMeta.amsgEmotionError = EMOTION_EVAL_LATE_REASON;
+          else if (outcome.raw) lastMeta.amsgEmotionUpdate = outcome.raw;
+          else if (outcome.error) lastMeta.amsgEmotionError = outcome.error;
         }
         if (Object.keys(lastMeta).length > 0) {
           payloads = attachMetaAt(payloads, payloads.length - 1, lastMeta);
@@ -10713,7 +10765,7 @@ var amsgHooks = {
           continue;
         }
         const result = name === AMSG_FIRE_SCHEDULE_TOOL ? await runFireScheduleTool(stash, ctx.scheduleTask, args, Date.now()) : name === AMSG_FIRE_CANCEL_TOOL ? await runFireCancelTool(stash, ctx.cancelTask, args, Date.now()) : name === AMSG_FIRE_RENEW_TOOL ? await runFireRenewTool(stash, ctx, args, Date.now()) : name.startsWith(MCP_FIRE_NAME_PREFIX) ? await runMcpFireTool(stash, name, args) : await dispatchAgenticTool(name, args, stash.toolCtx);
-        stash.session.toolCalls.push({ name, fingerprint, ran: !neverRan(result) });
+        stash.session.toolCalls.push({ name, fingerprint, ran: toolDidSomething(name, result) });
         content = buildToolResultMessage({ name, result, history: stash.session.toolCalls });
         console.log("[amsg:agentic]", { type: "tool_done", sessionId: ctx.sessionId, tool: name });
       } catch (error) {
@@ -10965,6 +11017,7 @@ var src_default = {
   }
 };
 export {
+  EMOTION_EVAL_RIDE_ALONG_MS,
   amsgFireSettled,
   amsgHooks,
   amsgReasoningKey,

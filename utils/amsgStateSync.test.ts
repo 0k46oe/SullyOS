@@ -16,6 +16,13 @@ vi.mock('./activeMsgClient', () => ({
     registerPushSubscription: vi.fn().mockResolvedValue(undefined),
     deleteRemotePushSubscription: vi.fn().mockResolvedValue(undefined),
   },
+  // 「欠着即时对话回复」的判定本体住在 activeMsgClient（排程那条路写 fire_pack 前问的
+  // 是同一个）。整个 client 在这儿被换成了假的，所以照它的定义把两个原始信号接回来，
+  // 用例照旧拿 setInstantChatPending 驱动。判定本身怎么写由 activeMsgClient.test.ts 钉，
+  // 这里钉的是「冲刷之前会去问它」。
+  // 工厂比 import 先跑，这两个 binding 那会儿还没初始化——所以只能在调用时才解引用。
+  owesInstantChatReply: (charId: string) =>
+    !!getInstantChatPending(charId) || isInstantChatSendInFlight(charId),
 }));
 vi.mock('./activeMsgStore', () => ({
   ActiveMsgStore: { getGlobalConfig: vi.fn() },
@@ -41,6 +48,8 @@ import { CHAT_PRESENCE_HEARTBEAT_MS } from './amsgChatPresence';
 import {
   AMSG_INSTANT_CHAT_PENDING_LS_KEY,
   clearInstantChatPending,
+  getInstantChatPending,
+  isInstantChatSendInFlight,
   setInstantChatPending,
 } from './amsgInstantChat';
 import type { CharacterProfile } from '../types';
@@ -569,6 +578,23 @@ describe('清空 Worker 地址前的收尾', () => {
 
     expect(result.listed).toBe(false);
     expect(ActiveMsgClient.cancelTask).not.toHaveBeenCalled();
+  });
+
+  // 这一条刻意跟角色级的 ActiveMsgClient.cancelAllTasksForChar 反着来：那边放过即时对话的
+  // 行（关掉角色的 2.0 开关不该掐掉用户正等着的那轮聊天），这边两个调用方要的都是
+  // 「我不跟这台 worker 来往了」——地址一清，回复推回来这边也接不住；云端数据一清，
+  // 角色上下文没了，那一跳到点也只会硬失败，留着只是多一条要等 7 天才自动消失的失败行。
+  it('正在跑的即时对话也一并取消（这里的「全部」是字面意思）', async () => {
+    (ActiveMsgClient.listAllTasks as any).mockResolvedValue([
+      { uuid: 'u-scheduled', messageSubtype: 'chat' },
+      { uuid: 'u-instant', messageSubtype: 'instant-chat' },
+    ]);
+
+    const result = await cancelAllRemoteAmsgTasks();
+
+    expect((ActiveMsgClient.cancelTask as any).mock.calls.map((call: unknown[]) => call[0]))
+      .toEqual(['u-scheduled', 'u-instant']);
+    expect(result).toEqual({ total: 2, failed: 0, listed: true });
   });
 });
 

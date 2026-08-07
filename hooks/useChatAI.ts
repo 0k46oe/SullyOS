@@ -23,7 +23,7 @@ import { MCD_PROPOSE_TOOL, autoFixProposalCodesByName } from '../utils/mcdToolBr
 // 瑞幸: 与麦当劳同构, 只读 LuckinMiniApp 快照注入 + propose_cart_items UI 钩子工具
 import { LUCKIN_PROPOSE_TOOL, autoFixProposalCodesByName as autoFixLuckinProposalCodesByName, fetchOpenAIToolsForLuckin, inferCardKind as inferLuckinCardKind } from '../utils/luckinToolBridge';
 import { callLuckinTool } from '../utils/luckinMcpClient';
-import { callMcpTool, getMcpUseNativeTools } from '../utils/mcpClient';
+import { callMcpTool, getMcpUseNativeTools, hasWorkerUnreachableMcpServer } from '../utils/mcpClient';
 import { buildMcpOpenAITools, buildMcpRejectedToolsFallbackBody, buildMcpTextFallbackBody, extractTextFakedMcpCalls, formatMcpToolResult, sanitizeMcpLeadInText, shouldRetryMcpWithoutTools, stripTextFakedMcpCalls, type FakedMcpCall } from '../utils/mcpToolBridge';
 import { buildToolResultMessage, normalizeToolCallsForCompat } from '../utils/toolCallCompat';
 import { buildChatRequestPayload } from '../utils/chatRequestPayload';
@@ -45,7 +45,7 @@ import { getLastRealUserMessageAt } from '../utils/amsg2ExpireGuard';
 import { getPendingTasks, hasActiveAiTask, isAmsg2EnabledForChar } from '../utils/amsg2Tasks';
 import { buildAmsg2NoticesText, buildAmsg2TaskContextText, collectAmsg2TaskContext } from '../utils/amsg2TaskContext';
 import { resolveCharTimeZone } from '../utils/timezone';
-import { getInstantChatPending, isInstantChatReady, sendInstantChatTurn } from '../utils/amsgInstantChat';
+import { getInstantChatPending, resolveInstantChatReadiness, sendInstantChatTurn, stageInstantChatExpiredNotices } from '../utils/amsgInstantChat';
 // worker 模块的常量叶子（零运行时依赖，前端引它不带进 worker 环境）：
 // 云端 fire 的总时长上限，安全网超时从它推导，worker 调预算时前端自动跟上。
 import { INSTANT_TOTAL_TIMEOUT_MS } from '../worker/amsg/src/instantChat';
@@ -832,29 +832,54 @@ export const useChatAI = ({
             // 的 prompt，最后却交给了 IP 或落回本地」——两个钟的问题原样回来。
             const instantPushConfigured = isInstantConfigReady();
             const luckinChatOn = !!luckinChatRef?.current?.active;
+            // 本机 / 内网的 MCP 服务器（docs/mcp-client.md 教用户填的 http://localhost:18061
+            // 就是这一类）：上云那一轮前端不注入 MCP 说明块，而 worker 从 CF 那头连不上这类
+            // 地址、上云清单里压根没有它——两边都不说，角色这一轮彻底不知道自己有工具。
+            // 判据就一句话：这一轮上云会让角色掉能力，那就别上云。留在本地跑，工具照常用。
+            // （地址够得着的服务器不受影响，照常上云，worker 自己跑后台 MCP。）
+            const mcpWorkerUnreachable = hasWorkerUnreachableMcpServer(char.id);
             const instantChatVeto: string | null = luckinChatOn ? 'luckin-chat'
                 : mcdMiniOpen ? 'mcd'
-                    : luckinMiniOpen ? 'luckin' : null;
-            const instantChatOn = await isInstantChatReady();
+                    : luckinMiniOpen ? 'luckin'
+                        : mcpWorkerUnreachable ? 'mcp-worker-unreachable' : null;
+            const instantChatReadiness = await resolveInstantChatReadiness();
+            const instantChatOn = instantChatReadiness.ready;
             const instantChatRoute = instantChatOn && !instantChatVeto && !instantPushConfigured;
-            // 「即时对话开着、这一轮却没上云」的所有情形都在这一处留痕，两种原因去向不同：
+            // 「即时对话开着、这一轮却没上云」的所有情形都在这一处留痕，三种原因去向不同：
             //   · 点单流程否决：瑞幸/麦当劳是客户端交互式循环（选城市、确认单），云端接不了
             //     手，这一轮留在本地跑是对的；
+            //   · MCP 地址 worker 够不着：同上，留在本地才有工具（见上面那段）；
             //   · IP 配置也还在（脏配置）：这一轮交给下面的 Instant Push 分支，它也不接的话
             //     （比如配了 MCP，在它的排除名单里）就一路落回本地。
-            // 两个原因同时成立时报点单那个——它更具体，也更可能是用户真正想问的。
+            // 几个原因同时成立时报最前面那个——越靠前越具体，也更可能是用户真正想问的。
             // 不留痕的话，用户看到的是「开关亮着、消息照常出来」，查无可查——静默分流那个坑
             // 就是这么来的。这里只报不拦：拦不拦已经由 instantChatRoute 说了算。
             if (instantChatOn && !instantChatRoute) {
                 const skipReason = instantChatVeto ?? 'instant-push-configured';
-                console.warn(instantChatVeto
-                    ? `[AmsgInstantChat] 这一轮没上云（${instantChatVeto} 点单流程需要客户端交互），本地生成`
-                    : '[AmsgInstantChat] 这一轮没走即时对话（Instant Push 配置仍在，脏配置）：交给 Instant Push，它也不接就落回本地');
+                console.warn(
+                    skipReason === 'mcp-worker-unreachable'
+                        ? '[AmsgInstantChat] 这一轮没上云（有 MCP 服务器填的是本机/内网地址，worker 够不着），本地生成，工具照常可用'
+                        : instantChatVeto
+                            ? `[AmsgInstantChat] 这一轮没上云（${instantChatVeto} 点单流程需要客户端交互），本地生成`
+                            : '[AmsgInstantChat] 这一轮没走即时对话（Instant Push 配置仍在，脏配置）：交给 Instant Push，它也不接就落回本地',
+                );
                 appendInstantTraceEntry({
                     ts: new Date().toISOString(),
                     event: 'instant-chat-veto',
                     charId: char.id,
                     reason: skipReason,
+                });
+            } else if (instantChatReadiness.reason === 'config-unreadable') {
+                // 配置根本没读出来（IndexedDB 被别的标签页 versionchange 卡住 / iOS 存储压力）。
+                // 这不是「用户没开」：开关很可能开着，只是这一刻问不到，于是这一轮悄悄退回本地
+                // 直连生成——用户按完发送随手锁屏，本地 fetch 被系统掐掉，回来时既没有回复也没
+                // 有报错，设置页还写着「已开启」。上面那条 trace 的条件（instantChatOn）在这里
+                // 天然为假，所以单独留一条，别让这种情形在观察窗里查无此事。
+                console.warn('[AmsgInstantChat] 这一轮没走即时对话：全局配置读不出来，开没开都不知道，按本地生成继续');
+                appendInstantTraceEntry({
+                    ts: new Date().toISOString(),
+                    event: 'instant-chat-config-unreadable',
+                    charId: char.id,
                 });
             }
 
@@ -1306,11 +1331,14 @@ export const useChatAI = ({
                 if (instantChatResult.ok) {
                     // 这次 POST 已经把权威的那份 fire_pack 传上去了，收尾不必再打脏重传一遍。
                     instantChatAccepted = true;
-                    // 回执已随 chat 段冻进云端，worker 到点（含它自己的重试）都会带着它——
-                    // 受理即算告知。极小概率云端整轮失败时这份回执随之作罢：那条路用户会
-                    // 收到明确的失败说明并重发，比失败后下一轮把陈年回执再端出来强。
-                    if (amsg2ExpiredIds.length) {
-                        void ActiveMsgStore.markExpiredNoticesNotified(char.id, amsg2ExpiredIds);
+                    // 202 只说明云端收下了，不说明角色真的读到过这些回执：那一轮可能空输出被
+                    // 判 skip-push，也可能 fire 重试打光标 failed。所以这里只记账不销账，等回复
+                    // 真的落库那一刻（activeMsgRuntime 认末段到齐）再调
+                    // settleInstantChatExpiredNotices 写 notifiedAt；这一轮没成的话
+                    // failInstantChatPending 会把它们退回未告知，下一轮重新注入。
+                    // 本地路径同一口径：回复 applyAssistantPostProcessing 落库之后才标记。
+                    if (amsg2ExpiredIds.length && instantChatResult.uuid) {
+                        stageInstantChatExpiredNotices(char.id, instantChatResult.uuid, amsg2ExpiredIds);
                     }
                 } else {
                     // 没发出去就是没发出去：明确落一条系统消息 + 弹错，用户可以直接重发。

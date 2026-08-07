@@ -34,6 +34,13 @@ export const MAX_ACTIVE_TASKS_PER_CHAR = 5;
  *
  * 面板的开关初值和工具注入门都读这一个判定，别各写各的三元——两处答案不一致的话，
  * 面板显示「关」而角色其实照样能排程，界面就成了骗人的那一方。
+ *
+ * 「关」是默认值，不是需要迁移掉的旧数据：写 activeMsg2Config 的每条路（面板保存、
+ * 角色用工具排程、push 认领自排任务、面板与远端对账补任务）落盘时都带着 enabled:true，
+ * 所以真用过 2.0 的角色身上一定有这面旗，判定翻面也照常能排程；剩下 config 缺失的
+ * 那批本来就一次没用过。反过来给全体角色补写一份 config 更糟——amsg2CharCleanup 拿
+ * 「身上有没有 activeMsg2Config」判断删角色时要不要去云端清数据，补完之后每删一个
+ * 角色都会为一份根本不存在的云端残留发请求。
  */
 export const isAmsg2EnabledForChar = (char: CharacterProfile): boolean =>
   char.activeMsg2Config?.enabled === true;

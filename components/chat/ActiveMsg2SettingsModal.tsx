@@ -247,6 +247,25 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
   });
 
   /**
+   * 拨开关本身就算一次保存。
+   *
+   * 这是设置弹窗，用户拨完开关就认为已经生效了。只改 React state 不写库的话，角色的
+   * activeMsg2Config 还是空的（= 关）：聊天里不注入排程工具、fire_pack 的
+   * selfScheduleEnabled 上传 false、重开面板开关又显示成「关」，全程一句提示都没有。
+   *
+   * 只有「开」这一侧就地落盘。「关」要走底部那颗「关闭 2.0」按钮：关掉的同时得把该
+   * 角色在远端的任务全部取消，这里就地写一个 enabled:false，远端任务没人管，会变成
+   * 面板看不见却照样到点触发的幽灵任务。
+   */
+  const handleToggleEnabled = () => {
+    const turningOn = !enabled;
+    setEnabled(!enabled);
+    // 顺手把面板上其它角色级设置（maxTokens / 连发上限 / 单独 API）一起带上，与
+    // buildConfig 的口径一致：这几项本来就只有面板会写。
+    if (turningOn) onSave((prev) => buildConfig(prev, (list) => list));
+  };
+
+  /**
    * 给角色留一句「这几条被人工取消了」。
    *
    * 聊天历史里那句「明早八点叫你～」是角色自己许的承诺，任务在面板里被删掉之后它并不
@@ -449,12 +468,20 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
             <div className="text-xs text-fuchsia-600 mt-1">{pushSummary || '正在检查 Push 状态...'}</div>
           </div>
           <button
-            onClick={() => setEnabled(!enabled)}
+            onClick={handleToggleEnabled}
             className={`w-12 h-7 rounded-full transition-colors relative ${enabled ? 'bg-fuchsia-500' : 'bg-slate-200'}`}
           >
             <span className={`absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow transition-all duration-200 ${enabled ? 'translate-x-5' : 'translate-x-0'}`} />
           </button>
         </div>
+
+        {/* 关着的时候面板下面整块都是空的，不说一句的话，用户看不出这个开关是按角色算的，
+            也不知道打开它能换来什么。 */}
+        {!enabled ? (
+          <p className="text-xs leading-relaxed text-slate-400 pl-1">
+            主动消息 2.0 按角色单独开启。打开这个开关，TA 才能在聊天里给你排定时消息，到点由云端发出；你也可以在这里手动建任务。
+          </p>
+        ) : null}
 
         {/* 闸拦下一次触发时不发任何推送，远端那行任务却照样被消费掉——不说一声的话，
             「让路了」在用户看来跟「没发出去 / 功能坏了」完全一样。 */}

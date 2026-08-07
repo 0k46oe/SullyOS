@@ -22,6 +22,11 @@ import {
   resolveExpirePolicy, toDatetimeLocalValue,
 } from './amsg2Tasks';
 import { AMSG_CHAT_PRESENCE_KEY, AmsgChatPresence } from './amsgChatPresence';
+// 「这个角色欠着一条即时对话回复吗」的两个原始信号（待收记录 + 发送在飞）。
+// amsgInstantChat 反过来也 import 这个文件，两边都只在函数体里用对方，模块求值期
+// 谁都不碰谁，所以这个环是安全的；换成在这里另读一遍 localStorage 才是真麻烦
+// （挂起判定就有了两把尺，而「发送在飞」那半截根本抄不过来，它是内存里的集合）。
+import { getInstantChatPending, isInstantChatSendInFlight } from './amsgInstantChat';
 import { flattenContentPartsToText } from './promptMessageCleanup';
 import {
   AMSG_FIRE_PACK_KEY,
@@ -317,6 +322,16 @@ const ensureWorkerReady = async () => {
 // 两次），逐次重新握手纯属白付 RTT。键取会影响握手的三个字段；配置一变（换 worker /
 // 换密钥 / 清空重连）键就换，旧缓存自然作废。失败的握手不缓存，下一次重新来过。
 let cachedClientEntry: { key: string; promise: ReturnType<typeof createAndInitClient> } | null = null;
+
+/**
+ * 作废握手缓存，下一次调用重新 get-user-key。
+ *
+ * 记忆化的键只认「地址 / 用户 id / 共享密钥」，可云端的用户密钥还能在这三样都不变的
+ * 情况下换代 —— 用户在 Cloudflare 上换掉 AMSG_MASTER_KEY 就是。所以凡是「用户密钥
+ * 可能已经不是刚才那把」的动作（重新连接、清空云端状态）都得先过这里，否则缓存里
+ * 那条 client 握着旧密钥，加密调用发出去 worker 一条都解不开。
+ */
+const invalidateClientCache = () => { cachedClientEntry = null; };
 
 const createAndInitClient = async (config: ActiveMsg2GlobalConfig) => {
   const client = createClient(config);
@@ -885,6 +900,23 @@ export const clearNamespaceValuesOrThrow = async (
 };
 
 /**
+ * 这个角色此刻欠着一条即时对话的回复吗（发送还在飞 / 已受理还没收到）。
+ *
+ * 欠着的那段时间里，云端的 fire_pack 是 POST /instant-chat 带上去的那一份，比常规的包
+ * 多一段 chat —— worker 到点全靠它拿这一轮的对话。常规重建的包没有 chat 段，覆盖上去
+ * worker 只会硬失败（「fire_pack 里没有 chat 段」），重试梯子上每一跳都是同一个错，
+ * 用户最后拿到一句「即时对话没能完成」，话还得自己重发一遍。
+ *
+ * 所以凡是会写 fire_pack 的路径，写之前都得先问一次这里：批量同步（amsgStateSync 的
+ * 挂起段）和排程（scheduleCharacterTask）共用这一把尺，别各写各的。
+ *
+ * 「发送在飞」这一半不能省：待收记录要 202 回来才有，光认它的话，慢网上传的那几秒
+ * 正好是敞着的。
+ */
+export const owesInstantChatReply = (charId: string): boolean =>
+  !!getInstantChatPending(charId) || isInstantChatSendInFlight(charId);
+
+/**
  * 角色侧云端状态的两条条目（fire_pack + tool_pack）。
  *
  * 「哪个 namespace 配哪个 key 配哪个 build 函数」只在这里写一遍：排程和批量同步两条路
@@ -1406,6 +1438,12 @@ export const ActiveMsgClient = {
         resolveInitFailKind(status),
       );
     }
+    // 「重新连接并验证」是显式的重新握手，缓存必须先作废。用户按它多半正是因为云端换了
+    // 东西（典型是在 Cloudflare 上换掉 AMSG_MASTER_KEY，用户密钥跟着换代），而记忆化的
+    // 三个键一个都没变 —— 不作废的话这里拿回来的还是握着旧密钥的老 client：init-tenant
+    // 成功、界面报「连接成功」，此后每一次加密调用（排任务 / 即时对话 / 读云端状态）
+    // worker 都解不开，只有整页刷新才能恢复。
+    invalidateClientCache();
     await initializeClient(config);
     await ActiveMsgStore.saveGlobalConfig({ ...config, initializedAt: Date.now() });
     await this.reconcilePushSubscription();
@@ -1483,11 +1521,6 @@ export const ActiveMsgClient = {
       }));
   },
 
-  /** 只要 uuid 的薄壳（删角色 / 关闭全部这些路径不关心 status / lastError）。 */
-  async listRemoteTaskUuidsForChar(charId: string): Promise<string[]> {
-    return (await this.listRemoteTasksForChar(charId)).map((t) => t.uuid);
-  },
-
   /**
    * 取消一个远端任务。**幂等**：远端已经没有这一条（一次性任务发完就删行、或在别处
    * 取消过），amsg-server 回 404 `TASK_NOT_FOUND`，那正是取消要达到的终态，算成功并
@@ -1560,6 +1593,12 @@ export const ActiveMsgClient = {
    * charId 投影）才退回调用方给的本地清单——半份证据也比不取消强。
    *
    * 逐条取消，单条失败记进 failed 继续跑完其余的：一条网络抖动不该让剩下的任务都留着。
+   *
+   * 即时对话的行不在取消范围内（过滤口径与面板对账同一把尺 AMSG_INSTANT_CHAT_SUBTYPE，
+   * 见 amsg2Tasks 的 reconcileTasksWithRemote）：那不是定时任务，是用户此刻正等着的一轮
+   * 聊天。角色的 2.0 开关管的是定时主动消息，连它一起掐掉的话 worker 那一跳永远不会跑，
+   * 用户等到的是一句「云端已处理这条消息，但回复没能取回」，还得自己把话重发一遍。
+   * 退回本地清单的那条路天然不含即时对话（本地任务记录里从来没有它）。
    */
   async cancelAllTasksForChar(
     charId: string,
@@ -1567,7 +1606,9 @@ export const ActiveMsgClient = {
   ): Promise<{ targets: string[]; failed: Set<string> }> {
     let targets: string[];
     try {
-      targets = await this.listRemoteTaskUuidsForChar(charId);
+      targets = (await this.listRemoteTasksForChar(charId))
+        .filter((task) => task.messageSubtype !== AMSG_INSTANT_CHAT_SUBTYPE)
+        .map((task) => task.uuid);
     } catch {
       targets = localTaskUuids;
     }
@@ -1697,10 +1738,20 @@ export const ActiveMsgClient = {
     //
     // 大值（胖角色的完整角色卡 / 世界书）由 amsg-server 2.6.0-next.4+ 在 worker 存储层
     // 透明分块，客户端整条直传即可；老 worker 会拒超限条目 → putClientStateOrThrow 抛错。
+    //
+    // 角色欠着即时对话回复时，这一批里的 fire_pack 抽掉不写（口径与批量同步那条路共用
+    // owesInstantChatReply）：云端此刻那份带着用户正等的这一轮 chat 段，盖掉的话 worker
+    // 到点只能硬失败。tool_pack / tool_config 里没有 chat，照传。抽掉的那份不会就此作废：
+    // 排完任务紧跟着的落库会打脏，等回复销账后由状态同步把最新的包补上去。
     if (firePack) {
       const now = Date.now();
+      const owesChat = owesInstantChatReply(char.id);
+      if (owesChat) {
+        console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 该角色还欠着一条即时对话回复，这次排程不覆盖云端 fire_pack（等回复销账后由状态同步补传）`);
+      }
+      const charEntries = await buildCharStateEntries(char, firePack, now);
       await putClientStateOrThrow(client, [
-        ...(await buildCharStateEntries(char, firePack, now)),
+        ...(owesChat ? charEntries.filter((entry) => entry.key !== AMSG_FIRE_PACK_KEY) : charEntries),
         buildToolConfigEntry(realtimeConfig, now),
       ], '上传云端状态');
     }
@@ -2275,7 +2326,7 @@ export const ActiveMsgClient = {
   ): Promise<{ deleted: number; toolConfigRestored: boolean }> {
     const config = await ensureWorkerReady();
     // 清云端状态可能连用户密钥一起换代：握手缓存作废，之后的第一次调用重新 init。
-    cachedClientEntry = null;
+    invalidateClientCache();
     const client = createClient(config);
     const response = await client.clearClientState();
     if (!response?.success) {

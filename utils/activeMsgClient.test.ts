@@ -23,7 +23,8 @@ const { reiClient } = vi.hoisted(() => ({
     putPushSubscription: vi.fn(),
     getPushSubscription: vi.fn(),
     deletePushSubscription: vi.fn(),
-    // 加密响应的解包（库的私有方法，客户端通过桥接类型调）。
+    // 加密信封的封包 / 解包（库的私有方法，客户端通过桥接类型调）。
+    _encrypt: vi.fn(),
     _decrypt: vi.fn(),
   },
 }));
@@ -42,9 +43,12 @@ import {
   dropStaleSubscription, putClientStateOrThrow, readAmsgFailKind, toRemoteAvatarUrl,
 } from './activeMsgClient';
 import {
+  AMSG_FIRE_PACK_KEY,
   AMSG_SLOT_CURRENT_TIME, AMSG_SLOT_REALTIME_WORLD, AMSG_SLOT_SCENE,
   AMSG_SLOT_TASK_LIST, AMSG_SLOT_TIME_SINCE_USER, AMSG_SLOT_USER_CLOCK,
 } from './amsgFirePack';
+import { clearInstantChatPending, setInstantChatPending } from './amsgInstantChat';
+import { AMSG_TOOL_CONFIG_KEY, AMSG_TOOL_PACK_KEY } from './amsgToolPack';
 import * as dailySchedule from './dailySchedule';
 import { ChatPrompts } from './chatPrompts';
 import { DB } from './db';
@@ -410,21 +414,37 @@ describe('连接前的 worker 配置自检', () => {
 
     await expect(ActiveMsgClient.connect()).resolves.toMatchObject({ ok: true });
   });
+
+  // 回归守卫：握手（get-user-key）按「地址 / 用户 id / 共享密钥」记忆化，可用户密钥能在
+  // 这三样都不变的情况下换代——用户在 Cloudflare 上换掉 AMSG_MASTER_KEY 就是。缓存不作废
+  // 的话，「重新连接并验证」拿回来的还是握着旧密钥的老 client：init-tenant 成功、界面报
+  // 「连接成功」，此后每一次加密调用 worker 都解不开（即时对话每发一条挂一条、任务到点
+  // 全失败），只有整页刷新能恢复。
+  it('「重新连接并验证」每按一次都真的重新握手（换过 master key 后旧密钥必须被丢掉）', async () => {
+    routeFetch({});
+    reiClient.init.mockReset().mockResolvedValue(undefined);
+
+    await ActiveMsgClient.connect();
+    await ActiveMsgClient.connect();
+
+    expect(reiClient.init).toHaveBeenCalledTimes(2);
+  });
 });
 
 // 回归守卫：老 worker（< 2.6.0-next.5）的 GET /messages 不投影 charId，按角色过滤会
 // 一条都留不下。要是照直返回空数组，面板会把该角色的任务全标成「远端不存在」，
 // 「关闭 2.0」也会以为没什么要取消——两处都是拿半份证据下结论。
-describe('ActiveMsgClient.listRemoteTaskUuidsForChar', () => {
+describe('ActiveMsgClient.listRemoteTasksForChar 的版本护栏', () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
-  it('worker 有投影 → 只留本角色的 uuid', async () => {
+  it('worker 有投影 → 只留本角色的行', async () => {
     vi.spyOn(ActiveMsgClient, 'listAllTasks').mockResolvedValue([
       { uuid: 'task-a', charId: 'char-1' },
       { uuid: 'task-b', charId: 'char-2' },
       { charId: 'char-1' },
     ]);
-    await expect(ActiveMsgClient.listRemoteTaskUuidsForChar('char-1')).resolves.toEqual(['task-a']);
+    await expect(ActiveMsgClient.listRemoteTasksForChar('char-1').then((rows) => rows.map((r) => r.uuid)))
+      .resolves.toEqual(['task-a']);
   });
 
   it('老 worker 没投影（远端有任务、charId 全空）→ 抛错交给调用方降级', async () => {
@@ -432,13 +452,13 @@ describe('ActiveMsgClient.listRemoteTaskUuidsForChar', () => {
       { uuid: 'task-a' },
       { uuid: 'task-b', charId: null },
     ]);
-    await expect(ActiveMsgClient.listRemoteTaskUuidsForChar('char-1'))
+    await expect(ActiveMsgClient.listRemoteTasksForChar('char-1'))
       .rejects.toThrow(/重新粘贴部署/);
   });
 
   it('远端确实一条任务都没有 → 空数组（跟版本无关，别误伤）', async () => {
     vi.spyOn(ActiveMsgClient, 'listAllTasks').mockResolvedValue([]);
-    await expect(ActiveMsgClient.listRemoteTaskUuidsForChar('char-1')).resolves.toEqual([]);
+    await expect(ActiveMsgClient.listRemoteTasksForChar('char-1')).resolves.toEqual([]);
   });
 });
 
@@ -447,8 +467,13 @@ describe('ActiveMsgClient.listRemoteTaskUuidsForChar', () => {
 describe('ActiveMsgClient.cancelAllTasksForChar', () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
+  /** 远端投影的最小形状（只有 uuid 与子类型参与取消判定）。 */
+  const remoteRows = (rows: Array<{ uuid: string; messageSubtype?: string }>) =>
+    vi.spyOn(ActiveMsgClient, 'listRemoteTasksForChar')
+      .mockResolvedValue(rows.map((r) => ({ ...r, lastError: null })) as any);
+
   it('以远端清单为准（本地漏掉的「已过点未消费」任务也要取消到）', async () => {
-    vi.spyOn(ActiveMsgClient, 'listRemoteTaskUuidsForChar').mockResolvedValue(['remote-1', 'remote-2']);
+    remoteRows([{ uuid: 'remote-1' }, { uuid: 'remote-2' }]);
     const cancel = vi.spyOn(ActiveMsgClient, 'cancelTask')
       .mockResolvedValue({ uuid: '', alreadyGone: false });
 
@@ -459,7 +484,7 @@ describe('ActiveMsgClient.cancelAllTasksForChar', () => {
   });
 
   it('远端读不到（老 worker / 断网）→ 退回本地清单，半份证据也比不取消强', async () => {
-    vi.spyOn(ActiveMsgClient, 'listRemoteTaskUuidsForChar').mockRejectedValue(new Error('offline'));
+    vi.spyOn(ActiveMsgClient, 'listRemoteTasksForChar').mockRejectedValue(new Error('offline'));
     const cancel = vi.spyOn(ActiveMsgClient, 'cancelTask')
       .mockResolvedValue({ uuid: '', alreadyGone: false });
 
@@ -469,7 +494,7 @@ describe('ActiveMsgClient.cancelAllTasksForChar', () => {
   });
 
   it('单条取消失败只记账，剩下的照样取消完', async () => {
-    vi.spyOn(ActiveMsgClient, 'listRemoteTaskUuidsForChar').mockResolvedValue(['t1', 't2', 't3']);
+    remoteRows([{ uuid: 't1' }, { uuid: 't2' }, { uuid: 't3' }]);
     vi.spyOn(ActiveMsgClient, 'cancelTask').mockImplementation(async (uuid: string) => {
       if (uuid === 't2') throw new Error('D1 busy');
       return { uuid, alreadyGone: false };
@@ -477,6 +502,100 @@ describe('ActiveMsgClient.cancelAllTasksForChar', () => {
 
     const { failed } = await ActiveMsgClient.cancelAllTasksForChar('char-1', []);
     expect([...failed]).toEqual(['t2']);
+  });
+
+  // 回归守卫：即时对话的行不是定时任务，是用户此刻正等着的一轮聊天。以前这里照远端全量
+  // 清单逐条取消，关掉角色的 2.0 开关就会把它一起掐掉：worker 那一跳永远不会跑，客户端
+  // 的待收记录还留着，60s 点名查到 gone、outbox 也空，最后落一句「云端已处理这条消息，
+  // 但回复没能取回」，用户还得把话重发一遍。过滤口径与面板对账同一把尺。
+  it('即时对话的行不取消（关掉 2.0 不该掐掉正在跑的那轮聊天）', async () => {
+    remoteRows([
+      { uuid: 'scheduled-1' },
+      { uuid: 'instant-1', messageSubtype: 'instant-chat' },
+      { uuid: 'scheduled-2', messageSubtype: 'chat' },
+    ]);
+    const cancel = vi.spyOn(ActiveMsgClient, 'cancelTask')
+      .mockResolvedValue({ uuid: '', alreadyGone: false });
+
+    const { targets } = await ActiveMsgClient.cancelAllTasksForChar('char-1', []);
+    expect(targets).toEqual(['scheduled-1', 'scheduled-2']);
+    expect(cancel.mock.calls.map((c) => c[0])).not.toContain('instant-1');
+  });
+});
+
+// 回归守卫：排程建任务前会把整份 fire_pack PUT 上去，而用户刚发出去的那条即时对话还
+// 欠着回复时，云端那一份是 POST /instant-chat 带上去的、比常规的包多一段 chat——worker
+// 到点全靠它拿这一轮的对话。盖掉的话 onBeforeFire 当场硬失败（fire_pack 里没有 chat 段），
+// 重试梯子上每一跳都是同一个错，用户最后拿到一句「即时对话没能完成」，话还得自己重发。
+// 现实触发路径：等回复期间打开该角色的 2.0 面板新建 / 编辑一条定时任务（角色在本地轮里
+// 给自己排任务同理）。挂起口径与批量同步共用 owesInstantChatReply 这一把尺。
+describe('scheduleCharacterTask 与欠着的即时对话 chat 段', () => {
+  const CHAR_ID = 'char-schedule-instant';
+
+  let putBatches: Array<Array<{ namespace: string; key: string }>>;
+
+  beforeEach(() => {
+    putBatches = [];
+    reiClient.init.mockReset().mockResolvedValue(undefined);
+    reiClient.putClientState.mockReset().mockImplementation(async (entries: any[]) => {
+      putBatches.push(entries);
+      return { success: true };
+    });
+    reiClient._encrypt.mockReset().mockResolvedValue({ iv: 'iv', authTag: 'tag', encryptedData: 'enc' });
+    // 模板本体、表情全库、推送登记这些都不在被测范围，桩掉。
+    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
+    vi.spyOn(DB, 'getEmojis').mockResolvedValue([] as any);
+    vi.spyOn(DB, 'getEmojiCategories').mockResolvedValue([] as any);
+    vi.spyOn(ChatPrompts, 'buildSystemPrompt').mockResolvedValue('SYS_PROMPT_MARKER');
+    vi.spyOn(ChatPrompts, 'buildMessageHistory').mockReturnValue({ apiMessages: [] } as any);
+    vi.spyOn(ChatPrompts, 'filterVisibleEmojis').mockReturnValue({ emojis: [], categories: [] } as any);
+    vi.spyOn(ActiveMsgClient, 'registerPushSubscription').mockResolvedValue(undefined);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      status: 200,
+      text: async () => JSON.stringify({ success: true, data: { uuid: 'remote-uuid', status: 'pending' } }),
+      headers: new Headers({ 'content-type': 'application/json' }),
+    }));
+    clearInstantChatPending(CHAR_ID);
+  });
+  afterEach(() => {
+    clearInstantChatPending(CHAR_ID);
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const schedule = () => ActiveMsgClient.scheduleCharacterTask({
+    char: { id: CHAR_ID, name: '小满', memories: [], activeMsg2Config: { enabled: true, tasks: [] } } as any,
+    config: { enabled: true, tasks: [] } as any,
+    task: {
+      mode: 'auto',
+      firstSendTime: new Date(Date.now() + 3600_000).toISOString(),
+      recurrenceType: 'none',
+    },
+    userProfile: { name: '小明' } as any,
+    groups: [],
+    realtimeConfig: {} as any,
+    apiConfig: { baseUrl: 'https://api.example.dev', apiKey: 'sk-test', model: 'gpt-test' } as any,
+  });
+
+  /** 这次排程往云端写了哪些 key。 */
+  const writtenKeys = () => putBatches.flat().map((entry) => entry.key);
+
+  it('没欠着回复 → fire_pack 照常整份覆盖上去', async () => {
+    await schedule();
+    expect(writtenKeys()).toContain(AMSG_FIRE_PACK_KEY);
+  });
+
+  it('欠着回复 → 这一批把 fire_pack 抽掉，tool_pack / tool_config 照写、任务照建', async () => {
+    setInstantChatPending(CHAR_ID, 'uuid-waiting');
+
+    const result = await schedule();
+
+    expect(writtenKeys(), '盖掉 chat 段 = 用户正等的那条回复到点必然硬失败')
+      .not.toContain(AMSG_FIRE_PACK_KEY);
+    expect(writtenKeys()).toContain(AMSG_TOOL_PACK_KEY);
+    expect(writtenKeys()).toContain(AMSG_TOOL_CONFIG_KEY);
+    // 任务本身照建：等回复不是拒绝排程的理由，抽掉的那份包由销账后的状态同步补上。
+    expect(result.uuid).toBe('remote-uuid');
   });
 });
 
@@ -1274,9 +1393,8 @@ describe('ActiveMsgClient.refreshCharPendingAiTaskCredentials（③ 面板保存
 
 });
 
-// listRemoteTasksForChar 的 lastError 投影（listRemoteTaskUuidsForChar 的老口径由上面的
-// describe 继续钉着——它现在是这份投影的薄壳）。
-describe('ActiveMsgClient.listRemoteTasksForChar', () => {
+// listRemoteTasksForChar 的 lastError 投影（按角色过滤本身的口径由上面那个 describe 钉着）。
+describe('ActiveMsgClient.listRemoteTasksForChar 的失败摘要投影', () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
   it('带回 status 与收敛后的 lastError（旧 worker 没这字段 → null）', async () => {

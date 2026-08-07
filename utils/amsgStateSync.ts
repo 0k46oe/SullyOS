@@ -29,11 +29,10 @@
  */
 
 import { CharacterProfile, GroupProfile, RealtimeConfig, UserProfile } from '../types';
-import { ActiveMsgClient } from './activeMsgClient';
+import { ActiveMsgClient, owesInstantChatReply } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
 import { hasActiveAiTask } from './amsg2Tasks';
 import { AmsgChatPresence, CHAT_PRESENCE_HEARTBEAT_MS } from './amsgChatPresence';
-import { getInstantChatPending, isInstantChatSendInFlight } from './amsgInstantChat';
 import { trackEvent } from './analytics';
 
 /** 失败重试的退避起点，逐次翻倍（30s → 60s → 120s）。 */
@@ -196,14 +195,10 @@ export const flushAmsgState = async (reason: string): Promise<void> => {
   // 欠着即时对话回复（含 POST 还在飞、202 未回）的角色这次挂起不传：那一轮的 fire_pack
   // 是 POST /instant-chat 带上去的、多一段 chat（worker 到点全靠它拿这轮的对话），
   // 常规重建的包没有 chat 段，现在覆盖上去的话 worker 到点只会硬失败（fire_pack 里
-  // 没有 chat 段）。占位从按下发送那一刻就生效——待收记录要 202 才有，光认它的话
-  // 慢网上传的那几秒正好是敞着的。快照连底账一起留在队列里，销账后的下一次冲刷
-  // （含下面那个定时回看）照传不误。
-  const deferredIds = new Set(
-    [...dirty.keys()].filter(
-      (charId) => !!getInstantChatPending(charId) || isInstantChatSendInFlight(charId),
-    ),
-  );
+  // 没有 chat 段）。判定用 activeMsgClient 那份共用的 owesInstantChatReply——排程那条路
+  // （scheduleCharacterTask 建任务前也要写 fire_pack）跟这里必须是同一把尺。
+  // 快照连底账一起留在队列里，销账后的下一次冲刷（含下面那个定时回看）照传不误。
+  const deferredIds = new Set([...dirty.keys()].filter(owesInstantChatReply));
   if (deferredIds.size === dirty.size) {
     // 全都欠着回复：这次一个都传不了，排个回看就走（retryTimer 刚在上面清空过，直接排）。
     scheduleDeferredRecheck();
@@ -445,6 +440,12 @@ export const isWorkerUrlCleared = (prevUrl: string | undefined, nextUrl: string 
 
 /**
  * 取消远端**全部**任务（清空 Worker 地址时用，此时还没换地址，读写的都是旧那台）。
+ *
+ * 「全部」是字面意思，正在跑的即时对话也一起取消，跟角色级的
+ * ActiveMsgClient.cancelAllTasksForChar（那边刻意放过即时对话的行）不是一把尺 ——
+ * 两个调用方（清空 Worker 地址、清空云端数据）要的都是「我不跟这台 worker 来往了」：
+ * 地址一清，回复推回来这边也接不住了；云端数据一清，角色上下文没了，那一跳到点也只会
+ * 硬失败，留着它只是多一条要等 7 天才自动消失的失败行。所以这里不给调用方开过滤的口子。
  *
  * 尽力而为：逐条取消，单条失败记数继续跑完其余的；清单都读不到（网络 / 鉴权）就
  * 回 listed:false，交给调用方提示用户「远端可能还挂着」。

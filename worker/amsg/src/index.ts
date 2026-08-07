@@ -68,6 +68,7 @@ import {
   buildFireRenewTool,
   buildFireScheduleBlock,
   buildFireScheduleTool,
+  buildSelfScheduleUuid,
   MAX_FIRE_SCHEDULES,
   parseFireRenewSendAt,
   parseFireScheduleArgs,
@@ -729,7 +730,7 @@ export const amsgFireSettled = async (
       at: Date.now(),
       text,
       // 即时对话是在答用户刚说的话——列进自述块保持连续性，但不占「主动连发」的额度
-      // （countUnansweredSends 只数没这个标记的条目）。
+      // （带这个标记的条目不会让 selfLog.unansweredSends 加一）。
       ...(stash.instant ? { reply: true } : {}),
     });
     // 整段只有副作用标签（正文为空）时 append 原样返回——没有话可记。
@@ -831,16 +832,38 @@ export const attachScheduledTasks = (
     : payload));
 };
 
+/** 会真动 D1 任务行的那三个工具（其余都是查东西的）。 */
+const TASK_MUTATING_TOOLS = new Set<string>([
+  AMSG_FIRE_SCHEDULE_TOOL, AMSG_FIRE_CANCEL_TOOL, AMSG_FIRE_RENEW_TOOL,
+]);
+
 /**
- * 这一轮在云端**真跑起来**的工具，按第一次出现的顺序压成 `[{ name, count }]`。
+ * 一次工具调用值不值得记进工具痕迹（用来填 ToolCallRecord.ran）。两族问的问题不一样：
+ *
+ * - 查东西的（recall / 搜索 / 日记 / MCP…）问「有没有真去查」：跑起来了就算，
+ *   查了没查到照算——角色说「我翻了下没找到」是实话。压根没跑起来的（没配 key、
+ *   连不上、服务器没开机）不算，那一族由 neverRan 认。
+ * - 改排程的（schedule / cancel / renew）问「有没有真改成」：`ok:false` 一律不算。
+ *   它们的打回码（unanswered_limit、task_not_found、ambiguous_task、cancel_failed…）
+ *   都不在 neverRan 的集合里，照 neverRan 判就成了「跑起来了」——于是取消失败的那次
+ *   也会在气泡底下写一行「调用了工具：取消排好的消息」，用户据此以为排程没了，而任务
+ *   原封不动到点照响。这行灰字本来就是防穿帮的，不能自己造一个。
+ *
+ * 形状认不出来（不是对象）时按「算」处理，与 neverRan 的兜底同口径。
+ */
+const toolDidSomething = (name: string, result: unknown): boolean => {
+  if (!result || typeof result !== 'object') return true;
+  if (TASK_MUTATING_TOOLS.has(name)) return (result as { ok?: unknown }).ok !== false;
+  return !neverRan(result);
+};
+
+/**
+ * 这一轮在云端**真做成事**的工具，按第一次出现的顺序压成 `[{ name, count }]`。
  *
  * 只留原始工具名和次数：参数和结果都不带（那些是角色的内心活动，摊给用户看反而出戏），
  * 翻译成人话也不在这儿——那是显示的事，归客户端（见 utils/amsgToolTrace.ts）。
  *
- * 没跑起来的不算数。没配 key、连不上、MCP 服务器没开机的那些调用一个请求都没发出去，
- * 记进痕迹的话，气泡底下就会写着「调用了工具：搜索网页」而其实什么都没查——这行字
- * 本来就是为了防这种穿帮的，自己先造一个就本末倒置了。「跑了但没查到」照算：
- * 它是真去查了。
+ * 哪些算「做成了」见 toolDidSomething：查东西的看有没有真去查，改排程的看有没有真改成。
  */
 const condenseToolTrace = (
   calls: ReadonlyArray<ToolCallRecord>,
@@ -851,6 +874,40 @@ const condenseToolTrace = (
     counts.set(call.name, (counts.get(call.name) ?? 0) + 1);
   }
   return [...counts].map(([name, count]) => ({ name, count }));
+};
+
+/**
+ * 正文写完之后，最多再给情绪评估这么久搭上这班车。
+ *
+ * 评估在 onBeforeFire 就跟主生成并行起跑了，正常情况下走到收尾时早就回来了，这个窗口
+ * 一秒都用不上；它管的是副 API 限流 / 挂起的那种时候。评估自己的超时是 120 秒
+ * （EMOTION_EVAL_TIMEOUT_MS），死等的话用户会对着「正在输入…」多看两分钟——同一句话走
+ * 本地路径十秒就上屏了；工具循环吃掉大半预算时，这两分钟还会把整轮 600 秒的预算顶穿，
+ * fire 失败重跑，用户拿到的是一句失败说明而不是那条已经写好的回复。
+ *
+ * 取舍：回复优先，情绪让路。没赶上就不带结果（这一轮的情绪更新丢掉），但仍然挂
+ * amsgEmotionDone + 一句原因——客户端那盏「情绪更新中」得有人来熄，静默丢弃只会让它
+ * 一直亮到安全网超时。不留后台续写：worker 交还 payload 之后这一跳很快就结束了，
+ * 悬着的请求不保证还能跑完，客户端也没有第二条取回路径。
+ */
+export const EMOTION_EVAL_RIDE_ALONG_MS = 10_000;
+
+/** 没赶上这班车时给用户看的一句话（跟着 amsgEmotionDone 一起回去）。 */
+const EMOTION_EVAL_LATE_REASON = '情绪评估没赶上这条回复（副 API 太慢），这一轮先不更新';
+
+/** 等评估结果，最多等 EMOTION_EVAL_RIDE_ALONG_MS；没赶上返回 null，回复照发。 */
+const raceEmotionEval = (
+  promise: Promise<AmsgEmotionEvalOutcome>,
+): Promise<AmsgEmotionEvalOutcome | null> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      console.warn('[amsg:emotion] 评估没赶上这条回复，先把话发出去（这一轮不更新情绪）');
+      resolve(null);
+    }, EMOTION_EVAL_RIDE_ALONG_MS);
+  });
+  return Promise.race([promise, late])
+    .finally(() => { if (timer !== undefined) clearTimeout(timer); });
 };
 
 /**
@@ -905,8 +962,10 @@ export const runFireScheduleTool = async (
   if ('ok' in parsed) return parsed as unknown as Record<string, unknown>;
 
   // 同一次触发内第几条 —— 连同触发时刻构成确定性 uuid，重跑对得上。
+  // uuid 开头那 8 位摘要正是排程清单里印给角色看的短 id，同一次 fire 排下的两条
+  // 必须印得不一样（见 buildSelfScheduleUuid）。
   const seq = stash.scheduledTasks.length;
-  const uuid = `amsgself-${stash.charId}-${stash.occurrenceMs}-${seq}`;
+  const uuid = buildSelfScheduleUuid(stash.charId, stash.occurrenceMs, seq);
   const clientTaskId = `${uuid}-c`;
 
   let result;
@@ -1032,7 +1091,7 @@ export const runFireCancelTool = async (
   if (typeof cancelTask !== 'function') {
     return { ok: false, reason: 'not_supported', message: '当前后台版本还不支持取消任务，先当它会照常响，把要说的话说清楚。' };
   }
-  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id, nowMs);
+  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id, nowMs, stash.tz);
   if ('ok' in resolved) return resolved as unknown as Record<string, unknown>;
   const target = resolved.task;
 
@@ -1071,7 +1130,7 @@ export const runFireRenewTool = async (
   if (typeof fireCtx.renewTask !== 'function') {
     return { ok: false, reason: 'not_supported', message: '当前后台版本还不支持改期，要么取消重排，要么先当它会照常响。' };
   }
-  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id, nowMs);
+  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id, nowMs, stash.tz);
   if ('ok' in resolved) return resolved as unknown as Record<string, unknown>;
   const target = resolved.task;
   if (target.mode === 'fixed') {
@@ -1780,10 +1839,11 @@ export const amsgHooks = {
       // 再挂一行「调用了工具」等于把后台实现摊开给用户看，跟主动消息要的那点不着痕迹相冲。
       //
       // 情绪评估（客户端拿 applyEmotionEvalRaw 落 buff，与本地路径共用同一套解析）：
-      // 评估是 onBeforeFire 就起跑的，这里 await 时多半已经跑完。评估挂了也要挂一个
-      // amsgEmotionDone——客户端从按下发送那一刻就点着「情绪更新中」，只在有结果时才带
-      // 信号的话，评估一失败那盏灯就得亮到十几分钟后才由安全网熄。挂了还捎一句短原因
-      // （amsgEmotionError），原因里绝不含凭据（见 describeEvalFailure）。
+      // 评估是 onBeforeFire 就起跑的，跟主生成并行，走到这里多半早跑完了。**最多再等
+      // EMOTION_EVAL_RIDE_ALONG_MS**，等不到就不搭这班车（见那个常量的注释）。评估挂了
+      // 或没赶上都要挂一个 amsgEmotionDone——客户端从按下发送那一刻就点着「情绪更新中」，
+      // 只在有结果时才带信号的话，评估一失败那盏灯就得亮到十几分钟后才由安全网熄。
+      // 挂了还捎一句短原因（amsgEmotionError），原因里绝不含凭据（见 describeEvalFailure）。
       //
       // 两样都排在旁路存储之前，装不下时才能连它们一起挪走。
       if (stash.instant && payloads.length > 0) {
@@ -1808,10 +1868,11 @@ export const amsgHooks = {
           }
         }
         if (stash.emotionEvalPromise) {
-          const { raw: evalText, error: evalError } = await stash.emotionEvalPromise;
+          const outcome = await raceEmotionEval(stash.emotionEvalPromise);
           lastMeta.amsgEmotionDone = true;
-          if (evalText) lastMeta.amsgEmotionUpdate = evalText;
-          else if (evalError) lastMeta.amsgEmotionError = evalError;
+          if (outcome === null) lastMeta.amsgEmotionError = EMOTION_EVAL_LATE_REASON;
+          else if (outcome.raw) lastMeta.amsgEmotionUpdate = outcome.raw;
+          else if (outcome.error) lastMeta.amsgEmotionError = outcome.error;
         }
         if (Object.keys(lastMeta).length > 0) {
           payloads = attachMetaAt(payloads, payloads.length - 1, lastMeta);
@@ -1920,10 +1981,10 @@ export const amsgHooks = {
               : name.startsWith(MCP_FIRE_NAME_PREFIX)
                 ? await runMcpFireTool(stash, name, args)
                 : await dispatchAgenticTool(name, args, stash.toolCtx);
-        // ran 记的是「这次到底跑没跑起来」：没配 key / 连不上 / 服务器没开机的那些
-        // 一个请求都没发出去。回喂给模型的措辞早就分开讲了（见 buildToolResultMessage），
-        // 给用户看的那行工具痕迹也要照着筛（见 condenseToolTrace）。
-        stash.session.toolCalls.push({ name, fingerprint, ran: !neverRan(result) });
+        // ran 记的是「这次值不值得写进工具痕迹」：查东西的看有没有真去查，改排程的看有没有
+        // 真改成（见 toolDidSomething）。回喂给模型的措辞另有一套口径（buildToolResultMessage
+        // 里的 neverRan），两者不共用——痕迹是给用户看的，只说真发生过的事。
+        stash.session.toolCalls.push({ name, fingerprint, ran: toolDidSomething(name, result) });
         // 不再回裸 JSON：模型从裸 JSON 里看不出「这一步已经做完了」，提示词里但凡有一句
         // 常驻的「先去查 X」就会每轮照做。这段话跟前台说的是同一套（见 agenticToolFeedback）。
         content = buildToolResultMessage({ name, result, history: stash.session.toolCalls });

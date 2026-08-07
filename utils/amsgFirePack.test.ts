@@ -369,6 +369,40 @@ describe('self_log', () => {
       expect(countUnansweredSends(createSelfLog(packAt))).toBe(0);
       expect(countUnansweredSends(null)).toBe(0);
     });
+
+    // 回归守卫：计数以前是数 entries 数出来的，而 entries 只留最近 SELF_LOG_MAX_ENTRIES
+    // （8）条——计数因此永远不会超过 8，用户把连发上限设成 9 或 10 时，到点兜底闸的
+    // 「计数 >= 上限」恒为 false，那道闸整个失效（等于「不限」）。
+    it('连发条数不被 entries 上限压平：发 10 条就数到 10（上限设 9 / 10 时闸才拦得住）', () => {
+      let log = createSelfLog(packAt);
+      for (let i = 0; i < 10; i += 1) {
+        log = appendSelfLogEntry(log, entry(`t1@${i}`, `第 ${i + 1} 条`));
+      }
+      expect(log.entries).toHaveLength(SELF_LOG_MAX_ENTRIES);   // 前提：entries 确实被削过
+      expect(countUnansweredSends(log)).toBe(10);
+    });
+
+    it('同一次触发重跑（同 id 再追加一次）不多记一条连发', () => {
+      let log = createSelfLog(packAt);
+      log = appendSelfLogEntry(log, entry('t1@100', '在干嘛呢'));
+      log = appendSelfLogEntry(log, entry('t1@100', '在干嘛呢'));
+      expect(countUnansweredSends(log)).toBe(1);
+    });
+
+    it('用户开口 → 连发条数跟 entries 一起归零', () => {
+      let log = createSelfLog(packAt, 500);
+      for (let i = 0; i < 10; i += 1) log = appendSelfLogEntry(log, entry(`t1@${i}`, `第 ${i} 条`));
+      const after = reconcileSelfLogWithPack(log, pack, 900);
+      expect(after.entries).toHaveLength(0);
+      expect(countUnansweredSends(after)).toBe(0);
+    });
+
+    it('fire_pack 换代（客户端认领重传）不清连发条数', () => {
+      let log = createSelfLog(packAt, 500);
+      for (let i = 0; i < 10; i += 1) log = appendSelfLogEntry(log, entry(`t1@${i}`, `第 ${i} 条`));
+      expect(countUnansweredSends(reconcileSelfLogWithPack(log, { ...pack, builtAt: packAt + 1 }, 500)))
+        .toBe(10);
+    });
   });
 
   describe('resolveMaxUnansweredSends（用户设置的连发上限）', () => {
@@ -398,7 +432,11 @@ describe('self_log', () => {
       expect(parseSelfLog('not json')).toBeNull();
       expect(parseSelfLog(JSON.stringify({ v: 2, basePackAt: packAt, entries: [], tasks: [] }))).toBeNull();
       expect(parseSelfLog(JSON.stringify({ v: 1, basePackAt: packAt }))).toBeNull();
-      expect(parseSelfLog(JSON.stringify({ v: 3, basePackAt: packAt, anchorUserMsgAt: null, entries: [{ id: 'a' }], tasks: [] }))).toBeNull();
+      // v3（连发条数还数在 entries 里的那版）不认：读出来的计数会是错的，宁可从空的重攒
+      expect(parseSelfLog(JSON.stringify({ v: 3, basePackAt: packAt, anchorUserMsgAt: null, entries: [], tasks: [] }))).toBeNull();
+      // 缺连发计数字段的一样不认（少了它计数会静默从 0 开始，闸又白装了）
+      expect(parseSelfLog(JSON.stringify({ v: 4, basePackAt: packAt, anchorUserMsgAt: null, entries: [], tasks: [] }))).toBeNull();
+      expect(parseSelfLog(JSON.stringify({ v: 4, basePackAt: packAt, anchorUserMsgAt: null, entries: [{ id: 'a' }], unansweredSends: 0, tasks: [] }))).toBeNull();
     });
   });
 
@@ -554,6 +592,16 @@ describe('last_skip 新原因', () => {
     expect(describeLastSkip({ ...base, reason: 'active-chat-presence' }, fmt)).toContain('让路');
     expect(describeLastSkip({ ...base, reason: 'conversation-moved-on' }, fmt)).toContain('过时');
     expect(describeLastSkip({ ...base, reason: 'unanswered-limit' }, fmt)).toContain('连发上限');
+  });
+
+  // 被连发上限拦下的那一次是**真的跳过了**：上游把 { skip: true } 当成功消费，一次性
+  // 任务的行当场就删了，循环任务也只是快进到下一次，都不会把这一条补回来。文案要是说
+  // 「等你回复后恢复」，用户就会一直等一条永远不会来的消息（角色在正文里承诺过的
+  // 「等下再来找你」也跟着蒸发）。
+  it('连发上限那次说清「不会补发」，不许承诺恢复', () => {
+    const text = describeLastSkip({ ...base, reason: 'unanswered-limit' }, fmt);
+    expect(text).toContain('不会补发');
+    expect(text).not.toContain('等你回复后恢复');
   });
 });
 

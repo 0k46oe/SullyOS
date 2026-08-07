@@ -8,7 +8,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import worker, {
   amsgFireSettled, amsgHooks, amsgReasoningKey, amsgStaleSkip, attachScheduledTasks,
-  buildWorkerConfig, inspectWorkerEnv, offloadOversizedPush,
+  buildWorkerConfig, EMOTION_EVAL_RIDE_ALONG_MS, inspectWorkerEnv, offloadOversizedPush,
   resolveVapidEmail, runFireCancelTool, runFireRenewTool, runFireScheduleTool, runMcpFireTool,
 } from './index';
 import { MAX_TOOL_ITERATIONS } from './agentic';
@@ -26,17 +26,20 @@ import {
   AMSG_SLOT_TASK_INSTRUCTION,
   amsgStateNamespace,
   amsgXhsSessionKey,
+  appendSelfLogEntry,
+  createSelfLog,
   CHAT_OUTBOX_MAX,
   FIRE_PACK_VERSION,
   packStateValue,
   parseChatOutbox,
   parseSelfLog,
+  SELF_LOG_MAX_ENTRIES,
 } from '../../../utils/amsgFirePack';
 import { AMSG_CHAT_PRESENCE_KEY } from '../../../utils/amsgChatPresence';
 import { AMSG_TOOL_CONFIG_KEY, AMSG_TOOL_PACK_KEY } from '../../../utils/amsgToolPack';
 import { buildMcpNameMap, MCP_FIRE_NAME_BUDGET, type McpFireServer } from '../../../utils/mcpFireCore';
 import { MAX_FIRE_SCHEDULES } from '../../../utils/amsgFireSchedule';
-import { MAX_ACTIVE_TASKS_PER_CHAR } from '../../../utils/amsg2Tasks';
+import { MAX_ACTIVE_TASKS_PER_CHAR, shortTaskId } from '../../../utils/amsg2Tasks';
 
 const CHAR_ID = 'preset-nyah';
 const TASK_UUID = '3637dae1-1461-4444-a747-34e406f67acc';
@@ -549,14 +552,24 @@ describe('onBeforeFire 四道门', () => {
 // 即时对话是在答用户刚说的话，也不拦。计数随「用户开口」清零，不随 fire_pack
 // 重传清零（后者正是当年提醒失效的回路）。
 describe('连发上限（到点兜底闸）', () => {
-  /** 造一份 v3 自述日志：n 条主动 + 可选几条即时回复。 */
+  /**
+   * 造一份自述日志：n 条主动 + 可选几条即时回复。
+   *
+   * 连发条数记在 unansweredSends 上，entries 只是给 prompt 看的上下文（最多留 8 条）；
+   * 两者分开正是「上限设 9 / 10 时闸失效」那条的修法，夹具也照真格式造。
+   */
   const selfLogValue = (sends: number, opts: { replies?: number; basePackAt?: number } = {}) => {
     const entries = [
       ...Array.from({ length: sends }, (_, i) => ({ id: `s@${i}`, at: NOW.getTime() - (sends - i) * 60_000, text: `主动第${i + 1}条` })),
       ...Array.from({ length: opts.replies ?? 0 }, (_, i) => ({ id: `r@${i}`, at: NOW.getTime() - 30_000, text: `回复${i + 1}`, reply: true })),
     ];
     return JSON.stringify({
-      v: 3, basePackAt: opts.basePackAt ?? PACK_BUILT_AT, anchorUserMsgAt: null, entries, tasks: [],
+      v: 4,
+      basePackAt: opts.basePackAt ?? PACK_BUILT_AT,
+      anchorUserMsgAt: null,
+      entries: entries.slice(-SELF_LOG_MAX_ENTRIES),
+      unansweredSends: sends,
+      tasks: [],
     });
   };
 
@@ -622,6 +635,40 @@ describe('连发上限（到点兜底闸）', () => {
     const { ctx } = makeCtx({
       metadata: { amsgSelfScheduled: true },
       charRows: rowsWith(selfLogValue(2, { replies: 3 })),
+    });
+    fired(await amsgHooks.onBeforeFire(ctx));
+  });
+
+  // 回归守卫：设置页的下拉给到 1–10，而连发计数以前是数 entries 数出来的、entries 只留
+  // 最近 8 条 —— 9 和 10 两档因此等于「不限」，这道专门为自排链炸屏加的硬闸整个失效。
+  // 日志按真实路径攒（appendSelfLogEntry 会削 entries），才验得出这件事。
+  it('上限设 10、已连发 10 条 → 照样拦下（计数不被 entries 的 8 条上限压平）', async () => {
+    let log = createSelfLog(PACK_BUILT_AT);
+    for (let i = 0; i < 10; i += 1) {
+      log = appendSelfLogEntry(log, {
+        id: `s@${i}`, at: NOW.getTime() - (10 - i) * 60_000, text: `主动第${i + 1}条`,
+      });
+    }
+    expect(log.entries).toHaveLength(SELF_LOG_MAX_ENTRIES);   // 前提：entries 确实被削过
+
+    const { ctx, writeState } = makeCtx({
+      metadata: { amsgSelfScheduled: true },
+      charRows: rowsWith(JSON.stringify(log), { maxUnansweredSends: 10 }),
+    });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
+    expect(lastSkipReason(writeState)).toBe('unanswered-limit');
+  });
+
+  it('上限设 10、只连发 9 条 → 还差一条，照常生成', async () => {
+    let log = createSelfLog(PACK_BUILT_AT);
+    for (let i = 0; i < 9; i += 1) {
+      log = appendSelfLogEntry(log, {
+        id: `s@${i}`, at: NOW.getTime() - (9 - i) * 60_000, text: `主动第${i + 1}条`,
+      });
+    }
+    const { ctx } = makeCtx({
+      metadata: { amsgSelfScheduled: true },
+      charRows: rowsWith(JSON.stringify(log), { maxUnansweredSends: 10 }),
     });
     fired(await amsgHooks.onBeforeFire(ctx));
   });
@@ -1279,12 +1326,15 @@ describe('云端工具痕迹随末条 push 回客户端', () => {
   const fireWithTools = async (opts: {
     instant: boolean;
     tools: Array<{ name: string; args: Record<string, unknown> }>;
+    /** 给了才注入取消能力（不给的话取消工具会以 not_supported 打回，测不出别的）。 */
+    cancelTask?: (uuid: string) => Promise<{ cancelled: boolean }>;
   }) => {
     const store = makeFireStore(opts.instant ? CHAT_MESSAGES : undefined);
     const scratch: Record<string, unknown> = {};
     const scheduleTask = async (o: any) => ({
       created: true as const, id: 7, uuid: o.uuid, nextSendAt: o.firstSendTime,
     });
+    const cancelTask = opts.cancelTask;
     const metadata = {
       charId: CHAR_ID,
       amsgClientTaskId: CLIENT_TASK_ID,
@@ -1308,7 +1358,10 @@ describe('云端工具痕迹随末条 push 回客户端', () => {
     for (const [i, tool] of opts.tools.entries()) {
       await amsgHooks.executeToolCalls(
         [toolCall(`c${i}`, tool.name, tool.args)],
-        { sessionId: `sess_task_${FIRE_TASK_ID}@1`, scratch, iteration: 0, scheduleTask } as any,
+        {
+          sessionId: `sess_task_${FIRE_TASK_ID}@1`, scratch, iteration: 0,
+          scheduleTask, cancelTask,
+        } as any,
       );
     }
 
@@ -1319,7 +1372,10 @@ describe('云端工具痕迹随末条 push 回客户端', () => {
     } as any) as any;
   };
 
-  const SEND_AT = new Date(NOW.getTime() + 90 * 60_000).toISOString();
+  // 排程工具校验 send_at 用的是真实时钟（executeToolCalls 传的是 Date.now()，不是
+  // ctx.now），所以这里必须相对**现在**取未来时刻——照夹具里那个固定的 NOW 算的话，
+  // 这次排程会被 send_at_too_soon 打回，测的就不是「排成功的调用记进痕迹」了。
+  const SEND_AT = new Date(Date.now() + 90 * 60_000).toISOString();
 
   it('同一个工具跑了两次 → 按第一次出现的顺序压成名字 + 次数，只挂最后一条', async () => {
     const decision = await fireWithTools({
@@ -1371,6 +1427,41 @@ describe('云端工具痕迹随末条 push 回客户端', () => {
     const payloads = decision.pushPayloads as Array<Record<string, any>>;
     expect(payloads[payloads.length - 1].metadata.amsgToolTrace)
       .toEqual([{ name: 'recall', count: 1 }]);
+  });
+
+  // 被打回的调用同样不算。排程 / 取消 / 改期的打回码（no_tasks、task_not_found、
+  // ambiguous_task、unanswered_limit…）都不在 neverRan 那个集合里，照它筛的话这些会被
+  // 当成「跑起来了」记进痕迹——于是取消失败的那次也在气泡底下写一行「调用了工具：
+  // 取消排好的消息」，用户据此以为排程没了，而那条任务原封不动到点照响。
+  it('被打回的取消不算数（远端一次都没调，什么都没改）', async () => {
+    const cancelTask = vi.fn(async () => ({ cancelled: true }));
+    const decision = await fireWithTools({
+      instant: true,
+      cancelTask,
+      // 这个角色现在一条排程都没挂着 → no_tasks 打回
+      tools: [{ name: 'cancel_active_message', args: { task_id: 'nosuch12' } }],
+    });
+
+    expect(decision.decision).toBe('finish');
+    expect(cancelTask, '连远端都没调，更没改动任何东西').not.toHaveBeenCalled();
+    for (const payload of decision.pushPayloads as Array<Record<string, any>>) {
+      expect(payload.metadata.amsgToolTrace).toBeUndefined();
+    }
+  });
+
+  it('被打回的排程不算数（send_at 太近，一条任务都没建）', async () => {
+    const decision = await fireWithTools({
+      instant: true,
+      tools: [{
+        name: 'schedule_active_message',
+        args: { send_at: new Date(Date.now() + 10_000).toISOString() },
+      }],
+    });
+
+    expect(decision.decision).toBe('finish');
+    for (const payload of decision.pushPayloads as Array<Record<string, any>>) {
+      expect(payload.metadata.amsgToolTrace).toBeUndefined();
+    }
   });
 
   it('这一轮一个工具都没跑 → 一个字段都不挂（气泡底下不该凭空多一行）', async () => {
@@ -1832,7 +1923,9 @@ describe('自排后续任务', () => {
   const makeStash = (over: Record<string, unknown> = {}) => ({
     session: { narrations: [], toolCalls: [], duplicateToolCalls: 0, mcpCallSeq: 0 },
     occurrenceMs: Date.parse('2026-07-25T12:00:00.000Z'),
-    selfLog: { v: 3 as const, basePackAt: 1, anchorUserMsgAt: null, entries: [], tasks: [] },
+    selfLog: {
+      v: 4 as const, basePackAt: 1, anchorUserMsgAt: null, entries: [], unansweredSends: 0, tasks: [],
+    },
     pendingTaskCount: 0,
     scheduledTasks: [],
     charId: CHAR_ID,
@@ -1859,7 +1952,7 @@ describe('自排后续任务', () => {
     const stash = makeStash({
       maxUnansweredSends: 3,
       selfLog: {
-        v: 3, basePackAt: 1, anchorUserMsgAt: null, tasks: [],
+        v: 4, basePackAt: 1, anchorUserMsgAt: null, tasks: [], unansweredSends: 3,
         entries: [
           { id: 's@1', at: NOW_MS - 3 * 60_000, text: '一' },
           { id: 's@2', at: NOW_MS - 2 * 60_000, text: '二' },
@@ -1878,7 +1971,7 @@ describe('自排后续任务', () => {
       maxUnansweredSends: 3,
       plannedSelfSends: 1,
       selfLog: {
-        v: 3, basePackAt: 1, anchorUserMsgAt: null, tasks: [],
+        v: 4, basePackAt: 1, anchorUserMsgAt: null, tasks: [], unansweredSends: 2,
         entries: [
           { id: 's@1', at: NOW_MS - 2 * 60_000, text: '一' },
           { id: 's@2', at: NOW_MS - 60_000, text: '二' },
@@ -1894,7 +1987,7 @@ describe('自排后续任务', () => {
     const stash = makeStash({
       maxUnansweredSends: 3,
       selfLog: {
-        v: 3, basePackAt: 1, anchorUserMsgAt: null, tasks: [],
+        v: 4, basePackAt: 1, anchorUserMsgAt: null, tasks: [], unansweredSends: 2,
         entries: [
           { id: 'r@1', at: NOW_MS - 4 * 60_000, text: '在的', reply: true },
           { id: 'r@2', at: NOW_MS - 3 * 60_000, text: '嗯嗯', reply: true },
@@ -1947,6 +2040,20 @@ describe('自排后续任务', () => {
     expect(stash.scheduledTasks).toHaveLength(1);
     expect(stash.selfLog.tasks).toHaveLength(1);
     expect(stash.selfLog.tasks[0].source).toBe('character');
+  });
+
+  // 回归守卫：排程清单里印给角色看的短 id 取的是 uuid 前 8 个字符。uuid 要是以固定字样
+  // 开头（旧写法 `amsgself-…`），同一次 fire 排下的两条在清单里就印成一模一样的
+  // `[amsgself]` —— 角色说「晚上那条不用了」，取消的却是早上那条，两边还都回 ok。
+  it('同一次 fire 排的两条，清单里的短 id 不撞车', async () => {
+    const stash = makeStash();
+    await runFireScheduleTool(stash, okSchedule, { send_at: sendAt }, NOW_MS);
+    await runFireScheduleTool(
+      stash, okSchedule, { send_at: new Date(NOW_MS + 8 * 3600_000).toISOString() }, NOW_MS);
+
+    expect(stash.scheduledTasks).toHaveLength(2);
+    const shortIds = stash.scheduledTasks.map((t: any) => shortTaskId(t.taskUuid));
+    expect(new Set(shortIds).size, `两条印出来都是 ${shortIds[0]}`).toBe(2);
   });
 
   // 幽灵任务回归守卫：角色排了任务，但这轮最终一句话都没发出去（只做了副作用 / 空生成 /
@@ -2165,7 +2272,9 @@ describe('fire 侧取消 / 改期任务', () => {
     session: { narrations: [], toolCalls: [], duplicateToolCalls: 0, mcpCallSeq: 0 },
     toolCtx: { char: { name: 'Nyah' } },
     occurrenceMs: NOW_MS,
-    selfLog: { v: 3 as const, basePackAt: 1, anchorUserMsgAt: null, entries: [], tasks: [] },
+    selfLog: {
+      v: 4 as const, basePackAt: 1, anchorUserMsgAt: null, entries: [], unansweredSends: 0, tasks: [],
+    },
     pendingTaskCount: 0,
     pendingTasks: [],
     scheduledTasks: [],
@@ -2228,11 +2337,41 @@ describe('fire 侧取消 / 改期任务', () => {
     expect(cancel).not.toHaveBeenCalled();
   });
 
+  // 撞车守卫（配合自排 uuid 那条）：万一哪天两条任务的短 id 又长一样了，宁可打回让角色
+  // 重说一次，也不能挑一条删了 —— 删错的那条无声无息地没了，说好要响的那条照样响。
+  it('两条任务共用一个短 id → 打回 ambiguous_task，远端一次都不调', async () => {
+    const cancel = okCancel();
+    const stash = makeStash({
+      pendingTasks: [taskRec('samehead-aaaa-1'), taskRec('samehead-bbbb-2')],
+    });
+    const out = await runFireCancelTool(stash, cancel, { task_id: 'samehead' }, NOW_MS);
+    expect(out.ok).toBe(false);
+    expect(out.reason).toBe('ambiguous_task');
+    expect(cancel).not.toHaveBeenCalled();
+    expect(stash.cancelledTasks).toEqual([]);
+    // 打回的话要能照做：带上两条各自的完整 id，角色下一轮指得准
+    expect(String(out.message)).toContain('samehead-aaaa-1');
+    expect(String(out.message)).toContain('samehead-bbbb-2');
+  });
+
+  it('改期同样不猜：短 id 撞车时打回，不去改另一条的时间', async () => {
+    const renew = okRenew();
+    const stash = makeStash({
+      pendingTasks: [taskRec('samehead-aaaa-1'), taskRec('samehead-bbbb-2')],
+    });
+    const out = await runFireRenewTool(
+      stash, { renewTask: renew }, { task_id: 'samehead', send_at: newSendAt }, NOW_MS);
+    expect(out.reason).toBe('ambiguous_task');
+    expect(renew).not.toHaveBeenCalled();
+  });
+
   it('取消掉 selfLog 里备着账的自排任务：日志同步摘除并打脏', async () => {
     const rec = taskRec('u-selflog', { source: 'character' });
     const stash = makeStash({
       pendingTasks: [rec],
-      selfLog: { v: 3, basePackAt: 1, anchorUserMsgAt: null, entries: [], tasks: [rec] },
+      selfLog: {
+        v: 4, basePackAt: 1, anchorUserMsgAt: null, entries: [], unansweredSends: 0, tasks: [rec],
+      },
     });
     await runFireCancelTool(stash, okCancel(), { task_id: 'u-selflog' }, NOW_MS);
     expect(stash.selfLog.tasks).toEqual([]);
@@ -2266,7 +2405,9 @@ describe('fire 侧取消 / 改期任务', () => {
     const renew = okRenew();
     const stash = makeStash({
       pendingTasks: [rec],
-      selfLog: { v: 3, basePackAt: 1, anchorUserMsgAt: null, entries: [], tasks: [rec] },
+      selfLog: {
+        v: 4, basePackAt: 1, anchorUserMsgAt: null, entries: [], unansweredSends: 0, tasks: [rec],
+      },
     });
     const out = await runFireRenewTool(stash, { renewTask: renew }, { send_at: newSendAt }, NOW_MS);
     expect(out.ok).toBe(true);
@@ -3188,6 +3329,52 @@ describe('即时对话的云端情绪评估', () => {
     expect(lastMeta.amsgEmotionError).toContain('副 API HTTP 500');
     // 评估跑挂了也照删不误（凭据的去留跟评估成不成功无关）
     expect(metadata).not.toHaveProperty('amsgEmotionEval');
+  });
+
+  // 回归守卫：评估以前是无条件 await 的，而它自己的超时是 120 秒（EMOTION_EVAL_TIMEOUT_MS）。
+  // 副 API 一限流 / 挂起，写好的回复就被扣在这儿两分钟：用户一直看着「正在输入…」，
+  // 同一句话走本地路径十秒就上屏了（本地那条的情绪评估是 fire-and-forget，从不挡回复）。
+  // 工具循环吃掉大半预算时，这两分钟还会把整轮 600 秒的预算顶穿 —— fire 失败重跑，
+  // 用户拿到的是一句失败说明，而不是那条已经生成好的回复。
+  it('副 API 挂起时不挡回复：等够搭车窗口就先把话发出去', async () => {
+    vi.useFakeTimers();
+    try {
+      // 永不回来的副 API（限流 / 挂起时就是这个样子）
+      vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})));
+
+      const store = makeStore();
+      const pending = evalFire(store, { amsgEmotionEval: EVAL_SPEC });
+      // 先把 hook 链推到「等评估搭车」那一步（中间还有几个 await），再拨表。
+      for (let i = 0; i < 8; i += 1) await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(EMOTION_EVAL_RIDE_ALONG_MS);
+      const { decision } = await pending;
+
+      expect(decision.decision).toBe('finish');
+      const payloads = decision.pushPayloads as Array<Record<string, any>>;
+      // 正文一段不少地发出去了 —— 这才是用户在等的东西
+      expect(payloads.map((p) => p.message)).toEqual(['在的。', '怎么啦？']);
+
+      const lastMeta = payloads[payloads.length - 1].metadata;
+      // 结果没赶上就不搭这班车；但那盏「情绪更新中」得有人来熄，所以照样带信号 + 一句原因
+      expect(lastMeta.amsgEmotionUpdate).toBeUndefined();
+      expect(lastMeta.amsgEmotionDone).toBe(true);
+      expect(lastMeta.amsgEmotionError).toContain('没赶上');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // 正常情况下评估早就跑完了，搭车窗口一秒都用不上——不能因为加了窗口就变成「每轮都等」。
+  it('评估已经跑完时立刻搭上车，不白等那个窗口', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: '{"changed":true,"buffs":[]} FAST-EVAL' } }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+
+    const startedAt = Date.now();
+    const { decision } = await evalFire(makeStore(), { amsgEmotionEval: EVAL_SPEC });
+    const lastMeta = (decision.pushPayloads as Array<Record<string, any>>).slice(-1)[0].metadata;
+    expect(lastMeta.amsgEmotionUpdate).toContain('FAST-EVAL');
+    expect(Date.now() - startedAt).toBeLessThan(EMOTION_EVAL_RIDE_ALONG_MS);
   });
 
   // 报错正文里带回一小段够定位是限流还是鉴权就行，但**绝不能把 key 带出来**：

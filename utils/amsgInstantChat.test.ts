@@ -34,31 +34,46 @@ const { storeState } = vi.hoisted(() => ({
       serverToken: '',
       instantChatEnabled: true,
     } as Record<string, unknown>,
+    /** 非空时 getGlobalConfig 直接 reject（模拟 IndexedDB 被别的标签页卡住那类异常）。 */
+    configError: null as Error | null,
     inbox: [] as any[],
     saved: [] as any[],
+    markedNotices: [] as Array<{ charId: string; ids: string[] }>,
   },
 }));
 vi.mock('./activeMsgStore', () => ({
   ActiveMsgStore: {
     ensureUserId: async () => TEST_USER_ID,
-    getGlobalConfig: async () => storeState.config,
+    getGlobalConfig: async () => {
+      if (storeState.configError) throw storeState.configError;
+      return storeState.config;
+    },
     saveGlobalConfig: vi.fn().mockResolvedValue(undefined),
     listInboxMessages: async () => storeState.inbox,
     saveInboxMessage: async (message: any) => { storeState.saved.push(message); },
+    markExpiredNoticesNotified: async (charId: string, ids: string[]) => {
+      storeState.markedNotices.push({ charId, ids });
+    },
   },
 }));
 
 import { ActiveMsgClient } from './activeMsgClient';
 import {
   AMSG_INSTANT_CHAT_PENDING_LS_KEY,
+  AMSG_INSTANT_CHAT_STAGED_NOTICES_LS_KEY,
   chatOutboxPayloadToInbox,
   clearInstantChatPending,
+  discardInstantChatExpiredNotices,
   drainChatOutboxForChar,
   failInstantChatPending,
   getInstantChatPending,
+  getStagedInstantChatExpiredNotices,
   isInstantChatReady,
+  resolveInstantChatReadiness,
   sendInstantChatTurn,
   setInstantChatPending,
+  settleInstantChatExpiredNotices,
+  stageInstantChatExpiredNotices,
 } from './amsgInstantChat';
 import { FIRE_PACK_VERSION, unpackStateValue } from './amsgFirePack';
 import { ChatPrompts } from './chatPrompts';
@@ -93,8 +108,11 @@ const mockInstantChatFetch = (status: number, body: unknown) => {
 
 beforeEach(() => {
   localStorage.removeItem(AMSG_INSTANT_CHAT_PENDING_LS_KEY);
+  localStorage.removeItem(AMSG_INSTANT_CHAT_STAGED_NOTICES_LS_KEY);
   storeState.inbox = [];
   storeState.saved = [];
+  storeState.markedNotices = [];
+  storeState.configError = null;
   storeState.config = {
     userId: TEST_USER_ID,
     workerUrl: 'https://amsg.example.workers.dev',
@@ -485,16 +503,96 @@ describe('零推送收尾时也要熄灭情绪徽章', () => {
 describe('开关', () => {
   it('设置页开了 + 地址填着 → 走云端', async () => {
     expect(await isInstantChatReady()).toBe(true);
+    expect(await resolveInstantChatReadiness()).toEqual({ ready: true });
   });
 
   it('开关没开 → 不走（每条消息都读这一份，别处不做第二道门）', async () => {
     storeState.config = { ...storeState.config, instantChatEnabled: false };
     expect(await isInstantChatReady()).toBe(false);
+    expect(await resolveInstantChatReadiness()).toEqual({ ready: false, reason: 'disabled' });
   });
 
   it('地址空着 → 不走', async () => {
     storeState.config = { ...storeState.config, workerUrl: '  ' };
     expect(await isInstantChatReady()).toBe(false);
+    expect(await resolveInstantChatReadiness()).toEqual({ ready: false, reason: 'no-worker-url' });
+  });
+
+  // 读配置失败被当成「没开」的话，这一轮会悄悄退回本地直连生成：用户按完发送随手锁屏，
+  // 本地 fetch 被系统掐掉，回来时既没有回复也没有报错，设置页还写着「已开启」，观察窗里
+  // 查无此事。所以它必须是单独一档、而且落地一条 warn。
+  it('配置根本读不出来 ≠ 没开：单独一档 config-unreadable，而且不许静默', async () => {
+    storeState.configError = new Error('IndexedDB blocked by another tab');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* 静音，只数次数 */ });
+    const readiness = await resolveInstantChatReadiness();
+    expect(readiness).toEqual({ ready: false, reason: 'config-unreadable' });
+    expect(readiness.reason).not.toBe('disabled');
+    expect(warn).toHaveBeenCalledTimes(1);
+    // 只关心「走不走得通」的老调用点（设置页互斥门）行为不变：依旧是 false，不抛。
+    expect(await isInstantChatReady()).toBe(false);
+  });
+});
+
+describe('随这一轮上云的作废回执', () => {
+  const NOTICE_CHAR = 'char-notice';
+
+  it('202 之后只记账，不销账（受理 ≠ 角色读到过）', () => {
+    stageInstantChatExpiredNotices(NOTICE_CHAR, 'uuid-1', ['n1', 'n2']);
+    expect(getStagedInstantChatExpiredNotices(NOTICE_CHAR)).toEqual({
+      charId: NOTICE_CHAR, uuid: 'uuid-1', ids: ['n1', 'n2'],
+    });
+    expect(storeState.markedNotices).toEqual([]);
+  });
+
+  it('回复真的落库了才销账，而且只销一次', async () => {
+    stageInstantChatExpiredNotices(NOTICE_CHAR, 'uuid-1', ['n1', 'n2']);
+    expect(await settleInstantChatExpiredNotices(NOTICE_CHAR, 'uuid-1')).toEqual(['n1', 'n2']);
+    expect(storeState.markedNotices).toEqual([{ charId: NOTICE_CHAR, ids: ['n1', 'n2'] }]);
+    // 台账已经取走：同一轮的补收 / 重复冲刷再调一次不会二次销账。
+    expect(await settleInstantChatExpiredNotices(NOTICE_CHAR, 'uuid-1')).toEqual([]);
+    expect(storeState.markedNotices).toHaveLength(1);
+  });
+
+  it('销账认 uuid：上一轮迟到的结论碰不到新那一轮的回执', async () => {
+    stageInstantChatExpiredNotices(NOTICE_CHAR, 'uuid-new', ['n1']);
+    expect(await settleInstantChatExpiredNotices(NOTICE_CHAR, 'uuid-old')).toEqual([]);
+    expect(storeState.markedNotices).toEqual([]);
+    expect(getStagedInstantChatExpiredNotices(NOTICE_CHAR)?.uuid).toBe('uuid-new');
+  });
+
+  it('连发时新那一轮顶掉旧记录（旧的还没销账，会跟着新一轮一起重注）', () => {
+    stageInstantChatExpiredNotices(NOTICE_CHAR, 'uuid-1', ['n1']);
+    stageInstantChatExpiredNotices(NOTICE_CHAR, 'uuid-2', ['n1', 'n2']);
+    expect(getStagedInstantChatExpiredNotices(NOTICE_CHAR)).toEqual({
+      charId: NOTICE_CHAR, uuid: 'uuid-2', ids: ['n1', 'n2'],
+    });
+  });
+
+  it('台账扛得住重启（云端那一轮本来就可能横跨一次刷新）', () => {
+    stageInstantChatExpiredNotices(NOTICE_CHAR, 'uuid-1', ['n1']);
+    expect(JSON.parse(localStorage.getItem(AMSG_INSTANT_CHAT_STAGED_NOTICES_LS_KEY) || '{}'))
+      .toEqual({ [NOTICE_CHAR]: { charId: NOTICE_CHAR, uuid: 'uuid-1', ids: ['n1'] } });
+  });
+
+  // 这一条是整个改动的由头：云端整轮失败（空输出被判 skip-push / fire 重试打光）时，
+  // 回执要是已经销过账，角色永远不知道那条任务被作废过 —— 聊天里许下的承诺凭空消失。
+  it('这一轮判定失败 → 回执退回未告知，绝不销账', async () => {
+    setInstantChatPending(NOTICE_CHAR, 'uuid-1', 1_000);
+    stageInstantChatExpiredNotices(NOTICE_CHAR, 'uuid-1', ['n1']);
+    vi.spyOn(DB, 'saveMessage').mockResolvedValue(undefined as any);
+    await failInstantChatPending(NOTICE_CHAR, 'uuid-1', '云端生成失败');
+    expect(storeState.markedNotices).toEqual([]);
+    expect(getStagedInstantChatExpiredNotices(NOTICE_CHAR)).toBeNull();
+  });
+
+  it('失败结论对不上当前这一轮 → 新那一轮的回执一根都别动', async () => {
+    setInstantChatPending(NOTICE_CHAR, 'uuid-new', 2_000);
+    stageInstantChatExpiredNotices(NOTICE_CHAR, 'uuid-new', ['n1']);
+    vi.spyOn(DB, 'saveMessage').mockResolvedValue(undefined as any);
+    await failInstantChatPending(NOTICE_CHAR, 'uuid-old', '迟到的结论');
+    expect(getStagedInstantChatExpiredNotices(NOTICE_CHAR)?.ids).toEqual(['n1']);
+    expect(discardInstantChatExpiredNotices(NOTICE_CHAR, 'uuid-new')).toEqual(['n1']);
+    expect(storeState.markedNotices).toEqual([]);
   });
 });
 
