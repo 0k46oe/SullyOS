@@ -57,7 +57,6 @@ import {
 } from './amsgToolPack';
 // 只取一个常量：客户端算 firstSendTime 时要留的提前量，和包装层「把任务行拉到期」
 // 那一步是同一个数，各写各的就会出现「校验说时间要在未来 / cron 说还没到」的死角。
-import { INSTANT_SCHEDULE_LEAD_MS } from '../worker/amsg/src/instantChat';
 import type { AmsgEmotionEvalSpec } from '../worker/amsg/src/emotionEval';
 import { listRecallableMonths } from './agenticTools';
 import { ChatPrompts } from './chatPrompts';
@@ -1765,17 +1764,13 @@ export const ActiveMsgClient = {
       // 定时任务的行分开——不然一条失败的即时对话行会被面板对账当成排程任务补进清单。
       // 常量与面板对账的过滤端共用（amsgFirePack 的 AMSG_INSTANT_CHAT_SUBTYPE）。
       messageSubtype: AMSG_INSTANT_CHAT_SUBTYPE,
-      // amsg-server 2.6.0-next.15 起认 immediate：任务落库即到期，不用再靠 30s 提前量 +
-      // 包装层拉到期那套舞步（慢网/低端机把提前量吃穿的 INVALID_TIMESTAMP 从根上消失）。
-      // firstSendTime 仍然照旧盖（下面紧邻加密前）：老 worker 会把 immediate 剥掉、
-      // 按 firstSendTime 走旧舞步，新 worker 只把它当合法 ISO 校验、实际用「此刻」。
+      // 落库即到期（不带 firstSendTime）：用户已经把话说完了，现在就该答。
+      // 排未来时刻的话，打包/上传的耗时都要预支提前量，慢网低端机会被
+      // 「时间必须在未来」打回，而同一轮走本地路径毫无问题。
       immediate: true,
-      // 同版本起 supersedesUuid 进加密信封、在建新任务的同一事务里取消旧的（原子顶替）。
-      // 外壳明文那份 supersedesUuid 也继续带：老 worker 只认外壳；新 worker 两条都跑，
-      // 双重取消是幂等的 DELETE，无害。
+      // 顶替上一条还没被认领的任务（连发两条时合并成一起回）：上游在建新任务的
+      // 同一事务里取消旧的，原子、无第二个请求。
       ...(params.supersedesUuid ? { supersedesUuid: params.supersedesUuid } : {}),
-      // firstSendTime 在下面紧邻加密前才盖（见 encryptPayload 那段）：这里先占个位。
-      firstSendTime: '',
       recurrenceType: 'none',
       tzId,
       // 真正要发给模型的消息在 fire_pack.chat 里，这条只为过上游「messages 非空」的校验。
@@ -1813,19 +1808,12 @@ export const ActiveMsgClient = {
       },
     };
 
-    // 状态信封的重活（拼 entries，含 MB 级 stringify）先做完，taskPayload 的时间戳
-    // 最后一刻才盖：上游校验 firstSendTime 必须在未来，30s 提前量是给**网络在途**
-    // 留的（worker/amsg/src/instantChat.ts 的 INSTANT_SCHEDULE_LEAD_MS 注释）——
-    // 在流程开头就定格的话，低端机 + 带图大包的 buildFirePack/stringify/加密会把
-    // 提前量预支掉，慢网上传完直接被 400 INVALID_TIMESTAMP 打回，而同一轮走本地
-    // 路径毫无问题。加密本身是毫秒级，留在时间戳之后无妨。
     const stateEntries = {
       entries: [
         ...(await buildCharStateEntries(char, firePack, now)),
         buildToolConfigEntry(realtimeConfig, now),
       ],
     };
-    taskPayload.firstSendTime = new Date(Date.now() + INSTANT_SCHEDULE_LEAD_MS).toISOString();
     const [statePayload, encryptedTask] = await Promise.all([
       encryptPayload(client, stateEntries),
       encryptPayload(client, taskPayload),
@@ -1835,11 +1823,7 @@ export const ActiveMsgClient = {
       method: 'POST',
       // 外壳是明文：里头两个信封已经加密好，别再给外壳挂加密头（包装层会当它是整体密文）。
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        statePayload,
-        taskPayload: encryptedTask,
-        ...(params.supersedesUuid ? { supersedesUuid: params.supersedesUuid } : {}),
-      }),
+      body: JSON.stringify({ statePayload, taskPayload: encryptedTask }),
     }, '即时对话');
 
     if (status !== 202 || typeof body?.uuid !== 'string' || !body.uuid) {

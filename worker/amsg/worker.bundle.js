@@ -9328,8 +9328,6 @@ var runAmsgEmotionEval = async (spec, chatMessages, charName, timeoutMs = EMOTIO
 };
 
 // worker/amsg/src/instantChat.ts
-var INSTANT_SCHEDULE_LEAD_MS = 3e4;
-var INSTANT_TICK_FALLBACK_WAIT_MS = INSTANT_SCHEDULE_LEAD_MS + 1e3;
 var INSTANT_TOTAL_TIMEOUT_MS = 6e5;
 var INSTANT_TICK_CRON = "instant-chat";
 var AMSG_INSTANT_CHAT_FLAG = "amsgInstantChat";
@@ -9403,26 +9401,9 @@ var isEncryptedEnvelope2 = (value) => {
   const env = value;
   return typeof env.iv === "string" && typeof env.authTag === "string" && typeof env.encryptedData === "string";
 };
-var pullTaskDue = async (db, uuid, userId, nowMs) => {
-  const d1 = db;
-  if (typeof d1?.prepare !== "function") return false;
-  const iso = new Date(nowMs).toISOString();
-  try {
-    await d1.prepare(
-      `UPDATE scheduled_messages SET next_send_at = ?, updated_at = ?
-          WHERE uuid = ? AND user_id = ? AND status = 'pending' AND next_send_at > ?`
-    ).bind(iso, iso, uuid, userId, iso).run();
-    return true;
-  } catch (error) {
-    console.warn("[amsg:instant-chat] \u4EFB\u52A1\u884C\u62C9\u5230\u671F\u5931\u8D25\uFF08\u6539\u6210\u7B49\u5230\u70B9\u518D\u8D77\u8DF3\uFF09", error);
-    return false;
-  }
-};
-var delay = (ms) => ms <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
 var handleInstantChat = async (args) => {
   const { request, env, ctx, upstream: upstream2, json } = args;
   const now = args.now ?? Date.now;
-  const sleep = args.sleep ?? delay;
   const fail = (status, code, message, extra) => json(status, { success: false, error: { code, message, ...extra ?? {} } });
   const token = (env.AMSG_SERVER_TOKEN ?? "").trim();
   const clientToken = request.headers.get("X-Client-Token") ?? "";
@@ -9448,13 +9429,12 @@ var handleInstantChat = async (args) => {
   if (!isEncryptedEnvelope2(body.taskPayload)) {
     return fail(400, "INVALID_TASK_PAYLOAD", "taskPayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
   }
-  const supersedesUuid = typeof body.supersedesUuid === "string" ? body.supersedesUuid.trim() : "";
   const requestUrl = new URL(request.url);
   const mountPath = requestUrl.pathname.replace(/\/+$/, "").replace(/\/instant-chat$/, "");
-  const internalUrl = (path, search = "") => {
+  const internalUrl = (path) => {
     const url = new URL(request.url);
     url.pathname = `${mountPath}${path}`;
-    url.search = search;
+    url.search = "";
     return url.toString();
   };
   const encryptedHeaders = {
@@ -9490,28 +9470,6 @@ var handleInstantChat = async (args) => {
       }
     });
   }
-  const cancelPromise = supersedesUuid ? (async () => {
-    try {
-      const cancelled = await upstream2.fetch(
-        new Request(internalUrl("/cancel-message", `?id=${encodeURIComponent(supersedesUuid)}`), {
-          method: "DELETE",
-          headers: {
-            "X-User-Id": userId,
-            ...clientToken ? { "X-Client-Token": clientToken } : {}
-          }
-        }),
-        env
-      );
-      if (!cancelled.ok) {
-        console.log("[amsg:instant-chat] \u9876\u66FF\u4E0A\u4E00\u6761\u6CA1\u6210\uFF08\u7167\u5E38\u7EE7\u7EED\uFF09", {
-          uuid: supersedesUuid,
-          status: cancelled.status
-        });
-      }
-    } catch (error) {
-      console.log("[amsg:instant-chat] \u9876\u66FF\u4E0A\u4E00\u6761\u629B\u9519\uFF08\u7167\u5E38\u7EE7\u7EED\uFF09", error);
-    }
-  })() : null;
   const taskResponse = await upstream2.fetch(
     new Request(internalUrl("/schedule-message"), {
       method: "POST",
@@ -9520,7 +9478,6 @@ var handleInstantChat = async (args) => {
     }),
     env
   );
-  if (cancelPromise) await cancelPromise;
   const taskBody = await readBody(taskResponse);
   if (!taskResponse.ok) {
     return json(taskResponse.status, {
@@ -9540,15 +9497,11 @@ var handleInstantChat = async (args) => {
     });
   }
   if (ctx && typeof ctx.waitUntil === "function") {
-    ctx.waitUntil((async () => {
-      try {
-        const due = await pullTaskDue(env.DB, uuid, userId, now());
-        if (!due) await sleep(INSTANT_TICK_FALLBACK_WAIT_MS);
-        await upstream2.scheduled({ scheduledTime: now(), cron: INSTANT_TICK_CRON }, env);
-      } catch (error) {
+    ctx.waitUntil(
+      upstream2.scheduled({ scheduledTime: now(), cron: INSTANT_TICK_CRON }, env).catch((error) => {
         console.warn("[amsg:instant-chat] \u7ACB\u5373\u89E6\u53D1\u5931\u8D25\uFF08\u7B49 cron \u515C\u5E95\uFF09", error);
-      }
-    })());
+      })
+    );
   } else {
     console.warn("[amsg:instant-chat] \u8FD0\u884C\u65F6\u6CA1\u7ED9 ctx\uFF0C\u8DF3\u8FC7\u7ACB\u5373\u89E6\u53D1\uFF0C\u7B49 cron \u515C\u5E95");
   }

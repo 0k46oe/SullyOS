@@ -46,7 +46,7 @@ import { getPendingTasks, hasActiveAiTask, isAmsg2EnabledForChar } from '../util
 import { buildAmsg2NoticesText, buildAmsg2TaskContextText, collectAmsg2TaskContext } from '../utils/amsg2TaskContext';
 import { resolveCharTimeZone } from '../utils/timezone';
 import { isInstantChatReady, sendInstantChatTurn } from '../utils/amsgInstantChat';
-// worker 模块的常量叶子（同 activeMsgClient import INSTANT_SCHEDULE_LEAD_MS 的先例）：
+// worker 模块的常量叶子（零运行时依赖，前端引它不带进 worker 环境）：
 // 云端 fire 的总时长上限，安全网超时从它推导，worker 调预算时前端自动跟上。
 import { INSTANT_TOTAL_TIMEOUT_MS } from '../worker/amsg/src/instantChat';
 import { appendInstantTraceEntry } from '../utils/instantTraceLog';

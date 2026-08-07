@@ -61,7 +61,6 @@ import {
   setInstantChatPending,
 } from './amsgInstantChat';
 import { FIRE_PACK_VERSION, unpackStateValue } from './amsgFirePack';
-import { INSTANT_SCHEDULE_LEAD_MS } from '../worker/amsg/src/instantChat';
 import { ChatPrompts } from './chatPrompts';
 import { DB } from './db';
 
@@ -157,29 +156,21 @@ describe('POST /instant-chat 的形状', () => {
     expect(task.metadata.amsgExpirePolicy).toBeUndefined();
   });
 
-  it('firstSendTime 留出提前量（老 worker 兼容路：上游要求在未来，包装层落库后再拉到期）', async () => {
-    const before = Date.now();
-    const { task } = await postOnce([{ role: 'user', content: '在吗' }]);
-    const lead = Date.parse(task.firstSendTime) - before;
-    expect(lead).toBeGreaterThanOrEqual(INSTANT_SCHEDULE_LEAD_MS - 50);
-    expect(lead).toBeLessThanOrEqual(INSTANT_SCHEDULE_LEAD_MS + 5_000);
-  });
-
-  it('immediate: true 随信封上云（新 worker 落库即到期，不吃 30s 提前量）', async () => {
+  it('immediate: true 且不带 firstSendTime（落库即到期，慢机吃提前量的 400 无从发生）', async () => {
     const { task } = await postOnce([{ role: 'user', content: '在吗' }]);
     expect(task.immediate).toBe(true);
+    expect(task.firstSendTime).toBeUndefined();
   });
 
-  it('顶替 uuid 两份都带：信封内走原子事务（新 worker），外壳明文走旧取消路（老 worker）', async () => {
+  it('顶替 uuid 只在加密信封里（上游同一事务原子取消），外壳明文不带', async () => {
     const { task, supersedes } = await postOnce([{ role: 'user', content: '在吗' }], 'uuid-prev');
     expect(task.supersedesUuid).toBe('uuid-prev');
-    expect(supersedes).toBe('uuid-prev');
+    expect(supersedes).toBeUndefined();
   });
 
-  it('没有可顶替的上一条时，两处都不带这个键', async () => {
-    const { task, supersedes } = await postOnce([{ role: 'user', content: '在吗' }]);
+  it('没有可顶替的上一条时不带这个键', async () => {
+    const { task } = await postOnce([{ role: 'user', content: '在吗' }]);
     expect(task.supersedesUuid).toBeUndefined();
-    expect(supersedes).toBeUndefined();
   });
 
   // 情绪评估要跟这一轮一起上云（worker 跑完随最后一条推送把结果送回来）。它里头有
@@ -314,15 +305,6 @@ describe('POST /instant-chat 的形状', () => {
     warn.mockRestore();
   });
 
-  it('顶替上一条：supersedesUuid 原样带上去', async () => {
-    const { supersedes } = await postOnce([{ role: 'user', content: '再补一句' }], 'uuid-prev');
-    expect(supersedes).toBe('uuid-prev');
-  });
-
-  it('没有待顶替的那条时不带这个字段', async () => {
-    const { supersedes } = await postOnce([{ role: 'user', content: '在吗' }]);
-    expect(supersedes).toBeUndefined();
-  });
 });
 
 describe('只有 202 才算发出去', () => {
