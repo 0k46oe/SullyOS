@@ -114,6 +114,8 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   const [generatedServerToken, setGeneratedServerToken] = useState('');
 
   const [workerOutdated, setWorkerOutdated] = useState(false);
+  /** 自更新成功后 worker 报回来的代码指纹，显示出来好让人确认这次真换了。 */
+  const [selfUpdateHash, setSelfUpdateHash] = useState('');
   // Instant Push 也开着：聊天会走它，2.0 挂在本地那条路上的几样东西全静默失效——设置页
   // 两道双向门通常已经拦住这种组合，这里读一次是给漏网脏配置兜底，关掉后立刻更新。
   const [instantOn, setInstantOn] = useState(false);
@@ -282,6 +284,36 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     } catch (error: any) {
       addToast(error?.message || '连接失败。', 'error');
       trackEvent('连接并启用主动消息 2.0', { result: readAmsgFailKind(error) });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /**
+   * 让后端自己更新到最新版本。
+   *
+   * 三种装法（fork 后连 Git / Deploy 按钮 / 找人代配）此前更新方式各不相同，最麻烦的一种
+   * 要在两个网站之间倒腾一个几百 KB 的文件。有了这个按钮都变成点一下。
+   *
+   * 更新完不刷新面板：那一刻代码才刚换上，紧接着去问状态多半问到的还是旧实例，
+   * 反而显示得莫名其妙。看返回的指纹确认就够了。
+   */
+  const handleSelfUpdateWorker = async () => {
+    setLoading(true);
+    try {
+      const result = await ActiveMsgClient.selfUpdateWorker();
+      if (result.ok) {
+        setSelfUpdateHash(result.bundleHash || '');
+        addToast(result.message, 'success');
+      } else {
+        addToast(result.message, result.supported ? 'error' : 'info');
+      }
+      trackEvent('更新后端 Worker', {
+        result: result.ok ? 'ok' : result.supported ? 'failed' : 'unsupported',
+      });
+    } catch (error: any) {
+      addToast(error?.message || '更新失败。', 'error');
+      trackEvent('更新后端 Worker', { result: 'failed' });
     } finally {
       setLoading(false);
     }
@@ -786,6 +818,28 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
           <p className="text-xs leading-relaxed text-slate-500">
             「连接」会自动在你的 D1 里把表建好（幂等，重复点没关系），不用手动执行 SQL。
           </p>
+
+          {isConnected ? (
+            <div className="pt-1 space-y-2 border-t border-slate-200">
+              <button
+                onClick={handleSelfUpdateWorker}
+                disabled={loading}
+                className="w-full py-2.5 bg-white border border-slate-300 text-slate-700 font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50"
+              >
+                {loading ? '处理中...' : '更新后端到最新版本'}
+              </button>
+              <p className="text-xs leading-relaxed text-slate-500">
+                后端自己去取最新代码覆盖自己，你排好的任务和填过的密钥都不动。
+                需要先给 Worker 加一条 <code className="font-mono">CF_API_TOKEN</code>（只勾 Workers Scripts → Edit），
+                没加的话点了会告诉你去哪儿补。
+              </p>
+              {selfUpdateHash ? (
+                <p className="text-xs leading-relaxed text-emerald-600">
+                  当前后端代码指纹：<code className="font-mono">{selfUpdateHash}</code>
+                </p>
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
         <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">

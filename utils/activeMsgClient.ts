@@ -269,6 +269,19 @@ const inspectWorkerConfig = async (config: ActiveMsg2GlobalConfig): Promise<Amsg
   }
 };
 
+/**
+ * 后端自更新的回执（`POST /self-update`，见 worker/amsg/src/selfUpdate.ts）。
+ * supported 为 false 表示这台 worker 还是旧版、根本没有这个端点。
+ */
+export interface AmsgSelfUpdateResult {
+  ok: boolean;
+  supported: boolean;
+  /** 直接显示给用户的整句，成功和失败都有。 */
+  message: string;
+  /** 新代码的指纹，成功时才有，拿来当「现在跑的是哪一版」。 */
+  bundleHash?: string;
+}
+
 /** init-tenant 没成功时按 HTTP 状态归类：三种状态要用户去改的地方完全不同。 */
 const resolveInitFailKind = (status: number): AmsgFailKind => {
   if (status === 401 || status === 403) return '鉴权失败';   // 共享密钥两边对不上
@@ -1971,6 +1984,44 @@ export const ActiveMsgClient = {
     } catch {
       return false;
     }
+  },
+
+  /**
+   * 让后端自己更新到最新版本。
+   *
+   * 这活儿只能由 worker 自己干：api.cloudflare.com 不返回 CORS 头，浏览器直接调一律被拦。
+   * 所以这里只是按一下开关，取代码、校验、覆盖都发生在 worker 那一侧（见 worker/amsg/src/selfUpdate.ts）。
+   *
+   * 更新成功那一刻代码就换了，但本次响应仍由旧代码发出——所以这个方法拿到的是「旧代码
+   * 报告更新已完成」，不是新代码的自我介绍。想确认新版本真跑起来了，看返回的 bundleHash。
+   */
+  async selfUpdateWorker(): Promise<AmsgSelfUpdateResult> {
+    const config = await ensureWorkerReady();
+    const { status, body } = await fetchWithAuthRaw('self-update', config, { method: 'POST' }, '后端自更新');
+
+    // 旧 worker 没有这个端点。它可能回 404，也可能被上游当成未知路由回一段自己的 JSON，
+    // 两种都归到「不支持」——让面板去说「先用老办法更新一次」，而不是报一个看不懂的错。
+    if (status === 404 || body?.error?.code === 'NOT_FOUND') {
+      return {
+        ok: false,
+        supported: false,
+        message: '这台 Worker 还是旧版本，没有自更新能力。先按原来的办法更新一次，之后就能在这儿点了。',
+      };
+    }
+    if (status === 200 && body?.success === true) {
+      const data = body.data ?? {};
+      return {
+        ok: true,
+        supported: true,
+        message: typeof data.message === 'string' ? data.message : '已经更新到最新版本。',
+        bundleHash: typeof data.bundleHash === 'string' ? data.bundleHash : undefined,
+      };
+    }
+    return {
+      ok: false,
+      supported: true,
+      message: body?.error?.message || `更新没成功（HTTP ${status}）。`,
+    };
   },
 
   async getCapabilities(): Promise<{ serverVersion: string; features: string[] } | null> {
