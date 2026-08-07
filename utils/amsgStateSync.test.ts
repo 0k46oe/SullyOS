@@ -22,6 +22,7 @@ vi.mock('./activeMsgStore', () => ({
 }));
 
 import {
+  FLUSH_DEBOUNCE_MS,
   AMSG2_PENDING_SYNC_LS_KEY,
   AMSG2_PENDING_TOOL_CONFIG_LS_KEY,
   cancelAllRemoteAmsgTasks,
@@ -152,7 +153,7 @@ describe('markAmsgStateDirty 同步门', () => {
     (ActiveMsgStore.getGlobalConfig as any).mockResolvedValue({ workerUrl: '' });
     const char = charWithAiTask(nextCharId());
     markAmsgStateDirty(snapshotOf(char));
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
     expect(ActiveMsgClient.syncCharFirePacks).not.toHaveBeenCalled();
     // 没有去处不算「欠着」：底账也一起清，别让下次启动为它白跑一趟补传。
     expect(JSON.parse(localStorage.getItem(AMSG2_PENDING_SYNC_LS_KEY) || '[]')).not.toContain(char.id);
@@ -162,7 +163,7 @@ describe('markAmsgStateDirty 同步门', () => {
     (ActiveMsgClient.syncCharFirePacks as any).mockRejectedValueOnce(new Error('worker down'));
     const char = charWithAiTask(nextCharId());
     markAmsgStateDirty(snapshotOf(char));
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
     expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
 
     await flushAmsgState('test-retry');
@@ -175,7 +176,7 @@ describe('markAmsgStateDirty 同步门', () => {
     (ActiveMsgClient.syncCharFirePacks as any).mockRejectedValueOnce(new Error('worker down'));
     const char = charWithAiTask(nextCharId());
     markAmsgStateDirty(snapshotOf(char));
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
     expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(30_000);
@@ -188,7 +189,7 @@ describe('markAmsgStateDirty 同步门', () => {
     const stale = charWithAiTask(id);
     stale.name = '旧快照';
     markAmsgStateDirty(snapshotOf(stale));
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
 
     const fresh = charWithAiTask(id);
     fresh.name = '新快照';
@@ -204,7 +205,7 @@ describe('markAmsgStateDirty 同步门', () => {
     (ActiveMsgClient.syncCharFirePacks as any).mockRejectedValue(new Error('offline'));
     const char = charWithAiTask(nextCharId());
     markAmsgStateDirty(snapshotOf(char));
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
     expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
 
     // 30s → 60s → 120s 三次重排后放手（快照仍留在队列里等下一轮打脏）
@@ -216,24 +217,30 @@ describe('markAmsgStateDirty 同步门', () => {
   });
 });
 
-// 即时冲刷回归守卫：打脏后不再有去抖窗口，微任务内就冲刷。
-// 旧的 10s 去抖行为下第一条会挂（0ms 时还没冲刷）。
-describe('即时冲刷', () => {
-  it('打脏后立即冲刷，不等任何窗口', async () => {
+// 打脏合并窗口回归守卫：一轮聊天的多次打脏（收尾 / 情绪落库 / 记忆写入）不在同一个
+// tick，各自触发完整冲刷太贵（重读近史 + 重建提示词 + 加密 + PUT ~40KB）。第一次打脏起
+// FLUSH_DEBOUNCE_MS 内的合并成一次上传；固定窗口不顺延，持续打脏也保证窗口到点必冲。
+// 数据丢失窗口没有回退：底账在打脏那一刻就写、切后台立即冲刷、启动有补传。
+describe('打脏合并窗口', () => {
+  it('窗口内不发请求，窗口到点冲刷一次', async () => {
     markAmsgStateDirty(snapshotOf(charWithAiTask(nextCharId())));
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS - 1);
+    expect(ActiveMsgClient.syncCharFirePacks).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
     expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
   });
 
-  it('同一个事件循环里连环打脏只合并成一次上传', async () => {
+  it('窗口内的连环打脏（隔几个 tick 也算）只合并成一次上传', async () => {
     markAmsgStateDirty(snapshotOf(charWithAiTask(nextCharId())));
+    // 情绪 buff 落库这类晚半秒才来的打脏，也该并进同一次上传
+    await vi.advanceTimersByTimeAsync(500);
     markAmsgStateDirty(snapshotOf(charWithAiTask(nextCharId())));
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
     expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
     expect((ActiveMsgClient.syncCharFirePacks as any).mock.calls[0][0]).toHaveLength(2);
   });
 
-  it('同一个角色同 tick 打两次脏只传最新那份', async () => {
+  it('同一个角色窗口内打两次脏只传最新那份', async () => {
     const id = nextCharId();
     const stale = charWithAiTask(id);
     stale.name = '旧快照';
@@ -242,7 +249,7 @@ describe('即时冲刷', () => {
 
     markAmsgStateDirty(snapshotOf(stale));
     markAmsgStateDirty(snapshotOf(fresh));
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
 
     expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
     const batch = (ActiveMsgClient.syncCharFirePacks as any).mock.calls[0][0];
@@ -258,11 +265,11 @@ describe('即时冲刷', () => {
       () => new Promise<void>((resolve) => { release = resolve; }),
     );
     markAmsgStateDirty(snapshotOf(charWithAiTask(nextCharId())));
-    await vi.advanceTimersByTimeAsync(0);           // 第一次冲刷挂起中
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);   // 第一次冲刷挂起中
 
     const later = charWithAiTask(nextCharId());
     markAmsgStateDirty(snapshotOf(later));
-    await vi.advanceTimersByTimeAsync(0);           // 撞上 flushing
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);   // 撞上 flushing
     expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
 
     release();
@@ -278,10 +285,10 @@ describe('即时冲刷', () => {
       () => new Promise<void>((_, reject) => { fail = () => reject(new Error('worker down')); }),
     );
     markAmsgStateDirty(snapshotOf(charWithAiTask(nextCharId())));
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
 
     markAmsgStateDirty(snapshotOf(charWithAiTask(nextCharId())));  // 在飞期间又打脏
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
 
     fail();
     await vi.advanceTimersByTimeAsync(0);
@@ -308,13 +315,13 @@ describe('即时冲刷', () => {
 
     const doomed = charWithAiTask(nextCharId());
     markAmsgStateDirty(snapshotOf(doomed));
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
     await vi.advanceTimersByTimeAsync(30_000 + 60_000 + 120_000 + 1_000);
     expect(mock).toHaveBeenCalledTimes(4);           // 第四次挂在半空
 
     const later = charWithAiTask(nextCharId());
     markAmsgStateDirty(snapshotOf(later));
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
     expect(mock).toHaveBeenCalledTimes(4);           // 撞上 flushing，先记账
 
     failLast();
@@ -342,7 +349,7 @@ describe('即时对话挂起（chat 段不许被常规冲刷覆盖）', () => {
     const char = charWithAiTask(nextCharId());
     setInstantChatPending(char.id, 'uuid-instant-defer');
     markAmsgStateDirty(snapshotOf(char));
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
     expect(ActiveMsgClient.syncCharFirePacks, '等回复期间一个包都不许传').not.toHaveBeenCalled();
 
     clearInstantChatPending(char.id);
@@ -358,7 +365,7 @@ describe('即时对话挂起（chat 段不许被常规冲刷覆盖）', () => {
     setInstantChatPending(owing.id, 'uuid-instant-owing');
     markAmsgStateDirty(snapshotOf(owing));
     markAmsgStateDirty(snapshotOf(free));
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
 
     const mock = ActiveMsgClient.syncCharFirePacks as any;
     expect(mock).toHaveBeenCalledTimes(1);
@@ -383,7 +390,7 @@ describe('脏标记持久化与启动补传', () => {
     markAmsgStateDirty(snapshotOf(char));
     expect(readMarks()).toContain(char.id);
 
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
     expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
     expect(readMarks()).not.toContain(char.id);
   });
@@ -398,7 +405,7 @@ describe('脏标记持久化与启动补传', () => {
     (ActiveMsgClient.syncCharFirePacks as any).mockRejectedValueOnce(new Error('worker down'));
     const char = charWithAiTask(nextCharId());
     markAmsgStateDirty(snapshotOf(char));
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(FLUSH_DEBOUNCE_MS);
     expect(ActiveMsgClient.syncCharFirePacks).toHaveBeenCalledTimes(1);
     expect(readMarks()).toContain(char.id);
   });

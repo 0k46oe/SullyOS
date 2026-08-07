@@ -43,8 +43,8 @@ export interface AmsgInstantChatPending {
   uuid: string;
   /** 受理时刻（epoch ms），排查时看「这一轮等了多久」用。 */
   acceptedAt: number;
-  /** 角色名快照（全局横幅显示用；旧记录可能没有，缺省显示空）。 */
-  charName?: string;
+  /** 角色名快照（全局横幅显示用）。必填：唯一写入方恒定带上（角色名为空就是空串）。 */
+  charName: string;
 }
 
 type PendingMap = Record<string, AmsgInstantChatPending>;
@@ -57,11 +57,13 @@ const readPendingMap = (): PendingMap => {
     for (const [charId, value] of Object.entries(parsed as Record<string, unknown>)) {
       const record = value as Partial<AmsgInstantChatPending> | null;
       if (record && typeof record.uuid === 'string' && typeof record.acceptedAt === 'number') {
+        // charName 的形状防御是「防 localStorage 损坏/手改」，不是兼容什么旧记录——
+        // 这个 key 与写入方同一次发布上线，缺名就按空串补齐。
         result[charId] = {
           charId,
           uuid: record.uuid,
           acceptedAt: record.acceptedAt,
-          ...(typeof record.charName === 'string' && record.charName ? { charName: record.charName } : {}),
+          charName: typeof record.charName === 'string' ? record.charName : '',
         };
       }
     }
@@ -96,10 +98,10 @@ export const setInstantChatPending = (
   charId: string,
   uuid: string,
   acceptedAt = Date.now(),
-  charName?: string,
+  charName = '',
 ): void => {
   const map = readPendingMap();
-  map[charId] = { charId, uuid, acceptedAt, ...(charName ? { charName } : {}) };
+  map[charId] = { charId, uuid, acceptedAt, charName };
   writePendingMap(map);
   announcePendingChanged(charId);
 };

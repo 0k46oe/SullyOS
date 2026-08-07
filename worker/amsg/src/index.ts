@@ -59,7 +59,7 @@ import {
 } from '../../../utils/amsgFirePack';
 import { resolveFireSceneSong } from '../../../utils/amsgFireScene';
 import { shouldExpireFire } from '../../../utils/amsg2ExpireGuard';
-import { buildFireTaskListBlock, isPendingTask, MAX_ACTIVE_TASKS_PER_CHAR } from '../../../utils/amsg2Tasks';
+import { buildFireTaskListBlock, isPendingTask, MAX_ACTIVE_TASKS_PER_CHAR, shortTaskId } from '../../../utils/amsg2Tasks';
 import {
   AMSG_FIRE_CANCEL_TOOL,
   AMSG_FIRE_RENEW_TOOL,
@@ -299,18 +299,18 @@ interface FireStash {
   pendingTaskCount: number;
   /**
    * fire 开场的活任务清单（客户端快照 + 自排未认领），取消 / 改期工具按短 id
-   * 在这里找目标。直造的旧 stash 可能没有这个字段，缺省当空清单。
+   * 在这里找目标。唯一生产者 onBeforeFire 恒定初始化，必填。
    */
-  pendingTasks?: ActiveMsg2TaskRecord[];
+  pendingTasks: ActiveMsg2TaskRecord[];
   /** 角色本次 fire 已经排成功的任务（也是要随 push 带回客户端认领的那些）。 */
   scheduledTasks: ActiveMsg2TaskRecord[];
   /**
    * 本次 fire 里取消 / 改期掉的既有任务（uuid / uuid+新时刻）。随最后一条 push 的
    * metadata.amsgTaskMutations 带回客户端消账——D1 行已经动了，本地清单不跟着动的话，
-   * 面板会一直列着一条永远不会响（或时间不对）的任务。
+   * 面板会一直列着一条永远不会响（或时间不对）的任务。唯一生产者恒定初始化，必填。
    */
-  cancelledTasks?: string[];
-  renewedTasks?: Array<{ taskUuid: string; sendAt: string }>;
+  cancelledTasks: string[];
+  renewedTasks: Array<{ taskUuid: string; sendAt: string }>;
   /**
    * 用户设的「未回复期间最多连发几条」（已解析：0 → Infinity、缺省 → 默认值）。
    * 排程工具用它打回超额的自排；到点兜底闸在 onBeforeFire 里直接用 pack 上的原始值。
@@ -868,10 +868,9 @@ export const runFireScheduleTool = async (
   }
   // 连发上限·排程闸（用户主权）：已发的 + 先前排了还没响的 + 这次已排的，加上这条会超
   // 就打回。到点兜底闸（onBeforeFire）是它的另一半——先排满再触发的在那边拦。
-  // 直造的旧 stash 可能没有这两个字段，缺省当不限，别让 undefined 比较把排程整个禁掉。
-  const unansweredLimit = stash.maxUnansweredSends ?? Infinity;
+  const unansweredLimit = stash.maxUnansweredSends;
   const committedSends = countUnansweredSends(stash.selfLog)
-    + (stash.plannedSelfSends ?? 0) + stash.scheduledTasks.length;
+    + stash.plannedSelfSends + stash.scheduledTasks.length;
   if (committedSends + 1 > unansweredLimit) {
     return {
       ok: false,
@@ -977,7 +976,7 @@ export const runFireScheduleTool = async (
 
   return {
     ok: true,
-    task_id: result.uuid.slice(0, 8),
+    task_id: shortTaskId(result.uuid),
     send_at: sendAt,
     message: '排好了。到点你会知道自己这次说了什么，接着说就行，现在不用剧透。',
   };
@@ -988,8 +987,8 @@ export const runFireScheduleTool = async (
  * 刨掉本轮已经取消的。不含当前正在 fire 的这条（它的收尾归 run-tick 管）。
  */
 const liveTaskView = (stash: FireStash): ActiveMsg2TaskRecord[] => {
-  const cancelled = new Set(stash.cancelledTasks ?? []);
-  return [...(stash.pendingTasks ?? []), ...stash.scheduledTasks]
+  const cancelled = new Set(stash.cancelledTasks);
+  return [...stash.pendingTasks, ...stash.scheduledTasks]
     .filter((t) => !cancelled.has(t.taskUuid) && t.taskUuid !== stash.taskUuid);
 };
 
@@ -1023,11 +1022,12 @@ export const runFireCancelTool = async (
   stash: FireStash,
   cancelTask: CancelTask | undefined,
   args: Record<string, unknown>,
+  nowMs: number,
 ): Promise<Record<string, unknown>> => {
   if (typeof cancelTask !== 'function') {
     return { ok: false, reason: 'not_supported', message: '当前后台版本还不支持取消任务，先当它会照常响，把要说的话说清楚。' };
   }
-  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id);
+  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id, nowMs);
   if ('ok' in resolved) return resolved as unknown as Record<string, unknown>;
   const target = resolved.task;
 
@@ -1039,14 +1039,14 @@ export const runFireCancelTool = async (
   }
   if (!result.cancelled) {
     // 行已经不在了（先前取消过 / 已经触发跑掉了）。对模型来说目的达成，照实说。
-    return { ok: true, already_gone: true, message: `任务 [${target.taskUuid.slice(0, 8)}] 已经不在排程里了，不用再管它。` };
+    return { ok: true, already_gone: true, message: `任务 [${shortTaskId(target.taskUuid)}] 已经不在排程里了，不用再管它。` };
   }
 
-  stash.cancelledTasks = [...(stash.cancelledTasks ?? []), target.taskUuid];
+  stash.cancelledTasks = [...stash.cancelledTasks, target.taskUuid];
   stash.scheduledTasks = stash.scheduledTasks.filter((t) => t.taskUuid !== target.taskUuid);
   patchSelfLogTask(stash, target.taskUuid, { remove: true });
   console.log('[amsg:self-cancel]', { uuid: target.taskUuid });
-  return { ok: true, task_id: target.taskUuid.slice(0, 8), message: `已取消 [${target.taskUuid.slice(0, 8)}]。` };
+  return { ok: true, task_id: shortTaskId(target.taskUuid), message: `已取消 [${shortTaskId(target.taskUuid)}]。` };
 };
 
 /**
@@ -1066,7 +1066,7 @@ export const runFireRenewTool = async (
   if (typeof fireCtx.renewTask !== 'function') {
     return { ok: false, reason: 'not_supported', message: '当前后台版本还不支持改期，要么取消重排，要么先当它会照常响。' };
   }
-  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id);
+  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id, nowMs);
   if ('ok' in resolved) return resolved as unknown as Record<string, unknown>;
   const target = resolved.task;
   if (target.mode === 'fixed') {
@@ -1086,7 +1086,7 @@ export const runFireRenewTool = async (
       expire_policy: target.expirePolicy,
     }, nowMs);
     if (result.ok === true) {
-      return { ...result, message: `已为 [${target.taskUuid.slice(0, 8)}] 的这一次补上一条一次性任务，原来的重复节奏不变。` };
+      return { ...result, message: `已为 [${shortTaskId(target.taskUuid)}] 的这一次补上一条一次性任务，原来的重复节奏不变。` };
     }
     return result;
   }
@@ -1099,17 +1099,17 @@ export const runFireRenewTool = async (
     return { ok: false, reason: 'renew_rejected', message: error instanceof Error ? error.message : String(error) };
   }
   if (!result.renewed) {
-    return { ok: false, reason: 'task_gone', message: `任务 [${target.taskUuid.slice(0, 8)}] 已经不在排程里了（可能刚触发过），要说的话用 schedule_active_message 重新排。` };
+    return { ok: false, reason: 'task_gone', message: `任务 [${shortTaskId(target.taskUuid)}] 已经不在排程里了（可能刚触发过），要说的话用 schedule_active_message 重新排。` };
   }
 
-  stash.renewedTasks = [...(stash.renewedTasks ?? []), { taskUuid: target.taskUuid, sendAt: result.nextSendAt }];
+  stash.renewedTasks = [...stash.renewedTasks, { taskUuid: target.taskUuid, sendAt: result.nextSendAt }];
   patchSelfLogTask(stash, target.taskUuid, { sendAt: result.nextSendAt });
   console.log('[amsg:self-renew]', { uuid: target.taskUuid, sendAt: result.nextSendAt });
   return {
     ok: true,
-    task_id: target.taskUuid.slice(0, 8),
+    task_id: shortTaskId(target.taskUuid),
     send_at: result.nextSendAt,
-    message: `已把 [${target.taskUuid.slice(0, 8)}] 改到新时间（编号不变）。`,
+    message: `已把 [${shortTaskId(target.taskUuid)}] 改到新时间（编号不变）。`,
   };
 };
 
@@ -1395,8 +1395,8 @@ export const amsgHooks = {
     // 角色级 2.0 开关（pack.selfScheduleEnabled，打包时取 isAmsg2EnabledForChar）。
     // 关着 = 排程说明块、排程工具、任务清单一概不注入：本地路径这道闸在 useChatAI 的
     // amsg2ToolsInjected——用户显式关掉的功能不能被云端聊天轮绕开重排任务。
-    // 缺省当 true（旧包 / 定时任务路径的包只会来自开着 2.0 的角色）。
-    const selfScheduleAllowed = pack.selfScheduleEnabled !== false;
+    // 必填字段（parseFirePack 把关），不做缺省——这道闸缺省放行就是 fail-open。
+    const selfScheduleAllowed = pack.selfScheduleEnabled;
 
     // 老 worker 部署（amsg-server < 2.6.0-next.9）没有这个口子。教了也排不成，
     // 只会让角色说「我等下再找你」然后没有下文——干脆不教。
@@ -1743,8 +1743,8 @@ export const amsgHooks = {
 
       // 本轮取消 / 改期掉的既有任务同样随最后一条回去消账（与排程认领对称：那边是
       // 「D1 多了一行，本地补上」，这边是「D1 那行没了 / 换时间了，本地跟上」）。
-      const cancelled = stash.cancelledTasks ?? [];
-      const renewed = stash.renewedTasks ?? [];
+      const cancelled = stash.cancelledTasks;
+      const renewed = stash.renewedTasks;
       if ((cancelled.length > 0 || renewed.length > 0) && payloads.length > 0) {
         payloads = attachMetaAt(payloads, payloads.length - 1, {
           amsgTaskMutations: {
@@ -1909,7 +1909,7 @@ export const amsgHooks = {
         const result = name === AMSG_FIRE_SCHEDULE_TOOL
           ? await runFireScheduleTool(stash, ctx.scheduleTask, args, Date.now())
           : name === AMSG_FIRE_CANCEL_TOOL
-            ? await runFireCancelTool(stash, ctx.cancelTask, args)
+            ? await runFireCancelTool(stash, ctx.cancelTask, args, Date.now())
             : name === AMSG_FIRE_RENEW_TOOL
               ? await runFireRenewTool(stash, ctx, args, Date.now())
               : name.startsWith(MCP_FIRE_NAME_PREFIX)

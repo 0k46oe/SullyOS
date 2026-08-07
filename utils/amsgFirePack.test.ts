@@ -120,7 +120,7 @@ describe('formatFireTimeFull / formatFireTimeShort（角色参照系的自然中
 
 describe('renderFirePack', () => {
   const basePack: AmsgFirePack = {
-    v: FIRE_PACK_VERSION, builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
+    v: FIRE_PACK_VERSION, builtAt: 1_700_000_000_000, pendingTasks: [], scene: null, selfScheduleEnabled: true,
     template: [
       `当前本地时间：${AMSG_SLOT_CURRENT_TIME}`,
       AMSG_SLOT_TIME_SINCE_USER,
@@ -176,7 +176,7 @@ describe('对方那边现在几点（AMSG_SLOT_USER_CLOCK）', () => {
   // 纽约角色 / 上海用户：2026-08-02T13:00Z = 纽约 09:00、上海 21:00。
   const AT = Date.UTC(2026, 7, 2, 13, 0);
   const nyChar: AmsgFirePack = {
-    v: FIRE_PACK_VERSION, builtAt: 1, pendingTasks: [], scene: null, lastUserMessageAt: null,
+    v: FIRE_PACK_VERSION, builtAt: 1, pendingTasks: [], scene: null, selfScheduleEnabled: true, lastUserMessageAt: null,
     template: `当前本地时间（你所在地）：${AMSG_SLOT_CURRENT_TIME}${AMSG_SLOT_USER_CLOCK}`,
     tzId: 'America/New_York',
     userTzId: 'Asia/Shanghai',
@@ -211,7 +211,7 @@ describe('对方那边现在几点（AMSG_SLOT_USER_CLOCK）', () => {
 describe('parseFirePack', () => {
   const valid: AmsgFirePack = {
     v: FIRE_PACK_VERSION, template: 'x', lastUserMessageAt: null, tzId: 'Asia/Shanghai', userTzId: 'Asia/Shanghai', targetName: 'A',
-    builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
+    builtAt: 1_700_000_000_000, pendingTasks: [], scene: null, selfScheduleEnabled: true,
   };
 
   it('合法 JSON 原样返回', () => {
@@ -269,7 +269,7 @@ describe('self_log', () => {
   const packAt = 1_700_000_000_000;
   const pack: AmsgFirePack = {
     v: FIRE_PACK_VERSION, template: 'x', lastUserMessageAt: null, tzId: 'UTC', userTzId: 'UTC', targetName: '小明同学',
-    builtAt: packAt, pendingTasks: [], scene: null,
+    builtAt: packAt, pendingTasks: [], scene: null, selfScheduleEnabled: true,
   };
   const entry = (id: string, text: string, at = packAt) => ({ id, at, text });
 
@@ -482,7 +482,7 @@ describe('连发提醒（自述块内的计数与上限）', () => {
   const packAt = 1_700_000_000_000;
   const slotted: AmsgFirePack = {
     v: FIRE_PACK_VERSION, lastUserMessageAt: null, tzId: 'UTC', userTzId: 'UTC', targetName: '小明同学',
-    builtAt: packAt, pendingTasks: [], scene: null,
+    builtAt: packAt, pendingTasks: [], scene: null, selfScheduleEnabled: true,
     template: `【最近对话上下文】\n用户：在吗${AMSG_SLOT_SELF_LOG}\n\n【本次任务】\n${AMSG_SLOT_TASK_INSTRUCTION}`,
   };
   const entry = (id: string, text: string) => ({ id, at: packAt, text });
@@ -562,7 +562,7 @@ describe('fire_pack 任务指令槽', () => {
     v: FIRE_PACK_VERSION,
     template: `头部\n${AMSG_SLOT_TASK_INSTRUCTION}\n尾部 ${AMSG_SLOT_CURRENT_TIME}`,
     lastUserMessageAt: null, tzId: 'Asia/Shanghai', userTzId: 'Asia/Shanghai', targetName: '小明同学',
-    builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
+    builtAt: 1_700_000_000_000, pendingTasks: [], scene: null, selfScheduleEnabled: true,
   };
 
   it('renderFirePack 用传入的任务指令填槽', () => {
@@ -590,6 +590,7 @@ describe('client_state 值压缩', () => {
     builtAt: 1_700_000_000_000,
     pendingTasks: [],
     scene: null,
+    selfScheduleEnabled: true,
   });
 
   it('压完再解回来，一个字都不差', async () => {
@@ -653,7 +654,7 @@ describe('client_state 值压缩', () => {
 describe('fire_pack 版本对不上时说清该做什么', () => {
   const pack = (v: unknown) => JSON.stringify({
     v, template: 'x', lastUserMessageAt: null, tzId: 'UTC', userTzId: 'UTC', targetName: 'A',
-    builtAt: 1, pendingTasks: [], scene: null,
+    builtAt: 1, pendingTasks: [], scene: null, selfScheduleEnabled: true,
   });
 
   it('旧包（worker 新、前端旧）→ 让用户打开一次网页重传', () => {
@@ -687,7 +688,7 @@ describe('fire_pack v7 的 chat 段', () => {
   const base: AmsgFirePack = {
     v: FIRE_PACK_VERSION, template: 'x', lastUserMessageAt: null,
     tzId: 'Asia/Shanghai', userTzId: 'Asia/Shanghai', targetName: '小明',
-    builtAt: 1_700_000_000_000, pendingTasks: [], scene: null,
+    builtAt: 1_700_000_000_000, pendingTasks: [], scene: null, selfScheduleEnabled: true,
   };
   const chat = { messages: [{ role: 'user', content: '在吗' }], builtAt: 1_700_000_000_000 };
 

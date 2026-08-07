@@ -10,7 +10,7 @@
  */
 
 import type { ActiveMsg2ExpirePolicy, ActiveMsg2Mode, ActiveMsg2Recurrence, ActiveMsg2TaskRecord } from '../types';
-import { findTaskByShortId } from './amsg2Tasks';
+import { findTaskByShortId, isPendingTask } from './amsg2Tasks';
 import { type AmsgTzRef, formatFireTimeShort, wallClockPartsInZone } from './amsgFirePack';
 import { wallClockToTimestamp } from './timezone';
 
@@ -317,13 +317,17 @@ export const parseFireScheduleArgs = (
 // ─── 取消 / 改期的目标解析（fire 侧） ───
 
 /**
- * 按 task_id（或「只有一个就选它」）从 fire 时刻的活任务清单里解出目标。
- * 语义与前台 resolveTargetTask 对齐：短 id / 全 uuid 都认；不带 task_id 时
- * 只有清单恰好一条才敢动。找不到就回一句能照做的话（不抛错，见 parseFireScheduleArgs）。
+ * 按 task_id（或「唯一即选」）从 fire 时刻的活任务清单里解出目标。
+ * 语义与前台 resolveTargetTask 对齐：短 id / 全 uuid 都认；不带 task_id 时先按
+ * fire 时刻复筛 pending（快照里可能混着已过点变陈旧的一次性任务——pack 只在打包
+ * 那一刻筛过一次），唯一 pending 就选它，没有 pending 而清单恰好一条也选它。
+ * 不对齐的话，同一句 cancel_active_message 本地能成、云端却被打回 ambiguous_task。
+ * 找不到就回一句能照做的话（不抛错，见 parseFireScheduleArgs）。
  */
 export const resolveFireTargetTask = (
   tasks: ActiveMsg2TaskRecord[],
   taskIdArg: unknown,
+  nowMs: number,
 ): { task: ActiveMsg2TaskRecord } | FireScheduleReject => {
   if (tasks.length === 0) {
     return { ok: false, reason: 'no_tasks', message: '你现在没有挂着任何排程任务。' };
@@ -334,7 +338,9 @@ export const resolveFireTargetTask = (
       ? { task }
       : { ok: false, reason: 'task_not_found', message: `没有找到短 id 为 ${taskIdArg.trim()} 的任务——短 id 在排程清单里，照着那里的写。` };
   }
-  if (tasks.length === 1) return { task: tasks[0] };
+  const pending = tasks.filter((t) => isPendingTask(t, nowMs));
+  if (pending.length === 1) return { task: pending[0] };
+  if (pending.length === 0 && tasks.length === 1) return { task: tasks[0] };
   return { ok: false, reason: 'ambiguous_task', message: '你挂着不止一个任务，带 task_id（排程清单里的短 id）指定要动哪一个。' };
 };
 

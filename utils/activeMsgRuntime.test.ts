@@ -596,6 +596,34 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
     expect(staleMs, '补收该跳过打字延迟').toBeLessThan(400);
   }, 20000);
 
+  // 同一条推送的「第二次到达」（outbox 补收先落库、被推送服务延迟的原始 push 几分钟后
+  // 才送达；或补收销账时 cancelTask 没拦住、worker 重试重跑复用同 messageId）不该再上
+  // 屏一遍：落库前按聊天近史里的 activeMsg2.messageId 去重。
+  it('聊天记录里已有同 messageId → 第二次到达整条丢弃，不重复上屏', async () => {
+    const charId = 'char-dedup-redelivery';
+    await DB.saveCharacter({ id: charId, name: '去重角色' } as any);
+    await ActiveMsgStore.saveInboxMessage(inboxMsg({
+      messageId: 'msg_task_9@1700000000000_hook_0',
+      charId,
+      messageType: 'text',
+      sentAt: Date.now() - 8 * 60_000, // 走补收口径，跳过拟人慢放
+    }));
+    await flushInboxToChat();
+    const first = await assistantMsgs(charId);
+    expect(first.length).toBeGreaterThan(0);
+
+    // 同一条（同 messageId）再次入库 = 迟到的原始推送终于送达
+    await ActiveMsgStore.saveInboxMessage(inboxMsg({
+      messageId: 'msg_task_9@1700000000000_hook_0',
+      charId,
+      messageType: 'text',
+      sentAt: Date.now() - 8 * 60_000,
+    }));
+    await flushInboxToChat();
+
+    expect((await assistantMsgs(charId)).length, '第二次到达不能再上屏').toBe(first.length);
+  }, 20000);
+
   // 即时对话的情绪评估在 worker 里跟主回复并行跑，结果挂在最后一条推送的 metadata 上。
   // 收侧得走 Instant Push 那条 emotion_update 同一条链：同一个 applyEmotionEvalRaw 落 buff、
   // 同一个 'instant-emotion-done' 熄灯。漏了这一段，用户看到的是「回复来了、情绪永远不更新、

@@ -12,7 +12,7 @@ import {
 import { runPendingToolCalls } from './instantToolRunner';
 import { drainPendingDiaries } from './pendingDiary';
 import { applyEmotionEvalRaw } from './emotionApply';
-import { CHAT_GEN_EVENTS, announceEmotionDone } from './chatGenEvents';
+import { CHAT_GEN_EVENTS, announceChatGen, announceEmotionDone } from './chatGenEvents';
 import { processNewMessages } from './memoryPalace/pipeline';
 import { loadMusicHooks } from '../context/MusicContext';
 import type { XhsNote } from './realtimeContext';
@@ -607,16 +607,13 @@ const processInboxMessageWithPostProcessing = async (
     // 情绪没变、没有任何解释。worker 捎回来的那句原因（副 API 的状态码 / 模型没输出）
     // 直接给用户看：他自己部署的 worker，「可查日志」对多数人等于没说。
     const workerReason = (message.metadata as any)?.amsgEmotionError;
-    try {
-      window.dispatchEvent(new CustomEvent(CHAT_GEN_EVENTS.emotionFailed, {
-        detail: {
-          charId: message.charId, charName: message.charName || '',
-          reason: typeof workerReason === 'string' && workerReason
-            ? `云端情绪评估失败——${workerReason}`
-            : '云端情绪评估无输出（副 API 报错或模型没返回内容，可查 worker 日志）',
-        },
-      }));
-    } catch { /* SSR-safe */ }
+    // 统一走 announceChatGen（chatGenEvents 的唯一派发出口），别再手写 dispatchEvent。
+    announceChatGen(CHAT_GEN_EVENTS.emotionFailed, {
+      charId: message.charId, charName: message.charName || '',
+      reason: typeof workerReason === 'string' && workerReason
+        ? `云端情绪评估失败——${workerReason}`
+        : '云端情绪评估无输出（副 API 报错或模型没返回内容，可查 worker 日志）',
+    });
   }
   if (emotionDone || emotionUpdateRaw) {
     announceEmotionDone(message.charId);
@@ -1259,6 +1256,29 @@ const flushInboxToChatImpl = async () => {
   // finally 里撤掉：落库成功的那时聊天记录已经查得到；requeue 回收件箱的那几条
   // 也重新出现在 listInboxMessages 里，两条腿都接上了才撤。
   trackInFlightInboxMessageIds(pendingMessages.map((m) => m.messageId));
+  // ─── 落库前的 messageId 去重 ───
+  // 同一条推送有两条可达的「第二次到达」路径：① outbox 补收先落了库，被推送服务
+  // 延迟的原始 Web Push 几分钟后才送达（补收绕过 SW，delivery-dedupe 里没有记录）；
+  // ② 补收销账时 best-effort cancelTask 没拦住重试，worker 重跑整个 fire——重叠段号
+  // 复用相同 messageId（`msg_task_{行id}@{occurrenceMs}_hook_{i}` 是确定性规则）。
+  // 聊天近史里已经有这个 activeMsg2.messageId 的，直接丢弃：不落库、不弹 toast、
+  // 不重放 directives。只对首次处理（processAttempts=0）做——重试那几条的半成品
+  // 气泡刚被 prepareInboxRetry 清场，近史里查到的正是「该重跑」的证据，不能误杀。
+  const persistedIdsByChar = new Map<string, Set<string>>();
+  const isAlreadyPersisted = async (charId: string, messageId: string): Promise<boolean> => {
+    if (!messageId) return false;
+    let ids = persistedIdsByChar.get(charId);
+    if (!ids) {
+      const recent = await DB.getRecentMessagesByCharId(charId, 200);
+      ids = new Set(
+        recent
+          .map((m: any) => m?.metadata?.activeMsg2?.messageId)
+          .filter((id: unknown): id is string => typeof id === 'string' && !!id),
+      );
+      persistedIdsByChar.set(charId, ids);
+    }
+    return ids.has(messageId);
+  };
   try {
   // consumeInboxMessages 是 "先 ack 后处理" 语义 —— inbox 已经原子地清空。
   // 这里 per-message try/catch: 单条处理抛错 (quota / DB 故障 / postprocess 异常) 不连累
@@ -1278,6 +1298,15 @@ const flushInboxToChatImpl = async () => {
       bodyChars: typeof message.body === 'string' ? message.body.length : undefined,
     });
 
+    // 见上面 isAlreadyPersisted 的注释：这条已经在聊天记录里了（补收先到、真推送迟到，
+    // 或重试重跑的重叠段），第二份原样丢弃。
+    if (!(message.processAttempts && message.processAttempts > 0)
+      && await isAlreadyPersisted(message.charId, message.messageId)) {
+      log.warn('这条消息已在聊天记录里（补收先到/重试重跑的第二份），丢弃', { messageId: message.messageId, charId: message.charId });
+      activeMsgTrace('runtime-inbox-duplicate-dropped', { messageId: message.messageId, charId: message.charId });
+      continue;
+    }
+
     // emotion_update: worker 跑完副 API 情绪评估后推回的 buff 结果. 不渲染成聊天消息, 直接落 buff +
     // 广播 innerState (useChatAI 监听 'emotion-innerstate-updated' → setEvolvedNarrative 喂下一轮).
     // 识别条件用 messageType==='emotion_update' 或 metadata.emotionRaw 存在 —— 后者兜底旧 SW
@@ -1293,16 +1322,12 @@ const flushInboxToChatImpl = async () => {
         // 派发失败事件让 OSContext 弹 toast。2026-07-17+ 的 worker 会把具体原因带在
         // metadata.emotionError（副 API HTTP 状态等）；旧 worker 没这字段就给通用文案。
         const workerReason = (message.metadata as any)?.emotionError;
-        try {
-          window.dispatchEvent(new CustomEvent(CHAT_GEN_EVENTS.emotionFailed, {
-            detail: {
-              charId: message.charId, charName: '',
-              reason: typeof workerReason === 'string' && workerReason
-                ? `云端评估失败——${workerReason}`
-                : '云端情绪评估无输出（副 API 报错或模型没返回内容，可查 worker 日志）',
-            },
-          }));
-        } catch { /* SSR-safe */ }
+        announceChatGen(CHAT_GEN_EVENTS.emotionFailed, {
+          charId: message.charId, charName: '',
+          reason: typeof workerReason === 'string' && workerReason
+            ? `云端评估失败——${workerReason}`
+            : '云端情绪评估无输出（副 API 报错或模型没返回内容，可查 worker 日志）',
+        });
       }
       // 无论成功与否都通知 useChatAI 熄灭 "情绪更新中" 徽章 (buff 已落 / 或这轮没结果).
       announceEmotionDone(message.charId);
@@ -1544,7 +1569,11 @@ const flushInboxToChatImpl = async () => {
         // 2/4/6 分钟的重试队列里，跑起来就是同一轮的第二份回复。尽力取消；
         // 正常送达的路不带这个标记（行发完即删，也无从取消），一个多余请求都不发。
         if ((message.metadata as any)?.amsgOutboxBackfill) {
-          ActiveMsgClient.cancelTask(pendingForChar.uuid).catch(() => {});
+          // 取消失败别静默吞：重试跑起来就是同一轮的第二份回复（重叠段有上面的
+          // messageId 去重兜着，多出的段拦不住），至少留下一条可查的痕。
+          ActiveMsgClient.cancelTask(pendingForChar.uuid).catch((e) => {
+            log.warn('补收销账后取消重试任务失败（若重试已在跑，重复段会被落库去重拦下）', { uuid: pendingForChar.uuid, error: e });
+          });
         }
         // 末段先到、中段还丢在路上的乱序场景：销账后 pending 没了，常规兜底不会再看
         // 这一轮——离场前按这轮的 uuid 补扫一次 outbox，把缺的段捡回来。

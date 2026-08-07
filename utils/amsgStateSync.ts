@@ -64,22 +64,25 @@ let retryCount = 0;
 /** 「退避打光了还是没传上去」每次会话只上报一次。 */
 let staleStateReported = false;
 
-// ─── 打脏即传的两个合并开关 ───
-// 一轮聊天不止打一次脏（收尾一次、情绪 buff 落库又一次），中间还有群聊逐个成员打脏这种
-// 连环调用。这两个开关负责收口：同一个事件循环里的连环打脏合并成一次上传；上传途中
-// 来的打脏等这次传完再补跑一次（丢弃的话那份快照就永远躺在队列里了）。
-/** 已经排了一个微任务等着冲刷，别重复排。 */
-let flushQueued = false;
-/** 冲刷进行中又有人打脏，这次传完得再跑一轮。 */
+// ─── 打脏后的合并窗口 ───
+// 一轮聊天不止打一次脏，而且**不在同一个 tick**：收尾在 finally 里、情绪 buff 落库在
+// 副 API 回来后的事件回调里、记忆写入又是一拨；用户连删几条消息更是一次操作一个 tick。
+// 微任务合并只能收拢同 tick 的连环调用，上面这些各自触发一次「重读 200 条近史 + 重建
+// 系统提示词 + gzip + 加密 + PUT ~40KB」的完整冲刷。这里给一个短的固定合并窗口：
+// 第一次打脏起 1.5s 内的都并进同一次上传。数据丢失窗口不回退——底账（persistDirtyMark）
+// 在打脏那一刻就写了，切后台有 visibilitychange 的立即冲刷，杀进程有启动补传。
+/** 打脏合并窗口（固定窗口不顺延：持续打脏也保证 1.5s 内必冲一次）。 */
+export const FLUSH_DEBOUNCE_MS = 1_500;
+let flushDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+/** 冲刷进行中又有人打脏，这次传完得再跑一轮（丢弃的话那份快照就永远躺在队列里了）。 */
 let reflushRequested = false;
 
 const queueFlush = () => {
-  if (flushQueued) return;
-  flushQueued = true;
-  queueMicrotask(() => {
-    flushQueued = false;
+  if (flushDebounceTimer != null) return;
+  flushDebounceTimer = setTimeout(() => {
+    flushDebounceTimer = null;
     void flushAmsgState('dirty');
-  });
+  }, FLUSH_DEBOUNCE_MS);
 };
 
 // ─── 脏标记轻量持久化 ───
@@ -177,6 +180,10 @@ const requeue = (batch: AmsgSyncSnapshot[]) => {
 
 /** 把所有脏角色的 fire_pack 批量上传。失败退避重排，快照留在队列里等下次。 */
 export const flushAmsgState = async (reason: string): Promise<void> => {
+  // 这次冲刷把队列带走了，还挂着的合并窗口就不用再响一次（响了也只是空跑一趟）。
+  // 顺手把句柄归零：不归零的话，外部触发的冲刷（hidden / resume / 测试清理）之后
+  // 队列里再打的脏会以为已有窗口在等，实际那个 timer 早没了。
+  if (flushDebounceTimer != null) { clearTimeout(flushDebounceTimer); flushDebounceTimer = null; }
   // 工具凭据欠着的话顺手一起补：它和 fire_pack 一样是「云端那份过时了」，
   // 而且冲刷时机（切后台 / 聊完一轮）正是网络多半又通了的时候。
   void runToolConfigSync(`flush:${reason}`);
