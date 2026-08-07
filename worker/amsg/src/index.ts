@@ -83,6 +83,7 @@ import {
   type AmsgToolPack,
 } from '../../../utils/amsgToolPack';
 import { buildRealtimeWorldBlock } from './realtimeWorld';
+import { handleSelfUpdate } from './selfUpdate';
 import {
   buildMcpDirectHeaders,
   buildMcpFireBlock,
@@ -145,6 +146,10 @@ interface Env extends NativeFcmEnv {
   AMSG_SERVER_TOKEN?: string;
   /** D1 binding（factory 默认 createD1Adapter(env.DB)，这里只是标注存在）。 */
   DB: unknown;
+  /** 以下三项给 /self-update 用，都可选；没配 CF_API_TOKEN 就是不开自更新。见 ./selfUpdate。 */
+  CF_API_TOKEN?: string;
+  CF_ACCOUNT_ID?: string;
+  CF_SCRIPT_NAME?: string;
 }
 
 // ─── 满血 fire-time hooks（amsg-server 2.6.0-next.4+：含 ctx.scratch / 存储层大值分块） ───
@@ -1977,6 +1982,7 @@ const readServerVersion = async (request: Request, env: Env) => {
  *   GET  /config-check  配置齐不齐（只读 env，前端「连接并验证」用的就是它）
  *   GET  /debug         上面那些再加库和 cron 的状况，给隔着屏幕帮人排障用
  *   POST /instant-chat  即时对话：一个请求受理一轮聊天（见 ./instantChat）
+ *   POST /self-update   自己去取最新代码覆盖自己（见 ./selfUpdate，要共享密钥 + CF_API_TOKEN）
  *   其它请求            配置不全时直接 503 + 说明缺什么，不进上游
  */
 // 两个 handler 的第三个参数 ctx 是 CF 给的：/instant-chat 用它的 waitUntil 在回完
@@ -2014,6 +2020,24 @@ export default {
           tick: judgeTick(storage),
           vapidPublicKey: env.VAPID_PUBLIC_KEY?.trim() || null,
         },
+      });
+    }
+
+    if (pathname.endsWith('/self-update')) {
+      if (method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
+      if (method !== 'POST') {
+        return jsonWithCors(405, {
+          success: false,
+          error: { code: 'METHOD_NOT_ALLOWED', message: '/self-update 只接受 POST' },
+        });
+      }
+      // 排在下面那道配置门之前：配置缺了一半正是想更新一版试试的时候，
+      // 被门挡住反而没法自救。它自己校验共享密钥，不吃这道门的豁免。
+      const result = await handleSelfUpdate(request, env);
+      return jsonWithCors(result.ok ? 200 : 400, {
+        success: result.ok,
+        data: result.ok ? result : undefined,
+        error: result.ok ? undefined : { code: result.code, message: result.message },
       });
     }
 

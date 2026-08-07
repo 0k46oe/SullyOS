@@ -5345,6 +5345,196 @@ var buildRealtimeWorldBlock = async (args) => {
   return block;
 };
 
+// worker/amsg/src/selfUpdate.ts
+var CF_API = "https://api.cloudflare.com/client/v4";
+var BUNDLE_URL = "https://raw.githubusercontent.com/Tosd0/sullyos-workers/main/amsg/worker.bundle.js";
+var MAIN_MODULE = "worker.bundle.js";
+var FALLBACK_COMPATIBILITY_DATE = "2026-01-01";
+var FALLBACK_COMPATIBILITY_FLAGS = ["global_fetch_strictly_public"];
+var MIN_BUNDLE_BYTES = 100 * 1024;
+var MAX_BUNDLE_BYTES = 8 * 1024 * 1024;
+var BUNDLE_FINGERPRINT = "src_default as default";
+var fail = (code, message) => ({ ok: false, code, message });
+async function cf(token, path, init = {}) {
+  let res;
+  try {
+    res = await fetch(`${CF_API}${path}`, {
+      method: init.method ?? "GET",
+      headers: { Authorization: `Bearer ${token}` },
+      body: init.body
+    });
+  } catch (err3) {
+    return { ok: false, detail: `\u8FDE\u4E0D\u4E0A Cloudflare API\uFF1A${err3.message}` };
+  }
+  const text = await res.text();
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    return { ok: false, detail: `Cloudflare \u8FD4\u56DE\u4E86\u975E JSON\uFF08HTTP ${res.status}\uFF09` };
+  }
+  if (!res.ok || payload?.success === false) {
+    const detail = (payload?.errors ?? []).map((e) => `${e.code}: ${e.message}`).join("\uFF1B") || `HTTP ${res.status}`;
+    return { ok: false, detail };
+  }
+  return { ok: true, result: payload.result };
+}
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function resolveScriptName(env, requestUrl) {
+  const configured = env.CF_SCRIPT_NAME?.trim();
+  if (configured) return configured;
+  let host;
+  try {
+    host = new URL(requestUrl).hostname;
+  } catch {
+    return null;
+  }
+  if (!host.endsWith(".workers.dev")) return null;
+  const name = host.split(".")[0];
+  return name || null;
+}
+async function resolveAccountId(env, token) {
+  const configured = env.CF_ACCOUNT_ID?.trim();
+  if (configured) return { ok: true, id: configured };
+  const listed = await cf(token, "/accounts");
+  if (!listed.ok) {
+    return {
+      ok: false,
+      message: `\u95EE\u4E0D\u5230\u8D26\u53F7 ID\uFF08${listed.detail}\uFF09\u3002\u7ED9 Worker \u52A0\u4E00\u6761 CF_ACCOUNT_ID \u53D8\u91CF\u5373\u53EF\u7ED5\u8FC7\u8FD9\u4E00\u6B65\u3002`
+    };
+  }
+  const accounts = Array.isArray(listed.result) ? listed.result : [];
+  if (accounts.length === 1) return { ok: true, id: accounts[0].id };
+  if (accounts.length === 0) {
+    return { ok: false, message: "\u8FD9\u679A token \u4E00\u4E2A\u8D26\u53F7\u90FD\u8BFB\u4E0D\u5230\uFF0C\u591A\u534A\u662F\u6743\u9650\u6CA1\u7ED9\u5168\u6216\u8005\u5DF2\u7ECF\u8FC7\u671F\u3002" };
+  }
+  return {
+    ok: false,
+    message: "\u8FD9\u679A token \u80FD\u78B0\u5230\u4E0D\u6B62\u4E00\u4E2A\u8D26\u53F7\uFF0C\u5206\u4E0D\u6E05\u8BE5\u66F4\u65B0\u54EA\u4E2A\u3002\u7ED9 Worker \u52A0\u4E00\u6761 CF_ACCOUNT_ID \u53D8\u91CF\u6307\u660E\u3002"
+  };
+}
+async function fetchLatestBundle() {
+  let res;
+  try {
+    res = await fetch(BUNDLE_URL, { headers: { "User-Agent": "sullyos-amsg-self-update" } });
+  } catch (err3) {
+    return { ok: false, message: `\u53D6\u4E0D\u5230\u6700\u65B0\u4EE3\u7801\uFF1A${err3.message}` };
+  }
+  if (!res.ok) return { ok: false, message: `\u53D6\u6700\u65B0\u4EE3\u7801\u5931\u8D25\uFF08HTTP ${res.status}\uFF09` };
+  const code = await res.text();
+  const bytes = new TextEncoder().encode(code).length;
+  if (bytes < MIN_BUNDLE_BYTES || bytes > MAX_BUNDLE_BYTES) {
+    return { ok: false, message: `\u53D6\u56DE\u6765\u7684\u6587\u4EF6\u5927\u5C0F\u4E0D\u5BF9\uFF08${bytes} \u5B57\u8282\uFF09\uFF0C\u6CA1\u6709\u8986\u76D6\uFF0C\u5F53\u524D\u7248\u672C\u4E0D\u52A8\u3002` };
+  }
+  if (!code.includes(BUNDLE_FINGERPRINT)) {
+    return { ok: false, message: "\u53D6\u56DE\u6765\u7684\u6587\u4EF6\u4E0D\u50CF amsg \u7684 worker \u4EE3\u7801\uFF0C\u6CA1\u6709\u8986\u76D6\uFF0C\u5F53\u524D\u7248\u672C\u4E0D\u52A8\u3002" };
+  }
+  return { ok: true, code };
+}
+function rebuildBindings(existing, env) {
+  const bindings = [];
+  const missing = [];
+  for (const binding of existing) {
+    if (binding?.type === "secret_text") {
+      const value = env[binding.name];
+      if (typeof value !== "string" || !value) {
+        missing.push(binding.name);
+        continue;
+      }
+      bindings.push({ type: "secret_text", name: binding.name, text: value });
+    } else {
+      bindings.push(binding);
+    }
+  }
+  if (missing.length) return { ok: false, missing };
+  return { ok: true, bindings };
+}
+async function handleSelfUpdate(request, env) {
+  const serverToken = env.AMSG_SERVER_TOKEN?.trim();
+  if (!serverToken) {
+    return fail(
+      "SERVER_TOKEN_REQUIRED",
+      "\u8FD9\u4E2A Worker \u6CA1\u8BBE\u5171\u4EAB\u5BC6\u94A5\uFF08AMSG_SERVER_TOKEN\uFF09\uFF0C\u51FA\u4E8E\u5B89\u5168\u8003\u8651\u4E0D\u5F00\u653E\u81EA\u66F4\u65B0\u3002\u5148\u8865\u4E0A\u518D\u8BD5\u3002"
+    );
+  }
+  if (request.headers.get("X-Client-Token") !== serverToken) {
+    return fail("UNAUTHORIZED", "\u5171\u4EAB\u5BC6\u94A5\u5BF9\u4E0D\u4E0A\u3002");
+  }
+  const token = env.CF_API_TOKEN?.trim();
+  if (!token) {
+    return fail(
+      "CF_TOKEN_MISSING",
+      "\u6CA1\u914D CF_API_TOKEN\uFF0C\u6CA1\u6CD5\u81EA\u5DF1\u66F4\u65B0\u3002\u53BB Cloudflare \u5EFA\u4E00\u679A\u53EA\u52FE Workers Scripts \u2192 Edit \u7684 API Token\uFF0C\u52A0\u8FDB\u8FD9\u4E2A Worker \u7684\u53D8\u91CF\u91CC\u3002"
+    );
+  }
+  const scriptName = resolveScriptName(env, request.url);
+  if (!scriptName) {
+    return fail(
+      "SCRIPT_NAME_UNKNOWN",
+      "\u8BA4\u4E0D\u51FA\u8FD9\u4E2A Worker \u53EB\u4EC0\u4E48\uFF08\u591A\u534A\u662F\u5957\u4E86\u4EE3\u7406\u57DF\u540D\uFF09\u3002\u7ED9\u5B83\u52A0\u4E00\u6761 CF_SCRIPT_NAME \u53D8\u91CF\uFF0C\u503C\u586B Worker \u7684\u540D\u5B57\u3002"
+    );
+  }
+  const account = await resolveAccountId(env, token);
+  if (!account.ok) return fail("ACCOUNT_UNKNOWN", account.message);
+  const bundle = await fetchLatestBundle();
+  if (!bundle.ok) return fail("BUNDLE_INVALID", bundle.message);
+  const settings = await cf(
+    token,
+    `/accounts/${account.id}/workers/scripts/${encodeURIComponent(scriptName)}/settings`
+  );
+  if (!settings.ok) {
+    return fail(
+      "SETTINGS_UNREADABLE",
+      `\u8BFB\u4E0D\u5230\u8FD9\u4E2A Worker \u73B0\u5728\u7684\u914D\u7F6E\uFF08${settings.detail}\uFF09\u3002\u6CA1\u6709\u8986\u76D6\uFF0C\u5F53\u524D\u7248\u672C\u4E0D\u52A8\u3002`
+    );
+  }
+  const rebuilt = rebuildBindings(
+    settings.result?.bindings ?? [],
+    env
+  );
+  if (!rebuilt.ok) {
+    return fail(
+      "BINDING_VALUE_MISSING",
+      `\u8FD9\u51E0\u9879\u5BC6\u94A5\u5728\u8FD0\u884C\u65F6\u8BFB\u4E0D\u5230\u503C\uFF1A${rebuilt.missing.join("\u3001")}\u3002\u7167\u539F\u6837\u4F20\u4E0A\u53BB\u4F1A\u628A\u5B83\u4EEC\u62B9\u6389\uFF0C\u6240\u4EE5\u6CA1\u6709\u8986\u76D6\uFF0C\u5F53\u524D\u7248\u672C\u4E0D\u52A8\u3002`
+    );
+  }
+  const metadata = {
+    main_module: MAIN_MODULE,
+    compatibility_date: settings.result?.compatibility_date || FALLBACK_COMPATIBILITY_DATE,
+    compatibility_flags: settings.result?.compatibility_flags?.length ? settings.result.compatibility_flags : FALLBACK_COMPATIBILITY_FLAGS,
+    bindings: rebuilt.bindings
+  };
+  const form = new FormData();
+  form.set("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
+  form.set(
+    MAIN_MODULE,
+    new Blob([bundle.code], { type: "application/javascript+module" }),
+    MAIN_MODULE
+  );
+  const uploaded = await cf(
+    token,
+    `/accounts/${account.id}/workers/scripts/${encodeURIComponent(scriptName)}`,
+    { method: "PUT", body: form }
+  );
+  if (!uploaded.ok) {
+    return fail("UPLOAD_FAILED", `\u4E0A\u4F20\u5931\u8D25\uFF08${uploaded.detail}\uFF09\u3002\u5F53\u524D\u7248\u672C\u4E0D\u52A8\u3002`);
+  }
+  const hash = (await sha256Hex(bundle.code)).slice(0, 12);
+  const bytes = new TextEncoder().encode(bundle.code).length;
+  return {
+    ok: true,
+    code: "UPDATED",
+    message: "\u5DF2\u7ECF\u66F4\u65B0\u5230\u6700\u65B0\u7248\u672C\u3002",
+    bundleHash: hash,
+    bundleBytes: bytes,
+    versionId: uploaded.result?.id,
+    scriptName
+  };
+}
+
 // utils/mcpFireCore.ts
 var DEFAULT_MAX_TOOL_NAME_LEN = 64;
 var MCP_FIRE_NAME_PREFIX = "mcp__";
@@ -8612,30 +8802,30 @@ var handleInstantChat = async (args) => {
   const { request, env, ctx, upstream: upstream2, json } = args;
   const now = args.now ?? Date.now;
   const sleep = args.sleep ?? delay;
-  const fail = (status, code, message, extra) => json(status, { success: false, error: { code, message, ...extra ?? {} } });
+  const fail2 = (status, code, message, extra) => json(status, { success: false, error: { code, message, ...extra ?? {} } });
   const token = (env.AMSG_SERVER_TOKEN ?? "").trim();
   const clientToken = request.headers.get("X-Client-Token") ?? "";
   if (token) {
     if (!clientToken || !await constantTimeEqual2(clientToken, token)) {
-      return fail(401, "INVALID_CLIENT_TOKEN", "\u5171\u4EAB\u5BC6\u94A5\u65E0\u6548\u6216\u7F3A\u5931");
+      return fail2(401, "INVALID_CLIENT_TOKEN", "\u5171\u4EAB\u5BC6\u94A5\u65E0\u6548\u6216\u7F3A\u5931");
     }
   }
   const userId = request.headers.get("X-User-Id") ?? "";
-  if (!userId) return fail(400, "USER_ID_REQUIRED", "\u7F3A\u5C11\u7528\u6237\u6807\u8BC6\u7B26");
-  if (!UUID_V4_RE.test(userId)) return fail(400, "INVALID_USER_ID_FORMAT", "X-User-Id \u5FC5\u987B\u662F UUID v4 \u683C\u5F0F");
+  if (!userId) return fail2(400, "USER_ID_REQUIRED", "\u7F3A\u5C11\u7528\u6237\u6807\u8BC6\u7B26");
+  if (!UUID_V4_RE.test(userId)) return fail2(400, "INVALID_USER_ID_FORMAT", "X-User-Id \u5FC5\u987B\u662F UUID v4 \u683C\u5F0F");
   let body;
   try {
     const parsed = await request.json();
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     body = parsed;
   } catch {
-    return fail(400, "INVALID_JSON", "\u8BF7\u6C42\u4F53\u4E0D\u662F\u5408\u6CD5\u7684 JSON \u5BF9\u8C61");
+    return fail2(400, "INVALID_JSON", "\u8BF7\u6C42\u4F53\u4E0D\u662F\u5408\u6CD5\u7684 JSON \u5BF9\u8C61");
   }
   if (!isEncryptedEnvelope2(body.statePayload)) {
-    return fail(400, "INVALID_STATE_PAYLOAD", "statePayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
+    return fail2(400, "INVALID_STATE_PAYLOAD", "statePayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
   }
   if (!isEncryptedEnvelope2(body.taskPayload)) {
-    return fail(400, "INVALID_TASK_PAYLOAD", "taskPayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
+    return fail2(400, "INVALID_TASK_PAYLOAD", "taskPayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
   }
   const supersedesUuid = typeof body.supersedesUuid === "string" ? body.supersedesUuid.trim() : "";
   const requestUrl = new URL(request.url);
@@ -8723,7 +8913,7 @@ var handleInstantChat = async (args) => {
   }
   const uuid = taskBody?.data?.uuid;
   if (typeof uuid !== "string" || !uuid) {
-    return fail(502, "INSTANT_CHAT_TASK_UUID_MISSING", "\u4E0A\u6E38\u6CA1\u6709\u56DE\u4EFB\u52A1 uuid\uFF0C\u65E0\u6CD5\u8DDF\u8E2A\u8FD9\u4E00\u8F6E", {
+    return fail2(502, "INSTANT_CHAT_TASK_UUID_MISSING", "\u4E0A\u6E38\u6CA1\u6709\u56DE\u4EFB\u52A1 uuid\uFF0C\u65E0\u6CD5\u8DDF\u8E2A\u8FD9\u4E00\u8F6E", {
       step: "schedule-message"
     });
   }
@@ -9241,12 +9431,12 @@ var amsgHooks = {
     if (typeof charId !== "string" || !charId) {
       throw fireStateError("task metadata \u7F3A charId", { taskId: ctx.task.id });
     }
-    const fail = (reason, extra) => fireStateError(reason, { taskId: ctx.task.id, charId, ...extra });
+    const fail2 = (reason, extra) => fireStateError(reason, { taskId: ctx.task.id, charId, ...extra });
     const unpackOrFail = async (label, value) => {
       try {
         return await unpackStateValue(value);
       } catch (error) {
-        throw fail(`${label} \u89E3\u538B\u5931\u8D25\uFF08\u6570\u636E\u635F\u574F\uFF09`, { error: String(error) });
+        throw fail2(`${label} \u89E3\u538B\u5931\u8D25\uFF08\u6570\u636E\u635F\u574F\uFF09`, { error: String(error) });
       }
     };
     const charRows = await ctx.readState(amsgStateNamespace(charId));
@@ -9272,16 +9462,16 @@ var amsgHooks = {
       return { skip: true };
     }
     const packRow = charRows.find((r) => r.key === AMSG_FIRE_PACK_KEY);
-    if (!packRow) throw fail("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 fire_pack");
+    if (!packRow) throw fail2("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 fire_pack");
     const packJson = await unpackOrFail("fire_pack", packRow.value);
     const pack = parseFirePack(packJson);
-    if (!pack) throw fail(`fire_pack \u89E3\u6790\u5931\u8D25\uFF1A${describeFirePackVersion(packJson)}`);
+    if (!pack) throw fail2(`fire_pack \u89E3\u6790\u5931\u8D25\uFF1A${describeFirePackVersion(packJson)}`);
     if (instant && !pack.chat) {
-      throw fail("\u5373\u65F6\u5BF9\u8BDD\u4EFB\u52A1\u7684 fire_pack \u91CC\u6CA1\u6709 chat \u6BB5\uFF08\u4E91\u7AEF\u72B6\u6001\u6CA1\u8DDF\u4E0A\uFF09");
+      throw fail2("\u5373\u65F6\u5BF9\u8BDD\u4EFB\u52A1\u7684 fire_pack \u91CC\u6CA1\u6709 chat \u6BB5\uFF08\u4E91\u7AEF\u72B6\u6001\u6CA1\u8DDF\u4E0A\uFF09");
     }
     const occurrenceMs = Date.parse(String(ctx.task.nextSendAt));
     if (!Number.isFinite(occurrenceMs)) {
-      throw fail("\u4EFB\u52A1\u884C next_send_at \u89E3\u6790\u4E0D\u51FA\u89E6\u53D1\u65F6\u523B", { nextSendAt: ctx.task.nextSendAt });
+      throw fail2("\u4EFB\u52A1\u884C next_send_at \u89E3\u6790\u4E0D\u51FA\u89E6\u53D1\u65F6\u523B", { nextSendAt: ctx.task.nextSendAt });
     }
     const presenceLastUserMessageAt = presence?.charId === charId ? presence.lastUserMessageAt : null;
     const expireInput = {
@@ -9298,17 +9488,17 @@ var amsgHooks = {
       return { skip: true };
     }
     if (!instant && typeof taskMeta.amsgTaskInstruction !== "string") {
-      throw fail("\u4EFB\u52A1 metadata \u7F3A amsgTaskInstruction\uFF08\u65E7\u683C\u5F0F\u4EFB\u52A1\uFF09");
+      throw fail2("\u4EFB\u52A1 metadata \u7F3A amsgTaskInstruction\uFF08\u65E7\u683C\u5F0F\u4EFB\u52A1\uFF09");
     }
     const globalRows = await ctx.readState(AMSG_GLOBAL_NAMESPACE);
     const toolPackRow = charRows.find((r) => r.key === AMSG_TOOL_PACK_KEY);
     const toolConfigRow = globalRows.find((r) => r.key === AMSG_TOOL_CONFIG_KEY);
-    if (!toolPackRow) throw fail("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 tool_pack");
-    if (!toolConfigRow) throw fail("\u4E91\u7AEF\u6CA1\u6709 tool_config");
+    if (!toolPackRow) throw fail2("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 tool_pack");
+    if (!toolConfigRow) throw fail2("\u4E91\u7AEF\u6CA1\u6709 tool_config");
     const toolPack = parseToolPack(await unpackOrFail("tool_pack", toolPackRow.value));
-    if (!toolPack) throw fail("tool_pack \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
+    if (!toolPack) throw fail2("tool_pack \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
     const toolConfig = parseToolConfig(await unpackOrFail("tool_config", toolConfigRow.value));
-    if (!toolConfig) throw fail("tool_config \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
+    if (!toolConfig) throw fail2("tool_config \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
     const mcpServers = filterMcpServersForChar(toolConfig.mcpServers, charId);
     const mcpResolve = mcpServers.length ? buildMcpNameMap(mcpServers, { maxNameLen: MCP_FIRE_NAME_BUDGET }) : null;
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
@@ -9833,6 +10023,21 @@ var src_default = {
           tick: judgeTick(storage),
           vapidPublicKey: env.VAPID_PUBLIC_KEY?.trim() || null
         }
+      });
+    }
+    if (pathname.endsWith("/self-update")) {
+      if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
+      if (method !== "POST") {
+        return jsonWithCors(405, {
+          success: false,
+          error: { code: "METHOD_NOT_ALLOWED", message: "/self-update \u53EA\u63A5\u53D7 POST" }
+        });
+      }
+      const result = await handleSelfUpdate(request, env);
+      return jsonWithCors(result.ok ? 200 : 400, {
+        success: result.ok,
+        data: result.ok ? result : void 0,
+        error: result.ok ? void 0 : { code: result.code, message: result.message }
       });
     }
     const report = inspectWorkerEnv(env);
