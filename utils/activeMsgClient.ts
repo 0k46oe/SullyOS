@@ -22,6 +22,7 @@ import {
   resolveExpirePolicy, toDatetimeLocalValue,
 } from './amsg2Tasks';
 import { AMSG_CHAT_PRESENCE_KEY, AmsgChatPresence } from './amsgChatPresence';
+import { flattenContentPartsToText } from './promptMessageCleanup';
 import {
   AMSG_FIRE_PACK_KEY,
   FIRE_PACK_VERSION,
@@ -30,6 +31,7 @@ import {
   AMSG_SLOT_REALTIME_WORLD,
   AMSG_SLOT_SCENE,
   AMSG_SLOT_TASK_INSTRUCTION,
+  AMSG_INSTANT_CHAT_SUBTYPE,
   AMSG_LAST_SKIP_KEY,
   AMSG_SLOT_SELF_LOG,
   AMSG_SLOT_TASK_LIST,
@@ -56,7 +58,6 @@ import {
 } from './amsgToolPack';
 // 只取一个常量：客户端算 firstSendTime 时要留的提前量，和包装层「把任务行拉到期」
 // 那一步是同一个数，各写各的就会出现「校验说时间要在未来 / cron 说还没到」的死角。
-import { INSTANT_SCHEDULE_LEAD_MS } from '../worker/amsg/src/instantChat';
 import type { AmsgEmotionEvalSpec } from '../worker/amsg/src/emotionEval';
 import { listRecallableMonths } from './agenticTools';
 import { ChatPrompts } from './chatPrompts';
@@ -298,7 +299,13 @@ const ensureWorkerReady = async () => {
   return config;
 };
 
-const initializeClient = async (config: ActiveMsg2GlobalConfig) => {
+// 握手结果按配置记忆化：init()（get-user-key）是一次真网络往返，而用户密钥不变——
+// 即时对话把它放上了发送热路径（拿到 202 之前的串行延迟）和 60s 状态点名（一跳最多
+// 两次），逐次重新握手纯属白付 RTT。键取会影响握手的三个字段；配置一变（换 worker /
+// 换密钥 / 清空重连）键就换，旧缓存自然作废。失败的握手不缓存，下一次重新来过。
+let cachedClientEntry: { key: string; promise: ReturnType<typeof createAndInitClient> } | null = null;
+
+const createAndInitClient = async (config: ActiveMsg2GlobalConfig) => {
   const client = createClient(config);
   try {
     await client.init();
@@ -306,6 +313,17 @@ const initializeClient = async (config: ActiveMsg2GlobalConfig) => {
     throw normalizeActiveMsgApiError(error, '获取用户密钥');
   }
   return client;
+};
+
+const initializeClient = (config: ActiveMsg2GlobalConfig) => {
+  const key = `${config.workerUrl}|${config.userId}|${config.serverToken ?? ''}`;
+  if (cachedClientEntry?.key === key) return cachedClientEntry.promise;
+  const promise = createAndInitClient(config);
+  cachedClientEntry = { key, promise };
+  promise.catch(() => {
+    if (cachedClientEntry?.promise === promise) cachedClientEntry = null;
+  });
+  return promise;
 };
 
 const resolveApiConfig = (char: CharacterProfile, config: ActiveMsg2CharacterConfig, apiConfig: APIConfig) => {
@@ -404,16 +422,40 @@ const readEmojiLibrary = async (): Promise<EmojiLibrary> => {
 };
 
 // export 只为单测（activeMsgClient.test.ts 钉 tzId 取值与模板不烤时间）。
+/**
+ * 即时对话轻量包的模板占位（角色 2.0 关着且没有任何任务时用）：定时任务那条路才渲染
+ * 模板，这类角色的包永远没人渲染，每次发送重建一整份系统提示词 + 近史转写纯属白付
+ * （主线程二次构建 + 手机上行几十 KB，都发生在拿到 202 之前）。写成一眼能认出来的
+ * 标记：它要是出现在推送正文里，说明有本不该渲染模板的 fire 在渲染它。
+ */
+const AMSG2_INSTANT_STUB_TEMPLATE =
+  'AMSG2_INSTANT_STUB_TEMPLATE（即时对话轻量包：该角色无定时任务，模板未随发送重建；看到这条正文说明有本不该渲染模板的 fire 在渲染它）';
+
 export const buildFirePack = async (
   char: CharacterProfile,
   userProfile: UserProfile,
   groups: GroupProfile[],
   realtimeConfig: RealtimeConfig | undefined,
   emojiLibrary?: EmojiLibrary,
+  opts?: {
+    /**
+     * 用占位模板替代真模板（跳过系统提示词 + 近史转写 + 表情全库读取这三样大头）。
+     * 只许在「这份包的模板确定无人渲染」时传：即时对话发送路径上，角色 2.0 关着
+     * （selfScheduleEnabled=false，云端 fire 不给排程能力）且本地任务清单为空。
+     * 其余字段（scene / lastUserMessageAt / pendingTasks / tzId…）照常构建——
+     * 即时 fire 自己要读它们（sceneSong、锚点、任务清单块）。
+     */
+    templateStub?: boolean;
+  },
 ): Promise<AmsgFirePack> => {
+  const templateStub = opts?.templateStub === true;
   const [{ recentMessages, lastUserMessageAt }, library, schedule] = await Promise.all([
     buildTimeGapHint(char.id),
-    emojiLibrary ? Promise.resolve(emojiLibrary) : readEmojiLibrary(),
+    // 表情库只喂系统提示词/近史渲染：占位模板路径整库都不用读（表情记录带图片数据，
+    // 全表 getAll 不便宜）。
+    templateStub
+      ? Promise.resolve({ all: [], categories: [] } as unknown as EmojiLibrary)
+      : (emojiLibrary ? Promise.resolve(emojiLibrary) : readEmojiLibrary()),
     // 日程随包带原始表（不是渲染好的文字），worker 到点自己挑时段。总开关关掉的角色没有表。
     isScheduleFeatureOn(char)
       ? getDailyScheduleForChar(char).catch((e) => {
@@ -468,7 +510,7 @@ export const buildFirePack = async (
     library.categories,
     char.id,
   );
-  const systemPrompt = await ChatPrompts.buildSystemPrompt(
+  const systemPrompt = templateStub ? '' : await ChatPrompts.buildSystemPrompt(
     char,
     userProfile,
     groups,
@@ -484,15 +526,13 @@ export const buildFirePack = async (
     // 具体拿掉哪些块、到点由谁补，见 ChatPrompts.PromptBuildOptions 上的表。
     { forFirePack: true },
   );
-  const { apiMessages } = ChatPrompts.buildMessageHistory(
+  const recentTranscript = templateStub ? '' : ChatPrompts.buildMessageHistory(
     recentMessages,
     Math.min(char.contextLimit || 120, 120),
     char,
     userProfile,
     emojis,
-  );
-
-  const recentTranscript = apiMessages
+  ).apiMessages
     .slice(-30)
     .map((message) => formatHistoryLine(message.role, message.content, char, userProfile))
     .join('\n\n');
@@ -505,7 +545,7 @@ export const buildFirePack = async (
     ? `- 你的记忆库里存着这些月份的经历：${recallableMonths.join('、')}。想聊起其中某段时，先输出 [[RECALL: 年-月]] 把细节取回来再写，别凭印象编。`
     : null;
 
-  const template = [
+  const template = templateStub ? AMSG2_INSTANT_STUB_TEMPLATE : [
     '你将代表下面这个角色，生成一条“主动发给用户”的私聊消息。',
     '',
     '【重要规则】',
@@ -574,6 +614,9 @@ export const buildFirePack = async (
     ...(typeof char.activeMsg2Config?.maxUnansweredSends === 'number'
       ? { maxUnansweredSends: char.activeMsg2Config.maxUnansweredSends }
       : {}),
+    // 角色级 2.0 开关随包上云：关着的角色即便走即时对话（全局开关是另一颗），云端
+    // fire 也不给排程能力——本地的 amsg2ToolsInjected 闸门在云端的对应物就是它。
+    selfScheduleEnabled: isAmsg2EnabledForChar(char),
     // 到点时角色要知道自己还挂着什么，才不会把同一件事再排一遍。这里带原始记录，
     // 渲染成人话由 worker 现场做（时间要按 tzId 换算，且得摘掉正在发的那条）。
     pendingTasks: getPendingTasks(char.activeMsg2Config, Date.now()),
@@ -644,14 +687,9 @@ const utf8ByteLength = (text: string): number => new TextEncoder().encode(text).
 const hasNonTextPart = (content: unknown): boolean =>
   Array.isArray(content) && content.some((part: any) => part?.type !== 'text');
 
-/** 结构化分段 → 只剩文字的那一句（丢掉图片本体时的替代内容）。 */
-const flattenToText = (content: unknown[]): string => {
-  const text = content
-    .map((part: any) => (part?.type === 'text' ? String(part.text ?? '') : ''))
-    .filter(Boolean)
-    .join('\n');
-  return text || '[图片]';
-};
+// 「图片消息 → 文字占位」的拍平内核与本地 stripImages 路径共用同一份
+// （promptMessageCleanup.flattenContentPartsToText）：超预算降级产物必须与
+// 本地拍平产物严格同源，否则同一条历史消息在两条生成路上渲染成两种样子。
 
 /**
  * 本地那串 fullMessages → fire_pack 的 `chat.messages`。
@@ -700,7 +738,7 @@ export const toFirePackChatMessages = (
   for (let i = 0; i < result.length && totalBytes > CHAT_CONTENT_BUDGET_BYTES; i += 1) {
     if (i === protectedIdx || !hasNonTextPart(result[i].content)) continue;
     const bytesBefore = entryBytes(result[i]);
-    result[i] = { role: result[i].role, content: flattenToText(result[i].content as unknown[]) };
+    result[i] = { role: result[i].role, content: flattenContentPartsToText(result[i].content as unknown[]) };
     totalBytes -= bytesBefore - entryBytes(result[i]);
     console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 即时对话这轮体积超标，第 ${i + 1} 条消息的图片本体没带上云（文字段保留）`);
   }
@@ -1060,7 +1098,12 @@ const decryptPayload = async (client: ReiClient, payload: { iv: string; authTag:
  */
 export type RemoteTaskStatus =
   | { state: 'pending'; retryCount?: number; nextSendAt?: string }
-  | { state: 'completed' }
+  /**
+   * lastError：amsg-server 2.6.0-next.15 起 409 的 error.details 带的行级失败摘要
+   * （查询本来就按 uuid 点名，必然是这一行的）。旧 worker 不带 → null，调用方退回
+   * chat_fail 留痕那条路。
+   */
+  | { state: 'completed'; lastError?: RemoteTaskLastError | null }
   | { state: 'gone' };
 
 export const ActiveMsgClient = {
@@ -1476,7 +1519,11 @@ export const ActiveMsgClient = {
     if (!response?.success) {
       const code = response?.error?.code;
       if (code === REMOTE_TASK_NOT_FOUND_CODE) return { state: 'gone' };
-      if (code === REMOTE_TASK_ALREADY_COMPLETED_CODE) return { state: 'completed' };
+      if (code === REMOTE_TASK_ALREADY_COMPLETED_CODE) {
+        // 失败摘要跟着 409 一起来（新 worker 的 details.lastError；明文列，无凭据）。
+        const details = (response.error as { details?: { lastError?: unknown } } | undefined)?.details;
+        return { state: 'completed', lastError: parseRemoteTaskLastError(details?.lastError) };
+      }
       throw new Error(response?.error?.message || '查询任务状态失败。');
     }
 
@@ -1710,6 +1757,13 @@ export const ActiveMsgClient = {
      */
     temperature?: number;
     maxTokens?: number;
+    /**
+     * 本地这一轮会额外发进请求体的字段（思考链三件套：thinking / reasoning_effort /
+     * extra_body，由 useChatAI 的 shouldSendThinkingParams 分支决定）。worker 组请求体
+     * 时原样展开、核心字段（model/messages 等）优先——两条路发出去的请求体必须一致，
+     * 不然开思考的角色一开即时对话，心象卡片就静默消失。
+     */
+    extraBody?: Record<string, unknown>;
     userProfile: UserProfile;
     groups: GroupProfile[];
     realtimeConfig: RealtimeConfig;
@@ -1728,8 +1782,13 @@ export const ActiveMsgClient = {
 
     const now = Date.now();
     const tzId = resolveCharTimeZone(char) ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    // 模板只有定时任务那条路才渲染：角色 2.0 关着（云端 fire 不注入排程工具，排不出
+    // 会消费模板的新任务）且本地任务清单为空时，用占位模板省掉每次发送的二次全量
+    // 构建与上传。2.0 开着 / 还挂着任务（含取消失败的幽灵行）就老老实实带真模板。
+    const templateStub = !isAmsg2EnabledForChar(char)
+      && (char.activeMsg2Config?.tasks?.length ?? 0) === 0;
     const firePack: AmsgFirePack = {
-      ...(await buildFirePack(char, userProfile, groups, realtimeConfig)),
+      ...(await buildFirePack(char, userProfile, groups, realtimeConfig, undefined, { templateStub })),
       chat: { messages: toFirePackChatMessages(chatMessages), builtAt: now },
     };
 
@@ -1743,10 +1802,15 @@ export const ActiveMsgClient = {
       messageType: 'auto',
       // 上游只把它当自由文本标签原样带进推送，不据此分支；本地拿它把即时对话的行跟
       // 定时任务的行分开——不然一条失败的即时对话行会被面板对账当成排程任务补进清单。
-      messageSubtype: 'instant-chat',
-      // 上游校验 firstSendTime 必须在未来，而 cron 只捡已到期的行；先留一点提前量过校验，
-      // 落库之后由包装层把这一行拉到「此刻」（见 worker/amsg/src/instantChat.ts）。
-      firstSendTime: new Date(now + INSTANT_SCHEDULE_LEAD_MS).toISOString(),
+      // 常量与面板对账的过滤端共用（amsgFirePack 的 AMSG_INSTANT_CHAT_SUBTYPE）。
+      messageSubtype: AMSG_INSTANT_CHAT_SUBTYPE,
+      // 落库即到期（不带 firstSendTime）：用户已经把话说完了，现在就该答。
+      // 排未来时刻的话，打包/上传的耗时都要预支提前量，慢网低端机会被
+      // 「时间必须在未来」打回，而同一轮走本地路径毫无问题。
+      immediate: true,
+      // 顶替上一条还没被认领的任务（连发两条时合并成一起回）：上游在建新任务的
+      // 同一事务里取消旧的，原子、无第二个请求。
+      ...(params.supersedesUuid ? { supersedesUuid: params.supersedesUuid } : {}),
       recurrenceType: 'none',
       tzId,
       // 真正要发给模型的消息在 fire_pack.chat 里，这条只为过上游「messages 非空」的校验。
@@ -1758,6 +1822,14 @@ export const ActiveMsgClient = {
       // 少了它，同一句话云端会落到供应商默认温度（常为 1.0），回复风格和本地对不上。
       ...(typeof params.temperature === 'number' ? { temperature: params.temperature } : {}),
       ...(params.maxTokens && params.maxTokens > 0 ? { maxTokens: params.maxTokens } : {}),
+      // 思考链三件套（thinking / reasoning_effort / extra_body）放行顶层，随加密信封
+      // 到 fire 时刻由上游 buildLlmRequestBody 展开进请求体（核心字段 model/messages
+      // 等优先）。⚠️ 依赖上游 amsg-server 认领这个字段（/schedule-message 的
+      // fullTaskData 白名单 + buildLlmRequestBody 的展开）；旧版上游会把它剥掉——
+      // 那时行为退回「只有 -thinking 模型名后缀生效」，即本次改动前的样子，不会更糟。
+      ...(params.extraBody && Object.keys(params.extraBody).length > 0
+        ? { llmExtraBody: params.extraBody }
+        : {}),
       metadata: {
         charId: char.id,
         charName: char.name,
@@ -1776,13 +1848,14 @@ export const ActiveMsgClient = {
       },
     };
 
+    const stateEntries = {
+      entries: [
+        ...(await buildCharStateEntries(char, firePack, now)),
+        buildToolConfigEntry(realtimeConfig, now),
+      ],
+    };
     const [statePayload, encryptedTask] = await Promise.all([
-      encryptPayload(client, {
-        entries: [
-          ...(await buildCharStateEntries(char, firePack, now)),
-          buildToolConfigEntry(realtimeConfig, now),
-        ],
-      }),
+      encryptPayload(client, stateEntries),
       encryptPayload(client, taskPayload),
     ]);
 
@@ -1790,11 +1863,7 @@ export const ActiveMsgClient = {
       method: 'POST',
       // 外壳是明文：里头两个信封已经加密好，别再给外壳挂加密头（包装层会当它是整体密文）。
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        statePayload,
-        taskPayload: encryptedTask,
-        ...(params.supersedesUuid ? { supersedesUuid: params.supersedesUuid } : {}),
-      }),
+      body: JSON.stringify({ statePayload, taskPayload: encryptedTask }),
     }, '即时对话');
 
     if (status !== 202 || typeof body?.uuid !== 'string' || !body.uuid) {
@@ -1859,6 +1928,17 @@ export const ActiveMsgClient = {
       console.warn(
         `${ACTIVE_MSG_RUNTIME_HEADER} 云端状态部分条目被拒（对应角色沿用上一份 fire_pack）`,
         rejected.map((r) => `${r.namespace}/${r.key}: ${r.message || 'rejected'}`),
+      );
+    }
+    // amsg-server 2.6.0-next.15 起服务端按 updatedAt 做条件写（旧不盖新）。被拦 = 云端
+    // 已有**更新**的一份（多设备 / 多标签页竞写时晚到的旧包），是保护生效而不是错误，
+    // log 一句留个排障线索就好。
+    const skipped = (response as { data?: { skippedEntries?: Array<{ namespace: string; key: string }> } })
+      .data?.skippedEntries;
+    if (skipped && skipped.length > 0) {
+      console.log(
+        `${ACTIVE_MSG_RUNTIME_HEADER} 云端已有更新的一份，这批旧条目被拦下（条件写保护）`,
+        skipped.map((s) => `${s.namespace}/${s.key}`),
       );
     }
   },
@@ -2143,6 +2223,8 @@ export const ActiveMsgClient = {
     realtimeConfig: RealtimeConfig | undefined,
   ): Promise<{ deleted: number; toolConfigRestored: boolean }> {
     const config = await ensureWorkerReady();
+    // 清云端状态可能连用户密钥一起换代：握手缓存作废，之后的第一次调用重新 init。
+    cachedClientEntry = null;
     const client = createClient(config);
     const response = await client.clearClientState();
     if (!response?.success) {

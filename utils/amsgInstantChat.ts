@@ -43,6 +43,8 @@ export interface AmsgInstantChatPending {
   uuid: string;
   /** 受理时刻（epoch ms），排查时看「这一轮等了多久」用。 */
   acceptedAt: number;
+  /** 角色名快照（全局横幅显示用）。必填：唯一写入方恒定带上（角色名为空就是空串）。 */
+  charName: string;
 }
 
 type PendingMap = Record<string, AmsgInstantChatPending>;
@@ -55,7 +57,14 @@ const readPendingMap = (): PendingMap => {
     for (const [charId, value] of Object.entries(parsed as Record<string, unknown>)) {
       const record = value as Partial<AmsgInstantChatPending> | null;
       if (record && typeof record.uuid === 'string' && typeof record.acceptedAt === 'number') {
-        result[charId] = { charId, uuid: record.uuid, acceptedAt: record.acceptedAt };
+        // charName 的形状防御是「防 localStorage 损坏/手改」，不是兼容什么旧记录——
+        // 这个 key 与写入方同一次发布上线，缺名就按空串补齐。
+        result[charId] = {
+          charId,
+          uuid: record.uuid,
+          acceptedAt: record.acceptedAt,
+          charName: typeof record.charName === 'string' ? record.charName : '',
+        };
       }
     }
     return result;
@@ -85,9 +94,14 @@ export const getInstantChatPending = (charId: string): AmsgInstantChatPending | 
 export const listInstantChatPendings = (): AmsgInstantChatPending[] => Object.values(readPendingMap());
 
 /** 受理成功后记一笔。同角色只留最新一条——顶替之后旧 uuid 已经没人认领了。 */
-export const setInstantChatPending = (charId: string, uuid: string, acceptedAt = Date.now()): void => {
+export const setInstantChatPending = (
+  charId: string,
+  uuid: string,
+  acceptedAt = Date.now(),
+  charName = '',
+): void => {
   const map = readPendingMap();
-  map[charId] = { charId, uuid, acceptedAt };
+  map[charId] = { charId, uuid, acceptedAt, charName };
   writePendingMap(map);
   announcePendingChanged(charId);
 };
@@ -122,6 +136,16 @@ export const isInstantChatReady = async (): Promise<boolean> => {
 
 // ─── 发这一轮 ───
 
+// POST /instant-chat 在飞（发出到 202 之间）的角色。待收记录要等 202 才写，而挂起
+// fire_pack 常规上传的那道挡板（amsgStateSync）原本只认待收记录——慢网上传几 MB 的
+// 那几秒里，别处打脏触发的常规包（没有 chat 段）可能晚于 POST 内部那次 client-state
+// 写入落地，把带 chat 段的包盖掉，worker 到点只会硬失败。所以从按下发送那一刻起就
+// 占位，挡板认「占位或待收」，202 后由待收记录接棒，失败则释放。
+const inFlightSends = new Set<string>();
+
+/** POST /instant-chat 正在飞（还没等到 202/失败）吗。amsgStateSync 的挂起挡板用。 */
+export const isInstantChatSendInFlight = (charId: string): boolean => inFlightSends.has(charId);
+
 export interface InstantChatSendResult {
   ok: boolean;
   uuid?: string;
@@ -144,6 +168,13 @@ export const sendInstantChatTurn = async (params: {
   /** 本地这一轮会发的采样温度；开思考时本地不发温度，这里也就不传。 */
   temperature?: number;
   maxTokens?: number;
+  /**
+   * 本地这一轮会额外塞进请求体的字段（现在只有思考链那三件：thinking /
+   * reasoning_effort / extra_body，见 useChatAI 的 shouldSendThinkingParams 分支）。
+   * 原样带给 worker 展开——云端发出去的请求体必须和本地一字不差，不然开思考的
+   * 角色一开即时对话心象卡片就静默消失。不传就是本地也不发。
+   */
+  extraBody?: Record<string, unknown>;
   userProfile: UserProfile;
   groups: GroupProfile[];
   realtimeConfig: RealtimeConfig;
@@ -154,6 +185,7 @@ export const sendInstantChatTurn = async (params: {
   emotionEval?: AmsgEmotionEvalSpec;
 }): Promise<InstantChatSendResult> => {
   const supersedes = getInstantChatPending(params.char.id);
+  inFlightSends.add(params.char.id);
   try {
     const { uuid } = await ActiveMsgClient.sendInstantChat({
       char: params.char,
@@ -161,23 +193,40 @@ export const sendInstantChatTurn = async (params: {
       api: params.api,
       ...(typeof params.temperature === 'number' ? { temperature: params.temperature } : {}),
       ...(params.maxTokens ? { maxTokens: params.maxTokens } : {}),
+      ...(params.extraBody ? { extraBody: params.extraBody } : {}),
       userProfile: params.userProfile,
       groups: params.groups,
       realtimeConfig: params.realtimeConfig,
       ...(params.emotionEval ? { emotionEval: params.emotionEval } : {}),
       ...(supersedes ? { supersedesUuid: supersedes.uuid } : {}),
     });
-    setInstantChatPending(params.char.id, uuid);
+    // 先记待收再释放占位（finally），挡板的两个信号无缝交接，不留「都不认」的空窗。
+    setInstantChatPending(params.char.id, uuid, Date.now(), params.char.name);
     return { ok: true, uuid };
   } catch (error: any) {
     // 只报失败、只有事件名（跟送达端那几条同一条口径）：失败原因里带着 HTTP 状态和
     // 上游报文，不进上报。用户侧同一时刻已经有明确的报错提示，这里只记「发生过」。
     trackEvent('即时对话发送失败');
     return { ok: false, error: error?.message || String(error) };
+  } finally {
+    inFlightSends.delete(params.char.id);
   }
 };
 
 // ─── 推送丢了的兜底：拉 outbox ───
+
+// 正在冲刷管线里处理中的收件箱消息（先 ack 后处理的那几秒，它们既不在收件箱也不在
+// 聊天记录）。对账时并进「已收」，不然拟人打字延迟期间撞上 60s 点名，同一条会被
+// 当成「没收到」二次入库。登记/撤销由 activeMsgRuntime 的 flush 管线负责。
+const inFlightInboxIds = new Set<string>();
+
+export const trackInFlightInboxMessageIds = (ids: string[]): void => {
+  for (const id of ids) if (id) inFlightInboxIds.add(id);
+};
+
+export const untrackInFlightInboxMessageIds = (ids: string[]): void => {
+  for (const id of ids) inFlightInboxIds.delete(id);
+};
 
 /**
  * 云端那份推送副本 → 收件箱记录。
@@ -216,6 +265,10 @@ export const chatOutboxPayloadToInbox = (
       sessionId: payload?.sessionId,
       messageIndex: payload?.messageIndex,
       totalMessages: payload?.totalMessages,
+      // 走到这里 = 真推送没送到、从云端副本捡回来的。销账那边靠它决定要不要顺手
+      // 取消还挂在重试队列里的任务行（正常送达的路没这个标记，一个多余请求不发）。
+      // SW 那份映射（saveContentToInbox）刻意没有这个键：它只在补收路径为真。
+      amsgOutboxBackfill: true,
     },
     sentAt: Number.isFinite(parsedSentAt) ? parsedSentAt : receivedAt,
     receivedAt,
@@ -252,6 +305,8 @@ const collectReceivedMessageIds = async (charId: string): Promise<Set<string>> =
   } catch (error) {
     console.warn(`${HEADER} 读收件箱失败（只按聊天记录对账）`, error);
   }
+  // 冲刷管线正处理中的那批（先 ack 后处理的空窗）也算已收。
+  for (const id of inFlightInboxIds) seen.add(id);
   return seen;
 };
 
@@ -261,10 +316,23 @@ const collectReceivedMessageIds = async (charId: string): Promise<Set<string>> =
  * 「没读到」和「读到了、确实没有」是两个结论：调用方要拿它下「回复取不回」的判决时
  * 只能认后者——catch 不许直接变成送达判定（docs/instant-push-dual-channel.md 那条铁律）。
  *
+ * 只对账**指定轮次**的条目（opts.uuids，缺省 = 这个角色当前欠着的那一轮）：outbox 是
+ * 跨轮保留的环形数组，旧轮的条目永远躺在里面——不按轮过滤的话，被用户重 roll / 手动
+ * 删掉的回复会因为「本地查无此 id」被判成没收到、原样复活。没有目标轮直接返回 0，
+ * 连近史对账都不用跑。
+ *
  * 调用方拿到 >0 之后要自己 flush 一次收件箱（见文件头注：不在这里 flush 是为了避免
  * 和 activeMsgRuntime 成环）。
  */
-export const drainChatOutboxForChar = async (charId: string): Promise<number | null> => {
+export const drainChatOutboxForChar = async (
+  charId: string,
+  opts?: { uuids?: string[] },
+): Promise<number | null> => {
+  const targetUuids = new Set(
+    opts?.uuids ?? (getInstantChatPending(charId) ? [getInstantChatPending(charId)!.uuid] : []),
+  );
+  if (targetUuids.size === 0) return 0;
+
   let raw: string | null;
   try {
     raw = await ActiveMsgClient.readClientStateValue(amsgStateNamespace(charId), AMSG_CHAT_OUTBOX_KEY);
@@ -275,6 +343,12 @@ export const drainChatOutboxForChar = async (charId: string): Promise<number | n
   const outbox = parseChatOutbox(raw);
   if (!outbox || outbox.entries.length === 0) return 0;
 
+  const candidates = outbox.entries.filter((entry) => {
+    const uuid = (entry.payload as Record<string, any>)?.taskUuid;
+    return typeof uuid === 'string' && targetUuids.has(uuid);
+  });
+  if (candidates.length === 0) return 0;
+
   let seen: Set<string>;
   try {
     seen = await collectReceivedMessageIds(charId);
@@ -284,7 +358,7 @@ export const drainChatOutboxForChar = async (charId: string): Promise<number | n
     return null;
   }
 
-  const missing = outbox.entries.filter((entry) => entry.messageId && !seen.has(entry.messageId));
+  const missing = candidates.filter((entry) => entry.messageId && !seen.has(entry.messageId));
   if (missing.length === 0) return 0;
 
   const now = Date.now();
@@ -344,9 +418,9 @@ export const failInstantChatPending = async (
   //
   // 平时它的熄灭信号搭在最后一条回复的推送上（metadata.amsgEmotionDone，见
   // activeMsgRuntime 收侧）。可这一轮要是一条推送都没有——模型空输出/纯拒答被 worker
-  // 判成 skip-push，或者整条 fire 硬失败——那个信号永远不会到，灯只能干等 660 秒的
-  // 安全网，中途还会弹一句「worker 可能是旧版」的误导提示。云端已经点名说这一轮没成，
-  // 就是最确定的熄灯时机。
+  // 判成 skip-push，或者整条 fire 硬失败——那个信号永远不会到，灯只能干等十来分钟的
+  // 安全网（useChatAI 的 cloudEvalTimeoutMs，按 worker fire 上限推导），中途还会弹一句
+  // 「worker 可能是旧版」的误导提示。云端已经点名说这一轮没成，就是最确定的熄灯时机。
   //
   // 派在写库之前：写库失败只 warn，灯不该被它连累（同上面那句注释的口径）。
   announceEmotionDone(charId);

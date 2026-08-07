@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { CHAT_GEN_EVENTS, CHAT_VIEW_CHANGED_EVENT, getChatViewSnapshot } from '../utils/chatGenEvents';
+import { AMSG_INSTANT_CHAT_PENDING_EVENT, listInstantChatPendings } from '../utils/amsgInstantChat';
+import { INSTANT_TOTAL_TIMEOUT_MS } from '../worker/amsg/src/instantChat';
 
 /**
  * 聊天生成全局横幅（对标彼方的 VRBroadcast，App 根级挂载）。
@@ -30,9 +32,18 @@ const TTL_MS: Record<GenKind, number> = { reply: 6 * 60_000, emotion: 2 * 60_000
 
 const LABEL: Record<GenKind, string> = { reply: '正在回应', emotion: '正在感受' };
 
+// 即时对话待收条目的兜底 TTL：worker fire 上限 + 一分钟推送在途（与 useChatAI 的
+// cloudEvalTimeoutMs 同一来源推导，worker 调预算两边一起动）。正常熄灭不靠它——
+// 待收记录销账（回复到了 / 判失败）那一刻事件就把条目撤了。
+const INSTANT_PENDING_TTL_MS = INSTANT_TOTAL_TIMEOUT_MS + 60_000;
+
 const ChatBroadcast: React.FC = () => {
     const [entries, setEntries] = useState<GenEntry[]>([]);
     const [, setViewTick] = useState(0);
+    // 即时对话的「正在回应」不靠 replyStart/replyEnd 撑：instant 分支 POST 完就 return，
+    // finally 的 replyEnd 几秒内就把事件条目撤了，而云端还要跑最长十分钟。这里直接以
+    // 待收记录为准（localStorage 持久，重启后横幅也还在）——受理点亮、销账熄灭。
+    const [, setPendingTick] = useState(0);
 
     useEffect(() => {
         const add = (kind: GenKind) => (e: Event) => {
@@ -63,14 +74,19 @@ const ChatBroadcast: React.FC = () => {
         // 上云的情绪评估在 worker 跑，结束信号由 activeMsgRuntime / 收尾判定派发
         window.addEventListener(CHAT_GEN_EVENTS.emotionDone, onEmotionEnd);
         window.addEventListener(CHAT_VIEW_CHANGED_EVENT, onView);
+        const onPending = () => setPendingTick(n => n + 1);
+        window.addEventListener(AMSG_INSTANT_CHAT_PENDING_EVENT, onPending);
         const sweeper = setInterval(() => {
             const now = Date.now();
             setEntries(prev => {
                 const next = prev.filter(x => now - x.startedAt < x.ttlMs);
                 return next.length === prev.length ? prev : next;
             });
+            // 待收条目的 TTL 过期只在渲染时判，欠着回复时靠这个 tick 保证有下一次渲染。
+            if (listInstantChatPendings().length > 0) setPendingTick(n => n + 1);
         }, 15_000);
         return () => {
+            window.removeEventListener(AMSG_INSTANT_CHAT_PENDING_EVENT, onPending);
             window.removeEventListener(CHAT_GEN_EVENTS.replyStart, onReplyStart);
             window.removeEventListener(CHAT_GEN_EVENTS.replyEnd, onReplyEnd);
             window.removeEventListener(CHAT_GEN_EVENTS.emotionStart, onEmotionStart);
@@ -81,8 +97,18 @@ const ChatBroadcast: React.FC = () => {
         };
     }, []);
 
+    // 即时对话待收 → 「正在回应」条目（同角色已有事件驱动的 reply 条目时不重复）。
+    const now = Date.now();
+    const cloudEntries: GenEntry[] = listInstantChatPendings()
+        .filter(p => now - p.acceptedAt < INSTANT_PENDING_TTL_MS)
+        .filter(p => !entries.some(e => e.kind === 'reply' && e.charId === p.charId))
+        .map(p => ({
+            kind: 'reply' as const, charId: p.charId, charName: p.charName || '',
+            startedAt: p.acceptedAt, ttlMs: INSTANT_PENDING_TTL_MS,
+        }));
+
     const view = getChatViewSnapshot();
-    const visible = entries.filter(x => !(view.chatOpen && view.charId === x.charId));
+    const visible = [...entries, ...cloudEntries].filter(x => !(view.chatOpen && view.charId === x.charId));
     if (visible.length === 0) return null;
     // 回复优先于情绪展示（同角色两个都在跑时"正在回应"信息量更大）
     const cur = [...visible].sort((a, b) =>

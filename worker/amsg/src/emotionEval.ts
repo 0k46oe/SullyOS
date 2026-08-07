@@ -10,15 +10,22 @@
  * 还原回原位。这样上下文不必在请求体里重复发一份，输出又与本地逐字对齐。
  *
  * 还原规则与 instant push worker 的 `runEmotionEval`（worker/instant-push/src/index.ts）
- * **逐字同款**——两边吃的是同一个模板，格式一漂输出就变味。之所以复制一份而不是共享：
- * 两个 worker 是各自打包部署的 bundle，共享只能走 utils/ 叶子，而这段逻辑贴着 amsg 的
- * chat 段形状，放在 amsg 侧更贴。
+ * **逐字同款**——两边吃的是同一个模板，格式一漂输出就变味。所以内核收敛在
+ * utils/emotionEvalCore.ts 这份零依赖叶子里，两个 worker bundle 共用；这里只留
+ * amsg 侧特有的部分（评估配置的摘取与红线处理、旁路存储键）。
  *
  * 失败绝不连累主回复——用户等的是那句话，情绪只是附赠；跑挂了就带一句短原因回去，
  * 让客户端能照实说明白，而不是丢一句「可查 worker 日志」。
  *
  * 零浏览器依赖（这份代码会被打进 worker bundle）。
  */
+
+import {
+  EMOTION_EVAL_TIMEOUT_MS,
+  requestEmotionEval,
+  restoreEvalPrompt as coreRestoreEvalPrompt,
+  type EmotionEvalOutcome,
+} from '../../../utils/emotionEvalCore';
 
 /** 前端塞进任务 metadata.amsgEmotionEval 的那份评估配置。 */
 export interface AmsgEmotionEvalSpec {
@@ -28,11 +35,6 @@ export interface AmsgEmotionEvalSpec {
   api: { baseUrl: string; apiKey: string; model: string };
 }
 
-const SYSTEM_SLOT = '__EMOTION_EVAL_SYSTEM_PROMPT__';
-const HISTORY_SLOT = '__EMOTION_EVAL_HISTORY__';
-
-/** 单次评估请求的上限；副 API 卡住的话，主回复不该跟着一起被扣在这儿。 */
-const EMOTION_EVAL_TIMEOUT_MS = 120_000;
 
 /**
  * 评估结果太大、一条 push 装不下时的旁路存储键（同 XHS 那套，见 amsgXhsSessionKey）。
@@ -100,80 +102,12 @@ export const takeEmotionEvalSpec = (
   return isUsableEvalSpec(spec) ? spec : null;
 };
 
-/**
- * 消息 content → 一行文本。结构化分段（带图片的消息）拍平成「文字 [图片]」。
- * 与本地 buildEmotionEvalPrompt 的 recentLines 同款：用空格连接、空段丢掉。
- */
-const flattenContent = (content: unknown): string => {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part: any) => (part?.type === 'text'
-        ? (part.text || '')
-        : (part?.type === 'image_url' ? '[图片]' : '')))
-      .filter(Boolean)
-      .join(' ');
-  }
-  return '';
-};
-
-/**
- * 把模板里的两个占位符用本次请求的消息还原掉。
- *
- * - `messages[0]`（role=system）= 本地的 mainSystemPrompt
- * - `messages[1..]` = 本地的 cleanedApiMessages，拼成 `[用户]: …` / `[角色名]: …` / `[系统]: …`
- *
- * 用函数式 replacer：system prompt 和对话里出现 `$&`、`$1` 这类字符时，
- * String.replace 会把它们当成替换模式解析，评估看到的就不是原话了。
- */
-export const restoreEvalPrompt = (
-  template: string,
-  chatMessages: Array<{ role: string; content: unknown }>,
-  charName: string,
-): string => {
-  const messages = Array.isArray(chatMessages) ? chatMessages : [];
-  let systemPromptText = '';
-  let conversation = messages;
-  if (messages.length > 0 && messages[0]?.role === 'system') {
-    systemPromptText = flattenContent(messages[0].content);
-    conversation = messages.slice(1);
-  }
-  const recentLines = conversation
-    .map((m) => {
-      const role = m.role === 'user' ? '用户' : (m.role === 'assistant' ? charName : '系统');
-      return `[${role}]: ${flattenContent(m.content)}`;
-    })
-    .join('\n');
-  return String(template)
-    .replace(SYSTEM_SLOT, () => systemPromptText)
-    .replace(HISTORY_SLOT, () => recentLines);
-};
+// 占位符还原 / 打码 / 请求内核在 utils/emotionEvalCore.ts（与 instant-push 共用）。
+// re-export 保住既有导入点（本文件历史上就是它们的家）。
+export { restoreEvalPrompt } from '../../../utils/emotionEvalCore';
 
 /** 一次评估的结局：拿到原文，或者一句能给用户看的短失败原因。 */
-export interface AmsgEmotionEvalOutcome {
-  /** 评估模型的输出原文；没跑出来时为 null。 */
-  raw: string | null;
-  /** 没跑出来的原因（人话、一句话）；成功时为 null。 */
-  error: string | null;
-}
-
-/** 报错正文最多带回这么长——够定位是限流还是鉴权就行，不是日志转发通道。 */
-const ERROR_SNIPPET_MAX = 120;
-
-/**
- * 从失败响应里摘一句能给用户看的原因。
- *
- * **绝不能带出 apiKey**：个别中转会把整个请求（含 Authorization 头）回显在错误页里，
- * 而这句话最终要走 push 出门。摘之前先按 key 本身过一遍，命中就打码。
- */
-const describeEvalFailure = (status: number, body: string, apiKey: string): string => {
-  // 打码必须在截断之前：先截的话，切口正好落在 key 中间时整串就查不到 key，
-  // 半截凭据原样带出去。
-  let snippet = body.replace(/\s+/g, ' ').trim();
-  if (apiKey && snippet.includes(apiKey)) snippet = snippet.split(apiKey).join('***');
-  snippet = snippet.slice(0, ERROR_SNIPPET_MAX);
-  return `副 API HTTP ${status}${snippet ? `：${snippet}` : ''}`;
-};
+export type AmsgEmotionEvalOutcome = EmotionEvalOutcome;
 
 /**
  * 跑一次评估。成功给原文（解析交给客户端的 applyEmotionEvalRaw，与本地路径共用同一套
@@ -188,56 +122,5 @@ export const runAmsgEmotionEval = async (
   chatMessages: Array<{ role: string; content: unknown }>,
   charName: string,
   timeoutMs: number = EMOTION_EVAL_TIMEOUT_MS,
-): Promise<AmsgEmotionEvalOutcome> => {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const baseUrl = String(spec.api.baseUrl).replace(/\/+$/, '');
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${spec.api.apiKey || 'sk-none'}`,
-      },
-      body: JSON.stringify({
-        model: spec.api.model,
-        messages: [{ role: 'user', content: restoreEvalPrompt(spec.prompt, chatMessages, charName) }],
-        temperature: 0.85,
-        // 显式给足输出额度：部分中转不传 max_tokens 时默认很小，评估输出很长，
-        // 会被截成半截 JSON（与 instant push worker 同一个数）。
-        max_tokens: 8000,
-        stream: false,
-      }),
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      // 正文可能是 HTML 错误页，截一小段够定位即可（与 instant push worker 同一套）。
-      let body = '';
-      try { body = await res.text(); } catch { /* 读不出正文就只报状态码 */ }
-      console.warn('[amsg:emotion] 副 API 拒了这次评估（主回复不受影响）', res.status);
-      return { raw: null, error: describeEvalFailure(res.status, body, spec.api.apiKey) };
-    }
-    const data = await res.json() as any;
-    // 个别中转把全部输出塞进 reasoning_content 而 content 留空——与客户端
-    // utils/emotionApply.ts 的 extractAssistantText 同一套兜底。
-    const message = data?.choices?.[0]?.message;
-    const raw = flattenContent(message?.content)
-      || (typeof message?.reasoning_content === 'string' ? message.reasoning_content : '');
-    if (!raw.trim()) {
-      return {
-        raw: null,
-        error: `评估模型没有输出内容（finish_reason: ${data?.choices?.[0]?.finish_reason ?? '?'}）`,
-      };
-    }
-    return { raw, error: null };
-  } catch (error) {
-    console.warn('[amsg:emotion] 评估失败（主回复不受影响）', error);
-    // 只带异常名/消息，不带栈：这句要走 push 出门，短一点、也别把内部路径抖出去。
-    const reason = controller.signal.aborted
-      ? `评估超时（${Math.round(timeoutMs / 1000)} 秒没回来）`
-      : `评估请求没发出去：${(error instanceof Error ? error.message : String(error)).slice(0, ERROR_SNIPPET_MAX)}`;
-    return { raw: null, error: reason };
-  } finally {
-    clearTimeout(timer);
-  }
-};
+): Promise<AmsgEmotionEvalOutcome> =>
+  requestEmotionEval(spec.api, coreRestoreEvalPrompt(spec.prompt, chatMessages, charName), timeoutMs);

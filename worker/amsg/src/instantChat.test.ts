@@ -10,9 +10,7 @@ import {
   finalizeInstantPush,
   handleInstantChat,
   INSTANT_TICK_CRON,
-  INSTANT_TICK_FALLBACK_WAIT_MS,
   isInstantChatTask,
-  pullTaskDue,
   toOutboxEntries,
   writeChatOutbox,
 } from './instantChat';
@@ -34,7 +32,6 @@ const json = (status: number, body: unknown) =>
 const makeUpstream = (opts: {
   clientState?: { status: number; body?: unknown };
   scheduleMessage?: { status: number; body?: unknown };
-  cancelMessage?: { status: number; body?: unknown };
 } = {}) => {
   const calls: Array<{ method: string; path: string; search: string; headers: Record<string, string>; body: string }> = [];
   const reply = (spec: { status: number; body?: unknown } | undefined, fallback: unknown) =>
@@ -52,9 +49,6 @@ const makeUpstream = (opts: {
       if (url.pathname.endsWith('/client-state')) {
         return reply(opts.clientState, { success: true, data: { upserted: 3, skipped: 0 } });
       }
-      if (url.pathname.endsWith('/cancel-message')) {
-        return reply(opts.cancelMessage, { success: true, data: { uuid: 'old' } });
-      }
       if (url.pathname.endsWith('/schedule-message')) {
         return reply(opts.scheduleMessage, { success: true, data: { uuid: TASK_UUID, id: 42 } });
       }
@@ -63,25 +57,6 @@ const makeUpstream = (opts: {
     scheduled: vi.fn(async (_event: { scheduledTime: number; cron: string }, _env?: unknown) => {}),
   };
   return { upstream, calls, paths: () => calls.map((c) => `${c.method} ${c.path}`) };
-};
-
-/** 假 D1：只认这个端点真正会发的那条 UPDATE。 */
-const makeDb = (opts: { fails?: boolean } = {}) => {
-  const statements: Array<{ sql: string; values: unknown[] }> = [];
-  return {
-    statements,
-    db: {
-      prepare: (sql: string) => ({
-        bind: (...values: unknown[]) => ({
-          run: async () => {
-            if (opts.fails) throw new Error('d1 down');
-            statements.push({ sql, values });
-            return { meta: { changes: 1 } };
-          },
-        }),
-      }),
-    },
-  };
 };
 
 const makeCtx = () => {
@@ -108,20 +83,18 @@ const validBody = (extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 
-/** 默认参数跑一次；sleep 默认换成不真等的替身，测试不为 15 秒的兜底等待卡住。 */
+/** 默认参数跑一次。 */
 const run = (args: {
   request: Request;
   env?: Record<string, unknown>;
   upstream: ReturnType<typeof makeUpstream>['upstream'];
   ctx?: { waitUntil: (p: Promise<unknown>) => void };
-  sleep?: (ms: number) => Promise<void>;
 }) => handleInstantChat({
   request: args.request,
-  env: (args.env ?? { DB: makeDb().db }) as any,
+  env: (args.env ?? {}) as any,
   ctx: args.ctx,
   upstream: args.upstream as any,
   json,
-  sleep: args.sleep ?? (async () => {}),
 });
 
 describe('POST /instant-chat — 鉴权', () => {
@@ -129,7 +102,7 @@ describe('POST /instant-chat — 鉴权', () => {
     const { upstream, calls } = makeUpstream();
     const response = await run({
       request: post(validBody()),
-      env: { AMSG_SERVER_TOKEN: 'secret', DB: makeDb().db },
+      env: { AMSG_SERVER_TOKEN: 'secret' },
       upstream,
     });
     expect(response.status).toBe(401);
@@ -142,7 +115,7 @@ describe('POST /instant-chat — 鉴权', () => {
     const { upstream, calls } = makeUpstream();
     const response = await run({
       request: post(validBody(), { headers: { 'X-Client-Token': 'wrong' } }),
-      env: { AMSG_SERVER_TOKEN: 'secret', DB: makeDb().db },
+      env: { AMSG_SERVER_TOKEN: 'secret' },
       upstream,
     });
     expect(response.status).toBe(401);
@@ -153,7 +126,7 @@ describe('POST /instant-chat — 鉴权', () => {
     const { upstream, calls } = makeUpstream();
     const response = await run({
       request: post(validBody(), { headers: { 'X-Client-Token': 'secret' } }),
-      env: { AMSG_SERVER_TOKEN: 'secret', DB: makeDb().db },
+      env: { AMSG_SERVER_TOKEN: 'secret' },
       upstream,
     });
     expect(response.status).toBe(202);
@@ -226,6 +199,40 @@ describe('POST /instant-chat — 严格顺序与失败传播', () => {
     expect(paths()).toEqual(['PUT /client-state']);
   });
 
+  // HTTP ok ≠ 都写进去了：上游按 updatedAt 条件写，被拦的条目在成功体 skippedEntries 里
+  // 点名。fire_pack 被拦（设备时钟回拨过）还落任务的话，fire 会拿旧 chat 段答话——用户
+  // 拿着 202 白等一轮甚至收到答非所问，且无任何报错。
+  it('client-state 200 但 fire_pack 被条件写拦下 → 409 INSTANT_CHAT_STATE_STALE，绝不建任务', async () => {
+    const { upstream, paths } = makeUpstream({
+      clientState: {
+        status: 200,
+        body: {
+          success: true,
+          data: { upserted: 2, skippedEntries: [{ namespace: 'amsg:char:c1', key: 'fire_pack' }] },
+        },
+      },
+    });
+    const response = await run({ request: post(validBody()), upstream });
+    expect(response.status).toBe(409);
+    const body = await response.json() as any;
+    expect(body.error.code).toBe('INSTANT_CHAT_STATE_STALE');
+    expect(body.error.step).toBe('client-state');
+    expect(paths()).toEqual(['PUT /client-state']);
+  });
+
+  it('client-state 200、被拦的只是别的条目（非 fire_pack）→ 照常受理', async () => {
+    const { upstream } = makeUpstream({
+      clientState: {
+        status: 200,
+        body: {
+          success: true,
+          data: { upserted: 2, skippedEntries: [{ namespace: 'amsg:char:c1', key: 'chat_presence' }] },
+        },
+      },
+    });
+    expect((await run({ request: post(validBody()), upstream })).status).toBe(202);
+  });
+
   it('建任务失败 → 报 schedule-message 那一步，不假装受理', async () => {
     const { upstream } = makeUpstream({
       scheduleMessage: { status: 409, body: { success: false, error: { code: 'PUSH_SUBSCRIPTION_MISSING' } } },
@@ -274,57 +281,28 @@ describe('POST /instant-chat — 严格顺序与失败传播', () => {
   });
 });
 
-describe('POST /instant-chat — 顶替上一条', () => {
-  it('带 supersedesUuid → 夹在传状态和建任务之间发 DELETE', async () => {
-    const { upstream, calls, paths } = makeUpstream();
-    await run({ request: post(validBody({ supersedesUuid: 'old-uuid' })), upstream });
-    expect(paths()).toEqual([
-      'PUT /client-state', 'DELETE /cancel-message', 'POST /schedule-message',
-    ]);
-    expect(calls[1].search).toBe('?id=old-uuid');
-  });
-
-  it('上一条已经不在了（404）不影响主流程', async () => {
-    const { upstream } = makeUpstream({ cancelMessage: { status: 404, body: { success: false } } });
-    const response = await run({ request: post(validBody({ supersedesUuid: 'gone' })), upstream });
-    expect(response.status).toBe(202);
-  });
-
-  it('不带 supersedesUuid 就不发取消（别把别人的任务顺手删了）', async () => {
+describe('POST /instant-chat — 只有两次内部转发', () => {
+  // 顶替上一条不再是包装层的事：supersedesUuid 在加密的任务体里，
+  // 上游建新任务的同一事务里取消旧的。包装层多发一条 DELETE 才是回归。
+  it('状态在前、建任务在后，没有第三个请求', async () => {
     const { upstream, paths } = makeUpstream();
     await run({ request: post(validBody()), upstream });
-    expect(paths()).not.toContain('DELETE /cancel-message');
+    expect(paths()).toEqual(['PUT /client-state', 'POST /schedule-message']);
   });
 });
 
 describe('POST /instant-chat — 立即起跳', () => {
-  it('回完 202 之后把任务行拉到期并起一跳（不然要等到提前量过去才开跑）', async () => {
+  it('回完 202 之后立刻起一跳（immediate 任务落库即到期，不用拉行）', async () => {
     const { upstream } = makeUpstream();
-    const { db, statements } = makeDb();
     const { ctx, settle, count } = makeCtx();
-    const response = await run({ request: post(validBody()), upstream, ctx, env: { DB: db } });
+    const response = await run({ request: post(validBody()), upstream, ctx });
 
     expect(response.status).toBe(202);
     expect(count()).toBe(1);          // 起跳挂在 waitUntil 上，不拖住这次响应
-    expect(upstream.scheduled).not.toHaveBeenCalled();
 
     await settle();
-    expect(statements).toHaveLength(1);
-    expect(statements[0].sql).toContain('UPDATE scheduled_messages');
-    expect(statements[0].values).toContain(TASK_UUID);
-    expect(statements[0].values).toContain(USER_ID);
     expect(upstream.scheduled).toHaveBeenCalledTimes(1);
     expect((upstream.scheduled.mock.calls[0][0] as any).cron).toBe(INSTANT_TICK_CRON);
-  });
-
-  it('拉到期失败 → 先等过那个时刻再起跳（早跳一步只会空跑一轮）', async () => {
-    const { upstream } = makeUpstream();
-    const { ctx, settle } = makeCtx();
-    const sleep = vi.fn(async () => {});
-    await run({ request: post(validBody()), upstream, ctx, env: { DB: makeDb({ fails: true }).db }, sleep });
-    await settle();
-    expect(sleep).toHaveBeenCalledWith(INSTANT_TICK_FALLBACK_WAIT_MS);
-    expect(upstream.scheduled).toHaveBeenCalledTimes(1);
   });
 
   it('起跳自己挂了不影响已经回出去的 202（cron 每分钟还会来捡）', async () => {
@@ -341,20 +319,6 @@ describe('POST /instant-chat — 立即起跳', () => {
     const response = await run({ request: post(validBody()), upstream });
     expect(response.status).toBe(202);
     expect(upstream.scheduled).not.toHaveBeenCalled();
-  });
-});
-
-describe('pullTaskDue', () => {
-  it('没有 D1 绑定时返回 false，不抛错', async () => {
-    await expect(pullTaskDue(undefined, TASK_UUID, USER_ID, Date.now())).resolves.toBe(false);
-  });
-
-  it('只拉还没到点的那一行（已经到点的别去动它的触发时刻）', async () => {
-    const { db, statements } = makeDb();
-    await pullTaskDue(db, TASK_UUID, USER_ID, Date.UTC(2026, 7, 4, 3, 0));
-    expect(statements[0].sql).toContain("status = 'pending'");
-    expect(statements[0].sql).toContain('next_send_at > ?');
-    expect(statements[0].values[0]).toBe('2026-08-04T03:00:00.000Z');
   });
 });
 

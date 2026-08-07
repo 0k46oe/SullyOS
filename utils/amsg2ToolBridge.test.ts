@@ -370,3 +370,48 @@ describe('同名同参的调用不重复执行', () => {
     expect(ActiveMsgClient.scheduleCharacterTask).toHaveBeenCalledTimes(2);
   });
 });
+
+// 连发上限的本地排程闸（与 worker fire 侧 unanswered_limit 对齐）：本地排到超限的
+// 那几条会被到点兜底闸静默 skip——角色在正文里承诺了「等下再来找你」，到点却凭空
+// 蒸发。这里钉住：超限时带回喂打回、一次远端请求都不发；面板任务不占额度。
+describe('连发上限·本地排程闸', () => {
+  beforeEach(() => {
+    (ActiveMsgClient.scheduleCharacterTask as any).mockReset();
+    (ActiveMsgClient.scheduleCharacterTask as any).mockImplementation(async () => ({
+      uuid: UUIDS[0], clientTaskId: 'ct-limit', firstSendAt: RESOLVED_ISO, anchorMs: null,
+    }));
+  });
+
+  const selfTask = (uuid: string) => ({
+    taskUuid: uuid, clientTaskId: `${uuid}-c`, mode: 'auto', recurrenceType: 'none',
+    expirePolicy: 'expire', source: 'character', status: 'scheduled',
+    firstSendTime: new Date(Date.now() + 3600_000).toISOString(), createdAt: Date.now(),
+  });
+
+  it('挂满自排任务（默认上限 3）再排 → 打回，不发远端请求', async () => {
+    const { deps } = makeSession({
+      activeMsg2Config: { enabled: true, tasks: [selfTask('u1'), selfTask('u2'), selfTask('u3')] },
+    });
+    const reply = await executeAmsg2Tool('schedule_active_message', { send_at: future(1) }, deps);
+    expect(reply).toContain('连发上限');
+    expect(ActiveMsgClient.scheduleCharacterTask).not.toHaveBeenCalled();
+  });
+
+  it('面板里用户亲手排的任务不占连发额度', async () => {
+    const userTask = (uuid: string) => ({ ...selfTask(uuid), source: 'user' });
+    const { deps } = makeSession({
+      activeMsg2Config: { enabled: true, tasks: [userTask('u1'), userTask('u2'), userTask('u3')] },
+    });
+    const reply = await executeAmsg2Tool('schedule_active_message', { send_at: future(1) }, deps);
+    expect(reply).toContain('已创建');
+  });
+
+  it('用户把上限设成 1 → 第一条自排就打回第二条', async () => {
+    const { deps } = makeSession({
+      activeMsg2Config: { enabled: true, maxUnansweredSends: 1, tasks: [selfTask('u1')] },
+    });
+    const reply = await executeAmsg2Tool('schedule_active_message', { send_at: future(1) }, deps);
+    expect(reply).toContain('连发上限是 1 条');
+    expect(ActiveMsgClient.scheduleCharacterTask).not.toHaveBeenCalled();
+  });
+});

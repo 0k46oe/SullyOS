@@ -361,6 +361,15 @@ describe('describeInstantChatFailure', () => {
     expect(describeInstantChatFailure({ reason: 'stale' }, 2)).toBe('云端排队太久没轮到这一轮（重试 2 次后放弃）');
   });
 
+  // skip-push 的两种机器码（worker 在 chat_fail 里留的）：这一轮不是失败、是没产出。
+  // 掉进「生成失败」句式的话，用户以为出了故障，其实是模型拒答/只做了动作。
+  it("reason 'empty-generation' / 'side-effects-only' 照实说没产出，不说成失败", () => {
+    expect(describeInstantChatFailure({ reason: 'empty-generation' }))
+      .toBe('模型这轮没有生成内容（空输出或拒答）');
+    expect(describeInstantChatFailure({ reason: 'side-effects-only' }))
+      .toBe('角色这轮只做了动作，没有文字回复');
+  });
+
   it('一长串原始报错照样截断；没有 lastError → null', () => {
     expect(describeInstantChatFailure({ reason: 'x'.repeat(500) })!.length).toBeLessThan(120);
     expect(describeInstantChatFailure(null)).toBeNull();

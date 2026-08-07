@@ -449,6 +449,16 @@ export interface AmsgFirePack {
    * 排程工具打回、以及角色自排任务到点时的兜底作废（用户面板排的任务不受它管）。
    */
   maxUnansweredSends?: number;
+  /**
+   * 角色级「主动消息 2.0」开关（打包时取 isAmsg2EnabledForChar）。false 时云端 fire
+   * 不注入排程说明块 / 排程工具 / 任务清单——本地路径的同名闸门是 useChatAI 的
+   * amsg2ToolsInjected（角色级开关关掉的不注入，否则被用户显式关掉的功能会被角色
+   * 一次工具调用重新打开），云端不看这个字段的话正好把那道闸绕穿：全局即时对话开着、
+   * 角色 2.0 关着，角色照样能在云端聊天轮里排出真会触发的任务。
+   * 必填：v7 的唯一生产者（buildFirePack）无条件写它。这是一道用户主权闸，缺省放行
+   * 的容错方向是 fail-open（字段一丢开关就被静默重新打开），宁可整包打回。
+   */
+  selfScheduleEnabled: boolean;
 }
 
 // ─── 按角色参照系渲染时间（②：worker 给角色看的一切时间只此一份） ───
@@ -817,6 +827,15 @@ export const renderFirePack = (
 export const FIRE_PACK_VERSION = 7;
 
 /**
+ * 即时对话任务行的 messageSubtype 标签。上游只当自由文本原样透传；客户端两处都认它：
+ * 排程时写（activeMsgClient.sendInstantChat）、面板对账时滤（amsg2Tasks 的
+ * reconcileTasksWithRemote——即时对话的行不补进任务清单，不然用户正等着的一轮会显示
+ * 成「待触发」，还可能被「取消全部」顺手掐掉）。写读两侧靠这一个常量绑死：它是
+ * GET /messages 明文投影里唯一可查的即时对话标记，producer 改个说法 filter 就瞎了。
+ */
+export const AMSG_INSTANT_CHAT_SUBTYPE = 'instant-chat';
+
+/**
  * 解析失败时给人看的一句原因。
  *
  * 存在的理由：升 fire_pack 版本需要 worker bundle 和前端一起动，而设置页的版本门槛读的是
@@ -880,7 +899,8 @@ export const parseFirePack = (value: string): AmsgFirePack | null => {
       (parsed.maxUnansweredSends === undefined
         || (typeof parsed.maxUnansweredSends === 'number'
           && Number.isFinite(parsed.maxUnansweredSends)
-          && parsed.maxUnansweredSends >= 0))
+          && parsed.maxUnansweredSends >= 0)) &&
+      typeof parsed.selfScheduleEnabled === 'boolean'
     ) {
       return parsed as AmsgFirePack;
     }
