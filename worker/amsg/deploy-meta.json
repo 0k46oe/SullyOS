@@ -1,11 +1,11 @@
 {
-  "_comment": "同步到部署仓库时会改名成 package.json，「Deploy to Cloudflare」按钮读它来渲染每个密钥输入框旁边的说明。在本仓库不叫 package.json 是因为 worker/* 在 pnpm workspace 里，多一个会让这个目录变成独立包、依赖解析不到。这里也刻意不写 build 脚本：bundle 是打好的，部署页面的 Build command 空着就行。同步逻辑见 .github/workflows/sync-workers-repo.yml。",
+  "_comment": "同步到部署仓库时会改名成 package.json，「Deploy to Cloudflare」按钮读它来渲染每个密钥输入框旁边的说明。在本仓库不叫 package.json 是因为 worker/* 在 pnpm workspace 里，多一个会让这个目录变成独立包、依赖解析不到。这里也刻意不写 build 脚本：bundle 是打好的，部署页面的 Build command 空着就行。deploy 脚本必须带 npx——部署页面会把 Deploy command 自动设成 npm run deploy，而部署仓库里没装 wrangler，不走 npx 就会找不到命令。同步逻辑见 .github/workflows/sync-workers-repo.yml。",
   "name": "sullyos-amsg",
   "description": "SullyOS 主动消息 2.0 的后端：角色到点自己发消息，App 关着也收得到。",
   "private": true,
   "type": "module",
   "scripts": {
-    "deploy": "wrangler deploy"
+    "deploy": "npx wrangler deploy"
   },
   "cloudflare": {
     "label": "SullyOS 主动消息 2.0",
