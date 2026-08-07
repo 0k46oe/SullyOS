@@ -4271,6 +4271,7 @@ var amsgXhsSessionKey = (clientTaskId) => `xhs_session:${clientTaskId}`;
 var AMSG_CHAT_OUTBOX_KEY = "chat_outbox";
 var CHAT_OUTBOX_MAX = 10;
 var createChatOutbox = () => ({ v: 1, entries: [] });
+var AMSG_CHAT_FAIL_KEY = "chat_fail";
 var parseChatOutbox = (value) => {
   if (typeof value !== "string" || !value) return null;
   try {
@@ -4387,12 +4388,31 @@ var buildAwayHint = (targetName, timeSinceUser) => {
 };
 var SELF_LOG_MAX_ENTRIES = 8;
 var SELF_LOG_TEXT_MAX = 200;
-var createSelfLog = (basePackAt) => ({
-  v: 2,
+var createSelfLog = (basePackAt, anchorUserMsgAt = null) => ({
+  v: 3,
   basePackAt,
+  anchorUserMsgAt,
   entries: [],
   tasks: []
 });
+var DEFAULT_MAX_UNANSWERED_SENDS = 3;
+var resolveMaxUnansweredSends = (value) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_MAX_UNANSWERED_SENDS;
+  if (value === 0) return Infinity;
+  if (value < 1) return DEFAULT_MAX_UNANSWERED_SENDS;
+  return Math.min(99, Math.floor(value));
+};
+var countUnansweredSends = (log) => log ? log.entries.filter((e) => !e.reply).length : 0;
+var reconcileSelfLogWithPack = (stored, pack, lastUserMessageAt) => {
+  let log = stored ?? createSelfLog(pack.builtAt, lastUserMessageAt);
+  if (lastUserMessageAt != null && (log.anchorUserMsgAt == null || lastUserMessageAt > log.anchorUserMsgAt)) {
+    log = { ...log, anchorUserMsgAt: lastUserMessageAt, entries: [] };
+  }
+  if (log.basePackAt !== pack.builtAt) {
+    log = { ...log, basePackAt: pack.builtAt, tasks: [] };
+  }
+  return log;
+};
 var appendSelfLogTask = (log, task) => ({
   ...log,
   tasks: [...log.tasks.filter((t) => t.taskUuid !== task.taskUuid), task]
@@ -4403,11 +4423,10 @@ var appendSelfLogEntry = (log, entry) => {
   const kept = log.entries.filter((e) => e.id !== entry.id);
   return { ...log, entries: [...kept, { ...entry, text }].slice(-SELF_LOG_MAX_ENTRIES) };
 };
-var selfLogMatchesPack = (log, pack) => !!log && log.basePackAt === pack.builtAt;
 var parseSelfLog = (value) => {
   try {
     const parsed = JSON.parse(value);
-    if (parsed && typeof parsed === "object" && parsed.v === 2 && typeof parsed.basePackAt === "number" && Array.isArray(parsed.tasks) && Array.isArray(parsed.entries) && parsed.entries.every((e) => {
+    if (parsed && typeof parsed === "object" && parsed.v === 3 && typeof parsed.basePackAt === "number" && (parsed.anchorUserMsgAt === null || typeof parsed.anchorUserMsgAt === "number") && Array.isArray(parsed.tasks) && Array.isArray(parsed.entries) && parsed.entries.every((e) => {
       const entry = e;
       return !!entry && typeof entry.id === "string" && typeof entry.at === "number" && typeof entry.text === "string";
     })) {
@@ -4417,19 +4436,36 @@ var parseSelfLog = (value) => {
   }
   return null;
 };
-var renderSelfLogBlock = (log, tz) => {
+var formatAgo = (atMs, nowMs, tz) => {
+  const diff = nowMs - atMs;
+  if (diff < 6e4) return "\u521A\u521A";
+  if (diff < 60 * 6e4) return `${Math.floor(diff / 6e4)}\u5206\u949F\u524D`;
+  if (diff < 24 * 60 * 6e4) return `${Math.floor(diff / (60 * 6e4))}\u5C0F\u65F6\u524D`;
+  return formatFireTimeShort(atMs, tz);
+};
+var renderSelfLogBlock = (log, nowMs, tz, maxUnanswered = DEFAULT_MAX_UNANSWERED_SENDS) => {
   if (!log || log.entries.length === 0) return "";
+  const fresh = log.entries.filter((e) => e.at > log.basePackAt);
+  const sends = countUnansweredSends(log);
+  const limitHalf = Number.isFinite(maxUnanswered) ? `\uFF0C\u4E0A\u9650 ${maxUnanswered} \u6761\uFF0C\u5230\u4E0A\u9650\u540E\u4F60\u81EA\u5DF1\u6392\u7684\u540E\u7EED\u4F1A\u6682\u505C\u3001\u7B49\u5BF9\u65B9\u56DE\u590D\u624D\u6062\u590D` : "";
+  if (fresh.length === 0) {
+    if (sends === 0) return "";
+    return [
+      "",
+      "",
+      `\uFF08\u5BF9\u65B9\u672A\u56DE\u5E94\u671F\u95F4\u4F60\u5DF2\u8FDE\u53D1 ${sends} \u6761\u4E3B\u52A8\u6D88\u606F${limitHalf}\u3002\u522B\u628A\u5DF2\u7ECF\u8BF4\u8FC7\u7684\u8BDD\u6362\u4E2A\u8BF4\u6CD5\u518D\u8BB2\u4E00\u904D\u3002\uFF09`
+    ].join("\n");
+  }
+  const countLine = sends >= 1 ? `\uFF08\u5BF9\u65B9\u4E00\u76F4\u6CA1\u56DE\u5E94\uFF0C\u5176\u4E2D\u4E3B\u52A8\u53D1\u8D77\u7684\u4F60\u5DF2\u8FDE\u53D1 ${sends} \u6761${limitHalf}\u3002\u5F80\u4E0B\u63A5\u7740\u8BF4\uFF0C\u522B\u628A\u5DF2\u7ECF\u8BF4\u8FC7\u7684\u8BDD\u6362\u4E2A\u8BF4\u6CD5\u518D\u8BB2\u4E00\u904D\uFF0C\u4E5F\u522B\u5047\u88C5\u8FD9\u4E9B\u6CA1\u53D1\u751F\u8FC7\u3002\uFF09` : "\uFF08\u8FD9\u51E0\u6761\u662F\u4F60\u53D1\u51FA\u53BB\u7684\uFF0C\u5BF9\u65B9\u8FD8\u6CA1\u56DE\u5E94\u3002\u5F80\u4E0B\u63A5\u7740\u8BF4\uFF0C\u522B\u628A\u5DF2\u7ECF\u8BF4\u8FC7\u7684\u8BDD\u6362\u4E2A\u8BF4\u6CD5\u518D\u8BB2\u4E00\u904D\uFF0C\u4E5F\u522B\u5047\u88C5\u8FD9\u4E9B\u6CA1\u53D1\u751F\u8FC7\u3002\uFF09";
   return [
     "",
     "",
-    "\u3010\u8FD9\u4E4B\u540E\u4F60\u53C8\u4E3B\u52A8\u53D1\u8FC7\uFF08\u5BF9\u65B9\u8FD8\u6CA1\u56DE\uFF09\u3011",
-    ...log.entries.map((e) => `- ${formatFireTimeShort(e.at, tz)}\u3000${e.text}`),
-    "\uFF08\u8FD9\u51E0\u6761\u662F\u4F60\u81EA\u5DF1\u53D1\u51FA\u53BB\u7684\uFF0C\u5BF9\u65B9\u4E00\u76F4\u6CA1\u56DE\u5E94\u3002\u5F80\u4E0B\u63A5\u7740\u8BF4\uFF0C\u522B\u628A\u5DF2\u7ECF\u8BF4\u8FC7\u7684\u8BDD\u6362\u4E2A\u8BF4\u6CD5\u518D\u8BB2\u4E00\u904D\uFF0C\u4E5F\u522B\u5047\u88C5\u8FD9\u4E9B\u6CA1\u53D1\u751F\u8FC7\u3002\uFF09"
+    "\u3010\u8FD9\u4E4B\u540E\u4F60\u53C8\u53D1\u8FC7\uFF08\u5BF9\u65B9\u8FD8\u6CA1\u56DE\uFF09\u3011",
+    ...fresh.map((e) => `- ${formatAgo(e.at, nowMs, tz)}\u3000${e.text}`),
+    countLine
   ].join("\n");
 };
 var fillSlot = (text, slot, value) => text.split(slot).join(value);
-var TASK_SECTION_HEADING = "\u3010\u672C\u6B21\u4EFB\u52A1\u3011";
-var buildStreakReminder = (x) => `\uFF08\u8FD9\u662F\u4F60\u5728\u5BF9\u65B9\u672A\u56DE\u5E94\u671F\u95F4\u53D1\u51FA\u7684\u7B2C ${x} \u6761\u4E3B\u52A8\u6D88\u606F\u3002\u8BF7\u6CE8\u610F\u8FB9\u754C\uFF1A\u82E5\u8981\u7EE7\u7EED\u5B89\u6392\u65B0\u7684\u6D88\u606F\uFF0C\u8003\u8651\u5BF9\u65B9\u7684\u9700\u6C42\u548C\u5B9E\u9645\u89C2\u611F\u3002\uFF09`;
 var renderFirePack = (pack, nowMs, taskInstruction, extras) => {
   const tz = { tzId: pack.tzId };
   const currentTime = formatFireTimeFull(nowMs, tz);
@@ -4437,17 +4473,17 @@ var renderFirePack = (pack, nowMs, taskInstruction, extras) => {
   const timeSinceUser = formatTimeSinceUser(diffMinutes);
   const awayHint = buildAwayHint(pack.targetName, timeSinceUser);
   let out = pack.template;
-  const streak = (extras?.selfLog?.entries.length ?? 0) + 1;
-  if (streak >= 2) {
-    out = out.replace(TASK_SECTION_HEADING, `${buildStreakReminder(streak)}
-${TASK_SECTION_HEADING}`);
-  }
   out = fillSlot(out, AMSG_SLOT_CURRENT_TIME, currentTime);
   out = fillSlot(out, AMSG_SLOT_USER_CLOCK, buildUserClockHint(nowMs, tz, { tzId: pack.userTzId }, pack.targetName));
   out = fillSlot(out, AMSG_SLOT_TIME_SINCE_USER, timeSinceUser);
   out = fillSlot(out, AMSG_SLOT_AWAY_HINT, awayHint);
   out = fillSlot(out, AMSG_SLOT_TASK_INSTRUCTION, taskInstruction);
-  out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(extras?.selfLog ?? null, tz));
+  out = fillSlot(out, AMSG_SLOT_SELF_LOG, renderSelfLogBlock(
+    extras?.selfLog ?? null,
+    nowMs,
+    tz,
+    resolveMaxUnansweredSends(pack.maxUnansweredSends)
+  ));
   out = fillSlot(out, AMSG_SLOT_TASK_LIST, extras?.taskListBlock ?? "");
   out = fillSlot(out, AMSG_SLOT_SCENE, renderFireSceneBlock(pack.scene, nowMs, tz));
   const realtimeWorld = extras?.realtimeWorldBlock?.trim();
@@ -4487,7 +4523,7 @@ var chatFieldOk = (chat) => {
 var parseFirePack = (value) => {
   try {
     const parsed = JSON.parse(value);
-    if (parsed && typeof parsed === "object" && parsed.v === FIRE_PACK_VERSION && chatFieldOk(parsed.chat) && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && typeof parsed.tzId === "string" && parsed.tzId.length > 0 && typeof parsed.userTzId === "string" && parsed.userTzId.length > 0 && typeof parsed.targetName === "string" && typeof parsed.builtAt === "number" && Array.isArray(parsed.pendingTasks) && (parsed.scene === null || typeof parsed.scene === "object")) {
+    if (parsed && typeof parsed === "object" && parsed.v === FIRE_PACK_VERSION && chatFieldOk(parsed.chat) && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && typeof parsed.tzId === "string" && parsed.tzId.length > 0 && typeof parsed.userTzId === "string" && parsed.userTzId.length > 0 && typeof parsed.targetName === "string" && typeof parsed.builtAt === "number" && Array.isArray(parsed.pendingTasks) && (parsed.scene === null || typeof parsed.scene === "object") && (parsed.maxUnansweredSends === void 0 || typeof parsed.maxUnansweredSends === "number" && Number.isFinite(parsed.maxUnansweredSends) && parsed.maxUnansweredSends >= 0)) {
       return parsed;
     }
   } catch {
@@ -8424,8 +8460,9 @@ var restoreEvalPrompt = (template, chatMessages, charName) => {
 };
 var ERROR_SNIPPET_MAX = 120;
 var describeEvalFailure = (status, body, apiKey) => {
-  let snippet = body.replace(/\s+/g, " ").trim().slice(0, ERROR_SNIPPET_MAX);
+  let snippet = body.replace(/\s+/g, " ").trim();
   if (apiKey && snippet.includes(apiKey)) snippet = snippet.split(apiKey).join("***");
+  snippet = snippet.slice(0, ERROR_SNIPPET_MAX);
   return `\u526F API HTTP ${status}${snippet ? `\uFF1A${snippet}` : ""}`;
 };
 var runAmsgEmotionEval = async (spec, chatMessages, charName, timeoutMs = EMOTION_EVAL_TIMEOUT_MS) => {
@@ -8479,7 +8516,7 @@ var runAmsgEmotionEval = async (spec, chatMessages, charName, timeoutMs = EMOTIO
 };
 
 // worker/amsg/src/instantChat.ts
-var INSTANT_SCHEDULE_LEAD_MS = 15e3;
+var INSTANT_SCHEDULE_LEAD_MS = 3e4;
 var INSTANT_TICK_FALLBACK_WAIT_MS = INSTANT_SCHEDULE_LEAD_MS + 1e3;
 var INSTANT_TOTAL_TIMEOUT_MS = 6e5;
 var INSTANT_CLAIM_LEASE_MS = INSTANT_TOTAL_TIMEOUT_MS + 12e4;
@@ -8961,6 +8998,23 @@ var recordSkip = async (ctx, charId, reason, occurrenceMs) => writeLastSkip(ctx.
 var amsgFireSettled = async (info) => {
   const stash = getFireStash(info.scratch);
   if (!stash) return;
+  if (stash.instant && info.status === "failed" && stash.taskUuid) {
+    const reason = info.error instanceof Error ? info.error.message : String(info.error ?? "\u672A\u77E5\u9519\u8BEF");
+    const record = {
+      v: 1,
+      uuid: stash.taskUuid,
+      reason: reason.slice(0, 500),
+      retryCount: typeof info.task?.retry_count === "number" ? info.task.retry_count : 0,
+      at: Date.now()
+    };
+    try {
+      await info.writeState(amsgStateNamespace(stash.charId), [
+        { key: AMSG_CHAT_FAIL_KEY, value: JSON.stringify(record) }
+      ]);
+    } catch (error) {
+      console.warn("[amsg:instant-chat] \u5931\u8D25\u7559\u75D5\u5199\u4E0D\u8FDB\u53BB\uFF08\u5BA2\u6237\u7AEF\u53EA\u80FD\u62A5\u7B3C\u7EDF\u539F\u56E0\uFF09", error);
+    }
+  }
   const texts = stash.selfLogTexts;
   stash.selfLogTexts = null;
   const sentCount = info.sentCount ?? 0;
@@ -8969,7 +9023,10 @@ var amsgFireSettled = async (info) => {
     const next = appendSelfLogEntry(stash.selfLog, {
       id: `${stash.clientTaskId || "task"}@${stash.occurrenceMs}`,
       at: Date.now(),
-      text
+      text,
+      // 即时对话是在答用户刚说的话——列进自述块保持连续性，但不占「主动连发」的额度
+      // （countUnansweredSends 只数没这个标记的条目）。
+      ...stash.instant ? { reply: true } : {}
     });
     if (next !== stash.selfLog) {
       stash.selfLog = next;
@@ -8992,6 +9049,22 @@ var amsgStaleSkip = async (task, info) => {
   if (!charId) {
     console.warn("[amsg:stale-skip] \u4EFB\u52A1 metadata \u7F3A charId\uFF0C\u8FD9\u6B21\u8FC7\u671F\u8DF3\u8FC7\u6CA1\u6CD5\u7559\u75D5", { taskId: task?.id ?? null });
     return;
+  }
+  if (isInstantChatTask(meta) && typeof task?.uuid === "string" && task.uuid) {
+    const record = {
+      v: 1,
+      uuid: task.uuid,
+      reason: "stale",
+      retryCount: 0,
+      at: Date.now()
+    };
+    try {
+      await info.writeState(amsgStateNamespace(charId), [
+        { key: AMSG_CHAT_FAIL_KEY, value: JSON.stringify(record) }
+      ]);
+    } catch (error) {
+      console.warn("[amsg:instant-chat] stale \u7559\u75D5\u5199\u4E0D\u8FDB\u53BB\uFF08\u5BA2\u6237\u7AEF\u53EA\u80FD\u62A5\u7B3C\u7EDF\u539F\u56E0\uFF09", error);
+    }
   }
   const nextSendAtMs = Date.parse(String(info.nextSendAt ?? ""));
   await writeLastSkip(info.writeState, charId, {
@@ -9026,6 +9099,15 @@ var condenseToolTrace = (calls) => {
 var runFireScheduleTool = async (stash, scheduleTask, args, nowMs) => {
   if (typeof scheduleTask !== "function") {
     return { ok: false, reason: "not_supported", message: "\u5F53\u524D\u540E\u53F0\u7248\u672C\u8FD8\u4E0D\u652F\u6301\u7ED9\u81EA\u5DF1\u6392\u540E\u7EED\uFF0C\u8FD9\u6B21\u5C31\u628A\u8BDD\u8BF4\u5B8C\u5427\u3002" };
+  }
+  const unansweredLimit = stash.maxUnansweredSends ?? Infinity;
+  const committedSends = countUnansweredSends(stash.selfLog) + (stash.plannedSelfSends ?? 0) + stash.scheduledTasks.length;
+  if (committedSends + 1 > unansweredLimit) {
+    return {
+      ok: false,
+      reason: "unanswered_limit",
+      message: `\u5BF9\u65B9\u8FD8\u6CA1\u56DE\u590D\uFF0C\u8FD9\u671F\u95F4\u4F60\u5DF2\u7ECF\u53D1\u4E86/\u6392\u4E86 ${committedSends} \u6761\uFF0C\u7528\u6237\u8BBE\u7F6E\u7684\u8FDE\u53D1\u4E0A\u9650\u662F ${unansweredLimit} \u6761\u2014\u2014\u8FD9\u6B21\u522B\u6392\u4E86\uFF0C\u7B49 ta \u56DE\u590D\u518D\u8BF4\u3002`
+    };
   }
   if (stash.scheduledTasks.length >= MAX_FIRE_SCHEDULES) {
     return {
@@ -9064,7 +9146,9 @@ var runFireScheduleTool = async (stash, scheduleTask, args, nowMs) => {
         amsgExpirePolicy: parsed.expirePolicy,
         // 防穿帮闸锚点：这条排下去之后，用户再开口就算「对话往前走了」。
         amsgAnchorMs: stash.anchorMs,
-        amsgTaskInstruction: buildTaskInstruction(parsed.mode, parsed.promptHint)
+        amsgTaskInstruction: buildTaskInstruction(parsed.mode, parsed.promptHint),
+        // 自排标记：到点兜底闸只拦带它的任务（用户面板排的不受连发上限管）。
+        amsgSelfScheduled: true
       }
     });
   } catch (error) {
@@ -9229,7 +9313,18 @@ var amsgHooks = {
     const mcpResolve = mcpServers.length ? buildMcpNameMap(mcpServers, { maxNameLen: MCP_FIRE_NAME_BUDGET }) : null;
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
     const storedSelfLog = parseSelfLog(charRows.find((r) => r.key === AMSG_SELF_LOG_KEY)?.value ?? "");
-    const selfLog = selfLogMatchesPack(storedSelfLog, pack) ? storedSelfLog : createSelfLog(pack.builtAt);
+    const selfLog = reconcileSelfLogWithPack(storedSelfLog, pack, expireInput.lastUserMessageAt);
+    const maxUnansweredSends = resolveMaxUnansweredSends(pack.maxUnansweredSends);
+    if (!instant && taskMeta.amsgSelfScheduled === true && countUnansweredSends(selfLog) >= maxUnansweredSends) {
+      console.log("[amsg:unanswered-limit-skip]", {
+        taskId: ctx.task.id,
+        charId,
+        sends: countUnansweredSends(selfLog),
+        limit: maxUnansweredSends
+      });
+      await recordSkip(ctx, charId, "unanswered-limit", occurrenceMs);
+      return { skip: true };
+    }
     const livePendingTasks = [...pack.pendingTasks, ...selfLog.tasks];
     const canSelfSchedule = typeof ctx.scheduleTask === "function";
     const tz = { tzId: pack.tzId };
@@ -9250,6 +9345,8 @@ var amsgHooks = {
       // 不然角色离线期间连排几次就能绕过每角色的任务上限。
       pendingTaskCount: livePendingTasks.length,
       scheduledTasks: [],
+      maxUnansweredSends,
+      plannedSelfSends: livePendingTasks.filter((t) => t.source === "character" && isPendingTask(t, ctx.now.getTime())).length,
       charId,
       anchorMs: pack.lastUserMessageAt ?? 0,
       tz,
@@ -9298,7 +9395,13 @@ var amsgHooks = {
         userTzId: pack.userTzId,
         targetName: pack.targetName,
         timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
-        blocks: [realtimeWorldBlock, renderSelfLogBlock(selfLog, tz), taskListBlock, mcpBlock, scheduleBlock]
+        blocks: [
+          realtimeWorldBlock,
+          renderSelfLogBlock(selfLog, ctx.now.getTime(), tz, maxUnansweredSends),
+          taskListBlock,
+          mcpBlock,
+          scheduleBlock
+        ]
       });
       const instantMessages = [
         // content 原样透传，一个字都不动：带图片的消息本地就是结构化分段
