@@ -42,6 +42,9 @@
 
 - 处理步骤（严格顺序，两个 await 失败即向客户端返回明确错误，不落任务）：
   1. 内部 `upstream.fetch` 转发 `PUT /client-state`（statePayload）→ 必须成功。
+     HTTP ok 还不够：上游按 updatedAt 条件写（旧不盖新），成功体 `data.skippedEntries`
+     里点名了 `fire_pack` 条目（典型成因：设备时钟被回拨过）时同样打回——
+     `409 INSTANT_CHAT_STATE_STALE`，绝不落任务（否则 fire 拿旧 chat 段答话）。
   2. 内部转发 `POST /schedule-message`（taskPayload）→ 必须成功，拿到 uuid
      （顶替在上游事务内完成）。
   3. 返回 `202 { status: 'accepted', uuid }`。
@@ -122,8 +125,16 @@
 
 - 客户端「正在输入」的主判定是**云端任务状态**：还欠着回复时每 60s 查一次
   `GET /message?id=<uuid>`，`pending` 就继续等，行已失败 / 行没了才收尾；
-  查询本身失败（网络、鉴权）不下任何结论，等下一跳。下结论前先拉一次 outbox。
+  查询本身失败不立刻下结论，等下一跳。下结论前先拉一次 outbox。
   **只在前台查**：页面不可见时既不查也不排下一跳，回前台立刻点一次名把周期接上。
+  **失联判死线**：联网状态（`navigator.onLine !== false`）下同一轮连续 5 次查询
+  失败 → worker 多半已不在（被删 / 密钥换了），明确收尾并提示去设置页重新连接
+  验证；离线时的失败不计数。「不按时长宣判」只对云端还答得上话的等待成立。
+- worker 留痕 `chat_fail`（char namespace 的 client_state，认 uuid）：fire 收尾
+  失败、过期跳过（reason `stale`）、以及 skip-push（reason `empty-generation` /
+  `side-effects-only`——即时对话的一次性行会被上游当成功消费删掉，客户端只能看到
+  gone）三处都写。客户端 completed 与 gone 两个分支都点名读回翻成人话，别把
+  「没生成出来」说成「回复没能取回」。
 - worker 侧若现有 hook（如 `onFireSettled`）拿得到失败结局且拿得到 push 发送
   能力 → 尽力补发一条 `messageKind: 'error'`（SW 已有该分轨）。拿不到就算了，
   别为此改上游。

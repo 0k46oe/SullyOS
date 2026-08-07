@@ -232,6 +232,37 @@ describe('POST /instant-chat 的形状', () => {
     expect(keys).toContain('tool_config');
   });
 
+  // ── 轻量包：模板只有定时任务那条路才渲染 ──
+  // 角色 2.0 关着（云端 fire 不注入排程工具）且没有任务时，每次发送重建一整份系统
+  // 提示词 + 近史转写纯属白付——主线程二次构建 + 上行几十 KB 都发生在拿到 202 之前。
+  it('角色 2.0 关着且无任务 → 模板用占位标记，系统提示词一次都不构建', async () => {
+    const { state } = await postOnce([{ role: 'user', content: '在吗' }]);
+    const entry = state.entries.find((e: any) => e.key === 'fire_pack');
+    const pack = JSON.parse(await unpackStateValue(entry.value));
+    expect(pack.template).toContain('AMSG2_INSTANT_STUB_TEMPLATE');
+    expect(pack.selfScheduleEnabled).toBe(false);
+    // chat 段照常带全——即时 fire 吃的是它，不是模板
+    expect(pack.chat.messages).toHaveLength(1);
+    expect(ChatPrompts.buildSystemPrompt).not.toHaveBeenCalled();
+  });
+
+  it('角色 2.0 开着 → 照旧带真模板（云端 fire 可能当场排出会消费它的任务）', async () => {
+    stubFirePackDeps();
+    const calls = mockInstantChatFetch(202, { status: 'accepted', uuid: 'uuid-real-template' });
+    const charOn = { ...CHAR, activeMsg2Config: { enabled: true, tasks: [] } } as any;
+    await ActiveMsgClient.sendInstantChat({
+      char: charOn, chatMessages: [{ role: 'user', content: '在吗' }], api: API,
+      userProfile: USER, groups: [], realtimeConfig: {} as any,
+    });
+    const body = JSON.parse(String(calls[0].init.body));
+    const state = JSON.parse(body.statePayload.encryptedData);
+    const entry = state.entries.find((e: any) => e.key === 'fire_pack');
+    const pack = JSON.parse(await unpackStateValue(entry.value));
+    expect(pack.template).toContain('SYS_PROMPT_MARKER');
+    expect(pack.template).not.toContain('AMSG2_INSTANT_STUB_TEMPLATE');
+    expect(pack.selfScheduleEnabled).toBe(true);
+  });
+
   // ── 图片：云端这条路必须跟本地跑出来的一模一样 ──
   //
   // 拍平图片曾经是这里的做法，代价是模型看不到用户刚发的那张图，只能对着
@@ -378,7 +409,7 @@ describe('待收记录（「正在输入…」那盏灯的唯一依据）', () =
   it('落在 localStorage 里，重启后还在', () => {
     setInstantChatPending('char-a', 'uuid-a', 1_000);
     // 模块状态每次都从存储读，等价于重开一次应用。
-    expect(getInstantChatPending('char-a')).toEqual({ charId: 'char-a', uuid: 'uuid-a', acceptedAt: 1_000 });
+    expect(getInstantChatPending('char-a')).toEqual({ charId: 'char-a', uuid: 'uuid-a', acceptedAt: 1_000, charName: '' });
     expect(localStorage.getItem(AMSG_INSTANT_CHAT_PENDING_LS_KEY)).toContain('uuid-a');
   });
 
@@ -567,5 +598,28 @@ describe('推送丢了的补收对账', () => {
 
   it('推送载荷少了 charId → 没有落点，丢掉而不是造一条无主消息', () => {
     expect(chatOutboxPayloadToInbox({ message: '孤儿' }, 1)).toBeNull();
+  });
+
+  // 契约测试：push→inbox 的字段映射有两份手工同步的副本（SW 的 saveContentToInbox 与
+  // 这里的补收路径），销账检查只读 metadata.messageIndex/totalMessages、缺失当末段——
+  // 任一副本漏抄这两个字段，多段回复的首段就会被当成末段销账，后续段永久丢失且无报错。
+  // 这里钉住补收侧必须把顶层段号抄进 metadata（与 sw-keep-alive.ts 的映射同一条规则；
+  // 那份是 SW 代码没法直接 import，改动 SW 映射时这条测试就是要一起过的清单）。
+  it('顶层 messageIndex/totalMessages 必须抄进 metadata（销账检查只认 metadata 里的）', () => {
+    const inbox = chatOutboxPayloadToInbox({
+      charId: CHAR.id,
+      charName: '小满',
+      message: '第一段',
+      messageId: 'msg_task_7@1700000000000_hook_0',
+      sessionId: 'sess_task_7@1700000000000',
+      taskUuid: 'uuid-round-1',
+      messageIndex: 1,
+      totalMessages: 3,
+      metadata: { charId: CHAR.id },
+    }, Date.now())!;
+    expect(inbox).toBeTruthy();
+    expect((inbox.metadata as any).messageIndex).toBe(1);
+    expect((inbox.metadata as any).totalMessages).toBe(3);
+    expect((inbox.metadata as any).sessionId).toBe('sess_task_7@1700000000000');
   });
 });

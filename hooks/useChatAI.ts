@@ -45,7 +45,7 @@ import { getLastRealUserMessageAt } from '../utils/amsg2ExpireGuard';
 import { getPendingTasks, hasActiveAiTask, isAmsg2EnabledForChar } from '../utils/amsg2Tasks';
 import { buildAmsg2NoticesText, buildAmsg2TaskContextText, collectAmsg2TaskContext } from '../utils/amsg2TaskContext';
 import { resolveCharTimeZone } from '../utils/timezone';
-import { isInstantChatReady, sendInstantChatTurn } from '../utils/amsgInstantChat';
+import { getInstantChatPending, isInstantChatReady, sendInstantChatTurn } from '../utils/amsgInstantChat';
 // worker 模块的常量叶子（零运行时依赖，前端引它不带进 worker 环境）：
 // 云端 fire 的总时长上限，安全网超时从它推导，worker 调预算时前端自动跟上。
 import { INSTANT_TOTAL_TIMEOUT_MS } from '../worker/amsg/src/instantChat';
@@ -62,6 +62,28 @@ import {
     getMemoryPalaceHighWaterMarkForContext,
     loadCharacterContextRange,
 } from '../utils/chatContextRange';
+
+// ─── 云端情绪评估的安全网定时器（模块级，按角色）───
+// 为什么不放 hook 里：结论（emotionDone）是全局事件，用户切了角色、离开聊天页之后
+// 照样会到，而 hook 里的监听是跟着当前挂载角色走的——单个 ref 存定时器的话，切走再回来
+// 结论到了也没人清，安全网到点就弹「worker 可能是旧版，请重新部署」的假告警；给 B 布防
+// 还会静默吞掉 A 的真告警。按 charId 记、模块级监听清，两个都治。
+const cloudEmotionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const clearCloudEmotionTimer = (charId: unknown): void => {
+    if (typeof charId !== 'string') return;
+    const timer = cloudEmotionTimers.get(charId);
+    if (timer != null) {
+        clearTimeout(timer);
+        cloudEmotionTimers.delete(charId);
+    }
+};
+if (typeof window !== 'undefined') {
+    // emotionDone 是「这一轮评估有结论了」（成败都发）：flush 落结果、收尾判失败两条路
+    // 都会广播。不论哪个角色、Chat 挂没挂载，结论一到就撤掉对应的安全网。
+    window.addEventListener(CHAT_GEN_EVENTS.emotionDone, (e) => {
+        clearCloudEmotionTimer((e as CustomEvent).detail?.charId);
+    });
+}
 
 // ─── 情绪评估（副API，fire & forget）───
 
@@ -502,8 +524,10 @@ export const useChatAI = ({
     // 下一轮 system prompt 会把它作为角色的内心状态注入
     const [evolvedNarrative, setEvolvedNarrative] = useState<string>('');
 
-    // instant 情绪评估的 "情绪更新中" 徽章安全超时句柄 (worker 推回 emotion_update 前别一直转).
-    const instantEmotionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // 云端情绪评估安全网到点时判断「用户现在看的还是不是布防那个角色」用（防止过期
+    // 定时器把当前角色的徽章错熄）。定时器本体在模块级 cloudEmotionTimers（按角色记）。
+    const currentCharIdRef = useRef<string | null>(null);
+    currentCharIdRef.current = char?.id ?? null;
 
     // 切换角色时重置
     useEffect(() => {
@@ -642,11 +666,8 @@ export const useChatAI = ({
         const emotionDoneHandler = (e: Event) => {
             const detail = (e as CustomEvent).detail;
             if (detail?.charId !== charIdAtMount) return;
+            // 安全网定时器由模块级监听按 charId 清（切走了也清得到），这里只管当前页的徽章。
             setEmotionStatus('');
-            if (instantEmotionTimerRef.current) {
-                clearTimeout(instantEmotionTimerRef.current);
-                instantEmotionTimerRef.current = null;
-            }
         };
         window.addEventListener(CHAT_GEN_EVENTS.emotionDone, emotionDoneHandler);
 
@@ -974,10 +995,7 @@ export const useChatAI = ({
              * 「worker 可能是旧版」的提示，而真实原因是这条消息压根没发出去。
              */
             const extinguishCloudEmotionBadge = () => {
-                if (instantEmotionTimerRef.current) {
-                    clearTimeout(instantEmotionTimerRef.current);
-                    instantEmotionTimerRef.current = null;
-                }
+                clearCloudEmotionTimer(char.id);
                 setEmotionStatus('');
                 announceChatGen(CHAT_GEN_EVENTS.emotionEnd, { charId: char.id, charName: char.name });
             };
@@ -988,20 +1006,36 @@ export const useChatAI = ({
                 announceChatGen(CHAT_GEN_EVENTS.emotionStart, {
                     charId: char.id, charName: char.name, ttlMs: cloudEvalTimeoutMs,
                 });
-                if (instantEmotionTimerRef.current) clearTimeout(instantEmotionTimerRef.current);
-                instantEmotionTimerRef.current = setTimeout(() => {
-                    setEmotionStatus('');
-                    instantEmotionTimerRef.current = null;
-                    // 超时无回音最常见的原因是用户部署的 worker 版本过旧（不支持情绪评估、
-                    // 压根不会推结果回来），其次是 worker 被杀/推送丢失。过去这里
-                    // 静默熄灯, 用户只看到「情绪永远不更新」—— 给一条可操作的提示。
-                    announceChatGen(CHAT_GEN_EVENTS.emotionFailed, {
-                        charId: char.id, charName: char.name,
-                        reason: instantChatRoute
-                            ? '云端情绪评估超时无回音——worker 可能是旧版（不支持情绪评估），请到 设置→主动消息 2.0 重新部署 worker 后重试'
-                            : '云端情绪评估超时无回音——worker 可能是旧版（不支持情绪评估），请到 设置→Instant 消息设置 更新 worker 后重试',
-                    });
-                }, cloudEvalTimeoutMs);
+                // 布防按 charId 记进模块级 map。到点先看这一轮死没死透：即时对话的待收
+                // 记录还在 = 云端还没给结论（worker 的 2/4/6 分钟重试梯子完全可能把合法
+                // 回复拖过这个点）——这不是「无回音」，安静续期一小段再看，别抢在状态机
+                // 前面宣判、把一个好端端的 worker 说成旧版让用户白重部署。待收记录没了
+                // 而结论（emotionDone）一直没来，才是真的「跑完了但没人回音」。
+                const charIdAtArm = char.id;
+                const charNameAtArm = char.name;
+                const armCloudEmotionSafetyNet = (delayMs: number) => {
+                    clearCloudEmotionTimer(charIdAtArm);
+                    cloudEmotionTimers.set(charIdAtArm, setTimeout(() => {
+                        cloudEmotionTimers.delete(charIdAtArm);
+                        if (instantChatRoute && getInstantChatPending(charIdAtArm)) {
+                            armCloudEmotionSafetyNet(60_000);
+                            return;
+                        }
+                        // 徽章只熄「布防那个角色」的：用户已切到别的角色时，这个 setter
+                        // 管的是人家的徽章，不能碰。
+                        if (currentCharIdRef.current === charIdAtArm) setEmotionStatus('');
+                        // 超时无回音最常见的原因是用户部署的 worker 版本过旧（不支持情绪评估、
+                        // 压根不会推结果回来），其次是 worker 被杀/推送丢失。过去这里
+                        // 静默熄灯, 用户只看到「情绪永远不更新」—— 给一条可操作的提示。
+                        announceChatGen(CHAT_GEN_EVENTS.emotionFailed, {
+                            charId: charIdAtArm, charName: charNameAtArm,
+                            reason: instantChatRoute
+                                ? '云端情绪评估超时无回音——worker 可能是旧版（不支持情绪评估），请到 设置→主动消息 2.0 重新部署 worker 后重试'
+                                : '云端情绪评估超时无回音——worker 可能是旧版（不支持情绪评估），请到 设置→Instant 消息设置 更新 worker 后重试',
+                        });
+                    }, delayMs));
+                };
+                armCloudEmotionSafetyNet(cloudEvalTimeoutMs);
             }
 
             // 发送前汇总计时

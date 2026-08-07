@@ -20,6 +20,7 @@
 
 import {
   AMSG_CHAT_OUTBOX_KEY,
+  AMSG_FIRE_PACK_KEY,
   amsgStateNamespace,
   appendChatOutbox,
   buildUserClockHint,
@@ -338,6 +339,25 @@ export const handleInstantChat = async (args: {
         message: '云端状态没传上去，这条没发出去',
         step: 'client-state',
         upstream: await readBody(stateResponse),
+      },
+    });
+  }
+  // HTTP ok ≠ 都写进去了：上游按 updatedAt 做条件写（旧不盖新），被拦的条目在成功体的
+  // skippedEntries 里点名。fire_pack 被拦（典型成因：设备时钟在两次发送之间被回拨，
+  // 这次的 updatedAt 反而比云端存量旧）时绝不能落任务——到点的 fire 读到的是上一轮的
+  // chat 段，要么对旧消息答非所问、要么硬失败，用户却已经拿到 202 在等「正在输入」。
+  // 「状态没落地就不落任务」正是这条两步串行存在的意义，这里把它守完整。
+  const stateBody = await readBody(stateResponse);
+  const skippedEntries = (stateBody as {
+    data?: { skippedEntries?: Array<{ namespace?: unknown; key?: unknown }> };
+  } | null)?.data?.skippedEntries;
+  if (Array.isArray(skippedEntries) && skippedEntries.some((entry) => entry?.key === AMSG_FIRE_PACK_KEY)) {
+    return json(409, {
+      success: false,
+      error: {
+        code: 'INSTANT_CHAT_STATE_STALE',
+        message: '云端拒收了这轮的最新状态（云端已有更新的一份）——设备时钟可能被回拨过，检查系统时间后再发一次',
+        step: 'client-state',
       },
     });
   }

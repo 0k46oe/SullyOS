@@ -199,6 +199,40 @@ describe('POST /instant-chat — 严格顺序与失败传播', () => {
     expect(paths()).toEqual(['PUT /client-state']);
   });
 
+  // HTTP ok ≠ 都写进去了：上游按 updatedAt 条件写，被拦的条目在成功体 skippedEntries 里
+  // 点名。fire_pack 被拦（设备时钟回拨过）还落任务的话，fire 会拿旧 chat 段答话——用户
+  // 拿着 202 白等一轮甚至收到答非所问，且无任何报错。
+  it('client-state 200 但 fire_pack 被条件写拦下 → 409 INSTANT_CHAT_STATE_STALE，绝不建任务', async () => {
+    const { upstream, paths } = makeUpstream({
+      clientState: {
+        status: 200,
+        body: {
+          success: true,
+          data: { upserted: 2, skippedEntries: [{ namespace: 'amsg:char:c1', key: 'fire_pack' }] },
+        },
+      },
+    });
+    const response = await run({ request: post(validBody()), upstream });
+    expect(response.status).toBe(409);
+    const body = await response.json() as any;
+    expect(body.error.code).toBe('INSTANT_CHAT_STATE_STALE');
+    expect(body.error.step).toBe('client-state');
+    expect(paths()).toEqual(['PUT /client-state']);
+  });
+
+  it('client-state 200、被拦的只是别的条目（非 fire_pack）→ 照常受理', async () => {
+    const { upstream } = makeUpstream({
+      clientState: {
+        status: 200,
+        body: {
+          success: true,
+          data: { upserted: 2, skippedEntries: [{ namespace: 'amsg:char:c1', key: 'chat_presence' }] },
+        },
+      },
+    });
+    expect((await run({ request: post(validBody()), upstream })).status).toBe(202);
+  });
+
   it('建任务失败 → 报 schedule-message 那一步，不假装受理', async () => {
     const { upstream } = makeUpstream({
       scheduleMessage: { status: 409, body: { success: false, error: { code: 'PUSH_SUBSCRIPTION_MISSING' } } },

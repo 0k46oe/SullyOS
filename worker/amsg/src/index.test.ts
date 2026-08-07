@@ -16,6 +16,7 @@ import { MAX_PUSH_PAYLOAD_BYTES } from '@rei-standard/amsg-server/cloudflare';
 import { amsgEmotionUpdateKey } from './emotionEval';
 import { INSTANT_TOTAL_TIMEOUT_MS } from './instantChat';
 import {
+  AMSG_CHAT_FAIL_KEY,
   AMSG_CHAT_OUTBOX_KEY,
   AMSG_FIRE_PACK_KEY,
   AMSG_LAST_SKIP_KEY,
@@ -57,6 +58,7 @@ const firePackValue = (
   builtAt: PACK_BUILT_AT,
   pendingTasks: [],
   scene: null,
+  selfScheduleEnabled: true,
   ...extra,
 });
 
@@ -1529,6 +1531,7 @@ describe('self_log — 角色自述回写', () => {
     builtAt,
     pendingTasks: [],
     scene: null,
+    selfScheduleEnabled: true,
   });
 
   /** 会真的记住写入的假 client_state：第二次 fire 靠它读回第一次写下的自述。 */
@@ -2188,7 +2191,7 @@ describe('fire 侧取消 / 改期任务', () => {
   it('短 id 找目标、全 uuid 传给 ctx.cancelTask，账记进 cancelledTasks', async () => {
     const cancel = okCancel();
     const stash = makeStash({ pendingTasks: [taskRec('11112222-aaaa-4bbb-8ccc-000000000001')] });
-    const out = await runFireCancelTool(stash, cancel, { task_id: '11112222' });
+    const out = await runFireCancelTool(stash, cancel, { task_id: '11112222' }, NOW_MS);
     expect(out.ok).toBe(true);
     expect(cancel).toHaveBeenCalledWith('11112222-aaaa-4bbb-8ccc-000000000001');
     expect(stash.cancelledTasks).toEqual(['11112222-aaaa-4bbb-8ccc-000000000001']);
@@ -2197,18 +2200,30 @@ describe('fire 侧取消 / 改期任务', () => {
   it('只有一条时可省略 task_id；多条时打回 ambiguous、一条都不动', async () => {
     const cancel = okCancel();
     const one = makeStash({ pendingTasks: [taskRec('u-only')] });
-    expect((await runFireCancelTool(one, cancel, {})).ok).toBe(true);
+    expect((await runFireCancelTool(one, cancel, {}, NOW_MS)).ok).toBe(true);
 
     const many = makeStash({ pendingTasks: [taskRec('u-a'), taskRec('u-b')] });
-    const out = await runFireCancelTool(many, cancel, {});
+    const out = await runFireCancelTool(many, cancel, {}, NOW_MS);
     expect(out.reason).toBe('ambiguous_task');
     expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  // 与前台 resolveTargetTask 对齐的回归守卫：清单快照里混着一条已过点变陈旧的一次性
+  // 任务（pack 只在打包那一刻筛过 pending）时，不带 task_id 也能锁定唯一还活着的那条。
+  // 不复筛的话，同一句 cancel_active_message 本地能成、云端却被打回 ambiguous_task。
+  it('快照里混着过点的陈旧任务 → 不带 task_id 仍锁定唯一 pending 那条', async () => {
+    const cancel = okCancel();
+    const stale = taskRec('u-stale', { firstSendTime: new Date(NOW_MS - 2 * 3600_000).toISOString() });
+    const stash = makeStash({ pendingTasks: [stale, taskRec('u-live')] });
+    const out = await runFireCancelTool(stash, cancel, {}, NOW_MS);
+    expect(out.ok).toBe(true);
+    expect(cancel).toHaveBeenCalledWith('u-live');
   });
 
   it('当前正在 fire 的这条不在可取消视图里（它的收尾归 run-tick 管）', async () => {
     const cancel = okCancel();
     const stash = makeStash({ pendingTasks: [taskRec(TASK_UUID)] });
-    const out = await runFireCancelTool(stash, cancel, { task_id: TASK_UUID.slice(0, 8) });
+    const out = await runFireCancelTool(stash, cancel, { task_id: TASK_UUID.slice(0, 8) }, NOW_MS);
     expect(out.ok).toBe(false);
     expect(cancel).not.toHaveBeenCalled();
   });
@@ -2219,7 +2234,7 @@ describe('fire 侧取消 / 改期任务', () => {
       pendingTasks: [rec],
       selfLog: { v: 3, basePackAt: 1, anchorUserMsgAt: null, entries: [], tasks: [rec] },
     });
-    await runFireCancelTool(stash, okCancel(), { task_id: 'u-selflog' });
+    await runFireCancelTool(stash, okCancel(), { task_id: 'u-selflog' }, NOW_MS);
     expect(stash.selfLog.tasks).toEqual([]);
     expect(stash.selfLogDirty).toBe(true);
   });
@@ -2227,7 +2242,7 @@ describe('fire 侧取消 / 改期任务', () => {
   it('本轮刚排的那条允许当场反悔：scheduledTasks 一并摘掉', async () => {
     const rec = taskRec('u-fresh', { source: 'character' });
     const stash = makeStash({ scheduledTasks: [rec] });
-    const out = await runFireCancelTool(stash, okCancel(), { task_id: 'u-fresh' });
+    const out = await runFireCancelTool(stash, okCancel(), { task_id: 'u-fresh' }, NOW_MS);
     expect(out.ok).toBe(true);
     expect(stash.scheduledTasks).toEqual([]);
   });
@@ -2235,14 +2250,14 @@ describe('fire 侧取消 / 改期任务', () => {
   it('行已经不在了（cancelled:false）→ 照实说、不记账', async () => {
     const cancel = vi.fn(async () => ({ cancelled: false }));
     const stash = makeStash({ pendingTasks: [taskRec('u-gone')] });
-    const out = await runFireCancelTool(stash, cancel, { task_id: 'u-gone' });
+    const out = await runFireCancelTool(stash, cancel, { task_id: 'u-gone' }, NOW_MS);
     expect(out.ok).toBe(true);
     expect(out.already_gone).toBe(true);
     expect(stash.cancelledTasks).toEqual([]);
   });
 
   it('老部署没有 ctx.cancelTask → not_supported，一句能照做的话', async () => {
-    const out = await runFireCancelTool(makeStash({ pendingTasks: [taskRec('u-x')] }), undefined, {});
+    const out = await runFireCancelTool(makeStash({ pendingTasks: [taskRec('u-x')] }), undefined, {}, NOW_MS);
     expect(out.reason).toBe('not_supported');
   });
 
@@ -2378,6 +2393,44 @@ describe('没发出去时写 last_skip', () => {
   it('留痕写失败不影响 skip 本身（best-effort）', async () => {
     const { decision } = await runEmptyFire({ writeStateFails: true });
     expect(decision.decision).toBe('skip-push');
+  });
+
+  // 即时对话被 skip 时一次性行会被上游当成功消费删掉，客户端点名只能看到 gone + 空
+  // outbox——不写 chat_fail 的话，给用户的解释是「回复没能取回」，把「没生成出来」说成
+  // 了「取不回」。定时任务不用写：那条路没有人在等着销账，last_skip 就够面板解释了。
+  it('即时对话空输出 → 除 last_skip 外还写 chat_fail（认 uuid，客户端 gone 分支照实解释）', async () => {
+    const { ctx, scratch, writeState } = makeCtx({
+      metadata: { amsgInstantChat: true, amsgMode: 'instant', amsgTaskInstruction: undefined },
+      charRows: [
+        { key: AMSG_FIRE_PACK_KEY, value: firePackValue(null, { chat: { messages: [{ role: 'user', content: '在吗' }], builtAt: PACK_BUILT_AT } }) },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+    });
+    await amsgHooks.onBeforeFire(ctx);
+    const decision = await amsgHooks.onLLMOutput({
+      sessionId: 'sess_task_42',
+      llmResponse: {},
+      llmOutputText: '',
+      contactName: 'Nyah',
+      metadata: { charId: CHAR_ID, amsgClientTaskId: 'client-task-1', amsgMode: 'instant', amsgInstantChat: true },
+      scratch,
+      writeState,
+    } as any);
+    expect((decision as any).decision).toBe('skip-push');
+
+    const call = writeState.mock.calls.find(([, entries]) =>
+      entries.some((e: { key: string }) => e.key === AMSG_CHAT_FAIL_KEY));
+    expect(call, '应该写过 chat_fail').toBeTruthy();
+    const fail = JSON.parse(String(call![1].find((e: { key: string }) => e.key === AMSG_CHAT_FAIL_KEY)!.value));
+    expect(fail.uuid).toBe(TASK_UUID);
+    expect(fail.reason).toBe('empty-generation');
+  });
+
+  it('定时任务空输出 → 只写 last_skip，不写 chat_fail', async () => {
+    const { writeState } = await runEmptyFire();
+    const call = writeState.mock.calls.find(([, entries]) =>
+      entries.some((e: { key: string }) => e.key === AMSG_CHAT_FAIL_KEY));
+    expect(call).toBeFalsy();
   });
 
   it('正常出正文的 fire 不写 empty-generation', async () => {

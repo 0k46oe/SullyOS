@@ -22,6 +22,7 @@ import {
   resolveExpirePolicy, toDatetimeLocalValue,
 } from './amsg2Tasks';
 import { AMSG_CHAT_PRESENCE_KEY, AmsgChatPresence } from './amsgChatPresence';
+import { flattenContentPartsToText } from './promptMessageCleanup';
 import {
   AMSG_FIRE_PACK_KEY,
   FIRE_PACK_VERSION,
@@ -298,7 +299,13 @@ const ensureWorkerReady = async () => {
   return config;
 };
 
-const initializeClient = async (config: ActiveMsg2GlobalConfig) => {
+// 握手结果按配置记忆化：init()（get-user-key）是一次真网络往返，而用户密钥不变——
+// 即时对话把它放上了发送热路径（拿到 202 之前的串行延迟）和 60s 状态点名（一跳最多
+// 两次），逐次重新握手纯属白付 RTT。键取会影响握手的三个字段；配置一变（换 worker /
+// 换密钥 / 清空重连）键就换，旧缓存自然作废。失败的握手不缓存，下一次重新来过。
+let cachedClientEntry: { key: string; promise: ReturnType<typeof createAndInitClient> } | null = null;
+
+const createAndInitClient = async (config: ActiveMsg2GlobalConfig) => {
   const client = createClient(config);
   try {
     await client.init();
@@ -306,6 +313,17 @@ const initializeClient = async (config: ActiveMsg2GlobalConfig) => {
     throw normalizeActiveMsgApiError(error, '获取用户密钥');
   }
   return client;
+};
+
+const initializeClient = (config: ActiveMsg2GlobalConfig) => {
+  const key = `${config.workerUrl}|${config.userId}|${config.serverToken ?? ''}`;
+  if (cachedClientEntry?.key === key) return cachedClientEntry.promise;
+  const promise = createAndInitClient(config);
+  cachedClientEntry = { key, promise };
+  promise.catch(() => {
+    if (cachedClientEntry?.promise === promise) cachedClientEntry = null;
+  });
+  return promise;
 };
 
 const resolveApiConfig = (char: CharacterProfile, config: ActiveMsg2CharacterConfig, apiConfig: APIConfig) => {
@@ -404,16 +422,40 @@ const readEmojiLibrary = async (): Promise<EmojiLibrary> => {
 };
 
 // export 只为单测（activeMsgClient.test.ts 钉 tzId 取值与模板不烤时间）。
+/**
+ * 即时对话轻量包的模板占位（角色 2.0 关着且没有任何任务时用）：定时任务那条路才渲染
+ * 模板，这类角色的包永远没人渲染，每次发送重建一整份系统提示词 + 近史转写纯属白付
+ * （主线程二次构建 + 手机上行几十 KB，都发生在拿到 202 之前）。写成一眼能认出来的
+ * 标记：它要是出现在推送正文里，说明有本不该渲染模板的 fire 在渲染它。
+ */
+const AMSG2_INSTANT_STUB_TEMPLATE =
+  'AMSG2_INSTANT_STUB_TEMPLATE（即时对话轻量包：该角色无定时任务，模板未随发送重建；看到这条正文说明有本不该渲染模板的 fire 在渲染它）';
+
 export const buildFirePack = async (
   char: CharacterProfile,
   userProfile: UserProfile,
   groups: GroupProfile[],
   realtimeConfig: RealtimeConfig | undefined,
   emojiLibrary?: EmojiLibrary,
+  opts?: {
+    /**
+     * 用占位模板替代真模板（跳过系统提示词 + 近史转写 + 表情全库读取这三样大头）。
+     * 只许在「这份包的模板确定无人渲染」时传：即时对话发送路径上，角色 2.0 关着
+     * （selfScheduleEnabled=false，云端 fire 不给排程能力）且本地任务清单为空。
+     * 其余字段（scene / lastUserMessageAt / pendingTasks / tzId…）照常构建——
+     * 即时 fire 自己要读它们（sceneSong、锚点、任务清单块）。
+     */
+    templateStub?: boolean;
+  },
 ): Promise<AmsgFirePack> => {
+  const templateStub = opts?.templateStub === true;
   const [{ recentMessages, lastUserMessageAt }, library, schedule] = await Promise.all([
     buildTimeGapHint(char.id),
-    emojiLibrary ? Promise.resolve(emojiLibrary) : readEmojiLibrary(),
+    // 表情库只喂系统提示词/近史渲染：占位模板路径整库都不用读（表情记录带图片数据，
+    // 全表 getAll 不便宜）。
+    templateStub
+      ? Promise.resolve({ all: [], categories: [] } as unknown as EmojiLibrary)
+      : (emojiLibrary ? Promise.resolve(emojiLibrary) : readEmojiLibrary()),
     // 日程随包带原始表（不是渲染好的文字），worker 到点自己挑时段。总开关关掉的角色没有表。
     isScheduleFeatureOn(char)
       ? getDailyScheduleForChar(char).catch((e) => {
@@ -468,7 +510,7 @@ export const buildFirePack = async (
     library.categories,
     char.id,
   );
-  const systemPrompt = await ChatPrompts.buildSystemPrompt(
+  const systemPrompt = templateStub ? '' : await ChatPrompts.buildSystemPrompt(
     char,
     userProfile,
     groups,
@@ -484,15 +526,13 @@ export const buildFirePack = async (
     // 具体拿掉哪些块、到点由谁补，见 ChatPrompts.PromptBuildOptions 上的表。
     { forFirePack: true },
   );
-  const { apiMessages } = ChatPrompts.buildMessageHistory(
+  const recentTranscript = templateStub ? '' : ChatPrompts.buildMessageHistory(
     recentMessages,
     Math.min(char.contextLimit || 120, 120),
     char,
     userProfile,
     emojis,
-  );
-
-  const recentTranscript = apiMessages
+  ).apiMessages
     .slice(-30)
     .map((message) => formatHistoryLine(message.role, message.content, char, userProfile))
     .join('\n\n');
@@ -505,7 +545,7 @@ export const buildFirePack = async (
     ? `- 你的记忆库里存着这些月份的经历：${recallableMonths.join('、')}。想聊起其中某段时，先输出 [[RECALL: 年-月]] 把细节取回来再写，别凭印象编。`
     : null;
 
-  const template = [
+  const template = templateStub ? AMSG2_INSTANT_STUB_TEMPLATE : [
     '你将代表下面这个角色，生成一条“主动发给用户”的私聊消息。',
     '',
     '【重要规则】',
@@ -647,14 +687,9 @@ const utf8ByteLength = (text: string): number => new TextEncoder().encode(text).
 const hasNonTextPart = (content: unknown): boolean =>
   Array.isArray(content) && content.some((part: any) => part?.type !== 'text');
 
-/** 结构化分段 → 只剩文字的那一句（丢掉图片本体时的替代内容）。 */
-const flattenToText = (content: unknown[]): string => {
-  const text = content
-    .map((part: any) => (part?.type === 'text' ? String(part.text ?? '') : ''))
-    .filter(Boolean)
-    .join('\n');
-  return text || '[图片]';
-};
+// 「图片消息 → 文字占位」的拍平内核与本地 stripImages 路径共用同一份
+// （promptMessageCleanup.flattenContentPartsToText）：超预算降级产物必须与
+// 本地拍平产物严格同源，否则同一条历史消息在两条生成路上渲染成两种样子。
 
 /**
  * 本地那串 fullMessages → fire_pack 的 `chat.messages`。
@@ -703,7 +738,7 @@ export const toFirePackChatMessages = (
   for (let i = 0; i < result.length && totalBytes > CHAT_CONTENT_BUDGET_BYTES; i += 1) {
     if (i === protectedIdx || !hasNonTextPart(result[i].content)) continue;
     const bytesBefore = entryBytes(result[i]);
-    result[i] = { role: result[i].role, content: flattenToText(result[i].content as unknown[]) };
+    result[i] = { role: result[i].role, content: flattenContentPartsToText(result[i].content as unknown[]) };
     totalBytes -= bytesBefore - entryBytes(result[i]);
     console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 即时对话这轮体积超标，第 ${i + 1} 条消息的图片本体没带上云（文字段保留）`);
   }
@@ -1747,8 +1782,13 @@ export const ActiveMsgClient = {
 
     const now = Date.now();
     const tzId = resolveCharTimeZone(char) ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    // 模板只有定时任务那条路才渲染：角色 2.0 关着（云端 fire 不注入排程工具，排不出
+    // 会消费模板的新任务）且本地任务清单为空时，用占位模板省掉每次发送的二次全量
+    // 构建与上传。2.0 开着 / 还挂着任务（含取消失败的幽灵行）就老老实实带真模板。
+    const templateStub = !isAmsg2EnabledForChar(char)
+      && (char.activeMsg2Config?.tasks?.length ?? 0) === 0;
     const firePack: AmsgFirePack = {
-      ...(await buildFirePack(char, userProfile, groups, realtimeConfig)),
+      ...(await buildFirePack(char, userProfile, groups, realtimeConfig, undefined, { templateStub })),
       chat: { messages: toFirePackChatMessages(chatMessages), builtAt: now },
     };
 
@@ -2183,6 +2223,8 @@ export const ActiveMsgClient = {
     realtimeConfig: RealtimeConfig | undefined,
   ): Promise<{ deleted: number; toolConfigRestored: boolean }> {
     const config = await ensureWorkerReady();
+    // 清云端状态可能连用户密钥一起换代：握手缓存作废，之后的第一次调用重新 init。
+    cachedClientEntry = null;
     const client = createClient(config);
     const response = await client.clearClientState();
     if (!response?.success) {

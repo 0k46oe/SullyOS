@@ -5263,7 +5263,7 @@ var chatFieldOk = (chat) => {
 var parseFirePack = (value) => {
   try {
     const parsed = JSON.parse(value);
-    if (parsed && typeof parsed === "object" && parsed.v === FIRE_PACK_VERSION && chatFieldOk(parsed.chat) && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && typeof parsed.tzId === "string" && parsed.tzId.length > 0 && typeof parsed.userTzId === "string" && parsed.userTzId.length > 0 && typeof parsed.targetName === "string" && typeof parsed.builtAt === "number" && Array.isArray(parsed.pendingTasks) && (parsed.scene === null || typeof parsed.scene === "object") && (parsed.maxUnansweredSends === void 0 || typeof parsed.maxUnansweredSends === "number" && Number.isFinite(parsed.maxUnansweredSends) && parsed.maxUnansweredSends >= 0) && (parsed.selfScheduleEnabled === void 0 || typeof parsed.selfScheduleEnabled === "boolean")) {
+    if (parsed && typeof parsed === "object" && parsed.v === FIRE_PACK_VERSION && chatFieldOk(parsed.chat) && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && typeof parsed.tzId === "string" && parsed.tzId.length > 0 && typeof parsed.userTzId === "string" && parsed.userTzId.length > 0 && typeof parsed.targetName === "string" && typeof parsed.builtAt === "number" && Array.isArray(parsed.pendingTasks) && (parsed.scene === null || typeof parsed.scene === "object") && (parsed.maxUnansweredSends === void 0 || typeof parsed.maxUnansweredSends === "number" && Number.isFinite(parsed.maxUnansweredSends) && parsed.maxUnansweredSends >= 0) && typeof parsed.selfScheduleEnabled === "boolean") {
       return parsed;
     }
   } catch {
@@ -5524,7 +5524,7 @@ var parseFireScheduleArgs = (args, nowMs, tz) => {
     expirePolicy
   };
 };
-var resolveFireTargetTask = (tasks, taskIdArg) => {
+var resolveFireTargetTask = (tasks, taskIdArg, nowMs) => {
   if (tasks.length === 0) {
     return { ok: false, reason: "no_tasks", message: "\u4F60\u73B0\u5728\u6CA1\u6709\u6302\u7740\u4EFB\u4F55\u6392\u7A0B\u4EFB\u52A1\u3002" };
   }
@@ -5532,7 +5532,9 @@ var resolveFireTargetTask = (tasks, taskIdArg) => {
     const task = findTaskByShortId(tasks, taskIdArg.trim());
     return task ? { task } : { ok: false, reason: "task_not_found", message: `\u6CA1\u6709\u627E\u5230\u77ED id \u4E3A ${taskIdArg.trim()} \u7684\u4EFB\u52A1\u2014\u2014\u77ED id \u5728\u6392\u7A0B\u6E05\u5355\u91CC\uFF0C\u7167\u7740\u90A3\u91CC\u7684\u5199\u3002` };
   }
-  if (tasks.length === 1) return { task: tasks[0] };
+  const pending = tasks.filter((t) => isPendingTask(t, nowMs));
+  if (pending.length === 1) return { task: pending[0] };
+  if (pending.length === 0 && tasks.length === 1) return { task: tasks[0] };
   return { ok: false, reason: "ambiguous_task", message: "\u4F60\u6302\u7740\u4E0D\u6B62\u4E00\u4E2A\u4EFB\u52A1\uFF0C\u5E26 task_id\uFF08\u6392\u7A0B\u6E05\u5355\u91CC\u7684\u77ED id\uFF09\u6307\u5B9A\u8981\u52A8\u54EA\u4E00\u4E2A\u3002" };
 };
 var parseFireRenewSendAt = (raw, nowMs, tz) => {
@@ -9221,10 +9223,89 @@ function buildScheduledPush(message, build, extraMeta, bannerBody) {
   };
 }
 
-// worker/amsg/src/emotionEval.ts
-var SYSTEM_SLOT = "__EMOTION_EVAL_SYSTEM_PROMPT__";
-var HISTORY_SLOT = "__EMOTION_EVAL_HISTORY__";
+// utils/emotionEvalCore.ts
+var EMOTION_EVAL_SYSTEM_SLOT = "__EMOTION_EVAL_SYSTEM_PROMPT__";
+var EMOTION_EVAL_HISTORY_SLOT = "__EMOTION_EVAL_HISTORY__";
 var EMOTION_EVAL_TIMEOUT_MS = 12e4;
+var flattenEvalContent = (content) => {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map((part) => part?.type === "text" ? part.text || "" : part?.type === "image_url" ? "[\u56FE\u7247]" : "").filter(Boolean).join(" ");
+  }
+  return "";
+};
+var restoreEvalPrompt = (template, chatMessages, charName) => {
+  const messages = Array.isArray(chatMessages) ? chatMessages : [];
+  let systemPromptText = "";
+  let conversation = messages;
+  if (messages.length > 0 && messages[0]?.role === "system") {
+    systemPromptText = flattenEvalContent(messages[0].content);
+    conversation = messages.slice(1);
+  }
+  const recentLines = conversation.map((m) => {
+    const role = m.role === "user" ? "\u7528\u6237" : m.role === "assistant" ? charName : "\u7CFB\u7EDF";
+    return `[${role}]: ${flattenEvalContent(m.content)}`;
+  }).join("\n");
+  return String(template).replace(EMOTION_EVAL_SYSTEM_SLOT, () => systemPromptText).replace(EMOTION_EVAL_HISTORY_SLOT, () => recentLines);
+};
+var ERROR_SNIPPET_MAX = 120;
+var maskAndSnip = (text, apiKey) => {
+  let snippet = text.replace(/\s+/g, " ").trim();
+  if (apiKey && snippet.includes(apiKey)) snippet = snippet.split(apiKey).join("***");
+  return snippet.slice(0, ERROR_SNIPPET_MAX);
+};
+var requestEmotionEval = async (api, promptContent, timeoutMs = EMOTION_EVAL_TIMEOUT_MS) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const baseUrl = String(api.baseUrl).replace(/\/+$/, "");
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${api.apiKey || "sk-none"}`
+      },
+      body: JSON.stringify({
+        model: api.model,
+        messages: [{ role: "user", content: promptContent }],
+        temperature: 0.85,
+        // 显式给足输出额度：部分中转不传 max_tokens 时默认很小，评估输出很长，
+        // 会被截成半截 JSON。
+        max_tokens: 8e3,
+        stream: false
+      }),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      let body = "";
+      try {
+        body = await res.text();
+      } catch {
+      }
+      console.warn("[emotion-eval] \u526F API \u62D2\u4E86\u8FD9\u6B21\u8BC4\u4F30\uFF08\u4E3B\u6D41\u7A0B\u4E0D\u53D7\u5F71\u54CD\uFF09", res.status);
+      const snippet = maskAndSnip(body, api.apiKey);
+      return { raw: null, error: `\u526F API HTTP ${res.status}${snippet ? `\uFF1A${snippet}` : ""}` };
+    }
+    const data = await res.json();
+    const message = data?.choices?.[0]?.message;
+    const raw = flattenEvalContent(message?.content) || (typeof message?.reasoning_content === "string" ? message.reasoning_content : "");
+    if (!raw.trim()) {
+      return {
+        raw: null,
+        error: `\u8BC4\u4F30\u6A21\u578B\u6CA1\u6709\u8F93\u51FA\u5185\u5BB9\uFF08finish_reason: ${data?.choices?.[0]?.finish_reason ?? "?"}\uFF09`
+      };
+    }
+    return { raw, error: null };
+  } catch (error) {
+    console.warn("[emotion-eval] \u8BC4\u4F30\u5931\u8D25\uFF08\u4E3B\u6D41\u7A0B\u4E0D\u53D7\u5F71\u54CD\uFF09", error);
+    const reason = controller.signal.aborted ? `\u8BC4\u4F30\u8D85\u65F6\uFF08${Math.round(timeoutMs / 1e3)} \u79D2\u6CA1\u56DE\u6765\uFF09` : `\u8BC4\u4F30\u8BF7\u6C42\u6CA1\u53D1\u51FA\u53BB\uFF1A${maskAndSnip(error instanceof Error ? error.message : String(error), api.apiKey)}`;
+    return { raw: null, error: reason };
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+// worker/amsg/src/emotionEval.ts
 var amsgEmotionUpdateKey = (clientTaskId) => `emotion_update:${clientTaskId}`;
 var isUsableEvalSpec = (spec) => {
   const s = spec;
@@ -9246,86 +9327,7 @@ var takeEmotionEvalSpec = (metadata) => {
   }
   return isUsableEvalSpec(spec) ? spec : null;
 };
-var flattenContent = (content) => {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content.map((part) => part?.type === "text" ? part.text || "" : part?.type === "image_url" ? "[\u56FE\u7247]" : "").filter(Boolean).join(" ");
-  }
-  return "";
-};
-var restoreEvalPrompt = (template, chatMessages, charName) => {
-  const messages = Array.isArray(chatMessages) ? chatMessages : [];
-  let systemPromptText = "";
-  let conversation = messages;
-  if (messages.length > 0 && messages[0]?.role === "system") {
-    systemPromptText = flattenContent(messages[0].content);
-    conversation = messages.slice(1);
-  }
-  const recentLines = conversation.map((m) => {
-    const role = m.role === "user" ? "\u7528\u6237" : m.role === "assistant" ? charName : "\u7CFB\u7EDF";
-    return `[${role}]: ${flattenContent(m.content)}`;
-  }).join("\n");
-  return String(template).replace(SYSTEM_SLOT, () => systemPromptText).replace(HISTORY_SLOT, () => recentLines);
-};
-var ERROR_SNIPPET_MAX = 120;
-var maskAndSnip = (text, apiKey) => {
-  let snippet = text.replace(/\s+/g, " ").trim();
-  if (apiKey && snippet.includes(apiKey)) snippet = snippet.split(apiKey).join("***");
-  return snippet.slice(0, ERROR_SNIPPET_MAX);
-};
-var describeEvalFailure = (status, body, apiKey) => {
-  const snippet = maskAndSnip(body, apiKey);
-  return `\u526F API HTTP ${status}${snippet ? `\uFF1A${snippet}` : ""}`;
-};
-var runAmsgEmotionEval = async (spec, chatMessages, charName, timeoutMs = EMOTION_EVAL_TIMEOUT_MS) => {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const baseUrl = String(spec.api.baseUrl).replace(/\/+$/, "");
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${spec.api.apiKey || "sk-none"}`
-      },
-      body: JSON.stringify({
-        model: spec.api.model,
-        messages: [{ role: "user", content: restoreEvalPrompt(spec.prompt, chatMessages, charName) }],
-        temperature: 0.85,
-        // 显式给足输出额度：部分中转不传 max_tokens 时默认很小，评估输出很长，
-        // 会被截成半截 JSON（与 instant push worker 同一个数）。
-        max_tokens: 8e3,
-        stream: false
-      }),
-      signal: controller.signal
-    });
-    if (!res.ok) {
-      let body = "";
-      try {
-        body = await res.text();
-      } catch {
-      }
-      console.warn("[amsg:emotion] \u526F API \u62D2\u4E86\u8FD9\u6B21\u8BC4\u4F30\uFF08\u4E3B\u56DE\u590D\u4E0D\u53D7\u5F71\u54CD\uFF09", res.status);
-      return { raw: null, error: describeEvalFailure(res.status, body, spec.api.apiKey) };
-    }
-    const data = await res.json();
-    const message = data?.choices?.[0]?.message;
-    const raw = flattenContent(message?.content) || (typeof message?.reasoning_content === "string" ? message.reasoning_content : "");
-    if (!raw.trim()) {
-      return {
-        raw: null,
-        error: `\u8BC4\u4F30\u6A21\u578B\u6CA1\u6709\u8F93\u51FA\u5185\u5BB9\uFF08finish_reason: ${data?.choices?.[0]?.finish_reason ?? "?"}\uFF09`
-      };
-    }
-    return { raw, error: null };
-  } catch (error) {
-    console.warn("[amsg:emotion] \u8BC4\u4F30\u5931\u8D25\uFF08\u4E3B\u56DE\u590D\u4E0D\u53D7\u5F71\u54CD\uFF09", error);
-    const reason = controller.signal.aborted ? `\u8BC4\u4F30\u8D85\u65F6\uFF08${Math.round(timeoutMs / 1e3)} \u79D2\u6CA1\u56DE\u6765\uFF09` : `\u8BC4\u4F30\u8BF7\u6C42\u6CA1\u53D1\u51FA\u53BB\uFF1A${maskAndSnip(error instanceof Error ? error.message : String(error), spec.api.apiKey)}`;
-    return { raw: null, error: reason };
-  } finally {
-    clearTimeout(timer);
-  }
-};
+var runAmsgEmotionEval = async (spec, chatMessages, charName, timeoutMs = EMOTION_EVAL_TIMEOUT_MS) => requestEmotionEval(spec.api, restoreEvalPrompt(spec.prompt, chatMessages, charName), timeoutMs);
 
 // worker/amsg/src/instantChat.ts
 var INSTANT_TOTAL_TIMEOUT_MS = 6e5;
@@ -9467,6 +9469,18 @@ var handleInstantChat = async (args) => {
         message: "\u4E91\u7AEF\u72B6\u6001\u6CA1\u4F20\u4E0A\u53BB\uFF0C\u8FD9\u6761\u6CA1\u53D1\u51FA\u53BB",
         step: "client-state",
         upstream: await readBody(stateResponse)
+      }
+    });
+  }
+  const stateBody = await readBody(stateResponse);
+  const skippedEntries = stateBody?.data?.skippedEntries;
+  if (Array.isArray(skippedEntries) && skippedEntries.some((entry) => entry?.key === AMSG_FIRE_PACK_KEY)) {
+    return json(409, {
+      success: false,
+      error: {
+        code: "INSTANT_CHAT_STATE_STALE",
+        message: "\u4E91\u7AEF\u62D2\u6536\u4E86\u8FD9\u8F6E\u7684\u6700\u65B0\u72B6\u6001\uFF08\u4E91\u7AEF\u5DF2\u6709\u66F4\u65B0\u7684\u4E00\u4EFD\uFF09\u2014\u2014\u8BBE\u5907\u65F6\u949F\u53EF\u80FD\u88AB\u56DE\u62E8\u8FC7\uFF0C\u68C0\u67E5\u7CFB\u7EDF\u65F6\u95F4\u540E\u518D\u53D1\u4E00\u6B21",
+        step: "client-state"
       }
     });
   }
@@ -9860,8 +9874,8 @@ var runFireScheduleTool = async (stash, scheduleTask, args, nowMs) => {
   if (typeof scheduleTask !== "function") {
     return { ok: false, reason: "not_supported", message: "\u5F53\u524D\u540E\u53F0\u7248\u672C\u8FD8\u4E0D\u652F\u6301\u7ED9\u81EA\u5DF1\u6392\u540E\u7EED\uFF0C\u8FD9\u6B21\u5C31\u628A\u8BDD\u8BF4\u5B8C\u5427\u3002" };
   }
-  const unansweredLimit = stash.maxUnansweredSends ?? Infinity;
-  const committedSends = countUnansweredSends(stash.selfLog) + (stash.plannedSelfSends ?? 0) + stash.scheduledTasks.length;
+  const unansweredLimit = stash.maxUnansweredSends;
+  const committedSends = countUnansweredSends(stash.selfLog) + stash.plannedSelfSends + stash.scheduledTasks.length;
   if (committedSends + 1 > unansweredLimit) {
     return {
       ok: false,
@@ -9949,14 +9963,14 @@ var runFireScheduleTool = async (stash, scheduleTask, args, nowMs) => {
   }
   return {
     ok: true,
-    task_id: result.uuid.slice(0, 8),
+    task_id: shortTaskId(result.uuid),
     send_at: sendAt,
     message: "\u6392\u597D\u4E86\u3002\u5230\u70B9\u4F60\u4F1A\u77E5\u9053\u81EA\u5DF1\u8FD9\u6B21\u8BF4\u4E86\u4EC0\u4E48\uFF0C\u63A5\u7740\u8BF4\u5C31\u884C\uFF0C\u73B0\u5728\u4E0D\u7528\u5267\u900F\u3002"
   };
 };
 var liveTaskView = (stash) => {
-  const cancelled = new Set(stash.cancelledTasks ?? []);
-  return [...stash.pendingTasks ?? [], ...stash.scheduledTasks].filter((t) => !cancelled.has(t.taskUuid) && t.taskUuid !== stash.taskUuid);
+  const cancelled = new Set(stash.cancelledTasks);
+  return [...stash.pendingTasks, ...stash.scheduledTasks].filter((t) => !cancelled.has(t.taskUuid) && t.taskUuid !== stash.taskUuid);
 };
 var patchSelfLogTask = (stash, taskUuid, patch) => {
   const tasks = stash.selfLog.tasks;
@@ -9967,11 +9981,11 @@ var patchSelfLogTask = (stash, taskUuid, patch) => {
   };
   stash.selfLogDirty = true;
 };
-var runFireCancelTool = async (stash, cancelTask, args) => {
+var runFireCancelTool = async (stash, cancelTask, args, nowMs) => {
   if (typeof cancelTask !== "function") {
     return { ok: false, reason: "not_supported", message: "\u5F53\u524D\u540E\u53F0\u7248\u672C\u8FD8\u4E0D\u652F\u6301\u53D6\u6D88\u4EFB\u52A1\uFF0C\u5148\u5F53\u5B83\u4F1A\u7167\u5E38\u54CD\uFF0C\u628A\u8981\u8BF4\u7684\u8BDD\u8BF4\u6E05\u695A\u3002" };
   }
-  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id);
+  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id, nowMs);
   if ("ok" in resolved) return resolved;
   const target = resolved.task;
   let result;
@@ -9981,19 +9995,19 @@ var runFireCancelTool = async (stash, cancelTask, args) => {
     return { ok: false, reason: "cancel_failed", message: error instanceof Error ? error.message : String(error) };
   }
   if (!result.cancelled) {
-    return { ok: true, already_gone: true, message: `\u4EFB\u52A1 [${target.taskUuid.slice(0, 8)}] \u5DF2\u7ECF\u4E0D\u5728\u6392\u7A0B\u91CC\u4E86\uFF0C\u4E0D\u7528\u518D\u7BA1\u5B83\u3002` };
+    return { ok: true, already_gone: true, message: `\u4EFB\u52A1 [${shortTaskId(target.taskUuid)}] \u5DF2\u7ECF\u4E0D\u5728\u6392\u7A0B\u91CC\u4E86\uFF0C\u4E0D\u7528\u518D\u7BA1\u5B83\u3002` };
   }
-  stash.cancelledTasks = [...stash.cancelledTasks ?? [], target.taskUuid];
+  stash.cancelledTasks = [...stash.cancelledTasks, target.taskUuid];
   stash.scheduledTasks = stash.scheduledTasks.filter((t) => t.taskUuid !== target.taskUuid);
   patchSelfLogTask(stash, target.taskUuid, { remove: true });
   console.log("[amsg:self-cancel]", { uuid: target.taskUuid });
-  return { ok: true, task_id: target.taskUuid.slice(0, 8), message: `\u5DF2\u53D6\u6D88 [${target.taskUuid.slice(0, 8)}]\u3002` };
+  return { ok: true, task_id: shortTaskId(target.taskUuid), message: `\u5DF2\u53D6\u6D88 [${shortTaskId(target.taskUuid)}]\u3002` };
 };
 var runFireRenewTool = async (stash, fireCtx, args, nowMs) => {
   if (typeof fireCtx.renewTask !== "function") {
     return { ok: false, reason: "not_supported", message: "\u5F53\u524D\u540E\u53F0\u7248\u672C\u8FD8\u4E0D\u652F\u6301\u6539\u671F\uFF0C\u8981\u4E48\u53D6\u6D88\u91CD\u6392\uFF0C\u8981\u4E48\u5148\u5F53\u5B83\u4F1A\u7167\u5E38\u54CD\u3002" };
   }
-  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id);
+  const resolved = resolveFireTargetTask(liveTaskView(stash), args.task_id, nowMs);
   if ("ok" in resolved) return resolved;
   const target = resolved.task;
   if (target.mode === "fixed") {
@@ -10010,7 +10024,7 @@ var runFireRenewTool = async (stash, fireCtx, args, nowMs) => {
       expire_policy: target.expirePolicy
     }, nowMs);
     if (result2.ok === true) {
-      return { ...result2, message: `\u5DF2\u4E3A [${target.taskUuid.slice(0, 8)}] \u7684\u8FD9\u4E00\u6B21\u8865\u4E0A\u4E00\u6761\u4E00\u6B21\u6027\u4EFB\u52A1\uFF0C\u539F\u6765\u7684\u91CD\u590D\u8282\u594F\u4E0D\u53D8\u3002` };
+      return { ...result2, message: `\u5DF2\u4E3A [${shortTaskId(target.taskUuid)}] \u7684\u8FD9\u4E00\u6B21\u8865\u4E0A\u4E00\u6761\u4E00\u6B21\u6027\u4EFB\u52A1\uFF0C\u539F\u6765\u7684\u91CD\u590D\u8282\u594F\u4E0D\u53D8\u3002` };
     }
     return result2;
   }
@@ -10021,16 +10035,16 @@ var runFireRenewTool = async (stash, fireCtx, args, nowMs) => {
     return { ok: false, reason: "renew_rejected", message: error instanceof Error ? error.message : String(error) };
   }
   if (!result.renewed) {
-    return { ok: false, reason: "task_gone", message: `\u4EFB\u52A1 [${target.taskUuid.slice(0, 8)}] \u5DF2\u7ECF\u4E0D\u5728\u6392\u7A0B\u91CC\u4E86\uFF08\u53EF\u80FD\u521A\u89E6\u53D1\u8FC7\uFF09\uFF0C\u8981\u8BF4\u7684\u8BDD\u7528 schedule_active_message \u91CD\u65B0\u6392\u3002` };
+    return { ok: false, reason: "task_gone", message: `\u4EFB\u52A1 [${shortTaskId(target.taskUuid)}] \u5DF2\u7ECF\u4E0D\u5728\u6392\u7A0B\u91CC\u4E86\uFF08\u53EF\u80FD\u521A\u89E6\u53D1\u8FC7\uFF09\uFF0C\u8981\u8BF4\u7684\u8BDD\u7528 schedule_active_message \u91CD\u65B0\u6392\u3002` };
   }
-  stash.renewedTasks = [...stash.renewedTasks ?? [], { taskUuid: target.taskUuid, sendAt: result.nextSendAt }];
+  stash.renewedTasks = [...stash.renewedTasks, { taskUuid: target.taskUuid, sendAt: result.nextSendAt }];
   patchSelfLogTask(stash, target.taskUuid, { sendAt: result.nextSendAt });
   console.log("[amsg:self-renew]", { uuid: target.taskUuid, sendAt: result.nextSendAt });
   return {
     ok: true,
-    task_id: target.taskUuid.slice(0, 8),
+    task_id: shortTaskId(target.taskUuid),
     send_at: result.nextSendAt,
-    message: `\u5DF2\u628A [${target.taskUuid.slice(0, 8)}] \u6539\u5230\u65B0\u65F6\u95F4\uFF08\u7F16\u53F7\u4E0D\u53D8\uFF09\u3002`
+    message: `\u5DF2\u628A [${shortTaskId(target.taskUuid)}] \u6539\u5230\u65B0\u65F6\u95F4\uFF08\u7F16\u53F7\u4E0D\u53D8\uFF09\u3002`
   };
 };
 var FINAL_ROUND_NOTICE = "\uFF08\u63D0\u9192\uFF1A\u8FD9\u662F\u6700\u540E\u4E00\u8F6E\u4E86\uFF0C\u4E0D\u8981\u518D\u8C03\u7528\u4EFB\u4F55\u5DE5\u5177\uFF0C\u76F4\u63A5\u628A\u60F3\u8BF4\u7684\u8BDD\u5199\u5B8C\u3002\uFF09";
@@ -10174,7 +10188,7 @@ var amsgHooks = {
       return { skip: true };
     }
     const livePendingTasks = [...pack.pendingTasks, ...selfLog.tasks];
-    const selfScheduleAllowed = pack.selfScheduleEnabled !== false;
+    const selfScheduleAllowed = pack.selfScheduleEnabled;
     const canSelfSchedule = typeof ctx.scheduleTask === "function" && selfScheduleAllowed;
     const tz = { tzId: pack.tzId };
     const clientTaskId = typeof taskMeta.amsgClientTaskId === "string" ? taskMeta.amsgClientTaskId : "";
@@ -10379,6 +10393,13 @@ var amsgHooks = {
         reason: decision.reason,
         skippedAt: Date.now()
       });
+      if (stash.instant && stash.taskUuid && ctx.writeState) {
+        await writeChatFail(ctx.writeState, stash.charId, {
+          uuid: stash.taskUuid,
+          reason: decision.reason,
+          retryCount: 0
+        });
+      }
     }
     if (decision.decision === "finish") {
       stash.selfLogTexts = decision.pushPayloads.map(
@@ -10386,8 +10407,8 @@ var amsgHooks = {
       );
       let payloads = attachScheduledTasks(decision.pushPayloads, stash.scheduledTasks);
       const attachMetaAt = (list, idx, extra) => list.map((payload, i) => i === idx ? { ...payload, metadata: { ...payload.metadata ?? {}, ...extra } } : payload);
-      const cancelled = stash.cancelledTasks ?? [];
-      const renewed = stash.renewedTasks ?? [];
+      const cancelled = stash.cancelledTasks;
+      const renewed = stash.renewedTasks;
       if ((cancelled.length > 0 || renewed.length > 0) && payloads.length > 0) {
         payloads = attachMetaAt(payloads, payloads.length - 1, {
           amsgTaskMutations: {
@@ -10491,7 +10512,7 @@ var amsgHooks = {
           });
           continue;
         }
-        const result = name === AMSG_FIRE_SCHEDULE_TOOL ? await runFireScheduleTool(stash, ctx.scheduleTask, args, Date.now()) : name === AMSG_FIRE_CANCEL_TOOL ? await runFireCancelTool(stash, ctx.cancelTask, args) : name === AMSG_FIRE_RENEW_TOOL ? await runFireRenewTool(stash, ctx, args, Date.now()) : name.startsWith(MCP_FIRE_NAME_PREFIX) ? await runMcpFireTool(stash, name, args) : await dispatchAgenticTool(name, args, stash.toolCtx);
+        const result = name === AMSG_FIRE_SCHEDULE_TOOL ? await runFireScheduleTool(stash, ctx.scheduleTask, args, Date.now()) : name === AMSG_FIRE_CANCEL_TOOL ? await runFireCancelTool(stash, ctx.cancelTask, args, Date.now()) : name === AMSG_FIRE_RENEW_TOOL ? await runFireRenewTool(stash, ctx, args, Date.now()) : name.startsWith(MCP_FIRE_NAME_PREFIX) ? await runMcpFireTool(stash, name, args) : await dispatchAgenticTool(name, args, stash.toolCtx);
         stash.session.toolCalls.push({ name, fingerprint, ran: !neverRan(result) });
         content = buildToolResultMessage({ name, result, history: stash.session.toolCalls });
         console.log("[amsg:agentic]", { type: "tool_done", sessionId: ctx.sessionId, tool: name });

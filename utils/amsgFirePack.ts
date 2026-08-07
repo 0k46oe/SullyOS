@@ -455,9 +455,10 @@ export interface AmsgFirePack {
    * amsg2ToolsInjected（角色级开关关掉的不注入，否则被用户显式关掉的功能会被角色
    * 一次工具调用重新打开），云端不看这个字段的话正好把那道闸绕穿：全局即时对话开着、
    * 角色 2.0 关着，角色照样能在云端聊天轮里排出真会触发的任务。
-   * 缺省当 true：定时任务路径的包只会来自开着 2.0 的角色，旧包缺字段不该被拦。
+   * 必填：v7 的唯一生产者（buildFirePack）无条件写它。这是一道用户主权闸，缺省放行
+   * 的容错方向是 fail-open（字段一丢开关就被静默重新打开），宁可整包打回。
    */
-  selfScheduleEnabled?: boolean;
+  selfScheduleEnabled: boolean;
 }
 
 // ─── 按角色参照系渲染时间（②：worker 给角色看的一切时间只此一份） ───
@@ -899,7 +900,7 @@ export const parseFirePack = (value: string): AmsgFirePack | null => {
         || (typeof parsed.maxUnansweredSends === 'number'
           && Number.isFinite(parsed.maxUnansweredSends)
           && parsed.maxUnansweredSends >= 0)) &&
-      (parsed.selfScheduleEnabled === undefined || typeof parsed.selfScheduleEnabled === 'boolean')
+      typeof parsed.selfScheduleEnabled === 'boolean'
     ) {
       return parsed as AmsgFirePack;
     }
