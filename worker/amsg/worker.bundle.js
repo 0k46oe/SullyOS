@@ -786,7 +786,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.12/node_modules/@rei-standard/amsg-server/dist/chunk-RRWCPPOY.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.13/node_modules/@rei-standard/amsg-server/dist/chunk-TV7N3RTH.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -3792,7 +3792,7 @@ function createClientStateHandler(ctx) {
   }
   return { PUT, GET, DELETE };
 }
-var SERVER_VERSION = true ? "2.6.0-next.12" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.6.0-next.13" : "0.0.0-dev";
 var SERVER_FEATURES = Object.freeze([
   "client-state",
   "client-state-chunking",
@@ -3976,6 +3976,12 @@ function corsHeadersFor(cors, requestOrigin) {
   if (allowOrigin !== "*") headers["Vary"] = "Origin";
   return headers;
 }
+function degradedCorsHeaders(requestOrigin) {
+  return corsHeadersFor({ origin: requestOrigin, maxAge: 0 }, requestOrigin);
+}
+function internalErrorResponse(cors) {
+  return jsonResponse(500, { success: false, error: { code: "INTERNAL_ERROR", message: "\u670D\u52A1\u5668\u5185\u90E8\u9519\u8BEF" } }, cors);
+}
 function createSingleUserCloudflareWorker(buildConfig) {
   async function resolveConfig(env) {
     const cfg = await buildConfig(env);
@@ -3983,10 +3989,19 @@ function createSingleUserCloudflareWorker(buildConfig) {
     return cfg;
   }
   async function fetch2(request, env) {
+    const requestOrigin = request.headers.get("origin") || "";
+    const method = request.method.toUpperCase();
+    let cfg;
     try {
-      const cfg = await resolveConfig(env);
-      const cors = corsHeadersFor(cfg.cors, request.headers.get("origin") || "");
-      const method = request.method.toUpperCase();
+      cfg = await resolveConfig(env);
+    } catch (error) {
+      console.error("[amsg single-user] fetch() config build failed:", error && error.message);
+      const degraded = degradedCorsHeaders(requestOrigin);
+      if (method === "OPTIONS" && degraded) return new Response(null, { status: 204, headers: degraded });
+      return internalErrorResponse(degraded);
+    }
+    const cors = corsHeadersFor(cfg.cors, requestOrigin);
+    try {
       if (method === "OPTIONS") {
         return cors ? new Response(null, { status: 204, headers: cors }) : jsonResponse(404, { success: false, error: { code: "NOT_FOUND", message: "Unknown route" } });
       }
@@ -4031,7 +4046,7 @@ function createSingleUserCloudflareWorker(buildConfig) {
       return jsonResponse(result.status, result.body, cors);
     } catch (error) {
       console.error("[amsg single-user] fetch() unhandled error:", error && error.message);
-      return jsonResponse(500, { success: false, error: { code: "INTERNAL_ERROR", message: "\u670D\u52A1\u5668\u5185\u90E8\u9519\u8BEF" } });
+      return internalErrorResponse(cors);
     }
   }
   async function scheduled(event, env) {
