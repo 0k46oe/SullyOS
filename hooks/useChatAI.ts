@@ -330,13 +330,7 @@ export async function evaluateEmotionBackground(
     // （主链路 fire & forget / post-push 补跑 / OSContext 主动消息），在函数级
     // start/finally 派发一次即可全覆盖；instant 模式的 worker 评估另行点灯。
     announceChatGen(CHAT_GEN_EVENTS.emotionStart, { charId: charData.id, charName: charData.name });
-    // 情绪评估与主回复并行，而且通常更慢。必须自己持有一份 KeepAlive：
-    // 只靠 triggerAI 的那份时，主回复先完成就会在 finally 里 stop，导致仍在跑的
-    // 情绪请求失去后台保活。TWA 切后台时最容易表现为「正文回了，情绪永远不落地」。
-    let keepAliveHeld = false;
     try {
-        await KeepAlive.start();
-        keepAliveHeld = true;
         const ambientSection = shouldRequestAmbient(charData.id) ? buildAmbientEvalSection(charData) : '';
         const prompt = buildEmotionEvalPrompt(charData, userProfile, mainSystemPrompt, apiMessages, true, ambientSection);
 
@@ -410,7 +404,6 @@ export async function evaluateEmotionBackground(
         });
         return null;
     } finally {
-        if (keepAliveHeld) KeepAlive.stop();
         announceChatGen(CHAT_GEN_EVENTS.emotionEnd, { charId: charData.id, charName: charData.name });
     }
 }

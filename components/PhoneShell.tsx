@@ -142,7 +142,6 @@ import { StatusBar as CapStatusBar, Style as StatusBarStyle } from '@capacitor/s
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Capacitor } from '@capacitor/core';
 import { isIOSStandaloneWebApp, resolveStatusBarMode } from '../utils/iosStandalone';
-import { installTwaBackNavigation, isTwaNavigationContext } from '../utils/twaBackNavigation';
 import AppErrorBoundary from './os/AppErrorBoundary';
 import GlobalMiniPlayer from './os/GlobalMiniPlayer';
 import PersonaSimIndicator from './os/PersonaSimIndicator';
@@ -482,35 +481,6 @@ const AppLoadingFallback: React.FC<{ onReturn?: () => void }> = ({ onReturn }) =
 const PhoneShell: React.FC = () => {
   const { theme, isLocked, unlock, activeApp, closeApp, openApp, virtualTime, isDataLoaded, toasts, unreadMessages, characters, handleBack, suspendedCall, resumeCall, activeCharacterId, errorDialog, dismissError } = useOS();
   const useIOSStandaloneLayout = isIOSStandaloneWebApp();
-  const browserBackHandlerRef = useRef(handleBack);
-
-  useEffect(() => {
-    browserBackHandlerRef.current = handleBack;
-  }, [handleBack]);
-
-  // TWA / installed PWA navigation bridge. Chrome owns the Android gesture in
-  // a TWA, so keep a same-URL history sentinel and delegate its popstate to the
-  // same OS back handler already used by Capacitor. Normal browser tabs are not
-  // touched, and feature-owned history entries remain ahead of the sentinel.
-  useEffect(() => {
-    const shouldInstall = isTwaNavigationContext({
-      isNativePlatform: Capacitor.isNativePlatform(),
-      referrer: document.referrer,
-      matchesDisplayMode: (mode) => window.matchMedia(`(display-mode: ${mode})`).matches,
-    });
-    if (!shouldInstall) return;
-
-    return installTwaBackNavigation({
-      history: window.history,
-      getCurrentUrl: () => window.location.href,
-      subscribeToPopState: (listener) => {
-        const onPopState = (event: PopStateEvent) => listener(event.state);
-        window.addEventListener('popstate', onPopState);
-        return () => window.removeEventListener('popstate', onPopState);
-      },
-      onBack: () => browserBackHandlerRef.current(),
-    });
-  }, []);
 
   // 三档顶部状态栏：安全显示 / 紧凑显示 / 隐藏。旧存档仍由 hideStatusBar 兼容解析。
   // compact 把时间放进 safe-area，本体顶栏只让出 max(safe-area, 1.5rem)，避免顶部再多一整行。

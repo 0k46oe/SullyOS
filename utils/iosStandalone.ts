@@ -1,6 +1,5 @@
 let hasInstalledIOSStandaloneWorkaround = false;
 let stableStandaloneHeight = 0;
-let stableAndroidHeight = 0;
 // 安全区只在旋转 / 窗口尺寸变化时才变，缓存探测结果，避免 visualViewport 滚动、聚焦时反复同步重排。
 // 上下各自独立缓存：某边读到非 0 才锁定；iOS 启动早期某边可能瞬时为 0，此时该边不锁、下次继续探测，
 // 避免「一边真值、一边瞬时 0」被整体锁死（否则 home 条避让会失效，直到旋转/尺寸变化才恢复）。
@@ -91,59 +90,6 @@ const isTextEntryElement = (target: EventTarget | null): target is HTMLElement =
     return ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
 };
 
-export interface AndroidViewportMetrics {
-    stableHeight: number;
-    innerHeight: number;
-    viewportHeight: number;
-    viewportOffsetTop: number;
-    virtualKeyboardHeight: number;
-    textEntryFocused: boolean;
-}
-
-export interface AndroidViewportState {
-    appHeight: number;
-    stableHeight: number;
-    keyboardOpen: boolean;
-}
-
-/** Resolve the visible app height for every Android soft-keyboard mode. */
-export const resolveAndroidViewportState = (metrics: AndroidViewportMetrics): AndroidViewportState => {
-    const innerHeight = Math.max(0, Math.round(metrics.innerHeight));
-    const viewportHeight = Math.max(0, Math.round(metrics.viewportHeight));
-    const viewportOffsetTop = Math.max(0, Math.round(metrics.viewportOffsetTop));
-    const virtualKeyboardHeight = Math.max(0, Math.round(metrics.virtualKeyboardHeight));
-    const currentFullHeight = Math.max(innerHeight, viewportHeight + viewportOffsetTop);
-
-    let stableHeight = Math.max(0, Math.round(metrics.stableHeight));
-    if (!metrics.textEntryFocused) {
-        stableHeight = Math.max(stableHeight, currentFullHeight);
-    } else if (!stableHeight) {
-        stableHeight = currentFullHeight;
-    }
-
-    const layoutLoss = Math.max(0, stableHeight - innerHeight);
-    const visualLoss = Math.max(0, stableHeight - viewportHeight);
-    const obscuredHeight = Math.max(0, innerHeight - viewportHeight - viewportOffsetTop);
-    const keyboardHeight = Math.max(layoutLoss, visualLoss, obscuredHeight, virtualKeyboardHeight);
-    const keyboardOpen = metrics.textEntryFocused && keyboardHeight > 120;
-
-    if (!keyboardOpen) {
-        return { appHeight: currentFullHeight || stableHeight, stableHeight, keyboardOpen: false };
-    }
-
-    const visibleCandidates: number[] = [];
-    if (visualLoss > 100 || obscuredHeight > 100) visibleCandidates.push(viewportHeight);
-    if (layoutLoss > 100) visibleCandidates.push(innerHeight);
-    if (virtualKeyboardHeight > 100) visibleCandidates.push(stableHeight - virtualKeyboardHeight);
-    const usableCandidates = visibleCandidates.filter(height => height > 150);
-
-    return {
-        appHeight: usableCandidates.length > 0 ? Math.min(...usableCandidates) : viewportHeight,
-        stableHeight,
-        keyboardOpen: true,
-    };
-};
-
 const setViewportVars = () => {
     if (typeof document === 'undefined') return;
     const shouldStabilizeHeight = isIOSStandaloneWebApp();
@@ -178,28 +124,21 @@ const setViewportVars = () => {
         }
     } else {
         stableStandaloneHeight = 0;
-        const virtualKeyboard = (navigator as Navigator & {
-            virtualKeyboard?: { boundingRect?: { height?: number } };
-        }).virtualKeyboard;
-        const viewportState = resolveAndroidViewportState({
-            stableHeight: stableAndroidHeight,
-            innerHeight,
-            viewportHeight,
-            viewportOffsetTop,
-            virtualKeyboardHeight: Math.round(virtualKeyboard?.boundingRect?.height || 0),
-            textEntryFocused: document.body.classList.contains('ios-keyboard-open')
-                || isTextEntryElement(document.activeElement),
-        });
-        stableAndroidHeight = viewportState.stableHeight;
+        // obscuredHeight = 被软键盘盖住的高度。安卓浏览器若按 resizes-content 回流，
+        // innerHeight 会跟着缩，obscuredHeight ≈ 0（走无键盘分支，布局自行回流，什么都不用做）；
+        // 若不回流而是缩小可视区/顶起整页，obscuredHeight > 120，进入键盘分支统一避让。
+        const obscuredHeight = Math.max(0, innerHeight - viewportHeight - viewportOffsetTop);
+        const keyboardOpen = obscuredHeight > 120;
+        // 键盘避让统一用「app 高度跟随可视区」，不再靠 keyboard-inset 让各 App 自己叠 padding。
         keyboardInset = 0;
-        if (viewportState.keyboardOpen) {
+        if (keyboardOpen) {
             // 安卓 Chrome/Edge：app 高度收到键盘上方的可视区，输入框自然落在可视区内；
             // 再把被浏览器顶起的外层滚动拉回顶部（配合 body.ios-keyboard-open 的 touchmove 锁定），
             // 界面不再整体上移、退出重进才恢复。
-            fullAppHeight = viewportState.appHeight;
+            fullAppHeight = viewportHeight;
             if (viewportOffsetTop > 0) window.scrollTo(0, 0);
         } else {
-            fullAppHeight = viewportState.appHeight;
+            fullAppHeight = Math.max(innerHeight, viewportHeight + viewportOffsetTop);
         }
     }
 
@@ -235,19 +174,13 @@ export const installIOSStandaloneWorkaround = () => {
         setViewportVars();
     };
 
-    const handleOrientationChange = () => {
-        stableAndroidHeight = 0;
-        handleSafeAreaChange();
-    };
-
     const handleFocusIn = (event: FocusEvent) => {
         if (!isTextEntryElement(event.target)) return;
         document.body.classList.add('ios-keyboard-open');
         setViewportVars();
 
         const target = event.target;
-        const revealTarget = () => {
-            setViewportVars();
+        window.requestAnimationFrame(() => {
             window.requestAnimationFrame(() => {
                 if (document.activeElement !== target) return;
                 try {
@@ -256,11 +189,7 @@ export const installIOSStandaloneWorkaround = () => {
                     // Ignore scroll failures on older iOS builds.
                 }
             });
-        };
-        window.requestAnimationFrame(revealTarget);
-        // Chromium/TWA usually publishes final keyboard geometry after focus and
-        // after the first animation frames. Follow the short opening animation.
-        for (const delay of [80, 180, 360, 650]) window.setTimeout(revealTarget, delay);
+        });
     };
 
     const handleFocusOut = () => {
@@ -282,22 +211,10 @@ export const installIOSStandaloneWorkaround = () => {
     };
 
     window.addEventListener('resize', handleSafeAreaChange);
-    window.addEventListener('orientationchange', handleOrientationChange);
+    window.addEventListener('orientationchange', handleSafeAreaChange);
     window.visualViewport?.addEventListener('resize', handleViewportChange);
     window.visualViewport?.addEventListener('scroll', handleViewportChange);
     if (useKeyboardFixes) {
-        const virtualKeyboard = (navigator as Navigator & {
-            virtualKeyboard?: {
-                overlaysContent?: boolean;
-                addEventListener?: (type: string, listener: EventListener) => void;
-            };
-        }).virtualKeyboard;
-        if (virtualKeyboard) {
-            // Prefer resize mode. The resolver above still supports WebViews
-            // that ignore this assignment and keep overlay mode.
-            try { virtualKeyboard.overlaysContent = false; } catch { /* read-only implementation */ }
-            virtualKeyboard.addEventListener?.('geometrychange', handleViewportChange as EventListener);
-        }
         document.addEventListener('focusin', handleFocusIn);
         document.addEventListener('focusout', handleFocusOut);
         document.addEventListener('touchmove', handleTouchMove, { passive: false });
