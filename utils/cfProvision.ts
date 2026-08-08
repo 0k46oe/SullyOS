@@ -774,6 +774,10 @@ export async function provisionAmsgBackend(input: ProvisionInput): Promise<Provi
       CF_API_TOKEN: token,
       CF_SCRIPT_NAME: scriptName,
     }),
+    // 实时日志（面板上的 Workers Logs）默认是关的，amsg 排障全靠它。
+    // 官方的 multipart-upload-metadata 文档没把 observability 列进合法字段，但实测是认的
+    // ——上传 enabled:false 能关掉、true 能开起来、不带就没有，三向都验过。
+    observability: { enabled: true, logs: { enabled: true } },
   };
   const form = new FormData();
   form.set('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
@@ -821,26 +825,6 @@ export async function provisionAmsgBackend(input: ProvisionInput): Promise<Provi
   );
   if (!exposed.ok) {
     return { ok: false, code: 'CF_ERROR', message: `开启 workers.dev 地址失败（${exposed.error}）。` };
-  }
-
-  // 实时日志（面板上的 Workers Logs）默认是关的，amsg 排障全靠它，所以顺手打开。
-  // 这个端点**只收 multipart**，发 JSON 会被 10001 顶回来；PATCH 是合并语义，
-  // 只带 observability 不会动到刚写好的绑定（真机验过，七条绑定一条没少）。
-  // 开不上不影响功能，所以失败只记一句警告，不中断。
-  const settingsForm = new FormData();
-  settingsForm.set(
-    'settings',
-    new Blob([JSON.stringify({ observability: { enabled: true, logs: { enabled: true } } })], {
-      type: 'application/json',
-    }),
-  );
-  const observability = await cfApi(
-    token,
-    `/accounts/${accountId}/workers/scripts/${encodeURIComponent(scriptName)}/settings`,
-    { method: 'PATCH', body: settingsForm },
-  );
-  if (!observability.ok) {
-    warnings.push('实时日志没能自动打开，排障时要去 Cloudflare 面板手动开一下。');
   }
 
   report('done', '部署完成。');

@@ -6424,6 +6424,11 @@ async function cf(token, path, init = {}) {
   }
   return { ok: true, result: payload.result };
 }
+function resolveObservability(existing) {
+  const current = existing;
+  if (current && typeof current.enabled === "boolean") return current;
+  return { enabled: true, logs: { enabled: true } };
+}
 async function sha256Hex(text) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -6556,7 +6561,9 @@ async function handleSelfUpdate(request, env) {
     main_module: MAIN_MODULE,
     compatibility_date: settings.result?.compatibility_date || FALLBACK_COMPATIBILITY_DATE,
     compatibility_flags: settings.result?.compatibility_flags?.length ? settings.result.compatibility_flags : FALLBACK_COMPATIBILITY_FLAGS,
-    bindings: rebuilt.bindings
+    bindings: rebuilt.bindings,
+    // 不带这一项等于把实时日志关掉（上传是整体覆盖）。原样带上读回来的那份。
+    observability: resolveObservability(settings.result?.observability)
   };
   const form = new FormData();
   form.set("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));

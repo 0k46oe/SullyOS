@@ -94,6 +94,24 @@ async function cf(
   return { ok: true, result: payload.result };
 }
 
+/**
+ * 上传时要带上的实时日志开关。
+ *
+ * **不带就等于关掉**：上传是整体覆盖，metadata 里没有 observability 的话，重传一次
+ * 之前开着的日志就没了（实测确认过）。而排障恰恰是更新之后最可能需要日志的时候。
+ *
+ * 传入的是上传前读回来的那份，原样带上；读不到就按开启兜底（仓库里的 wrangler.toml
+ * 声明的就是开）。
+ *
+ * 注：官方的 multipart-upload-metadata 文档没把 observability 列进合法字段，但实测
+ * 是认的——上传 enabled:false 能关掉、enabled:true 能开起来、不带就没有，三向都验过。
+ */
+export function resolveObservability(existing: unknown): Record<string, unknown> {
+  const current = existing as { enabled?: boolean } | null | undefined;
+  if (current && typeof current.enabled === 'boolean') return current as Record<string, unknown>;
+  return { enabled: true, logs: { enabled: true } };
+}
+
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return Array.from(new Uint8Array(digest))
@@ -293,6 +311,8 @@ export async function handleSelfUpdate(
       ? settings.result.compatibility_flags
       : FALLBACK_COMPATIBILITY_FLAGS,
     bindings: rebuilt.bindings,
+    // 不带这一项等于把实时日志关掉（上传是整体覆盖）。原样带上读回来的那份。
+    observability: resolveObservability(settings.result?.observability),
   };
 
   const form = new FormData();
