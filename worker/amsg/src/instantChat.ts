@@ -226,7 +226,7 @@ const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9
  * 常时比较（照抄上游 constantTimeEqual 的做法）：两边各做一次随机密钥的 HMAC 再逐字节比，
  * 长度和内容都不会从耗时上漏出来。
  */
-const constantTimeEqual = async (a: string, b: string): Promise<boolean> => {
+export const constantTimeEqual = async (a: string, b: string): Promise<boolean> => {
   const raw = crypto.getRandomValues(new Uint8Array(32));
   const key = await crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const enc = new TextEncoder();

@@ -17,6 +17,8 @@
  *   3. token 只出现在发往 Cloudflare 的请求头里，任何响应体都不回显它
  */
 
+import { constantTimeEqual } from './instantChat';
+
 const CF_API = 'https://api.cloudflare.com/client/v4';
 
 /** 官方成品代码。跟代配脚本、手册附录指的是同一份。 */
@@ -237,7 +239,9 @@ export async function handleSelfUpdate(
       '这个 Worker 没设共享密钥（AMSG_SERVER_TOKEN），出于安全考虑不开放自更新。先补上再试。',
     );
   }
-  if (request.headers.get('X-Client-Token') !== serverToken) {
+  // 常时比较：这个端点能让 worker 覆盖自己的代码，密钥校验不能从耗时上漏字。
+  const clientToken = request.headers.get('X-Client-Token');
+  if (!clientToken || !(await constantTimeEqual(clientToken, serverToken))) {
     return fail('UNAUTHORIZED', '共享密钥对不上。');
   }
 

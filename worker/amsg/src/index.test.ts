@@ -25,11 +25,12 @@ import {
   AMSG_SLOT_CURRENT_TIME,
   AMSG_SLOT_SELF_LOG,
   AMSG_SLOT_TASK_INSTRUCTION,
+  AMSG2_INSTANT_STUB_TEMPLATE,
   amsgStateNamespace,
   amsgXhsSessionKey,
   appendSelfLogEntry,
   createSelfLog,
-  CHAT_OUTBOX_MAX,
+  CHAT_OUTBOX_MAX_SESSIONS,
   FIRE_PACK_VERSION,
   packStateValue,
   parseChatOutbox,
@@ -1929,6 +1930,8 @@ describe('自排后续任务', () => {
     },
     pendingTaskCount: 0,
     scheduledTasks: [],
+    selfScheduleSeq: 0,
+    cancelledTasks: [],
     charId: CHAR_ID,
     anchorMs: 1_700_000_000_000,
     tz: { tzId: 'Asia/Shanghai' },
@@ -1938,6 +1941,7 @@ describe('自排后续任务', () => {
     // 连发上限相关：单测夹具默认不限，上限行为由「连发上限」那组用例单独钉。
     maxUnansweredSends: Infinity,
     plannedSelfSends: 0,
+    plannedSelfSendUuids: [],
     ...over,
   }) as any;
 
@@ -2279,6 +2283,7 @@ describe('fire 侧取消 / 改期任务', () => {
     pendingTaskCount: 0,
     pendingTasks: [],
     scheduledTasks: [],
+    selfScheduleSeq: 0,
     cancelledTasks: [],
     renewedTasks: [],
     charId: CHAR_ID,
@@ -2289,6 +2294,7 @@ describe('fire 侧取消 / 改期任务', () => {
     instant: false,
     maxUnansweredSends: Infinity,
     plannedSelfSends: 0,
+    plannedSelfSendUuids: [],
     ...over,
   }) as any;
 
@@ -2385,6 +2391,84 @@ describe('fire 侧取消 / 改期任务', () => {
     const out = await runFireCancelTool(stash, okCancel(), { task_id: 'u-fresh' }, NOW_MS);
     expect(out.ok).toBe(true);
     expect(stash.scheduledTasks).toEqual([]);
+  });
+
+  // uuid 序号只增不减的回归守卫：取消会让 scheduledTasks 回缩，序号要是取数组长度，
+  // 「排A→排B→取消A→排C」时 C 会算出和还活着的 B 一样的 uuid——createTask 报 duplicate
+  // 被当成 fire 重跑，回 ok:true already_scheduled，C 实际不存在却告诉模型排上了。
+  it('排A→排B→取消A→排C：三个 uuid 互不相同，C 是真新建的', async () => {
+    const schedule = vi.fn(async (o: any) => ({
+      created: true as const, id: 7, uuid: o.uuid, nextSendAt: o.firstSendTime,
+    }));
+    const stash = makeStash();
+    await runFireScheduleTool(
+      stash, schedule, { send_at: new Date(NOW_MS + 90 * 60_000).toISOString() }, NOW_MS);
+    await runFireScheduleTool(
+      stash, schedule, { send_at: new Date(NOW_MS + 120 * 60_000).toISOString() }, NOW_MS);
+    const uuidA = schedule.mock.calls[0][0].uuid;
+    await runFireCancelTool(stash, okCancel(), { task_id: uuidA }, NOW_MS);
+    const outC = await runFireScheduleTool(
+      stash, schedule, { send_at: new Date(NOW_MS + 150 * 60_000).toISOString() }, NOW_MS);
+
+    const uuids = schedule.mock.calls.map((c: any[]) => c[0].uuid);
+    expect(new Set(uuids).size, 'C 不能撞上还活着的 B 的 uuid').toBe(3);
+    expect(outC.ok).toBe(true);
+    expect(outC.already_scheduled, 'C 是真新建的，不是被撞车话术糊过去').toBeUndefined();
+  });
+
+  // 另一变体：排A→取消A→排B。序号回退的话 B 会复用 A 的 uuid，而 A 已在
+  // cancelledTasks 里——客户端消账时会把 B 当成已取消删掉，B 成了幽灵任务。
+  it('排A→取消A→排B：B 不复用 A 的 uuid（不落进 cancelledTasks）', async () => {
+    const schedule = vi.fn(async (o: any) => ({
+      created: true as const, id: 7, uuid: o.uuid, nextSendAt: o.firstSendTime,
+    }));
+    const stash = makeStash();
+    await runFireScheduleTool(
+      stash, schedule, { send_at: new Date(NOW_MS + 90 * 60_000).toISOString() }, NOW_MS);
+    const uuidA = schedule.mock.calls[0][0].uuid;
+    await runFireCancelTool(stash, okCancel(), { task_id: uuidA }, NOW_MS);
+    await runFireScheduleTool(
+      stash, schedule, { send_at: new Date(NOW_MS + 120 * 60_000).toISOString() }, NOW_MS);
+
+    const uuidB = schedule.mock.calls[1][0].uuid;
+    expect(uuidB).not.toBe(uuidA);
+    expect(stash.cancelledTasks).toEqual([uuidA]);
+    expect(stash.cancelledTasks).not.toContain(uuidB);
+  });
+
+  // 连发闸退额度的回归守卫：3 条 pending 打满上限时，提示词教的「cancel + 重排」要能
+  // 落地——取消掉快照里的任务把额度还回来，重排 1 条放行；额度只是中性不是解锁，
+  // 紧接着第 2 条仍要被闸。
+  it('取消退还连发额度：cancel 1 条后重排 1 条放行，第 2 条仍被闸', async () => {
+    const schedule = vi.fn(async (o: any) => ({
+      created: true as const, id: 7, uuid: o.uuid, nextSendAt: o.firstSendTime,
+    }));
+    const planned = [
+      taskRec('u-plan-1', { source: 'character' }),
+      taskRec('u-plan-2', { source: 'character' }),
+      taskRec('u-plan-3', { source: 'character' }),
+    ];
+    const stash = makeStash({
+      maxUnansweredSends: 3,
+      pendingTasks: planned,
+      pendingTaskCount: planned.length,
+      plannedSelfSends: planned.length,
+      plannedSelfSendUuids: planned.map((t: any) => t.taskUuid),
+    });
+    const sendAt = new Date(NOW_MS + 90 * 60_000).toISOString();
+
+    // 先钉住闸还在收：打满时直接排要被打回（不然下面的放行可能是闸整个失效）
+    const blockedFull = await runFireScheduleTool(stash, schedule, { send_at: sendAt }, NOW_MS);
+    expect(blockedFull.reason).toBe('unanswered_limit');
+
+    await runFireCancelTool(stash, okCancel(), { task_id: 'u-plan-1' }, NOW_MS);
+    const rescheduled = await runFireScheduleTool(stash, schedule, { send_at: sendAt }, NOW_MS);
+    expect(rescheduled.ok, '取消 1 条后额度该还回来').toBe(true);
+
+    const blockedAgain = await runFireScheduleTool(
+      stash, schedule, { send_at: new Date(NOW_MS + 120 * 60_000).toISOString() }, NOW_MS);
+    expect(blockedAgain.ok).toBe(false);
+    expect(blockedAgain.reason).toBe('unanswered_limit');
   });
 
   it('行已经不在了（cancelled:false）→ 照实说、不记账', async () => {
@@ -3138,6 +3222,48 @@ describe('onBeforeFire — 即时对话分支', () => {
   });
 });
 
+// 角色 2.0 关着且无任务时，即时对话上传的轻量包把 template 填成占位串；欠着即时回复
+// 期间用户新排的定时任务可能赶在真模板补传之前到点——照渲就是给用户发那句占位自白。
+describe('定时轮撞上即时轻量包的占位模板', () => {
+  const stubPackRows = (extra: Record<string, unknown> = {}) => [
+    { key: AMSG_FIRE_PACK_KEY, value: firePackValue(null, { template: AMSG2_INSTANT_STUB_TEMPLATE, ...extra }) },
+    { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+  ];
+
+  afterEach(() => configureInstantErrorPush(null));
+
+  it('定时任务 → 抛可重试错（不渲染占位文本、不发 error push）', async () => {
+    // 挂上直发通道才验得出「没发」：不挂的话 sendInstantErrorPush 本来就静默跳过
+    const sent: unknown[] = [];
+    configureInstantErrorPush({
+      webpush: { sendNotification: async (_s: unknown, body: string) => { sent.push(JSON.parse(body)); } },
+      db: { prepare: () => ({ bind: () => ({ first: async () => null }), first: async () => null }) },
+      masterKey: 'a'.repeat(64),
+    } as any);
+
+    const { ctx } = makeCtx({ charRows: stubPackRows() });
+    const error = await amsgHooks.onBeforeFire(ctx).then(() => null, (e: unknown) => e);
+    expect(error, '占位模板不许被当系统提示词渲染出去').toBeInstanceOf(Error);
+    expect(String((error as Error).message)).toContain('AMSG2_FIRE_PACK_NOT_READY');
+    // 可重试（不带 permanent）：走上游重试梯子，客户端销账后补传真模板自然放行
+    expect((error as { permanent?: boolean }).permanent).toBeUndefined();
+    // 定时轮不占即时失败通道
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent).toHaveLength(0);
+  });
+
+  it('即时对话不吃这道门：轻量包的 template 本来就是占位串，照常按 chat 段生成', async () => {
+    const { ctx } = makeCtx({
+      metadata: { amsgMode: 'instant', amsgInstantChat: true, amsgClientTaskId: 'ct-stub' },
+      charRows: stubPackRows({ chat: { messages: [{ role: 'user', content: '在吗' }], builtAt: PACK_BUILT_AT } }),
+    });
+    const result = fired(await amsgHooks.onBeforeFire(ctx));
+    expect(result.messages.length).toBeGreaterThan(0);
+    // 占位文本一个字都不进请求消息（即时轮不渲染模板）
+    expect(JSON.stringify(result.messages)).not.toContain('AMSG2_INSTANT_STUB_TEMPLATE');
+  });
+});
+
 // 推送是会静默丢的：手机换网、系统压制、SW 没醒，用户那边就是「一直在输入中」。
 // outbox 是唯一的补收通道，写晚了（等发送结果）或者写漏了都等于没有。
 describe('即时对话的收件兜底 outbox', () => {
@@ -3198,16 +3324,44 @@ describe('即时对话的收件兜底 outbox', () => {
     }
   });
 
-  it('连聊几轮后只留最近 CHAT_OUTBOX_MAX 条', async () => {
+  it('连聊几轮只留最近 CHAT_OUTBOX_MAX_SESSIONS 轮（按 sessionId 整轮保留）', async () => {
     const store = makeStore(true);
-    for (let i = 0; i < CHAT_OUTBOX_MAX + 2; i += 1) {
-      // 每轮换一个任务行 id，messageId 才跟着变（同一次触发重跑是要覆盖的）
+    for (let i = 0; i < CHAT_OUTBOX_MAX_SESSIONS + 2; i += 1) {
+      // 每轮换一个任务行 id，messageId / sessionId 才跟着变（同一次触发重跑是要覆盖的）
       await runFire(store, {
         metadata: fireMeta(true), llmOutput: `第 ${i} 轮`,
         taskId: 40 + i, sessionId: `sess_${i}`,
       });
     }
-    expect(store.outbox()!.entries).toHaveLength(CHAT_OUTBOX_MAX);
+    const entries = store.outbox()!.entries;
+    // 5 轮只剩最近 3 轮（每轮 1 条），最老两轮整轮丢弃
+    expect(entries).toHaveLength(CHAT_OUTBOX_MAX_SESSIONS);
+    expect(entries.map((e: any) => e.payload.message)).toEqual(['第 2 轮', '第 3 轮', '第 4 轮']);
+  });
+
+  it('单轮长回复整轮保留：12 段一条不掐（按条数环形保留会把整轮掐头）', async () => {
+    const store = makeStore(true);
+    for (let i = 0; i < 3; i += 1) {
+      await runFire(store, {
+        metadata: fireMeta(true), llmOutput: `短回复 ${i}`,
+        taskId: 50 + i, sessionId: `sess_short_${i}`,
+      });
+    }
+    await runFire(store, {
+      metadata: fireMeta(true),
+      llmOutput: Array.from({ length: 12 }, (_, i) => `长回复第 ${i} 段`).join('\n'),
+      taskId: 60, sessionId: 'sess_long',
+    });
+
+    const entries = store.outbox()!.entries;
+    expect(entries
+      .map((e: any) => String(e.payload.message))
+      .filter((message: string) => message.startsWith('长回复')))
+      .toHaveLength(12);
+    // 留下的仍是最近 3 轮：长回复那轮 + 前两轮短回复
+    expect(entries
+      .filter((e: any) => String(e.payload.message).startsWith('短回复')))
+      .toHaveLength(2);
   });
 });
 
@@ -3402,7 +3556,8 @@ describe('即时对话的云端情绪评估', () => {
   });
 
   // 一段都没送出去（推送全灭 → 任务整轮重跑）时不写晚投：客户端没收到 pending 标记，
-  // 没人会来取这一份，重跑的那轮会带着自己的评估重新走完整流程。
+  // 没人会来取这一份，重跑的那轮会带着自己的评估重新走完整流程。评估一直没跑出来时，
+  // 失败收尾那段「留给下一跳」的等待也是有界的（搭车窗口那么久），等不到就空手收尾。
   it('推送没送出去时收尾不写晚投评估', async () => {
     vi.useFakeTimers();
     try {
@@ -3420,12 +3575,43 @@ describe('即时对话的云端情绪评估', () => {
         scratch, writeState: store.writeState,
       } as any);
       for (let i = 0; i < 8; i += 1) await vi.advanceTimersByTimeAsync(0);
+      // 失败收尾那段有界等待（评估结果留给下一跳复用）也要拨过去
+      await vi.advanceTimersByTimeAsync(EMOTION_EVAL_RIDE_ALONG_MS);
       await settling;
 
       expect(store.rows.has(`emotion_update:${CLIENT_TASK_ID}`)).toBe(false);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // fire 重试白烧评估费的回归守卫：失败那跳的收尾把已出的评估结果写进旁路键
+  // （amsgEmotionUpdateKey，重试跨 tick 唯一能带过来的位置），下一跳 onBeforeFire
+  // 读到就直接复用——2/4/6 分钟梯子打满也只烧一次副 API。
+  it('fire 失败重试：第二跳复用上一跳的评估结果，副 API 只调 1 次', async () => {
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: '{"changed":true,"buffs":[]} RETRY-EVAL-MARKER' } }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const store = makeStore();
+    // 第一跳：生成完但这跳失败（比如推送没发出去），任务还会重试
+    const first = await evalFire(store, { amsgEmotionEval: EVAL_SPEC });
+    await amsgFireSettled({
+      status: 'failed', sentCount: 0, task: { retry_count: 0 },
+      error: new Error('push send failed'),
+      scratch: first.scratch, writeState: store.writeState,
+    } as any);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(store.rows.get(`emotion_update:${CLIENT_TASK_ID}`), '失败收尾该把结果留给下一跳')
+      .toContain('RETRY-EVAL-MARKER');
+
+    // 第二跳（重试）：评估一个请求都不再发，结果照常随末条 push 回客户端
+    const second = await evalFire(store, { amsgEmotionEval: EVAL_SPEC });
+    expect(fetchSpy, '第二跳不许再烧一次副 API').toHaveBeenCalledTimes(1);
+    const lastMeta = (second.decision.pushPayloads as Array<Record<string, any>>).slice(-1)[0].metadata;
+    expect(lastMeta.amsgEmotionUpdate).toContain('RETRY-EVAL-MARKER');
+    expect(lastMeta.amsgEmotionDone).toBe(true);
   });
 
   // 正常情况下评估早就跑完了，搭车窗口一秒都用不上——不能因为加了窗口就变成「每轮都等」。
@@ -3643,6 +3829,55 @@ describe('即时对话终态失败的直发 error push', () => {
     expect(payload.messageId).toBe(`err_${TASK_UUID}`);
     // 订阅行按 user_id 查、明文兜底解出来
     expect((sent[0].subscription as any).endpoint).toBe('https://push.example/e1');
+  });
+
+  // permanent 终态（fireStateError 那族）最典型的发生位置在挂 stash 之前：收尾那份因
+  // 读不到 stash 提前走人，一条通知都发不出——只能由 fail() 当场补发。回归守卫：
+  // 这族失败以前是零通知，用户锁屏干等到超时。
+  it('onBeforeFire 挂 stash 之前的 permanent 失败 → 恰好 1 条 error push（收尾不双发）', async () => {
+    const { deps, sent } = makeErrorPushDeps();
+    configureInstantErrorPush(deps as any);
+
+    // 即时任务 + 云端没有 fire_pack：fail() 在挂 stash 之前抛 permanent 终态
+    const { ctx, scratch } = makeCtx({
+      metadata: { amsgMode: 'instant', amsgInstantChat: true, amsgClientTaskId: 'ct-err' },
+      charRows: [],
+    });
+    const error = await amsgHooks.onBeforeFire(ctx).then(() => null, (e: unknown) => e);
+    expect((error as { permanent?: boolean }).permanent).toBe(true);
+
+    // fail() 的直发是 fire-and-forget，等它落地
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0].body.messageKind).toBe('error');
+    expect(sent[0].body.metadata.taskUuid).toBe(TASK_UUID);
+    expect(sent[0].body.metadata.reason).toContain('fire_pack');
+    expect(sent[0].body.messageId).toBe(`err_${TASK_UUID}`);
+
+    // 上游随后照常调收尾（status failed、scratch 上没有 stash）→ 不双发
+    await amsgFireSettled({
+      status: 'failed', sentCount: 0, task: { retry_count: 0 }, error,
+      scratch, writeState: vi.fn(async () => ({ upserted: 0, skipped: 0, deleted: 0 })),
+    } as any);
+    expect(sent).toHaveLength(1);
+  });
+
+  // 挂上 stash 之后才炸出的 permanent 也是终态（上游一跳就把行标 failed），
+  // 不能拿「retry 还没打光」当没到终态——那样这族失败同样零通知。
+  it('挂上 stash 之后的 permanent 失败 → 收尾直发，不用等重试打光', async () => {
+    const { deps, sent } = makeErrorPushDeps();
+    configureInstantErrorPush(deps as any);
+
+    const store = makeFireStore(CHAT_MESSAGES);
+    const { scratch } = await runFire(store, { metadata: INSTANT_META, llmOutput: '在的。' });
+    const error = Object.assign(new Error('状态坏了，重试也没用'), { permanent: true });
+    await amsgFireSettled({
+      status: 'failed', sentCount: 0, task: { retry_count: 0, user_id: 'u1' }, error,
+      scratch, writeState: store.writeState,
+    } as any);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].body.messageKind).toBe('error');
+    expect(sent[0].body.metadata.reason).toContain('状态坏了');
   });
 
   it('还会重试的失败（retry_count < 3）绝不发——报错完回复又到是最伤的误报', async () => {

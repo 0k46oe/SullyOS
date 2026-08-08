@@ -39,6 +39,7 @@ import {
   AMSG_FIRE_PACK_KEY,
   AMSG_LAST_SKIP_KEY,
   AMSG_SELF_LOG_KEY,
+  AMSG2_INSTANT_STUB_TEMPLATE,
   type AmsgChatFailRecord,
   type AmsgChatOutbox,
   type AmsgLastSkip,
@@ -313,6 +314,14 @@ interface FireStash {
   /** 角色本次 fire 已经排成功的任务（也是要随 push 带回客户端认领的那些）。 */
   scheduledTasks: ActiveMsg2TaskRecord[];
   /**
+   * 本次 fire 内已经消耗掉的排程序号（只增不减）。自排任务的确定性 uuid 由
+   * 「触发时刻 + 序号」推出来，序号不能取 scheduledTasks.length——取消会让数组回缩，
+   * 「排 A → 排 B → 取消 A → 排 C」时 C 会撞上还活着的 B 的 uuid（撞车被当成
+   * fire 重跑回 ok:true，任务实际没建）。fire 重跑时 stash 重建、序号从头推进，
+   * 重跑的确定性去重语义不变。
+   */
+  selfScheduleSeq: number;
+  /**
    * 本次 fire 里取消 / 改期掉的既有任务（uuid / uuid+新时刻）。随最后一条 push 的
    * metadata.amsgTaskMutations 带回客户端消账——D1 行已经动了，本地清单不跟着动的话，
    * 面板会一直列着一条永远不会响（或时间不对）的任务。唯一生产者恒定初始化，必填。
@@ -329,6 +338,12 @@ interface FireStash {
    * 且时间在未来的）。它们到点各会消耗一条连发额度，排程工具算「还能不能再排」要连它一起数。
    */
   plannedSelfSends: number;
+  /**
+   * plannedSelfSends 那份快照里各条任务的 uuid。排程闸退额度用：本轮被成功取消的、
+   * 原本计入快照的任务，按它与 cancelledTasks 的交集把额度还回来——不退的话，
+   * pending 打满上限时提示词教的「cancel + 重排」必被打回（任务删了却排不回来）。
+   */
+  plannedSelfSendUuids: string[];
   /** 本次触发用到的角色 id / 任务归属键，排程时要写进新任务的 metadata。 */
   charId: string;
   /** 防穿帮闸锚点：这份 fire_pack 记的「用户最后一次开口」。 */
@@ -811,9 +826,15 @@ export const amsgFireSettled = async (
       reason: failReason,
       retryCount,
     });
-    // 终态判定与上游 handleDeliveryFailure 同源：retry_count >= 3 的这跳失败后行转
-    // failed，不会再跑。还会重试的失败绝不发通知（回复可能随后就到）。
-    if (retryCount >= 3) {
+    // 终态判定与上游同源，两种都算：retry_count >= 3 的这跳失败后行转 failed
+    // （handleDeliveryFailure 的梯子打光）；permanent 标记的错误（fireStateError 那族）
+    // 上游一跳就终审。info.error 就是 fire 里抛出的那个对象，permanent 属性原样带过来
+    // ——挂上 stash 之后才炸出的 permanent 只有这里看得到（挂 stash 之前的那族由
+    // onBeforeFire 的 fail() 直发，那时没有 stash、走不到这里，两条机制天然互斥）。
+    // 还会重试的失败绝不发通知（回复可能随后就到）。
+    const permanent = info.error instanceof Error
+      && (info.error as Error & { permanent?: boolean }).permanent === true;
+    if (retryCount >= 3 || permanent) {
       await sendInstantErrorPush({
         charId: stash.charId,
         taskUuid: stash.taskUuid,
@@ -822,6 +843,21 @@ export const amsgFireSettled = async (
           ? (info.task as Record<string, unknown>).user_id as string
           : null,
       });
+    } else if (stash.emotionEvalPromise && stash.clientTaskId) {
+      // 还会重试的失败：这一跳的情绪评估结果写进旁路键留给下一跳——重试会整轮重跑
+      // onBeforeFire，读到这份就不再白烧一次副 API（见那边的复用逻辑）。等待有界：
+      // 只等搭车窗口那么久，评估还没跑完就算了，下一跳重新评估。
+      try {
+        const outcome = await raceEmotionEval(
+          stash.emotionEvalPromise, '评估没赶上这跳收尾，重试那轮只好重新评估');
+        if (outcome?.raw) {
+          await info.writeState(amsgStateNamespace(stash.charId), [
+            { key: amsgEmotionUpdateKey(stash.clientTaskId), value: outcome.raw },
+          ]);
+        }
+      } catch (error) {
+        console.warn('[amsg:emotion] 重试前留不下评估结果（下一跳会重新评估）', error);
+      }
     }
   }
 
@@ -1034,11 +1070,12 @@ const EMOTION_EVAL_LATE_REASON = '情绪评估没赶上这条回复（副 API �
 /** 等评估结果，最多等 EMOTION_EVAL_RIDE_ALONG_MS；没赶上返回 null，回复照发。 */
 const raceEmotionEval = (
   promise: Promise<AmsgEmotionEvalOutcome>,
+  lateNote = '评估没赶上这条回复，先把话发出去（这一轮不更新情绪）',
 ): Promise<AmsgEmotionEvalOutcome | null> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<null>((resolve) => {
     timer = setTimeout(() => {
-      console.warn('[amsg:emotion] 评估没赶上这条回复，先把话发出去（这一轮不更新情绪）');
+      console.warn(`[amsg:emotion] ${lateNote}`);
       resolve(null);
     }, EMOTION_EVAL_RIDE_ALONG_MS);
   });
@@ -1066,9 +1103,14 @@ export const runFireScheduleTool = async (
   }
   // 连发上限·排程闸（用户主权）：已发的 + 先前排了还没响的 + 这次已排的，加上这条会超
   // 就打回。到点兜底闸（onBeforeFire）是它的另一半——先排满再触发的在那边拦。
+  // 本轮成功取消的、原本计入快照的任务把额度还回来：提示词教的「cancel + 重排」
+  //（renew 循环任务补当次走的也是这条）在同一次 fire 内额度中性。只抵扣快照里的
+  // ——本轮刚排又反悔的不在快照里，它的额度已随 scheduledTasks 回缩，不重复退。
   const unansweredLimit = stash.maxUnansweredSends;
+  const refundedSends = stash.cancelledTasks
+    .filter((uuid) => stash.plannedSelfSendUuids.includes(uuid)).length;
   const committedSends = countUnansweredSends(stash.selfLog)
-    + stash.plannedSelfSends + stash.scheduledTasks.length;
+    + stash.plannedSelfSends - refundedSends + stash.scheduledTasks.length;
   if (committedSends + 1 > unansweredLimit) {
     return {
       ok: false,
@@ -1097,10 +1139,12 @@ export const runFireScheduleTool = async (
   const parsed = parseFireScheduleArgs(args, nowMs, stash.tz);
   if ('ok' in parsed) return parsed as unknown as Record<string, unknown>;
 
-  // 同一次触发内第几条 —— 连同触发时刻构成确定性 uuid，重跑对得上。
+  // 同一次触发内第几条 —— 连同触发时刻构成确定性 uuid，重跑对得上。序号只增不减
+  // （selfScheduleSeq，见字段注释）：取不得 scheduledTasks.length，取消会让它回缩，
+  // 「排→取消→再排」就会撞上还活着那条的 uuid。
   // uuid 开头那 8 位摘要正是排程清单里印给角色看的短 id，同一次 fire 排下的两条
   // 必须印得不一样（见 buildSelfScheduleUuid）。
-  const seq = stash.scheduledTasks.length;
+  const seq = stash.selfScheduleSeq;
   const uuid = buildSelfScheduleUuid(stash.charId, stash.occurrenceMs, seq);
   const clientTaskId = `${uuid}-c`;
 
@@ -1134,6 +1178,10 @@ export const runFireScheduleTool = async (
       message: error instanceof Error ? error.message : String(error),
     };
   }
+
+  // 这个序号已经打到远端了（created 和撞车都算），下一条换新号。打回/抛错（上面已
+  // return）不消号：重跑时同样在那一步被打回，序号推进保持确定性。
+  stash.selfScheduleSeq += 1;
 
   // 撞车 = 这一条在上一次重跑里已经建过了（投递失败重试会重跑整个 fire）。任务确实在
   // D1 里排着，但这一轮要是什么账都不记，它就只活在 D1 里：随 push 带不回客户端、面板
@@ -1413,15 +1461,28 @@ export const amsgHooks = {
     // stash、一条都写不了，用户等完全部重试只会得到「云端没记下原因」。fire-and-forget，
     // 不拦 throw；挂 stash 之后的失败会被收尾那份用最后一跳的原因覆盖，语义不变。
     const fail = (reason: string, extra?: Record<string, unknown>) => {
-      // writeState 在老版本上游的 FireCtx 上可能不存在——那就退回没有留痕的老行为。
-      if (instant && typeof ctx.writeState === 'function'
-        && typeof ctx.task.uuid === 'string' && ctx.task.uuid) {
-        void writeChatFail(ctx.writeState, charId, {
-          uuid: ctx.task.uuid,
+      if (instant && typeof ctx.task.uuid === 'string' && ctx.task.uuid) {
+        // writeState 在老版本上游的 FireCtx 上可能不存在——那就退回没有留痕的老行为。
+        if (typeof ctx.writeState === 'function') {
+          void writeChatFail(ctx.writeState, charId, {
+            uuid: ctx.task.uuid,
+            reason,
+            retryCount: typeof (ctx.task as { retry_count?: unknown }).retry_count === 'number'
+              ? (ctx.task as { retry_count: number }).retry_count
+              : 0,
+          });
+        }
+        // fireStateError 一律 permanent：上游一跳就把任务行标 failed（终态），而这批失败
+        // 都发生在挂 stash 之前——收尾那份（amsgFireSettled）因读不到 stash 提前走人，
+        // 一条通知都发不出，用户会对着「正在输入…」干等到超时。终态失败的 error push
+        // 只能在这里补发；与收尾那条互斥不双发（这里只在挂 stash 之前跑，收尾只在
+        // stash 在场时发）。老上游不认 permanent 时每跳重试都会走到这儿，重复投递由
+        // 确定性 messageId（err_<uuid>）交给 SW 去重兜住。fire-and-forget，不拦 throw。
+        void sendInstantErrorPush({
+          charId,
+          taskUuid: ctx.task.uuid,
           reason,
-          retryCount: typeof (ctx.task as { retry_count?: unknown }).retry_count === 'number'
-            ? (ctx.task as { retry_count: number }).retry_count
-            : 0,
+          contactName: ctx.task.contactName ?? null,
         });
       }
       return fireStateError(reason, { taskId: ctx.task.id, charId, ...extra });
@@ -1493,6 +1554,23 @@ export const amsgHooks = {
     // 出来的东西驴唇不对马嘴，而用户完全看不出这是坏了还是角色就这样。
     if (instant && !pack.chat) {
       throw fail('即时对话任务的 fire_pack 里没有 chat 段（云端状态没跟上）');
+    }
+
+    // 定时轮撞上占位模板：角色 2.0 关着且无任务时，即时对话上传的轻量包把 template 填成
+    // 占位串（AMSG2_INSTANT_STUB_TEMPLATE）；欠着即时回复期间用户新排了定时任务、真模板
+    // 的补传又被挡到销账之后时，任务可能先到点——照渲就是把那句占位自白当系统提示词发出去。
+    // 抛**可重试**错误（不带 permanent、不走 fail()）：这不是状态坏了，只是包还没就绪，
+    // 走上游重试梯子（2/4/6 分钟，第一跳就比客户端销账后 60s 一轮的补传回看宽），销账后
+    // 真模板到位自然放行；一直不来就按正常梯子终失败。
+    // 即时轮不渲染模板，不受这道门管；这条是定时轮，也不写 chat_fail、不发 error push。
+    // fixed 任务（固定文案、不走 LLM）不会被这道门等死：上游按 taskNeedsLlm 把关，
+    // messageType 'fixed' 压根不进 onBeforeFire，直接走固定文案分支。
+    if (!instant && pack.template === AMSG2_INSTANT_STUB_TEMPLATE) {
+      console.warn('[amsg:fire-pack-stub] fire_pack 还是即时对话的占位模板，等客户端补传后重试', {
+        taskId: ctx.task.id,
+        charId,
+      });
+      throw new Error('AMSG2_FIRE_PACK_NOT_READY: fire_pack 里还是即时对话的占位模板（真模板尚未补传），这次触发先重试等它就位');
     }
 
     // 本次触发时刻：任务行 next_send_at（NOT NULL，buildHookTask 已摊平提供）。防穿帮闸的
@@ -1609,6 +1687,10 @@ export const amsgHooks = {
     const clientTaskId = typeof taskMeta.amsgClientTaskId === 'string' ? taskMeta.amsgClientTaskId : '';
 
     const { toolCtx, proxyWorkerUrl, xhsCookie } = buildToolCtx(toolPack, toolConfig);
+    // 连发额度里「先前排了还没响」那一份的快照：条数进 plannedSelfSends，uuid 留一份
+    // 给排程闸退额度用（本轮取消掉快照里的任务时按交集抵扣，cancel + 重排额度中性）。
+    const plannedSelfSendTasks = livePendingTasks
+      .filter((t) => t.source === 'character' && isPendingTask(t, ctx.now.getTime()));
     // 显式标注而不是 satisfies：下面即时对话那一支要往 emotionEvalPromise 上写 promise，
     // 用 satisfies 的话这个字段会被推成字面量 null 类型，写不进去。
     const stash: FireStash = {
@@ -1627,12 +1709,13 @@ export const amsgHooks = {
       pendingTaskCount: livePendingTasks.length,
       pendingTasks: livePendingTasks,
       scheduledTasks: [],
+      // 序号与 scheduledTasks 一样从空账起步；此后只增不减（取消不回退，见字段注释）。
+      selfScheduleSeq: 0,
       cancelledTasks: [],
       renewedTasks: [],
       maxUnansweredSends,
-      plannedSelfSends: livePendingTasks
-        .filter((t) => t.source === 'character' && isPendingTask(t, ctx.now.getTime()))
-        .length,
+      plannedSelfSends: plannedSelfSendTasks.length,
+      plannedSelfSendUuids: plannedSelfSendTasks.map((t) => t.taskUuid),
       charId,
       anchorMs: pack.lastUserMessageAt ?? 0,
       tz,
@@ -1755,9 +1838,19 @@ export const amsgHooks = {
       // 喂给它的是主生成看到的同一串消息（含末尾那块时效信息）：客户端打包的 chat 段
       // 里已经没有「现在几点」了（那部分留给到点现填），只喂原串的话评估模型连时间都
       // 不知道，判出来的情绪跟角色刚说的话对不上。
+      //
+      // fire 重试（2/4/6 分钟梯子）会整轮重跑到这里。上一跳评估已经出了结果的话，
+      // 失败收尾（amsgFireSettled）把它写在旁路键 amsgEmotionUpdateKey 下——重试跨
+      // tick 唯一能带过来的位置。读到就直接包成 resolved promise 复用，别再白烧一次
+      // 副 API；读不到才起新评估。
       if (emotionEvalSpec) {
-        stash.emotionEvalPromise = runAmsgEmotionEval(
-          emotionEvalSpec, instantMessages, toolPack.charName || ctx.task.contactName || '角色');
+        const storedEvalRaw = clientTaskId
+          ? charRows.find((r) => r.key === amsgEmotionUpdateKey(clientTaskId))?.value
+          : undefined;
+        stash.emotionEvalPromise = storedEvalRaw
+          ? Promise.resolve({ raw: storedEvalRaw, error: null })
+          : runAmsgEmotionEval(
+            emotionEvalSpec, instantMessages, toolPack.charName || ctx.task.contactName || '角色');
       }
 
       return {
