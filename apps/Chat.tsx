@@ -57,7 +57,7 @@ import { normalizeTranslationLangLabel, isTranslationLangPreset } from '../utils
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent, noteMessageSent, presetOrCustom } from '../utils/analytics';
 import { markAmsgStateDirty, markAmsgStateDirtyForAll } from '../utils/amsgStateSync';
-import { AMSG_INSTANT_CHAT_PENDING_EVENT, getInstantChatPending } from '../utils/amsgInstantChat';
+import { AMSG_INSTANT_CHAT_PENDING_EVENT, AMSG_INSTANT_CHAT_PENDING_LS_KEY, getInstantChatPending } from '../utils/amsgInstantChat';
 import { formatAmsgToolTrace } from '../utils/amsgToolTrace';
 import {
     CONTEXT_RANGE_POLICY_VERSION,
@@ -312,6 +312,8 @@ const Chat: React.FC = () => {
 
     // 即时对话的「正在输入…」：受理 / 收到回复 / 超时判失败都会广播一次，界面跟着它亮灭。
     // 进这个角色时先读一次落盘记录——上一轮的回复可能是在应用关着的时候还没回来。
+    // 这个 CustomEvent 只在本标签页内派发；别的标签页销账走下面那个 storage 监听
+    //（搜 AMSG_INSTANT_CHAT_PENDING_LS_KEY）。
     useEffect(() => {
         const sync = () => setInstantChatPending(!!activeCharacterId && !!getInstantChatPending(activeCharacterId));
         sync();
@@ -975,6 +977,24 @@ const Chat: React.FC = () => {
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- clearUnread is stable (useCallback with []), omit to prevent stale-dep lint noise
     }, [lastMsgTimestamp, activeCharacterId, reloadMessages, clearUnread]);
+
+    // 即时对话待收记录的跨标签页补听。同一聊天开两个标签页时，回复推送到达后 SW 把
+    // 广播发给所有 client，后台标签页的 flush 可能先抢到并落库——销账的 CustomEvent
+    // 只在它自己那边派发，这边收不到，「正在输入…」就会无限常亮、回复也不上屏。
+    // 待收记录本来就落在 localStorage，而 storage 事件恰好只在「其他」标签页触发，
+    // 正好补上这条缝：这个 key 一变，就照上面 CustomEvent 那套处理走——刷新指示灯，
+    // 并重载消息把对方标签页落的库带上屏。同标签页内的 CustomEvent 机制保持不动。
+    useEffect(() => {
+        const onStorage = (e: StorageEvent) => {
+            // 严格按 key 过滤，别的 localStorage 变动（草稿、翻译开关等）一概不理。
+            if (e.key !== AMSG_INSTANT_CHAT_PENDING_LS_KEY) return;
+            const charId = activeCharIdRef.current;
+            setInstantChatPending(!!charId && !!getInstantChatPending(charId));
+            if (charId) reloadMessages(visibleCountRef.current);
+        };
+        window.addEventListener('storage', onStorage);
+        return () => window.removeEventListener('storage', onStorage);
+    }, [reloadMessages]);
 
     useEffect(() => {
         visibleCountRef.current = visibleCount;

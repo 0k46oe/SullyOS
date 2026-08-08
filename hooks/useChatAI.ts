@@ -874,16 +874,32 @@ export const useChatAI = ({
                 });
             } else if (instantChatReadiness.reason === 'config-unreadable') {
                 // 配置根本没读出来（IndexedDB 被别的标签页 versionchange 卡住 / iOS 存储压力）。
-                // 这不是「用户没开」：开关很可能开着，只是这一刻问不到，于是这一轮悄悄退回本地
-                // 直连生成——用户按完发送随手锁屏，本地 fetch 被系统掐掉，回来时既没有回复也没
-                // 有报错，设置页还写着「已开启」。上面那条 trace 的条件（instantChatOn）在这里
-                // 天然为假，所以单独留一条，别让这种情形在观察窗里查无此事。
-                console.warn('[AmsgInstantChat] 这一轮没走即时对话：全局配置读不出来，开没开都不知道，按本地生成继续');
+                // 这不是「用户没开」：开关很可能开着，只是这一刻问不到。上面那条 trace 的条件
+                // （instantChatOn）在这里天然为假，所以单独留一条，别让这种情形在观察窗里查无此事。
+                // 点单流程否决 / Instant Push 配置还在（脏配置）时例外：配置就算读出来了这一轮
+                // 也轮不到即时对话（去向由 veto / IP 分支决定），照原路走本就是对的，只留痕不拦。
+                const configUnreadableFailsTurn = !instantChatVeto && !instantPushConfigured;
                 appendInstantTraceEntry({
                     ts: new Date().toISOString(),
                     event: 'instant-chat-config-unreadable',
                     charId: char.id,
+                    outcome: configUnreadableFailsTurn ? 'turn-failed' : 'other-route',
                 });
+                if (configUnreadableFailsTurn) {
+                    // 悄悄退回本地直连生成的话：用户按「发完就自由」的心智随手锁屏，本地 fetch
+                    // 被系统掐掉，回来时既没有回复也没有报错，设置页还写着「已开启」。所以和下面
+                    // sendInstantChatTurn 没发出去同一口径：明确落系统消息 + 弹错，这一轮不发起
+                    // 本地生成，用户稍后重发即可。**绝不静默退回本地生成**。收尾交给 finally
+                    // （熄 isTyping / 熄「发送准备中」灯 / 停 KeepAlive），和那条失败路径同一段。
+                    const reason = '即时对话暂时出了点问题：本地配置这一刻读不出来（可能是存储正忙）。这条没有发出去，稍等几秒重新发一次就好。';
+                    console.warn('[AmsgInstantChat] 全局配置读不出来，开没开都不知道：这一轮明确报错等重发，不悄悄退回本地生成');
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[${reason}]` });
+                    setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
+                    if (showError) showError('即时对话发送失败', reason);
+                    else addToast(reason, 'error');
+                    return;
+                }
+                console.warn('[AmsgInstantChat] 全局配置读不出来（开没开都不知道），但这一轮本就不走即时对话，照原路继续');
             }
 
             const payload = await stageT('payload', buildChatRequestPayload({

@@ -240,7 +240,8 @@ export interface InstantChatReadiness {
  * 配置读不出来（IndexedDB 被别的标签页 versionchange 卡住、iOS 存储压力…）单独成一档：
  * 它不等于「用户没开」。当成没开的话这一轮会悄悄退回本地直连生成——用户按完发送随手
  * 锁屏，本地 fetch 被系统掐掉，回来时既没有回复也没有报错，设置页还写着「已开启」。
- * 所以这里就地 warn 一声，调用方再按这个 reason 决定要不要留一条 trace。
+ * 所以这里就地 warn 一声，调用方按这个 reason 单独收场（useChatAI 里这一档会留一条
+ * trace，并且明确报错等用户重发，不发起本地生成）。
  */
 export const resolveInstantChatReadiness = async (
   char?: Pick<CharacterProfile, 'activeMsg2Config'>,

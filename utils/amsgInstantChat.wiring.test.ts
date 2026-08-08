@@ -159,7 +159,34 @@ describe('useChatAI 的分流接缝', () => {
     const traceSites = chatAiSrc.match(/event: 'instant-chat-veto'/g) ?? [];
     expect(traceSites.length).toBe(1);
     // 只报不拦：报完照常往下走本地路径，不能顺手 return 掉整轮。
-    expect(routing).not.toContain('return;');
+    // （config-unreadable 的裸情形是唯一例外——那档要拦，单独一条用例钉在下面。）
+    const vetoBranch = sliceSrc(
+      chatAiSrc,
+      '否决留痕分支',
+      'if (instantChatOn && !instantChatRoute)',
+      "} else if (instantChatReadiness.reason === 'config-unreadable')",
+    );
+    expect(vetoBranch).not.toContain('return;');
+  });
+
+  it('配置读不出来（config-unreadable）：裸情形明确报错拦下这一轮，veto/脏配置在场只留痕', () => {
+    // 静默退回本地的坑：用户按「发完就自由」的心智锁屏，本地 fetch 被系统掐死，回来
+    // 既无回复也无报错，设置页还写着「已开启」。裸情形（没有点单否决、IP 配置也不在）
+    // 必须与 sendInstantChatTurn 失败同口径：落系统消息 + 弹错 + return，不发起本地
+    // 生成。回归守卫——改回「静默走本地」这条会挂。
+    const branch = sliceSrc(
+      chatAiSrc,
+      'config-unreadable 分支',
+      "} else if (instantChatReadiness.reason === 'config-unreadable')",
+      'const payload = await stageT(',
+    );
+    expect(branch).toContain("event: 'instant-chat-config-unreadable'");
+    // 裸情形的判定与两档去向：veto / IP 在场时本就轮不到即时对话，照原路只留痕不拦。
+    expect(branch).toMatch(/configUnreadableFailsTurn = !instantChatVeto && !instantPushConfigured/);
+    expect(branch).toMatch(/outcome: configUnreadableFailsTurn \? 'turn-failed' : 'other-route'/);
+    // 拦下的那一档：落系统消息、弹错、return——绝不静默退回本地生成。
+    expect(branch).toMatch(/if \(configUnreadableFailsTurn\) \{[\s\S]*?return;/);
+    expect(branch).not.toContain('safeFetchJson');
   });
 
   it('两个分支都还在，且 Instant Push 排在即时对话前面（历史配置的兜底顺序不变）', () => {

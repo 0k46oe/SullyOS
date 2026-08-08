@@ -888,6 +888,42 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
       // 原稿本体照常上屏
       expect((await assistantMsgs(charId)).length).toBeGreaterThan(0);
     }, 20000);
+
+    // 降级 × 晚投的组合：降级分支也得认 pending 标记——旧行为是立刻按 ref 去读旁路
+    // （键还空着，白打「被下一轮覆盖」的 warn），然后既不熄灯也不补落，安全网到点弹
+    // 「worker 可能是旧版」的假告警。回归守卫——旧行为下 readSpy 会被立即调用。
+    it('降级存原稿 × 晚投标记 → 不熄灯、不立刻取，交给补落轮询', async () => {
+      const charId = 'char-emotion-degraded-pending';
+      await DB.saveCharacter({ id: charId, name: '降级晚投角色' } as any);
+      const ref = 'emotion_update:client-task-degraded-late';
+      const readSpy = vi.spyOn(ActiveMsgClient, 'readClientStateValue')
+        .mockResolvedValue(JSON.stringify({ changed: true, buffs: [] }));
+
+      await ActiveMsgStore.saveInboxMessage(inboxMsg({
+        messageId: 'msg-emotion-degraded-pending',
+        charId,
+        charName: '降级晚投角色',
+        messageType: 'forum', // 白名单外 → 降级存原稿分支（routed=false）
+        metadata: { charId, amsgEmotionPending: true, amsgEmotionRef: ref },
+      }));
+
+      const { seen, restore } = captureEvents();
+      try {
+        await flushInboxToChat();
+      } finally {
+        restore();
+        // 收掉这一轮排下的补落定时器，别让它带着生产间隔漂进后面的测试
+        cancelLateEmotionPoll(charId);
+      }
+
+      // 结论未到：灯不熄、不报失败、也不立刻去读旁路键
+      expect(seen.some((e) => e.type === 'instant-emotion-done' && e.detail?.charId === charId)).toBe(false);
+      expect(seen.some((e) => e.type === CHAT_GEN_EVENTS.emotionFailed && e.detail?.charId === charId)).toBe(false);
+      expect(readSpy).not.toHaveBeenCalled();
+      // 原稿本体照常上屏
+      expect((await assistantMsgs(charId)).length).toBeGreaterThan(0);
+      readSpy.mockRestore();
+    }, 20000);
   });
 
   // 聊天走即时对话时，思考是在 worker 里生成的，客户端手上没有那份 reasoning。

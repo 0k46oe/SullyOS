@@ -1728,11 +1728,35 @@ const flushInboxToChatImpl = async () => {
         const degradedCleanups: OffloadedCleanup[] = [];
         try {
           const degradedEmotionDone = (message.metadata as any)?.amsgEmotionDone === true;
+          // 晚投标记（同主路径口径）：评估没赶上这条 push 的顺风车，结果要等 worker 收尾
+          // 才写进旁路存储。此刻旁路键多半还空着，跳过一次性取回（立刻读只会白打一个
+          // 「被下一轮覆盖了」的 warn），改为对引用键轮询补落，灯继续亮着。
+          const degradedEmotionPending = (message.metadata as any)?.amsgEmotionPending === true;
           const degradedInline = (message.metadata as any)?.amsgEmotionUpdate;
+          // 这条消息带来了新一轮的情绪结论（成 / 败 / 晚投）→ 上一轮还在跑的补落轮询作废：
+          // 旧结果这时再落下去会盖掉新一轮的 buff（同主路径）。
+          if (degradedEmotionDone || degradedEmotionPending || (typeof degradedInline === 'string' && !!degradedInline)) {
+            cancelLateEmotionPoll(message.charId);
+          }
           const degradedUpdateRaw = typeof degradedInline === 'string' && degradedInline
             ? degradedInline
-            : await fetchOffloadedEmotionUpdate(message, degradedCleanups);
-          if (degradedUpdateRaw) await landCloudEmotionResult(message.charId, degradedUpdateRaw);
+            : (degradedEmotionPending ? null : await fetchOffloadedEmotionUpdate(message, degradedCleanups));
+          if (degradedUpdateRaw) {
+            await landCloudEmotionResult(message.charId, degradedUpdateRaw);
+          } else if (degradedEmotionPending) {
+            const degradedPendingRef = (message.metadata as any)?.amsgEmotionRef;
+            if (typeof degradedPendingRef === 'string' && degradedPendingRef) {
+              // 轮询等到结果就落 buff + 熄灯 + 删云端副本；跳数用尽由它自己报失败收尾。
+              startLateEmotionPoll(message.charId, degradedPendingRef, message.charName || '');
+            } else {
+              // 标了 pending 却没给引用键（worker bug）：没法轮询，按「有结论但没结果」收尾。
+              announceChatGen(CHAT_GEN_EVENTS.emotionFailed, {
+                charId: message.charId, charName: message.charName || '',
+                reason: '云端情绪评估晚投但缺少引用键（worker 可能有 bug），这一轮不更新',
+              });
+              announceEmotionDone(message.charId);
+            }
+          }
           if (degradedEmotionDone || degradedUpdateRaw) announceEmotionDone(message.charId);
           // 原稿落了、情绪也消费完了，云端那份才可以删（同主路径口径）。
           void runOffloadedCleanups(degradedCleanups);
