@@ -376,6 +376,23 @@ export const startLateEmotionPoll = (
 };
 
 /**
+ * SW 转来的 error push（即时对话终态失败的直发告知）→ 当场收尾那一轮：落系统消息、
+ * 熄灯、销账。与 60s 点名兜底殊途同归——failInstantChatPending 认 uuid，谁先到谁收尾，
+ * 晚到的一方对不上账直接走人，不会重复落说明。失败文案与点名路径同一份翻译
+ * （describeInstantChatFailure），两条路对用户说同样的话。export 只为单测。
+ */
+export const handleInstantErrorPushMessage = async (data: unknown): Promise<void> => {
+  const meta = (data as { metadata?: Record<string, unknown> } | null)?.metadata;
+  const charId = typeof meta?.charId === 'string' && meta.charId ? meta.charId : null;
+  const taskUuid = typeof meta?.taskUuid === 'string' && meta.taskUuid ? meta.taskUuid : null;
+  // 不是即时对话的失败告知（旧 Instant Push 的诊断 push 没这两个字段）→ 不归这里管
+  if (!charId || !taskUuid) return;
+  const reason = typeof meta?.reason === 'string' && meta.reason ? meta.reason : null;
+  const described = reason ? describeInstantChatFailure({ reason }) : null;
+  await failInstantChatPending(charId, taskUuid, described ?? undefined);
+};
+
+/**
  * 角色在本地已经不存在了：删角色时远端取消失败留下的残留，或者导入备份之后 id 对不上。
  * 与「暂时读不到」区分开——这种重试多少次都没用，得去把远端那条还在到点跑的任务取消掉。
  */
@@ -2201,6 +2218,13 @@ export const ActiveMsgRuntime = {
         // 通知丢了也没关系（启动兜底会再查一遍标记）。
         if (type === 'active-msg-subscription-change') {
           void refreshPushSubscriptionIfMarked();
+          return;
+        }
+
+        // 即时对话终态失败的直发告知（worker 判死那一刻推的 error push）：当场收尾，
+        // 不用等 60s 点名。metadata 对不上号的（IP 诊断 push）在里面被静默略过。
+        if (type === 'active-msg-error') {
+          void handleInstantErrorPushMessage(event.data);
           return;
         }
 

@@ -10019,15 +10019,75 @@ var writeChatFail = async (writeState, charId, record) => {
     console.warn("[amsg:instant-chat] \u5931\u8D25\u7559\u75D5\u5199\u4E0D\u8FDB\u53BB\uFF08\u5BA2\u6237\u7AEF\u53EA\u80FD\u62A5\u7B3C\u7EDF\u539F\u56E0\uFF09", error);
   }
 };
+var instantErrorPushDeps = null;
+var configureInstantErrorPush = (deps) => {
+  instantErrorPushDeps = deps;
+};
+var instantErrorNotificationBody = (reason) => {
+  if (reason === "empty-generation") return "\u6A21\u578B\u8FD9\u4E00\u8F6E\u6CA1\u6709\u751F\u6210\u5185\u5BB9\uFF0C\u53EF\u4EE5\u91CD\u65B0\u53D1\u4E00\u6B21\u3002";
+  if (reason === "side-effects-only") return "\u89D2\u8272\u8FD9\u4E00\u8F6E\u53EA\u505A\u4E86\u52A8\u4F5C\uFF0C\u6CA1\u6709\u6587\u5B57\u56DE\u590D\u3002";
+  if (reason === "stale") return "\u8FD9\u6761\u6D88\u606F\u5728\u4E91\u7AEF\u6392\u961F\u592A\u4E45\uFF0C\u5DF2\u4F5C\u5E9F\u3002\u53EF\u4EE5\u91CD\u65B0\u53D1\u4E00\u6B21\u3002";
+  return "\u8FD9\u4E00\u8F6E\u4E91\u7AEF\u751F\u6210\u5931\u8D25\u4E86\uFF0C\u70B9\u5F00\u67E5\u770B\u539F\u56E0\uFF0C\u53EF\u4EE5\u91CD\u65B0\u53D1\u4E00\u6B21\u3002";
+};
+var sendInstantErrorPush = async (args) => {
+  const deps = instantErrorPushDeps;
+  if (!deps?.masterKey) return;
+  try {
+    const row = args.userId ? await deps.db.prepare("SELECT user_id, subscription FROM push_subscriptions WHERE user_id = ? LIMIT 1").bind(args.userId).first() : await deps.db.prepare("SELECT user_id, subscription FROM push_subscriptions LIMIT 1").first();
+    const stored = row?.subscription;
+    const userId = row?.user_id;
+    if (typeof stored !== "string" || !stored || typeof userId !== "string" || !userId) return;
+    let subscription;
+    try {
+      const userKey = await deriveUserEncryptionKey(userId, deps.masterKey);
+      subscription = JSON.parse(await decryptFromStorage(stored, userKey));
+    } catch {
+      subscription = JSON.parse(stored);
+    }
+    const payload = {
+      messageKind: "error",
+      messageType: "instant",
+      charId: args.charId,
+      contactName: args.contactName ?? void 0,
+      // 确定性 id：同一条任务的终态只有一个，重复投递靠 SW 的 messageId 去重兜住
+      messageId: `err_${args.taskUuid}`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      metadata: {
+        charId: args.charId,
+        amsgInstantError: true,
+        taskUuid: args.taskUuid,
+        reason: args.reason.slice(0, 500)
+      },
+      notification: {
+        title: args.contactName ? `${args.contactName} \u7684\u56DE\u590D\u6CA1\u80FD\u751F\u6210` : "\u56DE\u590D\u6CA1\u80FD\u751F\u6210",
+        body: instantErrorNotificationBody(args.reason),
+        show: "when-hidden"
+      }
+    };
+    await deps.webpush.sendNotification(subscription, JSON.stringify(payload));
+  } catch (error) {
+    console.warn("[amsg:instant-chat] \u5931\u8D25\u901A\u77E5\u6CA1\u53D1\u51FA\u53BB\uFF08\u5BA2\u6237\u7AEF\u4ECD\u9760 60s \u70B9\u540D\u515C\u5E95\uFF09", error);
+  }
+};
 var amsgFireSettled = async (info) => {
   const stash = getFireStash(info.scratch);
   if (!stash) return;
   if (stash.instant && info.status === "failed" && stash.taskUuid) {
+    const failReason = info.error instanceof Error ? info.error.message : String(info.error ?? "\u672A\u77E5\u9519\u8BEF");
+    const retryCount = typeof info.task?.retry_count === "number" ? info.task.retry_count : 0;
     await writeChatFail(info.writeState, stash.charId, {
       uuid: stash.taskUuid,
-      reason: info.error instanceof Error ? info.error.message : String(info.error ?? "\u672A\u77E5\u9519\u8BEF"),
-      retryCount: typeof info.task?.retry_count === "number" ? info.task.retry_count : 0
+      reason: failReason,
+      retryCount
     });
+    if (retryCount >= 3) {
+      await sendInstantErrorPush({
+        charId: stash.charId,
+        taskUuid: stash.taskUuid,
+        reason: failReason,
+        userId: typeof info.task?.user_id === "string" ? info.task.user_id : null
+      });
+    }
   }
   if (stash.instant && stash.emotionLatePending && stash.emotionEvalPromise && stash.clientTaskId && (info.sentCount ?? 0) > 0) {
     stash.emotionLatePending = false;
@@ -10081,6 +10141,7 @@ var amsgStaleSkip = async (task, info) => {
   }
   if (isInstantChatTask(meta) && typeof task?.uuid === "string" && task.uuid) {
     await writeChatFail(info.writeState, charId, { uuid: task.uuid, reason: "stale", retryCount: 0 });
+    await sendInstantErrorPush({ charId, taskUuid: task.uuid, reason: "stale" });
   }
   const nextSendAtMs = Date.parse(String(info.nextSendAt ?? ""));
   await writeLastSkip(info.writeState, charId, {
@@ -10666,6 +10727,12 @@ var amsgHooks = {
           reason: decision.reason,
           retryCount: 0
         });
+        await sendInstantErrorPush({
+          charId: stash.charId,
+          taskUuid: stash.taskUuid,
+          reason: decision.reason,
+          contactName: ctx.contactName ?? null
+        });
       }
     }
     if (decision.decision === "finish") {
@@ -10821,12 +10888,14 @@ var buildWorkerConfig = (env) => {
   };
   const nativeFcmReady = isFcmConfigured(env);
   const effectiveVapid = nativeFcmReady && (!vapid.publicKey?.trim() || !vapid.privateKey?.trim()) ? { email: vapid.email, publicKey: "native-fcm", privateKey: "native-fcm" } : vapid;
+  const webpush = createHybridPushTransport(env, createWebCryptoWebPush(effectiveVapid));
+  configureInstantErrorPush(env.DB && env.AMSG_MASTER_KEY ? { webpush, db: env.DB, masterKey: env.AMSG_MASTER_KEY } : null);
   return {
     // db 缺省时 factory 自动用 createD1Adapter(env.DB)
     masterKey: env.AMSG_MASTER_KEY,
     serverToken: env.AMSG_SERVER_TOKEN,
     vapid: effectiveVapid,
-    webpush: createHybridPushTransport(env, createWebCryptoWebPush(effectiveVapid)),
+    webpush,
     // 前端和 Worker 不同源，带自定义头的请求会先发 CORS 预检，必须放行。
     // 单用户自用默认全开；想收紧就把 '*' 换成自己的 SullyOS 站点 origin。
     cors: { origin: "*" },
@@ -11050,6 +11119,7 @@ export {
   amsgStaleSkip,
   attachScheduledTasks,
   buildWorkerConfig,
+  configureInstantErrorPush,
   src_default as default,
   inspectWorkerEnv,
   offloadOversizedPush,

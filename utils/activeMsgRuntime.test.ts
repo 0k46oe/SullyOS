@@ -22,6 +22,7 @@ import {
   revokeSwallowedSelfLogEntry,
   runInstantChatStatusCheck,
   cancelLateEmotionPoll,
+  handleInstantErrorPushMessage,
   startLateEmotionPoll,
 } from './activeMsgRuntime';
 import {
@@ -2293,5 +2294,49 @@ describe('云端旁路副本等这条消息处理成功了再删（走真库）'
     // 落定了才轮到收尾：两份都删掉，D1 不留垃圾。
     expect(clearSpy).toHaveBeenCalledWith(amsgStateNamespace(charId), reasoningRef);
     expect(clearSpy).toHaveBeenCalledWith(amsgStateNamespace(charId), xhsRef);
+  }, 20000);
+});
+
+// worker 判死那一刻直发的 error push：SW 转给页面后当场收尾那一轮（落系统消息、销账），
+// 不用干等 60s 点名。回归守卫：以前 active-msg-error 在页面被静默丢弃。
+describe('error push 到页面 → 当场收尾（handleInstantErrorPushMessage）', () => {
+  it('uuid 对得上 → 销账 + 落同一份翻译的失败说明', async () => {
+    const charId = 'char-errpush-hit';
+    await DB.saveCharacter({ id: charId, name: '直发角色' } as any);
+    setInstantChatPending(charId, 'uuid-errpush-1');
+
+    await handleInstantErrorPushMessage({
+      metadata: { charId, taskUuid: 'uuid-errpush-1', reason: 'empty-generation' },
+    });
+
+    expect(getInstantChatPending(charId)).toBeNull();
+    const msgs = await DB.getRecentMessagesByCharId(charId, 10);
+    const note = msgs.find((m: any) => m.role === 'system' && String(m.content).includes('即时对话没能完成'));
+    expect(note, '要落一条失败说明').toBeTruthy();
+    // 与 60s 点名路径同一份翻译（describeInstantChatFailure），两条路对用户说同样的话
+    expect(String(note!.content)).toContain('模型这轮没有生成内容');
+  }, 20000);
+
+  it('uuid 对不上（用户已经重发了新一轮）→ 不动账', async () => {
+    const charId = 'char-errpush-miss';
+    await DB.saveCharacter({ id: charId, name: '重发角色' } as any);
+    setInstantChatPending(charId, 'uuid-new-round');
+
+    await handleInstantErrorPushMessage({
+      metadata: { charId, taskUuid: 'uuid-old-round', reason: 'stale' },
+    });
+
+    expect(getInstantChatPending(charId)?.uuid).toBe('uuid-new-round');
+    const msgs = await DB.getRecentMessagesByCharId(charId, 10);
+    expect(msgs.some((m: any) => String(m.content ?? '').includes('即时对话没能完成'))).toBe(false);
+  }, 20000);
+
+  it('metadata 缺 taskUuid（旧 Instant Push 的诊断 push）→ 静默略过', async () => {
+    const charId = 'char-errpush-ip';
+    setInstantChatPending(charId, 'uuid-untouched');
+
+    await handleInstantErrorPushMessage({ metadata: { charId }, code: 'SOME_DIAG', message: 'x' });
+
+    expect(getInstantChatPending(charId)?.uuid).toBe('uuid-untouched');
   }, 20000);
 });

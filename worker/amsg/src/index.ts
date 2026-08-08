@@ -27,6 +27,8 @@
 import {
   createSingleUserCloudflareWorker,
   createWebCryptoWebPush,
+  decryptFromStorage,
+  deriveUserEncryptionKey,
   measurePushPayload,
 } from '@rei-standard/amsg-server/cloudflare';
 import { stripReasoningTags } from '@rei-standard/amsg-shared';
@@ -692,6 +694,95 @@ const writeChatFail = async (
   }
 };
 
+/**
+ * 即时对话终态失败直发 error push 用到的三样：推送 transport、D1、master key。
+ * buildWorkerConfig 每次组装配置时写入（isolate 级全局，同代理地址 / XHS cookie 的先例：
+ * 单用户部署里全局同一份才安全）。没配齐时直发整个跳过，失败告知退回 60s 点名兜底。
+ */
+interface InstantErrorPushDeps {
+  webpush: { sendNotification: (subscription: unknown, body: string) => Promise<unknown> };
+  db: { prepare: (sql: string) => { bind: (...args: unknown[]) => { first: () => Promise<Record<string, unknown> | null> }; first: () => Promise<Record<string, unknown> | null> } };
+  masterKey: string;
+}
+let instantErrorPushDeps: InstantErrorPushDeps | null = null;
+
+/** buildWorkerConfig 的写入口；export 只为单测注入假 transport / 假库。 */
+export const configureInstantErrorPush = (deps: InstantErrorPushDeps | null): void => {
+  instantErrorPushDeps = deps;
+};
+
+/** 通知横幅上那句话（简短人话）；聊天流里的详细说明由客户端 describeInstantChatFailure 出。 */
+const instantErrorNotificationBody = (reason: string): string => {
+  if (reason === 'empty-generation') return '模型这一轮没有生成内容，可以重新发一次。';
+  if (reason === 'side-effects-only') return '角色这一轮只做了动作，没有文字回复。';
+  if (reason === 'stale') return '这条消息在云端排队太久，已作废。可以重新发一次。';
+  return '这一轮云端生成失败了，点开查看原因，可以重新发一次。';
+};
+
+/**
+ * 即时对话的**终态**失败直发一条 `messageKind:'error'` 的 push（best-effort）。
+ *
+ * 只许在「这条任务不会再跑」的场合调：重试打光（retry_count 判定与上游
+ * handleDeliveryFailure 同源）、skip-push（行被当成功消费）、stale 跳过。还会重试的
+ * 失败绝不发——「报错完回复又到了」这种误报比晚知道更伤（SSE↔push 双通道的老教训）。
+ *
+ * 通知打 `show: 'when-hidden'`：前台由页面监听 active-msg-error 当场收尾（落系统消息、
+ * 熄灯），不弹横幅；后台弹「回复没能生成」。发不出去只 warn——客户端 60s 点名读
+ * chat_fail 的兜底路径原样保留，这条 push 只是把感知从分钟级提到秒级。
+ *
+ * 订阅行是加密存的（encryptForStorage 的 iv:authTag:data 格式）；个别老部署可能存的是
+ * 明文 JSON，解密失败时按明文再试一次，都不行才放弃。
+ */
+const sendInstantErrorPush = async (args: {
+  charId: string;
+  taskUuid: string;
+  reason: string;
+  /** 任务行上的 user_id；拿不到时取订阅表唯一那行（单用户部署）。 */
+  userId?: string | null;
+  contactName?: string | null;
+}): Promise<void> => {
+  const deps = instantErrorPushDeps;
+  if (!deps?.masterKey) return;
+  try {
+    const row = args.userId
+      ? await deps.db.prepare('SELECT user_id, subscription FROM push_subscriptions WHERE user_id = ? LIMIT 1').bind(args.userId).first()
+      : await deps.db.prepare('SELECT user_id, subscription FROM push_subscriptions LIMIT 1').first();
+    const stored = row?.subscription;
+    const userId = row?.user_id;
+    if (typeof stored !== 'string' || !stored || typeof userId !== 'string' || !userId) return;
+    let subscription: unknown;
+    try {
+      const userKey = await deriveUserEncryptionKey(userId, deps.masterKey);
+      subscription = JSON.parse(await decryptFromStorage(stored, userKey));
+    } catch {
+      subscription = JSON.parse(stored);
+    }
+    const payload = {
+      messageKind: 'error',
+      messageType: 'instant',
+      charId: args.charId,
+      contactName: args.contactName ?? undefined,
+      // 确定性 id：同一条任务的终态只有一个，重复投递靠 SW 的 messageId 去重兜住
+      messageId: `err_${args.taskUuid}`,
+      timestamp: new Date().toISOString(),
+      metadata: {
+        charId: args.charId,
+        amsgInstantError: true,
+        taskUuid: args.taskUuid,
+        reason: args.reason.slice(0, 500),
+      },
+      notification: {
+        title: args.contactName ? `${args.contactName} 的回复没能生成` : '回复没能生成',
+        body: instantErrorNotificationBody(args.reason),
+        show: 'when-hidden',
+      },
+    };
+    await deps.webpush.sendNotification(subscription, JSON.stringify(payload));
+  } catch (error) {
+    console.warn('[amsg:instant-chat] 失败通知没发出去（客户端仍靠 60s 点名兜底）', error);
+  }
+};
+
 export const amsgFireSettled = async (
   info: {
     /** sent / skipped / failed / not-handled；区分「有没有真发出去」和「这跳挂了」。 */
@@ -713,11 +804,25 @@ export const amsgFireSettled = async (
   // 交代为什么没发出去——不用再按角色扫全量任务列表逐条解密（几秒起步）。
   // best-effort：写不进去只是失败原因退化成笼统的一句，不能连累收尾其他动作。
   if (stash.instant && info.status === 'failed' && stash.taskUuid) {
+    const failReason = info.error instanceof Error ? info.error.message : String(info.error ?? '未知错误');
+    const retryCount = typeof info.task?.retry_count === 'number' ? info.task.retry_count : 0;
     await writeChatFail(info.writeState, stash.charId, {
       uuid: stash.taskUuid,
-      reason: info.error instanceof Error ? info.error.message : String(info.error ?? '未知错误'),
-      retryCount: typeof info.task?.retry_count === 'number' ? info.task.retry_count : 0,
+      reason: failReason,
+      retryCount,
     });
+    // 终态判定与上游 handleDeliveryFailure 同源：retry_count >= 3 的这跳失败后行转
+    // failed，不会再跑。还会重试的失败绝不发通知（回复可能随后就到）。
+    if (retryCount >= 3) {
+      await sendInstantErrorPush({
+        charId: stash.charId,
+        taskUuid: stash.taskUuid,
+        reason: failReason,
+        userId: typeof (info.task as Record<string, unknown> | null | undefined)?.user_id === 'string'
+          ? (info.task as Record<string, unknown>).user_id as string
+          : null,
+      });
+    }
   }
 
   // 情绪评估没赶上顺风车、回复已经先发出去了 → 在这里等它出结果，写进旁路存储
@@ -820,6 +925,8 @@ export const amsgStaleSkip = async (
   // 客户端点名判到「行已出清」后靠它说出「排队太久没轮到」，而不是笼统的生成失败。
   if (isInstantChatTask(meta) && typeof task?.uuid === 'string' && task.uuid) {
     await writeChatFail(info.writeState, charId, { uuid: task.uuid, reason: 'stale', retryCount: 0 });
+    // 过期跳过也是一锤定音 → 直发失败通知（best-effort），别让用户干等点名。
+    await sendInstantErrorPush({ charId, taskUuid: task.uuid, reason: 'stale' });
   }
   const nextSendAtMs = Date.parse(String(info.nextSendAt ?? ''));
   await writeLastSkip(info.writeState, charId, {
@@ -1814,6 +1921,13 @@ export const amsgHooks = {
           reason: decision.reason,
           retryCount: 0,
         });
+        // skip 一锤定音（行不会再跑）→ 直发失败通知，等待当场收尾，不用干等 60s 点名。
+        await sendInstantErrorPush({
+          charId: stash.charId,
+          taskUuid: stash.taskUuid,
+          reason: decision.reason,
+          contactName: ctx.contactName ?? null,
+        });
       }
     }
 
@@ -2077,12 +2191,17 @@ export const buildWorkerConfig = (env: Env) => {
   const effectiveVapid = nativeFcmReady && (!vapid.publicKey?.trim() || !vapid.privateKey?.trim())
     ? { email: vapid.email, publicKey: 'native-fcm', privateKey: 'native-fcm' }
     : vapid;
+  const webpush = createHybridPushTransport(env, createWebCryptoWebPush(effectiveVapid));
+  // 即时对话终态失败的直发通道拿同一份 transport（见 sendInstantErrorPush）。
+  configureInstantErrorPush(env.DB && env.AMSG_MASTER_KEY
+    ? { webpush, db: env.DB as unknown as InstantErrorPushDeps['db'], masterKey: env.AMSG_MASTER_KEY }
+    : null);
   return {
     // db 缺省时 factory 自动用 createD1Adapter(env.DB)
     masterKey: env.AMSG_MASTER_KEY,
     serverToken: env.AMSG_SERVER_TOKEN,
     vapid: effectiveVapid,
-    webpush: createHybridPushTransport(env, createWebCryptoWebPush(effectiveVapid)),
+    webpush,
     // 前端和 Worker 不同源，带自定义头的请求会先发 CORS 预检，必须放行。
     // 单用户自用默认全开；想收紧就把 '*' 换成自己的 SullyOS 站点 origin。
     cors: { origin: '*' },

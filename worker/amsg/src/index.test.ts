@@ -8,8 +8,9 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import worker, {
   amsgFireSettled, amsgHooks, amsgReasoningKey, amsgStaleSkip, attachScheduledTasks,
-  buildWorkerConfig, EMOTION_EVAL_RIDE_ALONG_MS, inspectWorkerEnv, offloadOversizedPush,
-  resolveVapidEmail, runFireCancelTool, runFireRenewTool, runFireScheduleTool, runMcpFireTool,
+  buildWorkerConfig, configureInstantErrorPush, EMOTION_EVAL_RIDE_ALONG_MS, inspectWorkerEnv,
+  offloadOversizedPush, resolveVapidEmail, runFireCancelTool, runFireRenewTool,
+  runFireScheduleTool, runMcpFireTool,
 } from './index';
 import { MAX_TOOL_ITERATIONS } from './agentic';
 import { MAX_PUSH_PAYLOAD_BYTES } from '@rei-standard/amsg-server/cloudflare';
@@ -3579,5 +3580,127 @@ describe('即时对话的接线', () => {
     // 心跳自己会盖住即时对话 600s 的 fire——fire 跑多久租约就滚多久。
     const cfg = buildWorkerConfig(fullEnv) as Record<string, unknown>;
     expect(cfg.claimLeaseMs).toBeUndefined();
+  });
+});
+
+// 即时对话终态失败的直发通知：判死那一刻推一条 messageKind:'error'，前台当场收尾、
+// 后台弹横幅，不用干等 60s 点名。红线是「还会重试的失败绝不发」——报错完回复又到
+// 是双通道老教训里最伤的误报。回归守卫：没有直发通道时这些场合一条 push 都不会有。
+describe('即时对话终态失败的直发 error push', () => {
+  const CLIENT_TASK_ID = 'client-task-errpush';
+  const CHAT_MESSAGES = [
+    { role: 'system', content: '你是 Nyah。' },
+    { role: 'user', content: '在吗' },
+  ];
+  const INSTANT_META = {
+    amsgClientTaskId: CLIENT_TASK_ID,
+    amsgMode: 'instant',
+    amsgInstantChat: true,
+  };
+
+  const makeErrorPushDeps = () => {
+    const sent: Array<{ subscription: any; body: any }> = [];
+    const row = {
+      user_id: 'u1',
+      // 明文兜底路径：解密失败 → 按明文 JSON 再试（老部署的订阅行）
+      subscription: JSON.stringify({ endpoint: 'https://push.example/e1', keys: {} }),
+    };
+    const first = vi.fn(async () => row);
+    const deps = {
+      webpush: {
+        sendNotification: vi.fn(async (subscription: unknown, body: string) => {
+          sent.push({ subscription, body: JSON.parse(body) });
+        }),
+      },
+      db: { prepare: vi.fn(() => ({ bind: vi.fn(() => ({ first })), first })) },
+      masterKey: 'a'.repeat(64),
+    };
+    return { deps, sent };
+  };
+
+  afterEach(() => configureInstantErrorPush(null));
+
+  it('重试打光（retry_count >= 3）的失败 → 直发 error push（when-hidden）', async () => {
+    const { deps, sent } = makeErrorPushDeps();
+    configureInstantErrorPush(deps as any);
+
+    const store = makeFireStore(CHAT_MESSAGES);
+    const { scratch } = await runFire(store, { metadata: INSTANT_META, llmOutput: '在的。' });
+    await amsgFireSettled({
+      status: 'failed', sentCount: 0,
+      task: { retry_count: 3, user_id: 'u1' },
+      error: new Error('LLM 上游 502'),
+      scratch, writeState: store.writeState,
+    } as any);
+
+    expect(sent).toHaveLength(1);
+    const payload = sent[0].body;
+    expect(payload.messageKind).toBe('error');
+    expect(payload.metadata.taskUuid).toBe(TASK_UUID);
+    expect(payload.metadata.charId).toBe(CHAR_ID);
+    expect(payload.metadata.reason).toContain('LLM 上游 502');
+    expect(payload.notification.show).toBe('when-hidden');
+    expect(payload.messageId).toBe(`err_${TASK_UUID}`);
+    // 订阅行按 user_id 查、明文兜底解出来
+    expect((sent[0].subscription as any).endpoint).toBe('https://push.example/e1');
+  });
+
+  it('还会重试的失败（retry_count < 3）绝不发——报错完回复又到是最伤的误报', async () => {
+    const { deps, sent } = makeErrorPushDeps();
+    configureInstantErrorPush(deps as any);
+
+    const store = makeFireStore(CHAT_MESSAGES);
+    const { scratch } = await runFire(store, { metadata: INSTANT_META, llmOutput: '在的。' });
+    await amsgFireSettled({
+      status: 'failed', sentCount: 0,
+      task: { retry_count: 1, user_id: 'u1' },
+      error: new Error('临时抖动'),
+      scratch, writeState: store.writeState,
+    } as any);
+
+    expect(sent).toHaveLength(0);
+  });
+
+  it('skip-push（空输出，一锤定音）→ 直发，横幅文案是人话', async () => {
+    const { deps, sent } = makeErrorPushDeps();
+    configureInstantErrorPush(deps as any);
+
+    const store = makeFireStore(CHAT_MESSAGES);
+    const { decision } = await runFire(store, { metadata: INSTANT_META, llmOutput: '' });
+    expect((decision as any).decision).toBe('skip-push');
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].body.metadata.reason).toBe('empty-generation');
+    expect(sent[0].body.notification.body).toContain('没有生成内容');
+  });
+
+  it('stale 跳过（一锤定音）→ 直发', async () => {
+    const { deps, sent } = makeErrorPushDeps();
+    configureInstantErrorPush(deps as any);
+
+    const writeState = vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 }));
+    await amsgStaleSkip(
+      { id: 1, uuid: TASK_UUID },
+      {
+        reason: 'stale', action: 'expired',
+        metadata: { charId: CHAR_ID, amsgInstantChat: true },
+        occurrenceMs: Date.now(), skippedCount: 1, nextSendAt: null,
+        writeState,
+      } as any,
+    );
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].body.metadata.reason).toBe('stale');
+  });
+
+  it('直发通道没配（deps 为 null）时静默跳过，收尾不炸', async () => {
+    const store = makeFireStore(CHAT_MESSAGES);
+    const { scratch } = await runFire(store, { metadata: INSTANT_META, llmOutput: '在的。' });
+    await expect(amsgFireSettled({
+      status: 'failed', sentCount: 0,
+      task: { retry_count: 3, user_id: 'u1' },
+      error: new Error('LLM 上游 502'),
+      scratch, writeState: store.writeState,
+    } as any)).resolves.toBeUndefined();
   });
 });
