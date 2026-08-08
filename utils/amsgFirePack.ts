@@ -45,6 +45,18 @@ export const AMSG_SELF_LOG_KEY = 'self_log';
  */
 export const amsgXhsSessionKey = (clientTaskId: string) => `xhs_session:${clientTaskId}`;
 
+// ─── 即时对话轻量包的模板占位 ───
+
+/**
+ * 即时对话轻量包的模板占位（角色 2.0 关着且没有任何任务时用）：定时任务那条路才渲染
+ * 模板，这类角色的包正常没人渲染，每次发送重建一整份系统提示词 + 近史转写纯属白付
+ * （主线程二次构建 + 手机上行几十 KB，都发生在拿到 202 之前）。写成一眼能认出来的
+ * 标记，两侧共用这一份：客户端（activeMsgClient）发轻量包时填进 template；worker
+ * 跑定时任务前认出它，就知道真模板还没补传上来，这一跳先延后重试而不是照渲。
+ */
+export const AMSG2_INSTANT_STUB_TEMPLATE =
+  'AMSG2_INSTANT_STUB_TEMPLATE（即时对话轻量包：该角色无定时任务，模板未随发送重建；看到这条正文说明有本不该渲染模板的 fire 在渲染它）';
+
 // ─── 即时对话的收件兜底（chat_outbox） ───
 
 /**
@@ -54,13 +66,17 @@ export const amsgXhsSessionKey = (clientTaskId: string) => `xhs_session:${client
  * 服务端没有收件箱表（也不新增表），所以定稿的 push 载荷顺手在这里留一份，
  * 客户端上线 / 页面回到前台 / 等超时之前来拉一次，按 messageId 挑出没收到的补上。
  *
- * 环形保留最近 CHAT_OUTBOX_MAX 条，写的时候整份覆盖——它是兜底缓存不是流水账，
- * 攒着只会把一条 client_state 撑大。
+ * 按轮（sessionId）保留最近 CHAT_OUTBOX_MAX_SESSIONS 轮的全部条目——一轮长回复会拆成
+ * 很多段逐段推送，按条数掐会把整轮掐头——另设 CHAT_OUTBOX_MAX_ENTRIES 总条数护栏。
+ * 写的时候整份覆盖——它是兜底缓存不是流水账，攒着只会把一条 client_state 撑大。
  */
 export const AMSG_CHAT_OUTBOX_KEY = 'chat_outbox';
 
-/** outbox 最多留几条（超出的从头丢）。 */
-export const CHAT_OUTBOX_MAX = 10;
+/** 按轮保留最近几轮（sessionId 相同算同一轮），留下的轮次条目全保。 */
+export const CHAT_OUTBOX_MAX_SESSIONS = 3;
+
+/** 总条数护栏（防止一份 outbox 把 client_state 撑爆），超出从最老的条目丢起。 */
+export const CHAT_OUTBOX_MAX_ENTRIES = 60;
 
 export interface AmsgChatOutboxEntry {
   /** 这条推送的 messageId，客户端拿它跟已入库的消息对账。 */
@@ -142,8 +158,11 @@ export const parseChatOutbox = (value: string | null | undefined): AmsgChatOutbo
 };
 
 /**
- * 追加这一轮的几条，超出上限的从头丢。同 messageId 视为同一条（fire 重跑会重新生成
- * 同样的 id），覆盖而不是叠加，免得重试几次就把环形缓冲刷空。
+ * 追加这一轮的几条。保留按轮算：留最近 CHAT_OUTBOX_MAX_SESSIONS 轮（sessionId 相同
+ * 算同一轮）的全部条目——一轮长回复会拆成很多段逐段推送，按条数掐会把整轮掐头。
+ * 另有 CHAT_OUTBOX_MAX_ENTRIES 总条数护栏，超出从最老的条目丢起（单轮独自超护栏时
+ * 留的就是该轮最新的那截）。同 messageId 视为同一条（fire 重跑会重新生成同样的 id），
+ * 覆盖而不是叠加，免得重试几次就把缓存刷空。
  */
 export const appendChatOutbox = (
   outbox: AmsgChatOutbox | null,
@@ -153,7 +172,19 @@ export const appendChatOutbox = (
   if (entries.length === 0) return base;
   const incoming = new Set(entries.map((e) => e.messageId));
   const kept = base.entries.filter((e) => !incoming.has(e.messageId));
-  return { v: 1, entries: [...kept, ...entries].slice(-CHAT_OUTBOX_MAX) };
+  const merged = [...kept, ...entries];
+
+  // 挑最近几轮：从尾往头扫，先见到的 sessionId 就是较新的一轮，凑满上限为止。
+  // 轮次新旧按出现位置判而不是比 at——条目本来就按写入顺序追加，位置不受
+  // 时钟回拨、同毫秒并列这些影响，是这里最稳的排序依据。
+  const recentSessions = new Set<string>();
+  for (let i = merged.length - 1; i >= 0 && recentSessions.size < CHAT_OUTBOX_MAX_SESSIONS; i -= 1) {
+    recentSessions.add(merged[i].sessionId);
+  }
+  const byRecentSessions = merged.filter((e) => recentSessions.has(e.sessionId));
+
+  // 总条数护栏：从最老的条目丢起（单轮独自超护栏时，留下的就是该轮最新的那截）。
+  return { v: 1, entries: byRecentSessions.slice(-CHAT_OUTBOX_MAX_ENTRIES) };
 };
 
 // ─── client_state 的值压缩 ───

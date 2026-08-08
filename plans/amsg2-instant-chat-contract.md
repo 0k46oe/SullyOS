@@ -114,7 +114,8 @@
 ## outbox（push 丢失的拉取兜底）
 
 - 服务端没有收件箱表，也不新增表（D1 schema 漂移坑）。用 char namespace 的
-  `client_state` 写 key `chat_outbox`：环形数组 ≤10 条，元素
+  `client_state` 写 key `chat_outbox`：按轮（sessionId）保留最近 3 轮的全部条目
+  （一轮长回复会拆成很多段，整轮留下补收才不掐头），另有 60 条总条数护栏、超出从最老丢起；元素
   `{ messageId, sessionId, at, payload }`。
 - 写入点：push 载荷定稿处（**不论 push 发送成败都写**——push 静默丢失正是要兜的）。
   只记 instant 任务的产物即可（v1 范围）。

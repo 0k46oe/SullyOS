@@ -354,6 +354,30 @@ describe('POST /instant-chat 的形状', () => {
     warn.mockRestore();
   });
 
+  // ── 超预算的报错要说真话 ──
+  // 拍平循环只压得动图片；纯文本本身就超限（长角色卡 + 世界书 + 近史）时它一条也压
+  // 不掉。以前这条路也报「图片太大…删掉图片再发」——用户没有图可删，照着做永远修不好。
+  it('纯文本就超预算 → 报「上下文太大」，一个字不提图片', async () => {
+    const err = await postOnce([
+      { role: 'system', content: 'A'.repeat(3 * 1024 * 1024) },
+      { role: 'user', content: '在吗' },
+    ]).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain('上下文太大');
+    // 回归守卫：旧文案叫用户删图，纯文本轮里没有图可删
+    expect(err.message).not.toContain('图片');
+  });
+
+  it('小图 + 巨文本（删图也救不回来）→ 同样报上下文太大，不指错路让用户删图', async () => {
+    const err = await postOnce([
+      { role: 'system', content: 'A'.repeat(3 * 1024 * 1024) },
+      imageMessage('user', 16, '顺手带的小图'),
+    ]).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain('上下文太大');
+    expect(err.message).not.toContain('图片');
+  });
+
 });
 
 describe('只有 202 才算发出去', () => {

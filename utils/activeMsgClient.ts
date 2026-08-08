@@ -36,6 +36,7 @@ import {
   AMSG_SLOT_REALTIME_WORLD,
   AMSG_SLOT_SCENE,
   AMSG_SLOT_TASK_INSTRUCTION,
+  AMSG2_INSTANT_STUB_TEMPLATE,
   AMSG_INSTANT_CHAT_SUBTYPE,
   AMSG_LAST_SKIP_KEY,
   AMSG_SLOT_SELF_LOG,
@@ -450,15 +451,6 @@ const readEmojiLibrary = async (): Promise<EmojiLibrary> => {
 };
 
 // export 只为单测（activeMsgClient.test.ts 钉 tzId 取值与模板不烤时间）。
-/**
- * 即时对话轻量包的模板占位（角色 2.0 关着且没有任何任务时用）：定时任务那条路才渲染
- * 模板，这类角色的包永远没人渲染，每次发送重建一整份系统提示词 + 近史转写纯属白付
- * （主线程二次构建 + 手机上行几十 KB，都发生在拿到 202 之前）。写成一眼能认出来的
- * 标记：它要是出现在推送正文里，说明有本不该渲染模板的 fire 在渲染它。
- */
-const AMSG2_INSTANT_STUB_TEMPLATE =
-  'AMSG2_INSTANT_STUB_TEMPLATE（即时对话轻量包：该角色无定时任务，模板未随发送重建；看到这条正文说明有本不该渲染模板的 fire 在渲染它）';
-
 export const buildFirePack = async (
   char: CharacterProfile,
   userProfile: UserProfile,
@@ -731,8 +723,9 @@ const hasNonTextPart = (content: unknown): boolean =>
  * 一条一条丢到进预算为止。最新那条用户消息的图片永远不丢——用户刚发的这张图正是
  * 这一轮要聊的东西，把它丢了等于答非所问，而用户完全看不出来。
  *
- * 丢到只剩最新那条还是超预算 → 抛错，走「即时对话发送失败」那条明路，用户看得到
- * 原因、可以删掉图片重发。绝不悄悄把当前这轮截断。
+ * 丢到只剩最新那条还是超预算 → 抛错，走「即时对话发送失败」那条明路，绝不悄悄把
+ * 当前这轮截断。报错分两种：删掉最新那张图能救回来的，指向图片；纯文本本身就超限的
+ * （长角色卡 + 世界书 + 近史），如实说上下文太大——这种情况用户没有图可删。
  */
 export const toFirePackChatMessages = (
   messages: Array<{ role: string; content: unknown }>,
@@ -773,9 +766,26 @@ export const toFirePackChatMessages = (
 
   if (totalBytes > CHAT_CONTENT_BUDGET_BYTES) {
     const mb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
+    // 走到这里，能拍的图全拍平了，还带着图的只可能是受保护的最新那条用户消息。
+    // 报错前先算一笔账：把它的图也拍掉能不能进预算。能 → 罪魁确实是这张图，让用户
+    // 删图/换小图是条真出路；不能 → 超限的是纯文本本身（长角色卡 + 世界书 + 近史），
+    // 这时候还叫人删图就是指错路——用户可能压根没发过图，照着做也永远修不好。
+    const protectedEntry = protectedIdx >= 0 ? result[protectedIdx] : undefined;
+    const protectedImageBytes = protectedEntry && hasNonTextPart(protectedEntry.content)
+      ? entryBytes(protectedEntry) - entryBytes({
+          role: protectedEntry.role,
+          content: flattenContentPartsToText(protectedEntry.content as unknown[]),
+        })
+      : 0;
+    if (totalBytes - protectedImageBytes <= CHAT_CONTENT_BUDGET_BYTES) {
+      throw new Error(
+        `即时对话发不出去：这一轮要带的图片太大（约 ${mb(totalBytes)} MB，上限 ${mb(CHAT_CONTENT_BUDGET_BYTES)} MB）。`
+        + '删掉图片、或者换一张小一点的再发。',
+      );
+    }
     throw new Error(
-      `即时对话发不出去：这一轮要带的图片太大（约 ${mb(totalBytes)} MB，上限 ${mb(CHAT_CONTENT_BUDGET_BYTES)} MB）。`
-      + '删掉图片、或者换一张小一点的再发。',
+      `即时对话发不出去：这一轮上下文太大（约 ${mb(totalBytes)} MB，即时对话单轮上限 ${mb(CHAT_CONTENT_BUDGET_BYTES)} MB）。`
+      + '精简一下上下文（比如角色设定、世界书或携带的历史条数），或先关掉即时对话走本地生成。',
     );
   }
   return result;

@@ -14,7 +14,7 @@ import {
   toOutboxEntries,
   writeChatOutbox,
 } from './instantChat';
-import { AMSG_CHAT_OUTBOX_KEY, CHAT_OUTBOX_MAX, amsgStateNamespace } from '../../../utils/amsgFirePack';
+import { AMSG_CHAT_OUTBOX_KEY, CHAT_OUTBOX_MAX_ENTRIES, amsgStateNamespace } from '../../../utils/amsgFirePack';
 
 const USER_ID = '3637dae1-1461-4444-a747-34e406f67acc';
 const TASK_UUID = '7a1f0b4c-2c9d-4a3e-8b21-9f0f3c5d7e11';
@@ -438,7 +438,7 @@ describe('finalizeInstantPush — 信封按库的同一套规则先补好', () =
 });
 
 describe('writeChatOutbox', () => {
-  const entry = (id: string) => ({ messageId: id, sessionId: 's', at: 1, payload: { message: id } });
+  const entry = (id: string, sessionId = 's') => ({ messageId: id, sessionId, at: 1, payload: { message: id } });
 
   it('写进角色 namespace 的 chat_outbox', async () => {
     const writeState = vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 }));
@@ -449,14 +449,39 @@ describe('writeChatOutbox', () => {
     expect(next!.entries.map((e) => e.messageId)).toEqual(['m1']);
   });
 
-  it('环形只留最近 CHAT_OUTBOX_MAX 条', async () => {
+  it('单轮 12 段整轮保留（按条数掐会把长回复掐头，客户端只能补收到后半截）', async () => {
+    const writeState = vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 }));
+    const twelve = Array.from({ length: 12 }, (_, i) => entry(`m${i}`, 'sess-long'));
+    const outbox = await writeChatOutbox(writeState, 'char-a', null, twelve);
+    expect(outbox!.entries.map((e) => e.messageId)).toEqual(twelve.map((e) => e.messageId));
+  });
+
+  it('连写 5 轮只留最近 3 轮，留下的轮次每段都在', async () => {
     const writeState = vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 }));
     let outbox = null as any;
-    for (let i = 0; i < CHAT_OUTBOX_MAX + 3; i += 1) {
-      outbox = await writeChatOutbox(writeState, 'char-a', outbox, [entry(`m${i}`)]);
+    for (let round = 0; round < 5; round += 1) {
+      outbox = await writeChatOutbox(writeState, 'char-a', outbox, [
+        entry(`m${round}-0`, `sess-${round}`),
+        entry(`m${round}-1`, `sess-${round}`),
+      ]);
     }
-    expect(outbox.entries).toHaveLength(CHAT_OUTBOX_MAX);
-    expect(outbox.entries[0].messageId).toBe('m3');
+    expect(outbox.entries.map((e: any) => e.messageId)).toEqual(
+      ['m2-0', 'm2-1', 'm3-0', 'm3-1', 'm4-0', 'm4-1'],
+    );
+  });
+
+  it('总条数超护栏从最老丢起，且不超 CHAT_OUTBOX_MAX_ENTRIES', async () => {
+    const writeState = vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 }));
+    let outbox = null as any;
+    // 3 轮各 25 段共 75 条，都在保留轮数内，只能靠总条数护栏掐
+    for (let round = 0; round < 3; round += 1) {
+      outbox = await writeChatOutbox(writeState, 'char-a', outbox,
+        Array.from({ length: 25 }, (_, i) => entry(`m${round}-${i}`, `sess-${round}`)));
+    }
+    expect(outbox.entries).toHaveLength(CHAT_OUTBOX_MAX_ENTRIES);
+    // 丢的是最老那轮的前 15 条，最新一轮完整
+    expect(outbox.entries[0].messageId).toBe('m0-15');
+    expect(outbox.entries.at(-1).messageId).toBe('m2-24');
   });
 
   it('写不进去不抛错，返回原来那份（这次照常发送，只是丢了兜底能力）', async () => {

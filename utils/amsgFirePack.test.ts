@@ -8,7 +8,8 @@ import {
   AMSG_SLOT_USER_CLOCK,
   AmsgFirePack,
   AmsgSelfLog,
-  CHAT_OUTBOX_MAX,
+  CHAT_OUTBOX_MAX_ENTRIES,
+  CHAT_OUTBOX_MAX_SESSIONS,
   FIRE_PACK_VERSION,
   describeFirePackVersion,
   SELF_LOG_MAX_ENTRIES,
@@ -815,15 +816,38 @@ describe('fire_pack v7 的 chat 段', () => {
 
 // ─── 即时对话的收件兜底 outbox ───
 describe('chat_outbox', () => {
-  const entry = (id: string) => ({ messageId: id, sessionId: 's', at: 1, payload: { message: id } });
+  const entry = (id: string, sessionId = 's') => ({ messageId: id, sessionId, at: 1, payload: { message: id } });
 
-  it('环形只留最近 CHAT_OUTBOX_MAX 条', () => {
+  it('单轮再长也整轮保留（按条数掐会把长回复掐头，补收只能拿到后半截）', () => {
     let outbox = createChatOutbox();
-    for (let i = 0; i < CHAT_OUTBOX_MAX + 5; i += 1) {
-      outbox = appendChatOutbox(outbox, [entry(`m${i}`)]);
+    for (let i = 0; i < 12; i += 1) {
+      outbox = appendChatOutbox(outbox, [entry(`m${i}`, 'sess-0')]);
     }
-    expect(outbox.entries).toHaveLength(CHAT_OUTBOX_MAX);
-    expect(outbox.entries[0].messageId).toBe('m5');
+    expect(outbox.entries).toHaveLength(12);
+    expect(outbox.entries[0].messageId).toBe('m0');
+  });
+
+  it('按轮保留最近 CHAT_OUTBOX_MAX_SESSIONS 轮，更老的整轮丢', () => {
+    let outbox = createChatOutbox();
+    for (let s = 0; s < CHAT_OUTBOX_MAX_SESSIONS + 2; s += 1) {
+      outbox = appendChatOutbox(outbox, [entry(`m${s}-a`, `sess-${s}`), entry(`m${s}-b`, `sess-${s}`)]);
+    }
+    const sessions = [...new Set(outbox.entries.map((e) => e.sessionId))];
+    expect(sessions).toEqual(['sess-2', 'sess-3', 'sess-4']);
+    expect(outbox.entries).toHaveLength(CHAT_OUTBOX_MAX_SESSIONS * 2);
+  });
+
+  it('总条数护栏：超出 CHAT_OUTBOX_MAX_ENTRIES 从最老丢起', () => {
+    let outbox = createChatOutbox();
+    for (let s = 0; s < 3; s += 1) {
+      outbox = appendChatOutbox(
+        outbox,
+        Array.from({ length: 25 }, (_, i) => entry(`m${s}-${i}`, `sess-${s}`)),
+      );
+    }
+    expect(outbox.entries).toHaveLength(CHAT_OUTBOX_MAX_ENTRIES);
+    expect(outbox.entries[0].messageId).toBe('m0-15');
+    expect(outbox.entries.at(-1)!.messageId).toBe('m2-24');
   });
 
   it('同 messageId 覆盖不叠加（fire 重跑会重新生成同样的 id）', () => {
