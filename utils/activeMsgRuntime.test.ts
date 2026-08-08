@@ -21,6 +21,8 @@ import {
   resolveInboxPersistTimestamp,
   revokeSwallowedSelfLogEntry,
   runInstantChatStatusCheck,
+  cancelLateEmotionPoll,
+  startLateEmotionPoll,
 } from './activeMsgRuntime';
 import {
   AMSG_INSTANT_CHAT_PENDING_LS_KEY,
@@ -724,6 +726,98 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
 
       const failed = seen.find((e) => e.type === CHAT_GEN_EVENTS.emotionFailed && e.detail?.charId === charId);
       expect(failed!.detail.reason).toContain('云端情绪评估无输出');
+    }, 20000);
+
+    // 晚投：worker 那头评估没赶上回复，push 只挂引用键 + pending 标记，结果收尾时才写进
+    // 旁路。收侧不许当场熄灯（结论还没有），也不许立刻按 ref 取（键多半还空着，白打
+    // 一个「被下一轮覆盖」的 warn）。回归守卫——旧行为会把 ref 当旁路结果取、当场熄灯。
+    it('晚投标记（amsgEmotionPending）→ 不熄灯、不立刻取，交给补落轮询', async () => {
+      const charId = 'char-emotion-pending';
+      await DB.saveCharacter({ id: charId, name: '晚投角色' } as any);
+      const ref = 'emotion_update:client-task-late';
+      const readSpy = vi.spyOn(ActiveMsgClient, 'readClientStateValue')
+        .mockResolvedValue(JSON.stringify({ changed: true, buffs: [] }));
+
+      await ActiveMsgStore.saveInboxMessage(inboxMsg({
+        messageId: 'msg-emotion-pending',
+        charId,
+        charName: '晚投角色',
+        messageType: 'text',
+        metadata: { charId, amsgEmotionPending: true, amsgEmotionRef: ref },
+      }));
+
+      const { seen, restore } = captureEvents();
+      try {
+        await flushInboxToChat();
+      } finally {
+        restore();
+        // 收掉这一轮排下的补落定时器，别让它带着生产间隔漂进后面的测试
+        cancelLateEmotionPoll(charId);
+      }
+
+      // 结论未到：灯不熄、不报失败、也不立刻去读旁路键
+      expect(seen.some((e) => e.type === 'instant-emotion-done' && e.detail?.charId === charId)).toBe(false);
+      expect(seen.some((e) => e.type === CHAT_GEN_EVENTS.emotionFailed && e.detail?.charId === charId)).toBe(false);
+      expect(readSpy).not.toHaveBeenCalled();
+      // 正文照常上屏
+      expect((await assistantMsgs(charId)).length).toBeGreaterThan(0);
+      readSpy.mockRestore();
+    }, 20000);
+
+    it('补落轮询：第二跳等到结果 → 落 buff + 熄灯 + 删云端副本', async () => {
+      const charId = 'char-emotion-late-land';
+      await DB.saveCharacter({ id: charId, name: '补落角色' } as any);
+      const ref = 'emotion_update:client-task-land';
+      const readSpy = vi.spyOn(ActiveMsgClient, 'readClientStateValue')
+        .mockResolvedValueOnce(null)
+        .mockResolvedValue(JSON.stringify({
+          changed: true,
+          buffs: [{ label: '释然', emoji: '🌤', intensity: 2 }],
+          injection: '你此刻很释然。',
+        }));
+      const clearSpy = vi.spyOn(ActiveMsgClient, 'clearClientStateValue').mockResolvedValue(undefined as any);
+
+      const { seen, restore } = captureEvents();
+      try {
+        startLateEmotionPoll(charId, ref, '补落角色', { intervalMs: 10, maxTries: 5 });
+        await vi.waitFor(() => {
+          expect(clearSpy).toHaveBeenCalledWith(amsgStateNamespace(charId), ref);
+        }, { timeout: 5000 });
+      } finally {
+        restore();
+        cancelLateEmotionPoll(charId);
+      }
+
+      const updated = (await DB.getAllCharacters()).find((c) => c.id === charId)!;
+      expect(updated.activeBuffs?.map((b: any) => b.label)).toContain('释然');
+      expect(seen.some((e) => e.type === 'instant-emotion-done' && e.detail?.charId === charId)).toBe(true);
+      expect(readSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+      readSpy.mockRestore();
+      clearSpy.mockRestore();
+    }, 20000);
+
+    it('补落轮询：跳数用尽还没等到 → 报「最终没等到」+ 熄灯', async () => {
+      const charId = 'char-emotion-late-timeout';
+      await DB.saveCharacter({ id: charId, name: '超时角色' } as any);
+      const ref = 'emotion_update:client-task-timeout';
+      const readSpy = vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
+
+      const { seen, restore } = captureEvents();
+      try {
+        startLateEmotionPoll(charId, ref, '超时角色', { intervalMs: 10, maxTries: 3 });
+        await vi.waitFor(() => {
+          expect(seen.some((e) => e.type === 'instant-emotion-done' && e.detail?.charId === charId)).toBe(true);
+        }, { timeout: 5000 });
+      } finally {
+        restore();
+        cancelLateEmotionPoll(charId);
+      }
+
+      const failed = seen.find((e) => e.type === CHAT_GEN_EVENTS.emotionFailed && e.detail?.charId === charId);
+      expect(failed).toBeTruthy();
+      expect(failed!.detail.reason).toContain('最终没等到');
+      expect(readSpy).toHaveBeenCalledTimes(3);
+      readSpy.mockRestore();
     }, 20000);
 
     it('装不下时挪进 client_state：按 amsgEmotionRef 取回来照样落 buff，用完就删', async () => {

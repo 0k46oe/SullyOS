@@ -302,6 +302,79 @@ const landCloudEmotionResult = async (charId: string, raw: string): Promise<void
   }
 };
 
+// ─── 情绪评估晚投的补落轮询 ───
+// worker 那头评估没赶上回复的顺风车（push 上是 amsgEmotionRef + amsgEmotionPending），
+// 结果要等 worker 收尾时才写进旁路存储。这里对着引用键每隔一跳读一次，读到就走
+// landCloudEmotionResult 落 buff（与正常路径同一份解析）、熄灯、删云端副本；跳数用尽
+// 还没等到才按失败收尾——评估自身在 worker 有 120s 超时，这个窗口盖住它再留余量。
+// 每角色最多一个在跑；新一轮的情绪结论到达时旧轮询作废（旧结果落下去会盖掉新 buff）。
+const LATE_EMOTION_POLL_INTERVAL_MS = 20_000;
+const LATE_EMOTION_POLL_MAX_TRIES = 8;
+// value 是各轮询独有的会话对象：tick 的 await 期间被 cancel / 被新一轮顶替时，
+// 比对引用就能发现自己已经不是当前那一轮，静默退场。
+const lateEmotionPolls = new Map<string, { timer: ReturnType<typeof setTimeout> }>();
+
+export const cancelLateEmotionPoll = (charId: string): void => {
+  const entry = lateEmotionPolls.get(charId);
+  if (entry) {
+    clearTimeout(entry.timer);
+    lateEmotionPolls.delete(charId);
+  }
+};
+
+/** 晚投情绪的补落轮询。intervalMs / maxTries 仅供测试收窄，生产调用不传。 */
+export const startLateEmotionPoll = (
+  charId: string,
+  ref: string,
+  charName: string,
+  opts?: { intervalMs?: number; maxTries?: number },
+): void => {
+  const intervalMs = opts?.intervalMs ?? LATE_EMOTION_POLL_INTERVAL_MS;
+  const maxTries = opts?.maxTries ?? LATE_EMOTION_POLL_MAX_TRIES;
+  cancelLateEmotionPoll(charId);
+  const namespace = amsgStateNamespace(charId);
+  const entry = { timer: undefined as unknown as ReturnType<typeof setTimeout> };
+  let tries = 0;
+  const tick = async (): Promise<void> => {
+    tries += 1;
+    let raw: string | null = null;
+    try {
+      raw = await ActiveMsgClient.readClientStateValue(namespace, ref);
+    } catch (error) {
+      // 读失败当「还没到」：网络抖一下不该终结这轮补落。
+      logAmsg.warn('晚投情绪补落这一跳没读到（下一跳再试）', { charId, ref, error });
+    }
+    // await 期间被 cancel / 被新一轮顶替 → 静默退场，别把旧结果落到新 buff 上。
+    if (lateEmotionPolls.get(charId) !== entry) return;
+    if (raw) {
+      lateEmotionPolls.delete(charId);
+      await landCloudEmotionResult(charId, raw);
+      announceEmotionDone(charId);
+      activeMsgTrace('runtime-late-emotion-landed', { charId, tries });
+      // 用完即删（同旁路取回的口径）；删不掉下次触发会覆盖，只 warn。
+      try {
+        await ActiveMsgClient.clearClientStateValue(namespace, ref);
+      } catch (error) {
+        logAmsg.warn('晚投情绪副本清理失败（下次触发会覆盖）', { charId, ref, error });
+      }
+      return;
+    }
+    if (tries >= maxTries) {
+      lateEmotionPolls.delete(charId);
+      announceChatGen(CHAT_GEN_EVENTS.emotionFailed, {
+        charId, charName,
+        reason: '云端情绪评估最终没等到（副 API 太慢或报错），这一轮不更新',
+      });
+      announceEmotionDone(charId);
+      return;
+    }
+    entry.timer = setTimeout(() => { void tick(); }, intervalMs);
+  };
+  // 首跳也等一个间隔：push 刚到那一刻 worker 多半还没写完旁路，立刻读必空。
+  entry.timer = setTimeout(() => { void tick(); }, intervalMs);
+  lateEmotionPolls.set(charId, entry);
+};
+
 /**
  * 角色在本地已经不存在了：删角色时远端取消失败留下的残留，或者导入备份之后 id 对不上。
  * 与「暂时读不到」区分开——这种重试多少次都没用，得去把远端那条还在到点跑的任务取消掉。
@@ -630,12 +703,33 @@ const processInboxMessageWithPostProcessing = async (
   // amsgEmotionDone 是「这一轮的评估已经有结论了」，成败都带：只在有结果时才发信号的话，
   // 评估一失败徽章就得亮到十几分钟后才由安全网熄，而用户看到的是「情绪永远不更新」。
   const emotionDone = (message.metadata as any)?.amsgEmotionDone === true;
+  // 晚投标记：评估没赶上这条回复的顺风车，worker 收尾时才把结果写进旁路存储。
+  // 此刻旁路键多半还是空的，跳过一次性取回（免得白打一个「被下一轮覆盖了」的 warn），
+  // 改为对引用键轮询补落，灯继续亮着。
+  const emotionPending = (message.metadata as any)?.amsgEmotionPending === true;
   const inlineEmotionUpdate = (message.metadata as any)?.amsgEmotionUpdate;
+  // 这条消息带来了新一轮的情绪结论（成 / 败 / 晚投）→ 上一轮还在跑的补落轮询作废：
+  // 旧结果这时再落下去会盖掉新一轮的 buff。
+  if (emotionDone || emotionPending || (typeof inlineEmotionUpdate === 'string' && !!inlineEmotionUpdate)) {
+    cancelLateEmotionPoll(message.charId);
+  }
   const emotionUpdateRaw = typeof inlineEmotionUpdate === 'string' && inlineEmotionUpdate
     ? inlineEmotionUpdate
-    : await fetchOffloadedEmotionUpdate(message, offloadedCleanups);
+    : (emotionPending ? null : await fetchOffloadedEmotionUpdate(message, offloadedCleanups));
   if (emotionUpdateRaw) {
     await landCloudEmotionResult(message.charId, emotionUpdateRaw);
+  } else if (emotionPending) {
+    const pendingRef = (message.metadata as any)?.amsgEmotionRef;
+    if (typeof pendingRef === 'string' && pendingRef) {
+      startLateEmotionPoll(message.charId, pendingRef, message.charName || '');
+    } else {
+      // 标了 pending 却没给引用键（worker bug）：没法轮询，按「有结论但没结果」收尾。
+      announceChatGen(CHAT_GEN_EVENTS.emotionFailed, {
+        charId: message.charId, charName: message.charName || '',
+        reason: '云端情绪评估晚投但缺少引用键（worker 可能有 bug），这一轮不更新',
+      });
+      announceEmotionDone(message.charId);
+    }
   } else if (emotionDone) {
     // 云端跑了但没跑出东西。不静默熄灯——弹一条 toast，否则用户只看到「情绪更新中」灭了、
     // 情绪没变、没有任何解释。worker 捎回来的那句原因（副 API 的状态码 / 模型没输出）

@@ -368,6 +368,11 @@ interface FireStash {
    * 存 promise 而不是结果：评估和主生成是并行跑的，等到收尾时多半早就跑完了。
    */
   emotionEvalPromise: Promise<AmsgEmotionEvalOutcome> | null;
+  /**
+   * 评估没赶上顺风车（EMOTION_EVAL_RIDE_ALONG_MS），push 上只挂了引用键 + pending
+   * 标记。收尾时（amsgFireSettled）据此把迟到的结果写进旁路存储，客户端轮询补落。
+   */
+  emotionLatePending: boolean;
 }
 
 const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash | undefined =>
@@ -715,6 +720,29 @@ export const amsgFireSettled = async (
     });
   }
 
+  // 情绪评估没赶上顺风车、回复已经先发出去了 → 在这里等它出结果，写进旁路存储
+  // （push 上已挂引用键 + pending 标记，客户端对着键轮询补落）。上游 await 这个 hook，
+  // 评估自带 EMOTION_EVAL_TIMEOUT_MS，续等是有界的。只在真送出去过（sentCount > 0）
+  // 时等：一段都没出去的话客户端根本没收到 pending 标记，任务还会整轮重跑。
+  // 评估失败或超时什么都不写——旁路只存 applyEmotionEvalRaw 认识的评估原文，
+  // 客户端轮询到点自会按「最终没等到」收尾。
+  if (stash.instant && stash.emotionLatePending && stash.emotionEvalPromise
+      && stash.clientTaskId && (info.sentCount ?? 0) > 0) {
+    stash.emotionLatePending = false;   // 认领掉，重复调用不会写两遍
+    try {
+      const outcome = await stash.emotionEvalPromise;
+      if (outcome.raw) {
+        await info.writeState(amsgStateNamespace(stash.charId), [
+          { key: amsgEmotionUpdateKey(stash.clientTaskId), value: outcome.raw },
+        ]);
+      } else {
+        console.warn('[amsg:emotion] 晚投评估没跑出结果（这一轮情绪不更新）', outcome.error);
+      }
+    } catch (error) {
+      console.warn('[amsg:emotion] 晚投评估收尾失败（这一轮情绪不更新）', error);
+    }
+  }
+
   const texts = stash.selfLogTexts;
   stash.selfLogTexts = null;   // 认领掉，重复调用不会记两遍
   const sentCount = info.sentCount ?? 0;
@@ -885,14 +913,15 @@ const condenseToolTrace = (
  * 本地路径十秒就上屏了；工具循环吃掉大半预算时，这两分钟还会把整轮 600 秒的预算顶穿，
  * fire 失败重跑，用户拿到的是一句失败说明而不是那条已经写好的回复。
  *
- * 取舍：回复优先，情绪让路。没赶上就不带结果（这一轮的情绪更新丢掉），但仍然挂
- * amsgEmotionDone + 一句原因——客户端那盏「情绪更新中」得有人来熄，静默丢弃只会让它
- * 一直亮到安全网超时。不留后台续写：worker 交还 payload 之后这一跳很快就结束了，
- * 悬着的请求不保证还能跑完，客户端也没有第二条取回路径。
+ * 取舍：回复优先，情绪让路。没赶上的评估不作废：push 上挂引用键 + pending 标记
+ * （客户端那盏「情绪更新中」继续亮着），收尾 hook（amsgFireSettled，上游会 await 它）
+ * 接着等评估出结果，写进旁路存储（amsgEmotionUpdateKey），客户端对着引用键轮询补落
+ * ——对齐本地路径「评估慢是晚到，不是丢弃」的语义。评估自带 EMOTION_EVAL_TIMEOUT_MS，
+ * 这段续等是有界的。
  */
 export const EMOTION_EVAL_RIDE_ALONG_MS = 10_000;
 
-/** 没赶上这班车时给用户看的一句话（跟着 amsgEmotionDone 一起回去）。 */
+/** 旁路也用不上（任务行没有 clientTaskId）时给用户看的一句话（跟着 amsgEmotionDone 回去）。 */
 const EMOTION_EVAL_LATE_REASON = '情绪评估没赶上这条回复（副 API 太慢），这一轮先不更新';
 
 /** 等评估结果，最多等 EMOTION_EVAL_RIDE_ALONG_MS；没赶上返回 null，回复照发。 */
@@ -1514,6 +1543,7 @@ export const amsgHooks = {
         : null,
       // 下面即时对话那一支起跑（要等请求消息拼完才知道给评估喂什么）。
       emotionEvalPromise: null,
+      emotionLatePending: false,
     };
     ctx.scratch.fire = stash;
 
@@ -1869,10 +1899,23 @@ export const amsgHooks = {
         }
         if (stash.emotionEvalPromise) {
           const outcome = await raceEmotionEval(stash.emotionEvalPromise);
-          lastMeta.amsgEmotionDone = true;
-          if (outcome === null) lastMeta.amsgEmotionError = EMOTION_EVAL_LATE_REASON;
-          else if (outcome.raw) lastMeta.amsgEmotionUpdate = outcome.raw;
-          else if (outcome.error) lastMeta.amsgEmotionError = outcome.error;
+          if (outcome === null) {
+            // 没赶上顺风车：不作废也不熄灯。挂引用键 + pending 标记，收尾 hook
+            // （amsgFireSettled）等评估出结果写进旁路，客户端对着引用键轮询补落。
+            // clientTaskId 缺失时旁路无处可写（存储键按它编），退回「这一轮不更新」。
+            if (stash.clientTaskId) {
+              lastMeta.amsgEmotionRef = amsgEmotionUpdateKey(stash.clientTaskId);
+              lastMeta.amsgEmotionPending = true;
+              stash.emotionLatePending = true;
+            } else {
+              lastMeta.amsgEmotionDone = true;
+              lastMeta.amsgEmotionError = EMOTION_EVAL_LATE_REASON;
+            }
+          } else {
+            lastMeta.amsgEmotionDone = true;
+            if (outcome.raw) lastMeta.amsgEmotionUpdate = outcome.raw;
+            else if (outcome.error) lastMeta.amsgEmotionError = outcome.error;
+          }
         }
         if (Object.keys(lastMeta).length > 0) {
           payloads = attachMetaAt(payloads, payloads.length - 1, lastMeta);

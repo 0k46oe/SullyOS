@@ -237,7 +237,7 @@ const runFire = async (
     llmResponse: opts.llmResponse ?? {}, llmOutputText: opts.llmOutput, contactName: 'Nyah',
     metadata, scratch, writeState: store.writeState,
   } as any) as any;
-  return { decision, metadata };
+  return { decision, metadata, scratch };
 };
 
 describe('onBeforeFire 四道门', () => {
@@ -3355,10 +3355,73 @@ describe('即时对话的云端情绪评估', () => {
       expect(payloads.map((p) => p.message)).toEqual(['在的。', '怎么啦？']);
 
       const lastMeta = payloads[payloads.length - 1].metadata;
-      // 结果没赶上就不搭这班车；但那盏「情绪更新中」得有人来熄，所以照样带信号 + 一句原因
+      // 结果没赶上就不搭这班车，但也不作废：挂引用键 + pending 标记，客户端对着键
+      // 轮询补落（灯继续亮着，等 amsgFireSettled 把迟到的结果写进旁路）。
       expect(lastMeta.amsgEmotionUpdate).toBeUndefined();
-      expect(lastMeta.amsgEmotionDone).toBe(true);
-      expect(lastMeta.amsgEmotionError).toContain('没赶上');
+      expect(lastMeta.amsgEmotionRef).toBe(`emotion_update:${CLIENT_TASK_ID}`);
+      expect(lastMeta.amsgEmotionPending).toBe(true);
+      expect(lastMeta.amsgEmotionDone).toBeUndefined();
+      expect(lastMeta.amsgEmotionError).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // 晚投不丢：没赶上顺风车的评估，收尾（amsgFireSettled）等它出结果写进旁路存储，
+  // 客户端按 push 上的引用键轮询补落。回归守卫——以前这一轮评估是直接作废的。
+  it('没赶上的评估晚投不丢：收尾时写进旁路存储', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveEval!: (r: Response) => void;
+      vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { resolveEval = resolve; })));
+
+      const store = makeStore();
+      const pending = evalFire(store, { amsgEmotionEval: EVAL_SPEC });
+      for (let i = 0; i < 8; i += 1) await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(EMOTION_EVAL_RIDE_ALONG_MS);
+      const { decision, scratch } = await pending;
+      const lastMeta = (decision.pushPayloads as Array<Record<string, any>>).slice(-1)[0].metadata;
+      expect(lastMeta.amsgEmotionPending).toBe(true);
+
+      // 收尾开始后评估才回来 → 结果落进旁路键，客户端轮询取得到
+      const settling = amsgFireSettled({
+        status: 'sent', sentCount: 2, task: { retry_count: 0 },
+        scratch, writeState: store.writeState,
+      } as any);
+      resolveEval(new Response(JSON.stringify({
+        choices: [{ message: { content: '{"changed":true,"buffs":[]} LATE-EVAL-MARKER' } }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } }));
+      for (let i = 0; i < 8; i += 1) await vi.advanceTimersByTimeAsync(0);
+      await settling;
+
+      expect(store.rows.get(`emotion_update:${CLIENT_TASK_ID}`)).toContain('LATE-EVAL-MARKER');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // 一段都没送出去（推送全灭 → 任务整轮重跑）时不写晚投：客户端没收到 pending 标记，
+  // 没人会来取这一份，重跑的那轮会带着自己的评估重新走完整流程。
+  it('推送没送出去时收尾不写晚投评估', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})));
+
+      const store = makeStore();
+      const pending = evalFire(store, { amsgEmotionEval: EVAL_SPEC });
+      for (let i = 0; i < 8; i += 1) await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(EMOTION_EVAL_RIDE_ALONG_MS);
+      const { scratch } = await pending;
+
+      const settling = amsgFireSettled({
+        status: 'failed', sentCount: 0, task: { retry_count: 0 },
+        error: new Error('push send failed'),
+        scratch, writeState: store.writeState,
+      } as any);
+      for (let i = 0; i < 8; i += 1) await vi.advanceTimersByTimeAsync(0);
+      await settling;
+
+      expect(store.rows.has(`emotion_update:${CLIENT_TASK_ID}`)).toBe(false);
     } finally {
       vi.useRealTimers();
     }

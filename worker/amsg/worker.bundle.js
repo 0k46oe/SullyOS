@@ -10029,6 +10029,21 @@ var amsgFireSettled = async (info) => {
       retryCount: typeof info.task?.retry_count === "number" ? info.task.retry_count : 0
     });
   }
+  if (stash.instant && stash.emotionLatePending && stash.emotionEvalPromise && stash.clientTaskId && (info.sentCount ?? 0) > 0) {
+    stash.emotionLatePending = false;
+    try {
+      const outcome = await stash.emotionEvalPromise;
+      if (outcome.raw) {
+        await info.writeState(amsgStateNamespace(stash.charId), [
+          { key: amsgEmotionUpdateKey(stash.clientTaskId), value: outcome.raw }
+        ]);
+      } else {
+        console.warn("[amsg:emotion] \u665A\u6295\u8BC4\u4F30\u6CA1\u8DD1\u51FA\u7ED3\u679C\uFF08\u8FD9\u4E00\u8F6E\u60C5\u7EEA\u4E0D\u66F4\u65B0\uFF09", outcome.error);
+      }
+    } catch (error) {
+      console.warn("[amsg:emotion] \u665A\u6295\u8BC4\u4F30\u6536\u5C3E\u5931\u8D25\uFF08\u8FD9\u4E00\u8F6E\u60C5\u7EEA\u4E0D\u66F4\u65B0\uFF09", error);
+    }
+  }
   const texts = stash.selfLogTexts;
   stash.selfLogTexts = null;
   const sentCount = info.sentCount ?? 0;
@@ -10478,7 +10493,8 @@ var amsgHooks = {
       // 顺手读进来：发完要在它上面追加写回，这里不读的话 onLLMOutput 得为它单独查一次库。
       chatOutbox: instant ? parseChatOutbox(charRows.find((r) => r.key === AMSG_CHAT_OUTBOX_KEY)?.value) : null,
       // 下面即时对话那一支起跑（要等请求消息拼完才知道给评估喂什么）。
-      emotionEvalPromise: null
+      emotionEvalPromise: null,
+      emotionLatePending: false
     };
     ctx.scratch.fire = stash;
     const canManageTasks = canSelfSchedule && mcpNative && typeof ctx.cancelTask === "function" && typeof ctx.renewTask === "function";
@@ -10689,10 +10705,20 @@ var amsgHooks = {
         }
         if (stash.emotionEvalPromise) {
           const outcome = await raceEmotionEval(stash.emotionEvalPromise);
-          lastMeta.amsgEmotionDone = true;
-          if (outcome === null) lastMeta.amsgEmotionError = EMOTION_EVAL_LATE_REASON;
-          else if (outcome.raw) lastMeta.amsgEmotionUpdate = outcome.raw;
-          else if (outcome.error) lastMeta.amsgEmotionError = outcome.error;
+          if (outcome === null) {
+            if (stash.clientTaskId) {
+              lastMeta.amsgEmotionRef = amsgEmotionUpdateKey(stash.clientTaskId);
+              lastMeta.amsgEmotionPending = true;
+              stash.emotionLatePending = true;
+            } else {
+              lastMeta.amsgEmotionDone = true;
+              lastMeta.amsgEmotionError = EMOTION_EVAL_LATE_REASON;
+            }
+          } else {
+            lastMeta.amsgEmotionDone = true;
+            if (outcome.raw) lastMeta.amsgEmotionUpdate = outcome.raw;
+            else if (outcome.error) lastMeta.amsgEmotionError = outcome.error;
+          }
         }
         if (Object.keys(lastMeta).length > 0) {
           payloads = attachMetaAt(payloads, payloads.length - 1, lastMeta);
