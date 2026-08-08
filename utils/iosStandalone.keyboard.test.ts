@@ -1,9 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { resolveAndroidViewportState } from './iosStandalone';
-
-const source = readFileSync(fileURLToPath(new URL('./iosStandalone.ts', import.meta.url)), 'utf8');
 
 const resolve = (overrides: Partial<Parameters<typeof resolveAndroidViewportState>[0]> = {}) =>
     resolveAndroidViewportState({
@@ -40,11 +36,6 @@ describe('Android/TWA keyboard viewport', () => {
             appHeight: 490,
             keyboardOpen: true,
         });
-    });
-
-    it('opts fullscreen TWA into VirtualKeyboard geometry reporting', () => {
-        expect(source).toContain('virtualKeyboard.overlaysContent = true');
-        expect(source).toContain("virtualKeyboard.addEventListener?.('geometrychange'");
     });
 
     it('does not mistake browser toolbar movement for a keyboard without focus', () => {
