@@ -7,7 +7,6 @@ import { extractImagesInPlace, deepCloneForExport } from '../utils/backupExport'
 import { isBlobRef, getBlobForRef, migrateDataUrlToRef, migrateAppearancePresetBlobRefs, resolveBlobRefsDeep, BLOBREF_PREFIX, deleteBlobRefIfUnreferenced } from '../utils/blobRef';
 import { LEGACY_DEFAULT_WALLPAPER, isLegacyDefaultWallpaper, shouldPreserveLegacyDefaultWallpaper } from '../utils/wallpaperCompat';
 import { migrateSharkpanAssets } from '../utils/sharkpanAssetMigration';
-import { migrateLegacyRoomTemplateAssets } from '../utils/roomAssetUrl';
 import { SULLY_DEFAULT_AVATAR_URL, shouldMigrateSullyAvatar } from '../utils/sullyAvatar';
 import { exportStoryTheaterAppearanceSetting, restoreStoryTheaterAppearanceSetting } from '../utils/storyTheaterBackup';
 import { createV2ArrayFieldWriter, writeV2Backup, assembleV2Backup, type BackupManifest, type ZipFileWriter, type ZipFileReader } from '../utils/backupFormat';
@@ -1447,10 +1446,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         // 老用户库存的鲨盘图链接就地改写成 jsDelivr（幂等、跑一次）。放在读 characters 之前，
         // 让下面 getAllCharacters 拿到的就是改好的数据。见 utils/sharkpanAssetMigration.ts。
         await migrateSharkpanAssets();
-        // Old Capacitor backups may contain built-in sample-room images resolved
-        // as https://localhost/... . Rebase only those known template assets to
-        // the current deployment before loading characters into React state.
-        await migrateLegacyRoomTemplateAssets();
 
         // 用 allSettled 而非 all：早期 Promise.all 只要任意一个 store 读取 reject，
         // 整批加载就全挂 → setCharacters / setWorldbooks 都不执行 → 角色和世界书"凭空消失"
