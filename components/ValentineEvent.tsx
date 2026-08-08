@@ -663,7 +663,7 @@ export const ValentineSession: React.FC<ValentineSessionProps> = ({ charId, onCl
         if (!recordRef.current || isExporting) return;
         setIsExporting(true);
         try {
-            const mod: any = await import('https://esm.sh/html2canvas@1.4.1');
+            const mod = await import('https://esm.sh/html2canvas@1.4.1');
             const html2canvas = mod.default;
             const canvas = await html2canvas(recordRef.current, {
                 backgroundColor: '#faf6f1',
