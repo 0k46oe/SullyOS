@@ -33,6 +33,7 @@ import ApiCallLogModal from '../components/settings/ApiCallLogModal';
 import { DB } from '../utils/db';
 import { getBackupReminderState, setBackupReminderIntervalDays, daysSinceLastBackup, BACKUP_REMINDER_MIN_DAYS, BACKUP_REMINDER_MAX_DAYS } from '../utils/backupReminder';
 import { bucketRetryCount, isAnalyticsConfigured, isAnalyticsEnabled, setAnalyticsEnabled, trackEvent } from '../utils/analytics';
+import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '../utils/apiConfigNormalize';
 
 // hot_news（news.orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
 const HOTNEWS_PLATFORM_OPTIONS: { key: string; label: string }[] = [
@@ -782,14 +783,14 @@ const Settings: React.FC = () => {
   const loadPreset = (preset: typeof apiPresets[0]) => {
       setSelectedPresetId(preset.id);
       setSelectedPresetName(preset.name);
-      setLocalUrl(preset.config.baseUrl);
-      setLocalKey(preset.config.apiKey);
-      setLocalModel(String(preset.config.model || ''));
+      setLocalUrl(normalizeApiBaseUrl(preset.config.baseUrl));
+      setLocalKey(normalizeApiCredential(preset.config.apiKey));
+      setLocalModel(normalizeApiModel(preset.config.model));
       setLocalStream(preset.config.stream === true);
       setLocalTemperature(typeof preset.config.temperature === 'number' ? preset.config.temperature : 0.85);
       // MiniMax / AceStep settings are NOT overwritten by presets — typically one user
       // has only one MiniMax / Replicate account regardless of which LLM preset they use.
-      addToast(`已加载配置: ${preset.name}`, 'info');
+      addToast(`已载入预设：${preset.name}；点「保存配置」后才会切换生效`, 'info');
   };
 
   const cancelPresetDeleteHold = useCallback(() => {
@@ -835,9 +836,9 @@ const Settings: React.FC = () => {
           return;
       }
       addApiPreset(newPresetName, {
-        baseUrl: localUrl,
-        apiKey: localKey,
-        model: localModel,
+        baseUrl: normalizeApiBaseUrl(localUrl),
+        apiKey: normalizeApiCredential(localKey),
+        model: normalizeApiModel(localModel),
         stream: localStream,
         temperature: localTemperature,
       });
@@ -853,12 +854,15 @@ const Settings: React.FC = () => {
       return;
     }
     const nextConfig = {
-      apiKey: localKey,
-      baseUrl: localUrl,
-      model: localModel,
+      apiKey: normalizeApiCredential(localKey),
+      baseUrl: normalizeApiBaseUrl(localUrl),
+      model: normalizeApiModel(localModel),
       stream: localStream,
       temperature: localTemperature,
     };
+    setLocalKey(nextConfig.apiKey);
+    setLocalUrl(nextConfig.baseUrl);
+    setLocalModel(nextConfig.model);
     updateApiConfig(nextConfig);
     if (selectedApiPreset) {
       updateApiPreset(selectedApiPreset.id, presetName, {
@@ -944,16 +948,17 @@ const Settings: React.FC = () => {
   };
 
   const fetchModels = async () => {
-    if (!localUrl) { setStatusMsg('请先填写 URL'); return; }
+    const baseUrl = normalizeApiBaseUrl(localUrl);
+    const apiKey = normalizeApiCredential(localKey);
+    if (!baseUrl) { setStatusMsg('请先填写 URL'); return; }
     setIsLoadingModels(true);
     setStatusMsg('正在连接...');
     try {
-        const baseUrl = localUrl.replace(/\/+$/, '');
         const response = await fetch(`${baseUrl}/models`, {
             method: 'GET',
-            headers: { 'Authorization': `Bearer ${localKey}`, 'Content-Type': 'application/json' }
+            headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
         });
-        if (!response.ok) throw new Error(`Status ${response.status}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await safeResponseJson(response);
         // Support common OpenAI-compatible and nested gateway response formats.
         const models = extractModelIds(data);
@@ -965,7 +970,7 @@ const Settings: React.FC = () => {
         } else { setStatusMsg('模型列表为空或格式不兼容'); }
     } catch (error: any) {
         console.error(error);
-        setStatusMsg('连接失败');
+        setStatusMsg(`连接失败${error?.message ? `：${error.message}` : ''}`);
     } finally {
         setIsLoadingModels(false);
     }

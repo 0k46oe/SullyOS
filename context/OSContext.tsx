@@ -24,8 +24,9 @@ import { captureApiRequestOnce, getApiCallAmbientContext, recordApiCall, setApiC
 import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
 import { INSTALLED_APPS, HIDDEN_APP_NAMES } from '../constants';
-import { trackEvent, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, trackCurrentFeaturesOnce } from '../utils/analytics';
+import { isAnalyticsRequestUrl, trackEvent, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, trackCurrentFeaturesOnce } from '../utils/analytics';
 import { collectAppearance, collectCharSettings, collectDataScale, collectFeatureFlagsAsync } from '../utils/analyticsSnapshot';
+import { normalizeApiConfig, normalizeApiPreset } from '../utils/apiConfigNormalize';
 import { markBackupDone } from '../utils/backupReminder';
 import { normalizeCharacterImpression, normalizeCharacterDefaults } from '../utils/impression';
 import { normalizeModelIds } from '../utils/modelList';
@@ -1030,7 +1031,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       const patchedFetch = async (...args: [RequestInfo | URL, RequestInit?]) => {
           const [resource, config] = args;
           
-          const urlStr = String(resource);
+          const urlStr = typeof resource === 'string'
+              ? resource
+              : (typeof Request !== 'undefined' && resource instanceof Request)
+                  ? resource.url
+                  : resource instanceof URL
+                      ? resource.href
+                      : String(resource);
           const fetchStartedAt = Date.now();
           // Bare fetch calls do not carry explicit metadata. Snapshot the active
           // App now; reading the ambient value after a long response would label
@@ -1189,14 +1196,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   updateApiRequestCaptureUsage({ captureId: apiRequestCaptureId, ok: false });
                   recordApiCall({ requestId: (config as any)?.__sullyApiCallId, url: urlStr, body: (sendArgs[1] as any)?.body, ok: false, meta: (config as any)?.__sullyMeta || ambientMetaAtStart, durationMs: Date.now() - fetchStartedAt });
               }
-              setSystemLogs(prev => [{
-                  id: `log-${Date.now()}`,
-                  timestamp: Date.now(),
-                  type: 'network',
-                  source: 'Network',
-                  message: err.message || 'Fetch Failed',
-                  detail: `URL: ${urlStr}`
-              }, ...prev.slice(0, 49)]);
+              if (!isAnalyticsRequestUrl(urlStr)) {
+                  setSystemLogs(prev => [{
+                      id: `log-${Date.now()}`,
+                      timestamp: Date.now(),
+                      type: 'network',
+                      source: 'Network',
+                      message: err.message || 'Fetch Failed',
+                      detail: `URL: ${urlStr}`
+                  }, ...prev.slice(0, 49)]);
+              }
               throw err;
           }
       };
@@ -1286,12 +1295,20 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
              } catch(e) { console.error('Theme load error', e); }
         }
         
-        if (savedApi) setApiConfig(JSON.parse(savedApi));
+        if (savedApi) {
+            const normalizedApi = normalizeApiConfig({ ...defaultApiConfig, ...JSON.parse(savedApi) });
+            setApiConfig(normalizedApi);
+            localStorage.setItem('os_api_config', JSON.stringify(normalizedApi));
+        }
         if (savedModels) {
             try { setAvailableModels(normalizeModelIds(JSON.parse(savedModels))); }
             catch (error) { console.warn('Model list load error', error); }
         }
-        if (savedPresets) setApiPresets(JSON.parse(savedPresets));
+        if (savedPresets) {
+            const normalizedPresets = (JSON.parse(savedPresets) as ApiPreset[]).map(normalizeApiPreset);
+            setApiPresets(normalizedPresets);
+            localStorage.setItem('os_api_presets', JSON.stringify(normalizedPresets));
+        }
 
         // 加载实时配置
         const savedRealtimeConfig = localStorage.getItem('os_realtime_config');
@@ -2705,7 +2722,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         addToast('主题没能保存到本地（存储空间可能已满），重启后可能会还原', 'error');
     }
   };
-  const updateApiConfig = (updates: Partial<APIConfig>) => { const newConfig = { ...apiConfig, ...updates }; setApiConfig(newConfig); localStorage.setItem('os_api_config', JSON.stringify(newConfig)); };
+  const updateApiConfig = (updates: Partial<APIConfig>) => { const newConfig = normalizeApiConfig({ ...apiConfig, ...updates }); setApiConfig(newConfig); localStorage.setItem('os_api_config', JSON.stringify(newConfig)); };
   const updateRealtimeConfig = (updates: Partial<RealtimeConfig>) => { const newConfig = { ...realtimeConfig, ...updates }; setRealtimeConfig(newConfig); localStorage.setItem('os_realtime_config', JSON.stringify(newConfig)); };
 
   // Cloud Backup functions
@@ -2830,10 +2847,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       setAvailableModels(safeModels);
       localStorage.setItem('os_available_models', JSON.stringify(safeModels));
   };
-  const addApiPreset = (name: string, config: APIConfig) => { setApiPresets(prev => { const next = [...prev, { id: Date.now().toString(), name, config }]; localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
-  const updateApiPreset = (id: string, name: string, config: APIConfig) => { setApiPresets(prev => { const next = prev.map(p => p.id === id ? { ...p, name, config } : p); localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
+  const addApiPreset = (name: string, config: APIConfig) => { setApiPresets(prev => { const next = [...prev, normalizeApiPreset({ id: Date.now().toString(), name, config })]; localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
+  const updateApiPreset = (id: string, name: string, config: APIConfig) => { setApiPresets(prev => { const next = prev.map(p => p.id === id ? normalizeApiPreset({ ...p, name, config }) : p); localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
   const removeApiPreset = (id: string) => { setApiPresets(prev => { const next = prev.filter(p => p.id !== id); localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
-  const savePresets = (presets: ApiPreset[]) => { setApiPresets(presets); localStorage.setItem('os_api_presets', JSON.stringify(presets)); };
+  const savePresets = (presets: ApiPreset[]) => { const normalized = presets.map(normalizeApiPreset); setApiPresets(normalized); localStorage.setItem('os_api_presets', JSON.stringify(normalized)); };
   const addCharacter = async () => {
     const name = 'New Character';
     // 默认开启 emotionConfig.enabled，让"开日程 = 开情绪"这条隐含约定对新角色也成立。
