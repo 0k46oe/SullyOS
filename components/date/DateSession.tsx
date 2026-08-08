@@ -119,10 +119,13 @@ interface DateSessionProps {
     historyReachedEnd?: boolean;
 }
 
-const NOVEL_MESSAGE_WINDOW_SIZE = 80;
+// Long replies can expand into many DOM lines. Keeping a smaller reading window
+// materially reduces iOS WebKit content-process crashes while older entries
+// remain available through the existing "加载更早" button.
+const NOVEL_MESSAGE_WINDOW_SIZE = 40;
 /** 铺满已加载部分后，每次回库多取多少条见面消息。 */
 const NOVEL_HISTORY_FETCH_STEP = 220;
-const NOVEL_MESSAGE_LOAD_STEP = 80;
+const NOVEL_MESSAGE_LOAD_STEP = 40;
 const REQUIRED_EMOTIONS_SET = ['normal', 'happy', 'angry', 'sad', 'shy'];
 
 const DateSession: React.FC<DateSessionProps> = ({ 
