@@ -255,7 +255,8 @@ describe('ActiveMsgClient.getRemoteTaskStatus', () => {
 
   it('网络故障要抛，不能悄悄当成 gone', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
-    await expect(ActiveMsgClient.getRemoteTaskStatus('task-1')).rejects.toThrow(/Failed to fetch/);
+    // 抛出来的是翻好的整句，不是浏览器那句 "Failed to fetch"（见 amsgDiagnostics）。
+    await expect(ActiveMsgClient.getRemoteTaskStatus('task-1')).rejects.toThrow(/连不上你的 Worker/);
   });
 
   // 地址填错时 worker 对未知路由也回 404，只是错误码不同。照 HTTP 状态判就会把

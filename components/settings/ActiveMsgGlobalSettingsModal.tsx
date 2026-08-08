@@ -1,7 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Modal from '../os/Modal';
 import { ActiveMsg2GlobalConfig, RealtimeConfig } from '../../types';
-import { ActiveMsgClient, ActiveMsg2PushStatus, readAmsgFailKind } from '../../utils/activeMsgClient';
+import {
+  ActiveMsgClient, ActiveMsg2PushStatus, fetchWorkerDiagnostics, readAmsgFailKind,
+} from '../../utils/activeMsgClient';
+import {
+  AmsgDiagnosticLevel, AmsgDiagnosticsProbe,
+  buildAmsgDiagnosticRows, summarizeAmsgDiagnostics,
+} from '../../utils/amsgDiagnostics';
 import { ActiveMsgStore, maskActiveMsgUserId } from '../../utils/activeMsgStore';
 import { cancelAllRemoteAmsgTasks, isWorkerUrlCleared, wipeAmsgCloudData } from '../../utils/amsgStateSync';
 import {
@@ -76,6 +82,14 @@ const SETUP_WALKTHROUGH_URL = 'https://github.com/qegj567-cloud/SullyOS/blob/mas
 // 一个连不上、反复点「连接」的人否则能一个人刷出十几条同样的结果，把分布带歪。
 let workerCapsReported = false;
 
+/** 体检每一行的配色与那一列小字。unknown 用灰：查不出结论时别拿颜色暗示好坏。 */
+const DIAGNOSTIC_STYLES: Record<AmsgDiagnosticLevel, { dot: string; text: string; word: string }> = {
+  ok: { dot: 'bg-emerald-500', text: 'text-emerald-600', word: '正常' },
+  warn: { dot: 'bg-amber-500', text: 'text-amber-600', word: '注意' },
+  bad: { dot: 'bg-rose-500', text: 'text-rose-600', word: '有问题' },
+  unknown: { dot: 'bg-slate-300', text: 'text-slate-400', word: '查不到' },
+};
+
 /** 刚生成的密钥明文：输入框是 password 型，只能在这一处让用户看见并手动复制。 */
 const SecretReveal: React.FC<{ value: string; className?: string }> = ({ value, className = '' }) => (
   <p className={`font-mono text-[10px] leading-relaxed text-slate-500 break-all bg-white border border-slate-200 rounded-xl px-2 py-1.5 ${className}`}>
@@ -112,6 +126,12 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   // 「生成 Master Key」只在本次打开期间展示，前端不落盘——它是 worker 侧密钥，粘进 CF env 即可。
   const [generatedMasterKey, setGeneratedMasterKey] = useState('');
   const [generatedServerToken, setGeneratedServerToken] = useState('');
+
+  // 体检：worker 的 GET /debug 结果。它早就把「缺哪个变量、缺哪张表、缺哪几列、cron
+  // 有没有停」都算好了，但入口一直只有手拼 URL——而这几样恰恰是「界面上一切正常、
+  // 就是一条都不发」的全部原因。存原始探测结果，红绿灯在渲染时算（推送状态一变就跟着走）。
+  const [diagnosticsProbe, setDiagnosticsProbe] = useState<AmsgDiagnosticsProbe | null>(null);
+  const [diagnosing, setDiagnosing] = useState(false);
 
   const [workerOutdated, setWorkerOutdated] = useState(false);
   /** 自更新成功后 worker 报回来的代码指纹，显示出来好让人确认这次真换了。 */
@@ -153,6 +173,19 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   // 取消远端任务的那几个请求还得发到旧那台上去。
   const savedWorkerUrlRef = useRef('');
 
+  /**
+   * 拉一次体检。没填地址时不拉——那时候唯一该做的事是把地址填上，
+   * 摆一排红灯只会让人以为哪儿坏了。
+   */
+  const runDiagnostics = async () => {
+    setDiagnosing(true);
+    try {
+      setDiagnosticsProbe(await fetchWorkerDiagnostics());
+    } finally {
+      setDiagnosing(false);
+    }
+  };
+
   const refresh = async () => {
     const nextConfig = await ActiveMsgClient.getGlobalConfig();
     const nextPushStatus = await ActiveMsgClient.getPushStatus();
@@ -163,8 +196,10 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     void probeWorkerCaps(Boolean(nextConfig.workerUrl?.trim()));
     if (nextConfig.workerUrl?.trim()) {
       void ActiveMsgClient.probeInstantChatSupport().then(setInstantChatSupported);
+      void runDiagnostics();
     } else {
       setInstantChatSupported(false);
+      setDiagnosticsProbe(null);
     }
   };
 
@@ -446,6 +481,16 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
    * 没连上就谈不上推送，没推送权限就算发出去也收不到，worker 太旧则端点根本不存在，
    * 最后是两条发送路只能留一条。
    */
+  // 体检：探测结果 + 「这台设备订阅了没」这个只有前端知道的事实，红绿灯判定全在
+  // amsgDiagnostics 那份纯函数里（那边有回归测试钉着）。
+  const diagnosticRows = diagnosticsProbe
+    ? buildAmsgDiagnosticRows({
+      probe: diagnosticsProbe,
+      localPushSubscribed: Boolean(pushStatus?.hasSubscription),
+    })
+    : [];
+  const diagnosticLevel = diagnosticRows.length ? summarizeAmsgDiagnostics(diagnosticRows) : 'unknown';
+
   const instantChatBlockedReason = !isConnected
     ? '先在上面把 Worker 连上。'
     : !pushStatus?.hasSubscription
@@ -841,6 +886,59 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
             </div>
           ) : null}
         </div>
+
+        {/* 体检。主动消息坏掉的那几种方式在界面上全是隐形的：D1 没绑、表结构是旧的、
+            VAPID 没配、云端没登记收件设备——任务照建、面板照常，就是一条都不发。
+            Worker 的 /debug 一直算得出这些，这里只是把它摆到看得见的地方。 */}
+        {config.workerUrl?.trim() ? (
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-slate-700">体检</span>
+                {diagnosticRows.length ? (
+                  <span className={`text-xs font-bold ${DIAGNOSTIC_STYLES[diagnosticLevel].text}`}>
+                    {diagnosticLevel === 'ok' ? '都正常' : diagnosticLevel === 'bad' ? '有问题' : diagnosticLevel === 'warn' ? '有提醒' : '查不全'}
+                  </span>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                onClick={() => void runDiagnostics()}
+                disabled={diagnosing}
+                className="shrink-0 px-3 py-1.5 text-[11px] rounded-xl font-bold bg-white border border-slate-200 text-slate-600 active:scale-95 transition-transform disabled:opacity-50"
+              >
+                {diagnosing ? '检查中…' : '重新检查'}
+              </button>
+            </div>
+
+            {diagnosticRows.length ? (
+              <div className="space-y-2">
+                {diagnosticRows.map((row) => {
+                  const style = DIAGNOSTIC_STYLES[row.level];
+                  return (
+                    <div key={row.key}>
+                      <div className="flex items-center gap-2">
+                        <span className={`shrink-0 w-1.5 h-1.5 rounded-full ${style.dot}`} />
+                        <span className="flex-1 text-xs font-bold text-slate-600">{row.label}</span>
+                        <span className={`shrink-0 text-[11px] font-bold ${style.text}`}>{style.word}</span>
+                      </div>
+                      {/* 正常的行不展开说明：全绿时这一列要短到能一眼扫完。 */}
+                      {row.level === 'ok' ? null : (
+                        <p className="mt-1 pl-3.5 text-[11px] leading-relaxed text-slate-500 whitespace-pre-line">
+                          {row.detail}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-xs leading-relaxed text-slate-400">
+                {diagnosing ? '正在问 Worker…' : '还没有结果，点右上角检查一次。'}
+              </p>
+            )}
+          </div>
+        ) : null}
 
         <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
           <div className="flex items-center justify-between gap-3">

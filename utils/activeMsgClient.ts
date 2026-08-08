@@ -22,6 +22,9 @@ import {
   resolveExpirePolicy, toDatetimeLocalValue,
 } from './amsg2Tasks';
 import { AMSG_CHAT_PRESENCE_KEY, AmsgChatPresence } from './amsgChatPresence';
+import {
+  AmsgDiagnosticsProbe, AmsgFailKind, describeAmsgFetchFailure, parseAmsgDebugReport,
+} from './amsgDiagnostics';
 // 「这个角色欠着一条即时对话回复吗」的两个原始信号（待收记录 + 发送在飞）。
 // amsgInstantChat 反过来也 import 这个文件，两边都只在函数体里用对方，模块求值期
 // 谁都不碰谁，所以这个环是安全的；换成在这里另读一遍 localStorage 才是真麻烦
@@ -190,37 +193,10 @@ export const toRemoteAvatarUrl = (avatar: string | undefined | null): string | u
   }
 };
 
-const looksLikeHtmlFallbackError = (message: string) => (
-  /HTML/i.test(message) ||
-  message.includes(`Unexpected token '<'`) ||
-  /<!doctype/i.test(message) ||
-  /<html/i.test(message)
-);
-
-// ─── 失败归类（给使用统计分档用）───
-//
-// 「连接失败」在图上只有一格的话，地址填错、密钥对不上、D1 没绑、纯断网会长成一个样，
-// 而这四种要修的引导完全不同。所以在**抛错的那一刻**按源码里写死的谓词挂一个代号，
-// 上报只带这个代号。
-//
-// 报错原文（可能带 Worker 地址、push endpoint）一个字都不进上报——挂在这里的
-// 永远是下面这个联合类型里的字面量之一，不是从异常对象上读出来的任何东西。
-// 见 docs/analytics.md 「加新埋点的规矩」第 4 条。
-export type AmsgFailKind =
-  | '地址没填'
-  | '打到网页了'
-  | '鉴权失败'
-  | '端点不存在'
-  | '建表失败'
-  | '配置缺失'
-  | '网络失败'
-  | '权限被拒'
-  | '不支持推送'
-  | 'worker没配VAPID'
-  | '订阅失败'
-  | '推送通道不通'
-  | '端点僵尸'
-  | '其他';
+// 失败归类（AmsgFailKind）连同「把 fetch 异常翻成人话」都住在 ./amsgDiagnostics：
+// 那是一份纯函数叶子，设置页的体检面板也要用同一套判定。这里原样转出去，
+// 外面按 `from './activeMsgClient'` 引的地方不用改。
+export type { AmsgFailKind } from './amsgDiagnostics';
 
 const FAIL_KIND_PROP = '__amsgFailKind';
 
@@ -276,6 +252,50 @@ const inspectWorkerConfig = async (config: ActiveMsg2GlobalConfig): Promise<Amsg
 };
 
 /**
+ * 拉一次体检（`GET /debug`）。
+ *
+ * 跟 inspectWorkerConfig 的差别在于失败也要有结论：那个是连接流程里的抢跑一步，拿不到
+ * 就退回原流程；这个是用户主动来看「我到底哪儿没配对」的，连不上本身就是第一条结论，
+ * 咽下去的话面板会一片空白，比不体检还难受。
+ *
+ * 端点是后加的，旧 worker 回 404（或者代理塞回来一段 HTML）。那种情况标成 unsupported——
+ * 它只是查不了，不是坏了，报红会让人跑去改根本没错的配置。
+ */
+export const fetchWorkerDiagnostics = async (): Promise<AmsgDiagnosticsProbe> => {
+  let config: ActiveMsg2GlobalConfig;
+  try {
+    config = await ensureWorkerReady();
+  } catch (error: any) {
+    return { reachable: false, reason: error?.message || '还没填 Worker 地址。' };
+  }
+
+  try {
+    // 自带超时：连不上 Cloudflare 时 TCP 可以干等几十秒，而这个面板正是用户来问
+    // 「到底怎么了」的地方——转圈转到天荒地老跟没有体检没区别。超时会被翻成
+    // 「等太久」那一句，它跟「不通」的处理办法本来就不一样。
+    const signal = typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(8000) : undefined;
+    const { status, body } = await fetchWithAuthRaw('debug', config, { method: 'GET', signal }, '体检');
+    const report = parseAmsgDebugReport(body);
+    if (report) return { reachable: true, report };
+
+    // 401/403 是真配错了（共享密钥两边对不上），不是「版本旧」——标成 unsupported
+    // 会让人跑去点更新，而更新一遍照样进不来。
+    if (status === 401 || status === 403) {
+      return { reachable: false, reason: `Worker 拒绝了这次请求（HTTP ${status}），多半是共享密钥两边对不上。` };
+    }
+    // 200 但形状对不上，跟 404 一样都是「这台 worker 上没有这个端点」。
+    return {
+      reachable: false,
+      unsupported: true,
+      reason: 'Worker 上跑的代码还没有体检端点。回你 fork 的 sullyos-workers 点一下 Sync fork，或者用上面的「更新后端到最新版本」，之后再来看。',
+    };
+  } catch (error: any) {
+    // fetchWithAuthRaw 抛出来的已经是人话了（见 amsgDiagnostics 的 describeAmsgFetchFailure）。
+    return { reachable: false, reason: error?.message || '连不上 Worker。' };
+  }
+};
+
+/**
  * 后端自更新的回执（`POST /self-update`，见 worker/amsg/src/selfUpdate.ts）。
  * supported 为 false 表示这台 worker 还是旧版、根本没有这个端点。
  */
@@ -295,18 +315,27 @@ const resolveInitFailKind = (status: number): AmsgFailKind => {
   return '建表失败';                                         // 多半是没绑 D1（变量名 DB）
 };
 
-const normalizeActiveMsgApiError = (error: unknown, phase: string) => {
-  const message = error instanceof Error ? error.message : String(error || 'Unknown error');
-  if (looksLikeHtmlFallbackError(message)) {
-    return withFailKind(new Error(`主动消息 2.0 的 ${phase} 请求没有打到 Worker，而是拿到了网页 HTML。请确认设置里填的是已部署的 amsg Worker 地址，而不是某个网页地址。`), '打到网页了');
-  }
-  // 走到这儿的基本是 fetch 自己抛的（断网 / DNS 挂 / CORS 被拒），归网络。
-  return withFailKind(error instanceof Error ? error : new Error(message), '网络失败');
+/**
+ * 最近一次用过的 Worker 地址，只拿来把域名写进给人看的报错里。
+ *
+ * 报错想说清「连不上的是哪儿」，可有几条抛错路径手上只有 client 没有 config
+ * （取 VAPID 公钥、登记订阅）。为它们逐层加参数不划算——这个值不参与任何判定，
+ * 错了也只是那句话里少个域名。凡是走 ensureWorkerReady 的路径都会先更新它。
+ */
+let lastKnownWorkerUrl = '';
+
+const normalizeActiveMsgApiError = (error: unknown, phase: string, workerUrl?: string | null) => {
+  const described = describeAmsgFetchFailure(error, phase, workerUrl || lastKnownWorkerUrl);
+  // 尽量沿用原来那个异常对象（调用方可能还看它别的字段），只把给人看的那句话换掉。
+  const normalized = error instanceof Error ? error : new Error(described.message);
+  normalized.message = described.message;
+  return withFailKind(normalized, described.kind);
 };
 
 const ensureGlobalReady = async (): Promise<ActiveMsg2GlobalConfig> => {
   const userId = await ActiveMsgStore.ensureUserId();
   const config = await ActiveMsgStore.getGlobalConfig();
+  if (config.workerUrl?.trim()) lastKnownWorkerUrl = config.workerUrl;
   return { ...config, userId };
 };
 
@@ -339,7 +368,7 @@ const createAndInitClient = async (config: ActiveMsg2GlobalConfig) => {
   try {
     await client.init();
   } catch (error) {
-    throw normalizeActiveMsgApiError(error, '获取用户密钥');
+    throw normalizeActiveMsgApiError(error, '获取用户密钥', config.workerUrl);
   }
   return client;
 };
@@ -1130,7 +1159,7 @@ const fetchWithAuthRaw = async (
 
     return { status: response.status, body: await safeResponseJson(response) };
   } catch (error) {
-    throw normalizeActiveMsgApiError(error, phase);
+    throw normalizeActiveMsgApiError(error, phase, config.workerUrl);
   }
 };
 
