@@ -222,7 +222,7 @@ export const discardInstantChatExpiredNotices = (charId: string, uuid?: string):
 // ─── 开关 ───
 
 /** ready=false 时卡在哪一道。config-unreadable 是异常，不是「用户没开」。 */
-export type InstantChatReadinessReason = 'disabled' | 'no-worker-url' | 'config-unreadable';
+export type InstantChatReadinessReason = 'disabled' | 'char-disabled' | 'no-worker-url' | 'config-unreadable';
 
 export interface InstantChatReadiness {
   ready: boolean;
@@ -232,17 +232,25 @@ export interface InstantChatReadiness {
 /**
  * 即时对话此刻走不走得通，外加「走不通是因为什么」。
  *
- * 门槛只有两道：设置页开了、Worker 地址填着。版本门槛（worker 支不支持这个端点）只在
- * 设置页那一处探测——开发期规矩是门槛只留一处，不做逐调用 capability 预检。这里再探
- * 一次的话，每发一条消息都要多一次网络往返，而且探测失败时到底算「不支持」还是「网络
- * 抖了一下」没有正确答案。
+ * 门槛三道：角色没单独关（传了 char 才查）、设置页开了、Worker 地址填着。版本门槛
+ * （worker 支不支持这个端点）只在设置页那一处探测——开发期规矩是门槛只留一处，不做
+ * 逐调用 capability 预检。这里再探一次的话，每发一条消息都要多一次网络往返，而且探测
+ * 失败时到底算「不支持」还是「网络抖了一下」没有正确答案。
  *
  * 配置读不出来（IndexedDB 被别的标签页 versionchange 卡住、iOS 存储压力…）单独成一档：
  * 它不等于「用户没开」。当成没开的话这一轮会悄悄退回本地直连生成——用户按完发送随手
  * 锁屏，本地 fetch 被系统掐掉，回来时既没有回复也没有报错，设置页还写着「已开启」。
  * 所以这里就地 warn 一声，调用方再按这个 reason 决定要不要留一条 trace。
  */
-export const resolveInstantChatReadiness = async (): Promise<InstantChatReadiness> => {
+export const resolveInstantChatReadiness = async (
+  char?: Pick<CharacterProfile, 'activeMsg2Config'>,
+): Promise<InstantChatReadiness> => {
+  // 角色自己关了 → 这一轮回到本地前台生成。这是用户的主动选择，跟「全局没开」同一
+  // 待遇：静默走本地，不 warn 不留 trace。undefined = 跟随全局默认开，只认显式 false；
+  // 全局配置都不用读——读出什么这一轮都不上云。
+  if (char?.activeMsg2Config?.instantChatEnabled === false) {
+    return { ready: false, reason: 'char-disabled' };
+  }
   let config: Awaited<ReturnType<typeof ActiveMsgStore.getGlobalConfig>>;
   try {
     config = await ActiveMsgStore.getGlobalConfig();

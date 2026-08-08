@@ -91,6 +91,17 @@ describe('useChatAI 的分流接缝', () => {
     // 跟 veto 一样只报不拦（那条 return 的守卫在下面「留痕只此一处」那条里）。
   });
 
+  it('角色级即时对话开关吃进路由判定（char-disabled 静默走本地，不留 veto trace）', () => {
+    const routing = routingSrc();
+    // readiness 判定必须带上 char：角色单独关了的话 ready 直接为 false，veto trace 的
+    // 条件（instantChatOn && …）够不到它。不带 char 的话角色关了照上云——旧行为回潮。
+    expect(routing).toContain('resolveInstantChatReadiness(char)');
+    // 也不许给 char-disabled 单开留痕分支：那是用户的主动选择，和「全局没开」同一待遇，
+    // 每条消息刷一遍 warn 就成骚扰了。查的是带引号的字面量——真要按它分支绕不开这个比较；
+    // 注释里提一嘴不算。
+    expect(routing).not.toContain("'char-disabled'");
+  });
+
   it('上云的判定在构建 prompt 之前就定下来，并作为 timelyByWorker 交给 payload', () => {
     // 这一条钉的是「一份 prompt 只剩一个钟」：走云端时前端不烤时钟/节日/天气/热搜/
     // MCP 说明，那几段由 worker 在 fire 时刻独家补。判定要是又挪回分支里现算，

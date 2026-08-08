@@ -842,7 +842,10 @@ export const useChatAI = ({
                 : mcdMiniOpen ? 'mcd'
                     : luckinMiniOpen ? 'luckin'
                         : mcpWorkerUnreachable ? 'mcp-worker-unreachable' : null;
-            const instantChatReadiness = await resolveInstantChatReadiness();
+            // 带上 char：角色单独关了即时对话（reason char-disabled）时 ready 直接为
+            // false，和「全局没开」同一待遇——下面那条 veto trace 的条件够不到它，
+            // 静默走本地。那是用户的主动选择，每条消息刷一遍 warn 就成骚扰了。
+            const instantChatReadiness = await resolveInstantChatReadiness(char);
             const instantChatOn = instantChatReadiness.ready;
             const instantChatRoute = instantChatOn && !instantChatVeto && !instantPushConfigured;
             // 「即时对话开着、这一轮却没上云」的所有情形都在这一处留痕，三种原因去向不同：

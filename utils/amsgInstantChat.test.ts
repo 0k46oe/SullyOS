@@ -531,6 +531,34 @@ describe('开关', () => {
     // 只关心「走不走得通」的老调用点（设置页互斥门）行为不变：依旧是 false，不抛。
     expect(await isInstantChatReady()).toBe(false);
   });
+
+  // ─── 角色级开关（undefined = 跟随全局默认开，只认显式 false）───
+
+  it('角色自己关了 → 不走云端，reason char-disabled', async () => {
+    const char = { activeMsg2Config: { enabled: true, instantChatEnabled: false } } as any;
+    expect(await resolveInstantChatReadiness(char)).toEqual({ ready: false, reason: 'char-disabled' });
+  });
+
+  it('字段没设 / 显式 true → 照常上云（undefined 就是开，没有兼容舞步）', async () => {
+    expect(await resolveInstantChatReadiness({ activeMsg2Config: { enabled: true } } as any))
+      .toEqual({ ready: true });
+    expect(await resolveInstantChatReadiness({ activeMsg2Config: { enabled: true, instantChatEnabled: true } } as any))
+      .toEqual({ ready: true });
+    // 连 activeMsg2Config 都没有的角色也一样是开。
+    expect(await resolveInstantChatReadiness({} as any)).toEqual({ ready: true });
+  });
+
+  it('与排程开关互相独立：enabled=false 不影响即时对话', async () => {
+    // 只即时不排程：排程关着、即时字段没设 → 照常上云。
+    expect(await resolveInstantChatReadiness({ activeMsg2Config: { enabled: false } } as any))
+      .toEqual({ ready: true });
+  });
+
+  it('char-disabled 是用户的主动选择，不 warn（跟「全局没开」同一待遇）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* 静音，只数次数 */ });
+    await resolveInstantChatReadiness({ activeMsg2Config: { enabled: true, instantChatEnabled: false } } as any);
+    expect(warn).not.toHaveBeenCalled();
+  });
 });
 
 describe('随这一轮上云的作废回执', () => {
