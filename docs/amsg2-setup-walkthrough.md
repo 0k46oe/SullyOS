@@ -2,11 +2,59 @@
 
 「主动消息 2.0」让角色到点自己给你发消息——App 关着、手机锁屏也能收到。
 
-它需要一个只属于你的小后端（一个 Cloudflare Worker + 一个数据库）。这份手册把整个过程拆成六步，**全程只在网页上点，不用装任何东西、不用敲命令**。跟着做大约 15 分钟。
+它需要一个只属于你的小后端（一个 Cloudflare Worker + 一个数据库）。**全程只在网页上点，不用装任何东西、不用敲命令**。
 
 需要先准备好两个免费账号：**GitHub（用邮箱就能注册）** 和 **Cloudflare（用GitHub/邮箱就能注册）**。
 
+装法有两条，选一条走完就行：
+
+| | [一键部署](#一键部署最快) | [跟着六步装](#第一步--把后端仓库-fork-一份) |
+|---|---|---|
+| 花多久 | 大约 5 分钟，密钥在同一个页面上填完 | 大约 15 分钟，要在两个网站之间来回几趟 |
+| 适合 | 想快点用上；**手机上装尤其推荐** | 想看清每一步在干什么 |
+
+两条路装出来的东西完全一样，以后更新也都是在 SullyOS 里点一下。
+
 > 没有 GitHub 账号也能装，看文末的[附录 · 不用 GitHub 怎么装](#附录--不用-github-怎么装)——那条路只要 Cloudflare 一个账号。
+
+---
+
+## 一键部署（最快）
+
+Cloudflare 会替你把仓库、数据库、定时任务一次性建好，你只要在一个页面上把几个密钥填进去。
+
+### 先在 SullyOS 里把要填的东西准备好
+
+打开 SullyOS → 底部齿轮 **系统设置** → 滚到最底部。
+
+**推送凭据 (VAPID)**：点标题右边的小箭头展开 → **生成 VAPID 密钥对 →** → 弹窗里点 **生成新密钥对** → **保存**。再点开一次，把「VAPID 公钥」和「VAPID 私钥」分别复制出来存好。
+
+**主动消息 2.0**：点这一节右边的 **配置** → 展开 **部署 Worker（第一次用先做这个）** → 找到 **AMSG_MASTER_KEY** 点 **生成并复制**，存好。再往下滚到 **共享密钥（可选）**，点右边的 **随机**，也存好。
+
+### 点按钮
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Tosd0/sullyos-workers/tree/main/amsg)
+
+<https://deploy.workers.cloudflare.com/?url=https://github.com/Tosd0/sullyos-workers/tree/main/amsg>
+
+跳过去之后：
+
+1. **Git account** 选你的 GitHub 账号（第一次用会让你授权，同意即可）
+2. 往下每个密钥一个输入框，把刚才存的几串填进去。每个框下面都写了它是什么、去哪儿取
+   - `VAPID_EMAIL` 和 `AMSG_SERVER_TOKEN` 是可选的，不填也能跑
+3. 点右下角 **Deploy**
+
+页面会跳到构建进度，半分钟左右完成。数据库、每分钟的定时触发器、workers.dev 地址都会自动配好，不用管。
+
+> **如果你已经装过一个**：`Project name` 和数据库名默认都叫 `sullyos-amsg`，跟已有的那个撞名。而且 **D1 那栏会自动选中同名的已有数据库**——不改的话两个后端会共用一个库。装第二个的话，把项目名和数据库名都改一下（比如加个后缀）。只装一个就不用操心。
+
+建好之后，Worker 的 **Overview** 页里标题下面那个 `https://xxx.workers.dev` 就是地址，复制它，然后跳到[第五步](#第五步--回-sullyos-连上)把它填回 SullyOS。
+
+---
+
+## 跟着六步装
+
+下面是把上面那一下拆开的版本：每一步在建什么、填到哪儿都看得见。已经用一键部署装好了的话，这六步跳过就行。
 
 ---
 
@@ -185,7 +233,7 @@ env.DB (sullyos-amsg)   D1 Database
 
 **排好的任务到点没反应**
 
-1. Cloudflare → 你的 Worker → **Settings** → 往下找 **Trigger events**，确认有 `* * * * *` 那条。没有的话：连仓库装的多半是第三步 Path 填错、没指到 `amsg` 目录；照附录手动贴代码装的，就是那条定时触发器还没加（附录 E）。
+1. Cloudflare → 你的 Worker → **Settings** → 往下找 **Trigger events**，确认有 `* * * * *` 那条。没有的话：连仓库装的多半是第三步 Path 填错、没指到 `amsg` 目录；照附录手动贴代码装的，就是那条定时触发器还没加（附录 E）。一键部署装的这条是自动配好的，一般不会缺。
 2. 还是不行就开日志：同一页往下找 **Observability** → **Logs** 那一行右边的铅笔 → 把开关打开 → **Deploy**。之后到 顶部 **Observability** 标签就能看到每分钟一条的 `* * * * *`，点开能看到那次运行有没有报错。
 
 **看起来都正常，就是收不到消息**
@@ -194,7 +242,7 @@ env.DB (sullyos-amsg)   D1 Database
 
 **SullyOS 里点「连接」失败**
 
-提示里如果直接写了「缺 XXX」，那就是后端自己报的，照着补完再点一次就行（第四步那张表）。
+提示里如果直接写了「缺 XXX」，那就是后端自己报的，照着补完再点一次就行（第四步那张表列了每个密钥是什么；一键部署装的去 Worker → **Settings** → **Variables and secrets** 补）。
 
 其它情况按这几条排：
 
@@ -257,14 +305,26 @@ env.DB (sullyos-amsg)   D1 Database
 
 ## 以后怎么更新
 
-上游发了新版本之后：
+**在 SullyOS 里点一下就行**：**系统设置** → **主动消息 2.0** → **配置**，「连接并启用」下面有个 **更新后端到最新版本**。点了之后后端自己去取最新代码覆盖自己，你排好的任务、填过的密钥、数据库绑定都不动。更新完会显示一串代码指纹，用来确认这次确实换了版本。
 
-1. 打开你 fork 的那个仓库
-2. 点 **Sync fork** → **Update branch**
+用它之前要给 Worker 加一把钥匙（做一次就够）：
 
-完事。Cloudflare 检测到新提交会自动重新部署，你填的密钥、数据库绑定、Database ID 都不会丢。
+1. 打开 <https://dash.cloudflare.com/profile/api-tokens> → **Create Token** → 拉到最下面的 **Custom token** → **Get started**
+2. **Permissions** 只加一行：`Account` / `Workers Scripts` / `Edit`
+3. **Account Resources** 选你的账号，然后 **Continue to summary** → **Create Token**，复制显示出来的那串
+4. 回到 Worker → **Settings** → **Variables and secrets** → **+ Add**，Type 选 `Secret`，名字填 `CF_API_TOKEN`，值粘贴刚才那串，点 **Deploy**
 
-> 照附录手动贴代码装的，更新方式见附录最后一节。
+> 没加这把钥匙也不影响用，只是点更新时会提示你去补。
+>
+> 这把钥匙只能改 Workers，读不到你的数据库内容。
+
+**不想加钥匙的话**，按当初的装法手动更新也行：
+
+- 跟着六步装的：打开你 fork 的那个仓库，点 **Sync fork** → **Update branch**，Cloudflare 检测到新提交会自动重新部署
+- 一键部署装的：Cloudflare 给你建的是一个独立仓库（不是 fork，所以没有 Sync fork 可点）。先把 <https://github.com/Tosd0/sullyos-workers/raw/main/amsg/worker.bundle.js> 下载下来，再打开你那个仓库 → **Add file** → **Upload files**，把下载的文件拖进去覆盖同名的那个，提交后会自动重新部署。这文件有四十多万字符，网页编辑器打不开，只能整个文件替换
+- 照附录手动贴代码装的：见附录最后一节
+
+> 头一次用「更新后端」时，如果提示这台 Worker 还是旧版本、没有这个功能，先按上面的办法手动更新一次，之后就能在 SullyOS 里点了。
 
 ---
 
