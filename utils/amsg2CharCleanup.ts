@@ -18,7 +18,7 @@ import { ActiveMsgClient } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
 
 export type CharCloudStateCleanup =
-  /** 没有云端可清（这个角色没配过 2.0，或者压根没填 worker 地址）—— 一个请求都没发。 */
+  /** 没有云端可清（角色不存在，或压根没填 worker 地址）—— 一个请求都没发。 */
   | { status: 'skipped' }
   /** 清完了；keys 是实际被清空的条目（本来就空的角色是空数组）。 */
   | { status: 'cleared'; keys: string[] }
@@ -28,23 +28,23 @@ export type CharCloudStateCleanup =
 /**
  * 判断这个角色云端有没有可能留着东西。
  *
- * 只看 activeMsg2Config 在不在：往云端写状态的几条路（面板排程、角色用工具排程、
- * 聊完一轮的 fire_pack 同步、活跃会话租约）都要先有这份配置，从没配过的角色云端
- * 一定是空的，不该为它发请求。
- *
- * 反过来只看「还有没有待触发任务」是不够的 —— 任务发完即从清单里移除，而 fire_pack
- * 按角色存、不随任务消失，只要聊过天就还在云端躺着。
+ * 只要角色存在就当「可能有」：往云端写状态的路不止面板那几条——全局即时对话开着时，
+ * **从没打开过 2.0 面板的角色**（activeMsg2Config 缺失，只是跟随全局默认开）每轮聊天
+ * 也在经 POST /instant-chat 往 client_state 写完整对话和提示词（worker 侧还会写
+ * chat_outbox / chat_fail）。按「配没配过」猜写没写过，猜漏一条路聊天原文就永久留在
+ * D1 里。清理是幂等操作、成本一次网络请求，宁可多发不可漏，所以这里不做任何按角色的
+ * capability 预检；真正的门只有一道——「压根没配 worker 连接」，那一道由调用方
+ * （purgeCharCloudState、deleteCharacter 的前置检查）读全局配置来把。
  */
 export const charMayHaveCloudState = (char: CharacterProfile | undefined): boolean =>
-  Boolean(char?.activeMsg2Config);
+  Boolean(char);
 
 /**
  * 清掉该角色的云端 client_state。永远不抛错（见文件头：不能阻塞角色删除）。
  *
  * 发请求之前先确认真有个 worker 可发。没填地址时云端一个字节都没写过，
  * 那不是「清理失败」，跳过就好——报成失败会让用户对着一条根本不存在的残留发愁。
- * （角色身上有 activeMsg2Config 不代表云端有数据：面板保存失败时也会留下一份，
- * 比如全局还没配好就点了保存。）
+ * 这也是唯一的一道门：只要 worker 配置在，就不再按角色猜「写没写过」，清一次是幂等的。
  *
  * 判断放在发请求之前、而不是靠 catch 里认错误文案：错误文案改一次这里就失效了。
  */
