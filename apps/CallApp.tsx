@@ -13,11 +13,9 @@ import { startStt, isSttSupported, type SttSession } from '../utils/speechToText
 import { ContextBuilder } from '../utils/context';
 import { resolveCharTimeZone } from '../utils/timezone';
 import {
-  getMemoryPalaceHighWaterMark,
   injectMemoryPalace,
-  mergePalaceFragmentsIntoMemories,
-  processNewMessages,
 } from '../utils/memoryPalace/pipeline';
+import { processNewMessagesWithAutoArchive } from '../utils/memoryPalace/autoArchive';
 import { incrementDigestRound, runCognitiveDigestion } from '../utils/memoryPalace';
 import { RealtimeContextManager } from '../utils/realtimeContext';
 import { DB } from '../utils/db';
@@ -371,7 +369,7 @@ const CallApp: React.FC = () => {
 
     try {
       const recentMessages = await DB.getRecentMessagesByCharId(charForHook.id, 50);
-      const result = await processNewMessages(
+      await processNewMessagesWithAutoArchive(
         recentMessages,
         charForHook.id,
         charForHook.name,
@@ -384,23 +382,6 @@ const CallApp: React.FC = () => {
 
       const liveAfter = charactersRef.current.find(char => char.id === charForHook.id) || null;
       if (!liveAfter?.memoryPalaceEnabled) return;
-
-      if (liveAfter.autoArchiveEnabled) {
-        const patch: Partial<CharacterProfile> = {};
-        if (result?.autoArchive) {
-          patch.memories = mergePalaceFragmentsIntoMemories(
-            liveAfter.memories || [],
-            result.autoArchive.fragments,
-          );
-        }
-        const highWaterMark = getMemoryPalaceHighWaterMark(charForHook.id);
-        if (highWaterMark > (liveAfter.hideBeforeMessageId || 0)) {
-          patch.hideBeforeMessageId = highWaterMark;
-        }
-        if (Object.keys(patch).length > 0) {
-          updateCharacter(charForHook.id, patch);
-        }
-      }
 
       if (incrementDigestRound(charForHook.id)) {
         setMemoryPalaceStatus(`${charForHook.name}正在整理内心…`);

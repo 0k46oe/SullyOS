@@ -4,7 +4,7 @@ import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { CharacterProfile, Message, DateState, AppID } from '../types';
 import { DatePrompts, ApiMessage } from '../utils/datePrompts';
-import { processNewMessages, mergePalaceFragmentsIntoMemories, getMemoryPalaceHighWaterMark } from '../utils/memoryPalace/pipeline';
+import { processNewMessagesWithAutoArchive } from '../utils/memoryPalace/autoArchive';
 import type { PipelineResult } from '../utils/memoryPalace/pipeline';
 import { incrementDigestRound, runCognitiveDigestion } from '../utils/memoryPalace';
 import { getRoomLabel } from '../utils/memoryPalace/types';
@@ -339,7 +339,7 @@ const DateApp: React.FC = () => {
 
         const recentMsgs = await DB.getRecentMessagesByCharId(charForHook.id, 50);
         try {
-            const pipelineResult = await processNewMessages(
+            const pipelineResult = await processNewMessagesWithAutoArchive(
                 recentMsgs,
                 charForHook.id,
                 charForHook.name,
@@ -356,30 +356,6 @@ const DateApp: React.FC = () => {
 
             if (pipelineResult && pipelineResult.stored > 0) {
                 setMemoryPalaceResult(pipelineResult);
-            }
-
-            if ((liveAfter as any).autoArchiveEnabled) {
-                try {
-                    const patch: any = {};
-                    if (pipelineResult?.autoArchive) {
-                        patch.memories = mergePalaceFragmentsIntoMemories(
-                            liveAfter.memories || [],
-                            pipelineResult.autoArchive.fragments,
-                        );
-                    }
-                    // 隐藏线追平到向量高水位：覆盖「关闭期推进了 hwm 但 hide 被冻结」的历史空档。
-                    // 只要全自动记忆开着，每次自动总结都把 hide 追平到 hwm，无需用户手动操作。
-                    const hwm = getMemoryPalaceHighWaterMark(charForHook.id);
-                    const curHide = ((liveAfter as any).hideBeforeMessageId as number) || 0;
-                    if (hwm > curHide) {
-                        patch.hideBeforeMessageId = hwm;
-                    }
-                    if (Object.keys(patch).length > 0) {
-                        updateCharacter(charForHook.id, patch);
-                    }
-                } catch (e: any) {
-                    console.warn(`📚 [DateApp AutoArchive] 失败: ${e?.message || e}`);
-                }
             }
 
             // 50 轮自动认知消化（与聊天侧共享计数器，按 charId 持久化）

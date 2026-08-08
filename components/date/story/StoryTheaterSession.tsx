@@ -39,11 +39,10 @@ import {
 } from '../../../utils/storyTheater';
 import {
     getMemoryPalaceHighWaterMark,
-    mergePalaceFragmentsIntoMemories,
     processMessageRange,
-    processNewMessages,
     retrieveMemories,
 } from '../../../utils/memoryPalace/pipeline';
+import { processNewMessagesWithAutoArchive } from '../../../utils/memoryPalace/autoArchive';
 import { incrementDigestRound, runCognitiveDigestion } from '../../../utils/memoryPalace';
 import StoryQuickPresetPanel from './StoryQuickPresetPanel';
 import { StoryAppearanceButton } from './StoryTheaterTheme';
@@ -493,15 +492,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             try {
                 setMemoryStatus(`${actor.name}正在整理这段相处……`);
                 const recent = await DB.getRecentMessagesByCharId(actor.id, 50);
-                const result = await processNewMessages(recent, actor.id, actor.name, embedding, light, mask.name, false, setMemoryStatus);
-                const live = characters.find(char => char.id === actor.id) || actor;
-                if ((live as any).autoArchiveEnabled) {
-                    const patch: Partial<CharacterProfile> = {};
-                    if (result?.autoArchive) patch.memories = mergePalaceFragmentsIntoMemories(live.memories || [], result.autoArchive.fragments);
-                    const hwm = getMemoryPalaceHighWaterMark(actor.id);
-                    if (hwm > ((live as any).hideBeforeMessageId || 0)) patch.hideBeforeMessageId = hwm;
-                    if (Object.keys(patch).length > 0) updateCharacter(actor.id, patch);
-                }
+                await processNewMessagesWithAutoArchive(recent, actor.id, actor.name, embedding, light, mask.name, false, setMemoryStatus);
                 if (incrementDigestRound(actor.id)) {
                     await runCognitiveDigestion(actor.id, actor.name, [actor.systemPrompt, actor.worldview].filter(Boolean).join('\n'), light, false, mask.name, embedding);
                 }
