@@ -17,6 +17,13 @@ import {
   saveInstantConfig,
 } from '../../utils/instantPushClient';
 import { generateClientToken } from '../../utils/vapidGen';
+import { loadPushVapid, savePushVapid } from '../../utils/pushVapid';
+import {
+  provisionAmsgBackend,
+  waitForWorkerReady,
+  type CfAccount,
+  type ProvisionProgress,
+} from '../../utils/cfProvision';
 import { isAmsgServerVersionAtLeast } from '../../utils/amsgWorkerVersion';
 import { trackEvent } from '../../utils/analytics';
 
@@ -77,6 +84,8 @@ const REQUIRED_WORKER_VERSION = '2.6.0-next.15';
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';
 const SETUP_WALKTHROUGH_URL = 'https://github.com/qegj567-cloud/SullyOS/blob/master/docs/amsg2-setup-walkthrough.md';
+/** 一键部署要的那枚 API Token 在这里建。 */
+const CF_TOKEN_URL = 'https://dash.cloudflare.com/profile/api-tokens';
 
 // 探测结果每次会话只报一次。refresh() 在开面板、连接成功、订阅成功后都会跑一遍，
 // 一个连不上、反复点「连接」的人否则能一个人刷出十几条同样的结果，把分布带歪。
@@ -126,6 +135,19 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   // 「生成 Master Key」只在本次打开期间展示，前端不落盘——它是 worker 侧密钥，粘进 CF env 即可。
   const [generatedMasterKey, setGeneratedMasterKey] = useState('');
   const [generatedServerToken, setGeneratedServerToken] = useState('');
+
+  // 一键部署：填一枚 CF Token，剩下的（建库、传 worker、写密钥、加定时）都自动做完。
+  // Token 只在这次部署期间留在内存里，成功与否都不落盘——它是能改整个账号 Workers 的
+  // 权限，真正需要长期留着的那一份已经作为 secret 写进用户自己的 worker 了（自更新用）。
+  const [cfToken, setCfToken] = useState('');
+  const [provisioning, setProvisioning] = useState(false);
+  const [provisionStep, setProvisionStep] = useState('');
+  /** token 能用在多个账号上时让用户挑一个。 */
+  const [provisionAccounts, setProvisionAccounts] = useState<CfAccount[] | null>(null);
+  /** 全新的 CF 账号还没有 workers.dev 子域，得先起一个。 */
+  const [needsSubdomain, setNeedsSubdomain] = useState(false);
+  const [desiredSubdomain, setDesiredSubdomain] = useState('');
+  const [provisionError, setProvisionError] = useState('');
 
   // 体检：worker 的 GET /debug 结果。它早就把「缺哪个变量、缺哪张表、缺哪几列、cron
   // 有没有停」都算好了，但入口一直只有手拼 URL——而这几样恰恰是「界面上一切正常、
@@ -218,6 +240,12 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     // 两个明文密钥都要清：留到下次打开面板还挂在页面上，就是白白多摊一次。
     setGeneratedMasterKey('');
     setGeneratedServerToken('');
+    // CF Token 更要清：它比上面两个都重，绝不留到下次打开。
+    setCfToken('');
+    setProvisionAccounts(null);
+    setNeedsSubdomain(false);
+    setDesiredSubdomain('');
+    setProvisionError('');
     void refresh();
   }, [isOpen]);
 
@@ -255,6 +283,8 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       workerUrl: config.workerUrl,
       serverToken: config.serverToken,
       instantChatEnabled: config.instantChatEnabled,
+      // 一键部署生成的 Master Key 也要跟着存：这是本地唯一的一份，Worker 那边读不回来。
+      masterKey: config.masterKey,
     });
     savedWorkerUrlRef.current = config.workerUrl || '';
   };
@@ -289,6 +319,111 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       trackEvent('开启通知与推送订阅', { result: readAmsgFailKind(error) });
     } finally {
       setLoading(false);
+    }
+  };
+
+  /**
+   * 一键部署：只要一枚 Cloudflare API Token，把后端从零装好，装完顺手连上。
+   *
+   * 密钥全部在本地生成，用户不用复制粘贴任何东西。已经有的一律沿用——Master Key 换了
+   * 之前排的任务全解不开，VAPID 换了浏览器现有的推送订阅会全部 403。
+   *
+   * Token 只在这次操作期间留在内存里，成功与否都不落盘。需要长期留着的那一份已经作为
+   * secret 写进用户自己的 Worker 了（以后「更新后端」用的就是它）。
+   */
+  const handleOneClickDeploy = async (accountId?: string) => {
+    const token = cfToken.trim();
+    if (!token) {
+      addToast('先把 Cloudflare API Token 填进来。', 'error');
+      return;
+    }
+
+    setProvisioning(true);
+    setProvisionError('');
+    setProvisionStep('');
+    try {
+      const vapid = loadPushVapid();
+      const result = await provisionAmsgBackend({
+        token,
+        accountId: accountId || undefined,
+        desiredSubdomain: desiredSubdomain.trim() || undefined,
+        secrets: {
+          AMSG_MASTER_KEY: config?.masterKey || undefined,
+          VAPID_PUBLIC_KEY: vapid.vapidPublicKey || undefined,
+          VAPID_PRIVATE_KEY: vapid.vapidPrivateKey || undefined,
+          VAPID_EMAIL: vapid.vapidEmail || undefined,
+          AMSG_SERVER_TOKEN: config?.serverToken || undefined,
+        },
+        onProgress: (p: ProvisionProgress) => setProvisionStep(p.message),
+      });
+
+      if (!result.ok) {
+        setProvisionStep('');
+        // 这两种不是失败，是「还差一个信息」，界面上补个输入再点一次就能接着走。
+        if (result.code === 'ACCOUNT_AMBIGUOUS') {
+          setProvisionAccounts(result.accounts || []);
+          trackEvent('一键部署 2.0 后端', { result: '要选账号' });
+          return;
+        }
+        if (result.code === 'SUBDOMAIN_MISSING') {
+          setNeedsSubdomain(true);
+          setProvisionError(result.message);
+          trackEvent('一键部署 2.0 后端', { result: '要起子域名' });
+          return;
+        }
+        setProvisionError(result.message);
+        trackEvent('一键部署 2.0 后端', { result: '失败' });
+        return;
+      }
+
+      // 先把密钥落盘再连接：连接要用 serverToken，而 Master Key 一旦丢了就再也读不回来。
+      const { secrets } = result;
+      savePushVapid({
+        vapidPublicKey: secrets.VAPID_PUBLIC_KEY,
+        vapidPrivateKey: secrets.VAPID_PRIVATE_KEY,
+        vapidEmail: secrets.VAPID_EMAIL || undefined,
+      });
+      // instantChatEnabled 跟着一起写：面板渲染时 config 一定不是 null（文件末尾有空值
+      // 早退），读到的就是界面上当前的值，不显式带上会被这次保存冲掉。
+      await ActiveMsgStore.saveGlobalConfig({
+        workerUrl: result.workerUrl,
+        serverToken: secrets.AMSG_SERVER_TOKEN,
+        masterKey: secrets.AMSG_MASTER_KEY,
+        instantChatEnabled: config?.instantChatEnabled,
+      });
+      patchConfig({
+        workerUrl: result.workerUrl,
+        serverToken: secrets.AMSG_SERVER_TOKEN,
+        masterKey: secrets.AMSG_MASTER_KEY,
+      });
+      savedWorkerUrlRef.current = result.workerUrl;
+
+      setProvisionAccounts(null);
+      setNeedsSubdomain(false);
+      setCfToken('');
+      result.warnings.forEach((warning) => addToast(warning, 'info'));
+      addToast(`后端已经装好了：${result.workerUrl}`, 'success');
+      trackEvent('一键部署 2.0 后端', { result: '成功' });
+
+      // 刚建好的 workers.dev 地址要等一会儿才解析得到，等它活过来再建表。
+      setProvisionStep('等待 Worker 启动…');
+      const ready = await waitForWorkerReady(result.workerUrl);
+      if (!ready) {
+        addToast('Worker 装好了，但地址还没生效。过一两分钟点一下「连接并启用」即可。', 'info');
+        return;
+      }
+      setProvisionStep('正在建表…');
+      const { warnings } = await ActiveMsgClient.connect();
+      await refresh();
+      warnings.forEach((warning) => addToast(warning.message, 'info'));
+      addToast('已连接成功，主动消息 2.0 可以用了。', 'success');
+    } catch (error: any) {
+      // 报错原文只进界面，不进上报（可能带地址、账号 id）。
+      setProvisionError(error?.message || '部署过程中出错了。');
+      trackEvent('一键部署 2.0 后端', { result: '失败' });
+    } finally {
+      setProvisioning(false);
+      setProvisionStep('');
     }
   };
 
@@ -549,6 +684,101 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         ) : null}
 
         <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-bold text-slate-700">一键部署（推荐）</span>
+            <span className="shrink-0 text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">
+              只要一枚 Token
+            </span>
+          </div>
+
+          <p className="text-xs leading-relaxed text-slate-500">
+            在 Cloudflare 建一枚 API Token 粘进来，建数据库、传后端代码、写密钥、加定时触发
+            全都自动做完。不用 GitHub 账号，手机上也走得完。
+          </p>
+
+          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-1.5">
+            <p className="text-[11px] font-bold text-slate-600">建 Token 时这三项权限都要勾上</p>
+            <ul className="text-[11px] leading-relaxed text-slate-500 space-y-0.5 list-disc list-outside pl-4">
+              <li>Account → <code className="font-mono">Workers Scripts</code> : Edit</li>
+              <li>Account → <code className="font-mono">D1</code> : Edit</li>
+              <li>Account → <code className="font-mono">Account Settings</code> : Read</li>
+            </ul>
+            <a
+              href={CF_TOKEN_URL}
+              target="_blank"
+              rel="noreferrer"
+              onClick={() => trackEvent('打开 2.0 部署外链', { target: 'CF面板' })}
+              className="inline-block mt-1 text-[11px] font-bold text-violet-600"
+            >
+              ↗ 去 Cloudflare 建 Token
+            </a>
+          </div>
+
+          <input
+            type="password"
+            value={cfToken}
+            onChange={(e) => setCfToken(e.target.value)}
+            placeholder="粘贴 Cloudflare API Token"
+            autoComplete="off"
+            className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm outline-none focus:border-violet-400"
+          />
+
+          {provisionAccounts?.length ? (
+            <div className="space-y-1.5">
+              <p className="text-[11px] font-bold text-slate-600">这枚 Token 能用在多个账号上，装到哪个？</p>
+              {provisionAccounts.map((account) => (
+                <button
+                  key={account.id}
+                  type="button"
+                  disabled={provisioning}
+                  onClick={() => void handleOneClickDeploy(account.id)}
+                  className="w-full px-3 py-2.5 rounded-xl text-xs font-bold bg-white border border-slate-200 text-slate-600 text-left active:scale-95 transition-transform disabled:opacity-50"
+                >
+                  {account.name}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {needsSubdomain ? (
+            <div className="space-y-1.5">
+              <p className="text-[11px] font-bold text-slate-600">给这个账号起一个 workers.dev 子域名</p>
+              <input
+                type="text"
+                value={desiredSubdomain}
+                onChange={(e) => setDesiredSubdomain(e.target.value)}
+                placeholder="例如 my-name（全 Cloudflare 唯一）"
+                autoComplete="off"
+                className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm outline-none focus:border-violet-400"
+              />
+              <p className="text-[11px] leading-relaxed text-slate-400">
+                后端地址会长这样：<code className="font-mono">sullyos-amsg.你填的.workers.dev</code>。
+                这个名字定了就是这个账号所有 Worker 共用的，之后不好改。
+              </p>
+            </div>
+          ) : null}
+
+          <button
+            type="button"
+            disabled={provisioning || !cfToken.trim()}
+            onClick={() => void handleOneClickDeploy()}
+            className="w-full py-3 rounded-xl text-sm font-bold bg-violet-500 text-white active:scale-95 transition-transform disabled:opacity-50"
+          >
+            {provisioning ? provisionStep || '部署中…' : '开始部署'}
+          </button>
+
+          {provisionError ? (
+            <p className="text-[11px] leading-relaxed text-rose-600 whitespace-pre-line">{provisionError}</p>
+          ) : null}
+
+          <p className="text-[10px] leading-relaxed text-slate-400">
+            浏览器不能直接调 Cloudflare 的接口（它不给跨域），所以这枚 Token 会经过本站的
+            网络代理 Worker 转发一次。部署完它会作为密钥存进<strong>你自己的</strong> Worker，
+            以后「更新后端」用的就是它；本页不保存。介意的话可以照下面的手动方式装。
+          </p>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
           <button
             type="button"
             onClick={() => setDeployOpen((prev) => {
@@ -558,7 +788,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
             })}
             className="w-full flex items-center justify-between text-left"
           >
-            <span className="font-bold text-slate-700">部署 Worker（第一次用先做这个）</span>
+            <span className="font-bold text-slate-700">手动部署 Worker（想自己一步步来）</span>
             <span className="text-xs font-bold text-slate-400">{deployOpen ? '收起' : '展开'}</span>
           </button>
 
