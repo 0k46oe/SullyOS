@@ -1762,12 +1762,13 @@ async function saveIncomingActiveMessage(payload) {
       await notifyVisibleClientForToolRequest(payload);
       return;
     case "error":
-      console.error("[amsg] error push", payload?.code, payload?.message);
+      console.error("[amsg] error push", payload?.code, payload?.message, payload?.metadata?.reason);
       await notifyClients({
         type: "active-msg-error",
         code: payload?.code,
         message: payload?.message,
-        charId: payload?.metadata?.charId
+        charId: payload?.metadata?.charId,
+        metadata: payload?.metadata
       });
       return;
     default:
