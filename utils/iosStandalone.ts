@@ -293,9 +293,11 @@ export const installIOSStandaloneWorkaround = () => {
             };
         }).virtualKeyboard;
         if (virtualKeyboard) {
-            // Prefer resize mode. The resolver above still supports WebViews
-            // that ignore this assignment and keep overlay mode.
-            try { virtualKeyboard.overlaysContent = false; } catch { /* read-only implementation */ }
+            // Fullscreen TWAs do not consistently resize either viewport when the
+            // Android IME opens. Opt into overlay mode so geometrychange and
+            // boundingRect expose the exact covered height; setViewportVars then
+            // shrinks --app-height itself and keeps the composer above the IME.
+            try { virtualKeyboard.overlaysContent = true; } catch { /* read-only implementation */ }
             virtualKeyboard.addEventListener?.('geometrychange', handleViewportChange as EventListener);
         }
         document.addEventListener('focusin', handleFocusIn);
