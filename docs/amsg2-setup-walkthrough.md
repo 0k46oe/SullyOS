@@ -355,16 +355,20 @@ env.DB (sullyos-amsg)   D1 Database
 
 **用[「在 SullyOS 里装」](#在-sullyos-里装推荐)那条路装的，这把钥匙部署时已经放进去了**，直接点更新就行，下面这段跳过。
 
-另外两条路要给 Worker 加一把钥匙（做一次就够）：
+另外两条路装的，第一次点更新会提示缺一把钥匙，同一块地方就能补上（做一次就够）：
 
 1. 打开 <https://dash.cloudflare.com/profile/api-tokens> → **Create Token** → 拉到最下面的 **Custom token** → **Get started**
 2. **Permissions** 只加一行：`Account` / `Workers Scripts` / `Edit`
-3. **Account Resources** 选你的账号，然后 **Continue to summary** → **Create Token**，复制显示出来的那串
-4. 回到 Worker → **Settings** → **Variables and secrets** → **+ Add**，Type 选 `Secret`，名字填 `CF_API_TOKEN`，值粘贴刚才那串，点 **Deploy**
+3. **Account Resources** 选你的账号；**Start Date 留空**，然后 **Continue to summary** → **Create Token**，复制显示出来的那串
+4. 回到 SullyOS 的这一块，把它粘进 **给这台后端补一把更新用的钥匙**，点 **装上钥匙**
 
-> 没加这把钥匙也不影响用，只是点更新时会提示你去补。
+之后更新就都是点上面那个按钮了。
+
+> 这一步只往你的 Worker 里加这一条密钥，代码、数据库、已经填过的密钥都不动。
 >
-> 这把钥匙只能改 Workers，读不到你的数据库内容。
+> 这把钥匙只能改 Workers，读不到你的数据库内容。写进去之后就留在你自己的 Worker 里，SullyOS 不保存。
+>
+> 也可以自己去 Cloudflare 面板加：Worker → **Settings** → **Variables and secrets** → **+ Add**，Type 选 `Secret`，名字填 `CF_API_TOKEN`，值粘贴那串，点 **Deploy**。效果一样。
 
 **不想加钥匙的话**，按当初的装法手动更新也行：
 

@@ -14,6 +14,7 @@ import {
     explainCfError,
     validateSubdomain,
     generateAmsgSecrets,
+    scriptNameFromWorkerUrl,
     verifyToken,
     isAccountScopedToken,
     type AmsgSecrets,
@@ -239,6 +240,26 @@ describe('explainCfError', () => {
     it('认不出来的错至少把 CF 的原话带上', () => {
         const msg = explainCfError(500, { errors: [{ code: 12345, message: 'Something odd' }] });
         expect(msg).toContain('Something odd');
+    });
+});
+
+describe('scriptNameFromWorkerUrl', () => {
+    it('workers.dev 地址认得出脚本名', () => {
+        expect(scriptNameFromWorkerUrl('https://sullyos-amsg.kaede.workers.dev')).toBe('sullyos-amsg');
+        expect(scriptNameFromWorkerUrl('https://sullyos-amsg.kaede.workers.dev/')).toBe('sullyos-amsg');
+    });
+
+    it('自定义域名和代理门面一律返回 null，不猜', () => {
+        // 猜出来的名字会指向账号里另一个 Worker，把钥匙写到别人身上去。
+        expect(scriptNameFromWorkerUrl('https://amsg.example.com')).toBeNull();
+        expect(scriptNameFromWorkerUrl('https://my-proxy.deno.dev')).toBeNull();
+        // 少一段：这是账号子域本身，不是某个脚本
+        expect(scriptNameFromWorkerUrl('https://kaede.workers.dev')).toBeNull();
+    });
+
+    it('填的不是地址时返回 null 而不是抛错', () => {
+        expect(scriptNameFromWorkerUrl('随便写的')).toBeNull();
+        expect(scriptNameFromWorkerUrl('')).toBeNull();
     });
 });
 

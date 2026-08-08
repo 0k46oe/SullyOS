@@ -19,6 +19,7 @@ import {
 import { generateClientToken } from '../../utils/vapidGen';
 import { loadPushVapid, savePushVapid } from '../../utils/pushVapid';
 import {
+  attachUpdateCapability,
   provisionAmsgBackend,
   waitForWorkerReady,
   type CfAccount,
@@ -149,6 +150,16 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   const [desiredSubdomain, setDesiredSubdomain] = useState('');
   const [provisionError, setProvisionError] = useState('');
 
+  // 补装更新能力：老办法装的后端里没有 CF_API_TOKEN，点更新会被顶回来。
+  // 粘一枚 token 就能就地补上，不用去 Cloudflare 面板。只在真的缺钥匙时才露出来。
+  const [attachOpen, setAttachOpen] = useState(false);
+  const [attachToken, setAttachToken] = useState('');
+  const [attachScriptName, setAttachScriptName] = useState('');
+  const [attachNeedsScriptName, setAttachNeedsScriptName] = useState(false);
+  const [attachAccounts, setAttachAccounts] = useState<CfAccount[] | null>(null);
+  const [attaching, setAttaching] = useState(false);
+  const [attachError, setAttachError] = useState('');
+
   // 体检：worker 的 GET /debug 结果。它早就把「缺哪个变量、缺哪张表、缺哪几列、cron
   // 有没有停」都算好了，但入口一直只有手拼 URL——而这几样恰恰是「界面上一切正常、
   // 就是一条都不发」的全部原因。存原始探测结果，红绿灯在渲染时算（推送状态一变就跟着走）。
@@ -246,6 +257,12 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     setNeedsSubdomain(false);
     setDesiredSubdomain('');
     setProvisionError('');
+    setAttachOpen(false);
+    setAttachToken('');
+    setAttachScriptName('');
+    setAttachNeedsScriptName(false);
+    setAttachAccounts(null);
+    setAttachError('');
     void refresh();
   }, [isOpen]);
 
@@ -474,9 +491,13 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       const result = await ActiveMsgClient.selfUpdateWorker();
       if (result.ok) {
         setSelfUpdateHash(result.bundleHash || '');
+        setAttachOpen(false);
         addToast(result.message, 'success');
       } else {
         addToast(result.message, result.supported ? 'error' : 'info');
+        // 「缺 CF_API_TOKEN」是这里唯一能就地解决的一种：露出补装那一块，
+        // 用户粘一枚 token 就好，不用去 Cloudflare 面板加变量。
+        if (result.code === 'CF_TOKEN_MISSING') setAttachOpen(true);
       }
       trackEvent('更新后端 Worker', {
         result: result.ok ? 'ok' : result.supported ? 'failed' : 'unsupported',
@@ -486,6 +507,63 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       trackEvent('更新后端 Worker', { result: 'failed' });
     } finally {
       setLoading(false);
+    }
+  };
+
+  /**
+   * 给已经装好的后端补上「自己更新自己」的钥匙。
+   *
+   * 只写 CF_API_TOKEN / CF_SCRIPT_NAME 两条密钥，不碰脚本也不碰别的绑定——手动部署的
+   * 用户，前端手里根本没有他们的 Master Key，走重传那条路会把密钥抹掉。
+   */
+  const handleAttachUpdateKey = async (accountId?: string) => {
+    const token = attachToken.trim();
+    if (!token) {
+      addToast('先把 Cloudflare API Token 填进来。', 'error');
+      return;
+    }
+    if (!config?.workerUrl.trim()) {
+      addToast('先把 Worker 地址填好。', 'error');
+      return;
+    }
+
+    setAttaching(true);
+    setAttachError('');
+    try {
+      const result = await attachUpdateCapability({
+        token,
+        workerUrl: config.workerUrl,
+        scriptName: attachScriptName.trim() || undefined,
+        accountId,
+      });
+
+      if (!result.ok) {
+        if (result.code === 'SCRIPT_NAME_UNKNOWN') {
+          setAttachNeedsScriptName(true);
+          setAttachError(result.message);
+          trackEvent('补装后端更新能力', { result: '要填Worker名' });
+          return;
+        }
+        if (result.code === 'ACCOUNT_AMBIGUOUS') {
+          setAttachAccounts(result.accounts || []);
+          trackEvent('补装后端更新能力', { result: '要选账号' });
+          return;
+        }
+        setAttachError(result.message);
+        trackEvent('补装后端更新能力', { result: '失败' });
+        return;
+      }
+
+      setAttachToken('');
+      setAttachAccounts(null);
+      setAttachNeedsScriptName(false);
+      addToast('钥匙装好了，现在可以点「更新后端到最新版本」了。', 'success');
+      trackEvent('补装后端更新能力', { result: '成功' });
+    } catch (error: any) {
+      setAttachError(error?.message || '装钥匙时出错了。');
+      trackEvent('补装后端更新能力', { result: '失败' });
+    } finally {
+      setAttaching(false);
     }
   };
 
@@ -1105,13 +1183,86 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
               </button>
               <p className="text-xs leading-relaxed text-slate-500">
                 后端自己去取最新代码覆盖自己，你排好的任务和填过的密钥都不动。
-                需要先给 Worker 加一条 <code className="font-mono">CF_API_TOKEN</code>（只勾 Workers Scripts → Edit），
-                没加的话点了会告诉你去哪儿补。
+                用一键部署装的可以直接点；老办法装的第一次点会提示补一把钥匙，就在下面补。
               </p>
               {selfUpdateHash ? (
                 <p className="text-xs leading-relaxed text-emerald-600">
                   当前后端代码指纹：<code className="font-mono">{selfUpdateHash}</code>
                 </p>
+              ) : null}
+
+              {attachOpen ? (
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-2.5">
+                  <p className="text-[11px] font-bold text-slate-600">给这台后端补一把更新用的钥匙</p>
+                  <p className="text-[11px] leading-relaxed text-slate-500">
+                    建一枚只勾 <strong>Account → Workers Scripts : Edit</strong> 的 Cloudflare API Token
+                    粘进来（<strong>Start Date 留空</strong>），SullyOS 会把它写进你这台 Worker。
+                    做完一次以后更新就都是点上面那个按钮了。
+                  </p>
+                  <a
+                    href={CF_TOKEN_URL}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={() => trackEvent('打开 2.0 部署外链', { target: 'CF面板' })}
+                    className="inline-block text-[11px] font-bold text-violet-600"
+                  >
+                    ↗ 去 Cloudflare 建 Token
+                  </a>
+                  <input
+                    type="password"
+                    value={attachToken}
+                    onChange={(e) => setAttachToken(e.target.value)}
+                    placeholder="粘贴 Cloudflare API Token"
+                    autoComplete="off"
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm outline-none focus:border-violet-400"
+                  />
+
+                  {attachNeedsScriptName ? (
+                    <input
+                      type="text"
+                      value={attachScriptName}
+                      onChange={(e) => setAttachScriptName(e.target.value)}
+                      placeholder="这台 Worker 在 Cloudflare 上的名字"
+                      autoComplete="off"
+                      className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm outline-none focus:border-violet-400"
+                    />
+                  ) : null}
+
+                  {attachAccounts?.length ? (
+                    <div className="space-y-1.5">
+                      <p className="text-[11px] font-bold text-slate-600">多个账号下都有同名 Worker，选一个：</p>
+                      {attachAccounts.map((account) => (
+                        <button
+                          key={account.id}
+                          type="button"
+                          disabled={attaching}
+                          onClick={() => void handleAttachUpdateKey(account.id)}
+                          className="w-full px-3 py-2.5 rounded-xl text-xs font-bold bg-white border border-slate-200 text-slate-600 text-left active:scale-95 transition-transform disabled:opacity-50"
+                        >
+                          {account.name}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  <button
+                    type="button"
+                    disabled={attaching || !attachToken.trim()}
+                    onClick={() => void handleAttachUpdateKey()}
+                    className="w-full py-2.5 rounded-xl text-xs font-bold bg-violet-500 text-white active:scale-95 transition-transform disabled:opacity-50"
+                  >
+                    {attaching ? '装钥匙中…' : '装上钥匙'}
+                  </button>
+
+                  {attachError ? (
+                    <p className="text-[11px] leading-relaxed text-rose-600 whitespace-pre-line">{attachError}</p>
+                  ) : null}
+
+                  <p className="text-[10px] leading-relaxed text-slate-400">
+                    这一步只往你的 Worker 里加这一条密钥，不动代码、不动数据库、不动已有的密钥。
+                    Token 写进去之后就留在你自己的 Worker 里，本页不保存。
+                  </p>
+                </div>
               ) : null}
             </div>
           ) : null}

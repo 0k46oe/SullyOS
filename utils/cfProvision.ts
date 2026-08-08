@@ -100,6 +100,8 @@ export type ProvisionFailureCode =
   | 'RELAY_UNSUPPORTED'
   | 'TOKEN_INVALID'
   | 'TOKEN_NOT_YET_VALID'
+  | 'SCRIPT_NAME_UNKNOWN'
+  | 'SCRIPT_NOT_FOUND'
   | 'NO_USABLE_ACCOUNT'
   | 'ACCOUNT_AMBIGUOUS'
   | 'SUBDOMAIN_MISSING'
@@ -219,6 +221,26 @@ export function buildBindings(
 /** workers.dev 的地址就是「脚本名.账号子域.workers.dev」。 */
 export function deriveWorkerUrl(scriptName: string, subdomain: string): string {
   return `https://${scriptName}.${subdomain}.workers.dev`;
+}
+
+/**
+ * 反过来：从后端地址认出这个 Worker 在 Cloudflare 上叫什么。
+ *
+ * 只有 `<脚本名>.<子域>.workers.dev` 这种地址认得出。自定义域名、Deno 门面那类
+ * 代理地址跟脚本名没有关系，猜出来的名字会指向别的 Worker——宁可返回 null 让界面
+ * 问一句，也不能猜。（worker 侧 selfUpdate.ts 的 resolveScriptName 是同一套规矩。）
+ */
+export function scriptNameFromWorkerUrl(workerUrl: string): string | null {
+  try {
+    const host = new URL(workerUrl.trim()).hostname.toLowerCase();
+    const parts = host.split('.');
+    // <script>.<subdomain>.workers.dev → 至少四段
+    if (parts.length < 4) return null;
+    if (parts.slice(-2).join('.') !== 'workers.dev') return null;
+    return parts[0] || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -554,6 +576,119 @@ export async function generateAmsgSecrets(existing: Partial<AmsgSecrets> = {}): 
     VAPID_EMAIL: existing.VAPID_EMAIL || '',
     AMSG_SERVER_TOKEN: existing.AMSG_SERVER_TOKEN || generateClientToken(),
   };
+}
+
+/**
+ * 给一台**已经装好的**后端补上「自己更新自己」的能力。
+ *
+ * 老办法装的（fork 仓库 / 部署按钮 / 手动粘代码）Worker 里没有 CF_API_TOKEN，点「更新
+ * 后端」会被顶回来，原本得去 Cloudflare 面板手动加一条密钥。这里用 Workers 的密钥接口
+ * （`PUT .../secrets`）单独写这一条——**它不碰脚本，也不碰其它绑定**，所以对手动部署的
+ * 用户是安全的：前端手里没有他们的 Master Key，走上传那条路会把密钥抹掉，走这条不会。
+ *
+ * 写完 token 就留在用户自己的 Worker 里，前端不保存。
+ */
+export async function attachUpdateCapability(input: {
+  token: string;
+  /** 用户当前配的后端地址，用来认出脚本叫什么。 */
+  workerUrl: string;
+  /** 地址是自定义域名 / 代理时认不出来，由界面问出来再传进来。 */
+  scriptName?: string;
+  accountId?: string;
+  onProgress?: (p: ProvisionProgress) => void;
+}): Promise<
+  | { ok: true; accountId: string; scriptName: string }
+  | { ok: false; code: ProvisionFailureCode; message: string; accounts?: CfAccount[] }
+> {
+  const token = input.token.trim();
+  const report = (step: ProvisionStepId, message: string) => input.onProgress?.({ step, message });
+
+  report('relay', '检查中转是否可用…');
+  if (!(await checkRelayAvailable())) {
+    return {
+      ok: false,
+      code: 'RELAY_UNSUPPORTED',
+      message: '当前的网络代理 Worker 不支持这个操作（缺 /cf-api）。把代理地址改回默认的再试。',
+    };
+  }
+
+  report('token', '验证 Token…');
+  const verified = await verifyToken(token);
+  if (!verified.ok) return { ok: false, code: verified.code, message: verified.message };
+
+  const scriptName = input.scriptName?.trim() || scriptNameFromWorkerUrl(input.workerUrl);
+  if (!scriptName) {
+    return {
+      ok: false,
+      code: 'SCRIPT_NAME_UNKNOWN',
+      message:
+        '认不出你这台后端在 Cloudflare 上叫什么名字（地址不是 workers.dev 那种，多半套了自定义域名或代理）。'
+        + '去 Cloudflare 的 Workers 列表看一眼它的名字，填进来。',
+    };
+  }
+
+  report('account', '找这台 Worker 在哪个账号下…');
+  const scriptPath = (accId: string) =>
+    `/accounts/${accId}/workers/scripts/${encodeURIComponent(scriptName)}`;
+
+  let accountId = input.accountId?.trim() || '';
+  if (accountId) {
+    const found = await cfApi(token, `${scriptPath(accountId)}/settings`);
+    if (!found.ok) {
+      return {
+        ok: false,
+        code: 'SCRIPT_NOT_FOUND',
+        message: `这个账号下没找到名叫 ${scriptName} 的 Worker。`,
+      };
+    }
+  } else {
+    const accounts = await findUsableAccounts(token);
+    if (!accounts.ok) {
+      return { ok: false, code: 'CF_ERROR', message: accounts.error || '读取账号列表失败。' };
+    }
+    // 挨个账号问「你这儿有没有这个 Worker」。同名 Worker 可能在多个账号里都存在，
+    // 那就得让用户自己指认，别替他猜一个写进去。
+    const owners: CfAccount[] = [];
+    for (const account of accounts.body ?? []) {
+      const found = await cfApi(token, `${scriptPath(account.id)}/settings`);
+      if (found.ok) owners.push(account);
+    }
+    if (owners.length === 0) {
+      return {
+        ok: false,
+        code: 'SCRIPT_NOT_FOUND',
+        message:
+          `这枚 Token 能看到的账号里都没有名叫 ${scriptName} 的 Worker。`
+          + '确认一下 Token 建的时候选对账号了没有。',
+      };
+    }
+    if (owners.length > 1) {
+      return {
+        ok: false,
+        code: 'ACCOUNT_AMBIGUOUS',
+        message: `有多个账号下都有名叫 ${scriptName} 的 Worker，选一个。`,
+        accounts: owners,
+      };
+    }
+    accountId = owners[0].id;
+  }
+
+  report('upload', '写入更新用的钥匙…');
+  // 两条：token 本身，外加脚本名——地址套了代理时 Worker 认不出自己叫什么，
+  // 显式写进去它才知道要更新哪一个。
+  for (const [name, text] of [['CF_API_TOKEN', token], ['CF_SCRIPT_NAME', scriptName]]) {
+    const written = await cfApi(token, `${scriptPath(accountId)}/secrets`, {
+      method: 'PUT',
+      body: JSON.stringify({ name, text, type: 'secret_text' }),
+      contentType: 'application/json',
+    });
+    if (!written.ok) {
+      return { ok: false, code: 'CF_ERROR', message: `写入 ${name} 失败（${written.error}）。` };
+    }
+  }
+
+  report('done', '装好了。');
+  return { ok: true, accountId, scriptName };
 }
 
 /**

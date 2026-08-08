@@ -306,6 +306,11 @@ export interface AmsgSelfUpdateResult {
   message: string;
   /** 新代码的指纹，成功时才有，拿来当「现在跑的是哪一版」。 */
   bundleHash?: string;
+  /**
+   * worker 挂在哪一步的代号（`CF_TOKEN_MISSING` / `UPLOAD_FAILED` 之类）。
+   * 面板据此决定要不要露出「补装更新能力」那一块——缺钥匙是唯一能就地解决的一种。
+   */
+  code?: string;
 }
 
 /** init-tenant 没成功时按 HTTP 状态归类：三种状态要用户去改的地方完全不同。 */
@@ -2111,6 +2116,7 @@ export const ActiveMsgClient = {
       ok: false,
       supported: true,
       message: body?.error?.message || `更新没成功（HTTP ${status}）。`,
+      code: typeof body?.error?.code === 'string' ? body.error.code : undefined,
     };
   },
 
