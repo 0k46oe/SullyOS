@@ -4,7 +4,7 @@
  * 都是踩过或者一眼能看出会踩的坑：密钥漏一条 worker 直接 503、compat flag 少一个
  * 角色调工具就 1042、重装换掉 Master Key 之前排的任务全解不开。
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
@@ -14,6 +14,8 @@ import {
     explainCfError,
     validateSubdomain,
     generateAmsgSecrets,
+    verifyToken,
+    isAccountScopedToken,
     type AmsgSecrets,
 } from './cfProvision';
 
@@ -142,6 +144,81 @@ describe('generateAmsgSecrets', () => {
 
         expect(a.AMSG_MASTER_KEY).not.toBe(b.AMSG_MASTER_KEY);
         expect(a.VAPID_PUBLIC_KEY).not.toBe(b.VAPID_PUBLIC_KEY);
+    });
+});
+
+describe('verifyToken', () => {
+    /** 装一个假的中转，返回它收到的请求路径。 */
+    const stubRelay = (payload: unknown, status = 200) => {
+        const paths: string[] = [];
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+            const relayed = new URL(String(url)).searchParams.get('path');
+            if (relayed) paths.push(relayed);
+            return new Response(JSON.stringify(payload), {
+                status,
+                headers: { 'Content-Type': 'application/json' },
+            });
+        }));
+        return paths;
+    };
+
+    afterEach(() => {
+        vi.unstubAllGlobals();
+        vi.restoreAllMocks();
+    });
+
+    it('还没到生效日期的 token 要拦下来——CF 这时照样回 success:true', async () => {
+        // 放过去的话，后面每一步都收到通用的 Authentication error，会被归成
+        // 「权限不够」，用户跑去改权限，可那根本不是原因。真机上踩过一次。
+        stubRelay({
+            success: true,
+            result: { id: 'x', status: 'active', not_before: '2026-08-10T00:00:00Z' },
+            messages: [{ code: 10002, message: 'This API Token can not be used before 2026-08-10' }],
+        });
+
+        const result = await verifyToken('plain-token');
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+            expect(result.code).toBe('TOKEN_NOT_YET_VALID');
+            expect(result.message).toContain('2026-08-10');
+        }
+    });
+
+    it('正常的 token 放行', async () => {
+        stubRelay({ success: true, result: { id: 'x', status: 'active' }, messages: [] });
+
+        expect((await verifyToken('plain-token')).ok).toBe(true);
+    });
+
+    it('账号令牌当场说清楚该换哪种，而不是拿用户级端点去撞 401', async () => {
+        // cfat_ 打 /user/tokens/verify 必然 1000，报错原文只会说 Invalid API Token，
+        // 用户对着那句话查不出「你建错了种类」。
+        const paths = stubRelay({ success: true });
+
+        const result = await verifyToken('cfat_abcdef');
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+            expect(result.code).toBe('TOKEN_INVALID');
+            expect(result.message).toContain('API Tokens');
+        }
+        // 一次网络都不该发
+        expect(paths).toHaveLength(0);
+    });
+
+    it('普通 token 走用户级端点', async () => {
+        const paths = stubRelay({ success: true, result: { status: 'active' }, messages: [] });
+
+        await verifyToken('plain-token');
+
+        expect(paths).toEqual(['/user/tokens/verify']);
+    });
+
+    it('认得出账号令牌的前缀', () => {
+        expect(isAccountScopedToken('cfat_abc')).toBe(true);
+        expect(isAccountScopedToken('  cfat_abc  ')).toBe(true);
+        expect(isAccountScopedToken('abcdef123')).toBe(false);
     });
 });
 

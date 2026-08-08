@@ -86,6 +86,11 @@ export interface ProvisionInput {
   /** 账号还没有 workers.dev 子域时，由界面问出来再传进来。 */
   desiredSubdomain?: string;
   scriptName?: string;
+  /**
+   * D1 库名。跟 scriptName 一样默认 sullyos-amsg，两个都能改是为了在同一个账号里
+   * 装第二套时不会撞上——尤其别让新实例静默绑到已有实例的生产库上。
+   */
+  databaseName?: string;
   /** 复用已有密钥（重装时传，避免换掉 Master Key 让旧任务解不开）。 */
   secrets?: Partial<AmsgSecrets>;
   onProgress?: (p: ProvisionProgress) => void;
@@ -94,6 +99,7 @@ export interface ProvisionInput {
 export type ProvisionFailureCode =
   | 'RELAY_UNSUPPORTED'
   | 'TOKEN_INVALID'
+  | 'TOKEN_NOT_YET_VALID'
   | 'NO_USABLE_ACCOUNT'
   | 'ACCOUNT_AMBIGUOUS'
   | 'SUBDOMAIN_MISSING'
@@ -330,6 +336,65 @@ interface CfItemEnvelope<T> {
   result?: T;
 }
 
+/** 账号令牌的前缀。它属于账号本身、不属于任何用户，这里不支持，见 verifyToken。 */
+const ACCOUNT_TOKEN_PREFIX = 'cfat_';
+
+export const isAccountScopedToken = (token: string): boolean =>
+  token.trim().startsWith(ACCOUNT_TOKEN_PREFIX);
+
+interface CfVerifyResult {
+  result?: { status?: string; not_before?: string; expires_on?: string };
+  messages?: Array<{ code?: number; message?: string }>;
+}
+
+/**
+ * 验 token。只认普通 API Token（属于用户那种）。
+ *
+ * 账号令牌（cfat_ 开头）是另一套东西：它不属于任何用户，`/user/tokens/verify` 和
+ * `/accounts` 对它一律 401，于是没法自动找账号，用户还得自己去抄一串 Account ID。
+ * 而普通 Token 建的时候一样能把范围限定到单个账号，权限一样小、还省一次粘贴——
+ * 所以这里直接不支持它，认出来就明说该换哪种，别让人对着 401 猜。
+ *
+ * 另一个坑：**token 还没到生效日期时，verify 照样返回 success: true**，只在 messages
+ * 里塞一条 code 10002。放它过去的话，后面每一步都收到通用的 Authentication error，
+ * 会被归成「权限不够」——用户跑去改权限，可那根本不是原因。真机上踩过。
+ */
+export async function verifyToken(
+  token: string,
+): Promise<{ ok: true } | { ok: false; code: ProvisionFailureCode; message: string }> {
+  if (isAccountScopedToken(token)) {
+    return {
+      ok: false,
+      code: 'TOKEN_INVALID',
+      message:
+        '这是一枚账号令牌（cfat_ 开头），这里用不了。'
+        + '去 Cloudflare 右上角头像 → My Profile → API Tokens 建一枚普通的 API Token，'
+        + '建的时候在 Account Resources 里选上你要装到的那个账号就行。',
+    };
+  }
+
+  const res = await cfApi<CfVerifyResult>(token, '/user/tokens/verify');
+  if (!res.ok) {
+    return { ok: false, code: 'TOKEN_INVALID', message: res.error || 'Token 验证不通过。' };
+  }
+
+  const notYet = (res.body?.messages ?? []).find((m) => m.code === 10002);
+  if (notYet) {
+    return {
+      ok: false,
+      code: 'TOKEN_NOT_YET_VALID',
+      message:
+        `这枚 Token 还没到生效时间，现在用不了。${notYet.message ? `\nCloudflare 说：${notYet.message}` : ''}`
+        + '\n重新建一枚，把「Start Date」留空或设成今天。',
+    };
+  }
+  const status = res.body?.result?.status;
+  if (status && status !== 'active') {
+    return { ok: false, code: 'TOKEN_INVALID', message: `这枚 Token 的状态是 ${status}，不能用。` };
+  }
+  return { ok: true };
+}
+
 /**
  * 找出这枚 token 真正能用的账号。
  *
@@ -351,19 +416,20 @@ async function findUsableAccounts(token: string): Promise<CfResponse<CfAccount[]
 async function ensureDatabase(
   token: string,
   accountId: string,
+  databaseName: string,
 ): Promise<{ ok: true; id: string; reused: boolean } | { ok: false; error: string }> {
   const existing = await cfApi<CfListEnvelope<{ uuid?: string; name?: string }>>(
     token,
-    `/accounts/${accountId}/d1/database?name=${encodeURIComponent(AMSG_D1_NAME)}`,
+    `/accounts/${accountId}/d1/database?name=${encodeURIComponent(databaseName)}`,
   );
   if (existing.ok) {
-    const hit = (existing.body?.result ?? []).find((db) => db.name === AMSG_D1_NAME && db.uuid);
+    const hit = (existing.body?.result ?? []).find((db) => db.name === databaseName && db.uuid);
     if (hit?.uuid) return { ok: true, id: hit.uuid, reused: true };
   }
   const created = await cfApi<CfItemEnvelope<{ uuid?: string }>>(
     token,
     `/accounts/${accountId}/d1/database`,
-    { method: 'POST', body: JSON.stringify({ name: AMSG_D1_NAME }), contentType: 'application/json' },
+    { method: 'POST', body: JSON.stringify({ name: databaseName }), contentType: 'application/json' },
   );
   const uuid = created.body?.result?.uuid;
   if (!created.ok || !uuid) {
@@ -444,21 +510,30 @@ async function fetchBundle(): Promise<{ ok: true; code: string; config: WorkerDe
 /**
  * 等新部署的 Worker 真的能响应。
  *
- * 刚建好的 workers.dev 地址要过一会儿才解析得到，上传成功的下一秒去连它多半连不上。
- * 任何 HTTP 响应都算活了（401/404 也说明请求确实打到 Worker 上了）。
- * 超时返回 false 而不是抛错——没等到不代表装失败，让调用方提示「过会儿点连接」即可。
+ * 刚建好的 workers.dev 地址要过一会儿才解析得到（实测上传成功后还得几十秒）。
+ * **这期间 Cloudflare 会返回它自己的 404 占位页**，所以「收到 HTTP 响应」不能当成
+ * 活了的判据——真机上就是这么误判的，紧接着去建表必然失败。
+ * 占位页是 text/html，Worker 一律回 JSON，拿 Content-Type 分得干净。
+ *
+ * 超时返回 false 而不是抛错：没等到不代表装失败，让调用方提示「过会儿点连接」即可。
  */
-export async function waitForWorkerReady(workerUrl: string, timeoutMs = 30_000): Promise<boolean> {
+export async function waitForWorkerReady(workerUrl: string, timeoutMs = 90_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
+  // 新地址在各个边缘节点上不是同时生效的：探到一次成功、下一秒又落到没生效的节点上，
+  // 真机上就这么反复了几轮。连着两次才算数，把这个抖动期让过去。
+  const NEEDED_STREAK = 2;
+  let streak = 0;
   let delay = 1000;
   while (Date.now() < deadline) {
     try {
-      await fetch(`${workerUrl}/config-check`, { method: 'GET', cache: 'no-store' });
-      return true;
+      const res = await fetch(`${workerUrl}/config-check`, { method: 'GET', cache: 'no-store' });
+      streak = res.headers.get('content-type')?.includes('json') ? streak + 1 : 0;
+      if (streak >= NEEDED_STREAK) return true;
     } catch {
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      delay = Math.min(delay * 1.5, 5000);
+      streak = 0;
     }
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    delay = Math.min(delay * 1.5, 5000);
   }
   return false;
 }
@@ -487,6 +562,7 @@ export async function generateAmsgSecrets(existing: Partial<AmsgSecrets> = {}): 
  */
 export async function provisionAmsgBackend(input: ProvisionInput): Promise<ProvisionResult> {
   const scriptName = input.scriptName?.trim() || AMSG_SCRIPT_NAME;
+  const databaseName = input.databaseName?.trim() || AMSG_D1_NAME;
   const token = input.token.trim();
   const report = (step: ProvisionStepId, message: string) => input.onProgress?.({ step, message });
   const warnings: string[] = [];
@@ -503,9 +579,9 @@ export async function provisionAmsgBackend(input: ProvisionInput): Promise<Provi
   }
 
   report('token', '验证 Token…');
-  const verified = await cfApi(token, '/user/tokens/verify');
+  const verified = await verifyToken(token);
   if (!verified.ok) {
-    return { ok: false, code: 'TOKEN_INVALID', message: verified.error || 'Token 验证不通过。' };
+    return { ok: false, code: verified.code, message: verified.message };
   }
 
   report('account', '查找可用的 Cloudflare 账号…');
@@ -537,10 +613,10 @@ export async function provisionAmsgBackend(input: ProvisionInput): Promise<Provi
   }
 
   report('database', '准备数据库…');
-  const db = await ensureDatabase(token, accountId);
+  const db = await ensureDatabase(token, accountId, databaseName);
   if (!db.ok) return { ok: false, code: 'CF_ERROR', message: db.error };
   if (db.reused) {
-    warnings.push(`用的是账号里已有的同名数据库 ${AMSG_D1_NAME}。如果之前装过一套，两边会共用同一个库。`);
+    warnings.push(`用的是账号里已有的同名数据库 ${databaseName}。如果之前装过一套，两边会共用同一个库。`);
   }
 
   report('subdomain', '确认 workers.dev 地址…');
@@ -612,15 +688,21 @@ export async function provisionAmsgBackend(input: ProvisionInput): Promise<Provi
     return { ok: false, code: 'CF_ERROR', message: `开启 workers.dev 地址失败（${exposed.error}）。` };
   }
 
-  // 实时日志是排障用的，开不上不影响功能，所以只记一句警告。
+  // 实时日志（面板上的 Workers Logs）默认是关的，amsg 排障全靠它，所以顺手打开。
+  // 这个端点**只收 multipart**，发 JSON 会被 10001 顶回来；PATCH 是合并语义，
+  // 只带 observability 不会动到刚写好的绑定（真机验过，七条绑定一条没少）。
+  // 开不上不影响功能，所以失败只记一句警告，不中断。
+  const settingsForm = new FormData();
+  settingsForm.set(
+    'settings',
+    new Blob([JSON.stringify({ observability: { enabled: true, logs: { enabled: true } } })], {
+      type: 'application/json',
+    }),
+  );
   const observability = await cfApi(
     token,
     `/accounts/${accountId}/workers/scripts/${encodeURIComponent(scriptName)}/settings`,
-    {
-      method: 'PATCH',
-      body: JSON.stringify({ observability: { enabled: true, logs: { enabled: true } } }),
-      contentType: 'application/json',
-    },
+    { method: 'PATCH', body: settingsForm },
   );
   if (!observability.ok) {
     warnings.push('实时日志没能自动打开，排障时要去 Cloudflare 面板手动开一下。');
