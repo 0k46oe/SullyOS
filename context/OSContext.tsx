@@ -42,6 +42,12 @@ import { CHAT_GEN_EVENTS, setChatViewSnapshot } from '../utils/chatGenEvents';
 import { buildChatRequestPayload } from '../utils/chatRequestPayload';
 import { ChatPrompts } from '../utils/chatPrompts';
 import { extractHtmlBlocks } from '../utils/htmlPrompt';
+import { mergePalaceFragmentsIntoMemories } from '../utils/memoryPalace/pipeline';
+import {
+  MEMORY_AUTO_ARCHIVE_SYNC_EVENT,
+  repairMissingAutoArchiveMemories,
+  type MemoryAutoArchiveSyncDetail,
+} from '../utils/memoryPalace/autoArchive';
 import { ActiveMsgClient } from '../utils/activeMsgClient';
 import { resolveCharTimeZone } from '../utils/timezone';
 import { ActiveMsgStore } from '../utils/activeMsgStore';
@@ -2593,13 +2599,72 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           }));
       };
 
+      // Push / 彼方 / 家园等 React 外入口完成全自动记忆双写后，只把增量搬回内存。
+      // 再基于当前 state 保存一次，堵住后台 DB 写入和前台角色更新同时发生时的反向覆盖。
+      const memoryAutoArchiveSyncHandler = (e: Event) => {
+          const detail = ((e as CustomEvent).detail || {}) as MemoryAutoArchiveSyncDetail;
+          if (!detail.charId) return;
+          setCharacters(prev => prev.map(character => {
+              if (character.id !== detail.charId) return character;
+              const nextMemories = detail.fragments.length > 0
+                  ? mergePalaceFragmentsIntoMemories(character.memories || [], detail.fragments)
+                  : (character.memories || []);
+              const currentHide = character.hideBeforeMessageId || 0;
+              const nextHide = Math.max(currentHide, detail.hideBeforeMessageId || 0);
+              if (nextMemories === character.memories && nextHide === currentHide) return character;
+              const next = normalizeCharacterImpression({
+                  ...character,
+                  memories: nextMemories,
+                  ...(nextHide > currentHide ? { hideBeforeMessageId: nextHide } : {}),
+              });
+              DB.saveCharacter(next).then(() => {
+                  markAmsgStateDirty({
+                      char: next,
+                      userProfile: userProfileRef.current,
+                      groups: groupsRef.current,
+                      realtimeConfig: realtimeConfigRef.current,
+                  });
+              }).catch(error => console.warn('[AutoArchive] state sync save failed', error));
+              return next;
+          }));
+      };
+
       window.addEventListener('amsg2-tasks-adopted', tasksAdoptedHandler);
       window.addEventListener('char-music-profile-updated', musicProfileSyncHandler);
+      window.addEventListener(MEMORY_AUTO_ARCHIVE_SYNC_EVENT, memoryAutoArchiveSyncHandler);
       return () => {
           window.removeEventListener('amsg2-tasks-adopted', tasksAdoptedHandler);
           window.removeEventListener('char-music-profile-updated', musicProfileSyncHandler);
+          window.removeEventListener(MEMORY_AUTO_ARCHIVE_SYNC_EVENT, memoryAutoArchiveSyncHandler);
       };
   }, []);
+
+  // 旧版本曾在 Push 后处理里只写宫殿、没写神经链接。每个角色升级后保守修一次：
+  // 只补“最后一条 palace 日志之后整天完全空白”的聊天提取节点，不调 API、不动水位线。
+  useEffect(() => {
+      if (!isDataLoaded) return;
+      let cancelled = false;
+      const runRepair = async () => {
+          const enabledCharacters = characters.filter(character => (
+              character.memoryPalaceEnabled && character.autoArchiveEnabled
+          ));
+          for (const character of enabledCharacters) {
+              if (cancelled) return;
+              const marker = `mp_autoArchiveDualWriteRepair_v1_${character.id}`;
+              if (localStorage.getItem(marker) === '1') continue;
+              try {
+                  await repairMissingAutoArchiveMemories(character.id);
+                  if (!cancelled) localStorage.setItem(marker, '1');
+              } catch (error) {
+                  console.warn('[AutoArchiveRepair] failed', character.id, error);
+              }
+          }
+      };
+      void runRepair();
+      return () => { cancelled = true; };
+  // 只在本次数据初始化完成时执行；后续新数据走已修复的统一双写入口。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDataLoaded]);
 
   const updateTheme = async (updates: Partial<OSTheme>) => {
     const { wallpaper, lockWallpaper, launcherWidgetImage, launcherWidgets, desktopDecorations, customFont, ...styleUpdates } = updates;
