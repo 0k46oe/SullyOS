@@ -16,6 +16,7 @@ import { getTtsProvider, getVoicePromptOverride } from './ttsProvider';
 import { resolveCharTimeZone, nowInTimeZone } from './timezone';
 import { buildLifeRecordInjection } from './lifeRecords';
 import { isWorkerReachableUrl } from './amsgToolPack';
+import { isAmsg2EnabledForChar } from './amsg2Tasks';
 import { getCharNameById } from './charNameRegistry';
 import { getLocalDateKey } from './localDate';
 import { getDailyScheduleForChar } from './dailySchedule';
@@ -99,6 +100,8 @@ export interface PromptBuildOptions {
      * 易变段（召回/buff/音乐/日程/群聊/彼方）照常保留，它们在发送时刻是新鲜的，
      * 而 worker 拿不到。不裁的话，模型会在一份 prompt 里看到两个钟、两份互不
      * 重叠的热搜（前端快照版 + worker 现拉版），且两段都自称「来自真实世界」。
+     * `[schedule_message]` 教学是否保留还要看角色的 2.0 开关，见下方
+     * scheduleMessageTagEnabled 处的说明。
      */
     timelyByWorker?: boolean;
 }
@@ -569,7 +572,15 @@ ${uname} 的化身正挂在《彼方》的【${roomName}】${act ? `，状态写
         // 轮询的 React 定时器派发，App 关着就不存在。主动消息 2.0 到点生成走的是另一条路
         // （worker 到点跑，不需要 App 开着），它有自己的排程工具，worker 会把说明追加在
         // fire_pack 末尾。两套一起教，角色会挑错的那套，然后「我到点叫你」就落空了。
-        const scheduleMessageTagEnabled = !forFirePack;
+        // 所以只在「这一轮 worker 不会教云端排程工具」时才教本地标签：
+        // - 打包（forFirePack）：worker 到点必带排程工具说明 → 不教；
+        // - 即时对话（timelyByWorker）且角色开着主动消息 2.0：worker 同样会注入排程
+        //   工具 → 不教。「2.0 开着」的判据与 activeMsgClient 里 fire_pack 的
+        //   selfScheduleEnabled 同源（都走 isAmsg2EnabledForChar）；
+        // - 即时对话但角色 2.0 关着：云端不给排程能力，本地标签是唯一的定时手段 → 照教；
+        // - 本地生成：worker 不参与 → 照教。
+        const scheduleMessageTagEnabled = !forFirePack
+            && !(timelyByWorker && isAmsg2EnabledForChar(char));
 
         baseSystemPrompt += `### 聊天 App 行为规范 (Chat App Rules)
             **严格注意，你正在手机聊天，无论之前是什么模式，哪怕上一句话你们还面对面在一起，当前，你都是已经处于线上聊天状态了，请不要输出你的行为**
