@@ -1510,8 +1510,14 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
           <div className="flex items-center justify-between gap-3">
             <span className="font-bold text-slate-700">即时对话</span>
-            <span className={`text-xs font-bold ${config.instantChatEnabled ? 'text-emerald-600' : 'text-slate-400'}`}>
-              {config.instantChatEnabled ? '已开启' : '未开启'}
+            {/* 开着但有门没过时不能只写「已开启」——那几道门是真的会让这一轮走本地生成的，
+                标成绿色的「已开启」就是在骗人：用户以为聊天在云端跑，实际一直在本地。 */}
+            <span className={`text-xs font-bold ${
+              !config.instantChatEnabled ? 'text-slate-400'
+                : instantChatBlockedReason ? 'text-amber-600' : 'text-emerald-600'
+            }`}>
+              {!config.instantChatEnabled ? '未开启'
+                : instantChatBlockedReason ? '已开启 · 暂不生效' : '已开启'}
             </span>
           </div>
           <p className="text-xs leading-relaxed text-slate-500">

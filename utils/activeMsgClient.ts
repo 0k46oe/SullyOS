@@ -387,6 +387,12 @@ const initializeClient = (config: ActiveMsg2GlobalConfig) => {
   promise.catch(() => {
     if (cachedClientEntry?.promise === promise) cachedClientEntry = null;
   });
+  // 顺手刷一次即时对话的能力位（结果存进全局配置，见 probeInstantChatSupport）。
+  // 挂在这里是因为这是「一次会话一次」的天然位置：握手按配置记忆化，换 worker / 换密钥
+  // 才会重来。设置页那一处探测只覆盖打开过设置页的人——而最需要被纠正的恰恰是那批
+  // 「装好之后再没进过设置页、Worker 还停在旧版」的人。
+  // 不 await：它只影响**之后**几轮的路由判断，拿它挡住握手等于给每条消息加一次 RTT。
+  void ActiveMsgClient.probeInstantChatSupport().catch(() => {});
   return promise;
 };
 
@@ -2069,21 +2075,37 @@ export const ActiveMsgClient = {
   // 老部署没有这个端点 → null。设置页用它亮「worker 需要重新粘贴部署」的牌子，
   // 防止版本落后时新特性静默降级、用户以为功能坏了。不需要 init（无加密参与）。
   /**
-   * 这台 worker 认不认 `POST /instant-chat`（即时对话的唯一版本门槛）。
+   * 这台 worker 现在**真的跑得动**即时对话吗（即时对话的唯一版本门槛）。
    *
-   * 标志来自 `GET /config-check`，是**包装层**自己报的：即时对话的路由住在 SullyOS 这份
-   * worker 代码里，而 getCapabilities 报的是上游库的版本号——只更新 SullyOS 这份时那个号
-   * 一动不动，靠它分不出新旧。探不到（旧 bundle / 网络不通）一律 false：开关置灰比
-   * 「开着但发一条挂一条」好。
+   * 认的是 `GET /config-check` 里的 `instantTick`——运行时到底有没有 INSTANT_TICK 绑定。
+   * 不认 `instantChat`（那只说明代码里有这条路由）也不认版本号，因为这三样会分家：
+   * 自更新由用户那台 Worker 上的**旧代码**执行，旧代码不认识 Durable Object，所以更新完
+   * 第一下常常是「代码新了、版本号也对上了、绑定却没接上」，这条路只能回 503。看版本号
+   * 的话前端会一边说「已经是最新版」一边发一条挂一条。
+   *
+   * 探不到一律 false（老 bundle 根本没这个字段，网络不通也是 false）：这一档会让即时对话
+   * 整个让位给本地生成，宁可少一个后台能力，也不要「开关亮着、发一条挂一条」。
+   *
+   * 结论顺手存进全局配置（`instantChatSupported`）：真正拦下这一轮的是发消息那条路上的
+   * resolveInstantChatReadiness，而它不做逐调用网络探测，只认这份存量。所以每探一次就
+   * 刷一次，用户更新完 Worker 后下一次探测自然把它翻回来，不用手动去重开开关。
    */
   async probeInstantChatSupport(): Promise<boolean> {
+    let supported = false;
     try {
       const config = await ensureWorkerReady();
       const { status, body } = await fetchWithAuthRaw('config-check', config, { method: 'GET' }, '即时对话能力探测');
-      return status === 200 && body?.success === true && body?.data?.instantChat === true;
+      supported = status === 200 && body?.success === true && body?.data?.instantTick === true;
     } catch {
-      return false;
+      supported = false;
     }
+    try {
+      await ActiveMsgStore.saveGlobalConfig({ instantChatSupported: supported });
+    } catch (error) {
+      // 存不下只是这一轮的判断留不到下次，探测结论本身照常返回。
+      console.warn('[AmsgInstantChat] 能力探测结果没存下来（下次发消息按上一次的存量判断）', error);
+    }
+    return supported;
   },
 
   /**

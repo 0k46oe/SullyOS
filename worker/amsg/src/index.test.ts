@@ -8,13 +8,14 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import worker, {
   amsgFireSettled, amsgHooks, amsgReasoningKey, amsgStaleSkip, attachScheduledTasks,
-  buildWorkerConfig, configureInstantErrorPush, EMOTION_EVAL_RIDE_ALONG_MS, inspectWorkerEnv,
+  buildWorkerConfig, configureInstantErrorPush, inspectWorkerEnv,
   offloadOversizedPush, resolveVapidEmail, runFireCancelTool, runFireRenewTool,
   runFireScheduleTool, runMcpFireTool, splitSchemaMissing,
 } from './index';
+import * as workerEntry from './index';
 import { MAX_TOOL_ITERATIONS } from './agentic';
 import { MAX_PUSH_PAYLOAD_BYTES } from '@rei-standard/amsg-server/cloudflare';
-import { amsgEmotionUpdateKey } from './emotionEval';
+import { amsgEmotionUpdateKey, EMOTION_EVAL_RIDE_ALONG_MS } from './emotionEval';
 import { INSTANT_TOTAL_TIMEOUT_MS } from './instantChat';
 import {
   AMSG_CHAT_FAIL_KEY,
@@ -241,6 +242,28 @@ const runFire = async (
   } as any) as any;
   return { decision, metadata, scratch };
 };
+
+describe('Worker 入口的具名导出', () => {
+  /**
+   * 回归守卫：入口不能导出数字 / 字符串这类原始值。
+   *
+   * Worker 入口模块的具名导出会被 workerd 当成「命名入口点」——Durable Object 和
+   * WorkerEntrypoint 的类就是靠这个认出来的——所以每一个都得是函数（类也是函数）或者
+   * ExportedHandler 那样的对象。从入口顺手导出一个数字常量（给测试用的那种），
+   * 整个 Worker 直接起不来：`Incorrect type for map entry '<导出名>':
+   * the provided value is not of type 'function or ExportedHandler'`。
+   * 而这事儿只有真跑 workerd 才看得见，单测和 tsc 全绿，`wrangler dev` 一开才炸。
+   *
+   * 常量一律住在别的模块里（先例：EMOTION_EVAL_RIDE_ALONG_MS 在 ./emotionEval）。
+   */
+  it('没有原始值——导出一个数字常量就够让整个 Worker 起不来', () => {
+    const offenders = Object.entries(workerEntry)
+      .filter(([name]) => name !== 'default')
+      .filter(([, value]) => typeof value !== 'function' && (typeof value !== 'object' || value === null))
+      .map(([name, value]) => `${name}: ${typeof value}`);
+    expect(offenders).toEqual([]);
+  });
+});
 
 describe('onBeforeFire 四道门', () => {
   it('正常路径：填好槽返回 prompt，并把工具状态挂上 scratch', async () => {
@@ -3047,6 +3070,30 @@ describe('/debug — 只读诊断', () => {
    *
    * 「缺哪些」由上游按它自己的建表语句判定，这里只钉住「它说缺，/debug 就得报出来」。
    */
+  /**
+   * 回归守卫：比对不出来时报 null，**不是 true**。
+   *
+   * 这一项的全部意义就是查出上面那种漂移。查询本身挂了（个别运行时不让读 sqlite_master /
+   * PRAGMA，就是这种长相）却回一句「齐了」，等于在唯一能发现这件事的地方给假绿灯——
+   * 库真缺列、cron 每分钟静默挂，而面板一路绿到底。宁可说「不知道」。
+   */
+  it('schema 比对不出来 → schemaReady 报 null（查不了 ≠ 齐了）', async () => {
+    const db = fakeDb({ tables: ALL_TABLES });
+    const blind = {
+      prepare(sql: string) {
+        if (/PRAGMA table_info/.test(sql)) {
+          const boom = async () => { throw new Error('D1_ERROR: not authorized: SQLITE_AUTH'); };
+          return { bind: () => ({ first: boom }), first: boom, all: boom };
+        }
+        return db.prepare(sql);
+      },
+    };
+    const data = await debug(blind);
+    expect(data.storage.reachable).toBe(true);
+    expect(data.storage.schemaReady).toBeNull();
+    expect(data.storage.schemaReady).not.toBe(true);
+  });
+
   it('换了 bundle 没跑 init-tenant → 点名缺的那几列（cron 会因此每分钟静默挂）', async () => {
     const data = await debug(fakeDb({
       tables: ALL_TABLES,
@@ -3802,6 +3849,28 @@ describe('即时对话的接线', () => {
     const response = await call('https://w.example/config-check');
     const body = await response.json();
     expect(body.data.instantChat).toBe(true);
+  });
+
+  /**
+   * 回归守卫：「有这条路由」和「这条路真的能用」必须分开报。
+   *
+   * 自更新是由用户那台 Worker 上的**旧代码**执行的，而旧代码不认识 Durable Object——
+   * 它传上去的新 bundle 不带 INSTANT_TICK 绑定。于是有个中间态：代码是新的、
+   * workerVersion 也对上了，`/instant-chat` 却只能回 503。只报 instantChat / 版本号的话，
+   * 前端会一边说「已经是最新版」一边发一条挂一条。前端的能力门槛认的就是这个字段。
+   */
+  it('/config-check 单独报起跳器接没接上：没绑定就是 false', async () => {
+    const body = await (await call('https://w.example/config-check')).json();
+    expect(body.data.instantTick).toBe(false);
+    // 中间态的长相：路由在、版本号也是新的，唯独这条路跑不动。
+    expect(body.data.instantChat).toBe(true);
+    expect(typeof body.data.workerVersion).toBe('string');
+  });
+
+  it('/config-check 绑定在就是 true', async () => {
+    const withTick = { ...fullEnv, INSTANT_TICK: { idFromName: () => ({}), get: () => ({ kick: async () => {} }) } };
+    const body = await (await call('https://w.example/config-check', {}, withTick)).json();
+    expect(body.data.instantTick).toBe(true);
   });
 
   it('/instant-chat 的预检要放行，否则带自定义头的正式请求根本发不出去', async () => {

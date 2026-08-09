@@ -130,6 +130,7 @@ import {
 } from './agentic';
 import {
   amsgEmotionUpdateKey,
+  EMOTION_EVAL_RIDE_ALONG_MS,
   runAmsgEmotionEval,
   stripEmotionEvalSpec,
   takeEmotionEvalSpec,
@@ -1053,23 +1054,6 @@ const condenseToolTrace = (
   }
   return [...counts].map(([name, count]) => ({ name, count }));
 };
-
-/**
- * 正文写完之后，最多再给情绪评估这么久搭上这班车。
- *
- * 评估在 onBeforeFire 就跟主生成并行起跑了，正常情况下走到收尾时早就回来了，这个窗口
- * 一秒都用不上；它管的是副 API 限流 / 挂起的那种时候。评估自己的超时是 120 秒
- * （EMOTION_EVAL_TIMEOUT_MS），死等的话用户会对着「正在输入…」多看两分钟——同一句话走
- * 本地路径十秒就上屏了；工具循环吃掉大半预算时，这两分钟还会把整轮 600 秒的预算顶穿，
- * fire 失败重跑，用户拿到的是一句失败说明而不是那条已经写好的回复。
- *
- * 取舍：回复优先，情绪让路。没赶上的评估不作废：push 上挂引用键 + pending 标记
- * （客户端那盏「情绪更新中」继续亮着），收尾 hook（amsgFireSettled，上游会 await 它）
- * 接着等评估出结果，写进旁路存储（amsgEmotionUpdateKey），客户端对着引用键轮询补落
- * ——对齐本地路径「评估慢是晚到，不是丢弃」的语义。评估自带 EMOTION_EVAL_TIMEOUT_MS，
- * 这段续等是有界的。
- */
-export const EMOTION_EVAL_RIDE_ALONG_MS = 10_000;
 
 /** 旁路也用不上（任务行没有 clientTaskId）时给用户看的一句话（跟着 amsgEmotionDone 回去）。 */
 const EMOTION_EVAL_LATE_REASON = '情绪评估没赶上这条回复（副 API 太慢），这一轮先不更新';
@@ -2486,12 +2470,20 @@ const inspectStorage = async (env: Env, schema: SchemaProbe) => {
     const present = new Set((tables.results || []).map((row) => row.name));
 
     // schema 齐不齐由上游说了算（它按自己的建表语句比对，见 splitSchemaMissing）。
-    // 查不了就当没有缺失，别让一次查询失败把整块体检染红。
+    //
+    // 查不了（schema 为 null）时报 **null，不是 true**：这一项的全部意义就是查出
+    // 「升级完 Worker 没重新连接」造成的表结构漂移——那种情况下 cron 每分钟静默失败、
+    // 主动消息整个停摆，而界面处处正常。查询本身挂了却回一句「表和列都齐了」，等于在
+    // 唯一能发现这件事的地方给了假绿灯，比没有这项检查更糟。让它照实说「查不了」，
+    // 界面那一行显示成灰色的未知，人至少知道还得自己确认一次。
     const { missingTables, missingColumns } = splitSchemaMissing(schema?.missing ?? []);
 
     if (!present.has('scheduled_messages')) {
+      // 主表都不在，这个不用上游背书也是确定的：库是空的。
       return { reachable: true as const, missingTables, missingColumns, schemaReady: false };
     }
+    // 主表在、但比对不出来 → 不知道。
+    const schemaReady = schema ? missingTables.length === 0 && missingColumns.length === 0 : null;
 
     const nowIso = new Date().toISOString();
     const stats = await db
@@ -2510,7 +2502,7 @@ const inspectStorage = async (env: Env, schema: SchemaProbe) => {
 
     return {
       reachable: true as const,
-      schemaReady: missingTables.length === 0 && missingColumns.length === 0,
+      schemaReady,
       missingTables,
       missingColumns,
       // 单用户 worker 只存一行。到点却发不出去最常见的原因就是这行是空的——
@@ -2671,15 +2663,28 @@ export default {
       // 刻意不校验 X-Client-Token：worker 配了口令而前端没填正是要诊断的情形之一，
       // 校验了就查不出来。作为交换，这里只回「配没配」，不回任何值。
       //
-      // instantChat 是包装层自己的能力标志：即时对话的路由住在这份代码里，而设置页
-      // 能读到的版本号是**上游库**的，只改 SullyOS 这份 worker 时那个号不动。前端拿
-      // 这个标志做唯一的版本门槛（贴的是旧 bundle 就没有它，开关直接置灰）。
+      // 三个能力标志，各答各的问题，前端全都要：
       //
-      // workerVersion 则是这份 bundle 自己的版本，前端拿它跟自己编译进去的同一个常量
-      // 比，不一样就说明用户那台 Worker 该更新了（老 bundle 不报这个字段，也算该更新）。
+      //   instantChat  这份代码里有没有 /instant-chat 这条路由。老 bundle 没有这个字段。
+      //   instantTick  起跳器（INSTANT_TICK 绑定）接上了没有——**即时对话真正能不能用**看它。
+      //   workerVersion 这份 bundle 自己的版本，跟前端编译进去的同一个常量比，不一样就该更新。
+      //
+      // 为什么「有路由」和「能用」得分开报：自更新是由**用户当前那台 Worker 上的旧代码**
+      // 执行的，而旧代码不认识 Durable Object，所以它传上去的新 bundle 是不带 INSTANT_TICK
+      // 绑定的——代码是新的、版本号也对上了，`/instant-chat` 却只能回 503。这中间态没有
+      // 单独的信号的话，前端会一边说「已经是最新版」一边发一条挂一条。再点一次更新（这次
+      // 跑的是新代码，会把绑定补上）就好，而让用户知道「还得再点一次」的正是这个字段。
+      //
+      // 同理，以后再加别的绑定也会撞上同一堵墙：自更新永远由旧代码执行。所以判断「能不能
+      // 用」一律看运行时真的有没有那个绑定，别看版本号。
       return jsonWithCors(200, {
         success: true,
-        data: { ...inspectWorkerEnv(env), instantChat: true, workerVersion: AMSG_BUNDLE_VERSION },
+        data: {
+          ...inspectWorkerEnv(env),
+          instantChat: true,
+          instantTick: !!env.INSTANT_TICK,
+          workerVersion: AMSG_BUNDLE_VERSION,
+        },
       });
     }
 

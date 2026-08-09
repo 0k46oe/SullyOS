@@ -338,6 +338,57 @@ describe('连接失败的归类（AmsgFailKind）', () => {
 // 回归守卫：worker 缺 D1 绑定或 master key 时，上游是抛异常 → 被它的全局 catch 吞成
 // 一句「服务器内部错误」，而那个响应不带 CORS 头，浏览器连这句话都不让前端读，用户
 // 只看得到 "Failed to fetch"。connect 先问一次 /config-check，把缺的那一样直接说出来。
+// 回归守卫：即时对话的能力门槛认的是「运行时真的有起跳器」，不是「代码里有这条路由」。
+//
+// 自更新由用户那台 Worker 上的**旧代码**执行，而旧代码不认识 Durable Object——它传上去的
+// 新 bundle 不带 INSTANT_TICK 绑定。于是会出现「instantChat:true、workerVersion 也对上了、
+// 但 /instant-chat 只能回 503」的中间态。认前两样中的任何一样，前端都会一边说「已经是
+// 最新版」一边发一条挂一条。
+describe('即时对话能力探测（instantTick）', () => {
+  const configCheck = (data: Record<string, unknown>) => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      status: 200,
+      text: async () => JSON.stringify({
+        success: true,
+        data: { ok: true, missing: [], message: 'Worker 配置齐全。', warnings: [], ...data },
+      }),
+      headers: new Headers({ 'content-type': 'application/json' }),
+    })));
+  };
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('起跳器接上了 → 支持', async () => {
+    configCheck({ instantChat: true, instantTick: true, workerVersion: '2026-08-09' });
+    expect(await ActiveMsgClient.probeInstantChatSupport()).toBe(true);
+  });
+
+  it('代码新了但起跳器没接上（更新过一次的中间态）→ 不支持', async () => {
+    configCheck({ instantChat: true, instantTick: false, workerVersion: '2026-08-09' });
+    expect(await ActiveMsgClient.probeInstantChatSupport()).toBe(false);
+  });
+
+  it('老 bundle 根本不报这个字段 → 不支持（哪怕它自称 instantChat:true）', async () => {
+    configCheck({ instantChat: true });
+    expect(await ActiveMsgClient.probeInstantChatSupport()).toBe(false);
+  });
+
+  // 结论要存下来：真正拦下这一轮的是发消息路上的 resolveInstantChatReadiness，
+  // 而它不做逐调用网络探测，只认这份存量。不存 = 这道门形同虚设。
+  it('每探一次就把结论存进全局配置（发消息那道门只认存量）', async () => {
+    const { ActiveMsgStore } = await import('./activeMsgStore');
+    (ActiveMsgStore.saveGlobalConfig as any).mockClear();
+    configCheck({ instantChat: true, instantTick: false });
+    await ActiveMsgClient.probeInstantChatSupport();
+    expect(ActiveMsgStore.saveGlobalConfig).toHaveBeenCalledWith({ instantChatSupported: false });
+
+    (ActiveMsgStore.saveGlobalConfig as any).mockClear();
+    configCheck({ instantChat: true, instantTick: true });
+    await ActiveMsgClient.probeInstantChatSupport();
+    expect(ActiveMsgStore.saveGlobalConfig).toHaveBeenCalledWith({ instantChatSupported: true });
+  });
+});
+
 describe('连接前的 worker 配置自检', () => {
   /** 按路径分流的 fetch：没列到的路径一律当成功，模拟 init-tenant 那步是通的。 */
   const routeFetch = (routes: Record<string, { status: number; body: unknown }>) => {

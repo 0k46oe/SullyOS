@@ -10052,6 +10052,7 @@ var takeEmotionEvalSpec = (metadata) => {
   }
   return isUsableEvalSpec(spec) ? spec : null;
 };
+var EMOTION_EVAL_RIDE_ALONG_MS = 1e4;
 var runAmsgEmotionEval = async (spec, chatMessages, charName, timeoutMs = EMOTION_EVAL_TIMEOUT_MS) => requestEmotionEval(spec.api, restoreEvalPrompt(spec.prompt, chatMessages, charName), timeoutMs);
 
 // worker/amsg/src/nativeFcm.ts
@@ -10503,7 +10504,6 @@ var condenseToolTrace = (calls) => {
   }
   return [...counts].map(([name, count]) => ({ name, count }));
 };
-var EMOTION_EVAL_RIDE_ALONG_MS = 1e4;
 var EMOTION_EVAL_LATE_REASON = "\u60C5\u7EEA\u8BC4\u4F30\u6CA1\u8D76\u4E0A\u8FD9\u6761\u56DE\u590D\uFF08\u526F API \u592A\u6162\uFF09\uFF0C\u8FD9\u4E00\u8F6E\u5148\u4E0D\u66F4\u65B0";
 var raceEmotionEval = (promise, lateNote = "\u8BC4\u4F30\u6CA1\u8D76\u4E0A\u8FD9\u6761\u56DE\u590D\uFF0C\u5148\u628A\u8BDD\u53D1\u51FA\u53BB\uFF08\u8FD9\u4E00\u8F6E\u4E0D\u66F4\u65B0\u60C5\u7EEA\uFF09") => {
   let timer;
@@ -11339,6 +11339,7 @@ var inspectStorage = async (env, schema) => {
     if (!present.has("scheduled_messages")) {
       return { reachable: true, missingTables, missingColumns, schemaReady: false };
     }
+    const schemaReady = schema ? missingTables.length === 0 && missingColumns.length === 0 : null;
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     const stats = await db.prepare(
       `SELECT COUNT(*) AS pending,
@@ -11349,7 +11350,7 @@ var inspectStorage = async (env, schema) => {
     const pushRow = present.has("push_subscriptions") ? await db.prepare("SELECT COUNT(*) AS n FROM push_subscriptions").first() : null;
     return {
       reachable: true,
-      schemaReady: missingTables.length === 0 && missingColumns.length === 0,
+      schemaReady,
       missingTables,
       missingColumns,
       // 单用户 worker 只存一行。到点却发不出去最常见的原因就是这行是空的——
@@ -11445,7 +11446,12 @@ var src_default = {
       if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
       return jsonWithCors(200, {
         success: true,
-        data: { ...inspectWorkerEnv(env), instantChat: true, workerVersion: AMSG_BUNDLE_VERSION }
+        data: {
+          ...inspectWorkerEnv(env),
+          instantChat: true,
+          instantTick: !!env.INSTANT_TICK,
+          workerVersion: AMSG_BUNDLE_VERSION
+        }
       });
     }
     if (pathname.endsWith("/debug")) {
@@ -11510,7 +11516,6 @@ var src_default = {
   }
 };
 export {
-  EMOTION_EVAL_RIDE_ALONG_MS,
   InstantTickDO,
   amsgFireSettled,
   amsgHooks,

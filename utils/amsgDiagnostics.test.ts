@@ -211,6 +211,44 @@ describe('buildAmsgDiagnosticRows — 红绿判定', () => {
     expect(masterKey.detail).toContain('Secret');
   });
 
+  /**
+   * 回归守卫：查不了 ≠ 齐了。
+   *
+   * 这一项存在的全部意义就是查出「升级完 Worker 没重新连接」造成的表结构漂移——漂移时
+   * cron 每分钟静默失败、主动消息整个停摆，而配置自检、任务列表、界面全都正常。查询本身
+   * 挂了却报一句「表和列都齐了」，等于在唯一能发现这件事的地方给了假绿灯，比没有这项检查
+   * 更糟。2026-08-09 本地实机跑到过：库里真缺 last_error 列和 message_outbox 表，
+   * 面板照报「数据表 正常」。
+   */
+  it('worker 查不了表结构（schemaReady=null）→ 报未知，绝不报正常', () => {
+    const rows = buildAmsgDiagnosticRows({
+      probe: {
+        reachable: true,
+        report: healthyReport({
+          storage: {
+            reachable: true,
+            schemaReady: null,
+            missingTables: [],
+            missingColumns: [],
+            pushSubscriptionRegistered: true,
+            pendingTasks: 0,
+            overdueTasks: 0,
+            oldestOverdueMinutes: null,
+          },
+        }),
+      },
+      localPushSubscribed: true,
+    });
+
+    const schema = rowOf(rows, 'schema');
+    expect(schema.level).toBe('unknown');
+    expect(schema.level).not.toBe('ok');
+    // 过去这一档说的就是这句——它正是那个假绿灯。
+    expect(schema.detail).not.toContain('表和列都齐了');
+    // 整块体检的基调也不能是「一切正常」。
+    expect(summarizeAmsgDiagnostics(rows)).not.toBe('ok');
+  });
+
   it('表结构是旧的（缺列）要单独报红并指向「重新连接并验证」', () => {
     const rows = buildAmsgDiagnosticRows({
       probe: {
