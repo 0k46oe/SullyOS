@@ -1019,6 +1019,7 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
         userProfile: UserProfile,
         emojis: Emoji[],
         processedExcludeIds?: Set<number>,
+        options?: { useVisionDescriptions?: boolean },
     ) => {
         // Filter Logic
         // 新版上下文范围由 chatContextRange 先按「自适应/拉杆最大范围」取窗；
@@ -1087,6 +1088,15 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                 }
                 
                 if (m.type === 'image') {
+                     const visionDescription = options?.useVisionDescriptions
+                         && typeof m.metadata?.visionDescription === 'string'
+                         ? m.metadata.visionDescription.trim()
+                         : '';
+                     if (visionDescription) {
+                         let textPart = `${timeStr} [图片：${visionDescription}]`;
+                         if (index === historySlice.length - 1 && timeGapHint && m.role === 'user') textPart += `\n\n${timeGapHint}`;
+                         return { role: m.role, content: textPart };
+                     }
                      // 向下兼容：如果图片数据缺失（例如只导入了文字备份），不要把空 URL 发给 API，否则会报错无法回应
                      const hasImageData = typeof m.content === 'string' && (m.content.startsWith('data:') || m.content.startsWith('http'));
                      let textPart = hasImageData

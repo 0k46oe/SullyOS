@@ -22,6 +22,12 @@ describe('API config normalization', () => {
       stream: true,
       temperature: 0.7,
       minimaxApiKey: 'mini-key',
+      visionApi: {
+        enabled: true,
+        baseUrl: ' https://vision.example.com/v1/// ',
+        apiKey: '\u200Bvision-key\u2060',
+        model: ' vision-model ',
+      },
     })).toEqual({
       baseUrl: 'https://api.example.com/v1',
       apiKey: 'sk-test',
@@ -29,6 +35,12 @@ describe('API config normalization', () => {
       stream: true,
       temperature: 0.7,
       minimaxApiKey: 'mini-key',
+      visionApi: {
+        enabled: true,
+        baseUrl: 'https://vision.example.com/v1',
+        apiKey: 'vision-key',
+        model: 'vision-model',
+      },
     });
   });
 });
