@@ -465,7 +465,10 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       setNeedsSubdomain(false);
       setCfToken('');
       result.warnings.forEach((warning) => addToast(warning, 'info'));
-      addToast(`后端已经装好了：${result.workerUrl}`, 'success');
+      // 别在这儿说「装好了」就完事：地址还要几十秒才在各个边缘节点上生效，而上面那句
+      // patchConfig 一落地，一键部署那张卡片就因为「地址已填」收起来了——进度条跟着消失，
+      // 看上去像是全部办妥。用户于是去点「连接并启用」，撞上还没生效的地址。
+      addToast(`后端装好了：${result.workerUrl}。地址还要几十秒才生效，等它自己连上就行。`, 'success');
       trackEvent('一键部署 2.0 后端', { result: '成功' });
 
       // 刚建好的 workers.dev 地址要等一会儿才解析得到，等它活过来再建表。
@@ -1282,12 +1285,20 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
             ) : null}
           </div>
 
+          {/*
+            部署还没收尾时这个按钮必须是点不动的：刚建好的 workers.dev 地址要过几十秒才在
+            各个边缘节点上都解析得到，这期间点连接必然报「连不上 Worker」。一键部署那条路
+            自己会等（waitForWorkerReady），等到了还会顺手把表建好——用户抢在前面点，
+            收获的只有一次莫名其妙的失败。
+          */}
           <button
             onClick={handleConnect}
-            disabled={loading}
+            disabled={loading || provisioning}
             className="w-full py-3 bg-slate-900 text-white font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50"
           >
-            {loading ? '处理中...' : isConnected ? '重新连接并验证' : '连接并启用'}
+            {provisioning
+              ? provisionStep || '部署中…'
+              : loading ? '处理中...' : isConnected ? '重新连接并验证' : '连接并启用'}
           </button>
 
           <p className="text-xs leading-relaxed text-slate-500">
