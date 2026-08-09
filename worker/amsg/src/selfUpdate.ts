@@ -244,6 +244,52 @@ export function rebuildBindings(
   return { ok: true, bindings };
 }
 
+// ─── 即时对话的 Durable Object ───
+
+/** 起跳器的 binding 名与类名，跟 wrangler.toml、index.ts 的 InstantTickDO 三处对齐。 */
+const INSTANT_TICK_BINDING = 'INSTANT_TICK';
+const INSTANT_TICK_CLASS = 'InstantTickDO';
+/** 建这个 namespace 用的 migration tag；只在首次创建时发一次，见 buildDurableObjectPlan。 */
+const INSTANT_TICK_MIGRATION_TAG = 'amsg-instant-tick-v1';
+
+export interface DurableObjectPlan {
+  /** 要补进 bindings 的那条；已经有了就是 null。 */
+  binding: { type: string; name: string; class_name: string } | null;
+  /** metadata.migrations 的值；不需要动 migration 时是 null（字段整个不带）。 */
+  migrations: { new_tag: string; new_sqlite_classes: string[] } | null;
+}
+
+/**
+ * 算出这次上传要不要建 Durable Object namespace。
+ *
+ * Cloudflare 的 migrations 字段是**带乐观锁的**：不给 `old_tag` 等于断言「这个 Worker
+ * 现在一个 migration 都没应用过」。所以它不能每次都原样重传——第二次就会撞上
+ * `10079 Actor migration tag precondition failed, got tag '' when expected tag is
+ * 'xxx'`，把整个自更新搞失败（2026-08-09 实测确认）。
+ *
+ * 于是按「现有 binding 里有没有它」分流：
+ *   - 没有 → 这是第一次，带 migrations 把 namespace 建出来，同时补上 binding；
+ *   - 已有 → 完全不带 migrations，binding 原样传即可（实测这样上传成功，
+ *     migration_tag 保持不变，DO 类也还在）。
+ *
+ * 另注：API 的 migrations 是**一个对象**，不是 wrangler.toml 里那种数组——传数组会被
+ * 顶回来（`10021 cannot unmarshal array into ... ActorMigrations`）。
+ */
+export function buildDurableObjectPlan(existing: any[]): DurableObjectPlan {
+  const already = existing.some(
+    (binding) => binding?.type === 'durable_object_namespace' && binding?.name === INSTANT_TICK_BINDING,
+  );
+  if (already) return { binding: null, migrations: null };
+  return {
+    binding: {
+      type: 'durable_object_namespace',
+      name: INSTANT_TICK_BINDING,
+      class_name: INSTANT_TICK_CLASS,
+    },
+    migrations: { new_tag: INSTANT_TICK_MIGRATION_TAG, new_sqlite_classes: [INSTANT_TICK_CLASS] },
+  };
+}
+
 export async function handleSelfUpdate(
   request: Request,
   env: SelfUpdateEnv,
@@ -304,15 +350,23 @@ export async function handleSelfUpdate(
     );
   }
 
+  // 即时对话的起跳器：老 Worker 上还没有，这一发顺手把它建出来（见 buildDurableObjectPlan）。
+  const doPlan = buildDurableObjectPlan(settings.result?.bindings ?? []);
+  if (doPlan.binding) {
+    console.log('[amsg:self-update] 这台 Worker 还没有 INSTANT_TICK，本次上传一并创建');
+  }
+
   const metadata = {
     main_module: MAIN_MODULE,
     compatibility_date: settings.result?.compatibility_date || FALLBACK_COMPATIBILITY_DATE,
     compatibility_flags: settings.result?.compatibility_flags?.length
       ? settings.result.compatibility_flags
       : FALLBACK_COMPATIBILITY_FLAGS,
-    bindings: rebuilt.bindings,
+    bindings: doPlan.binding ? [...rebuilt.bindings, doPlan.binding] : rebuilt.bindings,
     // 不带这一项等于把实时日志关掉（上传是整体覆盖）。原样带上读回来的那份。
     observability: resolveObservability(settings.result?.observability),
+    // 已经建过就整个字段不带：它带乐观锁，重传会被顶回来。
+    ...(doPlan.migrations ? { migrations: doPlan.migrations } : {}),
   };
 
   const form = new FormData();

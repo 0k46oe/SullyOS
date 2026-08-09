@@ -81,8 +81,11 @@ const REQUIRED_WORKER_FEATURES = [
 //            上游没有心跳 → 退回 10 分钟死租约，isolate 死后任务干等）；fire ctx
 //            的 cancelTask / renewTask（角色取消 / 改期自己的排程）；client_state
 //            条件写（旧包不盖新包）；任务行 last_error（失败原因可查）。
+//   next.16 — 即时对话改由 Durable Object 起跳，靠的就是这一档的 runTask（按 uuid
+//            跑单条）；错误响应带 error.cause（真因不再只进 worker 日志）；
+//            getSchemaVersion（表结构对不对得上，由上游按自己的建表语句比对）。
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
-const REQUIRED_WORKER_VERSION = '2.6.0-next.15';
+const REQUIRED_WORKER_VERSION = '2.6.0-next.16';
 
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';

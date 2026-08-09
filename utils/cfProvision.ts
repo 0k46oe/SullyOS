@@ -190,11 +190,27 @@ export function parseWranglerConfig(toml: string): WorkerDeployConfig {
 }
 
 /**
- * 拼上传用的 bindings。D1 一条 + 每个非空密钥一条。
+ * 即时对话起跳器的 binding 名 / 类名 / 建库用的 migration tag。
+ *
+ * 三处必须跟 worker 侧对齐：`worker/amsg/wrangler.toml`、`worker/amsg/src/index.ts`
+ * 里的 `InstantTickDO`、以及 `selfUpdate.ts`（老 Worker 更新时补建走那条）。
+ */
+const INSTANT_TICK_BINDING = 'INSTANT_TICK';
+const INSTANT_TICK_CLASS = 'InstantTickDO';
+export const INSTANT_TICK_MIGRATIONS = {
+  new_tag: 'amsg-instant-tick-v1',
+  new_sqlite_classes: [INSTANT_TICK_CLASS],
+};
+
+/**
+ * 拼上传用的 bindings。D1 一条 + Durable Object 一条 + 每个非空密钥一条。
  *
  * 空值一律不写：Cloudflare 会原样收下空字符串，而 worker 侧
  * 「配了 AMSG_SERVER_TOKEN 就强制校验 X-Client-Token」判断的是有没有这一项——
  * 塞个空串进去，等于打开了一道永远对不上的门。
+ *
+ * Durable Object 不用先建资源：namespace 会随这次上传一起创建（靠 metadata 里的
+ * migrations，见 INSTANT_TICK_MIGRATIONS），不像 D1 要先调一次建库接口拿 id。
  */
 export function buildBindings(
   d1Binding: string,
@@ -204,6 +220,7 @@ export function buildBindings(
 ): Array<Record<string, string>> {
   const bindings: Array<Record<string, string>> = [
     { type: 'd1', name: d1Binding, id: databaseId },
+    { type: 'durable_object_namespace', name: INSTANT_TICK_BINDING, class_name: INSTANT_TICK_CLASS },
   ];
   for (const [name, value] of Object.entries(secrets)) {
     if (typeof value === 'string' && value.trim()) {
@@ -778,6 +795,10 @@ export async function provisionAmsgBackend(input: ProvisionInput): Promise<Provi
     // 官方的 multipart-upload-metadata 文档没把 observability 列进合法字段，但实测是认的
     // ——上传 enabled:false 能关掉、true 能开起来、不带就没有，三向都验过。
     observability: { enabled: true, logs: { enabled: true } },
+    // 建即时对话起跳器的 Durable Object namespace。这里是全新部署，所以只给 new_tag
+    // （不给 old_tag 即断言「还没应用过任何 migration」）。注意它是一个对象，不是
+    // wrangler.toml 里那种数组——传数组会被 10021 顶回来。
+    migrations: INSTANT_TICK_MIGRATIONS,
   };
   const form = new FormData();
   form.set('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));

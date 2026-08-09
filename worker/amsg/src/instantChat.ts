@@ -37,12 +37,9 @@ import {
  *
  * 定时任务那条路仍用库默认的 240s：它到点没跑完还有下一分钟的 cron 接着来，
  * 而用户正盯着「正在输入…」等回复，多给点时间跑完工具循环比让他重发一遍强。
- * 上限压在 cron 的墙钟预算（15 分钟）之内。
+ * 上限压在执行它的那次 invocation 的墙钟预算（DO alarm 和 cron 都是 15 分钟）之内。
  */
 export const INSTANT_TOTAL_TIMEOUT_MS = 600_000;
-
-/** 合成 cron 事件的标记；wrangler tail 里一眼能看出这一跳是谁起的。 */
-export const INSTANT_TICK_CRON = 'instant-chat';
 
 // ─── 任务身份 ───
 
@@ -204,20 +201,66 @@ export const writeChatOutbox = async (
 
 // ─── POST /instant-chat ───
 
-/** 上游 worker 的两个入口（注入进来只为单测能替身）。 */
+/**
+ * 上游 worker 里这条路用得到的入口（注入进来只为单测能替身）。
+ *
+ * 只有 fetch：这条路做的是「转发两个加密信封」，跑任务是 DO 那边的事
+ * （`upstream.runTask`，见 index.ts 的 InstantTickDO）。
+ */
 export interface InstantChatUpstream {
   fetch(request: Request, env: unknown): Promise<Response>;
-  scheduled(event: { scheduledTime: number; cron: string }, env: unknown): Promise<void>;
 }
 
-/** CF 给 fetch 的第三个参数，这里只用 waitUntil。 */
-export interface InstantChatExecutionCtx {
-  waitUntil(promise: Promise<unknown>): void;
+/**
+ * 起跳用的 Durable Object namespace binding（`INSTANT_TICK`）。
+ *
+ * 只声明这里真正会调的两个方法：包装层不需要完整的 DO 类型，单测也就能拿个字面量当替身。
+ */
+export interface InstantTickNamespace {
+  idFromName(name: string): unknown;
+  get(id: unknown): { kick(uuid: string): Promise<unknown> };
 }
 
 interface InstantChatEnv {
   AMSG_SERVER_TOKEN?: string;
+  /** 没有它就没法起跳；老版本 Worker 上是 undefined，见 kickInstantTick。 */
+  INSTANT_TICK?: InstantTickNamespace;
 }
+
+export type InstantTickKickResult =
+  | { ok: true }
+  | { ok: false; reason: 'missing-binding' }
+  | { ok: false; reason: 'kick-failed'; error: unknown };
+
+/**
+ * 叫醒 DO，让它把刚落库的这条立刻捡走。
+ *
+ * 这一跳过去挂在 `ctx.waitUntil` 上，而那个只有 30 秒——响应发出（或客户端断开）
+ * 之后就开始倒计时，一轮带工具循环的生成必被砍在半路，日志里只留一条
+ * 「waitUntil() tasks did not complete」。DO 的 alarm 是独立 invocation，
+ * 拿满 15 分钟墙钟，跟这个已经回了 202 的请求彻底脱钩，才对得上
+ * INSTANT_TOTAL_TIMEOUT_MS 一直以来的设计意图。
+ *
+ * **一条任务一个 DO 实例**（实例名就是任务 uuid）：每个实例只跑自己那一条
+ * （`upstream.runTask(uuid)`），所以几条聊天同时在跑也互不排队、更不会重复生成。
+ * 这依赖上游 2.6.0-next.16 起的 runTask——在那之前只有「扫一遍所有到期任务」，
+ * 多实例并发扫同一批会各生成一次，只能退回单实例串行。
+ *
+ * 两种失败分开报，因为要用户做的事完全不同：binding 压根不在 = Worker 是旧的，
+ * 得去更新；叫醒失败 = 临时故障，任务已经在库里，下一分钟的 cron 会捡。
+ */
+export const kickInstantTick = async (env: unknown, uuid: string): Promise<InstantTickKickResult> => {
+  const namespace = (env as InstantChatEnv | null | undefined)?.INSTANT_TICK;
+  if (!namespace || typeof namespace.get !== 'function' || typeof namespace.idFromName !== 'function') {
+    return { ok: false, reason: 'missing-binding' };
+  }
+  try {
+    await namespace.get(namespace.idFromName(uuid)).kick(uuid);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: 'kick-failed', error };
+  }
+};
 
 /** 上游的 UUID v4 判定（照抄它的正则，前端拿同一个 X-User-Id 跑两边）。 */
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -240,69 +283,34 @@ export const constantTimeEqual = async (a: string, b: string): Promise<boolean> 
 // ─── 上游那句「服务器内部错误」背后到底出了什么事 ───
 
 /**
- * 上游 fetch 里抛出来的异常，它自己 catch 掉、只回一句写死的「服务器内部错误」，
- * 真实原因（`D1_ERROR: no such table: message_outbox`、`D1 DB storage operation
- * exceeded timeout` 之类）只写进它自己的 console.error。
+ * 从上游的错误响应体里取出真实原因，拼成一行给用户看的话。
  *
- * 结果是用户看到的报错跟他要做的事完全对不上：「云端状态没传上去：服务器内部错误」
- * 既不告诉他哪儿坏了，也不告诉他该点哪里。那行日志躺在 Cloudflare 面板里，得先知道
- * 有这么个地方才找得到。
+ * 上游 catch 到异常后回的是一句写死的「服务器内部错误」，光凭它用户既不知道哪儿坏了、
+ * 也不知道该点哪里。真因（`D1_ERROR: no such table: message_outbox`、
+ * `D1 DB storage operation exceeded timeout` 之类）由 amsg-server 2.6.0-next.16 起
+ * 放在 `error.cause` 里一并回来，取出来原样端到用户面前。
  *
- * 所以这里在 console.error 上永久搭一个旁听：认出上游那条前缀就记下来，随后失败时
- * 一起回给客户端。**只听不吞**——原来的 console.error 照常调用，wrangler tail 里
- * 那一行一个字都不少。
- */
-const UPSTREAM_FATAL_LOG_PREFIX = '[amsg single-user] fetch() unhandled error:';
-
-/** 最近一条上游致命日志；seq 单调递增，调用方用它判断「这一跳有没有新的」。 */
-let upstreamFatalLog: { seq: number; message: string } = { seq: 0, message: '' };
-let fatalLogTap: { patched: (...args: unknown[]) => void; original: typeof console.error } | null = null;
-
-/**
- * 装旁听。装上就不摘：摘挂都要改全局 console，同一个 isolate 里并发的请求会互相踩，
- * 而这个旁听本身没有副作用，一直挂着最省事。
- */
-export const installUpstreamFatalLogTap = (): void => {
-  if (fatalLogTap) return;
-  const original = console.error;
-  const patched = (...args: unknown[]) => {
-    if (typeof args[0] === 'string' && args[0].startsWith(UPSTREAM_FATAL_LOG_PREFIX)) {
-      const detail = args.slice(1)
-        .map((arg) => (arg instanceof Error ? arg.message : typeof arg === 'string' ? arg : String(arg)))
-        .join(' ')
-        .trim();
-      if (detail) upstreamFatalLog = { seq: upstreamFatalLog.seq + 1, message: detail };
-    }
-    original.apply(console, args as []);
-  };
-  fatalLogTap = { patched, original };
-  console.error = patched as typeof console.error;
-};
-
-/** 单测用：清空记录并摘掉旁听（外面还套了别人时就不动它，只当没装过）。 */
-export const __resetUpstreamFatalLogTap = (): void => {
-  upstreamFatalLog = { seq: 0, message: '' };
-  if (fatalLogTap && console.error === fatalLogTap.patched) console.error = fatalLogTap.original;
-  fatalLogTap = null;
-};
-
-/**
- * 转发一次内部请求，顺带把这一跳里上游写下的致命日志捞出来。
+ * 只在 5xx 上取：4xx 是「你请求不对」，上游的 message 本身就说清楚了，再缀一段
+ * 内部细节只会让人更迷惑。
  *
- * 用 seq 差值判断而不是清空重读：旁听是全局的，同一瞬间可能还有别的请求在跑。
- * 拿到的日志只在「这一跳确实回了 5xx」时才当作原因用（上游只有真抛异常才会既写
- * 这行日志又回 500），单用户 worker 上这两件事基本不可能分属两个请求。
+ * 拼进 `upstreamLog` 而不是新起一个字段：这条链路的消费方（activeMsgClient 组装
+ * 用户可见报错时）读的就是它。
  */
-const forwardWithFatalLog = async (
-  upstream: InstantChatUpstream,
-  request: Request,
-  env: unknown,
-): Promise<{ response: Response; fatalLog: string | null }> => {
-  installUpstreamFatalLogTap();
-  const seqBefore = upstreamFatalLog.seq;
-  const response = await upstream.fetch(request, env);
-  const fatalLog = upstreamFatalLog.seq !== seqBefore ? upstreamFatalLog.message : null;
-  return { response, fatalLog: response.status >= 500 ? fatalLog : null };
+const readUpstreamCause = (status: number, body: unknown): string | null => {
+  if (status < 500) return null;
+  const cause = (body as { error?: { cause?: { name?: unknown; message?: unknown; code?: unknown } } } | null)
+    ?.error?.cause;
+  if (!cause) return null;
+  const name = typeof cause.name === 'string' ? cause.name : '';
+  const message = typeof cause.message === 'string' ? cause.message : '';
+  const code = typeof cause.code === 'string' ? cause.code : '';
+  // 前缀只在能多说明一点事情的时候才加：
+  //   code 常常就是 message 的开头（`D1_ERROR: no such table …`），再缀一遍是噪音；
+  //   没有 code 时退回 name，但光秃秃的 'Error' 谁都知道，不如不写。
+  const head = code
+    ? (message.startsWith(code) ? '' : code)
+    : (name && name !== 'Error' ? name : '');
+  return [head, message].filter(Boolean).join(': ') || null;
 };
 
 // ─── 云端状态那一步的重试 ───
@@ -362,16 +370,13 @@ const isEncryptedEnvelope = (value: unknown): boolean => {
 export const handleInstantChat = async (args: {
   request: Request;
   env: InstantChatEnv;
-  ctx: InstantChatExecutionCtx | undefined;
   upstream: InstantChatUpstream;
   /** 带 CORS 头的 JSON 响应器（CORS 头只在 index.ts 存一份）。 */
   json: (status: number, body: unknown) => Response;
-  now?: () => number;
   /** 云端状态那步的重试梯子（单测传全零，别真等）。 */
   stateBackoffMs?: number[];
 }): Promise<Response> => {
-  const { request, env, ctx, upstream, json } = args;
-  const now = args.now ?? Date.now;
+  const { request, env, upstream, json } = args;
   const stateBackoffMs = args.stateBackoffMs ?? STATE_FORWARD_BACKOFF_MS;
 
   const fail = (status: number, code: string, message: string, extra?: Record<string, unknown>) =>
@@ -432,21 +437,24 @@ export const handleInstantChat = async (args: {
   //    5xx 是 D1 冷启动那类瞬时错误的典型长相，按梯子重试几次（见 STATE_FORWARD_BACKOFF_MS）；
   //    4xx 是上游判出来的业务错（体积超限、时间戳不合法……），重试多少次都是同一个答案，立刻打回。
   let stateResponse!: Response;
-  let stateFatalLog: string | null = null;
+  let stateBody: unknown = null;
+  let stateCause: string | null = null;
   for (let attempt = 0; attempt < stateBackoffMs.length; attempt += 1) {
     if (attempt > 0) {
-      console.warn(`[amsg:instant-chat] 云端状态第 ${attempt} 次没写进去（${stateFatalLog ?? stateResponse.status}），重试`);
+      console.warn(`[amsg:instant-chat] 云端状态第 ${attempt} 次没写进去（${stateCause ?? stateResponse.status}），重试`);
       await sleep(stateBackoffMs[attempt]);
     }
-    ({ response: stateResponse, fatalLog: stateFatalLog } = await forwardWithFatalLog(
-      upstream,
+    stateResponse = await upstream.fetch(
       new Request(internalUrl('/client-state'), {
         method: 'PUT',
         headers: encryptedHeaders,
         body: JSON.stringify(body.statePayload),
       }),
       env,
-    ));
+    );
+    // 响应体只能读一次，这里读完存着：失败分支要拿它报原因，成功分支要拿它查 skippedEntries。
+    stateBody = await readBody(stateResponse);
+    stateCause = readUpstreamCause(stateResponse.status, stateBody);
     if (stateResponse.status < 500) break;
   }
   if (!stateResponse.ok) {
@@ -456,8 +464,8 @@ export const handleInstantChat = async (args: {
         code: 'INSTANT_CHAT_STATE_FAILED',
         message: '云端状态没传上去，这条没发出去',
         step: 'client-state',
-        upstream: await readBody(stateResponse),
-        ...(stateFatalLog ? { upstreamLog: stateFatalLog } : {}),
+        upstream: stateBody,
+        ...(stateCause ? { upstreamLog: stateCause } : {}),
       },
     });
   }
@@ -466,7 +474,6 @@ export const handleInstantChat = async (args: {
   // 这次的 updatedAt 反而比云端存量旧）时绝不能落任务——到点的 fire 读到的是上一轮的
   // chat 段，要么对旧消息答非所问、要么硬失败，用户却已经拿到 202 在等「正在输入」。
   // 「状态没落地就不落任务」正是这条两步串行存在的意义，这里把它守完整。
-  const stateBody = await readBody(stateResponse);
   const skippedEntries = (stateBody as {
     data?: { skippedEntries?: Array<{ namespace?: unknown; key?: unknown }> };
   } | null)?.data?.skippedEntries;
@@ -484,8 +491,7 @@ export const handleInstantChat = async (args: {
   // ② 任务落库 = 受理（顶替上一条也在这一步里：任务体的 supersedesUuid 由上游在
   //    同一事务里处理）。到这一步返回 202 之前，行已经在 D1 里了，
   //    下面那一跳只是让它快点跑起来，跑不成还有每分钟的 cron。
-  const { response: taskResponse, fatalLog: taskFatalLog } = await forwardWithFatalLog(
-    upstream,
+  const taskResponse = await upstream.fetch(
     new Request(internalUrl('/schedule-message'), {
       method: 'POST',
       headers: encryptedHeaders,
@@ -495,6 +501,7 @@ export const handleInstantChat = async (args: {
   );
   const taskBody = await readBody(taskResponse);
   if (!taskResponse.ok) {
+    const taskCause = readUpstreamCause(taskResponse.status, taskBody);
     return json(taskResponse.status, {
       success: false,
       error: {
@@ -502,7 +509,7 @@ export const handleInstantChat = async (args: {
         message: '任务没建起来，这条没发出去',
         step: 'schedule-message',
         upstream: taskBody,
-        ...(taskFatalLog ? { upstreamLog: taskFatalLog } : {}),
+        ...(taskCause ? { upstreamLog: taskCause } : {}),
       },
     });
   }
@@ -513,17 +520,28 @@ export const handleInstantChat = async (args: {
     });
   }
 
-  // ③ 立刻起一跳把它捡走（immediate 任务落库即到期）。isolate 被回收就退回
-  //    cron 兜底，正确性两头都在。
-  if (ctx && typeof ctx.waitUntil === 'function') {
-    ctx.waitUntil(
-      upstream.scheduled({ scheduledTime: now(), cron: INSTANT_TICK_CRON }, env).catch((error) => {
-        // 这一跳只是「快」，跑挂了下一分钟的 cron 照样会捡起来，不该影响已经回出去的 202。
-        console.warn('[amsg:instant-chat] 立即触发失败（等 cron 兜底）', error);
-      }),
-    );
-  } else {
-    console.warn('[amsg:instant-chat] 运行时没给 ctx，跳过立即触发，等 cron 兜底');
+  // ③ 叫醒 DO，让它立刻把这条捡走（immediate 任务落库即到期）。
+  //    生成跑在它的 alarm 里 —— 独立 invocation、15 分钟墙钟，见 kickInstantTick。
+  const kicked = await kickInstantTick(env, uuid);
+  if (!kicked.ok && kicked.reason === 'missing-binding') {
+    // 任务已经在库里了，所以这不是「没发出去」，而是「这台 Worker 跑不动它」：
+    // 每分钟的 cron 仍会把它捡走，但那条路上没有为即时对话放宽的超时，用户会等很久
+    // 甚至等不到。与其让他对着「正在输入」干等，不如现在就说清楚该去点哪里。
+    console.error('[amsg:instant-chat] 没有 INSTANT_TICK 绑定：这台 Worker 是旧版本，需要更新');
+    return json(503, {
+      success: false,
+      error: {
+        code: 'INSTANT_CHAT_WORKER_OUTDATED',
+        message: '即时对话需要更新 Worker：打开「系统设置 → 主动消息 2.0 → 配置」，点「更新 Worker」。',
+        step: 'instant-tick',
+        uuid,
+      },
+    });
+  }
+  if (!kicked.ok) {
+    // 叫醒失败但绑定在 = 临时故障。任务已落库，下一分钟的 cron 会捡起来，
+    // 不该把已经受理的这一轮报成失败。
+    console.warn('[amsg:instant-chat] 叫醒 DO 失败（等 cron 兜底）', kicked.error);
   }
 
   return json(202, { status: 'accepted', uuid });

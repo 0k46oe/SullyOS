@@ -24,6 +24,7 @@
  * 共用一个浏览器 push 订阅，worker 用别的密钥对签推送会 403。
  */
 
+import { DurableObject } from 'cloudflare:workers';
 import {
   createSingleUserCloudflareWorker,
   createWebCryptoWebPush,
@@ -32,6 +33,7 @@ import {
   measurePushPayload,
 } from '@rei-standard/amsg-server/cloudflare';
 import { stripReasoningTags } from '@rei-standard/amsg-shared';
+import { AMSG_BUNDLE_VERSION } from '../../../utils/amsgBundleVersion';
 import type { UserProfile } from '../../../types';
 import {
   AMSG_CHAT_FAIL_KEY,
@@ -141,7 +143,7 @@ import {
   isInstantChatTask,
   toOutboxEntries,
   writeChatOutbox,
-  type InstantChatExecutionCtx,
+  type InstantTickNamespace,
 } from './instantChat';
 import type { ActiveMsg2TaskRecord } from '../../../types';
 import { createHybridPushTransport, isFcmConfigured, type NativeFcmEnv } from './nativeFcm';
@@ -159,6 +161,11 @@ interface Env extends NativeFcmEnv {
   CF_API_TOKEN?: string;
   CF_ACCOUNT_ID?: string;
   CF_SCRIPT_NAME?: string;
+  /**
+   * 即时对话的起跳器（Durable Object）。类型上可选是因为老版本 Worker 上真的没有它，
+   * 那种情况由 /instant-chat 明确报「需要更新 Worker」，见 instantChat.kickInstantTick。
+   */
+  INSTANT_TICK?: InstantTickNamespace;
 }
 
 // ─── 满血 fire-time hooks（amsg-server 2.6.0-next.4+：含 ctx.scratch / 存储层大值分块） ───
@@ -2426,20 +2433,33 @@ const jsonWithCors = (status: number, body: unknown): Response =>
 // cron 触发时 CF 传进来的事件，只往上游转手，没必要为它引 workers-types。
 type CfScheduledEvent = { scheduledTime: number; cron: string };
 
-/** 上游 initSchema 建的表。少一张就说明「连接并验证」那步没跑成。 */
-const EXPECTED_TABLES = ['scheduled_messages', 'client_state', 'push_subscriptions'];
-
-/**
- * 上游后加的列（amsg-server 2.6.0 的三个迁移）。
- *
- * 这是最值得单独查一眼的一项：换了新 bundle 却没重新点「连接并验证」时，已经存在的
- * 表不会自己长出新列，而 cron 每分钟都会因为读不到这些列而挂——前端一切正常、任务
- * 列表也在，就是一条都不发。缺列时这里会直接点名，省得对着「都正常啊」发呆。
- */
-const EXPECTED_TASK_COLUMNS = ['lease_until', 'retry_after', 'serialize_group'];
-
 /** 到点多久还没被处理就算 cron 那侧出了问题。cron 每分钟一跳，留足重试余量。 */
 const TICK_STALL_MINUTES = 5;
+
+/**
+ * 把上游的 schema 自查结果拆成「缺表 / 缺列」两摞。
+ *
+ * 上游报的形如 `table:message_outbox`、`column:scheduled_messages.last_error`、
+ * `index:uidx_uuid`，而体检面板是按这两类分开说话的（缺表 → 点连接就能建好；
+ * 缺列 → 是升级后没重连的典型症状）。索引归进「表」那一摞：对用户来说都是
+ * 「点一次重新连接」，没必要多一个词。
+ *
+ * 为什么不自己列一份期望清单：手抄的那份会漏。这个判断本身要守的就是
+ * 「升级后老表没长出新列、cron 每分钟静默挂」，而漏掉的恰恰会是最新加的那一列——
+ * 于是体检对着一个正在挂的库回「表和列都齐了」，比不查更误导人。上游那份是从
+ * 建表语句现解析出来的，它加了什么列，这里就查什么列。
+ */
+/** 上游 schema 自查的结果；查不了时是 null（见 inspectSchema）。 */
+type SchemaProbe = Awaited<ReturnType<typeof upstream.getSchemaVersion>> | null;
+
+export const splitSchemaMissing = (missing: string[]) => ({
+  missingTables: missing
+    .filter((item) => item.startsWith('table:') || item.startsWith('index:'))
+    .map((item) => item.slice(item.indexOf(':') + 1)),
+  missingColumns: missing
+    .filter((item) => item.startsWith('column:'))
+    .map((item) => item.slice('column:'.length)),
+});
 
 type D1Like = {
   prepare(sql: string): {
@@ -2455,26 +2475,21 @@ type D1Like = {
  * 全程不写库，也不读任何一条任务的内容——只数数和比对 schema。数出来的东西
  * （待发条数、最老的一条过期了多久）不指向任何角色、时间点或正文。
  */
-const inspectStorage = async (env: Env) => {
+const inspectStorage = async (env: Env, schema: SchemaProbe) => {
   const db = env.DB as D1Like | undefined;
   if (typeof db?.prepare !== 'function') return { reachable: false as const };
 
   try {
-    const tables = await db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table'").all<{
-      name: string; sql: string | null;
+    const tables = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all<{
+      name: string;
     }>();
-    const rows = tables.results || [];
-    const present = new Set(rows.map((row) => row.name));
-    // ALTER TABLE ADD COLUMN 会把新列写回 sqlite_master 的建表语句，所以照着它比对
-    // 就能看出迁移跑没跑，不用依赖 D1 对 PRAGMA 的支持程度。
-    const taskSql = rows.find((row) => row.name === 'scheduled_messages')?.sql || '';
+    const present = new Set((tables.results || []).map((row) => row.name));
 
-    const missingTables = EXPECTED_TABLES.filter((name) => !present.has(name));
-    const missingColumns = present.has('scheduled_messages')
-      ? EXPECTED_TASK_COLUMNS.filter((column) => !taskSql.includes(column))
-      : [];
+    // schema 齐不齐由上游说了算（它按自己的建表语句比对，见 splitSchemaMissing）。
+    // 查不了就当没有缺失，别让一次查询失败把整块体检染红。
+    const { missingTables, missingColumns } = splitSchemaMissing(schema?.missing ?? []);
 
-    if (missingTables.includes('scheduled_messages')) {
+    if (!present.has('scheduled_messages')) {
       return { reachable: true as const, missingTables, missingColumns, schemaReady: false };
     }
 
@@ -2529,7 +2544,91 @@ const judgeTick = (storage: Awaited<ReturnType<typeof inspectStorage>>) => {
   return 'stalled';
 };
 
-const upstream = createSingleUserCloudflareWorker(buildWorkerConfig);
+/** DO 存「这个实例负责哪条任务」用的 storage 键。 */
+const INSTANT_TICK_UUID_KEY = 'taskUuid';
+
+const upstream = createSingleUserCloudflareWorker(buildWorkerConfig, {
+  /**
+   * cron 那条路上没有调用方能看到错误响应——上游把异常 catch 掉之后，整轮就这么无声
+   * 结束了。表结构漂移（升级后老表没加列）撞上的正是这里：cron 每分钟静默失败、
+   * 主动消息整个停摆，而界面上一切正常，没人知道出了事。
+   *
+   * 这个 hook 是那条路唯一的出口，所以什么都不做也要把它记下来。
+   */
+  onError({ stage, cause, path }) {
+    const where = path ? `${stage} ${path}` : stage;
+    console.error(`[amsg:upstream-error] ${where} → ${cause.name}: ${cause.message}`);
+  },
+});
+
+/**
+ * 库的表结构跟当前这版代码对不对得上。
+ *
+ * 这是「升级完 Worker 却没重新连接」的唯一可查证据：表结构漂移（新版要的列老表没有）
+ * 之后，cron 每分钟静默失败、主动消息整个停摆，而配置自检、任务列表、界面全都正常，
+ * 隔着屏幕根本问不出来。missing 里会直接点名缺哪张表、哪一列。
+ *
+ * 查不了不算错（D1 没绑之类）——报 null，让面板照旧显示其余部分。
+ */
+const inspectSchema = async (env: Env) => {
+  try {
+    return await upstream.getSchemaVersion(env);
+  } catch (error) {
+    console.warn('[amsg:debug] schema 查不了', error);
+    return null;
+  }
+};
+
+/**
+ * 即时对话的起跳器：把「立刻跑这一条」搬进 Durable Object 的 alarm 里。
+ *
+ * 为什么非得是 DO：客户端发完就走（切后台、锁屏、杀进程都行），所以这一跳不能挂在
+ * 那个已经回了 202 的 HTTP 请求上——`ctx.waitUntil` 只给 30 秒，一轮带工具循环的生成
+ * 必被砍在半路。Cloudflare 上能「不依赖客户端连接 + 长墙钟」的入口只有三个：
+ * Cron Trigger、Queue consumer、DO alarm，都是 15 分钟。这里选 DO 是因为它不用预建
+ * 任何资源（namespace 随 Worker 上传自动创建），一键部署那条路一个额外 API 调用都不用加。
+ *
+ * **一条任务一个实例**（实例名 = 任务 uuid），所以几条聊天同时在跑互不排队。
+ * 每个实例只碰自己那一条（`upstream.runTask(uuid)`），不会去扫别人的任务。
+ *
+ * cron 仍然留着：它是所有定时任务的正常投递通道，同时也是这一跳万一没跑成时的兜底。
+ */
+export class InstantTickDO extends DurableObject<Env> {
+  /**
+   * 叫醒：记下要跑哪条、设一个立刻到期的 alarm，然后马上返回——调用方还等着回 202。
+   *
+   * 已经挂着 alarm 就只覆盖 uuid 不重设时间：同一个实例只服务同一条任务，重复叫醒
+   * （客户端重发）应该合并成一次，而不是排成两次生成。
+   */
+  async kick(uuid: string): Promise<void> {
+    await this.ctx.storage.put(INSTANT_TICK_UUID_KEY, uuid);
+    if ((await this.ctx.storage.getAlarm()) !== null) return;
+    await this.ctx.storage.setAlarm(Date.now());
+  }
+
+  /** 独立 invocation，15 分钟墙钟。跑挂了不重设 alarm——下一分钟的 cron 会接着捡。 */
+  async alarm(): Promise<void> {
+    const uuid = await this.ctx.storage.get<string>(INSTANT_TICK_UUID_KEY);
+    if (!uuid) {
+      console.error('[amsg:instant-tick] alarm 醒了却不知道要跑哪条，跳过（等 cron 兜底）');
+      return;
+    }
+    const report = inspectWorkerEnv(this.env);
+    if (!report.ok) {
+      console.error(`[amsg:instant-tick] 整轮跳过：${report.message}`);
+      return;
+    }
+    // 跑完就把 uuid 清掉：这个实例的活儿到此为止，留着只会让下一次 kick 分不清新旧。
+    // 放在 runTask 之前清是不行的——中途被回收就查不出这条到底跑没跑。
+    const result = await upstream.runTask(uuid, this.env);
+    await this.ctx.storage.delete(INSTANT_TICK_UUID_KEY);
+    if (!result.ran) {
+      // 一次性任务发完即删，所以 not_found 多半是「cron 抢先跑掉了」，属正常。
+      // 其余几种（未到期、退避窗口里、配置不全）留一行，排障时能看出是哪种。
+      console.warn(`[amsg:instant-tick] ${uuid} 没跑：${result.reason}`);
+    }
+  }
+}
 
 /**
  * 版本号只有上游的 capabilities 才给，转手问它一次；问不到不算错，报 null。
@@ -2559,11 +2658,11 @@ const readServerVersion = async (request: Request, env: Env) => {
  *   POST /self-update   自己去取最新代码覆盖自己（见 ./selfUpdate，要共享密钥 + CF_API_TOKEN）
  *   其它请求            配置不全时直接 503 + 说明缺什么，不进上游
  */
-// 两个 handler 的第三个参数 ctx 是 CF 给的：/instant-chat 用它的 waitUntil 在回完
-// 202 之后把这一轮立刻跑起来。上游的签名只收 (request/event, env)，所以往上游转发时
-// 照旧只传两个——多传运行时无害，但类型对不上。
+// 两个 handler 都只收 (request/event, env)：CF 还会给第三个参数 ctx，但这里用不上——
+// /instant-chat 回完 202 之后的那一跳跑在 InstantTickDO 的 alarm 里，不占这个请求的
+// 生命周期（waitUntil 只有 30 秒，见 InstantTickDO 的注释）。
 export default {
-  async fetch(request: Request, env: Env, ctx?: InstantChatExecutionCtx): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
     const pathname = new URL(request.url).pathname.replace(/\/+$/, '') || '/';
     const method = request.method.toUpperCase();
 
@@ -2575,7 +2674,13 @@ export default {
       // instantChat 是包装层自己的能力标志：即时对话的路由住在这份代码里，而设置页
       // 能读到的版本号是**上游库**的，只改 SullyOS 这份 worker 时那个号不动。前端拿
       // 这个标志做唯一的版本门槛（贴的是旧 bundle 就没有它，开关直接置灰）。
-      return jsonWithCors(200, { success: true, data: { ...inspectWorkerEnv(env), instantChat: true } });
+      //
+      // workerVersion 则是这份 bundle 自己的版本，前端拿它跟自己编译进去的同一个常量
+      // 比，不一样就说明用户那台 Worker 该更新了（老 bundle 不报这个字段，也算该更新）。
+      return jsonWithCors(200, {
+        success: true,
+        data: { ...inspectWorkerEnv(env), instantChat: true, workerVersion: AMSG_BUNDLE_VERSION },
+      });
     }
 
     if (pathname.endsWith('/debug')) {
@@ -2583,7 +2688,8 @@ export default {
       // 全只读、也不设防，所以能报什么是有边界的：只有配置齐不齐、schema 对不对、
       // 数出来的条数，以及本来就公开的 VAPID 公钥。密钥的值、用户标识、任务正文、
       // 推送 endpoint 一概不出现——不是没取到，是刻意不取。
-      const storage = await inspectStorage(env);
+      const schema = await inspectSchema(env);
+      const storage = await inspectStorage(env, schema);
       return jsonWithCors(200, {
         success: true,
         data: {
@@ -2592,6 +2698,7 @@ export default {
           server: await readServerVersion(request, env),
           storage,
           tick: judgeTick(storage),
+          schema,
           vapidPublicKey: env.VAPID_PUBLIC_KEY?.trim() || null,
         },
       });
@@ -2636,13 +2743,13 @@ export default {
           error: { code: 'METHOD_NOT_ALLOWED', message: '/instant-chat 只接受 POST' },
         });
       }
-      return handleInstantChat({ request, env, ctx, upstream, json: jsonWithCors });
+      return handleInstantChat({ request, env, upstream, json: jsonWithCors });
     }
 
     return upstream.fetch(request, env);
   },
 
-  async scheduled(event: CfScheduledEvent, env: Env, _ctx?: InstantChatExecutionCtx): Promise<void> {
+  async scheduled(event: CfScheduledEvent, env: Env): Promise<void> {
     // 定时任务这条路没人看得见，配置不全时上游只会抛一个堆栈。写明白点，
     // wrangler tail 里一眼能看出是配置问题还是任务本身挂了。
     const report = inspectWorkerEnv(env);
@@ -2650,6 +2757,8 @@ export default {
       console.error(`[amsg] 定时任务整轮跳过：${report.message}`);
       return;
     }
-    return upstream.scheduled(event, env);
+    // 整轮出错时上游把原因放在返回值里（同一份也会经 onError 记一行）。这里不再重复
+    // 打印，但要把它咽掉——CF 不看 scheduled 的返回值，往外抛只会变成一条没上下文的堆栈。
+    await upstream.scheduled(event, env);
   },
 };

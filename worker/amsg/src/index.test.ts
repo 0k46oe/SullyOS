@@ -10,7 +10,7 @@ import worker, {
   amsgFireSettled, amsgHooks, amsgReasoningKey, amsgStaleSkip, attachScheduledTasks,
   buildWorkerConfig, configureInstantErrorPush, EMOTION_EVAL_RIDE_ALONG_MS, inspectWorkerEnv,
   offloadOversizedPush, resolveVapidEmail, runFireCancelTool, runFireRenewTool,
-  runFireScheduleTool, runMcpFireTool,
+  runFireScheduleTool, runMcpFireTool, splitSchemaMissing,
 } from './index';
 import { MAX_TOOL_ITERATIONS } from './agentic';
 import { MAX_PUSH_PAYLOAD_BYTES } from '@rei-standard/amsg-server/cloudflare';
@@ -2947,21 +2947,57 @@ describe('worker 入口 — 配置不全时的响应', () => {
   });
 });
 
+// 上游报的 missing 是一摞带类型前缀的串（table: / column: / index:），体检面板按
+// 「缺表」「缺列」两类分开说话——两者要用户做的事不一样：缺表点一下连接就建好了，
+// 缺列则是升级后没重连的典型症状。
+describe('splitSchemaMissing', () => {
+  it('按前缀分两摞，列保留表名前缀', () => {
+    expect(splitSchemaMissing([
+      'table:message_outbox',
+      'column:scheduled_messages.last_error',
+      'column:client_state.updated_at',
+    ])).toEqual({
+      missingTables: ['message_outbox'],
+      missingColumns: ['scheduled_messages.last_error', 'client_state.updated_at'],
+    });
+  });
+
+  // 索引缺失对用户来说也是「点一次重新连接」，没必要多造一个词让人分辨。
+  it('索引并进「缺表」那一摞', () => {
+    expect(splitSchemaMissing(['index:uidx_uuid'])).toEqual({
+      missingTables: ['uidx_uuid'],
+      missingColumns: [],
+    });
+  });
+
+  it('什么都不缺时两摞都是空的（这是「一切正常」的判据）', () => {
+    expect(splitSchemaMissing([])).toEqual({ missingTables: [], missingColumns: [] });
+  });
+});
+
 // /debug 是隔着屏幕帮别人看部署时用的：对方只会截图或者把 JSON 贴过来，所以它既要
 // 说得足够多（配置、schema、cron），又不能带出任何一样不该外传的东西——它不设防。
 describe('/debug — 只读诊断', () => {
-  /** 假 D1：按 SQL 关键字给回答，只支持这个端点真正会发的那几条。 */
-  const fakeDb = ({ tables, taskSql, pending = [], pushRows = 0 }: {
+  /**
+   * 假 D1：按 SQL 关键字给回答，只支持这个端点真正会发的那几条。
+   *
+   * schema 自查（上游的 describeSchema）会发三种：列表、`PRAGMA table_info(表名)`、
+   * 索引列表。`columns` 给每张表配列名，不配的表当成没有列——上游会照着自己的建表语句
+   * 比对，缺什么它说了算，这里不再自己抄一份期望清单。
+   */
+  const fakeDb = ({ tables, columns = {}, indexes = [], pending = [], pushRows = 0 }: {
     tables: string[];
-    taskSql: string;
+    columns?: Record<string, string[]>;
+    indexes?: string[];
     pending?: { next_send_at: string }[];
     pushRows?: number;
   }) => ({
     prepare(sql: string) {
       const answer = async () => {
-        if (sql.includes('sqlite_master')) {
-          return { results: tables.map((name) => ({ name, sql: name === 'scheduled_messages' ? taskSql : '' })) };
-        }
+        const pragma = /PRAGMA table_info\((\w+)\)/.exec(sql);
+        if (pragma) return { results: (columns[pragma[1]] || []).map((name) => ({ name })) };
+        if (sql.includes("type = 'index'")) return { results: indexes.map((name) => ({ name })) };
+        if (sql.includes('sqlite_master')) return { results: tables.map((name) => ({ name })) };
         if (sql.includes('push_subscriptions')) return { n: pushRows };
         const nowIso = new Date().toISOString();
         const overdue = pending.filter((task) => task.next_send_at <= nowIso);
@@ -2975,7 +3011,6 @@ describe('/debug — 只读诊断', () => {
     },
   });
 
-  const FULL_TASK_SQL = 'CREATE TABLE scheduled_messages (id, lease_until, retry_after, serialize_group)';
   const ALL_TABLES = ['scheduled_messages', 'client_state', 'push_subscriptions'];
 
   const envWith = (db: unknown) => ({
@@ -2995,7 +3030,7 @@ describe('/debug — 只读诊断', () => {
   const minutesAgo = (n: number) => new Date(Date.now() - n * 60_000).toISOString();
 
   it('一个字都不能带出密钥、用户标识或任务正文（这个端点不设防）', async () => {
-    const data = await debug(fakeDb({ tables: ALL_TABLES, taskSql: FULL_TASK_SQL }));
+    const data = await debug(fakeDb({ tables: ALL_TABLES }));
     const dumped = JSON.stringify(data);
     expect(dumped).not.toContain('a'.repeat(64));   // master key
     expect(dumped).not.toContain('priv-key');       // VAPID 私钥
@@ -3005,25 +3040,56 @@ describe('/debug — 只读诊断', () => {
     expect(data.vapidPublicKey).toBe('pub-key');
   });
 
+  /**
+   * 换了 bundle 却没跑 init-tenant 时，已有的表不会自己长出新列，cron 每分钟都会因为
+   * 读不到它们而挂——前端一切正常、任务列表也在，就是一条都不发。这一项是那种故障
+   * 唯一的可查证据，所以缺列必须点到名（缺哪张表哪一列，而不只是「有问题」）。
+   *
+   * 「缺哪些」由上游按它自己的建表语句判定，这里只钉住「它说缺，/debug 就得报出来」。
+   */
   it('换了 bundle 没跑 init-tenant → 点名缺的那几列（cron 会因此每分钟静默挂）', async () => {
     const data = await debug(fakeDb({
       tables: ALL_TABLES,
-      taskSql: 'CREATE TABLE scheduled_messages (id, next_send_at, status)',
+      columns: { scheduled_messages: ['id', 'next_send_at', 'status'] },
     }));
     expect(data.storage.schemaReady).toBe(false);
-    expect(data.storage.missingColumns).toEqual(['lease_until', 'retry_after', 'serialize_group']);
+    // 带表名前缀：同名列（created_at 之类）在好几张表里都有，光报列名说不清是哪张。
+    expect(data.storage.missingColumns).toContain('scheduled_messages.lease_until');
+    expect(data.storage.missingColumns.every((item: string) => item.includes('.'))).toBe(true);
   });
 
-  it('表齐列齐时不报假警', async () => {
-    const data = await debug(fakeDb({ tables: ALL_TABLES, taskSql: FULL_TASK_SQL }));
-    expect(data.storage.schemaReady).toBe(true);
+  it('整张表都没有时报的是缺表，不是把它的列一条条列出来', async () => {
+    const data = await debug(fakeDb({ tables: ['scheduled_messages'] }));
+    expect(data.storage.missingTables).toContain('client_state');
+    expect(data.storage.missingColumns.some((item: string) => item.startsWith('client_state.'))).toBe(false);
+  });
+
+  /**
+   * 回归守卫：schema 查不动的时候不许报假警。
+   *
+   * 这一项红了意味着「你的库该迁移了」，而用户照着去点「重新连接」并不能解决
+   * 「查不了」这件事——反复点、反复红，比不报更糟。
+   */
+  it('schema 查不了时不报假警（不是所有表都缺）', async () => {
+    const brokenDb = {
+      prepare(sql: string) {
+        const answer = async () => {
+          if (sql.includes('PRAGMA')) throw new Error('PRAGMA not supported');
+          if (sql.includes('sqlite_master')) return { results: ALL_TABLES.map((name) => ({ name })) };
+          return { pending: 0, overdue: 0, oldest: null };
+        };
+        return { bind: () => ({ first: answer }), first: answer, all: answer };
+      },
+    };
+    const data = await debug(brokenDb);
     expect(data.storage.missingTables).toEqual([]);
     expect(data.storage.missingColumns).toEqual([]);
+    expect(data.schema).toBeNull();
   });
 
   it('任务到点很久还挂着 pending → cron 那侧有问题', async () => {
     const data = await debug(fakeDb({
-      tables: ALL_TABLES, taskSql: FULL_TASK_SQL,
+      tables: ALL_TABLES,
       pending: [{ next_send_at: minutesAgo(47) }],
     }));
     expect(data.tick).toBe('stalled');
@@ -3032,21 +3098,21 @@ describe('/debug — 只读诊断', () => {
 
   it('刚到点一两分钟不算挂——cron 一分钟一跳，得留重试余量', async () => {
     const data = await debug(fakeDb({
-      tables: ALL_TABLES, taskSql: FULL_TASK_SQL,
+      tables: ALL_TABLES,
       pending: [{ next_send_at: minutesAgo(1) }],
     }));
     expect(data.tick).toBe('healthy');
   });
 
   it('手上没有待发任务时说 idle，不能拿「没活干」当「挂了」报', async () => {
-    const data = await debug(fakeDb({ tables: ALL_TABLES, taskSql: FULL_TASK_SQL }));
+    const data = await debug(fakeDb({ tables: ALL_TABLES }));
     expect(data.tick).toBe('idle');
   });
 
   it('云端没有推送订阅时看得出来（换 worker 后最常见的「全绿但收不到」）', async () => {
-    const empty = await debug(fakeDb({ tables: ALL_TABLES, taskSql: FULL_TASK_SQL, pushRows: 0 }));
+    const empty = await debug(fakeDb({ tables: ALL_TABLES, pushRows: 0 }));
     expect(empty.storage.pushSubscriptionRegistered).toBe(false);
-    const registered = await debug(fakeDb({ tables: ALL_TABLES, taskSql: FULL_TASK_SQL, pushRows: 1 }));
+    const registered = await debug(fakeDb({ tables: ALL_TABLES, pushRows: 1 }));
     expect(registered.storage.pushSubscriptionRegistered).toBe(true);
   });
 
