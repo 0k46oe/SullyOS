@@ -88,6 +88,28 @@ const SETUP_WALKTHROUGH_URL = 'https://github.com/qegj567-cloud/SullyOS/blob/mas
 /** 一键部署要的那枚 API Token 在这里建。 */
 const CF_TOKEN_URL = 'https://dash.cloudflare.com/profile/api-tokens';
 
+// ─── 一键部署的内测口令（公测时把这一段连同界面上那张卡一起删掉）───
+//
+// 这功能会往用户自己的 Cloudflare 账号里建东西，眼下只跟少数几个人一起试，
+// 所以先加一道口令，挡住随手点进来的人。
+//
+// **它挡不住存心找的人**：口令就写在前端代码里，翻一下打包产物就能看到。
+// 这里要的也只是「别让不知情的人误点」，不是真正的访问控制。
+const ONE_CLICK_ACCESS_CODE = 'amsg-neice-0809';
+const ONE_CLICK_UNLOCK_KEY = 'amsg_oneclick_unlocked_v1';
+
+const isOneClickCodeCorrect = (input: string): boolean =>
+  input.trim().toLowerCase() === ONE_CLICK_ACCESS_CODE;
+
+/** 解锁状态记在本地，测试的人不用每次开面板都重敲一遍。 */
+const readOneClickUnlocked = (): boolean => {
+  try {
+    return localStorage.getItem(ONE_CLICK_UNLOCK_KEY) === '1';
+  } catch {
+    return false;
+  }
+};
+
 // 探测结果每次会话只报一次。refresh() 在开面板、连接成功、订阅成功后都会跑一遍，
 // 一个连不上、反复点「连接」的人否则能一个人刷出十几条同样的结果，把分布带歪。
 let workerCapsReported = false;
@@ -141,6 +163,10 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   // Token 只在这次部署期间留在内存里，成功与否都不落盘——它是能改整个账号 Workers 的
   // 权限，真正需要长期留着的那一份已经作为 secret 写进用户自己的 worker 了（自更新用）。
   const [cfToken, setCfToken] = useState('');
+  // 内测口令闸（公测时删掉这三个 state 和界面上那张卡）。
+  const [oneClickUnlocked, setOneClickUnlocked] = useState(readOneClickUnlocked);
+  const [accessCodeInput, setAccessCodeInput] = useState('');
+  const [accessCodeError, setAccessCodeError] = useState('');
   const [provisioning, setProvisioning] = useState(false);
   const [provisionStep, setProvisionStep] = useState('');
   /** token 能用在多个账号上时让用户挑一个。 */
@@ -815,6 +841,60 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
           </div>
         ) : null}
 
+        {/* 内测口令闸。公测时把这个 {!oneClickUnlocked ? (...) : null} 整块删掉，
+            下面那张部署卡就永远显示了。 */}
+        {!oneClickUnlocked ? (
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-bold text-slate-700">一键部署</span>
+              <span className="shrink-0 text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">
+                内测中
+              </span>
+            </div>
+            <p className="text-xs leading-relaxed text-slate-500">
+              粘一枚 Cloudflare Token 就把后端装好的那条路，现在还在小范围试。
+              有口令的话填进来；没有的话往下走「手动部署」，那条路是一直可用的。
+            </p>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={accessCodeInput}
+                onChange={(e) => {
+                  setAccessCodeInput(e.target.value);
+                  setAccessCodeError('');
+                }}
+                placeholder="内测口令"
+                autoComplete="off"
+                className="flex-1 min-w-0 px-3 py-2.5 rounded-xl border border-slate-200 text-sm outline-none focus:border-violet-400"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (!isOneClickCodeCorrect(accessCodeInput)) {
+                    setAccessCodeError('口令不对。');
+                    return;
+                  }
+                  try {
+                    localStorage.setItem(ONE_CLICK_UNLOCK_KEY, '1');
+                  } catch {
+                    /* 存不下也不影响这次用，只是下次要再填一遍 */
+                  }
+                  setOneClickUnlocked(true);
+                  setAccessCodeInput('');
+                  setAccessCodeError('');
+                }}
+                className="shrink-0 px-4 py-2.5 rounded-xl text-xs font-bold bg-violet-500 text-white active:scale-95 transition-transform"
+              >
+                解锁
+              </button>
+            </div>
+            {accessCodeError ? (
+              <p className="text-[11px] font-bold text-rose-600">{accessCodeError}</p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {oneClickUnlocked ? (
         <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <span className="font-bold text-slate-700">一键部署（推荐）</span>
@@ -909,6 +989,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
             以后「更新后端」用的就是它；本页不保存。介意的话可以照下面的手动方式装。
           </p>
         </div>
+        ) : null}
 
         <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
           <button
