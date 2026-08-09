@@ -362,9 +362,9 @@ describe('POST /instant-chat — 上游 500 时把它日志里那句真话带回
   });
 });
 
-// D1 底下是 Durable Object，闲一阵之后第一次写常常直接超时（实测：隔几小时说第一句话
-// 必挂、马上重发就好）。即时对话这一步一次写三十多 KB 的 fire_pack，正撞在这个坑上，
-// 而客户端只 POST 一次 /instant-chat，它自己那把重试梯子够不着里面这一跳。
+// D1 偶尔会把一次写直接判超时（`… object to be reset`），而这一步是整条链上最大的一次写
+// （三十多 KB 的 fire_pack）。什么时候来没量出规律（2026-08-09 的观测记在 instantChat.ts
+// 那段注释里），而客户端只 POST 一次 /instant-chat，它自己那把重试梯子够不着里面这一跳。
 describe('POST /instant-chat — 云端状态那一步遇到 5xx 会重试', () => {
   /** 前 n 次回 5xx，之后回正常成功体。 */
   const flakyClientState = (failures: number) => {
