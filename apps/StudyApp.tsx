@@ -10,17 +10,12 @@ import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { Notepad, Check, X, CheckCircle, XCircle, Hand } from '@phosphor-icons/react';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent } from '../utils/analytics';
-
-type PdfJsLike = {
-    getDocument: (src: { data: ArrayBuffer }) => { promise: Promise<any> };
-    GlobalWorkerOptions?: { workerSrc?: string };
-};
+import { extractPdfText } from '../utils/pdfText';
 
 type KatexLike = {
     renderToString: (latex: string, options: any) => string;
 };
 
-let pdfjsPromise: Promise<PdfJsLike> | null = null;
 let katexPromise: Promise<KatexLike> | null = null;
 
 const loadScript = (src: string): Promise<void> => new Promise((resolve, reject) => {
@@ -46,20 +41,6 @@ const loadScript = (src: string): Promise<void> => new Promise((resolve, reject)
     script.onerror = () => reject(new Error(`load failed: ${src}`));
     document.head.appendChild(script);
 });
-
-const loadPdfJs = async (): Promise<PdfJsLike> => {
-    if (!pdfjsPromise) {
-        pdfjsPromise = loadScript('https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js').then(() => {
-            const pdfjs = (window as any).pdfjsLib as PdfJsLike | undefined;
-            if (!pdfjs) throw new Error('pdfjs 加载失败');
-            if (pdfjs?.GlobalWorkerOptions) {
-                pdfjs.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
-            }
-            return pdfjs;
-        });
-    }
-    return pdfjsPromise;
-};
 
 const loadKatex = async (): Promise<KatexLike> => {
     if (!katexPromise) {
@@ -524,23 +505,13 @@ const StudyApp: React.FC = () => {
 
         try {
             const arrayBuffer = await file.arrayBuffer();
-            const pdfjs = await loadPdfJs();
-            const loadingTask = pdfjs.getDocument({ data: arrayBuffer });
-            const pdf = await loadingTask.promise;
-            
-            let fullText = '';
-            const maxPages = Math.min(pdf.numPages, 50);
-
-            for (let i = 1; i <= maxPages; i++) {
-                setProcessStatus(`提取文本中 (${i}/${maxPages})...`);
-                const page = await pdf.getPage(i);
-                const textContent = await page.getTextContent();
-                const pageText = textContent.items.map((item: any) => item.str).join(' ');
-                fullText += pageText + '\n\n';
-            }
+            const { text: fullText, pageCount } = await extractPdfText(arrayBuffer, {
+                maxPages: 50,
+                onProgress: ({ page, totalPages }) => setProcessStatus(`提取文本中 (${page}/${totalPages})...`),
+            });
 
             // Scanned PDF Detection
-            if (fullText.trim().length < 50 && pdf.numPages > 0) {
+            if (fullText.trim().length < 50 && pageCount > 0) {
                 addToast('检测到文本极少，可能是扫描件/图片PDF。建议先进行OCR识别。', 'error');
             }
 
