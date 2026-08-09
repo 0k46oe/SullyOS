@@ -47,6 +47,7 @@ import { cleanTextForTts, parseVoiceOutput } from '../utils/minimaxTts';
 import { collectVoiceBatchSubtitle, isPoisonedVoiceSubtitle } from '../utils/voiceSubtitle';
 import { synthesizeSpeechDetailed, characterHasVoice } from '../utils/ttsRouter';
 import { shouldAutoGenerateVoice, shouldAutoPlayGeneratedVoice } from '../utils/voicePlayback';
+import { fetchBlobForShare, shareOrDownloadBlob } from '../utils/shareExport';
 import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
 import { resolveFishAudioApiKey, stripFishMarkupForDisplay, cleanTextForTtsFish } from '../utils/fishAudioTts';
 import { resolveTtsProvider } from '../utils/ttsProvider';
@@ -65,6 +66,7 @@ import {
     countMessagesFrom,
     getMemoryPalaceHighWaterMarkForContext,
     loadCharacterContextRange,
+    resolveContextRangeMode,
     type ContextRangeMode,
 } from '../utils/chatContextRange';
 
@@ -141,7 +143,7 @@ const Chat: React.FC = () => {
     // Reply Logic
     const [replyTarget, setReplyTarget] = useState<Message | null>(null);
 
-    const [modalType, setModalType] = useState<'none' | 'transfer' | 'emoji-import' | 'chat-settings' | 'message-options' | 'edit-message' | 'delete-emoji' | 'delete-category' | 'add-category' | 'history-manager' | 'archive-settings' | 'prompt-editor' | 'category-options' | 'category-visibility' | 'emoji-options' | 'rename-emoji' | 'schedule' | 'chrome-css' | 'chrome-sound'>('none');
+    const [modalType, setModalType] = useState<'none' | 'transfer' | 'emoji-import' | 'chat-settings' | 'message-options' | 'edit-message' | 'delete-emoji' | 'delete-category' | 'add-category' | 'history-manager' | 'archive-settings' | 'prompt-editor' | 'category-options' | 'category-visibility' | 'emoji-options' | 'rename-emoji' | 'schedule' | 'chrome-css' | 'chrome-sound' | 'memory-vectorize-confirm' | 'memory-vectorize-result'>('none');
     // 「聊天装扮」悬浮态：不走全屏 modal——圆气泡挂在聊天上，点开小面板边看真聊天边调。
     const [fineTuneOpen, setFineTuneOpen] = useState(false);          // 圆气泡在场
     const [fineTunePanelOpen, setFineTunePanelOpen] = useState(false); // 小面板展开/收起
@@ -165,6 +167,13 @@ const Chat: React.FC = () => {
     // 记忆宫殿「一键存入」：打开设置弹窗时算出待处理条数（排除热区的真实口径），处理中显示逐轮进度
     const [vectorizePendingCount, setVectorizePendingCount] = useState<number | null>(null);
     const [vectorizeProgress, setVectorizeProgress] = useState('');
+    const [retainRecentForVectorize, setRetainRecentForVectorize] = useState(false);
+    const [vectorizeResult, setVectorizeResult] = useState<{
+        processedMessages: number;
+        storedMemories: number;
+        retainedMessages: number;
+        waterlineAlreadyAhead: boolean;
+    } | null>(null);
     const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
     const [selectedEmoji, setSelectedEmoji] = useState<Emoji | null>(null);
     const [selectedCategory, setSelectedCategory] = useState<EmojiCategory | null>(null); // For deletion modal
@@ -592,32 +601,23 @@ const Chat: React.FC = () => {
         }
     };
 
-    // 长按语音菜单里的「下载」：把已生成的语音音频存到本地。
-    // 优先用持久化的 blob；只有远端 URL（CORS 兜底）时先尝试拉回 blob，拉不到就直接开链接让用户自己存。
+    // 长按语音菜单里的「下载」：移动端优先调系统分享/保存，桌面端才走浏览器下载。
     const handleDownloadVoice = async (msg: Message) => {
         if (!msg?.id) return;
         try {
             const stored = await DB.getAssetRaw(voiceAssetKey(msg.id)) as StoredVoice | null;
             let blob: Blob | null = stored?.blob instanceof Blob ? stored.blob : null;
             if (!blob && stored?.remoteUrl) {
-                try { const r = await fetch(stored.remoteUrl); if (r.ok) blob = await r.blob(); } catch { /* CORS：走下面的兜底 */ }
+                try { blob = await fetchBlobForShare(stored.remoteUrl, 'audio/mpeg'); } catch { /* 下面给出明确提示 */ }
             }
             const fname = `${(char?.name || '语音').replace(/[\\/:*?"<>|]/g, '_')}_语音_${msg.id}.mp3`;
-            const a = document.createElement('a');
-            a.download = fname;
-            if (blob) {
-                const u = URL.createObjectURL(blob);
-                a.href = u;
-                document.body.appendChild(a); a.click(); a.remove();
-                setTimeout(() => { try { URL.revokeObjectURL(u); } catch { /* ignore */ } }, 1000);
-            } else if (stored?.remoteUrl) {
-                a.href = stored.remoteUrl; a.target = '_blank'; a.rel = 'noopener';
-                document.body.appendChild(a); a.click(); a.remove();
-            } else {
+            if (!blob) {
                 addToast('这条还没有可下载的语音', 'error');
                 return;
             }
-            addToast('语音已开始下载', 'success');
+            const result = await shareOrDownloadBlob({ blob, fileName: fname, shareTitle: `${char?.name || '角色'}的语音` });
+            if (result === 'cancelled') return;
+            addToast(result === 'shared' ? '已打开系统保存/分享' : '语音已开始下载', 'success');
             trackEvent('下载语音条');
         } catch {
             addToast('语音下载失败', 'error');
@@ -825,11 +825,7 @@ const Chat: React.FC = () => {
             setInput(savedDraft || '');
             if (char) {
                 setSettingsContextLimit(char.contextLimit || 500);
-                setSettingsContextRangeMode(
-                    char.autoArchiveEnabled && char.contextRangeMode === 'adaptive'
-                        ? 'adaptive'
-                        : 'manual',
-                );
+                setSettingsContextRangeMode(resolveContextRangeMode(char));
                 setSettingsHideSysLogs(char.hideSystemLogs || false);
                 setSettingsHtmlModeCustomPrompt((char as any).htmlModeCustomPrompt || '');
                 clearUnread(char.id);
@@ -856,6 +852,8 @@ const Chat: React.FC = () => {
             setReplyTarget(null);
             setSelectionMode(false);
             setSelectedMsgIds(new Set());
+            setRetainRecentForVectorize(false);
+            setVectorizeResult(null);
             setShowingTargetIds(new Set());
             setWindowedFocusMsgId(null);
             setFlashMsgId(null);
@@ -937,11 +935,7 @@ const Chat: React.FC = () => {
     useEffect(() => {
         if (modalType !== 'chat-settings' || !char) return;
         setSettingsContextLimit(char.contextLimit || 500);
-        setSettingsContextRangeMode(
-            char.autoArchiveEnabled && char.contextRangeMode === 'adaptive'
-                ? 'adaptive'
-                : 'manual',
-        );
+        setSettingsContextRangeMode(resolveContextRangeMode(char));
         setSettingsHideSysLogs(char.hideSystemLogs || false);
         setSettingsHtmlModeCustomPrompt((char as any).htmlModeCustomPrompt || '');
     }, [modalType, char?.id]);
@@ -1996,14 +1990,18 @@ const Chat: React.FC = () => {
     };
 
     const saveSettings = async () => {
-        const nextMode: ContextRangeMode = char.autoArchiveEnabled
+        const canUseAdaptiveRange = !!(char.autoArchiveEnabled || char.contextFollowsMemoryPalaceHwm);
+        const nextMode: ContextRangeMode = canUseAdaptiveRange
             ? settingsContextRangeMode
             : 'manual';
+        const nextFollowsOneShotWaterline = nextMode === 'adaptive'
+            && !!char.contextFollowsMemoryPalaceHwm;
         const candidate = {
             ...char,
             contextRangePolicyVersion: CONTEXT_RANGE_POLICY_VERSION,
             contextRangeMode: nextMode,
             contextLimit: settingsContextLimit,
+            contextFollowsMemoryPalaceHwm: nextFollowsOneShotWaterline,
         };
         let nextUserStart = char.contextUserStartMessageId;
         try {
@@ -2016,6 +2014,7 @@ const Chat: React.FC = () => {
             contextLimit: settingsContextLimit,
             contextRangeMode: nextMode,
             contextRangePolicyVersion: CONTEXT_RANGE_POLICY_VERSION,
+            contextFollowsMemoryPalaceHwm: nextFollowsOneShotWaterline,
             contextUserStartMessageId: nextUserStart,
             hideSystemLogs: settingsHideSysLogs,
             htmlModeCustomPrompt: settingsHtmlModeCustomPrompt,
@@ -2025,16 +2024,22 @@ const Chat: React.FC = () => {
     };
 
     const restoreAdaptiveContext = () => {
-        if (!char.autoArchiveEnabled) return;
+        if (!char.autoArchiveEnabled && !char.contextFollowsMemoryPalaceHwm) return;
         setSettingsContextRangeMode('adaptive');
         setSettingsContextLimit(500);
         updateCharacter(char.id, {
             contextRangePolicyVersion: CONTEXT_RANGE_POLICY_VERSION,
             contextRangeMode: 'adaptive',
             contextLimit: 500,
+            contextFollowsMemoryPalaceHwm: !!char.contextFollowsMemoryPalaceHwm,
             contextUserStartMessageId: undefined,
         });
-        addToast('已恢复全自动记忆的自适应上下文', 'success');
+        addToast(
+            char.autoArchiveEnabled
+                ? '已恢复全自动记忆的自适应上下文'
+                : '已恢复跟随记忆水位线',
+            'success',
+        );
     };
 
     const handleClearHistory = async () => {
@@ -2118,8 +2123,8 @@ const Chat: React.FC = () => {
         setModalType('none');
     };
 
-    // 打开「聊天设置」弹窗且开了记忆宫殿时，算一次待处理条数显示在「一键存入」按钮上。
-    // 口径与 pipeline 一致（getMemoryPalaceUnprocessedBufferCount 已排除热区 200 条）。
+    // 只在打开聊天设置时计算一键存入的待处理量；不开弹窗的用户没有额外 DB 扫描。
+    // 这里按按钮的真实语义统计：默认处理到当前末尾，勾选后精确保留最后 10 条原文。
     useEffect(() => {
         if (modalType !== 'chat-settings' || !char?.memoryPalaceEnabled) {
             setVectorizePendingCount(null);
@@ -2128,15 +2133,18 @@ const Chat: React.FC = () => {
         let cancelled = false;
         (async () => {
             try {
-                const { getMemoryPalaceUnprocessedBufferCount } = await import('../utils/memoryPalace/pipeline');
-                const n = await getMemoryPalaceUnprocessedBufferCount(char.id);
+                const { getMemoryPalaceOneShotPendingCount } = await import('../utils/memoryPalace/pipeline');
+                const n = await getMemoryPalaceOneShotPendingCount(
+                    char.id,
+                    retainRecentForVectorize ? 10 : 0,
+                );
                 if (!cancelled) setVectorizePendingCount(n);
             } catch {
                 // 算不出就不显示条数，不影响按钮可用
             }
         })();
         return () => { cancelled = true; };
-    }, [modalType, char?.id, char?.memoryPalaceEnabled]);
+    }, [modalType, char?.id, char?.memoryPalaceEnabled, retainRecentForVectorize]);
 
     const handleForceVectorize = async () => {
         if (!char || !char.memoryPalaceEnabled || isVectorizing) return;
@@ -2147,97 +2155,102 @@ const Chat: React.FC = () => {
             return;
         }
 
+        const retainedCount = retainRecentForVectorize ? 10 : 0;
+        const charIdAtStart = char.id;
         setIsVectorizing(true);
-        // 留在「聊天设置」弹窗里，按钮原地转成逐轮进度，跑完才收
         setVectorizeProgress('准备中...');
-        addToast('🏰 开始向量化所有聊天记录...', 'info');
+        addToast(
+            retainedCount === 10
+                ? '🏰 开始整理聊天，保留最近 10 条原文...'
+                : '🏰 开始整理全部聊天记录...',
+            'info',
+        );
 
         try {
-            const { processNewMessages, getMemoryPalaceHighWaterMark, getMemoryPalaceUnprocessedBufferCount, mergePalaceFragmentsIntoMemories } = await import('../utils/memoryPalace/pipeline');
-            let totalProcessed = 0;
-            let round = 0;
-            const MAX_ROUNDS = 50; // 安全上限
-            // 每轮合并进来的 palace MemoryFragment；全部处理完后一次性 updateCharacter
-            let accumulatedMemories = char.memories ? [...char.memories] : [];
-            let latestHideBefore = char.hideBeforeMessageId;
+            const {
+                processNewMessages,
+                getMemoryPalaceHighWaterMark,
+                getMemoryPalaceOneShotPendingCount,
+                mergePalaceFragmentsIntoMemories,
+            } = await import('../utils/memoryPalace/pipeline');
+            const pendingBefore = await getMemoryPalaceOneShotPendingCount(char.id, retainedCount);
+            const hwmBefore = getMemoryPalaceHighWaterMark(char.id);
+            setVectorizePendingCount(pendingBefore);
+            setVectorizeProgress(pendingBefore > 0 ? `待处理 ${pendingBefore} 条` : '正在同步原文边界...');
 
-            while (round < MAX_ROUNDS) {
-                round++;
-                // 角色已切走就中断：Chat 是单实例复用、这些是共享 state，继续跑会把旧角色的进度串到新角色 UI 上。
-                // 向量化基于高水位、可续跑，下次进这个角色再点会接着来。
-                if (char.id !== activeCharIdRef.current) break;
-                const hwm = getMemoryPalaceHighWaterMark(char.id);
-                // 用 pipeline 的真实缓冲区口径（排除热区），与 processNewMessages(force) 实际会处理的量一致，
-                // 循环才能正确收敛，进度条数也不会骗人。
-                const remaining = await getMemoryPalaceUnprocessedBufferCount(char.id);
-                if (char.id !== activeCharIdRef.current) break;
-                if (remaining < 10) break; // 剩余太少，停止
-                setVectorizeProgress(`第 ${round} 轮 · 剩余 ${remaining} 条`);
-                setVectorizePendingCount(remaining);
+            const pipelineResult = await processNewMessages(
+                [],
+                char.id,
+                char.name,
+                mpEmb,
+                mpLLM,
+                userProfile?.name || '',
+                true,
+                setVectorizeProgress,
+                {
+                    drainBuffer: true,
+                    retainRecentMessages: retainedCount,
+                    requireAllBatches: true,
+                },
+            );
 
-                // processNewMessages 内部直接从 DB 加载并按缓冲区口径取批，忽略首个参数，传 [] 即可
-                const pipelineResult = await processNewMessages([], char.id, char.name, mpEmb, mpLLM, userProfile?.name || '', true);
-                if (char.id !== activeCharIdRef.current) break;
+            if (charIdAtStart !== activeCharIdRef.current) return;
+            if (!pipelineResult) throw new Error('记忆处理没有完成，请检查副 API 与网络');
+            if (pipelineResult.skipReason === 'lock') throw new Error('这个角色已有记忆任务在运行，请稍后再试');
+            const failedBatches = pipelineResult.batches.filter(batch => !batch.ok);
+            if (failedBatches.length > 0) {
+                throw new Error(`第 ${failedBatches.map(batch => batch.index).join('、')} 批处理失败，水位线未移动`);
+            }
 
-                // 软跳过：缓冲区还没到阈值 / 热区还没被挤出 / 已有任务在跑 —— 不是 LLM 失败
-                if (pipelineResult?.skipReason) {
-                    if (pipelineResult.skipReason !== 'lock') {
-                        addToast('当前聊天不足以触发总结，请保持这个状态聊天~', 'info');
-                    }
-                    break;
-                }
+            const rangeMessages = (await DB.getMessagesByCharId(char.id, true))
+                .filter(message => !message.groupId)
+                .sort((a, b) => a.id - b.id);
+            const expectedRetained = Math.min(retainedCount, rangeMessages.length);
+            const targetBoundaryIndex = rangeMessages.length - expectedRetained - 1;
+            const targetBoundaryId = targetBoundaryIndex >= 0 ? rangeMessages[targetBoundaryIndex].id : 0;
+            const hwmAfter = getMemoryPalaceHighWaterMark(char.id);
+            if (targetBoundaryId > hwmBefore && hwmAfter < targetBoundaryId) {
+                throw new Error('处理未到达预定边界，原文范围保持不变，请重试');
+            }
 
-                totalProcessed += pipelineResult?.processedMessages || 0;
+            // 水位线只前进不回退。极少数情况下用户先“保留 0 条”又改选保留 10 条，
+            // 这 10 条此前已处理；此时用手动 10 条保证原文仍可读，同时避免重复向量化。
+            const waterlineAlreadyAhead = expectedRetained > 0 && hwmBefore > targetBoundaryId;
+            const nextMode: ContextRangeMode = waterlineAlreadyAhead ? 'manual' : 'adaptive';
+            const nextLimit = expectedRetained > 0 ? 10 : (char.contextLimit || 500);
+            const updates: Record<string, any> = {
+                contextRangePolicyVersion: CONTEXT_RANGE_POLICY_VERSION,
+                contextRangeMode: nextMode,
+                contextLimit: nextLimit,
+                contextFollowsMemoryPalaceHwm: !waterlineAlreadyAhead,
+                contextUserStartMessageId: undefined,
+            };
 
-                // 累积自动归档，统一在循环结束后 updateCharacter
-                // 避免每轮 setState 触发 char 对象重建进而 dep 失效
-                // 仅在 char.autoArchiveEnabled 开启时累积；未开启则 palace 仍向量化，但不推 hideBefore
-                if (pipelineResult?.autoArchive && (char as any).autoArchiveEnabled) {
-                    accumulatedMemories = mergePalaceFragmentsIntoMemories(
-                        accumulatedMemories,
+            if (char.autoArchiveEnabled) {
+                updates.hideBeforeMessageId = Math.max(char.hideBeforeMessageId || 0, hwmAfter);
+                if (pipelineResult.autoArchive) {
+                    updates.memories = mergePalaceFragmentsIntoMemories(
+                        char.memories ? [...char.memories] : [],
                         pipelineResult.autoArchive.fragments,
                     );
-                    latestHideBefore = pipelineResult.autoArchive.hideBeforeMessageId;
-                }
-
-                // 检查高水位是否前进了（如果没前进说明 LLM 失败了）
-                const newHwm = getMemoryPalaceHighWaterMark(char.id);
-                if (newHwm <= hwm) {
-                    addToast('⚠️ 处理中断：LLM 提取失败，请检查副 API 配置', 'error');
-                    break;
                 }
             }
-
-            // 隐藏线追平到向量高水位：覆盖「关闭期推进了 hwm 但 hide 被冻结」的历史空档。
-            // 只要全自动记忆开着，即便本轮没有新批次也把 hide 追平到 hwm（之前的消息都已向量化）。
-            if ((char as any).autoArchiveEnabled) {
-                const hwmFinal = getMemoryPalaceHighWaterMark(char.id);
-                if (hwmFinal > (latestHideBefore || 0)) latestHideBefore = hwmFinal;
-            }
-
-            // 循环结束后把累积的自动归档一次性写回角色
-            if (latestHideBefore !== char.hideBeforeMessageId || accumulatedMemories.length !== (char.memories?.length || 0)) {
-                updateCharacter(char.id, {
-                    memories: accumulatedMemories,
-                    hideBeforeMessageId: latestHideBefore,
-                } as any);
-            }
-
-            // 仅当仍停在这个角色时刷新按钮 + 弹结果提示，避免串台到刚切过去的新角色
-            if (char.id === activeCharIdRef.current) {
-                // 跑完刷新按钮上的待处理条数
-                try {
-                    setVectorizePendingCount(await getMemoryPalaceUnprocessedBufferCount(char.id));
-                } catch { /* 忽略：刷新失败不影响结果提示 */ }
-
-                if (totalProcessed > 0) {
-                    addToast(`✅ 向量化完成：${round} 轮处理了约 ${totalProcessed} 条消息`, 'success');
-                } else {
-                    addToast('所有聊天记录都已处理完毕，无需操作', 'info');
-                }
-            }
+            updateCharacter(char.id, updates);
+            setAllHistoryMessages(rangeMessages);
+            setSettingsContextRangeMode(nextMode);
+            setSettingsContextLimit(nextLimit);
+            setVectorizePendingCount(await getMemoryPalaceOneShotPendingCount(char.id, retainedCount));
+            setVectorizeResult({
+                processedMessages: pipelineResult.processedMessages || pendingBefore,
+                storedMemories: pipelineResult.stored,
+                retainedMessages: expectedRetained,
+                waterlineAlreadyAhead,
+            });
+            setModalType('memory-vectorize-result');
+            addToast('✅ 记忆处理完成，原文范围已同步', 'success');
         } catch (e: any) {
             addToast(`❌ 向量化失败：${e.message}`, 'error');
+            if (charIdAtStart === activeCharIdRef.current) setModalType('chat-settings');
         } finally {
             setIsVectorizing(false);
             setVectorizeProgress('');
@@ -2274,8 +2287,12 @@ const Chat: React.FC = () => {
 
         updateCharacter(char.id, {
             contextRangePolicyVersion: CONTEXT_RANGE_POLICY_VERSION,
-            contextRangeMode: char.autoArchiveEnabled ? settingsContextRangeMode : 'manual',
+            contextRangeMode: (char.autoArchiveEnabled || char.contextFollowsMemoryPalaceHwm)
+                ? settingsContextRangeMode
+                : 'manual',
             contextLimit: settingsContextLimit,
+            contextFollowsMemoryPalaceHwm: settingsContextRangeMode === 'adaptive'
+                && !!char.contextFollowsMemoryPalaceHwm,
             contextUserStartMessageId: messageId,
         });
         setModalType('none');
@@ -3138,6 +3155,9 @@ const Chat: React.FC = () => {
                 isVectorizing={isVectorizing}
                 vectorizePendingCount={vectorizePendingCount}
                 vectorizeProgress={vectorizeProgress}
+                retainRecentForVectorize={retainRecentForVectorize}
+                setRetainRecentForVectorize={setRetainRecentForVectorize}
+                vectorizeResult={vectorizeResult}
                 onForceVectorize={handleForceVectorize}
                 apiPresets={apiPresets}
                 onAddApiPreset={addApiPreset}

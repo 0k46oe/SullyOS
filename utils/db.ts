@@ -2500,6 +2500,63 @@ export const DB = {
       });
   },
 
+  // --- 下一次 LLM 请求完整抓包（同 store 独立单例，永远只保留一份）---
+  getApiRequestCapture: async (): Promise<any | null> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_API_CALL_LOG)) return null;
+      return new Promise((resolve) => {
+          const tx = db.transaction(STORE_API_CALL_LOG, 'readonly');
+          const req = tx.objectStore(STORE_API_CALL_LOG).get('one-shot-capture');
+          req.onsuccess = () => resolve(req.result?.capture ?? null);
+          req.onerror = () => resolve(null);
+      });
+  },
+
+  saveApiRequestCapture: async (capture: any): Promise<void> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_API_CALL_LOG)) return;
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_API_CALL_LOG, 'readwrite');
+          tx.objectStore(STORE_API_CALL_LOG).put({ id: 'one-shot-capture', capture });
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error || new Error('saveApiRequestCapture transaction failed'));
+          tx.onabort = () => reject(tx.error || new Error('saveApiRequestCapture transaction aborted'));
+      });
+  },
+
+  patchApiRequestCapture: async (captureId: string, patch: Record<string, unknown>): Promise<boolean> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_API_CALL_LOG)) return false;
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_API_CALL_LOG, 'readwrite');
+          const store = tx.objectStore(STORE_API_CALL_LOG);
+          const req = store.get('one-shot-capture');
+          let updated = false;
+          req.onsuccess = () => {
+              const current = req.result?.capture;
+              if (!current || current.id !== captureId) return;
+              store.put({ id: 'one-shot-capture', capture: { ...current, ...patch } });
+              updated = true;
+          };
+          req.onerror = () => reject(req.error || new Error('patchApiRequestCapture read failed'));
+          tx.oncomplete = () => resolve(updated);
+          tx.onerror = () => reject(tx.error || new Error('patchApiRequestCapture transaction failed'));
+          tx.onabort = () => reject(tx.error || new Error('patchApiRequestCapture transaction aborted'));
+      });
+  },
+
+  clearApiRequestCapture: async (): Promise<void> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_API_CALL_LOG)) return;
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_API_CALL_LOG, 'readwrite');
+          tx.objectStore(STORE_API_CALL_LOG).delete('one-shot-capture');
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error || new Error('clearApiRequestCapture transaction failed'));
+          tx.onabort = () => reject(tx.error || new Error('clearApiRequestCapture transaction aborted'));
+      });
+  },
+
   // 导入备份用：直接写回一条 vr_settings 原始记录（{id, ...}）。
   saveVRSettingRecord: async (record: any): Promise<void> => {
       if (!record || !record.id) return;

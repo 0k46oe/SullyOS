@@ -120,6 +120,9 @@ export interface OSTheme {
   scheduleCardAppearance?: ScheduleCardAppearance;
   desktopDecorations?: DesktopDecoration[];
   customFont?: string;
+  /** 顶部时间栏布局：安全显示（安全区下方）/ 紧凑显示（嵌入安全区）/ 完全隐藏。 */
+  statusBarMode?: 'standard' | 'compact' | 'hidden';
+  /** @deprecated 旧版两档开关，仅用于兼容已有存档；新设置写入 statusBarMode。 */
   hideStatusBar?: boolean;
   // Chat UI customization (global)
   chatAvatarShape?: 'circle' | 'rounded' | 'square';
@@ -2048,6 +2051,8 @@ export interface StoryTheaterEntry {
     presetId?: string;
     /** 会话内快速预设只覆盖本剧场，不修改预设库。 */
     presetOverride?: StoryTheaterPresetDocument;
+    /** 仅供拒绝 assistant prefill、要求最后一条消息必须为 user 的接口使用；默认关闭以保留原生预设效果。 */
+    forceUserLastMessage?: boolean;
     createdAt: number;
     updatedAt: number;
 }
@@ -2352,6 +2357,16 @@ export interface CharMusicProfile {
     updatedAt: number;
 }
 
+export type MemoryPalaceWaterlinePreset = 'online' | 'balanced' | 'offline' | 'custom';
+
+export interface MemoryPalaceWaterlineConfig {
+  preset: MemoryPalaceWaterlinePreset;
+  /** 自定义档位才读取；预设档位由统一映射决定。 */
+  hotZoneSize?: number;
+  /** 自定义档位才读取；预设档位由统一映射决定。 */
+  bufferThreshold?: number;
+}
+
 export interface CharacterProfile {
   id: string;
   name: string;
@@ -2386,6 +2401,11 @@ export interface CharacterProfile {
    * - manual：用户拉杆决定最多读取最近 contextLimit 条完整原文。
    */
   contextRangeMode?: 'adaptive' | 'manual';
+  /**
+   * 用户主动点「一键存进记忆宫殿」后，让原文范围继续跟随记忆水位线。
+   * 与全自动归档开关独立；未使用该按钮的旧角色保持 undefined，不改变既有行为。
+   */
+  contextFollowsMemoryPalaceHwm?: boolean;
   /** 上下文范围结构版本；用于把旧版「5000 条 + 自动水位隐藏」一次性迁移到自适应模式。 */
   contextRangePolicyVersion?: number;
   /**
@@ -2547,6 +2567,12 @@ export interface CharacterProfile {
    * 已处理的聊天。默认 false（opt-in）——首次启用建议让用户做一次 force 追平历史。
    */
   autoArchiveEnabled?: boolean;
+  /**
+   * 角色独立的记忆水位节奏。整个角色消息时间线共用这一份配置，不区分私聊、
+   * 见面、通话或剧情来源。缺省代表 online，即保持历史行为 200/100。
+   * 作为 CharacterProfile 一部分随 IndexedDB 与完整备份持久化。
+   */
+  memoryPalaceWaterline?: MemoryPalaceWaterlineConfig;
   embeddingConfig?: {
     baseUrl: string;
     apiKey: string;

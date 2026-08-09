@@ -20,14 +20,16 @@ import { runWorldEpisode, rerollWorldCharBeat } from '../utils/worldHome/engine'
 import { migrateWorldDaySegs } from '../utils/worldHome/prompts';
 import { ChatParser } from '../utils/chatParser';
 import { safeFetchJson } from '../utils/safeApi';
-import { getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext } from '../utils/apiCallLog';
+import { captureApiRequestOnce, getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext, updateApiRequestCaptureUsage } from '../utils/apiCallLog';
 import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
 import { INSTALLED_APPS, HIDDEN_APP_NAMES } from '../constants';
-import { trackEvent, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, trackCurrentFeaturesOnce } from '../utils/analytics';
+import { isAnalyticsRequestUrl, trackEvent, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, trackCurrentFeaturesOnce } from '../utils/analytics';
 import { collectAppearance, collectCharSettings, collectDataScale, collectFeatureFlagsAsync } from '../utils/analyticsSnapshot';
+import { normalizeApiConfig, normalizeApiPreset } from '../utils/apiConfigNormalize';
 import { markBackupDone } from '../utils/backupReminder';
 import { normalizeCharacterImpression, normalizeCharacterDefaults } from '../utils/impression';
+import { normalizeModelIds } from '../utils/modelList';
 import {
   CONTEXT_RANGE_POLICY_VERSION,
   DEFAULT_MANUAL_CONTEXT_LIMIT,
@@ -40,6 +42,12 @@ import { CHAT_GEN_EVENTS, setChatViewSnapshot } from '../utils/chatGenEvents';
 import { buildChatRequestPayload } from '../utils/chatRequestPayload';
 import { ChatPrompts } from '../utils/chatPrompts';
 import { extractHtmlBlocks } from '../utils/htmlPrompt';
+import { mergePalaceFragmentsIntoMemories } from '../utils/memoryPalace/pipeline';
+import {
+  MEMORY_AUTO_ARCHIVE_SYNC_EVENT,
+  repairMissingAutoArchiveMemories,
+  type MemoryAutoArchiveSyncDetail,
+} from '../utils/memoryPalace/autoArchive';
 import { ActiveMsgClient } from '../utils/activeMsgClient';
 import { resolveCharTimeZone } from '../utils/timezone';
 import { ActiveMsgStore } from '../utils/activeMsgStore';
@@ -1029,7 +1037,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       const patchedFetch = async (...args: [RequestInfo | URL, RequestInit?]) => {
           const [resource, config] = args;
           
-          const urlStr = String(resource);
+          const urlStr = typeof resource === 'string'
+              ? resource
+              : (typeof Request !== 'undefined' && resource instanceof Request)
+                  ? resource.url
+                  : resource instanceof URL
+                      ? resource.href
+                      : String(resource);
           const fetchStartedAt = Date.now();
           // Bare fetch calls do not carry explicit metadata. Snapshot the active
           // App now; reading the ambient value after a long response would label
@@ -1067,6 +1081,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       if (body !== rawBody) sendArgs = [resource, { ...(config as RequestInit), body }];
                   } catch { /* 非 JSON body：原样放行 */ }
               }
+          }
+
+          // 用户手动开启的「本次发送统计」：只抢占下一条请求，并在真正发出前立即自动关闭。
+          // 取兼容层处理后的 sendArgs，展示内容与本次实际提交给服务端的请求体一致。
+          let apiRequestCaptureId: string | null = null;
+          if (urlStr.includes('/chat/completions')) {
+              const captureMeta = (sendArgs[1] as any)?.__sullyMeta || ambientMetaAtStart;
+              apiRequestCaptureId = captureApiRequestOnce({ url: urlStr, body: (sendArgs[1] as any)?.body, meta: captureMeta });
           }
 
           try {
@@ -1124,9 +1146,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           const durationMs = Date.now() - fetchStartedAt;
                           let parsed: any = undefined;
                           try { parsed = JSON.parse(t); } catch { /* 流式/非 JSON：把原始文本交给 recordApiCall 的 SSE 兜底解析 */ }
+                          updateApiRequestCaptureUsage({ captureId: apiRequestCaptureId, ok, response: parsed, responseText: parsed === undefined ? t : undefined });
                           recordApiCall({ requestId, url: urlStr, body, status, ok, response: parsed, responseText: parsed === undefined ? t : undefined, meta, durationMs });
-                      }).catch(() => recordApiCall({ requestId, url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt }));
+                      }).catch(() => {
+                          updateApiRequestCaptureUsage({ captureId: apiRequestCaptureId, ok });
+                          recordApiCall({ requestId, url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt });
+                      });
                   } else {
+                      updateApiRequestCaptureUsage({ captureId: apiRequestCaptureId, ok });
                       recordApiCall({ requestId, url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt });
                   }
               }
@@ -1172,16 +1199,19 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           } catch (err: any) {
               // Network Failure
               if (urlStr.includes('/chat/completions')) {
+                  updateApiRequestCaptureUsage({ captureId: apiRequestCaptureId, ok: false });
                   recordApiCall({ requestId: (config as any)?.__sullyApiCallId, url: urlStr, body: (sendArgs[1] as any)?.body, ok: false, meta: (config as any)?.__sullyMeta || ambientMetaAtStart, durationMs: Date.now() - fetchStartedAt });
               }
-              setSystemLogs(prev => [{
-                  id: `log-${Date.now()}`,
-                  timestamp: Date.now(),
-                  type: 'network',
-                  source: 'Network',
-                  message: err.message || 'Fetch Failed',
-                  detail: `URL: ${urlStr}`
-              }, ...prev.slice(0, 49)]);
+              if (!isAnalyticsRequestUrl(urlStr)) {
+                  setSystemLogs(prev => [{
+                      id: `log-${Date.now()}`,
+                      timestamp: Date.now(),
+                      type: 'network',
+                      source: 'Network',
+                      message: err.message || 'Fetch Failed',
+                      detail: `URL: ${urlStr}`
+                  }, ...prev.slice(0, 49)]);
+              }
               throw err;
           }
       };
@@ -1271,9 +1301,20 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
              } catch(e) { console.error('Theme load error', e); }
         }
         
-        if (savedApi) setApiConfig(JSON.parse(savedApi));
-        if (savedModels) setAvailableModels(JSON.parse(savedModels));
-        if (savedPresets) setApiPresets(JSON.parse(savedPresets));
+        if (savedApi) {
+            const normalizedApi = normalizeApiConfig({ ...defaultApiConfig, ...JSON.parse(savedApi) });
+            setApiConfig(normalizedApi);
+            localStorage.setItem('os_api_config', JSON.stringify(normalizedApi));
+        }
+        if (savedModels) {
+            try { setAvailableModels(normalizeModelIds(JSON.parse(savedModels))); }
+            catch (error) { console.warn('Model list load error', error); }
+        }
+        if (savedPresets) {
+            const normalizedPresets = (JSON.parse(savedPresets) as ApiPreset[]).map(normalizeApiPreset);
+            setApiPresets(normalizedPresets);
+            localStorage.setItem('os_api_presets', JSON.stringify(normalizedPresets));
+        }
 
         // 加载实时配置
         const savedRealtimeConfig = localStorage.getItem('os_realtime_config');
@@ -2558,13 +2599,72 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           }));
       };
 
+      // Push / 彼方 / 家园等 React 外入口完成全自动记忆双写后，只把增量搬回内存。
+      // 再基于当前 state 保存一次，堵住后台 DB 写入和前台角色更新同时发生时的反向覆盖。
+      const memoryAutoArchiveSyncHandler = (e: Event) => {
+          const detail = ((e as CustomEvent).detail || {}) as MemoryAutoArchiveSyncDetail;
+          if (!detail.charId) return;
+          setCharacters(prev => prev.map(character => {
+              if (character.id !== detail.charId) return character;
+              const nextMemories = detail.fragments.length > 0
+                  ? mergePalaceFragmentsIntoMemories(character.memories || [], detail.fragments)
+                  : (character.memories || []);
+              const currentHide = character.hideBeforeMessageId || 0;
+              const nextHide = Math.max(currentHide, detail.hideBeforeMessageId || 0);
+              if (nextMemories === character.memories && nextHide === currentHide) return character;
+              const next = normalizeCharacterImpression({
+                  ...character,
+                  memories: nextMemories,
+                  ...(nextHide > currentHide ? { hideBeforeMessageId: nextHide } : {}),
+              });
+              DB.saveCharacter(next).then(() => {
+                  markAmsgStateDirty({
+                      char: next,
+                      userProfile: userProfileRef.current,
+                      groups: groupsRef.current,
+                      realtimeConfig: realtimeConfigRef.current,
+                  });
+              }).catch(error => console.warn('[AutoArchive] state sync save failed', error));
+              return next;
+          }));
+      };
+
       window.addEventListener('amsg2-tasks-adopted', tasksAdoptedHandler);
       window.addEventListener('char-music-profile-updated', musicProfileSyncHandler);
+      window.addEventListener(MEMORY_AUTO_ARCHIVE_SYNC_EVENT, memoryAutoArchiveSyncHandler);
       return () => {
           window.removeEventListener('amsg2-tasks-adopted', tasksAdoptedHandler);
           window.removeEventListener('char-music-profile-updated', musicProfileSyncHandler);
+          window.removeEventListener(MEMORY_AUTO_ARCHIVE_SYNC_EVENT, memoryAutoArchiveSyncHandler);
       };
   }, []);
+
+  // 旧版本曾在 Push 后处理里只写宫殿、没写神经链接。每个角色升级后保守修一次：
+  // 只补“最后一条 palace 日志之后整天完全空白”的聊天提取节点，不调 API、不动水位线。
+  useEffect(() => {
+      if (!isDataLoaded) return;
+      let cancelled = false;
+      const runRepair = async () => {
+          const enabledCharacters = characters.filter(character => (
+              character.memoryPalaceEnabled && character.autoArchiveEnabled
+          ));
+          for (const character of enabledCharacters) {
+              if (cancelled) return;
+              const marker = `mp_autoArchiveDualWriteRepair_v1_${character.id}`;
+              if (localStorage.getItem(marker) === '1') continue;
+              try {
+                  await repairMissingAutoArchiveMemories(character.id);
+                  if (!cancelled) localStorage.setItem(marker, '1');
+              } catch (error) {
+                  console.warn('[AutoArchiveRepair] failed', character.id, error);
+              }
+          }
+      };
+      void runRepair();
+      return () => { cancelled = true; };
+  // 只在本次数据初始化完成时执行；后续新数据走已修复的统一双写入口。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDataLoaded]);
 
   const updateTheme = async (updates: Partial<OSTheme>) => {
     const { wallpaper, lockWallpaper, launcherWidgetImage, launcherWidgets, desktopDecorations, customFont, ...styleUpdates } = updates;
@@ -2687,7 +2787,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         addToast('主题没能保存到本地（存储空间可能已满），重启后可能会还原', 'error');
     }
   };
-  const updateApiConfig = (updates: Partial<APIConfig>) => { const newConfig = { ...apiConfig, ...updates }; setApiConfig(newConfig); localStorage.setItem('os_api_config', JSON.stringify(newConfig)); };
+  const updateApiConfig = (updates: Partial<APIConfig>) => { const newConfig = normalizeApiConfig({ ...apiConfig, ...updates }); setApiConfig(newConfig); localStorage.setItem('os_api_config', JSON.stringify(newConfig)); };
   const updateRealtimeConfig = (updates: Partial<RealtimeConfig>) => { const newConfig = { ...realtimeConfig, ...updates }; setRealtimeConfig(newConfig); localStorage.setItem('os_realtime_config', JSON.stringify(newConfig)); };
 
   // Cloud Backup functions
@@ -2807,11 +2907,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     setRemoteVectorConfig(newConfig);
     localStorage.setItem('os_remote_vector_config', JSON.stringify(newConfig));
   };
-  const saveModels = (models: string[]) => { setAvailableModels(models); localStorage.setItem('os_available_models', JSON.stringify(models)); };
-  const addApiPreset = (name: string, config: APIConfig) => { setApiPresets(prev => { const next = [...prev, { id: Date.now().toString(), name, config }]; localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
-  const updateApiPreset = (id: string, name: string, config: APIConfig) => { setApiPresets(prev => { const next = prev.map(p => p.id === id ? { ...p, name, config } : p); localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
+  const saveModels = (models: string[]) => {
+      const safeModels = normalizeModelIds(models);
+      setAvailableModels(safeModels);
+      localStorage.setItem('os_available_models', JSON.stringify(safeModels));
+  };
+  const addApiPreset = (name: string, config: APIConfig) => { setApiPresets(prev => { const next = [...prev, normalizeApiPreset({ id: Date.now().toString(), name, config })]; localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
+  const updateApiPreset = (id: string, name: string, config: APIConfig) => { setApiPresets(prev => { const next = prev.map(p => p.id === id ? normalizeApiPreset({ ...p, name, config }) : p); localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
   const removeApiPreset = (id: string) => { setApiPresets(prev => { const next = prev.filter(p => p.id !== id); localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
-  const savePresets = (presets: ApiPreset[]) => { setApiPresets(presets); localStorage.setItem('os_api_presets', JSON.stringify(presets)); };
+  const savePresets = (presets: ApiPreset[]) => { const normalized = presets.map(normalizeApiPreset); setApiPresets(normalized); localStorage.setItem('os_api_presets', JSON.stringify(normalized)); };
   const addCharacter = async () => {
     const name = 'New Character';
     // 默认开启 emotionConfig.enabled，让"开日程 = 开情绪"这条隐含约定对新角色也成立。

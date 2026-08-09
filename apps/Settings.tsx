@@ -4,7 +4,8 @@ import { useOS } from '../context/OSContext';
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
-import { safeResponseJson } from '../utils/safeApi';
+import { extractContent, safeResponseJson } from '../utils/safeApi';
+import { extractModelIds, normalizeModelIds } from '../utils/modelList';
 import { EXPORT_CHUNK_SIZE, sliceRanges } from '../utils/backupExport';
 import Modal from '../components/os/Modal';
 import { NotionManager, FeishuManager, RealtimeContextManager, fetchOwmWeather, fetchOpenMeteoWeather } from '../utils/realtimeContext';
@@ -32,6 +33,7 @@ import ApiCallLogModal from '../components/settings/ApiCallLogModal';
 import { DB } from '../utils/db';
 import { getBackupReminderState, setBackupReminderIntervalDays, daysSinceLastBackup, BACKUP_REMINDER_MIN_DAYS, BACKUP_REMINDER_MAX_DAYS } from '../utils/backupReminder';
 import { bucketRetryCount, isAnalyticsConfigured, isAnalyticsEnabled, setAnalyticsEnabled, trackEvent } from '../utils/analytics';
+import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '../utils/apiConfigNormalize';
 
 // hot_news（news.orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
 const HOTNEWS_PLATFORM_OPTIONS: { key: string; label: string }[] = [
@@ -411,7 +413,7 @@ const Settings: React.FC = () => {
   
   const [localKey, setLocalKey] = useState(apiConfig.apiKey);
   const [localUrl, setLocalUrl] = useState(apiConfig.baseUrl);
-  const [localModel, setLocalModel] = useState(apiConfig.model);
+  const [localModel, setLocalModel] = useState(String(apiConfig.model || ''));
   const [localStream, setLocalStream] = useState<boolean>(apiConfig.stream === true);
   const [localTemperature, setLocalTemperature] = useState<number>(
     typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85
@@ -566,7 +568,9 @@ const Settings: React.FC = () => {
   // 模型选择 Modal 的过滤 + 公共前缀（memo 掉，避免每次 Settings 重渲染都重算）
   const modelPickerView = useMemo(() => {
       const q = modelFilter.trim().toLowerCase();
-      const filtered = q ? availableModels.filter(m => m.toLowerCase().includes(q)) : availableModels;
+      // 老备份或非标准 /models 可能混入对象；渲染前再守一道，保证任何坏值都不会让设置页白屏。
+      const safeModels = normalizeModelIds(availableModels);
+      const filtered = q ? safeModels.filter(m => m.toLowerCase().includes(q)) : safeModels;
       let commonPrefix = '';
       if (filtered.length >= 2) {
           let p = filtered[0];
@@ -756,7 +760,7 @@ const Settings: React.FC = () => {
   useEffect(() => {
       setLocalUrl(apiConfig.baseUrl);
       setLocalKey(apiConfig.apiKey);
-      setLocalModel(apiConfig.model);
+      setLocalModel(String(apiConfig.model || ''));
       setLocalStream(apiConfig.stream === true);
       setLocalTemperature(typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85);
       setLocalMiniMaxKey(apiConfig.minimaxApiKey || '');
@@ -779,14 +783,14 @@ const Settings: React.FC = () => {
   const loadPreset = (preset: typeof apiPresets[0]) => {
       setSelectedPresetId(preset.id);
       setSelectedPresetName(preset.name);
-      setLocalUrl(preset.config.baseUrl);
-      setLocalKey(preset.config.apiKey);
-      setLocalModel(preset.config.model);
+      setLocalUrl(normalizeApiBaseUrl(preset.config.baseUrl));
+      setLocalKey(normalizeApiCredential(preset.config.apiKey));
+      setLocalModel(normalizeApiModel(preset.config.model));
       setLocalStream(preset.config.stream === true);
       setLocalTemperature(typeof preset.config.temperature === 'number' ? preset.config.temperature : 0.85);
       // MiniMax / AceStep settings are NOT overwritten by presets — typically one user
       // has only one MiniMax / Replicate account regardless of which LLM preset they use.
-      addToast(`已加载配置: ${preset.name}`, 'info');
+      addToast(`已载入预设：${preset.name}；点「保存配置」后才会切换生效`, 'info');
   };
 
   const cancelPresetDeleteHold = useCallback(() => {
@@ -832,9 +836,9 @@ const Settings: React.FC = () => {
           return;
       }
       addApiPreset(newPresetName, {
-        baseUrl: localUrl,
-        apiKey: localKey,
-        model: localModel,
+        baseUrl: normalizeApiBaseUrl(localUrl),
+        apiKey: normalizeApiCredential(localKey),
+        model: normalizeApiModel(localModel),
         stream: localStream,
         temperature: localTemperature,
       });
@@ -850,12 +854,15 @@ const Settings: React.FC = () => {
       return;
     }
     const nextConfig = {
-      apiKey: localKey,
-      baseUrl: localUrl,
-      model: localModel,
+      apiKey: normalizeApiCredential(localKey),
+      baseUrl: normalizeApiBaseUrl(localUrl),
+      model: normalizeApiModel(localModel),
       stream: localStream,
       temperature: localTemperature,
     };
+    setLocalKey(nextConfig.apiKey);
+    setLocalUrl(nextConfig.baseUrl);
+    setLocalModel(nextConfig.model);
     updateApiConfig(nextConfig);
     if (selectedApiPreset) {
       updateApiPreset(selectedApiPreset.id, presetName, {
@@ -941,29 +948,29 @@ const Settings: React.FC = () => {
   };
 
   const fetchModels = async () => {
-    if (!localUrl) { setStatusMsg('请先填写 URL'); return; }
+    const baseUrl = normalizeApiBaseUrl(localUrl);
+    const apiKey = normalizeApiCredential(localKey);
+    if (!baseUrl) { setStatusMsg('请先填写 URL'); return; }
     setIsLoadingModels(true);
     setStatusMsg('正在连接...');
     try {
-        const baseUrl = localUrl.replace(/\/+$/, '');
         const response = await fetch(`${baseUrl}/models`, {
             method: 'GET',
-            headers: { 'Authorization': `Bearer ${localKey}`, 'Content-Type': 'application/json' }
+            headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
         });
-        if (!response.ok) throw new Error(`Status ${response.status}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await safeResponseJson(response);
-        // Support various API response formats
-        const list = data.data || data.models || [];
-        if (Array.isArray(list)) {
-            const models = list.map((m: any) => m.id || m);
+        // Support common OpenAI-compatible and nested gateway response formats.
+        const models = extractModelIds(data);
+        if (models.length > 0) {
             setAvailableModels(models);
             if (models.length > 0 && !models.includes(localModel)) setLocalModel(models[0]);
             setStatusMsg(`获取到 ${models.length} 个模型`);
             setShowModelModal(true); // Open selector immediately
-        } else { setStatusMsg('格式不兼容'); }
+        } else { setStatusMsg('模型列表为空或格式不兼容'); }
     } catch (error: any) {
         console.error(error);
-        setStatusMsg('连接失败');
+        setStatusMsg(`连接失败${error?.message ? `：${error.message}` : ''}`);
     } finally {
         setIsLoadingModels(false);
     }
@@ -1942,7 +1949,7 @@ const Settings: React.FC = () => {
                             if (res.ok) {
                                 // 走 safeResponseJson —— 它能透明把 SSE 流响应拼成普通 chat/completion 结构
                                 const data = await safeResponseJson(res);
-                                const reply = data.choices?.[0]?.message?.content || '';
+                                const reply = extractContent(data);
                                 setTestApiResult(`✅ 连接成功 — 模型回复: "${reply.slice(0, 30)}"`);
                             } else {
                                 const text = await res.text().catch(() => '');

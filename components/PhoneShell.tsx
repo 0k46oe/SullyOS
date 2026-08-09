@@ -141,7 +141,7 @@ import { App as CapApp } from '@capacitor/app';
 import { StatusBar as CapStatusBar, Style as StatusBarStyle } from '@capacitor/status-bar';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Capacitor } from '@capacitor/core';
-import { isIOSStandaloneWebApp, isStatusBarHidden } from '../utils/iosStandalone';
+import { isIOSStandaloneWebApp, resolveStatusBarMode } from '../utils/iosStandalone';
 import AppErrorBoundary from './os/AppErrorBoundary';
 import GlobalMiniPlayer from './os/GlobalMiniPlayer';
 import PersonaSimIndicator from './os/PersonaSimIndicator';
@@ -482,12 +482,13 @@ const PhoneShell: React.FC = () => {
   const { theme, isLocked, unlock, activeApp, closeApp, openApp, virtualTime, isDataLoaded, toasts, unreadMessages, characters, handleBack, suspendedCall, resumeCall, activeCharacterId, errorDialog, dismissError } = useOS();
   const useIOSStandaloneLayout = isIOSStandaloneWebApp();
 
-  // 顶部时钟/电量条是否隐藏（外观「隐藏顶部时间栏」开关 + 平台默认：iOS 全屏 PWA 系统已有状态栏，默认隐藏避免双显）。
-  // 隐藏时把 --chrome-top 退化成 --safe-top，让用 chrome-top 让位的顶栏（交换日记/彼方/剧场）不再为已隐藏的状态栏多留 1.5rem。
-  const statusBarHidden = isStatusBarHidden(theme.hideStatusBar);
+  // 三档顶部状态栏：安全显示 / 紧凑显示 / 隐藏。旧存档仍由 hideStatusBar 兼容解析。
+  // compact 把时间放进 safe-area，本体顶栏只让出 max(safe-area, 1.5rem)，避免顶部再多一整行。
+  const statusBarMode = resolveStatusBarMode(theme.statusBarMode, theme.hideStatusBar);
   useEffect(() => {
-    document.documentElement.classList.toggle('sully-statusbar-hidden', statusBarHidden);
-  }, [statusBarHidden]);
+    document.documentElement.classList.toggle('sully-statusbar-hidden', statusBarMode === 'hidden');
+    document.documentElement.classList.toggle('sully-statusbar-compact', statusBarMode === 'compact');
+  }, [statusBarMode]);
 
   // 冷启动「世界入场」是否已结束。结束前由 BootSequence 接管整屏（同时取代旧的黑屏 spinner）。
   const [bootDone, setBootDone] = useState(false);
@@ -954,11 +955,11 @@ const PhoneShell: React.FC = () => {
           {/* Overlays: Toasts (Top) */}
           <div className="absolute top-12 left-0 w-full flex flex-col items-center gap-2 pointer-events-none z-[60]">
               {toasts.map(toast => (
-                 <div key={toast.id} className="animate-fade-in bg-white/95 backdrop-blur-xl px-4 py-3 rounded-2xl shadow-xl border border-black/5 flex items-center gap-3 max-w-[85%] ring-1 ring-white/20">
+                 <div key={toast.id} className="animate-fade-in bg-white/95 backdrop-blur-xl px-4 py-3 rounded-2xl shadow-xl border border-black/5 flex items-start gap-3 max-w-[85%] ring-1 ring-white/20">
                      {toast.type === 'success' && <div className="w-2.5 h-2.5 rounded-full bg-green-500 shrink-0"></div>}
                      {toast.type === 'error' && <div className="w-2.5 h-2.5 rounded-full bg-red-500 shrink-0"></div>}
                      {toast.type === 'info' && <div className="w-2.5 h-2.5 rounded-full bg-primary shrink-0"></div>}
-                     <span className="text-xs font-bold text-slate-800 truncate leading-none">{toast.message}</span>
+                     <span className="min-w-0 text-left text-xs font-bold text-slate-800 whitespace-normal break-words [overflow-wrap:anywhere] leading-5">{toast.message}</span>
                  </div>
               ))}
            </div>

@@ -489,8 +489,25 @@ export async function safeFetchJson(
  */
 export function extractContent(data: any): string {
     const msg = data?.choices?.[0]?.message;
-    let text: string = msg?.content || '';
-    if (!text.trim()) text = msg?.reasoning_content || '';
+    const contentToText = (value: unknown): string => {
+        if (typeof value === 'string') return value;
+        if (Array.isArray(value)) {
+            return value.map(part => {
+                if (typeof part === 'string') return part;
+                if (!part || typeof part !== 'object') return '';
+                const record = part as Record<string, unknown>;
+                return contentToText(record.text ?? record.content ?? record.value);
+            }).filter(Boolean).join('');
+        }
+        if (value && typeof value === 'object') {
+            const record = value as Record<string, unknown>;
+            return contentToText(record.text ?? record.content ?? record.value);
+        }
+        return '';
+    };
+
+    let text = contentToText(msg?.content);
+    if (!text.trim()) text = contentToText(msg?.reasoning_content);
     // Strip hidden chain-of-thought blocks: <think> / <thinking> / <thought>
     text = text.replace(/<(think|thinking|thought)>[\s\S]*?<\/\1>/gi, '');
     text = text.replace(/<(?:think|thinking|thought)>[\s\S]*$/gi, '');

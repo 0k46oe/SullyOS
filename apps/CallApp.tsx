@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Microphone, SpeakerHigh, SpeakerSlash, PhoneDisconnect, Translate, Gear, Clock, CaretLeft, CaretRight } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
 import { safeFetchJson } from '../utils/safeApi';
@@ -12,15 +12,21 @@ import { resolveTtsProvider, getTtsProvider, getVoicePromptOverride } from '../u
 import { startStt, isSttSupported, type SttSession } from '../utils/speechToText';
 import { ContextBuilder } from '../utils/context';
 import { resolveCharTimeZone } from '../utils/timezone';
-import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
+import {
+  injectMemoryPalace,
+} from '../utils/memoryPalace/pipeline';
+import { processNewMessagesWithAutoArchive } from '../utils/memoryPalace/autoArchive';
+import { incrementDigestRound, runCognitiveDigestion } from '../utils/memoryPalace';
 import { RealtimeContextManager } from '../utils/realtimeContext';
 import { DB } from '../utils/db';
 import { ChatPrompts } from '../utils/chatPrompts';
-import { Message, ChatTheme, AppID } from '../types';
+import { CharacterProfile, Message, ChatTheme, AppID } from '../types';
 import { PRESET_THEMES } from '../components/chat/ChatConstants';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent } from '../utils/analytics';
 import { markAmsgStateDirty } from '../utils/amsgStateSync';
+import { fetchBlobForShare, shareOrDownloadBlob } from '../utils/shareExport';
+import { getPendingReplyText } from '../utils/pendingReply';
 type CallState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | 'ended' | 'error';
 type ViewMode = 'role-select' | 'in-call' | 'history' | 'record-detail';
 type CallBubble = { id: string; dbId?: number; role: 'user' | 'assistant'; text: string; time: string; audioUrl?: string; timestamp: number };
@@ -290,7 +296,7 @@ ${getVoicePromptOverride(getTtsProvider()) ?? (getTtsProvider() === 'fishaudio' 
   return [coreContext, timeContext, callPrompt, voiceLangPrompt].filter(Boolean).join('\n\n');
 };
 const CallApp: React.FC = () => {
-  const { closeApp, openApp, characters, activeCharacterId, addToast, apiConfig, userProfile, customThemes, suspendCall, suspendedCall, clearSuspendedCall, updateCharacter, characterGroups, groups, realtimeConfig } = useOS();
+  const { closeApp, openApp, characters, activeCharacterId, addToast, apiConfig, userProfile, customThemes, suspendCall, suspendedCall, clearSuspendedCall, updateCharacter, characterGroups, groups, realtimeConfig, memoryPalaceConfig } = useOS();
 
   const [viewMode, setViewMode] = useState<ViewMode>('role-select');
   const [selectedCharId, setSelectedCharId] = useState<string>(activeCharacterId || characters[0]?.id || '');
@@ -324,6 +330,9 @@ const CallApp: React.FC = () => {
   const [deleteConfirmRecord, setDeleteConfirmRecord] = useState<CallRecord | null>(null);
   const [voiceLang, setVoiceLang] = useState('');
   const [showLangPicker, setShowLangPicker] = useState(false);
+  const [memoryPalaceStatus, setMemoryPalaceStatus] = useState('');
+  const memoryPalaceStatusRef = useRef(memoryPalaceStatus);
+  memoryPalaceStatusRef.current = memoryPalaceStatus;
   const audioRef = useRef<HTMLAudioElement | null>(null);
   // All blob: URLs created this call session. Kept alive so 重播/下载 work on every
   // bubble; revoked together only when leaving/resetting the call (not per-turn).
@@ -336,6 +345,10 @@ const CallApp: React.FC = () => {
   const longPressTimerRef = useRef<number | null>(null);
   const callTouchStartPos = useRef({ x: 0, y: 0 });
   const selectedChar = useMemo(() => characters.find(c => c.id === selectedCharId) || null, [characters, selectedCharId]);
+  // 通话、见面和私聊共用同一个角色时间线。异步整理结束时必须重新读取最新角色状态，
+  // 避免用户在整理途中关闭记忆宫殿后，旧闭包仍继续写自动归档结果。
+  const charactersRef = useRef(characters);
+  charactersRef.current = characters;
   // 通话内容和普通聊天写进同一份历史，也就是主动消息 2.0 云端快照的素材。每轮落库后打一次脏，
   // 不然打完电话直接关 App，角色到点就当这通电话没发生过（连"这段时间没联系"都会算错）。
   // 一通电话里的多次调用会在微任务内合并成一次上传；快照里的消息在上传时从 DB 重读。
@@ -343,6 +356,54 @@ const CallApp: React.FC = () => {
     if (!selectedChar) return;
     markAmsgStateDirty({ char: selectedChar, userProfile, groups, realtimeConfig });
   };
+  const runMemoryPalacePostHook = useCallback(async (charForHook: CharacterProfile) => {
+    const liveBefore = charactersRef.current.find(char => char.id === charForHook.id) || null;
+    if (!liveBefore?.memoryPalaceEnabled) return;
+
+    const embedding = memoryPalaceConfig?.embedding;
+    const configuredLightLLM = memoryPalaceConfig?.lightLLM;
+    const lightLLM = configuredLightLLM?.baseUrl
+      ? configuredLightLLM
+      : { baseUrl: apiConfig.baseUrl, apiKey: apiConfig.apiKey, model: apiConfig.model };
+    if (!embedding?.baseUrl || !embedding?.apiKey || !lightLLM.baseUrl) return;
+
+    try {
+      const recentMessages = await DB.getRecentMessagesByCharId(charForHook.id, 50);
+      await processNewMessagesWithAutoArchive(
+        recentMessages,
+        charForHook.id,
+        charForHook.name,
+        embedding,
+        lightLLM,
+        userProfile?.name || '',
+        false,
+        stage => setMemoryPalaceStatus(stage),
+      );
+
+      const liveAfter = charactersRef.current.find(char => char.id === charForHook.id) || null;
+      if (!liveAfter?.memoryPalaceEnabled) return;
+
+      if (incrementDigestRound(charForHook.id)) {
+        setMemoryPalaceStatus(`${charForHook.name}正在整理内心…`);
+        await runCognitiveDigestion(
+          charForHook.id,
+          charForHook.name,
+          [liveAfter.systemPrompt, liveAfter.worldview].filter(Boolean).join('\n'),
+          lightLLM,
+          false,
+          userProfile?.name,
+          embedding,
+        );
+      }
+    } catch (error: any) {
+      console.warn('[CallApp MemoryPalace] 后台整理失败:', error?.message || error);
+      addToast('通话已保存，但记忆整理失败了', 'error');
+    } finally {
+      const currentStatus = memoryPalaceStatusRef.current;
+      if (currentStatus.includes('完成')) addToast(currentStatus, 'success');
+      setMemoryPalaceStatus('');
+    }
+  }, [addToast, apiConfig.apiKey, apiConfig.baseUrl, apiConfig.model, memoryPalaceConfig, updateCharacter, userProfile?.name]);
   const recordDetail = useMemo(() => callRecords.find(r => r.id === recordDetailId) || null, [callRecords, recordDetailId]);
   // 从角色聊天主题中提取强调色，用于通话界面的按钮和高亮
   const accentColor = useMemo(() => {
@@ -484,27 +545,19 @@ const CallApp: React.FC = () => {
       addToast(e?.message || '无法启动语音输入', 'error');
     }
   };
-  // 下载某条通话语音（优先把 blob/远端拉成文件下载，CORS 拉不到就开链接让用户自己存）
+  // 下载某条通话语音：移动端优先调系统分享/保存，避免 WebView 的 <a download> 假成功。
   const handleDownloadCallAudio = async (url?: string, ts?: number) => {
     if (!url) { addToast('这条还没有语音', 'error'); return; }
     try {
       const fname = `${(selectedChar?.name || '通话').replace(/[\\/:*?"<>|]/g, '_')}_语音_${ts || Date.now()}.mp3`;
-      let blob: Blob | null = null;
-      try { const r = await fetch(url); if (r.ok) blob = await r.blob(); } catch { /* CORS：走兜底 */ }
-      const a = document.createElement('a');
-      a.download = fname;
-      if (blob) {
-        const u = URL.createObjectURL(blob);
-        a.href = u; document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(u), 1000);
-      } else {
-        a.href = url; a.target = '_blank'; a.rel = 'noopener';
-        document.body.appendChild(a); a.click(); a.remove();
-      }
-      addToast('语音已开始下载', 'success');
+      const blob = await fetchBlobForShare(url, 'audio/mpeg');
+      const result = await shareOrDownloadBlob({ blob, fileName: fname, shareTitle: `${selectedChar?.name || '通话'}的语音` });
+      if (result === 'cancelled') return;
+      addToast(result === 'shared' ? '已打开系统保存/分享' : '语音已开始下载', 'success');
       trackEvent('下载一条通话语音');
-    } catch {
-      addToast('语音下载失败', 'error');
+    } catch (error) {
+      console.error('[Call] download audio failed', error);
+      addToast('语音文件已失效或无法读取，请重新生成后再下载', 'error');
     }
   };
   useEffect(() => {
@@ -541,6 +594,7 @@ const CallApp: React.FC = () => {
           const dbId = await DB.saveMessage({ charId: selectedChar.id, role: 'assistant', type: 'text', content: greetingText, metadata: { source: 'call', callSessionId: currentSessionId } });
           setBubbles(prev => prev.map(b => b.id === greetingBubble.id ? { ...b, dbId: dbId } : b));
           markCallTurnDirty();
+          void runMemoryPalacePostHook(selectedChar);
         }
         // 尝试语音合成开场白
         const minimaxApiKey = resolveMiniMaxApiKey(apiConfig);
@@ -702,6 +756,7 @@ const CallApp: React.FC = () => {
       // 挂断这一下最要紧：用户多半接着就把 App 关了，得把这最后一条也打脏——
       // 打脏即传，微任务内就会冲刷上传。
       markCallTurnDirty();
+      void runMemoryPalacePostHook(selectedChar);
     }
     clearSuspendedCall();
     resetCurrentCall();
@@ -782,21 +837,32 @@ const CallApp: React.FC = () => {
     const minimaxApiKey = resolveMiniMaxApiKey(apiConfig);
     const voiceId = resolveVoiceId();
     if (isListening) { sttSessionRef.current?.stop(); setIsListening(false); }
-    const input = draftInput.trim();
+    const typedInput = draftInput.trim();
+    const retryInput = getPendingReplyText(bubbles);
+    const input = typedInput || retryInput;
     if (!input) return addToast('说点什么吧', 'info');
     if (['connecting', 'thinking'].includes(callState)) return addToast(`${selectedChar?.name || '对方'}还在想，等一等`, 'info');
     if (isAudioPlaying) pauseAudio();
+    const latestBubble = bubbles[bubbles.length - 1];
+    const retryBubble = latestBubble?.role === 'user' && latestBubble.text.trim() === input
+      ? latestBubble
+      : null;
+    const isRetry = !!retryBubble;
     const nowTs = Date.now();
     const now = formatTime();
-    const userBubble: CallBubble = { id: `${nowTs}-u`, role: 'user', text: input, time: now, timestamp: nowTs };
-    setBubbles(prev => [...prev, userBubble]);
+    const userBubble: CallBubble = retryBubble
+      ? retryBubble
+      : { id: `${nowTs}-u`, role: 'user', text: input, time: now, timestamp: nowTs };
+    if (!isRetry) setBubbles(prev => [...prev, userBubble]);
     setDraftInput('');
     setShowInputPanel(false);
-    let userDbId: number | undefined;
+    let userDbId: number | undefined = isRetry ? userBubble.dbId : undefined;
     if (selectedChar?.id) {
-      userDbId = await DB.saveMessage({ charId: selectedChar.id, role: 'user', type: 'text', content: input, metadata: { source: 'call', callSessionId: currentSessionId } });
-      setBubbles(prev => prev.map(b => (b.id === userBubble.id ? { ...b, dbId: userDbId } : b)));
-      markCallTurnDirty();
+      if (!userDbId) {
+        userDbId = await DB.saveMessage({ charId: selectedChar.id, role: 'user', type: 'text', content: input, metadata: { source: 'call', callSessionId: currentSessionId } });
+        setBubbles(prev => prev.map(b => (b.id === userBubble.id ? { ...b, dbId: userDbId } : b)));
+        markCallTurnDirty();
+      }
     }
     if (!callStartedAt) setCallStartedAt(Date.now());
     setCallState('connecting');
@@ -825,6 +891,7 @@ const CallApp: React.FC = () => {
         return b;
       }));
       markCallTurnDirty();
+      void runMemoryPalacePostHook(selectedChar);
     }
     const hasTimberWeights2 = (selectedChar?.voiceProfile?.timberWeights?.length || 0) > 1;
     if (!canSpeakVoice()) {
@@ -987,6 +1054,7 @@ const CallApp: React.FC = () => {
     }
   };
   const sendingBusy = ['connecting', 'thinking'].includes(callState);
+  const pendingCallRetryText = getPendingReplyText(bubbles);
   const displayCallState: CallState = isAudioPlaying ? 'speaking' : callState;
   const latestAssistantAudio = [...bubbles].reverse().find(b => b.role === 'assistant' && b.audioUrl)?.audioUrl;
   useEffect(() => {
@@ -1398,6 +1466,11 @@ const CallApp: React.FC = () => {
           <h1 className="mt-0.5 font-serif text-[2.6rem] leading-none tracking-wide text-white" style={{ textShadow: `0 0 26px ${accentColor}aa, 0 0 6px ${accentColor}66` }}>{selectedChar?.name || '未选择'}</h1>
           <div className="mt-2.5 text-[11px] tracking-[0.25em] text-white/55">{connSub}</div>
           <div className="mt-1.5 text-lg tabular-nums font-extralight tracking-[0.2em]" style={{ color: accentColor }}>{formatDuration(elapsedSeconds)}</div>
+          {memoryPalaceStatus && (
+            <div className="mt-1 text-[10px] text-white/55 animate-pulse">
+              记忆整理 · {memoryPalaceStatus}
+            </div>
+          )}
         </div>
       </div>
       {/* portrait + aura —— 键盘弹起时（body.ios-keyboard-open）整块收起，把可视区让给消息+输入框，
@@ -1517,10 +1590,11 @@ const CallApp: React.FC = () => {
               value={draftInput}
               onChange={(e) => setDraftInput(e.target.value)}
               className="flex-1 min-w-0 bg-transparent px-2 text-sm outline-none placeholder:text-white/35"
-              placeholder={isListening ? '在听你说……' : sendingBusy ? `${selectedChar?.name || '对方'}正在想……` : `想对${selectedChar?.name || '对方'}说什么？`}
+              placeholder={isListening ? '在听你说……' : sendingBusy ? `${selectedChar?.name || '对方'}正在想……` : pendingCallRetryText ? '上次回复中断，可直接重试' : `想对${selectedChar?.name || '对方'}说什么？`}
             />
-            <button onClick={handleTurn} disabled={sendingBusy} className="shrink-0 px-4 py-2 rounded-xl text-sm font-medium text-white disabled:opacity-40 transition active:scale-95" style={{ backgroundColor: accentColor, boxShadow: `0 0 16px ${accentColor}66` }}>{sendingBusy ? '…' : '说'}</button>
+            <button onClick={handleTurn} disabled={sendingBusy || (!draftInput.trim() && !pendingCallRetryText)} className="shrink-0 px-4 py-2 rounded-xl text-sm font-medium text-white disabled:opacity-40 transition active:scale-95" style={{ backgroundColor: accentColor, boxShadow: `0 0 16px ${accentColor}66` }}>{sendingBusy ? '…' : pendingCallRetryText && !draftInput.trim() ? '重试' : '说'}</button>
           </div>
+          {!sendingBusy && pendingCallRetryText && !draftInput.trim() && <div className="text-[10px] text-amber-200/70 mt-1 px-1">上一句话还没得到回复，点击重试即可继续</div>}
           {isListening && <div className="text-[10px] text-white/40 mt-1 px-1 animate-pulse">正在聆听，点麦克风结束</div>}
         </div>
       )}

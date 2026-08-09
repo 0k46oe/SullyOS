@@ -13,7 +13,7 @@ import { runPendingToolCalls } from './instantToolRunner';
 import { drainPendingDiaries } from './pendingDiary';
 import { applyEmotionEvalRaw } from './emotionApply';
 import { CHAT_GEN_EVENTS, announceChatGen, announceEmotionDone } from './chatGenEvents';
-import { processNewMessages } from './memoryPalace/pipeline';
+import { processNewMessagesWithAutoArchive } from './memoryPalace/autoArchive';
 import { loadMusicHooks } from '../context/MusicContext';
 import type { XhsNote } from './realtimeContext';
 import { appendDevDebugInstantPushLog, appendDevDebugLog, isCaptureEnabled, makeDebugLogger } from './devDebug';
@@ -1088,7 +1088,7 @@ async function runPushTailPipeline(
     try {
       const recentMsgs = await DB.getRecentMessagesByCharId(char.id, 50);
       // fire-and-forget: pipeline 内部有并发锁 + 水位线检查, 不会抢着跑两份
-      void processNewMessages(
+      void processNewMessagesWithAutoArchive(
         recentMsgs,
         char.id,
         char.name,

@@ -180,6 +180,11 @@ describe('v2 真实链路：分片 → 组装 → importFullData', () => {
             contextRangeMode: 'manual',
             contextLimit: 1200,
             contextUserStartMessageId: 345,
+            memoryPalaceWaterline: {
+                preset: 'custom',
+                hotZoneSize: 80,
+                bufferThreshold: 30,
+            },
         };
         const zip = new FakeZip();
         const manifest = await writeV2Backup(zip, { characters: [char] } as any, {});
@@ -193,6 +198,11 @@ describe('v2 真实链路：分片 → 组装 → importFullData', () => {
             contextRangeMode: 'manual',
             contextLimit: 1200,
             contextUserStartMessageId: 345,
+            memoryPalaceWaterline: {
+                preset: 'custom',
+                hotZoneSize: 80,
+                bufferThreshold: 30,
+            },
         });
     });
 

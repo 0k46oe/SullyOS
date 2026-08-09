@@ -4,6 +4,7 @@ import { STORY_PRESET_SIMPLE_CHOICES } from '../components/date/story/StoryPrese
 import {
     appendStoryAffinityInput,
     appendStoryAffinityInputs,
+    appendStoryUserTurn,
     applyStoryPresetChoice,
     BUILTIN_NIGHT_SCREENING_PRESET,
     buildStoryMiniTheaterReminder,
@@ -12,6 +13,7 @@ import {
     buildStoryAffinityAwarenessReminder,
     buildStoryBackstageAftermathReminder,
     buildStoryIdentityGuard,
+    buildStoryPrefillInstruction,
     buildStoryMultiAffinityGuide,
     compileStoryPreset,
     createStoryTheaterDraft,
@@ -200,6 +202,21 @@ describe('剧情预设发送器', () => {
         expect(result.settings).toMatchObject({ temperature: 0.7, top_p: 0.8, max_tokens: 2048 });
     });
 
+    it('默认保留原生 assistant prefill，只有显式兼容时才由 user 收尾', () => {
+        const prefill = { role: 'assistant' as const, content: '<scene_header>\n' };
+        const nativePayload = appendStoryUserTurn([{ role: 'system', content: '规则' }], '继续', prefill);
+        expect(nativePayload[nativePayload.length - 1]).toEqual(prefill);
+
+        const compatiblePayload = appendStoryUserTurn([{ role: 'system', content: '规则' }], '继续', prefill, true);
+        expect(compatiblePayload[compatiblePayload.length - 1]).toEqual({ role: 'user', content: '继续' });
+        expect(compatiblePayload[compatiblePayload.length - 2]).toMatchObject({ role: 'system', content: expect.stringContaining('<scene_header>') });
+        expect(buildStoryPrefillInstruction({ role: 'assistant', content: '<scene_header>\n' })).toEqual({
+            role: 'system',
+            content: expect.stringContaining('<scene_header>'),
+        });
+        expect(buildStoryPrefillInstruction(undefined)).toBeUndefined();
+    });
+
     it('内置幕后与余波已合为同一发送条目并确实进入最终消息', () => {
         const backstage = BUILTIN_NIGHT_SCREENING_PRESET.document.prompts.find(prompt => prompt.id === 'nmj-v48-backstage');
         const legacyDebts = BUILTIN_NIGHT_SCREENING_PRESET.document.prompts.find(prompt => prompt.id === 'nmj-v61-shot-debts');
@@ -229,7 +246,7 @@ describe('剧情预设发送器', () => {
 
 describe('剧情沙盒辅助逻辑', () => {
     it('新虚构剧场默认不读取记忆，真实陪伴强制摘下面具', () => {
-        expect(createStoryTheaterDraft(1)).toMatchObject({ openingMode: 'user', writesToCharacterMemory: false, carryCharacterMemory: false });
+        expect(createStoryTheaterDraft(1)).toMatchObject({ openingMode: 'user', writesToCharacterMemory: false, carryCharacterMemory: false, forceUserLastMessage: false });
         const normalized = normalizeStoryTheater({
             ...createStoryTheaterDraft(1),
             openingMode: 'assistant',

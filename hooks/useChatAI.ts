@@ -10,7 +10,7 @@ import { ContextBuilder } from '../utils/context';
 import { ChatParser } from '../utils/chatParser';
 // 思考链 / HTML / MCD / memoryPalace 注入已下沉到 chatRequestPayload；这里不再直接调用
 import { useMusic, loadMusicHooks } from '../context/MusicContext';
-import { processNewMessages, mergePalaceFragmentsIntoMemories, getMemoryPalaceHighWaterMark } from '../utils/memoryPalace/pipeline';
+import { processNewMessagesWithAutoArchive } from '../utils/memoryPalace/autoArchive';
 import { incrementDigestRound, runCognitiveDigestion, detectPersonalityStyle } from '../utils/memoryPalace';
 // evolveFlowNarrative 保留为低频深刷新备用，日常意识流由副 API 的情绪评估同轮产出（innerState 字段）
 // import { evolveFlowNarrative } from '../utils/scheduleGenerator';
@@ -2034,7 +2034,7 @@ export const useChatAI = ({
 
                 // 缓冲区处理（LLM提取 + Embedding向量化）
                 const recentMsgs = await DB.getRecentMessagesByCharId(char.id, 50);
-                processNewMessages(recentMsgs, char.id, charName, mpEmb, mpLLM, userProfile?.name || '', false, (stage) => {
+                processNewMessagesWithAutoArchive(recentMsgs, char.id, charName, mpEmb, mpLLM, userProfile?.name || '', false, (stage) => {
                         setMemoryPalaceStatus(stage);
                     })
                     .then(async (pipelineResult) => {
@@ -2048,36 +2048,7 @@ export const useChatAI = ({
                             setMemoryPalaceResult(pipelineResult);
                         }
 
-                        // 自动归档：把 palace 提取出的记忆按日期合成 YAML bullets 追加到
-                        // char.memories，同时推 hideBeforeMessageId 自动隐藏已总结的聊天
-                        // 仅在 char.autoArchiveEnabled 显式开启时执行（默认 off，opt-in）
-                        if (updateCharacter && (liveAfter as any).autoArchiveEnabled) {
-                            try {
-                                const patch: any = {};
-                                if (pipelineResult?.autoArchive) {
-                                    patch.memories = mergePalaceFragmentsIntoMemories(
-                                        char.memories || [],
-                                        pipelineResult.autoArchive.fragments,
-                                    );
-                                }
-                                // 隐藏线追平到向量高水位：palace 向量化在 autoArchive 关闭期间会
-                                // 无条件推进 hwm，而 hide 被 gate 冻结，于是「已中招」的角色会出现
-                                // hide 落后于 hwm 的空档。只要全自动记忆现在是开的，每次自动总结都把
-                                // hide 追平到 hwm（hwm 之前的消息都已向量化归档），无需用户手动操作。
-                                // 即便本轮没有新批次（autoArchive 为空），这一步也会把历史空档补上。
-                                const hwm = getMemoryPalaceHighWaterMark(char.id);
-                                const curHide = ((liveAfter as any).hideBeforeMessageId as number) || 0;
-                                if (hwm > curHide) {
-                                    patch.hideBeforeMessageId = hwm;
-                                }
-                                if (Object.keys(patch).length > 0) {
-                                    updateCharacter(char.id, patch);
-                                    console.log(`📚 [AutoArchive] ${patch.memories ? `合并 ${pipelineResult!.autoArchive!.fragments.length} 条 MemoryFragment，` : ''}hideBefore 追平 → ${patch.hideBeforeMessageId ?? curHide}`);
-                                }
-                            } catch (e: any) {
-                                console.warn(`📚 [AutoArchive] 失败（不影响 palace）: ${e?.message || e}`);
-                            }
-                        }
+                        // 全自动记忆双写已由统一封装完成，React 外的入口也不会再漏接返回值。
                         // 轮数计数 + 自动认知消化（每50轮触发一次）
                         const shouldAutoDigest = incrementDigestRound(char.id);
                         if (shouldAutoDigest) {
