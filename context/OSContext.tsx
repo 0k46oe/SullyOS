@@ -5,6 +5,7 @@ import { DB } from '../utils/db';
 import { modelRejectsSamplingParams, stripSamplingParams, isSamplingParamError } from '../utils/samplingParamCompat';
 import { extractImagesInPlace, deepCloneForExport } from '../utils/backupExport';
 import { isBlobRef, getBlobForRef, migrateDataUrlToRef, migrateAppearancePresetBlobRefs, resolveBlobRefsDeep, BLOBREF_PREFIX, deleteBlobRefIfUnreferenced } from '../utils/blobRef';
+import { initPwaIcon } from '../utils/appIcon';
 import { LEGACY_DEFAULT_WALLPAPER, isLegacyDefaultWallpaper, shouldPreserveLegacyDefaultWallpaper } from '../utils/wallpaperCompat';
 import { migrateSharkpanAssets } from '../utils/sharkpanAssetMigration';
 import { SULLY_DEFAULT_AVATAR_URL, shouldMigrateSullyAvatar } from '../utils/sullyAvatar';
@@ -1385,6 +1386,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                     }
                 }
                 setCustomIcons(loadedIcons);
+                initPwaIcon(loadedIcons); // 启动时恢复自定义 PWA 图标（见 utils/appIcon.ts）
                 // Strip deprecated slots that may have been imported via beautification packs.
                 if (loadedTheme.launcherWidgets) {
                     for (const slot of DEPRECATED_WIDGET_SLOTS) {

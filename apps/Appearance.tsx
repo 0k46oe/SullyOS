@@ -11,6 +11,7 @@ import { confirmExportSafety } from '../utils/exportGuard';
 import { trackEvent } from '../utils/analytics';
 import { Sparkle } from '@phosphor-icons/react';
 import { ChatAppearanceEditor as ModularChatAppearanceEditor } from '../components/appearance/ChatAppearanceEditor';
+import AppIconEditor from '../components/appearance/AppIconEditor';
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
@@ -1458,6 +1459,7 @@ const Appearance: React.FC = () => {
             </>
         ) : activeTab === 'icons' ? (
             <div className="space-y-5">
+              <AppIconEditor />
               <section className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100">
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
