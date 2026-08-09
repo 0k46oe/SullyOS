@@ -10,6 +10,8 @@
  * Skills Server: https://github.com/autoclaw-cc/xiaohongshu-skills
  */
 
+import { classifyFetchFailure, parseTargetUrl } from './networkFailureDiagnosis';
+
 export interface McpToolResult {
     success: boolean;
     data?: any;
@@ -510,6 +512,30 @@ const extractFirstXsecToken = (data: any): string | undefined => {
     return undefined;
 };
 
+/**
+ * 连接测试失败时给一句人话。裸传 e.message 的话，用户在设置页只会看到
+ * 「Failed to fetch」——那句话不区分「地址填错」「梯子拦了」「对方在限流页后面」，
+ * 到头来只能来问作者。分类逻辑复用调试终端那份，两处口径保持一致。
+ */
+const describeXhsConnectFailure = (e: any, serverUrl: string): string => {
+    const host = parseTargetUrl(serverUrl).host || serverUrl;
+    const kind = classifyFetchFailure({ url: serverUrl, error: e });
+    switch (kind) {
+        case 'aborted':
+            return `连接 ${host} 超时（10 秒没有响应）。多半是代理/网关把连接吞了，换个梯子节点再试。`;
+        case 'offline':
+            return '当前处于离线状态，请检查网络或梯子是否掉线。';
+        case 'mixed-content':
+            return `SullyOS 跑在 https 上，不能连 http 地址（${host}）。请把服务地址改成 https://，或用本地 http 打开 SullyOS。`;
+        case 'bad-url':
+            return `服务器地址不是合法 URL：${serverUrl}。检查有没有漏掉 https://、多了空格或用了中文标点。`;
+        case 'blocked':
+            return `连不上 ${host}：浏览器在拿到响应前就失败了。常见原因——梯子/代理拦了这个域名、DNS 解析不到、浏览器扩展（广告拦截/隐私盾）屏蔽了，或对方正返回限流/人机验证页。可在新标签页直接打开 ${serverUrl.replace(/\/+$/, '')}/health 验证；详细旁证见「系统调试终端」。`;
+        default:
+            return e?.message || '连接失败';
+    }
+};
+
 // ==================== Public API (双模式) ====================
 
 export const XhsMcpClient = {
@@ -534,7 +560,11 @@ export const XhsMcpClient = {
         if (mode === 'bridge') {
             try {
                 const baseUrl = serverUrl.replace(/\/+$/, '').replace(/\/api$/, '');
-                const healthResp = await fetch(`${baseUrl}/api/health`);
+                // 探活必须自带超时：代理/网关把连接吞掉时裸 fetch 会一直挂着，界面永远停在
+                // 「连接中」，用户只能当成卡死。10s 到点主动断，走下面的 catch 出一句人话。
+                const healthResp = await fetch(`${baseUrl}/api/health`, {
+                    signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(10000) : undefined,
+                });
                 if (!healthResp.ok) return { connected: false, error: `Bridge 服务未响应 (HTTP ${healthResp.status})` };
 
                 const loginResult = await bridgePost(serverUrl, 'check-login');
@@ -564,7 +594,7 @@ export const XhsMcpClient = {
                 }
                 return { connected: true, tools, nickname, userId, loggedIn, xsecToken };
             } catch (e: any) {
-                return { connected: false, error: e.message };
+                return { connected: false, error: describeXhsConnectFailure(e, serverUrl) };
             }
         }
 

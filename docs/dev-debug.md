@@ -348,3 +348,61 @@ SW 跑在自己的 context，没法直接访问 page 的 `localStorage` / `appen
 | `public/sw-keep-alive.js` | 1308 | `[InstantTrace:SW]`（构建产物里也叫这名） |
 
 > **建议路径**：等真的有 SW 端 bug 需要远端排障时再做（开发本地 SW 在 DevTools 单独面板就能看，价值不大）。做的时候在 `utils/swVersion.ts` 旁边新增 `utils/swTrace.ts` 包通信协议。
+
+---
+
+## 十二、系统调试终端里的网络失败诊断（面向普通用户）
+
+> 注意：这一节讲的是**所有用户都看得到**的「系统调试终端」（状态栏下方的红色 `SYSTEM ERROR` 胶囊点开的那个），
+> 不是上面十一节那个只在开发分支出现的 devDebug 面板。两者是两套东西，别改串了。
+
+### 背景
+
+浏览器出于安全，把下面这些完全不同的事统统报成同一句 `TypeError: Failed to fetch`，不带任何细节：
+
+- 梯子 / 代理把这个域名的连接掐了
+- DNS 解析不到
+- 浏览器扩展（广告拦截、隐私盾、脚本管理器）在请求发出前就屏蔽了
+- 对方**回了响应，但没有 CORS 头**（Cloudflare 限流页、人机验证页、网关错误页都长这样）
+
+旧版日志只记 `URL: xxx` 一行，用户复制出来发到群里，信息量是零。
+
+### 现在记什么
+
+`utils/networkFailureDiagnosis.ts` 负责把能补的旁证一次性补齐，`context/OSContext.tsx` 的 fetch 拦截器
+在 `catch` 里调用它：
+
+```
+URL: https://sullymeow.ccwu.cc/api/health
+请求: GET · 失败于 43ms
+错误: TypeError: Failed to fetch
+目标域名: sullymeow.ccwu.cc（跨域请求，受 CORS 约束）
+本页来源: https://xxx.pages.dev
+浏览器联网状态: 在线
+Resource Timing: responseStatus=429, transferSize=0 → 对方其实回了 HTTP 429，是响应被 CORS 拦掉的，不是网络不通
+初判: 请求在拿到响应头之前就失败了——浏览器没告诉我们具体是哪一步断的。
+可能原因: 梯子/代理把这个域名的连接掐了 · DNS 解析不到 · ...
+连通性复检: no-cors 直连 sullymeow.ccwu.cc 成功 → 网络路径是通的，问题出在响应本身（...）
+```
+
+两个关键设计：
+
+1. **Resource Timing 的 `responseStatus`**：跨域也能读（不受 TAO 限制）。它 > 0 就说明**对方其实回了**，
+   那就是 CORS / 限流页的事，跟网络通不通无关——这一条直接把排查范围砍一半。
+2. **no-cors 连通性复检**：`mode: 'no-cors'` 不做 CORS 校验，只要网络路径通就会拿到 opaque 响应。
+   它成功而原请求失败 ⇒ 响应头的问题；它也失败 ⇒ 这台设备到这个域名是真的不通。结论异步回填到同一条日志。
+
+### 改这块时的坑
+
+- **复检必须用 `originalFetch`**（拦截器闭包里那个未打补丁的），用打过补丁的 `window.fetch` 会让探测自己
+  失败时再写一条日志，一条网络错误滚成一屏。
+- **复检打的是域名根路径，不是原地址**：原地址可能是有副作用的接口（发帖、下单），复检不该顺手触发它；
+  而 DNS / 梯子 / 防火墙 / 扩展拦的都是整个域名，打根路径一样测得出来。
+- **同域名 30s 冷却**：一串请求同时炸时不能对同一个域名连打探测。
+- **只对 `blocked` 这一类复检**：主动取消 / 混合内容 / 地址非法已经有确定结论，再打一次纯属浪费。
+- 判定全是纯函数，回归守卫在 `utils/networkFailureDiagnosis.test.ts`——改文案时先看那份测试想守的是什么。
+
+### 用户侧自查清单
+
+`NETWORK_SELF_CHECK_STEPS` 同时被调试终端（`components/os/StatusBar.tsx`，网络类错误时折叠展示）复用。
+改文案改那一处即可，两边不会不同步。
