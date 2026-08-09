@@ -418,6 +418,11 @@ const Settings: React.FC = () => {
   const [localTemperature, setLocalTemperature] = useState<number>(
     typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85
   );
+  const [localVisionEnabled, setLocalVisionEnabled] = useState(apiConfig.visionApi?.enabled === true);
+  const [localVisionUrl, setLocalVisionUrl] = useState(apiConfig.visionApi?.baseUrl || '');
+  const [localVisionKey, setLocalVisionKey] = useState(apiConfig.visionApi?.apiKey || '');
+  const [localVisionModel, setLocalVisionModel] = useState(apiConfig.visionApi?.model || '');
+  const [visionStatusMsg, setVisionStatusMsg] = useState('');
   const [localMiniMaxKey, setLocalMiniMaxKey] = useState(apiConfig.minimaxApiKey || '');
   const [localMiniMaxGroupId, setLocalMiniMaxGroupId] = useState(apiConfig.minimaxGroupId || '');
   const [localMiniMaxRegion, setLocalMiniMaxRegion] = useState<'domestic' | 'overseas'>(
@@ -765,6 +770,10 @@ const Settings: React.FC = () => {
       setLocalModel(String(apiConfig.model || ''));
       setLocalStream(apiConfig.stream === true);
       setLocalTemperature(typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85);
+      setLocalVisionEnabled(apiConfig.visionApi?.enabled === true);
+      setLocalVisionUrl(apiConfig.visionApi?.baseUrl || '');
+      setLocalVisionKey(apiConfig.visionApi?.apiKey || '');
+      setLocalVisionModel(apiConfig.visionApi?.model || '');
       setLocalMiniMaxKey(apiConfig.minimaxApiKey || '');
       setLocalMiniMaxGroupId(apiConfig.minimaxGroupId || '');
       setLocalMiniMaxRegion(apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic');
@@ -887,6 +896,25 @@ const Settings: React.FC = () => {
         console.warn('[Settings] 刷新已排程任务的 API 凭据失败', error);
         addToast('API 已保存，但已排程的主动消息凭据刷新失败，稍后再保存一次可重试。', 'error');
       });
+  };
+
+  const handleSaveVisionApi = () => {
+    const nextVisionApi = {
+      enabled: localVisionEnabled,
+      baseUrl: normalizeApiBaseUrl(localVisionUrl),
+      apiKey: normalizeApiCredential(localVisionKey),
+      model: normalizeApiModel(localVisionModel),
+    };
+    if (nextVisionApi.enabled && (!nextVisionApi.baseUrl || !nextVisionApi.apiKey || !nextVisionApi.model)) {
+      addToast('开启识图 API 前，请填写完整的 URL、Key 和 Model', 'error');
+      return;
+    }
+    setLocalVisionUrl(nextVisionApi.baseUrl);
+    setLocalVisionKey(nextVisionApi.apiKey);
+    setLocalVisionModel(nextVisionApi.model);
+    updateApiConfig({ visionApi: nextVisionApi });
+    setVisionStatusMsg(nextVisionApi.enabled ? '识图 API 已接入' : '已关闭，沿用原有识图方式');
+    setTimeout(() => setVisionStatusMsg(''), 2200);
   };
 
   const handleSaveOtherApis = () => {
@@ -1984,6 +2012,100 @@ const Settings: React.FC = () => {
                         {testApiResult}
                     </div>
                 )}
+            </div>
+        </SettingsSection>
+
+        {/* 独立识图 API：给不支持 image_url 的主模型补视觉能力；不随主 API 预设切换。 */}
+        <SettingsSection
+            title="识图 API"
+            badge={
+                <span className={`text-[9px] font-bold px-2 py-1 rounded-full ${
+                    apiConfig.visionApi?.enabled
+                        ? 'bg-violet-100 text-violet-600'
+                        : 'bg-slate-100 text-slate-400'
+                }`}>
+                    {apiConfig.visionApi?.enabled ? '已接入' : '未接入'}
+                </span>
+            }
+            icon={
+                <div className="p-2 bg-violet-100/60 rounded-xl text-violet-600">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12s3.75-6.75 9.75-6.75S21.75 12 21.75 12 18 18.75 12 18.75 2.25 12 2.25 12Z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+                    </svg>
+                </div>
+            }
+        >
+            <div className="space-y-4">
+                <div className="rounded-2xl border border-violet-100 bg-violet-50/60 p-3.5">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <div className="text-xs font-bold text-slate-600">接入独立识图 API</div>
+                            <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">
+                                适合 DeepSeek 等不能直接看图的主模型。
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            role="switch"
+                            aria-checked={localVisionEnabled}
+                            onClick={() => setLocalVisionEnabled(value => !value)}
+                            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${localVisionEnabled ? 'bg-violet-500' : 'bg-slate-200'}`}
+                        >
+                            <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${localVisionEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                        </button>
+                    </div>
+                </div>
+
+                <p className="text-[10px] text-slate-400 leading-relaxed px-1">
+                    开启后，每张聊天图片只会先交给这里的视觉模型识别一次，并把结果写成
+                    <span className="font-semibold text-violet-600"> [图片：模型看到的内容] </span>
+                    再发给主 API；之后聊天和重 roll 都直接复用，不会重复识图扣费。关闭时完全沿用原来的图片发送逻辑。
+                </p>
+
+                <div className={`space-y-3 transition-opacity ${localVisionEnabled ? 'opacity-100' : 'opacity-50'}`}>
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">URL</label>
+                        <input
+                            type="text"
+                            value={localVisionUrl}
+                            onChange={event => setLocalVisionUrl(event.target.value)}
+                            disabled={!localVisionEnabled}
+                            placeholder="https://.../v1"
+                            className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                        />
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Key</label>
+                        <input
+                            type="password"
+                            value={localVisionKey}
+                            onChange={event => setLocalVisionKey(event.target.value)}
+                            disabled={!localVisionEnabled}
+                            placeholder="sk-..."
+                            className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                        />
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Model</label>
+                        <input
+                            type="text"
+                            value={localVisionModel}
+                            onChange={event => setLocalVisionModel(event.target.value)}
+                            disabled={!localVisionEnabled}
+                            placeholder="例如 gpt-4o-mini / qwen-vl-max"
+                            className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                        />
+                    </div>
+                </div>
+
+                <button
+                    type="button"
+                    onClick={handleSaveVisionApi}
+                    className="w-full py-3 rounded-2xl font-bold text-white shadow-lg shadow-violet-500/20 bg-violet-500 active:scale-95 transition-all"
+                >
+                    {visionStatusMsg || '保存识图 API'}
+                </button>
             </div>
         </SettingsSection>
 

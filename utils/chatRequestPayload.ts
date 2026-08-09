@@ -12,7 +12,7 @@
  * 等价。新增 caller（runProactive）只是补齐了过去缺的字段。
  */
 
-import type { CharacterProfile, UserProfile, GroupProfile, Emoji, EmojiCategory, Message, RealtimeConfig, TranslationConfig } from '../types';
+import type { CharacterProfile, UserProfile, GroupProfile, Emoji, EmojiCategory, Message, RealtimeConfig, TranslationConfig, VisionApiConfig } from '../types';
 import { ChatPrompts } from './chatPrompts';
 import { injectMemoryPalace } from './memoryPalace/pipeline';
 import { buildHtmlPrompt } from './htmlPrompt';
@@ -29,6 +29,7 @@ import { mergeSystemMessages } from './systemMessageMerge';
 import { injectWorldbookDepthEntries, resolveWorldbookEntries } from './worldbook';
 import { normalizeTranslationLangLabel } from './translationLang';
 import { cleanApiMessages, flattenImageContentParts } from './promptMessageCleanup';
+import { materializeVisionDescriptions } from './visionApi';
 
 export { cleanApiMessages, flattenImageContentParts } from './promptMessageCleanup';
 
@@ -78,6 +79,8 @@ export interface BuildChatPayloadInput {
     translationConfig?: TranslationConfig | { enabled: boolean; sourceLang: string; targetLang: string };
     htmlMode?: { enabled: boolean; customPrompt?: string };
     thinkingChain?: { enabled: boolean; customPrompt?: string };
+    /** 可选识图 API：开启后先把图片持久化转写为 [图片：描述]，主模型只接收文字。 */
+    visionApiConfig?: VisionApiConfig;
     mcdMiniSnap?: McdMiniAppSnapshot;
     luckinMiniSnap?: LuckinMiniAppSnapshot;
     /** 瑞幸聊天点单模式 (点"瑞一杯"激活, 角色直接调真实工具) */
@@ -206,10 +209,36 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
         input.categories,
         char.id,
     );
-    const recentMsgsHint = input.recentMsgsHint ?? historyMsgs;
+    const rawRecentMsgsHint = input.recentMsgsHint ?? historyMsgs;
+    const useVisionDescriptions = input.visionApiConfig?.enabled === true;
+    let historyMsgsForPrompt = historyMsgs;
+    let recentMsgsHint = rawRecentMsgsHint;
+
+    if (useVisionDescriptions) {
+        // historyMsgs 通常来自 DB、recentMsgsHint 通常来自 React state；按 id 合并后只识别一次，
+        // 再把写回 metadata 的新快照映射回两套窗口，避免同一轮的 system/history 各跑一次识图。
+        const uniqueMessages = new Map<number, Message>();
+        for (const message of rawRecentMsgsHint) uniqueMessages.set(message.id, message);
+        for (const message of historyMsgs) uniqueMessages.set(message.id, message);
+        const prepared = await materializeVisionDescriptions(
+            [...uniqueMessages.values()],
+            input.visionApiConfig,
+        );
+        const preparedById = new Map(prepared.map(message => [message.id, message]));
+        historyMsgsForPrompt = historyMsgs.map(message => preparedById.get(message.id) || message);
+        recentMsgsHint = rawRecentMsgsHint.map(message => preparedById.get(message.id) || message);
+    }
 
     if (isPromptBuildSkipped()) {
-        const { apiMessages } = ChatPrompts.buildMessageHistory(historyMsgs, contextLimit, char, userProfile, emojis);
+        const { apiMessages } = ChatPrompts.buildMessageHistory(
+            historyMsgsForPrompt,
+            contextLimit,
+            char,
+            userProfile,
+            emojis,
+            undefined,
+            { useVisionDescriptions },
+        );
         const cleanedApiMessages = cleanApiMessages(input.stripImages ? flattenImageContentParts(apiMessages) : apiMessages);
         console.warn('[DevDebug] Prompt Build skipped: sending chat history without system prompt injection.');
         return {
@@ -312,7 +341,15 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
     }
 
     // ── 7. 历史消息构造 ───────────────────────────────────
-    const { apiMessages } = ChatPrompts.buildMessageHistory(historyMsgs, contextLimit, char, userProfile, emojis);
+    const { apiMessages } = ChatPrompts.buildMessageHistory(
+        historyMsgsForPrompt,
+        contextLimit,
+        char,
+        userProfile,
+        emojis,
+        undefined,
+        { useVisionDescriptions },
+    );
 
     // ── 8. 剥离历史里旧的双语标签（stripImages 时先压平 image_url → 纯文本占位） ──
     const cleanedApiMessages = cleanApiMessages(input.stripImages ? flattenImageContentParts(apiMessages) : apiMessages);

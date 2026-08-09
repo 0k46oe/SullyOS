@@ -230,9 +230,19 @@ export type MinimaxRegion = 'domestic' | 'overseas';
 // 全局二选一：切换后所有语音场景（聊天语音条 / 约会 / 电话）统一用同一家。
 export type TtsProvider = 'minimax' | 'fishaudio';
 
+export interface VisionApiConfig {
+  /** 开启后，聊天图片先由独立视觉模型转成文字，再交给主对话模型。 */
+  enabled: boolean;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
 export interface APIConfig {
   baseUrl: string;
   apiKey: string;
+  // 可选识图中转：给不支持 image_url 的主模型补视觉能力。
+  visionApi?: VisionApiConfig;
   minimaxApiKey?: string;
   minimaxGroupId?: string;
   // 'domestic' → https://api.minimaxi.com (国内站)

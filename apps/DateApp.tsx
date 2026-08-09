@@ -20,6 +20,7 @@ import { trackEvent } from '../utils/analytics';
 import { markAmsgStateDirty } from '../utils/amsgStateSync';
 import StoryTheater from '../components/date/story/StoryTheater';
 import { dateLaunch } from '../utils/dateLaunch';
+import { materializeVisionDescriptions } from '../utils/visionApi';
 
 const DateApp: React.FC = () => {
     const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, apiConfig, addToast, updateCharacter, virtualTime, userProfile, memoryPalaceConfig, dateAutoStartCharId, consumeDateAutoStart, characterGroups, groups, realtimeConfig } = useOS();
@@ -306,12 +307,14 @@ const DateApp: React.FC = () => {
 
         try {
             const msgs = await DB.getRecentMessagesByCharId(c.id, getDateContextFetchLimit(c), true);
+            const preparedMsgs = await materializeVisionDescriptions(msgs, apiConfig.visionApi);
             const emojis = await DB.getEmojis();
             const { messages } = DatePrompts.buildPeekPayload({
                 char: c,
                 userProfile,
-                allMsgs: msgs,
+                allMsgs: preparedMsgs,
                 emojis,
+                useVisionDescriptions: apiConfig.visionApi?.enabled === true,
             });
             const content = await callLLM(messages, apiConfig.temperature ?? 0.85);
             setPeekStatus(content);
@@ -399,6 +402,7 @@ const DateApp: React.FC = () => {
         // Re-fetch messages. Since we saved the opening in handleEnterSession,
         // 'allMsgs' will now correctly contain: [History..., Opening, UserMsg]
         const allMsgs = await DB.getRecentMessagesByCharId(char.id, getDateContextFetchLimit(char), true);
+        const preparedAllMsgs = await materializeVisionDescriptions(allMsgs, apiConfig.visionApi);
 
         // Update local state for display
         setDateMessages(await loadRecentDateMessages(char.id));
@@ -407,10 +411,11 @@ const DateApp: React.FC = () => {
         const { messages } = await DatePrompts.buildSessionPayload({
             char,
             userProfile,
-            allMsgs,
+            allMsgs: preparedAllMsgs,
             emojis,
             userText: text,
             variant: 'send',
+            useVisionDescriptions: apiConfig.visionApi?.enabled === true,
         });
         const content = await callLLM(messages, apiConfig.temperature ?? 0.85);
 
@@ -436,6 +441,7 @@ const DateApp: React.FC = () => {
         // Keep the old reply until the replacement request succeeds.
         const allMsgs = await DB.getRecentMessagesByCharId(char.id, getDateContextFetchLimit(char), true);
         const validMsgs = allMsgs.filter(m => m.id !== lastMsg.id);
+        const preparedValidMsgs = await materializeVisionDescriptions(validMsgs, apiConfig.visionApi);
         const emojis = await DB.getEmojis();
 
         // 重掷的是开场白（isOpening 锚点消息）：走感知同款 payload 重新生成开场。
@@ -444,7 +450,13 @@ const DateApp: React.FC = () => {
         // 新消息也不带 isOpening，阅读模式会从上一次见面的开场开始切片，表现为
         // 「新见面只有立绘模式是新剧情，阅读模式全是旧剧情」。
         if (lastMsg.metadata?.isOpening === true) {
-            const { messages } = DatePrompts.buildPeekPayload({ char, userProfile, allMsgs: validMsgs, emojis });
+            const { messages } = DatePrompts.buildPeekPayload({
+                char,
+                userProfile,
+                allMsgs: preparedValidMsgs,
+                emojis,
+                useVisionDescriptions: apiConfig.visionApi?.enabled === true,
+            });
             const content = await callLLM(messages, Math.max(apiConfig.temperature ?? 0.85, 0.9));
             // 生成成功后才动库：先删旧开场、再带 isOpening 落新开场，请求失败时原剧情不丢
             await DB.deleteMessage(lastMsg.id);
@@ -459,7 +471,7 @@ const DateApp: React.FC = () => {
             return content;
         }
 
-        const validDateMsgs = validMsgs.filter(m => m.metadata?.source === 'date');
+        const validDateMsgs = preparedValidMsgs.filter(m => m.metadata?.source === 'date');
         const lastUserMsg = validDateMsgs[validDateMsgs.length - 1];
         if (!lastUserMsg || lastUserMsg.role !== 'user') throw new Error("Context lost");
 
@@ -470,10 +482,11 @@ const DateApp: React.FC = () => {
         const { messages } = await DatePrompts.buildSessionPayload({
             char,
             userProfile,
-            allMsgs: trimHistoryThrough(validMsgs, lastUserMsg.id),
+            allMsgs: trimHistoryThrough(preparedValidMsgs, lastUserMsg.id),
             emojis,
             userText: lastUserMsg.content,
             variant: 'reroll',
+            useVisionDescriptions: apiConfig.visionApi?.enabled === true,
         });
         // Reroll 略调高温度求多样性，但绝不低于用户配置的基线。
         const content = await callLLM(messages, Math.max(apiConfig.temperature ?? 0.85, 0.9));

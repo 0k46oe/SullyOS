@@ -41,3 +41,26 @@ describe('buildGroupHistoryBlock 时间跳变分隔行', () => {
         expect(GROUP_HISTORY_GAP_THRESHOLD_MS).toBe(3 * 60 * 60 * 1000);
     });
 });
+
+describe('buildGroupHistoryBlock 识图 API', () => {
+    it('接入时使用文字描述，不再附带 image_url 原图', () => {
+        const image = {
+            ...msg(10, 'user', 'data:image/jpeg;base64,AAAA', Date.now()),
+            type: 'image' as const,
+            metadata: { visionDescription: '三个人在海边举着写有生日快乐的横幅。' },
+        };
+        const history = buildGroupHistoryBlock(
+            [image],
+            [char('c1', '小夏')],
+            [],
+            '用户',
+            3,
+            { useVisionDescriptions: true },
+        );
+
+        expect(history.text).toContain('[图片：三个人在海边举着写有生日快乐的横幅。]');
+        expect(history.attachedImages).toEqual([]);
+        expect(history.attachedImagesNote).toBe('');
+        expect(history.text).not.toContain('data:image');
+    });
+});
