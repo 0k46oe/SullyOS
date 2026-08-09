@@ -1,13 +1,25 @@
-import type { Message, VisionApiConfig } from '../types';
+import type { ApiPreset, Message, VisionApiConfig } from '../types';
 import { DB } from './db';
 import { extractContent, safeFetchJson } from './safeApi';
+import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from './apiConfigNormalize';
 
 export const VISION_DESCRIPTION_METADATA_KEY = 'visionDescription';
+
+/** 设置页测试识图能力时发送的 48×48 白底紫色圆点 PNG。 */
+export const VISION_API_TEST_IMAGE_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAADKSURBVGhD7Y+5DQMxDASvLtfmll2DDQYHHDYwfxGCdoBJFGg513dzLnzYDQZMw4BpGDANA568Xx+zVZQE4HEes6QC8JiMUcIBeECFEUIBOFypF3cADnbowRWAQ51aOScAB1Zo4YwA/HilGgzoVoMB3WqoAfjhajXUAAE/XakGA7rVYEC3GqYAAT9eoYVzAgQc6NTKWQECDnXowR0g4GClXkIBAg5XGCEcIOABGaOkAm7wGI9ZSgJu8Lh/VlEaMAEDpmHANAyYZvuAH2hIrK7auxVfAAAAAElFTkSuQmCC';
 
 const VISION_PROMPT = `请准确、具体地描述图片中实际可见的内容，供另一个无法看图的对话模型理解。
 请覆盖主体、动作、场景、重要物品、画面中的文字或界面信息；不要猜测画面外的信息，不要寒暄，只输出描述正文。`;
 
 const inFlightDescriptions = new Map<string, Promise<string>>();
+
+/** 把一份通用模型预设填入独立识图配置，不改变主 API 当前选择。 */
+export const visionApiConfigFromPreset = (preset: ApiPreset, enabled = true): VisionApiConfig => ({
+  enabled,
+  baseUrl: normalizeApiBaseUrl(preset.config.baseUrl),
+  apiKey: normalizeApiCredential(preset.config.apiKey),
+  model: normalizeApiModel(preset.config.model),
+});
 
 export const isVisionApiReady = (config?: VisionApiConfig | null): config is VisionApiConfig =>
   config?.enabled === true
