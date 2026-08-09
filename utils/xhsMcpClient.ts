@@ -28,6 +28,7 @@ export const XHS_SPIDER_V3_EXPERIMENT = Object.freeze({
 // ==================== Backend Detection ====================
 
 type BackendMode = 'mcp' | 'bridge';
+type XhsPlatform = 'xhs' | 'rednote';
 
 const detectMode = (serverUrl: string): BackendMode => {
     if (serverUrl.includes('/api')) return 'bridge';
@@ -37,6 +38,7 @@ const detectMode = (serverUrl: string): BackendMode => {
 // Lite-Worker cookie: set from settings, sent as x-xhs-cookie on bridge calls.
 // Local Bridge/Skills servers ignore the header; the cloud Worker requires it.
 let liteCookie = '';
+let litePlatform: XhsPlatform | 'auto' = 'auto';
 
 // Resolve the XHS cookie for bridge requests: prefer the explicitly-set value,
 // otherwise read it straight from persisted realtime config. This keeps chat-
@@ -48,6 +50,16 @@ const resolveLiteCookie = (): string => {
         if (raw) return JSON.parse(raw)?.xhsMcpConfig?.cookie || '';
     } catch { /* ignore */ }
     return '';
+};
+
+const resolvePersistedLitePlatform = (): XhsPlatform | 'auto' => {
+    try {
+        const raw = localStorage.getItem('os_realtime_config');
+        const platform = raw ? JSON.parse(raw)?.xhsMcpConfig?.platform : undefined;
+        return platform === 'xhs' || platform === 'rednote' ? platform : 'auto';
+    } catch {
+        return 'auto';
+    }
 };
 
 
@@ -109,6 +121,8 @@ const trySpiderV3CommentPatch = async (
     if (
         !storage
         || detail?.data?.comments_status === 'loaded'
+        || detail?.platform === 'rednote'
+        || detail?.data?.platform === 'rednote'
     ) {
         return detail;
     }
@@ -136,6 +150,7 @@ const trySpiderV3CommentPatch = async (
             headers: {
                 'Content-Type': 'application/json',
                 'x-xhs-cookie': cookie,
+                ...(litePlatform !== 'auto' ? { 'x-xhs-platform': litePlatform } : {}),
                 'x-xhs-experiment-ack': XHS_SPIDER_V3_EXPERIMENT.optInValue,
             },
             body: JSON.stringify({
@@ -186,6 +201,10 @@ const bridgePost = async (
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const ck = resolveLiteCookie();
     if (ck) headers['x-xhs-cookie'] = ck;
+    const requestPlatform = endpoint === 'check-login'
+        ? litePlatform
+        : (litePlatform === 'auto' ? resolvePersistedLitePlatform() : litePlatform);
+    if (requestPlatform !== 'auto') headers['x-xhs-platform'] = requestPlatform;
 
     try {
         const resp = await fetch(url, {
@@ -206,6 +225,10 @@ const bridgePost = async (
         let data = await resp.json();
         if (data.error) {
             return { success: false, error: data.error };
+        }
+        const detectedPlatform = data?.platform || data?.data?.platform;
+        if (detectedPlatform === 'xhs' || detectedPlatform === 'rednote') {
+            litePlatform = detectedPlatform;
         }
         if (endpoint === 'get-feed-detail' && ck) {
             data = await trySpiderV3CommentPatch(baseUrl, body, ck, data);
@@ -551,12 +574,14 @@ export const XhsMcpClient = {
 
     // Lite Worker auth: register the XHS cookie used for x-xhs-cookie header.
     setCookie: (cookie?: string) => {
-        liteCookie = cookie || '';
+        const nextCookie = cookie || '';
+        if (nextCookie !== liteCookie) litePlatform = 'auto';
+        liteCookie = nextCookie;
     },
 
 
-    testConnection: async (serverUrl: string, cookie?: string): Promise<{ connected: boolean; tools?: string[]; error?: string; nickname?: string; userId?: string; loggedIn?: boolean; xsecToken?: string }> => {
-        if (cookie !== undefined) liteCookie = cookie;
+    testConnection: async (serverUrl: string, cookie?: string): Promise<{ connected: boolean; tools?: string[]; error?: string; nickname?: string; userId?: string; loggedIn?: boolean; xsecToken?: string; platform?: XhsPlatform }> => {
+        if (cookie !== undefined) XhsMcpClient.setCookie(cookie);
         const mode = detectMode(serverUrl);
 
         if (mode === 'bridge') {
@@ -571,7 +596,7 @@ export const XhsMcpClient = {
 
                 const loginResult = await bridgePost(serverUrl, 'check-login');
                 const tools = ['check-login', 'search', 'list-feeds', 'get-feed-detail', 'publish', 'publish-video', 'long-article', 'post-comment', 'reply-comment', 'like-feed', 'favorite-feed', 'user-profile', 'login', 'get-qrcode'];
-                let loggedIn = false, nickname: string | undefined, userId: string | undefined;
+                let loggedIn = false, nickname: string | undefined, userId: string | undefined, platform: XhsPlatform | undefined;
                 if (loginResult.success && loginResult.data) {
                     const d = loginResult.data;
                     if (typeof d === 'string') {
@@ -584,6 +609,7 @@ export const XhsMcpClient = {
                         loggedIn = !!(d.logged_in || d.loggedIn || d.is_logged_in || d.isLoggedIn || d.logged);
                         nickname = d.nickname || d.name || d.username || d.user_name || undefined;
                         userId = d.user_id || d.userId || d.id || d.red_id || undefined;
+                        platform = d.platform === 'xhs' || d.platform === 'rednote' ? d.platform : undefined;
                     }
                 }
                 // 自动获取 xsecToken：从首页推荐中提取
@@ -594,7 +620,7 @@ export const XhsMcpClient = {
                         if (feedResult.success) xsecToken = extractFirstXsecToken(feedResult.data);
                     } catch { /* 非关键，静默忽略 */ }
                 }
-                return { connected: true, tools, nickname, userId, loggedIn, xsecToken };
+                return { connected: true, tools, nickname, userId, loggedIn, xsecToken, platform };
             } catch (e: any) {
                 return { connected: false, error: describeXhsConnectFailure(e, serverUrl) };
             }
