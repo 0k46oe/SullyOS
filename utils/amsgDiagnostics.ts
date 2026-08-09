@@ -133,7 +133,8 @@ export interface AmsgDebugReport {
   config: { ok: boolean; missing: string[]; message: string; warnings: AmsgConfigWarning[] };
   storage: {
     reachable: boolean;
-    schemaReady?: boolean;
+    /** null = worker 查不了这一项（不等于「齐了」）。老 worker 只报 boolean。 */
+    schemaReady?: boolean | null;
     missingTables?: string[];
     missingColumns?: string[];
     pushSubscriptionRegistered?: boolean;
@@ -274,6 +275,16 @@ export const buildAmsgDiagnosticRows = (input: AmsgDiagnosticsInput): AmsgDiagno
         ? '先把 D1 绑上再看这一项。'
         : `连得上 Worker，但读不了它的数据库${storage.error ? `（${storage.error}）` : ''}。`,
     });
+  } else if (storage.schemaReady === null) {
+    // Worker 连得上、库也读得到，但它比对不出表结构（比如那句查询本身被拒了）。
+    // 这一档过去混在「正常」里——而这一项存在的全部意义就是查出表结构漂移，
+    // 漂移时 cron 每分钟静默失败、界面处处正常，这里再给一个假绿灯就彻底没人能发现了。
+    rows.push({
+      key: 'schema',
+      label: '数据表',
+      level: 'unknown',
+      detail: '这台 Worker 查不了自己的表结构，齐没齐不知道。要是主动消息到点不响，先点一次上面的「重新连接并验证」把表补齐。',
+    });
   } else {
     const missingTables = storage.missingTables || [];
     const missingColumns = storage.missingColumns || [];
@@ -335,4 +346,48 @@ export const summarizeAmsgDiagnostics = (rows: AmsgDiagnosticRow[]): AmsgDiagnos
   if (rows.some((row) => row.level === 'warn')) return 'warn';
   if (rows.some((row) => row.level === 'unknown')) return 'unknown';
   return 'ok';
+};
+
+// ─── 即时对话：开不了的话卡在哪一道 ───
+
+/**
+ * 即时对话四道门里最先没过的那一道。
+ *
+ * 代号写死在这儿，设置页拿它选提示文案、使用统计拿它当属性——**两处共用同一个判定**。
+ * 各算各的话，黄字说的和上报里的早晚各说各话，而这条路上的每一次分歧都只能靠用户
+ * 自己来报（他看到的是「开关点不动」，我们看到的是「没人开」）。
+ */
+export type InstantChatBlocker = '没连上Worker' | '没开推送' | 'Worker太旧' | '与InstantPush冲突';
+
+export interface InstantChatGateInput {
+  /** 连接并验证成功过（全局配置的 initializedAt）。 */
+  connected: boolean;
+  /** 这台设备订阅了推送。 */
+  pushSubscribed: boolean;
+  /** 这台 Worker 认 `POST /instant-chat`（GET /config-check 的 instantChat 标志）。 */
+  workerSupportsInstantChat: boolean;
+  /** Instant Push 那条路也配齐开着。 */
+  instantPushOn: boolean;
+}
+
+/**
+ * 按「先补哪个」的顺序返回第一道没过的门，四道全过返回 null。
+ *
+ * 顺序不是随便排的：没连上就谈不上推送，没推送权限就算发得出去也收不回来，
+ * Worker 太旧则端点根本不存在，最后才是两条发送路只能留一条。
+ */
+export const resolveInstantChatBlocker = (input: InstantChatGateInput): InstantChatBlocker | null => {
+  if (!input.connected) return '没连上Worker';
+  if (!input.pushSubscribed) return '没开推送';
+  if (!input.workerSupportsInstantChat) return 'Worker太旧';
+  if (input.instantPushOn) return '与InstantPush冲突';
+  return null;
+};
+
+/** 每道门对应的那句话（设置页开关下面的黄字）。 */
+export const INSTANT_CHAT_BLOCKER_HINTS: Record<InstantChatBlocker, string> = {
+  '没连上Worker': '先在上面把 Worker 连上。',
+  '没开推送': '先开启通知与推送：回复是靠推送送回来的，没有权限就变成发得出、收不到。',
+  'Worker太旧': 'Worker 上跑的代码还起不了这条路（缺起跳器，或者还是旧版）。点上面的「更新 Worker」，更新完这里会自己恢复。开着也不会走云端——那台 Worker 上是发一条挂一条，这段时间聊天先在本地生成。',
+  '与InstantPush冲突': 'Instant Push 也开着，两条发送路只能留一条。上面那张黄色卡片里可以把它关掉。',
 };

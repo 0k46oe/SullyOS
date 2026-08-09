@@ -110,6 +110,28 @@ export { restoreEvalPrompt } from '../../../utils/emotionEvalCore';
 export type AmsgEmotionEvalOutcome = EmotionEvalOutcome;
 
 /**
+ * 正文写完之后，最多再给情绪评估这么久搭上这班车。用在 index.ts 的 raceEmotionEval。
+ *
+ * 评估在 onBeforeFire 就跟主生成并行起跑了，正常情况下走到收尾时早就回来了，这个窗口
+ * 一秒都用不上；它管的是副 API 限流 / 挂起的那种时候。评估自己的超时是 120 秒
+ * （EMOTION_EVAL_TIMEOUT_MS），死等的话用户会对着「正在输入…」多看两分钟——同一句话走
+ * 本地路径十秒就上屏了；工具循环吃掉大半预算时，这两分钟还会把整轮 600 秒的预算顶穿，
+ * fire 失败重跑，用户拿到的是一句失败说明而不是那条已经写好的回复。
+ *
+ * 取舍：回复优先，情绪让路。没赶上的评估不作废：push 上挂引用键 + pending 标记
+ * （客户端那盏「情绪更新中」继续亮着），收尾 hook（amsgFireSettled，上游会 await 它）
+ * 接着等评估出结果，写进旁路存储（amsgEmotionUpdateKey），客户端对着引用键轮询补落
+ * ——对齐本地路径「评估慢是晚到，不是丢弃」的语义。评估自带 EMOTION_EVAL_TIMEOUT_MS，
+ * 这段续等是有界的。
+ *
+ * 放在这个文件而不是 index.ts：Worker 入口模块的具名导出会被 workerd 当成「命名入口点」
+ * （Durable Object / WorkerEntrypoint 类就是靠这个认的），只接受函数和类。从入口导出一个
+ * 数字，整个 Worker 起不来——报的是 `Incorrect type for map entry '<导出名>'`。
+ * 入口只能导出函数，常量一律住在别的模块里。见 index.test.ts 的同名回归守卫。
+ */
+export const EMOTION_EVAL_RIDE_ALONG_MS = 10_000;
+
+/**
  * 跑一次评估。成功给原文（解析交给客户端的 applyEmotionEvalRaw，与本地路径共用同一套
  * 容错），失败给一句短原因——它会跟着「评估有结论了」的信号回到客户端，替掉过去那句
  * 「可查 worker 日志」。用户自己部署的 worker，日志不是人人都会看。

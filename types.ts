@@ -317,6 +317,17 @@ export interface ActiveMsg2GlobalConfig {
    * 关掉就是现在的本地直连生成。
    */
   instantChatEnabled?: boolean;
+  /**
+   * 上一次探到的「那台 Worker 真的跑得动即时对话吗」（见 ActiveMsgClient.probeInstantChatSupport）。
+   *
+   * false 时即时对话整个让位给本地生成，**用户开着也不走** —— 跑不动的 Worker 上这条路
+   * 是发一条挂一条，让位比让他对着「已开启」干等强。探测每次都会刷新它，用户更新完
+   * Worker 下一次探测自然翻回 true，不用手动去重开开关。
+   *
+   * undefined = 还没探过（刚装、没进过设置页），按放行处理：这一档说明我们不知道，
+   * 而不是知道它不行；握手时会补探一次，之后就有准数了。
+   */
+  instantChatSupported?: boolean;
   updatedAt?: number;
 }
 
@@ -3385,6 +3396,12 @@ export interface FullBackupData {
     apiConfig?: APIConfig;
     instantPushConfig?: InstantPushConfig;
     pushVapid?: { vapidPublicKey: string; vapidPrivateKey: string; vapidEmail?: string; updatedAt?: number; };
+    /**
+     * 主动消息 2.0 的全局配置：Worker 地址、共享密钥、一键部署生成的 AMSG_MASTER_KEY、
+     * 即时对话总开关。存在独立的 `ActiveMsg` 库里，所以单独占一格（见 activeMsgStore
+     * 的 exportAmsg2GlobalConfig）。角色身上那份 activeMsg2Config 跟着 characters 走。
+     */
+    amsg2GlobalConfig?: ActiveMsg2GlobalConfig;
     apiPresets?: ApiPreset[];
     availableModels?: string[];
     realtimeConfig?: RealtimeConfig;  // 实时感知配置（天气/新闻/Notion）

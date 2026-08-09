@@ -7,6 +7,8 @@ import {
 import {
   AmsgDiagnosticLevel, AmsgDiagnosticsProbe,
   buildAmsgDiagnosticRows, summarizeAmsgDiagnostics,
+  INSTANT_CHAT_BLOCKER_HINTS, resolveInstantChatBlocker,
+  type InstantChatGateInput,
 } from '../../utils/amsgDiagnostics';
 import { ActiveMsgStore, maskActiveMsgUserId } from '../../utils/activeMsgStore';
 import { cancelAllRemoteAmsgTasks, isWorkerUrlCleared, wipeAmsgCloudData } from '../../utils/amsgStateSync';
@@ -79,8 +81,11 @@ const REQUIRED_WORKER_FEATURES = [
 //            上游没有心跳 → 退回 10 分钟死租约，isolate 死后任务干等）；fire ctx
 //            的 cancelTask / renewTask（角色取消 / 改期自己的排程）；client_state
 //            条件写（旧包不盖新包）；任务行 last_error（失败原因可查）。
+//   next.16 — 即时对话改由 Durable Object 起跳，靠的就是这一档的 runTask（按 uuid
+//            跑单条）；错误响应带 error.cause（真因不再只进 worker 日志）；
+//            getSchemaVersion（表结构对不对得上，由上游按自己的建表语句比对）。
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
-const REQUIRED_WORKER_VERSION = '2.6.0-next.15';
+const REQUIRED_WORKER_VERSION = '2.6.0-next.16';
 
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';
@@ -88,31 +93,11 @@ const SETUP_WALKTHROUGH_URL = 'https://github.com/qegj567-cloud/SullyOS/blob/mas
 /** 一键部署要的那枚 API Token 在这里建。 */
 const CF_TOKEN_URL = 'https://dash.cloudflare.com/profile/api-tokens';
 
-// ─── 一键部署的内测口令（公测时把这一段连同界面上那张卡一起删掉）───
-//
-// 这功能会往用户自己的 Cloudflare 账号里建东西，眼下只跟少数几个人一起试，
-// 所以先加一道口令，挡住随手点进来的人。
-//
-// **它挡不住存心找的人**：口令就写在前端代码里，翻一下打包产物就能看到。
-// 这里要的也只是「别让不知情的人误点」，不是真正的访问控制。
-const ONE_CLICK_ACCESS_CODE = 'amsg-neice-0809';
-const ONE_CLICK_UNLOCK_KEY = 'amsg_oneclick_unlocked_v1';
-
-const isOneClickCodeCorrect = (input: string): boolean =>
-  input.trim().toLowerCase() === ONE_CLICK_ACCESS_CODE;
-
-/** 解锁状态记在本地，测试的人不用每次开面板都重敲一遍。 */
-const readOneClickUnlocked = (): boolean => {
-  try {
-    return localStorage.getItem(ONE_CLICK_UNLOCK_KEY) === '1';
-  } catch {
-    return false;
-  }
-};
-
 // 探测结果每次会话只报一次。refresh() 在开面板、连接成功、订阅成功后都会跑一遍，
 // 一个连不上、反复点「连接」的人否则能一个人刷出十几条同样的结果，把分布带歪。
 let workerCapsReported = false;
+// 「即时对话开不了卡在哪」同样每次会话只报一次，理由同上。
+let instantChatGateReported = false;
 
 /** 体检每一行的配色与那一列小字。unknown 用灰：查不出结论时别拿颜色暗示好坏。 */
 const DIAGNOSTIC_STYLES: Record<AmsgDiagnosticLevel, { dot: string; text: string; word: string }> = {
@@ -163,10 +148,6 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   // Token 只在这次部署期间留在内存里，成功与否都不落盘——它是能改整个账号 Workers 的
   // 权限，真正需要长期留着的那一份已经作为 secret 写进用户自己的 worker 了（自更新用）。
   const [cfToken, setCfToken] = useState('');
-  // 内测口令闸（公测时删掉这三个 state 和界面上那张卡）。
-  const [oneClickUnlocked, setOneClickUnlocked] = useState(readOneClickUnlocked);
-  const [accessCodeInput, setAccessCodeInput] = useState('');
-  const [accessCodeError, setAccessCodeError] = useState('');
   const [provisioning, setProvisioning] = useState(false);
   const [provisionStep, setProvisionStep] = useState('');
   /** token 能用在多个账号上时让用户挑一个。 */
@@ -196,6 +177,13 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
   const [workerOutdated, setWorkerOutdated] = useState(false);
+  /**
+   * 用户那台 Worker 上的后端代码是不是最新的（见 ActiveMsgClient.probeWorkerVersion）。
+   * null = 还没探到（没填地址 / 正在探）。界面拿它决定更新按钮是高亮催更新还是弱化。
+   */
+  const [workerVersion, setWorkerVersion] = useState<
+    { state: 'current' | 'outdated' | 'unknown'; deployed: string | null; expected: string } | null
+  >(null);
   /** 自更新成功后 worker 报回来的代码指纹，显示出来好让人确认这次真换了。 */
   const [selfUpdateHash, setSelfUpdateHash] = useState('');
   // Instant Push 也开着：聊天会走它，2.0 挂在本地那条路上的几样东西全静默失效——设置页
@@ -248,6 +236,24 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     }
   };
 
+  /**
+   * 报一次「即时对话此刻能不能开、开不了卡在哪」。
+   *
+   * 这一格只能在这儿收：开关灰着的时候用户什么都点不动，也就不会产生任何别的事件——
+   * 光看配置快照里那个开/关，被挡在门外的人和「不想要这功能的人」长得一模一样。
+   * 判定跟界面上那行黄字共用 resolveInstantChatBlocker，两处不会各说各话。
+   */
+  const reportInstantChatGate = (gate: InstantChatGateInput, enabled: boolean) => {
+    if (instantChatGateReported) return;
+    instantChatGateReported = true;
+    trackEvent('即时对话能不能开', {
+      result: resolveInstantChatBlocker(gate) ?? '可以开',
+      // 已经开着的人也报：他们卡住意味着「开的时候好好的，后来 Worker 退回旧版了」，
+      // 那是一种发一条挂一条、但设置页还写着「已开启」的坏法。
+      state: enabled ? '已开着' : '还没开',
+    });
+  };
+
   const refresh = async () => {
     const nextConfig = await ActiveMsgClient.getGlobalConfig();
     const nextPushStatus = await ActiveMsgClient.getPushStatus();
@@ -257,11 +263,21 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     setInstantOn(isInstantConfigReady());
     void probeWorkerCaps(Boolean(nextConfig.workerUrl?.trim()));
     if (nextConfig.workerUrl?.trim()) {
-      void ActiveMsgClient.probeInstantChatSupport().then(setInstantChatSupported);
+      void ActiveMsgClient.probeWorkerVersion().then(setWorkerVersion);
+      void ActiveMsgClient.probeInstantChatSupport().then((supported) => {
+        setInstantChatSupported(supported);
+        reportInstantChatGate({
+          connected: Boolean(nextConfig.initializedAt),
+          pushSubscribed: Boolean(nextPushStatus?.hasSubscription),
+          workerSupportsInstantChat: supported,
+          instantPushOn: isInstantConfigReady(),
+        }, Boolean(nextConfig.instantChatEnabled));
+      });
       void runDiagnostics();
     } else {
       setInstantChatSupported(false);
       setDiagnosticsProbe(null);
+      setWorkerVersion(null);
     }
   };
 
@@ -512,8 +528,14 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
    * 三种装法（fork 后连 Git / Deploy 按钮 / 找人代配）此前更新方式各不相同，最麻烦的一种
    * 要在两个网站之间倒腾一个几百 KB 的文件。有了这个按钮都变成点一下。
    *
-   * 更新完不刷新面板：那一刻代码才刚换上，紧接着去问状态多半问到的还是旧实例，
-   * 反而显示得莫名其妙。看返回的指纹确认就够了。
+   * 更新成功后接着跑一次「连接并验证」（POST /init-tenant，幂等）。
+   *
+   * 这一步不是可有可无的收尾：新版后端可能带了新的表结构，而 D1 的建表只在这个端点里做。
+   * 少了它，Worker 代码是新的、库还是旧的，cron 每分钟静默失败，主动消息整个停摆——
+   * 而界面上一切正常，用户完全看不出来（这个坑踩过）。让「更新」自己把它带上，
+   * 就不必指望每个人都记得再手动点一次。
+   *
+   * 失败不改判这次更新：代码确实已经换上了，只是库没跟上。分开报，用户才知道该点哪个。
    */
   const handleSelfUpdateWorker = async () => {
     setLoading(true);
@@ -523,6 +545,15 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         setSelfUpdateHash(result.bundleHash || '');
         setAttachOpen(false);
         addToast(result.message, 'success');
+        try {
+          await ActiveMsgClient.connect();
+          await refresh();
+        } catch (error: any) {
+          addToast(
+            `后端已更新，但紧接着的验证没过：${error?.message || '未知原因'}。手动点一下「重新连接并验证」。`,
+            'error',
+          );
+        }
       } else {
         addToast(result.message, result.supported ? 'error' : 'info');
         // 「缺 CF_API_TOKEN」是这里唯一能就地解决的一种：露出补装那一块，
@@ -587,7 +618,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       setAttachToken('');
       setAttachAccounts(null);
       setAttachNeedsScriptName(false);
-      addToast('钥匙装好了，现在可以点「更新后端到最新版本」了。', 'success');
+      addToast('钥匙装好了，现在可以点上面的「更新 Worker」了。', 'success');
       trackEvent('补装后端更新能力', { result: '成功' });
     } catch (error: any) {
       setAttachError(error?.message || '装钥匙时出错了。');
@@ -703,6 +734,8 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
    */
   const handleToggleInstantChat = async () => {
     const next = !config?.instantChatEnabled;
+    // 开了又关是这条路上最值钱的信号：能开、开过、然后放弃了，跟「压根没开」不是一回事。
+    trackEvent('切换即时对话', { action: next ? '开' : '关' });
     patchConfig({ instantChatEnabled: next });
     await ActiveMsgStore.saveGlobalConfig({ instantChatEnabled: next });
     addToast(next ? '已开启即时对话，之后的聊天在你的 Worker 上生成。' : '已关闭即时对话，聊天回到本地生成。', 'success');
@@ -719,11 +752,6 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
 
   const isConnected = Boolean(config.initializedAt);
 
-  /**
-   * 即时对话开不了的第一个原因（能开时为空串）。按「先补哪个」的顺序排：
-   * 没连上就谈不上推送，没推送权限就算发出去也收不到，worker 太旧则端点根本不存在，
-   * 最后是两条发送路只能留一条。
-   */
   // 体检：探测结果 + 「这台设备订阅了没」这个只有前端知道的事实，红绿灯判定全在
   // amsgDiagnostics 那份纯函数里（那边有回归测试钉着）。
   const diagnosticRows = diagnosticsProbe
@@ -734,15 +762,13 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     : [];
   const diagnosticLevel = diagnosticRows.length ? summarizeAmsgDiagnostics(diagnosticRows) : 'unknown';
 
-  const instantChatBlockedReason = !isConnected
-    ? '先在上面把 Worker 连上。'
-    : !pushStatus?.hasSubscription
-      ? '先开启通知与推送：回复是靠推送送回来的，没有权限就变成发得出、收不到。'
-      : !instantChatSupported
-        ? 'Worker 上跑的代码还没有这个端点。回你 fork 的 sullyos-workers 点一下 Sync fork，CF 重新部署后再来开。'
-        : instantOn
-          ? 'Instant Push 也开着，两条发送路只能留一条。上面那张黄色卡片里可以把它关掉。'
-          : '';
+  const instantChatBlocker = resolveInstantChatBlocker({
+    connected: isConnected,
+    pushSubscribed: Boolean(pushStatus?.hasSubscription),
+    workerSupportsInstantChat: instantChatSupported,
+    instantPushOn: instantOn,
+  });
+  const instantChatBlockedReason = instantChatBlocker ? INSTANT_CHAT_BLOCKER_HINTS[instantChatBlocker] : '';
 
   return (
     <Modal
@@ -841,60 +867,6 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
           </div>
         ) : null}
 
-        {/* 内测口令闸。公测时把这个 {!oneClickUnlocked ? (...) : null} 整块删掉，
-            下面那张部署卡就永远显示了。 */}
-        {!oneClickUnlocked ? (
-          <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-bold text-slate-700">一键部署</span>
-              <span className="shrink-0 text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">
-                内测中
-              </span>
-            </div>
-            <p className="text-xs leading-relaxed text-slate-500">
-              粘一枚 Cloudflare Token 就把后端装好的那条路，现在还在小范围试。
-              有口令的话填进来；没有的话往下走「手动部署」，那条路是一直可用的。
-            </p>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={accessCodeInput}
-                onChange={(e) => {
-                  setAccessCodeInput(e.target.value);
-                  setAccessCodeError('');
-                }}
-                placeholder="内测口令"
-                autoComplete="off"
-                className="flex-1 min-w-0 px-3 py-2.5 rounded-xl border border-slate-200 text-sm outline-none focus:border-violet-400"
-              />
-              <button
-                type="button"
-                onClick={() => {
-                  if (!isOneClickCodeCorrect(accessCodeInput)) {
-                    setAccessCodeError('口令不对。');
-                    return;
-                  }
-                  try {
-                    localStorage.setItem(ONE_CLICK_UNLOCK_KEY, '1');
-                  } catch {
-                    /* 存不下也不影响这次用，只是下次要再填一遍 */
-                  }
-                  setOneClickUnlocked(true);
-                  setAccessCodeInput('');
-                  setAccessCodeError('');
-                }}
-                className="shrink-0 px-4 py-2.5 rounded-xl text-xs font-bold bg-violet-500 text-white active:scale-95 transition-transform"
-              >
-                解锁
-              </button>
-            </div>
-            {accessCodeError ? (
-              <p className="text-[11px] font-bold text-rose-600">{accessCodeError}</p>
-            ) : null}
-          </div>
-        ) : null}
-
-        {oneClickUnlocked ? (
         <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <span className="font-bold text-slate-700">一键部署（推荐）</span>
@@ -989,7 +961,6 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
             以后「更新后端」用的就是它；本页不保存。介意的话可以照下面的手动方式装。
           </p>
         </div>
-        ) : null}
 
         <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
           <button
@@ -1309,15 +1280,39 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
 
           {isConnected ? (
             <div className="pt-1 space-y-2 border-t border-slate-200">
+              {/*
+                按钮常驻，但有更新时才抢眼：有新版就实心高亮并写明更新到哪一版，
+                没新版时弱化成一行浅色的「重新检查并更新」——想手动重跑一次的人照样点得到，
+                不用为了这个去别处找入口。
+              */}
               <button
                 onClick={handleSelfUpdateWorker}
                 disabled={loading}
-                className="w-full py-2.5 bg-white border border-slate-300 text-slate-700 font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50"
+                className={`w-full py-2.5 font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50 ${
+                  workerVersion?.state === 'outdated'
+                    ? 'bg-emerald-600 text-white border border-emerald-600'
+                    : 'bg-white border border-slate-300 text-slate-700'
+                }`}
               >
-                {loading ? '处理中...' : '更新后端到最新版本'}
+                {loading
+                  ? '处理中...'
+                  : workerVersion?.state === 'outdated'
+                    ? `更新 Worker 到 ${workerVersion.expected}`
+                    : '重新检查并更新 Worker'}
               </button>
+              {workerVersion?.state === 'outdated' ? (
+                <p className="text-xs leading-relaxed text-emerald-700">
+                  你这台 Worker 上跑的是
+                  {workerVersion.deployed ? <code className="font-mono"> {workerVersion.deployed} </code> : '更早的版本'}
+                  ，更新后即时对话才走得上新的生成通道。
+                </p>
+              ) : workerVersion?.state === 'current' ? (
+                <p className="text-xs leading-relaxed text-slate-500">
+                  后端已经是最新版（<code className="font-mono">{workerVersion.expected}</code>）。
+                </p>
+              ) : null}
               <p className="text-xs leading-relaxed text-slate-500">
-                后端自己去取最新代码覆盖自己，你排好的任务和填过的密钥都不动。
+                后端自己去取最新代码覆盖自己，你排好的任务和填过的密钥都不动，更新完会自动验证一次。
                 用一键部署装的可以直接点；老办法装的第一次点会提示补一把钥匙，就在下面补。
               </p>
               {selfUpdateHash ? (
@@ -1434,8 +1429,14 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
           <div className="flex items-center justify-between gap-3">
             <span className="font-bold text-slate-700">即时对话</span>
-            <span className={`text-xs font-bold ${config.instantChatEnabled ? 'text-emerald-600' : 'text-slate-400'}`}>
-              {config.instantChatEnabled ? '已开启' : '未开启'}
+            {/* 开着但有门没过时不能只写「已开启」——那几道门是真的会让这一轮走本地生成的，
+                标成绿色的「已开启」就是在骗人：用户以为聊天在云端跑，实际一直在本地。 */}
+            <span className={`text-xs font-bold ${
+              !config.instantChatEnabled ? 'text-slate-400'
+                : instantChatBlockedReason ? 'text-amber-600' : 'text-emerald-600'
+            }`}>
+              {!config.instantChatEnabled ? '未开启'
+                : instantChatBlockedReason ? '已开启 · 暂不生效' : '已开启'}
             </span>
           </div>
           <p className="text-xs leading-relaxed text-slate-500">

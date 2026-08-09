@@ -872,6 +872,18 @@ export const useChatAI = ({
                     charId: char.id,
                     reason: skipReason,
                 });
+            } else if (instantChatReadiness.reason === 'worker-outdated') {
+                // 用户把开关开着，是我们判定那台 Worker 跑不动才让位给本地生成的
+                // （见 resolveInstantChatReadiness 的同名门）。上面那条 trace 的条件
+                // （instantChatOn）在这里天然为假，所以单独留一条：这一档比别的更需要
+                // 查得到——用户的主观意愿是「上云」，实际走的却是本地，不留痕就又是一次
+                // 静默分流。拦不拦不用这里管，readiness 已经说了 not ready，
+                // 下面照常走本地生成那条路。
+                appendInstantTraceEntry({
+                    ts: new Date().toISOString(),
+                    event: 'instant-chat-worker-outdated',
+                    charId: char.id,
+                });
             } else if (instantChatReadiness.reason === 'config-unreadable') {
                 // 配置根本没读出来（IndexedDB 被别的标签页 versionchange 卡住 / iOS 存储压力）。
                 // 这不是「用户没开」：开关很可能开着，只是这一刻问不到。上面那条 trace 的条件

@@ -221,8 +221,17 @@ export const discardInstantChatExpiredNotices = (charId: string, uuid?: string):
 
 // ─── 开关 ───
 
-/** ready=false 时卡在哪一道。config-unreadable 是异常，不是「用户没开」。 */
-export type InstantChatReadinessReason = 'disabled' | 'char-disabled' | 'no-worker-url' | 'config-unreadable';
+/**
+ * ready=false 时卡在哪一道。两档不是「用户没开」，调用方要分开收场：
+ *   config-unreadable  这一刻问不出来（明确报错等重发，绝不悄悄退回本地）
+ *   worker-outdated    开着，但那台 Worker 跑不动（退回本地生成，且必须留痕）
+ */
+export type InstantChatReadinessReason =
+  | 'disabled'
+  | 'char-disabled'
+  | 'no-worker-url'
+  | 'worker-outdated'
+  | 'config-unreadable';
 
 export interface InstantChatReadiness {
   ready: boolean;
@@ -232,10 +241,18 @@ export interface InstantChatReadiness {
 /**
  * 即时对话此刻走不走得通，外加「走不通是因为什么」。
  *
- * 门槛三道：角色没单独关（传了 char 才查）、设置页开了、Worker 地址填着。版本门槛
- * （worker 支不支持这个端点）只在设置页那一处探测——开发期规矩是门槛只留一处，不做
- * 逐调用 capability 预检。这里再探一次的话，每发一条消息都要多一次网络往返，而且探测
- * 失败时到底算「不支持」还是「网络抖了一下」没有正确答案。
+ * 门槛四道：角色没单独关（传了 char 才查）、设置页开了、那台 Worker 跑得动、Worker
+ * 地址填着。
+ *
+ * 「跑得动」读的是**存量**（config.instantChatSupported），不是现探——这里现探的话每发
+ * 一条消息都要多一次网络往返，而且探测失败时到底算「不支持」还是「网络抖了一下」没有
+ * 正确答案。存量由 probeInstantChatSupport 每次探测时刷新（设置页打开时、握手时各一次），
+ * 用户更新完 Worker 会自己翻回来，不用手动重开开关。undefined = 还没探过，放行——那一
+ * 档说明我们不知道，不是知道它不行。
+ *
+ * 为什么这道门非要有：跑不动的 Worker 上这条路是**发一条挂一条**（老 bundle 被 waitUntil
+ * 砍在 30 秒，新 bundle 少了起跳器则直接 503），而开关还写着「已开启」。让位给本地生成
+ * 顶多是少一个后台能力，比让用户对着「正在输入」干等强。
  *
  * 配置读不出来（IndexedDB 被别的标签页 versionchange 卡住、iOS 存储压力…）单独成一档：
  * 它不等于「用户没开」。当成没开的话这一轮会悄悄退回本地直连生成——用户按完发送随手
@@ -260,7 +277,15 @@ export const resolveInstantChatReadiness = async (
     return { ready: false, reason: 'config-unreadable' };
   }
   if (!config.instantChatEnabled) return { ready: false, reason: 'disabled' };
+  // 地址排在能力前面：没填地址时那份能力位多半是上一台 Worker 留下的存量，
+  // 报「Worker 太旧」会把人指去点一个根本没连上的东西。
   if (!config.workerUrl?.trim()) return { ready: false, reason: 'no-worker-url' };
+  // 开着、地址也在，但那台 Worker 上这条路是坏的。静默让位正是「静默分流」那个老坑，
+  // 所以就地 warn 一声，调用方还会额外留一条 trace——用户至少查得到「为什么开了却走本地」。
+  if (config.instantChatSupported === false) {
+    console.warn(`${HEADER} 开关是开的，但那台 Worker 跑不动即时对话（缺起跳器或还是旧 bundle）：这一轮本地生成。去设置页点「更新 Worker」`);
+    return { ready: false, reason: 'worker-outdated' };
+  }
   return { ready: true };
 };
 

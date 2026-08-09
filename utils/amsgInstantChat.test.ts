@@ -137,10 +137,13 @@ describe('POST /instant-chat 的形状', () => {
       userProfile: USER, groups: [], realtimeConfig: {} as any,
       ...(supersedesUuid ? { supersedesUuid } : {}),
     });
-    const body = JSON.parse(String(calls[0].init.body));
+    // 按地址挑，不按顺序挑：握手时会顺带打一次 /config-check 刷能力位
+    // （见 activeMsgClient 的 initializeClient），认 calls[0] 会挑到那一条。
+    const call = calls.find((c) => String(c.url).includes('/instant-chat'))!;
+    const body = JSON.parse(String(call.init.body));
     return {
       result,
-      call: calls[0],
+      call,
       state: JSON.parse(body.statePayload.encryptedData),
       task: JSON.parse(body.taskPayload.encryptedData),
       supersedes: body.supersedesUuid,
@@ -539,6 +542,48 @@ describe('开关', () => {
   it('地址空着 → 不走', async () => {
     storeState.config = { ...storeState.config, workerUrl: '  ' };
     expect(await isInstantChatReady()).toBe(false);
+    expect(await resolveInstantChatReadiness()).toEqual({ ready: false, reason: 'no-worker-url' });
+  });
+
+  // ─── Worker 跑不动这条路（instantChatSupported）───
+  //
+  // 跑不动的 Worker 上即时对话是**发一条挂一条**：老 bundle 被 waitUntil 砍在 30 秒，
+  // 新 bundle 少了起跳器直接 503。用户开着开关也得让位给本地生成，否则他对着
+  // 「正在输入…」等一条永远不来的回复，而设置页写着「已开启」。
+
+  it('探到 Worker 跑不动 → 用户开着也不走云端（reason worker-outdated）', async () => {
+    storeState.config = { ...storeState.config, instantChatEnabled: true, instantChatSupported: false };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* 静音，只数次数 */ });
+    const readiness = await resolveInstantChatReadiness();
+    expect(readiness).toEqual({ ready: false, reason: 'worker-outdated' });
+    // 「用户没开」和「开了但用不了」是两回事：混成 disabled 的话，设置页那句提示、
+    // 观察窗那条 trace 都没了着落。
+    expect(readiness.reason).not.toBe('disabled');
+    // 静默让位正是「静默分流」那个坑，必须留声。
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('没探过（undefined）→ 放行：不知道 ≠ 知道它不行', async () => {
+    storeState.config = { ...storeState.config, instantChatEnabled: true, instantChatSupported: undefined };
+    expect(await resolveInstantChatReadiness()).toEqual({ ready: true });
+  });
+
+  it('探到能跑 → 照常上云', async () => {
+    storeState.config = { ...storeState.config, instantChatEnabled: true, instantChatSupported: true };
+    expect(await resolveInstantChatReadiness()).toEqual({ ready: true });
+  });
+
+  // 用户自己没开的时候，「Worker 行不行」根本不该被问——那一档的原因是 disabled，
+  // 报成 worker-outdated 会让设置页对着一个没开的开关喊「去更新 Worker」。
+  it('用户自己没开时，先报 disabled，不越到 worker-outdated', async () => {
+    storeState.config = { ...storeState.config, instantChatEnabled: false, instantChatSupported: false };
+    expect(await resolveInstantChatReadiness()).toEqual({ ready: false, reason: 'disabled' });
+  });
+
+  // 能力位是「上一台 Worker」留下的存量。地址都空着还报「Worker 太旧」的话，
+  // 设置页会把人指去点一个根本没连上的东西。
+  it('地址空着时报 no-worker-url，不越到 worker-outdated', async () => {
+    storeState.config = { ...storeState.config, workerUrl: '  ', instantChatSupported: false };
     expect(await resolveInstantChatReadiness()).toEqual({ ready: false, reason: 'no-worker-url' });
   });
 

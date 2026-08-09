@@ -283,6 +283,8 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
    */
   const handleToggleInstantChat = () => {
     const next = !instantChatOn;
+    // 全局那个开关有自己的事件，这里单独记：想知道「按角色区分」这件事有没有人真的用。
+    trackEvent('切换角色的即时对话', { action: next ? '开' : '关' });
     setInstantChatOn(next);
     onSave((prev) => ({
       ...(prev ?? { enabled: false }),

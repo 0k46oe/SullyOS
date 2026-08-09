@@ -1,10 +1,52 @@
 import { describe, it, expect } from 'vitest';
 import {
+  buildDurableObjectPlan,
   resolveObservability,
   handleSelfUpdate,
   rebuildBindings,
   resolveScriptName,
 } from './selfUpdate';
+
+describe('buildDurableObjectPlan', () => {
+  const doBinding = {
+    type: 'durable_object_namespace',
+    name: 'INSTANT_TICK',
+    class_name: 'InstantTickDO',
+  };
+
+  it('老 Worker 上没有起跳器 → 补 binding，同时带 migrations 把它建出来', () => {
+    const plan = buildDurableObjectPlan([
+      { type: 'd1', name: 'DB', id: 'x' },
+      { type: 'secret_text', name: 'AMSG_MASTER_KEY' },
+    ]);
+    expect(plan.binding).toEqual(doBinding);
+    expect(plan.migrations).toEqual({
+      new_tag: 'amsg-instant-tick-v1',
+      new_sqlite_classes: ['InstantTickDO'],
+    });
+  });
+
+  /**
+   * 回归守卫：建过之后绝不能再带 migrations。
+   *
+   * Cloudflare 的 migrations 带乐观锁——不给 old_tag 等于断言「这个 Worker 一个
+   * migration 都没应用过」。自更新是会被反复点的，第二次带同一个 tag 会撞上
+   * `10079 Actor migration tag precondition failed`，**整个自更新失败**，用户的
+   * Worker 从此更新不动。2026-08-09 直接打 Cloudflare API 实测确认过这个行为。
+   */
+  it('已经有起跳器 → binding 和 migrations 都不动（重传 migrations 会 10079）', () => {
+    const plan = buildDurableObjectPlan([{ type: 'd1', name: 'DB', id: 'x' }, doBinding]);
+    expect(plan.binding).toBeNull();
+    expect(plan.migrations).toBeNull();
+  });
+
+  it('认的是 binding 名而不只是类型（别的 DO 不算数）', () => {
+    const plan = buildDurableObjectPlan([
+      { type: 'durable_object_namespace', name: 'SOMETHING_ELSE', class_name: 'OtherDO' },
+    ]);
+    expect(plan.binding).toEqual(doBinding);
+  });
+});
 
 describe('rebuildBindings', () => {
   // Cloudflare 的上传接口是整体替换：这一发没带的 binding 等于删掉。

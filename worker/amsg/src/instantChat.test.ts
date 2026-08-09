@@ -6,11 +6,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import {
-  __resetUpstreamFatalLogTap,
   buildInstantTimelyBlock,
   finalizeInstantPush,
   handleInstantChat,
-  INSTANT_TICK_CRON,
   isInstantChatTask,
   toOutboxEntries,
   writeChatOutbox,
@@ -55,17 +53,30 @@ const makeUpstream = (opts: {
       }
       return json(404, { success: false });
     }),
-    scheduled: vi.fn(async (_event: { scheduledTime: number; cron: string }, _env?: unknown) => {}),
   };
   return { upstream, calls, paths: () => calls.map((c) => `${c.method} ${c.path}`) };
 };
 
-const makeCtx = () => {
-  const pending: Array<Promise<unknown>> = [];
+/**
+ * INSTANT_TICK 绑定的替身。记下叫醒了哪个实例、传了哪个 uuid。
+ *
+ * `kick` 只负责给 DO 记下 uuid、设 alarm，真正的生成在 alarm 里跑（另一次 invocation，
+ * 走 upstream.runTask），所以这条路上根本碰不到 upstream 的执行入口——那是 DO 侧的事，
+ * 见 index.ts 的 InstantTickDO。
+ */
+const makeTick = (opts: { kick?: () => Promise<unknown> } = {}) => {
+  const kicks: Array<{ instance: string; uuid: string }> = [];
   return {
-    ctx: { waitUntil: (p: Promise<unknown>) => { pending.push(p); } },
-    settle: () => Promise.all(pending),
-    count: () => pending.length,
+    kicks,
+    INSTANT_TICK: {
+      idFromName: (name: string) => ({ name }),
+      get: (id: { name: string }) => ({
+        kick: async (uuid: string) => {
+          kicks.push({ instance: id.name, uuid });
+          return opts.kick ? opts.kick() : undefined;
+        },
+      }),
+    },
   };
 };
 
@@ -89,11 +100,14 @@ const run = (args: {
   request: Request;
   env?: Record<string, unknown>;
   upstream: ReturnType<typeof makeUpstream>['upstream'];
-  ctx?: { waitUntil: (p: Promise<unknown>) => void };
+  /** 不传就用一个正常工作的替身；要测「Worker 是旧的」显式传 null。 */
+  tick?: ReturnType<typeof makeTick> | null;
 }) => handleInstantChat({
   request: args.request,
-  env: (args.env ?? {}) as any,
-  ctx: args.ctx,
+  env: {
+    ...(args.tick === null ? {} : { INSTANT_TICK: (args.tick ?? makeTick()).INSTANT_TICK }),
+    ...(args.env ?? {}),
+  } as any,
   upstream: args.upstream as any,
   json,
   stateBackoffMs: [0, 0, 0],
@@ -283,82 +297,93 @@ describe('POST /instant-chat — 严格顺序与失败传播', () => {
   });
 });
 
-// 上游 500 只回一句写死的「服务器内部错误」，真实原因（缺表、D1 超时……）只进它自己的
-// console.error。用户照着那句泛型报文什么也做不了，还得先知道 Cloudflare 面板里有条日志。
-describe('POST /instant-chat — 上游 500 时把它日志里那句真话带回去', () => {
-  const FATAL = 'D1_ERROR: no such table: message_outbox: SQLITE_ERROR';
-  /** 上游抛异常时的真实行为：先写一行日志，再回那句写死的泛型报文。 */
-  const throwsInside = (status = 500): { status: number; body: unknown; log: boolean } => ({
+// 上游 500 的 message 是一句写死的「服务器内部错误」，用户照着它什么也做不了。
+// 真实原因（缺表、D1 超时……）由 amsg-server 2.6.0-next.16 起放在 error.cause 里，
+// 这里必须原样端到客户端面前——否则他看到的还是那句什么都没说的话。
+describe('POST /instant-chat — 把上游 error.cause 里那句真话带回去', () => {
+  /** 上游抛异常时的真实响应：泛型 message + 带真因的 cause。 */
+  const throwsInside = (
+    status = 500,
+    cause: Record<string, unknown> | null = {
+      stage: 'request',
+      name: 'Error',
+      message: 'D1_ERROR: no such table: message_outbox',
+      code: 'D1_ERROR',
+    },
+  ) => ({
     status,
-    body: { success: false, error: { code: 'INTERNAL_ERROR', message: '服务器内部错误' } },
-    log: true,
+    body: {
+      success: false,
+      error: { code: 'INTERNAL_ERROR', message: '服务器内部错误', ...(cause ? { cause } : {}) },
+    },
   });
-  const makeThrowingUpstream = (
-    which: 'clientState' | 'scheduleMessage',
-    spec: { status: number; body: unknown; log: boolean },
-  ) => {
-    const base = makeUpstream({ [which]: { status: spec.status, body: spec.body } } as any);
-    const inner = base.upstream.fetch;
-    base.upstream.fetch = vi.fn(async (request: Request) => {
-      const path = new URL(request.url).pathname;
-      const hit = which === 'clientState' ? path.endsWith('/client-state') : path.endsWith('/schedule-message');
-      if (hit && spec.log) console.error('[amsg single-user] fetch() unhandled error:', FATAL);
-      return inner(request);
-    }) as any;
-    return base;
-  };
-
-  beforeEach(() => { __resetUpstreamFatalLogTap(); });
 
   it('client-state 那步：真实原因随 upstreamLog 回给客户端', async () => {
-    const { upstream } = makeThrowingUpstream('clientState', throwsInside());
+    const { upstream } = makeUpstream({ clientState: throwsInside() } as any);
     const response = await run({ request: post(validBody()), upstream });
     expect(response.status).toBe(500);
     const body = await response.json() as any;
     expect(body.error.code).toBe('INSTANT_CHAT_STATE_FAILED');
-    expect(body.error.upstreamLog).toBe(FATAL);
+    expect(body.error.upstreamLog).toBe('D1_ERROR: no such table: message_outbox');
   });
 
   it('schedule-message 那步同理', async () => {
-    const { upstream } = makeThrowingUpstream('scheduleMessage', throwsInside());
+    const { upstream } = makeUpstream({ scheduleMessage: throwsInside() } as any);
     const response = await run({ request: post(validBody()), upstream });
     expect(response.status).toBe(500);
     const body = await response.json() as any;
     expect(body.error.code).toBe('INSTANT_CHAT_TASK_FAILED');
-    expect(body.error.upstreamLog).toBe(FATAL);
+    expect(body.error.upstreamLog).toBe('D1_ERROR: no such table: message_outbox');
   });
 
-  // 旁听是全局的、装上不摘。4xx 是上游自己判出来的业务错（正文里已经写清了原因），
-  // 这时再把某条不相干的日志当成原因贴上去，只会把人往错的方向指。
+  it('code 不是 message 前缀时两个都带上（光一句 message 看不出是哪类错）', async () => {
+    const { upstream } = makeUpstream({
+      clientState: throwsInside(500, {
+        stage: 'request', name: 'Error', message: '写不进去', code: 'STORAGE_FAILED',
+      }),
+    } as any);
+    const response = await run({ request: post(validBody()), upstream });
+    expect((await response.json() as any).error.upstreamLog).toBe('STORAGE_FAILED: 写不进去');
+  });
+
+  it('没有 code 时退回 name', async () => {
+    const { upstream } = makeUpstream({
+      clientState: throwsInside(500, { stage: 'request', name: 'TypeError', message: '炸了' }),
+    } as any);
+    const response = await run({ request: post(validBody()), upstream });
+    expect((await response.json() as any).error.upstreamLog).toBe('TypeError: 炸了');
+  });
+
+  // 4xx 是上游自己判出来的业务错，正文里已经写清了原因；再缀一段内部细节只会让人更迷惑。
   it('4xx 不带 upstreamLog：那不是抛出来的异常，正文本身就是原因', async () => {
-    const { upstream } = makeThrowingUpstream('clientState', {
-      ...throwsInside(400),
-      body: { success: false, error: { code: 'TOO_MANY_STATE_ENTRIES' } },
-    });
+    const { upstream } = makeUpstream({
+      clientState: { status: 400, body: { success: false, error: { code: 'TOO_MANY_STATE_ENTRIES' } } },
+    } as any);
     const response = await run({ request: post(validBody()), upstream });
     expect(response.status).toBe(400);
     expect((await response.json() as any).error.upstreamLog).toBeUndefined();
   });
 
-  it('这一跳没写日志就不带（不能把上一次失败的原因贴到这次头上）', async () => {
-    const first = makeThrowingUpstream('clientState', throwsInside());
-    await run({ request: post(validBody()), upstream: first.upstream });
-    const { upstream } = makeThrowingUpstream('clientState', { ...throwsInside(), log: false });
+  it('上游没给 cause 就不带（老 worker 不会多出一截空白）', async () => {
+    const { upstream } = makeUpstream({ clientState: throwsInside(500, null) } as any);
     const response = await run({ request: post(validBody()), upstream });
+    expect(response.status).toBe(500);
     expect((await response.json() as any).error.upstreamLog).toBeUndefined();
   });
 
-  // 只听不吞：wrangler tail 是排障的人真正盯着的地方，那一行不能因为我们接住了就没了。
-  it('原来的 console.error 照常收到这一行', async () => {
-    const seen: unknown[][] = [];
-    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { seen.push(args); });
-    try {
-      const { upstream } = makeThrowingUpstream('clientState', throwsInside());
-      await run({ request: post(validBody()), upstream });
-    } finally {
-      spy.mockRestore();
-    }
-    expect(seen.some((args) => String(args[1]) === FATAL)).toBe(true);
+  /**
+   * 回归守卫：拿真因这件事不许再回去改全局 console。
+   *
+   * 这段历史值得留一句：上游早先不回 cause，只把真因写进自己的 console.error，
+   * 于是这里曾经永久 patch 全局 console.error 去偷听。那是会影响整个 isolate 的副作用，
+   * 而且和任何并发请求都在抢同一个全局对象。真因现在由上游随响应体给，
+   * 谁都不该再动 console。
+   */
+  it('不碰全局 console.error（真因来自响应体，不是偷听日志）', async () => {
+    const original = console.error;
+    const { upstream } = makeUpstream({ clientState: throwsInside() } as any);
+    await run({ request: post(validBody()), upstream });
+    expect(console.error).toBe(original);
   });
 });
 
@@ -375,20 +400,23 @@ describe('POST /instant-chat — 云端状态那一步遇到 5xx 会重试', () 
         if (path.endsWith('/client-state')) {
           seen += 1;
           if (seen <= failures) {
-            console.error('[amsg single-user] fetch() unhandled error:', 'D1_ERROR: … object to be reset.');
-            return json(500, { success: false, error: { code: 'INTERNAL_ERROR', message: '服务器内部错误' } });
+            return json(500, {
+              success: false,
+              error: {
+                code: 'INTERNAL_ERROR',
+                message: '服务器内部错误',
+                cause: { stage: 'request', name: 'Error', message: 'D1_ERROR: … object to be reset.' },
+              },
+            });
           }
           return json(200, { success: true, data: { upserted: 3, skipped: 0 } });
         }
         if (path.endsWith('/schedule-message')) return json(200, { success: true, data: { uuid: TASK_UUID } });
         return json(404, { success: false });
       }),
-      scheduled: vi.fn(async () => {}),
     };
     return { upstream, attempts: () => seen };
   };
-
-  beforeEach(() => { __resetUpstreamFatalLogTap(); });
 
   it('第一次超时、第二次写进去 → 照常受理，用户完全无感', async () => {
     const { upstream, attempts } = flakyClientState(1);
@@ -435,33 +463,58 @@ describe('POST /instant-chat — 只有两次内部转发', () => {
 });
 
 describe('POST /instant-chat — 立即起跳', () => {
-  it('回完 202 之后立刻起一跳（immediate 任务落库即到期，不用拉行）', async () => {
+  /**
+   * 实例名就是任务 uuid：一条任务一个 DO 实例，几条聊天同时在跑才不会互相排队。
+   * DO 的 alarm 是一实例一个，共用实例就意味着共用那一个 alarm、只能挨个来。
+   */
+  it('回完 202 之前叫醒 DO，实例名和 uuid 都是这条任务的', async () => {
     const { upstream } = makeUpstream();
-    const { ctx, settle, count } = makeCtx();
-    const response = await run({ request: post(validBody()), upstream, ctx });
+    const tick = makeTick();
+    const response = await run({ request: post(validBody()), upstream, tick });
 
     expect(response.status).toBe(202);
-    expect(count()).toBe(1);          // 起跳挂在 waitUntil 上，不拖住这次响应
-
-    await settle();
-    expect(upstream.scheduled).toHaveBeenCalledTimes(1);
-    expect((upstream.scheduled.mock.calls[0][0] as any).cron).toBe(INSTANT_TICK_CRON);
+    expect(tick.kicks).toEqual([{ instance: TASK_UUID, uuid: TASK_UUID }]);
   });
 
-  it('起跳自己挂了不影响已经回出去的 202（cron 每分钟还会来捡）', async () => {
-    const { upstream } = makeUpstream();
-    upstream.scheduled.mockRejectedValueOnce(new Error('tick boom'));
-    const { ctx, settle } = makeCtx();
-    const response = await run({ request: post(validBody()), upstream, ctx });
-    expect(response.status).toBe(202);
-    await expect(settle()).resolves.toBeDefined();
-  });
-
-  it('运行时没给 ctx 也照常受理（任务已落库，交给 cron）', async () => {
-    const { upstream } = makeUpstream();
+  /**
+   * 回归守卫：这一跳绝不能再挂回 ctx.waitUntil。
+   *
+   * waitUntil 的墙钟上限是硬性的 30 秒（从响应发出或客户端断开起算），而一轮带工具
+   * 循环的生成动辄几十秒——挂上去就必被砍在半路，日志里只留一条
+   * 「waitUntil() tasks did not complete」，用户那边表现为「一直等不到回复」。
+   * 生成必须跑在 DO 的 alarm 里（独立 invocation，15 分钟），所以受理这一步只该叫醒
+   * DO：`InstantChatUpstream` 只声明了 fetch，压根没有能把生成拉进当前请求的入口。
+   */
+  it('受理时只发两个转发请求，不碰任何执行入口', async () => {
+    const { upstream, paths } = makeUpstream();
     const response = await run({ request: post(validBody()), upstream });
     expect(response.status).toBe(202);
-    expect(upstream.scheduled).not.toHaveBeenCalled();
+    expect(paths()).toEqual(['PUT /client-state', 'POST /schedule-message']);
+  });
+
+  it('叫醒失败不影响已经回出去的 202（任务已落库，cron 每分钟还会来捡）', async () => {
+    const { upstream } = makeUpstream();
+    const tick = makeTick({ kick: () => Promise.reject(new Error('kick boom')) });
+    const response = await run({ request: post(validBody()), upstream, tick });
+    expect(response.status).toBe(202);
+  });
+
+  /**
+   * 回归守卫：老版本 Worker（没有 INSTANT_TICK 绑定）必须明说「去更新」。
+   *
+   * 这里刻意不退回 cron 兜底然后照回 202：那条路上没有为即时对话放宽的超时，用户会
+   * 对着「正在输入」等很久甚至等不到，而界面上没有任何线索告诉他该做什么。
+   */
+  it('没有 INSTANT_TICK 绑定 → 503 且点名要更新 Worker', async () => {
+    const { upstream } = makeUpstream();
+    const response = await run({ request: post(validBody()), upstream, tick: null });
+
+    expect(response.status).toBe(503);
+    const body = await response.json() as any;
+    expect(body.error.code).toBe('INSTANT_CHAT_WORKER_OUTDATED');
+    expect(body.error.message).toContain('更新 Worker');
+    // 任务本身是建成了的，uuid 要带回去，别让客户端以为整轮没发生过。
+    expect(body.error.uuid).toBe(TASK_UUID);
   });
 });
 

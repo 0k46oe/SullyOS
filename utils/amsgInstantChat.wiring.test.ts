@@ -297,12 +297,27 @@ describe('设置页那一道门', () => {
     expect(chatAiSrc).not.toContain('probeInstantChatSupport');
   });
 
-  it('四道门缺一不可，而且要说出卡在哪一道', () => {
-    const reason = sliceSrc(settingsSrc, '即时对话开关的置灰理由', 'const instantChatBlockedReason', '\n  return (');
-    expect(reason).toContain('!isConnected');
-    expect(reason).toContain('pushStatus?.hasSubscription');
-    expect(reason).toContain('instantChatSupported');
-    expect(reason).toContain('instantOn');
+  it('四道门缺一不可：四个输入都要喂进同一份判定', () => {
+    // 顺序和每道门的文案钉在 amsgDiagnostics.test.ts（resolveInstantChatBlocker 是纯函数，
+    // 能直接测）。这里只钉「设置页确实把四个输入都递过去了」——漏一个的话那道门就消失了，
+    // 界面上表现为开关能点，点完发一条挂一条。
+    const gate = sliceSrc(settingsSrc, '即时对话开关的置灰理由', 'const instantChatBlocker = resolveInstantChatBlocker(', '\n  const instantChatBlockedReason');
+    expect(gate).toContain('isConnected');
+    expect(gate).toContain('pushStatus?.hasSubscription');
+    expect(gate).toContain('instantChatSupported');
+    expect(gate).toContain('instantOn');
+    // 黄字直接取自代号表：文案跟上报属性共用一份判定，不许哪天各写各的。
+    expect(settingsSrc).toContain('INSTANT_CHAT_BLOCKER_HINTS[instantChatBlocker]');
+  });
+
+  it('开不了卡在哪要上报，且跟界面共用那份判定', () => {
+    // 开关灰着的时候用户什么都点不动，也就不会产生别的事件——不主动收的话，被挡在门外的人
+    // 和「不想要这功能的人」在数据里长得一模一样。
+    const report = sliceSrc(settingsSrc, '即时对话可用性上报', 'const reportInstantChatGate', '\n  const refresh');
+    expect(report).toContain('resolveInstantChatBlocker(gate)');
+    expect(report).toContain(`trackEvent('即时对话能不能开'`);
+    // 反复点「连接」的人否则一个人能刷出十几条同样的结果，把分布带歪。
+    expect(report).toContain('instantChatGateReported');
   });
 
   it('开关落盘：两个 saveGlobalConfig 调用点都要带上它', () => {

@@ -73,6 +73,21 @@ describe('buildBindings', () => {
         expect(bindings[0]).toEqual({ type: 'd1', name: 'DB', id: 'db-uuid-1234' });
     });
 
+    /**
+     * 回归守卫：新部署必须自带即时对话的起跳器。
+     *
+     * 漏了它，装出来的 Worker 一发即时对话就 503（instantChat 认的就是这个 binding），
+     * 而用户刚走完一键部署，界面上一切正常，只会以为是功能坏了。
+     */
+    it('自带 INSTANT_TICK 的 Durable Object binding', () => {
+        const bindings = buildBindings('DB', 'x', FULL_SECRETS);
+        expect(bindings).toContainEqual({
+            type: 'durable_object_namespace',
+            name: 'INSTANT_TICK',
+            class_name: 'InstantTickDO',
+        });
+    });
+
     it('五个密钥一条不落——漏一条上去 worker 就起不来', () => {
         const bindings = buildBindings('DB', 'x', FULL_SECRETS);
         const names = bindings.filter((b) => b.type === 'secret_text').map((b) => b.name);
