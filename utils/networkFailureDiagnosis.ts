@@ -18,7 +18,8 @@
 
 /** 连接失败的粗分类。用于选那句初判，也用于决定要不要做 no-cors 复检。 */
 export type FetchFailureKind =
-    | 'aborted'        // 调用方主动取消 / 超时控制器掐的
+    | 'aborted'        // 调用方主动取消（页面/组件卸载、用户点停）
+    | 'timeout'        // AbortSignal.timeout() 到点掐的：连接挂住不返回，跟「被拒」是两回事
     | 'offline'        // navigator.onLine === false，浏览器自己知道没网
     | 'mixed-content'  // https 页面打 http 地址，被浏览器直接拦
     | 'bad-url'        // 地址本身就不合法（拼错、少了协议头）
@@ -77,6 +78,10 @@ const isLoopbackHost = (host: string) => /^(localhost|127\.0\.0\.1|\[::1\])(:\d+
 
 export const classifyFetchFailure = (ctx: FetchFailureContext): FetchFailureKind => {
     const { name, message } = readError(ctx.error);
+    // AbortSignal.timeout() 抛的是 TimeoutError（"signal timed out"），跟用户/组件主动
+    // abort 抛的 AbortError 不是一回事：前者说明连接挂住了，必须继续往下查；后者到此为止。
+    // 先按 TimeoutError 判，再判 AbortError——顺序反了会把超时吞进「主动取消」。
+    if (name === 'TimeoutError' || /timed?\s?out|timeout/i.test(message)) return 'timeout';
     if (name === 'AbortError' || /aborted|abort/i.test(message)) return 'aborted';
 
     const target = parseTargetUrl(ctx.url);
@@ -95,8 +100,12 @@ export const classifyFetchFailure = (ctx: FetchFailureContext): FetchFailureKind
 /** 每种分类给一句「现在能确定什么」+ 一行「可能是什么」。 */
 const VERDICTS: Record<FetchFailureKind, { verdict: string; causes: string }> = {
     aborted: {
-        verdict: '请求被主动取消（超时控制器掐的，或页面/组件卸载了）。',
-        causes: '对方响应太慢超过了超时阈值 · 中途切走了页面 · 手动点了停止',
+        verdict: '请求被主动取消（页面/组件卸载了，或调用方自己撤了）。',
+        causes: '中途切走了页面 · 手动点了停止',
+    },
+    timeout: {
+        verdict: '请求超时：到点为止一个响应字节都没等到。连接是**挂住不返回**，不是被明确拒绝——这两种要查的东西不一样。',
+        causes: '代理/梯子接下了连接但上游是黑洞 · 这个域名没走代理、直连被拦截丢包 · 解析到的 IP 不可达 · 对方服务器无响应',
     },
     offline: {
         verdict: '浏览器自己报告当前离线，请求根本没发出去。',
@@ -147,6 +156,24 @@ export const readResourceTimingHint = (
 };
 
 /**
+ * 「失败得多快」本身就是证据，而且是 JS 侧唯一能拿到的、区分「连接被吞」和「立刻被拒」
+ * 的线索——这两种的排查方向完全相反：
+ *   - 挂几秒到几十秒才失败 ⇒ TCP/TLS 握手没人应答（黑洞）。查代理分流规则、换节点。
+ *   - 几十毫秒就失败 ⇒ 有人明确说不 。查 DNS、扩展、防火墙、混合内容。
+ */
+export const readStallHint = (durationMs?: number, kind?: FetchFailureKind): string => {
+    if (typeof durationMs !== 'number' || !Number.isFinite(durationMs)) return '';
+    if (kind && kind !== 'blocked' && kind !== 'timeout' && kind !== 'unknown') return '';
+    if (durationMs >= 5000) {
+        return `耗时线索: 挂了 ${(durationMs / 1000).toFixed(1)}s 才失败、且一个字节都没收到 → 连接建立阶段被吞（握手没人应答），不是「立刻被拒」。这种形态最常见的是：该域名没走代理走了直连、或代理节点到上游是黑洞。优先换节点 / 把该域名显式加进代理规则。`;
+    }
+    if (durationMs <= 300) {
+        return `耗时线索: ${Math.round(durationMs)}ms 就失败，属于「立刻被拒」→ DNS 解析不到、浏览器扩展或防火墙在发出前拦掉、代理直接拒绝连接。不像是线路慢或被墙。`;
+    }
+    return '';
+};
+
+/**
  * 拼出写进调试终端 detail 的那一段。同步、无副作用——no-cors 复检结论由
  * describeReachabilityProbe() 单独产出，异步补到这段后面。
  */
@@ -174,6 +201,8 @@ export const buildFetchFailureDetail = (
     lines.push(`浏览器联网状态: ${online === false ? '离线' : '在线'}`);
     const timing = readResourceTimingHint(target.href, opts?.perf);
     if (timing) lines.push(timing);
+    const stall = readStallHint(ctx.durationMs, kind);
+    if (stall) lines.push(stall);
     lines.push(`初判: ${VERDICTS[kind].verdict}`);
     lines.push(`可能原因: ${VERDICTS[kind].causes}`);
     return lines.join('\n');
@@ -181,7 +210,15 @@ export const buildFetchFailureDetail = (
 
 // ─── no-cors 连通性复检 ───
 
-export type ReachabilityVerdict = 'reachable' | 'unreachable' | 'timeout' | 'skipped';
+export type ReachabilityVerdict = 'reachable' | 'unreachable' | 'timeout' | 'cooldown' | 'skipped';
+
+/**
+ * 只有「拿不到响应」和「超时」两类值得复检：
+ * 主动取消 / 混合内容 / 地址非法 / 离线 都已经有确定结论，再打一次纯属浪费。
+ */
+export const shouldProbeReachability = (kind: FetchFailureKind): boolean => (
+    kind === 'blocked' || kind === 'timeout' || kind === 'unknown'
+);
 
 /** 同一个域名 30s 内只复检一次，避免一串请求同时炸时打出一片探测流量。 */
 const probeCooldown = new Map<string, number>();
@@ -207,7 +244,7 @@ export const probeOriginReachability = async (
     const now = opts?.now ?? (() => Date.now());
     const last = probeCooldown.get(target.origin);
     const at = now();
-    if (typeof last === 'number' && at - last < PROBE_COOLDOWN_MS) return 'skipped';
+    if (typeof last === 'number' && at - last < PROBE_COOLDOWN_MS) return 'cooldown';
     probeCooldown.set(target.origin, at);
 
     const timeoutMs = opts?.timeoutMs ?? 6000;
@@ -241,6 +278,8 @@ export const describeReachabilityProbe = (verdict: ReachabilityVerdict, host: st
             return `连通性复检: no-cors 直连 ${who} 同样失败 → 这台设备到 ${who} 是真的连不上。按顺序查：梯子的分流规则（把该域名放进代理）、DNS、浏览器扩展（广告拦截/隐私盾）、系统或路由器防火墙。`;
         case 'timeout':
             return `连通性复检: no-cors 直连 ${who} 超时（连接挂住不返回）→ 多半是代理/网关把连接吞了，或对方正被限速。优先换一个梯子节点再试。`;
+        case 'cooldown':
+            return `连通性复检: 30 秒内已对 ${who} 检测过，结论看这条之前那一条日志（同一次故障刷出来的多条，复检结果是一样的）。`;
         default:
             return '';
     }
