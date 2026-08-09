@@ -276,6 +276,20 @@ describe('当前功能启用 · 开关值的判定', () => {
         expect(flags['开了2.0的角色数']).toBe('1');
     });
 
+    it('「单独关了即时对话的角色数」只数显式关掉的，跟随全局的不算', () => {
+        // 角色级开关缺省是「跟随全局」（undefined），只有用户在角色面板里主动关才落 false。
+        // 把 undefined 也当成关的话，这一格会变成角色总数，用它判断「这开关有没有人用」会判反。
+        const turnedOff = (id: string) => {
+            const ch = amsg2Char(id);
+            (ch.activeMsg2Config as { instantChatEnabled?: boolean }).instantChatEnabled = false;
+            return ch;
+        };
+        const flags = collectFeatureFlags(poisonedSources({
+            characters: [turnedOff('a'), amsg2Char('b'), untouchedChar('c')],
+        }));
+        expect(flags['单独关了即时对话的角色数']).toBe('1');
+    });
+
     it('不上报已经全局下线的主动消息 Push 加速', () => {
         // 那一层 FORCE_DISABLED 恒为关，报出来会被误读成「没人用」。
         localStorage.setItem('proactive_push_enabled_v1', 'true');

@@ -7,6 +7,8 @@ import {
 import {
   AmsgDiagnosticLevel, AmsgDiagnosticsProbe,
   buildAmsgDiagnosticRows, summarizeAmsgDiagnostics,
+  INSTANT_CHAT_BLOCKER_HINTS, resolveInstantChatBlocker,
+  type InstantChatGateInput,
 } from '../../utils/amsgDiagnostics';
 import { ActiveMsgStore, maskActiveMsgUserId } from '../../utils/activeMsgStore';
 import { cancelAllRemoteAmsgTasks, isWorkerUrlCleared, wipeAmsgCloudData } from '../../utils/amsgStateSync';
@@ -113,6 +115,8 @@ const readOneClickUnlocked = (): boolean => {
 // 探测结果每次会话只报一次。refresh() 在开面板、连接成功、订阅成功后都会跑一遍，
 // 一个连不上、反复点「连接」的人否则能一个人刷出十几条同样的结果，把分布带歪。
 let workerCapsReported = false;
+// 「即时对话开不了卡在哪」同样每次会话只报一次，理由同上。
+let instantChatGateReported = false;
 
 /** 体检每一行的配色与那一列小字。unknown 用灰：查不出结论时别拿颜色暗示好坏。 */
 const DIAGNOSTIC_STYLES: Record<AmsgDiagnosticLevel, { dot: string; text: string; word: string }> = {
@@ -248,6 +252,24 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     }
   };
 
+  /**
+   * 报一次「即时对话此刻能不能开、开不了卡在哪」。
+   *
+   * 这一格只能在这儿收：开关灰着的时候用户什么都点不动，也就不会产生任何别的事件——
+   * 光看配置快照里那个开/关，被挡在门外的人和「不想要这功能的人」长得一模一样。
+   * 判定跟界面上那行黄字共用 resolveInstantChatBlocker，两处不会各说各话。
+   */
+  const reportInstantChatGate = (gate: InstantChatGateInput, enabled: boolean) => {
+    if (instantChatGateReported) return;
+    instantChatGateReported = true;
+    trackEvent('即时对话能不能开', {
+      result: resolveInstantChatBlocker(gate) ?? '可以开',
+      // 已经开着的人也报：他们卡住意味着「开的时候好好的，后来 Worker 退回旧版了」，
+      // 那是一种发一条挂一条、但设置页还写着「已开启」的坏法。
+      state: enabled ? '已开着' : '还没开',
+    });
+  };
+
   const refresh = async () => {
     const nextConfig = await ActiveMsgClient.getGlobalConfig();
     const nextPushStatus = await ActiveMsgClient.getPushStatus();
@@ -257,7 +279,15 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     setInstantOn(isInstantConfigReady());
     void probeWorkerCaps(Boolean(nextConfig.workerUrl?.trim()));
     if (nextConfig.workerUrl?.trim()) {
-      void ActiveMsgClient.probeInstantChatSupport().then(setInstantChatSupported);
+      void ActiveMsgClient.probeInstantChatSupport().then((supported) => {
+        setInstantChatSupported(supported);
+        reportInstantChatGate({
+          connected: Boolean(nextConfig.initializedAt),
+          pushSubscribed: Boolean(nextPushStatus?.hasSubscription),
+          workerSupportsInstantChat: supported,
+          instantPushOn: isInstantConfigReady(),
+        }, Boolean(nextConfig.instantChatEnabled));
+      });
       void runDiagnostics();
     } else {
       setInstantChatSupported(false);
@@ -703,6 +733,8 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
    */
   const handleToggleInstantChat = async () => {
     const next = !config?.instantChatEnabled;
+    // 开了又关是这条路上最值钱的信号：能开、开过、然后放弃了，跟「压根没开」不是一回事。
+    trackEvent('切换即时对话', { action: next ? '开' : '关' });
     patchConfig({ instantChatEnabled: next });
     await ActiveMsgStore.saveGlobalConfig({ instantChatEnabled: next });
     addToast(next ? '已开启即时对话，之后的聊天在你的 Worker 上生成。' : '已关闭即时对话，聊天回到本地生成。', 'success');
@@ -719,11 +751,6 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
 
   const isConnected = Boolean(config.initializedAt);
 
-  /**
-   * 即时对话开不了的第一个原因（能开时为空串）。按「先补哪个」的顺序排：
-   * 没连上就谈不上推送，没推送权限就算发出去也收不到，worker 太旧则端点根本不存在，
-   * 最后是两条发送路只能留一条。
-   */
   // 体检：探测结果 + 「这台设备订阅了没」这个只有前端知道的事实，红绿灯判定全在
   // amsgDiagnostics 那份纯函数里（那边有回归测试钉着）。
   const diagnosticRows = diagnosticsProbe
@@ -734,15 +761,13 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     : [];
   const diagnosticLevel = diagnosticRows.length ? summarizeAmsgDiagnostics(diagnosticRows) : 'unknown';
 
-  const instantChatBlockedReason = !isConnected
-    ? '先在上面把 Worker 连上。'
-    : !pushStatus?.hasSubscription
-      ? '先开启通知与推送：回复是靠推送送回来的，没有权限就变成发得出、收不到。'
-      : !instantChatSupported
-        ? 'Worker 上跑的代码还没有这个端点。回你 fork 的 sullyos-workers 点一下 Sync fork，CF 重新部署后再来开。'
-        : instantOn
-          ? 'Instant Push 也开着，两条发送路只能留一条。上面那张黄色卡片里可以把它关掉。'
-          : '';
+  const instantChatBlocker = resolveInstantChatBlocker({
+    connected: isConnected,
+    pushSubscribed: Boolean(pushStatus?.hasSubscription),
+    workerSupportsInstantChat: instantChatSupported,
+    instantPushOn: instantOn,
+  });
+  const instantChatBlockedReason = instantChatBlocker ? INSTANT_CHAT_BLOCKER_HINTS[instantChatBlocker] : '';
 
   return (
     <Modal
