@@ -12,7 +12,11 @@ import { resolveTtsProvider, getTtsProvider, getVoicePromptOverride } from '../u
 import { startStt, isSttSupported, type SttSession } from '../utils/speechToText';
 import { ContextBuilder } from '../utils/context';
 import { resolveCharTimeZone } from '../utils/timezone';
-import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
+import {
+  injectMemoryPalace,
+} from '../utils/memoryPalace/pipeline';
+import { processNewMessagesWithAutoArchive } from '../utils/memoryPalace/autoArchive';
+import { incrementDigestRound, runCognitiveDigestion } from '../utils/memoryPalace';
 import { RealtimeContextManager } from '../utils/realtimeContext';
 import { DB } from '../utils/db';
 import { ChatPrompts } from '../utils/chatPrompts';
@@ -969,10 +973,11 @@ const CallApp: React.FC = () => {
   }, []);
   // Voice input: toggle speech-to-text into the draft input box.
   const toggleStt = async () => {
-    if (isListening) { sttSessionRef.current?.stop(); return; }
+    if (isListening) { sttSessionRef.current?.stop(); trackEvent('切换语音输入', { action: 'stop' }); return; }
     if (!sttSupported) { addToast('当前环境不支持语音输入', 'info'); return; }
     try {
       setIsListening(true);
+      trackEvent('切换语音输入', { action: 'start' });
       sttSessionRef.current = await startStt('zh-CN', {
         onPartial: (t) => setDraftInput(t),
         onFinal: (t) => setDraftInput(t),
@@ -985,26 +990,19 @@ const CallApp: React.FC = () => {
       addToast(e?.message || '无法启动语音输入', 'error');
     }
   };
-  // 下载某条通话语音（优先把 blob/远端拉成文件下载，CORS 拉不到就开链接让用户自己存）
+  // 下载某条通话语音：移动端优先调系统分享/保存，避免 WebView 的 <a download> 假成功。
   const handleDownloadCallAudio = async (url?: string, ts?: number) => {
     if (!url) { addToast('这条还没有语音', 'error'); return; }
     try {
       const fname = `${(selectedChar?.name || '通话').replace(/[\\/:*?"<>|]/g, '_')}_语音_${ts || Date.now()}.mp3`;
-      let blob: Blob | null = null;
-      try { const r = await fetch(url); if (r.ok) blob = await r.blob(); } catch { /* CORS：走兜底 */ }
-      const a = document.createElement('a');
-      a.download = fname;
-      if (blob) {
-        const u = URL.createObjectURL(blob);
-        a.href = u; document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(u), 1000);
-      } else {
-        a.href = url; a.target = '_blank'; a.rel = 'noopener';
-        document.body.appendChild(a); a.click(); a.remove();
-      }
-      addToast('语音已开始下载', 'success');
-    } catch {
-      addToast('语音下载失败', 'error');
+      const blob = await fetchBlobForShare(url, 'audio/mpeg');
+      const result = await shareOrDownloadBlob({ blob, fileName: fname, shareTitle: `${selectedChar?.name || '通话'}的语音` });
+      if (result === 'cancelled') return;
+      addToast(result === 'shared' ? '已打开系统保存/分享' : '语音已开始下载', 'success');
+      trackEvent('下载一条通话语音');
+    } catch (error) {
+      console.error('[Call] download audio failed', error);
+      addToast('语音文件已失效或无法读取，请重新生成后再下载', 'error');
     }
   };
   useEffect(() => {
@@ -1065,6 +1063,8 @@ const CallApp: React.FC = () => {
             },
           });
           setBubbles(prev => prev.map(b => b.id === greetingBubble.id ? { ...b, dbId: dbId } : b));
+          markCallTurnDirty();
+          void runMemoryPalacePostHook(selectedChar);
         }
         // 尝试语音合成开场白
         let greetingAudioPlayed = false;
@@ -1182,6 +1182,10 @@ const CallApp: React.FC = () => {
         metadata: { source: 'call-end-popup', callSessionId: currentSessionId, ...payload },
       });
       await loadCallRecords(selectedChar.id);
+      // 挂断这一下最要紧：用户多半接着就把 App 关了，得把这最后一条也打脏——
+      // 打脏即传，微任务内就会冲刷上传。
+      markCallTurnDirty();
+      void runMemoryPalacePostHook(selectedChar);
     }
     clearSuspendedCall();
     resetCurrentCall();
@@ -1611,7 +1615,9 @@ const CallApp: React.FC = () => {
   }, []);
   const handleTurn = async () => {
     if (isListening) { sttSessionRef.current?.stop(); setIsListening(false); }
-    const input = draftInput.trim();
+    const typedInput = draftInput.trim();
+    const retryInput = getPendingReplyText(bubbles);
+    const input = typedInput || retryInput;
     if (!input) return addToast('说点什么吧', 'info');
     if (['connecting', 'thinking'].includes(callState)) return addToast(`${selectedChar?.name || '对方'}还在想，等一等`, 'info');
     if (isAudioPlaying) pauseAudio();
@@ -1619,11 +1625,13 @@ const CallApp: React.FC = () => {
     const pendingTouchesForTurn = pendingAvatarTouchesRef.current.slice();
     const nowTs = Date.now();
     const now = formatTime();
-    const userBubble: CallBubble = { id: `${nowTs}-u`, role: 'user', text: input, time: now, timestamp: nowTs };
-    setBubbles(prev => [...prev, userBubble]);
+    const userBubble: CallBubble = retryBubble
+      ? retryBubble
+      : { id: `${nowTs}-u`, role: 'user', text: input, time: now, timestamp: nowTs };
+    if (!isRetry) setBubbles(prev => [...prev, userBubble]);
     setDraftInput('');
     setShowInputPanel(false);
-    let userDbId: number | undefined;
+    let userDbId: number | undefined = isRetry ? userBubble.dbId : undefined;
     if (selectedChar?.id) {
       userDbId = await DB.saveMessage({
         charId: selectedChar.id,
@@ -1744,6 +1752,7 @@ const CallApp: React.FC = () => {
     }
   };
   const sendingBusy = ['connecting', 'thinking'].includes(callState);
+  const pendingCallRetryText = getPendingReplyText(bubbles);
   const displayCallState: CallState = isAudioPlaying ? 'speaking' : callState;
   const latestAssistantAudio = [...bubbles].reverse().find(b => b.role === 'assistant' && b.audioUrl)?.audioUrl;
   useEffect(() => {
@@ -1772,6 +1781,7 @@ const CallApp: React.FC = () => {
     }
     await loadCallRecords(record.characterId);
     addToast('通话记录已删除', 'success');
+    trackEvent('删除一条通话记录');
   };
   const startEditBubble = (bubble: CallBubble) => {
     if (bubble.role !== 'user') return;
@@ -1787,6 +1797,7 @@ const CallApp: React.FC = () => {
     setEditingBubble(null);
     setEditingText('');
     addToast('已更新发言', 'success');
+    trackEvent('修改自己的通话发言');
   };
   const handleRerollAssistant = async (bubble: CallBubble) => {
     if (!selectedChar || bubble.role !== 'assistant') return;
@@ -2208,7 +2219,7 @@ const CallApp: React.FC = () => {
                 {selectedChar ? <>{callMode === 'video' ? '视频接通 ' : '拨给 '}<span className="font-serif italic text-xl align-baseline" style={{ textShadow: `0 0 12px ${accentColor}` }}>{selectedChar.name}</span></> : '开始通话'}
               </span>
             </button>
-            <button onClick={() => setViewMode('history')}
+            <button onClick={() => { setViewMode('history'); trackEvent('打开通话记录'); }}
               className="relative w-full py-3 rounded-2xl border border-white/15 bg-white/[0.04] backdrop-blur-md text-white/80 flex items-center justify-center gap-2 transition active:scale-[0.98] hover:bg-white/[0.08]">
               <Clock size={16} weight="bold" style={{ color: accentColor }} /> 通话记录
             </button>
@@ -2318,7 +2329,7 @@ const CallApp: React.FC = () => {
                 const cleanVoice = cleanVoiceMarkupForDisplay(voiceText);
                 return <>{renderAssistantLine(display, accentColor)}{cleanVoice && <div className="mt-1 text-[10px] text-white/40 italic">{cleanVoice}</div>}</>;
               })()}</div>
-              {!!item.audioUrl && <button onClick={() => playAudio(item.audioUrl)} className="mt-2 text-xs px-2.5 py-1 rounded-full bg-white/8 border border-white/15 text-white/60 transition hover:bg-white/15">重播语音</button>}
+              {!!item.audioUrl && <button onClick={() => { playAudio(item.audioUrl); trackEvent('重播通话记录里的语音'); }} className="mt-2 text-xs px-2.5 py-1 rounded-full bg-white/8 border border-white/15 text-white/60 transition hover:bg-white/15">重播语音</button>}
             </div>
           ))}
         </div>
@@ -2327,6 +2338,7 @@ const CallApp: React.FC = () => {
             setSelectedCharId(recordDetail.characterId || selectedCharId);
             resetCurrentCall();
             setViewMode('in-call');
+            trackEvent('再打一通电话');
           }}
           className="keep-white w-full py-3 rounded-2xl mt-4 font-medium text-white transition active:scale-[0.98]"
           style={{ backgroundColor: accentColor }}
@@ -2400,6 +2412,11 @@ const CallApp: React.FC = () => {
           <h1 className={`mt-0.5 font-serif leading-none tracking-wide text-white ${callMode === 'video' ? 'text-[2rem]' : 'text-[2.6rem]'}`} style={{ textShadow: `0 0 26px ${accentColor}aa, 0 0 6px ${accentColor}66` }}>{selectedChar?.name || '未选择'}</h1>
           <div className="mt-2.5 text-[11px] tracking-[0.25em] text-white/55">{connSub}</div>
           <div className="mt-1.5 text-lg tabular-nums font-extralight tracking-[0.2em]" style={{ color: accentColor }}>{formatDuration(elapsedSeconds)}</div>
+          {memoryPalaceStatus && (
+            <div className="mt-1 text-[10px] text-white/55 animate-pulse">
+              记忆整理 · {memoryPalaceStatus}
+            </div>
+          )}
         </div>
       </div>
       {/* portrait + aura —— 键盘弹起时（body.ios-keyboard-open）整块收起，把可视区让给消息+输入框，
@@ -2580,10 +2597,11 @@ const CallApp: React.FC = () => {
               value={draftInput}
               onChange={(e) => setDraftInput(e.target.value)}
               className="flex-1 min-w-0 bg-transparent px-2 text-sm outline-none placeholder:text-white/35"
-              placeholder={isListening ? '在听你说……' : sendingBusy ? `${selectedChar?.name || '对方'}正在想……` : `想对${selectedChar?.name || '对方'}说什么？`}
+              placeholder={isListening ? '在听你说……' : sendingBusy ? `${selectedChar?.name || '对方'}正在想……` : pendingCallRetryText ? '上次回复中断，可直接重试' : `想对${selectedChar?.name || '对方'}说什么？`}
             />
             <button onClick={handleTurn} disabled={sendingBusy} className="keep-white shrink-0 px-4 py-2 rounded-xl text-sm font-medium text-white disabled:opacity-40 transition active:scale-95" style={{ backgroundColor: accentColor, boxShadow: `0 0 16px ${accentColor}66` }}>{sendingBusy ? '…' : '说'}</button>
           </div>
+          {!sendingBusy && pendingCallRetryText && !draftInput.trim() && <div className="text-[10px] text-amber-200/70 mt-1 px-1">上一句话还没得到回复，点击重试即可继续</div>}
           {isListening && <div className="text-[10px] text-white/40 mt-1 px-1 animate-pulse">正在聆听，点麦克风结束</div>}
         </div>
       )}
@@ -2719,6 +2737,7 @@ const CallApp: React.FC = () => {
                     pendingAvatarTouches: pendingAvatarTouchesRef.current,
                   });
                   addToast('通话已挂起，点击顶部绿色条可随时回来', 'success');
+                  trackEvent('挂起通话到后台');
                 }
               }} className="keep-white w-full py-2.5 rounded-2xl bg-emerald-500/80 text-white font-semibold transition active:scale-[0.97] flex items-center justify-center gap-2">
                 <span>先忙别的</span><span className="text-xs opacity-70">（挂起通话）</span>

@@ -651,10 +651,12 @@ export const parsePersonaMarkdown = (rawPersona: string) => {
     const sections: {title: string, content: string[], icon: string}[] = [];
     let currentSection: {title: string, content: string[], icon: string} | null = null;
 
-    lines.forEach(line => {
+    // 用 for...of 而不是 forEach：回调里的赋值不进 TS 的控制流分析，
+    // 循环结束后 currentSection 会被当成还是初始的 null。
+    for (const line of lines) {
         const trimmed = line.trim();
-        if (!trimmed) return;
-        
+        if (!trimmed) continue;
+
         const headerMatch = trimmed.match(/^###\s*(.+)/) || 
                            trimmed.match(/^\*\*([^*]+)\*\*\s*[:：]\s*(.*)/) ||
                            trimmed.match(/^([^-•\d][^:：]{1,15})[:：]\s*(.*)/);
@@ -679,8 +681,8 @@ export const parsePersonaMarkdown = (rawPersona: string) => {
                 currentSection.content.push(cleanLine);
             }
         }
-    });
-    
+    }
+
     if (currentSection && currentSection.content.length > 0) {
         sections.push(currentSection);
     }

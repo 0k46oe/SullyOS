@@ -72,6 +72,10 @@ function calling（例如携带 `tools` 就报 401），关闭它后首轮会直
 - **MCP 模式强制本地 fetch**（跳过 Instant Push）且**本轮禁 thinking**
   （`toolModeActive`，Gemini 系 "thinking + tools" 同发会 400）——与
   瑞幸/麦当劳既有约束一致，设置卡片里已向用户说明。
+- **即时对话路径下 MCP 由 amsg worker 云端执行**：主动消息 2.0 的即时对话（与上面的
+  Instant Push 是两条互斥的云端路，见 `plans/amsg2-instant-chat-contract.md`）刻意不把
+  MCP 排除在外——worker fire 时自己解析 `tool_config`、直连用户配置的 MCP 服务器，
+  工具说明块与凭据都由 worker 侧统一供给（客户端这次 POST 顺手把 `tool_config` 传上去）。
 - **session 失效自动重连一次**：`tools/call` 遇 HTTP 400/404 会重握手重试
   （服务器重启后 `Mcp-Session-Id` 作废是常态）。
 - **配置改动要 `resetMcpSession`**：URL/token/代理任一变了旧 session 就不能用，
@@ -97,3 +101,31 @@ function calling（例如携带 `tools` 就报 401），关闭它后首轮会直
   （静态 Bearer Token 与自定义 Header 均支持；OAuth 登录流仍未实现）。
 - 工具结果回填上限 20000 字符（`formatMcpToolResult`，正常使用等于不截断，
   只防病态超长结果炸上下文；被截断时会标注全文长度）。瑞幸自己的工具仍是 1500。
+
+## amsg2 后台路径
+
+主动消息 2.0 的 worker 到点调 MCP，走与前台不同的一条链：
+
+- **配置**：`mcpClient.collectMcpFireServers()` 把 enabled + 已发现工具 + 公网
+  地址的服务器（含 token/customHeaders，剥代理字段）与「聊天模型支持工具调用」
+  开关一起，作为 `tool_config.mcpServers` / `mcpUseNativeTools` 随 client_state
+  加密通道上云（`activeMsgClient.buildToolConfigEntry` 是三条上传路径的唯一咽喉）。
+- **提示词与 tools**：worker 在 onBeforeFire 用 `mcpFireCore.buildMcpFireBlock` /
+  `buildMcpFireTools` 从 tool_config 现场生成——与凭据同源，不经过 fire_pack，
+  没有陈旧窗口。amsg-server 带 `agentic-fire-tools` feature 的版本起，fire 循环
+  透传 tools 请求参数。
+- **调用识别（与前台同构的两层）**：native tool_calls 优先；没有 native 时用
+  前台「兼容模式」同一个解析器（`extractTextFakedMcpCalls`，`alsoMatchPrefix`
+  选项认带前缀写法）从正文抠 `tool_name({...})`。统一 `mcp__` 前缀路由
+  （`MCP_FIRE_NAME_PREFIX`，名映射预算 `MCP_FIRE_NAME_BUDGET` 由它算出）。
+- **执行**：`executeToolCalls` 按前缀分流到 `runMcpFireTool`，worker 直连
+  `server.url`（服务端 fetch 无 CORS）；单次调用 25s、单次 fire 内共享 120s
+  总预算，预算尽了早退回喂而不是拖到轮次上限整条重跑。
+- 纯逻辑都在 `utils/mcpFireCore.ts`（环境无关叶子，进 worker bundle，禁加
+  浏览器依赖——有守卫测试扫 import）；浏览器侧 mcpClient/mcpToolBridge 委托
+  同一份实现。
+- **版本歪斜可见**：capabilities 的 `agentic-fire-tools` + 设置页版本门槛，
+  老 worker 不会静默吞掉 MCP 配置。
+
+回归守卫：`scripts/amsg2-e2e-harness.mjs` S8/S8b（mock MCP 服务器端到端）+
+`worker/amsg/src/agentic.test.ts`、`index.test.ts`、`utils/mcpFireCore.test.ts`。

@@ -223,9 +223,6 @@ ${chatHistoryBlock ? `**重要：上面给了你最近和「${user.name}」的�
 仅输出JSON，不要其他内容。`;
 }
 
-/**
- * 根据当前小时数返回 flowNarrative 的 key。
- */
 export async function generateDailyScheduleForChar(
     char: CharacterProfile,
     userProfile: UserProfile,

@@ -4,7 +4,8 @@ import { useOS } from '../context/OSContext';
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
-import { safeResponseJson } from '../utils/safeApi';
+import { extractContent, safeResponseJson } from '../utils/safeApi';
+import { extractModelIds, normalizeModelIds } from '../utils/modelList';
 import { EXPORT_CHUNK_SIZE, sliceRanges } from '../utils/backupExport';
 import Modal from '../components/os/Modal';
 import { NotionManager, FeishuManager, RealtimeContextManager, fetchOwmWeather, fetchOpenMeteoWeather } from '../utils/realtimeContext';
@@ -21,6 +22,10 @@ import { loadPushConfig, savePushConfig, registerScheduleOnWorker, startHeartbea
 import { ProactiveChat } from '../utils/proactiveChat';
 import { InstantPushSettingsModal } from '../components/settings/InstantPushSettingsModal';
 import { PushVapidSettingsModal } from '../components/settings/PushVapidSettingsModal';
+import PushSubscriptionPanel from '../components/settings/PushSubscriptionPanel';
+import ActiveMsgGlobalSettingsModal from '../components/settings/ActiveMsgGlobalSettingsModal';
+import { syncAmsgToolConfig, syncAmsgToolConfigAndPrompts } from '../utils/amsgStateSync';
+import { ActiveMsgClient } from '../utils/activeMsgClient';
 import VersionInfo from '../components/settings/VersionInfo';
 import { LoyalUserRecruitmentController } from '../components/LoyalUserRecruitmentEvent';
 import { isPushVapidReady } from '../utils/pushVapid';
@@ -111,12 +116,44 @@ const SettingsSection: React.FC<{
     );
 };
 
+let mcpToolConfigSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingMcpToolConfigSync: (() => void) | null = null;
+
+const runMcpToolConfigSync = () => {
+    const sync = pendingMcpToolConfigSync;
+    mcpToolConfigSyncTimer = null;
+    pendingMcpToolConfigSync = null;
+    // 上传本身的失败重试与底账在 syncAmsgToolConfig 里（见 amsgStateSync），这儿只管节流。
+    sync?.();
+};
+
+/**
+ * MCP 卡片没有「保存」按钮，改一个字就落盘一次；直接每次都上云就变成一次按键一个请求。
+ * 攒到停手 800ms 再传一次，中途继续改就顺延。
+ */
+const scheduleMcpToolConfigSync = (sync: () => void) => {
+    pendingMcpToolConfigSync = sync;
+    if (mcpToolConfigSyncTimer) clearTimeout(mcpToolConfigSyncTimer);
+    mcpToolConfigSyncTimer = setTimeout(runMcpToolConfigSync, 800);
+};
+
+/** 关掉 MCP 设置就别让那 800ms 继续吊着了，攒着的改动当场传上去。 */
+const flushMcpToolConfigSync = () => {
+    if (!mcpToolConfigSyncTimer) return;
+    clearTimeout(mcpToolConfigSyncTimer);
+    runMcpToolConfigSync();
+};
+
 /**
  * 通用 MCP 工具服务器管理卡片（对标麦当劳/瑞幸卡片的样式，但服务器是用户自配的列表）。
  * 配置存 localStorage（utils/mcpClient），启用且发现过工具的服务器会在聊天里
  * 以 function-calling 注入，详见 docs/mcp-client.md。
  */
-const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> = ({ addToast }) => {
+const McpServersCard: React.FC<{
+    addToast: (msg: string, type?: any) => void;
+    /** 服务器清单或「兼容模式」开关变了 → 让主动消息那边把新配置重传上云 */
+    onMcpConfigChanged?: () => void;
+}> = ({ addToast, onMcpConfigChanged }) => {
     const { characters, groups } = useOS();
     const [servers, setServers] = useState<McpServerConfig[]>(() => loadMcpServers());
     const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -127,6 +164,7 @@ const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> 
     const persist = (next: McpServerConfig[]) => {
         setServers(next);
         saveMcpServers(next);
+        onMcpConfigChanged?.();
     };
 
     const update = (id: string, patch: Partial<McpServerConfig>) => {
@@ -155,6 +193,19 @@ const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> 
         try {
             const r = await testMcpConnection(server);
             setTestStatus(prev => ({ ...prev, [server.id]: r.ok ? `✅ ${r.message}` : `❌ ${r.message}` }));
+            // 失败原因只上报归类后的固定枚举：原始报错里可能带服务器地址和返回内容，不能外发
+            if (r.ok) {
+                trackEvent('测试 MCP 服务器连接', { result: r.tools?.length ? 'connected' : 'connected-no-tools' });
+            } else {
+                const msg = r.message || '';
+                const failureKind =
+                    /超时/.test(msg) ? 'timeout'
+                    : /鉴权失败/.test(msg) ? 'auth-failed'
+                    : /请求失败/.test(msg) ? 'fetch-failed'
+                    : /MCP HTTP/.test(msg) ? 'http-error'
+                    : 'other';
+                trackEvent('测试 MCP 服务器连接', { result: 'failed', failureKind });
+            }
             if (r.ok && r.tools) {
                 update(server.id, { tools: r.tools });
             }
@@ -189,6 +240,8 @@ const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> 
                         const next = e.target.checked;
                         setUseNativeToolsState(next);
                         setMcpUseNativeTools(next);
+                        onMcpConfigChanged?.();
+                        trackEvent('关闭原生工具调用（退回文字兼容模式）', { state: next ? 'on' : 'off' });
                     }} className="sr-only peer" />
                     <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-violet-500"></div>
                 </label>
@@ -206,6 +259,7 @@ const McpServersCard: React.FC<{ addToast: (msg: string, type?: any) => void }> 
                             <input type="checkbox" checked={server.enabled} onChange={e => {
                                 if (e.target.checked && !(server.tools?.length)) {
                                     addToast('先点「测试连接」拿到工具清单再启用', 'error');
+                                    trackEvent('启用未测通的 MCP 服务器被拦下');
                                     return;
                                 }
                                 update(server.id, { enabled: e.target.checked });
@@ -362,17 +416,24 @@ const Settings: React.FC = () => {
       apiPresets, addApiPreset, updateApiPreset, removeApiPreset,
       sysOperation, // Get progress state
       realtimeConfig, updateRealtimeConfig, // 实时感知配置
+      // 改工具凭据时要连云端提示词一起刷（见 syncAmsgToolConfigAndPrompts）
+      characters, groups, userProfile,
       cloudBackupConfig, updateCloudBackupConfig,
       cloudBackupToWebDAV, cloudRestoreFromWebDAV, listCloudBackups,
   } = useOS();
   
   const [localKey, setLocalKey] = useState(apiConfig.apiKey);
   const [localUrl, setLocalUrl] = useState(apiConfig.baseUrl);
-  const [localModel, setLocalModel] = useState(apiConfig.model);
+  const [localModel, setLocalModel] = useState(String(apiConfig.model || ''));
   const [localStream, setLocalStream] = useState<boolean>(apiConfig.stream === true);
   const [localTemperature, setLocalTemperature] = useState<number>(
     typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85
   );
+  const [localVisionEnabled, setLocalVisionEnabled] = useState(apiConfig.visionApi?.enabled === true);
+  const [localVisionUrl, setLocalVisionUrl] = useState(apiConfig.visionApi?.baseUrl || '');
+  const [localVisionKey, setLocalVisionKey] = useState(apiConfig.visionApi?.apiKey || '');
+  const [localVisionModel, setLocalVisionModel] = useState(apiConfig.visionApi?.model || '');
+  const [visionStatusMsg, setVisionStatusMsg] = useState('');
   const [localMiniMaxKey, setLocalMiniMaxKey] = useState(apiConfig.minimaxApiKey || '');
   const [localMiniMaxGroupId, setLocalMiniMaxGroupId] = useState(apiConfig.minimaxGroupId || '');
   const [localMiniMaxRegion, setLocalMiniMaxRegion] = useState<'domestic' | 'overseas'>(
@@ -445,6 +506,7 @@ const Settings: React.FC = () => {
   // 入口刻意低调：默认折叠，普通用户不需要碰，开箱即用。
   const [proxyWorkerInput, setProxyWorkerInput] = useState(getProxyWorkerUrl());
   const [showProxyConfig, setShowProxyConfig] = useState(false);
+  const [analyticsEnabled, setAnalyticsEnabledState] = useState(() => isAnalyticsEnabled());
 
   // 实时感知配置的本地状态
   const [rtWeatherEnabled, setRtWeatherEnabled] = useState(realtimeConfig.weatherEnabled);
@@ -469,13 +531,14 @@ const Settings: React.FC = () => {
   const XHS_RISK_TEXT = '⚠️ 风险：本功能基于网页爬虫技术调用小红书，账号有被风控的概率。建议①用小号；②尽量别让角色主动发帖；③发出的笔记可能被屏蔽。';
   const XHS_COOKIE_GUIDE = [
     '【获取小红书 cookie 教程】',
-    '1. 用电脑浏览器(Chrome/Edge)登录 www.xiaohongshu.com',
+    '1. 用电脑浏览器(Chrome/Edge)登录实际分配给你的站点：www.xiaohongshu.com 或 www.rednote.com',
     '2. 按 F12 打开开发者工具，切到「Network/网络」标签',
-    '3. 刷新页面，点列表最上面那条「explore」(document 类型，发给 www.xiaohongshu.com 的主请求)',
+    '3. 刷新页面，点列表最上面那条「explore」(document 类型，发给当前网站的主请求)',
     '4. 右侧切到「Headers/标头」，往下滚到「Request Headers/请求标头」',
     '5. 找到 cookie: 开头那一行(很长一串)',
     '6. 复制它后面整段的值：可把 Request Headers 右边的「Raw」开关打开看纯文本更好选，或在值上右键 Copy value，或选中后 Ctrl+C',
     '7. 确认这串里有 a1= 和 web_session= 两个字段(最关键)，粘到「小红书 Lite」的 cookie 框',
+    'Lite 会自动判断这串 Cookie 属于国内小红书还是全球 RedNote；不用自己补 gid、bRequestId 等会随站点变化的字段。',
     '注意：别用 Console 的 document.cookie，拿不到 web_session(httpOnly)。cookie 数天~数周会过期，失效重复制即可。',
   ].join('\n');
   const _xhsCfgUrl = realtimeConfig.xhsMcpConfig?.serverUrl || '';
@@ -488,6 +551,7 @@ const Settings: React.FC = () => {
   const [rtXhsNickname, setRtXhsNickname] = useState(realtimeConfig.xhsMcpConfig?.loggedInNickname || '');
   const [rtXhsUserId, setRtXhsUserId] = useState(realtimeConfig.xhsMcpConfig?.loggedInUserId || '');
   const [rtXhsCookie, setRtXhsCookie] = useState(realtimeConfig.xhsMcpConfig?.cookie || '');
+  const [rtXhsPlatform, setRtXhsPlatform] = useState<'xhs' | 'rednote' | undefined>(realtimeConfig.xhsMcpConfig?.platform);
   const [rtXhsGuideOpen, setRtXhsGuideOpen] = useState(false);
   const [rtTestStatus, setRtTestStatus] = useState('');
 
@@ -518,13 +582,16 @@ const Settings: React.FC = () => {
   // "深度重置". 不持久化, 刷新页面归零 (用户原话: "刷新页面正常消失").
   const [ppZombieStreak, setPpZombieStreak] = useState(0);
   const [showInstantModal, setShowInstantModal] = useState(false);
+  const [showAmsg2Modal, setShowAmsg2Modal] = useState(false);
   const [showVapidModal, setShowVapidModal] = useState(false);
   const [vapidReadyTick, setVapidReadyTick] = useState(0); // 关闭 VAPID 弹窗后刷新顶层徽标
 
   // 模型选择 Modal 的过滤 + 公共前缀（memo 掉，避免每次 Settings 重渲染都重算）
   const modelPickerView = useMemo(() => {
       const q = modelFilter.trim().toLowerCase();
-      const filtered = q ? availableModels.filter(m => m.toLowerCase().includes(q)) : availableModels;
+      // 老备份或非标准 /models 可能混入对象；渲染前再守一道，保证任何坏值都不会让设置页白屏。
+      const safeModels = normalizeModelIds(availableModels);
+      const filtered = q ? safeModels.filter(m => m.toLowerCase().includes(q)) : safeModels;
       let commonPrefix = '';
       if (filtered.length >= 2) {
           let p = filtered[0];
@@ -552,8 +619,14 @@ const Settings: React.FC = () => {
       setPpStatus('正在连接 Worker…');
       try {
           const res = await fetch(`${initialPushCfg.workerUrl}/health`);
-          if (!res.ok) { setPpStatus(`失败：Worker HTTP ${res.status}`); setPpBusy(false); return; }
+          if (!res.ok) {
+              trackEvent('启用主动消息 Push 加速', { result: 'fail', failStage: 'worker_health' });
+              trackEvent('启用 Push 加速器的结果', { result: 'worker-unreachable' });
+              setPpStatus(`失败：Worker HTTP ${res.status}`); setPpBusy(false); return;
+          }
       } catch (e: any) {
+          trackEvent('启用主动消息 Push 加速', { result: 'fail', failStage: 'network' });
+          trackEvent('启用 Push 加速器的结果', { result: 'worker-unreachable' });
           setPpStatus(`失败：${e?.message || '网络错误'}`); setPpBusy(false); return;
       }
 
@@ -563,6 +636,8 @@ const Settings: React.FC = () => {
       setPpStatus('正在请求通知权限并创建订阅…');
       const sub = await ensureSubscribed();
       if (!sub.ok) {
+          trackEvent('启用主动消息 Push 加速', { result: 'fail', failStage: 'subscribe' });
+          trackEvent('启用 Push 加速器的结果', { result: 'subscribe-failed' });
           setPpStatus(`失败：${sub.reason || '订阅创建失败'}`);
           setPpBusy(false);
           await refreshPpDiag();
@@ -582,10 +657,16 @@ const Settings: React.FC = () => {
       }
 
       if (schedules.length === 0) {
+          trackEvent('启用主动消息 Push 加速', { result: 'success' });
+          trackEvent('启用 Push 加速器的结果', { result: 'ok-no-schedule' });
           setPpStatus('已启用（订阅已建立。暂无主动消息定时，下次开启角色主动消息时会自动注册）');
       } else if (okCount < schedules.length) {
+          trackEvent('启用主动消息 Push 加速', { result: 'partial' });
+          trackEvent('启用 Push 加速器的结果', { result: 'ok-partial-schedule' });
           setPpStatus(`已启用：${okCount}/${schedules.length} 个定时注册成功`);
       } else {
+          trackEvent('启用主动消息 Push 加速', { result: 'success' });
+          trackEvent('启用 Push 加速器的结果', { result: 'ok' });
           setPpStatus(`已启用，${okCount} 个主动消息定时已注册`);
       }
       setPpBusy(false);
@@ -593,6 +674,7 @@ const Settings: React.FC = () => {
   };
 
   const doDisablePushAccelerator = async () => {
+      trackEvent('关闭主动消息 Push 加速');
       savePushConfig(false);
       setPpEnabled(false);
       stopHeartbeat();
@@ -606,10 +688,16 @@ const Settings: React.FC = () => {
       setPpStatus('正在让 Worker 发一条测试推送…');
       const res = await sendTestPush();
       if (res.ok) {
+          trackEvent('发送测试推送（主动消息加速）', { result: 'sent' });
+          trackEvent('发一条测试推送', { result: 'sent' });
           setPpStatus('测试推送已发出。如果 5 秒内系统通知里没出现"推送测试成功"，说明送达环节有问题——看下方诊断面板。');
       } else if (res.deadSubscription) {
+          trackEvent('发送测试推送（主动消息加速）', { result: 'dead_subscription' });
+          trackEvent('发一条测试推送', { result: 'dead-subscription' });
           setPpStatus('订阅已被浏览器吊销（zombie endpoint）。请点下方"重置订阅"重建一次再测。');
       } else {
+          trackEvent('发送测试推送（主动消息加速）', { result: 'fail' });
+          trackEvent('发一条测试推送', { result: 'failed' });
           setPpStatus(`测试失败：${res.reason || '未知错误'}${res.status ? `（HTTP ${res.status}）` : ''}`);
       }
       setPpTestBusy(false);
@@ -622,6 +710,7 @@ const Settings: React.FC = () => {
       setPpStatus('正在重置订阅…');
       const res = await resetSubscription();
       if (res.ok) {
+          trackEvent('重置推送订阅', { result: 'success', attempt: bucketRetryCount(ppZombieStreak) });
           setPpZombieStreak(0);
           setPpStatus('订阅已重建。可以再点"发一条测试推送"试一下。');
       } else {
@@ -630,6 +719,11 @@ const Settings: React.FC = () => {
           if (/permanently-removed|zombie/i.test(reason)) {
               setPpZombieStreak(c => c + 1);
           }
+          // 只上报归类后的固定枚举，失败原文一个字都不带；重试次数同样先分桶
+          trackEvent('重置推送订阅', {
+              result: /permanently-removed|zombie/i.test(reason) ? 'fail_zombie' : 'fail_other',
+              attempt: bucketRetryCount(ppZombieStreak),
+          });
           setPpStatus(`重置失败：${reason || '未知错误'}`);
       }
       setPpResetBusy(false);
@@ -647,8 +741,10 @@ const Settings: React.FC = () => {
           // ProactiveChat.resume() 把所有 schedule 推回新 SW. deepResetSubscription 内部
           // 不调它是为了避免循环依赖 (ProactiveChat 反向依赖 proactivePushConfig).
           try { ProactiveChat.resume(); } catch (e) { console.warn('[Settings] ProactiveChat.resume failed', e); }
+          trackEvent('深度重置推送订阅', { result: 'success' });
           setPpStatus('订阅已重建。可以再点"发一条测试推送"试一下。');
       } else {
+          trackEvent('深度重置推送订阅', { result: 'fail' });
           setPpStatus(`深度重置失败：${res.reason || '未知错误'}`);
       }
       setPpDeepResetBusy(false);
@@ -695,9 +791,13 @@ const Settings: React.FC = () => {
   useEffect(() => {
       setLocalUrl(apiConfig.baseUrl);
       setLocalKey(apiConfig.apiKey);
-      setLocalModel(apiConfig.model);
+      setLocalModel(String(apiConfig.model || ''));
       setLocalStream(apiConfig.stream === true);
       setLocalTemperature(typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85);
+      setLocalVisionEnabled(apiConfig.visionApi?.enabled === true);
+      setLocalVisionUrl(apiConfig.visionApi?.baseUrl || '');
+      setLocalVisionKey(apiConfig.visionApi?.apiKey || '');
+      setLocalVisionModel(apiConfig.visionApi?.model || '');
       setLocalMiniMaxKey(apiConfig.minimaxApiKey || '');
       setLocalMiniMaxGroupId(apiConfig.minimaxGroupId || '');
       setLocalMiniMaxRegion(apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic');
@@ -718,14 +818,14 @@ const Settings: React.FC = () => {
   const loadPreset = (preset: typeof apiPresets[0]) => {
       setSelectedPresetId(preset.id);
       setSelectedPresetName(preset.name);
-      setLocalUrl(preset.config.baseUrl);
-      setLocalKey(preset.config.apiKey);
-      setLocalModel(preset.config.model);
+      setLocalUrl(normalizeApiBaseUrl(preset.config.baseUrl));
+      setLocalKey(normalizeApiCredential(preset.config.apiKey));
+      setLocalModel(normalizeApiModel(preset.config.model));
       setLocalStream(preset.config.stream === true);
       setLocalTemperature(typeof preset.config.temperature === 'number' ? preset.config.temperature : 0.85);
       // MiniMax / AceStep settings are NOT overwritten by presets — typically one user
       // has only one MiniMax / Replicate account regardless of which LLM preset they use.
-      addToast(`已加载配置: ${preset.name}`, 'info');
+      addToast(`已载入预设：${preset.name}；点「保存配置」后才会切换生效`, 'info');
   };
 
   const cancelPresetDeleteHold = useCallback(() => {
@@ -771,9 +871,9 @@ const Settings: React.FC = () => {
           return;
       }
       addApiPreset(newPresetName, {
-        baseUrl: localUrl,
-        apiKey: localKey,
-        model: localModel,
+        baseUrl: normalizeApiBaseUrl(localUrl),
+        apiKey: normalizeApiCredential(localKey),
+        model: normalizeApiModel(localModel),
         stream: localStream,
         temperature: localTemperature,
       });
@@ -789,12 +889,15 @@ const Settings: React.FC = () => {
       return;
     }
     const nextConfig = {
-      apiKey: localKey,
-      baseUrl: localUrl,
-      model: localModel,
+      apiKey: normalizeApiCredential(localKey),
+      baseUrl: normalizeApiBaseUrl(localUrl),
+      model: normalizeApiModel(localModel),
       stream: localStream,
       temperature: localTemperature,
     };
+    setLocalKey(nextConfig.apiKey);
+    setLocalUrl(nextConfig.baseUrl);
+    setLocalModel(nextConfig.model);
     updateApiConfig(nextConfig);
     if (selectedApiPreset) {
       updateApiPreset(selectedApiPreset.id, presetName, {
@@ -804,6 +907,38 @@ const Settings: React.FC = () => {
     }
     setStatusMsg(selectedApiPreset ? '配置和预设已保存' : '配置已保存');
     setTimeout(() => setStatusMsg(''), 2000);
+    // 已排程的主动消息 2.0 AI 任务里冻结的是排程那一刻的凭据——换 Key / 换模型后
+    // 不重传的话，到点全拿旧凭据打请求（旧 Key 一吊销就是连环 401）。best-effort：
+    // 保存本身不等它，失败只提示；没配 2.0 / 没有 pending AI 任务时它是 no-op。
+    void ActiveMsgClient.refreshApiCredentialsForPendingTasks({ ...apiConfig, ...nextConfig })
+      .then((result) => {
+        if (result.status === 'partial') {
+          addToast(`API 已保存，但有 ${result.failed} 条已排程的主动消息没换上新凭据，稍后再保存一次可重试。`, 'error');
+        }
+      })
+      .catch((error) => {
+        console.warn('[Settings] 刷新已排程任务的 API 凭据失败', error);
+        addToast('API 已保存，但已排程的主动消息凭据刷新失败，稍后再保存一次可重试。', 'error');
+      });
+  };
+
+  const handleSaveVisionApi = () => {
+    const nextVisionApi = {
+      enabled: localVisionEnabled,
+      baseUrl: normalizeApiBaseUrl(localVisionUrl),
+      apiKey: normalizeApiCredential(localVisionKey),
+      model: normalizeApiModel(localVisionModel),
+    };
+    if (nextVisionApi.enabled && (!nextVisionApi.baseUrl || !nextVisionApi.apiKey || !nextVisionApi.model)) {
+      addToast('开启识图 API 前，请填写完整的 URL、Key 和 Model', 'error');
+      return;
+    }
+    setLocalVisionUrl(nextVisionApi.baseUrl);
+    setLocalVisionKey(nextVisionApi.apiKey);
+    setLocalVisionModel(nextVisionApi.model);
+    updateApiConfig({ visionApi: nextVisionApi });
+    setVisionStatusMsg(nextVisionApi.enabled ? '识图 API 已接入' : '已关闭，沿用原有识图方式');
+    setTimeout(() => setVisionStatusMsg(''), 2200);
   };
 
   const handleSaveOtherApis = () => {
@@ -867,29 +1002,29 @@ const Settings: React.FC = () => {
   };
 
   const fetchModels = async () => {
-    if (!localUrl) { setStatusMsg('请先填写 URL'); return; }
+    const baseUrl = normalizeApiBaseUrl(localUrl);
+    const apiKey = normalizeApiCredential(localKey);
+    if (!baseUrl) { setStatusMsg('请先填写 URL'); return; }
     setIsLoadingModels(true);
     setStatusMsg('正在连接...');
     try {
-        const baseUrl = localUrl.replace(/\/+$/, '');
         const response = await fetch(`${baseUrl}/models`, {
             method: 'GET',
-            headers: { 'Authorization': `Bearer ${localKey}`, 'Content-Type': 'application/json' }
+            headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
         });
-        if (!response.ok) throw new Error(`Status ${response.status}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await safeResponseJson(response);
-        // Support various API response formats
-        const list = data.data || data.models || [];
-        if (Array.isArray(list)) {
-            const models = list.map((m: any) => m.id || m);
+        // Support common OpenAI-compatible and nested gateway response formats.
+        const models = extractModelIds(data);
+        if (models.length > 0) {
             setAvailableModels(models);
             if (models.length > 0 && !models.includes(localModel)) setLocalModel(models[0]);
             setStatusMsg(`获取到 ${models.length} 个模型`);
             setShowModelModal(true); // Open selector immediately
-        } else { setStatusMsg('格式不兼容'); }
+        } else { setStatusMsg('模型列表为空或格式不兼容'); }
     } catch (error: any) {
         console.error(error);
-        setStatusMsg('连接失败');
+        setStatusMsg(`连接失败${error?.message ? `：${error.message}` : ''}`);
     } finally {
         setIsLoadingModels(false);
     }
@@ -926,6 +1061,7 @@ const Settings: React.FC = () => {
   };
 
   const handleExport = async (mode: 'text_only' | 'media_only' | 'full') => {
+      trackEvent('导出本地备份', { scope: mode });
       try {
           // 二次确认：整包备份（full / text_only）本就包含你的 API 密钥等设置——这是预期行为，
           // 但绝不能发给别人。media_only 只有媒体、不含密钥，视为可分享。
@@ -934,7 +1070,10 @@ const Settings: React.FC = () => {
               const msg = includesSettings
                   ? '该导出数据包含了明文密钥，请不要发送给任何人'
                   : '该导出内容安全，可以用于分享';
-              if (!window.confirm(`${msg}\n\n点「确定」继续导出，「取消」中止。`)) return;
+              if (!window.confirm(`${msg}\n\n点「确定」继续导出，「取消」中止。`)) {
+                  trackEvent('取消导出前的密钥确认', { mode });
+                  return;
+              }
           }
 
           // Trigger export (Context handles loading state UI)
@@ -980,6 +1119,7 @@ const Settings: React.FC = () => {
                   console.error("Native write failed", e);
                   // 尽力清掉写了一半的残片，别留下损坏文件。
                   try { await Filesystem.deleteFile({ path: tempName, directory: Directory.Cache }); } catch { /* ignore */ }
+                  trackEvent('保存备份文件到手机失败', { mode });
                   addToast("保存文件失败", "error");
               }
           } else {
@@ -1002,6 +1142,8 @@ const Settings: React.FC = () => {
               document.body.removeChild(a);
           }
       } catch (e: any) {
+          // 只报导出档位，错误文案是动态串不能进属性
+          trackEvent('导出备份失败', { mode });
           addToast(e.message, 'error');
       }
   };
@@ -1013,6 +1155,17 @@ const Settings: React.FC = () => {
       // Pass the File object directly to importSystem
       importSystem(file).catch(err => {
           console.error(err);
+          // 只上报归类后的固定枚举：报错原文（可能含文件路径/内容片段）只留在 console
+          const rawMessage = String(err?.message || '');
+          trackEvent('导入备份失败', {
+              source: file.name.toLowerCase().endsWith('.zip') ? 'zip' : 'json',
+              reason:
+                  /无效的文件格式/.test(rawMessage) ? 'invalid_file_format'
+                  : /缺少 data\.json/.test(rawMessage) ? 'missing_data_json'
+                  : /manifest\.json 解析失败/.test(rawMessage) ? 'bad_manifest'
+                  : /JSON 格式错误/.test(rawMessage) ? 'json_syntax'
+                  : 'other',
+          });
           const details = err?.stack || err?.message || String(err || '未知错误');
           showError('导入失败', details);
           addToast('导入失败，错误信息已展开', 'error');
@@ -1140,7 +1293,22 @@ const Settings: React.FC = () => {
           const tempConfig = { ...cloudBackupConfig, webdavUrl: cbUrl, username: cbUsername, password: cbPassword, remotePath: cbPath };
           const result = await testConnection(tempConfig);
           setCloudTestResult(result.ok ? `✓ ${result.message}` : `✗ ${result.message}`);
+          // 失败原因收敛成固定几类，地址/账号/密码与原始报错都不上报
+          if (result.ok) {
+              trackEvent('测试 WebDAV 连接', { result: '成功' });
+          } else {
+              const m = result.message || '';
+              trackEvent('测试 WebDAV 连接', {
+                  result: '失败',
+                  failure_kind:
+                      /认证失败/.test(m) ? 'auth_401'
+                      : /无法创建/.test(m) ? 'dir_missing_uncreatable'
+                      : /服务器返回/.test(m) ? 'http_status'
+                      : 'network_error',
+              });
+          }
       } catch (e: any) {
+          trackEvent('测试 WebDAV 连接', { result: '失败', failure_kind: 'network_error' });
           setCloudTestResult(`✗ ${e.message}`);
       }
       setCloudTesting(false);
@@ -1158,21 +1326,29 @@ const Settings: React.FC = () => {
   };
 
   // 保存 / 恢复主代理 Worker 地址
+  // 主动消息那边的搜索、Notion、飞书全经这个地址转发（tool_config.proxyWorkerUrl），
+  // 所以改完必须把 tool_config 重传一次——不然云端还指着旧地址，角色到点的工具全静默失灵。
   const handleSaveProxyWorker = () => {
       const raw = proxyWorkerInput.trim();
       if (raw && !/^https?:\/\//i.test(raw)) {
           addToast('地址必须以 http:// 或 https:// 开头', 'error');
+          trackEvent('代理地址格式被拒');
           return;
       }
       setProxyWorkerUrl(raw);                 // 传空 / 默认地址 → 自动回落默认
       const applied = getProxyWorkerUrl();
       setProxyWorkerInput(applied);
+      // 上云那份的 proxyWorkerUrl 是现算的（读 getProxyWorkerUrl），所以要在生效之后再传。
+      syncAmsgToolConfig(realtimeConfig);
+      if (applied === DEFAULT_PROXY_WORKER) trackEvent('恢复默认代理 Worker', { via: 'save-empty' });
       addToast(applied === DEFAULT_PROXY_WORKER ? '已恢复为默认 Worker' : 'Worker 地址已保存', 'success');
   };
 
   const handleResetProxyWorker = () => {
       setProxyWorkerUrl('');
       setProxyWorkerInput(getProxyWorkerUrl());
+      syncAmsgToolConfig(realtimeConfig);
+      trackEvent('恢复默认代理 Worker', { via: 'reset-button' });
       addToast('已恢复为默认 Worker', 'info');
   };
 
@@ -1186,7 +1362,11 @@ const Settings: React.FC = () => {
       try {
           const files = await listCloudBackups();
           setCloudBackupFiles(files);
-      } catch { addToast('获取云端备份列表失败', 'error'); }
+          trackEvent('加载云端备份列表', { provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav', result: '成功' });
+      } catch {
+          trackEvent('加载云端备份列表', { provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav', result: '失败' });
+          addToast('获取云端备份列表失败', 'error');
+      }
   };
 
   const handleCloudRestore = async (file: import('../types').CloudBackupFile) => {
@@ -1194,6 +1374,11 @@ const Settings: React.FC = () => {
       try {
           await cloudRestoreFromWebDAV(file);
       } catch (err: any) {
+          // 只区分「下载阶段」还是「导入阶段」，报错原文只进 showError / console
+          trackEvent('从云端恢复失败', {
+              provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav',
+              stage: /^恢复失败/.test(String(err?.message || '')) ? 'import' : 'download',
+          });
           const details = err?.stack || err?.message || String(err || '未知错误');
           showError('云端恢复失败', details);
       }
@@ -1202,7 +1387,11 @@ const Settings: React.FC = () => {
   // GitHub backup handlers — single "测试并连接" button does verify-token +
   // ensure-repo, persists owner/login on success so users never type 'owner'.
   const handleTestGithub = async () => {
-      if (!ghToken.trim()) { setGhTestResult('✗ 请先粘贴 Token'); return; }
+      if (!ghToken.trim()) {
+          trackEvent('测试并连接 GitHub', { result: '失败', failure_stage: 'no_token' });
+          setGhTestResult('✗ 请先粘贴 Token');
+          return;
+      }
       setGhTesting(true);
       setGhTestResult('');
       try {
@@ -1214,6 +1403,10 @@ const Settings: React.FC = () => {
               githubUseProxy: ghUseProxy,
           });
           setGhTestResult(result.ok ? `✓ ${result.message}` : `✗ ${result.message}`);
+          // 失败时只报卡在哪一步：token 校验没过 → 没有 login，仓库准备没过 → 有 login
+          trackEvent('测试并连接 GitHub', result.ok
+              ? { result: '成功' }
+              : { result: '失败', failure_stage: result.login ? 'ensure_repo' : 'verify_token' });
           if (result.ok && result.login) {
               updateCloudBackupConfig({
                   enabled: true,
@@ -1225,12 +1418,14 @@ const Settings: React.FC = () => {
               });
           }
       } catch (e: any) {
+          trackEvent('测试并连接 GitHub', { result: '失败', failure_stage: 'exception' });
           setGhTestResult(`✗ ${e?.message || '连接失败'}`);
       }
       setGhTesting(false);
   };
 
   const handleDisableCloud = () => {
+      trackEvent('关闭云端备份', { provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav' });
       updateCloudBackupConfig({ enabled: false });
       setShowCloudModal(false);
       setShowGithubModal(false);
@@ -1243,6 +1438,7 @@ const Settings: React.FC = () => {
   // saved credentials, so old WebDAV users keep their old backups visible
   // when they switch back.
   const switchToGithub = () => {
+      trackEvent('切换云端备份服务商', { to: 'github' });
       if (cloudBackupConfig.githubToken && cloudBackupConfig.githubOwner) {
           updateCloudBackupConfig({ provider: 'github' });
           addToast(`已切换到 GitHub @${cloudBackupConfig.githubOwner}`, 'success');
@@ -1251,6 +1447,7 @@ const Settings: React.FC = () => {
       }
   };
   const switchToWebDAV = () => {
+      trackEvent('切换云端备份服务商', { to: 'webdav' });
       if (cloudBackupConfig.webdavUrl && cloudBackupConfig.username) {
           updateCloudBackupConfig({ provider: 'webdav' });
           addToast('已切换回 WebDAV，旧备份依旧在', 'success');
@@ -1266,7 +1463,7 @@ const Settings: React.FC = () => {
 
   // 保存实时感知配置
   const handleSaveRealtimeConfig = () => {
-      updateRealtimeConfig({
+      const updates = {
           weatherEnabled: rtWeatherEnabled,
           weatherApiKey: rtWeatherKey,
           weatherCity: rtWeatherCity,
@@ -1287,12 +1484,17 @@ const Settings: React.FC = () => {
               enabled: rtXhsMcpEnabled,
               serverUrl: rtXhsMode === 'lite' ? XHS_LITE_URL : rtXhsLocalUrl,
               cookie: rtXhsMode === 'lite' ? (rtXhsCookie.trim() || undefined) : undefined,
+              platform: rtXhsMode === 'lite' ? rtXhsPlatform : undefined,
               loggedInNickname: rtXhsNickname || undefined,
               loggedInUserId: rtXhsUserId || undefined,
-              userXsecToken: realtimeConfig.xhsMcpConfig?.userXsecToken, // 保留自动获取的 token
+              userXsecToken: realtimeConfig.xhsMcpConfig?.userXsecToken,
           }
-      });
-      RealtimeContextManager.clearCache(); // 城市/来源改了就别再吐旧缓存
+      };
+      updateRealtimeConfig(updates);
+      RealtimeContextManager.clearCache();
+      const nextRealtimeConfig = { ...realtimeConfig, ...updates };
+      // 云端凭据 + 按配置裁剪过的提示词一起刷，否则角色到点会照着旧提示词调已关掉的工具。
+      syncAmsgToolConfigAndPrompts(nextRealtimeConfig, { characters, userProfile, groups });
       addToast('实时感知配置已保存', 'success');
       setShowRealtimeModal(false);
   };
@@ -1309,8 +1511,11 @@ const Settings: React.FC = () => {
               ? await fetchOwmWeather(rtWeatherCity, rtWeatherKey)
               : await fetchOpenMeteoWeather(rtWeatherCity);
           const source = rtWeatherKey ? 'OpenWeatherMap' : 'Open-Meteo';
+          // 刻意不带数据源名：那等价于「有没有填天气 key」，属于配置状态
+          trackEvent('测试天气数据源连接', { result: 'ok' });
           setRtTestStatus(`连接成功！(${source}) ${weather.city}: ${weather.description}, ${weather.temp}°C`);
       } catch (e: any) {
+          trackEvent('测试天气数据源连接', { result: 'failed' });
           setRtTestStatus(`连接失败: ${e.message}`);
       }
   };
@@ -1324,8 +1529,10 @@ const Settings: React.FC = () => {
       setRtTestStatus('正在测试 Notion 连接...');
       try {
           const result = await NotionManager.testConnection(rtNotionKey, rtNotionDbId);
+          trackEvent('测试 Notion 连接', { result: result.success ? 'ok' : 'failed' });
           setRtTestStatus(result.message);
       } catch (e: any) {
+          trackEvent('测试 Notion 连接', { result: 'network-error' });
           setRtTestStatus(`网络错误: ${e.message}`);
       }
   };
@@ -1339,8 +1546,10 @@ const Settings: React.FC = () => {
       setRtTestStatus('正在测试飞书连接...');
       try {
           const result = await FeishuManager.testConnection(rtFeishuAppId, rtFeishuAppSecret, rtFeishuBaseId, rtFeishuTableId);
+          trackEvent('测试飞书连接', { result: result.success ? 'ok' : 'failed' });
           setRtTestStatus(result.message);
       } catch (e: any) {
+          trackEvent('测试飞书连接', { result: 'network-error' });
           setRtTestStatus(`网络错误: ${e.message}`);
       }
   };
@@ -1364,29 +1573,39 @@ const Settings: React.FC = () => {
               cookieToUse,
           );
           if (result.connected) {
+              // 昵称 / 用户 ID / xsecToken 一律不带
+              trackEvent('测试小红书桥接连接', { mode: rtXhsMode === 'lite' ? 'lite' : 'local', result: 'connected' });
               const toolCount = result.tools?.length || 0;
               const tokenInfo = result.xsecToken ? ' | xsecToken 已获取' : '';
+              const platformInfo = result.platform ? ` | 平台: ${result.platform === 'rednote' ? 'RedNote' : '小红书'}` : '';
               const loginInfo = result.loggedIn
-                  ? ` | ${result.nickname ? `账号: ${result.nickname}` : '已登录'}${result.userId ? ` (ID: ${result.userId})` : ''}${tokenInfo}`
+                  ? `${platformInfo} | ${result.nickname ? `账号: ${result.nickname}` : '已登录'}${result.userId ? ` (ID: ${result.userId})` : ''}${tokenInfo}`
                   : ' | 未登录，请检查 cookie 或登录小红书';
               setRtTestStatus(`连接成功! ${toolCount} 个功能可用${loginInfo}`);
               // 自动填充：只在用户未手动填写时覆盖
               if (result.nickname && !rtXhsNickname) setRtXhsNickname(result.nickname);
               if (result.userId && !rtXhsUserId) setRtXhsUserId(result.userId);
-              updateRealtimeConfig({
+              setRtXhsPlatform(result.platform);
+              const xhsUpdates = {
                   xhsMcpConfig: {
                       enabled: rtXhsMcpEnabled,
                       serverUrl: urlToUse,
                       cookie: cookieToUse,
+                      platform: result.platform,
                       loggedInNickname: rtXhsNickname || result.nickname,
                       loggedInUserId: rtXhsUserId || result.userId,
                       userXsecToken: result.xsecToken,
                   }
-              });
+              };
+              updateRealtimeConfig(xhsUpdates);
+              const nextConfig = { ...realtimeConfig, ...xhsUpdates };
+              syncAmsgToolConfigAndPrompts(nextConfig, { characters, userProfile, groups });
           } else {
+              trackEvent('测试小红书桥接连接', { mode: rtXhsMode === 'lite' ? 'lite' : 'local', result: 'failed' });
               setRtTestStatus(`连接失败: ${result.error}`);
           }
       } catch (e: any) {
+          trackEvent('测试小红书桥接连接', { mode: rtXhsMode === 'lite' ? 'lite' : 'local', result: 'network-error' });
           setRtTestStatus(`网络错误: ${e.message}`);
       }
   };
@@ -1410,12 +1629,15 @@ const Settings: React.FC = () => {
       try {
           const r = await testMcdConnection();
           if (r.ok) {
+              trackEvent('测试点单 MCP 连接', { provider: 'mcdonalds', result: 'ok' });
               const names = (r.tools || []).map(t => t.name).slice(0, 6).join(', ');
               setMcdTestStatus(`✅ ${r.message}${names ? `\n工具: ${names}${(r.tools || []).length > 6 ? ' ...' : ''}` : ''}`);
           } else {
+              trackEvent('测试点单 MCP 连接', { provider: 'mcdonalds', result: 'failed' });
               setMcdTestStatus(`❌ ${r.message}`);
           }
       } catch (e: any) {
+          trackEvent('测试点单 MCP 连接', { provider: 'mcdonalds', result: 'exception' });
           setMcdTestStatus(`❌ ${e?.message || String(e)}`);
       } finally {
           setMcdTesting(false);
@@ -1441,12 +1663,15 @@ const Settings: React.FC = () => {
       try {
           const r = await testLuckinConnection();
           if (r.ok) {
+              trackEvent('测试点单 MCP 连接', { provider: 'luckin', result: 'ok' });
               const names = (r.tools || []).map(t => t.name).slice(0, 6).join(', ');
               setLuckinTestStatus(`✅ ${r.message}${names ? `\n工具: ${names}${(r.tools || []).length > 6 ? ' ...' : ''}` : ''}`);
           } else {
+              trackEvent('测试点单 MCP 连接', { provider: 'luckin', result: 'failed' });
               setLuckinTestStatus(`❌ ${r.message}`);
           }
       } catch (e: any) {
+          trackEvent('测试点单 MCP 连接', { provider: 'luckin', result: 'exception' });
           setLuckinTestStatus(`❌ ${e?.message || String(e)}`);
       } finally {
           setLuckinTesting(false);
@@ -1676,7 +1901,7 @@ const Settings: React.FC = () => {
                     </p>
                     <div className="grid grid-cols-2 gap-2">
                         <button
-                            onClick={() => setShowGithubModal(true)}
+                            onClick={() => { trackEvent('连接云端备份服务商', { provider: 'github' }); setShowGithubModal(true); }}
                             className="py-3 px-2 bg-gradient-to-br from-slate-800 to-slate-900 text-white rounded-xl text-xs font-bold shadow-sm active:scale-95 transition-all flex flex-col items-center gap-1.5 relative"
                         >
                             <span className="absolute top-1 right-1.5 text-[8px] bg-amber-300 text-slate-800 px-1.5 py-0.5 rounded-full font-bold">推荐</span>
@@ -1685,7 +1910,7 @@ const Settings: React.FC = () => {
                             <span className="text-[9px] text-slate-300 font-normal">不用梯子 · 2GB</span>
                         </button>
                         <button
-                            onClick={() => setShowCloudModal(true)}
+                            onClick={() => { trackEvent('连接云端备份服务商', { provider: 'webdav' }); setShowCloudModal(true); }}
                             className="py-3 px-2 bg-gradient-to-br from-sky-500 to-blue-600 text-white rounded-xl text-xs font-bold shadow-sm active:scale-95 transition-all flex flex-col items-center gap-1.5"
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z" /></svg>
@@ -1978,7 +2203,7 @@ const Settings: React.FC = () => {
                             if (res.ok) {
                                 // 走 safeResponseJson —— 它能透明把 SSE 流响应拼成普通 chat/completion 结构
                                 const data = await safeResponseJson(res);
-                                const reply = data.choices?.[0]?.message?.content || '';
+                                const reply = extractContent(data);
                                 setTestApiResult(`✅ 连接成功 — 模型回复: "${reply.slice(0, 30)}"`);
                             } else {
                                 const text = await res.text().catch(() => '');
@@ -2007,6 +2232,100 @@ const Settings: React.FC = () => {
                         {testApiResult}
                     </div>
                 )}
+            </div>
+        </SettingsSection>
+
+        {/* 独立识图 API：给不支持 image_url 的主模型补视觉能力；不随主 API 预设切换。 */}
+        <SettingsSection
+            title="识图 API"
+            badge={
+                <span className={`text-[9px] font-bold px-2 py-1 rounded-full ${
+                    apiConfig.visionApi?.enabled
+                        ? 'bg-violet-100 text-violet-600'
+                        : 'bg-slate-100 text-slate-400'
+                }`}>
+                    {apiConfig.visionApi?.enabled ? '已接入' : '未接入'}
+                </span>
+            }
+            icon={
+                <div className="p-2 bg-violet-100/60 rounded-xl text-violet-600">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12s3.75-6.75 9.75-6.75S21.75 12 21.75 12 18 18.75 12 18.75 2.25 12 2.25 12Z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+                    </svg>
+                </div>
+            }
+        >
+            <div className="space-y-4">
+                <div className="rounded-2xl border border-violet-100 bg-violet-50/60 p-3.5">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <div className="text-xs font-bold text-slate-600">接入独立识图 API</div>
+                            <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">
+                                适合 DeepSeek 等不能直接看图的主模型。
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            role="switch"
+                            aria-checked={localVisionEnabled}
+                            onClick={() => setLocalVisionEnabled(value => !value)}
+                            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${localVisionEnabled ? 'bg-violet-500' : 'bg-slate-200'}`}
+                        >
+                            <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${localVisionEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                        </button>
+                    </div>
+                </div>
+
+                <p className="text-[10px] text-slate-400 leading-relaxed px-1">
+                    开启后，每张聊天图片只会先交给这里的视觉模型识别一次，并把结果写成
+                    <span className="font-semibold text-violet-600"> [图片：模型看到的内容] </span>
+                    再发给主 API；之后聊天和重 roll 都直接复用，不会重复识图扣费。关闭时完全沿用原来的图片发送逻辑。
+                </p>
+
+                <div className={`space-y-3 transition-opacity ${localVisionEnabled ? 'opacity-100' : 'opacity-50'}`}>
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">URL</label>
+                        <input
+                            type="text"
+                            value={localVisionUrl}
+                            onChange={event => setLocalVisionUrl(event.target.value)}
+                            disabled={!localVisionEnabled}
+                            placeholder="https://.../v1"
+                            className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                        />
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Key</label>
+                        <input
+                            type="password"
+                            value={localVisionKey}
+                            onChange={event => setLocalVisionKey(event.target.value)}
+                            disabled={!localVisionEnabled}
+                            placeholder="sk-..."
+                            className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                        />
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Model</label>
+                        <input
+                            type="text"
+                            value={localVisionModel}
+                            onChange={event => setLocalVisionModel(event.target.value)}
+                            disabled={!localVisionEnabled}
+                            placeholder="例如 gpt-4o-mini / qwen-vl-max"
+                            className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                        />
+                    </div>
+                </div>
+
+                <button
+                    type="button"
+                    onClick={handleSaveVisionApi}
+                    className="w-full py-3 rounded-2xl font-bold text-white shadow-lg shadow-violet-500/20 bg-violet-500 active:scale-95 transition-all"
+                >
+                    {visionStatusMsg || '保存识图 API'}
+                </button>
             </div>
         </SettingsSection>
 
@@ -2308,7 +2627,7 @@ const Settings: React.FC = () => {
                 </div>
             }
             actions={
-                <button onClick={() => setShowRealtimeModal(true)} className="text-[10px] bg-violet-100 text-violet-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
+                <button onClick={() => { trackEvent('打开实时感知配置'); setShowRealtimeModal(true); }} className="text-[10px] bg-violet-100 text-violet-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
                     配置
                 </button>
             }
@@ -2353,11 +2672,11 @@ const Settings: React.FC = () => {
             actions={
                 <>
                     <button
-                        onClick={() => setShowMcpHelp(true)}
+                        onClick={() => { trackEvent('打开「MCP 是什么」说明弹窗'); setShowMcpHelp(true); }}
                         aria-label="MCP 是什么？"
                         className="w-7 h-7 rounded-full border border-slate-200 bg-white text-[12px] font-bold text-slate-400 active:scale-90 transition-all"
                     >?</button>
-                    <button onClick={() => setShowMcpModal(true)} className="text-[10px] bg-violet-100 text-violet-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
+                    <button onClick={() => { trackEvent('打开MCP工具服务器配置'); setShowMcpModal(true); }} className="text-[10px] bg-violet-100 text-violet-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
                         配置
                     </button>
                 </>
@@ -2415,6 +2734,20 @@ const Settings: React.FC = () => {
             </button>
         </SettingsSection>
 
+        {/* ───────── 推送订阅状态（诊断 + 重置） ───────── */}
+        <SettingsSection
+            title="推送订阅状态"
+            icon={
+                <div className="p-2 bg-sky-100/60 rounded-xl text-sky-600">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 0 1-1.043 3.296 3.745 3.745 0 0 1-3.296 1.043A3.745 3.745 0 0 1 12 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 0 1-3.296-1.043 3.745 3.745 0 0 1-1.043-3.296A3.745 3.745 0 0 1 3 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 0 1 1.043-3.296 3.746 3.746 0 0 1 3.296-1.043A3.746 3.746 0 0 1 12 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 0 1 3.296 1.043 3.746 3.746 0 0 1 1.043 3.296A3.745 3.745 0 0 1 21 12Z" />
+                    </svg>
+                </div>
+            }
+        >
+            <PushSubscriptionPanel addToast={addToast} />
+        </SettingsSection>
+
         {/* ───────── 主动消息 Push 加速器（开关） ───────── */}
         {SHOW_PROACTIVE_PUSH_ACCEL_UI && ppAvailable && (
         <SettingsSection
@@ -2453,6 +2786,7 @@ const Settings: React.FC = () => {
                     disabled={ppBusy}
                     onClick={() => {
                         if (ppBusy) return;
+                        trackEvent('切换主动消息Push加速', { action: ppEnabled ? 'disable' : 'enable' });
                         if (ppEnabled) {
                             void doDisablePushAccelerator();
                         } else {
@@ -2470,7 +2804,16 @@ const Settings: React.FC = () => {
                 <div className="flex items-center justify-between mb-3">
                     <p className="text-xs font-semibold text-slate-600">Web Push 状态</p>
                     <button
-                        onClick={() => void refreshPpDiag()}
+                        onClick={() => {
+                            // 全部是浏览器/设备状态的固定枚举，不含端点地址、也不含任何用户配置值
+                            trackEvent('刷新 Web Push 诊断', ppDiag ? {
+                                permission: ppDiag.permission,
+                                subscription: !ppDiag.endpoint ? 'none' : ppDiag.endpointDead ? 'dead' : 'active',
+                                swState: ppDiag.swState === 'activated' ? 'activated' : ppDiag.swState === 'none' ? 'none' : 'other',
+                                platform: ppDiag.capacitorNative ? 'capacitor_native' : ppDiag.iosNeedsPwa ? 'ios_needs_pwa' : 'normal',
+                            } : undefined);
+                            void refreshPpDiag();
+                        }}
                         className="text-[10px] px-2.5 py-1 rounded-full bg-white border border-slate-200 text-slate-500 hover:bg-slate-50"
                     >
                         刷新
@@ -2603,7 +2946,7 @@ const Settings: React.FC = () => {
             }
             actions={
                 <button
-                    onClick={() => setShowInstantModal(true)}
+                    onClick={() => { trackEvent('打开Instant Push配置'); setShowInstantModal(true); }}
                     className="text-[10px] bg-indigo-100 text-indigo-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform"
                 >
                     配置
@@ -2614,6 +2957,29 @@ const Settings: React.FC = () => {
                 与上方 Push 加速器不同：前端发 prompt 到你自部署的 Worker，Worker 调你自己的 LLM 生成回复后分句逐条 Web Push。零数据库、零 cron。
             </p>
         </SettingsSection>
+
+        {/* ───────── 主动消息 2.0（定时推送） ───────── */}
+        <section className="bg-white/80 rounded-3xl p-5 shadow-sm border border-white/50">
+            <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                    <div className="p-2 bg-violet-100/60 rounded-xl text-violet-600">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                        </svg>
+                    </div>
+                    <h2 className="text-sm font-semibold text-slate-600 tracking-wider">主动消息 2.0</h2>
+                </div>
+                <button
+                    onClick={() => { trackEvent('打开主动消息2.0配置'); setShowAmsg2Modal(true); }}
+                    className="text-[10px] bg-violet-100 text-violet-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform"
+                >
+                    配置
+                </button>
+            </div>
+            <p className="text-xs text-slate-500 leading-relaxed">
+                角色到点自动给你发消息，App 关着也能收。需要你自己部署一个 Cloudflare Worker（自带 D1 数据库 + 定时触发），在配置里填地址即可。聊天上云（即时对话）与定时主动消息都由它承担。
+            </p>
+        </section>
 
         {/* 自定义网络代理 — 刻意低调的高级入口。默认折叠，不主动指引基本发现不了。
             普通用户无需配置：默认走作者部署的公共 Worker，所有功能开箱即用。 */}
@@ -2665,6 +3031,55 @@ const Settings: React.FC = () => {
             </section>
         )}
 
+        {/* ───────── 使用统计 ─────────
+            只在配了统计环境变量的构建里显示。自部署实例本来就一个统计请求都不发，
+            给个关不掉也没东西可关的开关只会更让人犯嘀咕。 */}
+        {isAnalyticsConfigured() && (
+        <SettingsSection
+            title="使用统计"
+            icon={
+                <div className="p-2 bg-slate-100/60 rounded-xl text-slate-500">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
+                    </svg>
+                </div>
+            }
+        >
+            <div className="space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm font-bold text-slate-600">参与使用统计</span>
+                    <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                        <input
+                            type="checkbox"
+                            checked={analyticsEnabled}
+                            onChange={e => {
+                                setAnalyticsEnabledState(e.target.checked);
+                                setAnalyticsEnabled(e.target.checked);
+                            }}
+                            className="sr-only peer"
+                        />
+                        <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-slate-500"></div>
+                    </label>
+                </div>
+                <p className="text-xs text-slate-500 leading-relaxed">
+                    只数「哪个页面被打开了、哪个功能被用了一次」，记忆条数 / 角色数落在哪个区间，
+                    以及你这台设备打开页面花了多久（浏览器自己测的毫秒数）。
+                    不碰你和角色的任何对话、记忆、设定，不碰你输入的任何文字，不碰 API 和 MCP 配置。
+                </p>
+                <p className="text-xs text-slate-500 leading-relaxed">
+                    SullyOS 的功能已经多到我们自己也扫不完，但「哪些真的有人用、大家配置时卡在哪一步」
+                    基本靠猜。留着这个开关开着能帮我们看清这些，好把精力放在有人用的地方。
+                    不想参与就关掉，功能一点不受影响。
+                </p>
+                <p className="text-[10px] text-slate-400 leading-relaxed">
+                    浏览器开了 Do Not Track 的话，不用动这个开关也会自动跳过。
+                    关掉之后当场就不再发，下次启动连统计脚本都不会加载。想自己核实的话，按 F12 打开 Network 面板，
+                    这个页面发出的每一个请求装了什么都在你自己的浏览器里。
+                </p>
+            </div>
+        </SettingsSection>
+        )}
+
         <VersionInfo />
 
         {/* QQ 小群入口不主动曝光：接近水印，仅在 hover / 键盘聚焦 / 按住时略微显现。 */}
@@ -2686,13 +3101,14 @@ const Settings: React.FC = () => {
           footer={
               <div className="flex gap-2 w-full">
                   <button
-                      onClick={() => setShowPpConfirm(false)}
+                      onClick={() => { trackEvent('在 Push 加速启用确认弹窗做出选择', { choice: 'cancel' }); setShowPpConfirm(false); }}
                       className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl"
                   >
                       取消
                   </button>
                   <button
                       onClick={() => {
+                          trackEvent('在 Push 加速启用确认弹窗做出选择', { choice: 'confirm' });
                           setShowPpConfirm(false);
                           void doEnablePushAccelerator();
                       }}
@@ -2787,7 +3203,7 @@ const Settings: React.FC = () => {
                   <button onClick={handleSaveCloudConfig} disabled={!cbUrl || !cbUsername || !cbPassword} className="py-2.5 bg-sky-500 rounded-xl text-xs font-bold text-white disabled:opacity-40">保存配置</button>
               </div>
               {cloudBackupConfig.enabled && (
-                  <button onClick={() => { updateCloudBackupConfig({ enabled: false }); setShowCloudModal(false); addToast('云端备份已关闭', 'info'); }} className="w-full py-2 text-[11px] text-red-400 font-medium">关闭云端备份</button>
+                  <button onClick={() => { trackEvent('关闭云端备份', { provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav' }); updateCloudBackupConfig({ enabled: false }); setShowCloudModal(false); addToast('云端备份已关闭', 'info'); }} className="w-full py-2 text-[11px] text-red-400 font-medium">关闭云端备份</button>
               )}
           </div>
       </Modal>
@@ -2818,6 +3234,7 @@ const Settings: React.FC = () => {
               <a
                   href="https://github.com/settings/tokens/new?scopes=repo&description=Sully%20%E5%A4%87%E4%BB%BD"
                   target="_blank" rel="noopener noreferrer"
+                  onClick={() => trackEvent('跳去 GitHub 创建 Token')}
                   className="block w-full py-3 bg-gradient-to-br from-slate-800 to-slate-900 text-white rounded-xl text-xs font-bold text-center shadow-sm active:scale-95 transition-all"
               >
                   ① 去 GitHub 创建 Token ↗
@@ -2868,7 +3285,7 @@ const Settings: React.FC = () => {
               )}
 
               <button
-                  onClick={() => setGhShowAdvanced(v => !v)}
+                  onClick={() => { if (!ghShowAdvanced) trackEvent('展开 GitHub 高级选项'); setGhShowAdvanced(v => !v); }}
                   className="w-full text-[10px] text-slate-400 underline-offset-2 hover:underline"
               >
                   {ghShowAdvanced ? '收起高级选项 ▲' : '高级选项 ▼'}
@@ -3275,14 +3692,14 @@ const Settings: React.FC = () => {
                       </label>
                   </div>
                   <p className="text-[10px] text-rose-500/70 leading-relaxed">
-                      免电脑、免扫码：粘贴一次小红书 cookie，即可搜索/浏览/详情/点赞/收藏/评论/发帖(带图)。地址已内置，无需填写。
+                      免电脑、免扫码：粘贴一次小红书 / RedNote cookie，即可搜索、浏览、看详情及互动；国内小红书还支持发帖(带图)。地址已内置，无需填写。
                   </p>
                   <p className="text-[10px] text-amber-700 leading-relaxed bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">{XHS_RISK_TEXT}</p>
                   {rtXhsMcpEnabled && rtXhsMode === 'lite' && (
                       <div className="space-y-2">
                           <div>
                               <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">小红书 Cookie</label>
-                              <textarea value={rtXhsCookie} onChange={e => setRtXhsCookie(e.target.value)} rows={2} className="w-full bg-white/80 border border-rose-200 rounded-xl px-3 py-2 text-[10px] font-mono resize-y" placeholder="a1=...; web_session=...; （从浏览器登录后复制完整 cookie）" />
+                              <textarea value={rtXhsCookie} onChange={e => { setRtXhsCookie(e.target.value); setRtXhsPlatform(undefined); }} rows={2} className="w-full bg-white/80 border border-rose-200 rounded-xl px-3 py-2 text-[10px] font-mono resize-y" placeholder="a1=...; web_session=...; （从浏览器登录后复制完整 cookie）" />
                           </div>
                           <button onClick={testXhsMcp} className="w-full py-2 bg-rose-100 text-rose-600 text-xs font-bold rounded-xl active:scale-95 transition-transform">测试连接</button>
                           <div className="grid grid-cols-2 gap-2">
@@ -3296,11 +3713,11 @@ const Settings: React.FC = () => {
                               </div>
                           </div>
                           <div>
-                              <button type="button" onClick={() => setRtXhsGuideOpen(v => !v)} className="text-[11px] font-bold text-rose-600 underline">📖 点击获取 cookie 教程 {rtXhsGuideOpen ? '▲' : '▼'}</button>
+                              <button type="button" onClick={() => { if (!rtXhsGuideOpen) trackEvent('展开获取 cookie 教程'); setRtXhsGuideOpen(v => !v); }} className="text-[11px] font-bold text-rose-600 underline">📖 点击获取 cookie 教程 {rtXhsGuideOpen ? '▲' : '▼'}</button>
                               {rtXhsGuideOpen && (
                                   <div className="mt-1 bg-white/70 rounded-lg p-2 space-y-1.5">
                                       <pre className="text-[10px] text-slate-600 whitespace-pre-wrap font-sans leading-relaxed">{XHS_COOKIE_GUIDE}</pre>
-                                      <button type="button" onClick={async () => { try { await navigator.clipboard.writeText(XHS_COOKIE_GUIDE); addToast('教程已复制，可粘贴去问别的 AI', 'success'); } catch { addToast('复制失败，请长按手动选择', 'error'); } }} className="w-full py-1.5 bg-rose-100 text-rose-600 text-[11px] font-bold rounded-lg active:scale-95 transition-transform">复制教程</button>
+                                      <button type="button" onClick={async () => { try { await navigator.clipboard.writeText(XHS_COOKIE_GUIDE); trackEvent('复制 cookie 教程文本', { result: 'copied' }); addToast('教程已复制，可粘贴去问别的 AI', 'success'); } catch { trackEvent('复制 cookie 教程文本', { result: 'clipboard-failed' }); addToast('复制失败，请长按手动选择', 'error'); } }} className="w-full py-1.5 bg-rose-100 text-rose-600 text-[11px] font-bold rounded-lg active:scale-95 transition-transform">复制教程</button>
                                   </div>
                               )}
                           </div>
@@ -3401,9 +3818,16 @@ const Settings: React.FC = () => {
       </Modal>
 
       {/* MCP 工具服务器配置 Modal（高级玩法, 从实时感知里独立出来） */}
-      <Modal isOpen={showMcpModal} title="MCP 工具服务器" onClose={() => setShowMcpModal(false)}>
+      <Modal isOpen={showMcpModal} title="MCP 工具服务器" onClose={() => { setShowMcpModal(false); flushMcpToolConfigSync(); }}>
           <div className="space-y-4">
-              <McpServersCard addToast={addToast} />
+              <McpServersCard addToast={addToast} onMcpConfigChanged={() => {
+                  // MCP 配置变更只需重传 tool_config：提示词块与 tools 数组由 worker 在 fire 时
+                  // 从 tool_config 现场生成（见 mcpFireCore），不经过 fire_pack，没有陈旧问题，
+                  // 所以不用像实时感知那样连提示词一起刷（syncAmsgToolConfigAndPrompts）。
+                  // 这一份尤其不能传丢：删掉的服务器要是没同步上去，worker 半夜还会带着
+                  // 旧 token 去直连它。重试和底账由 syncAmsgToolConfig 负责。
+                  scheduleMcpToolConfigSync(() => syncAmsgToolConfig(realtimeConfig));
+              }} />
           </div>
       </Modal>
 
@@ -3445,14 +3869,15 @@ const Settings: React.FC = () => {
                       href={MCP_USER_GUIDE_URL}
                       target="_blank"
                       rel="noopener noreferrer"
+                      onClick={() => trackEvent('跳转 MCP 完整教程')}
                       className="block w-full py-2.5 bg-violet-500 text-white text-center text-xs font-bold rounded-xl active:scale-95 transition-transform"
                   >📖 打开完整教程（含部署示例）</a>
                   <button
                       type="button"
                       onClick={async () => {
                           const text = `请阅读这份教程，然后一步一步教我把 MCP 工具服务器接入 SullyOS。先问清楚我想接什么工具、准备部署在哪（云端/本地电脑/本地+内网穿透），再给对应路线的步骤：\n${MCP_USER_GUIDE_URL}`;
-                          try { await navigator.clipboard.writeText(text); addToast('已复制，去粘贴给你的 AI 吧', 'success'); }
-                          catch { addToast('复制失败，请手动复制教程链接', 'error'); }
+                          try { await navigator.clipboard.writeText(text); trackEvent('复制 MCP 部署指引给 AI', { result: 'copied' }); addToast('已复制，去粘贴给你的 AI 吧', 'success'); }
+                          catch { trackEvent('复制 MCP 部署指引给 AI', { result: 'clipboard-failed' }); addToast('复制失败，请手动复制教程链接', 'error'); }
                       }}
                       className="w-full py-2.5 bg-violet-100 text-violet-700 text-xs font-bold rounded-xl active:scale-95 transition-transform"
                   >🤖 复制链接给你的 AI，让它带你部署</button>
@@ -3489,6 +3914,13 @@ const Settings: React.FC = () => {
       <PushVapidSettingsModal
         open={showVapidModal}
         onClose={() => { setShowVapidModal(false); setVapidReadyTick((n) => n + 1); }}
+      />
+      <ActiveMsgGlobalSettingsModal
+        isOpen={showAmsg2Modal}
+        onClose={() => setShowAmsg2Modal(false)}
+        addToast={addToast}
+        realtimeConfig={realtimeConfig}
+        onOpenVapid={() => { setShowAmsg2Modal(false); setShowVapidModal(true); }}
       />
 
       {showCommunityMigration && (

@@ -120,6 +120,9 @@ export interface OSTheme {
   scheduleCardAppearance?: ScheduleCardAppearance;
   desktopDecorations?: DesktopDecoration[];
   customFont?: string;
+  /** 顶部时间栏布局：安全显示（安全区下方）/ 紧凑显示（嵌入安全区）/ 完全隐藏。 */
+  statusBarMode?: 'standard' | 'compact' | 'hidden';
+  /** @deprecated 旧版两档开关，仅用于兼容已有存档；新设置写入 statusBarMode。 */
   hideStatusBar?: boolean;
   // Chat UI customization (global)
   chatAvatarShape?: 'circle' | 'rounded' | 'square';
@@ -227,9 +230,19 @@ export type MinimaxRegion = 'domestic' | 'overseas';
 // 全局二选一：切换后所有语音场景（聊天语音条 / 约会 / 电话）统一用同一家。
 export type TtsProvider = 'minimax' | 'fishaudio';
 
+export interface VisionApiConfig {
+  /** 开启后，聊天图片先由独立视觉模型转成文字，再交给主对话模型。 */
+  enabled: boolean;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
 export interface APIConfig {
   baseUrl: string;
   apiKey: string;
+  // 可选识图中转：给不支持 image_url 的主模型补视觉能力。
+  visionApi?: VisionApiConfig;
   minimaxApiKey?: string;
   minimaxGroupId?: string;
   // 'domestic' → https://api.minimaxi.com (国内站)
@@ -285,7 +298,6 @@ export interface InstantPushConfig {
 
 export type InstantOversizeTransport = 'multipart' | 'd1';
 
-export type ActiveMsg2DbDriver = 'pg' | 'neon';
 export type ActiveMsg2Mode = 'fixed' | 'auto' | 'prompted';
 export type ActiveMsg2Recurrence = 'none' | 'daily' | 'weekly';
 
@@ -297,32 +309,114 @@ export interface ActiveMsg2ApiConfig {
 
 export interface ActiveMsg2GlobalConfig {
   userId: string;
-  driver: ActiveMsg2DbDriver;
-  databaseUrl: string;
-  initSecret?: string;
-  tenantId?: string;
-  tenantToken?: string;
-  cronToken?: string;
-  cronWebhookUrl?: string;
-  masterKeyFingerprint?: string;
+  /** 单用户 Cloudflare Worker 地址，例如 https://amsg.your-worker.dev */
+  workerUrl: string;
+  /** 与 worker 约定的共享密钥；配了就每次请求带 X-Client-Token，缺/错 worker 返回 401 */
+  serverToken?: string;
+  /**
+   * 一键部署时生成的 AMSG_MASTER_KEY（worker 侧用它加密任务内容）。
+   * 存在这里只为「重装时沿用同一把」——它一换，之前加密进 D1 的任务就全解不开了，
+   * 而 worker 里的值读不回来。手动部署的用户这里是空的，属正常。
+   */
+  masterKey?: string;
+  /** 上次「连接」（在 worker 端建表）成功的时间 */
   initializedAt?: number;
+  /**
+   * 即时对话：聊天的每一轮都交给云端跑（POST /instant-chat），回复走推送回来。
+   * 只在设置页那一处开关（开关本身还有连接 / 通知权限 / worker 能力三道门），
+   * 关掉就是现在的本地直连生成。
+   */
+  instantChatEnabled?: boolean;
+  /**
+   * 上一次探到的「那台 Worker 真的跑得动即时对话吗」（见 ActiveMsgClient.probeInstantChatSupport）。
+   *
+   * false 时即时对话整个让位给本地生成，**用户开着也不走** —— 跑不动的 Worker 上这条路
+   * 是发一条挂一条，让位比让他对着「已开启」干等强。探测每次都会刷新它，用户更新完
+   * Worker 下一次探测自然翻回 true，不用手动去重开开关。
+   *
+   * undefined = 还没探过（刚装、没进过设置页），按放行处理：这一档说明我们不知道，
+   * 而不是知道它不行；握手时会补探一次，之后就有准数了。
+   */
+  instantChatSupported?: boolean;
   updatedAt?: number;
+}
+
+export type ActiveMsg2ExpirePolicy = 'expire' | 'force';
+export type ActiveMsg2TaskSource = 'user' | 'character';
+/** scheduled=待触发/循环中；cancelled 仅短暂存在（取消即从清单移除）。到点后的
+ *  一次性任务不改 status——「已发送/已作废」由消息历史现场推导，避免 React 外写角色数据。 */
+export type ActiveMsg2TaskStatus = 'scheduled' | 'cancelled';
+
+export interface ActiveMsg2TaskRecord {
+  taskUuid: string;
+  /** 客户端排程前自造的 uuid v4，与 push metadata 的 amsgClientTaskId 同源——送达归属匹配键。 */
+  clientTaskId: string;
+  mode: ActiveMsg2Mode;
+  /** ISO / datetime-local 字符串，首次触发时间。 */
+  firstSendTime: string;
+  /**
+   * 远端算出来的下一次触发时刻（对账时同步回来）。循环任务按角色所在时区的墙钟推进，
+   * 本地拿固定周期自己乘出来的那个一跨夏令时就会偏一小时——显示以这份为准。
+   */
+  nextSendAt?: string;
+  recurrenceType: ActiveMsg2Recurrence;
+  /** fixed 模式的固定内容。 */
+  userMessage?: string;
+  promptHint?: string;
+  /** 防穿帮策略；fixed 任务恒为 'force'（见 amsg2Tasks.resolveExpirePolicy）。 */
+  expirePolicy: ActiveMsg2ExpirePolicy;
+  /** 排程时最后一条真实用户消息的时间戳（作废判定锚点；当时无消息为 0）。 */
+  anchorLastUserMsgAt?: number;
+  source: ActiveMsg2TaskSource;
+  status: ActiveMsg2TaskStatus;
+  createdAt: number;
+  lastError?: string;
 }
 
 export interface ActiveMsg2CharacterConfig {
   enabled: boolean;
-  mode: ActiveMsg2Mode;
-  firstSendTime: string;
-  recurrenceType: ActiveMsg2Recurrence;
-  userMessage?: string;
-  promptHint?: string;
+  /**
+   * 即时对话按角色单独关。undefined = 跟随全局（全局即时对话开着就默认开）；
+   * false = 这个角色的聊天回到本地前台生成。与 enabled（排程开关）互相独立：
+   * 可以只排程不即时，也可以只即时不排程。
+   */
+  instantChatEnabled?: boolean;
+  /** 多任务清单（用户在面板建的和角色用工具建的并存），见 utils/amsg2Tasks.ts。 */
+  tasks?: ActiveMsg2TaskRecord[];
+  /** ↓ 角色级共享设置（所有任务共用）。 */
   maxTokens?: number;
-  taskUuid?: string;
-  remoteStatus?: 'idle' | 'scheduled' | 'sent' | 'error';
+  /**
+   * 「我没回的时候，TA 最多连续主动发几条」。0 = 不限；没设 = 默认值
+   * （amsgFirePack.DEFAULT_MAX_UNANSWERED_SENDS）。管的是角色自己排的后续
+   * （含 fire 里的自排链），用户在面板里亲手排的任务不受它管；用户一回复就重新计数。
+   */
+  maxUnansweredSends?: number;
   useSecondaryApi?: boolean;
   secondaryApi?: ActiveMsg2ApiConfig;
   lastSyncedAt?: number;
   lastError?: string;
+}
+
+/** 任务「没了」的回执台账（amsg-local IDB kv，按角色一条数组）。 */
+export interface Amsg2ExpiredNoticeRecord {
+  /**
+   * 防穿帮闸作废：一次性任务 = taskUuid，循环任务 = `${taskUuid}:${occurrenceMs}`；
+   * 用户手动取消 = `${taskUuid}:cancelled`（同一条任务可能两件事都发生过，各占一条）。
+   */
+  id: string;
+  charId: string;
+  occurrenceMs: number;
+  mode: ActiveMsg2Mode;
+  promptHint?: string;
+  recurrenceType: ActiveMsg2Recurrence;
+  /**
+   * 这条回执是怎么来的：闸自动作废（缺省）还是用户在面板里手动取消。
+   * 两者给角色的交代不一样——作废可以续期补上，手动取消是用户不要了。
+   */
+  kind?: 'expired' | 'user-cancelled';
+  /** 已注入过排程现状块（角色已知情），不再重复注入。 */
+  notifiedAt?: number;
+  createdAt: number;
 }
 
 export interface ActiveMsg2InboxMessage {
@@ -336,9 +430,23 @@ export interface ActiveMsg2InboxMessage {
   messageType?: string;
   messageSubtype?: string;
   taskId?: string | null;
+  /**
+   * 任务身份，由库盖在 push 顶层带下来（不是排程方写进 metadata 的）。
+   * 两条排程路径——用户在面板排的、角色在 fire 里给自己排的——走的是同一份，
+   * 所以防穿帮闸和任务认领都读这里，不读 metadata 里各自抄的那份。
+   */
+  taskUuid?: string | null;
+  recurrenceType?: string | null;
+  /** 本次触发的名义时刻（epoch 毫秒）。 */
+  occurrenceMs?: number | null;
   metadata?: Record<string, any>;
   sentAt?: number;
   receivedAt: number;
+  /**
+   * 已经尝试处理过几次（见 activeMsgRuntime 的 MAX_INBOX_PROCESS_ATTEMPTS）。
+   * 处理失败时消息会写回收件箱等重试，这个计数决定什么时候放弃重试、退回存原稿保底。
+   */
+  processAttempts?: number;
 }
 
 // Phase 2 Round 1 — Instant Push agentic loop session state, written client-side
@@ -1883,8 +1991,14 @@ export interface DateState {
     dialogueQueue: DialogueItem[];
     dialogueBatch: DialogueItem[];
     currentText: string;
-    bgImage: string;
-    currentSprite: string;
+    /** @deprecated 旧版恢复快照会复制背景图，可能是超大 base64；新版恢复优先读角色上的 dateBackground。 */
+    bgImage?: string;
+    /** @deprecated 旧版恢复快照会复制立绘图，可能是超大 base64；新版恢复优先读 currentSpriteKey。 */
+    currentSprite?: string;
+    /** 当前立绘对应的情绪 key，只存引用信息，避免把 base64 立绘重复塞进 savedDateState。 */
+    currentSpriteKey?: string;
+    /** 恢复时优先按当时的皮肤集找 currentSpriteKey，皮肤不存在再回退当前皮肤/默认立绘。 */
+    activeSkinSetId?: string;
     isNovelMode: boolean;
     timestamp: number;
     peekStatus: string;
@@ -1958,6 +2072,8 @@ export interface StoryTheaterEntry {
     presetId?: string;
     /** 会话内快速预设只覆盖本剧场，不修改预设库。 */
     presetOverride?: StoryTheaterPresetDocument;
+    /** 仅供拒绝 assistant prefill、要求最后一条消息必须为 user 的接口使用；默认关闭以保留原生预设效果。 */
+    forceUserLastMessage?: boolean;
     createdAt: number;
     updatedAt: number;
 }
@@ -2470,6 +2586,11 @@ export interface CharacterProfile {
    * - manual：用户拉杆决定最多读取最近 contextLimit 条完整原文。
    */
   contextRangeMode?: 'adaptive' | 'manual';
+  /**
+   * 用户主动点「一键存进记忆宫殿」后，让原文范围继续跟随记忆水位线。
+   * 与全自动归档开关独立；未使用该按钮的旧角色保持 undefined，不改变既有行为。
+   */
+  contextFollowsMemoryPalaceHwm?: boolean;
   /** 上下文范围结构版本；用于把旧版「5000 条 + 自动水位隐藏」一次性迁移到自适应模式。 */
   contextRangePolicyVersion?: number;
   /**
@@ -2586,6 +2707,9 @@ export interface CharacterProfile {
 
   // Chat & Date voice TTS settings
   chatVoiceEnabled?: boolean;
+  // 收到语音是否自动播放。默认关（不填 = 不自动播）：语音条照常出现，点一下才响。
+  // 只管 AI 自动发来的语音；用户主动点「转换语音」/ 点空语音条生成的，仍然生成完就播。
+  chatVoiceAutoPlay?: boolean;
   chatVoiceLang?: string;
   dateVoiceEnabled?: boolean;
   dateVoiceLang?: string;
@@ -2628,6 +2752,12 @@ export interface CharacterProfile {
    * 已处理的聊天。默认 false（opt-in）——首次启用建议让用户做一次 force 追平历史。
    */
   autoArchiveEnabled?: boolean;
+  /**
+   * 角色独立的记忆水位节奏。整个角色消息时间线共用这一份配置，不区分私聊、
+   * 见面、通话或剧情来源。缺省代表 online，即保持历史行为 200/100。
+   * 作为 CharacterProfile 一部分随 IndexedDB 与完整备份持久化。
+   */
+  memoryPalaceWaterline?: MemoryPalaceWaterlineConfig;
   embeddingConfig?: {
     baseUrl: string;
     apiKey: string;
@@ -3440,6 +3570,12 @@ export interface FullBackupData {
     apiConfig?: APIConfig;
     instantPushConfig?: InstantPushConfig;
     pushVapid?: { vapidPublicKey: string; vapidPrivateKey: string; vapidEmail?: string; updatedAt?: number; };
+    /**
+     * 主动消息 2.0 的全局配置：Worker 地址、共享密钥、一键部署生成的 AMSG_MASTER_KEY、
+     * 即时对话总开关。存在独立的 `ActiveMsg` 库里，所以单独占一格（见 activeMsgStore
+     * 的 exportAmsg2GlobalConfig）。角色身上那份 activeMsg2Config 跟着 characters 走。
+     */
+    amsg2GlobalConfig?: ActiveMsg2GlobalConfig;
     apiPresets?: ApiPreset[];
     availableModels?: string[];
     realtimeConfig?: RealtimeConfig;  // 实时感知配置（天气/新闻/Notion）
@@ -3722,6 +3858,7 @@ export interface XhsMcpConfig {
     enabled: boolean;
     serverUrl: string;  // MCP: "http://localhost:18060/mcp" | Skills: "http://localhost:18061/api" | Lite Worker: "https://xhs-lite.<acct>.workers.dev/api"
     cookie?: string;    // Lite 模式：登录后的小红书完整 cookie（含 a1 / web_session）。仅 lite Worker 用。
+    platform?: 'xhs' | 'rednote'; // Lite 自动识别出的国内小红书 / 全球 RedNote 后端
     rnoteApiKey?: string; // Lite 模式可选：用户自己的 Rnote Key，仅用于读取真实评论。
     loggedInUserId?: string;   // 登录用户的 user_id，连接测试成功后自动获取
     loggedInNickname?: string; // 登录用户的昵称

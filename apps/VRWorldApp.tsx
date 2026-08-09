@@ -15,6 +15,7 @@ import { VRScheduler } from '../utils/vrWorld/scheduler';
 import { VR_ROOMS, getRoom, VR_DEFAULT_INTERVAL_MIN, SIGNAL_EPIGRAPH, signalActFor, signalActRanges, SIGNAL_POEMS_PER_BOOKLET, SIGNAL_EVENT_ENDED, SIGNAL_MEMORIAL_CLOSING } from '../utils/vrWorld/constants';
 import { buildNovelAsync, groupAnnotationsBySeg, getBookmark } from '../utils/vrWorld/novel';
 import { decodeBytes } from '../utils/vrWorld/decodeText';
+import { extractPdfText, isPdfFile } from '../utils/pdfText';
 import { stripLeakedAttrs } from '../utils/vrWorld/prompts';
 import { PostOffice, MAX_LETTER_CHARS, exportIdentity, importIdentity, getAdminToken, setAdminToken, type RemoteReply, type RemoteLetterStat, type RemoteAdminLetter } from '../utils/vrWorld/postOffice';
 import { Signal, getMyAuthorship, setSignalWhisper, hasSignalNoticeAck, ackSignalNotice, type SignalState } from '../utils/vrWorld/signal';
@@ -75,6 +76,7 @@ import type { CharacterProfile, UserProfile, VRWorldNovel, VRNovelAnnotation, VR
 // ============ chibi 形象解析（vrState.chibi → 立绘 → 头像） ============
 import { getChibi } from '../utils/vrWorld/chibi';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
+import { trackEvent } from '../utils/analytics';
 
 type Tab = 'world' | 'library' | 'settings' | 'api';
 
@@ -301,6 +303,7 @@ const VRWorldApp: React.FC = () => {
         const interval = char.vrState?.intervalMinutes || VR_DEFAULT_INTERVAL_MIN;
         updateCharacter(char.id, { vrState: { ...(char.vrState || {}), enabled: true, intervalMinutes: interval } });
         VRScheduler.start(char.id, interval);
+        trackEvent('开启角色接入彼方', { action: 'enable' });
     };
     const requestEnable = (char: CharacterProfile) => {
         // 没设过专属 chibi → 先要求设定形象
@@ -349,7 +352,7 @@ const VRWorldApp: React.FC = () => {
             {/* Tab — 发丝下划线 */}
             <div className="relative flex px-5 gap-6 shrink-0 z-10 pb-px">
                 {([['world', '世界'], ['library', '书库'], ['settings', '接入'], ['api', 'API']] as [Tab, string][]).map(([t, label]) => (
-                    <button key={t} onClick={() => setTab(t)} className="relative pb-2 text-[13.5px] tracking-[0.22em] transition-colors"
+                    <button key={t} onClick={() => { setTab(t); trackEvent('切换彼方顶部标签', { tab: t }); }} className="relative pb-2 text-[13.5px] tracking-[0.22em] transition-colors"
                         style={{ fontFamily: `'Noto Serif SC',serif`, color: tab === t ? 'rgba(255,255,255,.95)' : 'rgba(255,255,255,.38)' }}>
                         {label}
                         {tab === t && <span className="absolute -bottom-px left-1/2 -translate-x-1/2 w-5 h-px"
@@ -369,7 +372,7 @@ const VRWorldApp: React.FC = () => {
                         onDeleteFeed={onDeleteFeed} onDeleteFeedMany={onDeleteFeedMany} />
                 ) : tab === 'library' ? (
                     <LibraryView novels={novels} characters={characters} onOpen={setReaderNovel}
-                        onAdd={() => setShowUpload(true)}
+                        onAdd={() => { setShowUpload(true); trackEvent('打开小说上架弹窗'); }}
                         onDelete={async (id) => { await DB.deleteVRNovel(id); await loadNovels(); addToast?.('已删除', 'success'); }} />
                 ) : tab === 'settings' ? (
                     <div className="space-y-3">
@@ -416,6 +419,7 @@ const VRWorldApp: React.FC = () => {
                             updateCharacter(charSnap.id, { vrState: { ...(charSnap.vrState || {}), chibi, enabled: true, intervalMinutes: interval } });
                             VRScheduler.start(charSnap.id, interval);
                             addToast?.(`${charSnap.name} 已接入彼方`, 'success');
+                            trackEvent('开启角色接入彼方', { action: 'enable' });
                         } else {
                             addToast?.('形象已更新', 'success');
                         }
@@ -716,7 +720,7 @@ const IdentityModal: React.FC<{ onImport: (code: string) => void; onClose: () =>
     const [input, setInput] = useState('');
     const [copied, setCopied] = useState(false);
     const copy = async () => {
-        try { await navigator.clipboard?.writeText(code); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* ignore */ }
+        try { await navigator.clipboard?.writeText(code); setCopied(true); trackEvent('复制邮局身份码'); setTimeout(() => setCopied(false), 1500); } catch { /* ignore */ }
     };
     return (
         <div className="fixed inset-0 z-[300] flex items-center justify-center px-6 bg-black/55 backdrop-blur-sm" onClick={onClose}>
@@ -1001,12 +1005,12 @@ const WorldView: React.FC<{
     return (
     <div className="space-y-4">
         {/* 顶部特殊活动 banner：信号坠落处（跨用户接龙诗） */}
-        <SignalBanner onOpen={() => onEnterRoom('signal')} />
+        <SignalBanner onOpen={() => { onEnterRoom('signal'); trackEvent('进入彼方房间', { room: 'signal' }); }} />
         <div className="grid grid-cols-2 gap-3">
             {shownRooms.map(room => {
                 const occupants = occupantsByRoom[room.id] || [];
                 return (
-                    <button key={room.id} onClick={() => room.implemented && onEnterRoom(room.id)}
+                    <button key={room.id} onClick={() => { if (room.implemented) { onEnterRoom(room.id); trackEvent('进入彼方房间', { room: room.id }); } }}
                         className={`relative rounded-2xl h-36 overflow-hidden text-left active:scale-[0.98] transition-transform ${room.implemented ? '' : 'opacity-65'}`}
                         style={{ boxShadow: '0 8px 28px rgba(0,0,0,.4)', border: room.implemented ? '1px solid rgba(255,255,255,.12)' : '1px solid rgba(255,255,255,.05)' }}>
                         <RoomBackground roomId={room.id} />
@@ -1260,6 +1264,7 @@ const PostOfficePanel: React.FC<{ addToast?: (m: string, t?: any) => void; chara
             await DB.saveVRLetters(batch.map((l, i) => ({ ...l, status: 'sent', remoteId: ids[i], sentAt: Date.now() })));
             bumpQuota(PO_SEND_QUOTA, batch.length);
             await load();
+            trackEvent('一键寄出漂流信');
             addToast?.(heldBack > 0
                 ? `已寄出 ${ids.length} 封，额度用完，还剩 ${heldBack} 封约 ${quotaResetHours(readQuota(PO_SEND_QUOTA).windowStart, PO_SEND_QUOTA.windowMs)} 小时后再寄`
                 : `已寄出 ${ids.length} 封漂流信`, 'success');
@@ -1298,6 +1303,7 @@ const PostOfficePanel: React.FC<{ addToast?: (m: string, t?: any) => void; chara
             bumpQuota(PO_REPLY_QUOTA, batch.length);
             await DB.saveVRLetters(batch.map(l => ({ ...l, replyStatus: 'sent' as const })));
             await load();
+            trackEvent('一键发送待发的回信');
             addToast?.(heldBack > 0
                 ? `已发出 ${payload.length} 封回信，今日额度用完，还剩 ${heldBack} 封约 ${quotaResetHours(readQuota(PO_REPLY_QUOTA).windowStart, PO_REPLY_QUOTA.windowMs)} 小时后再发`
                 : `已发出 ${payload.length} 封回信`, heldBack > 0 ? 'info' : 'success');
@@ -1352,6 +1358,7 @@ const PostOfficePanel: React.FC<{ addToast?: (m: string, t?: any) => void; chara
         VRScheduler.triggerNow(charId, 'postoffice', assignFor.id);
         const cname = enabledChars.find(c => c.id === charId)?.name;
         addToast?.(`${cname ?? '角色'} 正在去邮局回这封信…`, 'info');
+        trackEvent('指定角色去邮局回这封来信');
         setAssignFor(null);
         setTimeout(() => void load(), 5000);
     };
@@ -1374,6 +1381,7 @@ const PostOfficePanel: React.FC<{ addToast?: (m: string, t?: any) => void; chara
         if (!l.remoteLetterId) return;
         try {
             const r = await PostOffice.vote(l.remoteLetterId, vote);
+            trackEvent('给陌生来信点赞或举报', { vote: vote === 1 ? 'like' : vote === -1 ? 'report' : 'cancel' });
             if (r.deleted) { await DB.deleteVRLetter(l.id); await load(); addToast?.('这封信被举报够数，已移除', 'info'); return; }
             await DB.saveVRLetter({ ...l, likes: r.likes, dislikes: r.dislikes, myVote: vote }); await load();
         } catch (e: any) { addToast?.('操作失败：' + (e?.message || '检查网络'), 'error'); }
@@ -1441,7 +1449,7 @@ const PostOfficePanel: React.FC<{ addToast?: (m: string, t?: any) => void; chara
                     ] as const).map(t => {
                         const active = tab === t.key;
                         return (
-                            <button key={t.key} onClick={() => setTab(t.key)}
+                            <button key={t.key} onClick={() => { setTab(t.key); trackEvent('切换邮局信件分类', { category: t.key }); }}
                                 className="w-full rounded-lg px-1.5 py-2 text-left transition-colors"
                                 style={{ background: active ? 'rgba(255,255,255,.09)' : 'transparent', border: `1px solid ${active ? 'rgba(255,255,255,.14)' : 'transparent'}` }}>
                                 <div className="flex items-center gap-1">
@@ -2364,6 +2372,7 @@ const RoomScene: React.FC<{
         setBoard(await DB.getVRGuestbook());
         setGbPage(0);
         setConfirmClear(false);
+        trackEvent('清空彼方留言墙');
         addToast?.('留言墙已清空', 'success');
     };
 
@@ -2386,6 +2395,7 @@ const RoomScene: React.FC<{
         if (!np) return;
         if (music.current?.id === np.song.id) music.togglePlay();
         else { music.playSong(toSong(np.song)); startedRef.current = true; }
+        trackEvent('播放听歌房正在放的歌');
     };
     // 音乐只在听歌房内播放：离开场景时若仍在放我们起播的歌，暂停它
     useEffect(() => () => {
@@ -2882,24 +2892,35 @@ const ReaderModal: React.FC<{ novel: VRWorldNovel; characters: CharacterProfile[
     );
 };
 
-// ============ 上传弹窗（支持大文件 .txt，内容不入 DOM） ============
+// ============ 上传弹窗（支持大文件 .txt / .pdf，内容不入 DOM） ============
+type UploadFileInfo = {
+    name: string;
+    chars: number;
+    preview: string;
+    encoding: string;
+    kind: 'text' | 'pdf';
+    pages?: number;
+};
+
 const UploadModal: React.FC<{
     onClose: () => void;
     onCommit: (novel: VRWorldNovel) => Promise<void> | void;
     onError: (msg: string) => void;
 }> = ({ onClose, onCommit, onError }) => {
+    const uploadFieldClass = 'w-full rounded-lg border border-indigo-100/70 bg-white px-3 py-2 text-slate-800 caret-indigo-500 placeholder:text-indigo-300 outline-none focus:border-indigo-300';
     const [title, setTitle] = useState('');
     const [author, setAuthor] = useState('');
     const [summary, setSummary] = useState('');
     // 手动粘贴的小段文本走 state；大文件内容只存 ref，不进 textarea（否则 12MB 会冻 UI）
     const [pasteText, setPasteText] = useState('');
-    const [fileInfo, setFileInfo] = useState<{ name: string; chars: number; preview: string; encoding: string } | null>(null);
+    const [fileInfo, setFileInfo] = useState<UploadFileInfo | null>(null);
     const fileContentRef = useRef<string>('');
     // 留着原始字节，手动换编码时无需重新读盘即可重解码
     const fileBufRef = useRef<ArrayBuffer | null>(null);
     const [chosenEncoding, setChosenEncoding] = useState<string>('auto');
     const fileRef = useRef<HTMLInputElement>(null);
     const [reading, setReading] = useState(false);
+    const [readingStatus, setReadingStatus] = useState('');
     const [busy, setBusy] = useState(false);
     const [progress, setProgress] = useState(0);
 
@@ -2912,24 +2933,56 @@ const UploadModal: React.FC<{
             chars: content.length,
             preview: content.slice(0, 300).replace(/\s+/g, ' ').trim(),
             encoding,
+            kind: 'text',
         });
     };
 
     const onFile = async (f: File | undefined) => {
         if (!f) return;
+        const pdfFile = isPdfFile(f);
+        const textFile = f.type.toLowerCase() === 'text/plain' || /\.(txt|text)$/i.test(f.name);
+        if (!pdfFile && !textFile) {
+            onError('目前只支持 .txt 和 .pdf 文件');
+            if (fileRef.current) fileRef.current.value = '';
+            return;
+        }
         setReading(true);
+        setReadingStatus(pdfFile ? '正在载入 PDF…' : '读取并识别编码中…');
         try {
             const buf = await f.arrayBuffer();
-            fileBufRef.current = buf;
-            setChosenEncoding('auto');
-            applyDecode(f.name, buf, 'auto');
+            if (pdfFile) {
+                fileBufRef.current = null;
+                const result = await extractPdfText(buf, {
+                    onProgress: ({ page, totalPages }) => setReadingStatus(`正在提取 PDF 文本… ${page}/${totalPages}`),
+                });
+                const content = result.text.trim();
+                if (!content) {
+                    onError('PDF 中没有可提取的文字，可能是扫描件或图片 PDF；请先 OCR 后再导入');
+                    return;
+                }
+                fileContentRef.current = content;
+                setFileInfo({
+                    name: f.name,
+                    chars: content.length,
+                    preview: content.slice(0, 300).replace(/\s+/g, ' ').trim(),
+                    encoding: 'PDF',
+                    kind: 'pdf',
+                    pages: result.pageCount,
+                });
+                trackEvent('导入 PDF 小说到彼方书库', { pages: result.pageCount, chars: content.length });
+            } else {
+                fileBufRef.current = buf;
+                setChosenEncoding('auto');
+                applyDecode(f.name, buf, 'auto');
+            }
             setPasteText(''); // 文件优先，清掉粘贴框
-            if (!title.trim()) setTitle(f.name.replace(/\.(txt|text)$/i, ''));
+            if (!title.trim()) setTitle(f.name.replace(/\.(txt|text|pdf)$/i, ''));
         } catch (e) {
-            console.error('[VRWorld] decode file failed', e);
-            onError('文件读取失败');
+            console.error('[VRWorld] read novel file failed', e);
+            onError(pdfFile ? 'PDF 读取失败，文件可能已损坏、加密或网络组件加载失败' : '文件读取失败');
         } finally {
             setReading(false);
+            setReadingStatus('');
         }
     };
 
@@ -2946,6 +2999,7 @@ const UploadModal: React.FC<{
         fileBufRef.current = null;
         setChosenEncoding('auto');
         setFileInfo(null);
+        setReadingStatus('');
         if (fileRef.current) fileRef.current.value = '';
     };
 
@@ -2966,6 +3020,7 @@ const UploadModal: React.FC<{
             });
             if (novel.segments.length === 0) { onError('正文是空的'); setBusy(false); return; }
             await onCommit(novel);
+            trackEvent('上架一本小说到书库');
         } catch (e) {
             console.error('[VRWorld] build novel failed', e);
             onError('处理失败，文件可能太大或格式异常');
@@ -2981,22 +3036,24 @@ const UploadModal: React.FC<{
                     {!busy && <button onClick={onClose} className="ml-auto p-1 text-indigo-300/60"><X size={18} /></button>}
                 </div>
 
-                <input ref={fileRef} type="file" accept=".txt,text/plain" className="hidden" onChange={e => onFile(e.target.files?.[0])} />
+                <input ref={fileRef} type="file" accept=".txt,text/plain,.pdf,application/pdf" className="hidden" onChange={e => onFile(e.target.files?.[0])} />
                 {reading ? (
                     <div className="w-full rounded-xl border border-indigo-300/30 py-5 mb-3 flex items-center justify-center gap-2 text-indigo-100/90">
-                        <CircleNotch size={18} weight="bold" className="animate-spin" /> 读取并识别编码中…
+                        <CircleNotch size={18} weight="bold" className="animate-spin" /> {readingStatus}
                     </div>
                 ) : fileInfo ? (
                     <div className="rounded-xl border border-indigo-300/30 p-3 mb-3 bg-white/5">
                         <div className="flex items-center gap-2">
                             <BookOpen size={16} weight="fill" className="text-amber-200 shrink-0" />
                             <span className="text-[12.5px] text-white font-semibold truncate flex-1">{fileInfo.name}</span>
-                            <span className="text-[8.5px] text-indigo-300/60 border border-indigo-300/30 rounded px-1 uppercase">{fileInfo.encoding}</span>
+                            <span className="text-[8.5px] text-indigo-300/60 border border-indigo-300/30 rounded px-1 uppercase">
+                                {fileInfo.kind === 'pdf' ? `PDF · ${fileInfo.pages} 页` : fileInfo.encoding}
+                            </span>
                             {!busy && <button onClick={clearFile} className="text-indigo-300/60 p-1"><X size={14} /></button>}
                         </div>
                         <div className="text-[10px] text-indigo-300/60 mt-1">{fileInfo.chars.toLocaleString()} 字 · 预计 ~{Math.ceil(fileInfo.chars / 400).toLocaleString()} 段</div>
                         <p className="text-[10.5px] text-indigo-200/50 mt-1.5 leading-snug line-clamp-2">{fileInfo.preview}…</p>
-                        {!busy && (
+                        {!busy && fileInfo.kind === 'text' && (
                             <div className="flex items-center gap-1.5 mt-2">
                                 <span className="text-[9.5px] text-indigo-300/55 shrink-0">乱码？换编码</span>
                                 <select value={chosenEncoding} onChange={e => redecode(e.target.value)}
@@ -3014,19 +3071,19 @@ const UploadModal: React.FC<{
                 ) : (
                     <button onClick={() => fileRef.current?.click()}
                         className="w-full rounded-xl border border-dashed border-indigo-300/40 py-3 mb-3 text-[12.5px] text-indigo-100/90 flex items-center justify-center gap-2 active:bg-white/5">
-                        <UploadSimple size={16} weight="bold" /> 选择 .txt 文件（大文件也 OK）
+                        <UploadSimple size={16} weight="bold" /> 选择 .txt / .pdf 文件（大文件也 OK）
                     </button>
                 )}
 
                 <div className="space-y-2.5">
-                    <input value={title} onChange={e => setTitle(e.target.value)} placeholder="书名（必填）" className="w-full rounded-lg bg-white/8 px-3 py-2 text-[13px] text-white placeholder-indigo-300/40 outline-none" />
-                    <input value={author} onChange={e => setAuthor(e.target.value)} placeholder="作者（选填）" className="w-full rounded-lg bg-white/8 px-3 py-2 text-[13px] text-white placeholder-indigo-300/40 outline-none" />
-                    <input value={summary} onChange={e => setSummary(e.target.value)} placeholder="一句话简介（选填，喂给角色当背景）" className="w-full rounded-lg bg-white/8 px-3 py-2 text-[13px] text-white placeholder-indigo-300/40 outline-none" />
+                    <input value={title} onChange={e => setTitle(e.target.value)} placeholder="书名（必填）" className={`${uploadFieldClass} text-[13px]`} />
+                    <input value={author} onChange={e => setAuthor(e.target.value)} placeholder="作者（选填）" className={`${uploadFieldClass} text-[13px]`} />
+                    <input value={summary} onChange={e => setSummary(e.target.value)} placeholder="一句话简介（选填，喂给角色当背景）" className={`${uploadFieldClass} text-[13px]`} />
                     {!fileInfo && (
                         <>
                             <div className="text-[10px] text-indigo-300/50">或直接粘贴正文（小段文本用；大文件请走上面的文件选择）↓</div>
                             <textarea value={pasteText} onChange={e => setPasteText(e.target.value)} placeholder="粘贴正文…" rows={6}
-                                className="w-full rounded-lg bg-white/8 px-3 py-2 text-[12.5px] text-white placeholder-indigo-300/40 outline-none leading-relaxed" />
+                                className={`${uploadFieldClass} text-[12.5px] leading-relaxed`} />
                         </>
                     )}
                     <div className="text-[10px] text-indigo-300/50">{totalChars.toLocaleString()} 字</div>
@@ -3221,10 +3278,12 @@ const UserVRPanel: React.FC<{
         if (!chibi?.img) { onEditChibi(); return; } // 没捏小人 → 先捏，再回来开接入
         updateUserProfile({ vrState: { ...(uv || {}), enabled: true, currentRoom: room, activity: activity.trim(), updatedAt: Date.now() } });
         addToast?.('你已接入彼方', 'success');
+        trackEvent('开启用户本人接入彼方', { action: 'enable' });
     };
     const logout = () => {
         updateUserProfile({ vrState: { ...(uv || {}), enabled: false } });
         addToast?.('已从彼方登出', 'success'); // 登出后角色聊天里的"你在彼方"提示随之消失
+        trackEvent('开启用户本人接入彼方', { action: 'disable' });
     };
     const saveBroadcast = () => {
         updateUserProfile({ vrState: { ...(uv || {}), enabled: true, currentRoom: room, activity: activity.trim(), updatedAt: Date.now() } });
@@ -3303,6 +3362,7 @@ const SettingsView: React.FC<{
     const disable = (char: CharacterProfile) => {
         updateCharacter(char.id, { vrState: { ...(char.vrState || { intervalMinutes: VR_DEFAULT_INTERVAL_MIN }), enabled: false } as any });
         VRScheduler.stop(char.id);
+        trackEvent('开启角色接入彼方', { action: 'disable' });
     };
     const setInterval = (char: CharacterProfile, minutes: number) => {
         updateCharacter(char.id, { vrState: { ...(char.vrState || {}), enabled: char.vrState?.enabled ?? true, intervalMinutes: minutes } });

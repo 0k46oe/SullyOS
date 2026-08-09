@@ -2242,16 +2242,7 @@ function sanitizeTable(value) {
   return value;
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-instant@0.9.1/node_modules/@rei-standard/amsg-instant/dist/index.mjs
-var TEXT_ENCODER2 = new TextEncoder();
-var TEXT_DECODER2 = new TextDecoder("utf-8", { fatal: false });
-function utf82(str) {
-  return TEXT_ENCODER2.encode(String(str));
-}
-var KEY_INFO_PREFIX2 = utf82("WebPush: info\0");
-var CEK_INFO2 = utf82("Content-Encoding: aes128gcm\0");
-var NONCE_INFO2 = utf82("Content-Encoding: nonce\0");
-var VAPID_TOKEN_LIFETIME2 = 12 * 3600;
+// node_modules/.pnpm/@rei-standard+amsg-instant@0.11.0-next.3/node_modules/@rei-standard/amsg-instant/dist/index.mjs
 var PUSH_PAYLOAD_BYTE_ENCODER2 = new TextEncoder();
 function segmentTextWithProtectedBlocks(text, options) {
   if (!text) return [];
@@ -2339,7 +2330,8 @@ var stripTimestamps = (t) => t.replace(/\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\]\s*/g
 var stripChineseDate = (t) => t.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, "");
 var stripRoleNamePrefix = (t) => t.replace(/^[\w一-龥]+:\s*/, "");
 var stripBusinessTagsForBubble = (t) => t.replace(/\[\[(?:ACTION|RECALL|SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END|MUSIC_ACTION)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[\s*[记記][录錄]\s*[:：][\s\S]*?\]\]/g, "").replace(/\[schedule_message[^\]]*\]/g, "");
-var stripBusinessTagsForNotification = (t) => stripBusinessTagsForBubble(t).replace(/\[\[(?:READ_NOTE|XHS_[A-Z_]+)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[XHS_[A-Z_]+\]\]/g, "");
+var stripBusinessTagsForNotification = (t) => stripBusinessTagsForBubble(t).replace(/\[\[(?:READ_NOTE|XHS_[A-Z_]+|LIFE|NEWS_CARD)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[XHS_[A-Z_]+\]\]/g, "");
+var stripAllDoubleBracketTags = (t) => t.replace(/\[\[[\s\S]*?\]\]/g, "");
 var stripQuotes = (t) => t.replace(/\[\[(?:QU[OA]TE|引用)[：:][\s\S]*?\]\]/g, "").replace(/\[(?:QU[OA]TE|引用)[：:][^\]]*\]/g, "").replace(/\[回复\s*[""“][^""”]*?[""”](?:\.{0,3})\]\s*[：:]?\s*/g, "").replace(/\[[^\[\]\n「」]{0,24}引用了[^\[\]\n「」]{0,24}「[^」\n]*?」[^\[\]\n]{0,24}\]\s*/g, "");
 var stripSystemLogLeak = (t) => t.replace(/[\[【]\s*(?:系统|系統|System)\s*(?:提示)?\s*[:：][^\[\]【】]*[\]】]\s*/gi, "").replace(/\[\s*(?:系统|系統)\s*\]\s*/g, "");
 var stripMarkdownHeaders = (t) => t.replace(/^#{1,6}\s+/gm, "");
@@ -2351,7 +2343,7 @@ var collapseWhitespace = (t) => t.replace(/\n{3,}/g, "\n\n").trim();
 var stripThinkBlocks = (t) => t.replace(/<(think|thinking|thought)>[\s\S]*?<\/\1>/gi, "").replace(/<(?:think|thinking|thought)>[\s\S]*$/gi, "");
 var stripInnerState = (t) => t.replace(/\[\[INNER_STATE:\s*[\s\S]*?\]\]/g, "");
 var replaceMarkdownLinks = (t) => t.replace(/\[([^\]]+)\]\([^)]+\)/g, "[\u94FE\u63A5\uFF1A$1]");
-var replaceSendEmoji = (t) => t.replace(/\[\[SEND_EMOJI:\s*(.+?)\]\]/g, "[\u8868\u60C5\uFF1A$1]");
+var replaceSendEmoji = (t) => t.replace(/\[\[SEND_EMOJI[:：]\s*(.+?)\]\]/g, "[\u8868\u60C5\uFF1A$1]");
 var replaceEmojiReverseTag = (t) => t.replace(/\[(?:你|User|用户|System|[\w一-龥]+)\s*发送了表情包[:：]\s*(.*?)\]/g, "[\u8868\u60C5\uFF1A$1]");
 var replaceHtmlBlocks = (t) => t.replace(/\[html\][\s\S]*?\[\/html\]/gi, "[HTML \u5361\u7247]");
 var replaceTranslationForBanner = (t) => t.replace(/<翻译>\s*<原文>([\s\S]*?)<\/原文>\s*<译文>[\s\S]*?<\/译文>\s*<\/翻译>/g, "$1").replace(/<译文>[\s\S]*?<\/译文>/g, "").replace(/<\/?(?:翻译|原文)>/g, "");
@@ -2534,6 +2526,7 @@ ${ATOM_MARKER}B${idx}${ATOM_MARKER}
   const SOLO_RE = new RegExp(`^${ATOM_MARKER}B(\\d+)${ATOM_MARKER}$`);
   const GLOBAL_RE = new RegExp(`${ATOM_MARKER}B(\\d+)${ATOM_MARKER}`, "g");
   const segments = [];
+  let pendingQuoteRaw = "";
   for (const rawChunk of rawChunks) {
     const soloMatch = rawChunk.trim().match(SOLO_RE);
     if (soloMatch) {
@@ -2557,8 +2550,17 @@ ${ATOM_MARKER}B${idx}${ATOM_MARKER}
       rawText = rawText.trim();
       if (!rawText) continue;
       const sanitized = sanitizeTextForBanner(rawText).trim();
-      if (!sanitized) continue;
-      segments.push({ raw: rawText, sanitized });
+      if (!sanitized) {
+        if (!stripQuotes(rawText).trim()) pendingQuoteRaw += `${rawText}
+`;
+        continue;
+      }
+      if (!stripAllDoubleBracketTags(sanitized).trim()) continue;
+      segments.push({
+        raw: pendingQuoteRaw ? `${pendingQuoteRaw}${rawText}` : rawText,
+        sanitized
+      });
+      pendingQuoteRaw = "";
     }
   }
   return segments;
@@ -2593,7 +2595,7 @@ function chunkText(text) {
   return out;
 }
 function splitOnSendEmoji(chunk) {
-  const re = /\[\[SEND_EMOJI:\s*(.*?)\]\]/g;
+  const re = /\[\[SEND_EMOJI[:：]\s*(.*?)\]\]/g;
   const parts = [];
   let lastIndex = 0;
   let m;
@@ -2843,6 +2845,17 @@ var SIDE_EFFECT_TAGS = [
     re: /\[\[XHS_SHARE:\s*(\d+)\]\]/g,
     toDirective: (m) => ({ type: "xhs_share", idx: Number(m[1]) })
   },
+  // [[LIFE:MED|布洛芬]] 生活记录代记 — 跟 chatParser.ts 的 `\[\[LIFE:[^\]]*\]\]` 同口径,
+  // 冒号后整段原样带走, 不在这里拆 verb/args (那份解析在 lifeRecords.parseLifeDirective)。
+  {
+    re: /\[\[LIFE:([^\]]*)\]\]/g,
+    toDirective: (m) => ({ type: "life_record", body: m[1] })
+  },
+  // [[NEWS_CARD: 来源|标题]] 分享热点卡片 — 跟 chatParser.ts:NEWS_CARD_RE 同口径。
+  {
+    re: /\[\[NEWS_CARD:\s*([^\]]*?)\s*\]\]/g,
+    toDirective: (m) => ({ type: "news_card", body: m[1] })
+  },
   // 写日记 — 长形态: [[DIARY_START: title|mood]]\n content \n[[DIARY_END]]
   // 短形态: [[DIARY: title|content]] 或 [[DIARY: content]] (无 title)
   // 行为跟 applyAssistantPostProcessing.ts:465-495 字节对齐:
@@ -2934,16 +2947,109 @@ function classifyLLMOutput(text) {
       if (d) directives.push(d);
     }
   }
+  const dedupedDirectives = [];
+  const seenDirectives = /* @__PURE__ */ new Set();
+  for (const d of directives) {
+    const key = JSON.stringify(d);
+    if (seenDirectives.has(key)) {
+      console.warn("[classifier] \u540C\u4E00\u6761\u6D88\u606F\u91CC\u91CD\u590D\u7684\u526F\u4F5C\u7528, \u53EA\u4FDD\u7559\u7B2C\u4E00\u4E2A:", key);
+      continue;
+    }
+    seenDirectives.add(key);
+    dedupedDirectives.push(d);
+  }
   let cleanedText = textAfterTransfers;
   for (const spec of DATA_TAGS) cleanedText = cleanedText.replace(spec.re, "");
   for (const spec of SIDE_EFFECT_TAGS) cleanedText = cleanedText.replace(spec.re, "");
   cleanedText = cleanedText.trim();
   const sanitizedBody = sanitizeForNotification(cleanedText);
-  return { kind: "finish", cleanedText, sanitizedBody, directives };
+  return { kind: "finish", cleanedText, sanitizedBody, directives: dedupedDirectives };
 }
 
 // utils/instantWorkerVersion.ts
 var INSTANT_WORKER_VERSION = "2026-07-17";
+
+// utils/emotionEvalCore.ts
+var EMOTION_EVAL_SYSTEM_SLOT = "__EMOTION_EVAL_SYSTEM_PROMPT__";
+var EMOTION_EVAL_HISTORY_SLOT = "__EMOTION_EVAL_HISTORY__";
+var EMOTION_EVAL_TIMEOUT_MS = 12e4;
+var flattenEvalContent = (content) => {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map((part) => part?.type === "text" ? part.text || "" : part?.type === "image_url" ? "[\u56FE\u7247]" : "").filter(Boolean).join(" ");
+  }
+  return "";
+};
+var restoreEvalPrompt = (template, chatMessages, charName) => {
+  const messages = Array.isArray(chatMessages) ? chatMessages : [];
+  let systemPromptText = "";
+  let conversation = messages;
+  if (messages.length > 0 && messages[0]?.role === "system") {
+    systemPromptText = flattenEvalContent(messages[0].content);
+    conversation = messages.slice(1);
+  }
+  const recentLines = conversation.map((m) => {
+    const role = m.role === "user" ? "\u7528\u6237" : m.role === "assistant" ? charName : "\u7CFB\u7EDF";
+    return `[${role}]: ${flattenEvalContent(m.content)}`;
+  }).join("\n");
+  return String(template).replace(EMOTION_EVAL_SYSTEM_SLOT, () => systemPromptText).replace(EMOTION_EVAL_HISTORY_SLOT, () => recentLines);
+};
+var ERROR_SNIPPET_MAX = 120;
+var maskAndSnip = (text, apiKey) => {
+  let snippet = text.replace(/\s+/g, " ").trim();
+  if (apiKey && snippet.includes(apiKey)) snippet = snippet.split(apiKey).join("***");
+  return snippet.slice(0, ERROR_SNIPPET_MAX);
+};
+var requestEmotionEval = async (api, promptContent, timeoutMs = EMOTION_EVAL_TIMEOUT_MS) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const baseUrl = String(api.baseUrl).replace(/\/+$/, "");
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${api.apiKey || "sk-none"}`
+      },
+      body: JSON.stringify({
+        model: api.model,
+        messages: [{ role: "user", content: promptContent }],
+        temperature: 0.85,
+        // 显式给足输出额度：部分中转不传 max_tokens 时默认很小，评估输出很长，
+        // 会被截成半截 JSON。
+        max_tokens: 8e3,
+        stream: false
+      }),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      let body = "";
+      try {
+        body = await res.text();
+      } catch {
+      }
+      console.warn("[emotion-eval] \u526F API \u62D2\u4E86\u8FD9\u6B21\u8BC4\u4F30\uFF08\u4E3B\u6D41\u7A0B\u4E0D\u53D7\u5F71\u54CD\uFF09", res.status);
+      const snippet = maskAndSnip(body, api.apiKey);
+      return { raw: null, error: `\u526F API HTTP ${res.status}${snippet ? `\uFF1A${snippet}` : ""}` };
+    }
+    const data = await res.json();
+    const message = data?.choices?.[0]?.message;
+    const raw = flattenEvalContent(message?.content) || (typeof message?.reasoning_content === "string" ? message.reasoning_content : "");
+    if (!raw.trim()) {
+      return {
+        raw: null,
+        error: `\u8BC4\u4F30\u6A21\u578B\u6CA1\u6709\u8F93\u51FA\u5185\u5BB9\uFF08finish_reason: ${data?.choices?.[0]?.finish_reason ?? "?"}\uFF09`
+      };
+    }
+    return { raw, error: null };
+  } catch (error) {
+    console.warn("[emotion-eval] \u8BC4\u4F30\u5931\u8D25\uFF08\u4E3B\u6D41\u7A0B\u4E0D\u53D7\u5F71\u54CD\uFF09", error);
+    const reason = controller.signal.aborted ? `\u8BC4\u4F30\u8D85\u65F6\uFF08${Math.round(timeoutMs / 1e3)} \u79D2\u6CA1\u56DE\u6765\uFF09` : `\u8BC4\u4F30\u8BF7\u6C42\u6CA1\u53D1\u51FA\u53BB\uFF1A${maskAndSnip(error instanceof Error ? error.message : String(error), api.apiKey)}`;
+    return { raw: null, error: reason };
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 // worker/instant-push/src/index.ts
 var MULTIPART_TRANSPORT = { enabled: true };
@@ -3291,65 +3397,13 @@ async function runEmotionEval(body) {
   if (!ee?.prompt || !ee?.api?.baseUrl || !ee?.api?.apiKey || !ee?.api?.model) {
     return { raw: "", error: "\u8BC4\u4F30\u914D\u7F6E\u4E0D\u5B8C\u6574\uFF08\u7F3A prompt / baseUrl / apiKey / model\uFF09" };
   }
-  const charId = body?.metadata && typeof body.metadata === "object" ? body.metadata.charId : "";
   const priorMessages = Array.isArray(body?.messages) ? body.messages : [];
   const contactName = body?.contactName || "\u89D2\u8272";
-  const flattenContent = (content) => {
-    if (typeof content === "string") return content;
-    if (Array.isArray(content)) {
-      return content.map((p) => p?.type === "text" ? p.text || "" : p?.type === "image_url" ? "[\u56FE\u7247]" : "").filter(Boolean).join(" ");
-    }
-    return "";
-  };
-  let systemPromptText = "";
-  let conversation = priorMessages;
-  if (priorMessages.length > 0 && priorMessages[0]?.role === "system") {
-    systemPromptText = flattenContent(priorMessages[0].content);
-    conversation = priorMessages.slice(1);
-  }
-  const recentLines = conversation.map((m) => {
-    const role = m.role === "user" ? "\u7528\u6237" : m.role === "assistant" ? contactName : "\u7CFB\u7EDF";
-    return `[${role}]: ${flattenContent(m.content)}`;
-  }).join("\n");
-  const evalContent = String(ee.prompt).replace("__EMOTION_EVAL_SYSTEM_PROMPT__", () => systemPromptText).replace("__EMOTION_EVAL_HISTORY__", () => recentLines);
-  const evalMessages = [{ role: "user", content: evalContent }];
-  try {
-    const baseUrl = String(ee.api.baseUrl).replace(/\/+$/, "");
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${ee.api.apiKey || "sk-none"}`
-      },
-      body: JSON.stringify({
-        model: ee.api.model,
-        messages: evalMessages,
-        temperature: 0.85,
-        // 显式给足输出额度: 部分代理不传 max_tokens 时默认很小, eval 输出很长, 会被截断成半截 JSON
-        max_tokens: 8e3,
-        stream: false
-      })
-    });
-    if (!res.ok) {
-      let snippet = "";
-      try {
-        snippet = (await res.text()).replace(/\s+/g, " ").slice(0, 120);
-      } catch {
-      }
-      console.error("[emotion-eval] LLM call failed", res.status);
-      return { raw: "", error: `\u526F API HTTP ${res.status}${snippet ? `\uFF1A${snippet}` : ""}` };
-    }
-    const data = await res.json();
-    const msg = data?.choices?.[0]?.message;
-    const raw = flattenContent(msg?.content) || (typeof msg?.reasoning_content === "string" ? msg.reasoning_content : "");
-    if (!raw) {
-      return { raw: "", error: `\u8BC4\u4F30\u6A21\u578B\u6CA1\u6709\u8F93\u51FA\u5185\u5BB9 (finish_reason: ${data?.choices?.[0]?.finish_reason ?? "?"})` };
-    }
-    return { raw };
-  } catch (e) {
-    console.error("[emotion-eval] failed", e);
-    return { raw: "", error: `\u8BC4\u4F30\u8BF7\u6C42\u5F02\u5E38\uFF1A${e?.message || String(e)}` };
-  }
+  const outcome = await requestEmotionEval(
+    ee.api,
+    restoreEvalPrompt(String(ee.prompt), priorMessages, contactName)
+  );
+  return outcome.raw != null ? { raw: outcome.raw } : { raw: "", error: outcome.error ?? void 0 };
 }
 function withSseAntiBufferingHeaders(resp) {
   const contentType = resp.headers.get("content-type") || "";

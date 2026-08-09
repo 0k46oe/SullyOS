@@ -17,6 +17,20 @@ dist-ssr
 # committed copy lives at worker/instant-push/worker.bundle.js
 public/instant-worker.bundle.js
 
+# build artifact — `pnpm run build:workers` 原样复制过来的，与源文件逐字节相同；
+# 提交的那份在 worker/amsg/deno-proxy.ts
+public/amsg-deno-proxy.ts
+
+# build artifact — 每次 `pnpm run build` 都会重新打，跟着提交只会让跑完构建的人
+# 平白多一条 diff。提交的那份在 worker/amsg/worker.bundle.js（wrangler.toml 的
+# main 指着它，手动 wrangler deploy 要用）。
+#
+# 发布链路都会自己生成，不会因为仓库里没有它就少东西：
+#   - GitHub Pages：deploy-pages.yml 跑 `pnpm run build`
+#   - Netlify：本地构建后上传 dist
+#   - 用户自部署的 worker 仓库：sync-workers-repo.yml 跑 `pnpm build:workers`
+public/amsg-worker.bundle.js
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -31,5 +45,18 @@ public/instant-worker.bundle.js
 # xiaohongshu-skills (cloned dependency)
 xiaohongshu-skills/
 
+# wrangler 本地开发：.dev.vars 装的是 worker secrets（master key / VAPID 私钥），
+# .wrangler/ 是本地 D1 数据与缓存，两样都不进仓库。
+**/.dev.vars
+**/.dev.vars.*
+!**/.dev.vars.example
+**/.wrangler/
+
 # git worktrees
 .worktrees/
+.claude/
+.pnpm-store/
+
+# TIAO-Capacitor local Android toolchain and caches (D: only, never committed)
+.android-sdk/
+.gradle-user-home/

@@ -9,6 +9,7 @@ const callLite = (
   body: Record<string, unknown> = {},
   env: Record<string, unknown> = {},
   rnoteApiKey = '',
+  platform = 'xhs',
 ) =>
   worker.fetch(
     new Request(`https://local.test/api/${command}`, {
@@ -17,6 +18,7 @@ const callLite = (
         'content-type': 'application/json',
         'x-xhs-cookie': COOKIE,
         ...(rnoteApiKey ? { 'x-rnote-api-key': rnoteApiKey } : {}),
+        ...(platform && platform !== 'auto' ? { 'x-xhs-platform': platform } : {}),
       },
       body: JSON.stringify(body),
     }),
@@ -33,6 +35,7 @@ const callExperiment = (
       headers: {
         'content-type': 'application/json',
         'x-xhs-cookie': COOKIE,
+        'x-xhs-platform': 'xhs',
         ...(ack ? { 'x-xhs-experiment-ack': ack } : {}),
       },
       body: JSON.stringify(body),
@@ -45,6 +48,66 @@ const callExperiment = (
 afterEach(() => {
   vi.restoreAllMocks();
   __xhsLiteTest.spiderV3.resetDslCache();
+  __xhsLiteTest.spiderV3.resetPlatformCache();
+});
+
+describe('XHS Lite mainland / RedNote platform routing', () => {
+  it('auto-detects a RedNote session without relying on gid or bRequestId', async () => {
+    const upstream = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      const headers = new Headers(init?.headers);
+      expect(headers.get('cookie')).toBe(COOKIE);
+      if (url.hostname === 'edith.xiaohongshu.com') {
+        expect(headers.get('origin')).toBe('https://www.xiaohongshu.com');
+        return new Response(JSON.stringify({ success: true, data: { guest: true } }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.hostname === 'webapi.rednote.com') {
+        expect(headers.get('origin')).toBe('https://www.rednote.com');
+        if (url.pathname.endsWith('/v2/user/me')) {
+          return new Response(JSON.stringify({ success: true, data: { guest: true } }), {
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({
+          success: true,
+          data: { result: { success: true, user: { user_id: 'rednote-user', nickname: 'global-user' } } },
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    const response = await callLite('check-login', {}, {}, '', 'auto');
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(3);
+    expect(body).toMatchObject({
+      logged_in: true,
+      platform: 'rednote',
+      api_host: 'webapi.rednote.com',
+      user_id: 'rednote-user',
+    });
+  });
+
+  it('routes subsequent RedNote reads directly to the global backend', async () => {
+    const upstream = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ success: true, data: { items: [] } }), {
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    const response = await callLite('search', { keyword: 'cat' }, {}, '', 'rednote');
+
+    expect(response.status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(1);
+    const [input, init] = upstream.mock.calls[0];
+    expect(String(input)).toContain('https://webapi.rednote.com/api/sns/web/v1/search/notes');
+    const headers = new Headers(init?.headers);
+    expect(headers.get('origin')).toBe('https://www.rednote.com');
+    expect((await response.json()).platform).toBe('rednote');
+  });
 });
 
 describe('XHS Lite session-risk headers', () => {

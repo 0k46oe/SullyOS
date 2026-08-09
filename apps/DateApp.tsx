@@ -1,10 +1,10 @@
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { CharacterProfile, Message, DateState, AppID } from '../types';
 import { DatePrompts, ApiMessage } from '../utils/datePrompts';
-import { processNewMessages, mergePalaceFragmentsIntoMemories, getMemoryPalaceHighWaterMark } from '../utils/memoryPalace/pipeline';
+import { processNewMessagesWithAutoArchive } from '../utils/memoryPalace/autoArchive';
 import type { PipelineResult } from '../utils/memoryPalace/pipeline';
 import { incrementDigestRound, runCognitiveDigestion } from '../utils/memoryPalace';
 import { getRoomLabel } from '../utils/memoryPalace/types';
@@ -15,11 +15,26 @@ import DateSettings from '../components/date/DateSettings';
 import { armDateResumeAttempt, clearDateResumeAttempt, takeCrashedDateResume } from '../utils/dateSessionRecovery';
 import { BookOpen, Sparkle, CaretLeft, GearSix } from '@phosphor-icons/react';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
+import { trimHistoryThrough } from '../utils/dateSessionHistory';
+import { trackEvent } from '../utils/analytics';
+import { markAmsgStateDirty } from '../utils/amsgStateSync';
 import StoryTheater from '../components/date/story/StoryTheater';
 import { dateLaunch } from '../utils/dateLaunch';
+import { materializeVisionDescriptions } from '../utils/visionApi';
+import { shareOrDownloadFile } from '../utils/shareExport';
+import {
+    buildDateHistoryGroups,
+    formatDateHistoryDate,
+    formatDateHistoryExport,
+    formatDateHistoryTime,
+    makeDateHistoryFileName,
+    type DateHistoryGroup,
+    type DateHistorySortOrder,
+    type DateHistoryView,
+} from '../utils/dateHistory';
 
 const DateApp: React.FC = () => {
-    const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, apiConfig, addToast, updateCharacter, virtualTime, userProfile, memoryPalaceConfig, dateAutoStartCharId, consumeDateAutoStart, characterGroups } = useOS();
+    const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, apiConfig, addToast, updateCharacter, virtualTime, userProfile, memoryPalaceConfig, dateAutoStartCharId, consumeDateAutoStart, characterGroups, groups, realtimeConfig } = useOS();
 
     // 是否由聊天「见面」按钮进入：为真时，退出见面流程回到聊天而非见面选择页/桌面。
     // 用本地 state（而非 context）承载：DateApp 切走即卸载，标记随之消失，不会泄漏到
@@ -61,6 +76,8 @@ const DateApp: React.FC = () => {
 
     // 选择页分页（6 个角色一页，横向翻页）
     const SELECT_PAGE_SIZE = 6;
+    const DATE_SESSION_MESSAGE_LIMIT = 220;
+    const DATE_HISTORY_MESSAGE_LIMIT = 500;
     const pagerRef = useRef<HTMLDivElement>(null);
     const [selectPage, setSelectPage] = useState(0);
     const [selectGroupId, setSelectGroupId] = useState(GROUP_FILTER_ALL); // 选择页的分组筛选
@@ -80,7 +97,12 @@ const DateApp: React.FC = () => {
     const [peekLoading, setPeekLoading] = useState(false);
     
     // History State
-    const [historySessions, setHistorySessions] = useState<{date: string, msgs: Message[]}[]>([]);
+    const [historyMessages, setHistoryMessages] = useState<Message[]>([]);
+    const [historyView, setHistoryView] = useState<DateHistoryView>('encounter');
+    const [historySortOrder, setHistorySortOrder] = useState<DateHistorySortOrder>('newest');
+    const [historyLoadLimit, setHistoryLoadLimit] = useState(DATE_HISTORY_MESSAGE_LIMIT);
+    const [historyReachedEnd, setHistoryReachedEnd] = useState(false);
+    const [historyBusy, setHistoryBusy] = useState(false);
     // History long-press context menu
     const [historyMenuMsg, setHistoryMenuMsg] = useState<Message | null>(null);
     const [historyMenuPos, setHistoryMenuPos] = useState<{x: number, y: number}>({x: 0, y: 0});
@@ -94,6 +116,9 @@ const DateApp: React.FC = () => {
 
     // --- NEW: Editing State lifted to here for DB sync ---
     const [dateMessages, setDateMessages] = useState<Message[]>([]);
+    // 阅读模式「加载更早」用：当前查询 limit 与「库里已经没有更早的了」。
+    const [dateLoadLimit, setDateLoadLimit] = useState(DATE_SESSION_MESSAGE_LIMIT);
+    const [dateHistoryReachedEnd, setDateHistoryReachedEnd] = useState(false);
     const [hasSavedOpening, setHasSavedOpening] = useState(false);
 
     // Edit Modal State
@@ -102,16 +127,34 @@ const DateApp: React.FC = () => {
     const [editContent, setEditContent] = useState('');
 
     const char = characters.find(c => c.id === activeCharacterId);
+    const historyGroups = useMemo(
+        () => buildDateHistoryGroups(historyMessages, historyView, historySortOrder),
+        [historyMessages, historyView, historySortOrder],
+    );
+
+    // 见面消息和普通聊天共用同一份历史，也就是主动消息 2.0 云端快照（fire_pack）的素材。
+    // 每次落库 / 删改后打一次脏：中途杀 App 时这一场见面就不会在云端整个丢掉，删改过的
+    // 内容也不会被角色到点又提一遍。快照里的消息在上传时从 DB 重读，打脏本身很便宜。
+    const markDateTurnDirty = (target = char) => {
+        if (!target) return;
+        markAmsgStateDirty({ char: target, userProfile, groups, realtimeConfig });
+    };
+
+    const getDateContextFetchLimit = (c: CharacterProfile) => Math.max(c.contextLimit || 500, DATE_SESSION_MESSAGE_LIMIT) + 32;
+    const loadRecentDateMessages = async (charId: string, limit = DATE_SESSION_MESSAGE_LIMIT) => {
+        return (await DB.getRecentMessagesByCharIdAndSource(charId, 'date', limit))
+            .sort((a, b) => a.timestamp - b.timestamp);
+    };
 
     // --- Data Loading ---
-    const loadDateMessages = async () => {
+    const loadDateMessages = async (limit = dateLoadLimit) => {
         if (char) {
-            // includeProcessed=true：见面记录有自己的 source 维度，
-            // 不能被聊天侧的 memoryPalace 高水位静默吃掉
-            const msgs = await DB.getMessagesByCharId(char.id, true);
-            // 只筛选 source='date' 的消息用于小说模式显示
-            const filtered = msgs.filter(m => m.metadata?.source === 'date').sort((a,b) => a.timestamp - b.timestamp);
+            // 见面记录只取最近窗口，不再把该角色全部聊天 getAll 进内存。
+            // TODO(date-assets): 后续把角色立绘/背景本体迁到 assets store 后，这里还能再把 limit 放宽。
+            const filtered = await loadRecentDateMessages(char.id, limit);
             setDateMessages(filtered);
+            // 拿回来的比要的少 = 库里的见面记录已经取完，阅读模式不用再往前翻了。
+            setDateHistoryReachedEnd(filtered.length < limit);
             
             // 检查数据库中是否已经包含当前的 peekStatus（通过内容比对），避免重复保存
             if (peekStatus && filtered.some(m => m.content === peekStatus && m.role === 'assistant')) {
@@ -122,9 +165,20 @@ const DateApp: React.FC = () => {
 
     useEffect(() => {
         if (char && mode === 'session') {
-            loadDateMessages();
+            // 进会话 / 换角色都从初始窗口重来。limit 必须显式传：setState 是异步的，
+            // 靠 dateLoadLimit 闭包会读到上一个角色翻开的深度，和重置后的 state 对不上。
+            setDateLoadLimit(DATE_SESSION_MESSAGE_LIMIT);
+            setDateHistoryReachedEnd(false);
+            loadDateMessages(DATE_SESSION_MESSAGE_LIMIT);
         }
     }, [char, mode]);
+
+
+    /** 阅读模式要更早的记录：limit 递增重取（反向游标，limit 越大够得越远）。 */
+    const handleLoadMoreDateHistory = async (nextLimit: number) => {
+        setDateLoadLimit(nextLimit);
+        await loadDateMessages(nextLimit);
+    };
 
     // 见面「继续上次」崩溃自愈：若上次恢复会话时把 iOS WebKit 内容进程撑崩了
     // (表现为反复灰屏/白屏「此网页反复出现问题」，非可捕获的 JS 异常)，那份重快照
@@ -134,6 +188,7 @@ const DateApp: React.FC = () => {
         const crashedCharId = takeCrashedDateResume();
         if (!crashedCharId) return;
         const crashed = characters.find(c => c.id === crashedCharId);
+        trackEvent('检出见面存档崩溃并清理', { 处理结果: crashed?.savedDateState ? '已清理存档' : '无存档可清' });
         if (crashed?.savedDateState) {
             updateCharacter(crashedCharId, { savedDateState: undefined });
             addToast('上次见面异常退出，已清理存档，可重新开始', 'info');
@@ -215,6 +270,8 @@ const DateApp: React.FC = () => {
         setMode('session');
         setPendingSessionChar(null);
         addToast('已恢复上次进度', 'success');
+        trackEvent('选择见面存档处理方式', { choice: 'resume' });
+        trackEvent('恢复上次见面进度');
     };
 
     const handleStartNewSession = () => {
@@ -222,6 +279,8 @@ const DateApp: React.FC = () => {
         // 新会话没有恢复快照可重放，撤销任何残留哨兵。
         clearDateResumeAttempt();
         updateCharacter(pendingSessionChar.id, { savedDateState: undefined });
+        trackEvent('选择见面存档处理方式', { choice: 'new' });
+        trackEvent('见面存档选重新开始');
         startPeek(pendingSessionChar);
         setPendingSessionChar(null);
     };
@@ -253,7 +312,8 @@ const DateApp: React.FC = () => {
 
         // 2. 切换模式并刷新数据
         setMode('session');
-        await loadDateMessages();
+        trackEvent('走过去开始见面会话');
+        await loadDateMessages(DATE_SESSION_MESSAGE_LIMIT);
     };
 
     // --- Peek (Generation) Logic ---
@@ -262,16 +322,19 @@ const DateApp: React.FC = () => {
         setMode('peek');
         setPeekLoading(true);
         setPeekStatus('');
-        setHasSavedOpening(false); 
+        setHasSavedOpening(false);
+        trackEvent('进入见面感知页');
 
         try {
-            const msgs = await DB.getMessagesByCharId(c.id, true);
+            const msgs = await DB.getRecentMessagesByCharId(c.id, getDateContextFetchLimit(c), true);
+            const preparedMsgs = await materializeVisionDescriptions(msgs, apiConfig.visionApi);
             const emojis = await DB.getEmojis();
             const { messages } = DatePrompts.buildPeekPayload({
                 char: c,
                 userProfile,
-                allMsgs: msgs,
+                allMsgs: preparedMsgs,
                 emojis,
+                useVisionDescriptions: apiConfig.visionApi?.enabled === true,
             });
             const content = await callLLM(messages, apiConfig.temperature ?? 0.85);
             setPeekStatus(content);
@@ -299,7 +362,7 @@ const DateApp: React.FC = () => {
 
         const recentMsgs = await DB.getRecentMessagesByCharId(charForHook.id, 50);
         try {
-            const pipelineResult = await processNewMessages(
+            const pipelineResult = await processNewMessagesWithAutoArchive(
                 recentMsgs,
                 charForHook.id,
                 charForHook.name,
@@ -316,30 +379,6 @@ const DateApp: React.FC = () => {
 
             if (pipelineResult && pipelineResult.stored > 0) {
                 setMemoryPalaceResult(pipelineResult);
-            }
-
-            if ((liveAfter as any).autoArchiveEnabled) {
-                try {
-                    const patch: any = {};
-                    if (pipelineResult?.autoArchive) {
-                        patch.memories = mergePalaceFragmentsIntoMemories(
-                            liveAfter.memories || [],
-                            pipelineResult.autoArchive.fragments,
-                        );
-                    }
-                    // 隐藏线追平到向量高水位：覆盖「关闭期推进了 hwm 但 hide 被冻结」的历史空档。
-                    // 只要全自动记忆开着，每次自动总结都把 hide 追平到 hwm，无需用户手动操作。
-                    const hwm = getMemoryPalaceHighWaterMark(charForHook.id);
-                    const curHide = ((liveAfter as any).hideBeforeMessageId as number) || 0;
-                    if (hwm > curHide) {
-                        patch.hideBeforeMessageId = hwm;
-                    }
-                    if (Object.keys(patch).length > 0) {
-                        updateCharacter(charForHook.id, patch);
-                    }
-                } catch (e: any) {
-                    console.warn(`📚 [DateApp AutoArchive] 失败: ${e?.message || e}`);
-                }
             }
 
             // 50 轮自动认知消化（与聊天侧共享计数器，按 charId 持久化）
@@ -367,7 +406,7 @@ const DateApp: React.FC = () => {
 
         // 重发场景：如果 DB 里最后一条已经是这条 user 消息（上一轮发送后 API 失败 / 网络抖动等），
         // 就跳过重复落库，直接走 API。与 chat app 行为对齐，让用户按发送键即可重新触发 LLM。
-        const recentCheck = await DB.getRecentMessagesByCharId(char.id, 1, true);
+        const recentCheck = await DB.getRecentMessagesByCharIdAndSource(char.id, 'date', 1);
         const isRetry = recentCheck.length > 0
             && recentCheck[0].role === 'user'
             && recentCheck[0].content === text
@@ -376,34 +415,36 @@ const DateApp: React.FC = () => {
         if (!isRetry) {
             // 1. Save User Msg
             await DB.saveMessage({ charId: char.id, role: 'user', type: 'text', content: text, metadata: { source: 'date' } });
+            markDateTurnDirty(char);
         }
-        
+
         // 2. Prepare Context
         // Re-fetch messages. Since we saved the opening in handleEnterSession,
         // 'allMsgs' will now correctly contain: [History..., Opening, UserMsg]
-        const allMsgs = await DB.getMessagesByCharId(char.id, true);
+        const allMsgs = await DB.getRecentMessagesByCharId(char.id, getDateContextFetchLimit(char), true);
+        const preparedAllMsgs = await materializeVisionDescriptions(allMsgs, apiConfig.visionApi);
 
         // Update local state for display
-        const dateFiltered = allMsgs.filter(m => m.metadata?.source === 'date').sort((a,b) => a.timestamp - b.timestamp);
-        setDateMessages(dateFiltered);
+        setDateMessages(await loadRecentDateMessages(char.id));
 
         const emojis = await DB.getEmojis();
         const { messages } = await DatePrompts.buildSessionPayload({
             char,
             userProfile,
-            allMsgs,
+            allMsgs: preparedAllMsgs,
             emojis,
             userText: text,
             variant: 'send',
+            useVisionDescriptions: apiConfig.visionApi?.enabled === true,
         });
         const content = await callLLM(messages, apiConfig.temperature ?? 0.85);
 
         // 3. Save AI Response
         await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: content, metadata: { source: 'date' } });
+        markDateTurnDirty(char);
 
         // Refresh local state
-        const freshMsgs = await DB.getMessagesByCharId(char.id, true);
-        setDateMessages(freshMsgs.filter(m => m.metadata?.source === 'date').sort((a,b) => a.timestamp - b.timestamp));
+        setDateMessages(await loadRecentDateMessages(char.id));
 
         // Memory Palace 后台流程（不阻塞返回，与聊天侧一致）
         runMemoryPalacePostHook(char);
@@ -417,8 +458,10 @@ const DateApp: React.FC = () => {
         const lastMsg = dateMessages[dateMessages.length - 1];
         if (lastMsg.role !== 'assistant') throw new Error("Cannot reroll user message");
 
-        const allMsgs = await DB.getMessagesByCharId(char.id, true);
+        // Keep the old reply until the replacement request succeeds.
+        const allMsgs = await DB.getRecentMessagesByCharId(char.id, getDateContextFetchLimit(char), true);
         const validMsgs = allMsgs.filter(m => m.id !== lastMsg.id);
+        const preparedValidMsgs = await materializeVisionDescriptions(validMsgs, apiConfig.visionApi);
         const emojis = await DB.getEmojis();
 
         // 重掷的是开场白（isOpening 锚点消息）：走感知同款 payload 重新生成开场。
@@ -427,11 +470,19 @@ const DateApp: React.FC = () => {
         // 新消息也不带 isOpening，阅读模式会从上一次见面的开场开始切片，表现为
         // 「新见面只有立绘模式是新剧情，阅读模式全是旧剧情」。
         if (lastMsg.metadata?.isOpening === true) {
-            const { messages } = DatePrompts.buildPeekPayload({ char, userProfile, allMsgs: validMsgs, emojis });
+            const { messages } = DatePrompts.buildPeekPayload({
+                char,
+                userProfile,
+                allMsgs: preparedValidMsgs,
+                emojis,
+                useVisionDescriptions: apiConfig.visionApi?.enabled === true,
+            });
             const content = await callLLM(messages, Math.max(apiConfig.temperature ?? 0.85, 0.9));
             // 生成成功后才动库：先删旧开场、再带 isOpening 落新开场，请求失败时原剧情不丢
             await DB.deleteMessage(lastMsg.id);
             await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content, metadata: { source: 'date', isOpening: true } });
+            markDateTurnDirty(char);
+            trackEvent('重掷见面回复', { 目标: '开场白' });
             // 阅读模式空会话时顶部渲染的开场 & 退出快照里的 peekStatus 同步成新开场
             setPeekStatus(content);
 
@@ -440,17 +491,22 @@ const DateApp: React.FC = () => {
             return content;
         }
 
-        const lastUserMsg = validMsgs[validMsgs.length - 1];
+        const validDateMsgs = preparedValidMsgs.filter(m => m.metadata?.source === 'date');
+        const lastUserMsg = validDateMsgs[validDateMsgs.length - 1];
         if (!lastUserMsg || lastUserMsg.role !== 'user') throw new Error("Context lost");
 
         // Call API logic（与 handleSendMessage 共用 buildSessionPayload，只差 variant）
+        // 历史裁到被重掷的那一轮为止：见面回复之后用户又在普通聊天里发过消息时，
+        // validMsgs（全来源）的尾巴不是这条 date user，直接传进去会把那条聊天消息当成
+        // 「待重发的最后一条」砍掉，同时 date user 又被追加一次（丢一条、重一条）。
         const { messages } = await DatePrompts.buildSessionPayload({
             char,
             userProfile,
-            allMsgs: validMsgs,
+            allMsgs: trimHistoryThrough(preparedValidMsgs, lastUserMsg.id),
             emojis,
             userText: lastUserMsg.content,
             variant: 'reroll',
+            useVisionDescriptions: apiConfig.visionApi?.enabled === true,
         });
         // Reroll 略调高温度求多样性，但绝不低于用户配置的基线。
         const content = await callLLM(messages, Math.max(apiConfig.temperature ?? 0.85, 0.9));
@@ -458,10 +514,11 @@ const DateApp: React.FC = () => {
         // 生成成功后才删旧回复：以前先删后调 API，请求一失败上一条剧情就永久消失
         await DB.deleteMessage(lastMsg.id);
         await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: content, metadata: { source: 'date' } });
+        markDateTurnDirty(char);
+        trackEvent('重掷见面回复', { 目标: '回复' });
 
         // Sync
-        const freshMsgs = await DB.getMessagesByCharId(char.id, true);
-        setDateMessages(freshMsgs.filter(m => m.metadata?.source === 'date').sort((a,b) => a.timestamp - b.timestamp));
+        setDateMessages(await loadRecentDateMessages(char.id));
 
         // Memory Palace 后台流程（Reroll 也算一轮新输出）
         runMemoryPalacePostHook(char);
@@ -470,25 +527,33 @@ const DateApp: React.FC = () => {
     };
 
     // --- Editing & Deletion ---
+    // 删改同样要打脏（对齐 Chat.tsx 的同款处理器）：云端快照里带着最近对话原文，
+    // 不刷的话角色到点还会提起这条已经被删掉 / 已经改过的消息。
     const handleDeleteMessage = async (msg: Message) => {
         await DB.deleteMessage(msg.id);
         setDateMessages(prev => prev.filter(m => m.id !== msg.id));
+        markDateTurnDirty();
+        trackEvent('删除一条见面消息');
     };
 
     const handleDeleteMessages = async (ids: number[]) => {
         if (ids.length === 0) return;
         await Promise.all(ids.map(id => DB.deleteMessage(id)));
         setDateMessages(prev => prev.filter(m => !ids.includes(m.id)));
+        markDateTurnDirty();
         addToast(`已删除 ${ids.length} 条记录`, 'success');
+        trackEvent('批量删除见面消息');
     };
 
     const confirmEditMessage = async () => {
         if (!editTargetMsg) return;
         await DB.updateMessage(editTargetMsg.id, editContent);
         setDateMessages(prev => prev.map(m => m.id === editTargetMsg.id ? { ...m, content: editContent } : m));
+        markDateTurnDirty();
         setIsEditModalOpen(false);
         setEditTargetMsg(null);
         addToast('已修改', 'success');
+        trackEvent('编辑一条见面消息');
     };
 
     // --- History Long Press ---
@@ -510,12 +575,11 @@ const DateApp: React.FC = () => {
 
     const handleHistoryDelete = async (msg: Message) => {
         await DB.deleteMessage(msg.id);
-        setHistorySessions(prev => prev.map(s => ({
-            ...s,
-            msgs: s.msgs.filter(m => m.id !== msg.id)
-        })).filter(s => s.msgs.length > 0));
+        setHistoryMessages(prev => prev.filter(m => m.id !== msg.id));
+        markDateTurnDirty();
         setHistoryMenuMsg(null);
         addToast('已删除', 'success');
+        trackEvent('删除见面记录里的一条消息');
     };
 
     const handleHistoryEditOpen = (msg: Message) => {
@@ -527,12 +591,13 @@ const DateApp: React.FC = () => {
     const handleHistoryEditConfirm = async () => {
         if (!historyEditMsg) return;
         await DB.updateMessage(historyEditMsg.id, historyEditContent);
-        setHistorySessions(prev => prev.map(s => ({
-            ...s,
-            msgs: s.msgs.map(m => m.id === historyEditMsg.id ? { ...m, content: historyEditContent } : m)
-        })));
+        setHistoryMessages(prev => prev.map(m => (
+            m.id === historyEditMsg.id ? { ...m, content: historyEditContent } : m
+        )));
+        markDateTurnDirty();
         setHistoryEditMsg(null);
         addToast('已修改', 'success');
+        trackEvent('编辑见面记录里的一条消息');
     };
 
     const onExitSession = (finalState: DateState) => {
@@ -554,57 +619,84 @@ const DateApp: React.FC = () => {
         setActiveCharacterId(c.id);
         setPreviousMode('select');
         setMode('settings');
+        trackEvent('打开见面设置面板', { from: 'select' });
     };
 
     const openHistory = async (c: CharacterProfile) => {
         setActiveCharacterId(c.id);
-        // includeProcessed=true：见面历史完全独立于聊天侧高水位，
-        // 否则用户开了向量记忆后老的见面记录会全部"消失"
-        const msgs = await DB.getMessagesByCharId(c.id, true);
-        // dateMsgs sorted DESCENDING (newest first)
-        const dateMsgs = msgs.filter(m => m.metadata?.source === 'date').sort((a, b) => b.timestamp - a.timestamp);
-        
-        const sessions: {date: string, msgs: Message[]}[] = [];
-        if (dateMsgs.length > 0) {
-            // Group by strict time gap (30 mins) OR explicit Opening flag
-            let currentSession: Message[] = [dateMsgs[0]];
-            
-            for (let i = 1; i < dateMsgs.length; i++) {
-                const prev = dateMsgs[i-1]; // Newer message
-                const curr = dateMsgs[i];   // Older message
-                
-                // Break session if:
-                // 1. Time gap > 30 minutes
-                // 2. OR THE PREVIOUS (Newer) message was an opening. 
-                //    (If 'prev' is an opening, it means 'prev' is the START of the newer session we just accumulated. 
-                //     So 'curr' must belong to an older, different session.)
-                const isTimeBreak = Math.abs(prev.timestamp - curr.timestamp) > 30 * 60 * 1000;
-                const splitSincePrevWasOpening = prev.metadata?.isOpening === true;
-
-                if (isTimeBreak || splitSincePrevWasOpening) {
-                    // This session ends. 
-                    // Date label is the Start Time of this session (which is the oldest msg in currentSession)
-                    const sessionStartMsg = currentSession[currentSession.length - 1];
-                    sessions.push({ 
-                        date: new Date(sessionStartMsg.timestamp).toLocaleString(), 
-                        msgs: currentSession.reverse() // Reverse messages to be Chronological (Old->New) inside the bubble
-                    });
-                    currentSession = [curr];
-                } else {
-                    currentSession.push(curr);
-                }
-            }
-            // Push final session
-            const sessionStartMsg = currentSession[currentSession.length - 1];
-            sessions.push({ 
-                date: new Date(sessionStartMsg.timestamp).toLocaleString(), 
-                msgs: currentSession.reverse() 
-            });
-        }
-        // Do NOT reverse sessions array. We want [NewestSession, OlderSession, OldestSession].
-        // Default loop populated them New -> Old.
-        setHistorySessions(sessions);
+        // 见面历史按 source=date 独立读取，不受聊天侧记忆宫殿高水位影响。
+        const msgs = await DB.getRecentMessagesByCharIdAndSource(c.id, 'date', DATE_HISTORY_MESSAGE_LIMIT);
+        setHistoryMessages(msgs);
+        setHistoryView('encounter');
+        setHistorySortOrder('newest');
+        setHistoryLoadLimit(DATE_HISTORY_MESSAGE_LIMIT);
+        setHistoryReachedEnd(msgs.length < DATE_HISTORY_MESSAGE_LIMIT);
         setMode('history');
+        trackEvent('打开见面记录');
+    };
+
+    const handleLoadMoreHistory = async () => {
+        if (!char || historyBusy || historyReachedEnd) return;
+        const nextLimit = historyLoadLimit + DATE_HISTORY_MESSAGE_LIMIT;
+        setHistoryBusy(true);
+        try {
+            const msgs = await DB.getRecentMessagesByCharIdAndSource(char.id, 'date', nextLimit);
+            setHistoryMessages(msgs);
+            setHistoryLoadLimit(nextLimit);
+            setHistoryReachedEnd(msgs.length < nextLimit);
+        } catch (error) {
+            console.error('Load Earlier Date History Error', error);
+            addToast('更早的见面记录加载失败', 'error');
+        } finally {
+            setHistoryBusy(false);
+        }
+    };
+
+    const exportHistoryGroups = async (groups: DateHistoryGroup[], scope: string) => {
+        if (!char || groups.length === 0 || historyBusy) return;
+        setHistoryBusy(true);
+        try {
+            const result = await shareOrDownloadFile({
+                content: formatDateHistoryExport(char.name, groups, historyView),
+                fileName: makeDateHistoryFileName(char.name, scope),
+                mimeType: 'text/plain;charset=utf-8',
+                shareTitle: `${char.name}的见面记录`,
+            });
+            addToast(result === 'shared' ? '已打开分享面板' : '见面记录已导出', 'success');
+            trackEvent('导出见面记录', { 范围: scope, 整理方式: historyView === 'encounter' ? '按次' : '按日期' });
+        } catch (error) {
+            console.error('Export Date History Error', error);
+            addToast('见面记录导出失败', 'error');
+        } finally {
+            setHistoryBusy(false);
+        }
+    };
+
+    const handleExportAllHistory = async () => {
+        if (!char || historyBusy) return;
+        setHistoryBusy(true);
+        try {
+            // 导出属于用户主动操作，可以完整扫描该角色消息索引；只收集 source=date，避免把图片聊天读进内存。
+            const allDateMessages = await DB.getRecentMessagesByCharIdAndSource(char.id, 'date', Number.MAX_SAFE_INTEGER);
+            const allGroups = buildDateHistoryGroups(allDateMessages, historyView, historySortOrder);
+            if (allGroups.length === 0) {
+                addToast('暂无可导出的见面记录', 'info');
+                return;
+            }
+            const result = await shareOrDownloadFile({
+                content: formatDateHistoryExport(char.name, allGroups, historyView),
+                fileName: makeDateHistoryFileName(char.name, `全部_${historyView === 'encounter' ? '按次' : '按日期'}`),
+                mimeType: 'text/plain;charset=utf-8',
+                shareTitle: `${char.name}的全部见面记录`,
+            });
+            addToast(result === 'shared' ? '已打开分享面板' : '全部见面记录已导出', 'success');
+            trackEvent('导出全部见面记录', { 整理方式: historyView === 'encounter' ? '按次' : '按日期' });
+        } catch (error) {
+            console.error('Export All Date History Error', error);
+            addToast('全部见面记录导出失败', 'error');
+        } finally {
+            setHistoryBusy(false);
+        }
     };
 
     // --- Render ---
@@ -769,16 +861,64 @@ const DateApp: React.FC = () => {
                 <div className="border-b border-slate-200 bg-white sticky top-0 z-10" style={{ paddingTop: 'var(--safe-top)' }}>
                     <div className="h-16 flex items-center justify-between px-4">
                         <button onClick={handleBack} className="p-2 -ml-2 rounded-full hover:bg-slate-100"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg></button>
-                        <span className="font-bold text-slate-700">见面记录</span>
-                        <div className="w-8"></div>
+                        <div className="text-center min-w-0">
+                            <div className="font-bold text-slate-700">见面记录</div>
+                            <div className="text-[10px] text-slate-400 truncate max-w-36">{char.name}</div>
+                        </div>
+                        <button
+                            onClick={(event) => { event.stopPropagation(); handleExportAllHistory(); }}
+                            disabled={historyBusy || historyMessages.length === 0}
+                            className="text-xs font-bold text-blue-500 px-2 py-2 -mr-2 rounded-lg hover:bg-blue-50 disabled:opacity-40"
+                        >
+                            导出全部
+                        </button>
+                    </div>
+                    <div className="px-4 pb-3 flex items-center gap-2">
+                        <div className="flex-1 p-1 rounded-xl bg-slate-100 flex">
+                            <button
+                                onClick={() => setHistoryView('encounter')}
+                                className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${historyView === 'encounter' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-400'}`}
+                            >按次</button>
+                            <button
+                                onClick={() => setHistoryView('date')}
+                                className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${historyView === 'date' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-400'}`}
+                            >按日期</button>
+                        </div>
+                        <button
+                            onClick={() => setHistorySortOrder(order => order === 'newest' ? 'oldest' : 'newest')}
+                            className="h-9 px-3 rounded-xl border border-slate-200 bg-white text-[11px] font-bold text-slate-500 whitespace-nowrap"
+                            title="切换排序方向"
+                        >
+                            {historySortOrder === 'newest' ? '新 → 旧' : '旧 → 新'}
+                        </button>
                     </div>
                 </div>
                 <div className="flex-1 overflow-y-auto p-4 space-y-6 pb-20">
-                    {historySessions.length === 0 ? <div className="flex flex-col items-center justify-center h-64 text-slate-400 gap-2"><BookOpen size={48} className="opacity-50" /><span className="text-xs">暂无见面记录</span></div> : historySessions.map((session, idx) => (
-                        <div key={idx} className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
-                            <div className="bg-slate-50 px-4 py-3 border-b border-slate-100 flex justify-between items-center"><span className="text-xs font-bold text-slate-500 uppercase tracking-wider">{session.date}</span><span className="text-[10px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{session.msgs.length} 句</span></div>
+                    {historyGroups.length === 0 ? <div className="flex flex-col items-center justify-center h-64 text-slate-400 gap-2"><BookOpen size={48} className="opacity-50" /><span className="text-xs">暂无见面记录</span></div> : historyGroups.map((group) => (
+                        <div key={group.id} className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+                            <div className="bg-slate-50 px-4 py-3 border-b border-slate-100 flex gap-3 justify-between items-center">
+                                <div className="min-w-0">
+                                    <div className="text-xs font-bold text-slate-600 tracking-wide truncate">
+                                        {historyView === 'encounter' ? formatDateHistoryTime(group.startAt, true) : formatDateHistoryDate(group.startAt)}
+                                    </div>
+                                    <div className="text-[10px] text-slate-400 mt-1">
+                                        {historyView === 'encounter'
+                                            ? (group.hasOpeningAnchor ? '一次完整见面' : '旧记录 · 按日期兼容整理')
+                                            : (group.encounterCount > 0 ? `${group.encounterCount} 次开场` : '旧记录')}
+                                        {' · '}{group.messages.length} 句
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={(event) => {
+                                        event.stopPropagation();
+                                        exportHistoryGroups([group], `${historyView === 'encounter' ? '本次' : '当天'}_${group.dateKey}`);
+                                    }}
+                                    disabled={historyBusy}
+                                    className="shrink-0 text-[11px] font-bold text-blue-500 bg-blue-50 px-3 py-1.5 rounded-full disabled:opacity-40"
+                                >导出{historyView === 'encounter' ? '本次' : '当天'}</button>
+                            </div>
                             <div className="p-4 space-y-4">
-                                {session.msgs.map(m => {
+                                {group.messages.map(m => {
                                     const text = (m.content || '').replace(/\[.*?\]/g, '').trim();
                                     return (
                                         <div
@@ -795,12 +935,22 @@ const DateApp: React.FC = () => {
                                             <div className={`max-w-[90%] text-sm leading-relaxed whitespace-pre-wrap ${m.role === 'user' ? 'text-slate-500 text-right italic' : 'text-slate-800'}`}>
                                                 {m.role === 'user' ? <span className="bg-slate-100 px-3 py-2 rounded-xl rounded-tr-none inline-block">{text}</span> : <span>{text || '(无内容)'}</span>}
                                             </div>
+                                            <div className="text-[9px] text-slate-300 mt-1 px-1">{formatDateHistoryTime(m.timestamp)}</div>
                                         </div>
                                     );
                                 })}
                             </div>
                         </div>
                     ))}
+                    {!historyReachedEnd && historyMessages.length > 0 && (
+                        <button
+                            onClick={handleLoadMoreHistory}
+                            disabled={historyBusy}
+                            className="w-full py-3 rounded-2xl border border-slate-200 bg-white text-xs font-bold text-slate-500 disabled:opacity-50"
+                        >
+                            {historyBusy ? '正在加载…' : '加载更早的见面记录'}
+                        </button>
+                    )}
                 </div>
 
                 {/* Long-press context menu */}
@@ -862,9 +1012,9 @@ const DateApp: React.FC = () => {
                              <div className="w-full flex gap-3">
                                  {/* 修改这里：调用 handleEnterSession 确保开场白被保存 */}
                                  <button onClick={handleEnterSession} className="flex-1 h-14 bg-white text-black rounded-full font-bold tracking-[0.1em] text-sm shadow-[0_0_20px_rgba(255,255,255,0.1)] active:scale-95 transition-transform hover:bg-neutral-200">走过去 (Approach)</button>
-                                 <button onClick={() => startPeek(char)} className="w-14 h-14 bg-neutral-800 text-white rounded-full flex items-center justify-center border border-neutral-700 shadow-lg active:scale-90 transition-transform"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg></button>
+                                 <button onClick={() => { trackEvent('重新感知一次角色状态'); startPeek(char); }} className="w-14 h-14 bg-neutral-800 text-white rounded-full flex items-center justify-center border border-neutral-700 shadow-lg active:scale-90 transition-transform"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg></button>
                              </div>
-                             <div className="flex flex-col items-center gap-3 text-[10px] text-neutral-600 font-medium tracking-wider"><button onClick={() => { setPreviousMode('peek'); setMode('settings'); }} className="hover:text-neutral-400 transition-colors">布置场景 / 设定立绘</button><button onClick={handleBack} className="hover:text-neutral-400 transition-colors">悄悄离开</button></div>
+                             <div className="flex flex-col items-center gap-3 text-[10px] text-neutral-600 font-medium tracking-wider"><button onClick={() => { setPreviousMode('peek'); setMode('settings'); trackEvent('打开见面设置面板', { from: 'peek' }); }} className="hover:text-neutral-400 transition-colors">布置场景 / 设定立绘</button><button onClick={handleBack} className="hover:text-neutral-400 transition-colors">悄悄离开</button></div>
                         </div>
                     </div>
                 )}
@@ -873,7 +1023,7 @@ const DateApp: React.FC = () => {
                 {!peekLoading && !peekStatus && (
                     <div className="flex-1 flex flex-col items-center justify-center gap-8 -mt-20 z-10 animate-fade-in">
                         <p className="text-sm font-light text-neutral-500 italic tracking-widest">未能感知到 {char.name} 的状态</p>
-                        <button onClick={() => startPeek(char)} className="h-12 px-10 bg-white text-black rounded-full font-bold tracking-[0.1em] text-sm active:scale-95 transition-transform hover:bg-neutral-200">重新感知</button>
+                        <button onClick={() => { trackEvent('重新感知一次角色状态'); startPeek(char); }} className="h-12 px-10 bg-white text-black rounded-full font-bold tracking-[0.1em] text-sm active:scale-95 transition-transform hover:bg-neutral-200">重新感知</button>
                         <button onClick={handleBack} className="text-[10px] text-neutral-600 font-medium tracking-wider hover:text-neutral-400 transition-colors">悄悄离开</button>
                     </div>
                 )}
@@ -901,6 +1051,9 @@ const DateApp: React.FC = () => {
                     onDeleteMessage={handleDeleteMessage}
                     onDeleteMessages={handleDeleteMessages}
                     onSettings={() => {}} // Removed parent state change, DateSession handles it internally now
+                    onLoadMoreHistory={handleLoadMoreDateHistory}
+                    historyLoadLimit={dateLoadLimit}
+                    historyReachedEnd={dateHistoryReachedEnd}
                 />
 
                 {/* 记忆整理中 — 顶部浮动胶囊（与聊天侧外观一致） */}

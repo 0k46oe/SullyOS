@@ -6,10 +6,12 @@ import { INSTALLED_APPS, Icons } from '../constants';
 import { processImage, processImageToBlob } from '../utils/file';
 import { putImageBlob, useBlobRefUrl } from '../utils/blobRef';
 import { DB } from '../utils/db';
-import { isStatusBarHidden } from '../utils/iosStandalone';
+import { resolveStatusBarMode, type StatusBarMode } from '../utils/iosStandalone';
 import { confirmExportSafety } from '../utils/exportGuard';
+import { trackEvent } from '../utils/analytics';
 import { Sparkle } from '@phosphor-icons/react';
 import { ChatAppearanceEditor as ModularChatAppearanceEditor } from '../components/appearance/ChatAppearanceEditor';
+import AppIconEditor from '../components/appearance/AppIconEditor';
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
@@ -331,6 +333,7 @@ const PresetManager: React.FC<PresetManagerProps> = ({ presets, onSave, onApply,
         if (!file) return;
         try {
             await onImport(file);
+            trackEvent('导入外观预设文件');
         } catch (err: any) {
             addToast(err.message || '导入失败', 'error');
         }
@@ -468,7 +471,7 @@ const PresetManager: React.FC<PresetManagerProps> = ({ presets, onSave, onApply,
                                     )}
 
                                     <div className="flex gap-1.5 flex-wrap">
-                                        <button onClick={() => onApply(preset.id)}
+                                        <button onClick={() => { onApply(preset.id); trackEvent('应用已保存外观预设'); }}
                                             className="px-3 py-1.5 bg-primary text-white text-[10px] font-bold rounded-lg active:scale-95 transition-transform shadow-sm">
                                             应用
                                         </button>
@@ -775,6 +778,7 @@ const Appearance: React.FC = () => {
       const { wallpaper: _ignored, ...restConfig } = skin.config;
       await updateTheme({ ...restConfig, wallpaper, desktopDecorations });
       addToast(`已切换到「${skin.name}」`, 'success');
+      trackEvent('切换桌面整机风格', { skin: skin.id });
   };
 
   const handleIconUpload = async (file: File) => {
@@ -805,10 +809,10 @@ const Appearance: React.FC = () => {
       </div>
 
       <div className="flex border-b border-slate-200 bg-white sticky top-0 z-20">
-          <button onClick={() => setActiveTab('theme')} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'theme' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>系统主题</button>
-          <button onClick={() => setActiveTab('icons')} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'icons' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>应用图标</button>
-          <button onClick={() => setActiveTab('presets')} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'presets' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>外观预设</button>
-          <button onClick={() => setActiveTab('chat')} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'chat' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>聊天界面</button>
+          <button onClick={() => { setActiveTab('theme'); trackEvent('切换外观定制标签页', { tab: 'theme' }); }} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'theme' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>系统主题</button>
+          <button onClick={() => { setActiveTab('icons'); trackEvent('切换外观定制标签页', { tab: 'icons' }); }} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'icons' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>应用图标</button>
+          <button onClick={() => { setActiveTab('presets'); trackEvent('切换外观定制标签页', { tab: 'presets' }); }} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'presets' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>外观预设</button>
+          <button onClick={() => { setActiveTab('chat'); trackEvent('切换外观定制标签页', { tab: 'chat' }); }} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'chat' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>聊天界面</button>
       </div>
 
       <div className="flex-1 overflow-y-auto p-5 space-y-6 no-scrollbar">
@@ -920,7 +924,7 @@ const Appearance: React.FC = () => {
                         {THEME_PRESETS.map(preset => (
                             <button 
                                 key={preset.name}
-                                onClick={() => updateTheme(preset.config)}
+                                onClick={() => { updateTheme(preset.config); trackEvent('应用配色预设', { preset: preset.name }); }}
                                 className="flex flex-col items-center gap-1.5 shrink-0 group"
                             >
                                 <div className="w-10 h-10 rounded-full shadow-sm border-2 border-white ring-1 ring-black/5 transition-transform group-active:scale-95" style={{ backgroundColor: preset.color }}></div>
@@ -1033,21 +1037,34 @@ const Appearance: React.FC = () => {
                     )}
                 </section>
 
-                {/* Status Bar Toggle */}
+                {/* Status Bar Layout */}
                 <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
                     <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4">状态栏 (Status Bar)</h2>
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <div className="text-sm font-medium text-slate-700">隐藏顶部时间栏</div>
-                            <div className="text-[10px] text-slate-400 mt-0.5">隐藏屏幕顶部的时间、电量（iOS 全屏默认隐藏，避免与系统重复）</div>
-                        </div>
-                        <button
-                            onClick={() => updateTheme({ hideStatusBar: !isStatusBarHidden(theme.hideStatusBar) })}
-                            className={`w-12 h-7 rounded-full transition-colors relative ${isStatusBarHidden(theme.hideStatusBar) ? 'bg-primary' : 'bg-slate-200'}`}
-                        >
-                            <div className={`absolute top-1 w-5 h-5 bg-white rounded-full shadow-sm transition-transform ${isStatusBarHidden(theme.hideStatusBar) ? 'translate-x-6' : 'translate-x-1'}`} />
-                        </button>
+                    <div className="grid grid-cols-3 gap-2">
+                        {([
+                            { id: 'standard', label: '安全显示', hint: '额外留一行', icon: '◫' },
+                            { id: 'compact', label: '紧凑显示', hint: '保留时间并上移', icon: '⌃' },
+                            { id: 'hidden', label: '隐藏时间', hint: '只留安全区', icon: '—' },
+                        ] as Array<{ id: StatusBarMode; label: string; hint: string; icon: string }>).map(option => {
+                            const active = resolveStatusBarMode(theme.statusBarMode, theme.hideStatusBar) === option.id;
+                            return (
+                                <button
+                                    key={option.id}
+                                    type="button"
+                                    aria-pressed={active}
+                                    onClick={() => updateTheme({ statusBarMode: option.id, hideStatusBar: option.id === 'hidden' })}
+                                    className={`min-w-0 rounded-2xl border px-2 py-3 text-center transition-all active:scale-[0.98] ${active ? 'border-primary bg-primary/10 text-primary shadow-sm' : 'border-slate-100 bg-slate-50 text-slate-500'}`}
+                                >
+                                    <div className="text-lg leading-none mb-1.5" aria-hidden="true">{option.icon}</div>
+                                    <div className="text-xs font-bold whitespace-nowrap">{option.label}</div>
+                                    <div className="text-[9px] mt-1 leading-tight opacity-70">{option.hint}</div>
+                                </button>
+                            );
+                        })}
                     </div>
+                    <p className="mt-3 text-[10px] leading-relaxed text-slate-400">
+                        有刘海或灵动岛优先用“紧凑显示”：时间、电量进入顶部安全区，按钮仍从遮挡区下方开始；若系统已显示时间，可选“隐藏时间”。
+                    </p>
                 </section>
 
                 {/* Desktop Music Widget Style */}
@@ -1354,7 +1371,7 @@ const Appearance: React.FC = () => {
 
                     {/* Add Decoration Buttons */}
                     <div className="flex gap-2 mb-4">
-                        <button onClick={() => setShowPresetPicker(!showPresetPicker)}
+                        <button onClick={() => { setShowPresetPicker(!showPresetPicker); if (!showPresetPicker) trackEvent('打开桌面装饰贴纸库'); }}
                             className="flex-1 py-2.5 bg-gradient-to-r from-pink-50 to-purple-50 text-pink-500 font-bold text-xs rounded-xl border border-pink-200 active:scale-95 transition-transform flex items-center justify-center gap-1.5">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456Z" /></svg>
                             预设贴纸
@@ -1379,7 +1396,7 @@ const Appearance: React.FC = () => {
                                         <div className="text-[10px] text-slate-500 mb-1.5 flex items-center gap-1">{catInfo && <TwemojiImg code={catInfo.code} className="w-3.5 h-3.5 inline-block" />} {catInfo?.label || cat}</div>
                                         <div className="flex gap-2 flex-wrap">
                                             {items.map(preset => (
-                                                <button key={preset.name} onClick={() => addDecoration(preset.content, 'preset')}
+                                                <button key={preset.name} onClick={() => { addDecoration(preset.content, 'preset'); trackEvent('添加桌面装饰贴纸', { 贴纸: preset.name, 分类: preset.category }); }}
                                                     className="w-14 h-14 bg-white rounded-xl border border-slate-200 flex flex-col items-center justify-center gap-0.5 hover:border-pink-300 hover:shadow-sm active:scale-90 transition-all group">
                                                     <img src={preset.content} className="w-8 h-8 object-contain group-hover:scale-110 transition-transform" />
                                                     <span className="text-[8px] text-slate-400">{preset.name}</span>
@@ -1507,6 +1524,7 @@ const Appearance: React.FC = () => {
             </>
         ) : activeTab === 'icons' ? (
             <div className="space-y-5">
+              <AppIconEditor />
               <section className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100">
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">

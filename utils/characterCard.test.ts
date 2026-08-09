@@ -39,6 +39,7 @@ describe('stripSensitiveCardFields', () => {
       // 语言
       chatVoiceLang: 'ja',
       dateVoiceLang: 'en',
+      memoryPalaceWaterline: { preset: 'offline' },
       // 运行时状态
       activeBuffs: [{ id: 'b1' }],
       buffInjection: '（开心）',
@@ -76,7 +77,7 @@ describe('stripSensitiveCardFields', () => {
   });
 
   it('清单覆盖四类敏感字段', () => {
-    for (const k of ['emotionConfig', 'embeddingConfig', 'bubbleStyle', 'chatVoiceLang', 'activeBuffs', 'phoneState']) {
+    for (const k of ['emotionConfig', 'embeddingConfig', 'bubbleStyle', 'chatVoiceLang', 'memoryPalaceWaterline', 'activeBuffs', 'phoneState']) {
       expect(CARD_STRIPPED_FIELDS).toContain(k);
     }
   });

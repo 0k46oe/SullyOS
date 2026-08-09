@@ -17,7 +17,7 @@
 // through this pipeline.
 
 import { build } from 'esbuild';
-import { existsSync, statSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, statSync, readFileSync, writeFileSync, copyFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -54,6 +54,10 @@ const WORKERS = [
     name: 'post-office',
     skipPublicOut: true,
   },
+  // amsg = 主动消息 2.0 的单用户 worker（amsg-server/cloudflare, D1 + Cron Trigger）。
+  // public/ 副本给设置页「复制 Worker 代码」按钮 fetch。amsg-server 2.6.0-next.2 起
+  // 全 Web Crypto，和 instant 一样免 nodejs_compat flag。
+  { name: 'amsg', outName: 'amsg-worker.bundle.js' },
   // loyal-recruitment 是一次性忠实用户招募服务：独立 D1 / secrets / 路由，
   // 不与邮局或彼方活动共享运行时状态。
   {
@@ -72,6 +76,9 @@ const sharedOpts = {
   bundle: true,
   minify: false,
   conditions: ['worker', 'browser', 'import', 'default'],
+  // cloudflare:* 是运行时自带的内置模块（amsg 用 cloudflare:workers 的 DurableObject
+  // 基类）。它们不在 node_modules 里，不标 external 的话 esbuild 会当成缺失依赖报错。
+  external: ['cloudflare:*'],
 };
 
 console.log(`Building ${WORKERS.length} worker bundle(s)...`);
@@ -112,6 +119,28 @@ for (const w of WORKERS) {
     outPublic && (w.outPublic || `public/${w.outName}`),
   ].filter(Boolean).join(' + ');
   console.log(`✓ ${w.name.padEnd(16)} ${sizeKb} KB  → ${dest}`);
+}
+
+// 原样复制到 public/ 的单文件脚本（不过 esbuild）。
+//
+// 为什么不打包：这些文件没有 import，是自包含单文件，而 Deno Playground 原生吃
+// TypeScript。过一遍 esbuild 只会剥掉类型、还可能顺手把注释吃了 —— 而这类脚本
+// 恰恰要用户读着注释改配置（比如 amsg 代理里的 UPSTREAM 那一行），注释没了就废了。
+const VERBATIM_COPIES = [
+  // amsg 的 Deno 门面：给 Cloudflare worker 换一个国内能直连的地址。
+  // 设置页「复制 Deno 代理代码」按钮 fetch 这份。
+  { from: 'worker/amsg/deno-proxy.ts', to: 'public/amsg-deno-proxy.ts' },
+];
+
+for (const { from, to } of VERBATIM_COPIES) {
+  const src = resolve(root, from);
+  if (!existsSync(src)) {
+    console.error(`ERROR: verbatim copy source not found: ${from}`);
+    process.exit(1);
+  }
+  copyFileSync(src, resolve(root, to));
+  const sizeKb = (statSync(src).size / 1024).toFixed(1);
+  console.log(`✓ ${from.split('/').pop().padEnd(16)} ${sizeKb} KB  → ${to} (原样复制)`);
 }
 
 // instant-worker.version.txt — Deno loader 冷启动时拉这个文件决定 bundle 版本号

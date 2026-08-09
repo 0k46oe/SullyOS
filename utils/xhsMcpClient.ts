@@ -10,6 +10,8 @@
  * Skills Server: https://github.com/autoclaw-cc/xiaohongshu-skills
  */
 
+import { classifyFetchFailure, parseTargetUrl } from './networkFailureDiagnosis';
+
 export interface McpToolResult {
     success: boolean;
     data?: any;
@@ -26,6 +28,7 @@ export const XHS_SPIDER_V3_EXPERIMENT = Object.freeze({
 // ==================== Backend Detection ====================
 
 type BackendMode = 'mcp' | 'bridge';
+type XhsPlatform = 'xhs' | 'rednote';
 
 const detectMode = (serverUrl: string): BackendMode => {
     if (serverUrl.includes('/api')) return 'bridge';
@@ -35,6 +38,7 @@ const detectMode = (serverUrl: string): BackendMode => {
 // Lite-Worker cookie: set from settings, sent as x-xhs-cookie on bridge calls.
 // Local Bridge/Skills servers ignore the header; the cloud Worker requires it.
 let liteCookie = '';
+let litePlatform: XhsPlatform | 'auto' = 'auto';
 
 // Resolve the XHS cookie for bridge requests: prefer the explicitly-set value,
 // otherwise read it straight from persisted realtime config. This keeps chat-
@@ -46,6 +50,16 @@ const resolveLiteCookie = (): string => {
         if (raw) return JSON.parse(raw)?.xhsMcpConfig?.cookie || '';
     } catch { /* ignore */ }
     return '';
+};
+
+const resolvePersistedLitePlatform = (): XhsPlatform | 'auto' => {
+    try {
+        const raw = localStorage.getItem('os_realtime_config');
+        const platform = raw ? JSON.parse(raw)?.xhsMcpConfig?.platform : undefined;
+        return platform === 'xhs' || platform === 'rednote' ? platform : 'auto';
+    } catch {
+        return 'auto';
+    }
 };
 
 
@@ -107,6 +121,8 @@ const trySpiderV3CommentPatch = async (
     if (
         !storage
         || detail?.data?.comments_status === 'loaded'
+        || detail?.platform === 'rednote'
+        || detail?.data?.platform === 'rednote'
     ) {
         return detail;
     }
@@ -134,6 +150,7 @@ const trySpiderV3CommentPatch = async (
             headers: {
                 'Content-Type': 'application/json',
                 'x-xhs-cookie': cookie,
+                ...(litePlatform !== 'auto' ? { 'x-xhs-platform': litePlatform } : {}),
                 'x-xhs-experiment-ack': XHS_SPIDER_V3_EXPERIMENT.optInValue,
             },
             body: JSON.stringify({
@@ -184,6 +201,10 @@ const bridgePost = async (
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const ck = resolveLiteCookie();
     if (ck) headers['x-xhs-cookie'] = ck;
+    const requestPlatform = endpoint === 'check-login'
+        ? litePlatform
+        : (litePlatform === 'auto' ? resolvePersistedLitePlatform() : litePlatform);
+    if (requestPlatform !== 'auto') headers['x-xhs-platform'] = requestPlatform;
 
     try {
         const resp = await fetch(url, {
@@ -204,6 +225,10 @@ const bridgePost = async (
         let data = await resp.json();
         if (data.error) {
             return { success: false, error: data.error };
+        }
+        const detectedPlatform = data?.platform || data?.data?.platform;
+        if (detectedPlatform === 'xhs' || detectedPlatform === 'rednote') {
+            litePlatform = detectedPlatform;
         }
         if (endpoint === 'get-feed-detail' && ck) {
             data = await trySpiderV3CommentPatch(baseUrl, body, ck, data);
@@ -233,6 +258,8 @@ interface McpJsonRpcResponse {
 let mcpRequestIdCounter = 0;
 let mcpSessionId: string | null = null;
 let mcpInitialized = false;
+/** 在途的握手（并发去重用；见 mcpEnsureInitialized）。 */
+let mcpInitPromise: Promise<void> | null = null;
 let mcpDiscoveredTools: { name: string; description?: string }[] = [];
 
 const TOOL_NAME_ALIASES: Record<string, string[]> = {
@@ -381,9 +408,25 @@ const mcpInitialize = async (serverUrl: string): Promise<void> => {
     mcpInitialized = true;
 };
 
+/**
+ * 并发去重的握手：同时进来的调用共用同一次 initialize。
+ *
+ * 直接写 `if (!mcpInitialized) await mcpInitialize()` 是 check-then-act：两个调用会都
+ * 看到 false 各握一次手，后完成的那个把模块级 mcpSessionId 覆盖掉，先发起的那个再拿它
+ * 发 tools/call 就用了别人的 session。worker 到点最多并发跑 8 个任务，两个任务同一分钟
+ * 都用小红书就会踩到。失败时清掉在途 promise，下一次调用可以重新握手。
+ */
+const mcpEnsureInitialized = async (serverUrl: string): Promise<void> => {
+    if (mcpInitialized) return;
+    if (!mcpInitPromise) {
+        mcpInitPromise = mcpInitialize(serverUrl).finally(() => { mcpInitPromise = null; });
+    }
+    await mcpInitPromise;
+};
+
 const mcpCallTool = async (serverUrl: string, toolName: string, args: Record<string, any> = {}): Promise<McpToolResult> => {
     try {
-        if (!mcpInitialized) await mcpInitialize(serverUrl);
+        await mcpEnsureInitialized(serverUrl);
         const resolved = mcpResolveToolName(toolName);
         const adapted = mcpAdaptParams(resolved, args);
         if (resolved !== toolName) console.log(`[MCP] 工具名映射: ${toolName} → ${resolved}`);
@@ -492,6 +535,32 @@ const extractFirstXsecToken = (data: any): string | undefined => {
     return undefined;
 };
 
+/**
+ * 连接测试失败时给一句人话。裸传 e.message 的话，用户在设置页只会看到
+ * 「Failed to fetch」——那句话不区分「地址填错」「梯子拦了」「对方在限流页后面」，
+ * 到头来只能来问作者。分类逻辑复用调试终端那份，两处口径保持一致。
+ */
+const describeXhsConnectFailure = (e: any, serverUrl: string): string => {
+    const host = parseTargetUrl(serverUrl).host || serverUrl;
+    const kind = classifyFetchFailure({ url: serverUrl, error: e });
+    switch (kind) {
+        case 'timeout':
+            return `连接 ${host} 超时（10 秒一个字节都没回）。连接是挂住不返回、不是被拒——多半是该域名没走代理走了直连，或代理节点到上游是黑洞。优先换个梯子节点、或把这个域名显式加进代理规则。`;
+        case 'aborted':
+            return '连接被取消（页面切走了或手动停止）。';
+        case 'offline':
+            return '当前处于离线状态，请检查网络或梯子是否掉线。';
+        case 'mixed-content':
+            return `SullyOS 跑在 https 上，不能连 http 地址（${host}）。请把服务地址改成 https://，或用本地 http 打开 SullyOS。`;
+        case 'bad-url':
+            return `服务器地址不是合法 URL：${serverUrl}。检查有没有漏掉 https://、多了空格或用了中文标点。`;
+        case 'blocked':
+            return `连不上 ${host}：浏览器在拿到响应前就失败了。常见原因——梯子/代理拦了这个域名、DNS 解析不到、浏览器扩展（广告拦截/隐私盾）屏蔽了，或对方正返回限流/人机验证页。可在新标签页直接打开 ${serverUrl.replace(/\/+$/, '')}/health 验证；详细旁证见「系统调试终端」。`;
+        default:
+            return e?.message || '连接失败';
+    }
+};
+
 // ==================== Public API (双模式) ====================
 
 export const XhsMcpClient = {
@@ -505,23 +574,29 @@ export const XhsMcpClient = {
 
     // Lite Worker auth: register the XHS cookie used for x-xhs-cookie header.
     setCookie: (cookie?: string) => {
-        liteCookie = cookie || '';
+        const nextCookie = cookie || '';
+        if (nextCookie !== liteCookie) litePlatform = 'auto';
+        liteCookie = nextCookie;
     },
 
 
-    testConnection: async (serverUrl: string, cookie?: string): Promise<{ connected: boolean; tools?: string[]; error?: string; nickname?: string; userId?: string; loggedIn?: boolean; xsecToken?: string }> => {
-        if (cookie !== undefined) liteCookie = cookie;
+    testConnection: async (serverUrl: string, cookie?: string): Promise<{ connected: boolean; tools?: string[]; error?: string; nickname?: string; userId?: string; loggedIn?: boolean; xsecToken?: string; platform?: XhsPlatform }> => {
+        if (cookie !== undefined) XhsMcpClient.setCookie(cookie);
         const mode = detectMode(serverUrl);
 
         if (mode === 'bridge') {
             try {
                 const baseUrl = serverUrl.replace(/\/+$/, '').replace(/\/api$/, '');
-                const healthResp = await fetch(`${baseUrl}/api/health`);
+                // 探活必须自带超时：代理/网关把连接吞掉时裸 fetch 会一直挂着，界面永远停在
+                // 「连接中」，用户只能当成卡死。10s 到点主动断，走下面的 catch 出一句人话。
+                const healthResp = await fetch(`${baseUrl}/api/health`, {
+                    signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(10000) : undefined,
+                });
                 if (!healthResp.ok) return { connected: false, error: `Bridge 服务未响应 (HTTP ${healthResp.status})` };
 
                 const loginResult = await bridgePost(serverUrl, 'check-login');
                 const tools = ['check-login', 'search', 'list-feeds', 'get-feed-detail', 'publish', 'publish-video', 'long-article', 'post-comment', 'reply-comment', 'like-feed', 'favorite-feed', 'user-profile', 'login', 'get-qrcode'];
-                let loggedIn = false, nickname: string | undefined, userId: string | undefined;
+                let loggedIn = false, nickname: string | undefined, userId: string | undefined, platform: XhsPlatform | undefined;
                 if (loginResult.success && loginResult.data) {
                     const d = loginResult.data;
                     if (typeof d === 'string') {
@@ -534,6 +609,7 @@ export const XhsMcpClient = {
                         loggedIn = !!(d.logged_in || d.loggedIn || d.is_logged_in || d.isLoggedIn || d.logged);
                         nickname = d.nickname || d.name || d.username || d.user_name || undefined;
                         userId = d.user_id || d.userId || d.id || d.red_id || undefined;
+                        platform = d.platform === 'xhs' || d.platform === 'rednote' ? d.platform : undefined;
                     }
                 }
                 // 自动获取 xsecToken：从首页推荐中提取
@@ -544,9 +620,9 @@ export const XhsMcpClient = {
                         if (feedResult.success) xsecToken = extractFirstXsecToken(feedResult.data);
                     } catch { /* 非关键，静默忽略 */ }
                 }
-                return { connected: true, tools, nickname, userId, loggedIn, xsecToken };
+                return { connected: true, tools, nickname, userId, loggedIn, xsecToken, platform };
             } catch (e: any) {
-                return { connected: false, error: e.message };
+                return { connected: false, error: describeXhsConnectFailure(e, serverUrl) };
             }
         }
 

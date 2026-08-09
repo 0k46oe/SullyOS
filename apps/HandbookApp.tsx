@@ -29,6 +29,7 @@ import HandbookSideTabs, { HandbookSection } from '../components/handbook/Handbo
 import TrackerSection from '../components/handbook/TrackerSection';
 import TrackerCreateSheet from '../components/handbook/TrackerCreateSheet';
 import { PAPER_TONES, SERIF_STACK, dayOfWeekZh, monthEn, dayNum } from '../components/handbook/paper';
+import { trackEvent } from '../utils/analytics';
 import { CaretLeft, Plus, Sparkle } from '@phosphor-icons/react';
 
 const HandbookApp: React.FC = () => {
@@ -65,6 +66,7 @@ const HandbookApp: React.FC = () => {
     const updateLifestreamDepth = (d: LifestreamDepth) => {
         setLifestreamDepth(d);
         try { localStorage.setItem('handbook_lifestream_depth', d); } catch {}
+        trackEvent('切换角色生活流深度', { depth: d });
     };
 
     // ─── 数据加载 ───────────────────────────────────────
@@ -115,6 +117,7 @@ const HandbookApp: React.FC = () => {
         setExcludedChatChars(new Set());
         setExcludedLifeChars(new Set());
         setShowCharPicker(true);
+        trackEvent('打开生成今日面板');
     };
 
     // ─── 执行生成 ─────────────────────────────────────
@@ -129,6 +132,7 @@ const HandbookApp: React.FC = () => {
         }
         setGenerating(true);
         setGenProgress(null);
+        trackEvent('生成今日手账');
         try {
             const selectedChat = chatCharIds.filter(id => !excludedChatChars.has(id));
             const selectedLife = lifestreamCandidates.filter(c => !excludedLifeChars.has(c.id));
@@ -231,6 +235,7 @@ const HandbookApp: React.FC = () => {
             generatedBy: p.generatedBy === 'llm' ? 'user' : p.generatedBy,
         }));
         setEditingPageId(null);
+        trackEvent('保存手账页编辑');
     };
 
     const handleDeletePage = async (pageId: string) => {
@@ -240,10 +245,12 @@ const HandbookApp: React.FC = () => {
             const layouts = recomputeLayouts(prev.layouts, newPages);
             return { ...prev, pages: newPages, layouts };
         });
+        trackEvent('撕掉一页手账');
     };
 
     const handleToggleExclude = async (pageId: string) => {
         await updatePage(pageId, p => ({ ...p, excluded: !p.excluded }));
+        trackEvent('标记手账页不入册');
     };
 
     const handleRegenerateLifestream = async (page: HandbookPage) => {
@@ -251,6 +258,7 @@ const HandbookApp: React.FC = () => {
         const char = characters.find(c => c.id === page.charId);
         if (!char) return;
         setRegenPageId(page.id);
+        trackEvent('重新生成角色小生活');
         try {
             const entry = activeEntry;
             if (!entry) return;
@@ -282,6 +290,7 @@ const HandbookApp: React.FC = () => {
     };
 
     const handleAddNote = async () => {
+        trackEvent('新增手写页');
         const newPage: HandbookPage = {
             id: `note-${Date.now()}`, type: 'user_note', content: '',
             paperStyle: 'dot', generatedBy: 'user', generatedAt: Date.now(),
@@ -554,8 +563,15 @@ const HandbookApp: React.FC = () => {
                 <HandbookSideTabs
                     activeSection={activeSection}
                     trackers={trackers}
-                    onSwitch={setActiveSection}
-                    onAddTracker={() => setShowTrackerCreate(true)}
+                    onSwitch={(section) => {
+                        setActiveSection(section);
+                        // 只报分区类型（今日 / 打卡），tracker 名字是用户自己起的，不带出去
+                        trackEvent('切换手账分区', { section: section.kind });
+                    }}
+                    onAddTracker={() => {
+                        setShowTrackerCreate(true);
+                        trackEvent('打开新建打卡面板');
+                    }}
                 />
             )}
             <TrackerCreateSheet
@@ -567,6 +583,7 @@ const HandbookApp: React.FC = () => {
                     setShowTrackerCreate(false);
                     setActiveSection({ kind: 'tracker', trackerId: tracker.id });
                     addToast(`「${tracker.name}」已添加 ♡`, 'success');
+                    trackEvent('新建一个打卡项');
                 }}
             />
             <HandbookCharPicker
