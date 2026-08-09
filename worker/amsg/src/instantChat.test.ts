@@ -3,9 +3,10 @@
 // 即时对话这条路上最要命的是「顺序」和「失败就别落任务」：云端状态没传上去却把任务
 // 建了，到点那条 fire 会拿上一轮的上下文答这一轮的话——不报错、不重试，用户只会觉得
 // 角色突然听不懂人话。下面每条都对着一种具体的坏法。
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import {
+  __resetUpstreamFatalLogTap,
   buildInstantTimelyBlock,
   finalizeInstantPush,
   handleInstantChat,
@@ -83,7 +84,7 @@ const validBody = (extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 
-/** 默认参数跑一次。 */
+/** 默认参数跑一次。重试梯子清零：钉的是「重了几次」，不是「等了多久」。 */
 const run = (args: {
   request: Request;
   env?: Record<string, unknown>;
@@ -95,6 +96,7 @@ const run = (args: {
   ctx: args.ctx,
   upstream: args.upstream as any,
   json,
+  stateBackoffMs: [0, 0, 0],
 });
 
 describe('POST /instant-chat — 鉴权', () => {
@@ -278,6 +280,147 @@ describe('POST /instant-chat — 严格顺序与失败传播', () => {
     const response = await run({ request: post(validBody()), upstream });
     expect(response.status).toBe(202);
     expect(await response.json()).toEqual({ status: 'accepted', uuid: TASK_UUID });
+  });
+});
+
+// 上游 500 只回一句写死的「服务器内部错误」，真实原因（缺表、D1 超时……）只进它自己的
+// console.error。用户照着那句泛型报文什么也做不了，还得先知道 Cloudflare 面板里有条日志。
+describe('POST /instant-chat — 上游 500 时把它日志里那句真话带回去', () => {
+  const FATAL = 'D1_ERROR: no such table: message_outbox: SQLITE_ERROR';
+  /** 上游抛异常时的真实行为：先写一行日志，再回那句写死的泛型报文。 */
+  const throwsInside = (status = 500): { status: number; body: unknown; log: boolean } => ({
+    status,
+    body: { success: false, error: { code: 'INTERNAL_ERROR', message: '服务器内部错误' } },
+    log: true,
+  });
+  const makeThrowingUpstream = (
+    which: 'clientState' | 'scheduleMessage',
+    spec: { status: number; body: unknown; log: boolean },
+  ) => {
+    const base = makeUpstream({ [which]: { status: spec.status, body: spec.body } } as any);
+    const inner = base.upstream.fetch;
+    base.upstream.fetch = vi.fn(async (request: Request) => {
+      const path = new URL(request.url).pathname;
+      const hit = which === 'clientState' ? path.endsWith('/client-state') : path.endsWith('/schedule-message');
+      if (hit && spec.log) console.error('[amsg single-user] fetch() unhandled error:', FATAL);
+      return inner(request);
+    }) as any;
+    return base;
+  };
+
+  beforeEach(() => { __resetUpstreamFatalLogTap(); });
+
+  it('client-state 那步：真实原因随 upstreamLog 回给客户端', async () => {
+    const { upstream } = makeThrowingUpstream('clientState', throwsInside());
+    const response = await run({ request: post(validBody()), upstream });
+    expect(response.status).toBe(500);
+    const body = await response.json() as any;
+    expect(body.error.code).toBe('INSTANT_CHAT_STATE_FAILED');
+    expect(body.error.upstreamLog).toBe(FATAL);
+  });
+
+  it('schedule-message 那步同理', async () => {
+    const { upstream } = makeThrowingUpstream('scheduleMessage', throwsInside());
+    const response = await run({ request: post(validBody()), upstream });
+    expect(response.status).toBe(500);
+    const body = await response.json() as any;
+    expect(body.error.code).toBe('INSTANT_CHAT_TASK_FAILED');
+    expect(body.error.upstreamLog).toBe(FATAL);
+  });
+
+  // 旁听是全局的、装上不摘。4xx 是上游自己判出来的业务错（正文里已经写清了原因），
+  // 这时再把某条不相干的日志当成原因贴上去，只会把人往错的方向指。
+  it('4xx 不带 upstreamLog：那不是抛出来的异常，正文本身就是原因', async () => {
+    const { upstream } = makeThrowingUpstream('clientState', {
+      ...throwsInside(400),
+      body: { success: false, error: { code: 'TOO_MANY_STATE_ENTRIES' } },
+    });
+    const response = await run({ request: post(validBody()), upstream });
+    expect(response.status).toBe(400);
+    expect((await response.json() as any).error.upstreamLog).toBeUndefined();
+  });
+
+  it('这一跳没写日志就不带（不能把上一次失败的原因贴到这次头上）', async () => {
+    const first = makeThrowingUpstream('clientState', throwsInside());
+    await run({ request: post(validBody()), upstream: first.upstream });
+    const { upstream } = makeThrowingUpstream('clientState', { ...throwsInside(), log: false });
+    const response = await run({ request: post(validBody()), upstream });
+    expect((await response.json() as any).error.upstreamLog).toBeUndefined();
+  });
+
+  // 只听不吞：wrangler tail 是排障的人真正盯着的地方，那一行不能因为我们接住了就没了。
+  it('原来的 console.error 照常收到这一行', async () => {
+    const seen: unknown[][] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { seen.push(args); });
+    try {
+      const { upstream } = makeThrowingUpstream('clientState', throwsInside());
+      await run({ request: post(validBody()), upstream });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(seen.some((args) => String(args[1]) === FATAL)).toBe(true);
+  });
+});
+
+// D1 底下是 Durable Object，闲一阵之后第一次写常常直接超时（实测：隔几小时说第一句话
+// 必挂、马上重发就好）。即时对话这一步一次写三十多 KB 的 fire_pack，正撞在这个坑上，
+// 而客户端只 POST 一次 /instant-chat，它自己那把重试梯子够不着里面这一跳。
+describe('POST /instant-chat — 云端状态那一步遇到 5xx 会重试', () => {
+  /** 前 n 次回 5xx，之后回正常成功体。 */
+  const flakyClientState = (failures: number) => {
+    let seen = 0;
+    const upstream = {
+      fetch: vi.fn(async (request: Request) => {
+        const path = new URL(request.url).pathname;
+        if (path.endsWith('/client-state')) {
+          seen += 1;
+          if (seen <= failures) {
+            console.error('[amsg single-user] fetch() unhandled error:', 'D1_ERROR: … object to be reset.');
+            return json(500, { success: false, error: { code: 'INTERNAL_ERROR', message: '服务器内部错误' } });
+          }
+          return json(200, { success: true, data: { upserted: 3, skipped: 0 } });
+        }
+        if (path.endsWith('/schedule-message')) return json(200, { success: true, data: { uuid: TASK_UUID } });
+        return json(404, { success: false });
+      }),
+      scheduled: vi.fn(async () => {}),
+    };
+    return { upstream, attempts: () => seen };
+  };
+
+  beforeEach(() => { __resetUpstreamFatalLogTap(); });
+
+  it('第一次超时、第二次写进去 → 照常受理，用户完全无感', async () => {
+    const { upstream, attempts } = flakyClientState(1);
+    const response = await run({ request: post(validBody()), upstream: upstream as any });
+    expect(response.status).toBe(202);
+    expect(attempts()).toBe(2);
+  });
+
+  it('梯子走完还是 5xx → 才报失败，且真实原因照样带着', async () => {
+    const { upstream, attempts } = flakyClientState(99);
+    const response = await run({ request: post(validBody()), upstream: upstream as any });
+    expect(response.status).toBe(500);
+    expect(attempts()).toBe(3);
+    const body = await response.json() as any;
+    expect(body.error.code).toBe('INSTANT_CHAT_STATE_FAILED');
+    expect(body.error.upstreamLog).toContain('object to be reset');
+  });
+
+  // 4xx 是上游判出来的业务错（体积超限、时间戳不合法……），重试多少次都是同一个答案，
+  // 白等三次还让用户多盯 1.6 秒的「正在输入」。
+  it('4xx 不重试，立刻打回', async () => {
+    const { upstream, calls } = makeUpstream({
+      clientState: { status: 400, body: { success: false, error: { code: 'TOO_MANY_STATE_ENTRIES' } } },
+    });
+    expect((await run({ request: post(validBody()), upstream })).status).toBe(400);
+    expect(calls.filter((c) => c.path.endsWith('/client-state'))).toHaveLength(1);
+  });
+
+  it('一次就成的正常轮次只转发一次（别把重试变成常态）', async () => {
+    const { upstream, calls } = makeUpstream();
+    expect((await run({ request: post(validBody()), upstream })).status).toBe(202);
+    expect(calls.filter((c) => c.path.endsWith('/client-state'))).toHaveLength(1);
   });
 });
 

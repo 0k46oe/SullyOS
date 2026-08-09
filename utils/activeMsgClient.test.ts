@@ -40,7 +40,8 @@ vi.mock('./keepAlive', () => ({
 
 import {
   ActiveMsgClient, buildFirePack, clearNamespaceValuesOrThrow, compareRemotePushSubscription,
-  dropStaleSubscription, putClientStateOrThrow, readAmsgFailKind, toRemoteAvatarUrl,
+  describeInstantChatFailure, dropStaleSubscription, putClientStateOrThrow, readAmsgFailKind,
+  toRemoteAvatarUrl,
 } from './activeMsgClient';
 import {
   AMSG_FIRE_PACK_KEY,
@@ -1700,5 +1701,36 @@ describe('ActiveMsgClient.getRemotePushSubscription（⑥b 问不到就说问不
   it('请求本身炸了 → null，不往外抛（面板会反复调它）', async () => {
     reiClient.getPushSubscription.mockRejectedValue(new Error('offline'));
     await expect(ActiveMsgClient.getRemotePushSubscription()).resolves.toBeNull();
+  });
+});
+
+// 上游把异常吞成一句写死的「服务器内部错误」，真话只进 worker 的日志。包装层把那行
+// 捞出来放进 upstreamLog，这里必须原样端到用户面前——否则他看到的还是那句什么都没说的话，
+// 得先知道 Cloudflare 面板里有条日志才查得下去。
+describe('describeInstantChatFailure — 后端那句真话要露出来', () => {
+  const internalError = (upstreamLog?: string) => ({
+    error: {
+      code: 'INSTANT_CHAT_STATE_FAILED',
+      message: '云端状态没传上去，这条没发出去',
+      upstream: { success: false, error: { code: 'INTERNAL_ERROR', message: '服务器内部错误' } },
+      ...(upstreamLog ? { upstreamLog } : {}),
+    },
+  });
+
+  it('带了 upstreamLog 就拼进去', () => {
+    const text = describeInstantChatFailure(500, internalError('D1_ERROR: no such table: message_outbox'));
+    expect(text).toContain('D1_ERROR: no such table: message_outbox');
+    // 泛型报文照留：它说明这一步是哪一步，跟真实原因不冲突。
+    expect(text).toContain('云端状态没传上去');
+  });
+
+  it('没有 upstreamLog 时照旧（老 worker 不会多出一截空白）', () => {
+    const text = describeInstantChatFailure(500, internalError());
+    expect(text).toBe('即时对话没发出去（HTTP 500 / INSTANT_CHAT_STATE_FAILED）：云端状态没传上去，这条没发出去：服务器内部错误');
+  });
+
+  it('有专属指引的错误码不受影响（401 仍然只说该去核对共享密钥）', () => {
+    expect(describeInstantChatFailure(401, internalError('D1_ERROR: whatever')))
+      .toBe('即时对话没发出去：共享密钥和 Worker 上的对不上，去「主动消息 2.0」设置里核对一下。');
   });
 });

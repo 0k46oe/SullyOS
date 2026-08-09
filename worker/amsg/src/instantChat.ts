@@ -237,6 +237,96 @@ export const constantTimeEqual = async (a: string, b: string): Promise<boolean> 
   return diff === 0;
 };
 
+// ─── 上游那句「服务器内部错误」背后到底出了什么事 ───
+
+/**
+ * 上游 fetch 里抛出来的异常，它自己 catch 掉、只回一句写死的「服务器内部错误」，
+ * 真实原因（`D1_ERROR: no such table: message_outbox`、`D1 DB storage operation
+ * exceeded timeout` 之类）只写进它自己的 console.error。
+ *
+ * 结果是用户看到的报错跟他要做的事完全对不上：「云端状态没传上去：服务器内部错误」
+ * 既不告诉他哪儿坏了，也不告诉他该点哪里。那行日志躺在 Cloudflare 面板里，得先知道
+ * 有这么个地方才找得到。
+ *
+ * 所以这里在 console.error 上永久搭一个旁听：认出上游那条前缀就记下来，随后失败时
+ * 一起回给客户端。**只听不吞**——原来的 console.error 照常调用，wrangler tail 里
+ * 那一行一个字都不少。
+ */
+const UPSTREAM_FATAL_LOG_PREFIX = '[amsg single-user] fetch() unhandled error:';
+
+/** 最近一条上游致命日志；seq 单调递增，调用方用它判断「这一跳有没有新的」。 */
+let upstreamFatalLog: { seq: number; message: string } = { seq: 0, message: '' };
+let fatalLogTap: { patched: (...args: unknown[]) => void; original: typeof console.error } | null = null;
+
+/**
+ * 装旁听。装上就不摘：摘挂都要改全局 console，同一个 isolate 里并发的请求会互相踩，
+ * 而这个旁听本身没有副作用，一直挂着最省事。
+ */
+export const installUpstreamFatalLogTap = (): void => {
+  if (fatalLogTap) return;
+  const original = console.error;
+  const patched = (...args: unknown[]) => {
+    if (typeof args[0] === 'string' && args[0].startsWith(UPSTREAM_FATAL_LOG_PREFIX)) {
+      const detail = args.slice(1)
+        .map((arg) => (arg instanceof Error ? arg.message : typeof arg === 'string' ? arg : String(arg)))
+        .join(' ')
+        .trim();
+      if (detail) upstreamFatalLog = { seq: upstreamFatalLog.seq + 1, message: detail };
+    }
+    original.apply(console, args as []);
+  };
+  fatalLogTap = { patched, original };
+  console.error = patched as typeof console.error;
+};
+
+/** 单测用：清空记录并摘掉旁听（外面还套了别人时就不动它，只当没装过）。 */
+export const __resetUpstreamFatalLogTap = (): void => {
+  upstreamFatalLog = { seq: 0, message: '' };
+  if (fatalLogTap && console.error === fatalLogTap.patched) console.error = fatalLogTap.original;
+  fatalLogTap = null;
+};
+
+/**
+ * 转发一次内部请求，顺带把这一跳里上游写下的致命日志捞出来。
+ *
+ * 用 seq 差值判断而不是清空重读：旁听是全局的，同一瞬间可能还有别的请求在跑。
+ * 拿到的日志只在「这一跳确实回了 5xx」时才当作原因用（上游只有真抛异常才会既写
+ * 这行日志又回 500），单用户 worker 上这两件事基本不可能分属两个请求。
+ */
+const forwardWithFatalLog = async (
+  upstream: InstantChatUpstream,
+  request: Request,
+  env: unknown,
+): Promise<{ response: Response; fatalLog: string | null }> => {
+  installUpstreamFatalLogTap();
+  const seqBefore = upstreamFatalLog.seq;
+  const response = await upstream.fetch(request, env);
+  const fatalLog = upstreamFatalLog.seq !== seqBefore ? upstreamFatalLog.message : null;
+  return { response, fatalLog: response.status >= 500 ? fatalLog : null };
+};
+
+// ─── 云端状态那一步的重试 ───
+
+/**
+ * `PUT /client-state` 每次重试前等多久（数组长度即总尝试次数，首次不等）。
+ *
+ * 为什么这一步要重试：D1 底下是 Durable Object，闲一段时间后的第一次写常常直接超时
+ * （`D1 DB storage operation exceeded timeout which caused object to be reset`），
+ * 而即时对话这一步一次要写下三十多 KB 的 fire_pack，正好撞在最容易超时的地方。实测
+ * 就是「隔几个小时第一次说话必挂、马上再发一次就好」——用户看到的是自己好端端一句话
+ * 发不出去，还得自己重发。
+ *
+ * 客户端本来有一模一样的一把梯子（activeMsgClient 的 CLIENT_STATE_BACKOFF_MS），
+ * 但它护的是常规状态同步；即时对话这条路上客户端只 POST 一次 /instant-chat，那把梯子
+ * 就够不着里面这一跳了。补在这儿，两条路才一样稳。
+ *
+ * 只重这一步：它是按 (namespace, key) 的 upsert，重跑一次等于把同样的值再写一遍，
+ * 没有副作用。下一步的建任务不重——那一步失败重跑可能建出两条任务。
+ */
+const STATE_FORWARD_BACKOFF_MS = [0, 400, 1200];
+
+const sleep = (ms: number) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
 /** 客户端预加密的信封形状（上游 parseEncryptedBody 认的就是这三个字段）。 */
 const isEncryptedEnvelope = (value: unknown): boolean => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -264,9 +354,12 @@ export const handleInstantChat = async (args: {
   /** 带 CORS 头的 JSON 响应器（CORS 头只在 index.ts 存一份）。 */
   json: (status: number, body: unknown) => Response;
   now?: () => number;
+  /** 云端状态那步的重试梯子（单测传全零，别真等）。 */
+  stateBackoffMs?: number[];
 }): Promise<Response> => {
   const { request, env, ctx, upstream, json } = args;
   const now = args.now ?? Date.now;
+  const stateBackoffMs = args.stateBackoffMs ?? STATE_FORWARD_BACKOFF_MS;
 
   const fail = (status: number, code: string, message: string, extra?: Record<string, unknown>) =>
     json(status, { success: false, error: { code, message, ...(extra ?? {}) } });
@@ -323,14 +416,26 @@ export const handleInstantChat = async (args: {
   };
 
   // ① 云端状态必须先落地：这一步失败就绝不落任务（否则任务到点会拿旧上下文答话）。
-  const stateResponse = await upstream.fetch(
-    new Request(internalUrl('/client-state'), {
-      method: 'PUT',
-      headers: encryptedHeaders,
-      body: JSON.stringify(body.statePayload),
-    }),
-    env,
-  );
+  //    5xx 是 D1 冷启动那类瞬时错误的典型长相，按梯子重试几次（见 STATE_FORWARD_BACKOFF_MS）；
+  //    4xx 是上游判出来的业务错（体积超限、时间戳不合法……），重试多少次都是同一个答案，立刻打回。
+  let stateResponse!: Response;
+  let stateFatalLog: string | null = null;
+  for (let attempt = 0; attempt < stateBackoffMs.length; attempt += 1) {
+    if (attempt > 0) {
+      console.warn(`[amsg:instant-chat] 云端状态第 ${attempt} 次没写进去（${stateFatalLog ?? stateResponse.status}），重试`);
+      await sleep(stateBackoffMs[attempt]);
+    }
+    ({ response: stateResponse, fatalLog: stateFatalLog } = await forwardWithFatalLog(
+      upstream,
+      new Request(internalUrl('/client-state'), {
+        method: 'PUT',
+        headers: encryptedHeaders,
+        body: JSON.stringify(body.statePayload),
+      }),
+      env,
+    ));
+    if (stateResponse.status < 500) break;
+  }
   if (!stateResponse.ok) {
     return json(stateResponse.status, {
       success: false,
@@ -339,6 +444,7 @@ export const handleInstantChat = async (args: {
         message: '云端状态没传上去，这条没发出去',
         step: 'client-state',
         upstream: await readBody(stateResponse),
+        ...(stateFatalLog ? { upstreamLog: stateFatalLog } : {}),
       },
     });
   }
@@ -365,7 +471,8 @@ export const handleInstantChat = async (args: {
   // ② 任务落库 = 受理（顶替上一条也在这一步里：任务体的 supersedesUuid 由上游在
   //    同一事务里处理）。到这一步返回 202 之前，行已经在 D1 里了，
   //    下面那一跳只是让它快点跑起来，跑不成还有每分钟的 cron。
-  const taskResponse = await upstream.fetch(
+  const { response: taskResponse, fatalLog: taskFatalLog } = await forwardWithFatalLog(
+    upstream,
     new Request(internalUrl('/schedule-message'), {
       method: 'POST',
       headers: encryptedHeaders,
@@ -382,6 +489,7 @@ export const handleInstantChat = async (args: {
         message: '任务没建起来，这条没发出去',
         step: 'schedule-message',
         upstream: taskBody,
+        ...(taskFatalLog ? { upstreamLog: taskFatalLog } : {}),
       },
     });
   }

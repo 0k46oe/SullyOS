@@ -826,10 +826,14 @@ export const toFirePackChatMessages = (
 };
 
 /** POST /instant-chat 的失败原因（包装层的错误码 → 一句能照着做的话）。 */
-const describeInstantChatFailure = (status: number, body: any): string => {
+export const describeInstantChatFailure = (status: number, body: any): string => {
   const code = body?.error?.code;
   const upstream = body?.error?.upstream?.error?.message || body?.error?.upstream?.message;
-  const detail = [body?.error?.message, upstream].filter(Boolean).join('：');
+  // Worker 内部真正抛出来的那句（`D1_ERROR: no such table …` 之类）。上游只回一句写死的
+  // 「服务器内部错误」，包装层从它的日志里把原文捞了出来（见 worker 的 forwardWithFatalLog）。
+  // 这才是能照着做事的那一句，所以排在泛型报文后面一起给出来，别让人再去翻 Cloudflare 面板。
+  const upstreamLog = typeof body?.error?.upstreamLog === 'string' ? body.error.upstreamLog : '';
+  const detail = [body?.error?.message, upstream, upstreamLog].filter(Boolean).join('：');
   if (status === 401 || code === 'INVALID_CLIENT_TOKEN') {
     return '即时对话没发出去：共享密钥和 Worker 上的对不上，去「主动消息 2.0」设置里核对一下。';
   }

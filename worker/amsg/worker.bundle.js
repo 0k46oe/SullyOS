@@ -1697,7 +1697,7 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
     throw new Error("AGENTIC_CONFIG_ERROR: hooks.onBeforeFire requires hooks.onLLMOutput to classify LLM rounds");
   }
   const nowFn = typeof ctx._agenticNow === "function" ? ctx._agenticNow : Date.now;
-  const sleep = typeof ctx._agenticSleep === "function" ? ctx._agenticSleep : defaultSleep;
+  const sleep2 = typeof ctx._agenticSleep === "function" ? ctx._agenticSleep : defaultSleep;
   const { readState, writeState } = createStateAccessors({
     db: ctx.db,
     userId: task.user_id,
@@ -1917,7 +1917,7 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
       ctx,
       hooks,
       nowFn,
-      sleep,
+      sleep: sleep2,
       readState,
       writeState,
       scratch,
@@ -1962,7 +1962,7 @@ async function runFireChain({
   ctx,
   hooks,
   nowFn,
-  sleep,
+  sleep: sleep2,
   readState,
   writeState,
   scratch,
@@ -2048,7 +2048,7 @@ async function runFireChain({
         occurrenceMs,
         task,
         userKey,
-        sleep,
+        sleep: sleep2,
         scratch,
         readState,
         writeState,
@@ -2117,7 +2117,7 @@ async function sendHookPushPayloads({
   occurrenceMs,
   task,
   userKey,
-  sleep,
+  sleep: sleep2,
   scratch,
   readState,
   writeState,
@@ -2156,7 +2156,7 @@ async function sendHookPushPayloads({
       sentCount++;
       progress.sentCount = sentCount;
       sentIds.push(finalized[i].messageId);
-      if (i < total - 1) await sleep(SLEEP_BETWEEN_MESSAGES_MS);
+      if (i < total - 1) await sleep2(SLEEP_BETWEEN_MESSAGES_MS);
     }
   } catch (error) {
     await markPushesDelivered({ db: ctx.db, userId: task.user_id, messageIds: sentIds });
@@ -6266,6 +6266,33 @@ var constantTimeEqual2 = async (a, b) => {
   for (let i = 0; i < da.length; i += 1) diff |= da[i] ^ db[i];
   return diff === 0;
 };
+var UPSTREAM_FATAL_LOG_PREFIX = "[amsg single-user] fetch() unhandled error:";
+var upstreamFatalLog = { seq: 0, message: "" };
+var fatalLogTap = null;
+var installUpstreamFatalLogTap = () => {
+  if (fatalLogTap) return;
+  const original = console.error;
+  const patched = (...args) => {
+    if (typeof args[0] === "string" && args[0].startsWith(UPSTREAM_FATAL_LOG_PREFIX)) {
+      const detail = args.slice(1).map((arg) => arg instanceof Error ? arg.message : typeof arg === "string" ? arg : String(arg)).join(" ").trim();
+      if (detail) upstreamFatalLog = { seq: upstreamFatalLog.seq + 1, message: detail };
+    }
+    original.apply(console, args);
+  };
+  fatalLogTap = { patched, original };
+  console.error = patched;
+};
+var forwardWithFatalLog = async (upstream2, request, env) => {
+  installUpstreamFatalLogTap();
+  const seqBefore = upstreamFatalLog.seq;
+  const response = await upstream2.fetch(request, env);
+  const fatalLog = upstreamFatalLog.seq !== seqBefore ? upstreamFatalLog.message : null;
+  return { response, fatalLog: response.status >= 500 ? fatalLog : null };
+};
+var STATE_FORWARD_BACKOFF_MS = [0, 400, 1200];
+var sleep = (ms) => new Promise((resolve) => {
+  setTimeout(resolve, ms);
+});
 var isEncryptedEnvelope2 = (value) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const env = value;
@@ -6274,6 +6301,7 @@ var isEncryptedEnvelope2 = (value) => {
 var handleInstantChat = async (args) => {
   const { request, env, ctx, upstream: upstream2, json } = args;
   const now = args.now ?? Date.now;
+  const stateBackoffMs = args.stateBackoffMs ?? STATE_FORWARD_BACKOFF_MS;
   const fail2 = (status, code, message, extra) => json(status, { success: false, error: { code, message, ...extra ?? {} } });
   const token = (env.AMSG_SERVER_TOKEN ?? "").trim();
   const clientToken = request.headers.get("X-Client-Token") ?? "";
@@ -6321,14 +6349,24 @@ var handleInstantChat = async (args) => {
       return null;
     }
   };
-  const stateResponse = await upstream2.fetch(
-    new Request(internalUrl("/client-state"), {
-      method: "PUT",
-      headers: encryptedHeaders,
-      body: JSON.stringify(body.statePayload)
-    }),
-    env
-  );
+  let stateResponse;
+  let stateFatalLog = null;
+  for (let attempt = 0; attempt < stateBackoffMs.length; attempt += 1) {
+    if (attempt > 0) {
+      console.warn(`[amsg:instant-chat] \u4E91\u7AEF\u72B6\u6001\u7B2C ${attempt} \u6B21\u6CA1\u5199\u8FDB\u53BB\uFF08${stateFatalLog ?? stateResponse.status}\uFF09\uFF0C\u91CD\u8BD5`);
+      await sleep(stateBackoffMs[attempt]);
+    }
+    ({ response: stateResponse, fatalLog: stateFatalLog } = await forwardWithFatalLog(
+      upstream2,
+      new Request(internalUrl("/client-state"), {
+        method: "PUT",
+        headers: encryptedHeaders,
+        body: JSON.stringify(body.statePayload)
+      }),
+      env
+    ));
+    if (stateResponse.status < 500) break;
+  }
   if (!stateResponse.ok) {
     return json(stateResponse.status, {
       success: false,
@@ -6336,7 +6374,8 @@ var handleInstantChat = async (args) => {
         code: "INSTANT_CHAT_STATE_FAILED",
         message: "\u4E91\u7AEF\u72B6\u6001\u6CA1\u4F20\u4E0A\u53BB\uFF0C\u8FD9\u6761\u6CA1\u53D1\u51FA\u53BB",
         step: "client-state",
-        upstream: await readBody(stateResponse)
+        upstream: await readBody(stateResponse),
+        ...stateFatalLog ? { upstreamLog: stateFatalLog } : {}
       }
     });
   }
@@ -6352,7 +6391,8 @@ var handleInstantChat = async (args) => {
       }
     });
   }
-  const taskResponse = await upstream2.fetch(
+  const { response: taskResponse, fatalLog: taskFatalLog } = await forwardWithFatalLog(
+    upstream2,
     new Request(internalUrl("/schedule-message"), {
       method: "POST",
       headers: encryptedHeaders,
@@ -6368,7 +6408,8 @@ var handleInstantChat = async (args) => {
         code: "INSTANT_CHAT_TASK_FAILED",
         message: "\u4EFB\u52A1\u6CA1\u5EFA\u8D77\u6765\uFF0C\u8FD9\u6761\u6CA1\u53D1\u51FA\u53BB",
         step: "schedule-message",
-        upstream: taskBody
+        upstream: taskBody,
+        ...taskFatalLog ? { upstreamLog: taskFatalLog } : {}
       }
     });
   }
