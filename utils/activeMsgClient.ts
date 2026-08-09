@@ -1206,6 +1206,38 @@ export type RemoteTaskStatus =
   | { state: 'completed'; lastError?: RemoteTaskLastError | null }
   | { state: 'gone' };
 
+/**
+ * 服务端消息账本里的一条。
+ *
+ * 云端每条推送发出去之前先记一行，客户端收下之后销账（ack）。`push` 就是推送信封
+ * 本身，跟 Service Worker 收到的那一份逐字一致——补收时原样走收件箱那条老路即可。
+ */
+export interface AmsgOutboxEntry {
+  /** 行号，同时也是翻页游标。 */
+  id: number;
+  messageId: string;
+  taskUuid: string | null;
+  sessionId: string | null;
+  messageIndex: number | null;
+  totalMessages: number | null;
+  /** 落账时刻（epoch ms）。补收按它掐时效，太老的不再往聊天流里放。 */
+  createdAt: number;
+  deliveredAt: number | null;
+  push: Record<string, any>;
+}
+
+/** 单页条数。服务端上限 100，取满减少往返。 */
+const OUTBOX_PAGE_SIZE = 100;
+
+/**
+ * 最多翻几页。护栏而非配额：正常情况一两页就到底了，堆到 2000 条说明账本没人销过，
+ * 这时也不该无限翻下去把启动卡死——剩下的下次再拉。
+ */
+const OUTBOX_MAX_PAGES = 20;
+
+/** 单次 ack 的条数上限（服务端 200，超了自己分批）。 */
+const OUTBOX_ACK_BATCH_SIZE = 200;
+
 export const ActiveMsgClient = {
   async registerNativePushToken(token: string): Promise<void> {
     if (!nativePushBuildEnabled()) throw new Error('当前构建未开启 Capacitor 原生推送');
@@ -1638,6 +1670,83 @@ export const ActiveMsgClient = {
       ...(typeof task.retryCount === 'number' ? { retryCount: task.retryCount } : {}),
       ...(typeof task.nextSendAt === 'string' ? { nextSendAt: task.nextSendAt } : {}),
     };
+  },
+
+  /**
+   * 服务端消息账本里还没销账的条目，翻页拉全。
+   *
+   * 「哪些消息客户端还没收下」在服务端是查得出来的事实——每条推送发出去之前先记一行，
+   * 客户端落库之后销账。所以这里不做任何本地对账，读回来是什么就是什么。
+   *
+   * 读失败照常抛：调用方要能分清「读到了、里面确实没有」和「压根没读成」，
+   * 后者不构成任何结论（见 docs/instant-push-dual-channel.md 那条铁律）。
+   */
+  async listOutboxEntries(): Promise<AmsgOutboxEntry[]> {
+    const config = await ensureWorkerReady();
+    const client = await initializeClient(config);
+    const collected: AmsgOutboxEntry[] = [];
+    let since: number | undefined;
+
+    for (let page = 0; page < OUTBOX_MAX_PAGES; page += 1) {
+      const response = await client.getOutbox({
+        limit: OUTBOX_PAGE_SIZE,
+        ...(since == null ? {} : { since }),
+      });
+      if (!response?.success) {
+        throw new Error(response?.error?.message || '读取云端消息账本失败。');
+      }
+      const data = (response.data ?? {}) as {
+        entries?: unknown;
+        cursor?: unknown;
+        hasMore?: unknown;
+      };
+      const entries = Array.isArray(data.entries) ? data.entries : [];
+      for (const raw of entries) {
+        const entry = raw as Partial<AmsgOutboxEntry> | null;
+        // messageId 是销账和去重的唯一依据，缺了这条就没法处理，跳过。
+        if (!entry || typeof entry.messageId !== 'string' || !entry.messageId) continue;
+        if (!entry.push || typeof entry.push !== 'object') continue;
+        collected.push({
+          id: typeof entry.id === 'number' ? entry.id : 0,
+          messageId: entry.messageId,
+          taskUuid: typeof entry.taskUuid === 'string' ? entry.taskUuid : null,
+          sessionId: typeof entry.sessionId === 'string' ? entry.sessionId : null,
+          messageIndex: typeof entry.messageIndex === 'number' ? entry.messageIndex : null,
+          totalMessages: typeof entry.totalMessages === 'number' ? entry.totalMessages : null,
+          createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : 0,
+          deliveredAt: typeof entry.deliveredAt === 'number' ? entry.deliveredAt : null,
+          push: entry.push as Record<string, any>,
+        });
+      }
+      if (data.hasMore !== true) break;
+      const cursor = typeof data.cursor === 'number' ? data.cursor : null;
+      // 游标没往前走就停：再拉一次是同一页，会转成死循环。
+      if (cursor == null || (since != null && cursor <= since)) break;
+      since = cursor;
+    }
+
+    return collected;
+  },
+
+  /**
+   * 销账：告诉服务端这些消息已经收下了，之后不会再拉到。
+   *
+   * **只在消息真的落地之后调**——账销了而落库半途失败的话，这条消息就再也补不回来。
+   * 幂等，重复销同一批不会出错。超过单次上限自动分批；某一批失败不拦着后面几批，
+   * 没销掉的下次拉回来会被落库那层的去重挡下，不会重复上屏。
+   */
+  async ackOutboxMessages(messageIds: string[]): Promise<void> {
+    const ids = Array.from(new Set(messageIds.filter((id) => typeof id === 'string' && !!id)));
+    if (ids.length === 0) return;
+    const config = await ensureWorkerReady();
+    const client = await initializeClient(config);
+    for (let i = 0; i < ids.length; i += OUTBOX_ACK_BATCH_SIZE) {
+      const batch = ids.slice(i, i + OUTBOX_ACK_BATCH_SIZE);
+      const response = await client.ackOutbox(batch);
+      if (!response?.success) {
+        throw new Error(response?.error?.message || '云端消息账本销账失败。');
+      }
+    }
   },
 
   /**

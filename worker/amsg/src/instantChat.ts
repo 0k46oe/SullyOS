@@ -5,7 +5,7 @@
  * 结果走 Web Push 回去。这份模块管三件事：
  *   1. `POST /instant-chat` 这条包装层路由（鉴权 → 内部转发 → 202 → 立刻起一跳）
  *   2. 即时对话那条 fire 用的「时效信息」块（当前时间 / 实时世界 / 排程说明拼一起）
- *   3. 收件兜底 outbox 的推送信封定稿（push 丢了客户端能按 messageId 补收）
+ *   3. 推送的通知策略（前台可见时不弹横幅）
  *
  * 为什么要在包装层做而不是让客户端直接调上游的两个端点：两步有严格的先后和
  * 「前面失败就不能落任务」的语义（云端状态没传上去，到点的 fire 读到的还是上一轮的
@@ -19,14 +19,10 @@
  */
 
 import {
-  AMSG_CHAT_OUTBOX_KEY,
   AMSG_FIRE_PACK_KEY,
   amsgStateNamespace,
-  appendChatOutbox,
   buildUserClockHint,
   formatFireTimeFull,
-  type AmsgChatOutbox,
-  type AmsgChatOutboxEntry,
   type AmsgTzRef,
 } from '../../../utils/amsgFirePack';
 
@@ -91,7 +87,7 @@ export const buildInstantTimelyBlock = (args: {
   return [head, ...blocks].join('\n');
 };
 
-// ─── 收件兜底 outbox ───
+// ─── 通知策略 ───
 
 /**
  * 前台可见时别弹系统通知（SW 的 shouldRenderNotification 认这个值）。
@@ -105,98 +101,26 @@ export const buildInstantTimelyBlock = (args: {
 const NOTIFICATION_WHEN_HIDDEN = 'when-hidden';
 
 /**
- * 把定稿的推送载荷补齐成「客户端真正会收到的那一份」。
+ * 给即时对话的推送载荷表态通知策略。
  *
- * 库在发之前还会补 messageId / sessionId / timestamp / messageIndex / totalMessages
- * 和四个任务身份字段。其中前三个是「没有才补」，所以这里先按库的同一套规则算好写进去，
- * 库那边就会原样沿用——outbox 里留的那份和真发出去的那份于是逐字一致，客户端补收时
- * 按 messageId 对账不会错位。
+ * 载荷本来就没有 notification 时不凭空造一个：SW 拿不到 title / body 只能弹一条空白
+ * 横幅，而「没有 notification」这件事本身在 SW 那边有按 messageKind 的默认行为，
+ * 替它做主只会把默认行为弄坏。
  *
- * 顺带把 notification.show 表态成 when-hidden（见上）。载荷本来就没有 notification 时
- * 不凭空造一个：SW 拿不到 title / body 只能弹一条空白横幅，而「没有 notification」这件事
- * 本身在 SW 那边有按 messageKind 的默认行为，替它做主只会把默认行为弄坏。
+ * 信封的其余部分（messageId / sessionId / 时间戳 / 段号 / 任务身份）一律交给库去补——
+ * 客户端补收现在读的是服务端账本，账本里的那份就是库发出去的那份，没有第二处需要
+ * 逐字对齐的副本了。
  */
-export const finalizeInstantPush = (
+export const applyInstantNotificationPolicy = (
   payload: Record<string, unknown>,
-  index: number,
-  total: number,
-  ids: {
-    /** 任务行 id（字符串化）；没有时用随机串，跟库的兜底同语义。 */
-    taskRowId: string | null;
-    taskUuid: string | null;
-    occurrenceMs: number;
-    nowMs: number;
-    randomId: string;
-  },
 ): Record<string, unknown> => {
-  const suffix = `@${ids.occurrenceMs}`;
-  const messageIdBase = ids.taskRowId != null
-    ? `msg_task_${ids.taskRowId}${suffix}`
-    : `msg_${ids.randomId}`;
-  const sessionId = ids.taskRowId != null
-    ? `sess_task_${ids.taskRowId}${suffix}`
-    : `sess_${ids.randomId}`;
   const notification = payload.notification;
   const hasNotification = !!notification && typeof notification === 'object' && !Array.isArray(notification);
+  if (!hasNotification) return payload;
   return {
     ...payload,
-    ...(hasNotification
-      ? { notification: { ...(notification as Record<string, unknown>), show: NOTIFICATION_WHEN_HIDDEN } }
-      : {}),
-    messageId: `${messageIdBase}_hook_${index}`,
-    sessionId,
-    timestamp: new Date(ids.nowMs).toISOString(),
-    messageIndex: index + 1,
-    totalMessages: total,
-    // 库的 stampTaskIdentity 会原样覆写这四个，写成一样的值只是让 outbox 那份也带上。
-    // 任务行 id 在 D1 里是整数，转不出数字就照实报 null，别塞一个 NaN 出去。
-    taskId: ids.taskRowId != null && Number.isFinite(Number(ids.taskRowId))
-      ? Number(ids.taskRowId)
-      : null,
-    taskUuid: ids.taskUuid,
-    recurrenceType: 'none',
-    occurrenceMs: ids.occurrenceMs,
+    notification: { ...(notification as Record<string, unknown>), show: NOTIFICATION_WHEN_HIDDEN },
   };
-};
-
-/** 定稿后的载荷 → outbox 条目（messageId / sessionId 已经在载荷上了）。 */
-export const toOutboxEntries = (
-  payloads: Array<Record<string, unknown>>,
-  nowMs: number,
-): AmsgChatOutboxEntry[] =>
-  payloads.map((payload) => ({
-    messageId: String(payload.messageId ?? ''),
-    sessionId: String(payload.sessionId ?? ''),
-    at: nowMs,
-    payload,
-  }));
-
-/**
- * 把这一轮的产物写进角色的 outbox。**不论 push 发得出去发不出去都写**——
- * push 静默丢失正是它要兜的那件事。
- *
- * best-effort：写不进去不能连累这次发送，只是丢了兜底能力，吼一声。
- */
-export const writeChatOutbox = async (
-  writeState: ((
-    namespace: string,
-    entries: Array<{ key: string; value: string | null; updatedAt?: number }>,
-  ) => Promise<unknown>) | undefined,
-  charId: string,
-  current: AmsgChatOutbox | null,
-  entries: AmsgChatOutboxEntry[],
-): Promise<AmsgChatOutbox | null> => {
-  if (typeof writeState !== 'function' || entries.length === 0) return current;
-  const next = appendChatOutbox(current, entries);
-  try {
-    await writeState(amsgStateNamespace(charId), [
-      { key: AMSG_CHAT_OUTBOX_KEY, value: JSON.stringify(next) },
-    ]);
-    return next;
-  } catch (error) {
-    console.warn('[amsg:instant-chat] outbox 写入失败（这次照常发送，但推送丢了客户端补不回来）', error);
-    return current;
-  }
 };
 
 // ─── POST /instant-chat ───

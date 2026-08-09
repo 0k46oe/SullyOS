@@ -19,7 +19,6 @@ import { amsgEmotionUpdateKey, EMOTION_EVAL_RIDE_ALONG_MS } from './emotionEval'
 import { INSTANT_TOTAL_TIMEOUT_MS } from './instantChat';
 import {
   AMSG_CHAT_FAIL_KEY,
-  AMSG_CHAT_OUTBOX_KEY,
   AMSG_FIRE_PACK_KEY,
   AMSG_LAST_SKIP_KEY,
   AMSG_SELF_LOG_KEY,
@@ -31,10 +30,8 @@ import {
   amsgXhsSessionKey,
   appendSelfLogEntry,
   createSelfLog,
-  CHAT_OUTBOX_MAX_SESSIONS,
   FIRE_PACK_VERSION,
   packStateValue,
-  parseChatOutbox,
   parseSelfLog,
   SELF_LOG_MAX_ENTRIES,
 } from '../../../utils/amsgFirePack';
@@ -200,7 +197,7 @@ const makeFireStore = (chatMessages?: Array<{ role: string; content: unknown }>)
     }
     return { upserted: entries.length, skipped: 0, deleted: 0 };
   });
-  return { rows, readState, writeState, outbox: () => parseChatOutbox(rows.get(AMSG_CHAT_OUTBOX_KEY)) };
+  return { rows, readState, writeState };
 };
 
 /**
@@ -3457,9 +3454,9 @@ describe('定时轮撞上即时轻量包的占位模板', () => {
   });
 });
 
-// 推送是会静默丢的：手机换网、系统压制、SW 没醒，用户那边就是「一直在输入中」。
-// outbox 是唯一的补收通道，写晚了（等发送结果）或者写漏了都等于没有。
-describe('即时对话的收件兜底 outbox', () => {
+// 用户正盯着窗口等这条回复时，锁屏横幅是纯打扰（页面自己会上屏）；窗口不可见时又
+// 必须弹。SW 的 shouldRenderNotification 按 notification.show 分这两种，worker 表态。
+describe('即时对话的推送通知策略', () => {
   const CLIENT_TASK_ID = 'client-instant-1';
   const CHAT_MESSAGES = [{ role: 'user', content: '在吗' }];
 
@@ -3472,40 +3469,15 @@ describe('即时对话的收件兜底 outbox', () => {
     ...(instant ? { amsgInstantChat: true } : { amsgTaskInstruction: '想到什么说什么' }),
   });
 
-  it('生成完就写进 chat_outbox，和真发出去的那份 id 逐字一致', async () => {
+  it('即时对话的推送标 when-hidden', async () => {
     const store = makeStore(true);
     const { decision } = await runFire(store, { metadata: fireMeta(true), llmOutput: '在的。怎么啦？' });
     expect(decision.decision).toBe('finish');
-
-    const outbox = store.outbox()!;
-    expect(outbox.entries).toHaveLength(decision.pushPayloads.length);
-    // 回归守卫：outbox 里的 messageId 跟推送上的对不上，客户端补收时会把同一条再入库一遍
-    expect(outbox.entries.map((e: any) => e.messageId))
-      .toEqual(decision.pushPayloads.map((p: any) => p.messageId));
-    expect(outbox.entries[0].messageId)
-      .toBe(`msg_task_42@${Date.parse('2026-07-25T12:00:00.000Z')}_hook_0`);
-    expect(outbox.entries[0].payload).toEqual(decision.pushPayloads[0]);
-  });
-
-  it('定时任务不写 outbox（那条路的产物在任务列表里查得到）', async () => {
-    const store = makeStore(false);
-    const { decision } = await runFire(store, { metadata: fireMeta(false), llmOutput: '在的。' });
-    expect(decision.decision).toBe('finish');
-    expect(store.outbox()).toBeNull();
-    expect(store.rows.has(AMSG_CHAT_OUTBOX_KEY)).toBe(false);
-  });
-
-  // 用户正盯着窗口等这条回复时，锁屏横幅是纯打扰（页面自己会上屏）；窗口不可见时又
-  // 必须弹。SW 的 shouldRenderNotification 按 notification.show 分这两种，worker 表态。
-  it('即时对话的推送标 when-hidden，outbox 里那份也带着', async () => {
-    const store = makeStore(true);
-    const { decision } = await runFire(store, { metadata: fireMeta(true), llmOutput: '在的。怎么啦？' });
     for (const push of decision.pushPayloads) {
       expect((push.notification as any).show).toBe('when-hidden');
       // 横幅文案还在：show 只是加一个字段，不是把 notification 换掉
       expect((push.notification as any).body).toBeTruthy();
     }
-    expect((store.outbox()!.entries[0].payload as any).notification.show).toBe('when-hidden');
   });
 
   it('定时任务的推送不标 show（主动消息前台可见时更该弹）', async () => {
@@ -3515,46 +3487,6 @@ describe('即时对话的收件兜底 outbox', () => {
       expect(push.notification).toBeTruthy();
       expect((push.notification as any).show).toBeUndefined();
     }
-  });
-
-  it('连聊几轮只留最近 CHAT_OUTBOX_MAX_SESSIONS 轮（按 sessionId 整轮保留）', async () => {
-    const store = makeStore(true);
-    for (let i = 0; i < CHAT_OUTBOX_MAX_SESSIONS + 2; i += 1) {
-      // 每轮换一个任务行 id，messageId / sessionId 才跟着变（同一次触发重跑是要覆盖的）
-      await runFire(store, {
-        metadata: fireMeta(true), llmOutput: `第 ${i} 轮`,
-        taskId: 40 + i, sessionId: `sess_${i}`,
-      });
-    }
-    const entries = store.outbox()!.entries;
-    // 5 轮只剩最近 3 轮（每轮 1 条），最老两轮整轮丢弃
-    expect(entries).toHaveLength(CHAT_OUTBOX_MAX_SESSIONS);
-    expect(entries.map((e: any) => e.payload.message)).toEqual(['第 2 轮', '第 3 轮', '第 4 轮']);
-  });
-
-  it('单轮长回复整轮保留：12 段一条不掐（按条数环形保留会把整轮掐头）', async () => {
-    const store = makeStore(true);
-    for (let i = 0; i < 3; i += 1) {
-      await runFire(store, {
-        metadata: fireMeta(true), llmOutput: `短回复 ${i}`,
-        taskId: 50 + i, sessionId: `sess_short_${i}`,
-      });
-    }
-    await runFire(store, {
-      metadata: fireMeta(true),
-      llmOutput: Array.from({ length: 12 }, (_, i) => `长回复第 ${i} 段`).join('\n'),
-      taskId: 60, sessionId: 'sess_long',
-    });
-
-    const entries = store.outbox()!.entries;
-    expect(entries
-      .map((e: any) => String(e.payload.message))
-      .filter((message: string) => message.startsWith('长回复')))
-      .toHaveLength(12);
-    // 留下的仍是最近 3 轮：长回复那轮 + 前两轮短回复
-    expect(entries
-      .filter((e: any) => String(e.payload.message).startsWith('短回复')))
-      .toHaveLength(2);
   });
 });
 

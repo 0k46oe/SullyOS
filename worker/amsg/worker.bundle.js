@@ -5041,7 +5041,7 @@ function createWebCryptoWebPush(vapid = {}, { ttl = SCHEDULED_DEFAULT_TTL } = {}
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-08-09";
+var AMSG_BUNDLE_VERSION = "2026-08-10";
 
 // utils/localDate.ts
 function getLocalDateKey(date = /* @__PURE__ */ new Date()) {
@@ -5229,38 +5229,7 @@ var AMSG_FIRE_PACK_KEY = "fire_pack";
 var AMSG_SELF_LOG_KEY = "self_log";
 var amsgXhsSessionKey = (clientTaskId) => `xhs_session:${clientTaskId}`;
 var AMSG2_INSTANT_STUB_TEMPLATE = "AMSG2_INSTANT_STUB_TEMPLATE\uFF08\u5373\u65F6\u5BF9\u8BDD\u8F7B\u91CF\u5305\uFF1A\u8BE5\u89D2\u8272\u65E0\u5B9A\u65F6\u4EFB\u52A1\uFF0C\u6A21\u677F\u672A\u968F\u53D1\u9001\u91CD\u5EFA\uFF1B\u770B\u5230\u8FD9\u6761\u6B63\u6587\u8BF4\u660E\u6709\u672C\u4E0D\u8BE5\u6E32\u67D3\u6A21\u677F\u7684 fire \u5728\u6E32\u67D3\u5B83\uFF09";
-var AMSG_CHAT_OUTBOX_KEY = "chat_outbox";
-var CHAT_OUTBOX_MAX_SESSIONS = 3;
-var CHAT_OUTBOX_MAX_ENTRIES = 60;
-var createChatOutbox = () => ({ v: 1, entries: [] });
 var AMSG_CHAT_FAIL_KEY = "chat_fail";
-var parseChatOutbox = (value) => {
-  if (typeof value !== "string" || !value) return null;
-  try {
-    const parsed = JSON.parse(value);
-    if (parsed && typeof parsed === "object" && parsed.v === 1 && Array.isArray(parsed.entries) && parsed.entries.every((e) => {
-      const entry = e;
-      return !!entry && typeof entry.messageId === "string" && typeof entry.sessionId === "string" && typeof entry.at === "number" && !!entry.payload && typeof entry.payload === "object";
-    })) {
-      return parsed;
-    }
-  } catch {
-  }
-  return null;
-};
-var appendChatOutbox = (outbox, entries) => {
-  const base = outbox ?? createChatOutbox();
-  if (entries.length === 0) return base;
-  const incoming = new Set(entries.map((e) => e.messageId));
-  const kept = base.entries.filter((e) => !incoming.has(e.messageId));
-  const merged = [...kept, ...entries];
-  const recentSessions = /* @__PURE__ */ new Set();
-  for (let i = merged.length - 1; i >= 0 && recentSessions.size < CHAT_OUTBOX_MAX_SESSIONS; i -= 1) {
-    recentSessions.add(merged[i].sessionId);
-  }
-  const byRecentSessions = merged.filter((e) => recentSessions.has(e.sessionId));
-  return { v: 1, entries: byRecentSessions.slice(-CHAT_OUTBOX_MAX_ENTRIES) };
-};
 var GZIP_VALUE_PREFIX = "gz1:";
 var base64ToBytes2 = (base64) => {
   const binary = atob(base64);
@@ -6433,46 +6402,14 @@ var buildInstantTimelyBlock = (args) => {
   return [head, ...blocks].join("\n");
 };
 var NOTIFICATION_WHEN_HIDDEN = "when-hidden";
-var finalizeInstantPush = (payload, index, total, ids) => {
-  const suffix = `@${ids.occurrenceMs}`;
-  const messageIdBase = ids.taskRowId != null ? `msg_task_${ids.taskRowId}${suffix}` : `msg_${ids.randomId}`;
-  const sessionId = ids.taskRowId != null ? `sess_task_${ids.taskRowId}${suffix}` : `sess_${ids.randomId}`;
+var applyInstantNotificationPolicy = (payload) => {
   const notification = payload.notification;
   const hasNotification = !!notification && typeof notification === "object" && !Array.isArray(notification);
+  if (!hasNotification) return payload;
   return {
     ...payload,
-    ...hasNotification ? { notification: { ...notification, show: NOTIFICATION_WHEN_HIDDEN } } : {},
-    messageId: `${messageIdBase}_hook_${index}`,
-    sessionId,
-    timestamp: new Date(ids.nowMs).toISOString(),
-    messageIndex: index + 1,
-    totalMessages: total,
-    // 库的 stampTaskIdentity 会原样覆写这四个，写成一样的值只是让 outbox 那份也带上。
-    // 任务行 id 在 D1 里是整数，转不出数字就照实报 null，别塞一个 NaN 出去。
-    taskId: ids.taskRowId != null && Number.isFinite(Number(ids.taskRowId)) ? Number(ids.taskRowId) : null,
-    taskUuid: ids.taskUuid,
-    recurrenceType: "none",
-    occurrenceMs: ids.occurrenceMs
+    notification: { ...notification, show: NOTIFICATION_WHEN_HIDDEN }
   };
-};
-var toOutboxEntries = (payloads, nowMs) => payloads.map((payload) => ({
-  messageId: String(payload.messageId ?? ""),
-  sessionId: String(payload.sessionId ?? ""),
-  at: nowMs,
-  payload
-}));
-var writeChatOutbox = async (writeState, charId, current, entries) => {
-  if (typeof writeState !== "function" || entries.length === 0) return current;
-  const next = appendChatOutbox(current, entries);
-  try {
-    await writeState(amsgStateNamespace(charId), [
-      { key: AMSG_CHAT_OUTBOX_KEY, value: JSON.stringify(next) }
-    ]);
-    return next;
-  } catch (error) {
-    console.warn("[amsg:instant-chat] outbox \u5199\u5165\u5931\u8D25\uFF08\u8FD9\u6B21\u7167\u5E38\u53D1\u9001\uFF0C\u4F46\u63A8\u9001\u4E22\u4E86\u5BA2\u6237\u7AEF\u8865\u4E0D\u56DE\u6765\uFF09", error);
-    return current;
-  }
 };
 var kickInstantTick = async (env, uuid) => {
   const namespace = env?.INSTANT_TICK;
@@ -7712,6 +7649,42 @@ var feishuGetDiaryByDate = async (appId, appSecret, baseId, tableId, characterNa
   }
 };
 
+// utils/networkFailureDiagnosis.ts
+var readError = (error) => {
+  if (error instanceof Error) return { name: error.name || "Error", message: error.message || String(error) };
+  if (error && typeof error === "object") {
+    const anyErr = error;
+    return {
+      name: typeof anyErr.name === "string" ? anyErr.name : "Error",
+      message: typeof anyErr.message === "string" ? anyErr.message : String(error)
+    };
+  }
+  return { name: "Error", message: String(error ?? "") };
+};
+var looksLikeNetworkError = (message) => /failed to fetch/i.test(message) || /load failed/i.test(message) || /networkerror/i.test(message) || /network request failed/i.test(message);
+var parseTargetUrl = (url, base) => {
+  try {
+    const parsed = new URL(url, base || (typeof location !== "undefined" ? location.href : void 0));
+    return { ok: true, origin: parsed.origin, host: parsed.host, protocol: parsed.protocol, href: parsed.href };
+  } catch {
+    return { ok: false, origin: "", host: "", protocol: "", href: url };
+  }
+};
+var isLoopbackHost = (host) => /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(host);
+var classifyFetchFailure = (ctx) => {
+  const { name, message } = readError(ctx.error);
+  if (name === "TimeoutError" || /timed?\s?out|timeout/i.test(message)) return "timeout";
+  if (name === "AbortError" || /aborted|abort/i.test(message)) return "aborted";
+  const target = parseTargetUrl(ctx.url);
+  if (!target.ok) return "bad-url";
+  const pageProtocol = ctx.pageProtocol ?? (typeof location !== "undefined" ? location.protocol : "");
+  if (pageProtocol === "https:" && target.protocol === "http:" && !isLoopbackHost(target.host)) return "mixed-content";
+  const online = ctx.online ?? (typeof navigator !== "undefined" ? navigator.onLine : true);
+  if (online === false) return "offline";
+  if (looksLikeNetworkError(message) || name === "TypeError") return "blocked";
+  return "unknown";
+};
+
 // utils/xhsMcpClient.ts
 var XHS_SPIDER_V3_EXPERIMENT = Object.freeze({
   optInValue: "spider-v3-isolated-cookie",
@@ -7724,6 +7697,7 @@ var detectMode = (serverUrl) => {
   return "mcp";
 };
 var liteCookie = "";
+var litePlatform = "auto";
 var resolveLiteCookie = () => {
   if (liteCookie) return liteCookie;
   try {
@@ -7732,6 +7706,15 @@ var resolveLiteCookie = () => {
   } catch {
   }
   return "";
+};
+var resolvePersistedLitePlatform = () => {
+  try {
+    const raw = localStorage.getItem("os_realtime_config");
+    const platform = raw ? JSON.parse(raw)?.xhsMcpConfig?.platform : void 0;
+    return platform === "xhs" || platform === "rednote" ? platform : "auto";
+  } catch {
+    return "auto";
+  }
 };
 var spiderStorage = () => {
   try {
@@ -7779,7 +7762,7 @@ var withSpiderCircuitError = (detail, message) => ({
 });
 var trySpiderV3CommentPatch = async (baseUrl, requestBody, cookie, detail) => {
   const storage = spiderStorage();
-  if (!storage || detail?.data?.comments_status === "loaded") {
+  if (!storage || detail?.data?.comments_status === "loaded" || detail?.platform === "rednote" || detail?.data?.platform === "rednote") {
     return detail;
   }
   const a1Tag = await spiderCookieTag(cookie);
@@ -7802,6 +7785,7 @@ var trySpiderV3CommentPatch = async (baseUrl, requestBody, cookie, detail) => {
       headers: {
         "Content-Type": "application/json",
         "x-xhs-cookie": cookie,
+        ...litePlatform !== "auto" ? { "x-xhs-platform": litePlatform } : {},
         "x-xhs-experiment-ack": XHS_SPIDER_V3_EXPERIMENT.optInValue
       },
       body: JSON.stringify({
@@ -7844,6 +7828,8 @@ var bridgePost = async (serverUrl, endpoint, body = {}) => {
   const headers = { "Content-Type": "application/json" };
   const ck = resolveLiteCookie();
   if (ck) headers["x-xhs-cookie"] = ck;
+  const requestPlatform = endpoint === "check-login" ? litePlatform : litePlatform === "auto" ? resolvePersistedLitePlatform() : litePlatform;
+  if (requestPlatform !== "auto") headers["x-xhs-platform"] = requestPlatform;
   try {
     const resp = await fetch(url, {
       method: "POST",
@@ -7860,6 +7846,10 @@ var bridgePost = async (serverUrl, endpoint, body = {}) => {
     let data = await resp.json();
     if (data.error) {
       return { success: false, error: data.error };
+    }
+    const detectedPlatform = data?.platform || data?.data?.platform;
+    if (detectedPlatform === "xhs" || detectedPlatform === "rednote") {
+      litePlatform = detectedPlatform;
     }
     if (endpoint === "get-feed-detail" && ck) {
       data = await trySpiderV3CommentPatch(baseUrl, body, ck, data);
@@ -8100,6 +8090,26 @@ var extractFirstXsecToken = (data) => {
   }
   return void 0;
 };
+var describeXhsConnectFailure = (e, serverUrl) => {
+  const host = parseTargetUrl(serverUrl).host || serverUrl;
+  const kind = classifyFetchFailure({ url: serverUrl, error: e });
+  switch (kind) {
+    case "timeout":
+      return `\u8FDE\u63A5 ${host} \u8D85\u65F6\uFF0810 \u79D2\u4E00\u4E2A\u5B57\u8282\u90FD\u6CA1\u56DE\uFF09\u3002\u8FDE\u63A5\u662F\u6302\u4F4F\u4E0D\u8FD4\u56DE\u3001\u4E0D\u662F\u88AB\u62D2\u2014\u2014\u591A\u534A\u662F\u8BE5\u57DF\u540D\u6CA1\u8D70\u4EE3\u7406\u8D70\u4E86\u76F4\u8FDE\uFF0C\u6216\u4EE3\u7406\u8282\u70B9\u5230\u4E0A\u6E38\u662F\u9ED1\u6D1E\u3002\u4F18\u5148\u6362\u4E2A\u68AF\u5B50\u8282\u70B9\u3001\u6216\u628A\u8FD9\u4E2A\u57DF\u540D\u663E\u5F0F\u52A0\u8FDB\u4EE3\u7406\u89C4\u5219\u3002`;
+    case "aborted":
+      return "\u8FDE\u63A5\u88AB\u53D6\u6D88\uFF08\u9875\u9762\u5207\u8D70\u4E86\u6216\u624B\u52A8\u505C\u6B62\uFF09\u3002";
+    case "offline":
+      return "\u5F53\u524D\u5904\u4E8E\u79BB\u7EBF\u72B6\u6001\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u6216\u68AF\u5B50\u662F\u5426\u6389\u7EBF\u3002";
+    case "mixed-content":
+      return `SullyOS \u8DD1\u5728 https \u4E0A\uFF0C\u4E0D\u80FD\u8FDE http \u5730\u5740\uFF08${host}\uFF09\u3002\u8BF7\u628A\u670D\u52A1\u5730\u5740\u6539\u6210 https://\uFF0C\u6216\u7528\u672C\u5730 http \u6253\u5F00 SullyOS\u3002`;
+    case "bad-url":
+      return `\u670D\u52A1\u5668\u5730\u5740\u4E0D\u662F\u5408\u6CD5 URL\uFF1A${serverUrl}\u3002\u68C0\u67E5\u6709\u6CA1\u6709\u6F0F\u6389 https://\u3001\u591A\u4E86\u7A7A\u683C\u6216\u7528\u4E86\u4E2D\u6587\u6807\u70B9\u3002`;
+    case "blocked":
+      return `\u8FDE\u4E0D\u4E0A ${host}\uFF1A\u6D4F\u89C8\u5668\u5728\u62FF\u5230\u54CD\u5E94\u524D\u5C31\u5931\u8D25\u4E86\u3002\u5E38\u89C1\u539F\u56E0\u2014\u2014\u68AF\u5B50/\u4EE3\u7406\u62E6\u4E86\u8FD9\u4E2A\u57DF\u540D\u3001DNS \u89E3\u6790\u4E0D\u5230\u3001\u6D4F\u89C8\u5668\u6269\u5C55\uFF08\u5E7F\u544A\u62E6\u622A/\u9690\u79C1\u76FE\uFF09\u5C4F\u853D\u4E86\uFF0C\u6216\u5BF9\u65B9\u6B63\u8FD4\u56DE\u9650\u6D41/\u4EBA\u673A\u9A8C\u8BC1\u9875\u3002\u53EF\u5728\u65B0\u6807\u7B7E\u9875\u76F4\u63A5\u6253\u5F00 ${serverUrl.replace(/\/+$/, "")}/health \u9A8C\u8BC1\uFF1B\u8BE6\u7EC6\u65C1\u8BC1\u89C1\u300C\u7CFB\u7EDF\u8C03\u8BD5\u7EC8\u7AEF\u300D\u3002`;
+    default:
+      return e?.message || "\u8FDE\u63A5\u5931\u8D25";
+  }
+};
 var XhsMcpClient = {
   resetSession: () => {
     mcpSessionId = null;
@@ -8109,19 +8119,23 @@ var XhsMcpClient = {
   },
   // Lite Worker auth: register the XHS cookie used for x-xhs-cookie header.
   setCookie: (cookie) => {
-    liteCookie = cookie || "";
+    const nextCookie = cookie || "";
+    if (nextCookie !== liteCookie) litePlatform = "auto";
+    liteCookie = nextCookie;
   },
   testConnection: async (serverUrl, cookie) => {
-    if (cookie !== void 0) liteCookie = cookie;
+    if (cookie !== void 0) XhsMcpClient.setCookie(cookie);
     const mode = detectMode(serverUrl);
     if (mode === "bridge") {
       try {
         const baseUrl = serverUrl.replace(/\/+$/, "").replace(/\/api$/, "");
-        const healthResp = await fetch(`${baseUrl}/api/health`);
+        const healthResp = await fetch(`${baseUrl}/api/health`, {
+          signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(1e4) : void 0
+        });
         if (!healthResp.ok) return { connected: false, error: `Bridge \u670D\u52A1\u672A\u54CD\u5E94 (HTTP ${healthResp.status})` };
         const loginResult = await bridgePost(serverUrl, "check-login");
         const tools = ["check-login", "search", "list-feeds", "get-feed-detail", "publish", "publish-video", "long-article", "post-comment", "reply-comment", "like-feed", "favorite-feed", "user-profile", "login", "get-qrcode"];
-        let loggedIn = false, nickname, userId;
+        let loggedIn = false, nickname, userId, platform;
         if (loginResult.success && loginResult.data) {
           const d = loginResult.data;
           if (typeof d === "string") {
@@ -8134,6 +8148,7 @@ var XhsMcpClient = {
             loggedIn = !!(d.logged_in || d.loggedIn || d.is_logged_in || d.isLoggedIn || d.logged);
             nickname = d.nickname || d.name || d.username || d.user_name || void 0;
             userId = d.user_id || d.userId || d.id || d.red_id || void 0;
+            platform = d.platform === "xhs" || d.platform === "rednote" ? d.platform : void 0;
           }
         }
         let xsecToken;
@@ -8144,9 +8159,9 @@ var XhsMcpClient = {
           } catch {
           }
         }
-        return { connected: true, tools, nickname, userId, loggedIn, xsecToken };
+        return { connected: true, tools, nickname, userId, loggedIn, xsecToken, platform };
       } catch (e) {
-        return { connected: false, error: e.message };
+        return { connected: false, error: describeXhsConnectFailure(e, serverUrl) };
       }
     }
     try {
@@ -10892,8 +10907,6 @@ var amsgHooks = {
       // （resolveFireSceneSong 与 renderFireSceneBlock 共用判定），冻的必然是正文里那首。
       sceneSong: resolveFireSceneSong(pack.scene, ctx.now.getTime(), tz),
       instant,
-      // 顺手读进来：发完要在它上面追加写回，这里不读的话 onLLMOutput 得为它单独查一次库。
-      chatOutbox: instant ? parseChatOutbox(charRows.find((r) => r.key === AMSG_CHAT_OUTBOX_KEY)?.value) : null,
       // 下面即时对话那一支起跑（要等请求消息拼完才知道给评估喂什么）。
       emotionEvalPromise: null,
       emotionLatePending: false
@@ -11146,21 +11159,7 @@ var amsgHooks = {
         payloads = budgeted;
       }
       if (stash.instant) {
-        const nowMs = Date.now();
-        const ids = {
-          taskRowId: stash.taskRowId,
-          taskUuid: stash.taskUuid,
-          occurrenceMs: stash.occurrenceMs,
-          nowMs,
-          randomId: crypto.randomUUID()
-        };
-        payloads = payloads.map((payload, i) => finalizeInstantPush(payload, i, payloads.length, ids));
-        stash.chatOutbox = await writeChatOutbox(
-          ctx.writeState,
-          stash.charId,
-          stash.chatOutbox,
-          toOutboxEntries(payloads, nowMs)
-        );
+        payloads = payloads.map((payload) => applyInstantNotificationPolicy(payload));
       }
       return { ...decision, pushPayloads: payloads };
     }
@@ -11325,11 +11324,20 @@ var jsonWithCors = (status, body) => new Response(JSON.stringify(body), {
   headers: { "Content-Type": "application/json; charset=utf-8", ...CORS_HEADERS }
 });
 var TICK_STALL_MINUTES = 5;
+var classifySchemaProbeError = (error) => {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const name = error instanceof Error ? error.name : "";
+  if (/SQLITE_AUTH/i.test(message) || /not authorized/i.test(message)) return "denied";
+  if (/is not a function/i.test(message) || /不支持 schema 自查/.test(message)) return "unsupported";
+  if (name === "AbortError" || name === "TimeoutError" || /timed? ?out/i.test(message)) return "timeout";
+  return "other";
+};
 var splitSchemaMissing = (missing) => ({
   missingTables: missing.filter((item) => item.startsWith("table:") || item.startsWith("index:")).map((item) => item.slice(item.indexOf(":") + 1)),
   missingColumns: missing.filter((item) => item.startsWith("column:")).map((item) => item.slice("column:".length))
 });
-var inspectStorage = async (env, schema) => {
+var inspectStorage = async (env, probe) => {
+  const { schema, error: schemaError } = probe;
   const db = env.DB;
   if (typeof db?.prepare !== "function") return { reachable: false };
   try {
@@ -11337,7 +11345,7 @@ var inspectStorage = async (env, schema) => {
     const present = new Set((tables.results || []).map((row) => row.name));
     const { missingTables, missingColumns } = splitSchemaMissing(schema?.missing ?? []);
     if (!present.has("scheduled_messages")) {
-      return { reachable: true, missingTables, missingColumns, schemaReady: false };
+      return { reachable: true, missingTables, missingColumns, schemaReady: false, schemaError };
     }
     const schemaReady = schema ? missingTables.length === 0 && missingColumns.length === 0 : null;
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
@@ -11351,6 +11359,8 @@ var inspectStorage = async (env, schema) => {
     return {
       reachable: true,
       schemaReady,
+      // null = 这次自查跑成了。有值时 schemaReady 必然是 null，界面照它选该说哪句话。
+      schemaError,
       missingTables,
       missingColumns,
       // 单用户 worker 只存一行。到点却发不出去最常见的原因就是这行是空的——
@@ -11387,10 +11397,11 @@ var upstream = createSingleUserCloudflareWorker(buildWorkerConfig, {
 });
 var inspectSchema = async (env) => {
   try {
-    return await upstream.getSchemaVersion(env);
+    return { schema: await upstream.getSchemaVersion(env), error: null };
   } catch (error) {
-    console.warn("[amsg:debug] schema \u67E5\u4E0D\u4E86", error);
-    return null;
+    const kind = classifySchemaProbeError(error);
+    console.warn(`[amsg:debug] schema \u67E5\u4E0D\u4E86\uFF08${kind}\uFF09`, error);
+    return { schema: null, error: kind };
   }
 };
 var InstantTickDO = class extends DurableObject {
@@ -11456,8 +11467,8 @@ var src_default = {
     }
     if (pathname.endsWith("/debug")) {
       if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
-      const schema = await inspectSchema(env);
-      const storage = await inspectStorage(env, schema);
+      const probe = await inspectSchema(env);
+      const storage = await inspectStorage(env, probe);
       return jsonWithCors(200, {
         success: true,
         data: {
@@ -11466,7 +11477,7 @@ var src_default = {
           server: await readServerVersion(request, env),
           storage,
           tick: judgeTick(storage),
-          schema,
+          schema: probe.schema,
           vapidPublicKey: env.VAPID_PUBLIC_KEY?.trim() || null
         }
       });
@@ -11523,6 +11534,7 @@ export {
   amsgStaleSkip,
   attachScheduledTasks,
   buildWorkerConfig,
+  classifySchemaProbeError,
   configureInstantErrorPush,
   src_default as default,
   inspectWorkerEnv,

@@ -37,13 +37,11 @@ import { AMSG_BUNDLE_VERSION } from '../../../utils/amsgBundleVersion';
 import type { UserProfile } from '../../../types';
 import {
   AMSG_CHAT_FAIL_KEY,
-  AMSG_CHAT_OUTBOX_KEY,
   AMSG_FIRE_PACK_KEY,
   AMSG_LAST_SKIP_KEY,
   AMSG_SELF_LOG_KEY,
   AMSG2_INSTANT_STUB_TEMPLATE,
   type AmsgChatFailRecord,
-  type AmsgChatOutbox,
   type AmsgLastSkip,
   type AmsgSelfLog,
   type AmsgTzRef,
@@ -53,7 +51,6 @@ import {
   appendSelfLogTask,
   countUnansweredSends,
   describeFirePackVersion,
-  parseChatOutbox,
   parseFirePack,
   parseSelfLog,
   reconcileSelfLogWithPack,
@@ -137,13 +134,11 @@ import {
   type AmsgEmotionEvalOutcome,
 } from './emotionEval';
 import {
+  applyInstantNotificationPolicy,
   buildInstantTimelyBlock,
-  finalizeInstantPush,
   handleInstantChat,
   INSTANT_TOTAL_TIMEOUT_MS,
   isInstantChatTask,
-  toOutboxEntries,
-  writeChatOutbox,
   type InstantTickNamespace,
 } from './instantChat';
 import type { ActiveMsg2TaskRecord } from '../../../types';
@@ -381,11 +376,6 @@ interface FireStash {
   sceneSong: { id?: number; name: string; artists: string } | null;
   /** 这条任务是不是即时对话（用户刚发完消息在等回复）；决定要不要写 outbox。 */
   instant: boolean;
-  /**
-   * 角色当前的收件兜底 outbox（onBeforeFire 顺手读进来，发完在它上面追加写回）。
-   * 不是即时对话时一直是 null——那条路的产物有任务列表可查，不需要兜底。
-   */
-  chatOutbox: AmsgChatOutbox | null;
   /**
    * 这一轮的情绪评估（副 API）。onBeforeFire 起跑、onLLMOutput 收尾时 await，
    * 结论挂上最后一条 push。没配评估 / 不是即时对话时是 null。
@@ -1718,10 +1708,6 @@ export const amsgHooks = {
       // （resolveFireSceneSong 与 renderFireSceneBlock 共用判定），冻的必然是正文里那首。
       sceneSong: resolveFireSceneSong(pack.scene, ctx.now.getTime(), tz),
       instant,
-      // 顺手读进来：发完要在它上面追加写回，这里不读的话 onLLMOutput 得为它单独查一次库。
-      chatOutbox: instant
-        ? parseChatOutbox(charRows.find((r) => r.key === AMSG_CHAT_OUTBOX_KEY)?.value)
-        : null,
       // 下面即时对话那一支起跑（要等请求消息拼完才知道给评估喂什么）。
       emotionEvalPromise: null,
       emotionLatePending: false,
@@ -2133,22 +2119,11 @@ export const amsgHooks = {
         payloads = budgeted;
       }
 
-      // 即时对话的收件兜底：**不论 push 发得出去发不出去**都在这里留一份。
-      // push 静默丢失（换网、系统压制、SW 没醒）正是要兜的那件事，等发送结果再写就晚了。
-      // 信封先按库的同一套规则补齐，库那边「没有才补」，所以 outbox 和真发出去的逐字一致。
+      // 即时对话的通知策略：用户正盯着窗口等这条回复时不弹横幅（见
+      // applyInstantNotificationPolicy）。收件兜底不在这里做——库自己会在每条推送
+      // 发出去之前记进服务端账本，客户端按账本补收。
       if (stash.instant) {
-        const nowMs = Date.now();
-        const ids = {
-          taskRowId: stash.taskRowId,
-          taskUuid: stash.taskUuid,
-          occurrenceMs: stash.occurrenceMs,
-          nowMs,
-          randomId: crypto.randomUUID(),
-        };
-        payloads = payloads.map((payload, i) =>
-          finalizeInstantPush(payload, i, payloads.length, ids));
-        stash.chatOutbox = await writeChatOutbox(
-          ctx.writeState, stash.charId, stash.chatOutbox, toOutboxEntries(payloads, nowMs));
+        payloads = payloads.map((payload) => applyInstantNotificationPolicy(payload));
       }
 
       return { ...decision, pushPayloads: payloads };
