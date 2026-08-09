@@ -203,6 +203,13 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
   const [workerOutdated, setWorkerOutdated] = useState(false);
+  /**
+   * 用户那台 Worker 上的后端代码是不是最新的（见 ActiveMsgClient.probeWorkerVersion）。
+   * null = 还没探到（没填地址 / 正在探）。界面拿它决定更新按钮是高亮催更新还是弱化。
+   */
+  const [workerVersion, setWorkerVersion] = useState<
+    { state: 'current' | 'outdated' | 'unknown'; deployed: string | null; expected: string } | null
+  >(null);
   /** 自更新成功后 worker 报回来的代码指纹，显示出来好让人确认这次真换了。 */
   const [selfUpdateHash, setSelfUpdateHash] = useState('');
   // Instant Push 也开着：聊天会走它，2.0 挂在本地那条路上的几样东西全静默失效——设置页
@@ -282,6 +289,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     setInstantOn(isInstantConfigReady());
     void probeWorkerCaps(Boolean(nextConfig.workerUrl?.trim()));
     if (nextConfig.workerUrl?.trim()) {
+      void ActiveMsgClient.probeWorkerVersion().then(setWorkerVersion);
       void ActiveMsgClient.probeInstantChatSupport().then((supported) => {
         setInstantChatSupported(supported);
         reportInstantChatGate({
@@ -295,6 +303,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     } else {
       setInstantChatSupported(false);
       setDiagnosticsProbe(null);
+      setWorkerVersion(null);
     }
   };
 
@@ -545,8 +554,14 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
    * 三种装法（fork 后连 Git / Deploy 按钮 / 找人代配）此前更新方式各不相同，最麻烦的一种
    * 要在两个网站之间倒腾一个几百 KB 的文件。有了这个按钮都变成点一下。
    *
-   * 更新完不刷新面板：那一刻代码才刚换上，紧接着去问状态多半问到的还是旧实例，
-   * 反而显示得莫名其妙。看返回的指纹确认就够了。
+   * 更新成功后接着跑一次「连接并验证」（POST /init-tenant，幂等）。
+   *
+   * 这一步不是可有可无的收尾：新版后端可能带了新的表结构，而 D1 的建表只在这个端点里做。
+   * 少了它，Worker 代码是新的、库还是旧的，cron 每分钟静默失败，主动消息整个停摆——
+   * 而界面上一切正常，用户完全看不出来（这个坑踩过）。让「更新」自己把它带上，
+   * 就不必指望每个人都记得再手动点一次。
+   *
+   * 失败不改判这次更新：代码确实已经换上了，只是库没跟上。分开报，用户才知道该点哪个。
    */
   const handleSelfUpdateWorker = async () => {
     setLoading(true);
@@ -556,6 +571,15 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         setSelfUpdateHash(result.bundleHash || '');
         setAttachOpen(false);
         addToast(result.message, 'success');
+        try {
+          await ActiveMsgClient.connect();
+          await refresh();
+        } catch (error: any) {
+          addToast(
+            `后端已更新，但紧接着的验证没过：${error?.message || '未知原因'}。手动点一下「重新连接并验证」。`,
+            'error',
+          );
+        }
       } else {
         addToast(result.message, result.supported ? 'error' : 'info');
         // 「缺 CF_API_TOKEN」是这里唯一能就地解决的一种：露出补装那一块，
@@ -620,7 +644,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       setAttachToken('');
       setAttachAccounts(null);
       setAttachNeedsScriptName(false);
-      addToast('钥匙装好了，现在可以点「更新后端到最新版本」了。', 'success');
+      addToast('钥匙装好了，现在可以点上面的「更新 Worker」了。', 'success');
       trackEvent('补装后端更新能力', { result: '成功' });
     } catch (error: any) {
       setAttachError(error?.message || '装钥匙时出错了。');
@@ -1337,15 +1361,39 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
 
           {isConnected ? (
             <div className="pt-1 space-y-2 border-t border-slate-200">
+              {/*
+                按钮常驻，但有更新时才抢眼：有新版就实心高亮并写明更新到哪一版，
+                没新版时弱化成一行浅色的「重新检查并更新」——想手动重跑一次的人照样点得到，
+                不用为了这个去别处找入口。
+              */}
               <button
                 onClick={handleSelfUpdateWorker}
                 disabled={loading}
-                className="w-full py-2.5 bg-white border border-slate-300 text-slate-700 font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50"
+                className={`w-full py-2.5 font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50 ${
+                  workerVersion?.state === 'outdated'
+                    ? 'bg-emerald-600 text-white border border-emerald-600'
+                    : 'bg-white border border-slate-300 text-slate-700'
+                }`}
               >
-                {loading ? '处理中...' : '更新后端到最新版本'}
+                {loading
+                  ? '处理中...'
+                  : workerVersion?.state === 'outdated'
+                    ? `更新 Worker 到 ${workerVersion.expected}`
+                    : '重新检查并更新 Worker'}
               </button>
+              {workerVersion?.state === 'outdated' ? (
+                <p className="text-xs leading-relaxed text-emerald-700">
+                  你这台 Worker 上跑的是
+                  {workerVersion.deployed ? <code className="font-mono"> {workerVersion.deployed} </code> : '更早的版本'}
+                  ，更新后即时对话才走得上新的生成通道。
+                </p>
+              ) : workerVersion?.state === 'current' ? (
+                <p className="text-xs leading-relaxed text-slate-500">
+                  后端已经是最新版（<code className="font-mono">{workerVersion.expected}</code>）。
+                </p>
+              ) : null}
               <p className="text-xs leading-relaxed text-slate-500">
-                后端自己去取最新代码覆盖自己，你排好的任务和填过的密钥都不动。
+                后端自己去取最新代码覆盖自己，你排好的任务和填过的密钥都不动，更新完会自动验证一次。
                 用一键部署装的可以直接点；老办法装的第一次点会提示补一把钥匙，就在下面补。
               </p>
               {selfUpdateHash ? (

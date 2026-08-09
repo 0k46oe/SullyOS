@@ -15,6 +15,7 @@ import {
   UserProfile,
 } from '../types';
 import { getLastRealUserMessageAt } from './amsg2ExpireGuard';
+import { AMSG_BUNDLE_VERSION } from './amsgBundleVersion';
 import { buildTaskInstruction, resolveSendAtMs } from './amsgFireSchedule';
 import {
   getPendingTasks, isAmsg2EnabledForChar, MAX_ACTIVE_TASKS_PER_CHAR,
@@ -287,7 +288,7 @@ export const fetchWorkerDiagnostics = async (): Promise<AmsgDiagnosticsProbe> =>
     return {
       reachable: false,
       unsupported: true,
-      reason: 'Worker 上跑的代码还没有体检端点。回你 fork 的 sullyos-workers 点一下 Sync fork，或者用上面的「更新后端到最新版本」，之后再来看。',
+      reason: 'Worker 上跑的代码还没有体检端点。回你 fork 的 sullyos-workers 点一下 Sync fork，或者用上面的「更新 Worker」，之后再来看。',
     };
   } catch (error: any) {
     // fetchWithAuthRaw 抛出来的已经是人话了（见 amsgDiagnostics 的 describeAmsgFetchFailure）。
@@ -2082,6 +2083,37 @@ export const ActiveMsgClient = {
       return status === 200 && body?.success === true && body?.data?.instantChat === true;
     } catch {
       return false;
+    }
+  },
+
+  /**
+   * 用户那台 Worker 上跑的后端代码是不是最新的。
+   *
+   * 比的是 `GET /config-check` 报的 workerVersion 和本 App 编译进来的
+   * AMSG_WORKER_VERSION——两者同源（都出自 utils/amsgWorkerVersion.ts），所以只要不相等
+   * 就是「那台 Worker 贴的是旧 bundle」。
+   *
+   * 三种拿不到结论的情况分开表态，因为界面上该说的话不一样：
+   *   - 老 bundle 根本不报这个字段 → outdated（它确实旧，只是旧到还不会自报家门）；
+   *   - 网络不通 / 还没连上 → unknown（别在用户断网时催他更新）。
+   */
+  async probeWorkerVersion(): Promise<{
+    state: 'current' | 'outdated' | 'unknown';
+    /** 那台 Worker 自报的版本；老 bundle 不报就是 null。 */
+    deployed: string | null;
+    /** 本 App 期望的版本，用来在界面上写「更新到 X」。 */
+    expected: string;
+  }> {
+    const expected = AMSG_BUNDLE_VERSION;
+    try {
+      const config = await ensureWorkerReady();
+      const { status, body } = await fetchWithAuthRaw('config-check', config, { method: 'GET' }, '后端版本探测');
+      if (status !== 200 || body?.success !== true) return { state: 'unknown', deployed: null, expected };
+      const deployed = typeof body?.data?.workerVersion === 'string' ? body.data.workerVersion : null;
+      if (!deployed) return { state: 'outdated', deployed: null, expected };
+      return { state: deployed === expected ? 'current' : 'outdated', deployed, expected };
+    } catch {
+      return { state: 'unknown', deployed: null, expected };
     }
   },
 
