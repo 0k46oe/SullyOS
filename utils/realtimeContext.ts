@@ -79,6 +79,7 @@ export interface RealtimeConfig {
         enabled: boolean;
         serverUrl: string;
         cookie?: string;        // Lite 模式：登录后的完整小红书 cookie
+        platform?: 'xhs' | 'rednote'; // Lite 自动识别出的国内 / 全球后端
         rnoteApiKey?: string;   // Lite 模式：用户自备的 Rnote Key，用于真实评论
         loggedInNickname?: string;
         loggedInUserId?: string;
@@ -105,6 +106,7 @@ export const defaultRealtimeConfig: RealtimeConfig = {
         enabled: false,
         serverUrl: `${getProxyWorkerUrl()}/api`,
         cookie: undefined,
+        platform: undefined,
         rnoteApiKey: undefined,
         loggedInNickname: undefined,
         loggedInUserId: undefined,
