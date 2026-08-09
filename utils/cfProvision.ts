@@ -352,6 +352,55 @@ async function cfApi<T = unknown>(
   };
 }
 
+/** DO migration 的乐观锁冲突：这个 Worker 已经应用过 migration，「全新部署」的断言不成立。 */
+const MIGRATION_TAG_CONFLICT = 10079;
+
+function firstCfErrorCode(body: unknown): number | null {
+  const errors = (body as { errors?: Array<{ code?: number }> } | null)?.errors;
+  return (Array.isArray(errors) && errors.length ? errors[0]?.code : null) ?? null;
+}
+
+async function putScript(
+  token: string,
+  accountId: string,
+  scriptName: string,
+  metadata: Record<string, unknown>,
+  code: string,
+): Promise<CfResponse> {
+  const form = new FormData();
+  form.set('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+  form.set(MAIN_MODULE, new Blob([code], { type: 'application/javascript+module' }), MAIN_MODULE);
+  return cfApi(token, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(scriptName)}`, {
+    method: 'PUT',
+    body: form,
+  });
+}
+
+/**
+ * 上传 Worker 脚本。metadata 带着建 DO namespace 的 migrations，等于断言「全新部署」；
+ * 对着一个已经装过的 Worker 重装（清了地址重跑、换设备对同一个账号再部署）时这个断言
+ * 不成立，CF 会回 10079 把整次上传顶回来。
+ *
+ * 这时 namespace 本来就已经在了，migrations 纯属多余——去掉重传一次即可，binding 原样
+ * 保留（与 worker 侧 selfUpdate 的补建路径同一套实测结论：migration_tag 不变、DO 类还在）。
+ * 只对 10079 重试：全新部署一次就过，其他错误照旧当场返回。
+ */
+export async function uploadWorkerScript(
+  token: string,
+  accountId: string,
+  scriptName: string,
+  metadata: Record<string, unknown>,
+  code: string,
+): Promise<CfResponse & { reusedExistingWorker?: boolean }> {
+  const first = await putScript(token, accountId, scriptName, metadata, code);
+  if (first.ok || firstCfErrorCode(first.body) !== MIGRATION_TAG_CONFLICT) return first;
+
+  const withoutMigrations = { ...metadata };
+  delete withoutMigrations.migrations;
+  const second = await putScript(token, accountId, scriptName, withoutMigrations, code);
+  return second.ok ? { ...second, reusedExistingWorker: true } : second;
+}
+
 /** 当前生效的网络代理 Worker 支不支持一键部署（老版本没有 /cf-api 这条路由）。 */
 export async function checkRelayAvailable(): Promise<boolean> {
   try {
@@ -795,24 +844,17 @@ export async function provisionAmsgBackend(input: ProvisionInput): Promise<Provi
     // 官方的 multipart-upload-metadata 文档没把 observability 列进合法字段，但实测是认的
     // ——上传 enabled:false 能关掉、true 能开起来、不带就没有，三向都验过。
     observability: { enabled: true, logs: { enabled: true } },
-    // 建即时对话起跳器的 Durable Object namespace。这里是全新部署，所以只给 new_tag
-    // （不给 old_tag 即断言「还没应用过任何 migration」）。注意它是一个对象，不是
-    // wrangler.toml 里那种数组——传数组会被 10021 顶回来。
+    // 建即时对话起跳器的 Durable Object namespace。不给 old_tag 即断言「还没应用过
+    // 任何 migration」；重装撞上 10079 时由 uploadWorkerScript 去掉它重传。注意它是
+    // 一个对象，不是 wrangler.toml 里那种数组——传数组会被 10021 顶回来。
     migrations: INSTANT_TICK_MIGRATIONS,
   };
-  const form = new FormData();
-  form.set('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-  form.set(
-    MAIN_MODULE,
-    new Blob([bundle.code], { type: 'application/javascript+module' }),
-    MAIN_MODULE,
-  );
-  const uploaded = await cfApi(token, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(scriptName)}`, {
-    method: 'PUT',
-    body: form,
-  });
+  const uploaded = await uploadWorkerScript(token, accountId, scriptName, metadata, bundle.code);
   if (!uploaded.ok) {
     return { ok: false, code: 'UPLOAD_FAILED', message: uploaded.error || '上传 Worker 失败。' };
+  }
+  if (uploaded.reusedExistingWorker) {
+    warnings.push(`账号里已经有一套装好的 ${scriptName}，这次是在它上面覆盖更新。`);
   }
 
   report('cron', '设置定时触发…');
