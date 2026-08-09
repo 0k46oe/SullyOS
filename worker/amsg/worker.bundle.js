@@ -3,7 +3,7 @@
 // worker/amsg/src/index.ts
 import { DurableObject } from "cloudflare:workers";
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.16/node_modules/@rei-standard/amsg-server/dist/chunk-34I2YSWE.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.19/node_modules/@rei-standard/amsg-server/dist/chunk-5FXVSC5O.mjs
 var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
   "user_id",
   "uuid",
@@ -296,12 +296,12 @@ async function sendWebPush({ subscription, payload, vapid, ttl, fetch: fetchImpl
   });
   if (!res.ok) {
     const text = await safeReadText(res);
-    const err4 = new Error(
+    const err5 = new Error(
       `Web Push delivery failed: ${res.status} ${res.statusText || ""}${text ? ` \u2014 ${text}` : ""}`
     );
-    err4.code = "PUSH_SEND_FAILED";
-    err4.statusCode = res.status;
-    throw err4;
+    err5.code = "PUSH_SEND_FAILED";
+    err5.statusCode = res.status;
+    throw err5;
   }
   return {
     statusCode: res.status,
@@ -817,7 +817,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.16/node_modules/@rei-standard/amsg-server/dist/chunk-KVHR3RCU.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.19/node_modules/@rei-standard/amsg-server/dist/chunk-PRQHHRAK.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -938,6 +938,200 @@ function planNextOccurrence(occurrenceMs, recurrenceType, nowMs, tzId) {
 function nextFutureOccurrence(occurrenceMs, recurrenceType, nowMs, tzId) {
   return new Date(planNextOccurrence(occurrenceMs, recurrenceType, nowMs, tzId).nextMs).toISOString();
 }
+var base64ToBytes = base64UrlToBytes;
+var TAG_LENGTH_BYTES = 16;
+function importAesKey(hexKey, usage) {
+  return globalThis.crypto.subtle.importKey(
+    "raw",
+    hexToBytes(hexKey),
+    { name: "AES-GCM" },
+    false,
+    [usage]
+  );
+}
+async function aesGcmSeal(hexKey, iv, plaintextBytes) {
+  const key = await importAesKey(hexKey, "encrypt");
+  const sealed = new Uint8Array(await globalThis.crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, tagLength: TAG_LENGTH_BYTES * 8 },
+    key,
+    plaintextBytes
+  ));
+  return {
+    ciphertext: sealed.slice(0, sealed.length - TAG_LENGTH_BYTES),
+    authTag: sealed.slice(sealed.length - TAG_LENGTH_BYTES)
+  };
+}
+async function aesGcmOpen(hexKey, iv, ciphertext, authTag) {
+  const key = await importAesKey(hexKey, "decrypt");
+  const tagBits = authTag.length * 8;
+  const tagLength = tagBits >= 96 && tagBits <= 128 ? tagBits : 128;
+  const plain = await globalThis.crypto.subtle.decrypt(
+    { name: "AES-GCM", iv, tagLength },
+    key,
+    concatBytes(ciphertext, authTag)
+  );
+  return new Uint8Array(plain);
+}
+async function deriveUserEncryptionKey(userId, masterKey) {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", utf8(masterKey + userId));
+  return bytesToHex(new Uint8Array(digest)).slice(0, 64);
+}
+async function decryptPayload(encryptedPayload, encryptionKey) {
+  const { iv, authTag, encryptedData } = encryptedPayload;
+  const plain = await aesGcmOpen(
+    encryptionKey,
+    base64ToBytes(iv),
+    base64ToBytes(encryptedData),
+    base64ToBytes(authTag)
+  );
+  return JSON.parse(utf8Decode(plain));
+}
+async function encryptPayload(payload, encryptionKey) {
+  const plaintext = typeof payload === "string" ? payload : JSON.stringify(payload);
+  const iv = randomBytes(12);
+  const { ciphertext, authTag } = await aesGcmSeal(encryptionKey, iv, utf8(plaintext));
+  return {
+    iv: bytesToBase64(iv),
+    authTag: bytesToBase64(authTag),
+    encryptedData: bytesToBase64(ciphertext)
+  };
+}
+async function encryptForStorage(text, encryptionKey) {
+  const iv = randomBytes(16);
+  const { ciphertext, authTag } = await aesGcmSeal(encryptionKey, iv, utf8(text));
+  return `${bytesToHex(iv)}:${bytesToHex(authTag)}:${bytesToHex(ciphertext)}`;
+}
+async function decryptFromStorage(encryptedText, encryptionKey) {
+  const [ivHex, authTagHex, encryptedDataHex] = encryptedText.split(":");
+  const plain = await aesGcmOpen(
+    encryptionKey,
+    hexToBytes(ivHex),
+    hexToBytes(encryptedDataHex),
+    hexToBytes(authTagHex)
+  );
+  return utf8Decode(plain);
+}
+var CRED_ID_MAX_LENGTH = 128;
+var CRED_VALUE_FIELD_MAX_LENGTH = 2048;
+var CRED_PUT_BATCH_MAX = 100;
+var CRED_ROWS_PER_USER_MAX = 500;
+var CRED_REFS_MAX_ENTRIES = 16;
+var CRED_REFS_KEY_MAX_LENGTH = 64;
+function supportsLlmCredentialsStore(db) {
+  return !!db && typeof db.upsertLlmCredentials === "function" && typeof db.getLlmCredentials === "function" && typeof db.listLlmCredentials === "function" && typeof db.deleteLlmCredentials === "function";
+}
+var CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+function isValidCredId(credId) {
+  return typeof credId === "string" && credId.length > 0 && credId.length <= CRED_ID_MAX_LENGTH && !CONTROL_CHARS.test(credId);
+}
+function validateCredValue(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "value \u5FC5\u987B\u662F { apiUrl, apiKey, primaryModel } \u5BF9\u8C61";
+  }
+  for (const field of ["apiUrl", "apiKey", "primaryModel"]) {
+    const v = (
+      /** @type {Record<string, unknown>} */
+      value[field]
+    );
+    if (typeof v !== "string" || !v) return `value.${field} \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32`;
+    if (v.length > CRED_VALUE_FIELD_MAX_LENGTH) {
+      return `value.${field} \u4E0D\u80FD\u8D85\u8FC7 ${CRED_VALUE_FIELD_MAX_LENGTH} \u5B57\u7B26`;
+    }
+  }
+  return null;
+}
+function validateCredRefs(credRefs) {
+  if (!credRefs || typeof credRefs !== "object" || Array.isArray(credRefs)) {
+    return "credRefs \u5FC5\u987B\u662F { <purpose>: <credId> } \u5F62\u72B6\u7684\u666E\u901A\u5BF9\u8C61";
+  }
+  const entries = Object.entries(credRefs);
+  if (entries.length === 0) return "credRefs \u4E0D\u80FD\u662F\u7A7A\u5BF9\u8C61\uFF08\u4E0D\u9700\u8981\u5C31\u522B\u5E26\u8FD9\u4E2A\u5B57\u6BB5\uFF09";
+  if (entries.length > CRED_REFS_MAX_ENTRIES) {
+    return `credRefs \u6700\u591A ${CRED_REFS_MAX_ENTRIES} \u4E2A\u6761\u76EE`;
+  }
+  for (const [purpose, credId] of entries) {
+    if (purpose.length > CRED_REFS_KEY_MAX_LENGTH || CONTROL_CHARS.test(purpose)) {
+      return `credRefs \u7684 purpose \u952E\u4E0D\u80FD\u8D85\u8FC7 ${CRED_REFS_KEY_MAX_LENGTH} \u5B57\u7B26\u3001\u4E0D\u80FD\u542B\u63A7\u5236\u5B57\u7B26`;
+    }
+    if (!isValidCredId(credId)) {
+      return `credRefs['${purpose}'] \u5FC5\u987B\u662F 1\u2013${CRED_ID_MAX_LENGTH} \u5B57\u7B26\u3001\u4E0D\u542B\u63A7\u5236\u5B57\u7B26\u7684 cred_id`;
+    }
+  }
+  return null;
+}
+function hasChatCredRef(payload) {
+  const refs = payload && payload.credRefs;
+  return !!refs && typeof refs === "object" && !Array.isArray(refs) && typeof refs.chat === "string" && refs.chat.length > 0;
+}
+function hasCredRefs(payload) {
+  const refs = payload && payload.credRefs;
+  return !!refs && typeof refs === "object" && !Array.isArray(refs) && Object.keys(refs).length > 0;
+}
+async function saveLlmCredentials({ db, userId, userKey, credentials }) {
+  const entries = [];
+  for (const { credId, value } of credentials) {
+    entries.push({ credId, encryptedValue: await encryptForStorage(JSON.stringify(value), userKey) });
+  }
+  const upserted = await db.upsertLlmCredentials(userId, entries);
+  return { upserted };
+}
+async function findMissingCredIds({ db, userId, credRefs }) {
+  const wanted = [...new Set(Object.values(credRefs))];
+  const rows = await db.getLlmCredentials(userId, wanted);
+  const present = new Set(rows.map((row) => row.cred_id));
+  return wanted.filter((credId) => !present.has(credId));
+}
+async function resolveLlmCredential({ db, userId, userKey, credId }) {
+  const rows = await db.getLlmCredentials(userId, [credId]);
+  const row = rows.find((r) => r.cred_id === credId);
+  if (!row || typeof row.encrypted_value !== "string" || !row.encrypted_value) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(await decryptFromStorage(row.encrypted_value, userKey));
+  } catch (_error) {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  return {
+    apiUrl: parsed.apiUrl,
+    apiKey: parsed.apiKey,
+    primaryModel: parsed.primaryModel
+  };
+}
+function codedError(code, message) {
+  const error = new Error(`${code}: ${message}`);
+  error.code = code;
+  return error;
+}
+async function resolveFireCredentials({ db, userId, userKey, decryptedPayload }) {
+  if (!hasChatCredRef(decryptedPayload)) {
+    const type = decryptedPayload.messageType;
+    const hasInlineTrio = !!(decryptedPayload.apiUrl && decryptedPayload.apiKey && decryptedPayload.primaryModel);
+    if ((type === "prompted" || type === "auto") && !hasInlineTrio) {
+      throw codedError(
+        "CREDENTIAL_MISSING",
+        "\u4EFB\u52A1\u65E2\u65E0 credRefs.chat \u4E5F\u65E0\u5185\u8054 apiUrl / apiKey / primaryModel\uFF08\u8865\u4F20\u51ED\u636E\u6216\u66F4\u65B0\u4EFB\u52A1\u540E\uFF0C\u4E0B\u4E00\u8F6E\u91CD\u8BD5\u5373\u81EA\u6108\uFF09"
+      );
+    }
+    return null;
+  }
+  const credId = decryptedPayload.credRefs.chat;
+  if (supportsLlmCredentialsStore(db)) {
+    const resolved = await resolveLlmCredential({ db, userId, userKey, credId });
+    if (resolved && resolved.apiUrl && resolved.apiKey && resolved.primaryModel) return resolved;
+  }
+  if (decryptedPayload.apiUrl && decryptedPayload.apiKey && decryptedPayload.primaryModel) {
+    return {
+      apiUrl: decryptedPayload.apiUrl,
+      apiKey: decryptedPayload.apiKey,
+      primaryModel: decryptedPayload.primaryModel
+    };
+  }
+  throw codedError(
+    "CREDENTIAL_MISSING",
+    `\u51ED\u636E ${credId} \u4E0D\u5B58\u5728\uFF08PUT /llm-credentials \u8865\u4F20\u540E\u8FD9\u6761\u4EFB\u52A1\u4E0B\u4E00\u8F6E\u91CD\u8BD5\u5373\u81EA\u6108\uFF09`
+  );
+}
 function isValidISO8601(dateString) {
   const date = new Date(dateString);
   return date instanceof Date && !isNaN(date.getTime());
@@ -976,9 +1170,9 @@ function validateSplitPattern(value) {
   return null;
 }
 function validateLlmMessagesArray(messages) {
-  const err4 = validateLlmMessagesShape(messages);
-  if (!err4) return null;
-  const { code, index: i, toolCallIndex: j } = err4;
+  const err5 = validateLlmMessagesShape(messages);
+  if (!err5) return null;
+  const { code, index: i, toolCallIndex: j } = err5;
   switch (code) {
     case "MESSAGES_NOT_ARRAY":
       return "messages must be a non-empty array";
@@ -1068,10 +1262,10 @@ function validateScheduleMessagePayload(payload) {
       };
     }
     if (hasMessages) {
-      const err4 = validateLlmMessagesArray(payload.messages);
-      if (err4) {
+      const err5 = validateLlmMessagesArray(payload.messages);
+      if (err5) {
         return {
-          error: { code: "INVALID_PARAMETERS", message: err4, details: { invalidFields: ["messages"] } },
+          error: { code: "INVALID_PARAMETERS", message: err5, details: { invalidFields: ["messages"] } },
           hasCompletePrompt: false,
           hasMessages: true
         };
@@ -1083,12 +1277,29 @@ function validateScheduleMessagePayload(payload) {
     return { valid: false, errorCode: promptCheck.error.code, errorMessage: promptCheck.error.message, details: promptCheck.error.details };
   }
   const hasPrompt = promptCheck.hasCompletePrompt || promptCheck.hasMessages;
+  if (payload.credRefs !== void 0 && payload.credRefs !== null) {
+    const credRefsErr = validateCredRefs(payload.credRefs);
+    if (credRefsErr) {
+      return { valid: false, errorCode: "INVALID_PARAMETERS", errorMessage: credRefsErr, details: { invalidFields: ["credRefs"] } };
+    }
+  }
+  const hasChatRef = hasChatCredRef(payload);
+  if (hasChatRef && (payload.apiUrl || payload.apiKey || payload.primaryModel)) {
+    return { valid: false, errorCode: "INVALID_PARAMETERS", errorMessage: "credRefs.chat \u4E0E\u5185\u8054 apiUrl / apiKey / primaryModel \u4E0D\u80FD\u540C\u65F6\u63D0\u4F9B\uFF08\u4E8C\u9009\u4E00\uFF09", details: { invalidFields: ["credRefs.chat", "apiUrl", "apiKey", "primaryModel"] } };
+  }
   if (payload.messageType === "prompted" || payload.messageType === "auto") {
     const missingAiFields = [];
     if (!hasPrompt) missingAiFields.push("completePrompt or messages");
-    if (!payload.apiUrl) missingAiFields.push("apiUrl");
-    if (!payload.apiKey) missingAiFields.push("apiKey");
-    if (!payload.primaryModel) missingAiFields.push("primaryModel");
+    if (!hasChatRef) {
+      const hasAnyInline = !!(payload.apiUrl || payload.apiKey || payload.primaryModel);
+      if (!hasAnyInline) {
+        missingAiFields.push("credRefs.chat or (apiUrl + apiKey + primaryModel)");
+      } else {
+        if (!payload.apiUrl) missingAiFields.push("apiUrl");
+        if (!payload.apiKey) missingAiFields.push("apiKey");
+        if (!payload.primaryModel) missingAiFields.push("primaryModel");
+      }
+    }
     if (missingAiFields.length > 0) {
       return { valid: false, errorCode: "INVALID_PARAMETERS", errorMessage: "\u7F3A\u5C11\u5FC5\u9700\u53C2\u6570\u6216\u53C2\u6570\u683C\u5F0F\u9519\u8BEF", details: { missingFields: missingAiFields } };
     }
@@ -1097,10 +1308,10 @@ function validateScheduleMessagePayload(payload) {
     if (payload.recurrenceType && payload.recurrenceType !== "none") {
       return { valid: false, errorCode: "INVALID_PARAMETERS", errorMessage: "instant \u7C7B\u578B\u7684 recurrenceType \u5FC5\u987B\u4E3A none", details: { invalidFields: ['recurrenceType (must be "none" for instant type)'] } };
     }
-    const hasAiConfig = hasPrompt && payload.apiUrl && payload.apiKey && payload.primaryModel;
+    const hasAiConfig = hasPrompt && (hasChatRef || payload.apiUrl && payload.apiKey && payload.primaryModel);
     const hasUserMessage = payload.userMessage;
     if (!hasAiConfig && !hasUserMessage) {
-      return { valid: false, errorCode: "INVALID_PARAMETERS", errorMessage: "instant \u7C7B\u578B\u5FC5\u987B\u63D0\u4F9B userMessage \u6216\u5B8C\u6574\u7684 AI \u914D\u7F6E", details: { missingFields: ["userMessage or ((completePrompt | messages) + apiUrl + apiKey + primaryModel)"] } };
+      return { valid: false, errorCode: "INVALID_PARAMETERS", errorMessage: "instant \u7C7B\u578B\u5FC5\u987B\u63D0\u4F9B userMessage \u6216\u5B8C\u6574\u7684 AI \u914D\u7F6E", details: { missingFields: ["userMessage or ((completePrompt | messages) + (credRefs.chat | apiUrl + apiKey + primaryModel))"] } };
     }
   }
   if (payload.temperature !== void 0 && payload.temperature !== null && (typeof payload.temperature !== "number" || !Number.isFinite(payload.temperature))) {
@@ -1125,79 +1336,6 @@ function validateScheduleMessagePayload(payload) {
     return { valid: false, errorCode: "INVALID_PARAMETERS", errorMessage: "llmExtraBody \u5FC5\u987B\u662F\u666E\u901A\u5BF9\u8C61", details: { invalidFields: ["llmExtraBody"] } };
   }
   return { valid: true };
-}
-var base64ToBytes = base64UrlToBytes;
-var TAG_LENGTH_BYTES = 16;
-function importAesKey(hexKey, usage) {
-  return globalThis.crypto.subtle.importKey(
-    "raw",
-    hexToBytes(hexKey),
-    { name: "AES-GCM" },
-    false,
-    [usage]
-  );
-}
-async function aesGcmSeal(hexKey, iv, plaintextBytes) {
-  const key = await importAesKey(hexKey, "encrypt");
-  const sealed = new Uint8Array(await globalThis.crypto.subtle.encrypt(
-    { name: "AES-GCM", iv, tagLength: TAG_LENGTH_BYTES * 8 },
-    key,
-    plaintextBytes
-  ));
-  return {
-    ciphertext: sealed.slice(0, sealed.length - TAG_LENGTH_BYTES),
-    authTag: sealed.slice(sealed.length - TAG_LENGTH_BYTES)
-  };
-}
-async function aesGcmOpen(hexKey, iv, ciphertext, authTag) {
-  const key = await importAesKey(hexKey, "decrypt");
-  const tagBits = authTag.length * 8;
-  const tagLength = tagBits >= 96 && tagBits <= 128 ? tagBits : 128;
-  const plain = await globalThis.crypto.subtle.decrypt(
-    { name: "AES-GCM", iv, tagLength },
-    key,
-    concatBytes(ciphertext, authTag)
-  );
-  return new Uint8Array(plain);
-}
-async function deriveUserEncryptionKey(userId, masterKey) {
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", utf8(masterKey + userId));
-  return bytesToHex(new Uint8Array(digest)).slice(0, 64);
-}
-async function decryptPayload(encryptedPayload, encryptionKey) {
-  const { iv, authTag, encryptedData } = encryptedPayload;
-  const plain = await aesGcmOpen(
-    encryptionKey,
-    base64ToBytes(iv),
-    base64ToBytes(encryptedData),
-    base64ToBytes(authTag)
-  );
-  return JSON.parse(utf8Decode(plain));
-}
-async function encryptPayload(payload, encryptionKey) {
-  const plaintext = typeof payload === "string" ? payload : JSON.stringify(payload);
-  const iv = randomBytes(12);
-  const { ciphertext, authTag } = await aesGcmSeal(encryptionKey, iv, utf8(plaintext));
-  return {
-    iv: bytesToBase64(iv),
-    authTag: bytesToBase64(authTag),
-    encryptedData: bytesToBase64(ciphertext)
-  };
-}
-async function encryptForStorage(text, encryptionKey) {
-  const iv = randomBytes(16);
-  const { ciphertext, authTag } = await aesGcmSeal(encryptionKey, iv, utf8(text));
-  return `${bytesToHex(iv)}:${bytesToHex(authTag)}:${bytesToHex(ciphertext)}`;
-}
-async function decryptFromStorage(encryptedText, encryptionKey) {
-  const [ivHex, authTagHex, encryptedDataHex] = encryptedText.split(":");
-  const plain = await aesGcmOpen(
-    encryptionKey,
-    hexToBytes(ivHex),
-    hexToBytes(encryptedDataHex),
-    hexToBytes(authTagHex)
-  );
-  return utf8Decode(plain);
 }
 var REQUEST_ERRORS = {
   INVALID_JSON: { code: "INVALID_JSON", message: "\u8BF7\u6C42\u4F53\u4E0D\u662F\u6709\u6548\u7684 JSON" },
@@ -1538,6 +1676,9 @@ function projectTask(row, decryptedPayload, options = {}) {
     // 靠它按角色过滤（contactName 会跨角色重名）。缺席 → null。
     charId: metadata.charId ?? null,
     clientTaskId: metadata.amsgClientTaskId ?? null,
+    // 凭据引用只是名字（cred_id），本体在 llm_credentials 表里，凭据字段本身
+    // 照旧被白名单挡在外面。
+    credRefs: payload.credRefs ?? null,
     // 整份 metadata 只在单条查询里给（见上面的 includeMetadata）。
     ...options.includeMetadata ? { metadata: payload.metadata ?? null } : {},
     // 上一次没发出去的原因（run-tick 记进 payload 的 lastError）。
@@ -1575,7 +1716,7 @@ async function loadPushSubscription({ db, userId, userKey }) {
   const subscription = JSON.parse(await decryptFromStorage(row.subscription, userKey));
   return { subscription, updatedAt: row.updated_at ?? null };
 }
-function codedError(code, message) {
+function codedError2(code, message) {
   const error = new Error(`${code}: ${message}`);
   error.code = code;
   return error;
@@ -1584,12 +1725,12 @@ async function resolvePushSubscription({ db, userId, userKey, legacyFallback = n
   const fallback = isPushSubscriptionShape(legacyFallback) ? legacyFallback : null;
   if (!supportsPushSubscriptionStore(db)) {
     if (fallback) return fallback;
-    throw codedError("PUSH_SUBSCRIPTION_STORE_UNSUPPORTED", "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301\u7528\u6237\u7EA7\u63A8\u9001\u8BA2\u9605\u5B58\u50A8");
+    throw codedError2("PUSH_SUBSCRIPTION_STORE_UNSUPPORTED", "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301\u7528\u6237\u7EA7\u63A8\u9001\u8BA2\u9605\u5B58\u50A8");
   }
   const stored = await loadPushSubscription({ db, userId, userKey });
   if (!stored) {
     if (fallback) return fallback;
-    throw codedError("PUSH_SUBSCRIPTION_MISSING", "\u8BE5\u7528\u6237\u8FD8\u6CA1\u6709\u767B\u8BB0\u63A8\u9001\u8BA2\u9605\uFF08PUT /push-subscription\uFF09");
+    throw codedError2("PUSH_SUBSCRIPTION_MISSING", "\u8BE5\u7528\u6237\u8FD8\u6CA1\u6709\u767B\u8BB0\u63A8\u9001\u8BA2\u9605\uFF08PUT /push-subscription\uFF09");
   }
   return stored.subscription;
 }
@@ -1645,7 +1786,7 @@ function taskNeedsLlm(decryptedPayload) {
   const type = decryptedPayload.messageType;
   if (type === "prompted" || type === "auto") return true;
   if (type === "instant") {
-    return !!(decryptedPayload.apiUrl && decryptedPayload.apiKey && decryptedPayload.primaryModel);
+    return hasChatCredRef(decryptedPayload) || !!(decryptedPayload.apiUrl && decryptedPayload.apiKey && decryptedPayload.primaryModel);
   }
   return false;
 }
@@ -1800,9 +1941,25 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
       firstSendTime: nextSendAt,
       recurrenceType,
       tzId,
-      apiUrl: decryptedPayload.apiUrl || null,
-      apiKey: decryptedPayload.apiKey || null,
-      primaryModel: decryptedPayload.primaryModel || null,
+      // 凭据继承按 **credRefs.chat** 分支：
+      //   - 父带 chat 引用 → 复制整份引用、内联置空（换 Key 只要覆盖
+      //     llm_credentials 里那一行，自排链上的后代自动跟随——「自排链传旧
+      //     Key」那个洞的修口）；
+      //   - 父只带非 chat 引用（如仅 emotion）→ 引用与内联**都**复制：引用归
+      //     hook 用途，聊天凭据在内联那份里，只复制引用会造出既无引用可解析
+      //     又无内联的空壳后代；
+      //   - 父没带引用 → 照旧复制内联三件套。
+      ...hasChatCredRef(decryptedPayload) ? {
+        apiUrl: null,
+        apiKey: null,
+        primaryModel: null,
+        credRefs: { ...decryptedPayload.credRefs }
+      } : {
+        apiUrl: decryptedPayload.apiUrl || null,
+        apiKey: decryptedPayload.apiKey || null,
+        primaryModel: decryptedPayload.primaryModel || null,
+        credRefs: hasCredRefs(decryptedPayload) ? { ...decryptedPayload.credRefs } : null
+      },
       // 见文件头：fire-time hook 每次现场重组 prompt，旧 prompt 带过去只会在新
       // 任务走回老链路时顶替宿主的意图。
       completePrompt: null,
@@ -1897,6 +2054,13 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
     if (!updated) return { renewed: false, reason: "not_found" };
     return { renewed: true, uuid, nextSendAt: nextSendAtIso };
   };
+  const resolveLlmCredential2 = async (credId) => {
+    if (typeof credId !== "string" || !credId.trim()) {
+      throw new TypeError("resolveLlmCredential(credId) \u9700\u8981\u975E\u7A7A\u5B57\u7B26\u4E32 credId");
+    }
+    if (!supportsLlmCredentialsStore(ctx.db)) return null;
+    return resolveLlmCredential({ db: ctx.db, userId: task.user_id, userKey, credId });
+  };
   const scratch = {};
   const fireCtx = Object.freeze({
     task: buildHookTask(task, decryptedPayload),
@@ -1906,6 +2070,7 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
     scheduleTask,
     cancelTask,
     renewTask,
+    resolveLlmCredential: resolveLlmCredential2,
     now: new Date(nowFn()),
     scratch
   });
@@ -1927,6 +2092,7 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
       scheduleTask,
       cancelTask,
       renewTask,
+      resolveLlmCredential: resolveLlmCredential2,
       fireCtx,
       progress
     });
@@ -1972,6 +2138,7 @@ async function runFireChain({
   scheduleTask,
   cancelTask,
   renewTask,
+  resolveLlmCredential: resolveLlmCredential2,
   fireCtx,
   progress
 }) {
@@ -1994,6 +2161,12 @@ async function runFireChain({
   const sessionId = task.id != null ? `sess_task_${task.id}${occurrenceSuffix(task)}` : `sess_${randomUUID()}`;
   const occurrenceMs = occurrenceMsOf(task);
   let messages = normalized.messages.slice();
+  const chatCred = await resolveFireCredentials({
+    db: ctx.db,
+    userId: task.user_id,
+    userKey,
+    decryptedPayload
+  });
   for (let iteration = 0; iteration < maxToolIterations; iteration++) {
     if (nowFn() >= deadline) {
       throw new Error(`AGENTIC_TOTAL_TIMEOUT: fire chain exceeded ${totalTimeoutMs}ms after ${iteration} LLM round(s)`);
@@ -2003,6 +2176,7 @@ async function runFireChain({
     const { response: llmResponse } = await callLlm(
       {
         ...decryptedPayload,
+        ...chatCred || {},
         messages,
         ...normalized.tools ? { tools: normalized.tools, toolChoice: normalized.toolChoice } : {}
       },
@@ -2030,7 +2204,8 @@ async function runFireChain({
       writeState,
       scheduleTask,
       cancelTask,
-      renewTask
+      renewTask,
+      resolveLlmCredential: resolveLlmCredential2
     });
     const decision = await hooks.onLLMOutput(sessionCtx);
     assertValidDecision(decision, { inlineToolCalls: true });
@@ -2238,8 +2413,10 @@ async function processSingleMessage(task, ctx, providedMasterKey, predecrypted =
       messageContent = decryptedPayload.userMessage;
     } else if (decryptedPayload.messageType === "instant") {
       const hasPrompt = !!decryptedPayload.completePrompt || Array.isArray(decryptedPayload.messages) && decryptedPayload.messages.length > 0;
-      if (hasPrompt && decryptedPayload.apiUrl && decryptedPayload.apiKey && decryptedPayload.primaryModel) {
-        const aiResult = await callLlm(decryptedPayload);
+      const hasChatSource = hasChatCredRef(decryptedPayload) || !!(decryptedPayload.apiUrl && decryptedPayload.apiKey && decryptedPayload.primaryModel);
+      if (hasPrompt && hasChatSource) {
+        const chatCred = await resolveFireCredentials({ db: ctx.db, userId: task.user_id, userKey, decryptedPayload });
+        const aiResult = await callLlm(chatCred ? { ...decryptedPayload, ...chatCred } : decryptedPayload);
         messageContent = aiResult.content;
         llmResponse = aiResult.response;
       } else if (decryptedPayload.userMessage) {
@@ -2248,7 +2425,8 @@ async function processSingleMessage(task, ctx, providedMasterKey, predecrypted =
         throw new Error("Invalid instant message: no content source available");
       }
     } else if (decryptedPayload.messageType === "prompted" || decryptedPayload.messageType === "auto") {
-      const aiResult = await callLlm(decryptedPayload);
+      const chatCred = await resolveFireCredentials({ db: ctx.db, userId: task.user_id, userKey, decryptedPayload });
+      const aiResult = await callLlm(chatCred ? { ...decryptedPayload, ...chatCred } : decryptedPayload);
       messageContent = aiResult.content;
       llmResponse = aiResult.response;
     } else {
@@ -2487,6 +2665,30 @@ function createScheduleMessageHandler(ctx) {
         }
       };
     }
+    if (payload.credRefs) {
+      if (!supportsLlmCredentialsStore(db)) {
+        return { status: 501, body: { success: false, error: { code: "LLM_CREDENTIALS_NOT_SUPPORTED", message: "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301\u7528\u6237\u7EA7 LLM \u51ED\u636E\u5B58\u50A8" } } };
+      }
+      let missingCredIds;
+      try {
+        missingCredIds = await findMissingCredIds({ db, userId, credRefs: payload.credRefs });
+      } catch (_error) {
+        return { status: 503, body: { success: false, error: { code: "LLM_CREDENTIALS_LOOKUP_FAILED", message: "\u51ED\u636E\u8BFB\u53D6\u5931\u8D25\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5" } } };
+      }
+      if (missingCredIds.length > 0) {
+        return {
+          status: 409,
+          body: {
+            success: false,
+            error: {
+              code: "CREDENTIAL_NOT_FOUND",
+              message: `credRefs \u5F15\u7528\u7684\u51ED\u636E\u4E0D\u5B58\u5728\uFF1A${missingCredIds.join(", ")}\uFF08\u5148 PUT /llm-credentials \u767B\u8BB0\uFF09`,
+              details: { missingCredIds }
+            }
+          }
+        };
+      }
+    }
     const taskUuid = payload.uuid || randomUUID();
     const effectiveSendTime = payload.immediate === true ? (/* @__PURE__ */ new Date()).toISOString() : payload.firstSendTime;
     const fullTaskData = {
@@ -2503,6 +2705,9 @@ function createScheduleMessageHandler(ctx) {
       apiUrl: payload.apiUrl || null,
       apiKey: payload.apiKey || null,
       primaryModel: payload.primaryModel || null,
+      // 凭据引用（{ <purpose>: <cred_id> }）。带它的任务到点按引用现读
+      // llm_credentials，凭据本体不冻结在行里。
+      credRefs: payload.credRefs || null,
       // Prompt is one-of: legacy completePrompt (string) OR messages (OpenAI-
       // style array). Validation has already enforced exactly-one-of, so
       // exactly one of these will be non-null when an AI config is provided.
@@ -3153,6 +3358,27 @@ function createUpdateMessageHandler(ctx) {
     if (updates.pushSubscription !== void 0) {
       return { status: 400, body: { success: false, error: { code: "PUSH_SUBSCRIPTION_NOT_ACCEPTED", message: "pushSubscription \u4E0D\u518D\u968F\u4EFB\u52A1\u66F4\u65B0\uFF0C\u6539\u7528 PUT /push-subscription \u8986\u76D6\u7528\u6237\u7EA7\u8BA2\u9605", details: { invalidFields: ["pushSubscription"] } } } };
     }
+    if (updates.credRefs !== void 0 && updates.credRefs !== null) {
+      const credRefsErr = validateCredRefs(updates.credRefs);
+      if (credRefsErr) {
+        return { status: 400, body: { success: false, error: { code: "INVALID_UPDATE_DATA", message: credRefsErr, details: { invalidFields: ["credRefs"] } } } };
+      }
+      if (updates.apiUrl || updates.apiKey || updates.primaryModel) {
+        return { status: 400, body: { success: false, error: { code: "INVALID_UPDATE_DATA", message: "credRefs \u4E0E\u5185\u8054 apiUrl / apiKey / primaryModel \u4E0D\u80FD\u540C\u65F6\u66F4\u65B0\uFF08\u4E8C\u9009\u4E00\uFF09", details: { invalidFields: ["credRefs", "apiUrl", "apiKey", "primaryModel"] } } } };
+      }
+      if (!supportsLlmCredentialsStore(db)) {
+        return { status: 501, body: { success: false, error: { code: "LLM_CREDENTIALS_NOT_SUPPORTED", message: "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301\u7528\u6237\u7EA7 LLM \u51ED\u636E\u5B58\u50A8" } } };
+      }
+      let missingCredIds;
+      try {
+        missingCredIds = await findMissingCredIds({ db, userId, credRefs: updates.credRefs });
+      } catch (_error) {
+        return { status: 503, body: { success: false, error: { code: "LLM_CREDENTIALS_LOOKUP_FAILED", message: "\u51ED\u636E\u8BFB\u53D6\u5931\u8D25\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5" } } };
+      }
+      if (missingCredIds.length > 0) {
+        return { status: 409, body: { success: false, error: { code: "CREDENTIAL_NOT_FOUND", message: `credRefs \u5F15\u7528\u7684\u51ED\u636E\u4E0D\u5B58\u5728\uFF1A${missingCredIds.join(", ")}\uFF08\u5148 PUT /llm-credentials \u767B\u8BB0\uFF09`, details: { missingCredIds } } } };
+      }
+    }
     const existingTask = await db.getTaskByUuid(taskUuid, userId);
     if (!existingTask) {
       const taskStatus = await db.getTaskStatus(taskUuid, userId);
@@ -3187,6 +3413,9 @@ function createUpdateMessageHandler(ctx) {
       ...updates.apiUrl && { apiUrl: updates.apiUrl },
       ...updates.apiKey && { apiKey: updates.apiKey },
       ...updates.primaryModel && { primaryModel: updates.primaryModel },
+      // credRefs 整体替换；truthy spread——显式传 null 只是「不改」，摘掉引用
+      // 退回内联没有已知用途，真要清就 DELETE 凭据行让 fire 走兜底。
+      ...updates.credRefs && { credRefs: updates.credRefs },
       ...Object.prototype.hasOwnProperty.call(updates, "maxTokens") && { maxTokens: updates.maxTokens ?? null },
       ...Object.prototype.hasOwnProperty.call(updates, "temperature") && { temperature: updates.temperature ?? null },
       // splitPattern: hasOwnProperty so that explicit `null` (= revert to
@@ -3449,6 +3678,144 @@ function createPushSubscriptionHandler(ctx) {
   }
   return { PUT, GET, DELETE };
 }
+function err2(status, code, message, details) {
+  const error = details === void 0 ? { code, message } : { code, message, details };
+  return { status, body: { success: false, error } };
+}
+var UNSUPPORTED2 = err2(
+  501,
+  "LLM_CREDENTIALS_NOT_SUPPORTED",
+  "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301\u7528\u6237\u7EA7 LLM \u51ED\u636E\u5B58\u50A8"
+);
+function createLlmCredentialsHandler(ctx) {
+  async function decryptBody(headers, body) {
+    if (getHeader(headers, "x-payload-encrypted") !== "true") {
+      return { error: err2(400, "ENCRYPTION_REQUIRED", "\u8BF7\u6C42\u4F53\u5FC5\u987B\u52A0\u5BC6") };
+    }
+    const gate = requireUserId(headers);
+    if (gate.error) return { error: gate.error };
+    const { userId } = gate;
+    if (getHeader(headers, "x-encryption-version") !== "1") {
+      return { error: err2(400, "UNSUPPORTED_ENCRYPTION_VERSION", "\u52A0\u5BC6\u7248\u672C\u4E0D\u652F\u6301") };
+    }
+    const parsedBody = parseEncryptedBody(body);
+    if (!parsedBody.ok) return { error: { status: 400, body: { success: false, error: parsedBody.error } } };
+    return { userId, encryptedBody: parsedBody.data };
+  }
+  async function PUT(headers, body) {
+    const tenantResult = await ctx.tenantManager.resolveTenant(headers);
+    if (!tenantResult.ok) return tenantResult.error;
+    const { db, masterKey } = tenantResult.context;
+    const pre = await decryptBody(headers, body);
+    if (pre.error) return pre.error;
+    const { userId, encryptedBody } = pre;
+    const userKey = await deriveUserEncryptionKey(userId, masterKey);
+    let payload;
+    try {
+      payload = await decryptPayload(encryptedBody, userKey);
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        return err2(400, "INVALID_PAYLOAD_FORMAT", "\u89E3\u5BC6\u540E\u7684\u6570\u636E\u4E0D\u662F\u6709\u6548 JSON");
+      }
+      return err2(400, "DECRYPTION_FAILED", "\u8BF7\u6C42\u4F53\u89E3\u5BC6\u5931\u8D25");
+    }
+    if (!isPlainObject(payload)) return err2(400, "INVALID_PAYLOAD_FORMAT", "\u89E3\u5BC6\u540E\u7684\u6570\u636E\u5FC5\u987B\u662F JSON \u5BF9\u8C61");
+    const credentials = payload.credentials;
+    if (!Array.isArray(credentials) || credentials.length === 0) {
+      return err2(400, "INVALID_PARAMETERS", "credentials \u5FC5\u987B\u662F\u975E\u7A7A\u6570\u7EC4", { invalidFields: ["credentials"] });
+    }
+    if (credentials.length > CRED_PUT_BATCH_MAX) {
+      return err2(400, "INVALID_PARAMETERS", `credentials \u4E00\u6279\u6700\u591A ${CRED_PUT_BATCH_MAX} \u6761`, { invalidFields: ["credentials"] });
+    }
+    for (let i = 0; i < credentials.length; i++) {
+      const entry = credentials[i];
+      if (!isPlainObject(entry) || !isValidCredId(entry.credId)) {
+        return err2(400, "INVALID_PARAMETERS", `credentials[${i}].credId \u5FC5\u987B\u662F 1\u2013128 \u5B57\u7B26\u3001\u4E0D\u542B\u63A7\u5236\u5B57\u7B26\u7684\u5B57\u7B26\u4E32`, { invalidFields: [`credentials[${i}].credId`] });
+      }
+      const valueErr = validateCredValue(entry.value);
+      if (valueErr) {
+        return err2(400, "INVALID_PARAMETERS", `credentials[${i}].${valueErr}`, { invalidFields: [`credentials[${i}].value`] });
+      }
+    }
+    if (!supportsLlmCredentialsStore(db)) return UNSUPPORTED2;
+    const byId = /* @__PURE__ */ new Map();
+    for (const entry of credentials) byId.set(entry.credId, entry);
+    const deduped = [...byId.values()];
+    let existing;
+    try {
+      existing = await db.listLlmCredentials(userId);
+    } catch (_error) {
+      return err2(503, "LLM_CREDENTIALS_LOOKUP_FAILED", "\u51ED\u636E\u6E05\u5355\u8BFB\u53D6\u5931\u8D25\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+    }
+    const existingIds = new Set(existing.map((row) => row.cred_id));
+    const newCount = deduped.filter((entry) => !existingIds.has(entry.credId)).length;
+    if (existingIds.size + newCount > CRED_ROWS_PER_USER_MAX) {
+      return err2(400, "LLM_CREDENTIALS_LIMIT_EXCEEDED", `\u5355\u7528\u6237\u6700\u591A\u5B58 ${CRED_ROWS_PER_USER_MAX} \u884C\u51ED\u636E`, {
+        existing: existingIds.size,
+        adding: newCount,
+        limit: CRED_ROWS_PER_USER_MAX
+      });
+    }
+    const { upserted } = await saveLlmCredentials({ db, userId, userKey, credentials: deduped });
+    return { status: 200, body: { success: true, data: { upserted } } };
+  }
+  async function GET(url, headers) {
+    const effectiveHeaders = headers || url || {};
+    const tenantResult = await ctx.tenantManager.resolveTenant(effectiveHeaders);
+    if (!tenantResult.ok) return tenantResult.error;
+    const { db } = tenantResult.context;
+    const gate = requireUserId(effectiveHeaders);
+    if (gate.error) return gate.error;
+    const { userId } = gate;
+    if (!supportsLlmCredentialsStore(db)) return UNSUPPORTED2;
+    const rows = await db.listLlmCredentials(userId);
+    return {
+      status: 200,
+      body: {
+        success: true,
+        data: {
+          // 只有 credId 和 updatedAt——凭据本体永远不出这个接口。
+          credentials: rows.map((row) => ({ credId: row.cred_id, updatedAt: row.updated_at }))
+        }
+      }
+    };
+  }
+  async function DELETE(url, headers, body) {
+    const tenantResult = await ctx.tenantManager.resolveTenant(headers, { url });
+    if (!tenantResult.ok) return tenantResult.error;
+    const { db, masterKey } = tenantResult.context;
+    const pre = await decryptBody(headers, body);
+    if (pre.error) return pre.error;
+    const { userId, encryptedBody } = pre;
+    const userKey = await deriveUserEncryptionKey(userId, masterKey);
+    let payload;
+    try {
+      payload = await decryptPayload(encryptedBody, userKey);
+    } catch (_error) {
+      return err2(400, "DECRYPTION_FAILED", "\u8BF7\u6C42\u4F53\u89E3\u5BC6\u5931\u8D25");
+    }
+    if (!isPlainObject(payload)) return err2(400, "INVALID_PAYLOAD_FORMAT", "\u89E3\u5BC6\u540E\u7684\u6570\u636E\u5FC5\u987B\u662F JSON \u5BF9\u8C61");
+    const wantsAll = payload.all === true;
+    const credIds = payload.credIds;
+    if (!wantsAll && (!Array.isArray(credIds) || credIds.length === 0)) {
+      return err2(400, "INVALID_PARAMETERS", "\u8981\u4E48 { all: true }\uFF0C\u8981\u4E48 credIds \u975E\u7A7A\u6570\u7EC4", { invalidFields: ["credIds"] });
+    }
+    if (wantsAll && credIds !== void 0) {
+      return err2(400, "INVALID_PARAMETERS", "all \u4E0E credIds \u4E0D\u80FD\u540C\u65F6\u51FA\u73B0", { invalidFields: ["all", "credIds"] });
+    }
+    if (!wantsAll) {
+      for (let i = 0; i < credIds.length; i++) {
+        if (!isValidCredId(credIds[i])) {
+          return err2(400, "INVALID_PARAMETERS", `credIds[${i}] \u4E0D\u662F\u5408\u6CD5 cred_id`, { invalidFields: [`credIds[${i}]`] });
+        }
+      }
+    }
+    if (!supportsLlmCredentialsStore(db)) return UNSUPPORTED2;
+    const deleted = await db.deleteLlmCredentials(userId, wantsAll ? null : [...new Set(credIds)]);
+    return { status: 200, body: { success: true, data: { deleted } } };
+  }
+  return { PUT, GET, DELETE };
+}
 var SQLITE_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS scheduled_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3558,6 +3925,16 @@ var PUSH_SUBSCRIPTION_TABLE_SQL = `
     updated_at INTEGER NOT NULL
   )
 `;
+var LLM_CREDENTIALS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS llm_credentials (
+    user_id TEXT NOT NULL,
+    cred_id TEXT NOT NULL,
+    encrypted_value TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, cred_id)
+  )
+`;
 var MESSAGE_OUTBOX_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS message_outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3610,12 +3987,17 @@ var SQLITE_REQUIRED_SCHEMA = Object.freeze({
     describeTable(SQLITE_TABLE_SQL),
     describeTable(CLIENT_STATE_TABLE_SQL),
     describeTable(PUSH_SUBSCRIPTION_TABLE_SQL),
+    describeTable(LLM_CREDENTIALS_TABLE_SQL),
     describeTable(MESSAGE_OUTBOX_TABLE_SQL)
   ])),
   indexes: Object.freeze(SQLITE_INDEXES.filter((index) => index.critical).map((index) => index.name))
 });
 function escapeLikePrefix(prefix) {
   return prefix.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+var INTERNAL_TABLE_PREFIXES = ["sqlite_", "_cf_"];
+function isInternalTableName(name) {
+  return INTERNAL_TABLE_PREFIXES.some((prefix) => name.startsWith(prefix));
 }
 var D1Adapter = class {
   /** @param {{ prepare: (sql: string) => any }} db - Cloudflare D1 binding */
@@ -3638,6 +4020,7 @@ var D1Adapter = class {
     await this._db.prepare(SQLITE_TABLE_SQL).run();
     await this._db.prepare(CLIENT_STATE_TABLE_SQL).run();
     await this._db.prepare(PUSH_SUBSCRIPTION_TABLE_SQL).run();
+    await this._db.prepare(LLM_CREDENTIALS_TABLE_SQL).run();
     await this._db.prepare(MESSAGE_OUTBOX_TABLE_SQL).run();
     await this._db.prepare(MESSAGE_OUTBOX_INDEX_SQL).run();
     for (const migration of SQLITE_MIGRATIONS) {
@@ -3683,13 +4066,15 @@ var D1Adapter = class {
    */
   async describeSchema() {
     const tableRes = await this._db.prepare(
-      `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`
+      `SELECT name FROM sqlite_master WHERE type = 'table'`
     ).all();
     const tables = {};
     for (const row of tableRes.results || []) {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(row.name)) continue;
-      const columnRes = await this._db.prepare(`PRAGMA table_info(${row.name})`).all();
-      tables[row.name] = (columnRes.results || []).map((column) => column.name);
+      const name = String(row.name ?? "");
+      if (isInternalTableName(name)) continue;
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
+      const columnRes = await this._db.prepare(`PRAGMA table_info(${name})`).all();
+      tables[name] = (columnRes.results || []).map((column) => column.name);
     }
     const indexRes = await this._db.prepare(
       `SELECT name FROM sqlite_master WHERE type = 'index' AND name IS NOT NULL`
@@ -3700,6 +4085,7 @@ var D1Adapter = class {
     await this._db.prepare("DROP TABLE IF EXISTS scheduled_messages").run();
     await this._db.prepare("DROP TABLE IF EXISTS client_state").run();
     await this._db.prepare("DROP TABLE IF EXISTS push_subscriptions").run();
+    await this._db.prepare("DROP TABLE IF EXISTS llm_credentials").run();
     await this._db.prepare("DROP TABLE IF EXISTS message_outbox").run();
   }
   async createTask(params) {
@@ -4107,6 +4493,90 @@ var D1Adapter = class {
     const res = await this._db.prepare("DELETE FROM push_subscriptions WHERE user_id = ?").bind(userId).run();
     return (res.meta.changes || 0) > 0;
   }
+  // ── llm_credentials (user-level LLM API credentials) ───────────────────
+  /**
+   * 批量 upsert 这个用户的凭据（value 已是密文，加密在上层）。已存在的行
+   * 覆盖 encrypted_value 并刷 updated_at，created_at 保留首次写入的时刻。
+   *
+   * @param {string} userId
+   * @param {Array<{ credId: string, encryptedValue: string }>} entries
+   * @returns {Promise<number>} 实际写入/覆盖的行数
+   */
+  async upsertLlmCredentials(userId, entries) {
+    if (!entries || entries.length === 0) return 0;
+    const now = this._now();
+    const SQL = `INSERT INTO llm_credentials (user_id, cred_id, encrypted_value, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (user_id, cred_id) DO UPDATE SET
+         encrypted_value = excluded.encrypted_value,
+         updated_at = excluded.updated_at`;
+    const statements = entries.map(
+      (entry) => this._db.prepare(SQL).bind(userId, entry.credId, entry.encryptedValue, now, now)
+    );
+    let results;
+    if (typeof this._db.batch === "function") {
+      results = await this._db.batch(statements);
+    } else {
+      results = [];
+      for (const stmt of statements) results.push(await stmt.run());
+    }
+    return results.reduce((n, res) => n + ((res.meta.changes || 0) > 0 ? 1 : 0), 0);
+  }
+  /**
+   * 按 cred_id 批量读这个用户的凭据行（`encrypted_value` 是密文，解密在上
+   * 层）。排程时的存在性检查和 fire 时的解析共用这一个口。
+   *
+   * @param {string} userId
+   * @param {string[]} credIds
+   * @returns {Promise<Array<{ cred_id: string, encrypted_value: string, updated_at: string }>>}
+   */
+  async getLlmCredentials(userId, credIds) {
+    if (!credIds || credIds.length === 0) return [];
+    const placeholders = credIds.map(() => "?").join(", ");
+    const res = await this._db.prepare(
+      `SELECT cred_id, encrypted_value, updated_at
+       FROM llm_credentials
+       WHERE user_id = ? AND cred_id IN (${placeholders})`
+    ).bind(userId, ...credIds).all();
+    return res.results || [];
+  }
+  /**
+   * 这个用户名下所有凭据的对账清单（只有 cred_id 和 updated_at，密文不出
+   * 这个方法）。按 cred_id 排序，输出稳定。
+   *
+   * @param {string} userId
+   * @returns {Promise<Array<{ cred_id: string, updated_at: string }>>}
+   */
+  async listLlmCredentials(userId) {
+    const res = await this._db.prepare(
+      `SELECT cred_id, updated_at FROM llm_credentials
+       WHERE user_id = ? ORDER BY cred_id ASC`
+    ).bind(userId).all();
+    return res.results || [];
+  }
+  /**
+   * 删凭据。`credIds` 传数组删指定那几行；传 null 删这个用户的全部
+   * （「清空云端数据」用）。
+   *
+   * @param {string} userId
+   * @param {string[]|null} credIds
+   * @returns {Promise<number>} 删掉的行数
+   */
+  async deleteLlmCredentials(userId, credIds = null) {
+    if (credIds !== null && credIds.length === 0) return 0;
+    let res;
+    if (credIds === null) {
+      res = await this._db.prepare(
+        "DELETE FROM llm_credentials WHERE user_id = ?"
+      ).bind(userId).run();
+    } else {
+      const placeholders = credIds.map(() => "?").join(", ");
+      res = await this._db.prepare(
+        `DELETE FROM llm_credentials WHERE user_id = ? AND cred_id IN (${placeholders})`
+      ).bind(userId, ...credIds).run();
+    }
+    return res.meta.changes || 0;
+  }
   // ── message_outbox（服务端消息收件箱，客户端 ack）────────────────────────
   /**
    * 发送前把这一批 push 落进 outbox（一次 batch）。(user_id, message_id)
@@ -4333,7 +4803,7 @@ function createVapidPublicKeyHandler(ctx) {
   return { GET };
 }
 var MAX_STATE_ENTRIES_PER_REQUEST = MAX_STATE_ENTRIES_PER_BATCH;
-function err2(status, code, message, details) {
+function err3(status, code, message, details) {
   const error = details === void 0 ? { code, message } : { code, message, details };
   return { status, body: { success: false, error } };
 }
@@ -4383,13 +4853,13 @@ function createClientStateHandler(ctx) {
     if (!tenantResult.ok) return tenantResult.error;
     const { db, masterKey } = tenantResult.context;
     if (getHeader(headers, "x-payload-encrypted") !== "true") {
-      return err2(400, "ENCRYPTION_REQUIRED", "\u8BF7\u6C42\u4F53\u5FC5\u987B\u52A0\u5BC6");
+      return err3(400, "ENCRYPTION_REQUIRED", "\u8BF7\u6C42\u4F53\u5FC5\u987B\u52A0\u5BC6");
     }
     const gate = requireUserId(headers);
     if (gate.error) return gate.error;
     const { userId } = gate;
     if (getHeader(headers, "x-encryption-version") !== "1") {
-      return err2(400, "UNSUPPORTED_ENCRYPTION_VERSION", "\u52A0\u5BC6\u7248\u672C\u4E0D\u652F\u6301");
+      return err3(400, "UNSUPPORTED_ENCRYPTION_VERSION", "\u52A0\u5BC6\u7248\u672C\u4E0D\u652F\u6301");
     }
     const parsedBody = parseEncryptedBody(body);
     if (!parsedBody.ok) return { status: 400, body: { success: false, error: parsedBody.error } };
@@ -4399,17 +4869,17 @@ function createClientStateHandler(ctx) {
       payload = await decryptPayload(parsedBody.data, userKey);
     } catch (error) {
       if (error instanceof SyntaxError) {
-        return err2(400, "INVALID_PAYLOAD_FORMAT", "\u89E3\u5BC6\u540E\u7684\u6570\u636E\u4E0D\u662F\u6709\u6548 JSON");
+        return err3(400, "INVALID_PAYLOAD_FORMAT", "\u89E3\u5BC6\u540E\u7684\u6570\u636E\u4E0D\u662F\u6709\u6548 JSON");
       }
-      return err2(400, "DECRYPTION_FAILED", "\u8BF7\u6C42\u4F53\u89E3\u5BC6\u5931\u8D25");
+      return err3(400, "DECRYPTION_FAILED", "\u8BF7\u6C42\u4F53\u89E3\u5BC6\u5931\u8D25");
     }
-    if (!isPlainObject(payload)) return err2(400, "INVALID_PAYLOAD_FORMAT", "\u89E3\u5BC6\u540E\u7684\u6570\u636E\u5FC5\u987B\u662F JSON \u5BF9\u8C61");
+    if (!isPlainObject(payload)) return err3(400, "INVALID_PAYLOAD_FORMAT", "\u89E3\u5BC6\u540E\u7684\u6570\u636E\u5FC5\u987B\u662F JSON \u5BF9\u8C61");
     const entries = payload.entries;
     if (!Array.isArray(entries) || entries.length === 0) {
-      return err2(400, "INVALID_STATE_ENTRIES", "entries \u5FC5\u987B\u662F\u975E\u7A7A\u6570\u7EC4");
+      return err3(400, "INVALID_STATE_ENTRIES", "entries \u5FC5\u987B\u662F\u975E\u7A7A\u6570\u7EC4");
     }
     if (entries.length > MAX_STATE_ENTRIES_PER_REQUEST) {
-      return err2(400, "TOO_MANY_STATE_ENTRIES", `\u5355\u6B21\u6700\u591A ${MAX_STATE_ENTRIES_PER_REQUEST} \u6761`, { count: entries.length });
+      return err3(400, "TOO_MANY_STATE_ENTRIES", `\u5355\u6B21\u6700\u591A ${MAX_STATE_ENTRIES_PER_REQUEST} \u6761`, { count: entries.length });
     }
     const maxValueBytes = Number.isInteger(ctx.maxStateValueBytes) && ctx.maxStateValueBytes > 0 ? ctx.maxStateValueBytes : DEFAULT_MAX_STATE_VALUE_BYTES;
     const accepted = [];
@@ -4425,7 +4895,7 @@ function createClientStateHandler(ctx) {
       }
     }
     if (typeof db.upsertClientState !== "function") {
-      return err2(501, "CLIENT_STATE_NOT_SUPPORTED", "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301 client_state");
+      return err3(501, "CLIENT_STATE_NOT_SUPPORTED", "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301 client_state");
     }
     const { upserted, skipped, skippedEntries } = await writeClientStateEntries({ db, userId, userKey, entries: accepted });
     const data = { upserted, skipped };
@@ -4441,12 +4911,12 @@ function createClientStateHandler(ctx) {
     if (gate.error) return gate.error;
     const { userId } = gate;
     const namespace = new URL(url, "https://dummy").searchParams.get("namespace") || "";
-    if (!namespace.trim()) return err2(400, "NAMESPACE_REQUIRED", "\u5FC5\u987B\u63D0\u4F9B namespace \u67E5\u8BE2\u53C2\u6570");
+    if (!namespace.trim()) return err3(400, "NAMESPACE_REQUIRED", "\u5FC5\u987B\u63D0\u4F9B namespace \u67E5\u8BE2\u53C2\u6570");
     if (INTERNAL_STATE_CHAR_RE.test(namespace)) {
-      return err2(400, "INVALID_STATE_NAMESPACE", "namespace \u4E0D\u80FD\u5305\u542B\u63A7\u5236\u5B57\u7B26\uFF08\\u0000-\\u001f \u4E3A\u5E93\u5185\u90E8\u4FDD\u7559\uFF09");
+      return err3(400, "INVALID_STATE_NAMESPACE", "namespace \u4E0D\u80FD\u5305\u542B\u63A7\u5236\u5B57\u7B26\uFF08\\u0000-\\u001f \u4E3A\u5E93\u5185\u90E8\u4FDD\u7559\uFF09");
     }
     if (typeof db.getClientState !== "function") {
-      return err2(501, "CLIENT_STATE_NOT_SUPPORTED", "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301 client_state");
+      return err3(501, "CLIENT_STATE_NOT_SUPPORTED", "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301 client_state");
     }
     const userKey = await deriveUserEncryptionKey(userId, masterKey);
     const rows = await db.getClientState(userId, namespace);
@@ -4466,14 +4936,14 @@ function createClientStateHandler(ctx) {
     if (gate.error) return gate.error;
     const { userId } = gate;
     if (typeof db.clearClientState !== "function") {
-      return err2(501, "CLIENT_STATE_NOT_SUPPORTED", "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301 client_state");
+      return err3(501, "CLIENT_STATE_NOT_SUPPORTED", "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301 client_state");
     }
     const deleted = await db.clearClientState(userId);
     return { status: 200, body: { success: true, data: { deleted } } };
   }
   return { PUT, GET, DELETE };
 }
-var SERVER_VERSION = true ? "2.6.0-next.16" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.6.0-next.19" : "0.0.0-dev";
 var SERVER_FEATURES = Object.freeze([
   "client-state",
   "client-state-chunking",
@@ -4547,7 +5017,11 @@ var SERVER_FEATURES = Object.freeze([
   // 导出 getSchemaVersion / ensureSchema：表结构够不够用查得出来，也补得上。
   "schema-self-check",
   // 单用户 Worker 上有 runTask(uuid, env)：只跑指定那一条任务。
-  "worker-run-task"
+  "worker-run-task",
+  // 用户级 LLM 凭据存储：PUT/GET/DELETE /llm-credentials，任务 payload 认
+  // credRefs（fire 时按引用现读、自排任务复制引用），hook ctx 带
+  // resolveLlmCredential。
+  "llm-credentials"
 ]);
 function createCapabilitiesHandler(ctx) {
   async function GET(url, headers) {
@@ -4566,7 +5040,7 @@ function createCapabilitiesHandler(ctx) {
 var MAX_OUTBOX_PAGE_SIZE = 100;
 var DEFAULT_OUTBOX_PAGE_SIZE = 50;
 var MAX_OUTBOX_ACK_IDS = 200;
-function err3(status, code, message, details) {
+function err4(status, code, message, details) {
   const error = details === void 0 ? { code, message } : { code, message, details };
   return { status, body: { success: false, error } };
 }
@@ -4579,18 +5053,18 @@ function createOutboxHandler(ctx) {
     if (gate.error) return gate.error;
     const { userId } = gate;
     if (typeof db.listUnackedOutbox !== "function") {
-      return err3(501, "OUTBOX_NOT_SUPPORTED", "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301 message_outbox");
+      return err4(501, "OUTBOX_NOT_SUPPORTED", "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301 message_outbox");
     }
     const params = new URL(url, "https://dummy").searchParams;
     const sinceRaw = params.get("since");
     const since = sinceRaw == null || sinceRaw === "" ? 0 : Number(sinceRaw);
     if (!Number.isInteger(since) || since < 0) {
-      return err3(400, "INVALID_OUTBOX_CURSOR", "since \u5FC5\u987B\u662F\u975E\u8D1F\u6574\u6570\uFF08\u4E0A\u4E00\u9875\u54CD\u5E94\u91CC\u7684 cursor\uFF09");
+      return err4(400, "INVALID_OUTBOX_CURSOR", "since \u5FC5\u987B\u662F\u975E\u8D1F\u6574\u6570\uFF08\u4E0A\u4E00\u9875\u54CD\u5E94\u91CC\u7684 cursor\uFF09");
     }
     const limitRaw = params.get("limit");
     let limit = limitRaw == null || limitRaw === "" ? DEFAULT_OUTBOX_PAGE_SIZE : Number(limitRaw);
     if (!Number.isInteger(limit) || limit <= 0) {
-      return err3(400, "INVALID_OUTBOX_LIMIT", `limit \u5FC5\u987B\u662F 1-${MAX_OUTBOX_PAGE_SIZE} \u7684\u6574\u6570`);
+      return err4(400, "INVALID_OUTBOX_LIMIT", `limit \u5FC5\u987B\u662F 1-${MAX_OUTBOX_PAGE_SIZE} \u7684\u6574\u6570`);
     }
     limit = Math.min(limit, MAX_OUTBOX_PAGE_SIZE);
     const userKey = await deriveUserEncryptionKey(userId, masterKey);
@@ -4632,13 +5106,13 @@ function createOutboxHandler(ctx) {
     if (!tenantResult.ok) return tenantResult.error;
     const { db, masterKey } = tenantResult.context;
     if (getHeader(headers, "x-payload-encrypted") !== "true") {
-      return err3(400, "ENCRYPTION_REQUIRED", "\u8BF7\u6C42\u4F53\u5FC5\u987B\u52A0\u5BC6");
+      return err4(400, "ENCRYPTION_REQUIRED", "\u8BF7\u6C42\u4F53\u5FC5\u987B\u52A0\u5BC6");
     }
     const gate = requireUserId(headers);
     if (gate.error) return gate.error;
     const { userId } = gate;
     if (getHeader(headers, "x-encryption-version") !== "1") {
-      return err3(400, "UNSUPPORTED_ENCRYPTION_VERSION", "\u52A0\u5BC6\u7248\u672C\u4E0D\u652F\u6301");
+      return err4(400, "UNSUPPORTED_ENCRYPTION_VERSION", "\u52A0\u5BC6\u7248\u672C\u4E0D\u652F\u6301");
     }
     const parsedBody = parseEncryptedBody(body);
     if (!parsedBody.ok) return { status: 400, body: { success: false, error: parsedBody.error } };
@@ -4648,23 +5122,23 @@ function createOutboxHandler(ctx) {
       payload = await decryptPayload(parsedBody.data, userKey);
     } catch (error) {
       if (error instanceof SyntaxError) {
-        return err3(400, "INVALID_PAYLOAD_FORMAT", "\u89E3\u5BC6\u540E\u7684\u6570\u636E\u4E0D\u662F\u6709\u6548 JSON");
+        return err4(400, "INVALID_PAYLOAD_FORMAT", "\u89E3\u5BC6\u540E\u7684\u6570\u636E\u4E0D\u662F\u6709\u6548 JSON");
       }
-      return err3(400, "DECRYPTION_FAILED", "\u8BF7\u6C42\u4F53\u89E3\u5BC6\u5931\u8D25");
+      return err4(400, "DECRYPTION_FAILED", "\u8BF7\u6C42\u4F53\u89E3\u5BC6\u5931\u8D25");
     }
-    if (!isPlainObject(payload)) return err3(400, "INVALID_PAYLOAD_FORMAT", "\u89E3\u5BC6\u540E\u7684\u6570\u636E\u5FC5\u987B\u662F JSON \u5BF9\u8C61");
+    if (!isPlainObject(payload)) return err4(400, "INVALID_PAYLOAD_FORMAT", "\u89E3\u5BC6\u540E\u7684\u6570\u636E\u5FC5\u987B\u662F JSON \u5BF9\u8C61");
     const messageIds = payload.messageIds;
     if (!Array.isArray(messageIds) || messageIds.length === 0) {
-      return err3(400, "INVALID_OUTBOX_ACK", "messageIds \u5FC5\u987B\u662F\u975E\u7A7A\u6570\u7EC4");
+      return err4(400, "INVALID_OUTBOX_ACK", "messageIds \u5FC5\u987B\u662F\u975E\u7A7A\u6570\u7EC4");
     }
     if (messageIds.length > MAX_OUTBOX_ACK_IDS) {
-      return err3(400, "TOO_MANY_OUTBOX_ACK_IDS", `\u5355\u6B21\u6700\u591A ack ${MAX_OUTBOX_ACK_IDS} \u6761`, { count: messageIds.length });
+      return err4(400, "TOO_MANY_OUTBOX_ACK_IDS", `\u5355\u6B21\u6700\u591A ack ${MAX_OUTBOX_ACK_IDS} \u6761`, { count: messageIds.length });
     }
     if (!messageIds.every((id) => typeof id === "string" && id.trim())) {
-      return err3(400, "INVALID_OUTBOX_ACK", "messageIds \u7684\u6BCF\u4E00\u9879\u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32");
+      return err4(400, "INVALID_OUTBOX_ACK", "messageIds \u7684\u6BCF\u4E00\u9879\u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32");
     }
     if (typeof db.ackOutboxMessages !== "function") {
-      return err3(501, "OUTBOX_NOT_SUPPORTED", "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301 message_outbox");
+      return err4(501, "OUTBOX_NOT_SUPPORTED", "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301 message_outbox");
     }
     const acked = await db.ackOutboxMessages(userId, messageIds, Date.now());
     return { status: 200, body: { success: true, data: { acked } } };
@@ -4716,6 +5190,7 @@ function createSingleUserServer(config) {
       vapidPublicKey: createVapidPublicKeyHandler(ctx),
       clientState: createClientStateHandler(ctx),
       pushSubscription: createPushSubscriptionHandler(ctx),
+      llmCredentials: createLlmCredentialsHandler(ctx),
       capabilities: createCapabilitiesHandler(ctx),
       outbox: createOutboxHandler(ctx)
     }
@@ -4932,6 +5407,12 @@ function createSingleUserCloudflareWorker(buildConfig, options = {}) {
         result = await server.handlers.pushSubscription.GET(url, headers);
       } else if (method === "DELETE" && pathname.endsWith("/push-subscription")) {
         result = await server.handlers.pushSubscription.DELETE(url, headers);
+      } else if (method === "PUT" && pathname.endsWith("/llm-credentials")) {
+        result = await server.handlers.llmCredentials.PUT(headers, await request.text());
+      } else if (method === "GET" && pathname.endsWith("/llm-credentials")) {
+        result = await server.handlers.llmCredentials.GET(url, headers);
+      } else if (method === "DELETE" && pathname.endsWith("/llm-credentials")) {
+        result = await server.handlers.llmCredentials.DELETE(url, headers, await request.text());
       } else {
         result = { status: 404, body: { success: false, error: { code: "NOT_FOUND", message: "Unknown route" } } };
       }
@@ -5010,13 +5491,13 @@ async function sendWebPush2(args) {
   if (typeof payload === "string") {
     const size = measurePushPayload(payload);
     if (!size.withinLimit) {
-      const err4 = new Error(
+      const err5 = new Error(
         `sendWebPush: payload is ${size.bytes} bytes, over the ${MAX_PUSH_PAYLOAD_BYTES}-byte limit (push services cap the encrypted body at ${WEB_PUSH_MAX_BODY_BYTES} bytes; aes128gcm adds ${WEB_PUSH_ENCRYPTION_OVERHEAD_BYTES} bytes)`
       );
-      err4.code = "PUSH_PAYLOAD_TOO_LARGE";
-      err4.bytes = size.bytes;
-      err4.maxBytes = MAX_PUSH_PAYLOAD_BYTES;
-      throw err4;
+      err5.code = "PUSH_PAYLOAD_TOO_LARGE";
+      err5.bytes = size.bytes;
+      err5.maxBytes = MAX_PUSH_PAYLOAD_BYTES;
+      throw err5;
     }
   }
   return sendWebPush(args);
@@ -5041,7 +5522,7 @@ function createWebCryptoWebPush(vapid = {}, { ttl = SCHEDULED_DEFAULT_TTL } = {}
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-08-10";
+var AMSG_BUNDLE_VERSION = "2026-08-10.2";
 
 // utils/localDate.ts
 function getLocalDateKey(date = /* @__PURE__ */ new Date()) {
@@ -6611,8 +7092,8 @@ async function cf(token, path, init = {}) {
       headers: { Authorization: `Bearer ${token}` },
       body: init.body
     });
-  } catch (err4) {
-    return { ok: false, detail: `\u8FDE\u4E0D\u4E0A Cloudflare API\uFF1A${err4.message}` };
+  } catch (err5) {
+    return { ok: false, detail: `\u8FDE\u4E0D\u4E0A Cloudflare API\uFF1A${err5.message}` };
   }
   const text = await res.text();
   let payload;
@@ -6686,8 +7167,8 @@ async function fetchLatestBundle() {
   let res;
   try {
     res = await fetch(BUNDLE_URL, { headers: { "User-Agent": "sullyos-amsg-self-update" } });
-  } catch (err4) {
-    return { ok: false, message: `\u53D6\u4E0D\u5230\u6700\u65B0\u4EE3\u7801\uFF1A${err4.message}` };
+  } catch (err5) {
+    return { ok: false, message: `\u53D6\u4E0D\u5230\u6700\u65B0\u4EE3\u7801\uFF1A${err5.message}` };
   }
   if (!res.ok) return { ok: false, message: `\u53D6\u6700\u65B0\u4EE3\u7801\u5931\u8D25\uFF08HTTP ${res.status}\uFF09` };
   const code = await res.text();
@@ -10046,10 +10527,30 @@ var requestEmotionEval = async (api, promptContent, timeoutMs = EMOTION_EVAL_TIM
 };
 
 // worker/amsg/src/emotionEval.ts
+var resolveEmotionEvalApi = async (spec, credRefs, resolveLlmCredential2) => {
+  if (spec.api?.baseUrl && spec.api.model) return spec.api;
+  const credId = credRefs && typeof credRefs === "object" && !Array.isArray(credRefs) ? credRefs.emotion : void 0;
+  if (typeof credId !== "string" || !credId || typeof resolveLlmCredential2 !== "function") return null;
+  let resolved = null;
+  try {
+    resolved = await resolveLlmCredential2(credId);
+  } catch (error) {
+    console.warn("[amsg:emotion] \u51ED\u636E\u8BFB\u4E0D\u51FA\u6765\uFF0C\u8FD9\u4E00\u8F6E\u4E0D\u8BC4\u4F30\uFF08\u4E3B\u56DE\u590D\u4E0D\u53D7\u5F71\u54CD\uFF09", error);
+    return null;
+  }
+  if (!resolved?.apiUrl || !resolved.primaryModel) return null;
+  return {
+    baseUrl: resolved.apiUrl.replace(/\/chat\/completions\/*$/i, ""),
+    apiKey: resolved.apiKey || "",
+    model: resolved.primaryModel
+  };
+};
 var amsgEmotionUpdateKey = (clientTaskId) => `emotion_update:${clientTaskId}`;
 var isUsableEvalSpec = (spec) => {
   const s = spec;
-  return !!s && typeof s.prompt === "string" && !!s.prompt && !!s.api && typeof s.api.baseUrl === "string" && !!s.api.baseUrl && typeof s.api.model === "string" && !!s.api.model;
+  if (!s || typeof s.prompt !== "string" || !s.prompt) return false;
+  if (s.api === void 0 || s.api === null) return true;
+  return typeof s.api.baseUrl === "string" && !!s.api.baseUrl && typeof s.api.model === "string" && !!s.api.model;
 };
 var stripEmotionEvalSpec = (metadata) => {
   const { amsgEmotionEval: _secret, ...rest } = metadata ?? {};
@@ -10068,7 +10569,7 @@ var takeEmotionEvalSpec = (metadata) => {
   return isUsableEvalSpec(spec) ? spec : null;
 };
 var EMOTION_EVAL_RIDE_ALONG_MS = 1e4;
-var runAmsgEmotionEval = async (spec, chatMessages, charName, timeoutMs = EMOTION_EVAL_TIMEOUT_MS) => requestEmotionEval(spec.api, restoreEvalPrompt(spec.prompt, chatMessages, charName), timeoutMs);
+var runAmsgEmotionEval = async (spec, api, chatMessages, charName, timeoutMs = EMOTION_EVAL_TIMEOUT_MS) => requestEmotionEval(api, restoreEvalPrompt(spec.prompt, chatMessages, charName), timeoutMs);
 
 // worker/amsg/src/nativeFcm.ts
 var accessTokenCache = null;
@@ -10967,11 +11468,23 @@ var amsgHooks = {
       ];
       if (emotionEvalSpec) {
         const storedEvalRaw = clientTaskId ? charRows.find((r) => r.key === amsgEmotionUpdateKey(clientTaskId))?.value : void 0;
-        stash.emotionEvalPromise = storedEvalRaw ? Promise.resolve({ raw: storedEvalRaw, error: null }) : runAmsgEmotionEval(
-          emotionEvalSpec,
-          instantMessages,
-          toolPack.charName || ctx.task.contactName || "\u89D2\u8272"
-        );
+        stash.emotionEvalPromise = storedEvalRaw ? Promise.resolve({ raw: storedEvalRaw, error: null }) : (async () => {
+          const evalApi = await resolveEmotionEvalApi(
+            emotionEvalSpec,
+            ctx.task.credRefs,
+            ctx.resolveLlmCredential
+          );
+          if (!evalApi) {
+            console.warn("[amsg:emotion] \u8FD9\u4E00\u8F6E\u53D6\u4E0D\u5230\u526F API \u51ED\u636E\uFF0C\u8DF3\u8FC7\u8BC4\u4F30");
+            return { raw: null, error: "\u4E91\u7AEF\u6CA1\u6709\u53EF\u7528\u7684\u60C5\u7EEA\u8BC4\u4F30 API \u51ED\u636E" };
+          }
+          return runAmsgEmotionEval(
+            emotionEvalSpec,
+            evalApi,
+            instantMessages,
+            toolPack.charName || ctx.task.contactName || "\u89D2\u8272"
+          );
+        })();
       }
       return {
         messages: instantMessages,

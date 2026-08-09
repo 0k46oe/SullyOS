@@ -31,6 +31,19 @@ import {
 // 谁都不碰谁，所以这个环是安全的；换成在这里另读一遍 localStorage 才是真麻烦
 // （挂起判定就有了两把尺，而「发送在飞」那半截根本抄不过来，它是内存里的集合）。
 import { getInstantChatPending, isInstantChatSendInFlight } from './amsgInstantChat';
+import {
+  buildCharChatCredRow,
+  buildCharEmotionCredRow,
+  buildCharInstantCredRow,
+  chunkCredRows,
+  forgetAllCredIds,
+  forgetCredIds,
+  normalizeChatApiUrl,
+  pickChangedCredRows,
+  rememberCredRows,
+  supportsLlmCredentials,
+  type LlmCredentialRow,
+} from './amsgLlmCredentials';
 import { flattenContentPartsToText } from './promptMessageCleanup';
 import {
   AMSG_FIRE_PACK_KEY,
@@ -169,8 +182,6 @@ const createClient = (config: Pick<ActiveMsg2GlobalConfig, 'userId' | 'workerUrl
 /** 面板新建任务的默认时间：半小时后，折成 datetime-local 认的本地墙钟。 */
 export const getDefaultActiveMsgFirstSendTime = () =>
   toDatetimeLocalValue(new Date(Date.now() + 30 * 60_000).toISOString());
-
-const normalizeChatApiUrl = (baseUrl: string) => `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
 
 /** amsg-server 对 avatarUrl 的长度上限，超了整条会被拒。 */
 const REMOTE_AVATAR_URL_MAX_LENGTH = 2048;
@@ -393,6 +404,9 @@ const initializeClient = (config: ActiveMsg2GlobalConfig) => {
   // 「装好之后再没进过设置页、Worker 还停在旧版」的人。
   // 不 await：它只影响**之后**几轮的路由判断，拿它挡住握手等于给每条消息加一次 RTT。
   void ActiveMsgClient.probeInstantChatSupport().catch(() => {});
+  // 同理顺手探一次「凭据能不能存成表里的一行」（credRefs 的唯一版本门槛，见
+  // isLlmCredentialsReady）。探不到就按老路走，不影响任何一条消息发出去。
+  void ActiveMsgClient.probeLlmCredentialsSupport().catch(() => {});
   return promise;
 };
 
@@ -426,7 +440,54 @@ const resolveTaskCredentialUpdates = (
   };
 };
 
-const formatHistoryLine = (role: string, content: any, char: CharacterProfile, userProfile: UserProfile) => {
+// ─── LLM 凭据引用（credRefs）───
+//
+// 走不走这条路只判一处：这台 worker 的 capabilities 里有没有 'llm-credentials'。
+// 达标就把凭据存成表里的一行、任务只带名字；不达标原样走「凭据冻结进任务」的老路。
+// 结论跟即时对话那个能力位一样存进全局配置（握手时探一次），发消息 / 排程的路上
+// 不做逐次网络预检——那等于给每条消息加一次 RTT。
+
+/**
+ * 这台 worker 现在走不走 credRefs。**整个前端的版本门槛只有这一处。**
+ *
+ * undefined（还没探过）按 false 处理：老路在哪台 worker 上都能跑，宁可这一轮多冻结
+ * 一份凭据，也不要拿新写法去撞一台还不认识它的 worker（那是排程直接 400）。
+ * 握手时会补探一次，之后就有准数了。
+ */
+export const isLlmCredentialsReady = async (): Promise<boolean> => {
+  try {
+    return (await ActiveMsgStore.getGlobalConfig()).llmCredentialsSupported === true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * 把这几行凭据传上去，**只传真的变了的那些**（指纹底账见 amsgLlmCredentials）。
+ *
+ * force 用在「云端说这行不存在」的自愈路径上：那时本地底账是脏的（记着传过、实际没有），
+ * 必须绕过指纹。传成功才记账——记早了就会把一次失败的上传当成已生效。
+ */
+const putLlmCredentialRows = async (
+  rows: LlmCredentialRow[],
+  options: { force?: boolean } = {},
+): Promise<number> => {
+  const pending = options.force ? rows : pickChangedCredRows(rows);
+  if (pending.length === 0) return 0;
+  const globalConfig = await ensureWorkerReady();
+  const client = await initializeClient(globalConfig);
+  for (const batch of chunkCredRows(pending)) {
+    const response = await client.putLlmCredentials(batch);
+    if (!response?.success) {
+      throw new Error(response?.error?.message || '登记 LLM 凭据失败。');
+    }
+    // 逐批记账：后面那批失败时，前面已经落地的不必再传一遍。
+    rememberCredRows(batch);
+  }
+  return pending.length;
+};
+
+const formatHistoryLine =(role: string, content: any, char: CharacterProfile, userProfile: UserProfile) => {
   const speaker = role === 'assistant' ? char.name : role === 'user' ? userProfile.name : '系统';
   // 富内容（视觉模型的 [{type:'text'},{type:'image_url'}] 格式）按 part 类型拍平：
   // 文本部分照抄，图片部分压成 [图片] 占位，别的类型丢掉——不能整段 JSON.stringify，
@@ -860,6 +921,16 @@ export const describeInstantChatFailure = (status: number, body: any): string =>
   }
   return `即时对话没发出去（HTTP ${status}${code ? ` / ${code}` : ''}）${detail ? `：${detail}` : '。'}`;
 };
+
+/**
+ * 这个错误体是不是「引用的凭据行在云端不存在」。
+ *
+ * 两层都看：排程直接调上游时错误码就在顶层；即时对话经包装层，上游那份原样躺在
+ * `error.upstream` 里。补传自愈的两处（排程 / 即时对话）共用这一把尺。
+ */
+export const isCredentialNotFound = (body: any): boolean =>
+  body?.error?.code === 'CREDENTIAL_NOT_FOUND'
+  || body?.error?.upstream?.error?.code === 'CREDENTIAL_NOT_FOUND';
 
 /** client_state 上传每次尝试前等多久：数组长度即总尝试次数（首次不等）。 */
 const CLIENT_STATE_BACKOFF_MS = [0, 400, 1200];
@@ -1533,6 +1604,9 @@ export const ActiveMsgClient = {
     invalidateClientCache();
     await initializeClient(config);
     await ActiveMsgStore.saveGlobalConfig({ ...config, initializedAt: Date.now() });
+    // 「重新连接并验证」是用户显式的一次对表，凭据引用那个能力位也当场探准，别等下次握手。
+    // 排在保存之后：上面那句写的是握手前的配置快照，探测结论放它前面会被原样盖回去。
+    await this.probeLlmCredentialsSupport();
     await this.reconcilePushSubscription();
     const nativeToken = readNativePushToken();
     if (nativeToken) await this.registerNativePushToken(nativeToken);
@@ -1871,6 +1945,11 @@ export const ActiveMsgClient = {
       },
     };
 
+    // 凭据这一轮走哪条路：能存表就只带引用，老 worker 照旧内联三件套。
+    // 引用那条路要先把行传上去（下面的 credRow），传成功才建任务。
+    const useCredRefs = task.mode !== 'fixed' && await isLlmCredentialsReady();
+    let credRow: LlmCredentialRow | null = null;
+
     if (task.mode === 'fixed') {
       const userMessage = task.userMessage?.trim();
       if (!userMessage) throw new Error('固定消息模式需要填写消息内容。');
@@ -1884,9 +1963,18 @@ export const ActiveMsgClient = {
       // worker 的 onBeforeFire 返回值覆盖（库用 { ...payload, messages } 调 LLM），
       // 这条内容永远不参与生成——它要是真出现在哪里，就说明 worker 的 fire hooks 没生效。
       payload.messages = [{ role: 'user', content: AMSG2_PLACEHOLDER_PROMPT }];
-      payload.apiUrl = normalizeChatApiUrl(activeApi.baseUrl);
-      payload.apiKey = activeApi.apiKey;
-      payload.primaryModel = activeApi.model;
+      if (useCredRefs) {
+        // 引用与内联三件套上游只收一种，同传直接 400——所以这条路上一个内联字段都不写。
+        // 行的值按 (char, config, apiConfig) 现算，与后台补传那条路同一个入口，
+        // 两边算出来的指纹才对得上（否则每次排程都会白传一次）。
+        credRow = buildCharChatCredRow(char, config, apiConfig);
+        if (!credRow) throw new Error('主动消息 2.0 缺少可用的 API URL / Key / Model。');
+        payload.credRefs = { chat: credRow.credId };
+      } else {
+        payload.apiUrl = normalizeChatApiUrl(activeApi.baseUrl);
+        payload.apiKey = activeApi.apiKey;
+        payload.primaryModel = activeApi.model;
+      }
       if (config.maxTokens && config.maxTokens > 0) {
         payload.maxTokens = config.maxTokens;
       }
@@ -1920,16 +2008,33 @@ export const ActiveMsgClient = {
       ], '上传云端状态');
     }
 
-    const encrypted = await encryptPayload(client, payload);
-    const response = await fetchWithAuth('schedule-message', globalConfig, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Payload-Encrypted': 'true',
-        'X-Encryption-Version': '1',
-      },
-      body: JSON.stringify(encrypted),
-    }, '创建任务');
+    // 凭据行要先在云端存在：上游建任务前会挨个查引用，缺一个就 409 CREDENTIAL_NOT_FOUND。
+    // 只在值变过时真的发请求（指纹底账），所以常态下这一步一个请求都不发。
+    if (credRow) await putLlmCredentialRows([credRow]);
+
+    const postSchedule = async () => {
+      const encrypted = await encryptPayload(client, payload);
+      return fetchWithAuth('schedule-message', globalConfig, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Payload-Encrypted': 'true',
+          'X-Encryption-Version': '1',
+        },
+        body: JSON.stringify(encrypted),
+      }, '创建任务');
+    };
+
+    let response = await postSchedule();
+    // 云端说这行凭据不存在（换过 master key、点过「清空云端数据」、或者上一次上传其实
+    // 没落地而本地底账记着传过）——本地那本账此刻是脏的，绕过指纹强传一次再重排一次。
+    // 只自愈一次：再不成就是真出了别的问题，抛给用户看得见的报错。
+    if (!response?.success && response?.error?.code === 'CREDENTIAL_NOT_FOUND' && credRow) {
+      console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 云端没有这行凭据，补传后重排一次`, credRow.credId);
+      forgetCredIds([credRow.credId]);
+      await putLlmCredentialRows([credRow], { force: true });
+      response = await postSchedule();
+    }
 
     if (!response?.success) {
       throw new Error(response?.error?.message || '主动消息 2.0 任务创建失败。');
@@ -2021,6 +2126,43 @@ export const ActiveMsgClient = {
     };
 
     const clientTaskId = crypto.randomUUID();
+
+    // ── 这一轮的凭据走引用还是内联 ──
+    //
+    // 走引用时两行一起登记：
+    //   char:<id>/instant  这一轮真正会用的聊天凭据（model 是请求体终值，claude 系开思考
+    //                      时带 -thinking 后缀）。**必须带上它**——只带 emotion 一个引用的话，
+    //                      角色在这一轮里给自己排的任务会继承一份「有引用、没聊天凭据」的
+    //                      空壳（上游 scheduleTask 见到任何 credRefs 就不再复制内联三件套）。
+    //   char:<id>/emotion  情绪评估的副 API。有了它，评估配置里就不必再塞一份凭据。
+    //
+    // 走内联时一切照旧：三件套写在任务顶层，评估配置连凭据一起放 metadata。
+    const useCredRefs = await isLlmCredentialsReady();
+    const credRows: LlmCredentialRow[] = [];
+    const credRefs: Record<string, string> = {};
+    if (useCredRefs) {
+      const instantRow = buildCharInstantCredRow(char.id, api);
+      if (instantRow) {
+        credRows.push(instantRow);
+        credRefs.chat = instantRow.credId;
+      }
+      if (params.emotionEval?.api) {
+        const emotionRow = buildCharEmotionCredRow(char.id, params.emotionEval.api, {
+          baseUrl: api.baseUrl, apiKey: api.apiKey, model: api.model,
+        });
+        // 只在聊天那一行也立得住时才挂 emotion：单挂一个 emotion 引用就是上面说的那种空壳。
+        if (emotionRow && credRefs.chat) {
+          credRows.push(emotionRow);
+          credRefs.emotion = emotionRow.credId;
+        }
+      }
+    }
+    const inlineCreds = !credRefs.chat;
+    // 评估配置：凭据走引用时只留提示词模板，副 API 的 apiKey 一个字节都不进任务 metadata。
+    const emotionEvalSpec = params.emotionEval
+      ? (credRefs.emotion ? { prompt: params.emotionEval.prompt } : params.emotionEval)
+      : undefined;
+
     const remoteAvatarUrl = toRemoteAvatarUrl(char.avatar);
     const taskPayload: Record<string, unknown> = {
       contactName: char.name,
@@ -2043,9 +2185,14 @@ export const ActiveMsgClient = {
       tzId,
       // 真正要发给模型的消息在 fire_pack.chat 里，这条只为过上游「messages 非空」的校验。
       messages: [{ role: 'user', content: AMSG2_PLACEHOLDER_PROMPT }],
-      apiUrl: normalizeChatApiUrl(api.baseUrl),
-      apiKey: api.apiKey,
-      primaryModel: api.model,
+      // 引用与内联上游只收一种，同传直接 400。
+      ...(inlineCreds
+        ? {
+          apiUrl: normalizeChatApiUrl(api.baseUrl),
+          apiKey: api.apiKey,
+          primaryModel: api.model,
+        }
+        : { credRefs }),
       // 温度跟着本地走：本地发多少云端发多少，本地不发（开思考时）云端也不发。
       // 少了它，同一句话云端会落到供应商默认温度（常为 1.0），回复风格和本地对不上。
       ...(typeof params.temperature === 'number' ? { temperature: params.temperature } : {}),
@@ -2068,9 +2215,10 @@ export const ActiveMsgClient = {
         amsgInstantChat: true,
         amsgClientTaskId: clientTaskId,
         // 情绪评估交给云端跑：worker 到点和主回复并行发起，结果随最后一条推送回来
-        // （见 worker/amsg/src/emotionEval.ts）。它里头有副 API 的 apiKey，只能待在
-        // 这个加密信封里——worker 组推送前会把它摘掉，一个字节都不许跟着 push 出门。
-        ...(params.emotionEval ? { amsgEmotionEval: params.emotionEval } : {}),
+        // （见 worker/amsg/src/emotionEval.ts）。凭据走引用时这里只剩提示词模板；
+        // 老 worker 那条路还带着副 API 的 apiKey，它只能待在这个加密信封里——worker
+        // 组推送前会把它摘掉，一个字节都不许跟着 push 出门。
+        ...(emotionEvalSpec ? { amsgEmotionEval: emotionEvalSpec } : {}),
         // 刻意不带 amsgExpirePolicy / amsgAnchorMs：防穿帮闸问的是「到点还该不该主动开口」，
         // 对「回一句用户刚说的话」不适用，带上去反而会把用户等着的回复吞掉。
       },
@@ -2087,12 +2235,26 @@ export const ActiveMsgClient = {
       encryptPayload(client, taskPayload),
     ]);
 
-    const { status, body } = await fetchWithAuthRaw('instant-chat', globalConfig, {
+    // 凭据行先落地再建任务（上游建任务前会挨个查引用）。只有值变过才真的发请求，
+    // 所以常态下这一步是零请求——不给「用户正等着回复」这条路白加一次往返。
+    if (credRows.length > 0) await putLlmCredentialRows(credRows);
+
+    const postInstantChat = () => fetchWithAuthRaw('instant-chat', globalConfig, {
       method: 'POST',
       // 外壳是明文：里头两个信封已经加密好，别再给外壳挂加密头（包装层会当它是整体密文）。
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ statePayload, taskPayload: encryptedTask }),
     }, '即时对话');
+
+    let { status, body } = await postInstantChat();
+    // 云端说引用的凭据不存在（本地底账脏了）：绕过指纹强传一次再发一次，只自愈一次。
+    // 包装层把上游那份原样塞在 error.upstream 里，所以要往里再剥一层看错误码。
+    if (status !== 202 && credRows.length > 0 && isCredentialNotFound(body)) {
+      console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 云端没有这一轮引用的凭据，补传后重发一次`);
+      forgetCredIds(credRows.map((row) => row.credId));
+      await putLlmCredentialRows(credRows, { force: true });
+      ({ status, body } = await postInstantChat());
+    }
 
     if (status !== 202 || typeof body?.uuid !== 'string' || !body.uuid) {
       throw new Error(describeInstantChatFailure(status, body));
@@ -2215,6 +2377,55 @@ export const ActiveMsgClient = {
       console.warn('[AmsgInstantChat] 能力探测结果没存下来（下次发消息按上一次的存量判断）', error);
     }
     return supported;
+  },
+
+  /**
+   * 这台 worker 支不支持「凭据存表、任务带引用」（credRefs）。
+   *
+   * 认的是 GET /capabilities 里的 features 有没有 'llm-credentials'。结论存进全局配置，
+   * 之后排程 / 即时对话 / 保存配置都只读那份存量（见 isLlmCredentialsReady）——路上不做
+   * 逐次预检，那等于给每条消息加一次 RTT。
+   *
+   * 探不到（老 worker 没这个端点、网络不通）一律 false：老路在哪台 worker 上都能跑。
+   */
+  async probeLlmCredentialsSupport(): Promise<boolean> {
+    let supported = false;
+    try {
+      const capabilities = await this.getCapabilities();
+      supported = supportsLlmCredentials(capabilities?.features);
+    } catch {
+      supported = false;
+    }
+    try {
+      await ActiveMsgStore.saveGlobalConfig({ llmCredentialsSupported: supported });
+    } catch (error) {
+      console.warn('[AmsgLlmCred] 能力探测结果没存下来（下次按上一次的存量判断）', error);
+    }
+    return supported;
+  },
+
+  /**
+   * 把几行凭据登记到云端（只传真的变了的那些）。排程 / 即时对话之前调，失败就抛，
+   * 让那一轮明确失败——建了一条引用着不存在凭据的任务，到点只会白白失败几轮。
+   */
+  async putLlmCredentials(rows: LlmCredentialRow[], options?: { force?: boolean }): Promise<number> {
+    return putLlmCredentialRows(rows, options ?? {});
+  },
+
+  /**
+   * 删掉云端登记的凭据行。`credIds` 删指定几行（删角色时清它名下的），
+   * `all` 全删（「清空云端数据」）。本地指纹底账同步划掉，不然下次「没变过」会拦住重传。
+   */
+  async deleteLlmCredentials(opts: { credIds?: string[]; all?: boolean }): Promise<number> {
+    const config = await ensureWorkerReady();
+    const client = await initializeClient(config);
+    const response = await client.deleteLlmCredentials(opts);
+    if (!response?.success) {
+      throw new Error(response?.error?.message || '删除 LLM 凭据失败。');
+    }
+    if (opts.all) forgetAllCredIds();
+    else forgetCredIds(opts.credIds ?? []);
+    return Number(response.data?.deleted ?? 0);
   },
 
   /**

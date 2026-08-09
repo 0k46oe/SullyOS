@@ -128,6 +128,7 @@ import {
 import {
   amsgEmotionUpdateKey,
   EMOTION_EVAL_RIDE_ALONG_MS,
+  resolveEmotionEvalApi,
   runAmsgEmotionEval,
   stripEmotionEvalSpec,
   takeEmotionEvalSpec,
@@ -196,8 +197,22 @@ interface FireCtx {
     recurrenceType?: string;
     nextSendAt?: string | null;
     metadata?: Record<string, unknown>;
+    /**
+     * 凭据引用（`{ <用途>: <cred_id> }`）。聊天那一路由上游自己解析后直接喂给 LLM，
+     * 宿主碰不到也不必碰；这里只用得上别的用途——现在只有 `emotion`（情绪评估的副 API）。
+     * 引用本身不是机密（只是个名字），所以上游没把它挡在 hook 之外。
+     */
+    credRefs?: Record<string, unknown> | null;
   };
   userId: string;
+  /**
+   * 按名字取一行凭据（amsg-server 2.6.0-next.17+）。查不到回 null，老部署上整个方法不存在。
+   * **红线**：取到就地用完即弃，绝不挂到 ctx / task / metadata / push 上——凭据一旦
+   * 沾上会流向推送的任何对象，就等于送出门了。
+   */
+  resolveLlmCredential?: (
+    credId: string,
+  ) => Promise<{ apiUrl: string; apiKey: string; primaryModel: string } | null>;
   readState: (namespace: string) => Promise<Array<{ key: string; value: string }>>;
   /** 与每轮 sessionCtx 上那个是同一套写口（防穿帮闸跳过时用它留一句原因）。 */
   writeState?: WriteState;
@@ -1824,10 +1839,25 @@ export const amsgHooks = {
         const storedEvalRaw = clientTaskId
           ? charRows.find((r) => r.key === amsgEmotionUpdateKey(clientTaskId))?.value
           : undefined;
+        // 副 API 凭据两种来路：存量任务里内联的那份，或任务只带引用、这里现读凭据表
+        // （换 Key 之后不用回头改任务，见 resolveEmotionEvalApi）。取不到就这一轮不评估，
+        // 主回复照发——评估从来不连累正文。
+        // 取凭据是异步的，包在一个 promise 里保持「与主生成并行起跑」这件事不变。
         stash.emotionEvalPromise = storedEvalRaw
           ? Promise.resolve({ raw: storedEvalRaw, error: null })
-          : runAmsgEmotionEval(
-            emotionEvalSpec, instantMessages, toolPack.charName || ctx.task.contactName || '角色');
+          : (async () => {
+            const evalApi = await resolveEmotionEvalApi(
+              emotionEvalSpec, ctx.task.credRefs, ctx.resolveLlmCredential,
+            );
+            if (!evalApi) {
+              console.warn('[amsg:emotion] 这一轮取不到副 API 凭据，跳过评估');
+              return { raw: null, error: '云端没有可用的情绪评估 API 凭据' };
+            }
+            return runAmsgEmotionEval(
+              emotionEvalSpec, evalApi, instantMessages,
+              toolPack.charName || ctx.task.contactName || '角色',
+            );
+          })();
       }
 
       return {

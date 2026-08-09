@@ -3120,14 +3120,15 @@ describe('/debug — 只读诊断', () => {
   });
 
   /**
-   * 回归守卫：查不动的时候，**为什么**查不动要跟着回执一起出来。
+   * 回归守卫：库里混着 Cloudflare 内部表 `_cf_KV` 时，自查必须绕开它跑完。
    *
-   * 2026-08-09 在真机上撞到的：新建的 D1 库自带一张 Cloudflare 内部表 `_cf_KV`，上游
-   * 遍历全库逐表问列时问到它，被 D1 一口回绝（SQLITE_AUTH），整个自查断在第一张表上。
-   * 原因只写进 worker 日志的话，面板上剩下的就是一句「查不了，不知道」——用户拿它做不了
-   * 任何事，隔着屏幕也问不出来，只能一路猜到去翻 Cloudflare 日志为止。
+   * 2026-08-09 在真机上撞到的：新建的 D1 库自带这张内部表，当时的上游遍历全库逐表
+   * 问列，问到它被 D1 一口回绝（SQLITE_AUTH），整个自查断在第一张表上。修复随
+   * amsg-server 2.6.0-next.18+ 发布：内部表直接跳过。这个夹具里 `PRAGMA
+   * table_info(_cf_KV)` 仍然会炸——上游哪天退回去问它一句，自查就会重新断掉、
+   * schemaError 变回 denied，这条就红。
    */
-  it('自查被 D1 拒了（库里有 _cf_KV 这种内部表）→ 回执里带 schemaError: denied', async () => {
+  it('库里混着 _cf_KV 内部表 → 上游跳过它，自查照常跑完', async () => {
     const db = fakeDb({ tables: ['_cf_KV', ...ALL_TABLES] });
     const withInternalTable = {
       prepare(sql: string) {
@@ -3139,8 +3140,12 @@ describe('/debug — 只读诊断', () => {
       },
     };
     const data = await debug(withInternalTable);
-    expect(data.storage.schemaReady).toBeNull();
-    expect(data.storage.schemaError).toBe('denied');
+    // 自查没被内部表噎死：跑出了结论（缺不缺另说），且没把 _cf_KV 当成该建的表。
+    expect(data.storage.schemaError).toBeNull();
+    expect(data.storage.schemaReady).not.toBeNull();
+    expect(data.storage.missingTables).not.toContain('_cf_KV');
+    // 走完了全程才对得出完整清单：credRefs 那张 llm_credentials 也在比对范围里。
+    expect(data.storage.missingTables).toContain('llm_credentials');
   });
 
   it('自查跑成了就不带 schemaError（有值等于「这次没查成」）', async () => {
@@ -3149,12 +3154,14 @@ describe('/debug — 只读诊断', () => {
   });
 
   /**
-   * 回归守卫：库是空的 + 自查也挂了，这两件事撞一起时不许报「表和列都齐了」。
+   * 回归守卫：一张业务表都没有的库（一键部署完还没点「连接并启用」的样子，只剩
+   * `_cf_KV`）绝不许显示成全绿，而且要点得出名来。
    *
-   * 一键部署完还没点连接时正好同时成立：表一张没建（主表不在），而自查被 `_cf_KV`
-   * 拒掉，于是「缺哪些表」是一个空数组。界面只数这个数组的话，一个空库会显示成全绿。
+   * 旧版上游在这里会被 `_cf_KV` 噎死，「缺哪些表」只能是空数组，界面全靠
+   * schemaError 撑着说「查不了」；amsg-server 2.6.0-next.18+ 跳过内部表后，
+   * 自查能跑完并点名全部缺表，界面直接说得清「该点重新连接建表」。
    */
-  it('库里一张表都没有 + 自查也挂了 → schemaReady 报 false，且带得出原因', async () => {
+  it('库里一张业务表都没有 → 点名全部缺表，空库不算绿', async () => {
     const empty = {
       prepare(sql: string) {
         const answer = async () => {
@@ -3167,8 +3174,9 @@ describe('/debug — 只读诊断', () => {
     };
     const data = await debug(empty);
     expect(data.storage.schemaReady).toBe(false);
-    expect(data.storage.missingTables).toEqual([]);
-    expect(data.storage.schemaError).toBe('denied');
+    expect(data.storage.missingTables).toContain('scheduled_messages');
+    expect(data.storage.missingTables).toContain('llm_credentials');
+    expect(data.storage.schemaError).toBeNull();
   });
 
   it('换了 bundle 没跑 init-tenant → 点名缺的那几列（cron 会因此每分钟静默挂）', async () => {

@@ -46,6 +46,44 @@ describe('打脏入口接线（保存后调 markAmsgStateDirty）', () => {
   });
 });
 
+// 换 Key 之后云端那几行凭据不重传的话，已排程的任务到点全部 401，而界面上一切正常。
+// 保存配置那两处是它唯一的触发点，接线被删就没人补了。
+describe('LLM 凭据行的重传接线', () => {
+  it('设置页保存聊天 API：重传凭据行 + 存量内联任务照旧补刷（两条并存）', () => {
+    const src = read('../apps/Settings.tsx');
+    const fn = sliceBetween(src, 'const handleSaveApi', 'const handleSaveOtherApis');
+    expect(fn).toContain('syncAmsgLlmCredentials(');
+    expect(fn, '存量内联任务还靠它续命，不能顺手退役')
+      .toContain('ActiveMsgClient.refreshApiCredentialsForPendingTasks(');
+  });
+
+  it('角色 2.0 面板保存（单独 API 可能刚改过）：也重传一次', () => {
+    expect(read('../components/chat/ActiveMsg2SettingsModal.tsx')).toContain('syncAmsgLlmCredentials(');
+  });
+
+  it('启动补传把 apiConfig 也递进去（缺了它凭据那一项永远补不上）', () => {
+    const src = read('../context/OSContext.tsx');
+    const call = sliceBetween(src, 'resumePendingAmsgStateSync({', '});');
+    expect(call).toContain('apiConfig:');
+  });
+
+  it('删角色时连它名下那几行凭据一起清（keys 是 API Key，不能留在云端）', () => {
+    const src = read('./amsg2CharCleanup.ts');
+    expect(src).toContain('deleteLlmCredentials({ credIds: charCredIds(');
+  });
+});
+
+// 「更新 Worker」之后必须跑一次 init-tenant：新版后端带了新表（这一波是 llm_credentials），
+// 而建表只在那个端点里做。少了它，代码是新的、表还是旧的，cron 每分钟静默失败。
+describe('更新 Worker 之后的自动验证', () => {
+  it('自更新成功后接着 connect()（POST /init-tenant，新表在这一步建出来）', () => {
+    const src = read('../components/settings/ActiveMsgGlobalSettingsModal.tsx');
+    const fn = sliceBetween(src, 'const handleSelfUpdateWorker', 'const handleAttachUpdateKey');
+    expect(fn).toContain('await ActiveMsgClient.connect()');
+    expect(fn, '验证没过要单独说，别把「代码换上了」和「表补齐了」混成一句').toContain('重新连接并验证');
+  });
+});
+
 describe('删角色阻塞接线（云端任务清不掉先不删本地）', () => {
   it('deleteCharacter：await 云端清理、失败返回 cloud-cleanup-failed', () => {
     const src = read('../context/OSContext.tsx');

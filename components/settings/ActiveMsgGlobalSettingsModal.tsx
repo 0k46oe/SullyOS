@@ -57,6 +57,10 @@ const REQUIRED_WORKER_FEATURES = [
   'task-timezone',
   // 推送订阅按用户存一份，排程不再携带；换订阅后已排的任务自动跟上。
   'user-push-subscription',
+  // 凭据存成表里的一行、任务只带引用（credRefs）。换 Key 只要覆盖那一行，已排的任务
+  // ——包括角色在触发时给自己排的那些——下次触发就用新凭据。缺了它就退回「凭据冻结
+  // 进每条任务」的老路：换 Key 要逐条补刷，漏一条到点就是 401。
+  'llm-credentials',
 ];
 // features 之外还必须比版本：这波依赖的能力大多没发独立 flag，光查 features 分不出新旧。
 //   next.5 — GET /messages 投影（charId/clientTaskId）、onBeforeFire 的 { skip } 出口
@@ -84,8 +88,11 @@ const REQUIRED_WORKER_FEATURES = [
 //   next.16 — 即时对话改由 Durable Object 起跳，靠的就是这一档的 runTask（按 uuid
 //            跑单条）；错误响应带 error.cause（真因不再只进 worker 日志）；
 //            getSchemaVersion（表结构对不对得上，由上游按自己的建表语句比对）。
+//   next.17 — 用户级 LLM 凭据表（PUT/GET/DELETE /llm-credentials）、任务的 credRefs、
+//            fire hook 的 resolveLlmCredential。这一档有独立 flag（上面那条
+//            'llm-credentials'），版本号列在这里只是备个案。
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
-const REQUIRED_WORKER_VERSION = '2.6.0-next.16';
+const REQUIRED_WORKER_VERSION = '2.6.0-next.19';
 
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';
@@ -701,8 +708,10 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       '确定清空云端数据？Worker D1 里属于你的这几样会一起删掉：\n\n'
       + '· 已排程的主动消息任务（含角色自己排的）\n'
       + '· 同步上去的角色上下文与工具凭据\n'
+      + '· 登记的 API 凭据\n'
       + '· 推送订阅登记\n\n'
-      + '任务删了要重新排。角色上下文下次聊天会自动传回去，工具凭据和推送订阅当场就补登记。'
+      + '任务删了要重新排。角色上下文下次聊天会自动传回去，API 凭据下次排程/发消息时重新登记，'
+      + '工具凭据和推送订阅当场就补登记。'
     )) return;
     setLoading(true);
     try {
@@ -723,6 +732,11 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       } else if (!result.toolConfigRestored) {
         problems.push('工具凭据没能补传回去，请到「实时感知」里重新保存一次配置，否则已排程的 AI 任务会一直失败');
       }
+      if (result.llmCredentialsDeleted === null) {
+        // 老 Worker 上压根没有这张表，这一句同样成立：那边确实没清成，而下次排程会
+        // 走回「凭据冻结进任务」的老路，也就无所谓残留。
+        problems.push('登记的 API 凭据没能删掉（Worker 版本较旧的话本来就没有这一项）');
+      }
       if (result.push === 'failed') {
         problems.push('推送订阅没能收拾干净，建议到上面的推送区域重新订阅一次');
       }
@@ -730,7 +744,11 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       if (problems.length > 0) {
         addToast(`云端数据没能全部清干净：${problems.join('；')}。`, 'error');
       } else {
-        const done = [`任务 ${result.tasks.total} 个`, `状态 ${result.stateDeleted} 条`];
+        const done = [
+          `任务 ${result.tasks.total} 个`,
+          `状态 ${result.stateDeleted} 条`,
+          `API 凭据 ${result.llmCredentialsDeleted} 行`,
+        ];
         if (result.push === 'reregistered') done.push('推送订阅已重新登记');
         addToast(`已清空云端数据（${done.join('、')}）。`, 'success');
       }
