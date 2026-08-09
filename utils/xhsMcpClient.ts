@@ -521,8 +521,10 @@ const describeXhsConnectFailure = (e: any, serverUrl: string): string => {
     const host = parseTargetUrl(serverUrl).host || serverUrl;
     const kind = classifyFetchFailure({ url: serverUrl, error: e });
     switch (kind) {
+        case 'timeout':
+            return `连接 ${host} 超时（10 秒一个字节都没回）。连接是挂住不返回、不是被拒——多半是该域名没走代理走了直连，或代理节点到上游是黑洞。优先换个梯子节点、或把这个域名显式加进代理规则。`;
         case 'aborted':
-            return `连接 ${host} 超时（10 秒没有响应）。多半是代理/网关把连接吞了，换个梯子节点再试。`;
+            return '连接被取消（页面切走了或手动停止）。';
         case 'offline':
             return '当前处于离线状态，请检查网络或梯子是否掉线。';
         case 'mixed-content':

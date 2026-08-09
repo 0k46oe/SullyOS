@@ -23,7 +23,7 @@ import { safeFetchJson } from '../utils/safeApi';
 import { captureApiRequestOnce, getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext, updateApiRequestCaptureUsage } from '../utils/apiCallLog';
 import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
-import { buildFetchFailureDetail, classifyFetchFailure, describeReachabilityProbe, parseTargetUrl, probeOriginReachability } from '../utils/networkFailureDiagnosis';
+import { buildFetchFailureDetail, classifyFetchFailure, describeReachabilityProbe, parseTargetUrl, probeOriginReachability, shouldProbeReachability } from '../utils/networkFailureDiagnosis';
 import { INSTALLED_APPS, HIDDEN_APP_NAMES } from '../constants';
 import { isAnalyticsRequestUrl, trackEvent, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, trackCurrentFeaturesOnce } from '../utils/analytics';
 import { collectAppearance, collectCharSettings, collectDataScale, collectFeatureFlagsAsync } from '../utils/analyticsSnapshot';
@@ -1228,9 +1228,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       detail: baseDetail,
                   }, ...prev.slice(0, 49)]);
 
-                  // 只对「拿不到响应」这一类做复检：主动取消 / 混合内容 / 地址非法已经有确定结论了，
-                  // 再打一次纯属浪费。复检走 originalFetch，否则它自己失败会再写一条日志滚雪球。
-                  if (classifyFetchFailure({ url: urlStr, error: err }) === 'blocked') {
+                  // 复检走 originalFetch，否则它自己失败会再写一条日志滚雪球。
+                  if (shouldProbeReachability(classifyFetchFailure({ url: urlStr, error: err }))) {
                       void (async () => {
                           const verdict = await probeOriginReachability(urlStr, originalFetch);
                           const line = describeReachabilityProbe(verdict, parseTargetUrl(urlStr).host);
