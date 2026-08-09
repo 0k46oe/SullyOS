@@ -1,5 +1,7 @@
 // utils/amsg2Tasks.test.ts
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   MAX_ACTIVE_TASKS_PER_CHAR,
   REPLACE_CANCEL_FAILED_NOTE,
@@ -8,6 +10,7 @@ import {
   AMSG2_SCHEDULE_SECRECY_NOTE,
   buildFireTaskListBlock,
   currentOccurrenceMs,
+  describeInstantChatFailure,
   describeRemoteLastError,
   describeTaskProgress,
   findTaskByShortId,
@@ -343,6 +346,38 @@ describe('describeRemoteLastError', () => {
   });
 });
 
+describe('describeInstantChatFailure', () => {
+  // 排程那句是「上次到点没发出去」，说的是一条到点该主动开口的任务。即时对话是用户
+  // 刚按下发送的一条消息，套那个句式读起来不知所云。
+  it('说人话地讲这一轮生成失败，带上重试次数和底层报错，不提「到点」', () => {
+    expect(describeInstantChatFailure({ at: '2026-08-05T00:00:00.000Z', reason: '上游 502' }, 3))
+      .toBe('生成失败（重试 3 次后放弃）：上游 502');
+  });
+
+  it('没重试过就不提重试；没有底层报错就只说生成失败', () => {
+    expect(describeInstantChatFailure({ reason: '上游 502' }, 0)).toBe('生成失败：上游 502');
+    expect(describeInstantChatFailure({ at: '2026-08-05T00:00:00.000Z' })).toBe('生成失败');
+  });
+
+  it("reason 'stale' 是排队太久没轮到，没有底层报错可引", () => {
+    expect(describeInstantChatFailure({ reason: 'stale' }, 2)).toBe('云端排队太久没轮到这一轮（重试 2 次后放弃）');
+  });
+
+  // skip-push 的两种机器码（worker 在 chat_fail 里留的）：这一轮不是失败、是没产出。
+  // 掉进「生成失败」句式的话，用户以为出了故障，其实是模型拒答/只做了动作。
+  it("reason 'empty-generation' / 'side-effects-only' 照实说没产出，不说成失败", () => {
+    expect(describeInstantChatFailure({ reason: 'empty-generation' }))
+      .toBe('模型这轮没有生成内容（空输出或拒答）');
+    expect(describeInstantChatFailure({ reason: 'side-effects-only' }))
+      .toBe('角色这轮只做了动作，没有文字回复');
+  });
+
+  it('一长串原始报错照样截断；没有 lastError → null', () => {
+    expect(describeInstantChatFailure({ reason: 'x'.repeat(500) })!.length).toBeLessThan(120);
+    expect(describeInstantChatFailure(null)).toBeNull();
+  });
+});
+
 describe('pruneFiredTasks', () => {
   const now = Date.now();
   const uuids = (list: ActiveMsg2TaskRecord[]) => list.map((t) => shortTaskId(t.taskUuid));
@@ -512,6 +547,18 @@ describe('reconcileTasksWithRemote（跟远端底账对一次账）', () => {
     const local = [task()];
     expect(reconcileTasksWithRemote(local, [])).toEqual(local);
   });
+
+  // 失败的行会在远端留 7 天（一次性任务发成功才删行），照单全收的话，清单上会多出
+  // 一条永远等不到的幽灵任务。
+  it('远端那行已经失败 → 不补进清单', () => {
+    expect(reconcileTasksWithRemote([], [remoteRow({ status: 'failed' })])).toEqual([]);
+  });
+
+  // 即时对话的行是「用户此刻正等着的一轮聊天」，不是排程：补进清单会显示成待触发的
+  // 任务，还可能被「取消全部」把用户正等着的回复顺手掐掉。
+  it('远端那行是即时对话 → 不补进清单', () => {
+    expect(reconcileTasksWithRemote([], [remoteRow({ messageSubtype: 'instant-chat' })])).toEqual([]);
+  });
 });
 
 describe('currentOccurrenceMs 跨夏令时', () => {
@@ -538,5 +585,40 @@ describe('currentOccurrenceMs 跨夏令时', () => {
     });
     const now = Date.parse('2026-03-20T00:00:00.000Z');
     expect(currentOccurrenceMs(stale, now)).toBeGreaterThan(now);
+  });
+});
+
+// ─── 设置面板的「启用主动消息 2.0」开关必须落盘 ───
+//
+// isAmsg2EnabledForChar 只认持久化下来的 enabled:true。开关的 onClick 要是只改 React
+// state，用户拨开、关掉弹窗之后角色身上还是没有 activeMsg2Config：聊天里不注入
+// schedule/cancel/renew/list、fire_pack 的 selfScheduleEnabled 上传 false、云端 fire
+// 也不给排程能力，而重开面板开关又显示成「关」。症状是纯界面的，不报错也不崩，
+// 用户唯一能歪打正着的路子是去点「新建任务」——那条路才顺手写了 enabled:true。
+//
+// 仓库的 vitest 是纯 Node 环境（没装 jsdom），设置面板是 React 组件跑不起来测行为，
+// 所以沿用 amsg2CharToggle.wiring.test.ts 的做法做源码级断言：它验证不了运行时时序，
+// 只钉住「开关接的是会写库的 handler」这一件事。
+describe('设置面板的启用开关落盘', () => {
+  const modal = readFileSync(
+    fileURLToPath(new URL('../components/chat/ActiveMsg2SettingsModal.tsx', import.meta.url)),
+    'utf8',
+  );
+  const toggleHandler = modal.match(/const handleToggleEnabled[\s\S]*?\n  \};/)?.[0] ?? '';
+
+  it('开关接的是会写库的 handler，不是裸 setEnabled', () => {
+    expect(modal).toMatch(/onClick=\{handleToggleEnabled\}/);
+    expect(modal).not.toMatch(/onClick=\{\(\) => setEnabled\(!enabled\)\}/);
+  });
+
+  it('handler 既改面板状态也落盘', () => {
+    expect(toggleHandler).toMatch(/setEnabled\(!enabled\)/);
+    expect(toggleHandler).toMatch(/onSave\(/);
+  });
+
+  it('只有「开」就地落盘，「关」留给「关闭 2.0」按钮先取消远端任务', () => {
+    // 就地写 enabled:false 的话，该角色在远端的任务没人取消，会变成面板看不见、
+    // 却照样到点触发的幽灵任务。
+    expect(toggleHandler).toMatch(/if \(turningOn\)[\s\S]*?onSave\(/);
   });
 });

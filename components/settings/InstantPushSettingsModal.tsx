@@ -15,6 +15,7 @@ import {
   normalizeWorkerUrl,
 } from '../../utils/instantPushClient';
 import { isPushVapidReady } from '../../utils/pushVapid';
+import { isInstantChatReady } from '../../utils/amsgInstantChat';
 import {
   markWorkerBuildSeen,
 } from '../WorkerUpdateReminderEvent';
@@ -47,6 +48,10 @@ export const InstantPushSettingsModal: React.FC<InstantPushSettingsModalProps> =
   const [d1CheckedWorkerUrl, setD1CheckedWorkerUrl] = useState('');
 
   const [vapidReady, setVapidReady] = useState(false);
+  // 即时对话（主动消息 2.0）已取代 Instant Push，两条发送路互斥。对面（amsg2 面板）
+  // 有一道同款的门，这里是反方向那一半：少了它，用户可以先开即时对话、再回这里把
+  // IP 勾回来，聊天就会静默走 IP、即时对话开关亮着却不生效。
+  const [instantChatOn, setInstantChatOn] = useState(false);
 
   const [testStatus, setTestStatus] = useState('');
   const [testBusy, setTestBusy] = useState(false);
@@ -90,10 +95,13 @@ export const InstantPushSettingsModal: React.FC<InstantPushSettingsModalProps> =
     setDenoCopyStatus('');
     setVersionCheck('idle');
     setVersionCheckDetail('');
+    void isInstantChatReady().then(setInstantChatOn).catch(() => setInstantChatOn(false));
   }, [open]);
 
   const normalizedWorkerUrl = normalizeWorkerUrl(workerUrl);
   const canUseD1 = !!d1Available && !!normalizedWorkerUrl && d1CheckedWorkerUrl === normalizedWorkerUrl;
+  // 即时对话开着、IP 还没开：勾选框锁死 + 底下那句提示都看这一个值，取消永远不受影响。
+  const enableBlockedByInstantChat = instantChatOn && !enabled;
 
   const resetD1State = () => {
     setD1Available(false);
@@ -314,11 +322,25 @@ export const InstantPushSettingsModal: React.FC<InstantPushSettingsModalProps> =
     }
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const cfg = currentCfg();
+    // 存档前现查一次即时对话状态兜底：instantChatOn 是异步读回来的，modal 刚打开还没落地
+    // 那一小段时间里手快把 IP 勾上就点保存，能在探测结果生效前把 off→on 抢跑过去——这正是
+    // 这道反向门要挡住的情况。这里只夹 enabled 这一个字段，其余字段照常存盘；已经是 on
+    // 的 IP 不受影响，取消永远放行。
+    const raceBlocked = !loadInstantConfig().enabled && cfg.enabled && await isInstantChatReady();
+    if (raceBlocked) {
+      cfg.enabled = false;
+      setEnabled(false);
+      setInstantChatOn(true);
+    }
     saveInstantConfig(cfg);
     // 保存为启用状态视为「已按当前 worker 版本配好」，避免随后被无意义地提醒更新。
     if (cfg.enabled) markWorkerBuildSeen();
+    if (raceBlocked) {
+      addToast('主动消息 2.0 的「即时对话」已经开着，Instant Push 没法一起启用，其余设置已保存。', 'error');
+      return;
+    }
     addToast('Instant Push 配置已保存', 'success');
     onClose();
   };
@@ -345,7 +367,7 @@ export const InstantPushSettingsModal: React.FC<InstantPushSettingsModalProps> =
           </button>
           <button
             type="button"
-            onClick={handleSave}
+            onClick={() => void handleSave()}
             className="flex-1 py-3 bg-indigo-500 text-white font-bold rounded-2xl shadow-lg shadow-indigo-200 text-sm"
           >
             保存
@@ -431,15 +453,21 @@ export const InstantPushSettingsModal: React.FC<InstantPushSettingsModalProps> =
             </div>
           </div>
 
-          <label className="flex items-center gap-2 cursor-pointer">
+          <label className={`flex items-center gap-2 ${enableBlockedByInstantChat ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>
             <input
               type="checkbox"
               checked={enabled}
+              disabled={enableBlockedByInstantChat}
               onChange={(e) => setEnabled(e.target.checked)}
               className="accent-indigo-500"
             />
             <span className="text-[12px] text-slate-600 font-medium">启用 Instant Push</span>
           </label>
+          {enableBlockedByInstantChat && (
+            <p className="text-[11px] text-amber-600 leading-relaxed">
+              主动消息 2.0 的「即时对话」已经接管了聊天上云，这里不用再开。想换回 Instant Push 的话，先去 2.0 设置里关掉即时对话。
+            </p>
+          )}
 
           <label className="flex items-start gap-2 cursor-pointer">
             <input

@@ -5,9 +5,10 @@
 // 和 `tool_pack`。fire_pack 里是完整角色系统提示词 + 最近 30 条对话原文，而删除确认框
 // 跟用户说的是「记忆将被清空」——留着就是把聊天记录晾在云端。
 //
-// 同时钉住两条边界，别为了清得干净把删角色搞坏：
-//   1. 没配过主动消息 2.0 的角色一个请求都不发；
-//   2. 压根没填 worker 地址时也不发（云端从来没写过东西，报「清理失败」是吓唬人）；
+// 同时钉住几条边界，别为了清得干净把删角色搞坏：
+//   1. 从没打开过 2.0 面板的角色（activeMsg2Config 缺失）也要清——全局即时对话开着时
+//      它每轮聊天都在往云端写完整对话，按「配没配过」猜就是把聊天原文永久留在 D1 里；
+//   2. 压根没填 worker 地址时不发（云端从来没写过东西，报「清理失败」是吓唬人）；
 //   3. 清不掉（断网 / worker 挂了）只回报结果，绝不抛错阻塞删除。
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -53,10 +54,14 @@ describe('purgeCharCloudState', () => {
     expect(clearMock()).toHaveBeenCalledTimes(1);
   });
 
-  it('从没配过 amsg2 的角色 → 一个请求都不发', async () => {
+  // Bug 回归守卫：全局即时对话开着时，从没打开过 2.0 面板的角色（activeMsg2Config
+  // 缺失、跟随全局默认开）每轮聊天都会经 POST /instant-chat 把完整对话写进云端
+  // client_state。以前这里看「配没配过」直接 skip，一个清理请求都不发——该角色的
+  // 聊天原文（含图片 base64）就永久留在 D1 里，删除确认框「记忆将被清空」落空。
+  it('从没配过 amsg2 的角色 → 只要 worker 配置在就照清（即时对话可能写过云端）', async () => {
     const result = await purgeCharCloudState({ id: 'char-2', name: '路人' } as CharacterProfile);
-    expect(clearMock()).not.toHaveBeenCalled();
-    expect(result).toEqual({ status: 'skipped' });
+    expect(clearMock()).toHaveBeenCalledWith('char-2');
+    expect(result).toEqual({ status: 'cleared', keys: ['fire_pack', 'tool_pack'] });
   });
 
   it('角色本身找不到（并发删两次）→ 同样不发请求', async () => {
@@ -65,8 +70,7 @@ describe('purgeCharCloudState', () => {
     expect(result).toEqual({ status: 'skipped' });
   });
 
-  // 面板保存失败时也会给角色留下一份 activeMsg2Config（比如全局还没配好就点了保存），
-  // 光看 config 在不在会把这种角色当成「云端有数据」，删它时弹一条根本不存在的清理失败。
+  // 「压根没配 worker 连接」是唯一的 skip 理由：没有地址就没有云端，一个字节都没写过。
   it('没填 worker 地址 → 跳过，不发请求也不报失败（云端压根没写过东西）', async () => {
     workerUrl = '';
     const result = await purgeCharCloudState(charWith({ enabled: true, tasks: [] }));
@@ -79,6 +83,13 @@ describe('purgeCharCloudState', () => {
     await expect(purgeCharCloudState(charWith({ enabled: true })))
       .resolves.toEqual({ status: 'skipped' });
     expect(clearMock()).not.toHaveBeenCalled();
+  });
+
+  it('没配过 2.0 的角色 + 全局也没配 worker → 才是真的没云端，跳过', async () => {
+    workerUrl = '';
+    const result = await purgeCharCloudState({ id: 'char-3', name: '路人乙' } as CharacterProfile);
+    expect(clearMock()).not.toHaveBeenCalled();
+    expect(result).toEqual({ status: 'skipped' });
   });
 
   it('清不掉（断网 / worker 挂了）→ 不抛错，把失败交给调用方提示', async () => {
@@ -97,10 +108,12 @@ describe('purgeCharCloudState', () => {
 });
 
 describe('charMayHaveCloudState', () => {
-  it('只看有没有 activeMsg2Config', () => {
+  // 不做按角色的 capability 预检：即时对话会替「从没配过 2.0」的角色写云端，
+  // 猜漏一条写入路就是漏清。角色在就当可能有，真正的门是「配没配 worker 连接」。
+  it('角色存在就当可能有云端数据（不看 activeMsg2Config）', () => {
     expect(charMayHaveCloudState(charWith({ enabled: true }))).toBe(true);
     expect(charMayHaveCloudState(charWith({ enabled: false }))).toBe(true);
-    expect(charMayHaveCloudState({ id: 'x', name: 'x' } as CharacterProfile)).toBe(false);
+    expect(charMayHaveCloudState({ id: 'x', name: 'x' } as CharacterProfile)).toBe(true);
     expect(charMayHaveCloudState(undefined)).toBe(false);
   });
 });

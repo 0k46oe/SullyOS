@@ -303,8 +303,20 @@ export interface ActiveMsg2GlobalConfig {
   workerUrl: string;
   /** 与 worker 约定的共享密钥；配了就每次请求带 X-Client-Token，缺/错 worker 返回 401 */
   serverToken?: string;
+  /**
+   * 一键部署时生成的 AMSG_MASTER_KEY（worker 侧用它加密任务内容）。
+   * 存在这里只为「重装时沿用同一把」——它一换，之前加密进 D1 的任务就全解不开了，
+   * 而 worker 里的值读不回来。手动部署的用户这里是空的，属正常。
+   */
+  masterKey?: string;
   /** 上次「连接」（在 worker 端建表）成功的时间 */
   initializedAt?: number;
+  /**
+   * 即时对话：聊天的每一轮都交给云端跑（POST /instant-chat），回复走推送回来。
+   * 只在设置页那一处开关（开关本身还有连接 / 通知权限 / worker 能力三道门），
+   * 关掉就是现在的本地直连生成。
+   */
+  instantChatEnabled?: boolean;
   updatedAt?: number;
 }
 
@@ -342,10 +354,22 @@ export interface ActiveMsg2TaskRecord {
 
 export interface ActiveMsg2CharacterConfig {
   enabled: boolean;
+  /**
+   * 即时对话按角色单独关。undefined = 跟随全局（全局即时对话开着就默认开）；
+   * false = 这个角色的聊天回到本地前台生成。与 enabled（排程开关）互相独立：
+   * 可以只排程不即时，也可以只即时不排程。
+   */
+  instantChatEnabled?: boolean;
   /** 多任务清单（用户在面板建的和角色用工具建的并存），见 utils/amsg2Tasks.ts。 */
   tasks?: ActiveMsg2TaskRecord[];
   /** ↓ 角色级共享设置（所有任务共用）。 */
   maxTokens?: number;
+  /**
+   * 「我没回的时候，TA 最多连续主动发几条」。0 = 不限；没设 = 默认值
+   * （amsgFirePack.DEFAULT_MAX_UNANSWERED_SENDS）。管的是角色自己排的后续
+   * （含 fire 里的自排链），用户在面板里亲手排的任务不受它管；用户一回复就重新计数。
+   */
+  maxUnansweredSends?: number;
   useSecondaryApi?: boolean;
   secondaryApi?: ActiveMsg2ApiConfig;
   lastSyncedAt?: number;

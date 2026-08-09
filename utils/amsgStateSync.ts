@@ -3,14 +3,14 @@
  *
  * 打脏入口不止聊完一轮（useChatAI）：改人设 / 改记忆 / 删改消息 / 面板取消任务这些会
  * 改变 fire_pack 内容的落库路径也会调 markAmsgStateDirty（大多汇在 OSContext 的
- * updateCharacter 落库点），去抖后把所有脏角色的 fire_pack 批量上传 worker 的
- * client_state；切后台（visibilitychange→hidden）立即冲刷——iOS 只给几秒存活窗口，
+ * updateCharacter 落库点），打脏后立即把所有脏角色的 fire_pack 批量上传 worker 的
+ * client_state；切后台（visibilitychange→hidden）也冲刷一次——iOS 只给几秒存活窗口，
  * 必须一次请求写完。
  *
  * 只对「已排程 AI 模式 amsg2 任务」的角色生效，其余 markDirty 直接忽略。
  *
  * 脏标记有一份极轻量的 localStorage 底账（只存 charId 数组，不存快照本体）：打脏时写入、
- * 上传成功后移除。去抖窗口内被杀进程的话，下次启动 OSContext 调 resumePendingAmsgStateSync
+ * 上传成功后移除。请求还没落地（在飞、或躺在退避重排里）就被杀进程的话，下次启动 OSContext 调 resumePendingAmsgStateSync
  * 按底账重建快照补传一次——否则那次改动云端永远不知道，角色到点带旧上下文说话。
  *
  * 上传失败会**退避重试**，不能一失败就把快照丢掉：云端那份 fire_pack 是到点时角色
@@ -29,16 +29,20 @@
  */
 
 import { CharacterProfile, GroupProfile, RealtimeConfig, UserProfile } from '../types';
-import { ActiveMsgClient } from './activeMsgClient';
+import { ActiveMsgClient, owesInstantChatReply } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
 import { hasActiveAiTask } from './amsg2Tasks';
 import { AmsgChatPresence, CHAT_PRESENCE_HEARTBEAT_MS } from './amsgChatPresence';
 import { trackEvent } from './analytics';
 
-// 10s：比 15s 少一截「聊完就关 App → 快照没传上去」的裸奔窗口，又不至于每个键入都打请求。
-const SYNC_DEBOUNCE_MS = 10_000;
 /** 失败重试的退避起点，逐次翻倍（30s → 60s → 120s）。 */
 const RETRY_BASE_MS = 30_000;
+/**
+ * 角色欠着即时对话回复时，它的快照挂起不传（见 flushAmsgState 里的挂起段）；
+ * 隔这么久再来看一眼账销了没有——销账走的是「回复到了 / 判失败」那几条路，
+ * 它们不会替这边触发冲刷。
+ */
+const INSTANT_DEFER_RECHECK_MS = 60_000;
 /** 连续失败几次后放手，等下一轮聊天重新打脏标记——避免离线时无限重排。 */
 const MAX_RETRIES = 3;
 const HEADER = '[AmsgStateSync]';
@@ -52,16 +56,38 @@ export interface AmsgSyncSnapshot {
 
 // charId → 最新快照。同角色多轮聊天只留最后一份，flush 永远用最新状态拼模板。
 const dirty = new Map<string, AmsgSyncSnapshot>();
-let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let flushing = false;
 let lifecycleBound = false;
 let retryCount = 0;
 /** 「退避打光了还是没传上去」每次会话只上报一次。 */
 let staleStateReported = false;
 
+// ─── 打脏后的合并窗口 ───
+// 一轮聊天不止打一次脏，而且**不在同一个 tick**：收尾在 finally 里、情绪 buff 落库在
+// 副 API 回来后的事件回调里、记忆写入又是一拨；用户连删几条消息更是一次操作一个 tick。
+// 微任务合并只能收拢同 tick 的连环调用，上面这些各自触发一次「重读 200 条近史 + 重建
+// 系统提示词 + gzip + 加密 + PUT ~40KB」的完整冲刷。这里给一个短的固定合并窗口：
+// 第一次打脏起 1.5s 内的都并进同一次上传。数据丢失窗口不回退——底账（persistDirtyMark）
+// 在打脏那一刻就写了，切后台有 visibilitychange 的立即冲刷，杀进程有启动补传。
+/** 打脏合并窗口（固定窗口不顺延：持续打脏也保证 1.5s 内必冲一次）。 */
+export const FLUSH_DEBOUNCE_MS = 1_500;
+let flushDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+/** 冲刷进行中又有人打脏，这次传完得再跑一轮（丢弃的话那份快照就永远躺在队列里了）。 */
+let reflushRequested = false;
+
+const queueFlush = () => {
+  if (flushDebounceTimer != null) return;
+  flushDebounceTimer = setTimeout(() => {
+    flushDebounceTimer = null;
+    void flushAmsgState('dirty');
+  }, FLUSH_DEBOUNCE_MS);
+};
+
 // ─── 脏标记轻量持久化 ───
-// 内存队列在「打脏 → 去抖窗口内杀进程」时会整个蒸发，重开 App 也不补传。这里只把
-// charId 记进 localStorage 当底账（快照本体下次启动从 DB 重建，存本体只会留一份过期数据）。
+// 内存队列在「打脏 → 请求还没落地（在飞或在退避重排里）就被杀进程」时会整个蒸发，
+// 重开 App 也不补传。这里只把 charId 记进 localStorage 当底账
+// （快照本体下次启动从 DB 重建，存本体只会留一份过期数据）。
 export const AMSG2_PENDING_SYNC_LS_KEY = 'amsg2_pending_sync_char_ids';
 
 const readPendingCharIds = (): string[] => {
@@ -114,8 +140,7 @@ export const markAmsgStateDirty = (snapshot: AmsgSyncSnapshot) => {
   dirty.set(snapshot.char.id, snapshot);
   persistDirtyMark(snapshot.char.id);
   bindLifecycleListener();
-  if (debounceTimer != null) clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => { void flushAmsgState('debounce'); }, SYNC_DEBOUNCE_MS);
+  queueFlush();
 };
 
 /**
@@ -154,25 +179,45 @@ const requeue = (batch: AmsgSyncSnapshot[]) => {
 
 /** 把所有脏角色的 fire_pack 批量上传。失败退避重排，快照留在队列里等下次。 */
 export const flushAmsgState = async (reason: string): Promise<void> => {
+  // 这次冲刷把队列带走了，还挂着的合并窗口就不用再响一次（响了也只是空跑一趟）。
+  // 顺手把句柄归零：不归零的话，外部触发的冲刷（hidden / resume / 测试清理）之后
+  // 队列里再打的脏会以为已有窗口在等，实际那个 timer 早没了。
+  if (flushDebounceTimer != null) { clearTimeout(flushDebounceTimer); flushDebounceTimer = null; }
   // 工具凭据欠着的话顺手一起补：它和 fire_pack 一样是「云端那份过时了」，
   // 而且冲刷时机（切后台 / 聊完一轮）正是网络多半又通了的时候。
   void runToolConfigSync(`flush:${reason}`);
-  if (flushing) return;
+  // 已经有一次在飞：这次的脏数据留在队列里，等那次落地后由 finally 补跑（直接 return
+  // 的话，上传期间打的脏就此搁浅，等不到任何人来传）。
+  if (flushing) { reflushRequested = true; return; }
   // 队列空 = 没有欠着的快照，之前那串失败也就翻篇了，退避计数跟着归零。
   if (dirty.size === 0) { retryCount = 0; return; }
-  if (debounceTimer != null) { clearTimeout(debounceTimer); debounceTimer = null; }
+  if (retryTimer != null) { clearTimeout(retryTimer); retryTimer = null; }
+  // 欠着即时对话回复（含 POST 还在飞、202 未回）的角色这次挂起不传：那一轮的 fire_pack
+  // 是 POST /instant-chat 带上去的、多一段 chat（worker 到点全靠它拿这轮的对话），
+  // 常规重建的包没有 chat 段，现在覆盖上去的话 worker 到点只会硬失败（fire_pack 里
+  // 没有 chat 段）。判定用 activeMsgClient 那份共用的 owesInstantChatReply——排程那条路
+  // （scheduleCharacterTask 建任务前也要写 fire_pack）跟这里必须是同一把尺。
+  // 快照连底账一起留在队列里，销账后的下一次冲刷（含下面那个定时回看）照传不误。
+  const deferredIds = new Set([...dirty.keys()].filter(owesInstantChatReply));
+  if (deferredIds.size === dirty.size) {
+    // 全都欠着回复：这次一个都传不了，排个回看就走（retryTimer 刚在上面清空过，直接排）。
+    scheduleDeferredRecheck();
+    return;
+  }
   flushing = true;
-  const batch = [...dirty.values()];
+  const batch = [...dirty.values()].filter((snapshot) => !deferredIds.has(snapshot.char.id));
   try {
     const globalConfig = await ActiveMsgStore.getGlobalConfig();
     if (!globalConfig.workerUrl?.trim()) {
-      // 没配 worker = 这些快照没有去处，不是「传失败」，清掉即可（连底账一起）。
+      // 没配 worker = 这些快照没有去处，不是「传失败」，清掉即可（连底账一起，
+      // 挂起的那些同样没有去处）。
+      const all = [...dirty.values()];
       dirty.clear();
-      prunePersistedMarks(batch);
+      prunePersistedMarks(all);
       return;
     }
 
-    dirty.clear();
+    for (const snapshot of batch) dirty.delete(snapshot.char.id);
     await ActiveMsgClient.syncCharFirePacks(batch.map((snapshot) => ({
       char: snapshot.char,
       config: snapshot.char.activeMsg2Config!,
@@ -189,8 +234,8 @@ export const flushAmsgState = async (reason: string): Promise<void> => {
       const delay = RETRY_BASE_MS * 2 ** retryCount;
       retryCount += 1;
       console.warn(`${HEADER} flush(${reason}) 失败，${Math.round(delay / 1000)}s 后重试（第 ${retryCount}/${MAX_RETRIES} 次）`, error);
-      if (debounceTimer != null) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => { void flushAmsgState('retry'); }, delay);
+      if (retryTimer != null) clearTimeout(retryTimer);
+      retryTimer = setTimeout(() => { void flushAmsgState('retry'); }, delay);
     } else {
       // 重排到头了（多半是离线）。快照留在队列里：下次打脏标记 / 切后台都会再试，
       // 在那之前云端仍是上一份，角色到点会带旧上下文——所以这条要吼出来。
@@ -205,7 +250,22 @@ export const flushAmsgState = async (reason: string): Promise<void> => {
     }
   } finally {
     flushing = false;
+    if (reflushRequested) {
+      reflushRequested = false;
+      // 两种情况不用补跑：队列空（上面那批把它一起带走了）；已经排了退避重传
+      // （重传本来就带上队列里的全部快照，此刻再打一次只是立刻重蹈覆辙，还白吃一次退避额度）。
+      // 失败也不是一律不补跑：退避打光那条路不留 timer，此时飞行中打的脏会当场补跑一次
+      // 并重开一轮退避——有新数据值得再试，且退避上限管着，不会变成死循环。
+      if (dirty.size > 0 && retryTimer == null) void flushAmsgState('reflush');
+    }
+    // 还有挂起（欠即时对话回复）的快照时排个回看，销账后把它们传掉。
+    if (deferredIds.size > 0 && retryTimer == null) scheduleDeferredRecheck();
   }
+};
+
+/** 排一个「即时对话销账后回来传挂起快照」的回看。占用 retryTimer 这一个槽。 */
+const scheduleDeferredRecheck = () => {
+  retryTimer = setTimeout(() => { void flushAmsgState('instant-chat-deferred'); }, INSTANT_DEFER_RECHECK_MS);
 };
 
 /**
@@ -242,7 +302,7 @@ export const resumePendingAmsgStateSync = (scope: {
       realtimeConfig: scope.realtimeConfig,
     });
   }
-  // 立即冲刷，不等 10s 去抖——这份欠账已经拖了一次进程生死了。
+  // 当场冲刷，不等 markDirty 排的那个微任务——这份欠账已经拖了一次进程生死了。
   if (dirty.size > 0) void flushAmsgState('resume');
 };
 
@@ -380,6 +440,12 @@ export const isWorkerUrlCleared = (prevUrl: string | undefined, nextUrl: string 
 
 /**
  * 取消远端**全部**任务（清空 Worker 地址时用，此时还没换地址，读写的都是旧那台）。
+ *
+ * 「全部」是字面意思，正在跑的即时对话也一起取消，跟角色级的
+ * ActiveMsgClient.cancelAllTasksForChar（那边刻意放过即时对话的行）不是一把尺 ——
+ * 两个调用方（清空 Worker 地址、清空云端数据）要的都是「我不跟这台 worker 来往了」：
+ * 地址一清，回复推回来这边也接不住了；云端数据一清，角色上下文没了，那一跳到点也只会
+ * 硬失败，留着它只是多一条要等 7 天才自动消失的失败行。所以这里不给调用方开过滤的口子。
  *
  * 尽力而为：逐条取消，单条失败记数继续跑完其余的；清单都读不到（网络 / 鉴权）就
  * 回 listed:false，交给调用方提示用户「远端可能还挂着」。

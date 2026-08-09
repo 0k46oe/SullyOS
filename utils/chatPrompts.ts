@@ -16,6 +16,7 @@ import { getTtsProvider, getVoicePromptOverride } from './ttsProvider';
 import { resolveCharTimeZone, nowInTimeZone } from './timezone';
 import { buildLifeRecordInjection } from './lifeRecords';
 import { isWorkerReachableUrl } from './amsgToolPack';
+import { isAmsg2EnabledForChar } from './amsg2Tasks';
 import { getCharNameById } from './charNameRegistry';
 import { getLocalDateKey } from './localDate';
 import { getDailyScheduleForChar } from './dailySchedule';
@@ -92,6 +93,17 @@ function summarizeGroupMsgContent(m: Message): string {
  */
 export interface PromptBuildOptions {
     forFirePack?: boolean;
+    /**
+     * `timelyByWorker` = 这份 prompt 会交给 amsg worker 在 fire 时刻补时效段
+     * （即时对话路径）。与 forFirePack 的区别：只裁「worker 那边有对应槽位」的
+     * 时效块——当前时间块、【真实世界感知系统】（节日/天气/热搜）；本地私有的
+     * 易变段（召回/buff/音乐/日程/群聊/彼方）照常保留，它们在发送时刻是新鲜的，
+     * 而 worker 拿不到。不裁的话，模型会在一份 prompt 里看到两个钟、两份互不
+     * 重叠的热搜（前端快照版 + worker 现拉版），且两段都自称「来自真实世界」。
+     * `[schedule_message]` 教学是否保留还要看角色的 2.0 开关，见下方
+     * scheduleMessageTagEnabled 处的说明。
+     */
+    timelyByWorker?: boolean;
 }
 
 export const ChatPrompts = {
@@ -232,6 +244,9 @@ export const ChatPrompts = {
         // 主动消息的模板是最后一次聊天时打好、到点才渲染的，凡是「打包这一刻」的状态
         // 到触发时都已经过期，一律不烤进模板。见 PromptBuildOptions 的清单。
         const forFirePack = promptOptions?.forFirePack === true;
+        // 即时对话：这一轮交给 worker 生成，时钟和真实世界块由它在 fire 时刻补。
+        // 本地私有的易变段照常烤进去（worker 拿不到，而这一刻它们是新鲜的）。
+        const timelyByWorker = promptOptions?.timelyByWorker === true;
         // ── 分段计时（定位瓶颈用）──
         const perfT0 = performance.now();
         const timings: Record<string, number> = {};
@@ -261,7 +276,7 @@ export const ChatPrompts = {
         let volatileState = `\n[System: 实时状态 (Live Context)]\n（以下是此刻的实时状态——当前时间、你正在做的事、你的情绪底色、周边动态。你的人设与聊天规则见最上方的系统设定，此处不再重复。）\n\n`;
         volatileState += ContextBuilder.buildVolatileCoreState(char, {
             includeDetailedMemories: true,
-            timeOptions: { skipTimeAwareness: forFirePack },
+            timeOptions: { skipTimeAwareness: forFirePack || timelyByWorker },
         });
 
         // ── 并发发起所有独立的异步取数（网络 + IndexedDB），下面按原顺序拼接 ──
@@ -282,8 +297,13 @@ export const ChatPrompts = {
         // 主动消息不是因此就没有这一段：模板里留着 AMSG_SLOT_REALTIME_WORLD，worker 到点
         // 自己去拉一次天气热搜、按角色时区判今天是不是节日，再填进去（见 worker/amsg 的
         // realtimeWorld）。两边的取数与措辞都来自 realtimeWorldCore，是同一份。
+        //
+        // 即时对话（timelyByWorker）同理：这一轮的回复也在 worker 上生成，它那边照样会
+        // 现拉一次天气热搜、按角色时区判节日。前端这份留着就是两份互不重叠的热搜、
+        // 两句自称「来自真实世界」——包括天气热搜关掉时那条「今日特殊」节日兜底，
+        // worker 的 realtimeWorld 里也有它（同样跟着角色的时间感知开关走）。
         const realtimePromise: Promise<string> = (async () => {
-            if (forFirePack) return '';
+            if (forFirePack || timelyByWorker) return '';
             try {
                 if (config.weatherEnabled || config.newsEnabled) {
                     // 时间行跟着角色的「时间感知」开关走：关掉的角色不该从天气块里读到
@@ -552,7 +572,15 @@ ${uname} 的化身正挂在《彼方》的【${roomName}】${act ? `，状态写
         // 轮询的 React 定时器派发，App 关着就不存在。主动消息 2.0 到点生成走的是另一条路
         // （worker 到点跑，不需要 App 开着），它有自己的排程工具，worker 会把说明追加在
         // fire_pack 末尾。两套一起教，角色会挑错的那套，然后「我到点叫你」就落空了。
-        const scheduleMessageTagEnabled = !forFirePack;
+        // 所以只在「这一轮 worker 不会教云端排程工具」时才教本地标签：
+        // - 打包（forFirePack）：worker 到点必带排程工具说明 → 不教；
+        // - 即时对话（timelyByWorker）且角色开着主动消息 2.0：worker 同样会注入排程
+        //   工具 → 不教。「2.0 开着」的判据与 activeMsgClient 里 fire_pack 的
+        //   selfScheduleEnabled 同源（都走 isAmsg2EnabledForChar）；
+        // - 即时对话但角色 2.0 关着：云端不给排程能力，本地标签是唯一的定时手段 → 照教；
+        // - 本地生成：worker 不参与 → 照教。
+        const scheduleMessageTagEnabled = !forFirePack
+            && !(timelyByWorker && isAmsg2EnabledForChar(char));
 
         baseSystemPrompt += `### 聊天 App 行为规范 (Chat App Rules)
             **严格注意，你正在手机聊天，无论之前是什么模式，哪怕上一句话你们还面对面在一起，当前，你都是已经处于线上聊天状态了，请不要输出你的行为**

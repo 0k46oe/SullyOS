@@ -21,22 +21,29 @@ import {
   CharacterProfile,
 } from '../types';
 import { FIRE_GRACE_MS, recurrencePeriodMs } from './amsg2ExpireGuard';
-import { type AmsgTzRef, formatFireTimeShort } from './amsgFirePack';
+import { AMSG_INSTANT_CHAT_SUBTYPE, type AmsgTzRef, formatFireTimeShort } from './amsgFirePack';
 
 export const MAX_ACTIVE_TASKS_PER_CHAR = 5;
 
 /**
  * 这个角色是否开着主动消息 2.0。
  *
- * 设置面板「关闭」会持久化 enabled:false，注入工具前必须过这道判定——否则被关掉的角色
- * 照样能调 schedule_active_message。从没配过的角色（config 缺失）算开启：默认可用，
- * 不需要先进面板点一下。
+ * 只有在设置面板里把开关打开过（持久化 enabled:true）才算开。从没配过的角色
+ * （config 缺失）算关——注入工具前必须过这道判定，否则用户还没表态要不要用，
+ * 角色已经能调 schedule_active_message 给他排定时消息了。
  *
  * 面板的开关初值和工具注入门都读这一个判定，别各写各的三元——两处答案不一致的话，
  * 面板显示「关」而角色其实照样能排程，界面就成了骗人的那一方。
+ *
+ * 「关」是默认值，不是需要迁移掉的旧数据：写 activeMsg2Config 的每条路（面板保存、
+ * 角色用工具排程、push 认领自排任务、面板与远端对账补任务）落盘时都带着 enabled:true，
+ * 所以真用过 2.0 的角色身上一定有这面旗，判定翻面也照常能排程；剩下 config 缺失的
+ * 那批本来就一次没用过。反过来给全体角色补写一份 config 更糟——amsg2CharCleanup 拿
+ * 「身上有没有 activeMsg2Config」判断删角色时要不要去云端清数据，补完之后每删一个
+ * 角色都会为一份根本不存在的云端残留发请求。
  */
 export const isAmsg2EnabledForChar = (char: CharacterProfile): boolean =>
-  char.activeMsg2Config?.enabled !== false;
+  char.activeMsg2Config?.enabled === true;
 
 export const shortTaskId = (taskUuid: string): string => taskUuid.slice(0, 8);
 
@@ -299,6 +306,27 @@ export const describeRemoteLastError = (
   return `${whenText}上次到点没发出去（连续失败${reason ? `：${reason}` : ''}）`;
 };
 
+/**
+ * 即时对话那一轮失败的人话。读的是同一份 lastError，但换一套说法：那是用户刚按下
+ * 发送的一条消息，「上次到点没发出去」这种排程口吻放在这里不成话。时间也不带——
+ * 就是刚才，写出来只是噪音。retryCount 是远端行上的重试次数（旧 worker 不投影 → 不提）。
+ */
+export const describeInstantChatFailure = (
+  lastError: RemoteTaskLastError | null | undefined,
+  retryCount?: number,
+): string | null => {
+  if (!lastError) return null;
+  const retried = retryCount && retryCount > 0 ? `（重试 ${retryCount} 次后放弃）` : '';
+  // 'stale' 是「排队太久没轮到就被跳过」，没有底层报错可以引。
+  if (lastError.reason === 'stale') return `云端排队太久没轮到这一轮${retried}`;
+  // skip-push 的两种（worker 在 chat_fail 里留的机器码）：这一轮云端跑完了，但没有
+  // 能推给用户的正文。照实说，别掉进下面「生成失败」的口径——生成没失败，是没产出。
+  if (lastError.reason === 'empty-generation') return '模型这轮没有生成内容（空输出或拒答）';
+  if (lastError.reason === 'side-effects-only') return '角色这轮只做了动作，没有文字回复';
+  const detail = (lastError.reason || '').slice(0, REMOTE_ERROR_REASON_MAX);
+  return `生成失败${retried}${detail ? `：${detail}` : ''}`;
+};
+
 /** 替换任务时远端取消失败的标注文案（面板和工具侧共用一份，两边都会显示给人看）。 */
 export const REPLACE_CANCEL_FAILED_NOTE = '替换时远端取消失败，任务可能仍会触发，可再次取消';
 
@@ -333,8 +361,12 @@ export interface RemoteTaskProjection {
   lastError: RemoteTaskLastError | null;
   clientTaskId?: string;
   messageType?: string;
+  /** 排程方写的自由文本标签；即时对话的行是 'instant-chat'，定时任务是 'chat'。 */
+  messageSubtype?: string;
   recurrenceType?: string;
   nextSendAt?: string;
+  /** 远端行上的重试计数（旧 worker 不投影这字段 → undefined）。 */
+  retryCount?: number;
 }
 
 /**
@@ -363,7 +395,15 @@ export const reconcileTasksWithRemote = (
 
   const adopted = remote
     // 字段不全的行不补：宁可少一条，也别拿默认值凑一条跟远端对不上的记录出来。
-    .filter((row) => !known.has(row.uuid) && row.nextSendAt && row.recurrenceType && row.messageType)
+    // 已经失败的行也不补：它不会再响，补进来就是清单上一条永远等不到的幽灵任务。
+    // 即时对话的行同样不补：那是用户此刻正等着的一轮聊天，不是排程，进了清单会显示成
+    // 「待触发的任务」，还可能被「取消全部」顺手掐掉。
+    .filter((row) => (
+      !known.has(row.uuid)
+      && row.nextSendAt && row.recurrenceType && row.messageType
+      && row.status !== 'failed'
+      && row.messageSubtype !== AMSG_INSTANT_CHAT_SUBTYPE
+    ))
     .map((row): ActiveMsg2TaskRecord => ({
       taskUuid: row.uuid,
       // 归属键是应用自己写进 metadata 的，投影里带回来；非 amsg2 建的任务没有，

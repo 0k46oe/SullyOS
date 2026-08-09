@@ -2629,7 +2629,7 @@ const Settings: React.FC = () => {
                 </button>
             </div>
             <p className="text-xs text-slate-500 leading-relaxed">
-                角色到点自动给你发消息，App 关着也能收。需要你自己部署一个 Cloudflare Worker（自带 D1 数据库 + 定时触发），在配置里填地址即可。与上方 Instant Push（你发消息才即时回）互补。
+                角色到点自动给你发消息，App 关着也能收。需要你自己部署一个 Cloudflare Worker（自带 D1 数据库 + 定时触发），在配置里填地址即可。聊天上云（即时对话）与定时主动消息都由它承担。
             </p>
         </section>
 

@@ -58,6 +58,8 @@ import { normalizeTranslationLangLabel, isTranslationLangPreset } from '../utils
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent, noteMessageSent, presetOrCustom } from '../utils/analytics';
 import { markAmsgStateDirty, markAmsgStateDirtyForAll } from '../utils/amsgStateSync';
+import { AMSG_INSTANT_CHAT_PENDING_EVENT, AMSG_INSTANT_CHAT_PENDING_LS_KEY, getInstantChatPending } from '../utils/amsgInstantChat';
+import { formatAmsgToolTrace } from '../utils/amsgToolTrace';
 import {
     CONTEXT_RANGE_POLICY_VERSION,
     computeContextRangeSnapshot,
@@ -69,6 +71,8 @@ import {
 } from '../utils/chatContextRange';
 
 const VOICE_LANG_LABELS: Record<string, string> = { en: 'English', ja: '日本語', ko: '한국어', fr: 'Français', es: 'Español' };
+/** 即时对话那一轮回复「推送陆续到齐」的宽限时间，也就是自动合成的补扫窗口有多长（见下面的 auto-TTS effect）。 */
+const INSTANT_VOICE_SCAN_WINDOW_MS = 30_000;
 type InstantToolUiStatus = {
     charId: string;
     phase: 'running' | 'continuing' | 'done' | 'failed';
@@ -93,6 +97,9 @@ const Chat: React.FC = () => {
     // Instant Push 路径："准备中"三个点 = 消息正在拼接+发送; 消失 = SSE POST 已排进
     // 浏览器网络栈. 页面关闭时会主动 abort SSE, 让 worker 尽量走 Web Push fallback。
     const [instantSendingActive, setInstantSendingActive] = useState(false);
+    // 即时对话：这一轮已经交给云端、还没等到回复。它跟 isTyping 不一样——生成不在这台
+    // 设备上跑，所以要扛得住关页面重开（记录落在 localStorage，见 amsgInstantChat）。
+    const [instantChatPending, setInstantChatPending] = useState(false);
     const [instantToolStatus, setInstantToolStatus] = useState<InstantToolUiStatus | null>(null);
     const [totalMsgCount, setTotalMsgCount] = useState(0);
     const [visibleCount, setVisibleCount] = useState(30);
@@ -312,6 +319,17 @@ const Chat: React.FC = () => {
         setMessages(msgs);
     }, []);
 
+    // 即时对话的「正在输入…」：受理 / 收到回复 / 超时判失败都会广播一次，界面跟着它亮灭。
+    // 进这个角色时先读一次落盘记录——上一轮的回复可能是在应用关着的时候还没回来。
+    // 这个 CustomEvent 只在本标签页内派发；别的标签页销账走下面那个 storage 监听
+    //（搜 AMSG_INSTANT_CHAT_PENDING_LS_KEY）。
+    useEffect(() => {
+        const sync = () => setInstantChatPending(!!activeCharacterId && !!getInstantChatPending(activeCharacterId));
+        sync();
+        window.addEventListener(AMSG_INSTANT_CHAT_PENDING_EVENT, sync);
+        return () => window.removeEventListener(AMSG_INSTANT_CHAT_PENDING_EVENT, sync);
+    }, [activeCharacterId]);
+
     // --- Initialize Hook ---
     const { isTyping, streamingBubbles, streamingThinking, recallStatus, searchStatus, diaryStatus, emotionStatus, memoryPalaceStatus, memoryPalaceResult, setMemoryPalaceResult, lastDigestResult, setLastDigestResult, lastTokenUsage, tokenBreakdown, setLastTokenUsage, triggerAI, startProactiveChat, stopProactiveChat, isProactiveActive } = useChatAI({
         char,
@@ -346,6 +364,15 @@ const Chat: React.FC = () => {
     const [playingMsgId, setPlayingMsgId] = useState<number | null>(null);
     const chatAudioRef = useRef<HTMLAudioElement | null>(null);
     const prevIsTypingRef = useRef(false);
+    // 即时对话那条路的自动合成扫描窗（用法见下面那个 auto-TTS 的 effect）：
+    // 「正在输入」灯灭的那一下开窗，窗口内每次消息变化都补扫一遍；角色不对就整个作废。
+    const prevInstantPendingRef = useRef(false);
+    const instantVoiceScanUntilRef = useRef(0);
+    const instantVoiceScanCharRef = useRef<string | undefined>(undefined);
+    // 自动合成失败过的消息 id。扫描窗里每来一条新消息都会重扫一遍，不记下来的话同一条失败的
+    // 消息会被反复重试、每次再弹一个「语音生成失败」。只挡自动那条路：用户自己点「转换语音」
+    // 照样能重试（换了网络/补了 key 之后就该能成）。换角色时清空。
+    const voiceFailedRef = useRef<Set<number>>(new Set());
     // Track blob: URLs we created so we can revoke them on character switch / unmount.
     const voiceBlobUrlsRef = useRef<Set<string>>(new Set());
     // We warn the user at most once (per character) that MiniMax voice isn't configured —
@@ -459,11 +486,13 @@ const Chat: React.FC = () => {
         const isFishTts = resolveTtsProvider(apiConfig) === 'fishaudio';
         const voiceTagContent = parsedVoice.hasVoiceTag ? (isFishTts ? parsedVoice.rawSpeech : parsedVoice.speech) : '';
         const voiceEmotion = parsedVoice.emotion;
-        // F12 调试：打印 LLM 这条消息的带标签原文，方便核对语音标签写法是否正确。
-        console.log('[voice] LLM 原文(带标签):', { provider: isFishTts ? 'fishaudio' : 'minimax', content: msg.content, voiceTagContent, emotion: voiceEmotion });
 
         // Auto-TTS: only generate voice when AI explicitly used <语音> tag
         if (autoTriggered && !parsedVoice.hasVoiceTag) return;
+        // F12 调试：打印 LLM 这条消息的带标签原文，方便核对语音标签写法是否正确。
+        // 放在上面那道门之后：即时对话的扫描窗里每来一条消息都要重扫一遍，
+        // 搁在门前的话没有语音标签的普通消息会被反复打印，控制台直接刷屏。
+        console.log('[voice] LLM 原文(带标签):', { provider: isFishTts ? 'fishaudio' : 'minimax', content: msg.content, voiceTagContent, emotion: voiceEmotion });
 
         // MiniMax not configured for this character: don't attempt synthesis (it would
         // throw and surface an error toast on every message / every tap). Instead remind
@@ -564,6 +593,8 @@ const Chat: React.FC = () => {
                 setPlayingMsgId(msg.id);
             }
         } catch (err: any) {
+            // 记一笔失败：自动那条路下次扫到就跳过（见 voiceFailedRef 的说明）。
+            voiceFailedRef.current.add(msg.id);
             addToast(`语音生成失败: ${err?.message || '未知错误'}`, 'error');
         } finally {
             setVoiceLoading(prev => { const next = new Set(prev); next.delete(msg.id); return next; });
@@ -597,11 +628,39 @@ const Chat: React.FC = () => {
     // Scans ALL recent assistant messages (not just the last one) because chunkText
     // may split a single AI response into multiple messages, and the <语音> tag could
     // end up in any chunk — not necessarily the final one.
+    //
+    // 两个触发源：
+    //   · 本机生成：打字结束的那一下（wasTyping → !isTyping）。
+    //   · 即时对话：回复在云端生成、靠推送落库，本机的 isTyping 在 POST 完就灭了，永远等不到
+    //     那一下，开了自动播放的角色会一路静音。改看「正在输入」指示灯熄灭（instantChatPending
+    //     由真变假），熄灭时开一个 30 秒的扫描窗——一轮回复常被拆成好几条推送陆续到，第一条到
+    //     就熄灯，后面几条得靠窗口内每次 messages 变化补扫。只扫窗口内，冷启动和翻历史不会把
+    //     旧消息整批合成一遍。
     useEffect(() => {
         const wasTyping = prevIsTypingRef.current;
         prevIsTypingRef.current = isTyping;
-        // Only trigger when AI just finished typing (wasTyping → !isTyping)
-        if (!wasTyping || isTyping) return;
+        const wasPending = prevInstantPendingRef.current;
+        prevInstantPendingRef.current = instantChatPending;
+        // 换角色先把窗清零：Chat 里切角色不卸载组件，这几个 ref 会跨角色留着。甲还欠着回复时
+        // 切到乙，instantChatPending 会跟着乙的记录变假——那不是「乙的回复到了」，不能拿它开窗，
+        // 更不能拿甲的窗去扫乙的历史消息。两个触发源都要先有一次「变化前」才成立，所以这里直接
+        // 走人不会漏掉任何一次真的触发。
+        if (instantVoiceScanCharRef.current !== char?.id) {
+            instantVoiceScanCharRef.current = char?.id;
+            instantVoiceScanUntilRef.current = 0;
+            return;
+        }
+        // 覆盖范围就到这儿：销账是在页面里发生的，推送落地时人不在这个聊天页的话没有这次
+        // 真→假的转换，那条回复就保持静音（跟「不批量合成历史」是同一个取舍）。
+        if (wasPending && !instantChatPending) {
+            instantVoiceScanUntilRef.current = Date.now() + INSTANT_VOICE_SCAN_WINDOW_MS;
+        }
+        // Only trigger when AI just finished typing (wasTyping → !isTyping)，或者还在即时对话的扫描窗里。
+        // 这道门也是 messages 进依赖之后本机那条路的保险：不在窗里就仍然只在打字结束那一下扫，
+        // 平时每来一条消息不会重扫。
+        const typingJustEnded = wasTyping && !isTyping;
+        const inInstantWindow = Date.now() < instantVoiceScanUntilRef.current;
+        if (!typingJustEnded && !inInstantWindow) return;
         if (!char.chatVoiceEnabled) return;
         // 关着「收到就自动播放」就别提前合成（理由见 shouldAutoGenerateVoice）：
         // 空语音条照常出现，用户点了才合成、合成完直接播。
@@ -614,9 +673,12 @@ const Chat: React.FC = () => {
             if (msg.role !== 'assistant') break;
             if (msg.type !== 'text') continue;
             if (voiceDataMap[msg.id] || voiceLoading.has(msg.id)) continue;
+            // 合成失败过就别再自动重试了：扫描窗里每来一条消息都重扫一遍，
+            // 同一条会一路重试到窗口关闭，还每次弹一个失败提示。用户手点不受影响。
+            if (voiceFailedRef.current.has(msg.id)) continue;
             handleManualTts(msg, true);
         }
-    }, [isTyping]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [isTyping, instantChatPending, messages]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const canReroll = !isTyping && messages.length > 0 && messages[messages.length - 1].role === 'assistant';
 
@@ -686,6 +748,8 @@ const Chat: React.FC = () => {
     useEffect(() => {
         // Reset the "MiniMax not configured" warning so each character gets one reminder.
         minimaxWarnedRef.current = false;
+        // 自动合成的失败记录也跟着换角色清空：这一位的失败不该拦着下一位。
+        voiceFailedRef.current.clear();
         const urls = voiceBlobUrlsRef.current;
         return () => {
             urls.forEach(u => { try { URL.revokeObjectURL(u); } catch { /* ignore */ } });
@@ -907,6 +971,24 @@ const Chat: React.FC = () => {
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- clearUnread is stable (useCallback with []), omit to prevent stale-dep lint noise
     }, [lastMsgTimestamp, activeCharacterId, reloadMessages, clearUnread]);
+
+    // 即时对话待收记录的跨标签页补听。同一聊天开两个标签页时，回复推送到达后 SW 把
+    // 广播发给所有 client，后台标签页的 flush 可能先抢到并落库——销账的 CustomEvent
+    // 只在它自己那边派发，这边收不到，「正在输入…」就会无限常亮、回复也不上屏。
+    // 待收记录本来就落在 localStorage，而 storage 事件恰好只在「其他」标签页触发，
+    // 正好补上这条缝：这个 key 一变，就照上面 CustomEvent 那套处理走——刷新指示灯，
+    // 并重载消息把对方标签页落的库带上屏。同标签页内的 CustomEvent 机制保持不动。
+    useEffect(() => {
+        const onStorage = (e: StorageEvent) => {
+            // 严格按 key 过滤，别的 localStorage 变动（草稿、翻译开关等）一概不理。
+            if (e.key !== AMSG_INSTANT_CHAT_PENDING_LS_KEY) return;
+            const charId = activeCharIdRef.current;
+            setInstantChatPending(!!charId && !!getInstantChatPending(charId));
+            if (charId) reloadMessages(visibleCountRef.current);
+        };
+        window.addEventListener('storage', onStorage);
+        return () => window.removeEventListener('storage', onStorage);
+    }, [reloadMessages]);
 
     useEffect(() => {
         visibleCountRef.current = visibleCount;
@@ -2696,6 +2778,11 @@ const Chat: React.FC = () => {
         onOpenSettings: () => setShowThinkingChainModal(true),
     }), [(char as any)?.thinkingChainStyle, (char as any)?.thinkingChainCustomColors]);
 
+    // 工具痕迹那行灰字要贴着气泡走，所以把气泡自带的组间距（MessageItem 里那组
+    // mb-3 / mb-6 / mb-8）抵掉大半。组内的气泡本来就挨着，不用抵。
+    const toolTracePullClass = osTheme.chatMessageSpacing === 'compact' ? '-mt-2'
+        : osTheme.chatMessageSpacing === 'spacious' ? '-mt-6' : '-mt-5';
+
     // Reset active category if it becomes invisible for the current character
     useEffect(() => {
         if (activeCategory !== 'default' && visibleCategories.length > 0 && !visibleCategories.some(c => c.id === activeCategory)) {
@@ -3290,6 +3377,16 @@ const Chat: React.FC = () => {
                         nextMessage.role !== m.role ||
                         Math.abs(nextMessage.timestamp - m.timestamp) > messageGroupGapMs;
                     const suppressEntranceAnimation = streamPreviewHandoverIdsRef.current.has(m.id);
+                    // 这一轮在云端跑过哪些工具（即时对话才有，worker 挂在最后一条推送上）。
+                    // 一条推送拆出的每条气泡都继承了同一份（metadata 是整份往下铺的，见
+                    // activeMsgRuntime 的 mcdInheritMeta），所以只在这条推送的最后一条底下画，
+                    // 不然一句回复底下能排出三行一模一样的字。
+                    // 多选状态下不画：跟旁边那两块浮层一样，让位给选择框。
+                    const toolTraceText = selectionMode
+                        ? '' : formatAmsgToolTrace((m.metadata as any)?.amsgToolTrace);
+                    const pushMessageId = (m.metadata as any)?.activeMsg2?.messageId;
+                    const showToolTrace = !!toolTraceText
+                        && !(pushMessageId && (nextMessage?.metadata as any)?.activeMsg2?.messageId === pushMessageId);
                     return (
                         <div
                             key={m.id || i}
@@ -3342,6 +3439,13 @@ const Chat: React.FC = () => {
                             onResolveLifeRecord={handleResolveLifeRecord}
                             thinkingChainOptions={thinkingChainOptions}
                         />
+                        {showToolTrace && (
+                            <div className={`px-3 mb-4 ${breaksWithNext ? toolTracePullClass : ''}`}>
+                                <div className="ml-12 text-[10px] leading-relaxed text-slate-400">
+                                    调用了工具：{toolTraceText}
+                                </div>
+                            </div>
+                        )}
                         </div>
                     );
                 })}
@@ -3437,7 +3541,8 @@ const Chat: React.FC = () => {
                         ))}
                     </>
                 )}
-                {(isTyping || recallStatus || searchStatus || diaryStatus || isProactiveComposing) && !selectionMode && (
+                {/* instantChatPending：这一轮在云端跑，本机可以关页面，指示灯靠落盘记录活着。 */}
+                {(isTyping || instantChatPending || recallStatus || searchStatus || diaryStatus || isProactiveComposing) && !selectionMode && (
                     <div className="flex items-end gap-3 px-3 mb-6 animate-fade-in">
                         <img src={char.avatar} className={chatPendingAvatarClass} />
                         <div className="bg-white px-4 py-3 rounded-2xl shadow-sm">

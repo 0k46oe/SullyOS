@@ -15,7 +15,7 @@ function corsHeaders(origin) {
   return {
     "Access-Control-Allow-Origin": origin || "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, Depth, X-Brave-API-Key, X-Notion-API-Key, X-Feishu-Token, X-Xhs-Cookie, X-Rnote-API-Key, X-Xhs-Experiment-Ack, X-Netease-Cookie, X-WebDAV-Method, X-WebDAV-Depth, X-WebDAV-Range, X-GitHub-Method, X-GitHub-Api-Version, Mcp-Session-Id, Accept, Range",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, Depth, X-Brave-API-Key, X-Notion-API-Key, X-Feishu-Token, X-Xhs-Cookie, X-Rnote-API-Key, X-Xhs-Experiment-Ack, X-Netease-Cookie, X-WebDAV-Method, X-WebDAV-Depth, X-WebDAV-Range, X-GitHub-Method, X-GitHub-Api-Version, X-CF-Method, Mcp-Session-Id, Accept, Range",
     "Access-Control-Expose-Headers": "Mcp-Session-Id",
     "Access-Control-Max-Age": "86400",
   };
@@ -2346,6 +2346,104 @@ export default {
         return jsonResponse({
           error: `Proxy error: ${String(e && e.message || e)}`,
           stack: String(e && e.stack || '').slice(0, 400),
+        }, { status: 502, origin });
+      }
+    }
+
+    // ========== Cloudflare API 代理 (/cf-api) ==========
+    // api.cloudflare.com 一个 CORS 头都不返回，浏览器连最简单的请求都发不出去，所以
+    // 「在设置页填一枚 CF token 就把主动消息后端装好」这条路必须过一层中转。
+    //
+    // 跟 /webdav 的关键区别：目标地址不是调用方给的，是这里拼死的。调用方只能给
+    // api.cloudflare.com/client/v4 后面那一截路径，而且限制在账号级资源里——建 D1、
+    // 传 worker、加 cron、开 workers.dev 都在 /accounts 下面，够用；/zones/* 那类
+    // （改 DNS、签证书）一律挡掉，免得这个端点变成通用的 CF API 中继。
+    if (url.pathname === '/cf-api') {
+      const CF_ALLOWED_PREFIXES = ['/accounts', '/memberships', '/user/tokens/verify'];
+      // 探针：不带任何凭据 GET 一下就知道这条中转在不在。
+      // 这个 worker 要手动部署，而它对未知路径的 POST 一律回 405，光看状态码分不出
+      // 「部署好了」还是「路由不存在」；GET 这里回 200、旧版本落到末尾的 404，一眼分得开。
+      // 前端也拿它判断用户自填的代理 worker 支不支持一键部署。
+      if (request.method === 'GET') {
+        return jsonResponse({
+          ok: true,
+          relay: 'cf-api',
+          upstream: 'api.cloudflare.com',
+          allowed: CF_ALLOWED_PREFIXES,
+        }, { origin });
+      }
+      if (request.method !== 'POST') {
+        return jsonResponse({ error: 'Method not allowed' }, { status: 405, origin });
+      }
+      const apiPath = url.searchParams.get('path') || '';
+      if (!apiPath.startsWith('/') || apiPath.includes('://') || apiPath.includes('..')) {
+        return jsonResponse({ error: 'Invalid path parameter' }, { status: 400, origin });
+      }
+      const prefixAllowed = CF_ALLOWED_PREFIXES.some(
+        (p) => apiPath === p || apiPath.startsWith(p + '/') || apiPath.startsWith(p + '?')
+      );
+      if (!prefixAllowed) {
+        return jsonResponse({
+          error: 'This proxy only relays account-scoped Cloudflare API paths',
+          allowed: CF_ALLOWED_PREFIXES,
+        }, { status: 403, origin });
+      }
+      // 真实方法走 header：全局 CORS 只放行 GET/POST/OPTIONS，跟 /webdav 一个套路。
+      const cfMethod = (request.headers.get('X-CF-Method') || 'GET').toUpperCase();
+      if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(cfMethod)) {
+        return jsonResponse({ error: 'CF method not allowed' }, { status: 400, origin });
+      }
+      const cfTargetUrl = 'https://api.cloudflare.com/client/v4' + apiPath;
+      // 拼完再验一次 host。上面的字符串检查已经拦掉了绝对地址，这里是兜底：
+      // 只要解析出来不是 api.cloudflare.com 就宁可 400，不往外发。
+      let parsedCf;
+      try {
+        parsedCf = new URL(cfTargetUrl);
+      } catch {
+        return jsonResponse({ error: 'Invalid path parameter' }, { status: 400, origin });
+      }
+      if (parsedCf.host !== 'api.cloudflare.com') {
+        return jsonResponse({ error: 'Refusing to relay off api.cloudflare.com' }, { status: 400, origin });
+      }
+      const cfAuth = request.headers.get('Authorization');
+      if (!cfAuth) {
+        return jsonResponse({ error: 'Missing Authorization header' }, { status: 401, origin });
+      }
+      // worker.bundle.js 现在 ~500KB，multipart 包一层还要再大些。给到 10MB 够宽裕，
+      // 同时别让这个端点变成谁都能拿来传大文件的口子。
+      const CF_MAX_BODY = 10 * 1024 * 1024;
+      const declaredLen = Number(request.headers.get('Content-Length') || '0');
+      if (Number.isFinite(declaredLen) && declaredLen > CF_MAX_BODY) {
+        return jsonResponse({ error: 'Request body too large' }, { status: 413, origin });
+      }
+      const cfHeaders = { Authorization: cfAuth };
+      const cfContentType = request.headers.get('Content-Type');
+      // multipart 上传要靠 Content-Type 里的 boundary，原样带过去，别自己拼。
+      if (cfContentType) cfHeaders['Content-Type'] = cfContentType;
+      try {
+        let cfBody = null;
+        if (cfMethod !== 'GET' && cfMethod !== 'DELETE') {
+          cfBody = await request.arrayBuffer();
+          if (cfBody.byteLength > CF_MAX_BODY) {
+            return jsonResponse({ error: 'Request body too large' }, { status: 413, origin });
+          }
+          if (cfBody.byteLength === 0) cfBody = null;
+        }
+        const upstream = await fetch(cfTargetUrl, {
+          method: cfMethod,
+          headers: cfHeaders,
+          body: cfBody,
+        });
+        // 日志只留方法 / 路径 / 状态码，排障够用。token 在 header 里、不打；
+        // query 也不打（pathname 已经把它切掉了）。路径里的账号 id 会留下。
+        console.log('cf-api', cfMethod, parsedCf.pathname, '→', upstream.status);
+        const respHeaders = new Headers(corsHeaders(origin));
+        respHeaders.set('Content-Type', upstream.headers.get('Content-Type') || 'application/json; charset=utf-8');
+        // 状态码原样透传，前端能直接分辨 401（token 不对）和 403（权限不够）。
+        return new Response(upstream.body, { status: upstream.status, headers: respHeaders });
+      } catch (e) {
+        return jsonResponse({
+          error: `CF proxy error: ${String((e && e.message) || e)}`,
         }, { status: 502, origin });
       }
     }
