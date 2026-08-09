@@ -17,6 +17,7 @@ import {
     scriptNameFromWorkerUrl,
     verifyToken,
     isAccountScopedToken,
+    uploadWorkerScript,
     type AmsgSecrets,
 } from './cfProvision';
 
@@ -235,6 +236,90 @@ describe('verifyToken', () => {
         expect(isAccountScopedToken('cfat_abc')).toBe(true);
         expect(isAccountScopedToken('  cfat_abc  ')).toBe(true);
         expect(isAccountScopedToken('abcdef123')).toBe(false);
+    });
+});
+
+describe('uploadWorkerScript', () => {
+    /**
+     * 装一个假的中转，按次序吐响应，并把每次上传的 metadata 记下来。
+     */
+    const stubUploadRelay = (responses: Array<{ status: number; payload: unknown }>) => {
+        const metadatas: Array<Record<string, unknown>> = [];
+        vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+            const form = init?.body as FormData;
+            const metaBlob = form.get('metadata') as Blob;
+            metadatas.push(JSON.parse(await metaBlob.text()));
+            const next = responses[Math.min(metadatas.length - 1, responses.length - 1)];
+            return new Response(JSON.stringify(next.payload), {
+                status: next.status,
+                headers: { 'Content-Type': 'application/json' },
+            });
+        }));
+        return metadatas;
+    };
+
+    const FRESH_METADATA = {
+        main_module: 'worker.bundle.js',
+        bindings: [{ type: 'durable_object_namespace', name: 'INSTANT_TICK', class_name: 'InstantTickDO' }],
+        migrations: { new_tag: 'amsg-instant-tick-v1', new_sqlite_classes: ['InstantTickDO'] },
+    };
+
+    afterEach(() => {
+        vi.unstubAllGlobals();
+        vi.restoreAllMocks();
+    });
+
+    /**
+     * 回归守卫：对着已经装过的 Worker 重装（清了地址重跑、换设备再部署）。
+     *
+     * metadata 里的 migrations 断言「全新部署」，这时 CF 会回 10079 乐观锁冲突把整次
+     * 上传顶回来——修法是去掉 migrations 重传（namespace 本来就在），binding 原样保留。
+     */
+    it('撞上 10079 就去掉 migrations 重传一次，并标记这是覆盖更新', async () => {
+        const metadatas = stubUploadRelay([
+            {
+                status: 400,
+                payload: {
+                    success: false,
+                    errors: [{ code: 10079, message: "Actor migration tag precondition failed, got tag '' when expected tag is 'amsg-instant-tick-v1'." }],
+                },
+            },
+            { status: 200, payload: { success: true, result: {} } },
+        ]);
+
+        const result = await uploadWorkerScript('tok', 'acct', 'sullyos-amsg', FRESH_METADATA, 'export default {}');
+
+        expect(result.ok).toBe(true);
+        expect(result.reusedExistingWorker).toBe(true);
+        expect(metadatas).toHaveLength(2);
+        expect(metadatas[1].migrations).toBeUndefined();
+        // 只该去掉 migrations，binding 等其余字段原样保留
+        expect(metadatas[1].bindings).toEqual(metadatas[0].bindings);
+        expect(metadatas[1].main_module).toBe(metadatas[0].main_module);
+    });
+
+    it('全新部署一次成功就不重试，也不标记覆盖更新', async () => {
+        const metadatas = stubUploadRelay([{ status: 200, payload: { success: true, result: {} } }]);
+
+        const result = await uploadWorkerScript('tok', 'acct', 'sullyos-amsg', FRESH_METADATA, 'export default {}');
+
+        expect(result.ok).toBe(true);
+        expect(result.reusedExistingWorker).toBeUndefined();
+        expect(metadatas).toHaveLength(1);
+    });
+
+    it('其他错误不套这个重试——盲目去掉 migrations 只会把真错误拖成两次', async () => {
+        const metadatas = stubUploadRelay([
+            {
+                status: 400,
+                payload: { success: false, errors: [{ code: 10037, message: 'workers limit reached' }] },
+            },
+        ]);
+
+        const result = await uploadWorkerScript('tok', 'acct', 'sullyos-amsg', FRESH_METADATA, 'export default {}');
+
+        expect(result.ok).toBe(false);
+        expect(metadatas).toHaveLength(1);
     });
 });
 
