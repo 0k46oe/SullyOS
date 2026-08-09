@@ -15,6 +15,7 @@ import { VRScheduler } from '../utils/vrWorld/scheduler';
 import { VR_ROOMS, getRoom, VR_DEFAULT_INTERVAL_MIN, SIGNAL_EPIGRAPH, signalActFor, signalActRanges, SIGNAL_POEMS_PER_BOOKLET, SIGNAL_EVENT_ENDED, SIGNAL_MEMORIAL_CLOSING } from '../utils/vrWorld/constants';
 import { buildNovelAsync, groupAnnotationsBySeg, getBookmark } from '../utils/vrWorld/novel';
 import { decodeBytes } from '../utils/vrWorld/decodeText';
+import { extractPdfText, isPdfFile } from '../utils/pdfText';
 import { stripLeakedAttrs } from '../utils/vrWorld/prompts';
 import { PostOffice, MAX_LETTER_CHARS, exportIdentity, importIdentity, getAdminToken, setAdminToken, type RemoteReply, type RemoteLetterStat, type RemoteAdminLetter } from '../utils/vrWorld/postOffice';
 import { Signal, getMyAuthorship, setSignalWhisper, hasSignalNoticeAck, ackSignalNotice, type SignalState } from '../utils/vrWorld/signal';
@@ -2891,7 +2892,16 @@ const ReaderModal: React.FC<{ novel: VRWorldNovel; characters: CharacterProfile[
     );
 };
 
-// ============ 上传弹窗（支持大文件 .txt，内容不入 DOM） ============
+// ============ 上传弹窗（支持大文件 .txt / .pdf，内容不入 DOM） ============
+type UploadFileInfo = {
+    name: string;
+    chars: number;
+    preview: string;
+    encoding: string;
+    kind: 'text' | 'pdf';
+    pages?: number;
+};
+
 const UploadModal: React.FC<{
     onClose: () => void;
     onCommit: (novel: VRWorldNovel) => Promise<void> | void;
@@ -2903,13 +2913,14 @@ const UploadModal: React.FC<{
     const [summary, setSummary] = useState('');
     // 手动粘贴的小段文本走 state；大文件内容只存 ref，不进 textarea（否则 12MB 会冻 UI）
     const [pasteText, setPasteText] = useState('');
-    const [fileInfo, setFileInfo] = useState<{ name: string; chars: number; preview: string; encoding: string } | null>(null);
+    const [fileInfo, setFileInfo] = useState<UploadFileInfo | null>(null);
     const fileContentRef = useRef<string>('');
     // 留着原始字节，手动换编码时无需重新读盘即可重解码
     const fileBufRef = useRef<ArrayBuffer | null>(null);
     const [chosenEncoding, setChosenEncoding] = useState<string>('auto');
     const fileRef = useRef<HTMLInputElement>(null);
     const [reading, setReading] = useState(false);
+    const [readingStatus, setReadingStatus] = useState('');
     const [busy, setBusy] = useState(false);
     const [progress, setProgress] = useState(0);
 
@@ -2922,24 +2933,56 @@ const UploadModal: React.FC<{
             chars: content.length,
             preview: content.slice(0, 300).replace(/\s+/g, ' ').trim(),
             encoding,
+            kind: 'text',
         });
     };
 
     const onFile = async (f: File | undefined) => {
         if (!f) return;
+        const pdfFile = isPdfFile(f);
+        const textFile = f.type.toLowerCase() === 'text/plain' || /\.(txt|text)$/i.test(f.name);
+        if (!pdfFile && !textFile) {
+            onError('目前只支持 .txt 和 .pdf 文件');
+            if (fileRef.current) fileRef.current.value = '';
+            return;
+        }
         setReading(true);
+        setReadingStatus(pdfFile ? '正在载入 PDF…' : '读取并识别编码中…');
         try {
             const buf = await f.arrayBuffer();
-            fileBufRef.current = buf;
-            setChosenEncoding('auto');
-            applyDecode(f.name, buf, 'auto');
+            if (pdfFile) {
+                fileBufRef.current = null;
+                const result = await extractPdfText(buf, {
+                    onProgress: ({ page, totalPages }) => setReadingStatus(`正在提取 PDF 文本… ${page}/${totalPages}`),
+                });
+                const content = result.text.trim();
+                if (!content) {
+                    onError('PDF 中没有可提取的文字，可能是扫描件或图片 PDF；请先 OCR 后再导入');
+                    return;
+                }
+                fileContentRef.current = content;
+                setFileInfo({
+                    name: f.name,
+                    chars: content.length,
+                    preview: content.slice(0, 300).replace(/\s+/g, ' ').trim(),
+                    encoding: 'PDF',
+                    kind: 'pdf',
+                    pages: result.pageCount,
+                });
+                trackEvent('导入 PDF 小说到彼方书库', { pages: result.pageCount, chars: content.length });
+            } else {
+                fileBufRef.current = buf;
+                setChosenEncoding('auto');
+                applyDecode(f.name, buf, 'auto');
+            }
             setPasteText(''); // 文件优先，清掉粘贴框
-            if (!title.trim()) setTitle(f.name.replace(/\.(txt|text)$/i, ''));
+            if (!title.trim()) setTitle(f.name.replace(/\.(txt|text|pdf)$/i, ''));
         } catch (e) {
-            console.error('[VRWorld] decode file failed', e);
-            onError('文件读取失败');
+            console.error('[VRWorld] read novel file failed', e);
+            onError(pdfFile ? 'PDF 读取失败，文件可能已损坏、加密或网络组件加载失败' : '文件读取失败');
         } finally {
             setReading(false);
+            setReadingStatus('');
         }
     };
 
@@ -2956,6 +2999,7 @@ const UploadModal: React.FC<{
         fileBufRef.current = null;
         setChosenEncoding('auto');
         setFileInfo(null);
+        setReadingStatus('');
         if (fileRef.current) fileRef.current.value = '';
     };
 
@@ -2992,22 +3036,24 @@ const UploadModal: React.FC<{
                     {!busy && <button onClick={onClose} className="ml-auto p-1 text-indigo-300/60"><X size={18} /></button>}
                 </div>
 
-                <input ref={fileRef} type="file" accept=".txt,text/plain" className="hidden" onChange={e => onFile(e.target.files?.[0])} />
+                <input ref={fileRef} type="file" accept=".txt,text/plain,.pdf,application/pdf" className="hidden" onChange={e => onFile(e.target.files?.[0])} />
                 {reading ? (
                     <div className="w-full rounded-xl border border-indigo-300/30 py-5 mb-3 flex items-center justify-center gap-2 text-indigo-100/90">
-                        <CircleNotch size={18} weight="bold" className="animate-spin" /> 读取并识别编码中…
+                        <CircleNotch size={18} weight="bold" className="animate-spin" /> {readingStatus}
                     </div>
                 ) : fileInfo ? (
                     <div className="rounded-xl border border-indigo-300/30 p-3 mb-3 bg-white/5">
                         <div className="flex items-center gap-2">
                             <BookOpen size={16} weight="fill" className="text-amber-200 shrink-0" />
                             <span className="text-[12.5px] text-white font-semibold truncate flex-1">{fileInfo.name}</span>
-                            <span className="text-[8.5px] text-indigo-300/60 border border-indigo-300/30 rounded px-1 uppercase">{fileInfo.encoding}</span>
+                            <span className="text-[8.5px] text-indigo-300/60 border border-indigo-300/30 rounded px-1 uppercase">
+                                {fileInfo.kind === 'pdf' ? `PDF · ${fileInfo.pages} 页` : fileInfo.encoding}
+                            </span>
                             {!busy && <button onClick={clearFile} className="text-indigo-300/60 p-1"><X size={14} /></button>}
                         </div>
                         <div className="text-[10px] text-indigo-300/60 mt-1">{fileInfo.chars.toLocaleString()} 字 · 预计 ~{Math.ceil(fileInfo.chars / 400).toLocaleString()} 段</div>
                         <p className="text-[10.5px] text-indigo-200/50 mt-1.5 leading-snug line-clamp-2">{fileInfo.preview}…</p>
-                        {!busy && (
+                        {!busy && fileInfo.kind === 'text' && (
                             <div className="flex items-center gap-1.5 mt-2">
                                 <span className="text-[9.5px] text-indigo-300/55 shrink-0">乱码？换编码</span>
                                 <select value={chosenEncoding} onChange={e => redecode(e.target.value)}
@@ -3025,7 +3071,7 @@ const UploadModal: React.FC<{
                 ) : (
                     <button onClick={() => fileRef.current?.click()}
                         className="w-full rounded-xl border border-dashed border-indigo-300/40 py-3 mb-3 text-[12.5px] text-indigo-100/90 flex items-center justify-center gap-2 active:bg-white/5">
-                        <UploadSimple size={16} weight="bold" /> 选择 .txt 文件（大文件也 OK）
+                        <UploadSimple size={16} weight="bold" /> 选择 .txt / .pdf 文件（大文件也 OK）
                     </button>
                 )}
 
