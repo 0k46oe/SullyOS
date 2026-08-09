@@ -23,6 +23,7 @@ import { safeFetchJson } from '../utils/safeApi';
 import { captureApiRequestOnce, getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext, updateApiRequestCaptureUsage } from '../utils/apiCallLog';
 import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
+import { buildFetchFailureDetail, classifyFetchFailure, describeReachabilityProbe, parseTargetUrl, probeOriginReachability } from '../utils/networkFailureDiagnosis';
 import { INSTALLED_APPS, HIDDEN_APP_NAMES } from '../constants';
 import { isAnalyticsRequestUrl, trackEvent, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, trackCurrentFeaturesOnce } from '../utils/analytics';
 import { collectAppearance, collectCharSettings, collectDataScale, collectFeatureFlagsAsync } from '../utils/analyticsSnapshot';
@@ -1203,14 +1204,42 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   recordApiCall({ requestId: (config as any)?.__sullyApiCallId, url: urlStr, body: (sendArgs[1] as any)?.body, ok: false, meta: (config as any)?.__sullyMeta || ambientMetaAtStart, durationMs: Date.now() - fetchStartedAt });
               }
               if (!isAnalyticsRequestUrl(urlStr)) {
+                  // 光秃秃一句 "Failed to fetch" + 一个 URL 排查不了任何东西（社区里这条卡过好几个人）。
+                  // 这里把浏览器肯在 JS 侧交出来的旁证一次性补齐：方法、耗时、在线状态、是否跨域、
+                  // Resource Timing 里那条记录，再给一句初判；随后异步做一次 no-cors 连通性复检，
+                  // 结论回填到同一条日志上——「网络不通」和「网络通但响应被 CORS 拦」要走的排查路
+                  // 完全相反，不分开的话用户只能瞎试。详见 utils/networkFailureDiagnosis.ts。
+                  const logId = `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                  const method = (typeof Request !== 'undefined' && resource instanceof Request)
+                      ? resource.method
+                      : ((config as RequestInit | undefined)?.method || 'GET');
+                  const baseDetail = buildFetchFailureDetail({
+                      url: urlStr,
+                      method,
+                      durationMs: Date.now() - fetchStartedAt,
+                      error: err,
+                  });
                   setSystemLogs(prev => [{
-                      id: `log-${Date.now()}`,
+                      id: logId,
                       timestamp: Date.now(),
                       type: 'network',
                       source: 'Network',
                       message: err.message || 'Fetch Failed',
-                      detail: `URL: ${urlStr}`
+                      detail: baseDetail,
                   }, ...prev.slice(0, 49)]);
+
+                  // 只对「拿不到响应」这一类做复检：主动取消 / 混合内容 / 地址非法已经有确定结论了，
+                  // 再打一次纯属浪费。复检走 originalFetch，否则它自己失败会再写一条日志滚雪球。
+                  if (classifyFetchFailure({ url: urlStr, error: err }) === 'blocked') {
+                      void (async () => {
+                          const verdict = await probeOriginReachability(urlStr, originalFetch);
+                          const line = describeReachabilityProbe(verdict, parseTargetUrl(urlStr).host);
+                          if (!line) return;
+                          setSystemLogs(prev => prev.map(log => (
+                              log.id === logId ? { ...log, detail: `${log.detail || ''}\n${line}` } : log
+                          )));
+                      })();
+                  }
               }
               throw err;
           }
