@@ -867,6 +867,8 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
           </div>
         ) : null}
 
+        {/* 已经填了 Worker 地址就说明后端装好了，这张卡收起来；重装走「清掉地址再回来」这条路。 */}
+        {config.workerUrl?.trim() ? null : (
         <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <span className="font-bold text-slate-700">一键部署（推荐）</span>
@@ -961,6 +963,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
             以后「更新后端」用的就是它；本页不保存。介意的话可以照下面的手动方式装。
           </p>
         </div>
+        )}
 
         <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
           <button
