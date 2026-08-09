@@ -656,22 +656,33 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   };
 
   /**
+   * 复制密钥时带不带 `变量名=` 前缀，看 Worker 地址填了没：
+   * 空着 = 还没装后端，用户要去 Cloudflare 的 Variables and secrets 里新建变量，
+   * 给整行最省事（粘一行进去会自动拆成名字和值两栏，不用对着抄名字）；
+   * 填了 = 后端早装好了，这会儿是回来改某一项的值，光标就停在值那一栏，
+   * 整行粘进去会把变量名一起写成值。
+   */
+  const copyWholeEnvLine = !config?.workerUrl?.trim();
+
+  /**
    * 把刚生成的密钥交给用户：存进 state 供展示 + 尽量复制到剪贴板。
    * 输入框是 password 型看不见内容，所以生成时必须把值显示出来，
    * 否则「把同样的值填进 Worker 环境变量」这一步没法做。
-   *
-   * 复制和展示的都是 `变量名=值` 整行。Cloudflare 的 Variables and secrets
-   * 认这个格式：粘一行进去会自动拆成变量名和值两栏，不用自己对着抄名字。
-   * 剪贴板不可用时用户是从下方手抄的，所以展示的那份也得带变量名。
+   * 剪贴板不可用时用户是从下方手抄的，所以展示的那份要和复制的一模一样。
    */
   const revealAndCopy = async (value: string, reveal: (v: string) => void, envName: string) => {
-    const envLine = `${envName}=${value}`;
-    reveal(envLine);
+    const text = copyWholeEnvLine ? `${envName}=${value}` : value;
+    reveal(text);
     try {
-      await navigator.clipboard.writeText(envLine);
-      addToast(`已复制 ${envName} 整行，粘进 Worker 的 Variables 会自动填好名字和值。`, 'success');
+      await navigator.clipboard.writeText(text);
+      addToast(
+        copyWholeEnvLine
+          ? `已复制 ${envName} 整行，粘进 Worker 的 Variables 会自动填好名字和值。`
+          : `已复制 ${envName} 的值（不含变量名），直接粘进 Cloudflare 的值那一栏。`,
+        'success',
+      );
     } catch {
-      addToast('已生成，请手动从下方复制整行。', 'info');
+      addToast(copyWholeEnvLine ? '已生成，请手动从下方复制整行。' : '已生成，请手动从下方复制。', 'info');
     }
   };
 
@@ -1066,8 +1077,10 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
                     <SecretReveal value={generatedMasterKey} />
                   ) : (
                     <p className="text-[11px] text-slate-400">
-                      加密任务内容用的密钥，只存在 Worker 侧。复制出来是 <code className="font-mono">变量名=值</code> 整行，
-                      粘进 CF 的 Variables 会自动分好两栏。本页不保存。
+                      加密任务内容用的密钥，只存在 Worker 侧。本页不保存。
+                      {copyWholeEnvLine
+                        ? <>复制出来是 <code className="font-mono">变量名=值</code> 整行，粘进 CF 的 Variables 会自动分好两栏。</>
+                        : <>复制出来只有值本身，直接粘进 CF 里那一项的值那一栏。</>}
                     </p>
                   )}
                 </div>
