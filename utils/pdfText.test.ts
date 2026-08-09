@@ -13,12 +13,34 @@ describe('PDF 文本提取', () => {
         expect(isPdfFile({ name: 'novel.txt', type: 'text/plain' })).toBe(false);
     });
 
-    it('保留 PDF.js 标记的换行并清理多余空白', () => {
+    it('合并中文 PDF 的视觉折行，不在半句话中留下换行或空格', () => {
         expect(pdfItemsToText([
-            { str: '第一段', hasEOL: true },
-            { str: '第二段' },
-            { str: '继续', hasEOL: true },
-        ])).toBe('第一段\n第二段 继续');
+            { str: '她抬头看向窗外，夜色正' },
+            { str: '', hasEOL: true },
+            { str: '一点点漫进房间。', hasEOL: true },
+        ])).toBe('她抬头看向窗外，夜色正一点点漫进房间。');
+    });
+
+    it('合并英文软换行并去掉行末断词连字符', () => {
+        expect(pdfItemsToText([
+            { str: 'The sentence was inter-', hasEOL: true },
+            { str: 'rupted by a visual line break.', hasEOL: true },
+        ])).toBe('The sentence was interrupted by a visual line break.');
+    });
+
+    it('保留显式空行和明显的版面段间距', () => {
+        expect(pdfItemsToText([
+            { str: '第一段。' },
+            { str: '', hasEOL: true },
+            { str: '', hasEOL: true },
+            { str: '第二段。', hasEOL: true },
+        ])).toBe('第一段。\n\n第二段。');
+
+        expect(pdfItemsToText([
+            { str: '同一段的第一行', hasEOL: true, transform: [12, 0, 0, 12, 40, 700], height: 12 },
+            { str: '继续这一段。', hasEOL: true, transform: [12, 0, 0, 12, 40, 686], height: 12 },
+            { str: '新的自然段。', hasEOL: true, transform: [12, 0, 0, 12, 40, 650], height: 12 },
+        ])).toBe('同一段的第一行继续这一段。\n\n新的自然段。');
     });
 
     it('逐页提取全文、报告进度并释放页面资源', async () => {
