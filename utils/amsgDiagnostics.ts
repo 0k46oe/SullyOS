@@ -128,6 +128,15 @@ export const describeAmsgFetchFailure = (
 /** worker 自检里「能跑但有一块是哑的」那类提醒。 */
 export interface AmsgConfigWarning { code: string; message: string }
 
+/**
+ * 表结构自查没跑成时，worker 给出的归类代号（worker/amsg/src/index.ts 的
+ * classifySchemaProbeError；改那边的档位这份要跟着走）。
+ *
+ * 分档全是为了「用户该做什么」：unsupported 点一下更新就好，denied 是后端自己的
+ * 毛病、点什么都没用，timeout 再体检一次多半就过。
+ */
+export type AmsgSchemaProbeError = 'unsupported' | 'denied' | 'timeout' | 'other';
+
 /** GET /debug 回执里用得上的那部分（worker/amsg/src/index.ts）。 */
 export interface AmsgDebugReport {
   config: { ok: boolean; missing: string[]; message: string; warnings: AmsgConfigWarning[] };
@@ -135,6 +144,8 @@ export interface AmsgDebugReport {
     reachable: boolean;
     /** null = worker 查不了这一项（不等于「齐了」）。老 worker 只报 boolean。 */
     schemaReady?: boolean | null;
+    /** 上面那项查不了时是为什么。缺字段 = 老 worker 不报这一项，只能笼统说一句。 */
+    schemaError?: AmsgSchemaProbeError | null;
     missingTables?: string[];
     missingColumns?: string[];
     pushSubscriptionRegistered?: boolean;
@@ -207,6 +218,19 @@ export interface AmsgDiagnosticsInput {
 const DB_MISSING_HINT = 'Worker 没有绑定 D1 数据库。多半是部署第一步填完 Database ID 之后没点那个「Add」就直接 Deploy 了。回 Cloudflare 的 Settings → Bindings 加一条 D1 database，变量名填大写的 DB。';
 const MASTER_KEY_MISSING_HINT = 'Worker 上没有 AMSG_MASTER_KEY。去 Settings → Variables and secrets 添加，类型一定要选 Secret——选成 Text 的话下次部署就会消失。';
 const SCHEMA_STALE_HINT = '换过 Worker 版本后，已经存在的表不会自己长出新列，定时任务每分钟都会因为读不到它们而挂掉（界面上一切正常，就是一条都不发）。点上面的「重新连接并验证」补一次。';
+
+/**
+ * 表结构没查成时，各档分别该跟用户说什么。
+ *
+ * 每一句都要落到「要不要紧 + 该做什么」上。以前这里只有一句「查不了，不知道」——
+ * 原因躺在 Cloudflare 日志里，用户看不到，隔着屏幕也问不出来，只能一路猜。
+ */
+const SCHEMA_PROBE_HINTS: Record<AmsgSchemaProbeError, string> = {
+  denied: '查表结构时被数据库挡了一道：Cloudflare 在库里放了一张自己的内部表，不让 Worker 读，自查就断在那儿了。表齐没齐这次没查出来，但主动消息的收发不受影响。等后端更新到修好这处的版本就会自己恢复。',
+  unsupported: '这台 Worker 上跑的后端代码还没有「查自己表结构」这个本事，齐没齐问不出来。点上面的「更新 Worker」换成新版就能查了。',
+  timeout: '查表结构时数据库没在时限内回话，这次没查出来。多半是 D1 刚被唤醒（隔几小时的头一次请求常这样），过一会儿再体检一次通常就好了。',
+  other: '这台 Worker 查不了自己的表结构，齐没齐不知道。要是主动消息到点不响，先点一次上面的「重新连接并验证」把表补齐。',
+};
 
 /**
  * 把体检结果排成一列，顺序就是「该先修哪个」。
@@ -283,21 +307,27 @@ export const buildAmsgDiagnosticRows = (input: AmsgDiagnosticsInput): AmsgDiagno
       key: 'schema',
       label: '数据表',
       level: 'unknown',
-      detail: '这台 Worker 查不了自己的表结构，齐没齐不知道。要是主动消息到点不响，先点一次上面的「重新连接并验证」把表补齐。',
+      detail: SCHEMA_PROBE_HINTS[storage.schemaError || 'other'],
     });
   } else {
     const missingTables = storage.missingTables || [];
     const missingColumns = storage.missingColumns || [];
     const schemaBad = missingTables.length > 0 || missingColumns.length > 0;
+    // 明说了不够用（false）却一项都没点到名 = 自查本身没跑成，而主表确实不在：库还是空的。
+    // 只数这两个数组的话，一个一张表都没建的空库会显示成全绿——一键部署完还没点连接时
+    // 正好是这个组合（表没建 + 自查被内部表拒掉）。
+    const emptyDatabase = storage.schemaReady === false && !schemaBad;
     rows.push({
       key: 'schema',
       label: '数据表',
-      level: schemaBad ? 'bad' : 'ok',
-      detail: missingTables.length
-        ? `缺表：${missingTables.join('、')}。点上面的「重新连接并验证」会自动建好（可能要点两次）。`
-        : missingColumns.length
-          ? `表结构是旧的，缺列：${missingColumns.join('、')}。${SCHEMA_STALE_HINT}`
-          : '表和列都齐了。',
+      level: schemaBad || emptyDatabase ? 'bad' : 'ok',
+      detail: emptyDatabase
+        ? '库里还一张表都没有。点上面的「重新连接并验证」建一次。'
+        : missingTables.length
+          ? `缺表：${missingTables.join('、')}。点上面的「重新连接并验证」会自动建好（可能要点两次）。`
+          : missingColumns.length
+            ? `表结构是旧的，缺列：${missingColumns.join('、')}。${SCHEMA_STALE_HINT}`
+            : '表和列都齐了。',
     });
   }
 

@@ -10,7 +10,7 @@ import worker, {
   amsgFireSettled, amsgHooks, amsgReasoningKey, amsgStaleSkip, attachScheduledTasks,
   buildWorkerConfig, configureInstantErrorPush, inspectWorkerEnv,
   offloadOversizedPush, resolveVapidEmail, runFireCancelTool, runFireRenewTool,
-  runFireScheduleTool, runMcpFireTool, splitSchemaMissing,
+  runFireScheduleTool, runMcpFireTool, splitSchemaMissing, classifySchemaProbeError,
 } from './index';
 import * as workerEntry from './index';
 import { MAX_TOOL_ITERATIONS } from './agentic';
@@ -3000,6 +3000,34 @@ describe('splitSchemaMissing', () => {
 
 // /debug 是隔着屏幕帮别人看部署时用的：对方只会截图或者把 JSON 贴过来，所以它既要
 // 说得足够多（配置、schema、cron），又不能带出任何一样不该外传的东西——它不设防。
+describe('classifySchemaProbeError — 自查挂了归到哪一档', () => {
+  // 分档的意义全在「用户该做什么」上：unsupported 点一下更新就好，denied 点什么都没用
+  // （后端自己的毛病），timeout 再体检一次多半就过。混成一句「查不了」等于什么都没说。
+  it('D1 的授权器拒了 → denied', () => {
+    expect(classifySchemaProbeError(new Error('D1_ERROR: not authorized: SQLITE_AUTH'))).toBe('denied');
+  });
+
+  it('后端太旧、压根没这个方法 → unsupported', () => {
+    expect(classifySchemaProbeError(new TypeError('upstream.getSchemaVersion is not a function')))
+      .toBe('unsupported');
+    expect(classifySchemaProbeError(new Error('[amsg-server] 这个数据库适配器不支持 schema 自查（没实现 describeSchema）。')))
+      .toBe('unsupported');
+  });
+
+  it('库没在时限内回话 → timeout', () => {
+    const aborted = new Error('The operation was aborted');
+    aborted.name = 'AbortError';
+    expect(classifySchemaProbeError(aborted)).toBe('timeout');
+    expect(classifySchemaProbeError(new Error('D1_ERROR: query timed out'))).toBe('timeout');
+  });
+
+  it('归不了类的一律 other，绝不误报成上面三档', () => {
+    expect(classifySchemaProbeError(new Error('D1_ERROR: something else entirely'))).toBe('other');
+    expect(classifySchemaProbeError('一段字符串')).toBe('other');
+    expect(classifySchemaProbeError(null)).toBe('other');
+  });
+});
+
 describe('/debug — 只读诊断', () => {
   /**
    * 假 D1：按 SQL 关键字给回答，只支持这个端点真正会发的那几条。
@@ -3092,6 +3120,58 @@ describe('/debug — 只读诊断', () => {
     expect(data.storage.reachable).toBe(true);
     expect(data.storage.schemaReady).toBeNull();
     expect(data.storage.schemaReady).not.toBe(true);
+  });
+
+  /**
+   * 回归守卫：查不动的时候，**为什么**查不动要跟着回执一起出来。
+   *
+   * 2026-08-09 在真机上撞到的：新建的 D1 库自带一张 Cloudflare 内部表 `_cf_KV`，上游
+   * 遍历全库逐表问列时问到它，被 D1 一口回绝（SQLITE_AUTH），整个自查断在第一张表上。
+   * 原因只写进 worker 日志的话，面板上剩下的就是一句「查不了，不知道」——用户拿它做不了
+   * 任何事，隔着屏幕也问不出来，只能一路猜到去翻 Cloudflare 日志为止。
+   */
+  it('自查被 D1 拒了（库里有 _cf_KV 这种内部表）→ 回执里带 schemaError: denied', async () => {
+    const db = fakeDb({ tables: ['_cf_KV', ...ALL_TABLES] });
+    const withInternalTable = {
+      prepare(sql: string) {
+        if (sql.includes('PRAGMA table_info(_cf_KV)')) {
+          const boom = async () => { throw new Error('D1_ERROR: not authorized: SQLITE_AUTH'); };
+          return { bind: () => ({ first: boom }), first: boom, all: boom };
+        }
+        return db.prepare(sql);
+      },
+    };
+    const data = await debug(withInternalTable);
+    expect(data.storage.schemaReady).toBeNull();
+    expect(data.storage.schemaError).toBe('denied');
+  });
+
+  it('自查跑成了就不带 schemaError（有值等于「这次没查成」）', async () => {
+    const data = await debug(fakeDb({ tables: ALL_TABLES }));
+    expect(data.storage.schemaError).toBeNull();
+  });
+
+  /**
+   * 回归守卫：库是空的 + 自查也挂了，这两件事撞一起时不许报「表和列都齐了」。
+   *
+   * 一键部署完还没点连接时正好同时成立：表一张没建（主表不在），而自查被 `_cf_KV`
+   * 拒掉，于是「缺哪些表」是一个空数组。界面只数这个数组的话，一个空库会显示成全绿。
+   */
+  it('库里一张表都没有 + 自查也挂了 → schemaReady 报 false，且带得出原因', async () => {
+    const empty = {
+      prepare(sql: string) {
+        const answer = async () => {
+          if (sql.includes('PRAGMA')) throw new Error('D1_ERROR: not authorized: SQLITE_AUTH');
+          if (sql.includes('sqlite_master')) return { results: [{ name: '_cf_KV' }] };
+          return { pending: 0, overdue: 0, oldest: null };
+        };
+        return { bind: () => ({ first: answer }), first: answer, all: answer };
+      },
+    };
+    const data = await debug(empty);
+    expect(data.storage.schemaReady).toBe(false);
+    expect(data.storage.missingTables).toEqual([]);
+    expect(data.storage.schemaError).toBe('denied');
   });
 
   it('换了 bundle 没跑 init-tenant → 点名缺的那几列（cron 会因此每分钟静默挂）', async () => {

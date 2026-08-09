@@ -2436,6 +2436,33 @@ const TICK_STALL_MINUTES = 5;
 /** 上游 schema 自查的结果；查不了时是 null（见 inspectSchema）。 */
 type SchemaProbe = Awaited<ReturnType<typeof upstream.getSchemaVersion>> | null;
 
+/**
+ * schema 自查查不动时的归类代号。**只有这四个字面量会进 /debug 回执**，异常原文一个
+ * 字都不带——那上面可能挂着 SQL 片段，而这个端点是不设防的。
+ *
+ * 分这几档是因为用户该做的事完全不同：`unsupported` 点一下「更新 Worker」就好，
+ * `denied` 是后端自己的毛病、点什么都没用，`timeout` 再体检一次多半就过了。
+ * 混成一句「查不了」的话，界面只能说一句谁都用不上的废话。
+ */
+export type AmsgSchemaProbeError = 'unsupported' | 'denied' | 'timeout' | 'other';
+
+/**
+ * 把 schema 自查抛出来的异常归到上面四档里。
+ *
+ * `denied` 排在最前面，因为它的特征串最硬（D1 的授权器只会报这一种）。2026-08-09
+ * 真机上撞到的就是它：新建的 D1 库里自带一张 Cloudflare 内部表 `_cf_KV`，上游遍历
+ * 全库逐表问列时问到它，被 D1 一口回绝，整个自查断在第一张表上。
+ */
+export const classifySchemaProbeError = (error: unknown): AmsgSchemaProbeError => {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const name = error instanceof Error ? error.name : '';
+  if (/SQLITE_AUTH/i.test(message) || /not authorized/i.test(message)) return 'denied';
+  // 老 bundle 里压根没有 getSchemaVersion，或者适配器没实现 describeSchema。
+  if (/is not a function/i.test(message) || /不支持 schema 自查/.test(message)) return 'unsupported';
+  if (name === 'AbortError' || name === 'TimeoutError' || /timed? ?out/i.test(message)) return 'timeout';
+  return 'other';
+};
+
 export const splitSchemaMissing = (missing: string[]) => ({
   missingTables: missing
     .filter((item) => item.startsWith('table:') || item.startsWith('index:'))
@@ -2459,7 +2486,11 @@ type D1Like = {
  * 全程不写库，也不读任何一条任务的内容——只数数和比对 schema。数出来的东西
  * （待发条数、最老的一条过期了多久）不指向任何角色、时间点或正文。
  */
-const inspectStorage = async (env: Env, schema: SchemaProbe) => {
+const inspectStorage = async (
+  env: Env,
+  probe: { schema: SchemaProbe; error: AmsgSchemaProbeError | null },
+) => {
+  const { schema, error: schemaError } = probe;
   const db = env.DB as D1Like | undefined;
   if (typeof db?.prepare !== 'function') return { reachable: false as const };
 
@@ -2480,7 +2511,7 @@ const inspectStorage = async (env: Env, schema: SchemaProbe) => {
 
     if (!present.has('scheduled_messages')) {
       // 主表都不在，这个不用上游背书也是确定的：库是空的。
-      return { reachable: true as const, missingTables, missingColumns, schemaReady: false };
+      return { reachable: true as const, missingTables, missingColumns, schemaReady: false, schemaError };
     }
     // 主表在、但比对不出来 → 不知道。
     const schemaReady = schema ? missingTables.length === 0 && missingColumns.length === 0 : null;
@@ -2503,6 +2534,8 @@ const inspectStorage = async (env: Env, schema: SchemaProbe) => {
     return {
       reachable: true as const,
       schemaReady,
+      // null = 这次自查跑成了。有值时 schemaReady 必然是 null，界面照它选该说哪句话。
+      schemaError,
       missingTables,
       missingColumns,
       // 单用户 worker 只存一行。到点却发不出去最常见的原因就是这行是空的——
@@ -2561,13 +2594,18 @@ const upstream = createSingleUserCloudflareWorker(buildWorkerConfig, {
  * 隔着屏幕根本问不出来。missing 里会直接点名缺哪张表、哪一列。
  *
  * 查不了不算错（D1 没绑之类）——报 null，让面板照旧显示其余部分。
+ *
+ * 但**为什么查不了要一起带出去**：只往日志里写一行的话，用户看到的永远是一句
+ * 「查不了，不知道」，而这句话对他做什么毫无帮助，隔着屏幕也问不出来。归类见
+ * classifySchemaProbeError。
  */
-const inspectSchema = async (env: Env) => {
+const inspectSchema = async (env: Env): Promise<{ schema: SchemaProbe; error: AmsgSchemaProbeError | null }> => {
   try {
-    return await upstream.getSchemaVersion(env);
+    return { schema: await upstream.getSchemaVersion(env), error: null };
   } catch (error) {
-    console.warn('[amsg:debug] schema 查不了', error);
-    return null;
+    const kind = classifySchemaProbeError(error);
+    console.warn(`[amsg:debug] schema 查不了（${kind}）`, error);
+    return { schema: null, error: kind };
   }
 };
 
@@ -2693,8 +2731,8 @@ export default {
       // 全只读、也不设防，所以能报什么是有边界的：只有配置齐不齐、schema 对不对、
       // 数出来的条数，以及本来就公开的 VAPID 公钥。密钥的值、用户标识、任务正文、
       // 推送 endpoint 一概不出现——不是没取到，是刻意不取。
-      const schema = await inspectSchema(env);
-      const storage = await inspectStorage(env, schema);
+      const probe = await inspectSchema(env);
+      const storage = await inspectStorage(env, probe);
       return jsonWithCors(200, {
         success: true,
         data: {
@@ -2703,7 +2741,7 @@ export default {
           server: await readServerVersion(request, env),
           storage,
           tick: judgeTick(storage),
-          schema,
+          schema: probe.schema,
           vapidPublicKey: env.VAPID_PUBLIC_KEY?.trim() || null,
         },
       });

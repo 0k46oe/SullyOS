@@ -249,6 +249,85 @@ describe('buildAmsgDiagnosticRows — 红绿判定', () => {
     expect(summarizeAmsgDiagnostics(rows)).not.toBe('ok');
   });
 
+  /**
+   * 回归守卫：查不成的时候要说清楚是**哪一种**查不成。
+   *
+   * 三档要用户做的事完全不同，混成一句「查不了，不知道」等于什么都没说——真实故障里
+   * 原因躺在 Cloudflare 日志里，用户看不到，只能一路猜。2026-08-09 从零部署稳定复现的
+   * 就是 denied 那档：新建的 D1 库自带一张 Cloudflare 内部表，上游逐表问列时被它拒掉。
+   */
+  it('查不成的原因分档说话，不再一句「不知道」打发', () => {
+    const rowFor = (schemaError: 'denied' | 'unsupported' | 'timeout' | 'other' | undefined) =>
+      rowOf(buildAmsgDiagnosticRows({
+        probe: {
+          reachable: true,
+          report: healthyReport({
+            storage: {
+              reachable: true,
+              schemaReady: null,
+              schemaError,
+              missingTables: [],
+              missingColumns: [],
+              pushSubscriptionRegistered: true,
+              pendingTasks: 0,
+              overdueTasks: 0,
+              oldestOverdueMinutes: null,
+            },
+          }),
+        },
+        localPushSubscribed: true,
+      }), 'schema');
+
+    // 后端自己的毛病：得说明不影响收发，别让用户白点一通按钮。
+    expect(rowFor('denied').detail).toContain('内部表');
+    expect(rowFor('denied').detail).toContain('不受影响');
+    // 后端太旧：指向「更新 Worker」，不是「重新连接」。
+    expect(rowFor('unsupported').detail).toContain('更新 Worker');
+    // 库刚醒：再体检一次就好，不用改任何东西。
+    expect(rowFor('timeout').detail).toContain('过一会儿');
+    // 老 worker 不报这一项 → 退回原来那句笼统的，不能变成空字符串。
+    expect(rowFor(undefined).detail).toContain('重新连接并验证');
+    expect(rowFor(undefined).detail.length).toBeGreaterThan(10);
+    // 哪一档都不许把这行说成绿的。
+    (['denied', 'unsupported', 'timeout', 'other', undefined] as const).forEach((kind) => {
+      expect(rowFor(kind).level).toBe('unknown');
+    });
+  });
+
+  /**
+   * 回归守卫：一张表都没建的空库不许显示成全绿。
+   *
+   * 一键部署完还没点「连接并验证」时正好是这个组合：表一张没建（主表不在 → schemaReady
+   * 为 false），而自查被库里的内部表拒掉 → 「缺哪些表」是个空数组。界面只数这个数组的话，
+   * 空库和齐活的库长得一模一样。
+   */
+  it('库是空的但自查也没跑成 → 报红说「一张表都没有」，不报绿', () => {
+    const rows = buildAmsgDiagnosticRows({
+      probe: {
+        reachable: true,
+        report: healthyReport({
+          storage: {
+            reachable: true,
+            schemaReady: false,
+            schemaError: 'denied',
+            missingTables: [],
+            missingColumns: [],
+            pushSubscriptionRegistered: false,
+            pendingTasks: 0,
+            overdueTasks: 0,
+            oldestOverdueMinutes: null,
+          },
+        }),
+      },
+      localPushSubscribed: true,
+    });
+
+    const schema = rowOf(rows, 'schema');
+    expect(schema.level).toBe('bad');
+    expect(schema.detail).not.toContain('表和列都齐了');
+    expect(schema.detail).toContain('重新连接并验证');
+  });
+
   it('表结构是旧的（缺列）要单独报红并指向「重新连接并验证」', () => {
     const rows = buildAmsgDiagnosticRows({
       probe: {
