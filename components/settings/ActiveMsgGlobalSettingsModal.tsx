@@ -165,6 +165,9 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   // 就是一条都不发」的全部原因。存原始探测结果，红绿灯在渲染时算（推送状态一变就跟着走）。
   const [diagnosticsProbe, setDiagnosticsProbe] = useState<AmsgDiagnosticsProbe | null>(null);
   const [diagnosing, setDiagnosing] = useState(false);
+  // 体检摆在最上面，但默认收着：装好之后它天天是「都正常」，摊开占掉半屏。
+  // 标题那一行已经把结论说了，要看是哪一项才需要点开。
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
   const [workerOutdated, setWorkerOutdated] = useState(false);
   /** 自更新成功后 worker 报回来的代码指纹，显示出来好让人确认这次真换了。 */
@@ -246,6 +249,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   useEffect(() => {
     if (!isOpen) return;
     setAdvancedOpen(false);
+    setDiagnosticsOpen(false);
     setDeployOpen(false);
     setPasteFallbackOpen(false);
     // 两个明文密钥都要清：留到下次打开面板还挂在页面上，就是白白多摊一次。
@@ -729,18 +733,68 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       )}
     >
       <div className="space-y-4 text-sm text-slate-600">
-        <div className="bg-violet-50 border border-violet-100 rounded-2xl p-4 space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <span className="font-bold text-slate-700">连接方式</span>
-            <span className="px-3 py-1 rounded-full bg-violet-500 text-white text-xs font-bold">自部署 Worker</span>
+        {/* 体检。主动消息坏掉的那几种方式在界面上全是隐形的：D1 没绑、表结构是旧的、
+            VAPID 没配、云端没登记收件设备——任务照建、面板照常，就是一条都不发。
+            Worker 的 /debug 一直算得出这些，这里只是把它摆到看得见的地方。 */}
+        {config.workerUrl?.trim() ? (
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
+            {/* 收着时那句「都正常 / 有问题」就是全部结论，逐项细节点开再看。 */}
+            <div className="flex items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={() => setDiagnosticsOpen((prev) => !prev)}
+                className="flex-1 flex items-center justify-between gap-2 text-left"
+              >
+                <span className="flex items-center gap-2">
+                  <span className="font-bold text-slate-700">体检</span>
+                  {diagnosticRows.length ? (
+                    <span className={`text-xs font-bold ${DIAGNOSTIC_STYLES[diagnosticLevel].text}`}>
+                      {diagnosticLevel === 'ok' ? '都正常' : diagnosticLevel === 'bad' ? '有问题' : diagnosticLevel === 'warn' ? '有提醒' : '查不全'}
+                    </span>
+                  ) : null}
+                </span>
+                <span className="text-xs font-bold text-slate-400">{diagnosticsOpen ? '收起' : '展开'}</span>
+              </button>
+              {diagnosticsOpen ? (
+                <button
+                  type="button"
+                  onClick={() => void runDiagnostics()}
+                  disabled={diagnosing}
+                  className="shrink-0 px-3 py-1.5 text-[11px] rounded-xl font-bold bg-white border border-slate-200 text-slate-600 active:scale-95 transition-transform disabled:opacity-50"
+                >
+                  {diagnosing ? '检查中…' : '重新检查'}
+                </button>
+              ) : null}
+            </div>
+
+            {!diagnosticsOpen ? null : diagnosticRows.length ? (
+              <div className="space-y-2">
+                {diagnosticRows.map((row) => {
+                  const style = DIAGNOSTIC_STYLES[row.level];
+                  return (
+                    <div key={row.key}>
+                      <div className="flex items-center gap-2">
+                        <span className={`shrink-0 w-1.5 h-1.5 rounded-full ${style.dot}`} />
+                        <span className="flex-1 text-xs font-bold text-slate-600">{row.label}</span>
+                        <span className={`shrink-0 text-[11px] font-bold ${style.text}`}>{style.word}</span>
+                      </div>
+                      {/* 正常的行不展开说明：全绿时这一列要短到能一眼扫完。 */}
+                      {row.level === 'ok' ? null : (
+                        <p className="mt-1 pl-3.5 text-[11px] leading-relaxed text-slate-500 whitespace-pre-line">
+                          {row.detail}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-xs leading-relaxed text-slate-400">
+                {diagnosing ? '正在问 Worker…' : '还没有结果，点右上角检查一次。'}
+              </p>
+            )}
           </div>
-          <p className="text-xs leading-relaxed text-violet-700">
-            角色到点自动给你发消息，App 关着也能收。你自己部署一个 Cloudflare Worker（自带 D1 数据库 + 定时触发），把地址填在下面即可。
-          </p>
-          <p className="text-[11px] leading-relaxed text-violet-600/80">
-            即时对话：你发消息，这一轮整个交给云端跑，发完就能关页面。到点主动推的定时消息与它共用同一条云端管线。
-          </p>
-        </div>
+        ) : null}
 
         {/* 正常情况下两道双向门会拦住「两个都开」，能走到这儿全是脏配置遗留。
             脏配置照样会让聊天悄悄走 Instant，2.0 挂在本地那条路上的东西全静默失效——
@@ -1267,59 +1321,6 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
             </div>
           ) : null}
         </div>
-
-        {/* 体检。主动消息坏掉的那几种方式在界面上全是隐形的：D1 没绑、表结构是旧的、
-            VAPID 没配、云端没登记收件设备——任务照建、面板照常，就是一条都不发。
-            Worker 的 /debug 一直算得出这些，这里只是把它摆到看得见的地方。 */}
-        {config.workerUrl?.trim() ? (
-          <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-slate-700">体检</span>
-                {diagnosticRows.length ? (
-                  <span className={`text-xs font-bold ${DIAGNOSTIC_STYLES[diagnosticLevel].text}`}>
-                    {diagnosticLevel === 'ok' ? '都正常' : diagnosticLevel === 'bad' ? '有问题' : diagnosticLevel === 'warn' ? '有提醒' : '查不全'}
-                  </span>
-                ) : null}
-              </div>
-              <button
-                type="button"
-                onClick={() => void runDiagnostics()}
-                disabled={diagnosing}
-                className="shrink-0 px-3 py-1.5 text-[11px] rounded-xl font-bold bg-white border border-slate-200 text-slate-600 active:scale-95 transition-transform disabled:opacity-50"
-              >
-                {diagnosing ? '检查中…' : '重新检查'}
-              </button>
-            </div>
-
-            {diagnosticRows.length ? (
-              <div className="space-y-2">
-                {diagnosticRows.map((row) => {
-                  const style = DIAGNOSTIC_STYLES[row.level];
-                  return (
-                    <div key={row.key}>
-                      <div className="flex items-center gap-2">
-                        <span className={`shrink-0 w-1.5 h-1.5 rounded-full ${style.dot}`} />
-                        <span className="flex-1 text-xs font-bold text-slate-600">{row.label}</span>
-                        <span className={`shrink-0 text-[11px] font-bold ${style.text}`}>{style.word}</span>
-                      </div>
-                      {/* 正常的行不展开说明：全绿时这一列要短到能一眼扫完。 */}
-                      {row.level === 'ok' ? null : (
-                        <p className="mt-1 pl-3.5 text-[11px] leading-relaxed text-slate-500 whitespace-pre-line">
-                          {row.detail}
-                        </p>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <p className="text-xs leading-relaxed text-slate-400">
-                {diagnosing ? '正在问 Worker…' : '还没有结果，点右上角检查一次。'}
-              </p>
-            )}
-          </div>
-        ) : null}
 
         <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
           <div className="flex items-center justify-between gap-3">
