@@ -2897,6 +2897,7 @@ const UploadModal: React.FC<{
     onCommit: (novel: VRWorldNovel) => Promise<void> | void;
     onError: (msg: string) => void;
 }> = ({ onClose, onCommit, onError }) => {
+    const uploadFieldClass = 'w-full rounded-lg border border-indigo-100/70 bg-white px-3 py-2 text-slate-800 caret-indigo-500 placeholder:text-indigo-300 outline-none focus:border-indigo-300';
     const [title, setTitle] = useState('');
     const [author, setAuthor] = useState('');
     const [summary, setSummary] = useState('');
@@ -3029,14 +3030,14 @@ const UploadModal: React.FC<{
                 )}
 
                 <div className="space-y-2.5">
-                    <input value={title} onChange={e => setTitle(e.target.value)} placeholder="书名（必填）" className="w-full rounded-lg bg-white/8 px-3 py-2 text-[13px] text-white placeholder-indigo-300/40 outline-none" />
-                    <input value={author} onChange={e => setAuthor(e.target.value)} placeholder="作者（选填）" className="w-full rounded-lg bg-white/8 px-3 py-2 text-[13px] text-white placeholder-indigo-300/40 outline-none" />
-                    <input value={summary} onChange={e => setSummary(e.target.value)} placeholder="一句话简介（选填，喂给角色当背景）" className="w-full rounded-lg bg-white/8 px-3 py-2 text-[13px] text-white placeholder-indigo-300/40 outline-none" />
+                    <input value={title} onChange={e => setTitle(e.target.value)} placeholder="书名（必填）" className={`${uploadFieldClass} text-[13px]`} />
+                    <input value={author} onChange={e => setAuthor(e.target.value)} placeholder="作者（选填）" className={`${uploadFieldClass} text-[13px]`} />
+                    <input value={summary} onChange={e => setSummary(e.target.value)} placeholder="一句话简介（选填，喂给角色当背景）" className={`${uploadFieldClass} text-[13px]`} />
                     {!fileInfo && (
                         <>
                             <div className="text-[10px] text-indigo-300/50">或直接粘贴正文（小段文本用；大文件请走上面的文件选择）↓</div>
                             <textarea value={pasteText} onChange={e => setPasteText(e.target.value)} placeholder="粘贴正文…" rows={6}
-                                className="w-full rounded-lg bg-white/8 px-3 py-2 text-[12.5px] text-white placeholder-indigo-300/40 outline-none leading-relaxed" />
+                                className={`${uploadFieldClass} text-[12.5px] leading-relaxed`} />
                         </>
                     )}
                     <div className="text-[10px] text-indigo-300/50">{totalChars.toLocaleString()} 字</div>
