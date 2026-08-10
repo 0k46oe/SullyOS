@@ -120,6 +120,7 @@ import { XhsMcpClient } from '../../../utils/xhsMcpClient';
 // type-only：编译期擦除，classifier 的实现不会因为这行被拉进 bundle。
 import type { ToolCall } from '../../instant-push/src/classifier';
 import {
+  classifyNativeToolCalls,
   createFireSessionState,
   MAX_TOOL_ITERATIONS,
   processLLMRound,
@@ -318,6 +319,13 @@ interface FireStash {
   selfLogDirty: boolean;
   /** 通用 MCP：暴露名 → 服务器/工具。tool_config 里没配（或对该角色不可见）时为 null。 */
   mcpResolve: Map<string, McpResolvedToolCore> | null;
+  /**
+   * 本次 fire 声明给模型的非 MCP native 工具名（schedule / cancel / renew 按各自开关
+   * 在场与否）。onLLMOutput 认领 native tool_call 时拿它当清单（MCP 那份在 mcpResolve）。
+   * 从拼好的 fireTools 现算——以后加新工具不用再来入口登记。onBeforeFire 拼完 fireTools
+   * 后填充，在那之前是空集。
+   */
+  fireToolNames: Set<string>;
   /** 每服务器一份连接会话，单次 fire 内跨轮复用，fire 结束随 scratch 丢弃。 */
   mcpSessions: Map<string, McpSessionState>;
   /** 本次 fire 已经花在 MCP 调用上的毫秒数，见 MCP_TOTAL_BUDGET_MS。 */
@@ -1698,6 +1706,7 @@ export const amsgHooks = {
       selfLog,
       selfLogDirty: false,
       mcpResolve,
+      fireToolNames: new Set(),
       mcpSessions: new Map(),
       mcpSpentMs: 0,
       // 「还能不能再排」按客户端已知的 + 角色自己排过还没被认领的一起算，
@@ -1788,6 +1797,10 @@ export const amsgHooks = {
         ? [buildFireCancelTool(), buildFireRenewTool({ nowMs: ctx.now.getTime(), tz })]
         : []),
     ];
+    // 非 MCP 的声明名单独留一份给 onLLMOutput 认领 native 调用用（见 FireStash.fireToolNames）。
+    stash.fireToolNames = new Set(fireTools
+      .map((t) => t?.function?.name)
+      .filter((n): n is string => typeof n === 'string' && !n.startsWith(MCP_FIRE_NAME_PREFIX)));
     // 轮次上限显式给一份：worker 要靠同一个数判「这是最后一轮了」（见 onLLMOutput），
     // 而上游只有内部默认值、没导出常量，各写各的迟早对不上。
     // tools 由 amsg-server 带 agentic-fire-tools feature 的版本起透传给每轮 LLM 请求。
@@ -1930,31 +1943,23 @@ export const amsgHooks = {
       .join('\n\n');
     session.finalReasoning = roundReasoning || null;
 
-    // native tool_calls：只认 tools 数组里声明过的 MCP 名字。模型幻觉出的
-    // 未声明调用（比如给 tag 工具编一个 native 调用）丢弃并留日志——直接透传
-    // 会让 executeToolCalls 撞上没有 stash 映射的名字。日志带上当时声明了哪些，
+    // native tool_calls：只认声明过的工具（fireToolNames 的管理工具 + mcpResolve 的
+    // MCP 名），但认法放宽——模型常把声明名的「姓」搞丢或换家：声明的 mcp__foo 回报成
+    // foo / default_api:foo，cancel_active_message 也在此列。严格命中优先，对不上再
+    // 去掉命名空间取裸名、唯一命中才认领（见 classifyNativeToolCalls，认领时名字改写
+    // 回声明名）。真幻觉的（哪份清单都对不上）照旧丢弃并留日志——直接透传会让
+    // executeToolCalls 撞上没有 stash 映射的名字。日志带上当时声明了哪些，
     // 「模型编的」和「名字映射建歪了」一眼能分开。
     const rawToolCalls = (ctx.llmResponse as { choices?: Array<{ message?: { tool_calls?: unknown } }> })
       ?.choices?.[0]?.message?.tool_calls;
-    const allNativeCalls = (Array.isArray(rawToolCalls) ? rawToolCalls : []) as ToolCall[];
-    const nativeScheduleCalls = allNativeCalls.filter(
-      (tc) => tc?.function?.name === AMSG_FIRE_SCHEDULE_TOOL,
-    );
-    const nativeMcpCalls = allNativeCalls.filter((tc): tc is ToolCall => {
-      const n = (tc as ToolCall | undefined)?.function?.name;
-      if (n === AMSG_FIRE_SCHEDULE_TOOL) return false;   // 排程工具走上面那条，不算 MCP
-      const hit = typeof n === 'string'
-        && n.startsWith(MCP_FIRE_NAME_PREFIX)
-        && !!stash.mcpResolve?.has(n.slice(MCP_FIRE_NAME_PREFIX.length));
-      if (!hit) {
-        console.warn('[amsg:agentic] 丢弃未声明的 native tool_call', {
-          sessionId: ctx.sessionId,
-          name: n ?? null,
-          declared: [...(stash.mcpResolve?.keys() ?? [])],
-        });
-      }
-      return hit;
-    });
+    const nativeCalls = classifyNativeToolCalls(rawToolCalls, stash.fireToolNames, stash.mcpResolve);
+    for (const droppedName of nativeCalls.dropped) {
+      console.warn('[amsg:agentic] 丢弃未声明的 native tool_call', {
+        sessionId: ctx.sessionId,
+        name: droppedName,
+        declared: [...stash.fireToolNames, ...(stash.mcpResolve?.keys() ?? [])],
+      });
+    }
 
     let decision = processLLMRound(session, content, {
       // 名字取 tool_pack 里的那份：它跟着每轮聊天重新上云，改名当天就是新的。
@@ -1980,9 +1985,11 @@ export const amsgHooks = {
       // 没有这一份的话客户端只能拿「用户此刻在听的那首」凑（补收时多半是空的）。
       sceneSong: stash.sceneSong,
     },
-    stash.mcpResolve ? { resolve: stash.mcpResolve, nativeToolCalls: nativeMcpCalls } : null,
+    stash.mcpResolve ? { resolve: stash.mcpResolve, nativeToolCalls: nativeCalls.mcp } : null,
     // 传 null = 这次不认排程（老部署没这口子），正文里写了也不当调用。
-    typeof ctx.scheduleTask === 'function' ? { nativeToolCalls: nativeScheduleCalls } : null,
+    // manage 池里可能还有 cancel / renew——它们被认领的前提是声明过（canManageTasks），
+    // 而 canManageTasks ⊆ canSelfSchedule ⊆「scheduleTask 是函数」，这道闸不会误拦。
+    typeof ctx.scheduleTask === 'function' ? { nativeToolCalls: nativeCalls.manage } : null,
     // 最后一轮不再放行工具请求，改成用手上的内容收尾（见 agentic.ts 的 MAX_TOOL_ITERATIONS）。
     ctx.iteration);
 

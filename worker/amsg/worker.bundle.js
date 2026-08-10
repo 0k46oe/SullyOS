@@ -5522,7 +5522,7 @@ function createWebCryptoWebPush(vapid = {}, { ttl = SCHEDULED_DEFAULT_TTL } = {}
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-08-10.2";
+var AMSG_BUNDLE_VERSION = "2026-08-10.3";
 
 // utils/localDate.ts
 function getLocalDateKey(date = /* @__PURE__ */ new Date()) {
@@ -10361,17 +10361,52 @@ function attachSceneSong(directives, sceneSong) {
   if (!sceneSong) return directives;
   return directives.map((d) => d.type === "music_action" ? { ...d, song: sceneSong } : d);
 }
+var resolveNativeFireToolName = (raw, manageToolNames, mcpResolve) => {
+  const candidates = [raw];
+  const lastSegment = raw.split(/[:./]/).pop();
+  if (lastSegment && lastSegment !== raw) candidates.push(lastSegment);
+  for (const c of candidates) {
+    if (!c) continue;
+    if (c.startsWith(MCP_FIRE_NAME_PREFIX) && mcpResolve?.has(c.slice(MCP_FIRE_NAME_PREFIX.length))) {
+      return { kind: "mcp", name: c };
+    }
+    if (manageToolNames.has(c)) return { kind: "manage", name: c };
+    if (mcpResolve?.has(c)) return { kind: "mcp", name: `${MCP_FIRE_NAME_PREFIX}${c}` };
+  }
+  return null;
+};
+var classifyNativeToolCalls = (rawToolCalls, manageToolNames, mcpResolve) => {
+  const out = { manage: [], mcp: [], dropped: [] };
+  const calls = Array.isArray(rawToolCalls) ? rawToolCalls : [];
+  for (const tc of calls) {
+    const raw = tc?.function?.name;
+    const resolved = typeof raw === "string" && raw ? resolveNativeFireToolName(raw, manageToolNames, mcpResolve) : null;
+    if (!resolved) {
+      out.dropped.push(typeof raw === "string" && raw ? raw : null);
+      continue;
+    }
+    const call = resolved.name === raw ? tc : { ...tc, function: { ...tc.function, name: resolved.name } };
+    (resolved.kind === "mcp" ? out.mcp : out.manage).push(call);
+  }
+  return out;
+};
 function processLLMRound(state, llmOutputText, build, mcp, schedule, iteration) {
   const isFinalRound = typeof iteration === "number" && iteration >= MAX_TOOL_ITERATIONS - 1;
   const nativeToolCalls = mcp?.nativeToolCalls ?? [];
   const textCalls = mcp?.resolve.size ? extractTextFakedMcpCalls(llmOutputText, mcp.resolve, { alsoMatchPrefix: MCP_FIRE_NAME_PREFIX }) : [];
   const nativeScheduleCalls = schedule?.nativeToolCalls ?? [];
-  const scheduleTextCalls = nativeScheduleCalls.length > 0 || !schedule ? [] : extractFireScheduleTextCalls(llmOutputText);
-  const scheduleCalls = nativeScheduleCalls.length > 0 ? nativeScheduleCalls : scheduleTextCalls.map((c) => ({
-    id: `sched_${state.mcpCallSeq++}`,
-    type: "function",
-    function: { name: AMSG_FIRE_SCHEDULE_TOOL, arguments: JSON.stringify(c.args) }
-  }));
+  const hasNativeSchedule = nativeScheduleCalls.some(
+    (tc) => tc?.function?.name === AMSG_FIRE_SCHEDULE_TOOL
+  );
+  const scheduleTextCalls = schedule ? extractFireScheduleTextCalls(llmOutputText) : [];
+  const scheduleCalls = [
+    ...nativeScheduleCalls,
+    ...(hasNativeSchedule ? [] : scheduleTextCalls).map((c) => ({
+      id: `sched_${state.mcpCallSeq++}`,
+      type: "function",
+      function: { name: AMSG_FIRE_SCHEDULE_TOOL, arguments: JSON.stringify(c.args) }
+    }))
+  ];
   const strippedText = scheduleTextCalls.length ? stripTextFakedMcpCalls(llmOutputText, scheduleTextCalls) : llmOutputText;
   const scanText = textCalls.length ? stripTextFakedMcpCalls(strippedText, textCalls) : strippedText;
   const mcpToolCalls = nativeToolCalls.length > 0 ? nativeToolCalls : textCalls.map((c) => ({
@@ -11383,6 +11418,7 @@ var amsgHooks = {
       selfLog,
       selfLogDirty: false,
       mcpResolve,
+      fireToolNames: /* @__PURE__ */ new Set(),
       mcpSessions: /* @__PURE__ */ new Map(),
       mcpSpentMs: 0,
       // 「还能不能再排」按客户端已知的 + 角色自己排过还没被认领的一起算，
@@ -11437,6 +11473,7 @@ var amsgHooks = {
       ...canSelfSchedule && mcpNative ? [buildFireScheduleTool({ nowMs: ctx.now.getTime(), tz })] : [],
       ...canManageTasks ? [buildFireCancelTool(), buildFireRenewTool({ nowMs: ctx.now.getTime(), tz })] : []
     ];
+    stash.fireToolNames = new Set(fireTools.map((t) => t?.function?.name).filter((n) => typeof n === "string" && !n.startsWith(MCP_FIRE_NAME_PREFIX)));
     const common = {
       maxToolIterations: MAX_TOOL_ITERATIONS,
       ...fireTools.length ? { tools: fireTools } : {}
@@ -11520,23 +11557,14 @@ var amsgHooks = {
     const roundReasoning = [nativeReasoning, extractInlineThink(ctx.llmOutputText || "")].filter((s) => typeof s === "string" && !!s.trim()).map((s) => s.trim()).join("\n\n");
     session.finalReasoning = roundReasoning || null;
     const rawToolCalls = ctx.llmResponse?.choices?.[0]?.message?.tool_calls;
-    const allNativeCalls = Array.isArray(rawToolCalls) ? rawToolCalls : [];
-    const nativeScheduleCalls = allNativeCalls.filter(
-      (tc) => tc?.function?.name === AMSG_FIRE_SCHEDULE_TOOL
-    );
-    const nativeMcpCalls = allNativeCalls.filter((tc) => {
-      const n = tc?.function?.name;
-      if (n === AMSG_FIRE_SCHEDULE_TOOL) return false;
-      const hit = typeof n === "string" && n.startsWith(MCP_FIRE_NAME_PREFIX) && !!stash.mcpResolve?.has(n.slice(MCP_FIRE_NAME_PREFIX.length));
-      if (!hit) {
-        console.warn("[amsg:agentic] \u4E22\u5F03\u672A\u58F0\u660E\u7684 native tool_call", {
-          sessionId: ctx.sessionId,
-          name: n ?? null,
-          declared: [...stash.mcpResolve?.keys() ?? []]
-        });
-      }
-      return hit;
-    });
+    const nativeCalls = classifyNativeToolCalls(rawToolCalls, stash.fireToolNames, stash.mcpResolve);
+    for (const droppedName of nativeCalls.dropped) {
+      console.warn("[amsg:agentic] \u4E22\u5F03\u672A\u58F0\u660E\u7684 native tool_call", {
+        sessionId: ctx.sessionId,
+        name: droppedName,
+        declared: [...stash.fireToolNames, ...stash.mcpResolve?.keys() ?? []]
+      });
+    }
     let decision = processLLMRound(
       session,
       content,
@@ -11562,9 +11590,11 @@ var amsgHooks = {
         // 没有这一份的话客户端只能拿「用户此刻在听的那首」凑（补收时多半是空的）。
         sceneSong: stash.sceneSong
       },
-      stash.mcpResolve ? { resolve: stash.mcpResolve, nativeToolCalls: nativeMcpCalls } : null,
+      stash.mcpResolve ? { resolve: stash.mcpResolve, nativeToolCalls: nativeCalls.mcp } : null,
       // 传 null = 这次不认排程（老部署没这口子），正文里写了也不当调用。
-      typeof ctx.scheduleTask === "function" ? { nativeToolCalls: nativeScheduleCalls } : null,
+      // manage 池里可能还有 cancel / renew——它们被认领的前提是声明过（canManageTasks），
+      // 而 canManageTasks ⊆ canSelfSchedule ⊆「scheduleTask 是函数」，这道闸不会误拦。
+      typeof ctx.scheduleTask === "function" ? { nativeToolCalls: nativeCalls.manage } : null,
       // 最后一轮不再放行工具请求，改成用手上的内容收尾（见 agentic.ts 的 MAX_TOOL_ITERATIONS）。
       ctx.iteration
     );
