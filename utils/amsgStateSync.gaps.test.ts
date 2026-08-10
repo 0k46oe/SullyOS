@@ -137,11 +137,12 @@ describe('其余打脏入口接线', () => {
     }
   });
 
-  it('CallApp：开场白 / 用户发言 / 角色回复 / 挂断落库后都打脏', () => {
+  it('CallApp：用户发言 / 角色回复 / 挂断落库后都打脏', () => {
     const src = read('../apps/CallApp.tsx');
     expect(src).toContain("import { markAmsgStateDirty } from '../utils/amsgStateSync'");
-    // 通话四个落库点各跟一次（同一个事件循环里的会在微任务内合并成一次上传）
-    expect(src.match(/markCallTurnDirty\(\)/g)?.length ?? 0).toBeGreaterThanOrEqual(4);
+    // 通话三个落库点各跟一次（同一个事件循环里的会在微任务内合并成一次上传）。
+    // 接通后不再自动生成开场白，必须等用户明确发送。
+    expect(src.match(/markCallTurnDirty\(\)/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
     const finishCall = sliceBetween(src, 'const finishCall = async', 'const handleHangup');
     expect(finishCall, '挂断这一下最要紧（用户接着就关 App）').toContain('markCallTurnDirty()');
   });

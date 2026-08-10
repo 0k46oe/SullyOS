@@ -18,7 +18,7 @@ describe('CallApp runtime references', () => {
     expect(source).toContain("import { markAmsgStateDirty } from '../utils/amsgStateSync'");
     expect(source).toContain("const [memoryPalaceStatus, setMemoryPalaceStatus] = useState('')");
     expect(source).toContain('const retryBubble = latestBubble?.role === \'user\'');
-    expect(source.match(/markCallTurnDirty\(\)/g)?.length ?? 0).toBeGreaterThanOrEqual(4);
+    expect(source.match(/markCallTurnDirty\(\)/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
   });
 
   it('routes every memory-palace trigger through the defined call hook', () => {
@@ -26,7 +26,20 @@ describe('CallApp runtime references', () => {
 
     expect(source).not.toContain('runMemoryPalacePostHook');
     expect(source).toContain('const runCallMemoryPalaceHook = (char: CharacterProfile) =>');
-    expect(source.match(/runCallMemoryPalaceHook\(selectedChar\)/g)?.length ?? 0).toBeGreaterThanOrEqual(5);
+    expect(source.match(/runCallMemoryPalaceHook\(selectedChar\)/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+  });
+
+  it('waits for an explicit user send before requesting a call reply', () => {
+    const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
+
+    expect(source).toContain("onFinal: (t) => setDraftInput(t)");
+    expect(source).toContain("await requestAssistantReply(input, userDbId, pendingTouchesForTurn, true)");
+    expect(source).toContain("{sendingBusy ? '…' : '发送'}");
+    expect(source).toMatch(/const beginSelectedCall[\s\S]*?setViewMode\('in-call'\);\s+setCallStartedAt\(Date\.now\(\)\);\s+setCallState\('listening'\);/);
+    expect(source).not.toContain('fireIdleNudge');
+    expect(source).not.toContain('idleNudgeCountRef');
+    expect(source).not.toContain('电话刚接通。你先开口');
+    expect(source).not.toContain('const silenceMs =');
   });
 
   it('offers game-like video layouts and a collapsible immersive subtitle', () => {
@@ -65,7 +78,6 @@ describe('CallApp runtime references', () => {
     expect(source).toContain('const playSilentAvatarSpeech = (');
     expect(source).toContain("if (callMode === 'video') playSilentAvatarSpeech(assistantText, turnPerformanceCues)");
     expect(source).toContain('playSilentAvatarSpeech(rerolled, rerollReply.performanceCues)');
-    expect(source).toContain('playSilentAvatarSpeech(reply.text, reply.performanceCues)');
     expect(source).toContain("playSilentAvatarSpeech('', cues, estimatedDurationMs)");
   });
 
@@ -104,6 +116,13 @@ describe('CallApp runtime references', () => {
     expect(source).toContain('isVisionInputUnsupportedError(error)');
     expect(source).toContain('await requestAssistantReply(input, userDbId, pendingTouchesForTurn, true)');
     expect(source).toContain('data-testid="user-camera-emotion-readout"');
+    expect(source).toContain('className="absolute right-4 top-4 z-30"');
+    expect(source).toContain('data-testid="user-camera-preview-size-picker"');
+    expect(source).toContain('data-testid={`user-camera-preview-size-${option.id}`}');
+    expect(source).toContain("return saved === 'small' || saved === 'medium' || saved === 'large' ? saved : 'medium'");
+    for (const size of ['small', 'medium', 'large']) {
+      expect(source).toContain(`id: '${size}'`);
+    }
     expect(source).toContain("const [userCameraMode, setUserCameraMode] = useState<UserCameraMode>('off')");
     expect(source).toContain('这张图只用于画面，不会发送给角色');
     expect(source).toContain("userCameraStreamRef.current?.getTracks().forEach(track => track.stop())");

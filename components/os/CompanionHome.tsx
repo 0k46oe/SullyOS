@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowClockwise,
   ArrowsOutCardinal,
+  CaretDown,
   Check,
   Crop,
   Gear,
@@ -393,6 +394,7 @@ const CompanionHome: React.FC = () => {
   const [touchGenerating, setTouchGenerating] = useState(false);
   const [touchGenerateVoice, setTouchGenerateVoice] = useState(false);
   const [startupEnabled, setStartupEnabled] = useState(false);
+  const [startupSettingsExpanded, setStartupSettingsExpanded] = useState(false);
   const [startupLine, setStartupLine] = useState('');
   const [startupTranslation, setStartupTranslation] = useState('');
   const [startupVoiceLanguage, setStartupVoiceLanguage] = useState('');
@@ -675,6 +677,7 @@ const CompanionHome: React.FC = () => {
     setLastHit(null);
     setTouchBanner(null);
     setTouchSettingsOpen(false);
+    setStartupSettingsExpanded(false);
     setAppStarOpen(false);
     if (touchDialogueTimerRef.current !== null) window.clearTimeout(touchDialogueTimerRef.current);
     performanceCueTimersRef.current.forEach(timer => window.clearTimeout(timer));
@@ -925,6 +928,7 @@ const CompanionHome: React.FC = () => {
 
   const openTouchSettings = () => {
     setAppStarOpen(false);
+    setStartupSettingsExpanded(false);
     setTouchDraftZones(
       (character?.companionTouchSettings?.enabledZones as AvatarTouchZone[] | undefined)
       || DEFAULT_COMPANION_TOUCH_ZONES,
@@ -2172,17 +2176,29 @@ const CompanionHome: React.FC = () => {
               style={{ clipPath: 'polygon(0 9px, 9px 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%, 0 100%)' }}
               data-testid="companion-startup-settings"
             >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
+              <div className="flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  aria-expanded={startupSettingsExpanded}
+                  aria-controls="companion-startup-settings-body"
+                  data-testid="companion-startup-settings-toggle"
+                  onClick={() => setStartupSettingsExpanded(current => !current)}
+                  className="min-w-0 flex-1 text-left outline-none"
+                >
                   <div className="flex items-center gap-2">
                     <Sparkle size={14} weight="fill" style={{ color: uiTint }} />
                     <h3 className="text-[12px] font-semibold tracking-wide text-white">开机自启</h3>
                     <span className="border border-white/12 px-1.5 py-0.5 text-[7px] tracking-[0.16em] text-white/45">HOME INTRO</span>
                   </div>
-                  <p className="mt-1 text-[9px] leading-relaxed text-white/48">
-                    中文原文、语音译文和动作都由你手动填写。每次刷新或重启后演一次；从 App 返回桌面不会重复播放。演出期间暂停随机转头。
-                  </p>
-                </div>
+                  <div className="mt-1 flex items-center gap-1.5 text-[9px] text-white/48">
+                    <span>{startupEnabled ? '已开启' : '未开启'} · {startupLine.trim() ? '已填写开机演出' : '点击展开设置'}</span>
+                    <CaretDown
+                      size={11}
+                      className={`shrink-0 transition-transform ${startupSettingsExpanded ? 'rotate-180' : ''}`}
+                      aria-hidden
+                    />
+                  </div>
+                </button>
                 <button
                   type="button"
                   role="switch"
@@ -2203,6 +2219,11 @@ const CompanionHome: React.FC = () => {
                 </button>
               </div>
 
+              {startupSettingsExpanded && (
+              <div id="companion-startup-settings-body" data-testid="companion-startup-settings-body">
+              <p className="mt-3 text-[9px] leading-relaxed text-white/48">
+                中文原文、语音译文和动作都由你手动填写。每次刷新或重启后演一次；从 App 返回桌面不会重复播放。演出期间暂停随机转头。
+              </p>
               <label className="mt-3 block text-[8px] tracking-[0.12em] text-white/48" htmlFor="companion-startup-line">
                 中文原文（界面显示）
               </label>
@@ -2508,6 +2529,8 @@ const CompanionHome: React.FC = () => {
               >
                 保存开机演出
               </button>
+              </div>
+              )}
             </div>
 
             <div className="mb-2 mt-5 flex items-center gap-2 text-[8px] tracking-[0.16em] text-white/42">

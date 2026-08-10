@@ -96,6 +96,7 @@ import { getPendingReplyText } from '../utils/pendingReply';
 type CallState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | 'ended' | 'error';
 type CallMode = 'voice' | 'video';
 type VideoCallLayout = 'stage' | 'story' | 'mini';
+type UserCameraPreviewSize = 'small' | 'medium' | 'large';
 type ViewMode = 'role-select' | 'in-call' | 'history' | 'record-detail';
 type CallBubble = {
   id: string;
@@ -125,6 +126,7 @@ type PendingVRoidImport = {
 };
 const VIDEO_CALL_LAYOUT_KEY = 'sully-call-video-layout-v1';
 const FAKE_USER_CAMERA_IMAGE_KEY = 'sully-call-fake-camera-image-v1';
+const USER_CAMERA_PREVIEW_SIZE_KEY = 'sully-call-camera-preview-size-v1';
 const CALL_SETUP_GUIDE_KEY = 'sully-call-setup-guide-v2';
 const VIDEO_CALL_LAYOUTS: Array<{ id: VideoCallLayout; name: string; hint: string }> = [
   { id: 'stage', name: '沉浸', hint: '角色最大，聊天收成字幕' },
@@ -137,6 +139,19 @@ const loadVideoCallLayout = (): VideoCallLayout => {
     return saved === 'stage' || saved === 'story' || saved === 'mini' ? saved : 'stage';
   } catch {
     return 'stage';
+  }
+};
+const USER_CAMERA_PREVIEW_SIZES: Array<{ id: UserCameraPreviewSize; label: string; frameClass: string }> = [
+  { id: 'small', label: '小', frameClass: 'h-[5rem] w-[3.75rem]' },
+  { id: 'medium', label: '中', frameClass: 'h-[7.25rem] w-[5.45rem]' },
+  { id: 'large', label: '大', frameClass: 'h-[10rem] w-[7.5rem]' },
+];
+const loadUserCameraPreviewSize = (): UserCameraPreviewSize => {
+  try {
+    const saved = localStorage.getItem(USER_CAMERA_PREVIEW_SIZE_KEY);
+    return saved === 'small' || saved === 'medium' || saved === 'large' ? saved : 'medium';
+  } catch {
+    return 'medium';
   }
 };
 const buildMiniMaxErrorMessage = (rawMessage: string, traceId?: string): string => {
@@ -530,6 +545,7 @@ const CallApp: React.FC = () => {
   const [showBgPicker, setShowBgPicker] = useState(false);
   const [bgUrlInput, setBgUrlInput] = useState('');
   const [videoCallLayout, setVideoCallLayout] = useState<VideoCallLayout>(loadVideoCallLayout);
+  const [userCameraPreviewSize, setUserCameraPreviewSize] = useState<UserCameraPreviewSize>(loadUserCameraPreviewSize);
   const [videoTranscriptExpanded, setVideoTranscriptExpanded] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const userCameraVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -734,6 +750,10 @@ const CallApp: React.FC = () => {
     if (layout !== 'stage') setVideoTranscriptExpanded(false);
     try { localStorage.setItem(VIDEO_CALL_LAYOUT_KEY, layout); } catch { /* private WebView */ }
   };
+  const chooseUserCameraPreviewSize = (size: UserCameraPreviewSize) => {
+    setUserCameraPreviewSize(size);
+    try { localStorage.setItem(USER_CAMERA_PREVIEW_SIZE_KEY, size); } catch { /* private WebView */ }
+  };
   // All blob: URLs created this call session. Kept alive so 重播/下载 work on every
   // bubble; revoked together only when leaving/resetting the call (not per-turn).
   const sessionBlobUrlsRef = useRef<Set<string>>(new Set());
@@ -744,8 +764,6 @@ const CallApp: React.FC = () => {
   };
   const longPressTimerRef = useRef<number | null>(null);
   const callTouchStartPos = useRef({ x: 0, y: 0 });
-  // 本段静默里角色已主动开口的次数（见下方 fireIdleNudge）
-  const idleNudgeCountRef = useRef(0);
   // VRM 模型的自定义表情名（加载时由画布回传），喂给基础版主模型或高质量导演。
   const vrmExpressionsRef = useRef<string[]>([]);
   const selectedChar = useMemo(() => characters.find(c => c.id === selectedCharId) || null, [characters, selectedCharId]);
@@ -1314,78 +1332,6 @@ const CallApp: React.FC = () => {
     if (!inputPanelMountedRef.current) { inputPanelMountedRef.current = true; return; }
     if (showInputPanel) draftInputRef.current?.focus();
   }, [showInputPanel]);
-  // 开场白：进入通话后角色自动先开口
-  const greetingFiredRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (viewMode !== 'in-call' || bubbles.length > 0) return;
-    if (!selectedChar?.id || greetingFiredRef.current === currentSessionId) return;
-    greetingFiredRef.current = currentSessionId;
-    (async () => {
-      try {
-        setCallStartedAt(Date.now());
-        setCallState('connecting');
-        const greetingReply = prepareCallAssistantReply(
-          await requestAssistantReply('（电话刚接通。你先开口——像平时接到这个人电话一样自然地说第一句话。不要解释你在做什么，就是最自然的那个"喂"或者"诶"或者别的什么。）'),
-          callMode === 'video' && selectedChar?.videoCallPerformanceQuality !== 'high',
-        );
-        const greetingText = greetingReply.text;
-        setAvatarEmotion(greetingReply.performance.emotion);
-        setAvatarPerformance(greetingReply.performance);
-        const nowTs = Date.now();
-        const greetingBubble: CallBubble = {
-          id: `${nowTs}-greeting`,
-          role: 'assistant',
-          text: greetingText,
-          time: formatTime(),
-          timestamp: nowTs,
-          thinkingChain: greetingReply.thinkingChain,
-          performance: greetingReply.performance,
-          performanceTimeline: greetingReply.performanceCues,
-        };
-        setCallState('speaking');
-        setBubbles([greetingBubble]);
-        if (selectedChar?.id) {
-          const dbId = await DB.saveMessage({
-            charId: selectedChar.id,
-            role: 'assistant',
-            type: 'text',
-            content: greetingText,
-            metadata: {
-              source: 'call',
-              callSessionId: currentSessionId,
-              ...(greetingReply.thinkingChain ? { thinkingChain: greetingReply.thinkingChain } : {}),
-              avatarPerformance: greetingReply.performance,
-              avatarPerformanceCues: greetingReply.performanceCues,
-            },
-          });
-          setBubbles(prev => prev.map(b => b.id === greetingBubble.id ? { ...b, dbId: dbId } : b));
-          markCallTurnDirty();
-          runCallMemoryPalaceHook(selectedChar);
-        }
-        // 尝试语音合成开场白
-        let greetingAudioPlayed = false;
-        if (canSpeakVoice()) {
-          try {
-            const { url: greetingAudioUrl } = await takeOrSynthesizeCallAudio(greetingText, greetingReply.speechEmotion);
-            if (greetingAudioUrl) {
-              trackBlobUrl(greetingAudioUrl);
-              setAudioUrl(greetingAudioUrl);
-              setBubbles(prev => prev.map(b => b.id === greetingBubble.id ? { ...b, audioUrl: greetingAudioUrl } : b));
-              setTimeout(() => playAudio(greetingAudioUrl, greetingReply.performanceCues, estimateSpeechMs(greetingText)), 0);
-              greetingAudioPlayed = true;
-            }
-          } catch { /* 语音合成失败不影响文字开场白 */ }
-        }
-        // 有音频播放时由 audio onEnded 回调切换到 listening；无音频时延迟切换，让用户看到 speaking 状态
-        if (!greetingAudioPlayed) {
-          playSilentAvatarSpeech(greetingText, greetingReply.performanceCues);
-        }
-      } catch (e: any) {
-        setCallState('error');
-        setErrorMessage(e?.message || '开场白生成失败');
-      }
-    })();
-  }, [viewMode, currentSessionId]);
   const stopPlayback = () => {
     clearSilentSpeechTimer();
     clearPerformanceCueTimers();
@@ -1444,7 +1390,6 @@ const CallApp: React.FC = () => {
     setAvatarTouchEffects([]);
     avatarTouchEffectTimersRef.current.forEach(timer => window.clearTimeout(timer));
     avatarTouchEffectTimersRef.current = [];
-    idleNudgeCountRef.current = 0;
     setCallState('idle');
     setBubbles([]);
     setDraftInput('');
@@ -1472,6 +1417,8 @@ const CallApp: React.FC = () => {
     closeCallSetupGuide();
     resetCurrentCall();
     setViewMode('in-call');
+    setCallStartedAt(Date.now());
+    setCallState('listening');
     if (callMode !== 'video' || cameraMode === 'off') {
       stopUserCamera();
       return;
@@ -2057,7 +2004,6 @@ ${sentencePlan}`;
     if (!input) return addToast('说点什么吧', 'info');
     if (['connecting', 'thinking'].includes(callState)) return addToast(`${selectedChar?.name || '对方'}还在想，等一等`, 'info');
     if (isAudioPlaying) pauseAudio();
-    idleNudgeCountRef.current = 0; // 用户开口了，重置角色主动开口的配额
     const pendingTouchesForTurn = pendingAvatarTouchesRef.current.slice();
     const latestBubble = bubbles[bubbles.length - 1];
     const retryBubble = latestBubble?.role === 'user' && latestBubble.text.trim() === input
@@ -2313,85 +2259,6 @@ ${sentencePlan}`;
       setRerollingBubbleId(null);
     }
   };
-  // ── 主观能动性：安静太久时角色主动开口 ──
-  // 通话 prompt 一直在告诉角色「对方半天没说话你会好奇」，这里补上真正的触发器。
-  // 每段静默最多主动开口 2 次、间隔逐次拉长；用户一发言就重置配额。
-  const idleNudgeBusyRef = useRef(false);
-  const fireIdleNudge = async () => {
-    if (idleNudgeBusyRef.current || !selectedChar?.id) return;
-    if (document.visibilityState === 'hidden') return;
-    idleNudgeBusyRef.current = true;
-    try {
-      setCallState('thinking');
-      const reply = prepareCallAssistantReply(
-        await requestAssistantReply(
-          '（电话里安静了好一会儿，对方一直没说话。你不是客服，不用干等——像真实通话里那样自然地开口：可以随口说说你这边正在做的事、把刚才的话题往下接一点，或者直接问问ta是不是在忙。一两句就好，别重复你上一句说过的意思。）',
-        ),
-        callMode === 'video' && selectedChar?.videoCallPerformanceQuality !== 'high',
-      );
-      const nudgeTs = Date.now();
-      const nudgeBubble: CallBubble = {
-        id: `${nudgeTs}-nudge`,
-        role: 'assistant',
-        text: reply.text,
-        time: formatTime(),
-        timestamp: nudgeTs,
-        thinkingChain: reply.thinkingChain,
-        performance: reply.performance,
-        performanceTimeline: reply.performanceCues,
-      };
-      setAvatarEmotion(reply.performance.emotion);
-      setAvatarPerformance(reply.performance);
-      setBubbles(prev => [...prev, nudgeBubble]);
-      idleNudgeCountRef.current += 1;
-      const nudgeDbId = await DB.saveMessage({
-        charId: selectedChar.id,
-        role: 'assistant',
-        type: 'text',
-        content: reply.text,
-        metadata: {
-          source: 'call',
-          callSessionId: currentSessionId,
-          ...(reply.thinkingChain ? { thinkingChain: reply.thinkingChain } : {}),
-          avatarPerformance: reply.performance,
-          avatarPerformanceCues: reply.performanceCues,
-        },
-      });
-      setBubbles(prev => prev.map(b => b.id === nudgeBubble.id ? { ...b, dbId: nudgeDbId } : b));
-      markCallTurnDirty();
-      runCallMemoryPalaceHook(selectedChar);
-      let nudgeAudioPlayed = false;
-      if (canSpeakVoice()) {
-        try {
-          const { url } = await takeOrSynthesizeCallAudio(reply.text, reply.speechEmotion);
-          if (url) {
-            trackBlobUrl(url);
-            setAudioUrl(url);
-            setBubbles(prev => prev.map(b => b.id === nudgeBubble.id ? { ...b, audioUrl: url } : b));
-            setTimeout(() => playAudio(url, reply.performanceCues, estimateSpeechMs(reply.text)), 0);
-            nudgeAudioPlayed = true;
-          }
-        } catch { /* 主动开口拿不到语音就只留文字 */ }
-      }
-      if (!nudgeAudioPlayed) {
-        playSilentAvatarSpeech(reply.text, reply.performanceCues);
-      }
-    } catch {
-      // 主动开口失败就保持安静，不打扰用户
-      setCallState(prev => (prev === 'thinking' ? 'listening' : prev));
-    } finally {
-      idleNudgeBusyRef.current = false;
-    }
-  };
-  useEffect(() => {
-    if (viewMode !== 'in-call' || callState !== 'listening' || isAudioPlaying) return;
-    if (!bubbles.length || idleNudgeCountRef.current >= 2 || idleNudgeBusyRef.current) return;
-    // 依赖里带 bubbles / draftInput：用户有任何动静（发言、打字）都会重新计时。
-    const silenceMs = 50_000 + Math.random() * 30_000 + idleNudgeCountRef.current * 40_000;
-    const timer = window.setTimeout(() => { void fireIdleNudge(); }, silenceMs);
-    return () => window.clearTimeout(timer);
-  }, [viewMode, callState, isAudioPlaying, bubbles, draftInput]);
-
   // 用户在舞台上拖拽/缩放后的构图，写回角色的 videoAvatar 持久化。
   const handleStageFramingChange = (framing: AvatarStageFraming) => {
     if (!selectedChar?.videoAvatar) return;
@@ -2981,7 +2848,7 @@ ${sentencePlan}`;
       {callMode === 'video' ? (
         <div className={`sully-call-hero sully-stage-dark sully-video-stage-shell relative px-2 pb-2 pt-2 ${videoCallLayout === 'stage' ? 'flex-1 min-h-0' : 'shrink-0'} ${videoStageSize}`}>
           <span className="pointer-events-none absolute left-3 top-3 z-20 h-8 w-8 rounded-tl-[1.8rem] border-l border-t" style={{ borderColor: `${accentColor}aa` }} aria-hidden />
-          <span className="pointer-events-none absolute right-3 top-3 z-20 h-8 w-8 rounded-tr-[1.8rem] border-r border-t" style={{ borderColor: `${accentColor}aa` }} aria-hidden />
+          {userCameraMode === 'off' && <span className="pointer-events-none absolute right-3 top-3 z-20 h-8 w-8 rounded-tr-[1.8rem] border-r border-t" style={{ borderColor: `${accentColor}aa` }} aria-hidden />}
           <span className="pointer-events-none absolute bottom-3 left-3 z-20 text-[8px]" style={{ color: accentColor }} aria-hidden>✦</span>
           <span className="pointer-events-none absolute bottom-3 right-3 z-20 text-[7px] text-white/55" aria-hidden>✦</span>
           <VRMVideoCallStage
@@ -3012,17 +2879,42 @@ ${sentencePlan}`;
             lightTheme={lightTheme}
           />
           {userCameraMode !== 'off' && (
-            <div className="absolute bottom-4 left-4 z-30 h-[4.4rem] w-[3.4rem] overflow-hidden rounded-[1rem] border border-white/20 bg-black/40 shadow-[0_10px_28px_rgba(0,0,0,.35)]" data-testid="user-camera-preview">
-              {userCameraMode === 'fake'
-                ? fakeUserCameraUrl
-                  ? <img src={fakeUserCameraUrl} alt="用户静态画面" className="h-full w-full object-cover" />
-                  : <div className="flex h-full w-full items-center justify-center text-[8px] text-white/35">NO IMAGE</div>
-                : <video ref={userCameraVideoRef} muted playsInline autoPlay className="h-full w-full scale-x-[-1] object-cover" />}
-              <span
-                className={`absolute bottom-1.5 left-1.5 rounded-full border border-white/15 bg-black/55 px-1.5 py-0.5 text-[6px] font-semibold tracking-[0.14em] ${userCameraMode === 'emotion' ? 'text-emerald-200' : userCameraMode === 'snapshot' ? 'text-violet-200' : 'text-white/65'}`}
+            <div className="absolute right-4 top-4 z-30" data-testid="user-camera-preview">
+              <div
+                className={`${USER_CAMERA_PREVIEW_SIZES.find(option => option.id === userCameraPreviewSize)?.frameClass || USER_CAMERA_PREVIEW_SIZES[1].frameClass} relative overflow-hidden rounded-[1.15rem] border border-white/30 bg-black/45 shadow-[0_14px_38px_rgba(0,0,0,.48)] ring-1 ring-black/20 transition-[width,height] duration-200`}
+                data-testid={`user-camera-preview-${userCameraPreviewSize}`}
               >
-                {userCameraMode === 'emotion' ? 'LOCAL' : userCameraMode === 'snapshot' ? 'SNAP' : 'STILL'}
-              </span>
+                {userCameraMode === 'fake'
+                  ? fakeUserCameraUrl
+                    ? <img src={fakeUserCameraUrl} alt="用户静态画面" className="h-full w-full object-cover" />
+                    : <div className="flex h-full w-full items-center justify-center text-[8px] text-white/35">NO IMAGE</div>
+                  : <video ref={userCameraVideoRef} muted playsInline autoPlay className="h-full w-full scale-x-[-1] object-cover" />}
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/70 to-transparent" aria-hidden />
+                <span
+                  className={`absolute left-2 top-2 rounded-full border border-white/15 bg-black/50 px-1.5 py-0.5 text-[6px] font-semibold tracking-[0.14em] backdrop-blur-md ${userCameraMode === 'emotion' ? 'text-emerald-200' : userCameraMode === 'snapshot' ? 'text-violet-200' : 'text-white/70'}`}
+                >
+                  {userCameraMode === 'emotion' ? 'LIVE · YOU' : userCameraMode === 'snapshot' ? 'SNAP · YOU' : 'YOU'}
+                </span>
+                <div
+                  className="absolute bottom-1.5 left-1/2 flex -translate-x-1/2 items-center rounded-full border border-white/15 bg-black/55 p-0.5 backdrop-blur-md"
+                  data-testid="user-camera-preview-size-picker"
+                  aria-label="用户镜头大小"
+                >
+                  {USER_CAMERA_PREVIEW_SIZES.map(option => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      aria-label={`用户镜头${option.label}号`}
+                      aria-pressed={userCameraPreviewSize === option.id}
+                      data-testid={`user-camera-preview-size-${option.id}`}
+                      onClick={() => chooseUserCameraPreviewSize(option.id)}
+                      className={`flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[8px] font-medium transition active:scale-90 ${userCameraPreviewSize === option.id ? 'bg-white text-black' : 'text-white/65 hover:bg-white/10'}`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
           {userCameraMode === 'emotion' && detectedUserEmotion && (
@@ -3218,7 +3110,7 @@ ${sentencePlan}`;
               className="flex-1 min-w-0 bg-transparent px-2 text-sm outline-none placeholder:text-white/35"
               placeholder={isListening ? '在听你说……' : sendingBusy ? `${selectedChar?.name || '对方'}正在想……` : pendingCallRetryText ? '上次回复中断，可直接重试' : `想对${selectedChar?.name || '对方'}说什么？`}
             />
-            <button onClick={handleTurn} disabled={sendingBusy} className="keep-white shrink-0 px-4 py-2 rounded-xl text-sm font-medium text-white disabled:opacity-40 transition active:scale-95" style={{ backgroundColor: accentColor, boxShadow: `0 0 16px ${accentColor}66` }}>{sendingBusy ? '…' : '说'}</button>
+            <button onClick={handleTurn} disabled={sendingBusy} className="keep-white shrink-0 px-4 py-2 rounded-xl text-sm font-medium text-white disabled:opacity-40 transition active:scale-95" style={{ backgroundColor: accentColor, boxShadow: `0 0 16px ${accentColor}66` }}>{sendingBusy ? '…' : '发送'}</button>
           </div>
           {!sendingBusy && pendingCallRetryText && !draftInput.trim() && <div className="text-[10px] text-amber-200/70 mt-1 px-1">上一句话还没得到回复，点击重试即可继续</div>}
           {isListening && <div className="text-[10px] text-white/40 mt-1 px-1 animate-pulse">正在聆听，点麦克风结束</div>}

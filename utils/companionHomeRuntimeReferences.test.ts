@@ -349,6 +349,11 @@ describe('CompanionHome touch request boundaries', () => {
     const companionDirectorSource = readFileSync(path.resolve(__dirname, './companionPerformanceDirector.ts'), 'utf8');
 
     expect(source).toContain('data-testid="companion-startup-enabled"');
+    expect(source).toContain('const [startupSettingsExpanded, setStartupSettingsExpanded] = useState(false)');
+    expect(source).toContain('data-testid="companion-startup-settings-toggle"');
+    expect(source).toContain('aria-expanded={startupSettingsExpanded}');
+    expect(source).toContain('{startupSettingsExpanded && (');
+    expect(source).toContain('data-testid="companion-startup-settings-body"');
     expect(source).toContain('data-testid="companion-startup-line"');
     expect(source).toContain('data-testid="companion-startup-precision"');
     expect(source).toContain('data-testid="companion-startup-cue-editor"');
