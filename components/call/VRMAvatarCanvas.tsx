@@ -30,11 +30,16 @@ interface VRMAvatarCanvasProps {
   motionState: AvatarMotionState;
   emotion?: string;
   audioFeed?: CallAudioFeed;
+  /** Absolute runtime lock; used for the whole companion startup utterance. */
+  headMotionLocked?: boolean;
+  /** Companion desktop must not inherit the video-call random pose generator. */
+  ambientAutonomyDisabled?: boolean;
   framing?: AvatarStageFraming;
   /** 用户锚定的脸部特写构图；close/push-in 时镜头直接落到这里。 */
   faceFraming?: AvatarStageFraming;
   performance?: AvatarPerformanceDirection;
   onLoadingChange?: (loading: boolean) => void;
+  onReady?: () => void;
   onError?: (message: string) => void;
   /** 模型加载后回传自定义表情名（预设之外的），供 LLM 以 model_action 调用。 */
   onExpressionsDiscovered?: (names: string[]) => void;
@@ -82,10 +87,13 @@ const VRMAvatarCanvas: React.FC<VRMAvatarCanvasProps> = ({
   motionState,
   emotion = 'calm',
   audioFeed,
+  headMotionLocked = false,
+  ambientAutonomyDisabled = false,
   framing = DEFAULT_STAGE_FRAMING,
   faceFraming,
   performance: performanceDirection = DEFAULT_AVATAR_PERFORMANCE,
   onLoadingChange,
+  onReady,
   onError,
   onExpressionsDiscovered,
   touchRequest,
@@ -95,6 +103,9 @@ const VRMAvatarCanvas: React.FC<VRMAvatarCanvasProps> = ({
 }) => {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const audioFeedRef = useRef<CallAudioFeed | undefined>(audioFeed);
+  const headMotionLockedRef = useRef(headMotionLocked);
+  const ambientAutonomyDisabledRef = useRef(ambientAutonomyDisabled);
+  const onReadyRef = useRef(onReady);
   const onExpressionsDiscoveredRef = useRef(onExpressionsDiscovered);
   const onAvatarTouchRef = useRef(onAvatarTouch);
   const touchResolverRef = useRef<((request: AvatarTouchRequest) => void) | null>(null);
@@ -102,6 +113,9 @@ const VRMAvatarCanvas: React.FC<VRMAvatarCanvasProps> = ({
   const motionRef = useRef<MotionSnapshot>({ state: motionState, emotion, performance: performanceDirection, framing, faceFraming });
 
   useEffect(() => { audioFeedRef.current = audioFeed; }, [audioFeed]);
+  useEffect(() => { headMotionLockedRef.current = headMotionLocked; }, [headMotionLocked]);
+  useEffect(() => { ambientAutonomyDisabledRef.current = ambientAutonomyDisabled; }, [ambientAutonomyDisabled]);
+  useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
   useEffect(() => { onExpressionsDiscoveredRef.current = onExpressionsDiscovered; }, [onExpressionsDiscovered]);
   useEffect(() => { onAvatarTouchRef.current = onAvatarTouch; }, [onAvatarTouch]);
   useEffect(() => { touchImpulseNonceRef.current = touchImpulseNonce; }, [touchImpulseNonce]);
@@ -256,27 +270,54 @@ const VRMAvatarCanvas: React.FC<VRMAvatarCanvasProps> = ({
 
       if (vrm) {
         const { state, emotion: fallbackEmotion, performance: currentPerformance, framing: userFraming, faceFraming: anchorFraming } = motionRef.current;
+        const headLocked = headMotionLockedRef.current;
+        const suppressesAmbientAutonomy = ambientAutonomyDisabledRef.current;
+        const effectivePerformance = headLocked || suppressesAmbientAutonomy ? {
+          ...currentPerformance,
+          precision: {
+            ...(currentPerformance.precision || {}),
+            lockAutonomy: true,
+            lockHead: headLocked || currentPerformance.precision?.lockHead,
+            headX: 0,
+            headY: 0,
+            headZ: 0,
+            eyeX: currentPerformance.precision?.eyeX ?? 0,
+            eyeY: currentPerformance.precision?.eyeY ?? 0,
+            bodyX: currentPerformance.precision?.bodyX ?? 0,
+            bodyY: currentPerformance.precision?.bodyY ?? 0,
+            bodyZ: currentPerformance.precision?.bodyZ ?? 0,
+            overshoot: 0,
+          },
+        } : currentPerformance;
         const speaking = state === 'speaking';
-        const currentEmotion = currentPerformance.emotion || fallbackEmotion;
-        const gesture = currentPerformance.gesture;
-        const intensity = Math.max(0.2, Math.min(1, currentPerformance.intensity));
+        const currentEmotion = effectivePerformance.emotion || fallbackEmotion;
+        const gesture = effectivePerformance.gesture;
+        const intensity = Math.max(0.2, Math.min(1, effectivePerformance.intensity));
         const frameNow = window.performance.now();
         const touchNonce = touchImpulseNonceRef.current;
         if (touchNonce !== undefined && touchNonce !== handledTouchImpulseNonce) {
           handledTouchImpulseNonce = touchNonce;
-          autonomy.triggerTouchReaction(currentPerformance, state, frameNow);
+          autonomy.triggerTouchReaction(effectivePerformance, state, frameNow);
           host.dataset.avatarTouchImpulse = String(touchNonce);
         }
         // Sample once per render frame: the same live signal drives both visemes
         // and emphasis beats, keeping head/hands synchronized with the voice.
         const lip = audioFeedRef.current?.sample(frameNow);
-        const frame = autonomy.step(
+        const autonomyFrame = autonomy.step(
           frameNow,
-          currentPerformance,
+          effectivePerformance,
           state,
           pointer,
           speaking && lip?.active ? lip.level : undefined,
         );
+        const frame = headLocked ? {
+          ...autonomyFrame,
+          headX: 0,
+          headY: 0,
+          headZ: 0,
+          rotation: 0,
+          speechAccent: 0,
+        } : autonomyFrame;
         const breath = frame.breath * 2 - 1;
         const blend = 1 - Math.exp(-delta * 7.5);
         // 姿态低频、变了才写；逐帧变化的眨眼调试值只在 dev 面板可用时写 DOM。
@@ -291,15 +332,17 @@ const VRMAvatarCanvas: React.FC<VRMAvatarCanvasProps> = ({
           + breath * avatarHeight * 0.0015
           + frame.lift * avatarHeight * 0.08;
         vrm.scene.position.z = modelBasePositionZ + frame.lean * avatarHeight * 0.12;
-        vrm.scene.rotation.y = modelBaseRotationY + frame.bodyX * 0.018 + frame.rotation;
+        vrm.scene.rotation.y = headLocked
+          ? modelBaseRotationY
+          : modelBaseRotationY + frame.bodyX * 0.018 + frame.rotation;
 
         // Autonomy uses normalized tracker coordinates (horizontal, vertical,
         // roll). Convert them once here to humanoid Euler rotations.
-        const headX = -frame.headY * 0.24;
-        const headY = frame.headX * 0.3;
-        const headZ = -frame.headZ * 0.18;
-        setBone(vrm, VRMHumanBoneName.Head, headX, headY, headZ, blend);
-        setBone(vrm, VRMHumanBoneName.Neck, headX * 0.25, headY * 0.22, headZ * 0.25, blend);
+        const headX = headLocked ? 0 : -frame.headY * 0.24;
+        const headY = headLocked ? 0 : frame.headX * 0.3;
+        const headZ = headLocked ? 0 : -frame.headZ * 0.18;
+        setBone(vrm, VRMHumanBoneName.Head, headX, headY, headZ, headLocked ? 1 : blend);
+        setBone(vrm, VRMHumanBoneName.Neck, headX * 0.25, headY * 0.22, headZ * 0.25, headLocked ? 1 : blend);
         setBone(vrm, VRMHumanBoneName.Chest, -frame.bodyY * 0.075 + breath * 0.003, frame.bodyX * 0.1, -frame.bodyZ * 0.06, blend * 0.65);
         setBone(vrm, VRMHumanBoneName.Spine, -frame.bodyY * 0.035 + breath * 0.0015, frame.bodyX * 0.04, -frame.bodyZ * 0.025, blend * 0.5);
 
@@ -512,6 +555,7 @@ const VRMAvatarCanvas: React.FC<VRMAvatarCanvasProps> = ({
         } catch { /* 表情枚举失败不影响渲染 */ }
 
         onLoadingChange?.(false);
+        onReadyRef.current?.();
       },
       undefined,
       error => {

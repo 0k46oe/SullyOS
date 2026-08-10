@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const read = (rel: string) =>
-  readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+  readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8').replace(/\r\n?/g, '\n');
 
 /** 取 [start, end) 之间的源码片段；找不到锚点直接让断言失败。 */
 const sliceBetween = (src: string, start: string, end: string): string => {
@@ -26,6 +26,14 @@ const MUSIC_CONTEXT = '../context/MusicContext.tsx';
 // ─── 跨模块事件名（改一个字两边就对不上，静默断供）───
 
 describe('utils 层直写 DB 后的内存回灌（事件名契约）', () => {
+  it('OSContext 对主动消息处理失败给出有冷却的可见提示', () => {
+    const src = read(OS_CONTEXT);
+    expect(src).toContain('const inboxFailHandler = (e: Event) =>');
+    expect(src).toContain("window.addEventListener('active-msg-process-failed', inboxFailHandler)");
+    expect(src).toContain("window.removeEventListener('active-msg-process-failed', inboxFailHandler)");
+    expect(src).toContain('inboxFailToastAt[charId]');
+  });
+
   it('OSContext 监听 amsg2-tasks-adopted：重读 DB → 只合并 activeMsg2Config → 打脏', () => {
     const src = read(OS_CONTEXT);
     // 事件名一字不差：派发方（activeMsgRuntime 采纳角色自排任务）按这个名字发。

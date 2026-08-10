@@ -32,8 +32,10 @@ describe('companion startup performance', () => {
     expect(result?.performance.modelAction).toBe('look-close');
     expect(result?.performance.precision).toMatchObject({
       lockAutonomy: true,
-      headX: 0.18,
-      headZ: -0.12,
+      lockHead: true,
+      headX: 0,
+      headY: 0,
+      headZ: 0,
       eyeX: 0,
       overshoot: 0.11,
       settleMs: 1080,
@@ -45,6 +47,7 @@ describe('companion startup performance', () => {
 
     expect(plain?.line).toBe('别盯着我看。');
     expect(plain?.performance.precision?.lockAutonomy).toBe(true);
+    expect(plain?.performance.precision?.lockHead).toBe(true);
     expect(parseCompanionStartupResponse('')).toBeNull();
   });
 

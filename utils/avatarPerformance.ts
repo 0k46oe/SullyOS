@@ -16,6 +16,8 @@ export type AvatarFace = typeof AVATAR_FACES[number];
 
 export interface AvatarPerformancePrecision {
   lockAutonomy?: boolean;
+  /** Prevent gesture/emotion overlays from changing the authored head angles. */
+  lockHead?: boolean;
   headX?: number;
   headY?: number;
   headZ?: number;
@@ -62,6 +64,37 @@ export interface AvatarStageFraming {
 }
 
 export const DEFAULT_STAGE_FRAMING: AvatarStageFraming = { scale: 1, offsetX: 0, offsetY: 0 };
+
+/** Percentage insets used to mask the companion avatar without changing its pose. */
+export interface AvatarStageCrop {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+export const DEFAULT_STAGE_CROP: AvatarStageCrop = { top: 0, right: 0, bottom: 0, left: 0 };
+
+export const clampStageCrop = (crop: AvatarStageCrop): AvatarStageCrop => {
+  const clampInset = (value: number) => Math.max(0, Math.min(0.42, Number.isFinite(value) ? value : 0));
+  let top = clampInset(crop.top);
+  let right = clampInset(crop.right);
+  let bottom = clampInset(crop.bottom);
+  let left = clampInset(crop.left);
+  const vertical = top + bottom;
+  const horizontal = left + right;
+  if (vertical > 0.78) {
+    const ratio = 0.78 / vertical;
+    top *= ratio;
+    bottom *= ratio;
+  }
+  if (horizontal > 0.78) {
+    const ratio = 0.78 / horizontal;
+    left *= ratio;
+    right *= ratio;
+  }
+  return { top, right, bottom, left };
+};
 
 export const clampStageFraming = (
   framing: AvatarStageFraming,
@@ -307,7 +340,72 @@ const parseDirectiveBody = (body: string, base: AvatarPerformanceDirection): Ava
 export interface AvatarPerformanceCue {
   direction: AvatarPerformanceDirection;
   at: number;
+  /** Optional closing pose for this sentence. Old cue data omits it and remains start-only. */
+  endDirection?: AvatarPerformanceDirection;
+  /** Milliseconds to keep the opening pose before the closing pose begins. */
+  holdMs?: number;
 }
+
+export interface AvatarPerformanceBeat {
+  direction: AvatarPerformanceDirection;
+  delayMs: number;
+  cueIndex: number;
+  phase: 'start' | 'end';
+}
+
+/** Expand sentence cues into concrete start/end timers against the real voice duration. */
+export const expandAvatarPerformanceCueBeats = (
+  cues: readonly AvatarPerformanceCue[],
+  durationMs: number,
+): AvatarPerformanceBeat[] => {
+  const parsedDuration = Number(durationMs);
+  // Persisted rehearsal data can outlive several schema versions. Never let a
+  // damaged duration/cue pack create NaN timers or an unbounded timer storm.
+  const duration = Number.isFinite(parsedDuration)
+    ? Math.max(1, Math.min(3_600_000, parsedDuration))
+    : 1;
+  const orderedCues = cues
+    .slice(0, 64)
+    .map((cue, sourceIndex) => {
+      const rawAt = Number(cue?.at);
+      return {
+        cue,
+        sourceIndex,
+        at: Number.isFinite(rawAt) ? Math.max(0, Math.min(1, rawAt)) : (sourceIndex === 0 ? 0 : 1),
+      };
+    })
+    .filter((entry): entry is typeof entry & { cue: AvatarPerformanceCue } => (
+      Boolean(entry.cue?.direction && typeof entry.cue.direction === 'object')
+    ))
+    .sort((a, b) => a.at - b.at || a.sourceIndex - b.sourceIndex);
+  const beats: AvatarPerformanceBeat[] = [];
+  orderedCues.forEach((entry, cueIndex) => {
+    const { cue } = entry;
+    const startDelay = Math.round(entry.at * duration);
+    beats.push({ direction: cue.direction, delayMs: startDelay, cueIndex, phase: 'start' });
+    if (!cue.endDirection || typeof cue.endDirection !== 'object') return;
+    const nextAt = orderedCues[cueIndex + 1]?.at ?? 1;
+    const nextDelay = Math.round(Math.max(entry.at, nextAt) * duration);
+    const available = Math.max(0, nextDelay - startDelay);
+    if (available < 80) return;
+    const fallbackHold = Math.round(available * 0.72);
+    const parsedHold = Number(cue.holdMs);
+    const requestedHold = Number.isFinite(parsedHold) ? parsedHold : fallbackHold;
+    const hold = Math.min(Math.max(80, requestedHold), Math.max(80, available - 60));
+    beats.push({
+      direction: cue.endDirection,
+      delayMs: Math.min(duration, startDelay + hold),
+      cueIndex,
+      phase: 'end',
+    });
+  });
+  // At a sentence boundary the previous closing pose runs first, then the next
+  // opening pose wins. Stable cue ordering also avoids comparator ambiguity.
+  return beats.sort((a, b) => (
+    a.delayMs - b.delayMs
+    || (a.phase === b.phase ? a.cueIndex - b.cueIndex : (a.phase === 'end' ? -1 : 1))
+  ));
+};
 
 /**
  * 演出时间轴：正文中可以穿插多条 [[AVATAR:]] 指令，每条从它所在位置开始生效。

@@ -3,6 +3,7 @@ import {
   buildAvatarPerformancePrompt,
   extractAvatarPerformance,
   extractAvatarPerformanceTimeline,
+  expandAvatarPerformanceCueBeats,
   inferAvatarPerformanceTimelineFromText,
 } from './avatarPerformance';
 
@@ -108,5 +109,63 @@ describe('inferAvatarPerformanceTimelineFromText', () => {
 
     expect(cues).toHaveLength(3);
     expect(cues.map(cue => cue.at)).toEqual([...cues.map(cue => cue.at)].sort((a, b) => a - b));
+  });
+});
+
+describe('expandAvatarPerformanceCueBeats', () => {
+  it('schedules a start, held middle, and closing action for every authored sentence cue', () => {
+    const beats = expandAvatarPerformanceCueBeats([
+      {
+        at: 0,
+        direction: { emotion: 'calm', gesture: 'talk', camera: 'medium', gaze: 'viewer', intensity: 0.6 },
+        holdMs: 900,
+        endDirection: { emotion: 'relaxed', gesture: 'idle', camera: 'medium', gaze: 'viewer', intensity: 0.4 },
+      },
+      {
+        at: 0.5,
+        direction: { emotion: 'happy', gesture: 'wave', camera: 'medium', gaze: 'viewer', intensity: 0.7 },
+      },
+    ], 4000);
+
+    expect(beats.map(beat => [beat.phase, beat.delayMs])).toEqual([
+      ['start', 0],
+      ['end', 900],
+      ['start', 2000],
+    ]);
+    expect(beats[1].direction.gesture).toBe('idle');
+  });
+
+  it('keeps legacy start-only cues unchanged', () => {
+    const beats = expandAvatarPerformanceCueBeats([
+      { at: 0, direction: { emotion: 'calm', gesture: 'talk', camera: 'medium', gaze: 'viewer', intensity: 0.6 } },
+    ], 2000);
+    expect(beats).toHaveLength(1);
+    expect(beats[0].phase).toBe('start');
+  });
+
+  it('sanitizes corrupt timing data, restores chronological order, and caps timer fan-out', () => {
+    const direction = { emotion: 'calm', gesture: 'talk', camera: 'medium', gaze: 'viewer', intensity: 0.6 } as const;
+    const closing = { ...direction, gesture: 'idle' as const };
+    const beats = expandAvatarPerformanceCueBeats([
+      { at: Number.NaN, direction },
+      { at: 0.2, direction, endDirection: closing, holdMs: Number.POSITIVE_INFINITY },
+      { at: -4, direction },
+      ...Array.from({ length: 80 }, (_, index) => ({ at: (index + 1) / 100, direction })),
+    ], Number.POSITIVE_INFINITY);
+
+    expect(beats.every(beat => Number.isFinite(beat.delayMs) && beat.delayMs >= 0)).toBe(true);
+    expect(beats.map(beat => beat.delayMs)).toEqual([...beats.map(beat => beat.delayMs)].sort((a, b) => a - b));
+    expect(beats.filter(beat => beat.phase === 'start')).toHaveLength(64);
+  });
+
+  it('lets the next sentence opening win when it shares a boundary with the prior closing pose', () => {
+    const direction = { emotion: 'calm', gesture: 'talk', camera: 'medium', gaze: 'viewer', intensity: 0.6 } as const;
+    const beats = expandAvatarPerformanceCueBeats([
+      { at: 0, direction, endDirection: { ...direction, gesture: 'idle' }, holdMs: 5000 },
+      { at: 0.02, direction: { ...direction, gesture: 'wave' } },
+    ], 4000);
+
+    expect(beats.slice(-2).map(beat => beat.phase)).toEqual(['end', 'start']);
+    expect(beats.slice(-1)[0].direction.gesture).toBe('wave');
   });
 });

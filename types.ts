@@ -2383,6 +2383,8 @@ export type CompanionTouchZone = 'head' | 'face' | 'hand' | 'body' | 'other';
 export interface CompanionPerformancePrecision {
   /** Temporarily suspend ambient turns/glances and keep the authored pose authoritative. */
   lockAutonomy?: boolean;
+  /** Keep head targets absolute after gesture/emotion overlays. */
+  lockHead?: boolean;
   /** Normalized pose targets (-1..1). */
   headX?: number;
   headY?: number;
@@ -2400,10 +2402,15 @@ export interface CompanionPerformancePrecision {
 
 export interface CompanionTouchReaction {
   id: string;
+  /** Displayed source line. Newly generated companion packs keep this in Simplified Chinese. */
   text: string;
+  /** Spoken translation kept separate from the displayed source line. */
+  translation?: string;
   /** Persisted local audio generated together with this reaction. */
   voiceAssetId?: string;
   voiceMimeType?: string;
+  voiceText?: string;
+  voiceLanguage?: string;
   performance: {
     emotion: 'neutral' | 'happy' | 'sad' | 'angry' | 'fearful' | 'disgusted' | 'surprised' | 'calm' | 'relaxed';
     gesture: 'idle' | 'talk' | 'nod' | 'shake' | 'tilt' | 'explain' | 'wave' | 'shy' | 'lean-in' | 'lean-back';
@@ -2421,7 +2428,26 @@ export interface CompanionStartupSettings {
   enabled: boolean;
   /** User-authored or character-generated line; never supplied by a desktop theme. */
   line: string;
+  /** User-authored spoken translation. Empty means speak the source line. */
+  translation?: string;
+  /** Empty means the source/default language; otherwise a TTS language_boost code. */
+  voiceLanguage?: string;
   performance: CompanionTouchReaction['performance'];
+  /** Optional LLM-directed beats, scheduled against the actual saved voice duration. */
+  performanceCues?: Array<{
+    at: number;
+    direction: CompanionTouchReaction['performance'];
+    endDirection?: CompanionTouchReaction['performance'];
+    holdMs?: number;
+  }>;
+  /** Source + spoken translation signature used to reject stale cue packs. */
+  performanceCueText?: string;
+  performanceGeneratedAt?: number;
+  voiceAssetId?: string;
+  voiceMimeType?: string;
+  voiceText?: string;
+  voiceGeneratedLanguage?: string;
+  voiceGeneratedAt?: number;
   generatedAt?: number;
   updatedAt?: number;
 }
@@ -2429,6 +2455,8 @@ export interface CompanionStartupSettings {
 export interface CompanionTouchSettings {
   enabledZones: CompanionTouchZone[];
   reactions: Partial<Record<CompanionTouchZone, CompanionTouchReaction[]>>;
+  /** Language used for touch-reaction translations and their persisted voice pack. */
+  voiceLanguage?: string;
   startup?: CompanionStartupSettings;
   /** When true, reactions with voiceAssetId play their local pre-generated audio. */
   voiceEnabled?: boolean;
@@ -2469,11 +2497,26 @@ export interface CharacterProfile {
           offsetX: number;
           offsetY: number;
       };
+      /** 陪伴桌面角色可视窗口裁剪；数值为相对舞台宽高的内缩比例。 */
+      companionCrop?: {
+          top: number;
+          right: number;
+          bottom: number;
+          left: number;
+      };
   } | {
       version: 1;
       format: 'live2d';
       assetId: string;
       fileName: string;
+      /** 随 SullyOS 发布的静态模型；不依赖 IndexedDB，也不需要进入模型备份。 */
+      builtIn?: true;
+      /** 相对当前应用根目录的 model3.json；仅 builtIn 模型使用。 */
+      builtinModelUrl?: string;
+      /** balanced = 2K 默认纹理，hd = 4K 可选纹理。 */
+      builtinQuality?: 'balanced' | 'hd';
+      /** 内置 Sully 的一次性默认构图迁移版本。 */
+      builtinFramingVersion?: 1 | 2;
       /** ZIP 包内 model3.json 的完整相对路径。 */
       modelPath: string;
       byteLength: number;
@@ -2501,6 +2544,13 @@ export interface CharacterProfile {
           offsetX: number;
           offsetY: number;
       };
+      /** 陪伴桌面角色可视窗口裁剪；数值为相对舞台宽高的内缩比例。 */
+      companionCrop?: {
+          top: number;
+          right: number;
+          bottom: number;
+          left: number;
+      };
       /** model3.json Groups 中声明的口型参数；没有声明时使用标准参数。 */
       lipSyncParameterIds: string[];
       /** 每个模型自己的动作/表情权限。AI 只能调用 permission=ai 的项目。 */
@@ -2523,8 +2573,12 @@ export interface CharacterProfile {
           /** VTube Studio 的“清除全部表情”热键。 */
           resetExpression?: boolean;
           tags: string[];
+          /** 真·衣橱动作：只允许用户手动触发，永远不会进入 LLM 动作白名单。 */
+          wardrobe?: boolean;
           permission: 'ai' | 'manual' | 'blocked';
       }>;
+      /** 衣橱中最后一次由用户手动选择的服装动作。 */
+      activeWardrobeActionId?: string;
   };
   /**
    * 视频通话舞台的自定义背景：`blobref:<id>` 令牌（本地图片，存 IndexedDB

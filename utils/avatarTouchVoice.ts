@@ -1,6 +1,7 @@
 import type {
   APIConfig,
   CharacterProfile,
+  CompanionStartupSettings,
   CompanionTouchReaction,
 } from '../types';
 import { DB } from './db';
@@ -19,6 +20,41 @@ const VOICE_CONCURRENCY = 2;
 const voiceAssetId = (characterId: string, zone: AvatarTouchZone, index: number): string => (
   `companion-touch-voice:${encodeURIComponent(characterId)}:${zone}:${index}`
 );
+
+const startupVoiceAssetId = (characterId: string): string => (
+  `companion-startup-voice:${encodeURIComponent(characterId)}`
+);
+
+export const generateCompanionStartupVoice = async (options: {
+  text: string;
+  voiceLanguage?: string;
+  performance: CompanionStartupSettings['performance'];
+  character: CharacterProfile;
+  apiConfig: APIConfig;
+}): Promise<Pick<CompanionStartupSettings, 'voiceAssetId' | 'voiceMimeType' | 'voiceText' | 'voiceGeneratedAt' | 'voiceGeneratedLanguage'>> => {
+  let playableUrl = '';
+  try {
+    const result = await synthesizeSpeechDetailed(
+      options.text,
+      options.character,
+      options.apiConfig,
+      { emotion: options.performance?.emotion, languageBoost: options.voiceLanguage || undefined },
+    );
+    playableUrl = result.url;
+    if (!result.blob) throw new Error('语音服务未返回可持久保存的音频');
+    const assetId = startupVoiceAssetId(options.character.id);
+    await DB.putBlobAsset(assetId, result.blob);
+    return {
+      voiceAssetId: assetId,
+      voiceMimeType: result.blob.type || 'audio/mpeg',
+      voiceText: options.text,
+      voiceGeneratedLanguage: options.voiceLanguage || '',
+      voiceGeneratedAt: Date.now(),
+    };
+  } finally {
+    if (playableUrl.startsWith('blob:')) URL.revokeObjectURL(playableUrl);
+  }
+};
 
 export const collectAvatarTouchVoiceAssetIds = (
   reactions?: AvatarTouchReactionPack | null,
@@ -46,6 +82,7 @@ export const generateAvatarTouchVoicePack = async (options: {
   reactions: AvatarTouchReactionPack;
   character: CharacterProfile;
   apiConfig: APIConfig;
+  voiceLanguage?: string;
   onProgress?: (completed: number, total: number) => void;
 }): Promise<AvatarTouchVoiceGenerationResult> => {
   const cloned: AvatarTouchReactionPack = {};
@@ -74,11 +111,12 @@ export const generateAvatarTouchVoicePack = async (options: {
       const task = tasks[cursor++];
       let playableUrl = '';
       try {
+        const spokenText = task.reaction.translation || task.reaction.text;
         const result = await synthesizeSpeechDetailed(
-          task.reaction.text,
+          spokenText,
           options.character,
           options.apiConfig,
-          { emotion: task.reaction.performance?.emotion },
+          { emotion: task.reaction.performance?.emotion, languageBoost: options.voiceLanguage || undefined },
         );
         playableUrl = result.url;
         if (!result.blob) throw new Error('语音服务未返回可持久保存的音频');
@@ -86,10 +124,14 @@ export const generateAvatarTouchVoicePack = async (options: {
         await DB.putBlobAsset(assetId, result.blob);
         task.reaction.voiceAssetId = assetId;
         task.reaction.voiceMimeType = result.blob.type || 'audio/mpeg';
+        task.reaction.voiceText = spokenText;
+        task.reaction.voiceLanguage = options.voiceLanguage || '';
         generated += 1;
       } catch (error) {
         delete task.reaction.voiceAssetId;
         delete task.reaction.voiceMimeType;
+        delete task.reaction.voiceText;
+        delete task.reaction.voiceLanguage;
         failures.push({
           zone: task.zone,
           reactionId: task.reaction.id,

@@ -25,6 +25,14 @@ const run = (
 };
 
 describe('AvatarAutonomy', () => {
+  it('starts centered instead of choosing a random left or right turn on boot', () => {
+    const frames = run(new AvatarAutonomy(0, seededRandom(5)), 900);
+
+    expect(new Set(frames.map(frame => frame.pose))).toEqual(new Set(['settle']));
+    expect(Math.max(...frames.map(frame => Math.abs(frame.headX)))).toBeLessThan(0.04);
+    expect(Math.max(...frames.map(frame => Math.abs(frame.eyeX)))).toBeLessThan(0.04);
+  });
+
   it('keeps choosing visible poses and blinking without LLM updates', () => {
     const frames = run(new AvatarAutonomy(0, seededRandom(7)), 10_000);
     const poses = new Set(frames.map(frame => frame.pose));
@@ -150,5 +158,33 @@ describe('AvatarAutonomy', () => {
     expect(Math.abs(final.eyeY)).toBeLessThan(0.03);
     expect(final.bodyX).toBeCloseTo(0.05, 1);
     expect(final.bodyZ).toBeCloseTo(-0.04, 1);
+  });
+
+  it('keeps the head centered for the entire startup speech even when the gesture is shake', () => {
+    const direction: AvatarPerformanceDirection = {
+      ...DEFAULT_AVATAR_PERFORMANCE,
+      emotion: 'surprised',
+      gesture: 'shake',
+      camera: 'close',
+      intensity: 1,
+      precision: {
+        lockAutonomy: true,
+        lockHead: true,
+        headX: 0,
+        headY: 0,
+        headZ: 0,
+        bodyX: 0,
+        bodyY: 0,
+        bodyZ: 0,
+        overshoot: 0,
+        settleMs: 320,
+      },
+    };
+    const frames = run(new AvatarAutonomy(0, seededRandom(61)), 6_000, direction, 'speaking');
+
+    expect(Math.max(...frames.map(frame => Math.abs(frame.headX)))).toBe(0);
+    expect(Math.max(...frames.map(frame => Math.abs(frame.headY)))).toBe(0);
+    expect(Math.max(...frames.map(frame => Math.abs(frame.headZ)))).toBe(0);
+    expect(Math.max(...frames.map(frame => frame.gestureEnvelope))).toBeGreaterThan(0.5);
   });
 });

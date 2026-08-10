@@ -90,6 +90,7 @@ export const getAvatarModelBlob = async (config?: VideoAvatarConfig | null): Pro
 
 export const deleteAvatarModel = async (config?: VideoAvatarConfig | null): Promise<void> => {
   if (!config?.assetId) return;
+  if (config.format === 'live2d' && config.builtIn) return;
   await DB.deleteBlobAsset(config.assetId);
   if (config.format === 'live2d') {
     await DB.deleteBlobAsset(live2DRuntimeCacheAssetId(config.assetId));

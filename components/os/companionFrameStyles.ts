@@ -1,4 +1,4 @@
-export type CompanionFrameStyleId = 'tech' | 'mobilegame' | 'storycard' | 'editorial';
+export type CompanionFrameStyleId = 'tech' | 'otome' | 'cat' | 'magazine' | 'archive' | 'idol';
 
 export type CompanionFrameStyleOption = {
   id: CompanionFrameStyleId;
@@ -14,26 +14,38 @@ export const COMPANION_FRAME_STYLES: CompanionFrameStyleOption[] = [
   {
     id: 'tech',
     name: '星轨终端',
-    description: '当前科技风 · 切角细线 · 菱形控制',
+    description: '切角细线 · 菱形控制 · 低负担渲染',
     swatch: 'linear-gradient(145deg,#111827 0%,#1f2940 55%,#8fa9d7 100%)',
   },
   {
-    id: 'mobilegame',
-    name: '星愿手游',
-    description: '二次元手游风 · 亮紫徽章 · 星芒圆框',
-    swatch: 'linear-gradient(145deg,#2b173d 0%,#8c5bc6 52%,#ffd1f0 100%)',
+    id: 'otome',
+    name: '晴庭手帐',
+    description: '浅色温室 · 侧边书签 · 四栏书脊',
+    swatch: 'linear-gradient(145deg,#fffaf0 0%,#cddfd4 58%,#b95e78 100%)',
   },
   {
-    id: 'storycard',
-    name: '绮夜卡面',
-    description: '角色卡片风 · 双层描边 · 章节角标',
-    swatch: 'linear-gradient(145deg,#171328 0%,#49335e 55%,#e4c38e 100%)',
+    id: 'cat',
+    name: '夜巡小猫',
+    description: '黑紫夜庭 · 猫耳页签 · 爪印中枢',
+    swatch: 'radial-gradient(circle at 68% 28%,#b9f36a 0 5%,transparent 6%), linear-gradient(145deg,#08070d 0%,#24113d 58%,#7137a6 100%)',
   },
   {
-    id: 'editorial',
-    name: '夜刊画报',
-    description: '平面杂志风 · 细线分栏 · 克制留白',
-    swatch: 'linear-gradient(145deg,#0d1018 0%,#222536 62%,#d9d7e7 100%)',
+    id: 'magazine',
+    name: '夜刊封面',
+    description: '通栏标题 · 直角网格 · 编辑标记',
+    swatch: 'linear-gradient(145deg,#f1ede5 0%,#d9d3ca 62%,#e95b52 62%,#e95b52 100%)',
+  },
+  {
+    id: 'archive',
+    name: '星愿卡册',
+    description: '奶油粉蓝 · 封印线章 · 宝石卡签',
+    swatch: 'radial-gradient(circle at 48% 38%,#fffaf2 0 22%,transparent 23%),linear-gradient(145deg,#f8e8ef 0%,#fff9ed 58%,#83baca 100%)',
+  },
+  {
+    id: 'idol',
+    name: '偶像直播',
+    description: '清透圆框 · 珊瑚强调 · 轻盈标签',
+    swatch: 'linear-gradient(145deg,#18233d 0%,#445c9b 56%,#ff8fa7 100%)',
   },
 ];
 

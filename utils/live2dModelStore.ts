@@ -2,10 +2,20 @@ import JSZip from 'jszip';
 import type { CharacterProfile } from '../types';
 import { DB } from './db';
 import { live2DRuntimeCacheAssetId } from './avatarModelStore';
+import { isBuiltinSullyLive2D } from './builtinSullyLive2D';
 
 export type Live2DAvatarConfig = Extract<NonNullable<CharacterProfile['videoAvatar']>, { format: 'live2d' }>;
 export type Live2DAction = Live2DAvatarConfig['actions'][number];
 export type Live2DActionPermission = Live2DAction['permission'];
+
+/** 衣橱动作拥有独立的强制手动通道，旧数据即使残留 ai 权限也不会暴露给模型。 */
+export const isLive2DWardrobeAction = (action: Live2DAction): boolean => action.wardrobe === true;
+export const getLive2DAIActions = (config: Live2DAvatarConfig): Live2DAction[] => (
+  config.actions.filter(action => action.permission === 'ai' && !isLive2DWardrobeAction(action))
+);
+export const getLive2DWardrobeActions = (config: Live2DAvatarConfig): Live2DAction[] => (
+  config.actions.filter(isLive2DWardrobeAction)
+);
 
 const isIdleOnlyMotion = (action: Live2DAction): boolean => (
   action.kind === 'motion'
@@ -20,6 +30,7 @@ const isIdleOnlyMotion = (action: Live2DAction): boolean => (
 export const upgradeLive2DAutoPermissions = (config: Live2DAvatarConfig): Live2DAvatarConfig => {
   if (config.actionPolicyVersion === 2) return config;
   const actions = config.actions.map(action => {
+    if (isLive2DWardrobeAction(action)) return { ...action, permission: 'manual' as const };
     const autoEligible = action.permission === 'manual'
       && action.tags.length === 0
       && action.source !== 'custom'
@@ -516,6 +527,88 @@ interface Live2DRuntimePackage {
   unpackMs: number;
 }
 
+interface BuiltinLive2DSettingsResult {
+  settings: Record<string, any>;
+  modelUrl: string;
+  memoryHit: boolean;
+  waitMs: number;
+}
+
+// Built-in variants are ordinary static files. Keep only the tiny parsed
+// model3 manifest in JS memory; textures remain in the browser HTTP cache and
+// are decoded by Pixi only when a visible canvas is mounted.
+const builtinLive2DSettingsCache = new Map<string, Promise<Record<string, any>>>();
+
+const builtinDocumentBase = (): string => {
+  if (typeof document !== 'undefined' && document.baseURI) return document.baseURI;
+  if (typeof location !== 'undefined' && location.href) return location.href;
+  return 'http://localhost/';
+};
+
+const getBuiltinLive2DSettings = async (
+  config: Live2DAvatarConfig,
+  onProgress?: Live2DLoadProgress,
+): Promise<BuiltinLive2DSettingsResult> => {
+  if (!isBuiltinSullyLive2D(config)) throw new Error('内置 Live2D 配置缺少静态模型地址。');
+  const startedAt = nowMs();
+  const modelUrl = new URL(config.builtinModelUrl, builtinDocumentBase()).href;
+  const cached = builtinLive2DSettingsCache.get(modelUrl);
+  if (cached) {
+    onProgress?.('正在从内置缓存恢复 Sully…');
+    return { settings: await cached, modelUrl, memoryHit: true, waitMs: nowMs() - startedAt };
+  }
+  onProgress?.(`正在读取 Sully 内置${config.builtinQuality === 'hd' ? '高清' : '轻量'}模型…`);
+  const pending = fetch(modelUrl, { cache: 'force-cache' })
+    .then(async response => {
+      if (!response.ok) throw new Error(`Sully 内置模型读取失败（HTTP ${response.status}）。`);
+      return response.json() as Promise<Record<string, any>>;
+    })
+    .catch(error => {
+      builtinLive2DSettingsCache.delete(modelUrl);
+      throw error;
+    });
+  builtinLive2DSettingsCache.set(modelUrl, pending);
+  while (builtinLive2DSettingsCache.size > 2) {
+    const oldest = builtinLive2DSettingsCache.keys().next().value as string | undefined;
+    if (!oldest || oldest === modelUrl) break;
+    builtinLive2DSettingsCache.delete(oldest);
+  }
+  return { settings: await pending, modelUrl, memoryHit: false, waitMs: nowMs() - startedAt };
+};
+
+const cloneBuiltinSettings = (settings: Record<string, any>): Record<string, any> => (
+  JSON.parse(JSON.stringify(settings)) as Record<string, any>
+);
+
+const hydrateBuiltinSettings = (
+  rawSettings: Record<string, any>,
+  modelUrl: string,
+): { settings: Record<string, any>; textureUrls: string[] } => {
+  const settings = cloneBuiltinSettings(rawSettings);
+  const refs = settings.FileReferences;
+  if (!refs?.Moc || !Array.isArray(refs.Textures) || !refs.Textures.length) {
+    throw new Error('Sully 内置 model3.json 缺少 Moc 或 Textures。');
+  }
+  const absolute = (reference?: string): string | undefined => (
+    reference ? new URL(reference, modelUrl).href : undefined
+  );
+  refs.Moc = absolute(refs.Moc);
+  refs.Textures = refs.Textures.map((reference: string) => absolute(reference));
+  refs.Physics = absolute(refs.Physics);
+  refs.Pose = absolute(refs.Pose);
+  refs.DisplayInfo = absolute(refs.DisplayInfo);
+  refs.UserData = absolute(refs.UserData);
+  for (const motions of Object.values(refs.Motions || {}) as Array<Array<{ File?: string; Sound?: string }>>) {
+    for (const motion of motions) {
+      motion.File = absolute(motion.File);
+      motion.Sound = absolute(motion.Sound);
+    }
+  }
+  for (const expression of refs.Expressions || []) expression.File = absolute(expression.File);
+  settings.url = modelUrl;
+  return { settings, textureUrls: refs.Textures.filter(Boolean) };
+};
+
 // Settings preview and the call stage normally open the same asset back to
 // back. Keep one decompressed package in memory so the 8K texture and moc are
 // not inflated from ZIP twice. A single-entry LRU bounds the extra memory when
@@ -624,7 +717,7 @@ const getRuntimeTextureDataUrl = (
 };
 
 export interface Live2DLoadTimings {
-  cache: 'memory' | Live2DRuntimePackage['source'];
+  cache: 'memory' | 'builtin' | Live2DRuntimePackage['source'];
   packageMs: number;
   manifestMs: number;
   textureMs: number;
@@ -641,6 +734,29 @@ export const prewarmLive2DModelSource = async (
   onProgress?: Live2DLoadProgress,
 ): Promise<Live2DLoadTimings> => {
   const totalStartedAt = nowMs();
+  if (isBuiltinSullyLive2D(config)) {
+    const builtIn = await getBuiltinLive2DSettings(config, onProgress);
+    const manifestStartedAt = nowMs();
+    const { textureUrls } = hydrateBuiltinSettings(builtIn.settings, builtIn.modelUrl);
+    const manifestMs = nowMs() - manifestStartedAt;
+    const textureStartedAt = nowMs();
+    await Promise.all(textureUrls.map(async url => {
+      const response = await fetch(url, { cache: 'force-cache' });
+      if (!response.ok) throw new Error(`Sully 内置贴图预热失败（HTTP ${response.status}）。`);
+      await response.blob();
+    }));
+    const textureMs = nowMs() - textureStartedAt;
+    const timings: Live2DLoadTimings = {
+      cache: builtIn.memoryHit ? 'memory' : 'builtin',
+      packageMs: builtIn.waitMs,
+      manifestMs,
+      textureMs,
+      totalMs: nowMs() - totalStartedAt,
+    };
+    onProgress?.(`Sully 预热完成：清单 ${prettyMs(timings.packageMs)}，贴图 ${prettyMs(textureMs)}`);
+    console.info('[live2d] builtin prewarm complete', { assetId: config.assetId, ...timings });
+    return timings;
+  }
   const packageResult = await getLive2DRuntimePackage(config, onProgress);
   const { runtimePackage } = packageResult;
   const manifestStartedAt = nowMs();
@@ -685,6 +801,31 @@ export const loadLive2DModelSource = async (
   cleanup: () => void;
 }> => {
   const totalStartedAt = nowMs();
+  if (isBuiltinSullyLive2D(config)) {
+    const builtIn = await getBuiltinLive2DSettings(config, onProgress);
+    const manifestStartedAt = nowMs();
+    const { settings, textureUrls } = hydrateBuiltinSettings(builtIn.settings, builtIn.modelUrl);
+    const actionParameterIds = Object.fromEntries(config.actions
+      .filter(action => action.parameterIds?.length)
+      .map(action => [action.id, [...action.parameterIds!]]));
+    const manifestMs = nowMs() - manifestStartedAt;
+    const timings: Live2DLoadTimings = {
+      cache: builtIn.memoryHit ? 'memory' : 'builtin',
+      packageMs: builtIn.waitMs,
+      manifestMs,
+      textureMs: 0,
+      totalMs: nowMs() - totalStartedAt,
+    };
+    onProgress?.(`Sully 内置${config.builtinQuality === 'hd' ? '高清' : '轻量'}模型就绪`);
+    console.info('[live2d] builtin model source ready', { assetId: config.assetId, ...timings });
+    return {
+      settings,
+      textureUrls,
+      actionParameterIds,
+      timings,
+      cleanup: () => {},
+    };
+  }
   const packageResult = await getLive2DRuntimePackage(config, onProgress);
   const runtimePackage = packageResult.runtimePackage;
   const entries = runtimePackage.entries;
@@ -798,7 +939,7 @@ export const findLive2DActionsForPerformance = (
   config: Live2DAvatarConfig,
   performance: { emotion?: string; gesture?: string; modelAction?: string },
 ): Live2DAction[] => {
-  const allowed = config.actions.filter(action => action.permission === 'ai');
+  const allowed = getLive2DAIActions(config);
   if (performance.modelAction) {
     const explicit = allowed.find(action => action.id === performance.modelAction);
     if (explicit) return [explicit];
@@ -841,7 +982,7 @@ export const buildLive2DPerformanceMix = (
   },
   runtimeParameterIds: Record<string, string[]> = {},
 ): Live2DPerformanceMix => {
-  const allowed = config.actions.filter(action => action.permission === 'ai');
+  const allowed = getLive2DAIActions(config);
   const allowedById = new Map(allowed.map(action => [action.id, action]));
   const requestedIds = [...new Set([
     ...(performance.modelActions || []),

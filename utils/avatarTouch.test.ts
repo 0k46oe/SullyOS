@@ -3,6 +3,7 @@ import {
   appendPendingAvatarTouch,
   buildAvatarTouchSystemPrompt,
   applyAvatarTouchForce,
+  buildAvatarTouchReactionPackPrompt,
   buildPendingAvatarTouchContext,
   buildImmediateTouchPerformance,
   normalizeCompanionDialogue,
@@ -151,6 +152,7 @@ describe('角色触碰互动', () => {
       { "dialogue": "别把我的头发弄乱。", "performance": { "emotion": "happy", "gesture": "tilt", "intensity": 0.7 } }
     ] },
     "arm": [
+
       { "reply": "牵住了就别松开。", "emotion": "surprised", "gesture": "wave" }
     ],
   },
@@ -169,7 +171,68 @@ Thanks!`,
     });
   });
 
-  it('keeps valid zones from a partial markdown reply so only missing zones need repair', () => {
+  it('accepts the exact Chinese labels shown to the model and user', () => {
+    const pack = parseAvatarTouchReactionPack({
+      choices: [{ message: { content: JSON.stringify({
+        '手或手臂': [{ text: '手给你。', performance: { emotion: 'happy', gesture: 'wave', camera: 'medium', gaze: 'viewer', intensity: 0.7 } }],
+        '肩膀或身体': [{ text: '别突然靠这么近。', performance: { emotion: 'surprised', gesture: 'lean-back', camera: 'medium', gaze: 'viewer', intensity: 0.7 } }],
+        '角色身边': [{ text: '站这里就好。', performance: { emotion: 'calm', gesture: 'idle', camera: 'wide', gaze: 'viewer', intensity: 0.5 } }],
+      }) } }],
+    }, ['hand', 'body', 'other']);
+
+    expect(pack?.hand?.[0].text).toBe('手给你。');
+    expect(pack?.body?.[0].performance.gesture).toBe('lean-back');
+    expect(pack?.other?.[0].text).toBe('站这里就好。');
+  });
+
+  it('flattens array-style zone groups and content-block responses', () => {
+    const content = JSON.stringify([
+      {
+        zone: 'hand',
+        reactions: [{ text: '牵好。', performance: { emotion: 'happy', gesture: 'wave', camera: 'medium', gaze: 'viewer', intensity: 0.6 } }],
+      },
+      {
+        zone: 'body',
+        items: [{ text: '轻一点。', performance: { emotion: 'calm', gesture: 'idle', camera: 'medium', gaze: 'viewer', intensity: 0.5 } }],
+      },
+    ]);
+    const pack = parseAvatarTouchReactionPack({
+      choices: [{ message: { content: [{ type: 'text', text: content }] } }],
+    }, ['hand', 'body']);
+
+    expect(pack?.hand?.[0].text).toBe('牵好。');
+    expect(pack?.body?.[0].text).toBe('轻一点。');
+  });
+
+  it('asks for structured reaction objects under exact English zone ids', () => {
+    const prompt = buildAvatarTouchReactionPackPrompt('FULL_CONTEXT', 'Sully', '条条', ['hand', 'body'], [], 4, 'ja');
+
+    expect(prompt).toContain('顶层键必须逐字使用上面的英文部位 ID');
+    expect(prompt).toContain('"text": "第1句角色台词"');
+    expect(prompt).toContain('"translation": "第1句日本語口语译文"');
+    expect(prompt).toContain('text 是界面显示的原文，必须使用简体中文');
+    expect(prompt).toContain('"performance"');
+  });
+
+  it('keeps source text and spoken translation separate for a selected voice language', () => {
+    const raw = {
+      head: [{
+        text: '别把我的头发揉乱。',
+        translation: '髪をくしゃくしゃにしないで。',
+        performance: { emotion: 'happy', gesture: 'tilt', camera: 'medium', gaze: 'viewer', intensity: 0.7 },
+      }],
+    };
+    const pack = parseAvatarTouchReactionPack(raw, ['head'], [], 'ja');
+    expect(pack?.head?.[0]).toMatchObject({
+      text: '别把我的头发揉乱。',
+      translation: '髪をくしゃくしゃにしないで。',
+    });
+    expect(parseAvatarTouchReactionPack({
+      head: [{ text: '缺少译文。', performance: { emotion: 'calm', gesture: 'idle' } }],
+    }, ['head'], [], 'ja')).toBeNull();
+  });
+
+  it('keeps valid zones visible to diagnostics without issuing a repair request', () => {
     const pack = parseAvatarTouchReactionPackPartial(`
 head:
 - [[AVATAR: emotion=happy; gesture=tilt]] 别揉乱我的头发。

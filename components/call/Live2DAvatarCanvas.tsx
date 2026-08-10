@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { Application, Assets, Cache, extensions } from 'pixi.js';
 import { AvatarAutonomy } from '../../utils/avatarAutonomy';
-import type { AvatarPerformanceDirection, AvatarStageFraming } from '../../utils/avatarPerformance';
+import { DEFAULT_AVATAR_PERFORMANCE, type AvatarPerformanceDirection, type AvatarStageFraming } from '../../utils/avatarPerformance';
 import type { CallAudioFeed } from '../../utils/callAudioFeed';
 import { isDevDebugAvailable } from '../../utils/devDebug';
 import { bridgeCubism6RenderOrders, ensureLive2DCubismCore, preloadLive2DRuntime } from '../../utils/live2dCore';
@@ -36,6 +36,10 @@ interface Live2DAvatarCanvasProps {
   config: Live2DAvatarConfig;
   motionState: AvatarMotionState;
   audioFeed?: CallAudioFeed;
+  /** Absolute runtime lock; used for the whole companion startup utterance. */
+  headMotionLocked?: boolean;
+  /** Companion desktop must not inherit the video-call random pose generator. */
+  ambientAutonomyDisabled?: boolean;
   /** 优先于 config.framing 的实时构图（舞台拖拽/设置面板滑杆的即时预览）。 */
   framing?: AvatarStageFraming;
   /** 用户锚定的脸部特写构图；close/push-in 时镜头直接落到这里。 */
@@ -66,6 +70,73 @@ const registerLive2DPlugin = (plugin: Parameters<typeof extensions.add>[0]) => {
 };
 
 const clamp = (value: number, min = -1, max = 1): number => Math.max(min, Math.min(max, value));
+const HEAD_LOCK_PARAMETER_IDS = [
+  'xin', 'yin', 'zin',
+  'ParamAngleX', 'ParamAngleY', 'ParamAngleZ',
+] as const;
+const isHeadLockParameter = (id: string): boolean => (
+  /^(?:x|y|z)in$/i.test(id)
+  || /^(?:Param)?(?:Head)?Angle[XYZ]$/i.test(id)
+  || /^ParamHead[XYZ]$/i.test(id)
+);
+
+type DirectedHeadControl = {
+  enabled: boolean;
+  authoredEnabled: boolean;
+  motionOwnsHead: boolean;
+  paramsOwnHead: boolean;
+};
+
+/**
+ * Companion mode suppresses ambient head autonomy, but authored directions are
+ * still allowed to move the head. Explicit model motions own their head curves;
+ * precision/gaze/head gestures remain deterministic through AvatarAutonomy.
+ */
+const getDirectedHeadControl = (
+  direction: AvatarPerformanceDirection | undefined,
+  config: Live2DAvatarConfig,
+): DirectedHeadControl => {
+  if (!direction) return {
+    enabled: false,
+    authoredEnabled: false,
+    motionOwnsHead: false,
+    paramsOwnHead: false,
+  };
+  const requestedIds = new Set([
+    ...(direction.modelActions || []),
+    direction.modelAction,
+  ].filter((id): id is string => Boolean(id)));
+  const requestedActions = config.actions.filter(action => requestedIds.has(action.id));
+  const motionOwnsHead = requestedActions.some(action => action.kind === 'motion');
+  const paramsOwnHead = requestedActions.some(action => (
+    action.kind === 'params'
+    && (action.params || []).some(param => isHeadLockParameter(param.id))
+  ));
+  // Saved startup poses commonly contain explicit zeroes. Zero means "stay
+  // centered", not "release the head lock for the entire sentence".
+  const precisionOwnsHead = [
+    direction.precision?.headX,
+    direction.precision?.headY,
+    direction.precision?.headZ,
+  ].some(value => typeof value === 'number' && Math.abs(value) > 0.001);
+  const gestureOwnsHead = direction.gesture === 'nod'
+    || direction.gesture === 'shake'
+    || direction.gesture === 'tilt';
+  const gazeOwnsHead = direction.gaze !== 'viewer';
+  const authoredEnabled = precisionOwnsHead || gestureOwnsHead || gazeOwnsHead;
+  return {
+    enabled: motionOwnsHead || paramsOwnHead || authoredEnabled,
+    authoredEnabled,
+    motionOwnsHead,
+    paramsOwnHead,
+  };
+};
+
+type DirectedHeadMotionLease = {
+  channel: 'pending' | 'parallel' | 'main';
+  startedAt: number;
+  expiresAt: number;
+};
 
 type Live2DModelLike = {
   expression: (id?: number | string) => Promise<boolean>;
@@ -147,6 +218,8 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   config,
   motionState,
   audioFeed,
+  headMotionLocked = false,
+  ambientAutonomyDisabled = false,
   framing,
   faceFraming,
   performance,
@@ -166,6 +239,8 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   const modelRef = useRef<(Live2DModelLike & any) | null>(null);
   const motionStateRef = useRef(motionState);
   const audioFeedRef = useRef(audioFeed);
+  const headMotionLockedRef = useRef(headMotionLocked);
+  const ambientAutonomyDisabledRef = useRef(ambientAutonomyDisabled);
   const configRef = useRef(config);
   const performanceRef = useRef(performance);
   const touchImpulseNonceRef = useRef(touchImpulseNonce);
@@ -179,14 +254,57 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   const parameterPreviewRef = useRef(parameterPreview);
   // 进行中的参数动作叠加（kind='params'）：短暂把一组参数推到目标值再淡出。
   const paramOverlaysRef = useRef<Array<{ params: Array<{ id: string; value: number }>; startedAt: number }>>([]);
+  const directedHeadMotionLeaseRef = useRef<DirectedHeadMotionLease | null>(null);
+  const directedHeadPoseRef = useRef<{ headX: number; headY: number; headZ: number } | null>(null);
   const framingRef = useRef(framing || config.framing || { scale: 1, offsetX: 0, offsetY: 0 });
   const faceFramingRef = useRef<AvatarStageFraming | undefined>(faceFraming || config.faceFraming);
   const aiExpressionActiveRef = useRef(false);
   const pointerRef = useRef({ x: 0, y: 0, active: false, lastMoved: 0 });
   const lipSyncKey = config.lipSyncParameterIds.join('\u0000');
 
+  const isDirectedHeadMotionActive = (now: number): boolean => {
+    const lease = directedHeadMotionLeaseRef.current;
+    if (!lease) return false;
+    if (now >= lease.expiresAt) {
+      directedHeadMotionLeaseRef.current = null;
+      return false;
+    }
+    // Give a freshly requested motion a brief setup window before its manager
+    // publishes running state.
+    if (lease.channel === 'pending' || now - lease.startedAt < 120) return true;
+    const internal = (modelRef.current as any)?.internalModel;
+    const managers = lease.channel === 'parallel'
+      ? (Array.isArray(internal?.parallelMotionManager) ? internal.parallelMotionManager : [])
+      : internal?.motionManager ? [internal.motionManager] : [];
+    const inspectable = managers.filter((manager: any) => typeof manager?.isFinished === 'function');
+    if (!inspectable.length) return true;
+    const active = inspectable.some((manager: any) => !manager.isFinished());
+    if (!active) directedHeadMotionLeaseRef.current = null;
+    return active;
+  };
+
+  const getRuntimeDirectedHeadControl = (
+    direction: AvatarPerformanceDirection | undefined,
+    now: number,
+  ): DirectedHeadControl => {
+    const planned = getDirectedHeadControl(direction, configRef.current);
+    const motionOwnsHead = isDirectedHeadMotionActive(now);
+    const paramsOwnHead = paramOverlaysRef.current.some(overlay => (
+      now - overlay.startedAt < 4_100
+      && overlay.params.some(param => isHeadLockParameter(param.id))
+    ));
+    return {
+      enabled: planned.authoredEnabled || motionOwnsHead || paramsOwnHead,
+      authoredEnabled: planned.authoredEnabled,
+      motionOwnsHead,
+      paramsOwnHead,
+    };
+  };
+
   useEffect(() => { motionStateRef.current = motionState; }, [motionState]);
   useEffect(() => { audioFeedRef.current = audioFeed; }, [audioFeed]);
+  useEffect(() => { headMotionLockedRef.current = headMotionLocked; }, [headMotionLocked]);
+  useEffect(() => { ambientAutonomyDisabledRef.current = ambientAutonomyDisabled; }, [ambientAutonomyDisabled]);
   useEffect(() => { configRef.current = config; }, [config]);
   useEffect(() => { performanceRef.current = performance; }, [performance]);
   useEffect(() => { touchImpulseNonceRef.current = touchImpulseNonce; }, [touchImpulseNonce]);
@@ -241,10 +359,13 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
 
   // kind='params' 的自定义参数动作不走引擎的 motion/expression 通道，
   // 而是推进叠加队列，由 applyControls 按攻击-保持-衰减包络逐帧写参数。
-  const triggerAction = (action: Live2DAction): Promise<void> => {
+  const triggerAction = (action: Live2DAction, allowDirectedHead = false): Promise<void> => {
     if (action.kind === 'params') {
-      if (action.params?.length) {
-        paramOverlaysRef.current.push({ params: action.params, startedAt: window.performance.now() });
+      const params = headMotionLockedRef.current && !allowDirectedHead
+        ? action.params?.filter(param => !isHeadLockParameter(param.id))
+        : action.params;
+      if (params?.length) {
+        paramOverlaysRef.current.push({ params, startedAt: window.performance.now() });
       }
       return Promise.resolve();
     }
@@ -252,17 +373,44 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
     return model ? playAction(model, action) : Promise.resolve();
   };
 
+  const stopPerformanceMotions = () => {
+    const model = modelRef.current as any;
+    if (!model) return;
+    try { model.stopMotions?.(); } catch { /* optional runtime API */ }
+    const parallelManagers = model.internalModel?.parallelMotionManager;
+    if (Array.isArray(parallelManagers)) {
+      parallelManagers.forEach((manager: any) => {
+        try { manager?.stopAllMotions?.(); } catch { /* optional layer */ }
+      });
+    }
+    paramOverlaysRef.current = [];
+    directedHeadMotionLeaseRef.current = null;
+  };
+
   const triggerPerformance = async (direction: AvatarPerformanceDirection): Promise<void> => {
+    if (ambientAutonomyDisabledRef.current && motionStateRef.current === 'idle') {
+      stopPerformanceMotions();
+      return;
+    }
     const model = modelRef.current;
     if (!model) return;
     const host = hostRef.current;
+    const directedHead = getDirectedHeadControl(direction, configRef.current);
     if (performanceQualityRef.current !== 'high') {
       const actions = findLive2DActionsForPerformance(configRef.current, direction);
       host?.setAttribute('data-live2d-mix-mode', 'basic');
       actions.forEach(action => {
         if (host) host.dataset.live2dLastAction = action.id;
         if (action.kind === 'expression') aiExpressionActiveRef.current = true;
-        void triggerAction(action).catch(() => { /* optional actions stay non-fatal */ });
+        if (directedHead.motionOwnsHead && action.kind === 'motion') {
+          const now = window.performance.now();
+          directedHeadMotionLeaseRef.current = {
+            channel: 'main',
+            startedAt: now,
+            expiresAt: now + 5_000,
+          };
+        }
+        void triggerAction(action, directedHead.enabled).catch(() => { /* optional actions stay non-fatal */ });
       });
       return;
     }
@@ -281,6 +429,14 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
     }
 
     if (mix.motions.length) {
+      const motionLeaseStartedAt = window.performance.now();
+      if (directedHead.motionOwnsHead) {
+        directedHeadMotionLeaseRef.current = {
+          channel: 'pending',
+          startedAt: motionLeaseStartedAt,
+          expiresAt: motionLeaseStartedAt + 5_000,
+        };
+      }
       const motionItems = mix.motions
         .filter(action => action.group && action.index !== undefined)
         .map(action => ({
@@ -296,6 +452,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
             'ParamMouthOpenY',
             'ParamEyeBallX',
             'ParamEyeBallY',
+            ...(headMotionLockedRef.current && !directedHead.enabled ? HEAD_LOCK_PARAMETER_IDS : []),
           ])],
         }));
       let started = false;
@@ -303,20 +460,29 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
         try {
           const results = await model.parallelMotion(motionItems);
           started = results.some(Boolean);
+          if (started && directedHead.motionOwnsHead && directedHeadMotionLeaseRef.current) {
+            directedHeadMotionLeaseRef.current.channel = 'parallel';
+          }
         } catch {
           // Older/partial runtimes take the single-motion fallback below.
         }
       }
-      if (!started && mix.motions[0]) await playAction(model, mix.motions[0]);
+      if (!started && mix.motions[0]) {
+        if (directedHead.motionOwnsHead && directedHeadMotionLeaseRef.current) {
+          directedHeadMotionLeaseRef.current.channel = 'main';
+        }
+        await playAction(model, mix.motions[0]);
+      }
+      if (!started && !mix.motions[0]) directedHeadMotionLeaseRef.current = null;
     }
 
     // Apply the expression after starting motions: model files are allowed to
     // reset expressions on start, so this order keeps the director's face layer.
     if (mix.expression) {
       aiExpressionActiveRef.current = true;
-      await triggerAction(mix.expression);
+      await triggerAction(mix.expression, directedHead.enabled);
     }
-    await Promise.all(mix.params.map(action => triggerAction(action)));
+    await Promise.all(mix.params.map(action => triggerAction(action, directedHead.enabled)));
   };
 
   // 只跟随导演指令（performance）触发动作，不依赖 config 对象身份——否则保存
@@ -324,8 +490,16 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   useEffect(() => {
     const model = modelRef.current;
     if (!model || !performance) return;
+    if (ambientAutonomyDisabled && motionState === 'idle') {
+      stopPerformanceMotions();
+      return;
+    }
     void triggerPerformance(performance).catch(() => { /* invalid optional actions stay non-fatal */ });
-  }, [performance, performanceQuality]);
+  }, [performance, performanceQuality, headMotionLocked, ambientAutonomyDisabled, motionState]);
+
+  useEffect(() => {
+    if (ambientAutonomyDisabled && motionState === 'idle') stopPerformanceMotions();
+  }, [ambientAutonomyDisabled, motionState]);
 
   useEffect(() => {
     if (motionState === 'speaking' || !aiExpressionActiveRef.current) return;
@@ -343,7 +517,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
     const action = configRef.current.actions.find(item => item.id === manualAction.id && item.permission !== 'blocked');
     if (action) {
       if (hostRef.current) hostRef.current.dataset.live2dLastAction = action.id;
-      void triggerAction(action).catch(error => onErrorRef.current?.(error instanceof Error ? error.message : '动作播放失败'));
+      void triggerAction(action, true).catch(error => onErrorRef.current?.(error instanceof Error ? error.message : '动作播放失败'));
     }
   }, [manualAction]);
 
@@ -355,6 +529,9 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
     let resizeObserver: ResizeObserver | null = null;
     let internal: any = null;
     let applyControls: (() => void) | null = null;
+    let applyFinalHeadLock: (() => void) | null = null;
+    let intersectionObserver: IntersectionObserver | null = null;
+    let stageVisible = true;
     let cleanupPackage: (() => void) | null = null;
     let packageTextureUrls: string[] = [];
     let texturesLeased = false;
@@ -370,6 +547,15 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
       cleanupPackage = null;
       cleanup?.();
     };
+
+    const syncTickerVisibility = () => {
+      if (!app) return;
+      const shouldRun = document.visibilityState !== 'hidden' && stageVisible;
+      if (shouldRun) app.ticker.start();
+      else app.ticker.stop();
+      host.dataset.live2dTicker = shouldRun ? 'running' : 'paused';
+    };
+    const onDocumentVisibilityChange = () => syncTickerVisibility();
 
     onLoadingChangeRef.current?.(true, '正在启动 Cubism 引擎…');
     onErrorRef.current?.('');
@@ -415,6 +601,16 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
         if (disposed || !app) return;
         app.canvas.className = 'h-full w-full touch-none';
         host.appendChild(app.canvas);
+        document.addEventListener('visibilitychange', onDocumentVisibilityChange);
+        if (typeof IntersectionObserver !== 'undefined') {
+          intersectionObserver = new IntersectionObserver(entries => {
+            const entry = entries[entries.length - 1];
+            stageVisible = Boolean(entry?.isIntersecting && entry.intersectionRatio > 0.01);
+            syncTickerVisibility();
+          }, { threshold: [0, 0.01] });
+          intersectionObserver.observe(host);
+        }
+        syncTickerVisibility();
 
         onLoadingChangeRef.current?.(true, '正在准备模型缓存…');
         const source = await sourcePromise;
@@ -600,7 +796,36 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
           const now = window.performance.now();
           const t = now / 1000;
           const speaking = motionStateRef.current === 'speaking';
-          const direction = performanceRef.current;
+          const headLocked = headMotionLockedRef.current;
+          const suppressesAmbientAutonomy = ambientAutonomyDisabledRef.current;
+          const authoredDirection = performanceRef.current || DEFAULT_AVATAR_PERFORMANCE;
+          const directedHead = getRuntimeDirectedHeadControl(authoredDirection, now);
+          const authoredPrecision = authoredDirection.precision || {};
+          const authoredIntensity = clamp(authoredDirection.intensity, 0.2, 1);
+          const gazeHeadX = authoredDirection.gaze === 'left' ? -0.22 * authoredIntensity
+            : authoredDirection.gaze === 'right' ? 0.22 * authoredIntensity : 0;
+          const gazeHeadY = authoredDirection.gaze === 'down' ? -0.18 * authoredIntensity : 0;
+          const gazeEyeX = authoredDirection.gaze === 'left' ? -0.78 * authoredIntensity
+            : authoredDirection.gaze === 'right' ? 0.78 * authoredIntensity : 0;
+          const gazeEyeY = authoredDirection.gaze === 'down' ? -0.62 * authoredIntensity : 0;
+          host.dataset.live2dDirectedHead = directedHead.enabled ? 'true' : 'false';
+          const direction = headLocked || suppressesAmbientAutonomy ? {
+            ...authoredDirection,
+            precision: {
+              ...authoredPrecision,
+              lockAutonomy: true,
+              lockHead: directedHead.enabled ? authoredPrecision.lockHead : true,
+              headX: authoredPrecision.headX ?? gazeHeadX,
+              headY: authoredPrecision.headY ?? gazeHeadY,
+              headZ: authoredPrecision.headZ ?? 0,
+              eyeX: authoredPrecision.eyeX ?? gazeEyeX,
+              eyeY: authoredPrecision.eyeY ?? gazeEyeY,
+              bodyX: authoredPrecision.bodyX ?? 0,
+              bodyY: authoredPrecision.bodyY ?? 0,
+              bodyZ: authoredPrecision.bodyZ ?? 0,
+              overshoot: authoredPrecision.overshoot ?? 0,
+            },
+          } : authoredDirection;
           const touchNonce = touchImpulseNonceRef.current;
           if (touchNonce !== undefined && touchNonce !== handledTouchImpulseNonce && direction) {
             handledTouchImpulseNonce = touchNonce;
@@ -610,13 +835,27 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
           // One WebAudio sample drives both mouth shapes and body emphasis, so a
           // loud syllable lands as a synchronized nod/gesture instead of random motion.
           const lip = audioFeedRef.current?.sample(now);
-          const frame = autonomy.step(
+          const autonomyFrame = autonomy.step(
             now,
             direction,
             motionStateRef.current,
             pointerRef.current,
             speaking && lip?.active ? lip.level : undefined,
           );
+          // Do not merely ask the springs to settle. A previously active call
+          // pose can retain momentum for seconds, and downstream physics sees
+          // that intermediate frame. Startup publishes a literal still pose.
+          const frame = headLocked && !directedHead.enabled ? {
+            ...autonomyFrame,
+            headX: 0,
+            headY: 0,
+            headZ: 0,
+            rotation: 0,
+            speechAccent: 0,
+          } : autonomyFrame;
+          directedHeadPoseRef.current = directedHead.authoredEnabled && !directedHead.motionOwnsHead
+            ? { headX: frame.headX, headY: frame.headY, headZ: frame.headZ }
+            : null;
           if (frame.pose !== lastPoseDataset) {
             lastPoseDataset = frame.pose;
             host.dataset.live2dAutonomyPose = frame.pose;
@@ -636,21 +875,34 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
           }
           if (debugFrameDatasets) host.dataset.live2dMouthLevel = mouth.toFixed(3);
 
+          const pinsAutonomyPose = Boolean(direction?.precision?.lockAutonomy);
           if (usesVTubeTrackingInputs) {
             // Models exported for VTube Studio often route these normalized
             // tracker inputs through their own physics. Feeding them preserves
             // the artist's hair/body setup instead of guessing output params.
-            smooth('xin', frame.headX, 0.32);
-            smooth('yin', frame.headY, 0.32);
-            smooth('zin', frame.headZ, 0.3);
+            if (!directedHead.motionOwnsHead) {
+              smooth('xin', frame.headX, 0.32);
+              smooth('yin', frame.headY, 0.32);
+              smooth('zin', frame.headZ, 0.3);
+            }
             smooth('xinb', frame.bodyX, 0.24);
             smooth('yinb', frame.bodyY, 0.22);
             smooth('zinb', frame.bodyZ, 0.22);
+            // Pin both tracking inputs and the standard outputs we write while
+            // the call-style autonomy layer is locked.
+            if (pinsAutonomyPose && !directedHead.motionOwnsHead) {
+              if (hasParameter('ParamAngleX')) smooth('ParamAngleX', frame.headX * 18, 0.2);
+              if (hasParameter('ParamAngleY')) smooth('ParamAngleY', frame.headY * 12, 0.2);
+              if (hasParameter('ParamAngleZ')) smooth('ParamAngleZ', frame.headZ * 10, 0.18);
+              if (hasParameter('ParamBodyAngleX')) smooth('ParamBodyAngleX', frame.bodyX * 7, 0.13);
+            }
           } else {
-            smooth('ParamAngleX', frame.headX * 18, 0.2, true);
-            smooth('ParamAngleY', frame.headY * 12, 0.2, true);
-            smooth('ParamAngleZ', frame.headZ * 10, 0.18, true);
-            smooth('ParamBodyAngleX', frame.bodyX * 7, 0.13, true);
+            if (!directedHead.motionOwnsHead) {
+              smooth('ParamAngleX', frame.headX * 18, 0.2, !pinsAutonomyPose);
+              smooth('ParamAngleY', frame.headY * 12, 0.2, !pinsAutonomyPose);
+              smooth('ParamAngleZ', frame.headZ * 10, 0.18, !pinsAutonomyPose);
+            }
+            smooth('ParamBodyAngleX', frame.bodyX * 7, 0.13, !pinsAutonomyPose);
           }
           smooth('ParamEyeBallX', frame.eyeX, 0.42);
           smooth('ParamEyeBallY', frame.eyeY, 0.42);
@@ -713,11 +965,61 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
           // A playable action fades by design; the editor instead needs a
           // sustained before/after state so every slider movement is visible.
           applyPinnedPreview(parameterPreviewRef.current || []);
+          // Final writer wins: our call-style autonomy, audio accents and custom
+          // parameter overlays have all run by this point. During companion
+          // startup, erase every head output we own on every frame.
+          if (headLocked && !directedHead.enabled) {
+            for (const id of ['xin', 'yin', 'zin', 'ParamAngleX', 'ParamAngleY', 'ParamAngleZ']) {
+              if (hasParameter(id)) core.setParameterValueById(resolveId(id), 0);
+            }
+          }
         };
         internal.on('afterMotionUpdate', applyControls);
 
+        // `afterMotionUpdate` is not the end of this engine's frame. It still
+        // runs focus, breath, physics and pose after that event, so clamping the
+        // head there can be overwritten before Cubism evaluates the drawable.
+        // `beforeModelUpdate` is the last writable point. The startup lock must
+        // win here or the old video-call autonomy remains visible on screen.
+        applyFinalHeadLock = () => {
+          const locked = headMotionLockedRef.current || ambientAutonomyDisabledRef.current;
+          const directedHead = getRuntimeDirectedHeadControl(performanceRef.current, window.performance.now());
+          host.dataset.live2dHeadLocked = headMotionLockedRef.current ? 'true' : 'false';
+          host.dataset.live2dAmbientHeadSuppressed = locked ? 'true' : 'false';
+          if (!locked || directedHead.motionOwnsHead || directedHead.paramsOwnHead) return;
+          const authoredPose = directedHead.authoredEnabled ? directedHeadPoseRef.current : null;
+          if (authoredPose) {
+            const values: Array<[string, number]> = [
+              ['xin', authoredPose.headX],
+              ['yin', authoredPose.headY],
+              ['zin', authoredPose.headZ],
+              ['ParamAngleX', authoredPose.headX * 18],
+              ['ParamAngleY', authoredPose.headY * 12],
+              ['ParamAngleZ', authoredPose.headZ * 10],
+            ];
+            values.forEach(([id, value]) => {
+              if (hasParameter(id)) core.setParameterValueById(resolveId(id), value);
+            });
+            return;
+          }
+          for (const id of HEAD_LOCK_PARAMETER_IDS) {
+            if (hasParameter(id)) core.setParameterValueById(resolveId(id), 0);
+          }
+        };
+        internal.on('beforeModelUpdate', applyFinalHeadLock);
+
         app.ticker.add(() => {
           if (!app) return;
+          if (ambientAutonomyDisabledRef.current && motionStateRef.current === 'idle') {
+            const mainManager = internal?.motionManager;
+            if (mainManager && !mainManager.isFinished?.()) mainManager.stopAllMotions?.();
+            const parallelManagers = internal?.parallelMotionManager;
+            if (Array.isArray(parallelManagers)) {
+              parallelManagers.forEach((manager: any) => {
+                if (!manager?.isFinished?.()) manager?.stopAllMotions?.();
+              });
+            }
+          }
           const direction = performanceRef.current;
           const motionManagerState = internal?.motionManager?.state;
           const activeMotionGroup = String(motionManagerState?.currentGroup || motionManagerState?.reservedIdleGroup || '');
@@ -756,7 +1058,10 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
             cameraX + frame.bodyX * 5,
             currentY + (targetY - currentY) * 0.08,
           );
-          model.rotation = frame.rotation;
+          // `frame.rotation` is also produced by AvatarAutonomy and rotates the
+          // entire Live2D display, which visually turns the head even when all
+          // head parameters are zero.
+          model.rotation = headMotionLockedRef.current || ambientAutonomyDisabledRef.current ? 0 : frame.rotation;
         });
 
         const initialPerformance = performanceRef.current;
@@ -804,7 +1109,10 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
     return () => {
       disposed = true;
       resizeObserver?.disconnect();
+      intersectionObserver?.disconnect();
+      document.removeEventListener('visibilitychange', onDocumentVisibilityChange);
       if (internal && applyControls) internal.off('afterMotionUpdate', applyControls);
+      if (internal && applyFinalHeadLock) internal.off('beforeModelUpdate', applyFinalHeadLock);
       const model = modelRef.current;
       modelRef.current = null;
       if (model) {

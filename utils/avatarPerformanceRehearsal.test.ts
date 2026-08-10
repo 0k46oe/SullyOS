@@ -5,8 +5,10 @@ import {
   AVATAR_PERFORMANCE_REHEARSAL_MAX_TOKENS,
   buildAvatarPerformancePersonaPrompt,
   buildAvatarPerformanceRehearsalPrompt,
+  isCompleteAvatarPerformanceCuePack,
   parseAvatarPerformancePersona,
   parseAvatarPerformanceRehearsal,
+  splitAvatarPerformanceSentences,
 } from './avatarPerformanceRehearsal';
 
 describe('avatar performance rehearsal', () => {
@@ -92,6 +94,42 @@ describe('avatar performance rehearsal', () => {
     expect(blocked?.[0].direction.modelAction).toBeUndefined();
   });
 
+  it('parses per-sentence opening, hold duration, and closing directions', () => {
+    const cues = parseAvatarPerformanceRehearsal(JSON.stringify({
+      cues: [{
+        at: 0,
+        hold_ms: 1180,
+        start: { emotion: 'surprised', gesture: 'lean-in', model_actions: ['Star-Eyes'] },
+        end: { emotion: 'relaxed', gesture: 'lean-back', face: ['smile-eyes'] },
+      }],
+    }), ['Star-Eyes']);
+
+    expect(cues?.[0]).toMatchObject({
+      at: 0,
+      holdMs: 1180,
+      direction: { emotion: 'surprised', gesture: 'lean-in', modelAction: 'Star-Eyes' },
+      endDirection: { emotion: 'relaxed', gesture: 'lean-back', faces: ['smile-eyes'] },
+    });
+    expect(isCompleteAvatarPerformanceCuePack(cues, 1)).toBe(true);
+  });
+
+  it('rejects incomplete packs in strict mode while keeping legacy parsing compatible', () => {
+    const legacy = parseAvatarPerformanceRehearsal(JSON.stringify({
+      cues: [{ at: 0, emotion: 'calm', gesture: 'talk' }],
+    }));
+    expect(legacy).toHaveLength(1);
+    expect(isCompleteAvatarPerformanceCuePack(legacy, 1)).toBe(false);
+    expect(isCompleteAvatarPerformanceCuePack(legacy, 2)).toBe(false);
+  });
+
+  it('shares deterministic sentence boundaries with desktop and high-quality calls', () => {
+    expect(splitAvatarPerformanceSentences('第一句。第二句！\n第三句')).toEqual([
+      { text: '第一句。', at: 0 },
+      { text: '第二句！', at: 4 / 12 },
+      { text: '第三句', at: 9 / 12 },
+    ]);
+  });
+
   it('accepts up to three deduplicated whitelisted action layers and mirrors the first for compatibility', () => {
     const cues = parseAvatarPerformanceRehearsal(JSON.stringify({
       cues: [{
@@ -108,5 +146,17 @@ describe('avatar performance rehearsal', () => {
   it('returns null for unusable director output', () => {
     expect(parseAvatarPerformanceRehearsal('not json')).toBeNull();
     expect(parseAvatarPerformanceRehearsal('{"cues":[{"at":0}]}')).toBeNull();
+  });
+
+  it('accepts an explicit cue cap for sentence-level companion direction', () => {
+    const cues = parseAvatarPerformanceRehearsal(JSON.stringify({
+      cues: Array.from({ length: 8 }, (_, index) => ({
+        at: index / 8,
+        emotion: 'calm',
+        gesture: index % 2 ? 'wave' : 'talk',
+      })),
+    }), [], 8);
+
+    expect(cues).toHaveLength(8);
   });
 });

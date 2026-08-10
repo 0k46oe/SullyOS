@@ -22,15 +22,16 @@ export interface CompanionStartupDraft {
 
 export const DEFAULT_COMPANION_STARTUP_PERFORMANCE: AvatarPerformanceDirection = {
   emotion: 'calm',
-  gesture: 'tilt',
+  gesture: 'talk',
   camera: 'medium',
   gaze: 'viewer',
   intensity: 0.66,
   precision: {
     lockAutonomy: true,
-    headX: 0.06,
-    headY: 0.04,
-    headZ: -0.14,
+    lockHead: true,
+    headX: 0,
+    headY: 0,
+    headZ: 0,
     eyeX: 0,
     eyeY: 0,
     bodyX: 0.02,
@@ -62,9 +63,12 @@ export const normalizeCompanionStartupPerformance = (
     modelActions: direction?.modelActions?.slice(0, 2),
     precision: {
       lockAutonomy: true,
-      headX: clamp(sourcePrecision.headX, defaultPrecision.headX || 0, -1, 1),
-      headY: clamp(sourcePrecision.headY, defaultPrecision.headY || 0, -1, 1),
-      headZ: clamp(sourcePrecision.headZ, defaultPrecision.headZ || 0, -1, 1),
+      lockHead: true,
+      // Startup speech is a hard centered-head phase. Saved legacy angles and
+      // shake/tilt gestures must never reintroduce movement before the line ends.
+      headX: 0,
+      headY: 0,
+      headZ: 0,
       eyeX: clamp(sourcePrecision.eyeX, 0, -1, 1),
       eyeY: clamp(sourcePrecision.eyeY, 0, -1, 1),
       bodyX: clamp(sourcePrecision.bodyX, defaultPrecision.bodyX || 0, -1, 1),

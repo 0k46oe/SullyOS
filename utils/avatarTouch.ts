@@ -7,7 +7,7 @@ import type {
 import { ContextBuilder } from './context';
 import { DB } from './db';
 import { ChatPrompts } from './chatPrompts';
-import { extractContent, safeFetchJson } from './safeApi';
+import { extractContent, extractJson, safeFetchJson } from './safeApi';
 import { injectMemoryPalace } from './memoryPalace/pipeline';
 import { parseCallAssistantMessage, stripCallTextFormatting } from './callReplyFormat';
 import {
@@ -15,6 +15,7 @@ import {
   inferAvatarPerformanceFromText,
   type AvatarPerformanceDirection,
 } from './avatarPerformance';
+import { voiceLanguageLabel } from './voiceLanguage';
 
 export const AVATAR_TOUCH_ZONES = ['head', 'face', 'hand', 'body', 'other'] as const;
 export type AvatarTouchZone = typeof AVATAR_TOUCH_ZONES[number];
@@ -394,15 +395,24 @@ export const buildAvatarTouchReactionPackPrompt = (
   zones: AvatarTouchZone[],
   modelActions: AvatarTouchModelAction[] = [],
   reactionsPerZone = 4,
+  voiceLanguage = '',
 ): string => {
   const actionList = modelActions.length
     ? modelActions.slice(0, 60).map(action => `- ${action.id}: ${action.name}`).join('\n')
     : '（当前没有模型专属动作）';
   const zoneList = zones.map(zone => `- ${zone}: ${avatarTouchZoneLabel(zone)}`).join('\n');
+  const spokenLanguage = voiceLanguage ? voiceLanguageLabel(voiceLanguage) : '简体中文（与原文一致）';
   const schema = Object.fromEntries(zones.map(zone => [
     zone,
     Array.from({ length: reactionsPerZone }, (_, index) => (
-      `[[AVATAR: emotion=happy; gesture=tilt; gaze=viewer; intensity=0.7]] 第${index + 1}句台词`
+      {
+        text: `第${index + 1}句角色台词`,
+        translation: voiceLanguage ? `第${index + 1}句${spokenLanguage}口语译文` : `第${index + 1}句角色台词`,
+        performance: {
+          emotion: 'happy', gesture: 'tilt', camera: 'medium', gaze: 'viewer', intensity: 0.7,
+          faces: ['smile-eyes'],
+        },
+      }
     )),
   ]));
   return `${coreContext}
@@ -413,13 +423,14 @@ ${userName}正在为${characterName}设置可触摸部位。请一次生成完�
 需要生成的部位：
 ${zoneList}
 
-要求：
-- 每个部位恰好生成 ${reactionsPerZone} 条彼此有区别、可独立成立的一至三句短台词。
+  要求：
+  - 每个部位恰好生成 ${reactionsPerZone} 条彼此有区别、可独立成立的一至三句短台词。
+  - text 是界面显示的原文，必须使用简体中文；translation 是真正送入语音合成的${spokenLanguage}版本。两者必须语义一致，但字段不可合并或省略。
 - 必须结合完整人设、你们的关系、近期对话与记忆；允许喜欢、害羞、意外、躲开、拒绝或生气，边界必须符合角色本人。
 - 台词只能包含角色真正说出口的话。不要写动作旁白、引号、角色名前缀、Markdown、命中区、系统解释或半截续句。
-- 每条台词开头放一条演出指令：[[AVATAR: emotion=...; gesture=...; gaze=...; intensity=...]]。
-- 可按需附加 face=wink,blush 或 model_action=白名单ID；禁止编造模型动作。
-- 只输出一个合法 JSON 对象，不要代码围栏，不要 JSON 以外的文字。键必须是英文部位 ID，值必须是字符串数组。
+  - 每一项必须是 {"text":"中文原文","translation":"语音译文","performance":{...}}；演出数据不要混进台词字段。
+- performance 必须给出 emotion、gesture、camera、gaze、intensity；可按需附加 faces 或 modelAction 白名单 ID，禁止编造模型动作。
+- 只输出一个合法 JSON 对象，不要代码围栏，不要 JSON 以外的文字。顶层键必须逐字使用上面的英文部位 ID，不要翻译或合并部位。
 
 模型专属动作白名单：
 ${actionList}
@@ -429,11 +440,11 @@ ${JSON.stringify(schema, null, 2)}`;
 };
 
 const TOUCH_ZONE_ALIASES: Record<AvatarTouchZone, string[]> = {
-  head: ['head', 'hair', 'top', '头', '头部', '头顶', '头发'],
-  face: ['face', 'cheek', 'mouth', '脸', '脸颊', '面部'],
-  hand: ['hand', 'arm', 'wrist', '手', '手臂', '胳膊'],
-  body: ['body', 'chest', 'torso', 'shoulder', 'waist', '身体', '肩膀', '胸口', '腰'],
-  other: ['other', 'around', 'else', '其他', '身边'],
+  head: ['head', 'heads', 'hair', 'top', '头', '头部', '头顶', '头发', '头顶或头发'],
+  face: ['face', 'faces', 'cheek', 'mouth', '脸', '脸颊', '面部', '脸颊或脸部'],
+  hand: ['hand', 'hands', 'arm', 'arms', 'wrist', '手', '手臂', '胳膊', '手或手臂'],
+  body: ['body', 'bodies', 'chest', 'torso', 'shoulder', 'shoulders', 'waist', '身体', '肩膀', '胸口', '腰', '肩膀或身体'],
+  other: ['other', 'around', 'nearby', 'surroundings', 'else', '其他', '身边', '角色身边'],
 };
 
 const normalizePackKey = (value: string): string => value
@@ -451,7 +462,11 @@ const asReactionPackRoot = (value: unknown): Record<string, unknown> | null => {
       const record = item as Record<string, unknown>;
       const zone = record.zone || record.part || record.area || record.target;
       if (typeof zone !== 'string') return;
-      (grouped[zone] ||= []).push(record);
+      const collection = ['items', 'reactions', 'feedbacks', 'responses', 'lines', 'variants']
+        .map(key => record[key])
+        .find(Array.isArray);
+      if (Array.isArray(collection)) (grouped[zone] ||= []).push(...collection);
+      else (grouped[zone] ||= []).push(record);
     });
     return Object.keys(grouped).length ? grouped : null;
   }
@@ -501,9 +516,17 @@ const readReactionPackSource = (
   zones: AvatarTouchZone[],
 ): Record<string, unknown> | null => {
   const direct = asReactionPackRoot(raw);
-  const content = typeof raw === 'string'
-    ? raw
-    : extractContent(raw as any) || (typeof (raw as any)?.content === 'string' ? (raw as any).content : '');
+  const messageContent = (raw as any)?.choices?.[0]?.message?.content ?? (raw as any)?.content;
+  const blockContent = Array.isArray(messageContent)
+    ? messageContent.map(block => (
+      typeof block === 'string'
+        ? block
+        : typeof block?.text === 'string' ? block.text : typeof block?.content === 'string' ? block.content : ''
+    )).join('')
+    : '';
+  const content = typeof raw === 'string' ? raw
+    : typeof messageContent === 'string' ? messageContent
+      : blockContent || extractContent(raw as any);
   const fenced = [...content.matchAll(/```(?:json|javascript|js)?\s*([\s\S]*?)```/gi)].map(match => match[1]);
   const cleaned = content.replace(/^\uFEFF/, '').trim();
   const candidates = [cleaned, ...fenced, ...extractBalancedJson(cleaned)]
@@ -518,9 +541,16 @@ const readReactionPackSource = (
       if (root) return root;
     } catch { /* try the next conservative repair */ }
   }
+  const tolerant = cleaned.includes('{') ? extractJson(cleaned) : null;
+  const tolerantRoot = asReactionPackRoot(tolerant);
+  if (tolerantRoot) return tolerantRoot;
+
   if (direct && zones.some(zone => {
     const aliases = TOUCH_ZONE_ALIASES[zone].map(normalizePackKey);
-    return Object.keys(direct).some(key => aliases.includes(normalizePackKey(key)));
+    return Object.keys(direct).some(key => {
+      const normalized = normalizePackKey(key);
+      return aliases.some(alias => normalized === alias || normalized.endsWith(alias));
+    });
   })) return direct;
 
   // Last resort for otherwise useful markdown such as "head:\n- line".
@@ -542,7 +572,10 @@ const readReactionPackSource = (
 
 const readZoneValue = (source: Record<string, unknown>, zone: AvatarTouchZone): unknown => {
   const aliases = TOUCH_ZONE_ALIASES[zone].map(normalizePackKey);
-  const entry = Object.entries(source).find(([key]) => aliases.includes(normalizePackKey(key)));
+  const entry = Object.entries(source).find(([key]) => {
+    const normalized = normalizePackKey(key);
+    return aliases.some(alias => normalized === alias || normalized.endsWith(alias));
+  });
   return entry?.[1];
 };
 
@@ -587,10 +620,20 @@ const reactionItemContent = (item: unknown): string => {
   return `${structuredPerformanceDirective(performance)}\n${typeof text === 'string' ? text : ''}`.trim();
 };
 
+const reactionItemTranslation = (item: unknown): string => {
+  if (!item || typeof item !== 'object') return '';
+  const record = item as Record<string, unknown>;
+  const translation = ['translation', 'translatedText', 'speechText', 'voiceText']
+    .map(key => record[key])
+    .find(value => typeof value === 'string');
+  return typeof translation === 'string' ? translation : '';
+};
+
 export const parseAvatarTouchReactionPackPartial = (
   raw: unknown,
   zones: AvatarTouchZone[],
   allowedModelActions: AvatarTouchModelAction[] = [],
+  voiceLanguage = '',
 ): AvatarTouchReactionPack => {
   const source = readReactionPackSource(raw, zones);
   if (!source) return {};
@@ -601,7 +644,14 @@ export const parseAvatarTouchReactionPackPartial = (
       if (!reply) return [];
       const text = normalizeCompanionDialogue(reply.text);
       if (!text) return [];
-      return [{ id: `${zone}-${index + 1}`, text, performance: reply.performance }];
+      const translated = normalizeCompanionDialogue(reactionItemTranslation(item));
+      if (voiceLanguage && !translated) return [];
+      return [{
+        id: `${zone}-${index + 1}`,
+        text,
+        translation: translated || text,
+        performance: reply.performance,
+      }];
     }).slice(0, 6);
     if (reactions.length) pack[zone] = reactions;
   });
@@ -612,8 +662,9 @@ export const parseAvatarTouchReactionPack = (
   raw: unknown,
   zones: AvatarTouchZone[],
   allowedModelActions: AvatarTouchModelAction[] = [],
+  voiceLanguage = '',
 ): AvatarTouchReactionPack | null => {
-  const pack = parseAvatarTouchReactionPackPartial(raw, zones, allowedModelActions);
+  const pack = parseAvatarTouchReactionPackPartial(raw, zones, allowedModelActions, voiceLanguage);
   return zones.every(zone => pack[zone]?.length) ? pack : null;
 };
 
@@ -625,6 +676,7 @@ export const requestAvatarTouchReactionPack = async (options: {
   modelActions?: AvatarTouchModelAction[];
   recentMessageLimit?: number;
   reactionsPerZone?: number;
+  voiceLanguage?: string;
 }): Promise<AvatarTouchReactionPack> => {
   const {
     character,
@@ -634,6 +686,7 @@ export const requestAvatarTouchReactionPack = async (options: {
     modelActions = [],
     recentMessageLimit = 28,
     reactionsPerZone = 4,
+    voiceLanguage = '',
   } = options;
   const selectedZones = [...new Set(zones)].filter(zone => AVATAR_TOUCH_ZONES.includes(zone));
   if (!selectedZones.length) throw new Error('请至少选择一个可触摸部位');
@@ -671,57 +724,46 @@ export const requestAvatarTouchReactionPack = async (options: {
     emojis,
   );
   const boundedReactionCount = Math.max(3, Math.min(6, reactionsPerZone));
-  const requestForZones = async (targetZones: AvatarTouchZone[], repair = false) => {
-    const systemPrompt = buildAvatarTouchReactionPackPrompt(
-      coreContext,
-      character.name,
-      user.name || '用户',
-      targetZones,
-      modelActions,
-      boundedReactionCount,
-    );
-    const repairText = repair
-      ? `[自动补全缺失部位] 上一次回复中只有部分内容可解析。现在只返回 ${targetZones.join(', ')} 的 JSON 对象，不要重复其他部位。`
-      : eventText;
-    return safeFetchJson(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiConfig.apiKey || 'sk-none'}`,
-      },
-      body: JSON.stringify({
-        model: apiConfig.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          ...apiMessages,
-          { role: 'user', content: repairText },
-        ],
-        temperature: repair ? 0.72 : 0.92,
-        max_tokens: repair ? 2200 : 3200,
-        stream: false,
-      }),
-    }, 1, 60_000, {
-      appName: '触感陪伴',
-      charId: character.id,
-      charName: character.name,
-      purpose: repair ? '自动补全缺失触摸反馈' : '一次性生成桌面触摸反馈包',
-    });
-  };
-
-  const firstData = await requestForZones(selectedZones);
-  const pack = parseAvatarTouchReactionPackPartial(firstData, selectedZones, modelActions);
-  const missingZones = selectedZones.filter(zone => !pack[zone]?.length);
-  if (missingZones.length) {
-    const repairData = await requestForZones(missingZones, true);
-    const repaired = parseAvatarTouchReactionPackPartial(repairData, missingZones, modelActions);
-    missingZones.forEach(zone => {
-      if (repaired[zone]?.length) pack[zone] = repaired[zone];
-    });
+  const systemPrompt = buildAvatarTouchReactionPackPrompt(
+    coreContext,
+    character.name,
+    user.name || '用户',
+    selectedZones,
+    modelActions,
+    boundedReactionCount,
+    voiceLanguage,
+  );
+  const data = await safeFetchJson(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiConfig.apiKey || 'sk-none'}`,
+    },
+    body: JSON.stringify({
+      model: apiConfig.model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...apiMessages,
+        { role: 'user', content: eventText },
+      ],
+      temperature: 0.92,
+      max_tokens: 4800,
+      stream: false,
+    }),
+  }, 0, 60_000, {
+    appName: '触感陪伴',
+    charId: character.id,
+    charName: character.name,
+    purpose: '一次性生成桌面触摸反馈包（不重试）',
+  });
+  const pack = parseAvatarTouchReactionPackPartial(data, selectedZones, modelActions, voiceLanguage);
+  const incompleteZones = selectedZones.filter(zone => (pack[zone]?.length || 0) < boundedReactionCount);
+  if (incompleteZones.length) {
+    const details = incompleteZones
+      .map(zone => `${avatarTouchZoneLabel(zone)} ${(pack[zone]?.length || 0)}/${boundedReactionCount}`)
+      .join('、');
+    throw new Error(`模型回复不完整：${details}。本次未保存，只请求了这一次`);
   }
-
-  const stillMissing = selectedZones.filter(zone => !pack[zone]?.length);
-  if (stillMissing.length) {
-    throw new Error(`模型两次回复都缺少这些部位：${stillMissing.map(avatarTouchZoneLabel).join('、')}。请重试一次`);
-  }
+  selectedZones.forEach(zone => { pack[zone] = pack[zone]!.slice(0, boundedReactionCount); });
   return pack;
 };

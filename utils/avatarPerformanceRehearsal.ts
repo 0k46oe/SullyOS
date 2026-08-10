@@ -83,6 +83,67 @@ export interface AvatarPerformanceRehearsalInput {
   }>;
 }
 
+export interface AvatarPerformanceSentence {
+  text: string;
+  at: number;
+}
+
+/** Shared sentence splitter for strict one-sentence/one-cue rehearsal. */
+export const splitAvatarPerformanceSentences = (raw: string): AvatarPerformanceSentence[] => {
+  const text = (raw || '').replace(/\r\n?/g, '\n').trim();
+  if (!text) return [];
+  const sentences: Array<{ text: string; start: number }> = [];
+  let start = 0;
+  const push = (end: number) => {
+    const chunk = text.slice(start, end);
+    const leading = chunk.search(/\S/);
+    const value = chunk.trim();
+    if (value) sentences.push({ text: value, start: start + Math.max(0, leading) });
+    start = end;
+  };
+  for (let index = 0; index < text.length; index += 1) {
+    if (!/[。！？!?；;\n]/.test(text[index])) continue;
+    let end = index + 1;
+    while (end < text.length && /[。！？!?；;\n]/.test(text[end])) end += 1;
+    push(end);
+    index = end - 1;
+  }
+  push(text.length);
+  const total = Math.max(1, text.length);
+  return sentences.slice(0, 12).map((sentence, index) => ({
+    text: sentence.text,
+    at: index === 0 ? 0 : Math.max(0, Math.min(0.98, sentence.start / total)),
+  }));
+};
+
+export const hasCompleteAvatarPerformanceCue = (cue: AvatarPerformanceCue | null | undefined): boolean => (
+  Boolean(cue?.direction && cue.endDirection)
+  && Number.isFinite(Number(cue?.holdMs))
+  && Number(cue?.holdMs) >= 120
+  && Number(cue?.holdMs) <= 5000
+);
+
+/** Strict packs are used by high-quality modes; old start-only data stays readable elsewhere. */
+export const isCompleteAvatarPerformanceCuePack = (
+  cues: readonly AvatarPerformanceCue[] | null | undefined,
+  expectedCount?: number,
+): cues is readonly AvatarPerformanceCue[] => (
+  Boolean(cues?.length)
+  && (!Number.isFinite(expectedCount) || cues!.length === Math.max(0, Math.floor(expectedCount!)))
+  && cues!.every(hasCompleteAvatarPerformanceCue)
+);
+
+export const alignAvatarPerformanceCuesToSentences = (
+  cues: readonly AvatarPerformanceCue[],
+  spokenText: string,
+): AvatarPerformanceCue[] => {
+  const sentences = splitAvatarPerformanceSentences(spokenText);
+  if (!sentences.length || cues.length !== sentences.length) {
+    throw new Error(`动作导演必须为每句话返回一个动作：需要 ${sentences.length} 个，实际 ${cues.length} 个；未保存，也不会重试`);
+  }
+  return cues.map((cue, index) => ({ ...cue, at: sentences[index].at }));
+};
+
 const compact = (value: string, maxLength: number): string => {
   const normalized = (value || '').trim();
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}\n[内容已截断]` : normalized;
@@ -112,6 +173,12 @@ ${personality.trim() || '（未提供额外性格描述，按自然克制的通�
 ## 本轮定稿输出
 ${compact(reply, 8_000)}
 
+## 逐句动作结构
+- 每句话只对应一个 cue，但 cue 内必须包含 start、hold_ms、end 三部分。
+- start 是开口时的起始动作；hold_ms 是中段保持时长，范围 120 到 5000 毫秒；end 是句末收尾动作。
+- 收尾不是机械回到默认站姿：应根据语气自然落住、移开视线、松开表情或回正身体，并为下一句话留出衔接。
+- 不要让 start 与 end 完全相同；不要在 start 与 end 中重复触发同一个一次性 model_action。
+
 如果输出同时含中文正文和 <语音> 翻译，它们是同一句话的两个版本，不是两段连续台词。按实际朗读时的语义节拍排练。
 
 ## 可用字段
@@ -128,8 +195,8 @@ ${modelActions.length ? `- model_actions: 可选数组，最多 3 个，只能�
 
 ## 排练原则
 - 先想这个角色会怎样自然地说出这句话，再安排脸、视线、身体和镜头；性格优先于炫技。
-- 平静台词保持克制；有明确转折时才增加拍点。通常 1 到 3 拍，最多 4 拍。
-- 第一拍 at 必须为 0；后续 at 是该动作在朗读进度中的起点，范围 0 到 1。
+- 平静台词保持克制；每句话固定一个 cue，动作变化写在 cue 内的 start → hold_ms → end，不要额外增加过场 cue。
+- 第一句 at 必须为 0；后续 at 是对应句子在朗读进度中的起点，范围 0 到 1。
 - close / push-in 只用于确实值得靠近的情绪重音；不要每句都拉镜头。
 - model_actions 是叠加层，不替代 emotion / gesture / face：选了专属表情仍要安排身体手势，选了身体动作仍要安排脸和视线。
 - 同一拍最多选一个 expression；只有不同 kind 或不同身体通道的动作才组合，禁止为了热闹堆动作，禁止编造 ID。
@@ -140,13 +207,25 @@ ${modelActions.length ? `- model_actions: 可选数组，最多 3 个，只能�
   "cues": [
     {
       "at": 0,
-      "emotion": "calm",
-      "gesture": "talk",
-      "face": [],
-      "camera": "medium",
-      "gaze": "viewer",
-      "intensity": 0.65,
-      "model_actions": []
+      "hold_ms": 900,
+      "start": {
+        "emotion": "calm",
+        "gesture": "talk",
+        "face": [],
+        "camera": "medium",
+        "gaze": "viewer",
+        "intensity": 0.65,
+        "model_actions": []
+      },
+      "end": {
+        "emotion": "relaxed",
+        "gesture": "idle",
+        "face": ["smile-eyes"],
+        "camera": "medium",
+        "gaze": "viewer",
+        "intensity": 0.45,
+        "model_actions": []
+      }
     }
   ]
 }`;
@@ -224,6 +303,7 @@ const normalizeDirection = (
 export const parseAvatarPerformanceRehearsal = (
   raw: string,
   allowedModelActionIds: string[] = [],
+  maxCues = 6,
 ): AvatarPerformanceCue[] | null => {
   const parsed = extractJson(raw);
   const rawCues = Array.isArray(parsed) ? parsed : parsed?.cues;
@@ -232,6 +312,10 @@ export const parseAvatarPerformanceRehearsal = (
   const allowedActions = new Map(
     allowedModelActionIds.map(id => [id.toLowerCase(), id]),
   );
+  const parsedCueCap = Number(maxCues);
+  const cueCap = Number.isFinite(parsedCueCap)
+    ? Math.max(1, Math.min(12, Math.floor(parsedCueCap)))
+    : 6;
   let previous = DEFAULT_AVATAR_PERFORMANCE;
   const cues: AvatarPerformanceCue[] = [];
   const ordered = rawCues
@@ -242,19 +326,28 @@ export const parseAvatarPerformanceRehearsal = (
       const bAt = Number.isFinite(b.at) ? b.at : (b.index === 0 ? 0 : 1);
       return aAt - bAt || a.index - b.index;
     })
-    .slice(0, 6);
+    .slice(0, cueCap);
 
   for (const entry of ordered) {
-    const nested = entry.item.direction;
-    const directionSource = nested && typeof nested === 'object' && !Array.isArray(nested)
-      ? nested as Record<string, unknown>
+    const nestedStart = entry.item.start ?? entry.item.direction;
+    const directionSource = nestedStart && typeof nestedStart === 'object' && !Array.isArray(nestedStart)
+      ? nestedStart as Record<string, unknown>
       : entry.item;
     const direction = normalizeDirection(directionSource, previous, allowedActions);
     if (!direction) continue;
-    previous = direction;
+    const nestedEnd = entry.item.end ?? entry.item.end_direction ?? entry.item.endDirection;
+    const endDirection = nestedEnd && typeof nestedEnd === 'object' && !Array.isArray(nestedEnd)
+      ? normalizeDirection(nestedEnd as Record<string, unknown>, direction, allowedActions) || undefined
+      : undefined;
+    const holdMsValue = Number(entry.item.hold_ms ?? entry.item.holdMs);
+    previous = endDirection || direction;
     cues.push({
       direction,
       at: Number.isFinite(entry.at) ? Math.max(0, Math.min(1, entry.at)) : (cues.length ? 1 : 0),
+      ...(endDirection ? { endDirection } : {}),
+      ...(Number.isFinite(holdMsValue)
+        ? { holdMs: Math.max(120, Math.min(5000, Math.round(holdMsValue))) }
+        : {}),
     });
   }
 

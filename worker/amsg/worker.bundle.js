@@ -3,7 +3,7 @@
 // worker/amsg/src/index.ts
 import { DurableObject } from "cloudflare:workers";
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.16/node_modules/@rei-standard/amsg-server/dist/chunk-34I2YSWE.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2_8704e95665f0a624df92ace6c1a67237/node_modules/@rei-standard/amsg-server/dist/chunk-34I2YSWE.mjs
 var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
   "user_id",
   "uuid",
@@ -817,7 +817,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.16/node_modules/@rei-standard/amsg-server/dist/chunk-KVHR3RCU.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2_8704e95665f0a624df92ace6c1a67237/node_modules/@rei-standard/amsg-server/dist/chunk-KVHR3RCU.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -7712,6 +7712,42 @@ var feishuGetDiaryByDate = async (appId, appSecret, baseId, tableId, characterNa
   }
 };
 
+// utils/networkFailureDiagnosis.ts
+var readError = (error) => {
+  if (error instanceof Error) return { name: error.name || "Error", message: error.message || String(error) };
+  if (error && typeof error === "object") {
+    const anyErr = error;
+    return {
+      name: typeof anyErr.name === "string" ? anyErr.name : "Error",
+      message: typeof anyErr.message === "string" ? anyErr.message : String(error)
+    };
+  }
+  return { name: "Error", message: String(error ?? "") };
+};
+var looksLikeNetworkError = (message) => /failed to fetch/i.test(message) || /load failed/i.test(message) || /networkerror/i.test(message) || /network request failed/i.test(message);
+var parseTargetUrl = (url, base) => {
+  try {
+    const parsed = new URL(url, base || (typeof location !== "undefined" ? location.href : void 0));
+    return { ok: true, origin: parsed.origin, host: parsed.host, protocol: parsed.protocol, href: parsed.href };
+  } catch {
+    return { ok: false, origin: "", host: "", protocol: "", href: url };
+  }
+};
+var isLoopbackHost = (host) => /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(host);
+var classifyFetchFailure = (ctx) => {
+  const { name, message } = readError(ctx.error);
+  if (name === "TimeoutError" || /timed?\s?out|timeout/i.test(message)) return "timeout";
+  if (name === "AbortError" || /aborted|abort/i.test(message)) return "aborted";
+  const target = parseTargetUrl(ctx.url);
+  if (!target.ok) return "bad-url";
+  const pageProtocol = ctx.pageProtocol ?? (typeof location !== "undefined" ? location.protocol : "");
+  if (pageProtocol === "https:" && target.protocol === "http:" && !isLoopbackHost(target.host)) return "mixed-content";
+  const online = ctx.online ?? (typeof navigator !== "undefined" ? navigator.onLine : true);
+  if (online === false) return "offline";
+  if (looksLikeNetworkError(message) || name === "TypeError") return "blocked";
+  return "unknown";
+};
+
 // utils/xhsMcpClient.ts
 var XHS_SPIDER_V3_EXPERIMENT = Object.freeze({
   optInValue: "spider-v3-isolated-cookie",
@@ -7724,6 +7760,7 @@ var detectMode = (serverUrl) => {
   return "mcp";
 };
 var liteCookie = "";
+var litePlatform = "auto";
 var resolveLiteCookie = () => {
   if (liteCookie) return liteCookie;
   try {
@@ -7732,6 +7769,15 @@ var resolveLiteCookie = () => {
   } catch {
   }
   return "";
+};
+var resolvePersistedLitePlatform = () => {
+  try {
+    const raw = localStorage.getItem("os_realtime_config");
+    const platform = raw ? JSON.parse(raw)?.xhsMcpConfig?.platform : void 0;
+    return platform === "xhs" || platform === "rednote" ? platform : "auto";
+  } catch {
+    return "auto";
+  }
 };
 var spiderStorage = () => {
   try {
@@ -7779,7 +7825,7 @@ var withSpiderCircuitError = (detail, message) => ({
 });
 var trySpiderV3CommentPatch = async (baseUrl, requestBody, cookie, detail) => {
   const storage = spiderStorage();
-  if (!storage || detail?.data?.comments_status === "loaded") {
+  if (!storage || detail?.data?.comments_status === "loaded" || detail?.platform === "rednote" || detail?.data?.platform === "rednote") {
     return detail;
   }
   const a1Tag = await spiderCookieTag(cookie);
@@ -7802,6 +7848,7 @@ var trySpiderV3CommentPatch = async (baseUrl, requestBody, cookie, detail) => {
       headers: {
         "Content-Type": "application/json",
         "x-xhs-cookie": cookie,
+        ...litePlatform !== "auto" ? { "x-xhs-platform": litePlatform } : {},
         "x-xhs-experiment-ack": XHS_SPIDER_V3_EXPERIMENT.optInValue
       },
       body: JSON.stringify({
@@ -7844,6 +7891,8 @@ var bridgePost = async (serverUrl, endpoint, body = {}) => {
   const headers = { "Content-Type": "application/json" };
   const ck = resolveLiteCookie();
   if (ck) headers["x-xhs-cookie"] = ck;
+  const requestPlatform = endpoint === "check-login" ? litePlatform : litePlatform === "auto" ? resolvePersistedLitePlatform() : litePlatform;
+  if (requestPlatform !== "auto") headers["x-xhs-platform"] = requestPlatform;
   try {
     const resp = await fetch(url, {
       method: "POST",
@@ -7860,6 +7909,10 @@ var bridgePost = async (serverUrl, endpoint, body = {}) => {
     let data = await resp.json();
     if (data.error) {
       return { success: false, error: data.error };
+    }
+    const detectedPlatform = data?.platform || data?.data?.platform;
+    if (detectedPlatform === "xhs" || detectedPlatform === "rednote") {
+      litePlatform = detectedPlatform;
     }
     if (endpoint === "get-feed-detail" && ck) {
       data = await trySpiderV3CommentPatch(baseUrl, body, ck, data);
@@ -8100,6 +8153,26 @@ var extractFirstXsecToken = (data) => {
   }
   return void 0;
 };
+var describeXhsConnectFailure = (e, serverUrl) => {
+  const host = parseTargetUrl(serverUrl).host || serverUrl;
+  const kind = classifyFetchFailure({ url: serverUrl, error: e });
+  switch (kind) {
+    case "timeout":
+      return `\u8FDE\u63A5 ${host} \u8D85\u65F6\uFF0810 \u79D2\u4E00\u4E2A\u5B57\u8282\u90FD\u6CA1\u56DE\uFF09\u3002\u8FDE\u63A5\u662F\u6302\u4F4F\u4E0D\u8FD4\u56DE\u3001\u4E0D\u662F\u88AB\u62D2\u2014\u2014\u591A\u534A\u662F\u8BE5\u57DF\u540D\u6CA1\u8D70\u4EE3\u7406\u8D70\u4E86\u76F4\u8FDE\uFF0C\u6216\u4EE3\u7406\u8282\u70B9\u5230\u4E0A\u6E38\u662F\u9ED1\u6D1E\u3002\u4F18\u5148\u6362\u4E2A\u68AF\u5B50\u8282\u70B9\u3001\u6216\u628A\u8FD9\u4E2A\u57DF\u540D\u663E\u5F0F\u52A0\u8FDB\u4EE3\u7406\u89C4\u5219\u3002`;
+    case "aborted":
+      return "\u8FDE\u63A5\u88AB\u53D6\u6D88\uFF08\u9875\u9762\u5207\u8D70\u4E86\u6216\u624B\u52A8\u505C\u6B62\uFF09\u3002";
+    case "offline":
+      return "\u5F53\u524D\u5904\u4E8E\u79BB\u7EBF\u72B6\u6001\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u6216\u68AF\u5B50\u662F\u5426\u6389\u7EBF\u3002";
+    case "mixed-content":
+      return `SullyOS \u8DD1\u5728 https \u4E0A\uFF0C\u4E0D\u80FD\u8FDE http \u5730\u5740\uFF08${host}\uFF09\u3002\u8BF7\u628A\u670D\u52A1\u5730\u5740\u6539\u6210 https://\uFF0C\u6216\u7528\u672C\u5730 http \u6253\u5F00 SullyOS\u3002`;
+    case "bad-url":
+      return `\u670D\u52A1\u5668\u5730\u5740\u4E0D\u662F\u5408\u6CD5 URL\uFF1A${serverUrl}\u3002\u68C0\u67E5\u6709\u6CA1\u6709\u6F0F\u6389 https://\u3001\u591A\u4E86\u7A7A\u683C\u6216\u7528\u4E86\u4E2D\u6587\u6807\u70B9\u3002`;
+    case "blocked":
+      return `\u8FDE\u4E0D\u4E0A ${host}\uFF1A\u6D4F\u89C8\u5668\u5728\u62FF\u5230\u54CD\u5E94\u524D\u5C31\u5931\u8D25\u4E86\u3002\u5E38\u89C1\u539F\u56E0\u2014\u2014\u68AF\u5B50/\u4EE3\u7406\u62E6\u4E86\u8FD9\u4E2A\u57DF\u540D\u3001DNS \u89E3\u6790\u4E0D\u5230\u3001\u6D4F\u89C8\u5668\u6269\u5C55\uFF08\u5E7F\u544A\u62E6\u622A/\u9690\u79C1\u76FE\uFF09\u5C4F\u853D\u4E86\uFF0C\u6216\u5BF9\u65B9\u6B63\u8FD4\u56DE\u9650\u6D41/\u4EBA\u673A\u9A8C\u8BC1\u9875\u3002\u53EF\u5728\u65B0\u6807\u7B7E\u9875\u76F4\u63A5\u6253\u5F00 ${serverUrl.replace(/\/+$/, "")}/health \u9A8C\u8BC1\uFF1B\u8BE6\u7EC6\u65C1\u8BC1\u89C1\u300C\u7CFB\u7EDF\u8C03\u8BD5\u7EC8\u7AEF\u300D\u3002`;
+    default:
+      return e?.message || "\u8FDE\u63A5\u5931\u8D25";
+  }
+};
 var XhsMcpClient = {
   resetSession: () => {
     mcpSessionId = null;
@@ -8109,19 +8182,23 @@ var XhsMcpClient = {
   },
   // Lite Worker auth: register the XHS cookie used for x-xhs-cookie header.
   setCookie: (cookie) => {
-    liteCookie = cookie || "";
+    const nextCookie = cookie || "";
+    if (nextCookie !== liteCookie) litePlatform = "auto";
+    liteCookie = nextCookie;
   },
   testConnection: async (serverUrl, cookie) => {
-    if (cookie !== void 0) liteCookie = cookie;
+    if (cookie !== void 0) XhsMcpClient.setCookie(cookie);
     const mode = detectMode(serverUrl);
     if (mode === "bridge") {
       try {
         const baseUrl = serverUrl.replace(/\/+$/, "").replace(/\/api$/, "");
-        const healthResp = await fetch(`${baseUrl}/api/health`);
+        const healthResp = await fetch(`${baseUrl}/api/health`, {
+          signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(1e4) : void 0
+        });
         if (!healthResp.ok) return { connected: false, error: `Bridge \u670D\u52A1\u672A\u54CD\u5E94 (HTTP ${healthResp.status})` };
         const loginResult = await bridgePost(serverUrl, "check-login");
         const tools = ["check-login", "search", "list-feeds", "get-feed-detail", "publish", "publish-video", "long-article", "post-comment", "reply-comment", "like-feed", "favorite-feed", "user-profile", "login", "get-qrcode"];
-        let loggedIn = false, nickname, userId;
+        let loggedIn = false, nickname, userId, platform;
         if (loginResult.success && loginResult.data) {
           const d = loginResult.data;
           if (typeof d === "string") {
@@ -8134,6 +8211,7 @@ var XhsMcpClient = {
             loggedIn = !!(d.logged_in || d.loggedIn || d.is_logged_in || d.isLoggedIn || d.logged);
             nickname = d.nickname || d.name || d.username || d.user_name || void 0;
             userId = d.user_id || d.userId || d.id || d.red_id || void 0;
+            platform = d.platform === "xhs" || d.platform === "rednote" ? d.platform : void 0;
           }
         }
         let xsecToken;
@@ -8144,9 +8222,9 @@ var XhsMcpClient = {
           } catch {
           }
         }
-        return { connected: true, tools, nickname, userId, loggedIn, xsecToken };
+        return { connected: true, tools, nickname, userId, loggedIn, xsecToken, platform };
       } catch (e) {
-        return { connected: false, error: e.message };
+        return { connected: false, error: describeXhsConnectFailure(e, serverUrl) };
       }
     }
     try {

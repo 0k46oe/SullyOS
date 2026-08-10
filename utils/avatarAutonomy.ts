@@ -101,7 +101,7 @@ export class AvatarAutonomy {
   private behaviorKey = '';
   private focusStartedAt = 0;
   private phase: number;
-  private pose: AvatarAutonomyPose = 'turn';
+  private pose: AvatarAutonomyPose = 'settle';
   private target: PoseTarget;
   private headX = new Spring();
   private headY = new Spring();
@@ -131,20 +131,19 @@ export class AvatarAutonomy {
     blink: 0,
     speechAccent: 0,
     gestureEnvelope: 0,
-    pose: 'turn',
+    pose: 'settle',
   };
 
   constructor(now = globalThis.performance?.now?.() ?? Date.now(), random: () => number = Math.random) {
     this.random = random;
     this.phase = this.randomBetween(0, Math.PI * 2);
-    const side = this.randomSign();
     this.lastTime = now;
     this.target = {
-      headX: side * this.randomBetween(0.22, 0.36),
-      headY: this.randomBetween(-0.06, 0.12),
-      headZ: -side * this.randomBetween(0.04, 0.1),
-      eyeX: side * this.randomBetween(0.38, 0.62),
-      eyeY: this.randomBetween(-0.12, 0.14),
+      headX: 0,
+      headY: 0,
+      headZ: 0,
+      eyeX: 0,
+      eyeY: 0,
       lean: 0,
     };
     this.nextDecisionAt = now + this.randomBetween(2_200, 3_400);
@@ -468,6 +467,7 @@ export class AvatarAutonomy {
       targetHeadY = targetHeadY * 0.62 + pointer.y * 0.12;
     }
 
+    let precisionPoseFactor = 1;
     if (precision) {
       const settleMs = Math.max(320, Math.min(2_400, precision.settleMs ?? 920));
       const phase = clamp((now - this.focusStartedAt) / settleMs, 0, 1);
@@ -476,6 +476,7 @@ export class AvatarAutonomy {
       const poseFactor = phase < 0.62
         ? (1 + overshoot) * smooth(phase / 0.62)
         : 1 + overshoot * (1 - smooth((phase - 0.62) / 0.38));
+      precisionPoseFactor = poseFactor;
       targetHeadX = (precision.headX ?? 0) * poseFactor;
       targetHeadY = (precision.headY ?? 0) * poseFactor;
       targetHeadZ = (precision.headZ ?? 0) * poseFactor;
@@ -575,6 +576,14 @@ export class AvatarAutonomy {
           targetHeadY += 0.06 * gestureEnvelope;
         }
       }
+    }
+
+    // Strong authored locks (used throughout startup speech) win over every
+    // gesture/emotion head accent. Body, face and arm animation may continue.
+    if (precision?.lockHead) {
+      targetHeadX = (precision.headX ?? 0) * precisionPoseFactor;
+      targetHeadY = (precision.headY ?? 0) * precisionPoseFactor;
+      targetHeadZ = (precision.headZ ?? 0) * precisionPoseFactor;
     }
 
     const touchSpeed = this.reaction?.profile === 'touch';

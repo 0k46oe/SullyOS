@@ -4,8 +4,10 @@ import type { CharacterProfile } from '../../types';
 import { getAvatarModelBlob } from '../../utils/avatarModelStore';
 import {
   clampStageFraming,
+  DEFAULT_STAGE_CROP,
   DEFAULT_STAGE_FRAMING,
   type AvatarPerformanceDirection,
+  type AvatarStageCrop,
   type AvatarStageFraming,
 } from '../../utils/avatarPerformance';
 import type { CallAudioFeed } from '../../utils/callAudioFeed';
@@ -24,6 +26,8 @@ interface VRMVideoCallStageProps {
   motionState: AvatarMotionState;
   emotion?: string;
   audioFeed?: CallAudioFeed;
+  /** External hard lock used by companion startup; independent from performance cues. */
+  headMotionLocked?: boolean;
   performance?: AvatarPerformanceDirection;
   performanceQuality?: 'basic' | 'high';
   accentColor: string;
@@ -39,15 +43,25 @@ interface VRMVideoCallStageProps {
   onFaceAnchorChange?: (framing: AvatarStageFraming | null) => void;
   /** VRM 模型加载后回传自定义表情名，供 LLM 的 model_action 白名单使用。 */
   onExpressionsDiscovered?: (names: string[]) => void;
+  /** Fired only after the renderable model has completed loading. */
+  onModelReady?: () => void;
+  /** Lets the companion desktop uncover the stage instead of trapping an error behind its loading curtain. */
+  onModelError?: (message: string) => void;
   onAvatarTouch?: (hit: AvatarTouchHit) => void;
   /** Changes only for explicit companion touches; call ambience never sets it. */
   touchImpulseNonce?: number;
+  /** Explicit user-only Live2D action, used by the companion wardrobe. */
+  externalManualAction?: Live2DActionTrigger | null;
   /** Minimal chrome for the always-on launcher companion. */
   companionMode?: boolean;
   /** 基准构图覆盖：陪伴桌面传 companionFraming，优先于 model.framing 作为静息构图。 */
   baseFraming?: AvatarStageFraming;
   /** 布置模式：companionMode 下重新启用拖拽/捏合/滚轮调构图（默认 = !companionMode）。 */
   framingEditable?: boolean;
+  /** Optional companion-only mask. Insets are percentages of the full stage. */
+  stageCrop?: AvatarStageCrop;
+  /** Shows the exact crop window while the desktop composition editor is open. */
+  showCropGuide?: boolean;
   maxFps?: number;
 }
 
@@ -72,6 +86,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
   motionState,
   emotion,
   audioFeed,
+  headMotionLocked = false,
   performance,
   performanceQuality = 'basic',
   accentColor,
@@ -84,10 +99,15 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
   onFaceAnchorChange,
   onExpressionsDiscovered,
   onAvatarTouch,
+  onModelReady,
+  onModelError,
   touchImpulseNonce,
+  externalManualAction,
   companionMode = false,
   baseFraming,
   framingEditable,
+  stageCrop = DEFAULT_STAGE_CROP,
+  showCropGuide = false,
   maxFps,
 }) => {
   const canAdjustFraming = framingEditable ?? !companionMode;
@@ -192,6 +212,11 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
   const framingAdjusted = Math.abs(framing.scale - 1) > 0.02
     || Math.abs(framing.offsetX) > 0.01
     || Math.abs(framing.offsetY) > 0.01;
+  const cropAdjusted = stageCrop.top > 0.001
+    || stageCrop.right > 0.001
+    || stageCrop.bottom > 0.001
+    || stageCrop.left > 0.001;
+  const cropInset = `${stageCrop.top * 100}% ${stageCrop.right * 100}% ${stageCrop.bottom * 100}% ${stageCrop.left * 100}%`;
 
   const handleStagePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if ((event.target as HTMLElement).closest('button, video')) return;
@@ -302,12 +327,17 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
       if (cancelled) return;
       if (!blob) {
         setModelMissing(true);
+        onModelError?.('模型文件已丢失，请重新导入');
         return;
       }
       url = URL.createObjectURL(blob);
       setModelUrl(url);
     }).catch(error => {
-      if (!cancelled) setModelError(error instanceof Error ? error.message : '模型读取失败');
+      if (!cancelled) {
+        const message = error instanceof Error ? error.message : '模型读取失败';
+        setModelError(message);
+        onModelError?.(message);
+      }
     });
 
     return () => {
@@ -341,14 +371,15 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
       return;
     }
     setModelError(message);
+    onModelError?.(message);
   };
 
   const hasRenderableModel = Boolean(model && !modelError && (model.format === 'live2d' || modelUrl));
 
   return (
     <div
-      className={`relative h-full w-full overflow-hidden ${companionMode ? '' : 'rounded-[1.6rem] border border-white/10 bg-[#080a10]'}`}
-      style={companionMode ? undefined : { boxShadow: `inset 0 1px 0 ${accentColor}33, 0 18px 50px rgba(0,0,0,.36)` }}
+      className={`relative h-full w-full overflow-hidden ${companionMode ? '' : 'rounded-[1.9rem] border border-white/15 bg-[#080a10]'}`}
+      style={companionMode ? undefined : { boxShadow: `inset 0 1px 0 ${accentColor}48, inset 0 -1px 0 ${accentColor}24, 0 18px 50px rgba(0,0,0,.36), 0 0 28px ${accentColor}12` }}
       data-avatar-emotion={performance?.emotion || emotion || 'calm'}
       data-avatar-gesture={performance?.gesture || 'talk'}
       data-avatar-camera={performance?.camera || 'medium'}
@@ -358,7 +389,15 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
       <style>{`
         @keyframes vrm-stage-drift { 0%,100% { transform: translate3d(0,0,0) scale(1.02) } 50% { transform: translate3d(0,-5px,0) scale(1.025) } }
         @keyframes vrm-stage-arrive { from { opacity:0; transform:scale(1.035) } to { opacity:1; transform:scale(1) } }
+        @keyframes companion-stage-fade { from { opacity:0 } to { opacity:1 } }
       `}</style>
+      {!companionMode && (
+        <>
+          <div className="pointer-events-none absolute inset-x-[18%] top-0 z-20 h-px" style={{ background: `linear-gradient(90deg, transparent, ${accentColor}cc, transparent)` }} />
+          <span className="pointer-events-none absolute left-4 top-12 z-20 text-[7px]" style={{ color: `${accentColor}c9` }} aria-hidden>✦</span>
+          <span className="pointer-events-none absolute bottom-4 right-4 z-20 text-[6px] text-white/55" aria-hidden>✦</span>
+        </>
+      )}
       {backgroundUrl ? (
         <>
           <div className="absolute inset-0 bg-cover bg-center" style={{ backgroundImage: `url(${backgroundUrl})` }} />
@@ -377,7 +416,12 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
         <div
           ref={stageBoxRef}
           className="absolute inset-0 touch-none"
-          style={{ animation: 'vrm-stage-arrive 520ms ease-out both' }}
+          style={{
+            animation: companionMode
+              ? 'companion-stage-fade 180ms ease-out both'
+              : 'vrm-stage-arrive 520ms ease-out both',
+            clipPath: cropAdjusted ? `inset(${cropInset} round 1.4rem)` : undefined,
+          }}
           onPointerDown={handleStagePointerDown}
           onPointerMove={handleStagePointerMove}
           onPointerUp={handleStagePointerEnd}
@@ -390,15 +434,18 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
               config={model}
               motionState={motionState}
               audioFeed={audioFeed}
+              headMotionLocked={headMotionLocked}
+              ambientAutonomyDisabled={companionMode}
               framing={framing}
               faceFraming={calibratingFace ? undefined : model.faceFraming}
               performance={performance}
               performanceQuality={performanceQuality}
-              manualAction={manualAction}
+              manualAction={externalManualAction || manualAction}
               touchRequest={touchRequest}
               touchImpulseNonce={touchImpulseNonce}
               onAvatarTouch={onAvatarTouch}
               maxFps={maxFps}
+              onReady={onModelReady}
               onLoadingChange={(loading, stage) => {
                 setModelLoading(loading);
                 if (stage) setModelLoadingStage(stage);
@@ -411,6 +458,8 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
               motionState={motionState}
               emotion={emotion}
               audioFeed={audioFeed}
+              headMotionLocked={headMotionLocked}
+              ambientAutonomyDisabled={companionMode}
               framing={framing}
               faceFraming={calibratingFace ? undefined : model?.faceFraming}
               performance={performance}
@@ -419,35 +468,39 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
               onAvatarTouch={onAvatarTouch}
               maxFps={maxFps}
               onLoadingChange={setModelLoading}
-              onError={setModelError}
+              onError={message => {
+                setModelError(message);
+                if (message) onModelError?.(message);
+              }}
               onExpressionsDiscovered={onExpressionsDiscovered}
+              onReady={onModelReady}
             />
           )}
         </div>
       ) : (
         <div className="absolute inset-0 flex flex-col items-center justify-center px-8 text-center">
           {fallbackAvatar ? (
-            <div className="relative h-36 w-36 overflow-hidden rounded-full border border-white/15" style={{ animation: 'vrm-stage-drift 5.5s ease-in-out infinite', boxShadow: `0 0 55px ${accentColor}4d` }}>
+            <div className={`relative overflow-hidden rounded-full border border-white/15 ${companionMode ? 'h-36 w-36' : 'h-20 w-20'}`} style={{ animation: 'vrm-stage-drift 5.5s ease-in-out infinite', boxShadow: `0 0 55px ${accentColor}4d` }}>
               <img src={fallbackAvatar} alt={characterName} className="h-full w-full object-cover" />
             </div>
           ) : (
             <div className="flex h-28 w-28 items-center justify-center rounded-full border border-white/15 text-5xl font-light" style={{ background: `${accentColor}22`, color: accentColor }}>{characterName[0] || '角'}</div>
           )}
-          <div className="mt-5 text-sm font-medium text-white/85">
+          <div className={`${companionMode ? 'mt-5' : 'mt-3'} text-sm font-medium text-white/85`}>
             {modelMissing ? '模型文件已丢失，需要重新导入' : modelError ? '模型暂时加载失败' : '给这个角色装上视频模型'}
           </div>
           <p className="mt-1.5 max-w-[17rem] text-xs leading-relaxed text-white/45">
             {modelError && !modelMissing ? '模型仍保存在本地，可以直接重新建立渲染，不必重复导入。' : '支持 VRM 0.x / 1.0，以及 Cubism model3.json 文件夹或 ZIP。'}
           </p>
           {model?.format === 'live2d' && modelError && !modelMissing ? (
-            <div className="mt-4 flex items-center gap-2">
+            <div className={`${companionMode ? 'mt-4' : 'mt-2.5'} flex items-center gap-2`}>
               <button onClick={retryLive2D} className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-4 py-2.5 text-[11px] font-medium text-white transition active:scale-95">
                 <ArrowClockwise size={15} weight="bold" /> 重新加载模型
               </button>
               <button onClick={onChooseModel} className="px-2 py-2 text-[10px] text-white/40">重新导入</button>
             </div>
           ) : onChooseLive2DFolder ? (
-            <div className="mt-4 grid w-full max-w-[18rem] grid-cols-1 gap-2 sm:grid-cols-2">
+            <div className={`${companionMode ? 'mt-4' : 'mt-2.5'} grid w-full max-w-[18rem] grid-cols-1 gap-2 sm:grid-cols-2`}>
               <button onClick={onChooseModel} className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/10 px-3 py-2.5 text-[11px] font-medium text-white transition active:scale-95">
                 <FileZip size={15} weight="bold" /> VRM / L2D ZIP
               </button>
@@ -461,6 +514,25 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
               <UploadSimple size={15} weight="bold" /> 导入模型
             </button>
           )}
+        </div>
+      )}
+
+      {showCropGuide && hasRenderableModel && (
+        <div
+          className="pointer-events-none absolute z-[26] border border-dashed border-white/70"
+          style={{
+            inset: cropInset,
+            borderRadius: '1.4rem',
+            boxShadow: `0 0 0 999px rgba(3,4,9,.34), inset 0 0 0 1px ${accentColor}88`,
+          }}
+          data-testid="companion-crop-guide"
+          aria-hidden
+        >
+          <span className="absolute -left-px -top-px h-5 w-5 rounded-tl-[1.4rem] border-l-2 border-t-2" style={{ borderColor: accentColor }} />
+          <span className="absolute -right-px -top-px h-5 w-5 rounded-tr-[1.4rem] border-r-2 border-t-2" style={{ borderColor: accentColor }} />
+          <span className="absolute -bottom-px -left-px h-5 w-5 rounded-bl-[1.4rem] border-b-2 border-l-2" style={{ borderColor: accentColor }} />
+          <span className="absolute -bottom-px -right-px h-5 w-5 rounded-br-[1.4rem] border-b-2 border-r-2" style={{ borderColor: accentColor }} />
+          <span className="absolute left-3 top-3 rounded-full border border-white/20 bg-black/55 px-2 py-1 text-[8px] tracking-[0.14em] text-white/75 backdrop-blur">角色可视区</span>
         </div>
       )}
 
@@ -558,7 +630,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
                     <span className="text-[8px] text-white/25">高级</span>
                   </button>
                 )}
-                {model?.format === 'live2d' && model.actions.some(action => action.permission !== 'blocked') && (
+                {model?.format === 'live2d' && model.actions.some(action => action.permission !== 'blocked' && !action.wardrobe) && (
                   <button
                     onClick={() => { toggleActionChips(); setStageToolsOpen(false); }}
                     data-live2d-chips-toggle
@@ -566,7 +638,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
                   >
                     <Play size={13} weight="fill" className="text-white/35" />
                     <span className="flex-1">{actionChipsOpen ? '收起手动动作' : '展开手动动作'}</span>
-                    <span className="text-[8px] text-white/25">{model.actions.filter(action => action.permission !== 'blocked').length}</span>
+                    <span className="text-[8px] text-white/25">{model.actions.filter(action => action.permission !== 'blocked' && !action.wardrobe).length}</span>
                   </button>
                 )}
                 <button
@@ -582,7 +654,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
         </div>
       )}
 
-      {!companionMode && actionChipsOpen && model?.format === 'live2d' && model.actions.some(action => action.permission !== 'blocked') && (
+      {!companionMode && actionChipsOpen && model?.format === 'live2d' && model.actions.some(action => action.permission !== 'blocked' && !action.wardrobe) && (
         <div className="absolute inset-x-3 bottom-3 z-30 flex items-center gap-1.5">
           <button
             onClick={toggleActionChips}
@@ -592,7 +664,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
             <CaretDown size={10} weight="bold" />
           </button>
           <div className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
-            {model.actions.filter(action => action.permission !== 'blocked').map(action => (
+            {model.actions.filter(action => action.permission !== 'blocked' && !action.wardrobe).map(action => (
               <button
                 key={action.id}
                 data-live2d-manual-action={action.id}

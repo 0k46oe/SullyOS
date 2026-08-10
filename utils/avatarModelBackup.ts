@@ -133,7 +133,10 @@ export const getAvatarModelBackupInventory = async (): Promise<AvatarModelBackup
 
   for (const character of characters) {
     const config = character.videoAvatar;
-    if (!config) continue;
+    // Built-in Sully ships with the application and has no IndexedDB blob to
+    // back up. Character framing/quality preferences remain in the normal data
+    // backup, while this archive stays focused on user-imported binaries.
+    if (!config || (config.format === 'live2d' && config.builtIn)) continue;
     const blob = await DB.getBlobAsset(config.assetId);
     models.push({
       characterId: character.id,
@@ -156,8 +159,11 @@ export const getAvatarModelBackupInventory = async (): Promise<AvatarModelBackup
 export const createAvatarModelBackup = async (
   onProgress?: (progress: AvatarModelBackupProgress) => void,
 ): Promise<Blob> => {
-  const characters = (await DB.getAllCharacters()).filter(character => Boolean(character.videoAvatar));
-  if (!characters.length) throw new Error('当前没有已导入的 VRM / Live2D 模型。');
+  const characters = (await DB.getAllCharacters()).filter(character => {
+    const config = character.videoAvatar;
+    return Boolean(config && !(config.format === 'live2d' && config.builtIn));
+  });
+  if (!characters.length) throw new Error('当前没有需要备份的自定义模型；Sully 内置模型会随应用自动提供。');
 
   const zip = new JSZip();
   const models: AvatarModelManifestEntry[] = [];

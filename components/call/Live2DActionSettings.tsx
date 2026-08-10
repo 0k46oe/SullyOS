@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, HandTap, PencilSimple, Play, Plus, Prohibit, Robot, Trash, X } from '@phosphor-icons/react';
+import { Check, HandTap, PencilSimple, Play, Plus, Prohibit, Robot, Trash, TShirt, X } from '@phosphor-icons/react';
 import { inferLive2DActionTags, type Live2DAction, type Live2DActionPermission, type Live2DAvatarConfig } from '../../utils/live2dModelStore';
 import {
   describeLive2DParameter,
@@ -7,11 +7,13 @@ import {
   live2DParameterPosition,
 } from '../../utils/live2dParameterSemantics';
 import Live2DAvatarCanvas, { type Live2DActionTrigger, type Live2DParameterInfo } from './Live2DAvatarCanvas';
+import { BUILTIN_SULLY_DEFAULT_FRAMING, isBuiltinSullyLive2D } from '../../utils/builtinSullyLive2D';
 
 interface Live2DActionSettingsProps {
   config: Live2DAvatarConfig;
   characterName: string;
   accentColor: string;
+  setupMode?: 'import' | 'advanced';
   onSave: (config: Live2DAvatarConfig) => void;
   onClose: () => void;
 }
@@ -30,10 +32,14 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
   config,
   characterName,
   accentColor,
+  setupMode = 'advanced',
   onSave,
   onClose,
 }) => {
-  const [actions, setActions] = useState(config.actions);
+  const defaultFraming = isBuiltinSullyLive2D(config)
+    ? { ...BUILTIN_SULLY_DEFAULT_FRAMING }
+    : { scale: 1, offsetX: 0, offsetY: 0 };
+  const [actions, setActions] = useState(() => config.actions.map(action => action.wardrobe ? { ...action, permission: 'manual' as const } : action));
   const [previewAction, setPreviewAction] = useState<Live2DActionTrigger | null>(null);
   const [previewError, setPreviewError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -49,7 +55,7 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
   const previewReturnTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    setActions(config.actions);
+    setActions(config.actions.map(action => action.wardrobe ? { ...action, permission: 'manual' as const } : action));
     setFraming(config.framing || { scale: 1, offsetX: 0, offsetY: 0 });
   }, [config.assetId, config.actions, config.framing]);
 
@@ -90,7 +96,17 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
     : null;
 
   const setPermission = (id: string, permission: Live2DActionPermission) => {
-    setActions(current => current.map(action => action.id === id ? { ...action, permission } : action));
+    setActions(current => current.map(action => {
+      if (action.id !== id) return action;
+      if (action.wardrobe && permission !== 'manual') return action;
+      return { ...action, permission };
+    }));
+  };
+
+  const toggleWardrobe = (id: string) => {
+    setActions(current => current.map(action => action.id === id
+      ? { ...action, wardrobe: !action.wardrobe, permission: 'manual' as const }
+      : action));
   };
 
   const previewDraft = (force = false) => {
@@ -166,22 +182,30 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
   };
 
   const counts = useMemo(() => ({
-    ai: actions.filter(action => action.permission === 'ai').length,
+    ai: actions.filter(action => action.permission === 'ai' && !action.wardrobe).length,
     manual: actions.filter(action => action.permission === 'manual').length,
     blocked: actions.filter(action => action.permission === 'blocked').length,
+    wardrobe: actions.filter(action => action.wardrobe).length,
   }), [actions]);
 
   return (
     <div className="absolute inset-0 z-[90] flex flex-col bg-[#08070d]/95 text-white backdrop-blur-xl">
       <div className="flex shrink-0 items-center justify-between border-b border-white/10 px-5 pb-3" style={{ paddingTop: 'max(1.25rem, var(--safe-top))' }}>
         <div className="min-w-0">
-          <div className="text-[10px] tracking-[0.2em] text-white/35">LIVE2D ACTION LIBRARY · ADVANCED</div>
-          <h2 className="mt-1 truncate text-lg font-semibold">{characterName} · 动作库</h2>
+          <div className="text-[10px] tracking-[0.2em] text-white/35">{setupMode === 'import' ? 'LIVE2D IMPORT · WARDROBE SETUP' : 'LIVE2D ACTION LIBRARY · ADVANCED'}</div>
+          <h2 className="mt-1 truncate text-lg font-semibold">{characterName} · {setupMode === 'import' ? '标记服装动作' : '动作库'}</h2>
         </div>
         <button onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-white/65 active:scale-90" aria-label="关闭">
           <X size={17} weight="bold" />
         </button>
       </div>
+
+      {setupMode === 'import' && (
+        <div className="mx-4 mt-3 shrink-0 border-l-4 border-fuchsia-300 bg-fuchsia-300/10 px-3 py-2.5" data-testid="live2d-wardrobe-onboarding">
+          <div className="flex items-center gap-2 text-[11px] font-semibold text-fuchsia-100"><TShirt size={15} weight="fill" /> 哪些按键会切换服装？</div>
+          <p className="mt-1 text-[9px] leading-relaxed text-white/48">先点左侧播放确认效果，再勾选「加入衣橱」。服装动作会强制设为仅手动，AI 永远看不到也不能私自替换。</p>
+        </div>
+      )}
 
       <div className="shrink-0 px-4 pt-3">
         <div className="relative h-[min(31vh,250px)] min-h-[180px] overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-b from-[#171322] to-[#090810]">
@@ -259,7 +283,7 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
               onClick={() => setFraming({ scale: 5.4, offsetX: 0, offsetY: 2.15 })}
               className="rounded-full border border-violet-300/20 bg-violet-400/10 px-2 py-1 text-[9px] text-violet-200"
             >贴脸</button>
-            <button onClick={() => setFraming({ scale: 1, offsetX: 0, offsetY: 0 })} className="px-1 text-[9px] text-white/35">恢复默认</button>
+            <button onClick={() => setFraming(defaultFraming)} className="px-1 text-[9px] text-white/35">恢复默认</button>
           </div>
         </div>
         {([
@@ -288,6 +312,7 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
         <span className="shrink-0 rounded-full bg-violet-400/15 px-2.5 py-1 text-[10px] text-violet-200">AI {counts.ai}</span>
         <span className="shrink-0 rounded-full bg-sky-400/15 px-2.5 py-1 text-[10px] text-sky-200">手动 {counts.manual}</span>
         <span className="shrink-0 rounded-full bg-rose-400/15 px-2.5 py-1 text-[10px] text-rose-200">禁用 {counts.blocked}</span>
+        <span className="shrink-0 rounded-full bg-fuchsia-400/15 px-2.5 py-1 text-[10px] text-fuchsia-100">衣橱 {counts.wardrobe}</span>
         <button
           onClick={() => openCustomDraft()}
           disabled={!modelParameters.length}
@@ -298,11 +323,11 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
         </button>
         <span className="min-w-4 flex-1" />
         <button onClick={() => setActions(current => current.map(action => ({ ...action, permission: 'manual' })))} className="shrink-0 text-[10px] text-white/45">全部仅手动</button>
-        <button onClick={() => setActions(current => current.map(action => ({ ...action, permission: 'blocked' })))} className="shrink-0 text-[10px] text-rose-300/65">全部禁用</button>
+        <button onClick={() => setActions(current => current.map(action => action.wardrobe ? { ...action, permission: 'manual' } : { ...action, permission: 'blocked' }))} className="shrink-0 text-[10px] text-rose-300/65">其余禁用</button>
       </div>
 
       <p className="shrink-0 px-4 pb-2 text-[9px] leading-relaxed text-white/35">
-        模型原生表情和非待机动作已自动交给 AI；这里是高级覆盖，只在你想限制、禁用或自建参数动作时使用。
+        衣橱动作始终只允许用户手动切换；其余模型表情和非待机动作可按权限交给 AI。
       </p>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-3 no-scrollbar">
@@ -313,7 +338,7 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
         ) : (
           <div className="space-y-2">
             {actions.map(action => (
-              <div key={action.id} data-live2d-action-id={action.id} className="rounded-2xl border border-white/10 bg-white/[0.045] p-3">
+              <div key={action.id} data-live2d-action-id={action.id} data-live2d-wardrobe={action.wardrobe ? 'true' : 'false'} className={`rounded-2xl border p-3 ${action.wardrobe ? 'border-fuchsia-300/35 bg-fuchsia-300/[0.07]' : 'border-white/10 bg-white/[0.045]'}`}>
                 <div className="flex items-center gap-3">
                   <button
                     onClick={() => setPreviewAction({ id: action.id, nonce: Date.now() + Math.random() })}
@@ -354,6 +379,14 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
                     </div>
                   )}
                 </div>
+                <button
+                  type="button"
+                  onClick={() => toggleWardrobe(action.id)}
+                  className={`mt-2.5 flex w-full items-center justify-between border px-3 py-2 text-left text-[10px] transition active:scale-[.99] ${action.wardrobe ? 'border-fuchsia-300/35 bg-fuchsia-300/15 text-fuchsia-100' : 'border-white/8 bg-black/15 text-white/42'}`}
+                >
+                  <span className="flex items-center gap-2"><TShirt size={13} weight={action.wardrobe ? 'fill' : 'regular'} /> {action.wardrobe ? '已加入真·衣橱' : '这是服装切换动作'}</span>
+                  <span>{action.wardrobe ? '仅手动' : '加入'}</span>
+                </button>
                 <div className="mt-2.5 grid grid-cols-3 gap-1 rounded-xl bg-black/20 p-1">
                   {permissionOptions.map(({ value, label, Icon }) => {
                     const selected = action.permission === value;
@@ -362,7 +395,8 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
                         key={value}
                         data-live2d-permission={value}
                         onClick={() => setPermission(action.id, value)}
-                        className={`flex items-center justify-center gap-1 rounded-lg py-1.5 text-[10px] transition ${selected ? 'text-white' : 'text-white/35'}`}
+                        disabled={Boolean(action.wardrobe && value !== 'manual')}
+                        className={`flex items-center justify-center gap-1 rounded-lg py-1.5 text-[10px] transition disabled:cursor-not-allowed disabled:opacity-20 ${selected ? 'text-white' : 'text-white/35'}`}
                         style={selected ? { background: value === 'blocked' ? 'rgba(244,63,94,.24)' : `${accentColor}44`, boxShadow: `inset 0 0 0 1px ${value === 'blocked' ? 'rgba(251,113,133,.32)' : `${accentColor}66`}` } : undefined}
                       >
                         <Icon size={11} weight={selected ? 'fill' : 'regular'} /> {label}
@@ -570,13 +604,13 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
       )}
 
       <div className="shrink-0 border-t border-white/10 bg-black/30 px-4 pt-3" style={{ paddingBottom: 'max(1rem, var(--safe-bottom))' }}>
-        <p className="mb-3 text-[10px] leading-relaxed text-white/35">AI 只能看到并调用“AI 可用”的项目；“仅手动”只出现在通话舞台按钮中；“禁用”不会播放。</p>
+        <p className="mb-3 text-[10px] leading-relaxed text-white/35">衣橱项目只允许用户手动切换，并从所有 AI 动作白名单中强制排除；“禁用”不会播放。</p>
         <button
-          onClick={() => onSave({ ...config, framing, actions })}
+          onClick={() => onSave({ ...config, framing, actions: actions.map(action => action.wardrobe ? { ...action, permission: 'manual' as const } : action) })}
           className="flex w-full items-center justify-center gap-2 rounded-2xl py-3 text-sm font-semibold text-white active:scale-[0.98]"
           style={{ background: `linear-gradient(90deg, ${accentColor}aa, ${accentColor})`, boxShadow: `0 0 20px ${accentColor}44` }}
         >
-          <Check size={16} weight="bold" /> 保存权限
+          <Check size={16} weight="bold" /> {setupMode === 'import' ? '保存并完成导入' : '保存权限'}
         </button>
       </div>
     </div>

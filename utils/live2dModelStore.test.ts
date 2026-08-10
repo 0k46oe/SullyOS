@@ -4,6 +4,8 @@ import {
   buildStoredLive2DPackage,
   buildLive2DPerformanceMix,
   findLive2DActionsForPerformance,
+  getLive2DAIActions,
+  getLive2DWardrobeActions,
   inferLive2DActionTags,
   inspectLive2DPackage,
   sniffImageMime,
@@ -123,6 +125,22 @@ describe('Live2D 模型导入解析', () => {
     expect(findLive2DActionsForPerformance(config, { emotion: 'happy', gesture: 'wave' }).map(action => action.id))
       .toEqual(['expression-0']);
     expect(findLive2DActionsForPerformance(config, { modelAction: 'motion-1' })).toEqual([]);
+  });
+
+  it('keeps wardrobe actions user-only even if stale data marks them as AI actions', () => {
+    const config = {
+      format: 'live2d',
+      actions: [
+        { id: 'expression-smile', kind: 'expression', name: 'smile', file: 'smile.exp3.json', tags: ['happy'], permission: 'ai' },
+        { id: 'outfit-night', kind: 'expression', name: 'night outfit', file: 'night.exp3.json', tags: ['happy'], permission: 'ai', wardrobe: true },
+      ],
+    } as Live2DAvatarConfig;
+
+    expect(getLive2DAIActions(config).map(action => action.id)).toEqual(['expression-smile']);
+    expect(getLive2DWardrobeActions(config).map(action => action.id)).toEqual(['outfit-night']);
+    expect(findLive2DActionsForPerformance(config, { modelAction: 'outfit-night', emotion: 'happy' }).map(action => action.id))
+      .toEqual(['expression-smile']);
+    expect(buildLive2DPerformanceMix(config, { modelActions: ['outfit-night'] }).expression).toBeUndefined();
   });
 
   it('旧模型一次性自动开放未分类原生动作，同时保留用户覆盖和待机动作', () => {
