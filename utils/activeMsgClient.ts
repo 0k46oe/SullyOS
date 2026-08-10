@@ -1814,12 +1814,25 @@ export const ActiveMsgClient = {
     if (ids.length === 0) return;
     const config = await ensureWorkerReady();
     const client = await initializeClient(config);
+    let failed = 0;
+    let lastError: unknown = null;
     for (let i = 0; i < ids.length; i += OUTBOX_ACK_BATCH_SIZE) {
       const batch = ids.slice(i, i + OUTBOX_ACK_BATCH_SIZE);
-      const response = await client.ackOutbox(batch);
-      if (!response?.success) {
-        throw new Error(response?.error?.message || '云端消息账本销账失败。');
+      // 一批挂了继续跑后面几批：中途 throw 的话剩下的批次一条都销不掉，账本只会
+      // 越积越多，下一趟又整批拉回来。没销掉的那批下次拉回来有落库那层的去重挡着。
+      try {
+        const response = await client.ackOutbox(batch);
+        if (!response?.success) {
+          throw new Error(response?.error?.message || '云端消息账本销账失败。');
+        }
+      } catch (error) {
+        failed += batch.length;
+        lastError = error;
       }
+    }
+    if (failed > 0) {
+      const detail = lastError instanceof Error ? lastError.message : String(lastError);
+      throw new Error(`云端消息账本销账失败（${failed}/${ids.length} 条没销掉）：${detail}`);
     }
   },
 

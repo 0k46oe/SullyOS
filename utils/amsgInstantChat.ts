@@ -441,21 +441,76 @@ export interface OutboxDrainResult {
 }
 
 /**
- * 拉一次服务端消息账本，把还没收下的写回收件箱走原路入库。
+ * 「这台设备已经接上服务端账本」的标记。
  *
- * 跟以前那套「本地比对着猜哪些没收到」的关键差别：**账本是服务端记的事实**，
- * 客户端不再需要拿最近几条聊天记录去反推。读失败照常抛——「没读成」和「读到了、
- * 里面确实没有」是两个结论，调用方要拿它下判决时只能认后者。
+ * 账本是服务端从建表那一刻起就在攒的，而销账是客户端这一版才有的能力。所以**第一次**
+ * 拉账本时上面躺着的并不是「我丢了的消息」，而是这套机制生效之前积累下来的存量——
+ * 当成补收放进聊天流的话，用户会被自己这段时间收过的消息重放一遍（定时问候、多段
+ * 回复全部再来一次）。时效窗口挡不住这一档：存量的年龄本来就在窗口之内。
+ *
+ * 所以首次接管那一趟只做一件事：**存量整批销账，一条都不往聊天流里放**。销干净了才
+ * 记这个标记，下一趟起才按正常补收处理。
+ */
+export const AMSG_OUTBOX_ADOPTED_LS_KEY = 'amsg2_outbox_adopted_v1';
+
+const hasAdoptedOutbox = (): boolean => {
+  try {
+    return !!localStorage.getItem(AMSG_OUTBOX_ADOPTED_LS_KEY);
+  } catch {
+    // 存储读不出来（隐私模式 / 存储关停）时按**已接管**处理：这一档下标记永远也写不
+    // 进去，当成未接管的话每一趟都会把当趟条目整批销掉，补收就永久失效了——推送真丢
+    // 的时候一条都补不回来，比偶尔多倒一次存量严重得多。
+    return true;
+  }
+};
+
+const markOutboxAdopted = (): void => {
+  try {
+    localStorage.setItem(AMSG_OUTBOX_ADOPTED_LS_KEY, JSON.stringify({ at: Date.now() }));
+  } catch { /* 写不进去就下次再接管一遍，反正存量已经销掉了 */ }
+};
+
+/**
+ * 首次接管：账本上的存量整批销账、不进聊天流。
+ *
+ * 唯一的例外是用户**此刻正等着的那几轮**（taskUuid 跟待收记录对得上）：那是刚刚发生
+ * 的事，不是历史积压，照常走补收放进聊天流——否则第一次接管恰好赶上用户发消息时，
+ * 那一轮的回复会被当存量销掉，用户等来的是一句「回复没能取回」。
+ *
+ * 销账成功才记标记。没销干净就这一趟什么都不做、也不记标记：没销掉的条目下次还会
+ * 拉回来，那时仍按接管处理。反过来（先记标记再销账）一旦销账失败，剩下的存量下一趟
+ * 就会被当成补收倒进聊天流，正是这里要防的那件事。
+ */
+const adoptOutboxBacklog = async (entries: AmsgOutboxEntry[]): Promise<OutboxDrainResult> => {
+  const awaitedUuids = new Set(listInstantChatPendings().map((pending) => pending.uuid));
+  const isAwaited = (entry: AmsgOutboxEntry) => !!entry.taskUuid && awaitedUuids.has(entry.taskUuid);
+  const backlogIds = entries.filter((entry) => !isAwaited(entry)).map((entry) => entry.messageId);
+
+  if (backlogIds.length > 0) {
+    try {
+      await ActiveMsgClient.ackOutboxMessages(backlogIds);
+    } catch (error) {
+      console.warn(`${HEADER} 账本存量没销干净，这一趟先不接管（下次重来）`, error);
+      return { written: 0, ackNow: [], entries };
+    }
+  }
+  markOutboxAdopted();
+  console.log(`${HEADER} 第一次接上云端账本：存量 ${backlogIds.length} 条直接销账，不往聊天流里放`);
+
+  const { written, ackNow } = await backfillOutboxEntries(entries.filter(isAwaited));
+  return { written, ackNow, entries };
+};
+
+/**
+ * 把账本条目写回收件箱走原路入库。
  *
  * 只有正文类（`content` 与情绪结果）才往收件箱里放。思维链、工具请求、错误通知
  * 这几类补收回来已经没有意义：思维链要挂在正文上、工具请求那头的云端早就收工了、
  * 隔了一阵子的报错弹出来只会让人摸不着头脑。它们照样要销账，不然每次拉都拉回来。
- *
- * 调用方拿到 written > 0 之后要自己 flush 一次收件箱（见文件头注：不在这里 flush
- * 是为了避免和 activeMsgRuntime 成环）。
  */
-export const drainOutbox = async (): Promise<OutboxDrainResult> => {
-  const entries = await ActiveMsgClient.listOutboxEntries();
+const backfillOutboxEntries = async (
+  entries: AmsgOutboxEntry[],
+): Promise<Omit<OutboxDrainResult, 'entries'>> => {
   const now = Date.now();
   const ackNow: string[] = [];
   let written = 0;
@@ -490,6 +545,26 @@ export const drainOutbox = async (): Promise<OutboxDrainResult> => {
   }
 
   if (written > 0) console.log(`${HEADER} 从云端账本补收 ${written} 条（推送多半是丢了）`);
+  return { written, ackNow };
+};
+
+/**
+ * 拉一次服务端消息账本，把还没收下的写回收件箱走原路入库。
+ *
+ * 跟以前那套「本地比对着猜哪些没收到」的关键差别：**账本是服务端记的事实**，
+ * 客户端不再需要拿最近几条聊天记录去反推。读失败照常抛——「没读成」和「读到了、
+ * 里面确实没有」是两个结论，调用方要拿它下判决时只能认后者。
+ *
+ * 头一次拉走的是另一条路（见 adoptOutboxBacklog）：那一趟账本上装的是存量，不是
+ * 「我丢了的消息」。
+ *
+ * 调用方拿到 written > 0 之后要自己 flush 一次收件箱（见文件头注：不在这里 flush
+ * 是为了避免和 activeMsgRuntime 成环）。
+ */
+export const drainOutbox = async (): Promise<OutboxDrainResult> => {
+  const entries = await ActiveMsgClient.listOutboxEntries();
+  if (!hasAdoptedOutbox()) return await adoptOutboxBacklog(entries);
+  const { written, ackNow } = await backfillOutboxEntries(entries);
   return { written, ackNow, entries };
 };
 
