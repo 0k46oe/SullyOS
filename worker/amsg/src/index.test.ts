@@ -5,11 +5,13 @@
 // 顺序：charId 校验 → 活跃会话租约(skip) → fire_pack 存在(否则抛) → 防穿帮闸(skip)
 //      → 任务指令存在(否则抛) → 挂 scratch + 填槽返回
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { readFile } from 'node:fs/promises';
 
 import worker, {
   amsgFireSettled, amsgHooks, amsgReasoningKey, amsgStaleSkip, attachScheduledTasks,
   buildWorkerConfig, configureInstantErrorPush, inspectWorkerEnv,
   offloadOversizedPush, resolveVapidEmail, runFireCancelTool, runFireRenewTool,
+  inspectPushDelivery,
   runFireScheduleTool, runMcpFireTool, splitSchemaMissing, classifySchemaProbeError,
 } from './index';
 import * as workerEntry from './index';
@@ -40,6 +42,7 @@ import { AMSG_TOOL_CONFIG_KEY, AMSG_TOOL_PACK_KEY } from '../../../utils/amsgToo
 import { buildMcpNameMap, MCP_FIRE_NAME_BUDGET, type McpFireServer } from '../../../utils/mcpFireCore';
 import { MAX_FIRE_SCHEDULES } from '../../../utils/amsgFireSchedule';
 import { MAX_ACTIVE_TASKS_PER_CHAR, shortTaskId } from '../../../utils/amsg2Tasks';
+import { isAmsgServerVersionAtLeast } from '../../../utils/amsgWorkerVersion';
 
 const CHAR_ID = 'preset-nyah';
 const TASK_UUID = '3637dae1-1461-4444-a747-34e406f67acc';
@@ -4092,5 +4095,133 @@ describe('即时对话终态失败的直发 error push', () => {
       error: new Error('LLM 上游 502'),
       scratch, writeState: store.writeState,
     } as any)).resolves.toBeUndefined();
+  });
+});
+
+// 回归守卫：「登记状态全绿、到点一条都不来」的唯一出口。
+//
+// 浏览器有订阅、库里也登记着同一条 endpoint，两边都自洽，但那条 endpoint 在推送服务
+// 那侧已经作废——推过去只换回一个 410。这件事只有推送服务知道，所以事实由上游
+// amsg-server 结构化写进 last_error.pushStatus，这里只负责读出来。
+//
+// 关键约束：**只认 pushStatus 这个结构化字段，不去解析 reason 那句人话**。reason 是
+// 给用户看的自由文本，拿它当接口用的话，上游改个措辞这里就静默失效，而且不会有任何
+// 测试挂——那正是「全绿但一条不来」重新长出来的方式。
+describe('inspectPushDelivery — 推送有没有真的送出去', () => {
+  const REGISTERED_AT = Date.parse('2026-08-10T04:00:00.000Z');
+
+  /** 一个只回 last_error 列的假 D1。 */
+  const fakeDb = (rows: Array<{ last_error: string | null }>, explode = false) => ({
+    prepare: () => ({
+      all: async () => {
+        if (explode) throw new Error('no such column: last_error');
+        return { results: rows };
+      },
+      bind: () => ({ first: async () => null }),
+      first: async () => null,
+    }),
+  }) as any;
+
+  const failureRow = (at: string, extra: Record<string, unknown>) => ({
+    last_error: JSON.stringify({ at, occurrence: at, reason: '随便什么人话摘要', ...extra }),
+  });
+
+  it('认结构化的 410，交出状态码和时刻', async () => {
+    const result = await inspectPushDelivery(
+      fakeDb([failureRow('2026-08-10T05:06:00.000Z', { pushStatus: 410 })]),
+      REGISTERED_AT,
+    );
+    expect(result).toEqual({
+      gone: { status: 410, atMs: Date.parse('2026-08-10T05:06:00.000Z') },
+      registeredAtMs: REGISTERED_AT,
+    });
+  });
+
+  it('404（端点根本不存在）同样算失效', async () => {
+    const result = await inspectPushDelivery(
+      fakeDb([failureRow('2026-08-10T05:06:00.000Z', { pushStatus: 404 })]),
+      REGISTERED_AT,
+    );
+    expect(result?.gone?.status).toBe(404);
+  });
+
+  it('reason 里写着 410 但没有 pushStatus → 不认', async () => {
+    // 这条就是「别把人话当接口」的守卫：上游给不出结构化字段时，宁可报「没查到」，
+    // 也不去正则匹配一句随时会变的错误摘要。
+    const result = await inspectPushDelivery(
+      fakeDb([{
+        last_error: JSON.stringify({
+          at: '2026-08-10T05:06:00.000Z',
+          reason: 'Web Push delivery failed: 410 Gone — push subscription has unsubscribed or expired.',
+        }),
+      }]),
+      REGISTERED_AT,
+    );
+    expect(result).toEqual({ gone: null, registeredAtMs: REGISTERED_AT });
+  });
+
+  it('别的推送失败（403 / 500）不算订阅失效——重置订阅治不了那些', async () => {
+    const result = await inspectPushDelivery(
+      fakeDb([
+        failureRow('2026-08-10T05:06:00.000Z', { pushStatus: 403 }),
+        failureRow('2026-08-10T05:07:00.000Z', { pushStatus: 500 }),
+      ]),
+      REGISTERED_AT,
+    );
+    expect(result?.gone).toBeNull();
+  });
+
+  it('多条里挑最近的那次——用户要判断的是「现在还坏不坏」', async () => {
+    const result = await inspectPushDelivery(
+      fakeDb([
+        failureRow('2026-08-10T05:06:00.000Z', { pushStatus: 410 }),
+        failureRow('2026-08-10T06:30:00.000Z', { pushStatus: 410 }),
+        failureRow('2026-08-10T02:00:00.000Z', { pushStatus: 410 }),
+      ]),
+      REGISTERED_AT,
+    );
+    expect(result?.gone?.atMs).toBe(Date.parse('2026-08-10T06:30:00.000Z'));
+  });
+
+  it('坏 JSON / 时刻解析不出来的行跳过，不带崩整次自查', async () => {
+    const result = await inspectPushDelivery(
+      fakeDb([
+        { last_error: '不是 JSON' },
+        { last_error: null },
+        failureRow('不是时间', { pushStatus: 410 }),
+      ]),
+      REGISTERED_AT,
+    );
+    expect(result).toEqual({ gone: null, registeredAtMs: REGISTERED_AT });
+  });
+
+  it('查询本身挂了（老库没有 last_error 列）→ null = 这一项没查出来', async () => {
+    // 界面拿 null 显示「没查成」，不是绿灯——假绿灯正是这一整条链要治的病。
+    expect(await inspectPushDelivery(fakeDb([], true), REGISTERED_AT)).toBeNull();
+  });
+});
+
+// 交付顺序守卫（这条挂着 = 这活还没干完，不是坏了）。
+//
+// 上面那段 inspectPushDelivery 读的是上游写进 last_error 的 pushStatus，而**上游从
+// 2.6.0-next.20 才开始写它**。依赖还锁在更早的版本时打出来的 bundle 是最坏的组合：
+// 「查了这一项」（probed: true）+「一次都没被退回」（gone 永远是 null）= 一个理直气壮
+// 的绿灯，而整条改动的存在意义就是干掉这个绿灯。
+//
+// 所以这条测试就是发布门禁：上游发版、这边 pnpm up 到 next.20 之后它自己会变绿。
+describe('打包进来的 amsg-server 得会写 pushStatus', () => {
+  it('依赖版本 >= 2.6.0-next.20（低于它 inspectPushDelivery 会一路绿灯说谎）', async () => {
+    const pkg = JSON.parse(
+      await readFile(new URL('../../../package.json', import.meta.url), 'utf-8'),
+    );
+    const version = String(
+      pkg.devDependencies?.['@rei-standard/amsg-server']
+      ?? pkg.dependencies?.['@rei-standard/amsg-server'],
+    );
+    expect(
+      isAmsgServerVersionAtLeast(version, '2.6.0-next.20'),
+      `package.json 里还锁着 ${version}：那个版本的上游不写 last_error.pushStatus，`
+      + '打出来的 worker 会把「推送投递」这一项一路报绿。等上游发版后升到 next.20 再打 bundle。',
+    ).toBe(true);
   });
 });

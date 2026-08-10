@@ -91,8 +91,14 @@ const REQUIRED_WORKER_FEATURES = [
 //   next.17 — 用户级 LLM 凭据表（PUT/GET/DELETE /llm-credentials）、任务的 credRefs、
 //            fire hook 的 resolveLlmCredential。这一档有独立 flag（上面那条
 //            'llm-credentials'），版本号列在这里只是备个案。
+//   next.20 — 推送被推送服务判死（410 / 404）时当终态，不再空转重试——投递是先生成
+//            后推送，每重试一跳就白跑一整轮 LLM；同时把状态码结构化写进 last_error
+//            的 pushStatus，体检的「这台设备」靠它拆穿「登记全绿但一条都不来」。
+//            另外 client_state 的前缀清理改走字典序范围：D1 把 LIKE pattern 压到
+//            50 字节（官方文档没写），key 一长就整条语句报 pattern too complex，
+//            同批的状态写入跟着一起回滚。
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
-const REQUIRED_WORKER_VERSION = '2.6.0-next.19';
+const REQUIRED_WORKER_VERSION = '2.6.0-next.20';
 
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';

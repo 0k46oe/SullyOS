@@ -1053,6 +1053,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       ? resource.href
                       : String(resource);
           const fetchStartedAt = Date.now();
+          // 失败诊断要按发起时刻去 Resource Timing 里认领本次那条记录，而 entry.startTime 跟
+          // performance.now() 同一条时间轴、跟 Date.now() 不是——两者不能混用，详见
+          // utils/networkFailureDiagnosis.ts 的 readResourceTimingHint。
+          const fetchStartedAtPerf = typeof performance !== 'undefined' ? performance.now() : Number.NaN;
           // Bare fetch calls do not carry explicit metadata. Snapshot the active
           // App now; reading the ambient value after a long response would label
           // the request as whichever App the user navigated to in the meantime.
@@ -1225,7 +1229,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       method,
                       durationMs: Date.now() - fetchStartedAt,
                       error: err,
-                  });
+                  }, { startedAt: fetchStartedAtPerf });
                   setSystemLogs(prev => [{
                       id: logId,
                       timestamp: Date.now(),
