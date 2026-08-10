@@ -188,6 +188,9 @@ purpose」的组合，会产出既无引用可解析、又无内联凭据的空�
 - 情绪评估新任务的 `metadata.amsgEmotionEval` 只剩 `{ prompt }`，凭据走
   `credRefs.emotion`；存量任务 metadata 里的 `api` 继续认，两道 strip 防线保留到
   存量消亡。
+- `emotion` 行是懒创建的：第一次跑「带情绪评估的即时对话」时才随指纹门控 PUT 上表，
+  在那之前表里只有 `chat` / `instant` 两行——排查时见不到 `emotion` 行属正常，
+  不代表没实现。
 - 「清空云端数据」第四样 `deleteLlmCredentials({ all: true })`，与前三样互不短路。
 - 补刷函数（`refreshCharPendingAiTaskCredentials` / `refreshApiCredentialsForPendingTasks`）
   混合期保留照跑，存量内联任务消亡后自然 no-op，届时可退役，「API 凭据没刷新成功」
