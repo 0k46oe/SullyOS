@@ -3,7 +3,7 @@
 // worker/amsg/src/index.ts
 import { DurableObject } from "cloudflare:workers";
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.19/node_modules/@rei-standard/amsg-server/dist/chunk-5FXVSC5O.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.20/node_modules/@rei-standard/amsg-server/dist/chunk-5FXVSC5O.mjs
 var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
   "user_id",
   "uuid",
@@ -817,7 +817,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.19/node_modules/@rei-standard/amsg-server/dist/chunk-PRQHHRAK.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.20/node_modules/@rei-standard/amsg-server/dist/chunk-HTGYGGUH.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -1685,6 +1685,9 @@ function projectTask(row, decryptedPayload, options = {}) {
     // reason 'stale' 表示错过触发时刻太久被判定不再补发；其余是投递失败的
     // 错误信息。payload 里没有时退回行上的 last_error 列（同形状的脱敏摘要，
     // 等重试期间的失败也记在那里）。没有记录 → null。
+    // 记进去的字段整份带出来，不再挑一遍——`pushStatus`（410 = 订阅已注销，
+    // 404 = 端点不存在）这类机读标注就是给客户端看的，白名单挡在这一层的话，
+    // 客户端只能回去正则匹配 reason 那句人话。
     lastError: payload.lastError ?? parseRowLastError(row.last_error)
   };
 }
@@ -2510,6 +2513,7 @@ async function processSingleMessage(task, ctx, providedMasterKey, predecrypted =
       messagesSent: 0,
       error: error.message,
       errorCode: error.code || null,
+      pushStatusCode: Number.isInteger(error.statusCode) ? error.statusCode : null,
       permanent: isNonRetryableError(error)
     };
   }
@@ -2838,6 +2842,10 @@ var CLAIM_LEASE_MARGIN_MS = 2 * 60 * 1e3;
 var DEFAULT_LEASE_HEARTBEAT_MS = 30 * 1e3;
 var DEFAULT_HEARTBEAT_LEASE_TTL_MS = 90 * 1e3;
 var STALE_AFTER_MS = 60 * 60 * 1e3;
+var TERMINAL_PUSH_STATUSES = /* @__PURE__ */ new Set([404, 410]);
+function toPushStatus(value) {
+  return Number.isInteger(value) ? value : null;
+}
 function resolveStaleAfterMs(ctx) {
   return positiveNumber(ctx.staleAfterMs) || STALE_AFTER_MS;
 }
@@ -3020,27 +3028,30 @@ async function deliverTasks(ctx, tasks) {
       console.warn("[amsg-server] onStaleSkip hook \u629B\u9519\uFF08\u5DF2\u5FFD\u7565\uFF09:", hookError && hookError.message);
     }
   }
-  async function handleDeliveryFailure(task, reason, recurrenceType, decryptedPayload, userKey, errorCode = null, permanentFlag = false) {
+  async function handleDeliveryFailure(task, reason, recurrenceType, decryptedPayload, userKey, failure = {}) {
     results.failedCount++;
+    const errorCode = failure.errorCode ?? null;
+    const pushStatus = toPushStatus(failure.pushStatus);
     const tzId = decryptedPayload ? decryptedPayload.tzId ?? null : null;
-    const permanent = permanentFlag === true || errorCode === "PUSH_SUBSCRIPTION_MISSING" || errorCode === "PUSH_SUBSCRIPTION_STORE_UNSUPPORTED";
+    const permanent = failure.permanent === true || errorCode === "PUSH_SUBSCRIPTION_MISSING" || errorCode === "PUSH_SUBSCRIPTION_STORE_UNSUPPORTED" || TERMINAL_PUSH_STATUSES.has(pushStatus);
+    const errorExtra = pushStatus === null ? void 0 : { pushStatus };
     try {
       if (permanent || task.retry_count >= 3) {
-        const encrypted = await encryptPayloadWithLastError(task, decryptedPayload, userKey, reason);
+        const encrypted = await encryptPayloadWithLastError(task, decryptedPayload, userKey, reason, errorExtra);
         if (isRecurringType(recurrenceType)) {
           const nextSendAt = nextFutureOccurrence(Date.parse(task.next_send_at), recurrenceType, Date.now(), tzId);
           await updateAndRelease(task.id, {
             next_send_at: nextSendAt,
             retry_count: 0,
             ...encrypted ? { encrypted_payload: encrypted } : {},
-            ...supportsLastError ? { last_error: lastErrorJson(task, reason) } : {}
+            ...supportsLastError ? { last_error: lastErrorJson(task, reason, errorExtra) } : {}
           });
           results.failedTasks.push({ taskId: task.id, reason, retryCount: task.retry_count, status: "occurrence_skipped", nextSendAt, ...permanent ? { permanent: true } : {} });
         } else {
           await updateAndRelease(task.id, {
             status: "failed",
             ...encrypted ? { encrypted_payload: encrypted } : {},
-            ...supportsLastError ? { last_error: lastErrorJson(task, reason) } : {}
+            ...supportsLastError ? { last_error: lastErrorJson(task, reason, errorExtra) } : {}
           });
           results.failedTasks.push({ taskId: task.id, reason, retryCount: task.retry_count, status: "permanently_failed", ...permanent ? { permanent: true } : {} });
         }
@@ -3051,7 +3062,7 @@ async function deliverTasks(ctx, tasks) {
             retry_after: nextRetryTime.toISOString(),
             lease_until: null,
             retry_count: task.retry_count + 1,
-            ...supportsLastError ? { last_error: lastErrorJson(task, reason) } : {}
+            ...supportsLastError ? { last_error: lastErrorJson(task, reason, errorExtra) } : {}
           });
         } else {
           await db.updateTaskById(task.id, { next_send_at: nextRetryTime.toISOString(), retry_count: task.retry_count + 1 });
@@ -3196,8 +3207,7 @@ async function deliverTasks(ctx, tasks) {
         recurrenceType,
         decryptedPayload,
         userKey,
-        error.code || null,
-        error.permanent === true
+        { errorCode: error.code || null, permanent: error.permanent === true, pushStatus: error.statusCode }
       );
       return;
     }
@@ -3208,8 +3218,7 @@ async function deliverTasks(ctx, tasks) {
         recurrenceType,
         decryptedPayload,
         userKey,
-        sendResult.errorCode || null,
-        sendResult.permanent === true
+        { errorCode: sendResult.errorCode || null, permanent: sendResult.permanent === true, pushStatus: sendResult.pushStatusCode }
       );
       return;
     }
@@ -3992,8 +4001,35 @@ var SQLITE_REQUIRED_SCHEMA = Object.freeze({
   ])),
   indexes: Object.freeze(SQLITE_INDEXES.filter((index) => index.critical).map((index) => index.name))
 });
-function escapeLikePrefix(prefix) {
-  return prefix.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+function prefixRangeEnd(prefix) {
+  const points = Array.from(prefix);
+  while (points.length > 0) {
+    const cp = points[points.length - 1].codePointAt(0);
+    if (cp === 55295) {
+      points[points.length - 1] = String.fromCodePoint(57344);
+      return points.join("");
+    }
+    if (cp < 1114111) {
+      points[points.length - 1] = String.fromCodePoint(cp + 1);
+      return points.join("");
+    }
+    points.pop();
+  }
+  return "";
+}
+var D1_MAX_BOUND_PARAMS = 100;
+function chunkForBoundParams(values, fixedParams) {
+  const perStatement = D1_MAX_BOUND_PARAMS - fixedParams;
+  if (perStatement < 1) {
+    throw new Error(
+      `[amsg-server D1] \u56FA\u5B9A\u53C2\u6570\u5DF2\u5360\u6EE1 ${D1_MAX_BOUND_PARAMS} \u4E2A\u7ED1\u5B9A\u4F4D\uFF0CIN \u5217\u8868\u653E\u4E0D\u4E0B`
+    );
+  }
+  const batches = [];
+  for (let i = 0; i < values.length; i += perStatement) {
+    batches.push(values.slice(i, i + perStatement));
+  }
+  return batches;
 }
 var INTERNAL_TABLE_PREFIXES = ["sqlite_", "_cf_"];
 function isInternalTableName(name) {
@@ -4015,6 +4051,50 @@ var D1Adapter = class {
       throw new Error(`[amsg-server D1] invalid timestamp: ${value}`);
     }
     return d.toISOString();
+  }
+  /**
+   * 组一组带 `IN (...)` 的语句：值多到一条塞不下时，按 D1 的绑定参数上限切成
+   * 几条（见 chunkForBoundParams）。
+   *
+   * 只有拿得到事务的绑定才切。没有 batch() 的绑定（测试 shim、自定义适配器，
+   * 都不是真实 D1）原样发一条不切的语句：切批是为 D1 那条上限服务的，这类绑
+   * 定不受它约束，切了反倒会因为没有事务而多出一个「写一半」的中间态。
+   *
+   * @private
+   * @param {(placeholders: string) => string} buildSql - 拿占位符串（`?, ?, ?`）组 SQL
+   * @param {unknown[]} leadingParams - IN 列表之前的固定参数，按出现顺序
+   * @param {unknown[]} values - IN 列表里的全部值
+   * @returns {any[]} 已经 bind 好的语句
+   */
+  _prepareInClauseStatements(buildSql, leadingParams, values) {
+    const batches = typeof this._db.batch === "function" ? chunkForBoundParams(values, leadingParams.length) : [values];
+    return batches.map((batch) => this._db.prepare(buildSql(batch.map(() => "?").join(", "))).bind(...leadingParams, ...batch));
+  }
+  /**
+   * 带 `IN (...)` 的批量写，切成几条也仍然是一次原子操作。
+   *
+   * 一条语句本来天然原子，拆开之后这份保证得自己补回来，否则就会多出「只删掉
+   * 前 99 个」「只 ack 了前 98 条」这类比原问题更难查的中间态。D1 的 batch()
+   * 是隐式事务——其中一条失败，整批回滚——正好接住这件事。
+   *
+   * 一条就够时照旧单发，跟切批以前走的是同一条路，常见调用（一次三五个 id）
+   * 的行为一个字节都没变。
+   *
+   * @private
+   * @param {(placeholders: string) => string} buildSql
+   * @param {unknown[]} leadingParams
+   * @param {unknown[]} values
+   * @returns {Promise<number>} 各批影响行数之和
+   */
+  async _runInClauseWrite(buildSql, leadingParams, values) {
+    const statements = this._prepareInClauseStatements(buildSql, leadingParams, values);
+    if (statements.length === 0) return 0;
+    if (statements.length === 1) {
+      const res = await statements[0].run();
+      return res.meta.changes || 0;
+    }
+    const results = await this._db.batch(statements);
+    return results.reduce((n, res) => n + (res.meta.changes || 0), 0);
   }
   async initSchema() {
     await this._db.prepare(SQLITE_TABLE_SQL).run();
@@ -4399,11 +4479,11 @@ var D1Adapter = class {
          updated_at = excluded.updated_at
        WHERE excluded.updated_at >= client_state.updated_at`;
     const CLEANUP_PREFIX_SQL = `DELETE FROM client_state
-       WHERE user_id = ? AND namespace = ? AND key LIKE ? ESCAPE '\\' AND updated_at <= ?`;
+       WHERE user_id = ? AND namespace = ? AND key >= ? AND key < ? AND updated_at <= ?`;
     const CLEANUP_KEY_SQL = `DELETE FROM client_state
        WHERE user_id = ? AND namespace = ? AND key = ? AND updated_at <= ?`;
     const buildStatements = () => [
-      ...cleanups.map((c) => typeof c.key === "string" ? this._db.prepare(CLEANUP_KEY_SQL).bind(userId, c.namespace, c.key, c.updatedAt) : this._db.prepare(CLEANUP_PREFIX_SQL).bind(userId, c.namespace, `${escapeLikePrefix(c.keyPrefix)}%`, c.updatedAt)),
+      ...cleanups.map((c) => typeof c.key === "string" ? this._db.prepare(CLEANUP_KEY_SQL).bind(userId, c.namespace, c.key, c.updatedAt) : this._db.prepare(CLEANUP_PREFIX_SQL).bind(userId, c.namespace, c.keyPrefix, prefixRangeEnd(c.keyPrefix), c.updatedAt)),
       ...entries.map(
         (entry) => this._db.prepare(UPSERT_SQL).bind(userId, entry.namespace, entry.key, entry.value, entry.updatedAt)
       )
@@ -4532,13 +4612,19 @@ var D1Adapter = class {
    */
   async getLlmCredentials(userId, credIds) {
     if (!credIds || credIds.length === 0) return [];
-    const placeholders = credIds.map(() => "?").join(", ");
-    const res = await this._db.prepare(
-      `SELECT cred_id, encrypted_value, updated_at
-       FROM llm_credentials
-       WHERE user_id = ? AND cred_id IN (${placeholders})`
-    ).bind(userId, ...credIds).all();
-    return res.results || [];
+    const statements = this._prepareInClauseStatements(
+      (placeholders) => `SELECT cred_id, encrypted_value, updated_at
+         FROM llm_credentials
+         WHERE user_id = ? AND cred_id IN (${placeholders})`,
+      [userId],
+      credIds
+    );
+    const rows = [];
+    for (const stmt of statements) {
+      const res = await stmt.all();
+      rows.push(...res.results || []);
+    }
+    return rows;
   }
   /**
    * 这个用户名下所有凭据的对账清单（只有 cred_id 和 updated_at，密文不出
@@ -4564,18 +4650,17 @@ var D1Adapter = class {
    */
   async deleteLlmCredentials(userId, credIds = null) {
     if (credIds !== null && credIds.length === 0) return 0;
-    let res;
     if (credIds === null) {
-      res = await this._db.prepare(
+      const res = await this._db.prepare(
         "DELETE FROM llm_credentials WHERE user_id = ?"
       ).bind(userId).run();
-    } else {
-      const placeholders = credIds.map(() => "?").join(", ");
-      res = await this._db.prepare(
-        `DELETE FROM llm_credentials WHERE user_id = ? AND cred_id IN (${placeholders})`
-      ).bind(userId, ...credIds).run();
+      return res.meta.changes || 0;
     }
-    return res.meta.changes || 0;
+    return this._runInClauseWrite(
+      (placeholders) => `DELETE FROM llm_credentials WHERE user_id = ? AND cred_id IN (${placeholders})`,
+      [userId],
+      credIds
+    );
   }
   // ── message_outbox（服务端消息收件箱，客户端 ack）────────────────────────
   /**
@@ -4631,12 +4716,12 @@ var D1Adapter = class {
    */
   async markOutboxDelivered(userId, messageIds, deliveredAt) {
     if (!messageIds || messageIds.length === 0) return 0;
-    const placeholders = messageIds.map(() => "?").join(", ");
-    const res = await this._db.prepare(
-      `UPDATE message_outbox SET delivered_at = ?
-       WHERE user_id = ? AND message_id IN (${placeholders})`
-    ).bind(deliveredAt, userId, ...messageIds).run();
-    return res.meta.changes || 0;
+    return this._runInClauseWrite(
+      (placeholders) => `UPDATE message_outbox SET delivered_at = ?
+         WHERE user_id = ? AND message_id IN (${placeholders})`,
+      [deliveredAt, userId],
+      messageIds
+    );
   }
   /**
    * 未 ack 的行（id 升序，游标翻页）。payload 仍是密文，解密在 handler。
@@ -4668,12 +4753,12 @@ var D1Adapter = class {
    */
   async ackOutboxMessages(userId, messageIds, ackedAt) {
     if (!messageIds || messageIds.length === 0) return 0;
-    const placeholders = messageIds.map(() => "?").join(", ");
-    const res = await this._db.prepare(
-      `UPDATE message_outbox SET acked_at = ?
-       WHERE user_id = ? AND acked_at IS NULL AND message_id IN (${placeholders})`
-    ).bind(ackedAt, userId, ...messageIds).run();
-    return res.meta.changes || 0;
+    return this._runInClauseWrite(
+      (placeholders) => `UPDATE message_outbox SET acked_at = ?
+         WHERE user_id = ? AND acked_at IS NULL AND message_id IN (${placeholders})`,
+      [ackedAt, userId],
+      messageIds
+    );
   }
   /**
    * outbox 的例行清理（run-tick 每跳顺手调）：已 ack 的行留短一些，未 ack 的
@@ -4943,7 +5028,7 @@ function createClientStateHandler(ctx) {
   }
   return { PUT, GET, DELETE };
 }
-var SERVER_VERSION = true ? "2.6.0-next.19" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.6.0-next.20" : "0.0.0-dev";
 var SERVER_FEATURES = Object.freeze([
   "client-state",
   "client-state-chunking",
@@ -11879,6 +11964,35 @@ var splitSchemaMissing = (missing) => ({
   missingTables: missing.filter((item) => item.startsWith("table:") || item.startsWith("index:")).map((item) => item.slice(item.indexOf(":") + 1)),
   missingColumns: missing.filter((item) => item.startsWith("column:")).map((item) => item.slice("column:".length))
 });
+var PUSH_GONE_STATUSES = [410, 404];
+var inspectPushDelivery = async (db, registeredAtMs) => {
+  try {
+    const rows = await db.prepare(
+      `SELECT last_error FROM scheduled_messages
+          WHERE last_error IS NOT NULL
+          ORDER BY updated_at DESC
+          LIMIT 20`
+    ).all();
+    let gone = null;
+    for (const row of rows.results || []) {
+      let record = null;
+      try {
+        const parsed = JSON.parse(row.last_error || "null");
+        record = parsed && typeof parsed === "object" ? parsed : null;
+      } catch {
+        continue;
+      }
+      const status = Number(record?.pushStatus);
+      if (!PUSH_GONE_STATUSES.includes(status)) continue;
+      const atMs = Date.parse(String(record?.at ?? ""));
+      if (!Number.isFinite(atMs)) continue;
+      if (!gone || atMs > gone.atMs) gone = { status, atMs };
+    }
+    return { gone, registeredAtMs };
+  } catch {
+    return null;
+  }
+};
 var inspectStorage = async (env, probe) => {
   const { schema, error: schemaError } = probe;
   const db = env.DB;
@@ -11898,7 +12012,7 @@ var inspectStorage = async (env, probe) => {
                 MIN(CASE WHEN next_send_at <= ? THEN next_send_at END) AS oldest
            FROM scheduled_messages WHERE status = 'pending'`
     ).bind(nowIso, nowIso).first();
-    const pushRow = present.has("push_subscriptions") ? await db.prepare("SELECT COUNT(*) AS n FROM push_subscriptions").first() : null;
+    const pushRow = present.has("push_subscriptions") ? await db.prepare("SELECT COUNT(*) AS n, MAX(updated_at) AS updatedAt FROM push_subscriptions").first() : null;
     return {
       reachable: true,
       schemaReady,
@@ -11909,6 +12023,7 @@ var inspectStorage = async (env, probe) => {
       // 单用户 worker 只存一行。到点却发不出去最常见的原因就是这行是空的——
       // 换了一台 worker 之后云端订阅是空的，而浏览器那侧的订阅一个字都没变。
       pushSubscriptionRegistered: (pushRow?.n ?? 0) > 0,
+      pushDelivery: await inspectPushDelivery(db, pushRow?.updatedAt ?? null),
       pendingTasks: stats?.pending ?? 0,
       overdueTasks: stats?.overdue ?? 0,
       oldestOverdueMinutes: stats?.oldest ? Math.floor((Date.now() - Date.parse(stats.oldest)) / 6e4) : null
@@ -12080,6 +12195,7 @@ export {
   classifySchemaProbeError,
   configureInstantErrorPush,
   src_default as default,
+  inspectPushDelivery,
   inspectWorkerEnv,
   offloadOversizedPush,
   resolveVapidEmail,

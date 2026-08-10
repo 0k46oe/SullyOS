@@ -34,6 +34,9 @@ import {
 } from '@rei-standard/amsg-server/cloudflare';
 import { stripReasoningTags } from '@rei-standard/amsg-shared';
 import { AMSG_BUNDLE_VERSION } from '../../../utils/amsgBundleVersion';
+// 「上一次推送被判订阅失效」的形状，跟前端体检共用一个类型定义（那份是零依赖纯叶子；
+// 往里加任何浏览器依赖都会连累这个 bundle）。这里只产出事实，红绿灯和文案归前端。
+import type { AmsgPushGoneFailure } from '../../../utils/amsgDiagnostics';
 import type { UserProfile } from '../../../types';
 import {
   AMSG_CHAT_FAIL_KEY,
@@ -2492,11 +2495,71 @@ type D1Like = {
   };
 };
 
+/** 推送服务判定订阅已失效时回的状态码：410 = 已注销/过期，404 = 端点根本不存在。 */
+const PUSH_GONE_STATUSES = [410, 404];
+
+/**
+ * 推送到底推没推出去：最近一次被推送服务判成「这条订阅已经失效」是什么时候。
+ *
+ * 这是「登记状态全绿、到点一条都不来」的最后一块拼图。浏览器手里有订阅、库里也
+ * 登记着同一条 endpoint，两边都自洽，但那条 endpoint 在推送服务（FCM / Mozilla /
+ * Apple）那侧早就作废了，推过去只换回一个 410。这件事只有推送服务知道，前端和
+ * Worker 自己都查不出来。
+ *
+ * 事实由上游 amsg-server 产生：投递失败时它把推送服务回的状态码结构化写进任务的
+ * `last_error.pushStatus`。这里只是把它读出来——**不去解析 `reason` 那句人话**，
+ * 那是给用户看的自由文本，拿它当接口用的话，上游改个措辞这里就静默失效。
+ *
+ * 只回状态码和时刻，不回 `last_error` 原文：那是一段没有约束的错误摘要，而
+ * `/debug` 这个端点是不设防的。
+ *
+ * 查不成（老库还没有 last_error 列、查询被拒）返回 null = 「这一项没查出来」，
+ * 界面照实说查不了，不会因此给一个假绿灯。
+ */
+export const inspectPushDelivery = async (
+  db: D1Like,
+  registeredAtMs: number | null,
+): Promise<{ gone: AmsgPushGoneFailure | null; registeredAtMs: number | null } | null> => {
+  try {
+    // 只看有失败记录的行，按最近更新排。订阅一旦作废，每条到点的任务都会撞上同一个
+    // 410，最近那次必然排在最前面——取 20 条足够，不必把整个任务表读一遍。
+    const rows = await db
+      .prepare(
+        `SELECT last_error FROM scheduled_messages
+          WHERE last_error IS NOT NULL
+          ORDER BY updated_at DESC
+          LIMIT 20`,
+      )
+      .all<{ last_error: string | null }>();
+
+    let gone: AmsgPushGoneFailure | null = null;
+    for (const row of rows.results || []) {
+      let record: { at?: unknown; pushStatus?: unknown } | null = null;
+      try {
+        const parsed = JSON.parse(row.last_error || 'null');
+        record = parsed && typeof parsed === 'object' ? parsed : null;
+      } catch {
+        continue; // 存进去的不是 JSON（不该发生），跳过这一条就是了
+      }
+      const status = Number(record?.pushStatus);
+      if (!PUSH_GONE_STATUSES.includes(status)) continue;
+      const atMs = Date.parse(String(record?.at ?? ''));
+      if (!Number.isFinite(atMs)) continue;
+      if (!gone || atMs > gone.atMs) gone = { status, atMs };
+    }
+
+    return { gone, registeredAtMs };
+  } catch {
+    return null;
+  }
+};
+
 /**
  * 只读地看一眼库里的状况：表齐不齐、列全不全、有没有到点却没人处理的任务。
  *
- * 全程不写库，也不读任何一条任务的内容——只数数和比对 schema。数出来的东西
- * （待发条数、最老的一条过期了多久）不指向任何角色、时间点或正文。
+ * 全程不写库，也不读任何一条任务的内容——只数数、比对 schema，以及从失败记录里
+ * 认一个状态码。数出来的东西（待发条数、最老的一条过期了多久）不指向任何角色、
+ * 时间点或正文。
  */
 const inspectStorage = async (
   env: Env,
@@ -2539,8 +2602,12 @@ const inspectStorage = async (
       .bind(nowIso, nowIso)
       .first<{ pending: number; overdue: number | null; oldest: string | null }>();
 
+    // 一行表，条数和登记时刻一次拿全。登记时刻是判断投递失败还算不算数的标尺：
+    // 重置订阅会覆盖这一行、刷新时刻，比它更早的失败都是上一条订阅的旧账。
     const pushRow = present.has('push_subscriptions')
-      ? await db.prepare('SELECT COUNT(*) AS n FROM push_subscriptions').first<{ n: number }>()
+      ? await db
+        .prepare('SELECT COUNT(*) AS n, MAX(updated_at) AS updatedAt FROM push_subscriptions')
+        .first<{ n: number; updatedAt: number | null }>()
       : null;
 
     return {
@@ -2553,6 +2620,7 @@ const inspectStorage = async (
       // 单用户 worker 只存一行。到点却发不出去最常见的原因就是这行是空的——
       // 换了一台 worker 之后云端订阅是空的，而浏览器那侧的订阅一个字都没变。
       pushSubscriptionRegistered: (pushRow?.n ?? 0) > 0,
+      pushDelivery: await inspectPushDelivery(db, pushRow?.updatedAt ?? null),
       pendingTasks: stats?.pending ?? 0,
       overdueTasks: stats?.overdue ?? 0,
       oldestOverdueMinutes: stats?.oldest
