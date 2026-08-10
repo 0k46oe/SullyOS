@@ -17,6 +17,7 @@ import {
     buildStoryHistory,
     buildStoryIdentityGuard,
     buildStoryMiniTheaterReminder,
+    buildStoryWorldbookScanMessages,
     buildTheaterPersona,
     buildTheaterWorldbookSlots,
     compileStoryPreset,
@@ -613,7 +614,11 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                 summaries ? `### 常驻事件盒\n${summaries}` : '',
                 vectorRecall ? buildStoryArchiveMemoryEnvelope(vectorRecall) : '',
             ].filter(Boolean).join('\n\n');
-            const worldbookSlots = buildTheaterWorldbookSlots(selectedBooks, visibleHistory.slice(-20).map(message => ({ role: message.role, content: message.content })), promptIdentityName, actors.map(actor => actor.name));
+            const worldbookScanMessages = buildStoryWorldbookScanMessages(
+                visibleHistory.map(message => ({ role: message.role, content: message.content })),
+                text,
+            );
+            const worldbookSlots = buildTheaterWorldbookSlots(selectedBooks, worldbookScanMessages, promptIdentityName, actors.map(actor => actor.name));
             const compiled = compileStoryPreset({
                 preset: effectivePreset,
                 userName: promptIdentityName,

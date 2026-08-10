@@ -493,6 +493,7 @@ export const createBlankStoryPreset = (name = '新剧情预设', now = Date.now(
         generation: { temperature: 0.9, topP: 1, frequencyPenalty: 0, presencePenalty: 0, maxTokens: 8000 },
         prompts: [
             { id: makeStoryTheaterId(), name: '主叙事规则', enabled: true, role: 'system', content: '直接续写连续的第三人称故事，让人物保持独立动机与知识边界。' },
+            { id: makeStoryTheaterId(), name: '世界书 · 角色设定前', enabled: true, role: 'system', content: '', marker: 'world_before' },
             { id: makeStoryTheaterId(), name: '角色资料', enabled: true, role: 'system', content: '', marker: 'characters' },
             { id: makeStoryTheaterId(), name: '世界书', enabled: true, role: 'system', content: '', marker: 'world_after' },
             { id: makeStoryTheaterId(), name: '剧情设定', enabled: true, role: 'system', content: '', marker: 'scenario' },
@@ -808,10 +809,33 @@ export const compileStoryPreset = (input: {
     const document = (preset || BUILTIN_NIGHT_SCREENING_PRESET).document;
     const messages: StoryApiMessage[] = [];
 
+    const worldBeforePrompts = document.prompts.filter(prompt => prompt.marker === 'world_before');
+    const enabledWorldBeforePrompt = worldBeforePrompts.find(prompt => prompt.enabled);
+    const firstEnabledCharacterIndex = document.prompts.findIndex(prompt => prompt.enabled && prompt.marker === 'characters');
+    const shouldBackfillWorldBefore = worldBeforePrompts.length === 0 && Boolean(slots.worldBefore.trim());
+    const shouldMoveWorldBeforeAheadOfCharacters = Boolean(
+        enabledWorldBeforePrompt
+        && firstEnabledCharacterIndex >= 0
+        && document.prompts.indexOf(enabledWorldBeforePrompt) > firstEnabledCharacterIndex
+        && slots.worldBefore.trim(),
+    );
+
     // 糯米机原生 Prompt Manager 按数组顺序送出；同一个 marker 只注入一次，
     // 角色资料始终使用一份完整的沙盒上下文。
     const injectedMarkers = new Set<string>();
-    for (const prompt of document.prompts) {
+    for (let index = 0; index < document.prompts.length; index += 1) {
+        const prompt = document.prompts[index];
+        if (
+            index === firstEnabledCharacterIndex
+            && (shouldBackfillWorldBefore || shouldMoveWorldBeforeAheadOfCharacters)
+        ) {
+            pushPromptMessage(
+                messages,
+                enabledWorldBeforePrompt?.role || 'system',
+                macroReplace(slots.worldBefore, userName, characterNames),
+            );
+            injectedMarkers.add('world_before');
+        }
         if (!prompt.enabled) continue;
         let raw = prompt.content;
         if (prompt.marker) {
@@ -821,6 +845,11 @@ export const compileStoryPreset = (input: {
         }
         if (!raw.trim()) continue;
         pushPromptMessage(messages, prompt.role, macroReplace(raw, userName, characterNames));
+    }
+
+    // 兼容没有任何原生槽位的旧自定义预设，确保角色设定前世界书不会静默丢失。
+    if (shouldBackfillWorldBefore && firstEnabledCharacterIndex < 0 && !injectedMarkers.has('world_before')) {
+        messages.unshift({ role: 'system', content: macroReplace(slots.worldBefore, userName, characterNames).trim() });
     }
 
     const prefill = String(document.assistantPrefill || '').trim();
@@ -890,7 +919,6 @@ export const dedupeTheaterWorldbooks = (characters: CharacterProfile[]): Mounted
             const keys = [
                 book.id ? `id:${book.id}` : '',
                 `body:${book.title.trim().toLocaleLowerCase()}\u0000${book.content.trim()}`,
-                book.sourceUid !== undefined ? `source:${book.sourceUid}` : '',
             ].filter(Boolean);
             if (keys.length === 0 || keys.some(key => seen.has(key))) continue;
             keys.forEach(key => seen.add(key));
@@ -898,6 +926,21 @@ export const dedupeTheaterWorldbooks = (characters: CharacterProfile[]): Mounted
         }
     }
     return output.sort((a, b) => (a.category || '').localeCompare(b.category || '', 'zh-CN') || a.title.localeCompare(b.title, 'zh-CN'));
+};
+
+export const buildStoryWorldbookScanMessages = (
+    history: WorldbookScanMessage[],
+    currentUserContent: string,
+    limit = 20,
+): WorldbookScanMessage[] => {
+    const safeLimit = Math.max(1, Math.floor(limit));
+    const current = currentUserContent.trim();
+    if (!current) return history.slice(-safeLimit);
+    const historyLimit = safeLimit - 1;
+    return [
+        ...(historyLimit > 0 ? history.slice(-historyLimit) : []),
+        { role: 'user', content: current },
+    ];
 };
 
 export const buildTheaterWorldbookSlots = (
