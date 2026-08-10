@@ -78,6 +78,16 @@ class Spring {
 const clamp = (value: number, min = -1, max = 1): number => Math.max(min, Math.min(max, value));
 
 /**
+ * Counter-steer local eye parameters against the final head pose so a model
+ * keeps approximate camera contact while speaking. The caps intentionally
+ * preserve some natural head-led gaze instead of producing a rigid stare.
+ */
+export const getViewerEyeContactCompensation = (headX: number, headY: number): { eyeX: number; eyeY: number } => ({
+  eyeX: clamp(-headX * 0.9, -0.56, 0.56),
+  eyeY: clamp(-headY * 0.72, -0.38, 0.38),
+});
+
+/**
  * Stateful, renderer-independent avatar motion. It is intentionally autonomous:
  * LLM performance directions bias it, but pose choices, attention, blinking and
  * speech beats continue without a new model response.
@@ -493,6 +503,11 @@ export class AvatarAutonomy {
     targetHeadY += accent.value * 0.11 * intensity;
     targetHeadX += accent.value * accent.side * 0.035 * intensity;
     targetLift -= accent.value * 0.006 * intensity;
+    // Speech should travel through the torso too. Without a body impulse the
+    // renderer can faithfully drive nine axes while the last three stay close
+    // to zero, which makes a detailed rig read like a face-only animation.
+    targetBodyY += accent.value * 0.18 * intensity;
+    targetBodyX += accent.value * accent.side * 0.065 * intensity;
 
     let gestureEnvelope = 0;
     const reaction = this.reaction;
@@ -512,45 +527,72 @@ export class AvatarAutonomy {
           // nod/shake 的振幅随 gestureEnvelope（已含 intensity）线性放大：
           // intensity 0.95 是用力点头/摇头，0.4 只是轻轻颔首。
           case 'nod':
-            targetHeadY += Math.sin(localTime * 8.4) * 0.44 * gestureEnvelope;
-            targetLift += Math.sin(localTime * 8.4) * 0.01 * gestureEnvelope;
+            {
+              const beat = Math.sin(localTime * 8.4);
+              targetHeadY += beat * 0.44 * gestureEnvelope;
+              targetBodyY += beat * 0.34 * gestureEnvelope;
+              targetLift += beat * 0.01 * gestureEnvelope;
+            }
             break;
           case 'shake':
-            targetHeadX += Math.sin(localTime * 7.2) * 0.48 * gestureEnvelope;
-            targetHeadZ -= Math.sin(localTime * 7.2) * 0.1 * gestureEnvelope;
+            {
+              const sweep = Math.sin(localTime * 7.2);
+              targetHeadX += sweep * 0.48 * gestureEnvelope;
+              targetHeadZ -= sweep * 0.1 * gestureEnvelope;
+              targetBodyX += sweep * 0.36 * gestureEnvelope;
+              targetBodyZ -= sweep * 0.12 * gestureEnvelope;
+            }
             break;
           case 'tilt':
             targetHeadZ -= 0.3 * gestureEnvelope;
             targetHeadX += 0.1 * gestureEnvelope;
+            targetBodyZ -= 0.38 * gestureEnvelope;
+            targetBodyX += 0.11 * gestureEnvelope;
             break;
           case 'lean-in':
             targetLean += 0.1 * gestureEnvelope;
             targetHeadY += 0.1 * gestureEnvelope;
+            targetBodyY += 0.56 * gestureEnvelope;
+            targetBodyZ -= 0.08 * gestureEnvelope;
             targetLift -= 0.012 * gestureEnvelope;
             break;
           case 'lean-back':
             targetLean -= 0.09 * gestureEnvelope;
             targetHeadY += 0.06 * gestureEnvelope;
             targetHeadZ += 0.05 * gestureEnvelope;
+            targetBodyY -= 0.52 * gestureEnvelope;
+            targetBodyZ += 0.14 * gestureEnvelope;
             break;
           case 'explain':
-            targetHeadX += Math.sin(localTime * 2.4) * 0.2 * gestureEnvelope;
-            targetHeadZ -= Math.sin(localTime * 2.4) * 0.1 * gestureEnvelope;
-            targetRotation += Math.sin(localTime * 2.4) * 0.009 * gestureEnvelope;
+            {
+              const sweep = Math.sin(localTime * 2.4);
+              targetHeadX += sweep * 0.2 * gestureEnvelope;
+              targetHeadZ -= sweep * 0.1 * gestureEnvelope;
+              targetBodyX += sweep * 0.34 * gestureEnvelope;
+              targetBodyZ -= sweep * 0.22 * gestureEnvelope;
+              targetRotation += sweep * 0.009 * gestureEnvelope;
+            }
             break;
           case 'wave':
             targetHeadX -= 0.12 * gestureEnvelope;
             targetHeadZ += 0.13 * gestureEnvelope;
+            targetBodyX -= 0.25 * gestureEnvelope;
+            targetBodyZ += 0.24 * gestureEnvelope;
             targetLean += 0.018 * gestureEnvelope;
             break;
           case 'shy':
             targetHeadY -= 0.18 * gestureEnvelope;
             targetHeadX += 0.1 * gestureEnvelope;
             targetHeadZ -= 0.16 * gestureEnvelope;
+            targetBodyX += 0.16 * gestureEnvelope;
+            targetBodyY += 0.2 * gestureEnvelope;
+            targetBodyZ -= 0.28 * gestureEnvelope;
             targetLean += 0.018 * gestureEnvelope;
             break;
           case 'talk':
             targetHeadY += accent.value * 0.08 * gestureEnvelope;
+            targetBodyY += accent.value * 0.24 * gestureEnvelope;
+            targetBodyX += accent.value * accent.side * 0.09 * gestureEnvelope;
             break;
           default:
             break;
@@ -559,21 +601,27 @@ export class AvatarAutonomy {
         if (reaction.direction.camera === 'push-in' || reaction.direction.camera === 'close') {
           targetLean += 0.075 * gestureEnvelope;
           targetHeadY += 0.12 * gestureEnvelope;
+          targetBodyY += 0.28 * gestureEnvelope;
           targetLift -= 0.018 * gestureEnvelope;
         } else if (reaction.direction.camera === 'pull-out') {
           targetLean *= 1 - gestureEnvelope * 0.8;
+          targetBodyY -= 0.18 * gestureEnvelope;
         }
 
         if (reaction.direction.emotion === 'surprised') {
           targetHeadY += 0.26 * gestureEnvelope;
+          targetBodyY += 0.24 * gestureEnvelope;
           targetLean += 0.022 * gestureEnvelope;
           targetLift -= 0.014 * gestureEnvelope;
         } else if (reaction.direction.emotion === 'sad') {
           targetHeadY -= 0.12 * gestureEnvelope;
           targetHeadZ -= 0.09 * gestureEnvelope;
+          targetBodyY -= 0.14 * gestureEnvelope;
+          targetBodyZ -= 0.12 * gestureEnvelope;
         } else if (reaction.direction.emotion === 'happy') {
           targetLean += 0.012 * gestureEnvelope;
           targetHeadY += 0.06 * gestureEnvelope;
+          targetBodyY += 0.1 * gestureEnvelope;
         }
       }
     }
@@ -590,12 +638,26 @@ export class AvatarAutonomy {
     const headX = this.headX.step(clamp(targetHeadX), dt, 0.72 * (touchSpeed ? 1.45 : 1));
     const headY = this.headY.step(clamp(targetHeadY), dt, 0.68 * (touchSpeed ? 1.45 : 1));
     const headZ = this.headZ.step(clamp(targetHeadZ), dt, 0.64 * (touchSpeed ? 1.45 : 1));
-    const bodyFrequency = precision ? 0.62 : 0.34 * (touchSpeed ? 1.2 : 1);
-    const bodyX = this.bodyX.step(clamp(precision ? targetBodyX : headX * 0.62 + microX * 0.8), dt, bodyFrequency);
-    const bodyY = this.bodyY.step(clamp(precision ? targetBodyY : headY * 0.48 + microY * 0.7), dt, precision ? 0.58 : 0.31 * (touchSpeed ? 1.2 : 1));
-    const bodyZ = this.bodyZ.step(clamp(precision ? targetBodyZ : headZ * 0.7 + microZ), dt, precision ? 0.56 : 0.3 * (touchSpeed ? 1.2 : 1));
-    const eyeX = this.eyeX.step(clamp(targetEyeX), dt, 2.4, 0.78);
-    const eyeY = this.eyeY.step(clamp(targetEyeY), dt, 2.2, 0.78);
+    // Body axes used to run at ~0.3 Hz and then get smoothed a second time in
+    // Live2D. A short touch reaction ended before the torso reached a visible
+    // fraction of its target. Keep the springs damped, but let them arrive while
+    // the authored beat is still on screen.
+    const bodyFrequency = precision ? 0.62 : 0.64 * (touchSpeed ? 1.25 : 1);
+    const bodyX = this.bodyX.step(clamp(precision ? targetBodyX : headX * 0.5 + microX * 0.8 + targetBodyX), dt, bodyFrequency);
+    const bodyY = this.bodyY.step(clamp(precision ? targetBodyY : headY * 0.36 + microY * 0.7 + targetBodyY), dt, precision ? 0.58 : 0.6 * (touchSpeed ? 1.25 : 1));
+    const bodyZ = this.bodyZ.step(clamp(precision ? targetBodyZ : headZ * 0.54 + microZ + targetBodyZ), dt, precision ? 0.56 : 0.58 * (touchSpeed ? 1.25 : 1));
+    // “眼球归零”只表示眼睛朝着脸的正前方；头在摇晃/点头时，眼睛仍会随头骨一起
+    // 离开镜头。说话且明确 gaze=viewer 时，按弹簧平滑后的实际头姿做有限反向补偿。
+    // 眼球响应略快于普通扫视，减少摇头换向时的错相；显式 left/right/down 与导演
+    // 精确姿态保持原样，不在这里抢控制权。
+    const maintainsViewerEyeContact = !precision && activity === 'speaking' && direction.gaze === 'viewer';
+    if (maintainsViewerEyeContact) {
+      const correction = getViewerEyeContactCompensation(headX, headY);
+      targetEyeX = correction.eyeX;
+      targetEyeY = correction.eyeY;
+    }
+    const eyeX = this.eyeX.step(clamp(targetEyeX), dt, maintainsViewerEyeContact ? 3.1 : 2.4, maintainsViewerEyeContact ? 0.9 : 0.78);
+    const eyeY = this.eyeY.step(clamp(targetEyeY), dt, maintainsViewerEyeContact ? 2.8 : 2.2, maintainsViewerEyeContact ? 0.9 : 0.78);
     // lean 允许为负（lean-back 后仰）；正向前倾上限稍高。
     const lean = this.lean.step(clamp(targetLean, -0.1, 0.14), dt, 0.42 * (touchSpeed ? 1.3 : 1));
     const lift = this.lift.step(targetLift, dt, 0.5 * (touchSpeed ? 1.3 : 1));

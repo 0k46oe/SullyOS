@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AvatarAutonomy, type AvatarActivity, type AvatarAttentionPointer } from './avatarAutonomy';
+import { AvatarAutonomy, getViewerEyeContactCompensation, type AvatarActivity, type AvatarAttentionPointer } from './avatarAutonomy';
 import { DEFAULT_AVATAR_PERFORMANCE, type AvatarPerformanceDirection } from './avatarPerformance';
 
 const seededRandom = (seed = 0x12345678) => {
@@ -25,6 +25,12 @@ const run = (
 };
 
 describe('AvatarAutonomy', () => {
+  it('maps the final head pose to a bounded opposite eye correction', () => {
+    const correction = getViewerEyeContactCompensation(0.4, -0.25);
+    expect(correction.eyeX).toBeCloseTo(-0.36, 8);
+    expect(correction.eyeY).toBeCloseTo(0.18, 8);
+    expect(getViewerEyeContactCompensation(2, -2)).toEqual({ eyeX: -0.56, eyeY: 0.38 });
+  });
   it('starts centered instead of choosing a random left or right turn on boot', () => {
     const frames = run(new AvatarAutonomy(0, seededRandom(5)), 900);
 
@@ -108,6 +114,21 @@ describe('AvatarAutonomy', () => {
     expect(viewer.pose).not.toBe('pointer');
     expect(averted.eyeX).toBeLessThan(-0.5);
   });
+  it('counter-steers the eyes toward the camera while the head shakes', () => {
+    const direction: AvatarPerformanceDirection = {
+      ...DEFAULT_AVATAR_PERFORMANCE,
+      gesture: 'shake',
+      gaze: 'viewer',
+      intensity: 1,
+    };
+    const frames = run(new AvatarAutonomy(0, seededRandom(49)), 2_200, direction, 'speaking');
+    const activeFrames = frames.filter(frame => Math.abs(frame.headX) > 0.12);
+
+    expect(activeFrames.length).toBeGreaterThan(10);
+    expect(Math.max(...activeFrames.map(frame => Math.abs(frame.eyeX)))).toBeGreaterThan(0.12);
+    expect(Math.max(...activeFrames.map(frame => Math.abs(frame.eyeX)))).toBeLessThan(0.58);
+    expect(activeFrames.filter(frame => frame.headX * frame.eyeX < 0).length / activeFrames.length).toBeGreaterThan(0.75);
+  });
   it('uses a fast touch attack without speeding up ambient call motion', () => {
     const direction: AvatarPerformanceDirection = {
       ...DEFAULT_AVATAR_PERFORMANCE,
@@ -126,6 +147,45 @@ describe('AvatarAutonomy', () => {
     expect(touchAttack.gestureEnvelope).toBeGreaterThan(ambientAttack.gestureEnvelope + 0.4);
     expect(touched.step(1_500, direction, 'speaking', noPointer).gestureEnvelope).toBe(0);
     expect(ambient.step(1_500, direction, 'speaking', noPointer).gestureEnvelope).toBeGreaterThan(0.5);
+  });
+
+  it('turns a short touch gesture into visible body XYZ motion', () => {
+    const direction: AvatarPerformanceDirection = {
+      ...DEFAULT_AVATAR_PERFORMANCE,
+      gesture: 'tilt',
+      intensity: 0.9,
+    };
+    const performer = new AvatarAutonomy(0, seededRandom(57));
+    performer.triggerTouchReaction(direction, 'speaking', 0);
+    const frames = run(performer, 1_100, direction, 'speaking');
+
+    expect(Math.max(...frames.map(frame => Math.abs(frame.bodyX)))).toBeGreaterThan(0.08);
+    expect(Math.max(...frames.map(frame => Math.abs(frame.bodyZ)))).toBeGreaterThan(0.2);
+  });
+
+  it('keeps authored head locks while allowing a directed torso reaction', () => {
+    const direction: AvatarPerformanceDirection = {
+      ...DEFAULT_AVATAR_PERFORMANCE,
+      gesture: 'lean-back',
+      intensity: 1,
+      precision: {
+        lockAutonomy: true,
+        lockHead: true,
+        headX: 0,
+        headY: 0,
+        headZ: 0,
+        bodyX: 0,
+        bodyY: 0,
+        bodyZ: 0,
+      },
+    };
+    const frames = run(new AvatarAutonomy(0, seededRandom(58)), 1_600, direction, 'speaking');
+
+    expect(Math.max(...frames.map(frame => Math.abs(frame.headX)))).toBe(0);
+    expect(Math.max(...frames.map(frame => Math.abs(frame.headY)))).toBe(0);
+    expect(Math.max(...frames.map(frame => Math.abs(frame.headZ)))).toBe(0);
+    expect(Math.max(...frames.map(frame => Math.abs(frame.bodyY)))).toBeGreaterThan(0.28);
+    expect(Math.max(...frames.map(frame => Math.abs(frame.bodyZ)))).toBeGreaterThan(0.06);
   });
 
   it('locks an authored startup pose, gaze and body against ambient randomness', () => {

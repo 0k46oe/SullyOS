@@ -20,6 +20,12 @@ const EMOTION_LABELS: Record<UserCameraEmotion, string> = {
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
 const average = (...values: number[]): number => values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
+const median = (...values: number[]): number => {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : average(sorted[middle - 1], sorted[middle]);
+};
 const score = (shapes: ReadonlyMap<string, number>, name: string): number => clamp01(shapes.get(name) || 0);
 
 export const blendshapeCategoriesToMap = (categories: readonly Pick<Category, 'categoryName' | 'score'>[]): Map<string, number> => {
@@ -33,8 +39,11 @@ export const blendshapeCategoriesToMap = (categories: readonly Pick<Category, 'c
 };
 
 /**
- * Conservative blendshape-to-emotion calibration. It intentionally prefers
- * neutral over a low-confidence guess: this signal is context, not a diagnosis.
+ * Blendshape coefficients have very different useful ranges. Requiring every
+ * expression to cross one shared raw-score threshold made normal webcam
+ * expressions collapse to neutral, especially surprise, sadness and anger.
+ * Each candidate therefore has its own activation threshold and a small
+ * feature gate that rejects common resting-face noise.
  */
 export const classifyUserCameraBlendshapes = (shapes: ReadonlyMap<string, number>): UserCameraEmotionResult => {
   const smile = average(score(shapes, 'mouthSmileLeft'), score(shapes, 'mouthSmileRight'));
@@ -49,22 +58,59 @@ export const classifyUserCameraBlendshapes = (shapes: ReadonlyMap<string, number
   const jawOpen = score(shapes, 'jawOpen');
   const browInnerUp = score(shapes, 'browInnerUp');
 
-  const candidates: Array<{ emotion: Exclude<UserCameraEmotion, 'neutral'>; value: number }> = [
-    { emotion: 'happy', value: smile * 0.72 + cheekSquint * 0.28 },
-    { emotion: 'surprised', value: jawOpen * 0.42 + eyeWide * 0.36 + browInnerUp * 0.22 - smile * 0.18 },
-    { emotion: 'sad', value: frown * 0.58 + browInnerUp * 0.30 + mouthPress * 0.12 },
-    { emotion: 'angry', value: browDown * 0.56 + mouthPress * 0.26 + noseSneer * 0.18 },
-    { emotion: 'disgusted', value: noseSneer * 0.52 + mouthUpper * 0.30 + browDown * 0.18 },
-    { emotion: 'tired', value: eyeClosed * 0.72 + mouthPress * 0.16 + (1 - eyeWide) * 0.12 },
-  ].map(item => ({ ...item, value: clamp01(item.value) }));
-  candidates.sort((a, b) => b.value - a.value);
+  const candidates: Array<{
+    emotion: Exclude<UserCameraEmotion, 'neutral'>;
+    value: number;
+    threshold: number;
+    eligible: boolean;
+  }> = [
+    {
+      emotion: 'happy',
+      value: smile * 0.76 + cheekSquint * 0.24,
+      threshold: 0.28,
+      eligible: smile >= 0.22,
+    },
+    {
+      emotion: 'surprised',
+      value: jawOpen * 0.44 + eyeWide * 0.34 + browInnerUp * 0.22 - smile * 0.16,
+      threshold: 0.28,
+      eligible: jawOpen >= 0.22 && (eyeWide >= 0.1 || browInnerUp >= 0.16),
+    },
+    {
+      emotion: 'sad',
+      value: frown * 0.56 + browInnerUp * 0.32 + mouthPress * 0.12,
+      threshold: 0.24,
+      eligible: frown >= 0.18 && browInnerUp >= 0.08,
+    },
+    {
+      emotion: 'angry',
+      value: browDown * 0.56 + mouthPress * 0.26 + noseSneer * 0.18,
+      threshold: 0.24,
+      eligible: browDown >= 0.18 && (mouthPress >= 0.08 || noseSneer >= 0.06 || frown >= 0.1),
+    },
+    {
+      emotion: 'disgusted',
+      value: noseSneer * 0.52 + mouthUpper * 0.30 + browDown * 0.18,
+      threshold: 0.22,
+      eligible: noseSneer >= 0.16 && (mouthUpper >= 0.1 || browDown >= 0.08),
+    },
+    {
+      emotion: 'tired',
+      value: eyeClosed * 0.8 + mouthPress * 0.2,
+      threshold: 0.58,
+      eligible: eyeClosed >= 0.58,
+    },
+  ].map(item => ({ ...item, value: item.eligible ? clamp01(item.value) : 0 }));
+  candidates.sort((a, b) => (b.value / b.threshold) - (a.value / a.threshold));
   const winner = candidates[0];
-  const runnerUp = candidates[1]?.value || 0;
-  const decisive = winner.value >= 0.42 && winner.value - runnerUp >= 0.045;
+  const runnerUp = candidates[1];
+  const activation = winner.value / winner.threshold;
+  const runnerUpActivation = runnerUp ? runnerUp.value / runnerUp.threshold : 0;
+  const decisive = winner.eligible && activation >= 1;
   const emotion: UserCameraEmotion = decisive ? winner.emotion : 'neutral';
   const confidence = emotion === 'neutral'
-    ? clamp01(0.58 + (0.42 - winner.value) * 0.5)
-    : clamp01(0.5 + winner.value * 0.42 + Math.max(0, winner.value - runnerUp) * 0.18);
+    ? clamp01(0.54 + Math.max(0, 1 - activation) * 0.18)
+    : clamp01(0.58 + Math.max(0, activation - 1) * 0.24 + Math.max(0, activation - runnerUpActivation) * 0.08);
   return { emotion, label: EMOTION_LABELS[emotion], confidence };
 };
 
@@ -133,7 +179,7 @@ const detectFrame = (landmarker: FaceLandmarker, video: HTMLVideoElement): FaceL
 
 const delay = (ms: number) => new Promise<void>(resolve => window.setTimeout(resolve, ms));
 
-/** Samples three frames to avoid treating a single blink as a lasting emotion. */
+/** Samples three frames and takes their median so one blink/noisy frame cannot dominate. */
 export const detectUserCameraEmotion = async (video: HTMLVideoElement): Promise<UserCameraEmotionResult | null> => {
   if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth || !video.videoHeight) return null;
   await preloadUserCameraEmotionDetector();
@@ -150,7 +196,7 @@ export const detectUserCameraEmotion = async (video: HTMLVideoElement): Promise<
   }
   if (!aggregate.size) return null;
   return classifyUserCameraBlendshapes(new Map(
-    [...aggregate].map(([name, values]) => [name, average(...values)]),
+    [...aggregate].map(([name, values]) => [name, median(...values)]),
   ));
 };
 

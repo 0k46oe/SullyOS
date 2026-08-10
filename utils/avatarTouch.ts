@@ -19,6 +19,8 @@ import { voiceLanguageLabel } from './voiceLanguage';
 
 export const AVATAR_TOUCH_ZONES = ['head', 'face', 'hand', 'body', 'other'] as const;
 export type AvatarTouchZone = typeof AVATAR_TOUCH_ZONES[number];
+export const AVATAR_TOUCH_PARTS = ['hair', 'head', 'face', 'shoulder', 'arm', 'hand', 'chest', 'waist', 'body', 'other'] as const;
+export type AvatarTouchPart = typeof AVATAR_TOUCH_PARTS[number];
 export const DEFAULT_COMPANION_TOUCH_ZONES: AvatarTouchZone[] = ['head', 'face', 'hand', 'body'];
 export type AvatarTouchReactionPack = Partial<Record<AvatarTouchZone, CompanionTouchReaction[]>>;
 
@@ -39,6 +41,8 @@ export interface AvatarTouchRequest {
 
 export interface AvatarTouchHit extends AvatarTouchRequest {
   zone: AvatarTouchZone;
+  /** Precise visual target; zone remains the backward-compatible reaction bucket. */
+  part?: AvatarTouchPart;
   source: 'live2d-hit-area' | 'live2d-bounds' | 'vrm-raycast' | 'portrait-bounds';
   rawAreas: string[];
 }
@@ -46,6 +50,7 @@ export interface AvatarTouchHit extends AvatarTouchRequest {
 export interface AvatarTouchRecord {
   id: string;
   zone: AvatarTouchZone;
+  part?: AvatarTouchPart;
   rawAreas: string[];
   timestamp: number;
 }
@@ -58,7 +63,14 @@ export interface AvatarTouchReply {
 export interface AvatarTouchModelAction {
   id: string;
   name: string;
+  kind?: 'motion' | 'expression' | 'params';
+  tags?: string[];
 }
+
+const formatAvatarTouchModelAction = (action: AvatarTouchModelAction): string => {
+  const capabilities = [action.kind, ...(action.tags || []).slice(0, 4)].filter(Boolean).join(' / ');
+  return `- ${action.id}: ${action.name}${capabilities ? ` [${capabilities}]` : ''}`;
+};
 
 const ZONE_LABELS: Record<AvatarTouchZone, string> = {
   head: '头顶或头发',
@@ -80,6 +92,25 @@ const TOAST_ZONE_LABELS: Record<AvatarTouchZone, string> = {
 
 export const avatarTouchZoneToastLabel = (zone: AvatarTouchZone): string => TOAST_ZONE_LABELS[zone];
 
+const TOUCH_PART_LABELS: Record<AvatarTouchPart, string> = {
+  hair: '头发',
+  head: '头顶',
+  face: '脸',
+  shoulder: '肩膀',
+  arm: '手臂',
+  hand: '手',
+  chest: '胸口',
+  waist: '腰部',
+  body: '身体',
+  other: '身边',
+};
+
+export const avatarTouchPartLabel = (part: AvatarTouchPart): string => TOUCH_PART_LABELS[part];
+
+export const avatarTouchTargetLabel = (
+  hit: Pick<AvatarTouchHit, 'zone' | 'part'>,
+): string => hit.part ? avatarTouchPartLabel(hit.part) : avatarTouchZoneToastLabel(hit.zone);
+
 export const normalizeCompanionDialogue = (raw: string, characterName = ''): string => {
   const escapedName = characterName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return stripCallTextFormatting(raw)
@@ -98,11 +129,12 @@ export const normalizeCompanionDialogue = (raw: string, characterName = ''): str
 };
 
 export const createAvatarTouchRecord = (
-  hit: Pick<AvatarTouchHit, 'zone' | 'rawAreas'>,
+  hit: Pick<AvatarTouchHit, 'zone' | 'part' | 'rawAreas'>,
   timestamp = Date.now(),
 ): AvatarTouchRecord => ({
   id: `${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
   zone: hit.zone,
+  ...(hit.part ? { part: hit.part } : {}),
   rawAreas: hit.rawAreas.slice(0, 8),
   timestamp,
 });
@@ -128,14 +160,16 @@ export const buildPendingAvatarTouchContext = (
   userName: string,
 ): string => {
   if (!records.length) return '';
-  const counts = new Map<AvatarTouchZone, number>();
-  records.forEach(record => counts.set(record.zone, (counts.get(record.zone) || 0) + 1));
-  const details = AVATAR_TOUCH_ZONES
-    .filter(zone => counts.has(zone))
-    .map(zone => `${avatarTouchZoneToastLabel(zone)}${counts.get(zone)}次`)
+  const counts = new Map<string, number>();
+  records.forEach(record => {
+    const label = avatarTouchTargetLabel(record);
+    counts.set(label, (counts.get(label) || 0) + 1);
+  });
+  const details = [...counts]
+    .map(([label, count]) => `${label}${count}次`)
     .join('、');
   const action = records.length === 1
-    ? `${userName}在开口前戳了戳${characterName}的${avatarTouchZoneToastLabel(records[0].zone)}`
+    ? `${userName}在开口前戳了戳${characterName}的${avatarTouchTargetLabel(records[0])}`
     : `${userName}在开口前连续戳了${characterName}${records.length}次（${details}）`;
   return `[本轮尚未回应的触碰互动]\n${action}。这些动作已经在本地发生过，但你还没有用语言回应。请在回答用户本轮话语时自然地顺带接住它们，不要逐条播报、不要解释系统，也不要把触碰当成一条单独的新消息。`;
 };
@@ -168,27 +202,72 @@ export const applyAvatarTouchForce = (
   touch: Pick<AvatarTouchRequest, 'pressure' | 'durationMs' | 'pointerType'>,
 ): AvatarPerformanceDirection => {
   const force = resolveAvatarTouchForce(touch);
+  // A touch is a discrete physical event, so even an old cached AI reaction
+  // with an overly timid intensity must remain readable on the desktop stage.
+  // Pressure/hold time still decides how far above that visible floor it goes.
+  const visibleTouchFloor = 0.52 + force * 0.28;
   return {
     ...direction,
-    intensity: Math.max(0.25, Math.min(1, direction.intensity * (0.72 + force * 0.46))),
+    intensity: Math.max(visibleTouchFloor, Math.min(1, direction.intensity * (0.72 + force * 0.46))),
   };
+};
+
+const zoneForTouchPart = (part: AvatarTouchPart): AvatarTouchZone => {
+  if (part === 'hair' || part === 'head') return 'head';
+  if (part === 'face') return 'face';
+  if (part === 'hand' || part === 'arm') return 'hand';
+  if (part === 'shoulder' || part === 'chest' || part === 'waist' || part === 'body') return 'body';
+  return 'other';
+};
+
+const geometricTouchPart = (fallbackY: number, fallbackX: number): AvatarTouchPart => {
+  const x = Math.max(0, Math.min(1, fallbackX));
+  const y = Math.max(0, Math.min(1, fallbackY));
+  if (y < 0.14) return 'hair';
+  if (y < 0.34) return x > 0.22 && x < 0.78 ? 'face' : 'hair';
+  if (y < 0.5) {
+    if (x < 0.18 || x > 0.82) return 'arm';
+    if (x < 0.4 || x > 0.6) return 'shoulder';
+    return 'chest';
+  }
+  if (y < 0.72) return x < 0.25 || x > 0.75 ? 'arm' : 'chest';
+  if (y < 0.9) return 'waist';
+  return 'other';
+};
+
+export const resolveAvatarTouchTarget = (
+  rawAreas: string[],
+  fallbackY?: number,
+  fallbackX?: number,
+): { zone: AvatarTouchZone; part: AvatarTouchPart } => {
+  const value = rawAreas.join(' ').toLowerCase();
+  const precisePart = /(face|cheek|mouth|eye|nose|lip|脸|面|頬|顏|眼|嘴|鼻)/i.test(value) ? 'face'
+    : /(hair|bang|fringe|ahoge|髪|发|髮|刘海|瀏海)/i.test(value) ? 'hair'
+      : /(hand|finger|palm|wrist|手|指|掌|腕)/i.test(value) ? 'hand'
+        : /(forearm|upperarm|lowerarm|arm|sleeve|elbow|手臂|胳膊|臂|袖|肘)/i.test(value) ? 'arm'
+          : /(shoulder|clavicle|肩|锁骨|鎖骨)/i.test(value) ? 'shoulder'
+            : /(chest|bust|breast|胸)/i.test(value) ? 'chest'
+              : /(waist|hip|pelvis|腰|胯|臀)/i.test(value) ? 'waist'
+                : null;
+  if (precisePart) return { zone: zoneForTouchPart(precisePart), part: precisePart };
+
+  const hasGeometry = Number.isFinite(fallbackY) && Number.isFinite(fallbackX);
+  const genericHead = /(head|hat|ear|头|頭|帽|耳)/i.test(value);
+  const genericBody = /(body|torso|身体|身體|躯干|軀幹)/i.test(value);
+  if (hasGeometry) {
+    const part = geometricTouchPart(fallbackY!, fallbackX!);
+    return { zone: zoneForTouchPart(part), part };
+  }
+  if (genericHead) return { zone: 'head', part: 'head' };
+  if (genericBody) return { zone: 'body', part: 'body' };
+  return { zone: 'other', part: 'other' };
 };
 
 export const normalizeAvatarTouchZone = (
   rawAreas: string[],
-  fallbackY = 0.5,
-  fallbackX = 0.5,
-): AvatarTouchZone => {
-  const value = rawAreas.join(' ').toLowerCase();
-  if (/(face|cheek|mouth|eye|nose|脸|頬|顏)/i.test(value)) return 'face';
-  if (/(head|hair|hat|ear|头|頭|髪|发|耳)/i.test(value)) return 'head';
-  if (/(hand|arm|sleeve|手|腕|臂|袖)/i.test(value)) return 'hand';
-  if (/(body|bust|chest|torso|shoulder|waist|hip|身体|身體|胸|肩|腰)/i.test(value)) return 'body';
-  if (fallbackY < 0.3) return fallbackX > 0.28 && fallbackX < 0.72 ? 'face' : 'head';
-  if (fallbackY < 0.68 && (fallbackX < 0.24 || fallbackX > 0.76)) return 'hand';
-  if (fallbackY < 0.72) return 'body';
-  return 'other';
-};
+  fallbackY?: number,
+  fallbackX?: number,
+): AvatarTouchZone => resolveAvatarTouchTarget(rawAreas, fallbackY, fallbackX).zone;
 
 export const buildImmediateTouchPerformance = (zone: AvatarTouchZone): AvatarPerformanceDirection => {
   if (zone === 'head') {
@@ -237,16 +316,22 @@ export const buildAvatarTouchSystemPrompt = (
   coreContext: string,
   characterName: string,
   userName: string,
-  hit: Pick<AvatarTouchHit, 'zone' | 'rawAreas'>,
+  hit: Pick<AvatarTouchHit, 'zone' | 'part' | 'rawAreas'>,
   modelActions: AvatarTouchModelAction[] = [],
 ): string => {
   const actionList = modelActions.length
-    ? modelActions.slice(0, 60).map(action => `- ${action.id}: ${action.name}`).join('\n')
+    ? modelActions.slice(0, 60).map(formatAvatarTouchModelAction).join('\n')
     : '（当前没有模型专属动作）';
   return `${coreContext}
 
+### 桌面 Live2D 动作优先级
+- 表情只是叠加层，不是完整演出；必须同时给出肉眼可见的手势或身体反应。
+- 白名单中存在语义匹配的 [motion] 时优先选用；不能拿一个表情动作代替匹配的身体动作。
+- 物理触碰反馈的 intensity 通常应在 0.68-1.0；只有角色刻意压住反应时才使用更低数值。
+- 让头部 XYZ 与身体 XYZ 都参与：触碰值得回应时，应从 nod/shake/tilt/explain/wave/shy/lean-in/lean-back 中选，不要只给 idle/talk。
+
 ### 当前面对面的触碰互动
-${userName}刚刚轻轻触碰了${characterName}的「${avatarTouchZoneLabel(hit.zone)}」。
+${userName}刚刚轻轻触碰了${characterName}的「${avatarTouchTargetLabel(hit)}」。
 模型命中区原名：${hit.rawAreas.length ? hit.rawAreas.join('、') : '自动识别区域'}。
 
 这是一次真实、低频的面对面互动。请直接以${characterName}本人回应：
@@ -322,7 +407,7 @@ export const requestAvatarTouchReply = async (options: {
   const recentMessages = allMessages
     .filter(message => message.role === 'user' || message.role === 'assistant')
     .slice(-Math.max(8, Math.min(60, recentMessageLimit)));
-  const eventText = `[面对面触碰互动] ${user.name || '用户'}轻轻触碰了你的${avatarTouchZoneLabel(hit.zone)}。`;
+  const eventText = `[面对面触碰互动] ${user.name || '用户'}轻轻触碰了你的${avatarTouchTargetLabel(hit)}。`;
 
   await injectMemoryPalace(
     character,
@@ -398,7 +483,7 @@ export const buildAvatarTouchReactionPackPrompt = (
   voiceLanguage = '',
 ): string => {
   const actionList = modelActions.length
-    ? modelActions.slice(0, 60).map(action => `- ${action.id}: ${action.name}`).join('\n')
+    ? modelActions.slice(0, 60).map(formatAvatarTouchModelAction).join('\n')
     : '（当前没有模型专属动作）';
   const zoneList = zones.map(zone => `- ${zone}: ${avatarTouchZoneLabel(zone)}`).join('\n');
   const spokenLanguage = voiceLanguage ? voiceLanguageLabel(voiceLanguage) : '简体中文（与原文一致）';
@@ -416,6 +501,12 @@ export const buildAvatarTouchReactionPackPrompt = (
     )),
   ]));
   return `${coreContext}
+
+### 桌面 Live2D 动作优先级
+- 每条缓存反馈都必须包含肉眼可见的手势或身体拍点；只有 faces 变化视为不完整。
+- 白名单动作带有 [motion] / [expression] / [params] 能力标记；语义匹配时优先使用 [motion]，表情与参数只能作为叠加层。
+- 大多数反馈的 intensity 使用 0.68-1.0，让精细的头部/身体 XYZ 绑定真正动起来；只有刻意克制的角色时刻才保持轻微。
+- 同一部位的多条反馈要改变身体轮廓（转、歪、靠近、后缩、解释或挥手），不要生成四条仅表情不同的变体。
 
 ### 触感陪伴桌面 · 一次性反馈包
 ${userName}正在为${characterName}设置可触摸部位。请一次生成完整反馈包；保存后，桌面只会在本地轮播这些结果，不会每次触摸都再次请求你。

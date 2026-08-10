@@ -84,6 +84,9 @@ export const requestCompanionPerformanceCues = async ({
 - 禁止任何随机左右转头。默认头部正中；只有台词语义明确需要时，才可在对应句 cue 中有意指定一次 nod / shake / tilt、左右视线、precision 头部角度或带头部曲线的白名单 model_actions。
 - 必须严格按下面的句子表返回 ${sentences.length} 个 cues：每句话一个主动作，不可合并、不可拆分、不可增加过场拍。
 - 每句可组合 emotion、一个 gesture、最多四个 face、镜头和白名单 model_actions；优先让表情、手臂、身体前后倾和模型专属动作承担变化，头部动作必须少而明确。
+- faces 只是叠加层，不能作为整句的唯一变化；每个 start 和 end 至少有一个可读的 gesture、身体轮廓变化或 [motion] 模型动作。
+- 白名单条目带有动作种类和语义标签。存在匹配的 [motion] 时优先采用，不能用 [expression] 冒充身体动作。
+- 除非角色在这一句刻意克制，intensity 使用 0.65-0.95；充分调动头部 XYZ、身体 XYZ 和手臂，不要把精细模型压成只换表情的立绘。
 - at 必须照抄句子表。不要让相邻两句使用完全相同的 gesture + face + camera 组合。
 
 ## 逐句动作表

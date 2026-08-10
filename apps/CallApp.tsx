@@ -62,12 +62,13 @@ import {
 import { CallAudioFeed } from '../utils/callAudioFeed';
 import {
   appendPendingAvatarTouch,
-  avatarTouchZoneToastLabel,
+  avatarTouchTargetLabel,
   buildPendingAvatarTouchContext,
   buildImmediateTouchPerformance,
   consumePendingAvatarTouches,
   createAvatarTouchRecord,
   isAvatarTouchGesture,
+  resolveAvatarTouchTarget,
   type AvatarTouchHit,
   type AvatarTouchRecord,
 } from '../utils/avatarTouch';
@@ -1359,7 +1360,7 @@ const CallApp: React.FC = () => {
           });
           setBubbles(prev => prev.map(b => b.id === greetingBubble.id ? { ...b, dbId: dbId } : b));
           markCallTurnDirty();
-          void runMemoryPalacePostHook(selectedChar);
+          runCallMemoryPalaceHook(selectedChar);
         }
         // 尝试语音合成开场白
         let greetingAudioPlayed = false;
@@ -1377,8 +1378,7 @@ const CallApp: React.FC = () => {
         }
         // 有音频播放时由 audio onEnded 回调切换到 listening；无音频时延迟切换，让用户看到 speaking 状态
         if (!greetingAudioPlayed) {
-          schedulePerformanceCues(greetingReply.performanceCues, estimateSpeechMs(greetingText));
-          setTimeout(() => setCallState('listening'), 1500);
+          playSilentAvatarSpeech(greetingText, greetingReply.performanceCues);
         }
       } catch (e: any) {
         setCallState('error');
@@ -1387,6 +1387,8 @@ const CallApp: React.FC = () => {
     })();
   }, [viewMode, currentSessionId]);
   const stopPlayback = () => {
+    clearSilentSpeechTimer();
+    clearPerformanceCueTimers();
     if (!audioRef.current) return;
     audioRef.current.pause();
     audioRef.current.currentTime = 0;
@@ -1520,7 +1522,7 @@ const CallApp: React.FC = () => {
       // 挂断这一下最要紧：用户多半接着就把 App 关了，得把这最后一条也打脏——
       // 打脏即传，微任务内就会冲刷上传。
       markCallTurnDirty();
-      void runMemoryPalacePostHook(selectedChar);
+      runCallMemoryPalaceHook(selectedChar);
     }
     clearSuspendedCall();
     resetCurrentCall();
@@ -1868,9 +1870,14 @@ ${sentencePlan}`;
   // ── 演出时间轴调度：多条 [[AVATAR:]] 指令按语音播放进度依次生效 ──
   const performanceCueTimersRef = useRef<number[]>([]);
   const pendingCueScheduleRef = useRef<{ cues: AvatarPerformanceCue[]; fallbackMs: number } | null>(null);
+  const silentSpeechTimerRef = useRef<number | null>(null);
   const clearPerformanceCueTimers = () => {
     performanceCueTimersRef.current.forEach(timer => window.clearTimeout(timer));
     performanceCueTimersRef.current = [];
+  };
+  const clearSilentSpeechTimer = () => {
+    if (silentSpeechTimerRef.current !== null) window.clearTimeout(silentSpeechTimerRef.current);
+    silentSpeechTimerRef.current = null;
   };
   const applyPerformanceDirection = (direction: AvatarPerformanceDirection) => {
     setAvatarEmotion(direction.emotion);
@@ -1887,17 +1894,47 @@ ${sentencePlan}`;
       performanceCueTimersRef.current.push(window.setTimeout(() => applyPerformanceDirection(beat.direction), beat.delayMs));
     });
   };
-  useEffect(() => () => clearPerformanceCueTimers(), []);
+  const playSilentAvatarSpeech = (
+    text: string,
+    cues?: AvatarPerformanceCue[],
+    durationOverrideMs?: number,
+  ) => {
+    const durationMs = durationOverrideMs || estimateSpeechMs(text);
+    clearSilentSpeechTimer();
+    pendingCueScheduleRef.current = null;
+    setIsAudioPlaying(false);
+    setCallState('speaking');
+    schedulePerformanceCues(cues, durationMs);
+    silentSpeechTimerRef.current = window.setTimeout(() => {
+      silentSpeechTimerRef.current = null;
+      clearPerformanceCueTimers();
+      setCallState(prev => (prev === 'speaking' ? 'listening' : prev));
+    }, durationMs);
+  };
+  useEffect(() => () => {
+    clearPerformanceCueTimers();
+    clearSilentSpeechTimer();
+  }, []);
 
   const playAudio = (url?: string, cues?: AvatarPerformanceCue[], fallbackMs?: number) => {
     const targetUrl = url || audioUrl;
-    if (!targetUrl || !audioRef.current) return;
+    const estimatedDurationMs = fallbackMs || 4000;
+    if (!targetUrl || !audioRef.current) {
+      if (callMode === 'video') playSilentAvatarSpeech('', cues, estimatedDurationMs);
+      return;
+    }
+    clearSilentSpeechTimer();
     if (audioUrl !== targetUrl) setAudioUrl(targetUrl);
     // 时间轴在 onPlay 时用真实音频时长调度；拿不到时长再用估计值。
-    pendingCueScheduleRef.current = cues?.length ? { cues, fallbackMs: fallbackMs || 4000 } : null;
+    pendingCueScheduleRef.current = cues?.length ? { cues, fallbackMs: estimatedDurationMs } : null;
     audioRef.current.src = targetUrl;
     audioRef.current.currentTime = 0;
-    audioRef.current.play().catch(() => addToast('音频已生成，自动播放被浏览器拦截，请点击重播', 'info'));
+    audioRef.current.play().catch(() => {
+      pendingCueScheduleRef.current = null;
+      if (callMode === 'video') playSilentAvatarSpeech('', cues, estimatedDurationMs);
+      else setCallState('listening');
+      addToast('音频已生成，自动播放被浏览器拦截；本轮已改用无声口型与动作', 'info');
+    });
     setCallState('speaking');
   };
   const resumeAudio = () => {
@@ -1925,7 +1962,7 @@ ${sentencePlan}`;
       id: record.id,
       normalizedX: hit.normalizedX,
       normalizedY: hit.normalizedY,
-      label: avatarTouchZoneToastLabel(hit.zone),
+      label: avatarTouchTargetLabel(hit),
     };
     setAvatarTouchEffects(current => [...current.slice(-3), effect]);
     const timer = window.setTimeout(() => {
@@ -1975,13 +2012,14 @@ ${sentencePlan}`;
     const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
     const normalizedX = rect.width > 0 ? x / rect.width : 0.5;
     const normalizedY = rect.height > 0 ? y / rect.height : 0.5;
+    const target = resolveAvatarTouchTarget([], normalizedY, normalizedX);
     handleAvatarTouch({
       nonce: Date.now(),
       x,
       y,
       normalizedX,
       normalizedY,
-      zone: normalizedY < 0.26 ? 'head' : normalizedY < 0.78 ? 'face' : 'body',
+      ...target,
       source: 'portrait-bounds',
       rawAreas: [],
     });
@@ -2001,6 +2039,7 @@ ${sentencePlan}`;
       normalizedX: 0.5,
       normalizedY: 0.45,
       zone: 'face',
+      part: 'face',
       source: 'portrait-bounds',
       rawAreas: [],
     });
@@ -2045,8 +2084,9 @@ ${sentencePlan}`;
             source: 'call',
             callSessionId: currentSessionId,
             ...(pendingTouchesForTurn.length ? {
-              avatarTouches: pendingTouchesForTurn.map(({ zone, rawAreas, timestamp }) => ({
+              avatarTouches: pendingTouchesForTurn.map(({ zone, part, rawAreas, timestamp }) => ({
                 zone,
+                ...(part ? { part } : {}),
                 rawAreas,
                 timestamp,
               })),
@@ -2128,10 +2168,7 @@ ${sentencePlan}`;
     }
     if (!canSpeakVoice()) {
       if (callMode === 'video') {
-        setCallState('speaking');
-        const performanceMs = Math.max(1200, Math.min(4200, assistantText.length * 90));
-        schedulePerformanceCues(turnPerformanceCues, performanceMs);
-        window.setTimeout(() => setCallState(prev => prev === 'speaking' ? 'listening' : prev), performanceMs);
+        playSilentAvatarSpeech(assistantText, turnPerformanceCues);
       } else {
         setCallState('listening');
       }
@@ -2153,8 +2190,9 @@ ${sentencePlan}`;
       setCallState('listening');
     } catch (e: any) {
       setErrorMessage(e?.message || '语音生成失败');
-      setCallState('error');
-      addToast(`TTS失败：${e?.message || '语音生成失败'}，已保留文本回复`, 'error');
+      if (callMode === 'video') playSilentAvatarSpeech(assistantText, turnPerformanceCues);
+      else setCallState('listening');
+      addToast(`TTS失败：${e?.message || '语音生成失败'}，已保留文本并启用无声表演`, 'info');
     }
   };
   const sendingBusy = ['connecting', 'thinking'].includes(callState);
@@ -2246,6 +2284,7 @@ ${sentencePlan}`;
       runCallMemoryPalaceHook(selectedChar);
 
       // Synthesize voice for the rerolled text (same pipeline as handleTurn)
+      let rerollAudioPlayed = false;
       if (canSpeakVoice()) {
         try {
           setCallState('speaking');
@@ -2255,13 +2294,18 @@ ${sentencePlan}`;
             setAudioUrl(rerollAudioUrl);
             setBubbles(prev => prev.map(b => b.id === bubble.id ? { ...b, audioUrl: rerollAudioUrl } : b));
             setTimeout(() => playAudio(rerollAudioUrl, rerollReply.performanceCues, estimateSpeechMs(rerolled)), 0);
+            rerollAudioPlayed = true;
           }
         } catch (ttsErr: any) {
           console.warn('[call] reroll TTS failed:', ttsErr?.message);
           addToast('语音合成失败，已保留文本', 'info');
         }
       }
-      setCallState('listening');
+      if (!rerollAudioPlayed && callMode === 'video') {
+        playSilentAvatarSpeech(rerolled, rerollReply.performanceCues);
+      } else {
+        setCallState('listening');
+      }
     } catch (e: any) {
       setCallState('error');
       addToast(`重 roll 失败：${e?.message || '未知错误'}`, 'error');
@@ -2330,10 +2374,7 @@ ${sentencePlan}`;
         } catch { /* 主动开口拿不到语音就只留文字 */ }
       }
       if (!nudgeAudioPlayed) {
-        setCallState('speaking');
-        const speakMs = Math.max(1200, Math.min(4200, reply.text.length * 90));
-        schedulePerformanceCues(reply.performanceCues, speakMs);
-        window.setTimeout(() => setCallState(prev => (prev === 'speaking' ? 'listening' : prev)), speakMs);
+        playSilentAvatarSpeech(reply.text, reply.performanceCues);
       }
     } catch {
       // 主动开口失败就保持安静，不打扰用户
@@ -2480,7 +2521,7 @@ ${sentencePlan}`;
           </div>
         )}
 
-        <div className="relative z-10 flex flex-col h-full px-5 pb-5" style={{ paddingTop: 'max(2.5rem, var(--safe-top))' }}>
+        <div className="relative z-10 h-full overflow-y-auto overscroll-contain px-5 pb-5 no-scrollbar" style={{ paddingTop: 'max(2.5rem, var(--safe-top))' }}>
           {/* header */}
           <div className="shrink-0">
             <div className="text-[10px] tracking-[0.42em] text-white/35 font-semibold">CHAT WITH</div>
@@ -2496,7 +2537,7 @@ ${sentencePlan}`;
             value={roleGroupId} onChange={(id) => { setRoleGroupId(id); setRolePage(0); }} className="mt-4 shrink-0" />
 
           {/* character cards (6 / page) */}
-          <div className="mt-5 flex-1 min-h-0 overflow-y-auto no-scrollbar space-y-2.5">
+          <div className="mt-4 min-h-[5rem] max-h-[15rem] overflow-y-auto no-scrollbar space-y-2.5 pr-0.5" data-testid="call-character-picker">
             {pagedChars.map(char => {
               const selected = selectedCharId === char.id;
               return (
@@ -2545,7 +2586,7 @@ ${sentencePlan}`;
           )}
 
           {/* actions */}
-          <div className="shrink-0 pt-4 space-y-2.5">
+          <div className="pt-4 space-y-2.5">
             <div className="flex items-center gap-1 rounded-2xl border border-white/10 bg-black/20 p-1">
               <button
                 onClick={() => setCallMode('voice')}
@@ -2576,7 +2617,13 @@ ${sentencePlan}`;
                   </span>
                   <span className="text-xs text-white/30">{selectedChar?.videoAvatar ? '设置' : '引导'}</span>
                 </button>
-                {selectedBuiltinSullyAvatar && (
+                <details className="group rounded-2xl border border-white/10 bg-black/15 p-2" data-testid="video-call-advanced-settings">
+                  <summary className="flex cursor-pointer list-none items-center justify-between rounded-xl px-2 py-1.5 text-[10px] text-white/42">
+                    <span>模型画质、导入与动作排练</span>
+                    <span className="transition-transform group-open:rotate-45">＋</span>
+                  </summary>
+                  <div className="mt-2 space-y-2">
+                  {selectedBuiltinSullyAvatar && (
                   <div className="rounded-2xl border border-white/10 bg-black/20 p-2.5" data-testid="builtin-sully-quality-picker">
                     <div className="flex items-center justify-between px-0.5">
                       <span className="text-[10px] tracking-[0.14em] text-white/40">内置模型画质</span>
@@ -2674,6 +2721,8 @@ ${sentencePlan}`;
                     高质量版只把本轮定稿台词和角色性格交给情绪 Buff 的 API，不读取聊天上下文；未单独配置副 API 时回退主 API。
                   </p>
                 </div>
+                  </div>
+                </details>
               </div>
             )}
             <button onClick={requestSelectedCall}
@@ -3243,6 +3292,7 @@ ${sentencePlan}`;
         src={audioUrl}
         muted={!isSpeakerOn}
         onPlay={() => {
+          clearSilentSpeechTimer();
           setIsAudioPlaying(true);
           setCallState('speaking');
           const pending = pendingCueScheduleRef.current;

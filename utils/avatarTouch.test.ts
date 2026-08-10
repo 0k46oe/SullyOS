@@ -6,11 +6,13 @@ import {
   buildAvatarTouchReactionPackPrompt,
   buildPendingAvatarTouchContext,
   buildImmediateTouchPerformance,
+  avatarTouchTargetLabel,
   normalizeCompanionDialogue,
   parseAvatarTouchReactionPack,
   parseAvatarTouchReactionPackPartial,
   consumePendingAvatarTouches,  isAvatarTouchGesture,
   normalizeAvatarTouchZone,
+  resolveAvatarTouchTarget,
   resolveAvatarTouchForce,
   parseAvatarTouchReply,
   type AvatarTouchRecord,
@@ -24,6 +26,24 @@ describe('角色触碰互动', () => {
     expect(normalizeAvatarTouchZone([], 0.2, 0.5)).toBe('face');
     expect(normalizeAvatarTouchZone([], 0.5, 0.1)).toBe('hand');
     expect(normalizeAvatarTouchZone([], 0.55, 0.5)).toBe('body');
+  });
+
+  it('在兼容旧反馈分区的同时细分头发、脸、肩膀、手臂、手和胸口', () => {
+    expect(resolveAvatarTouchTarget(['FrontHair'])).toEqual({ zone: 'head', part: 'hair' });
+    expect(resolveAvatarTouchTarget(['Face'])).toEqual({ zone: 'face', part: 'face' });
+    expect(resolveAvatarTouchTarget(['LeftShoulder'])).toEqual({ zone: 'body', part: 'shoulder' });
+    expect(resolveAvatarTouchTarget(['Arm_L'])).toEqual({ zone: 'hand', part: 'arm' });
+    expect(resolveAvatarTouchTarget(['RightHand'])).toEqual({ zone: 'hand', part: 'hand' });
+    expect(resolveAvatarTouchTarget(['Bust'])).toEqual({ zone: 'body', part: 'chest' });
+  });
+
+  it('用模型内坐标拆分只有 Head/Body 粗命中区的 Live2D 模型', () => {
+    expect(resolveAvatarTouchTarget(['HitAreaHead'], 0.08, 0.5).part).toBe('hair');
+    expect(resolveAvatarTouchTarget(['HitAreaHead'], 0.25, 0.5).part).toBe('face');
+    expect(resolveAvatarTouchTarget(['HitAreaBody'], 0.42, 0.3).part).toBe('shoulder');
+    expect(resolveAvatarTouchTarget(['HitAreaBody'], 0.58, 0.08).part).toBe('arm');
+    expect(resolveAvatarTouchTarget(['HitAreaBody'], 0.58, 0.5).part).toBe('chest');
+    expect(avatarTouchTargetLabel({ zone: 'body', part: 'chest' })).toBe('胸口');
   });
 
   it('即时本地反馈不会等待模型台词', () => {
@@ -51,6 +71,11 @@ describe('角色触碰互动', () => {
     expect(applyAvatarTouchForce(buildImmediateTouchPerformance('face'), {
       pointerType: 'pen', pressure: 0.95, durationMs: 80,
     }).intensity).toBeGreaterThan(buildImmediateTouchPerformance('face').intensity);
+    expect(applyAvatarTouchForce({
+      ...buildImmediateTouchPerformance('body'), intensity: 0.2,
+    }, {
+      pointerType: 'mouse', durationMs: 70,
+    }).intensity).toBeGreaterThan(0.6);
   });
 
   it('触碰提示使用完整 ContextBuilder 输入并明确近期关系约束', () => {
@@ -59,11 +84,14 @@ describe('角色触碰互动', () => {
       'Sully',
       '条条',
       { zone: 'head', rawAreas: ['Head'] },
-      [{ id: 'wave-special', name: '专属挥手' }],
+      [{ id: 'wave-special', name: '专属挥手', kind: 'motion', tags: ['wave', 'happy'] }],
     );
     expect(prompt).toContain('FULL_CONTEXT_WITH_RECENT_MEMORY');
     expect(prompt).toContain('近期对话与记忆');
     expect(prompt).toContain('wave-special');
+    expect(prompt).toContain('[motion / wave / happy]');
+    expect(prompt).toContain('表情只是叠加层，不是完整演出');
+    expect(prompt).toContain('0.68-1.0');
     expect(prompt).not.toContain('表演人格');
   });
 
@@ -84,8 +112,8 @@ describe('角色触碰互动', () => {
 
   it('只在下一次正常发言里批量描述尚未回应的戳戳', () => {
     const records: AvatarTouchRecord[] = [
-      { id: 'touch-1', zone: 'head', rawAreas: ['Hair'], timestamp: 100 },
-      { id: 'touch-2', zone: 'head', rawAreas: ['Hair'], timestamp: 200 },
+      { id: 'touch-1', zone: 'head', part: 'hair', rawAreas: ['Hair'], timestamp: 100 },
+      { id: 'touch-2', zone: 'head', part: 'hair', rawAreas: ['Hair'], timestamp: 200 },
       { id: 'touch-3', zone: 'face', rawAreas: ['Face'], timestamp: 300 },
     ];
     const context = buildPendingAvatarTouchContext(records, 'Sully', '条条');
@@ -205,13 +233,17 @@ Thanks!`,
   });
 
   it('asks for structured reaction objects under exact English zone ids', () => {
-    const prompt = buildAvatarTouchReactionPackPrompt('FULL_CONTEXT', 'Sully', '条条', ['hand', 'body'], [], 4, 'ja');
+    const prompt = buildAvatarTouchReactionPackPrompt('FULL_CONTEXT', 'Sully', '条条', ['hand', 'body'], [
+      { id: 'body-recoil', name: '身体后缩', kind: 'motion', tags: ['lean-back', 'surprised'] },
+    ], 4, 'ja');
 
     expect(prompt).toContain('顶层键必须逐字使用上面的英文部位 ID');
     expect(prompt).toContain('"text": "第1句角色台词"');
     expect(prompt).toContain('"translation": "第1句日本語口语译文"');
     expect(prompt).toContain('text 是界面显示的原文，必须使用简体中文');
     expect(prompt).toContain('"performance"');
+    expect(prompt).toContain('body-recoil: 身体后缩 [motion / lean-back / surprised]');
+    expect(prompt).toContain('faces 变化视为不完整');
   });
 
   it('keeps source text and spoken translation separate for a selected voice language', () => {

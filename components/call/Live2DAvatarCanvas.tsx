@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { Application, Assets, Cache, extensions } from 'pixi.js';
-import { AvatarAutonomy } from '../../utils/avatarAutonomy';
+import { AvatarAutonomy, getViewerEyeContactCompensation } from '../../utils/avatarAutonomy';
 import { DEFAULT_AVATAR_PERFORMANCE, type AvatarPerformanceDirection, type AvatarStageFraming } from '../../utils/avatarPerformance';
 import type { CallAudioFeed } from '../../utils/callAudioFeed';
 import { isDevDebugAvailable } from '../../utils/devDebug';
@@ -14,7 +14,7 @@ import {
 } from '../../utils/live2dModelStore';
 import type { AvatarMotionState } from './VRMAvatarCanvas';
 import {
-  normalizeAvatarTouchZone,
+  resolveAvatarTouchTarget,
   type AvatarTouchHit,
   type AvatarTouchRequest,
 } from '../../utils/avatarTouch';
@@ -74,6 +74,9 @@ const HEAD_LOCK_PARAMETER_IDS = [
   'xin', 'yin', 'zin',
   'ParamAngleX', 'ParamAngleY', 'ParamAngleZ',
 ] as const;
+const LIVE2D_HEAD_AXIS_SCALE = { x: 22, y: 16, z: 14 } as const;
+const LIVE2D_BODY_AXIS_SCALE = { x: 12, y: 14, z: 12 } as const;
+const LIVE2D_VTUBE_BODY_GAIN = 1.18;
 const isHeadLockParameter = (id: string): boolean => (
   /^(?:x|y|z)in$/i.test(id)
   || /^(?:Param)?(?:Head)?Angle[XYZ]$/i.test(id)
@@ -349,9 +352,10 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
       }
     } catch { /* ignore invalid first-frame bounds */ }
     if (!insideBounds) return;
+    const target = resolveAvatarTouchTarget(rawAreas, fallbackY, fallbackX);
     onAvatarTouchRef.current?.({
       ...touchRequest,
-      zone: normalizeAvatarTouchZone(rawAreas, fallbackY, fallbackX),
+      ...target,
       source: rawAreas.length ? 'live2d-hit-area' : 'live2d-bounds',
       rawAreas,
     });
@@ -729,7 +733,32 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
           } catch { /* malformed optional parameters stay absent */ }
           return false;
         };
-        const usesVTubeTrackingInputs = hasParameter('xin') && hasParameter('yin');
+        const readParameter = (id: string): number | undefined => {
+          if (!hasParameter(id)) return undefined;
+          try {
+            const value = Number(core.getParameterValueById(resolveId(id)));
+            return Number.isFinite(value) ? value : undefined;
+          } catch {
+            return undefined;
+          }
+        };
+        // VTube exports are not always all-or-nothing. Some nine-axis rigs keep
+        // only a subset of xin/yin/zin + xinb/yinb/zinb, so detect each channel
+        // independently instead of disabling the entire tracking path when one
+        // optional parameter is absent.
+        const vtubeHeadTrackingInputs = {
+          x: hasParameter('xin'),
+          y: hasParameter('yin'),
+          z: hasParameter('zin'),
+        };
+        const vtubeBodyTrackingInputs = {
+          x: hasParameter('xinb'),
+          y: hasParameter('yinb'),
+          z: hasParameter('zinb'),
+        };
+        const hasVTubeHeadTrackingInputs = Object.values(vtubeHeadTrackingInputs).some(Boolean);
+        const hasVTubeBodyTrackingInputs = Object.values(vtubeBodyTrackingInputs).some(Boolean);
+        const usesVTubeTrackingInputs = hasVTubeHeadTrackingInputs || hasVTubeBodyTrackingInputs;
         const autonomy = new AvatarAutonomy(window.performance.now());
         // 微表情包络的计时基准：导演指令一换就重新起算。
         let handledTouchImpulseNonce = touchImpulseNonceRef.current;
@@ -792,6 +821,10 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
         const debugFrameDatasets = isDevDebugAvailable();
         let lastPoseDataset = '';
         let lastActiveMotionDataset: string | null = null;
+        let lastAutonomyEyes = { eyeX: 0, eyeY: 0 };
+        let finalEyeX = 0;
+        let finalEyeY = 0;
+        let lastMouthLevel = 0;
         applyControls = () => {
           const now = window.performance.now();
           const t = now / 1000;
@@ -853,6 +886,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
             rotation: 0,
             speechAccent: 0,
           } : autonomyFrame;
+          lastAutonomyEyes = { eyeX: frame.eyeX, eyeY: frame.eyeY };
           directedHeadPoseRef.current = directedHead.authoredEnabled && !directedHead.motionOwnsHead
             ? { headX: frame.headX, headY: frame.headY, headZ: frame.headZ }
             : null;
@@ -873,6 +907,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
               mouth = rhythm * phraseGate;
             }
           }
+          lastMouthLevel = mouth;
           if (debugFrameDatasets) host.dataset.live2dMouthLevel = mouth.toFixed(3);
 
           const pinsAutonomyPose = Boolean(direction?.precision?.lockAutonomy);
@@ -881,28 +916,42 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
             // tracker inputs through their own physics. Feeding them preserves
             // the artist's hair/body setup instead of guessing output params.
             if (!directedHead.motionOwnsHead) {
-              smooth('xin', frame.headX, 0.32);
-              smooth('yin', frame.headY, 0.32);
-              smooth('zin', frame.headZ, 0.3);
+              if (vtubeHeadTrackingInputs.x) smooth('xin', frame.headX, 0.36);
+              if (vtubeHeadTrackingInputs.y) smooth('yin', frame.headY, 0.36);
+              if (vtubeHeadTrackingInputs.z) smooth('zin', frame.headZ, 0.34);
             }
-            smooth('xinb', frame.bodyX, 0.24);
-            smooth('yinb', frame.bodyY, 0.22);
-            smooth('zinb', frame.bodyZ, 0.22);
-            // Pin both tracking inputs and the standard outputs we write while
-            // the call-style autonomy layer is locked.
-            if (pinsAutonomyPose && !directedHead.motionOwnsHead) {
-              if (hasParameter('ParamAngleX')) smooth('ParamAngleX', frame.headX * 18, 0.2);
-              if (hasParameter('ParamAngleY')) smooth('ParamAngleY', frame.headY * 12, 0.2);
-              if (hasParameter('ParamAngleZ')) smooth('ParamAngleZ', frame.headZ * 10, 0.18);
-              if (hasParameter('ParamBodyAngleX')) smooth('ParamBodyAngleX', frame.bodyX * 7, 0.13);
+            // Body springs are already damped in AvatarAutonomy. A second slow
+            // filter used to erase most short gestures before they reached a
+            // detailed rig, so this layer now only removes frame-level jitter.
+            if (vtubeBodyTrackingInputs.x) smooth('xinb', clamp(frame.bodyX * LIVE2D_VTUBE_BODY_GAIN), 0.34);
+            if (vtubeBodyTrackingInputs.y) smooth('yinb', clamp(frame.bodyY * LIVE2D_VTUBE_BODY_GAIN), 0.32);
+            if (vtubeBodyTrackingInputs.z) smooth('zinb', clamp(frame.bodyZ * LIVE2D_VTUBE_BODY_GAIN), 0.32);
+          }
+          // A rig can mix VTube head inputs with standard Cubism body angles (or
+          // the reverse). Fall back per channel family, not per whole model.
+          // Authored precision additionally pins the output parameters so later
+          // focus/physics passes cannot pull the pose away from its target.
+          if (!directedHead.motionOwnsHead) {
+            if ((!vtubeHeadTrackingInputs.x || pinsAutonomyPose) && hasParameter('ParamAngleX')) {
+              smooth('ParamAngleX', frame.headX * LIVE2D_HEAD_AXIS_SCALE.x, 0.24, !pinsAutonomyPose);
             }
-          } else {
-            if (!directedHead.motionOwnsHead) {
-              smooth('ParamAngleX', frame.headX * 18, 0.2, !pinsAutonomyPose);
-              smooth('ParamAngleY', frame.headY * 12, 0.2, !pinsAutonomyPose);
-              smooth('ParamAngleZ', frame.headZ * 10, 0.18, !pinsAutonomyPose);
+            if ((!vtubeHeadTrackingInputs.y || pinsAutonomyPose) && hasParameter('ParamAngleY')) {
+              smooth('ParamAngleY', frame.headY * LIVE2D_HEAD_AXIS_SCALE.y, 0.24, !pinsAutonomyPose);
             }
-            smooth('ParamBodyAngleX', frame.bodyX * 7, 0.13, !pinsAutonomyPose);
+            if ((!vtubeHeadTrackingInputs.z || pinsAutonomyPose) && hasParameter('ParamAngleZ')) {
+              smooth('ParamAngleZ', frame.headZ * LIVE2D_HEAD_AXIS_SCALE.z, 0.22, !pinsAutonomyPose);
+            }
+          }
+          // Standard Cubism nine-axis rigs expose all three body angles. The
+          // old renderer wrote only X, leaving body pitch and roll frozen.
+          if ((!vtubeBodyTrackingInputs.x || pinsAutonomyPose) && hasParameter('ParamBodyAngleX')) {
+            smooth('ParamBodyAngleX', frame.bodyX * LIVE2D_BODY_AXIS_SCALE.x, 0.22, !pinsAutonomyPose);
+          }
+          if ((!vtubeBodyTrackingInputs.y || pinsAutonomyPose) && hasParameter('ParamBodyAngleY')) {
+            smooth('ParamBodyAngleY', frame.bodyY * LIVE2D_BODY_AXIS_SCALE.y, 0.22, !pinsAutonomyPose);
+          }
+          if ((!vtubeBodyTrackingInputs.z || pinsAutonomyPose) && hasParameter('ParamBodyAngleZ')) {
+            smooth('ParamBodyAngleZ', frame.bodyZ * LIVE2D_BODY_AXIS_SCALE.z, 0.22, !pinsAutonomyPose);
           }
           smooth('ParamEyeBallX', frame.eyeX, 0.42);
           smooth('ParamEyeBallY', frame.eyeY, 0.42);
@@ -979,13 +1028,53 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
         // `afterMotionUpdate` is not the end of this engine's frame. It still
         // runs focus, breath, physics and pose after that event, so clamping the
         // head there can be overwritten before Cubism evaluates the drawable.
-        // `beforeModelUpdate` is the last writable point. The startup lock must
-        // win here or the old video-call autonomy remains visible on screen.
+        // `beforeModelUpdate` is the last writable point. Both the startup lock
+        // and call gaze must win here: even with autoFocus=false, a model motion
+        // can write head/eye curves after our afterMotionUpdate controls.
         applyFinalHeadLock = () => {
           const locked = headMotionLockedRef.current || ambientAutonomyDisabledRef.current;
-          const directedHead = getRuntimeDirectedHeadControl(performanceRef.current, window.performance.now());
+          const authoredDirection = performanceRef.current || DEFAULT_AVATAR_PERFORMANCE;
+          const directedHead = getRuntimeDirectedHeadControl(authoredDirection, window.performance.now());
           host.dataset.live2dHeadLocked = headMotionLockedRef.current ? 'true' : 'false';
           host.dataset.live2dAmbientHeadSuppressed = locked ? 'true' : 'false';
+
+          let targetEyeX = lastAutonomyEyes.eyeX;
+          let targetEyeY = lastAutonomyEyes.eyeY;
+          const maintainsViewerEyeContact = motionStateRef.current === 'speaking'
+            && authoredDirection.gaze === 'viewer'
+            && !authoredDirection.precision?.lockAutonomy;
+          let normalizedHeadX = 0;
+          let normalizedHeadY = 0;
+          if (maintainsViewerEyeContact) {
+            // Read the actual final model pose, not AvatarAutonomy's requested
+            // pose. Imported Live2D motions can own the head and never expose
+            // their angle back to the shared frame.
+            const angleX = readParameter('ParamAngleX');
+            const angleY = readParameter('ParamAngleY');
+            normalizedHeadX = angleX !== undefined ? angleX / LIVE2D_HEAD_AXIS_SCALE.x : (readParameter('xin') ?? 0);
+            normalizedHeadY = angleY !== undefined ? angleY / LIVE2D_HEAD_AXIS_SCALE.y : (readParameter('yin') ?? 0);
+            const correction = getViewerEyeContactCompensation(normalizedHeadX, normalizedHeadY);
+            targetEyeX = correction.eyeX;
+            targetEyeY = correction.eyeY;
+          }
+          const eyeSpeed = maintainsViewerEyeContact ? 0.48 : 0.38;
+          finalEyeX += (targetEyeX - finalEyeX) * eyeSpeed;
+          finalEyeY += (targetEyeY - finalEyeY) * eyeSpeed;
+          if (hasParameter('ParamEyeBallX')) core.setParameterValueById(resolveId('ParamEyeBallX'), finalEyeX);
+          if (hasParameter('ParamEyeBallY')) core.setParameterValueById(resolveId('ParamEyeBallY'), finalEyeY);
+          // Motions, focus and physics can all run after afterMotionUpdate and
+          // overwrite the synthetic no-audio mouth. Write the call-owned mouth
+          // at the same final stage as gaze so text-only speech stays visible.
+          const finalMouth = motionStateRef.current === 'speaking' ? lastMouthLevel : 0;
+          for (const id of config.lipSyncParameterIds.length ? config.lipSyncParameterIds : ['ParamMouthOpenY']) {
+            if (hasParameter(id)) core.setParameterValueById(resolveId(id), finalMouth);
+          }
+          if (debugFrameDatasets) {
+            host.dataset.live2dFinalHead = `${normalizedHeadX.toFixed(3)},${normalizedHeadY.toFixed(3)}`;
+            host.dataset.live2dFinalEyes = `${finalEyeX.toFixed(3)},${finalEyeY.toFixed(3)}`;
+            host.dataset.live2dFinalMouth = finalMouth.toFixed(3);
+          }
+
           if (!locked || directedHead.motionOwnsHead || directedHead.paramsOwnHead) return;
           const authoredPose = directedHead.authoredEnabled ? directedHeadPoseRef.current : null;
           if (authoredPose) {
@@ -993,9 +1082,9 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
               ['xin', authoredPose.headX],
               ['yin', authoredPose.headY],
               ['zin', authoredPose.headZ],
-              ['ParamAngleX', authoredPose.headX * 18],
-              ['ParamAngleY', authoredPose.headY * 12],
-              ['ParamAngleZ', authoredPose.headZ * 10],
+              ['ParamAngleX', authoredPose.headX * LIVE2D_HEAD_AXIS_SCALE.x],
+              ['ParamAngleY', authoredPose.headY * LIVE2D_HEAD_AXIS_SCALE.y],
+              ['ParamAngleZ', authoredPose.headZ * LIVE2D_HEAD_AXIS_SCALE.z],
             ];
             values.forEach(([id, value]) => {
               if (hasParameter(id)) core.setParameterValueById(resolveId(id), value);

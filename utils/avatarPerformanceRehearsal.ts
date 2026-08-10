@@ -199,6 +199,8 @@ ${modelActions.length ? `- model_actions: 可选数组，最多 3 个，只能�
 - 第一句 at 必须为 0；后续 at 是对应句子在朗读进度中的起点，范围 0 到 1。
 - close / push-in 只用于确实值得靠近的情绪重音；不要每句都拉镜头。
 - model_actions 是叠加层，不替代 emotion / gesture / face：选了专属表情仍要安排身体手势，选了身体动作仍要安排脸和视线。
+- faces 不能成为一拍的唯一变化；除非台词明确要求静止，每拍都要让 gesture、身体 XYZ 或一个匹配的 motion 动作承担可见变化。
+- 白名单存在语义匹配的 motion 时优先使用；大多数自然表演的 intensity 应在 0.6-0.95，只有角色刻意压低反应时才更轻。
 - 同一拍最多选一个 expression；只有不同 kind 或不同身体通道的动作才组合，禁止为了热闹堆动作，禁止编造 ID。
 - 不要输出解释，不要复述台词，只输出严格 JSON。
 

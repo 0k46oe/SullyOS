@@ -21,6 +21,14 @@ describe('CallApp runtime references', () => {
     expect(source.match(/markCallTurnDirty\(\)/g)?.length ?? 0).toBeGreaterThanOrEqual(4);
   });
 
+  it('routes every memory-palace trigger through the defined call hook', () => {
+    const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
+
+    expect(source).not.toContain('runMemoryPalacePostHook');
+    expect(source).toContain('const runCallMemoryPalaceHook = (char: CharacterProfile) =>');
+    expect(source.match(/runCallMemoryPalaceHook\(selectedChar\)/g)?.length ?? 0).toBeGreaterThanOrEqual(5);
+  });
+
   it('offers game-like video layouts and a collapsible immersive subtitle', () => {
     const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
 
@@ -37,10 +45,37 @@ describe('CallApp runtime references', () => {
     expect(source).toContain('setVideoTranscriptExpanded(true)');
   });
 
+  it('keeps the character picker visible before optional video settings', () => {
+    const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
+    expect(source).toContain('data-testid="call-character-picker"');
+    expect(source).toContain('min-h-[5rem] max-h-[15rem]');
+    expect(source).toContain('h-full overflow-y-auto overscroll-contain');
+    expect(source).toContain('data-testid="video-call-advanced-settings"');
+    expect(source).toContain('模型画质、导入与动作排练');
+  });
+
   it('schedules opening and closing performance beats against the real audio duration', () => {
     const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
     expect(source).toContain('expandAvatarPerformanceCueBeats(cues, durationMs)');
     expect(source).toContain('applyPerformanceDirection(beat.direction)');
+  });
+
+  it('keeps lip sync and performance running when call audio is unavailable', () => {
+    const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
+    expect(source).toContain('const playSilentAvatarSpeech = (');
+    expect(source).toContain("if (callMode === 'video') playSilentAvatarSpeech(assistantText, turnPerformanceCues)");
+    expect(source).toContain('playSilentAvatarSpeech(rerolled, rerollReply.performanceCues)');
+    expect(source).toContain('playSilentAvatarSpeech(reply.text, reply.performanceCues)');
+    expect(source).toContain("playSilentAvatarSpeech('', cues, estimatedDurationMs)");
+  });
+
+  it('shows precise touch targets without blurring the feedback copy', () => {
+    const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
+    const feedbackSource = readFileSync(path.resolve(__dirname, '../components/call/AvatarTouchFeedback.tsx'), 'utf8');
+    expect(source).toContain('label: avatarTouchTargetLabel(hit)');
+    expect(source).toContain('...(part ? { part } : {})');
+    expect(feedbackSource).not.toContain('filter: blur');
+    expect(feedbackSource).not.toMatch(/sully-touch-float-copy[\s\S]*?scale\(/);
   });
 
   it('keeps the built-in Sully model lightweight by default', () => {

@@ -756,7 +756,7 @@ const PhoneShell: React.FC = () => {
   const contentColor = theme.contentColor || '#ffffff';
   const acnhSkin = theme.skin === 'animalcrossing'; // 动森彩蛋：锁屏换暖色草地点缀
   const storedCompanionFrame = theme.skin === 'companion' ? loadCompanionFrameStyle() : null;
-  const companionLockFrame = storedCompanionFrame === 'otome' || storedCompanionFrame === 'cat' ? storedCompanionFrame : null;
+  const companionLockFrame = storedCompanionFrame;
 
   if (isLocked) {
     const unreadCount = Object.values(unreadMessages).reduce((a,b) => a+b, 0);

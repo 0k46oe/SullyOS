@@ -24,7 +24,7 @@ import type { Live2DActionTrigger } from '../call/Live2DAvatarCanvas';
 import {
   applyAvatarTouchForce,
   avatarTouchZoneLabel,
-  avatarTouchZoneToastLabel,
+  avatarTouchTargetLabel,
   buildImmediateTouchPerformance,
   DEFAULT_COMPANION_TOUCH_ZONES,
   normalizeCompanionDialogue,
@@ -80,6 +80,7 @@ import OtomeCompanionChrome from './OtomeCompanionChrome';
 import CatCompanionChrome from './CatCompanionChrome';
 import MagazineCompanionChrome from './MagazineCompanionChrome';
 import CardbookCompanionChrome from './CardbookCompanionChrome';
+import IdolCompanionChrome from './IdolCompanionChrome';
 import CompanionWardrobeDrawer from './CompanionWardrobeDrawer';
 import CompanionStageLoadingCurtain, { type CompanionStageCurtainPhase } from './CompanionStageLoadingCurtain';
 import { getLive2DAIActions, getLive2DWardrobeActions, type Live2DAction } from '../../utils/live2dModelStore';
@@ -806,7 +807,12 @@ const CompanionHome: React.FC = () => {
   const modelActions = useMemo<AvatarTouchModelAction[]>(() => {
     if (character?.videoAvatar?.format === 'live2d') {
       return getLive2DAIActions(character.videoAvatar)
-        .map(action => ({ id: action.id, name: action.name }));
+        .map(action => ({
+          id: action.id,
+          name: action.name,
+          kind: action.kind,
+          tags: action.tags,
+        }));
     }
     return vrmExpressions.map(name => ({ id: name, name: `自定义表情：${name}` }));
   }, [character?.videoAvatar, vrmExpressions]);
@@ -1396,7 +1402,7 @@ const CompanionHome: React.FC = () => {
     setLastHit(hit);
     const touchForce = resolveAvatarTouchForce(hit);
     setRipple({ nonce: hit.nonce, x: hit.normalizedX, y: hit.normalizedY, force: touchForce });
-    showTouchBanner(hit, `你戳了戳${character.name}的${avatarTouchZoneToastLabel(hit.zone)}`);
+    showTouchBanner(hit, `你戳了戳${character.name}的${avatarTouchTargetLabel(hit)}`);
     setPerformance(applyAvatarTouchForce(buildImmediateTouchPerformance(hit.zone), hit));
     setMotionState('speaking');
 
@@ -1443,7 +1449,7 @@ const CompanionHome: React.FC = () => {
   const thinking = motionState === 'thinking';
   const displayLineText = normalizeCompanionDialogue(line?.text || '', character?.name || '');
   const typed = useTypewriter(displayLineText);
-  const independentChrome = frameStyle === 'otome' || frameStyle === 'cat' || frameStyle === 'magazine' || frameStyle === 'archive';
+  const independentChrome = frameStyle === 'otome' || frameStyle === 'cat' || frameStyle === 'magazine' || frameStyle === 'archive' || frameStyle === 'idol';
   const dialogVisible = (independentChrome
     ? line?.kind === 'touch' || (thinking && Boolean(lastHit))
     : Boolean(line) || thinking)
@@ -1534,10 +1540,10 @@ const CompanionHome: React.FC = () => {
           to { opacity:1; transform:translateY(0) scale(1); }
         }
         @keyframes companion-touch-banner {
-          0% { opacity:0; transform:translate(-50%, 4px) scale(.86); }
-          18% { opacity:1; transform:translate(-50%, -8px) scale(1); }
-          78% { opacity:1; transform:translate(-50%, -30px) scale(1); }
-          100% { opacity:0; transform:translate(-50%, -46px) scale(.96); }
+          0% { opacity:0; transform:translate(-50%, 4px); }
+          18% { opacity:1; transform:translate(-50%, -8px); }
+          78% { opacity:1; transform:translate(-50%, -30px); }
+          100% { opacity:0; transform:translate(-50%, -46px); }
         }
         @keyframes companion-heart-pop {
           0% { opacity:0; transform:translate(-50%,-50%) scale(.2) rotate(-10deg); }
@@ -1576,7 +1582,8 @@ const CompanionHome: React.FC = () => {
         [data-companion-frame='otome'] .companion-stage-canvas,
         [data-companion-frame='cat'] .companion-stage-canvas,
         [data-companion-frame='magazine'] .companion-stage-canvas,
-        [data-companion-frame='archive'] .companion-stage-canvas {
+        [data-companion-frame='archive'] .companion-stage-canvas,
+        [data-companion-frame='idol'] .companion-stage-canvas {
           inset:0;
           width:100%;
           height:100%;
@@ -1587,7 +1594,8 @@ const CompanionHome: React.FC = () => {
           [data-companion-frame='otome'] .companion-stage-canvas,
           [data-companion-frame='cat'] .companion-stage-canvas,
           [data-companion-frame='magazine'] .companion-stage-canvas,
-          [data-companion-frame='archive'] .companion-stage-canvas {
+          [data-companion-frame='archive'] .companion-stage-canvas,
+          [data-companion-frame='idol'] .companion-stage-canvas {
             inset:50% auto auto 50%;
             width:min(100%,56.25vh);
             height:100%;
@@ -1835,6 +1843,7 @@ const CompanionHome: React.FC = () => {
       )}
       {frameStyle === 'magazine' && <div className="magazine-scene-backdrop pointer-events-none absolute inset-0" aria-hidden />}
       {frameStyle === 'archive' && <div className="cardbook-scene-backdrop pointer-events-none absolute inset-0" aria-hidden />}
+      {frameStyle === 'idol' && <div className="idol-scene-backdrop pointer-events-none absolute inset-0" aria-hidden />}
 
       {/* ── 角色全出血舞台 ── */}
       <div className="absolute inset-0">
@@ -1967,6 +1976,21 @@ const CompanionHome: React.FC = () => {
           character={character}
           currentScheduleSlot={currentScheduleSlot}
           dayProgress={todayEventProgress}
+          openApp={openApp}
+          openCharacterSchedule={() => setScheduleViewerOpen(true)}
+          openWardrobe={() => setWardrobeOpen(true)}
+          openTouchSettings={openTouchSettings}
+          openAllApps={() => setAppStarOpen(open => !open)}
+        />
+      )}
+
+      {!editing && frameStyle === 'idol' && !touchSettingsOpen && !appStarOpen && (
+        <IdolCompanionChrome
+          character={character}
+          currentScheduleSlot={currentScheduleSlot}
+          dayProgress={todayEventProgress}
+          hours={virtualTime.hours}
+          minutes={virtualTime.minutes}
           openApp={openApp}
           openCharacterSchedule={() => setScheduleViewerOpen(true)}
           openWardrobe={() => setWardrobeOpen(true)}

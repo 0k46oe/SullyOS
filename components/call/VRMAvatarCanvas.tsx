@@ -18,7 +18,7 @@ import {
 } from '../../utils/avatarPerformance';
 import type { CallAudioFeed } from '../../utils/callAudioFeed';
 import {
-  normalizeAvatarTouchZone,
+  resolveAvatarTouchTarget,
   type AvatarTouchHit,
   type AvatarTouchRequest,
 } from '../../utils/avatarTouch';
@@ -182,24 +182,44 @@ const VRMAvatarCanvas: React.FC<VRMAvatarCanvasProps> = ({
       const xRatio = (intersection.point.x - bounds.min.x) / Math.max(0.001, size.x);
       const yFromTop = 1 - ((intersection.point.y - bounds.min.y) / size.y);
       const rawAreas: string[] = [];
-      const handDistanceLimit = size.y * 0.16;
-      const leftHand = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.LeftHand);
-      const rightHand = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.RightHand);
-      if (leftHand) {
-        const position = leftHand.getWorldPosition(new THREE.Vector3());
-        if (position.distanceTo(intersection.point) <= handDistanceLimit) rawAreas.push('LeftHand');
+      let object: THREE.Object3D | null = intersection.object;
+      for (let depth = 0; object && depth < 6; depth += 1, object = object.parent) {
+        const name = String(object.name || '').trim();
+        if (name && !rawAreas.includes(name)) rawAreas.push(name);
       }
-      if (rightHand) {
-        const position = rightHand.getWorldPosition(new THREE.Vector3());
-        if (position.distanceTo(intersection.point) <= handDistanceLimit) rawAreas.push('RightHand');
-      }
-      if (!rawAreas.length) {
-        if (yFromTop < 0.28) rawAreas.push(xRatio > 0.24 && xRatio < 0.76 ? 'Face' : 'Head');
-        else rawAreas.push('Body');
-      }
+      const boneAnchors: Array<{ bone: VRMHumanBoneName; label: string; radius: number }> = [
+        { bone: VRMHumanBoneName.LeftHand, label: 'LeftHand', radius: 0.095 },
+        { bone: VRMHumanBoneName.RightHand, label: 'RightHand', radius: 0.095 },
+        { bone: VRMHumanBoneName.LeftLowerArm, label: 'LeftArm', radius: 0.1 },
+        { bone: VRMHumanBoneName.RightLowerArm, label: 'RightArm', radius: 0.1 },
+        { bone: VRMHumanBoneName.LeftUpperArm, label: 'LeftArm', radius: 0.1 },
+        { bone: VRMHumanBoneName.RightUpperArm, label: 'RightArm', radius: 0.1 },
+        { bone: VRMHumanBoneName.LeftShoulder, label: 'LeftShoulder', radius: 0.085 },
+        { bone: VRMHumanBoneName.RightShoulder, label: 'RightShoulder', radius: 0.085 },
+        { bone: VRMHumanBoneName.Head, label: 'Head', radius: 0.16 },
+        { bone: VRMHumanBoneName.UpperChest, label: 'Chest', radius: 0.12 },
+        { bone: VRMHumanBoneName.Chest, label: 'Chest', radius: 0.12 },
+        { bone: VRMHumanBoneName.Spine, label: 'Waist', radius: 0.11 },
+      ];
+      const nearestAnchor = boneAnchors
+        .map(anchor => {
+          const node = vrm.humanoid.getNormalizedBoneNode(anchor.bone);
+          if (!node) return null;
+          const distance = node.getWorldPosition(new THREE.Vector3()).distanceTo(intersection.point) / size.y;
+          return { ...anchor, distance };
+        })
+        .filter((anchor): anchor is NonNullable<typeof anchor> => Boolean(anchor))
+        .filter(anchor => anchor.distance <= anchor.radius)
+        .sort((a, b) => (a.distance / a.radius) - (b.distance / b.radius))[0];
+      if (nearestAnchor && !rawAreas.includes(nearestAnchor.label)) rawAreas.unshift(nearestAnchor.label);
+      const target = resolveAvatarTouchTarget(
+        nearestAnchor ? [nearestAnchor.label] : rawAreas,
+        yFromTop,
+        xRatio,
+      );
       onAvatarTouchRef.current?.({
         ...request,
-        zone: normalizeAvatarTouchZone(rawAreas, yFromTop, xRatio),
+        ...target,
         source: 'vrm-raycast',
         rawAreas,
       });

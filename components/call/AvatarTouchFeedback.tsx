@@ -42,10 +42,10 @@ const TOUCH_FEEDBACK_CSS = `
   100% { transform: scale(1) rotate(0deg); }
 }
 @keyframes sully-touch-float-copy {
-  0% { opacity: 0; transform: translate(-50%, 8px) scale(.96); filter: blur(3px); }
-  14% { opacity: 1; transform: translate(-50%, 0) scale(1); filter: blur(0); }
-  72% { opacity: .95; transform: translate(-50%, -15px) scale(1); }
-  100% { opacity: 0; transform: translate(-50%, -28px) scale(.985); filter: blur(1px); }
+  0% { opacity: 0; transform: translate(-50%, 8px); }
+  14% { opacity: 1; transform: translate(-50%, 0); }
+  72% { opacity: .95; transform: translate(-50%, -15px); }
+  100% { opacity: 0; transform: translate(-50%, -28px); }
 }
 @media (prefers-reduced-motion: reduce) {
   .sully-touch-ripple,

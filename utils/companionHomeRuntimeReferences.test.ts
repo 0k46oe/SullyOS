@@ -7,6 +7,7 @@ describe('CompanionHome touch request boundaries', () => {
     const source = readFileSync(path.resolve(__dirname, '../components/os/CompanionHome.tsx'), 'utf8');
 
     expect(source).toContain('requestAvatarTouchReactionPack');
+    expect(source).toContain('avatarTouchTargetLabel(hit)');
     expect(source).toContain('reactions[cursor % reactions.length]');
     expect(source).not.toContain('requestAvatarTouchReply');
     expect(source).not.toContain('DB.saveMessage');
@@ -189,7 +190,7 @@ describe('CompanionHome touch request boundaries', () => {
 
     expect(source).toContain("frameStyle === 'cat'");
     expect(source).toContain('<CatCompanionChrome');
-    expect(source).toContain("frameStyle === 'otome' || frameStyle === 'cat' || frameStyle === 'magazine' || frameStyle === 'archive'");
+    expect(source).toContain("frameStyle === 'otome' || frameStyle === 'cat' || frameStyle === 'magazine' || frameStyle === 'archive' || frameStyle === 'idol'");
     expect(catSource).toContain('NIGHT COMPANION');
     expect(catSource).toContain('CURRENT ROUTE · 当前行程');
     expect(catSource).toContain('onClick={openCharacterSchedule}');
@@ -198,9 +199,37 @@ describe('CompanionHome touch request boundaries', () => {
     expect(catSource).toContain('action: openWardrobe');
     expect(catCss).toContain("[data-companion-frame='cat'] .companion-dialogue-shell");
     expect(catCss).toContain('--cat-eye:#b9f36a');
-    expect(shellSource).toContain("storedCompanionFrame === 'otome' || storedCompanionFrame === 'cat'");
+    expect(shellSource).toContain('const companionLockFrame = storedCompanionFrame');
     expect(shellSource).toContain('<CompanionLockChrome');
-    expect(lockSource).toContain("variant: 'otome' | 'cat'");
+    expect(lockSource).toContain('variant: CompanionFrameStyleId');
+  });
+
+  it('gives every companion frame a matching default lock wallpaper and upgrades idol live to its own stage chrome', () => {
+    const source = readFileSync(path.resolve(__dirname, '../components/os/CompanionHome.tsx'), 'utf8');
+    const idolSource = readFileSync(path.resolve(__dirname, '../components/os/IdolCompanionChrome.tsx'), 'utf8');
+    const idolCss = readFileSync(path.resolve(__dirname, '../components/os/IdolCompanionChrome.css'), 'utf8');
+    const lockSource = readFileSync(path.resolve(__dirname, '../components/os/CompanionLockChrome.tsx'), 'utf8');
+    const lockCss = readFileSync(path.resolve(__dirname, '../components/os/CompanionLockChrome.css'), 'utf8');
+
+    expect(source).toContain('<IdolCompanionChrome');
+    expect(source).toContain("frameStyle === 'idol'");
+    expect(source).toContain('idol-scene-backdrop');
+    expect(idolSource).toContain('data-testid="companion-idol-chrome"');
+    expect(idolSource).toContain('PRIVATE LIVE SESSION');
+    expect(idolSource).toContain("testId: 'companion-idol-wardrobe-button'");
+    expect(idolSource).toContain('CURRENT SET');
+    expect(idolCss).toContain('.idol-live-dock .is-live');
+    expect(idolCss).toContain('@keyframes idol-light-sweep');
+    for (const id of ['tech', 'otome', 'cat', 'magazine', 'archive', 'idol']) {
+      expect(lockSource).toContain(`${id}: { eyebrow:`);
+      expect(lockCss).toContain(`.companion-themed-lock--${id}`);
+    }
+    expect(lockSource).toContain('const copy = LOCK_COPY[variant]');
+    expect(lockCss).toContain('opacity:var(--lock-theme-opacity,1)');
+    expect(lockSource).not.toContain('companion-lock-idol-head');
+    expect(lockSource).not.toContain('companion-lock-idol-name');
+    expect(lockSource).not.toContain('companion-lock-idol-floor');
+    expect(lockCss).not.toContain('.companion-themed-lock--idol .companion-lock-wallpaper::after');
   });
 
   it('renders the magazine frame as a layered publication cover instead of the generic game HUD', () => {
@@ -349,12 +378,28 @@ describe('CompanionHome touch request boundaries', () => {
     expect(source).not.toContain('greetPerformance');
     expect(startupSource).toContain('lockAutonomy: true');
     expect(startupSource).toContain('lockHead: true');
-    expect(live2dSource).toContain("if (hasParameter('ParamAngleX')) smooth('ParamAngleX', frame.headX * 18, 0.2)");
-    expect(live2dSource).toContain("smooth('ParamAngleX', frame.headX * 18, 0.2, !pinsAutonomyPose)");
+    expect(live2dSource).toContain('const LIVE2D_HEAD_AXIS_SCALE = { x: 22, y: 16, z: 14 }');
+    expect(live2dSource).toContain('const LIVE2D_BODY_AXIS_SCALE = { x: 12, y: 14, z: 12 }');
+    expect(live2dSource).toContain('const LIVE2D_VTUBE_BODY_GAIN = 1.18');
+    expect(live2dSource).toContain("smooth('ParamAngleX', frame.headX * LIVE2D_HEAD_AXIS_SCALE.x");
+    expect(live2dSource).toContain("smooth('ParamBodyAngleX', frame.bodyX * LIVE2D_BODY_AXIS_SCALE.x");
+    expect(live2dSource).toContain("smooth('ParamBodyAngleY', frame.bodyY * LIVE2D_BODY_AXIS_SCALE.y");
+    expect(live2dSource).toContain("smooth('ParamBodyAngleZ', frame.bodyZ * LIVE2D_BODY_AXIS_SCALE.z");
+    expect(live2dSource).toContain("x: hasParameter('xinb')");
+    expect(live2dSource).toContain("y: hasParameter('yinb')");
+    expect(live2dSource).toContain("z: hasParameter('zinb')");
     expect(live2dSource).toContain('for (const id of HEAD_LOCK_PARAMETER_IDS)');
     expect(live2dSource).toContain('headMotionLockedRef.current && !directedHead.enabled ? HEAD_LOCK_PARAMETER_IDS : []');
     expect(live2dSource).toContain('headMotionLockedRef.current && !allowDirectedHead');
-    expect(live2dSource).toContain('getRuntimeDirectedHeadControl(performanceRef.current, window.performance.now())');
+    expect(live2dSource).toContain('getRuntimeDirectedHeadControl(authoredDirection, window.performance.now())');
+    expect(live2dSource).toContain("const angleX = readParameter('ParamAngleX')");
+    expect(live2dSource).toContain("const angleY = readParameter('ParamAngleY')");
+    expect(live2dSource).toContain('getViewerEyeContactCompensation(normalizedHeadX, normalizedHeadY)');
+    expect(live2dSource).toContain("core.setParameterValueById(resolveId('ParamEyeBallX'), finalEyeX)");
+    expect(live2dSource).toContain("host.dataset.live2dFinalEyes = `${finalEyeX.toFixed(3)},${finalEyeY.toFixed(3)}`");
+    expect(live2dSource).toContain("const finalMouth = motionStateRef.current === 'speaking' ? lastMouthLevel : 0");
+    expect(live2dSource).toContain("core.setParameterValueById(resolveId(id), finalMouth)");
+    expect(live2dSource).toContain("host.dataset.live2dFinalMouth = finalMouth.toFixed(3)");
     expect(live2dSource).toContain('if (!locked || directedHead.motionOwnsHead || directedHead.paramsOwnHead) return;');
     expect(live2dSource).toContain("typeof value === 'number' && Math.abs(value) > 0.001");
     expect(live2dSource).toContain("channel: 'pending'");
@@ -384,6 +429,10 @@ describe('CompanionHome touch request boundaries', () => {
     expect(companionDirectorSource).not.toContain('inferAvatarPerformanceFromText');
     expect(companionDirectorSource).toContain('禁止任何随机左右转头');
     expect(companionDirectorSource).toContain('才可在对应句 cue 中有意指定一次');
+    expect(companionDirectorSource).toContain('faces 只是叠加层，不能作为整句的唯一变化');
+    expect(companionDirectorSource).toContain('充分调动头部 XYZ、身体 XYZ 和手臂');
+    expect(source).toContain('kind: action.kind');
+    expect(source).toContain('tags: action.tags');
     expect(startupSource).toContain('不要替桌面主题说话');
     expect(tamagotchiSource).not.toContain('POKE_FALLBACK');
   });
