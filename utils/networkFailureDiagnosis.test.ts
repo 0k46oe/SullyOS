@@ -7,6 +7,8 @@
 //   3. no-cors 复检的两个结论必须泾渭分明：「通了」指向 CORS/限流，「没通」指向线路，
 //      两边要查的东西完全相反，说反了比不说更糟。
 //   4. 探测有 30s 冷却：一串请求同时炸时不能对同一个域名连打探测。
+//   5. Resource Timing 只认本次请求那条记录。同一个地址被反复请求时，timeline 里躺着
+//      早先成功过的记录，误取会打出「对方其实回了 200」这种跟事实相反的结论。
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
     NETWORK_SELF_CHECK_STEPS,
@@ -93,7 +95,7 @@ describe('buildFetchFailureDetail', () => {
         online: true,
         pageOrigin: 'https://sullyos.example.com',
         pageProtocol: 'https:',
-    }, { perf: { getEntriesByName: () => [] } });
+    }, { startedAt: 0, perf: { getEntriesByName: () => [] } });
 
     it('把能补的旁证全补上', () => {
         const text = detail();
@@ -115,7 +117,7 @@ describe('buildFetchFailureDetail', () => {
             online: true,
             pageOrigin: 'https://sullyos.example.com',
             pageProtocol: 'https:',
-        }, { perf: { getEntriesByName: () => [] } });
+        }, { startedAt: 0, perf: { getEntriesByName: () => [] } });
         expect(text).toContain('同源');
         expect(text).not.toContain('跨域请求');
     });
@@ -127,7 +129,7 @@ describe('buildFetchFailureDetail', () => {
             online: true,
             pageOrigin: 'https://sullyos.example.com',
             pageProtocol: 'https:',
-        }, { perf: { getEntriesByName: () => [] } });
+        }, { startedAt: 0, perf: { getEntriesByName: () => [] } });
         expect(text).toContain('混合内容');
         expect(text).not.toContain('DNS 解析不到');
     });
@@ -145,7 +147,7 @@ describe('buildFetchFailureDetail', () => {
             online: true,
             pageOrigin: 'https://qegj567-cloud.github.io',
             pageProtocol: 'https:',
-        }, { perf: { getEntriesByName: () => [] } });
+        }, { startedAt: 0, perf: { getEntriesByName: () => [] } });
         expect(text).toContain('请求超时');
         expect(text).toContain('连接建立阶段被吞');
         expect(text).not.toContain('不符合已知');
@@ -160,10 +162,35 @@ describe('buildFetchFailureDetail', () => {
             pageOrigin: 'https://sullyos.example.com',
             pageProtocol: 'https:',
         }, {
-            perf: { getEntriesByName: () => [{ responseStatus: 429, transferSize: 0, duration: 120 }] },
+            startedAt: 50_000,
+            perf: {
+                getEntriesByName: () => [{ startTime: 50_010, responseStatus: 429, transferSize: 0, duration: 120 }],
+            },
         });
         expect(text).toContain('responseStatus=429');
         expect(text).toContain('CORS');
+    });
+
+    // 整条日志级别的守卫：早先那次成功的记录不能反过来推翻本次「挂了 10s、一个字节没收到」
+    // 的判断。两句结论同时出现在一条日志里，用户只会更懵。
+    it('挂 10s 的失败不能被历史记录改口成「对方其实回了 200」', () => {
+        const text = buildFetchFailureDetail({
+            url: 'https://sullyos-amsg.example.workers.dev/client-state',
+            method: 'PUT',
+            durationMs: 10078,
+            error: failedToFetch(),
+            online: true,
+            pageOrigin: 'https://qegj567-cloud.github.io',
+            pageProtocol: 'https:',
+        }, {
+            startedAt: 50_000,
+            perf: {
+                getEntriesByName: () => [{ startTime: 9_000, responseStatus: 200, transferSize: 0, duration: 1038 }],
+            },
+        });
+        expect(text).toContain('连接建立阶段被吞');
+        expect(text).not.toContain('对方其实回了');
+        expect(text).not.toContain('responseStatus=200');
     });
 });
 
@@ -196,21 +223,87 @@ describe('readStallHint', () => {
 
 describe('readResourceTimingHint', () => {
     it('没有记录时说明「连接可能压根没建立」', () => {
-        expect(readResourceTimingHint('https://a.example.com/x', { getEntriesByName: () => [] }))
-            .toContain('没有这条请求的记录');
+        expect(readResourceTimingHint('https://a.example.com/x', {
+            startedAt: 1000, perf: { getEntriesByName: () => [] },
+        })).toContain('没有这条请求的记录');
     });
 
-    it('取最后一条记录（同一 URL 重试过多次）', () => {
+    it('同一 URL 请求过多次时，取本次这条', () => {
         const hint = readResourceTimingHint('https://a.example.com/x', {
-            getEntriesByName: () => [{ responseStatus: 200 }, { responseStatus: 503 }],
+            startedAt: 50_000,
+            perf: {
+                getEntriesByName: () => [
+                    { startTime: 9_000, responseStatus: 200, duration: 1038 },
+                    { startTime: 50_120, responseStatus: 503, duration: 88 },
+                ],
+            },
         });
         expect(hint).toContain('503');
+        expect(hint).not.toContain('1038');
+    });
+
+    // 线上翻车实录：/client-state 被反复 PUT，timeline 里躺着早先成功那次的 200。本次连接
+    // 压根没建立、什么都没往 timeline 里写，旧版取「最后一条」就把那条陈旧的 200 当成了本次
+    // 的响应，打出「对方其实回了 HTTP 200，是响应被 CORS 拦掉的」——跟同一条日志里「挂了
+    // 10.1s 一个字节没收到」「no-cors 也连不上」直接打架，把人往查 CORS 的方向带。
+    it('不能把早先成功那次的记录当成本次失败的证据', () => {
+        const hint = readResourceTimingHint('https://sullyos-amsg.example.workers.dev/client-state', {
+            startedAt: 50_000,
+            perf: {
+                getEntriesByName: () => [
+                    { startTime: 9_000, responseStatus: 200, transferSize: 0, duration: 1038 },
+                ],
+            },
+        });
+        expect(hint).toContain('没有这条请求的记录');
+        expect(hint).not.toContain('200');
+        expect(hint).not.toContain('CORS');
+    });
+
+    // 跨域拿不到 Timing-Allow-Origin 授权时，responseStatus / transferSize 被规范统统置 0。
+    // 直接印出来会被读成「状态码是 0」「一个字节都没传」——后者尤其坑，跟「连接被吞」是完全
+    // 不同的两回事。这时候只有耗时可信，其余整个不印，并说清为什么少了。
+    it('拿不到 Timing-Allow-Origin 时只报耗时，不印那两个恒为 0 的字段', () => {
+        const hint = readResourceTimingHint('https://a.example.com/x', {
+            startedAt: 50_000,
+            perf: {
+                getEntriesByName: () => [
+                    { startTime: 50_010, responseStart: 0, responseStatus: 0, transferSize: 0, duration: 10_078 },
+                ],
+            },
+        });
+        expect(hint).not.toContain('responseStatus');
+        expect(hint).not.toContain('transferSize');
+        expect(hint).toContain('10078ms');
+        expect(hint).toContain('Timing-Allow-Origin');
+    });
+
+    // 有授权时 transferSize=0 才真的是「没传字节」，得照常给。这条同时钉住 responseStart
+    // 这个探针：Safari 没有 responseStatus 字段，只能靠它判断有没有授权。
+    it('有 Timing-Allow-Origin 授权时照常给字节数', () => {
+        const hint = readResourceTimingHint('https://a.example.com/x', {
+            startedAt: 50_000,
+            perf: {
+                getEntriesByName: () => [{ startTime: 50_010, responseStart: 50_050, transferSize: 0, duration: 88 }],
+            },
+        });
+        expect(hint).toContain('transferSize=0');
+        expect(hint).not.toContain('Timing-Allow-Origin');
     });
 
     it('performance 不可用时静默返回空串，不能抛', () => {
-        expect(readResourceTimingHint('https://a.example.com/x', {})).toBe('');
+        expect(readResourceTimingHint('https://a.example.com/x', { startedAt: 0, perf: {} })).toBe('');
         expect(readResourceTimingHint('https://a.example.com/x', {
-            getEntriesByName: () => { throw new Error('boom'); },
+            startedAt: 0,
+            perf: { getEntriesByName: () => { throw new Error('boom'); } },
+        })).toBe('');
+    });
+
+    // 没有 performance.now() 就没法分辨哪条记录是本次的，这时候整段不出比瞎猜强。
+    it('拿不到发起时刻时整段不出，不退回「取最后一条」', () => {
+        expect(readResourceTimingHint('https://a.example.com/x', {
+            startedAt: Number.NaN,
+            perf: { getEntriesByName: () => [{ startTime: 9_000, responseStatus: 200 }] },
         })).toBe('');
     });
 });
