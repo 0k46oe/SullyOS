@@ -15,8 +15,9 @@
  * 把自己部署的 worker 地址填进「设置 → 网络代理 (Worker)」即可，
  * 以上全部能力会自动切到你的实例，无需改任何代码。
  *
- * 注意：网易云音乐（MusicContext）和小红书 Lite 各自在自己的 App / 设置里有
- * 独立的 worker 地址输入框，走各自的持久化，不受这里影响。
+ * 网易云音乐（MusicContext）在播放器设置里另有一个服务地址输入框：留空 = 跟随这里，
+ * 填了则只有音乐走那个地址。小红书 Lite 的 serverUrl 指向用户自己电脑上跑的服务，
+ * 跟这里是两回事。
  */
 
 export const DEFAULT_PROXY_WORKER = 'https://sullymeow.ccwu.cc';
@@ -104,8 +105,8 @@ export const isCustomProxyWorker = (): boolean => getProxyWorkerUrl() !== DEFAUL
 
 /**
  * 把指向已死历史实例的 url 改写到当前生效的 worker（保留路径和 query）；
- * 其余地址原样返回。给音乐播放器 / 小红书等「独立持久化 worker 地址」的
- * 模块做存量迁移用——它们各自存的地址不走上面的 LS_KEY，得在自己的读取层调这个。
+ * 其余地址原样返回。给小红书 serverUrl 这类「自己存一份地址」的模块做存量迁移用——
+ * 它们存的地址不走上面的 LS_KEY，得在自己的读取层调这个。
  */
 export const rewriteStaleWorkerUrl = (url: string): string => {
   if (typeof url !== 'string' || !url || !STALE_HOSTS.some((re) => re.test(url))) return url;
