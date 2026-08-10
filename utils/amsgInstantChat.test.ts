@@ -61,10 +61,10 @@ import { ActiveMsgClient } from './activeMsgClient';
 import {
   AMSG_INSTANT_CHAT_PENDING_LS_KEY,
   AMSG_INSTANT_CHAT_STAGED_NOTICES_LS_KEY,
-  chatOutboxPayloadToInbox,
+  OUTBOX_BACKFILL_MAX_AGE_MS,
   clearInstantChatPending,
   discardInstantChatExpiredNotices,
-  drainChatOutboxForChar,
+  drainOutbox,
   failInstantChatPending,
   getInstantChatPending,
   getStagedInstantChatExpiredNotices,
@@ -693,8 +693,8 @@ describe('随这一轮上云的作废回执', () => {
   });
 });
 
-describe('推送丢了的补收对账', () => {
-  const outboxPayload = (messageId: string) => ({
+describe('推送丢了的补收（服务端账本）', () => {
+  const outboxPush = (messageId: string, overrides: Record<string, any> = {}) => ({
     messageKind: 'content',
     messageType: 'instant',
     source: 'scheduled',
@@ -709,26 +709,24 @@ describe('推送丢了的补收对账', () => {
     taskUuid: 'uuid-round-1',
     occurrenceMs: 1_700_000_000_000,
     metadata: { charId: CHAR.id, charName: '小满', amsgInstantChat: true },
+    ...overrides,
   });
 
-  // 补收只对账目标轮（欠着回复的那一轮 / 显式点名的 uuid）：outbox 是跨轮环形数组，
-  // 不过滤的话被重 roll / 手动删掉的旧轮回复会因「本地查无此 id」复活。
-  beforeEach(() => setInstantChatPending(CHAR.id, 'uuid-round-1', 1_000));
+  const entry = (messageId: string, push: Record<string, any>, createdAt = Date.now()) => ({
+    id: 1, messageId, taskUuid: 'uuid-round-1', sessionId: 'sess-1',
+    messageIndex: 1, totalMessages: 1, createdAt, deliveredAt: null, push,
+  });
 
-  const stubOutbox = (messageIds: string[]) => {
-    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(JSON.stringify({
-      v: 1,
-      entries: messageIds.map((messageId) => ({
-        messageId, sessionId: 'sess-1', at: 1_700_000_000_000, payload: outboxPayload(messageId),
-      })),
-    }));
+  const stubOutbox = (entries: any[]) => {
+    vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue(entries as any);
   };
 
-  it('没收到的那条写进收件箱，字段跟 SW 收真推送时写的一份对得上', async () => {
-    stubOutbox(['msg_task_7@1700000000000_hook_0']);
-    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
-    const written = await drainChatOutboxForChar(CHAR.id);
+  it('账本上的那条写进收件箱，字段跟 SW 收真推送时写的一份对得上', async () => {
+    const messageId = 'msg_task_7@1700000000000_hook_0';
+    stubOutbox([entry(messageId, outboxPush(messageId))]);
+    const { written, ackNow } = await drainOutbox();
     expect(written).toBe(1);
+    expect(ackNow).toEqual([]);           // 落库之前不许销账
     const saved = storeState.saved[0];
     expect(saved.charId).toBe(CHAR.id);
     expect(saved.body).toBe('我在呢');
@@ -738,61 +736,65 @@ describe('推送丢了的补收对账', () => {
     expect(saved.sentAt).toBe(1_700_000_000_000);
   });
 
-  it('已经上过屏的那条不再放一遍（对账读聊天记录里的 messageId）', async () => {
+  // 账本是这一版才开始销账的，头一次拉会把历史积压一次性倒出来。不掐时效的话，那些
+  // 早就落过库的老消息会因为超出近史去重的查询窗口而重新上屏。
+  it('超过时效窗口的条目不进聊天流，当场销账', async () => {
     const messageId = 'msg_task_7@1700000000000_hook_0';
-    stubOutbox([messageId]);
-    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([
-      { role: 'assistant', type: 'text', content: '我在呢', metadata: { activeMsg2: { messageId } } },
-    ] as any);
-    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
+    const tooOld = Date.now() - OUTBOX_BACKFILL_MAX_AGE_MS - 1;
+    stubOutbox([entry(messageId, outboxPush(messageId), tooOld)]);
+    const { written, ackNow } = await drainOutbox();
+    expect(written).toBe(0);
     expect(storeState.saved).toHaveLength(0);
+    expect(ackNow).toEqual([messageId]);
   });
 
-  it('还压在收件箱里没冲刷的那条也算收过', async () => {
+  // 补收回来已经没有意义的那几类：思维链要挂在正文上、工具请求那头的云端早就收工了、
+  // 隔了一阵子的报错弹出来只会让人摸不着头脑。但账还是要销，不然每趟都把它们捞回来。
+  it.each(['reasoning', 'tool_request', 'error'])('%s 类不进聊天流，当场销账', async (kind) => {
+    const messageId = `msg-${kind}`;
+    stubOutbox([entry(messageId, outboxPush(messageId, { messageKind: kind }))]);
+    const { written, ackNow } = await drainOutbox();
+    expect(written).toBe(0);
+    expect(storeState.saved).toHaveLength(0);
+    expect(ackNow).toEqual([messageId]);
+  });
+
+  it('情绪结果显式标成 emotion_update（冲刷管线靠它分流，认不出会当正文气泡渲染）', async () => {
+    const messageId = 'msg-emotion';
+    stubOutbox([entry(messageId, outboxPush(messageId, {
+      messageKind: 'emotion_update',
+      messageType: undefined,
+      message: '',
+      metadata: { charId: CHAR.id, emotionRaw: '{"joy":1}' },
+    }))]);
+    const { written } = await drainOutbox();
+    expect(written).toBe(1);
+    expect(storeState.saved[0].messageType).toBe('emotion_update');
+    expect(storeState.saved[0].metadata.emotionRaw).toBe('{"joy":1}');
+  });
+
+  it('推送载荷少了 charId → 没有落点，丢掉并销账而不是造一条无主消息', async () => {
+    stubOutbox([entry('msg-orphan', { messageKind: 'content', message: '孤儿' })]);
+    const { written, ackNow } = await drainOutbox();
+    expect(written).toBe(0);
+    expect(storeState.saved).toHaveLength(0);
+    expect(ackNow).toEqual(['msg-orphan']);
+  });
+
+  // 销账即失忆：账一销，这条就再也拉不回来了。写不进收件箱时必须留着账。
+  it('写收件箱失败 → 不销账，下次拉回来再试', async () => {
     const messageId = 'msg_task_7@1700000000000_hook_0';
-    stubOutbox([messageId]);
-    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
-    storeState.inbox = [{ messageId, charId: CHAR.id }];
-    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
+    stubOutbox([entry(messageId, outboxPush(messageId))]);
+    const { ActiveMsgStore } = await import('./activeMsgStore');
+    vi.spyOn(ActiveMsgStore, 'saveInboxMessage').mockRejectedValueOnce(new Error('quota'));
+    const { written, ackNow } = await drainOutbox();
+    expect(written).toBe(0);
+    expect(ackNow).toEqual([]);
   });
 
-  it('不是目标轮的旧条目不复活（重 roll / 删除过的轮次已不在 pending 里）', async () => {
-    clearInstantChatPending(CHAR.id);
-    setInstantChatPending(CHAR.id, 'uuid-round-2', 2_000);   // 正在等的是新一轮
-    stubOutbox(['msg_task_7@1700000000000_hook_0']);          // outbox 里只有旧轮（uuid-round-1）
-    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
-    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
-    expect(storeState.saved).toHaveLength(0);
-  });
-
-  it('一条都不欠、也没显式点名 → 直接 0，一个请求都不发', async () => {
-    clearInstantChatPending(CHAR.id);
-    const read = vi.spyOn(ActiveMsgClient, 'readClientStateValue');
-    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
-    expect(read).not.toHaveBeenCalled();
-  });
-
-  it('显式点名 uuid（销账后的末段补扫）时不依赖 pending 存在', async () => {
-    clearInstantChatPending(CHAR.id);
-    stubOutbox(['msg_task_7@1700000000000_hook_0']);
-    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
-    expect(await drainChatOutboxForChar(CHAR.id, { uuids: ['uuid-round-1'] })).toBe(1);
-  });
-
-  it('读不到近史时宁可这次不补收（重复上屏比晚一会儿更糟），对外报 null', async () => {
-    stubOutbox(['msg_task_7@1700000000000_hook_0']);
-    vi.spyOn(DB, 'getRecentMessagesByCharId').mockRejectedValue(new Error('IDB down'));
-    expect(await drainChatOutboxForChar(CHAR.id)).toBeNull();
-    expect(storeState.saved).toHaveLength(0);
-  });
-
-  it('云端 outbox 读失败 → 返回 null（「没读到」≠「读到了、确实没有」），不抛错', async () => {
-    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockRejectedValue(new Error('offline'));
-    expect(await drainChatOutboxForChar(CHAR.id)).toBeNull();
-  });
-
-  it('推送载荷少了 charId → 没有落点，丢掉而不是造一条无主消息', () => {
-    expect(chatOutboxPayloadToInbox({ message: '孤儿' }, 1)).toBeNull();
+  it('账本读失败照常抛（「没读到」≠「读到了、确实没有」，调用方才好分开收场）', async () => {
+    vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockRejectedValue(new Error('offline'));
+    await expect(drainOutbox()).rejects.toThrow('offline');
   });
 
   // 契约测试：push→inbox 的字段映射有两份手工同步的副本（SW 的 saveContentToInbox 与
@@ -800,21 +802,23 @@ describe('推送丢了的补收对账', () => {
   // 任一副本漏抄这两个字段，多段回复的首段就会被当成末段销账，后续段永久丢失且无报错。
   // 这里钉住补收侧必须把顶层段号抄进 metadata（与 sw-keep-alive.ts 的映射同一条规则；
   // 那份是 SW 代码没法直接 import，改动 SW 映射时这条测试就是要一起过的清单）。
-  it('顶层 messageIndex/totalMessages 必须抄进 metadata（销账检查只认 metadata 里的）', () => {
-    const inbox = chatOutboxPayloadToInbox({
-      charId: CHAR.id,
-      charName: '小满',
+  it('顶层 messageIndex/totalMessages 必须抄进 metadata（销账检查只认 metadata 里的）', async () => {
+    const messageId = 'msg_task_7@1700000000000_hook_0';
+    stubOutbox([entry(messageId, {
+      messageKind: 'content',
       message: '第一段',
-      messageId: 'msg_task_7@1700000000000_hook_0',
+      messageId,
       sessionId: 'sess_task_7@1700000000000',
       taskUuid: 'uuid-round-1',
       messageIndex: 1,
       totalMessages: 3,
       metadata: { charId: CHAR.id },
-    }, Date.now())!;
+    })]);
+    await drainOutbox();
+    const inbox = storeState.saved[0];
     expect(inbox).toBeTruthy();
-    expect((inbox.metadata as any).messageIndex).toBe(1);
-    expect((inbox.metadata as any).totalMessages).toBe(3);
-    expect((inbox.metadata as any).sessionId).toBe('sess_task_7@1700000000000');
+    expect(inbox.metadata.messageIndex).toBe(1);
+    expect(inbox.metadata.totalMessages).toBe(3);
+    expect(inbox.metadata.sessionId).toBe('sess_task_7@1700000000000');
   });
 });

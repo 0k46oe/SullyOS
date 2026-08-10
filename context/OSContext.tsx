@@ -1621,9 +1621,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
         // amsg2 脏标记兜底补传：上次会话打了脏、但请求还没落地（在飞或躺在退避重排里）
         // 就被杀进程的角色，按 localStorage 底账用刚从 DB 读回的数据重建快照传一次。
-        // realtimeConfig 的 state 此刻可能还没就位，直接读它的持久化来源。
+        // realtimeConfig / apiConfig 的 state 此刻可能都还没就位，直接读各自的持久化来源。
         try {
           const savedRealtime = localStorage.getItem('os_realtime_config');
+          const savedApiRaw = localStorage.getItem('os_api_config');
           resumePendingAmsgStateSync({
             characters: finalChars,
             userProfile: dbUser ?? defaultUserProfile,
@@ -1631,6 +1632,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
             realtimeConfig: savedRealtime
               ? { ...defaultRealtimeConfig, ...JSON.parse(savedRealtime) }
               : defaultRealtimeConfig,
+            // 上次没传成功的 LLM 凭据行按这份重算补传；没有就跳过那一项。
+            apiConfig: savedApiRaw ? JSON.parse(savedApiRaw) : undefined,
           });
         } catch (err) {
           console.warn('[AmsgStateSync] 启动补传失败（不影响启动）', err);

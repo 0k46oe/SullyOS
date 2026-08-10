@@ -10,7 +10,7 @@ import worker, {
   amsgFireSettled, amsgHooks, amsgReasoningKey, amsgStaleSkip, attachScheduledTasks,
   buildWorkerConfig, configureInstantErrorPush, inspectWorkerEnv,
   offloadOversizedPush, resolveVapidEmail, runFireCancelTool, runFireRenewTool,
-  runFireScheduleTool, runMcpFireTool, splitSchemaMissing,
+  runFireScheduleTool, runMcpFireTool, splitSchemaMissing, classifySchemaProbeError,
 } from './index';
 import * as workerEntry from './index';
 import { MAX_TOOL_ITERATIONS } from './agentic';
@@ -19,7 +19,6 @@ import { amsgEmotionUpdateKey, EMOTION_EVAL_RIDE_ALONG_MS } from './emotionEval'
 import { INSTANT_TOTAL_TIMEOUT_MS } from './instantChat';
 import {
   AMSG_CHAT_FAIL_KEY,
-  AMSG_CHAT_OUTBOX_KEY,
   AMSG_FIRE_PACK_KEY,
   AMSG_LAST_SKIP_KEY,
   AMSG_SELF_LOG_KEY,
@@ -31,10 +30,8 @@ import {
   amsgXhsSessionKey,
   appendSelfLogEntry,
   createSelfLog,
-  CHAT_OUTBOX_MAX_SESSIONS,
   FIRE_PACK_VERSION,
   packStateValue,
-  parseChatOutbox,
   parseSelfLog,
   SELF_LOG_MAX_ENTRIES,
 } from '../../../utils/amsgFirePack';
@@ -200,7 +197,7 @@ const makeFireStore = (chatMessages?: Array<{ role: string; content: unknown }>)
     }
     return { upserted: entries.length, skipped: 0, deleted: 0 };
   });
-  return { rows, readState, writeState, outbox: () => parseChatOutbox(rows.get(AMSG_CHAT_OUTBOX_KEY)) };
+  return { rows, readState, writeState };
 };
 
 /**
@@ -3000,6 +2997,34 @@ describe('splitSchemaMissing', () => {
 
 // /debug 是隔着屏幕帮别人看部署时用的：对方只会截图或者把 JSON 贴过来，所以它既要
 // 说得足够多（配置、schema、cron），又不能带出任何一样不该外传的东西——它不设防。
+describe('classifySchemaProbeError — 自查挂了归到哪一档', () => {
+  // 分档的意义全在「用户该做什么」上：unsupported 点一下更新就好，denied 点什么都没用
+  // （后端自己的毛病），timeout 再体检一次多半就过。混成一句「查不了」等于什么都没说。
+  it('D1 的授权器拒了 → denied', () => {
+    expect(classifySchemaProbeError(new Error('D1_ERROR: not authorized: SQLITE_AUTH'))).toBe('denied');
+  });
+
+  it('后端太旧、压根没这个方法 → unsupported', () => {
+    expect(classifySchemaProbeError(new TypeError('upstream.getSchemaVersion is not a function')))
+      .toBe('unsupported');
+    expect(classifySchemaProbeError(new Error('[amsg-server] 这个数据库适配器不支持 schema 自查（没实现 describeSchema）。')))
+      .toBe('unsupported');
+  });
+
+  it('库没在时限内回话 → timeout', () => {
+    const aborted = new Error('The operation was aborted');
+    aborted.name = 'AbortError';
+    expect(classifySchemaProbeError(aborted)).toBe('timeout');
+    expect(classifySchemaProbeError(new Error('D1_ERROR: query timed out'))).toBe('timeout');
+  });
+
+  it('归不了类的一律 other，绝不误报成上面三档', () => {
+    expect(classifySchemaProbeError(new Error('D1_ERROR: something else entirely'))).toBe('other');
+    expect(classifySchemaProbeError('一段字符串')).toBe('other');
+    expect(classifySchemaProbeError(null)).toBe('other');
+  });
+});
+
 describe('/debug — 只读诊断', () => {
   /**
    * 假 D1：按 SQL 关键字给回答，只支持这个端点真正会发的那几条。
@@ -3092,6 +3117,66 @@ describe('/debug — 只读诊断', () => {
     expect(data.storage.reachable).toBe(true);
     expect(data.storage.schemaReady).toBeNull();
     expect(data.storage.schemaReady).not.toBe(true);
+  });
+
+  /**
+   * 回归守卫：库里混着 Cloudflare 内部表 `_cf_KV` 时，自查必须绕开它跑完。
+   *
+   * 2026-08-09 在真机上撞到的：新建的 D1 库自带这张内部表，当时的上游遍历全库逐表
+   * 问列，问到它被 D1 一口回绝（SQLITE_AUTH），整个自查断在第一张表上。修复随
+   * amsg-server 2.6.0-next.18+ 发布：内部表直接跳过。这个夹具里 `PRAGMA
+   * table_info(_cf_KV)` 仍然会炸——上游哪天退回去问它一句，自查就会重新断掉、
+   * schemaError 变回 denied，这条就红。
+   */
+  it('库里混着 _cf_KV 内部表 → 上游跳过它，自查照常跑完', async () => {
+    const db = fakeDb({ tables: ['_cf_KV', ...ALL_TABLES] });
+    const withInternalTable = {
+      prepare(sql: string) {
+        if (sql.includes('PRAGMA table_info(_cf_KV)')) {
+          const boom = async () => { throw new Error('D1_ERROR: not authorized: SQLITE_AUTH'); };
+          return { bind: () => ({ first: boom }), first: boom, all: boom };
+        }
+        return db.prepare(sql);
+      },
+    };
+    const data = await debug(withInternalTable);
+    // 自查没被内部表噎死：跑出了结论（缺不缺另说），且没把 _cf_KV 当成该建的表。
+    expect(data.storage.schemaError).toBeNull();
+    expect(data.storage.schemaReady).not.toBeNull();
+    expect(data.storage.missingTables).not.toContain('_cf_KV');
+    // 走完了全程才对得出完整清单：credRefs 那张 llm_credentials 也在比对范围里。
+    expect(data.storage.missingTables).toContain('llm_credentials');
+  });
+
+  it('自查跑成了就不带 schemaError（有值等于「这次没查成」）', async () => {
+    const data = await debug(fakeDb({ tables: ALL_TABLES }));
+    expect(data.storage.schemaError).toBeNull();
+  });
+
+  /**
+   * 回归守卫：一张业务表都没有的库（一键部署完还没点「连接并启用」的样子，只剩
+   * `_cf_KV`）绝不许显示成全绿，而且要点得出名来。
+   *
+   * 旧版上游在这里会被 `_cf_KV` 噎死，「缺哪些表」只能是空数组，界面全靠
+   * schemaError 撑着说「查不了」；amsg-server 2.6.0-next.18+ 跳过内部表后，
+   * 自查能跑完并点名全部缺表，界面直接说得清「该点重新连接建表」。
+   */
+  it('库里一张业务表都没有 → 点名全部缺表，空库不算绿', async () => {
+    const empty = {
+      prepare(sql: string) {
+        const answer = async () => {
+          if (sql.includes('PRAGMA')) throw new Error('D1_ERROR: not authorized: SQLITE_AUTH');
+          if (sql.includes('sqlite_master')) return { results: [{ name: '_cf_KV' }] };
+          return { pending: 0, overdue: 0, oldest: null };
+        };
+        return { bind: () => ({ first: answer }), first: answer, all: answer };
+      },
+    };
+    const data = await debug(empty);
+    expect(data.storage.schemaReady).toBe(false);
+    expect(data.storage.missingTables).toContain('scheduled_messages');
+    expect(data.storage.missingTables).toContain('llm_credentials');
+    expect(data.storage.schemaError).toBeNull();
   });
 
   it('换了 bundle 没跑 init-tenant → 点名缺的那几列（cron 会因此每分钟静默挂）', async () => {
@@ -3377,9 +3462,9 @@ describe('定时轮撞上即时轻量包的占位模板', () => {
   });
 });
 
-// 推送是会静默丢的：手机换网、系统压制、SW 没醒，用户那边就是「一直在输入中」。
-// outbox 是唯一的补收通道，写晚了（等发送结果）或者写漏了都等于没有。
-describe('即时对话的收件兜底 outbox', () => {
+// 用户正盯着窗口等这条回复时，锁屏横幅是纯打扰（页面自己会上屏）；窗口不可见时又
+// 必须弹。SW 的 shouldRenderNotification 按 notification.show 分这两种，worker 表态。
+describe('即时对话的推送通知策略', () => {
   const CLIENT_TASK_ID = 'client-instant-1';
   const CHAT_MESSAGES = [{ role: 'user', content: '在吗' }];
 
@@ -3392,40 +3477,15 @@ describe('即时对话的收件兜底 outbox', () => {
     ...(instant ? { amsgInstantChat: true } : { amsgTaskInstruction: '想到什么说什么' }),
   });
 
-  it('生成完就写进 chat_outbox，和真发出去的那份 id 逐字一致', async () => {
+  it('即时对话的推送标 when-hidden', async () => {
     const store = makeStore(true);
     const { decision } = await runFire(store, { metadata: fireMeta(true), llmOutput: '在的。怎么啦？' });
     expect(decision.decision).toBe('finish');
-
-    const outbox = store.outbox()!;
-    expect(outbox.entries).toHaveLength(decision.pushPayloads.length);
-    // 回归守卫：outbox 里的 messageId 跟推送上的对不上，客户端补收时会把同一条再入库一遍
-    expect(outbox.entries.map((e: any) => e.messageId))
-      .toEqual(decision.pushPayloads.map((p: any) => p.messageId));
-    expect(outbox.entries[0].messageId)
-      .toBe(`msg_task_42@${Date.parse('2026-07-25T12:00:00.000Z')}_hook_0`);
-    expect(outbox.entries[0].payload).toEqual(decision.pushPayloads[0]);
-  });
-
-  it('定时任务不写 outbox（那条路的产物在任务列表里查得到）', async () => {
-    const store = makeStore(false);
-    const { decision } = await runFire(store, { metadata: fireMeta(false), llmOutput: '在的。' });
-    expect(decision.decision).toBe('finish');
-    expect(store.outbox()).toBeNull();
-    expect(store.rows.has(AMSG_CHAT_OUTBOX_KEY)).toBe(false);
-  });
-
-  // 用户正盯着窗口等这条回复时，锁屏横幅是纯打扰（页面自己会上屏）；窗口不可见时又
-  // 必须弹。SW 的 shouldRenderNotification 按 notification.show 分这两种，worker 表态。
-  it('即时对话的推送标 when-hidden，outbox 里那份也带着', async () => {
-    const store = makeStore(true);
-    const { decision } = await runFire(store, { metadata: fireMeta(true), llmOutput: '在的。怎么啦？' });
     for (const push of decision.pushPayloads) {
       expect((push.notification as any).show).toBe('when-hidden');
       // 横幅文案还在：show 只是加一个字段，不是把 notification 换掉
       expect((push.notification as any).body).toBeTruthy();
     }
-    expect((store.outbox()!.entries[0].payload as any).notification.show).toBe('when-hidden');
   });
 
   it('定时任务的推送不标 show（主动消息前台可见时更该弹）', async () => {
@@ -3435,46 +3495,6 @@ describe('即时对话的收件兜底 outbox', () => {
       expect(push.notification).toBeTruthy();
       expect((push.notification as any).show).toBeUndefined();
     }
-  });
-
-  it('连聊几轮只留最近 CHAT_OUTBOX_MAX_SESSIONS 轮（按 sessionId 整轮保留）', async () => {
-    const store = makeStore(true);
-    for (let i = 0; i < CHAT_OUTBOX_MAX_SESSIONS + 2; i += 1) {
-      // 每轮换一个任务行 id，messageId / sessionId 才跟着变（同一次触发重跑是要覆盖的）
-      await runFire(store, {
-        metadata: fireMeta(true), llmOutput: `第 ${i} 轮`,
-        taskId: 40 + i, sessionId: `sess_${i}`,
-      });
-    }
-    const entries = store.outbox()!.entries;
-    // 5 轮只剩最近 3 轮（每轮 1 条），最老两轮整轮丢弃
-    expect(entries).toHaveLength(CHAT_OUTBOX_MAX_SESSIONS);
-    expect(entries.map((e: any) => e.payload.message)).toEqual(['第 2 轮', '第 3 轮', '第 4 轮']);
-  });
-
-  it('单轮长回复整轮保留：12 段一条不掐（按条数环形保留会把整轮掐头）', async () => {
-    const store = makeStore(true);
-    for (let i = 0; i < 3; i += 1) {
-      await runFire(store, {
-        metadata: fireMeta(true), llmOutput: `短回复 ${i}`,
-        taskId: 50 + i, sessionId: `sess_short_${i}`,
-      });
-    }
-    await runFire(store, {
-      metadata: fireMeta(true),
-      llmOutput: Array.from({ length: 12 }, (_, i) => `长回复第 ${i} 段`).join('\n'),
-      taskId: 60, sessionId: 'sess_long',
-    });
-
-    const entries = store.outbox()!.entries;
-    expect(entries
-      .map((e: any) => String(e.payload.message))
-      .filter((message: string) => message.startsWith('长回复')))
-      .toHaveLength(12);
-    // 留下的仍是最近 3 轮：长回复那轮 + 前两轮短回复
-    expect(entries
-      .filter((e: any) => String(e.payload.message).startsWith('短回复')))
-      .toHaveLength(2);
   });
 });
 

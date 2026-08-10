@@ -24,7 +24,7 @@ import { InstantPushSettingsModal } from '../components/settings/InstantPushSett
 import { PushVapidSettingsModal } from '../components/settings/PushVapidSettingsModal';
 import PushSubscriptionPanel from '../components/settings/PushSubscriptionPanel';
 import ActiveMsgGlobalSettingsModal from '../components/settings/ActiveMsgGlobalSettingsModal';
-import { syncAmsgToolConfig, syncAmsgToolConfigAndPrompts } from '../utils/amsgStateSync';
+import { syncAmsgLlmCredentials, syncAmsgToolConfig, syncAmsgToolConfigAndPrompts } from '../utils/amsgStateSync';
 import { ActiveMsgClient } from '../utils/activeMsgClient';
 import VersionInfo from '../components/settings/VersionInfo';
 import { LoyalUserRecruitmentController } from '../components/LoyalUserRecruitmentEvent';
@@ -908,9 +908,14 @@ const Settings: React.FC = () => {
     }
     setStatusMsg(selectedApiPreset ? '配置和预设已保存' : '配置已保存');
     setTimeout(() => setStatusMsg(''), 2000);
+    // 支持凭据表的 Worker 上，任务只带引用，换 Key 只要覆盖云端那几行——不用逐条改任务。
+    // 老 Worker 上这句是 no-op，凭据靠下面那条逐条补刷的老路续命。
+    syncAmsgLlmCredentials({ ...apiConfig, ...nextConfig });
     // 已排程的主动消息 2.0 AI 任务里冻结的是排程那一刻的凭据——换 Key / 换模型后
     // 不重传的话，到点全拿旧凭据打请求（旧 Key 一吊销就是连环 401）。best-effort：
     // 保存本身不等它，失败只提示；没配 2.0 / 没有 pending AI 任务时它是 no-op。
+    // 存量的内联任务还靠它，所以走引用那条路的用户这里照跑（带 credRefs 的任务
+    // 到点只认引用，这一份补刷落在它们身上是无害的空转）。
     void ActiveMsgClient.refreshApiCredentialsForPendingTasks({ ...apiConfig, ...nextConfig })
       .then((result) => {
         if (result.status === 'partial') {
