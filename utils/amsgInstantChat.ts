@@ -662,9 +662,23 @@ const backfillOutboxEntries = async (
  * 调用方拿到 written > 0 之后要自己 flush 一次收件箱（见文件头注：不在这里 flush
  * 是为了避免和 activeMsgRuntime 成环）。
  */
-export const drainOutbox = async (): Promise<OutboxDrainResult> => {
+export const drainOutbox = async (
+  options?: {
+    /**
+     * 头一趟也把存量当「我丢了的消息」补收（默认 false = 走 adoptOutboxBacklog 整批销账）。
+     *
+     * 只给用户手点的那次补收用：自动路径分不清存量里哪些是真丢的、哪些是当时收到了只是
+     * 客户端还不会销账，倒出来就是重放；而用户是察觉到「消息没来」才去点那个按钮的，
+     * 这个判断他自己做得了。按补收处理之后照样记下接管标记，后面回到自动路径。
+     */
+    treatBacklogAsMissed?: boolean;
+  },
+): Promise<OutboxDrainResult> => {
   const entries = await ActiveMsgClient.listOutboxEntries();
-  if (!hasAdoptedOutbox()) return await adoptOutboxBacklog(entries);
+  if (!hasAdoptedOutbox()) {
+    if (!options?.treatBacklogAsMissed) return await adoptOutboxBacklog(entries);
+    markOutboxAdopted();
+  }
   const { written, ackNow } = await backfillOutboxEntries(entries);
   return { written, ackNow, entries };
 };

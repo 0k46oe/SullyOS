@@ -22,6 +22,7 @@ import {
   judgePushDeliveryFailure,
   type AmsgPushDeliveryProbe,
 } from '../../utils/amsgDiagnostics';
+import { catchUpMissedPushesManually } from '../../utils/activeMsgRuntime';
 import { readBrowserPushState, type BrowserPushState } from '../../utils/pushSubscribeShared';
 import {
   describeElapsed,
@@ -67,6 +68,7 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
   const [workerConfigured, setWorkerConfigured] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [catchingUp, setCatchingUp] = useState(false);
   // 连续几次僵尸失败。不落盘：刷新页面就归零，用户不会莫名其妙看到一个红按钮。
   const [zombieStreak, setZombieStreak] = useState(0);
 
@@ -123,6 +125,33 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
     } finally {
       setResetting(false);
       await refresh();
+    }
+  };
+
+  /**
+   * 手动补收：去云端账本上把没收到的消息捞回来。
+   *
+   * 结果照实说，不含糊：捞回来几条、翻过多少条都报出来。「一条都没补回来」跟「压根没读成」
+   * 是两个结论，用户拿它决定下一步该干嘛（前者说明消息不在账本上、该查别处，后者只是这趟
+   * 没读成、再点一次就行），混在一起说等于什么都没说。
+   */
+  const handleCatchUp = async () => {
+    setCatchingUp(true);
+    try {
+      const { written, scanned } = await catchUpMissedPushesManually();
+      if (written > 0) {
+        addToast(`补回 ${written} 条消息，去聊天里看看。`, 'success');
+      } else if (scanned > 0) {
+        // 账本上有行、但一条都没上屏：全都超出了一天的补收窗口（更老的推送推送服务
+        // 早就不投了，补回来只会让人莫名其妙），或者本来就不是聊天内容。
+        addToast('账本上剩下的都太旧了（只补最近一天的），没有可补的消息。', 'info');
+      } else {
+        addToast('账本上没有漏收的消息——这条链路是通的。', 'info');
+      }
+    } catch (error: any) {
+      addToast(error?.message || '读云端账本失败，待会儿再试。', 'error');
+    } finally {
+      setCatchingUp(false);
     }
   };
 
@@ -307,6 +336,30 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
           或者订阅被吊销之后点它。
           {deepMode && <><br/>连着几次都没成，已经切到「深度重置」——它会把 Service Worker 整个装一遍，更彻底。</>}
         </p>
+
+        {/* 上面那条链路修好了也追不回已经丢掉的消息——那些还在云端账本上躺着，得有人去拿。
+            平时冷启动和回到前台会自动捞一次，这个按钮是给「我确实少收了东西」的时候用的：
+            它连头一趟的账本存量也当补收处理，而自动那条路会把存量整批销掉（分不清哪些是
+            真丢的、哪些是当时收到了只是老版本不会销账，倒出来就是重放）。 */}
+        {workerConfigured && !browser?.capacitorNative && (
+          <>
+            <button
+              disabled={catchingUp || resetting || refreshing}
+              onClick={() => void handleCatchUp()}
+              className={`mt-3 w-full py-2 rounded-xl text-xs font-bold border ${
+                catchingUp || resetting || refreshing
+                  ? 'bg-slate-100 text-slate-400 border-slate-200'
+                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+              }`}
+            >
+              {catchingUp ? '正在找…' : '找回没收到的消息'}
+            </button>
+            <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
+              每条消息发出去之前，云端都先记了一行，你这边收到了才销账。所以推送要是在路上丢了
+              （网络不稳、挂着代理、手机压后台），内容还留在云端——点它把最近一天里漏掉的捞回来。
+            </p>
+          </>
+        )}
       </div>
     </div>
   );
