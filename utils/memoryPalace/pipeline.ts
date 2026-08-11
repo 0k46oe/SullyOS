@@ -1704,7 +1704,17 @@ export async function processNewMessages(
 
         console.log(`🏰 [Pipeline] 开始处理缓冲区：${toProcess.length} 条消息（保留尾部 ${keptTail} 条）`);
         console.log(`🏰 [Pipeline]   消息ID范围: ${toProcess[0].id} ~ ${toProcess[toProcess.length - 1].id}`);
-        console.log(`🏰 [Pipeline]   总消息: ${totalCount}, 保留原文: ${hotZoneSizeForLog}, 缓冲区: ${buffer.length}/${minThreshold}, 档位: ${waterline.preset}, hwm: ${lastProcessedId}`);
+        console.log(`🏰 [Pipeline]   总消息: ${totalCount}, 热区: ${HOT_ZONE_SIZE}, 缓冲区: ${buffer.length}, hwm: ${lastProcessedId}`);
+        // 全局广播：聊天/见面/通话共用同一条消息流与水位线，触发整理的可能是
+        // 任何一个入口。OS 层监听此事件统一弹「xx正在整理记忆」，用户不管在哪个
+        // App 都能立刻看到。只在真正进入处理路径后才广播——skip 不打扰。
+        try {
+            if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('memory-palace-processing', {
+                    detail: { charId, charName, count: toProcess.length },
+                }));
+            }
+        } catch { /* 非浏览器环境（测试）无 window */ }
         onProgress?.(`正在整理 ${toProcess.length} 条对话...`);
 
         // 5–8. 构建上下文 → LLM 提取 → 向量化（共用 extractAndStoreMemories）。

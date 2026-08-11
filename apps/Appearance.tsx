@@ -1,15 +1,22 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useOS, DEFAULT_WALLPAPER, DEFAULT_PAPER_APPEARANCE, NOSTALGIA_APPEARANCE } from '../context/OSContext';
-import { OSTheme, DesktopDecoration, AppearancePreset, Toast } from '../types';
+import { AppID, OSTheme, DesktopDecoration, AppearancePreset, Toast } from '../types';
 import { INSTALLED_APPS, Icons } from '../constants';
 import { processImage, processImageToBlob } from '../utils/file';
-import { putImageBlob, useBlobRefUrl } from '../utils/blobRef';
+import { deleteBlobRef, putImageBlob, useBlobRefUrl } from '../utils/blobRef';
+import {
+    companionAvatarSource,
+    companionSkinSetPatchValue,
+    hasDatePortraits,
+    listCompanionDateOutfits,
+    normalizeCompanionSkinSetId,
+} from '../utils/companionAvatar';
 import { DB } from '../utils/db';
 import { resolveStatusBarMode, type StatusBarMode } from '../utils/iosStandalone';
 import { confirmExportSafety } from '../utils/exportGuard';
 import { trackEvent } from '../utils/analytics';
-import { Sparkle } from '@phosphor-icons/react';
+import { Check, ImageSquare, Sparkle, Trash, UploadSimple } from '@phosphor-icons/react';
 import { ChatAppearanceEditor as ModularChatAppearanceEditor } from '../components/appearance/ChatAppearanceEditor';
 import AppIconEditor from '../components/appearance/AppIconEditor';
 import { Capacitor } from '@capacitor/core';
@@ -19,6 +26,11 @@ import { Share } from '@capacitor/share';
 const CustomIconImage: React.FC<{ value: string; alt: string; preserveOutline?: boolean }> = ({ value, alt, preserveOutline = false }) => {
     const url = useBlobRefUrl(value);
     return url ? <img src={url} className={`w-full h-full ${preserveOutline ? 'object-contain' : 'object-cover rounded-2xl'}`} alt={alt} /> : null;
+};
+
+const CompanionPortraitPreview: React.FC<{ value?: string; alt: string }> = ({ value, alt }) => {
+    const url = useBlobRefUrl(value);
+    return url ? <img src={url} className="h-full w-full object-contain" alt={alt} /> : <ImageSquare size={28} className="text-slate-300" />;
 };
 
 // Touch-friendly long-press wrapper. `onContextMenu` alone misses iOS Safari /
@@ -104,6 +116,7 @@ const ACNH_WALLPAPER = 'linear-gradient(180deg, #F8F4E8 0%, #F3EFDD 58%, #E6EECE
 const MOBILEGAME_WALLPAPER = 'radial-gradient(95% 55% at 85% 0%, #fdeef7 0%, transparent 50%), radial-gradient(85% 55% at 6% 10%, #f6f2fc 0%, transparent 55%), linear-gradient(180deg, #fdfbff 0%, #f9f6fd 55%, #f4f0fa 100%)';
 // 电子宠物主题壁纸：薰衣草奶油（照抄参考稿——柔紫底衬奶油卡片与紫描边）。
 const TAMAGOTCHI_WALLPAPER = 'radial-gradient(85% 50% at 80% 0%, #e6dcf8 0%, transparent 55%), radial-gradient(75% 45% at 12% 10%, #f4edfb 0%, transparent 55%), linear-gradient(180deg, #ded4f4 0%, #d6cbf0 55%, #cfc3ec 100%)';
+const COMPANION_WALLPAPER = 'radial-gradient(90% 65% at 50% 5%, #6c5a91 0%, transparent 62%), radial-gradient(75% 55% at 100% 50%, #382e5b 0%, transparent 72%), linear-gradient(180deg, #211a36 0%, #100d1c 62%, #080711 100%)';
 
 type DesktopSkinOption = { id: string; name: string; desc: string; swatch: string; config: Partial<OSTheme> };
 
@@ -159,6 +172,23 @@ const DESKTOP_SKINS: DesktopSkinOption[] = [
       chatBubbleStyle: 'modern', chatMessageSpacing: 'default',
       chatHeaderStyle: 'default', chatInputStyle: 'rounded',
       chatChromeStyle: 'soft', chatBackgroundStyle: 'paper',
+      chatShowTimestamp: 'always',
+    },
+  },
+  {
+    id: 'companion',
+    name: '触感陪伴',
+    desc: '角色占据桌面 · 一次生成反馈包 · 轻触后本地轮播演出',
+    swatch: 'radial-gradient(circle at 50% 25%,#a993d3 0%,#51436f 42%,#171222 100%)',
+    config: {
+      skin: 'companion',
+      hue: 267, saturation: 46, lightness: 64,
+      contentColor: '#f6efff',
+      wallpaper: COMPANION_WALLPAPER,
+      chatAvatarShape: 'rounded', chatAvatarSize: 'medium',
+      chatBubbleStyle: 'modern', chatMessageSpacing: 'spacious',
+      chatHeaderStyle: 'gradient', chatInputStyle: 'rounded',
+      chatChromeStyle: 'soft', chatBackgroundStyle: 'mesh',
       chatShowTimestamp: 'always',
     },
   },
@@ -493,7 +523,7 @@ const PresetManager: React.FC<PresetManagerProps> = ({ presets, onSave, onApply,
 };
 
 const Appearance: React.FC = () => {
-  const { theme, updateTheme, closeApp, openApp, setCustomIcon, customIcons, addToast, appearancePresets, saveAppearancePreset, applyAppearancePreset, deleteAppearancePreset, renameAppearancePreset, exportAppearancePreset, importAppearancePreset, resetAppearance, characters, updateCharacter } = useOS();
+  const { theme, updateTheme, closeApp, openApp, setCustomIcon, customIcons, addToast, appearancePresets, saveAppearancePreset, applyAppearancePreset, deleteAppearancePreset, renameAppearancePreset, exportAppearancePreset, importAppearancePreset, resetAppearance, characters, activeCharacterId, updateCharacter } = useOS();
   // 一键还原全部「聊天白框自定义 CSS」：清掉全局 + 每个角色自带的。
   // 兼作救援：单角色的坏 CSS 把聊天界面整崩、进不去该角色设置时，从这里一键全清即可恢复。
   const resetAllChromeCss = () => {
@@ -513,6 +543,7 @@ const Appearance: React.FC = () => {
   const [activeWidgetSlot, setActiveWidgetSlot] = useState<string | null>(null);
   const iconInputRef = useRef<HTMLInputElement>(null);
   const fontInputRef = useRef<HTMLInputElement>(null);
+  const companionPortraitInputRef = useRef<HTMLInputElement>(null);
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
   
   // Font State
@@ -526,6 +557,107 @@ const Appearance: React.FC = () => {
 
   const decorations = theme.desktopDecorations || [];
   const editingDeco = editingDecoId ? decorations.find(d => d.id === editingDecoId) : null;
+  const appearanceCharacter = characters.find(character => character.id === activeCharacterId) || characters[0];
+  const companionSource = companionAvatarSource(appearanceCharacter);
+  const companionDateOutfits = listCompanionDateOutfits(appearanceCharacter);
+  const selectedCompanionOutfitId = normalizeCompanionSkinSetId(appearanceCharacter?.companionAvatar?.skinSetId);
+  const selectedCompanionOutfit = companionDateOutfits.find(outfit => outfit.id === selectedCompanionOutfitId)
+      || companionDateOutfits[0];
+  const companionPreview = companionSource === 'upload'
+      ? appearanceCharacter?.companionAvatar?.imageRef
+      : companionSource === 'date' ? selectedCompanionOutfit?.preview : appearanceCharacter?.avatar;
+
+  const chooseCompanionSource = (source: 'model' | 'upload' | 'date') => {
+      if (!appearanceCharacter) {
+          addToast('请先创建并选择一个角色', 'error');
+          return;
+      }
+      if (source === 'upload' && !appearanceCharacter.companionAvatar?.imageRef) {
+          companionPortraitInputRef.current?.click();
+          return;
+      }
+      if (source === 'date' && !hasDatePortraits(appearanceCharacter)) {
+          addToast('这个角色还没有见面立绘，请先去见面模式添加', 'info');
+          openApp(AppID.Date);
+          return;
+      }
+      updateCharacter(appearanceCharacter.id, {
+          companionAvatar: {
+              version: 1,
+              ...appearanceCharacter.companionAvatar,
+              source,
+          },
+      });
+      trackEvent('切换桌面陪伴形象来源', {
+          来源: source === 'model' ? '动态模型' : source === 'upload' ? '静态图片' : '见面立绘',
+      });
+      addToast(source === 'model' ? '桌面已使用动态模型' : source === 'date' ? '已沿用见面模式立绘' : '已使用导入图片', 'success');
+  };
+
+  const handleCompanionPortraitUpload = async (file: File) => {
+      if (!appearanceCharacter) return;
+      const extension = file.name.split('.').pop()?.toLowerCase();
+      if (!['png', 'gif'].includes(extension || '') || !['image/png', 'image/gif'].includes(file.type)) {
+          addToast('静态形象仅支持 PNG / GIF', 'error');
+          return;
+      }
+      if (file.size > 20 * 1024 * 1024) {
+          addToast('图片超过 20 MB，请压缩后再导入', 'error');
+          return;
+      }
+      try {
+          const previousRef = appearanceCharacter.companionAvatar?.imageRef;
+          const imageRef = await putImageBlob(file);
+          updateCharacter(appearanceCharacter.id, {
+              companionAvatar: {
+                  version: 1,
+                  ...appearanceCharacter.companionAvatar,
+                  source: 'upload',
+                  imageRef,
+                  fileName: file.name,
+                  mimeType: file.type,
+                  importedAt: Date.now(),
+              },
+          });
+          if (previousRef && previousRef !== imageRef) await deleteBlobRef(previousRef);
+          trackEvent('导入桌面静态形象', { 格式: file.type === 'image/gif' ? 'GIF' : 'PNG' });
+          addToast(file.type === 'image/gif' ? 'GIF 已原样导入，动画会保留' : 'PNG 静态形象已导入', 'success');
+      } catch (error: any) {
+          addToast(error?.message || '静态形象导入失败', 'error');
+      }
+  };
+
+  const chooseCompanionOutfit = (outfitId: string) => {
+      if (!appearanceCharacter) return;
+      updateCharacter(appearanceCharacter.id, {
+          companionAvatar: {
+              version: 1,
+              ...appearanceCharacter.companionAvatar,
+              source: 'date',
+              skinSetId: companionSkinSetPatchValue(outfitId),
+          },
+      });
+      trackEvent('切换桌面见面立绘衣服');
+      addToast('桌面衣服已切换，见面模式的选择不会被改动', 'success');
+  };
+
+  const removeCompanionUpload = async () => {
+      if (!appearanceCharacter?.companionAvatar?.imageRef) return;
+      const previousRef = appearanceCharacter.companionAvatar.imageRef;
+      updateCharacter(appearanceCharacter.id, {
+          companionAvatar: {
+              ...appearanceCharacter.companionAvatar,
+              source: hasDatePortraits(appearanceCharacter) ? 'date' : 'model',
+              imageRef: undefined,
+              fileName: undefined,
+              mimeType: undefined,
+              importedAt: undefined,
+          },
+      });
+      await deleteBlobRef(previousRef);
+      trackEvent('移除桌面静态形象');
+      addToast('已移除导入图片', 'success');
+  };
 
   // Preset decoration SVGs (cute decorative elements)
   const PRESET_DECOS: { name: string; content: string; category: string }[] = [
@@ -852,6 +984,102 @@ const Appearance: React.FC = () => {
                         </div>
                     )}
                 </section>
+
+                {currentDesktopSkinId === 'companion' && (
+                    <section className="overflow-hidden rounded-3xl border border-violet-100 bg-white shadow-sm" data-testid="companion-static-avatar-settings">
+                        <input
+                            ref={companionPortraitInputRef}
+                            type="file"
+                            className="hidden"
+                            accept=".png,.gif,image/png,image/gif"
+                            onChange={event => {
+                                const file = event.target.files?.[0];
+                                if (file) void handleCompanionPortraitUpload(file);
+                                event.target.value = '';
+                            }}
+                        />
+                        <div className="flex items-center gap-4 p-5">
+                            <div className="flex h-24 w-20 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-b from-violet-50 to-slate-100 p-1.5 shadow-inner">
+                                <CompanionPortraitPreview value={companionPreview} alt={`${appearanceCharacter?.name || '角色'}桌面形象`} />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2">
+                                    <h2 className="text-sm font-bold text-slate-700">静态形象</h2>
+                                    <span className="rounded-full bg-violet-50 px-2 py-0.5 text-[8px] font-bold tracking-wide text-violet-500">PNG / GIF</span>
+                                </div>
+                                <p className="mt-1 text-[10px] leading-relaxed text-slate-400">
+                                    没有 L2D 也能使用触感陪伴。单图只生成台词；见面立绘会按 AI 情绪切换表情。
+                                </p>
+                                <button
+                                    type="button"
+                                    onClick={() => companionPortraitInputRef.current?.click()}
+                                    className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-violet-600 px-3 py-2 text-[10px] font-bold text-white active:scale-95"
+                                >
+                                    <UploadSimple size={13} weight="bold" /> {appearanceCharacter?.companionAvatar?.imageRef ? '更换图片' : '导入 PNG / GIF'}
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-3 border-y border-slate-100 bg-slate-50/80 p-1.5">
+                            {([
+                                ['model', '动态模型'],
+                                ['upload', '静态图片'],
+                                ['date', '见面立绘'],
+                            ] as const).map(([source, label]) => (
+                                <button
+                                    key={source}
+                                    type="button"
+                                    aria-pressed={companionSource === source}
+                                    onClick={() => chooseCompanionSource(source)}
+                                    className={`flex items-center justify-center gap-1 rounded-xl px-2 py-2 text-[10px] font-semibold transition ${companionSource === source ? 'bg-white text-violet-600 shadow-sm' : 'text-slate-400'}`}
+                                >
+                                    {companionSource === source && <Check size={11} weight="bold" />}{label}
+                                </button>
+                            ))}
+                        </div>
+
+                        {companionSource === 'date' && (
+                            <div className="p-5 pt-4">
+                                <div className="mb-2 flex items-center justify-between">
+                                    <div>
+                                        <div className="text-[11px] font-bold text-slate-600">桌面衣橱</div>
+                                        <div className="mt-0.5 text-[9px] text-slate-400">独立选择，不会改掉见面模式正在穿的衣服</div>
+                                    </div>
+                                    <button type="button" onClick={() => openApp(AppID.Date)} className="text-[9px] font-semibold text-violet-500">补立绘表情 →</button>
+                                </div>
+                                <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
+                                    {companionDateOutfits.map(outfit => {
+                                        const active = selectedCompanionOutfit?.id === outfit.id;
+                                        return (
+                                            <button
+                                                key={outfit.id}
+                                                type="button"
+                                                onClick={() => chooseCompanionOutfit(outfit.id)}
+                                                className={`w-20 shrink-0 rounded-2xl border p-2 text-left transition active:scale-95 ${active ? 'border-violet-400 bg-violet-50' : 'border-slate-100 bg-slate-50'}`}
+                                            >
+                                                <div className="flex h-16 items-center justify-center overflow-hidden rounded-xl bg-white">
+                                                    <CompanionPortraitPreview value={outfit.preview} alt={outfit.name} />
+                                                </div>
+                                                <div className="mt-1.5 truncate text-[9px] font-bold text-slate-600">{outfit.name}</div>
+                                                <div className={`mt-0.5 text-[8px] ${outfit.expressionCount >= 5 ? 'text-emerald-500' : 'text-amber-500'}`}>{outfit.expressionCount}/5 表情</div>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
+
+                        {appearanceCharacter?.companionAvatar?.imageRef && (
+                            <button
+                                type="button"
+                                onClick={() => { void removeCompanionUpload(); }}
+                                className="flex w-full items-center justify-center gap-1.5 border-t border-slate-100 py-3 text-[9px] font-semibold text-slate-400 active:bg-rose-50 active:text-rose-500"
+                            >
+                                <Trash size={12} /> 移除已导入图片
+                            </button>
+                        )}
+                    </section>
+                )}
 
                 <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
                     <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4">Preset Themes</h2>

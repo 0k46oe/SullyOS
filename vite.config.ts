@@ -50,6 +50,18 @@ if (process.env.VITE_HIDE_BUILD_BADGE === '1') showBuildBadge = false;
 if (process.env.VITE_SHOW_BUILD_BADGE === '1') showBuildBadge = true;
 
 export default defineConfig({
+  resolve: {
+    // Live2D subclasses Pixi containers, so both the renderer and the engine
+    // must share the same Pixi prototype/extension registry in dev and builds.
+    dedupe: [
+      'react',
+      'react-dom',
+      'react/jsx-runtime',
+      'react/jsx-dev-runtime',
+      'pixi.js',
+      '@pixi/sound',
+    ],
+  },
   plugins: [
     react(),
     {
@@ -128,6 +140,20 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           if (id.includes('node_modules')) {
+            // Local camera emotion calibration is opt-in. Keep MediaPipe out of
+            // the preloaded common vendor so its JS is fetched only after the
+            // user explicitly enables their camera.
+            if (id.includes('@mediapipe/tasks-vision')) {
+              return 'vendor-mediapipe';
+            }
+            // VRM/Three 只在懒加载的 CallApp 视频模式使用。单独成包，避免 3D 引擎
+            // 被通用 vendor 首屏加载，普通聊天/桌面用户无需支付这部分体积。
+            if (id.includes('@pixiv/three-vrm') || /[\\/]node_modules[\\/]three[\\/]/.test(id)) {
+              return 'vendor-vrm';
+            }
+            if (id.includes('untitled-pixi-live2d-engine') || id.includes('@pixi/') || /[\\/]node_modules[\\/]pixi\.js[\\/]/.test(id)) {
+              return 'vendor-live2d';
+            }
             if (id.includes('react') || id.includes('react-dom') || id.includes('scheduler')) {
               return 'vendor-react';
             }

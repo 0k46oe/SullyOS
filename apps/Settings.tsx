@@ -7,6 +7,7 @@ import { Share } from '@capacitor/share';
 import { extractContent, safeResponseJson } from '../utils/safeApi';
 import { extractModelIds, normalizeModelIds } from '../utils/modelList';
 import { EXPORT_CHUNK_SIZE, sliceRanges } from '../utils/backupExport';
+import { bucketRetryCount, isAnalyticsConfigured, isAnalyticsEnabled, setAnalyticsEnabled, trackEvent } from '../utils/analytics';
 import Modal from '../components/os/Modal';
 import { NotionManager, FeishuManager, RealtimeContextManager, fetchOwmWeather, fetchOpenMeteoWeather } from '../utils/realtimeContext';
 import { XhsMcpClient } from '../utils/xhsMcpClient';
@@ -32,7 +33,13 @@ import { isPushVapidReady } from '../utils/pushVapid';
 import ApiCallLogModal from '../components/settings/ApiCallLogModal';
 import { DB } from '../utils/db';
 import { getBackupReminderState, setBackupReminderIntervalDays, daysSinceLastBackup, BACKUP_REMINDER_MIN_DAYS, BACKUP_REMINDER_MAX_DAYS } from '../utils/backupReminder';
-import { bucketRetryCount, isAnalyticsConfigured, isAnalyticsEnabled, setAnalyticsEnabled, trackEvent } from '../utils/analytics';
+import {
+    createAvatarModelBackup,
+    getAvatarModelBackupInventory,
+    restoreAvatarModelBackup,
+    type AvatarModelBackupInventory,
+    type AvatarModelBackupProgress,
+} from '../utils/avatarModelBackup';
 import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '../utils/apiConfigNormalize';
 import { describeImageWithVisionApi, VISION_API_TEST_IMAGE_DATA_URL, visionApiConfigFromPreset } from '../utils/visionApi';
 
@@ -105,6 +112,12 @@ const DiagRow: React.FC<{ label: string; value: string; bad?: boolean }> = ({ la
 // 看不到仓库内文档，所以帮助弹窗只能跳 GitHub 的 blob 页。
 const MCP_USER_GUIDE_URL = 'https://github.com/qegj567-cloud/SullyOS/blob/master/docs/mcp-user-guide.md';
 
+const formatBackupBytes = (bytes: number): string => {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
+    if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(bytes >= 100 * 1024 * 1024 ? 0 : 1)} MB`;
+};
+
 /**
  * 设置大板块的折叠外壳：默认收起，标题行常显、点击开合；
  * actions 放右侧动作（配置按钮 / 状态 chip / 问号），点击不触发开合。
@@ -119,7 +132,7 @@ const SettingsSection: React.FC<{
 }> = ({ icon, title, badge, actions, sectionProps, children }) => {
     const [open, setOpen] = useState(false);
     return (
-        <section {...sectionProps} className="bg-white/80 rounded-3xl p-5 shadow-sm border border-white/50">
+        <section {...sectionProps} className="bg-[#fffefe] rounded-3xl p-5 shadow-[0_8px_24px_rgba(15,23,42,0.05)] border border-slate-200/80">
             <div className={`flex items-center justify-between gap-2 ${open ? 'mb-4' : ''}`}>
                 <button type="button" onClick={() => setOpen(v => !v)} className="flex items-center gap-2 flex-1 min-w-0 text-left">
                     {icon}
@@ -432,7 +445,7 @@ const McpServersCard: React.FC<{
 const Settings: React.FC = () => {
   const {
       apiConfig, updateApiConfig, closeApp, availableModels, setAvailableModels,
-      exportSystem, importSystem, addToast, showError, resetSystem,
+      exportSystem, importSystem, addToast, showError, resetSystem, updateCharacter,
       apiPresets, addApiPreset, updateApiPreset, removeApiPreset,
       sysOperation, // Get progress state
       realtimeConfig, updateRealtimeConfig, // 实时感知配置
@@ -505,6 +518,9 @@ const Settings: React.FC = () => {
   const [cloudBackupFiles, setCloudBackupFiles] = useState<import('../types').CloudBackupFile[]>([]);
   const [cloudTestResult, setCloudTestResult] = useState<string>('');
   const [cloudTesting, setCloudTesting] = useState(false);
+  const [avatarModelInventory, setAvatarModelInventory] = useState<AvatarModelBackupInventory | null>(null);
+  const [avatarModelBackupBusy, setAvatarModelBackupBusy] = useState(false);
+  const [avatarModelBackupProgress, setAvatarModelBackupProgress] = useState<AvatarModelBackupProgress | null>(null);
 
   // 「该备份啦」提醒频率（1~30 天）。改动即落 localStorage（backupReminder 模块自管持久化）。
   const [backupReminderDays, setBackupReminderDays] = useState<number>(() => getBackupReminderState().intervalDays);
@@ -769,6 +785,7 @@ const Settings: React.FC = () => {
 
   // For web download link
   const [downloadUrl, setDownloadUrl] = useState<string>('');
+  const [downloadFileName, setDownloadFileName] = useState('Sully_Backup.zip');
   // 用 ref 跟住当前的 object URL，关弹窗 / 重新导出 / 卸载时都能 revoke 到最新那个，
   // 不受 state 闭包过期影响。
   const downloadUrlRef = useRef<string>('');
@@ -787,6 +804,15 @@ const Settings: React.FC = () => {
   const [testingApi, setTestingApi] = useState(false);
   const [testApiResult, setTestApiResult] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const avatarModelBackupInputRef = useRef<HTMLInputElement>(null);
+  const refreshAvatarModelInventory = useCallback(async () => {
+      try {
+          setAvatarModelInventory(await getAvatarModelBackupInventory());
+      } catch (error) {
+          console.warn('[Settings] 读取模型备份清单失败', error);
+      }
+  }, []);
+  useEffect(() => { void refreshAvatarModelInventory(); }, [refreshAvatarModelInventory]);
 
   // Auto-save draft configs locally to prevent loss during typing
   useEffect(() => {
@@ -1209,12 +1235,14 @@ const Settings: React.FC = () => {
               const url = URL.createObjectURL(blob);
               downloadUrlRef.current = url;
               setDownloadUrl(url);
+              const fileName = 'Sully_Backup_' + mode + '_' + new Date().toISOString().slice(0,10) + '.zip';
+              setDownloadFileName(fileName);
               setShowExportModal(true);
 
               // Auto click
               const a = document.createElement('a');
               a.href = url;
-              a.download = `Sully_Backup_${mode}_${new Date().toISOString().slice(0,10)}.zip`;
+              a.download = fileName;
               document.body.appendChild(a);
               a.click();
               document.body.removeChild(a);
@@ -1252,6 +1280,116 @@ const Settings: React.FC = () => {
       if (importInputRef.current) importInputRef.current.value = '';
   };
 
+  const deliverStandaloneBackup = async (blob: Blob, fileName: string, shareTitle: string) => {
+      if (Capacitor.isNativePlatform()) {
+          const tempName = `${fileName}.part`;
+          const sliceToBase64 = (slice: Blob): Promise<string> => new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onloadend = () => {
+                  const result = String(reader.result);
+                  const comma = result.indexOf(',');
+                  resolve(comma >= 0 ? result.slice(comma + 1) : result);
+              };
+              reader.onerror = () => reject(reader.error || new Error('读取模型备份分片失败'));
+              reader.onabort = () => reject(new Error('读取模型备份分片被中断'));
+              reader.readAsDataURL(slice);
+          });
+
+          try {
+              const ranges = sliceRanges(blob.size, EXPORT_CHUNK_SIZE);
+              for (let index = 0; index < ranges.length; index++) {
+                  const [start, end] = ranges[index];
+                  const base64 = await sliceToBase64(blob.slice(start, end));
+                  if (index === 0) {
+                      await Filesystem.writeFile({ path: tempName, data: base64, directory: Directory.Cache });
+                  } else {
+                      await Filesystem.appendFile({ path: tempName, data: base64, directory: Directory.Cache });
+                  }
+              }
+              await Filesystem.rename({ from: tempName, to: fileName, directory: Directory.Cache });
+              const uriResult = await Filesystem.getUri({ directory: Directory.Cache, path: fileName });
+              await Share.share({ title: shareTitle, files: [uriResult.uri] });
+          } catch (error) {
+              try { await Filesystem.deleteFile({ path: tempName, directory: Directory.Cache }); } catch { /* ignore */ }
+              throw error;
+          }
+          return;
+      }
+
+      if (downloadUrlRef.current) URL.revokeObjectURL(downloadUrlRef.current);
+      const url = URL.createObjectURL(blob);
+      downloadUrlRef.current = url;
+      setDownloadUrl(url);
+      setDownloadFileName(fileName);
+      setShowExportModal(true);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+  };
+
+  const handleAvatarModelExport = async () => {
+      if (avatarModelBackupBusy) return;
+      setAvatarModelBackupBusy(true);
+      setAvatarModelBackupProgress({ phase: 'scan', done: 0, total: 1, label: '正在读取本地模型…' });
+      try {
+          const blob = await createAvatarModelBackup(setAvatarModelBackupProgress);
+          const fileName = `Sully_Models_${new Date().toISOString().slice(0, 10)}_${Date.now()}.zip`;
+          await deliverStandaloneBackup(blob, fileName, 'Sully 模型备份');
+          addToast(`模型备份已生成（${formatBackupBytes(blob.size)}）`, 'success');
+      } catch (error: any) {
+          const details = error?.stack || error?.message || String(error || '未知错误');
+          showError('模型备份导出失败', details);
+          addToast(error?.message || '模型备份导出失败', 'error');
+      } finally {
+          setAvatarModelBackupBusy(false);
+          setAvatarModelBackupProgress(null);
+          void refreshAvatarModelInventory();
+      }
+  };
+
+  const handleAvatarModelImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(event.target.files || []);
+      if (!files.length || avatarModelBackupBusy) return;
+      setAvatarModelBackupBusy(true);
+      let restored = 0;
+      let skipped = 0;
+      let restoredBytes = 0;
+      try {
+          for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
+              const file = files[fileIndex];
+              const result = await restoreAvatarModelBackup(file, progress => {
+                  setAvatarModelBackupProgress({
+                      ...progress,
+                      label: files.length > 1 ? `[${fileIndex + 1}/${files.length}] ${progress.label}` : progress.label,
+                  });
+              });
+              restored += result.restored;
+              skipped += result.skipped;
+              restoredBytes += result.restoredBytes;
+              for (const model of result.models) {
+                  updateCharacter(model.characterId, { videoAvatar: model.config });
+              }
+          }
+          await refreshAvatarModelInventory();
+          addToast(
+              skipped > 0
+                  ? `已恢复 ${restored} 个模型，跳过 ${skipped} 个未找到的角色`
+                  : `已顺序恢复 ${restored} 个模型（${formatBackupBytes(restoredBytes)}）`,
+              skipped > 0 ? 'info' : 'success',
+          );
+      } catch (error: any) {
+          const details = error?.stack || error?.message || String(error || '未知错误');
+          showError('模型备份导入失败', details);
+          addToast(restored > 0 ? `已恢复 ${restored} 个模型后中断` : '模型备份导入失败', 'error');
+      } finally {
+          setAvatarModelBackupBusy(false);
+          setAvatarModelBackupProgress(null);
+          if (avatarModelBackupInputRef.current) avatarModelBackupInputRef.current.value = '';
+      }
+  };
   // Cloud Backup Handlers
   const handleTestCloudConnection = async () => {
       setCloudTesting(true);
@@ -1647,7 +1785,7 @@ const Settings: React.FC = () => {
   };
 
   return (
-    <div className="h-full w-full bg-slate-50/50 flex flex-col font-light relative">
+    <div className="h-full w-full bg-[#f3f4f8] flex flex-col font-light relative isolate">
 
       {/* GLOBAL PROGRESS OVERLAY */}
       {sysOperation.status === 'processing' && (
@@ -1665,7 +1803,7 @@ const Settings: React.FC = () => {
       )}
 
       {/* Header */}
-      <div className="bg-white/85 border-b border-white/40 shrink-0 z-10 sticky top-0" style={{ paddingTop: 'var(--safe-top)' }}>
+      <div className="bg-[#fffefe] border-b border-slate-200 shrink-0 z-10 sticky top-0" style={{ paddingTop: 'var(--safe-top)' }}>
         <div className="flex items-center px-4 py-3">
         <div className="flex items-center gap-2 w-full">
             <button onClick={closeApp} className="p-2 -ml-2 rounded-full hover:bg-black/5 active:scale-90 transition-transform">
@@ -1719,12 +1857,96 @@ const Settings: React.FC = () => {
             </div>
 
             <p className="text-[10px] text-slate-400 px-1 mb-4 leading-relaxed">
-                • <b>整合导出</b>: 一次性导出所有数据（文字+媒体），适合设备性能充足的用户。<br/>
+                • <b>整合导出</b>: 一次性导出文字与图片媒体；VRM / Live2D 模型请使用下方独立备份。<br/>
                 • <b>纯文字备份</b>: 包含所有聊天记录、角色设定、剧情数据。所有图片会被移除（减小体积）。<br/>
                 • <b>媒体与美化素材</b>: 导出相册、表情包、聊天图片、头像、主题气泡、壁纸、图标等图片资源和外观配置。<br/>
                 • 兼容旧版 JSON 备份文件的导入。
             </p>
 
+            <div data-testid="avatar-model-backup-section" className="mb-5 border-y border-violet-100 py-4">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                    <div>
+                        <h3 className="text-xs font-bold text-slate-700">视频模型 · 单独备份</h3>
+                        <p className="mt-0.5 text-[10px] text-slate-400">VRM / Live2D 不再混进普通数据包</p>
+                    </div>
+                    <span className="shrink-0 rounded-full bg-violet-50 px-2.5 py-1 text-[10px] font-bold text-violet-600">
+                        {avatarModelInventory
+                            ? `${avatarModelInventory.availableCount} 个 · ${formatBackupBytes(avatarModelInventory.totalBytes)}`
+                            : '正在扫描…'}
+                    </span>
+                </div>
+
+                {avatarModelInventory && avatarModelInventory.models.length > 0 && (
+                    <div className="mb-3 divide-y divide-slate-100 border-y border-slate-100">
+                        {avatarModelInventory.models.map(model => (
+                            <div key={model.characterId} className="flex items-center justify-between gap-3 py-2">
+                                <div className="min-w-0">
+                                    <p className="truncate text-[11px] font-semibold text-slate-600">{model.characterName}</p>
+                                    <p className="truncate text-[9px] uppercase tracking-wide text-slate-400">{model.format} · {model.fileName}</p>
+                                </div>
+                                <span className={`shrink-0 text-[10px] font-medium ${model.available ? 'text-emerald-500' : 'text-rose-500'}`}>
+                                    {model.available ? formatBackupBytes(model.byteLength) : '文件缺失'}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-2">
+                    <button
+                        type="button"
+                        onClick={handleAvatarModelExport}
+                        disabled={avatarModelBackupBusy || !avatarModelInventory?.availableCount}
+                        className="flex min-h-12 items-center justify-center gap-2 rounded-xl bg-violet-600 px-3 text-xs font-bold text-white transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-4 w-4"><path strokeLinecap="round" strokeLinejoin="round" d="M12 16.5V3.75m0 0 4.5 4.5M12 3.75l-4.5 4.5M3.75 15v4.125c0 .621.504 1.125 1.125 1.125h14.25c.621 0 1.125-.504 1.125-1.125V15" /></svg>
+                        导出模型包
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => avatarModelBackupInputRef.current?.click()}
+                        disabled={avatarModelBackupBusy}
+                        className="flex min-h-12 items-center justify-center gap-2 rounded-xl border border-violet-200 bg-white px-3 text-xs font-bold text-violet-600 transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-4 w-4"><path strokeLinecap="round" strokeLinejoin="round" d="M12 7.5v12m0 0 4.5-4.5M12 19.5 7.5 15M3.75 9V4.875c0-.621.504-1.125 1.125-1.125h14.25c.621 0 1.125.504 1.125 1.125V9" /></svg>
+                        顺序导入
+                    </button>
+                    <input
+                        ref={avatarModelBackupInputRef}
+                        type="file"
+                        accept=".zip,application/zip"
+                        multiple
+                        className="hidden"
+                        onChange={handleAvatarModelImport}
+                    />
+                </div>
+
+                {avatarModelBackupProgress && (
+                    <div className="mt-3" aria-live="polite">
+                        <div className="mb-1.5 flex items-center justify-between gap-3 text-[10px] text-violet-600">
+                            <span className="truncate">{avatarModelBackupProgress.label}</span>
+                            <span className="shrink-0 font-bold">
+                                {Math.min(100, Math.round((avatarModelBackupProgress.done / Math.max(1, avatarModelBackupProgress.total)) * 100))}%
+                            </span>
+                        </div>
+                        <div className="h-1.5 overflow-hidden rounded-full bg-violet-100">
+                            <div
+                                className="h-full rounded-full bg-violet-500 transition-[width] duration-200"
+                                style={{ width: `${Math.min(100, Math.round((avatarModelBackupProgress.done / Math.max(1, avatarModelBackupProgress.total)) * 100))}%` }}
+                            />
+                        </div>
+                    </div>
+                )}
+
+                <p className="mt-3 text-[10px] leading-relaxed text-slate-400">
+                    一个 ZIP 可以包含多个角色模型。恢复时请先导入上方普通数据，再导入模型包；系统会逐个读取、逐个写入。一次选择多个模型包时，也会按选择顺序处理。
+                </p>
+                {avatarModelInventory && avatarModelInventory.missingCount > 0 && (
+                    <p className="mt-2 text-[10px] leading-relaxed text-rose-500">
+                        有 {avatarModelInventory.missingCount} 个角色只剩模型索引，本地二进制已经丢失，无法导出。
+                    </p>
+                )}
+            </div>
             {/* 备份提醒频率：糯米机数据只在本机，隔 N 天没导出会弹一次提醒 */}
             <div className="mb-4 p-3.5 bg-gradient-to-br from-rose-50 to-orange-50 border border-rose-100 rounded-xl">
                 <div className="flex items-center justify-between mb-1">
@@ -3497,7 +3719,7 @@ const Settings: React.FC = () => {
               </div>
               <p className="text-sm font-bold text-slate-700">备份文件已生成！</p>
               <p className="text-xs text-slate-500">如果浏览器没有自动下载，请点击下方链接。</p>
-              {downloadUrl && <a href={downloadUrl} download="Sully_Backup.zip" className="text-primary text-sm underline block py-2">点击手动下载 .zip</a>}
+              {downloadUrl && <a href={downloadUrl} download={downloadFileName} className="text-primary text-sm underline block py-2">点击手动下载 .zip</a>}
           </div>
       </Modal>
 

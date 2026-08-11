@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const read = (rel: string) =>
-  readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+  readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8').replace(/\r\n?/g, '\n');
 
 /** 取 [start, end) 之间的源码片段；找不到锚点直接让断言失败。 */
 const sliceBetween = (src: string, start: string, end: string): string => {

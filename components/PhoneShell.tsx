@@ -5,6 +5,8 @@ import React, { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'rea
 import { IMPORT_IN_PROGRESS_KEY, useOS } from '../context/OSContext';
 import StatusBar from './os/StatusBar';
 import Launcher from '../apps/Launcher';
+import CompanionLockChrome from './os/CompanionLockChrome';
+import { loadCompanionFrameStyle } from './os/companionFrameStyles';
 
 // 按需懒加载各 App —— 切到对应 App 时才下载/解析其代码块，首屏只加载 Launcher 与外壳，
 // 大体积 App（MemoryPalace / VRWorld / Songwriting 等）不再压在主包里。
@@ -753,11 +755,14 @@ const PhoneShell: React.FC = () => {
   const lockBgImageValue = getBgStyle(theme.lockWallpaper || theme.wallpaper);
   const contentColor = theme.contentColor || '#ffffff';
   const acnhSkin = theme.skin === 'animalcrossing'; // 动森彩蛋：锁屏换暖色草地点缀
+  const storedCompanionFrame = theme.skin === 'companion' ? loadCompanionFrameStyle() : null;
+  const companionLockFrame = storedCompanionFrame;
 
   if (isLocked) {
     const unreadCount = Object.values(unreadMessages).reduce((a,b) => a+b, 0);
     const unreadCharId = Object.keys(unreadMessages)[0];
     const unreadChar = unreadCharId ? characters.find(c => c.id === unreadCharId) : null;
+    const lockCharacter = characters.find(c => c.id === activeCharacterId) || characters[0] || null;
 
         return (
       <div 
@@ -789,7 +794,19 @@ const PhoneShell: React.FC = () => {
             </div>
         )}
 
-        <div className="absolute top-24 w-full text-center drop-shadow-[0_2px_4px_rgba(0,0,0,0.3)]">
+        {companionLockFrame && (
+          <CompanionLockChrome
+            variant={companionLockFrame}
+            hours={virtualTime.hours}
+            minutes={virtualTime.minutes}
+            activeCharacter={lockCharacter}
+            unreadCharacter={unreadChar}
+            unreadCount={unreadCount}
+            preserveWallpaper={Boolean(theme.lockWallpaper)}
+          />
+        )}
+
+        {!companionLockFrame && <div className="absolute top-24 w-full text-center drop-shadow-[0_2px_4px_rgba(0,0,0,0.3)]">
            <div className="text-8xl tracking-tighter opacity-95 font-bold">
              {virtualTime.hours.toString().padStart(2,'0')}<span className="animate-pulse">:</span>{virtualTime.minutes.toString().padStart(2,'0')}
            </div>
@@ -800,9 +817,9 @@ const PhoneShell: React.FC = () => {
            ) : (
                <div className="text-lg tracking-widest opacity-90 mt-2 uppercase text-xs font-bold">SullyOS Simulation</div>
            )}
-        </div>
+        </div>}
 
-        {unreadCount > 0 && (
+        {!companionLockFrame && unreadCount > 0 && (
             <div className="absolute top-[40%] left-4 right-4 animate-slide-up">
                 <div className="bg-white/20 backdrop-blur-md rounded-2xl p-4 shadow-lg border border-white/10 flex items-center gap-4">
                     <div className="w-10 h-10 rounded-xl bg-green-500 flex items-center justify-center text-white shrink-0 shadow-sm">
@@ -821,10 +838,10 @@ const PhoneShell: React.FC = () => {
             </div>
         )}
 
-        <div className="absolute bottom-12 w-full flex flex-col items-center gap-3 animate-pulse opacity-80 drop-shadow-md">
+        {!companionLockFrame && <div className="absolute bottom-12 w-full flex flex-col items-center gap-3 animate-pulse opacity-80 drop-shadow-md">
           <div className="w-1 h-8 rounded-full bg-gradient-to-b from-transparent to-current"></div>
           <span className="text-[10px] tracking-widest uppercase font-semibold">Tap to Unlock</span>
-        </div>
+        </div>}
       </div>
     );
   }
