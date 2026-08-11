@@ -954,4 +954,21 @@ describe('第一次接上服务端账本', () => {
     expect(written).toBe(1);
     expect(storeState.saved.map((m: any) => m.messageId)).toEqual(['m-new']);
   });
+
+  // 自动路径把存量整批销掉是对的（分不清哪些是真丢的），但对「我确实少收了消息」的
+  // 用户来说，那批存量恰恰就是他要找的东西——销了就再也拿不回来了。所以手动补收
+  // 这条路要能越过接管：用户自己知道自己丢了，这个判断他做得了。
+  it('手动补收越过首次接管，存量照样上屏', async () => {
+    stubOutboxOnce([entry('m-missed', 'uuid-missed')]);
+    const ack = vi.spyOn(ActiveMsgClient, 'ackOutboxMessages').mockResolvedValue(undefined);
+
+    const { written } = await drainOutbox({ treatBacklogAsMissed: true });
+
+    expect(written).toBe(1);
+    expect(storeState.saved.map((m: any) => m.messageId)).toEqual(['m-missed']);
+    // 没被当存量销掉：销账要等落库走完那一步（backfill 里 written 的那条不进 ackNow）。
+    expect(ack).not.toHaveBeenCalledWith(['m-missed']);
+    // 手动补过一次就算接上了，后面回到自动路径，别下次又把新条目当存量销掉。
+    expect(localStorage.getItem(AMSG_OUTBOX_ADOPTED_LS_KEY)).toBeTruthy();
+  });
 });

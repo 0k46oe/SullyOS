@@ -8,6 +8,8 @@ import {
   OrphanedCharacterError,
   PUSH_SUBSCRIPTION_CHANGED_KV_ID,
   buildSelfLogEntryId,
+  catchUpMissedPushes,
+  resetOutboxCatchUpThrottleForTesting,
   findInboxArtifacts,
   findMissingChunkIndexes,
   findPersistedChunkIndexes,
@@ -27,9 +29,11 @@ import {
 } from './activeMsgRuntime';
 import {
   AMSG_INSTANT_CHAT_PENDING_LS_KEY,
+  AMSG_OUTBOX_ADOPTED_LS_KEY,
   INSTANT_CHAT_STATUS_CHECK_INTERVAL_MS,
   getInstantChatPending,
   getStagedInstantChatExpiredNotices,
+  listInstantChatPendings,
   setInstantChatPending,
   stageInstantChatExpiredNotices,
 } from './amsgInstantChat';
@@ -2423,5 +2427,122 @@ describe('error push 到页面 → 当场收尾（handleInstantErrorPushMessage�
     await handleInstantErrorPushMessage({ metadata: { charId }, code: 'SOME_DIAG', message: 'x' });
 
     expect(getInstantChatPending(charId)?.uuid).toBe('uuid-untouched');
+  }, 20000);
+});
+
+// 这一组钉的是一次真实事故：定时主动消息到点生成好了、账本也记了、推送也发出去了，
+// 但在网络层丢了（代理断流、推送服务连不上）。worker 日志全绿、任务照常消费、订阅
+// 也没被退回，用户那边就是再也收不到——而云端账本上明明躺着那几条。
+//
+// 病根不在补收本身，在**什么时候去补**：拉账本的时机当初只挂在「即时对话正等着回复」
+// 上，而定时主动消息由云端到点自己发，客户端从来不产生那个状态，于是永远没人去捞。
+//
+// 所以这里钉死的不变量只有一条：**一条待收记录都没有时，上线补收照样要去拉账本。**
+describe('上线补收不看有没有在等回复（走真库）', () => {
+  const WORKER_URL = 'https://amsg-catchup.example.workers.dev';
+
+  beforeAll(() => {
+    (globalThis as any).window ??= { dispatchEvent: () => true, addEventListener: () => {} };
+  });
+
+  beforeEach(async () => {
+    localStorage.removeItem(AMSG_INSTANT_CHAT_PENDING_LS_KEY);
+    // 这一组测的都是「已经接上账本之后」的常规补收；首次接管那条路（存量整批销账、
+    // 不上屏）有自己的一组，见 amsgInstantChat.test.ts。
+    localStorage.setItem(AMSG_OUTBOX_ADOPTED_LS_KEY, JSON.stringify({ at: Date.now() }));
+    resetOutboxCatchUpThrottleForTesting();
+    await ActiveMsgStore.saveGlobalConfig({ workerUrl: WORKER_URL });
+    vi.spyOn(ActiveMsgClient, 'ackOutboxMessages').mockResolvedValue(undefined);
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await ActiveMsgStore.saveGlobalConfig({ workerUrl: '' });
+  });
+
+  /** 账本上的一条定时主动消息（`push` 就是推送信封本身，跟 SW 收到的那份逐字一致）。 */
+  const scheduledEntry = (charId: string, messageId: string) => ({
+    id: 1,
+    messageId,
+    taskUuid: 'uuid-scheduled',
+    sessionId: 'sess-scheduled',
+    messageIndex: 1,
+    totalMessages: 1,
+    createdAt: Date.now(),
+    deliveredAt: Date.now(),
+    push: {
+      messageKind: 'content',
+      messageType: 'scheduled',
+      source: 'scheduled',
+      message: '到点啦，该睡觉了',
+      contactName: '定时角色',
+      messageId,
+      sessionId: 'sess-scheduled',
+      messageIndex: 1,
+      totalMessages: 1,
+      taskUuid: 'uuid-scheduled',
+      timestamp: new Date().toISOString(),
+      metadata: { charId, charName: '定时角色' },
+    },
+  });
+
+  it('一条待收记录都没有，冷启动照样去账本上捞', async () => {
+    const list = vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue([]);
+
+    expect(listInstantChatPendings()).toHaveLength(0);
+    await expect(catchUpMissedPushes('startup')).resolves.toBe('drained');
+    expect(list).toHaveBeenCalledTimes(1);
+  }, 20000);
+
+  it('回到前台同样不看待收记录', async () => {
+    const list = vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue([]);
+
+    expect(listInstantChatPendings()).toHaveLength(0);
+    await expect(catchUpMissedPushes('foreground')).resolves.toBe('drained');
+    expect(list).toHaveBeenCalledTimes(1);
+  }, 20000);
+
+  it('推送丢掉的那条定时主动消息，从账本补回聊天流', async () => {
+    const charId = 'char-catchup-scheduled';
+    const messageId = 'msg_task_67@1786434120000_hook_0';
+    await DB.saveCharacter({ id: charId, name: '定时角色' } as any);
+    vi.spyOn(ActiveMsgClient, 'listOutboxEntries')
+      .mockResolvedValue([scheduledEntry(charId, messageId)] as any);
+
+    expect(listInstantChatPendings()).toHaveLength(0);
+    await expect(catchUpMissedPushes('startup')).resolves.toBe('drained');
+
+    const msgs = await DB.getRecentMessagesByCharId(charId, 10);
+    expect(msgs.some((m: any) => String(m.content ?? '').includes('到点啦，该睡觉了'))).toBe(true);
+  }, 20000);
+
+  it('不到节流窗口的第二趟不打网络', async () => {
+    const list = vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue([]);
+
+    await expect(catchUpMissedPushes('startup')).resolves.toBe('drained');
+    await expect(catchUpMissedPushes('foreground')).resolves.toBe('throttled');
+    expect(list).toHaveBeenCalledTimes(1);
+  }, 20000);
+
+  it('手动补收不受节流管（用户自己知道丢了才点）', async () => {
+    const list = vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue([]);
+
+    await expect(catchUpMissedPushes('startup')).resolves.toBe('drained');
+    await expect(catchUpMissedPushes('manual')).resolves.toBe('drained');
+    expect(list).toHaveBeenCalledTimes(2);
+  }, 20000);
+
+  it('没配 Worker 的用户一个请求都不发', async () => {
+    await ActiveMsgStore.saveGlobalConfig({ workerUrl: '' });
+    const list = vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue([]);
+
+    await expect(catchUpMissedPushes('startup')).resolves.toBe('worker-unset');
+    expect(list).not.toHaveBeenCalled();
+  }, 20000);
+
+  it('账本读不成只是「这趟没读成」，不当成「账本上没有」', async () => {
+    vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockRejectedValue(new Error('worker 500'));
+
+    await expect(catchUpMissedPushes('startup')).resolves.toBe('failed');
   }, 20000);
 });
