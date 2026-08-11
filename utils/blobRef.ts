@@ -11,12 +11,14 @@
 //   · 备份导出前把令牌解析回 data URL，复用既有「data:image → zip assets/*」抽取管线，
 //     备份格式与可移植性完全不变（见 context/OSContext.tsx 导出/导入）。
 //
-// 兼容：旧值（`data:...` / `http(s)://...` / CSS 渐变字符串）一律原样透传，永远能渲染；
+// 兼容：旧值（`data:...` / `http(s)://...` / CSS 渐变字符串）一律原样透传；内置样板房
+// 的可移植令牌会按当前部署 BASE_URL 解开，避免备份跨域/跨壳恢复后家具路径失效。
 // 惰性迁移由各消费方（壁纸加载、进入小屋）在读到 data: 时顺手 put 成 Blob 完成。
 
 import { useEffect, useState } from 'react';
 import { DB } from './db';
 import type { AppearancePreset } from '../types';
+import { resolveBuiltinRoomAssetUrl } from './roomTemplateAssets';
 
 export const BLOBREF_PREFIX = 'blobref:';
 
@@ -240,17 +242,18 @@ export async function resolveBlobRefsDeep(root: unknown): Promise<void> {
 /**
  * 把一个图片字段值解析成可直接用于 <img src>/CSS url() 的字符串。
  *   · blobref 令牌 → 读 Blob 建 objectURL，组件卸载 / value 变化时 revoke，绝不泄漏；
+ *   · builtin-room-asset 令牌 / 旧样板房绝对 URL → 当前部署下的内置资源 URL；
  *   · 其它（data: / http(s) / 渐变 / undefined）→ 原样返回。
  * 令牌解析前返回 undefined（首帧可能无图，等 Blob 读出后再渲染，属预期）。
  */
 export function useBlobRefUrl(value: string | undefined | null): string | undefined {
     const [url, setUrl] = useState<string | undefined>(
-        isBlobRef(value) ? undefined : (value ?? undefined)
+        isBlobRef(value) ? undefined : resolveBuiltinRoomAssetUrl(value)
     );
 
     useEffect(() => {
         if (!isBlobRef(value)) {
-            setUrl(value ?? undefined);
+            setUrl(resolveBuiltinRoomAssetUrl(value));
             return;
         }
         let alive = true;
