@@ -1,5 +1,5 @@
 import React from 'react';
-import { Check, Crop, Gear, Play, TShirt, X } from '@phosphor-icons/react';
+import { Check, Crop, Gear, Play, Sparkle, TShirt, X } from '@phosphor-icons/react';
 import type { Live2DAction } from '../../utils/live2dModelStore';
 import type { CompanionFrameStyleId } from './companionFrameStyles';
 import { useBlobRefUrl } from '../../utils/blobRef';
@@ -28,6 +28,8 @@ type CompanionWardrobeDrawerProps = {
   activeStaticOutfitId?: string;
   onSelectStaticOutfit?: (outfitId: string) => void;
   staticMode?: boolean;
+  staticSource?: 'upload' | 'date';
+  discoveryHint?: boolean;
   onOpenComposition: () => void;
   onManageActions: () => void;
   onClose: () => void;
@@ -44,6 +46,8 @@ const CompanionWardrobeDrawer: React.FC<CompanionWardrobeDrawerProps> = ({
   activeStaticOutfitId,
   onSelectStaticOutfit,
   staticMode = false,
+  staticSource,
+  discoveryHint = false,
   onOpenComposition,
   onManageActions,
   onClose,
@@ -60,10 +64,17 @@ const CompanionWardrobeDrawer: React.FC<CompanionWardrobeDrawerProps> = ({
 
         <div className="companion-wardrobe-tabs">
           <span className="is-active"><TShirt weight="fill" /> 服装</span>
-          <button type="button" onClick={onOpenComposition}><Crop weight="bold" /> 构图</button>
+          <button type="button" onClick={onOpenComposition}><Crop weight="bold" /> 场景与构图</button>
         </div>
 
-        <p className="companion-wardrobe-note">{staticMode ? '衣服来自见面模式立绘。桌面拥有独立选择，AI 只负责按台词情绪切换同一套衣服里的表情。' : '这里的动作只能由你手动切换。AI 无法读取、选择或替换服装。'}</p>
+        {discoveryHint && (
+          <div className="companion-wardrobe-discovery" data-testid="companion-wardrobe-discovery-tip">
+            <Sparkle weight="fill" />
+            <p><strong>以后想换场景或衣服，就从这里进。</strong><span>点「场景与构图」可以更换桌面风格、背景和角色位置。</span></p>
+          </div>
+        )}
+
+        <p className="companion-wardrobe-note">{staticSource === 'date' ? '衣服来自见面模式立绘。桌面拥有独立选择，AI 只负责按台词情绪切换同一套衣服里的表情。' : staticMode ? '单张静态图片没有额外服装动作；仍可从「场景与构图」更换桌面风格和背景。' : '这里的动作只能由你手动切换。AI 无法读取、选择或替换服装。'}</p>
 
         <div className="companion-wardrobe-list">
           {staticMode && staticOutfits.length ? staticOutfits.map(outfit => {
@@ -99,15 +110,15 @@ const CompanionWardrobeDrawer: React.FC<CompanionWardrobeDrawerProps> = ({
           }) : (
             <div className="companion-wardrobe-empty">
               <TShirt weight="duotone" />
-              <strong>{staticMode ? '还没有见面衣服' : '还没有标记服装动作'}</strong>
-              <span>{staticMode ? '去见面模式添加默认立绘或新皮肤，每套衣服可以准备五种基础表情。' : '去动作库预览模型按键，把会换装的动作加入衣橱。'}</span>
+              <strong>{staticSource === 'date' ? '还没有见面衣服' : staticMode ? '单张图片没有额外衣服' : '还没有标记服装动作'}</strong>
+              <span>{staticSource === 'date' ? '去见面模式添加默认立绘或新皮肤，每套衣服可以准备五种基础表情。' : staticMode ? '你可以继续使用当前图片，或进入场景与构图调整桌面。' : '去动作库预览模型按键，把会换装的动作加入衣橱。'}</span>
             </div>
           )}
         </div>
 
         <footer className="companion-wardrobe-footer">
-          <button type="button" onClick={onManageActions}><Gear weight="bold" /> {staticMode ? '管理见面立绘' : '管理服装动作'}</button>
-          <small>{staticMode ? 'DATE SPRITES · 5 EXPRESSIONS' : 'WARDROBE ACTIONS · USER ONLY'}</small>
+          <button type="button" onClick={onManageActions}><Gear weight="bold" /> {staticSource === 'date' ? '管理见面立绘' : staticMode ? '更换静态图片' : '管理服装动作'}</button>
+          <small>{staticSource === 'date' ? 'DATE SPRITES · 5 EXPRESSIONS' : staticMode ? 'STATIC IMAGE · PNG / GIF' : 'WARDROBE ACTIONS · USER ONLY'}</small>
         </footer>
       </section>
     </div>

@@ -77,6 +77,7 @@ import { exportMcpLocal } from '../utils/mcpClient';
 import { exportDesktopSkinLocal } from '../utils/desktopSkinBackup';
 import { assertSupportedSullyBackup } from '../utils/backupImportPolicy';
 import { createBuiltinSullyLive2DConfig, isBuiltinSullyLive2D, upgradeBuiltinSullyLive2DDefaults } from '../utils/builtinSullyLive2D';
+import { normalizeCharacterRoomAssetsInPlace } from '../utils/roomTemplateAssets';
 
 interface ProactiveQueueEntry {
   charId: string;
@@ -4101,6 +4102,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       },
                   );
                   await DB.streamRawStoreData(storeName, (item) => {
+                      // characters 也走这条低内存旁路；必须在逐条写分片前规范化，
+                      // 否则 text_only 会绕过下面 getAll 分支，把旧部署的绝对样板房 URL 原样带走。
+                      if (storeName === 'characters') normalizeCharacterRoomAssetsInPlace(item);
                       const processedItem = noImageStores.has(storeName) ? item : stripTextOnlyMedia(item);
                       writer.appendSync([processedItem]);
                   });
@@ -4110,6 +4114,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
               let rawData = await DB.getRawStoreData(storeName);
               let processedData: any;
+
+              // Built-in room-template files belong to the app, not to the source deployment.
+              // Older builds stored their fully resolved origin in roomConfig; strip that origin
+              // from the export clone so restoring on another host/base path keeps every item.
+              if (storeName === 'characters' && Array.isArray(rawData)) {
+                  for (const character of rawData) normalizeCharacterRoomAssetsInPlace(character);
+              }
 
               // 向量旁路：归一化拼 bin + 索引，不进 backupData（writeV2Backup 收尾落 zip）。直接跳过
               // 下面的图片处理 / switch（向量无图、无 image base64）。

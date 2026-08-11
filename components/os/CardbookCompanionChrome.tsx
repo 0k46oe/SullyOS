@@ -60,7 +60,7 @@ const CardbookCompanionChrome: React.FC<CardbookCompanionChromeProps> = ({
 
       <aside className="cardbook-tools pointer-events-auto" aria-label="收藏册工具">
         {tools.map(({ id, label, en, Icon, action, testId }, index) => (
-          <button key={id} type="button" onClick={action} data-testid={testId}>
+          <button key={id} type="button" onClick={action} data-testid={testId} data-companion-wardrobe-trigger={id === 'wardrobe' ? 'true' : undefined}>
             <span>0{index + 1}</span>
             <Icon weight="bold" />
             <strong>{label}</strong>

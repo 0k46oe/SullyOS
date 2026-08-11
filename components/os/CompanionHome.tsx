@@ -7,7 +7,6 @@ import {
   Crop,
   Gear,
   HandTap,
-  ImageSquare,
   Minus,
   Plus,
   Sparkle,
@@ -31,8 +30,6 @@ import {
   DEFAULT_COMPANION_TOUCH_ZONES,
   normalizeCompanionDialogue,
   requestAvatarTouchReactionPack,
-  isAvatarTouchGesture,
-  resolveAvatarTouchTarget,
   resolveAvatarTouchForce,
   type AvatarTouchHit,
   type AvatarTouchModelAction,
@@ -87,6 +84,7 @@ import CardbookCompanionChrome from './CardbookCompanionChrome';
 import IdolCompanionChrome from './IdolCompanionChrome';
 import CompanionWardrobeDrawer from './CompanionWardrobeDrawer';
 import CompanionStageLoadingCurtain, { type CompanionStageCurtainPhase } from './CompanionStageLoadingCurtain';
+import StaticCompanionPortrait from './StaticCompanionPortrait';
 import { getLive2DAIActions, getLive2DWardrobeActions, type Live2DAction } from '../../utils/live2dModelStore';
 import {
   DEFAULT_COMPANION_STARTUP_PERFORMANCE,
@@ -337,6 +335,7 @@ const companionLineFallbackDuration = (textLength: number) => (
 // not an App-return transition, so remember which character already performed
 // it for the lifetime of this page session.
 const companionStartupPlayedThisSession = new Set<string>();
+const COMPANION_WARDROBE_DISCOVERY_KEY = 'sully-companion-wardrobe-discovery-v1';
 
 const COMPANION_BOOT_LOCK_PERFORMANCE: AvatarPerformanceDirection = {
   emotion: 'calm',
@@ -367,99 +366,6 @@ const COMPANION_STAR_APPS: Array<{
 }> = INSTALLED_APPS
   .filter(app => app.id !== AppID.CharCreatorDev || import.meta.env.DEV)
   .map(app => ({ id: app.id, label: app.name, icon: app.icon as keyof typeof Icons }));
-
-const StaticCompanionPortrait: React.FC<{
-  value?: string;
-  characterName: string;
-  spriteConfig?: { scale: number; x: number; y: number };
-  expressionKey: string;
-  touchEnabled: boolean;
-  onAvatarTouch: (hit: AvatarTouchHit) => void;
-}> = ({ value, characterName, spriteConfig, expressionKey, touchEnabled, onAvatarTouch }) => {
-  const imageUrl = useBlobRefUrl(value);
-  const pointerRef = useRef<{
-    id: number;
-    x: number;
-    y: number;
-    startedAt: number;
-    maxDistance: number;
-    pressure: number;
-  } | null>(null);
-  const scale = Math.max(0.25, Math.min(3, spriteConfig?.scale || 1));
-  const offsetX = spriteConfig?.x || 0;
-  const offsetY = spriteConfig?.y || 0;
-
-  if (!imageUrl) return (
-    <div className="absolute inset-0 flex items-center justify-center text-center text-xs text-white/55">
-      <div><ImageSquare size={30} className="mx-auto mb-2" />请在外观中导入 PNG / GIF 或沿用见面立绘</div>
-    </div>
-  );
-
-  return (
-    <div className="pointer-events-none absolute inset-0 flex items-end justify-center overflow-hidden px-[4%] pb-[2%]" data-testid="companion-static-portrait-stage">
-      <img
-        key={`${value}-${expressionKey}`}
-        src={imageUrl}
-        alt={`${characterName}的桌面形象`}
-        draggable={false}
-        className={`pointer-events-auto max-h-[96%] max-w-full select-none object-contain drop-shadow-[0_18px_35px_rgba(0,0,0,.38)] ${touchEnabled ? 'cursor-pointer' : 'cursor-default'}`}
-        style={{
-          transform: `translate(${offsetX}%, ${offsetY}%) scale(${scale})`,
-          transformOrigin: 'bottom center',
-          touchAction: 'none',
-          animation: 'companion-static-expression-in 220ms ease-out both',
-        }}
-        onPointerDown={event => {
-          if (!touchEnabled) return;
-          event.currentTarget.setPointerCapture(event.pointerId);
-          pointerRef.current = {
-            id: event.pointerId,
-            x: event.clientX,
-            y: event.clientY,
-            startedAt: Date.now(),
-            maxDistance: 0,
-            pressure: event.pressure || 0,
-          };
-        }}
-        onPointerMove={event => {
-          const pointer = pointerRef.current;
-          if (!pointer || pointer.id !== event.pointerId) return;
-          pointer.maxDistance = Math.max(pointer.maxDistance, Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y));
-          pointer.pressure = Math.max(pointer.pressure, event.pressure || 0);
-        }}
-        onPointerCancel={() => { pointerRef.current = null; }}
-        onPointerUp={event => {
-          const pointer = pointerRef.current;
-          pointerRef.current = null;
-          if (!pointer || pointer.id !== event.pointerId) return;
-          const durationMs = Date.now() - pointer.startedAt;
-          if (!isAvatarTouchGesture(pointer.maxDistance, durationMs, true)) return;
-          const rect = event.currentTarget.getBoundingClientRect();
-          const stageRect = event.currentTarget.parentElement?.getBoundingClientRect() || rect;
-          const portraitX = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
-          const portraitY = Math.max(0, Math.min(1, (event.clientY - rect.top) / Math.max(1, rect.height)));
-          const normalizedX = Math.max(0, Math.min(1, (event.clientX - stageRect.left) / Math.max(1, stageRect.width)));
-          const normalizedY = Math.max(0, Math.min(1, (event.clientY - stageRect.top) / Math.max(1, stageRect.height)));
-          const target = resolveAvatarTouchTarget([], portraitY, portraitX);
-          onAvatarTouch({
-            nonce: Date.now() + Math.random(),
-            x: event.clientX - rect.left,
-            y: event.clientY - rect.top,
-            normalizedX,
-            normalizedY,
-            pressure: pointer.pressure,
-            durationMs,
-            pointerType: event.pointerType === 'mouse' || event.pointerType === 'touch' || event.pointerType === 'pen' ? event.pointerType : 'unknown',
-            zone: target.zone,
-            part: target.part,
-            source: 'portrait-bounds',
-            rawAreas: [],
-          });
-        }}
-      />
-    </div>
-  );
-};
 
 const CompanionHome: React.FC = () => {
   const {
@@ -496,6 +402,11 @@ const CompanionHome: React.FC = () => {
   const [appStarOpen, setAppStarOpen] = useState(false);
   const [scheduleViewerOpen, setScheduleViewerOpen] = useState(false);
   const [wardrobeOpen, setWardrobeOpen] = useState(false);
+  const [wardrobeDiscoveryActive, setWardrobeDiscoveryActive] = useState(() => {
+    try { return localStorage.getItem(COMPANION_WARDROBE_DISCOVERY_KEY) !== 'seen'; }
+    catch { return true; }
+  });
+  const [wardrobeDiscoveryOpened, setWardrobeDiscoveryOpened] = useState(false);
   const [wardrobeTrigger, setWardrobeTrigger] = useState<Live2DActionTrigger | null>(null);
   const [touchGenerating, setTouchGenerating] = useState(false);
   const [touchGenerateVoice, setTouchGenerateVoice] = useState(false);
@@ -967,6 +878,22 @@ const CompanionHome: React.FC = () => {
     addToast('桌面衣服已切换', 'success');
   };
 
+  const openWardrobe = () => {
+    setAppStarOpen(false);
+    if (wardrobeDiscoveryActive) {
+      try { localStorage.setItem(COMPANION_WARDROBE_DISCOVERY_KEY, 'seen'); } catch { /* private WebView */ }
+      setWardrobeDiscoveryActive(false);
+      setWardrobeDiscoveryOpened(true);
+    } else {
+      setWardrobeDiscoveryOpened(false);
+    }
+    setWardrobeOpen(true);
+  };
+  const closeWardrobe = () => {
+    setWardrobeOpen(false);
+    setWardrobeDiscoveryOpened(false);
+  };
+
   // ── 布置模式：构图在草稿里实时预览，只有点“保存”才写回角色。 ──
   const companionFraming = character?.videoAvatar?.companionFraming;
   const companionCrop = character?.videoAvatar?.companionCrop;
@@ -983,15 +910,10 @@ const CompanionHome: React.FC = () => {
     crop.top <= 0.001 && crop.right <= 0.001 && crop.bottom <= 0.001 && crop.left <= 0.001
   );
   const openCompositionEditor = () => {
-    if (staticCompanionActive) {
-      setWardrobeOpen(false);
-      openApp(AppID.Appearance);
-      return;
-    }
-    setWardrobeOpen(false);
+    closeWardrobe();
     setAppStarOpen(false);
     setLine(null);
-    setEditingPanel('character');
+    setEditingPanel(staticCompanionActive ? 'stage' : 'character');
     setFramingDraft(companionFraming || defaultCompanionFraming);
     setCropDraft(companionCrop || DEFAULT_STAGE_CROP);
     setEditing(true);
@@ -1668,7 +1590,7 @@ const CompanionHome: React.FC = () => {
   };
 
   return (
-    <div className="relative h-full w-full overflow-hidden select-none" data-companion-frame={frameStyle} data-companion-layout="stage">
+    <div className="relative h-full w-full overflow-hidden select-none" data-companion-frame={frameStyle} data-companion-layout="stage" data-wardrobe-hint-active={wardrobeDiscoveryActive ? 'true' : 'false'}>
       <style>{`
         @keyframes companion-ripple {
           from { opacity:.8; transform:translate(-50%,-50%) scale(.25); }
@@ -1717,6 +1639,17 @@ const CompanionHome: React.FC = () => {
         @keyframes companion-inspector-in {
           from { opacity:0; transform:translateX(28px); }
           to { opacity:1; transform:translateX(0); }
+        }
+        @keyframes companion-wardrobe-beacon {
+          0%,100% { filter:drop-shadow(0 0 4px rgba(255,255,255,.25)); }
+          50% { filter:drop-shadow(0 0 13px ${uiTint}) drop-shadow(0 0 24px ${uiTint}); }
+        }
+        [data-wardrobe-hint-active='true'] [data-companion-wardrobe-trigger='true'] {
+          position:relative;
+          z-index:48;
+          outline:1px solid ${uiTint};
+          outline-offset:3px;
+          animation:companion-wardrobe-beacon 1.35s ease-in-out infinite;
         }
 
         /* The content grid and control sizes stay fixed; only the frame language changes. */
@@ -1961,6 +1894,14 @@ const CompanionHome: React.FC = () => {
 
       <div className="companion-stage-canvas absolute inset-0 overflow-hidden">
 
+      {wardrobeDiscoveryActive && !editing && !touchSettingsOpen && !appStarOpen && !wardrobeOpen && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-[6.9rem] z-[47] flex justify-center px-5" data-testid="companion-wardrobe-discovery-nudge">
+          <div className="rounded-full border border-white/20 bg-black/60 px-4 py-2 text-[10px] font-medium text-white/90 shadow-[0_10px_34px_rgba(0,0,0,.35)] backdrop-blur-xl">
+            想换场景？衣橱入口正在发光 ✦
+          </div>
+        </div>
+      )}
+
       {/* ── 背景：自定义图片 > 华丽预设场景 > 时段天光 ── */}
       {backgroundImageUrl ? (
         <>
@@ -2107,7 +2048,7 @@ const CompanionHome: React.FC = () => {
           dayProgress={todayEventProgress}
           openApp={openApp}
           openCharacterSchedule={() => setScheduleViewerOpen(true)}
-          openWardrobe={() => setWardrobeOpen(true)}
+          openWardrobe={openWardrobe}
           openTouchSettings={openTouchSettings}
           openAllApps={() => setAppStarOpen(open => !open)}
           onHome={() => addToast('已经在月庭主页了', 'info')}
@@ -2121,7 +2062,7 @@ const CompanionHome: React.FC = () => {
           dayProgress={todayEventProgress}
           openApp={openApp}
           openCharacterSchedule={() => setScheduleViewerOpen(true)}
-          openWardrobe={() => setWardrobeOpen(true)}
+          openWardrobe={openWardrobe}
           openTouchSettings={openTouchSettings}
           openAllApps={() => setAppStarOpen(open => !open)}
           onHome={() => addToast('已经在夜巡主页了', 'info')}
@@ -2134,7 +2075,7 @@ const CompanionHome: React.FC = () => {
           currentScheduleSlot={currentScheduleSlot}
           openApp={openApp}
           openCharacterSchedule={() => setScheduleViewerOpen(true)}
-          openWardrobe={() => setWardrobeOpen(true)}
+          openWardrobe={openWardrobe}
           openTouchSettings={openTouchSettings}
           openAllApps={() => setAppStarOpen(open => !open)}
         />
@@ -2147,7 +2088,7 @@ const CompanionHome: React.FC = () => {
           dayProgress={todayEventProgress}
           openApp={openApp}
           openCharacterSchedule={() => setScheduleViewerOpen(true)}
-          openWardrobe={() => setWardrobeOpen(true)}
+          openWardrobe={openWardrobe}
           openTouchSettings={openTouchSettings}
           openAllApps={() => setAppStarOpen(open => !open)}
         />
@@ -2162,7 +2103,7 @@ const CompanionHome: React.FC = () => {
           minutes={virtualTime.minutes}
           openApp={openApp}
           openCharacterSchedule={() => setScheduleViewerOpen(true)}
-          openWardrobe={() => setWardrobeOpen(true)}
+          openWardrobe={openWardrobe}
           openTouchSettings={openTouchSettings}
           openAllApps={() => setAppStarOpen(open => !open)}
         />
@@ -2178,10 +2119,15 @@ const CompanionHome: React.FC = () => {
         staticOutfits={staticOutfits}
         activeStaticOutfitId={activeStaticOutfitId}
         onSelectStaticOutfit={selectStaticOutfit}
-        staticMode={activeCompanionSource === 'date'}
+        staticMode={staticCompanionActive}
+        staticSource={staticCompanionActive ? activeCompanionSource : undefined}
+        discoveryHint={wardrobeDiscoveryOpened}
         onOpenComposition={openCompositionEditor}
-        onManageActions={() => { setWardrobeOpen(false); openApp(activeCompanionSource === 'date' ? AppID.Date : AppID.Call); }}
-        onClose={() => setWardrobeOpen(false)}
+        onManageActions={() => {
+          closeWardrobe();
+          openApp(activeCompanionSource === 'date' ? AppID.Date : activeCompanionSource === 'upload' ? AppID.Appearance : AppID.Call);
+        }}
+        onClose={closeWardrobe}
       />
 
       <ScheduleFullscreenViewer
@@ -2283,7 +2229,7 @@ const CompanionHome: React.FC = () => {
             <span className="text-[8px] tracking-[0.08em] text-white/90 sm:text-[9px]">外观</span>
           </button>
 
-          <button onClick={() => setWardrobeOpen(true)} className="companion-rail-button group relative z-10 flex flex-col items-center gap-1 active:scale-[.97]" data-testid="companion-real-wardrobe-button">
+          <button onClick={openWardrobe} className="companion-rail-button group relative z-10 flex flex-col items-center gap-1 active:scale-[.97]" data-testid="companion-real-wardrobe-button" data-companion-wardrobe-trigger="true">
             <span className="companion-rail-shape relative flex h-10 w-10 rotate-45 items-center justify-center rounded-[0.72rem] border bg-[#171023]/64 sm:h-12 sm:w-12" style={{ borderColor: `${uiTint}88` }}>
               <span className="companion-rail-shape-inner absolute inset-[3px] rounded-[0.55rem] border" style={{ borderColor: `${uiTint}2f` }} />
               <TShirt className="companion-rail-icon relative h-[17px] w-[17px] -rotate-45 text-white/95 sm:h-5 sm:w-5" weight="bold" />

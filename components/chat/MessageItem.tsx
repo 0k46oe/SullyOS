@@ -1370,6 +1370,10 @@ interface MessageItemProps {
     charAvatar: string;
     charName: string;
     userAvatar: string;
+    /** 当前窗口里的最后一条消息；最新图片需要立即解码，避免移动端懒加载卡在滚动容器底部。 */
+    isLatestMessage?: boolean;
+    /** 图片完成解码并确定高度后，通知聊天列表重新校准贴底位置。 */
+    onMediaLoad?: (messageId: number) => void;
     onLongPress: (m: Message) => void;
     onReply: (m: Message) => void;
     selectionMode: boolean;
@@ -1428,6 +1432,8 @@ const MessageItem = React.memo(({
     charAvatar,
     charName,
     userAvatar,
+    isLatestMessage = false,
+    onMediaLoad,
     onLongPress,
     onReply,
     selectionMode,
@@ -3272,7 +3278,14 @@ const MessageItem = React.memo(({
         return commonLayout(
             <div className="relative group">
                 {m.content ? (
-                    <img src={m.content} className="max-w-[200px] max-h-[300px] rounded-2xl" alt="Uploaded" loading="lazy" decoding="async" />
+                    <img
+                        src={m.content}
+                        className="max-w-[200px] max-h-[300px] rounded-2xl"
+                        alt="Uploaded"
+                        loading={isLatestMessage ? 'eager' : 'lazy'}
+                        decoding="async"
+                        onLoad={() => onMediaLoad?.(m.id)}
+                    />
                 ) : (
                     <div className="px-4 py-6 rounded-2xl bg-slate-100 text-slate-400 text-xs italic text-center min-w-[120px]">[图片已丢失]</div>
                 )}
@@ -3734,6 +3747,8 @@ const MessageItem = React.memo(({
            prev.charAvatar === next.charAvatar &&
            prev.charName === next.charName &&
            prev.userAvatar === next.userAvatar &&
+           prev.isLatestMessage === next.isLatestMessage &&
+           prev.onMediaLoad === next.onMediaLoad &&
            prev.selectionMode === next.selectionMode &&
            prev.isSelected === next.isSelected &&
            prev.translationEnabled === next.translationEnabled &&

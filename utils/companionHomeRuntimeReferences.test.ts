@@ -294,6 +294,9 @@ describe('CompanionHome touch request boundaries', () => {
     expect(callSource).toContain('setLive2DWardrobeOnboarding(true)');
     expect(callSource).toContain("setupMode={live2DWardrobeOnboarding ? 'import' : 'advanced'}");
     expect(settingsSource).toContain('data-testid="live2d-wardrobe-onboarding"');
+    expect(settingsSource).toContain('data-testid="live2d-floating-settings-toggle"');
+    expect(settingsSource).toContain('data-testid="live2d-floating-settings-panel"');
+    expect(settingsSource).toContain("useState<'actions' | 'framing'>('actions')");
     expect(settingsSource).toContain('toggleWardrobe');
     expect(settingsSource).toContain("action.wardrobe ? { ...action, permission: 'manual' as const } : action");
     expect(stageSource).toContain('externalManualAction?: Live2DActionTrigger | null');
@@ -301,6 +304,19 @@ describe('CompanionHome touch request boundaries', () => {
     expect(stageSource).toContain('!action.wardrobe');
     expect(wardrobeSource).toContain('data-testid="companion-real-wardrobe"');
     expect(wardrobeSource).toContain('onOpenComposition');
+  });
+
+  it('teaches the wardrobe scene entry once and keeps it available for static portraits', () => {
+    const source = readFileSync(path.resolve(__dirname, '../components/os/CompanionHome.tsx'), 'utf8');
+    const wardrobeSource = readFileSync(path.resolve(__dirname, '../components/os/CompanionWardrobeDrawer.tsx'), 'utf8');
+
+    expect(source).toContain("const COMPANION_WARDROBE_DISCOVERY_KEY = 'sully-companion-wardrobe-discovery-v1'");
+    expect(source).toContain('data-wardrobe-hint-active={wardrobeDiscoveryActive');
+    expect(source).toContain('data-testid="companion-wardrobe-discovery-nudge"');
+    expect(source).toContain("setEditingPanel(staticCompanionActive ? 'stage' : 'character')");
+    expect(source).toContain('staticMode={staticCompanionActive}');
+    expect(wardrobeSource).toContain('data-testid="companion-wardrobe-discovery-tip"');
+    expect(wardrobeSource).toContain('场景与构图');
   });
 
   it('offers built-in model quality control and pauses hidden Live2D stages', () => {

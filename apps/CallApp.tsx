@@ -94,6 +94,15 @@ import { trackEvent } from '../utils/analytics';
 import { fetchBlobForShare, shareOrDownloadBlob } from '../utils/shareExport';
 import { getPendingReplyText } from '../utils/pendingReply';
 import { findExpiredCallSnapshots } from '../utils/callSnapshotRetention';
+import {
+  companionAvatarSource,
+  companionExpressionKey,
+  hasDatePortraits,
+  listCompanionDateOutfits,
+  normalizeCompanionSkinSetId,
+  resolveCompanionPortrait,
+  type CompanionAvatarSource,
+} from '../utils/companionAvatar';
 type CallState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | 'ended' | 'error';
 type CallMode = 'voice' | 'video';
 type VideoCallLayout = 'stage' | 'story' | 'mini';
@@ -789,6 +798,20 @@ const CallApp: React.FC = () => {
   // VRM 模型的自定义表情名（加载时由画布回传），喂给基础版主模型或高质量导演。
   const vrmExpressionsRef = useRef<string[]>([]);
   const selectedChar = useMemo(() => characters.find(c => c.id === selectedCharId) || null, [characters, selectedCharId]);
+  const selectedVisualSource = companionAvatarSource(selectedChar);
+  const selectedDateOutfits = useMemo(() => listCompanionDateOutfits(selectedChar), [selectedChar]);
+  const selectedDateOutfitId = normalizeCompanionSkinSetId(selectedChar?.companionAvatar?.skinSetId);
+  const selectedDateOutfit = selectedDateOutfits.find(outfit => outfit.id === selectedDateOutfitId) || selectedDateOutfits[0];
+  const staticVideoAvatarActive = selectedVisualSource === 'upload' || selectedVisualSource === 'date';
+  const staticVideoPortrait = selectedChar && staticVideoAvatarActive
+    ? resolveCompanionPortrait(selectedChar, avatarPerformance.emotion, avatarPerformance.faces || [])
+    : undefined;
+  const staticVideoExpressionKey = companionExpressionKey(avatarPerformance.emotion, avatarPerformance.faces || []);
+  const hasSelectedVideoVisual = selectedVisualSource === 'model'
+    ? Boolean(selectedChar?.videoAvatar)
+    : selectedVisualSource === 'upload'
+      ? Boolean(selectedChar?.companionAvatar?.imageRef)
+      : hasDatePortraits(selectedChar);
   // 通话与普通聊天共用主动消息的云端快照。每个落库点都打脏，微任务会把同一轮
   // 的多次调用合并；这样用户通话后立刻关 App，也不会让角色漏掉刚发生的内容。
   const markCallTurnDirty = () => {
@@ -858,7 +881,14 @@ const CallApp: React.FC = () => {
 
   const bindVideoAvatar = (character: CharacterProfile, videoAvatar: NonNullable<CharacterProfile['videoAvatar']>) => {
     const previous = character.videoAvatar;
-    updateCharacter(character.id, { videoAvatar });
+    updateCharacter(character.id, {
+      videoAvatar,
+      companionAvatar: {
+        version: 1,
+        ...character.companionAvatar,
+        source: 'model',
+      },
+    });
     setCallMode('video');
     if (videoAvatar.format === 'live2d') {
       setLive2DWardrobeOnboarding(true);
@@ -872,6 +902,85 @@ const CallApp: React.FC = () => {
       'success',
     );
     if (previous?.assetId !== videoAvatar.assetId) void deleteAvatarModel(previous).catch(() => { /* orphan GC can clean later */ });
+  };
+
+  const chooseStaticAvatarImage = () => {
+    if (!selectedChar) {
+      addToast('先选择一个角色', 'info');
+      return;
+    }
+    const character = selectedChar;
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.png,.gif,image/png,image/gif';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+    const removeInput = () => { if (input.parentElement) input.remove(); };
+    window.addEventListener('focus', () => window.setTimeout(removeInput, 1200), { once: true });
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return removeInput();
+      const extension = file.name.split('.').pop()?.toLowerCase();
+      if (!['png', 'gif'].includes(extension || '') || !['image/png', 'image/gif'].includes(file.type)) {
+        addToast('静态形象仅支持 PNG / GIF', 'error');
+        return removeInput();
+      }
+      if (file.size > 20 * 1024 * 1024) {
+        addToast('图片超过 20 MB，请压缩后再导入', 'error');
+        return removeInput();
+      }
+      try {
+        const previousRef = character.companionAvatar?.imageRef;
+        const imageRef = await putImageBlob(file);
+        updateCharacter(character.id, {
+          companionAvatar: {
+            version: 1,
+            ...character.companionAvatar,
+            source: 'upload',
+            imageRef,
+            fileName: file.name,
+            mimeType: file.type,
+            importedAt: Date.now(),
+          },
+        });
+        if (previousRef && previousRef !== imageRef) await deleteBlobRef(previousRef);
+        setCallMode('video');
+        if (callSetupGuideOpenRef.current) setCallSetupGuideStep('camera');
+        trackEvent('导入桌面静态形象', { 格式: file.type === 'image/gif' ? 'GIF' : 'PNG' });
+        addToast(`${file.name} 已设为桌面与视频通话形象`, 'success');
+      } catch (error: any) {
+        addToast(error?.message || '静态形象导入失败', 'error');
+      } finally {
+        removeInput();
+      }
+    };
+    input.click();
+  };
+
+  const chooseVideoAvatarSource = (source: CompanionAvatarSource) => {
+    if (!selectedChar) return;
+    if (source === 'model' && !selectedChar.videoAvatar) {
+      chooseAvatarModel();
+      return;
+    }
+    if (source === 'upload' && !selectedChar.companionAvatar?.imageRef) {
+      chooseStaticAvatarImage();
+      return;
+    }
+    if (source === 'date' && !hasDatePortraits(selectedChar)) {
+      addToast('还没有见面立绘，先去见面模式补一套表情', 'info');
+      openApp(AppID.Date);
+      return;
+    }
+    updateCharacter(selectedChar.id, {
+      companionAvatar: {
+        version: 1,
+        ...selectedChar.companionAvatar,
+        source,
+      },
+    });
+    setCallMode('video');
+    addToast(source === 'model' ? '视频通话已使用动态模型' : source === 'date' ? '视频通话已沿用见面立绘' : '视频通话已使用静态图片', 'success');
   };
 
   const chooseBuiltinSullyQuality = (quality: BuiltinSullyLive2DQuality) => {
@@ -894,7 +1003,7 @@ const CallApp: React.FC = () => {
   // stage so browsing characters does not retain multiple GPU-heavy models.
   useEffect(() => {
     const avatar = selectedChar?.videoAvatar;
-    if (viewMode !== 'role-select' || callMode !== 'video' || avatar?.format !== 'live2d') return;
+    if (viewMode !== 'role-select' || callMode !== 'video' || selectedVisualSource !== 'model' || avatar?.format !== 'live2d') return;
     const timer = window.setTimeout(() => {
       void Promise.all([
         preloadLive2DRuntime(),
@@ -904,7 +1013,7 @@ const CallApp: React.FC = () => {
       });
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [viewMode, callMode, selectedChar?.id, selectedChar?.videoAvatar?.assetId]);
+  }, [viewMode, callMode, selectedChar?.id, selectedChar?.videoAvatar?.assetId, selectedVisualSource]);
 
   const chooseAvatarModel = () => {
     if (!selectedChar) {
@@ -1495,6 +1604,7 @@ const CallApp: React.FC = () => {
     setViewMode('in-call');
     setCallStartedAt(Date.now());
     setCallState('listening');
+    trackEvent('发起通话');
     if (callMode !== 'video' || cameraMode === 'off') {
       stopUserCamera();
       return;
@@ -1511,7 +1621,7 @@ const CallApp: React.FC = () => {
       let guideCompleted = false;
       try { guideCompleted = localStorage.getItem(CALL_SETUP_GUIDE_KEY) === 'complete'; } catch { /* private WebView */ }
       if (!guideCompleted) {
-        openCallSetupGuide(selectedChar?.videoAvatar ? 'camera' : 'model');
+        openCallSetupGuide(hasSelectedVideoVisual ? 'camera' : 'model');
         return;
       }
     }
@@ -1600,7 +1710,9 @@ const CallApp: React.FC = () => {
     kind?: 'motion' | 'expression' | 'params';
     tags?: string[];
   }> => (
-    selectedChar?.videoAvatar?.format === 'live2d'
+    selectedVisualSource !== 'model'
+      ? []
+      : selectedChar?.videoAvatar?.format === 'live2d'
       ? selectedChar.videoAvatar.actions
           .filter(action => action.permission === 'ai' && !action.wardrobe)
           .sort((a, b) => {
@@ -2336,6 +2448,7 @@ ${sentencePlan}`;
     try {
       setRerollingBubbleId(bubble.id);
       setCallState('thinking');
+      trackEvent('重掷角色的通话台词');
       const rerollReply = prepareCallAssistantReply(
         await requestAssistantReply(prevUser.text, bubble.dbId),
         callMode === 'video' && selectedChar?.videoCallPerformanceQuality !== 'high',
@@ -2494,6 +2607,10 @@ ${sentencePlan}`;
             characterName={selectedChar?.name || '当前角色'}
             modelName={selectedChar?.videoAvatar?.fileName}
             modelFormat={selectedChar?.videoAvatar?.format}
+            avatarSource={selectedVisualSource}
+            staticImageName={selectedChar?.companionAvatar?.fileName}
+            hasDatePortraits={hasDatePortraits(selectedChar)}
+            dateOutfitName={selectedDateOutfit?.name}
             cameraMode={setupCameraMode}
             hasFakeImage={!!fakeUserCameraRef}
             accentColor={accentColor}
@@ -2501,6 +2618,9 @@ ${sentencePlan}`;
             onStepChange={setCallSetupGuideStep}
             onChooseModelFile={chooseAvatarModel}
             onChooseLive2DFolder={chooseLive2DDirectory}
+            onChooseAvatarSource={chooseVideoAvatarSource}
+            onChooseStaticImage={chooseStaticAvatarImage}
+            onManageDatePortraits={() => openApp(AppID.Date)}
             onConfigureLive2D={selectedChar?.videoAvatar?.format === 'live2d' ? () => {
               setLive2DWardrobeOnboarding(true);
               setShowLive2DSettings(true);
@@ -2617,10 +2737,10 @@ ${sentencePlan}`;
                     <Cube size={15} weight="fill" />
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block text-[10px] tracking-[0.16em] text-white/35">角色模型 · {selectedChar?.videoAvatar?.format === 'live2d' ? 'LIVE2D' : selectedChar?.videoAvatar?.format === 'vrm' ? 'VRM' : '未绑定'}</span>
-                    <span className="mt-0.5 block truncate text-xs text-white/70">{selectedChar?.videoAvatar?.fileName || '支持 VRM / Live2D'}</span>
+                    <span className="block text-[10px] tracking-[0.16em] text-white/35">角色形象 · {selectedVisualSource === 'upload' ? '静态图片' : selectedVisualSource === 'date' ? '见面立绘' : selectedChar?.videoAvatar?.format === 'live2d' ? 'LIVE2D' : selectedChar?.videoAvatar?.format === 'vrm' ? 'VRM' : '未选择'}</span>
+                    <span className="mt-0.5 block truncate text-xs text-white/70">{selectedVisualSource === 'upload' ? selectedChar?.companionAvatar?.fileName || 'PNG / GIF' : selectedVisualSource === 'date' ? selectedDateOutfit?.name || '按通话情绪切换表情' : selectedChar?.videoAvatar?.fileName || '动态模型、静态图片或见面立绘'}</span>
                   </span>
-                  <span className="text-xs text-white/30">{selectedChar?.videoAvatar ? '设置' : '引导'}</span>
+                  <span className="text-xs text-white/30">{hasSelectedVideoVisual ? '设置' : '引导'}</span>
                 </button>
                 <details className="group rounded-2xl border border-white/10 bg-black/15 p-2" data-testid="video-call-advanced-settings">
                   <summary className="flex cursor-pointer list-none items-center justify-between rounded-xl px-2 py-1.5 text-[10px] text-white/42">
@@ -2993,7 +3113,11 @@ ${sentencePlan}`;
           <VRMVideoCallStage
             characterName={selectedChar?.name || '未选择'}
             fallbackAvatar={selectedChar?.avatar}
-            model={selectedChar?.videoAvatar}
+            model={selectedVisualSource === 'model' ? selectedChar?.videoAvatar : undefined}
+            staticAvatarSource={staticVideoAvatarActive ? selectedVisualSource : undefined}
+            staticPortraitValue={staticVideoPortrait}
+            staticExpressionKey={staticVideoExpressionKey}
+            staticSpriteConfig={selectedChar?.spriteConfig}
             motionState={displayCallState}
             emotion={avatarEmotion}
             audioFeed={getAudioFeed()}
@@ -3001,7 +3125,7 @@ ${sentencePlan}`;
             performanceQuality={selectedChar?.videoCallPerformanceQuality || 'basic'}
             accentColor={accentColor}
             backgroundUrl={stageBackgroundUrl}
-            onChooseModel={chooseAvatarModel}
+            onChooseModel={() => openCallSetupGuide('model')}
             onChooseLive2DFolder={chooseLive2DDirectory}
             onConfigureActions={() => setShowLive2DSettings(true)}
             onConfigureBackground={openBgPicker}
@@ -3219,7 +3343,7 @@ ${sentencePlan}`;
             </div>
             {bubble.role === 'assistant' && (bubble.audioUrl || isLatest) && (
               <div className="mt-2 flex gap-2 flex-wrap">
-                {bubble.audioUrl && <button onClick={() => playAudio(bubble.audioUrl, bubble.performanceTimeline, estimateSpeechMs(bubble.text))} className="text-xs px-2.5 py-1 rounded-full bg-white/8 border border-white/15 text-white/70 transition hover:bg-white/15">重播语音</button>}
+                {bubble.audioUrl && <button onClick={() => { playAudio(bubble.audioUrl, bubble.performanceTimeline, estimateSpeechMs(bubble.text)); trackEvent('重播一条通话语音'); }} className="text-xs px-2.5 py-1 rounded-full bg-white/8 border border-white/15 text-white/70 transition hover:bg-white/15">重播语音</button>}
                 {bubble.audioUrl && <button onClick={() => handleDownloadCallAudio(bubble.audioUrl, bubble.timestamp)} className="text-xs px-2.5 py-1 rounded-full bg-white/8 border border-white/15 text-white/70 transition hover:bg-white/15">下载</button>}
                 {isLatest && <button onClick={() => handleRerollAssistant(bubble)} disabled={!!rerollingBubbleId} className="text-xs px-2.5 py-1 rounded-full bg-white/8 border border-white/15 text-white/70 transition hover:bg-white/15 disabled:opacity-40">{rerollingBubbleId === bubble.id ? '换一种说法…' : '换个说法'}</button>}
               </div>
@@ -3385,7 +3509,7 @@ ${sentencePlan}`;
             <p className="text-xs text-white/40">选择后，角色会用中文回复，语音则用对应语种朗读</p>
             <div className="flex flex-wrap gap-2 pt-1">
               {VOICE_LANGUAGE_OPTIONS.map(opt => (
-                <button key={opt.value} onClick={() => { setVoiceLang(opt.value); if (selectedChar) updateCharacter(selectedChar.id, { callVoiceLang: opt.value }); setShowLangPicker(false); }}
+                <button key={opt.value} onClick={() => { setVoiceLang(opt.value); if (selectedChar) updateCharacter(selectedChar.id, { callVoiceLang: opt.value }); setShowLangPicker(false); trackEvent('设置通话语音语种', { lang: opt.value }); }}
                   className={`text-xs px-3 py-2 rounded-full font-medium transition-colors text-white ${voiceLang === opt.value ? 'keep-white' : ''}`}
                   style={voiceLang === opt.value ? { backgroundColor: accentColor } : lightTheme ? { background: 'rgba(38,34,57,0.08)' } : { background: 'rgba(255,255,255,0.1)' }}>
                   {opt.label}
