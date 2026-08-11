@@ -328,11 +328,16 @@ export interface ActiveMsg2GlobalConfig {
    */
   instantChatEnabled?: boolean;
   /**
-   * 上一次探到的「那台 Worker 真的跑得动即时对话吗」（见 ActiveMsgClient.probeInstantChatSupport）。
+   * 上一次**明确探到**的「那台 Worker 真的跑得动即时对话吗」
+   * （见 ActiveMsgClient.probeInstantChatSupportDetailed）。
    *
-   * false 时即时对话整个让位给本地生成，**用户开着也不走** —— 跑不动的 Worker 上这条路
-   * 是发一条挂一条，让位比让他对着「已开启」干等强。探测每次都会刷新它，用户更新完
-   * Worker 下一次探测自然翻回 true，不用手动去重开开关。
+   * 只有问到了答案才会写这里：200 + instantTick 写 true，200 但没有 instantTick 写 false。
+   * 网络异常、超时、401、5xx 一律不写——那些说明的是线路或配置有问题，不是这台 Worker
+   * 的能力，拿它们判死刑的话一次抖动就能把即时对话长期钉死在本地生成。
+   *
+   * false 时即时对话让位给本地生成，**用户开着也不走** —— 跑不动的 Worker 上这条路是
+   * 发一条挂一条，让位比让他对着「已开启」干等强。发消息路上会带冷却地现探一次，
+   * 用户更新完 Worker 后自己就翻回来了，不用手动去重开开关。
    *
    * undefined = 还没探过（刚装、没进过设置页），按放行处理：这一档说明我们不知道，
    * 而不是知道它不行；握手时会补探一次，之后就有准数了。

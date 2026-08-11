@@ -20,7 +20,7 @@
  */
 
 import { ActiveMsg2InboxMessage, CharacterProfile, GroupProfile, RealtimeConfig, UserProfile } from '../types';
-import { ActiveMsgClient, type AmsgOutboxEntry } from './activeMsgClient';
+import { ActiveMsgClient, type AmsgOutboxEntry, type InstantChatProbeOutcome } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
 import { trackEvent } from './analytics';
 import { announceEmotionDone } from './chatGenEvents';
@@ -221,15 +221,19 @@ export const discardInstantChatExpiredNotices = (charId: string, uuid?: string):
 // ─── 开关 ───
 
 /**
- * ready=false 时卡在哪一道。两档不是「用户没开」，调用方要分开收场：
+ * ready=false 时卡在哪一道。三档不是「用户没开」，调用方要分开收场：
  *   config-unreadable  这一刻问不出来（明确报错等重发，绝不悄悄退回本地）
- *   worker-outdated    开着，但那台 Worker 跑不动（退回本地生成，且必须留痕）
+ *   worker-outdated    问到了，那台 Worker 确实跑不动（退回本地生成，提示去更新 Worker）
+ *   worker-unreachable 这一刻够不着云端（退回本地生成，但别叫人去更新——多半是网络）
+ *
+ * 后两档都得留痕：用户的主观意愿是「上云」，实际走的却是本地，不留痕就是一次静默分流。
  */
 export type InstantChatReadinessReason =
   | 'disabled'
   | 'char-disabled'
   | 'no-worker-url'
   | 'worker-outdated'
+  | 'worker-unreachable'
   | 'config-unreadable';
 
 export interface InstantChatReadiness {
@@ -237,17 +241,78 @@ export interface InstantChatReadiness {
   reason?: InstantChatReadinessReason;
 }
 
+// ─── 存量说「跑不动」时的现探 ───
+//
+// 存量是粘的：一旦写成 false，只有下一次探测成功才翻得回来，而探测原本只挂在握手
+// （一次会话一次）和打开设置页两处。用户不进设置页，就会一直卡在本地生成。
+//
+// 所以这里补一次**懒重探**：只有存量已经是 false 时才探，且带冷却。成本压得很准——
+// 状态正常的人一次额外请求都不加，只有已经降级的人付这点延迟，而他们本来就在走一条
+// 对自己未必通的本地路径，拿 0.4 秒换回云端完全值得。
+
+/** 存量已经是 false 时，最多每隔这么久现探一次，看能不能翻回来。 */
+export const INSTANT_CHAT_REPROBE_COOLDOWN_MS = 30_000;
+
+/** 现探卡这么久还没回话就算了，这一轮照常走本地——绝不把用户按在发送键上干等。 */
+export const INSTANT_CHAT_REPROBE_TIMEOUT_MS = 3_000;
+
+let lastReprobeAt = 0;
+/** 上一次现探问到了什么。冷却期内沿用它，别让同一段时间里的消息报出忽左忽右的原因。 */
+let lastReprobeOutcome: InstantChatProbeOutcome = 'unknown';
+/** 同一刻好几条消息一起进来时共用同一次探测，别打出一串并发的 /config-check。 */
+let reprobeInFlight: Promise<InstantChatProbeOutcome> | null = null;
+
+/**
+ * 把冷却清零，让下一条消息立刻重探。
+ * 网络刚恢复时调（online 事件），换 Worker / 改配置的地方也可以调。
+ */
+export const resetInstantChatReprobeCooldown = (): void => { lastReprobeAt = 0; };
+
+// 切代理节点不会触发 online，所以这个监听只是「便宜的加速」，不是恢复的唯一指望——
+// 真正兜底的是上面那道冷却到期后的现探。
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('online', resetInstantChatReprobeCooldown);
+}
+
+/**
+ * 现探一次，返回这次问到了什么。冷却期内不探，沿用上一次的结论。
+ */
+const reprobeInstantChatSupport = async (): Promise<InstantChatProbeOutcome> => {
+  if (reprobeInFlight) return reprobeInFlight;
+  if (Date.now() - lastReprobeAt < INSTANT_CHAT_REPROBE_COOLDOWN_MS) return lastReprobeOutcome;
+  lastReprobeAt = Date.now();
+  const task = (async () => {
+    try {
+      const result = await ActiveMsgClient.probeInstantChatSupportDetailed({
+        timeoutMs: INSTANT_CHAT_REPROBE_TIMEOUT_MS,
+      });
+      return result.outcome;
+    } catch {
+      return 'unknown' as const;
+    }
+  })();
+  reprobeInFlight = task;
+  try {
+    lastReprobeOutcome = await task;
+    return lastReprobeOutcome;
+  } finally {
+    reprobeInFlight = null;
+  }
+};
+
 /**
  * 即时对话此刻走不走得通，外加「走不通是因为什么」。
  *
  * 门槛四道：角色没单独关（传了 char 才查）、设置页开了、那台 Worker 跑得动、Worker
  * 地址填着。
  *
- * 「跑得动」读的是**存量**（config.instantChatSupported），不是现探——这里现探的话每发
- * 一条消息都要多一次网络往返，而且探测失败时到底算「不支持」还是「网络抖了一下」没有
- * 正确答案。存量由 probeInstantChatSupport 每次探测时刷新（设置页打开时、握手时各一次），
- * 用户更新完 Worker 会自己翻回来，不用手动重开开关。undefined = 还没探过，放行——那一
- * 档说明我们不知道，不是知道它不行。
+ * 「跑得动」平时读的是**存量**（config.instantChatSupported），由 probeInstantChatSupport
+ * 在握手和打开设置页时刷新。走存量是为了省 RTT：状态正常的人一条消息都不该多花一次
+ * 网络往返。undefined = 还没探过，放行——那一档说明我们不知道，不是知道它不行。
+ *
+ * 只有存量已经是 false（= 上一次明确探到跑不动）时，这里才补一次现探，看能不能翻回来，
+ * 详见 reprobeInstantChatSupport。额外开销精确落在已经降级的那批人身上，而他们本来就在
+ * 走一条对自己未必通的本地路径。
  *
  * 为什么这道门非要有：跑不动的 Worker 上这条路是**发一条挂一条**（老 bundle 被 waitUntil
  * 砍在 30 秒，新 bundle 少了起跳器则直接 503），而开关还写着「已开启」。让位给本地生成
@@ -279,11 +344,26 @@ export const resolveInstantChatReadiness = async (
   // 地址排在能力前面：没填地址时那份能力位多半是上一台 Worker 留下的存量，
   // 报「Worker 太旧」会把人指去点一个根本没连上的东西。
   if (!config.workerUrl?.trim()) return { ready: false, reason: 'no-worker-url' };
-  // 开着、地址也在，但那台 Worker 上这条路是坏的。静默让位正是「静默分流」那个老坑，
-  // 所以就地 warn 一声，调用方还会额外留一条 trace——用户至少查得到「为什么开了却走本地」。
+  // 开着、地址也在，但存量说那台 Worker 上这条路是坏的。
+  //
+  // 先现探一次再下结论：这份 false 可能是**旧版本**在一次网络抖动里写下的误判（那会儿
+  // 「探不到」和「探到不行」共用一个 false），也可能是用户当时真的还没更新 Worker。
+  // 不重探的话，前者要一直等到用户碰巧打开设置页才纠正得过来。
   if (config.instantChatSupported === false) {
-    console.warn(`${HEADER} 开关是开的，但那台 Worker 跑不动即时对话（缺起跳器或还是旧 bundle）：这一轮本地生成。去设置页点「更新 Worker」`);
-    return { ready: false, reason: 'worker-outdated' };
+    const outcome = await reprobeInstantChatSupport();
+    if (outcome === 'supported') {
+      console.info(`${HEADER} 重探到那台 Worker 现在跑得动即时对话（存量是过期结论），这一轮照常上云`);
+      return { ready: true };
+    }
+    // 静默让位正是「静默分流」那个老坑，所以两档都就地 warn 一声，调用方还会额外留一条
+    // trace——用户至少查得到「为什么开了却走本地」。两档的去向不同，别混：
+    if (outcome === 'unsupported') {
+      console.warn(`${HEADER} 开关是开的，但那台 Worker 跑不动即时对话（缺起跳器或还是旧 bundle）：这一轮本地生成。去设置页点「更新 Worker」`);
+      return { ready: false, reason: 'worker-outdated' };
+    }
+    // 够不着云端时别叫人去更新 Worker——他多半点不动，而且问题也不在那儿。
+    console.warn(`${HEADER} 开关是开的，但这一刻够不着云端（问不出新结论）：这一轮本地生成，连上了会自己回到云端`);
+    return { ready: false, reason: 'worker-unreachable' };
   }
   return { ready: true };
 };
@@ -291,6 +371,27 @@ export const resolveInstantChatReadiness = async (
 /** 只关心「走不走得通」的调用点用这个（设置页的互斥门）。要区分原因走上面那个。 */
 export const isInstantChatReady = async (): Promise<boolean> =>
   (await resolveInstantChatReadiness()).ready;
+
+// ─── 「这一轮走的哪条路」广播给界面 ───
+//
+// 开关写着「已开启」、消息却在本地生成，这中间的落差过去只留在 console 和观察窗里，
+// 普通用户查不到——他能看到的只有一条读不懂的网络报错。所以每一轮都把结论播出去，
+// 由输入框上方那条小提示接住。
+
+/** detail 是 InstantChatRouteDetail。每一轮都发，包括「这一轮回到云端了」。 */
+export const AMSG_INSTANT_CHAT_ROUTE_EVENT = 'amsg-instant-chat-route';
+
+export interface InstantChatRouteDetail {
+  charId: string;
+  /** null = 这一轮走的云端（界面上把提示收起来）；否则是让位给本地生成的原因。 */
+  reason: InstantChatReadinessReason | null;
+}
+
+export const announceInstantChatRoute = (detail: InstantChatRouteDetail): void => {
+  try {
+    window.dispatchEvent(new CustomEvent(AMSG_INSTANT_CHAT_ROUTE_EVENT, { detail }));
+  } catch { /* SSR / 测试环境无 window */ }
+};
 
 // ─── 发这一轮 ───
 
