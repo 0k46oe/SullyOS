@@ -588,6 +588,9 @@ const Appearance: React.FC = () => {
               source,
           },
       });
+      trackEvent('切换桌面陪伴形象来源', {
+          来源: source === 'model' ? '动态模型' : source === 'upload' ? '静态图片' : '见面立绘',
+      });
       addToast(source === 'model' ? '桌面已使用动态模型' : source === 'date' ? '已沿用见面模式立绘' : '已使用导入图片', 'success');
   };
 
@@ -617,6 +620,7 @@ const Appearance: React.FC = () => {
               },
           });
           if (previousRef && previousRef !== imageRef) await deleteBlobRef(previousRef);
+          trackEvent('导入桌面静态形象', { 格式: file.type === 'image/gif' ? 'GIF' : 'PNG' });
           addToast(file.type === 'image/gif' ? 'GIF 已原样导入，动画会保留' : 'PNG 静态形象已导入', 'success');
       } catch (error: any) {
           addToast(error?.message || '静态形象导入失败', 'error');
@@ -633,6 +637,7 @@ const Appearance: React.FC = () => {
               skinSetId: companionSkinSetPatchValue(outfitId),
           },
       });
+      trackEvent('切换桌面见面立绘衣服');
       addToast('桌面衣服已切换，见面模式的选择不会被改动', 'success');
   };
 
@@ -650,6 +655,7 @@ const Appearance: React.FC = () => {
           },
       });
       await deleteBlobRef(previousRef);
+      trackEvent('移除桌面静态形象');
       addToast('已移除导入图片', 'success');
   };
 

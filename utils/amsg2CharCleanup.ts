@@ -16,6 +16,7 @@
 import { CharacterProfile } from '../types';
 import { ActiveMsgClient } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
+import { charCredIds, forgetCredIds } from './amsgLlmCredentials';
 
 export type CharCloudStateCleanup =
   /** 没有云端可清（角色不存在，或压根没填 worker 地址）—— 一个请求都没发。 */
@@ -59,6 +60,18 @@ export const purgeCharCloudState = async (
   } catch {
     // 连本地配置都读不到，等于无从判断有没有云端；按没有处理，别为它弹错误。
     return { status: 'skipped' };
+  }
+
+  // 这个角色名下登记的 API 凭据行也一起清掉：角色都没了，那几行再留着只是白占
+  // 云端的行数上限。跟 client_state 各清各的——凭据没清成不该让上下文也留在云端。
+  // 失败只 warn：删角色的路上一个附带清理拦不住主线（下次同名 credId 覆盖即可）。
+  try {
+    await ActiveMsgClient.deleteLlmCredentials({ credIds: charCredIds(char!.id) });
+  } catch (error) {
+    console.warn('[Amsg2CharCleanup] 删角色时清云端 API 凭据失败（不影响删除）', error);
+    // 本地那本指纹底账照划：角色都没了，留着几条死账只会一直占 localStorage，
+    // 后台重传也会一遍遍去查一个不存在的角色。
+    forgetCredIds(charCredIds(char!.id));
   }
 
   try {

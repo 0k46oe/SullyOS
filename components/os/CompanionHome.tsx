@@ -109,6 +109,7 @@ import {
   normalizeCompanionSkinSetId,
   resolveCompanionPortrait,
 } from '../../utils/companionAvatar';
+import { trackEvent } from '../../utils/analytics';
 
 // ── 时段氛围：陪伴桌面按虚拟时间换天色（晨曦 / 白日 / 黄昏 / 夜晚）──
 interface DayPeriod {
@@ -962,6 +963,7 @@ const CompanionHome: React.FC = () => {
         skinSetId: companionSkinSetPatchValue(outfitId),
       },
     });
+    trackEvent('切换桌面见面立绘衣服');
     addToast('桌面衣服已切换', 'success');
   };
 
@@ -1438,6 +1440,12 @@ const CompanionHome: React.FC = () => {
       const keepVoiceIds = collectAvatarTouchVoiceAssetIds(reactions);
       void cleanupAvatarTouchVoiceAssets(character.companionTouchSettings?.reactions, keepVoiceIds);
       touchCursorRef.current = {};
+      trackEvent('生成桌面触碰反馈', {
+        形象: activeCompanionSource === 'upload'
+          ? '静态图片'
+          : activeCompanionSource === 'date' ? '见面立绘' : '动态模型',
+        语音: touchGenerateVoice,
+      });
       const voiceSummary = touchGenerateVoice ? ` · 本地语音 ${voiceGenerated}/${voiceTotal}` : '';
       addToast(`已为 ${touchDraftZones.length} 个部位准备本地反馈包${voiceSummary}`, 'success');
       if (voiceFailures) {

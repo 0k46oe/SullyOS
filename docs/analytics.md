@@ -604,9 +604,15 @@ push endpoint）留在 toast 和 console 里，一个字都不进上报。
 `none` / `other`）、`platform`（`normal` / `ios_needs_pwa` / `capacitor_native`）、
 `registration`（`worker-unset` / `unreachable` / `missing` / `other-endpoint` / `matched`）、
 `lastFailure`（`none` / `channel-unreachable` / `unsupported` / `permission` / `state` /
-`zombie` / `unknown`）。
+`zombie` / `unknown`）、`delivery`（`clean` / `gone` / `recovered` / `unknown`）。
 `registration` 是「worker 上登记的订阅是不是这台设备」，中间那两档对应的是任务建得成、
 到点却一条都不来的静默失联。
+`delivery` 是上一次推送有没有被推送服务退回，结论由 Worker 那侧算好（`/debug` 的
+`pushDelivery`）。`gone` 指现在这条订阅在推送服务那侧已经作废（登记状态可能全对，推过去
+只换回一个 410），`recovered` 指出过这事但之后订阅换过一条了，`unknown` 是没问到——
+没连上 Worker、这台 Worker 上跑的后端还不查这一项、或者它查了没查成，三种都归这一格。
+`gone` 那一格量大说明「全绿但一条不来」正在成批发生；`unknown` 常年居高则说明大批用户
+的 Worker 还停在老版本上。
 `lastFailure` 是最近一次建订阅失败卡在哪类，手上已有活订阅时报 `none`。
 `channel-unreachable` 那一格量大就说明有一批设备（多半是没装谷歌服务的国行安卓机）
 从系统层面就用不了网页推送——这是它唯一能被看见的地方。
@@ -940,6 +946,10 @@ push endpoint）留在 toast 和 console 里，一个字都不进上报。
 
 **电话**
 
+- 保存视频通话单帧快照
+- 结束一通通话
+- 淘汰旧视频通话快照
+- 选择用户摄像头模式
 - 下载一条通话语音
 - 修改自己的通话发言
 - 再打一通电话
@@ -1005,6 +1015,9 @@ push endpoint）留在 toast 和 console 里，一个字都不进上报。
 
 **外观**
 
+- 导入桌面静态形象
+- 切换桌面见面立绘衣服
+- 切换桌面陪伴形象来源
 - 切换外观定制标签页
 - 切换桌面整机风格
 - 导入外观预设文件
@@ -1012,6 +1025,7 @@ push endpoint）留在 toast 和 console 里，一个字都不进上报。
 - 应用配色预设
 - 打开桌面装饰贴纸库
 - 添加桌面装饰贴纸
+- 移除桌面静态形象
 
 **气泡工坊**
 
@@ -1077,6 +1091,7 @@ push endpoint）留在 toast 和 console 里，一个字都不进上报。
 
 **桌面**
 
+- 生成桌面触碰反馈
 - 打开角色日程面板
 - 进入桌面整理模式
 
@@ -1101,5 +1116,5 @@ push endpoint）留在 toast 和 console 里，一个字都不进上报。
 
 - 手动刷新热点日报
 
-以上分类清单共 499 条，另有「数据规模」「当前外观」「当前角色设置」「当前功能启用」
+以上分类清单共 508 条，另有「数据规模」「当前外观」「当前角色设置」「当前功能启用」
 「私聊会话发送条数」五条会话级事件（见前几节）和「打开某个 App」一族。

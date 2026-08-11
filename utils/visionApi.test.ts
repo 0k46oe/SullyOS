@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CharacterProfile, Message, UserProfile, VisionApiConfig } from '../types';
 import { ChatPrompts } from './chatPrompts';
 import { DB } from './db';
-import { materializeVisionDescriptions } from './visionApi';
+import { materializeVisionDescriptions, visionApiConfigFromPreset } from './visionApi';
 
 const config: VisionApiConfig = {
   enabled: true,
@@ -28,6 +28,20 @@ afterEach(() => {
 });
 
 describe('independent vision API', () => {
+  it('can load a generic model preset into vision without carrying unrelated main-model options', () => {
+    expect(visionApiConfigFromPreset({
+      id: 'preset-1',
+      name: '视觉模型',
+      config: {
+        baseUrl: ' https://vision.example.com/v1/// ',
+        apiKey: '\u200Bvision-key\u2060',
+        model: ' vision-model ',
+        stream: true,
+        temperature: 1.2,
+      },
+    })).toEqual(config);
+  });
+
   it('recognizes identical image data once, writes both message caches, then reuses them', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       choices: [{ message: { content: '一只黑猫坐在窗边，窗外正在下雨。' } }],

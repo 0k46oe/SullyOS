@@ -63,8 +63,8 @@ importers:
         specifier: 3.5.3
         version: 3.5.3(three@0.185.1)
       '@rei-standard/amsg-client':
-        specifier: 2.9.0-next.8
-        version: 2.9.0-next.8
+        specifier: 2.9.0-next.11
+        version: 2.9.0-next.11
       '@rei-standard/amsg-instant':
         specifier: 0.11.0-next.3
         version: 0.11.0-next.3
@@ -109,8 +109,8 @@ importers:
         specifier: ^6.0.0
         version: 6.2.1
       '@rei-standard/amsg-server':
-        specifier: 2.6.0-next.16
-        version: 2.6.0-next.16(@neondatabase/serverless@1.1.0)(pg@8.22.0)
+        specifier: 2.6.0-next.20
+        version: 2.6.0-next.20(@neondatabase/serverless@1.1.0)(pg@8.22.0)
       '@types/qrcode':
         specifier: ^1.5.6
         version: 1.5.6
@@ -1044,8 +1044,8 @@ packages:
   '@pixiv/types-vrmc-vrm-1.0@3.5.3':
     resolution: {integrity: sha512-3HsBZWKXU/CnY2J6uAVuYmM0NPt/e5jroQZH85WYK0EzYmebqTmWKF/fllguNliJQAovdhn8sIA8NbHZoQvbUA==}
 
-  '@rei-standard/amsg-client@2.9.0-next.8':
-    resolution: {integrity: sha512-6cXlyV3tP4IFxejQlX2teJaZVQctB1kYhaSTgDhZUE2nSRCdj2sKRnSqmqIiISrOSET/hQD9q2xcaoGeczGW+g==}
+  '@rei-standard/amsg-client@2.9.0-next.11':
+    resolution: {integrity: sha512-szYPcEvUIluUPTCdfr38Ia9bx0KXMZDcEIu9IcUP1esVH3I4uLKW4zjwGBf12MXg/Ds6l7sB7w4wTYKZhja6MA==}
     engines: {node: '>=20'}
 
   '@rei-standard/amsg-instant@0.11.0-next.3':
@@ -1056,8 +1056,8 @@ packages:
     resolution: {integrity: sha512-GsLzRvSXsp5cbJ/vNwQP+yHoZ4LJiilOvws0LemrzaFoG45ApQ7WW3YHux58DXdXOSN36prT5CsmipA3wUAmQQ==}
     engines: {node: '>=18'}
 
-  '@rei-standard/amsg-server@2.6.0-next.16':
-    resolution: {integrity: sha512-l39QL3iWuWdq9qyasqijDD+vRdXUgQSXg7af8f/3rwv2CPdD3ZtqYTfwegOTWdHkv8BSvGXW/2wNdSr19N6EXg==}
+  '@rei-standard/amsg-server@2.6.0-next.20':
+    resolution: {integrity: sha512-jK9zttm0nRh55S7yQpBrOvm7Z22XDtWSbfQIdgQaaKvu2gT2si+BkjZlIetct0f3z3xr4GyM7hmeS0ygKg8gWA==}
     engines: {node: '>=20'}
     peerDependencies:
       '@neondatabase/serverless': '>=0.9.0'
@@ -3320,7 +3320,7 @@ snapshots:
 
   '@pixiv/types-vrmc-vrm-1.0@3.5.3': {}
 
-  '@rei-standard/amsg-client@2.9.0-next.8':
+  '@rei-standard/amsg-client@2.9.0-next.11':
     dependencies:
       '@rei-standard/amsg-shared': 0.4.0-next.5
 
@@ -3332,7 +3332,7 @@ snapshots:
     dependencies:
       '@rei-standard/amsg-shared': 0.2.0
 
-  '@rei-standard/amsg-server@2.6.0-next.16(@neondatabase/serverless@1.1.0)(pg@8.22.0)':
+  '@rei-standard/amsg-server@2.6.0-next.20(@neondatabase/serverless@1.1.0)(pg@8.22.0)':
     dependencies:
       '@netlify/blobs': 8.2.0
       '@rei-standard/amsg-shared': 0.4.0-next.5

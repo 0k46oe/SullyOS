@@ -1758,6 +1758,10 @@ describe('即时对话的待收记录（走真库）', () => {
 
   beforeEach(() => {
     localStorage.removeItem(AMSG_INSTANT_CHAT_PENDING_LS_KEY);
+    // 默认「账本读得到、里面是空的」。要区分「读到了、确实没有」和「压根没读成」的
+    // 那几条自己覆盖：前者才构成结论，后者只能继续等。
+    vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue([]);
+    vi.spyOn(ActiveMsgClient, 'ackOutboxMessages').mockResolvedValue(undefined);
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -1765,29 +1769,31 @@ describe('即时对话的待收记录（走真库）', () => {
     delete (globalThis as any).window.umami;
   });
 
-  /** 一条云端 outbox 副本：形状跟 worker 定稿的那份推送一致（含任务身份 taskUuid）。 */
-  const outboxValue = (charId: string, messageId: string, taskUuid: string) => JSON.stringify({
-    v: 1,
-    entries: [{
+  /** 服务端账本上的一条：`push` 就是推送信封本身，跟 SW 收到的那份逐字一致。 */
+  const outboxEntries = (charId: string, messageId: string, taskUuid: string) => [{
+    id: 1,
+    messageId,
+    taskUuid,
+    sessionId: 'sess-instant',
+    messageIndex: 1,
+    totalMessages: 1,
+    createdAt: Date.now(),
+    deliveredAt: null,
+    push: {
+      messageKind: 'content',
+      messageType: 'instant',
+      source: 'scheduled',
+      message: '在的，刚看到',
+      contactName: '即时角色',
       messageId,
       sessionId: 'sess-instant',
-      at: Date.now(),
-      payload: {
-        messageKind: 'content',
-        messageType: 'instant',
-        source: 'scheduled',
-        message: '在的，刚看到',
-        contactName: '即时角色',
-        messageId,
-        sessionId: 'sess-instant',
-        messageIndex: 1,
-        totalMessages: 1,
-        taskUuid,
-        timestamp: new Date().toISOString(),
-        metadata: { charId, charName: '即时角色', amsgInstantChat: true },
-      },
-    }],
-  });
+      messageIndex: 1,
+      totalMessages: 1,
+      taskUuid,
+      timestamp: new Date().toISOString(),
+      metadata: { charId, charName: '即时角色', amsgInstantChat: true },
+    },
+  }];
 
   it('欠着的那一轮回复到了 → 待收记录销账（灯灭）', async () => {
     const charId = 'char-instant-clear';
@@ -1880,13 +1886,13 @@ describe('即时对话的待收记录（走真库）', () => {
     return { delays, restore: () => spy.mockRestore() };
   };
 
-  it('云端 outbox 里有那条 → 补收上屏，不查状态也不报失败', async () => {
+  it('云端账本里有那条 → 补收上屏，不查状态也不报失败', async () => {
     const charId = 'char-instant-outbox';
     const messageId = 'msg_task_9@1700000000000_hook_0';
     await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
     setInstantChatPending(charId, 'uuid-outbox', Date.now());
-    vi.spyOn(ActiveMsgClient, 'readClientStateValue')
-      .mockResolvedValue(outboxValue(charId, messageId, 'uuid-outbox'));
+    vi.spyOn(ActiveMsgClient, 'listOutboxEntries')
+      .mockResolvedValue(outboxEntries(charId, messageId, 'uuid-outbox') as any);
     const status = vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus')
       .mockResolvedValue({ state: 'gone' });
     const cancel = vi.spyOn(ActiveMsgClient, 'cancelTask')
@@ -2114,22 +2120,22 @@ describe('即时对话的待收记录（走真库）', () => {
     expect(msgs.some((m) => m.role === 'system')).toBe(false);
   }, 20000);
 
-  // 「取不回」的结论 = 行没了 **且 outbox 读到了、里面确实没有**。outbox 那一步读失败
-  // 时（网络抖、worker 500），结论就建立在一次失败的读上——回复可能正躺在 outbox 里。
+  // 「取不回」的结论 = 行没了 **且账本读到了、里面确实没有**。账本那一步读失败
+  // 时（网络抖、worker 500），结论就建立在一次失败的读上——回复可能正躺在账本里。
   // 这时判死的话：用户看到「生成失败」重发一遍（再烧一轮），下一跳补收又把原回复放
   // 出来，聊天流里失败说明后面跟着两条几乎一样的回复。
-  it('云端那行已经没了、但 outbox 读失败 → 这一跳不下结论，等下一跳', async () => {
+  it('云端那行已经没了、但账本读失败 → 这一跳不下结论，等下一跳', async () => {
     const charId = 'char-instant-gone-unreadable';
     await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
     setInstantChatPending(charId, 'uuid-gone-unreadable', Date.now());
-    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockRejectedValue(new Error('worker 500'));
+    vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockRejectedValue(new Error('worker 500'));
     vi.spyOn(ActiveMsgClient, 'getRemoteTaskStatus').mockResolvedValue({ state: 'gone' });
 
     const timers = captureStatusPollTimers();
     await runInstantChatStatusCheck();
     timers.restore();
 
-    expect(getInstantChatPending(charId)?.uuid, 'outbox 没读成就不许判死').toBe('uuid-gone-unreadable');
+    expect(getInstantChatPending(charId)?.uuid, '账本没读成就不许判死').toBe('uuid-gone-unreadable');
     const msgs = await DB.getRecentMessagesByCharId(charId, 50);
     expect(msgs.some((m) => m.role === 'system'), '一次失败的读不构成「生成失败」').toBe(false);
     expect(timers.delays, '下一跳还得排上').toContain(INSTANT_CHAT_STATUS_CHECK_INTERVAL_MS);
@@ -2245,6 +2251,49 @@ describe('收件箱处理途中抛错不许吞掉整批（走真库）', () => {
       (await DB.getRecentMessagesByCharId(okCharId, 50)).some((m) => m.role === 'assistant'),
       '同一批里后面那条不该被连累',
     ).toBe(true);
+
+    await ActiveMsgStore.consumeInboxMessages(); // 别把这条留给后面的用例
+  }, 20000);
+
+  // 销账即失忆：云端账本一销，那条就再也拉不回来了。压回收件箱的消息还没处理完，
+  // 这一趟把它一起销掉的话，进程正好在重试前被杀就是**永久丢一条消息**——而这恰恰是
+  // 这次接账本要修的那个病。所以「有着落」的口径必须是「不会再回收件箱」，不是「处理过了」。
+  it('压回收件箱重试的那条不许销账，同批走完的照常销', async () => {
+    const failCharId = 'char-ack-requeue';
+    const okCharId = 'char-ack-settled';
+    await DB.saveCharacter({ id: failCharId, name: '抛错角色' } as any);
+    await DB.saveCharacter({ id: okCharId, name: '正常角色' } as any);
+
+    const base = Date.now() - 8 * 60_000; // 补收口径，跳过拟人慢放
+    const inbox = (charId: string, messageId: string, sentAt: number) => ({
+      messageId,
+      charId,
+      charName: '测试角色',
+      body: '在的，刚看到',
+      messageType: 'text',
+      receivedAt: sentAt,
+      sentAt,
+      metadata: { charId },
+    }) as any;
+    await ActiveMsgStore.saveInboxMessage(inbox(failCharId, 'msg-ack-requeue', base));
+    await ActiveMsgStore.saveInboxMessage(inbox(okCharId, 'msg-ack-settled', base + 1_000));
+
+    const realRecent = DB.getRecentMessagesByCharId.bind(DB);
+    vi.spyOn(DB, 'getRecentMessagesByCharId')
+      .mockImplementation(realRecent as any)
+      .mockRejectedValueOnce(new Error('IndexedDB 连接被占'));
+    const ack = vi.spyOn(ActiveMsgClient, 'ackOutboxMessages').mockResolvedValue(undefined);
+
+    const timers = captureInboxRetryTimer();
+    try {
+      await flushInboxToChat();
+    } finally {
+      timers.restore();
+    }
+
+    const acked = ack.mock.calls.flatMap(([ids]) => ids ?? []);
+    expect(acked, '压回收件箱的那条销了账就再也补不回来了').not.toContain('msg-ack-requeue');
+    expect(acked, '走完流程的那条要销账，不然每趟都被重新捞回来').toContain('msg-ack-settled');
 
     await ActiveMsgStore.consumeInboxMessages(); // 别把这条留给后面的用例
   }, 20000);

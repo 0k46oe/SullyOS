@@ -129,12 +129,25 @@ const VERDICTS: Record<FetchFailureKind, { verdict: string; causes: string }> = 
     },
 };
 
-/** Resource Timing 里那条记录能补两个关键旁证：到底有没有收到响应状态码、传了多少字节。 */
+/**
+ * Resource Timing 里那条记录能补两个关键旁证：到底有没有收到响应状态码、传了多少字节。
+ *
+ * ⚠️ 必须按发起时刻筛。getEntriesByName() 捞的是整个页面生命周期内打过这个地址的**全部**
+ * 记录，而像 /client-state 这种反复请求的端点，timeline 里一直躺着早先成功那次的 200。
+ * 偏偏「连接压根没建立」的失败什么都不会往 timeline 里写——于是不筛的话，越是老用户、
+ * 越是之前一直用得好好的地址，越会拿到一条陈旧的成功记录，并据此打出「对方其实回了 200，
+ * 是被 CORS 拦的」，跟同一条日志里的耗时线索和 no-cors 复检结论正面打架。
+ *
+ * startedAt 用 performance.now() 的基准（跟 entry.startTime 同一条时间轴，不能换成
+ * Date.now()）。取不到就整段不出——宁可少说一句，也不能说反。
+ */
 export const readResourceTimingHint = (
     href: string,
-    perf?: { getEntriesByName?: (name: string, type?: string) => any[] },
+    opts: { startedAt: number; perf?: { getEntriesByName?: (name: string, type?: string) => any[] } },
 ): string => {
-    const target = perf ?? (typeof performance !== 'undefined' ? (performance as any) : undefined);
+    const { startedAt } = opts;
+    if (!Number.isFinite(startedAt)) return '';
+    const target = opts.perf ?? (typeof performance !== 'undefined' ? (performance as any) : undefined);
     if (!target?.getEntriesByName) return '';
     let entries: any[] = [];
     try {
@@ -142,15 +155,29 @@ export const readResourceTimingHint = (
     } catch {
         return '';
     }
-    const entry = entries[entries.length - 1];
+    const entry = entries
+        .filter(item => typeof item?.startTime === 'number' && item.startTime >= startedAt)
+        .pop();
     if (!entry) return 'Resource Timing: 没有这条请求的记录（通常说明连接压根没建立起来，或被扩展在发出前就拦掉了）';
+    // 跨域资源拿不到 Timing-Allow-Origin 授权时，规范要求把 responseStatus、transferSize、
+    // 各阶段时间戳统统置 0。这时候「transferSize=0」的意思是「没授权看」，不是「一个字节都
+    // 没传」——照字面读会得出跟事实相反的结论，所以这些字段整个不印，改成一句说明。
+    // responseStart 是判断有没有授权最稳的探针：它比 responseStatus 老得多，Safari 也有。
+    const timingAllowed = (typeof entry.responseStart === 'number' && entry.responseStart > 0)
+        || (typeof entry.responseStatus === 'number' && entry.responseStatus > 0);
     const parts: string[] = [];
-    if (typeof entry.responseStatus === 'number') parts.push(`responseStatus=${entry.responseStatus}`);
-    if (typeof entry.transferSize === 'number') parts.push(`transferSize=${entry.transferSize}`);
+    if (timingAllowed) {
+        if (typeof entry.responseStatus === 'number' && entry.responseStatus > 0) {
+            parts.push(`responseStatus=${entry.responseStatus}`);
+        }
+        if (typeof entry.transferSize === 'number') parts.push(`transferSize=${entry.transferSize}`);
+    }
     if (typeof entry.duration === 'number') parts.push(`duration=${Math.round(entry.duration)}ms`);
     let note = '';
-    if (typeof entry.responseStatus === 'number' && entry.responseStatus > 0) {
+    if (timingAllowed && typeof entry.responseStatus === 'number' && entry.responseStatus > 0) {
         note = ` → 对方其实回了 HTTP ${entry.responseStatus}，是响应被 CORS 拦掉的，不是网络不通`;
+    } else if (!timingAllowed) {
+        note = '（对方没给 Timing-Allow-Origin，状态码和字节数看不到，只有耗时可信）';
     }
     return `Resource Timing: ${parts.join(', ') || '有记录'}${note}`;
 };
@@ -179,7 +206,7 @@ export const readStallHint = (durationMs?: number, kind?: FetchFailureKind): str
  */
 export const buildFetchFailureDetail = (
     ctx: FetchFailureContext,
-    opts?: { perf?: { getEntriesByName?: (name: string, type?: string) => any[] } },
+    opts: { startedAt: number; perf?: { getEntriesByName?: (name: string, type?: string) => any[] } },
 ): string => {
     const { name, message } = readError(ctx.error);
     const kind = classifyFetchFailure(ctx);
@@ -199,7 +226,7 @@ export const buildFetchFailureDetail = (
     }
     if (pageOrigin) lines.push(`本页来源: ${pageOrigin}`);
     lines.push(`浏览器联网状态: ${online === false ? '离线' : '在线'}`);
-    const timing = readResourceTimingHint(target.href, opts?.perf);
+    const timing = readResourceTimingHint(target.href, { startedAt: opts.startedAt, perf: opts.perf });
     if (timing) lines.push(timing);
     const stall = readStallHint(ctx.durationMs, kind);
     if (stall) lines.push(stall);

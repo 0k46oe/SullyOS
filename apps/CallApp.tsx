@@ -690,6 +690,11 @@ const CallApp: React.FC = () => {
     addToast('已移除假摄像头图片', 'success');
   };
   const selectUserCameraMode = (nextMode: UserCameraMode) => {
+    trackEvent('选择用户摄像头模式', {
+      模式: nextMode === 'off'
+        ? '关闭'
+        : nextMode === 'fake' ? '假摄像头' : nextMode === 'emotion' ? '本地情绪' : '每轮快照',
+    });
     if (nextMode === 'off') {
       stopUserCamera();
       setShowUserCameraModePicker(false);
@@ -1427,6 +1432,7 @@ const CallApp: React.FC = () => {
       });
       await deleteBlobRef(snapshot.ref);
     }
+    trackEvent('淘汰旧视频通话快照');
     const expiredIds = new Set(expired.map(snapshot => snapshot.messageId));
     setBubbles(previous => previous.map(bubble => (
       bubble.dbId && expiredIds.has(bubble.dbId)
@@ -1520,6 +1526,7 @@ const CallApp: React.FC = () => {
         metadata: { source: 'call-end-popup', callSessionId: currentSessionId, ...payload },
       });
       await loadCallRecords(selectedChar.id);
+      trackEvent('结束一通通话', { 模式: callMode === 'video' ? '视频' : '语音' });
       // 挂断这一下最要紧：用户多半接着就把 App 关了，得把这最后一条也打脏——
       // 打脏即传，微任务内就会冲刷上传。
       markCallTurnDirty();
@@ -2075,6 +2082,7 @@ ${sentencePlan}`;
     if (userCameraSnapshotForTurn) {
       try {
         newSnapshotRef = await putImageBlob(dataUrlToBlob(userCameraSnapshotForTurn));
+        trackEvent('保存视频通话单帧快照');
       } catch (error) {
         console.warn('[camera-snapshot] failed to save the local call-record frame:', error);
         addToast('快照仍会交给角色，但未能写入本地通话记录', 'info');
