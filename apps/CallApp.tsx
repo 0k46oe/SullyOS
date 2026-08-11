@@ -1478,6 +1478,7 @@ const CallApp: React.FC = () => {
     setViewMode('in-call');
     setCallStartedAt(Date.now());
     setCallState('listening');
+    trackEvent('发起通话');
     if (callMode !== 'video' || cameraMode === 'off') {
       stopUserCamera();
       return;
@@ -2319,6 +2320,7 @@ ${sentencePlan}`;
     try {
       setRerollingBubbleId(bubble.id);
       setCallState('thinking');
+      trackEvent('重掷角色的通话台词');
       const rerollReply = prepareCallAssistantReply(
         await requestAssistantReply(prevUser.text, bubble.dbId),
         callMode === 'video' && selectedChar?.videoCallPerformanceQuality !== 'high',
@@ -3202,7 +3204,7 @@ ${sentencePlan}`;
             </div>
             {bubble.role === 'assistant' && (bubble.audioUrl || isLatest) && (
               <div className="mt-2 flex gap-2 flex-wrap">
-                {bubble.audioUrl && <button onClick={() => playAudio(bubble.audioUrl, bubble.performanceTimeline, estimateSpeechMs(bubble.text))} className="text-xs px-2.5 py-1 rounded-full bg-white/8 border border-white/15 text-white/70 transition hover:bg-white/15">重播语音</button>}
+                {bubble.audioUrl && <button onClick={() => { playAudio(bubble.audioUrl, bubble.performanceTimeline, estimateSpeechMs(bubble.text)); trackEvent('重播一条通话语音'); }} className="text-xs px-2.5 py-1 rounded-full bg-white/8 border border-white/15 text-white/70 transition hover:bg-white/15">重播语音</button>}
                 {bubble.audioUrl && <button onClick={() => handleDownloadCallAudio(bubble.audioUrl, bubble.timestamp)} className="text-xs px-2.5 py-1 rounded-full bg-white/8 border border-white/15 text-white/70 transition hover:bg-white/15">下载</button>}
                 {isLatest && <button onClick={() => handleRerollAssistant(bubble)} disabled={!!rerollingBubbleId} className="text-xs px-2.5 py-1 rounded-full bg-white/8 border border-white/15 text-white/70 transition hover:bg-white/15 disabled:opacity-40">{rerollingBubbleId === bubble.id ? '换一种说法…' : '换个说法'}</button>}
               </div>
@@ -3368,7 +3370,7 @@ ${sentencePlan}`;
             <p className="text-xs text-white/40">选择后，角色会用中文回复，语音则用对应语种朗读</p>
             <div className="flex flex-wrap gap-2 pt-1">
               {VOICE_LANGUAGE_OPTIONS.map(opt => (
-                <button key={opt.value} onClick={() => { setVoiceLang(opt.value); if (selectedChar) updateCharacter(selectedChar.id, { callVoiceLang: opt.value }); setShowLangPicker(false); }}
+                <button key={opt.value} onClick={() => { setVoiceLang(opt.value); if (selectedChar) updateCharacter(selectedChar.id, { callVoiceLang: opt.value }); setShowLangPicker(false); trackEvent('设置通话语音语种', { lang: opt.value }); }}
                   className={`text-xs px-3 py-2 rounded-full font-medium transition-colors text-white ${voiceLang === opt.value ? 'keep-white' : ''}`}
                   style={voiceLang === opt.value ? { backgroundColor: accentColor } : lightTheme ? { background: 'rgba(38,34,57,0.08)' } : { background: 'rgba(255,255,255,0.1)' }}>
                   {opt.label}

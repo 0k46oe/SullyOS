@@ -2487,6 +2487,17 @@ export interface CompanionTouchSettings {
   voiceGeneratedCount?: number;
   generatedAt?: number;
 }
+
+export type MemoryPalaceWaterlinePreset = 'online' | 'balanced' | 'offline' | 'custom';
+
+export interface MemoryPalaceWaterlineConfig {
+  preset: MemoryPalaceWaterlinePreset;
+  /** 自定义模式保留在热区内的消息数量。 */
+  hotZoneSize?: number;
+  /** 自定义模式触发下一轮整理前允许积累的缓冲消息数量。 */
+  bufferThreshold?: number;
+}
+
 export interface CharacterProfile {
   id: string;
   name: string;
