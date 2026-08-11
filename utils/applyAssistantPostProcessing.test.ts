@@ -318,6 +318,65 @@ describe('renderAndPersist XHS mimicked-card fallback', () => {
         expect(text).not.toContain('\u6807\u9898:');
         expect(text).not.toContain('\u4e92\u52a8:');
     }, 20000);
+
+    it('recovers consecutive cards when the next marker is glued to the previous description', async () => {
+        const charId = `c-xhs-mimic-glued-${Date.now()}`;
+        const ctx = makeCtx(charId, []);
+        ctx.instantRender = true;
+        ctx.lastXhsNotesRef = {
+            current: [
+                {
+                    noteId: 'note-doll',
+                    title: '只需发照片定制人偶可撕拉盲盒',
+                    desc: '完整盲盒简介',
+                    likes: 11,
+                    collects: 0,
+                    commentCount: 0,
+                    shareCount: 0,
+                    author: 'StoyTuned小铺',
+                    authorId: 'author-doll',
+                    coverUrl: 'https://example.test/doll.jpg',
+                },
+                {
+                    noteId: 'note-couple-app',
+                    title: '情侣必备的治愈系app',
+                    desc: '完整应用简介',
+                    likes: 991,
+                    collects: 0,
+                    commentCount: 0,
+                    shareCount: 0,
+                    author: '小猫女士',
+                    authorId: 'author-cat',
+                    coverUrl: 'https://example.test/couple.jpg',
+                },
+            ],
+        };
+        const raw = [
+            '[你分享了小红书笔记]',
+            '标题: 只需发照片定制人偶可撕拉盲盒',
+            '作者: StoyTuned小铺',
+            '互动: 11赞 0收藏 0评论 0分享',
+            '简介: 无[你分享了小红书笔记]',
+            '标题: 情侣必备的治愈系app',
+            '作者: 小猫女士',
+            '互动: 991赞 0收藏 0评论 0分享',
+            '简介: 无',
+        ].join('\n');
+
+        await applyAssistantPostProcessing(raw, ctx);
+
+        const msgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        const cards = msgs.filter(m => m.type === 'xhs_card');
+        const leakedText = msgs.filter(m => m.type === 'text').map(m => m.content).join('\n');
+        expect(cards).toHaveLength(2);
+        expect(cards.map(card => card.metadata?.xhsNote?.noteId)).toEqual(['note-doll', 'note-couple-app']);
+        expect(cards.map(card => card.metadata?.xhsNote?.coverUrl)).toEqual([
+            'https://example.test/doll.jpg',
+            'https://example.test/couple.jpg',
+        ]);
+        expect(leakedText).not.toContain('分享了小红书笔记');
+        expect(leakedText).not.toContain('991赞');
+    }, 20000);
 });
 
 // push 路径上 LIFE / NEWS_CARD 的副作用改走 worker classifier 的 directive 通道

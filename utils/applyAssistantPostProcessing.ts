@@ -79,7 +79,15 @@ const MIMICKED_XHS_SHARE_RE = /(^|\r?\n)[ \t]*\[[^\]\r\n]{0,32}分享了小红�
 
 const extractMimickedXhsShares = (content: string): { cleanedContent: string; shares: MimickedXhsShareBlock[] } => {
     const shares: MimickedXhsShareBlock[] = [];
-    const cleanedContent = content.replace(
+    // Some models glue the next history-shaped card directly after the previous
+    // description (`简介: 无[你分享了小红书笔记]`). Put the marker back on its own
+    // line before scanning so every card is recovered instead of leaking the
+    // second card as five ordinary chat bubbles.
+    const normalizedBlocks = content.replace(
+        /([^\r\n])(\[[^\]\r\n]{0,32}分享了小红书笔记\])/gu,
+        '$1\n$2',
+    );
+    const cleanedContent = normalizedBlocks.replace(
         MIMICKED_XHS_SHARE_RE,
         (_match, leadingBreak: string, title: string, author: string, interactionText: string, desc: string) => {
             shares.push({
@@ -91,7 +99,7 @@ const extractMimickedXhsShares = (content: string): { cleanedContent: string; sh
             return leadingBreak || '';
         },
     ).replace(/\n{3,}/g, '\n\n').trim();
-    return { cleanedContent, shares };
+    return { cleanedContent: shares.length > 0 ? cleanedContent : content, shares };
 };
 
 const normalizeXhsCardKey = (value: string): string => String(value || '')

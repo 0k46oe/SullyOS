@@ -12,11 +12,12 @@ describe('CompanionHome touch request boundaries', () => {
     expect(source).not.toContain('requestAvatarTouchReply');
     expect(source).not.toContain('DB.saveMessage');
   });
-  it('makes one touch-pack model attempt with no automatic repair or retry', () => {
+  it('makes one touch-pack model attempt without retry or an artificial 60s cutoff', () => {
     const touchSource = readFileSync(path.resolve(__dirname, './avatarTouch.ts'), 'utf8');
 
     expect(touchSource).toContain("purpose: '一次性生成桌面触摸反馈包（不重试）'");
-    expect(touchSource).toContain('}, 0, 60_000, {');
+    expect(touchSource).toContain('}, 0, 0, {');
+    expect(touchSource).not.toContain('}, 0, 60_000, {');
     expect(touchSource).not.toContain('自动补全缺失部位');
     expect(touchSource).not.toContain('requestForZones');
     expect(touchSource).not.toContain('repairData');
