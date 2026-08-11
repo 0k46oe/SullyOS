@@ -870,7 +870,13 @@ export const requestAvatarTouchReactionPack = async (options: {
       max_tokens: 4800,
       stream: false,
     }),
-  }, 0, 60_000, {
+  // A complete pack can contain dozens of lines plus translations and
+  // performance data.  The previous 60s wall-clock timeout also kept ticking
+  // while a healthy streamed response was arriving, so slower providers were
+  // locally aborted at almost exactly 60s. Keep this a single model attempt,
+  // but align its timeout policy with normal chat instead of killing valid
+  // long generations before the optional TTS phase has even started.
+  }, 0, 0, {
     appName: '触感陪伴',
     charId: character.id,
     charName: character.name,

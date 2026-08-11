@@ -3002,10 +3002,10 @@ ${sentencePlan}`;
   const latestCallBubble = bubbles[bubbles.length - 1];
   const compactVideoTranscript = callMode === 'video' && videoCallLayout === 'stage' && !videoTranscriptExpanded;
   const videoStageSize = videoCallLayout === 'stage'
-    ? 'min-h-[260px]'
+    ? 'min-h-0'
     : videoCallLayout === 'mini'
-      ? 'h-[clamp(170px,26vh,230px)] min-h-[170px]'
-      : 'h-[clamp(215px,34vh,300px)] min-h-[215px]';
+      ? 'h-[clamp(140px,26dvh,230px)] min-h-0'
+      : 'h-[clamp(170px,34dvh,300px)] min-h-0';
   const callControlSize = callMode === 'video' ? 'h-10 w-10' : 'h-14 w-14';
   return (
     <div
@@ -3042,11 +3042,11 @@ ${sentencePlan}`;
             style={{ top: p.top, left: p.left, width: p.s, height: p.s, opacity: 0.5, animationDelay: `${i * 0.4}s`, boxShadow: `0 0 6px ${accentColor}` }} />
         ))}
       </div>
-      <div className="relative z-10 flex flex-col h-full">
+      <div className="relative z-10 flex h-full min-h-0 flex-col overflow-hidden">
         {/* 键盘避让不在这里做 paddingBottom 兜底：交给全局 interactive-widget=resizes-content
             与 iOS 全屏 PWA 的 app 高度跟随可视区（见 utils/iosStandalone.ts），和聊天等其它 App 一致。 */}
       {/* top channel bar */}
-      <div className="relative px-5" style={{ paddingTop: 'max(2.25rem, var(--safe-top))' }}>
+      <div className="relative shrink-0 px-5" style={{ paddingTop: 'max(2.25rem, var(--safe-top))' }}>
         <div className="absolute left-5 leading-tight" style={{ top: 'max(2.25rem, var(--safe-top))' }}>
           <div className="text-[9px] tracking-[0.28em] text-white/45 font-semibold">{callMode === 'video' ? 'SULLYOS · VIDEO DATE' : 'PRIVATE CHANNEL'}</div>
           <div className="mt-1.5 flex items-center gap-1.5 text-[8px] tracking-[0.22em] text-white/35">
@@ -3354,7 +3354,7 @@ ${sentencePlan}`;
       </div>
       )}
       {showInputPanel && (
-        <div className={callMode === 'video' ? 'px-3 pb-1.5' : 'px-4 pb-2'}>
+        <div className={`shrink-0 ${callMode === 'video' ? 'px-3 pb-1.5' : 'px-4 pb-2'}`}>
           <div className={`${callMode === 'video' ? 'rounded-[1.15rem] p-1.5' : 'rounded-2xl p-2'} border border-white/12 bg-black/30 backdrop-blur-md flex gap-2 items-center`} style={{ boxShadow: `inset 0 0 20px ${accentColor}1f` }}>
             {sttSupported && (
               <button
@@ -3380,7 +3380,7 @@ ${sentencePlan}`;
           {isListening && <div className="text-[10px] text-white/40 mt-1 px-1 animate-pulse">正在聆听，点麦克风结束</div>}
         </div>
       )}
-      <div className={`${callMode === 'video' ? 'px-3 pb-2 pt-0.5' : 'px-7 pb-7 pt-1.5'}`} data-testid={callMode === 'video' ? 'video-call-compact-controls' : undefined}>
+      <div className={`shrink-0 ${callMode === 'video' ? 'px-3 pb-2 pt-0.5' : 'px-7 pb-2 pt-1.5'}`} data-testid={callMode === 'video' ? 'video-call-compact-controls' : undefined}>
         <div
           className={`${callMode === 'video' ? 'grid grid-cols-5 items-center gap-1 rounded-[1.35rem] border border-white/12 bg-black/30 px-1.5 py-1.5 backdrop-blur-xl' : 'flex items-start justify-between'}`}
           style={callMode === 'video' ? { boxShadow: `inset 0 1px 0 ${accentColor}32, 0 14px 32px rgba(0,0,0,.2)` } : undefined}

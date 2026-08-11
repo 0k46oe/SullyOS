@@ -66,7 +66,11 @@ describe('CallApp runtime references', () => {
     expect(source).toContain('data-testid="video-call-subtitle"');
     expect(source).toContain('data-testid={callMode === \'video\' ? \'video-call-compact-controls\' : undefined}');
     expect(source).toContain("videoCallLayout === 'stage' ? 'flex-1 min-h-0' : 'shrink-0'");
-    expect(source).toContain("? 'min-h-[260px]'");
+    expect(source).toContain("? 'min-h-0'");
+    expect(source).not.toContain('min-h-[260px]');
+    expect(source).toContain('relative z-10 flex h-full min-h-0 flex-col overflow-hidden');
+    expect(source).toContain("'px-7 pb-2 pt-1.5'");
+    expect(source).not.toContain('px-7 pb-7');
     expect(source).toContain("callMode === 'video' ? 'h-10 w-10'");
     expect(source).toContain("videoCallLayout === 'stage'");
     expect(source).toContain('setVideoTranscriptExpanded(true)');
@@ -176,6 +180,24 @@ describe('CallApp runtime references', () => {
     expect(guideSource).toContain('静态机位永远不随消息发送');
     expect(stageSource).toContain('testId="video-call-static-portrait-stage"');
     expect(stageSource).toContain('staticAvatarActive ? `static-${staticAvatarSource}`');
+  });
+
+  it('stores static companion imports as the original File in blob_assets from both entry points', () => {
+    const callSource = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
+    const appearanceSource = readFileSync(path.resolve(__dirname, '../apps/Appearance.tsx'), 'utf8');
+    const callImport = callSource.slice(
+      callSource.indexOf('const chooseStaticAvatarImage = () =>'),
+      callSource.indexOf('const chooseVideoAvatarSource ='),
+    );
+    const appearanceImport = appearanceSource.slice(
+      appearanceSource.indexOf('const handleCompanionPortraitUpload = async'),
+      appearanceSource.indexOf('const chooseCompanionOutfit ='),
+    );
+
+    for (const importer of [callImport, appearanceImport]) {
+      expect(importer).toContain('const imageRef = await putImageBlob(file)');
+      expect(importer).not.toMatch(/processImage(?:ToBlob)?\(|FileReader|canvas|toDataURL|toBlob/);
+    }
   });
 
   it('requires explicit acknowledgement before saving a VRM test import', () => {
