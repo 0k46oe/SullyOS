@@ -45,7 +45,7 @@ import { getLastRealUserMessageAt } from '../utils/amsg2ExpireGuard';
 import { getPendingTasks, hasActiveAiTask, isAmsg2EnabledForChar } from '../utils/amsg2Tasks';
 import { buildAmsg2NoticesText, buildAmsg2TaskContextText, collectAmsg2TaskContext } from '../utils/amsg2TaskContext';
 import { resolveCharTimeZone } from '../utils/timezone';
-import { getInstantChatPending, resolveInstantChatReadiness, sendInstantChatTurn, stageInstantChatExpiredNotices } from '../utils/amsgInstantChat';
+import { announceInstantChatRoute, getInstantChatPending, resolveInstantChatReadiness, sendInstantChatTurn, stageInstantChatExpiredNotices } from '../utils/amsgInstantChat';
 // worker 模块的常量叶子（零运行时依赖，前端引它不带进 worker 环境）：
 // 云端 fire 的总时长上限，安全网超时从它推导，worker 调预算时前端自动跟上。
 import { INSTANT_TOTAL_TIMEOUT_MS } from '../worker/amsg/src/instantChat';
@@ -873,16 +873,21 @@ export const useChatAI = ({
                     charId: char.id,
                     reason: skipReason,
                 });
-            } else if (instantChatReadiness.reason === 'worker-outdated') {
-                // 用户把开关开着，是我们判定那台 Worker 跑不动才让位给本地生成的
+            } else if (instantChatReadiness.reason === 'worker-outdated' || instantChatReadiness.reason === 'worker-unreachable') {
+                // 用户把开关开着，是我们判定这一轮上不了云才让位给本地生成的
                 // （见 resolveInstantChatReadiness 的同名门）。上面那条 trace 的条件
                 // （instantChatOn）在这里天然为假，所以单独留一条：这一档比别的更需要
                 // 查得到——用户的主观意愿是「上云」，实际走的却是本地，不留痕就又是一次
                 // 静默分流。拦不拦不用这里管，readiness 已经说了 not ready，
                 // 下面照常走本地生成那条路。
+                //
+                // 两档分开记：worker-outdated 是「问到了、那台 Worker 确实跑不动」（该去更新），
+                // worker-unreachable 是「这一刻够不着云端」（多半是网络，会自己好）。
                 appendInstantTraceEntry({
                     ts: new Date().toISOString(),
-                    event: 'instant-chat-worker-outdated',
+                    event: instantChatReadiness.reason === 'worker-outdated'
+                        ? 'instant-chat-worker-outdated'
+                        : 'instant-chat-worker-unreachable',
                     charId: char.id,
                 });
             } else if (instantChatReadiness.reason === 'config-unreadable') {
@@ -914,6 +919,14 @@ export const useChatAI = ({
                 }
                 console.warn('[AmsgInstantChat] 全局配置读不出来（开没开都不知道），但这一轮本就不走即时对话，照原路继续');
             }
+
+            // 这一轮到底走了哪条路，播给输入框上方那条小提示。**每轮都发**，包括走成了云端
+            // 那一轮（reason=null，提示自己收起来）——只在出问题时发的话，用户会一直盯着一条
+            // 早就过期的提示，猜不出来「现在到底恢复了没有」。
+            announceInstantChatRoute({
+                charId: char.id,
+                reason: instantChatRoute ? null : (instantChatReadiness.reason ?? null),
+            });
 
             const payload = await stageT('payload', buildChatRequestPayload({
                 char: charForGen, userProfile, groups, emojis, categories,
