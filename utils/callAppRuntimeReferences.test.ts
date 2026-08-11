@@ -33,7 +33,7 @@ describe('CallApp runtime references', () => {
     const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
 
     expect(source).toContain("onFinal: (t) => setDraftInput(t)");
-    expect(source).toContain("await requestAssistantReply(input, userDbId, pendingTouchesForTurn, true)");
+    expect(source).toContain("await requestAssistantReply(input, userDbId, pendingTouchesForTurn, true, userCameraSnapshotForTurn)");
     expect(source).toContain("{sendingBusy ? '…' : '发送'}");
     expect(source).toMatch(/const beginSelectedCall[\s\S]*?setViewMode\('in-call'\);\s+setCallStartedAt\(Date\.now\(\)\);\s+setCallState\('listening'\);/);
     expect(source).not.toContain('fireIdleNudge');
@@ -114,7 +114,11 @@ describe('CallApp runtime references', () => {
     expect(source).toContain('attachSnapshotToLatestUserMessage(messages, userCameraSnapshot)');
     expect(source).toContain('userCameraSnapshot ? 0 : 2');
     expect(source).toContain('isVisionInputUnsupportedError(error)');
-    expect(source).toContain('await requestAssistantReply(input, userDbId, pendingTouchesForTurn, true)');
+    expect(source).toContain('await requestAssistantReply(input, userDbId, pendingTouchesForTurn, true, userCameraSnapshotForTurn)');
+    expect(source).toContain('await pruneCallSnapshots(selectedChar.id, currentSessionId)');
+    expect(source).toContain('cameraSnapshotExpired: true');
+    expect(source).toContain('<CallSnapshotImage imageRef={item.cameraSnapshotRef} expired={item.cameraSnapshotExpired} />');
+    expect(source).toContain('for (const snapshotRef of snapshotRefs) await deleteBlobRef(snapshotRef)');
     expect(source).toContain('data-testid="user-camera-emotion-readout"');
     expect(source).toContain('className="absolute right-4 top-4 z-30"');
     expect(source).toContain('data-testid="user-camera-preview-size-picker"');
@@ -126,6 +130,15 @@ describe('CallApp runtime references', () => {
     expect(source).toContain("const [userCameraMode, setUserCameraMode] = useState<UserCameraMode>('off')");
     expect(source).toContain('这张图只用于画面，不会发送给角色');
     expect(source).toContain("userCameraStreamRef.current?.getTracks().forEach(track => track.stop())");
+  });
+
+  it('backs retained call snapshots up as media while text-only exports keep [图片]', () => {
+    const exportSource = readFileSync(path.resolve(__dirname, '../context/OSContext.tsx'), 'utf8');
+
+    expect(exportSource).toContain("storeName === 'characters' || storeName === 'cc_custom_parts' || storeName === 'messages'");
+    expect(exportSource).toContain("metadata.cameraSnapshotExpired = true");
+    expect(exportSource).toContain("|| !!m.metadata?.cameraSnapshotRef");
+    expect(exportSource).toContain("companionAvatar: c.companionAvatar");
   });
 
   it('guides model import, framing, wardrobe and camera privacy before the first video call', () => {

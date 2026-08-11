@@ -33,7 +33,7 @@ const CAMERA_OPTIONS: Array<{
   { id: 'off', index: '0', title: '不打开', detail: '默认与最私密的选择', data: '不采集 · 不注入' },
   { id: 'fake', index: '1', title: '静态机位', detail: '放一张图，只用于通话画面和截图', data: '图片不发送' },
   { id: 'emotion', index: '2', title: '本地情绪', detail: '本机识别表情，用文字轻量矫正回复', data: '仅注入情绪文字' },
-  { id: 'snapshot', index: '3', title: '每轮快照', detail: '点击发送时截取当前一帧交给视觉模型', data: '每轮发送一帧' },
+  { id: 'snapshot', index: '3', title: '每轮快照', detail: '点击发送时截一帧；本地记录只保留最近 3 轮', data: '旧图显示 [图片]' },
 ];
 
 const CallSetupGuide: React.FC<CallSetupGuideProps> = ({
@@ -188,7 +188,7 @@ const CallSetupGuide: React.FC<CallSetupGuideProps> = ({
                 );
               })}
               <p className="border-t px-5 py-3 text-[10px] leading-5" style={{ borderColor: line, color: muted }}>
-                本地情绪只注入“识别到的情绪”文字，不上传摄像头画面；每轮快照才会在你点击发送时截取一帧。静态机位永远不随消息发送。
+                本地情绪只注入“识别到的情绪”文字，不上传摄像头画面；每轮快照会在点击发送时截取一帧，并仅在本机记录保留最近 3 轮。静态机位永远不随消息发送。
               </p>
             </section>
           )}

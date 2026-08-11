@@ -95,6 +95,22 @@ describe('角色触碰互动', () => {
     expect(prompt).not.toContain('表演人格');
   });
 
+  it('静态单图只要求台词，见面立绘只要求五类表情', () => {
+    const textPrompt = buildAvatarTouchReactionPackPrompt(
+      'CONTEXT', 'Sully', '条条', ['head'], [], 3, '', 'text',
+    );
+    expect(textPrompt).toContain('只有一张 PNG / GIF');
+    expect(textPrompt).toContain('不要输出 performance');
+    expect(textPrompt).not.toContain('模型专属动作白名单');
+
+    const expressionPrompt = buildAvatarTouchReactionPackPrompt(
+      'CONTEXT', 'Sully', '条条', ['face'], [], 3, '', 'expression',
+    );
+    expect(expressionPrompt).toContain('normal / happy / angry / sad / shy');
+    expect(expressionPrompt).toContain('只需要为每句选择 emotion');
+    expect(expressionPrompt).not.toContain('intensity 使用 0.68-1.0');
+  });
+
   it('解析台词和演出指令，并丢弃白名单外动作', () => {
     const allowed = parseAvatarTouchReply({
       content: '[[AVATAR: emotion=happy; gesture=tilt; model_action=wave-special]]\n别把我的头发揉乱啦。',

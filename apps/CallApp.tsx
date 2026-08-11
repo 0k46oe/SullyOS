@@ -72,7 +72,7 @@ import {
   type AvatarTouchHit,
   type AvatarTouchRecord,
 } from '../utils/avatarTouch';
-import { deleteBlobRef, isBlobRef, putImageBlob, useBlobRefUrl } from '../utils/blobRef';
+import { dataUrlToBlob, deleteBlobRef, isBlobRef, putImageBlob, useBlobRefUrl } from '../utils/blobRef';
 import { CALL_LIGHT_THEME_CSS } from '../components/call/callLightTheme';
 import AvatarTouchFeedback, { type AvatarTouchEffect } from '../components/call/AvatarTouchFeedback';
 import { isBuiltinSullyLive2D, setBuiltinSullyLive2DQuality, type BuiltinSullyLive2DQuality } from '../utils/builtinSullyLive2D';
@@ -93,6 +93,7 @@ import { markAmsgStateDirty } from '../utils/amsgStateSync';
 import { trackEvent } from '../utils/analytics';
 import { fetchBlobForShare, shareOrDownloadBlob } from '../utils/shareExport';
 import { getPendingReplyText } from '../utils/pendingReply';
+import { findExpiredCallSnapshots } from '../utils/callSnapshotRetention';
 type CallState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | 'ended' | 'error';
 type CallMode = 'voice' | 'video';
 type VideoCallLayout = 'stage' | 'story' | 'mini';
@@ -109,6 +110,8 @@ type CallBubble = {
   thinkingChain?: string;
   performance?: AvatarPerformanceDirection;
   performanceTimeline?: AvatarPerformanceCue[];
+  cameraSnapshotRef?: string;
+  cameraSnapshotExpired?: boolean;
 };
 type CallRecord = {
   id: string;
@@ -117,6 +120,7 @@ type CallRecord = {
   sessionId: string;
   createdAt: string;
   durationSec: number;
+  mode?: CallMode;
   transcript: CallBubble[];
 };
 type PendingVRoidImport = {
@@ -163,6 +167,19 @@ const buildMiniMaxErrorMessage = (rawMessage: string, traceId?: string): string 
 const formatTime = () => new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 const formatDuration = (seconds: number) => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 const formatTimeByTs = (ts: number) => new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+const CallSnapshotImage: React.FC<{ imageRef?: string; expired?: boolean; compact?: boolean }> = ({ imageRef, expired, compact = false }) => {
+  const imageUrl = useBlobRefUrl(imageRef);
+  if (!imageUrl) {
+    return expired ? <div className="mt-1.5 text-[11px] text-white/38">[图片]</div> : null;
+  }
+  return (
+    <img
+      src={imageUrl}
+      alt="本轮视频通话快照"
+      className={`${compact ? 'ml-auto max-h-28 max-w-[9rem]' : 'max-h-52 max-w-full'} mt-2 rounded-xl border border-white/12 object-cover`}
+    />
+  );
+};
 const summarizeKeepsakeLine = (transcript: CallBubble[], charName: string) => {
   const assistantLine = [...transcript].reverse().find(item => item.role === 'assistant' && item.text.trim());
   if (!assistantLine) return `这通电话我会悄悄收藏，下次也记得来找我。 —— ${charName}`;
@@ -1349,6 +1366,11 @@ const CallApp: React.FC = () => {
     const callMsgs = all
       .filter(m => m.metadata?.source === 'call' && m.metadata?.callSessionId)
       .sort((a, b) => a.timestamp - b.timestamp);
+    const callEnds = new Map<string, Message>();
+    all.forEach(message => {
+      if (message.metadata?.source !== 'call-end-popup' || !message.metadata?.callSessionId) return;
+      callEnds.set(String(message.metadata.callSessionId), message);
+    });
     const grouped = new Map<string, Message[]>();
     callMsgs.forEach(m => {
       const sid = String(m.metadata?.callSessionId);
@@ -1359,13 +1381,20 @@ const CallApp: React.FC = () => {
     const records: CallRecord[] = Array.from(grouped.entries()).map(([sessionId, msgs]) => {
       const start = msgs[0]?.timestamp || Date.now();
       const end = msgs[msgs.length - 1]?.timestamp || start;
+      const endMarker = callEnds.get(sessionId);
+      const savedDuration = Number(endMarker?.metadata?.durationSec);
+      const savedMode = endMarker?.metadata?.callMode
+        || msgs.find(message => message.metadata?.callMode)?.metadata?.callMode;
       return {
         id: sessionId,
         sessionId,
         characterId: charId,
         characterName: selectedChar?.name || '未选择角色',
         createdAt: new Date(start).toLocaleString('zh-CN'),
-        durationSec: Math.max(1, Math.floor((end - start) / 1000)),
+        durationSec: Number.isFinite(savedDuration)
+          ? Math.max(1, Math.floor(savedDuration))
+          : Math.max(1, Math.floor((end - start) / 1000)),
+        mode: savedMode === 'voice' || savedMode === 'video' ? savedMode : undefined,
         transcript: msgs.map(m => ({
           id: `db-${m.id}`,
           dbId: m.id,
@@ -1375,12 +1404,36 @@ const CallApp: React.FC = () => {
           thinkingChain: typeof m.metadata?.thinkingChain === 'string' ? m.metadata.thinkingChain : undefined,
           performance: m.metadata?.avatarPerformance as AvatarPerformanceDirection | undefined,
           performanceTimeline: m.metadata?.avatarPerformanceCues as AvatarPerformanceCue[] | undefined,
+          cameraSnapshotRef: typeof m.metadata?.cameraSnapshotRef === 'string' && m.metadata.cameraSnapshotRef
+            ? m.metadata.cameraSnapshotRef
+            : undefined,
+          cameraSnapshotExpired: m.metadata?.cameraSnapshotExpired === true,
           time: formatTimeByTs(m.timestamp),
           timestamp: m.timestamp,
         })),
       };
     }).sort((a, b) => (b.transcript[b.transcript.length - 1]?.timestamp || 0) - (a.transcript[a.transcript.length - 1]?.timestamp || 0));
     setCallRecords(records);
+  };
+  const pruneCallSnapshots = async (charId: string, sessionId: string) => {
+    const all = await DB.getMessagesByCharId(charId, true);
+    const expired = findExpiredCallSnapshots(all, sessionId);
+    if (!expired.length) return;
+    for (const snapshot of expired) {
+      await DB.updateMessageMetadata(snapshot.messageId, (previous: any) => {
+        const next = { ...(previous || {}), cameraSnapshotExpired: true };
+        delete next.cameraSnapshotRef;
+        return next;
+      });
+      await deleteBlobRef(snapshot.ref);
+    }
+    const expiredIds = new Set(expired.map(snapshot => snapshot.messageId));
+    setBubbles(previous => previous.map(bubble => (
+      bubble.dbId && expiredIds.has(bubble.dbId)
+        ? { ...bubble, cameraSnapshotRef: undefined, cameraSnapshotExpired: true }
+        : bubble
+    )));
+    markCallTurnDirty();
   };
   const resetCurrentCall = () => {
     revokeSessionBlobs();
@@ -1456,6 +1509,7 @@ const CallApp: React.FC = () => {
         durationSec: elapsedSeconds,
         turnCount: userTurns,
         keepsakeLine,
+        callMode,
         endedAt: Date.now(),
       };
       await DB.saveMessage({
@@ -1695,6 +1749,7 @@ ${sentencePlan}`;
     skipDbId?: number,
     pendingTouches: AvatarTouchRecord[] = [],
     includeUserCameraContext = false,
+    userCameraSnapshotForTurn?: string,
   ): Promise<ParsedCallReply> => {
     const baseUrl = apiConfig.baseUrl?.replace(/\/+$/, '');
     if (!baseUrl) throw new Error('请先在设置里配置聊天 API URL');
@@ -1734,9 +1789,9 @@ ${sentencePlan}`;
     const userCameraSnapshot = includeUserCameraContext
       && callMode === 'video'
       && userCameraMode === 'snapshot'
-      ? captureUserCameraSnapshotContext()
+      ? (userCameraSnapshotForTurn ?? captureUserCameraSnapshotContext())
       : '';
-    if (includeUserCameraContext && callMode === 'video' && userCameraMode === 'snapshot' && !userCameraSnapshot) {
+    if (includeUserCameraContext && callMode === 'video' && userCameraMode === 'snapshot' && !userCameraSnapshot && userCameraSnapshotForTurn === undefined) {
       addToast('摄像头画面还没准备好，本轮已只发送文字', 'info');
     }
     const baseSystemPrompt = [
@@ -2010,12 +2065,38 @@ ${sentencePlan}`;
       ? latestBubble
       : null;
     const isRetry = !!retryBubble;
+    const userCameraSnapshotForTurn = callMode === 'video' && userCameraMode === 'snapshot'
+      ? captureUserCameraSnapshotContext()
+      : '';
+    if (callMode === 'video' && userCameraMode === 'snapshot' && !userCameraSnapshotForTurn) {
+      addToast('摄像头画面还没准备好，本轮已只发送文字', 'info');
+    }
+    let newSnapshotRef: string | undefined;
+    if (userCameraSnapshotForTurn) {
+      try {
+        newSnapshotRef = await putImageBlob(dataUrlToBlob(userCameraSnapshotForTurn));
+      } catch (error) {
+        console.warn('[camera-snapshot] failed to save the local call-record frame:', error);
+        addToast('快照仍会交给角色，但未能写入本地通话记录', 'info');
+      }
+    }
     const nowTs = Date.now();
     const now = formatTime();
     const userBubble: CallBubble = retryBubble
-      ? retryBubble
-      : { id: `${nowTs}-u`, role: 'user', text: input, time: now, timestamp: nowTs };
-    if (!isRetry) setBubbles(prev => [...prev, userBubble]);
+      ? { ...retryBubble, ...(newSnapshotRef ? { cameraSnapshotRef: newSnapshotRef, cameraSnapshotExpired: false } : {}) }
+      : {
+          id: `${nowTs}-u`,
+          role: 'user',
+          text: input,
+          time: now,
+          timestamp: nowTs,
+          ...(newSnapshotRef ? { cameraSnapshotRef: newSnapshotRef } : {}),
+        };
+    if (isRetry && newSnapshotRef) {
+      setBubbles(previous => previous.map(bubble => bubble.id === userBubble.id ? userBubble : bubble));
+    } else if (!isRetry) {
+      setBubbles(prev => [...prev, userBubble]);
+    }
     setDraftInput('');
     setShowInputPanel(false);
     let userDbId: number | undefined = isRetry ? userBubble.dbId : undefined;
@@ -2029,6 +2110,8 @@ ${sentencePlan}`;
           metadata: {
             source: 'call',
             callSessionId: currentSessionId,
+            callMode,
+            ...(newSnapshotRef ? { cameraSnapshotRef: newSnapshotRef } : {}),
             ...(pendingTouchesForTurn.length ? {
               avatarTouches: pendingTouchesForTurn.map(({ zone, part, rawAreas, timestamp }) => ({
                 zone,
@@ -2041,7 +2124,31 @@ ${sentencePlan}`;
         });
         setBubbles(prev => prev.map(b => (b.id === userBubble.id ? { ...b, dbId: userDbId } : b)));
         markCallTurnDirty();
+      } else if (newSnapshotRef) {
+        const previousSnapshotRef = retryBubble?.cameraSnapshotRef;
+        try {
+          await DB.updateMessageMetadata(userDbId, (previous: any) => ({
+            ...(previous || {}),
+            source: 'call',
+            callSessionId: currentSessionId,
+            callMode,
+            cameraSnapshotRef: newSnapshotRef,
+            cameraSnapshotExpired: false,
+          }));
+          if (previousSnapshotRef && previousSnapshotRef !== newSnapshotRef) {
+            await deleteBlobRef(previousSnapshotRef);
+          }
+          markCallTurnDirty();
+        } catch (error) {
+          await deleteBlobRef(newSnapshotRef);
+          newSnapshotRef = undefined;
+          setBubbles(previous => previous.map(bubble => bubble.id === userBubble.id
+            ? { ...bubble, cameraSnapshotRef: previousSnapshotRef }
+            : bubble));
+          console.warn('[camera-snapshot] failed to update the retried call turn:', error);
+        }
       }
+      await pruneCallSnapshots(selectedChar.id, currentSessionId);
     }
     if (!callStartedAt) setCallStartedAt(Date.now());
     setCallState('connecting');
@@ -2055,7 +2162,7 @@ ${sentencePlan}`;
     try {
       setCallState('thinking');
       const reply = prepareCallAssistantReply(
-        await requestAssistantReply(input, userDbId, pendingTouchesForTurn, true),
+        await requestAssistantReply(input, userDbId, pendingTouchesForTurn, true, userCameraSnapshotForTurn),
         callMode === 'video' && selectedChar?.videoCallPerformanceQuality !== 'high',
       );
       if (pendingTouchesForTurn.length) {
@@ -2100,6 +2207,7 @@ ${sentencePlan}`;
         metadata: {
           source: 'call',
           callSessionId: currentSessionId,
+          callMode,
           ...(assistantThinkingChain ? { thinkingChain: assistantThinkingChain } : {}),
           avatarPerformance: turnPerformance,
           avatarPerformanceCues: turnPerformanceCues,
@@ -2159,12 +2267,17 @@ ${sentencePlan}`;
     // includeProcessed=true：同 loadCallRecords，否则水位线之前的通话消息删不掉
     const all = await DB.getMessagesByCharId(record.characterId, true);
     // 删除通话消息 + 聊天页的通话总结卡片
-    const ids = all.filter(m => {
+    const sessionMessages = all.filter(m => {
       if (m.metadata?.source === 'call' && m.metadata?.callSessionId === record.sessionId) return true;
       if (m.metadata?.source === 'call-end-popup' && m.metadata?.callSessionId === record.sessionId) return true;
       return false;
-    }).map(m => m.id);
+    });
+    const ids = sessionMessages.map(message => message.id);
+    const snapshotRefs = Array.from(new Set(sessionMessages
+      .map(message => message.metadata?.cameraSnapshotRef)
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)));
     if (ids.length) await DB.deleteMessages(ids);
+    for (const snapshotRef of snapshotRefs) await deleteBlobRef(snapshotRef);
     if (recordDetailId === record.id) {
       setRecordDetailId('');
       setViewMode('history');
@@ -2666,7 +2779,7 @@ ${sentencePlan}`;
                 <div className="w-10 h-10 rounded-full border border-white/20 flex items-center justify-center text-sm" style={{ backgroundColor: `${accentColor}35` }}>{record.characterName[0] || '角'}</div>
                 <div className="min-w-0 flex-1">
                   <div className="font-medium text-sm">{record.characterName}</div>
-                  <div className="text-xs text-white/45 mt-0.5">{formatDuration(record.durationSec)} · {turnCount}轮对话</div>
+                  <div className="text-xs text-white/45 mt-0.5">{record.mode === 'video' ? '视频' : record.mode === 'voice' ? '语音' : '通话'} · {formatDuration(record.durationSec)} · {turnCount}轮对话</div>
                 </div>
                 <button onClick={(e) => { e.stopPropagation(); handleDeleteRecord(record); }} className="text-xs px-2 py-1 rounded-lg text-white/35 transition hover:text-rose-300">删除</button>
               </div>
@@ -2699,7 +2812,7 @@ ${sentencePlan}`;
         <div className="flex items-center justify-between">
           <button onClick={() => setViewMode('history')} className="text-sm text-white/45">← 返回</button>
           <div className="text-sm text-white/80 font-medium">{recordDetail.characterName}</div>
-          <div className="text-xs text-white/35">{formatDuration(recordDetail.durationSec)}</div>
+          <div className="text-xs text-white/35">{recordDetail.mode === 'video' ? '视频 · ' : recordDetail.mode === 'voice' ? '语音 · ' : ''}{formatDuration(recordDetail.durationSec)}</div>
         </div>
         <div className="mt-2 text-center">
           <p className="text-xs text-white/35 italic">{recordDetail.createdAt}</p>
@@ -2708,6 +2821,7 @@ ${sentencePlan}`;
           {recordDetail.transcript.map(item => (
             <div key={item.id} className={`rounded-2xl px-3.5 py-2.5 border border-white/10 backdrop-blur-md ${item.role === 'user' ? 'bg-white/[0.07] ml-6' : 'bg-white/[0.03] mr-6'}`}>
               <div className="text-[10px] text-white/45">{item.role === 'user' ? '你' : recordDetail.characterName} · {item.time}</div>
+              {item.role === 'user' && <CallSnapshotImage imageRef={item.cameraSnapshotRef} expired={item.cameraSnapshotExpired} />}
               <div className="text-sm mt-1 leading-relaxed">{(() => {
                 if (item.role !== 'assistant') return item.text;
                 const { display, voiceText } = extractVoiceTag(item.text);
@@ -3061,6 +3175,7 @@ ${sentencePlan}`;
               <span style={bubble.role !== 'user' ? { color: `${accentColor}dd` } : undefined}>{bubble.role === 'user' ? '你' : selectedChar?.name}</span>
               <span>· {bubble.time}</span>
             </div>
+            {bubble.role === 'user' && <CallSnapshotImage imageRef={bubble.cameraSnapshotRef} expired={bubble.cameraSnapshotExpired} compact />}
             <div className={`${sizeClass} whitespace-pre-wrap leading-relaxed ${bubble.role === 'user' ? 'inline-block text-left text-white/90 bg-white/[0.06] border border-white/10 rounded-2xl rounded-tr-sm px-3 py-1.5' : 'text-white/95'}`}>
               {bubble.role === 'assistant' ? (() => {
                 const { display, voiceText } = extractVoiceTag(line || bubble.text);

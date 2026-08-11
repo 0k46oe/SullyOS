@@ -27,7 +27,8 @@ export const fitUserCameraSnapshot = (
 
 /**
  * Captures one mirrored frame, matching the user's on-screen selfie preview.
- * The data URL is kept in memory and is never written to the call database.
+ * The data URL itself is transient. CallApp may convert the compressed frame
+ * into a blobref for the local transcript, where retention is capped separately.
  */
 export const captureUserCameraSnapshot = (
   video: HTMLVideoElement,

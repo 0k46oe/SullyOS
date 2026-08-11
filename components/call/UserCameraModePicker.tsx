@@ -24,7 +24,7 @@ const MODES: Array<{
   { id: 'off', index: '0', title: '关闭', tag: 'DEFAULT', description: '不打开摄像头，也不添加任何视觉上下文' },
   { id: 'fake', index: '1', title: '假摄像头', tag: 'STILL', description: '放一张自己的图片，只让通话截图更好看' },
   { id: 'emotion', index: '2', title: '本地情绪', tag: 'LOCAL', description: '本机识别表情，只提交一小段情绪文字' },
-  { id: 'snapshot', index: '3', title: '每轮快照', tag: 'VISION', description: '每次点发送取一帧，随本轮消息交给角色' },
+  { id: 'snapshot', index: '3', title: '每轮快照', tag: 'VISION', description: '发送时取一帧；记录只保留最近 3 轮，旧图显示 [图片]' },
 ];
 
 const UserCameraModePicker: React.FC<UserCameraModePickerProps> = ({
@@ -71,7 +71,7 @@ const UserCameraModePicker: React.FC<UserCameraModePickerProps> = ({
             </div>
             <button type="button" onClick={onClose} disabled={busy} className="rounded-full border border-current/10 px-3 py-1.5 text-[11px] opacity-55 transition active:scale-95">完成</button>
           </div>
-          <p className="mt-2 text-[11px] leading-5 opacity-48">模式默认关闭；静态图片绝不会发送。只有你主动选择的情绪文字或单帧快照会进入当前请求。</p>
+          <p className="mt-2 text-[11px] leading-5 opacity-48">模式默认关闭；假摄像头静态图绝不会发送。只有你主动选择的情绪文字或单帧快照会进入当前请求；快照会在本机记录中保留最近 3 轮。</p>
         </div>
 
         <div className="border-y border-current/10">

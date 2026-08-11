@@ -67,6 +67,8 @@ export interface AvatarTouchModelAction {
   tags?: string[];
 }
 
+export type AvatarTouchPackOutputMode = 'full' | 'expression' | 'text';
+
 const formatAvatarTouchModelAction = (action: AvatarTouchModelAction): string => {
   const capabilities = [action.kind, ...(action.tags || []).slice(0, 4)].filter(Boolean).join(' / ');
   return `- ${action.id}: ${action.name}${capabilities ? ` [${capabilities}]` : ''}`;
@@ -481,6 +483,7 @@ export const buildAvatarTouchReactionPackPrompt = (
   modelActions: AvatarTouchModelAction[] = [],
   reactionsPerZone = 4,
   voiceLanguage = '',
+  outputMode: AvatarTouchPackOutputMode = 'full',
 ): string => {
   const actionList = modelActions.length
     ? modelActions.slice(0, 60).map(formatAvatarTouchModelAction).join('\n')
@@ -489,24 +492,46 @@ export const buildAvatarTouchReactionPackPrompt = (
   const spokenLanguage = voiceLanguage ? voiceLanguageLabel(voiceLanguage) : '简体中文（与原文一致）';
   const schema = Object.fromEntries(zones.map(zone => [
     zone,
-    Array.from({ length: reactionsPerZone }, (_, index) => (
-      {
+    Array.from({ length: reactionsPerZone }, (_, index) => {
+      const base = {
         text: `第${index + 1}句角色台词`,
         translation: voiceLanguage ? `第${index + 1}句${spokenLanguage}口语译文` : `第${index + 1}句角色台词`,
+      };
+      if (outputMode === 'text') return base;
+      if (outputMode === 'expression') return {
+        ...base,
+        performance: { emotion: 'happy' },
+      };
+      return {
+        ...base,
         performance: {
           emotion: 'happy', gesture: 'tilt', camera: 'medium', gaze: 'viewer', intensity: 0.7,
           faces: ['smile-eyes'],
         },
-      }
-    )),
+      };
+    }),
   ]));
-  return `${coreContext}
-
-### 桌面 Live2D 动作优先级
+  const performanceRules = outputMode === 'text'
+    ? `### 静态单图输出规则
+- 当前形象只有一张 PNG / GIF，不存在可调用的动作或表情资源。
+- 你只需要写角色台词。不要输出 performance、动作指令、表情标签、镜头、视线或模型动作。`
+    : outputMode === 'expression'
+      ? `### 见面立绘表情规则
+- 当前使用见面模式立绘，只需要为每句选择 emotion，不需要生成手势、身体动作、镜头、视线或模型动作。
+- emotion 只使用 normal / happy / angry / sad / shy；它会直接切换当前衣服对应的表情立绘。`
+      : `### 桌面 Live2D 动作优先级
 - 每条缓存反馈都必须包含肉眼可见的手势或身体拍点；只有 faces 变化视为不完整。
 - 白名单动作带有 [motion] / [expression] / [params] 能力标记；语义匹配时优先使用 [motion]，表情与参数只能作为叠加层。
 - 大多数反馈的 intensity 使用 0.68-1.0，让精细的头部/身体 XYZ 绑定真正动起来；只有刻意克制的角色时刻才保持轻微。
-- 同一部位的多条反馈要改变身体轮廓（转、歪、靠近、后缩、解释或挥手），不要生成四条仅表情不同的变体。
+- 同一部位的多条反馈要改变身体轮廓（转、歪、靠近、后缩、解释或挥手），不要生成四条仅表情不同的变体。`;
+  const itemRule = outputMode === 'text'
+    ? '- 每一项必须只有 {"text":"中文原文","translation":"语音译文"}。'
+    : outputMode === 'expression'
+      ? '- 每一项必须是 {"text":"中文原文","translation":"语音译文","performance":{"emotion":"五类表情之一"}}。'
+      : '- 每一项必须是 {"text":"中文原文","translation":"语音译文","performance":{...}}；演出数据不要混进台词字段。\n- performance 必须给出 emotion、gesture、camera、gaze、intensity；可按需附加 faces 或 modelAction 白名单 ID，禁止编造模型动作。';
+  return `${coreContext}
+
+${performanceRules}
 
 ### 触感陪伴桌面 · 一次性反馈包
 ${userName}正在为${characterName}设置可触摸部位。请一次生成完整反馈包；保存后，桌面只会在本地轮播这些结果，不会每次触摸都再次请求你。
@@ -519,12 +544,10 @@ ${zoneList}
   - text 是界面显示的原文，必须使用简体中文；translation 是真正送入语音合成的${spokenLanguage}版本。两者必须语义一致，但字段不可合并或省略。
 - 必须结合完整人设、你们的关系、近期对话与记忆；允许喜欢、害羞、意外、躲开、拒绝或生气，边界必须符合角色本人。
 - 台词只能包含角色真正说出口的话。不要写动作旁白、引号、角色名前缀、Markdown、命中区、系统解释或半截续句。
-  - 每一项必须是 {"text":"中文原文","translation":"语音译文","performance":{...}}；演出数据不要混进台词字段。
-- performance 必须给出 emotion、gesture、camera、gaze、intensity；可按需附加 faces 或 modelAction 白名单 ID，禁止编造模型动作。
+${itemRule}
 - 只输出一个合法 JSON 对象，不要代码围栏，不要 JSON 以外的文字。顶层键必须逐字使用上面的英文部位 ID，不要翻译或合并部位。
 
-模型专属动作白名单：
-${actionList}
+${outputMode === 'full' ? `模型专属动作白名单：\n${actionList}` : ''}
 
 严格按照这个结构输出：
 ${JSON.stringify(schema, null, 2)}`;
@@ -695,7 +718,10 @@ const structuredPerformanceDirective = (value: unknown): string => {
       const field = record[key];
       if (field === undefined || field === null || field === '') return [];
       const normalizedKey = key === 'modelAction' ? 'model_action' : key === 'faces' ? 'face' : key;
-      return [`${normalizedKey}=${Array.isArray(field) ? field.join(',') : String(field)}`];
+      const normalizedField = normalizedKey === 'emotion' && field === 'normal'
+        ? 'neutral'
+        : normalizedKey === 'emotion' && field === 'shy' ? 'surprised' : field;
+      return [`${normalizedKey}=${Array.isArray(normalizedField) ? normalizedField.join(',') : String(normalizedField)}`];
     });
   return fields.length ? `[[AVATAR: ${fields.join('; ')}]]` : '';
 };
@@ -768,6 +794,7 @@ export const requestAvatarTouchReactionPack = async (options: {
   recentMessageLimit?: number;
   reactionsPerZone?: number;
   voiceLanguage?: string;
+  outputMode?: AvatarTouchPackOutputMode;
 }): Promise<AvatarTouchReactionPack> => {
   const {
     character,
@@ -778,6 +805,7 @@ export const requestAvatarTouchReactionPack = async (options: {
     recentMessageLimit = 28,
     reactionsPerZone = 4,
     voiceLanguage = '',
+    outputMode = 'full',
   } = options;
   const selectedZones = [...new Set(zones)].filter(zone => AVATAR_TOUCH_ZONES.includes(zone));
   if (!selectedZones.length) throw new Error('请至少选择一个可触摸部位');
@@ -823,6 +851,7 @@ export const requestAvatarTouchReactionPack = async (options: {
     modelActions,
     boundedReactionCount,
     voiceLanguage,
+    outputMode,
   );
   const data = await safeFetchJson(`${baseUrl}/chat/completions`, {
     method: 'POST',

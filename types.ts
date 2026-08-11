@@ -611,6 +611,19 @@ export interface SkinSet {
   sprites: Record<string, string>; // emotion -> image URL or base64
 }
 
+export interface CompanionAvatarConfig {
+  version: 1;
+  /** model keeps the existing VRM / Live2D stage; upload and date use a flat portrait. */
+  source: 'model' | 'upload' | 'date';
+  /** Original PNG / GIF stored in blob_assets. Kept while switching sources. */
+  imageRef?: string;
+  fileName?: string;
+  mimeType?: string;
+  importedAt?: number;
+  /** Independent from Date mode's active outfit so both surfaces can keep their own look. */
+  skinSetId?: string;
+}
+
 // 见面模式文风配置。由「场景布置」面板调整，datePrompts 构建 VN 提示词时读取，
 // 改动即时生效于后续生成（system prompt 每次请求重建）。
 export interface DateStyleConfig {
@@ -2580,6 +2593,8 @@ export interface CharacterProfile {
       /** 衣橱中最后一次由用户手动选择的服装动作。 */
       activeWardrobeActionId?: string;
   };
+  /** Which character visual the tactile companion desktop should render. */
+  companionAvatar?: CompanionAvatarConfig;
   /**
    * 视频通话舞台的自定义背景：`blobref:<id>` 令牌（本地图片，存 IndexedDB
    * blob_assets，备份导出时由 resolveBlobRefsDeep 自动还原）或 http(s) 图床直链。
@@ -3698,6 +3713,7 @@ export interface FullBackupData {
     mediaAssets?: {
         charId: string;
         avatar?: string;
+        companionAvatar?: CompanionAvatarConfig;
         sprites?: Record<string, string>;
         dateSkinSets?: SkinSet[];
         activeSkinSetId?: string;

@@ -54,6 +54,7 @@ export const CARD_STRIPPED_FIELDS = [
   'videoCallPerformancePersona',
   'videoCallPerformancePersonaGeneratedAt',
   'companionTouchSettings',
+  'companionAvatar',
   'savedDateState',
   'savedRoomState',
   'lastRoomDate',

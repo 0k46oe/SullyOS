@@ -3183,6 +3183,7 @@ export const DB = {
           return {
               ...c,
               avatar: media.avatar || c.avatar,
+              companionAvatar: media.companionAvatar || c.companionAvatar,
               sprites: media.sprites || c.sprites,
               dateSkinSets: media.dateSkinSets || c.dateSkinSets,
               activeSkinSetId: media.activeSkinSetId || c.activeSkinSetId,

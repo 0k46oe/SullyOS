@@ -7,6 +7,7 @@ import {
   Crop,
   Gear,
   HandTap,
+  ImageSquare,
   Minus,
   Plus,
   Sparkle,
@@ -30,6 +31,8 @@ import {
   DEFAULT_COMPANION_TOUCH_ZONES,
   normalizeCompanionDialogue,
   requestAvatarTouchReactionPack,
+  isAvatarTouchGesture,
+  resolveAvatarTouchTarget,
   resolveAvatarTouchForce,
   type AvatarTouchHit,
   type AvatarTouchModelAction,
@@ -99,6 +102,13 @@ import {
   setBuiltinSullyLive2DQuality,
   type BuiltinSullyLive2DQuality,
 } from '../../utils/builtinSullyLive2D';
+import {
+  companionAvatarSource,
+  companionSkinSetPatchValue,
+  listCompanionDateOutfits,
+  normalizeCompanionSkinSetId,
+  resolveCompanionPortrait,
+} from '../../utils/companionAvatar';
 
 // ── 时段氛围：陪伴桌面按虚拟时间换天色（晨曦 / 白日 / 黄昏 / 夜晚）──
 interface DayPeriod {
@@ -357,6 +367,99 @@ const COMPANION_STAR_APPS: Array<{
   .filter(app => app.id !== AppID.CharCreatorDev || import.meta.env.DEV)
   .map(app => ({ id: app.id, label: app.name, icon: app.icon as keyof typeof Icons }));
 
+const StaticCompanionPortrait: React.FC<{
+  value?: string;
+  characterName: string;
+  spriteConfig?: { scale: number; x: number; y: number };
+  expressionKey: string;
+  touchEnabled: boolean;
+  onAvatarTouch: (hit: AvatarTouchHit) => void;
+}> = ({ value, characterName, spriteConfig, expressionKey, touchEnabled, onAvatarTouch }) => {
+  const imageUrl = useBlobRefUrl(value);
+  const pointerRef = useRef<{
+    id: number;
+    x: number;
+    y: number;
+    startedAt: number;
+    maxDistance: number;
+    pressure: number;
+  } | null>(null);
+  const scale = Math.max(0.25, Math.min(3, spriteConfig?.scale || 1));
+  const offsetX = spriteConfig?.x || 0;
+  const offsetY = spriteConfig?.y || 0;
+
+  if (!imageUrl) return (
+    <div className="absolute inset-0 flex items-center justify-center text-center text-xs text-white/55">
+      <div><ImageSquare size={30} className="mx-auto mb-2" />请在外观中导入 PNG / GIF 或沿用见面立绘</div>
+    </div>
+  );
+
+  return (
+    <div className="pointer-events-none absolute inset-0 flex items-end justify-center overflow-hidden px-[4%] pb-[2%]" data-testid="companion-static-portrait-stage">
+      <img
+        key={`${value}-${expressionKey}`}
+        src={imageUrl}
+        alt={`${characterName}的桌面形象`}
+        draggable={false}
+        className={`pointer-events-auto max-h-[96%] max-w-full select-none object-contain drop-shadow-[0_18px_35px_rgba(0,0,0,.38)] ${touchEnabled ? 'cursor-pointer' : 'cursor-default'}`}
+        style={{
+          transform: `translate(${offsetX}%, ${offsetY}%) scale(${scale})`,
+          transformOrigin: 'bottom center',
+          touchAction: 'none',
+          animation: 'companion-static-expression-in 220ms ease-out both',
+        }}
+        onPointerDown={event => {
+          if (!touchEnabled) return;
+          event.currentTarget.setPointerCapture(event.pointerId);
+          pointerRef.current = {
+            id: event.pointerId,
+            x: event.clientX,
+            y: event.clientY,
+            startedAt: Date.now(),
+            maxDistance: 0,
+            pressure: event.pressure || 0,
+          };
+        }}
+        onPointerMove={event => {
+          const pointer = pointerRef.current;
+          if (!pointer || pointer.id !== event.pointerId) return;
+          pointer.maxDistance = Math.max(pointer.maxDistance, Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y));
+          pointer.pressure = Math.max(pointer.pressure, event.pressure || 0);
+        }}
+        onPointerCancel={() => { pointerRef.current = null; }}
+        onPointerUp={event => {
+          const pointer = pointerRef.current;
+          pointerRef.current = null;
+          if (!pointer || pointer.id !== event.pointerId) return;
+          const durationMs = Date.now() - pointer.startedAt;
+          if (!isAvatarTouchGesture(pointer.maxDistance, durationMs, true)) return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          const stageRect = event.currentTarget.parentElement?.getBoundingClientRect() || rect;
+          const portraitX = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
+          const portraitY = Math.max(0, Math.min(1, (event.clientY - rect.top) / Math.max(1, rect.height)));
+          const normalizedX = Math.max(0, Math.min(1, (event.clientX - stageRect.left) / Math.max(1, stageRect.width)));
+          const normalizedY = Math.max(0, Math.min(1, (event.clientY - stageRect.top) / Math.max(1, stageRect.height)));
+          const target = resolveAvatarTouchTarget([], portraitY, portraitX);
+          onAvatarTouch({
+            nonce: Date.now() + Math.random(),
+            x: event.clientX - rect.left,
+            y: event.clientY - rect.top,
+            normalizedX,
+            normalizedY,
+            pressure: pointer.pressure,
+            durationMs,
+            pointerType: event.pointerType === 'mouse' || event.pointerType === 'touch' || event.pointerType === 'pen' ? event.pointerType : 'unknown',
+            zone: target.zone,
+            part: target.part,
+            source: 'portrait-bounds',
+            rawAreas: [],
+          });
+        }}
+      />
+    </div>
+  );
+};
+
 const CompanionHome: React.FC = () => {
   const {
     characters,
@@ -376,6 +479,8 @@ const CompanionHome: React.FC = () => {
     () => characters.find(item => item.id === activeCharacterId) || characters[0] || null,
     [characters, activeCharacterId],
   );
+  const activeCompanionSource = companionAvatarSource(character);
+  const staticCompanionActive = activeCompanionSource === 'upload' || activeCompanionSource === 'date';
   const [motionState, setMotionState] = useState<AvatarMotionState>('idle');
   const startupAlreadyPlayed = Boolean(character && companionStartupPlayedThisSession.has(character.id));
   const [performance, setPerformance] = useState<AvatarPerformanceDirection>(() => (
@@ -406,9 +511,9 @@ const CompanionHome: React.FC = () => {
   const [startupPerformanceCuePhase, setStartupPerformanceCuePhase] = useState<'start' | 'end'>('start');
   const [startupActionGenerating, setStartupActionGenerating] = useState(false);
   const [startupVoiceGenerating, setStartupVoiceGenerating] = useState(false);
-  const [stageReady, setStageReady] = useState(() => !character?.videoAvatar);
+  const [stageReady, setStageReady] = useState(() => staticCompanionActive || !character?.videoAvatar);
   const [stageCurtainPhase, setStageCurtainPhase] = useState<CompanionStageCurtainPhase>(() => (
-    character?.videoAvatar ? 'covered' : 'hidden'
+    !staticCompanionActive && character?.videoAvatar ? 'covered' : 'hidden'
   ));
   const [touchVoiceProgress, setTouchVoiceProgress] = useState<{ completed: number; total: number } | null>(null);
   const settingsGenerating = startupActionGenerating || startupVoiceGenerating || touchGenerating;
@@ -719,14 +824,14 @@ const CompanionHome: React.FC = () => {
   useEffect(() => {
     clearStageCurtainTimers();
     stageCurtainGenerationRef.current += 1;
-    const hasModel = Boolean(character?.videoAvatar);
+    const hasModel = Boolean(!staticCompanionActive && character?.videoAvatar);
     const nextPhase: CompanionStageCurtainPhase = hasModel ? 'covered' : 'hidden';
     stageCurtainStartedAtRef.current = window.performance.now();
     stageCurtainPhaseRef.current = nextPhase;
     setStageCurtainPhase(nextPhase);
     setStageReady(!hasModel);
     return clearStageCurtainTimers;
-  }, [character?.id, character?.videoAvatar?.assetId, character?.videoAvatar?.format]);
+  }, [character?.id, character?.videoAvatar?.assetId, character?.videoAvatar?.format, activeCompanionSource, staticCompanionActive]);
 
   const clearCompanionPerformanceCues = () => {
     performanceCueTimersRef.current.forEach(timer => window.clearTimeout(timer));
@@ -807,7 +912,16 @@ const CompanionHome: React.FC = () => {
   }, [character?.id, stageReady]);
 
   const accentColor = palette.accent;
+  const staticPortraitValue = useMemo(
+    () => character ? resolveCompanionPortrait(character, performance.emotion, performance.faces || []) : undefined,
+    [character, performance.emotion, performance.faces],
+  );
+  const staticExpressionKey = `${performance.emotion}:${(performance.faces || []).join(',')}`;
+  const touchPackContentLabel = activeCompanionSource === 'upload'
+    ? '台词'
+    : activeCompanionSource === 'date' ? '台词与表情' : '台词与动作';
   const modelActions = useMemo<AvatarTouchModelAction[]>(() => {
+    if (staticCompanionActive) return [];
     if (character?.videoAvatar?.format === 'live2d') {
       return getLive2DAIActions(character.videoAvatar)
         .map(action => ({
@@ -818,11 +932,16 @@ const CompanionHome: React.FC = () => {
         }));
     }
     return vrmExpressions.map(name => ({ id: name, name: `自定义表情：${name}` }));
-  }, [character?.videoAvatar, vrmExpressions]);
+  }, [character?.videoAvatar, staticCompanionActive, vrmExpressions]);
   const wardrobeActions = useMemo(
-    () => character?.videoAvatar?.format === 'live2d' ? getLive2DWardrobeActions(character.videoAvatar) : [],
-    [character?.videoAvatar],
+    () => !staticCompanionActive && character?.videoAvatar?.format === 'live2d' ? getLive2DWardrobeActions(character.videoAvatar) : [],
+    [character?.videoAvatar, staticCompanionActive],
   );
+  const staticOutfits = useMemo(
+    () => activeCompanionSource === 'date' ? listCompanionDateOutfits(character) : [],
+    [activeCompanionSource, character],
+  );
+  const activeStaticOutfitId = normalizeCompanionSkinSetId(character?.companionAvatar?.skinSetId);
 
   const selectWardrobeAction = (action: Live2DAction) => {
     if (!character || character.videoAvatar?.format !== 'live2d' || !action.wardrobe) return;
@@ -831,6 +950,19 @@ const CompanionHome: React.FC = () => {
       videoAvatar: { ...character.videoAvatar, activeWardrobeActionId: action.id },
     });
     addToast(`已手动切换：${action.name}`, 'success');
+  };
+
+  const selectStaticOutfit = (outfitId: string) => {
+    if (!character || activeCompanionSource !== 'date') return;
+    updateCharacter(character.id, {
+      companionAvatar: {
+        version: 1,
+        ...character.companionAvatar,
+        source: 'date',
+        skinSetId: companionSkinSetPatchValue(outfitId),
+      },
+    });
+    addToast('桌面衣服已切换', 'success');
   };
 
   // ── 布置模式：构图在草稿里实时预览，只有点“保存”才写回角色。 ──
@@ -849,6 +981,11 @@ const CompanionHome: React.FC = () => {
     crop.top <= 0.001 && crop.right <= 0.001 && crop.bottom <= 0.001 && crop.left <= 0.001
   );
   const openCompositionEditor = () => {
+    if (staticCompanionActive) {
+      setWardrobeOpen(false);
+      openApp(AppID.Appearance);
+      return;
+    }
     setWardrobeOpen(false);
     setAppStarOpen(false);
     setLine(null);
@@ -1257,6 +1394,9 @@ const CompanionHome: React.FC = () => {
         zones: touchDraftZones,
         modelActions,
         voiceLanguage: touchVoiceLanguage,
+        outputMode: activeCompanionSource === 'upload'
+          ? 'text'
+          : activeCompanionSource === 'date' ? 'expression' : 'full',
       });
       if (!mountedRef.current || requestToken !== requestTokenRef.current) return;
 
@@ -1529,6 +1669,10 @@ const CompanionHome: React.FC = () => {
         @keyframes companion-dialog-in {
           from { opacity:0; transform:translateY(10px); }
           to { opacity:1; transform:translateY(0); }
+        }
+        @keyframes companion-static-expression-in {
+          from { opacity:.35; filter:brightness(1.08); }
+          to { opacity:1; filter:brightness(1); }
         }
         @keyframes companion-cursor { 0%,100% { opacity:.85; } 50% { opacity:.1; } }
         @keyframes companion-thinking-dot {
@@ -1851,39 +1995,52 @@ const CompanionHome: React.FC = () => {
 
       {/* ── 角色全出血舞台 ── */}
       <div className="absolute inset-0">
-        <VRMVideoCallStage
-          characterName={character.name}
-          fallbackAvatar={character.avatar}
-          model={character.videoAvatar}
-          motionState={motionState}
-          audioFeed={getCompanionAudioFeed()}
-          headMotionLocked={startupHeadLocked}
-          emotion={performance.emotion}
-          performance={performance}
-          performanceQuality="high"
-          accentColor={accentColor}
-          baseFraming={activeCompanionFraming}
-          framingEditable={editing}
-          onFramingChange={editing ? setFramingDraft : undefined}
-          stageCrop={activeCompanionCrop}
-          showCropGuide={editing && editingPanel === 'character'}
-          onChooseModel={() => openApp(AppID.Call)}
-          onExpressionsDiscovered={setVrmExpressions}
-          onAvatarTouch={hit => { void respondToTouch(hit); }}
-          onModelReady={handleStageModelReady}
-          onModelError={handleStageModelError}
-          touchImpulseNonce={lastHit?.nonce}
-          externalManualAction={wardrobeTrigger}
-          companionMode
-          maxFps={30}
-        />
-        <CompanionStageLoadingCurtain
-          phase={stageCurtainPhase}
-          characterName={character.name}
-          accentColor={uiTint}
-          surfaceColor={palette.shadow}
-          lightSurface={frameStyle === 'otome' || frameStyle === 'magazine' || frameStyle === 'archive'}
-        />
+        {staticCompanionActive ? (
+          <StaticCompanionPortrait
+            value={staticPortraitValue}
+            characterName={character.name}
+            spriteConfig={character.spriteConfig}
+            expressionKey={staticExpressionKey}
+            touchEnabled={!editing && !touchSettingsOpen && !wardrobeOpen}
+            onAvatarTouch={hit => { void respondToTouch(hit); }}
+          />
+        ) : (
+          <VRMVideoCallStage
+            characterName={character.name}
+            fallbackAvatar={character.avatar}
+            model={character.videoAvatar}
+            motionState={motionState}
+            audioFeed={getCompanionAudioFeed()}
+            headMotionLocked={startupHeadLocked}
+            emotion={performance.emotion}
+            performance={performance}
+            performanceQuality="high"
+            accentColor={accentColor}
+            baseFraming={activeCompanionFraming}
+            framingEditable={editing}
+            onFramingChange={editing ? setFramingDraft : undefined}
+            stageCrop={activeCompanionCrop}
+            showCropGuide={editing && editingPanel === 'character'}
+            onChooseModel={() => openApp(AppID.Call)}
+            onExpressionsDiscovered={setVrmExpressions}
+            onAvatarTouch={hit => { void respondToTouch(hit); }}
+            onModelReady={handleStageModelReady}
+            onModelError={handleStageModelError}
+            touchImpulseNonce={lastHit?.nonce}
+            externalManualAction={wardrobeTrigger}
+            companionMode
+            maxFps={30}
+          />
+        )}
+        {!staticCompanionActive && (
+          <CompanionStageLoadingCurtain
+            phase={stageCurtainPhase}
+            characterName={character.name}
+            accentColor={uiTint}
+            surfaceColor={palette.shadow}
+            lightSurface={frameStyle === 'otome' || frameStyle === 'magazine' || frameStyle === 'archive'}
+          />
+        )}
         {ripple && !editing && (
           <span
             key={ripple.nonce}
@@ -2010,8 +2167,12 @@ const CompanionHome: React.FC = () => {
         wardrobeActions={wardrobeActions}
         activeActionId={character.videoAvatar?.format === 'live2d' ? character.videoAvatar.activeWardrobeActionId : undefined}
         onSelect={selectWardrobeAction}
+        staticOutfits={staticOutfits}
+        activeStaticOutfitId={activeStaticOutfitId}
+        onSelectStaticOutfit={selectStaticOutfit}
+        staticMode={activeCompanionSource === 'date'}
         onOpenComposition={openCompositionEditor}
-        onManageActions={() => { setWardrobeOpen(false); openApp(AppID.Call); }}
+        onManageActions={() => { setWardrobeOpen(false); openApp(activeCompanionSource === 'date' ? AppID.Date : AppID.Call); }}
         onClose={() => setWardrobeOpen(false)}
       />
 
@@ -2045,7 +2206,7 @@ const CompanionHome: React.FC = () => {
                 </span>
                 <span className="min-w-0">
                   <span className="block truncate text-[13px] font-semibold tracking-wide sm:text-[15px]">{character.name}</span>
-                  <span className="block text-[8px] tracking-[0.14em] text-white/50 sm:text-[9px]">{period.label} · {character.videoAvatar ? '动作同步中' : '等待模型'}</span>
+                  <span className="block text-[8px] tracking-[0.14em] text-white/50 sm:text-[9px]">{period.label} · {activeCompanionSource === 'upload' ? '静态形象' : activeCompanionSource === 'date' ? '见面表情同步' : character.videoAvatar ? '动作同步中' : '等待形象'}</span>
                 </span>
               </button>
               <div className="flex shrink-0 items-center gap-2">
@@ -2607,7 +2768,7 @@ const CompanionHome: React.FC = () => {
                 <span className="mt-0.5 block text-[8px] leading-relaxed text-white/42">
                   {touchVoiceAvailable
                     ? '勾选后预先合成并保存在本地；触摸时不会临时调用 TTS'
-                    : '角色尚未配置可用音色，当前只生成台词与动作'}
+                    : `角色尚未配置可用音色，当前只生成${touchPackContentLabel}`}
                 </span>
               </span>
               <span
@@ -2633,13 +2794,13 @@ const CompanionHome: React.FC = () => {
               {touchGenerating
                 ? touchVoiceProgress
                   ? `正在合成本地语音 ${touchVoiceProgress.completed}/${touchVoiceProgress.total}…`
-                  : '正在生成台词与动作…'
+                  : `正在生成${touchPackContentLabel}…`
                 : preparedReactionCount ? '重新生成反馈包' : '一次生成反馈包'}
             </button>
             <div className="mt-2 text-center text-[8px] tracking-wide text-white/30">
               {savedTouchSettings?.generatedAt
                 ? `上次生成 ${new Date(savedTouchSettings.generatedAt).toLocaleString()} · 台词 ${preparedReactionCount} 条 · 语音 ${preparedVoiceCount} 条`
-                : '台词动作正常只请求一次；语音仅在勾选时批量预生成'}
+                : `${touchPackContentLabel}正常只请求一次；语音仅在勾选时批量预生成`}
             </div>
           </section>
         </div>
