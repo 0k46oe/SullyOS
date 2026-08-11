@@ -9,6 +9,7 @@ import { isBlobRef, getBlobForRef, migrateDataUrlToRef, migrateAppearancePresetB
 import { initPwaIcon, clearPwaIcon } from '../utils/appIcon';
 import { LEGACY_DEFAULT_WALLPAPER, isLegacyDefaultWallpaper, shouldPreserveLegacyDefaultWallpaper } from '../utils/wallpaperCompat';
 import { migrateSharkpanAssets } from '../utils/sharkpanAssetMigration';
+import { stripCompanionChatStyleResidue } from '../utils/companionThemeIsolation';
 import { SULLY_DEFAULT_AVATAR_URL, shouldMigrateSullyAvatar } from '../utils/sullyAvatar';
 import { exportStoryTheaterAppearanceSetting, restoreStoryTheaterAppearanceSetting } from '../utils/storyTheaterBackup';
 import { createV2ArrayFieldWriter, writeV2Backup, assembleV2Backup, type BackupManifest, type ZipFileWriter, type ZipFileReader } from '../utils/backupFormat';
@@ -1347,6 +1348,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                  // Reset font too if it's data URI
                  if (loadedTheme.customFont && loadedTheme.customFont.startsWith('data:')) {
                      loadedTheme.customFont = undefined;
+                 }
+                 const companionRepair = stripCompanionChatStyleResidue(loadedTheme);
+                 if (companionRepair.repaired) {
+                     loadedTheme = companionRepair.theme;
+                     localStorage.setItem('os_theme', JSON.stringify(loadedTheme));
                  }
              } catch(e) { console.error('Theme load error', e); }
         }
