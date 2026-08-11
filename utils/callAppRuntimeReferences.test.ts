@@ -155,19 +155,27 @@ describe('CallApp runtime references', () => {
     expect(exportSource).toContain("companionAvatar: c.companionAvatar");
   });
 
-  it('guides model import, framing, wardrobe and camera privacy before the first video call', () => {
+  it('guides dynamic/static avatar selection, wardrobe and camera privacy before the first video call', () => {
     const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
     const guideSource = readFileSync(path.resolve(__dirname, '../components/call/CallSetupGuide.tsx'), 'utf8');
+    const stageSource = readFileSync(path.resolve(__dirname, '../components/call/VRMVideoCallStage.tsx'), 'utf8');
 
     expect(source).toContain("const CALL_SETUP_GUIDE_KEY = 'sully-call-setup-guide-v2'");
-    expect(source).toContain("openCallSetupGuide(selectedChar?.videoAvatar ? 'camera' : 'model')");
+    expect(source).toContain("openCallSetupGuide(hasSelectedVideoVisual ? 'camera' : 'model')");
     expect(source).toContain('beginSelectedCall(setupCameraMode)');
     expect(source).toContain('onChooseFakeImage={() => chooseFakeUserCameraImage(false)}');
+    expect(source).toContain('const chooseStaticAvatarImage = () =>');
+    expect(source).toContain("selectedVisualSource !== 'model'");
+    expect(source).toContain('staticPortraitValue={staticVideoPortrait}');
     expect(guideSource).toContain('data-testid="call-setup-guide"');
-    expect(guideSource).toContain('校准构图与真·衣橱');
+    expect(guideSource).toContain("['upload', '静态图片']");
+    expect(guideSource).toContain("['date', '见面立绘']");
+    expect(guideSource).toContain('校准构图、动作与真·衣橱');
     expect(guideSource).toContain('下次打开仍从关闭开始');
     expect(guideSource).toContain('本地情绪只注入');
     expect(guideSource).toContain('静态机位永远不随消息发送');
+    expect(stageSource).toContain('testId="video-call-static-portrait-stage"');
+    expect(stageSource).toContain('staticAvatarActive ? `static-${staticAvatarSource}`');
   });
 
   it('requires explicit acknowledgement before saving a VRM test import', () => {

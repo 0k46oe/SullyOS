@@ -18,11 +18,17 @@ import {
   type AvatarTouchHit,
   type AvatarTouchRequest,
 } from '../../utils/avatarTouch';
+import StaticCompanionPortrait from '../os/StaticCompanionPortrait';
 
 interface VRMVideoCallStageProps {
   characterName: string;
   fallbackAvatar?: string;
   model?: CharacterProfile['videoAvatar'];
+  /** Flat PNG/GIF or Date sprite selected for the shared desktop/video avatar. */
+  staticAvatarSource?: 'upload' | 'date';
+  staticPortraitValue?: string;
+  staticExpressionKey?: string;
+  staticSpriteConfig?: CharacterProfile['spriteConfig'];
   motionState: AvatarMotionState;
   emotion?: string;
   audioFeed?: CallAudioFeed;
@@ -83,6 +89,10 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
   characterName,
   fallbackAvatar,
   model,
+  staticAvatarSource,
+  staticPortraitValue,
+  staticExpressionKey = 'normal',
+  staticSpriteConfig,
   motionState,
   emotion,
   audioFeed,
@@ -374,7 +384,9 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
     onModelError?.(message);
   };
 
+  const staticAvatarActive = staticAvatarSource === 'upload' || staticAvatarSource === 'date';
   const hasRenderableModel = Boolean(model && !modelError && (model.format === 'live2d' || modelUrl));
+  const hasRenderableAvatar = staticAvatarActive || hasRenderableModel;
 
   return (
     <div
@@ -384,12 +396,13 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
       data-avatar-gesture={performance?.gesture || 'talk'}
       data-avatar-camera={performance?.camera || 'medium'}
       data-avatar-gaze={performance?.gaze || 'viewer'}
-      data-avatar-format={model?.format || 'none'}
+      data-avatar-format={staticAvatarActive ? `static-${staticAvatarSource}` : model?.format || 'none'}
     >
       <style>{`
         @keyframes vrm-stage-drift { 0%,100% { transform: translate3d(0,0,0) scale(1.02) } 50% { transform: translate3d(0,-5px,0) scale(1.025) } }
         @keyframes vrm-stage-arrive { from { opacity:0; transform:scale(1.035) } to { opacity:1; transform:scale(1) } }
         @keyframes companion-stage-fade { from { opacity:0 } to { opacity:1 } }
+        @keyframes companion-static-expression-in { from { opacity:.35; filter:brightness(1.08) } to { opacity:1; filter:brightness(1) } }
       `}</style>
       {!companionMode && (
         <>
@@ -412,7 +425,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
       )}
       <div className="absolute left-1/2 bottom-[7%] h-[12%] w-[52%] -translate-x-1/2 rounded-[50%] blur-xl" style={{ background: `${accentColor}31` }} />
 
-      {hasRenderableModel ? (
+      {hasRenderableAvatar ? (
         <div
           ref={stageBoxRef}
           className="absolute inset-0 touch-none"
@@ -422,13 +435,24 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
               : 'vrm-stage-arrive 520ms ease-out both',
             clipPath: cropAdjusted ? `inset(${cropInset} round 1.4rem)` : undefined,
           }}
-          onPointerDown={handleStagePointerDown}
-          onPointerMove={handleStagePointerMove}
-          onPointerUp={handleStagePointerEnd}
-          onPointerCancel={handleStagePointerEnd}
-          onWheel={handleStageWheel}
+          onPointerDown={staticAvatarActive ? undefined : handleStagePointerDown}
+          onPointerMove={staticAvatarActive ? undefined : handleStagePointerMove}
+          onPointerUp={staticAvatarActive ? undefined : handleStagePointerEnd}
+          onPointerCancel={staticAvatarActive ? undefined : handleStagePointerEnd}
+          onWheel={staticAvatarActive ? undefined : handleStageWheel}
         >
-          {model?.format === 'live2d' ? (
+          {staticAvatarActive ? (
+            <StaticCompanionPortrait
+              value={staticPortraitValue}
+              characterName={characterName}
+              spriteConfig={staticSpriteConfig}
+              expressionKey={staticExpressionKey}
+              touchEnabled={Boolean(onAvatarTouch)}
+              onAvatarTouch={onAvatarTouch}
+              surfaceLabel="视频形象"
+              testId="video-call-static-portrait-stage"
+            />
+          ) : model?.format === 'live2d' ? (
             <Live2DAvatarCanvas
               key={`${model.assetId}-${live2DRetryKey}`}
               config={model}
@@ -572,7 +596,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
         </div>
       )}
 
-      {!companionMode && hasRenderableModel && !modelLoading && !calibratingFace && (
+      {!companionMode && hasRenderableAvatar && !modelLoading && !calibratingFace && (
         <div className="absolute right-3 top-3 z-40 flex flex-col items-end">
           <button
             onClick={() => setStageToolsOpen(open => !open)}
@@ -603,15 +627,17 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
                     <span className="flex-1">更换舞台背景</span>
                   </button>
                 )}
-                <button
-                  onClick={() => { setStageToolsOpen(false); beginFaceCalibration(); }}
-                  className="flex w-full items-center gap-2.5 py-2.5 text-left text-[10px] text-white/62 active:text-white"
-                >
-                  <span className={`flex w-3.5 justify-center text-xs ${model?.faceFraming ? 'text-amber-200' : 'text-white/35'}`}>◎</span>
-                  <span className="flex-1">{model?.faceFraming ? '重新锚定脸部' : '锚定脸部特写'}</span>
-                  {model?.faceFraming && <span className="text-[8px] text-amber-200/55">已设置</span>}
-                </button>
-                {framingAdjusted && (
+                {!staticAvatarActive && (
+                  <button
+                    onClick={() => { setStageToolsOpen(false); beginFaceCalibration(); }}
+                    className="flex w-full items-center gap-2.5 py-2.5 text-left text-[10px] text-white/62 active:text-white"
+                  >
+                    <span className={`flex w-3.5 justify-center text-xs ${model?.faceFraming ? 'text-amber-200' : 'text-white/35'}`}>◎</span>
+                    <span className="flex-1">{model?.faceFraming ? '重新锚定脸部' : '锚定脸部特写'}</span>
+                    {model?.faceFraming && <span className="text-[8px] text-amber-200/55">已设置</span>}
+                  </button>
+                )}
+                {!staticAvatarActive && framingAdjusted && (
                   <button
                     onClick={() => { resetFraming(); setStageToolsOpen(false); }}
                     className="flex w-full items-center gap-2.5 py-2.5 text-left text-[10px] text-white/62 active:text-white"
@@ -646,7 +672,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
                   className="flex w-full items-center gap-2.5 py-2.5 text-left text-[10px] text-white/62 active:text-white"
                 >
                   <UploadSimple size={14} weight="bold" className="text-white/35" />
-                  <span className="flex-1">更换角色模型</span>
+                  <span className="flex-1">更换角色形象</span>
                 </button>
               </div>
             </div>

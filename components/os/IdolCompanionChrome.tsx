@@ -71,7 +71,7 @@ const IdolCompanionChrome: React.FC<IdolCompanionChromeProps> = ({
 
       <aside className="idol-stage-tools pointer-events-auto" aria-label="直播舞台工具">
         {stageTools.map(({ id, label, eyebrow, Icon, action, testId }, index) => (
-          <button key={id} type="button" onClick={action} data-testid={testId}>
+          <button key={id} type="button" onClick={action} data-testid={testId} data-companion-wardrobe-trigger={id === 'wardrobe' ? 'true' : undefined}>
             <span>0{index + 1}</span><Icon weight="bold" />
             <small>{eyebrow}</small><strong>{label}</strong>
           </button>

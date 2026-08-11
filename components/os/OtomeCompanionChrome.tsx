@@ -79,7 +79,7 @@ const OtomeCompanionChrome: React.FC<OtomeCompanionChromeProps> = ({
 
       <aside className="otome-bookmark-rail pointer-events-auto" aria-label="晴庭快捷书签">
         {rightBookmarks.map(({ key, label, eyebrow, Icon, action, testId }, index) => (
-          <button key={key} type="button" onClick={action} data-testid={testId}>
+          <button key={key} type="button" onClick={action} data-testid={testId} data-companion-wardrobe-trigger={key === 'wardrobe' ? 'true' : undefined}>
             <span className="otome-bookmark-index">0{index + 1}</span>
             <Icon />
             <span className="otome-bookmark-copy"><small>{eyebrow}</small><strong>{label}</strong></span>
