@@ -21,6 +21,20 @@ describe('CallApp runtime references', () => {
     expect(source.match(/markCallTurnDirty\(\)/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
   });
 
+  it('keeps the call analytics restored from the master-side merge', () => {
+    const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
+
+    for (const eventName of [
+      '发起通话',
+      '设置通话语音语种',
+      '重掷角色的通话台词',
+      '重播一条通话语音',
+    ]) {
+      expect(source).toContain(`trackEvent('${eventName}'`);
+    }
+    expect(source).toMatch(/const beginSelectedCall[\s\S]*?trackEvent\('发起通话'\)/);
+  });
+
   it('routes every memory-palace trigger through the defined call hook', () => {
     const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
 

@@ -9,4 +9,12 @@ describe('memory palace pipeline runtime references', () => {
         expect(source).not.toMatch(/\bHOT_ZONE_SIZE\b/);
         expect(source).toContain('热区: ${hotZoneSizeForLog}');
     });
+
+    it('keeps the per-character waterline types beside CharacterProfile', () => {
+        const typesSource = readFileSync(path.resolve(__dirname, '../../types.ts'), 'utf8');
+
+        expect(typesSource).toContain("export type MemoryPalaceWaterlinePreset = 'online' | 'balanced' | 'offline' | 'custom';");
+        expect(typesSource).toContain('export interface MemoryPalaceWaterlineConfig');
+        expect(typesSource).toContain('memoryPalaceWaterline?: MemoryPalaceWaterlineConfig;');
+    });
 });
