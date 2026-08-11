@@ -2646,7 +2646,13 @@ ${sentencePlan}`;
           </div>
         )}
 
-        <div className="relative z-10 h-full overflow-y-auto overscroll-contain px-5 pb-5 no-scrollbar" style={{ paddingTop: 'max(2.5rem, var(--safe-top))' }}>
+        <div
+          className="relative z-10 flex h-full min-h-0 flex-col overflow-hidden px-5"
+          style={{
+            paddingTop: 'max(2.5rem, var(--safe-top))',
+            paddingBottom: 'max(1.25rem, var(--safe-bottom, 0px))',
+          }}
+        >
           {/* header */}
           <div className="shrink-0">
             <div className="text-[10px] tracking-[0.42em] text-white/35 font-semibold">CHAT WITH</div>
@@ -2662,7 +2668,7 @@ ${sentencePlan}`;
             value={roleGroupId} onChange={(id) => { setRoleGroupId(id); setRolePage(0); }} className="mt-4 shrink-0" />
 
           {/* character cards (6 / page) */}
-          <div className="mt-4 min-h-[5rem] max-h-[15rem] overflow-y-auto no-scrollbar space-y-2.5 pr-0.5" data-testid="call-character-picker">
+          <div className="mt-4 min-h-[5rem] flex-1 overflow-y-auto overscroll-contain no-scrollbar space-y-2.5 pr-0.5" data-testid="call-character-picker">
             {pagedChars.map(char => {
               const selected = selectedCharId === char.id;
               return (
@@ -2711,7 +2717,7 @@ ${sentencePlan}`;
           )}
 
           {/* actions */}
-          <div className="pt-4 space-y-2.5">
+          <div className="shrink-0 pt-4 space-y-2.5" data-testid="call-role-actions">
             <div className="flex items-center gap-1 rounded-2xl border border-white/10 bg-black/20 p-1">
               <button
                 onClick={() => setCallMode('voice')}

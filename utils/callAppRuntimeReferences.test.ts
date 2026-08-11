@@ -79,10 +79,18 @@ describe('CallApp runtime references', () => {
   it('keeps the character picker visible before optional video settings', () => {
     const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
     expect(source).toContain('data-testid="call-character-picker"');
-    expect(source).toContain('min-h-[5rem] max-h-[15rem]');
-    expect(source).toContain('h-full overflow-y-auto overscroll-contain');
+    expect(source).toContain('min-h-[5rem] flex-1 overflow-y-auto overscroll-contain');
+    expect(source).not.toContain('min-h-[5rem] max-h-[15rem]');
     expect(source).toContain('data-testid="video-call-advanced-settings"');
     expect(source).toContain('模型画质、导入与动作排练');
+  });
+
+  it('pins voice and video setup actions to the same viewport bottom edge', () => {
+    const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
+
+    expect(source).toContain('relative z-10 flex h-full min-h-0 flex-col overflow-hidden px-5');
+    expect(source).toContain("paddingBottom: 'max(1.25rem, var(--safe-bottom, 0px))'");
+    expect(source).toContain('className="shrink-0 pt-4 space-y-2.5" data-testid="call-role-actions"');
   });
 
   it('schedules opening and closing performance beats against the real audio duration', () => {
