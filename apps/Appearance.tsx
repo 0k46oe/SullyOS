@@ -185,11 +185,6 @@ const DESKTOP_SKINS: DesktopSkinOption[] = [
       hue: 267, saturation: 46, lightness: 64,
       contentColor: '#f6efff',
       wallpaper: COMPANION_WALLPAPER,
-      chatAvatarShape: 'rounded', chatAvatarSize: 'medium',
-      chatBubbleStyle: 'modern', chatMessageSpacing: 'spacious',
-      chatHeaderStyle: 'gradient', chatInputStyle: 'rounded',
-      chatChromeStyle: 'soft', chatBackgroundStyle: 'mesh',
-      chatShowTimestamp: 'always',
     },
   },
   {
@@ -928,7 +923,7 @@ const Appearance: React.FC = () => {
             <>
                 <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
                     <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-1">桌面风格</h2>
-                    <p className="text-[10px] text-slate-400 mb-4">一键切换整机主题：壁纸、配色、图标外观、聊天界面全部联动改变。</p>
+                    <p className="text-[10px] text-slate-400 mb-4">一键切换整机主题：壁纸、配色与图标外观联动；触感陪伴不会改动全局聊天装扮。</p>
                     <div className="grid grid-cols-2 gap-3">
                         {DESKTOP_SKINS.map(skin => {
                             const active = currentDesktopSkinId === skin.id;
