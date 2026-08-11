@@ -40,6 +40,7 @@ import { isPushVapidReady } from './pushVapid';
 import { getPendingTasks, isAmsg2EnabledForChar } from './amsg2Tasks';
 import { ActiveMsgStore } from './activeMsgStore';
 import { getVRApi } from './vrWorld/vrApi';
+import { isBuiltinSullyLive2D } from './builtinSullyLive2D';
 
 /** 布尔开关转「开 / 关」，带默认值。 */
 const onOff = (v: boolean | undefined, dflt = false) => ((v ?? dflt) ? '开' : '关');
@@ -132,12 +133,47 @@ export function collectAppearance(
     };
 }
 
+/** 桌面陪伴形象来源的中文标签，跟「切换桌面陪伴形象来源」事件的取值一致，方便两张表对照着看。 */
+const COMPANION_SOURCE_LABELS: Record<string, string> = {
+    model: '动态模型',
+    upload: '静态图片',
+    date: '见面立绘',
+};
+
+/**
+ * 用户自己导入的通话形象。内置 Sully 那份不算——预置角色开箱就绑着它，
+ * 数进去的话人人至少 1，真正想知道的「有多少人自己导过模型」会被这个底噪盖住。
+ */
+const importedAvatars = (characters: CharacterProfile[]) =>
+    characters.filter(c => c.videoAvatar && !isBuiltinSullyLive2D(c.videoAvatar));
+
+/** 自己导入的是哪种格式。两种都导过的人单独占一档，不然会被算进先判断的那一边。 */
+function importedAvatarFormat(characters: CharacterProfile[]): string {
+    const formats = new Set(importedAvatars(characters).map(c => c.videoAvatar?.format));
+    if (formats.has('live2d') && formats.has('vrm')) return '都有';
+    if (formats.has('live2d')) return 'live2d';
+    if (formats.has('vrm')) return 'vrm';
+    return '没导入';
+}
+
+/**
+ * 用内置 Sully 的人选了哪档纹理。2K 和 4K 差一倍多的下载量和显存，
+ * 「有多少人切到 4K 了」直接关系到要不要继续维护两份贴图。
+ */
+function builtinSullyQuality(characters: CharacterProfile[]): string {
+    const builtin = characters.map(c => c.videoAvatar).filter(isBuiltinSullyLive2D);
+    if (!builtin.length) return '没用内置';
+    return builtin.some(cfg => cfg.builtinQuality === 'hd') ? '4K' : '2K';
+}
+
 /**
  * 收集角色级设置。两种问法，别混：
  *   · 开关类 → 问「有没有人开过 / 有没有人特意关掉」，看的是这个功能有没有人要
  *   · 选择类 → 报当前活跃角色选的那个，看的是各选项的占比
  *
  * 全程只有枚举值和「有/无」，不带角色名、不带任何设定内容。
+ * 形象这一族尤其要注意：`videoAvatar.fileName` 是用户自己的文件名，
+ * 只能拿来判断格式，一个字都不许进上报。
  *
  * 刻意没报的：每个世界一份（家园）、每局一份（跑团）的那些设置。一个用户能有十几个
  * 世界，报哪个都不代表他，而且这些选择本来就有「选择世界时间模式」这类事件在记。
@@ -192,6 +228,23 @@ export function collectCharSettings(
         ),
         // 角色专属提示音同样只分「内置哪个 / 自己弄的」
         角色提示音: presetOrCustom(c.chatSound?.src, Object.keys(BUILTIN_SOUNDS), '没设'),
+
+        // ── 桌面陪伴与通话形象 ──
+        // 「有多少人在用桌面陪伴」不在这里问：「当前外观」的桌面皮肤已经回答了
+        // （skin === 'companion'）。这几格问的是用起来的人手上是什么形象。
+        //
+        // 都数全部角色，不是当前活跃角色：一个人挂十几个角色时，导了模型的
+        // 恰好不是当前这个的概率很大，只看活跃角色会把重度用户报成没导过。
+        自己导入形象的角色数: bucketFewCount(importedAvatars(characters).length),
+        导入的形象格式: importedAvatarFormat(characters),
+        内置Sully画质: builtinSullyQuality(characters),
+        // 缺省就是「动态模型」，所以这一格里的「动态模型」含从没设过的人；
+        // 有信息量的是另外两档，只有主动换过的人才会落进去。
+        // 认不出的取值一并算「动态模型」，跟界面的渲染回落同口径（见 companionAvatarSource）。
+        桌面陪伴形象来源: COMPANION_SOURCE_LABELS[c.companionAvatar?.source || 'model'] ?? '动态模型',
+        换掉动态模型的角色数: bucketFewCount(
+            characters.filter(x => x.companionAvatar?.source && x.companionAvatar.source !== 'model').length,
+        ),
     };
 }
 

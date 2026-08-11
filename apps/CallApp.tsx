@@ -1031,33 +1031,45 @@ const CallApp: React.FC = () => {
     input.onchange = async () => {
       const file = input.files?.[0];
       if (!file) return removeInput();
+      // 挑到文件之后有五种结局，过去只有 toast，「多少人卡在导入这一步」在数据里是空白。
+      // 两条路共用一个 catch，先按扩展名把来源定死，报错时才分得清是哪条挂的。
+      // 来源和结果都是这里写死的字面量，文件名和报错原文一个字都不带。
+      const source = /\.zip$/i.test(file.name) ? 'Live2D ZIP' : 'VRM';
       try {
         if (/\.zip$/i.test(file.name)) {
           if (file.size > 200 * 1024 * 1024) {
+            trackEvent('导入通话形象', { 来源: source, 结果: '体积超限' });
             addToast('Live2D ZIP 超过 200 MB，移动端很可能无法稳定解压加载', 'error');
             return;
           }
           void preloadLive2DRuntime().catch(() => { /* loading UI will surface a retryable error */ });
           setAvatarImportStatus('正在打开 Live2D ZIP，请耐心等待…');
           bindVideoAvatar(character, await saveLive2DModelFromZip(file, setAvatarImportStatus));
+          trackEvent('导入通话形象', { 来源: source, 结果: '成功' });
           return;
         }
         setAvatarImportStatus('正在检查 VRM 模型…');
         const inspection = await inspectAvatarFile(file);
         if (inspection.kind === 'vroid-project') {
+          // .vroid 工程文件只弹说明、不导入，跟「文件坏了」是两回事，单独占一档。
+          trackEvent('导入通话形象', { 来源: source, 结果: '要先导出VRM' });
           setPendingVRoidImport({ file, characterId: character.id, projectFile: true });
           return;
         }
         if (inspection.kind === 'unsupported') {
+          trackEvent('导入通话形象', { 来源: source, 结果: '格式不支持' });
           addToast(inspection.reason, 'error');
           return;
         }
         if (file.size > 80 * 1024 * 1024) {
+          trackEvent('导入通话形象', { 来源: source, 结果: '体积超限' });
           addToast('模型超过 80 MB，移动端通话可能无法稳定加载，请在导出时降低纹理尺寸', 'error');
           return;
         }
+        // VRM 到这里只是通过体检，真正落库在确认 beta 提示之后，成功与否由 confirmVRoidImport 记。
         setPendingVRoidImport({ file, characterId: character.id, projectFile: false });
       } catch (error: any) {
+        trackEvent('导入通话形象', { 来源: source, 结果: '失败' });
         addToast(error?.message || '模型导入失败', 'error');
       } finally {
         setAvatarImportStatus('');
@@ -1081,8 +1093,10 @@ const CallApp: React.FC = () => {
     try {
       const videoAvatar = await saveAvatarModel(pending.file);
       bindVideoAvatar(character, videoAvatar);
+      trackEvent('导入通话形象', { 来源: 'VRM', 结果: '成功' });
       setPendingVRoidImport(null);
     } catch (error: any) {
+      trackEvent('导入通话形象', { 来源: 'VRM', 结果: '失败' });
       addToast(error?.message || 'VRM 测试模型导入失败；原模型未被覆盖', 'error');
     } finally {
       setAvatarImportStatus('');
@@ -1112,12 +1126,15 @@ const CallApp: React.FC = () => {
       try {
         const totalSize = files.reduce((sum, file) => sum + file.size, 0);
         if (totalSize > 250 * 1024 * 1024) {
+          trackEvent('导入通话形象', { 来源: 'Live2D 文件夹', 结果: '体积超限' });
           addToast('Live2D 文件夹超过 250 MB，请先压缩纹理尺寸或删掉无关文件', 'error');
           return;
         }
         setAvatarImportStatus(`已选择 ${files.length} 个文件，正在扫描模型…`);
         bindVideoAvatar(character, await saveLive2DModelFromFiles(files, setAvatarImportStatus));
+        trackEvent('导入通话形象', { 来源: 'Live2D 文件夹', 结果: '成功' });
       } catch (error: any) {
+        trackEvent('导入通话形象', { 来源: 'Live2D 文件夹', 结果: '失败' });
         addToast(error?.message || 'Live2D 文件夹导入失败', 'error');
       } finally {
         setAvatarImportStatus('');
