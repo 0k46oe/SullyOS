@@ -40,7 +40,7 @@ const MagazineCompanionChrome: React.FC<MagazineCompanionChromeProps> = ({
       <section className="mag-cover-tools pointer-events-auto" aria-label="封面工具">
         <button type="button" onClick={() => openApp(AppID.Appearance)}><span>01</span><Icons.Appearance /><strong>外观</strong><small>APPEARANCE</small></button>
         <button type="button" onClick={openTouchSettings}><span>02</span><HandTap weight="bold" /><strong>触摸</strong><small>TOUCH</small></button>
-        <button type="button" onClick={openWardrobe} data-testid="companion-magazine-wardrobe-button"><span>03</span><TShirt weight="bold" /><strong>衣橱</strong><small>WARDROBE</small></button>
+        <button type="button" onClick={openWardrobe} data-testid="companion-magazine-wardrobe-button" data-companion-wardrobe-trigger="true"><span>03</span><TShirt weight="bold" /><strong>衣橱</strong><small>WARDROBE</small></button>
       </section>
 
       <button type="button" className="mag-cover-feature pointer-events-auto" onClick={openCharacterSchedule}>

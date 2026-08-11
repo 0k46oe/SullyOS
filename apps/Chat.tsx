@@ -123,6 +123,9 @@ const Chat: React.FC = () => {
 
     const scrollRef = useRef<HTMLDivElement>(null);
     const lastMsgIdRef = useRef<number | null>(null);
+    // 最新图片在移动端异步解码后会把消息列表继续向下撑开。记录这一条，等真实高度
+    // 确定后再补一次贴底；用户一旦主动向上翻，就清掉它，绝不抢滚动位置。
+    const pendingMediaAutoScrollIdRef = useRef<number | null>(null);
     const scrollThrottleRef = useRef(0);
     const visibleCountRef = useRef(30);
     const activeCharIdRef = useRef(activeCharacterId);
@@ -1015,11 +1018,31 @@ const Chat: React.FC = () => {
         // windowed 模式下用户在翻旧消息，不要被新消息打断滚走。
         if (currentLastId !== lastMsgIdRef.current) {
             if (windowedFocusMsgId === null) {
+                pendingMediaAutoScrollIdRef.current = currentLastId;
                 scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+            } else {
+                pendingMediaAutoScrollIdRef.current = null;
             }
             lastMsgIdRef.current = currentLastId;
         }
     }, [messages, activeCharacterId, selectionMode, windowedFocusMsgId]);
+
+    const handleChatScroll = useCallback(() => {
+        const scroller = scrollRef.current;
+        if (!scroller) return;
+        const distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+        if (distanceFromBottom > 96) pendingMediaAutoScrollIdRef.current = null;
+    }, []);
+
+    const handleMessageMediaLoad = useCallback((messageId: number) => {
+        if (windowedFocusMsgId !== null || pendingMediaAutoScrollIdRef.current !== messageId) return;
+        requestAnimationFrame(() => {
+            if (pendingMediaAutoScrollIdRef.current !== messageId) return;
+            const scroller = scrollRef.current;
+            if (scroller) scroller.scrollTop = scroller.scrollHeight;
+            pendingMediaAutoScrollIdRef.current = null;
+        });
+    }, [windowedFocusMsgId]);
 
     useEffect(() => {
         if (isTyping && scrollRef.current && !selectionMode && windowedFocusMsgId === null) {
@@ -3344,7 +3367,7 @@ const Chat: React.FC = () => {
                 );
             })()}
 
-            <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden pt-6 pb-6 no-scrollbar" style={{ backgroundImage: activeTheme.type === 'custom' && activeTheme.user.backgroundImage ? 'none' : undefined }}>
+            <div ref={scrollRef} onScroll={handleChatScroll} className="flex-1 overflow-y-auto overflow-x-hidden pt-6 pb-6 no-scrollbar" style={{ backgroundImage: activeTheme.type === 'custom' && activeTheme.user.backgroundImage ? 'none' : undefined }}>
                 {windowedFocusMsgId !== null && (
                     <div className="sticky top-0 z-20 flex justify-center pb-2 pointer-events-none">
                         <button onClick={handleBackToCurrent} className="pointer-events-auto px-4 py-2 bg-primary text-white rounded-full text-xs font-bold shadow-lg active:scale-95 transition-transform flex items-center gap-1.5">
@@ -3409,6 +3432,8 @@ const Chat: React.FC = () => {
                             charAvatar={char.avatar}
                             charName={char.name}
                             userAvatar={userProfile.perCharAvatars?.[char.id] || userProfile.avatar}
+                            isLatestMessage={!nextMessage}
+                            onMediaLoad={handleMessageMediaLoad}
                             moduleAlign={mergedFineTune.chatModuleAlign || 'center'}
                             onLongPress={handleMessageLongPress}
                             onReply={handleQuickReply}

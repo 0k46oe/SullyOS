@@ -59,7 +59,7 @@ const CatCompanionChrome: React.FC<CatCompanionChromeProps> = ({
 
       <aside className="cat-paw-rail pointer-events-auto" aria-label="夜巡快捷入口">
         {quickActions.map(({ id, label, Icon, action }, index) => (
-          <button key={id} type="button" onClick={action || (() => openApp(id as AppID))}>
+          <button key={id} type="button" onClick={action || (() => openApp(id as AppID))} data-companion-wardrobe-trigger={id === 'wardrobe' ? 'true' : undefined}>
             <span className="cat-paw-number">0{index + 1}</span>
             <Icon />
             <strong>{label}</strong>

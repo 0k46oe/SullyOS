@@ -1008,7 +1008,7 @@ const Appearance: React.FC = () => {
                                     <span className="rounded-full bg-violet-50 px-2 py-0.5 text-[8px] font-bold tracking-wide text-violet-500">PNG / GIF</span>
                                 </div>
                                 <p className="mt-1 text-[10px] leading-relaxed text-slate-400">
-                                    没有 L2D 也能使用触感陪伴。单图只生成台词；见面立绘会按 AI 情绪切换表情。
+                                    桌面与视频通话共用这里的选择。单图保持原样；见面立绘会按 AI 情绪切换同套表情。
                                 </p>
                                 <button
                                     type="button"

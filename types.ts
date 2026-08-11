@@ -624,14 +624,14 @@ export interface SkinSet {
 
 export interface CompanionAvatarConfig {
   version: 1;
-  /** model keeps the existing VRM / Live2D stage; upload and date use a flat portrait. */
+  /** Shared desktop/video visual source: model uses VRM/Live2D; upload/date use a flat portrait. */
   source: 'model' | 'upload' | 'date';
   /** Original PNG / GIF stored in blob_assets. Kept while switching sources. */
   imageRef?: string;
   fileName?: string;
   mimeType?: string;
   importedAt?: number;
-  /** Independent from Date mode's active outfit so both surfaces can keep their own look. */
+  /** Independent from Date mode's active outfit; desktop and video calls share this selected outfit. */
   skinSetId?: string;
 }
 

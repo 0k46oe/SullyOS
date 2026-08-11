@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, HandTap, PencilSimple, Play, Plus, Prohibit, Robot, Trash, TShirt, X } from '@phosphor-icons/react';
+import { Check, FadersHorizontal, HandTap, PencilSimple, Play, Plus, Prohibit, Robot, Trash, TShirt, X } from '@phosphor-icons/react';
 import { inferLive2DActionTags, type Live2DAction, type Live2DActionPermission, type Live2DAvatarConfig } from '../../utils/live2dModelStore';
 import {
   describeLive2DParameter,
@@ -51,8 +51,42 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
   const [showTargetPreview, setShowTargetPreview] = useState(true);
   const [focusedParamId, setFocusedParamId] = useState('');
   const [previewRetryKey, setPreviewRetryKey] = useState(0);
+  const [settingsPanelOpen, setSettingsPanelOpen] = useState(true);
+  const [settingsPage, setSettingsPage] = useState<'actions' | 'framing'>('actions');
+  const [settingsBubblePos, setSettingsBubblePos] = useState<{ x: number; y: number } | null>(null);
+  const settingsBubbleDragRef = useRef<{ startX: number; startY: number; originX: number; originY: number; moved: boolean } | null>(null);
   const previewThrottleRef = useRef(0);
   const previewReturnTimerRef = useRef<number | null>(null);
+  const settingsBubbleSize = 48;
+  const clampSettingsBubble = (x: number, y: number) => ({
+    x: Math.max(8, Math.min(window.innerWidth - settingsBubbleSize - 8, x)),
+    y: Math.max(56, Math.min(window.innerHeight - settingsBubbleSize - 24, y)),
+  });
+  const onSettingsBubblePointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    settingsBubbleDragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: rect.left,
+      originY: rect.top,
+      moved: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const onSettingsBubblePointerMove = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = settingsBubbleDragRef.current;
+    if (!drag) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(dx, dy) < 6) return;
+    drag.moved = true;
+    setSettingsBubblePos(clampSettingsBubble(drag.originX + dx, drag.originY + dy));
+  };
+  const onSettingsBubblePointerUp = () => {
+    const drag = settingsBubbleDragRef.current;
+    settingsBubbleDragRef.current = null;
+    if (drag && !drag.moved) setSettingsPanelOpen(open => !open);
+  };
 
   useEffect(() => {
     setActions(config.actions.map(action => action.wardrobe ? { ...action, permission: 'manual' as const } : action));
@@ -207,8 +241,8 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
         </div>
       )}
 
-      <div className="shrink-0 px-4 pt-3">
-        <div className="relative h-[min(31vh,250px)] min-h-[180px] overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-b from-[#171322] to-[#090810]">
+      <div className="min-h-0 flex-1 px-4 pb-3 pt-3">
+        <div className="relative h-full min-h-[260px] overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-b from-[#171322] to-[#090810]">
           <div className="absolute inset-0 opacity-60" style={{ background: `radial-gradient(circle at 50% 55%, ${accentColor}38, transparent 64%)` }} />
           <Live2DAvatarCanvas
             key={`${config.assetId}-${previewRetryKey}`}
@@ -271,7 +305,49 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
         </div>
       </div>
 
-      <div className="mx-4 mt-3 shrink-0 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2.5">
+      <button
+        type="button"
+        onPointerDown={onSettingsBubblePointerDown}
+        onPointerMove={onSettingsBubblePointerMove}
+        onPointerUp={onSettingsBubblePointerUp}
+        onPointerCancel={() => { settingsBubbleDragRef.current = null; }}
+        className={`fixed z-[94] flex h-12 w-12 items-center justify-center rounded-full shadow-[0_12px_34px_rgba(0,0,0,.48)] transition-colors active:scale-90 ${settingsPanelOpen ? 'bg-violet-500 text-white ring-4 ring-violet-300/20' : 'border border-violet-300/35 bg-[#16111f]/95 text-violet-200 backdrop-blur-xl'}`}
+        style={settingsBubblePos
+          ? { left: settingsBubblePos.x, top: settingsBubblePos.y, touchAction: 'none' }
+          : { right: 12, top: 'calc(max(1.25rem, var(--safe-top)) + 34vh)', touchAction: 'none' }}
+        aria-label={settingsPanelOpen ? '收起动作与参数设置' : '展开动作与参数设置'}
+        aria-expanded={settingsPanelOpen}
+        data-testid="live2d-floating-settings-toggle"
+      >
+        <FadersHorizontal size={22} weight="bold" />
+      </button>
+
+      {settingsPanelOpen && (
+      <section
+        className="absolute inset-x-3 z-[70] flex max-h-[54vh] flex-col overflow-hidden rounded-3xl border border-white/12 bg-[#100d18]/95 shadow-[0_18px_60px_rgba(0,0,0,.58)] backdrop-blur-2xl"
+        style={{ bottom: 'calc(max(1rem, var(--safe-bottom)) + 6.25rem)' }}
+        data-testid="live2d-floating-settings-panel"
+      >
+        <div className="grid shrink-0 grid-cols-2 border-b border-white/10 p-1.5">
+          <button
+            type="button"
+            onClick={() => setSettingsPage('actions')}
+            className={`rounded-2xl px-3 py-2 text-[11px] font-medium transition ${settingsPage === 'actions' ? 'bg-white/10 text-white' : 'text-white/40'}`}
+          >
+            动作按键 · {actions.length}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSettingsPage('framing')}
+            className={`rounded-2xl px-3 py-2 text-[11px] font-medium transition ${settingsPage === 'framing' ? 'bg-white/10 text-white' : 'text-white/40'}`}
+          >
+            镜头构图
+          </button>
+        </div>
+
+        {settingsPage === 'framing' ? (
+        <div className="min-h-0 overflow-y-auto p-3 no-scrollbar">
+      <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2.5">
         <div className="mb-2 flex items-center justify-between">
           <span className="text-[10px] font-medium text-white/65">镜头构图</span>
           <div className="flex items-center gap-1.5">
@@ -307,8 +383,11 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
           </label>
         ))}
       </div>
+        </div>
+        ) : (
+        <div className="min-h-0 flex flex-1 flex-col">
 
-      <div className="flex shrink-0 items-center gap-2 overflow-x-auto px-4 py-3 no-scrollbar">
+      <div className="flex shrink-0 items-center gap-2 overflow-x-auto px-3 py-3 no-scrollbar">
         <span className="shrink-0 rounded-full bg-violet-400/15 px-2.5 py-1 text-[10px] text-violet-200">AI {counts.ai}</span>
         <span className="shrink-0 rounded-full bg-sky-400/15 px-2.5 py-1 text-[10px] text-sky-200">手动 {counts.manual}</span>
         <span className="shrink-0 rounded-full bg-rose-400/15 px-2.5 py-1 text-[10px] text-rose-200">禁用 {counts.blocked}</span>
@@ -326,11 +405,11 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
         <button onClick={() => setActions(current => current.map(action => action.wardrobe ? { ...action, permission: 'manual' } : { ...action, permission: 'blocked' }))} className="shrink-0 text-[10px] text-rose-300/65">其余禁用</button>
       </div>
 
-      <p className="shrink-0 px-4 pb-2 text-[9px] leading-relaxed text-white/35">
+      <p className="shrink-0 px-3 pb-2 text-[9px] leading-relaxed text-white/35">
         衣橱动作始终只允许用户手动切换；其余模型表情和非待机动作可按权限交给 AI。
       </p>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-3 no-scrollbar">
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 no-scrollbar">
         {!actions.length ? (
           <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-8 text-center text-sm text-white/45">
             model3.json 没有声明 Motions 或 Expressions；基础眼神、呼吸和口型仍可使用。
@@ -409,6 +488,10 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
           </div>
         )}
       </div>
+        </div>
+        )}
+      </section>
+      )}
 
       {customDraft && (
         <div
