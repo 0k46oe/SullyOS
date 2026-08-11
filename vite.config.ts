@@ -151,7 +151,14 @@ export default defineConfig({
             if (id.includes('@pixiv/three-vrm') || /[\\/]node_modules[\\/]three[\\/]/.test(id)) {
               return 'vendor-vrm';
             }
-            if (id.includes('untitled-pixi-live2d-engine') || id.includes('@pixi/') || /[\\/]node_modules[\\/]pixi\.js[\\/]/.test(id)) {
+            // The Cubism adapter checks window.Live2DCubismCore at module evaluation
+            // time. Keep it out of the Pixi chunk: the call page and Live2D desktop
+            // theme import Pixi eagerly, while live2dCore.ts must load Cubism Core
+            // before dynamically importing this adapter.
+            if (id.includes('untitled-pixi-live2d-engine')) {
+              return 'vendor-live2d-engine';
+            }
+            if (id.includes('@pixi/') || /[\\/]node_modules[\\/]pixi\.js[\\/]/.test(id)) {
               return 'vendor-live2d';
             }
             if (id.includes('react') || id.includes('react-dom') || id.includes('scheduler')) {
