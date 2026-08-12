@@ -121,6 +121,14 @@ describe('CompanionHome touch request boundaries', () => {
     expect(source).toContain('showCropGuide={editing && editingPanel === \'character\' && compositionFramingMode === \'base\'}');
     expect(source).toContain('data-testid="companion-face-anchor-mode"');
     expect(source).toContain('faceFraming: faceAnchorDraftEnabled ? faceFramingDraft : undefined');
+    expect(source).toContain('data-testid="companion-touch-region-mode"');
+    expect(source).toContain('data-testid="companion-touch-region-editor-panel"');
+    expect(source).toContain('touchRegions: touchRegionsDraft.length ? touchRegionsDraft : undefined');
+    expect(source).toContain("compositionFramingMode === 'touch'");
+    expect(source).toContain('onTouchRegionsChange={editing ? setTouchRegionsDraft : undefined}');
+    expect(source).toContain('data-testid="companion-live2d-texture-quality-picker"');
+    expect(source).toContain("textureQuality: quality");
+    expect(source).toContain("isBuiltinSullyLive2D(character.videoAvatar) && (hit.zone === 'head' || hit.zone === 'face')");
     expect(source).toContain('data-testid="companion-appearance-rail-button"');
     expect(source).toContain('data-testid="companion-real-wardrobe-button"');
     expect(source).toContain('<CompanionWardrobeDrawer');

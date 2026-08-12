@@ -1,5 +1,6 @@
 import type {
   APIConfig,
+  AvatarTouchRegion,
   CharacterProfile,
   CompanionTouchReaction,
   UserProfile,
@@ -19,7 +20,7 @@ import { voiceLanguageLabel } from './voiceLanguage';
 
 export const AVATAR_TOUCH_ZONES = ['head', 'face', 'hand', 'body', 'other'] as const;
 export type AvatarTouchZone = typeof AVATAR_TOUCH_ZONES[number];
-export const AVATAR_TOUCH_PARTS = ['hair', 'head', 'face', 'shoulder', 'arm', 'hand', 'chest', 'waist', 'body', 'leg', 'foot', 'other'] as const;
+export const AVATAR_TOUCH_PARTS = ['hair', 'head', 'face', 'shoulder', 'arm', 'hand', 'chest', 'waist', 'body', 'other'] as const;
 export type AvatarTouchPart = typeof AVATAR_TOUCH_PARTS[number];
 export const DEFAULT_COMPANION_TOUCH_ZONES: AvatarTouchZone[] = ['head', 'face', 'hand', 'body'];
 export type AvatarTouchReactionPack = Partial<Record<AvatarTouchZone, CompanionTouchReaction[]>>;
@@ -43,7 +44,7 @@ export interface AvatarTouchHit extends AvatarTouchRequest {
   zone: AvatarTouchZone;
   /** Precise visual target; zone remains the backward-compatible reaction bucket. */
   part?: AvatarTouchPart;
-  source: 'live2d-hit-area' | 'live2d-bounds' | 'vrm-raycast' | 'portrait-bounds';
+  source: 'live2d-custom-region' | 'live2d-hit-area' | 'live2d-bounds' | 'vrm-raycast' | 'portrait-bounds';
   rawAreas: string[];
 }
 
@@ -104,8 +105,6 @@ const TOUCH_PART_LABELS: Record<AvatarTouchPart, string> = {
   chest: '胸口',
   waist: '腰部',
   body: '身体',
-  leg: '腿',
-  foot: '脚',
   other: '身边',
 };
 
@@ -220,8 +219,48 @@ const zoneForTouchPart = (part: AvatarTouchPart): AvatarTouchZone => {
   if (part === 'hair' || part === 'head') return 'head';
   if (part === 'face') return 'face';
   if (part === 'hand' || part === 'arm') return 'hand';
-  if (part === 'shoulder' || part === 'chest' || part === 'waist' || part === 'body' || part === 'leg' || part === 'foot') return 'body';
+  if (part === 'shoulder' || part === 'chest' || part === 'waist' || part === 'body') return 'body';
   return 'other';
+};
+
+const partForTouchZone = (zone: AvatarTouchZone): AvatarTouchPart => {
+  if (zone === 'head') return 'head';
+  if (zone === 'face') return 'face';
+  if (zone === 'hand') return 'hand';
+  if (zone === 'body') return 'body';
+  return 'other';
+};
+
+/**
+ * Resolve user-authored model-local ellipses. Smaller overlapping regions win,
+ * so a face ellipse can safely sit inside a larger head ellipse.
+ */
+export const resolveAvatarTouchRegion = (
+  regions: AvatarTouchRegion[] | undefined,
+  normalizedX: number,
+  normalizedY: number,
+): { zone: AvatarTouchZone; part: AvatarTouchPart; regionId: string } | null => {
+  if (!Array.isArray(regions) || !Number.isFinite(normalizedX) || !Number.isFinite(normalizedY)) return null;
+  const hit = regions
+    .filter(region => (
+      AVATAR_TOUCH_ZONES.includes(region.zone as AvatarTouchZone)
+      && Number.isFinite(region.x)
+      && Number.isFinite(region.y)
+      && Number.isFinite(region.width)
+      && Number.isFinite(region.height)
+      && region.width > 0
+      && region.height > 0
+    ))
+    .filter(region => {
+      const radiusX = region.width / 2;
+      const radiusY = region.height / 2;
+      const dx = (normalizedX - region.x) / radiusX;
+      const dy = (normalizedY - region.y) / radiusY;
+      return dx * dx + dy * dy <= 1;
+    })
+    .sort((a, b) => a.width * a.height - b.width * b.height)[0];
+  if (!hit) return null;
+  return { zone: hit.zone, part: partForTouchZone(hit.zone), regionId: hit.id };
 };
 
 const geometricTouchPart = (fallbackY: number, fallbackX: number): AvatarTouchPart => {
@@ -229,14 +268,14 @@ const geometricTouchPart = (fallbackY: number, fallbackX: number): AvatarTouchPa
   const y = Math.max(0, Math.min(1, fallbackY));
   if (y < 0.14) return 'hair';
   if (y < 0.34) return x > 0.22 && x < 0.78 ? 'face' : 'hair';
-  if (y < 0.48) {
+  if (y < 0.5) {
     if (x < 0.18 || x > 0.82) return 'arm';
     if (x < 0.4 || x > 0.6) return 'shoulder';
     return 'chest';
   }
-  if (y < 0.65) return x < 0.22 || x > 0.78 ? 'arm' : 'waist';
-  if (y < 0.93) return 'leg';
-  return 'foot';
+  if (y < 0.72) return x < 0.25 || x > 0.75 ? 'arm' : 'chest';
+  if (y < 0.9) return 'waist';
+  return 'other';
 };
 
 export const resolveAvatarTouchTarget = (
@@ -252,26 +291,15 @@ export const resolveAvatarTouchTarget = (
           : /(shoulder|clavicle|肩|锁骨|鎖骨)/i.test(value) ? 'shoulder'
             : /(chest|bust|breast|胸)/i.test(value) ? 'chest'
               : /(waist|hip|pelvis|腰|胯|臀)/i.test(value) ? 'waist'
-                : /(foot|feet|shoe|ankle|脚|足|鞋|踝)/i.test(value) ? 'foot'
-                  : /(leg|thigh|knee|calf|腿|膝)/i.test(value) ? 'leg'
-                    : null;
+                : null;
+  if (precisePart) return { zone: zoneForTouchPart(precisePart), part: precisePart };
 
   const hasGeometry = Number.isFinite(fallbackY) && Number.isFinite(fallbackX);
-  const geometricPart = hasGeometry ? geometricTouchPart(fallbackY!, fallbackX!) : null;
-  if (precisePart) {
-    // Imported hit-area polygons are not always tight. Some full-body models
-    // call one torso polygon "Chest" even though it extends through both legs.
-    // A strong lower-body coordinate contradiction should follow the tap.
-    const contradictsLowerBody = geometricPart === 'leg' || geometricPart === 'foot';
-    if (!contradictsLowerBody || precisePart === 'leg' || precisePart === 'foot') {
-      return { zone: zoneForTouchPart(precisePart), part: precisePart };
-    }
-    return { zone: zoneForTouchPart(geometricPart), part: geometricPart };
-  }
   const genericHead = /(head|hat|ear|头|頭|帽|耳)/i.test(value);
   const genericBody = /(body|torso|身体|身體|躯干|軀幹)/i.test(value);
   if (hasGeometry) {
-    return { zone: zoneForTouchPart(geometricPart!), part: geometricPart! };
+    const part = geometricTouchPart(fallbackY!, fallbackX!);
+    return { zone: zoneForTouchPart(part), part };
   }
   if (genericHead) return { zone: 'head', part: 'head' };
   if (genericBody) return { zone: 'body', part: 'body' };

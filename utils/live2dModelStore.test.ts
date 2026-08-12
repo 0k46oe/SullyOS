@@ -6,11 +6,14 @@ import {
   downscaleOversizedLive2DTextures,
   findLive2DActionsForPerformance,
   getLive2DTextureResizeTarget,
+  getLive2DTextureMaxDimension,
+  getLive2DTextureQuality,
   getLive2DAIActions,
   getActiveLive2DWardrobeParameters,
   getLive2DWardrobeActions,
   inferLive2DActionTags,
   inspectLive2DPackage,
+  Live2DMissingFilesError,
   readLive2DTextureDimensions,
   removeLive2DWardrobeAction,
   sniffImageMime,
@@ -92,9 +95,43 @@ describe('Live2D 模型导入解析', () => {
     });
   });
 
-  it('模型引用缺文件时拒绝导入并指出包不完整', async () => {
-    await expect(inspectLive2DPackage(packageEntries.filter(entry => !entry.path.endsWith('texture_00.png'))))
-      .rejects.toThrow('模型引用的文件不完整');
+  it('模型引用缺文件时保留短提示，并向控制台返回完整路径诊断', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const entries = packageEntries.filter(entry => !entry.path.endsWith('texture_00.png'));
+    try {
+      await inspectLive2DPackage(entries);
+      throw new Error('expected missing-file rejection');
+    } catch (error) {
+      expect(error).toBeInstanceOf(Live2DMissingFilesError);
+      expect((error as Live2DMissingFilesError).message).toContain('模型引用的文件不完整');
+      expect((error as Live2DMissingFilesError).missingFiles).toEqual([
+        expect.objectContaining({
+          reference: 'textures/texture_00.png',
+          resolvedPath: 'Skylar/textures/texture_00.png',
+          referencedBy: 'Skylar/Skylar.model3.json',
+        }),
+      ]);
+      expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('完整缺失引用诊断'));
+      expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('Skylar/textures/texture_00.png'));
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('缺失诊断指出大小写错误和同名文件所在位置', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const entries = packageEntries
+      .filter(entry => !entry.path.endsWith('texture_00.png'))
+      .concat({ path: 'Skylar/Textures/TEXTURE_00.PNG', blob: blob('png') });
+    try {
+      await inspectLive2DPackage(entries);
+      throw new Error('expected missing-file rejection');
+    } catch (error) {
+      const detail = (error as Live2DMissingFilesError).missingFiles[0];
+      expect(detail.caseInsensitiveMatch).toBe('Skylar/Textures/TEXTURE_00.PNG');
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it('解析 VTube Studio 热键、未登记表情、待机动画和保存的构图', async () => {
@@ -283,6 +320,14 @@ describe('Live2D 模型导入解析', () => {
     });
     expect(getLive2DTextureResizeTarget(8192, 4096)).toEqual({ width: 4096, height: 2048 });
     expect(getLive2DTextureResizeTarget(2048, 4096)).toBeNull();
+  });
+
+  it('导入模型默认使用 2K 运行纹理，并允许显式切到 4K', () => {
+    const base = { format: 'live2d', textureQuality: undefined } as Live2DAvatarConfig;
+    expect(getLive2DTextureQuality(base)).toBe('balanced');
+    expect(getLive2DTextureMaxDimension(base)).toBe(2048);
+    expect(getLive2DTextureQuality({ ...base, textureQuality: 'hd' })).toBe('hd');
+    expect(getLive2DTextureMaxDimension({ ...base, textureQuality: 'hd' })).toBe(4096);
   });
 
   it('导入时自动降档模型引用的超大贴图，并关闭临时位图释放解码内存', async () => {
