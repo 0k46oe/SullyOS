@@ -126,6 +126,9 @@ describe('CompanionHome touch request boundaries', () => {
     expect(source).toContain('touchRegions: touchRegionsDraft.length ? touchRegionsDraft : undefined');
     expect(source).toContain("compositionFramingMode === 'touch'");
     expect(source).toContain('onTouchRegionsChange={editing ? setTouchRegionsDraft : undefined}');
+    expect(source).toContain('data-testid="companion-collapse-composition"');
+    expect(source).toContain('data-testid="companion-expand-composition"');
+    expect(source).toContain("data-collapsed={compositionEditorCollapsed ? 'true' : 'false'}");
     expect(source).toContain('data-testid="companion-live2d-texture-quality-picker"');
     expect(source).toContain("textureQuality: quality");
     expect(source).toContain("isBuiltinSullyLive2D(character.videoAvatar) && (hit.zone === 'head' || hit.zone === 'face')");

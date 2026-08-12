@@ -3,6 +3,8 @@ import {
   ArrowClockwise,
   ArrowsOutCardinal,
   CaretDown,
+  CaretLeft,
+  CaretRight,
   Check,
   Crop,
   Gear,
@@ -454,6 +456,7 @@ const CompanionHome: React.FC = () => {
   const [vrmExpressions, setVrmExpressions] = useState<string[]>([]);
   const [editing, setEditing] = useState(false);
   const [editingPanel, setEditingPanel] = useState<'character' | 'stage'>('character');
+  const [compositionEditorCollapsed, setCompositionEditorCollapsed] = useState(false);
   const [compositionFramingMode, setCompositionFramingMode] = useState<'base' | 'face' | 'touch'>('base');
   const [framingDraft, setFramingDraft] = useState<AvatarStageFraming>(() => character?.videoAvatar?.companionFraming || DEFAULT_STAGE_FRAMING);
   const [faceFramingDraft, setFaceFramingDraft] = useState<AvatarStageFraming>(() => character?.videoAvatar?.faceFraming || { scale: 1.8, offsetX: 0, offsetY: 0 });
@@ -1137,6 +1140,7 @@ const CompanionHome: React.FC = () => {
     setTouchRegionsDraft(character?.videoAvatar?.format === 'live2d' ? character.videoAvatar.touchRegions || [] : []);
     setTouchRegionEditingZone('face');
     setCropDraft(companionCrop || DEFAULT_STAGE_CROP);
+    setCompositionEditorCollapsed(false);
     setEditing(true);
   };
   const cancelCompositionEditor = () => {
@@ -1147,6 +1151,7 @@ const CompanionHome: React.FC = () => {
     setTouchRegionEditingZone('face');
     setCompositionFramingMode('base');
     setCropDraft(companionCrop || DEFAULT_STAGE_CROP);
+    setCompositionEditorCollapsed(false);
     setEditing(false);
   };
   const saveCompositionEditor = () => {
@@ -1163,6 +1168,7 @@ const CompanionHome: React.FC = () => {
       } : {}
     ));
     setCompositionFramingMode('base');
+    setCompositionEditorCollapsed(false);
     setEditing(false);
     addToast(
       touchRegionsDraft.length
@@ -3255,20 +3261,20 @@ const CompanionHome: React.FC = () => {
           {character.videoAvatar && editingPanel === 'character' && (
             <div
               className="pointer-events-none absolute left-4 z-40 border-l px-3 py-2 text-left backdrop-blur-md"
-              style={{ top: 'max(2.4rem, calc(var(--safe-top, 0px) + .8rem))', right: 'min(84vw, 22rem)', borderColor: `${uiTint}90`, background: `${palette.panelBottom}a8` }}
+              style={{ top: 'max(2.4rem, calc(var(--safe-top, 0px) + .8rem))', right: compositionEditorCollapsed ? '3rem' : 'min(84vw, 22rem)', borderColor: `${uiTint}90`, background: `${palette.panelBottom}a8`, transition: 'right 200ms ease' }}
             >
               <span className="text-[9px] leading-relaxed text-white/78">拖动角色 · 双指缩放 · 虚线框为可视区</span>
             </div>
           )}
           <div
-            className="absolute bottom-0 right-0 top-0 z-50 w-[min(82vw,21rem)]"
-            style={{ animation: 'companion-inspector-in 240ms cubic-bezier(.2,.8,.2,1) both' }}
+            className={`absolute bottom-0 right-0 top-0 z-50 w-[min(82vw,21rem)] transition-transform duration-200 ease-out ${compositionEditorCollapsed ? 'pointer-events-none translate-x-full' : 'translate-x-0'}`}
             data-testid="companion-composition-editor"
             data-placement="right-inspector"
+            data-collapsed={compositionEditorCollapsed ? 'true' : 'false'}
           >
             <section
               className="h-full overflow-y-auto border-l border-white/20 px-4 pb-5 text-white shadow-2xl backdrop-blur-2xl no-scrollbar"
-              style={{ paddingTop: 'max(1rem, calc(var(--safe-top, 0px) + .75rem))', paddingBottom: 'max(1.25rem, calc(var(--safe-bottom, 0px) + 1rem))', background: `linear-gradient(165deg, ${palette.panelTop}fa, ${palette.panelBottom}fd)`, boxShadow: `-24px 0 64px ${palette.shadow}bd, inset 1px 0 0 ${uiTint}28` }}
+              style={{ paddingTop: 'max(1rem, calc(var(--safe-top, 0px) + .75rem))', paddingBottom: 'max(1.25rem, calc(var(--safe-bottom, 0px) + 1rem))', background: `linear-gradient(165deg, ${palette.panelTop}fa, ${palette.panelBottom}fd)`, boxShadow: `-24px 0 64px ${palette.shadow}bd, inset 1px 0 0 ${uiTint}28`, animation: 'companion-inspector-in 240ms cubic-bezier(.2,.8,.2,1) both' }}
             >
               <header className="flex items-center justify-between gap-2">
                 <div>
@@ -3276,6 +3282,14 @@ const CompanionHome: React.FC = () => {
                   <div className="mt-0.5 text-[8px] tracking-[0.13em] text-white/36">CHARACTER INSPECTOR</div>
                 </div>
                 <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setCompositionEditorCollapsed(true)}
+                    className="flex h-7 w-7 items-center justify-center rounded-full border border-white/15 text-white/55 transition active:scale-90"
+                    aria-label="暂时折叠角色构图面板"
+                    title="暂时折叠"
+                    data-testid="companion-collapse-composition"
+                  ><CaretRight size={12} weight="bold" /></button>
                   <button onClick={cancelCompositionEditor} className="rounded-full border border-white/15 px-3 py-1.5 text-[10px] text-white/60 active:scale-95">取消</button>
                   <button
                     onClick={saveCompositionEditor}
@@ -3576,6 +3590,19 @@ const CompanionHome: React.FC = () => {
               )}
             </section>
           </div>
+          {compositionEditorCollapsed && (
+            <button
+              type="button"
+              onClick={() => setCompositionEditorCollapsed(false)}
+              className="absolute right-0 z-[51] flex items-center gap-1 rounded-l-2xl border border-r-0 border-white/20 px-2 py-3 text-[9px] font-medium tracking-[0.08em] text-white/75 shadow-2xl backdrop-blur-xl transition active:translate-x-0.5"
+              style={{ top: 'max(4.5rem, calc(var(--safe-top, 0px) + 3rem))', background: `linear-gradient(165deg, ${palette.panelTop}ee, ${palette.panelBottom}f8)`, boxShadow: `-12px 0 32px ${palette.shadow}a8` }}
+              aria-label="展开角色构图面板"
+              data-testid="companion-expand-composition"
+            >
+              <CaretLeft size={12} weight="bold" style={{ color: uiTint }} />
+              <span className="[writing-mode:vertical-rl]">展开构图</span>
+            </button>
+          )}
         </>
       )}
       </div>
