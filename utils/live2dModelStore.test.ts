@@ -1,19 +1,35 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import JSZip from 'jszip';
 import {
   buildStoredLive2DPackage,
   buildLive2DPerformanceMix,
+  downscaleOversizedLive2DTextures,
   findLive2DActionsForPerformance,
+  getLive2DTextureResizeTarget,
   getLive2DAIActions,
+  getActiveLive2DWardrobeParameters,
   getLive2DWardrobeActions,
   inferLive2DActionTags,
   inspectLive2DPackage,
+  readLive2DTextureDimensions,
   sniffImageMime,
   upgradeLive2DAutoPermissions,
   type Live2DAvatarConfig,
 } from './live2dModelStore';
 
 const blob = (value = '') => new Blob([value], { type: 'application/octet-stream' });
+
+const pngHeader = (width: number, height: number): Blob => {
+  const bytes = new Uint8Array(24);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  bytes.set([0x49, 0x48, 0x44, 0x52], 12);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(16, width, false);
+  view.setUint32(20, height, false);
+  return new Blob([bytes], { type: 'image/png' });
+};
+
+afterEach(() => vi.unstubAllGlobals());
 
 const modelJson = JSON.stringify({
   Version: 3,
@@ -41,7 +57,7 @@ const packageEntries = [
     Curves: [{ Target: 'Parameter', Id: 'ParamArmLA' }, { Target: 'Model', Id: 'EyeBlink' }],
   })) },
   { path: 'Skylar/expressions/happy.exp3.json', blob: blob(JSON.stringify({
-    Parameters: [{ Id: 'ParamMouthForm', Value: 1 }],
+    Parameters: [{ Id: 'ParamMouthForm', Value: 1, Blend: 'Overwrite' }],
   })) },
   { path: 'Skylar/expressions/angry.exp3.json', blob: blob('{}') },
 ];
@@ -60,12 +76,14 @@ describe('Live2D 模型导入解析', () => {
   it('从 model3.json 解析动作、表情、标签与口型参数，自动开放安全动作', async () => {
     const result = await inspectLive2DPackage(packageEntries);
     expect(result.modelPath).toBe('Skylar/Skylar.model3.json');
+    expect(result.texturePaths).toEqual(['Skylar/textures/texture_00.png']);
     expect(result.lipSyncParameterIds).toEqual(['ParamMouthOpenY', 'ParamMouthForm']);
     expect(result.actions).toHaveLength(4);
     expect(result.actions.filter(action => action.group !== 'Idle').every(action => action.permission === 'ai')).toBe(true);
     expect(result.actions.find(action => action.group === 'Idle')?.permission).toBe('manual');
     expect(result.actions.find(action => action.name === 'smile')).toMatchObject({
       kind: 'expression', tags: ['happy'], permission: 'ai', parameterIds: ['ParamMouthForm'],
+      parameterValues: [{ id: 'ParamMouthForm', value: 1, blend: 'Overwrite' }],
     });
     expect(result.actions.find(action => action.group === 'TapBody')).toMatchObject({
       tags: expect.arrayContaining(['wave']),
@@ -216,6 +234,75 @@ describe('Live2D 模型导入解析', () => {
     expect(await sniffImageMime(jpeg)).toBe('image/jpeg');
     expect(await sniffImageMime(webp)).toBe('image/webp');
     expect(await sniffImageMime(junk)).toBeNull();
+  });
+
+  it('resolves the selected wardrobe as a persistent parameter layer', () => {
+    const config = {
+      format: 'live2d',
+      activeWardrobeActionId: 'outfit-night',
+      actions: [
+        {
+          id: 'outfit-night', kind: 'expression', name: 'night', file: 'night.exp3.json',
+          tags: [], permission: 'manual', wardrobe: true,
+          parameterValues: [{ id: 'ParamWatermark', value: 0, blend: 'Overwrite' }],
+        },
+      ],
+    } as unknown as Live2DAvatarConfig;
+
+    expect(getActiveLive2DWardrobeParameters(config)).toEqual([
+      { id: 'ParamWatermark', value: 0, blend: 'Overwrite' },
+    ]);
+    expect(getActiveLive2DWardrobeParameters({ ...config, activeWardrobeActionId: undefined })).toEqual([]);
+  });
+
+  it('只读文件头即可识别超大贴图，并按最长边 4096 等比计算降档尺寸', async () => {
+    expect(await readLive2DTextureDimensions(pngHeader(8192, 4096))).toEqual({
+      width: 8192,
+      height: 4096,
+      mimeType: 'image/png',
+    });
+    expect(getLive2DTextureResizeTarget(8192, 4096)).toEqual({ width: 4096, height: 2048 });
+    expect(getLive2DTextureResizeTarget(2048, 4096)).toBeNull();
+  });
+
+  it('导入时自动降档模型引用的超大贴图，并关闭临时位图释放解码内存', async () => {
+    const close = vi.fn();
+    const createBitmap = vi.fn(async () => ({ width: 4096, height: 2048, close }));
+    const drawImage = vi.fn();
+    class MockOffscreenCanvas {
+      constructor(public width: number, public height: number) {}
+      getContext() { return { drawImage }; }
+      async convertToBlob(options: { type: string }) {
+        return new Blob(['resized'], { type: options.type });
+      }
+    }
+    vi.stubGlobal('createImageBitmap', createBitmap);
+    vi.stubGlobal('OffscreenCanvas', MockOffscreenCanvas);
+
+    const original = pngHeader(8192, 4096);
+    const progress = vi.fn();
+    const result = await downscaleOversizedLive2DTextures(
+      [{ path: 'Model/texture.png', blob: original }],
+      ['Model/texture.png'],
+      progress,
+    );
+
+    expect(createBitmap).toHaveBeenCalledWith(expect.any(Blob), expect.objectContaining({
+      resizeWidth: 4096,
+      resizeHeight: 2048,
+      resizeQuality: 'high',
+    }));
+    expect(drawImage).toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+    expect(result.entries[0].blob).not.toBe(original);
+    expect(result.entries[0].blob.type).toBe('image/png');
+    expect(result.resizedTextures).toEqual([expect.objectContaining({
+      path: 'Model/texture.png',
+      fromWidth: 8192,
+      toWidth: 4096,
+      toHeight: 2048,
+    })]);
+    expect(progress).toHaveBeenCalledWith(expect.stringContaining('8192×4096'));
   });
 
 });

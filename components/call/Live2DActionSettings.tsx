@@ -40,6 +40,11 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
     ? { ...BUILTIN_SULLY_DEFAULT_FRAMING }
     : { scale: 1, offsetX: 0, offsetY: 0 };
   const [actions, setActions] = useState(() => config.actions.map(action => action.wardrobe ? { ...action, permission: 'manual' as const } : action));
+  const [activeWardrobeActionId, setActiveWardrobeActionId] = useState(() => (
+    config.actions.some(action => action.id === config.activeWardrobeActionId && action.wardrobe)
+      ? config.activeWardrobeActionId
+      : config.actions.find(action => action.wardrobe)?.id
+  ));
   const [previewAction, setPreviewAction] = useState<Live2DActionTrigger | null>(null);
   const [previewError, setPreviewError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -90,6 +95,11 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
 
   useEffect(() => {
     setActions(config.actions.map(action => action.wardrobe ? { ...action, permission: 'manual' as const } : action));
+    setActiveWardrobeActionId(
+      config.actions.some(action => action.id === config.activeWardrobeActionId && action.wardrobe)
+        ? config.activeWardrobeActionId
+        : config.actions.find(action => action.wardrobe)?.id,
+    );
     setFraming(config.framing || { scale: 1, offsetX: 0, offsetY: 0 });
   }, [config.assetId, config.actions, config.framing]);
 
@@ -138,9 +148,16 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
   };
 
   const toggleWardrobe = (id: string) => {
-    setActions(current => current.map(action => action.id === id
-      ? { ...action, wardrobe: !action.wardrobe, permission: 'manual' as const }
-      : action));
+    setActions(current => {
+      const selected = current.find(action => action.id === id);
+      const enabling = !selected?.wardrobe;
+      const next = current.map(action => action.id === id
+        ? { ...action, wardrobe: enabling, permission: 'manual' as const }
+        : action);
+      if (enabling) setActiveWardrobeActionId(id);
+      else if (activeWardrobeActionId === id) setActiveWardrobeActionId(next.find(action => action.wardrobe)?.id);
+      return next;
+    });
   };
 
   const previewDraft = (force = false) => {
@@ -466,6 +483,16 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
                   <span className="flex items-center gap-2"><TShirt size={13} weight={action.wardrobe ? 'fill' : 'regular'} /> {action.wardrobe ? '已加入真·衣橱' : '这是服装切换动作'}</span>
                   <span>{action.wardrobe ? '仅手动' : '加入'}</span>
                 </button>
+                {action.wardrobe && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveWardrobeActionId(action.id)}
+                    className={`mt-1.5 flex w-full items-center justify-between border px-3 py-2 text-left text-[10px] ${activeWardrobeActionId === action.id ? 'border-emerald-300/35 bg-emerald-300/15 text-emerald-100' : 'border-white/8 bg-black/15 text-white/42'}`}
+                  >
+                    <span>导入完成后默认穿这套</span>
+                    <span>{activeWardrobeActionId === action.id ? '当前默认' : '设为默认'}</span>
+                  </button>
+                )}
                 <div className="mt-2.5 grid grid-cols-3 gap-1 rounded-xl bg-black/20 p-1">
                   {permissionOptions.map(({ value, label, Icon }) => {
                     const selected = action.permission === value;
@@ -689,7 +716,13 @@ const Live2DActionSettings: React.FC<Live2DActionSettingsProps> = ({
       <div className="shrink-0 border-t border-white/10 bg-black/30 px-4 pt-3" style={{ paddingBottom: 'max(1rem, var(--safe-bottom))' }}>
         <p className="mb-3 text-[10px] leading-relaxed text-white/35">衣橱项目只允许用户手动切换，并从所有 AI 动作白名单中强制排除；“禁用”不会播放。</p>
         <button
-          onClick={() => onSave({ ...config, framing, actions: actions.map(action => action.wardrobe ? { ...action, permission: 'manual' as const } : action) })}
+          onClick={() => {
+            const normalizedActions = actions.map(action => action.wardrobe ? { ...action, permission: 'manual' as const } : action);
+            const selectedWardrobeId = normalizedActions.some(action => action.id === activeWardrobeActionId && action.wardrobe)
+              ? activeWardrobeActionId
+              : normalizedActions.find(action => action.wardrobe)?.id;
+            onSave({ ...config, framing, actions: normalizedActions, activeWardrobeActionId: selectedWardrobeId });
+          }}
           className="flex w-full items-center justify-center gap-2 rounded-2xl py-3 text-sm font-semibold text-white active:scale-[0.98]"
           style={{ background: `linear-gradient(90deg, ${accentColor}aa, ${accentColor})`, boxShadow: `0 0 20px ${accentColor}44` }}
         >

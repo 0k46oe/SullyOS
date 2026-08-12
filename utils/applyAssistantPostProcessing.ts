@@ -32,6 +32,8 @@ import { resolveCharTimeZone } from './timezone';
 import { NotionManager, FeishuManager, XhsNote } from './realtimeContext';
 import { enqueuePendingDiary, removePendingDiary } from './pendingDiary';
 import { parseXhsCount, XhsMcpClient } from './xhsMcpClient';
+import { extractPublishedNoteId, ownedPostToNote } from './xhsFreeRoamOwnership';
+import { selectOwnedPostsForReference } from './xhsOwnedPostReference';
 import { safeFetchJson } from './safeApi';
 import { extractHtmlBlocks } from './htmlPrompt';
 import {
@@ -114,7 +116,13 @@ const parseMimickedXhsCount = (interactionText: string, label: string): number =
 };
 // XHS side-effect helpers (POKE-style: 不抽到 agenticTools, 留给 Phase 2 Round 2 的 directive 重放)
 
-async function xhsPublish(conf: { mcpUrl: string }, title: string, content: string, tags: string[]): Promise<{ success: boolean; noteId?: string; message: string }> {
+async function xhsPublish(
+    conf: { mcpUrl: string },
+    owner: Pick<CharacterProfile, 'id' | 'name'>,
+    title: string,
+    content: string,
+    tags: string[],
+): Promise<{ success: boolean; noteId?: string; message: string }> {
     let images: string[] = [];
     try {
         const stockImgs = await DB.getXhsStockImages();
@@ -132,7 +140,26 @@ async function xhsPublish(conf: { mcpUrl: string }, title: string, content: stri
     } catch { /* ignore stock failures */ }
 
     const r = await XhsMcpClient.publishNote(conf.mcpUrl, { title, content, tags, images: images.length > 0 ? images : undefined });
-    return { success: r.success, noteId: r.data?.noteId, message: r.error || (r.success ? '发布成功' : '发布失败') };
+    const noteId = r.success ? extractPublishedNoteId(r) : '';
+    if (r.success && noteId) {
+        const now = Date.now();
+        try {
+            await DB.saveXhsOwnedPost({
+                id: `${owner.id}:${noteId}`,
+                characterId: owner.id,
+                noteId,
+                title: title || '无标题',
+                body: content,
+                tags,
+                publishedAt: now,
+                updatedAt: now,
+            });
+        } catch (error) {
+            // 远端已经发布成功，不能因为本地索引写入失败把它误报成“发帖失败”。
+            console.warn('[XHS] 发帖成功，但保存角色主页索引失败:', error);
+        }
+    }
+    return { success: r.success, noteId: noteId || undefined, message: r.error || (r.success ? '发布成功' : '发布失败') };
 }
 
 async function xhsComment(conf: { mcpUrl: string }, noteId: string, content: string, xsecToken?: string): Promise<{ success: boolean; message: string }> {
@@ -1491,7 +1518,7 @@ export async function applyAssistantPostProcessing(
         setXhsStatus(`正在发布小红书: ${postTitle}...`);
 
         try {
-            const result = await xhsPublish(xhsConf, postTitle, postContent, postTags);
+            const result = await xhsPublish(xhsConf, char, postTitle, postContent, postTags);
             if (result.success) {
                 console.log('📕 [XHS] 发布成功:', result.noteId);
                 const tagsStr = postTags.length > 0 ? ` #${postTags.join(' #')}` : '';
@@ -1659,7 +1686,41 @@ export async function applyAssistantPostProcessing(
         setXhsStatus('正在查看小红书主页...');
 
         try {
-            const xmpr = await runXhsMyProfile({}, agenticCtx);
+            let xmpr: Awaited<ReturnType<typeof runXhsMyProfile>>;
+            try {
+                const ownedPosts = await DB.getXhsOwnedPosts(char.id);
+                const latestUserMessage = [...fullMessages].reverse().find(message => message?.role === 'user');
+                const latestUserText = typeof latestUserMessage?.content === 'string'
+                    ? latestUserMessage.content
+                    : Array.isArray(latestUserMessage?.content)
+                        ? latestUserMessage.content.map((part: any) => part?.text || '').join('\n')
+                        : '';
+                const selectedPosts = selectOwnedPostsForReference(ownedPosts, latestUserText, 8);
+                const localNotes = selectedPosts.map(post => ownedPostToNote(post, char.name) as XhsNote);
+                for (const note of localNotes) {
+                    if (note.xsecToken) xsecTokenCacheRef.set(note.noteId, note.xsecToken);
+                    if (note.title) ctx.xhsCaches.noteTitleCache.set(note.noteId, note.title);
+                }
+                if (localNotes.length > 0) lastXhsNotesRef.current = localNotes;
+                const feedsStr = selectedPosts.length > 0
+                    ? selectedPosts.map((post, index) => {
+                        const published = new Date(post.publishedAt).toLocaleString();
+                        return `${index + 1}. [noteId=${post.noteId}]「${post.title || '无标题'}」· 发布于 ${published} (${post.likes || 0}赞 ${post.commentCount || 0}评论)\n   ${post.body || '（无正文）'}`;
+                    }).join('\n\n')
+                    : '（这个角色的主页还没有已归属的笔记）';
+                xmpr = {
+                    ok: true,
+                    nickname: char.name,
+                    userId: '',
+                    profileStr: `角色独立主页：共 ${ownedPosts.length} 条笔记。真实账号可能与其他角色共用。`,
+                    feedsStr,
+                    gotProfile: true,
+                    notes: localNotes,
+                };
+            } catch (localProfileError) {
+                console.warn('[XHS] 角色主页读取失败，回退到真实账号主页:', localProfileError);
+                xmpr = await runXhsMyProfile({}, agenticCtx);
+            }
 
             if (xmpr.ok) {
                 const { nickname, userId, profileStr, feedsStr, gotProfile } = xmpr;
@@ -1672,7 +1733,7 @@ export async function applyAssistantPostProcessing(
                 const xhsMessages = [
                     ...fullMessages,
                     { role: 'assistant', content: cleanedForXhs },
-                    { role: 'user', content: `[系统: 你打开了自己的小红书]\n\n你的小红书账号昵称: ${nickname || '未知'}${userId ? ` (userId: ${userId})` : ''}${profileSection}\n\n${gotProfile ? '你的笔记' : `搜索「${nickname}」找到的相关笔记`}:\n${feedsStr}\n\n[系统: ${gotProfile ? '以上是你的主页数据。' : '注意，搜索结果可能包含别人的帖子，你需要辨别哪些是你自己发的（看作者名字）。'}现在请你：\n1. 自然地聊聊你看到了什么，"我看了看我的小红书..."、"我之前发的那个帖子..."\n2. 如果想发新笔记，可以用 [[XHS_POST: 标题 | 内容 | #标签1 #标签2]]\n3. 如果想看某条笔记的详细内容，可以用 [[XHS_DETAIL: noteId]]\n4. 严禁再输出[[XHS_MY_PROFILE]]标记]` }
+                    { role: 'user', content: `[系统: 你打开了自己的小红书]\n\n你的小红书账号昵称: ${nickname || '未知'}${userId ? ` (userId: ${userId})` : ''}${profileSection}\n\n${gotProfile ? '你的笔记' : `搜索「${nickname}」找到的相关笔记`}:\n${feedsStr}\n\n[系统: ${gotProfile ? '以上是按角色归属保存的主页数据，序号已根据用户刚才的说法按相关性和时间排序。' : '注意，搜索结果可能包含别人的帖子，你需要辨别哪些是你自己发的（看作者名字）。'}现在请你：\n1. 如果用户说“刚才那个帖子”“之前那篇”或要求查看自己帖子的评论区，选择最符合时间/标题的候选并输出 [[XHS_DETAIL: noteId]]；不要只口头说去看。\n2. 如果多个候选同样符合、无法判断是哪条，就自然地向用户确认，不能猜。\n3. 普通查看主页时，可以自然地聊聊看到的内容。\n4. 如果想发新笔记，可以用 [[XHS_POST: 标题 | 内容 | #标签1 #标签2]]。\n5. 严禁再输出[[XHS_MY_PROFILE]]标记。]` }
                 ];
 
                 data = await safeFetchJson(`${baseUrl}/chat/completions`, {
@@ -1923,7 +1984,7 @@ export async function applyAssistantPostProcessing(
         console.log(`📕 [XHS] AI要发小红书(profile后):`, postTitle);
         setXhsStatus(`正在发布小红书: ${postTitle}...`);
         try {
-            const result = await xhsPublish(xhsConf, postTitle, postContent, postTags);
+            const result = await xhsPublish(xhsConf, char, postTitle, postContent, postTags);
             if (result.success) {
                 console.log('📕 [XHS] 发布成功(profile后):', result.noteId);
                 const tagsStr = postTags.length > 0 ? ` #${postTags.join(' #')}` : '';

@@ -37,6 +37,7 @@ interface AvatarModelManifestEntry {
   path: string;
   byteLength: number;
   config: VideoAvatarConfig;
+  slot?: 'active' | 'wardrobe';
 }
 
 interface AvatarModelBackupManifest {
@@ -104,15 +105,11 @@ const readManifest = async (zip: JSZip): Promise<AvatarModelBackupManifest> => {
     throw new Error('模型备份中的模型数量异常，已停止导入。');
   }
 
-  const seenCharacterIds = new Set<string>();
+  const seenAssetIds = new Set<string>();
   for (const item of manifest.models) {
     if (!item || typeof item.characterId !== 'string' || !item.characterId) {
       throw new Error('模型备份清单缺少角色 ID。');
     }
-    if (seenCharacterIds.has(item.characterId)) {
-      throw new Error(`模型备份中角色 ${item.characterName || item.characterId} 出现了两次。`);
-    }
-    seenCharacterIds.add(item.characterId);
     if (!isSafeModelPath(item.path) || !zip.file(item.path)) {
       throw new Error(`模型文件缺失或路径不安全：${item.path || '未知路径'}。`);
     }
@@ -122,6 +119,10 @@ const readManifest = async (zip: JSZip): Promise<AvatarModelBackupManifest> => {
     if (!isVideoAvatarConfig(item.config)) {
       throw new Error(`模型 ${item.characterName || item.characterId} 的配置无效。`);
     }
+    if (seenAssetIds.has(item.config.assetId)) {
+      throw new Error(`模型备份中资源 ${item.config.assetId} 出现了两次。`);
+    }
+    seenAssetIds.add(item.config.assetId);
   }
 
   return manifest as AvatarModelBackupManifest;
@@ -132,20 +133,23 @@ export const getAvatarModelBackupInventory = async (): Promise<AvatarModelBackup
   const models: AvatarModelBackupInventoryItem[] = [];
 
   for (const character of characters) {
-    const config = character.videoAvatar;
-    // Built-in Sully ships with the application and has no IndexedDB blob to
-    // back up. Character framing/quality preferences remain in the normal data
-    // backup, while this archive stays focused on user-imported binaries.
-    if (!config || (config.format === 'live2d' && config.builtIn)) continue;
-    const blob = await DB.getBlobAsset(config.assetId);
-    models.push({
-      characterId: character.id,
-      characterName: character.name,
-      format: config.format,
-      fileName: config.fileName,
-      byteLength: blob?.size || config.byteLength || 0,
-      available: Boolean(blob),
-    });
+    const configs = [character.videoAvatar, ...(character.videoAvatarWardrobe || [])]
+      .filter((config, index, all): config is VideoAvatarConfig => Boolean(config)
+        && all.findIndex(item => item?.assetId === config?.assetId) === index);
+    for (const config of configs) {
+      // Built-in Sully ships with the application and has no IndexedDB blob to
+      // back up. Character framing/quality preferences remain in normal data.
+      if (config.format === 'live2d' && config.builtIn) continue;
+      const blob = await DB.getBlobAsset(config.assetId);
+      models.push({
+        characterId: character.id,
+        characterName: character.name,
+        format: config.format,
+        fileName: config.fileName,
+        byteLength: blob?.size || config.byteLength || 0,
+        available: Boolean(blob),
+      });
+    }
   }
 
   return {
@@ -159,19 +163,27 @@ export const getAvatarModelBackupInventory = async (): Promise<AvatarModelBackup
 export const createAvatarModelBackup = async (
   onProgress?: (progress: AvatarModelBackupProgress) => void,
 ): Promise<Blob> => {
-  const characters = (await DB.getAllCharacters()).filter(character => {
-    const config = character.videoAvatar;
-    return Boolean(config && !(config.format === 'live2d' && config.builtIn));
+  const characters = await DB.getAllCharacters();
+  const candidates = characters.flatMap(character => {
+    const configs = [character.videoAvatar, ...(character.videoAvatarWardrobe || [])]
+      .filter((config, index, all): config is VideoAvatarConfig => Boolean(config)
+        && all.findIndex(item => item?.assetId === config?.assetId) === index);
+    return configs
+      .filter(config => !(config.format === 'live2d' && config.builtIn))
+      .map(config => ({
+        character,
+        config,
+        slot: config.assetId === character.videoAvatar?.assetId ? 'active' as const : 'wardrobe' as const,
+      }));
   });
-  if (!characters.length) throw new Error('当前没有需要备份的自定义模型；Sully 内置模型会随应用自动提供。');
+  if (!candidates.length) throw new Error('当前没有需要备份的自定义模型；Sully 内置模型会随应用自动提供。');
 
   const zip = new JSZip();
   const models: AvatarModelManifestEntry[] = [];
 
-  for (let index = 0; index < characters.length; index++) {
-    const character = characters[index];
-    const config = character.videoAvatar!;
-    onProgress?.({ phase: 'scan', done: index, total: characters.length, label: `正在读取 ${character.name} 的模型…` });
+  for (let index = 0; index < candidates.length; index++) {
+    const { character, config, slot } = candidates[index];
+    onProgress?.({ phase: 'scan', done: index, total: candidates.length, label: `正在读取 ${character.name} 的模型…` });
     const blob = await DB.getBlobAsset(config.assetId);
     if (!blob) continue;
     const path = modelPath(models.length, config.format);
@@ -183,8 +195,9 @@ export const createAvatarModelBackup = async (
       path,
       byteLength: blob.size,
       config: { ...config, byteLength: blob.size },
+      slot,
     });
-    onProgress?.({ phase: 'scan', done: index + 1, total: characters.length, label: `已加入 ${character.name}` });
+    onProgress?.({ phase: 'scan', done: index + 1, total: candidates.length, label: `已加入 ${character.name}` });
   }
 
   if (!models.length) throw new Error('角色资料里有模型索引，但本地模型文件已经丢失。');
@@ -250,7 +263,7 @@ export const restoreAvatarModelBackup = async (
     if (bytes.byteLength !== item.byteLength) {
       throw new Error(`模型 ${item.characterName} 大小校验失败，已停止导入。`);
     }
-    const blob = new Blob([bytes], {
+    const blob = new Blob([bytes.slice().buffer], {
       type: item.config.format === 'vrm' ? 'model/gltf-binary' : 'application/zip',
     });
 
@@ -259,8 +272,17 @@ export const restoreAvatarModelBackup = async (
     if (config.format === 'live2d') {
       await DB.deleteBlobAsset(live2DRuntimeCacheAssetId(config.assetId));
     }
-    await DB.saveCharacter({ ...target, videoAvatar: config });
-    byId.set(target.id, { ...target, videoAvatar: config });
+    const updatedTarget = item.slot === 'wardrobe'
+      ? {
+          ...target,
+          videoAvatarWardrobe: [
+            ...(target.videoAvatarWardrobe || []).filter(model => model.assetId !== config.assetId),
+            config,
+          ],
+        }
+      : { ...target, videoAvatar: config };
+    await DB.saveCharacter(updatedTarget);
+    byId.set(target.id, updatedTarget);
     result.restored += 1;
     result.restoredBytes += blob.size;
     result.models.push({ characterId: target.id, characterName: target.name, config });

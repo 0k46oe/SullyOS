@@ -8,8 +8,10 @@ import { bridgeCubism6RenderOrders, ensureLive2DCubismCore, preloadLive2DRuntime
 import {
   buildLive2DPerformanceMix,
   findLive2DActionsForPerformance,
+  getActiveLive2DWardrobeParameters,
   loadLive2DModelSource,
   type Live2DAction,
+  type Live2DActionParameterValue,
   type Live2DAvatarConfig,
 } from '../../utils/live2dModelStore';
 import type { AvatarMotionState } from './VRMAvatarCanvas';
@@ -48,6 +50,8 @@ interface Live2DAvatarCanvasProps {
   /** 高质量模式才启用保守的多层动作混合；基础/手动播放路径保持原样。 */
   performanceQuality?: 'basic' | 'high';
   manualAction?: Live2DActionTrigger | null;
+  /** Keep the user's selected wardrobe expression as a persistent parameter layer. */
+  preserveActiveWardrobe?: boolean;
   onLoadingChange?: (loading: boolean, stage?: string) => void;
   onError?: (message: string) => void;
   onReady?: () => void;
@@ -228,6 +232,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   performance,
   performanceQuality = 'basic',
   manualAction,
+  preserveActiveWardrobe = false,
   onLoadingChange,
   onError,
   onReady,
@@ -249,6 +254,8 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   const touchImpulseNonceRef = useRef(touchImpulseNonce);
   const performanceQualityRef = useRef(performanceQuality);
   const actionParameterIdsRef = useRef<Record<string, string[]>>({});
+  const actionParameterValuesRef = useRef<Record<string, Live2DActionParameterValue[]>>({});
+  const preserveActiveWardrobeRef = useRef(preserveActiveWardrobe);
   const onLoadingChangeRef = useRef(onLoadingChange);
   const onErrorRef = useRef(onError);
   const onReadyRef = useRef(onReady);
@@ -312,6 +319,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   useEffect(() => { performanceRef.current = performance; }, [performance]);
   useEffect(() => { touchImpulseNonceRef.current = touchImpulseNonce; }, [touchImpulseNonce]);
   useEffect(() => { performanceQualityRef.current = performanceQuality; }, [performanceQuality]);
+  useEffect(() => { preserveActiveWardrobeRef.current = preserveActiveWardrobe; }, [preserveActiveWardrobe]);
   useEffect(() => { onLoadingChangeRef.current = onLoadingChange; }, [onLoadingChange]);
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
   useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
@@ -622,6 +630,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
         cleanupPackage = source.cleanup;
         packageTextureUrls = source.textureUrls;
         actionParameterIdsRef.current = source.actionParameterIds;
+        actionParameterValuesRef.current = source.actionParameterValues;
         if (disposed) {
           releasePackage();
           return;
@@ -767,6 +776,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
         // 自定义参数动作的底值记录：叠加淡出后参数要精确回到模型自身的值。
         const overlayBases: Record<string, { base: number; lastFinal: number }> = {};
         const pinnedPreviewBases: Record<string, { base: number; lastFinal: number }> = {};
+        const wardrobeBases: Record<string, { base: number; lastFinal: number }> = {};
         const overlayBlend = (id: string, target: number, weight: number) => {
           const resolved = resolveId(id);
           const currentValue = core.getParameterValueById(resolved);
@@ -797,6 +807,40 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
             }
             delete pinnedPreviewBases[id];
           });
+        };
+        const applyPersistentWardrobe = () => {
+          const targets = preserveActiveWardrobeRef.current
+            ? getActiveLive2DWardrobeParameters(configRef.current, actionParameterValuesRef.current)
+            : [];
+          const activeIds = new Set<string>();
+          targets.forEach(({ id, value, blend = 'Add' }) => {
+            if (!hasParameter(id) || !Number.isFinite(value)) return;
+            activeIds.add(id);
+            const resolved = resolveId(id);
+            const currentValue = core.getParameterValueById(resolved);
+            const previous = wardrobeBases[id];
+            const base = previous && Math.abs(currentValue - previous.lastFinal) < 1e-4
+              ? previous.base
+              : currentValue;
+            const next = blend === 'Overwrite'
+              ? value
+              : blend === 'Multiply' ? base * value : base + value;
+            core.setParameterValueById(resolved, next);
+            wardrobeBases[id] = { base, lastFinal: core.getParameterValueById(resolved) };
+          });
+          Object.keys(wardrobeBases).forEach(id => {
+            if (activeIds.has(id)) return;
+            const resolved = resolveId(id);
+            const previous = wardrobeBases[id];
+            const currentValue = core.getParameterValueById(resolved);
+            if (Math.abs(currentValue - previous.lastFinal) < 1e-4) {
+              core.setParameterValueById(resolved, previous.base);
+            }
+            delete wardrobeBases[id];
+          });
+          if (host.dataset.live2dWardrobe !== configRef.current.activeWardrobeActionId) {
+            host.dataset.live2dWardrobe = configRef.current.activeWardrobeActionId || '';
+          }
         };
 
         // 把模型全部参数（id/范围/默认值）回传给设置面板，驱动 VTS 风格的
@@ -1014,6 +1058,10 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
           // A playable action fades by design; the editor instead needs a
           // sustained before/after state so every slider movement is visible.
           applyPinnedPreview(parameterPreviewRef.current || []);
+          // Wardrobe is a user-owned persistent layer. It runs after motions,
+          // AI expressions and touch overlays so none of them can expose the
+          // model's watermarked/default art by resetting the expression manager.
+          applyPersistentWardrobe();
           // Final writer wins: our call-style autonomy, audio accents and custom
           // parameter overlays have all run by this point. During companion
           // startup, erase every head output we own on every frame.

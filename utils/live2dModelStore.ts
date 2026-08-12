@@ -7,6 +7,7 @@ import { isBuiltinSullyLive2D } from './builtinSullyLive2D';
 export type Live2DAvatarConfig = Extract<NonNullable<CharacterProfile['videoAvatar']>, { format: 'live2d' }>;
 export type Live2DAction = Live2DAvatarConfig['actions'][number];
 export type Live2DActionPermission = Live2DAction['permission'];
+export type Live2DActionParameterValue = NonNullable<Live2DAction['parameterValues']>[number];
 
 /** 衣橱动作拥有独立的强制手动通道，旧数据即使残留 ai 权限也不会暴露给模型。 */
 export const isLive2DWardrobeAction = (action: Live2DAction): boolean => action.wardrobe === true;
@@ -16,6 +17,22 @@ export const getLive2DAIActions = (config: Live2DAvatarConfig): Live2DAction[] =
 export const getLive2DWardrobeActions = (config: Live2DAvatarConfig): Live2DAction[] => (
   config.actions.filter(isLive2DWardrobeAction)
 );
+
+/** Resolve the parameter layer that must remain pinned for the selected outfit. */
+export const getActiveLive2DWardrobeParameters = (
+  config: Live2DAvatarConfig,
+  runtimeValues: Record<string, Live2DActionParameterValue[]> = {},
+): Live2DActionParameterValue[] => {
+  const action = config.actions.find(item => (
+    item.id === config.activeWardrobeActionId && isLive2DWardrobeAction(item)
+  ));
+  if (!action) return [];
+  if (action.kind === 'params') {
+    return (action.params || []).map(param => ({ ...param, blend: 'Overwrite' as const }));
+  }
+  if (action.kind !== 'expression') return [];
+  return action.parameterValues || runtimeValues[action.id] || [];
+};
 
 const isIdleOnlyMotion = (action: Live2DAction): boolean => (
   action.kind === 'motion'
@@ -83,6 +100,7 @@ type ParsedPackage = {
   modelName: string;
   actions: Live2DAction[];
   lipSyncParameterIds: string[];
+  texturePaths: string[];
   framing?: Live2DAvatarConfig['framing'];
 };
 
@@ -111,6 +129,246 @@ const finiteOr = (value: unknown, fallback: number): number => (
   typeof value === 'number' && Number.isFinite(value) ? value : fallback
 );
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
+
+export const LIVE2D_MAX_TEXTURE_DIMENSION = 4096;
+
+export interface Live2DTextureDimensions {
+  width: number;
+  height: number;
+  mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+}
+
+export interface Live2DTextureResizeTarget {
+  width: number;
+  height: number;
+}
+
+const readUint24LE = (bytes: Uint8Array, offset: number): number => (
+  bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16)
+);
+
+/** Read texture dimensions from the file header without decoding a potentially huge bitmap. */
+export const readLive2DTextureDimensions = async (blob: Blob): Promise<Live2DTextureDimensions | null> => {
+  const bytes = new Uint8Array(await blob.slice(0, Math.min(blob.size, 512 * 1024)).arrayBuffer());
+  if (bytes.length >= 24
+    && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+    && bytes[12] === 0x49 && bytes[13] === 0x48 && bytes[14] === 0x44 && bytes[15] === 0x52) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const width = view.getUint32(16, false);
+    const height = view.getUint32(20, false);
+    return width > 0 && height > 0 ? { width, height, mimeType: 'image/png' } : null;
+  }
+
+  if (bytes.length >= 12
+    && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
+    && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
+    for (let offset = 12; offset + 8 <= bytes.length;) {
+      const chunk = String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
+      const chunkSize = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(offset + 4, true);
+      const dataOffset = offset + 8;
+      if (chunk === 'VP8X' && dataOffset + 10 <= bytes.length) {
+        return {
+          width: readUint24LE(bytes, dataOffset + 4) + 1,
+          height: readUint24LE(bytes, dataOffset + 7) + 1,
+          mimeType: 'image/webp',
+        };
+      }
+      if (chunk === 'VP8 ' && dataOffset + 10 <= bytes.length
+        && bytes[dataOffset + 3] === 0x9d && bytes[dataOffset + 4] === 0x01 && bytes[dataOffset + 5] === 0x2a) {
+        return {
+          width: (bytes[dataOffset + 6] | (bytes[dataOffset + 7] << 8)) & 0x3fff,
+          height: (bytes[dataOffset + 8] | (bytes[dataOffset + 9] << 8)) & 0x3fff,
+          mimeType: 'image/webp',
+        };
+      }
+      if (chunk === 'VP8L' && dataOffset + 5 <= bytes.length && bytes[dataOffset] === 0x2f) {
+        return {
+          width: 1 + bytes[dataOffset + 1] + ((bytes[dataOffset + 2] & 0x3f) << 8),
+          height: 1 + (bytes[dataOffset + 2] >> 6) + (bytes[dataOffset + 3] << 2) + ((bytes[dataOffset + 4] & 0x0f) << 10),
+          mimeType: 'image/webp',
+        };
+      }
+      const next = dataOffset + chunkSize + (chunkSize % 2);
+      if (next <= offset) break;
+      offset = next;
+    }
+  }
+
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    const sofMarkers = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
+    for (let offset = 2; offset + 8 < bytes.length;) {
+      if (bytes[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;
+      const marker = bytes[offset++];
+      if (marker === 0xd9 || marker === 0xda) break;
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+      if (offset + 1 >= bytes.length) break;
+      const segmentLength = (bytes[offset] << 8) | bytes[offset + 1];
+      if (segmentLength < 2 || offset + segmentLength > bytes.length) break;
+      if (sofMarkers.has(marker) && segmentLength >= 7) {
+        const height = (bytes[offset + 3] << 8) | bytes[offset + 4];
+        const width = (bytes[offset + 5] << 8) | bytes[offset + 6];
+        return width > 0 && height > 0 ? { width, height, mimeType: 'image/jpeg' } : null;
+      }
+      offset += segmentLength;
+    }
+  }
+
+  return null;
+};
+
+export const getLive2DTextureResizeTarget = (
+  width: number,
+  height: number,
+  maxDimension = LIVE2D_MAX_TEXTURE_DIMENSION,
+): Live2DTextureResizeTarget | null => {
+  const longest = Math.max(width, height);
+  if (!Number.isFinite(longest) || longest <= maxDimension) return null;
+  const scale = maxDimension / longest;
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+};
+
+export interface Live2DResizedTexture {
+  path: string;
+  fromWidth: number;
+  fromHeight: number;
+  toWidth: number;
+  toHeight: number;
+}
+
+export interface Live2DTextureDownscaleResult {
+  entries: PackageEntry[];
+  resizedTextures: Live2DResizedTexture[];
+}
+
+const encodeResizedTexture = async (
+  source: CanvasImageSource,
+  target: Live2DTextureResizeTarget,
+  mimeType: Live2DTextureDimensions['mimeType'],
+): Promise<Blob> => {
+  const quality = mimeType === 'image/jpeg' ? 0.9 : undefined;
+  if (typeof OffscreenCanvas !== 'undefined') {
+    const canvas = new OffscreenCanvas(target.width, target.height);
+    try {
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('浏览器无法创建图片缩放画布');
+      context.drawImage(source, 0, 0, target.width, target.height);
+      return await canvas.convertToBlob({ type: mimeType, quality });
+    } finally {
+      canvas.width = 1;
+      canvas.height = 1;
+    }
+  }
+
+  if (typeof document === 'undefined') throw new Error('当前环境不支持图片缩放');
+  const canvas = document.createElement('canvas');
+  canvas.width = target.width;
+  canvas.height = target.height;
+  try {
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('浏览器无法创建图片缩放画布');
+    context.drawImage(source, 0, 0, target.width, target.height);
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        result => result ? resolve(result) : reject(new Error('浏览器无法编码降档后的贴图')),
+        mimeType,
+        quality,
+      );
+    });
+  } finally {
+    canvas.width = 1;
+    canvas.height = 1;
+  }
+};
+
+const resizeLive2DTextureBlob = async (
+  blob: Blob,
+  dimensions: Live2DTextureDimensions,
+  target: Live2DTextureResizeTarget,
+): Promise<Blob> => {
+  const typedBlob = blob.type === dimensions.mimeType ? blob : blob.slice(0, blob.size, dimensions.mimeType);
+  let source: CanvasImageSource;
+  let closeBitmap: (() => void) | undefined;
+  let objectUrl = '';
+
+  try {
+    if (typeof createImageBitmap === 'function') {
+      const bitmap = await createImageBitmap(typedBlob, {
+        resizeWidth: target.width,
+        resizeHeight: target.height,
+        resizeQuality: 'high',
+      });
+      source = bitmap;
+      closeBitmap = () => bitmap.close();
+    } else {
+      if (typeof document === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+        throw new Error('当前浏览器不支持图片降档');
+      }
+      objectUrl = URL.createObjectURL(typedBlob);
+      const image = document.createElement('img');
+      image.decoding = 'async';
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error('浏览器无法解码这张贴图'));
+        image.src = objectUrl;
+      });
+      source = image;
+    }
+
+    const resized = await encodeResizedTexture(source, target, dimensions.mimeType);
+    if (!resized.size) throw new Error('降档后的贴图为空');
+    return resized;
+  } finally {
+    closeBitmap?.();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  }
+};
+
+/** Downscale referenced textures sequentially to keep peak decode memory bounded. */
+export const downscaleOversizedLive2DTextures = async (
+  entries: PackageEntry[],
+  texturePaths: string[],
+  onProgress?: Live2DImportProgress,
+  maxDimension = LIVE2D_MAX_TEXTURE_DIMENSION,
+): Promise<Live2DTextureDownscaleResult> => {
+  const nextEntries = [...entries];
+  const entryIndexByPath = new Map(entries.map((entry, index) => [normalizePath(entry.path), index]));
+  const resizedTextures: Live2DResizedTexture[] = [];
+
+  for (const path of [...new Set(texturePaths.map(normalizePath))]) {
+    const index = entryIndexByPath.get(path);
+    if (index === undefined) continue;
+    const entry = nextEntries[index];
+    const dimensions = await readLive2DTextureDimensions(entry.blob);
+    if (!dimensions) continue;
+    const target = getLive2DTextureResizeTarget(dimensions.width, dimensions.height, maxDimension);
+    if (!target) continue;
+
+    onProgress?.(`贴图 ${basename(path)} 为 ${dimensions.width}×${dimensions.height}，正在自动降档到 ${target.width}×${target.height}…`);
+    try {
+      const resizedBlob = await resizeLive2DTextureBlob(entry.blob, dimensions, target);
+      nextEntries[index] = { ...entry, blob: resizedBlob };
+      resizedTextures.push({
+        path,
+        fromWidth: dimensions.width,
+        fromHeight: dimensions.height,
+        toWidth: target.width,
+        toHeight: target.height,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`贴图 ${basename(path)} 超过 ${maxDimension}px，但自动降档失败：${detail}`);
+    }
+  }
+
+  return { entries: nextEntries, resizedTextures };
+};
 
 const resolveModelReference = (modelPath: string, reference: string): string => {
   const base = dirname(modelPath).split('/').filter(Boolean);
@@ -142,30 +400,47 @@ export const inferLive2DActionTags = (...parts: Array<string | undefined>): stri
   return actionTagRules.filter(([, pattern]) => pattern.test(text)).map(([tag]) => tag);
 };
 
-const discoverActionParameterIds = async (
+const discoverActionParameters = async (
   action: Live2DAction,
   entries: Map<string, Blob>,
   modelPath: string,
-): Promise<string[]> => {
+): Promise<{ ids: string[]; values: Live2DActionParameterValue[] }> => {
   if (action.kind === 'params') {
-    return [...new Set((action.params || []).map(param => param.id).filter(Boolean))];
+    const values = (action.params || [])
+      .filter(param => Boolean(param.id) && Number.isFinite(param.value))
+      .map(param => ({ ...param, blend: 'Overwrite' as const }));
+    return { ids: [...new Set(values.map(param => param.id))], values };
   }
-  if (!action.file) return action.parameterIds || [];
+  if (!action.file) return { ids: action.parameterIds || [], values: action.parameterValues || [] };
   try {
     const blob = entries.get(resolveModelReference(modelPath, action.file));
     // Motion/expression JSON should be tiny. Refuse unexpectedly large files so
     // metadata discovery can never stall model loading.
-    if (!blob || blob.size > 8 * 1024 * 1024) return action.parameterIds || [];
+    if (!blob || blob.size > 8 * 1024 * 1024) {
+      return { ids: action.parameterIds || [], values: action.parameterValues || [] };
+    }
     const parsed = JSON.parse(await blob.text()) as {
       Curves?: Array<{ Target?: string; Id?: string }>;
-      Parameters?: Array<{ Id?: string }>;
+      Parameters?: Array<{ Id?: string; Value?: number; Blend?: string }>;
     };
     const ids = action.kind === 'motion'
       ? (parsed.Curves || []).filter(curve => curve.Target === 'Parameter').map(curve => curve.Id)
       : (parsed.Parameters || []).map(parameter => parameter.Id);
-    return [...new Set(ids.filter((id): id is string => typeof id === 'string' && Boolean(id)))];
+    const values = action.kind === 'expression'
+      ? (parsed.Parameters || []).flatMap(parameter => {
+          if (!parameter.Id || !Number.isFinite(parameter.Value)) return [];
+          const blend: Live2DActionParameterValue['blend'] = parameter.Blend === 'Multiply' || parameter.Blend === 'Overwrite'
+            ? parameter.Blend
+            : 'Add';
+          return [{ id: parameter.Id, value: Number(parameter.Value), blend }];
+        })
+      : [];
+    return {
+      ids: [...new Set(ids.filter((id): id is string => typeof id === 'string' && Boolean(id)))],
+      values,
+    };
   } catch {
-    return action.parameterIds || [];
+    return { ids: action.parameterIds || [], values: action.parameterValues || [] };
   }
 };
 
@@ -363,8 +638,9 @@ const parsePackage = async (entries: PackageEntry[]): Promise<ParsedPackage> => 
     .filter(Boolean);
 
   await Promise.all(actions.map(async action => {
-    const parameterIds = await discoverActionParameterIds(action, byPath, modelPath);
-    if (parameterIds.length) action.parameterIds = parameterIds;
+    const parameters = await discoverActionParameters(action, byPath, modelPath);
+    if (parameters.ids.length) action.parameterIds = parameters.ids;
+    if (parameters.values.length) action.parameterValues = parameters.values;
   }));
 
   return {
@@ -372,6 +648,7 @@ const parsePackage = async (entries: PackageEntry[]): Promise<ParsedPackage> => 
     modelName: basename(modelPath).replace(/\.model3\.json$/i, ''),
     actions,
     lipSyncParameterIds: lipSyncParameterIds.length ? [...new Set(lipSyncParameterIds)] : ['ParamMouthOpenY'],
+    texturePaths: [...new Set(refs.Textures.map(texture => resolveModelReference(modelPath, texture)))],
     ...(vtube?.SavedModelPosition ? {
       framing: {
         scale: clamp(finiteOr(vtube.SavedModelPosition.Scale?.x, 1), 0.5, 6),
@@ -401,6 +678,7 @@ const createConfig = async (
   const inspected = parsed || await parsePackage(entries);
   const assetId = makeAssetId();
   await DB.putBlobAsset(assetId, blob);
+  seedLive2DRuntimePackage(assetId, entries);
   return {
     version: 1,
     format: 'live2d',
@@ -431,13 +709,16 @@ export const saveLive2DModelFromFiles = async (
   const entries = sourceFiles.map(file => ({ path: normalizePath(fileRelativePath(file)), blob: file }));
   onProgress?.(`正在扫描 ${entries.length} 个文件和 VTube Studio 热键…`);
   const parsed = await parsePackage(entries);
-  onProgress?.(`已找到 ${parsed.actions.length} 个表情/动作；正在整理本地模型包…`);
+  const optimized = await downscaleOversizedLive2DTextures(entries, parsed.texturePaths, onProgress);
+  onProgress?.(optimized.resizedTextures.length
+    ? `已自动降档 ${optimized.resizedTextures.length} 张超大贴图，正在整理本地模型包…`
+    : `已找到 ${parsed.actions.length} 个表情/动作，正在整理本地模型包…`);
   // PNG/JPEG/moc are already compressed. Re-deflating a large 8K texture can
   // freeze the UI for tens of seconds without meaningfully reducing its size.
-  const packageBlob = await buildStoredLive2DPackage(entries);
+  const packageBlob = await buildStoredLive2DPackage(optimized.entries);
   const rootName = parsed.modelPath.includes('/') ? parsed.modelPath.split('/')[0] : parsed.modelName;
   onProgress?.('正在写入本地模型库，请保持页面打开…');
-  return createConfig(packageBlob, entries, rootName, parsed);
+  return createConfig(packageBlob, optimized.entries, rootName, parsed);
 };
 
 export const saveLive2DModelFromZip = async (
@@ -455,18 +736,22 @@ export const saveLive2DModelFromZip = async (
     !entry.dir && !/(^|\/)__MACOSX\//i.test(entry.name) && !/(^|\/)\.DS_Store$/i.test(entry.name)
   ));
   let loaded = 0;
-  const entries = await Promise.all(sourceEntries.map(async entry => {
+  const entries: PackageEntry[] = [];
+  for (const entry of sourceEntries) {
     const blob = await entry.async('blob');
     loaded += 1;
     if (loaded === sourceEntries.length || loaded % 6 === 0) onProgress?.(`正在解包模型文件 ${loaded}/${sourceEntries.length}…`);
-    return { path: normalizePath(entry.name), blob };
-  }));
+    entries.push({ path: normalizePath(entry.name), blob });
+  }
   onProgress?.('正在解析 model3、未登记文件与 VTube Studio 热键…');
   const parsed = await parsePackage(entries);
-  onProgress?.(`已找到 ${parsed.actions.length} 个表情/动作；正在建立免解压运行缓存…`);
-  const packageBlob = await buildStoredLive2DPackage(entries);
+  const optimized = await downscaleOversizedLive2DTextures(entries, parsed.texturePaths, onProgress);
+  onProgress?.(optimized.resizedTextures.length
+    ? `已自动降档 ${optimized.resizedTextures.length} 张超大贴图，正在建立免解压运行缓存…`
+    : `已找到 ${parsed.actions.length} 个表情/动作，正在建立免解压运行缓存…`);
+  const packageBlob = await buildStoredLive2DPackage(optimized.entries);
   onProgress?.('运行缓存已建立，正在写入本地模型库…');
-  return createConfig(packageBlob, entries, file.name.replace(/\.zip$/i, ''), parsed);
+  return createConfig(packageBlob, optimized.entries, file.name.replace(/\.zip$/i, ''), parsed);
 };
 
 const mimeForPath = (path: string): string => {
@@ -614,6 +899,19 @@ const hydrateBuiltinSettings = (
 // not inflated from ZIP twice. A single-entry LRU bounds the extra memory when
 // the user switches characters.
 const live2DRuntimePackageCache = new Map<string, Promise<Live2DRuntimePackage>>();
+
+const seedLive2DRuntimePackage = (assetId: string, entries: PackageEntry[]): void => {
+  const runtimePackage: Live2DRuntimePackage = {
+    entries: new Map(entries.map(entry => [normalizePath(entry.path), entry.blob])),
+    textureDataUrls: new Map<string, Promise<string>>(),
+    source: 'stored-package',
+    unpackMs: 0,
+  };
+  live2DRuntimePackageCache.set(assetId, Promise.resolve(runtimePackage));
+  for (const cachedAssetId of live2DRuntimePackageCache.keys()) {
+    if (cachedAssetId !== assetId) live2DRuntimePackageCache.delete(cachedAssetId);
+  }
+};
 
 export type Live2DLoadProgress = (stage: string) => void;
 
@@ -797,6 +1095,7 @@ export const loadLive2DModelSource = async (
   settings: Record<string, any>;
   textureUrls: string[];
   actionParameterIds: Record<string, string[]>;
+  actionParameterValues: Record<string, Live2DActionParameterValue[]>;
   timings: Live2DLoadTimings;
   cleanup: () => void;
 }> => {
@@ -808,6 +1107,9 @@ export const loadLive2DModelSource = async (
     const actionParameterIds = Object.fromEntries(config.actions
       .filter(action => action.parameterIds?.length)
       .map(action => [action.id, [...action.parameterIds!]]));
+    const actionParameterValues = Object.fromEntries(config.actions
+      .filter(action => action.parameterValues?.length)
+      .map(action => [action.id, action.parameterValues!.map(parameter => ({ ...parameter }))]));
     const manifestMs = nowMs() - manifestStartedAt;
     const timings: Live2DLoadTimings = {
       cache: builtIn.memoryHit ? 'memory' : 'builtin',
@@ -822,6 +1124,7 @@ export const loadLive2DModelSource = async (
       settings,
       textureUrls,
       actionParameterIds,
+      actionParameterValues,
       timings,
       cleanup: () => {},
     };
@@ -836,9 +1139,14 @@ export const loadLive2DModelSource = async (
   const refs = settings.FileReferences;
   if (!refs) throw new Error('model3.json 缺少 FileReferences。');
   const parameterEntries = await Promise.all(config.actions.map(async action => (
-    [action.id, await discoverActionParameterIds(action, entries, config.modelPath)] as const
+    [action.id, await discoverActionParameters(action, entries, config.modelPath)] as const
   )));
-  const actionParameterIds = Object.fromEntries(parameterEntries.filter(([, ids]) => ids.length));
+  const actionParameterIds = Object.fromEntries(parameterEntries
+    .filter(([, parameters]) => parameters.ids.length)
+    .map(([id, parameters]) => [id, parameters.ids]));
+  const actionParameterValues = Object.fromEntries(parameterEntries
+    .filter(([, parameters]) => parameters.values.length)
+    .map(([id, parameters]) => [id, parameters.values]));
   const manifestMs = nowMs() - manifestStartedAt;
 
   // model3.json often omits VTube Studio hotkey expressions and idle motions.
@@ -926,6 +1234,7 @@ export const loadLive2DModelSource = async (
       settings,
       textureUrls: [...textureUrlCache.values()],
       actionParameterIds,
+      actionParameterValues,
       timings,
       cleanup: () => objectUrls.splice(0).forEach(url => URL.revokeObjectURL(url)),
     };

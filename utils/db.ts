@@ -5,7 +5,7 @@ import {
     CharacterProfile, ChatTheme, Message, UserProfile,
     Task, Anniversary, DiaryEntry, RoomTodo, RoomNote, DailySchedule,
     GalleryImage, FullBackupData, GroupProfile, SocialPost, StudyCourse, GameSession, Worldbook, NovelBook, Emoji, EmojiCategory,
-    BankTransaction, SavingsGoal, BankFullState, DollhouseState, XhsStockImage, XhsActivityRecord, SongSheet, QuizSession, GuidebookSession,
+    BankTransaction, SavingsGoal, BankFullState, DollhouseState, XhsStockImage, XhsActivityRecord, XhsOwnedPost, SongSheet, QuizSession, GuidebookSession,
     LifeSimState, HandbookEntry, Tracker, TrackerEntry, HotNewsSnapshot,
     LifeRecord, MedPlan, LifeRecordSettings, CharacterGroup,
     VRWorldNovel, VRNovelAnnotation, CustomCreatorPart, VRMusicRoomState, VRGuestbookState, VRScript, VRStagedPlay, VRLetter,
@@ -26,7 +26,8 @@ const DB_NAME = 'AetherOS_Data';
 // v68：character_groups 角色分组（神经链接"文件夹"，见 types.ts CharacterGroup）。
 // v69：见面·剧情条目与糯米机原生预设。正文继续复用 messages 表，避免再造会话存储。
 // v70：剧场面具箱（原创人物面具）；角色面具仍只存 characterId，不复制神经链接资料。
-const DB_VERSION = 70;
+// v71：角色小红书伪主页；发帖归属与可删除的自由活动日志分离。
+const DB_VERSION = 71;
 
 const STORE_CHARACTERS = 'characters';
 const STORE_CHAR_GROUPS = 'character_groups'; // 角色分组定义（角色通过 groupId 指向；与群聊 groups 无关）
@@ -55,6 +56,7 @@ const STORE_BANK_TX = 'bank_transactions';
 const STORE_BANK_DATA = 'bank_data';
 const STORE_XHS_STOCK = 'xhs_stock';
 const STORE_XHS_ACTIVITIES = 'xhs_activities';
+const STORE_XHS_OWNED_POSTS = 'xhs_owned_posts';
 const STORE_SONGS = 'songs';
 const STORE_QUIZZES = 'quizzes';
 const STORE_GUIDEBOOK = 'guidebook';
@@ -319,6 +321,11 @@ export const openDB = (): Promise<IDBDatabase> => {
       if (!db.objectStoreNames.contains(STORE_XHS_ACTIVITIES)) {
           const xhsActStore = db.createObjectStore(STORE_XHS_ACTIVITIES, { keyPath: 'id' });
           xhsActStore.createIndex('characterId', 'characterId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_XHS_OWNED_POSTS)) {
+          const ownedPostStore = db.createObjectStore(STORE_XHS_OWNED_POSTS, { keyPath: 'id' });
+          ownedPostStore.createIndex('characterId', 'characterId', { unique: false });
+          ownedPostStore.createIndex('noteId', 'noteId', { unique: false });
       }
 
       createStore(STORE_SONGS, { keyPath: 'id' });
@@ -1426,6 +1433,45 @@ export const DB = {
       for (const a of activities) {
           store.delete(a.id);
       }
+  },
+
+  // --- XHS Character Profiles (durable ownership, independent from activity history) ---
+  saveXhsOwnedPost: async (post: XhsOwnedPost): Promise<void> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_XHS_OWNED_POSTS)) return;
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_XHS_OWNED_POSTS, 'readwrite');
+          tx.objectStore(STORE_XHS_OWNED_POSTS).put(post);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error || new Error('保存角色小红书帖子失败'));
+          tx.onabort = () => reject(tx.error || new Error('保存角色小红书帖子被中止'));
+      });
+  },
+
+  getXhsOwnedPosts: async (characterId: string): Promise<XhsOwnedPost[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_XHS_OWNED_POSTS)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_XHS_OWNED_POSTS, 'readonly');
+          const request = tx.objectStore(STORE_XHS_OWNED_POSTS).index('characterId').getAll(IDBKeyRange.only(characterId));
+          request.onsuccess = () => {
+              const posts = (request.result || []) as XhsOwnedPost[];
+              posts.sort((a, b) => b.publishedAt - a.publishedAt);
+              resolve(posts);
+          };
+          request.onerror = () => reject(request.error || tx.error);
+      });
+  },
+
+  getAllXhsOwnedPosts: async (): Promise<XhsOwnedPost[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_XHS_OWNED_POSTS)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_XHS_OWNED_POSTS, 'readonly');
+          const request = tx.objectStore(STORE_XHS_OWNED_POSTS).getAll();
+          request.onsuccess = () => resolve((request.result || []) as XhsOwnedPost[]);
+          request.onerror = () => reject(request.error || tx.error);
+      });
   },
 
   saveScheduledMessage: async (msg: ScheduledMessage): Promise<void> => {
@@ -2837,7 +2883,7 @@ export const DB = {
           });
       };
 
-      const [characters, characterGroups, messages, themes, emojis, emojiCategories, assets, galleryImages, userProfiles, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, journalStickers, socialPosts, courses, games, worldbooks, storyTheaters, storyTheaterPresets, storyTheaterMasks, novels, bankTx, bankData, xhsActivities, xhsStockImages, songs, quizzes, guidebookSessions, scheduledMessages, lifeSimStates, handbooks, trackers, trackerEntries, hotNewsSnapshots, vrNovels, vrAnnotations, customCreatorParts, vrMusic, vrGuestbook, vrScripts, vrStagedPlays, vrPresets, vrLetters, vrSettings, worlds, worldEpisodes, lifeRecords, medPlans, lifeRecordSettings] = await Promise.all([
+      const [characters, characterGroups, messages, themes, emojis, emojiCategories, assets, galleryImages, userProfiles, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, journalStickers, socialPosts, courses, games, worldbooks, storyTheaters, storyTheaterPresets, storyTheaterMasks, novels, bankTx, bankData, xhsActivities, xhsOwnedPosts, xhsStockImages, songs, quizzes, guidebookSessions, scheduledMessages, lifeSimStates, handbooks, trackers, trackerEntries, hotNewsSnapshots, vrNovels, vrAnnotations, customCreatorParts, vrMusic, vrGuestbook, vrScripts, vrStagedPlays, vrPresets, vrLetters, vrSettings, worlds, worldEpisodes, lifeRecords, medPlans, lifeRecordSettings] = await Promise.all([
           getAllFromStore(STORE_CHARACTERS),
           getAllFromStore(STORE_CHAR_GROUPS),
           getAllFromStore(STORE_MESSAGES),
@@ -2865,6 +2911,7 @@ export const DB = {
           getAllFromStore(STORE_BANK_TX),
           getAllFromStore(STORE_BANK_DATA),
           getAllFromStore(STORE_XHS_ACTIVITIES),
+          getAllFromStore(STORE_XHS_OWNED_POSTS),
           getAllFromStore(STORE_XHS_STOCK),
           getAllFromStore(STORE_SONGS),
           getAllFromStore(STORE_QUIZZES),
@@ -2907,6 +2954,7 @@ export const DB = {
           bankDollhouse: dollhouseRecord?.data || undefined,
           bankTransactions: bankTx,
           xhsActivities,
+          xhsOwnedPosts,
           xhsStockImages,
           songs,
           quizSessions: quizzes,
@@ -2965,7 +3013,7 @@ export const DB = {
           STORE_TASKS, STORE_ANNIVERSARIES, STORE_ROOM_TODOS, STORE_ROOM_NOTES,
           STORE_GROUPS, STORE_JOURNAL_STICKERS, STORE_SOCIAL_POSTS, STORE_COURSES, STORE_GAMES, STORE_WORLDBOOKS, STORE_STORY_THEATERS, STORE_STORY_THEATER_PRESETS, STORE_STORY_THEATER_MASKS, STORE_NOVELS, STORE_SONGS,
           STORE_BANK_TX, STORE_BANK_DATA,
-          STORE_XHS_ACTIVITIES, STORE_XHS_STOCK,
+          STORE_XHS_ACTIVITIES, STORE_XHS_OWNED_POSTS, STORE_XHS_STOCK,
           STORE_QUIZZES,
           STORE_GUIDEBOOK,
           STORE_SCHEDULED,
@@ -3450,6 +3498,10 @@ export const DB = {
           await clearAndAdd(STORE_XHS_ACTIVITIES, data.xhsActivities, '小红书活动', false);
           data.xhsActivities = undefined as any;
       }, data.xhsActivities?.length || 0);
+      await runSection('角色小红书主页', data.xhsOwnedPosts !== undefined, async () => {
+          await clearAndAdd(STORE_XHS_OWNED_POSTS, data.xhsOwnedPosts, '角色小红书主页', false);
+          data.xhsOwnedPosts = undefined as any;
+      }, data.xhsOwnedPosts?.length || 0);
       await runSection('小红书图库', data.xhsStockImages !== undefined, async () => {
           await clearAndAdd(STORE_XHS_STOCK, data.xhsStockImages, '小红书图库', true);
           data.xhsStockImages = undefined as any;
