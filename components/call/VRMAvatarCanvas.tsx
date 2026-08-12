@@ -491,8 +491,16 @@ const VRMAvatarCanvas: React.FC<VRMAvatarCanvasProps> = ({
         // 用户锚定过脸部时，特写镜头直接落到锚点构图——不再按"身高的 84%"
         // 这类启发式猜脸的位置（Q版/戴帽/比例特殊的模型会飘出画面）。
         const anchored = closeShot && anchorFraming ? anchorFraming : null;
+        // Companion touches must not replace the user's desktop composition
+        // with a one-size-fits-all full-body close-up. A saved face anchor is
+        // the only close-shot position allowed on the always-on desktop.
+        const suppressUnanchoredCloseShot = closeShot
+          && ambientAutonomyDisabledRef.current
+          && !anchored;
         const cameraZFactor = anchored
           ? 0.7
+          : suppressUnanchoredCloseShot
+            ? 0.7
           : closeShot
             ? 0.57
             : currentPerformance.camera === 'wide' || currentPerformance.camera === 'pull-out'
@@ -502,6 +510,8 @@ const VRMAvatarCanvas: React.FC<VRMAvatarCanvasProps> = ({
         // 引起的上下跳动要尽量轻，拉近拉远主要靠距离（Z）表达。
         const cameraYFactor = anchored
           ? 0.82
+          : suppressUnanchoredCloseShot
+            ? 0.82
           : closeShot
             ? 0.84
             : currentPerformance.camera === 'wide' || currentPerformance.camera === 'pull-out'

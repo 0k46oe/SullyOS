@@ -18,6 +18,31 @@ export const getLive2DWardrobeActions = (config: Live2DAvatarConfig): Live2DActi
   config.actions.filter(isLive2DWardrobeAction)
 );
 
+/**
+ * Remove an item from the manual wardrobe without deleting the underlying
+ * model action. It stays manual so a later compatibility upgrade cannot expose
+ * a former clothing switch to the AI action whitelist.
+ */
+export const removeLive2DWardrobeAction = (
+  config: Live2DAvatarConfig,
+  actionId: string,
+): Live2DAvatarConfig => {
+  const target = config.actions.find(action => action.id === actionId && isLive2DWardrobeAction(action));
+  if (!target) return config;
+  const actions = config.actions.map(action => action.id === actionId
+    ? { ...action, wardrobe: false, permission: 'manual' as const }
+    : action);
+  const nextWardrobe = actions.find(isLive2DWardrobeAction);
+  return {
+    ...config,
+    actionPolicyVersion: 2,
+    actions,
+    activeWardrobeActionId: config.activeWardrobeActionId === actionId
+      ? nextWardrobe?.id
+      : config.activeWardrobeActionId,
+  };
+};
+
 /** Resolve the parameter layer that must remain pinned for the selected outfit. */
 export const getActiveLive2DWardrobeParameters = (
   config: Live2DAvatarConfig,
@@ -918,6 +943,25 @@ export type Live2DLoadProgress = (stage: string) => void;
 const nowMs = (): number => globalThis.performance?.now?.() ?? Date.now();
 const prettyMs = (value: number): string => value < 1_000 ? `${Math.round(value)}ms` : `${(value / 1_000).toFixed(1)}s`;
 
+const optimizeStoredRuntimeTextures = async (
+  config: Live2DAvatarConfig,
+  entries: PackageEntry[],
+  onProgress?: Live2DLoadProgress,
+): Promise<Live2DTextureDownscaleResult> => {
+  const settingsBlob = entries.find(entry => normalizePath(entry.path) === normalizePath(config.modelPath))?.blob;
+  if (!settingsBlob) return { entries, resizedTextures: [] };
+  try {
+    const settings = JSON.parse(await settingsBlob.text()) as Model3Json;
+    const texturePaths = (settings.FileReferences?.Textures || [])
+      .map(reference => resolveModelReference(config.modelPath, reference));
+    if (!texturePaths.length) return { entries, resizedTextures: [] };
+    return downscaleOversizedLive2DTextures(entries, texturePaths, onProgress);
+  } catch (error) {
+    if (error instanceof SyntaxError) return { entries, resizedTextures: [] };
+    throw error;
+  }
+};
+
 const getLive2DRuntimePackage = async (
   config: Live2DAvatarConfig,
   onProgress?: Live2DLoadProgress,
@@ -939,12 +983,18 @@ const getLive2DRuntimePackage = async (
   const pending = (async () => {
     let packageBlob: Blob | null = null;
     let source: Live2DRuntimePackage['source'];
+    const persistentCacheId = live2DRuntimeCacheAssetId(assetId);
     if (config.runtimePackageEncoding === 'store-v1') {
-      onProgress?.('正在读取免解压模型包…');
-      packageBlob = await DB.getBlobAsset(assetId);
-      source = 'stored-package';
+      packageBlob = await DB.getBlobAsset(persistentCacheId);
+      if (packageBlob) {
+        onProgress?.('正在读取已优化的模型运行缓存…');
+        source = 'persistent-cache';
+      } else {
+        onProgress?.('正在读取免解压模型包…');
+        packageBlob = await DB.getBlobAsset(assetId);
+        source = 'stored-package';
+      }
     } else {
-      const persistentCacheId = live2DRuntimeCacheAssetId(assetId);
       packageBlob = await DB.getBlobAsset(persistentCacheId);
       if (packageBlob) {
         onProgress?.('正在读取持久化运行缓存…');
@@ -959,9 +1009,14 @@ const getLive2DRuntimePackage = async (
     const unpackStartedAt = nowMs();
     const zip = await JSZip.loadAsync(packageBlob);
     const files = Object.values(zip.files).filter(entry => !entry.dir);
-    const pairs = await Promise.all(files.map(async entry => (
+    const unpackedPairs = await Promise.all(files.map(async entry => (
       [normalizePath(entry.name), await entry.async('blob')] as const
     )));
+    const unpackedEntries = unpackedPairs.map(([path, blob]) => ({ path, blob }));
+    const optimized = await optimizeStoredRuntimeTextures(config, unpackedEntries, stage => {
+      onProgress?.(`首次优化旧模型：${stage}`);
+    });
+    const pairs = optimized.entries.map(entry => [normalizePath(entry.path), entry.blob] as const);
     const runtimePackage: Live2DRuntimePackage = {
       entries: new Map(pairs),
       textureDataUrls: new Map<string, Promise<string>>(),
@@ -972,11 +1027,15 @@ const getLive2DRuntimePackage = async (
     // Existing users keep the original portable ZIP, while a derived STORE archive
     // is written once beside it. It is a disposable cache, so backup/restore can
     // omit it and rebuild naturally.
-    if (source === 'legacy-zip') {
+    if (source === 'legacy-zip' || optimized.resizedTextures.length > 0) {
       const cacheEntries = pairs.map(([path, blob]) => ({ path, blob }));
       void buildStoredLive2DPackage(cacheEntries)
-        .then(blob => DB.putBlobAsset(live2DRuntimeCacheAssetId(assetId), blob))
-        .then(() => console.info('[live2d] persistent STORE cache created', { assetId, files: pairs.length }))
+        .then(blob => DB.putBlobAsset(persistentCacheId, blob))
+        .then(() => console.info('[live2d] persistent STORE cache created', {
+          assetId,
+          files: pairs.length,
+          resizedTextures: optimized.resizedTextures.length,
+        }))
         .catch(error => console.warn('[live2d] persistent cache write skipped:', error));
     }
     return runtimePackage;

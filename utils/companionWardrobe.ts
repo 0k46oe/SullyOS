@@ -34,6 +34,29 @@ export const addCompanionModelOutfit = (
   };
 };
 
+/**
+ * Put a same-format model into the wardrobe without changing the model that is
+ * currently on stage. Wardrobe imports use this path so merely choosing a file
+ * can never turn a large/untested package into the next desktop boot model.
+ */
+export const storeCompanionModelOutfit = (
+  character: CharacterProfile,
+  model: VideoAvatarConfig,
+): Pick<CharacterProfile, 'videoAvatar' | 'videoAvatarWardrobe'> => {
+  const active = character.videoAvatar;
+  if (!active) return { videoAvatar: model, videoAvatarWardrobe: [] };
+  if (active.format !== model.format) {
+    throw new Error(`衣橱只能加入同类型模型：当前是 ${active.format.toUpperCase()}。`);
+  }
+  return {
+    videoAvatar: active,
+    videoAvatarWardrobe: uniqueModels([
+      ...(character.videoAvatarWardrobe || []),
+      model,
+    ]).filter(item => item.assetId !== active.assetId),
+  };
+};
+
 export const selectCompanionModelOutfit = (
   character: CharacterProfile,
   assetId: string,
@@ -46,6 +69,29 @@ export const selectCompanionModelOutfit = (
   return {
     videoAvatar: selected,
     videoAvatarWardrobe: pool.filter(model => model.assetId !== selected.assetId),
+  };
+};
+
+/** Remove one whole-model outfit and pick a remaining model only when needed. */
+export const removeCompanionModelOutfit = (
+  character: CharacterProfile,
+  assetId: string,
+): Pick<CharacterProfile, 'videoAvatar' | 'videoAvatarWardrobe'> | null => {
+  const active = character.videoAvatar;
+  if (!active) return null;
+  const pool = listCompanionModelOutfits(character);
+  if (!pool.some(model => model.assetId === assetId)) return null;
+  const remaining = pool.filter(model => model.assetId !== assetId);
+  if (active.assetId !== assetId) {
+    return {
+      videoAvatar: active,
+      videoAvatarWardrobe: remaining.filter(model => model.assetId !== active.assetId),
+    };
+  }
+  const [nextActive, ...inactive] = remaining;
+  return {
+    videoAvatar: nextActive,
+    videoAvatarWardrobe: inactive,
   };
 };
 
@@ -105,5 +151,28 @@ export const selectUploadedCompanionOutfit = (
     mimeType: selected.mimeType,
     importedAt: selected.importedAt,
     imageWardrobe: items,
+  };
+};
+
+/** Remove an uploaded PNG/GIF and keep the top-level active pointer valid. */
+export const removeUploadedCompanionOutfit = (
+  config: CompanionAvatarConfig | undefined,
+  imageRef: string,
+): CompanionAvatarConfig | null => {
+  const items = listUploadedCompanionOutfits(config);
+  if (!items.some(item => item.imageRef === imageRef)) return null;
+  const remaining = items.filter(item => item.imageRef !== imageRef);
+  const selected = config?.imageRef === imageRef
+    ? remaining[0]
+    : remaining.find(item => item.imageRef === config?.imageRef) || remaining[0];
+  return {
+    version: 1,
+    ...config,
+    source: 'upload',
+    imageRef: selected?.imageRef,
+    fileName: selected?.fileName,
+    mimeType: selected?.mimeType,
+    importedAt: selected?.importedAt,
+    imageWardrobe: remaining,
   };
 };
