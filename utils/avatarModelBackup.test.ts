@@ -79,6 +79,27 @@ describe('avatar model backup', () => {
     expect(Object.keys(zip.files).some(path => path.includes('runtime-store'))).toBe(false);
   });
 
+  it('includes inactive wardrobe models and restores them without replacing the active model', async () => {
+    const spare = { ...live2dConfig, assetId: 'video-avatar-live2d-spare', fileName: 'B-night' };
+    dbMock.getAllCharacters.mockResolvedValue([
+      { id: 'b', name: 'B', avatar: '', videoAvatar: live2dConfig, videoAvatarWardrobe: [spare] },
+    ]);
+    dbMock.getBlobAsset.mockImplementation(async (id: string) => (
+      id === live2dConfig.assetId || id === spare.assetId ? new Blob([new Uint8Array([4, 5, 6, 7])]) : null
+    ));
+
+    const archive = await createAvatarModelBackup();
+    const zip = await JSZip.loadAsync(await archive.arrayBuffer());
+    const manifest = JSON.parse(await zip.file('manifest.json')!.async('string'));
+    expect(manifest.models.map((item: any) => item.slot)).toEqual(['active', 'wardrobe']);
+
+    await restoreAvatarModelBackup(archive);
+    expect(dbMock.saveCharacter).toHaveBeenLastCalledWith(expect.objectContaining({
+      videoAvatar: expect.objectContaining({ assetId: live2dConfig.assetId }),
+      videoAvatarWardrobe: [expect.objectContaining({ assetId: spare.assetId })],
+    }));
+  });
+
   it('restores model blobs and character configs strictly one at a time', async () => {
     const archive = await createAvatarModelBackup();
     const writes: string[] = [];

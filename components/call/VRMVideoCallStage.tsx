@@ -465,6 +465,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
               performance={performance}
               performanceQuality={performanceQuality}
               manualAction={externalManualAction || manualAction}
+              preserveActiveWardrobe
               touchRequest={touchRequest}
               touchImpulseNonce={touchImpulseNonce}
               onAvatarTouch={onAvatarTouch}

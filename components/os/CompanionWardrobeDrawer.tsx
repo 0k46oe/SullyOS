@@ -1,5 +1,5 @@
 import React from 'react';
-import { Check, Crop, Gear, Play, Sparkle, TShirt, X } from '@phosphor-icons/react';
+import { Check, Crop, Gear, Play, Sparkle, TShirt, UploadSimple, X } from '@phosphor-icons/react';
 import type { Live2DAction } from '../../utils/live2dModelStore';
 import type { CompanionFrameStyleId } from './companionFrameStyles';
 import { useBlobRefUrl } from '../../utils/blobRef';
@@ -24,6 +24,9 @@ type CompanionWardrobeDrawerProps = {
   wardrobeActions: Live2DAction[];
   activeActionId?: string;
   onSelect: (action: Live2DAction) => void;
+  modelOutfits?: Array<{ assetId: string; fileName: string; format: 'vrm' | 'live2d' }>;
+  activeModelAssetId?: string;
+  onSelectModel?: (assetId: string) => void;
   staticOutfits?: StaticOutfit[];
   activeStaticOutfitId?: string;
   onSelectStaticOutfit?: (outfitId: string) => void;
@@ -32,6 +35,8 @@ type CompanionWardrobeDrawerProps = {
   discoveryHint?: boolean;
   onOpenComposition: () => void;
   onManageActions: () => void;
+  onImportOutfit?: () => void;
+  importBusy?: boolean;
   onClose: () => void;
 };
 
@@ -42,6 +47,9 @@ const CompanionWardrobeDrawer: React.FC<CompanionWardrobeDrawerProps> = ({
   wardrobeActions,
   activeActionId,
   onSelect,
+  modelOutfits = [],
+  activeModelAssetId,
+  onSelectModel,
   staticOutfits = [],
   activeStaticOutfitId,
   onSelectStaticOutfit,
@@ -50,6 +58,8 @@ const CompanionWardrobeDrawer: React.FC<CompanionWardrobeDrawerProps> = ({
   discoveryHint = false,
   onOpenComposition,
   onManageActions,
+  onImportOutfit,
+  importBusy = false,
   onClose,
 }) => {
   if (!open) return null;
@@ -74,10 +84,10 @@ const CompanionWardrobeDrawer: React.FC<CompanionWardrobeDrawerProps> = ({
           </div>
         )}
 
-        <p className="companion-wardrobe-note">{staticSource === 'date' ? '衣服来自见面模式立绘。桌面拥有独立选择，AI 只负责按台词情绪切换同一套衣服里的表情。' : staticMode ? '单张静态图片没有额外服装动作；仍可从「场景与构图」更换桌面风格和背景。' : '这里的动作只能由你手动切换。AI 无法读取、选择或替换服装。'}</p>
+        <p className="companion-wardrobe-note">{staticSource === 'date' ? '衣服来自见面模式立绘。桌面拥有独立选择，AI 只负责按台词情绪切换同一套衣服里的表情。' : staticSource === 'upload' ? '可以继续导入 PNG / GIF；衣橱只接收相同类型，选中的图片会在首页与视频通话中共用。' : '可收纳同模型的换装按键，也可导入更多同类型整模。当前选择由你锁定，AI 和点击反馈都不能替换。'}</p>
 
         <div className="companion-wardrobe-list">
-          {staticMode && staticOutfits.length ? staticOutfits.map(outfit => {
+          {staticMode && staticOutfits.map(outfit => {
             const active = activeStaticOutfitId === outfit.id;
             return (
               <button
@@ -88,11 +98,28 @@ const CompanionWardrobeDrawer: React.FC<CompanionWardrobeDrawerProps> = ({
                 data-static-outfit={outfit.id}
               >
                 <span className="companion-wardrobe-thumb"><StaticOutfitPreview value={outfit.preview} /></span>
-                <span className="companion-wardrobe-copy"><strong>{outfit.name}</strong><small>{outfit.expressionCount}/5 个基础表情</small></span>
+                <span className="companion-wardrobe-copy"><strong>{outfit.name}</strong><small>{staticSource === 'upload' ? '静态图片' : `${outfit.expressionCount}/5 个基础表情`}</small></span>
                 <span className="companion-wardrobe-play">{active ? <Check weight="bold" /> : <Play weight="fill" />}</span>
               </button>
             );
-          }) : !staticMode && wardrobeActions.length ? wardrobeActions.map((action, index) => {
+          })}
+          {!staticMode && modelOutfits.map((model, index) => {
+            const active = activeModelAssetId === model.assetId;
+            return (
+              <button
+                key={model.assetId}
+                type="button"
+                className={active ? 'is-active' : ''}
+                onClick={() => onSelectModel?.(model.assetId)}
+                data-model-outfit={model.assetId}
+              >
+                <span className="companion-wardrobe-index">M{String(index + 1).padStart(2, '0')}</span>
+                <span className="companion-wardrobe-copy"><strong>{model.fileName}</strong><small>{model.format === 'live2d' ? 'Live2D 整模' : 'VRM 整模'}</small></span>
+                <span className="companion-wardrobe-play">{active ? <Check weight="bold" /> : <Play weight="fill" />}</span>
+              </button>
+            );
+          })}
+          {!staticMode && wardrobeActions.map((action, index) => {
             const active = activeActionId === action.id;
             return (
               <button
@@ -107,7 +134,8 @@ const CompanionWardrobeDrawer: React.FC<CompanionWardrobeDrawerProps> = ({
                 <span className="companion-wardrobe-play">{active ? <Check weight="bold" /> : <Play weight="fill" />}</span>
               </button>
             );
-          }) : (
+          })}
+          {((staticMode && staticOutfits.length === 0) || (!staticMode && modelOutfits.length === 0 && wardrobeActions.length === 0)) && (
             <div className="companion-wardrobe-empty">
               <TShirt weight="duotone" />
               <strong>{staticSource === 'date' ? '还没有见面衣服' : staticMode ? '单张图片没有额外衣服' : '还没有标记服装动作'}</strong>
@@ -117,6 +145,9 @@ const CompanionWardrobeDrawer: React.FC<CompanionWardrobeDrawerProps> = ({
         </div>
 
         <footer className="companion-wardrobe-footer">
+          {staticSource !== 'date' && onImportOutfit && (
+            <button type="button" onClick={onImportOutfit} disabled={importBusy}><UploadSimple weight="bold" /> {importBusy ? '正在导入…' : `导入更多${staticSource === 'upload' ? '图片' : modelOutfits[0]?.format === 'vrm' ? ' VRM' : ' Live2D'}`}</button>
+          )}
           <button type="button" onClick={onManageActions}><Gear weight="bold" /> {staticSource === 'date' ? '管理见面立绘' : staticMode ? '更换静态图片' : '管理服装动作'}</button>
           <small>{staticSource === 'date' ? 'DATE SPRITES · 5 EXPRESSIONS' : staticMode ? 'STATIC IMAGE · PNG / GIF' : 'WARDROBE ACTIONS · USER ONLY'}</small>
         </footer>

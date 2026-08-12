@@ -85,7 +85,23 @@ import IdolCompanionChrome from './IdolCompanionChrome';
 import CompanionWardrobeDrawer from './CompanionWardrobeDrawer';
 import CompanionStageLoadingCurtain, { type CompanionStageCurtainPhase } from './CompanionStageLoadingCurtain';
 import StaticCompanionPortrait from './StaticCompanionPortrait';
-import { getLive2DAIActions, getLive2DWardrobeActions, type Live2DAction } from '../../utils/live2dModelStore';
+import Live2DActionSettings from '../call/Live2DActionSettings';
+import {
+  getLive2DAIActions,
+  getLive2DWardrobeActions,
+  saveLive2DModelFromZip,
+  type Live2DAction,
+  type Live2DAvatarConfig,
+} from '../../utils/live2dModelStore';
+import { saveAvatarModel } from '../../utils/avatarModelStore';
+import {
+  addCompanionModelOutfit,
+  addUploadedCompanionOutfit,
+  listCompanionModelOutfits,
+  listUploadedCompanionOutfits,
+  selectCompanionModelOutfit,
+  selectUploadedCompanionOutfit,
+} from '../../utils/companionWardrobe';
 import {
   DEFAULT_COMPANION_STARTUP_PERFORMANCE,
   normalizeCompanionStartupPerformance,
@@ -408,6 +424,8 @@ const CompanionHome: React.FC = () => {
   });
   const [wardrobeDiscoveryOpened, setWardrobeDiscoveryOpened] = useState(false);
   const [wardrobeTrigger, setWardrobeTrigger] = useState<Live2DActionTrigger | null>(null);
+  const [wardrobeImportBusy, setWardrobeImportBusy] = useState(false);
+  const [wardrobeLive2DSettings, setWardrobeLive2DSettings] = useState<Live2DAvatarConfig | null>(null);
   const [touchGenerating, setTouchGenerating] = useState(false);
   const [touchGenerateVoice, setTouchGenerateVoice] = useState(false);
   const [startupEnabled, setStartupEnabled] = useState(false);
@@ -465,9 +483,13 @@ const CompanionHome: React.FC = () => {
 
   useEffect(() => {
     const avatar = character?.videoAvatar;
-    if (!stageReady || avatar?.format !== 'live2d' || !avatar.activeWardrobeActionId) return;
-    const action = avatar.actions.find(item => item.id === avatar.activeWardrobeActionId && item.wardrobe);
+    if (!stageReady || avatar?.format !== 'live2d') return;
+    const action = avatar.actions.find(item => item.id === avatar.activeWardrobeActionId && item.wardrobe)
+      || avatar.actions.find(item => item.wardrobe);
     if (!action) return;
+    if (avatar.activeWardrobeActionId !== action.id) {
+      updateCharacter(character.id, { videoAvatar: { ...avatar, activeWardrobeActionId: action.id } });
+    }
     const restoreKey = `${character.id}:${avatar.assetId}:${action.id}`;
     if (restoredWardrobeKeyRef.current === restoreKey) return;
     restoredWardrobeKeyRef.current = restoreKey;
@@ -849,11 +871,26 @@ const CompanionHome: React.FC = () => {
     () => !staticCompanionActive && character?.videoAvatar?.format === 'live2d' ? getLive2DWardrobeActions(character.videoAvatar) : [],
     [character?.videoAvatar, staticCompanionActive],
   );
+  const modelOutfits = useMemo(
+    () => !staticCompanionActive ? listCompanionModelOutfits(character) : [],
+    [character?.videoAvatar, character?.videoAvatarWardrobe, staticCompanionActive],
+  );
   const staticOutfits = useMemo(
-    () => activeCompanionSource === 'date' ? listCompanionDateOutfits(character) : [],
+    () => activeCompanionSource === 'date'
+      ? listCompanionDateOutfits(character)
+      : activeCompanionSource === 'upload'
+        ? listUploadedCompanionOutfits(character?.companionAvatar).map(outfit => ({
+            id: outfit.imageRef,
+            name: outfit.fileName || '静态图片',
+            preview: outfit.imageRef,
+            expressionCount: 1,
+          }))
+        : [],
     [activeCompanionSource, character],
   );
-  const activeStaticOutfitId = normalizeCompanionSkinSetId(character?.companionAvatar?.skinSetId);
+  const activeStaticOutfitId = activeCompanionSource === 'upload'
+    ? character?.companionAvatar?.imageRef
+    : normalizeCompanionSkinSetId(character?.companionAvatar?.skinSetId);
 
   const selectWardrobeAction = (action: Live2DAction) => {
     if (!character || character.videoAvatar?.format !== 'live2d' || !action.wardrobe) return;
@@ -865,7 +902,15 @@ const CompanionHome: React.FC = () => {
   };
 
   const selectStaticOutfit = (outfitId: string) => {
-    if (!character || activeCompanionSource !== 'date') return;
+    if (!character) return;
+    if (activeCompanionSource === 'upload') {
+      const companionAvatar = selectUploadedCompanionOutfit(character.companionAvatar, outfitId);
+      if (!companionAvatar) return;
+      updateCharacter(character.id, { companionAvatar });
+      addToast('静态衣服已切换', 'success');
+      return;
+    }
+    if (activeCompanionSource !== 'date') return;
     updateCharacter(character.id, {
       companionAvatar: {
         version: 1,
@@ -876,6 +921,94 @@ const CompanionHome: React.FC = () => {
     });
     trackEvent('切换桌面见面立绘衣服');
     addToast('桌面衣服已切换', 'success');
+  };
+
+  const selectModelOutfit = (assetId: string) => {
+    if (!character) return;
+    const patch = selectCompanionModelOutfit(character, assetId);
+    if (!patch) return;
+    closeWardrobe();
+    setWardrobeTrigger(null);
+    updateCharacter(character.id, {
+      ...patch,
+      companionAvatar: { version: 1, ...character.companionAvatar, source: 'model' },
+    });
+    addToast(`已切换模型：${patch.videoAvatar?.fileName || '当前外观'}`, 'success');
+  };
+
+  const importWardrobeOutfit = () => {
+    if (!character || wardrobeImportBusy || activeCompanionSource === 'date') return;
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.style.display = 'none';
+    input.accept = activeCompanionSource === 'upload'
+      ? '.png,.gif,image/png,image/gif'
+      : character.videoAvatar?.format === 'vrm'
+        ? '.vrm,model/gltf-binary'
+        : '.zip,application/zip';
+    document.body.appendChild(input);
+    const removeInput = () => { if (input.parentElement) input.remove(); };
+    window.addEventListener('focus', () => window.setTimeout(removeInput, 1200), { once: true });
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return removeInput();
+      setWardrobeImportBusy(true);
+      try {
+        if (activeCompanionSource === 'upload') {
+          const extension = file.name.split('.').pop()?.toLowerCase();
+          if (!['png', 'gif'].includes(extension || '') || !['image/png', 'image/gif'].includes(file.type)) {
+            throw new Error('图片衣橱只支持 PNG / GIF');
+          }
+          if (file.size > 20 * 1024 * 1024) throw new Error('图片超过 20 MB，请压缩后再导入');
+          const imageRef = await putImageBlob(file);
+          updateCharacter(character.id, {
+            companionAvatar: addUploadedCompanionOutfit(character.companionAvatar, {
+              id: imageRef,
+              imageRef,
+              fileName: file.name,
+              mimeType: file.type,
+              importedAt: Date.now(),
+            }),
+          });
+          addToast(`${file.name} 已加入图片衣橱`, 'success');
+          return;
+        }
+
+        const currentModel = character.videoAvatar;
+        if (!currentModel) throw new Error('请先设置一个动态模型');
+        if (currentModel.format === 'live2d') {
+          if (!/\.zip$/i.test(file.name)) throw new Error('Live2D 衣橱只能继续导入 Live2D ZIP');
+          if (file.size > 200 * 1024 * 1024) throw new Error('Live2D ZIP 超过 200 MB');
+          const model = await saveLive2DModelFromZip(file);
+          const patch = addCompanionModelOutfit(character, model);
+          updateCharacter(character.id, {
+            ...patch,
+            companionAvatar: { version: 1, ...character.companionAvatar, source: 'model' },
+          });
+          closeWardrobe();
+          setWardrobeLive2DSettings(model);
+          addToast(`${file.name} 已加入 Live2D 衣橱，请设置它的换装按键`, 'success');
+          return;
+        }
+
+        if (!/\.vrm$/i.test(file.name)) throw new Error('VRM 衣橱只能继续导入 VRM');
+        if (file.size > 80 * 1024 * 1024) throw new Error('VRM 超过 80 MB，请降低纹理尺寸后再导入');
+        const model = await saveAvatarModel(file);
+        const patch = addCompanionModelOutfit(character, model);
+        updateCharacter(character.id, {
+          ...patch,
+          companionAvatar: { version: 1, ...character.companionAvatar, source: 'model' },
+        });
+        closeWardrobe();
+        addToast(`${file.name} 已加入 VRM 衣橱`, 'success');
+      } catch (error: any) {
+        addToast(error?.message || '衣橱导入失败', 'error');
+      } finally {
+        setWardrobeImportBusy(false);
+        removeInput();
+      }
+    };
+    input.click();
   };
 
   const openWardrobe = () => {
@@ -2116,6 +2249,9 @@ const CompanionHome: React.FC = () => {
         wardrobeActions={wardrobeActions}
         activeActionId={character.videoAvatar?.format === 'live2d' ? character.videoAvatar.activeWardrobeActionId : undefined}
         onSelect={selectWardrobeAction}
+        modelOutfits={modelOutfits}
+        activeModelAssetId={character.videoAvatar?.assetId}
+        onSelectModel={selectModelOutfit}
         staticOutfits={staticOutfits}
         activeStaticOutfitId={activeStaticOutfitId}
         onSelectStaticOutfit={selectStaticOutfit}
@@ -2123,12 +2259,34 @@ const CompanionHome: React.FC = () => {
         staticSource={staticCompanionActive ? activeCompanionSource : undefined}
         discoveryHint={wardrobeDiscoveryOpened}
         onOpenComposition={openCompositionEditor}
+        onImportOutfit={importWardrobeOutfit}
+        importBusy={wardrobeImportBusy}
         onManageActions={() => {
           closeWardrobe();
           openApp(activeCompanionSource === 'date' ? AppID.Date : activeCompanionSource === 'upload' ? AppID.Appearance : AppID.Call);
         }}
         onClose={closeWardrobe}
       />
+
+      {wardrobeLive2DSettings && (
+        <Live2DActionSettings
+          config={wardrobeLive2DSettings}
+          characterName={character.name}
+          accentColor={uiTint}
+          setupMode="import"
+          onClose={() => setWardrobeLive2DSettings(null)}
+          onSave={config => {
+            updateCharacter(character.id, prev => ({
+              videoAvatar: prev.videoAvatar?.assetId === config.assetId ? config : prev.videoAvatar,
+              videoAvatarWardrobe: (prev.videoAvatarWardrobe || []).map(model => (
+                model.assetId === config.assetId ? config : model
+              )),
+            }));
+            setWardrobeLive2DSettings(null);
+            addToast('Live2D 衣橱模型已保存', 'success');
+          }}
+        />
+      )}
 
       <ScheduleFullscreenViewer
         open={scheduleViewerOpen}

@@ -1832,10 +1832,14 @@ const XHSLite = (() => {
     };
   }
 
-  async function signedGet(base, uri, params, cookieStr, ck, extraHeaders = {}, signFormat = 'xys') {
+  async function signedGet(base, uri, params, cookieStr, ck, extraHeaders = {}, signFormat = 'xys', useXrap = false) {
     const query = buildSignedQuery(params);
     const sig = await signHeaders('GET', uri, ck, { params: params || {}, signFormat });
-    const resp = await fetch(base + uri + (query ? '?' + query : ''), { method: 'GET', headers: { ...baseHeaders(cookieStr, base), ...sig, ...extraHeaders } });
+    const requestUri = uri + (query ? '?' + query : '');
+    const xrapHeader = useXrap
+      ? { 'x-rap-param': await xRapParam(`//${new URL(base).host}${requestUri}`, '') }
+      : {};
+    const resp = await fetch(base + requestUri, { method: 'GET', headers: { ...baseHeaders(cookieStr, base), ...sig, ...xrapHeader, ...extraHeaders } });
     return readJsonResponse(resp);
   }
   async function signedPost(base, uri, payload, cookieStr, ck, extraHeaders = {}, useXrap = false) {
@@ -2153,13 +2157,39 @@ const XHSLite = (() => {
   async function userProfile(cookieStr, userId, xsecToken, platform = 'xhs') {
     const { apiBase } = platformConfig(platform);
     const ck = parseCookies(cookieStr);
-    const info = await signedGet(apiBase, '/api/sns/web/v1/user/otherinfo', { target_user_id: userId }, cookieStr, ck);
-    let notes = [];
+    let info = null;
+    let infoError = '';
     try {
-      const posted = await signedGet(apiBase, '/api/sns/web/v1/user_posted', { num: 30, cursor: '', user_id: userId, image_formats: 'jpg,webp,avif', xsec_token: xsecToken || '', xsec_source: 'pc_note' }, cookieStr, ck);
+      info = await signedGet(apiBase, '/api/sns/web/v1/user/otherinfo', { target_user_id: userId }, cookieStr, ck);
+      if (!info?.success) infoError = info?.msg || `HTTP ${info?.http_status || 'unknown'}`;
+    } catch (e) {
+      infoError = e?.message || String(e);
+    }
+    let notes = [];
+    let notesLoaded = false;
+    let notesError = '';
+    try {
+      // Spider_XHS 将 user_posted 列入 RAP 白名单；GET 的 RAP 摘要包含完整 query，body 为空串。
+      const posted = await signedGet(apiBase, '/api/sns/web/v1/user_posted', { num: 30, cursor: '', user_id: userId, image_formats: 'jpg,webp,avif', xsec_token: xsecToken || '', xsec_source: 'pc_user' }, cookieStr, ck, {}, 'xys', true);
+      notesLoaded = !!posted?.success;
       notes = (posted?.data?.notes || []).map(normItem);
-    } catch (e) { /* best effort */ }
-    return { basic_info: info?.data?.basic_info || {}, notes, feeds: notes, success: !!info?.success };
+      if (!notesLoaded) notesError = posted?.msg || `HTTP ${posted?.http_status || 'unknown'}`;
+    } catch (e) {
+      notesError = e?.message || String(e);
+    }
+    if (!info?.success && !notesLoaded) {
+      return { error: `获取主页失败: ${notesError || infoError || '上游未返回成功状态'}` };
+    }
+    return {
+      basic_info: info?.data?.basic_info || {},
+      notes,
+      feeds: notes,
+      success: true,
+      profile_status: info?.success ? 'loaded' : 'unavailable',
+      profile_error: info?.success ? undefined : infoError,
+      notes_status: notesLoaded ? 'loaded' : 'unavailable',
+      notes_error: notesLoaded ? undefined : notesError,
+    };
   }
   async function likeFeed(cookieStr, feedId, unlike = false, platform = 'xhs') {
     const { apiBase } = platformConfig(platform);
@@ -2179,8 +2209,12 @@ const XHSLite = (() => {
     const payload = { note_id: feedId, content, at_users: [] };
     if (xsecToken) payload.xsec_token = xsecToken;
     if (targetCommentId) payload.target_comment_id = targetCommentId;
-    const r = await signedPost(apiBase, '/api/sns/web/v1/comment/post', payload, cookieStr, ck);
-    return { success: !!r?.success, msg: r?.msg, comment: r?.data?.comment, raw: r };
+    // Spider_XHS 的 RAP 白名单同样包含 comment/post。
+    const r = await signedPost(apiBase, '/api/sns/web/v1/comment/post', payload, cookieStr, ck, {}, true);
+    if (!r?.success) {
+      return { error: `评论失败: ${r?.msg || `HTTP ${r?.http_status || 'unknown'}`}`, raw: r };
+    }
+    return { success: true, msg: r?.msg, comment: r?.data?.comment, raw: r };
   }
 
   async function sha1Hex(str) {

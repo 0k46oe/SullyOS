@@ -636,6 +636,14 @@ export interface CompanionAvatarConfig {
   fileName?: string;
   mimeType?: string;
   importedAt?: number;
+  /** Uploaded portraits kept in the wardrobe. The top-level image fields point at the active item. */
+  imageWardrobe?: Array<{
+    id: string;
+    imageRef: string;
+    fileName?: string;
+    mimeType?: string;
+    importedAt?: number;
+  }>;
   /** Independent from Date mode's active outfit; desktop and video calls share this selected outfit. */
   skinSetId?: string;
 }
@@ -2607,6 +2615,12 @@ export interface CharacterProfile {
           params?: Array<{ id: string; value: number }>;
           /** motion3/exp3 文件实际写入的参数；用于高质量模式判断能否安全并行动作。 */
           parameterIds?: string[];
+          /** exp3 参数目标；衣橱会把这些值作为持久底层，避免表情重置顺带清掉服装。 */
+          parameterValues?: Array<{
+              id: string;
+              value: number;
+              blend?: 'Add' | 'Multiply' | 'Overwrite';
+          }>;
           /** VTube Studio 中绑定的原始组合键，例如 F1 / Alt+Q。 */
           hotkey?: string;
           source?: 'model3' | 'vtube' | 'discovered' | 'custom';
@@ -2620,6 +2634,8 @@ export interface CharacterProfile {
       /** 衣橱中最后一次由用户手动选择的服装动作。 */
       activeWardrobeActionId?: string;
   };
+  /** Inactive whole-model outfits. Switching swaps one entry with videoAvatar; only matching formats are shown. */
+  videoAvatarWardrobe?: Array<NonNullable<CharacterProfile['videoAvatar']>>;
   /** Which character visual the tactile companion desktop should render. */
   companionAvatar?: CompanionAvatarConfig;
   /**
@@ -3751,6 +3767,7 @@ export interface FullBackupData {
     }[];
 
     xhsActivities?: XhsActivityRecord[];
+    xhsOwnedPosts?: XhsOwnedPost[];
     xhsStockImages?: XhsStockImage[];
 
     // Study Room settings
@@ -3928,18 +3945,39 @@ export interface XhsActivityRecord {
     timestamp: number;
     actionType: XhsActionType;
     content: {
+        noteId?: string;
         title?: string;
         body?: string;
         tags?: string[];
         keyword?: string;
         savedTopics?: { title: string; desc: string; noteId?: string }[];
         notesViewed?: { noteId: string; title: string; desc: string; author: string; likes: number }[];
-        commentTarget?: { noteId: string; title: string };
+        commentTarget?: { noteId: string; title: string; commentId?: string };
         commentText?: string;
     };
     thinking: string;  // Character's internal monologue / reasoning
     result: 'success' | 'failed' | 'skipped';
     resultMessage?: string;
+}
+
+/**
+ * 角色在共享的真实小红书账号下发布的笔记归属。
+ * 独立于可清理的活动日志，作为自由活动 App 中“角色主页”的持久化数据源。
+ */
+export interface XhsOwnedPost {
+    id: string; // `${characterId}:${noteId}`
+    characterId: string;
+    noteId: string;
+    title: string;
+    body: string;
+    tags?: string[];
+    publishedAt: number;
+    updatedAt: number;
+    xsecToken?: string;
+    likes?: number;
+    collects?: number;
+    commentCount?: number;
+    shareCount?: number;
 }
 
 export interface XhsFreeRoamSession {
