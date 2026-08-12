@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Application, Assets, Cache, extensions } from 'pixi.js';
 import { AvatarAutonomy, getViewerEyeContactCompensation } from '../../utils/avatarAutonomy';
 import { DEFAULT_AVATAR_PERFORMANCE, type AvatarPerformanceDirection, type AvatarStageFraming } from '../../utils/avatarPerformance';
@@ -16,10 +16,14 @@ import {
 } from '../../utils/live2dModelStore';
 import type { AvatarMotionState } from './VRMAvatarCanvas';
 import {
+  avatarTouchZoneToastLabel,
+  resolveAvatarTouchRegion,
   resolveAvatarTouchTarget,
   type AvatarTouchHit,
   type AvatarTouchRequest,
+  type AvatarTouchZone,
 } from '../../utils/avatarTouch';
+import type { AvatarTouchRegion } from '../../types';
 
 export interface Live2DActionTrigger {
   id: string;
@@ -58,6 +62,11 @@ interface Live2DAvatarCanvasProps {
   touchRequest?: AvatarTouchRequest | null;
   touchImpulseNonce?: number;
   onAvatarTouch?: (hit: AvatarTouchHit) => void;
+  /** Optional draft override while editing; otherwise config.touchRegions is used. */
+  touchRegions?: AvatarTouchRegion[];
+  /** Enables model-local ellipse drawing for one reaction zone. */
+  touchRegionEditingZone?: AvatarTouchZone;
+  onTouchRegionsChange?: (regions: AvatarTouchRegion[]) => void;
   /** Desktop companion mode caps rendering work while preserving interaction. */
   maxFps?: number;
   /** Pins parameters to target values while the advanced editor shows its target state. */
@@ -74,6 +83,14 @@ const registerLive2DPlugin = (plugin: Parameters<typeof extensions.add>[0]) => {
 };
 
 const clamp = (value: number, min = -1, max = 1): number => Math.max(min, Math.min(max, value));
+const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+const TOUCH_REGION_COLORS: Record<AvatarTouchZone, string> = {
+  head: '#f5c86a',
+  face: '#ff8fb7',
+  hand: '#77d9dd',
+  body: '#9ba8ff',
+  other: '#c6cbd5',
+};
 const HEAD_LOCK_PARAMETER_IDS = [
   'xin', 'yin', 'zin',
   'ParamAngleX', 'ParamAngleY', 'ParamAngleZ',
@@ -239,6 +256,9 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   touchRequest,
   touchImpulseNonce,
   onAvatarTouch,
+  touchRegions,
+  touchRegionEditingZone,
+  onTouchRegionsChange,
   maxFps,
   parameterPreview,
   onParametersDiscovered,
@@ -260,6 +280,8 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   const onErrorRef = useRef(onError);
   const onReadyRef = useRef(onReady);
   const onAvatarTouchRef = useRef(onAvatarTouch);
+  const touchRegionsRef = useRef<AvatarTouchRegion[]>(touchRegions ?? config.touchRegions ?? []);
+  const onTouchRegionsChangeRef = useRef(onTouchRegionsChange);
   const onParametersDiscoveredRef = useRef(onParametersDiscovered);
   const parameterPreviewRef = useRef(parameterPreview);
   // 进行中的参数动作叠加（kind='params'）：短暂把一组参数推到目标值再淡出。
@@ -268,6 +290,16 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   const directedHeadPoseRef = useRef<{ headX: number; headY: number; headZ: number } | null>(null);
   const framingRef = useRef(framing || config.framing || { scale: 1, offsetX: 0, offsetY: 0 });
   const faceFramingRef = useRef<AvatarStageFraming | undefined>(faceFraming || config.faceFraming);
+  const [touchRegionBounds, setTouchRegionBounds] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const touchRegionBoundsRef = useRef<typeof touchRegionBounds>(null);
+  const [drawingTouchRegion, setDrawingTouchRegion] = useState<AvatarTouchRegion | null>(null);
+  const touchRegionPointerRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+  } | null>(null);
   const aiExpressionActiveRef = useRef(false);
   const pointerRef = useRef({ x: 0, y: 0, active: false, lastMoved: 0 });
   const lipSyncKey = config.lipSyncParameterIds.join('\u0000');
@@ -324,6 +356,8 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
   useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
   useEffect(() => { onAvatarTouchRef.current = onAvatarTouch; }, [onAvatarTouch]);
+  useEffect(() => { touchRegionsRef.current = touchRegions ?? config.touchRegions ?? []; }, [touchRegions, config.touchRegions]);
+  useEffect(() => { onTouchRegionsChangeRef.current = onTouchRegionsChange; }, [onTouchRegionsChange]);
   useEffect(() => { onParametersDiscoveredRef.current = onParametersDiscovered; }, [onParametersDiscovered]);
   useEffect(() => { parameterPreviewRef.current = parameterPreview; }, [parameterPreview]);
   useEffect(() => {
@@ -333,6 +367,135 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   useEffect(() => {
     faceFramingRef.current = faceFraming || config.faceFraming;
   }, [faceFraming, config.faceFraming]);
+
+  useEffect(() => {
+    if (!touchRegionEditingZone) {
+      touchRegionBoundsRef.current = null;
+      setTouchRegionBounds(null);
+      setDrawingTouchRegion(null);
+      touchRegionPointerRef.current = null;
+      return;
+    }
+    let frame = 0;
+    const updateBounds = () => {
+      const bounds = (modelRef.current as any)?.getBounds?.();
+      if (bounds?.width > 0 && bounds?.height > 0) {
+        const next = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+        const previous = touchRegionBoundsRef.current;
+        if (
+          !previous
+          || Math.abs(previous.x - next.x) > 0.5
+          || Math.abs(previous.y - next.y) > 0.5
+          || Math.abs(previous.width - next.width) > 0.5
+          || Math.abs(previous.height - next.height) > 0.5
+        ) {
+          touchRegionBoundsRef.current = next;
+          setTouchRegionBounds(next);
+        }
+      }
+      frame = window.requestAnimationFrame(updateBounds);
+    };
+    frame = window.requestAnimationFrame(updateBounds);
+    return () => window.cancelAnimationFrame(frame);
+  }, [touchRegionEditingZone, config.assetId]);
+
+  const touchRegionPoint = (event: React.PointerEvent<HTMLDivElement>): { x: number; y: number } | null => {
+    const host = hostRef.current;
+    const bounds = touchRegionBoundsRef.current;
+    if (!host || !bounds?.width || !bounds.height) return null;
+    const rect = host.getBoundingClientRect();
+    return {
+      x: clamp01((event.clientX - rect.left - bounds.x) / bounds.width),
+      y: clamp01((event.clientY - rect.top - bounds.y) / bounds.height),
+    };
+  };
+
+  const draftTouchRegion = (
+    zone: AvatarTouchZone,
+    startX: number,
+    startY: number,
+    currentX: number,
+    currentY: number,
+  ): AvatarTouchRegion => ({
+    id: '__drawing__',
+    zone,
+    shape: 'ellipse',
+    x: (Math.min(startX, currentX) + Math.max(startX, currentX)) / 2,
+    y: (Math.min(startY, currentY) + Math.max(startY, currentY)) / 2,
+    width: Math.abs(currentX - startX),
+    height: Math.abs(currentY - startY),
+  });
+
+  const handleTouchRegionPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!touchRegionEditingZone || (event.button !== 0 && event.pointerType === 'mouse')) return;
+    const point = touchRegionPoint(event);
+    const bounds = touchRegionBoundsRef.current;
+    const host = hostRef.current?.getBoundingClientRect();
+    if (!point || !bounds || !host) return;
+    const localX = event.clientX - host.left;
+    const localY = event.clientY - host.top;
+    if (localX < bounds.x || localX > bounds.x + bounds.width || localY < bounds.y || localY > bounds.y + bounds.height) return;
+    touchRegionPointerRef.current = {
+      pointerId: event.pointerId,
+      startX: point.x,
+      startY: point.y,
+      currentX: point.x,
+      currentY: point.y,
+    };
+    setDrawingTouchRegion(draftTouchRegion(touchRegionEditingZone, point.x, point.y, point.x, point.y));
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+
+  const handleTouchRegionPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const pointer = touchRegionPointerRef.current;
+    if (!pointer || pointer.pointerId !== event.pointerId || !touchRegionEditingZone) return;
+    const point = touchRegionPoint(event);
+    if (!point) return;
+    pointer.currentX = point.x;
+    pointer.currentY = point.y;
+    setDrawingTouchRegion(draftTouchRegion(
+      touchRegionEditingZone,
+      pointer.startX,
+      pointer.startY,
+      pointer.currentX,
+      pointer.currentY,
+    ));
+  };
+
+  const finishTouchRegion = (event: React.PointerEvent<HTMLDivElement>, save: boolean) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const pointer = touchRegionPointerRef.current;
+    if (!pointer || pointer.pointerId !== event.pointerId || !touchRegionEditingZone) return;
+    const point = touchRegionPoint(event);
+    if (point) {
+      pointer.currentX = point.x;
+      pointer.currentY = point.y;
+    }
+    const draft = draftTouchRegion(
+      touchRegionEditingZone,
+      pointer.startX,
+      pointer.startY,
+      pointer.currentX,
+      pointer.currentY,
+    );
+    touchRegionPointerRef.current = null;
+    setDrawingTouchRegion(null);
+    if (!save || draft.width < 0.025 || draft.height < 0.025) return;
+    const region: AvatarTouchRegion = {
+      ...draft,
+      id: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `touch-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    };
+    const next = [...touchRegionsRef.current, region];
+    touchRegionsRef.current = next;
+    onTouchRegionsChangeRef.current?.(next);
+  };
 
   useEffect(() => {
     if (!touchRequest) return;
@@ -360,12 +523,15 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
       }
     } catch { /* ignore invalid first-frame bounds */ }
     if (!insideBounds) return;
-    const target = resolveAvatarTouchTarget(rawAreas, fallbackY, fallbackX);
+    const customTarget = resolveAvatarTouchRegion(touchRegionsRef.current, fallbackX, fallbackY);
+    const target = customTarget
+      ? { zone: customTarget.zone, part: customTarget.part }
+      : resolveAvatarTouchTarget(rawAreas, fallbackY, fallbackX);
     onAvatarTouchRef.current?.({
       ...touchRequest,
       ...target,
-      source: rawAreas.length ? 'live2d-hit-area' : 'live2d-bounds',
-      rawAreas,
+      source: customTarget ? 'live2d-custom-region' : rawAreas.length ? 'live2d-hit-area' : 'live2d-bounds',
+      rawAreas: customTarget ? [`custom:${customTarget.regionId}`, ...rawAreas] : rawAreas,
     });
   }, [touchRequest]);
 
@@ -1283,7 +1449,66 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
     };
   }, [config.assetId, lipSyncKey, maxFps]);
 
-  return <div ref={hostRef} className="absolute inset-0 overflow-hidden" aria-label="Live2D 角色舞台" />;
+  const displayedTouchRegions = touchRegionEditingZone
+    ? [...(touchRegions ?? config.touchRegions ?? []), ...(drawingTouchRegion ? [drawingTouchRegion] : [])]
+    : [];
+
+  return (
+    <div ref={hostRef} className="absolute inset-0 overflow-hidden" aria-label="Live2D 角色舞台">
+      {touchRegionEditingZone && touchRegionBounds && (
+        <div
+          className="absolute inset-0 z-10 touch-none cursor-crosshair"
+          onPointerDown={handleTouchRegionPointerDown}
+          onPointerMove={handleTouchRegionPointerMove}
+          onPointerUp={event => finishTouchRegion(event, true)}
+          onPointerCancel={event => finishTouchRegion(event, false)}
+          data-testid="live2d-touch-region-editor"
+          aria-label={`正在圈选${avatarTouchZoneToastLabel(touchRegionEditingZone)}触摸区域`}
+        >
+          <div
+            className="pointer-events-none absolute border border-dashed border-white/30"
+            style={{
+              left: touchRegionBounds.x,
+              top: touchRegionBounds.y,
+              width: touchRegionBounds.width,
+              height: touchRegionBounds.height,
+            }}
+            aria-hidden
+          />
+          {displayedTouchRegions.map(region => {
+            const color = TOUCH_REGION_COLORS[region.zone];
+            const drawing = region.id === '__drawing__';
+            const active = region.zone === touchRegionEditingZone;
+            return (
+              <div
+                key={region.id}
+                className="pointer-events-none absolute flex items-center justify-center rounded-[50%] border"
+                style={{
+                  left: touchRegionBounds.x + (region.x - region.width / 2) * touchRegionBounds.width,
+                  top: touchRegionBounds.y + (region.y - region.height / 2) * touchRegionBounds.height,
+                  width: region.width * touchRegionBounds.width,
+                  height: region.height * touchRegionBounds.height,
+                  borderColor: color,
+                  borderStyle: drawing ? 'dashed' : 'solid',
+                  borderWidth: active ? 2 : 1,
+                  background: `${color}${active ? '28' : '12'}`,
+                  boxShadow: active ? `0 0 18px ${color}55` : undefined,
+                }}
+                data-touch-region-zone={region.zone}
+                aria-hidden
+              >
+                {region.width > 0.08 && region.height > 0.05 && (
+                  <span className="rounded-full bg-black/55 px-1.5 py-0.5 text-[8px] font-semibold text-white/90 backdrop-blur">
+                    {avatarTouchZoneToastLabel(region.zone)}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 };
 
 export default Live2DAvatarCanvas;

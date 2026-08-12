@@ -1,5 +1,6 @@
 import type {
   APIConfig,
+  AvatarTouchRegion,
   CharacterProfile,
   CompanionTouchReaction,
   UserProfile,
@@ -43,7 +44,7 @@ export interface AvatarTouchHit extends AvatarTouchRequest {
   zone: AvatarTouchZone;
   /** Precise visual target; zone remains the backward-compatible reaction bucket. */
   part?: AvatarTouchPart;
-  source: 'live2d-hit-area' | 'live2d-bounds' | 'vrm-raycast' | 'portrait-bounds';
+  source: 'live2d-custom-region' | 'live2d-hit-area' | 'live2d-bounds' | 'vrm-raycast' | 'portrait-bounds';
   rawAreas: string[];
 }
 
@@ -220,6 +221,46 @@ const zoneForTouchPart = (part: AvatarTouchPart): AvatarTouchZone => {
   if (part === 'hand' || part === 'arm') return 'hand';
   if (part === 'shoulder' || part === 'chest' || part === 'waist' || part === 'body') return 'body';
   return 'other';
+};
+
+const partForTouchZone = (zone: AvatarTouchZone): AvatarTouchPart => {
+  if (zone === 'head') return 'head';
+  if (zone === 'face') return 'face';
+  if (zone === 'hand') return 'hand';
+  if (zone === 'body') return 'body';
+  return 'other';
+};
+
+/**
+ * Resolve user-authored model-local ellipses. Smaller overlapping regions win,
+ * so a face ellipse can safely sit inside a larger head ellipse.
+ */
+export const resolveAvatarTouchRegion = (
+  regions: AvatarTouchRegion[] | undefined,
+  normalizedX: number,
+  normalizedY: number,
+): { zone: AvatarTouchZone; part: AvatarTouchPart; regionId: string } | null => {
+  if (!Array.isArray(regions) || !Number.isFinite(normalizedX) || !Number.isFinite(normalizedY)) return null;
+  const hit = regions
+    .filter(region => (
+      AVATAR_TOUCH_ZONES.includes(region.zone as AvatarTouchZone)
+      && Number.isFinite(region.x)
+      && Number.isFinite(region.y)
+      && Number.isFinite(region.width)
+      && Number.isFinite(region.height)
+      && region.width > 0
+      && region.height > 0
+    ))
+    .filter(region => {
+      const radiusX = region.width / 2;
+      const radiusY = region.height / 2;
+      const dx = (normalizedX - region.x) / radiusX;
+      const dy = (normalizedY - region.y) / radiusY;
+      return dx * dx + dy * dy <= 1;
+    })
+    .sort((a, b) => a.width * a.height - b.width * b.height)[0];
+  if (!hit) return null;
+  return { zone: hit.zone, part: partForTouchZone(hit.zone), regionId: hit.id };
 };
 
 const geometricTouchPart = (fallbackY: number, fallbackX: number): AvatarTouchPart => {

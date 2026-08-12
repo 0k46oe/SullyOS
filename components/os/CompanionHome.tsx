@@ -16,7 +16,7 @@ import {
   UploadSimple,
 } from '@phosphor-icons/react';
 import { useOS } from '../../context/OSContext';
-import { AppID, type CompanionStartupSettings, type CompanionTouchReaction, type DailySchedule } from '../../types';
+import { AppID, type AvatarTouchRegion, type CompanionStartupSettings, type CompanionTouchReaction, type DailySchedule } from '../../types';
 import { Icons, INSTALLED_APPS } from '../../constants';
 import VRMVideoCallStage from '../call/VRMVideoCallStage';
 import { ScheduleFullscreenViewer } from '../schedule/ScheduleHomeWidget';
@@ -454,10 +454,12 @@ const CompanionHome: React.FC = () => {
   const [vrmExpressions, setVrmExpressions] = useState<string[]>([]);
   const [editing, setEditing] = useState(false);
   const [editingPanel, setEditingPanel] = useState<'character' | 'stage'>('character');
-  const [compositionFramingMode, setCompositionFramingMode] = useState<'base' | 'face'>('base');
+  const [compositionFramingMode, setCompositionFramingMode] = useState<'base' | 'face' | 'touch'>('base');
   const [framingDraft, setFramingDraft] = useState<AvatarStageFraming>(() => character?.videoAvatar?.companionFraming || DEFAULT_STAGE_FRAMING);
   const [faceFramingDraft, setFaceFramingDraft] = useState<AvatarStageFraming>(() => character?.videoAvatar?.faceFraming || { scale: 1.8, offsetX: 0, offsetY: 0 });
   const [faceAnchorDraftEnabled, setFaceAnchorDraftEnabled] = useState(() => Boolean(character?.videoAvatar?.faceFraming));
+  const [touchRegionsDraft, setTouchRegionsDraft] = useState<AvatarTouchRegion[]>(() => character?.videoAvatar?.format === 'live2d' ? character.videoAvatar.touchRegions || [] : []);
+  const [touchRegionEditingZone, setTouchRegionEditingZone] = useState<AvatarTouchZone>('face');
   const [cropDraft, setCropDraft] = useState<AvatarStageCrop>(() => character?.videoAvatar?.companionCrop || DEFAULT_STAGE_CROP);
   const [frameStyle, setFrameStyle] = useState<CompanionFrameStyleId>(loadCompanionFrameStyle);
   const editingRef = useRef(false);
@@ -751,6 +753,8 @@ const CompanionHome: React.FC = () => {
     setFramingDraft(character?.videoAvatar?.companionFraming || (isBuiltinSullyLive2D(character?.videoAvatar) ? { ...BUILTIN_SULLY_DEFAULT_FRAMING } : DEFAULT_STAGE_FRAMING));
     setFaceFramingDraft(character?.videoAvatar?.faceFraming || { scale: 1.8, offsetX: 0, offsetY: 0 });
     setFaceAnchorDraftEnabled(Boolean(character?.videoAvatar?.faceFraming));
+    setTouchRegionsDraft(character?.videoAvatar?.format === 'live2d' ? character.videoAvatar.touchRegions || [] : []);
+    setTouchRegionEditingZone('face');
     setCropDraft(character?.videoAvatar?.companionCrop || DEFAULT_STAGE_CROP);
     setPerformance(shouldPrepareStartup
       ? (startup?.enabled && normalizeCompanionDialogue(startup.line, character?.name || '')
@@ -1130,6 +1134,8 @@ const CompanionHome: React.FC = () => {
     setFramingDraft(companionFraming || defaultCompanionFraming);
     setFaceFramingDraft(makeFaceFramingSeed());
     setFaceAnchorDraftEnabled(Boolean(character?.videoAvatar?.faceFraming));
+    setTouchRegionsDraft(character?.videoAvatar?.format === 'live2d' ? character.videoAvatar.touchRegions || [] : []);
+    setTouchRegionEditingZone('face');
     setCropDraft(companionCrop || DEFAULT_STAGE_CROP);
     setEditing(true);
   };
@@ -1137,6 +1143,8 @@ const CompanionHome: React.FC = () => {
     setFramingDraft(companionFraming || defaultCompanionFraming);
     setFaceFramingDraft(makeFaceFramingSeed());
     setFaceAnchorDraftEnabled(Boolean(character?.videoAvatar?.faceFraming));
+    setTouchRegionsDraft(character?.videoAvatar?.format === 'live2d' ? character.videoAvatar.touchRegions || [] : []);
+    setTouchRegionEditingZone('face');
     setCompositionFramingMode('base');
     setCropDraft(companionCrop || DEFAULT_STAGE_CROP);
     setEditing(false);
@@ -1150,12 +1158,18 @@ const CompanionHome: React.FC = () => {
           companionFraming: builtinSullyAvatar || !framingIsDefault(framingDraft) ? framingDraft : undefined,
           faceFraming: faceAnchorDraftEnabled ? faceFramingDraft : undefined,
           companionCrop: cropIsDefault(cropDraft) ? undefined : clampStageCrop(cropDraft),
+          ...(prev.videoAvatar.format === 'live2d' ? { touchRegions: touchRegionsDraft.length ? touchRegionsDraft : undefined } : {}),
         },
       } : {}
     ));
     setCompositionFramingMode('base');
     setEditing(false);
-    addToast(faceAnchorDraftEnabled ? '角色构图与面部特写锚点已保存' : '角色构图已保存', 'success');
+    addToast(
+      touchRegionsDraft.length
+        ? `角色构图与 ${touchRegionsDraft.length} 个触摸圈已保存`
+        : faceAnchorDraftEnabled ? '角色构图与面部特写锚点已保存' : '角色构图已保存',
+      'success',
+    );
   };
   const chooseBuiltinSullyQuality = (quality: BuiltinSullyLive2DQuality) => {
     if (!character || !builtinSullyAvatar || builtinSullyAvatar.builtinQuality === quality) return;
@@ -2189,12 +2203,15 @@ const CompanionHome: React.FC = () => {
             accentColor={accentColor}
             baseFraming={activeCompanionFraming}
             framingEditable={editing}
-            onFramingChange={editing ? setCompositionFramingDraft : undefined}
+            onFramingChange={editing && compositionFramingMode !== 'touch' ? setCompositionFramingDraft : undefined}
             stageCrop={activeCompanionCrop}
             showCropGuide={editing && editingPanel === 'character' && compositionFramingMode === 'base'}
+            touchRegions={editing && character.videoAvatar?.format === 'live2d' ? touchRegionsDraft : undefined}
+            touchRegionEditingZone={editing && editingPanel === 'character' && compositionFramingMode === 'touch' && character.videoAvatar?.format === 'live2d' ? touchRegionEditingZone : undefined}
+            onTouchRegionsChange={editing ? setTouchRegionsDraft : undefined}
             onChooseModel={() => openApp(AppID.Call)}
             onExpressionsDiscovered={setVrmExpressions}
-            onAvatarTouch={hit => { void respondToTouch(hit); }}
+            onAvatarTouch={editing ? undefined : hit => { void respondToTouch(hit); }}
             onModelReady={handleStageModelReady}
             onModelError={handleStageModelError}
             touchImpulseNonce={lastHit?.nonce}
@@ -3298,7 +3315,7 @@ const CompanionHome: React.FC = () => {
                           </div>
                         </div>
                       )}
-                      <div className="mb-3 grid grid-cols-2 gap-1.5" data-testid="companion-framing-mode-picker">
+                      <div className={`mb-3 grid gap-1.5 ${character.videoAvatar.format === 'live2d' ? 'grid-cols-3' : 'grid-cols-2'}`} data-testid="companion-framing-mode-picker">
                         <button
                           type="button"
                           aria-pressed={compositionFramingMode === 'base'}
@@ -3317,14 +3334,73 @@ const CompanionHome: React.FC = () => {
                           className={`border px-2 py-2 text-[9px] transition ${compositionFramingMode === 'face' ? 'bg-white/12 text-white' : 'border-white/10 text-white/42'}`}
                           style={compositionFramingMode === 'face' ? { borderColor: `${uiTint}88` } : undefined}
                         >面部特写锚点{faceAnchorDraftEnabled ? ' · 已设' : ''}</button>
+                        {character.videoAvatar.format === 'live2d' && (
+                          <button
+                            type="button"
+                            aria-pressed={compositionFramingMode === 'touch'}
+                            data-testid="companion-touch-region-mode"
+                            onClick={() => setCompositionFramingMode('touch')}
+                            className={`border px-2 py-2 text-[9px] transition ${compositionFramingMode === 'touch' ? 'bg-white/12 text-white' : 'border-white/10 text-white/42'}`}
+                            style={compositionFramingMode === 'touch' ? { borderColor: `${uiTint}88` } : undefined}
+                          >触摸圈选{touchRegionsDraft.length ? ` · ${touchRegionsDraft.length}` : ''}</button>
+                        )}
                       </div>
                       {compositionFramingMode === 'face' && (
                         <div className="mb-3 border-l px-2.5 py-2 text-[8px] leading-relaxed text-white/48" style={{ borderColor: `${uiTint}88`, background: `${uiTint}0f` }}>
                           把脸拖到画面中心并调整到理想大小。保存后，摸脸或 AI 使用「拉近」镜头只会落到这个位置，不再按全身比例猜。
                         </div>
                       )}
+                      {compositionFramingMode === 'touch' && character.videoAvatar.format === 'live2d' && (
+                        <div className="mb-3 rounded-2xl border border-white/10 bg-black/15 p-2.5" data-testid="companion-touch-region-editor-panel">
+                          <div className="text-[8px] leading-relaxed text-white/55">
+                            先选部位，再在左侧模型上按住拖动，圈出椭圆区域。同一部位可画多个圈；圈会跟随这个模型，不受半身、全身或构图缩放影响。
+                          </div>
+                          <div className="mt-2 grid grid-cols-5 gap-1">
+                            {([
+                              { zone: 'head', label: '头', color: '#f5c86a' },
+                              { zone: 'face', label: '脸', color: '#ff8fb7' },
+                              { zone: 'hand', label: '手', color: '#77d9dd' },
+                              { zone: 'body', label: '身体', color: '#9ba8ff' },
+                              { zone: 'other', label: '其他', color: '#c6cbd5' },
+                            ] as const).map(item => {
+                              const count = touchRegionsDraft.filter(region => region.zone === item.zone).length;
+                              const active = touchRegionEditingZone === item.zone;
+                              return (
+                                <button
+                                  key={item.zone}
+                                  type="button"
+                                  onClick={() => setTouchRegionEditingZone(item.zone)}
+                                  className={`min-w-0 rounded-xl border px-1 py-2 text-[8px] transition active:scale-95 ${active ? 'bg-white/12 text-white' : 'border-white/8 text-white/42'}`}
+                                  style={active ? { borderColor: item.color, boxShadow: `inset 0 0 14px ${item.color}18` } : undefined}
+                                  data-testid={`companion-touch-region-zone-${item.zone}`}
+                                >
+                                  <span className="mx-auto mb-1 block h-1.5 w-1.5 rounded-full" style={{ background: item.color }} />
+                                  {item.label}{count ? ` ${count}` : ''}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <div className="mt-2 flex items-center justify-between border-t border-white/8 pt-2">
+                            <span className="text-[8px] text-white/35">重叠时优先较小的圈</span>
+                            <span className="flex gap-1">
+                              <button
+                                type="button"
+                                disabled={!touchRegionsDraft.some(region => region.zone === touchRegionEditingZone)}
+                                onClick={() => setTouchRegionsDraft(current => current.filter(region => region.zone !== touchRegionEditingZone))}
+                                className="rounded-full px-2 py-1 text-[8px] text-rose-200/65 disabled:opacity-25"
+                              >清除此部位</button>
+                              <button
+                                type="button"
+                                disabled={!touchRegionsDraft.length}
+                                onClick={() => setTouchRegionsDraft([])}
+                                className="rounded-full px-2 py-1 text-[8px] text-rose-200/65 disabled:opacity-25"
+                              >全部清除</button>
+                            </span>
+                          </div>
+                        </div>
+                      )}
                       <div className="flex items-center justify-between">
-                        <div className="text-[9px] font-semibold tracking-[0.16em] text-white/48">{compositionFramingMode === 'face' ? '面部锚点大小与位置' : '大小与位置'}</div>
+                        <div className="text-[9px] font-semibold tracking-[0.16em] text-white/48">{compositionFramingMode === 'face' ? '面部锚点大小与位置' : compositionFramingMode === 'touch' ? '圈选时的模型位置' : '大小与位置'}</div>
                         <button
                           onClick={() => {
                             if (compositionFramingMode === 'face') setFaceFramingDraft(makeFaceFramingSeed());
@@ -3332,7 +3408,7 @@ const CompanionHome: React.FC = () => {
                           }}
                           className="inline-flex items-center gap-1 rounded-full border border-white/12 px-2 py-1 text-[9px] text-white/50 active:scale-95"
                         >
-                          <ArrowClockwise size={10} weight="bold" /> {compositionFramingMode === 'face' ? '重置锚点' : '全部重置'}
+                          <ArrowClockwise size={10} weight="bold" /> {compositionFramingMode === 'face' ? '重置锚点' : compositionFramingMode === 'touch' ? '重置构图' : '全部重置'}
                         </button>
                       </div>
 

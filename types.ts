@@ -2417,6 +2417,18 @@ export interface CharMusicProfile {
 
 export type CompanionTouchZone = 'head' | 'face' | 'hand' | 'body' | 'other';
 
+export interface AvatarTouchRegion {
+  id: string;
+  zone: CompanionTouchZone;
+  /** Regions are normalized against this Live2D model's rendered bounds, not the screen. */
+  shape: 'ellipse';
+  /** Ellipse center and size, all in model-local 0..1 coordinates. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface CompanionPerformancePrecision {
   /** Temporarily suspend ambient turns/glances and keep the authored pose authoritative. */
   lockAutonomy?: boolean;
@@ -2599,6 +2611,8 @@ export interface CharacterProfile {
           bottom: number;
           left: number;
       };
+      /** 用户为这个 Live2D 模型单独圈选的触摸区域；未命中时仍回退模型自己的 HitArea。 */
+      touchRegions?: AvatarTouchRegion[];
       /** model3.json Groups 中声明的口型参数；没有声明时使用标准参数。 */
       lipSyncParameterIds: string[];
       /** 每个模型自己的动作/表情权限。AI 只能调用 permission=ai 的项目。 */

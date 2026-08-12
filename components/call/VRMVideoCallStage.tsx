@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ArrowClockwise, ArrowsOutCardinal, CaretDown, FileZip, FolderOpen, ImageSquare, Play, SlidersHorizontal, UploadSimple, WarningCircle } from '@phosphor-icons/react';
-import type { CharacterProfile } from '../../types';
+import type { AvatarTouchRegion, CharacterProfile } from '../../types';
 import { getAvatarModelBlob } from '../../utils/avatarModelStore';
 import {
   clampStageFraming,
@@ -17,6 +17,7 @@ import {
   isAvatarTouchGesture,
   type AvatarTouchHit,
   type AvatarTouchRequest,
+  type AvatarTouchZone,
 } from '../../utils/avatarTouch';
 import StaticCompanionPortrait from '../os/StaticCompanionPortrait';
 
@@ -68,6 +69,10 @@ interface VRMVideoCallStageProps {
   stageCrop?: AvatarStageCrop;
   /** Shows the exact crop window while the desktop composition editor is open. */
   showCropGuide?: boolean;
+  /** Live2D-only model-local touch-region draft and editor controls. */
+  touchRegions?: AvatarTouchRegion[];
+  touchRegionEditingZone?: AvatarTouchZone;
+  onTouchRegionsChange?: (regions: AvatarTouchRegion[]) => void;
   maxFps?: number;
 }
 
@@ -118,9 +123,12 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
   framingEditable,
   stageCrop = DEFAULT_STAGE_CROP,
   showCropGuide = false,
+  touchRegions,
+  touchRegionEditingZone,
+  onTouchRegionsChange,
   maxFps,
 }) => {
-  const canAdjustFraming = framingEditable ?? !companionMode;
+  const canAdjustFraming = !touchRegionEditingZone && (framingEditable ?? !companionMode);
   // 动作/表情快捷按钮默认收起——一排药丸浮在模型上视觉太吵，想用再展开。
   const [actionChipsOpen, setActionChipsOpen] = useState(() => {
     try { return localStorage.getItem('sully-call-action-chips-v1') === 'open'; } catch { return false; }
@@ -469,6 +477,9 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
               touchRequest={touchRequest}
               touchImpulseNonce={touchImpulseNonce}
               onAvatarTouch={onAvatarTouch}
+              touchRegions={touchRegions}
+              touchRegionEditingZone={touchRegionEditingZone}
+              onTouchRegionsChange={onTouchRegionsChange}
               maxFps={maxFps}
               onReady={onModelReady}
               onLoadingChange={(loading, stage) => {
