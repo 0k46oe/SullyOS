@@ -13,6 +13,7 @@ import {
   getLive2DWardrobeActions,
   inferLive2DActionTags,
   inspectLive2DPackage,
+  Live2DMissingFilesError,
   readLive2DTextureDimensions,
   removeLive2DWardrobeAction,
   sniffImageMime,
@@ -94,9 +95,43 @@ describe('Live2D 模型导入解析', () => {
     });
   });
 
-  it('模型引用缺文件时拒绝导入并指出包不完整', async () => {
-    await expect(inspectLive2DPackage(packageEntries.filter(entry => !entry.path.endsWith('texture_00.png'))))
-      .rejects.toThrow('模型引用的文件不完整');
+  it('模型引用缺文件时保留短提示，并向控制台返回完整路径诊断', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const entries = packageEntries.filter(entry => !entry.path.endsWith('texture_00.png'));
+    try {
+      await inspectLive2DPackage(entries);
+      throw new Error('expected missing-file rejection');
+    } catch (error) {
+      expect(error).toBeInstanceOf(Live2DMissingFilesError);
+      expect((error as Live2DMissingFilesError).message).toContain('模型引用的文件不完整');
+      expect((error as Live2DMissingFilesError).missingFiles).toEqual([
+        expect.objectContaining({
+          reference: 'textures/texture_00.png',
+          resolvedPath: 'Skylar/textures/texture_00.png',
+          referencedBy: 'Skylar/Skylar.model3.json',
+        }),
+      ]);
+      expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('完整缺失引用诊断'));
+      expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('Skylar/textures/texture_00.png'));
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('缺失诊断指出大小写错误和同名文件所在位置', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const entries = packageEntries
+      .filter(entry => !entry.path.endsWith('texture_00.png'))
+      .concat({ path: 'Skylar/Textures/TEXTURE_00.PNG', blob: blob('png') });
+    try {
+      await inspectLive2DPackage(entries);
+      throw new Error('expected missing-file rejection');
+    } catch (error) {
+      const detail = (error as Live2DMissingFilesError).missingFiles[0];
+      expect(detail.caseInsensitiveMatch).toBe('Skylar/Textures/TEXTURE_00.PNG');
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it('解析 VTube Studio 热键、未登记表情、待机动画和保存的构图', async () => {

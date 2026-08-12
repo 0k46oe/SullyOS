@@ -9,6 +9,45 @@ export type Live2DAction = Live2DAvatarConfig['actions'][number];
 export type Live2DActionPermission = Live2DAction['permission'];
 export type Live2DActionParameterValue = NonNullable<Live2DAction['parameterValues']>[number];
 
+export interface Live2DMissingFileDetail {
+  /** Reference exactly as written in model3/vtube JSON. */
+  reference: string;
+  /** Normalized package path the importer tried to resolve. */
+  resolvedPath: string;
+  /** JSON file that owns the reference. */
+  referencedBy: string;
+  /** Existing path with only letter-case differences, when present. */
+  caseInsensitiveMatch?: string;
+  /** Existing files with the same basename, useful for spotting an extra folder level. */
+  sameNameCandidates?: string[];
+}
+
+export class Live2DMissingFilesError extends Error {
+  readonly code = 'LIVE2D_MISSING_REFERENCES';
+
+  constructor(
+    readonly modelPath: string,
+    readonly missingFiles: Live2DMissingFileDetail[],
+    readonly packageFileCount: number,
+  ) {
+    const names = missingFiles.slice(0, 3).map(item => basename(item.resolvedPath));
+    super(`模型引用的文件不完整：${names.join('、')}${missingFiles.length > 3 ? ` 等 ${missingFiles.length} 个` : ''}`);
+    this.name = 'Live2DMissingFilesError';
+  }
+
+  toJSON() {
+    return {
+      name: this.name,
+      code: this.code,
+      message: this.message,
+      modelPath: this.modelPath,
+      packageFileCount: this.packageFileCount,
+      missingCount: this.missingFiles.length,
+      missingFiles: this.missingFiles,
+    };
+  }
+}
+
 /** 衣橱动作拥有独立的强制手动通道，旧数据即使残留 ai 权限也不会暴露给模型。 */
 export const isLive2DWardrobeAction = (action: Live2DAction): boolean => action.wardrobe === true;
 export const getLive2DAIActions = (config: Live2DAvatarConfig): Live2DAction[] => (
@@ -528,13 +567,48 @@ const parsePackage = async (entries: PackageEntry[]): Promise<ParsedPackage> => 
     vtube?.FileReferences?.IdleAnimationWhenTrackingLost,
     ...(vtube?.Hotkeys || []).map(hotkey => hotkey.File),
   ].filter((item): item is string => Boolean(item));
-  const missing = [
-    ...collectReferencedFiles(model).map(file => resolveModelReference(modelPath, file)),
-    ...vtubeReferencedFiles.map(file => resolveModelReference(vtubePath || modelPath, file)),
-  ]
-    .filter(path => !byPath.has(path));
+  const referencedFiles = [
+    ...collectReferencedFiles(model).map(reference => ({
+      reference,
+      resolvedPath: resolveModelReference(modelPath, reference),
+      referencedBy: modelPath,
+    })),
+    ...vtubeReferencedFiles.map(reference => ({
+      reference,
+      resolvedPath: resolveModelReference(vtubePath || modelPath, reference),
+      referencedBy: vtubePath || modelPath,
+    })),
+  ];
+  const packagePaths = [...byPath.keys()];
+  const missing = referencedFiles
+    .filter(item => !byPath.has(item.resolvedPath))
+    .filter((item, index, items) => items.findIndex(candidate => (
+      candidate.referencedBy === item.referencedBy
+      && candidate.reference === item.reference
+      && candidate.resolvedPath === item.resolvedPath
+    )) === index)
+    .map((item): Live2DMissingFileDetail => {
+      const lowerPath = item.resolvedPath.toLowerCase();
+      const targetName = basename(item.resolvedPath).toLowerCase();
+      const caseInsensitiveMatch = packagePaths.find(path => path.toLowerCase() === lowerPath);
+      const sameNameCandidates = packagePaths
+        .filter(path => basename(path).toLowerCase() === targetName && path !== caseInsensitiveMatch)
+        .slice(0, 8);
+      return {
+        ...item,
+        ...(caseInsensitiveMatch ? { caseInsensitiveMatch } : {}),
+        ...(sameNameCandidates.length ? { sameNameCandidates } : {}),
+      };
+    });
   if (missing.length) {
-    throw new Error(`模型引用的文件不完整：${missing.slice(0, 3).map(basename).join('、')}${missing.length > 3 ? ` 等 ${missing.length} 个` : ''}`);
+    const error = new Live2DMissingFilesError(modelPath, missing, packagePaths.length);
+    // Keep the user-facing message compact, but make the browser/debug console
+    // fully actionable. JSON text is intentional: embedded WebView consoles
+    // often collapse Error custom fields and only retain Error.message.
+    console.error(
+      `[live2d] ${error.message}\n完整缺失引用诊断：\n${JSON.stringify(error.toJSON(), null, 2)}`,
+    );
+    throw error;
   }
 
   const actions: Live2DAction[] = [];
