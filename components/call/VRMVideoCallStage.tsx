@@ -462,7 +462,7 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
             />
           ) : model?.format === 'live2d' ? (
             <Live2DAvatarCanvas
-              key={`${model.assetId}-${live2DRetryKey}`}
+              key={`${model.assetId}-${model.textureQuality === 'hd' ? 'hd' : 'balanced'}-${live2DRetryKey}`}
               config={model}
               motionState={motionState}
               audioFeed={audioFeed}

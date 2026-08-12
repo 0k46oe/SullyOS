@@ -6,6 +6,8 @@ import {
   downscaleOversizedLive2DTextures,
   findLive2DActionsForPerformance,
   getLive2DTextureResizeTarget,
+  getLive2DTextureMaxDimension,
+  getLive2DTextureQuality,
   getLive2DAIActions,
   getActiveLive2DWardrobeParameters,
   getLive2DWardrobeActions,
@@ -283,6 +285,14 @@ describe('Live2D 模型导入解析', () => {
     });
     expect(getLive2DTextureResizeTarget(8192, 4096)).toEqual({ width: 4096, height: 2048 });
     expect(getLive2DTextureResizeTarget(2048, 4096)).toBeNull();
+  });
+
+  it('导入模型默认使用 2K 运行纹理，并允许显式切到 4K', () => {
+    const base = { format: 'live2d', textureQuality: undefined } as Live2DAvatarConfig;
+    expect(getLive2DTextureQuality(base)).toBe('balanced');
+    expect(getLive2DTextureMaxDimension(base)).toBe(2048);
+    expect(getLive2DTextureQuality({ ...base, textureQuality: 'hd' })).toBe('hd');
+    expect(getLive2DTextureMaxDimension({ ...base, textureQuality: 'hd' })).toBe(4096);
   });
 
   it('导入时自动降档模型引用的超大贴图，并关闭临时位图释放解码内存', async () => {

@@ -2575,6 +2575,8 @@ export interface CharacterProfile {
       builtinModelUrl?: string;
       /** balanced = 2K 默认纹理，hd = 4K 可选纹理。 */
       builtinQuality?: 'balanced' | 'hd';
+      /** 导入模型的运行纹理档位；默认 balanced(2K)，源模型最多保留到 4K 以便切换。 */
+      textureQuality?: 'balanced' | 'hd';
       /** 内置 Sully 的一次性默认构图迁移版本。 */
       builtinFramingVersion?: 1 | 2;
       /** ZIP 包内 model3.json 的完整相对路径。 */

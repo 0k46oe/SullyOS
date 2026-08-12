@@ -61,7 +61,18 @@ const makeAssetId = (): string => {
 };
 
 /** Existing compressed Live2D packages get a derived persistent STORE cache. */
-export const live2DRuntimeCacheAssetId = (assetId: string): string => `${assetId}:live2d-runtime-store-v1`;
+export type Live2DTextureQuality = 'balanced' | 'hd';
+
+export const live2DRuntimeCacheAssetId = (
+  assetId: string,
+  quality?: Live2DTextureQuality,
+): string => `${assetId}:live2d-runtime-store-v1${quality ? `:${quality}` : ''}`;
+
+export const live2DRuntimeCacheAssetIds = (assetId: string): string[] => [
+  live2DRuntimeCacheAssetId(assetId),
+  live2DRuntimeCacheAssetId(assetId, 'balanced'),
+  live2DRuntimeCacheAssetId(assetId, 'hd'),
+];
 
 export async function saveAvatarModel(file: File): Promise<VideoAvatarConfig> {
   const inspection = await inspectAvatarFile(file);
@@ -93,6 +104,6 @@ export const deleteAvatarModel = async (config?: VideoAvatarConfig | null): Prom
   if (config.format === 'live2d' && config.builtIn) return;
   await DB.deleteBlobAsset(config.assetId);
   if (config.format === 'live2d') {
-    await DB.deleteBlobAsset(live2DRuntimeCacheAssetId(config.assetId));
+    await Promise.all(live2DRuntimeCacheAssetIds(config.assetId).map(id => DB.deleteBlobAsset(id)));
   }
 };

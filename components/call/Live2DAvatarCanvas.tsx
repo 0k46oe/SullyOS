@@ -1341,7 +1341,8 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
           // desktop's calibrated composition perfectly still.
           const suppressUnanchoredCloseShot = closeShot
             && ambientAutonomyDisabledRef.current
-            && !anchored;
+            && !anchored
+            && !configRef.current.builtIn;
           // 导演机位只在用户构图基础上做温和加减：medium 必须是 1.0，
           // 否则用户校准好的构图会被默认镜头永久放大。锚定后特写倍率交给锚点本身。
           const cameraScale = anchored

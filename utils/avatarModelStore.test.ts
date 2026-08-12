@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { inspectAvatarFile, live2DRuntimeCacheAssetId } from './avatarModelStore';
+import { inspectAvatarFile, live2DRuntimeCacheAssetId, live2DRuntimeCacheAssetIds } from './avatarModelStore';
 
 const namedBlob = (name: string, bytes: number[]): Blob & { name: string } => {
   const blob = new Blob([new Uint8Array(bytes)]) as Blob & { name: string };
@@ -10,6 +10,8 @@ const namedBlob = (name: string, bytes: number[]): Blob & { name: string } => {
 describe('VRM 文件识别', () => {
   it('为 Live2D 派生运行缓存生成稳定且不碰撞原包的 key', () => {
     expect(live2DRuntimeCacheAssetId('video-avatar-live2d-1')).toBe('video-avatar-live2d-1:live2d-runtime-store-v1');
+    expect(live2DRuntimeCacheAssetId('video-avatar-live2d-1', 'balanced')).toBe('video-avatar-live2d-1:live2d-runtime-store-v1:balanced');
+    expect(live2DRuntimeCacheAssetIds('video-avatar-live2d-1')).toHaveLength(3);
   });
   it('识别标准 GLB/VRM magic', async () => {
     const result = await inspectAvatarFile(namedBlob('skylar.vrm', [0x67, 0x6c, 0x54, 0x46, 0, 0, 0, 0]));

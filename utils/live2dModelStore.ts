@@ -1,7 +1,7 @@
 import JSZip from 'jszip';
 import type { CharacterProfile } from '../types';
 import { DB } from './db';
-import { live2DRuntimeCacheAssetId } from './avatarModelStore';
+import { live2DRuntimeCacheAssetId, type Live2DTextureQuality } from './avatarModelStore';
 import { isBuiltinSullyLive2D } from './builtinSullyLive2D';
 
 export type Live2DAvatarConfig = Extract<NonNullable<CharacterProfile['videoAvatar']>, { format: 'live2d' }>;
@@ -155,7 +155,19 @@ const finiteOr = (value: unknown, fallback: number): number => (
 );
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 
+/** Source packages retain at most 4K so users can switch between runtime tiers. */
 export const LIVE2D_MAX_TEXTURE_DIMENSION = 4096;
+export const LIVE2D_BALANCED_TEXTURE_DIMENSION = 2048;
+
+export const getLive2DTextureQuality = (config: Live2DAvatarConfig): Live2DTextureQuality => (
+  config.textureQuality === 'hd' ? 'hd' : 'balanced'
+);
+
+export const getLive2DTextureMaxDimension = (config: Live2DAvatarConfig): number => (
+  getLive2DTextureQuality(config) === 'hd'
+    ? LIVE2D_MAX_TEXTURE_DIMENSION
+    : LIVE2D_BALANCED_TEXTURE_DIMENSION
+);
 
 export interface Live2DTextureDimensions {
   width: number;
@@ -696,14 +708,24 @@ const makeAssetId = (): string => {
 
 const createConfig = async (
   blob: Blob,
-  entries: PackageEntry[],
+  sourceEntries: PackageEntry[],
   fileName: string,
   parsed?: ParsedPackage,
+  runtimeEntries: PackageEntry[] = sourceEntries,
+  persistRuntimeCache = false,
 ): Promise<Live2DAvatarConfig> => {
-  const inspected = parsed || await parsePackage(entries);
+  const inspected = parsed || await parsePackage(sourceEntries);
   const assetId = makeAssetId();
   await DB.putBlobAsset(assetId, blob);
-  seedLive2DRuntimePackage(assetId, entries);
+  if (persistRuntimeCache) {
+    try {
+      const runtimeBlob = await buildStoredLive2DPackage(runtimeEntries);
+      await DB.putBlobAsset(live2DRuntimeCacheAssetId(assetId, 'balanced'), runtimeBlob);
+    } catch (error) {
+      console.warn('[live2d] 2K import cache write skipped:', error);
+    }
+  }
+  seedLive2DRuntimePackage(assetId, runtimeEntries, 'balanced');
   return {
     version: 1,
     format: 'live2d',
@@ -711,9 +733,10 @@ const createConfig = async (
     fileName: fileName || inspected.modelName,
     modelPath: inspected.modelPath,
     byteLength: blob.size,
-    fileCount: entries.length,
+    fileCount: sourceEntries.length,
     importedAt: Date.now(),
     runtimePackageEncoding: 'store-v1',
+    textureQuality: 'balanced',
     actionPolicyVersion: 2,
     framing: inspected.framing || { scale: 1, offsetX: 0, offsetY: 0 },
     lipSyncParameterIds: inspected.lipSyncParameterIds,
@@ -734,16 +757,29 @@ export const saveLive2DModelFromFiles = async (
   const entries = sourceFiles.map(file => ({ path: normalizePath(fileRelativePath(file)), blob: file }));
   onProgress?.(`正在扫描 ${entries.length} 个文件和 VTube Studio 热键…`);
   const parsed = await parsePackage(entries);
-  const optimized = await downscaleOversizedLive2DTextures(entries, parsed.texturePaths, onProgress);
-  onProgress?.(optimized.resizedTextures.length
-    ? `已自动降档 ${optimized.resizedTextures.length} 张超大贴图，正在整理本地模型包…`
+  const sourceOptimized = await downscaleOversizedLive2DTextures(entries, parsed.texturePaths, onProgress, LIVE2D_MAX_TEXTURE_DIMENSION);
+  const runtimeOptimized = await downscaleOversizedLive2DTextures(
+    sourceOptimized.entries,
+    parsed.texturePaths,
+    onProgress,
+    LIVE2D_BALANCED_TEXTURE_DIMENSION,
+  );
+  onProgress?.(sourceOptimized.resizedTextures.length || runtimeOptimized.resizedTextures.length
+    ? `已建立默认 2K 纹理（保留最多 4K 源图供切换），正在整理本地模型包…`
     : `已找到 ${parsed.actions.length} 个表情/动作，正在整理本地模型包…`);
   // PNG/JPEG/moc are already compressed. Re-deflating a large 8K texture can
   // freeze the UI for tens of seconds without meaningfully reducing its size.
-  const packageBlob = await buildStoredLive2DPackage(optimized.entries);
+  const packageBlob = await buildStoredLive2DPackage(sourceOptimized.entries);
   const rootName = parsed.modelPath.includes('/') ? parsed.modelPath.split('/')[0] : parsed.modelName;
   onProgress?.('正在写入本地模型库，请保持页面打开…');
-  return createConfig(packageBlob, optimized.entries, rootName, parsed);
+  return createConfig(
+    packageBlob,
+    sourceOptimized.entries,
+    rootName,
+    parsed,
+    runtimeOptimized.entries,
+    runtimeOptimized.resizedTextures.length > 0,
+  );
 };
 
 export const saveLive2DModelFromZip = async (
@@ -770,13 +806,26 @@ export const saveLive2DModelFromZip = async (
   }
   onProgress?.('正在解析 model3、未登记文件与 VTube Studio 热键…');
   const parsed = await parsePackage(entries);
-  const optimized = await downscaleOversizedLive2DTextures(entries, parsed.texturePaths, onProgress);
-  onProgress?.(optimized.resizedTextures.length
-    ? `已自动降档 ${optimized.resizedTextures.length} 张超大贴图，正在建立免解压运行缓存…`
+  const sourceOptimized = await downscaleOversizedLive2DTextures(entries, parsed.texturePaths, onProgress, LIVE2D_MAX_TEXTURE_DIMENSION);
+  const runtimeOptimized = await downscaleOversizedLive2DTextures(
+    sourceOptimized.entries,
+    parsed.texturePaths,
+    onProgress,
+    LIVE2D_BALANCED_TEXTURE_DIMENSION,
+  );
+  onProgress?.(sourceOptimized.resizedTextures.length || runtimeOptimized.resizedTextures.length
+    ? `已建立默认 2K 纹理（保留最多 4K 源图供切换），正在建立免解压运行缓存…`
     : `已找到 ${parsed.actions.length} 个表情/动作，正在建立免解压运行缓存…`);
-  const packageBlob = await buildStoredLive2DPackage(optimized.entries);
+  const packageBlob = await buildStoredLive2DPackage(sourceOptimized.entries);
   onProgress?.('运行缓存已建立，正在写入本地模型库…');
-  return createConfig(packageBlob, optimized.entries, file.name.replace(/\.zip$/i, ''), parsed);
+  return createConfig(
+    packageBlob,
+    sourceOptimized.entries,
+    file.name.replace(/\.zip$/i, ''),
+    parsed,
+    runtimeOptimized.entries,
+    runtimeOptimized.resizedTextures.length > 0,
+  );
 };
 
 const mimeForPath = (path: string): string => {
@@ -925,16 +974,23 @@ const hydrateBuiltinSettings = (
 // the user switches characters.
 const live2DRuntimePackageCache = new Map<string, Promise<Live2DRuntimePackage>>();
 
-const seedLive2DRuntimePackage = (assetId: string, entries: PackageEntry[]): void => {
+const live2DRuntimeMemoryCacheKey = (assetId: string, quality: Live2DTextureQuality): string => `${assetId}:${quality}`;
+
+const seedLive2DRuntimePackage = (
+  assetId: string,
+  entries: PackageEntry[],
+  quality: Live2DTextureQuality = 'balanced',
+): void => {
+  const cacheKey = live2DRuntimeMemoryCacheKey(assetId, quality);
   const runtimePackage: Live2DRuntimePackage = {
     entries: new Map(entries.map(entry => [normalizePath(entry.path), entry.blob])),
     textureDataUrls: new Map<string, Promise<string>>(),
     source: 'stored-package',
     unpackMs: 0,
   };
-  live2DRuntimePackageCache.set(assetId, Promise.resolve(runtimePackage));
-  for (const cachedAssetId of live2DRuntimePackageCache.keys()) {
-    if (cachedAssetId !== assetId) live2DRuntimePackageCache.delete(cachedAssetId);
+  live2DRuntimePackageCache.set(cacheKey, Promise.resolve(runtimePackage));
+  for (const cachedKey of live2DRuntimePackageCache.keys()) {
+    if (cachedKey !== cacheKey) live2DRuntimePackageCache.delete(cachedKey);
   }
 };
 
@@ -955,7 +1011,12 @@ const optimizeStoredRuntimeTextures = async (
     const texturePaths = (settings.FileReferences?.Textures || [])
       .map(reference => resolveModelReference(config.modelPath, reference));
     if (!texturePaths.length) return { entries, resizedTextures: [] };
-    return downscaleOversizedLive2DTextures(entries, texturePaths, onProgress);
+    return downscaleOversizedLive2DTextures(
+      entries,
+      texturePaths,
+      onProgress,
+      getLive2DTextureMaxDimension(config),
+    );
   } catch (error) {
     if (error instanceof SyntaxError) return { entries, resizedTextures: [] };
     throw error;
@@ -968,11 +1029,13 @@ const getLive2DRuntimePackage = async (
 ): Promise<{ runtimePackage: Live2DRuntimePackage; memoryHit: boolean; waitMs: number }> => {
   const startedAt = nowMs();
   const assetId = config.assetId;
-  const cached = live2DRuntimePackageCache.get(assetId);
+  const quality = getLive2DTextureQuality(config);
+  const cacheKey = live2DRuntimeMemoryCacheKey(assetId, quality);
+  const cached = live2DRuntimePackageCache.get(cacheKey);
   if (cached) {
-    live2DRuntimePackageCache.delete(assetId);
-    live2DRuntimePackageCache.set(assetId, cached);
-    onProgress?.('正在从内存缓存恢复模型…');
+    live2DRuntimePackageCache.delete(cacheKey);
+    live2DRuntimePackageCache.set(cacheKey, cached);
+    onProgress?.(`正在从内存缓存恢复${quality === 'hd' ? '高清 4K' : '轻量 2K'}模型…`);
     return {
       runtimePackage: await cached,
       memoryHit: true,
@@ -983,11 +1046,11 @@ const getLive2DRuntimePackage = async (
   const pending = (async () => {
     let packageBlob: Blob | null = null;
     let source: Live2DRuntimePackage['source'];
-    const persistentCacheId = live2DRuntimeCacheAssetId(assetId);
+    const persistentCacheId = live2DRuntimeCacheAssetId(assetId, quality);
     if (config.runtimePackageEncoding === 'store-v1') {
       packageBlob = await DB.getBlobAsset(persistentCacheId);
       if (packageBlob) {
-        onProgress?.('正在读取已优化的模型运行缓存…');
+        onProgress?.(`正在读取已优化的${quality === 'hd' ? '高清 4K' : '轻量 2K'}运行缓存…`);
         source = 'persistent-cache';
       } else {
         onProgress?.('正在读取免解压模型包…');
@@ -997,7 +1060,7 @@ const getLive2DRuntimePackage = async (
     } else {
       packageBlob = await DB.getBlobAsset(persistentCacheId);
       if (packageBlob) {
-        onProgress?.('正在读取持久化运行缓存…');
+        onProgress?.(`正在读取${quality === 'hd' ? '高清 4K' : '轻量 2K'}运行缓存…`);
         source = 'persistent-cache';
       } else {
         onProgress?.('首次优化旧模型：正在解包并建立运行缓存…');
@@ -1040,14 +1103,14 @@ const getLive2DRuntimePackage = async (
     }
     return runtimePackage;
   })().catch(error => {
-    live2DRuntimePackageCache.delete(assetId);
+    live2DRuntimePackageCache.delete(cacheKey);
     throw error;
   });
 
-  live2DRuntimePackageCache.set(assetId, pending);
+  live2DRuntimePackageCache.set(cacheKey, pending);
   while (live2DRuntimePackageCache.size > 1) {
     const oldest = live2DRuntimePackageCache.keys().next().value as string | undefined;
-    if (!oldest || oldest === assetId) break;
+    if (!oldest || oldest === cacheKey) break;
     live2DRuntimePackageCache.delete(oldest);
   }
   return {

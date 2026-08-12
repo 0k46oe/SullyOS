@@ -1,7 +1,7 @@
 import JSZip from 'jszip';
 import type { CharacterProfile } from '../types';
 import { DB } from './db';
-import { live2DRuntimeCacheAssetId } from './avatarModelStore';
+import { live2DRuntimeCacheAssetIds } from './avatarModelStore';
 
 export const AVATAR_MODEL_BACKUP_FORMAT = 'sully-avatar-models';
 export const AVATAR_MODEL_BACKUP_VERSION = 1;
@@ -270,7 +270,7 @@ export const restoreAvatarModelBackup = async (
     const config = { ...item.config, byteLength: blob.size } as VideoAvatarConfig;
     await DB.putBlobAsset(config.assetId, blob);
     if (config.format === 'live2d') {
-      await DB.deleteBlobAsset(live2DRuntimeCacheAssetId(config.assetId));
+      await Promise.all(live2DRuntimeCacheAssetIds(config.assetId).map(id => DB.deleteBlobAsset(id)));
     }
     const updatedTarget = item.slot === 'wardrobe'
       ? {

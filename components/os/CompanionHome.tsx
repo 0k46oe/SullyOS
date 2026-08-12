@@ -1176,6 +1176,24 @@ const CompanionHome: React.FC = () => {
     updateCharacter(character.id, { videoAvatar: setBuiltinSullyLive2DQuality(builtinSullyAvatar, quality) });
     addToast(quality === 'hd' ? 'Sully 已切到高清 4K；低端设备建议使用 2K' : 'Sully 已切回轻量 2K', quality === 'hd' ? 'info' : 'success');
   };
+  const chooseImportedLive2DTextureQuality = (quality: 'balanced' | 'hd') => {
+    if (!character?.videoAvatar || character.videoAvatar.format !== 'live2d' || character.videoAvatar.builtIn) return;
+    const current = character.videoAvatar.textureQuality === 'hd' ? 'hd' : 'balanced';
+    if (current === quality) return;
+    updateCharacter(character.id, prev => (
+      prev.videoAvatar?.format === 'live2d' && !prev.videoAvatar.builtIn
+        ? { videoAvatar: { ...prev.videoAvatar, textureQuality: quality } }
+        : {}
+    ));
+    setStageReady(false);
+    setStageCurtainPhase('covered');
+    addToast(
+      quality === 'hd'
+        ? '模型已切到高清 4K；首次切换会建立独立运行缓存'
+        : '模型已切回默认轻量 2K；更省内存、更不易闪退',
+      quality === 'hd' ? 'info' : 'success',
+    );
+  };
 
   const chooseCompanionFrameStyle = (nextStyle: CompanionFrameStyleId) => {
     setFrameStyle(nextStyle);
@@ -1709,9 +1727,14 @@ const CompanionHome: React.FC = () => {
     stopTouchVoice();
     setLastHit(hit);
     const touchForce = resolveAvatarTouchForce(hit);
+    const keepBuiltinSullyHeadClose = (direction: AvatarPerformanceDirection): AvatarPerformanceDirection => (
+      isBuiltinSullyLive2D(character.videoAvatar) && (hit.zone === 'head' || hit.zone === 'face')
+        ? { ...direction, camera: 'close' }
+        : direction
+    );
     setRipple({ nonce: hit.nonce, x: hit.normalizedX, y: hit.normalizedY, force: touchForce });
     showTouchBanner(hit, `你戳了戳${character.name}的${avatarTouchTargetLabel(hit)}`);
-    setPerformance(applyAvatarTouchForce(buildImmediateTouchPerformance(hit.zone), hit));
+    setPerformance(applyAvatarTouchForce(keepBuiltinSullyHeadClose(buildImmediateTouchPerformance(hit.zone)), hit));
     setMotionState('speaking');
 
     const settings = character.companionTouchSettings;
@@ -1741,7 +1764,7 @@ const CompanionHome: React.FC = () => {
       if (!mountedRef.current) return;
       setLine({ text, translation: translation || undefined, label: `触摸 · ${avatarTouchZoneLabel(hit.zone)}`, kind: 'touch' });
       setPerformance(applyAvatarTouchForce(
-        reaction.performance || buildImmediateTouchPerformance(hit.zone),
+        keepBuiltinSullyHeadClose(reaction.performance || buildImmediateTouchPerformance(hit.zone)),
         hit,
       ));
       setMotionState('speaking');
@@ -3309,6 +3332,33 @@ const CompanionHome: React.FC = () => {
                                   onClick={() => chooseBuiltinSullyQuality(option.value)}
                                   className={`rounded-xl border py-2 text-[9px] font-medium transition active:scale-[.98] ${active ? 'bg-white/14 text-white' : 'border-white/8 bg-white/[.025] text-white/42'}`}
                                   style={active ? { borderColor: `${uiTint}88` } : undefined}
+                                >{active && <Check size={10} weight="bold" className="mr-1 inline" />}{option.label}</button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                      {character.videoAvatar.format === 'live2d' && !builtinSullyAvatar && (
+                        <div className="mb-3 rounded-2xl border border-white/10 bg-black/15 p-2.5" data-testid="companion-live2d-texture-quality-picker">
+                          <div>
+                            <div className="text-[9px] font-semibold tracking-[0.16em] text-white/48">运行纹理画质</div>
+                            <div className="mt-0.5 text-[8px] leading-relaxed text-white/32">默认 2K 更稳；4K 会占用更多内存，并单独建立运行缓存</div>
+                          </div>
+                          <div className="mt-2 grid grid-cols-2 gap-1.5">
+                            {([
+                              { value: 'balanced' as const, label: '轻量 2K' },
+                              { value: 'hd' as const, label: '高清 4K' },
+                            ]).map(option => {
+                              const currentQuality = character.videoAvatar?.format === 'live2d' && character.videoAvatar.textureQuality === 'hd' ? 'hd' : 'balanced';
+                              const active = currentQuality === option.value;
+                              return (
+                                <button
+                                  key={option.value}
+                                  type="button"
+                                  onClick={() => chooseImportedLive2DTextureQuality(option.value)}
+                                  className={`rounded-xl border py-2 text-[9px] font-medium transition active:scale-[.98] ${active ? 'bg-white/14 text-white' : 'border-white/8 bg-white/[.025] text-white/42'}`}
+                                  style={active ? { borderColor: `${uiTint}88` } : undefined}
+                                  data-testid={`companion-live2d-texture-quality-${option.value}`}
                                 >{active && <Check size={10} weight="bold" className="mr-1 inline" />}{option.label}</button>
                               );
                             })}

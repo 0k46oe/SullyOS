@@ -120,6 +120,8 @@ describe('avatar model backup', () => {
     ]);
     expect(dbMock.saveCharacter).toHaveBeenCalledTimes(2);
     expect(dbMock.deleteBlobAsset).toHaveBeenCalledWith(`${live2dConfig.assetId}:live2d-runtime-store-v1`);
+    expect(dbMock.deleteBlobAsset).toHaveBeenCalledWith(`${live2dConfig.assetId}:live2d-runtime-store-v1:balanced`);
+    expect(dbMock.deleteBlobAsset).toHaveBeenCalledWith(`${live2dConfig.assetId}:live2d-runtime-store-v1:hd`);
   });
 
   it('skips a model when its character has not been restored yet', async () => {
