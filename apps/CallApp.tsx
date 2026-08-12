@@ -3121,10 +3121,11 @@ ${sentencePlan}`;
           {userCameraMode === 'off' && <span className="pointer-events-none absolute right-3 top-3 z-20 h-8 w-8 rounded-tr-[1.8rem] border-r border-t" style={{ borderColor: `${accentColor}aa` }} aria-hidden />}
           <span className="pointer-events-none absolute bottom-3 left-3 z-20 text-[8px]" style={{ color: accentColor }} aria-hidden>✦</span>
           <span className="pointer-events-none absolute bottom-3 right-3 z-20 text-[7px] text-white/55" aria-hidden>✦</span>
+          {/* The action editor owns its own WebGL preview; suspend this one. */}
           <VRMVideoCallStage
             characterName={selectedChar?.name || '未选择'}
             fallbackAvatar={selectedChar?.avatar}
-            model={selectedVisualSource === 'model' ? selectedChar?.videoAvatar : undefined}
+            model={!showLive2DSettings && selectedVisualSource === 'model' ? selectedChar?.videoAvatar : undefined}
             staticAvatarSource={staticVideoAvatarActive ? selectedVisualSource : undefined}
             staticPortraitValue={staticVideoPortrait}
             staticExpressionKey={staticVideoExpressionKey}

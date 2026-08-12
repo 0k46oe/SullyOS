@@ -3,7 +3,9 @@ import JSZip from 'jszip';
 import {
   buildStoredLive2DPackage,
   buildLive2DPerformanceMix,
+  createLive2DRuntimeTextureUrl,
   downscaleOversizedLive2DTextures,
+  extractStreamingLive2DRuntimeArchive,
   findLive2DActionsForPerformance,
   getLive2DTextureResizeTarget,
   getLive2DTextureMaxDimension,
@@ -75,6 +77,67 @@ describe('Live2D 模型导入解析', () => {
     const zip = await JSZip.loadAsync(await stored.arrayBuffer());
     expect(await zip.file('Model/model3.json')?.async('string')).toBe(repeated);
     expect(stored.size).toBeGreaterThan(64 * 1024);
+  });
+
+  it('从压缩 ZIP 逐项读取，并把 8K 纹理直接生成 2K 运行图', async () => {
+    const close = vi.fn();
+    const createBitmap = vi.fn(async () => ({ width: 2048, height: 1024, close }));
+    class MockOffscreenCanvas {
+      constructor(public width: number, public height: number) {}
+      getContext() { return { drawImage: vi.fn() }; }
+      async convertToBlob(options: { type: string }) {
+        return new Blob(['streamed-2k'], { type: options.type });
+      }
+    }
+    vi.stubGlobal('createImageBitmap', createBitmap);
+    vi.stubGlobal('OffscreenCanvas', MockOffscreenCanvas);
+
+    const zip = new JSZip();
+    zip.file('Model/Model.model3.json', JSON.stringify({
+      Version: 3,
+      FileReferences: { Moc: 'Model.moc3', Textures: ['texture.png'] },
+    }));
+    zip.file('Model/Model.moc3', 'moc');
+    zip.file('Model/texture.png', await pngHeader(8192, 4096).arrayBuffer());
+    const archive = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+    const progress = vi.fn();
+
+    const result = await extractStreamingLive2DRuntimeArchive(
+      archive,
+      'Model/Model.model3.json',
+      2048,
+      progress,
+    );
+
+    expect(result.entries.map(entry => entry.path)).toEqual([
+      'Model/Model.model3.json',
+      'Model/Model.moc3',
+      'Model/texture.png',
+    ]);
+    expect(await result.entries[2].blob.text()).toBe('streamed-2k');
+    expect(result.resizedTextures).toEqual([expect.objectContaining({
+      path: 'Model/texture.png',
+      fromWidth: 8192,
+      toWidth: 2048,
+      toHeight: 1024,
+    })]);
+    expect(createBitmap).toHaveBeenCalledWith(expect.any(Blob), expect.objectContaining({
+      resizeWidth: 2048,
+      resizeHeight: 1024,
+    }));
+    expect(close).toHaveBeenCalledOnce();
+    expect(progress).toHaveBeenCalledWith(expect.stringContaining('低内存解包'));
+  });
+
+  it('运行纹理使用带扩展名的 Blob URL，不再复制为 Base64', async () => {
+    const createObjectURL = vi.fn(() => 'blob:live2d-texture');
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() });
+
+    const url = await createLive2DRuntimeTextureUrl(pngHeader(2048, 2048), 'Model/texture.bin');
+
+    expect(url).toBe('blob:live2d-texture#live2d-texture.png');
+    expect(createObjectURL).toHaveBeenCalledWith(expect.objectContaining({ type: 'image/png' }));
+    expect(url).not.toContain('base64');
   });
 
   it('从 model3.json 解析动作、表情、标签与口型参数，自动开放安全动作', async () => {
@@ -368,6 +431,45 @@ describe('Live2D 模型导入解析', () => {
       toHeight: 2048,
     })]);
     expect(progress).toHaveBeenCalledWith(expect.stringContaining('8192×4096'));
+  });
+
+  it('手机支持 WebCodecs 时按 2K 目标流式解码，不先展开 8K 位图', async () => {
+    const frameClose = vi.fn();
+    const decoderClose = vi.fn();
+    const decoderInit = vi.fn();
+    class MockImageDecoder {
+      constructor(init: ImageDecoderInit) { decoderInit(init); }
+      async decode() { return { complete: true, image: { close: frameClose } }; }
+      close() { decoderClose(); }
+    }
+    class MockOffscreenCanvas {
+      constructor(public width: number, public height: number) {}
+      getContext() { return { drawImage: vi.fn() }; }
+      async convertToBlob(options: { type: string }) {
+        return new Blob(['webcodecs-2k'], { type: options.type });
+      }
+    }
+    const createBitmap = vi.fn();
+    vi.stubGlobal('ImageDecoder', MockImageDecoder);
+    vi.stubGlobal('createImageBitmap', createBitmap);
+    vi.stubGlobal('OffscreenCanvas', MockOffscreenCanvas);
+
+    const result = await downscaleOversizedLive2DTextures(
+      [{ path: 'Model/texture.png', blob: pngHeader(8192, 4096) }],
+      ['Model/texture.png'],
+      undefined,
+      2048,
+    );
+
+    expect(decoderInit).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'image/png',
+      desiredWidth: 2048,
+      desiredHeight: 1024,
+    }));
+    expect(createBitmap).not.toHaveBeenCalled();
+    expect(frameClose).toHaveBeenCalledOnce();
+    expect(decoderClose).toHaveBeenCalledOnce();
+    expect(await result.entries[0].blob.text()).toBe('webcodecs-2k');
   });
 
 });

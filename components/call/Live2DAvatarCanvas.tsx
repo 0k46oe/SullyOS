@@ -197,6 +197,18 @@ interface TextureLease {
 
 const textureLeases = new Map<string, TextureLease>();
 
+export const isMobileLive2DRuntime = (): boolean => {
+  if (typeof navigator === 'undefined') return false;
+  const nav = navigator as Navigator & { userAgentData?: { mobile?: boolean } };
+  if (nav.userAgentData?.mobile === true || /Android|iPhone|iPad|iPod|Mobile/i.test(nav.userAgent)) return true;
+  return nav.maxTouchPoints > 1
+    && typeof matchMedia === 'function'
+    && matchMedia('(pointer: coarse)').matches;
+};
+
+export const getLive2DCubismMemorySizeMB = (mobile = isMobileLive2DRuntime()): number => mobile ? 32 : 64;
+export const getLive2DTextureReleaseDelayMs = (mobile = isMobileLive2DRuntime()): number => mobile ? 1_000 : 8_000;
+
 const acquireTextureLeases = (urls: string[]) => {
   urls.forEach(url => {
     const lease = textureLeases.get(url) || { users: 0, cleanupTimer: null };
@@ -219,9 +231,9 @@ const releaseTextureLeases = (urls: string[]) => {
     if (!lease) return;
     lease.users = Math.max(0, lease.users - 1);
     if (lease.users > 0 || lease.cleanupTimer !== null) return;
-    // Keep the decoded texture briefly across settings-preview -> call-stage
-    // transitions. If nobody claims it, unload after the grace period so an 8K
-    // texture does not stay on the GPU for the whole session. Must go through
+    // Keep the decoded texture only briefly across preview -> stage transitions.
+    // A 30-second grace period used to retain every recently opened atlas and
+    // could exhaust a mobile WebView after switching models a few times. Must go through
     // Assets.unload：手动 destroy 只清 Cache，Assets 的 promise 缓存还留着，
     // 下次同一 URL 会拿到已销毁的贴图。
     lease.cleanupTimer = window.setTimeout(() => {
@@ -234,7 +246,7 @@ const releaseTextureLeases = (urls: string[]) => {
         }
       });
       textureLeases.delete(url);
-    }, 30_000);
+    }, getLive2DTextureReleaseDelayMs());
   });
 };
 
@@ -740,6 +752,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
 
     const boot = async () => {
       const bootStartedAt = window.performance.now();
+      const mobileRuntime = isMobileLive2DRuntime();
       // 模型包读取/解包/贴图转码只碰 IndexedDB 和 FileReader，与引擎完全无关。
       // 提前并行发起，引擎脚本加载 + Pixi 初始化期间磁盘 IO 与解码同时进行，
       // 首屏耗时从「两段相加」变成「取较慢的一段」。
@@ -753,13 +766,19 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
         onLoadingChangeRef.current?.(true, '引擎已就绪，正在准备 Live2D 渲染器…');
         const { configureCubismSDK, Live2DModel, Live2DPlugin } = await preloadLive2DRuntime();
         registerLive2DPlugin(Live2DPlugin as Parameters<typeof extensions.add>[0]);
-        configureCubismSDK({ memorySizeMB: 128 });
+        // The stage renders a single model. Reserving 128 MB for Cubism's
+        // internal update heap before textures were even uploaded was wasteful
+        // on phones; 32 MB keeps a 2x safety margin over the SDK minimum.
+        configureCubismSDK({ memorySizeMB: getLive2DCubismMemorySizeMB(mobileRuntime) });
 
         app = new Application();
         await app.init({
           resizeTo: host,
           backgroundAlpha: 0,
-          antialias: true,
+          // Live2D atlas edges are already alpha-antialiased. Disabling WebGL
+          // MSAA on mobile avoids an extra multisampled framebuffer without
+          // reducing atlas resolution.
+          antialias: !mobileRuntime,
           autoDensity: true,
           resolution: Math.min(window.devicePixelRatio || 1, 2),
           preference: 'webgl',
@@ -807,10 +826,12 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
         const cubismStartedAt = window.performance.now();
         const model = await Live2DModel.from(source.settings as any, {
           idleMotionGroup: 'Idle',
-          // preferCreateImageBitmap:false → 贴图走主线程 <img> 解码。worker 里
-          // fetch 巨型 data URL（8K 贴图 base64 上百 MB）是 Pixi 的经典翻车点，
-          // 表现就是 [Loader.load] Failed to load。
-          textureOptions: { lod: 'full', preferCreateImageBitmap: false } as any,
+          // Full mip chains add another ~33% GPU allocation per atlas. The
+          // model already uses the selected source resolution, so linear
+          // sampling without generated mipmaps preserves detail and memory.
+          // Texture sources are Blob URLs now, allowing Pixi's bitmap loader
+          // instead of the old main-thread Base64 <img> path.
+          textureOptions: { lod: false } as any,
           ticker: app.ticker,
           autoUpdate: true,
           // We provide our own DOM pointer-to-gaze controller and action chips,

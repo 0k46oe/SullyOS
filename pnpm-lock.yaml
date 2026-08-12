@@ -74,6 +74,9 @@ importers:
       '@rei-standard/amsg-sw':
         specifier: 2.4.0-next.3
         version: 2.4.0-next.3
+      '@zip.js/zip.js':
+        specifier: ^2.8.43
+        version: 2.8.43
       ag-psd:
         specifier: ^31.0.2
         version: 31.0.2
@@ -1339,6 +1342,10 @@ packages:
   '@xmldom/xmldom@0.9.10':
     resolution: {integrity: sha512-A9gOqLdi6cV4ibazAjcQufGj0B1y/vDqYrcuP6d/6x8P27gRS8643Dj9o1dEKtB6O7fwxb2FgBmJS2mX7gpvdw==}
     engines: {node: '>=14.6'}
+
+  '@zip.js/zip.js@2.8.43':
+    resolution: {integrity: sha512-LesnlKQyNaCm3NWd7TwMLYYRVShxaeItzReGGRiwxRhsad5PhIF2Vxl+tOWoajjK7xiukZtqmJf5ckkE/OVpYw==}
+    engines: {bun: '>=0.7.0', deno: '>=1.0.0', node: '>=18.0.0'}
 
   acorn-walk@8.3.2:
     resolution: {integrity: sha512-cjkyv4OtNCIeqhHrfS81QWXoCBPExR/J62oyEqepVw8WaQeSqpW2uhuLPh1m9eWhDuOo/jUXVTlifvesOWp/4A==}
@@ -3579,6 +3586,8 @@ snapshots:
   '@xmldom/xmldom@0.8.13': {}
 
   '@xmldom/xmldom@0.9.10': {}
+
+  '@zip.js/zip.js@2.8.43': {}
 
   acorn-walk@8.3.2: {}
 
