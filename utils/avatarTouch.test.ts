@@ -28,13 +28,15 @@ describe('角色触碰互动', () => {
     expect(normalizeAvatarTouchZone([], 0.55, 0.5)).toBe('body');
   });
 
-  it('在兼容旧反馈分区的同时细分头发、脸、肩膀、手臂、手和胸口', () => {
+  it('在兼容旧反馈分区的同时细分头发、脸、肩膀、手臂、手、胸口和下肢', () => {
     expect(resolveAvatarTouchTarget(['FrontHair'])).toEqual({ zone: 'head', part: 'hair' });
     expect(resolveAvatarTouchTarget(['Face'])).toEqual({ zone: 'face', part: 'face' });
     expect(resolveAvatarTouchTarget(['LeftShoulder'])).toEqual({ zone: 'body', part: 'shoulder' });
     expect(resolveAvatarTouchTarget(['Arm_L'])).toEqual({ zone: 'hand', part: 'arm' });
     expect(resolveAvatarTouchTarget(['RightHand'])).toEqual({ zone: 'hand', part: 'hand' });
     expect(resolveAvatarTouchTarget(['Bust'])).toEqual({ zone: 'body', part: 'chest' });
+    expect(resolveAvatarTouchTarget(['LeftLeg'])).toEqual({ zone: 'body', part: 'leg' });
+    expect(resolveAvatarTouchTarget(['RightFoot'])).toEqual({ zone: 'body', part: 'foot' });
   });
 
   it('用模型内坐标拆分只有 Head/Body 粗命中区的 Live2D 模型', () => {
@@ -42,8 +44,11 @@ describe('角色触碰互动', () => {
     expect(resolveAvatarTouchTarget(['HitAreaHead'], 0.25, 0.5).part).toBe('face');
     expect(resolveAvatarTouchTarget(['HitAreaBody'], 0.42, 0.3).part).toBe('shoulder');
     expect(resolveAvatarTouchTarget(['HitAreaBody'], 0.58, 0.08).part).toBe('arm');
-    expect(resolveAvatarTouchTarget(['HitAreaBody'], 0.58, 0.5).part).toBe('chest');
+    expect(resolveAvatarTouchTarget(['HitAreaBody'], 0.58, 0.5).part).toBe('waist');
+    expect(resolveAvatarTouchTarget(['HitAreaBody'], 0.82, 0.5).part).toBe('leg');
+    expect(resolveAvatarTouchTarget(['TouchChest'], 0.82, 0.5).part).toBe('leg');
     expect(avatarTouchTargetLabel({ zone: 'body', part: 'chest' })).toBe('胸口');
+    expect(avatarTouchTargetLabel({ zone: 'body', part: 'leg' })).toBe('腿');
   });
 
   it('即时本地反馈不会等待模型台词', () => {

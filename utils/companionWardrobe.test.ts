@@ -5,8 +5,11 @@ import {
   addUploadedCompanionOutfit,
   listCompanionModelOutfits,
   listUploadedCompanionOutfits,
+  removeCompanionModelOutfit,
+  removeUploadedCompanionOutfit,
   selectCompanionModelOutfit,
   selectUploadedCompanionOutfit,
+  storeCompanionModelOutfit,
   type VideoAvatarConfig,
 } from './companionWardrobe';
 
@@ -59,6 +62,30 @@ describe('companion wardrobe', () => {
       .toThrow('只能加入同类型模型');
   });
 
+  it('stores a newly imported wardrobe model without activating it', () => {
+    const original = character({ videoAvatar: live2d('safe') });
+    const stored = storeCompanionModelOutfit(original, live2d('large-untested'));
+    expect(stored.videoAvatar?.assetId).toBe('safe');
+    expect(stored.videoAvatarWardrobe?.map(model => model.assetId)).toEqual(['large-untested']);
+  });
+
+  it('removes inactive and active whole-model outfits without leaving a stale pointer', () => {
+    const original = character({
+      videoAvatar: live2d('active'),
+      videoAvatarWardrobe: [live2d('spare'), live2d('old-large')],
+    });
+    expect(removeCompanionModelOutfit(original, 'old-large')).toMatchObject({
+      videoAvatar: { assetId: 'active' },
+      videoAvatarWardrobe: [{ assetId: 'spare' }],
+    });
+    expect(removeCompanionModelOutfit(original, 'active')).toMatchObject({
+      videoAvatar: { assetId: 'spare' },
+      videoAvatarWardrobe: [{ assetId: 'old-large' }],
+    });
+    expect(removeCompanionModelOutfit(character({ videoAvatar: live2d('only') }), 'only'))
+      .toEqual({ videoAvatar: undefined, videoAvatarWardrobe: [] });
+  });
+
   it('keeps uploaded images and changes only the active pointer', () => {
     const first = addUploadedCompanionOutfit(undefined, {
       id: 'blobref:first', imageRef: 'blobref:first', fileName: 'first.png',
@@ -70,6 +97,14 @@ describe('companion wardrobe', () => {
       .toEqual(['blobref:second', 'blobref:first']);
     expect(selectUploadedCompanionOutfit(second, 'blobref:first')).toMatchObject({
       source: 'upload', imageRef: 'blobref:first', fileName: 'first.png',
+    });
+
+    expect(removeUploadedCompanionOutfit(second, 'blobref:second')).toMatchObject({
+      source: 'upload', imageRef: 'blobref:first', fileName: 'first.png',
+      imageWardrobe: [{ imageRef: 'blobref:first' }],
+    });
+    expect(removeUploadedCompanionOutfit(first, 'blobref:first')).toMatchObject({
+      source: 'upload', imageRef: undefined, imageWardrobe: [],
     });
   });
 });

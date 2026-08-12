@@ -12,6 +12,7 @@ import {
   inferLive2DActionTags,
   inspectLive2DPackage,
   readLive2DTextureDimensions,
+  removeLive2DWardrobeAction,
   sniffImageMime,
   upgradeLive2DAutoPermissions,
   type Live2DAvatarConfig,
@@ -159,6 +160,25 @@ describe('Live2D 模型导入解析', () => {
     expect(findLive2DActionsForPerformance(config, { modelAction: 'outfit-night', emotion: 'happy' }).map(action => action.id))
       .toEqual(['expression-smile']);
     expect(buildLive2DPerformanceMix(config, { modelActions: ['outfit-night'] }).expression).toBeUndefined();
+  });
+
+  it('removes a clothing choice without making its underlying action AI-callable', () => {
+    const config = {
+      format: 'live2d',
+      actionPolicyVersion: 2,
+      activeWardrobeActionId: 'outfit-night',
+      actions: [
+        { id: 'outfit-night', kind: 'expression', name: 'night', file: 'night.exp3.json', tags: [], permission: 'manual', wardrobe: true },
+        { id: 'outfit-day', kind: 'expression', name: 'day', file: 'day.exp3.json', tags: [], permission: 'manual', wardrobe: true },
+      ],
+    } as unknown as Live2DAvatarConfig;
+    const next = removeLive2DWardrobeAction(config, 'outfit-night');
+    expect(next.activeWardrobeActionId).toBe('outfit-day');
+    expect(next.actions.find(action => action.id === 'outfit-night')).toMatchObject({
+      wardrobe: false,
+      permission: 'manual',
+    });
+    expect(getLive2DAIActions(next)).toEqual([]);
   });
 
   it('旧模型一次性自动开放未分类原生动作，同时保留用户覆盖和待机动作', () => {

@@ -1168,14 +1168,24 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
           // 用户锚定过脸部时，特写镜头直接落到锚点构图，不再用启发式偏移猜脸的位置。
           const anchored = closeShot && faceFramingRef.current ? faceFramingRef.current : null;
           const framing = anchored || framingRef.current;
+          // On the always-on desktop, a generic full-body heuristic is more
+          // dangerous than useful: one face tap used to enlarge the model and
+          // push it down by 10% of the screen, which can move tall imports
+          // completely offstage. Until the user saves a face anchor, keep the
+          // desktop's calibrated composition perfectly still.
+          const suppressUnanchoredCloseShot = closeShot
+            && ambientAutonomyDisabledRef.current
+            && !anchored;
           // 导演机位只在用户构图基础上做温和加减：medium 必须是 1.0，
           // 否则用户校准好的构图会被默认镜头永久放大。锚定后特写倍率交给锚点本身。
           const cameraScale = anchored
             ? 1
+            : suppressUnanchoredCloseShot
+              ? 1
             : closeShot
               ? 1.22
               : direction?.camera === 'wide' || direction?.camera === 'pull-out' ? 0.88 : 1;
-          const cameraYOffset = anchored ? 0 : closeShot ? 0.1 : 0;
+          const cameraYOffset = anchored || suppressUnanchoredCloseShot ? 0 : closeShot ? 0.1 : 0;
           const cameraX = base.x + app.screen.width * framing.offsetX;
           const cameraY = base.y + app.screen.height * (framing.offsetY + cameraYOffset);
           const frame = autonomy.frame;
