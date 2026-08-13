@@ -10,7 +10,7 @@ import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { Notepad, Check, X, CheckCircle, XCircle, Hand } from '@phosphor-icons/react';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent } from '../utils/analytics';
-import { extractPdfText } from '../utils/pdfText';
+import { extractPdfText, isPdfFile } from '../utils/pdfText';
 
 type KatexLike = {
     renderToString: (latex: string, options: any) => string;
@@ -494,7 +494,9 @@ const StudyApp: React.FC = () => {
     const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
-        if (file.type !== 'application/pdf') {
+        // Android 的部分 DocumentsProvider 会给 PDF 空 MIME 或
+        // application/octet-stream；扩展名正确时仍应允许进入解析器。
+        if (!isPdfFile(file)) {
             addToast('请上传 PDF 文件', 'error');
             return;
         }

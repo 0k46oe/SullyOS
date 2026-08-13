@@ -1,5 +1,5 @@
-const PDFJS_SCRIPT_SRC = 'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js';
-const PDFJS_WORKER_SRC = 'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+import * as bundledPdfJs from 'pdfjs-dist';
+import bundledPdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.js?url';
 
 type PdfTextItemLike = {
     str?: unknown;
@@ -50,43 +50,21 @@ export interface ExtractPdfTextOptions {
 
 let pdfjsPromise: Promise<PdfJsLike> | null = null;
 
-const loadScript = (src: string): Promise<void> => new Promise((resolve, reject) => {
-    const existing = document.querySelector(`script[data-src="${src}"]`) as HTMLScriptElement | null;
-    if (existing) {
-        if (existing.dataset.loaded === 'true' || (window as any).pdfjsLib) {
-            resolve();
-            return;
-        }
-        existing.addEventListener('load', () => resolve(), { once: true });
-        existing.addEventListener('error', () => reject(new Error(`load failed: ${src}`)), { once: true });
-        return;
-    }
-
-    const script = document.createElement('script');
-    script.src = src;
-    script.async = true;
-    script.dataset.src = src;
-    script.onload = () => {
-        script.dataset.loaded = 'true';
-        resolve();
-    };
-    script.onerror = () => reject(new Error(`load failed: ${src}`));
-    document.head.appendChild(script);
-});
-
+/**
+ * PDF.js 与 worker 都随站点/APK 构建，不再从第三方 CDN 动态加载。
+ * Android WebView 因而不会再被跨域 Worker、CDN 可达性或离线状态卡住。
+ */
 const loadPdfJs = async (): Promise<PdfJsLike> => {
     if (!pdfjsPromise) {
-        pdfjsPromise = loadScript(PDFJS_SCRIPT_SRC)
-            .then(() => {
-                const pdfjs = (window as any).pdfjsLib as PdfJsLike | undefined;
-                if (!pdfjs) throw new Error('PDF.js 加载失败');
-                if (pdfjs.GlobalWorkerOptions) pdfjs.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_SRC;
-                return pdfjs;
-            })
-            .catch(error => {
-                pdfjsPromise = null;
-                throw error;
-            });
+        pdfjsPromise = Promise.resolve().then(() => {
+            const pdfjs = bundledPdfJs as unknown as PdfJsLike;
+            if (!pdfjs?.getDocument) throw new Error('PDF.js 加载失败');
+            if (pdfjs.GlobalWorkerOptions) pdfjs.GlobalWorkerOptions.workerSrc = bundledPdfWorkerSrc;
+            return pdfjs;
+        }).catch(error => {
+            pdfjsPromise = null;
+            throw error;
+        });
     }
     return pdfjsPromise;
 };

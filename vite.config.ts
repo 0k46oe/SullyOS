@@ -131,7 +131,7 @@ export default defineConfig({
     chunkSizeWarningLimit: 2000,
     rollupOptions: {
       // 关键修复：将这些包排除在打包之外，让浏览器通过 index.html 的 importmap 加载
-      external: ['pdfjs-dist', 'katex'],
+      external: ['katex'],
       onwarn(warning, defaultHandler) {
         // 抑制动态导入与静态导入混合的无害警告
         if (warning.message?.includes('dynamic import will not move module into another chunk')) return;
