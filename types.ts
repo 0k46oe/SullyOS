@@ -2584,8 +2584,8 @@ export interface CharacterProfile {
       byteLength: number;
       fileCount: number;
       importedAt: number;
-      /** 运行包已在导入时转为 STORE（免 DEFLATE 解压）的缓存格式。 */
-      runtimePackageEncoding?: 'store-v1';
+      /** 源包格式：旧模型使用 STORE，新导入 ZIP 保留原包并按文件流式读取。 */
+      runtimePackageEncoding?: 'store-v1' | 'zip-v1';
       /** 自动动作权限策略版本；2 = 安全动作默认加入 AI 动作库。 */
       actionPolicyVersion?: 2;
       /** 用户校准后的 Live2D 舞台构图；偏移量是相对画布宽高的比例。 */

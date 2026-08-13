@@ -2219,10 +2219,11 @@ const CompanionHome: React.FC = () => {
             onAvatarTouch={hit => { void respondToTouch(hit); }}
           />
         ) : (
+          /* Wardrobe onboarding owns its own WebGL preview; suspend this one. */
           <VRMVideoCallStage
             characterName={character.name}
             fallbackAvatar={character.avatar}
-            model={character.videoAvatar}
+            model={wardrobeLive2DSettings ? undefined : character.videoAvatar}
             motionState={motionState}
             audioFeed={getCompanionAudioFeed()}
             headMotionLocked={startupHeadLocked}

@@ -1,4 +1,4 @@
-import JSZip from 'jszip';
+import type { Entry as StreamingZipEntry, FileEntry as StreamingZipFileEntry, ZipReader as StreamingZipReader } from '@zip.js/zip.js';
 import type { CharacterProfile } from '../types';
 import { DB } from './db';
 import { live2DRuntimeCacheAssetId, type Live2DTextureQuality } from './avatarModelStore';
@@ -159,6 +159,10 @@ type VTubeJson = {
 };
 
 type PackageEntry = { path: string; blob: Blob };
+type OpenStreamingZip = {
+  reader: StreamingZipReader<Blob>;
+  entries: StreamingZipFileEntry[];
+};
 type ParsedPackage = {
   modelPath: string;
   modelName: string;
@@ -183,6 +187,63 @@ const dirname = (path: string): string => {
 };
 
 const basename = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
+
+const mimeForPath = (path: string): string => {
+  if (/\.png$/i.test(path)) return 'image/png';
+  if (/\.jpe?g$/i.test(path)) return 'image/jpeg';
+  if (/\.webp$/i.test(path)) return 'image/webp';
+  if (/\.json$/i.test(path)) return 'application/json';
+  if (/\.wav$/i.test(path)) return 'audio/wav';
+  if (/\.mp3$/i.test(path)) return 'audio/mpeg';
+  if (/\.ogg$/i.test(path)) return 'audio/ogg';
+  return 'application/octet-stream';
+};
+
+const isIgnoredLive2DZipPath = (path: string): boolean => (
+  /(^|\/)__MACOSX\//i.test(path) || /(^|\/)\.DS_Store$/i.test(path)
+);
+
+/**
+ * zip.js reads Blob slices on demand. Unlike JSZip.loadAsync(file), opening a
+ * large archive does not first copy the complete ZIP into the WebView JS heap.
+ */
+const openStreamingLive2DZip = async (blob: Blob): Promise<OpenStreamingZip> => {
+  const { BlobReader, ZipReader } = await import('@zip.js/zip.js');
+  const reader = new ZipReader(new BlobReader(blob), { useWebWorkers: false });
+  try {
+    const entries = (await reader.getEntries())
+      .filter((entry): entry is Extract<StreamingZipEntry, { directory: false }> => !entry.directory)
+      .filter(entry => !isIgnoredLive2DZipPath(entry.filename));
+    return { reader, entries };
+  } catch (error) {
+    await reader.close().catch(() => {});
+    throw error;
+  }
+};
+
+const extractStreamingZipEntry = async (entry: StreamingZipFileEntry): Promise<Blob> => {
+  const { BlobWriter } = await import('@zip.js/zip.js');
+  return entry.getData(new BlobWriter(mimeForPath(entry.filename)), { useWebWorkers: false });
+};
+
+/** Only JSON bodies are needed to validate references and discover actions. */
+const buildStreamingInspectionEntries = async (
+  entries: StreamingZipFileEntry[],
+  onProgress?: Live2DImportProgress,
+): Promise<PackageEntry[]> => {
+  const inspected: PackageEntry[] = [];
+  let jsonCount = 0;
+  for (const entry of entries) {
+    const path = normalizePath(entry.filename);
+    const needsBody = /\.json$/i.test(path);
+    inspected.push({ path, blob: needsBody ? await extractStreamingZipEntry(entry) : new Blob() });
+    if (needsBody) {
+      jsonCount += 1;
+      if (jsonCount % 8 === 0) onProgress?.(`正在读取模型配置 ${jsonCount} 个…`);
+    }
+  }
+  return inspected;
+};
 
 const modelRelativePath = (modelPath: string, fullPath: string): string => {
   const base = dirname(modelPath);
@@ -323,6 +384,35 @@ export interface Live2DTextureDownscaleResult {
   resizedTextures: Live2DResizedTexture[];
 }
 
+const downscaleLive2DTextureEntry = async (
+  entry: PackageEntry,
+  onProgress?: Live2DImportProgress,
+  maxDimension = LIVE2D_MAX_TEXTURE_DIMENSION,
+): Promise<{ entry: PackageEntry; resized?: Live2DResizedTexture }> => {
+  const dimensions = await readLive2DTextureDimensions(entry.blob);
+  if (!dimensions) return { entry };
+  const target = getLive2DTextureResizeTarget(dimensions.width, dimensions.height, maxDimension);
+  if (!target) return { entry };
+
+  onProgress?.(`贴图 ${basename(entry.path)} 为 ${dimensions.width}×${dimensions.height}，正在直接生成 ${target.width}×${target.height} 运行图…`);
+  try {
+    const resizedBlob = await resizeLive2DTextureBlob(entry.blob, dimensions, target);
+    return {
+      entry: { ...entry, blob: resizedBlob },
+      resized: {
+        path: normalizePath(entry.path),
+        fromWidth: dimensions.width,
+        fromHeight: dimensions.height,
+        toWidth: target.width,
+        toHeight: target.height,
+      },
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`贴图 ${basename(entry.path)} 超过 ${maxDimension}px，但自动降档失败：${detail}`);
+  }
+};
+
 const encodeResizedTexture = async (
   source: CanvasImageSource,
   target: Live2DTextureResizeTarget,
@@ -369,20 +459,46 @@ const resizeLive2DTextureBlob = async (
   target: Live2DTextureResizeTarget,
 ): Promise<Blob> => {
   const typedBlob = blob.type === dimensions.mimeType ? blob : blob.slice(0, blob.size, dimensions.mimeType);
-  let source: CanvasImageSource;
-  let closeBitmap: (() => void) | undefined;
+  let source: CanvasImageSource | undefined;
+  let closeSource: (() => void) | undefined;
   let objectUrl = '';
 
   try {
-    if (typeof createImageBitmap === 'function') {
+    // WebCodecs can consume the Blob stream and ask the decoder for the target
+    // size up front. On supporting Android WebViews this avoids materializing
+    // the full 8192px RGBA bitmap before the 2K result is produced.
+    if (typeof ImageDecoder !== 'undefined') {
+      let decoder: ImageDecoder | undefined;
+      try {
+        decoder = new ImageDecoder({
+          data: typedBlob.stream(),
+          type: dimensions.mimeType,
+          desiredWidth: target.width,
+          desiredHeight: target.height,
+        });
+        const decoded = await decoder.decode({ frameIndex: 0, completeFramesOnly: true });
+        source = decoded.image;
+        closeSource = () => {
+          decoded.image.close();
+          decoder?.close();
+        };
+      } catch (error) {
+        decoder?.close();
+        console.warn('[live2d] streaming ImageDecoder unavailable, falling back:', error);
+      }
+    }
+
+    if (!source && typeof createImageBitmap === 'function') {
       const bitmap = await createImageBitmap(typedBlob, {
         resizeWidth: target.width,
         resizeHeight: target.height,
         resizeQuality: 'high',
       });
       source = bitmap;
-      closeBitmap = () => bitmap.close();
-    } else {
+      closeSource = () => bitmap.close();
+    }
+
+    if (!source) {
       if (typeof document === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
         throw new Error('当前浏览器不支持图片降档');
       }
@@ -401,7 +517,7 @@ const resizeLive2DTextureBlob = async (
     if (!resized.size) throw new Error('降档后的贴图为空');
     return resized;
   } finally {
-    closeBitmap?.();
+    closeSource?.();
     if (objectUrl) URL.revokeObjectURL(objectUrl);
   }
 };
@@ -420,30 +536,82 @@ export const downscaleOversizedLive2DTextures = async (
   for (const path of [...new Set(texturePaths.map(normalizePath))]) {
     const index = entryIndexByPath.get(path);
     if (index === undefined) continue;
-    const entry = nextEntries[index];
-    const dimensions = await readLive2DTextureDimensions(entry.blob);
-    if (!dimensions) continue;
-    const target = getLive2DTextureResizeTarget(dimensions.width, dimensions.height, maxDimension);
-    if (!target) continue;
-
-    onProgress?.(`贴图 ${basename(path)} 为 ${dimensions.width}×${dimensions.height}，正在自动降档到 ${target.width}×${target.height}…`);
-    try {
-      const resizedBlob = await resizeLive2DTextureBlob(entry.blob, dimensions, target);
-      nextEntries[index] = { ...entry, blob: resizedBlob };
-      resizedTextures.push({
-        path,
-        fromWidth: dimensions.width,
-        fromHeight: dimensions.height,
-        toWidth: target.width,
-        toHeight: target.height,
-      });
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`贴图 ${basename(path)} 超过 ${maxDimension}px，但自动降档失败：${detail}`);
-    }
+    const result = await downscaleLive2DTextureEntry(nextEntries[index], onProgress, maxDimension);
+    nextEntries[index] = result.entry;
+    if (result.resized) resizedTextures.push(result.resized);
   }
 
   return { entries: nextEntries, resizedTextures };
+};
+
+/**
+ * Extract one archive entry at a time and immediately replace oversized source
+ * textures. At most one 8K source texture and its resized result overlap.
+ */
+const extractStreamingRuntimeEntries = async (
+  entries: StreamingZipFileEntry[],
+  texturePaths: string[],
+  onProgress?: Live2DImportProgress,
+  maxDimension = LIVE2D_BALANCED_TEXTURE_DIMENSION,
+  reusedEntries: Map<string, Blob> = new Map(),
+): Promise<Live2DTextureDownscaleResult> => {
+  const texturePathSet = new Set(texturePaths.map(normalizePath));
+  const runtimeEntries: PackageEntry[] = [];
+  const resizedTextures: Live2DResizedTexture[] = [];
+  let loaded = 0;
+
+  for (const zipEntry of entries) {
+    const path = normalizePath(zipEntry.filename);
+    const sourceBlob = reusedEntries.get(path) || await extractStreamingZipEntry(zipEntry);
+    let result: { entry: PackageEntry; resized?: Live2DResizedTexture } = {
+      entry: { path, blob: sourceBlob },
+    };
+    if (texturePathSet.has(path)) {
+      result = await downscaleLive2DTextureEntry(result.entry, onProgress, maxDimension);
+    }
+    runtimeEntries.push(result.entry);
+    if (result.resized) resizedTextures.push(result.resized);
+    loaded += 1;
+    if (loaded === entries.length || loaded % 6 === 0) {
+      onProgress?.(`正在低内存解包模型文件 ${loaded}/${entries.length}…`);
+    }
+    // Give Android WebView a paint/GC opportunity between large entries.
+    if (texturePathSet.has(path)) await new Promise<void>(resolve => setTimeout(resolve, 0));
+  }
+
+  return { entries: runtimeEntries, resizedTextures };
+};
+
+export const extractStreamingLive2DRuntimeArchive = async (
+  packageBlob: Blob,
+  modelPath: string,
+  maxDimension: number,
+  onProgress?: Live2DImportProgress,
+): Promise<Live2DTextureDownscaleResult> => {
+  const opened = await openStreamingLive2DZip(packageBlob);
+  try {
+    const normalizedModelPath = normalizePath(modelPath);
+    const modelEntry = opened.entries.find(entry => normalizePath(entry.filename) === normalizedModelPath);
+    if (!modelEntry) throw new Error('模型包内找不到 model3.json，请重新导入。');
+    const modelBlob = await extractStreamingZipEntry(modelEntry);
+    let settings: Model3Json;
+    try {
+      settings = JSON.parse(await modelBlob.text()) as Model3Json;
+    } catch {
+      throw new Error(`${basename(normalizedModelPath)} 不是有效的 JSON。`);
+    }
+    const texturePaths = (settings.FileReferences?.Textures || [])
+      .map(reference => resolveModelReference(normalizedModelPath, reference));
+    return extractStreamingRuntimeEntries(
+      opened.entries,
+      texturePaths,
+      onProgress,
+      maxDimension,
+      new Map([[normalizedModelPath, modelBlob]]),
+    );
+  } finally {
+    await opened.reader.close().catch(() => {});
+  }
 };
 
 const resolveModelReference = (modelPath: string, reference: string): string => {
@@ -787,6 +955,7 @@ const createConfig = async (
   parsed?: ParsedPackage,
   runtimeEntries: PackageEntry[] = sourceEntries,
   persistRuntimeCache = false,
+  runtimePackageEncoding: NonNullable<Live2DAvatarConfig['runtimePackageEncoding']> = 'store-v1',
 ): Promise<Live2DAvatarConfig> => {
   const inspected = parsed || await parsePackage(sourceEntries);
   const assetId = makeAssetId();
@@ -809,7 +978,7 @@ const createConfig = async (
     byteLength: blob.size,
     fileCount: sourceEntries.length,
     importedAt: Date.now(),
-    runtimePackageEncoding: 'store-v1',
+    runtimePackageEncoding,
     textureQuality: 'balanced',
     actionPolicyVersion: 2,
     framing: inspected.framing || { scale: 1, offsetX: 0, offsetY: 0 },
@@ -860,73 +1029,67 @@ export const saveLive2DModelFromZip = async (
   file: File,
   onProgress?: Live2DImportProgress,
 ): Promise<Live2DAvatarConfig> => {
-  let zip: JSZip;
+  let opened: OpenStreamingZip;
   try {
-    onProgress?.(`正在读取 ${file.name}，大纹理首次导入可能需要 10–30 秒…`);
-    zip = await JSZip.loadAsync(file);
+    onProgress?.(`正在流式读取 ${file.name}，不会把整个压缩包复制进内存…`);
+    opened = await openStreamingLive2DZip(file);
   } catch {
     throw new Error('ZIP 无法读取；请确认它没有加密且内容没有损坏。');
   }
-  const sourceEntries = Object.values(zip.files).filter(entry => (
-    !entry.dir && !/(^|\/)__MACOSX\//i.test(entry.name) && !/(^|\/)\.DS_Store$/i.test(entry.name)
-  ));
-  let loaded = 0;
-  const entries: PackageEntry[] = [];
-  for (const entry of sourceEntries) {
-    const blob = await entry.async('blob');
-    loaded += 1;
-    if (loaded === sourceEntries.length || loaded % 6 === 0) onProgress?.(`正在解包模型文件 ${loaded}/${sourceEntries.length}…`);
-    entries.push({ path: normalizePath(entry.name), blob });
-  }
-  onProgress?.('正在解析 model3、未登记文件与 VTube Studio 热键…');
-  const parsed = await parsePackage(entries);
-  const sourceOptimized = await downscaleOversizedLive2DTextures(entries, parsed.texturePaths, onProgress, LIVE2D_MAX_TEXTURE_DIMENSION);
-  const runtimeOptimized = await downscaleOversizedLive2DTextures(
-    sourceOptimized.entries,
-    parsed.texturePaths,
-    onProgress,
-    LIVE2D_BALANCED_TEXTURE_DIMENSION,
-  );
-  onProgress?.(sourceOptimized.resizedTextures.length || runtimeOptimized.resizedTextures.length
-    ? `已建立默认 2K 纹理（保留最多 4K 源图供切换），正在建立免解压运行缓存…`
-    : `已找到 ${parsed.actions.length} 个表情/动作，正在建立免解压运行缓存…`);
-  const packageBlob = await buildStoredLive2DPackage(sourceOptimized.entries);
-  onProgress?.('运行缓存已建立，正在写入本地模型库…');
-  return createConfig(
-    packageBlob,
-    sourceOptimized.entries,
-    file.name.replace(/\.zip$/i, ''),
-    parsed,
-    runtimeOptimized.entries,
-    runtimeOptimized.resizedTextures.length > 0,
-  );
-};
+  try {
+    onProgress?.('正在读取 model3、动作配置与 VTube Studio 热键…');
+    const inspectionEntries = await buildStreamingInspectionEntries(opened.entries, onProgress);
+    const parsed = await parsePackage(inspectionEntries);
+    const reusableBodies = new Map(
+      inspectionEntries
+        .filter(entry => entry.blob.size > 0)
+        .map(entry => [normalizePath(entry.path), entry.blob]),
+    );
+    const runtimeOptimized = await extractStreamingRuntimeEntries(
+      opened.entries,
+      parsed.texturePaths,
+      onProgress,
+      LIVE2D_BALANCED_TEXTURE_DIMENSION,
+      reusableBodies,
+    );
+    onProgress?.(runtimeOptimized.resizedTextures.length
+      ? '已逐张生成默认 2K 纹理，正在写入低内存运行缓存…'
+      : `已找到 ${parsed.actions.length} 个表情/动作，正在写入低内存运行缓存…`);
 
-const mimeForPath = (path: string): string => {
-  if (/\.png$/i.test(path)) return 'image/png';
-  if (/\.jpe?g$/i.test(path)) return 'image/jpeg';
-  if (/\.webp$/i.test(path)) return 'image/webp';
-  if (/\.json$/i.test(path)) return 'application/json';
-  if (/\.wav$/i.test(path)) return 'audio/wav';
-  if (/\.mp3$/i.test(path)) return 'audio/mpeg';
-  if (/\.ogg$/i.test(path)) return 'audio/ogg';
-  return 'application/octet-stream';
+    // Keep the original compressed ZIP as the portable source. 4K is derived
+    // on demand, while the default 2K runtime cache is written immediately.
+    // This avoids holding original 8K + 4K + 2K textures at the same time.
+    return await createConfig(
+      file,
+      inspectionEntries,
+      file.name.replace(/\.zip$/i, ''),
+      parsed,
+      runtimeOptimized.entries,
+      true,
+      'zip-v1',
+    );
+  } finally {
+    await opened.reader.close().catch(() => {});
+  }
 };
 
 /** Restores the stored package into browser Files with the original relative paths. */
 export const loadLive2DModelFiles = async (config: Live2DAvatarConfig): Promise<File[]> => {
   const packageBlob = await DB.getBlobAsset(config.assetId);
   if (!packageBlob) throw new Error('Live2D 模型文件已丢失，请重新导入。');
-  const zip = await JSZip.loadAsync(packageBlob);
-  const files: File[] = [];
-  for (const entry of Object.values(zip.files)) {
-    if (entry.dir) continue;
-    const path = normalizePath(entry.name);
-    const file = new File([await entry.async('blob')], basename(path), { type: mimeForPath(path) });
-    Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: path });
-    files.push(file);
+  const opened = await openStreamingLive2DZip(packageBlob);
+  try {
+    const files: File[] = [];
+    for (const entry of opened.entries) {
+      const path = normalizePath(entry.filename);
+      const file = new File([await extractStreamingZipEntry(entry)], basename(path), { type: mimeForPath(path) });
+      Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: path });
+      files.push(file);
+    }
+    return files;
+  } finally {
+    await opened.reader.close().catch(() => {});
   }
-  return files;
 };
 
 const blobToDataUrl = (blob: Blob, mimeType: string): Promise<string> => new Promise((resolve, reject) => {
@@ -955,8 +1118,8 @@ export const sniffImageMime = async (blob: Blob): Promise<string | null> => {
 
 interface Live2DRuntimePackage {
   entries: Map<string, Blob>;
-  textureDataUrls: Map<string, Promise<string>>;
-  source: 'stored-package' | 'persistent-cache' | 'legacy-zip';
+  textureUrls: Map<string, Promise<string>>;
+  source: 'stored-package' | 'persistent-cache' | 'source-zip' | 'legacy-zip';
   unpackMs: number;
 }
 
@@ -1050,6 +1213,26 @@ const live2DRuntimePackageCache = new Map<string, Promise<Live2DRuntimePackage>>
 
 const live2DRuntimeMemoryCacheKey = (assetId: string, quality: Live2DTextureQuality): string => `${assetId}:${quality}`;
 
+const revokeRuntimeTextureUrls = async (pending: Promise<Live2DRuntimePackage>): Promise<void> => {
+  try {
+    const runtimePackage = await pending;
+    const urls = await Promise.allSettled(runtimePackage.textureUrls.values());
+    for (const result of urls) {
+      if (result.status !== 'fulfilled' || !result.value.startsWith('blob:')) continue;
+      URL.revokeObjectURL(result.value.split('#', 1)[0]);
+    }
+    runtimePackage.textureUrls.clear();
+  } catch {
+    // A failed package has no usable texture URLs to release.
+  }
+};
+
+const removeLive2DRuntimeMemoryCache = (cacheKey: string): void => {
+  const pending = live2DRuntimePackageCache.get(cacheKey);
+  live2DRuntimePackageCache.delete(cacheKey);
+  if (pending) void revokeRuntimeTextureUrls(pending);
+};
+
 const seedLive2DRuntimePackage = (
   assetId: string,
   entries: PackageEntry[],
@@ -1058,13 +1241,14 @@ const seedLive2DRuntimePackage = (
   const cacheKey = live2DRuntimeMemoryCacheKey(assetId, quality);
   const runtimePackage: Live2DRuntimePackage = {
     entries: new Map(entries.map(entry => [normalizePath(entry.path), entry.blob])),
-    textureDataUrls: new Map<string, Promise<string>>(),
+    textureUrls: new Map<string, Promise<string>>(),
     source: 'stored-package',
     unpackMs: 0,
   };
+  removeLive2DRuntimeMemoryCache(cacheKey);
   live2DRuntimePackageCache.set(cacheKey, Promise.resolve(runtimePackage));
   for (const cachedKey of live2DRuntimePackageCache.keys()) {
-    if (cachedKey !== cacheKey) live2DRuntimePackageCache.delete(cachedKey);
+    if (cachedKey !== cacheKey) removeLive2DRuntimeMemoryCache(cachedKey);
   }
 };
 
@@ -1072,30 +1256,6 @@ export type Live2DLoadProgress = (stage: string) => void;
 
 const nowMs = (): number => globalThis.performance?.now?.() ?? Date.now();
 const prettyMs = (value: number): string => value < 1_000 ? `${Math.round(value)}ms` : `${(value / 1_000).toFixed(1)}s`;
-
-const optimizeStoredRuntimeTextures = async (
-  config: Live2DAvatarConfig,
-  entries: PackageEntry[],
-  onProgress?: Live2DLoadProgress,
-): Promise<Live2DTextureDownscaleResult> => {
-  const settingsBlob = entries.find(entry => normalizePath(entry.path) === normalizePath(config.modelPath))?.blob;
-  if (!settingsBlob) return { entries, resizedTextures: [] };
-  try {
-    const settings = JSON.parse(await settingsBlob.text()) as Model3Json;
-    const texturePaths = (settings.FileReferences?.Textures || [])
-      .map(reference => resolveModelReference(config.modelPath, reference));
-    if (!texturePaths.length) return { entries, resizedTextures: [] };
-    return downscaleOversizedLive2DTextures(
-      entries,
-      texturePaths,
-      onProgress,
-      getLive2DTextureMaxDimension(config),
-    );
-  } catch (error) {
-    if (error instanceof SyntaxError) return { entries, resizedTextures: [] };
-    throw error;
-  }
-};
 
 const getLive2DRuntimePackage = async (
   config: Live2DAvatarConfig,
@@ -1137,26 +1297,27 @@ const getLive2DRuntimePackage = async (
         onProgress?.(`正在读取${quality === 'hd' ? '高清 4K' : '轻量 2K'}运行缓存…`);
         source = 'persistent-cache';
       } else {
-        onProgress?.('首次优化旧模型：正在解包并建立运行缓存…');
+        onProgress?.(config.runtimePackageEncoding === 'zip-v1'
+          ? `正在从源包逐张生成${quality === 'hd' ? '高清 4K' : '轻量 2K'}运行纹理…`
+          : '首次优化旧模型：正在低内存解包并建立运行缓存…');
         packageBlob = await DB.getBlobAsset(assetId);
-        source = 'legacy-zip';
+        source = config.runtimePackageEncoding === 'zip-v1' ? 'source-zip' : 'legacy-zip';
       }
     }
     if (!packageBlob) throw new Error('Live2D 模型文件已丢失，请重新导入。');
     const unpackStartedAt = nowMs();
-    const zip = await JSZip.loadAsync(packageBlob);
-    const files = Object.values(zip.files).filter(entry => !entry.dir);
-    const unpackedPairs = await Promise.all(files.map(async entry => (
-      [normalizePath(entry.name), await entry.async('blob')] as const
-    )));
-    const unpackedEntries = unpackedPairs.map(([path, blob]) => ({ path, blob }));
-    const optimized = await optimizeStoredRuntimeTextures(config, unpackedEntries, stage => {
-      onProgress?.(`首次优化旧模型：${stage}`);
-    });
+    const optimized = await extractStreamingLive2DRuntimeArchive(
+      packageBlob,
+      config.modelPath,
+      getLive2DTextureMaxDimension(config),
+      stage => onProgress?.(source === 'persistent-cache' || source === 'stored-package'
+        ? stage
+        : `首次优化模型：${stage}`),
+    );
     const pairs = optimized.entries.map(entry => [normalizePath(entry.path), entry.blob] as const);
     const runtimePackage: Live2DRuntimePackage = {
       entries: new Map(pairs),
-      textureDataUrls: new Map<string, Promise<string>>(),
+      textureUrls: new Map<string, Promise<string>>(),
       source,
       unpackMs: nowMs() - unpackStartedAt,
     };
@@ -1164,7 +1325,7 @@ const getLive2DRuntimePackage = async (
     // Existing users keep the original portable ZIP, while a derived STORE archive
     // is written once beside it. It is a disposable cache, so backup/restore can
     // omit it and rebuild naturally.
-    if (source === 'legacy-zip' || optimized.resizedTextures.length > 0) {
+    if (source === 'legacy-zip' || source === 'source-zip' || optimized.resizedTextures.length > 0) {
       const cacheEntries = pairs.map(([path, blob]) => ({ path, blob }));
       void buildStoredLive2DPackage(cacheEntries)
         .then(blob => DB.putBlobAsset(persistentCacheId, blob))
@@ -1177,7 +1338,7 @@ const getLive2DRuntimePackage = async (
     }
     return runtimePackage;
   })().catch(error => {
-    live2DRuntimePackageCache.delete(cacheKey);
+    removeLive2DRuntimeMemoryCache(cacheKey);
     throw error;
   });
 
@@ -1185,7 +1346,7 @@ const getLive2DRuntimePackage = async (
   while (live2DRuntimePackageCache.size > 1) {
     const oldest = live2DRuntimePackageCache.keys().next().value as string | undefined;
     if (!oldest || oldest === cacheKey) break;
-    live2DRuntimePackageCache.delete(oldest);
+    removeLive2DRuntimeMemoryCache(oldest);
   }
   return {
     runtimePackage: await pending,
@@ -1194,20 +1355,38 @@ const getLive2DRuntimePackage = async (
   };
 };
 
-const getRuntimeTextureDataUrl = (
+const textureExtensionForMime = (mimeType: string): string => {
+  if (mimeType === 'image/jpeg') return 'jpg';
+  if (mimeType === 'image/webp') return 'webp';
+  return 'png';
+};
+
+export const createLive2DRuntimeTextureUrl = async (blob: Blob, path: string): Promise<string> => {
+  // Magic sniffing beats extensions: VTube Studio packages sometimes use
+  // texture.bin or extensionless images.
+  const mimeType = await sniffImageMime(blob) || mimeForPath(path);
+  const typedBlob = !blob.type || blob.type === 'application/octet-stream'
+    ? blob.slice(0, blob.size, mimeType)
+    : blob;
+  if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    // Pixi infers the image parser from the final extension. A fragment does
+    // not affect Blob fetching but gives the parser a stable .png/.jpg/.webp.
+    return `${URL.createObjectURL(typedBlob)}#live2d-texture.${textureExtensionForMime(mimeType)}`;
+  }
+  return blobToDataUrl(typedBlob, mimeType);
+};
+
+const getRuntimeTextureUrl = (
   runtimePackage: Live2DRuntimePackage,
   path: string,
   blob: Blob,
 ): Promise<string> => {
-  let dataUrlPromise = runtimePackage.textureDataUrls.get(path);
-  if (!dataUrlPromise) {
-    // Magic sniffing beats extensions: VTube Studio packages sometimes use
-    // texture.bin or extensionless images.
-    dataUrlPromise = sniffImageMime(blob)
-      .then(sniffed => blobToDataUrl(blob, sniffed || mimeForPath(path)));
-    runtimePackage.textureDataUrls.set(path, dataUrlPromise);
+  let urlPromise = runtimePackage.textureUrls.get(path);
+  if (!urlPromise) {
+    urlPromise = createLive2DRuntimeTextureUrl(blob, path);
+    runtimePackage.textureUrls.set(path, urlPromise);
   }
-  return dataUrlPromise;
+  return urlPromise;
 };
 
 export interface Live2DLoadTimings {
@@ -1219,7 +1398,7 @@ export interface Live2DLoadTimings {
 }
 
 /**
- * Warm the expensive persistent package read and texture → data URL conversion
+ * Warm the expensive persistent package read and texture Blob URL creation
  * while the user is still on the role picker. Cubism/Pixi model construction is
  * intentionally left to the visible canvas.
  */
@@ -1264,7 +1443,7 @@ export const prewarmLive2DModelSource = async (
     const path = resolveModelReference(config.modelPath, reference);
     const blob = runtimePackage.entries.get(path);
     if (!blob) throw new Error(`模型包缺少 ${reference}`);
-    return getRuntimeTextureDataUrl(runtimePackage, path, blob);
+    return getRuntimeTextureUrl(runtimePackage, path, blob);
   }));
   const textureMs = nowMs() - textureStartedAt;
   const timings: Live2DLoadTimings = {
@@ -1281,8 +1460,8 @@ export const prewarmLive2DModelSource = async (
 
 /**
  * Pixi's texture parser cannot infer an image extension from a bare `blob:` URL.
- * Build a settings object whose textures use MIME-bearing data URLs, while the
- * larger moc/physics/motion resources keep revocable blob URLs.
+ * Texture URLs therefore carry an extension fragment. This avoids the extra
+ * 33% Base64 copy that previously doubled memory pressure on mobile WebViews.
  */
 export const loadLive2DModelSource = async (
   config: Live2DAvatarConfig,
@@ -1390,7 +1569,7 @@ export const loadLive2DModelSource = async (
     const { path, blob } = resolveBlob(reference);
     const cached = textureUrlCache.get(path);
     if (cached) return cached;
-    const url = await getRuntimeTextureDataUrl(runtimePackage, path, blob);
+    const url = await getRuntimeTextureUrl(runtimePackage, path, blob);
     if (!url) throw new Error(`贴图 ${reference} 读取为空，文件可能已损坏。`);
     textureUrlCache.set(path, url);
     return url;
@@ -1458,11 +1637,21 @@ export const findLive2DActionsForPerformance = (
 
 /** Build an uncompressed runtime archive so future loads only read entries. */
 export const buildStoredLive2DPackage = async (entries: PackageEntry[]): Promise<Blob> => {
-  const zip = new JSZip();
-  await Promise.all(entries.map(async entry => {
-    zip.file(entry.path, await entry.blob.arrayBuffer(), { compression: 'STORE' });
-  }));
-  return zip.generateAsync({ type: 'blob', compression: 'STORE' });
+  const { BlobReader, BlobWriter, ZipWriter } = await import('@zip.js/zip.js');
+  const output = new BlobWriter('application/zip');
+  const writer = new ZipWriter(output, { useWebWorkers: false });
+  try {
+    for (const entry of entries) {
+      await writer.add(normalizePath(entry.path), new BlobReader(entry.blob), {
+        level: 0,
+        useWebWorkers: false,
+      });
+    }
+    return await writer.close();
+  } catch (error) {
+    await writer.close().catch(() => {});
+    throw error;
+  }
 };
 
 export interface Live2DPerformanceMix {
