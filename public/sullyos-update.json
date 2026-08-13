@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
-  "versionCode": 30401,
-  "versionName": "3.4.1",
-  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.1/SullyOS-Android-v3.4.1.apk",
-  "sha256": "33202475eb83fc8c6c6aaee6f59351286332c41ba1b67019c21b13229f2ff53a",
-  "sizeBytes": 37001510,
-  "publishedAt": "2026-08-13T14:41:51Z",
+  "versionCode": 30402,
+  "versionName": "3.4.2",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.2/SullyOS-Android-v3.4.2.apk",
+  "sha256": "9380cf50cf6316f123c642ed394f59de764632799cf3212ef7fac309602e3e80",
+  "sizeBytes": 37003588,
+  "publishedAt": "2026-08-13T15:10:42Z",
   "releaseNotes": [
-    "对齐 SullyOS 最新 master（aab15a9f）",
-    "Android 主动消息使用 UnifiedPush / ntfy，不依赖 Firebase",
-    "修复 Android 端 PDF 导入",
-    "沿用固定正式签名，可直接覆盖安装并保留数据",
-    "不内置个人 AMSG2 Worker 地址，由用户在应用内填写自己的配置"
+    "新增“设置 → 检查更新”按钮",
+    "下载后校验包名、版本号、固定签名与 SHA-256，再拉起 Android 安装器",
+    "首次使用可能需要允许 SullyOS 安装未知应用",
+    "延续 UnifiedPush / ntfy 与 Android PDF 导入修复",
+    "沿用固定正式签名，覆盖安装保留数据"
   ]
 }
