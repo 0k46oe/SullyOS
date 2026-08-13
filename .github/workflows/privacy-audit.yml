@@ -377,6 +377,39 @@ jobs:
           rc=$(cat /tmp/audit.rc)
           check "内部自检整体通过（audit-entry 退出码）" "0" "$rc"
 
+          # ── schema 账本（第三档）─────────────────────────────────
+          # 只比对、只报告，不往仓库里写。master 要求走 PR，bot 直推会被
+          # 分支保护弹回来（GH013），红的原因还跟隐私无关，纯粹是推不上去。
+          # 账本本身留在 artifact + Actions 历史里（90 天）。
+          #
+          # schema 变了就红，是故意的：新增一张表 / 一个列，正是「多了个能存
+          # 敏感数据的地方」最可能的样子。确认过没问题的话，把新版存进
+          # infra/umami-schema.sql 提交一次，下一轮就恢复绿。
+          if [[ -s /tmp/umami-schema.sql ]]; then
+            if diff -q infra/umami-schema.sql /tmp/umami-schema.sql >/dev/null 2>&1; then
+              check "数据库 schema 与仓库账本一致" "same" "same"
+            else
+              check "数据库 schema 与仓库账本一致" "same" "changed"
+              echo "::group::schema diff"
+              diff -u infra/umami-schema.sql /tmp/umami-schema.sql | head -200 || true
+              echo "::endgroup::"
+              {
+                echo
+                echo "<details><summary>schema diff（前 200 行）</summary>"
+                echo
+                echo '```diff'
+                diff -u infra/umami-schema.sql /tmp/umami-schema.sql | head -200 || true
+                echo '```'
+                echo
+                echo "</details>"
+                echo
+                echo "> 确认无害后，把本次 run 的 \`umami-schema\` artifact 存回 \`infra/umami-schema.sql\` 提交一次即可。"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            check "数据库 schema 与仓库账本一致" "same" "（没拿到 schema）"
+          fi
+
           # ── 配置即代码 ────────────────────────────────────────────
           # 判定刻意放在这一侧：服务器只负责报出自己那几个文件的 sha256，
           # 基线存在仓库里。谁想让配置漂移而不被发现，就得同时改服务器和 GitHub，
@@ -423,63 +456,12 @@ jobs:
           printf '::error::隐私内部审计失败 %d 项：%s\n' "${#fails[@]}" "${fails[*]}"
           exit 1
 
-      - name: 上传 schema 供账本 job 比对
+      # 不往仓库写之后，这个 artifact 就是 schema 账本本身了，
+      # 保留期跟 Actions 历史窗口对齐。
+      - name: 存档 schema
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: umami-schema
           path: /tmp/umami-schema.sql
-          retention-days: 7
-
-  # ═══════════════════════════════════════════════════════════════════
-  # 第三档：schema 账本
-  #
-  # 只在 schema 真的变了的时候提交一版。没变化就什么都不做 —— 仓库不会被
-  # 每日 commit 灌水。唯一需要 contents: write 的 job，所以单独拆出来。
-  # ═══════════════════════════════════════════════════════════════════
-  schema-ledger:
-    name: schema 账本
-    runs-on: ubuntu-latest
-    needs: internal
-    if: ${{ always() && needs.internal.result != 'skipped' && github.event_name != 'pull_request' }}
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: 取回 schema
-        uses: actions/download-artifact@v4
-        with:
-          name: umami-schema
-          path: /tmp/schema
-
-      - name: 有变化才提交
-        shell: bash
-        run: |
-          set -uo pipefail
-          new=/tmp/schema/umami-schema.sql
-
-          if [[ ! -s "$new" ]]; then
-            echo "没拿到 schema（内部自检可能就没跑通），跳过。"
-            exit 0
-          fi
-
-          if [[ -f infra/umami-schema.sql ]] && diff -q infra/umami-schema.sql "$new" >/dev/null; then
-            echo "schema 无变化，不提交。"
-            echo "schema 无变化。" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          echo "### schema 有变化" >> "$GITHUB_STEP_SUMMARY"
-          echo '```diff' >> "$GITHUB_STEP_SUMMARY"
-          diff -u infra/umami-schema.sql "$new" 2>/dev/null | head -200 >> "$GITHUB_STEP_SUMMARY" || true
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-          cp "$new" infra/umami-schema.sql
-          git config user.name  'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add infra/umami-schema.sql
-          git commit -m "chore(infra): umami schema 变更（run ${GITHUB_RUN_ID}）"
-          git push
-          echo "已提交新版 schema。"
+          retention-days: 90

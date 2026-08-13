@@ -13,7 +13,7 @@
 | `assert-privacy.sh` | `/opt/umami/bin/assert-privacy.sh` | 每日自检本体，把承诺逐条变成 SQL / HTTP 断言 |
 | `audit-entry.sh` | `/opt/umami/bin/audit-entry.sh` | CI 那把钥匙唯一能触达的入口，只收一个数字 nonce |
 | `umami-privacy-trigger.expected.txt` | 数据库里 | geo 触发器的规范化定义（postgres 自己吐的，不是手写 SQL） |
-| `umami-schema.sql` | 数据库里 | `pg_dump --schema-only` 的账本，schema 变了 CI 才提交新版 |
+| `umami-schema.sql` | 数据库里 | `pg_dump --schema-only` 的账本，schema 变了 CI 会报 diff（不自动提交，见下） |
 | `known_hosts` | — | 服务器主机指纹，钉死用的 |
 
 ## 判定为什么放在仓库这边
@@ -45,7 +45,16 @@ docker compose -f /opt/umami/docker-compose.yml exec -T db psql -U umami -d umam
 
 （两条输出拼起来、删空行。手写的 SQL 和 postgres 回吐的定义在空白和 schema 限定上对不上，逐字比对必然失败。）
 
-`umami-schema.sql` 完全不用手动管，CI 发现变化会自己提交。
+`umami-schema.sql` 平时不用管。schema 一旦变了（umami 升级加了表 / 加了列之类），
+CI 会红一次，并在 run summary 里贴出 diff —— **新增的表和列正是「多了个能存敏感数据的地方」
+最可能的样子**，所以这里刻意让它红而不是静默通过。
+
+确认无害之后，从那次 run 的 `umami-schema` artifact 里把新版下下来，覆盖 `infra/umami-schema.sql`
+提交一次，下一轮就恢复绿。
+
+CI 不会自己提交这个文件：master 要求走 PR，bot 直推会被分支保护弹回来（GH013），
+而且红的原因会变成「推不上去」这种跟隐私毫无关系的东西。账本留在 artifact（90 天）
+和 Actions 历史里，目前够用。
 
 ## 换服务器 / 换域名了
 

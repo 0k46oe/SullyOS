@@ -54,8 +54,10 @@ rc=$?
 
 echo "===== AUDIT-END rc=$rc ====="
 
-# ── schema 账本（第三档）。只输出，不判断 —— CI 那边发现和仓库里存的
-#    infra/umami-schema.sql 不一样时才提交一版新的，没变化就什么都不做。
+# ── schema 账本（第三档）。只输出，不判断。CI 那边拿它和仓库里存的
+#    infra/umami-schema.sql 比一下，不一样就把 diff 报出来让人看。
+#    刻意不让 CI 自己 commit 回仓库：master 要求走 PR，bot 直推会被规则弹回来，
+#    而且账本留在 Actions 历史里（90 天）目前就够用了。
 #
 #    那两条 grep 不是洁癖：pg_dump 17 会在开头插一行
 #      \restrict <每次都不同的随机 token>
