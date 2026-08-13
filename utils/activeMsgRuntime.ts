@@ -26,6 +26,7 @@ import {
   failInstantChatPending,
   getInstantChatPending,
   listInstantChatPendings,
+  settleInstantChatApiLog,
   settleInstantChatExpiredNotices,
 } from './amsgInstantChat';
 import { flushAmsgState } from './amsgStateSync';
@@ -1809,6 +1810,9 @@ const flushInboxToChatImpl = async () => {
           || (Number.isFinite(segIndex) && segIndex >= segTotal);
         if (isLastSegment && clearInstantChatPending(message.charId)) {
           scheduleNextInstantChatStatusCheck();
+          // 「API 调用记录」里那笔（发出去时记的）在这里补完：用量挂在末条推送上，
+          // 而这里正好是认末段的地方。
+          settleInstantChatApiLog(pendingForChar.uuid, message.metadata as Record<string, any> | null);
           // 随这一轮上云的「任务被作废」回执到这里才真的销账。发出时（worker 回 202）
           // 只是记账：202 仅表示受理，那一轮要是整个失败了，回执得留着下轮重新注入，
           // 否则角色永远不知道自己许过的那条排程已经没了。认 uuid，上一轮迟到的结论

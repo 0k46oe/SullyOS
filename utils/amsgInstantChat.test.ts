@@ -74,6 +74,7 @@ import {
   resolveInstantChatReadiness,
   sendInstantChatTurn,
   setInstantChatPending,
+  settleInstantChatApiLog,
   settleInstantChatExpiredNotices,
   stageInstantChatExpiredNotices,
 } from './amsgInstantChat';
@@ -450,6 +451,114 @@ describe('只有 202 才算发出去', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain('时钟');
     expect(getInstantChatPending(CHAR.id)).toBeNull();
+  });
+});
+
+// 「API 调用记录」的记录点挂在全局 fetch 拦截器上，只认 /chat/completions——上云这一轮
+// 本地只发一个 POST 给自己的 Worker，那条拦不到。不专门记的话，开了即时对话之后聊天
+// 在记录里整个消失，看着像调用凭空没了。
+describe('上云的这一轮也进「API 调用记录」', () => {
+  /** 收走写库的那几笔（apiCallLog 走动态 import('./db')，按 DB 单例打桩拦得到）。 */
+  const captureLog = () => {
+    const logged: any[] = [];
+    vi.spyOn(DB, 'appendApiCallLog').mockImplementation(async (entry: any) => { logged.push(entry); });
+    return logged;
+  };
+
+  const sendOnce = async (status: number, body: unknown) => {
+    stubFirePackDeps();
+    mockInstantChatFetch(status, body);
+    const logged = captureLog();
+    await sendInstantChatTurn({
+      char: CHAR, chatMessages: [{ role: 'user', content: '在吗' }], api: API,
+      userProfile: USER, groups: [], realtimeConfig: {} as any,
+    });
+    await vi.waitFor(() => expect(logged).toHaveLength(1));
+    return logged[0];
+  };
+
+  it('202 → 落一笔标着云端的「生成中」记录', async () => {
+    const entry = await sendOnce(202, { status: 'accepted', uuid: 'uuid-log' });
+    expect(entry).toMatchObject({
+      id: 'cloud-uuid-log',
+      route: 'cloud-instant-chat',
+      pending: true,
+      ok: true,
+      baseUrl: API.baseUrl,
+      model: API.model,
+      appName: '消息',
+      charId: CHAR.id,
+      charName: CHAR.name,
+      // 跟本地生成那条路同一个词，两条路在列表里对得起来。
+      purpose: '聊天回复',
+    });
+    // 输入构成照算：这一轮到底交上去多大的东西，本地就这一份线索。
+    expect(entry.promptBreakdown?.length).toBeGreaterThan(0);
+  });
+
+  it('连 202 都没拿到 → 记一笔当场就是终态的失败，不留「生成中」挂着', async () => {
+    const entry = await sendOnce(500, { success: false, error: { code: 'X', message: '云端挂了' } });
+    expect(entry).toMatchObject({ route: 'cloud-instant-chat', pending: false, ok: false });
+    expect(entry.promptBreakdown?.length).toBeGreaterThan(0);
+  });
+
+  it('还没等到回复就又发一条 → 上一笔收成「已顶替」，不会一直转圈到被裁掉', async () => {
+    stubFirePackDeps();
+    mockInstantChatFetch(202, { status: 'accepted', uuid: 'uuid-second' });
+    setInstantChatPending(CHAR.id, 'uuid-first', 1_000);
+    const logged = captureLog();
+    await sendInstantChatTurn({
+      char: CHAR, chatMessages: [{ role: 'user', content: '还在吗' }], api: API,
+      userProfile: USER, groups: [], realtimeConfig: {} as any,
+    });
+    await vi.waitFor(() => expect(logged).toHaveLength(2));
+    // 顶掉的那一轮不算失败：云端把两句合成一次回，只是它不再单独等回复了。
+    expect(logged.find((e) => e.id === 'cloud-uuid-first')).toMatchObject({
+      pending: false, superseded: true, ok: true,
+    });
+    expect(logged.find((e) => e.id === 'cloud-uuid-second')?.pending).toBe(true);
+  });
+
+  it('回复回来 → 同一条记录补上用量，时间戳一个字不动（列表顺序不许跟着回复先后跳）', async () => {
+    const logged = captureLog();
+    settleInstantChatApiLog('uuid-log', { amsgUsage: { promptTokens: 1200, completionTokens: 80 } });
+    await vi.waitFor(() => expect(logged).toHaveLength(1));
+    expect(logged[0]).toMatchObject({
+      id: 'cloud-uuid-log', pending: false, ok: true,
+      promptTokens: 1200, completionTokens: 80,
+      // 云端只报入和出，总数本地自己加——列表顶上的合计读的就是它。
+      totalTokens: 1280,
+    });
+    expect(logged[0].timestamp).toBeUndefined();
+    expect(logged[0].tokensPartial).toBeUndefined();
+  });
+
+  it('这一轮调过工具 → 用量标成只算末轮（云端只报得回最后一次调用的数）', async () => {
+    const logged = captureLog();
+    settleInstantChatApiLog('uuid-log', {
+      amsgUsage: { promptTokens: 1200, completionTokens: 80 },
+      amsgToolTrace: [{ name: 'web_search', count: 1 }],
+    });
+    await vi.waitFor(() => expect(logged).toHaveLength(1));
+    expect(logged[0].tokensPartial).toBe(true);
+  });
+
+  it('云端没回用量 → 只销「生成中」，不往记录里填 0 冒充真数', async () => {
+    const logged = captureLog();
+    settleInstantChatApiLog('uuid-log', {});
+    await vi.waitFor(() => expect(logged).toHaveLength(1));
+    expect(logged[0].pending).toBe(false);
+    expect(logged[0].promptTokens).toBeUndefined();
+    expect(logged[0].totalTokens).toBeUndefined();
+  });
+
+  it('云端点名说这一轮没成 → 那笔跟着收尾成失败，不会一直写着「生成中」', async () => {
+    setInstantChatPending(CHAR.id, 'uuid-dead', 1_000);
+    vi.spyOn(DB, 'saveMessage').mockResolvedValue(undefined as any);
+    const logged = captureLog();
+    await failInstantChatPending(CHAR.id, 'uuid-dead', '云端生成失败');
+    await vi.waitFor(() => expect(logged).toHaveLength(1));
+    expect(logged[0]).toMatchObject({ id: 'cloud-uuid-dead', pending: false, ok: false });
   });
 });
 
