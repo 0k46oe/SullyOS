@@ -15,7 +15,7 @@
  *  7. [[INNER_STATE:...]] 兜底剥
  *  8. 双语 <翻译><原文>...<译文>... 拆为单独 bubble
  *  9. ChatParser.splitResponse — 拆 [[SEND_EMOJI:]]
- * 10. --- 分块 + ChatParser.chunkText (换行 / CJK 空格)
+ * 10. --- 分块 + ChatParser.chunkText (只按显式换行)
  * 11. per-chunk 引用解析 ([[QUOTE:]]/[QUOTE:]/[回复 "..."]) → replyTo
  * 12. hasDisplayContent + per-chunk sanitize
  * 13. 拟人打字延迟 (setTimeout)
