@@ -1,4 +1,4 @@
-name: Deploy site to Cloudflare Workers
+name: Deploy static site to Cloudflare
 
 on:
   push:
@@ -41,8 +41,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify assets-only configuration
+        run: >-
+          node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('wrangler.jsonc','utf8'));
+          if(c.main||c.assets?.binding||c.assets?.run_worker_first||fs.existsSync('worker/site/index.ts'))
+          throw new Error('Cloudflare site deployment must remain static-assets-only')"
+
       - name: Build site
         run: pnpm run build
 
-      - name: Deploy Worker
+      - name: Deploy static assets
         run: npx --yes wrangler@4.122.0 deploy
