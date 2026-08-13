@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { bridgeCubism6RenderOrders } from './live2dCore';
+import { describe, expect, it, vi } from 'vitest';
+import { bridgeCubism6RenderOrders, enableCubism5HighPrecisionMasks } from './live2dCore';
 
 const createModel = (
   drawables: { count: number; renderOrders?: Int32Array },
@@ -46,5 +46,60 @@ describe('bridgeCubism6RenderOrders', () => {
       'This Cubism 5.3 model uses 1 offscreen object(s)',
     );
     expect(drawables.renderOrders).toBeUndefined();
+  });
+});
+
+describe('enableCubism5HighPrecisionMasks', () => {
+  const createMaskModel = (mocVersion: number, initiallyEnabled = false) => {
+    let enabled = initiallyEnabled;
+    const useHighPrecisionMask = vi.fn((value: boolean) => { enabled = value; });
+    return {
+      model: {
+        internalModel: {
+          coreModel: { __moc: { getMocVersion: () => mocVersion } },
+          renderer: {
+            isUsingHighPrecisionMask: () => enabled,
+            useHighPrecisionMask,
+          },
+        },
+      },
+      useHighPrecisionMask,
+    };
+  };
+
+  it.each([5, 6])('forces per-drawable masks for moc3 version %i', mocVersion => {
+    const { model, useHighPrecisionMask } = createMaskModel(mocVersion);
+
+    expect(enableCubism5HighPrecisionMasks(model)).toEqual({
+      highPrecisionMaskEnabled: true,
+      mocVersion,
+    });
+    expect(useHighPrecisionMask).toHaveBeenCalledWith(true);
+  });
+
+  it('keeps the adapter policy for pre-Cubism-5 models', () => {
+    const { model, useHighPrecisionMask } = createMaskModel(4);
+
+    expect(enableCubism5HighPrecisionMasks(model)).toEqual({
+      highPrecisionMaskEnabled: false,
+      mocVersion: 4,
+    });
+    expect(useHighPrecisionMask).not.toHaveBeenCalled();
+  });
+
+  it('safely keeps the adapter policy when the moc version is unavailable', () => {
+    expect(enableCubism5HighPrecisionMasks({})).toEqual({
+      highPrecisionMaskEnabled: false,
+      mocVersion: null,
+    });
+  });
+
+  it('does not report compatibility as enabled when the renderer hook is unavailable', () => {
+    expect(enableCubism5HighPrecisionMasks({
+      internalModel: { coreModel: { __moc: { getMocVersion: () => 6 } } },
+    })).toEqual({
+      highPrecisionMaskEnabled: false,
+      mocVersion: 6,
+    });
   });
 });

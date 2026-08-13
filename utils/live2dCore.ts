@@ -2,6 +2,7 @@
 // serves Core 5.1 (latest moc3 version 5), which rejects those models.
 const OFFICIAL_CUBISM_CORE = 'https://cubism.live2d.com/sdk-web/core/06/live2dcubismcore.min.js';
 const REQUIRED_MOC_VERSION = 6;
+const CUBISM_5_MOC_VERSION = 5;
 
 type CubismCoreGlobal = {
   Version?: {
@@ -125,4 +126,42 @@ export const bridgeCubism6RenderOrders = (model: unknown): { offscreenCount: num
     : renderOrders;
 
   return { offscreenCount };
+};
+
+type CubismMaskCompatibility = {
+  highPrecisionMaskEnabled: boolean;
+  mocVersion: number | null;
+};
+
+/**
+ * Cubism 5 models can use small facial clipping regions that the adapter's
+ * complexity heuristic leaves in the shared low-resolution mask atlas. Force
+ * those models onto the per-drawable mask path so eye and mouth masks retain
+ * their alpha edges. Older Cubism models keep the adapter's existing policy.
+ */
+export const enableCubism5HighPrecisionMasks = (model: unknown): CubismMaskCompatibility => {
+  const internal = (model as any)?.internalModel;
+  const renderer = internal?.renderer;
+  let mocVersion: number | null = null;
+
+  try {
+    const version = internal?.coreModel?.__moc?.getMocVersion?.();
+    if (typeof version === 'number' && Number.isFinite(version)) mocVersion = version;
+  } catch {
+    // A third-party adapter may not expose the moc wrapper. Keep its default.
+  }
+
+  if (mocVersion === null || mocVersion < CUBISM_5_MOC_VERSION) {
+    return {
+      highPrecisionMaskEnabled: Boolean(renderer?.isUsingHighPrecisionMask?.()),
+      mocVersion,
+    };
+  }
+
+  const canEnable = typeof renderer?.useHighPrecisionMask === 'function';
+  if (canEnable) renderer.useHighPrecisionMask(true);
+  return {
+    highPrecisionMaskEnabled: Boolean(renderer?.isUsingHighPrecisionMask?.() ?? canEnable),
+    mocVersion,
+  };
 };
