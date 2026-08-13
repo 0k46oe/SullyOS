@@ -128,28 +128,53 @@ jobs:
             PAGES="https://${owner}.github.io/${repo}/"
             echo "  Pages: $PAGES"
 
-            idx=$(curl -sSL --max-time 20 "$PAGES" || true)
-            entry=$(printf '%s' "$idx" | grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' | head -1 || true)
+            tmp=$(mktemp -d)
+            entry=""
+            code=""
 
-            if [[ -z "$entry" ]]; then
-              check "线上产物入口 chunk 可定位" "found" "not-found"
-            else
-              echo "  入口 chunk: $entry"
-              bundle=$(curl -sSL --max-time 60 "${PAGES}${entry}" || true)
-
-              if printf '%s' "$bundle" | grep -qF "$WID"; then
-                check "线上产物内含该站点 id" "yes" "yes"
-              else
-                check "线上产物内含该站点 id" "yes" "no"
+            # 改这个 workflow 的 push 会同时触发 deploy-pages（那条没有 paths 限制），
+            # 两边撞车时，index.html 指向的 chunk 可能正在被换掉，抓下来是 404。
+            # 所以「读 index → 抓 chunk」整个重试，每轮都重新读 index —— 部署一次
+            # chunk 名就变一次，只重试下载是没用的。
+            for attempt in 1 2 3; do
+              curl -sSL --max-time 20 "$PAGES" -o "$tmp/index.html" || true
+              entry=$(grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' "$tmp/index.html" 2>/dev/null | head -1 || true)
+              if [[ -z "$entry" ]]; then
+                echo "  第 $attempt 次没能从 index.html 定位入口 chunk，等 20 秒重试"
+                sleep 20
+                continue
               fi
+              code=$(curl -sSL --max-time 60 -w '%{http_code}' "${PAGES}${entry}" -o "$tmp/bundle.js" || echo 000)
+              [[ "$code" == "200" ]] && break
+              echo "  第 $attempt 次抓 $entry 得到 $code，等 20 秒重试（多半是正撞上部署）"
+              sleep 20
+            done
+
+            check "线上产物入口 chunk 可下载" "200" "${code:-（没定位到 chunk）}"
+
+            if [[ "$code" == "200" ]]; then
+              echo "  入口 chunk: $entry（$(wc -c < "$tmp/bundle.js") 字节）"
+
+              # ⚠️ 必须 grep 文件，不能写成 `printf '%s' "$bundle" | grep -qF ...`。
+              # grep -q 一匹配上就立刻退出，printf 随即被 SIGPIPE 打死，pipefail
+              # 把整个管道的退出码抬成 141 —— 于是「找到了」被判成「没找到」。
+              # 而真没找到时 grep 会读完全部输入、正常返回 1，同样是 no。
+              # 两条路都通向 no：那种写法下这条断言恒为假，一次都绿不了。
+              # （第一次上线就是这么红的，日志里那句 `printf: write error:
+              #   Broken pipe` 就是 grep 提前退出的证据 —— 换句话说，
+              #   那行报错本身证明了它其实找到了。）
+              hits=$(grep -cF "$WID" "$tmp/bundle.js" || true)
+              check "线上产物内含该站点 id" "yes" "$( (( ${hits:-0} > 0 )) && echo yes || echo no )"
 
               # 产物里出现的 tracker 脚本地址去重后必须只有一个，且就是配的那个。
               # 多出一个 = 页面上还挂着第二个上报端点，这必须被发现。
-              got=$(printf '%s' "$bundle" \
-                    | grep -oE 'https://[A-Za-z0-9.-]+/script\.js' \
+              # （这条的管道是安全的：grep -oE 不会提前退出，会读完整个文件。）
+              got=$(grep -oE 'https://[A-Za-z0-9.-]+/script\.js' "$tmp/bundle.js" \
                     | sort -u | paste -sd',' - || true)
               check "线上产物内 tracker 地址唯一且相符" "$VAR_SCRIPT_URL" "${got:-（没找到）}"
             fi
+
+            rm -rf "$tmp"
             echo
           fi
 
