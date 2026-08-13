@@ -129,15 +129,16 @@ describe('Live2D 模型导入解析', () => {
     expect(progress).toHaveBeenCalledWith(expect.stringContaining('低内存解包'));
   });
 
-  it('运行纹理使用带扩展名的 Blob URL，不再复制为 Base64', async () => {
+  it('运行纹理使用原始 Blob URL，不再复制为 Base64 或伪造扩展名', async () => {
     const createObjectURL = vi.fn(() => 'blob:live2d-texture');
     vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() });
 
     const url = await createLive2DRuntimeTextureUrl(pngHeader(2048, 2048), 'Model/texture.bin');
 
-    expect(url).toBe('blob:live2d-texture#live2d-texture.png');
+    expect(url).toBe('blob:live2d-texture');
     expect(createObjectURL).toHaveBeenCalledWith(expect.objectContaining({ type: 'image/png' }));
     expect(url).not.toContain('base64');
+    expect(url).not.toContain('#');
   });
 
   it('从 model3.json 解析动作、表情、标签与口型参数，自动开放安全动作', async () => {
