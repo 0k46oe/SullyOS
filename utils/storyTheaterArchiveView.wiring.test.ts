@@ -17,6 +17,16 @@ describe('剧情正常记忆归档原文入口', () => {
         expect(archivedBlock).toContain("entry.writesToCharacterMemory\n                                ? '已作为正常记忆归档'");
         expect(archivedBlock).toContain('展开查看原文');
         expect(archivedBlock).toContain('<details key={message.id}');
+        expect(archivedBlock).toContain('open={isExpanded}');
+        expect(archivedBlock).toContain('{isExpanded && <div');
         expect(archivedBlock).not.toContain('if (entry.writesToCharacterMemory) return <div');
+    });
+
+    it('分页、批量展开和完整导出接线不会退化', () => {
+        expect(source).toContain('const STORY_PAGE_SIZE = 10;');
+        expect(source).toContain('messages.slice(messagePage * STORY_PAGE_SIZE');
+        expect(source).toContain("allPageArchivesExpanded ? '全部收起' : '全部展开'");
+        expect(source).toContain("title='导出全部剧情原文'");
+        expect(source).toContain("<StoryPagination className='mt-8'");
     });
 });

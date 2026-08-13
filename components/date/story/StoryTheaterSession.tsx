@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, ArrowBendDownRight, ArrowClockwise, ArrowLeft, Broadcast, CaretDown, CaretLeft, CaretRight, ChatCircleDots, Clock, Database, Eye, EyeSlash, FilmSlate, GearSix, HeartStraight, Key, MapPin, PaperPlaneTilt, PencilSimple, SlidersHorizontal, SpinnerGap, Trash, X } from '@phosphor-icons/react';
+import { Archive, ArrowBendDownRight, ArrowClockwise, ArrowLeft, Broadcast, CaretDown, CaretLeft, CaretRight, ChatCircleDots, Clock, Database, DownloadSimple, Eye, EyeSlash, FilmSlate, GearSix, HeartStraight, Key, MapPin, PaperPlaneTilt, PencilSimple, SlidersHorizontal, SpinnerGap, Trash, X } from '@phosphor-icons/react';
 import { useOS } from '../../../context/OSContext';
 import type { CharacterProfile, Message, StoryTheaterEntry, StoryTheaterMask, StoryTheaterPreset } from '../../../types';
 import { DB } from '../../../utils/db';
@@ -24,9 +24,11 @@ import {
     dedupeTheaterWorldbooks,
     estimateStoryTokens,
     formatActorRecentMessages,
+    formatStoryTheaterExport,
     getActiveStoryMiniTheaterPrompt,
     getPendingStoryRetryInput,
     makeStoryTheaterId,
+    makeStoryTheaterFileName,
     memoryTimestampForCharacter,
     parseStoryDisplayBlocks,
     REAL_COMPANION_MEMORY_GUARD,
@@ -47,6 +49,7 @@ import { processNewMessagesWithAutoArchive } from '../../../utils/memoryPalace/a
 import { incrementDigestRound, runCognitiveDigestion } from '../../../utils/memoryPalace';
 import StoryQuickPresetPanel from './StoryQuickPresetPanel';
 import { StoryAppearanceButton } from './StoryTheaterTheme';
+import { shareOrDownloadFile } from '../../../utils/shareExport';
 
 interface Props {
     entry: StoryTheaterEntry;
@@ -64,6 +67,14 @@ const textFromHistory = (messages: Message[], identityName: string): string => b
 }).join('\n\n');
 
 const STORY_PAGE_SIZE = 10;
+
+const StoryPagination: React.FC<{ page: number; pageCount: number; onChange: (page: number) => void; className?: string }> = ({ page, pageCount, onChange, className = '' }) => (
+    <nav className={`${className} py-2 border-y border-slate-200 flex items-center justify-between`}>
+        <button disabled={page === 0} onClick={() => onChange(Math.max(0, page - 1))} className='w-9 h-9 rounded-full grid place-items-center disabled:opacity-20' aria-label='更早一页'><CaretLeft size={17} /></button>
+        <div className='text-center'><div className='text-[10px] font-bold text-slate-600'>第 {page + 1} / {pageCount} 页</div><div className='mt-0.5 text-[9px] text-slate-400'>每页最多 {STORY_PAGE_SIZE} 条内容</div></div>
+        <button disabled={page >= pageCount - 1} onClick={() => onChange(Math.min(pageCount - 1, page + 1))} className='w-9 h-9 rounded-full grid place-items-center disabled:opacity-20' aria-label='更新一页'><CaretRight size={17} /></button>
+    </nav>
+);
 
 const normalizeAffinityInput = (value: any, actor?: CharacterProfile): StoryAffinityInput | undefined => {
     if (!value || typeof value !== 'object') return undefined;
@@ -276,6 +287,8 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
     const [affinityDrafts, setAffinityDrafts] = useState<Record<string, AffinityDraft>>({});
     const [selectedAffinityActorId, setSelectedAffinityActorId] = useState('');
     const [messagePage, setMessagePage] = useState(0);
+    const [expandedArchivedIds, setExpandedArchivedIds] = useState<Set<number>>(() => new Set());
+    const [exporting, setExporting] = useState(false);
     const [showQuickPreset, setShowQuickPreset] = useState(false);
     const [rerollingId, setRerollingId] = useState<number | null>(null);
     const [messageMenu, setMessageMenu] = useState<Message | null>(null);
@@ -304,6 +317,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
         setShowAffinityInput(false);
         setAffinityDrafts({});
         setSelectedAffinityActorId('');
+        setExpandedArchivedIds(new Set());
         setMessageMenu(null);
         setEditingMessage(null);
         setDeletingMessage(null);
@@ -386,6 +400,25 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
     const pageCount = Math.max(1, Math.ceil(messages.length / STORY_PAGE_SIZE));
     useEffect(() => { setMessagePage(Math.max(0, pageCount - 1)); }, [messages.length, pageCount]);
     const pageMessages = useMemo(() => messages.slice(messagePage * STORY_PAGE_SIZE, (messagePage + 1) * STORY_PAGE_SIZE), [messagePage, messages]);
+    const pageArchivedIds = useMemo(() => pageMessages.filter(message => mirrorArchived(message, entry)).map(message => message.id), [entry, pageMessages]);
+    const allPageArchivesExpanded = pageArchivedIds.length > 0 && pageArchivedIds.every(id => expandedArchivedIds.has(id));
+    const togglePageArchives = useCallback(() => {
+        setExpandedArchivedIds(current => {
+            const next = new Set(current);
+            if (pageArchivedIds.every(id => next.has(id))) pageArchivedIds.forEach(id => next.delete(id));
+            else pageArchivedIds.forEach(id => next.add(id));
+            return next;
+        });
+    }, [pageArchivedIds]);
+    const setArchiveExpanded = useCallback((messageId: number, open: boolean) => {
+        setExpandedArchivedIds(current => {
+            if (current.has(messageId) === open) return current;
+            const next = new Set(current);
+            if (open) next.add(messageId);
+            else next.delete(messageId);
+            return next;
+        });
+    }, []);
     const storedTokenInfo = useMemo(() => {
         const source = [...messages].reverse().find(message => Number(message.metadata?.theaterPromptTokens) > 0);
         return source ? {
@@ -394,6 +427,28 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
         } : { count: 0, exact: false };
     }, [messages]);
     const displayedTokenInfo = contextTokens > 0 ? { count: contextTokens, exact: contextTokensExact } : storedTokenInfo;
+
+    const exportStory = useCallback(async () => {
+        if (messages.length === 0 || exporting) {
+            if (messages.length === 0) addToast('暂无可导出的剧情原文', 'info');
+            return;
+        }
+        setExporting(true);
+        try {
+            const result = await shareOrDownloadFile({
+                content: formatStoryTheaterExport(entry, mask.name, actors.map(actor => actor.name), messages),
+                fileName: makeStoryTheaterFileName(entry.title),
+                mimeType: 'text/plain;charset=utf-8',
+                shareTitle: `${entry.title || '未命名剧情'}的完整原文`,
+            });
+            addToast(result === 'shared' ? '已打开分享面板' : '剧情原文已导出', 'success');
+        } catch (error: any) {
+            console.error('[StoryTheater] export failed', error);
+            addToast(`剧情原文导出失败：${error?.message || error}`, 'error');
+        } finally {
+            setExporting(false);
+        }
+    }, [actors, addToast, entry, exporting, mask.name, messages]);
 
     const callCompletion = useCallback(async (payload: Array<{ role: string; content: string }>, settings?: object, onPromptTokens?: (tokens: number) => void): Promise<string> => {
         const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
@@ -713,6 +768,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                 <button onClick={onBack} className='w-9 h-9 rounded-full grid place-items-center'><ArrowLeft size={20} /></button>
                 <div className='min-w-0 flex-1'><div className='text-[9px] tracking-[.24em] uppercase font-bold text-violet-500'>Story theater</div><h1 className='font-serif font-semibold truncate'>{entry.title}</h1></div>
                 {onOpenVectorMemory && <button onClick={onOpenVectorMemory} className='w-9 h-9 rounded-full grid place-items-center text-violet-600' title='本剧情向量记忆' aria-label='本剧情向量记忆'><Database size={18} /></button>}
+                <button disabled={exporting || messages.length === 0} onClick={() => void exportStory()} className='w-9 h-9 rounded-full grid place-items-center text-violet-600 disabled:opacity-30' title='导出全部剧情原文' aria-label='导出全部剧情原文'>{exporting ? <SpinnerGap size={18} className='animate-spin' /> : <DownloadSimple size={18} />}</button>
                 <StoryAppearanceButton />
                 <button onClick={onEdit} className='w-9 h-9 rounded-full grid place-items-center'><GearSix size={19} /></button>
             </div>
@@ -742,7 +798,8 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                     <p className='mt-6 text-[10px] text-slate-400'>{canWriteOpening ? '输入框留空，点击推进即可开场' : '这一幕由你先落笔'}</p>
                 </section> : entry.writesToCharacterMemory && <div className='mb-8 py-3 border-y border-amber-200 text-center text-[11px] text-amber-700'>和朋友们已经分别相处了一段时间……</div>}
 
-                {pageCount > 1 && <nav className='mb-7 py-2 border-y border-slate-200 flex items-center justify-between'><button disabled={messagePage === 0} onClick={() => setMessagePage(value => Math.max(0, value - 1))} className='w-9 h-9 rounded-full grid place-items-center disabled:opacity-20'><CaretLeft size={17} /></button><div className='text-center'><div className='text-[10px] font-bold text-slate-600'>第 {messagePage + 1} / {pageCount} 页</div><div className='mt-0.5 text-[9px] text-slate-400'>每页最多 {STORY_PAGE_SIZE} 条内容</div></div><button disabled={messagePage >= pageCount - 1} onClick={() => setMessagePage(value => Math.min(pageCount - 1, value + 1))} className='w-9 h-9 rounded-full grid place-items-center disabled:opacity-20'><CaretRight size={17} /></button></nav>}
+                {pageCount > 1 && <StoryPagination className='mb-4' page={messagePage} pageCount={pageCount} onChange={setMessagePage} />}
+                {pageArchivedIds.length > 0 && <div className='mb-7 px-1 flex items-center justify-between gap-3 text-[9px] text-slate-400'><span>本页 {pageArchivedIds.length} 条归档原文 · 展开时才渲染正文</span><button onClick={togglePageArchives} className='shrink-0 px-3 py-1.5 rounded-full bg-white border border-slate-200 font-bold text-violet-600'>{allPageArchivesExpanded ? '全部收起' : '全部展开'}</button></div>}
 
                 <div className='space-y-8'>
                     {pageMessages.map(message => {
@@ -753,7 +810,8 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                                 : message.metadata?.theaterArchiveStrategy === 'vector'
                                     ? '已存入本剧情向量分区'
                                     : '已收进剧场事件盒';
-                            return <details key={message.id} className='group border-y border-slate-200'>
+                            const isExpanded = expandedArchivedIds.has(message.id);
+                            return <details key={message.id} open={isExpanded} onToggle={event => setArchiveExpanded(message.id, event.currentTarget.open)} className='group border-y border-slate-200'>
                                 <summary className='list-none cursor-pointer py-3 flex items-center gap-3 text-slate-400 [&::-webkit-details-marker]:hidden'>
                                     <Archive size={13} className='shrink-0' />
                                     <span className='min-w-0 flex-1'>
@@ -762,11 +820,11 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                                     </span>
                                     <CaretDown size={14} className='shrink-0 transition-transform group-open:rotate-180' />
                                 </summary>
-                                <div className='pb-5 pl-7'>
+                                {isExpanded && <div className='pb-5 pl-7'>
                                     {message.role === 'user'
                                         ? <p className='text-sm leading-7 text-slate-600 whitespace-pre-wrap'>{message.content}</p>
                                         : <StoryOutput content={message.content} affinityInputs={affinityInputsFromMessage(message, actors)} />}
-                                </div>
+                                </div>}
                             </details>;
                         }
                         if (message.role === 'user') return <section key={message.id} {...pressHandlersFor(message)} className='pl-4 border-l-2 border-violet-300'><div className='text-[9px] tracking-[.16em] font-bold text-violet-500'>你写下</div><p className='mt-2 text-sm leading-7 text-slate-600 whitespace-pre-wrap'>{message.content}</p></section>;
@@ -774,6 +832,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                         return <article key={message.id} {...pressHandlersFor(message)}><StoryOutput content={message.content} onChoose={choice => setInput(choice)} affinityInputs={affinityInputsFromMessage(message, actors)} />{isLatest && <div className='mt-4 flex items-center justify-end gap-2'><span className='w-1.5 h-1.5 rounded-full bg-violet-400' /><button disabled={sending} onClick={() => void send(message)} className='inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-white text-[10px] font-bold text-slate-500 disabled:opacity-40'>{rerollingId === message.id ? <SpinnerGap size={12} className='animate-spin' /> : <ArrowClockwise size={12} />}换一种写法</button></div>}</article>;
                     })}
                 </div>
+                {pageCount > 1 && <StoryPagination className='mt-8' page={messagePage} pageCount={pageCount} onChange={setMessagePage} />}
                 {archivedCount > 0 && <div className='mt-10 flex items-center justify-center gap-2 text-[9px] text-slate-400'><Archive size={13} />{archivedCount} 条旧内容已归档，仍会通过所选记忆方式参与续写</div>}
                 <div ref={bottomRef} className='h-6' />
             </div>
