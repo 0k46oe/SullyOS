@@ -115,6 +115,45 @@ export const makeStoryTheaterId = (): string => (
 
 export const storyTheaterThreadId = (entryId: string): string => `story-theater:${entryId}`;
 
+const formatStoryExportTime = (timestamp: number): string => {
+    const date = new Date(timestamp);
+    if (!Number.isFinite(date.getTime())) return '未知时间';
+    const pad = (value: number) => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+};
+
+/** 把一条剧情的完整中央线程导出为便于长期保存与检索的纯文字原文。 */
+export const formatStoryTheaterExport = (
+    entry: Pick<StoryTheaterEntry, 'title' | 'premise' | 'writesToCharacterMemory'>,
+    identityName: string,
+    actorNames: string[],
+    messages: Message[],
+    exportedAt: number = Date.now(),
+): string => {
+    const title = entry.title.trim() || '未命名剧情';
+    const userLabel = identityName.trim() || '你';
+    const lines = [
+        `剧情记录 · ${title}`,
+        `模式：${entry.writesToCharacterMemory ? '真实时间陪伴' : '虚构剧场'}`,
+        `你：${userLabel}`,
+        `角色：${actorNames.filter(Boolean).join('、') || '暂无'}`,
+        `导出时间：${formatStoryExportTime(exportedAt)}`,
+    ];
+    if (entry.premise.trim()) lines.push(`剧情简介：${entry.premise.trim()}`);
+    lines.push('', '===== 完整原文 =====');
+
+    for (const message of [...messages].sort((a, b) => a.id - b.id)) {
+        const speaker = message.role === 'user' ? userLabel : message.role === 'assistant' ? '剧场正文' : '系统';
+        lines.push('', `[${formatStoryExportTime(message.timestamp)}] ${speaker}`, message.content?.trim() || '（无内容）');
+    }
+    return `\uFEFF${lines.join('\n')}`;
+};
+
+export const makeStoryTheaterFileName = (title: string, now: number = Date.now()): string => {
+    const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_').trim() || '未命名剧情';
+    return `${safeTitle}_剧情记录_${formatStoryExportTime(now).slice(0, 10)}.txt`;
+};
+
 export const createStoryTheaterDraft = (now: number = Date.now()): StoryTheaterEntry => ({
     id: makeStoryTheaterId(),
     title: '',
