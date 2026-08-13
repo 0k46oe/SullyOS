@@ -3,7 +3,7 @@ import React, { createContext, useContext, useEffect, useState, useRef, useCallb
 import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, CharacterGroup, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, CloudBackupConfig, CloudBackupFile } from '../types';
 import { DB } from '../utils/db';
 import type { AvatarTouchRecord } from '../utils/avatarTouch';
-import { modelRejectsSamplingParams, stripSamplingParams, isSamplingParamError } from '../utils/samplingParamCompat';
+import { modelRejectsSamplingParams, stripSamplingParams } from '../utils/samplingParamCompat';
 import { extractImagesInPlace, deepCloneForExport } from '../utils/backupExport';
 import { isBlobRef, getBlobForRef, migrateDataUrlToRef, migrateAppearancePresetBlobRefs, resolveBlobRefsDeep, BLOBREF_PREFIX, deleteBlobRefIfUnreferenced } from '../utils/blobRef';
 import { initPwaIcon, clearPwaIcon } from '../utils/appIcon';
@@ -1074,7 +1074,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           let sendArgs: [RequestInfo | URL, RequestInit?] = args;
           // 透明流式升级状态（utils/streamUpgrade.ts）：请求侧改写 → 响应侧拼回 JSON
           let streamUpgraded = false;
-          let bodyBeforeStreamUpgrade: string | null = null;
           if (urlStr.includes('/chat/completions')) {
               const rawBody = (config as RequestInit | undefined)?.body;
               if (typeof rawBody === 'string') {
@@ -1091,7 +1090,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       if (isGlobalStreamEnabled()) {
                           const upgraded = upgradeChatBodyToStream(body);
                           if (upgraded) {
-                              bodyBeforeStreamUpgrade = body;
                               body = upgraded;
                               streamUpgraded = true;
                           }
@@ -1112,31 +1110,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           try {
               let response = await originalFetch(...sendArgs);
 
-              // 兜底：模型没被上面清单覆盖但仍拒收采样参数时，读 400 报文自愈——摘掉后重试一次。
-              if (!response.ok && response.status === 400 && urlStr.includes('/chat/completions')) {
-                  const sentBody = (sendArgs[1] as RequestInit | undefined)?.body;
-                  if (typeof sentBody === 'string') {
-                      let errText = '';
-                      try { errText = await response.clone().text(); } catch { /* 读不出就算了 */ }
-                      if (isSamplingParamError(errText)) {
-                          try {
-                              const parsed = JSON.parse(sentBody);
-                              if (stripSamplingParams(parsed)) {
-                                  sendArgs = [resource, { ...(sendArgs[1] as RequestInit), body: JSON.stringify(parsed) }];
-                                  response = await originalFetch(...sendArgs);
-                              }
-                          } catch { /* 解析失败：保留原始 400 响应 */ }
-                      }
-                  }
-              }
-
-              // 流式升级自愈：个别中转对 stream/stream_options 直接 4xx → 用升级前的
-              // 原 body 重发一次，行为退回旧版（升级只能赚不能赔）。
-              if (streamUpgraded && !response.ok && (response.status === 400 || response.status === 422) && bodyBeforeStreamUpgrade) {
-                  console.warn('🔁 [StreamUpgrade] 中转拒绝流式升级(HTTP ' + response.status + ')，回退原请求重发');
-                  response = await originalFetch(resource, { ...(config as RequestInit), body: bodyBeforeStreamUpgrade });
-                  streamUpgraded = false;
-              }
+              // /chat/completions 是可能已经开始计费的请求。拿到任何 HTTP 响应后都不在
+              // 兼容层静默重发：中转站可能在返回错误前已经把任务交给上游，重发会让用户
+              // 只看到一条调用记录却被扣两到三次。已知模型的采样参数仍在发送前清理；
+              // 未知兼容问题和流式 4xx 原样交给调用方，由用户明确决定是否重试。
               // 流式升级的响应归一化：SSE 攒齐拼回标准 chat.completion JSON——
               // 调用方（safeResponseJson / res.json() 均可）拿到与升级前等价的响应。
               if (streamUpgraded && response.ok) {

@@ -15,7 +15,7 @@ import { getApiCallAmbientContext, recordApiCall, type ApiCallMeta } from './api
 
 const log = makeDebugLogger('api', 'SafeAPI');
 
-function isChatCompletionUrl(url: string): boolean {
+export function isChatCompletionUrl(url: string): boolean {
     return url.includes('/chat/completions');
 }
 
@@ -334,8 +334,10 @@ async function readBodyWithStreaming(
 }
 
 /**
- * Fetch with automatic retry for transient errors.
- * Retries on: 429, 500, 502, 503, 504 and network failures.
+ * Fetch with automatic retry for transient errors on non-billable endpoints.
+ * Chat completions never retry automatically: a timeout/network error does not
+ * prove the upstream generation stopped, so retrying can charge the user twice.
+ * Other endpoints retry on: 429, 500, 502, 503, 504 and network failures.
  * Returns the parsed JSON data directly.
  *
  * `timeoutMs`：每次尝试的硬超时。如果调用方没在 options.signal 里自带 AbortController，
@@ -355,6 +357,9 @@ export async function safeFetchJson(
     const retryableStatuses = new Set([429, 500, 502, 503, 504]);
     let lastError: Error | null = null;
     const urlStr = String(url);
+    const automaticRetryLimit = isChatCompletionUrl(urlStr)
+        ? 0
+        : Math.max(0, Math.floor(Number(maxRetries) || 0));
     let lastStatus: number | undefined;
 
     // 显式 meta 挂到 RequestInit 给全局 fetch 兜底；同时快照环境标签，避免长响应期间
@@ -362,7 +367,7 @@ export async function safeFetchJson(
     const metaOptions: RequestInit = meta ? { ...options, __sullyMeta: meta } as RequestInit : options;
     const logMeta = meta || getApiCallAmbientContext();
 
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    for (let attempt = 0; attempt <= automaticRetryLimit; attempt++) {
         // 全局 fetch 拦截器和这里的“已解析响应兜底”共享 ID。前者覆盖裸 fetch，
         // 后者不依赖 Response.clone()，避免部分 iOS/WebView 克隆流不结束时漏记。
         const requestId = `api-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -392,9 +397,9 @@ export async function safeFetchJson(
 
             if (!response.ok) {
                 // For retryable status codes, retry before giving up
-                if (retryableStatuses.has(response.status) && attempt < maxRetries) {
+                if (retryableStatuses.has(response.status) && attempt < automaticRetryLimit) {
                     const delay = Math.pow(2, attempt) * 1000; // 1s, 2s
-                    log.warn('HTTP retry', { status: response.status, attempt: attempt + 1, maxRetries, delay });
+                    log.warn('HTTP retry', { status: response.status, attempt: attempt + 1, maxRetries: automaticRetryLimit, delay });
                     await new Promise(r => setTimeout(r, delay));
                     continue;
                 }
@@ -447,15 +452,15 @@ export async function safeFetchJson(
             const isAbort = e?.name === 'AbortError' || /aborted|timeout/i.test(e?.message || '');
 
             // Network errors (fetch itself failed) are retryable
-            if ((e?.name === 'TypeError' || isAbort) && attempt < maxRetries) {
+            if ((e?.name === 'TypeError' || isAbort) && attempt < automaticRetryLimit) {
                 const delay = Math.pow(2, attempt) * 1000;
-                log.warn(isAbort ? 'Timeout/Abort retry' : 'Network error retry', { attempt: attempt + 1, maxRetries, delay, message: e?.message });
+                log.warn(isAbort ? 'Timeout/Abort retry' : 'Network error retry', { attempt: attempt + 1, maxRetries: automaticRetryLimit, delay, message: e?.message });
                 await new Promise(r => setTimeout(r, delay));
                 continue;
             }
 
             // For HTML/parse errors on non-ok responses during retry, continue
-            if (attempt < maxRetries && e?.message?.includes('API返回了HTML')) {
+            if (attempt < automaticRetryLimit && e?.message?.includes('API返回了HTML')) {
                 const delay = Math.pow(2, attempt) * 1000;
                 log.warn('HTML response retry', { attempt: attempt + 1, maxRetries, delay });
                 await new Promise(r => setTimeout(r, delay));
