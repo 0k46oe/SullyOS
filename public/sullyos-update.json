@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "versionCode": 30400,
+  "versionName": "3.4.0",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.0/SullyOS-v3.4.0-Distribution.apk",
+  "sha256": "ef72cec1049e61e4e06347ddfa54d4289904b2a15c79fb56cec99803a6a373f9",
+  "sizeBytes": 36663227,
+  "publishedAt": "2026-08-13T12:15:00Z",
+  "releaseNotes": [
+    "对齐最新 master",
+    "首个支持应用内检查和下载安装的正式分发版本"
+  ]
+}
