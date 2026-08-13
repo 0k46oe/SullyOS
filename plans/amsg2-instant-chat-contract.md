@@ -107,7 +107,11 @@
 - 回程（push metadata）：`amsgEmotionUpdate` / `amsgEmotionDone` / `amsgEmotionError`
   （评估结果 / 熄灯信号 / 脱敏后的失败原因）、`amsgReasoning`（思考链，只挂第一条 push、
   只在即时对话轮）、`amsgToolTrace`（`[{name,count}]`，只数真跑过的调用、只挂末条 push、
+  只在即时对话轮）、`amsgUsage`（`{promptTokens, completionTokens}`，同样只挂末条 push、
   只在即时对话轮）。
+- `amsgUsage` 的去处：客户端把它补进「设置 → API 调用记录」里那笔云端调用（发出时先落
+  一笔 pending，收到末条推送时回填 Token）。它是**最后一次**模型调用的用量——带工具的
+  一轮会连着调好几次模型，中间几次的数云端没留，所以跑过工具时那笔记录会标「只算末轮」。
 - 超限旁路：`amsgEmotionRef` / `amsgReasoningRef`（值挪进 client_state，键
   `emotion_update:<clientTaskId>` / `reasoning:<clientTaskId>`）。
 

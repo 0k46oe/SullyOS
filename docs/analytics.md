@@ -57,7 +57,7 @@ SullyOS 的功能已经多到一个人扫不完了，而我们对「哪些功能
 
 ## 数据发到哪
 
-自托管的 umami 实例：`https://stats.palm.cdsv.cc`（站点 id `3f775277-882d-4453-be2c-3226eddab438`）。
+自托管的 umami 实例：`https://stats.friedsully.com`（站点 id `3f775277-882d-4453-be2c-3226eddab438`）。
 后台只有维护者能进，不接任何外部服务。
 
 这两个值**不写在源码里**，由构建环境注入：
@@ -486,6 +486,7 @@ Performance 标签页看：
 - 复制最新 Worker 代码
 - 导入恢复提醒选稍后再说
 - 导出调试日志
+- 弹出 Instant Push 下线通知
 - 弹出 Worker 更新提醒
 - 弹出上次导入未完成提醒
 - 弹出导入中断恢复提醒
@@ -565,6 +566,7 @@ Performance 标签页看：
 - 打开 Cloudflare Dashboard
 - 打开 Deno 控制台
 - 打开 Instant Push 视频教程
+- 打开 Instant Push 迁移教程
 - 打开实际后端字段说明
 - 探测 2.0 Worker 能力
 - 即时对话能不能开
@@ -641,6 +643,12 @@ push endpoint）留在 toast 和 console 里，一个字都不进上报。
 
 「切换即时对话」报 `开` / `关`。配置快照里那一格只看得到「此刻开着没」，
 开了之后又关掉的人在那儿跟从没开过的人是同一个样子，而这两种要修的东西完全不同。
+
+「弹出 Instant Push 下线通知」和「打开 Instant Push 迁移教程」都不带属性，配对起来看：
+前者是「今天有多少人被拦下来看了这条通知」（只弹给现在真开着 Instant Push 的人，
+每天最多一次），后者是「其中有多少人点进了迁移教程」。配置快照里的 `InstantPush`
+那一格看的是同一批人**迁走了没有**——`开` 这一档往下掉，才是迁移真的发生了。
+下线日期与迁移链接在 `components/InstantPushSunsetEvent.tsx`。
 
 **像素家园**
 

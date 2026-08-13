@@ -133,7 +133,7 @@ describe('统计请求识别', () => {
 
     it('未配置统计时不误判同路径的业务请求', async () => {
         const a = await loadModule(false);
-        expect(a.isAnalyticsRequestUrl('https://stats.palm.cdsv.cc/api/send')).toBe(false);
+        expect(a.isAnalyticsRequestUrl('https://stats.friedsully.com/api/send')).toBe(false);
     });
 });
 

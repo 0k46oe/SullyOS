@@ -23,6 +23,7 @@ import { ActiveMsg2InboxMessage, CharacterProfile, GroupProfile, RealtimeConfig,
 import { ActiveMsgClient, type AmsgOutboxEntry, type InstantChatProbeOutcome } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
 import { trackEvent } from './analytics';
+import { cloudApiCallLogId, recordCloudApiCall, settleCloudApiCall } from './apiCallLog';
 import { announceEmotionDone } from './chatGenEvents';
 import { DB } from './db';
 import type { AmsgEmotionEvalSpec } from '../worker/amsg/src/emotionEval';
@@ -445,6 +446,16 @@ export const sendInstantChatTurn = async (params: {
 }): Promise<InstantChatSendResult> => {
   const supersedes = getInstantChatPending(params.char.id);
   inFlightSends.add(params.char.id);
+  // 这一轮在「API 调用记录」里的那一笔：本地这条路只经手一个 POST，真正的模型请求
+  // 是云端发的，日志的全局拦截器够不着——不在这儿记，用户就会看到聊天从记录里消失。
+  // meta 跟本地生成那条路对齐（useChatAI 传给 safeFetchJson 的那份），两条路在列表里
+  // 长得一样，只多一个云端标记。
+  const logMeta = {
+    appName: '消息',
+    charId: params.char.id,
+    charName: params.char.name,
+    purpose: '聊天回复',
+  };
   try {
     const { uuid } = await ActiveMsgClient.sendInstantChat({
       char: params.char,
@@ -461,15 +472,65 @@ export const sendInstantChatTurn = async (params: {
     });
     // 先记待收再释放占位（finally），挡板的两个信号无缝交接，不留「都不认」的空窗。
     setInstantChatPending(params.char.id, uuid, Date.now(), params.char.name);
+    recordCloudApiCall({
+      id: cloudApiCallLogId(uuid),
+      route: 'cloud-instant-chat',
+      baseUrl: params.api.baseUrl,
+      model: params.api.model,
+      messages: params.chatMessages,
+      meta: logMeta,
+    });
+    // 顶掉的那一轮也得收尾：客户端从这一刻起不再等它的回复了（云端把两句合成一次回，
+    // 它已经在跑的情况下顶不掉，但那份回复也认不回这条记录）。不收的话它会一直写着
+    // 「云端生成中」，直到 5 天后被裁掉。
+    if (supersedes) {
+      settleCloudApiCall({ id: cloudApiCallLogId(supersedes.uuid), ok: true, superseded: true });
+    }
     return { ok: true, uuid };
   } catch (error: any) {
     // 只报失败、只有事件名（跟送达端那几条同一条口径）：失败原因里带着 HTTP 状态和
     // 上游报文，不进上报。用户侧同一时刻已经有明确的报错提示，这里只记「发生过」。
     trackEvent('即时对话发送失败');
+    // 没交上去的这一轮同样进记录：界面上那句报错关掉就没了，而日志里留得住——
+    // 交不上去往往跟这次要发的东西有多大有关，输入构成就在这条记录里。
+    recordCloudApiCall({
+      id: `cloud-send-failed-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      route: 'cloud-instant-chat',
+      baseUrl: params.api.baseUrl,
+      model: params.api.model,
+      messages: params.chatMessages,
+      meta: logMeta,
+      sendFailed: true,
+    });
     return { ok: false, error: error?.message || String(error) };
   } finally {
     inFlightSends.delete(params.char.id);
   }
+};
+
+/**
+ * 这一轮回来了 → 把「API 调用记录」里那笔挂着的补完。
+ *
+ * `metadata` 是这一轮**最后一条**推送带回来的那份：云端把用量（`amsgUsage`）和工具
+ * 痕迹（`amsgToolTrace`）都挂在末条上。补收路径拿到的是同一份（账本存的就是推送信封
+ * 的副本），所以推送丢了也照样补得上。
+ *
+ * 云端回传的用量只有**最后一次**模型调用那一份——带工具的一轮会连着调好几次模型，
+ * 中间几次的数在云端就没留下。跑过工具就把这笔标成「只算末轮」，让用户知道这个数字
+ * 偏小，别拿它去跟账单对齐。
+ */
+export const settleInstantChatApiLog = (uuid: string, metadata?: Record<string, any> | null): void => {
+  const num = (value: unknown): number | undefined =>
+    (typeof value === 'number' && Number.isFinite(value) ? value : undefined);
+  const usage = metadata?.amsgUsage;
+  const toolTrace = metadata?.amsgToolTrace;
+  settleCloudApiCall({
+    id: cloudApiCallLogId(uuid),
+    ok: true,
+    promptTokens: num(usage?.promptTokens),
+    completionTokens: num(usage?.completionTokens),
+    tokensPartial: Array.isArray(toolTrace) && toolTrace.length > 0,
+  });
 };
 
 // ─── 推送丢了的兜底：拉服务端消息账本 ───
@@ -722,6 +783,8 @@ export const failInstantChatPending = async (
   // 只报失败、只有事件名：云端点名说这一轮没成（或回复取不回来）。这一格涨起来说明
   // 云端生成或推送链路在掉队，比用户来报「一直在输入」早得多。
   trackEvent('即时对话云端任务失败');
+  // 「API 调用记录」里那笔挂着的也收尾，否则它会一直写着「云端生成中」直到被裁掉。
+  settleCloudApiCall({ id: cloudApiCallLogId(uuid), ok: false });
   try {
     await DB.saveMessage({
       charId,
