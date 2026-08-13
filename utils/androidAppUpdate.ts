@@ -36,6 +36,7 @@ interface ApkInstallerPlugin {
 }
 
 const ApkInstaller = registerPlugin<ApkInstallerPlugin>('ApkInstaller');
+const UPDATE_DIRECTORY = 'updates';
 const UPDATE_PATH = 'updates/SullyOS-update.apk';
 
 export const getAndroidUpdateManifestUrl = (): string =>
@@ -92,6 +93,12 @@ export const downloadAndVerifyAndroidUpdate = async (
   manifest: AndroidUpdateManifest,
   onProgress?: (fraction: number) => void,
 ): Promise<string> => {
+  await Filesystem.mkdir({
+    path: UPDATE_DIRECTORY,
+    directory: Directory.Cache,
+    recursive: true,
+  });
+
   try {
     await Filesystem.deleteFile({ path: UPDATE_PATH, directory: Directory.Cache });
   } catch {
