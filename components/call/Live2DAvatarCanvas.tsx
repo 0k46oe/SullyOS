@@ -4,7 +4,12 @@ import { AvatarAutonomy, getViewerEyeContactCompensation } from '../../utils/ava
 import { DEFAULT_AVATAR_PERFORMANCE, type AvatarPerformanceDirection, type AvatarStageFraming } from '../../utils/avatarPerformance';
 import type { CallAudioFeed } from '../../utils/callAudioFeed';
 import { isDevDebugAvailable } from '../../utils/devDebug';
-import { bridgeCubism6RenderOrders, ensureLive2DCubismCore, preloadLive2DRuntime } from '../../utils/live2dCore';
+import {
+  bridgeCubism6RenderOrders,
+  enableCubism5HighPrecisionMasks,
+  ensureLive2DCubismCore,
+  preloadLive2DRuntime,
+} from '../../utils/live2dCore';
 import {
   buildLive2DPerformanceMix,
   findLive2DActionsForPerformance,
@@ -892,6 +897,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
           throw new Error(`Live2D 贴图 ${invalidTextureIndex + 1} 加载为空，已阻止进入渲染阶段。`);
         }
         const cubismCoreCompatibility = bridgeCubism6RenderOrders(model);
+        const cubismMaskCompatibility = enableCubism5HighPrecisionMasks(model);
         if (disposed || !app) {
           model.destroy({ children: true, texture: true });
           return;
@@ -1458,6 +1464,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
         console.info('[live2d] renderer ready', {
           assetId: config.assetId,
           offscreenCount: cubismCoreCompatibility.offscreenCount,
+          ...cubismMaskCompatibility,
           ...source.timings,
           cubismMs: Math.round(cubismMs),
           bootTotalMs: Math.round(window.performance.now() - bootStartedAt),
