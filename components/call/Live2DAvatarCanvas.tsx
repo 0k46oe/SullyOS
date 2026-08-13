@@ -209,6 +209,46 @@ export const isMobileLive2DRuntime = (): boolean => {
 export const getLive2DCubismMemorySizeMB = (mobile = isMobileLive2DRuntime()): number => mobile ? 32 : 64;
 export const getLive2DTextureReleaseDelayMs = (mobile = isMobileLive2DRuntime()): number => mobile ? 1_000 : 8_000;
 
+const isUsableLive2DTexture = (texture: any): boolean => Boolean(
+  texture?.source
+  && !texture.destroyed
+  && !texture.source.destroyed,
+);
+
+const resetInvalidLive2DTextureAsset = async (url: string): Promise<void> => {
+  try {
+    await Assets.unload(url);
+  } catch {
+    if (Cache.has(url)) Cache.remove(url);
+  }
+  if (Assets.resolver.hasKey(url)) Assets.resolver.removeAlias(url);
+};
+
+export const prepareLive2DTextureAssets = async (urls: string[]): Promise<void> => {
+  await Promise.all(urls.map(async (url, index) => {
+    const cached = Cache.has(url) ? Cache.get<any>(url) : null;
+    if (isUsableLive2DTexture(cached)) return;
+    if (Cache.has(url) || Assets.resolver.hasKey(url)) {
+      await resetInvalidLive2DTextureAsset(url);
+    }
+
+    // Blob URLs have no path extension. Pixi's automatic parser detection
+    // therefore returns null even when a filename is placed in the fragment,
+    // because its path helper strips `#...` first. Pin the parser explicitly.
+    Assets.add({
+      alias: url,
+      src: url,
+      parser: 'texture',
+      data: { autoGenerateMipmaps: false },
+    });
+    const texture = await Assets.load<any>(url);
+    if (isUsableLive2DTexture(texture)) return;
+
+    await resetInvalidLive2DTextureAsset(url);
+    throw new Error(`Live2D 贴图 ${index + 1} 解码失败，渲染器未返回有效纹理。`);
+  }));
+};
+
 const acquireTextureLeases = (urls: string[]) => {
   urls.forEach(url => {
     const lease = textureLeases.get(url) || { users: 0, cleanupTimer: null };
@@ -822,6 +862,11 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
         }
         acquireTextureLeases(packageTextureUrls);
         texturesLeased = true;
+
+        onLoadingChangeRef.current?.(true, '正在解码 Live2D 贴图…');
+        await prepareLive2DTextureAssets(packageTextureUrls);
+        if (disposed) return;
+
         onLoadingChangeRef.current?.(true, '缓存已就绪，正在创建 Cubism 角色…');
         const cubismStartedAt = window.performance.now();
         const model = await Live2DModel.from(source.settings as any, {
@@ -840,6 +885,12 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
           autoFocus: false,
         });
         const cubismMs = window.performance.now() - cubismStartedAt;
+        const invalidTextureIndex = ((model as any).textures as any[] | undefined)
+          ?.findIndex(texture => !isUsableLive2DTexture(texture)) ?? -1;
+        if (invalidTextureIndex >= 0) {
+          model.destroy({ children: true, texture: false });
+          throw new Error(`Live2D 贴图 ${invalidTextureIndex + 1} 加载为空，已阻止进入渲染阶段。`);
+        }
         const cubismCoreCompatibility = bridgeCubism6RenderOrders(model);
         if (disposed || !app) {
           model.destroy({ children: true, texture: true });

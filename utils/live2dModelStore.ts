@@ -1355,12 +1355,6 @@ const getLive2DRuntimePackage = async (
   };
 };
 
-const textureExtensionForMime = (mimeType: string): string => {
-  if (mimeType === 'image/jpeg') return 'jpg';
-  if (mimeType === 'image/webp') return 'webp';
-  return 'png';
-};
-
 export const createLive2DRuntimeTextureUrl = async (blob: Blob, path: string): Promise<string> => {
   // Magic sniffing beats extensions: VTube Studio packages sometimes use
   // texture.bin or extensionless images.
@@ -1369,9 +1363,11 @@ export const createLive2DRuntimeTextureUrl = async (blob: Blob, path: string): P
     ? blob.slice(0, blob.size, mimeType)
     : blob;
   if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
-    // Pixi infers the image parser from the final extension. A fragment does
-    // not affect Blob fetching but gives the parser a stable .png/.jpg/.webp.
-    return `${URL.createObjectURL(typedBlob)}#live2d-texture.${textureExtensionForMime(mimeType)}`;
+    // Keep the Blob URL untouched. Pixi strips URL fragments before checking
+    // extensions, so appending `#texture.png` still leaves it with no parser
+    // and makes Assets.load resolve to null. The canvas selects the texture
+    // parser explicitly before handing the settings to the Live2D engine.
+    return URL.createObjectURL(typedBlob);
   }
   return blobToDataUrl(typedBlob, mimeType);
 };
@@ -1460,8 +1456,8 @@ export const prewarmLive2DModelSource = async (
 
 /**
  * Pixi's texture parser cannot infer an image extension from a bare `blob:` URL.
- * Texture URLs therefore carry an extension fragment. This avoids the extra
- * 33% Base64 copy that previously doubled memory pressure on mobile WebViews.
+ * The canvas explicitly selects Pixi's texture parser for these URLs, avoiding
+ * the extra 33% Base64 copy that previously doubled mobile WebView pressure.
  */
 export const loadLive2DModelSource = async (
   config: Live2DAvatarConfig,

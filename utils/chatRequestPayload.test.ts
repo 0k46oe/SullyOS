@@ -54,6 +54,16 @@ afterEach(() => {
 });
 
 describe('timelyByWorker —— 时效段交给 worker，前端这份不重复烤', () => {
+    it('ChatApp 格式以简短 TOP 1 规则置于行为规范最前', async () => {
+        const payload = await buildChatRequestPayload({ ...baseInput() });
+        const systemPrompt = String(payload.fullMessages[0]?.content || '');
+        const topRule = '**TOP 1｜ChatApp 格式（本节最高优先级）**';
+        expect(systemPrompt).toContain(topRule);
+        expect(systemPrompt.indexOf(topRule)).toBeLessThan(systemPrompt.indexOf('1. **沉浸感**'));
+        expect(systemPrompt).toContain('你是发消息的真实存在，以自然短句、短气泡为主；一个气泡一行，气泡间直接另起一行（实际换行，不要输出“\\n”字样）。');
+        expect(systemPrompt).toContain('每行渲染为一个气泡；空格和标点不会拆泡');
+    });
+
     it('timelyByWorker: 时钟与真实世界块不进 volatileTail，MCP 块与 tail reminder 不注入', async () => {
         const withMode = await buildChatRequestPayload({ ...baseInput(), timelyByWorker: true });
         const joined = joinMessages(withMode.fullMessages);

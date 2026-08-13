@@ -25,6 +25,9 @@ describe('Live2D production chunk isolation', () => {
     expect(canvasSource).toContain('mobile ? 1_000 : 8_000');
     expect(canvasSource).toContain('antialias: !mobileRuntime');
     expect(canvasSource).toContain('textureOptions: { lod: false }');
+    expect(canvasSource).toContain("parser: 'texture'");
+    expect(canvasSource).toContain('await prepareLive2DTextureAssets(packageTextureUrls)');
+    expect(canvasSource).toContain('findIndex(texture => !isUsableLive2DTexture(texture))');
     expect(canvasSource).not.toContain("textureOptions: { lod: 'full'");
     expect(canvasSource).not.toContain('memorySizeMB: 128');
     expect(callSource).toContain("model={!showLive2DSettings && selectedVisualSource === 'model'");
