@@ -57,7 +57,7 @@ SullyOS 的功能已经多到一个人扫不完了，而我们对「哪些功能
 
 ## 数据发到哪
 
-自托管的 umami 实例：`https://stats.palm.cdsv.cc`（站点 id `3f775277-882d-4453-be2c-3226eddab438`）。
+自托管的 umami 实例：`https://stats.friedsully.com`（站点 id `3f775277-882d-4453-be2c-3226eddab438`）。
 后台只有维护者能进，不接任何外部服务。
 
 这两个值**不写在源码里**，由构建环境注入：
