@@ -748,8 +748,11 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                     {pageMessages.map(message => {
                         const archived = mirrorArchived(message, entry);
                         if (archived) {
-                            if (entry.writesToCharacterMemory) return <div key={message.id} className='flex items-center gap-3 text-slate-300'><span className='h-px flex-1 bg-slate-200' /><span className='text-[9px] tracking-wide'>已作为正常记忆归档</span><span className='h-px flex-1 bg-slate-200' /></div>;
-                            const archiveLabel = message.metadata?.theaterArchiveStrategy === 'vector' ? '已存入本剧情向量分区' : '已收进剧场事件盒';
+                            const archiveLabel = entry.writesToCharacterMemory
+                                ? '已作为正常记忆归档'
+                                : message.metadata?.theaterArchiveStrategy === 'vector'
+                                    ? '已存入本剧情向量分区'
+                                    : '已收进剧场事件盒';
                             return <details key={message.id} className='group border-y border-slate-200'>
                                 <summary className='list-none cursor-pointer py-3 flex items-center gap-3 text-slate-400 [&::-webkit-details-marker]:hidden'>
                                     <Archive size={13} className='shrink-0' />
