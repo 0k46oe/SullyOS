@@ -300,7 +300,7 @@ export const describeReachabilityProbe = (verdict: ReachabilityVerdict, host: st
     const who = host || '该域名';
     switch (verdict) {
         case 'reachable':
-            return `连通性复检: no-cors 直连 ${who} 成功 → 网络路径是通的，问题出在响应本身（对方没回 CORS 头，多半是限流页 / 人机验证页 / 网关错误页）。换个网络或过几分钟重试，仍旧的话把这条日志发给作者。`;
+            return `连通性复检: no-cors 直连 ${who} 成功 → 只能确认这个域名当前可达；原 POST 仍可能在生成后断流、被网关关闭，或因最终响应缺少 CORS 头而被浏览器拦截。上游若已开始生成，即使页面显示失败也可能计费；请先核对服务商日志，不要连续重发。`;
         case 'unreachable':
             return `连通性复检: no-cors 直连 ${who} 同样失败 → 这台设备到 ${who} 是真的连不上。按顺序查：梯子的分流规则（把该域名放进代理）、DNS、浏览器扩展（广告拦截/隐私盾）、系统或路由器防火墙。`;
         case 'timeout':

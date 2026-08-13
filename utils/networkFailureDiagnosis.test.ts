@@ -356,10 +356,14 @@ describe('probeOriginReachability', () => {
 });
 
 describe('describeReachabilityProbe', () => {
-    it('通了 → 指向 CORS/限流，明确说「网络路径是通的」', () => {
+    it('通了 → 只确认域名可达，并警告生成后失败仍可能计费', () => {
         const text = describeReachabilityProbe('reachable', 'sullymeow.ccwu.cc');
-        expect(text).toContain('网络路径是通的');
+        expect(text).toContain('域名当前可达');
+        expect(text).toContain('原 POST');
         expect(text).toContain('CORS');
+        expect(text).toContain('可能计费');
+        expect(text).toContain('不要连续重发');
+        expect(text).not.toContain('问题出在响应本身');
         expect(text).not.toContain('梯子的分流规则');
     });
 
@@ -367,7 +371,7 @@ describe('describeReachabilityProbe', () => {
         const text = describeReachabilityProbe('unreachable', 'sullymeow.ccwu.cc');
         expect(text).toContain('连不上');
         expect(text).toContain('梯子');
-        expect(text).not.toContain('网络路径是通的');
+        expect(text).not.toContain('域名当前可达');
     });
 
     it('冷却期内要说清「已经查过了，看上一条」，不能一声不吭让人以为漏了', () => {
