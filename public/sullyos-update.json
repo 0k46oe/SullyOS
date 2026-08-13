@@ -1,15 +1,16 @@
 {
   "schemaVersion": 1,
-  "versionCode": 30400,
-  "versionName": "3.4.0",
-  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.0/SullyOS-v3.4.0-Android.apk",
-  "sha256": "182ef28f9bb8ac51f0f34634a29bf3635bd401598d6689abf988763c6b894c91",
-  "sizeBytes": 36663026,
-  "publishedAt": "2026-08-13T12:47:00Z",
+  "versionCode": 30402,
+  "versionName": "3.4.2",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.2/SullyOS-Android-v3.4.2.apk",
+  "sha256": "9380cf50cf6316f123c642ed394f59de764632799cf3212ef7fac309602e3e80",
+  "sizeBytes": 37003588,
+  "publishedAt": "2026-08-13T15:10:42Z",
   "releaseNotes": [
-    "对齐最新 master",
-    "首个支持应用内检查和下载安装的正式分发版本",
-    "沿用旧 CHICK2 签名，可直接覆盖安装并保留数据",
-    "启用与网页版相同的匿名使用统计"
+    "新增“设置 → 检查更新”按钮",
+    "下载后校验包名、版本号、固定签名与 SHA-256，再拉起 Android 安装器",
+    "首次使用可能需要允许 SullyOS 安装未知应用",
+    "延续 UnifiedPush / ntfy 与 Android PDF 导入修复",
+    "沿用固定正式签名，覆盖安装保留数据"
   ]
 }
