@@ -115,6 +115,73 @@ npm run cap:android
 
 然后在 Android Studio 里点播放按钮，或者 Build → Generate Signed Bundle 生成 APK。草，终于能装在真手机上了。
 
+### 维护者备忘：Android 分发与一键更新（别再把签名换了）
+
+> 这一节记录当前正式 Android 分发线。普通用户不用看；以后重出包前，维护者必须逐项核对。
+
+当前正式分发信息：
+
+| 项目 | 固定值 |
+|------|--------|
+| Android 包名 | `com.aetheros.simulator` |
+| 当前版本 | `versionName 3.4.0` / `versionCode 30400` |
+| 下一版本示例 | `3.4.1` / `30401`（`versionCode` 只能增加，不能复用或降低） |
+| 更新清单 | [`public/sullyos-update.json`](./public/sullyos-update.json) → `https://qegj567-cloud.github.io/SullyOS/sullyos-update.json` |
+| APK 托管 | [GitHub Release `android-v3.4.0`](https://github.com/qegj567-cloud/SullyOS/releases/tag/android-v3.4.0) |
+| 正式更新证书 SHA-256 | `D6:44:DD:DE:EB:6E:00:19:1F:90:CF:62:1C:CA:26:49:F3:72:A6:53:C2:C3:70:66:DE:F2:F8:F9:C8:1E:F1:C8` |
+| 本机活动 keystore | `D:\CHICK\SullyOS-PRIVATE-SIGNING\SullyOS-legacy-update.jks` |
+| 本机签名配置 | `D:\CHICK\SullyOS-PRIVATE-SIGNING\keystore.properties` |
+
+#### 最重要的签名规则
+
+- **以后所有公开 APK 永远使用 `SullyOS-legacy-update.jks`。** 这张证书与已经安装的旧 CHICK2 测试包一致，所以用户可以直接覆盖安装并保留 localStorage / IndexedDB 数据。
+- `D:\CHICK\SullyOS-PRIVATE-SIGNING\SullyOS-release.jks` 是后来生成但没有启用的新证书；对应配置已经标为 `UNUSED`。**不要切过去。** 一旦用错证书，Android 会拒绝覆盖安装，只能卸载旧 App 后重装。
+- `SullyOS-legacy-update.jks` 虽然名字是 Android Debug，但它现在就是这条分发线的永久更新钥匙，有效期到 **2055-10-04**。至少离线备份两份整个 `D:\CHICK\SullyOS-PRIVATE-SIGNING`，不要提交 Git、不要发群、不要把密码写进文档或构建日志。
+- 当前覆盖链只适用于包名 `com.aetheros.simulator`。极早期 `io.github.qegj567cloud.sullyos` 包名的 APK 是另一款独立应用，不能互相覆盖。
+- 从旧 CHICK2 更新时直接安装新 APK，**不要先卸载**。Android 应显示“更新现有应用”；若提示签名冲突或装成另一款应用，立刻取消并检查包名、证书和 `versionCode`。
+
+#### 转发 APK 后还能不能自动更新？
+
+**能。** APK 可以从 GitHub 下载后转发到 Discord、网盘或私聊。接收者不需要 GitHub 账号；安装后点击「设置 → APK 更新 → 检查更新」，仍会读取内置的 GitHub Pages 清单，并从清单里的 `apkUrl` 下载新版。
+
+- 不点击「检查更新」：`0` 次请求，不后台轮询。
+- 点击一次：`1` 次 GitHub Pages 静态 JSON 请求，**`0` 次 Cloudflare Worker 调用**。
+- 只有发现更高 `versionCode` 并确认下载时，才会请求 GitHub Release 的 APK。
+- GitHub 仓库侧栏的 `Releases 1` 表示有 1 个 Release，不是下载量；Release 卡片显示的是容器创建时间，后来替换 APK 资产不会刷新这个时间。
+
+#### Umami 统计不能忘
+
+Android 包必须复用网页版同一套匿名统计。仓库的 Actions 构建会读取 Repository Variables，但本地 Capacitor 构建**不会自动继承 GitHub Variables**，所以构建前必须显式注入：
+
+```powershell
+$env:VITE_HIDE_BUILD_BADGE = '1'
+$env:VITE_UMAMI_SCRIPT_URL = gh variable get UMAMI_SCRIPT_URL --repo qegj567-cloud/SullyOS
+$env:VITE_UMAMI_WEBSITE_ID = gh variable get UMAMI_WEBSITE_ID --repo qegj567-cloud/SullyOS
+```
+
+缺任何一个变量，APK 都会静默关闭统计。出包后必须扫描 APK，确认同时包含 `stats.friedsully.com/script.js` 和对应 Website ID；不要只看源码里有没有 `analytics.ts`。
+
+#### 每次发布新 APK 的固定顺序
+
+1. 拉取并对齐最新 `master`，不要擅自修改 master 没做的主动消息 / 情绪补拉逻辑。
+2. 在 CHICK2 的 `android/app/build.gradle` 同时提高 `versionName` 与 `versionCode`。例如 `3.4.1 / 30401`；只比较整数 `versionCode` 判断新旧。
+3. 注入上面的 Umami 变量，以 `VITE_HIDE_BUILD_BADGE=1` 构建 Capacitor Web 资源并同步到 `D:\CHICK\CHICK2`。
+4. 使用活动签名配置构建 Release：
+
+   ```powershell
+   $env:SULLYOS_SIGNING_PROPERTIES = 'D:\CHICK\SullyOS-PRIVATE-SIGNING\keystore.properties'
+   Set-Location D:\CHICK\CHICK2\android
+   .\gradlew.bat :app:assembleRelease --console=plain
+   ```
+
+5. 用 Android `apksigner verify --print-certs` 核对证书 SHA-256 必须仍是上表的 `D6:44:DD:...:F1:C8`；用 `aapt dump badging` 核对包名和版本；再计算 APK 的 SHA-256 与字节数。
+6. 先把新版 APK 以**新文件名**上传到 GitHub Release，确认公网能完整下载。不要先覆盖 / 删除清单仍在引用的旧文件，避免更新链短暂断掉。
+7. 更新 [`public/sullyos-update.json`](./public/sullyos-update.json) 的 `versionCode`、`versionName`、`apkUrl`、`sha256`、`sizeBytes`、发布时间与更新说明，走 PR 合并到 `master`。
+8. 等 GitHub Pages 部署成功，从公网重新读取 JSON，确认它已指向新版；再验证下载文件大小、SHA-256 和签名。
+9. 最后才能删除 Release 中不再引用的旧 APK。发布后不要再改变同一 `versionCode` 对应的二进制文件。
+
+更新器在原生层还会再次校验下载文件的 SHA-256、包名、签名证书和更高的 `versionCode`，通过后才调用 Android 系统安装器；它不会静默安装。
+
 ## 数据存储在哪？（你的秘密安全吗）
 
 **主要存在你本地浏览器里**（IndexedDB）。
