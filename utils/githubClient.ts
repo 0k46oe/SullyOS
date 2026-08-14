@@ -59,15 +59,11 @@ const blobToBase64 = (blob: Blob): Promise<string> =>
         reader.readAsDataURL(blob);
     });
 
-// 国内用户大部分摸不到 github.com，所以代理默认开（undefined 视为 true）。
-// 只有用户在高级选项里明确把勾去掉（githubUseProxy === false）才直连。
-//
-// 不再排除 native — Capacitor 用户（手机版）也可能在 GFW 后面，需要走
-// CF Worker 才能稳定连到 GitHub。WebView fetch() 把 Blob body 直接发给
-// Worker、Worker 转发到 uploads.github.com，路径全程 fetch，无原生桥的
-// binary 问题。
-const useProxy = (config: CloudBackupConfig): boolean =>
-    config.githubUseProxy !== false;
+// 安全默认：GitHub 备份优先直连。只有用户在新版风险提示下亲手开启过代理，
+// 才允许把 Token 与备份流量交给所选 Worker。consentVersion 会让旧配置里由
+// 历史“默认开启”写进去的 githubUseProxy=true 自动失效，所有人重新选择一次。
+export const shouldUseGithubProxy = (config: CloudBackupConfig): boolean =>
+    config.githubUseProxy === true && config.githubProxyConsentVersion === 1;
 
 const proxify = (url: string): string =>
     `${getProxyWorkerUrl()}/github?url=${encodeURIComponent(url)}`;
@@ -149,7 +145,7 @@ const ghRequest = async (
 ): Promise<GhResponse> => {
     const baseHeaders = opts.headers || {};
 
-    if (useProxy(config)) {
+    if (shouldUseGithubProxy(config)) {
         const headers: Record<string, string> = {
             ...baseHeaders,
             'X-GitHub-Method': method,
@@ -239,11 +235,14 @@ const repoName = (config: CloudBackupConfig): string =>
 export const verifyToken = async (
     token: string,
     useProxyOverride?: boolean,
+    proxyConsentVersion?: number,
 ): Promise<{ ok: boolean; login?: string; message: string }> => {
     try {
         const tempConfig: CloudBackupConfig = {
             enabled: false, webdavUrl: '', username: '', password: '', remotePath: '',
-            githubToken: token, githubUseProxy: useProxyOverride,
+            githubToken: token,
+            githubUseProxy: useProxyOverride,
+            githubProxyConsentVersion: proxyConsentVersion,
         };
         const res = await ghRequest(tempConfig, `${API_HOST}/user`, 'GET', {
             headers: authHeaders(token),
@@ -305,7 +304,7 @@ export const testConnection = async (
     const token = config.githubToken;
     if (!token) return { ok: false, message: '请先填写 Token' };
 
-    const ver = await verifyToken(token, config.githubUseProxy);
+    const ver = await verifyToken(token, config.githubUseProxy, config.githubProxyConsentVersion);
     if (!ver.ok) return { ok: false, message: ver.message };
 
     const cfg = { ...config, githubOwner: ver.login };
@@ -340,13 +339,13 @@ const uploadOneAsset = async (
         // origin 都返了 CORS 头，所以 Capacitor 里 fetch() 直连 uploads.github.com
         // 是 OK 的。useProxy 决定走代理还是直连，原生默认直连但用户可以勾选。
         try {
-            const targetUrl = useProxy(config) ? proxify(url) : url;
+            const targetUrl = shouldUseGithubProxy(config) ? proxify(url) : url;
             const headers: Record<string, string> = {
                 Authorization: `Bearer ${token}`,
                 Accept: 'application/vnd.github+json',
                 'Content-Type': 'application/zip',
             };
-            if (useProxy(config)) headers['X-GitHub-Method'] = 'POST';
+            if (shouldUseGithubProxy(config)) headers['X-GitHub-Method'] = 'POST';
             const res = await fetch(targetUrl, {
                 method: 'POST',
                 headers,
@@ -362,13 +361,13 @@ const uploadOneAsset = async (
     }
 
     return new Promise((resolve) => {
-        const targetUrl = useProxy(config) ? proxify(url) : url;
+        const targetUrl = shouldUseGithubProxy(config) ? proxify(url) : url;
         const xhr = new XMLHttpRequest();
         xhr.open('POST', targetUrl);
         xhr.setRequestHeader('Authorization', `Bearer ${token}`);
         xhr.setRequestHeader('Accept', 'application/vnd.github+json');
         xhr.setRequestHeader('Content-Type', 'application/zip');
-        if (useProxy(config)) xhr.setRequestHeader('X-GitHub-Method', 'POST');
+        if (shouldUseGithubProxy(config)) xhr.setRequestHeader('X-GitHub-Method', 'POST');
         xhr.upload.onprogress = (e) => {
             if (e.lengthComputable) onFraction?.(e.loaded / e.total);
         };
@@ -557,11 +556,15 @@ export const downloadBackup = async (
     const token = config.githubToken;
     const owner = config.githubOwner;
     const repo = repoName(config);
-    if (!token || !owner) return null;
+    if (!token || !owner) {
+        throw new Error('GitHub 配置不完整，请先重新测试并连接账号。');
+    }
 
     const [, idsStr] = file.href.split(':');
     const assetIds = (idsStr || '').split(',').map(s => Number(s)).filter(n => n > 0);
-    if (assetIds.length === 0) return null;
+    if (assetIds.length === 0) {
+        throw new Error('这个备份缺少有效的 GitHub 附件标识，请刷新备份列表后重试。');
+    }
 
     try {
         onProgress?.(2);
@@ -579,7 +582,15 @@ export const downloadBackup = async (
                     binary: true,
                 },
             );
-            if (res.status !== 200 && res.status !== 206) return null;
+            if (res.status !== 200 && res.status !== 206) {
+                if (res.status === 401 || res.status === 403) {
+                    throw new Error(`GitHub 拒绝下载附件（HTTP ${res.status}），请检查 Token 权限或重新连接账号。`);
+                }
+                if (res.status === 404) {
+                    throw new Error('GitHub 上的备份附件已不存在，请刷新备份列表。');
+                }
+                throw new Error(`GitHub 附件下载失败（HTTP ${res.status}）。`);
+            }
             const completedBeforePart = downloadedBytes;
             const buf = await res.arrayBuffer((partLoadedBytes) => {
                 if (totalBytes > 0) {
@@ -595,8 +606,19 @@ export const downloadBackup = async (
         }
         onProgress?.(100);
         return new Blob(buffers, { type: 'application/zip' });
-    } catch {
-        return null;
+    } catch (error: any) {
+        if (
+            !shouldUseGithubProxy(config)
+            && !isNative()
+            && (error instanceof TypeError || /failed to fetch/i.test(String(error?.message || '')))
+        ) {
+            throw new Error(
+                '浏览器直连 GitHub 的备份附件被网络或跨域限制拦截。'
+                + '请到「云端备份 → GitHub → 高级选项」手动开启 Cloudflare 中转后重试；应用不会自动开启。',
+            );
+        }
+        if (error instanceof Error) throw error;
+        throw new Error(`GitHub 附件下载失败：${String(error || '未知错误')}`);
     }
 };
 

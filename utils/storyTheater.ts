@@ -1274,6 +1274,43 @@ export const estimateStoryTokens = (text: string): number => {
     return cjk + Math.ceil(rest / 4);
 };
 
+const storyApiDetail = (value: unknown): string => {
+    if (typeof value === 'string') return value.trim();
+    if (!value || typeof value !== 'object') return '';
+    const record = value as Record<string, unknown>;
+    return storyApiDetail(record.message)
+        || storyApiDetail(record.detail)
+        || storyApiDetail(record.error)
+        || storyApiDetail(record.code);
+};
+
+/** 保留上游 4xx 的真正原因，避免调试日志里只剩一条没有信息量的 “API Error 400”。 */
+export const describeStoryApiError = (status: number, data: unknown): string => {
+    const detail = storyApiDetail((data as Record<string, unknown> | null)?.error)
+        || storyApiDetail((data as Record<string, unknown> | null)?.message)
+        || storyApiDetail((data as Record<string, unknown> | null)?.detail);
+    return `API Error ${status}${detail ? `：${detail.slice(0, 500)}` : ''}`;
+};
+
+export const isStoryUserLastCompatibilityError = (message: string): boolean => (
+    /(?:last|final)[^\n]{0,80}(?:message|role)[^\n]{0,80}user/i.test(message)
+    || /(?:最后|末尾)[^\n]{0,40}(?:消息|角色)[^\n]{0,40}user/i.test(message)
+);
+
+/** 200 但正文为空时把 finish_reason 带出来，区分截断、内容过滤和代理空包。 */
+export const describeEmptyStoryCompletion = (data: unknown): string => {
+    const record = data as Record<string, any> | null;
+    const choice = record?.choices?.[0];
+    const finishReason = String(choice?.finish_reason || choice?.finishReason || '').trim();
+    const providerDetail = storyApiDetail(record?.error) || storyApiDetail(record?.message);
+    if (providerDetail) return `没有生成正文：${providerDetail.slice(0, 500)}`;
+    if (finishReason === 'length' || finishReason === 'max_tokens') {
+        return '没有生成正文：模型在写出正文前已用完输出额度（finish_reason=length）。请提高“最大输出”，或降低模型思考量后重试';
+    }
+    if (finishReason === 'content_filter') return '没有生成正文：上游内容过滤拦截了本次回复（finish_reason=content_filter）';
+    return `没有生成正文${finishReason ? `（finish_reason=${finishReason}）` : '：上游返回了空内容'}，请重试`;
+};
+
 export const memoryTimestampForCharacter = (entry: StoryTheaterEntry, charId: string, realTimestamp: number): number => {
     const anchorText = entry.characterMemoryDates?.[charId];
     const storyAnchor = anchorText ? new Date(anchorText).getTime() : NaN;

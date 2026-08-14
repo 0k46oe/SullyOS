@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { adaptiveMouthLevel, vowelFromBands } from './callAudioFeed';
+import { adaptiveMouthLevel, shouldKeepNativeCallAudio, vowelFromBands } from './callAudioFeed';
 
 describe('adaptiveMouthLevel', () => {
   it('小音量语音也能张到接近满口型（相对峰值归一）', () => {
@@ -41,5 +41,28 @@ describe('vowelFromBands', () => {
   });
   it('近乎无声时回中位，不产生 NaN', () => {
     expect(vowelFromBands(0, 0)).toBe(0.5);
+  });
+});
+
+describe('iOS call audio routing', () => {
+  it('keeps iPhone and iPad audio on the native media element path', () => {
+    expect(shouldKeepNativeCallAudio({
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)',
+      platform: 'iPhone',
+      maxTouchPoints: 5,
+    })).toBe(true);
+    expect(shouldKeepNativeCallAudio({
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15)',
+      platform: 'MacIntel',
+      maxTouchPoints: 5,
+    })).toBe(true);
+  });
+
+  it('allows desktop browsers to use the analyser graph', () => {
+    expect(shouldKeepNativeCallAudio({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      platform: 'Win32',
+      maxTouchPoints: 0,
+    })).toBe(false);
   });
 });

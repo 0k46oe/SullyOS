@@ -21,10 +21,13 @@ import {
     createBlankStoryPreset,
     createStoryTheaterDraft,
     dedupeTheaterWorldbooks,
+    describeEmptyStoryCompletion,
+    describeStoryApiError,
     getStoryPresetPromptGroups,
     getActiveStoryMiniTheaterPrompt,
     getPendingStoryRetryInput,
     isProtectedStoryPrompt,
+    isStoryUserLastCompatibilityError,
     memoryTimestampForCharacter,
     parseStoryDisplayBlocks,
     parseStoryMiniTheater,
@@ -40,6 +43,30 @@ import {
     formatStoryTheaterExport,
     makeStoryTheaterFileName,
 } from './storyTheater';
+
+describe('剧情接口报错诊断', () => {
+    it('保留上游 400 的具体原因', () => {
+        expect(describeStoryApiError(400, { error: { message: 'context_length_exceeded: maximum 32768' } }))
+            .toBe('API Error 400：context_length_exceeded: maximum 32768');
+        expect(describeStoryApiError(400, { error: '最后一条消息必须是 user' }))
+            .toBe('API Error 400：最后一条消息必须是 user');
+    });
+
+    it('只在上游明确拒绝末条角色时建议 400 兼容模式', () => {
+        expect(isStoryUserLastCompatibilityError('API Error 400: final message role must be user')).toBe(true);
+        expect(isStoryUserLastCompatibilityError('API Error 400：最后一条消息必须是 user')).toBe(true);
+        expect(isStoryUserLastCompatibilityError('API Error 400: context_length_exceeded')).toBe(false);
+    });
+
+    it('空正文会暴露 finish_reason，而不是统一叫用户盲目重试', () => {
+        expect(describeEmptyStoryCompletion({ choices: [{ finish_reason: 'length', message: { content: '' } }] }))
+            .toContain('已用完输出额度');
+        expect(describeEmptyStoryCompletion({ choices: [{ finish_reason: 'content_filter', message: { content: '' } }] }))
+            .toContain('内容过滤');
+        expect(describeEmptyStoryCompletion({ choices: [{ finish_reason: 'stop', message: { content: '' } }] }))
+            .toContain('finish_reason=stop');
+    });
+});
 
 describe('剧情原文导出', () => {
     it('按原始楼层顺序导出真实陪伴的完整推进与正文', () => {

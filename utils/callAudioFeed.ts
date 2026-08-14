@@ -21,6 +21,18 @@ export interface LipSyncFrame {
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 
 /**
+ * iOS 上把 HTMLMediaElement 接入 WebAudio 后，AudioContext 一旦被系统挂起，
+ * 原生音频输出也会一起被截断。这里宁可退回节奏型口型，也不让分析器成为声音的必经节点。
+ * iPadOS 桌面 UA 会伪装成 Mac，需要同时检查触点数量。
+ */
+export const shouldKeepNativeCallAudio = (runtimeNavigator?: Pick<Navigator, 'userAgent' | 'platform' | 'maxTouchPoints'>): boolean => {
+  const nav = runtimeNavigator || (typeof navigator !== 'undefined' ? navigator : undefined);
+  if (!nav) return false;
+  return /iPad|iPhone|iPod/i.test(nav.userAgent)
+    || (nav.platform === 'MacIntel' && nav.maxTouchPoints > 1);
+};
+
+/**
  * 自适应开口度：rms 相对运行峰值归一。峰值缓慢回落（每次采样 ×0.996），
  * 换了音量更小的语音片段后 1–2 秒内恢复满幅口型。
  */
@@ -53,15 +65,50 @@ export class CallAudioFeed {
   private smoothedLevel = 0;
   private smoothedVowel = 0.5;
 
-  /** 把播放元素接入分析图。同一元素只会创建一次 MediaElementSource。 */
-  attach(element: HTMLAudioElement): void {
-    if (this.broken || this.attachedElement === element) return;
-    if (typeof window === 'undefined' || typeof window.AudioContext === 'undefined') {
+  private ensureContext(): AudioContext | null {
+    if (this.broken) return null;
+    if (this.context && this.context.state !== 'closed') return this.context;
+    if (typeof window === 'undefined') return null;
+    const AudioContextCtor = window.AudioContext
+      || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) {
       this.broken = true;
-      return;
+      return null;
     }
     try {
-      const context = this.context || new window.AudioContext();
+      this.context = new AudioContextCtor();
+      return this.context;
+    } catch {
+      this.broken = true;
+      return null;
+    }
+  }
+
+  /**
+   * 必须从“接通 / 重播 / 继续播放”等真实点击处理器里直接调用。
+   * 返回 false 时调用方应保留 HTMLAudioElement 原生输出，不要 attach。
+   */
+  async unlock(): Promise<boolean> {
+    const context = this.ensureContext();
+    if (!context) return false;
+    if (context.state === 'running') return true;
+    try {
+      await context.resume();
+      // Safari may mutate state to its non-standard `interrupted` value between
+      // tasks; stringify to force a fresh runtime read after the awaited resume.
+      return String(context.state) === 'running';
+    } catch {
+      return false;
+    }
+  }
+
+  /** 把播放元素接入分析图。同一元素只会创建一次；未解锁时绝不接管原生声音。 */
+  attach(element: HTMLAudioElement): boolean {
+    if (this.broken) return false;
+    if (this.attachedElement === element) return !!this.analyser;
+    const context = this.ensureContext();
+    if (!context || context.state !== 'running') return false;
+    try {
       const analyser = context.createAnalyser();
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.5;
@@ -73,18 +120,18 @@ export class CallAudioFeed {
       this.attachedElement = element;
       this.timeData = new Uint8Array(analyser.fftSize);
       this.freqData = new Uint8Array(analyser.frequencyBinCount);
+      return true;
     } catch {
       // 某些跨域音频不允许接入 WebAudio；标记后 sample() 恒 active=false，
       // 画布退回节奏型口型。
       this.broken = true;
+      return false;
     }
   }
 
   setActive(playing: boolean): void {
     this.playing = playing;
-    if (playing) {
-      void this.context?.resume().catch(() => { /* iOS 需要用户手势，播放本身就是 */ });
-    } else {
+    if (!playing) {
       this.smoothedLevel = 0;
       this.frame = { level: 0, vowel: this.smoothedVowel, active: false };
     }

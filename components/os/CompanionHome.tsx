@@ -862,7 +862,6 @@ const CompanionHome: React.FC = () => {
     () => character ? resolveCompanionPortrait(character, performance.emotion, performance.faces || []) : undefined,
     [character, performance.emotion, performance.faces],
   );
-  const staticExpressionKey = `${performance.emotion}:${(performance.faces || []).join(',')}`;
   const touchPackContentLabel = activeCompanionSource === 'upload'
     ? '台词'
     : activeCompanionSource === 'date' ? '台词与表情' : '台词与动作';
@@ -1865,10 +1864,6 @@ const CompanionHome: React.FC = () => {
           from { opacity:0; transform:translateY(10px); }
           to { opacity:1; transform:translateY(0); }
         }
-        @keyframes companion-static-expression-in {
-          from { opacity:.35; filter:brightness(1.08); }
-          to { opacity:1; filter:brightness(1); }
-        }
         @keyframes companion-cursor { 0%,100% { opacity:.85; } 50% { opacity:.1; } }
         @keyframes companion-thinking-dot {
           0%,80%,100% { opacity:.25; transform:translateY(0); }
@@ -2214,7 +2209,6 @@ const CompanionHome: React.FC = () => {
             value={staticPortraitValue}
             characterName={character.name}
             spriteConfig={character.spriteConfig}
-            expressionKey={staticExpressionKey}
             touchEnabled={!editing && !touchSettingsOpen && !wardrobeOpen}
             onAvatarTouch={hit => { void respondToTouch(hit); }}
           />

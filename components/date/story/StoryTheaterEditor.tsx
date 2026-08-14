@@ -58,7 +58,7 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
     const tokenPreview = useMemo(() => {
         const actorText = [resolvedMask.name, resolvedMask.description, resolvedMask.coreInstruction, resolvedMask.worldview, ...actors.map(char => [char.name, char.systemPrompt, char.worldview, draft.carryCharacterMemory ? JSON.stringify(char.memories || []) : ''].join('\n'))].join('\n');
         const bookText = books.filter(book => draft.selectedWorldbookIds.includes(book.id)).map(book => book.content).join('\n');
-        const presetText = effectivePreset ? effectivePreset.document.prompts.map(prompt => prompt.content).join('\n') : '';
+        const presetText = effectivePreset ? effectivePreset.document.prompts.filter(prompt => prompt.enabled).map(prompt => prompt.content).join('\n') : '';
         const archiveText = draft.archives.map(archive => archive.summary || '').join('\n');
         return { actor: estimateStoryTokens(actorText), book: estimateStoryTokens(bookText), preset: estimateStoryTokens(presetText), archive: estimateStoryTokens(archiveText) };
     }, [actors, books, draft, effectivePreset, resolvedMask]);
