@@ -23,6 +23,7 @@
 export const DEFAULT_PROXY_WORKER = 'https://sullymeow.ccwu.cc';
 
 const LS_KEY = 'sully_proxy_worker_url_v1';
+const SETTINGS_FOCUS_SESSION_KEY = 'sully_settings_focus_proxy_worker_v1';
 
 // 已死/弃用的历史公共实例域名。老用户 localStorage 里如果还存着这些，
 // 读出来时自动当成"用的是默认"，回落到 DEFAULT_PROXY_WORKER（与
@@ -102,6 +103,26 @@ const notifyProxyWorkerChanged = (): void => {
 
 /** 当前是否在用自定义（非默认）worker。用于设置页提示文案。 */
 export const isCustomProxyWorker = (): boolean => getProxyWorkerUrl() !== DEFAULT_PROXY_WORKER;
+
+/** 从公告等入口打开设置时，请设置页自动展开并定位到网络代理。 */
+export const requestProxyWorkerSettingsFocus = (): void => {
+  try {
+    sessionStorage.setItem(SETTINGS_FOCUS_SESSION_KEY, '1');
+  } catch {
+    /* sessionStorage 不可用时仍可正常打开设置，只是不自动定位。 */
+  }
+};
+
+/** 一次性读取定位请求，避免用户以后每次打开设置都被拉到页面底部。 */
+export const consumeProxyWorkerSettingsFocus = (): boolean => {
+  try {
+    const requested = sessionStorage.getItem(SETTINGS_FOCUS_SESSION_KEY) === '1';
+    if (requested) sessionStorage.removeItem(SETTINGS_FOCUS_SESSION_KEY);
+    return requested;
+  } catch {
+    return false;
+  }
+};
 
 /**
  * 把指向已死历史实例的 url 改写到当前生效的 worker（保留路径和 query）；

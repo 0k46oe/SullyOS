@@ -43,17 +43,59 @@ describe('CallApp runtime references', () => {
     expect(source.match(/runCallMemoryPalaceHook\(selectedChar\)/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
   });
 
-  it('waits for an explicit user send before requesting a call reply', () => {
+  it('restores optional character initiative without changing explicit user sends', () => {
     const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
+    const preferenceSource = readFileSync(path.resolve(__dirname, './callPreferences.ts'), 'utf8');
+    const preferenceSheetSource = readFileSync(path.resolve(__dirname, '../components/call/CallPreferencesSheet.tsx'), 'utf8');
 
     expect(source).toContain("onFinal: (t) => setDraftInput(t)");
     expect(source).toContain("await requestAssistantReply(input, userDbId, pendingTouchesForTurn, true, userCameraSnapshotForTurn)");
     expect(source).toContain("{sendingBusy ? '…' : '发送'}");
     expect(source).toMatch(/const beginSelectedCall[\s\S]*?setViewMode\('in-call'\);\s+setCallStartedAt\(Date\.now\(\)\);\s+setCallState\('listening'\);/);
-    expect(source).not.toContain('fireIdleNudge');
-    expect(source).not.toContain('idleNudgeCountRef');
-    expect(source).not.toContain('电话刚接通。你先开口');
-    expect(source).not.toContain('const silenceMs =');
+    expect(source).toContain('fireIdleNudge');
+    expect(source).toContain('idleNudgeCountRef');
+    expect(source).toContain('电话刚接通。你先开口');
+    expect(source).toContain('callPreferences.characterInitiative');
+    expect(preferenceSource).toContain('characterInitiative: true');
+    expect(preferenceSheetSource).toContain('谁先开口');
+    expect(preferenceSheetSource).toContain('对方先说');
+    expect(preferenceSheetSource).toContain('我先说');
+  });
+
+  it('keeps call autoplay separate from ChatApp and defers TTS when it is disabled', () => {
+    const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
+    const preferenceSource = readFileSync(path.resolve(__dirname, './callPreferences.ts'), 'utf8');
+    const preferenceSheetSource = readFileSync(path.resolve(__dirname, '../components/call/CallPreferencesSheet.tsx'), 'utf8');
+
+    expect(preferenceSource).toContain('voiceAutoPlay: true');
+    expect(source).toContain('primeCallAudioFromGesture();');
+    expect(source).toContain('SILENT_CALL_AUDIO_DATA_URL');
+    expect(source).toContain('if (callPreferences.voiceAutoPlay)');
+    expect(source).toContain('if (!callPreferences.voiceAutoPlay || !canSpeakVoice()) return');
+    expect(source).toMatch(/if \(!callPreferences\.voiceAutoPlay\) \{\s+setCallState\('listening'\);\s+return;/);
+    expect(source).toContain('const handlePlayBubbleAudio = async (bubble: CallBubble) =>');
+    expect(source).toContain("trackEvent('按需生成并播放通话语音')");
+    expect(source).toContain('shouldKeepNativeCallAudio');
+    expect(source).not.toContain('<audio');
+    expect(preferenceSheetSource).toContain('不改变聊天页的语音设置');
+    expect(preferenceSheetSource).toContain('关掉后，点“播放语音”时才会生成并播放');
+  });
+
+  it('announces the call update once and spotlights the lower-left preferences entry', () => {
+    const source = readFileSync(path.resolve(__dirname, '../apps/CallApp.tsx'), 'utf8');
+    const announcementSource = readFileSync(path.resolve(__dirname, '../components/call/CallUpdateAnnouncement.tsx'), 'utf8');
+    const preferenceSource = readFileSync(path.resolve(__dirname, './callPreferences.ts'), 'utf8');
+
+    expect(source).toContain('useState(shouldShowCallUpdateAnnouncement)');
+    expect(source).toContain('markCallUpdateAnnouncementSeen()');
+    expect(source).toContain('data-testid="call-preferences-entry"');
+    expect(preferenceSource).toContain("CALL_UPDATE_ANNOUNCEMENT_KEY = 'sully-call-update-audio-2026-08-v1'");
+    expect(announcementSource).toContain('data-testid="call-update-announcement"');
+    expect(announcementSource).toContain('data-testid="call-settings-spotlight"');
+    expect(announcementSource).toContain('通话有些调整');
+    expect(announcementSource).toContain('可以设置谁先开口');
+    expect(announcementSource).toContain('关掉后不会提前生成语音');
+    expect(announcementSource).toContain('修了 iPhone 没声音的问题');
   });
 
   it('offers game-like video layouts and a collapsible immersive subtitle', () => {
@@ -66,6 +108,8 @@ describe('CallApp runtime references', () => {
     expect(source).toContain('data-testid="video-call-subtitle"');
     expect(source).toContain('data-testid={callMode === \'video\' ? \'video-call-compact-controls\' : undefined}');
     expect(source).toContain("videoCallLayout === 'stage' ? 'flex-1 min-h-0' : 'shrink-0'");
+    expect(source).toContain('[data-call-video-layout="stage"] .sully-video-stage-shell { max-height: none; }');
+    expect(source).toContain('body.ios-keyboard-open [data-call-video-layout="stage"] .sully-video-stage-shell { max-height: 0; }');
     expect(source).toContain("? 'min-h-0'");
     expect(source).not.toContain('min-h-[260px]');
     expect(source).toContain('relative z-10 flex h-full min-h-0 flex-col overflow-hidden');

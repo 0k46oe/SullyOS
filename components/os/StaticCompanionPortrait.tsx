@@ -11,7 +11,8 @@ interface StaticCompanionPortraitProps {
   value?: string;
   characterName: string;
   spriteConfig?: { scale: number; x: number; y: number };
-  expressionKey: string;
+  /** Accepted for callers that track expressions; the image must not be keyed/remounted by it. */
+  expressionKey?: string;
   touchEnabled?: boolean;
   onAvatarTouch?: (hit: AvatarTouchHit) => void;
   surfaceLabel?: string;
@@ -22,7 +23,6 @@ const StaticCompanionPortrait: React.FC<StaticCompanionPortraitProps> = ({
   value,
   characterName,
   spriteConfig,
-  expressionKey,
   touchEnabled = false,
   onAvatarTouch,
   surfaceLabel = '桌面形象',
@@ -50,7 +50,6 @@ const StaticCompanionPortrait: React.FC<StaticCompanionPortraitProps> = ({
   return (
     <div className="pointer-events-none absolute inset-0 flex items-end justify-center overflow-hidden px-[4%] pb-[2%]" data-testid={testId}>
       <img
-        key={`${value}-${expressionKey}`}
         src={imageUrl}
         alt={`${characterName}的${surfaceLabel}`}
         draggable={false}
@@ -59,7 +58,6 @@ const StaticCompanionPortrait: React.FC<StaticCompanionPortraitProps> = ({
           transform: `translate(${offsetX}%, ${offsetY}%) scale(${scale})`,
           transformOrigin: 'bottom center',
           touchAction: 'none',
-          animation: 'companion-static-expression-in 220ms ease-out both',
         }}
         onPointerDown={event => {
           if (!touchEnabled || !onAvatarTouch) return;

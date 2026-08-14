@@ -3,7 +3,7 @@ import React, { createContext, useContext, useEffect, useState, useRef, useCallb
 import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, CharacterGroup, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, CloudBackupConfig, CloudBackupFile } from '../types';
 import { DB } from '../utils/db';
 import type { AvatarTouchRecord } from '../utils/avatarTouch';
-import { modelRejectsSamplingParams, stripSamplingParams } from '../utils/samplingParamCompat';
+import { clampClaudeTemperature, modelRejectsSamplingParams, stripSamplingParams } from '../utils/samplingParamCompat';
 import { extractImagesInPlace, deepCloneForExport } from '../utils/backupExport';
 import { isBlobRef, getBlobForRef, migrateDataUrlToRef, migrateAppearancePresetBlobRefs, resolveBlobRefsDeep, BLOBREF_PREFIX, deleteBlobRefIfUnreferenced } from '../utils/blobRef';
 import { initPwaIcon, clearPwaIcon } from '../utils/appIcon';
@@ -1080,6 +1080,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   try {
                       const parsed = JSON.parse(rawBody);
                       let body = rawBody;
+                      if (clampClaudeTemperature(parsed)) {
+                          body = JSON.stringify(parsed);
+                      }
                       if (modelRejectsSamplingParams(parsed?.model) && stripSamplingParams(parsed)) {
                           body = JSON.stringify(parsed);
                       }

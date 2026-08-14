@@ -3890,6 +3890,7 @@ export interface CloudBackupConfig {
     githubOwner?: string;
     githubRepo?: string;
     githubUseProxy?: boolean;   // route through Cloudflare Worker (for GFW)
+    githubProxyConsentVersion?: number; // must be 1: user explicitly accepted proxy transit after the safety change
 
     lastBackupTime?: number;    // timestamp
     lastBackupSize?: number;    // bytes
@@ -4007,6 +4008,7 @@ export interface XhsFreeRoamSession {
 
 export interface XhsMcpConfig {
     enabled: boolean;
+    mode?: 'local' | 'lite'; // 部署模式；不要再用 /api 路径推断（本地 Skills 与 Lite 都使用 /api）
     serverUrl: string;  // MCP: "http://localhost:18060/mcp" | Skills: "http://localhost:18061/api" | Lite Worker: "https://xhs-lite.<acct>.workers.dev/api"
     cookie?: string;    // Lite 模式：登录后的小红书完整 cookie（含 a1 / web_session）。仅 lite Worker 用。
     platform?: 'xhs' | 'rednote'; // Lite 自动识别出的国内小红书 / 全球 RedNote 后端

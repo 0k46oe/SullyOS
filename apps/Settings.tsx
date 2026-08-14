@@ -11,9 +11,10 @@ import { bucketRetryCount, isAnalyticsConfigured, isAnalyticsEnabled, setAnalyti
 import Modal from '../components/os/Modal';
 import { NotionManager, FeishuManager, RealtimeContextManager, fetchOwmWeather, fetchOpenMeteoWeather } from '../utils/realtimeContext';
 import { XhsMcpClient } from '../utils/xhsMcpClient';
+import { resolveXhsDeploymentMode } from '../utils/xhsMcpConfig';
 import { getMcdToken, setMcdToken as saveMcdToken, isMcdEnabled, setMcdEnabled as saveMcdEnabled, testMcdConnection, resetMcdSession } from '../utils/mcdMcpClient';
 import { getLuckinToken, setLuckinToken as saveLuckinToken, isLuckinEnabled, setLuckinEnabled as saveLuckinEnabled, testLuckinConnection, resetLuckinSession } from '../utils/luckinMcpClient';
-import { getProxyWorkerUrl, setProxyWorkerUrl, DEFAULT_PROXY_WORKER } from '../utils/proxyWorker';
+import { consumeProxyWorkerSettingsFocus, getProxyWorkerUrl, setProxyWorkerUrl, DEFAULT_PROXY_WORKER } from '../utils/proxyWorker';
 import { VOICE_ACTING_GUIDE } from '../utils/minimaxTts';
 import { FISH_VOICE_ACTING_GUIDE } from '../utils/fishAudioTts';
 import { DATE_VOICE_GUIDE } from '../utils/datePrompts';
@@ -110,6 +111,7 @@ const DiagRow: React.FC<{ label: string; value: string; bad?: boolean }> = ({ la
 // 用户版 MCP 教程（自包含，写给用户和他们的 AI 助手看的）。静态部署的站点
 // 看不到仓库内文档，所以帮助弹窗只能跳 GitHub 的 blob 页。
 const MCP_USER_GUIDE_URL = 'https://github.com/qegj567-cloud/SullyOS/blob/master/docs/mcp-user-guide.md';
+const PROXY_WORKER_SOURCE_URL = 'https://github.com/qegj567-cloud/SullyOS/blob/master/worker/index.js';
 
 const formatBackupBytes = (bytes: number): string => {
     if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
@@ -435,7 +437,7 @@ const McpServersCard: React.FC<{
                 </div>
             ))}
             <p className="text-[10px] text-violet-700/60 leading-relaxed bg-violet-100/40 rounded-lg px-2 py-1.5">
-                ⚠️ 开启 MCP 工具后聊天会走本地请求（跳过 Instant Push），且本轮思考链会让位给工具调用；涉及真实副作用的工具（发布/下单/删除）角色会先跟你确认。Token、自定义请求头与配置<b>只存本机、不上传</b>；走代理时请求会经过你自己配置的代理。
+                开启 MCP 工具后，聊天会改用本地工具请求（跳过 Instant Push），本轮思考链会让位给工具调用；发布、下单、删除等操作仍会先征得你的确认。Token、自定义请求头与配置保存在本机；若配置了代理，请求会按你的设置经该代理转发。
             </p>
         </div>
     );
@@ -533,18 +535,30 @@ const Settings: React.FC = () => {
   // GitHub local state
   const [ghToken, setGhToken] = useState(cloudBackupConfig.githubToken || '');
   const [ghRepo, setGhRepo] = useState(cloudBackupConfig.githubRepo || 'sully-backup');
-  // Default proxy ON — most users in mainland China can't reach github.com
-  // directly. Only flip to false if the user has explicitly opted out before.
-  const [ghUseProxy, setGhUseProxy] = useState(cloudBackupConfig.githubUseProxy !== false);
+  // 安全默认：旧版曾把代理默认打开。现在旧配置一律视为未重新确认，只有在
+  // 新版说明下手动开启过（consentVersion=1）才保持勾选。
+  const [ghUseProxy, setGhUseProxy] = useState(
+      cloudBackupConfig.githubUseProxy === true && cloudBackupConfig.githubProxyConsentVersion === 1
+  );
   const [ghShowAdvanced, setGhShowAdvanced] = useState(false);
   const [ghTesting, setGhTesting] = useState(false);
   const [ghTestResult, setGhTestResult] = useState<string>('');
 
   // 主代理 Worker 地址（联网搜索 / 备份代理 / Notion / 飞书 / MCD·瑞幸 MCP / 网页抓取 / 出图都走它）。
   // 入口刻意低调：默认折叠，普通用户不需要碰，开箱即用。
+  const [focusProxyConfigOnMount] = useState(() => consumeProxyWorkerSettingsFocus());
   const [proxyWorkerInput, setProxyWorkerInput] = useState(getProxyWorkerUrl());
-  const [showProxyConfig, setShowProxyConfig] = useState(false);
+  const [showProxyConfig, setShowProxyConfig] = useState(focusProxyConfigOnMount);
+  const proxyConfigSectionRef = useRef<HTMLElement | null>(null);
   const [analyticsEnabled, setAnalyticsEnabledState] = useState(() => isAnalyticsEnabled());
+
+  useEffect(() => {
+      if (!focusProxyConfigOnMount || !showProxyConfig) return;
+      const frame = window.requestAnimationFrame(() => {
+          proxyConfigSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+      return () => window.cancelAnimationFrame(frame);
+  }, [focusProxyConfigOnMount, showProxyConfig]);
 
   // 实时感知配置的本地状态
   const [rtWeatherEnabled, setRtWeatherEnabled] = useState(realtimeConfig.weatherEnabled);
@@ -566,7 +580,7 @@ const Settings: React.FC = () => {
   // lite 模式走中心配置的主代理 worker（/api 是 worker/index.js 里的 XHSLite 桥）。
   // 用户改了「自定义网络代理」，lite 模式自动跟着切到新 worker。
   const XHS_LITE_URL = `${getProxyWorkerUrl()}/api`;
-  const XHS_RISK_TEXT = '⚠️ 风险：本功能基于网页爬虫技术调用小红书，账号有被风控的概率。建议①用小号；②尽量别让角色主动发帖；③发出的笔记可能被屏蔽。';
+  const XHS_RISK_TEXT = '使用提示：Lite 通过网页接口连接小红书，平台规则变化时可能出现登录失效或功能暂时不可用。建议先用小号体验，并在发布或互动前确认内容。';
   const XHS_COOKIE_GUIDE = [
     '【获取小红书 cookie 教程】',
     '1. 用电脑浏览器(Chrome/Edge)登录实际分配给你的站点：www.xiaohongshu.com 或 www.rednote.com',
@@ -580,9 +594,9 @@ const Settings: React.FC = () => {
     '注意：别用 Console 的 document.cookie，拿不到 web_session(httpOnly)。cookie 数天~数周会过期，失效重复制即可。',
   ].join('\n');
   const _xhsCfgUrl = realtimeConfig.xhsMcpConfig?.serverUrl || '';
-  // local MCP 地址不含 /api；lite bridge 含 /api。按这个判模式（与 xhsMcpClient.detectMode 一致），
-  // 比之前的 `!== XHS_LITE_URL` 更稳——换 worker 域名后老的 lite 配置不会被误判成 local。
-  const _xhsIsLocal = !!_xhsCfgUrl && !_xhsCfgUrl.includes('/api');
+  // 部署模式与协议分开保存：本地 Skills 和云端 Lite 都是 /api，不能再凭路径判断。
+  const _xhsStoredMode = resolveXhsDeploymentMode(realtimeConfig.xhsMcpConfig, XHS_LITE_URL);
+  const _xhsIsLocal = _xhsStoredMode === 'local';
   const [rtXhsMcpEnabled, setRtXhsMcpEnabled] = useState(realtimeConfig.xhsMcpConfig?.enabled || false);
   const [rtXhsMode, setRtXhsMode] = useState<'lite' | 'local'>(_xhsIsLocal ? 'local' : 'lite');
   const [rtXhsLocalUrl, setRtXhsLocalUrl] = useState(_xhsIsLocal ? _xhsCfgUrl : 'http://localhost:18060/mcp');
@@ -1505,6 +1519,7 @@ const Settings: React.FC = () => {
               githubToken: ghToken.trim(),
               githubRepo: ghRepo.trim() || 'sully-backup',
               githubUseProxy: ghUseProxy,
+              githubProxyConsentVersion: ghUseProxy ? 1 : undefined,
           });
           setGhTestResult(result.ok ? `✓ ${result.message}` : `✗ ${result.message}`);
           // 失败时只报卡在哪一步：token 校验没过 → 没有 login，仓库准备没过 → 有 login
@@ -1519,6 +1534,7 @@ const Settings: React.FC = () => {
                   githubOwner: result.login,
                   githubRepo: ghRepo.trim() || 'sully-backup',
                   githubUseProxy: ghUseProxy,
+                  githubProxyConsentVersion: ghUseProxy ? 1 : undefined,
               });
           }
       } catch (e: any) {
@@ -1586,6 +1602,7 @@ const Settings: React.FC = () => {
           xhsEnabled: rtXhsEnabled,
           xhsMcpConfig: {
               enabled: rtXhsMcpEnabled,
+              mode: rtXhsMode,
               serverUrl: rtXhsMode === 'lite' ? XHS_LITE_URL : rtXhsLocalUrl,
               cookie: rtXhsMode === 'lite' ? (rtXhsCookie.trim() || undefined) : undefined,
               platform: rtXhsMode === 'lite' ? rtXhsPlatform : undefined,
@@ -1693,6 +1710,7 @@ const Settings: React.FC = () => {
               const xhsUpdates = {
                   xhsMcpConfig: {
                       enabled: rtXhsMcpEnabled,
+                      mode: rtXhsMode,
                       serverUrl: urlToUse,
                       cookie: cookieToUse,
                       platform: result.platform,
@@ -2118,7 +2136,8 @@ const Settings: React.FC = () => {
             )}
 
             <p className="text-[10px] text-slate-400 px-1 mt-3 leading-relaxed">
-                数据存储在你自己的账号下，我们不保存任何凭据到服务器。
+                备份始终存放在你自己的 WebDAV 或 GitHub 账号中，项目不建立用户备份数据库。
+                网页 WebDAV 因跨域限制需要中转；GitHub 默认直连，网络受限时可自行开启中转。
             </p>
         </SettingsSection>
 
@@ -2578,7 +2597,7 @@ const Settings: React.FC = () => {
                 <div className="group">
                     <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">鱼声 Fish Audio Key</label>
                     <input type="password" name="fish-api-key" autoComplete="new-password" spellCheck={false} value={localFishKey} onChange={(e) => setLocalFishKey(e.target.value)} placeholder="Fish Audio API Key（fish.audio 控制台签发）" className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
-                    <p className="text-[11px] text-slate-400 mt-1 pl-1">在 <a href="https://fish.audio/zh-CN/developers/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline font-semibold">fish.audio 开发者页</a> 拿 Key（<span className="text-amber-600 font-medium">需梯子</span>）。角色音色在「角色 → 语音」里填 reference_id。</p>
+                    <p className="text-[11px] text-slate-400 mt-1 pl-1">在 <a href="https://fish.audio/zh-CN/developers/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline font-semibold">fish.audio 开发者页</a> 拿 Key（<span className="text-amber-600 font-medium">需梯子</span>）。角色音色在「角色 → 语音」里填 reference_id。静态网页环境会在合成时通过网络 Worker 转发 Key 与待合成文字，项目不主动留存。</p>
 
                     <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-3 mb-1.5 block pl-1">鱼声模型</label>
                     <select
@@ -2718,7 +2737,7 @@ const Settings: React.FC = () => {
                         </button>
                     </div>
                     <input type="password" name="ace-step-api-token" autoComplete="new-password" spellCheck={false} value={localAceStepKey} onChange={(e) => setLocalAceStepKey(e.target.value)} placeholder="r8_xxx（写歌 App 调 ACE-Step 出整首歌用）" className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
-                    <p className="text-[11px] text-slate-400 mt-1 pl-1">填了之后写歌 App 的歌词页能一键调 ACE-Step 出真人声整首歌（约 ¥0.1/首，走 sfworker 代理免梯子）。</p>
+                    <p className="text-[11px] text-slate-400 mt-1 pl-1">填了之后，写歌 App 的歌词页可以一键调用 ACE-Step 生成真人声整首歌（约 ¥0.1/首）。生成时 Token、歌词与风格参数会通过网络 Worker 转发给 Replicate，项目不主动留存。</p>
 
                     {showAceStepGuide && (
                         <div className="mt-3 rounded-2xl overflow-hidden border border-rose-200/60 bg-gradient-to-br from-rose-50 via-orange-50 to-amber-50 shadow-sm animate-slide-down">
@@ -3159,16 +3178,25 @@ const Settings: React.FC = () => {
                 · 自定义网络代理 ·
             </button>
         ) : (
-            <section className="bg-white/60 rounded-2xl p-4 border border-slate-100">
+            <section ref={proxyConfigSectionRef} className="scroll-mt-4 bg-white/60 rounded-2xl p-4 border border-slate-100">
                 <div className="flex items-center justify-between mb-2">
                     <h2 className="text-xs font-semibold text-slate-500">自定义网络代理 (Worker)</h2>
                     <button onClick={() => { setShowProxyConfig(false); setProxyWorkerInput(getProxyWorkerUrl()); }} className="text-[10px] text-slate-400">收起</button>
                 </div>
 
-                <div className="text-[10px] text-amber-600 bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-2 mb-3 leading-relaxed">
-                    ⚠️ <b>除非你清楚自己在做什么，否则不用动这里。</b>默认配置开箱即用，
-                    所有功能（联网搜索 / 备份代理 / Notion / 飞书 / 点单 / 网页抓取 / 出图）都正常。
-                    只有在你自己部署了 <b>worker/index.js</b>、想换成自己的实例时才需要填。
+                <div className="text-[10px] text-slate-500 bg-slate-50 border border-slate-100 rounded-lg px-2.5 py-2 mb-3 leading-relaxed">
+                    <b>一般无需修改这里。</b>默认地址负责静态网页环境中需要跨域转发的联网功能；
+                    GitHub 备份仍默认直连，只有你在备份设置中主动开启中转后才会使用 Worker。
+                    如果你部署了自己的 <b>worker/index.js</b>，可以在这里换成自己的实例。
+                </div>
+
+                <div className="mb-3 rounded-xl border border-sky-100 bg-sky-50/80 px-3 py-2.5 text-[10px] leading-relaxed text-sky-900">
+                    <p className="mb-1.5 font-bold">部署自己的 Worker</p>
+                    <ol className="space-y-1">
+                        <li><b>1.</b> 在 Cloudflare 控制台进入 Workers &amp; Pages，新建一个 Worker。</li>
+                        <li><b>2.</b> 打开并复制完整的 <a href={PROXY_WORKER_SOURCE_URL} target="_blank" rel="noreferrer" className="font-bold underline underline-offset-2">worker/index.js 源码</a>，替换编辑器里的默认代码，然后部署。</li>
+                        <li><b>3.</b> 复制部署得到的 <b>https://xxx.workers.dev</b> 地址，粘贴到下方并保存。</li>
+                    </ol>
                 </div>
 
                 <input
@@ -3409,7 +3437,8 @@ const Settings: React.FC = () => {
                       className="w-full px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-xs text-slate-700 font-mono focus:border-slate-500 focus:ring-1 focus:ring-slate-300 outline-none"
                   />
                   <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">
-                      Token 只存在你本机，永远不会发到我们服务器。
+                      Token 保存在本机配置中。GitHub 默认直连；仅当你手动开启下方中转时，
+                      Token 会随 GitHub 请求经过所选 Worker，项目不会主动留存。
                   </p>
               </div>
 
@@ -3469,10 +3498,11 @@ const Settings: React.FC = () => {
                               onChange={(e) => setGhUseProxy(e.target.checked)}
                               className="rounded"
                           />
-                          <span>走 Cloudflare 代理（默认开，国内必需；能直连 GitHub 的可关掉提速）</span>
+                          <span>使用 Cloudflare 中转（默认关闭 · 直连失败时可开启）</span>
                       </label>
                       <p className="text-[10px] text-slate-400 leading-relaxed pl-5">
-                          大于 80MB 的备份会自动切成多片上传，所以勾着也能传 1GB+ 的完整备份，恢复时自动拼回来。能直连 github.com 的可以关掉提速。
+                          开启后，GitHub 请求会由所选 Worker 转发，备份仍存放在你的 GitHub 私有仓库；
+                          项目不建立备份数据库，也不主动留存 Token 或备份文件。大于 80MB 时仍会自动分片。
                       </p>
                   </div>
               )}
@@ -3829,9 +3859,10 @@ const Settings: React.FC = () => {
                               </p>
                           </div>
                           <p className="text-[10px] text-orange-500/70 leading-relaxed">
-                              1. 在 <a href="https://www.notion.so/my-integrations" target="_blank" className="underline">Notion开发者</a> 创建Integration（新版 Token 以 ntn_ 开头，老版以 secret_ 开头，都能用）<br/>
-                              2. 创建一个日记数据库，添加"Name"(标题)和"Date"(日期)属性<br/>
-                              3. 在数据库右上角菜单中 Connect 你的 Integration
+                               1. 在 <a href="https://www.notion.so/my-integrations" target="_blank" className="underline">Notion开发者</a> 创建Integration（新版 Token 以 ntn_ 开头，老版以 secret_ 开头，都能用）<br/>
+                               2. 创建一个日记数据库，添加"Name"(标题)和"Date"(日期)属性<br/>
+                               3. 在数据库右上角菜单中 Connect 你的 Integration<br/>
+                               Token 保存在本机配置中；启用后，所选数据库的请求会由网络 Worker 转发，项目不主动留存日记内容。
                           </p>
                       </div>
                   )}
@@ -3873,10 +3904,11 @@ const Settings: React.FC = () => {
                           </div>
                           <button onClick={testFeishuApi} className="w-full py-2 bg-indigo-100 text-indigo-600 text-xs font-bold rounded-xl active:scale-95 transition-transform">测试飞书连接</button>
                           <p className="text-[10px] text-indigo-500/70 leading-relaxed">
-                              1. 在 <a href="https://open.feishu.cn/app" target="_blank" className="underline">飞书开放平台</a> 创建企业自建应用，获取 App ID 和 Secret<br/>
-                              2. 在应用权限中添加「多维表格」相关权限<br/>
-                              3. 创建一个多维表格，添加字段: 标题(文本)、内容(文本)、日期(日期)、心情(文本)、角色(文本)<br/>
-                              4. 从多维表格 URL 中获取 App Token 和 Table ID
+                               1. 在 <a href="https://open.feishu.cn/app" target="_blank" className="underline">飞书开放平台</a> 创建企业自建应用，获取 App ID 和 Secret<br/>
+                               2. 在应用权限中添加「多维表格」相关权限<br/>
+                               3. 创建一个多维表格，添加字段: 标题(文本)、内容(文本)、日期(日期)、心情(文本)、角色(文本)<br/>
+                               4. 从多维表格 URL 中获取 App Token 和 Table ID<br/>
+                               App Secret 保存在本机配置中；启用后，多维表格请求会由网络 Worker 转发，项目不主动留存表格内容。
                           </p>
                       </div>
                   )}
@@ -3888,7 +3920,7 @@ const Settings: React.FC = () => {
                       <div className="flex items-center gap-2">
                           <Book size={20} weight="fill" />
                           <span className="text-sm font-bold text-red-700">小红书 · 本地</span>
-                          <span className="text-[9px] bg-red-100 text-red-500 px-1.5 py-0.5 rounded-full">MCP / Skills</span>
+                          <span className="text-[9px] bg-red-100 text-red-500 px-1.5 py-0.5 rounded-full">MCP 兼容 / Skills</span>
                       </div>
                       <label className="relative inline-flex items-center cursor-pointer">
                           <input type="checkbox" checked={rtXhsMcpEnabled && rtXhsMode === 'local'} onChange={e => { if (e.target.checked) { setRtXhsMcpEnabled(true); setRtXhsEnabled(true); setRtXhsMode('local'); } else { setRtXhsMcpEnabled(false); setRtXhsEnabled(false); } }} className="sr-only peer" />
@@ -3896,7 +3928,7 @@ const Settings: React.FC = () => {
                       </label>
                   </div>
                   <p className="text-[10px] text-red-500/70 leading-relaxed">
-                      本地后端：需在电脑上跑 xiaohongshu-mcp 或 xhs-bridge。想免电脑请用下面的「小红书 Lite」。
+                      本地模式继续可用：xiaohongshu-mcp 走 MCP 协议，xhs-bridge / Skills 走本地 /api。MCP 保留兼容，但不再承诺随其上游版本持续适配；新配置建议使用下方持续维护的 Lite。
                   </p>
                   {rtXhsMcpEnabled && rtXhsMode === 'local' && (
                       <div className="space-y-2">
@@ -3930,7 +3962,7 @@ const Settings: React.FC = () => {
                       <div className="flex items-center gap-2">
                           <Book size={20} weight="fill" />
                           <span className="text-sm font-bold text-rose-700">小红书 Lite</span>
-                          <span className="text-[9px] bg-rose-100 text-rose-500 px-1.5 py-0.5 rounded-full">云端 · 推荐</span>
+                          <span className="text-[9px] bg-rose-100 text-rose-500 px-1.5 py-0.5 rounded-full">持续维护</span>
                       </div>
                       <label className="relative inline-flex items-center cursor-pointer">
                           <input type="checkbox" checked={rtXhsMcpEnabled && rtXhsMode === 'lite'} onChange={e => { if (e.target.checked) { if (!window.confirm(XHS_RISK_TEXT + '\n\n确定要开启吗？')) return; setRtXhsMcpEnabled(true); setRtXhsEnabled(true); setRtXhsMode('lite'); } else { setRtXhsMcpEnabled(false); setRtXhsEnabled(false); } }} className="sr-only peer" />
@@ -3968,7 +4000,7 @@ const Settings: React.FC = () => {
                               )}
                           </div>
                           <p className="text-[10px] text-slate-400 leading-relaxed bg-slate-100/60 rounded-lg px-2 py-1.5">
-                              🔒 隐私：cookie 经 HTTPS 加密发到云端 Worker 仅用于请求签名，服务器<b>不保存、不记录</b>，运营方看不到。正常使用是安全的；但凡经第三方云服务都存在理论风险，介意可自行评估。
+                              使用说明：Cookie 保存在本机配置中；使用 Lite 时会随请求发送到网络 Worker，用于登录校验和接口签名，当前开源 Worker 不主动留存。建议使用小号，并在退出账号或 Cookie 失效后及时更新。
                           </p>
                       </div>
                   )}
@@ -4006,7 +4038,7 @@ const Settings: React.FC = () => {
                           )}
                           <p className="text-[10px] text-yellow-700/70 leading-relaxed">
                               1. 访问 <a href="https://open.mcd.cn/mcp" target="_blank" className="underline">open.mcd.cn/mcp</a> 用麦当劳账号登录申请 Token<br/>
-                              2. 粘贴到上面的输入框（仅存本地，<b>不会上传服务器</b>）<br/>
+                              2. Token 保存在本机配置中；使用点单功能时会随 MCP 请求由网络 Worker 转发，项目不主动留存<br/>
                               3. 下单类操作涉及真实支付，角色会先复述清单等你确认再下单<br/>
                               4. 仅中国大陆 (不含港澳台)
                           </p>
@@ -4046,7 +4078,7 @@ const Settings: React.FC = () => {
                           )}
                           <p className="text-[10px] text-blue-700/70 leading-relaxed">
                               1. 访问 <a href="https://open.lkcoffee.com" target="_blank" className="underline">open.lkcoffee.com</a> 用瑞幸账号登录，复制 Token（有效期约 1 个月）<br/>
-                              2. 粘贴到上面的输入框（仅存本地，<b>不会上传服务器</b>）<br/>
+                              2. Token 保存在本机配置中；使用点单功能时会随 MCP 请求由网络 Worker 转发，项目不主动留存<br/>
                               3. 下单类操作涉及真实支付，角色会先复述清单等你确认再下单<br/>
                               4. 上游需经 Worker 代理 (/mcp/luckin)，请确保已部署最新 worker
                           </p>
