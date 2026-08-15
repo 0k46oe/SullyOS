@@ -90,18 +90,31 @@ export const buildInstantTimelyBlock = (args: {
 // ─── 通知策略 ───
 
 /**
- * 前台可见时别弹系统通知（SW 的 shouldRenderNotification 认这个值）。
+ * 推了就一定弹（SW 的 shouldRenderNotification 认这个值）。
  *
- * 用户正盯着聊天窗口等这条回复，锁屏横幅在这时候弹出来纯属打扰——页面自己会把消息
- * 上屏。窗口不可见（切后台、锁屏、关了标签页）时照弹，不然「发完就自由了」这件事
- * 就没人来叫他。判定在 SW 那边按真实的窗口可见性做，worker 只负责表态。
- *
- * 只给即时对话用：主动消息是「到点找人说话」，前台可见时更该弹。
+ * 订阅是按 `userVisibleOnly: true` 建的，等于跟浏览器约好每条 push 都给用户一次可见
+ * 反馈；收了 push 却不弹是违约，Firefox 按配额把订阅退掉，iOS 过了新订阅那几天宽限期
+ * 一条就吊销，而且两边都是静默发生的——服务端只看得到后续推送返回 410。所以口径只有
+ * 两档：要推就一定弹，不想弹就压根别推（内容落服务端收件箱，等客户端上线补拉）。
+ * 即时对话是用户按下发送、正盯着「正在输入…」等的那一轮，必须推，于是选「一定弹」。
  */
-const NOTIFICATION_WHEN_HIDDEN = 'when-hidden';
+const NOTIFICATION_ALWAYS = 'always';
 
 /**
- * 给即时对话的推送载荷表态通知策略。
+ * 通知栏折叠用的 tag：同一个角色永远只留最新那一条。
+ *
+ * 一次回复常常分成好几段推，逐条弹会把通知栏刷满；同 tag 的通知互相覆盖，看到的就只有
+ * 最新一条。即时对话的失败通知也用这个 tag（见 index.ts 的 sendInstantErrorPush）：
+ * 同一个角色的最新状态本来就只该留一条，成功的回复把之前那条「没能生成」盖掉正合适。
+ */
+export const instantNotificationTag = (charId: string) => `amsg-instant-${charId}`;
+
+/**
+ * 给即时对话的推送载荷表态通知策略：一定弹，但按角色折叠、不响铃不震动。
+ *
+ * 打扰不靠「不弹」来压，靠另外两个字段：`tag` 折叠成一条，`silent` 关掉响铃和震动。
+ * 用户正盯着窗口时页面照旧自绘上屏，通知只是安静地躺在通知中心里。只给即时对话用——
+ * 主动消息是「到点找人说话」，那条路要响铃叫人，既不折叠也不静音。
  *
  * 载荷本来就没有 notification 时不凭空造一个：SW 拿不到 title / body 只能弹一条空白
  * 横幅，而「没有 notification」这件事本身在 SW 那边有按 messageKind 的默认行为，
@@ -113,13 +126,26 @@ const NOTIFICATION_WHEN_HIDDEN = 'when-hidden';
  */
 export const applyInstantNotificationPolicy = (
   payload: Record<string, unknown>,
+  charId?: string | null,
 ): Record<string, unknown> => {
   const notification = payload.notification;
   const hasNotification = !!notification && typeof notification === 'object' && !Array.isArray(notification);
   if (!hasNotification) return payload;
+  const meta = payload.metadata;
+  const metaCharId = meta && typeof meta === 'object' && !Array.isArray(meta)
+    ? (meta as Record<string, unknown>).charId
+    : undefined;
+  const target = charId || (typeof metaCharId === 'string' ? metaCharId : '');
   return {
     ...payload,
-    notification: { ...(notification as Record<string, unknown>), show: NOTIFICATION_WHEN_HIDDEN },
+    notification: {
+      ...(notification as Record<string, unknown>),
+      show: NOTIFICATION_ALWAYS,
+      silent: true,
+      // 认不出是哪个角色时就不折叠：通知栏里多几条只是吵，两个角色共用一个 tag 会
+      // 互相顶掉，那是真的丢消息。
+      ...(target ? { tag: instantNotificationTag(target) } : {}),
+    },
   };
 };
 

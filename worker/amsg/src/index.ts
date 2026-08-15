@@ -142,6 +142,7 @@ import {
   applyInstantNotificationPolicy,
   buildInstantTimelyBlock,
   handleInstantChat,
+  instantNotificationTag,
   INSTANT_TOTAL_TIMEOUT_MS,
   isInstantChatTask,
   type InstantTickNamespace,
@@ -780,9 +781,11 @@ const instantErrorNotificationBody = (reason: string): string => {
  * handleDeliveryFailure 同源）、skip-push（行被当成功消费）、stale 跳过。还会重试的
  * 失败绝不发——「报错完回复又到了」这种误报比晚知道更伤（SSE↔push 双通道的老教训）。
  *
- * 通知打 `show: 'when-hidden'`：前台由页面监听 active-msg-error 当场收尾（落系统消息、
- * 熄灯），不弹横幅；后台弹「回复没能生成」。发不出去只 warn——客户端 60s 点名读
- * chat_fail 的兜底路径原样保留，这条 push 只是把感知从分钟级提到秒级。
+ * 通知打 `show: 'always'` + 按角色折叠 + 静音：这条是自己直发的 push，不经库的收件箱，
+ * 收了不弹就是跟浏览器违约一次（配额、吊销订阅，见 applyInstantNotificationPolicy），
+ * 所以推就一定弹。前台该收的尾照收——页面监听 active-msg-error 落系统消息、熄灯，
+ * 跟弹不弹横幅互不影响。发不出去只 warn——客户端 60s 点名读 chat_fail 的兜底路径原样
+ * 保留，这条 push 只是把感知从分钟级提到秒级。
  *
  * 订阅行是加密存的（encryptForStorage 的 iv:authTag:data 格式）；个别老部署可能存的是
  * 明文 JSON，解密失败时按明文再试一次，都不行才放弃。
@@ -831,7 +834,11 @@ const sendInstantErrorPush = async (args: {
       notification: {
         title: args.contactName ? `${args.contactName} 的回复没能生成` : '回复没能生成',
         body: instantErrorNotificationBody(args.reason),
-        show: 'when-hidden',
+        show: 'always',
+        silent: true,
+        // 跟这个角色的回复共用一个 tag：通知栏里只留最新状态，重发成功后那条回复
+        // 会把这条「没能生成」盖掉。失败本身在聊天流里有系统消息留痕，不靠横幅记账。
+        tag: instantNotificationTag(args.charId),
       },
     };
     await deps.webpush.sendNotification(subscription, JSON.stringify(payload));
@@ -2183,11 +2190,11 @@ export const amsgHooks = {
         payloads = budgeted;
       }
 
-      // 即时对话的通知策略：用户正盯着窗口等这条回复时不弹横幅（见
+      // 即时对话的通知策略：一定弹，但按角色折叠成一条、不响铃不震动（见
       // applyInstantNotificationPolicy）。收件兜底不在这里做——库自己会在每条推送
       // 发出去之前记进服务端账本，客户端按账本补收。
       if (stash.instant) {
-        payloads = payloads.map((payload) => applyInstantNotificationPolicy(payload));
+        payloads = payloads.map((payload) => applyInstantNotificationPolicy(payload, stash.charId));
       }
 
       return { ...decision, pushPayloads: payloads };

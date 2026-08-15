@@ -627,13 +627,27 @@ describe('buildInstantTimelyBlock', () => {
 });
 
 describe('applyInstantNotificationPolicy', () => {
-  // 用户正盯着聊天窗口等这条回复，锁屏横幅在这时候弹出来纯属打扰（页面自己会把消息上屏）；
-  // 窗口不可见时又必须弹，不然「发完就自由了」这件事没人来叫他。表态写在载荷里，
-  // 真正的判定由 SW 的 shouldRenderNotification 按窗口可见性做。
-  it('标 when-hidden：前台可见时 SW 不弹系统通知，不可见照弹', () => {
+  // 订阅是按 userVisibleOnly 建的：推了却不弹，Firefox 按配额退订、iOS 过了宽限期直接
+  // 吊销，两边都静默发生。所以即时对话这条必推的路只能标 always，打扰交给折叠 + 静音压。
+  // 回到 when-hidden（或任何「有时候不弹」的档）就是把订阅重新押上去，这条守着别退回去。
+  it('标 always + 按角色折叠 + 静音：推了就一定弹，不靠不弹来防打扰', () => {
     const push = applyInstantNotificationPolicy(
-      { message: 'hi', notification: { title: '来自 Nyah', body: 'hi' } });
-    expect(push.notification).toEqual({ title: '来自 Nyah', body: 'hi', show: 'when-hidden' });
+      { message: 'hi', notification: { title: '来自 Nyah', body: 'hi' } }, 'char-1');
+    expect(push.notification).toEqual({
+      title: '来自 Nyah', body: 'hi', show: 'always', silent: true, tag: 'amsg-instant-char-1',
+    });
+  });
+
+  it('没显式传 charId 就从 metadata 上认', () => {
+    const push = applyInstantNotificationPolicy(
+      { message: 'hi', metadata: { charId: 'char-2' }, notification: { title: 't' } });
+    expect((push.notification as any).tag).toBe('amsg-instant-char-2');
+  });
+
+  // 折叠是为了不刷屏，但两个角色共用一个 tag 会互相顶掉——那是真丢消息，宁可多几条。
+  it('认不出角色就不折叠（tag 留空，交给库按 messageId 兜底）', () => {
+    const push = applyInstantNotificationPolicy({ message: 'hi', notification: { title: 't' } });
+    expect(push.notification).toEqual({ title: 't', show: 'always', silent: true });
   });
 
   it('载荷本来没有 notification 就不凭空造一个（造出来只会弹一条空白横幅）', () => {

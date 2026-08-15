@@ -3534,13 +3534,17 @@ describe('即时对话的推送通知策略', () => {
     ...(instant ? { amsgInstantChat: true } : { amsgTaskInstruction: '想到什么说什么' }),
   });
 
-  it('即时对话的推送标 when-hidden', async () => {
+  // 推了就得弹（订阅按 userVisibleOnly 建的，不弹要被退订/吊销），打扰交给折叠 + 静音压。
+  it('即时对话的推送标 always + 折叠 + 静音', async () => {
     const store = makeStore(true);
     const { decision } = await runFire(store, { metadata: fireMeta(true), llmOutput: '在的。怎么啦？' });
     expect(decision.decision).toBe('finish');
     for (const push of decision.pushPayloads) {
-      expect((push.notification as any).show).toBe('when-hidden');
-      // 横幅文案还在：show 只是加一个字段，不是把 notification 换掉
+      expect((push.notification as any).show).toBe('always');
+      expect((push.notification as any).silent).toBe(true);
+      // 多段回复折叠成一条，靠的是同 tag 互相覆盖
+      expect((push.notification as any).tag).toBe(`amsg-instant-${CHAR_ID}`);
+      // 横幅文案还在：策略只是加几个字段，不是把 notification 换掉
       expect((push.notification as any).body).toBeTruthy();
     }
   });
@@ -4018,7 +4022,7 @@ describe('即时对话终态失败的直发 error push', () => {
 
   afterEach(() => configureInstantErrorPush(null));
 
-  it('重试打光（retry_count >= 3）的失败 → 直发 error push（when-hidden）', async () => {
+  it('重试打光（retry_count >= 3）的失败 → 直发 error push（always + 折叠 + 静音）', async () => {
     const { deps, sent } = makeErrorPushDeps();
     configureInstantErrorPush(deps as any);
 
@@ -4037,7 +4041,10 @@ describe('即时对话终态失败的直发 error push', () => {
     expect(payload.metadata.taskUuid).toBe(TASK_UUID);
     expect(payload.metadata.charId).toBe(CHAR_ID);
     expect(payload.metadata.reason).toContain('LLM 上游 502');
-    expect(payload.notification.show).toBe('when-hidden');
+    // 这条是绕过库自己直发的 push，收了不弹就是白记一笔账，只能标 always
+    expect(payload.notification.show).toBe('always');
+    expect(payload.notification.silent).toBe(true);
+    expect(payload.notification.tag).toBe(`amsg-instant-${CHAR_ID}`);
     expect(payload.messageId).toBe(`err_${TASK_UUID}`);
     // 订阅行按 user_id 查、明文兜底解出来
     expect((sent[0].subscription as any).endpoint).toBe('https://push.example/e1');
