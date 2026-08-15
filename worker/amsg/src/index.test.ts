@@ -43,6 +43,8 @@ import { buildMcpNameMap, MCP_FIRE_NAME_BUDGET, type McpFireServer } from '../..
 import { MAX_FIRE_SCHEDULES } from '../../../utils/amsgFireSchedule';
 import { MAX_ACTIVE_TASKS_PER_CHAR, shortTaskId } from '../../../utils/amsg2Tasks';
 import { isAmsgServerVersionAtLeast } from '../../../utils/amsgWorkerVersion';
+import { AMSG_TASK_KIND_KEY } from '../../../utils/amsgTaskKinds';
+import { PLATE_CONSOLIDATE_KIND } from '../../../utils/amsgPlateJob';
 
 const CHAR_ID = 'preset-nyah';
 const TASK_UUID = '3637dae1-1461-4444-a747-34e406f67acc';
@@ -798,6 +800,20 @@ describe('VAPID 配置', () => {
   it('配了就用配的那个，不覆盖用户的联系方式', () => {
     const config = buildWorkerConfig({ ...baseEnv, VAPID_EMAIL: 'mailto:me@example.com' });
     expect(config.vapid.email).toBe('mailto:me@example.com');
+  });
+
+  // 上游端点的 CORS 头由上游按 config.cors 出，包装层自己的路由用另一份常量。
+  // 两处不一致的话，一半端点能用、另一半被浏览器拦死，而拦下的表现都是那句没有
+  // 下文的 "Failed to fetch"——最难查的那种半瘫。
+  it('上游 config 的 allowHeaders 跟包装层预检那份是同一串，且都放行 Content-Encoding', async () => {
+    const config = buildWorkerConfig(baseEnv);
+    const preflight = await (worker as any).fetch(
+      new Request('https://w.example/instant-chat', { method: 'OPTIONS' }),
+      baseEnv,
+      { waitUntil: () => {} },
+    );
+    expect(config.cors.allowHeaders).toBe(preflight.headers.get('Access-Control-Allow-Headers'));
+    expect(config.cors.allowHeaders).toContain('Content-Encoding');
   });
 
   it('解析函数本身：缺省/空白回退，配了就原样用', () => {
@@ -2140,6 +2156,38 @@ describe('自排后续任务', () => {
     expect(record.retryCount).toBe(3);
   });
 
+  // 上游给这一族错误挂了稳定的 code。带下去，客户端才说得出「该查 API Key」还是
+  // 「重发就行」；不带的话它只能去正则匹配 reason 那句人话，上游改个措辞就静默失效。
+  it('错误对象上的 code 一起写进 chat_fail', async () => {
+    const writeState = vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 }));
+    const error = Object.assign(new Error('AI API error: 401 …'), { code: 'LLM_CALL_FAILED' });
+    await amsgFireSettled({
+      status: 'failed', sentCount: 0, task: { retry_count: 3 }, error,
+      scratch: { fire: makeStash({ instant: true }) }, writeState,
+    } as any);
+
+    const entries = writeState.mock.calls.flatMap((c) => (c as any)[1] as Array<{ key: string; value: string }>);
+    const record = JSON.parse(String(entries.find((e) => e.key === 'chat_fail')!.value));
+    expect(record.errorCode).toBe('LLM_CALL_FAILED');
+  });
+
+  // 只认 `code`，不认 `statusCode`。Node 生态的 HTTP 库习惯把上游状态码挂成
+  // statusCode，而这个 catch 罩着整条投递链——宿主 hook 里转手抛出的一个 404 会被
+  // 读成「推送订阅已失效」，客户端于是引导用户白重建一次订阅。上游踩过这个坑。
+  it('错误上只有 statusCode（不是推送那一步的）→ 不认，chat_fail 里没有 errorCode', async () => {
+    const writeState = vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 }));
+    const error = Object.assign(new Error('hook 里转手抛的 404'), { statusCode: 404 });
+    await amsgFireSettled({
+      status: 'failed', sentCount: 0, task: { retry_count: 3 }, error,
+      scratch: { fire: makeStash({ instant: true }) }, writeState,
+    } as any);
+
+    const entries = writeState.mock.calls.flatMap((c) => (c as any)[1] as Array<{ key: string; value: string }>);
+    const record = JSON.parse(String(entries.find((e) => e.key === 'chat_fail')!.value));
+    expect(record.errorCode).toBeUndefined();
+    expect(record.pushStatus).toBeUndefined();
+  });
+
   it('定时任务 fire 失败不写 chat_fail（那条路走面板对账，不占即时通道）', async () => {
     const writeState = vi.fn(async (
       _namespace: string,
@@ -2795,6 +2843,27 @@ describe('stale 跳过留痕（onStaleSkip）', () => {
     expect(written!.skip.occurrenceMs).toBe(Date.parse('2026-07-25T09:00:00.000Z'));
   });
 
+  // 回归守卫：这个 hook 原先只认 metadata.charId，不分种类。于是服务停摆几小时之后，
+  // 一条挂着的门牌整理任务被过期跳过，就会给那个角色写一条「上次主动消息没响、已被
+  // 丢弃」——而用户根本没给他排过主动消息。onBeforeFire 里那条 kind-skip 分支特意
+  // 躲开了这个谎，但它排在这个 hook 后面，拦不到。
+  it('后台任务过期跳过 → 不写 last_skip（面板会拿它当主动消息说谎）', async () => {
+    const writeState = makeWriteState();
+    await amsgStaleSkip(
+      { id: 104, uuid: TASK_ROW_UUID },
+      {
+        reason: 'stale',
+        action: 'expired',
+        metadata: { charId: CHAR_ID, [AMSG_TASK_KIND_KEY]: PLATE_CONSOLIDATE_KIND, amsgJobId: 'job-1' },
+        occurrenceMs: Date.parse('2026-07-25T09:00:00.000Z'),
+        skippedCount: 1,
+        nextSendAt: null,
+        writeState,
+      },
+    );
+    expect(lastSkipOf(writeState), '门牌整理过期跟主动消息毫无关系').toBeNull();
+  });
+
   it('metadata 缺 charId（真异常）→ warn 放弃留痕，不写也不炸', async () => {
     const writeState = makeWriteState();
     await expect(amsgStaleSkip(
@@ -2849,6 +2918,33 @@ describe('worker 配置接线', () => {
     expect(cfg.serializeBy({ metadata: { charId: 'char-a' } })).toBe('char-a');
     expect(cfg.serializeBy({ metadata: {} })).toBeNull();
     expect(cfg.serializeBy({})).toBeNull();
+  });
+
+  // 回归守卫：后台任务原先跟聊天挤在同一个 charId 组里。一次门牌整理最长占住这个角色
+  // 120 秒，而它恰恰是在一轮对话刚结束时起跑的——用户下一句话的即时对话任务被排在它
+  // 后面，人就干等着「正在输入…」。
+  it('后台任务另开一组，不跟同角色的聊天任务串行', () => {
+    const cfg = buildWorkerConfig({
+      AMSG_MASTER_KEY: 'k'.repeat(64),
+      VAPID_EMAIL: 'mailto:a@b.c',
+      VAPID_PUBLIC_KEY: 'pub',
+      VAPID_PRIVATE_KEY: 'priv',
+      DB: {},
+    } as any);
+    const chatGroup = cfg.serializeBy({ metadata: { charId: 'char-a' } });
+    const jobGroup = cfg.serializeBy({
+      metadata: { charId: 'char-a', [AMSG_TASK_KIND_KEY]: PLATE_CONSOLIDATE_KIND },
+    });
+
+    expect(jobGroup, '同一组的话，聊天要干等门牌整理跑完').not.toBe(chatGroup);
+    // 同角色同种后台任务仍要串行：两份整理并发落地就是拿两份旧快照互相盖。
+    expect(cfg.serializeBy({
+      metadata: { charId: 'char-a', [AMSG_TASK_KIND_KEY]: PLATE_CONSOLIDATE_KIND },
+    })).toBe(jobGroup);
+    // 不同角色的后台任务照样分得开。
+    expect(cfg.serializeBy({
+      metadata: { charId: 'char-b', [AMSG_TASK_KIND_KEY]: PLATE_CONSOLIDATE_KIND },
+    })).not.toBe(jobGroup);
   });
 });
 
@@ -2947,6 +3043,14 @@ describe('worker 入口 — 配置不全时的响应', () => {
     const response = await call('https://w.example/messages', { method: 'OPTIONS' });
     expect(response.status).toBe(204);
     expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
+  });
+
+  // 大 body 走 gzip 上行时请求带 Content-Encoding，而它不在 CORS 安全列表里 ——
+  // 预检不放行的话，浏览器连正式请求都不会发，用户侧只看得到一句没有下文的
+  // "Failed to fetch"，从外面完全看不出是 CORS 的事。
+  it('预检放行 Content-Encoding，否则压过的请求一条都发不出去', async () => {
+    const response = await call('https://w.example/instant-chat', { method: 'OPTIONS' });
+    expect(response.headers.get('Access-Control-Allow-Headers')).toContain('Content-Encoding');
   });
 
   it('/config-check 在配置缺一半时也要能答，否则前端没法告诉用户缺的是哪一样', async () => {
@@ -3480,13 +3584,17 @@ describe('即时对话的推送通知策略', () => {
     ...(instant ? { amsgInstantChat: true } : { amsgTaskInstruction: '想到什么说什么' }),
   });
 
-  it('即时对话的推送标 when-hidden', async () => {
+  // 推了就得弹（订阅按 userVisibleOnly 建的，不弹要被退订/吊销），打扰交给折叠 + 静音压。
+  it('即时对话的推送标 always + 折叠 + 静音', async () => {
     const store = makeStore(true);
     const { decision } = await runFire(store, { metadata: fireMeta(true), llmOutput: '在的。怎么啦？' });
     expect(decision.decision).toBe('finish');
     for (const push of decision.pushPayloads) {
-      expect((push.notification as any).show).toBe('when-hidden');
-      // 横幅文案还在：show 只是加一个字段，不是把 notification 换掉
+      expect((push.notification as any).show).toBe('always');
+      expect((push.notification as any).silent).toBe(true);
+      // 多段回复折叠成一条，靠的是同 tag 互相覆盖
+      expect((push.notification as any).tag).toBe(`amsg-instant-${CHAR_ID}`);
+      // 横幅文案还在：策略只是加几个字段，不是把 notification 换掉
       expect((push.notification as any).body).toBeTruthy();
     }
   });
@@ -3964,7 +4072,7 @@ describe('即时对话终态失败的直发 error push', () => {
 
   afterEach(() => configureInstantErrorPush(null));
 
-  it('重试打光（retry_count >= 3）的失败 → 直发 error push（when-hidden）', async () => {
+  it('重试打光（retry_count >= 3）的失败 → 直发 error push（always + 折叠 + 静音）', async () => {
     const { deps, sent } = makeErrorPushDeps();
     configureInstantErrorPush(deps as any);
 
@@ -3983,7 +4091,10 @@ describe('即时对话终态失败的直发 error push', () => {
     expect(payload.metadata.taskUuid).toBe(TASK_UUID);
     expect(payload.metadata.charId).toBe(CHAR_ID);
     expect(payload.metadata.reason).toContain('LLM 上游 502');
-    expect(payload.notification.show).toBe('when-hidden');
+    // 这条是绕过库自己直发的 push，收了不弹就是白记一笔账，只能标 always
+    expect(payload.notification.show).toBe('always');
+    expect(payload.notification.silent).toBe(true);
+    expect(payload.notification.tag).toBe(`amsg-instant-${CHAR_ID}`);
     expect(payload.messageId).toBe(`err_${TASK_UUID}`);
     // 订阅行按 user_id 查、明文兜底解出来
     expect((sent[0].subscription as any).endpoint).toBe('https://push.example/e1');

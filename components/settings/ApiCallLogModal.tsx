@@ -318,7 +318,9 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                                 )}
                                 {expanded && e.promptBreakdown && (
                                     <>
-                                        {e.route && (
+                                        {/* 只有聊天那条路会被云端二次加料（当前时间、天气热搜这些当下才知道的东西）。
+                                            后台活儿（门牌整理）交上去的就是最终提示词，别让用户以为还有看不见的部分 */}
+                                        {e.route === 'cloud-instant-chat' && (
                                             <p className="mt-2 text-[10px] text-slate-400 leading-relaxed">
                                                 这里统计的是本地拼好、交给云端的那份。云端真正发出前还会补上当前时间、天气热搜这些当下才知道的内容，所以实际输入会比下面略大一点。
                                             </p>

@@ -79,6 +79,16 @@ export interface AmsgChatFailRecord {
   retryCount: number;
   /** 写入时刻（epoch ms）。 */
   at: number;
+  /**
+   * 底层错误的稳定 code，取自 fire 抛出来那个错误对象上的 `code`
+   * （`LLM_CALL_FAILED` / `AGENTIC_BAD_DECISION` / `PUSH_PAYLOAD_TOO_LARGE` …）。
+   * 客户端按它给「这次该怎么办」，不用去正则匹配 reason 那句人话。
+   *
+   * 没有配对的 `pushStatus`：那个数只有上游发 push 的那一步知道（存在包内私有的
+   * WeakMap 上），fire 收尾这里拿到的错误对象上读不到。要用它得读上游写在任务行
+   * 上的那份 lastError，客户端会把两边合起来看。
+   */
+  errorCode?: string;
 }
 
 /** 读回来的失败留痕；形状不对返回 null（这是提示通道不硬失败，没有就报笼统原因）。 */

@@ -74,10 +74,67 @@ export const purgeCharCloudState = async (
     forgetCredIds(charCredIds(char!.id));
   }
 
+  // 后台任务的一次性输入不住在角色命名空间里（它按 job 编号存在共用的 amsg:job 下，
+  // 见 amsgTaskKinds），所以上面那趟清不到它。里面装的是这个角色的门牌全文、蒸馏材料
+  // 和身份上下文——正是删除确认框承诺会清掉的那类东西，不能让它躺满 3 天等 TTL。
+  await purgeInFlightPlateJob(char!.id);
+
   try {
     const keys = await ActiveMsgClient.clearCharClientState(char!.id);
     return { status: 'cleared', keys };
   } catch (error) {
     return { status: 'failed', error };
+  }
+};
+
+/**
+ * 清掉这个角色那份还在云端跑的门牌整理：把任务取消掉，再撤掉它的一次性输入。
+ *
+ * 只清「在飞」那一条：跑完的 worker 自己会删，而同一角色同时只许一份在飞（见
+ * roomPlateCloud 的在飞记号），所以本地记着的那个 job 编号就是全部。
+ *
+ * 读记号要用**不看 TTL 的那个**（readPlateJobInFlightRaw）。带 TTL 的那个问的是
+ * 「这份还算不算在飞」，超过半小时一律回 null——而躺得越久的那份越是没人管的：worker
+ * 没送回结果、行还在云端占着，那行里装的是整块门牌原文、蒸馏材料和身份上下文，会一直
+ * 留到 TTL 到期。删角色时的承诺是「记忆将被清空」，不能因为它躺久了就跳过。
+ *
+ * **先取消任务，再撤输入**。只撤输入的话任务行还在，到点照样起跑、照样按重试梯子重来
+ * 几轮（读到空值会安静跳过，但每一轮都是一次调度），而它已经没有任何落脚点了。取消是
+ * 幂等的：一次性任务跑完就删行，远端回 404 就是取消要达到的终态。
+ *
+ * 撤输入跟别的清理一样是**写空串**而不是删行（HTTP 的 PUT /client-state 没有删除语义）。
+ */
+const purgeInFlightPlateJob = async (charId: string): Promise<void> => {
+  try {
+    const { readPlateJobInFlightRaw, clearPlateJobInFlight, clearPlateJobDone } =
+      await import('./memoryPalace/roomPlateCloud');
+    const inFlight = readPlateJobInFlightRaw(charId);
+    // 本地记号先清：云端那步失败也不该让这个已经不存在的角色继续占着闸。
+    // 「哪些结果已经落过地」那本底账一起清掉——角色都没了，留着只是一串没主的编号。
+    clearPlateJobInFlight(charId);
+    clearPlateJobDone(charId);
+    if (!inFlight) return;
+
+    // 记号一清，那个 job 编号就再没有别的地方记着了——「设置 → API 调用记录」里那笔
+    // 「云端生成中」于是永远等不到人来收，一直转圈到 5 天后被裁掉。在飞记号超时那条路
+    // 特意绕开的就是这个坑，删角色这条路同样得收。
+    const { cloudApiCallLogId, settleCloudApiCall } = await import('./apiCallLog');
+    settleCloudApiCall({ id: cloudApiCallLogId(inFlight.jobId), ok: false });
+
+    // 任务行先撤。拿不到 uuid 的只有一种情况：提交的答复丢在了路上（任务可能建了、编号
+    // 却没回来），那种只能等它自己跑完——读到空输入会安静跳过。
+    if (inFlight.uuid) {
+      try {
+        await ActiveMsgClient.cancelTask(inFlight.uuid);
+      } catch (error) {
+        console.warn('[Amsg2CharCleanup] 删角色时取消门牌整理任务失败（输入照撤）', error);
+      }
+    }
+
+    const { AMSG_JOB_NAMESPACE } = await import('./amsgTaskKinds');
+    const { plateJobKey } = await import('./amsgPlateJob');
+    await ActiveMsgClient.clearClientStateValue(AMSG_JOB_NAMESPACE, plateJobKey(inFlight.jobId));
+  } catch (error) {
+    console.warn('[Amsg2CharCleanup] 删角色时清在飞的门牌整理输入失败（等 TTL 兜底）', error);
   }
 };

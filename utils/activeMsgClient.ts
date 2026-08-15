@@ -67,6 +67,12 @@ import {
   packStateValue,
   parseLastSkip,
 } from './amsgFirePack';
+import {
+  AMSG_BACKGROUND_JOB_SUBTYPE,
+  AMSG_JOB_ID_KEY,
+  AMSG_JOB_NAMESPACE,
+  AMSG_TASK_KIND_KEY,
+} from './amsgTaskKinds';
 import type { AmsgFireScene } from './amsgFireScene';
 import { buildSongPool } from './charMusicSchedule';
 import { getDailyScheduleForChar } from './dailySchedule';
@@ -373,6 +379,62 @@ const ensureWorkerReady = async () => {
 // 即时对话把它放上了发送热路径（拿到 202 之前的串行延迟）和 60s 状态点名（一跳最多
 // 两次），逐次重新握手纯属白付 RTT。键取会影响握手的三个字段；配置一变（换 worker /
 // 换密钥 / 清空重连）键就换，旧缓存自然作废。失败的握手不缓存，下一次重新来过。
+/**
+ * 「这台 worker 认不认识后台任务」的探测结果（见 probeBackgroundJobSupport）。
+ * 只在内存里存，换 workerUrl 自然作废——用户中途换后端时不该拿旧结论当数。
+ */
+let backgroundJobProbe: { workerUrl: string; supported: boolean; at: number } | null = null;
+
+/**
+ * 存量答案是「不支持」时，最多隔这么久就再问一遍。
+ *
+ * 下面那个 forget 只盖得住「在设置页点按钮更新 Worker」这一条路，而换 bundle 不止这
+ * 一条：文档里那条 GitHub「Sync fork」→ Cloudflare Workers Builds 更新完，地址没变、
+ * 整个过程也不经过前端，缓存里那句「不支持」就会一直活到用户刷新页面为止——这段时间
+ * 每一轮消化都在前台跑那一两分钟的整理，页面一关就死。即时对话那条探测对同样的状态
+ * 就是「存着 false 就重探」（见 reprobeInstantChatSupport）。
+ *
+ * 正面答案不设冷却：一份认识后台任务的 bundle 不会自己变回不认识。
+ */
+const BACKGROUND_JOB_UNSUPPORTED_RECHECK_MS = 5 * 60_000;
+
+/**
+ * 把探测结论作废，下次重新问一遍。
+ *
+ * 缓存是按 workerUrl 键的，而「更新 Worker」换的是同一个地址上的 bundle——地址没变，
+ * 结论却过期了。不作废的话用户刚把后端升上去，前端还认着升级前那句「不支持」，得刷新
+ * 页面才好。所以凡是**在同一个地址上换 bundle** 的路径都要调一次：设置页的「重新连接
+ * 并验证」、以及「更新 Worker」（POST /self-update）。
+ *
+ * 从零部署那条路不用调：它换的是 workerUrl 本身，键一变旧缓存自然作废。
+ */
+export const forgetBackgroundJobProbe = (): void => { backgroundJobProbe = null; };
+
+/**
+ * 后台任务能力探测的三种结论。
+ *
+ * `unsupported` 和 `unknown` 分开是有用的：前者是「这条路断了」（老 bundle，重试也一样），
+ * 后者是「这次没问到」（网络抖一下、CF 边缘抽风、D1 冷启动超时）。调用方对这两种的处置
+ * 不一样——路断了就该退回本地把活儿干了，而只是没问到时，手上要是还有一份任务在云端跑，
+ * 退回本地就是拿同一份快照再烧一次 API、两份结果先后落地互相盖。
+ */
+export type BackgroundJobProbeOutcome = 'supported' | 'unsupported' | 'unknown';
+
+const BACKGROUND_JOB_MAYBE_CREATED_PROP = '__amsgBackgroundJobMaybeCreated';
+
+/**
+ * 这次失败的后台任务，**有没有可能其实已经在远端建起来了**。
+ *
+ * 只有「`POST /schedule-message` 发出去之后没等到答复」才算——那一刻请求可能已经到了
+ * 服务端。服务端答复了「不行」不算（确定没建），上传输入、传凭据那几步失败也不算
+ * （它们排在建任务之前）。
+ *
+ * 调用方靠它区分「没交出去」和「不知道交没交出去」：前者该退回本地把活儿干了，后者
+ * 绝不能——那会拿同一份快照在两条路上各跑一次，白烧一次 API，两份结果还先后落地互相盖。
+ */
+export const mayHaveCreatedBackgroundJob = (error: unknown): boolean =>
+  (error as Record<string, unknown> | null | undefined)?.[BACKGROUND_JOB_MAYBE_CREATED_PROP] === true;
+
 let cachedClientEntry: { key: string; promise: ReturnType<typeof createAndInitClient> } | null = null;
 
 /**
@@ -810,6 +872,9 @@ const CHAT_CONTENT_BUDGET_BYTES = 2 * 1024 * 1024;
 
 const utf8ByteLength = (text: string): number => new TextEncoder().encode(text).length;
 
+/** 字节数 → 给人看的 MB（体积类报错共用一份口径）。 */
+const formatMegabytes = (bytes: number): string => (bytes / 1024 / 1024).toFixed(1);
+
 /** 结构化分段里有没有图片这类非文字内容（只有文字段的数组拆了也省不下什么）。 */
 const hasNonTextPart = (content: unknown): boolean =>
   Array.isArray(content) && content.some((part: any) => part?.type !== 'text');
@@ -872,7 +937,7 @@ export const toFirePackChatMessages = (
   }
 
   if (totalBytes > CHAT_CONTENT_BUDGET_BYTES) {
-    const mb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
+    const mb = formatMegabytes;
     // 走到这里，能拍的图全拍平了，还带着图的只可能是受保护的最新那条用户消息。
     // 报错前先算一笔账：把它的图也拍掉能不能进预算。能 → 罪魁确实是这张图，让用户
     // 删图/换小图是条真出路；不能 → 超限的是纯文本本身（长角色卡 + 世界书 + 近史），
@@ -915,6 +980,24 @@ export const describeInstantChatFailure = (status: number, body: any): string =>
   }
   if (status === 503) {
     return '即时对话没发出去：Worker 的环境变量没配齐（设置页点「重新连接并验证」能看到缺什么）。';
+  }
+  // 任务正文超过存储的单行上限（amsg-server 2.6.0-next.21 起在建任务时就回 400，
+  // 以前要一路走到落库才撞上 D1 的 `string or blob too big`）。上游把两个数放在
+  // details 里，照着念就是了——重试没有意义，得先把带上去的内容减下来。
+  //
+  // 跟 CHAT_CONTENT_BUDGET_BYTES 那道闸不是一回事：那道量的是 fire_pack 里的对话
+  // （走 client_state，5 MiB 一条），这道量的是任务正文本身（约 1 MB）。
+  const tooLarge = body?.error?.upstream?.error?.code === 'TASK_PAYLOAD_TOO_LARGE'
+    ? body?.error?.upstream?.error
+    : (code === 'TASK_PAYLOAD_TOO_LARGE' ? body?.error : null);
+  if (tooLarge) {
+    const bytes = Number(tooLarge?.details?.bytes);
+    const maxBytes = Number(tooLarge?.details?.maxBytes);
+    const sizes = Number.isFinite(bytes) && Number.isFinite(maxBytes)
+      ? `（约 ${formatMegabytes(bytes)} MB，上限 ${formatMegabytes(maxBytes)} MB）`
+      : '';
+    return `即时对话没发出去：这一轮的任务内容超过了云端单条任务的上限${sizes}。`
+      + '精简一下角色设定 / 世界书 / 携带的历史条数，或先关掉即时对话走本地生成。';
   }
   // 上游打回「时间必须在未来」：firstSendTime 是设备的钟加提前量算出来的，被打回
   // 说明提前量在路上被吃光了——要么整包状态上传得太慢，要么设备时钟本身偏慢。
@@ -1229,6 +1312,52 @@ const resubscribeAndRegister = async (client: ReiClient): Promise<void> => {
 };
 
 /**
+ * 请求体超过这么多字节才压。跟 amsg-client 的 `compressRequest` 用同一个数
+ * （16 KB）：小请求压缩省下的字节还不够抵一次 CompressionStream 的开销，而这条路上
+ * 真正的大件（fire_pack、整轮聊天）动辄几百 KB 起步，一个数就分得开。
+ */
+const REQUEST_GZIP_THRESHOLD_BYTES = 16 * 1024;
+
+/**
+ * 超阈值的请求体先 gzip 再上网线。
+ *
+ * 收益比 instant-push 那条路小一截，得说清楚：这里的正文进 HTTP 之前已经是**密文**，
+ * 而 fire_pack 真正的压缩早在交给上游加密之前就做过了（见 amsgFirePack 的
+ * packStateValue，省 60%）。所以这一层压掉的只是密文那层 base64 的膨胀，约 25%。
+ * 慢网和 iOS 上行那几秒里，这 25% 仍然是实打实少传的字节。
+ *
+ * 接收端：上游端点由 amsg-server 的 readRequestBody 解（2.6.0-next.21 起），包装层
+ * 自己的 `/instant-chat` 由 readMaybeGzippedBody 解。两边都按 gzip 魔数判断，所以
+ * 中途被边缘节点替我们解开、头还留着的那种情形也接得住。
+ *
+ * 压不动就退回明文：老 Safari 没有 CompressionStream，压缩本身出错也一样——这条路
+ * 只是省流量，绝不能变成发不出去的理由。
+ *
+ * export 只为单测。
+ */
+export const maybeGzipRequestBody = async (
+  body: BodyInit | null | undefined,
+): Promise<{ body: BodyInit | null | undefined; gzipped: boolean }> => {
+  if (typeof body !== 'string') return { body, gzipped: false };
+  // 快速排除：UTF-8 一个字符最多三字节（BMP 之外是四字节，但那是代理对、占两个
+  // char），所以字符数乘三还不到阈值的，字节数必然也不到，连量都不用量。反过来
+  // **不成立**——「字符数不到阈值」推不出「字节数不到阈值」，一段六千字的中文就是
+  // 六千字符、一万八千字节。绝大多数请求都在这条线以下，一次 encode 都不用做。
+  if (body.length * 3 < REQUEST_GZIP_THRESHOLD_BYTES) return { body, gzipped: false };
+  if (typeof CompressionStream !== 'function') return { body, gzipped: false };
+  try {
+    const raw = new TextEncoder().encode(body);
+    // 到这儿才量得准。压缩要用的也是这份字节，没有多算。
+    if (raw.byteLength < REQUEST_GZIP_THRESHOLD_BYTES) return { body, gzipped: false };
+    const stream = new Response(raw).body!.pipeThrough(new CompressionStream('gzip'));
+    return { body: await new Response(stream).arrayBuffer(), gzipped: true };
+  } catch (error) {
+    console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 请求体压缩失败，这一次照常发明文`, error);
+    return { body, gzipped: false };
+  }
+};
+
+/**
  * 带鉴权头请求 worker，同时把 HTTP 状态一起交出来。
  * 状态只有「连接」那条路用得上（401/404/其它要引导用户去改的地方不同），
  * 其余调用方走下面那层薄壳，签名跟以前一样只拿 body。
@@ -1243,10 +1372,14 @@ const fetchWithAuthRaw = async (
   if (config.serverToken) headers.set('X-Client-Token', config.serverToken);
   headers.set('X-User-Id', config.userId);
 
+  const { body, gzipped } = await maybeGzipRequestBody(init.body);
+  if (gzipped) headers.set('Content-Encoding', 'gzip');
+
   try {
     const response = await fetch(`${normalizeWorkerBase(config.workerUrl)}/${path}`, {
       ...init,
       headers,
+      body,
     });
 
     return { status: response.status, body: await safeResponseJson(response) };
@@ -1706,6 +1839,9 @@ export const ActiveMsgClient = {
     // 成功、界面报「连接成功」，此后每一次加密调用（排任务 / 即时对话 / 读云端状态）
     // worker 都解不开，只有整页刷新才能恢复。
     invalidateClientCache();
+    // 同理：那台 worker 上的 bundle 可能刚被换过（「更新 Worker」走的是同一个地址），
+    // 而「认不认识后台任务」这个结论是按地址缓存的，不作废就还认着升级前那句「不支持」。
+    forgetBackgroundJobProbe();
     await initializeClient(config);
     await ActiveMsgStore.saveGlobalConfig({ ...config, initializedAt: Date.now() });
     // 「重新连接并验证」是用户显式的一次对表，凭据引用那个能力位也当场探准，别等下次握手。
@@ -2181,6 +2317,188 @@ export const ActiveMsgClient = {
   },
 
   /**
+   * 这台 worker 上的代码认不认识「后台任务」。
+   *
+   * 认的是 `GET /config-check` 里的 `backgroundJobs`——**这份 bundle 里有没有那段分派代码**，
+   * 不是版本号：自更新永远由用户那台 Worker 上的旧代码执行，「版本号对上了、新逻辑没生效」
+   * 是真实存在的中间态（即时对话那次踩过，见 probeInstantChatSupportDetailed）。
+   *
+   * 老 bundle 不报这个字段 → false，调用方留在本地跑。老 worker 会把后台任务当聊天任务
+   * 跑、卡在「本次任务指令缺失」终态失败，而那条任务行不在用户的清单里——面板一片正常，
+   * 活儿却永远不干。这道门就是为了别走到那儿。
+   *
+   * 探不到（网络抖 / 没连上）是单独一种结论 `unknown`，不跟「不支持」混：后台活儿本来
+   * 就有本地那条路，宁可这一轮在本地跑掉也别建一条注定失败的任务——但「这次没问到」时
+   * 手上可能还有一份任务正在云端跑，那时候退回本地是有害的（见 plateCloudGate）。
+   *
+   * 「问不到」也**不写进缓存**——只有拿到明确答复（不管支不支持）才按 workerUrl 记下来。
+   * 混着缓存的话，一次代理切换、一次 CF 边缘抖动、一次 D1 冷启动超时，就能把整个会话
+   * 钉死在本地整理，只有刷新页面才翻得回来。
+   *
+   * 缓存本身只为省掉「一轮里连着提交好几个 job」时的重复请求——这类任务几十轮才跑一次。
+   */
+  async probeBackgroundJobSupportDetailed(): Promise<BackgroundJobProbeOutcome> {
+    let config: ActiveMsg2GlobalConfig;
+    try {
+      config = await ensureWorkerReady();
+    } catch {
+      return 'unknown';
+    }
+    const cached = backgroundJobProbe;
+    if (
+      cached?.workerUrl === config.workerUrl
+      // 「不支持」只当阶段性结论：worker 可能在这个会话里被别的路径换掉了
+      // （见 BACKGROUND_JOB_UNSUPPORTED_RECHECK_MS）。
+      && (cached.supported || Date.now() - cached.at < BACKGROUND_JOB_UNSUPPORTED_RECHECK_MS)
+    ) {
+      return cached.supported ? 'supported' : 'unsupported';
+    }
+    try {
+      const { status, body } = await fetchWithAuthRaw(
+        'config-check', config, { method: 'GET' }, '后台任务能力探测',
+      );
+      if (status !== 200 || body?.success !== true) {
+        console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 后台任务能力问不到（HTTP ${status}），不记缓存`);
+        return 'unknown';
+      }
+      const supported = body?.data?.backgroundJobs === true;
+      backgroundJobProbe = { workerUrl: config.workerUrl, supported, at: Date.now() };
+      return supported ? 'supported' : 'unsupported';
+    } catch (error) {
+      console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 后台任务能力探测没发出去，不记缓存`, error);
+      return 'unknown';
+    }
+  },
+
+  /** 只问「能不能交」的那一版：问不到当不能交。要区分「问不到」用上面那个。 */
+  async probeBackgroundJobSupport(): Promise<boolean> {
+    return (await this.probeBackgroundJobSupportDetailed()) === 'supported';
+  },
+
+  /**
+   * 排一条**后台任务**：不说话的那种活儿（门牌整理是第一个），跑完把结果送回客户端。
+   *
+   * 跟排主动消息的那条路（scheduleCharacterTask）共用调度器，但要的东西少得多：
+   * 不传 fire_pack / tool_pack（那是聊天专用的云端状态，worker 的 kind 分派排在读它们
+   * 之前），不填「本次任务指令」，也不写防穿帮锚点——「到点还该不该说这句话」那一整套
+   * 判断对后台活儿都不适用。
+   *
+   * 只走凭据引用那条路，不做内联降级：这类任务用的往往是副 API（比如记忆宫殿那份），
+   * 内联三件套那条老路只有一个 chat 槽位，塞进去等于把副 API 冒充成聊天 API。凭据存不了
+   * 表的老 worker 上直接抛错，调用方据此留在本地跑。
+   *
+   * 顺序与排程那条路一致：**先传输入、成功了再建任务**。反过来失败的话，远端会留下一条
+   * 到点取不到输入的任务；这个方向的残留是无害的那一侧——没人引用的输入行会被
+   * clientStateTtl 清掉。
+   *
+   * @returns 远端任务 uuid
+   */
+  async scheduleBackgroundJob(params: {
+    /** 业务种类，worker 按它分派 handler（见 utils/amsgTaskKinds.ts） */
+    kind: string;
+    /** 任务归属的角色。worker 的 charId 是必填的，调度器也按它分组串行 */
+    charId: string;
+    charName: string;
+    /** 这一次的一次性输入在 amsg:job 命名空间下的 key */
+    jobKey: string;
+    /** 任务 metadata 上带的 job 编号，worker 靠它去抽屉里取输入 */
+    jobId: string;
+    /** 一次性输入本体（会被 JSON 序列化 + 压缩后上传） */
+    jobInput: unknown;
+    /** 这条任务该用哪一行凭据。行不在云端时这里负责补传 */
+    credRow: LlmCredentialRow;
+    /**
+     * 采样温度与输出上限：**同一件活儿在本地跑和在云端跑必须用同一组**。
+     * 不传的话上游整个省略这两个字段，落到供应商默认值（温度常为 1.0、输出上限常远小于
+     * 后台活儿需要的量）——同一批材料两条路会跑出不一样的结果，而界面上完全看不出来。
+     */
+    temperature?: number;
+    maxTokens?: number;
+  }): Promise<{ uuid: string }> {
+    const globalConfig = await ensureWorkerReady();
+    const client = await initializeClient(globalConfig);
+
+    if (!await isLlmCredentialsReady()) {
+      throw new Error('这台 Worker 还不支持凭据存表，后台任务跑不了（去设置页重新部署一次）。');
+    }
+
+    const now = Date.now();
+    await putClientStateOrThrow(client, [{
+      namespace: AMSG_JOB_NAMESPACE,
+      key: params.jobKey,
+      value: await packStateValue(JSON.stringify(params.jobInput)),
+      updatedAt: now,
+    }], '上传后台任务输入');
+
+    await putLlmCredentialRows([params.credRow]);
+
+    const payload: Record<string, any> = {
+      contactName: params.charName,
+      messageType: 'auto',
+      // 任务清单跟远端对账时靠它把这些行挡在外面（见 amsg2Tasks 的 reconcileTasksWithRemote）。
+      messageSubtype: AMSG_BACKGROUND_JOB_SUBTYPE,
+      // 立刻可跑：到期时间由服务端自己盖，下一跳 cron（最多一分钟）就会捞起来。
+      // 不能改成客户端算一个 firstSendTime——那个时刻在上传输入、传凭据、加密、
+      // 发请求这一路上早就过去了，服务端一律打回「时间必须在未来」，整条云端路
+      // 每次都退回本地跑。即时对话那条路同样只用 immediate。
+      immediate: true,
+      recurrenceType: 'none',
+      metadata: {
+        charId: params.charId,
+        charName: params.charName,
+        source: 'active_msg_2',
+        [AMSG_TASK_KIND_KEY]: params.kind,
+        [AMSG_JOB_ID_KEY]: params.jobId,
+      },
+      credRefs: { chat: params.credRow.credId },
+      ...(typeof params.temperature === 'number' ? { temperature: params.temperature } : {}),
+      ...(params.maxTokens && params.maxTokens > 0 ? { maxTokens: params.maxTokens } : {}),
+      // 服务端要求「completePrompt 或 messages」二选一。到点真正发给 LLM 的 messages 由
+      // worker 的 kind handler 返回值覆盖，这条占位内容永远不参与生成。
+      messages: [{ role: 'user', content: AMSG2_PLACEHOLDER_PROMPT }],
+    };
+
+    const postSchedule = async () => {
+      const encrypted = await encryptPayload(client, payload);
+      try {
+        return await fetchWithAuth('schedule-message', globalConfig, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Payload-Encrypted': 'true',
+            'X-Encryption-Version': '1',
+          },
+          body: JSON.stringify(encrypted),
+        }, '创建后台任务');
+      } catch (error) {
+        // 请求发出去了却没等到答复（断网、超时、连接被掐）：这条任务可能已经在远端建
+        // 起来了。挂个标记交给调用方，别让它把这种情形当成「没交出去」——见
+        // mayHaveCreatedBackgroundJob。只包这一步：上面上传输入、传凭据那两步排在建任务
+        // 之前，它们失败时确定还没有任务。
+        if (error && typeof error === 'object') {
+          (error as Record<string, unknown>)[BACKGROUND_JOB_MAYBE_CREATED_PROP] = true;
+        }
+        throw error;
+      }
+    };
+
+    let response = await postSchedule();
+    // 与排程那条路同款自愈：本地指纹底账记着传过、云端其实没有（换过 master key /
+    // 点过「清空云端数据」）。绕过指纹强传一次再重排一次，只自愈一次。
+    if (!response?.success && response?.error?.code === 'CREDENTIAL_NOT_FOUND') {
+      console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 云端没有这行凭据，补传后重排一次`, params.credRow.credId);
+      forgetCredIds([params.credRow.credId]);
+      await putLlmCredentialRows([params.credRow], { force: true });
+      response = await postSchedule();
+    }
+
+    if (!response?.success) {
+      throw new Error(response?.error?.message || '后台任务创建失败。');
+    }
+    return response.data as { uuid: string };
+  },
+
+  /**
    * 即时对话：把「用户刚按下发送」这一轮交给云端跑，一个请求受理完就返回。
    *
    * 请求体里两个信封都是这里加密好的（外壳是明文 JSON，包装层只搬不看）：
@@ -2639,6 +2957,10 @@ export const ActiveMsgClient = {
     }
     if (status === 200 && body?.success === true) {
       const data = body.data ?? {};
+      // 地址没变、bundle 换了，而「认不认识后台任务」这个结论是按地址缓存的。不作废的话
+      // 用户刚把后端升上去，接下来这几分钟每一轮消化还是照着升级前那句「不支持」在前台
+      // 跑那一两分钟的整理，页面一关就死。
+      forgetBackgroundJobProbe();
       return {
         ok: true,
         supported: true,

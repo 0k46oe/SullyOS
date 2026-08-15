@@ -48,12 +48,24 @@ describe('能力位', () => {
 });
 
 describe('credId 起名', () => {
-  it('三种用途各一个名字，拆得回去', () => {
+  it('每种用途各一个名字，拆得回去', () => {
     expect(charCredId('c1', 'chat')).toBe('char:c1/chat');
     expect(charCredId('c1', 'instant')).toBe('char:c1/instant');
     expect(charCredId('c1', 'emotion')).toBe('char:c1/emotion');
-    expect(charCredIds('c1')).toEqual(['char:c1/chat', 'char:c1/instant', 'char:c1/emotion']);
+    expect(charCredId('c1', 'memory')).toBe('char:c1/memory');
+    expect(charCredIds('c1')).toEqual([
+      'char:c1/chat', 'char:c1/instant', 'char:c1/emotion', 'char:c1/memory',
+    ]);
     expect(parseCharCredId('char:c1/emotion')).toEqual({ charId: 'c1', purpose: 'emotion' });
+    expect(parseCharCredId('char:c1/memory')).toEqual({ charId: 'c1', purpose: 'memory' });
+  });
+
+  // 回归守卫：删角色时按 charCredIds 清云端凭据行。用途表漏了一档，那一行就永远留在
+  // 云端 —— 角色删了，他那份副 API 的 Key 还在别人的 D1 里躺着。
+  it('新增用途必须同时进 ALL_CREDENTIAL_PURPOSES 和 parseCharCredId', () => {
+    for (const credId of charCredIds('c1')) {
+      expect(parseCharCredId(credId)).not.toBeNull();
+    }
   });
 
   it('不认识的形状拆出来是 null（别把别人的键当成角色凭据去重算）', () => {
