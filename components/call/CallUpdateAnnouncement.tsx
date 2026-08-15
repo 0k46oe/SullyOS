@@ -1,5 +1,5 @@
 import React from 'react';
-import { Gear, Phone, SpeakerHigh, X } from '@phosphor-icons/react';
+import { ChatCircleDots, Gear, Phone, SpeakerHigh, X } from '@phosphor-icons/react';
 
 interface CallUpdateAnnouncementProps {
   accentColor: string;
@@ -50,8 +50,8 @@ const CallUpdateAnnouncement: React.FC<CallUpdateAnnouncementProps> = ({
       </button>
 
       <div className="text-[9px] font-semibold tracking-[0.28em]" style={{ color: `${accentColor}cc` }}>CALL UPDATE</div>
-      <h2 id="call-update-title" className="mt-2 pr-8 text-[1.45rem] font-semibold leading-tight text-white/95">通话有些调整</h2>
-      <p className="mt-2 text-[11px] leading-5 text-white/45">为了让电话更像真的，我们改了几处。聊天里的语音不受影响。</p>
+      <h2 id="call-update-title" className="mt-2 pr-8 text-[1.45rem] font-semibold leading-tight text-white/95">通话偏好现在有三项</h2>
+      <p className="mt-2 text-[11px] leading-5 text-white/45">左下角可以分别控制开场、语音额度和沉默后的主动接话。聊天页的语音设置不受影响。</p>
 
       <div className="mt-5 divide-y divide-white/8 border-y border-white/8">
         <div className="flex gap-3 py-3">
@@ -64,15 +64,15 @@ const CallUpdateAnnouncement: React.FC<CallUpdateAnnouncementProps> = ({
         <div className="flex gap-3 py-3">
           <SpeakerHigh className="mt-0.5 shrink-0" size={17} weight="fill" style={{ color: accentColor }} />
           <div>
-            <div className="text-xs font-medium text-white/85">可以关掉自动语音</div>
-            <div className="mt-0.5 text-[10px] leading-4 text-white/38">关掉后不会提前生成语音。你点“播放语音”时，才会生成并播放。</div>
+            <div className="text-xs font-medium text-white/85">语音与视频共用自动播放偏好</div>
+            <div className="mt-0.5 text-[10px] leading-4 text-white/38">默认开启，并沿用你已经保存的选择；关掉后两种通话都不会提前生成语音。</div>
           </div>
         </div>
         <div className="flex gap-3 py-3">
-          <span className="mt-0.5 flex h-[17px] w-[17px] shrink-0 items-center justify-center text-[10px]" style={{ color: accentColor }}>✦</span>
+          <ChatCircleDots className="mt-0.5 shrink-0" size={17} weight="fill" style={{ color: accentColor }} />
           <div>
-            <div className="text-xs font-medium text-white/85">修了 iPhone 没声音的问题</div>
-            <div className="mt-0.5 text-[10px] leading-4 text-white/38">Safari 和 Firefox 的视频通话、重播语音现在应该都能正常出声。</div>
+            <div className="text-xs font-medium text-white/85">沉默后主动接话改为按需开启</div>
+            <div className="mt-0.5 text-[10px] leading-4 text-white/38">默认关闭。开启后，通话安静较久时对方最多自然接话两次。</div>
           </div>
         </div>
       </div>

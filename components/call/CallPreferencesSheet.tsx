@@ -1,5 +1,5 @@
 import React from 'react';
-import { Gear, Phone, SpeakerHigh, X } from '@phosphor-icons/react';
+import { ChatCircleDots, Gear, Phone, SpeakerHigh, X } from '@phosphor-icons/react';
 import type { CallPreferences } from '../../utils/callPreferences';
 
 interface CallPreferencesSheetProps {
@@ -102,7 +102,7 @@ const CallPreferencesSheet: React.FC<CallPreferencesSheetProps> = ({
             </span>
             <span className="min-w-0 flex-1">
               <span className={`block text-[13px] font-medium ${lightTheme ? 'text-[#262239]/90' : 'text-white/85'}`}>自动播放语音</span>
-              <span className={`mt-0.5 block text-[10px] leading-4 ${lightTheme ? 'text-[#262239]/55' : 'text-white/38'}`}>关掉后，点“播放语音”时才会生成并播放。</span>
+              <span className={`mt-0.5 block text-[10px] leading-4 ${lightTheme ? 'text-[#262239]/55' : 'text-white/38'}`}>默认开启并沿用你的选择。关掉后，语音和视频通话都只在你点“播放语音”时才生成，避免额外消耗额度。</span>
             </span>
             <button
               type="button"
@@ -118,6 +118,35 @@ const CallPreferencesSheet: React.FC<CallPreferencesSheetProps> = ({
               <span
                 className="absolute top-[3px] h-5 w-5 rounded-full bg-white shadow-sm transition-transform duration-200"
                 style={{ left: 3, transform: preferences.voiceAutoPlay ? 'translateX(20px)' : 'translateX(0)' }}
+              />
+            </button>
+          </div>
+
+          <div className="flex min-h-[4.75rem] items-center gap-3 py-3">
+            <span
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border"
+              style={{ color: preferences.idleNudgeEnabled ? accentColor : lightTheme ? 'rgba(38,34,57,.42)' : 'rgba(255,255,255,.38)', borderColor: preferences.idleNudgeEnabled ? `${accentColor}66` : lightTheme ? 'rgba(38,34,57,.1)' : 'rgba(255,255,255,.1)', background: preferences.idleNudgeEnabled ? `${accentColor}14` : lightTheme ? 'rgba(38,34,57,.025)' : 'rgba(255,255,255,.025)' }}
+            >
+              <ChatCircleDots size={17} weight="fill" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className={`block text-[13px] font-medium ${lightTheme ? 'text-[#262239]/90' : 'text-white/85'}`}>沉默后主动接话</span>
+              <span className={`mt-0.5 block text-[10px] leading-4 ${lightTheme ? 'text-[#262239]/55' : 'text-white/38'}`}>按需开启。通话安静较久时，对方最多主动接话两次；默认关闭，不会自行发起请求。</span>
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={preferences.idleNudgeEnabled}
+              aria-label="沉默后主动接话"
+              onClick={() => onChange({ ...preferences, idleNudgeEnabled: !preferences.idleNudgeEnabled })}
+              className="relative h-7 w-12 shrink-0 rounded-full border transition-all duration-200 active:scale-95"
+              style={preferences.idleNudgeEnabled
+                ? { background: accentColor, borderColor: accentColor, boxShadow: `0 0 14px ${accentColor}44` }
+                : { background: lightTheme ? 'rgba(38,34,57,.07)' : 'rgba(255,255,255,.06)', borderColor: lightTheme ? 'rgba(38,34,57,.14)' : 'rgba(255,255,255,.13)' }}
+            >
+              <span
+                className="absolute top-[3px] h-5 w-5 rounded-full bg-white shadow-sm transition-transform duration-200"
+                style={{ left: 3, transform: preferences.idleNudgeEnabled ? 'translateX(20px)' : 'translateX(0)' }}
               />
             </button>
           </div>

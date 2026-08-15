@@ -922,6 +922,53 @@ const Appearance: React.FC = () => {
         {activeTab === 'theme' ? (
             <>
                 <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+                    <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-1">动画与过场</h2>
+                    <p className="text-[10px] text-slate-400 mb-2">三项都默认开启，可以分别关闭；关闭加载动画后，超过 7 秒的卡死恢复提示仍会保留。</p>
+                    <div className="divide-y divide-slate-100">
+                        {([
+                            {
+                                key: 'bootAnimationEnabled' as const,
+                                title: '开机动画',
+                                description: '启动 SullyOS 时的整机入场过场。',
+                            },
+                            {
+                                key: 'chatCharacterSwitchAnimationEnabled' as const,
+                                title: '聊天切换角色动画',
+                                description: '进入聊天或换角色时的头像登场过场。',
+                            },
+                            {
+                                key: 'appLoadingAnimationEnabled' as const,
+                                title: '进入 App 加载动画',
+                                description: 'App 首次加载较慢时显示的柔光等待画面。',
+                            },
+                        ]).map(option => {
+                            const enabled = theme[option.key] !== false;
+                            return (
+                                <div key={option.key} className="flex items-center gap-3 py-3">
+                                    <div className="min-w-0 flex-1">
+                                        <div className="text-xs font-bold text-slate-700">{option.title}</div>
+                                        <div className="mt-0.5 text-[10px] leading-relaxed text-slate-400">{option.description}</div>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        role="switch"
+                                        aria-checked={enabled}
+                                        aria-label={option.title}
+                                        onClick={() => {
+                                            updateTheme({ [option.key]: !enabled });
+                                            trackEvent('设置外观动画', { animation: option.key, enabled: !enabled });
+                                        }}
+                                        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${enabled ? 'bg-primary' : 'bg-slate-300'}`}
+                                    >
+                                        <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${enabled ? 'translate-x-5' : 'translate-x-0'}`} style={{ left: 2 }} />
+                                    </button>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </section>
+
+                <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
                     <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-1">桌面风格</h2>
                     <p className="text-[10px] text-slate-400 mb-4">一键切换整机主题：壁纸、配色与图标外观联动；触感陪伴不会改动全局聊天装扮。</p>
                     <div className="grid grid-cols-2 gap-3">

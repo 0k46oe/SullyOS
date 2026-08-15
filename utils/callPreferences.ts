@@ -1,14 +1,17 @@
 export interface CallPreferences {
   characterInitiative: boolean;
   voiceAutoPlay: boolean;
+  /** 通话进行中长时间无人说话时，是否允许角色主动接话。显式按需开启。 */
+  idleNudgeEnabled: boolean;
 }
 
 export const CALL_PREFERENCES_KEY = 'sully-call-preferences-v1';
-export const CALL_UPDATE_ANNOUNCEMENT_KEY = 'sully-call-update-audio-2026-08-v1';
+export const CALL_UPDATE_ANNOUNCEMENT_KEY = 'sully-call-update-preferences-2026-08-v2';
 
 export const DEFAULT_CALL_PREFERENCES: CallPreferences = {
   characterInitiative: true,
   voiceAutoPlay: true,
+  idleNudgeEnabled: false,
 };
 
 export const parseCallPreferences = (raw: string | null | undefined): CallPreferences => {
@@ -18,6 +21,7 @@ export const parseCallPreferences = (raw: string | null | undefined): CallPrefer
     return {
       characterInitiative: parsed?.characterInitiative !== false,
       voiceAutoPlay: parsed?.voiceAutoPlay !== false,
+      idleNudgeEnabled: parsed?.idleNudgeEnabled === true,
     };
   } catch {
     return { ...DEFAULT_CALL_PREFERENCES };

@@ -2783,11 +2783,11 @@ ${sentencePlan}`;
     }
   };
 
-  // 一段已经开始的通话安静太久时，角色可以自然接话两次。“谁先开口”
-  // 只决定刚接通时的第一句话，不影响通话进行中的接话。
+  // 一段已经开始的通话安静太久时，角色可以自然接话两次。它是独立的显式偏好，
+  // 默认关闭；“谁先开口”只决定刚接通时的第一句话。
   const idleNudgeBusyRef = useRef(false);
   const fireIdleNudge = async () => {
-    if (idleNudgeBusyRef.current || !selectedChar?.id) return;
+    if (!callPreferences.idleNudgeEnabled || idleNudgeBusyRef.current || !selectedChar?.id) return;
     if (document.visibilityState === 'hidden') return;
     idleNudgeBusyRef.current = true;
     try {
@@ -2863,12 +2863,13 @@ ${sentencePlan}`;
     }
   };
   useEffect(() => {
+    if (!callPreferences.idleNudgeEnabled) return;
     if (viewMode !== 'in-call' || callState !== 'listening' || isAudioPlaying) return;
     if (!bubbles.length || idleNudgeCountRef.current >= 2 || idleNudgeBusyRef.current) return;
     const silenceMs = 50_000 + Math.random() * 30_000 + idleNudgeCountRef.current * 40_000;
     const timer = window.setTimeout(() => { void fireIdleNudge(); }, silenceMs);
     return () => window.clearTimeout(timer);
-  }, [viewMode, callState, isAudioPlaying, bubbles, draftInput]);
+  }, [viewMode, callState, isAudioPlaying, bubbles, draftInput, callPreferences.idleNudgeEnabled]);
 
   // 用户在舞台上拖拽/缩放后的构图，写回角色的 videoAvatar 持久化。
   const handleStageFramingChange = (framing: AvatarStageFraming) => {
@@ -3008,6 +3009,7 @@ ${sentencePlan}`;
               trackEvent('设置通话偏好', {
                 谁先开口: next.characterInitiative ? '角色' : '用户',
                 自动生成并播放语音: next.voiceAutoPlay ? '开启' : '关闭',
+                沉默后主动接话: next.idleNudgeEnabled ? '开启' : '关闭',
               });
             }}
             onOpenSystemSettings={() => {
