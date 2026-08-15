@@ -12,7 +12,9 @@ import { deleteGroupMemoriesByGroupId } from '../utils/memoryPalace/groupPipelin
 import { processImage } from '../utils/file';
 import { stickerNameFromUrl } from '../utils/messageFormat';
 import { PRESET_THEMES } from '../components/chat/ChatConstants';
-import { resolveChatTheme } from '../utils/groupChat/theme';
+import { resolveChatTheme, scopeBubbleThemeCss } from '../utils/groupChat/theme';
+import { resolveBubbleCornerRadii, shouldHideBubbleTail } from '../utils/bubbleAppearance';
+import { buildChatFineTuneCss } from '../utils/chatFineTuneCss';
 import { parseDirectorActions, stripSkipMarker, parseGroupTopicBox } from '../utils/groupChat/parse';
 import { GroupPacketMeta, PacketReceiptMeta, ClaimResult, claimPacket, effectivePacketStatus, makePacketMeta } from '../utils/groupChat/redpacket';
 import { messageLogText } from '../utils/groupChat/format';
@@ -122,7 +124,16 @@ const GroupMessageItem = React.memo(({
     onReply,
     nameOf,
     onPacketClick,
-    styleConfig
+    styleConfig,
+    themeScopeClass,
+    isFirstInGroup,
+    isLastInGroup,
+    avatarShape = 'circle',
+    avatarSize = 'medium',
+    avatarMode = 'grouped',
+    bubbleVariant = 'modern',
+    messageSpacing = 'default',
+    showTimestamp = 'always',
 }: {
     msg: Message,
     isUser: boolean,
@@ -137,10 +148,50 @@ const GroupMessageItem = React.memo(({
     nameOf: (id: string) => string,
     onPacketClick: (msg: Message) => void,
     /** 气泡样式（用户=群设置选的主题 user 侧；成员=统一或各自私聊主题 ai 侧）。引用需稳定（memo） */
-    styleConfig: BubbleStyle
+    styleConfig: BubbleStyle,
+    /** 将当前成员的气泡工坊 CSS 限定在自己的消息上，防止群成员主题互串。 */
+    themeScopeClass: string,
+    isFirstInGroup: boolean,
+    isLastInGroup: boolean,
+    avatarShape?: 'circle' | 'rounded' | 'square',
+    avatarSize?: 'small' | 'medium' | 'large',
+    avatarMode?: 'grouped' | 'every_message',
+    bubbleVariant?: 'modern' | 'flat' | 'outline' | 'shadow' | 'wechat' | 'ios',
+    messageSpacing?: 'compact' | 'default' | 'spacious',
+    showTimestamp?: 'always' | 'hover' | 'never',
 }) => {
     const avatar = isUser ? userAvatar : char?.avatar;
     const name = isUser ? '我' : char?.name || '未知成员';
+
+    const spacingClass = messageSpacing === 'compact'
+        ? (isLastInGroup ? 'mb-3' : 'mb-0.5')
+        : messageSpacing === 'spacious'
+            ? (isLastInGroup ? 'mb-8' : 'mb-2.5')
+            : (isLastInGroup ? 'mb-6' : 'mb-1.5');
+    const avatarSizeClass = avatarSize === 'small' ? 'w-7 h-7' : avatarSize === 'large' ? 'w-12 h-12' : 'w-9 h-9';
+    const avatarSizePx = avatarSize === 'small' ? 28 : avatarSize === 'large' ? 48 : 36;
+    const avatarRadiusClass = avatarShape === 'square' ? 'rounded-sm' : avatarShape === 'rounded' ? 'rounded-xl' : 'rounded-full';
+    const shouldShowAvatar = avatarMode === 'every_message' || isLastInGroup;
+    const cornerRadii = resolveBubbleCornerRadii(styleConfig);
+    const hideBubbleTail = shouldHideBubbleTail(styleConfig.tailMode, isLastInGroup);
+    const bubbleGroupClasses = [
+        isFirstInGroup ? 'sully-bubble-group-first' : '',
+        isLastInGroup ? 'sully-bubble-group-last' : '',
+        hideBubbleTail ? 'sully-bubble-tail-hidden' : 'sully-bubble-tail-visible',
+    ].filter(Boolean).join(' ');
+    const bubbleStyle: React.CSSProperties = {
+        backgroundColor: bubbleVariant === 'outline' ? 'transparent' : styleConfig.backgroundColor,
+        opacity: styleConfig.opacity ?? 1,
+        borderTopLeftRadius: cornerRadii.topLeft,
+        borderTopRightRadius: cornerRadii.topRight,
+        borderBottomRightRadius: cornerRadii.bottomRight,
+        borderBottomLeftRadius: cornerRadii.bottomLeft,
+        ...(bubbleVariant === 'outline' ? { border: `2px solid ${styleConfig.backgroundColor}`, boxShadow: 'none' } : {}),
+        ...(bubbleVariant === 'shadow' ? { boxShadow: '0 4px 12px rgba(0,0,0,0.12)' } : {}),
+        ...(bubbleVariant === 'flat' ? { boxShadow: 'none' } : {}),
+        ...(bubbleVariant === 'wechat' ? { boxShadow: 'none', border: '1px solid rgba(15,23,42,0.05)' } : {}),
+        ...(bubbleVariant === 'ios' ? { boxShadow: '0 10px 24px rgba(148,163,184,0.16)', border: '1px solid rgba(255,255,255,0.75)', backdropFilter: 'blur(12px)' } : {}),
+    };
 
     // pointer-event 手势（对齐私聊 MessageItem 的方案）：600ms 长按 → 操作菜单；
     // 触屏左滑 ≤-52px → 引用回复（带位移动画）；鼠标右键 → 操作菜单
@@ -154,7 +205,7 @@ const GroupMessageItem = React.memo(({
     const [isReplyGestureActive, setIsReplyGestureActive] = useState(false);
 
     // Time formatting
-    const timeStr = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const timeStr = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 
     const clearLongPressTimer = () => {
         if (!longPressTimer.current) return;
@@ -243,6 +294,36 @@ const GroupMessageItem = React.memo(({
         }
     };
 
+    const renderAvatar = (forceVisible = false) => (
+        <div className={`relative ${avatarSizeClass} z-0 sully-chat-message-avatar`}>
+            {(forceVisible || shouldShowAvatar) && (
+                <>
+                    <img
+                        src={avatar}
+                        className={`sully-chat-message-avatar-img w-full h-full ${avatarRadiusClass} object-cover shadow-sm ring-1 ring-black/5 relative z-0`}
+                        alt="avatar"
+                        loading="lazy"
+                        decoding="async"
+                    />
+                    {styleConfig.avatarDecoration && (
+                        <img
+                            src={styleConfig.avatarDecoration}
+                            className="absolute pointer-events-none z-10 max-w-none"
+                            style={{
+                                left: `${styleConfig.avatarDecorationX ?? 50}%`,
+                                top: `${styleConfig.avatarDecorationY ?? 50}%`,
+                                width: `${avatarSizePx * (styleConfig.avatarDecorationScale ?? 1)}px`,
+                                height: 'auto',
+                                transform: `translate(-50%, -50%) rotate(${styleConfig.avatarDecorationRotate ?? 0}deg)`,
+                            }}
+                            alt=""
+                        />
+                    )}
+                </>
+            )}
+        </div>
+    );
+
     // Special Content Renderers
     const renderContent = () => {
         switch (msg.type) {
@@ -276,30 +357,40 @@ const GroupMessageItem = React.memo(({
                 return <HtmlCard html={html} />;
             }
             default:
-                // 核心样式字段对齐私聊 MessageItem 的应用方式（decoration/voiceBar 群聊不做）
                 return (
                     <div
-                        className={`px-3.5 py-2 text-[15px] leading-relaxed shadow-sm whitespace-pre-wrap break-all relative overflow-hidden ${isUser ? '' : 'border border-black/5'}`}
-                        style={{
-                            color: styleConfig.textColor,
-                            backgroundColor: styleConfig.backgroundColor,
-                            opacity: styleConfig.opacity ?? 1,
-                            borderRadius: styleConfig.borderRadius ?? 18,
-                            ...(isUser ? { borderTopRightRadius: 4 } : { borderTopLeftRadius: 4 }),
-                        }}
+                        className={`relative px-5 py-3 text-[15px] leading-relaxed whitespace-pre-wrap break-all overflow-visible active:scale-[0.98] transition-transform ${bubbleVariant === 'flat' || bubbleVariant === 'outline' || bubbleVariant === 'wechat' ? '' : 'shadow-sm'} ${bubbleVariant === 'outline' ? '' : 'border border-black/5'} ${isUser ? 'sully-bubble-user' : 'sully-bubble-ai'} ${bubbleGroupClasses}`}
+                        style={bubbleStyle}
                     >
                         {styleConfig.backgroundImage && (
                             <div
-                                className="absolute inset-0 pointer-events-none"
+                                className="absolute inset-0 bg-cover bg-center pointer-events-none z-0"
                                 style={{
                                     backgroundImage: `url(${styleConfig.backgroundImage})`,
-                                    backgroundSize: 'cover',
-                                    backgroundPosition: 'center',
                                     opacity: styleConfig.backgroundImageOpacity ?? 0.5,
+                                    borderRadius: 'inherit',
                                 }}
                             />
                         )}
-                        <span className="relative z-10">{msg.content}</span>
+                        {styleConfig.decoration && (
+                            <img
+                                src={styleConfig.decoration}
+                                className="absolute z-10 w-8 h-8 object-contain drop-shadow-sm pointer-events-none"
+                                style={{
+                                    left: `${styleConfig.decorationX ?? (isUser ? 90 : 10)}%`,
+                                    top: `${styleConfig.decorationY ?? -10}%`,
+                                    transform: `translate(-50%, -50%) scale(${styleConfig.decorationScale ?? 1}) rotate(${styleConfig.decorationRotate ?? 0}deg)`,
+                                }}
+                                alt=""
+                            />
+                        )}
+                        {msg.replyTo && (
+                            <div className="relative z-10 mb-1 text-[10px] bg-black/5 p-1.5 rounded-md border-l-2 border-current opacity-60 flex flex-col gap-0.5 max-w-full overflow-hidden">
+                                <span className="font-bold opacity-90 truncate">{msg.replyTo.name}</span>
+                                <span className="truncate italic">"{msg.replyTo.content.length > 10 ? msg.replyTo.content.slice(0, 10) + '...' : msg.replyTo.content}"</span>
+                            </div>
+                        )}
+                        <div className="relative z-10 select-text" style={{ color: styleConfig.textColor }}>{msg.content}</div>
                     </div>
                 );
         }
@@ -307,58 +398,71 @@ const GroupMessageItem = React.memo(({
 
     return (
         <div
-            className={`flex gap-3 mb-4 w-full relative ${isUser ? 'justify-end' : 'justify-start'} ${selectionMode ? 'pl-8' : ''}`}
-            style={{
-                transform: `translateX(${replyOffset}px)`,
-                transition: isReplyGestureActive ? 'none' : 'transform 0.2s ease-out',
-                touchAction: 'pan-y',
-            }}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerEnd}
-            onPointerCancel={handlePointerCancel}
-            onContextMenu={(e) => {
-                e.preventDefault();
-                if (selectionMode || replyGestureActiveRef.current) return;
-                clearLongPressTimer();
-                activePointerId.current = null;
-                activePointerType.current = '';
-                resetReplyGesture();
-                onLongPress(msg.id);
-            }}
-            onDragStart={(e) => e.preventDefault()}
-            onClick={handleClick}
+            className={`${themeScopeClass} sully-chat-message ${isUser ? 'sully-chat-message-user justify-end' : 'sully-chat-message-ai justify-start'} ${isFirstInGroup ? 'sully-chat-message-group-first' : ''} ${isLastInGroup ? 'sully-chat-message-group-last' : ''} flex items-end ${spacingClass} px-3 w-full group relative transition-[padding] duration-300 ${selectionMode ? 'pl-12' : ''}`}
+            style={{ '--sully-chat-message-avatar-size': `${avatarSizePx}px` } as React.CSSProperties}
         >
             {selectionMode && (
-                <div className="absolute left-0 top-1/2 -translate-y-1/2 cursor-pointer z-10">
+                <div className="absolute left-3 top-1/2 -translate-y-1/2 cursor-pointer z-20" onClick={handleClick}>
                     <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'bg-violet-500 border-violet-500' : 'border-slate-300 bg-white'}`}>
                         {isSelected && <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
                     </div>
                 </div>
             )}
 
-            {!isUser && (
-                <div className="flex flex-col items-center gap-1 shrink-0">
-                    <img src={avatar} className="w-9 h-9 rounded-full object-cover shadow-sm border border-white" loading="lazy" />
+            {isFirstInGroup && (
+                <div className={`sully-chat-turn-avatar-slot hidden absolute top-0 z-0 ${isUser ? 'right-3' : (selectionMode ? 'left-14' : 'left-3')}`}>
+                    {renderAvatar(true)}
                 </div>
             )}
-            
-            <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} max-w-[80%] ${selectionMode ? 'pointer-events-none' : ''}`}>
-                {!isUser && <span className="text-[10px] text-slate-400 ml-1 mb-1">{name}</span>}
-                {/* 引用条（对齐私聊 MessageItem 的极简样式） */}
-                {msg.replyTo && (
-                    <div className="mb-1 text-[10px] bg-black/5 p-1.5 rounded-md border-l-2 border-slate-300 text-slate-500 flex flex-col gap-0.5 max-w-full overflow-hidden">
-                        <span className="font-bold truncate">{msg.replyTo.name}</span>
-                        <span className="truncate italic">"{msg.replyTo.content.length > 10 ? msg.replyTo.content.slice(0, 10) + '...' : msg.replyTo.content}"</span>
+
+            {!isUser && (
+                <div className={`sully-chat-message-avatar-slot absolute bottom-0 z-0 ${selectionMode ? 'left-14' : 'left-3'} transition-[left] duration-300`}>
+                    {renderAvatar()}
+                </div>
+            )}
+
+            <div className={`sully-chat-message-content relative min-w-0 max-w-[72%] ${isUser ? 'mr-12' : 'ml-12'}`}>
+                <div
+                    className={`relative flex flex-col ${isUser ? 'items-end' : 'items-start'} min-w-0 ${selectionMode ? 'pointer-events-none' : ''}`}
+                    style={{
+                        transform: `translateX(${replyOffset}px)`,
+                        transition: isReplyGestureActive ? 'none' : 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1)',
+                        touchAction: 'pan-y',
+                        userSelect: 'none',
+                        WebkitUserSelect: 'none',
+                        WebkitTouchCallout: 'none',
+                    } as React.CSSProperties}
+                    onPointerDown={handlePointerDown}
+                    onPointerMove={handlePointerMove}
+                    onPointerUp={handlePointerEnd}
+                    onPointerCancel={handlePointerCancel}
+                    onContextMenu={(e) => {
+                        e.preventDefault();
+                        if (selectionMode || replyGestureActiveRef.current) return;
+                        clearLongPressTimer();
+                        activePointerId.current = null;
+                        activePointerType.current = '';
+                        resetReplyGesture();
+                        onLongPress(msg.id);
+                    }}
+                    onDragStart={(e) => e.preventDefault()}
+                    onClick={handleClick}
+                >
+                    {!isUser && isFirstInGroup && (
+                        <span className="sully-chat-message-sender text-[10px] text-slate-400 ml-1 mb-1">{name}</span>
+                    )}
+                    <div className={selectionMode ? 'pointer-events-none' : ''}>
+                        {renderContent()}
                     </div>
-                )}
-                {renderContent()}
-                <span className="text-[9px] text-slate-300 mt-1 px-1">{timeStr}</span>
+                    {isLastInGroup && showTimestamp !== 'never' && (
+                        <span className={`absolute top-full ${isUser ? 'right-0' : 'left-0'} mt-0.5 px-1 text-[9px] text-slate-400/80 font-medium whitespace-nowrap pointer-events-none ${showTimestamp === 'hover' ? 'opacity-0 group-hover:opacity-100 transition-opacity' : ''}`}>{timeStr}</span>
+                    )}
+                </div>
             </div>
 
             {isUser && (
-                <div className="flex flex-col items-center gap-1 shrink-0">
-                    <img src={avatar} className="w-9 h-9 rounded-full object-cover shadow-sm border border-white" loading="lazy" />
+                <div className="sully-chat-message-avatar-slot absolute right-3 bottom-0 z-0">
+                    {renderAvatar()}
                 </div>
             )}
         </div>
@@ -914,23 +1018,43 @@ const GroupChat: React.FC = () => {
     };
 
     // --- Logic: 气泡体系 ---
-    // useMemo 保证引用稳定：GroupMessageItem 是 React.memo，styleConfig 每帧换新对象会导致整列表重渲
-    const userBubble = useMemo<BubbleStyle>(() => (
+    // 保留完整 ChatTheme：群聊不再只摘基础色值，气泡工坊 customCss 也一起复用。
+    const userBubbleTheme = useMemo<ChatTheme>(() => (
         activeGroup?.userBubbleThemeId
-            ? resolveChatTheme(activeGroup.userBubbleThemeId, customThemes, PRESET_THEMES).user
-            : PRESET_THEME_GROUP.user
+            ? resolveChatTheme(activeGroup.userBubbleThemeId, customThemes, PRESET_THEMES)
+            : PRESET_THEME_GROUP
     ), [activeGroup?.userBubbleThemeId, customThemes]);
 
-    const memberBubbles = useMemo(() => {
-        const map = new Map<string, BubbleStyle>();
+    const memberBubbleThemes = useMemo(() => {
+        const map = new Map<string, ChatTheme>();
         if (activeGroup?.memberBubbleIndependent) {
             for (const mid of activeGroup.members) {
                 const c = characters.find(ch => ch.id === mid);
-                map.set(mid, resolveChatTheme(c?.bubbleStyle, customThemes, PRESET_THEMES).ai);
+                map.set(mid, resolveChatTheme(c?.bubbleStyle, customThemes, PRESET_THEMES));
             }
         }
         return map;
     }, [activeGroup?.memberBubbleIndependent, activeGroup?.members, characters, customThemes]);
+
+    const memberThemeScopeClasses = useMemo(() => {
+        const map = new Map<string, string>();
+        activeGroup?.members.forEach((mid, index) => map.set(mid, `sully-group-member-theme-${index}`));
+        return map;
+    }, [activeGroup?.members]);
+
+    const groupBubbleCustomCss = useMemo(() => {
+        const chunks: string[] = [];
+        if (userBubbleTheme.customCss) {
+            chunks.push(scopeBubbleThemeCss(userBubbleTheme.customCss, '.sully-group-user-theme'));
+        }
+        memberBubbleThemes.forEach((theme, mid) => {
+            const scopeClass = memberThemeScopeClasses.get(mid);
+            if (theme.customCss && scopeClass) {
+                chunks.push(scopeBubbleThemeCss(theme.customCss, `.${scopeClass}`));
+            }
+        });
+        return chunks.filter(Boolean).join('\n');
+    }, [userBubbleTheme.customCss, memberBubbleThemes, memberThemeScopeClasses]);
 
     // 表情面板按分类过滤（对齐私聊 ChatInputArea 的行为）
     const filteredEmojis = useMemo(() => emojis.filter(e => {
@@ -1537,14 +1661,60 @@ ${memberTimeline || '(暂无互动记录)'}
     // CHAT VIEW
     // 动森彩蛋模式（与私聊同一开关联动）
     const acnh = osTheme.skin === 'animalcrossing' && osTheme.acnhChatSync !== false;
+    const chatChromeStyle = osTheme.chatChromeStyle || 'soft';
+    const chatBackgroundStyle = osTheme.chatBackgroundStyle || 'plain';
+    const groupChatRootClass = chatChromeStyle === 'pixel'
+        ? 'h-full w-full bg-[#efe1cf] flex flex-col overflow-hidden font-sans relative transition-[background-image,background-color] duration-500'
+        : chatChromeStyle === 'flat'
+            ? 'h-full w-full bg-white flex flex-col overflow-hidden font-sans relative transition-[background-image,background-color] duration-500'
+            : chatChromeStyle === 'floating'
+                ? 'h-full w-full bg-[#eef2ff] flex flex-col overflow-hidden font-sans relative transition-[background-image,background-color] duration-500'
+                : 'h-full w-full bg-[#f1f5f9] flex flex-col overflow-hidden font-sans relative transition-[background-image,background-color] duration-500';
+    const groupChatRootStyle: React.CSSProperties = chatBackgroundStyle === 'grid'
+        ? {
+            backgroundColor: chatChromeStyle === 'pixel' ? '#efe1cf' : '#f8fafc',
+            backgroundImage: 'linear-gradient(rgba(148,163,184,0.14) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,0.14) 1px, transparent 1px)',
+            backgroundSize: '20px 20px',
+        }
+        : chatBackgroundStyle === 'paper'
+            ? {
+                backgroundColor: chatChromeStyle === 'pixel' ? '#f4e8d9' : '#f9f7f2',
+                backgroundImage: 'radial-gradient(circle at 1px 1px, rgba(148,163,184,0.12) 1px, transparent 0)',
+                backgroundSize: '16px 16px',
+            }
+            : chatBackgroundStyle === 'mesh'
+                ? {
+                    backgroundColor: '#f8fafc',
+                    backgroundImage: 'radial-gradient(circle at 15% 20%, rgba(59,130,246,0.18), transparent 28%), radial-gradient(circle at 85% 15%, rgba(244,114,182,0.18), transparent 24%), radial-gradient(circle at 60% 75%, rgba(45,212,191,0.18), transparent 26%)',
+                }
+                : { backgroundImage: 'none' };
+    const groupFineTuneCss = buildChatFineTuneCss(osTheme);
+    const finalGroupRootClass = acnh
+        ? 'h-full w-full flex flex-col overflow-hidden font-sans relative transition-[background-color] duration-500'
+        : groupChatRootClass;
+    const finalGroupRootStyle = acnh
+        ? { backgroundColor: '#F6F0D8', backgroundImage: 'none' }
+        : groupChatRootStyle;
     return (
-        <div className="sully-chat-root h-full w-full bg-[#f0f4f8] flex flex-col font-sans relative">
+        <div className={`sully-chat-root ${finalGroupRootClass}`} style={finalGroupRootStyle}>
+            {/* 外观 App 的全局聊天细节与私聊共用同一份生成 CSS。 */}
+            {groupFineTuneCss && <style>{groupFineTuneCss}</style>}
             {/* 白框自定义 CSS：全局默认在前、群专属在后（后者叠加覆盖）。作用于 .sully-chat-* 各零件。 */}
             {osTheme.chatChromeCustomCss && <style>{osTheme.chatChromeCustomCss}</style>}
             {activeGroup?.chromeCustomCss && <style>{activeGroup.chromeCustomCss}</style>}
-            {/* 守护样式（注在用户 CSS 之后）：保证返回键永远可见可点，坏 CSS 也能退出群聊 */}
-            {(osTheme.chatChromeCustomCss || activeGroup?.chromeCustomCss) && (
-                <style>{`.sully-chat-back{visibility:visible!important;opacity:1!important;pointer-events:auto!important;}`}</style>
+            {/* 气泡工坊 CSS 排在白框之后，与私聊优先级一致；每套成员主题都限定在自己的消息上。 */}
+            {groupBubbleCustomCss && <style>{groupBubbleCustomCss}</style>}
+            <style>{`
+                .sully-bubble-tail-hidden::before,
+                .sully-bubble-tail-hidden::after { content: none !important; display: none !important; }
+            `}</style>
+            {/* 守护样式（注在用户 CSS 之后）：保证返回键与输入区永远可见可点。 */}
+            {(osTheme.chatChromeCustomCss || activeGroup?.chromeCustomCss || groupBubbleCustomCss) && (
+                <style>{`
+                    .sully-chat-back{visibility:visible!important;opacity:1!important;pointer-events:auto!important;}
+                    .sully-chat-inputbar{visibility:visible!important;opacity:1!important;pointer-events:auto!important;}
+                    .sully-chat-inputbar textarea,.sully-chat-inputbar button{pointer-events:auto!important;visibility:visible!important;}
+                `}</style>
             )}
             {/* 公共话题盒整理状态 — 不阻塞交互 */}
             {groupPalaceStatus && (
@@ -1615,7 +1785,7 @@ ${memberTimeline || '(暂无互动记录)'}
             />
 
             {/* Messages Area */}
-            <div className="flex-1 overflow-y-auto p-4 no-scrollbar space-y-2 bg-[#f0f4f8]" ref={scrollRef}>
+            <div className="flex-1 overflow-y-auto overflow-x-hidden pt-6 pb-6 no-scrollbar" ref={scrollRef}>
                 {collapsedCount > 0 && activeGroup && (
                     <div className="flex justify-center mb-6">
                         <button onClick={async () => {
@@ -1632,6 +1802,17 @@ ${memberTimeline || '(暂无互动记录)'}
                 {displayMessages.map((m, i) => {
                     const isUser = m.role === 'user';
                     const char = characters.find(c => c.id === m.charId);
+                    const prevMessage = i > 0 ? displayMessages[i - 1] : null;
+                    const nextMessage = i < displayMessages.length - 1 ? displayMessages[i + 1] : null;
+                    const messageGroupGapMs = 30 * 60 * 1000;
+                    const sameSpeaker = (other: Message | null) => !!other
+                        && other.role === m.role
+                        && other.charId === m.charId;
+                    const isFirstInGroup = !sameSpeaker(prevMessage)
+                        || Math.abs(m.timestamp - prevMessage!.timestamp) > messageGroupGapMs;
+                    const isLastInGroup = !sameSpeaker(nextMessage)
+                        || Math.abs(nextMessage!.timestamp - m.timestamp) > messageGroupGapMs;
+                    const memberTheme = memberBubbleThemes.get(m.charId);
 
                     return (
                         <GroupMessageItem
@@ -1648,7 +1829,16 @@ ${memberTimeline || '(暂无互动记录)'}
                             onReply={handleGroupReply}
                             nameOf={nameOf}
                             onPacketClick={openPacketDetail}
-                            styleConfig={isUser ? userBubble : (memberBubbles.get(m.charId) || PRESET_THEME_GROUP.ai)}
+                            styleConfig={isUser ? userBubbleTheme.user : (memberTheme?.ai || PRESET_THEME_GROUP.ai)}
+                            themeScopeClass={isUser ? 'sully-group-user-theme' : (memberThemeScopeClasses.get(m.charId) || 'sully-group-default-theme')}
+                            isFirstInGroup={isFirstInGroup}
+                            isLastInGroup={isLastInGroup}
+                            avatarShape={osTheme.chatAvatarShape}
+                            avatarSize={osTheme.chatAvatarSize}
+                            avatarMode={osTheme.chatAvatarMode}
+                            bubbleVariant={osTheme.chatBubbleStyle}
+                            messageSpacing={osTheme.chatMessageSpacing}
+                            showTimestamp={osTheme.chatShowTimestamp}
                         />
                     );
                 })}
@@ -1814,7 +2004,7 @@ ${memberTimeline || '(暂无互动记录)'}
                         <div className="flex items-center justify-between mb-3">
                             <div className="flex-1 pr-3">
                                 <div className="text-xs font-bold text-slate-700">成员独立气泡</div>
-                                <p className="text-[9px] text-slate-400 mt-0.5 leading-tight">开启后每位成员的气泡使用其私聊气泡主题（AI 侧）；关闭则全员统一。</p>
+                                <p className="text-[9px] text-slate-400 mt-0.5 leading-tight">开启后每位成员完整沿用其私聊气泡主题（AI 侧，包含自定义 CSS 与装饰）；关闭则全员统一。</p>
                             </div>
                             <div
                                 onClick={() => setTempMemberBubbleIndependent(v => !v)}

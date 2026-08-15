@@ -25,7 +25,7 @@
  * Phase 2 会让 worker 端把识别出的副作用 (RECALL/SEARCH/...) 结构化传 directives, 这里只重放。
  */
 
-import { CharacterProfile, UserProfile, Message, Emoji, RealtimeConfig } from '../types';
+import { CharacterProfile, UserProfile, Message, Emoji, RealtimeConfig, GroupProfile } from '../types';
 import { DB } from './db';
 import { ChatParser, type FrozenMusicSong } from './chatParser';
 import { resolveCharTimeZone } from './timezone';
@@ -51,6 +51,8 @@ import {
 } from './agenticTools';
 import { getLocalDateKey } from './localDate';
 import { normalizeAssistantActionFormatting } from './assistantActionFormat';
+import { markAmsgStateDirty } from './amsgStateSync';
+import { announceScheduleChanges, applyAssistantScheduleChanges } from './scheduleChange';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
 
@@ -197,6 +199,7 @@ export type PostProcessDirective =
     | { type: 'transfer_accept' }
     | { type: 'transfer_return' }
     | { type: 'add_event'; title: string; date: string }
+    | { type: 'change_schedule'; time: string; activity: string }
     | { type: 'schedule_message'; time: string; text: string }
     // song 是主动消息 2.0 的定时路径后补的「角色说的是哪首歌」（见 chatParser 的
     // FrozenMusicSong）；标签里只有歌单名带不动它，所以单独走 directive 字段。
@@ -247,6 +250,9 @@ function reconstructDirectiveTags(directives: PostProcessDirective[] | undefined
                 break;
             case 'add_event':
                 parts.push(`[[ACTION:ADD_EVENT|${d.title}|${d.date}]]`);
+                break;
+            case 'change_schedule':
+                parts.push(`[[ACTION:CHANGE_SCHEDULE|${d.time}|${d.activity}]]`);
                 break;
             case 'schedule_message':
                 parts.push(`[schedule_message | ${d.time} | fixed | ${d.text}]`);
@@ -359,6 +365,8 @@ export interface PostProcessCtx {
     userProfile: UserProfile;
     emojis: Emoji[];
     realtimeConfig?: RealtimeConfig;
+    /** 日程被角色改写后刷新主动消息 fire_pack；旧调用方可不传。 */
+    groups?: GroupProfile[];
     /** 上下文消息窗 — 用来匹配 quote 目标 */
     contextMsgs: Message[];
     /** 发给 API 的完整 messages 数组 — 2nd-pass LLM 调用要带上 */
@@ -438,6 +446,7 @@ export async function applyAssistantPostProcessing(
         userProfile,
         emojis,
         realtimeConfig,
+        groups,
         contextMsgs,
         fullMessages,
         initialData,
@@ -536,9 +545,32 @@ export async function applyAssistantPostProcessing(
     // 局部 data 副本 — 后续 2nd-pass 会覆盖, 模仿旧版的 let data 行为
     let data: any = initialData;
 
+    let scheduleFailureNotified = false;
+    const consumeScheduleChanges = async (content: string): Promise<string> => {
+        const result = await applyAssistantScheduleChanges(content, char);
+        if (result.changes.length > 0 && result.schedule) {
+            if (realtimeConfig) {
+                // 本地聊天直接复用 caller 的 groups；主动消息路径只在真的改了日程时读一次，
+                // 不给每一条普通 push 平添 IndexedDB 查询和新的失败点。
+                const syncGroups = groups ?? await DB.getGroups().catch(() => undefined);
+                if (syncGroups) markAmsgStateDirty({ char, userProfile, groups: syncGroups, realtimeConfig });
+            }
+            announceScheduleChanges(char.id, result.schedule, result.changes);
+        }
+        if (!scheduleFailureNotified
+            && result.changes.length === 0
+            && (result.malformedCount > 0 || result.rejectedCount > 0)) {
+            scheduleFailureNotified = true;
+            addToast('日程修改没有匹配到未来时段，已安全跳过', 'info');
+        }
+        return result.cleanedText;
+    };
+
     // ─── Step 1: 初次粗洗 ───
     let aiContent = replayedTagPrefix ? `${replayedTagPrefix}${rawAiContent}` : rawAiContent;
     aiContent = normalizeAiContent(aiContent);
+    // 先于 lead-in / 二轮渲染消费：否则控制标签会作为普通气泡短暂闪给用户看。
+    aiContent = await consumeScheduleChanges(aiContent);
     // 在任何 lead-in/二轮渲染之前先剥掉仿卡片文本，防止它被 chunkText 拆成灰色普通气泡。
     const mimickedXhsShares = extractMimickedXhsShares(aiContent);
     aiContent = mimickedXhsShares.cleanedContent;
@@ -2005,6 +2037,10 @@ export async function applyAssistantPostProcessing(
         setXhsStatus('');
     }
     aiContent = aiContent.replace(/\[\[XHS_POST:.*?\]\]/gs, '').trim();
+
+    // 二轮 LLM 可能新产生日程标签；在统一动作解析前再消费一次。首次那条已经从 aiContent
+    // 剥掉且写入幂等（同活动不重复），因此普通单轮回复不会重放副作用。
+    aiContent = await consumeScheduleChanges(aiContent);
 
     // ─── Step 3: ChatParser.parseAndExecuteActions ───
     // mcdInheritMeta 一起传下去：戳一戳 / 转账卡 / 音乐卡 / 新闻卡 / 日程系统提示 / 生活记录卡

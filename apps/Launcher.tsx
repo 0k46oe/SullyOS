@@ -1159,15 +1159,19 @@ const Launcher: React.FC = () => {
 
       {/* Page Indicators */}
       <div
-          className="absolute left-0 w-full flex justify-center gap-2 pointer-events-none z-20"
+          className="absolute left-0 w-full flex justify-center gap-1 pointer-events-none z-20"
           style={{ bottom: `calc(${launcherBottomInset} + 5.5rem)` }}
+          aria-hidden="true"
       >
           {Array.from({ length: totalPages }).map((_, i) => (
-              <div 
-                key={i}
-                className={`h-1.5 rounded-full transition-all duration-300 ${activePageIndex === i ? 'w-4 opacity-100' : 'w-1.5 opacity-40'}`} 
-                style={{ backgroundColor: contentColor }}
-              ></div>
+              // 每个页码占固定 16px 槽位，只动画内部圆点。旧版直接动画 flex child 的宽度，
+              // 快速划过多页时 WebKit 会一边改宽一边重算整行居中，几个过渡态就会挤成方块串。
+              <div key={i} className="flex h-1.5 w-4 shrink-0 items-center justify-center">
+                  <div
+                    className={`h-1.5 rounded-full transform-gpu transition-[width,opacity] duration-300 ${activePageIndex === i ? 'w-4 opacity-100' : 'w-1.5 opacity-40'}`}
+                    style={{ backgroundColor: contentColor }}
+                  />
+              </div>
           ))}
       </div>
 

@@ -56,7 +56,9 @@ describe('CallApp runtime references', () => {
     expect(source).toContain('idleNudgeCountRef');
     expect(source).toContain('电话刚接通。你先开口');
     expect(source).toContain('callPreferences.characterInitiative');
+    expect(source).toContain('callPreferences.idleNudgeEnabled');
     expect(preferenceSource).toContain('characterInitiative: true');
+    expect(preferenceSource).toContain('idleNudgeEnabled: false');
     expect(preferenceSheetSource).toContain('谁先开口');
     expect(preferenceSheetSource).toContain('对方先说');
     expect(preferenceSheetSource).toContain('我先说');
@@ -78,7 +80,7 @@ describe('CallApp runtime references', () => {
     expect(source).toContain('shouldKeepNativeCallAudio');
     expect(source).not.toContain('<audio');
     expect(preferenceSheetSource).toContain('不改变聊天页的语音设置');
-    expect(preferenceSheetSource).toContain('关掉后，点“播放语音”时才会生成并播放');
+    expect(preferenceSheetSource).toContain('语音和视频通话都只在你点“播放语音”时才生成');
   });
 
   it('announces the call update once and spotlights the lower-left preferences entry', () => {
@@ -89,13 +91,13 @@ describe('CallApp runtime references', () => {
     expect(source).toContain('useState(shouldShowCallUpdateAnnouncement)');
     expect(source).toContain('markCallUpdateAnnouncementSeen()');
     expect(source).toContain('data-testid="call-preferences-entry"');
-    expect(preferenceSource).toContain("CALL_UPDATE_ANNOUNCEMENT_KEY = 'sully-call-update-audio-2026-08-v1'");
+    expect(preferenceSource).toContain("CALL_UPDATE_ANNOUNCEMENT_KEY = 'sully-call-update-preferences-2026-08-v2'");
     expect(announcementSource).toContain('data-testid="call-update-announcement"');
     expect(announcementSource).toContain('data-testid="call-settings-spotlight"');
-    expect(announcementSource).toContain('通话有些调整');
+    expect(announcementSource).toContain('通话偏好现在有三项');
     expect(announcementSource).toContain('可以设置谁先开口');
-    expect(announcementSource).toContain('关掉后不会提前生成语音');
-    expect(announcementSource).toContain('修了 iPhone 没声音的问题');
+    expect(announcementSource).toContain('两种通话都不会提前生成语音');
+    expect(announcementSource).toContain('沉默后主动接话改为按需开启');
   });
 
   it('offers game-like video layouts and a collapsible immersive subtitle', () => {

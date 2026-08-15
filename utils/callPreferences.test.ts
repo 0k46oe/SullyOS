@@ -10,19 +10,26 @@ import {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('call preferences', () => {
-  it('defaults both call behaviors on for existing users', () => {
+  it('keeps voice/opening defaults on but makes idle follow-ups opt-in', () => {
     expect(parseCallPreferences(null)).toEqual(DEFAULT_CALL_PREFERENCES);
     expect(parseCallPreferences('{broken')).toEqual(DEFAULT_CALL_PREFERENCES);
   });
 
-  it('persists initiative and autoplay independently', () => {
+  it('persists all three preferences independently and migrates old storage safely', () => {
     expect(parseCallPreferences(JSON.stringify({ characterInitiative: false }))).toEqual({
       characterInitiative: false,
       voiceAutoPlay: true,
+      idleNudgeEnabled: false,
     });
     expect(parseCallPreferences(JSON.stringify({ voiceAutoPlay: false }))).toEqual({
       characterInitiative: true,
       voiceAutoPlay: false,
+      idleNudgeEnabled: false,
+    });
+    expect(parseCallPreferences(JSON.stringify({ idleNudgeEnabled: true }))).toEqual({
+      characterInitiative: true,
+      voiceAutoPlay: true,
+      idleNudgeEnabled: true,
     });
   });
 

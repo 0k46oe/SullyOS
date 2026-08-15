@@ -98,6 +98,12 @@ export interface OSTheme {
   lockWallpaper?: string;
   darkMode: boolean;
   contentColor?: string;
+  /** 冷启动时是否播放整机开机过场。默认开启（undefined 视为 true）。 */
+  bootAnimationEnabled?: boolean;
+  /** 进入聊天或切换角色时是否播放角色登场过场。默认开启。 */
+  chatCharacterSwitchAnimationEnabled?: boolean;
+  /** App 代码块加载较慢时是否显示加载柔光动画。默认开启；卡死恢复页不受影响。 */
+  appLoadingAnimationEnabled?: boolean;
   /** 桌面整体皮肤。'animalcrossing' = 动森风格（NookPhone 彩色圆角图标 + 暖色界面）；
    *  'mobilegame' = 二次元手游首页风格（角色卡 + 等级经验条 + 货币栏 + 网格卡 + 罗盘 dock）；
    *  'tamagotchi' = 电子宠物养成机（桌面即角色的小屋舞台 + 四颗糖果实体键）。默认 'default'。 */
@@ -786,6 +792,13 @@ export interface BubbleStyle {
     backgroundImage?: string;
     backgroundImageOpacity?: number;
     borderRadius: number;
+    /** 四角独立圆角；未设置的角继续跟随 borderRadius，兼容旧主题。 */
+    borderTopLeftRadius?: number;
+    borderTopRightRadius?: number;
+    borderBottomRightRadius?: number;
+    borderBottomLeftRadius?: number;
+    /** 自定义 CSS 伪元素尾巴的出现频率。旧主题缺省为 every，新建主题默认 last。 */
+    tailMode?: 'every' | 'last' | 'none';
     opacity: number;
     
     decoration?: string;

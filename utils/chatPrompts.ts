@@ -74,6 +74,40 @@ function summarizeGroupMsgContent(m: Message): string {
     }
 }
 
+export type ChatModeTransition = 'call' | 'video' | 'date' | 'story';
+
+const getChatModeTransition = (message: Message): ChatModeTransition | null => {
+    const source = message.metadata?.source;
+    if (source === 'date') return 'date';
+    if (source === 'story_theater' || source === 'story_theater_memory') return 'story';
+    if (source === 'call' || source === 'call-end-popup') {
+        return message.metadata?.callMode === 'video' ? 'video' : 'call';
+    }
+    return null;
+};
+
+/**
+ * 判断当前是不是「从特殊互动模式回到 ChatApp 后，尚未产生普通聊天回复」的第一轮。
+ *
+ * 用户可能连续发送多个气泡再点生成，所以普通 user 消息不会截断搜索；一旦已经出现
+ * 普通 assistant 回复，就说明格式切换已经完成，不应在后续每一轮重复提醒。
+ * 普通 system 日志也不参与判断，避免挂断卡片与其他后台提示把真正的来源隔开。
+ */
+export const detectChatModeTransition = (messages: readonly Message[]): ChatModeTransition | null => {
+    let hasPendingChatInput = false;
+
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        const mode = getChatModeTransition(message);
+        if (mode) return hasPendingChatInput ? mode : null;
+
+        if (message.role === 'assistant') return null;
+        if (message.role === 'user') hasPendingChatInput = true;
+    }
+
+    return null;
+};
+
 /**
  * buildSystemPrompt / buildSystemPromptParts 的构建选项。
  *
@@ -93,6 +127,8 @@ function summarizeGroupMsgContent(m: Message): string {
  */
 export interface PromptBuildOptions {
     forFirePack?: boolean;
+    /** 主 API 从完整数据库历史识别出的「刚从哪种模式回到 ChatApp」。 */
+    returningFromMode?: ChatModeTransition;
     /**
      * `timelyByWorker` = 这份 prompt 会交给 amsg worker 在 fire 时刻补时效段
      * （即时对话路径）。与 forFirePack 的区别：只裁「worker 那边有对应槽位」的
@@ -460,11 +496,16 @@ ${groupLogStr}\n`;
         // ── 拼接：易变的进 volatileState，稳定的进 baseSystemPrompt ──
         volatileState += realtimeText;
 
-        // 2a. 日程注入（当前时段 + 意识流独白，每轮都可能变）
+        // 2a. 日程注入（完整今日日程 + 当前时段 + 意识流独白，每轮都可能变）
         //     fire_pack 不烤：改由 worker 到点用 AMSG_SLOT_SCENE 现挑时段（见 amsgFireScene）。
         if (schedule && !forFirePack) {
             try {
-                const scheduleContext = ContextBuilder.buildScheduleInjection(schedule, evolvedNarrative, charNow);
+                const scheduleContext = ContextBuilder.buildScheduleInjection(
+                    schedule,
+                    evolvedNarrative,
+                    charNow,
+                    { includeFullDay: true, includeChangeInstruction: true },
+                );
                 if (scheduleContext) volatileState += `\n${scheduleContext}\n`;
             } catch (e) {
                 console.error('Failed to inject schedule context:', e);
@@ -889,15 +930,23 @@ ${xhsEnabled ? `${[notionEnabled, feishuEnabled, notionNotesEnabled].filter(Bool
 
 `;
 
-        // 「刚结束见面/通话」的切换提示由倒数第二条消息推导，随对话推进而变 → 易变段。
+        // 特殊模式结束后的第一轮必须把输出格式重新锚定到 ChatApp。
+        // 主聊天路径会从完整 DB 历史算好 returningFromMode；直接调用 ChatPrompts 的旧路径
+        // 则用 currentMsgs 兜底。不能再看固定的倒数第二条：用户可能连续发多个气泡，界面
+        // 状态也会隐藏 date/call/story 消息，而 API 历史仍会携带它们。
         // fire_pack 不烤：打包时确实刚挂电话，但那条主动消息可能是第二天凌晨才发出去的，
         // 角色照着这句接一句「刚才电话里说的那个……」就穿帮了。
-        const previousMsg = (currentMsgs.length > 1 && !forFirePack) ? currentMsgs[currentMsgs.length - 2] : null;
-        if (previousMsg && previousMsg.metadata?.source === 'date') {
-            volatileState += `\n\n[System Note: You just finished a face-to-face meeting. You are now back on the phone. Switch back to texting style.]`;
-        }
-        if (previousMsg && (previousMsg.metadata?.source === 'call' || previousMsg.metadata?.source === 'call-end-popup')) {
-            volatileState += `\n\n[系统提示: 你刚刚和对方结束了一通电话，现在回到了文字聊天模式。请切换回打字聊天的风格——不要再用电话口吻说话，不要输出语音标签，回到正常的 IM 短句风格。你可以自然地提一下"刚才电话里说的……"之类的衔接，但不要继续以通话模式回复。]`;
+        const returningFromMode = !forFirePack
+            ? (promptOptions?.returningFromMode || detectChatModeTransition(currentMsgs))
+            : null;
+        if (returningFromMode) {
+            const modeLabel: Record<ChatModeTransition, string> = {
+                call: '语音通话',
+                video: '视频通话',
+                date: '线下见面',
+                story: '剧情模式',
+            };
+            volatileState += `\n\n[系统提示｜模式切换（最高优先级）: 你刚刚结束了${modeLabel[returningFromMode]}，现在已经回到 ChatApp 的文字聊天界面。之前模式中的台词、旁白、动作、场景或转录格式只代表已经发生的历史，绝不是当前回复的格式范例。从这一条开始，只按 ChatApp 当前启用的输出规则回复：使用自然的 IM 短句/气泡，不沿用通话口吻、连续口语转录、动作描写、小说旁白、场景标题或说话人标签；如果 ChatApp 当前开启了语音消息，仍可遵守它自己的语音消息格式。你可以自然承接刚才发生的事，但必须以正在聊天界面发消息的方式表达。]`;
         }
 
         // Voice message prompt injection
