@@ -41,6 +41,8 @@ import {
     type AvatarModelBackupProgress,
 } from '../utils/avatarModelBackup';
 import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '../utils/apiConfigNormalize';
+import { configFromPreset, findActivePresetId, type PresetSwitchPatch } from '../utils/apiPresetSwitch';
+import type { APIConfig } from '../types';
 import { describeImageWithVisionApi, VISION_API_TEST_IMAGE_DATA_URL, visionApiConfigFromPreset } from '../utils/visionApi';
 
 // hot_news（news.orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
@@ -495,8 +497,12 @@ const Settings: React.FC = () => {
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [isLoadingVisionModels, setIsLoadingVisionModels] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
-  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
-  const [selectedPresetName, setSelectedPresetName] = useState('');
+  // 就地编辑某条预设：只改预设本身；改的正好是当前生效那条时，生效配置一并跟着走
+  const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
+  const [editPresetName, setEditPresetName] = useState('');
+  const [editPresetUrl, setEditPresetUrl] = useState('');
+  const [editPresetKey, setEditPresetKey] = useState('');
+  const [editPresetModel, setEditPresetModel] = useState('');
   const [holdingDeletePresetId, setHoldingDeletePresetId] = useState<string | null>(null);
   const presetDeleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
@@ -826,17 +832,27 @@ const Settings: React.FC = () => {
   }, []);
   useEffect(() => { void refreshAvatarModelInventory(); }, [refreshAvatarModelInventory]);
 
-  // Auto-save draft configs locally to prevent loss during typing
+  // 把已保存的配置同步进上面这些输入框。
+  //
+  // 三个区块（主 API / 识图 / 其他）各同步各的，依赖写到具体字段值上——**不能**整个
+  // apiConfig 当依赖：updateApiConfig 每次都返回新对象，那样在识图区点一下保存，
+  // 主 API 这边还没保存的输入就被悄悄冲回旧值了，而且界面上完全看不出来。
   useEffect(() => {
       setLocalUrl(apiConfig.baseUrl);
       setLocalKey(apiConfig.apiKey);
       setLocalModel(String(apiConfig.model || ''));
       setLocalStream(apiConfig.stream === true);
       setLocalTemperature(typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85);
+  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.stream, apiConfig.temperature]);
+
+  useEffect(() => {
       setLocalVisionEnabled(apiConfig.visionApi?.enabled === true);
       setLocalVisionUrl(apiConfig.visionApi?.baseUrl || '');
       setLocalVisionKey(apiConfig.visionApi?.apiKey || '');
       setLocalVisionModel(apiConfig.visionApi?.model || '');
+  }, [apiConfig.visionApi?.enabled, apiConfig.visionApi?.baseUrl, apiConfig.visionApi?.apiKey, apiConfig.visionApi?.model]);
+
+  useEffect(() => {
       setLocalMiniMaxKey(apiConfig.minimaxApiKey || '');
       setLocalMiniMaxGroupId(apiConfig.minimaxGroupId || '');
       setLocalMiniMaxRegion(apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic');
@@ -847,24 +863,87 @@ const Settings: React.FC = () => {
       setLocalVoicePromptMinimax(apiConfig.voicePrompts?.minimax || '');
       setLocalVoicePromptFish(apiConfig.voicePrompts?.fishaudio || '');
       setLocalVoicePromptDate(apiConfig.voicePrompts?.dateVoice || '');
-  }, [apiConfig]);
+  }, [
+      apiConfig.minimaxApiKey, apiConfig.minimaxGroupId, apiConfig.minimaxRegion, apiConfig.aceStepApiKey,
+      apiConfig.ttsProvider, apiConfig.fishAudioApiKey, apiConfig.fishAudioModel,
+      apiConfig.voicePrompts?.minimax, apiConfig.voicePrompts?.fishaudio, apiConfig.voicePrompts?.dateVoice,
+  ]);
 
-  const selectedApiPreset = useMemo(
-      () => apiPresets.find(preset => preset.id === selectedPresetId) || null,
-      [apiPresets, selectedPresetId],
+  // 当前生效的是哪条预设 —— 按已保存的配置反查，不额外记状态。
+  // 这样刷新、手改 URL、导入备份之后，界面上的「使用中」永远等于请求真的会发去哪。
+  const activePresetId = useMemo(
+      () => findActivePresetId(apiPresets, apiConfig),
+      [apiPresets, apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model],
   );
 
-  const loadPreset = (preset: typeof apiPresets[0]) => {
-      setSelectedPresetId(preset.id);
-      setSelectedPresetName(preset.name);
-      setLocalUrl(normalizeApiBaseUrl(preset.config.baseUrl));
-      setLocalKey(normalizeApiCredential(preset.config.apiKey));
-      setLocalModel(normalizeApiModel(preset.config.model));
-      setLocalStream(preset.config.stream === true);
-      setLocalTemperature(typeof preset.config.temperature === 'number' ? preset.config.temperature : 0.85);
-      // MiniMax / AceStep settings are NOT overwritten by presets — typically one user
-      // has only one MiniMax / Replicate account regardless of which LLM preset they use.
-      addToast(`已载入预设：${preset.name}；点「保存配置」后才会切换生效`, 'info');
+  /**
+   * 把一份配置真正切过去。保存按钮和点预设走的是同一条路——除了写进全局配置，
+   * 还要把已排程的主动消息凭据一起换掉，否则聊天换了、后台任务还拿旧 Key 打请求。
+   */
+  const commitApiConfig = (patch: PresetSwitchPatch | Partial<APIConfig>) => {
+    updateApiConfig(patch);
+    // 支持凭据表的 Worker 上，任务只带引用，换 Key 只要覆盖云端那几行——不用逐条改任务。
+    // 老 Worker 上这句是 no-op，凭据靠下面那条逐条补刷的老路续命。
+    syncAmsgLlmCredentials({ ...apiConfig, ...patch });
+    // 已排程的主动消息 2.0 AI 任务里冻结的是排程那一刻的凭据——换 Key / 换模型后
+    // 不重传的话，到点全拿旧凭据打请求（旧 Key 一吊销就是连环 401）。best-effort：
+    // 保存本身不等它，失败只提示；没配 2.0 / 没有 pending AI 任务时它是 no-op。
+    // 存量的内联任务还靠它，所以走引用那条路的用户这里照跑（带 credRefs 的任务
+    // 到点只认引用，这一份补刷落在它们身上是无害的空转）。
+    void ActiveMsgClient.refreshApiCredentialsForPendingTasks({ ...apiConfig, ...patch })
+      .then((result) => {
+        if (result.status === 'partial') {
+          addToast(`API 已保存，但有 ${result.failed} 条已排程的主动消息没换上新凭据，稍后再保存一次可重试。`, 'error');
+        }
+      })
+      .catch((error) => {
+        console.warn('[Settings] 刷新已排程任务的 API 凭据失败', error);
+        addToast('API 已保存，但已排程的主动消息凭据刷新失败，稍后再保存一次可重试。', 'error');
+      });
+  };
+
+  /**
+   * 点预设 = 直接切过去并生效，没有「载入了但还没保存」的中间状态。
+   * 上面的输入框由 apiConfig 同步 effect 自己跟上，不在这里手动塞。
+   * MiniMax / AceStep 那些不归预设管：一个人通常只有一个语音账号，换 LLM 不该动它。
+   */
+  const applyPreset = (preset: typeof apiPresets[0]) => {
+      // 已经在用这条也照切：「使用中」只看 URL/Key/Model 三件套，温度、流式可能被手调过，
+      // 再点一下的语义就是「整套回到这条预设存的样子」。
+      commitApiConfig(configFromPreset(preset));
+      addToast(`已切换到「${preset.name}」，立即生效`, 'success');
+  };
+
+  const openEditPreset = (preset: typeof apiPresets[0]) => {
+      cancelPresetDeleteHold();
+      setEditingPresetId(preset.id);
+      setEditPresetName(preset.name);
+      setEditPresetUrl(preset.config.baseUrl || '');
+      setEditPresetKey(preset.config.apiKey || '');
+      setEditPresetModel(preset.config.model || '');
+  };
+
+  const handleUpdatePreset = () => {
+      const preset = apiPresets.find(item => item.id === editingPresetId);
+      if (!preset) return;
+      const name = editPresetName.trim();
+      if (!name) {
+          addToast('预设名称不能为空', 'error');
+          return;
+      }
+      const nextConfig = {
+          ...preset.config,
+          baseUrl: normalizeApiBaseUrl(editPresetUrl),
+          apiKey: normalizeApiCredential(editPresetKey),
+          model: normalizeApiModel(editPresetModel),
+      };
+      // 「正在用的就是这条」要在改之前问，改完值就对不上了
+      const wasActive = activePresetId === preset.id;
+      updateApiPreset(preset.id, name, nextConfig);
+      // 改的正好是当前生效那条 → 生效配置跟着走，否则界面写着新 Key、请求还在用旧的
+      if (wasActive) commitApiConfig(configFromPreset({ ...preset, name, config: nextConfig }));
+      setEditingPresetId(null);
+      addToast(wasActive ? `「${name}」已更新，当前配置同步生效` : `「${name}」已更新`, 'success');
   };
 
   const cancelPresetDeleteHold = useCallback(() => {
@@ -879,13 +958,11 @@ const Settings: React.FC = () => {
       if (presetDeleteTimerRef.current) clearTimeout(presetDeleteTimerRef.current);
   }, []);
 
+  // 删预设只是把这张「存档卡」扔掉：当前生效的配置是拷贝，不受影响。
   const deleteApiPreset = (id: string, name: string) => {
       cancelPresetDeleteHold();
       removeApiPreset(id);
-      if (selectedPresetId === id) {
-          setSelectedPresetId(null);
-          setSelectedPresetName('');
-      }
+      setEditingPresetId(current => (current === id ? null : current));
       addToast(`已删除预设: ${name}`, 'success');
   };
 
@@ -896,10 +973,7 @@ const Settings: React.FC = () => {
           presetDeleteTimerRef.current = null;
           setHoldingDeletePresetId(null);
           removeApiPreset(id);
-          if (selectedPresetId === id) {
-              setSelectedPresetId(null);
-              setSelectedPresetName('');
-          }
+          setEditingPresetId(current => (current === id ? null : current));
           addToast(`已删除预设: ${name}`, 'success');
       }, 700);
   };
@@ -921,12 +995,11 @@ const Settings: React.FC = () => {
       addToast('预设已保存', 'success');
   };
 
+  /**
+   * 保存下面这份表单 = 改「当前生效的配置」，**不会**顺手覆盖任何一条预设。
+   * 想把改动存回预设，走预设那排的铅笔（弹窗里可一键填入当前配置）。
+   */
   const handleSaveApi = () => {
-    const presetName = selectedPresetName.trim();
-    if (selectedApiPreset && !presetName) {
-      addToast('预设名称不能为空', 'error');
-      return;
-    }
     const nextConfig = {
       apiKey: normalizeApiCredential(localKey),
       baseUrl: normalizeApiBaseUrl(localUrl),
@@ -937,33 +1010,9 @@ const Settings: React.FC = () => {
     setLocalKey(nextConfig.apiKey);
     setLocalUrl(nextConfig.baseUrl);
     setLocalModel(nextConfig.model);
-    updateApiConfig(nextConfig);
-    if (selectedApiPreset) {
-      updateApiPreset(selectedApiPreset.id, presetName, {
-        ...selectedApiPreset.config,
-        ...nextConfig,
-      });
-    }
-    setStatusMsg(selectedApiPreset ? '配置和预设已保存' : '配置已保存');
+    commitApiConfig(nextConfig);
+    setStatusMsg('配置已保存');
     setTimeout(() => setStatusMsg(''), 2000);
-    // 支持凭据表的 Worker 上，任务只带引用，换 Key 只要覆盖云端那几行——不用逐条改任务。
-    // 老 Worker 上这句是 no-op，凭据靠下面那条逐条补刷的老路续命。
-    syncAmsgLlmCredentials({ ...apiConfig, ...nextConfig });
-    // 已排程的主动消息 2.0 AI 任务里冻结的是排程那一刻的凭据——换 Key / 换模型后
-    // 不重传的话，到点全拿旧凭据打请求（旧 Key 一吊销就是连环 401）。best-effort：
-    // 保存本身不等它，失败只提示；没配 2.0 / 没有 pending AI 任务时它是 no-op。
-    // 存量的内联任务还靠它，所以走引用那条路的用户这里照跑（带 credRefs 的任务
-    // 到点只认引用，这一份补刷落在它们身上是无害的空转）。
-    void ActiveMsgClient.refreshApiCredentialsForPendingTasks({ ...apiConfig, ...nextConfig })
-      .then((result) => {
-        if (result.status === 'partial') {
-          addToast(`API 已保存，但有 ${result.failed} 条已排程的主动消息没换上新凭据，稍后再保存一次可重试。`, 'error');
-        }
-      })
-      .catch((error) => {
-        console.warn('[Settings] 刷新已排程任务的 API 凭据失败', error);
-        addToast('API 已保存，但已排程的主动消息凭据刷新失败，稍后再保存一次可重试。', 'error');
-      });
   };
 
   const handleSaveVisionApi = () => {
@@ -2164,15 +2213,25 @@ const Settings: React.FC = () => {
                     <div className="flex gap-2 flex-wrap">
                         {apiPresets.map(preset => (
                             <div key={preset.id} className={`flex items-center rounded-lg pl-3 pr-1 py-1 shadow-sm border transition-colors ${
-                                selectedPresetId === preset.id
+                                activePresetId === preset.id
                                     ? 'bg-primary/5 border-primary/30'
                                     : 'bg-white border-slate-200'
                             }`}>
-                                <button type="button" onClick={() => loadPreset(preset)}
-                                    className={`text-xs font-medium cursor-pointer mr-2 transition-colors ${
-                                        selectedPresetId === preset.id ? 'text-primary' : 'text-slate-600 hover:text-primary'
+                                <button type="button" onClick={() => applyPreset(preset)}
+                                    title={`切换到 ${preset.name}`}
+                                    className={`text-xs font-medium cursor-pointer mr-1.5 transition-colors ${
+                                        activePresetId === preset.id ? 'text-primary' : 'text-slate-600 hover:text-primary'
                                     }`}>
                                     {preset.name}
+                                    {activePresetId === preset.id && <span className="ml-1 text-[9px] font-bold">· 使用中</span>}
+                                </button>
+                                <button
+                                    type="button"
+                                    aria-label={`编辑预设 ${preset.name}`}
+                                    title="编辑这条预设"
+                                    onClick={(event) => { event.stopPropagation(); openEditPreset(preset); }}
+                                    className="p-1 rounded-full text-slate-300 hover:bg-primary/10 hover:text-primary transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path d="M13.586 3.586a2 2 0 1 1 2.828 2.828l-.793.793-2.828-2.828.793-.793ZM11.379 5.793 3 14.172V17h2.828l8.38-8.379-2.83-2.828Z" /></svg>
                                 </button>
                                 <button
                                     type="button"
@@ -2194,34 +2253,11 @@ const Settings: React.FC = () => {
                             </div>
                         ))}
                     </div>
-                    <p className="text-[9px] text-slate-300 mt-1.5 pl-1">点名称加载并编辑；长按或双击 × 才会删除。</p>
+                    <p className="text-[9px] text-slate-300 mt-1.5 pl-1">点名称直接切换并生效；铅笔改这条预设的内容；长按或双击 × 才会删除。</p>
                 </div>
             )}
-            
-            <div className="space-y-4">
-                {selectedApiPreset && (
-                    <div className="rounded-xl border border-primary/20 bg-primary/5 p-3">
-                        <div className="flex items-center justify-between gap-2 mb-1.5">
-                            <label className="text-[10px] font-bold text-primary uppercase tracking-widest">正在编辑预设</label>
-                            <button
-                                type="button"
-                                onClick={() => { setSelectedPresetId(null); setSelectedPresetName(''); }}
-                                className="text-[9px] text-slate-400 hover:text-slate-600 transition-colors"
-                            >
-                                仅作为当前配置
-                            </button>
-                        </div>
-                        <input
-                            type="text"
-                            value={selectedPresetName}
-                            onChange={(event) => setSelectedPresetName(event.target.value)}
-                            placeholder="预设名称"
-                            className="w-full bg-white/80 border border-primary/15 rounded-xl px-3 py-2 text-sm font-medium text-slate-700 focus:bg-white transition-all"
-                        />
-                        <p className="text-[9px] text-slate-400 mt-1.5 leading-relaxed">可直接修改名称及下方 URL、Key、Model；保存配置时会覆盖这个预设，不会新建。</p>
-                    </div>
-                )}
 
+            <div className="space-y-4">
                 <div className="group">
                     <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">URL</label>
                     <input type="text" value={localUrl} onChange={(e) => setLocalUrl(e.target.value)} placeholder="https://..." className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
@@ -2304,8 +2340,13 @@ const Settings: React.FC = () => {
                 </div>
 
                 <button onClick={handleSaveApi} className="w-full py-3 rounded-2xl font-bold text-white shadow-lg shadow-primary/20 bg-primary active:scale-95 transition-all mt-2">
-                    {statusMsg || (selectedApiPreset ? `保存配置并更新「${selectedPresetName.trim() || selectedApiPreset.name}」` : '保存配置')}
+                    {statusMsg || '保存配置'}
                 </button>
+                {apiPresets.length > 0 && (
+                    <p className="text-[9px] text-slate-300 px-1 leading-relaxed">
+                        这里改的是当前生效的配置，不会动上面的预设；要把改动存回某条预设，点它的铅笔。
+                    </p>
+                )}
 
                 <button
                     onClick={async () => {
@@ -3723,6 +3764,51 @@ const Settings: React.FC = () => {
           <div className="space-y-2">
               <label className="text-[10px] font-bold text-slate-400 uppercase">预设名称 (例如: DeepSeek)</label>
               <input value={newPresetName} onChange={e => setNewPresetName(e.target.value)} className="w-full bg-slate-100 rounded-xl px-4 py-3 text-sm focus:outline-primary" autoFocus placeholder="Name..." />
+              <p className="text-[10px] text-slate-400 leading-relaxed pt-1">用上面表单里现在填的 URL / Key / Model 存一张新的存档卡。</p>
+          </div>
+      </Modal>
+
+      {/* 编辑预设：只改这条预设本身；正在用它的话，当前配置一并跟着走 */}
+      <Modal
+          isOpen={!!editingPresetId}
+          title="编辑预设"
+          onClose={() => setEditingPresetId(null)}
+          footer={<button onClick={handleUpdatePreset} className="w-full py-3 bg-primary text-white font-bold rounded-2xl">保存</button>}
+      >
+          <div className="space-y-3">
+              <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">名称</label>
+                  <input value={editPresetName} onChange={e => setEditPresetName(e.target.value)} placeholder="预设名称" className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm focus:outline-primary" />
+              </div>
+              <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">URL</label>
+                  <input value={editPresetUrl} onChange={e => setEditPresetUrl(e.target.value)} placeholder="https://..." className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary" />
+              </div>
+              <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Key</label>
+                  <input type="password" value={editPresetKey} onChange={e => setEditPresetKey(e.target.value)} placeholder="sk-..." className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary" />
+              </div>
+              <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Model</label>
+                  <input value={editPresetModel} onChange={e => setEditPresetModel(e.target.value)} placeholder="模型名称" className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary" />
+              </div>
+              <button
+                  type="button"
+                  onClick={() => {
+                      setEditPresetUrl(localUrl);
+                      setEditPresetKey(localKey);
+                      setEditPresetModel(localModel);
+                      addToast('已填入当前配置', 'info');
+                  }}
+                  className="w-full py-2 bg-slate-100 text-slate-500 text-xs font-bold rounded-xl active:scale-95 transition-transform"
+              >
+                  用当前配置填入
+              </button>
+              <p className="text-[10px] text-slate-400 leading-relaxed">
+                  {editingPresetId && activePresetId === editingPresetId
+                      ? '这条正在使用中，保存后当前配置会一起换成新的值。'
+                      : '只改这条预设，当前生效的配置不受影响。'}
+              </p>
           </div>
       </Modal>
 
