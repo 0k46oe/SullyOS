@@ -712,10 +712,24 @@ const recordSkip = async (
  * 只靠收尾那份的话这些路径一条痕都留不下）。每次覆盖写，最终留下最后一跳的原因。
  * best-effort：写不进去只是失败原因退化成笼统一句，绝不连累调用方。
  */
+/**
+ * fire 抛出来那个错误对象上的稳定 code（没有 → null）。
+ *
+ * 刻意**只认 `code`**，不去读 `statusCode`：Node 生态的 HTTP 库习惯把上游状态码挂成
+ * `statusCode`，而这个 catch 罩着整条投递链——宿主 hook 里转手抛出的一个 404 会被读成
+ * 「推送订阅已失效」，客户端于是引导用户白重建一次订阅。上游踩过同一个坑，修法就是
+ * 只在真正发 push 那一步认那个数（存在包内私有的 WeakMap 上，这里读不到）。
+ * 推送状态码要用的话，读上游写在任务行 last_error 上的那份。
+ */
+const readErrorCode = (error: unknown): string | null => {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && code ? code : null;
+};
+
 const writeChatFail = async (
   writeState: WriteState,
   charId: string,
-  record: { uuid: string; reason: string; retryCount: number },
+  record: { uuid: string; reason: string; retryCount: number; errorCode?: string | null },
 ): Promise<void> => {
   const full: AmsgChatFailRecord = {
     v: 1,
@@ -723,6 +737,7 @@ const writeChatFail = async (
     reason: record.reason.slice(0, 500),
     retryCount: record.retryCount,
     at: Date.now(),
+    ...(record.errorCode ? { errorCode: record.errorCode } : {}),
   };
   try {
     await writeState(amsgStateNamespace(charId), [
@@ -776,6 +791,8 @@ const sendInstantErrorPush = async (args: {
   charId: string;
   taskUuid: string;
   reason: string;
+  /** 底层错误的稳定 code（见 AmsgChatFailRecord.errorCode）；客户端按它给处置建议。 */
+  errorCode?: string | null;
   /** 任务行上的 user_id；拿不到时取订阅表唯一那行（单用户部署）。 */
   userId?: string | null;
   contactName?: string | null;
@@ -809,6 +826,7 @@ const sendInstantErrorPush = async (args: {
         amsgInstantError: true,
         taskUuid: args.taskUuid,
         reason: args.reason.slice(0, 500),
+        ...(args.errorCode ? { errorCode: args.errorCode } : {}),
       },
       notification: {
         title: args.contactName ? `${args.contactName} 的回复没能生成` : '回复没能生成',
@@ -845,10 +863,15 @@ export const amsgFireSettled = async (
   if (stash.instant && info.status === 'failed' && stash.taskUuid) {
     const failReason = info.error instanceof Error ? info.error.message : String(info.error ?? '未知错误');
     const retryCount = typeof info.task?.retry_count === 'number' ? info.task.retry_count : 0;
+    // 上游 amsg-server 2.6.0-next.21 起给这一族错误挂了稳定的 code（LLM 上游拒了请求是
+    // LLM_CALL_FAILED，hook 契约违约是 AGENTIC_*，正文超限是 *_TOO_LARGE）。原样带下去，
+    // 客户端据此说「该查 API Key」还是「该重发」，不必去猜那句人话的措辞。
+    const errorCode = readErrorCode(info.error);
     await writeChatFail(info.writeState, stash.charId, {
       uuid: stash.taskUuid,
       reason: failReason,
       retryCount,
+      errorCode,
     });
     // 终态判定与上游同源，两种都算：retry_count >= 3 的这跳失败后行转 failed
     // （handleDeliveryFailure 的梯子打光）；permanent 标记的错误（fireStateError 那族）
@@ -863,6 +886,7 @@ export const amsgFireSettled = async (
         charId: stash.charId,
         taskUuid: stash.taskUuid,
         reason: failReason,
+        errorCode,
         userId: typeof (info.task as Record<string, unknown> | null | undefined)?.user_id === 'string'
           ? (info.task as Record<string, unknown>).user_id as string
           : null,
@@ -2303,7 +2327,9 @@ export const buildWorkerConfig = (env: Env) => {
     webpush,
     // 前端和 Worker 不同源，带自定义头的请求会先发 CORS 预检，必须放行。
     // 单用户自用默认全开；想收紧就把 '*' 换成自己的 SullyOS 站点 origin。
-    cors: { origin: '*' },
+    // allowHeaders 显式给：上游默认那份不含 Content-Encoding，而 gzip 上行要用它
+    // （见 CORS_ALLOW_HEADERS 那段注释）。
+    cors: { origin: '*', allowHeaders: CORS_ALLOW_HEADERS },
     // 满血 fire-time hooks（onBeforeFire 现场填槽 + onLLMOutput 分类 +
     // executeToolCalls 服务端工具循环）；轮数/超时用库默认（5 轮 / 240s），
     // 即时对话那条单独把超时抬到 INSTANT_TOTAL_TIMEOUT_MS（onBeforeFire 返回值里给）。
@@ -2413,13 +2439,24 @@ export const inspectWorkerEnv = (env: Env): WorkerEnvReport => {
   };
 };
 
-// 跟上游 corsHeadersFor 放行的那一份保持一致：预检放行的头少一个，正式请求就会被
-// 浏览器拦下，而拦下的表现同样是没有下文的 "Failed to fetch"。
+/**
+ * 预检放行的请求头。
+ *
+ * 这一份同时喂给包装层自己的响应（CORS_HEADERS）和上游 config 的 `cors.allowHeaders`
+ * ——两处**必须**是同一串：预检放行的头少一个，正式请求就会被浏览器拦下，而拦下的表现
+ * 同样是没有下文的 "Failed to fetch"，从外面根本看不出是 CORS 的事。
+ *
+ * `Content-Encoding` 是给 gzip 上行用的。它不在 CORS 安全列表里，所以带上它的请求
+ * 必过预检；上游默认那份白名单里没有它，不显式配的话，压过的请求一条都发不出去。
+ */
+const CORS_ALLOW_HEADERS =
+  'Content-Type, Content-Encoding, X-User-Id, X-Payload-Encrypted, X-Encryption-Version, '
+  + 'X-Response-Encrypted, X-Client-Token';
+
 const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers':
-    'Content-Type, X-User-Id, X-Payload-Encrypted, X-Encryption-Version, X-Response-Encrypted, X-Client-Token',
+  'Access-Control-Allow-Headers': CORS_ALLOW_HEADERS,
   'Access-Control-Max-Age': '86400',
 };
 

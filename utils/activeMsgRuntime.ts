@@ -30,7 +30,9 @@ import {
   settleInstantChatExpiredNotices,
 } from './amsgInstantChat';
 import { flushAmsgState } from './amsgStateSync';
-import { describeInstantChatFailure, pruneStaleTasks } from './amsg2Tasks';
+import { describeInstantChatFailure, pruneStaleTasks, type RemoteTaskLastError } from './amsg2Tasks';
+// 线协议常量的唯一出处是 shared（amsg-sw 只是 re-export 同一份）。
+import { MULTIPART_FAILURE_REASON } from '@rei-standard/amsg-shared';
 import { appendInstantTraceEntry } from './instantTraceLog';
 import { trackEvent } from './analytics';
 
@@ -386,8 +388,39 @@ export const handleInstantErrorPushMessage = async (data: unknown): Promise<void
   // 不是即时对话的失败告知（旧 Instant Push 的诊断 push 没这两个字段）→ 不归这里管
   if (!charId || !taskUuid) return;
   const reason = typeof meta?.reason === 'string' && meta.reason ? meta.reason : null;
-  const described = reason ? describeInstantChatFailure({ reason }) : null;
+  // worker 挂在 push 上的稳定 code（老 worker 没这个字段 → 走通用文案）。带上它，
+  // 秒级到达的这条直发告知才和 60s 点名那条说同一句话。
+  const errorCode = typeof meta?.errorCode === 'string' && meta.errorCode ? meta.errorCode : undefined;
+  const described = reason
+    ? describeInstantChatFailure({ reason, ...(errorCode ? { errorCode } : {}) })
+    : null;
   await failInstantChatPending(charId, taskUuid, described ?? undefined);
+};
+
+/**
+ * 分片消息拼不起来时给用户的那句话。
+ *
+ * 一条推送装不下的内容（长回复、推理模型的思考过程）会被切成分片逐条发出，SW 收齐
+ * 还原。`reason` 说的是这一条为什么废了（amsg-sw 2.4.0-next.4 起带；见 shared 的
+ * `MULTIPART_FAILURE_REASON`），值得分开说：
+ *
+ *   - 等超时是**最常见也最无害**的一种——分片在路上、设备刚好离线了，跟用户说
+ *     「没等齐」就够，他重开一下多半就好；
+ *   - 其余几种（分片对不上、超出本地限额、拼不回来、存储写不进去、本地把分片关了）
+ *     说明发送端或链路真出了问题，重开没用，得让用户知道这不是网络抖一下。
+ *
+ * export 只为单测。
+ */
+export const describeMultipartFailure = (reason: unknown): string => {
+  if (reason === MULTIPART_FAILURE_REASON.TTL_EXPIRED) {
+    return '有一条消息没接收完整（分片没在时限内到齐），重开一下试试';
+  }
+  if (reason === MULTIPART_FAILURE_REASON.STORAGE_FAILED) {
+    return '有一条消息没接收完整：本机存储写不进去，清点空间后重试';
+  }
+  // 剩下的都是「发送端和接收端对不上」这一类，用户自己做不了什么，但要照实说，
+  // 别让他以为重开就能好。
+  return '有一条消息没接收完整（分片数据有问题），可以让对方重发一次';
 };
 
 /**
@@ -2187,9 +2220,11 @@ export const runInstantChatStatusCheck = async (): Promise<void> => {
     // 上游的 completed = 行还在、但已经出了 pending 队列（sent / failed 都算这个码）。
     // 而一次性任务发成功会把行删掉、查出来是 gone——所以还查得到的 completed 行只可能是 failed。
     if (status.state === 'completed') {
-      let reason = await readInstantChatFailReason(pending.charId, pending.uuid);
-      // chat_fail 没留下（isolate 连人带痕一起没了那种）时退回 409 捎来的行级
-      // lastError（amsg-server 2.6.0-next.15 起；查询按 uuid 点名，必然是这一行的）。
+      // 行级 lastError（409 捎来的，amsg-server 2.6.0-next.15 起）一起带进去：chat_fail
+      // 是 worker 自己写的、拿不到 pushStatus 那个数，而「订阅失效了，去重置」这句最有用
+      // 的话正好只有它推得出来。两份说的是同一跳，合起来看才完整。
+      let reason = await readInstantChatFailReason(pending.charId, pending.uuid, status.lastError);
+      // chat_fail 一条都没留下（isolate 连人带痕一起没了那种）时，只用行上这份。
       if (!reason && status.lastError) {
         reason = describeInstantChatFailure(status.lastError) ?? undefined;
       }
@@ -2219,8 +2254,17 @@ export const runInstantChatStatusCheck = async (): Promise<void> => {
  * 失败都返回 undefined（这是提示通道，绝不硬失败）。completed 和 gone 两个分支共用：
  * worker 在 fire 收尾失败、过期跳过、以及 skip-push（空输出）三处都会留痕。
  * 记录认 uuid：读到的是别轮的（比如上一轮失败的陈痕）就当没有，报笼统原因。
+ *
+ * `rowLastError` 是上游写在任务行上的那份（有就传）。两份记的是同一跳，各有各的长处：
+ * chat_fail 认得 `empty-generation` 这类只有 SullyOS 这边定义的机器码，行上那份则带着
+ * `pushStatus`——推送服务回的状态码只有上游发 push 的那一步知道，worker 的 fire 收尾
+ * 钩子上读不到。所以原因用 chat_fail 的，机读字段以行上那份打底。
  */
-const readInstantChatFailReason = async (charId: string, uuid: string): Promise<string | undefined> => {
+const readInstantChatFailReason = async (
+  charId: string,
+  uuid: string,
+  rowLastError?: RemoteTaskLastError | null,
+): Promise<string | undefined> => {
   try {
     const raw = await ActiveMsgClient.readClientStateValue(
       amsgStateNamespace(charId), AMSG_CHAT_FAIL_KEY,
@@ -2228,7 +2272,14 @@ const readInstantChatFailReason = async (charId: string, uuid: string): Promise<
     const record = parseChatFailRecord(raw);
     if (record?.uuid !== uuid) return undefined;
     return describeInstantChatFailure(
-      { at: new Date(record.at).toISOString(), reason: record.reason },
+      {
+        ...(rowLastError ?? {}),
+        at: new Date(record.at).toISOString(),
+        reason: record.reason,
+        // worker 那份写的是 fire 抛错时错误对象上的 code，跟行上那份同源同义；
+        // 它没写（老 worker / 这一档本来就没有 code）时沿用行上那份。
+        ...(record.errorCode ? { errorCode: record.errorCode } : {}),
+      },
       record.retryCount,
     ) ?? undefined;
   } catch (e) {
@@ -2386,7 +2437,7 @@ export const ActiveMsgRuntime = {
           if (subEvent === 'rei-amsg-multipart-expired') {
             logAmsg.warn('multipart expired', payload);
             window.dispatchEvent(new CustomEvent('active-msg-error', {
-              detail: { message: '消息接收不完整，部分内容可能丢失' }
+              detail: { message: describeMultipartFailure(payload?.reason) },
             }));
           }
           return;

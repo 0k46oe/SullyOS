@@ -810,6 +810,9 @@ const CHAT_CONTENT_BUDGET_BYTES = 2 * 1024 * 1024;
 
 const utf8ByteLength = (text: string): number => new TextEncoder().encode(text).length;
 
+/** 字节数 → 给人看的 MB（体积类报错共用一份口径）。 */
+const formatMegabytes = (bytes: number): string => (bytes / 1024 / 1024).toFixed(1);
+
 /** 结构化分段里有没有图片这类非文字内容（只有文字段的数组拆了也省不下什么）。 */
 const hasNonTextPart = (content: unknown): boolean =>
   Array.isArray(content) && content.some((part: any) => part?.type !== 'text');
@@ -872,7 +875,7 @@ export const toFirePackChatMessages = (
   }
 
   if (totalBytes > CHAT_CONTENT_BUDGET_BYTES) {
-    const mb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
+    const mb = formatMegabytes;
     // 走到这里，能拍的图全拍平了，还带着图的只可能是受保护的最新那条用户消息。
     // 报错前先算一笔账：把它的图也拍掉能不能进预算。能 → 罪魁确实是这张图，让用户
     // 删图/换小图是条真出路；不能 → 超限的是纯文本本身（长角色卡 + 世界书 + 近史），
@@ -915,6 +918,24 @@ export const describeInstantChatFailure = (status: number, body: any): string =>
   }
   if (status === 503) {
     return '即时对话没发出去：Worker 的环境变量没配齐（设置页点「重新连接并验证」能看到缺什么）。';
+  }
+  // 任务正文超过存储的单行上限（amsg-server 2.6.0-next.21 起在建任务时就回 400，
+  // 以前要一路走到落库才撞上 D1 的 `string or blob too big`）。上游把两个数放在
+  // details 里，照着念就是了——重试没有意义，得先把带上去的内容减下来。
+  //
+  // 跟 CHAT_CONTENT_BUDGET_BYTES 那道闸不是一回事：那道量的是 fire_pack 里的对话
+  // （走 client_state，5 MiB 一条），这道量的是任务正文本身（约 1 MB）。
+  const tooLarge = body?.error?.upstream?.error?.code === 'TASK_PAYLOAD_TOO_LARGE'
+    ? body?.error?.upstream?.error
+    : (code === 'TASK_PAYLOAD_TOO_LARGE' ? body?.error : null);
+  if (tooLarge) {
+    const bytes = Number(tooLarge?.details?.bytes);
+    const maxBytes = Number(tooLarge?.details?.maxBytes);
+    const sizes = Number.isFinite(bytes) && Number.isFinite(maxBytes)
+      ? `（约 ${formatMegabytes(bytes)} MB，上限 ${formatMegabytes(maxBytes)} MB）`
+      : '';
+    return `即时对话没发出去：这一轮的任务内容超过了云端单条任务的上限${sizes}。`
+      + '精简一下角色设定 / 世界书 / 携带的历史条数，或先关掉即时对话走本地生成。';
   }
   // 上游打回「时间必须在未来」：firstSendTime 是设备的钟加提前量算出来的，被打回
   // 说明提前量在路上被吃光了——要么整包状态上传得太慢，要么设备时钟本身偏慢。
@@ -1229,6 +1250,52 @@ const resubscribeAndRegister = async (client: ReiClient): Promise<void> => {
 };
 
 /**
+ * 请求体超过这么多字节才压。跟 amsg-client 的 `compressRequest` 用同一个数
+ * （16 KB）：小请求压缩省下的字节还不够抵一次 CompressionStream 的开销，而这条路上
+ * 真正的大件（fire_pack、整轮聊天）动辄几百 KB 起步，一个数就分得开。
+ */
+const REQUEST_GZIP_THRESHOLD_BYTES = 16 * 1024;
+
+/**
+ * 超阈值的请求体先 gzip 再上网线。
+ *
+ * 收益比 instant-push 那条路小一截，得说清楚：这里的正文进 HTTP 之前已经是**密文**，
+ * 而 fire_pack 真正的压缩早在交给上游加密之前就做过了（见 amsgFirePack 的
+ * packStateValue，省 60%）。所以这一层压掉的只是密文那层 base64 的膨胀，约 25%。
+ * 慢网和 iOS 上行那几秒里，这 25% 仍然是实打实少传的字节。
+ *
+ * 接收端：上游端点由 amsg-server 的 readRequestBody 解（2.6.0-next.21 起），包装层
+ * 自己的 `/instant-chat` 由 readMaybeGzippedBody 解。两边都按 gzip 魔数判断，所以
+ * 中途被边缘节点替我们解开、头还留着的那种情形也接得住。
+ *
+ * 压不动就退回明文：老 Safari 没有 CompressionStream，压缩本身出错也一样——这条路
+ * 只是省流量，绝不能变成发不出去的理由。
+ *
+ * export 只为单测。
+ */
+export const maybeGzipRequestBody = async (
+  body: BodyInit | null | undefined,
+): Promise<{ body: BodyInit | null | undefined; gzipped: boolean }> => {
+  if (typeof body !== 'string') return { body, gzipped: false };
+  // 快速排除：UTF-8 一个字符最多三字节（BMP 之外是四字节，但那是代理对、占两个
+  // char），所以字符数乘三还不到阈值的，字节数必然也不到，连量都不用量。反过来
+  // **不成立**——「字符数不到阈值」推不出「字节数不到阈值」，一段六千字的中文就是
+  // 六千字符、一万八千字节。绝大多数请求都在这条线以下，一次 encode 都不用做。
+  if (body.length * 3 < REQUEST_GZIP_THRESHOLD_BYTES) return { body, gzipped: false };
+  if (typeof CompressionStream !== 'function') return { body, gzipped: false };
+  try {
+    const raw = new TextEncoder().encode(body);
+    // 到这儿才量得准。压缩要用的也是这份字节，没有多算。
+    if (raw.byteLength < REQUEST_GZIP_THRESHOLD_BYTES) return { body, gzipped: false };
+    const stream = new Response(raw).body!.pipeThrough(new CompressionStream('gzip'));
+    return { body: await new Response(stream).arrayBuffer(), gzipped: true };
+  } catch (error) {
+    console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 请求体压缩失败，这一次照常发明文`, error);
+    return { body, gzipped: false };
+  }
+};
+
+/**
  * 带鉴权头请求 worker，同时把 HTTP 状态一起交出来。
  * 状态只有「连接」那条路用得上（401/404/其它要引导用户去改的地方不同），
  * 其余调用方走下面那层薄壳，签名跟以前一样只拿 body。
@@ -1243,10 +1310,14 @@ const fetchWithAuthRaw = async (
   if (config.serverToken) headers.set('X-Client-Token', config.serverToken);
   headers.set('X-User-Id', config.userId);
 
+  const { body, gzipped } = await maybeGzipRequestBody(init.body);
+  if (gzipped) headers.set('Content-Encoding', 'gzip');
+
   try {
     const response = await fetch(`${normalizeWorkerBase(config.workerUrl)}/${path}`, {
       ...init,
       headers,
+      body,
     });
 
     return { status: response.status, body: await safeResponseJson(response) };

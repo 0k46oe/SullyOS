@@ -800,6 +800,20 @@ describe('VAPID 配置', () => {
     expect(config.vapid.email).toBe('mailto:me@example.com');
   });
 
+  // 上游端点的 CORS 头由上游按 config.cors 出，包装层自己的路由用另一份常量。
+  // 两处不一致的话，一半端点能用、另一半被浏览器拦死，而拦下的表现都是那句没有
+  // 下文的 "Failed to fetch"——最难查的那种半瘫。
+  it('上游 config 的 allowHeaders 跟包装层预检那份是同一串，且都放行 Content-Encoding', async () => {
+    const config = buildWorkerConfig(baseEnv);
+    const preflight = await (worker as any).fetch(
+      new Request('https://w.example/instant-chat', { method: 'OPTIONS' }),
+      baseEnv,
+      { waitUntil: () => {} },
+    );
+    expect(config.cors.allowHeaders).toBe(preflight.headers.get('Access-Control-Allow-Headers'));
+    expect(config.cors.allowHeaders).toContain('Content-Encoding');
+  });
+
   it('解析函数本身：缺省/空白回退，配了就原样用', () => {
     expect(resolveVapidEmail(undefined)).toMatch(/^mailto:/);
     expect(resolveVapidEmail('')).toMatch(/^mailto:/);
@@ -2140,6 +2154,38 @@ describe('自排后续任务', () => {
     expect(record.retryCount).toBe(3);
   });
 
+  // 上游给这一族错误挂了稳定的 code。带下去，客户端才说得出「该查 API Key」还是
+  // 「重发就行」；不带的话它只能去正则匹配 reason 那句人话，上游改个措辞就静默失效。
+  it('错误对象上的 code 一起写进 chat_fail', async () => {
+    const writeState = vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 }));
+    const error = Object.assign(new Error('AI API error: 401 …'), { code: 'LLM_CALL_FAILED' });
+    await amsgFireSettled({
+      status: 'failed', sentCount: 0, task: { retry_count: 3 }, error,
+      scratch: { fire: makeStash({ instant: true }) }, writeState,
+    } as any);
+
+    const entries = writeState.mock.calls.flatMap((c) => (c as any)[1] as Array<{ key: string; value: string }>);
+    const record = JSON.parse(String(entries.find((e) => e.key === 'chat_fail')!.value));
+    expect(record.errorCode).toBe('LLM_CALL_FAILED');
+  });
+
+  // 只认 `code`，不认 `statusCode`。Node 生态的 HTTP 库习惯把上游状态码挂成
+  // statusCode，而这个 catch 罩着整条投递链——宿主 hook 里转手抛出的一个 404 会被
+  // 读成「推送订阅已失效」，客户端于是引导用户白重建一次订阅。上游踩过这个坑。
+  it('错误上只有 statusCode（不是推送那一步的）→ 不认，chat_fail 里没有 errorCode', async () => {
+    const writeState = vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 }));
+    const error = Object.assign(new Error('hook 里转手抛的 404'), { statusCode: 404 });
+    await amsgFireSettled({
+      status: 'failed', sentCount: 0, task: { retry_count: 3 }, error,
+      scratch: { fire: makeStash({ instant: true }) }, writeState,
+    } as any);
+
+    const entries = writeState.mock.calls.flatMap((c) => (c as any)[1] as Array<{ key: string; value: string }>);
+    const record = JSON.parse(String(entries.find((e) => e.key === 'chat_fail')!.value));
+    expect(record.errorCode).toBeUndefined();
+    expect(record.pushStatus).toBeUndefined();
+  });
+
   it('定时任务 fire 失败不写 chat_fail（那条路走面板对账，不占即时通道）', async () => {
     const writeState = vi.fn(async (
       _namespace: string,
@@ -2947,6 +2993,14 @@ describe('worker 入口 — 配置不全时的响应', () => {
     const response = await call('https://w.example/messages', { method: 'OPTIONS' });
     expect(response.status).toBe(204);
     expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
+  });
+
+  // 大 body 走 gzip 上行时请求带 Content-Encoding，而它不在 CORS 安全列表里 ——
+  // 预检不放行的话，浏览器连正式请求都不会发，用户侧只看得到一句没有下文的
+  // "Failed to fetch"，从外面完全看不出是 CORS 的事。
+  it('预检放行 Content-Encoding，否则压过的请求一条都发不出去', async () => {
+    const response = await call('https://w.example/instant-chat', { method: 'OPTIONS' });
+    expect(response.headers.get('Access-Control-Allow-Headers')).toContain('Content-Encoding');
   });
 
   it('/config-check 在配置缺一半时也要能答，否则前端没法告诉用户缺的是哪一样', async () => {

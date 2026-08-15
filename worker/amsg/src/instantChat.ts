@@ -272,6 +272,34 @@ const STATE_FORWARD_BACKOFF_MS = [0, 400, 1200];
 
 const sleep = (ms: number) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
+/** gzip 流的头两个字节（RFC 1952）。压没压过看这个，不看那个头。 */
+const GZIP_MAGIC = [0x1f, 0x8b];
+
+/**
+ * 把请求正文读成字符串，`Content-Encoding: gzip` 的在这一步还原。
+ *
+ * 跟上游 `readRequestBody` 认同一个头（客户端只有一个请求出口，两边端点得收同一种
+ * 东西），但这份是自己写的：上游那个函数住在 `@rei-standard/amsg-server` 包根，而包根
+ * 顶层 import 了 Node 的 `crypto`，这个 worker 是明确不开 `nodejs_compat` 的。
+ *
+ * 判据是**魔数不是头**。`Content-Encoding` 是标准头，链路上的边缘节点会替你把请求体
+ * 解开却把头留着（SullyOS 在 instant-push 那条路上实测过这件事，那边索性换了个自定义
+ * 头来躲开）——只看头的话，这种时候会拿明文去喂解压器，报出来是一句让人找不着北的
+ * 「请求体不是合法的 JSON」。看魔数则三种情形都对：没解过的解开、替我们解过的原样读、
+ * 压根没压的原样读。
+ */
+const readMaybeGzippedBody = async (request: Request): Promise<string> => {
+  if ((request.headers.get('content-encoding') ?? '').toLowerCase() !== 'gzip') {
+    return request.text();
+  }
+  const raw = new Uint8Array(await request.arrayBuffer());
+  if (raw.length < 2 || raw[0] !== GZIP_MAGIC[0] || raw[1] !== GZIP_MAGIC[1]) {
+    return new TextDecoder().decode(raw);
+  }
+  const stream = new Response(raw).body!.pipeThrough(new DecompressionStream('gzip'));
+  return new Response(stream).text();
+};
+
 /** 客户端预加密的信封形状（上游 parseEncryptedBody 认的就是这三个字段）。 */
 const isEncryptedEnvelope = (value: unknown): boolean => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -320,9 +348,12 @@ export const handleInstantChat = async (args: {
   if (!UUID_V4_RE.test(userId)) return fail(400, 'INVALID_USER_ID_FORMAT', 'X-User-Id 必须是 UUID v4 格式');
 
   // ── 外壳是明文 JSON，里头两个信封是客户端加密好的，包装层只搬不看。
+  //    body 超阈值时客户端会先 gzip 再发（这条路上的正文是整轮聊天，最大的一份），
+  //    所以读之前先过一道解压。
   let body: Record<string, unknown>;
   try {
-    const parsed = await request.json();
+    const text = await readMaybeGzippedBody(request);
+    const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
     body = parsed as Record<string, unknown>;
   } catch {

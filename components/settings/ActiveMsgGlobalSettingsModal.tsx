@@ -97,8 +97,14 @@ const REQUIRED_WORKER_FEATURES = [
 //            另外 client_state 的前缀清理改走字典序范围：D1 把 LIKE pattern 压到
 //            50 字节（官方文档没写），key 一长就整条语句报 pattern too complex，
 //            同批的状态写入跟着一起回滚。
+//   next.21 — 带 body 的端点认 `Content-Encoding: gzip`：即时对话那条路上的正文
+//            （整轮聊天）在客户端压过再发，旧 worker 不认这个头，会把压缩字节当
+//            明文读，报出来是一句「请求体不是合法的 JSON」——大消息一条都发不出去。
+//            同一档还有失败记录里的 errorCode（`LLM_CALL_FAILED` 之类）和上游拒绝
+//            请求时的原话：卡片上那句「生成失败」从此说得出到底是模型名写错了、
+//            余额不够，还是订阅失效该去重新登记。
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
-const REQUIRED_WORKER_VERSION = '2.6.0-next.20';
+const REQUIRED_WORKER_VERSION = '2.6.0-next.21';
 
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';
