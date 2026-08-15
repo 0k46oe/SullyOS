@@ -26,6 +26,18 @@ vi.mock('./keepAlive', () => ({
   KeepAlive: { init: vi.fn().mockResolvedValue(undefined), reregister: vi.fn().mockResolvedValue(undefined) },
 }));
 
+// 后台任务结果的分发口：真的那份会动态 import 记忆宫殿那一整套（IndexedDB），
+// 这里只关心「补收有没有把它交出去、销账判断对不对」。
+const { resultDispatch } = vi.hoisted(() => ({
+  resultDispatch: { calls: [] as unknown[], settle: true },
+}));
+vi.mock('./amsgResults', () => ({
+  dispatchAmsgResult: vi.fn(async (payload: unknown) => {
+    resultDispatch.calls.push(payload);
+    return resultDispatch.settle;
+  }),
+}));
+
 const { storeState } = vi.hoisted(() => ({
   storeState: {
     config: {
@@ -918,6 +930,53 @@ describe('推送丢了的补收（服务端账本）', () => {
     expect(written).toBe(0);
     expect(storeState.saved).toHaveLength(0);
     expect(ackNow).toEqual([messageId]);
+  });
+
+  // 后台任务（门牌整理这类）跑完送回来的结果**只走这条路**：不弹通知的结果上游只落
+  // 账本、不发推送，所以补收是它唯一的入口。跟 reasoning/error 那批一起当场销账丢掉的
+  // 话，云端跑完的东西会一声不响地全部蒸发——面板全绿、日志干净、就是东西没了。
+  describe('后台任务的结果（messageKind: result）', () => {
+    beforeEach(() => {
+      resultDispatch.calls = [];
+      resultDispatch.settle = true;
+    });
+
+    it('交给分发口，不写进聊天流', async () => {
+      const messageId = 'msg-result';
+      const push = outboxPush(messageId, {
+        messageKind: 'result',
+        resultKind: 'plate-consolidate',
+        message: undefined,
+        items: [{ room: 'user_room', text: '小明搬去合租了' }],
+      });
+      stubOutbox([entry(messageId, push)]);
+      const { written, ackNow } = await drainOutbox();
+
+      expect(written).toBe(0);
+      expect(storeState.saved).toHaveLength(0);
+      expect(resultDispatch.calls).toEqual([push]);
+      expect(ackNow).toEqual([messageId]);
+    });
+
+    it('消化失败就不销账，下次上线再拉回来', async () => {
+      resultDispatch.settle = false;
+      const messageId = 'msg-result-retry';
+      stubOutbox([entry(messageId, outboxPush(messageId, {
+        messageKind: 'result', resultKind: 'plate-consolidate',
+      }))]);
+      const { ackNow } = await drainOutbox();
+      expect(ackNow).toEqual([]);
+    });
+
+    it('时效窗那道判断不套在结果上——结果晚到本来就是常态', async () => {
+      const messageId = 'msg-result-old';
+      const tooOld = Date.now() - OUTBOX_BACKFILL_MAX_AGE_MS - 1;
+      stubOutbox([entry(messageId, outboxPush(messageId, {
+        messageKind: 'result', resultKind: 'plate-consolidate',
+      }), tooOld)]);
+      await drainOutbox();
+      expect(resultDispatch.calls).toHaveLength(1);
+    });
   });
 
   it('情绪结果显式标成 emotion_update（冲刷管线靠它分流，认不出会当正文气泡渲染）', async () => {

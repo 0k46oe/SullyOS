@@ -663,6 +663,13 @@ async function saveIncomingActiveMessage(payload: any) {
       });
       return;
 
+    case 'result':
+      // 宿主自定义结果（worker 的 ctx.emitResult），不是聊天内容: 不写 inbox, 原样
+      // 转给页面按 resultKind 分流。落进 content 分支的话, 结果里那些不是正文的字段
+      // 会被当角色说的一句话渲染成气泡。
+      await notifyClients({ type: 'active-msg-result', payload });
+      return;
+
     default:
       console.warn('[amsg] unknown messageKind, falling back to content', messageKind);
       await saveContentToInbox(payload);

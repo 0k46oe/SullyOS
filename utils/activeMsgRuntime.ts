@@ -29,6 +29,7 @@ import {
   settleInstantChatApiLog,
   settleInstantChatExpiredNotices,
 } from './amsgInstantChat';
+import { dispatchAmsgResult } from './amsgResults';
 import { flushAmsgState } from './amsgStateSync';
 import { describeInstantChatFailure, pruneStaleTasks, type RemoteTaskLastError } from './amsg2Tasks';
 // 线协议常量的唯一出处是 shared（amsg-sw 只是 re-export 同一份）。
@@ -2427,6 +2428,15 @@ export const ActiveMsgRuntime = {
         // 不用等 60s 点名。metadata 对不上号的（IP 诊断 push）在里面被静默略过。
         if (type === 'active-msg-error') {
           void handleInstantErrorPushMessage(event.data);
+          return;
+        }
+
+        // 云端后台任务跑完送回来的结果（worker 的 emitResult）。这里是「推送直达」那条腿；
+        // 另一条腿是上线补收（drainOutbox），两边指的是同一个分发口。销账不在这里做——
+        // 推来的这一份服务端账本上也有一行，等补收那条路照常划掉，重复消化由各 handler
+        // 自己保证幂等（门牌是完整列表覆盖，天然幂等）。
+        if (type === 'active-msg-result') {
+          void dispatchAmsgResult(event.data?.payload);
           return;
         }
 

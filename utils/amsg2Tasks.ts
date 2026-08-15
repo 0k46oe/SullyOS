@@ -22,6 +22,7 @@ import {
 } from '../types';
 import { FIRE_GRACE_MS, recurrencePeriodMs } from './amsg2ExpireGuard';
 import { AMSG_INSTANT_CHAT_SUBTYPE, type AmsgTzRef, formatFireTimeShort } from './amsgFirePack';
+import { AMSG_BACKGROUND_JOB_SUBTYPE } from './amsgTaskKinds';
 
 export const MAX_ACTIVE_TASKS_PER_CHAR = 5;
 
@@ -474,12 +475,14 @@ export const reconcileTasksWithRemote = (
     // 字段不全的行不补：宁可少一条，也别拿默认值凑一条跟远端对不上的记录出来。
     // 已经失败的行也不补：它不会再响，补进来就是清单上一条永远等不到的幽灵任务。
     // 即时对话的行同样不补：那是用户此刻正等着的一轮聊天，不是排程，进了清单会显示成
-    // 「待触发的任务」，还可能被「取消全部」顺手掐掉。
+    // 「待触发的任务」，还可能被「取消全部」顺手掐掉。后台任务（门牌整理这类不说话的
+    // 活儿）同理——它们跟聊天任务共用调度器，但不是用户排的主动消息。
     .filter((row) => (
       !known.has(row.uuid)
       && row.nextSendAt && row.recurrenceType && row.messageType
       && row.status !== 'failed'
       && row.messageSubtype !== AMSG_INSTANT_CHAT_SUBTYPE
+      && row.messageSubtype !== AMSG_BACKGROUND_JOB_SUBTYPE
     ))
     .map((row): ActiveMsg2TaskRecord => ({
       taskUuid: row.uuid,

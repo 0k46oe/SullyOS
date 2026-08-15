@@ -67,6 +67,12 @@ import {
   packStateValue,
   parseLastSkip,
 } from './amsgFirePack';
+import {
+  AMSG_BACKGROUND_JOB_SUBTYPE,
+  AMSG_JOB_ID_KEY,
+  AMSG_JOB_NAMESPACE,
+  AMSG_TASK_KIND_KEY,
+} from './amsgTaskKinds';
 import type { AmsgFireScene } from './amsgFireScene';
 import { buildSongPool } from './charMusicSchedule';
 import { getDailyScheduleForChar } from './dailySchedule';
@@ -373,6 +379,12 @@ const ensureWorkerReady = async () => {
 // 即时对话把它放上了发送热路径（拿到 202 之前的串行延迟）和 60s 状态点名（一跳最多
 // 两次），逐次重新握手纯属白付 RTT。键取会影响握手的三个字段；配置一变（换 worker /
 // 换密钥 / 清空重连）键就换，旧缓存自然作废。失败的握手不缓存，下一次重新来过。
+/**
+ * 「这台 worker 认不认识后台任务」的一次性探测结果（见 probeBackgroundJobSupport）。
+ * 只在内存里存，换 workerUrl 自然作废——用户中途换后端时不该拿旧结论当数。
+ */
+let backgroundJobProbe: { workerUrl: string; supported: boolean } | null = null;
+
 let cachedClientEntry: { key: string; promise: ReturnType<typeof createAndInitClient> } | null = null;
 
 /**
@@ -2249,6 +2261,154 @@ export const ActiveMsgClient = {
       // 解析好的绝对时刻（UTC ISO）。任务记录存这一份，字段口径才只有一种。
       firstSendAt: firstSendTime,
     };
+  },
+
+  /**
+   * 这台 worker 上的代码认不认识「后台任务」。
+   *
+   * 认的是 `GET /config-check` 里的 `backgroundJobs`——**这份 bundle 里有没有那段分派代码**，
+   * 不是版本号：自更新永远由用户那台 Worker 上的旧代码执行，「版本号对上了、新逻辑没生效」
+   * 是真实存在的中间态（即时对话那次踩过，见 probeInstantChatSupportDetailed）。
+   *
+   * 老 bundle 不报这个字段 → false，调用方留在本地跑。老 worker 会把后台任务当聊天任务
+   * 跑、卡在「本次任务指令缺失」终态失败，而那条任务行不在用户的清单里——面板一片正常，
+   * 活儿却永远不干。这道门就是为了别走到那儿。
+   *
+   * 探不到（网络抖 / 没连上）也返回 false：后台活儿本来就有本地那条路，宁可这一轮在本地
+   * 跑掉，也别建一条注定失败的任务。结论按 workerUrl 在内存里存一次，同一次会话不重复探
+   * ——这类任务几十轮才跑一次，缓存只为省掉「一轮里连着提交好几个 job」时的重复请求。
+   */
+  async probeBackgroundJobSupport(): Promise<boolean> {
+    let config: ActiveMsg2GlobalConfig;
+    try {
+      config = await ensureWorkerReady();
+    } catch {
+      return false;
+    }
+    if (backgroundJobProbe?.workerUrl === config.workerUrl) return backgroundJobProbe.supported;
+    let supported = false;
+    try {
+      const { status, body } = await fetchWithAuthRaw(
+        'config-check', config, { method: 'GET' }, '后台任务能力探测',
+      );
+      supported = status === 200 && body?.success === true && body?.data?.backgroundJobs === true;
+    } catch {
+      supported = false;
+    }
+    backgroundJobProbe = { workerUrl: config.workerUrl, supported };
+    return supported;
+  },
+
+  /**
+   * 排一条**后台任务**：不说话的那种活儿（门牌整理是第一个），跑完把结果送回客户端。
+   *
+   * 跟排主动消息的那条路（scheduleCharacterTask）共用调度器，但要的东西少得多：
+   * 不传 fire_pack / tool_pack（那是聊天专用的云端状态，worker 的 kind 分派排在读它们
+   * 之前），不填「本次任务指令」，也不写防穿帮锚点——「到点还该不该说这句话」那一整套
+   * 判断对后台活儿都不适用。
+   *
+   * 只走凭据引用那条路，不做内联降级：这类任务用的往往是副 API（比如记忆宫殿那份），
+   * 内联三件套那条老路只有一个 chat 槽位，塞进去等于把副 API 冒充成聊天 API。凭据存不了
+   * 表的老 worker 上直接抛错，调用方据此留在本地跑。
+   *
+   * 顺序与排程那条路一致：**先传输入、成功了再建任务**。反过来失败的话，远端会留下一条
+   * 到点取不到输入的任务；这个方向的残留是无害的那一侧——没人引用的输入行会被
+   * clientStateTtl 清掉。
+   *
+   * @returns 远端任务 uuid
+   */
+  async scheduleBackgroundJob(params: {
+    /** 业务种类，worker 按它分派 handler（见 utils/amsgTaskKinds.ts） */
+    kind: string;
+    /** 任务归属的角色。worker 的 charId 是必填的，调度器也按它分组串行 */
+    charId: string;
+    charName: string;
+    /** 这一次的一次性输入在 amsg:job 命名空间下的 key */
+    jobKey: string;
+    /** 任务 metadata 上带的 job 编号，worker 靠它去抽屉里取输入 */
+    jobId: string;
+    /** 一次性输入本体（会被 JSON 序列化 + 压缩后上传） */
+    jobInput: unknown;
+    /** 这条任务该用哪一行凭据。行不在云端时这里负责补传 */
+    credRow: LlmCredentialRow;
+    /**
+     * 采样温度与输出上限：**同一件活儿在本地跑和在云端跑必须用同一组**。
+     * 不传的话上游整个省略这两个字段，落到供应商默认值（温度常为 1.0、输出上限常远小于
+     * 后台活儿需要的量）——同一批材料两条路会跑出不一样的结果，而界面上完全看不出来。
+     */
+    temperature?: number;
+    maxTokens?: number;
+  }): Promise<{ uuid: string }> {
+    const globalConfig = await ensureWorkerReady();
+    const client = await initializeClient(globalConfig);
+
+    if (!await isLlmCredentialsReady()) {
+      throw new Error('这台 Worker 还不支持凭据存表，后台任务跑不了（去设置页重新部署一次）。');
+    }
+
+    const now = Date.now();
+    await putClientStateOrThrow(client, [{
+      namespace: AMSG_JOB_NAMESPACE,
+      key: params.jobKey,
+      value: await packStateValue(JSON.stringify(params.jobInput)),
+      updatedAt: now,
+    }], '上传后台任务输入');
+
+    await putLlmCredentialRows([params.credRow]);
+
+    const payload: Record<string, any> = {
+      contactName: params.charName,
+      messageType: 'auto',
+      // 任务清单跟远端对账时靠它把这些行挡在外面（见 amsg2Tasks 的 reconcileTasksWithRemote）。
+      messageSubtype: AMSG_BACKGROUND_JOB_SUBTYPE,
+      // 立刻可跑：到期时间由服务端自己盖，下一跳 cron（最多一分钟）就会捞起来。
+      // 不能改成客户端算一个 firstSendTime——那个时刻在上传输入、传凭据、加密、
+      // 发请求这一路上早就过去了，服务端一律打回「时间必须在未来」，整条云端路
+      // 每次都退回本地跑。即时对话那条路同样只用 immediate。
+      immediate: true,
+      recurrenceType: 'none',
+      metadata: {
+        charId: params.charId,
+        charName: params.charName,
+        source: 'active_msg_2',
+        [AMSG_TASK_KIND_KEY]: params.kind,
+        [AMSG_JOB_ID_KEY]: params.jobId,
+      },
+      credRefs: { chat: params.credRow.credId },
+      ...(typeof params.temperature === 'number' ? { temperature: params.temperature } : {}),
+      ...(params.maxTokens && params.maxTokens > 0 ? { maxTokens: params.maxTokens } : {}),
+      // 服务端要求「completePrompt 或 messages」二选一。到点真正发给 LLM 的 messages 由
+      // worker 的 kind handler 返回值覆盖，这条占位内容永远不参与生成。
+      messages: [{ role: 'user', content: AMSG2_PLACEHOLDER_PROMPT }],
+    };
+
+    const postSchedule = async () => {
+      const encrypted = await encryptPayload(client, payload);
+      return fetchWithAuth('schedule-message', globalConfig, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Payload-Encrypted': 'true',
+          'X-Encryption-Version': '1',
+        },
+        body: JSON.stringify(encrypted),
+      }, '创建后台任务');
+    };
+
+    let response = await postSchedule();
+    // 与排程那条路同款自愈：本地指纹底账记着传过、云端其实没有（换过 master key /
+    // 点过「清空云端数据」）。绕过指纹强传一次再重排一次，只自愈一次。
+    if (!response?.success && response?.error?.code === 'CREDENTIAL_NOT_FOUND') {
+      console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 云端没有这行凭据，补传后重排一次`, params.credRow.credId);
+      forgetCredIds([params.credRow.credId]);
+      await putLlmCredentialRows([params.credRow], { force: true });
+      response = await postSchedule();
+    }
+
+    if (!response?.success) {
+      throw new Error(response?.error?.message || '后台任务创建失败。');
+    }
+    return response.data as { uuid: string };
   },
 
   /**

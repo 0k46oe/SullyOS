@@ -25,6 +25,7 @@ import { ActiveMsgStore } from './activeMsgStore';
 import { trackEvent } from './analytics';
 import { cloudApiCallLogId, recordCloudApiCall, settleCloudApiCall } from './apiCallLog';
 import { announceEmotionDone } from './chatGenEvents';
+import { dispatchAmsgResult } from './amsgResults';
 import { DB } from './db';
 import type { AmsgEmotionEvalSpec } from '../worker/amsg/src/emotionEval';
 
@@ -669,6 +670,11 @@ const adoptOutboxBacklog = async (entries: AmsgOutboxEntry[]): Promise<OutboxDra
  * 只有正文类（`content` 与情绪结果）才往收件箱里放。思维链、工具请求、错误通知
  * 这几类补收回来已经没有意义：思维链要挂在正文上、工具请求那头的云端早就收工了、
  * 隔了一阵子的报错弹出来只会让人摸不着头脑。它们照样要销账，不然每次拉都拉回来。
+ *
+ * `result`（worker 的 emitResult 送回来的后台产物）不进收件箱——它不是聊天内容，
+ * 交给 amsgResults 按 resultKind 派活，消化成功才销账。这类结果**本来就是靠补收
+ * 到达的**：不弹通知的结果上游只落账本、不发推送，所以这条路是它唯一的入口，
+ * 跟着上面那批一起销账丢掉的话，后台跑完的东西会一声不响地全部蒸发。
  */
 const backfillOutboxEntries = async (
   entries: AmsgOutboxEntry[],
@@ -680,6 +686,12 @@ const backfillOutboxEntries = async (
   for (const entry of entries) {
     const push = entry.push || {};
     const kind = typeof push.messageKind === 'string' ? push.messageKind : 'content';
+    if (kind === 'result') {
+      // 时效窗那道判断刻意不套在结果上：结果晚到本来就是常态（正是为此才上云的），
+      // 隔一天回来照样该落地，跟「隔一天才弹出来的报错」不是一回事。
+      if (await dispatchAmsgResult(push)) ackNow.push(entry.messageId);
+      continue;
+    }
     if (kind !== 'content' && kind !== 'emotion_update') {
       ackNow.push(entry.messageId);
       continue;

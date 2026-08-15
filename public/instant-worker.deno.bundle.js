@@ -2242,7 +2242,7 @@ function sanitizeTable(value) {
   return value;
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-instant@0.11.0-next.4/node_modules/@rei-standard/amsg-instant/dist/index.mjs
+// node_modules/.pnpm/@rei-standard+amsg-instant@0.11.0-next.5/node_modules/@rei-standard/amsg-instant/dist/index.mjs
 var PUSH_PAYLOAD_BYTE_ENCODER2 = new TextEncoder();
 function segmentTextWithProtectedBlocks(text, options) {
   if (!text) return [];

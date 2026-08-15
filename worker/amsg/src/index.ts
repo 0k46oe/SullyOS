@@ -38,6 +38,13 @@ import { AMSG_BUNDLE_VERSION } from '../../../utils/amsgBundleVersion';
 // 往里加任何浏览器依赖都会连累这个 bundle）。这里只产出事实，红绿灯和文案归前端。
 import type { AmsgPushGoneFailure } from '../../../utils/amsgDiagnostics';
 import type { UserProfile } from '../../../types';
+import { AMSG_JOB_NAMESPACE, AMSG_JOB_TTL_DAYS } from '../../../utils/amsgTaskKinds';
+import {
+  FIRE_KIND_HANDLERS,
+  getKindFireStash,
+  putKindFireStash,
+  readTaskKind,
+} from './fireKinds';
 import {
   AMSG_CHAT_FAIL_KEY,
   AMSG_FIRE_PACK_KEY,
@@ -290,6 +297,13 @@ interface SessionCtx {
   scheduleTask?: ScheduleTask;
   cancelTask?: CancelTask;
   renewTask?: RenewTask;
+  /**
+   * 往客户端送一条**不是聊天内容**的结果（amsg-server 2.6.0-next.21+）。
+   * 一条结果落进 message_outbox（到达的保证：客户端下次 `GET /outbox?since=` 一定
+   * 拿得到），并按通知策略决定要不要顺带发一条 Web Push（及时性）。
+   * `resultKind` 是唯一必填字段，其余形状由宿主定。老部署上整个方法不存在。
+   */
+  emitResult?: (payload: Record<string, unknown>) => Promise<{ messageId: string; pushed: boolean }>;
   /** 本次 fire 的第几轮 LLM（0-based）。最后一轮不再放行工具请求，见 MAX_TOOL_ITERATIONS。 */
   iteration?: number;
   /** 任务行 id；没有任务行的 in-server instant 路径为 null。 */
@@ -1550,6 +1564,37 @@ export const amsgHooks = {
     // 这里不分支：定时任务上本来就不该有这个键，真有也一样删掉。见 takeEmotionEvalSpec。
     const emotionEvalSpec = takeEmotionEvalSpec(ctx.task.metadata);
 
+    // 非聊天任务在这里就被接走（见 fireKinds.ts）。分派排在下面四道门之前是有意的：
+    // 那四道门问的都是「主动消息到点还该不该发」，对「后台整理一份数据」全都不适用；
+    // 而且它们要的 fire_pack / tool_pack 是聊天专用的云端状态，后台任务根本没传过，
+    // 排在后面的话第一道硬失败门就会把它判死。凭据擦除（上面那句）刻意留在前面：
+    // 不管什么种类的任务，metadata 上万一沾了副 API 凭据都得先摘掉。
+    const taskKind = readTaskKind(taskMeta);
+    if (taskKind) {
+      const handler = FIRE_KIND_HANDLERS[taskKind];
+      if (!handler) {
+        throw fail(`不认识的任务种类 amsgKind=${taskKind}（worker 代码比前端旧，去设置页重新部署一次）`);
+      }
+      let plan;
+      try {
+        plan = await handler.beforeFire({ ctx, charId, taskMeta });
+      } catch (error) {
+        throw fail(error instanceof Error ? error.message : String(error), { kind: taskKind });
+      }
+      if ('skip' in plan) {
+        // 不写 last_skip：那份留痕说的是「这条**主动消息**到点为什么没响」，主动消息
+        // 面板照它给用户解释。后台任务的跳过跟主动消息毫无关系，写进去面板就会说谎。
+        console.log('[amsg:kind-skip]', { taskId: ctx.task.id, kind: taskKind, reason: plan.reason });
+        return { skip: true } as const;
+      }
+      // 挂上跨 hook 的上下文，onLLMOutput 靠它认出「这一轮不是聊天」。
+      putKindFireStash(ctx.scratch, taskKind, plan.state);
+      return {
+        messages: plan.messages,
+        ...(plan.totalTimeoutMs ? { totalTimeoutMs: plan.totalTimeoutMs } : {}),
+      };
+    }
+
     // 即时对话：用户刚把话说完、正盯着「正在输入…」等回复。下面三道门问的都是
     // 「主动消息到点还该不该发」——用户正在聊天所以让路、对话已经往前走所以作废、
     // 这次任务的方向是什么——对「回一句用户刚说的话」全都不适用，整段跳过。
@@ -1929,6 +1974,18 @@ export const amsgHooks = {
   },
 
   async onLLMOutput(ctx: SessionCtx) {
+    // 非聊天任务在这里就被接走，排在下面所有聊天语义（stash、分段、self_log、推送）
+    // 之前——它们一条都不适用，而 stash 那道断言更是会直接把这一轮判死。
+    const kindFire = getKindFireStash(ctx.scratch);
+    if (kindFire) {
+      const handler = FIRE_KIND_HANDLERS[kindFire.kind];
+      if (!handler) {
+        // 到点那一步查过表才会挂上 stash，走到这里表里不该没有。
+        throw new Error(`AMSG2_KIND_HANDLER_MISSING: onLLMOutput 找不到 ${kindFire.kind} 的 handler`);
+      }
+      return handler.llmOutput({ ctx, state: kindFire.state });
+    }
+
     const content = stripReasoningTags(ctx.llmOutputText || '').trim();
 
     // 任务身份直接从 ctx 上读（sessionId 是给日志和去重用的不透明串，不拿它切）。
@@ -2337,6 +2394,11 @@ export const buildWorkerConfig = (env: Env) => {
     // allowHeaders 显式给：上游默认那份不含 Content-Encoding，而 gzip 上行要用它
     // （见 CORS_ALLOW_HEADERS 那段注释）。
     cors: { origin: '*', allowHeaders: CORS_ALLOW_HEADERS },
+    // 一次性 job 输入的过期清理（amsg-server 2.6.0-next.21+）：cron 每跳顺手把这个
+    // 命名空间下超过天数没更新的条目清掉。角色状态那个命名空间（amsg:char:<id>，
+    // 装 fire_pack / tool_pack）不配 TTL——那些是要长期留着的，配了就等于定时把
+    // 角色的云端状态抹掉。判据是行本来就有的 updated_at 列，不加列、不动表结构。
+    clientStateTtl: { [AMSG_JOB_NAMESPACE]: AMSG_JOB_TTL_DAYS },
     // 满血 fire-time hooks（onBeforeFire 现场填槽 + onLLMOutput 分类 +
     // executeToolCalls 服务端工具循环）；轮数/超时用库默认（5 轮 / 240s），
     // 即时对话那条单独把超时抬到 INSTANT_TOTAL_TIMEOUT_MS（onBeforeFire 返回值里给）。
@@ -2845,6 +2907,12 @@ export default {
           ...inspectWorkerEnv(env),
           instantChat: true,
           instantTick: !!env.INSTANT_TICK,
+          // 这份代码认不认识「后台任务」（metadata.amsgKind → handler，见 fireKinds.ts）。
+          // 老 bundle 没有这个字段，前端据此不去建那种任务——老 worker 会把它当聊天任务
+          // 跑，然后卡在「本次任务指令缺失」终态失败：任务行不在用户的清单里，面板一片
+          // 正常，而门牌永远不更新。报的是**这份代码有没有**，不是版本号：自更新永远由
+          // 旧代码执行，版本号对上了不代表新逻辑真的在跑。
+          backgroundJobs: true,
           workerVersion: AMSG_BUNDLE_VERSION,
         },
       });
