@@ -42,6 +42,9 @@ const DEFAULT_THEME: ChatTheme = {
     customCss: ''
 };
 
+const VOICE_PREVIEW_DURATION_MS = 8000;
+const VOICE_PREVIEW_WAVE = [4, 10, 6, 14, 8, 12, 5, 11, 7, 13, 5, 9];
+
 // --- CSS Examples ---
 const CSS_EXAMPLES = [
     {
@@ -468,6 +471,10 @@ const ThemeMaker: React.FC = () => {
     const [previewToggleTarget, setPreviewToggleTarget] = useState<'A' | 'B'>('A');
     const [lastUsableCss, setLastUsableCss] = useState('');
     const [isPreviewFullscreen, setIsPreviewFullscreen] = useState(false);
+    const [editorPanelOpen, setEditorPanelOpen] = useState(true);
+    const [editorBubblePos, setEditorBubblePos] = useState<{ x: number; y: number } | null>(null);
+    const [playingVoicePreviewKey, setPlayingVoicePreviewKey] = useState<string | null>(null);
+    const [voicePreviewProgress, setVoicePreviewProgress] = useState(0);
     // 保存后的「应用到角色」弹层：勾选 = 该角色 bubbleStyle 指向本主题，取消勾选 = 回落默认气泡
     const [showApplySheet, setShowApplySheet] = useState(false);
     const [applySelection, setApplySelection] = useState<Set<string>>(new Set());
@@ -483,6 +490,7 @@ const ThemeMaker: React.FC = () => {
     const decorationInputRef = useRef<HTMLInputElement>(null);
     const avatarDecoInputRef = useRef<HTMLInputElement>(null);
     const cssTextareaRef = useRef<HTMLTextAreaElement>(null);
+    const editorBubbleDragRef = useRef<{ startX: number; startY: number; originX: number; originY: number; moved: boolean } | null>(null);
 
     const activeStyle = editingTheme[activeTab === 'css' ? 'user' : activeTab];
     // 语音消息只出现在角色侧；无论当前在编辑哪个 tab，语音条控件都写到 ai，
@@ -492,6 +500,63 @@ const ThemeMaker: React.FC = () => {
     const CONTRAST_CRITICAL_THRESHOLD = 3;
     const HIGH_BG_IMAGE_OPACITY = 0.75;
     const cssValidation = useMemo(() => validateCustomCss(editingTheme.customCss || ''), [editingTheme.customCss]);
+
+    // 与「外观 → 聊天界面」保持同一套交互：圆形设置钮可拖动，轻点收起/展开悬浮编辑面板。
+    const EDITOR_BUBBLE_SIZE = 48;
+    const clampEditorBubble = (x: number, y: number) => ({
+        x: Math.max(8, Math.min(window.innerWidth - EDITOR_BUBBLE_SIZE - 8, x)),
+        y: Math.max(56, Math.min(window.innerHeight - EDITOR_BUBBLE_SIZE - 24, y)),
+    });
+    const onEditorBubblePointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        editorBubbleDragRef.current = {
+            startX: event.clientX,
+            startY: event.clientY,
+            originX: rect.left,
+            originY: rect.top,
+            moved: false,
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+    };
+    const onEditorBubblePointerMove = (event: React.PointerEvent<HTMLButtonElement>) => {
+        const drag = editorBubbleDragRef.current;
+        if (!drag) return;
+        const dx = event.clientX - drag.startX;
+        const dy = event.clientY - drag.startY;
+        if (!drag.moved && Math.hypot(dx, dy) < 6) return;
+        drag.moved = true;
+        setEditorBubblePos(clampEditorBubble(drag.originX + dx, drag.originY + dy));
+    };
+    const onEditorBubblePointerUp = () => {
+        const drag = editorBubbleDragRef.current;
+        editorBubbleDragRef.current = null;
+        if (drag && !drag.moved) {
+            setEditorPanelOpen(open => !open);
+            trackEvent('开关气泡工坊悬浮设置');
+        }
+    };
+
+    // 预览不播放真实音频，只复刻真实语音条的 8 秒播放态，便于检查播放背景、按钮和波形颜色。
+    const toggleVoicePreview = (key: string) => {
+        setPlayingVoicePreviewKey(current => current === key ? null : key);
+        setVoicePreviewProgress(0);
+    };
+
+    useEffect(() => {
+        if (!playingVoicePreviewKey) {
+            setVoicePreviewProgress(0);
+            return;
+        }
+        const startedAt = Date.now();
+        const tick = () => {
+            const progress = Math.min(1, (Date.now() - startedAt) / VOICE_PREVIEW_DURATION_MS);
+            setVoicePreviewProgress(progress);
+            if (progress >= 1) setPlayingVoicePreviewKey(null);
+        };
+        tick();
+        const timer = window.setInterval(tick, 80);
+        return () => window.clearInterval(timer);
+    }, [playingVoicePreviewKey]);
 
     useEffect(() => {
         if (cssValidation.isValid) {
@@ -908,6 +973,8 @@ const ThemeMaker: React.FC = () => {
         const isUser = role === 'user';
         const isVoice = mock.kind === 'voice';
         const isActive = panel === 'A' && (activeTab === role || activeTab === 'css');
+        const voicePreviewKey = `${panel}:${mock.id}`;
+        const isVoicePreviewPlaying = isVoice && playingVoicePreviewKey === voicePreviewKey;
         
         // Match core bubble corner/tail strategy in MessageItem.tsx.
         const corners = resolveBubbleCornerRadii(style);
@@ -984,25 +1051,57 @@ const ThemeMaker: React.FC = () => {
                         )}
 
                         {mock.kind === 'voice' ? (
-                            <div
-                                className="sully-voice-bar relative z-10 flex min-w-[210px] items-center gap-2.5 rounded-2xl border border-black/5 px-3 py-2"
-                                style={{ background: style.voiceBarBg || 'linear-gradient(135deg, rgba(0,0,0,0.03), rgba(0,0,0,0.06))' }}
+                            <button
+                                type="button"
+                                className="sully-voice-bar relative z-10 flex min-w-[210px] items-center gap-2.5 overflow-hidden rounded-2xl border px-3 py-2 text-left transition-all duration-300 active:scale-[0.98]"
+                                style={{
+                                    background: isVoicePreviewPlaying
+                                        ? (style.voiceBarActiveBg || 'linear-gradient(135deg, rgba(16,185,129,0.12), rgba(52,211,153,0.08))')
+                                        : (style.voiceBarBg || 'linear-gradient(135deg, rgba(0,0,0,0.03), rgba(0,0,0,0.06))'),
+                                    borderColor: isVoicePreviewPlaying
+                                        ? (style.voiceBarBtnColor ? `${style.voiceBarBtnColor}33` : 'rgba(16,185,129,0.2)')
+                                        : 'rgba(0,0,0,0.05)',
+                                }}
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    toggleVoicePreview(voicePreviewKey);
+                                    if (!isVoicePreviewPlaying) trackEvent('播放气泡工坊语音预览');
+                                }}
+                                aria-pressed={isVoicePreviewPlaying}
+                                aria-label={isVoicePreviewPlaying ? '暂停语音条播放预览' : '播放语音条样式预览'}
                             >
                                 <span
-                                    className="sully-voice-bar-button flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px]"
-                                    style={{ color: style.voiceBarBtnColor || '#64748b', background: style.voiceBarBg ? 'rgba(255,255,255,.3)' : 'rgba(148,163,184,.18)' }}
-                                >▶</span>
+                                    className="sully-voice-bar-button flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] transition-all duration-300"
+                                    style={{
+                                        color: isVoicePreviewPlaying ? '#fff' : (style.voiceBarBtnColor || '#64748b'),
+                                        background: isVoicePreviewPlaying
+                                            ? (style.voiceBarBtnColor || '#10b981')
+                                            : (style.voiceBarBg ? 'rgba(255,255,255,.3)' : 'rgba(148,163,184,.18)'),
+                                        boxShadow: isVoicePreviewPlaying
+                                            ? `0 2px 8px ${style.voiceBarBtnColor ? `${style.voiceBarBtnColor}4D` : 'rgba(16,185,129,.3)'}`
+                                            : 'none',
+                                    }}
+                                >{isVoicePreviewPlaying ? 'Ⅱ' : '▶'}</span>
                                 <span className="sully-voice-bar-wave flex h-5 flex-1 items-center gap-[3px] overflow-hidden">
-                                    {[4, 10, 6, 14, 8, 12, 5, 11, 7, 13, 5, 9].map((height, index) => (
-                                        <i
-                                            key={index}
-                                            className="sully-voice-bar-wave-segment block w-[2.5px] rounded-full"
-                                            style={{ height: Math.max(2, height * 0.4), background: style.voiceBarWaveColor ? `${style.voiceBarWaveColor}99` : 'rgba(148,163,184,.55)' }}
-                                        />
-                                    ))}
+                                    {VOICE_PREVIEW_WAVE.map((height, index) => {
+                                        const hasPlayed = index / VOICE_PREVIEW_WAVE.length <= voicePreviewProgress;
+                                        return (
+                                            <i
+                                                key={index}
+                                                className={`sully-voice-bar-wave-segment block w-[2.5px] rounded-full transition-all duration-150 ${isVoicePreviewPlaying ? 'animate-pulse' : ''}`}
+                                                style={{
+                                                    height: isVoicePreviewPlaying ? Math.max(3, height) : Math.max(2, height * 0.4),
+                                                    background: isVoicePreviewPlaying && hasPlayed
+                                                        ? (style.voiceBarWaveColor || '#10b981')
+                                                        : (style.voiceBarWaveColor ? `${style.voiceBarWaveColor}66` : 'rgba(148,163,184,.55)'),
+                                                    animationDelay: `${index * 60}ms`,
+                                                }}
+                                            />
+                                        );
+                                    })}
                                 </span>
                                 <span className="sully-voice-bar-toggle rounded-lg bg-black/5 px-1.5 py-0.5 text-[9px] font-medium" style={{ color: style.voiceBarTextColor || '#64748b' }}>转文字</span>
-                            </div>
+                            </button>
                         ) : mock.kind === 'image' ? (
                             <div className="relative z-10 w-40 h-28 rounded-xl bg-black/10 border border-black/10 flex items-center justify-center text-xs" style={{ color: style.textColor }}>
                                 🖼️ 图片占位
@@ -1121,7 +1220,7 @@ const ThemeMaker: React.FC = () => {
             </section>
 
             {/* Preview Area (Realistic Chat Row) */}
-            <div className={`${isPreviewFullscreen ? 'fixed inset-0 z-[120]' : 'flex-1'} relative overflow-hidden flex flex-col p-4 justify-center items-center gap-4 ${isPreviewDark ? 'bg-slate-900' : 'bg-slate-100'}`}>
+            <div className={`${isPreviewFullscreen ? 'fixed inset-0 z-[120]' : 'flex-1 min-h-0'} relative overflow-y-auto flex flex-col p-4 pb-20 justify-start sm:justify-center items-center gap-4 no-scrollbar ${isPreviewDark ? 'bg-slate-900' : 'bg-slate-100'}`}>
                 <div className="absolute inset-0 opacity-10" style={{ backgroundImage: 'radial-gradient(#cbd5e1 1px, transparent 1px)', backgroundSize: '20px 20px' }}></div>
                 {currentScene.wallpaper && (
                     <div className="absolute inset-0" style={{ background: currentScene.wallpaper, opacity: isPreviewDark ? 0.9 : 0.45 }} />
@@ -1211,16 +1310,52 @@ const ThemeMaker: React.FC = () => {
                 <div className={`text-[10px] absolute bottom-2 ${isPreviewDark ? 'text-slate-400' : 'text-slate-500'}`}>A 为当前编辑，B 为上次保存版本</div>
             </div>
 
-            {/* Editor Controls */}
+            {/* 与外观 App 相同的悬浮设置钮：点按开关面板，拖动避开想观察的气泡。 */}
             {!isPreviewFullscreen && (
-            <div className="bg-white rounded-t-[2.5rem] shadow-[0_-5px_30px_rgba(0,0,0,0.08)] z-30 flex flex-col h-[55%] ring-1 ring-slate-100">
+                <button
+                    type="button"
+                    onPointerDown={onEditorBubblePointerDown}
+                    onPointerMove={onEditorBubblePointerMove}
+                    onPointerUp={onEditorBubblePointerUp}
+                    onPointerCancel={() => { editorBubbleDragRef.current = null; }}
+                    className={`fixed z-[136] flex h-12 w-12 items-center justify-center rounded-full shadow-lg transition-all active:scale-90 ${editorPanelOpen ? 'bg-primary text-white ring-4 ring-primary/20' : 'bg-white/95 text-primary ring-1 ring-primary/30 backdrop-blur'}`}
+                    style={editorBubblePos
+                        ? { left: editorBubblePos.x, top: editorBubblePos.y, touchAction: 'none' }
+                        : { right: 12, top: 'calc(var(--safe-top, 0px) + 35vh)', touchAction: 'none' }}
+                    aria-label={editorPanelOpen ? '收起气泡编辑面板' : '展开气泡编辑面板'}
+                    title="点按开关设置 · 按住拖动"
+                >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-6 w-6" aria-hidden="true">
+                        <path strokeLinecap="round" d="M4 7h10M18 7h2M4 17h2M10 17h10M8 4v6M8 14v6M16 4v6M16 14v6" />
+                    </svg>
+                </button>
+            )}
+
+            {/* Editor Controls：悬浮在完整预览上方，不再挤占一半预览高度。 */}
+            {!isPreviewFullscreen && editorPanelOpen && (
+            <div
+                className="fixed left-1/2 z-[135] flex w-[94%] max-w-md -translate-x-1/2 flex-col overflow-hidden rounded-[2rem] border border-white/70 bg-white/95 shadow-[0_14px_50px_rgba(15,23,42,0.24)] ring-1 ring-slate-100 backdrop-blur-xl"
+                style={{
+                    bottom: 'calc(14px + var(--safe-bottom, 0px))',
+                    height: 'min(62vh, 620px)',
+                    maxHeight: 'calc(100dvh - 96px - var(--safe-top, 0px) - var(--safe-bottom, 0px))',
+                }}
+            >
                 {/* Main Tabs (User / AI / CSS) */}
-                <div className="flex px-8 pt-6 pb-2 gap-6 overflow-x-auto no-scrollbar">
-                    <button onClick={() => requestTabSwitch('user')} className={`text-sm font-bold transition-colors whitespace-nowrap ${activeTab === 'user' ? 'text-slate-800' : 'text-slate-300'}`}>用户气泡</button>
-                    <button onClick={() => requestTabSwitch('ai')} className={`text-sm font-bold transition-colors whitespace-nowrap ${activeTab === 'ai' ? 'text-slate-800' : 'text-slate-300'}`}>角色气泡</button>
-                    <button onClick={() => requestTabSwitch('css')} className={`text-sm font-bold transition-colors whitespace-nowrap flex items-center gap-1 ${activeTab === 'css' ? 'text-indigo-600' : 'text-slate-300'}`}>
-                        <span>⚡</span> 自定义CSS
-                    </button>
+                <div className="flex items-center gap-3 px-5 pt-4 pb-2">
+                    <div className="flex min-w-0 flex-1 gap-5 overflow-x-auto no-scrollbar">
+                        <button onClick={() => requestTabSwitch('user')} className={`text-sm font-bold transition-colors whitespace-nowrap ${activeTab === 'user' ? 'text-slate-800' : 'text-slate-300'}`}>用户气泡</button>
+                        <button onClick={() => requestTabSwitch('ai')} className={`text-sm font-bold transition-colors whitespace-nowrap ${activeTab === 'ai' ? 'text-slate-800' : 'text-slate-300'}`}>角色气泡</button>
+                        <button onClick={() => requestTabSwitch('css')} className={`text-sm font-bold transition-colors whitespace-nowrap flex items-center gap-1 ${activeTab === 'css' ? 'text-indigo-600' : 'text-slate-300'}`}>
+                            <span>⚡</span> 自定义CSS
+                        </button>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setEditorPanelOpen(false)}
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-lg leading-none text-slate-400 transition active:scale-90"
+                        aria-label="收起气泡编辑面板"
+                    >×</button>
                 </div>
 
                 <div className="px-8 pb-2 flex items-center gap-2">
@@ -1520,13 +1655,50 @@ const ThemeMaker: React.FC = () => {
                                 </h3>
                                 <p className="mb-3 text-[9px] leading-relaxed text-slate-400">语音只出现在角色侧，因此这里始终写入角色气泡配置；在“用户气泡”页修改也会真实生效。需要改尺寸、圆角或布局，可到“自定义 CSS”使用 .sully-voice-bar。</p>
                                 <div className="sully-bubble-ai mb-4 rounded-2xl bg-slate-50 p-2">
-                                    <div className="sully-voice-bar flex items-center gap-2.5 rounded-2xl border border-black/5 px-3 py-2" style={{ background: voiceBarStyle.voiceBarBg || 'linear-gradient(135deg, rgba(0,0,0,0.03), rgba(0,0,0,0.06))' }}>
-                                        <span className="sully-voice-bar-button flex h-7 w-7 shrink-0 items-center justify-center rounded-full" style={{ color: voiceBarStyle.voiceBarBtnColor || '#64748b', background: 'rgba(255,255,255,.55)' }}>▶</span>
-                                        <span className="sully-voice-bar-wave flex flex-1 items-center gap-[3px]">
-                                            {[5, 11, 7, 14, 8, 12, 6, 10, 5, 9].map((height, index) => <i key={index} className="sully-voice-bar-wave-segment block w-[2.5px] rounded-full" style={{ height, background: voiceBarStyle.voiceBarWaveColor || '#94a3b8' }} />)}
+                                    <button
+                                        type="button"
+                                        className="sully-voice-bar flex w-full items-center gap-2.5 overflow-hidden rounded-2xl border px-3 py-2 text-left transition-all duration-300 active:scale-[0.98]"
+                                        style={{
+                                            background: playingVoicePreviewKey === 'editor-inline'
+                                                ? (voiceBarStyle.voiceBarActiveBg || 'linear-gradient(135deg, rgba(16,185,129,0.12), rgba(52,211,153,0.08))')
+                                                : (voiceBarStyle.voiceBarBg || 'linear-gradient(135deg, rgba(0,0,0,0.03), rgba(0,0,0,0.06))'),
+                                            borderColor: playingVoicePreviewKey === 'editor-inline'
+                                                ? (voiceBarStyle.voiceBarBtnColor ? `${voiceBarStyle.voiceBarBtnColor}33` : 'rgba(16,185,129,0.2)')
+                                                : 'rgba(0,0,0,0.05)',
+                                        }}
+                                        onClick={() => toggleVoicePreview('editor-inline')}
+                                        aria-pressed={playingVoicePreviewKey === 'editor-inline'}
+                                    >
+                                        <span
+                                            className="sully-voice-bar-button flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-all duration-300"
+                                            style={{
+                                                color: playingVoicePreviewKey === 'editor-inline' ? '#fff' : (voiceBarStyle.voiceBarBtnColor || '#64748b'),
+                                                background: playingVoicePreviewKey === 'editor-inline'
+                                                    ? (voiceBarStyle.voiceBarBtnColor || '#10b981')
+                                                    : 'rgba(255,255,255,.55)',
+                                            }}
+                                        >{playingVoicePreviewKey === 'editor-inline' ? 'Ⅱ' : '▶'}</span>
+                                        <span className="sully-voice-bar-wave flex h-5 flex-1 items-center gap-[3px] overflow-hidden">
+                                            {VOICE_PREVIEW_WAVE.map((height, index) => {
+                                                const playing = playingVoicePreviewKey === 'editor-inline';
+                                                const hasPlayed = index / VOICE_PREVIEW_WAVE.length <= voicePreviewProgress;
+                                                return <i
+                                                    key={index}
+                                                    className={`sully-voice-bar-wave-segment block w-[2.5px] rounded-full transition-all duration-150 ${playing ? 'animate-pulse' : ''}`}
+                                                    style={{
+                                                        height: playing ? height : Math.max(2, height * 0.45),
+                                                        background: playing && hasPlayed
+                                                            ? (voiceBarStyle.voiceBarWaveColor || '#10b981')
+                                                            : (voiceBarStyle.voiceBarWaveColor ? `${voiceBarStyle.voiceBarWaveColor}66` : '#94a3b8'),
+                                                        animationDelay: `${index * 60}ms`,
+                                                    }}
+                                                />;
+                                            })}
                                         </span>
-                                        <span className="sully-voice-bar-toggle text-[9px]" style={{ color: voiceBarStyle.voiceBarTextColor || '#475569' }}>转文字</span>
-                                    </div>
+                                        <span className="sully-voice-bar-toggle text-[9px]" style={{ color: voiceBarStyle.voiceBarTextColor || '#475569' }}>
+                                            {playingVoicePreviewKey === 'editor-inline' ? '播放中' : '播放预览'}
+                                        </span>
+                                    </button>
                                 </div>
                                 <div className="grid grid-cols-2 gap-3">
                                     <div>
