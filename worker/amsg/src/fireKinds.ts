@@ -86,13 +86,25 @@ export interface FireKindHandler {
 
 /**
  * `metadata.amsgKind` → handler。没标 kind 的任务不查这张表，照旧走聊天主干。
- * 表里没有的 kind 是硬失败：客户端建了一种 worker 还不认识的任务，多半是
- * worker bundle 比前端旧，这种事必须响亮地说出来（面板上的 lastError 是用户
- * 唯一看得到的线索），而不是当聊天任务跑出一条驴唇不对马嘴的消息。
+ * 表里没有的 kind 是硬失败：客户端建了一种 worker 还不认识的任务，多半是 worker bundle
+ * 比前端旧，宁可让这条任务终态失败，也别当聊天任务跑出一条驴唇不对马嘴的消息。
+ *
+ * 这类失败在用户那边是**静默**的：后台任务行按 messageSubtype 挡在主动消息清单之外
+ * （那是有意的，它们不是用户排的消息，进了清单还会被「取消全部」顺手掐掉），所以
+ * lastError 没有露脸的地方，只能在 `wrangler tail` 里看到。判定「这一轮活儿要不要交
+ * 云端」的责任因此落在客户端那道探测门上（`GET /config-check` 的 `backgroundJobs`）：
+ * 它认的是「这份 bundle 里有没有这张表」，认不出来就留在本地跑，压根不建这条任务。
+ * 走到这里的失败一律是「白跑一轮」量级——下一轮消化会重新提交一份。
+ *
+ * 表用**没有原型的对象**建：kind 是从任务 metadata 上读出来的字符串，普通对象字面量
+ * 会把 `constructor` / `toString` / `valueOf` 这些原型链上的键解析成一个真值，绕过下面
+ * 那句「表里没有这个 kind」的判断，最后炸在 `handler.beforeFire is not a function` 上——
+ * 而那句报错跟真正的原因（这台 worker 不认识这种任务）毫无关系，排障要多绕一大圈。
  */
-export const FIRE_KIND_HANDLERS: Record<string, FireKindHandler> = {
-  [PLATE_CONSOLIDATE_KIND]: plateConsolidateHandler,
-};
+export const FIRE_KIND_HANDLERS: Record<string, FireKindHandler> = Object.assign(
+  Object.create(null) as Record<string, FireKindHandler>,
+  { [PLATE_CONSOLIDATE_KIND]: plateConsolidateHandler },
+);
 
 /** 挂在 scratch 上跨 hook 传递的键。 */
 const KIND_FIRE_SCRATCH_KEY = 'kindFire';

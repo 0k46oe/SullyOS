@@ -2433,8 +2433,9 @@ export const ActiveMsgRuntime = {
 
         // 云端后台任务跑完送回来的结果（worker 的 emitResult）。这里是「推送直达」那条腿；
         // 另一条腿是上线补收（drainOutbox），两边指的是同一个分发口。销账不在这里做——
-        // 推来的这一份服务端账本上也有一行，等补收那条路照常划掉，重复消化由各 handler
-        // 自己保证幂等（门牌是完整列表覆盖，天然幂等）。
+        // 推来的这一份服务端账本上也有一行，等补收那条路照常划掉。所以同一条结果被消化
+        // 两次是常态，两条腿还可能同时在跑（推送刚到、页面正好回到前台）：分发口自己排队
+        // 串行（见 amsgResults），handler 各自保证重复消化不改坏数据。
         if (type === 'active-msg-result') {
           void dispatchAmsgResult(event.data?.payload);
           return;

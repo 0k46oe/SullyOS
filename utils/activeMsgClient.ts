@@ -380,10 +380,60 @@ const ensureWorkerReady = async () => {
 // 两次），逐次重新握手纯属白付 RTT。键取会影响握手的三个字段；配置一变（换 worker /
 // 换密钥 / 清空重连）键就换，旧缓存自然作废。失败的握手不缓存，下一次重新来过。
 /**
- * 「这台 worker 认不认识后台任务」的一次性探测结果（见 probeBackgroundJobSupport）。
+ * 「这台 worker 认不认识后台任务」的探测结果（见 probeBackgroundJobSupport）。
  * 只在内存里存，换 workerUrl 自然作废——用户中途换后端时不该拿旧结论当数。
  */
-let backgroundJobProbe: { workerUrl: string; supported: boolean } | null = null;
+let backgroundJobProbe: { workerUrl: string; supported: boolean; at: number } | null = null;
+
+/**
+ * 存量答案是「不支持」时，最多隔这么久就再问一遍。
+ *
+ * 下面那个 forget 只盖得住「在设置页点按钮更新 Worker」这一条路，而换 bundle 不止这
+ * 一条：文档里那条 GitHub「Sync fork」→ Cloudflare Workers Builds 更新完，地址没变、
+ * 整个过程也不经过前端，缓存里那句「不支持」就会一直活到用户刷新页面为止——这段时间
+ * 每一轮消化都在前台跑那一两分钟的整理，页面一关就死。即时对话那条探测对同样的状态
+ * 就是「存着 false 就重探」（见 reprobeInstantChatSupport）。
+ *
+ * 正面答案不设冷却：一份认识后台任务的 bundle 不会自己变回不认识。
+ */
+const BACKGROUND_JOB_UNSUPPORTED_RECHECK_MS = 5 * 60_000;
+
+/**
+ * 把探测结论作废，下次重新问一遍。
+ *
+ * 缓存是按 workerUrl 键的，而「更新 Worker」换的是同一个地址上的 bundle——地址没变，
+ * 结论却过期了。不作废的话用户刚把后端升上去，前端还认着升级前那句「不支持」，得刷新
+ * 页面才好。所以凡是**在同一个地址上换 bundle** 的路径都要调一次：设置页的「重新连接
+ * 并验证」、以及「更新 Worker」（POST /self-update）。
+ *
+ * 从零部署那条路不用调：它换的是 workerUrl 本身，键一变旧缓存自然作废。
+ */
+export const forgetBackgroundJobProbe = (): void => { backgroundJobProbe = null; };
+
+/**
+ * 后台任务能力探测的三种结论。
+ *
+ * `unsupported` 和 `unknown` 分开是有用的：前者是「这条路断了」（老 bundle，重试也一样），
+ * 后者是「这次没问到」（网络抖一下、CF 边缘抽风、D1 冷启动超时）。调用方对这两种的处置
+ * 不一样——路断了就该退回本地把活儿干了，而只是没问到时，手上要是还有一份任务在云端跑，
+ * 退回本地就是拿同一份快照再烧一次 API、两份结果先后落地互相盖。
+ */
+export type BackgroundJobProbeOutcome = 'supported' | 'unsupported' | 'unknown';
+
+const BACKGROUND_JOB_MAYBE_CREATED_PROP = '__amsgBackgroundJobMaybeCreated';
+
+/**
+ * 这次失败的后台任务，**有没有可能其实已经在远端建起来了**。
+ *
+ * 只有「`POST /schedule-message` 发出去之后没等到答复」才算——那一刻请求可能已经到了
+ * 服务端。服务端答复了「不行」不算（确定没建），上传输入、传凭据那几步失败也不算
+ * （它们排在建任务之前）。
+ *
+ * 调用方靠它区分「没交出去」和「不知道交没交出去」：前者该退回本地把活儿干了，后者
+ * 绝不能——那会拿同一份快照在两条路上各跑一次，白烧一次 API，两份结果还先后落地互相盖。
+ */
+export const mayHaveCreatedBackgroundJob = (error: unknown): boolean =>
+  (error as Record<string, unknown> | null | undefined)?.[BACKGROUND_JOB_MAYBE_CREATED_PROP] === true;
 
 let cachedClientEntry: { key: string; promise: ReturnType<typeof createAndInitClient> } | null = null;
 
@@ -1789,6 +1839,9 @@ export const ActiveMsgClient = {
     // 成功、界面报「连接成功」，此后每一次加密调用（排任务 / 即时对话 / 读云端状态）
     // worker 都解不开，只有整页刷新才能恢复。
     invalidateClientCache();
+    // 同理：那台 worker 上的 bundle 可能刚被换过（「更新 Worker」走的是同一个地址），
+    // 而「认不认识后台任务」这个结论是按地址缓存的，不作废就还认着升级前那句「不支持」。
+    forgetBackgroundJobProbe();
     await initializeClient(config);
     await ActiveMsgStore.saveGlobalConfig({ ...config, initializedAt: Date.now() });
     // 「重新连接并验证」是用户显式的一次对表，凭据引用那个能力位也当场探准，别等下次握手。
@@ -2274,29 +2327,52 @@ export const ActiveMsgClient = {
    * 跑、卡在「本次任务指令缺失」终态失败，而那条任务行不在用户的清单里——面板一片正常，
    * 活儿却永远不干。这道门就是为了别走到那儿。
    *
-   * 探不到（网络抖 / 没连上）也返回 false：后台活儿本来就有本地那条路，宁可这一轮在本地
-   * 跑掉，也别建一条注定失败的任务。结论按 workerUrl 在内存里存一次，同一次会话不重复探
-   * ——这类任务几十轮才跑一次，缓存只为省掉「一轮里连着提交好几个 job」时的重复请求。
+   * 探不到（网络抖 / 没连上）是单独一种结论 `unknown`，不跟「不支持」混：后台活儿本来
+   * 就有本地那条路，宁可这一轮在本地跑掉也别建一条注定失败的任务——但「这次没问到」时
+   * 手上可能还有一份任务正在云端跑，那时候退回本地是有害的（见 plateCloudGate）。
+   *
+   * 「问不到」也**不写进缓存**——只有拿到明确答复（不管支不支持）才按 workerUrl 记下来。
+   * 混着缓存的话，一次代理切换、一次 CF 边缘抖动、一次 D1 冷启动超时，就能把整个会话
+   * 钉死在本地整理，只有刷新页面才翻得回来。
+   *
+   * 缓存本身只为省掉「一轮里连着提交好几个 job」时的重复请求——这类任务几十轮才跑一次。
    */
-  async probeBackgroundJobSupport(): Promise<boolean> {
+  async probeBackgroundJobSupportDetailed(): Promise<BackgroundJobProbeOutcome> {
     let config: ActiveMsg2GlobalConfig;
     try {
       config = await ensureWorkerReady();
     } catch {
-      return false;
+      return 'unknown';
     }
-    if (backgroundJobProbe?.workerUrl === config.workerUrl) return backgroundJobProbe.supported;
-    let supported = false;
+    const cached = backgroundJobProbe;
+    if (
+      cached?.workerUrl === config.workerUrl
+      // 「不支持」只当阶段性结论：worker 可能在这个会话里被别的路径换掉了
+      // （见 BACKGROUND_JOB_UNSUPPORTED_RECHECK_MS）。
+      && (cached.supported || Date.now() - cached.at < BACKGROUND_JOB_UNSUPPORTED_RECHECK_MS)
+    ) {
+      return cached.supported ? 'supported' : 'unsupported';
+    }
     try {
       const { status, body } = await fetchWithAuthRaw(
         'config-check', config, { method: 'GET' }, '后台任务能力探测',
       );
-      supported = status === 200 && body?.success === true && body?.data?.backgroundJobs === true;
-    } catch {
-      supported = false;
+      if (status !== 200 || body?.success !== true) {
+        console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 后台任务能力问不到（HTTP ${status}），不记缓存`);
+        return 'unknown';
+      }
+      const supported = body?.data?.backgroundJobs === true;
+      backgroundJobProbe = { workerUrl: config.workerUrl, supported, at: Date.now() };
+      return supported ? 'supported' : 'unsupported';
+    } catch (error) {
+      console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 后台任务能力探测没发出去，不记缓存`, error);
+      return 'unknown';
     }
-    backgroundJobProbe = { workerUrl: config.workerUrl, supported };
-    return supported;
+  },
+
+  /** 只问「能不能交」的那一版：问不到当不能交。要区分「问不到」用上面那个。 */
+  async probeBackgroundJobSupport(): Promise<boolean> {
+    return (await this.probeBackgroundJobSupportDetailed()) === 'supported';
   },
 
   /**
@@ -2384,15 +2460,26 @@ export const ActiveMsgClient = {
 
     const postSchedule = async () => {
       const encrypted = await encryptPayload(client, payload);
-      return fetchWithAuth('schedule-message', globalConfig, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Payload-Encrypted': 'true',
-          'X-Encryption-Version': '1',
-        },
-        body: JSON.stringify(encrypted),
-      }, '创建后台任务');
+      try {
+        return await fetchWithAuth('schedule-message', globalConfig, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Payload-Encrypted': 'true',
+            'X-Encryption-Version': '1',
+          },
+          body: JSON.stringify(encrypted),
+        }, '创建后台任务');
+      } catch (error) {
+        // 请求发出去了却没等到答复（断网、超时、连接被掐）：这条任务可能已经在远端建
+        // 起来了。挂个标记交给调用方，别让它把这种情形当成「没交出去」——见
+        // mayHaveCreatedBackgroundJob。只包这一步：上面上传输入、传凭据那两步排在建任务
+        // 之前，它们失败时确定还没有任务。
+        if (error && typeof error === 'object') {
+          (error as Record<string, unknown>)[BACKGROUND_JOB_MAYBE_CREATED_PROP] = true;
+        }
+        throw error;
+      }
     };
 
     let response = await postSchedule();
@@ -2870,6 +2957,10 @@ export const ActiveMsgClient = {
     }
     if (status === 200 && body?.success === true) {
       const data = body.data ?? {};
+      // 地址没变、bundle 换了，而「认不认识后台任务」这个结论是按地址缓存的。不作废的话
+      // 用户刚把后端升上去，接下来这几分钟每一轮消化还是照着升级前那句「不支持」在前台
+      // 跑那一两分钟的整理，页面一关就死。
+      forgetBackgroundJobProbe();
       return {
         ok: true,
         supported: true,

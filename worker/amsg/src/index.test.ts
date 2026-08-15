@@ -43,6 +43,8 @@ import { buildMcpNameMap, MCP_FIRE_NAME_BUDGET, type McpFireServer } from '../..
 import { MAX_FIRE_SCHEDULES } from '../../../utils/amsgFireSchedule';
 import { MAX_ACTIVE_TASKS_PER_CHAR, shortTaskId } from '../../../utils/amsg2Tasks';
 import { isAmsgServerVersionAtLeast } from '../../../utils/amsgWorkerVersion';
+import { AMSG_TASK_KIND_KEY } from '../../../utils/amsgTaskKinds';
+import { PLATE_CONSOLIDATE_KIND } from '../../../utils/amsgPlateJob';
 
 const CHAR_ID = 'preset-nyah';
 const TASK_UUID = '3637dae1-1461-4444-a747-34e406f67acc';
@@ -2841,6 +2843,27 @@ describe('stale 跳过留痕（onStaleSkip）', () => {
     expect(written!.skip.occurrenceMs).toBe(Date.parse('2026-07-25T09:00:00.000Z'));
   });
 
+  // 回归守卫：这个 hook 原先只认 metadata.charId，不分种类。于是服务停摆几小时之后，
+  // 一条挂着的门牌整理任务被过期跳过，就会给那个角色写一条「上次主动消息没响、已被
+  // 丢弃」——而用户根本没给他排过主动消息。onBeforeFire 里那条 kind-skip 分支特意
+  // 躲开了这个谎，但它排在这个 hook 后面，拦不到。
+  it('后台任务过期跳过 → 不写 last_skip（面板会拿它当主动消息说谎）', async () => {
+    const writeState = makeWriteState();
+    await amsgStaleSkip(
+      { id: 104, uuid: TASK_ROW_UUID },
+      {
+        reason: 'stale',
+        action: 'expired',
+        metadata: { charId: CHAR_ID, [AMSG_TASK_KIND_KEY]: PLATE_CONSOLIDATE_KIND, amsgJobId: 'job-1' },
+        occurrenceMs: Date.parse('2026-07-25T09:00:00.000Z'),
+        skippedCount: 1,
+        nextSendAt: null,
+        writeState,
+      },
+    );
+    expect(lastSkipOf(writeState), '门牌整理过期跟主动消息毫无关系').toBeNull();
+  });
+
   it('metadata 缺 charId（真异常）→ warn 放弃留痕，不写也不炸', async () => {
     const writeState = makeWriteState();
     await expect(amsgStaleSkip(
@@ -2895,6 +2918,33 @@ describe('worker 配置接线', () => {
     expect(cfg.serializeBy({ metadata: { charId: 'char-a' } })).toBe('char-a');
     expect(cfg.serializeBy({ metadata: {} })).toBeNull();
     expect(cfg.serializeBy({})).toBeNull();
+  });
+
+  // 回归守卫：后台任务原先跟聊天挤在同一个 charId 组里。一次门牌整理最长占住这个角色
+  // 120 秒，而它恰恰是在一轮对话刚结束时起跑的——用户下一句话的即时对话任务被排在它
+  // 后面，人就干等着「正在输入…」。
+  it('后台任务另开一组，不跟同角色的聊天任务串行', () => {
+    const cfg = buildWorkerConfig({
+      AMSG_MASTER_KEY: 'k'.repeat(64),
+      VAPID_EMAIL: 'mailto:a@b.c',
+      VAPID_PUBLIC_KEY: 'pub',
+      VAPID_PRIVATE_KEY: 'priv',
+      DB: {},
+    } as any);
+    const chatGroup = cfg.serializeBy({ metadata: { charId: 'char-a' } });
+    const jobGroup = cfg.serializeBy({
+      metadata: { charId: 'char-a', [AMSG_TASK_KIND_KEY]: PLATE_CONSOLIDATE_KIND },
+    });
+
+    expect(jobGroup, '同一组的话，聊天要干等门牌整理跑完').not.toBe(chatGroup);
+    // 同角色同种后台任务仍要串行：两份整理并发落地就是拿两份旧快照互相盖。
+    expect(cfg.serializeBy({
+      metadata: { charId: 'char-a', [AMSG_TASK_KIND_KEY]: PLATE_CONSOLIDATE_KIND },
+    })).toBe(jobGroup);
+    // 不同角色的后台任务照样分得开。
+    expect(cfg.serializeBy({
+      metadata: { charId: 'char-b', [AMSG_TASK_KIND_KEY]: PLATE_CONSOLIDATE_KIND },
+    })).not.toBe(jobGroup);
   });
 });
 

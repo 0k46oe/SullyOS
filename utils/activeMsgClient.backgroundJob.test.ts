@@ -41,7 +41,7 @@ vi.mock('./activeMsgStore', () => ({
   },
 }));
 
-import { ActiveMsgClient } from './activeMsgClient';
+import { ActiveMsgClient, forgetBackgroundJobProbe } from './activeMsgClient';
 import { forgetAllCredIds } from './amsgLlmCredentials';
 
 const capturedPayloads: any[] = [];
@@ -50,6 +50,7 @@ beforeEach(() => {
   capturedPayloads.length = 0;
   globalConfig.llmCredentialsSupported = true;
   forgetAllCredIds();
+  forgetBackgroundJobProbe();
   reiClient.init.mockReset().mockResolvedValue(undefined);
   reiClient.putClientState.mockReset().mockResolvedValue({ success: true });
   reiClient.putLlmCredentials.mockReset().mockResolvedValue({ success: true, data: { upserted: 1 } });
@@ -108,6 +109,112 @@ describe('后台任务的到期时间', () => {
     expect(task.metadata.amsgKind).toBe('plate-consolidate');
     expect(task.metadata.amsgJobId).toBe('job-1');
     expect(task.credRefs).toEqual({ chat: CRED_ROW.credId });
+  });
+});
+
+// 回归守卫：探测把「问不到」和「问到了、答案是不行」混成同一个 false，还按 workerUrl
+// 缓存了一整个会话。一次代理切换、一次 CF 边缘抖动、一次 D1 冷启动超时，就能把整个会话
+// 钉死在本地整理，而且没有任何日志区分这两件事——只有刷新页面才翻得回来。
+describe('后台任务能力探测的缓存', () => {
+  const configCheck = (body: unknown, status = 200) => vi.stubGlobal('fetch', vi.fn(async () => ({
+    status,
+    text: async () => JSON.stringify(body),
+    headers: new Headers({ 'content-type': 'application/json' }),
+  })));
+  const fetchCalls = () => (globalThis.fetch as any).mock.calls.length;
+
+  it('拿到明确答复才记缓存（支持 → 第二次不再发请求）', async () => {
+    configCheck({ success: true, data: { backgroundJobs: true } });
+
+    expect(await ActiveMsgClient.probeBackgroundJobSupport()).toBe(true);
+    expect(await ActiveMsgClient.probeBackgroundJobSupport()).toBe(true);
+    expect(fetchCalls()).toBe(1);
+  });
+
+  it('明确说了不支持也记缓存（老 bundle 不会自己变新）', async () => {
+    configCheck({ success: true, data: {} });
+
+    expect(await ActiveMsgClient.probeBackgroundJobSupport()).toBe(false);
+    expect(await ActiveMsgClient.probeBackgroundJobSupport()).toBe(false);
+    expect(fetchCalls()).toBe(1);
+  });
+
+  // 回归守卫：forgetBackgroundJobProbe 只盖得住「在设置页点按钮更新 Worker」这一条路，
+  // 而换 bundle 不止这一条——文档里那条 GitHub「Sync fork」→ Cloudflare Workers Builds
+  // 更新完，地址没变、整个过程也不经过前端。把「不支持」钉死一整个会话的话，这段时间
+  // 每一轮消化都在前台跑那一两分钟的整理，页面一关就死，只有刷新页面才翻得回来。
+  it('存量是「不支持」时隔一阵会再问一遍', async () => {
+    configCheck({ success: true, data: {} });
+    expect(await ActiveMsgClient.probeBackgroundJobSupport()).toBe(false);
+    expect(fetchCalls(), '同一轮里连着提交几个 job 不该重复问').toBe(1);
+
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 6 * 60_000);
+    configCheck({ success: true, data: { backgroundJobs: true } });
+
+    expect(
+      await ActiveMsgClient.probeBackgroundJobSupport(),
+      'worker 已经换成新 bundle 了，前端还认着换之前那句「不支持」',
+    ).toBe(true);
+  });
+
+  it('问不到（5xx）→ 这轮当不支持，但不记缓存，下轮重新问', async () => {
+    configCheck({ success: false }, 503);
+
+    expect(await ActiveMsgClient.probeBackgroundJobSupport()).toBe(false);
+    expect(await ActiveMsgClient.probeBackgroundJobSupport()).toBe(false);
+    expect(fetchCalls(), '缓存住的话这个会话之后每一轮消化都退回本地跑').toBe(2);
+  });
+
+  it('请求压根没发出去（网络挂了）同样不记缓存', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('Failed to fetch'); }));
+
+    expect(await ActiveMsgClient.probeBackgroundJobSupport()).toBe(false);
+    expect(await ActiveMsgClient.probeBackgroundJobSupport()).toBe(false);
+    expect(fetchCalls()).toBe(2);
+  });
+
+  // 回归守卫：探测原先把「问不到」和「问到了、答案是不行」压成同一个 false。门牌那道闸
+  // 要靠它区分「这条路断了」和「这次没问到」——混着的话，一次代理切换、一次 CF 边缘抖动
+  // 就能在任务还在云端跑着的时候把这一轮踢回本地，同一份快照烧两次副 API，两份结果先后
+  // 落地互相盖（见 plateCloudGate）。
+  it.each([
+    ['问到了、认识后台任务', { success: true, data: { backgroundJobs: true } }, 200, 'supported'],
+    ['问到了、是老 bundle', { success: true, data: {} }, 200, 'unsupported'],
+    ['问不到（5xx）', { success: false }, 503, 'unknown'],
+  ])('%s → %s', async (_name, body, status, expected) => {
+    configCheck(body, status as number);
+
+    expect(await ActiveMsgClient.probeBackgroundJobSupportDetailed()).toBe(expected);
+  });
+
+  it('请求没发出去也是「问不到」，不是「不支持」', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('Failed to fetch'); }));
+
+    expect(await ActiveMsgClient.probeBackgroundJobSupportDetailed()).toBe('unknown');
+  });
+
+  // 回归守卫：作废那个函数的说明写着「部署/更新 worker 的路径上调一次」，实际只有设置页的
+  // 「重新连接并验证」调了它。用户点完「更新 Worker」（同一个地址换了 bundle），前端还认着
+  // 升级前那句「不支持」——接下来这几分钟每一轮消化都在前台跑那一两分钟的整理，页面一关就死。
+  it('点过「更新 Worker」之后探测结论当场作废', async () => {
+    let upgraded = false;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const isSelfUpdate = String(url).includes('self-update');
+      if (isSelfUpdate) upgraded = true;
+      const body = isSelfUpdate
+        ? { success: true, data: { message: '已经更新到最新版本。' } }
+        : { success: true, data: upgraded ? { backgroundJobs: true } : {} };
+      return {
+        status: 200,
+        text: async () => JSON.stringify(body),
+        headers: new Headers({ 'content-type': 'application/json' }),
+      };
+    }));
+
+    expect(await ActiveMsgClient.probeBackgroundJobSupport(), '升级前是老 bundle').toBe(false);
+    await ActiveMsgClient.selfUpdateWorker();
+
+    expect(await ActiveMsgClient.probeBackgroundJobSupport(), '不作废就得等用户刷新页面').toBe(true);
   });
 });
 

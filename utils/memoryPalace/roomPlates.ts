@@ -20,7 +20,7 @@
 
 import type { MemoryNode, PlateRoom, RoomPlate } from './types';
 import { PLATE_ROOMS, PLATE_TITLES } from './types';
-import { MemoryNodeDB, RoomPlateDB, plateId } from './db';
+import { MemoryNodeDB, RoomPlateDB, loadOrCreatePlate, mutatePlate } from './db';
 import type { LightLLMConfig } from './pipeline';
 import { safeFetchJson } from '../safeApi';
 import {
@@ -45,21 +45,6 @@ export {
 export type { PlateLLMItem, PlateMaterial } from './roomPlateCore';
 import type { PlateLLMItem, PlateMaterial } from './roomPlateCore';
 import { isPlateRoom, mergePlateEntries } from './roomPlateCore';
-
-// ─── 基础工具 ─────────────────────────────────────────
-
-async function loadOrCreatePlate(charId: string, room: PlateRoom): Promise<RoomPlate> {
-    const existing = await RoomPlateDB.get(charId, room);
-    if (existing) return existing;
-    return {
-        id: plateId(charId, room),
-        charId,
-        room,
-        entries: [],
-        updatedAt: Date.now(),
-        version: 0,
-    };
-}
 
 // ─── LLM 蒸馏调用 ─────────────────────────────────────
 
@@ -132,14 +117,20 @@ async function fallbackMergeSubmissions(
         const lines = submissions[plate.room];
         if (!lines || lines.length === 0) continue;
         const before = plate.entries.length;
-        const merged = mergeSubmissionsIntoEntries(plate.room, plate.entries, lines, now);
-        if (!merged) continue;
-        plate.entries = merged;
-        plate.updatedAt = now;
-        plate.version += 1;
-        await RoomPlateDB.save(plate);
+        // 走 mutatePlate：这块门牌上还有别的路在写（云端结果落地、门牌面板的手改），
+        // 拿手上这份改完整块存回去就是把中间那次更新原地抹掉。
+        const saved = await mutatePlate(plate.charId, plate.room, fresh => {
+            const merged = mergeSubmissionsIntoEntries(fresh.room, fresh.entries, lines, now);
+            return merged ? { ...fresh, entries: merged, updatedAt: now, version: fresh.version + 1 } : null;
+        });
+        if (!saved) continue;
+        // 手上这份也要跟着换成落库后的那份：调用方随后拿 plates 当快照交给云端 / 交给
+        // 本地 LLM，留着并入之前那份的话，这批刚保底的候选在 LLM 眼里压根不存在。
+        plate.entries = saved.entries;
+        plate.updatedAt = saved.updatedAt;
+        plate.version = saved.version;
         updated.push(plate.room);
-        console.warn(`🚪 [RoomPlate] 兜底并入「${PLATE_TITLES[plate.room]}」${merged.length - before} 条候选（${why}）`);
+        console.warn(`🚪 [RoomPlate] 兜底并入「${PLATE_TITLES[plate.room]}」${saved.entries.length - before} 条候选（${why}）`);
     }
     return updated;
 }
@@ -162,8 +153,14 @@ async function consolidatePlates(
     llmConfig: LightLLMConfig,
     prioritySubmissions?: Partial<Record<PlateRoom, string[]>>,
     preferCloud = false,
-): Promise<{ updated: PlateRoom[] }> {
+): Promise<{ updated: PlateRoom[]; cloudPending?: boolean }> {
     const rooms = materials.map(m => m.room);
+    // 快照时刻要在**读之前**取。读完门牌之后还要拼身份上下文、过一遍能不能交云端那几道门
+    // （其中一道要发请求）、把消化刚提交的候选先保底并进去，才轮到提交；这一段少则几百
+    // 毫秒、多则好几秒，期间用户在门牌面板上改的字 LLM 是看不到的。取在读之后（更别说
+    // 取在提交那一刻）就会把这段时间的编辑漏判成「LLM 见过」，一份陈旧结果回来把用户刚
+    // 敲的字原样盖回去。宁可反过来错——顶多丢掉整理结果对那一条的改写。
+    const snapshotAt = Date.now();
     const plates = await Promise.all(rooms.map(r => loadOrCreatePlate(charId, r)));
 
     const hasMaterial = materials.some(m => m.lines.length > 0);
@@ -171,6 +168,10 @@ async function consolidatePlates(
     if (!hasMaterial && !hasEntries) {
         return { updated: [] };
     }
+
+    /** 交云端失败之前，送达保证已经当场并入的房间。退回本地跑也要连它们一起报。 */
+    let cloudRescued: PlateRoom[] = [];
+    const withRescued = (updated: PlateRoom[]) => ({ updated: [...new Set([...cloudRescued, ...updated])] });
 
     // 身份上下文：直接走 ContextBuilder.buildCoreContext(char, user, false)——
     // 与全 App 统一的人设口径（身份/核心指令/世界观/用户画像/印象/核心记忆），不重复造轮子。
@@ -187,13 +188,14 @@ async function consolidatePlates(
     } catch { /* 拿不到就裸跑，prompt 里仍有名字与身份确认段 */ }
 
     if (preferCloud) {
-        const cloudResult = await tryCloudConsolidation({
-            charId, charName, userName, identityContext, plates, materials, llmConfig, prioritySubmissions,
+        const cloud = await tryCloudConsolidation({
+            charId, charName, userName, identityContext, plates, materials, llmConfig, prioritySubmissions, snapshotAt,
         });
-        if (cloudResult) return cloudResult;
-        // 交不出去（没配 worker / 副 API 缺字段 / 网络挂了）→ 原地退回本地跑。
+        if (cloud.handled) return { updated: cloud.updated, cloudPending: cloud.pending };
+        // 交不出去（没配 worker / 副 API 缺字段 / 服务端答复了不行）→ 原地退回本地跑。
         // plates 可能已经被上面的送达保证并入过候选，本地这轮拿到的就是并入后的那份，
         // LLM 的完整新列表照常覆盖它。
+        cloudRescued = cloud.rescued;
     }
 
     let items: PlateLLMItem[] = [];
@@ -205,9 +207,9 @@ async function consolidatePlates(
     if (items.length === 0) {
         console.warn(`🚪 [RoomPlate] LLM 未返回有效条目，门牌保持不动`);
         if (prioritySubmissions) {
-            return { updated: await fallbackMergeSubmissions(plates, prioritySubmissions, Date.now()) };
+            return withRescued(await fallbackMergeSubmissions(plates, prioritySubmissions, Date.now()));
         }
-        return { updated: [] };
+        return withRescued([]);
     }
 
     const now = Date.now();
@@ -216,13 +218,19 @@ async function consolidatePlates(
     for (const plate of plates) {
         const roomItems = items.filter(i => i.room === plate.room);
         if (roomItems.length === 0) { skippedPlates.push(plate); continue; }
-        const mergedEntries = mergePlateEntries(plate.room, plate.entries, roomItems, now);
-        plate.entries = mergedEntries;
-        plate.updatedAt = now;
-        plate.version += 1;
-        await RoomPlateDB.save(plate);
+        // 同上：这块门牌上还有别的路在写，落库统一走 mutatePlate 那条队。
+        const saved = await mutatePlate(plate.charId, plate.room, fresh => ({
+            ...fresh,
+            entries: mergePlateEntries(fresh.room, fresh.entries, roomItems, now),
+            updatedAt: now,
+            version: fresh.version + 1,
+        }));
+        if (!saved) continue;
+        plate.entries = saved.entries;
+        plate.updatedAt = saved.updatedAt;
+        plate.version = saved.version;
         updated.push(plate.room);
-        console.log(`🚪 [RoomPlate] 「${PLATE_TITLES[plate.room]}」v${plate.version}：${mergedEntries.length} 条`);
+        console.log(`🚪 [RoomPlate] 「${PLATE_TITLES[plate.room]}」v${saved.version}：${saved.entries.length} 条`);
     }
     // 半失败态：LLM 只给部分房间输出了条目。没被提到的房间若有本次提交的候选，
     // 同样机械兜底并入——按房间粒度保证送达。
@@ -230,12 +238,32 @@ async function consolidatePlates(
         const rescued = await fallbackMergeSubmissions(skippedPlates, prioritySubmissions, now);
         updated.push(...rescued);
     }
-    return { updated };
+    return withRescued(updated);
 }
 
 /**
- * 试着把这一轮整理交给云端。交出去了返回结果（`updated` 是送达保证当场并入的那些，
- * 云端整理的结果要等它回来才落地）；交不出去返回 null，调用方退回本地跑。
+ * 交云端这一轮的三种结局。
+ *
+ * `handled: false` 那支要把 `rescued` 一起交回去：送达保证已经真的把候选并进门牌、
+ * 落库、升过版本号了。丢掉的话消化日志会说「这次一块门牌都没动」，而门牌上明明多了
+ * 几条——本地那条路末尾的兜底并入是按文本去重的，那批已经在里面了，它一条也不会再报。
+ */
+type CloudConsolidationOutcome =
+    /**
+     * 云端接手了。`pending` = **云端正有一份整理在跑、结果会晚点落地**——这一轮刚交上去
+     * 的算，上一份还没回来所以这轮没重复交的也算。它最后决定消化日志上说哪句话，问的是
+     * 「门牌等会儿还会不会动」，不是「这一轮交没交」。两者混起来的话，第二种会被写成
+     * 「⚠️ 本次提交的候选未合并进门牌（整理未跑成或未被采纳）」——而它正在用户自己的
+     * Worker 上好好跑着，几分钟后就落地。
+     */
+    | { handled: true; updated: PlateRoom[]; pending: boolean }
+    /** 交不出去，调用方退回本地跑。`rescued` 是送达保证当场并入的房间。 */
+    | { handled: false; rescued: PlateRoom[] };
+
+/**
+ * 试着把这一轮整理交给云端。云端接手了（交出去了 / 上一份还在跑）就返回 `handled: true`
+ * ——`updated` 只有送达保证当场并入的那些，整理结果要等它回来才落地；交不出去返回
+ * `handled: false`，调用方退回本地跑。
  *
  * **送达保证要前置**：本地那条路是「LLM 挂了才机械并入候选」，而上云之后「挂没挂」
  * 要几分钟后才知道，候选的源节点却已经打了 digestedAt、不会再来第二次。所以改成
@@ -251,26 +279,27 @@ async function tryCloudConsolidation(args: {
     materials: PlateMaterial[];
     llmConfig: LightLLMConfig;
     prioritySubmissions?: Partial<Record<PlateRoom, string[]>>;
-}): Promise<{ updated: PlateRoom[] } | null> {
+    /** `plates` 是什么时候读的（epoch 毫秒），原样传给提交侧记进在飞记号。 */
+    snapshotAt: number;
+}): Promise<CloudConsolidationOutcome> {
     // 动态 import：没开主动消息 2.0 的用户不该为这条路付首屏包体。
-    const { buildPlateCredRow, submitPlateConsolidation } = await import('./roomPlateCloud');
-    const { isAmsg2GlobalReady } = await import('../amsg2ToolBridge');
-    const { ActiveMsgClient } = await import('../activeMsgClient');
+    // 只引这一个模块——「能不能交」那几道门也收在它里面（plateCloudGate），
+    // 判定入口分散到两处的话，改一处漏一处就是「点了灯却走本地」那种查不出来的静默分流。
+    const { plateCloudGate, readPlateJobInFlight, submitPlateConsolidation } = await import('./roomPlateCloud');
 
-    // 三道门先过，一道比一道贵：记忆宫殿副 API 缺字段（纯本地判断）→ 没配 worker
-    // （读一次本地配置）→ 那台 worker 的代码认不认识后台任务（一次 config-check，
-    // 结论按 workerUrl 缓存）。最后这道是必须的：老 bundle 会把后台任务当聊天任务跑、
-    // 终态失败，而那条任务行不在用户的清单里，面板一片正常门牌却永远不更新。
-    if (!buildPlateCredRow(args.charId, args.llmConfig)) return null;
-    if (!await isAmsg2GlobalReady()) return null;
-    if (!await ActiveMsgClient.probeBackgroundJobSupport()) {
-        console.log('🚪 [RoomPlate] 这台 Worker 的代码还不认识后台任务，这轮在本地整理');
-        return null;
-    }
+    const gate = await plateCloudGate({ charId: args.charId, lightLLM: args.llmConfig });
+    if (gate === 'local') return { handled: false, rescued: [] };
 
     const rescued = args.prioritySubmissions
         ? await fallbackMergeSubmissions(args.plates, args.prioritySubmissions, Date.now(), '先保底再交云端整理')
         : [];
+
+    // 上一份整理还在云端跑：这轮只做送达保证，整理本身不重复交也不退回本地——本地再全量
+    // 跑一遍会白烧一次 API，跑出来的结果还会和在飞那份互相覆盖。
+    // `pending: true` —— 云端确实有一份在跑，门牌等会儿就会动。报 false 的话，候选恰好
+    // 都已经在门牌上（送达保证按文本去重、一条都没并进去）的那次消化，日志上会写成
+    // 「整理未跑成」。
+    if (gate === 'skip') return { handled: true, updated: rescued, pending: true };
 
     try {
         await submitPlateConsolidation({
@@ -281,11 +310,19 @@ async function tryCloudConsolidation(args: {
             plates: args.plates,
             materials: args.materials,
             lightLLM: args.llmConfig,
+            snapshotAt: args.snapshotAt,
         });
-        return { updated: rescued };
+        return { handled: true, updated: rescued, pending: true };
     } catch (e: any) {
+        // 在飞记号还在 = 请求发出去了却没等到答复，任务可能已经在云端建起来了（提交那侧
+        // 只在「服务端答复了不行」时才收记号）。这时候退回本地全量跑一遍，就是拿同一份
+        // 快照烧两次 API，两份结果还先后落地互相盖。宁可这轮不整理，等它回来。
+        if (readPlateJobInFlight(args.charId)) {
+            console.warn(`🚪 [RoomPlate] 交云端整理没等到答复，任务可能已经建起来了，这轮不退回本地: ${e?.message || e}`);
+            return { handled: true, updated: rescued, pending: true };
+        }
         console.warn(`🚪 [RoomPlate] 交云端整理失败，退回本地跑: ${e?.message || e}`);
-        return null;
+        return { handled: false, rescued };
     }
 }
 
@@ -361,7 +398,7 @@ export async function consolidateAllPlates(
     llmConfig: LightLLMConfig,
     extraMaterial?: Partial<Record<PlateRoom, string[]>>,
     sinceTs: number = 0,
-): Promise<{ updated: PlateRoom[] }> {
+): Promise<{ updated: PlateRoom[]; cloudPending?: boolean }> {
     const allNodes = await MemoryNodeDB.getByCharId(charId);
     const materials: PlateMaterial[] = PLATE_ROOMS.map(room => {
         const extra = (extraMaterial?.[room] || [])
@@ -376,9 +413,10 @@ export async function consolidateAllPlates(
     // extraMaterial 同时作为 prioritySubmissions 传入：LLM 整理失败时机械兜底并入，不许蒸发。
     //
     // 这个触发点走云端（配了主动消息 2.0 的话）：消化跑在一轮对话刚结束的时候，用户
-    // 大概率正准备切走，而四块门牌全量整理是这条链上最慢的一次调用。另外两个触发点留在
-    // 本地——盒子压缩那个一轮里可能跑好几次、后一次要看到前一次的结果，异步化会让它们
-    // 拿同一份快照互相覆盖；手动回填有进度条，批次之间也是串行依赖的。
+    // 大概率正准备切走，而四块门牌全量整理是这条链上最慢的一次调用。同一个角色同时只许
+    // 一份整理在飞（见 roomPlateCloud 的在飞记号），两份结果先后落地就是拿两份旧快照
+    // 互相盖。另外两个触发点留在本地——盒子压缩那个一轮里可能跑好几次、后一次要看到前
+    // 一次的结果；手动回填有进度条，批次之间也是串行依赖的。
     return consolidatePlates(charId, charName, userName || '用户', materials, llmConfig, extraMaterial, true);
 }
 

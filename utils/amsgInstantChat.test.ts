@@ -29,11 +29,12 @@ vi.mock('./keepAlive', () => ({
 // 后台任务结果的分发口：真的那份会动态 import 记忆宫殿那一整套（IndexedDB），
 // 这里只关心「补收有没有把它交出去、销账判断对不对」。
 const { resultDispatch } = vi.hoisted(() => ({
-  resultDispatch: { calls: [] as unknown[], settle: true },
+  resultDispatch: { calls: [] as unknown[], contexts: [] as unknown[], settle: true },
 }));
 vi.mock('./amsgResults', () => ({
-  dispatchAmsgResult: vi.fn(async (payload: unknown) => {
+  dispatchAmsgResult: vi.fn(async (payload: unknown, context?: unknown) => {
     resultDispatch.calls.push(payload);
+    resultDispatch.contexts.push(context);
     return resultDispatch.settle;
   }),
 }));
@@ -938,6 +939,7 @@ describe('推送丢了的补收（服务端账本）', () => {
   describe('后台任务的结果（messageKind: result）', () => {
     beforeEach(() => {
       resultDispatch.calls = [];
+      resultDispatch.contexts = [];
       resultDispatch.settle = true;
     });
 
@@ -968,7 +970,11 @@ describe('推送丢了的补收（服务端账本）', () => {
       expect(ackNow).toEqual([]);
     });
 
-    it('时效窗那道判断不套在结果上——结果晚到本来就是常态', async () => {
+    // 回归守卫：这条路刻意跳过了聊天那 24 小时的时效窗（结果晚到本来就是常态），可跳过
+    // 之后没换上任何上限。账本留 28 天——重装 PWA 的用户第一次接上账本会把一个月前的结果
+    // 一次性拉回来。这里不替各种产物定规矩，但账本上记的时间必须原样交出去，认领它的
+    // 那一方才判得了「陈到不能用了没有」。
+    it('时效窗那道判断不套在结果上，但账本上记的时间要交出去', async () => {
       const messageId = 'msg-result-old';
       const tooOld = Date.now() - OUTBOX_BACKFILL_MAX_AGE_MS - 1;
       stubOutbox([entry(messageId, outboxPush(messageId, {
@@ -976,6 +982,8 @@ describe('推送丢了的补收（服务端账本）', () => {
       }), tooOld)]);
       await drainOutbox();
       expect(resultDispatch.calls).toHaveLength(1);
+      expect(resultDispatch.contexts[0], '不交时间的话它连「这份躺了多久」都问不出来')
+        .toEqual({ createdAt: tooOld });
     });
   });
 
@@ -1095,6 +1103,28 @@ describe('第一次接上服务端账本', () => {
     expect(written).toBe(1);
     expect(storeState.saved.map((m: any) => m.messageId)).toEqual(['m-awaited']);
     expect(ack).toHaveBeenCalledWith(['m-old']);
+  });
+
+  // 回归守卫：换设备 / 重装 PWA / 清过 localStorage 的用户，启动第一趟走的就是这条路。
+  // 后台任务的结果不进聊天流，没有「存量重放刷屏」这回事，而补收是它唯一的入口（不弹
+  // 通知的结果上游只落账本、不发推送）。跟存量一起销掉的话，云端已经跑完的门牌整理会
+  // 一声不响地蒸发，面板全绿、日志干净、就是东西没了。
+  it('后台任务的结果不算存量，照常交给分发口', async () => {
+    resultDispatch.calls = [];
+    resultDispatch.settle = true;
+    const resultEntry = {
+      ...entry('m-result', 'uuid-job'),
+      push: { messageKind: 'result', resultKind: 'plate-consolidate', messageId: 'm-result' },
+    };
+    stubOutboxOnce([entry('m-old', 'uuid-old'), resultEntry]);
+    const ack = vi.spyOn(ActiveMsgClient, 'ackOutboxMessages').mockResolvedValue(undefined);
+
+    const { ackNow } = await drainOutbox();
+
+    expect(ack, '结果不在整批销账那一批里').toHaveBeenCalledWith(['m-old']);
+    expect(resultDispatch.calls).toHaveLength(1);
+    expect(ackNow, '消化成功之后才销它自己那一条').toEqual(['m-result']);
+    expect(localStorage.getItem(AMSG_OUTBOX_ADOPTED_LS_KEY)).toBeTruthy();
   });
 
   // 先记标记再销账的话，销账一失败，剩下的存量下一趟就会被当成补收倒进聊天流。

@@ -174,7 +174,7 @@ export const AMSG2_CRED_FINGERPRINT_LS_KEY = 'amsg2_llm_cred_fingerprints';
 
 /** FNV-1a 32 位 + 长度后缀。够区分「换了 Key / 换了模型」，不用于任何安全判定。 */
 export const fingerprintCredentialValue = (value: LlmCredentialValue): string => {
-  const text = `${value.apiUrl} ${value.apiKey} ${value.primaryModel}`;
+  const text = `${value.apiUrl}\0${value.apiKey}\0${value.primaryModel}`;
   let hash = 0x811c9dc5;
   for (let i = 0; i < text.length; i += 1) {
     hash ^= text.charCodeAt(i);

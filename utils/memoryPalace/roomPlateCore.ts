@@ -31,7 +31,11 @@ import { safeParseJsonArray } from './jsonUtils';
 export const PLATE_LLM_TEMPERATURE = 0.3;
 /** 四块门牌全量输出一次要不少字，给足 */
 export const PLATE_LLM_MAX_TOKENS = 8000;
-/** 单次整理的硬超时（浏览器侧 safeFetchJson 用，worker 侧交给上游的单次 fire 超时） */
+/**
+ * 单次整理的硬超时。两条路都用这一个值：浏览器侧交给 safeFetchJson，worker 侧作为这次
+ * fire 的 `totalTimeoutMs` 交给上游（见 worker/amsg/src/plateFire.ts 的 beforeFire）。
+ * 不显式交上去的话云端会落到库自己的默认值（四分钟），改这个常量对云端毫无影响。
+ */
 export const PLATE_LLM_TIMEOUT_MS = 120_000;
 
 // ─── 基础工具 ─────────────────────────────────────────
@@ -169,8 +173,13 @@ export function mergePlateEntries(
  * 两条认知的来历（firstLearnedAt / sourceCount）会被悄悄接错。
  *
  * 所以提交时把快照每条的 id 一起带上，回来时按 id 在当前列表里找它现在排第几，
- * 把标签改写过去。快照那条已经不在了（被上一轮淘汰）就把 basedOn 抹成 null，
+ * 把标签改写过去。标签指到快照之外（模型把序号编大了）就把 basedOn 抹成 null，
  * 当新条目收进去——认错来历比丢一次来历更糟。
+ *
+ * **快照里有、现在没了的那种要整条丢掉**，不能当新条目收：那说明这条认知在提交之后
+ * 被删掉了（用户在门牌面板上手删，或者被上一份整理结果淘汰）。这份结果照着旧快照
+ * 生成，它「保留」的是一条已经不该在的认知，收进去就是原地复活——而门牌面板恰恰是
+ * 用户手删的地方，删完还眼看着它长回来。删除比这份陈旧结果新，删除说了算。
  *
  * @param snapshotEntryIds 提交时该房间的条目 id，顺序即当时的标签顺序
  * @param current 现在的条目（合并要写进去的那一份）
@@ -184,19 +193,122 @@ export function remapBasedOnLabels(
     const prefix = ROOM_LABEL_PREFIX[room];
     const currentIndexById = new Map(current.map((e, i) => [e.id, i]));
 
-    return items.map(item => {
-        if (!item.basedOn) return item;
+    return items.flatMap(item => {
+        if (!item.basedOn) return [item];
         const label = String(item.basedOn).trim().toUpperCase();
-        if (!label.startsWith(prefix)) return { ...item, basedOn: null };
-        const snapshotIndex = Number(label.slice(prefix.length));
-        if (!Number.isInteger(snapshotIndex) || snapshotIndex < 0) return { ...item, basedOn: null };
+        if (!label.startsWith(prefix)) return [{ ...item, basedOn: null }];
+        // 只认「前缀 + 纯数字」。别拿 Number() 直接转：Number('') 是 0，光秃秃的前缀
+        // （模型把数字掉了，回一个 "U"）会被当成第 0 条，把一条无关认知的来历接过去。
+        const digits = label.slice(prefix.length);
+        if (!/^\d+$/.test(digits)) return [{ ...item, basedOn: null }];
+        const snapshotIndex = Number(digits);
 
         const entryId = snapshotEntryIds[snapshotIndex];
-        const currentIndex = entryId === undefined ? undefined : currentIndexById.get(entryId);
-        return currentIndex === undefined
-            ? { ...item, basedOn: null }
-            : { ...item, basedOn: `${prefix}${currentIndex}` };
+        if (entryId === undefined) return [{ ...item, basedOn: null }];
+
+        const currentIndex = currentIndexById.get(entryId);
+        if (currentIndex === undefined) {
+            console.warn(`🚪 [RoomPlate] 「${room}」丢掉一条陈旧结果：它保留的条目在提交之后已经被删掉了`);
+            return [];
+        }
+        return [{ ...item, basedOn: `${prefix}${currentIndex}` }];
     });
+}
+
+/**
+ * 提交之后被本地改过的条目，文本以本地那份为准。
+ *
+ * 门牌面板是人工纠错的口子——蒸错的事实一旦常驻，角色会自信地重复很久。用户在等结果的
+ * 这几分钟里把一条改对了，而这份结果是照着改之前那份快照生成的：照常合并就是拿旧认知
+ * 把刚纠正的那条又盖回去，用户看着自己刚敲的字变回原样，还不知道是谁改的。
+ *
+ * 只换文本，别的都不动：条目照常参与这一轮的保留/淘汰、tag 照常更新，只是「它现在写着
+ * 什么」由本地那份说了算。判据是条目的 updatedAt 晚于快照时刻。
+ *
+ * @param snapshotAt 快照是什么时候读的（epoch 毫秒）。`0` = 无从查起（结果迟到太久、
+ *   在飞记号已经不在了），那时按「谁都可能被改过」保守处理：凡是有过改动痕迹的条目
+ *   一律留本地文本，只有从没被改过的才让结果改写。
+ */
+function keepLocalEditsOverStaleRewrites(
+    room: PlateRoom,
+    current: PlateEntry[],
+    items: Array<{ text: string; basedOn?: string | null; tag?: string | null }>,
+    snapshotAt: number,
+): Array<{ text: string; basedOn?: string | null; tag?: string | null }> {
+    const prefix = ROOM_LABEL_PREFIX[room];
+    const byLabel = new Map<string, PlateEntry>();
+    current.forEach((e, i) => byLabel.set(`${prefix}${i}`, e));
+
+    return items.map(item => {
+        if (!item.basedOn) return item;
+        const base = byLabel.get(String(item.basedOn).trim().toUpperCase());
+        if (!base || base.text === item.text) return item;
+        // 从建出来到现在一个字都没被改过的条目不算「本地改过」：它现在写着什么，快照里
+        // 就写着什么。这条豁免不能省——交云端之前送达保证会先把消化刚提交的候选机械并进
+        // 门牌（见 roomPlates 的 fallbackMergeSubmissions），那批的 updatedAt 就是并入
+        // 那一刻、必然晚于快照。不豁免的话，云端把这批粗糙候选改写成人话的结果会被原样
+        // 退回去，而改写它们正是那一轮整理最主要的目的。
+        if (base.updatedAt === base.firstLearnedAt) return item;
+        if (base.updatedAt <= snapshotAt) return item;
+        console.warn(`🚪 [RoomPlate] 「${room}」这条在快照之后被本地改过，保留本地那份文本`);
+        return { ...item, text: base.text };
+    });
+}
+
+/**
+ * 上云那条路专用的合并：在 mergePlateEntries 之上，护住**快照之后才出现的条目**。
+ *
+ * 合并语义是「LLM 输出的完整新列表说了算，没被重新输出的条目淘汰」。本地那条路上这是
+ * 对的——LLM 看到的就是当前全部条目。上云之后不成立了：LLM 看到的是**提交那一刻**的
+ * 快照，而结果一两分钟后才回来，这中间封盒、手动回填、上一份结果落地都可能往门牌里
+ * 写了新条目。那些条目 LLM 压根没见过，谈不上「决定淘汰」，照原样合并就是把它们静默
+ * 抹掉，用户这边看到的是刚沉淀的认知凭空消失。
+ *
+ * 所以按 id 分两类：在快照里的，照常参与淘汰；不在快照里的（= 提交之后新增的），
+ * 没被引用也保留，排在整理结果后面，等下一轮整理再一起重排。
+ *
+ * 「提交之后被改过」的条目另算：那批还在快照里，照常参与淘汰，只是文本以本地那份为准
+ * （见 keepLocalEditsOverStaleRewrites）。
+ *
+ * @param snapshotEntryIds 提交时该房间的条目 id（顺序即当时的标签顺序）
+ * @param snapshotAt 快照是什么时候读的（epoch 毫秒），`0` = 无从查起。
+ *   见 keepLocalEditsOverStaleRewrites。
+ */
+export function mergeCloudPlateEntries(
+    room: PlateRoom,
+    current: PlateEntry[],
+    alignedItems: Array<{ text: string; basedOn?: string | null; tag?: string | null }>,
+    snapshotEntryIds: string[],
+    now: number,
+    snapshotAt: number,
+): PlateEntry[] {
+    const items = keepLocalEditsOverStaleRewrites(room, current, alignedItems, snapshotAt);
+    const merged = mergePlateEntries(room, current, items, now);
+    const snapshotIds = new Set(snapshotEntryIds);
+    const mergedIds = new Set(merged.map(e => e.id));
+    // 同文本原样保留那条支路也会把新条目收进 merged，所以要连 mergedIds 一起排除，
+    // 否则同一条会出现两次。
+    const born = current.filter(e => !snapshotIds.has(e.id) && !mergedIds.has(e.id));
+    if (born.length === 0) return merged;
+
+    const cap = PLATE_ENTRY_CAPS[room];
+    // 裁之前先给 born 留位子。直接 [...merged, ...born].slice(0, cap) 的话，整理结果占满
+    // 上限时 born 会被整批扔掉——而它们的来源节点早就打过 digestedAt，不会再有第二次，
+    // 「等下轮整理再收」是等不到的，那批认知就这么永久没了。
+    // 留一半封顶：born 是还没被整理过的粗糙条目，也不该把 LLM 刚排好的那份整块挤出去。
+    const bornQuota = Math.min(born.length, Math.max(1, Math.floor(cap / 2)));
+    const kept = [...merged.slice(0, cap - bornQuota), ...born].slice(0, cap);
+
+    const keptIds = new Set(kept.map(e => e.id));
+    const lostBorn = born.filter(e => !keptIds.has(e.id)).length;
+    const lostMerged = merged.filter(e => !keptIds.has(e.id)).length;
+    if (lostBorn > 0) {
+        console.warn(`🚪 [RoomPlate] 「${room}」快照之后新增的条目有 ${lostBorn} 条挤不进上限，已经丢掉（来源已消化，不会再来一次）`);
+    }
+    if (lostMerged > 0) {
+        console.warn(`🚪 [RoomPlate] 「${room}」整理结果有 ${lostMerged} 条挤不进上限，让位给快照之后新增的条目`);
+    }
+    return kept;
 }
 
 /**

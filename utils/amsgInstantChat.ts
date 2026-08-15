@@ -636,9 +636,14 @@ const markOutboxAdopted = (): void => {
 /**
  * 首次接管：账本上的存量整批销账、不进聊天流。
  *
- * 唯一的例外是用户**此刻正等着的那几轮**（taskUuid 跟待收记录对得上）：那是刚刚发生
- * 的事，不是历史积压，照常走补收放进聊天流——否则第一次接管恰好赶上用户发消息时，
- * 那一轮的回复会被当存量销掉，用户等来的是一句「回复没能取回」。
+ * 两类例外照常走补收：
+ *   - 用户**此刻正等着的那几轮**（taskUuid 跟待收记录对得上）：那是刚刚发生的事，不是
+ *     历史积压——否则第一次接管恰好赶上用户发消息时，那一轮的回复会被当存量销掉，用户
+ *     等来的是一句「回复没能取回」。
+ *   - **后台任务的结果**（`messageKind: 'result'`）：它们本来就是靠补收到达的（不弹通知
+ *     的结果上游只落账本、不发推送），跟存量一起销掉的话，云端跑完的门牌整理会一声不响
+ *     地蒸发。而且它们不进聊天流，没有「重放一遍」这回事——首次接管要防的是刷屏，不是
+ *     数据落地。换设备 / 重装 PWA / 清过 localStorage 的用户走的正是这条路。
  *
  * 销账成功才记标记。没销干净就这一趟什么都不做、也不记标记：没销掉的条目下次还会
  * 拉回来，那时仍按接管处理。反过来（先记标记再销账）一旦销账失败，剩下的存量下一趟
@@ -647,7 +652,9 @@ const markOutboxAdopted = (): void => {
 const adoptOutboxBacklog = async (entries: AmsgOutboxEntry[]): Promise<OutboxDrainResult> => {
   const awaitedUuids = new Set(listInstantChatPendings().map((pending) => pending.uuid));
   const isAwaited = (entry: AmsgOutboxEntry) => !!entry.taskUuid && awaitedUuids.has(entry.taskUuid);
-  const backlogIds = entries.filter((entry) => !isAwaited(entry)).map((entry) => entry.messageId);
+  const isResult = (entry: AmsgOutboxEntry) => entry.push?.messageKind === 'result';
+  const keep = (entry: AmsgOutboxEntry) => isAwaited(entry) || isResult(entry);
+  const backlogIds = entries.filter((entry) => !keep(entry)).map((entry) => entry.messageId);
 
   if (backlogIds.length > 0) {
     try {
@@ -660,7 +667,7 @@ const adoptOutboxBacklog = async (entries: AmsgOutboxEntry[]): Promise<OutboxDra
   markOutboxAdopted();
   console.log(`${HEADER} 第一次接上云端账本：存量 ${backlogIds.length} 条直接销账，不往聊天流里放`);
 
-  const { written, ackNow } = await backfillOutboxEntries(entries.filter(isAwaited));
+  const { written, ackNow } = await backfillOutboxEntries(entries.filter(keep));
   return { written, ackNow, entries };
 };
 
@@ -687,9 +694,12 @@ const backfillOutboxEntries = async (
     const push = entry.push || {};
     const kind = typeof push.messageKind === 'string' ? push.messageKind : 'content';
     if (kind === 'result') {
-      // 时效窗那道判断刻意不套在结果上：结果晚到本来就是常态（正是为此才上云的），
+      // 聊天那道 24 小时的时效窗刻意不套在结果上：结果晚到本来就是常态（正是为此才上云的），
       // 隔一天回来照样该落地，跟「隔一天才弹出来的报错」不是一回事。
-      if (await dispatchAmsgResult(push)) ackNow.push(entry.messageId);
+      // 但「多晚算太晚」得有人管——账本留 28 天，换设备 / 重装 PWA 的用户第一次接上账本
+      // 会把老结果一次性拉回来。这里不替各种产物定规矩，只把账本上记的时间原样交给认领
+      // 它的那一方，由它按自己的语义判（门牌整理的上限见 PLATE_RESULT_MAX_AGE_MS）。
+      if (await dispatchAmsgResult(push, { createdAt: entry.createdAt })) ackNow.push(entry.messageId);
       continue;
     }
     if (kind !== 'content' && kind !== 'emotion_update') {

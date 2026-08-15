@@ -17,6 +17,7 @@ import {
   plateJobKey,
 } from '../../../utils/amsgPlateJob';
 import { AMSG_JOB_ID_KEY, AMSG_JOB_NAMESPACE, AMSG_TASK_KIND_KEY } from '../../../utils/amsgTaskKinds';
+import { PLATE_LLM_TIMEOUT_MS } from '../../../utils/memoryPalace/roomPlateCore';
 
 const CHAR_ID = 'preset-nyah';
 const JOB_ID = 'job-0001';
@@ -168,6 +169,53 @@ describe('门牌整理 handler', () => {
     await expect(amsgHooks.onBeforeFire(ctx)).rejects.toThrow(/解析失败/);
   });
 
+  it('这次 fire 的超时跟浏览器那条路对齐', async () => {
+    const { ctx } = makeCtx({ jobValue: await packStateValue(JSON.stringify(jobInput())) });
+    const result = await amsgHooks.onBeforeFire(ctx) as { totalTimeoutMs?: number };
+
+    expect(result.totalTimeoutMs, '不交上去就落到库自己的四分钟默认值，改那个常量对云端毫无影响')
+      .toBe(PLATE_LLM_TIMEOUT_MS);
+  });
+
+  // 回归守卫：beforeFire 认定「这份输入坏了」时原先只抛错，行留着。那几种失败是确定性的
+  // （解压不出来、形状对不上、charId 对不上号），重试梯子再跑两遍还是同一份坏数据——行就
+  // 这么在共用命名空间里躺满三天 TTL。而每一行都是一个角色的整块门牌原文 + 蒸馏材料 +
+  // 身份上下文，且每次后台 fire 都要把整个命名空间读出来解密才能挑出自己那一行。
+  describe('确定性的坏输入，认定的同时就把那行删掉', () => {
+    const discarded = (writeState: ReturnType<typeof vi.fn>) =>
+      expect(writeState).toHaveBeenCalledWith(
+        AMSG_JOB_NAMESPACE, [{ key: plateJobKey(JOB_ID), value: null }],
+      );
+
+    it('解压不出来（数据损坏）', async () => {
+      const { ctx, writeState } = makeCtx({ jobValue: 'gz1:这不是合法的压缩数据' });
+      await expect(amsgHooks.onBeforeFire(ctx)).rejects.toThrow(/解压失败/);
+      discarded(writeState);
+    });
+
+    it('形状对不上', async () => {
+      const { ctx, writeState } = makeCtx({ jobValue: await packStateValue('{"v":99}') });
+      await expect(amsgHooks.onBeforeFire(ctx)).rejects.toThrow(/解析失败/);
+      discarded(writeState);
+    });
+
+    it('charId 跟任务对不上', async () => {
+      const { ctx, writeState } = makeCtx({
+        jobValue: await packStateValue(JSON.stringify(jobInput({ charId: 'someone-else' }))),
+      });
+      await expect(amsgHooks.onBeforeFire(ctx)).rejects.toThrow(/charId 与任务对不上/);
+      discarded(writeState);
+    });
+
+    it('一个要整理的房间都没有', async () => {
+      const { ctx, writeState } = makeCtx({
+        jobValue: await packStateValue(JSON.stringify(jobInput({ rooms: [] }))),
+      });
+      await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
+      discarded(writeState);
+    });
+  });
+
   it('跑完把结果送进收件箱、不弹通知，并删掉一次性输入', async () => {
     const { ctx: fireCtx, scratch } = makeCtx({
       jobValue: await packStateValue(JSON.stringify(jobInput())),
@@ -207,8 +255,30 @@ describe('门牌整理 handler', () => {
 
     expect(decision).toEqual({ decision: 'skip-push', reason: 'plate-empty-generation' });
     expect(emitResult).not.toHaveBeenCalled();
-    // 输入留着，重试还能再跑一次
-    expect(writeState).not.toHaveBeenCalled();
+    // 一次性输入照样得删：上游把 skip-push 当办完了（status: 'skipped'），这条
+    // recurrenceType: 'none' 的任务再没有第二次机会来读它。留着就是一行没人认领的
+    // 孤儿，装着整块门牌原文 + 材料 + 身份上下文，一直占到 TTL。
+    expect(writeState, '不删的话每次失败留一行，而 beforeFire 每跳都要把这个命名空间整个读出来解密')
+      .toHaveBeenCalledWith(AMSG_JOB_NAMESPACE, [{ key: plateJobKey(JOB_ID), value: null }]);
+  });
+
+  // 回归守卫：kind 是从任务 metadata 上读出来的字符串。handler 表要是普通对象字面量，
+  // `constructor` / `toString` 这些原型链上的键会解析成一个真值，绕过「表里没有这个
+  // kind」那道判断，最后炸在 `handler.beforeFire is not a function` 上——那句报错跟真正
+  // 的原因（这台 worker 不认识这种任务）毫无关系，排障要多绕一大圈。
+  it.each(['constructor', 'toString', 'valueOf', '__proto__'])(
+    'kind=%s 走「不认识的任务种类」，不是一句无关的报错',
+    async (kind) => {
+      const { ctx } = makeCtx({ metadata: { [AMSG_TASK_KIND_KEY]: kind } });
+      await expect(amsgHooks.onBeforeFire(ctx)).rejects.toThrow(/不认识的任务种类/);
+    },
+  );
+
+  // 删角色时客户端会把这份输入写成空壳（HTTP 的 PUT /client-state 没有删除语义）。
+  // 空壳解析不出来，当「数据损坏」硬失败的话，一个已经被删掉的角色还要把重试梯子走完。
+  it('输入被撤销（行还在但值是空的）→ 跟过期一样安静跳过', async () => {
+    const { ctx } = makeCtx({ jobValue: '' });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
   });
 
   it('老 worker 没有 emitResult → 说清楚原因，不静默', async () => {
@@ -217,11 +287,36 @@ describe('门牌整理 handler', () => {
     });
     await amsgHooks.onBeforeFire(fireCtx);
 
-    const { ctx } = makeSessionCtx(scratch, REPLY);
+    const { ctx, writeState } = makeSessionCtx(scratch, REPLY);
     delete (ctx as any).emitResult;
     await expect(amsgHooks.onLLMOutput(ctx)).resolves.toEqual({
       decision: 'skip-push', reason: 'plate-emit-result-unsupported',
     });
+    // 这台 worker 永远送不回结果，留着那行也没人会来读
+    expect(writeState).toHaveBeenCalledWith(
+      AMSG_JOB_NAMESPACE, [{ key: plateJobKey(JOB_ID), value: null }],
+    );
+  });
+
+  // 回归守卫：方法在、调用炸了（收件箱表缺列——升级 worker 不跑 init-tenant 就这样）。
+  // 抛出去的话这一轮算失败，重试梯子会**再跑两次完整生成**：LLM 已经烧过一次，后两次
+  // 注定同样送不回来。就地收成跳过，只白跑一次。
+  it('emitResult 调用抛错 → 就地收成跳过，不把整轮判失败去重试', async () => {
+    const { ctx: fireCtx, scratch } = makeCtx({
+      jobValue: await packStateValue(JSON.stringify(jobInput())),
+    });
+    await amsgHooks.onBeforeFire(fireCtx);
+
+    const { ctx, emitResult, writeState } = makeSessionCtx(scratch, REPLY);
+    emitResult.mockRejectedValueOnce(new Error('no such column: push_payload'));
+
+    await expect(amsgHooks.onLLMOutput(ctx)).resolves.toEqual({
+      decision: 'skip-push', reason: 'plate-emit-result-failed',
+    });
+    // 结果虽然没送出去，一次性输入照样得删：这一轮已经被上游当办完了，没人会再读它
+    expect(writeState).toHaveBeenCalledWith(
+      AMSG_JOB_NAMESPACE, [{ key: plateJobKey(JOB_ID), value: null }],
+    );
   });
 });
 

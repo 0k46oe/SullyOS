@@ -1021,6 +1021,20 @@ export const amsgStaleSkip = async (
   },
 ): Promise<void> => {
   const meta = (info.metadata ?? {}) as Record<string, unknown>;
+
+  // 后台任务（门牌整理这类）先接走。last_skip 那份留痕说的是「这条**主动消息**到点
+  // 为什么没响」，主动消息面板照它给用户解释；后台任务过期跟主动消息毫无关系，写进去
+  // 面板就会说谎——服务停摆几小时之后，用户会看到一条「上次主动消息没响、已被丢弃」，
+  // 而那个角色根本没排过主动消息。onBeforeFire 里那条 kind-skip 分支躲开的就是这个，
+  // 但它排在这个 hook 后面、看不到 kind，只能在这儿再挡一道。
+  const taskKind = readTaskKind(meta);
+  if (taskKind) {
+    console.log('[amsg:stale-skip] 后台任务过期跳过，不写 last_skip', {
+      taskId: task?.id ?? null, kind: taskKind, action: info.action,
+    });
+    return;
+  }
+
   const charId = typeof meta.charId === 'string' && meta.charId ? meta.charId : null;
   if (!charId) {
     console.warn('[amsg:stale-skip] 任务 metadata 缺 charId，这次过期跳过没法留痕', { taskId: task?.id ?? null });
@@ -1552,8 +1566,6 @@ export const amsgHooks = {
       }
     };
 
-    const charRows = await ctx.readState(amsgStateNamespace(charId));
-
     const taskMeta = (ctx.task.metadata ?? {}) as Record<string, unknown>;
     const policy = typeof taskMeta.amsgExpirePolicy === 'string'
       ? taskMeta.amsgExpirePolicy : undefined;
@@ -1594,6 +1606,11 @@ export const amsgHooks = {
         ...(plan.totalTimeoutMs ? { totalTimeoutMs: plan.totalTimeoutMs } : {}),
       };
     }
+
+    // 角色状态读在这儿而不是更早：fire_pack + tool_pack 是「一个角色 32KB 起步」、胖角色
+    // 还会被透明分块的大对象，读回来每条都要解密。上面那批后台任务根本没传过它，早读一行
+    // 就是每条任务白付一次 D1 往返加解密。
+    const charRows = await ctx.readState(amsgStateNamespace(charId));
 
     // 即时对话：用户刚把话说完、正盯着「正在输入…」等回复。下面三道门问的都是
     // 「主动消息到点还该不该发」——用户正在聊天所以让路、对话已经往前走所以作废、
@@ -2417,8 +2434,18 @@ export const buildWorkerConfig = (env: Env) => {
     // 同一个角色的多条任务不并发跑：两条撞在一起时用户会收到两条互不知情的消息，
     // 而且 self_log 是读-改-写整份，后写的会盖掉先写的那条「我说过什么」。分组键取
     // 角色 id，上游按它同跳去重 + 跨跳看租约，被拦下的任务一个字段都不动，下一跳原样再来。
-    serializeBy: (task: { metadata?: Record<string, unknown> | null }) =>
-      (typeof task.metadata?.charId === 'string' ? task.metadata.charId : null),
+    //
+    // 后台任务（门牌整理这类）按种类另开一组：上面那两条串行的理由它一条都不沾——不说话、
+    // 也不写 self_log（它在 onBeforeFire 就被 kind 分派接走了）。跟聊天挤同一组的话，一次
+    // 门牌整理最长占住这个角色 120 秒，而它恰恰是在一轮对话刚结束时起跑的：用户下一句话
+    // 的即时对话任务排在它后面，人就干等着「正在输入…」。同种后台任务之间仍按角色串行
+    // ——同一角色两份整理并发落地，就是拿两份旧快照互相盖。
+    serializeBy: (task: { metadata?: Record<string, unknown> | null }) => {
+      const charId = typeof task.metadata?.charId === 'string' ? task.metadata.charId : null;
+      if (!charId) return null;
+      const kind = readTaskKind(task.metadata);
+      return kind ? `${charId}#${kind}` : charId;
+    },
   };
 };
 
