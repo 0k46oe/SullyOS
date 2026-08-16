@@ -6,7 +6,7 @@
  */
 
 import type { Message } from '../../types';
-import type { MemoryNode, MemoryRoom } from './types';
+import type { MemoryEntity, MemoryNode, MemoryRoom } from './types';
 import type { LightLLMConfig } from './pipeline';
 import { safeFetchJson } from '../safeApi';
 import { safeParseJsonArray } from './jsonUtils';
@@ -54,7 +54,8 @@ function buildRulesBlock(charName: string, userLabel: string): string {
    - valence（效价）：-1（极痛苦）→ +1（极愉悦）
    - arousal（唤醒度）：-1（极平静）→ +1（极激烈）
    参考："开心"约 (0.7, 0.5)，"平静"约 (0.5, -0.6)，"失落"约 (-0.5, -0.4)，"焦虑"约 (-0.6, 0.7)，"愤怒"约 (-0.7, 0.8)。
-6. **标签**（tags）：提取 2-5 个关键词标签
+6. **标签**（tags）：提取 2-5 个关键词标签。
+   **明确实体**（entities）：把对话中明确出现的人名、昵称、地点、组织、项目、产品、账号或域名单独列出。只收录专名，不要写“朋友”“他”“那个项目”等泛称，也不要猜别名。格式为 {"name":"雾岚","type":"person"}（虚构示例）。
 7. **不要遗漏重要记忆，但也不要把每句话都变成记忆**。一个话题盒通常提取 1–5 条记忆。
 8. **便利贴置顶**（pinDays，可选）：如果这条记忆包含**有时效性的、近期需要持续记住的信息**，设置置顶天数（1-30天）。置顶期间每次对话都会想起这件事。适用场景：
    - 时间段状态："${userLabel}这周出差" → pinDays: 7
@@ -123,6 +124,30 @@ function parseMemoryNodesFromBuffer(
         return ts;
     };
 
+    const parseEntities = (value: unknown): MemoryEntity[] => {
+        if (!Array.isArray(value)) return [];
+        const validTypes = new Set<NonNullable<MemoryEntity['type']>>([
+            'person', 'place', 'organization', 'project', 'product', 'account', 'domain', 'other',
+        ]);
+        const seen = new Set<string>();
+        const result: MemoryEntity[] = [];
+        for (const raw of value) {
+            if (!raw || typeof raw !== 'object') continue;
+            const item = raw as Record<string, unknown>;
+            const name = typeof item.name === 'string' ? item.name.trim().slice(0, 80) : '';
+            const key = name.normalize('NFKC').toLocaleLowerCase();
+            if (name.length < 2 || !key || seen.has(key)) continue;
+            seen.add(key);
+            const entity: MemoryEntity = { name };
+            if (validTypes.has(item.type as NonNullable<MemoryEntity['type']>)) {
+                entity.type = item.type as NonNullable<MemoryEntity['type']>;
+            }
+            result.push(entity);
+            if (result.length >= 12) break;
+        }
+        return result;
+    };
+
     return parsed
         .filter(item => item.content && item.room)
         .map((item): MemoryNode => {
@@ -142,6 +167,7 @@ function parseMemoryNodesFromBuffer(
                 content: item.content,
                 room: (VALID_ROOMS.includes(item.room as MemoryRoom) ? item.room : 'living_room') as MemoryRoom,
                 tags: Array.isArray(item.tags) ? item.tags : [],
+                entities: parseEntities(item.entities),
                 importance: Math.max(1, Math.min(10, Math.round(item.importance || 5))),
                 mood: item.mood || 'neutral',
                 valence: v,
@@ -402,6 +428,7 @@ ${buildRulesBlock(charName, userLabel)}${relatedToRule}${unpinRule}
     "valence": 0,
     "arousal": 0,
     "tags": ["标签1", "标签2"],
+    "entities": [{"name": "明确出现的专名", "type": "person"}],
     "date": "YYYY-MM-DD",
     "pinDays": 3${relatedToFormat}
   }

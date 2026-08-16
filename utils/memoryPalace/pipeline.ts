@@ -14,11 +14,12 @@
  * LLM 调用策略：
  * - 记忆提取 → 用 LightLLMConfig（来自 memoryPalaceConfig.lightLLM 全局副 API，
  *   与情绪 API emotionConfig.api 完全独立）
- * - 检索管线 → 纯计算，不调 LLM
+ * - retrieveMemories() 本身仍是纯检索；ChatApp 每轮只做纯本地 Context Analyzer，
+ *   帮主模型理解当下话语的承接方式，不额外调用 LLM，也不改变旧召回排序
  */
 
-import type { MemoryPalaceWaterlineConfig, Message } from '../../types';
-import type { EmbeddingConfig, PersonalityStyle, RemoteVectorConfig, ScoredMemory } from './types';
+import type { CharacterAccommodationPolicy, MemoryPalaceWaterlineConfig, Message } from '../../types';
+import type { EmbeddingConfig, EventBox, MemoryNode, PersonalityStyle, RemoteVectorConfig, ScoredMemory } from './types';
 import {
     countOneShotPendingMessages,
     countUnprocessedBufferMessages,
@@ -77,12 +78,38 @@ import { expandAndFormat } from './formatter';
 import { runConsolidation } from './consolidation';
 import { rerankDocuments } from './rerank';
 // 认知消化由用户在记忆宫殿 App 手动触发，不在聊天管线中自动运行
-import { MemoryNodeDB, MemoryVectorDB, MemoryLinkDB, AnticipationDB } from './db';
+import { MemoryNodeDB, MemoryVectorDB, MemoryLinkDB, AnticipationDB, EventBoxDB } from './db';
 import { DB } from '../db';
 import { isMessageSemanticallyRelevant, formatMessageForPrompt } from '../messageFormat';
 import { sanitizeQuerySourceMessages } from './querySanitizer';
 import { getLocalDateKey } from '../localDate';
 import { extractExternalMemoryText } from './externalMemory';
+import {
+    analyzeLocalContext,
+    RECALL_GATE_ROUTE_THRESHOLD,
+    type RecallPlan,
+} from './recallRouter';
+import {
+    analyzeExplicitEntitySignals,
+    lookupExplicitEntityCandidates,
+    mergeExplicitEntityCandidates,
+    type ExplicitEntityAnalysis,
+} from './explicitEntityRecall';
+import {
+    buildEventBoxLightIndex,
+    lookupEventBoxLightCandidates,
+    mergeEventBoxLightCandidates,
+} from './eventBoxLightIndex';
+import { analyzeUserInteraction } from './interactionAdaptation';
+import { analyzeDeepEngagement } from './deepEngagement';
+import {
+    createRecallTrace,
+    finishRecallTrace,
+    type RecallEntryPoint,
+    type RecallRetrievalTelemetry,
+    type RecallTrace,
+    type RecallTraceStage,
+} from './trace';
 import {
     getLocalMemoryPalaceHighWaterMark,
     getReliableMemoryPalaceHighWaterMark,
@@ -318,6 +345,12 @@ function splitLastTurnQueries(messages: Message[]): {
  *
  * @param queryOverride App 自定义上下文（场景、题目等），会与最近一轮对话拼接后一起检索
  */
+export interface RecallRetrievalOptions {
+    explicitEntityAnalysis?: ExplicitEntityAnalysis;
+    /** 预留 Resolver 补救 query：只增加检索支路，不替换原始 user spikes。 */
+    recallPlan?: RecallPlan;
+}
+
 export async function retrieveMemories(
     recentMessages: Message[],
     charId: string,
@@ -329,6 +362,8 @@ export async function retrieveMemories(
     userName?: string,
     remoteVectorConfig?: RemoteVectorConfig,
     charName?: string,
+    onTelemetry?: (telemetry: RecallRetrievalTelemetry) => void,
+    recallOptions?: RecallRetrievalOptions,
 ): Promise<string> {
     // ── 分段计时：定位 memoryPalace 到底是网络慢还是计算慢 ──
     // tag: NET = 远端 API RTT；IDB = IndexedDB 读写；CPU = 纯本地计算
@@ -339,6 +374,8 @@ export async function retrieveMemories(
         try { return await p; }
         finally { retrieveTimings.push({ label, kind, ms: Math.round(performance.now() - t0) }); }
     };
+    let explicitEntityTelemetry: RecallRetrievalTelemetry['explicitEntity'];
+    let eventBoxMetadataTelemetry: RecallRetrievalTelemetry['eventBoxMetadata'];
     try {
         // 1. 构建查询 —— per-message 多路检索策略：
         //
@@ -425,6 +462,16 @@ export async function retrieveMemories(
         });
         // 保留最后 MAX_SPIKES 条（如果超过上限，优先保留最近的）
         const effectiveSpikes = userSpikes.slice(-MAX_SPIKES);
+        const routerSpikes = recallOptions?.recallPlan?.route
+            ? recallOptions.recallPlan.queries.map((query, index) => ({
+                label: `r${index + 1}`,
+                text: query.text,
+                scope: query.scope,
+                weight: query.weight,
+                source: query.source,
+            }))
+            : [];
+        const eventBoxRouterSpikes = routerSpikes.filter(spike => spike.scope === 'event_box');
 
         const contextQuery = [queryOverride, contextTurns.map(m => m.content).join('\n')]
             .filter(Boolean)
@@ -440,7 +487,10 @@ export async function retrieveMemories(
                   .join('\n')
                   .slice(0, 2000);
 
-        if (effectiveSpikes.length === 0 && !contextQuery.trim() && !fallbackQuery.trim()) return '';
+        if (effectiveSpikes.length === 0 && !contextQuery.trim() && !fallbackQuery.trim()) {
+            onTelemetry?.({ outcome: 'empty', reason: 'no_effective_query' });
+            return '';
+        }
 
         // ─── 调试日志：打印所有 query ─────────────────────────
         console.groupCollapsed(`🏰 [Retrieve] ═══ 检索开始 ═══`);
@@ -450,6 +500,9 @@ export async function retrieveMemories(
         }
         effectiveSpikes.forEach(s => {
             console.log(`  🎯 ${s.label} (${s.text.length} 字): ${s.text.replace(/\n/g, ' ↵ ')}`);
+        });
+        routerSpikes.forEach(s => {
+            console.log(`  🧭 ${s.label} [${s.scope}|w=${s.weight.toFixed(2)}${s.source ? `|${s.source}` : ''}] (${s.text.length} 字): ${s.text.replace(/\n/g, ' ↵ ')}`);
         });
         console.log(`📄 context query (${contextQuery.length} 字，${contextTurns.length} 条 context 消息):`);
         console.log(contextQuery || '(空)');
@@ -484,6 +537,8 @@ export async function retrieveMemories(
         };
 
         let results: ScoredMemory[] = [];
+        let explicitNodesSnapshot: MemoryNode[] | undefined;
+        let explicitEventBoxesSnapshot: EventBox[] | undefined;
         // 记录每条记忆被哪些 spike / context 命中以及各自分数
         type TraceEntry = {
             spikeScores: Map<string, number>; // label → finalScore
@@ -534,33 +589,57 @@ export async function retrieveMemories(
             //   3. 远程向量路径不消费 allVectors，所以远程开启且没熔断时跳过
             //      allVectors 预取，避免无效 IO。
             const contextQueryTrimmed = contextQuery.trim();
+            const searchPaths = [
+                ...effectiveSpikes.map(spike => ({
+                    label: spike.label,
+                    text: spike.text,
+                    kind: 'user' as const,
+                    scope: 'memory' as const,
+                    multiplier: 1,
+                })),
+                ...routerSpikes.map(spike => ({
+                    label: spike.label,
+                    text: spike.text,
+                    kind: 'router' as const,
+                    scope: spike.scope,
+                    // Resolver 是补充信号：高权重时接近原始支路，低权重时仍保守降权。
+                    multiplier: 0.65 + 0.35 * spike.weight,
+                })),
+            ];
             // 把 rerank 的 joined query 也塞进同一次 getEmbeddings，共享 embedding RTT
             const queriesToEmbed: string[] = [
-                ...effectiveSpikes.map(s => s.text),
+                ...searchPaths.map(path => path.text),
                 ...(contextQueryTrimmed ? [contextQuery] : []),
                 ...(doRerank ? [joinedUserQuery] : []),
             ];
             const useRemoteVector = !!(
                 remoteVectorConfig?.enabled && remoteVectorConfig.initialized && !isRemoteSearchBroken()
             );
-            const [queryVectors, allNodes, allVectors] = await Promise.all([
+            const [queryVectors, allNodes, allVectors, allEventBoxes] = await Promise.all([
                 tRetrieve(`getEmbeddings(${queriesToEmbed.length})`, 'NET', getEmbeddings(queriesToEmbed, embeddingConfig)),
                 tRetrieve('MemoryNodeDB.getByCharId', 'IDB', MemoryNodeDB.getByCharId(charId)),
                 useRemoteVector
                     ? Promise.resolve(undefined)
                     : tRetrieve('MemoryVectorDB.getAllByCharId', 'IDB', MemoryVectorDB.getAllByCharId(charId)),
+                recallOptions?.explicitEntityAnalysis?.hasSignals || eventBoxRouterSpikes.length > 0
+                    ? tRetrieve('EventBoxDB.getByCharId(recall)', 'IDB', EventBoxDB.getByCharId(charId))
+                    : Promise.resolve(undefined),
             ]);
+            explicitNodesSnapshot = allNodes;
+            explicitEventBoxesSnapshot = allEventBoxes;
 
-            const spikePromises = effectiveSpikes.map((s, i) =>
-                hybridSearch(s.text, charId, embeddingConfig, PER_QUERY_TOP_K, remoteVectorConfig, {
+            const pathPromises = searchPaths.map((path, i) =>
+                hybridSearch(path.text, charId, embeddingConfig, PER_QUERY_TOP_K, remoteVectorConfig, {
                     queryVector: queryVectors[i],
                     allNodes,
                     allVectors,
-                })
+                }).then(pathResults => path.scope === 'event_box'
+                    ? pathResults.filter(result => Boolean(result.node.eventBoxId || result.node.isBoxSummary))
+                    : pathResults)
             );
             const contextPromise = contextQueryTrimmed
                 ? hybridSearch(contextQuery, charId, embeddingConfig, PER_QUERY_TOP_K, remoteVectorConfig, {
-                    queryVector: queryVectors[effectiveSpikes.length],
+                    queryVector: queryVectors[searchPaths.length],
                     allNodes,
                     allVectors,
                 })
@@ -618,15 +697,16 @@ export async function retrieveMemories(
 
             const hybridKind: 'NET' | 'CPU' = useRemoteVector ? 'NET' : 'CPU';
             const [contextResults, ...spikeResultsArr] = await tRetrieve(
-                `hybridSearch×${spikePromises.length + (contextQueryTrimmed ? 1 : 0)}`,
+                `hybridSearch×${pathPromises.length + (contextQueryTrimmed ? 1 : 0)}`,
                 hybridKind,
-                Promise.all([contextPromise, ...spikePromises]),
+                Promise.all([contextPromise, ...pathPromises]),
             );
 
             // ─── 调试日志：每条 spike 的完整结果 ─────────────────
             spikeResultsArr.forEach((spikeResults, idx) => {
-                const s = effectiveSpikes[idx];
-                console.groupCollapsed(`🏰 [Retrieve] 🎯 ${s.label} 搜命中 ${spikeResults.length} 条 ("${s.text.slice(0, 30).replace(/\n/g, ' ')}${s.text.length > 30 ? '...' : ''}")`);
+                const s = searchPaths[idx];
+                const icon = s.kind === 'router' ? '🧭' : '🎯';
+                console.groupCollapsed(`🏰 [Retrieve] ${icon} ${s.label} 搜命中 ${spikeResults.length} 条 ("${s.text.slice(0, 30).replace(/\n/g, ' ')}${s.text.length > 30 ? '...' : ''}")`);
                 spikeResults.forEach((r, i) => console.log(fmt(r, `#${i + 1} `)));
                 console.groupEnd();
             });
@@ -644,14 +724,20 @@ export async function retrieveMemories(
             // 合并：每条记忆取 max(所有 spike 分, context 分×折扣)
             const merged = new Map<string, ScoredMemory>();
             spikeResultsArr.forEach((spikeResults, idx) => {
-                const label = effectiveSpikes[idx].label;
+                const path = searchPaths[idx];
+                const label = path.label;
                 for (const r of spikeResults) {
+                    const weighted = path.multiplier === 1 ? r : {
+                        ...r,
+                        finalScore: r.finalScore * path.multiplier,
+                        roomScore: r.roomScore * path.multiplier,
+                    };
                     const trace = sourceTrace.get(r.node.id) ?? { spikeScores: new Map<string, number>() } as TraceEntry;
-                    trace.spikeScores.set(label, r.finalScore);
+                    trace.spikeScores.set(label, weighted.finalScore);
                     sourceTrace.set(r.node.id, trace);
                     const existing = merged.get(r.node.id);
-                    if (!existing || r.finalScore > existing.finalScore) {
-                        merged.set(r.node.id, r);
+                    if (!existing || weighted.finalScore > existing.finalScore) {
+                        merged.set(r.node.id, weighted);
                     }
                 }
             });
@@ -693,7 +779,7 @@ export async function retrieveMemories(
             });
             console.groupEnd();
 
-            console.log(`🏰 [Retrieve] 多路检索汇总：${effectiveSpikes.length} 个 spike + ${contextResults.length > 0 ? 'context' : '无 context'} → 合并 top ${results.length}`);
+            console.log(`🏰 [Retrieve] 多路检索汇总：${effectiveSpikes.length} 个原始 spike + ${routerSpikes.length} 个 Resolver 补救 query + ${contextResults.length > 0 ? 'context' : '无 context'} → 合并 top ${results.length}`);
         } else {
             // 冷启动兜底：仅用 fallback 单 query
             const useRemoteVector = !!(
@@ -738,7 +824,97 @@ export async function retrieveMemories(
             console.groupEnd();
         }
 
-        // 2.5 日期引用路径：从 user 意图里抽"去年12月""3月4号""上周"这类
+        // 2.4 EventBox 本地轻索引：Resolver 的 event_box query 已经走完上面的旧 hybrid recall，
+        //     这里再补查 box.name/tags/summary/live metadata。两路合流，不替换旧结果、不额外调 API。
+        if (eventBoxRouterSpikes.length > 0) {
+            const eventBoxT0 = performance.now();
+            try {
+                if (!explicitNodesSnapshot || !explicitEventBoxesSnapshot) {
+                    [explicitNodesSnapshot, explicitEventBoxesSnapshot] = await Promise.all([
+                        MemoryNodeDB.getByCharId(charId),
+                        EventBoxDB.getByCharId(charId),
+                    ]);
+                }
+                const index = buildEventBoxLightIndex(explicitNodesSnapshot, explicitEventBoxesSnapshot);
+                const lookup = lookupEventBoxLightCandidates(index, eventBoxRouterSpikes);
+                results = mergeEventBoxLightCandidates(
+                    results,
+                    lookup.candidates,
+                    recallOptions?.recallPlan?.confidence ?? 0,
+                );
+                eventBoxMetadataTelemetry = {
+                    status: lookup.candidates.length > 0 ? 'hit' : 'miss',
+                    durationMs: Math.round(performance.now() - eventBoxT0),
+                    queryCount: eventBoxRouterSpikes.length,
+                    indexedBoxCount: index.indexedBoxCount,
+                    matchedBoxCount: lookup.matchedBoxCount,
+                    candidateCount: lookup.candidates.length,
+                    matchSources: [...new Set(lookup.candidates.map(candidate => candidate.matchSource))],
+                };
+                console.log(
+                    `📦 [EventBoxRecall] ${eventBoxMetadataTelemetry.status}: `
+                    + `${index.indexedBoxCount} indexed / ${lookup.matchedBoxCount} matched → `
+                    + `${lookup.candidates.length} additive candidates`,
+                );
+            } catch (e: any) {
+                eventBoxMetadataTelemetry = {
+                    status: 'error',
+                    durationMs: Math.round(performance.now() - eventBoxT0),
+                    queryCount: eventBoxRouterSpikes.length,
+                    indexedBoxCount: 0,
+                    matchedBoxCount: 0,
+                    candidateCount: 0,
+                    matchSources: [],
+                };
+                console.warn(`📦 [EventBoxRecall] 本地索引失败（旧召回不受影响）: ${e?.message || e}`);
+            }
+        }
+
+        // 2.5 明确实体路径：精确查找独立于 vector/BM25 分数，命中项保底进入 formatter。
+        //     旧节点没有 entities 时，lookup 会回退到 tags/content；EventBox 同时查 name/tags。
+        const explicitAnalysis = recallOptions?.explicitEntityAnalysis;
+        if (explicitAnalysis?.hasSignals) {
+            const explicitT0 = performance.now();
+            try {
+                if (!explicitNodesSnapshot || !explicitEventBoxesSnapshot) {
+                    [explicitNodesSnapshot, explicitEventBoxesSnapshot] = await Promise.all([
+                        MemoryNodeDB.getByCharId(charId),
+                        EventBoxDB.getByCharId(charId),
+                    ]);
+                }
+                const lookup = lookupExplicitEntityCandidates(
+                    explicitAnalysis,
+                    explicitNodesSnapshot,
+                    explicitEventBoxesSnapshot,
+                );
+                results = mergeExplicitEntityCandidates(results, lookup.candidates);
+                explicitEntityTelemetry = {
+                    status: lookup.candidates.length > 0 ? 'hit' : 'miss',
+                    durationMs: Math.round(performance.now() - explicitT0),
+                    signalCount: explicitAnalysis.signals.length,
+                    matchedMemoryCount: lookup.matchedMemoryCount,
+                    matchedEventBoxCount: lookup.matchedEventBoxCount,
+                    guaranteedCount: lookup.candidates.length,
+                };
+                console.log(
+                    `🔎 [EntityRecall] ${explicitEntityTelemetry.status}: `
+                    + `${lookup.matchedMemoryCount} memory / ${lookup.matchedEventBoxCount} box → `
+                    + `${lookup.candidates.length} guaranteed`,
+                );
+            } catch (e: any) {
+                explicitEntityTelemetry = {
+                    status: 'error',
+                    durationMs: Math.round(performance.now() - explicitT0),
+                    signalCount: explicitAnalysis.signals.length,
+                    matchedMemoryCount: 0,
+                    matchedEventBoxCount: 0,
+                    guaranteedCount: 0,
+                };
+                console.warn(`🔎 [EntityRecall] 精确查找失败（普通召回不受影响）: ${e?.message || e}`);
+            }
+        }
+
+        // 2.6 日期引用路径：从 user 意图里抽"去年12月""3月4号""上周"这类
         //     日期引用，直接按 createdAt 捞对应区间的记忆（vector/BM25 都对不准日期）。
         //     archived 节点参与日期匹配 → 路由到其 EventBox summary 返回。
         const dateT0 = performance.now();
@@ -781,6 +957,12 @@ export async function retrieveMemories(
 
         if (results.length === 0) {
             console.log(`🏰 [Retrieve] 混合搜索 + 日期路径均无结果，跳过记忆注入`);
+            onTelemetry?.({
+                outcome: 'empty',
+                reason: 'no_results',
+                explicitEntity: explicitEntityTelemetry,
+                eventBoxMetadata: eventBoxMetadataTelemetry,
+            });
             return '';
         }
 
@@ -912,10 +1094,22 @@ export async function retrieveMemories(
             .join(' ');
         console.log(`⏱ [retrieveMemories] total=${perfTotal}ms | NET=${byKind.NET}ms IDB=${byKind.IDB}ms CPU=${byKind.CPU}ms | ${detail}`);
 
+        onTelemetry?.({
+            outcome: formatted ? 'success' : 'empty',
+            reason: formatted ? undefined : 'formatted_empty',
+            explicitEntity: explicitEntityTelemetry,
+            eventBoxMetadata: eventBoxMetadataTelemetry,
+        });
         return formatted;
 
     } catch (err: any) {
         console.error(`❌ [Retrieve] 检索记忆失败:`, err.message);
+        onTelemetry?.({
+            outcome: 'error',
+            reason: 'exception',
+            explicitEntity: explicitEntityTelemetry,
+            eventBoxMetadata: eventBoxMetadataTelemetry,
+        });
         return '';
     }
 }
@@ -952,16 +1146,162 @@ function getEmbeddingConfig(charEmbeddingConfig?: any): EmbeddingConfig | null {
 }
 
 export async function injectMemoryPalace(
-    char: { memoryPalaceEnabled?: boolean; embeddingConfig?: any; activeBuffs?: any[]; personalityStyle?: string; ruminationTendency?: number; id: string; name?: string; memoryPalaceInjection?: string; roomPlatesInjection?: string },
+    char: { memoryPalaceEnabled?: boolean; embeddingConfig?: any; activeBuffs?: any[]; personalityStyle?: string; ruminationTendency?: number; interactionAccommodation?: CharacterAccommodationPolicy; id: string; name?: string; memoryPalaceInjection?: string; roomPlatesInjection?: string },
     recentMessages?: Message[],
     queryHint?: string,
     userName?: string,
-): Promise<void> {
-    if (!char.memoryPalaceEnabled) return;
+    traceContext?: { entryPoint?: RecallEntryPoint },
+): Promise<RecallTrace> {
+    const hadPreviousMemory = Boolean(char.memoryPalaceInjection);
+    const hadPreviousRoomPlates = Boolean(char.roomPlatesInjection);
+    const clearStartedAt = performance.now();
+    // 每轮先归零。否则本轮关闭、缺配置、空结果或报错时，会把上一轮的召回继续注入。
+    char.memoryPalaceInjection = '';
+    char.roomPlatesInjection = '';
+    const trace = createRecallTrace({
+        charId: char.id,
+        entryPoint: traceContext?.entryPoint,
+        recentMessageCount: recentMessages?.length ?? null,
+        hasQueryHint: Boolean(queryHint?.trim()),
+        clearedPreviousMemory: hadPreviousMemory,
+        clearedPreviousRoomPlates: hadPreviousRoomPlates,
+    });
+    trace.stages.push({
+        name: 'clear_previous_injection',
+        durationMs: Math.round(performance.now() - clearStartedAt),
+        outcome: 'ok',
+    });
+
+    let explicitEntityAnalysis: ExplicitEntityAnalysis | undefined;
+    if (!trace.featureFlagsSnapshot.recallRouter) {
+        trace.explicitEntityRecall = { status: 'disabled' };
+        trace.eventBoxMetadataRecall = { status: 'disabled' };
+        trace.recallResolver = { status: 'disabled' };
+    } else if (trace.entryPoint !== 'chat_app') {
+        trace.explicitEntityRecall = { status: 'out_of_scope' };
+        trace.eventBoxMetadataRecall = { status: 'out_of_scope' };
+        trace.recallResolver = { status: 'out_of_scope' };
+    } else {
+        trace.eventBoxMetadataRecall = { status: 'no_query' };
+        const explicitStartedAt = performance.now();
+        explicitEntityAnalysis = analyzeExplicitEntitySignals(recentMessages || [], char.name, userName);
+        trace.stages.push({
+            name: 'explicit_signal',
+            durationMs: Math.round(performance.now() - explicitStartedAt),
+            outcome: 'ok',
+        });
+        if (explicitEntityAnalysis.hasSignals) {
+            trace.recallIntent = 'explicit_entity';
+            trace.explicitEntityRecall = {
+                status: 'signaled',
+                signalCount: explicitEntityAnalysis.signals.length,
+                signalSources: [...new Set(explicitEntityAnalysis.signals.map(signal => signal.source))],
+            };
+        } else {
+            trace.explicitEntityRecall = { status: 'no_signal' };
+        }
+
+        const analyzerStartedAt = performance.now();
+        const analysis = analyzeLocalContext(
+            recentMessages || [],
+            char.name,
+            userName,
+            explicitEntityAnalysis.hasSignals,
+        );
+        trace.contextAnalyzer = analysis;
+        trace.recallResolver = { status: 'deferred' };
+        if (!explicitEntityAnalysis.hasSignals) {
+            trace.recallIntent = analysis.shouldGuide ? 'implicit_reference' : 'semantic';
+        }
+        console.log(
+            `🧭 [ContextAnalyzer] ${analysis.shouldGuide ? 'guide' : 'observe'}: `
+            + `continuation=${analysis.signals.continuationNeed.toFixed(2)} `
+            + `ambiguity=${analysis.signals.ambiguity.toFixed(2)} `
+            + `self=${analysis.signals.selfSufficiency.toFixed(2)} `
+            + `result=${analysis.signals.resultUpdate.toFixed(2)} `
+            + `energy=${analysis.signals.energy.toFixed(2)} | `
+            + `threshold=${RECALL_GATE_ROUTE_THRESHOLD.toFixed(2)} reasons=${analysis.reasons.join(',')}`,
+        );
+        trace.stages.push({
+            name: 'context_analyzer',
+            durationMs: Math.round(performance.now() - analyzerStartedAt),
+            outcome: analysis.analyzable ? 'ok' : 'empty',
+        });
+    }
+
+    if (!trace.featureFlagsSnapshot.interactionAdaptation) {
+        trace.interactionAdaptation = { status: 'disabled' };
+    } else if (trace.entryPoint !== 'chat_app') {
+        trace.interactionAdaptation = { status: 'out_of_scope' };
+    } else {
+        const interactionStartedAt = performance.now();
+        const interaction = analyzeUserInteraction(
+            recentMessages || [],
+            char.interactionAccommodation,
+            char.name,
+            userName,
+        );
+        trace.interactionAdaptation = {
+            status: interaction.analyzable ? 'observed' : 'no_signal',
+            analysis: interaction,
+        };
+        console.log(
+            `🎚️ [InteractionAdaptation] ${interaction.analyzable ? 'observed' : 'no_signal'}: `
+            + `impulse=${JSON.stringify(interaction.impulse)} `
+            + `trend=${JSON.stringify(interaction.trend)} `
+            + `policy=${JSON.stringify(interaction.policy)}`,
+        );
+        trace.stages.push({
+            name: 'interaction_adaptation',
+            durationMs: Math.round(performance.now() - interactionStartedAt),
+            outcome: interaction.analyzable ? 'ok' : 'empty',
+        });
+    }
+
+    if (!trace.featureFlagsSnapshot.deepEngagement) {
+        trace.deepEngagement = { status: 'disabled' };
+    } else if (trace.entryPoint !== 'chat_app') {
+        trace.deepEngagement = { status: 'out_of_scope' };
+    } else {
+        const depthStartedAt = performance.now();
+        const depth = analyzeDeepEngagement(recentMessages || [], char.name, userName);
+        trace.deepEngagement = {
+            status: depth.analyzable ? 'observed' : 'no_signal',
+            analysis: depth,
+        };
+        console.log(
+            `🪞 [DeepEngagement] ${depth.analyzable ? depth.mode : 'no_signal'}: `
+            + `depth=${depth.state.analyticalDepth.toFixed(2)} `
+            + `abstraction=${depth.state.abstraction.toFixed(2)} `
+            + `challenge=${depth.state.challengeTolerance.toFixed(2)} `
+            + `breadth=${depth.state.perspectiveBreadth.toFixed(2)} `
+            + `holding=${depth.state.emotionalHolding.toFixed(2)} `
+            + `confidence=${depth.confidence.toFixed(2)}`,
+        );
+        trace.stages.push({
+            name: 'deep_engagement',
+            durationMs: Math.round(performance.now() - depthStartedAt),
+            outcome: depth.analyzable ? 'ok' : 'empty',
+        });
+    }
+
+    if (!char.memoryPalaceEnabled) {
+        trace.stages.push({ name: 'finalize', durationMs: 0, outcome: 'skipped' });
+        return finishRecallTrace(trace, 'skipped_palace_disabled');
+    }
     const embeddingConfig = getEmbeddingConfig(char.embeddingConfig);
-    if (!embeddingConfig) return;
+    if (!embeddingConfig) {
+        trace.stages.push({ name: 'finalize', durationMs: 0, outcome: 'skipped' });
+        return finishRecallTrace(trace, 'skipped_embedding_unconfigured');
+    }
     try {
+        const loadStartedAt = performance.now();
         const msgs = recentMessages ?? await DB.getMessagesByCharId(char.id);
+        trace.stages.push({
+            name: 'load_messages',
+            durationMs: Math.round(performance.now() - loadStartedAt),
+            outcome: 'ok',
+        });
         const currentMood = char.activeBuffs?.[0]?.name;
         // 调用方没显式传 userName 时，兜底从全局用户档案取，保证各入口
         // （群聊/通话/事件/学习等）召回的房间名都统一显示「{用户名}的房间」，
@@ -973,13 +1313,24 @@ export async function injectMemoryPalace(
 
         // 门牌（常驻语义层）：纯 IDB 读 + 格式化，不调 LLM。
         // 无条件赋值（包括 ''）—— 门牌被清空/删除后，persist 过的旧注入必须被冲掉。
+        const roomPlatesStartedAt = performance.now();
+        let roomPlateOutcome: RecallTraceStage['outcome'] = 'ok';
         try {
             const { buildRoomPlatesInjection } = await import('./roomPlates');
             char.roomPlatesInjection = await buildRoomPlatesInjection(char.id, resolvedUserName);
         } catch {
             char.roomPlatesInjection = '';
+            roomPlateOutcome = 'error';
         }
+        trace.injection.roomPlateChars = char.roomPlatesInjection.length;
+        trace.stages.push({
+            name: 'room_plates',
+            durationMs: Math.round(performance.now() - roomPlatesStartedAt),
+            outcome: roomPlateOutcome,
+        });
 
+        const retrieveStartedAt = performance.now();
+        let retrievalTelemetry: RecallRetrievalTelemetry | undefined;
         const context = await retrieveMemories(
             msgs, char.id, embeddingConfig,
             currentMood,
@@ -989,12 +1340,64 @@ export async function injectMemoryPalace(
             resolvedUserName,
             getRemoteVectorConfig(),
             char.name,
+            telemetry => { retrievalTelemetry = telemetry; },
+            { explicitEntityAnalysis },
         );
-        if (context) {
-            char.memoryPalaceInjection = context;
+        char.memoryPalaceInjection = context || '';
+        trace.retrievalReason = retrievalTelemetry?.reason;
+        if (retrievalTelemetry?.explicitEntity) {
+            const entity = retrievalTelemetry.explicitEntity;
+            trace.explicitEntityRecall = {
+                ...trace.explicitEntityRecall,
+                status: entity.status,
+                signalCount: entity.signalCount,
+                matchedMemoryCount: entity.matchedMemoryCount,
+                matchedEventBoxCount: entity.matchedEventBoxCount,
+                guaranteedCount: entity.guaranteedCount,
+            };
+            trace.stages.push({
+                name: 'entity_lookup',
+                durationMs: entity.durationMs,
+                outcome: entity.status === 'error' ? 'error' : entity.status === 'miss' ? 'empty' : 'ok',
+            });
         }
+        if (retrievalTelemetry?.eventBoxMetadata) {
+            const eventBox = retrievalTelemetry.eventBoxMetadata;
+            trace.eventBoxMetadataRecall = {
+                status: eventBox.status,
+                queryCount: eventBox.queryCount,
+                indexedBoxCount: eventBox.indexedBoxCount,
+                matchedBoxCount: eventBox.matchedBoxCount,
+                candidateCount: eventBox.candidateCount,
+                matchSources: eventBox.matchSources,
+            };
+            trace.stages.push({
+                name: 'event_box_lookup',
+                durationMs: eventBox.durationMs,
+                outcome: eventBox.status === 'error' ? 'error' : eventBox.status === 'miss' ? 'empty' : 'ok',
+            });
+        }
+        trace.injection.memoryChars = char.memoryPalaceInjection.length;
+        trace.stages.push({
+            name: 'retrieve',
+            durationMs: Math.round(performance.now() - retrieveStartedAt),
+            outcome: context ? 'ok' : retrievalTelemetry?.outcome === 'error' ? 'error' : 'empty',
+        });
+        const finalStageOutcome: RecallTraceStage['outcome'] = context
+            ? 'ok'
+            : retrievalTelemetry?.outcome === 'error' ? 'error' : 'empty';
+        trace.stages.push({ name: 'finalize', durationMs: 0, outcome: finalStageOutcome });
+        if (retrievalTelemetry?.outcome === 'error') {
+            return finishRecallTrace(trace, 'error', 'retrieval_exception');
+        }
+        return finishRecallTrace(trace, context ? 'success' : 'empty');
     } catch (e: any) {
         console.warn(`🏰 [MemoryPalace] injectMemoryPalace failed: ${e.message}`);
+        char.memoryPalaceInjection = '';
+        trace.injection.memoryChars = 0;
+        trace.injection.roomPlateChars = char.roomPlatesInjection.length;
+        trace.stages.push({ name: 'finalize', durationMs: 0, outcome: 'error' });
+        return finishRecallTrace(trace, 'error', 'injection_exception');
     }
 }
 
