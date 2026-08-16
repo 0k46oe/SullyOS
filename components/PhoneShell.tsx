@@ -115,6 +115,7 @@ import DreamSimIndicator from './os/DreamSimIndicator';
 import ErrorDialog from './os/ErrorDialog';
 import BootSequence from './os/BootSequence';
 import { setAppPayloadWarmer, shouldUseIdleAppPreload } from './os/appPreload';
+import { isBrowserBackGuardState, makeBrowserBackGuardState } from '../utils/browserBackGuard';
 
 /*
 // Internal Error Boundary Component
@@ -697,6 +698,61 @@ const PhoneShell: React.FC = () => {
     openApp(AppID.Settings);
     trackEvent('点立即备份');
   };
+
+  // Web browsers normally interpret an edge-swipe/back shortcut as leaving SullyOS.
+  // While an app is open, keep one same-page history entry and translate that pop
+  // into the same layered back action used by the native Android button. Nested
+  // views may push their own entries above this one; landing back on our guard must
+  // therefore not consume a second in-app layer.
+  useEffect(() => {
+    if (typeof window === 'undefined' || Capacitor.isNativePlatform()) return;
+
+    const guardIsCurrent = isBrowserBackGuardState(window.history.state);
+    if (activeApp === AppID.Launcher) {
+      if (!guardIsCurrent) return;
+
+      // A nested view can inherit our marker. Unwind every marked same-page entry
+      // and stop as soon as the original browser entry is current again.
+      let disposed = false;
+      const releaseGuardEntries = () => {
+        if (disposed || !isBrowserBackGuardState(window.history.state)) return;
+        try { window.history.back(); } catch { /* leave browser history untouched */ }
+      };
+      window.addEventListener('popstate', releaseGuardEntries);
+      releaseGuardEntries();
+      return () => {
+        disposed = true;
+        window.removeEventListener('popstate', releaseGuardEntries);
+      };
+    }
+
+    const armGuard = () => {
+      try {
+        window.history.pushState(
+          makeBrowserBackGuardState(window.history.state),
+          '',
+          window.location.href,
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    if (!guardIsCurrent && !armGuard()) return;
+
+    const onPopState = (event: PopStateEvent) => {
+      // A nested panel was above the SullyOS guard and handled this back itself.
+      if (isBrowserBackGuardState(event.state)) return;
+
+      // Re-arm before navigating inside the OS so another quick swipe is safe too.
+      armGuard();
+      handleBack();
+    };
+
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [activeApp, handleBack]);
 
   // Capacitor Native Handling
   useEffect(() => {

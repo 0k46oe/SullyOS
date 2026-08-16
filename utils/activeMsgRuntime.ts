@@ -2384,7 +2384,9 @@ const handleDeepLink = () => {
   if (charId !== null || openApp !== null) {
     currentUrl.searchParams.delete('openApp');
     currentUrl.searchParams.delete('activeMsgCharId');
-    window.history.replaceState({}, '', currentUrl.toString());
+    // Keep same-page navigation markers (for example the browser back guard)
+    // while removing only the consumed deep-link parameters from the URL.
+    window.history.replaceState(window.history.state, '', currentUrl.toString());
   }
 };
 
