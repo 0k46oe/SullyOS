@@ -4,7 +4,7 @@ import {
     ArrowLeft, Plus, Trash, BookOpen, Planet, Clock, Play, CaretRight, X,
     UploadSimple, PencilSimple, FlipHorizontal, CaretLeft, Sparkle,
     CircleNotch, TextAa, Palette, Pause, MusicNotes, Queue, Question, Check, Gear,
-    SpeakerHigh, SpeakerSlash,
+    SpeakerHigh, SpeakerSlash, MagnifyingGlass,
 } from '@phosphor-icons/react';
 import TheaterPanel from './theater/TheaterPanel';
 import { CreatorIframe, type ChibiResult } from '../components/Like520Event';
@@ -148,6 +148,11 @@ const VRWorldApp: React.FC = () => {
     const [showHelp, setShowHelp] = useState(false);
     // 启用流程：设定 chibi 后回调启用
     const [pendingEnable, setPendingEnable] = useState<string | null>(null);
+    const [readingPreferenceCharId, setReadingPreferenceCharId] = useState<string | null>(null);
+    const readingPreferenceChar = useMemo(
+        () => characters.find(char => char.id === readingPreferenceCharId) || null,
+        [characters, readingPreferenceCharId],
+    );
 
     // 初次进入彼方：自动弹出玩法说明（看过一次后不再自动弹）
     useEffect(() => {
@@ -235,6 +240,7 @@ const VRWorldApp: React.FC = () => {
 
     // 返回键：有弹层先关弹层（阅读器/房间/上传/捏人），而不是直接退回桌面
     useEffect(() => registerBackHandler(() => {
+        if (readingPreferenceCharId) { setReadingPreferenceCharId(null); return true; }
         if (chibiEditChar) { setChibiEditChar(null); setPendingEnable(null); return true; }
         if (chibiEditUser) { setChibiEditUser(false); return true; }
         if (showUpload) { setShowUpload(false); return true; }
@@ -242,7 +248,7 @@ const VRWorldApp: React.FC = () => {
         if (readerNovel) { setReaderNovel(null); return true; }
         if (enterRoom) { setEnterRoom(null); return true; }
         return false; // 无弹层 → 交回默认（关闭 App）
-    }), [registerBackHandler, chibiEditChar, chibiEditUser, showUpload, readerJump, readerNovel, enterRoom]);
+    }), [registerBackHandler, readingPreferenceCharId, chibiEditChar, chibiEditUser, showUpload, readerJump, readerNovel, enterRoom]);
 
     // 从动态/批注点回原文：peek 模式打开阅读器跳到该段，不动用户书签
     const jumpToAnnotation = useCallback((novelId: string | undefined, segIdx: number) => {
@@ -380,8 +386,9 @@ const VRWorldApp: React.FC = () => {
                         <UserVRPanel userProfile={userProfile} updateUserProfile={updateUserProfile}
                             onEditChibi={() => setChibiEditUser(true)} onBroadcast={onUserVRBroadcast} addToast={addToast} />
                         <SettingsView characters={characters} updateCharacter={updateCharacter} addToast={addToast}
-                            novelCount={novels.length} onReload={reloadAll}
-                            onRequestEnable={requestEnable} onEditChibi={setChibiEditChar} />
+                            novels={novels} onReload={reloadAll}
+                            onRequestEnable={requestEnable} onEditChibi={setChibiEditChar}
+                            onEditReadingPreference={(char) => setReadingPreferenceCharId(char.id)} />
                     </div>
                 ) : (
                     <VRApiSettings apiPresets={apiPresets} chatApi={apiConfig} addToast={addToast} characters={characters} />
@@ -395,6 +402,23 @@ const VRWorldApp: React.FC = () => {
                     characters={characters} userName={userName} onUserBoardPost={onUserBoardPost} addToast={addToast} />
             )}
             {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
+            {readingPreferenceChar && (
+                <NovelPreferenceModal
+                    char={readingPreferenceChar}
+                    novels={novels}
+                    onClose={() => setReadingPreferenceCharId(null)}
+                    onSave={(novelIds) => {
+                        const current = readingPreferenceChar.vrState || { enabled: false, intervalMinutes: VR_DEFAULT_INTERVAL_MIN };
+                        updateCharacter(readingPreferenceChar.id, {
+                            vrState: { ...current, preferredNovelIds: novelIds.length > 0 ? novelIds : undefined },
+                        });
+                        addToast?.(novelIds.length > 0
+                            ? `已为 ${readingPreferenceChar.name} 优先选择 ${novelIds.length} 本书`
+                            : `${readingPreferenceChar.name} 将从全书库自动轮换`, 'success');
+                        setReadingPreferenceCharId(null);
+                    }}
+                />
+            )}
             {readerNovel && <ReaderModal novel={readerNovel} characters={characters} onClose={() => setReaderNovel(null)} />}
             {readerJump && <ReaderModal novel={readerJump.novel} characters={characters} initialSeg={readerJump.seg} peek onClose={() => setReaderJump(null)} />}
             {showUpload && (
@@ -2636,32 +2660,34 @@ const LibraryView: React.FC<{
         </button>
         {novels.length === 0 ? (
             <p className="text-[11px] text-indigo-300/50 py-6 text-center">书库空空如也。上传的小说是所有角色共享的读物，每个角色各自留批注、各自记书签。</p>
-        ) : novels.map(novel => {
-            const readers = characters.filter(c => getBookmark(c.vrState?.novelBookmarks, novel.id) > 0);
-            return (
-                <div key={novel.id} className="rounded-2xl p-3.5 backdrop-blur-sm" style={{ background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)' }}>
-                    <div className="flex items-start gap-2">
-                        <BookOpen size={18} weight="fill" className="text-amber-200 mt-0.5 shrink-0" />
-                        <div className="flex-1 min-w-0">
-                            <div className="text-[13px] font-bold truncate">{novel.title}</div>
-                            {novel.author && <div className="text-[10px] text-indigo-300/60">{novel.author}</div>}
-                            <div className="text-[10px] text-indigo-300/50 mt-0.5">{novel.segments.length} 段 · {novel.totalChars.toLocaleString()} 字</div>
+        ) : (
+            <PagedList items={novels} perPage={20} render={(novel) => {
+                const readers = characters.filter(c => getBookmark(c.vrState?.novelBookmarks, novel.id) > 0);
+                return (
+                    <div key={novel.id} className="rounded-2xl p-3.5 mb-3 backdrop-blur-sm" style={{ background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)' }}>
+                        <div className="flex items-start gap-2">
+                            <BookOpen size={18} weight="fill" className="text-amber-200 mt-0.5 shrink-0" />
+                            <div className="flex-1 min-w-0">
+                                <div className="text-[13px] font-bold truncate">{novel.title}</div>
+                                {novel.author && <div className="text-[10px] text-indigo-300/60">{novel.author}</div>}
+                                <div className="text-[10px] text-indigo-300/50 mt-0.5">{novel.segments.length} 段 · {novel.totalChars.toLocaleString()} 字</div>
+                            </div>
+                            <button onClick={() => onDelete(novel.id)} className="p-1.5 rounded-full active:bg-white/10 text-indigo-300/50"><Trash size={15} /></button>
                         </div>
-                        <button onClick={() => onDelete(novel.id)} className="p-1.5 rounded-full active:bg-white/10 text-indigo-300/50"><Trash size={15} /></button>
+                        {readers.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                                {readers.map(c => {
+                                    const bm = getBookmark(c.vrState?.novelBookmarks, novel.id);
+                                    const pct = Math.round((bm / Math.max(1, novel.segments.length)) * 100);
+                                    return <span key={c.id} className="text-[9.5px] bg-white/10 rounded-full px-2 py-0.5 text-indigo-100/80">{c.name} {pct}%</span>;
+                                })}
+                            </div>
+                        )}
+                        <button onClick={() => onOpen(novel)} className="mt-2 text-[11px] text-indigo-300 font-semibold flex items-center gap-0.5 active:opacity-70">翻开阅读 / 看批注 <CaretRight size={12} weight="bold" /></button>
                     </div>
-                    {readers.length > 0 && (
-                        <div className="mt-2 flex flex-wrap gap-1.5">
-                            {readers.map(c => {
-                                const bm = getBookmark(c.vrState?.novelBookmarks, novel.id);
-                                const pct = Math.round((bm / Math.max(1, novel.segments.length)) * 100);
-                                return <span key={c.id} className="text-[9.5px] bg-white/10 rounded-full px-2 py-0.5 text-indigo-100/80">{c.name} {pct}%</span>;
-                            })}
-                        </div>
-                    )}
-                    <button onClick={() => onOpen(novel)} className="mt-2 text-[11px] text-indigo-300 font-semibold flex items-center gap-0.5 active:opacity-70">翻开阅读 / 看批注 <CaretRight size={12} weight="bold" /></button>
-                </div>
-            );
-        })}
+                );
+            }} />
+        )}
     </div>
 );
 
@@ -3340,18 +3366,141 @@ const UserVRPanel: React.FC<{
 
 // ============ 接入设置 ============
 const INTERVAL_OPTIONS = [60, 120, 180, 360, 720];
+
+const NovelPreferenceModal: React.FC<{
+    char: CharacterProfile;
+    novels: VRWorldNovel[];
+    onSave: (novelIds: string[]) => void;
+    onClose: () => void;
+}> = ({ char, novels, onSave, onClose }) => {
+    const validNovelIds = useMemo(() => new Set(novels.map(novel => novel.id)), [novels]);
+    const [selected, setSelected] = useState<Set<string>>(() => new Set(
+        (char.vrState?.preferredNovelIds || []).filter(id => validNovelIds.has(id)),
+    ));
+    const [query, setQuery] = useState('');
+    const [page, setPage] = useState(0);
+    const pageSize = 18;
+
+    useEffect(() => {
+        setSelected(new Set((char.vrState?.preferredNovelIds || []).filter(id => validNovelIds.has(id))));
+        setQuery('');
+        setPage(0);
+    }, [char.id, validNovelIds]);
+
+    const filtered = useMemo(() => {
+        const needle = query.trim().toLocaleLowerCase();
+        if (!needle) return novels;
+        return novels.filter(novel => `${novel.title}\n${novel.author || ''}`.toLocaleLowerCase().includes(needle));
+    }, [novels, query]);
+    const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+    const currentPage = Math.min(page, pageCount - 1);
+    const visible = filtered.slice(currentPage * pageSize, currentPage * pageSize + pageSize);
+
+    const toggle = (novelId: string) => {
+        setSelected(current => {
+            const next = new Set(current);
+            if (next.has(novelId)) next.delete(novelId);
+            else next.add(novelId);
+            return next;
+        });
+    };
+
+    return (
+        <div className="fixed inset-0 z-[340] flex items-end justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+            <div
+                className="flex h-[min(86dvh,760px)] w-full max-w-md flex-col overflow-hidden rounded-t-[28px]"
+                style={{ background: 'linear-gradient(180deg,#1d1a31,#0f0d1c)', border: '1px solid rgba(255,255,255,.12)', paddingBottom: vrBottomPad('0px') }}
+                onClick={event => event.stopPropagation()}
+            >
+                <header className="shrink-0 px-4 pt-4 pb-3 border-b border-white/10">
+                    <div className="flex items-center gap-3">
+                        <div className="min-w-0 flex-1">
+                            <h2 className="text-[15px] font-bold text-white">{char.name} 的阅读偏好</h2>
+                            <p className="mt-1 text-[10.5px] leading-4 text-indigo-200/55">
+                                不选择就是全书库自动轮换；选中后优先在这些书里轮换。
+                            </p>
+                        </div>
+                        <button type="button" onClick={onClose} className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-white/55 active:bg-white/10" aria-label="关闭阅读偏好">
+                            <X size={18} />
+                        </button>
+                    </div>
+                    <label className="mt-3 flex h-10 items-center gap-2 rounded-xl bg-white/[0.07] px-3 text-indigo-100/60 ring-1 ring-white/10 focus-within:ring-indigo-300/45">
+                        <MagnifyingGlass size={15} />
+                        <input
+                            value={query}
+                            onChange={event => { setQuery(event.target.value); setPage(0); }}
+                            placeholder={`搜索 ${novels.length.toLocaleString()} 本小说`}
+                            className="min-w-0 flex-1 bg-transparent text-[12px] text-white outline-none placeholder:text-indigo-200/30"
+                        />
+                    </label>
+                    <div className="mt-2 flex items-center justify-between text-[10px] text-indigo-200/45">
+                        <span>{selected.size > 0 ? `已优先 ${selected.size} 本` : '当前：自动轮换全部小说'}</span>
+                        {query && <span>找到 {filtered.length.toLocaleString()} 本</span>}
+                    </div>
+                </header>
+
+                <main className="vr-reader-scroll min-h-0 flex-1 overflow-y-auto px-4 py-1">
+                    {visible.length === 0 ? (
+                        <div className="grid h-40 place-items-center text-[11px] text-indigo-200/35">没有找到这本书</div>
+                    ) : visible.map(novel => {
+                        const active = selected.has(novel.id);
+                        const bookmark = getBookmark(char.vrState?.novelBookmarks, novel.id);
+                        const progress = Math.min(100, Math.round(bookmark / Math.max(1, novel.segments.length) * 100));
+                        return (
+                            <button
+                                type="button"
+                                key={novel.id}
+                                onClick={() => toggle(novel.id)}
+                                aria-pressed={active}
+                                className="flex w-full items-center gap-3 border-b border-white/[0.07] py-3 text-left active:bg-white/[0.04]"
+                            >
+                                <span className={`grid h-5 w-5 shrink-0 place-items-center rounded-md border text-white transition-colors ${active ? 'border-indigo-400 bg-indigo-400' : 'border-white/20 bg-white/[0.03]'}`}>
+                                    {active && <Check size={12} weight="bold" />}
+                                </span>
+                                <span className="min-w-0 flex-1">
+                                    <span className="block truncate text-[12.5px] font-semibold text-white/90">{novel.title}</span>
+                                    <span className="mt-0.5 block truncate text-[9.5px] text-indigo-200/40">
+                                        {novel.author ? `${novel.author} · ` : ''}{novel.segments.length.toLocaleString()} 段{bookmark > 0 ? ` · ${progress}%` : ''}
+                                    </span>
+                                </span>
+                            </button>
+                        );
+                    })}
+                </main>
+
+                <footer className="shrink-0 border-t border-white/10 px-4 pt-3">
+                    {pageCount > 1 && (
+                        <div className="mb-3 flex items-center justify-center gap-4 text-[10px] text-indigo-100/55">
+                            <button type="button" onClick={() => setPage(value => Math.max(0, value - 1))} disabled={currentPage === 0} className="grid h-8 w-8 place-items-center rounded-full bg-white/[0.06] disabled:opacity-25" aria-label="上一页"><CaretLeft size={13} weight="bold" /></button>
+                            <span className="tabular-nums">{currentPage + 1} / {pageCount}</span>
+                            <button type="button" onClick={() => setPage(value => Math.min(pageCount - 1, value + 1))} disabled={currentPage >= pageCount - 1} className="grid h-8 w-8 place-items-center rounded-full bg-white/[0.06] disabled:opacity-25" aria-label="下一页"><CaretRight size={13} weight="bold" /></button>
+                        </div>
+                    )}
+                    <div className="flex gap-2">
+                        <button type="button" onClick={() => setSelected(new Set())} disabled={selected.size === 0} className="flex-1 rounded-xl border border-white/15 py-2.5 text-[12px] text-white/65 disabled:opacity-30">恢复自动轮换</button>
+                        <button type="button" onClick={() => onSave(Array.from(selected))} className="flex-1 rounded-xl py-2.5 text-[12px] font-bold text-white" style={{ background: 'linear-gradient(120deg,rgba(128,145,245,.95),rgba(171,142,235,.95))' }}>保存偏好</button>
+                    </div>
+                </footer>
+            </div>
+        </div>
+    );
+};
+
 const SettingsView: React.FC<{
     characters: CharacterProfile[];
     updateCharacter: (id: string, updates: Partial<CharacterProfile>) => void;
     addToast?: (msg: string, type?: any) => void;
-    novelCount: number; onReload: () => void;
+    novels: VRWorldNovel[]; onReload: () => void;
     onRequestEnable: (char: CharacterProfile) => void;
     onEditChibi: (char: CharacterProfile) => void;
-}> = ({ characters, updateCharacter, addToast, novelCount, onReload, onRequestEnable, onEditChibi }) => {
+    onEditReadingPreference: (char: CharacterProfile) => void;
+}> = ({ characters, updateCharacter, addToast, novels, onReload, onRequestEnable, onEditChibi, onEditReadingPreference }) => {
     const [pickFor, setPickFor] = useState<CharacterProfile | null>(null);
     // 接入列表的分组筛选（characters 由 props 传入，这里单独取 characterGroups 即可）
     const { characterGroups } = useOS();
     const [settingsGroupId, setSettingsGroupId] = useState<string>(GROUP_FILTER_ALL);
+    const novelCount = novels.length;
+    const validNovelIds = useMemo(() => new Set(novels.map(novel => novel.id)), [novels]);
     const go = (room?: VRRoomId) => {
         if (!pickFor) return;
         VRScheduler.triggerNow(pickFor.id, room);
@@ -3389,6 +3538,7 @@ const SettingsView: React.FC<{
                 const interval = st?.intervalMinutes || VR_DEFAULT_INTERVAL_MIN;
                 const chibi = getChibi(char);
                 const failStreak = VRScheduler.getFailStreak(char.id);
+                const preferredNovelCount = (st?.preferredNovelIds || []).filter(id => validNovelIds.has(id)).length;
                 return (
                     <div key={char.id} className="rounded-2xl p-3.5 backdrop-blur-sm" style={{ background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)' }}>
                         <div className="flex items-center gap-2.5">
@@ -3427,6 +3577,15 @@ const SettingsView: React.FC<{
                                     <Play size={12} weight="fill" /> 让 ta 现在去逛一次
                                 </button>
                             </>
+                        )}
+                        {novelCount > 0 && (
+                            <button onClick={() => onEditReadingPreference(char)}
+                                className="mt-2.5 flex w-full items-center gap-2 border-t border-white/[0.07] pt-2.5 text-left active:opacity-70">
+                                <BookOpen size={13} weight="fill" className="text-indigo-200/70" />
+                                <span className="text-[11px] font-semibold text-indigo-100/75">阅读偏好</span>
+                                <span className="ml-auto text-[10px] text-indigo-300/45">{preferredNovelCount > 0 ? `优先 ${preferredNovelCount} 本` : '自动轮换全部'}</span>
+                                <CaretRight size={11} weight="bold" className="text-indigo-300/35" />
+                            </button>
                         )}
                     </div>
                 );

@@ -130,19 +130,39 @@ function withSharedRoomLock<T>(fn: () => Promise<T>): Promise<T> {
     return result;
 }
 
-/** 选一本要读的书：优先续读未读完的，否则取最近更新的一本。 */
-function pickNovel(novels: VRWorldNovel[], char: CharacterProfile): VRWorldNovel | null {
-    if (novels.length === 0) return null;
+/**
+ * 选一本要读的书：
+ * - 默认从所有尚未读完的书里随机轮换，不再因为某本刚开始读就一直黏到结尾；
+ * - 用户圈了优先书单时，先在其中的未读完书目里轮换，读完后回到全书库；
+ * - 有多个候选时排除上一次选中的书，避免连续两轮重复。
+ *
+ * random 作为参数是为了让选书规则可以稳定测试；生产环境使用 Math.random。
+ */
+export function pickNovel(
+    novels: VRWorldNovel[],
+    char: CharacterProfile,
+    random: () => number = Math.random,
+): VRWorldNovel | null {
+    const readable = novels.filter(novel => novel.segments.length > 0);
+    if (readable.length === 0) return null;
     const bookmarks = char.vrState?.novelBookmarks;
-    const unfinished = novels.filter(n => getBookmark(bookmarks, n.id) < n.segments.length);
-    const pool = unfinished.length > 0 ? unfinished : novels;
-    pool.sort((a, b) => {
-        const aStarted = getBookmark(bookmarks, a.id) > 0 ? 1 : 0;
-        const bStarted = getBookmark(bookmarks, b.id) > 0 ? 1 : 0;
-        if (aStarted !== bStarted) return bStarted - aStarted;
-        return b.updatedAt - a.updatedAt;
-    });
-    return pool[0];
+    const unfinished = readable.filter(novel => getBookmark(bookmarks, novel.id) < novel.segments.length);
+    const available = unfinished.length > 0 ? unfinished : readable;
+    const preferred = new Set(char.vrState?.preferredNovelIds || []);
+    const preferredAvailable = preferred.size > 0
+        ? available.filter(novel => preferred.has(novel.id))
+        : [];
+    let pool = preferredAvailable.length > 0 ? preferredAvailable : available;
+
+    const lastNovelId = char.vrState?.lastNovelId;
+    if (lastNovelId && pool.length > 1) {
+        const withoutLast = pool.filter(novel => novel.id !== lastNovelId);
+        if (withoutLast.length > 0) pool = withoutLast;
+    }
+
+    const rolled = Number(random());
+    const normalized = Number.isFinite(rolled) ? Math.max(0, Math.min(0.999999999, rolled)) : 0;
+    return pool[Math.floor(normalized * pool.length)] || pool[0] || null;
 }
 
 /** 汇总角色可点的歌（歌单 + 最近在听，按 id 去重，最近优先，最多 20）。 */
@@ -286,7 +306,8 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
         }
 
         if (room.id === 'library') {
-            novel = pickNovel(novels, char)!;
+            novel = pickNovel(novels, char);
+            if (!novel) return { ok: false, room: 'library', reason: 'no-readable-novel' };
             const bm = getBookmark(char.vrState?.novelBookmarks, novel.id);
             win = getReadingWindow(novel, bm >= novel.segments.length ? 0 : bm);
             allAnn = await DB.getVRAnnotations(novel.id);
@@ -474,7 +495,13 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
             }
             const nextBookmark = win!.reachedEnd ? novel!.segments.length : win!.to;
             await updateCharacter(char.id, {
-                vrState: { ...prevState, novelBookmarks: { ...(prevState.novelBookmarks || {}), [novel!.id]: nextBookmark }, currentRoom: 'library', lastActiveAt: Date.now() },
+                vrState: {
+                    ...prevState,
+                    novelBookmarks: { ...(prevState.novelBookmarks || {}), [novel!.id]: nextBookmark },
+                    lastNovelId: novel!.id,
+                    currentRoom: 'library',
+                    lastActiveAt: Date.now(),
+                },
             });
             activity = parsed.activity || `读了《${novel!.title}》第 ${win!.from + 1}~${win!.to} 段${written ? `，留下了 ${written} 条批注` : '，安静读完没多说什么'}。`;
             cardLines = [`「彼方 · ${room.name}」`, nameLine(char.name, activity)];
