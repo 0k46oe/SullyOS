@@ -37,7 +37,59 @@ export interface FetchFailureContext {
     online?: boolean;
     pageOrigin?: string;
     pageProtocol?: string;
+    /** 只含体积/结构，不含消息正文；用于比较“同 API、不同功能”的请求差异。 */
+    requestSummary?: FetchRequestSummary;
+    /** 调用方显式标注的用途，例如“剧情见面生成”。 */
+    requestPurpose?: string;
+    /** 同一 method + URL 在本页面生命周期内最近一次成功读完整个响应正文的记录。 */
+    recentSuccessfulSameRequest?: { timestamp: number; status: number };
 }
+
+export interface FetchRequestSummary {
+    bodyBytes: number;
+    messageCount?: number;
+    contentChars?: number;
+    lastMessageRole?: string;
+    stream?: boolean;
+    optionalParams?: string[];
+}
+
+const utf8ByteLength = (value: string): number => {
+    try {
+        if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).byteLength;
+    } catch { /* fall through */ }
+    return value.length;
+};
+
+/**
+ * 提取 chat/completions 请求的安全结构摘要。绝不把 prompt、API key 或角色正文写进日志。
+ * 这组旁证专门回答“同一个 API 为什么陪伴能出、剧情不能出”：两边 URL 相同不代表
+ * 请求相同，剧情常见差异是更大的 messages、assistant 预填充和额外采样参数。
+ */
+export const summarizeFetchRequestBody = (body: unknown): FetchRequestSummary | undefined => {
+    if (typeof body !== 'string') return undefined;
+    const summary: FetchRequestSummary = { bodyBytes: utf8ByteLength(body) };
+    try {
+        const parsed = JSON.parse(body);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return summary;
+        if (Array.isArray(parsed.messages)) {
+            summary.messageCount = parsed.messages.length;
+            summary.contentChars = parsed.messages.reduce((total: number, message: any) => {
+                const content = message?.content;
+                if (typeof content === 'string') return total + content.length;
+                if (content == null) return total;
+                try { return total + JSON.stringify(content).length; } catch { return total; }
+            }, 0);
+            const lastRole = parsed.messages.at(-1)?.role;
+            if (typeof lastRole === 'string') summary.lastMessageRole = lastRole;
+        }
+        if (typeof parsed.stream === 'boolean') summary.stream = parsed.stream;
+        const optionalParams = ['top_p', 'frequency_penalty', 'presence_penalty', 'reasoning_effort', 'tools']
+            .filter(key => parsed[key] !== undefined);
+        if (optionalParams.length > 0) summary.optionalParams = optionalParams;
+    } catch { /* 非 JSON 只记录字节数 */ }
+    return summary;
+};
 
 const readError = (error: unknown): { name: string; message: string } => {
     if (error instanceof Error) return { name: error.name || 'Error', message: error.message || String(error) };
@@ -206,7 +258,7 @@ export const readStallHint = (durationMs?: number, kind?: FetchFailureKind): str
  */
 export const buildFetchFailureDetail = (
     ctx: FetchFailureContext,
-    opts: { startedAt: number; perf?: { getEntriesByName?: (name: string, type?: string) => any[] } },
+    opts: { startedAt: number; perf?: { getEntriesByName?: (name: string, type?: string) => any[] }; now?: number },
 ): string => {
     const { name, message } = readError(ctx.error);
     const kind = classifyFetchFailure(ctx);
@@ -226,12 +278,37 @@ export const buildFetchFailureDetail = (
     }
     if (pageOrigin) lines.push(`本页来源: ${pageOrigin}`);
     lines.push(`浏览器联网状态: ${online === false ? '离线' : '在线'}`);
+    if (ctx.requestPurpose) lines.push(`调用用途: ${ctx.requestPurpose}`);
+    if (ctx.requestSummary) {
+        const requestParts = [`${ctx.requestSummary.bodyBytes} bytes`];
+        if (typeof ctx.requestSummary.messageCount === 'number') requestParts.push(`messages=${ctx.requestSummary.messageCount}`);
+        if (typeof ctx.requestSummary.contentChars === 'number') requestParts.push(`消息内容=${ctx.requestSummary.contentChars} 字符`);
+        if (ctx.requestSummary.lastMessageRole) requestParts.push(`末条 role=${ctx.requestSummary.lastMessageRole}`);
+        if (typeof ctx.requestSummary.stream === 'boolean') requestParts.push(`stream=${ctx.requestSummary.stream}`);
+        lines.push(`请求体摘要: ${requestParts.join(' · ')}`);
+        if (ctx.requestSummary.optionalParams?.length) {
+            lines.push(`额外参数: ${ctx.requestSummary.optionalParams.join(', ')}`);
+        }
+    }
     const timing = readResourceTimingHint(target.href, { startedAt: opts.startedAt, perf: opts.perf });
     if (timing) lines.push(timing);
     const stall = readStallHint(ctx.durationMs, kind);
     if (stall) lines.push(stall);
-    lines.push(`初判: ${VERDICTS[kind].verdict}`);
-    lines.push(`可能原因: ${VERDICTS[kind].causes}`);
+    const now = opts.now ?? Date.now();
+    const recentSuccess = ctx.recentSuccessfulSameRequest;
+    const successAgeMs = recentSuccess ? now - recentSuccess.timestamp : Number.POSITIVE_INFINITY;
+    const hasRecentSameRequestSuccess = kind === 'blocked'
+        && successAgeMs >= 0
+        && successAgeMs <= 10 * 60 * 1000;
+    if (hasRecentSameRequestSuccess && recentSuccess) {
+        const ageSeconds = Math.max(1, Math.round(successAgeMs / 1000));
+        lines.push(`同接口对照: ${ageSeconds} 秒前，同一个 ${method} 已成功返回 HTTP ${recentSuccess.status}`);
+        lines.push('初判: 同一接口刚刚成功过，基本排除域名整体不可达、DNS 错误或代理把整个域名拦掉；这是当前请求/响应特有的失败。');
+        lines.push('更可能原因: 剧情上下文或请求体更大 · 服务商不接受末条 assistant 预填充或额外参数 · 上游生成/流式传输中途断开 · 上游错误页漏了 CORS 响应头');
+    } else {
+        lines.push(`初判: ${VERDICTS[kind].verdict}`);
+        lines.push(`可能原因: ${VERDICTS[kind].causes}`);
+    }
     return lines.join('\n');
 };
 

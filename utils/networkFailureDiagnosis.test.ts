@@ -21,6 +21,7 @@ import {
     readStallHint,
     resetReachabilityProbeCooldown,
     shouldProbeReachability,
+    summarizeFetchRequestBody,
 } from './networkFailureDiagnosis';
 
 const failedToFetch = () => new TypeError('Failed to fetch');
@@ -86,6 +87,28 @@ describe('classifyFetchFailure', () => {
     });
 });
 
+describe('summarizeFetchRequestBody', () => {
+    it('只保留结构统计，不泄露剧情正文', () => {
+        const summary = summarizeFetchRequestBody(JSON.stringify({
+            messages: [
+                { role: 'system', content: '绝不能写进日志的秘密设定' },
+                { role: 'assistant', content: '预填充' },
+            ],
+            stream: true,
+            top_p: 0.7,
+            presence_penalty: 0.2,
+        }));
+        expect(summary).toMatchObject({
+            messageCount: 2,
+            contentChars: 15,
+            lastMessageRole: 'assistant',
+            stream: true,
+            optionalParams: ['top_p', 'presence_penalty'],
+        });
+        expect(JSON.stringify(summary)).not.toContain('秘密设定');
+    });
+});
+
 describe('buildFetchFailureDetail', () => {
     const detail = () => buildFetchFailureDetail({
         url: 'https://sullymeow.ccwu.cc/api/health',
@@ -120,6 +143,35 @@ describe('buildFetchFailureDetail', () => {
         }, { startedAt: 0, perf: { getEntriesByName: () => [] } });
         expect(text).toContain('同源');
         expect(text).not.toContain('跨域请求');
+    });
+
+    it('同一个 POST 刚成功时，不再把剧情模式失败甩给 DNS 或整域名代理', () => {
+        const now = 1_786_894_455_703;
+        const text = buildFetchFailureDetail({
+            url: 'https://open.selart.cc/v1/chat/completions',
+            method: 'POST',
+            durationMs: 3828,
+            error: new TypeError('Load failed'),
+            online: true,
+            pageOrigin: 'https://qegj567-cloud.github.io',
+            pageProtocol: 'https:',
+            requestPurpose: '剧情见面生成',
+            requestSummary: summarizeFetchRequestBody(JSON.stringify({
+                messages: [{ role: 'system', content: '设定' }, { role: 'assistant', content: '<content>' }],
+                stream: true,
+                top_p: 0.8,
+            })),
+            recentSuccessfulSameRequest: { timestamp: now - 42_000, status: 200 },
+        }, { startedAt: 0, now, perf: { getEntriesByName: () => [] } });
+
+        expect(text).toContain('调用用途: 剧情见面生成');
+        expect(text).toContain('messages=2');
+        expect(text).toContain('末条 role=assistant');
+        expect(text).toContain('额外参数: top_p');
+        expect(text).toContain('同一个 POST 已成功返回 HTTP 200');
+        expect(text).toContain('当前请求/响应特有的失败');
+        expect(text).not.toContain('DNS 解析不到');
+        expect(text).not.toContain('代理把这个域名的连接掐了');
     });
 
     it('混合内容给的是「改成 https」而不是「查梯子」', () => {

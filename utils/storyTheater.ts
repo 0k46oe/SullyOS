@@ -40,6 +40,22 @@ export interface StoryGenerationSettings {
     max_tokens: number;
 }
 
+/**
+ * 默认值不需要发给上游。部分“OpenAI 兼容”中转会拒绝 top_p + temperature 同传，或不认识
+ * penalty 参数；它们又常在 4xx 错误页漏 CORS，浏览器最终只剩一句 Load failed。
+ * 非默认值仍完整保留，用户导入预设后的生成意图不会被改写。
+ */
+export const compactStoryGenerationSettings = (settings?: Partial<StoryGenerationSettings>): Partial<StoryGenerationSettings> => {
+    if (!settings) return {};
+    const compact: Partial<StoryGenerationSettings> = {};
+    if (settings.temperature !== undefined) compact.temperature = settings.temperature;
+    if (settings.top_p !== undefined && settings.top_p !== 1) compact.top_p = settings.top_p;
+    if (settings.frequency_penalty !== undefined && settings.frequency_penalty !== 0) compact.frequency_penalty = settings.frequency_penalty;
+    if (settings.presence_penalty !== undefined && settings.presence_penalty !== 0) compact.presence_penalty = settings.presence_penalty;
+    if (settings.max_tokens !== undefined) compact.max_tokens = settings.max_tokens;
+    return compact;
+};
+
 export interface StoryAffinityInput {
     characterId?: string;
     characterName?: string;

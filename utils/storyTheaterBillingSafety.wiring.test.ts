@@ -36,4 +36,15 @@ describe('story theater billing safety wiring', () => {
         expect(interceptorSource).toContain('await originalFetch(...sendArgs)');
         expect(interceptorSource).not.toContain('回退原请求重发');
     });
+
+    it('labels story requests and wires same-endpoint evidence into CORS diagnostics', () => {
+        const interceptorSource = sliceBetween(osContextSource, 'const patchedFetch = async', 'window.fetch = patchedFetch;');
+
+        expect(storySource).toContain("purpose: '剧情见面生成'");
+        expect(storySource).toContain('compactStoryGenerationSettings(settings)');
+        expect(storySource).toContain('剧情请求被上游/网关断开');
+        expect(interceptorSource).toContain('recentSuccessfulFetches.set(requestComparisonKey');
+        expect(interceptorSource).toContain('summarizeFetchRequestBody((sendArgs[1] as any)?.body)');
+        expect(interceptorSource).toContain('recentSuccessfulSameRequest: recentSuccess');
+    });
 });

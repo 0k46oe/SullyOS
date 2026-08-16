@@ -30,7 +30,7 @@ import { safeFetchJson } from '../utils/safeApi';
 import { captureApiRequestOnce, getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext, updateApiRequestCaptureUsage } from '../utils/apiCallLog';
 import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
-import { buildFetchFailureDetail, classifyFetchFailure, describeReachabilityProbe, parseTargetUrl, probeOriginReachability, shouldProbeReachability } from '../utils/networkFailureDiagnosis';
+import { buildFetchFailureDetail, classifyFetchFailure, describeReachabilityProbe, parseTargetUrl, probeOriginReachability, shouldProbeReachability, summarizeFetchRequestBody } from '../utils/networkFailureDiagnosis';
 import { INSTALLED_APPS, HIDDEN_APP_NAMES } from '../constants';
 import { isAnalyticsRequestUrl, trackEvent, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, trackCurrentFeaturesOnce } from '../utils/analytics';
 import { collectAppearance, collectCharSettings, collectDataScale, collectFeatureFlagsAsync } from '../utils/analyticsSnapshot';
@@ -1052,6 +1052,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
       // 1. Monkey Patch Fetch
       const originalFetch = window.fetch;
+      // “同一 API 在别的模式刚成功”是排查 CORS 包装错误最有价值的对照证据。
+      // 只记 method + URL + 状态与时间，不保存请求正文。
+      const recentSuccessfulFetches = new Map<string, { timestamp: number; status: number }>();
       const patchedFetch = async (...args: [RequestInfo | URL, RequestInit?]) => {
           const [resource, config] = args;
           
@@ -1071,6 +1074,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // App now; reading the ambient value after a long response would label
           // the request as whichever App the user navigated to in the meantime.
           const ambientMetaAtStart = getApiCallAmbientContext();
+          const method = ((config as RequestInit | undefined)?.method
+              || (typeof Request !== 'undefined' && resource instanceof Request ? resource.method : 'GET'))
+              .toUpperCase();
+          const requestComparisonKey = `${method} ${urlStr}`;
 
           // 采样参数兼容层（详见 utils/samplingParamCompat.ts）：
           // 某些模型废弃了 temperature/top_p/top_k，带上直接 400。这里在所有 /chat/completions
@@ -1146,6 +1153,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   if (usageClone) {
                       usageClone.text().then((t) => {
                           const durationMs = Date.now() - fetchStartedAt;
+                          // 一定要等正文完整读完再记成功；只拿到 200 响应头、随后 SSE 断流
+                          // 正是这次剧情故障的形态，不能拿它反过来当成功对照。
+                          if (ok) recentSuccessfulFetches.set(requestComparisonKey, { timestamp: Date.now(), status });
                           let parsed: any = undefined;
                           try { parsed = JSON.parse(t); } catch { /* 流式/非 JSON：把原始文本交给 recordApiCall 的 SSE 兜底解析 */ }
                           updateApiRequestCaptureUsage({ captureId: apiRequestCaptureId, ok, response: parsed, responseText: parsed === undefined ? t : undefined });
@@ -1155,6 +1165,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           recordApiCall({ requestId, url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt });
                       });
                   } else {
+                      // clone 失败时，只有已经在上面完整拼装过的升级流才能确认正文收完。
+                      if (ok && streamUpgraded) recentSuccessfulFetches.set(requestComparisonKey, { timestamp: Date.now(), status });
                       updateApiRequestCaptureUsage({ captureId: apiRequestCaptureId, ok });
                       recordApiCall({ requestId, url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt });
                   }
@@ -1211,14 +1223,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   // 结论回填到同一条日志上——「网络不通」和「网络通但响应被 CORS 拦」要走的排查路
                   // 完全相反，不分开的话用户只能瞎试。详见 utils/networkFailureDiagnosis.ts。
                   const logId = `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-                  const method = (typeof Request !== 'undefined' && resource instanceof Request)
-                      ? resource.method
-                      : ((config as RequestInit | undefined)?.method || 'GET');
+                  const requestMeta = (sendArgs[1] as any)?.__sullyMeta || ambientMetaAtStart;
+                  const recentSuccess = recentSuccessfulFetches.get(requestComparisonKey);
                   const baseDetail = buildFetchFailureDetail({
                       url: urlStr,
                       method,
                       durationMs: Date.now() - fetchStartedAt,
                       error: err,
+                      requestSummary: summarizeFetchRequestBody((sendArgs[1] as any)?.body),
+                      requestPurpose: requestMeta?.purpose,
+                      recentSuccessfulSameRequest: recentSuccess,
                   }, { startedAt: fetchStartedAtPerf });
                   setSystemLogs(prev => [{
                       id: logId,

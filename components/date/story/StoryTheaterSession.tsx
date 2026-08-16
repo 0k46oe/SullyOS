@@ -21,6 +21,7 @@ import {
     buildTheaterPersona,
     buildTheaterWorldbookSlots,
     compileStoryPreset,
+    compactStoryGenerationSettings,
     dedupeTheaterWorldbooks,
     describeEmptyStoryCompletion,
     describeStoryApiError,
@@ -42,6 +43,7 @@ import {
     storyTheaterMemoryRecipientIds,
     storyTheaterThreadId,
     type StoryAffinityInput,
+    type StoryGenerationSettings,
 } from '../../../utils/storyTheater';
 import {
     getMemoryPalaceHighWaterMark,
@@ -453,12 +455,14 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
         }
     }, [actors, addToast, entry, exporting, mask.name, messages]);
 
-    const callCompletion = useCallback(async (payload: Array<{ role: string; content: string }>, settings?: object, onPromptTokens?: (tokens: number) => void): Promise<string> => {
+    const callCompletion = useCallback(async (payload: Array<{ role: string; content: string }>, settings?: Partial<StoryGenerationSettings>, onPromptTokens?: (tokens: number) => void): Promise<string> => {
+        const generationSettings = compactStoryGenerationSettings(settings);
         const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-            body: JSON.stringify({ model: apiConfig.model, messages: payload, stream: false, ...settings }),
-        });
+            body: JSON.stringify({ model: apiConfig.model, messages: payload, stream: false, ...generationSettings }),
+            __sullyMeta: { appId: 'date', appName: '见面', purpose: '剧情见面生成' },
+        } as RequestInit & { __sullyMeta: { appId: string; appName: string; purpose: string } });
         const data = await safeResponseJson(response);
         if (!response.ok) throw new Error(describeStoryApiError(response.status, data));
         const reportedPromptTokens = Number(data?.usage?.prompt_tokens);
@@ -748,8 +752,11 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
         } catch (error: any) {
             console.error('[StoryTheater] send failed', error);
             const message = String(error?.message || error);
+            const isOpaqueBrowserFailure = /load failed|failed to fetch|networkerror|network request failed/i.test(message);
             addToast(
-                message.includes('API Error 400') && isStoryUserLastCompatibilityError(message) && !entry.forceUserLastMessage
+                isOpaqueBrowserFailure
+                    ? '剧情请求被上游/网关断开，浏览器读不到真实错误。若陪伴原版同 API 正常，先开右上角“400 兼容模式”；请求差异已写入 Network 日志，请勿连续重发。'
+                    : message.includes('API Error 400') && isStoryUserLastCompatibilityError(message) && !entry.forceUserLastMessage
                     ? '剧情续写失败：API 400。若日志提示最后一条必须是 user，可在右上角设置开启“400 兼容模式”；更建议更换模型。'
                     : `剧情续写失败：${message}`,
                 'error',
