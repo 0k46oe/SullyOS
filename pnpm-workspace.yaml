@@ -3,6 +3,8 @@ packages:
   - "worker/*"
 
 allowBuilds:
+  # Optional Node canvas for pdfjs/jsdom; the app uses the browser Canvas API.
+  canvas: false
   esbuild: true
   sharp: true
   workerd: true

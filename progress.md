@@ -21,6 +21,12 @@ Original prompt: 先继续优化都市人生 simsapp：去掉 pics 里的丑像�
 - `npm run build` still passes after the latest DramaFeed + chat-card styling changes.
 - Automated browser validation is still blocked locally because `require('playwright')` fails with `MODULE_NOT_FOUND`.
 
+2026-08-17 — Qixi visual retheme
+- Current request: rebuild the Qixi entry screen to match the supplied celestial poster reference, then retheme the in-game surfaces using the supplied deep-purple / lavender / blush-gold fantasy palette.
+- Constraints: preserve the existing Qixi memory-generation and smart-context behavior; visual/layout changes only unless a UI integration fix is required.
+- Visual thesis: a full-screen storybook night poster with deep plum space, lavender mist, cream moonlight, and restrained blush-gold ornament.
+- Planned validation: Qixi entry at mobile and desktop sizes, then fake chat and first interlayer screens; inspect screenshots, render_game_to_text, and console errors.
+
 - Removed LifeSim's autonomous NPC interaction step from the main turn flow, so only user-triggered actions and char/main-plot API turns advance the story now.
 - Added LifeSim-specific independent API settings with global preset loading and a Gemini Flash recommendation, and persisted them on the LifeSim state so city resets do not wipe the app-specific config.
 - Reworked `apps/lifesim/DramaFeed.tsx` again so `主线历史` appears above the current main-plot detail view, while keeping the archive separate from the general drama stream.
@@ -42,3 +48,9 @@ pm run build passes after the chat-avatar-frequency changes.
 - Updated chat message grouping in pps/Chat.tsx so consecutive messages now split not only by sender role but also by a 30-minute time gap, preventing early messages from visually merging into much later ones on either side of the conversation.
 - 
 pm run build passes after the time-gap grouping fix.
+
+2026-08-17 — Qixi visual retheme completed
+- Rebuilt the Qixi entry screen as a full-screen celestial storybook poster with visible brand/exit, moon phases, oversized title, oval CTA, and status copy.
+- Applied a cohesive deep-plum, lavender, blush, and cream-moonlight palette through fake chat, distortion, interlayer, exploration, core, touch, and ending screens without changing story or memory logic.
+- Verified the desktop entry and the mobile cover → fake chat → distortion → interlayer entry → first exploration sequence with rendered screenshots; no console or page errors were reported.
+- `utils/qixiMemoryBundle.test.ts` passes (2 tests) and the production build succeeds.

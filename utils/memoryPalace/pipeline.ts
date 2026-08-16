@@ -1154,23 +1154,32 @@ export async function injectMemoryPalace(
 ): Promise<RecallTrace> {
     const hadPreviousMemory = Boolean(char.memoryPalaceInjection);
     const hadPreviousRoomPlates = Boolean(char.roomPlatesInjection);
-    const clearStartedAt = performance.now();
-    // 每轮先归零。否则本轮关闭、缺配置、空结果或报错时，会把上一轮的召回继续注入。
-    char.memoryPalaceInjection = '';
-    char.roomPlatesInjection = '';
     const trace = createRecallTrace({
         charId: char.id,
         entryPoint: traceContext?.entryPoint,
         recentMessageCount: recentMessages?.length ?? null,
         hasQueryHint: Boolean(queryHint?.trim()),
-        clearedPreviousMemory: hadPreviousMemory,
-        clearedPreviousRoomPlates: hadPreviousRoomPlates,
+        clearedPreviousMemory: false,
+        clearedPreviousRoomPlates: false,
     });
-    trace.stages.push({
-        name: 'clear_previous_injection',
-        durationMs: Math.round(performance.now() - clearStartedAt),
-        outcome: 'ok',
-    });
+    const legacyCompatibilityMode = !trace.featureFlagsSnapshot.recallRouter
+        && !trace.featureFlagsSnapshot.interactionAdaptation
+        && !trace.featureFlagsSnapshot.deepEngagement;
+
+    // 总开关关闭时保留 master 的覆盖语义：只有本轮真的召回到内容才替换临时注入。
+    // 新管线开启后才主动归零，避免新分析失败时复用上一轮的上下文。
+    if (!legacyCompatibilityMode) {
+        const clearStartedAt = performance.now();
+        char.memoryPalaceInjection = '';
+        char.roomPlatesInjection = '';
+        trace.injection.clearedPreviousMemory = hadPreviousMemory;
+        trace.injection.clearedPreviousRoomPlates = hadPreviousRoomPlates;
+        trace.stages.push({
+            name: 'clear_previous_injection',
+            durationMs: Math.round(performance.now() - clearStartedAt),
+            outcome: 'ok',
+        });
+    }
 
     let explicitEntityAnalysis: ExplicitEntityAnalysis | undefined;
     if (!trace.featureFlagsSnapshot.recallRouter) {
@@ -1343,7 +1352,9 @@ export async function injectMemoryPalace(
             telemetry => { retrievalTelemetry = telemetry; },
             { explicitEntityAnalysis },
         );
-        char.memoryPalaceInjection = context || '';
+        if (context || !legacyCompatibilityMode) {
+            char.memoryPalaceInjection = context || '';
+        }
         trace.retrievalReason = retrievalTelemetry?.reason;
         if (retrievalTelemetry?.explicitEntity) {
             const entity = retrievalTelemetry.explicitEntity;
@@ -1393,7 +1404,7 @@ export async function injectMemoryPalace(
         return finishRecallTrace(trace, context ? 'success' : 'empty');
     } catch (e: any) {
         console.warn(`🏰 [MemoryPalace] injectMemoryPalace failed: ${e.message}`);
-        char.memoryPalaceInjection = '';
+        if (!legacyCompatibilityMode) char.memoryPalaceInjection = '';
         trace.injection.memoryChars = 0;
         trace.injection.roomPlateChars = char.roomPlatesInjection.length;
         trace.stages.push({ name: 'finalize', durationMs: 0, outcome: 'error' });
