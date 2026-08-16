@@ -172,6 +172,19 @@ describe('v2 真实链路：分片 → 组装 → importFullData', () => {
                 charId: 'c1',
                 avatar: 'new-avatar',
                 companionAvatar: { version: 1, source: 'upload', imageRef: 'blobref:static-companion' },
+                companionTouchSettings: {
+                    enabledZones: ['head'],
+                    reactions: { head: [{ id: 'touch-1', text: '别揉乱啦', performance: { emotion: 'happy', gesture: 'idle' }, voiceAssetId: 'companion-touch-voice:c1:pack:head:0' }] },
+                    touchPresets: [{
+                        id: 'touch-preset-1',
+                        name: '摸头',
+                        enabledZones: ['head'],
+                        reactions: { head: [{ id: 'touch-1', text: '别揉乱啦', performance: { emotion: 'happy', gesture: 'idle' }, voiceAssetId: 'companion-touch-voice:c1:pack:head:0' }] },
+                        createdAt: 1,
+                        updatedAt: 1,
+                    }],
+                    activeTouchPresetId: 'touch-preset-1',
+                },
                 backgrounds: {},
             }],
             messages: [
@@ -198,6 +211,9 @@ describe('v2 真实链路：分片 → 组装 → importFullData', () => {
         expect(c1.bio).toBe('text-bio');      // 文字字段存活
         expect(c1.avatar).toBe('new-avatar'); // 媒体被 patch
         expect(c1.companionAvatar).toEqual({ version: 1, source: 'upload', imageRef: 'blobref:static-companion' });
+        expect(c1.companionTouchSettings.activeTouchPresetId).toBe('touch-preset-1');
+        expect(c1.companionTouchSettings.touchPresets[0].reactions.head[0].voiceAssetId)
+            .toBe('companion-touch-voice:c1:pack:head:0');
         // 老文字消息 id1 没被清，新 image id2 加上（patch/merge，不 clear）
         const msgIds = (await DB.getRawStoreData('messages')).map((m: any) => m.id).sort();
         expect(msgIds).toEqual([1, 2, 3]);

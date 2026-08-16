@@ -26,22 +26,27 @@ describe('CompanionHome touch request boundaries', () => {
   it('pre-generates touch voice only when opted in and plays persisted audio without per-tap TTS', () => {
     const source = readFileSync(path.resolve(__dirname, '../components/os/CompanionHome.tsx'), 'utf8');
     const voiceSource = readFileSync(path.resolve(__dirname, './avatarTouchVoice.ts'), 'utf8');
+    const voiceAssetSource = readFileSync(path.resolve(__dirname, './companionVoiceAssets.ts'), 'utf8');
 
     expect(source).toContain('data-testid="companion-touch-generate-voice"');
     expect(source).toContain('if (touchGenerateVoice)');
     expect(source).toContain('createAvatarTouchVoiceUrl(voice)');
     expect(source).not.toContain('synthesizeSpeechDetailed(');
     expect(voiceSource).toContain('synthesizeSpeechDetailed(');
-    expect(voiceSource).toContain('DB.putBlobAsset');
+    expect(voiceSource).toContain('saveCompanionVoiceBlob');
     expect(voiceSource).toContain('VOICE_CONCURRENCY = 2');
     expect(source).toContain('data-testid="companion-generate-startup-voice"');
     expect(source).toContain('data-testid="companion-startup-voice-language"');
     expect(source).toContain('data-testid="companion-touch-voice-language"');
     expect(source).toContain('data-testid="companion-startup-translation"');
     expect(source).toContain('generateCompanionStartupVoice');
-    expect(voiceSource).toContain('companion-startup-voice:');
+    expect(voiceAssetSource).toContain("COMPANION_STARTUP_VOICE_ASSET_PREFIX = 'companion-startup-voice:'");
     expect(voiceSource).toContain('voiceText: options.text');
     expect(voiceSource).toContain('languageBoost: options.voiceLanguage || undefined');
+    expect(source).toContain('data-testid="companion-startup-preset-select"');
+    expect(source).toContain('data-testid="companion-touch-preset-select"');
+    expect(source).toContain('保存为新预设');
+    expect(source).toContain('生成并保存新预设');
   });
 
   it('sequences a local touch impulse and uses the center star for real apps', () => {

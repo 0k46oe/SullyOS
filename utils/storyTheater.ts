@@ -40,6 +40,25 @@ export interface StoryGenerationSettings {
     max_tokens: number;
 }
 
+/**
+ * 默认完整发送酒馆预设中的采样参数。只有用户为当前剧情显式开启兼容开关时，才省略
+ * top_p / frequency_penalty / presence_penalty；不能用少数中转的兼容问题牺牲正常预设效果。
+ */
+export const prepareStoryGenerationSettings = (
+    settings?: Partial<StoryGenerationSettings>,
+    omitSamplingParams = false,
+): Partial<StoryGenerationSettings> => {
+    if (!settings) return {};
+    if (!omitSamplingParams) return { ...settings };
+    const {
+        top_p: _topP,
+        frequency_penalty: _frequencyPenalty,
+        presence_penalty: _presencePenalty,
+        ...compatible
+    } = settings;
+    return compatible;
+};
+
 export interface StoryAffinityInput {
     characterId?: string;
     characterName?: string;
@@ -172,6 +191,7 @@ export const createStoryTheaterDraft = (now: number = Date.now()): StoryTheaterE
     archives: [],
     selectedWorldbookIds: [],
     forceUserLastMessage: false,
+    omitSamplingParams: false,
     createdAt: now,
     updatedAt: now,
 });
@@ -203,6 +223,7 @@ export const normalizeStoryTheater = (entry: StoryTheaterEntry): StoryTheaterEnt
         presetId: /^builtin-night-screening-v\d/i.test(String(entry.presetId || '')) ? 'builtin-night-screening' : entry.presetId,
         presetOverride: entry.presetOverride?.schema === 'sullyos.story-preset' && Array.isArray(entry.presetOverride.prompts) ? entry.presetOverride : undefined,
         forceUserLastMessage: entry.forceUserLastMessage === true,
+        omitSamplingParams: entry.omitSamplingParams === true,
         createdAt: Number(entry.createdAt) || Date.now(),
         updatedAt: Number(entry.updatedAt) || Number(entry.createdAt) || Date.now(),
     };
