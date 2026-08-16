@@ -157,6 +157,9 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
     running.add(char.id);
     // 信号坠落处的写诗会话锁 token（抢到才有值）；finally 里兜底放锁
     let signalLockToken: string | null = null;
+    // 这一轮是不是折在「调模型」这一步上。调度器只对这种失败记账做熔断——
+    // 解析出错、落库出错都是本机自己的事，重试有意义，不该算到 API 头上。
+    let modelCallFailed = false;
     try {
         window.dispatchEvent(new CustomEvent('vr-session-start', {
             detail: { charId: char.id, charName: char.name, room: room.id },
@@ -375,9 +378,10 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
                     temperature: 0.9, stream: false,
                 }),
             }, 2, 0, { appName: '彼方', charId: char.id, charName: char.name, purpose: '自由活动' });
-            logVRApiCall({ ts: callStart, charName: char.name, room: room.id, model: vrApi.model, baseUrl, ok: true, ms: Date.now() - callStart });
+            logVRApiCall({ ts: callStart, charId: char.id, charName: char.name, charEnabled: !!char.vrState?.enabled, room: room.id, model: vrApi.model, baseUrl, ok: true, ms: Date.now() - callStart });
         } catch (e: any) {
-            logVRApiCall({ ts: callStart, charName: char.name, room: room.id, model: vrApi.model, baseUrl, ok: false, ms: Date.now() - callStart, error: (e?.message || String(e)).slice(0, 160) });
+            modelCallFailed = true;
+            logVRApiCall({ ts: callStart, charId: char.id, charName: char.name, charEnabled: !!char.vrState?.enabled, room: room.id, model: vrApi.model, baseUrl, ok: false, ms: Date.now() - callStart, error: (e?.message || String(e)).slice(0, 160) });
             throw e;
         }
         let aiContent: string = data.choices?.[0]?.message?.content || '';
@@ -657,7 +661,7 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
         return { ok: true, room: room.id, activity };
     } catch (err) {
         console.error('[VRWorld] session error:', err);
-        return { ok: false, room: room.id, reason: 'error' };
+        return { ok: false, room: room.id, reason: modelCallFailed ? 'api-error' : 'error' };
     } finally {
         running.delete(char.id);
         // 兜底放锁：任何提前 return / 异常路径漏放，这里补放（漏了也有 TTL 自动回收）

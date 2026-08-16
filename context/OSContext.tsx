@@ -15,8 +15,9 @@ import { exportStoryTheaterAppearanceSetting, restoreStoryTheaterAppearanceSetti
 import { createV2ArrayFieldWriter, writeV2Backup, assembleV2Backup, type BackupManifest, type ZipFileWriter, type ZipFileReader } from '../utils/backupFormat';
 import { encodeVectorsForBackup, encodeVectorsForBackupChunked } from '../utils/memoryPalace/db';
 import { ProactiveChat } from '../utils/proactiveChat';
-import { VRScheduler } from '../utils/vrWorld/scheduler';
+import { VRScheduler, type VRSessionOutcome } from '../utils/vrWorld/scheduler';
 import { runVRSession } from '../utils/vrWorld/runSession';
+import { logVRApiCall } from '../utils/vrWorld/vrApi';
 import { VR_DEFAULT_INTERVAL_MIN } from '../utils/vrWorld/constants';
 import { WorldScheduler, toTickEntries } from '../utils/worldHome/scheduler';
 import { runWorldEpisode, rerollWorldCharBeat } from '../utils/worldHome/engine';
@@ -2510,10 +2511,22 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       // 「彼方」自主登入 —— 独立调度，复用同一批 refs 拿最新状态
       const runVR = async (charId: string, room?: string, letterId?: string) => {
           const char = charactersRef.current.find(c => c.id === charId);
-          if (!char || !char.vrState?.enabled) return;
+          // 调度表里还排着队，角色却已经不接入了（或者压根被删了）：这条调度不该继续存在。
+          // 就地撤掉并留一行记录 —— 不撤的话它会一直空转，而空转是完全静默的，
+          // 用户那边只看得到「明明全关了，调用记录还在涨」，谁也说不清是哪一边错了。
+          if (!char || !char.vrState?.enabled) {
+              VRScheduler.stop(charId);
+              void logVRApiCall({
+                  ts: Date.now(), charId, charName: char?.name, ok: false, ms: 0,
+                  kind: 'skipped', charEnabled: !!char?.vrState?.enabled,
+                  note: char ? '角色未接入彼方，已撤掉这条残留调度' : '角色已不存在，已撤掉这条残留调度',
+              });
+              return;
+          }
           if (!userProfileRef.current) return;
+          let outcome: VRSessionOutcome = 'skipped';
           try {
-              await runVRSession({
+              const result = await runVRSession({
                   char,
                   characters: charactersRef.current,
                   apiConfig: apiConfigRef.current,
@@ -2525,9 +2538,27 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   forcedRoom: room as any,
                   forcedLetterId: letterId,
               });
+              // 没书没歌、房间被别人占着这些都不算账，只有真的没调通模型才记一笔失败
+              outcome = result.ok ? 'ok' : (result.reason === 'api-error' ? 'failed' : 'skipped');
           } catch (e) {
               console.error('[VRWorld] runVR error', e);
+              outcome = 'failed';
           }
+
+          const { tripped, streak } = VRScheduler.report(charId, outcome);
+          if (!tripped) return;
+          // 熔断了：调度已经被掐掉，这里把角色一并落回未接入，让界面和实际跑的东西对上，
+          // 免得又变成「显示未接入、后台还在动」。用函数式更新拿最新的 vrState，
+          // 别拿会话开头那份快照写回去，那会把这一轮刚记下的房间和时间抹掉。
+          void updateCharacter(charId, prev => ({
+              vrState: { ...(prev.vrState || { intervalMinutes: VR_DEFAULT_INTERVAL_MIN }), enabled: false } as any,
+          }));
+          void logVRApiCall({
+              ts: Date.now(), charId, charName: char.name, ok: false, ms: 0,
+              kind: 'tripped',
+              note: `连续 ${streak} 次没能调通模型，已暂停 ${char.name} 的自主登入`,
+          });
+          addToast(`${char.name} 连续 ${streak} 次没能调通模型，已暂停 ta 在彼方的自主登入`, 'error');
       };
       VRScheduler.onTrigger((charId: string, room?: string, letterId?: string) => { void runVR(charId, room, letterId); });
 

@@ -11,7 +11,7 @@ import { CreatorIframe, type ChibiResult } from '../components/Like520Event';
 import { useMusic, type Song } from '../context/MusicContext';
 import { DB } from '../utils/db';
 import { useResilientAssetUrl, attachAudioMirrorFallback } from '../utils/assetUrl';
-import { VRScheduler } from '../utils/vrWorld/scheduler';
+import { VRScheduler, VR_FAIL_LIMIT } from '../utils/vrWorld/scheduler';
 import { VR_ROOMS, getRoom, VR_DEFAULT_INTERVAL_MIN, SIGNAL_EPIGRAPH, signalActFor, signalActRanges, SIGNAL_POEMS_PER_BOOKLET, SIGNAL_EVENT_ENDED, SIGNAL_MEMORIAL_CLOSING } from '../utils/vrWorld/constants';
 import { buildNovelAsync, groupAnnotationsBySeg, getBookmark } from '../utils/vrWorld/novel';
 import { decodeBytes } from '../utils/vrWorld/decodeText';
@@ -3373,6 +3373,7 @@ const SettingsView: React.FC<{
         <div className="space-y-3">
             <p className="text-[11px] text-indigo-300/60 leading-relaxed">
                 启用后，角色会按设定的间隔自己登入「彼方」，在图书馆读你上传的小说、写批注。每次活动会在 ta 的聊天里留下动态卡片，也会被记忆总结捕捉。
+                连着 {VR_FAIL_LIMIT} 次调不通模型（比如 API 令牌失效了）会自动暂停这个角色，不会一直空跑下去。
                 {novelCount === 0 && <span className="text-amber-300/80"> 书库还空着，先去「书库」上传一本。</span>}
             </p>
             {characters.length === 0 && <p className="text-[11px] text-indigo-300/50 py-4 text-center">还没有角色。</p>}
@@ -3386,6 +3387,7 @@ const SettingsView: React.FC<{
                 const enabled = !!st?.enabled;
                 const interval = st?.intervalMinutes || VR_DEFAULT_INTERVAL_MIN;
                 const chibi = getChibi(char);
+                const failStreak = VRScheduler.getFailStreak(char.id);
                 return (
                     <div key={char.id} className="rounded-2xl p-3.5 backdrop-blur-sm" style={{ background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)' }}>
                         <div className="flex items-center gap-2.5">
@@ -3396,8 +3398,13 @@ const SettingsView: React.FC<{
                             </button>
                             <div className="flex-1 min-w-0">
                                 <div className="text-[13px] font-bold truncate">{char.name}</div>
-                                {enabled ? <div className="text-[10px] text-indigo-300/60">每 {interval >= 60 ? `${interval / 60} 小时` : `${interval} 分`}登入一次</div>
-                                    : <div className="text-[10px] text-indigo-300/40">{chibi.isFallback ? '未设形象 · 未接入' : '未接入'}</div>}
+                                {enabled ? (
+                                    <div className="text-[10px] text-indigo-300/60">
+                                        每 {interval >= 60 ? `${interval / 60} 小时` : `${interval} 分`}登入一次
+                                        {/* 后台失败本来一点声响都没有，攒到熔断前先让用户看见 */}
+                                        {failStreak > 0 && <span className="text-amber-300/80"> · 已连续 {failStreak} 次没调通</span>}
+                                    </div>
+                                ) : <div className="text-[10px] text-indigo-300/40">{chibi.isFallback ? '未设形象 · 未接入' : '未接入'}</div>}
                             </div>
                             <button onClick={() => enabled ? disable(char) : onRequestEnable(char)}
                                 className={`relative w-11 h-6 rounded-full transition-colors ${enabled ? 'bg-indigo-400' : 'bg-white/15'}`}>
@@ -3479,7 +3486,10 @@ const VRApiSettings: React.FC<{ apiPresets: ApiPreset[]; chatApi: APIConfig; add
         } catch (e: any) { setTestResult(`连接失败: ${e.message}`); } finally { setTesting(false); }
     };
 
-    const okCount = log.filter(l => l.ok).length;
+    // 日志里混着两种行：真实的模型调用，和「调度动了但没走到模型」的诊断行。
+    // 对账只该看前者，把诊断行算进分母会让「成功几次」失真。
+    const calls = log.filter(l => !l.kind);
+    const okCount = calls.filter(l => l.ok).length;
 
     return (
         <div className="space-y-3">
@@ -3549,22 +3559,33 @@ const VRApiSettings: React.FC<{ apiPresets: ApiPreset[]; chatApi: APIConfig; add
             <div className="rounded-2xl p-3" style={{ background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.07)' }}>
                 <div className="flex items-center gap-1.5 mb-2">
                     <span className="text-[10px] tracking-[0.2em] text-indigo-200/60" style={{ fontFamily: `'Noto Serif SC',serif` }}>调用记录</span>
-                    <span className="text-[9.5px] text-white/40 rounded-full px-1.5 leading-tight" style={{ background: 'rgba(255,255,255,.08)' }}>{log.length}{log.length ? ` · 成功${okCount}` : ''}</span>
+                    <span className="text-[9.5px] text-white/40 rounded-full px-1.5 leading-tight" style={{ background: 'rgba(255,255,255,.08)' }}>{calls.length}{calls.length ? ` · 成功${okCount}` : ''}</span>
                     {log.length > 0 && <button onClick={() => { void clearVRApiLog(); setLog([]); }} className="ml-auto text-[10px] text-white/40 hover:text-rose-300/80">清空</button>}
                 </div>
                 {log.length === 0 ? (
                     <p className="text-[10.5px] text-white/35 py-2 text-center">还没有调用。角色每次登入彼方触发的模型调用都会记在这里，方便你对账。</p>
                 ) : (
                     <div className="space-y-1">
-                        {log.slice(0, 60).map((l, i) => (
-                            <div key={i} className="flex items-center gap-2 text-[10.5px] py-1 border-b border-white/5 last:border-0">
-                                <span className={`shrink-0 ${l.ok ? 'text-emerald-400/80' : 'text-rose-400/80'}`}>{l.ok ? '●' : '○'}</span>
-                                <span className="text-white/75 truncate">{l.charName || '—'}</span>
-                                <span className="text-indigo-300/40 shrink-0">{l.room ? getRoom(l.room as VRRoomId).name : ''}</span>
-                                <span className="ml-auto text-white/30 shrink-0 tabular-nums">{(l.ms / 1000).toFixed(1)}s</span>
-                                <span className="text-white/35 shrink-0 tabular-nums w-[68px] text-right">{new Date(l.ts).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
-                            </div>
-                        ))}
+                        {log.slice(0, 60).map((l, i) => {
+                            const diag = !!l.kind;   // 诊断行：调度到点了，但这一轮没走到模型
+                            return (
+                                <div key={i} className="flex items-start gap-2 text-[10.5px] py-1 border-b border-white/5 last:border-0">
+                                    <span className={`shrink-0 ${diag ? 'text-amber-400/70' : l.ok ? 'text-emerald-400/80' : 'text-rose-400/80'}`}>{diag ? '◌' : l.ok ? '●' : '○'}</span>
+                                    <span className="text-white/75 truncate shrink-0">{l.charName || l.charId?.slice(-4) || '—'}</span>
+                                    {diag ? (
+                                        <span className="flex-1 min-w-0 text-amber-200/55 leading-snug">{l.note}</span>
+                                    ) : (
+                                        <>
+                                            <span className="text-indigo-300/40 shrink-0">{l.room ? getRoom(l.room as VRRoomId).name : ''}</span>
+                                            {/* 接入明明是关的却还是发了请求 —— 这就是「关不掉」的现场，标出来别让它混在红点里 */}
+                                            {l.charEnabled === false && <span className="text-rose-300/75 shrink-0">未接入却发了</span>}
+                                            <span className="ml-auto text-white/30 shrink-0 tabular-nums">{(l.ms / 1000).toFixed(1)}s</span>
+                                        </>
+                                    )}
+                                    <span className="text-white/35 shrink-0 tabular-nums w-[68px] text-right">{new Date(l.ts).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                                </div>
+                            );
+                        })}
                     </div>
                 )}
             </div>
