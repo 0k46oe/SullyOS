@@ -41,6 +41,7 @@ import {
     storyTheaterMemoryRecipientIds,
     formatActorRecentMessages,
     formatStoryTheaterExport,
+    makeStoryPresetFileName,
     makeStoryTheaterFileName,
 } from './storyTheater';
 
@@ -85,6 +86,7 @@ describe('剧情原文导出', () => {
         expect(output).toContain('角色：林星、Noir');
         expect(output.indexOf('走出车站。')).toBeLessThan(output.indexOf('<story_text>他撑开伞。</story_text>'));
         expect(makeStoryTheaterFileName('雨/夜', new Date(2026, 7, 13).getTime())).toBe('雨_夜_剧情记录_2026-08-13.txt');
+        expect(makeStoryPresetFileName('雨/夜：预设')).toBe('雨_夜：预设.json');
     });
 });
 
