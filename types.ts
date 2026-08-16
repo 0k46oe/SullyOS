@@ -102,7 +102,7 @@ export interface OSTheme {
   bootAnimationEnabled?: boolean;
   /** 进入聊天或切换角色时是否播放角色登场过场。默认开启。 */
   chatCharacterSwitchAnimationEnabled?: boolean;
-  /** App 代码块加载较慢时是否显示加载柔光动画。默认开启；卡死恢复页不受影响。 */
+  /** App 代码块加载较慢时是否显示加载柔光动画。默认开启；超时恢复页不受影响。 */
   appLoadingAnimationEnabled?: boolean;
   /** 桌面整体皮肤。'animalcrossing' = 动森风格（NookPhone 彩色圆角图标 + 暖色界面）；
    *  'mobilegame' = 二次元手游首页风格（角色卡 + 等级经验条 + 货币栏 + 网格卡 + 罗盘 dock）；
@@ -1212,6 +1212,10 @@ export interface VRWorldCharState {
      * 这是"每个角色书签不一样"的落点。
      */
     novelBookmarks?: Record<string, number>;
+    /** 用户为该角色圈定的优先书单。为空时从全书库自动轮换。 */
+    preferredNovelIds?: string[];
+    /** 上一次图书馆活动选中的小说，用于有其它候选时避免连续读同一本。 */
+    lastNovelId?: string;
     /** 最近一次活动落在哪个房间（UI 立绘站位用） */
     currentRoom?: VRRoomId;
     /** 最近一次活动时间戳（UI / 调度展示用） */
@@ -2748,6 +2752,7 @@ export interface CharacterProfile {
   spriteConfig?: SpriteConfig;
   customDateSprites?: string[]; // User-added custom emotion names for date mode (per-character)
   dateLightReading?: boolean;   // Light reading mode for novel/text view in date
+  dateReadingShowAvatars?: boolean; // Show both participants' avatars beside messages in date reading mode
   dateSkinSets?: SkinSet[];     // Multiple skin sets for portrait mode
   activeSkinSetId?: string;     // Currently active skin set ID
   dateStyleConfig?: DateStyleConfig; // 见面模式文风（写作风格 / 叙事人称 / 自定义补充）

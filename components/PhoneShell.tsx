@@ -1,59 +1,23 @@
 
 
 
-import React, { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useMemo, useRef, Suspense } from 'react';
 import { IMPORT_IN_PROGRESS_KEY, useOS } from '../context/OSContext';
 import StatusBar from './os/StatusBar';
 import Launcher from '../apps/Launcher';
 import CompanionLockChrome from './os/CompanionLockChrome';
 import { loadCompanionFrameStyle } from './os/companionFrameStyles';
+import { createPreloadableLazy, type PreloadableLazy } from './os/preloadableLazy';
 
 // 按需懒加载各 App —— 切到对应 App 时才下载/解析其代码块，首屏只加载 Launcher 与外壳，
 // 大体积 App（MemoryPalace / VRWorld / Songwriting 等）不再压在主包里。
 // 默认导出直接 lazy；命名导出（SpecialMomentsApp）用 .then 适配成 { default }。
 // Launcher 保持静态导入：桌面常驻、需要秒开，不走懒加载。
 //
-// lazyApp：在 lazy 之外把 import 工厂挂到 .preload 上，使各 chunk 可被「预取」。
-// 桌面就绪后空闲时按优先级后台预热（见下方 useEffect），真正打开 App 时代码已在内存，
-// React.lazy 几乎同步解析 —— 过场层几乎不再出现，从根本上消除「每次进 App 都要加载」。
-type PreloadableLazy = React.LazyExoticComponent<React.ComponentType<any>> & { preload: () => Promise<unknown> };
-const lazyApp = (factory: () => Promise<{ default: React.ComponentType<any> }>): PreloadableLazy => {
-  const Comp = lazy(factory) as PreloadableLazy;
-  Comp.preload = factory;
-  return Comp;
-};
-
-// 预热 React.lazy 的「负载」本身：不仅下载模块，还把 lazy 内部状态推进到 resolved，
-// 使首次渲染该 App 时不再 suspend —— 杜绝切换瞬间露出外壳粉紫底色（深色 App 上尤其扎眼）的那一帧闪烁。
-// _payload / _init 为 React.lazy 内部结构（本项目锁定 React 18，形态稳定）；带防御，取不到则退化为仅预热 Vite 模块。
-// 注意：仅解析负载、不挂载组件，因此不会触发各 App 的副作用/数据读取。
-const LAZY_UNINITIALIZED = -1;
-const LAZY_PENDING = 0;
-const LAZY_REJECTED = 2;
-const warmLazy = (Comp: PreloadableLazy): void => {
-  try {
-    const payload: any = (Comp as any)?._payload;
-    const init: any = (Comp as any)?._init;
-    if (!payload || typeof init !== 'function' || payload._status !== LAZY_UNINITIALIZED) {
-      Comp.preload(); // 已在加载/已加载，或拿不到内部结构 → 仅预热 Vite 模块
-      return;
-    }
-    init(payload); // 触发下载 + 解析负载
-    // 关键防护：若空闲预取阶段加载失败，把负载复位为「未初始化」，避免该 App 被永久钉死为错误态；
-    // 真正打开时按 React 正常流程重试（再失败才交给错误边界），与预取前行为一致。
-    const thenable = payload._result;
-    if (payload._status === LAZY_PENDING && thenable && typeof thenable.then === 'function') {
-      thenable.then(undefined, () => {
-        if (payload._status === LAZY_REJECTED) {
-          payload._status = LAZY_UNINITIALIZED;
-          payload._result = Comp.preload; // 还原工厂，供 React 重新调用
-        }
-      });
-    }
-  } catch {
-    try { Comp.preload(); } catch { /* ignore */ }
-  }
-};
+// App 在用户打开/按下图标时立即加载；性能与网络条件合适时，桌面稳定后也会低优先级串行预热。
+// 绝不能在冷启动阶段并发扫完整个列表：低端设备会同时下载、解压和解析几十个 chunk，
+// 反而拖死用户此刻真正要打开的那个 App。
+const lazyApp = createPreloadableLazy;
 
 const Settings = lazyApp(() => import('../apps/Settings'));
 const Character = lazyApp(() => import('../apps/Character'));
@@ -93,23 +57,22 @@ const WorldHomeApp = lazyApp(() => import('../apps/WorldHomeApp'));
 const CharCreatorDevApp = lazyApp(() => import('../apps/CharCreatorDevApp'));
 const SpecialMomentsApp = lazyApp(() => import('./ValentineEvent').then(m => ({ default: m.SpecialMomentsApp })));
 
-// 预取优先级：高频/常驻 App 先预热，其余随后；逐个在空闲时触发，避免与交互抢主线程/带宽。
-const APP_PRELOAD_ORDER: PreloadableLazy[] = [
-  Chat, Character, GroupChat, SocialApp, RoomApp, Settings, Appearance,
-  CheckPhone, JournalApp, ScheduleApp, MusicApp, CallApp, Gallery, DateApp, UserApp,
+// 仅供「桌面稳定后的空闲串行预热」。严格 await 前一个再取下一个，且任何用户操作都会停止队列。
+// 高频 App 在前；低端设备/省流量/2G 由 shouldUseIdleAppPreload 整体跳过。
+const APP_IDLE_PRELOAD_ORDER: PreloadableLazy[] = [
+  Chat, Character, Settings, Appearance, GroupChat, RoomApp, CheckPhone,
+  JournalApp, ScheduleApp, SocialApp, MusicApp, CallApp, Gallery, DateApp, UserApp,
   StudyApp, GameApp, NovelApp, BankApp, WorldbookApp, MemoryPalaceApp, HandbookApp,
   VRWorldApp, WorldHomeApp, LifeSimApp, SongwritingApp, GuidebookApp, FAQApp, HotNewsApp,
   XhsStockApp, XhsFreeRoamApp, BrowserApp, VoiceDesignerApp, ThemeMaker, QQBridge,
   SpecialMomentsApp, CharCreatorDevApp,
 ];
 
-const ROLE_ENTRY_PRELOAD_ORDER: PreloadableLazy[] = [
-  Character,
-  CallApp,
-  RoomApp,
-];
+const IDLE_PRELOAD_START_MS = 600;
+const IDLE_PRELOAD_GAP_MS = 250;
+let idlePreloadCursor = 0;
 
-// AppID → 懒加载组件，供「按下即预取」连 React.lazy 负载一起解析（消除切换瞬间露底色的闪烁）。
+// AppID → 懒加载组件，供「按下即预取」复用同一个模块 Promise。
 // AppID 由下方 import 引入，ES 模块提升后全模块可用。
 const APP_BY_ID: Partial<Record<AppID, PreloadableLazy>> = {
   [AppID.Settings]: Settings, [AppID.Character]: Character, [AppID.Chat]: Chat,
@@ -126,8 +89,8 @@ const APP_BY_ID: Partial<Record<AppID, PreloadableLazy>> = {
   [AppID.VRWorld]: VRWorldApp, [AppID.CharCreatorDev]: CharCreatorDevApp, [AppID.SpecialMoments]: SpecialMomentsApp,
   [AppID.WorldHome]: WorldHomeApp,
 };
-// 注入负载预热器：AppIcon 的 pointerdown → preloadApp(id) → 这里 warmLazy，连 React.lazy 负载一起解析。
-setAppPayloadWarmer((id: AppID) => { const c = APP_BY_ID[id]; if (c) warmLazy(c); });
+// AppIcon 的 pointerdown 只预取用户正在点的 App；失败时由 preloadableLazy 清缓存，点击可正常重试。
+setAppPayloadWarmer((id: AppID) => APP_BY_ID[id]?.preload());
 
 import { Like520Controller, shouldShowLike520Popup } from './Like520Event';
 import { UpdateNotificationController, shouldShowUpdateNotification } from './UpdateNotificationEvent';
@@ -151,7 +114,7 @@ import PersonaSimIndicator from './os/PersonaSimIndicator';
 import DreamSimIndicator from './os/DreamSimIndicator';
 import ErrorDialog from './os/ErrorDialog';
 import BootSequence from './os/BootSequence';
-import { setAppPayloadWarmer } from './os/appPreload';
+import { setAppPayloadWarmer, shouldUseIdleAppPreload } from './os/appPreload';
 
 /*
 // Internal Error Boundary Component
@@ -424,7 +387,8 @@ const ImportRecoveryPopup: React.FC<{
 // （loading spinner 闪烁反模式）。所以前 ~220ms 一律渲染空（无感），只有真的慢才浮现。
 // 刻意「零动画开销」：之前那套呼吸/涟漪/上升微尘的持续动画在 iOS 上会引起卡顿，且预热命中后
 // 这屏几乎不出现 —— 收益小、代价大。现在只一次性淡入一个静态柔光点（无 infinite 动画），
-// 透明底让外壳虚化壁纸透出来。真卡住（>7s）才换成可点的刷新/返回兜底。
+// 透明底让外壳虚化壁纸透出来。真卡住（>15s）才换成可点的刷新/返回兜底，避免低端设备
+// 仍在正常解析单个大模块时被 7 秒阈值过早判死。
 const AppLoadingFallback: React.FC<{ onReturn?: () => void; animationEnabled?: boolean }> = ({ onReturn, animationEnabled = true }) => {
   const [show, setShow] = useState(false);
   const [stalled, setStalled] = useState(false);
@@ -434,7 +398,7 @@ const AppLoadingFallback: React.FC<{ onReturn?: () => void; animationEnabled?: b
     // Suspense 会永远停在这一屏（不报错 → 错误边界不触发 → 不会自动刷新），用户狂点中心光点却毫无反应。
     // 超过 STALL_MS 仍未加载完 → 把「看着像按钮其实不是」的光点换成真正可点的「刷新/返回」按钮，
     // 既明确告诉用户该点哪里，又把静默卡死变成一键可恢复。只动占位 UI，不碰 import 逻辑。
-    const stall = setTimeout(() => { setStalled(true); trackEvent('App 加载卡死超时'); }, 7000);
+    const stall = setTimeout(() => { setStalled(true); trackEvent('App 加载卡死超时'); }, 15_000);
     return () => { if (t) clearTimeout(t); clearTimeout(stall); };
   }, [animationEnabled]);
   if (stalled) {
@@ -443,7 +407,7 @@ const AppLoadingFallback: React.FC<{ onReturn?: () => void; animationEnabled?: b
         <style>{`@keyframes appLoadIn{from{opacity:0}to{opacity:1}}`}</style>
         <h2 className="text-base font-bold">加载有点慢…</h2>
         <p className="text-xs text-slate-300 max-w-xs leading-relaxed">
-          这个发光的圆点是加载动画，不是按钮——点它不会有反应。常见于刚更新版本或网络瞬断，刷新一次即可恢复。
+          首次打开会下载并解析功能代码；网络波动或设备性能较低都可能变慢。页面仍在继续加载，若长时间没有恢复再刷新。
         </p>
         <div className="flex flex-col gap-3 w-full max-w-xs">
           <button
@@ -501,31 +465,82 @@ const PhoneShell: React.FC = () => {
     if (!bootAnimationEnabled) setBootDone(true);
   }, [bootAnimationEnabled]);
 
-  // 从根本上消除「每次进 App 都要加载」：数据一就绪就在后台按优先级逐个预热各 App 的代码块。
-  // 关键：不等开机动画（bootDone）结束就开始 —— 否则用户在开机那 ~2 秒内点开 Chat 时 chunk 还没热，
-  // 会现下载+解析 300KB+，首次进聊天卡好几秒。预热与开机动画并行（只下载/解析负载、不挂载、无副作用）。
-  // 逐个、空闲触发（requestIdleCallback），不与首屏交互抢主线程/带宽。
+  // 折中预热策略：首屏/开机完全让路；桌面稳定约 600ms 后，能力足够的设备就逐个预热。
+  // 每次严格等待当前 chunk 下载 + 解析完成，再空一拍取下一个。用户一按屏幕或进入 App，
+  // 立刻取消所有尚未开始的任务；已经在飞的一个 import 无法中止，但最多只会与目标 App 并行一个。
   useEffect(() => {
-    if (!isDataLoaded) return;
-    ROLE_ENTRY_PRELOAD_ORDER.forEach(warmLazy);
-  }, [isDataLoaded]);
+    if (!bootDone || !isDataLoaded || activeApp !== AppID.Launcher) return;
+    if (!shouldUseIdleAppPreload() || idlePreloadCursor >= APP_IDLE_PRELOAD_ORDER.length) return;
 
-  useEffect(() => {
-    if (!isDataLoaded) return;
-    if (useIOSStandaloneLayout) return;
-    let cancelled = false;
-    let idx = 0;
-    const ric: (cb: () => void) => number = (window as any).requestIdleCallback
-      ? (cb) => (window as any).requestIdleCallback(cb, { timeout: 1500 })
-      : (cb) => window.setTimeout(cb, 200);
-    const step = () => {
-      if (cancelled || idx >= APP_PRELOAD_ORDER.length) return;
-      warmLazy(APP_PRELOAD_ORDER[idx++]); // 下载 chunk + 解析 React.lazy 负载 → 首次打开不再 suspend、无底色闪烁
-      if (!cancelled) ric(step);
+    let stoppedByInteraction = false;
+    let startTimer: number | null = null;
+    let gapTimer: number | null = null;
+    let idleHandle: number | null = null;
+    const requestIdle = (callback: () => void): number => {
+      if (typeof (window as any).requestIdleCallback === 'function') {
+        return (window as any).requestIdleCallback(callback, { timeout: 2_000 });
+      }
+      return window.setTimeout(callback, 250);
     };
-    const startId = window.setTimeout(() => ric(step), 150); // 让首帧先绘制一拍，随即开始（含开机动画期间）
-    return () => { cancelled = true; window.clearTimeout(startId); };
-  }, [isDataLoaded, useIOSStandaloneLayout]);
+    const cancelScheduled = () => {
+      if (startTimer !== null) window.clearTimeout(startTimer);
+      if (gapTimer !== null) window.clearTimeout(gapTimer);
+      if (idleHandle !== null) {
+        if (typeof (window as any).cancelIdleCallback === 'function') {
+          (window as any).cancelIdleCallback(idleHandle);
+        } else {
+          window.clearTimeout(idleHandle);
+        }
+      }
+      startTimer = null;
+      gapTimer = null;
+      idleHandle = null;
+    };
+    const scheduleStep = (delay: number) => {
+      if (stoppedByInteraction || document.visibilityState !== 'visible') return;
+      gapTimer = window.setTimeout(() => {
+        gapTimer = null;
+        idleHandle = requestIdle(() => {
+          idleHandle = null;
+          void runStep();
+        });
+      }, delay);
+    };
+    const runStep = async () => {
+      if (stoppedByInteraction || document.visibilityState !== 'visible') return;
+      const next = APP_IDLE_PRELOAD_ORDER[idlePreloadCursor++];
+      if (!next) return;
+      try {
+        await next.preload();
+      } catch {
+        // 空闲预热失败不打扰用户；真正点开时由 retryable preload 再试。
+      }
+      if (!stoppedByInteraction && idlePreloadCursor < APP_IDLE_PRELOAD_ORDER.length) {
+        scheduleStep(IDLE_PRELOAD_GAP_MS);
+      }
+    };
+    const stopForInteraction = () => {
+      stoppedByInteraction = true;
+      cancelScheduled();
+    };
+    const handleVisibilityChange = () => {
+      cancelScheduled();
+      if (document.visibilityState === 'visible' && !stoppedByInteraction) {
+        startTimer = window.setTimeout(() => scheduleStep(0), IDLE_PRELOAD_START_MS);
+      }
+    };
+
+    window.addEventListener('pointerdown', stopForInteraction, { capture: true, once: true });
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    startTimer = window.setTimeout(() => scheduleStep(0), IDLE_PRELOAD_START_MS);
+
+    return () => {
+      stoppedByInteraction = true;
+      cancelScheduled();
+      window.removeEventListener('pointerdown', stopForInteraction, { capture: true });
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [activeApp, bootDone, isDataLoaded]);
 
   // Disclaimer popup for first-time users
   const [showDisclaimer, setShowDisclaimer] = useState(() => {

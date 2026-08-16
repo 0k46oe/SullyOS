@@ -438,6 +438,8 @@ describe('CompanionHome touch request boundaries', () => {
     expect(live2dSource).toContain("core.setParameterValueById(resolveId('ParamEyeBallX'), finalEyeX)");
     expect(live2dSource).toContain("host.dataset.live2dFinalEyes = `${finalEyeX.toFixed(3)},${finalEyeY.toFixed(3)}`");
     expect(live2dSource).toContain("const finalMouth = motionStateRef.current === 'speaking' ? lastMouthLevel : 0");
+    expect(live2dSource).toContain('for (const id of mouthOpenParameterIds)');
+    expect(live2dSource).not.toContain("for (const id of config.lipSyncParameterIds.length ? config.lipSyncParameterIds : ['ParamMouthOpenY'])");
     expect(live2dSource).toContain("core.setParameterValueById(resolveId(id), finalMouth)");
     expect(live2dSource).toContain("host.dataset.live2dFinalMouth = finalMouth.toFixed(3)");
     expect(live2dSource).toContain('if (!locked || directedHead.motionOwnsHead || directedHead.paramsOwnHead) return;');

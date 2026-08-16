@@ -13,6 +13,7 @@ import { stripCompanionChatStyleResidue } from '../utils/companionThemeIsolation
 import { SULLY_DEFAULT_AVATAR_URL, shouldMigrateSullyAvatar } from '../utils/sullyAvatar';
 import { exportStoryTheaterAppearanceSetting, restoreStoryTheaterAppearanceSetting } from '../utils/storyTheaterBackup';
 import { createV2ArrayFieldWriter, writeV2Backup, assembleV2Backup, type BackupManifest, type ZipFileWriter, type ZipFileReader } from '../utils/backupFormat';
+import { externalizeVoiceMessageBlobs, restoreVoiceMessageBlobs, shouldIncludeVoiceRelatedAssetInBackup } from '../utils/voiceMessageBackup';
 import { encodeVectorsForBackup, encodeVectorsForBackupChunked } from '../utils/memoryPalace/db';
 import { ProactiveChat } from '../utils/proactiveChat';
 import { VRScheduler, type VRSessionOutcome } from '../utils/vrWorld/scheduler';
@@ -4161,9 +4162,20 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // --- MODE SPECIFIC FILTERING ---
 
               if (storeName === 'assets' && Array.isArray(rawData)) {
-                  rawData = rawData.filter((asset: { id?: string } | null | undefined) => {
+                  rawData = rawData.filter((asset: { id?: string; data?: { favorite?: boolean } } | null | undefined) => {
                       if (!asset || typeof asset.id !== 'string') return true;
-                      return !isRedundantManagedAssetId(asset.id);
+                      if (isRedundantManagedAssetId(asset.id)) return false;
+                      // Shared TTS rows are implementation cache. Ordinary voice
+                      // data keeps its existing local behavior; explicit favorites
+                      // join only full/media backups, never text-only backups.
+                      return shouldIncludeVoiceRelatedAssetInBackup(asset, mode !== 'text_only');
+                  });
+                  // Blob is not JSON-serializable (`JSON.stringify(new Blob()) === '{}'`).
+                  // Put favorite audio bytes in their own ZIP entries and leave a JSON-safe
+                  // marker in the assets row. `tts_*` stays a disposable cache so ordinary
+                  // speech is not duplicated in backups.
+                  await externalizeVoiceMessageBlobs(rawData, (path, bytes) => {
+                      zip.file(path, bytes, { compression: 'STORE' });
                   });
               }
 
@@ -4491,6 +4503,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // 必须发生在 restoreAssetsInPlace / DB.importFullData 之前：不受支持的第三方
           // 备份一旦命中特征就整包拒绝，不能出现“导入了一半才报错”的状态。
           assertSupportedSullyBackup(data);
+
+          // v2 backups keep favorite voice bytes outside JSON. Rehydrate every marker
+          // before DB.importFullData starts, so a missing/truncated file aborts while
+          // the current database is still untouched.
+          if (zip && Array.isArray(data.assets)) {
+              await restoreVoiceMessageBlobs(data.assets, async path => {
+                  const entry = zip?.file(path);
+                  return entry ? entry.async('uint8array') : null;
+              });
+          }
 
           const hadAssetStoreBackup = data.assets !== undefined;
           const hadCustomIconsBackup = data.customIcons !== undefined;

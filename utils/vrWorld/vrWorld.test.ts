@@ -5,7 +5,7 @@ import { rollPoemLines, SIGNAL_LINES_MIN, SIGNAL_LINES_MAX, signalActFor } from 
 import { maskPen } from './postOffice';
 import { decodeBytes } from './decodeText';
 import { VRScheduler, VR_FAIL_LIMIT } from './scheduler';
-import { rollRoom, vrAutoGapMs } from './runSession';
+import { pickNovel, rollRoom, vrAutoGapMs } from './runSession';
 
 // scheduler 的 attachListeners 会访问 document/window（node 环境下没有），补最简 stub。
 const g = globalThis as any;
@@ -214,6 +214,49 @@ describe('parseMusicOutput', () => {
 describe('彼方手动指定房间', () => {
     it('手动点听歌房时，即使角色没有歌单且房间没在放歌也不会随机跳走', () => {
         expect(rollRoom({} as any, [], null, 'music')).toBe('music');
+    });
+});
+
+describe('彼方图书馆自动选书', () => {
+    const novel = (id: string, segments = 10) => ({
+        id,
+        title: id,
+        segments: Array.from({ length: segments }, (_, idx) => ({ idx, text: `${id}-${idx}`, chars: 4 })),
+        totalChars: segments * 4,
+        createdAt: 1,
+        updatedAt: 1,
+    }) as any;
+
+    it('默认在全部未读完书目中 roll，而不是永远选择最近开始的那本', () => {
+        const books = [novel('a'), novel('b'), novel('c')];
+        const char = { vrState: { novelBookmarks: { c: 2 } } } as any;
+        expect(pickNovel(books, char, () => 0)?.id).toBe('a');
+        expect(pickNovel(books, char, () => 0.99)?.id).toBe('c');
+    });
+
+    it('有多个候选时不会连续两轮选择同一本', () => {
+        const books = [novel('a'), novel('b'), novel('c')];
+        const char = { vrState: { lastNovelId: 'b' } } as any;
+        expect(pickNovel(books, char, () => 0)?.id).toBe('a');
+        expect(pickNovel(books, char, () => 0.99)?.id).toBe('c');
+    });
+
+    it('优先书单有未读内容时只在优先书目中轮换', () => {
+        const books = [novel('a'), novel('b'), novel('c')];
+        const char = { vrState: { preferredNovelIds: ['b', 'c'], lastNovelId: 'b' } } as any;
+        expect(pickNovel(books, char, () => 0)?.id).toBe('c');
+        expect(pickNovel(books, char, () => 0.99)?.id).toBe('c');
+    });
+
+    it('优先书目读完后回到全书库的未读书目', () => {
+        const books = [novel('a'), novel('b'), novel('c')];
+        const char = { vrState: { preferredNovelIds: ['b'], novelBookmarks: { b: 10 } } } as any;
+        expect(pickNovel(books, char, () => 0)?.id).toBe('a');
+        expect(pickNovel(books, char, () => 0.99)?.id).toBe('c');
+    });
+
+    it('空书和损坏书不会进入候选池', () => {
+        expect(pickNovel([novel('empty', 0), novel('ok')], {} as any, () => 0)?.id).toBe('ok');
     });
 });
 
