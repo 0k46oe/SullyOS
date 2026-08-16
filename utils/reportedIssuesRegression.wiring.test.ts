@@ -70,4 +70,15 @@ describe('用户反馈回归保护', () => {
         expect(portrait).not.toContain('companion-static-expression-in');
         expect(home).not.toContain('staticExpressionKey');
     });
+
+    it('聊天翻译支持按角色保存直接展开模式，并在气泡内同时渲染原文和译文', () => {
+        const chat = read('../apps/Chat.tsx');
+        const modals = read('../components/chat/ChatModals.tsx');
+        const item = read('../components/chat/MessageItem.tsx');
+
+        expect(chat).toContain('chat_translate_expanded_${activeCharacterId}');
+        expect(modals).toContain('原文与译文同时展开');
+        expect(item).toContain('showExpandedTranslation');
+        expect(item).toContain('{renderContent(langBContent)}');
+    });
 });

@@ -228,6 +228,9 @@ const Chat: React.FC = () => {
             || localStorage.getItem('chat_translate_lang')
             || '中文') || '中文';
     });
+    const [translationExpanded, setTranslationExpanded] = useState(() => {
+        try { return JSON.parse(localStorage.getItem(`chat_translate_expanded_${activeCharacterId}`) || 'false'); } catch { return false; }
+    });
     // Which messages are currently showing "译" version (toggle state only, no API calls)
     const [showingTargetIds, setShowingTargetIds] = useState<Set<number>>(new Set());
 
@@ -975,6 +978,9 @@ const Chat: React.FC = () => {
                 || localStorage.getItem('chat_translate_lang')
                 || '中文') || '中文'
             );
+            try {
+                setTranslationExpanded(JSON.parse(localStorage.getItem(`chat_translate_expanded_${activeCharacterId}`) || 'false'));
+            } catch { setTranslationExpanded(false); }
             setVisibleCount(30);
             visibleCountRef.current = 30;
             lastMsgIdRef.current = null;
@@ -3305,6 +3311,14 @@ const Chat: React.FC = () => {
                 onToggleTranslation={() => { const next = !translationEnabled; setTranslationEnabled(next); localStorage.setItem(`chat_translate_enabled_${activeCharacterId}`, JSON.stringify(next)); if (next) { trackEvent('开启聊天翻译', { targetLang: isTranslationLangPreset(translateTargetLang) ? translateTargetLang : 'custom' }); } if (!next) { setShowingTargetIds(new Set()); } }}
                 translateSourceLang={translateSourceLang}
                 translateTargetLang={translateTargetLang}
+                translationExpanded={translationExpanded}
+                onToggleTranslationExpanded={() => {
+                    const next = !translationExpanded;
+                    setTranslationExpanded(next);
+                    localStorage.setItem(`chat_translate_expanded_${activeCharacterId}`, JSON.stringify(next));
+                    setShowingTargetIds(new Set());
+                    trackEvent('切换翻译展开模式', { enabled: next ? 'on' : 'off' });
+                }}
                 onSetTranslateSourceLang={(lang: string) => { const next = normalizeTranslationLangLabel(lang); if (!next) return; setTranslateSourceLang(next); localStorage.setItem(`chat_translate_source_lang_${activeCharacterId}`, next); setShowingTargetIds(new Set()); }}
                 onSetTranslateLang={(lang: string) => { const next = normalizeTranslationLangLabel(lang); if (!next) return; setTranslateTargetLang(next); localStorage.setItem(`chat_translate_lang_${activeCharacterId}`, next); setShowingTargetIds(new Set()); }}
                 xhsEnabled={!!char.xhsEnabled}
@@ -3605,6 +3619,7 @@ const Chat: React.FC = () => {
                             isThinkingSelected={selectedThinkingMsgIds.has(m.id)}
                             onToggleThinkingSelect={toggleThinkingSelection}
                             translationEnabled={translationEnabled && m.type === 'text' && m.role === 'assistant'}
+                            translationExpanded={translationExpanded}
                             isShowingTarget={showingTargetIds.has(m.id)}
                             onTranslateToggle={handleTranslateToggle}
                             voiceData={voiceDataMap[m.id]}
