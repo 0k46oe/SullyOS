@@ -304,7 +304,11 @@ export const buildFetchFailureDetail = (
         const ageSeconds = Math.max(1, Math.round(successAgeMs / 1000));
         lines.push(`同接口对照: ${ageSeconds} 秒前，同一个 ${method} 已成功返回 HTTP ${recentSuccess.status}`);
         lines.push('初判: 同一接口刚刚成功过，基本排除域名整体不可达、DNS 错误或代理把整个域名拦掉；这是当前请求/响应特有的失败。');
-        lines.push('更可能原因: 剧情上下文或请求体更大 · 服务商不接受末条 assistant 预填充或额外参数 · 上游生成/流式传输中途断开 · 上游错误页漏了 CORS 响应头');
+        if (ctx.requestPurpose === '剧情见面生成') {
+            lines.push('更可能原因: 剧情上下文或请求体更大 · 服务商不接受末条 assistant 预填充或额外参数 · 上游生成/流式传输中途断开 · 上游错误页漏了 CORS 响应头');
+        } else {
+            lines.push('更可能原因: 当前请求体或响应与刚才成功的请求不同 · 上游限流或临时故障 · 生成/传输中途断开 · 上游错误页漏了 CORS 响应头');
+        }
     } else {
         lines.push(`初判: ${VERDICTS[kind].verdict}`);
         lines.push(`可能原因: ${VERDICTS[kind].causes}`);

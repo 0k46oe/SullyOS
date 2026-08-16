@@ -170,8 +170,36 @@ describe('buildFetchFailureDetail', () => {
         expect(text).toContain('额外参数: top_p');
         expect(text).toContain('同一个 POST 已成功返回 HTTP 200');
         expect(text).toContain('当前请求/响应特有的失败');
+        expect(text).toContain('剧情上下文或请求体更大');
+        expect(text).toContain('末条 assistant 预填充或额外参数');
         expect(text).not.toContain('DNS 解析不到');
         expect(text).not.toContain('代理把这个域名的连接掐了');
+    });
+
+    it('普通聊天和记忆请求不会套用剧情专属诊断', () => {
+        const now = 1_786_894_455_703;
+        const text = buildFetchFailureDetail({
+            url: 'https://open.selart.cc/v1/chat/completions',
+            method: 'POST',
+            durationMs: 3828,
+            error: new TypeError('Load failed'),
+            online: true,
+            pageOrigin: 'https://qegj567-cloud.github.io',
+            pageProtocol: 'https:',
+            requestPurpose: '记忆提取',
+            requestSummary: summarizeFetchRequestBody(JSON.stringify({
+                messages: [{ role: 'system', content: '设定' }, { role: 'assistant', content: '<content>' }],
+                stream: false,
+                top_p: 0.8,
+            })),
+            recentSuccessfulSameRequest: { timestamp: now - 42_000, status: 200 },
+        }, { startedAt: 0, now, perf: { getEntriesByName: () => [] } });
+
+        expect(text).toContain('调用用途: 记忆提取');
+        expect(text).toContain('当前请求体或响应与刚才成功的请求不同');
+        expect(text).toContain('上游限流或临时故障');
+        expect(text).not.toContain('剧情上下文');
+        expect(text).not.toContain('assistant 预填充');
     });
 
     it('混合内容给的是「改成 https」而不是「查梯子」', () => {
