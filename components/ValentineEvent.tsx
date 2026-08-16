@@ -21,6 +21,7 @@ import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { WhiteDaySession, isWhiteDayEventAvailable, WHITEDAY_RECORD_KEY } from './WhiteDayEvent';
 import { Like520Session, isLike520EventAvailable, isLike520Past, LIKE520_RECORD_KEY } from './Like520Event';
+import { QixiDemoSession, QIXI_DEMO_RECORD_KEY } from './events/qixi/QixiDemoEvent';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { markAmsgStateDirty } from '../utils/amsgStateSync';
 
@@ -1200,12 +1201,14 @@ interface EventCardProps {
     onLongPressDelete: (charId: string) => void;
     /** 选中要删的角色 id（用于显示 ring） */
     pendingDeleteId?: string | null;
+    /** 不使用长按删除的活动可提供自己的页脚说明 */
+    footerNote?: string;
 }
 
 const SpecialEventCardImpl: React.FC<EventCardProps> = ({
     theme, icon, eyebrow, title, subtitleActive, subtitlePast,
     hintActive, hintPast, isPast, characters, recordKey,
-    onPick, onLongPressDelete, pendingDeleteId,
+    onPick, onLongPressDelete, pendingDeleteId, footerNote,
 }) => {
     const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const startLP = useCallback((id: string) => {
@@ -1276,7 +1279,7 @@ const SpecialEventCardImpl: React.FC<EventCardProps> = ({
                         </div>
                     )}
                     {characters.length > 0 && (
-                        <p className={`text-[10px] ${theme.helpColor} mt-3 text-center`}>长按角色可删除记录</p>
+                        <p className={`text-[10px] ${theme.helpColor} mt-3 text-center`}>{footerNote || '长按角色可删除记录'}</p>
                     )}
                 </div>
             </div>
@@ -1286,7 +1289,18 @@ const SpecialEventCardImpl: React.FC<EventCardProps> = ({
 
 const SpecialEventCard = React.memo(SpecialEventCardImpl);
 
-// 三个活动主题
+// 活动主题
+const THEME_QIXI: EventCardTheme = {
+    activeGradient: 'bg-gradient-to-br from-indigo-950 via-blue-900 to-indigo-600',
+    pastGradient: 'bg-gradient-to-br from-indigo-900/80 via-blue-800/75 to-violet-600/70',
+    activeShadow: 'shadow-indigo-300',
+    subColor: 'text-indigo-100/90',
+    hintColor: 'text-blue-100/65',
+    helpColor: 'text-indigo-100/45',
+    avatarRing: 'border-indigo-100/40',
+    dotColor: 'bg-amber-100/80',
+};
+
 const THEME_LIKE520: EventCardTheme = {
     activeGradient: 'bg-gradient-to-br from-pink-400 via-rose-400 to-amber-300',
     pastGradient: 'bg-gradient-to-br from-pink-300/70 via-rose-300/70 to-amber-200/70',
@@ -1324,7 +1338,7 @@ const THEME_VALENTINE: EventCardTheme = {
 // 特别时光 App（桌面第三页降级入口）
 // ============================================================
 export const SpecialMomentsApp: React.FC = () => {
-    const { closeApp, characters, addToast, updateCharacter } = useOS();
+    const { closeApp, characters, addToast, updateCharacter, apiConfig, userProfile } = useOS();
     const [showSession, setShowSession] = useState(false);
     const [selectedCharId, setSelectedCharId] = useState<string>('');
     const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
@@ -1338,6 +1352,10 @@ export const SpecialMomentsApp: React.FC = () => {
     const [show520Session, setShow520Session] = useState(false);
     const [like520CharId, setLike520CharId] = useState<string>('');
     const [l520DeleteTargetId, setL520DeleteTargetId] = useState<string | null>(null);
+
+    // Qixi
+    const [showQixiSession, setShowQixiSession] = useState(false);
+    const [qixiCharId, setQixiCharId] = useState<string>('');
 
     // 一次性算好可见性 / 往期态（避免每帧调日期函数）
     const visibility = useMemo(() => {
@@ -1413,6 +1431,18 @@ export const SpecialMomentsApp: React.FC = () => {
         }
     };
 
+    const qixiChar = characters.find(c => c.id === qixiCharId);
+    if (showQixiSession && qixiChar) {
+        return (
+            <QixiDemoSession
+                char={qixiChar}
+                user={userProfile}
+                apiConfig={apiConfig}
+                onClose={() => { setShowQixiSession(false); setQixiCharId(''); }}
+            />
+        );
+    }
+
     if (showSession && selectedCharId) {
         return (
             <ValentineSession
@@ -1455,6 +1485,24 @@ export const SpecialMomentsApp: React.FC = () => {
 
             {/* Content */}
             <div className="flex-1 overflow-y-auto p-6">
+                {/* 七夕 */}
+                <SpecialEventCard
+                    theme={THEME_QIXI}
+                    icon="✦"
+                    eyebrow="七 月 初 七 · DEMO"
+                    title="星月梦境童话"
+                    subtitleActive="2026 七夕 — 掉进上下文夹层，寻找也正在寻找你的 ta"
+                    subtitlePast="2026 七夕 — 重温那场星月梦境"
+                    hintActive="选择一位角色，从星月首页直接进入故事"
+                    hintPast="点击角色重温记录"
+                    isPast={false}
+                    characters={characters}
+                    recordKey={QIXI_DEMO_RECORD_KEY}
+                    onPick={(id) => { setQixiCharId(id); setShowQixiSession(true); }}
+                    onLongPressDelete={() => undefined}
+                    footerNote="UI / CSS / 手写 SVG · 固定坐标星图 · 首次 1 次 LLM 生成记忆星线"
+                />
+
                 {/* 520 */}
                 {visibility.like520.show && (
                     <SpecialEventCard
