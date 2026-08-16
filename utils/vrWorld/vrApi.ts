@@ -23,9 +23,10 @@ export interface VRApiCall {
     /**
      * 这条记的是什么。省略 = 一次真实的模型调用。
      *   - `skipped`：调度到点了，但这一轮没走到模型（角色没接入、角色已删）
+     *   - `throttled`：来得太密，被最小间隔闸拦下。出现这一行就说明有东西在催调度
      *   - `tripped`：连续失败攒够，自主登入被停掉
      */
-    kind?: 'skipped' | 'tripped';
+    kind?: 'skipped' | 'throttled' | 'tripped';
     /** kind 非空时的一句话说明，直接显示给用户。 */
     note?: string;
     /**

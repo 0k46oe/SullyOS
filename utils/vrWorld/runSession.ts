@@ -61,6 +61,8 @@ export interface VRSessionDeps {
     forcedRoom?: VRRoomId;
     /** 用户在邮局指定要让该角色回复的来信 id（forcedRoom 应为 postoffice）。 */
     forcedLetterId?: string;
+    /** 用户亲手点的（「让 ta 现在去逛一次」这类），不受自动登入的最小间隔闸限制。 */
+    manual?: boolean;
 }
 
 export interface VRSessionResult {
@@ -72,6 +74,42 @@ export interface VRSessionResult {
 
 const genId = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 const running = new Set<string>();
+
+/**
+ * 自动登入的最小间隔闸 —— 一个角色两次真实的模型调用之间，至少要隔够设定间隔的一半。
+ *
+ * 为什么要有它：熔断只认「一直失败」，可要是调用一直成功、只是被谁催着一分钟跑两趟，
+ * 那是安安静静地烧钱，没有任何东西会喊停。这道闸跟成败无关，只看「上一次是什么时候」。
+ *
+ * 为什么记在内存里而不落存储：它兜的正是「调度状态本身出了问题」——上游的首火时刻写丢了、
+ * 或者哪条路绕过了到期判断，靠的都是存储；把闸也存进去，就会跟着一起失效。页面一刷新
+ * 计数就归零，而失控循环本来就活在单个页面实例里，内存态足够拦住。
+ *
+ * 用户手动点「让 ta 现在去逛一次」不受这道闸限制。
+ */
+const lastAutoCallAt = new Map<string, number>();
+/** 被闸拦下的次数（成功跑一轮就归零）。正常调度永远是 0，非 0 本身就是「上游在失控」的证据。 */
+const throttledCount = new Map<string, number>();
+/** 间隔再怎么短、设定值再怎么脏，两轮之间也不该少于这个数。 */
+const MIN_AUTO_GAP_FLOOR_MS = 5 * 60_000;
+
+/**
+ * 按角色的设定间隔算出「这一轮最早什么时候才允许再来」。
+ *
+ * 取设定间隔的一半，是想留出余量：调度本身会被后台节流推迟，掐得跟设定值一样紧
+ * 会把正常的补火也误伤掉。设定值缺失或是脏数据（NaN、0、负数）时退回默认间隔，
+ * 再由下限兜一道——不这么写的话 NaN 会让所有比较恒为 false，整道闸静悄悄失效。
+ */
+export function vrAutoGapMs(intervalMinutes?: number): number {
+    const raw = Number(intervalMinutes);
+    const minutes = Number.isFinite(raw) && raw > 0 ? raw : VR_DEFAULT_INTERVAL_MIN;
+    return Math.max((minutes * 60_000) / 2, MIN_AUTO_GAP_FLOOR_MS);
+}
+
+/** 各角色当前被最小间隔闸拦下的累计次数，给诊断导出用。 */
+export function getVRThrottleCounts(): Record<string, number> {
+    return Object.fromEntries(throttledCount);
+}
 
 /**
  * 串行化共享房间状态（留言墙等）的 read-modify-write。
@@ -139,9 +177,29 @@ export function rollRoom(char: CharacterProfile, novels: VRWorldNovel[], musicSt
 }
 
 export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult> {
-    const { char, characters, apiConfig, userProfile, groups, realtimeConfig, memoryPalaceConfig, updateCharacter, forcedRoom, forcedLetterId } = deps;
+    const { char, characters, apiConfig, userProfile, groups, realtimeConfig, memoryPalaceConfig, updateCharacter, forcedRoom, forcedLetterId, manual } = deps;
 
     if (running.has(char.id)) return { ok: false, reason: 'busy' };
+
+    // 最小间隔闸（见 lastAutoCallAt）。走到这里说明有东西在催，正常调度不会这么密。
+    if (!manual) {
+        const minGap = vrAutoGapMs(char.vrState?.intervalMinutes);
+        const since = Date.now() - (lastAutoCallAt.get(char.id) || 0);
+        if (since < minGap) {
+            const times = (throttledCount.get(char.id) || 0) + 1;
+            throttledCount.set(char.id, times);
+            // 被拦这件事本身就是线索，但真拦起来会几十秒一次，全记下来会把真实调用挤出日志。
+            // 只在第一次和之后每 20 次留一行，把累计次数写进去。
+            if (times === 1 || times % 20 === 0) {
+                void logVRApiCall({
+                    ts: Date.now(), charId: char.id, charName: char.name, ok: false, ms: 0,
+                    kind: 'throttled', charEnabled: !!char.vrState?.enabled,
+                    note: `距上次登入才 ${Math.round(since / 1000)} 秒，不到下限 ${Math.round(minGap / 60000)} 分钟，已拦下（累计 ${times} 次）`,
+                });
+            }
+            return { ok: false, reason: 'too-soon' };
+        }
+    }
 
     // API 优先级：角色自带覆盖 > 彼方独立 API > 聊天默认
     const vrGlobalApi = await getVRApi();
@@ -367,6 +425,9 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
         // 调 LLM（记录一次调用，供"调用记录"对账）
         const baseUrl = vrApi.baseUrl.replace(/\/+$/, '');
         const callStart = Date.now();
+        // 闸的基准点是「真的发出去了」，而不是「被调度触发了」——没书没歌那些早退的轮次
+        // 一个 token 都没花，不该占掉下一次的额度。
+        if (!manual) { lastAutoCallAt.set(char.id, callStart); throttledCount.delete(char.id); }
         let data: any;
         try {
             data = await safeFetchJson(`${baseUrl}/chat/completions`, {

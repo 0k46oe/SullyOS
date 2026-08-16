@@ -12,6 +12,7 @@ import { useMusic, type Song } from '../context/MusicContext';
 import { DB } from '../utils/db';
 import { useResilientAssetUrl, attachAudioMirrorFallback } from '../utils/assetUrl';
 import { VRScheduler, VR_FAIL_LIMIT } from '../utils/vrWorld/scheduler';
+import { collectVRDiagnostics } from '../utils/vrWorld/diagnostics';
 import { VR_ROOMS, getRoom, VR_DEFAULT_INTERVAL_MIN, SIGNAL_EPIGRAPH, signalActFor, signalActRanges, SIGNAL_POEMS_PER_BOOKLET, SIGNAL_EVENT_ENDED, SIGNAL_MEMORIAL_CLOSING } from '../utils/vrWorld/constants';
 import { buildNovelAsync, groupAnnotationsBySeg, getBookmark } from '../utils/vrWorld/novel';
 import { decodeBytes } from '../utils/vrWorld/decodeText';
@@ -383,7 +384,7 @@ const VRWorldApp: React.FC = () => {
                             onRequestEnable={requestEnable} onEditChibi={setChibiEditChar} />
                     </div>
                 ) : (
-                    <VRApiSettings apiPresets={apiPresets} chatApi={apiConfig} addToast={addToast} />
+                    <VRApiSettings apiPresets={apiPresets} chatApi={apiConfig} addToast={addToast} characters={characters} />
                 )}
             </div>
 
@@ -3446,12 +3447,14 @@ const SettingsView: React.FC<{
 };
 
 // ============ 彼方 · API 设置 + 调用记录 ============
-const VRApiSettings: React.FC<{ apiPresets: ApiPreset[]; chatApi: APIConfig; addToast?: (m: string, t?: any) => void }> = ({ apiPresets, chatApi, addToast }) => {
+const VRApiSettings: React.FC<{ apiPresets: ApiPreset[]; chatApi: APIConfig; addToast?: (m: string, t?: any) => void; characters: CharacterProfile[] }> = ({ apiPresets, chatApi, addToast, characters }) => {
     const [vrApi, setVr] = useState<APIConfig | null>(null);
     const [log, setLog] = useState<VRApiCall[]>([]);
     const [testing, setTesting] = useState(false);
     const [testResult, setTestResult] = useState<string | null>(null);
     const [presetsOpen, setPresetsOpen] = useState(false);   // 折叠「保存的预设」长列表
+    const [snapshot, setSnapshot] = useState<string | null>(null);   // 排障快照正文
+    const [collecting, setCollecting] = useState(false);
 
     useEffect(() => {
         void getVRApi().then(setVr);
@@ -3484,6 +3487,25 @@ const VRApiSettings: React.FC<{ apiPresets: ApiPreset[]; chatApi: APIConfig; add
             if (res.ok) { const d = await safeResponseJson(res); const r = d.choices?.[0]?.message?.content || ''; setTestResult(`连接成功 — 模型回复:"${r.slice(0, 24)}"`); }
             else { const t = await res.text().catch(() => ''); setTestResult(`HTTP ${res.status}: ${t.slice(0, 80)}`); }
         } catch (e: any) { setTestResult(`连接失败: ${e.message}`); } finally { setTesting(false); }
+    };
+
+    // 手机上没有控制台，「界面全关了记录还在涨」这类问题光靠截图说不清。
+    // 一次把该看的都收齐，复制走即可；收的全是状态，不含名字、聊天和 key。
+    const exportSnapshot = async () => {
+        setCollecting(true);
+        try {
+            const text = await collectVRDiagnostics(characters, chatApi);
+            setSnapshot(text);
+            try {
+                await navigator.clipboard.writeText(text);
+                addToast?.('排障快照已复制，可以直接粘给开发者', 'success');
+            } catch {
+                // 剪贴板被浏览器挡住也不算失败——下面把正文摊开，截图一样能用
+                addToast?.('快照已生成（这台设备不让自动复制，长按下面的文字选中即可）', 'info');
+            }
+        } catch (e: any) {
+            addToast?.(`收集失败: ${e?.message || e}`, 'error');
+        } finally { setCollecting(false); }
     };
 
     // 日志里混着两种行：真实的模型调用，和「调度动了但没走到模型」的诊断行。
@@ -3587,6 +3609,27 @@ const VRApiSettings: React.FC<{ apiPresets: ApiPreset[]; chatApi: APIConfig; add
                             );
                         })}
                     </div>
+                )}
+            </div>
+
+            {/* 排障快照 */}
+            <div className="rounded-2xl p-3" style={{ background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.07)' }}>
+                <div className="flex items-center gap-1.5 mb-1.5">
+                    <span className="text-[10px] tracking-[0.2em] text-indigo-200/60" style={{ fontFamily: `'Noto Serif SC',serif` }}>排障快照</span>
+                    {snapshot && <button onClick={() => setSnapshot(null)} className="ml-auto text-[10px] text-white/40 hover:text-rose-300/80">收起</button>}
+                </div>
+                <p className="text-[10.5px] text-white/40 leading-relaxed mb-2">
+                    角色明明没接入却还在调用、或者设置改完过一阵又退回去 —— 遇到这类说不清的情况，点一下把当前状态收成一段文字发给开发者。
+                    里面只有开关、时间和用量，<b className="text-indigo-200/70">不含角色名字、聊天记录和 API key</b>。
+                </p>
+                <button onClick={exportSnapshot} disabled={collecting}
+                    className="text-[11px] px-3 py-1.5 rounded-full font-semibold disabled:opacity-50"
+                    style={{ background: 'rgba(120,180,255,.16)', color: '#bcd4ff', border: '1px solid rgba(140,180,255,.3)' }}>
+                    {collecting ? '收集中…' : '生成并复制'}
+                </button>
+                {snapshot && (
+                    <pre className="mt-2.5 max-h-64 overflow-auto text-[9.5px] leading-relaxed text-white/55 whitespace-pre-wrap break-all select-all p-2 rounded-lg"
+                        style={{ background: 'rgba(0,0,0,.3)' }}>{snapshot}</pre>
                 )}
             </div>
         </div>

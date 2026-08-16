@@ -5,7 +5,7 @@ import { rollPoemLines, SIGNAL_LINES_MIN, SIGNAL_LINES_MAX, signalActFor } from 
 import { maskPen } from './postOffice';
 import { decodeBytes } from './decodeText';
 import { VRScheduler, VR_FAIL_LIMIT } from './scheduler';
-import { rollRoom } from './runSession';
+import { rollRoom, vrAutoGapMs } from './runSession';
 
 // scheduler 的 attachListeners 会访问 document/window（node 环境下没有），补最简 stub。
 const g = globalThis as any;
@@ -99,6 +99,29 @@ describe('VRScheduler 熔断', () => {
         for (let i = 0; i < VR_FAIL_LIMIT; i++) VRScheduler.report('c1', 'failed');
         expect(VRScheduler.isActiveFor('c1')).toBe(false);
         expect(VRScheduler.isActiveFor('c2')).toBe(true);
+    });
+});
+
+describe('自动登入的最小间隔闸', () => {
+    const MINUTE = 60_000;
+
+    it('取设定间隔的一半，给后台节流留余量', () => {
+        expect(vrAutoGapMs(120)).toBe(60 * MINUTE);
+        expect(vrAutoGapMs(30)).toBe(15 * MINUTE);
+    });
+
+    it('间隔是脏数据时不能让闸失效 —— NaN 会让所有比较恒为 false', () => {
+        // 这几个值以前会算出 NaN 或 0，闸形同虚设：真正失控时一次都拦不住
+        for (const dirty of [NaN, 0, -5, undefined, Infinity]) {
+            const gap = vrAutoGapMs(dirty as any);
+            expect(Number.isFinite(gap)).toBe(true);
+            expect(gap).toBeGreaterThanOrEqual(5 * MINUTE);
+        }
+    });
+
+    it('间隔被写成极小值时由下限兜底', () => {
+        expect(vrAutoGapMs(1)).toBe(5 * MINUTE);
+        expect(vrAutoGapMs(4)).toBe(5 * MINUTE);
     });
 });
 
