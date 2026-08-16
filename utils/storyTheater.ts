@@ -17,6 +17,7 @@ import {
     splitWorldbookSections,
     type WorldbookScanMessage,
 } from './worldbook';
+import { shareOrDownloadFile } from './shareExport';
 
 export type StoryApiRole = 'system' | 'user' | 'assistant';
 export interface StoryApiMessage { role: StoryApiRole; content: string; }
@@ -1318,14 +1319,16 @@ export const memoryTimestampForCharacter = (entry: StoryTheaterEntry, charId: st
     return storyAnchor + Math.max(0, realTimestamp - entry.createdAt);
 };
 
-export const downloadStoryPreset = (preset: StoryTheaterPreset): void => {
-    const blob = new Blob([JSON.stringify(preset.document, null, 2)], { type: 'application/json;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `${preset.name || '剧情预设'}.json`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
+export const makeStoryPresetFileName = (name: string): string => {
+    const safeName = name.replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 80) || '剧情预设';
+    return `${safeName}.json`;
 };
+
+export const downloadStoryPreset = async (preset: StoryTheaterPreset): Promise<'shared' | 'downloaded'> => (
+    shareOrDownloadFile({
+        content: JSON.stringify(preset.document, null, 2),
+        fileName: makeStoryPresetFileName(preset.name),
+        mimeType: 'application/json',
+        shareTitle: `剧情预设：${preset.name || '未命名'}`,
+    })
+);

@@ -47,6 +47,14 @@ describe('用户反馈回归保护', () => {
         expect(maker).toContain("<h2 className='text-sm font-bold'>续写参数</h2>");
     });
 
+    it('剧情预设导出复用原生分享链路，不依赖 Android WebView 的 a.download', () => {
+        const storyTheater = read('./storyTheater.ts');
+
+        expect(storyTheater).toContain("import { shareOrDownloadFile } from './shareExport'");
+        expect(storyTheater).toContain('shareOrDownloadFile({');
+        expect(storyTheater).not.toContain("anchor.download = `${preset.name");
+    });
+
     it('统一请求出口会在发送前修正 Claude 超范围温度', () => {
         const osContext = read('../context/OSContext.tsx');
 
