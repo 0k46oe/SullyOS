@@ -2518,6 +2518,27 @@ export interface CompanionStartupSettings {
   updatedAt?: number;
 }
 
+export interface CompanionStartupPreset {
+  id: string;
+  name: string;
+  startup: CompanionStartupSettings;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CompanionTouchPreset {
+  id: string;
+  name: string;
+  enabledZones: CompanionTouchZone[];
+  reactions: Partial<Record<CompanionTouchZone, CompanionTouchReaction[]>>;
+  voiceLanguage?: string;
+  voiceEnabled?: boolean;
+  voiceGeneratedCount?: number;
+  generatedAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface CompanionTouchSettings {
   enabledZones: CompanionTouchZone[];
   reactions: Partial<Record<CompanionTouchZone, CompanionTouchReaction[]>>;
@@ -2528,6 +2549,12 @@ export interface CompanionTouchSettings {
   voiceEnabled?: boolean;
   voiceGeneratedCount?: number;
   generatedAt?: number;
+  /** 多套开机演出独立保存；startup 仍是当前实际启用的兼容字段。 */
+  startupPresets?: CompanionStartupPreset[];
+  activeStartupPresetId?: string;
+  /** 多套触摸反馈独立保存；顶层 reactions 等字段仍是当前实际启用包。 */
+  touchPresets?: CompanionTouchPreset[];
+  activeTouchPresetId?: string;
 }
 
 export type MemoryPalaceWaterlinePreset = 'online' | 'balanced' | 'offline' | 'custom';
@@ -3791,6 +3818,7 @@ export interface FullBackupData {
         charId: string;
         avatar?: string;
         companionAvatar?: CompanionAvatarConfig;
+        companionTouchSettings?: CompanionTouchSettings;
         sprites?: Record<string, string>;
         dateSkinSets?: SkinSet[];
         activeSkinSetId?: string;

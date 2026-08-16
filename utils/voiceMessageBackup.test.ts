@@ -7,6 +7,10 @@ import {
     shouldIncludeVoiceRelatedAssetInBackup,
 } from './voiceMessageBackup';
 import { VOICE_FAVORITE_AUDIO_PREFIX, VOICE_FAVORITES_INDEX_ASSET_ID } from './voiceFavorites';
+import {
+    COMPANION_STARTUP_VOICE_ASSET_PREFIX,
+    COMPANION_TOUCH_VOICE_ASSET_PREFIX,
+} from './companionVoiceAssets';
 
 describe('chat voice backup binary lane', () => {
     it('round-trips per-message audio as a real Blob', async () => {
@@ -58,11 +62,34 @@ describe('chat voice backup binary lane', () => {
         expect(assets[1].data.blob).toBeInstanceOf(Blob);
     });
 
+    it('backs up only preset-owned companion voice Blobs alongside explicit favorites', async () => {
+        const assets: any[] = [
+            { id: `${COMPANION_STARTUP_VOICE_ASSET_PREFIX}char:preset-a`, data: { blob: new Blob(['startup'], { type: 'audio/mpeg' }) } },
+            { id: `${COMPANION_TOUCH_VOICE_ASSET_PREFIX}char:preset-b:head:0`, data: { blob: new Blob(['touch'], { type: 'audio/wav' }) } },
+            { id: 'voice_msg_unfavorited', data: { blob: new Blob(['chat']), favorite: false } },
+            { id: 'tts_reproducible', data: { blob: new Blob(['tts']) } },
+        ];
+        const files = new Map<string, Uint8Array>();
+
+        expect(await externalizeVoiceMessageBlobs(assets, (path, data) => { files.set(path, data); })).toBe(2);
+        expect(files.size).toBe(2);
+        expect(assets[0].data.blob.path).toMatch(/^assets\/companion-voices\//);
+        expect(assets[1].data.blob.path).toMatch(/^assets\/companion-voices\//);
+        expect(assets[2].data.blob).toBeInstanceOf(Blob);
+        expect(assets[3].data.blob).toBeInstanceOf(Blob);
+
+        expect(await restoreVoiceMessageBlobs(assets, async path => files.get(path) || null)).toBe(2);
+        expect(await assets[0].data.blob.text()).toBe('startup');
+        expect(await assets[1].data.blob.text()).toBe('touch');
+    });
+
     it('includes only explicit favorites among voice-related asset rows', () => {
         expect(shouldIncludeVoiceRelatedAssetInBackup({ id: 'tts_hash', data: {} })).toBe(false);
         expect(shouldIncludeVoiceRelatedAssetInBackup({ id: 'voice_msg_1', data: { favorite: false } })).toBe(false);
         expect(shouldIncludeVoiceRelatedAssetInBackup({ id: 'voice_msg_2', data: { favorite: true } })).toBe(true);
         expect(shouldIncludeVoiceRelatedAssetInBackup({ id: `${VOICE_FAVORITE_AUDIO_PREFIX}chat_1`, data: {} }, false)).toBe(false);
+        expect(shouldIncludeVoiceRelatedAssetInBackup({ id: `${COMPANION_TOUCH_VOICE_ASSET_PREFIX}char:pack`, data: {} })).toBe(true);
+        expect(shouldIncludeVoiceRelatedAssetInBackup({ id: `${COMPANION_TOUCH_VOICE_ASSET_PREFIX}char:pack`, data: {} }, false)).toBe(false);
         expect(shouldIncludeVoiceRelatedAssetInBackup({ id: VOICE_FAVORITES_INDEX_ASSET_ID, data: {} }, false)).toBe(false);
         expect(shouldIncludeVoiceRelatedAssetInBackup({ id: 'wallpaper', data: 'x' })).toBe(true);
     });
@@ -78,7 +105,7 @@ describe('chat voice backup binary lane', () => {
         await expect(restoreVoiceMessageBlobs(
             [{ id: 'voice_msg_1', data: { blob: marker(4) } }],
             async () => null,
-        )).rejects.toThrow('缺少收藏语音文件');
+        )).rejects.toThrow('缺少语音文件');
 
         await expect(restoreVoiceMessageBlobs(
             [{ id: 'voice_msg_1', data: { blob: marker(4) } }],

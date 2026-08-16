@@ -3232,6 +3232,7 @@ export const DB = {
               ...c,
               avatar: media.avatar || c.avatar,
               companionAvatar: media.companionAvatar || c.companionAvatar,
+              companionTouchSettings: media.companionTouchSettings || c.companionTouchSettings,
               sprites: media.sprites || c.sprites,
               dateSkinSets: media.dateSkinSets || c.dateSkinSets,
               activeSkinSetId: media.activeSkinSetId || c.activeSkinSetId,
