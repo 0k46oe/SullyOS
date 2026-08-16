@@ -6,6 +6,7 @@ const read = (relative: string): string =>
     readFileSync(fileURLToPath(new URL(relative, import.meta.url)), 'utf8');
 
 const storySource = read('../components/date/story/StoryTheaterSession.tsx');
+const editorSource = read('../components/date/story/StoryTheaterEditor.tsx');
 const osContextSource = read('../context/OSContext.tsx');
 
 const sliceBetween = (source: string, startAnchor: string, endAnchor: string): string => {
@@ -41,7 +42,10 @@ describe('story theater billing safety wiring', () => {
         const interceptorSource = sliceBetween(osContextSource, 'const patchedFetch = async', 'window.fetch = patchedFetch;');
 
         expect(storySource).toContain("purpose: '剧情见面生成'");
-        expect(storySource).toContain('compactStoryGenerationSettings(settings)');
+        expect(storySource).toContain('prepareStoryGenerationSettings(settings, entry.omitSamplingParams === true)');
+        expect(editorSource).toContain("value={draft.omitSamplingParams === true}");
+        expect(editorSource).toContain("update('omitSamplingParams', value)");
+        expect(editorSource).toContain('默认关闭');
         expect(storySource).toContain('剧情请求被上游/网关断开');
         expect(interceptorSource).toContain('recentSuccessfulFetches.set(requestComparisonKey');
         expect(interceptorSource).toContain('summarizeFetchRequestBody((sendArgs[1] as any)?.body)');

@@ -18,7 +18,7 @@ import {
     buildStoryWorldbookScanMessages,
     buildTheaterWorldbookSlots,
     compileStoryPreset,
-    compactStoryGenerationSettings,
+    prepareStoryGenerationSettings,
     createBlankStoryPreset,
     createStoryTheaterDraft,
     dedupeTheaterWorldbooks,
@@ -241,28 +241,24 @@ describe('剧情预设发送器', () => {
         },
     };
 
-    it('发送前省略兼容风险高但语义为默认值的采样参数', () => {
-        expect(compactStoryGenerationSettings({
+    it('默认完整发送预设参数，只有显式兼容开关才省略三项', () => {
+        const settings = {
             temperature: 0.9,
             top_p: 1,
             frequency_penalty: 0,
             presence_penalty: 0,
             max_tokens: 8000,
-        })).toEqual({ temperature: 0.9, max_tokens: 8000 });
+        };
+        expect(prepareStoryGenerationSettings(settings)).toEqual(settings);
+        expect(prepareStoryGenerationSettings(settings, true)).toEqual({ temperature: 0.9, max_tokens: 8000 });
 
-        expect(compactStoryGenerationSettings({
+        expect(prepareStoryGenerationSettings({
             temperature: 0.7,
             top_p: 0.8,
             frequency_penalty: 0.1,
             presence_penalty: 0.2,
             max_tokens: 2048,
-        })).toEqual({
-            temperature: 0.7,
-            top_p: 0.8,
-            frequency_penalty: 0.1,
-            presence_penalty: 0.2,
-            max_tokens: 2048,
-        });
+        }, true)).toEqual({ temperature: 0.7, max_tokens: 2048 });
     });
 
     it('遵守顺序、enabled、role、marker 去重、宏和 prefill', () => {
@@ -376,7 +372,7 @@ describe('剧情预设发送器', () => {
 
 describe('剧情沙盒辅助逻辑', () => {
     it('新虚构剧场默认不读取记忆，真实陪伴强制摘下面具', () => {
-        expect(createStoryTheaterDraft(1)).toMatchObject({ openingMode: 'user', writesToCharacterMemory: false, carryCharacterMemory: false, forceUserLastMessage: false });
+        expect(createStoryTheaterDraft(1)).toMatchObject({ openingMode: 'user', writesToCharacterMemory: false, carryCharacterMemory: false, forceUserLastMessage: false, omitSamplingParams: false });
         const normalized = normalizeStoryTheater({
             ...createStoryTheaterDraft(1),
             openingMode: 'assistant',
@@ -385,6 +381,7 @@ describe('剧情沙盒辅助逻辑', () => {
             carryCharacterMemory: false,
         });
         expect(normalized.openingMode).toBe('assistant');
+        expect(normalized.omitSamplingParams).toBe(false);
         expect(normalized.mask).toEqual({ type: 'user' });
         expect(normalized.carryCharacterMemory).toBe(true);
         expect(REAL_COMPANION_MEMORY_GUARD).toContain('不得捏造两人曾经发生过的经历');

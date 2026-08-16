@@ -129,6 +129,13 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
                 {preset && <div className='mt-3 flex items-center justify-between'><span className='text-[10px] text-slate-500'>启用 {presetStats.enabled}/{presetStats.total} 条 · 按当前顺序与插入位置发送</span><button onClick={() => onEditPreset(preset, draft)} className='text-[10px] font-bold text-violet-600'>打开制作器</button></div>}
                 <div className='mt-5 pt-4 border-t border-slate-200'>
                     <div className='flex items-start justify-between gap-5'>
+                        <div><div className='text-sm font-semibold'>不发送高级采样参数</div><p className='mt-1 text-[10px] leading-5 text-slate-500'>默认关闭。仅当接口不接受这些字段时开启；开启后不发送 top_p、frequency_penalty 和 presence_penalty。</p></div>
+                        <Toggle label='不发送高级采样参数' value={draft.omitSamplingParams === true} onChange={value => update('omitSamplingParams', value)} />
+                    </div>
+                    {draft.omitSamplingParams && <p className='mt-3 border-l-2 border-amber-400 pl-3 text-[10px] leading-5 text-amber-700'>这会忽略当前预设中的三项参数，包括非默认值。正常支持酒馆参数的接口请保持关闭。</p>}
+                </div>
+                <div className='mt-5 pt-4 border-t border-slate-200'>
+                    <div className='flex items-start justify-between gap-5'>
                         <div><div className='text-sm font-semibold'>400 兼容模式</div><p className='mt-1 text-[10px] leading-5 text-slate-500'>仅当接口提示“最后一条消息必须是 user”时开启。</p></div>
                         <Toggle label='400 兼容模式' value={draft.forceUserLastMessage === true} onChange={value => update('forceUserLastMessage', value)} />
                     </div>

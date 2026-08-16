@@ -41,19 +41,22 @@ export interface StoryGenerationSettings {
 }
 
 /**
- * 默认值不需要发给上游。部分“OpenAI 兼容”中转会拒绝 top_p + temperature 同传，或不认识
- * penalty 参数；它们又常在 4xx 错误页漏 CORS，浏览器最终只剩一句 Load failed。
- * 非默认值仍完整保留，用户导入预设后的生成意图不会被改写。
+ * 默认完整发送酒馆预设中的采样参数。只有用户为当前剧情显式开启兼容开关时，才省略
+ * top_p / frequency_penalty / presence_penalty；不能用少数中转的兼容问题牺牲正常预设效果。
  */
-export const compactStoryGenerationSettings = (settings?: Partial<StoryGenerationSettings>): Partial<StoryGenerationSettings> => {
+export const prepareStoryGenerationSettings = (
+    settings?: Partial<StoryGenerationSettings>,
+    omitSamplingParams = false,
+): Partial<StoryGenerationSettings> => {
     if (!settings) return {};
-    const compact: Partial<StoryGenerationSettings> = {};
-    if (settings.temperature !== undefined) compact.temperature = settings.temperature;
-    if (settings.top_p !== undefined && settings.top_p !== 1) compact.top_p = settings.top_p;
-    if (settings.frequency_penalty !== undefined && settings.frequency_penalty !== 0) compact.frequency_penalty = settings.frequency_penalty;
-    if (settings.presence_penalty !== undefined && settings.presence_penalty !== 0) compact.presence_penalty = settings.presence_penalty;
-    if (settings.max_tokens !== undefined) compact.max_tokens = settings.max_tokens;
-    return compact;
+    if (!omitSamplingParams) return { ...settings };
+    const {
+        top_p: _topP,
+        frequency_penalty: _frequencyPenalty,
+        presence_penalty: _presencePenalty,
+        ...compatible
+    } = settings;
+    return compatible;
 };
 
 export interface StoryAffinityInput {
@@ -188,6 +191,7 @@ export const createStoryTheaterDraft = (now: number = Date.now()): StoryTheaterE
     archives: [],
     selectedWorldbookIds: [],
     forceUserLastMessage: false,
+    omitSamplingParams: false,
     createdAt: now,
     updatedAt: now,
 });
@@ -219,6 +223,7 @@ export const normalizeStoryTheater = (entry: StoryTheaterEntry): StoryTheaterEnt
         presetId: /^builtin-night-screening-v\d/i.test(String(entry.presetId || '')) ? 'builtin-night-screening' : entry.presetId,
         presetOverride: entry.presetOverride?.schema === 'sullyos.story-preset' && Array.isArray(entry.presetOverride.prompts) ? entry.presetOverride : undefined,
         forceUserLastMessage: entry.forceUserLastMessage === true,
+        omitSamplingParams: entry.omitSamplingParams === true,
         createdAt: Number(entry.createdAt) || Date.now(),
         updatedAt: Number(entry.updatedAt) || Number(entry.createdAt) || Date.now(),
     };
