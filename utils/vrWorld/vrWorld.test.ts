@@ -4,7 +4,7 @@ import { parseVROutput, parseMusicOutput, parseGuestbookOutput, parseGymOutput, 
 import { rollPoemLines, SIGNAL_LINES_MIN, SIGNAL_LINES_MAX, signalActFor } from './constants';
 import { maskPen } from './postOffice';
 import { decodeBytes } from './decodeText';
-import { VRScheduler } from './scheduler';
+import { VRScheduler, VR_FAIL_LIMIT } from './scheduler';
 import { rollRoom } from './runSession';
 
 // scheduler 的 attachListeners 会访问 document/window（node 环境下没有），补最简 stub。
@@ -43,6 +43,62 @@ describe('VRScheduler.reconcile', () => {
         VRScheduler.reconcile([{ charId: 'c1', intervalMinutes: 240 }]);
         expect(VRScheduler.getIntervalMinutes('c1')).toBe(240);
         expect(JSON.parse(localStorage.getItem('vr_last_fire')!).c1).toBe(fireBefore);
+    });
+});
+
+describe('VRScheduler 熔断', () => {
+    beforeEach(() => {
+        localStorage.removeItem('vr_schedules');
+        localStorage.removeItem('vr_last_fire');
+        localStorage.removeItem('vr_fail_streak');
+    });
+
+    it('连续调不通模型就掐掉自主登入（令牌失效时别通宵一轮轮撞下去）', () => {
+        VRScheduler.start('c1', 120);
+        for (let i = 1; i < VR_FAIL_LIMIT; i++) {
+            expect(VRScheduler.report('c1', 'failed').tripped).toBe(false);
+            expect(VRScheduler.isActiveFor('c1')).toBe(true);
+        }
+        const last = VRScheduler.report('c1', 'failed');
+        expect(last.tripped).toBe(true);
+        expect(last.streak).toBe(VR_FAIL_LIMIT);
+        expect(VRScheduler.isActiveFor('c1')).toBe(false);
+    });
+
+    it('中间成功一次，失败计数归零', () => {
+        VRScheduler.start('c1', 120);
+        VRScheduler.report('c1', 'failed');
+        VRScheduler.report('c1', 'failed');
+        VRScheduler.report('c1', 'ok');
+        expect(VRScheduler.getFailStreak('c1')).toBe(0);
+        expect(VRScheduler.report('c1', 'failed').tripped).toBe(false);
+        expect(VRScheduler.isActiveFor('c1')).toBe(true);
+    });
+
+    it('压根没走到模型的轮次不算账（没书没歌、房间被别人占着）', () => {
+        VRScheduler.start('c1', 120);
+        for (let i = 0; i < VR_FAIL_LIMIT + 2; i++) VRScheduler.report('c1', 'skipped');
+        expect(VRScheduler.getFailStreak('c1')).toBe(0);
+        expect(VRScheduler.isActiveFor('c1')).toBe(true);
+    });
+
+    it('重新启用会把上一轮的失败账清掉', () => {
+        VRScheduler.start('c1', 120);
+        for (let i = 0; i < VR_FAIL_LIMIT; i++) VRScheduler.report('c1', 'failed');
+        expect(VRScheduler.isActiveFor('c1')).toBe(false);
+
+        VRScheduler.start('c1', 120);   // 用户换了 API 重新开
+        expect(VRScheduler.getFailStreak('c1')).toBe(0);
+        expect(VRScheduler.report('c1', 'failed').tripped).toBe(false);
+        expect(VRScheduler.isActiveFor('c1')).toBe(true);
+    });
+
+    it('熔断只掐当事角色，不连累别人', () => {
+        VRScheduler.start('c1', 120);
+        VRScheduler.start('c2', 120);
+        for (let i = 0; i < VR_FAIL_LIMIT; i++) VRScheduler.report('c1', 'failed');
+        expect(VRScheduler.isActiveFor('c1')).toBe(false);
+        expect(VRScheduler.isActiveFor('c2')).toBe(true);
     });
 });
 
