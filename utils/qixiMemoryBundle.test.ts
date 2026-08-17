@@ -1,46 +1,69 @@
 import { describe, expect, it } from 'vitest';
-import { parseQixiMemoryBundle } from './qixiMemoryBundle';
+import { parseQixiMemoryBundle, QIXI_SCENE_IDS } from './qixiMemoryBundle';
+
+const evidence = Array.from({ length: 14 }, (_, index) => ({
+    id: `e${index + 1}`,
+    fact: `第 ${index + 1} 条来自真实聊天、可以核对的具体记忆事实。`,
+    object: `物件${index + 1}`,
+    tags: ['日常'],
+}));
+
+const artifacts = Array.from({ length: 18 }, (_, index) => ({
+    id: `a${index + 1}`,
+    label: `记忆词${index + 1}`,
+    kind: index % 2 ? 'phrase' : 'object',
+    evidenceIds: [`e${(index % evidence.length) + 1}`],
+}));
 
 const validBundle = {
-    anchors: [
-        { id: 'm1', fact: '用户曾把一张修改了很多次的图发给角色看。', object: '修改过的图' },
-        { id: 'm2', fact: '两人在一次沉默之后重新把话说完。', object: '没说完的话' },
-    ],
-    beats: Object.fromEntries([
-        'coldCorridor', 'bracketCorner', 'lightWell', 'maskCounter',
-        'receiptRain', 'unsentPlatform', 'typingShaft',
-    ].map((nodeId, index) => [nodeId, {
-        anchorId: index % 2 ? 'm2' : 'm1',
-        memoryLine: `第${index + 1}处认出了那段真实记忆。`,
-        ritualAction: '把记忆里的那一步重新穿过针孔',
-        result: '细线沿着真实留下的痕迹亮了起来。',
-        extension: '它没有替谁证明爱，只留下愿意继续做好的那一步。',
+    evidence,
+    artifacts,
+    scenes: Object.fromEntries(QIXI_SCENE_IDS.map((sceneId, sceneIndex) => [sceneId, {
+        sharedObject: `第${sceneIndex + 1}站的共享物件`,
+        memoryLine: `第${sceneIndex + 1}站从真实记忆里浮起了一段具体内容。`,
+        options: sceneId === 'wordCloud' ? [] : [0, 1, 2].map(index => ({
+            id: `${sceneId}-${index}`,
+            label: `执行第${index + 1}个真实动作`,
+            result: `这个动作让第${sceneIndex + 1}站出现了可见的梦境反馈。`,
+            evidenceIds: [`e${sceneIndex + 1}`],
+        })),
+        charAction: '另一种颜色从物件背面出现，完成了另一层正在进行的操作。',
+        reveal: '这一站只向前推进一层发现，不直接宣布另一边是谁。',
+        artifactIds: sceneId === 'wordCloud' ? artifacts.slice(0, 16).map(item => item.id) : [`a${sceneIndex + 1}`],
+        charSelectionIds: sceneId === 'wordCloud' ? ['a1', 'a3', 'a5'] : [],
     }])),
-    finalEcho: '后来再遇见相似的事，你还是会想起我。',
 };
 
-describe('parseQixiMemoryBundle', () => {
-    it('accepts fenced JSON and normalizes it into a memory bundle', () => {
-        const parsed = parseQixiMemoryBundle(`\`\`\`json\n${JSON.stringify(validBundle)}\n\`\`\``);
+describe('parseQixiMemoryBundle v2', () => {
+    it('keeps a rich 12–18 evidence pool instead of truncating it to five anchors', () => {
+        const parsed = parseQixiMemoryBundle(`\`\`\`json\n${JSON.stringify(validBundle)}\n\`\`\``, 'ctx-1');
         expect(parsed?.source).toBe('memory');
-        expect(parsed?.anchors).toHaveLength(2);
-        expect(Object.keys(parsed?.beats || {})).toHaveLength(7);
-        expect(parsed?.beats.bracketCorner?.anchorId).toBe('m2');
+        expect(parsed?.evidence).toHaveLength(14);
+        expect(parsed?.artifacts).toHaveLength(18);
+        expect(parsed?.personalizedSceneIds).toEqual(QIXI_SCENE_IDS);
+        expect(parsed?.scenes.wordCloud.artifactIds).toHaveLength(16);
+        expect(parsed?.contextSignature).toBe('ctx-1');
     });
 
-    it('rejects sparse or dangling material instead of presenting it as personal memory', () => {
-        const malformed = {
-            anchors: [{ id: 'm1', fact: '只有一条很短的记忆事实。', object: '纸条' }],
-            beats: {
-                bracketCorner: {
-                    anchorId: 'missing',
-                    memoryLine: '这条引用不存在。',
-                    ritualAction: '穿线',
-                    result: '没有结果。',
-                    extension: '没有引申。',
-                },
+    it('caps evidence at 24 and rejects artifacts that do not cite real evidence', () => {
+        const oversized = {
+            ...validBundle,
+            evidence: Array.from({ length: 30 }, (_, index) => ({ id: `e${index}`, fact: `足够具体的事实 ${index}`, object: '物件' })),
+            artifacts: [...artifacts, { id: 'dangling', label: '凭空出现', kind: 'object', evidenceIds: ['missing'] }],
+        };
+        const parsed = parseQixiMemoryBundle(JSON.stringify(oversized));
+        expect(parsed?.evidence).toHaveLength(24);
+        expect(parsed?.artifacts.some(item => item.id === 'dangling')).toBe(false);
+    });
+
+    it('falls back per scene but rejects a response with fewer than two usable personalized scenes', () => {
+        const sparse = {
+            evidence: evidence.slice(0, 2),
+            artifacts: artifacts.slice(0, 2),
+            scenes: {
+                lostLayer: validBundle.scenes.lostLayer,
             },
         };
-        expect(parseQixiMemoryBundle(JSON.stringify(malformed))).toBeNull();
+        expect(parseQixiMemoryBundle(JSON.stringify(sparse))).toBeNull();
     });
 });

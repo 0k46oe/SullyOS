@@ -1,44 +1,66 @@
-import { APIConfig, CharacterProfile, UserProfile } from '../types';
+import { APIConfig, CharacterProfile, Message, UserProfile } from '../types';
 import { ContextBuilder } from './context';
 import { DB } from './db';
 import { injectMemoryPalace } from './memoryPalace/pipeline';
 import { safeFetchJson } from './safeApi';
 
-export const QIXI_MEMORY_BUNDLE_VERSION = 1 as const;
-export const QIXI_MEMORY_BUNDLE_PREFIX = 'sullyos_qixi_memory_bundle_v1_';
+export const QIXI_MEMORY_BUNDLE_VERSION = 2 as const;
+export const QIXI_MEMORY_BUNDLE_PREFIX = 'sullyos_qixi_memory_bundle_v2_';
 
-export const QIXI_MEMORY_NODE_IDS = [
-    'coldCorridor',
-    'bracketCorner',
-    'lightWell',
-    'maskCounter',
-    'receiptRain',
-    'unsentPlatform',
-    'typingShaft',
+export const QIXI_SCENE_IDS = [
+    'lostLayer',
+    'doubleWish',
+    'threadNeedle',
+    'offerings',
+    'reflection',
+    'nightMarket',
+    'wordCloud',
 ] as const;
 
-export type QixiMemoryNodeId = typeof QIXI_MEMORY_NODE_IDS[number];
+export type QixiSceneId = typeof QIXI_SCENE_IDS[number];
 
-export interface QixiMemoryAnchor {
+export interface QixiMemoryEvidence {
     id: string;
     fact: string;
     object: string;
+    tags: string[];
 }
 
-export interface QixiMemoryBeat {
-    anchorId: string;
-    memoryLine: string;
-    ritualAction: string;
+export type QixiArtifactKind = 'object' | 'phrase' | 'nickname' | 'topic' | 'date' | 'emotion' | 'wish' | 'symbol';
+
+export interface QixiMemoryArtifact {
+    id: string;
+    label: string;
+    kind: QixiArtifactKind;
+    evidenceIds: string[];
+}
+
+export interface QixiSceneOption {
+    id: string;
+    label: string;
     result: string;
-    extension: string;
+    evidenceIds: string[];
+}
+
+export interface QixiScenePayload {
+    sharedObject: string;
+    memoryLine: string;
+    options: QixiSceneOption[];
+    charAction: string;
+    reveal: string;
+    artifactIds: string[];
+    charSelectionIds: string[];
 }
 
 export interface QixiMemoryBundle {
     version: typeof QIXI_MEMORY_BUNDLE_VERSION;
     source: 'memory' | 'fallback';
-    anchors: QixiMemoryAnchor[];
-    beats: Partial<Record<QixiMemoryNodeId, QixiMemoryBeat>>;
-    finalEcho: string;
+    evidence: QixiMemoryEvidence[];
+    artifacts: QixiMemoryArtifact[];
+    scenes: Record<QixiSceneId, QixiScenePayload>;
+    personalizedSceneIds: QixiSceneId[];
+    generatedAt: number;
+    contextSignature: string;
 }
 
 export interface QixiMemoryPreparation {
@@ -47,27 +69,32 @@ export interface QixiMemoryPreparation {
     reason?: string;
 }
 
-const NODE_BRIEFS: Record<QixiMemoryNodeId, string> = {
-    coldCorridor: '陈设瓜果/交换小物：把共同生活里真实出现过的一件小东西放上供桌，不把礼物写成凭空出现。',
-    bracketCorner: '穿针乞巧：对应一次因为想与对方分享、抵达对方，而耐心学会、改好或做成某件事的记忆。核心不是求被爱，而是爱让人愿意变得更有能力去创造。',
-    lightWell: '投针验巧：让水面针影把同一段真实记忆照出另一面，不占卜感情结论。',
-    maskCounter: '七姐会：对应彼此见过的不同情绪、状态或伪装；不要把人格面具写成真实诊断。',
-    receiptRain: '乞巧市：从真实时间、物件、口头禅或琐碎日常里找到“普通日子也被记住”的证据。',
-    unsentPlatform: '葡萄架听天语：对应一次没说完、撤回、沉默、冷战或后来才听懂的心声；没有这种记忆就改用安静陪伴。',
-    typingShaft: '双星架桥：把前面的真实痕迹汇成桥。承认屏幕和语言的距离，只写“已经进入彼此生活”，不承诺永远、不宣讲结论。',
-};
-
-const FALLBACK_BUNDLE: QixiMemoryBundle = {
-    version: QIXI_MEMORY_BUNDLE_VERSION,
-    source: 'fallback',
-    anchors: [],
-    beats: {},
-    finalEcho: '',
+const SCENE_BRIEFS: Record<QixiSceneId, string> = {
+    lostLayer: '01 失联层：从真实的等待、失联、负面情绪或很想联系对方的时刻取材。User 尝试联系但协议失败；另一色文字逐句摘掉负片想法，安慰只能像 Char，不能揭示身份。',
+    doubleWish: '02 双面祈愿处：User 在祈愿笺正面写一个真实、私人但不越界的愿望；Char 在另一层写背面。建立同一物体被两层共同使用的规则。',
+    threadNeedle: '03 穿针乞巧处：User 拿针或线，Char 从另一层拿走另一个，共同完成穿针。织出的意象和它收集的物件必须来自真实上下文。',
+    offerings: '04 供果与记忆陈列：User 放觉得 Char 会喜欢或在意的东西，Char 放觉得 User 会喜欢或需要的东西。用陈列本身表达了解，不让旁白总结。',
+    reflection: '05 投针照影：水面只显示两层操作轨迹。User 写名字、短句、符号或记忆意象，Char 从另一层补写、修改或接续，第一次形成近实时互动。',
+    nightMarket: '06 乞巧市：摊位售卖真实上下文里的饮料、称呼、口头禅、日期、截图概念、梗和小事。Char 买走与 User 有关的东西，User 买关于 Char 的碎片。',
+    wordCloud: '07 葡萄架词云：提供 12—20 个有真实依据的称呼、话题、关键词、情绪词、物件或熟悉表达。User 选最像 Char 的词；Char 的另一色选择必须是最像 User 的词。',
 };
 
 const compact = (value: unknown, max: number): string => {
     if (typeof value !== 'string') return '';
     return value.replace(/\s+/g, ' ').trim().slice(0, max);
+};
+
+const compactList = (value: unknown, maxItems: number, maxChars: number): string[] => Array.isArray(value)
+    ? [...new Set(value.map(item => compact(item, maxChars)).filter(Boolean))].slice(0, maxItems)
+    : [];
+
+const simpleHash = (value: string): string => {
+    let hash = 2166136261;
+    for (let index = 0; index < value.length; index += 1) {
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
 };
 
 function extractJsonObject(raw: string): unknown {
@@ -78,55 +105,207 @@ function extractJsonObject(raw: string): unknown {
     try { return JSON.parse(trimmed.slice(start, end + 1)); } catch { return null; }
 }
 
-export function parseQixiMemoryBundle(raw: string): QixiMemoryBundle | null {
+const fallbackScenes = (): Record<QixiSceneId, QixiScenePayload> => ({
+    lostLayer: {
+        sharedObject: '一条无法送达的消息',
+        memoryLine: '这一层拒绝替你假装收到回答。',
+        options: [
+            { id: 'message', label: '再发一条消息', result: '发送图标转了很久，最后变成一颗没有抵达的星。', evidenceIds: [] },
+            { id: 'call', label: '试着拨一次电话', result: '铃声越过七层文字，又从原处返回。', evidenceIds: [] },
+            { id: 'shout', label: '对着空白喊 ta', result: '回声没有回答，只把最刺耳的那句话轻轻划掉。', evidenceIds: [] },
+        ],
+        charAction: '另一种颜色的字从句尾出现，把“没有人会来”改成了“先在这里等一下”。',
+        reveal: '你不知道是谁写的，只觉得改字的方式很像 ta。',
+        artifactIds: [],
+        charSelectionIds: [],
+    },
+    doubleWish: {
+        sharedObject: '一张会被风翻面的祈愿笺',
+        memoryLine: '正面朝向你，背面朝向另一个看不见的地方。',
+        options: [
+            { id: 'steady', label: '写：希望生活慢慢稳定下来', result: '墨迹沉进纸纤维，没有替你许诺结果。', evidenceIds: [] },
+            { id: 'brave', label: '写：希望我更有勇气一点', result: '“勇气”两个字被风吹得很轻，却没有消失。', evidenceIds: [] },
+            { id: 'rest', label: '写：希望今年能好好休息', result: '纸角松下来，像终于肯把肩膀放低一点。', evidenceIds: [] },
+        ],
+        charAction: '卡片忽然翻面。另一色字迹已经写好：希望你走向真正想去的地方。',
+        reveal: '同一张纸的两面，同时留下了不同的体温。',
+        artifactIds: [],
+        charSelectionIds: [],
+    },
+    threadNeedle: {
+        sharedObject: '悬在两层之间的针与线',
+        memoryLine: '针和线总有一个会在你伸手前被另一边拿起。',
+        options: [
+            { id: 'needle', label: '拿起针，把线留给另一边', result: '针孔停在半空，另一端的线试了几次，终于穿过来。', evidenceIds: [] },
+            { id: 'thread', label: '拿起线，把针留给另一边', result: '针孔在看不见的手里稳住。你把线送过去，刚好穿中。', evidenceIds: [] },
+        ],
+        charAction: '另一端把线轻轻收紧，织物里鼓起一只会替人收好小东西的无名生物。',
+        reveal: '你第一次碰到了另一边正在发生的动作。',
+        artifactIds: [],
+        charSelectionIds: [],
+    },
+    offerings: {
+        sharedObject: '一张两边都能移动供物的长桌',
+        memoryLine: '桌面留着两套不同方向的摆放痕迹。',
+        options: [
+            { id: 'sweet', label: '放上一枚不太规整的巧果', result: '巧果刚落下，就被另一边挪到最显眼的位置。', evidenceIds: [] },
+            { id: 'drink', label: '放上一杯仍然温热的饮料', result: '杯子向桌心滑了半寸，旁边多出一张看不见字的杯垫。', evidenceIds: [] },
+            { id: 'note', label: '放上一张没有写满的纸条', result: '纸条被另一端压住，空白处慢慢出现新的折痕。', evidenceIds: [] },
+        ],
+        charAction: '另一层也放下一样东西，又把它推到更靠近你的位置。',
+        reveal: '两套陈列没有完全猜对，却都在认真为对方留位置。',
+        artifactIds: [],
+        charSelectionIds: [],
+    },
+    reflection: {
+        sharedObject: '一面只记录动作的水',
+        memoryLine: '水不回答感情问题，只忠实留下谁碰过哪里。',
+        options: [
+            { id: 'name', label: '在水面写下 ta 的名字', result: '最后一笔刚停，另一色波纹便从对岸接住了它。', evidenceIds: [] },
+            { id: 'symbol', label: '画一个只有你看得懂的符号', result: '另一边试着补了半笔，没有猜中，却没有把它擦掉。', evidenceIds: [] },
+            { id: 'dots', label: '只点下三个光点', result: '第四个光点从另一层亮起，与你的三个排成一条路。', evidenceIds: [] },
+        ],
+        charAction: '另一色水纹撞过来，抢走最后一笔，又在旁边补上一个很小的记号。',
+        reveal: '这一次不是旧痕迹。对方正在和你同时触碰水面。',
+        artifactIds: [],
+        charSelectionIds: [],
+    },
+    nightMarket: {
+        sharedObject: '只卖琐碎记忆的夜市摊位',
+        memoryLine: '这里不出售宏大纪念，只卖称呼、饮料、时间和小事。',
+        options: [
+            { id: 'drink', label: '买下一杯没有标名字的饮料', result: '杯壁浮出一小段被记住的日常，价格只是一次点头。', evidenceIds: [] },
+            { id: 'phrase', label: '买下一句熟悉但想不起来源的话', result: '纸袋一晃，那句话用很熟悉的语气又说了一遍。', evidenceIds: [] },
+            { id: 'small', label: '买下一件没人会写进纪念册的小事', result: '摊主把它包得很认真，说琐碎的东西最容易被人带走。', evidenceIds: [] },
+        ],
+        charAction: '你伸手时，另一件商品先显示“售罄”。标签背面写着：刚被另一层的客人买走。',
+        reveal: '被买走的那件东西与 ta 无关，反而很像你。',
+        artifactIds: [],
+        charSelectionIds: [],
+    },
+    wordCloud: {
+        sharedObject: '葡萄架下缓慢漂浮的词云',
+        memoryLine: '词语来自不同日子，不替任何关系命名。',
+        options: [],
+        charAction: '你选完以后，另一种颜色也开始点亮词语。那一边选的是更像你的词。',
+        reveal: '最后，两种颜色在一个没有被安排好的词上重叠。',
+        artifactIds: [],
+        charSelectionIds: [],
+    },
+});
+
+export function createQixiFallbackBundle(contextSignature = ''): QixiMemoryBundle {
+    return {
+        version: QIXI_MEMORY_BUNDLE_VERSION,
+        source: 'fallback',
+        evidence: [],
+        artifacts: [],
+        scenes: fallbackScenes(),
+        personalizedSceneIds: [],
+        generatedAt: Date.now(),
+        contextSignature,
+    };
+}
+
+export function parseQixiMemoryBundle(raw: string, contextSignature = ''): QixiMemoryBundle | null {
     const parsed = extractJsonObject(raw) as any;
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.anchors)) return null;
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.evidence)) return null;
 
-    const anchors: QixiMemoryAnchor[] = (parsed.anchors as any[])
-        .slice(0, 5)
-        .map((anchor: any, index: number): QixiMemoryAnchor => ({
-            id: compact(anchor?.id, 18) || `m${index + 1}`,
-            fact: compact(anchor?.fact, 150),
-            object: compact(anchor?.object, 40),
+    const seenEvidenceIds = new Set<string>();
+    const evidence = (parsed.evidence as any[])
+        .slice(0, 24)
+        .map((item: any, index: number): QixiMemoryEvidence => ({
+            id: compact(item?.id, 24) || `e${index + 1}`,
+            fact: compact(item?.fact, 180),
+            object: compact(item?.object, 48),
+            tags: compactList(item?.tags, 6, 24),
         }))
-        .filter((anchor: QixiMemoryAnchor) => anchor.fact.length >= 6);
-    const anchorIds = new Set(anchors.map(anchor => anchor.id));
-    const beats: Partial<Record<QixiMemoryNodeId, QixiMemoryBeat>> = {};
+        .filter((item: QixiMemoryEvidence) => {
+            if (item.fact.length < 6 || seenEvidenceIds.has(item.id)) return false;
+            seenEvidenceIds.add(item.id);
+            return true;
+        });
+    if (evidence.length < 2) return null;
 
-    for (const nodeId of QIXI_MEMORY_NODE_IDS) {
-        const beat = parsed.beats?.[nodeId];
-        const normalized: QixiMemoryBeat = {
-            anchorId: compact(beat?.anchorId, 18),
-            memoryLine: compact(beat?.memoryLine, 130),
-            ritualAction: compact(beat?.ritualAction, 52),
-            result: compact(beat?.result, 150),
-            extension: compact(beat?.extension, 120),
+    const evidenceIds = new Set(evidence.map(item => item.id));
+    const seenArtifactIds = new Set<string>();
+    const artifacts: QixiMemoryArtifact[] = (Array.isArray(parsed.artifacts) ? parsed.artifacts : [])
+        .slice(0, 40)
+        .map((item: any, index: number): QixiMemoryArtifact => {
+            const kind = compact(item?.kind, 16) as QixiArtifactKind;
+            return {
+                id: compact(item?.id, 24) || `a${index + 1}`,
+                label: compact(item?.label, 42),
+                kind: (['object', 'phrase', 'nickname', 'topic', 'date', 'emotion', 'wish', 'symbol'] as string[]).includes(kind) ? kind : 'object',
+                evidenceIds: compactList(item?.evidenceIds, 4, 24).filter(id => evidenceIds.has(id)),
+            };
+        })
+        .filter((item: QixiMemoryArtifact) => {
+            if (!item.label || !item.evidenceIds.length || seenArtifactIds.has(item.id)) return false;
+            seenArtifactIds.add(item.id);
+            return true;
+        });
+    const artifactIds = new Set(artifacts.map(item => item.id));
+    const scenes = fallbackScenes();
+    const personalizedSceneIds: QixiSceneId[] = [];
+
+    for (const sceneId of QIXI_SCENE_IDS) {
+        const scene = parsed.scenes?.[sceneId];
+        if (!scene || typeof scene !== 'object') continue;
+        const options = (Array.isArray(scene.options) ? scene.options : [])
+            .slice(0, sceneId === 'wordCloud' ? 0 : 5)
+            .map((option: any, index: number): QixiSceneOption => ({
+                id: compact(option?.id, 24) || `${sceneId}-${index + 1}`,
+                label: compact(option?.label, 64),
+                result: compact(option?.result, 190),
+                evidenceIds: compactList(option?.evidenceIds, 4, 24).filter(id => evidenceIds.has(id)),
+            }))
+            .filter((option: QixiSceneOption) => option.label.length >= 2 && option.result.length >= 6);
+        const normalized: QixiScenePayload = {
+            sharedObject: compact(scene.sharedObject, 72),
+            memoryLine: compact(scene.memoryLine, 190),
+            options,
+            charAction: compact(scene.charAction, 220),
+            reveal: compact(scene.reveal, 180),
+            artifactIds: compactList(scene.artifactIds, sceneId === 'wordCloud' ? 20 : 10, 24).filter(id => artifactIds.has(id)),
+            charSelectionIds: compactList(scene.charSelectionIds, 8, 24).filter(id => artifactIds.has(id)),
         };
+        const enoughOptions = sceneId === 'wordCloud' ? normalized.artifactIds.length >= 8 : normalized.options.length >= 2;
+        const hasEvidence = new Set([
+            ...normalized.options.flatMap(option => option.evidenceIds),
+            ...normalized.artifactIds.flatMap(id => artifacts.find(item => item.id === id)?.evidenceIds || []),
+        ]).size > 0;
         if (
-            anchorIds.has(normalized.anchorId)
+            enoughOptions
+            && hasEvidence
+            && normalized.sharedObject.length >= 2
             && normalized.memoryLine.length >= 6
-            && normalized.ritualAction.length >= 4
-            && normalized.result.length >= 6
-            && normalized.extension.length >= 6
-        ) beats[nodeId] = normalized;
+            && normalized.charAction.length >= 6
+            && normalized.reveal.length >= 6
+        ) {
+            scenes[sceneId] = normalized;
+            personalizedSceneIds.push(sceneId);
+        }
     }
 
-    // 少于四个有效民俗映射时，宁可整包降级，也不把零碎模型输出冒充完整活动。
-    if (anchors.length < 2 || Object.keys(beats).length < 4) return null;
+    if (personalizedSceneIds.length < 2) return null;
 
     return {
         version: QIXI_MEMORY_BUNDLE_VERSION,
         source: 'memory',
-        anchors,
-        beats,
-        finalEcho: compact(parsed.finalEcho, 120),
+        evidence,
+        artifacts,
+        scenes,
+        personalizedSceneIds,
+        generatedAt: Date.now(),
+        contextSignature,
     };
 }
 
 export function loadQixiMemoryBundle(charId: string): QixiMemoryBundle | null {
     try {
         const parsed = JSON.parse(localStorage.getItem(`${QIXI_MEMORY_BUNDLE_PREFIX}${charId}`) || 'null') as QixiMemoryBundle | null;
-        if (parsed?.version !== QIXI_MEMORY_BUNDLE_VERSION || parsed.source !== 'memory') return null;
+        if (parsed?.version !== QIXI_MEMORY_BUNDLE_VERSION || !parsed.scenes || !Array.isArray(parsed.evidence)) return null;
         return parsed;
     } catch {
         return null;
@@ -134,71 +313,117 @@ export function loadQixiMemoryBundle(charId: string): QixiMemoryBundle | null {
 }
 
 function saveQixiMemoryBundle(charId: string, bundle: QixiMemoryBundle): void {
-    try { localStorage.setItem(`${QIXI_MEMORY_BUNDLE_PREFIX}${charId}`, JSON.stringify(bundle)); } catch { /* cache is optional */ }
+    try { localStorage.setItem(`${QIXI_MEMORY_BUNDLE_PREFIX}${charId}`, JSON.stringify(bundle)); } catch { /* optional cache */ }
+}
+
+function buildContextSignature(messages: Message[], char: CharacterProfile, user: UserProfile): string {
+    const last = messages[messages.length - 1];
+    return simpleHash([
+        messages.length,
+        last?.id || 0,
+        last?.timestamp || 0,
+        char.systemPrompt?.length || 0,
+        char.description?.length || 0,
+        user.name,
+    ].join(':'));
 }
 
 function qixiBundlePrompt(char: CharacterProfile, user: UserProfile): string {
-    const briefs = QIXI_MEMORY_NODE_IDS.map(nodeId => `- ${nodeId}: ${NODE_BRIEFS[nodeId]}`).join('\n');
-    return `### 七夕特别活动：一次生成“记忆星线素材包”
+    const briefs = QIXI_SCENE_IDS.map(sceneId => `- ${sceneId}: ${SCENE_BRIEFS[sceneId]}`).join('\n');
+    return `### 七夕特别活动：双层上下文探索素材包
 
-你不是在写完整游戏，也不是总结关系。游戏地图、节奏与最终黑屏互动已经固定。你只需要从系统提供的真实聊天记录与记忆中，选择 2—5 个可核对的具体记忆锚点，让七夕民俗在不同地点重新显形。
+你只负责从提供的真实聊天、记忆召回、角色设定和用户资料中，为七个地点准备可即时播放的素材。User 与 ${char.name} 同时掉进上下文夹层的两层，双方看不见彼此，只能操作同一件东西。前六站不能直接说另一边就是 ${char.name}，第七站才让玩家确定。
 
 角色：${char.name}
 用户：${user.name}
 
-硬性事实规则：
-1. 只可使用上下文明确出现的事实。不得补造日期、原话、礼物、动作、争吵、承诺或关系身份。
-2. 没有准确原话时必须转述，不能伪造引号。没有某类记忆时，可以让多个节点复用同一真实锚点，从不同角度观察。
-3. anchors.fact 要写成可辨认的具体事件，不写“你们共同经历了很多”之类空话；object 只能是记忆里真实出现过的词、物件或动作。
-4. ritualAction 是玩家真的能在场景中做的动作；result 是这段记忆在梦境里的视觉反馈；extension 是从记忆自然长出的一小步含义，不说教、不替玩家下爱情结论。
-5. bracketCorner 必须保留“我不只祈求被爱，也在因为想抵达你而学习、创造、做得更好”的乞巧内核，但要落到真实记忆上。
-6. typingShaft 只把已有痕迹连接起来。最终母题由固定脚本表达，不要另写宏大誓言。
+事实与数量规则：
+1. 只使用上下文明示的事实。不得补造共同经历、日期、礼物、原话、争吵、承诺或关系身份；没有准确原话时只能转述。
+2. 资料充足时提取 12—18 条事实证据，最多 24 条；资料不足就少写，绝对不能为了数量编造。
+3. 每条 evidence 必须具体、可辨认。object 是事实里真实出现的词、物件或动作。
+4. artifacts 是从 evidence 派生的称呼、饮料、物件、梗、日期、情绪词、愿望或符号，每一项必须引用 evidenceIds。
+5. 同一 evidence 原则上最多服务两个场景。每个场景尽量使用不同证据。
+6. 选项必须是 User 真能做的动作；result 只描述 User 这一侧的即时结果。charAction 描述另一层随后发生的操作；reveal 只推进当前阶段的发现，不要替玩家总结爱情。
+7. wordCloud 的 artifactIds 提供 12—20 个词，charSelectionIds 选择 3—6 个“最像 User”的词；其他场景 artifactIds 提供该站出现的真实物件。
 
-节点要求：
+场景要求：
 ${briefs}
 
 只输出一个 JSON 对象，不要 Markdown，不要解释：
 {
-  "anchors": [
-    { "id": "m1", "fact": "真实记忆的一句话", "object": "真实物件/词/动作" }
+  "evidence": [
+    { "id": "e1", "fact": "一条具体可核对的事实", "object": "真实物件或词", "tags": ["日常", "饮料"] }
   ],
-  "beats": {
-    "coldCorridor": { "anchorId": "m1", "memoryLine": "记忆如何在此处出现", "ritualAction": "玩家动作", "result": "梦境反馈", "extension": "由此自然引申" },
-    "bracketCorner": { "anchorId": "m1", "memoryLine": "...", "ritualAction": "...", "result": "...", "extension": "..." },
-    "lightWell": { "anchorId": "m2", "memoryLine": "...", "ritualAction": "...", "result": "...", "extension": "..." },
-    "maskCounter": { "anchorId": "m2", "memoryLine": "...", "ritualAction": "...", "result": "...", "extension": "..." },
-    "receiptRain": { "anchorId": "m1", "memoryLine": "...", "ritualAction": "...", "result": "...", "extension": "..." },
-    "unsentPlatform": { "anchorId": "m2", "memoryLine": "...", "ritualAction": "...", "result": "...", "extension": "..." },
-    "typingShaft": { "anchorId": "m1", "memoryLine": "...", "ritualAction": "...", "result": "...", "extension": "..." }
-  },
-  "finalEcho": "由这些真实记忆凝成的一句很短的角色回声，不许承诺永远"
+  "artifacts": [
+    { "id": "a1", "label": "一个短词或物件", "kind": "object|phrase|nickname|topic|date|emotion|wish|symbol", "evidenceIds": ["e1"] }
+  ],
+  "scenes": {
+    "lostLayer": {
+      "sharedObject": "场景核心共享物件",
+      "memoryLine": "真实记忆如何在这一层出现",
+      "options": [{ "id": "contact-1", "label": "User 动作", "result": "动作结果", "evidenceIds": ["e1"] }],
+      "charAction": "另一色文字或另一层操作",
+      "reveal": "只推进到：怎么这么像 ta",
+      "artifactIds": ["a1"],
+      "charSelectionIds": []
+    },
+    "doubleWish": { "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
+    "threadNeedle": { "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
+    "offerings": { "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
+    "reflection": { "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
+    "nightMarket": { "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
+    "wordCloud": { "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "reveal": "...", "artifactIds": ["a1"], "charSelectionIds": ["a1"] }
+  }
 }`;
 }
+
+const formatRecentMessages = (messages: Message[]): string => messages
+    .slice(-160)
+    .map(message => {
+        const content = message.type === 'image' ? '[图片]' : message.content;
+        return `${message.role}: ${content}`;
+    })
+    .join('\n')
+    .slice(-24000);
 
 export async function prepareQixiMemoryBundle(
     char: CharacterProfile,
     user: UserProfile,
     apiConfig: APIConfig,
 ): Promise<QixiMemoryPreparation> {
+    let messages: Message[] = [];
+    try { messages = await DB.getMessagesByCharId(char.id); } catch { /* fallback below */ }
+    const contextSignature = buildContextSignature(messages, char, user);
     const cached = loadQixiMemoryBundle(char.id);
-    if (cached) return { bundle: cached, usedFallback: false };
+    if (cached?.contextSignature === contextSignature) return { bundle: cached, usedFallback: cached.source === 'fallback' };
+
     if (!apiConfig.baseUrl || !apiConfig.apiKey || !apiConfig.model) {
-        return { bundle: FALLBACK_BUNDLE, usedFallback: true, reason: 'API 未配置，使用基础梦境' };
+        if (cached?.source === 'memory') {
+            return { bundle: cached, usedFallback: false, reason: 'API 未配置，沿用上次找到的真实记忆' };
+        }
+        return { bundle: createQixiFallbackBundle(contextSignature), usedFallback: true, reason: 'API 未配置，使用基础双层梦境' };
     }
 
     try {
-        const memoryChar = { ...char };
-        await injectMemoryPalace(
-            memoryChar,
-            undefined,
-            '七夕 共同创造 想分享 冷战 苦恼 撤回 沉默 小礼物 想起对方 一起完成的事',
-            user.name,
-        );
-        const messages = await DB.getMessagesByCharId(char.id);
-        const recent = messages.slice(-60).map(message => {
-            const content = message.type === 'image' ? '[图片]' : message.content;
-            return `${message.role}: ${content}`;
-        }).join('\n').slice(-9000);
+        const recallQueries = [
+            '等待 失联 想联系 负面情绪 安慰 撤回 沉默 没说完的话 冷战 后来和好',
+            '愿望 目标 烦恼 工作 学习 创作 自由 休息 未来 想做到的事',
+            '饮料 食物 昵称 口头禅 礼物 截图 表情 梗 日期 日常小事 喜欢 需要',
+        ];
+        const recallSections: string[] = [];
+        let roomPlatesInjection = '';
+        for (const query of recallQueries) {
+            const recallChar = { ...char, memoryPalaceInjection: '', roomPlatesInjection: '' };
+            await injectMemoryPalace(recallChar, messages, query, user.name, { entryPoint: 'direct' });
+            if (recallChar.memoryPalaceInjection) recallSections.push(recallChar.memoryPalaceInjection);
+            if (!roomPlatesInjection && recallChar.roomPlatesInjection) roomPlatesInjection = recallChar.roomPlatesInjection;
+        }
+        const memoryChar = {
+            ...char,
+            memoryPalaceInjection: [...new Set(recallSections)].join('\n\n').slice(0, 30000),
+            roomPlatesInjection,
+        };
+        const recent = formatRecentMessages(messages);
         const roleAndMemoryContext = ContextBuilder.buildCoreContext(memoryChar, user, true);
         const data = await safeFetchJson(
             `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`,
@@ -211,21 +436,28 @@ export async function prepareQixiMemoryBundle(
                         { role: 'system', content: roleAndMemoryContext },
                         { role: 'user', content: `[最近聊天片段，仅作事实来源]\n${recent || '（没有可用的最近聊天片段）'}\n\n${qixiBundlePrompt(char, user)}` },
                     ],
-                    temperature: 0.64,
+                    temperature: 0.58,
                     stream: false,
                 }),
             },
             0,
-            45000,
-            { appId: 'special-moments', charId: char.id, purpose: 'qixi-memory-bundle' },
+            70000,
+            { appId: 'special-moments', charId: char.id, purpose: 'qixi-dual-layer-materials-v2' },
         );
         const content = data?.choices?.[0]?.message?.content;
-        const bundle = typeof content === 'string' ? parseQixiMemoryBundle(content) : null;
-        if (!bundle) throw new Error('模型没有返回可用的七夕记忆素材包');
+        const bundle = typeof content === 'string' ? parseQixiMemoryBundle(content, contextSignature) : null;
+        if (!bundle) throw new Error('模型没有返回可用的七夕双层素材包');
         saveQixiMemoryBundle(char.id, bundle);
         return { bundle, usedFallback: false };
     } catch (error: any) {
-        console.warn('[Qixi] memory bundle fallback:', error?.message || error);
-        return { bundle: FALLBACK_BUNDLE, usedFallback: true, reason: '记忆星线暂时没有抵达，使用基础梦境' };
+        console.warn('[Qixi] v2 memory bundle fallback:', error?.message || error);
+        if (cached?.source === 'memory') {
+            return { bundle: cached, usedFallback: false, reason: '新记忆暂时没有抵达，沿用上次素材' };
+        }
+        return {
+            bundle: createQixiFallbackBundle(contextSignature),
+            usedFallback: true,
+            reason: '记忆星线暂时没有抵达，使用基础双层梦境',
+        };
     }
 }

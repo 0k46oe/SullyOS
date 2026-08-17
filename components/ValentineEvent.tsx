@@ -15,7 +15,7 @@ import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { ContextBuilder } from '../utils/context';
 import { safeResponseJson } from '../utils/safeApi';
-import { CharacterProfile, SpecialMomentRecord } from '../types';
+import { AppID, CharacterProfile, SpecialMomentRecord } from '../types';
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
@@ -1338,7 +1338,7 @@ const THEME_VALENTINE: EventCardTheme = {
 // 特别时光 App（桌面第三页降级入口）
 // ============================================================
 export const SpecialMomentsApp: React.FC = () => {
-    const { closeApp, characters, addToast, updateCharacter, apiConfig, userProfile } = useOS();
+    const { closeApp, openApp, characters, setActiveCharacterId, addToast, updateCharacter, apiConfig, userProfile } = useOS();
     const [showSession, setShowSession] = useState(false);
     const [selectedCharId, setSelectedCharId] = useState<string>('');
     const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
@@ -1431,6 +1431,45 @@ export const SpecialMomentsApp: React.FC = () => {
         }
     };
 
+    const handleQixiReturnToChat = async (message: string) => {
+        if (!qixiCharId) return;
+        const targetChar = characters.find(c => c.id === qixiCharId);
+        try {
+            const existing = await DB.getMessagesByCharId(qixiCharId);
+            const alreadySaved = existing.slice(-12).some(item => item.metadata?.qixiEventVersion === 7 && item.content === message);
+            if (!alreadySaved) {
+                await DB.saveMessage({
+                    charId: qixiCharId,
+                    role: 'assistant',
+                    type: 'text',
+                    content: message,
+                    metadata: { source: 'qixi', qixiEvent: true, qixiEventVersion: 7, isReturnMessage: true },
+                });
+            }
+            if (targetChar) {
+                updateCharacter(qixiCharId, {
+                    specialMomentRecords: {
+                        ...(targetChar.specialMomentRecords || {}),
+                        [QIXI_DEMO_RECORD_KEY]: {
+                            content: message,
+                            timestamp: Date.now(),
+                            source: 'generated',
+                            customData: { version: 7, completed: true },
+                        },
+                    },
+                });
+            }
+            setActiveCharacterId(qixiCharId);
+            setShowQixiSession(false);
+            setQixiCharId('');
+            openApp(AppID.Chat);
+        } catch (error) {
+            console.error('[Qixi] return to chat failed:', error);
+            addToast('七夕消息保存失败，请再试一次', 'error');
+            throw error;
+        }
+    };
+
     const qixiChar = characters.find(c => c.id === qixiCharId);
     if (showQixiSession && qixiChar) {
         return (
@@ -1439,6 +1478,7 @@ export const SpecialMomentsApp: React.FC = () => {
                 user={userProfile}
                 apiConfig={apiConfig}
                 onClose={() => { setShowQixiSession(false); setQixiCharId(''); }}
+                onReturnToChat={handleQixiReturnToChat}
             />
         );
     }

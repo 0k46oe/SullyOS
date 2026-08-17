@@ -54,3 +54,33 @@ pm run build passes after the time-gap grouping fix.
 - Applied a cohesive deep-plum, lavender, blush, and cream-moonlight palette through fake chat, distortion, interlayer, exploration, core, touch, and ending screens without changing story or memory logic.
 - Verified the desktop entry and the mobile cover → fake chat → distortion → interlayer entry → first exploration sequence with rendered screenshots; no console or page errors were reported.
 - `utils/qixiMemoryBundle.test.ts` passes (2 tests) and the production build succeeds.
+
+2026-08-17 — Qixi dual-layer story rewrite
+- Original prompt for this rewrite: read `qixi_reworked (1).md`, expand the inadequate 2–5 memory-anchor design, and implement the approved Qixi rewrite list.
+- Visual thesis: a deep-plum context interlayer where User and Char are represented by two restrained text colors, with one shared ritual object dominating each full-screen scene.
+- Content plan: preserve the celestial entry/fake chat/rabbit door, then run seven evidence-backed dual-layer rituals, form the bridge, reveal Char for the first time, hold to touch, and return to ordinary chat.
+- Interaction thesis: the other-layer color gradually appears; shared objects visibly move from the unseen side; seven traces converge into one bridge transition. Keep copy and controls sparse.
+- Implementation order: v2 material schema and recall, v7 game state/scenes, reunion generation and portrait fallback, touch/return-to-chat, tests/build/Playwright screenshots.
+- Do not fabricate memories to satisfy anchor counts. Rich context targets 12–18 evidence anchors (cap 24); sparse context degrades personalization instead.
+
+TODO — Qixi rewrite
+- Replace qixi memory bundle v1 and invalidate stale per-character cache.
+- Replace fixed NPC nodes, early reveal copy, 5+3 hidden gate, fixed four-page core, finalEcho, long touch monologue, and repeated ending thesis.
+- Preserve the existing full-screen art direction and deterministic `render_game_to_text` / `advanceTime` hooks.
+
+2026-08-17 — Qixi v2 material layer
+- Replaced the 2–5-anchor v1 bundle with evidence (target 12–18, cap 24), typed artifacts (cap 40), seven scene payloads, per-scene personalization flags, and context-signature cache invalidation.
+- Expanded source gathering to 160 recent messages plus three focused memory-palace recalls covering difficult emotions, wishes/future, and daily objects/language.
+- Added local per-scene fallback content so sparse/invalid model output does not invent memories or make the activity unplayable.
+- Added parser tests for rich evidence retention, hard caps/provenance filtering, and sparse response rejection. All 3 assertions pass; Vitest then hits an environment-only EPERM writing `node_modules/.vite/vitest/results.json`.
+
+2026-08-17 — Qixi dual-layer rewrite implemented and browser-verified
+- Replaced the old exploration/core/final-echo structure with a v7 flow: celestial cover, fake chat, CSS white-rabbit door, interlayer entry, seven shared-object scenes, bridge, generated reunion, hold-to-touch, short ending, and return to ordinary chat.
+- Each of the seven scenes now has its own dominant CSS/SVG object, User action, independently rendered other-layer action, reveal, and saved decision; the word-cloud scene requires three selections and supports separate User/Char colors.
+- Added a separate final reunion generator with technical-language and coercive-promise filtering plus portrait priority `Live2D -> meeting sprite -> static avatar -> chibi/initial fallback`.
+- The ending saves one deduplicated assistant chat message, marks the special-moment record complete, selects the character, opens Chat, and now auto-returns reliably even when the OS parent re-renders.
+- Added image-load fallback, removed a visible `Char` placeholder from sparse-context copy, replaced the missing-glyph rabbit with a CSS silhouette, and made bridge line angles valid CSS variables.
+- `utils/qixiMemoryBundle.test.ts` and `utils/qixiReunion.test.ts` pass together (5 tests) with Vitest `--no-cache`.
+- Full desktop flow and mobile flow were exercised in the in-app Browser, including early-release feedback, sustained 1.25s touch, generated/fallback reunion, portrait loading, automatic chat return, and persisted return message.
+- The standalone skill Playwright client remains unavailable because its local package import fails; in-app Browser validation was used as the supported fallback.
+- Production build passes with 6,100 modules transformed when emitted to an isolated output directory; the temporary build output was removed afterward.
