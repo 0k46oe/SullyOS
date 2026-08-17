@@ -21,9 +21,16 @@ import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { WhiteDaySession, isWhiteDayEventAvailable, WHITEDAY_RECORD_KEY } from './WhiteDayEvent';
 import { Like520Session, isLike520EventAvailable, isLike520Past, LIKE520_RECORD_KEY } from './Like520Event';
-import { QixiDemoSession, QIXI_DEMO_RECORD_KEY } from './events/qixi/QixiDemoEvent';
+import {
+    QixiDemoSession,
+    QIXI_DEMO_RECORD_KEY,
+    QixiReplaySnapshot,
+    QixiReturnPayload,
+    QixiSessionMode,
+} from './events/qixi/QixiDemoEvent';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { markAmsgStateDirty } from '../utils/amsgStateSync';
+import { createQixiChatMessagePair } from '../utils/qixiChatCard';
 
 // ============================================================
 // 情人节立绘 Sprite 映射 (占位 emoji，等图片整理好后替换为图床URL)
@@ -1356,6 +1363,9 @@ export const SpecialMomentsApp: React.FC = () => {
     // Qixi
     const [showQixiSession, setShowQixiSession] = useState(false);
     const [qixiCharId, setQixiCharId] = useState<string>('');
+    const [qixiChoiceCharId, setQixiChoiceCharId] = useState<string>('');
+    const [qixiSessionMode, setQixiSessionMode] = useState<QixiSessionMode>('fresh');
+    const [qixiReplaySnapshot, setQixiReplaySnapshot] = useState<QixiReplaySnapshot | null>(null);
 
     // 一次性算好可见性 / 往期态（避免每帧调日期函数）
     const visibility = useMemo(() => {
@@ -1431,20 +1441,21 @@ export const SpecialMomentsApp: React.FC = () => {
         }
     };
 
-    const handleQixiReturnToChat = async (message: string) => {
+    const handleQixiReturnToChat = async ({ message, card, replaySnapshot }: QixiReturnPayload) => {
         if (!qixiCharId) return;
         const targetChar = characters.find(c => c.id === qixiCharId);
         try {
             const existing = await DB.getMessagesByCharId(qixiCharId);
-            const alreadySaved = existing.slice(-12).some(item => item.metadata?.qixiEventVersion === 7 && item.content === message);
-            if (!alreadySaved) {
-                await DB.saveMessage({
-                    charId: qixiCharId,
-                    role: 'assistant',
-                    type: 'text',
-                    content: message,
-                    metadata: { source: 'qixi', qixiEvent: true, qixiEventVersion: 7, isReturnMessage: true },
-                });
+            const recent = existing.slice(-30);
+            const cardAlreadySaved = recent.some(item => item.metadata?.qixiRunId === card.runId && item.metadata?.qixiEventCard === true);
+            const messageAlreadySaved = recent.some(item => item.metadata?.qixiRunId === card.runId && item.metadata?.isReturnMessage === true);
+            const timestamp = Date.now();
+            const [cardMessage, privateMessage] = createQixiChatMessagePair(qixiCharId, card, message, timestamp);
+            if (!cardAlreadySaved) {
+                await DB.saveMessage(cardMessage);
+            }
+            if (!messageAlreadySaved) {
+                await DB.saveMessage(privateMessage);
             }
             if (targetChar) {
                 updateCharacter(qixiCharId, {
@@ -1454,7 +1465,7 @@ export const SpecialMomentsApp: React.FC = () => {
                             content: message,
                             timestamp: Date.now(),
                             source: 'generated',
-                            customData: { version: 7, completed: true },
+                            customData: { version: 8, completed: true, replaySnapshot, chatCard: card },
                         },
                     },
                 });
@@ -1462,12 +1473,32 @@ export const SpecialMomentsApp: React.FC = () => {
             setActiveCharacterId(qixiCharId);
             setShowQixiSession(false);
             setQixiCharId('');
+            setQixiReplaySnapshot(null);
             openApp(AppID.Chat);
         } catch (error) {
             console.error('[Qixi] return to chat failed:', error);
             addToast('七夕消息保存失败，请再试一次', 'error');
             throw error;
         }
+    };
+
+    const openQixiSession = (charId: string, mode: QixiSessionMode) => {
+        const target = characters.find(c => c.id === charId);
+        const snapshot = target?.specialMomentRecords?.[QIXI_DEMO_RECORD_KEY]?.customData?.replaySnapshot as QixiReplaySnapshot | undefined;
+        setQixiSessionMode(mode);
+        setQixiReplaySnapshot(mode === 'replay' && snapshot?.version === 8 ? snapshot : null);
+        setQixiChoiceCharId('');
+        setQixiCharId(charId);
+        setShowQixiSession(true);
+    };
+
+    const pickQixiCharacter = (charId: string) => {
+        const target = characters.find(c => c.id === charId);
+        if (target?.specialMomentRecords?.[QIXI_DEMO_RECORD_KEY]) {
+            setQixiChoiceCharId(charId);
+            return;
+        }
+        openQixiSession(charId, 'fresh');
     };
 
     const qixiChar = characters.find(c => c.id === qixiCharId);
@@ -1477,7 +1508,13 @@ export const SpecialMomentsApp: React.FC = () => {
                 char={qixiChar}
                 user={userProfile}
                 apiConfig={apiConfig}
-                onClose={() => { setShowQixiSession(false); setQixiCharId(''); }}
+                sessionMode={qixiSessionMode}
+                replaySnapshot={qixiReplaySnapshot}
+                onPortraitConfigSave={(spriteConfig) => {
+                    updateCharacter(qixiChar.id, { spriteConfig });
+                    addToast('七夕立绘位置已保存，并同步到见面模式', 'success');
+                }}
+                onClose={() => { setShowQixiSession(false); setQixiCharId(''); setQixiReplaySnapshot(null); }}
                 onReturnToChat={handleQixiReturnToChat}
             />
         );
@@ -1538,7 +1575,7 @@ export const SpecialMomentsApp: React.FC = () => {
                     isPast={false}
                     characters={characters}
                     recordKey={QIXI_DEMO_RECORD_KEY}
-                    onPick={(id) => { setQixiCharId(id); setShowQixiSession(true); }}
+                    onPick={pickQixiCharacter}
                     onLongPressDelete={() => undefined}
                     footerNote="UI / CSS / 手写 SVG · 固定坐标星图 · 首次 1 次 LLM 生成记忆星线"
                 />
@@ -1602,6 +1639,15 @@ export const SpecialMomentsApp: React.FC = () => {
                 )}
             </div>
 
+            {qixiChoiceCharId && (
+                <QixiReplayChoiceModal
+                    charName={characters.find(c => c.id === qixiChoiceCharId)?.name || ''}
+                    onReplay={() => openQixiSession(qixiChoiceCharId, 'replay')}
+                    onFresh={() => openQixiSession(qixiChoiceCharId, 'fresh')}
+                    onCancel={() => setQixiChoiceCharId('')}
+                />
+            )}
+
             {/* 520 删除确认弹窗 */}
             {l520DeleteTargetId && (
                 <ConfirmDeleteModal
@@ -1637,6 +1683,34 @@ export const SpecialMomentsApp: React.FC = () => {
         </div>
     );
 };
+
+export const QixiReplayChoiceModal: React.FC<{
+    charName: string;
+    onReplay: () => void;
+    onFresh: () => void;
+    onCancel: () => void;
+}> = ({ charName, onReplay, onFresh, onCancel }) => (
+    <div className="qixi-replay-modal">
+        <button type="button" aria-label="关闭" className="qixi-replay-modal__scrim" onClick={onCancel} />
+        <div className="qixi-replay-modal__panel">
+            <div className="qixi-replay-modal__orbit" /><div className="qixi-replay-modal__glow" />
+            <div className="qixi-replay-modal__content">
+                <div className="qixi-replay-modal__eyebrow">QIXI · MEMORY FOUND</div>
+                <h3>这场梦已经<br />留下过一次记录。</h3>
+                <p>{charName} 的上一次星线还在。你想沿原来的内容重看，还是重新召回记忆生成新的一次？</p>
+                <div className="qixi-replay-modal__choices">
+                    <button type="button" data-qixi-entry-choice="replay" onClick={onReplay}>
+                        <span><b>重看上一次</b><small>不调用模型，不重复写入私聊</small></span><i>→</i>
+                    </button>
+                    <button type="button" data-qixi-entry-choice="fresh" onClick={onFresh}>
+                        <span><b>开始新的一次</b><small>重新召回并生成；旧记录会保留到新一次完成</small></span><i>↗</i>
+                    </button>
+                </div>
+                <button type="button" onClick={onCancel} className="qixi-replay-modal__cancel">暂时不进入</button>
+            </div>
+        </div>
+    </div>
+);
 
 // ============================================================
 // 共享：删除确认弹窗

@@ -14,6 +14,7 @@ import McdCard from './McdCard';
 import HtmlCard from './HtmlCard';
 import LuckinCard from './LuckinCard';
 import LuckinCheckoutCard from './LuckinCheckoutCard';
+import QixiEventCardView from './QixiEventCard';
 
 // 思考链卡片支持的 12 种风格预设 — 同时被 MessageItem 与 ThinkingChainSettingsModal 复用
 export type ThinkingChainStyleId = 'echo' | 'whisper' | 'minimal' | 'ink' | 'neon' | 'terminal' | 'stellar' | 'tama' | 'pixel' | 'muji' | 'ins' | 'custom';
@@ -3061,6 +3062,10 @@ const MessageItem = React.memo(({
 
         if (scoreData?.type === 'lifesim_reset_card') {
             return commonLayout(<LifeSimResetCardView card={scoreData} />);
+        }
+
+        if (scoreData?.type === 'qixi_event_card') {
+            return commonLayout(<QixiEventCardView card={scoreData} timestamp={m.timestamp} interactionProps={interactionProps} />);
         }
 
         // Guidebook End Card

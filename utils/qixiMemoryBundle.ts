@@ -3,9 +3,10 @@ import { ContextBuilder } from './context';
 import { DB } from './db';
 import { injectMemoryPalace } from './memoryPalace/pipeline';
 import { safeFetchJson } from './safeApi';
+import { parseQixiJsonObject } from './qixiJson';
 
-export const QIXI_MEMORY_BUNDLE_VERSION = 2 as const;
-export const QIXI_MEMORY_BUNDLE_PREFIX = 'sullyos_qixi_memory_bundle_v2_';
+export const QIXI_MEMORY_BUNDLE_VERSION = 6 as const;
+export const QIXI_MEMORY_BUNDLE_PREFIX = 'sullyos_qixi_memory_bundle_v6_';
 
 export const QIXI_SCENE_IDS = [
     'lostLayer',
@@ -43,18 +44,56 @@ export interface QixiSceneOption {
 }
 
 export interface QixiScenePayload {
+    /** Part 1 generated interstitial copy shown before entering this room. */
+    transitionLines?: string[];
     sharedObject: string;
     memoryLine: string;
     options: QixiSceneOption[];
     charAction: string;
+    /** The exact short words/mark that visibly appears on the shared object. */
+    charVisibleText?: string;
+    /** Lost-layer only: Char's hurried, in-character mutter before erasing the error. */
+    charMutter?: string;
     reveal: string;
     artifactIds: string[];
     charSelectionIds: string[];
 }
 
+export const QIXI_FALLBACK_TRANSITIONS: Record<QixiSceneId, string[]> = {
+    lostLayer: ['裂开的聊天界面在身后合拢。', '未送达的文字落在一条没有回声的路上。'],
+    doubleWish: ['那颗未抵达的星沿地面滚远。', '尽头悬着一张被风反复翻动的纸。'],
+    threadNeedle: ['纸背的墨迹被风抽成一根细线。', '线穿过夜色，停在一枚针孔前。'],
+    offerings: ['穿过针孔的线没有断。', '它牵着你来到一张摆着空位的长桌前。'],
+    reflection: ['桌边滚落的一点光沉进水里。', '水面把刚才出现过的两种颜色都留下。'],
+    nightMarket: ['水纹推开岸边的夜色。', '灯牌和摊位从倒影里一盏盏亮起。'],
+    wordCloud: ['夜市尽头垂下葡萄藤。', '买走与留下的词，都被挂进了叶影。'],
+};
+
+export const QIXI_FALLBACK_CHAR_VISIBLE_TEXT: Record<QixiSceneId, string> = {
+    lostLayer: '先别信那些最坏的念头。',
+    doubleWish: '希望你走向真正想去的地方。',
+    threadNeedle: '抓稳，我来把线送过去。',
+    offerings: '这个留给你。',
+    reflection: '我在这里。',
+    nightMarket: '刚刚被另一边买走。',
+    wordCloud: '轮到我选你了。',
+};
+
+export const QIXI_FALLBACK_CHAR_MUTTER = '啧……这破报错。';
+
+export const qixiTransitionLines = (sceneId: QixiSceneId, scene: QixiScenePayload): string[] =>
+    scene.transitionLines?.length ? scene.transitionLines : QIXI_FALLBACK_TRANSITIONS[sceneId];
+
+export const qixiCharVisibleText = (sceneId: QixiSceneId, scene: QixiScenePayload): string =>
+    scene.charVisibleText?.trim() || QIXI_FALLBACK_CHAR_VISIBLE_TEXT[sceneId];
+
+export const qixiCharMutter = (scene: QixiScenePayload): string =>
+    scene.charMutter?.trim() || QIXI_FALLBACK_CHAR_MUTTER;
+
 export interface QixiMemoryBundle {
     version: typeof QIXI_MEMORY_BUNDLE_VERSION;
     source: 'memory' | 'fallback';
+    openingChat: string[];
     evidence: QixiMemoryEvidence[];
     artifacts: QixiMemoryArtifact[];
     scenes: Record<QixiSceneId, QixiScenePayload>;
@@ -97,14 +136,6 @@ const simpleHash = (value: string): string => {
     return (hash >>> 0).toString(36);
 };
 
-function extractJsonObject(raw: string): unknown {
-    const trimmed = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-    const start = trimmed.indexOf('{');
-    const end = trimmed.lastIndexOf('}');
-    if (start < 0 || end <= start) return null;
-    try { return JSON.parse(trimmed.slice(start, end + 1)); } catch { return null; }
-}
-
 const fallbackScenes = (): Record<QixiSceneId, QixiScenePayload> => ({
     lostLayer: {
         sharedObject: '一条无法送达的消息',
@@ -115,6 +146,7 @@ const fallbackScenes = (): Record<QixiSceneId, QixiScenePayload> => ({
             { id: 'shout', label: '对着空白喊 ta', result: '回声没有回答，只把最刺耳的那句话轻轻划掉。', evidenceIds: [] },
         ],
         charAction: '另一种颜色的字从句尾出现，把“没有人会来”改成了“先在这里等一下”。',
+        charMutter: QIXI_FALLBACK_CHAR_MUTTER,
         reveal: '你不知道是谁写的，只觉得改字的方式很像 ta。',
         artifactIds: [],
         charSelectionIds: [],
@@ -187,7 +219,7 @@ const fallbackScenes = (): Record<QixiSceneId, QixiScenePayload> => ({
         sharedObject: '葡萄架下缓慢漂浮的词云',
         memoryLine: '词语来自不同日子，不替任何关系命名。',
         options: [],
-        charAction: '你选完以后，另一种颜色也开始点亮词语。那一边选的是更像你的词。',
+        charAction: '你每点亮一个词，另一种颜色就随后点亮一个更像你的词。两边一来一回，最后各自留下三次选择。',
         reveal: '最后，两种颜色在一个没有被安排好的词上重叠。',
         artifactIds: [],
         charSelectionIds: [],
@@ -198,6 +230,7 @@ export function createQixiFallbackBundle(contextSignature = ''): QixiMemoryBundl
     return {
         version: QIXI_MEMORY_BUNDLE_VERSION,
         source: 'fallback',
+        openingChat: ['你刚才是不是回我消息了？', '奇怪……我这里什么也没看到。'],
         evidence: [],
         artifacts: [],
         scenes: fallbackScenes(),
@@ -208,7 +241,7 @@ export function createQixiFallbackBundle(contextSignature = ''): QixiMemoryBundl
 }
 
 export function parseQixiMemoryBundle(raw: string, contextSignature = ''): QixiMemoryBundle | null {
-    const parsed = extractJsonObject(raw) as any;
+    const parsed = parseQixiJsonObject(raw, ['scenes', 'evidence']) as any;
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.evidence)) return null;
 
     const seenEvidenceIds = new Set<string>();
@@ -251,7 +284,13 @@ export function parseQixiMemoryBundle(raw: string, contextSignature = ''): QixiM
 
     for (const sceneId of QIXI_SCENE_IDS) {
         const scene = parsed.scenes?.[sceneId];
-        if (!scene || typeof scene !== 'object') continue;
+        if (!scene || typeof scene !== 'object') return null;
+        const transitionLines = compactList(scene.transitionLines, 2, 96);
+        if (!transitionLines.length) return null;
+        const charVisibleText = compact(scene.charVisibleText, 72);
+        if (charVisibleText.length < 2) return null;
+        const charMutter = sceneId === 'lostLayer' ? compact(scene.charMutter, 36) : '';
+        if (sceneId === 'lostLayer' && charMutter.length < 2) return null;
         const options = (Array.isArray(scene.options) ? scene.options : [])
             .slice(0, sceneId === 'wordCloud' ? 0 : 5)
             .map((option: any, index: number): QixiSceneOption => ({
@@ -262,10 +301,13 @@ export function parseQixiMemoryBundle(raw: string, contextSignature = ''): QixiM
             }))
             .filter((option: QixiSceneOption) => option.label.length >= 2 && option.result.length >= 6);
         const normalized: QixiScenePayload = {
+            transitionLines,
             sharedObject: compact(scene.sharedObject, 72),
             memoryLine: compact(scene.memoryLine, 190),
             options,
             charAction: compact(scene.charAction, 220),
+            charVisibleText,
+            ...(sceneId === 'lostLayer' ? { charMutter } : {}),
             reveal: compact(scene.reveal, 180),
             artifactIds: compactList(scene.artifactIds, sceneId === 'wordCloud' ? 20 : 10, 24).filter(id => artifactIds.has(id)),
             charSelectionIds: compactList(scene.charSelectionIds, 8, 24).filter(id => artifactIds.has(id)),
@@ -278,6 +320,7 @@ export function parseQixiMemoryBundle(raw: string, contextSignature = ''): QixiM
         if (
             enoughOptions
             && hasEvidence
+            && Boolean(normalized.transitionLines?.length)
             && normalized.sharedObject.length >= 2
             && normalized.memoryLine.length >= 6
             && normalized.charAction.length >= 6
@@ -285,14 +328,22 @@ export function parseQixiMemoryBundle(raw: string, contextSignature = ''): QixiM
         ) {
             scenes[sceneId] = normalized;
             personalizedSceneIds.push(sceneId);
+        } else {
+            // Sparse evidence may still use the safe local room interaction, but
+            // every spatial transition in a fresh Part 1 run remains LLM-made.
+            scenes[sceneId] = { ...scenes[sceneId], transitionLines, charVisibleText, ...(sceneId === 'lostLayer' ? { charMutter } : {}) };
         }
     }
 
     if (personalizedSceneIds.length < 2) return null;
 
+    const openingChat = compactList(parsed.openingChat, 2, 72);
+    if (openingChat.length !== 2) return null;
+
     return {
         version: QIXI_MEMORY_BUNDLE_VERSION,
         source: 'memory',
+        openingChat,
         evidence,
         artifacts,
         scenes,
@@ -332,7 +383,7 @@ function qixiBundlePrompt(char: CharacterProfile, user: UserProfile): string {
     const briefs = QIXI_SCENE_IDS.map(sceneId => `- ${sceneId}: ${SCENE_BRIEFS[sceneId]}`).join('\n');
     return `### 七夕特别活动：双层上下文探索素材包
 
-你只负责从提供的真实聊天、记忆召回、角色设定和用户资料中，为七个地点准备可即时播放的素材。User 与 ${char.name} 同时掉进上下文夹层的两层，双方看不见彼此，只能操作同一件东西。前六站不能直接说另一边就是 ${char.name}，第七站才让玩家确定。
+你负责 Part 1：根据真实聊天、记忆召回、角色设定和用户资料，生成异常发生前的两句正常聊天，以及七个地点可即时播放的素材。User 与 ${char.name} 都不知道七夕活动，也不知道接下来会掉进上下文夹层；两个人会被同一次异常同时卷入不同层，双方看不见彼此，只能操作同一件东西。前六站不能直接说另一边就是 ${char.name}，第七站才让玩家确定。
 
 角色：${char.name}
 用户：${user.name}
@@ -345,12 +396,17 @@ function qixiBundlePrompt(char: CharacterProfile, user: UserProfile): string {
 5. 同一 evidence 原则上最多服务两个场景。每个场景尽量使用不同证据。
 6. 选项必须是 User 真能做的动作；result 只描述 User 这一侧的即时结果。charAction 描述另一层随后发生的操作；reveal 只推进当前阶段的发现，不要替玩家总结爱情。
 7. wordCloud 的 artifactIds 提供 12—20 个词，charSelectionIds 选择 3—6 个“最像 User”的词；其他场景 artifactIds 提供该站出现的真实物件。
+8. openingChat 必须恰好两句，完全使用 ${char.name} 的说话方式。语义是：${char.name} 怀疑 ${user.name} 刚刚回复过，但自己没有收到。不能提活动、七夕、梦境、夹层、邀请、准备惊喜或“点击输入框”。
+9. 每个场景必须提供 transitionLines 1—2 句，作为进入该空间前的过场。它要把上一空间留下的具体视觉痕迹自然变成下一空间的入口，并让本场景的真实记忆物件开始浮现。每句要短，只写 User 能看到的变化；不能总结主题，不能解释“另一层是谁”，不能写成系统提示或任务说明。
+10. 每个场景必须提供 charVisibleText：这是 Char 操作以后，玩家能在共享物件上亲眼看见的 2—36 字短文本、标签或记号，不是解释性旁白。尤其 lostLayer 的顺序必须是“系统报错先出现 → 冷色字迹急匆匆闯入 → 一边抱怨一边抹掉报错和负片词 → 就地复写 charVisibleText”。charVisibleText 必须给出最后复写出来的可读核心句，不能只写“出现了一行字”。
+11. lostLayer 还必须提供 charMutter：2—18 字，必须像 ${char.name} 在着急处理故障时脱口而出的短促碎念，可以骂这个破报错、嫌系统碍事、催它让开，但不能骂 User，不能解释身份，不能写“另一边有人”。wordCloud 必须按“User 选一个、Char 选一个”的顺序交替回应，不能等 User 全部选完才突然出现 Char 的全部选择。
 
 场景要求：
 ${briefs}
 
 只输出一个 JSON 对象，不要 Markdown，不要解释：
 {
+  "openingChat": ["角色察觉可能漏收消息", "角色困惑地确认异常"],
   "evidence": [
     { "id": "e1", "fact": "一条具体可核对的事实", "object": "真实物件或词", "tags": ["日常", "饮料"] }
   ],
@@ -359,20 +415,23 @@ ${briefs}
   ],
   "scenes": {
     "lostLayer": {
+      "transitionLines": ["上一空间留下的痕迹开始变化", "下一空间从痕迹中浮现"],
       "sharedObject": "场景核心共享物件",
       "memoryLine": "真实记忆如何在这一层出现",
       "options": [{ "id": "contact-1", "label": "User 动作", "result": "动作结果", "evidenceIds": ["e1"] }],
       "charAction": "另一色文字或另一层操作",
+      "charMutter": "角色看到破报错时脱口而出的急促碎念",
+      "charVisibleText": "共享物件上实际显示的短句或记号",
       "reveal": "只推进到：怎么这么像 ta",
       "artifactIds": ["a1"],
       "charSelectionIds": []
     },
-    "doubleWish": { "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
-    "threadNeedle": { "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
-    "offerings": { "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
-    "reflection": { "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
-    "nightMarket": { "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
-    "wordCloud": { "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "reveal": "...", "artifactIds": ["a1"], "charSelectionIds": ["a1"] }
+    "doubleWish": { "transitionLines": ["..."], "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "charVisibleText": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
+    "threadNeedle": { "transitionLines": ["..."], "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "charVisibleText": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
+    "offerings": { "transitionLines": ["..."], "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "charVisibleText": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
+    "reflection": { "transitionLines": ["..."], "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "charVisibleText": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
+    "nightMarket": { "transitionLines": ["..."], "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "charVisibleText": "...", "reveal": "...", "artifactIds": [], "charSelectionIds": [] },
+    "wordCloud": { "transitionLines": ["..."], "sharedObject": "...", "memoryLine": "...", "options": [], "charAction": "...", "charVisibleText": "...", "reveal": "...", "artifactIds": ["a1"], "charSelectionIds": ["a1"] }
   }
 }`;
 }
@@ -390,14 +449,19 @@ export async function prepareQixiMemoryBundle(
     char: CharacterProfile,
     user: UserProfile,
     apiConfig: APIConfig,
+    options: { forceRegenerate?: boolean; strict?: boolean; onRecallComplete?: () => void } = {},
 ): Promise<QixiMemoryPreparation> {
     let messages: Message[] = [];
     try { messages = await DB.getMessagesByCharId(char.id); } catch { /* fallback below */ }
     const contextSignature = buildContextSignature(messages, char, user);
     const cached = loadQixiMemoryBundle(char.id);
-    if (cached?.contextSignature === contextSignature) return { bundle: cached, usedFallback: cached.source === 'fallback' };
+    if (!options.forceRegenerate && cached?.contextSignature === contextSignature) {
+        options.onRecallComplete?.();
+        return { bundle: cached, usedFallback: cached.source === 'fallback' };
+    }
 
     if (!apiConfig.baseUrl || !apiConfig.apiKey || !apiConfig.model) {
+        if (options.strict) throw new Error('Part 1 无法生成：请先配置可用的模型 API。');
         if (cached?.source === 'memory') {
             return { bundle: cached, usedFallback: false, reason: 'API 未配置，沿用上次找到的真实记忆' };
         }
@@ -405,23 +469,21 @@ export async function prepareQixiMemoryBundle(
     }
 
     try {
-        const recallQueries = [
-            '等待 失联 想联系 负面情绪 安慰 撤回 沉默 没说完的话 冷战 后来和好',
-            '愿望 目标 烦恼 工作 学习 创作 自由 休息 未来 想做到的事',
-            '饮料 食物 昵称 口头禅 礼物 截图 表情 梗 日期 日常小事 喜欢 需要',
-        ];
-        const recallSections: string[] = [];
-        let roomPlatesInjection = '';
-        for (const query of recallQueries) {
-            const recallChar = { ...char, memoryPalaceInjection: '', roomPlatesInjection: '' };
-            await injectMemoryPalace(recallChar, messages, query, user.name, { entryPoint: 'direct' });
-            if (recallChar.memoryPalaceInjection) recallSections.push(recallChar.memoryPalaceInjection);
-            if (!roomPlatesInjection && recallChar.roomPlatesInjection) roomPlatesInjection = recallChar.roomPlatesInjection;
-        }
+        const recallQuery = [
+            '七夕活动需要的真实共同记忆，请同时寻找以下方面：',
+            '想念、寻找对方、联系、分享、没说完的话、撤回、沉默、等待、失联；',
+            '礼物、食物、饮料、日常物件、日期时间、称呼昵称、口头禅、截图图片、梗；',
+            '学习、工作、创作、为对方做成的事、愿望目标、未来、彼此印象；',
+            '安慰、害怕、难过、烦恼、负面情绪、陪伴、和好、需要、喜欢、自由、休息。',
+            '优先返回私人、具体、可核对，能适配七夕八个地点的记忆。',
+        ].join('\n');
+        const recallChar = { ...char, memoryPalaceInjection: '', roomPlatesInjection: '' };
+        await injectMemoryPalace(recallChar, messages, recallQuery, user.name, { entryPoint: 'direct' });
+        options.onRecallComplete?.();
         const memoryChar = {
             ...char,
-            memoryPalaceInjection: [...new Set(recallSections)].join('\n\n').slice(0, 30000),
-            roomPlatesInjection,
+            memoryPalaceInjection: (recallChar.memoryPalaceInjection || '').slice(0, 30000),
+            roomPlatesInjection: recallChar.roomPlatesInjection || '',
         };
         const recent = formatRecentMessages(messages);
         const roleAndMemoryContext = ContextBuilder.buildCoreContext(memoryChar, user, true);
@@ -442,7 +504,7 @@ export async function prepareQixiMemoryBundle(
             },
             0,
             70000,
-            { appId: 'special-moments', charId: char.id, purpose: 'qixi-dual-layer-materials-v2' },
+            { appId: 'special-moments', charId: char.id, purpose: 'qixi-dual-layer-part1-v6' },
         );
         const content = data?.choices?.[0]?.message?.content;
         const bundle = typeof content === 'string' ? parseQixiMemoryBundle(content, contextSignature) : null;
@@ -450,7 +512,8 @@ export async function prepareQixiMemoryBundle(
         saveQixiMemoryBundle(char.id, bundle);
         return { bundle, usedFallback: false };
     } catch (error: any) {
-        console.warn('[Qixi] v2 memory bundle fallback:', error?.message || error);
+        console.warn('[Qixi] v6 memory bundle fallback:', error?.message || error);
+        if (options.strict) throw new Error(error?.message || 'Part 1 生成失败，请手动重新生成。');
         if (cached?.source === 'memory') {
             return { bundle: cached, usedFallback: false, reason: '新记忆暂时没有抵达，沿用上次素材' };
         }
