@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "versionCode": 30405,
-  "versionName": "3.4.5",
-  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.5/SullyOS-Android-v3.4.5.apk",
-  "sha256": "0b467f4e88ccceeb82449a968dde838f382cfcd9db5d8f621772d49c7a2c09ea",
-  "sizeBytes": 36981879,
-  "publishedAt": "2026-08-18T16:44:07Z",
+  "versionCode": 30406,
+  "versionName": "3.4.6",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.6/SullyOS-Android-v3.4.6.apk",
+  "sha256": "865073a2abfaba22fb4f1c82f65803e4c8bb895bb8a35f8f20c5edf45513f745",
+  "sizeBytes": 36983429,
+  "publishedAt": "2026-08-18T17:07:03Z",
   "releaseNotes": [
-    "对齐最新 master bd547b0d（含 PR #593）",
-    "新增七夕双层事件并增强智能上下文、记忆与聊天体验",
-    "增强 Live2D、语音收藏、VR 性能诊断与主动消息 2.0 后台流程",
+    "对齐最新 master b2101e83（含 PR #595）",
+    "修复七夕词云流程可能进入死路的问题",
+    "兼容七夕阶段接口的不同响应结构，增强会话状态与记忆恢复",
     "延续固定签名、UnifiedPush / ntfy、Android PDF 导入与应用内更新"
   ]
 }
