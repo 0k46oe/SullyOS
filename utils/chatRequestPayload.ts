@@ -18,6 +18,9 @@ import { injectMemoryPalace } from './memoryPalace/pipeline';
 import { renderLocalContextGuidance } from './memoryPalace/recallRouter';
 import { renderInteractionAdaptationGuidance } from './memoryPalace/interactionAdaptation';
 import { renderDeepEngagementGuidance } from './memoryPalace/deepEngagement';
+import { renderConversationEngagementGuidance } from './memoryPalace/conversationEngagement';
+import type { ConversationEngagementAnalysis } from './memoryPalace/conversationEngagement';
+import type { DeepEngagementAnalysis } from './memoryPalace/deepEngagement';
 import { buildHtmlPrompt } from './htmlPrompt';
 import { buildThinkingChainPrompt } from './thinkingChainPrompt';
 import { buildMcdMiniAppContextBlock } from './mcdToolBridge';
@@ -432,7 +435,15 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
     if (input.recallEntryPoint === 'chat_app') {
         volatileTail += renderLocalContextGuidance(recallTrace.contextAnalyzer);
         volatileTail += renderInteractionAdaptationGuidance(recallTrace.interactionAdaptation?.analysis);
-        volatileTail += renderDeepEngagementGuidance(recallTrace.deepEngagement?.analysis);
+        const engagementTrace = recallTrace.deepEngagement;
+        if (engagementTrace?.engine === 'legacy_depth') {
+            volatileTail += renderDeepEngagementGuidance(engagementTrace.analysis as DeepEngagementAnalysis | undefined);
+        } else if (engagementTrace?.engine === 'conversation_v2') {
+            // M3 核心原则常驻；分析结果只决定是否在后面追加当轮状态策略。
+            volatileTail += renderConversationEngagementGuidance(
+                engagementTrace.analysis as ConversationEngagementAnalysis | undefined,
+            );
+        }
     }
 
     // 「关于对方的表达」+「回到你自己」必须是易变尾段的最后内容：修复旧版把双语/HTML/

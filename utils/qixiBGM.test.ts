@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { qixiStageToBGMGroup } from '../components/events/qixi/QixiBGM';
+import { describe, expect, it, vi } from 'vitest';
+import { prepareQixiBGMFadeIn, qixiStageToBGMGroup, stopQixiBGMTrack } from '../components/events/qixi/QixiBGM';
 
 describe('Qixi BGM scene routing', () => {
     it('uses the fall track through scene 01', () => {
@@ -21,5 +21,25 @@ describe('Qixi BGM scene routing', () => {
         ['bridgeLoading', 'bridge', 'bridgeCrossing', 'reunionLoading', 'reunion', 'touch', 'ending'].forEach(stage => {
             expect(qixiStageToBGMGroup(stage, 7)).toBe('bridge');
         });
+    });
+});
+
+describe('Qixi BGM transitions', () => {
+    it('stops and rewinds the previous track immediately', () => {
+        const audio = {
+            currentTime: 48,
+            pause: vi.fn(),
+            volume: 0.32,
+        };
+        stopQixiBGMTrack(audio);
+        expect(audio.pause).toHaveBeenCalledOnce();
+        expect(audio.currentTime).toBe(0);
+        expect(audio.volume).toBe(0);
+    });
+
+    it('starts the incoming track from silence for fade-in', () => {
+        const audio = { volume: 0.32 };
+        prepareQixiBGMFadeIn(audio);
+        expect(audio.volume).toBe(0);
     });
 });

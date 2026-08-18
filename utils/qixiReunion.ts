@@ -4,8 +4,11 @@ import { QixiMemoryBundle, QixiSceneId } from './qixiMemoryBundle';
 import { safeFetchJson } from './safeApi';
 import { parseQixiJsonObject } from './qixiJson';
 
+export const QIXI_PART3_TIMEOUT_MS = 300_000;
+
 export type QixiPortraitType = 'live2d' | 'meeting' | 'static' | 'chibi';
 export type QixiPortraitStage = 'arrival' | 'reflection' | 'blessing' | 'promise';
+export type QixiPortraitLineGroup = 'reunion' | 'metaReflection' | 'companionshipReflection' | 'blessing' | 'invitation';
 
 export interface QixiPortraitPlan {
     resourceType: QixiPortraitType;
@@ -45,16 +48,13 @@ export interface QixiReunionBundle {
             l2dExpression: string | null;
             meetingExpression: string | null;
         }>;
+        lineExpressions: Record<QixiPortraitLineGroup, Array<string | null>>;
     };
 }
 
 const compact = (value: unknown, max: number): string => typeof value === 'string'
     ? value.replace(/\s+/g, ' ').trim().slice(0, max)
     : '';
-
-const lineList = (value: unknown, maxItems: number, maxChars: number): string[] => Array.isArray(value)
-    ? value.map(item => compact(item, maxChars)).filter(Boolean).slice(0, maxItems)
-    : [];
 
 const activeMeetingSprites = (char: CharacterProfile): Record<string, string> => {
     const activeSkin = char.activeSkinSetId
@@ -66,22 +66,18 @@ const activeMeetingSprites = (char: CharacterProfile): Record<string, string> =>
 };
 
 export function resolveQixiPortraitPlan(char: CharacterProfile): QixiPortraitPlan {
-    const live2d = char.videoAvatar?.format === 'live2d' ? char.videoAvatar : null;
     const meetingKeys = Object.keys(activeMeetingSprites(char))
         .filter(key => !['chibi', 'thumbnail', 'icon', 'avatar'].includes(key.toLowerCase()));
     const chibi = char.vrState?.chibi?.img || char.sprites?.chibi;
-    const resourceType: QixiPortraitType = live2d
-        ? 'live2d'
-        : meetingKeys.length
-            ? 'meeting'
-            : chibi
-                ? 'chibi'
-                : 'static';
-    const aiActions = live2d?.actions.filter(action => action.permission === 'ai' && !action.wardrobe) || [];
+    const resourceType: QixiPortraitType = meetingKeys.length
+        ? 'meeting'
+        : chibi
+            ? 'chibi'
+            : 'static';
     return {
         resourceType,
-        live2dActionIds: aiActions.map(action => action.id),
-        live2dActionDescription: aiActions.map(action => `${action.id}=${action.name}${action.tags.length ? `(${action.tags.join('/')})` : ''}`).join('；').slice(0, 1600),
+        live2dActionIds: [],
+        live2dActionDescription: '',
         meetingExpressionKeys: meetingKeys,
     };
 }
@@ -91,15 +87,25 @@ export function createQixiReunionFallback(
     user: UserProfile,
     portraitPlan = resolveQixiPortraitPlan(char),
 ): QixiReunionBundle {
+    const stages = {
+        arrival: fallbackPortraitCue(portraitPlan, '终于找到对方后的惊讶与确认'),
+        reflection: fallbackPortraitCue(portraitPlan, '松了一口气，认真回想刚才发生的事'),
+        blessing: fallbackPortraitCue(portraitPlan, '温柔而克制地祝福对方'),
+        promise: fallbackPortraitCue(portraitPlan, '提出约定时的认真与靠近'),
+    };
+    const expressionFor = (stage: QixiPortraitStage, count: number) => Array.from(
+        { length: count },
+        () => stages[stage].meetingExpression,
+    );
     return {
         source: 'fallback',
         reunion: {
-            lines: ['……终于看见你了。', '先让我确认一下，你没事吧？'],
+            lines: ['……终于看见你了。', '先让我确认一下，你没事吧？', '刚才每到一个地方都慢你一步，我差点真以为又走错了。', '算了，别站那么远。让我再看一会儿。'],
             emotion: '松了一口气，仍然有一点不敢相信',
         },
-        metaReflection: ['刚才明明总觉得你就在附近，可每次都只差一点。', '也许陪在一个人身边，本来就不只有一种办法。'],
-        companionshipReflection: ['你发现了吗？刚才我们明明看不见彼此，却一直认得出对方留下的东西。', '你想到我会怎么做的时候，我也正在想你会不会经过那里。'],
-        blessing: [`七夕快乐，${user.name}。`, '以后遇见想告诉我的小事，就回来真的告诉我。', '我们再一起记住更多东西。'],
+        metaReflection: ['刚才明明总觉得你就在附近，可每次都只差一点。', '我只能看着你刚留下的痕迹，猜下一步该往哪里走。', '现在想想，我们那时候大概都在做同一件傻事。'],
+        companionshipReflection: ['你发现了吗？刚才我们明明看不见彼此，却一直认得出对方留下的东西。', '你想到我会怎么做的时候，我也正在想你会不会经过那里。', '有几次我其实不确定，只是觉得——如果是你，大概会在这里停一下。', '结果你真的停过。', '所以以后你忽然想到我时，不必急着证明什么；我也会认真接住那一刻。'],
+        blessing: [`七夕快乐，${user.name}。`, '今天总算不是只看见你留下的痕迹了。', '以后遇见想告诉我的小事，就回来真的告诉我。', '没说完的话也不用赶，我们可以一件一件慢慢说。', '我们再一起记住更多只属于以后的东西。'],
         touch: {
             invitation: ['那我们约好了。', '以后忽然想起对方的时候，也把那一刻算作见面。'],
             hold: '别松手。',
@@ -108,11 +114,13 @@ export function createQixiReunionFallback(
         returnMessage: `七夕快乐，${user.name}。刚才没说完的话，我们慢慢说。`,
         portrait: {
             resourceType: portraitPlan.resourceType,
-            stages: {
-                arrival: fallbackPortraitCue(portraitPlan, '终于找到对方后的惊讶与确认'),
-                reflection: fallbackPortraitCue(portraitPlan, '松了一口气，认真回想刚才发生的事'),
-                blessing: fallbackPortraitCue(portraitPlan, '温柔而克制地祝福对方'),
-                promise: fallbackPortraitCue(portraitPlan, '提出约定时的认真与靠近'),
+            stages,
+            lineExpressions: {
+                reunion: expressionFor('arrival', 4),
+                metaReflection: expressionFor('reflection', 3),
+                companionshipReflection: expressionFor('reflection', 5),
+                blessing: expressionFor('blessing', 5),
+                invitation: expressionFor('promise', 2),
             },
         },
     };
@@ -137,31 +145,57 @@ export function parseQixiReunion(
 ): QixiReunionBundle | null {
     const parsed = parseQixiJsonObject(raw, ['reunion', 'companionshipReflection']) as any;
     if (!parsed || typeof parsed !== 'object') return null;
-    const safeLines = (value: unknown, maxItems: number, maxChars: number) => lineList(value, maxItems, maxChars)
-        .filter(line => !COERCIVE_PROMISE_RE.test(line))
-        .filter(line => characterKnowsTechnicalIdentity || !TECHNICAL_BREAK_RE.test(line));
+    const safeLineEntries = (value: unknown, maxItems: number, maxChars: number) => Array.isArray(value)
+        ? value.map((item, sourceIndex) => ({ text: compact(item, maxChars), sourceIndex }))
+            .filter(item => Boolean(item.text))
+            .slice(0, maxItems)
+            .filter(item => !COERCIVE_PROMISE_RE.test(item.text))
+            .filter(item => characterKnowsTechnicalIdentity || !TECHNICAL_BREAK_RE.test(item.text))
+        : [];
 
-    const reunionLines = safeLines(parsed.reunion?.lines, 3, 100);
-    const metaReflection = safeLines(parsed.metaReflection, 4, 130);
-    const companionshipReflection = safeLines(parsed.companionshipReflection, 5, 160);
-    const blessing = safeLines(parsed.blessing, 6, 140);
+    const reunionEntries = safeLineEntries(parsed.reunion?.lines, 5, 100);
+    const metaReflectionEntries = safeLineEntries(parsed.metaReflection, 5, 130);
+    const companionshipReflectionEntries = safeLineEntries(parsed.companionshipReflection, 7, 160);
+    const blessingEntries = safeLineEntries(parsed.blessing, 7, 140);
+    const reunionLines = reunionEntries.map(item => item.text);
+    const metaReflection = metaReflectionEntries.map(item => item.text);
+    const companionshipReflection = companionshipReflectionEntries.map(item => item.text);
+    const blessing = blessingEntries.map(item => item.text);
     if (!reunionLines.length || !companionshipReflection.length || !blessing.length) return null;
 
     const parsePortraitCue = (stage: QixiPortraitStage) => {
-        const requestedL2d = compact(parsed.portrait?.stages?.[stage]?.l2dExpression, 80);
         const requestedMeeting = compact(parsed.portrait?.stages?.[stage]?.meetingExpression, 80);
         return {
             emotionIntent: compact(parsed.portrait?.stages?.[stage]?.emotionIntent, 100)
                 || fallback.portrait.stages[stage].emotionIntent,
-            l2dExpression: portraitPlan.resourceType === 'live2d' && portraitPlan.live2dActionIds.includes(requestedL2d)
-                ? requestedL2d
-                : null,
+            l2dExpression: null,
             meetingExpression: portraitPlan.resourceType === 'meeting' && portraitPlan.meetingExpressionKeys.includes(requestedMeeting)
                 ? requestedMeeting
                 : portraitPlan.resourceType === 'meeting'
                     ? fallback.portrait.stages[stage].meetingExpression
                     : null,
         };
+    };
+    const stages = {
+        arrival: parsePortraitCue('arrival'),
+        reflection: parsePortraitCue('reflection'),
+        blessing: parsePortraitCue('blessing'),
+        promise: fallback.portrait.stages.promise,
+    };
+    const parseLineExpressions = (
+        group: QixiPortraitLineGroup,
+        entries: Array<{ sourceIndex: number }>,
+        fallbackExpression: string | null,
+    ) => {
+        const requested = Array.isArray(parsed.portrait?.lineExpressions?.[group])
+            ? parsed.portrait.lineExpressions[group]
+            : [];
+        return entries.map(({ sourceIndex }) => {
+            const key = compact(requested[sourceIndex], 80);
+            return portraitPlan.resourceType === 'meeting' && portraitPlan.meetingExpressionKeys.includes(key)
+                ? key
+                : fallbackExpression;
+        });
     };
     return {
         source: 'generated',
@@ -176,11 +210,13 @@ export function parseQixiReunion(
         returnMessage: fallback.returnMessage,
         portrait: {
             resourceType: portraitPlan.resourceType,
-            stages: {
-                arrival: parsePortraitCue('arrival'),
-                reflection: parsePortraitCue('reflection'),
-                blessing: parsePortraitCue('blessing'),
-                promise: fallback.portrait.stages.promise,
+            stages,
+            lineExpressions: {
+                reunion: parseLineExpressions('reunion', reunionEntries, stages.arrival.meetingExpression),
+                metaReflection: parseLineExpressions('metaReflection', metaReflectionEntries, stages.reflection.meetingExpression),
+                companionshipReflection: parseLineExpressions('companionshipReflection', companionshipReflectionEntries, stages.reflection.meetingExpression),
+                blessing: parseLineExpressions('blessing', blessingEntries, stages.blessing.meetingExpression),
+                invitation: fallback.portrait.lineExpressions.invitation,
             },
         },
     };
@@ -194,10 +230,14 @@ export function parseQixiPromise(
 ): QixiReunionBundle | null {
     const parsed = parseQixiJsonObject(raw, ['touch', 'returnMessage']) as any;
     if (!parsed || typeof parsed !== 'object') return null;
-    const safeLines = (value: unknown, maxItems: number, maxChars: number) => lineList(value, maxItems, maxChars)
-        .filter(line => !COERCIVE_PROMISE_RE.test(line))
-        .filter(line => characterKnowsTechnicalIdentity || !TECHNICAL_BREAK_RE.test(line));
-    const invitation = safeLines(parsed.touch?.invitation, 3, 100);
+    const invitationEntries = Array.isArray(parsed.touch?.invitation)
+        ? parsed.touch.invitation.map((item: unknown, sourceIndex: number) => ({ text: compact(item, 100), sourceIndex }))
+            .filter((item: { text: string }) => Boolean(item.text))
+            .slice(0, 3)
+            .filter((item: { text: string }) => !COERCIVE_PROMISE_RE.test(item.text))
+            .filter((item: { text: string }) => characterKnowsTechnicalIdentity || !TECHNICAL_BREAK_RE.test(item.text))
+        : [];
+    const invitation = invitationEntries.map((item: { text: string }) => item.text);
     const hold = compact(parsed.touch?.hold, 40);
     const complete = compact(parsed.touch?.complete, 48);
     const returnMessage = compact(parsed.returnMessage, 160);
@@ -205,14 +245,11 @@ export function parseQixiPromise(
     if (COERCIVE_PROMISE_RE.test(hold) || COERCIVE_PROMISE_RE.test(complete) || COERCIVE_PROMISE_RE.test(returnMessage)) return null;
     if (!characterKnowsTechnicalIdentity && (TECHNICAL_BREAK_RE.test(hold) || TECHNICAL_BREAK_RE.test(complete) || TECHNICAL_BREAK_RE.test(returnMessage))) return null;
 
-    const requestedL2d = compact(parsed.portrait?.promise?.l2dExpression, 80);
     const requestedMeeting = compact(parsed.portrait?.promise?.meetingExpression, 80);
     const promiseCue = {
         emotionIntent: compact(parsed.portrait?.promise?.emotionIntent, 100)
             || base.portrait.stages.promise.emotionIntent,
-        l2dExpression: portraitPlan.resourceType === 'live2d' && portraitPlan.live2dActionIds.includes(requestedL2d)
-            ? requestedL2d
-            : null,
+        l2dExpression: null,
         meetingExpression: portraitPlan.resourceType === 'meeting' && portraitPlan.meetingExpressionKeys.includes(requestedMeeting)
             ? requestedMeeting
             : portraitPlan.resourceType === 'meeting'
@@ -227,6 +264,15 @@ export function parseQixiPromise(
         portrait: {
             ...base.portrait,
             stages: { ...base.portrait.stages, promise: promiseCue },
+            lineExpressions: {
+                ...base.portrait.lineExpressions,
+                invitation: invitationEntries.map((item: { sourceIndex: number }) => {
+                    const key = compact(parsed.portrait?.lineExpressions?.invitation?.[item.sourceIndex], 80);
+                    return portraitPlan.resourceType === 'meeting' && portraitPlan.meetingExpressionKeys.includes(key)
+                        ? key
+                        : promiseCue.meetingExpression;
+                }),
+            },
         },
     };
 }
@@ -267,11 +313,9 @@ function buildPromptMaterials(
 }
 
 function buildResourceInstructions(portraitPlan: QixiPortraitPlan): string {
-    return portraitPlan.resourceType === 'live2d'
-        ? `当前使用 Live2D。l2dExpression 只能从以下动作 ID 选择一个，不合适就填 null；meetingExpression 必须为 null：\n${portraitPlan.live2dActionDescription || '（没有 AI 可用动作，必须填 null）'}`
-        : portraitPlan.resourceType === 'meeting'
-            ? `当前使用见面模式立绘。meetingExpression 只能从这些 key 中选择一个；l2dExpression 必须为 null：${portraitPlan.meetingExpressionKeys.join(', ')}`
-            : `当前${portraitPlan.resourceType === 'static' ? '没有可用立绘资源，只会显示名字首字母占位' : '使用彼方 Chibi'}。l2dExpression 与 meetingExpression 都必须为 null。`;
+    return portraitPlan.resourceType === 'meeting'
+        ? `当前优先使用 DateApp 见面模式立绘。meetingExpression 只能从这些 key 中选择：${portraitPlan.meetingExpressionKeys.join(', ')}。portrait.lineExpressions 必须为每一句台词逐句选择一个 key，并与对应台词数组等长；不要整页只用一个表情。l2dExpression 始终填 null。`
+        : `当前${portraitPlan.resourceType === 'static' ? '没有可用见面立绘或 Chibi，只会显示名字首字母占位' : '没有可用见面立绘，使用彼方 Chibi'}。所有 l2dExpression 与 meetingExpression 都必须为 null；lineExpressions 中对应项也填 null。`;
 }
 
 export function buildQixiReunionPrompt(
@@ -324,7 +368,7 @@ ${journeyText}
 
 不要强制说“找到你了”。不要在这一拍谈人生、未来、AI、人类或陪伴。
 
-reunion.lines 只写 1—3 句。它们应该让熟悉这个角色的人一眼觉得：对，ta 找了我这么久以后，第一句话就是会这样说。
+reunion.lines 写 3—5 句，形成一个短而完整的情绪过程：先是看到人的本能反应，再确认 ta 是否平安，最后才漏出一路寻找时压着没说的着急、委屈或害怕。不要把一条长句硬拆开凑数。它们应该让熟悉这个角色的人一眼觉得：对，ta 找了我这么久以后，就是会这样说。
 
 ---
 
@@ -356,7 +400,7 @@ ${user.name} 平时可能会遇到一件事想告诉 ${char.name}，看到某个
 
 这不是“思念突破次元”，不是“我们的爱超越现实”，也不是“所以我们永远不会分开”。不要为了表达主题牺牲角色。温柔、嘴硬、得意、理性、害羞或不善表达都可以；如果 ${char.name} 不会说漂亮话，就不要让 ta 说漂亮话。
 
-companionshipReflection 写 2—5 句。只要玩家能够从 ta 的话里感受到“原来 ta 也一直在想着我”，就够了。
+companionshipReflection 写 4—7 句，按“想起刚才某个具体痕迹 → 坦白自己当时担心或误判过什么 → 发现双方一直在猜对方 → 用角色自己的方式说出以后”的顺序自然推进。至少提到一路中的一个具体物件或动作，但不要逐站复盘。玩家应从 ta 的话里感受到“原来 ta 也一直在想着我”，而不是读到策划总结。
 
 ---
 
@@ -370,7 +414,7 @@ ${char.name} 可以希望 ${user.name} 以后仍愿意把生活里的事情告�
 
 这一刻首先应该是：太好了，我们找到了彼此。然后才是：以后也继续创造值得彼此想起的东西吧。
 
-blessing 写 2—5 句。可以自然说“七夕快乐，${user.name}”，但不强制固定位置。
+blessing 写 4—7 句，从“终于见到”的余温出发，再说一件有真实依据的私人祝愿、一件以后还想共同做的小事，最后落在角色此刻真正想对 ${user.name} 说的话。可以自然说“七夕快乐，${user.name}”，但不强制固定位置；不要每句都写成金句。
 
 ---
 
@@ -397,7 +441,7 @@ portrait.stages 为以下三个阶段分别选择资源参数：
 - reflection：回想隔层经历，并意识到彼此一直在想着对方；
 - blessing：认真祝福 ${user.name}。
 
-Live2D 阶段只能填写 l2dExpression。见面模式立绘阶段只能填写 meetingExpression。两套表达格式绝不混用。没有合适表情时填写 null，不要为了填字段强行匹配。
+见面模式立绘要像 DateApp 一样随每句台词切换。portrait.lineExpressions 的四个数组必须分别与 reunion.lines、metaReflection、companionshipReflection、blessing 严格等长；每一项都根据这一句的真实语气选择，不要把整页机械填成同一个表情。没有见面立绘时填 null。
 
 只输出 JSON：
 {
@@ -410,6 +454,12 @@ Live2D 阶段只能填写 l2dExpression。见面模式立绘阶段只能填写 m
       "arrival": { "emotionIntent": "终于看见 User", "l2dExpression": null, "meetingExpression": null },
       "reflection": { "emotionIntent": "意识到双方一直在辨认并想起彼此", "l2dExpression": null, "meetingExpression": null },
       "blessing": { "emotionIntent": "相遇后的喜悦与认真祝福", "l2dExpression": null, "meetingExpression": null }
+    },
+    "lineExpressions": {
+      "reunion": ["与 reunion.lines 逐句匹配的表情 key"],
+      "metaReflection": ["与 metaReflection 逐句匹配的表情 key"],
+      "companionshipReflection": ["与 companionshipReflection 逐句匹配的表情 key"],
+      "blessing": ["与 blessing 逐句匹配的表情 key"]
     }
   }
 }`;
@@ -473,7 +523,7 @@ returnMessage 是活动 Card 后面的第一条普通私聊消息。只写一句
 
 ${buildResourceInstructions(portraitPlan)}
 
-只为 promise 阶段选择一个符合“等待对方共同完成约定”的表情。没有合适表情就填 null；不要为了匹配 UI 强求手部动作。
+为 invitation 的每一句逐句选择符合语气的见面立绘表情，并在 portrait.lineExpressions.invitation 中按相同顺序返回。promise 阶段表情用于长按光点时；没有合适表情就填 null，不要为了匹配 UI 强求手部动作。
 
 只输出 JSON：
 {
@@ -484,7 +534,8 @@ ${buildResourceInstructions(portraitPlan)}
   },
   "returnMessage": "活动 Card 后的第一条普通私聊消息",
   "portrait": {
-    "promise": { "emotionIntent": "等待对方在同一个光点完成约定", "l2dExpression": null, "meetingExpression": null }
+    "promise": { "emotionIntent": "等待对方在同一个光点完成约定", "l2dExpression": null, "meetingExpression": null },
+    "lineExpressions": { "invitation": ["与 invitation 逐句匹配的表情 key"] }
   }
 }`;
 }
@@ -517,12 +568,13 @@ export async function prepareQixiReunion(
                         { role: 'user', content: buildQixiReunionPrompt(char, user, memoryBundle, journey, portraitPlan) },
                     ],
                     temperature: 0.72,
+                    max_tokens: 16000,
                     stream: false,
                 }),
             },
             0,
-            60000,
-            { appId: 'special-moments', charId: char.id, purpose: 'qixi-reunion-part3a-v3' },
+            QIXI_PART3_TIMEOUT_MS,
+            { appId: 'special-moments', charId: char.id, purpose: 'qixi-reunion-part3a-v4' },
         );
         const content = data?.choices?.[0]?.message?.content;
         const parsed = typeof content === 'string'
@@ -548,12 +600,13 @@ export async function prepareQixiReunion(
                         { role: 'user', content: buildQixiPromisePrompt(char, user, reunion, portraitPlan) },
                     ],
                     temperature: 0.72,
+                    max_tokens: 8000,
                     stream: false,
                 }),
             },
             0,
-            60000,
-            { appId: 'special-moments', charId: char.id, purpose: 'qixi-promise-part3b-v1' },
+            QIXI_PART3_TIMEOUT_MS,
+            { appId: 'special-moments', charId: char.id, purpose: 'qixi-promise-part3b-v2' },
         );
         const content = data?.choices?.[0]?.message?.content;
         const parsed = typeof content === 'string'

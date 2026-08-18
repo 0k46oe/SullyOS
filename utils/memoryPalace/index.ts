@@ -96,6 +96,34 @@ export type {
     DeepEngagementAnalysis,
     EngagementMode,
 } from './deepEngagement';
+export {
+    advanceConversationEngagement,
+    analyzeConversationEngagement,
+    clearConversationEngagementState,
+    loadConversationEngagementState,
+    renderConversationEngagementGuidance,
+    saveConversationEngagementState,
+    shouldUseLegacyDeepEngagement,
+    CONVERSATION_ENGAGEMENT_ENGINE_KEY,
+    CONVERSATION_ENGAGEMENT_STORAGE_PREFIX,
+    CONVERSATION_ENGAGEMENT_VERSION,
+} from './conversationEngagement';
+export type {
+    ActiveConversationSubject,
+    ConversationAct,
+    ConversationEngagementAdvanceResult,
+    ConversationEngagementAnalysis,
+    ConversationEngagementReason,
+    ConversationInteractionMode,
+    EngagementState,
+    GroundedConversationFact,
+    ProgressiveConversationStance,
+    ResponseAct,
+    ResponsePlan,
+    StoredConversationEngagementState,
+    SubjectHook,
+    SubjectHookKind,
+} from './conversationEngagement';
 export type {
     InteractionSurfaceState,
     ResolvedAccommodationPolicy,

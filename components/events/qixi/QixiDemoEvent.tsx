@@ -1,10 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { APIConfig, CharacterProfile, SpriteConfig, UserProfile } from '../../../types';
-import Live2DAvatarCanvas, { Live2DActionTrigger } from '../../call/Live2DAvatarCanvas';
 import { useBlobRefUrl } from '../../../utils/blobRef';
-import { DEFAULT_STAGE_FRAMING } from '../../../utils/avatarPerformance';
-import { BUILTIN_SULLY_DEFAULT_FRAMING, isBuiltinSullyLive2D } from '../../../utils/builtinSullyLive2D';
 import './QixiDemoEvent.css';
 import './QixiDemoRound2.css';
 import { QixiBGMToggle, useQixiBGM } from './QixiBGM';
@@ -15,8 +12,13 @@ import {
     QixiMemoryArtifact,
     QixiMemoryBundle,
     QixiSceneId,
+    QixiSceneOption,
     QIXI_SCENE_IDS,
+    QIXI_DEFAULT_USER_LAYER_COLOR,
+    QIXI_FALLBACK_CHAR_LAYER_COLOR,
+    QIXI_USER_LAYER_COLORS,
     qixiCharMutter,
+    qixiCharQuips,
     qixiCharVisibleText,
     qixiTransitionLines,
 } from '../../../utils/qixiMemoryBundle';
@@ -41,7 +43,7 @@ import { enterQixiInterlayerState, QixiEntryAttitude, selectQixiWordTurn } from 
 
 export const QIXI_DEMO_RECORD_KEY = 'qixi_2026_dual_layer_v7';
 
-type Stage = 'cover' | 'loading' | 'fakeChat' | 'distort' | 'entry' | 'sceneTransition' | 'scene' | 'bridgeLoading' | 'bridge' | 'bridgeCrossing' | 'reunionLoading' | 'reunion' | 'touch' | 'ending';
+type Stage = 'cover' | 'colorSelect' | 'loading' | 'fakeChat' | 'distort' | 'entry' | 'sceneTransition' | 'scene' | 'bridgeLoading' | 'bridge' | 'bridgeCrossing' | 'reunionLoading' | 'reunion' | 'touch' | 'ending';
 type EntryAttitude = QixiEntryAttitude;
 type SceneBeat = 'idle' | 'user' | 'char' | 'complete';
 type GenerationPart = 'part1' | 'part2' | 'part3';
@@ -63,6 +65,7 @@ export interface QixiGameV8 {
     reunion?: QixiReunionBundle;
     reunionPage: number;
     reunionLineIndex: number;
+    userLayerColor?: string;
 }
 
 export type QixiSessionMode = 'fresh' | 'replay';
@@ -131,9 +134,9 @@ const createPlannedJourney = (bundle: QixiMemoryBundle): QixiJourneyBeat[] => QI
     charAction: bundle.scenes[sceneId].charAction,
 }));
 
-const FALLBACK_WORDS = ['认真', '嘴硬', '晚睡', '温柔', '小事', '耐心', '好奇', '勇气', '安静', '分享', '想念', '自由', '努力', '休息'];
+const FALLBACK_WORDS = ['认真', '嘴硬', '温柔', '敏锐', '慢热', '好奇', '倔强', '爱逗人', '细心', '勇敢', '安静', '自由', '别扭', '可靠'];
 
-const freshGame = (): QixiGameV8 => ({
+const freshGame = (userLayerColor: string = QIXI_DEFAULT_USER_LAYER_COLOR): QixiGameV8 => ({
     version: 8,
     stage: 'cover',
     sceneIndex: 0,
@@ -146,6 +149,7 @@ const freshGame = (): QixiGameV8 => ({
     bridgeFinalState: 'idle',
     reunionPage: 0,
     reunionLineIndex: 0,
+    userLayerColor,
 });
 
 const loadGame = (charId: string): QixiGameV8 | null => {
@@ -346,7 +350,7 @@ const QixiFlappyLoader = React.forwardRef<QixiFlappyHandle, {
         simRef.current.vy = -315;
     };
 
-    return <main className="q7-loading-game"><ExitButton onClose={onClose} /><section><p className="q7-kicker">MEMORY SORTING · FLAPPY CHAR</p><h2>穿过正在整理的<br />上下文碎片</h2><p>正在整理你和 {char.name} 的聊天与共同记忆，这一步可能需要稍长时间。</p>{notice && <small className="q7-loading-status">{notice}</small>}</section><div className="q7-flappy-shell"><canvas ref={canvasRef} width={360} height={520} onPointerDown={flap} aria-label="点击或触摸让角色上升" />{!ui.alive && !ready && <button type="button" onClick={reset}>再飞一次</button>}{!ui.alive && ready && <div className="q7-flappy-ready"><small>MEMORIES READY</small><b>记忆整理完成。</b><button type="button" data-qixi-action="loading-continue" onClick={onContinue}>落进那条异常消息</button></div>}</div><footer>点击 / 触摸，让 {char.name} 上升</footer></main>;
+    return <main className="q7-loading-game"><ExitButton onClose={onClose} /><section><p className="q7-kicker">MEMORY SORTING · FLAPPY CHAR</p><h2>穿过正在整理的<br />上下文碎片</h2>{notice && <small className="q7-loading-status">{notice}</small>}</section><div className="q7-flappy-shell"><canvas ref={canvasRef} width={360} height={520} onPointerDown={flap} aria-label="点击或触摸让角色上升" />{!ui.alive && !ready && <button type="button" onClick={reset}>再飞一次</button>}{!ui.alive && ready && <div className="q7-flappy-ready"><small>MEMORIES READY</small><b>记忆整理完成。</b><button type="button" data-qixi-action="loading-continue" onClick={onContinue}>落进那条异常消息</button></div>}</div><footer>点击 / 触摸，让 {char.name} 上升</footer></main>;
 });
 QixiFlappyLoader.displayName = 'QixiFlappyLoader';
 
@@ -354,38 +358,63 @@ const AnimatedText: React.FC<{ text: string; className?: string }> = ({ text, cl
     <span className={className} aria-label={text}>{[...text].map((char, index) => <i key={`${char}-${index}`} style={{ '--char-index': index } as React.CSSProperties}>{char}</i>)}</span>
 );
 
+const LOST_LAYER_ERRORS = [
+    ['API 429', '请求太快，请稍后再试'],
+    ['TIMEOUT', '这条消息等了太久'],
+    ['DELIVERY FAILED', '抱歉，暂时没能送达'],
+    ['CONNECTION LOST', '正在努力重新连接'],
+    ['RESPONSE BLOCKED', '很遗憾，回复中断了'],
+    ['UNKNOWN ERROR', '或许可以换个说法'],
+] as const;
+
 const SceneObject: React.FC<{
     sceneId: QixiSceneId;
     label: string;
     beat: SceneBeat;
+    visualQuips?: string[];
     userText?: string;
     charText?: string;
     charMutter?: string;
-    fragments?: QixiMemoryArtifact[];
-    touchedFragment?: string;
-    showLostFragments?: boolean;
-    onFragmentTouch?: (id: string) => void;
-}> = ({ sceneId, label, beat, userText, charText, charMutter, fragments = [], touchedFragment, showLostFragments = false, onFragmentTouch }) => {
+    charReply?: string;
+    charContribution?: string;
+    topicOptions?: QixiSceneOption[];
+    selectedTopicId?: string;
+    onTopicSelect?: (id: string) => void;
+}> = ({ sceneId, label, beat, visualQuips = [], userText, charText, charMutter, charReply, charContribution, topicOptions = [], selectedTopicId, onTopicSelect }) => {
     const changedByChar = beat === 'char' || beat === 'complete';
     return <div className={`q7-object is-${sceneId} is-beat-${beat}`} aria-label={label}>
         {sceneId === 'lostLayer' && <div className="q7-message-object">
             <i className="q7-message-line" /><i className="q7-message-line" /><i className="q7-message-line" />
-            <b className="q7-delivery-error"><span>DELIVERY FAILED</span></b>
-            {(showLostFragments || changedByChar) && <div className="q7-leaked-lines">{fragments.slice(0, 5).map((item, index) => <button type="button" key={item.id} style={{ '--leak-index': index } as React.CSSProperties} className={`${touchedFragment === item.id ? 'is-user-touched' : ''} ${changedByChar && index < 3 ? 'is-taken' : ''}`} onClick={() => onFragmentTouch?.(item.id)}><span>{item.label}</span></button>)}</div>}
+            <div className="q7-topic-choices">{topicOptions.slice(0, 3).map((option, index) => <button type="button" key={option.id} style={{ '--topic-index': index } as React.CSSProperties} className={selectedTopicId === option.id ? 'is-selected' : ''} disabled={beat !== 'idle'} onClick={() => onTopicSelect?.(option.id)}><span>{option.label}</span></button>)}</div>
+            {beat !== 'idle' && <div className={`q7-lost-error-field ${changedByChar ? 'is-erasing' : ''}`} aria-label="发送失败，报错正在铺满空间">
+                {LOST_LAYER_ERRORS.map(([code, message], index) => <b key={code} style={{ '--error-index': index } as React.CSSProperties}><small>{code}</small><span>{message}</span>{changedByChar && <i aria-hidden="true" />}</b>)}
+            </div>}
             {changedByChar && <div className="q7-char-overwrite">
                 {charMutter && <AnimatedText className="q7-char-mutter" text={charMutter} />}
-                <span className="q7-error-scribble" aria-hidden="true"><i /><i /><i /></span>
             </div>}
+            {changedByChar && visualQuips.length > 0 && <div className="q7-lost-whispers" aria-label={`另一层的碎碎念：${visualQuips.join(' ')}`}>{visualQuips.slice(0, 2).map((quip, index) => <p key={`${quip}-${index}`} style={{ '--quip-index': index } as React.CSSProperties}>“{quip}”</p>)}</div>}
             {changedByChar && charText && <AnimatedText className="q7-lost-core-instruction" text={charText} />}
+            {changedByChar && charReply && <AnimatedText className="q7-lost-real-reply" text={charReply} />}
         </div>}
-        {sceneId === 'doubleWish' && <div className={`q7-wish-object ${changedByChar ? 'is-flipped' : ''}`}><div className="front"><i>愿</i>{userText && <AnimatedText text={userText} />}</div><div className="back">{charText && <AnimatedText text={charText} />}</div><span className="hanger" /></div>}
-        {sceneId === 'threadNeedle' && <svg viewBox="0 0 260 220" aria-hidden="true"><path className="needle" d="M175 26L83 187" /><ellipse className="eye" cx="170" cy="35" rx="7" ry="14" transform="rotate(31 170 35)" /><path className="thread" d="M25 151C87 75 153 170 211 86S292 71 236 174" /></svg>}
-        {sceneId === 'offerings' && <div className="q7-altar-object"><span /><i className="fruit one" /><i className="fruit two" /><i className="cup" />{changedByChar && <i className="from-char" />}</div>}
-        {sceneId === 'reflection' && <div className="q7-water-object"><i /><i /><i /><span />{changedByChar && <b />}</div>}
-        {sceneId === 'nightMarket' && <div className="q7-market-object"><span /><i>小事</i><i className={changedByChar ? 'is-sold' : ''}>{changedByChar ? '售罄' : '称呼'}</i><i>饮料</i></div>}
-        {sceneId === 'wordCloud' && <div className="q7-vine-object"><i /><i /><i /><span /></div>}
-        {beat === 'user' && userText && sceneId !== 'doubleWish' && <AnimatedText className="q7-user-object-text" text={userText} />}
-        {changedByChar && charText && !['doubleWish', 'lostLayer'].includes(sceneId) && <AnimatedText className="q7-char-object-text" text={charText} />}
+        {sceneId === 'doubleWish' && <div className={`q7-wish-object ${changedByChar ? 'is-flipped' : ''}`}>
+            <div className="front"><small>你的愿望</small><i className="q7-wish-seal">愿</i>{userText && <AnimatedText text={userText} />}</div>
+            <div className="back"><small>{'另一面的愿望'}</small>{charText && <AnimatedText text={charText} />}{visualQuips[0] && <em className="q7-wish-whisper">“{visualQuips[0]}”</em>}</div>
+            <span className="hanger" />
+        </div>}
+        {sceneId === 'threadNeedle' && <svg viewBox="0 0 260 220" aria-hidden="true"><path className="needle" d="M175 26L83 187" /><ellipse className="eye" cx="170" cy="35" rx="7" ry="14" transform="rotate(31 170 35)" /><path className="thread user-thread" d="M25 151C87 75 153 170 211 86S292 71 236 174" /><path className="thread char-thread" d="M233 177C190 138 159 55 103 105S40 119 29 159" /><circle className="thread-spark" cx="170" cy="35" r="4" /></svg>}
+        {sceneId === 'offerings' && <div className="q7-offering-stage">
+            <span className="q7-offering-table" aria-hidden="true" />
+            <section className="q7-offering-slot is-user"><small>你放下</small><b>{userText || '你的供物'}</b><i aria-hidden="true" /></section>
+            <section className="q7-offering-slot is-char"><small>另一边也放下</small><b>{charContribution || '一件属于 ta 的东西'}</b><i aria-hidden="true" /></section>
+            {changedByChar && visualQuips[0] && <em className="q7-offering-quip">“{visualQuips[0]}”</em>}
+        </div>}
+        {sceneId === 'reflection' && <div className="q7-water-object"><i /><i /><i /><span /><em className="q7-water-star">✦</em>{changedByChar && <b />}</div>}
+        {sceneId === 'nightMarket' && <div className="q7-market-object"><span /><i>小事</i><i className={changedByChar ? 'is-sold' : ''}>{changedByChar ? '售罄' : '称呼'}</i><i>饮料</i><b className="q7-market-ticket" /></div>}
+        {sceneId === 'wordCloud' && <div className="q7-vine-object"><i /><i /><i /><span /><b /><b /><b /></div>}
+        {visualQuips.length > 0 && !['lostLayer', 'doubleWish', 'offerings'].includes(sceneId) && <div className={`q7-char-visual-quips is-${sceneId}`} aria-label={`另一层吐槽：${visualQuips.join(' ')}`}>
+            {visualQuips.map((quip, index) => <p key={`${quip}-${index}`} style={{ '--quip-index': index } as React.CSSProperties}>“{quip}”</p>)}
+        </div>}
+        {changedByChar && !['lostLayer', 'doubleWish', 'wordCloud'].includes(sceneId) && <span className="q7-char-signature" aria-hidden="true"><i /><i /><i /></span>}
         <small>{label}</small>
     </div>;
 };
@@ -401,10 +430,10 @@ const QixiPortrait: React.FC<{
     char: CharacterProfile;
     reunion: QixiReunionBundle;
     stage: QixiPortraitStage;
+    meetingExpression?: string | null;
     adjustable?: boolean;
     onMeetingConfigSave?: (config: SpriteConfig) => void;
-}> = ({ char, reunion, stage, adjustable = false, onMeetingConfigSave }) => {
-    const [live2dFailed, setLive2dFailed] = useState(false);
+}> = ({ char, reunion, stage, meetingExpression, adjustable = false, onMeetingConfigSave }) => {
     const [meetingFailed, setMeetingFailed] = useState(false);
     const [chibiFailed, setChibiFailed] = useState(false);
     const [settingsOpen, setSettingsOpen] = useState(false);
@@ -412,31 +441,19 @@ const QixiPortrait: React.FC<{
     const meetingSprites = activeMeetingSprites(char);
     const cue = reunion.portrait.stages[stage];
     const meetingKeys = Object.keys(meetingSprites).filter(key => !['chibi', 'thumbnail', 'icon', 'avatar'].includes(key.toLowerCase()));
-    const meetingKey = cue.meetingExpression && meetingKeys.includes(cue.meetingExpression)
-        ? cue.meetingExpression
+    const requestedMeetingExpression = meetingExpression || cue.meetingExpression;
+    const meetingKey = requestedMeetingExpression && meetingKeys.includes(requestedMeetingExpression)
+        ? requestedMeetingExpression
         : meetingKeys.includes('normal') ? 'normal' : meetingKeys[0];
     const meetingRaw = meetingKey ? meetingSprites[meetingKey] : undefined;
     const chibiRaw = qixiChibiRaw(char);
     const meetingUrl = useBlobRefUrl(meetingRaw);
     const chibiUrl = useBlobRefUrl(chibiRaw);
-    const live2DFraming = char.videoAvatar?.companionFraming
-        || (isBuiltinSullyLive2D(char.videoAvatar) ? { ...BUILTIN_SULLY_DEFAULT_FRAMING } : DEFAULT_STAGE_FRAMING);
-    const companionCrop = char.videoAvatar?.companionCrop;
-    const cropAdjusted = Boolean(companionCrop && [companionCrop.top, companionCrop.right, companionCrop.bottom, companionCrop.left].some(value => value > .001));
-    const live2DClipPath = cropAdjusted && companionCrop
-        ? `inset(${companionCrop.top * 100}% ${companionCrop.right * 100}% ${companionCrop.bottom * 100}% ${companionCrop.left * 100}% round 1.4rem)`
-        : undefined;
-    const manualAction = useMemo<Live2DActionTrigger | null>(() => cue.l2dExpression
-        ? { id: cue.l2dExpression, nonce: Date.now() }
-        : null, [cue.l2dExpression]);
     useEffect(() => setMeetingFailed(false), [meetingUrl]);
     useEffect(() => setChibiFailed(false), [chibiUrl]);
     useEffect(() => {
         setMeetingConfig(char.spriteConfig || { scale: 1, x: 0, y: 0 });
     }, [char.id, char.spriteConfig?.scale, char.spriteConfig?.x, char.spriteConfig?.y]);
-    if (char.videoAvatar?.format === 'live2d' && !live2dFailed) {
-        return <div className="q7-portrait is-live2d" style={{ clipPath: live2DClipPath }}><Live2DAvatarCanvas config={char.videoAvatar} framing={live2DFraming} motionState="idle" manualAction={manualAction} ambientAutonomyDisabled preserveActiveWardrobe onError={() => setLive2dFailed(true)} /></div>;
-    }
     const meetingStyle: React.CSSProperties = {
         animation: 'q7-gal-portrait .7s ease both',
         transform: `translate(calc(-50% + ${meetingConfig.x}%), ${meetingConfig.y}%) scale(${meetingConfig.scale})`,
@@ -487,10 +504,11 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
     const [memoryStatus, setMemoryStatus] = useState<'idle' | 'loading' | 'memory' | 'fallback'>(cachedAtOpen?.source === 'memory' ? 'memory' : 'idle');
     const [memoryNotice, setMemoryNotice] = useState('');
     const [loadingReady, setLoadingReady] = useState(false);
+    const [selectedUserLayerColor, setSelectedUserLayerColor] = useState<string>(
+        replayGameAtOpen.current?.userLayerColor || savedAtOpen.current?.userLayerColor || QIXI_DEFAULT_USER_LAYER_COLOR,
+    );
     const [generationStatus, setGenerationStatus] = useState<Record<GenerationPart, GenerationState>>({ part1: 'idle', part2: 'idle', part3: 'idle' });
     const [generationError, setGenerationError] = useState<{ part: GenerationPart; message: string } | null>(null);
-    const [touchedFragment, setTouchedFragment] = useState('');
-    const [lostLayerTouchReady, setLostLayerTouchReady] = useState(false);
     const [touch, setTouch] = useState<TouchState>({ x: 50, y: 64, active: false, approaching: false, joined: false, releasedEarly: false, releasedAfterJoin: false });
     const touchingRef = useRef(false);
     const joinedRef = useRef(false);
@@ -500,10 +518,16 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
     const finishToChatRef = useRef<() => Promise<void>>(async () => undefined);
     const bgm = useQixiBGM(game.stage, game.sceneIndex);
     const activeBundle = memoryBundle || fallbackBundle;
+    const sessionUserLayerColor = ['cover', 'colorSelect'].includes(game.stage)
+        ? selectedUserLayerColor
+        : game.userLayerColor || selectedUserLayerColor;
+    const sessionCharLayerColor = activeBundle.charLayerColor || QIXI_FALLBACK_CHAR_LAYER_COLOR;
+    const charPerformance = activeBundle.charPerformance || { tempo: 'measured', markStyle: 'soft', presence: 'careful' };
     const currentSceneId = QIXI_SCENE_IDS[Math.max(0, Math.min(QIXI_SCENE_IDS.length - 1, game.sceneIndex))];
     const sceneMeta = SCENES[currentSceneId];
     const scenePayload = activeBundle.scenes[currentSceneId];
     const sceneDecisions = game.decisions[currentSceneId] || [];
+    const selectedSceneOption = scenePayload.options.find(option => sceneDecisions.includes(option.id));
     const sceneCompleted = game.completedScenes.includes(currentSceneId);
     const portraitPlan = useMemo(() => resolveQixiPortraitPlan(char), [char]);
     const sceneFragments = useMemo(() => {
@@ -512,7 +536,7 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
             .filter((item): item is QixiMemoryArtifact => Boolean(item));
         const fill = activeBundle.artifacts.filter(item => !selected.some(existing => existing.id === item.id));
         const combined = [...selected, ...fill];
-        const fallbackFragments = ['没收到', '是不是我说错了', '别等了', '[图片]', '23:57'].map((label, index): QixiMemoryArtifact => ({ id: `leak-${index}`, label, kind: index === 4 ? 'date' : 'phrase', evidenceIds: [] }));
+        const fallbackFragments = ['今天怎么样', '刚想到一件小事', '想给你看这个', '[图片]', '23:57'].map((label, index): QixiMemoryArtifact => ({ id: `leak-${index}`, label, kind: index === 4 ? 'date' : index < 3 ? 'topic' : 'phrase', evidenceIds: [] }));
         return [...combined, ...fallbackFragments.filter(item => !combined.some(existing => existing.label === item.label))].slice(0, 6);
     }, [activeBundle.artifacts, scenePayload.artifactIds]);
 
@@ -533,6 +557,13 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
     const wordTurnWaiting = currentSceneId === 'wordCloud'
         && game.sceneBeat === 'idle'
         && sceneDecisions.length > game.wordCloudCharRevealed;
+    const sceneCharQuips = qixiCharQuips(currentSceneId, scenePayload);
+    const activeWordCloudQuip = currentSceneId === 'wordCloud' && game.wordCloudCharRevealed > 0
+        ? sceneCharQuips[Math.min(game.wordCloudCharRevealed - 1, sceneCharQuips.length - 1)]
+        : '';
+    const visibleVisualCharQuips = currentSceneId === 'wordCloud'
+        ? (activeWordCloudQuip && !wordTurnWaiting ? [activeWordCloudQuip] : [])
+        : (game.sceneBeat === 'char' || game.sceneBeat === 'complete' ? sceneCharQuips.slice(0, 2) : []);
 
     const generatePart3 = useCallback(async (bundle: QixiMemoryBundle): Promise<QixiReunionBundle | null> => {
         if (reunionResultRef.current) {
@@ -596,7 +627,12 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
         setGenerationStatus({ part1: 'generating', part2: 'idle', part3: 'idle' });
         setGenerationError(null);
         setMemoryNotice(`正在整理你和 ${char.name} 的聊天与共同记忆，这一步可能需要稍长时间。`);
-        materialGenerationRef.current = prepareQixiMemoryBundle(char, user, apiConfig, { forceRegenerate, strict: true, onRecallComplete })
+        materialGenerationRef.current = prepareQixiMemoryBundle(char, user, apiConfig, {
+            forceRegenerate,
+            strict: true,
+            onRecallComplete,
+            userLayerColor: selectedUserLayerColor,
+        })
             .then(prepared => {
                 setMemoryBundle(prepared.bundle);
                 setMemoryStatus('memory');
@@ -613,7 +649,7 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
             })
             .finally(() => { materialGenerationRef.current = null; });
         return materialGenerationRef.current;
-    }, [apiConfig, char, generatePart2And3, user]);
+    }, [apiConfig, char, generatePart2And3, selectedUserLayerColor, user]);
 
     const startFresh = useCallback(async () => {
         finishRef.current = false;
@@ -621,14 +657,19 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
         bridgeResultRef.current = null;
         reunionResultRef.current = null;
         setLoadingReady(false);
-        setGame({ ...freshGame(), stage: 'cover' });
+        setGame({ ...freshGame(selectedUserLayerColor), stage: 'colorSelect' });
         try {
-            await ensureMaterials(true, () => setGame({ ...freshGame(), stage: 'loading' }));
+            await ensureMaterials(true, () => setGame({ ...freshGame(selectedUserLayerColor), stage: 'loading' }));
             setLoadingReady(true);
         } catch {
             setLoadingReady(false);
         }
-    }, [ensureMaterials]);
+    }, [ensureMaterials, selectedUserLayerColor]);
+
+    const openColorSelect = useCallback(() => {
+        setMemoryNotice('');
+        setGame(current => ({ ...current, stage: 'colorSelect' }));
+    }, []);
 
     const startReplay = useCallback(() => {
         finishRef.current = false;
@@ -636,8 +677,10 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
         bridgeResultRef.current = source?.bridge || null;
         reunionResultRef.current = source?.reunion || null;
         if (!memoryBundle) setMemoryBundle(replaySnapshot?.bundle || loadQixiMemoryBundle(char.id) || fallbackBundle);
-        setGame({ ...freshGame(), stage: 'fakeChat', attitude: source?.attitude });
-    }, [char.id, fallbackBundle, memoryBundle, replaySnapshot?.bundle]);
+        const replayColor = source?.userLayerColor || selectedUserLayerColor;
+        setSelectedUserLayerColor(replayColor);
+        setGame({ ...freshGame(replayColor), stage: 'fakeChat', attitude: source?.attitude });
+    }, [char.id, fallbackBundle, memoryBundle, replaySnapshot?.bundle, selectedUserLayerColor]);
 
     const continueAfterLoading = useCallback(() => {
         setGame(current => ({ ...current, stage: 'fakeChat' }));
@@ -659,16 +702,16 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
         setGenerationError(null);
         if (part === 'part1') {
             setLoadingReady(false);
-            setGame({ ...freshGame(), stage: 'cover' });
+            setGame({ ...freshGame(selectedUserLayerColor), stage: 'colorSelect' });
             try {
-                const bundle = await ensureMaterials(true, () => setGame({ ...freshGame(), stage: 'loading' }));
+                const bundle = await ensureMaterials(true, () => setGame({ ...freshGame(selectedUserLayerColor), stage: 'loading' }));
                 setLoadingReady(true);
                 return bundle;
             } catch { return null; }
         }
         if (part === 'part2') return generatePart2And3(activeBundle);
         return generatePart3(activeBundle);
-    }, [activeBundle, ensureMaterials, game.stage, generatePart2And3, generatePart3, generationError?.part]);
+    }, [activeBundle, ensureMaterials, generatePart2And3, generatePart3, generationError?.part, selectedUserLayerColor]);
 
     const enterInterlayer = useCallback((attitude: EntryAttitude) => {
         // Preserve bridge/reunion generated during Flappy and the opening. The
@@ -678,8 +721,6 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
 
     const chooseOption = useCallback((optionId: string, result: string) => {
         if (sceneCompleted || game.sceneBeat !== 'idle') return;
-        setTouchedFragment('');
-        setLostLayerTouchReady(false);
         setGame(current => ({
             ...current,
             sceneBeat: 'user',
@@ -687,11 +728,6 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
             results: { ...current.results, [currentSceneId]: [result] },
         }));
     }, [currentSceneId, game.sceneBeat, sceneCompleted]);
-
-    const touchMemoryFragment = useCallback((artifactId: string) => {
-        if (currentSceneId !== 'lostLayer' || game.sceneBeat !== 'user' || !lostLayerTouchReady) return;
-        setTouchedFragment(artifactId);
-    }, [currentSceneId, game.sceneBeat, lostLayerTouchReady]);
 
     const toggleWord = useCallback((artifactId: string) => {
         if (sceneCompleted || game.sceneBeat !== 'idle') return;
@@ -727,7 +763,6 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
         setGame(current => {
             if (current.stage !== 'scene') return current;
             if (current.sceneBeat === 'user') {
-                if (currentSceneId === 'lostLayer' && !touchedFragment) return current;
                 return { ...current, sceneBeat: 'char' };
             }
             if (current.sceneBeat === 'char') {
@@ -735,14 +770,12 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
             }
             return current;
         });
-    }, [currentSceneId, touchedFragment]);
+    }, [currentSceneId]);
 
     const nextScene = useCallback(() => {
         setGame(current => current.sceneIndex >= QIXI_SCENE_IDS.length - 1
             ? { ...current, stage: 'bridgeLoading' }
             : { ...current, stage: 'sceneTransition', sceneIndex: current.sceneIndex + 1, sceneBeat: 'idle' });
-        setTouchedFragment('');
-        setLostLayerTouchReady(false);
     }, []);
 
     const journey = useMemo((): QixiJourneyBeat[] => QIXI_SCENE_IDS.map(sceneId => {
@@ -940,24 +973,17 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
         finishToChatRef.current = finishToChat;
     }, [finishToChat]);
 
-    useEffect(() => {
-        if (game.stage !== 'ending') return;
-        const timer = window.setTimeout(() => void finishToChatRef.current(), 2800);
-        return () => window.clearTimeout(timer);
-    }, [game.stage]);
-
     const visibleActions = useMemo(() => {
         if (game.stage === 'cover') {
             if (sessionMode === 'replay') return ['重看上一次梦境'];
-            return memoryStatus === 'loading' ? ['正在辨认共同记忆'] : savedAtOpen.current ? ['进入梦境', '继续上次探索'] : ['进入梦境'];
+            return savedAtOpen.current ? ['进入梦境', '继续上次探索'] : ['进入梦境'];
         }
+        if (game.stage === 'colorSelect') return memoryStatus === 'loading' ? ['正在辨认共同记忆'] : QIXI_USER_LAYER_COLORS.map(color => color.label);
         if (game.stage === 'loading') return loadingReady ? ['等待落地', '记忆整理完成后继续'] : ['点击或触摸使角色上升'];
         if (game.stage === 'entry') return ['探索附近', '喊 ta 的名字', '留在原地'];
         if (game.stage === 'sceneTransition') return ['继续'];
         if (game.stage === 'scene') {
-            if (game.sceneBeat === 'user' && currentSceneId === 'lostLayer' && !lostLayerTouchReady) return ['继续'];
-            if (game.sceneBeat === 'user' && currentSceneId === 'lostLayer' && !touchedFragment) return sceneFragments.map(item => item.label);
-            if (game.sceneBeat === 'user') return ['继续'];
+            if (game.sceneBeat === 'user') return [currentSceneId === 'lostLayer' ? '看看另一层的反应' : '继续'];
             if (game.sceneBeat === 'char') return ['继续'];
             if (currentSceneId === 'wordCloud' && !sceneCompleted) return wordTurnWaiting ? ['等待另一边选择'] : wordArtifacts.map(item => item.label);
             if (!sceneCompleted) return scenePayload.options.map(option => option.label);
@@ -975,8 +1001,9 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
             if (game.reunionLineIndex < invitationCount) return ['继续听约定'];
             return [touch.joined ? '松手，留下约定' : '按住发光圆圈'];
         }
+        if (game.stage === 'ending') return ['点击任意处结束'];
         return [];
-    }, [currentSceneId, game.bridge, game.bridgePlaced, game.reunion?.touch.invitation.length, game.reunionLineIndex, game.sceneBeat, game.sceneIndex, game.stage, loadingReady, lostLayerTouchReady, memoryStatus, sceneCompleted, sceneFragments, scenePayload.options, sessionMode, touch.joined, touchedFragment, wordArtifacts, wordTurnWaiting]);
+    }, [currentSceneId, game.bridge, game.bridgePlaced, game.reunion?.touch.invitation.length, game.reunionLineIndex, game.sceneBeat, game.sceneIndex, game.stage, loadingReady, memoryStatus, sceneCompleted, scenePayload.options, sessionMode, touch.joined, wordArtifacts, wordTurnWaiting]);
 
     useEffect(() => {
         const renderState = () => JSON.stringify({
@@ -987,10 +1014,14 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
             scene: ['sceneTransition', 'scene'].includes(game.stage) ? { id: currentSceneId, title: sceneMeta.title, index: game.sceneIndex + 1, beat: game.sceneBeat, completed: sceneCompleted } : undefined,
             transitionLines: game.stage === 'sceneTransition' ? qixiTransitionLines(currentSceneId, scenePayload) : undefined,
             material: { status: memoryStatus, evidence: activeBundle.evidence.length, artifacts: activeBundle.artifacts.length, personalizedScenes: activeBundle.personalizedSceneIds },
+            layerIdentity: { userColor: sessionUserLayerColor, charColor: sessionCharLayerColor, charPerformance },
+            bgm: { group: bgm.group, muted: bgm.muted },
             flappy: game.stage === 'loading' ? flappyRef.current?.state() : undefined,
             selected: game.stage === 'scene' ? sceneDecisions : undefined,
-            lostLayerTouchReady: game.stage === 'scene' && currentSceneId === 'lostLayer' ? lostLayerTouchReady : undefined,
             wordCloudTurns: game.stage === 'scene' && currentSceneId === 'wordCloud' ? { user: sceneDecisions.length, char: game.wordCloudCharRevealed, waiting: wordTurnWaiting } : undefined,
+            charRemark: game.stage === 'scene' && visibleVisualCharQuips.length ? visibleVisualCharQuips : undefined,
+            charReply: game.stage === 'scene' && currentSceneId === 'lostLayer' ? selectedSceneOption?.charReply : undefined,
+            charContribution: game.stage === 'scene' && currentSceneId === 'offerings' ? scenePayload.charContribution : undefined,
             completedScenes: game.completedScenes,
             generation: generationStatus,
             preparedParts: { part2: Boolean(game.bridge || bridgeResultRef.current), part3: Boolean(game.reunion || reunionResultRef.current) },
@@ -1021,7 +1052,7 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
             if (window.render_game_to_text === renderState) delete window.render_game_to_text;
             if (window.advanceTime === advanceTime) delete window.advanceTime;
         };
-    }, [activeBundle, completeTouch, currentSceneId, game, generationError?.part, generationStatus, lostLayerTouchReady, memoryStatus, sceneCompleted, sceneDecisions, sceneMeta.title, sessionMode, touch, visibleActions, wordTurnWaiting]);
+    }, [activeBundle, bgm.group, bgm.muted, completeTouch, currentSceneId, game, generationError?.part, generationStatus, memoryStatus, sceneCompleted, sceneDecisions, sceneMeta.title, scenePayload.charContribution, selectedSceneOption?.charReply, sessionMode, touch, visibleActions, wordTurnWaiting]);
 
     const renderCover = () => (
         <main className="q7-cover">
@@ -1033,7 +1064,7 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
                 <h1><small>星月</small>梦境童话</h1>
                 <em>THE TALE BENEATH A MESSAGE</em>
                 <blockquote>沿着一条没有送达的消息，<br />捡回从聊天里漏掉的小事。</blockquote>
-                <button type="button" data-qixi-action="enter-dream" className="q7-primary" onClick={sessionMode === 'replay' ? startReplay : startFresh} disabled={sessionMode === 'fresh' && memoryStatus === 'loading'}><span>{sessionMode === 'replay' ? '重看这次梦境' : memoryStatus === 'loading' ? '确认两条星线中' : '进入梦境'}</span><small>{sessionMode === 'replay' ? 'REPLAY THE SAME MEMORY' : memoryStatus === 'loading' ? 'TRACING MEMORIES' : 'ENTER REVERIE'}</small></button>
+                <button type="button" data-qixi-action="enter-dream" className="q7-primary" onClick={sessionMode === 'replay' ? startReplay : openColorSelect}><span>{sessionMode === 'replay' ? '重看这次梦境' : '进入梦境'}</span><small>{sessionMode === 'replay' ? 'REPLAY THE SAME MEMORY' : 'ENTER REVERIE'}</small></button>
                 {sessionMode === 'replay' ? <p className="q7-notice is-memory">沿用上一次的记忆素材、鹊桥与最终约定，不会再次调用模型，也不会重复写入私聊。</p> : memoryNotice && <p className={`q7-notice is-${memoryStatus}`}>{memoryNotice}</p>}
                 {sessionMode === 'fresh' && savedAtOpen.current && <button type="button" data-qixi-action="resume" className="q7-resume" onClick={resume}>继续上次掉下去的地方</button>}
             </section>
@@ -1054,11 +1085,11 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
 
     const renderSceneTransition = () => {
         const lines = qixiTransitionLines(currentSceneId, scenePayload);
-        return <main className="q7-scene-transition" style={{ '--user-color': sceneMeta.userColor, '--char-color': sceneMeta.charColor } as React.CSSProperties}>
+        return <main className="q7-scene-transition" style={{ '--user-color': sessionUserLayerColor, '--char-color': sessionCharLayerColor } as React.CSSProperties}>
             <CelestialBackdrop /><ExitButton onClose={onClose} />
             <div className="q7-transition-orbit" aria-hidden="true"><i className="is-user" /><i className="is-char" /><span /></div>
             <section>
-                <small>{String(game.sceneIndex + 1).padStart(2, '0')} · BETWEEN CONTEXTS</small>
+                <small>前往 {String(game.sceneIndex + 1).padStart(2, '0')} · {sceneMeta.title}</small>
                 <div>{lines.map((line, index) => <p key={`${line}-${index}`}><AnimatedText text={line} /></p>)}</div>
                 <button type="button" data-qixi-action="enter-scene" onClick={() => setGame(current => ({ ...current, stage: 'scene' }))}>继续 <i>→</i></button>
             </section>
@@ -1066,26 +1097,39 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
     };
 
     const attitudeLine = game.attitude === 'shout'
-        ? '你喊出的名字在字缝里反弹。没有回答，只有一小段冷色光比回声晚了一拍。'
+        ? '你喊出的名字在字缝里弹了一下，几句还没发出的日常话题跟着亮起。'
         : game.attitude === 'stay'
-            ? '你确实等了一会儿。随后，脚下的空白自己向前移动。'
-            : '第一步落下时，一件无法送达的东西在远处亮起。';
+            ? '你等了一秒，输入框把几句还没说的话推到面前。'
+            : '第一步落下时，几件还想继续聊的小事在远处亮起。';
+
+    const wishCardText = currentSceneId === 'doubleWish'
+        ? selectedSceneOption?.label.replace(/^(?:写|许愿)[：:]\s*/, '')
+        : undefined;
+    const sceneObjectUserText = currentSceneId === 'offerings'
+        ? selectedSceneOption?.label
+        : wishCardText;
+    const sceneChoicePrompt: Partial<Record<QixiSceneId, string>> = {
+        doubleWish: '选一个你真想和 ta 一起抵达的以后',
+        threadNeedle: '决定这一轮怎么和另一边配合',
+        offerings: '选一件你想先放上供桌的东西',
+        reflection: '决定要在水面留下什么',
+        nightMarket: '挑一种试探另一边的办法',
+    };
 
     const renderScene = () => (
-        <main className={`q7-story q7-scene is-${currentSceneId}`} style={{ '--user-color': sceneMeta.userColor, '--char-color': sceneMeta.charColor } as React.CSSProperties}>
+        <main className={`q7-story q7-scene is-${currentSceneId}`} style={{ '--user-color': sessionUserLayerColor, '--char-color': sessionCharLayerColor } as React.CSSProperties}>
             <CelestialBackdrop /><ExitButton onClose={onClose} />
             <div className="q7-route" aria-label="七夕星路">{QIXI_SCENE_IDS.map((id, index) => <i key={id} className={`${index === game.sceneIndex ? 'is-current' : ''} ${game.completedScenes.includes(id) ? 'is-done' : ''}`}><span>{String(index + 1).padStart(2, '0')}</span></i>)}<b className="bridge-dot">∞</b></div>
             <header><p className="q7-kicker">{String(game.sceneIndex + 1).padStart(2, '0')} · {sceneMeta.intention}</p><h2>{sceneMeta.title}</h2><em>{sceneMeta.ritual}</em>{game.sceneIndex === 0 && <small>{attitudeLine}</small>}</header>
             <section className="q7-scene-grid">
-                <div className="q7-visual"><SceneObject sceneId={currentSceneId} label={scenePayload.sharedObject} beat={game.sceneBeat} userText={currentSceneId === 'lostLayer' && lostLayerTouchReady ? undefined : (game.results[currentSceneId] || [])[0]} charText={qixiCharVisibleText(currentSceneId, scenePayload)} charMutter={currentSceneId === 'lostLayer' ? qixiCharMutter(scenePayload) : undefined} fragments={sceneFragments} touchedFragment={touchedFragment} showLostFragments={lostLayerTouchReady} onFragmentTouch={touchMemoryFragment} /><p><AnimatedText text={scenePayload.memoryLine} /></p></div>
+                <div className="q7-visual"><SceneObject sceneId={currentSceneId} label={scenePayload.sharedObject} beat={game.sceneBeat} visualQuips={visibleVisualCharQuips} userText={sceneObjectUserText} charText={['lostLayer', 'doubleWish'].includes(currentSceneId) ? qixiCharVisibleText(currentSceneId, scenePayload) : undefined} charMutter={currentSceneId === 'lostLayer' ? qixiCharMutter(scenePayload) : undefined} charReply={currentSceneId === 'lostLayer' ? selectedSceneOption?.charReply : undefined} charContribution={currentSceneId === 'offerings' ? scenePayload.charContribution : undefined} topicOptions={currentSceneId === 'lostLayer' ? scenePayload.options : undefined} selectedTopicId={currentSceneId === 'lostLayer' ? sceneDecisions[0] : undefined} onTopicSelect={optionId => { const option = scenePayload.options.find(item => item.id === optionId); if (option) chooseOption(option.id, option.result); }} /><p><AnimatedText text={scenePayload.memoryLine} /></p></div>
                 <div className="q7-interaction">
-                    {!sceneCompleted && game.sceneBeat === 'idle' && currentSceneId !== 'wordCloud' && <><small>碰一个具体东西</small>{scenePayload.options.map(option => <button key={option.id} type="button" data-qixi-action={`choose-${currentSceneId}-${option.id}`} onClick={() => chooseOption(option.id, option.result)}>{option.label}<i>→</i></button>)}</>}
-                    {!sceneCompleted && game.sceneBeat === 'idle' && currentSceneId === 'wordCloud' && <><small>你选一个，对面就选一个 · {Math.min(sceneDecisions.length + (wordTurnWaiting ? 0 : 1), WORD_PICK_COUNT)} / {WORD_PICK_COUNT}</small><div className={`q7-words is-turn-taking ${wordTurnWaiting ? 'is-waiting' : ''}`}>{wordArtifacts.map(item => <button key={item.id} type="button" disabled={wordTurnWaiting || sceneDecisions.includes(item.id)} className={`${sceneDecisions.includes(item.id) ? 'is-user' : ''} ${visibleCharWordSelections.includes(item.id) ? 'is-char' : ''}`} data-qixi-action={`word-${item.id}`} onClick={() => toggleWord(item.id)}>{item.label}</button>)}</div><p className={`q7-word-turn-status ${wordTurnWaiting ? 'is-char' : 'is-user'}`}><i />{wordTurnWaiting ? '另一种颜色正在选择……' : game.wordCloudCharRevealed ? '轮到你了。' : '先由你选。'}</p></>}
-                    {!sceneCompleted && game.sceneBeat === 'user' && currentSceneId === 'lostLayer' && !lostLayerTouchReady && <div className="q7-beat-prompt is-user"><small>你刚才的操作</small><p>{(game.results[currentSceneId] || [])[0]}</p><button type="button" data-qixi-action="lost-layer-show-fragments" onClick={() => setLostLayerTouchReady(true)}>继续 <i>→</i></button></div>}
-                    {!sceneCompleted && game.sceneBeat === 'user' && currentSceneId === 'lostLayer' && lostLayerTouchReady && !touchedFragment && <div className="q7-beat-prompt"><small>刚才的反馈已经退开</small><p>现在，碰一碰漏出来的其中一句。</p></div>}
-                    {!sceneCompleted && game.sceneBeat === 'user' && currentSceneId === 'lostLayer' && lostLayerTouchReady && touchedFragment && <div className="q7-beat-prompt is-user"><small>这句停在了你的指尖</small><p>{sceneFragments.find(item => item.id === touchedFragment)?.label}</p><button type="button" data-qixi-action="scene-reveal-char" onClick={advanceSceneBeat}>继续 <i>→</i></button></div>}
+                    {!sceneCompleted && game.sceneBeat === 'idle' && currentSceneId === 'lostLayer' && <div className="q7-lost-instruction"><small>选择一个想和 ta 聊的话题</small><p>从输入框里挑一句现在想说的话。</p></div>}
+                    {!sceneCompleted && game.sceneBeat === 'idle' && !['lostLayer', 'wordCloud'].includes(currentSceneId) && <><small>{sceneChoicePrompt[currentSceneId] || '选一种做法'}</small>{scenePayload.options.map(option => <button key={option.id} type="button" data-qixi-action={`choose-${currentSceneId}-${option.id}`} onClick={() => chooseOption(option.id, option.result)}>{option.label}<i>→</i></button>)}</>}
+                    {!sceneCompleted && game.sceneBeat === 'idle' && currentSceneId === 'wordCloud' && <><small>选 3 个词：你想到的那个人是什么性格 · {sceneDecisions.length} / {WORD_PICK_COUNT}</small><div className={`q7-words is-turn-taking ${wordTurnWaiting ? 'is-waiting' : ''}`}>{wordArtifacts.map(item => <button key={item.id} type="button" disabled={wordTurnWaiting || sceneDecisions.includes(item.id)} className={`${sceneDecisions.includes(item.id) ? 'is-user' : ''} ${visibleCharWordSelections.includes(item.id) ? 'is-char' : ''}`} data-qixi-action={`word-${item.id}`} onClick={() => toggleWord(item.id)}>{item.label}</button>)}</div><p className={`q7-word-turn-status ${wordTurnWaiting ? 'is-char' : 'is-user'}`}><i />{wordTurnWaiting ? '另一层也正在替你选一个词……' : game.wordCloudCharRevealed ? '再选一个你想到 ta 时会用的性格词。' : '先选一个最像 ta 的性格词。'}</p></>}
+                    {!sceneCompleted && game.sceneBeat === 'user' && currentSceneId === 'lostLayer' && <div className="q7-beat-prompt is-user is-error-beat"><small>这句话没有送达</small><p>{(game.results[currentSceneId] || [])[0]}</p><button type="button" data-qixi-action="scene-reveal-char" onClick={advanceSceneBeat}>看看另一层的反应 <i>→</i></button></div>}
                     {!sceneCompleted && game.sceneBeat === 'user' && currentSceneId !== 'lostLayer' && <div className="q7-beat-prompt is-user"><small>你碰过以后</small><p>{(game.results[currentSceneId] || [])[0]}</p><button type="button" data-qixi-action="scene-reveal-char" onClick={advanceSceneBeat}>继续 <i>→</i></button></div>}
-                    {!sceneCompleted && game.sceneBeat === 'char' && <div className="q7-beat-prompt is-char"><small>不是你造成的变化</small><p>{scenePayload.charAction}</p>{currentSceneId === 'wordCloud' && <div className="q7-words is-reveal">{wordArtifacts.map((item, index) => <span key={item.id} style={{ '--word-index': index } as React.CSSProperties} className={`${sceneDecisions.includes(item.id) ? 'is-user' : ''} ${visibleCharWordSelections.includes(item.id) ? 'is-char' : ''}`}>{item.label}</span>)}</div>}<button type="button" data-qixi-action="scene-complete-beat" onClick={advanceSceneBeat}>继续 <i>→</i></button></div>}
+                    {!sceneCompleted && game.sceneBeat === 'char' && <div className="q7-beat-prompt is-char"><small>{currentSceneId === 'lostLayer' ? '另一层挤了进来' : `${char.name} · 另一层传来`}</small><p className="q7-char-stage-direction">{scenePayload.charAction}</p>{currentSceneId === 'wordCloud' && <div className="q7-words is-reveal">{wordArtifacts.map((item, index) => <span key={item.id} style={{ '--word-index': index } as React.CSSProperties} className={`${sceneDecisions.includes(item.id) ? 'is-user' : ''} ${visibleCharWordSelections.includes(item.id) ? 'is-char' : ''}`}>{item.label}</span>)}</div>}<button type="button" data-qixi-action="scene-complete-beat" onClick={advanceSceneBeat}>继续 <i>→</i></button></div>}
                     {sceneCompleted && <div className="q7-result">{currentSceneId === 'wordCloud' && <div className="q7-words is-reveal">{wordArtifacts.map((item, index) => <span key={item.id} style={{ '--word-index': index } as React.CSSProperties} className={`${sceneDecisions.includes(item.id) ? 'is-user' : ''} ${visibleCharWordSelections.includes(item.id) ? 'is-char' : ''}`}>{item.label}</span>)}</div>}<button type="button" data-qixi-action="next-scene" className="q7-next" onClick={nextScene}>继续 <i>→</i></button></div>}
                 </div>
             </section>
@@ -1138,15 +1182,16 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
 
     const renderReunion = () => {
         const reunion = game.reunion!;
-        const pages: Array<{ label: string; lines: string[]; portraitStage: QixiPortraitStage }> = [
-            { label: '终于看见', lines: reunion.reunion.lines, portraitStage: 'arrival' },
-            ...(reunion.metaReflection.length ? [{ label: '隔层回声', lines: reunion.metaReflection, portraitStage: 'reflection' as QixiPortraitStage }] : []),
-            { label: '想起彼此', lines: reunion.companionshipReflection, portraitStage: 'reflection' },
-            { label: '七夕祝愿', lines: reunion.blessing, portraitStage: 'blessing' },
+        const pages: Array<{ label: string; lines: string[]; portraitStage: QixiPortraitStage; expressionGroup: 'reunion' | 'metaReflection' | 'companionshipReflection' | 'blessing' }> = [
+            { label: '终于看见', lines: reunion.reunion.lines, portraitStage: 'arrival', expressionGroup: 'reunion' },
+            ...(reunion.metaReflection.length ? [{ label: '隔层回声', lines: reunion.metaReflection, portraitStage: 'reflection' as QixiPortraitStage, expressionGroup: 'metaReflection' as const }] : []),
+            { label: '想起彼此', lines: reunion.companionshipReflection, portraitStage: 'reflection', expressionGroup: 'companionshipReflection' },
+            { label: '七夕祝愿', lines: reunion.blessing, portraitStage: 'blessing', expressionGroup: 'blessing' },
         ];
         const page = pages[Math.min(game.reunionPage, pages.length - 1)];
         const lineIndex = Math.min(game.reunionLineIndex, Math.max(0, page.lines.length - 1));
         const line = page.lines[lineIndex] || '……';
+        const lineExpression = reunion.portrait.lineExpressions?.[page.expressionGroup]?.[lineIndex] || null;
         const lastLine = lineIndex >= page.lines.length - 1;
         const lastPage = game.reunionPage >= pages.length - 1;
         const memoryEchoes = activeBundle.evidence.filter(item => line.includes(item.object)).slice(0, 2);
@@ -1159,7 +1204,7 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
             <CelestialBackdrop /><ExitButton onClose={onClose} />
             <div className="q7-reunion-bridge-echo"><i className="is-user" /><i className="is-char" /><span className="q7-magpie"><i /><b /></span></div>
             {memoryEchoes.length > 0 && <div className="q7-reunion-memory-echo">{memoryEchoes.map(item => <span key={item.id}>「{item.object}」</span>)}</div>}
-            <QixiPortrait char={char} reunion={reunion} stage={page.portraitStage} adjustable onMeetingConfigSave={onPortraitConfigSave} />
+            <QixiPortrait char={char} reunion={reunion} stage={page.portraitStage} meetingExpression={lineExpression} adjustable onMeetingConfigSave={onPortraitConfigSave} />
             <button type="button" className="q7-galgame-dialogue" data-qixi-action={lastPage && lastLine ? 'begin-touch' : 'reunion-next'} onClick={advance}>
                 <header><small>{page.label}</small><b>{char.name}</b></header>
                 <p key={`${game.reunionPage}-${lineIndex}`}><AnimatedText text={line} /></p>
@@ -1173,9 +1218,10 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
         const touchLine = touch.joined ? reunion.touch.complete : reunion.touch.hold;
         const invitationIndex = Math.min(game.reunionLineIndex, Math.max(0, reunion.touch.invitation.length - 1));
         const invitationReady = game.reunionLineIndex >= reunion.touch.invitation.length;
+        const invitationExpression = reunion.portrait.lineExpressions?.invitation?.[invitationIndex] || null;
         return <main className={`q7-touch ${touch.releasedAfterJoin ? 'is-released' : ''}`}>
             <ExitButton onClose={onClose} />
-            <QixiPortrait char={char} reunion={reunion} stage="promise" />
+            <QixiPortrait char={char} reunion={reunion} stage="promise" meetingExpression={invitationReady ? reunion.portrait.stages.promise.meetingExpression : invitationExpression} />
             {!invitationReady && <button type="button" className="q7-promise-dialogue" data-qixi-action="promise-next" onClick={() => setGame(current => ({ ...current, reunionLineIndex: current.reunionLineIndex + 1 }))}>
                 <small>{char.name}</small>
                 <p key={invitationIndex}><AnimatedText text={reunion.touch.invitation[invitationIndex] || '……'} /></p>
@@ -1201,11 +1247,48 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
     };
 
     const renderEnding = () => (
-        <main className="q7-returning"><CelestialBackdrop /><div className="q7-returning-knot"><i /><b /></div><section><small>THE MOMENT REMAINS</small><p>七夕快乐，{user.name}。</p><span>{char.name}</span></section></main>
+        <main
+            className="q7-returning"
+            role="button"
+            tabIndex={0}
+            aria-label="结束七夕活动"
+            data-qixi-action="finish-event"
+            onClick={() => void finishToChatRef.current()}
+            onKeyDown={event => {
+                if (event.key === 'Enter' || event.key === ' ') void finishToChatRef.current();
+            }}
+        ><CelestialBackdrop /><div className="q7-returning-knot"><i /><b /></div><section><small>THE MOMENT REMAINS</small><p>七夕快乐，{user.name}。</p><span>{char.name}</span></section></main>
+    );
+
+    const renderColorSelect = () => (
+        <main className="q7-story q7-color-select">
+            <CelestialBackdrop /><ExitButton onClose={onClose} />
+            <section>
+                <p className="q7-kicker">YOUR SIDE · BEFORE THE FALL</p>
+                <h2>先认出<br />你这一边。</h2>
+                <p>选一种代表你的颜色。另一边会根据角色自己的气质，留下不同的颜色。</p>
+                <div className="q7-layer-color-picker">
+                    <small>你的层色</small>
+                    <div>{QIXI_USER_LAYER_COLORS.map(color => <button
+                        key={color.value}
+                        type="button"
+                        aria-label={color.label}
+                        aria-pressed={selectedUserLayerColor === color.value}
+                        title={color.label}
+                        disabled={memoryStatus === 'loading'}
+                        style={{ '--swatch': color.value } as React.CSSProperties}
+                        onClick={() => setSelectedUserLayerColor(color.value)}
+                    ><i /><span>{color.label}</span></button>)}</div>
+                </div>
+                <button type="button" data-qixi-action="confirm-layer-color" className="q7-primary" onClick={() => void startFresh()} disabled={memoryStatus === 'loading'}><span>{memoryStatus === 'loading' ? '正在辨认两条星线' : '就用这个颜色'}</span><small>{memoryStatus === 'loading' ? 'TRACING MEMORIES' : 'CONFIRM YOUR SIDE'}</small></button>
+                {memoryNotice && <p className={`q7-notice is-${memoryStatus}`}>{memoryNotice}</p>}
+                {memoryStatus !== 'loading' && <button type="button" className="q7-color-select-back" onClick={() => setGame(current => ({ ...current, stage: 'cover' }))}>返回封面</button>}
+            </section>
+        </main>
     );
 
     return createPortal(
-        <div ref={rootRef} className="qixi-v7-root">
+        <div ref={rootRef} className={`qixi-v7-root is-tempo-${charPerformance.tempo} is-mark-${charPerformance.markStyle} is-presence-${charPerformance.presence}`} style={{ '--user-color': sessionUserLayerColor, '--char-color': sessionCharLayerColor, '--rose': sessionUserLayerColor, '--blue': sessionCharLayerColor } as React.CSSProperties}>
             <QixiBGMToggle muted={bgm.muted} onToggle={bgm.toggleMuted} />
             {generationError && <div className="q7-generation-error" role="alertdialog" aria-modal="true">
                 <div className="q7-generation-error__veil" />
@@ -1219,6 +1302,7 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
                 </section>
             </div>}
             {game.stage === 'cover' && renderCover()}
+            {game.stage === 'colorSelect' && renderColorSelect()}
             {game.stage === 'loading' && <QixiFlappyLoader ref={flappyRef} char={char} ready={loadingReady} notice={memoryNotice} onClose={onClose} onContinue={continueAfterLoading} />}
             {game.stage === 'fakeChat' && renderFakeChat()}
             {game.stage === 'distort' && renderDistort()}

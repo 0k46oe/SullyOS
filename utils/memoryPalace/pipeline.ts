@@ -103,6 +103,11 @@ import {
 import { analyzeUserInteraction } from './interactionAdaptation';
 import { analyzeDeepEngagement } from './deepEngagement';
 import {
+    analyzeConversationEngagement,
+    clearConversationEngagementState,
+    shouldUseLegacyDeepEngagement,
+} from './conversationEngagement';
+import {
     createRecallTrace,
     finishRecallTrace,
     type RecallEntryPoint,
@@ -349,6 +354,8 @@ export interface RecallRetrievalOptions {
     explicitEntityAnalysis?: ExplicitEntityAnalysis;
     /** 预留 Resolver 补救 query：只增加检索支路，不替换原始 user spikes。 */
     recallPlan?: RecallPlan;
+    /** 调用方专用的最终召回/格式化上限；默认聊天仍保持 15。 */
+    formatterMaxOutputItems?: number;
 }
 
 export async function retrieveMemories(
@@ -517,14 +524,14 @@ export async function retrieveMemories(
         //    - context：分数 × CONTEXT_DISCOUNT 折扣
         //    合并时同一条记忆取 max(所有 spike 分, context 分×折扣)
         //
-        //    per-query 返回 30 条，最终合并后裁到 15 条。
-        //    原因：如果每路只返回 top 15，同一类主题（如"外公"）的多条
+        //    per-query 返回 30 条，最终合并按调用方上限裁剪（普通聊天 15）。
+        //    原因：如果每路只返回最终上限，同一类主题（如"外公"）的多条
         //    记忆中，排名较低的几条会在 per-query 阶段就被切掉，永远
         //    进不到合并池。扩大 per-query 容量让"同主题的次要记忆"
         //    也有机会竞争最终名次。
         const CONTEXT_DISCOUNT = 0.5;
         const PER_QUERY_TOP_K = 30;
-        const FINAL_TOP_K = 15;
+        const FINAL_TOP_K = Math.max(1, Math.min(30, Math.floor(recallOptions?.formatterMaxOutputItems ?? 15)));
 
         // 辅助：把 ScoredMemory 格式化成一行摘要
         const now = Date.now();
@@ -983,10 +990,10 @@ export async function retrieveMemories(
         results.sort((a, b) => b.finalScore - a.finalScore);
 
         // ─── 调试日志：扩散+启动后的候选排序
-        //    注意：这里是 pipeline 层的 ${results.length} 条候选，但 formatter
-        //    (MAX_OUTPUT_MEMORIES=15) 会在格式化时再砍一刀，只有前 15 条真正
-        //    写进 system prompt。多出来的会被标 "✂️ cut"。
-        const FORMATTER_CUT = 15;
+        //    formatter 会按调用方上限再砍一刀；普通聊天默认 15，活动可单独覆盖。
+        //    多出来的会被标 "✂️ cut"。
+        let formatterCap = FINAL_TOP_K;
+        const FORMATTER_CUT = formatterCap;
         console.groupCollapsed(
             `🏰 [Retrieve] 扩散+启动后 ${results.length} 条候选（formatter 只注入前 ${Math.min(FORMATTER_CUT, results.length)} 条）`
         );
@@ -1028,7 +1035,6 @@ export async function retrieveMemories(
         //
         //   注入层面不做特别对待：rerank 追加的几条直接混入主 results，formatter
         //   按 finalScore 排序渲染。用户/LLM 不会感知是 rerank 推荐的，F12 里能看。
-        let formatterCap: number | undefined = undefined;
         if (doRerank) {
             const rerankTailT0 = performance.now();
             const rrData = await rerankApiPromise;
@@ -1071,7 +1077,7 @@ export async function retrieveMemories(
                 // 排序自然落位；但通过 formatterCap 保证它们不被切掉。
                 if (rerankPicks.length > 0) {
                     results = [...results, ...rerankPicks.map(p => p.sm)];
-                    formatterCap = 15 + rerankPicks.length;
+                    formatterCap = Math.max(formatterCap, 15 + rerankPicks.length);
                 }
             }
             // rerank_tail = 等 rerankApiPromise 落地 + dedup + touch，理想值接近 0
@@ -1150,7 +1156,7 @@ export async function injectMemoryPalace(
     recentMessages?: Message[],
     queryHint?: string,
     userName?: string,
-    traceContext?: { entryPoint?: RecallEntryPoint },
+    traceContext?: { entryPoint?: RecallEntryPoint; formatterMaxOutputItems?: number },
 ): Promise<RecallTrace> {
     const hadPreviousMemory = Boolean(char.memoryPalaceInjection);
     const hadPreviousRoomPlates = Boolean(char.roomPlatesInjection);
@@ -1273,20 +1279,45 @@ export async function injectMemoryPalace(
         trace.deepEngagement = { status: 'out_of_scope' };
     } else {
         const depthStartedAt = performance.now();
-        const depth = analyzeDeepEngagement(recentMessages || [], char.name, userName);
+        const legacyRequested = shouldUseLegacyDeepEngagement();
+        let engine: 'conversation_v2' | 'legacy_depth' = legacyRequested ? 'legacy_depth' : 'conversation_v2';
+        let depth: ReturnType<typeof analyzeDeepEngagement> | ReturnType<typeof analyzeConversationEngagement>;
+        try {
+            depth = legacyRequested
+                ? analyzeDeepEngagement(recentMessages || [], char.name, userName)
+                : analyzeConversationEngagement(char.id, recentMessages || [], char.name, userName);
+        } catch (error) {
+            // M3 是质量增强层。v2 状态损坏或边界输入出错时，当轮回退旧分析，不能阻断聊天。
+            console.warn('[ConversationEngagement] v2 failed, falling back to legacy depth:', error);
+            clearConversationEngagementState(char.id);
+            engine = 'legacy_depth';
+            depth = analyzeDeepEngagement(recentMessages || [], char.name, userName);
+        }
         trace.deepEngagement = {
             status: depth.analyzable ? 'observed' : 'no_signal',
+            engine,
             analysis: depth,
         };
-        console.log(
-            `🪞 [DeepEngagement] ${depth.analyzable ? depth.mode : 'no_signal'}: `
-            + `depth=${depth.state.analyticalDepth.toFixed(2)} `
-            + `abstraction=${depth.state.abstraction.toFixed(2)} `
-            + `challenge=${depth.state.challengeTolerance.toFixed(2)} `
-            + `breadth=${depth.state.perspectiveBreadth.toFixed(2)} `
-            + `holding=${depth.state.emotionalHolding.toFixed(2)} `
-            + `confidence=${depth.confidence.toFixed(2)}`,
-        );
+        if (engine === 'conversation_v2') {
+            const engagement = depth as ReturnType<typeof analyzeConversationEngagement>;
+            console.log(
+                `🧭 [ConversationEngagement] core=on overlay=${engagement.shouldGuide ? 'on' : 'off'} ${engagement.conversationAct}: `
+                + `${engagement.previousEngagementState}->${engagement.engagementState} `
+                + `mode=${engagement.interactionMode} `
+                + `act=${engagement.responsePlan.primary}${engagement.responsePlan.secondary ? `+${engagement.responsePlan.secondary}` : ''} `
+                + `subject=${engagement.subject.active ? 'active' : 'idle'} `
+                + `openness=${engagement.subject.openness.toFixed(2)} `
+                + `stance=${engagement.stance.confidence.toFixed(2)} `
+                + `reasons=${engagement.reasons.join(',')}`,
+            );
+        } else {
+            const legacy = depth as ReturnType<typeof analyzeDeepEngagement>;
+            console.log(
+                `🪞 [DeepEngagement:legacy] ${legacy.analyzable ? legacy.mode : 'no_signal'}: `
+                + `depth=${legacy.state.analyticalDepth.toFixed(2)} `
+                + `confidence=${legacy.confidence.toFixed(2)}`,
+            );
+        }
         trace.stages.push({
             name: 'deep_engagement',
             durationMs: Math.round(performance.now() - depthStartedAt),
@@ -1350,7 +1381,7 @@ export async function injectMemoryPalace(
             getRemoteVectorConfig(),
             char.name,
             telemetry => { retrievalTelemetry = telemetry; },
-            { explicitEntityAnalysis },
+            { explicitEntityAnalysis, formatterMaxOutputItems: traceContext?.formatterMaxOutputItems },
         );
         if (context || !legacyCompatibilityMode) {
             char.memoryPalaceInjection = context || '';

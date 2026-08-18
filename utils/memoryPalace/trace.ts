@@ -5,12 +5,13 @@ import type { ExplicitEntitySignalSource } from './explicitEntityRecall';
 import type { EventBoxLightMatchSource } from './eventBoxLightIndex';
 import type { UserInteractionAnalysis } from './interactionAdaptation';
 import type { DeepEngagementAnalysis } from './deepEngagement';
+import type { ConversationEngagementAnalysis } from './conversationEngagement';
 
 /**
  * 任何会改变召回输出含义的实现都要升级这个版本。
  * Trace 不依赖构建 commit：同一 commit 做 A/B 时仍能看出实际跑的是哪代管线。
  */
-export const RECALL_PIPELINE_VERSION = 'context-m3.0';
+export const RECALL_PIPELINE_VERSION = 'context-m3.1';
 
 export const DEFAULT_MEMORY_PALACE_FEATURE_FLAGS: MemoryPalaceFeatureFlags = Object.freeze({
     recallRouter: false,
@@ -100,10 +101,11 @@ export interface RecallTrace {
         status: 'disabled' | 'out_of_scope' | 'no_signal' | 'observed';
         analysis?: UserInteractionAnalysis;
     };
-    /** ChatApp 当轮的交流深度状态；只含分数，不含用户原文。 */
+    /** ChatApp 当轮的参与状态；v2 只含枚举、分数和计数，不含用户原文。 */
     deepEngagement?: {
         status: 'disabled' | 'out_of_scope' | 'no_signal' | 'observed';
-        analysis?: DeepEngagementAnalysis;
+        engine?: 'conversation_v2' | 'legacy_depth';
+        analysis?: ConversationEngagementAnalysis | DeepEngagementAnalysis;
     };
     /** @deprecated context-m1.4 前的旧 Trace 字段。 */
     recallRouter?: RecallRouterTrace;

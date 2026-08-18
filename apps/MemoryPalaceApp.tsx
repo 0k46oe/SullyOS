@@ -1411,25 +1411,6 @@ export default function MemoryPalaceApp() {
         setTimeout(() => setRrSaved(false), 2000);
     };
 
-    const contextSuiteAnyEnabled = memoryPalaceConfig.featureFlags?.recallRouter === true
-        || memoryPalaceConfig.featureFlags?.interactionAdaptation === true
-        || memoryPalaceConfig.featureFlags?.deepEngagement === true;
-    const contextSuiteAllEnabled = memoryPalaceConfig.featureFlags?.recallRouter === true
-        && memoryPalaceConfig.featureFlags?.interactionAdaptation === true
-        && memoryPalaceConfig.featureFlags?.deepEngagement === true;
-
-    const handleToggleContextSuite = (enabled: boolean) => {
-        updateMemoryPalaceConfig({
-            featureFlags: {
-                ...memoryPalaceConfig.featureFlags,
-                recallRouter: enabled,
-                interactionAdaptation: enabled,
-                deepEngagement: enabled,
-            },
-        });
-        addToast(enabled ? '已开启智能语境' : '已关闭智能语境，回复恢复旧流程', 'success');
-    };
-
     const updateAccommodation = (key: keyof CharacterAccommodationPolicy, value: number) => {
         if (!char) return;
         updateCharacter(char.id, {
@@ -3401,40 +3382,6 @@ export default function MemoryPalaceApp() {
                             <StatusMessage msg={testResult} />
                         </div>
                     )}
-                </div>
-
-                <div style={{
-                    marginTop: 16, padding: 16, borderRadius: 16,
-                    background: '#f5f3ff', border: '1px solid #c4b5fd',
-                }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                        <span style={{ flex: 1 }}>
-                            <span style={{ display: 'block', fontSize: 13, fontWeight: 850, color: '#5b21b6' }}>
-                                智能语境
-                            </span>
-                            <span style={{ display: 'block', marginTop: 5, fontSize: 10, lineHeight: 1.7, color: '#6d28d9' }}>
-                                让角色更准确地理解你正在承接什么、跟上此刻的交流节奏，并判断你想把话题聊到多深。全部在本地完成，不增加 API 调用。
-                            </span>
-                            <span style={{ display: 'block', marginTop: 4, fontSize: 10, fontWeight: 700, color: '#7c3aed' }}>
-                                {contextSuiteAllEnabled
-                                    ? '已开启'
-                                    : contextSuiteAnyEnabled
-                                        ? '旧版的部分能力仍在运行；关闭后可统一重新开启'
-                                        : '已关闭，回复保持原有行为'}
-                            </span>
-                        </span>
-                        <button
-                            onClick={() => handleToggleContextSuite(!contextSuiteAnyEnabled)}
-                            style={{
-                                flexShrink: 0, border: 'none', borderRadius: 999, padding: '9px 14px',
-                                background: contextSuiteAnyEnabled ? '#ede9fe' : '#7c3aed',
-                                color: contextSuiteAnyEnabled ? '#6d28d9' : '#ffffff',
-                                fontSize: 11, fontWeight: 800, cursor: 'pointer',
-                            }}
-                        >
-                            {contextSuiteAnyEnabled ? '关闭' : '开启'}
-                        </button>
-                    </div>
                 </div>
 
                 {/* Rerank API（可选 cross-encoder 二次排序） */}

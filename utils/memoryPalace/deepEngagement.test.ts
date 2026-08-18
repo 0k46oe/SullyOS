@@ -101,6 +101,7 @@ describe('M3 Deep Engagement', () => {
         );
 
         expect(trace.deepEngagement?.status).toBe('observed');
+        expect(trace.deepEngagement?.engine).toBe('conversation_v2');
         expect(trace.stages.some(stage => stage.name === 'deep_engagement')).toBe(true);
         expect(JSON.stringify(trace)).not.toContain(privateSource);
         expect(JSON.stringify(trace)).not.toContain('虚构密语');

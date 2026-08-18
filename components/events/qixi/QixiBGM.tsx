@@ -28,6 +28,18 @@ const MUTED_KEY = 'sullyos_qixi_bgm_muted';
 const TARGET_VOLUME = 0.32;
 const FADE_MS = 1100;
 
+type QixiAudioTrack = Pick<HTMLAudioElement, 'currentTime' | 'pause' | 'volume'>;
+
+export const stopQixiBGMTrack = (audio: QixiAudioTrack): void => {
+    audio.pause();
+    audio.volume = 0;
+    try { audio.currentTime = 0; } catch { /* unloaded audio may not be seekable yet */ }
+};
+
+export const prepareQixiBGMFadeIn = (audio: Pick<HTMLAudioElement, 'volume'>): void => {
+    audio.volume = 0;
+};
+
 export const qixiStageToBGMGroup = (stage: string, sceneIndex: number): QixiBGMGroup | null => {
     if (['fakeChat', 'distort', 'entry'].includes(stage)) return 'fall';
     if (stage === 'scene' || stage === 'sceneTransition') {
@@ -49,12 +61,25 @@ export function useQixiBGM(stage: string, sceneIndex: number) {
     const audiosRef = useRef<Partial<Record<QixiBGMGroup, HTMLAudioElement>>>({});
     const cleanupRef = useRef<Array<() => void>>([]);
     const fadeTimersRef = useRef<Map<HTMLAudioElement, number>>(new Map());
+    const activeGroupRef = useRef<QixiBGMGroup | null>(null);
+    const handledInitialMuteRef = useRef(false);
     const mutedRef = useRef(muted);
     mutedRef.current = muted;
 
+    const clearFade = useCallback((audio: HTMLAudioElement) => {
+        const timer = fadeTimersRef.current.get(audio);
+        if (!timer) return;
+        window.clearInterval(timer);
+        fadeTimersRef.current.delete(audio);
+    }, []);
+
+    const stopImmediately = useCallback((audio: HTMLAudioElement) => {
+        clearFade(audio);
+        stopQixiBGMTrack(audio);
+    }, [clearFade]);
+
     const fade = useCallback((audio: HTMLAudioElement, target: number, duration = FADE_MS) => {
-        const previous = fadeTimersRef.current.get(audio);
-        if (previous) window.clearInterval(previous);
+        clearFade(audio);
         const steps = 14;
         const start = audio.volume;
         let step = 0;
@@ -67,7 +92,7 @@ export function useQixiBGM(stage: string, sceneIndex: number) {
             if (target === 0) audio.pause();
         }, duration / steps);
         fadeTimersRef.current.set(audio, timer);
-    }, []);
+    }, [clearFade]);
 
     useEffect(() => {
         (Object.keys(QIXI_BGM_GROUPS) as QixiBGMGroup[]).forEach(key => {
@@ -88,22 +113,35 @@ export function useQixiBGM(stage: string, sceneIndex: number) {
             cleanupRef.current = [];
             Object.values(audiosRef.current).forEach(audio => {
                 if (!audio) return;
-                audio.pause();
+                stopImmediately(audio);
                 audio.removeAttribute('src');
                 audio.load();
             });
             audiosRef.current = {};
         };
-    }, []);
+    }, [stopImmediately]);
 
     useEffect(() => {
-        const targetVolume = mutedRef.current ? 0 : TARGET_VOLUME;
+        activeGroupRef.current = group;
         let retry: (() => void) | undefined;
         const playCurrent = (audio: HTMLAudioElement) => {
-            audio.play().then(() => fade(audio, targetVolume)).catch(error => {
+            if (!group || activeGroupRef.current !== group || mutedRef.current) return;
+            prepareQixiBGMFadeIn(audio);
+            audio.play().then(() => {
+                if (activeGroupRef.current !== group || mutedRef.current) {
+                    stopImmediately(audio);
+                    return;
+                }
+                fade(audio, TARGET_VOLUME);
+            }).catch(error => {
                 if (error?.name !== 'NotAllowedError') return;
                 retry = () => {
-                    audio.play().then(() => fade(audio, mutedRef.current ? 0 : TARGET_VOLUME)).catch(() => undefined);
+                    if (activeGroupRef.current !== group || mutedRef.current) return;
+                    prepareQixiBGMFadeIn(audio);
+                    audio.play().then(() => {
+                        if (activeGroupRef.current === group && !mutedRef.current) fade(audio, TARGET_VOLUME);
+                        else stopImmediately(audio);
+                    }).catch(() => undefined);
                 };
                 document.addEventListener('pointerdown', retry, { once: true, passive: true });
                 document.addEventListener('keydown', retry, { once: true });
@@ -112,25 +150,36 @@ export function useQixiBGM(stage: string, sceneIndex: number) {
         (Object.keys(audiosRef.current) as QixiBGMGroup[]).forEach(key => {
             const audio = audiosRef.current[key];
             if (!audio) return;
-            if (key === group) {
-                if (audio.paused) playCurrent(audio);
-                else fade(audio, targetVolume);
-            } else if (!audio.paused) fade(audio, 0);
+            if (key !== group) stopImmediately(audio);
         });
+        const current = group ? audiosRef.current[group] : undefined;
+        if (current && !mutedRef.current) playCurrent(current);
         return () => {
             if (!retry) return;
             document.removeEventListener('pointerdown', retry);
             document.removeEventListener('keydown', retry);
         };
-    }, [fade, group]);
+    }, [fade, group, stopImmediately]);
 
     useEffect(() => {
         try { localStorage.setItem(MUTED_KEY, muted ? '1' : '0'); } catch { /* optional */ }
-        const current = group ? audiosRef.current[group] : undefined;
+        if (!handledInitialMuteRef.current) {
+            handledInitialMuteRef.current = true;
+            return;
+        }
+        const activeGroup = activeGroupRef.current;
+        const current = activeGroup ? audiosRef.current[activeGroup] : undefined;
         if (!current) return;
-        if (!muted && current.paused) current.play().catch(() => undefined);
-        fade(current, muted ? 0 : TARGET_VOLUME, 450);
-    }, [fade, group, muted]);
+        if (muted) {
+            fade(current, 0, 450);
+            return;
+        }
+        prepareQixiBGMFadeIn(current);
+        current.play().then(() => {
+            if (!mutedRef.current && activeGroupRef.current === activeGroup) fade(current, TARGET_VOLUME, 450);
+            else stopImmediately(current);
+        }).catch(() => undefined);
+    }, [fade, muted, stopImmediately]);
 
     return { group, muted, toggleMuted: useCallback(() => setMuted(value => !value), []) };
 }

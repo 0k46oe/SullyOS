@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { buildQixiBridgePrompt, createQixiBridgeFallback, parseQixiBridge } from './qixiBridge';
+import { buildQixiBridgePrompt, createQixiBridgeFallback, parseQixiBridge, QIXI_PART2_TIMEOUT_MS } from './qixiBridge';
 import { QixiMemoryBundle, QIXI_MEMORY_BUNDLE_VERSION } from './qixiMemoryBundle';
 
 const bundle = {
     version: QIXI_MEMORY_BUNDLE_VERSION,
     source: 'memory',
     openingChat: ['刚才回我了吗？', '我这里没看到。'],
+    charLayerColor: '#82D5B8',
+    charPerformance: { tempo: 'measured', markStyle: 'soft', presence: 'careful' },
     evidence: [1, 2, 3, 4].map(index => ({ id: `e${index}`, fact: `第 ${index} 条可以核对的真实记忆。`, object: `物件${index}`, tags: ['日常'] })),
     artifacts: [1, 2, 3, 4].map(index => ({ id: `a${index}`, label: `物件${index}`, kind: 'object', evidenceIds: [`e${index}`] })),
     scenes: {} as QixiMemoryBundle['scenes'],
@@ -15,6 +17,10 @@ const bundle = {
 } as QixiMemoryBundle;
 
 describe('qixi bridge parser', () => {
+    it('allows a slow Part 2 model call up to five minutes', () => {
+        expect(QIXI_PART2_TIMEOUT_MS).toBe(300_000);
+    });
+
     it('keeps two-sided magpies backed by Part 1 evidence and rejects invented ids', () => {
         const parsed = parseQixiBridge(JSON.stringify({
             userMagpies: [

@@ -5,6 +5,8 @@ import { QixiMemoryBundle } from './qixiMemoryBundle';
 import { safeFetchJson } from './safeApi';
 import { parseQixiJsonObject } from './qixiJson';
 
+export const QIXI_PART2_TIMEOUT_MS = 300_000;
+
 export type QixiMagpieOwner = 'user' | 'char';
 
 export interface QixiMagpie {
@@ -209,7 +211,7 @@ export async function prepareQixiBridge(
             }),
         },
         0,
-        50000,
+        QIXI_PART2_TIMEOUT_MS,
         { appId: 'special-moments', charId: char.id, purpose: 'qixi-bridge-part2-v2' },
     );
     const content = data?.choices?.[0]?.message?.content;
