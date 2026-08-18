@@ -21,7 +21,8 @@ describe('Qixi streaming request wiring', () => {
         // Part 1a/1b/1c share the same request body, so one stream flag covers all three calls.
         expect(countOccurrences(part1Source, 'stream: true')).toBe(1);
         expect(part1Source).toContain("phase === 'second' ? 'b' : 'c-bridge'");
-        expect(part1Source).toContain("parseQixiJsonObject(thirdResponse.content, ['scenes', 'bridge'])");
+        expect(part1Source).toContain('normalizeQixiPhaseChunk(');
+        expect(part1Source).toContain('parseQixiJsonObject(thirdResponse.content)');
         expect(part1Source).toContain('Incremental SSE reader stops on [DONE]');
 
         expect(countOccurrences(part2Source, 'stream: true')).toBe(0);
