@@ -1,14 +1,15 @@
 {
   "schemaVersion": 1,
-  "versionCode": 30404,
-  "versionName": "3.4.4",
-  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.4/SullyOS-Android-v3.4.4.apk",
-  "sha256": "acf3d7dc202a64bd6efbd617afe1e8fd597eab508746fd653e87517e33bbfd65",
-  "sizeBytes": 36822764,
-  "publishedAt": "2026-08-13T16:50:08Z",
+  "versionCode": 30405,
+  "versionName": "3.4.5",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.5/SullyOS-Android-v3.4.5.apk",
+  "sha256": "0b467f4e88ccceeb82449a968dde838f382cfcd9db5d8f621772d49c7a2c09ea",
+  "sizeBytes": 36981879,
+  "publishedAt": "2026-08-18T16:44:07Z",
   "releaseNotes": [
-    "修复首次使用应用内更新时 Cache/updates 目录未创建导致的下载失败",
-    "对齐最新 master 389c8738（含 PR #577）",
-    "延续固定签名、UnifiedPush / ntfy、Android PDF 导入与更新包校验"
+    "对齐最新 master bd547b0d（含 PR #593）",
+    "新增七夕双层事件并增强智能上下文、记忆与聊天体验",
+    "增强 Live2D、语音收藏、VR 性能诊断与主动消息 2.0 后台流程",
+    "延续固定签名、UnifiedPush / ntfy、Android PDF 导入与应用内更新"
   ]
 }
