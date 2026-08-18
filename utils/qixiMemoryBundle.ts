@@ -281,6 +281,104 @@ const normalizeDirectScene = (sceneId: QixiSceneId, value: any): QixiScenePayloa
     };
 };
 
+const QIXI_PHASE_SCENE_ALIASES: Record<QixiSceneId, string[]> = {
+    lostLayer: ['lostlayer', 'lost', 'scene1', 'room1', 'stage1', '01', '1', '失联层', '失联'],
+    doubleWish: ['doublewish', 'wish', 'wishes', 'scene2', 'room2', 'stage2', '02', '2', '双面祈愿处', '祈愿处', '祈愿'],
+    threadNeedle: ['threadneedle', 'needle', 'thread', 'scene3', 'room3', 'stage3', '03', '3', '穿针乞巧', '穿针'],
+    offerings: ['offerings', 'offering', 'fruits', 'scene4', 'room4', 'stage4', '04', '4', '供果', '供品'],
+    reflection: ['reflection', 'mirror', 'water', 'scene5', 'room5', 'stage5', '05', '5', '照影', '照影潭'],
+    nightMarket: ['nightmarket', 'market', 'scene6', 'room6', 'stage6', '06', '6', '记忆夜市', '夜市'],
+    wordCloud: ['wordcloud', 'words', 'grapes', 'scene7', 'room7', 'stage7', '07', '7', '葡萄架词云', '词云'],
+};
+
+const phaseKey = (value: unknown): string => directText(value).replace(/[\s_\-·：:（）()]/g, '').toLocaleLowerCase();
+const directRecord = (value: unknown): Record<string, any> | null =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : null;
+const looksLikeGeneratedScene = (value: unknown): boolean => {
+    const scene = directRecord(value);
+    return Boolean(scene && ['sharedObject', 'object', 'memoryLine', 'memory', 'options', 'choices', 'charAction', 'otherAction', 'transitionLines', 'reveal']
+        .some(key => key in scene));
+};
+const sceneIdFromLooseValue = (value: unknown): QixiSceneId | null => {
+    const normalized = phaseKey(value);
+    if (!normalized) return null;
+    return QIXI_SCENE_IDS.find(sceneId => [phaseKey(sceneId), ...QIXI_PHASE_SCENE_ALIASES[sceneId].map(phaseKey)]
+        .some(alias => normalized === alias || normalized.startsWith(alias))) || null;
+};
+
+/**
+ * Phase responses are final LLM scripts, not configuration files. Accept the
+ * same generated rooms when a provider wraps them, returns an array, uses
+ * `room3`/Chinese titles, or omits the `scenes` envelope. This is shape repair
+ * only: scene prose is never scored, rewritten, or replaced.
+ */
+export function normalizeQixiPhaseChunk(value: unknown, requiredIds: readonly QixiSceneId[]): any | null {
+    const root = directRecord(value);
+    if (!root) return null;
+    const collectionKeys = ['scenes', 'rooms', 'locations', 'stages', 'chapters'];
+    const wrapperKeys = ['data', 'result', 'output', 'payload', 'content', 'response', 'part1', 'part2', 'part3'];
+
+    const findCollection = (candidate: unknown, depth = 0): { container: Record<string, any>; collection: unknown } | null => {
+        if (depth > 4) return null;
+        const record = directRecord(candidate);
+        if (!record) return null;
+        for (const key of collectionKeys) {
+            const collection = record[key];
+            if (Array.isArray(collection) || directRecord(collection)) return { container: record, collection };
+        }
+        if (Object.values(record).some(looksLikeGeneratedScene)) return { container: record, collection: record };
+        for (const key of wrapperKeys) {
+            const nested = findCollection(record[key], depth + 1);
+            if (nested) return nested;
+        }
+        for (const nestedValue of Object.values(record)) {
+            const nested = findCollection(nestedValue, depth + 1);
+            if (nested) return nested;
+        }
+        return null;
+    };
+
+    const found = findCollection(root);
+    if (!found) return null;
+    const entries: Array<[string, any]> = Array.isArray(found.collection)
+        ? found.collection.map((scene, index) => [String(index), scene])
+        : Object.entries(found.collection as Record<string, unknown>);
+    const scenes: Partial<Record<QixiSceneId, any>> = {};
+    const remaining: any[] = [];
+
+    entries.forEach(([key, rawScene]) => {
+        if (!looksLikeGeneratedScene(rawScene)) return;
+        const scene = directRecord(rawScene)!;
+        const matchedId = sceneIdFromLooseValue(key)
+            || sceneIdFromLooseValue(scene.id ?? scene.sceneId ?? scene.roomId ?? scene.name ?? scene.title);
+        if (matchedId && requiredIds.includes(matchedId) && !scenes[matchedId]) scenes[matchedId] = scene;
+        else remaining.push(scene);
+    });
+    requiredIds.forEach(sceneId => {
+        if (!scenes[sceneId] && remaining.length) scenes[sceneId] = remaining.shift();
+    });
+
+    const rawBridge = found.container.bridge
+        ?? found.container.magpieBridge
+        ?? found.container.bridgeData
+        ?? root.bridge
+        ?? root.magpieBridge
+        ?? root.bridgeData;
+    const bridgeRecord = directRecord(rawBridge);
+    const bridge = bridgeRecord ? {
+        ...bridgeRecord,
+        userMagpies: bridgeRecord.userMagpies ?? bridgeRecord.userBirds ?? bridgeRecord.userNodes ?? bridgeRecord.leftMagpies ?? bridgeRecord.userSide,
+        charMagpies: bridgeRecord.charMagpies ?? bridgeRecord.charBirds ?? bridgeRecord.charNodes ?? bridgeRecord.rightMagpies ?? bridgeRecord.charSide,
+        finalMagpie: bridgeRecord.finalMagpie ?? bridgeRecord.finalBird ?? bridgeRecord.lastMagpie ?? bridgeRecord.finalNode,
+    } : rawBridge;
+    return {
+        ...root,
+        ...found.container,
+        scenes,
+        ...(bridge !== undefined ? { bridge } : {}),
+    };
+}
+
 /**
  * Qixi uses the same generation philosophy as the earlier special events:
  * model output is the final playable script. This parser only tolerates JSON
@@ -638,19 +736,20 @@ export async function prepareQixiMemoryBundle(
             }
             return { content, finishReason };
         };
-        const hasRequiredScenes = (value: any, requiredIds: readonly string[]) => (
-            value?.scenes
-            && typeof value.scenes === 'object'
-            && !Array.isArray(value.scenes)
-            && requiredIds.every(sceneId => value.scenes[sceneId] && typeof value.scenes[sceneId] === 'object')
+        const hasPlayablePhaseScenes = (value: any, requiredIds: readonly QixiSceneId[]) => (
+            directRecord(value?.scenes)
+            && requiredIds.every(sceneId => looksLikeGeneratedScene(value.scenes[sceneId]))
         );
         const firstResponse = await requestPhase(
             'first',
             `[最近聊天片段，仅作事实来源]\n${recent || '（没有可用的最近聊天片段）'}\n\n${buildQixiMemoryBundlePhasePrompt(char, user, options.userLayerColor, 'first')}`,
         );
-        const firstChunk = parseQixiJsonObject(firstResponse.content, ['scenes', 'evidence']) as any;
-        if (!firstChunk || !hasRequiredScenes(firstChunk, QIXI_PART1_FIRST_SCENE_IDS)) {
-            throw new Error(`Part 1 前两站结构无效（finish_reason=${firstResponse.finishReason}, output_chars=${firstResponse.content.length}）`);
+        const firstChunk = normalizeQixiPhaseChunk(
+            parseQixiJsonObject(firstResponse.content),
+            QIXI_PART1_FIRST_SCENE_IDS,
+        );
+        if (!firstChunk || !hasPlayablePhaseScenes(firstChunk, QIXI_PART1_FIRST_SCENE_IDS)) {
+            throw new Error(`Part 1 前两站正文无法读取（finish_reason=${firstResponse.finishReason}, output_chars=${firstResponse.content.length}）`);
         }
         let firstParseFailure = '未知结构错误';
         const firstBundle = parseQixiProgressiveMemoryBundle(firstChunk, firstChunk.scenes, contextSignature, user.name, reason => { firstParseFailure = reason; });
@@ -673,9 +772,12 @@ export async function prepareQixiMemoryBundle(
             'second',
             buildQixiMemoryBundlePhasePrompt(char, user, options.userLayerColor, 'second', continuationSeed),
         );
-        const secondChunk = parseQixiJsonObject(secondResponse.content, ['scenes']) as any;
-        if (!secondChunk || !hasRequiredScenes(secondChunk, QIXI_PART1_SECOND_SCENE_IDS)) {
-            throw new Error(`Part 1 中三站结构无效（finish_reason=${secondResponse.finishReason}, output_chars=${secondResponse.content.length}）`);
+        const secondChunk = normalizeQixiPhaseChunk(
+            parseQixiJsonObject(secondResponse.content),
+            QIXI_PART1_SECOND_SCENE_IDS,
+        );
+        if (!secondChunk || !hasPlayablePhaseScenes(secondChunk, QIXI_PART1_SECOND_SCENE_IDS)) {
+            throw new Error(`Part 1 中三站正文无法读取（finish_reason=${secondResponse.finishReason}, output_chars=${secondResponse.content.length}）`);
         }
         const secondScenes = { ...firstChunk.scenes, ...secondChunk.scenes };
         let secondParseFailure = '未知结构错误';
@@ -699,11 +801,14 @@ export async function prepareQixiMemoryBundle(
             'third',
             buildQixiMemoryBundlePhasePrompt(char, user, options.userLayerColor, 'third', finalContinuationSeed),
         );
-        const thirdChunk = parseQixiJsonObject(thirdResponse.content, ['scenes', 'bridge']) as any;
+        const thirdChunk = normalizeQixiPhaseChunk(
+            parseQixiJsonObject(thirdResponse.content),
+            QIXI_PART1_THIRD_SCENE_IDS,
+        );
         const hasCollection = (value: unknown) => Array.isArray(value)
             ? value.length > 0
             : Boolean(value && typeof value === 'object' && Object.keys(value as Record<string, unknown>).length);
-        if (!thirdChunk || !hasRequiredScenes(thirdChunk, QIXI_PART1_THIRD_SCENE_IDS)
+        if (!thirdChunk || !hasPlayablePhaseScenes(thirdChunk, QIXI_PART1_THIRD_SCENE_IDS)
             || !hasCollection(thirdChunk.bridge?.userMagpies)
             || !hasCollection(thirdChunk.bridge?.charMagpies)
             || !thirdChunk.bridge?.finalMagpie) {

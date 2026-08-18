@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     buildQixiMemoryBundlePhasePrompt,
     buildQixiMemoryBundlePrompt,
+    normalizeQixiPhaseChunk,
     parseQixiMemoryBundle,
     parseQixiProgressiveMemoryBundle,
     QIXI_MEMORY_BUNDLE_VERSION,
@@ -106,6 +107,38 @@ describe('Qixi direct LLM script pipeline', () => {
         expect(firstReady?.scenes.lostLayer.sharedObject).toBe('第1站物件');
         expect(firstReady?.scenes.threadNeedle.sharedObject).toBe('');
         expect(firstReady?.scenes.threadNeedle.options).toEqual([]);
+    });
+
+    it('accepts middle-room scripts wrapped, arrayed, aliased, or returned without a scenes envelope', () => {
+        const middleScenes = QIXI_PART1_SECOND_SCENE_IDS.map((id, index) => makeScene(id, index + 2));
+        const arrayWrapped = normalizeQixiPhaseChunk({
+            result: { rooms: middleScenes },
+        }, QIXI_PART1_SECOND_SCENE_IDS);
+        expect(Object.keys(arrayWrapped.scenes)).toEqual(QIXI_PART1_SECOND_SCENE_IDS);
+        expect(arrayWrapped.scenes.threadNeedle.sharedObject).toBe('第3站物件');
+
+        const aliased = normalizeQixiPhaseChunk({
+            part2: {
+                scene_3: middleScenes[0],
+                供果: middleScenes[1],
+                reflection_room: middleScenes[2],
+            },
+        }, QIXI_PART1_SECOND_SCENE_IDS);
+        expect(aliased.scenes.threadNeedle.charAction).toContain('第3站');
+        expect(aliased.scenes.offerings.charAction).toContain('第4站');
+        expect(aliased.scenes.reflection.charAction).toContain('第5站');
+
+        const third = normalizeQixiPhaseChunk({
+            rooms: [makeScene('nightMarket', 5), makeScene('wordCloud', 6)],
+            bridgeData: {
+                userBirds: [{ name: '用户侧' }],
+                charNodes: [{ name: '角色侧' }],
+                finalBird: { name: 'User' },
+            },
+        }, QIXI_PART1_THIRD_SCENE_IDS);
+        expect(third.bridge.userMagpies[0].name).toBe('用户侧');
+        expect(third.bridge.charMagpies[0].name).toBe('角色侧');
+        expect(third.bridge.finalMagpie.name).toBe('User');
     });
 
     it('preserves model prose and all three choices without semantic filtering or local replacement', () => {
