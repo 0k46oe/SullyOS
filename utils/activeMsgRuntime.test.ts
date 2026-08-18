@@ -24,9 +24,11 @@ import {
   revokeSwallowedSelfLogEntry,
   runInstantChatStatusCheck,
   cancelLateEmotionPoll,
+  describeMultipartFailure,
   handleInstantErrorPushMessage,
   startLateEmotionPoll,
 } from './activeMsgRuntime';
+import { MULTIPART_FAILURE_REASON } from '@rei-standard/amsg-shared';
 import {
   AMSG_INSTANT_CHAT_PENDING_LS_KEY,
   AMSG_OUTBOX_ADOPTED_LS_KEY,
@@ -2428,6 +2430,67 @@ describe('error push 到页面 → 当场收尾（handleInstantErrorPushMessage�
 
     expect(getInstantChatPending(charId)?.uuid).toBe('uuid-untouched');
   }, 20000);
+
+  // worker 把稳定的 errorCode 一起挂在 push 上（amsg-server 给 fire 抛的错误挂了 code）。
+  // 不带过去的话，秒级到达的这条直发告知只能说一句笼统的「生成失败」，而 60s 点名那条
+  // 路读得到同一个码、说的是「模型接口拒了，去查 Key」——同一次失败两种说法。
+  it('push 上带 errorCode → 用它给能照着做的话，跟点名路径同一份翻译', async () => {
+    const charId = 'char-errpush-code';
+    await DB.saveCharacter({ id: charId, name: '报错角色' } as any);
+    setInstantChatPending(charId, 'uuid-errpush-code');
+
+    await handleInstantErrorPushMessage({
+      metadata: {
+        charId,
+        taskUuid: 'uuid-errpush-code',
+        reason: 'AI API error: 401 Unauthorized. Request URL: https://api.example.com/v1/chat/completions\n'
+          + '  — Incorrect API key provided: sk-[redacted]. (provider code: invalid_api_key)',
+        errorCode: 'LLM_CALL_FAILED',
+      },
+    });
+
+    const msgs = await DB.getRecentMessagesByCharId(charId, 10);
+    const note = msgs.find((m: any) => m.role === 'system' && String(m.content).includes('即时对话没能完成'));
+    expect(String(note!.content)).toContain('模型接口拒了这次请求');
+    expect(String(note!.content)).toContain('invalid_api_key');
+  }, 20000);
+});
+
+// 一条推送装不下的内容会切成分片发出，SW 收齐还原。拼不起来的原因不都一样：等超时
+// 重开一下多半就好，而分片对不上 / 超限那几种重开没用。混成同一句「消息接收不完整」
+// 的话，用户对着一条永远修不好的提示反复重开。
+describe('分片拼不起来时说的那句话（describeMultipartFailure）', () => {
+  it('等超时 → 说没等齐，建议重开', () => {
+    const text = describeMultipartFailure(MULTIPART_FAILURE_REASON.TTL_EXPIRED);
+    expect(text).toContain('没在时限内到齐');
+    expect(text).toContain('重开');
+  });
+
+  it('本机存储写不进去 → 指向存储空间，不叫人重开', () => {
+    const text = describeMultipartFailure(MULTIPART_FAILURE_REASON.STORAGE_FAILED);
+    expect(text).toContain('存储');
+  });
+
+  it('分片本身有问题的几种 → 照实说是数据问题，别让人以为重开能好', () => {
+    for (const reason of [
+      MULTIPART_FAILURE_REASON.INVALID_CHUNK,
+      MULTIPART_FAILURE_REASON.CHUNK_CONFLICT,
+      MULTIPART_FAILURE_REASON.SIZE_LIMIT_EXCEEDED,
+      MULTIPART_FAILURE_REASON.RESTORE_FAILED,
+      MULTIPART_FAILURE_REASON.DISABLED,
+    ]) {
+      const text = describeMultipartFailure(reason);
+      expect(text, reason).toContain('分片数据有问题');
+      expect(text, reason).not.toContain('重开');
+    }
+  });
+
+  // 老 SW 不带 reason（字段是 2.4.0-next.4 加的），照样得给一句完整的话。
+  it('没有 reason → 走通用文案，不出现 undefined', () => {
+    const text = describeMultipartFailure(undefined);
+    expect(text).toContain('没接收完整');
+    expect(text).not.toContain('undefined');
+  });
 });
 
 // 这一组钉的是一次真实事故：定时主动消息到点生成好了、账本也记了、推送也发出去了，

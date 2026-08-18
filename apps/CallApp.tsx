@@ -113,6 +113,8 @@ import {
   type CompanionAvatarSource,
 } from '../utils/companionAvatar';
 import { addCompanionModelOutfit, addUploadedCompanionOutfit } from '../utils/companionWardrobe';
+import VoiceFavoriteActionSheet from '../components/voice/VoiceFavoriteActionSheet';
+import { getVoiceFavorite, removeVoiceFavorite, saveVoiceFavorite } from '../utils/voiceFavorites';
 type CallState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | 'ended' | 'error';
 type CallMode = 'voice' | 'video';
 type VideoCallLayout = 'stage' | 'story' | 'mini';
@@ -561,6 +563,9 @@ const CallApp: React.FC = () => {
   const [editingText, setEditingText] = useState('');
   const [rerollingBubbleId, setRerollingBubbleId] = useState<string | null>(null);
   const [generatingAudioBubbleId, setGeneratingAudioBubbleId] = useState<string | null>(null);
+  const [voiceFavoriteTarget, setVoiceFavoriteTarget] = useState<{ bubble: CallBubble; charId: string; charName: string } | null>(null);
+  const [voiceFavoriteSaved, setVoiceFavoriteSaved] = useState(false);
+  const [voiceFavoriteBusy, setVoiceFavoriteBusy] = useState(false);
   const [showHangupConfirm, setShowHangupConfirm] = useState(false);
   const [deleteConfirmRecord, setDeleteConfirmRecord] = useState<CallRecord | null>(null);
   const [voiceLang, setVoiceLang] = useState('');
@@ -821,6 +826,7 @@ const CallApp: React.FC = () => {
     sessionBlobUrlsRef.current.clear();
   };
   const longPressTimerRef = useRef<number | null>(null);
+  const callLongPressTriggeredRef = useRef(false);
   const callTouchStartPos = useRef({ x: 0, y: 0 });
   const idleNudgeCountRef = useRef(0);
   // VRM 模型的自定义表情名（加载时由画布回传），喂给基础版主模型或高质量导演。
@@ -2208,23 +2214,13 @@ ${sentencePlan}`;
     });
     setCallState('speaking');
   };
-  const handlePlayBubbleAudio = async (bubble: CallBubble) => {
-    if (bubble.role !== 'assistant' || generatingAudioBubbleId) return;
-    if (bubble.audioUrl) {
-      if (!isSpeakerOn) setIsSpeakerOn(true);
-      playAudio(bubble.audioUrl, bubble.performanceTimeline, estimateSpeechMs(bubble.text), true);
-      trackEvent('重播一条通话语音');
-      return;
-    }
+  const ensureCallBubbleAudio = async (bubble: CallBubble, forceRegenerate = false): Promise<string | null> => {
+    if (bubble.role !== 'assistant' || generatingAudioBubbleId) return null;
+    if (bubble.audioUrl && !forceRegenerate) return bubble.audioUrl;
     if (!hasConfiguredVoice()) {
       addToast('还没有配置这个角色的语音', 'info');
-      return;
+      return null;
     }
-
-    // The click itself unlocks the persistent media element. TTS happens only
-    // after this point when automatic voice is disabled.
-    if (isAudioPlaying) pauseAudio();
-    primeCallAudioFromGesture(true);
     setGeneratingAudioBubbleId(bubble.id);
     setErrorMessage('');
     try {
@@ -2242,14 +2238,90 @@ ${sentencePlan}`;
         ...record,
         transcript: record.transcript.map(item => item.id === bubble.id ? { ...item, audioUrl: url } : item),
       })));
-      playAudio(url, bubble.performanceTimeline, estimateSpeechMs(bubble.text), true);
-      trackEvent('按需生成并播放通话语音');
+      return url;
     } catch (error: any) {
       setCallState('listening');
       setErrorMessage(error?.message || '语音生成失败');
       addToast(`语音生成失败：${error?.message || '未知错误'}`, 'error');
+      return null;
     } finally {
       setGeneratingAudioBubbleId(null);
+    }
+  };
+  const handlePlayBubbleAudio = async (bubble: CallBubble) => {
+    if (bubble.role !== 'assistant' || generatingAudioBubbleId) return;
+    if (bubble.audioUrl) {
+      if (!isSpeakerOn) setIsSpeakerOn(true);
+      playAudio(bubble.audioUrl, bubble.performanceTimeline, estimateSpeechMs(bubble.text), true);
+      trackEvent('重播一条通话语音');
+      return;
+    }
+    // The click itself unlocks the persistent media element. TTS happens only
+    // after this point when automatic voice is disabled.
+    if (isAudioPlaying) pauseAudio();
+    primeCallAudioFromGesture(true);
+    const url = await ensureCallBubbleAudio(bubble);
+    if (!url) return;
+    if (!isSpeakerOn) setIsSpeakerOn(true);
+    playAudio(url, bubble.performanceTimeline, estimateSpeechMs(bubble.text), true);
+    trackEvent('按需生成并播放通话语音');
+  };
+  const callFavoriteSourceKey = (charId: string, bubble: CallBubble) => `${charId}:${bubble.dbId || bubble.id}`;
+  const openCallVoiceFavorite = async (bubble: CallBubble, charId = selectedChar?.id || '', charName = selectedChar?.name || '未知角色') => {
+    if (bubble.role !== 'assistant' || !charId) return;
+    setVoiceFavoriteTarget({ bubble, charId, charName });
+    setVoiceFavoriteBusy(false);
+    setVoiceFavoriteSaved(!!await getVoiceFavorite('call', callFavoriteSourceKey(charId, bubble)).catch(() => null));
+  };
+  const toggleCallVoiceFavorite = async () => {
+    const target = voiceFavoriteTarget;
+    if (!target || voiceFavoriteBusy) return;
+    const sourceKey = callFavoriteSourceKey(target.charId, target.bubble);
+    setVoiceFavoriteBusy(true);
+    try {
+      if (voiceFavoriteSaved) {
+        await removeVoiceFavorite('call', sourceKey);
+        setVoiceFavoriteSaved(false);
+        addToast('已取消收藏语音', 'info');
+        return;
+      }
+
+      let url = target.bubble.audioUrl || await ensureCallBubbleAudio(target.bubble);
+      let blob: Blob | null = null;
+      if (url) {
+        try { blob = await fetchBlobForShare(url, 'audio/mpeg'); } catch { /* stale session URL: regenerate below */ }
+      }
+      if (!blob) {
+        url = await ensureCallBubbleAudio(target.bubble, true);
+        if (url) {
+          try { blob = await fetchBlobForShare(url, 'audio/mpeg'); } catch { /* handled below */ }
+        }
+      }
+      if (!blob) throw new Error('暂时拿不到这条语音的音频文件');
+
+      const parsed = extractVoiceTag(target.bubble.text);
+      const originalText = stripCallTextFormatting(parsed.display).trim()
+        || cleanVoiceMarkupForDisplay(parsed.voiceText)
+        || stripCallTextFormatting(target.bubble.text).trim();
+      const spokenText = cleanVoiceMarkupForDisplay(parsed.voiceText) || originalText;
+      await saveVoiceFavorite({
+        source: 'call',
+        sourceKey,
+        charId: target.charId,
+        charName: target.charName,
+        sourceTimestamp: target.bubble.timestamp,
+        originalText,
+        spokenText: spokenText !== originalText ? spokenText : undefined,
+        language: voiceLang || undefined,
+        blob,
+      });
+      setVoiceFavoriteSaved(true);
+      addToast('已收藏通话语音', 'success');
+      trackEvent('收藏通话语音');
+    } catch (error: any) {
+      addToast(error?.message || '收藏失败，请检查浏览器存储空间', 'error');
+    } finally {
+      setVoiceFavoriteBusy(false);
     }
   };
   const resumeAudio = () => {
@@ -3358,7 +3430,37 @@ ${sentencePlan}`;
         </div>
         <div className="mt-4 flex-1 overflow-y-auto space-y-2.5">
           {recordDetail.transcript.map(item => (
-            <div key={item.id} className={`rounded-2xl px-3.5 py-2.5 border border-white/10 backdrop-blur-md ${item.role === 'user' ? 'bg-white/[0.07] ml-6' : 'bg-white/[0.03] mr-6'}`}>
+            <div
+              key={item.id}
+              onContextMenu={(event) => {
+                if (item.role !== 'assistant') return;
+                event.preventDefault();
+                void openCallVoiceFavorite(item, recordDetail.characterId, recordDetail.characterName);
+              }}
+              onTouchStart={(event) => {
+                if (item.role !== 'assistant') return;
+                callLongPressTriggeredRef.current = false;
+                callTouchStartPos.current = { x: event.touches[0].clientX, y: event.touches[0].clientY };
+                longPressTimerRef.current = window.setTimeout(() => {
+                  callLongPressTriggeredRef.current = true;
+                  void openCallVoiceFavorite(item, recordDetail.characterId, recordDetail.characterName);
+                }, 450);
+              }}
+              onTouchMove={(event) => {
+                if (!longPressTimerRef.current) return;
+                const dx = Math.abs(event.touches[0].clientX - callTouchStartPos.current.x);
+                const dy = Math.abs(event.touches[0].clientY - callTouchStartPos.current.y);
+                if (dx > 10 || dy > 10) {
+                  window.clearTimeout(longPressTimerRef.current);
+                  longPressTimerRef.current = null;
+                }
+              }}
+              onTouchEnd={() => {
+                if (longPressTimerRef.current) window.clearTimeout(longPressTimerRef.current);
+                longPressTimerRef.current = null;
+              }}
+              className={`rounded-2xl px-3.5 py-2.5 border border-white/10 backdrop-blur-md ${item.role === 'user' ? 'bg-white/[0.07] ml-6' : 'bg-white/[0.03] mr-6'}`}
+            >
               <div className="text-[10px] text-white/45">{item.role === 'user' ? '你' : recordDetail.characterName} · {item.time}</div>
               {item.role === 'user' && <CallSnapshotImage imageRef={item.cameraSnapshotRef} expired={item.cameraSnapshotExpired} />}
               <div className="text-sm mt-1 leading-relaxed">{(() => {
@@ -3369,7 +3471,11 @@ ${sentencePlan}`;
               })()}</div>
               {item.role === 'assistant' && (
                 <button
-                  onClick={() => { void handlePlayBubbleAudio(item); trackEvent('播放通话记录里的语音'); }}
+                  onClick={() => {
+                    if (callLongPressTriggeredRef.current) { callLongPressTriggeredRef.current = false; return; }
+                    void handlePlayBubbleAudio(item);
+                    trackEvent('播放通话记录里的语音');
+                  }}
                   disabled={!!generatingAudioBubbleId}
                   className="mt-2 text-xs px-2.5 py-1 rounded-full bg-white/8 border border-white/15 text-white/60 transition hover:bg-white/15 disabled:opacity-40"
                 >
@@ -3392,6 +3498,15 @@ ${sentencePlan}`;
           className="keep-white w-full py-3 rounded-2xl mt-4 font-medium text-white transition active:scale-[0.98]"
           style={{ backgroundColor: accentColor }}
         >再打一通</button>
+        <VoiceFavoriteActionSheet
+          open={!!voiceFavoriteTarget}
+          favorited={voiceFavoriteSaved}
+          busy={voiceFavoriteBusy}
+          title="通话语音"
+          preview={voiceFavoriteTarget ? (stripCallTextFormatting(extractVoiceTag(voiceFavoriteTarget.bubble.text).display) || cleanVoiceMarkupForDisplay(extractVoiceTag(voiceFavoriteTarget.bubble.text).voiceText)) : ''}
+          onToggle={() => void toggleCallVoiceFavorite()}
+          onClose={() => { if (!voiceFavoriteBusy) setVoiceFavoriteTarget(null); }}
+        />
       </div>
     );
   }
@@ -3705,12 +3820,17 @@ ${sentencePlan}`;
             key={bubble.id}
             onContextMenu={(e) => {
               e.preventDefault();
-              startEditBubble(bubble);
+              if (bubble.role === 'assistant') void openCallVoiceFavorite(bubble);
+              else startEditBubble(bubble);
             }}
             onTouchStart={(e) => {
-              if (bubble.role !== 'user') return;
+              callLongPressTriggeredRef.current = false;
               callTouchStartPos.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-              longPressTimerRef.current = window.setTimeout(() => startEditBubble(bubble), 450);
+              longPressTimerRef.current = window.setTimeout(() => {
+                callLongPressTriggeredRef.current = true;
+                if (bubble.role === 'assistant') void openCallVoiceFavorite(bubble);
+                else startEditBubble(bubble);
+              }, 450);
             }}
             onTouchMove={(e) => {
               if (!longPressTimerRef.current) return;
@@ -3752,7 +3872,10 @@ ${sentencePlan}`;
             {bubble.role === 'assistant' && (
               <div className="mt-2 flex gap-2 flex-wrap">
                 <button
-                  onClick={() => { void handlePlayBubbleAudio(bubble); }}
+                  onClick={() => {
+                    if (callLongPressTriggeredRef.current) { callLongPressTriggeredRef.current = false; return; }
+                    void handlePlayBubbleAudio(bubble);
+                  }}
                   disabled={!!generatingAudioBubbleId}
                   className="text-xs px-2.5 py-1 rounded-full bg-white/8 border border-white/15 text-white/70 transition hover:bg-white/15 disabled:opacity-40"
                 >
@@ -3959,6 +4082,15 @@ ${sentencePlan}`;
           </div>
         </div>
       )}
+      <VoiceFavoriteActionSheet
+        open={!!voiceFavoriteTarget}
+        favorited={voiceFavoriteSaved}
+        busy={voiceFavoriteBusy}
+        title="通话语音"
+        preview={voiceFavoriteTarget ? (stripCallTextFormatting(extractVoiceTag(voiceFavoriteTarget.bubble.text).display) || cleanVoiceMarkupForDisplay(extractVoiceTag(voiceFavoriteTarget.bubble.text).voiceText)) : ''}
+        onToggle={() => void toggleCallVoiceFavorite()}
+        onClose={() => { if (!voiceFavoriteBusy) setVoiceFavoriteTarget(null); }}
+      />
       {showLive2DSettings && selectedChar?.videoAvatar?.format === 'live2d' && (
         <div className="sully-stage-dark" style={{ display: 'contents' }}>
           <Live2DActionSettings

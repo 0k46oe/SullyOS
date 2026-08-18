@@ -1386,6 +1386,7 @@ interface MessageItemProps {
     onToggleThinkingSelect?: (id: number) => void;
     // Translation (AI messages only, bilingual content parsed from %%BILINGUAL%%)
     translationEnabled?: boolean;
+    translationExpanded?: boolean;
     isShowingTarget?: boolean;
     onTranslateToggle?: (msgId: number) => void;
     // Voice TTS
@@ -1444,6 +1445,7 @@ const MessageItem = React.memo(({
     isThinkingSelected,
     onToggleThinkingSelect,
     translationEnabled,
+    translationExpanded,
     isShowingTarget,
     onTranslateToggle,
     voiceData,
@@ -3464,9 +3466,12 @@ const MessageItem = React.memo(({
     const langAContent = hasBilingual ? stripJunk(rawContent.substring(0, bilingualIdx)) : stripJunk(rawContent);
     const langBContent = hasBilingual ? stripJunk(rawContent.substring(bilingualIdx + '%%BILINGUAL%%'.length)) : '';
 
-    // Display: "选" language by default, "译" language when toggled
-    const displayContent = (isShowingTarget && langBContent) ? langBContent : langAContent;
-    const showTranslateButton = translationEnabled && hasBilingual && langBContent;
+    // Display: 默认点击切换；可选“直接展开”时，上方原文 + 下方译文同时显示。
+    const showExpandedTranslation = Boolean(translationEnabled && translationExpanded && hasBilingual && langBContent);
+    const displayContent = showExpandedTranslation
+        ? langAContent
+        : (isShowingTarget && langBContent) ? langBContent : langAContent;
+    const showTranslateButton = translationEnabled && !showExpandedTranslation && hasBilingual && langBContent;
 
     // Check if raw content has a <语音> tag (voice-only message that hasn't been TTS'd yet).
     // 未闭合的开标签也算 (历史坏数据: 语音块曾被 chunkText 切碎, 开标签落单) —
@@ -3539,6 +3544,12 @@ const MessageItem = React.memo(({
             {displayContent && !isForeignVoiceMsg && (
             <div className="relative z-10 text-[15px] leading-relaxed whitespace-pre-wrap break-all select-text" style={{ color: styleConfig.textColor }}>
                 {renderContent(displayContent)}
+                {showExpandedTranslation && (
+                    <div className="mt-2.5 pt-2 border-t border-current/15">
+                        <div className="mb-1 text-[9px] font-bold tracking-[0.16em] opacity-40 select-none">翻译</div>
+                        {renderContent(langBContent)}
+                    </div>
+                )}
             </div>
             )}
 
@@ -3771,6 +3782,7 @@ const MessageItem = React.memo(({
            prev.selectionMode === next.selectionMode &&
            prev.isSelected === next.isSelected &&
            prev.translationEnabled === next.translationEnabled &&
+           prev.translationExpanded === next.translationExpanded &&
            prev.isShowingTarget === next.isShowingTarget &&
            prev.avatarShape === next.avatarShape &&
            prev.avatarSize === next.avatarSize &&

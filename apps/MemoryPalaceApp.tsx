@@ -1896,6 +1896,10 @@ export default function MemoryPalaceApp() {
                 if (result.aspirations?.length) parts.push(`${result.aspirations.length} 个新期盼`);
                 if (result.distilled?.length) parts.push(`${result.distilled.length} 条沉淀到门牌`);
                 if (result.plateUpdated?.length) parts.push(`${result.plateUpdated.length} 块门牌更新`);
+                // 门牌整理是交给云端跑的（页面关着也能跑完），交出去就返回，门牌得过几分钟
+                // 才动。手动消化时用户刚盯着「正在整理门牌…」一路看到这里，不说这一句的话
+                // 他看到的就是整理阶段一闪而过、门牌纹丝不动，跟没跑过一模一样。
+                if (result.plateCloudPending) parts.push('门牌整理在云端跑，结果晚几分钟落地');
                 setDigestResult(parts.length > 0 ? `[ok]${parts.join('，')}` : '没有变化');
             }
             loadStats();
@@ -4499,7 +4503,12 @@ create table if not exists memory_vectors (
                                                         门牌已更新：{report.plateUpdated.map(r => (PLATE_TITLES as Record<string, string>)[r] || r).join('、')}
                                                     </div>
                                                 )}
-                                                {submitCount > 0 && report.plateUpdated.length === 0 && (
+                                                {report.plateCloudPending && (
+                                                    <div style={{ fontSize: 10, color: '#8b5cf6', marginTop: 6 }}>
+                                                        门牌整理已交给云端跑，结果晚几分钟落地
+                                                    </div>
+                                                )}
+                                                {submitCount > 0 && report.plateUpdated.length === 0 && !report.plateCloudPending && (
                                                     <div style={{ fontSize: 10, color: '#f59e0b', marginTop: 6 }}>
                                                         ⚠️ 本次提交的候选未合并进门牌（整理未跑成或未被采纳）
                                                     </div>

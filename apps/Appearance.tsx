@@ -923,7 +923,7 @@ const Appearance: React.FC = () => {
             <>
                 <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
                     <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-1">动画与过场</h2>
-                    <p className="text-[10px] text-slate-400 mb-2">三项都默认开启，可以分别关闭；关闭加载动画后，超过 7 秒的卡死恢复提示仍会保留。</p>
+                    <p className="text-[10px] text-slate-400 mb-2">三项都默认开启，可以分别关闭；关闭加载动画后，超过 15 秒的卡死恢复提示仍会保留。</p>
                     <div className="divide-y divide-slate-100">
                         {([
                             {

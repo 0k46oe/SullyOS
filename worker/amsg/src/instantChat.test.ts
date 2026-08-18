@@ -190,6 +190,54 @@ describe('POST /instant-chat — 请求体', () => {
   });
 });
 
+// 客户端在 body 超阈值时会 gzip 再发（这条路上的正文是整轮聊天，最大的一份）。
+// 这三条钉的是「解压这一步不能因为链路上有人插手就炸」——挂了的表现是所有大 body
+// 的请求统统 400 INVALID_JSON，而小 body 一切正常，从外面看像是「长消息发不出去」。
+describe('POST /instant-chat — gzip 上行', () => {
+  const gzip = async (text: string): Promise<ArrayBuffer> => {
+    const stream = new Response(new TextEncoder().encode(text)).body!
+      .pipeThrough(new CompressionStream('gzip'));
+    return new Response(stream).arrayBuffer();
+  };
+
+  const postRaw = (body: BodyInit, headers: Record<string, string> = {}) =>
+    new Request('https://w.example/instant-chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-User-Id': USER_ID, ...headers },
+      body,
+    });
+
+  it('压过的请求体解得开，转发出去的还是原来那两个信封', async () => {
+    const { upstream, calls } = makeUpstream();
+    const payload = JSON.stringify(validBody());
+    const response = await run({
+      request: postRaw(await gzip(payload), { 'Content-Encoding': 'gzip' }),
+      upstream,
+    });
+    expect(response.status).toBe(202);
+    // 信封原样搬到上游，一个字段都不能在解压途中掉（转发时信封本身就是整个 body）。
+    expect(JSON.parse(calls[0].body)).toEqual(envelope('state'));
+    expect(JSON.parse(calls[1].body)).toEqual(envelope('task'));
+  });
+
+  // 最要命的一档：`Content-Encoding` 是标准头，链路上的边缘节点会替你把请求体解开
+  // 却把头留着（SullyOS 在 instant-push 那条路上实测过）。只看头就去解压的话，
+  // 这里拿到的是明文，解压器当场抛错，用户侧是一句「请求体不是合法的 JSON」。
+  it('头写着 gzip、字节其实是明文（边缘替我们解过了）→ 照常按明文读', async () => {
+    const { upstream } = makeUpstream();
+    const response = await run({
+      request: postRaw(JSON.stringify(validBody()), { 'Content-Encoding': 'gzip' }),
+      upstream,
+    });
+    expect(response.status).toBe(202);
+  });
+
+  it('没有这个头 → 一字不差地走老路（老客户端不压）', async () => {
+    const { upstream } = makeUpstream();
+    expect((await run({ request: post(validBody()), upstream })).status).toBe(202);
+  });
+});
+
 describe('POST /instant-chat — 严格顺序与失败传播', () => {
   it('顺序：先传云端状态，再建任务', async () => {
     const { upstream, paths } = makeUpstream();
@@ -579,13 +627,27 @@ describe('buildInstantTimelyBlock', () => {
 });
 
 describe('applyInstantNotificationPolicy', () => {
-  // 用户正盯着聊天窗口等这条回复，锁屏横幅在这时候弹出来纯属打扰（页面自己会把消息上屏）；
-  // 窗口不可见时又必须弹，不然「发完就自由了」这件事没人来叫他。表态写在载荷里，
-  // 真正的判定由 SW 的 shouldRenderNotification 按窗口可见性做。
-  it('标 when-hidden：前台可见时 SW 不弹系统通知，不可见照弹', () => {
+  // 订阅是按 userVisibleOnly 建的：推了却不弹，Firefox 按配额退订、iOS 过了宽限期直接
+  // 吊销，两边都静默发生。所以即时对话这条必推的路只能标 always，打扰交给折叠 + 静音压。
+  // 回到 when-hidden（或任何「有时候不弹」的档）就是把订阅重新押上去，这条守着别退回去。
+  it('标 always + 按角色折叠 + 静音：推了就一定弹，不靠不弹来防打扰', () => {
     const push = applyInstantNotificationPolicy(
-      { message: 'hi', notification: { title: '来自 Nyah', body: 'hi' } });
-    expect(push.notification).toEqual({ title: '来自 Nyah', body: 'hi', show: 'when-hidden' });
+      { message: 'hi', notification: { title: '来自 Nyah', body: 'hi' } }, 'char-1');
+    expect(push.notification).toEqual({
+      title: '来自 Nyah', body: 'hi', show: 'always', silent: true, tag: 'amsg-instant-char-1',
+    });
+  });
+
+  it('没显式传 charId 就从 metadata 上认', () => {
+    const push = applyInstantNotificationPolicy(
+      { message: 'hi', metadata: { charId: 'char-2' }, notification: { title: 't' } });
+    expect((push.notification as any).tag).toBe('amsg-instant-char-2');
+  });
+
+  // 折叠是为了不刷屏，但两个角色共用一个 tag 会互相顶掉——那是真丢消息，宁可多几条。
+  it('认不出角色就不折叠（tag 留空，交给库按 messageId 兜底）', () => {
+    const push = applyInstantNotificationPolicy({ message: 'hi', notification: { title: 't' } });
+    expect(push.notification).toEqual({ title: 't', show: 'always', silent: true });
   });
 
   it('载荷本来没有 notification 就不凭空造一个（造出来只会弹一条空白横幅）', () => {

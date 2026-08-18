@@ -17,6 +17,7 @@ import {
     splitWorldbookSections,
     type WorldbookScanMessage,
 } from './worldbook';
+import { shareOrDownloadFile } from './shareExport';
 
 export type StoryApiRole = 'system' | 'user' | 'assistant';
 export interface StoryApiMessage { role: StoryApiRole; content: string; }
@@ -38,6 +39,25 @@ export interface StoryGenerationSettings {
     presence_penalty?: number;
     max_tokens: number;
 }
+
+/**
+ * 默认完整发送酒馆预设中的采样参数。只有用户为当前剧情显式开启兼容开关时，才省略
+ * top_p / frequency_penalty / presence_penalty；不能用少数中转的兼容问题牺牲正常预设效果。
+ */
+export const prepareStoryGenerationSettings = (
+    settings?: Partial<StoryGenerationSettings>,
+    omitSamplingParams = false,
+): Partial<StoryGenerationSettings> => {
+    if (!settings) return {};
+    if (!omitSamplingParams) return { ...settings };
+    const {
+        top_p: _topP,
+        frequency_penalty: _frequencyPenalty,
+        presence_penalty: _presencePenalty,
+        ...compatible
+    } = settings;
+    return compatible;
+};
 
 export interface StoryAffinityInput {
     characterId?: string;
@@ -171,6 +191,7 @@ export const createStoryTheaterDraft = (now: number = Date.now()): StoryTheaterE
     archives: [],
     selectedWorldbookIds: [],
     forceUserLastMessage: false,
+    omitSamplingParams: false,
     createdAt: now,
     updatedAt: now,
 });
@@ -202,6 +223,7 @@ export const normalizeStoryTheater = (entry: StoryTheaterEntry): StoryTheaterEnt
         presetId: /^builtin-night-screening-v\d/i.test(String(entry.presetId || '')) ? 'builtin-night-screening' : entry.presetId,
         presetOverride: entry.presetOverride?.schema === 'sullyos.story-preset' && Array.isArray(entry.presetOverride.prompts) ? entry.presetOverride : undefined,
         forceUserLastMessage: entry.forceUserLastMessage === true,
+        omitSamplingParams: entry.omitSamplingParams === true,
         createdAt: Number(entry.createdAt) || Date.now(),
         updatedAt: Number(entry.updatedAt) || Number(entry.createdAt) || Date.now(),
     };
@@ -1318,14 +1340,16 @@ export const memoryTimestampForCharacter = (entry: StoryTheaterEntry, charId: st
     return storyAnchor + Math.max(0, realTimestamp - entry.createdAt);
 };
 
-export const downloadStoryPreset = (preset: StoryTheaterPreset): void => {
-    const blob = new Blob([JSON.stringify(preset.document, null, 2)], { type: 'application/json;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `${preset.name || '剧情预设'}.json`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
+export const makeStoryPresetFileName = (name: string): string => {
+    const safeName = name.replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 80) || '剧情预设';
+    return `${safeName}.json`;
 };
+
+export const downloadStoryPreset = async (preset: StoryTheaterPreset): Promise<'shared' | 'downloaded'> => (
+    shareOrDownloadFile({
+        content: JSON.stringify(preset.document, null, 2),
+        fileName: makeStoryPresetFileName(preset.name),
+        mimeType: 'application/json',
+        shareTitle: `剧情预设：${preset.name || '未命名'}`,
+    })
+);

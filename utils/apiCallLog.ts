@@ -34,11 +34,13 @@ export interface ApiCallMeta {
 /**
  * 这一次请求是谁发出去的。
  *
- * 不填 = 浏览器自己直连模型（绝大多数记录，不占存储）。`cloud-instant-chat` 是主动
- * 消息 2.0 的即时对话：本地只把这一轮交上去，真正那条 `/chat/completions` 由用户自己
- * 的 Cloudflare Worker 在云端发出。
+ * 不填 = 浏览器自己直连模型（绝大多数记录，不占存储）。带值的这几种都是主动消息 2.0
+ * 交给云端跑的：本地只把活儿交上去，真正那条 `/chat/completions` 由用户自己的
+ * Cloudflare Worker 在云端发出。
+ *   - `cloud-instant-chat`：即时对话（用户此刻正等着的那一轮）
+ *   - `cloud-plate-consolidate`：门牌整理（记忆宫殿的后台活儿，用的是副 API）
  */
-export type ApiCallRoute = 'cloud-instant-chat';
+export type ApiCallRoute = 'cloud-instant-chat' | 'cloud-plate-consolidate';
 
 /** 落库的一条记录。 */
 export interface ApiCallLogEntry extends ApiCallMeta {

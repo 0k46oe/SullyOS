@@ -284,7 +284,7 @@ const JournalApp: React.FC = () => {
         return { ...entry, chatCardMessageId: newId };
     };
 
-    const saveEntry = async () => {
+    const saveEntry = async (options: { silent?: boolean } = {}) => {
         if (!currentEntry || !selectedChar) return;
         // 若该日记已经在聊天里有卡片（char 回复过 + 自动发送过），保存时同步更新卡片
         let toSave = currentEntry;
@@ -294,7 +294,7 @@ const JournalApp: React.FC = () => {
         await DB.saveDiary(toSave);
         if (toSave !== currentEntry) setCurrentEntry(toSave);
         await loadDiaries(toSave.charId);
-        addToast('日记已保存', 'success');
+        if (!options.silent) addToast('日记已保存', 'success');
     };
 
     const handleDeleteDiary = async () => {
@@ -421,11 +421,15 @@ const JournalApp: React.FC = () => {
             return;
         }
 
+        const isRewrite = Boolean(currentEntry.charPage);
         setIsThinking(true);
-        saveEntry();
-        trackEvent('邀请角色交换日记');
+        addToast(isRewrite ? `正在请 ${selectedChar.name} 重新写这篇日记…` : `正在请 ${selectedChar.name} 写交换日记…`, 'info');
+        trackEvent(isRewrite ? '重新生成角色日记' : '邀请角色交换日记');
 
         try {
+            // 生成前仍要把用户页草稿落库，但这是重写流程的内部步骤，不能冒充用户
+            // 主动点了“保存”。旧代码在这里直接 saveEntry()，于是循环按钮先弹“日记已保存”。
+            await saveEntry({ silent: true });
             await injectMemoryPalace(selectedChar, undefined, currentEntry.userPage.text);
             let systemPrompt = ContextBuilder.buildCoreContext(selectedChar, userProfile);
 
@@ -531,10 +535,10 @@ Structure:
             await DB.saveDiary(synced);
             await loadDiaries(selectedChar.id);
             setActiveTab('char');
-            addToast('对方已回复 · 已同步到聊天', 'success');
+            addToast(isRewrite ? '角色日记已重新写好 · 已同步到聊天' : '对方已回复 · 已同步到聊天', 'success');
 
         } catch (e: any) {
-            addToast(`回复失败: ${e.message}`, 'error');
+            addToast(`${isRewrite ? '重新写日记' : '交换日记'}失败: ${e.message}`, 'error');
         } finally {
             setIsThinking(false);
         }
@@ -1159,7 +1163,13 @@ ${charPart}
                     
                     <div className="flex gap-3">
                         {activeTab === 'char' && currentEntry?.charPage && !isThinking && (
-                            <button onClick={handleExchange} className="w-11 h-11 bg-white/10 text-white rounded-full flex items-center justify-center active:scale-90 transition-transform border border-white/5">
+                            <button
+                                onClick={handleExchange}
+                                className="w-11 h-11 bg-white/10 text-white rounded-full flex items-center justify-center active:scale-90 transition-transform border border-white/5"
+                                title="重新写角色日记"
+                                aria-label="重新写角色日记"
+                                data-testid="journal-rewrite-character-page"
+                            >
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
                             </button>
                         )}

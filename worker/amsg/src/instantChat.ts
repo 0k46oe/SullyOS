@@ -90,18 +90,31 @@ export const buildInstantTimelyBlock = (args: {
 // ─── 通知策略 ───
 
 /**
- * 前台可见时别弹系统通知（SW 的 shouldRenderNotification 认这个值）。
+ * 推了就一定弹（SW 的 shouldRenderNotification 认这个值）。
  *
- * 用户正盯着聊天窗口等这条回复，锁屏横幅在这时候弹出来纯属打扰——页面自己会把消息
- * 上屏。窗口不可见（切后台、锁屏、关了标签页）时照弹，不然「发完就自由了」这件事
- * 就没人来叫他。判定在 SW 那边按真实的窗口可见性做，worker 只负责表态。
- *
- * 只给即时对话用：主动消息是「到点找人说话」，前台可见时更该弹。
+ * 订阅是按 `userVisibleOnly: true` 建的，等于跟浏览器约好每条 push 都给用户一次可见
+ * 反馈；收了 push 却不弹是违约，Firefox 按配额把订阅退掉，iOS 过了新订阅那几天宽限期
+ * 一条就吊销，而且两边都是静默发生的——服务端只看得到后续推送返回 410。所以口径只有
+ * 两档：要推就一定弹，不想弹就压根别推（内容落服务端收件箱，等客户端上线补拉）。
+ * 即时对话是用户按下发送、正盯着「正在输入…」等的那一轮，必须推，于是选「一定弹」。
  */
-const NOTIFICATION_WHEN_HIDDEN = 'when-hidden';
+const NOTIFICATION_ALWAYS = 'always';
 
 /**
- * 给即时对话的推送载荷表态通知策略。
+ * 通知栏折叠用的 tag：同一个角色永远只留最新那一条。
+ *
+ * 一次回复常常分成好几段推，逐条弹会把通知栏刷满；同 tag 的通知互相覆盖，看到的就只有
+ * 最新一条。即时对话的失败通知也用这个 tag（见 index.ts 的 sendInstantErrorPush）：
+ * 同一个角色的最新状态本来就只该留一条，成功的回复把之前那条「没能生成」盖掉正合适。
+ */
+export const instantNotificationTag = (charId: string) => `amsg-instant-${charId}`;
+
+/**
+ * 给即时对话的推送载荷表态通知策略：一定弹，但按角色折叠、不响铃不震动。
+ *
+ * 打扰不靠「不弹」来压，靠另外两个字段：`tag` 折叠成一条，`silent` 关掉响铃和震动。
+ * 用户正盯着窗口时页面照旧自绘上屏，通知只是安静地躺在通知中心里。只给即时对话用——
+ * 主动消息是「到点找人说话」，那条路要响铃叫人，既不折叠也不静音。
  *
  * 载荷本来就没有 notification 时不凭空造一个：SW 拿不到 title / body 只能弹一条空白
  * 横幅，而「没有 notification」这件事本身在 SW 那边有按 messageKind 的默认行为，
@@ -113,13 +126,26 @@ const NOTIFICATION_WHEN_HIDDEN = 'when-hidden';
  */
 export const applyInstantNotificationPolicy = (
   payload: Record<string, unknown>,
+  charId?: string | null,
 ): Record<string, unknown> => {
   const notification = payload.notification;
   const hasNotification = !!notification && typeof notification === 'object' && !Array.isArray(notification);
   if (!hasNotification) return payload;
+  const meta = payload.metadata;
+  const metaCharId = meta && typeof meta === 'object' && !Array.isArray(meta)
+    ? (meta as Record<string, unknown>).charId
+    : undefined;
+  const target = charId || (typeof metaCharId === 'string' ? metaCharId : '');
   return {
     ...payload,
-    notification: { ...(notification as Record<string, unknown>), show: NOTIFICATION_WHEN_HIDDEN },
+    notification: {
+      ...(notification as Record<string, unknown>),
+      show: NOTIFICATION_ALWAYS,
+      silent: true,
+      // 认不出是哪个角色时就不折叠：通知栏里多几条只是吵，两个角色共用一个 tag 会
+      // 互相顶掉，那是真的丢消息。
+      ...(target ? { tag: instantNotificationTag(target) } : {}),
+    },
   };
 };
 
@@ -272,6 +298,34 @@ const STATE_FORWARD_BACKOFF_MS = [0, 400, 1200];
 
 const sleep = (ms: number) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
+/** gzip 流的头两个字节（RFC 1952）。压没压过看这个，不看那个头。 */
+const GZIP_MAGIC = [0x1f, 0x8b];
+
+/**
+ * 把请求正文读成字符串，`Content-Encoding: gzip` 的在这一步还原。
+ *
+ * 跟上游 `readRequestBody` 认同一个头（客户端只有一个请求出口，两边端点得收同一种
+ * 东西），但这份是自己写的：上游那个函数住在 `@rei-standard/amsg-server` 包根，而包根
+ * 顶层 import 了 Node 的 `crypto`，这个 worker 是明确不开 `nodejs_compat` 的。
+ *
+ * 判据是**魔数不是头**。`Content-Encoding` 是标准头，链路上的边缘节点会替你把请求体
+ * 解开却把头留着（SullyOS 在 instant-push 那条路上实测过这件事，那边索性换了个自定义
+ * 头来躲开）——只看头的话，这种时候会拿明文去喂解压器，报出来是一句让人找不着北的
+ * 「请求体不是合法的 JSON」。看魔数则三种情形都对：没解过的解开、替我们解过的原样读、
+ * 压根没压的原样读。
+ */
+const readMaybeGzippedBody = async (request: Request): Promise<string> => {
+  if ((request.headers.get('content-encoding') ?? '').toLowerCase() !== 'gzip') {
+    return request.text();
+  }
+  const raw = new Uint8Array(await request.arrayBuffer());
+  if (raw.length < 2 || raw[0] !== GZIP_MAGIC[0] || raw[1] !== GZIP_MAGIC[1]) {
+    return new TextDecoder().decode(raw);
+  }
+  const stream = new Response(raw).body!.pipeThrough(new DecompressionStream('gzip'));
+  return new Response(stream).text();
+};
+
 /** 客户端预加密的信封形状（上游 parseEncryptedBody 认的就是这三个字段）。 */
 const isEncryptedEnvelope = (value: unknown): boolean => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -320,9 +374,12 @@ export const handleInstantChat = async (args: {
   if (!UUID_V4_RE.test(userId)) return fail(400, 'INVALID_USER_ID_FORMAT', 'X-User-Id 必须是 UUID v4 格式');
 
   // ── 外壳是明文 JSON，里头两个信封是客户端加密好的，包装层只搬不看。
+  //    body 超阈值时客户端会先 gzip 再发（这条路上的正文是整轮聊天，最大的一份），
+  //    所以读之前先过一道解压。
   let body: Record<string, unknown>;
   try {
-    const parsed = await request.json();
+    const text = await readMaybeGzippedBody(request);
+    const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
     body = parsed as Record<string, unknown>;
   } catch {

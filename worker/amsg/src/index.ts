@@ -38,6 +38,13 @@ import { AMSG_BUNDLE_VERSION } from '../../../utils/amsgBundleVersion';
 // 往里加任何浏览器依赖都会连累这个 bundle）。这里只产出事实，红绿灯和文案归前端。
 import type { AmsgPushGoneFailure } from '../../../utils/amsgDiagnostics';
 import type { UserProfile } from '../../../types';
+import { AMSG_JOB_NAMESPACE, AMSG_JOB_TTL_DAYS } from '../../../utils/amsgTaskKinds';
+import {
+  FIRE_KIND_HANDLERS,
+  getKindFireStash,
+  putKindFireStash,
+  readTaskKind,
+} from './fireKinds';
 import {
   AMSG_CHAT_FAIL_KEY,
   AMSG_FIRE_PACK_KEY,
@@ -142,6 +149,7 @@ import {
   applyInstantNotificationPolicy,
   buildInstantTimelyBlock,
   handleInstantChat,
+  instantNotificationTag,
   INSTANT_TOTAL_TIMEOUT_MS,
   isInstantChatTask,
   type InstantTickNamespace,
@@ -289,6 +297,13 @@ interface SessionCtx {
   scheduleTask?: ScheduleTask;
   cancelTask?: CancelTask;
   renewTask?: RenewTask;
+  /**
+   * 往客户端送一条**不是聊天内容**的结果（amsg-server 2.6.0-next.21+）。
+   * 一条结果落进 message_outbox（到达的保证：客户端下次 `GET /outbox?since=` 一定
+   * 拿得到），并按通知策略决定要不要顺带发一条 Web Push（及时性）。
+   * `resultKind` 是唯一必填字段，其余形状由宿主定。老部署上整个方法不存在。
+   */
+  emitResult?: (payload: Record<string, unknown>) => Promise<{ messageId: string; pushed: boolean }>;
   /** 本次 fire 的第几轮 LLM（0-based）。最后一轮不再放行工具请求，见 MAX_TOOL_ITERATIONS。 */
   iteration?: number;
   /** 任务行 id；没有任务行的 in-server instant 路径为 null。 */
@@ -712,10 +727,24 @@ const recordSkip = async (
  * 只靠收尾那份的话这些路径一条痕都留不下）。每次覆盖写，最终留下最后一跳的原因。
  * best-effort：写不进去只是失败原因退化成笼统一句，绝不连累调用方。
  */
+/**
+ * fire 抛出来那个错误对象上的稳定 code（没有 → null）。
+ *
+ * 刻意**只认 `code`**，不去读 `statusCode`：Node 生态的 HTTP 库习惯把上游状态码挂成
+ * `statusCode`，而这个 catch 罩着整条投递链——宿主 hook 里转手抛出的一个 404 会被读成
+ * 「推送订阅已失效」，客户端于是引导用户白重建一次订阅。上游踩过同一个坑，修法就是
+ * 只在真正发 push 那一步认那个数（存在包内私有的 WeakMap 上，这里读不到）。
+ * 推送状态码要用的话，读上游写在任务行 last_error 上的那份。
+ */
+const readErrorCode = (error: unknown): string | null => {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && code ? code : null;
+};
+
 const writeChatFail = async (
   writeState: WriteState,
   charId: string,
-  record: { uuid: string; reason: string; retryCount: number },
+  record: { uuid: string; reason: string; retryCount: number; errorCode?: string | null },
 ): Promise<void> => {
   const full: AmsgChatFailRecord = {
     v: 1,
@@ -723,6 +752,7 @@ const writeChatFail = async (
     reason: record.reason.slice(0, 500),
     retryCount: record.retryCount,
     at: Date.now(),
+    ...(record.errorCode ? { errorCode: record.errorCode } : {}),
   };
   try {
     await writeState(amsgStateNamespace(charId), [
@@ -765,9 +795,11 @@ const instantErrorNotificationBody = (reason: string): string => {
  * handleDeliveryFailure 同源）、skip-push（行被当成功消费）、stale 跳过。还会重试的
  * 失败绝不发——「报错完回复又到了」这种误报比晚知道更伤（SSE↔push 双通道的老教训）。
  *
- * 通知打 `show: 'when-hidden'`：前台由页面监听 active-msg-error 当场收尾（落系统消息、
- * 熄灯），不弹横幅；后台弹「回复没能生成」。发不出去只 warn——客户端 60s 点名读
- * chat_fail 的兜底路径原样保留，这条 push 只是把感知从分钟级提到秒级。
+ * 通知打 `show: 'always'` + 按角色折叠 + 静音：这条是自己直发的 push，不经库的收件箱，
+ * 收了不弹就是跟浏览器违约一次（配额、吊销订阅，见 applyInstantNotificationPolicy），
+ * 所以推就一定弹。前台该收的尾照收——页面监听 active-msg-error 落系统消息、熄灯，
+ * 跟弹不弹横幅互不影响。发不出去只 warn——客户端 60s 点名读 chat_fail 的兜底路径原样
+ * 保留，这条 push 只是把感知从分钟级提到秒级。
  *
  * 订阅行是加密存的（encryptForStorage 的 iv:authTag:data 格式）；个别老部署可能存的是
  * 明文 JSON，解密失败时按明文再试一次，都不行才放弃。
@@ -776,6 +808,8 @@ const sendInstantErrorPush = async (args: {
   charId: string;
   taskUuid: string;
   reason: string;
+  /** 底层错误的稳定 code（见 AmsgChatFailRecord.errorCode）；客户端按它给处置建议。 */
+  errorCode?: string | null;
   /** 任务行上的 user_id；拿不到时取订阅表唯一那行（单用户部署）。 */
   userId?: string | null;
   contactName?: string | null;
@@ -809,11 +843,16 @@ const sendInstantErrorPush = async (args: {
         amsgInstantError: true,
         taskUuid: args.taskUuid,
         reason: args.reason.slice(0, 500),
+        ...(args.errorCode ? { errorCode: args.errorCode } : {}),
       },
       notification: {
         title: args.contactName ? `${args.contactName} 的回复没能生成` : '回复没能生成',
         body: instantErrorNotificationBody(args.reason),
-        show: 'when-hidden',
+        show: 'always',
+        silent: true,
+        // 跟这个角色的回复共用一个 tag：通知栏里只留最新状态，重发成功后那条回复
+        // 会把这条「没能生成」盖掉。失败本身在聊天流里有系统消息留痕，不靠横幅记账。
+        tag: instantNotificationTag(args.charId),
       },
     };
     await deps.webpush.sendNotification(subscription, JSON.stringify(payload));
@@ -845,10 +884,15 @@ export const amsgFireSettled = async (
   if (stash.instant && info.status === 'failed' && stash.taskUuid) {
     const failReason = info.error instanceof Error ? info.error.message : String(info.error ?? '未知错误');
     const retryCount = typeof info.task?.retry_count === 'number' ? info.task.retry_count : 0;
+    // 上游 amsg-server 2.6.0-next.21 起给这一族错误挂了稳定的 code（LLM 上游拒了请求是
+    // LLM_CALL_FAILED，hook 契约违约是 AGENTIC_*，正文超限是 *_TOO_LARGE）。原样带下去，
+    // 客户端据此说「该查 API Key」还是「该重发」，不必去猜那句人话的措辞。
+    const errorCode = readErrorCode(info.error);
     await writeChatFail(info.writeState, stash.charId, {
       uuid: stash.taskUuid,
       reason: failReason,
       retryCount,
+      errorCode,
     });
     // 终态判定与上游同源，两种都算：retry_count >= 3 的这跳失败后行转 failed
     // （handleDeliveryFailure 的梯子打光）；permanent 标记的错误（fireStateError 那族）
@@ -863,6 +907,7 @@ export const amsgFireSettled = async (
         charId: stash.charId,
         taskUuid: stash.taskUuid,
         reason: failReason,
+        errorCode,
         userId: typeof (info.task as Record<string, unknown> | null | undefined)?.user_id === 'string'
           ? (info.task as Record<string, unknown>).user_id as string
           : null,
@@ -976,6 +1021,20 @@ export const amsgStaleSkip = async (
   },
 ): Promise<void> => {
   const meta = (info.metadata ?? {}) as Record<string, unknown>;
+
+  // 后台任务（门牌整理这类）先接走。last_skip 那份留痕说的是「这条**主动消息**到点
+  // 为什么没响」，主动消息面板照它给用户解释；后台任务过期跟主动消息毫无关系，写进去
+  // 面板就会说谎——服务停摆几小时之后，用户会看到一条「上次主动消息没响、已被丢弃」，
+  // 而那个角色根本没排过主动消息。onBeforeFire 里那条 kind-skip 分支躲开的就是这个，
+  // 但它排在这个 hook 后面、看不到 kind，只能在这儿再挡一道。
+  const taskKind = readTaskKind(meta);
+  if (taskKind) {
+    console.log('[amsg:stale-skip] 后台任务过期跳过，不写 last_skip', {
+      taskId: task?.id ?? null, kind: taskKind, action: info.action,
+    });
+    return;
+  }
+
   const charId = typeof meta.charId === 'string' && meta.charId ? meta.charId : null;
   if (!charId) {
     console.warn('[amsg:stale-skip] 任务 metadata 缺 charId，这次过期跳过没法留痕', { taskId: task?.id ?? null });
@@ -1507,8 +1566,6 @@ export const amsgHooks = {
       }
     };
 
-    const charRows = await ctx.readState(amsgStateNamespace(charId));
-
     const taskMeta = (ctx.task.metadata ?? {}) as Record<string, unknown>;
     const policy = typeof taskMeta.amsgExpirePolicy === 'string'
       ? taskMeta.amsgExpirePolicy : undefined;
@@ -1518,6 +1575,42 @@ export const amsgHooks = {
     // 在最早的地方摘掉，后面谁也漏不出去。取完还要用——即时对话那一支下面拿它起跑评估。
     // 这里不分支：定时任务上本来就不该有这个键，真有也一样删掉。见 takeEmotionEvalSpec。
     const emotionEvalSpec = takeEmotionEvalSpec(ctx.task.metadata);
+
+    // 非聊天任务在这里就被接走（见 fireKinds.ts）。分派排在下面四道门之前是有意的：
+    // 那四道门问的都是「主动消息到点还该不该发」，对「后台整理一份数据」全都不适用；
+    // 而且它们要的 fire_pack / tool_pack 是聊天专用的云端状态，后台任务根本没传过，
+    // 排在后面的话第一道硬失败门就会把它判死。凭据擦除（上面那句）刻意留在前面：
+    // 不管什么种类的任务，metadata 上万一沾了副 API 凭据都得先摘掉。
+    const taskKind = readTaskKind(taskMeta);
+    if (taskKind) {
+      const handler = FIRE_KIND_HANDLERS[taskKind];
+      if (!handler) {
+        throw fail(`不认识的任务种类 amsgKind=${taskKind}（worker 代码比前端旧，去设置页重新部署一次）`);
+      }
+      let plan;
+      try {
+        plan = await handler.beforeFire({ ctx, charId, taskMeta });
+      } catch (error) {
+        throw fail(error instanceof Error ? error.message : String(error), { kind: taskKind });
+      }
+      if ('skip' in plan) {
+        // 不写 last_skip：那份留痕说的是「这条**主动消息**到点为什么没响」，主动消息
+        // 面板照它给用户解释。后台任务的跳过跟主动消息毫无关系，写进去面板就会说谎。
+        console.log('[amsg:kind-skip]', { taskId: ctx.task.id, kind: taskKind, reason: plan.reason });
+        return { skip: true } as const;
+      }
+      // 挂上跨 hook 的上下文，onLLMOutput 靠它认出「这一轮不是聊天」。
+      putKindFireStash(ctx.scratch, taskKind, plan.state);
+      return {
+        messages: plan.messages,
+        ...(plan.totalTimeoutMs ? { totalTimeoutMs: plan.totalTimeoutMs } : {}),
+      };
+    }
+
+    // 角色状态读在这儿而不是更早：fire_pack + tool_pack 是「一个角色 32KB 起步」、胖角色
+    // 还会被透明分块的大对象，读回来每条都要解密。上面那批后台任务根本没传过它，早读一行
+    // 就是每条任务白付一次 D1 往返加解密。
+    const charRows = await ctx.readState(amsgStateNamespace(charId));
 
     // 即时对话：用户刚把话说完、正盯着「正在输入…」等回复。下面三道门问的都是
     // 「主动消息到点还该不该发」——用户正在聊天所以让路、对话已经往前走所以作废、
@@ -1898,6 +1991,18 @@ export const amsgHooks = {
   },
 
   async onLLMOutput(ctx: SessionCtx) {
+    // 非聊天任务在这里就被接走，排在下面所有聊天语义（stash、分段、self_log、推送）
+    // 之前——它们一条都不适用，而 stash 那道断言更是会直接把这一轮判死。
+    const kindFire = getKindFireStash(ctx.scratch);
+    if (kindFire) {
+      const handler = FIRE_KIND_HANDLERS[kindFire.kind];
+      if (!handler) {
+        // 到点那一步查过表才会挂上 stash，走到这里表里不该没有。
+        throw new Error(`AMSG2_KIND_HANDLER_MISSING: onLLMOutput 找不到 ${kindFire.kind} 的 handler`);
+      }
+      return handler.llmOutput({ ctx, state: kindFire.state });
+    }
+
     const content = stripReasoningTags(ctx.llmOutputText || '').trim();
 
     // 任务身份直接从 ctx 上读（sessionId 是给日志和去重用的不透明串，不拿它切）。
@@ -2159,11 +2264,11 @@ export const amsgHooks = {
         payloads = budgeted;
       }
 
-      // 即时对话的通知策略：用户正盯着窗口等这条回复时不弹横幅（见
+      // 即时对话的通知策略：一定弹，但按角色折叠成一条、不响铃不震动（见
       // applyInstantNotificationPolicy）。收件兜底不在这里做——库自己会在每条推送
       // 发出去之前记进服务端账本，客户端按账本补收。
       if (stash.instant) {
-        payloads = payloads.map((payload) => applyInstantNotificationPolicy(payload));
+        payloads = payloads.map((payload) => applyInstantNotificationPolicy(payload, stash.charId));
       }
 
       return { ...decision, pushPayloads: payloads };
@@ -2303,7 +2408,14 @@ export const buildWorkerConfig = (env: Env) => {
     webpush,
     // 前端和 Worker 不同源，带自定义头的请求会先发 CORS 预检，必须放行。
     // 单用户自用默认全开；想收紧就把 '*' 换成自己的 SullyOS 站点 origin。
-    cors: { origin: '*' },
+    // allowHeaders 显式给：上游默认那份不含 Content-Encoding，而 gzip 上行要用它
+    // （见 CORS_ALLOW_HEADERS 那段注释）。
+    cors: { origin: '*', allowHeaders: CORS_ALLOW_HEADERS },
+    // 一次性 job 输入的过期清理（amsg-server 2.6.0-next.21+）：cron 每跳顺手把这个
+    // 命名空间下超过天数没更新的条目清掉。角色状态那个命名空间（amsg:char:<id>，
+    // 装 fire_pack / tool_pack）不配 TTL——那些是要长期留着的，配了就等于定时把
+    // 角色的云端状态抹掉。判据是行本来就有的 updated_at 列，不加列、不动表结构。
+    clientStateTtl: { [AMSG_JOB_NAMESPACE]: AMSG_JOB_TTL_DAYS },
     // 满血 fire-time hooks（onBeforeFire 现场填槽 + onLLMOutput 分类 +
     // executeToolCalls 服务端工具循环）；轮数/超时用库默认（5 轮 / 240s），
     // 即时对话那条单独把超时抬到 INSTANT_TOTAL_TIMEOUT_MS（onBeforeFire 返回值里给）。
@@ -2322,8 +2434,18 @@ export const buildWorkerConfig = (env: Env) => {
     // 同一个角色的多条任务不并发跑：两条撞在一起时用户会收到两条互不知情的消息，
     // 而且 self_log 是读-改-写整份，后写的会盖掉先写的那条「我说过什么」。分组键取
     // 角色 id，上游按它同跳去重 + 跨跳看租约，被拦下的任务一个字段都不动，下一跳原样再来。
-    serializeBy: (task: { metadata?: Record<string, unknown> | null }) =>
-      (typeof task.metadata?.charId === 'string' ? task.metadata.charId : null),
+    //
+    // 后台任务（门牌整理这类）按种类另开一组：上面那两条串行的理由它一条都不沾——不说话、
+    // 也不写 self_log（它在 onBeforeFire 就被 kind 分派接走了）。跟聊天挤同一组的话，一次
+    // 门牌整理最长占住这个角色 120 秒，而它恰恰是在一轮对话刚结束时起跑的：用户下一句话
+    // 的即时对话任务排在它后面，人就干等着「正在输入…」。同种后台任务之间仍按角色串行
+    // ——同一角色两份整理并发落地，就是拿两份旧快照互相盖。
+    serializeBy: (task: { metadata?: Record<string, unknown> | null }) => {
+      const charId = typeof task.metadata?.charId === 'string' ? task.metadata.charId : null;
+      if (!charId) return null;
+      const kind = readTaskKind(task.metadata);
+      return kind ? `${charId}#${kind}` : charId;
+    },
   };
 };
 
@@ -2413,13 +2535,24 @@ export const inspectWorkerEnv = (env: Env): WorkerEnvReport => {
   };
 };
 
-// 跟上游 corsHeadersFor 放行的那一份保持一致：预检放行的头少一个，正式请求就会被
-// 浏览器拦下，而拦下的表现同样是没有下文的 "Failed to fetch"。
+/**
+ * 预检放行的请求头。
+ *
+ * 这一份同时喂给包装层自己的响应（CORS_HEADERS）和上游 config 的 `cors.allowHeaders`
+ * ——两处**必须**是同一串：预检放行的头少一个，正式请求就会被浏览器拦下，而拦下的表现
+ * 同样是没有下文的 "Failed to fetch"，从外面根本看不出是 CORS 的事。
+ *
+ * `Content-Encoding` 是给 gzip 上行用的。它不在 CORS 安全列表里，所以带上它的请求
+ * 必过预检；上游默认那份白名单里没有它，不显式配的话，压过的请求一条都发不出去。
+ */
+const CORS_ALLOW_HEADERS =
+  'Content-Type, Content-Encoding, X-User-Id, X-Payload-Encrypted, X-Encryption-Version, '
+  + 'X-Response-Encrypted, X-Client-Token';
+
 const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers':
-    'Content-Type, X-User-Id, X-Payload-Encrypted, X-Encryption-Version, X-Response-Encrypted, X-Client-Token',
+  'Access-Control-Allow-Headers': CORS_ALLOW_HEADERS,
   'Access-Control-Max-Age': '86400',
 };
 
@@ -2801,6 +2934,12 @@ export default {
           ...inspectWorkerEnv(env),
           instantChat: true,
           instantTick: !!env.INSTANT_TICK,
+          // 这份代码认不认识「后台任务」（metadata.amsgKind → handler，见 fireKinds.ts）。
+          // 老 bundle 没有这个字段，前端据此不去建那种任务——老 worker 会把它当聊天任务
+          // 跑，然后卡在「本次任务指令缺失」终态失败：任务行不在用户的清单里，面板一片
+          // 正常，而门牌永远不更新。报的是**这份代码有没有**，不是版本号：自更新永远由
+          // 旧代码执行，版本号对上了不代表新逻辑真的在跑。
+          backgroundJobs: true,
           workerVersion: AMSG_BUNDLE_VERSION,
         },
       });
