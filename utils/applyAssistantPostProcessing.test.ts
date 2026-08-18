@@ -452,6 +452,64 @@ describe('SEND_EMOJI 名字对不上', () => {
         expect(bubbles[0].type).toBe('emoji');
         expect(bubbles[0].content).toBe('blob:emoji-lol');
     }, 20000);
+
+    it('模型误写“分类名: 表情名”时恢复为当前可见分类里的真实表情', async () => {
+        const charId = `c-emoji-category-prefix-${Date.now()}`;
+        const ctx = makeCtx(charId, [], [{
+            name: '亲亲额头',
+            url: 'blob:emoji-kiss-forehead',
+            categoryId: 'cat-dull-cat',
+        }]);
+        ctx.categories = [{ id: 'cat-dull-cat', name: '呆猫' }];
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing('[[SEND_EMOJI: 呆猫: 亲亲额头]]', ctx);
+
+        const bubbles = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(bubbles).toHaveLength(1);
+        expect(bubbles[0].type).toBe('emoji');
+        expect(bubbles[0].content).toBe('blob:emoji-kiss-forehead');
+    }, 20000);
+
+    it('纯名称精确匹配优先，不误伤本来就包含冒号的表情名', async () => {
+        const charId = `c-emoji-colon-name-${Date.now()}`;
+        const ctx = makeCtx(charId, [], [
+            { name: '呆猫: 亲亲额头', url: 'blob:emoji-exact-colon', categoryId: 'cat-other' },
+            { name: '亲亲额头', url: 'blob:emoji-prefixed-fallback', categoryId: 'cat-dull-cat' },
+        ]);
+        ctx.categories = [
+            { id: 'cat-other', name: '其他猫' },
+            { id: 'cat-dull-cat', name: '呆猫' },
+        ];
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing('[[SEND_EMOJI: 呆猫: 亲亲额头]]', ctx);
+
+        const bubbles = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(bubbles).toHaveLength(1);
+        expect(bubbles[0].type).toBe('emoji');
+        expect(bubbles[0].content).toBe('blob:emoji-exact-colon');
+    }, 20000);
+
+    it('分类前缀存在歧义时不猜 URL，仍保留降级文本', async () => {
+        const charId = `c-emoji-category-ambiguous-${Date.now()}`;
+        const ctx = makeCtx(charId, [], [
+            { name: '挥手', url: 'blob:emoji-wave-a', categoryId: 'cat-a' },
+            { name: '挥手', url: 'blob:emoji-wave-b', categoryId: 'cat-b' },
+        ]);
+        ctx.categories = [
+            { id: 'cat-a', name: '小猫' },
+            { id: 'cat-b', name: '小猫' },
+        ];
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing('[[SEND_EMOJI: 小猫: 挥手]]', ctx);
+
+        const bubbles = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(bubbles).toHaveLength(1);
+        expect(bubbles[0].type).toBe('text');
+        expect(bubbles[0].content).toBe('[表情：小猫: 挥手]');
+    }, 20000);
 });
 
 // 模型偶尔会照抄历史/UI 里的人类可读单括号摘要，而不是 prompt 要求的双括号机器指令。

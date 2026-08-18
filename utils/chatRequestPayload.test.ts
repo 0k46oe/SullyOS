@@ -114,4 +114,125 @@ describe('timelyByWorker —— 时效段交给 worker，前端这份不重复�
         });
         expect(joinMessages(withMode.fullMessages)).not.toContain('【今日特殊】');
     });
+
+    it('M2 只把当下交流节奏注入 ChatApp，不进入其他 App 的写作提示', async () => {
+        localStorage.setItem('os_memory_palace_config', JSON.stringify({
+            featureFlags: { interactionAdaptation: true },
+        }));
+        const energeticInput = {
+            ...baseInput(),
+            char: { id: 'char-timely', name: '阿一', memoryPalaceEnabled: false } as any,
+            historyMsgs: [
+                { id: 1, charId: 'char-timely', role: 'user', type: 'text', content: '我过啦！！！', timestamp: Date.now() },
+            ] as any[],
+        };
+
+        const chatApp = await buildChatRequestPayload({
+            ...energeticInput,
+            recallEntryPoint: 'chat_app',
+        });
+        const anotherApp = await buildChatRequestPayload({
+            ...energeticInput,
+            recallEntryPoint: 'world_home',
+        });
+
+        expect(joinMessages(chatApp.fullMessages)).toContain('### 此刻的交流节奏');
+        expect(joinMessages(anotherApp.fullMessages)).not.toContain('### 此刻的交流节奏');
+        localStorage.removeItem('os_memory_palace_config');
+    });
+
+    it('M3 v2 只把谈话参与策略注入 ChatApp', async () => {
+        localStorage.setItem('os_memory_palace_config', JSON.stringify({
+            featureFlags: { deepEngagement: true },
+        }));
+        const depthInput = {
+            ...baseInput(),
+            char: { id: 'char-timely', name: '测试角色', memoryPalaceEnabled: false } as any,
+            historyMsgs: [
+                {
+                    id: 1,
+                    charId: 'char-timely',
+                    role: 'user',
+                    type: 'text',
+                    content: '我想认真分析一个虚构规则：它一边要求开放，一边不断增加限制，这背后的逻辑是什么？',
+                    timestamp: Date.now(),
+                },
+            ] as any[],
+        };
+
+        const chatApp = await buildChatRequestPayload({ ...depthInput, recallEntryPoint: 'chat_app' });
+        const anotherApp = await buildChatRequestPayload({ ...depthInput, recallEntryPoint: 'world_home' });
+
+        expect(joinMessages(chatApp.fullMessages)).toContain('### 当前谈话参与策略');
+        expect(joinMessages(chatApp.fullMessages)).toContain('### 谈话参与原则');
+        expect(joinMessages(chatApp.fullMessages)).toContain('对方出现负面情绪，不代表当前谈话的目标是消除这种情绪');
+        expect(joinMessages(chatApp.fullMessages)).toContain('情绪是谈话的一部分，不应覆盖谈话本身');
+        expect(joinMessages(anotherApp.fullMessages)).not.toContain('### 当前谈话参与策略');
+        expect(joinMessages(anotherApp.fullMessages)).not.toContain('### 谈话参与原则');
+        localStorage.removeItem('os_memory_palace_config');
+    });
+
+    it('M3 v2 的核心原则不依赖当轮是否命中 opening', async () => {
+        localStorage.setItem('os_memory_palace_config', JSON.stringify({
+            featureFlags: { deepEngagement: true },
+        }));
+        const payload = await buildChatRequestPayload({
+            ...baseInput(),
+            char: { id: 'char-m3-core', name: '测试角色', memoryPalaceEnabled: false } as any,
+            historyMsgs: [{
+                id: 102,
+                charId: 'char-m3-core',
+                role: 'user',
+                type: 'text',
+                content: '这个函数返回什么？',
+                timestamp: Date.now(),
+            }] as any[],
+            recallEntryPoint: 'chat_app',
+        });
+        const joined = joinMessages(payload.fullMessages);
+
+        expect(joined).toContain('### 谈话参与原则');
+        expect(joined).toContain('对方出现负面情绪，不代表当前谈话的目标是消除这种情绪');
+        expect(joined).toContain('先听见，再了解，再形成看法');
+        expect(joined).not.toContain('### 当前谈话参与策略');
+        localStorage.removeItem('os_memory_palace_config');
+    });
+
+    it('M3 关闭时不注入核心原则', async () => {
+        localStorage.setItem('os_memory_palace_config', JSON.stringify({
+            featureFlags: { deepEngagement: false },
+        }));
+        const payload = await buildChatRequestPayload({
+            ...baseInput(),
+            recallEntryPoint: 'chat_app',
+        });
+
+        expect(joinMessages(payload.fullMessages)).not.toContain('### 谈话参与原则');
+        localStorage.removeItem('os_memory_palace_config');
+    });
+
+    it('M3 v2 会把“我很累，事情很多”识别为尚未讲完的 opening', async () => {
+        localStorage.setItem('os_memory_palace_config', JSON.stringify({
+            featureFlags: { deepEngagement: true },
+        }));
+        const payload = await buildChatRequestPayload({
+            ...baseInput(),
+            char: { id: 'char-opening', name: '测试角色', memoryPalaceEnabled: false } as any,
+            historyMsgs: [{
+                id: 101,
+                charId: 'char-opening',
+                role: 'user',
+                type: 'text',
+                content: '我很累，事情很多。',
+                timestamp: Date.now(),
+            }] as any[],
+            recallEntryPoint: 'chat_app',
+        });
+        const joined = joinMessages(payload.fullMessages);
+
+        expect(joined).toContain('### 当前谈话参与策略');
+        expect(joined).toContain('对方正在开启一件还没有讲完的事情');
+        expect(joined).toContain('不要用“别想了”“回来就好”“一切都会过去”');
+        expect(joined).not.toContain('### 此刻的交流深度');
+    });
 });

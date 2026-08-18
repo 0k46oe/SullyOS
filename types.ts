@@ -612,6 +612,30 @@ export interface MemoryPalaceBackupConfig {
     model: string;
     topN: number;
   };
+  /**
+   * 实验管线总开关。旧备份没有这一块时按全部关闭处理，确保升级后行为不突变。
+   */
+  featureFlags?: MemoryPalaceFeatureFlags;
+}
+
+export interface MemoryPalaceFeatureFlags {
+  recallRouter: boolean;
+  interactionAdaptation: boolean;
+  deepEngagement: boolean;
+  /** 预留的薄事实约束层，不属于 M3 Deep Engagement。 */
+  epistemicState: boolean;
+}
+
+/**
+ * 角色在 ChatApp 里愿意向用户当前交流步伐靠近多少。每维 0..1；这是角色属性，
+ * 不是用户状态。缺省时使用保守默认值，且不会从角色实际回复中自动学习。
+ */
+export interface CharacterAccommodationPolicy {
+  length?: number;
+  rhythm?: number;
+  energy?: number;
+  punctuation?: number;
+  emoji?: number;
 }
 
 export interface MemoryFragment {
@@ -2941,6 +2965,8 @@ export interface CharacterProfile {
   };
   personalityStyle?: 'emotional' | 'narrative' | 'imagery' | 'analytical';
   ruminationTendency?: number;  // 反刍倾向 0-1，默认 0.3
+  /** ChatApp 专属的语言趋同强度；不影响其他 App 的写作人格。 */
+  interactionAccommodation?: CharacterAccommodationPolicy;
   memoryPalaceInjection?: string;  // 记忆宫殿检索结果，注入到 System Prompt（运行时填充，不持久化）
   roomPlatesInjection?: string;    // 房间门牌（常驻语义层），注入到 System Prompt（运行时填充，来源 room_plates 表）
 

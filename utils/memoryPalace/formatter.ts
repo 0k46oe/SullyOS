@@ -22,6 +22,8 @@ const DEFAULT_MAX_OUTPUT_ITEMS = 15;
 const MAX_LIVE_NODES_PER_BOX = 8; // 单盒最多展开多少条活节点（防止超大盒污染）
 
 interface RenderItem {
+    /** 精确信号命中项在普通 score 排序前保底进入。 */
+    guaranteed: boolean;
     /** 用于排序：取该 item 内最高的 finalScore */
     score: number;
     /** 用于按房间分组的代表房间 */
@@ -66,7 +68,7 @@ export async function expandAndFormat(
 
     // 1. 按 eventBoxId 去重分组（同一 box 多次命中合并；保留命中里最高分作 box 分）
     //    boxItem: { boxId, topScore, hitNodeIds[] }
-    const boxHits = new Map<string, { topScore: number; hitNodeIds: Set<string>; sample: ScoredMemory }>();
+    const boxHits = new Map<string, { topScore: number; hitNodeIds: Set<string>; sample: ScoredMemory; guaranteed: boolean }>();
     const standaloneItems: ScoredMemory[] = [];
 
     for (const r of results) {
@@ -81,10 +83,12 @@ export async function expandAndFormat(
                     topScore: r.finalScore,
                     hitNodeIds: new Set([r.node.id]),
                     sample: r,
+                    guaranteed: r.recallGuarantee === 'explicit_entity',
                 });
             } else {
                 if (r.finalScore > cur.topScore) cur.topScore = r.finalScore;
                 cur.hitNodeIds.add(r.node.id);
+                if (r.recallGuarantee === 'explicit_entity') cur.guaranteed = true;
             }
         } else {
             standaloneItems.push(r);
@@ -102,7 +106,7 @@ export async function expandAndFormat(
             renderItems.push(buildStandaloneItem(hit.sample, now));
             continue;
         }
-        const item = await buildBoxItem(box, hit.topScore, localNodeMap, now);
+        const item = await buildBoxItem(box, hit.topScore, localNodeMap, now, hit.guaranteed);
         if (item) renderItems.push(item);
     }
 
@@ -112,6 +116,7 @@ export async function expandAndFormat(
 
     // 3. 排序（finalScore 降序，同分时较新者优先）+ 截断到 MAX_OUTPUT_ITEMS
     renderItems.sort((a, b) => {
+        if (a.guaranteed !== b.guaranteed) return a.guaranteed ? -1 : 1;
         if (b.score !== a.score) return b.score - a.score;
         return b.createdAt - a.createdAt;
     });
@@ -245,6 +250,7 @@ function buildStandaloneItem(r: ScoredMemory, now: number): RenderItem {
     const date = formatMemoryDateWithDistance(node.createdAt, now);
     const body = `(${date}, 重要性: ${node.importance})\n${node.content}`;
     return {
+        guaranteed: r.recallGuarantee === 'explicit_entity',
         score: r.finalScore,
         room: node.room,
         body,
@@ -262,6 +268,7 @@ async function buildBoxItem(
     topScore: number,
     localNodeMap: Map<string, MemoryNode>,
     now: number,
+    guaranteed: boolean = false,
 ): Promise<RenderItem | null> {
     // 加载 summary（如有）
     let summary: MemoryNode | null = null;
@@ -313,6 +320,7 @@ async function buildBoxItem(
     for (const n of liveToShow) sourceIds.push(n.id);
 
     return {
+        guaranteed,
         score: topScore,
         room,
         body: body.trimEnd(),

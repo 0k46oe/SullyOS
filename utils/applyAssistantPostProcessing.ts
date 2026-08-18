@@ -25,7 +25,7 @@
  * Phase 2 会让 worker 端把识别出的副作用 (RECALL/SEARCH/...) 结构化传 directives, 这里只重放。
  */
 
-import { CharacterProfile, UserProfile, Message, Emoji, RealtimeConfig, GroupProfile } from '../types';
+import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, RealtimeConfig, GroupProfile } from '../types';
 import { DB } from './db';
 import { ChatParser, type FrozenMusicSong } from './chatParser';
 import { resolveCharTimeZone } from './timezone';
@@ -68,6 +68,48 @@ const normalizeAiContent = (raw: string): string => {
     cleaned = cleaned.replace(/\s*\[(?:聊天|通话|约会)\]\s*/g, '\n');
     cleaned = cleaned.replace(/\[(?:你|User|用户|System)\s*发送了表情包[:：]\s*(.*?)\]/g, '[[SEND_EMOJI: $1]]');
     return cleaned;
+};
+
+/**
+ * 模型偶尔会把按分类展示的清单 `呆猫: [亲亲额头]` 抄成
+ * `[[SEND_EMOJI: 呆猫: 亲亲额头]]`。先保留既有的纯名称精确匹配；只有失败后，
+ * 才把前缀当作“当前角色可见分类名”解析，并且仅在候选唯一时接受。
+ * 这样不会误伤本来就含冒号的表情名，也不会在同名分类/同名表情间猜 URL。
+ */
+const resolveEmojiForSend = (
+    rawName: string,
+    emojis: Emoji[],
+    categories: EmojiCategory[] = [],
+): Emoji | undefined => {
+    const name = rawName.trim();
+    const exact = emojis.find(emoji => emoji.name === name);
+    if (exact) return exact;
+
+    const separator = name.match(/^(.+?)\s*[:：]\s*(.+)$/u);
+    if (!separator) return undefined;
+    const categoryName = separator[1].trim();
+    const emojiName = separator[2].trim();
+    if (!categoryName || !emojiName) return undefined;
+
+    const categoryIds = new Set(categories.map(category => category.id));
+    const candidates: Emoji[] = [];
+    for (const category of categories) {
+        if (category.name !== categoryName) continue;
+        candidates.push(...emojis.filter(emoji => (
+            emoji.categoryId === category.id && emoji.name === emojiName
+        )));
+    }
+    // buildEmojiContext 给无分类表情使用“通用”，给找不到分类定义的残留使用“其他”。
+    if (categoryName === '通用') {
+        candidates.push(...emojis.filter(emoji => !emoji.categoryId && emoji.name === emojiName));
+    } else if (categoryName === '其他') {
+        candidates.push(...emojis.filter(emoji => (
+            !!emoji.categoryId && !categoryIds.has(emoji.categoryId) && emoji.name === emojiName
+        )));
+    }
+
+    const unique = candidates.filter((candidate, index) => candidates.indexOf(candidate) === index);
+    return unique.length === 1 ? unique[0] : undefined;
 };
 
 interface MimickedXhsShareBlock {
@@ -364,6 +406,8 @@ export interface PostProcessCtx {
     char: CharacterProfile;
     userProfile: UserProfile;
     emojis: Emoji[];
+    /** 已按当前角色可见性过滤的分类；用于容错解析“分类名: 表情名”。 */
+    categories?: EmojiCategory[];
     realtimeConfig?: RealtimeConfig;
     /** 日程被角色改写后刷新主动消息 fire_pack；旧调用方可不传。 */
     groups?: GroupProfile[];
@@ -631,7 +675,7 @@ export async function applyAssistantPostProcessing(
         // 降级文案跟横幅那边（sanitizeIntoSegments 的 [表情：x]）对齐，锁屏看到什么点进去就是什么。
         const sendEmojiBubble = async (name: string): Promise<void> => {
             await typingPause(Math.random() * 500 + 300);
-            const foundEmoji = emojis.find(e => e.name === name);
+            const foundEmoji = resolveEmojiForSend(name, emojis, ctx.categories);
             if (foundEmoji) {
                 await persistMessage({ charId: char.id, role: 'assistant', type: 'emoji', content: foundEmoji.url, metadata: takeMeta(mcdInheritMeta) } as any);
             } else {

@@ -24,6 +24,9 @@ interface ChatModalsProps {
     setSettingsContextRangeMode: (v: ContextRangeMode) => void;
     settingsHideSysLogs: boolean;
     setSettingsHideSysLogs: (v: boolean) => void;
+    contextSuiteAnyEnabled: boolean;
+    contextSuiteAllEnabled: boolean;
+    onToggleContextSuite: () => void;
     preserveContext: boolean;
     setPreserveContext: (v: boolean) => void;
     editContent: string;
@@ -236,6 +239,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     settingsContextLimit, setSettingsContextLimit,
     settingsContextRangeMode, setSettingsContextRangeMode,
     settingsHideSysLogs, setSettingsHideSysLogs,
+    contextSuiteAnyEnabled, contextSuiteAllEnabled, onToggleContextSuite,
     preserveContext, setPreserveContext,
     editContent, setEditContent,
     newCategoryName, setNewCategoryName, onAddCategory,
@@ -395,6 +399,34 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                 footer={<button onClick={onSaveSettings} className="w-full py-3 bg-primary text-white font-bold rounded-2xl">保存设置</button>}
             >
                 <div className="space-y-6">
+                     <div className="rounded-2xl border border-violet-200 bg-violet-50 p-3.5">
+                         <div className="flex items-center gap-3">
+                             <div className="min-w-0 flex-1">
+                                 <div className="text-xs font-bold text-violet-700">智能语境</div>
+                                 <p className="mt-1 text-[10px] leading-relaxed text-violet-600/90">
+                                     更准确地承接上下文、跟随交流节奏，并持续关注正在展开的事情。对所有私聊生效，本地完成，不增加 API 调用。
+                                 </p>
+                                 <p className="mt-1.5 text-[10px] font-bold text-violet-600">
+                                     {contextSuiteAllEnabled
+                                         ? '已开启'
+                                         : contextSuiteAnyEnabled
+                                             ? '旧版的部分能力仍在运行；关闭后可统一重新开启'
+                                             : '已关闭，回复保持原有行为'}
+                                 </p>
+                             </div>
+                             <button
+                                 type="button"
+                                 onClick={onToggleContextSuite}
+                                 aria-pressed={contextSuiteAnyEnabled}
+                                 className={`shrink-0 rounded-full px-3.5 py-2 text-[11px] font-extrabold transition-colors ${contextSuiteAnyEnabled
+                                     ? 'bg-white text-violet-700 ring-1 ring-violet-200'
+                                     : 'bg-violet-600 text-white'}`}
+                             >
+                                 {contextSuiteAnyEnabled ? '关闭' : '开启'}
+                             </button>
+                         </div>
+                     </div>
+
                      <div>
                          <label className="text-xs font-bold text-slate-400 uppercase mb-2 block">聊天背景</label>
                          <div onClick={() => bgInputRef.current?.click()} className="h-24 bg-slate-100 rounded-xl border-2 border-dashed border-slate-200 flex items-center justify-center cursor-pointer hover:border-primary/50 overflow-hidden relative">

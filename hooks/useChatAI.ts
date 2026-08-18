@@ -605,6 +605,7 @@ export const useChatAI = ({
                     categories: deps.categories,
                     historyMsgs: contextMsgs,
                     contextLimit: Math.max(1, contextMsgs.length),
+                    recallEntryPoint: 'emotion_eval',
                     realtimeConfig: deps.realtimeConfig,
                     innerState: deps.evolvedNarrative || undefined,
                     musicSnapshot: {
@@ -972,6 +973,7 @@ export const useChatAI = ({
                 luckinMiniSnap: luckinMiniOpen ? luckinMiniSnap : undefined,
                 luckinChat: luckinChatOn ? luckinChatRef?.current : undefined,
                 timelyByWorker: instantChatRoute,
+                recallEntryPoint: 'chat_app',
             }));
             const systemPrompt = payload.systemPrompt;
             const cleanedApiMessages = payload.cleanedApiMessages;
@@ -1974,6 +1976,7 @@ export const useChatAI = ({
                 char,
                 userProfile,
                 emojis,
+                categories,
                 realtimeConfig,
                 groups,
                 contextMsgs,

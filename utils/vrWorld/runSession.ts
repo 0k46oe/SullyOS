@@ -437,6 +437,7 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
         const payload = await buildChatRequestPayload({
             char, userProfile, groups, emojis, categories,
             historyMsgs, contextLimit, realtimeConfig, recallQueryHint,
+            recallEntryPoint: 'vr_world',
             // 彼方可配独立 API（可能不支持视觉，如 DeepSeek 对 image_url 直接 400），
             // 且纯文本情景里历史图片只是撑爆上下文的噪声 → 压平成文本占位
             stripImages: true,
