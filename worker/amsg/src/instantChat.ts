@@ -101,6 +101,19 @@ export const buildInstantTimelyBlock = (args: {
 const NOTIFICATION_ALWAYS = 'always';
 
 /**
+ * 静音只在用户看得见页面的那一刻生效（SW 的 resolveNotificationSilent 认这个值）。
+ *
+ * 用户正盯着聊天窗口时页面自己会把回复画上屏，横幅再响一声纯属打扰；切后台、锁屏、
+ * 关了标签页的那一刻则必须响，不然没人来叫他。判定得等到 SW 收到这条 push 才做——
+ * worker 在发推那一刻并不知道用户此刻在不在前台，写死 `silent: true` 的结果是切后台
+ * 也不响。
+ *
+ * 老 SW 不认这个字符串，会按 `Boolean('when-visible')` 算成恒静音，也就是退回这档
+ * 能力上线之前的行为，不会弹错也不会漏弹。
+ */
+export const NOTIFICATION_SILENT_WHEN_VISIBLE = 'when-visible';
+
+/**
  * 通知栏折叠用的 tag：同一个角色永远只留最新那一条。
  *
  * 一次回复常常分成好几段推，逐条弹会把通知栏刷满；同 tag 的通知互相覆盖，看到的就只有
@@ -110,11 +123,17 @@ const NOTIFICATION_ALWAYS = 'always';
 export const instantNotificationTag = (charId: string) => `amsg-instant-${charId}`;
 
 /**
- * 给即时对话的推送载荷表态通知策略：一定弹，但按角色折叠、不响铃不震动。
+ * 给即时对话的推送载荷表态通知策略：一定弹，按角色折叠，前台安静、后台叫人。
  *
- * 打扰不靠「不弹」来压，靠另外两个字段：`tag` 折叠成一条，`silent` 关掉响铃和震动。
- * 用户正盯着窗口时页面照旧自绘上屏，通知只是安静地躺在通知中心里。只给即时对话用——
- * 主动消息是「到点找人说话」，那条路要响铃叫人，既不折叠也不静音。
+ * 打扰不靠「不弹」来压，靠另外三个字段：
+ *   - `tag`      同一个角色只在通知栏留最新一条；
+ *   - `silent`   `when-visible`，用户看着页面时不响，切后台就照常响铃震动；
+ *   - `renotify` 只给这一轮的第一段。同 tag 的通知默认是静默替换，上一轮的横幅还
+ *                躺在通知栏没点掉时，新一轮的第一段就会被当成替换而不出声——那正是
+ *                用户会说「有时候响有时候不响」的那种情况。一轮响一声：第一段重新
+ *                提醒，后面几段安静地把内容更新掉。
+ *
+ * 只给即时对话用——主动消息是「到点找人说话」，那条路要响铃叫人，既不折叠也不静音。
  *
  * 载荷本来就没有 notification 时不凭空造一个：SW 拿不到 title / body 只能弹一条空白
  * 横幅，而「没有 notification」这件事本身在 SW 那边有按 messageKind 的默认行为，
@@ -127,6 +146,7 @@ export const instantNotificationTag = (charId: string) => `amsg-instant-${charId
 export const applyInstantNotificationPolicy = (
   payload: Record<string, unknown>,
   charId?: string | null,
+  isFirstSegment = false,
 ): Record<string, unknown> => {
   const notification = payload.notification;
   const hasNotification = !!notification && typeof notification === 'object' && !Array.isArray(notification);
@@ -141,10 +161,13 @@ export const applyInstantNotificationPolicy = (
     notification: {
       ...(notification as Record<string, unknown>),
       show: NOTIFICATION_ALWAYS,
-      silent: true,
+      silent: NOTIFICATION_SILENT_WHEN_VISIBLE,
       // 认不出是哪个角色时就不折叠：通知栏里多几条只是吵，两个角色共用一个 tag 会
-      // 互相顶掉，那是真的丢消息。
-      ...(target ? { tag: instantNotificationTag(target) } : {}),
+      // 互相顶掉，那是真的丢消息。renotify 跟着 tag 走——没有 tag 时带上它，
+      // showNotification 会直接抛 TypeError。
+      ...(target
+        ? { tag: instantNotificationTag(target), ...(isFirstSegment ? { renotify: true } : {}) }
+        : {}),
     },
   };
 };

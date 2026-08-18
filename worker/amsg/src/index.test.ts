@@ -3585,18 +3585,22 @@ describe('即时对话的推送通知策略', () => {
   });
 
   // 推了就得弹（订阅按 userVisibleOnly 建的，不弹要被退订/吊销），打扰交给折叠 + 静音压。
-  it('即时对话的推送标 always + 折叠 + 静音', async () => {
+  it('即时对话的推送标 always + 折叠 + 前台才静音，一轮只响一声', async () => {
     const store = makeStore(true);
     const { decision } = await runFire(store, { metadata: fireMeta(true), llmOutput: '在的。怎么啦？' });
     expect(decision.decision).toBe('finish');
-    for (const push of decision.pushPayloads) {
-      expect((push.notification as any).show).toBe('always');
-      expect((push.notification as any).silent).toBe(true);
+    decision.pushPayloads.forEach((push: any, index: number) => {
+      expect(push.notification.show).toBe('always');
+      // 静不静音交给 SW 按窗口可见性算：写死 true 的话切后台收到回复也不响
+      expect(push.notification.silent).toBe('when-visible');
       // 多段回复折叠成一条，靠的是同 tag 互相覆盖
-      expect((push.notification as any).tag).toBe(`amsg-instant-${CHAR_ID}`);
+      expect(push.notification.tag).toBe(`amsg-instant-${CHAR_ID}`);
+      // 同 tag 默认静默替换，所以这一轮的第一段得 renotify 才叫得到人，后面几段安静更新
+      if (index === 0) expect(push.notification.renotify).toBe(true);
+      else expect(push.notification).not.toHaveProperty('renotify');
       // 横幅文案还在：策略只是加几个字段，不是把 notification 换掉
-      expect((push.notification as any).body).toBeTruthy();
-    }
+      expect(push.notification.body).toBeTruthy();
+    });
   });
 
   it('定时任务的推送不标 show（主动消息前台可见时更该弹）', async () => {
@@ -3605,6 +3609,10 @@ describe('即时对话的推送通知策略', () => {
     for (const push of decision.pushPayloads) {
       expect(push.notification).toBeTruthy();
       expect((push.notification as any).show).toBeUndefined();
+      // 折叠 / 静音 / 重新提醒都是即时对话专属的，别顺手把主动消息也一起压安静了
+      expect((push.notification as any).silent).toBeUndefined();
+      expect((push.notification as any).tag).toBeUndefined();
+      expect((push.notification as any).renotify).toBeUndefined();
     }
   });
 });
@@ -4093,8 +4101,10 @@ describe('即时对话终态失败的直发 error push', () => {
     expect(payload.metadata.reason).toContain('LLM 上游 502');
     // 这条是绕过库自己直发的 push，收了不弹就是白记一笔账，只能标 always
     expect(payload.notification.show).toBe('always');
-    expect(payload.notification.silent).toBe(true);
+    expect(payload.notification.silent).toBe('when-visible');
     expect(payload.notification.tag).toBe(`amsg-instant-${CHAR_ID}`);
+    // 这一轮到此为止，横幅是唯一会去叫人的东西：不带 renotify 它会悄悄顶掉刚才那条回复
+    expect(payload.notification.renotify).toBe(true);
     expect(payload.messageId).toBe(`err_${TASK_UUID}`);
     // 订阅行按 user_id 查、明文兜底解出来
     expect((sent[0].subscription as any).endpoint).toBe('https://push.example/e1');

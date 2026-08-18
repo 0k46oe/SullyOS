@@ -103,8 +103,12 @@ const REQUIRED_WORKER_FEATURES = [
 //            同一档还有失败记录里的 errorCode（`LLM_CALL_FAILED` 之类）和上游拒绝
 //            请求时的原话：卡片上那句「生成失败」从此说得出到底是模型名写错了、
 //            余额不够，还是订阅失效该去重新登记。
+//   next.23 — 跟着 amsg-shared 0.4.0-next.8 一起升：shared 的通知字段校验放行了
+//            `silent: 'when-visible'`（静音改由 Service Worker 按窗口可见性算）。
+//            server 侧没有行为变化，单升这一档不解决任何问题；这批真正要用户去点
+//            一次「更新 Worker」的是通知策略本身，见 utils/amsgBundleVersion.ts。
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
-const REQUIRED_WORKER_VERSION = '2.6.0-next.22';
+const REQUIRED_WORKER_VERSION = '2.6.0-next.23';
 
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';

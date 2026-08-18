@@ -630,12 +630,21 @@ describe('applyInstantNotificationPolicy', () => {
   // 订阅是按 userVisibleOnly 建的：推了却不弹，Firefox 按配额退订、iOS 过了宽限期直接
   // 吊销，两边都静默发生。所以即时对话这条必推的路只能标 always，打扰交给折叠 + 静音压。
   // 回到 when-hidden（或任何「有时候不弹」的档）就是把订阅重新押上去，这条守着别退回去。
-  it('标 always + 按角色折叠 + 静音：推了就一定弹，不靠不弹来防打扰', () => {
+  it('标 always + 按角色折叠：推了就一定弹，不靠不弹来防打扰', () => {
     const push = applyInstantNotificationPolicy(
-      { message: 'hi', notification: { title: '来自 Nyah', body: 'hi' } }, 'char-1');
+      { message: 'hi', notification: { title: '来自 Nyah', body: 'hi' } }, 'char-1', true);
     expect(push.notification).toEqual({
-      title: '来自 Nyah', body: 'hi', show: 'always', silent: true, tag: 'amsg-instant-char-1',
+      title: '来自 Nyah', body: 'hi', show: 'always',
+      silent: 'when-visible', tag: 'amsg-instant-char-1', renotify: true,
     });
+  });
+
+  // 静不静音是 SW 收到这条时按窗口可见性算的。写死 true 的话，切后台、锁屏收到回复
+  // 也不响——worker 发推那一刻并不知道用户在不在前台，这个判定只能推迟到 SW 去做。
+  it('静音标成 when-visible，不写死 true（写死了切后台也不响）', () => {
+    const push = applyInstantNotificationPolicy(
+      { message: 'hi', notification: { title: 't' } }, 'char-1');
+    expect((push.notification as any).silent).toBe('when-visible');
   });
 
   it('没显式传 charId 就从 metadata 上认', () => {
@@ -647,7 +656,7 @@ describe('applyInstantNotificationPolicy', () => {
   // 折叠是为了不刷屏，但两个角色共用一个 tag 会互相顶掉——那是真丢消息，宁可多几条。
   it('认不出角色就不折叠（tag 留空，交给库按 messageId 兜底）', () => {
     const push = applyInstantNotificationPolicy({ message: 'hi', notification: { title: 't' } });
-    expect(push.notification).toEqual({ title: 't', show: 'always', silent: true });
+    expect(push.notification).toEqual({ title: 't', show: 'always', silent: 'when-visible' });
   });
 
   it('载荷本来没有 notification 就不凭空造一个（造出来只会弹一条空白横幅）', () => {
@@ -659,6 +668,27 @@ describe('applyInstantNotificationPolicy', () => {
 
   // 信封的其余部分（messageId / sessionId / 段号 / 任务身份）全交给库去补。这里多写一份
   // 就是多一处会跟库漂掉的副本，而账本里存的本来就是库发出去的那一份。
+  // 同 tag 的通知默认是静默替换。上一轮的横幅还躺在通知栏没点掉时，新一轮的第一段
+  // 不带 renotify 就会被当成替换、不出声——用户那句「有时候响有时候不响」就是这么来的。
+  it('每一轮的第一段带 renotify，后面几段不带（一轮只响一声）', () => {
+    const first = applyInstantNotificationPolicy(
+      { message: 'hi', notification: { title: 't' } }, 'char-1', true);
+    expect((first.notification as any).renotify).toBe(true);
+
+    const rest = applyInstantNotificationPolicy(
+      { message: 'hi', notification: { title: 't' } }, 'char-1', false);
+    expect(rest.notification).not.toHaveProperty('renotify');
+  });
+
+  // renotify 为 true 而 tag 是空串时 showNotification 直接抛 TypeError，那一条就
+  // 一个字都弹不出来。认不出角色时不折叠 = 没有 tag，这时哪怕是第一段也不能带。
+  it('没有 tag 就绝不带 renotify（带了 showNotification 会抛 TypeError）', () => {
+    const push = applyInstantNotificationPolicy(
+      { message: 'hi', notification: { title: 't' } }, null, true);
+    expect(push.notification).not.toHaveProperty('tag');
+    expect(push.notification).not.toHaveProperty('renotify');
+  });
+
   it('除通知策略外一个字段都不添（正文 / metadata 原样保留）', () => {
     const push = applyInstantNotificationPolicy({ message: 'hi', metadata: { directives: [1] } });
     expect(push).toEqual({ message: 'hi', metadata: { directives: [1] } });
