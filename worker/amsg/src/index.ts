@@ -152,6 +152,7 @@ import {
   instantNotificationTag,
   INSTANT_TOTAL_TIMEOUT_MS,
   isInstantChatTask,
+  NOTIFICATION_SILENT_WHEN_VISIBLE,
   type InstantTickNamespace,
 } from './instantChat';
 import type { ActiveMsg2TaskRecord } from '../../../types';
@@ -849,10 +850,13 @@ const sendInstantErrorPush = async (args: {
         title: args.contactName ? `${args.contactName} 的回复没能生成` : '回复没能生成',
         body: instantErrorNotificationBody(args.reason),
         show: 'always',
-        silent: true,
+        silent: NOTIFICATION_SILENT_WHEN_VISIBLE,
         // 跟这个角色的回复共用一个 tag：通知栏里只留最新状态，重发成功后那条回复
         // 会把这条「没能生成」盖掉。失败本身在聊天流里有系统消息留痕，不靠横幅记账。
         tag: instantNotificationTag(args.charId),
+        // 这一轮到此为止了，横幅是唯一会去叫人的东西。同 tag 默认静默替换，不带
+        // renotify 的话它会悄悄顶掉刚才那条回复通知，用户在后台就什么都不知道。
+        renotify: true,
       },
     };
     await deps.webpush.sendNotification(subscription, JSON.stringify(payload));
@@ -2264,11 +2268,13 @@ export const amsgHooks = {
         payloads = budgeted;
       }
 
-      // 即时对话的通知策略：一定弹，但按角色折叠成一条、不响铃不震动（见
-      // applyInstantNotificationPolicy）。收件兜底不在这里做——库自己会在每条推送
-      // 发出去之前记进服务端账本，客户端按账本补收。
+      // 即时对话的通知策略：一定弹，按角色折叠成一条，前台安静、后台响铃，一轮只响
+      // 一声（见 applyInstantNotificationPolicy）。第一段要重新提醒、后面几段安静
+      // 更新，所以策略要知道自己是这一轮的第几段。收件兜底不在这里做——库自己会在
+      // 每条推送发出去之前记进服务端账本，客户端按账本补收。
       if (stash.instant) {
-        payloads = payloads.map((payload) => applyInstantNotificationPolicy(payload, stash.charId));
+        payloads = payloads.map((payload, index) =>
+          applyInstantNotificationPolicy(payload, stash.charId, index === 0));
       }
 
       return { ...decision, pushPayloads: payloads };

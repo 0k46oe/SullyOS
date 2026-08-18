@@ -68,8 +68,11 @@ import { installReiSW } from '@rei-standard/amsg-sw';
  *            并往 ActiveMsg 库 kv store 写「订阅已变化」标记（主线程据此把新订阅逐条
  *            写回已排程的远端任务，见 utils/activeMsgRuntime.ts）。onupgradeneeded 补建
  *            kv store（SW-first 安装时主线程 schema 还没建过）。
+ *  - 1.17.0: 升级 amsg-sw，通知的 silent 认 'when-visible' 这一档：静不静音改由 SW 按
+ *            收到推送那一刻的窗口可见性算，用户看着页面时安静、切后台照常响铃震动。
+ *            老 SW 把这个字符串当真值，会一律静音。
  */
-const SW_VERSION = '1.16.0';
+const SW_VERSION = '1.17.0';
 
 const PING_INTERVAL = 15_000;
 const MAX_MANUAL_ALIVE_MS = 5 * 60_000;

@@ -3,7 +3,7 @@
 // worker/amsg/src/index.ts
 import { DurableObject } from "cloudflare:workers";
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.22_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.23_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
 var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
   "user_id",
   "uuid",
@@ -22,7 +22,7 @@ var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
 var TASK_DELIVERY_COLUMNS = "id, user_id, uuid, encrypted_payload, message_type, next_send_at, retry_after, status, retry_count";
 var TASK_DETAIL_COLUMNS = "id, user_id, uuid, encrypted_payload, message_type, next_send_at, status, retry_count, last_error, created_at, updated_at";
 
-// node_modules/.pnpm/@rei-standard+amsg-shared@0.4.0-next.7/node_modules/@rei-standard/amsg-shared/dist/index.mjs
+// node_modules/.pnpm/@rei-standard+amsg-shared@0.4.0-next.8/node_modules/@rei-standard/amsg-shared/dist/index.mjs
 var TEXT_ENCODER = new TextEncoder();
 var TEXT_DECODER = new TextDecoder("utf-8", { fatal: false });
 function toUint8(buf) {
@@ -819,10 +819,13 @@ function validateNotificationArg(kind, value) {
       throw new Error(`[amsg-shared] ${kind}: 'notification.${f}' must be a string when present`);
     }
   }
-  for (const f of ["renotify", "requireInteraction", "silent"]) {
+  for (const f of ["renotify", "requireInteraction"]) {
     if (n[f] !== void 0 && typeof n[f] !== "boolean") {
       throw new Error(`[amsg-shared] ${kind}: 'notification.${f}' must be a boolean when present`);
     }
+  }
+  if (n.silent !== void 0 && typeof n.silent !== "boolean" && n.silent !== "when-visible") {
+    throw new Error(`[amsg-shared] ${kind}: 'notification.silent' must be true, false, or "when-visible"`);
   }
   if (n.data !== void 0 && (n.data === null || typeof n.data !== "object" || Array.isArray(n.data))) {
     throw new Error(`[amsg-shared] ${kind}: 'notification.data' must be a plain object when present`);
@@ -1118,7 +1121,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.22_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-5J73MSQ5.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.23_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-3JEWYDM4.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -6200,7 +6203,7 @@ function createClientStateHandler(ctx) {
   }
   return { PUT, GET, DELETE };
 }
-var SERVER_VERSION = true ? "2.6.0-next.22" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.6.0-next.23" : "0.0.0-dev";
 var SERVER_FEATURES = Object.freeze([
   "client-state",
   "client-state-chunking",
@@ -6767,7 +6770,7 @@ function createSingleUserCloudflareWorker(buildConfig, options = {}) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-08-15";
+var AMSG_BUNDLE_VERSION = "2026-08-18";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -7105,7 +7108,7 @@ var resolveScheduleSlots = (schedule, now) => {
   }
   return { current: null, next: schedule.slots[0] };
 };
-var buildScheduleInjection = (schedule, evolvedNarrative, now = /* @__PURE__ */ new Date()) => {
+var buildScheduleInjection = (schedule, evolvedNarrative, now = /* @__PURE__ */ new Date(), options = {}) => {
   if (!schedule || !schedule.slots || schedule.slots.length === 0) return "";
   const { current: currentSlot, next: nextSlot } = resolveScheduleSlots(schedule, now);
   const isPreDawnCarryOver = !currentSlot && now.getHours() < PRE_DAWN_END_HOUR;
@@ -7134,9 +7137,25 @@ var buildScheduleInjection = (schedule, evolvedNarrative, now = /* @__PURE__ */ 
 `;
   const footnote = `
 \uFF08\u4E0D\u662F\u53F0\u8BCD\uFF0C\u4E0D\u7528\u8BF4\u51FA\u53E3\u2014\u2014\u8BA9\u5B83\u5F71\u54CD\u4F60\u7684\u8BED\u6C14\u548C\u60C5\u7EEA\u5C31\u597D\u3002\uFF09`;
-  let out = slotHeader;
+  let out = "";
+  if (options.includeFullDay) {
+    const rows = schedule.slots.map((slot) => {
+      let line = `- ${slot.startTime} ${slot.activity}`;
+      if (slot.location) line += `\uFF08${slot.location}\uFF09`;
+      if (slot.description) line += `\uFF1A${slot.description}`;
+      return line;
+    });
+    out += `\u4F60\u4ECA\u5929\u7684\u5B8C\u6574\u65E5\u7A0B\uFF1A
+${rows.join("\n")}
+`;
+  }
+  out += slotHeader;
   if (narrative) {
     out += preamble + narrative + footnote;
+  }
+  if (options.includeChangeInstruction && nextSlot) {
+    out += `
+\u4F60\u62E5\u6709\u66F4\u6539\u672A\u6765\u65E5\u7A0B\u8BA1\u5212\u7684\u80FD\u529B\uFF1B\u9700\u8981\u65F6\u5728\u56DE\u590D\u672B\u5C3E\u5355\u72EC\u8F93\u51FA\uFF1A[[ACTION:CHANGE_SCHEDULE | ${nextSlot.startTime} | \u53BB\u8D85\u5E02]]\uFF08\u65F6\u6BB5\u5FC5\u987B\u6765\u81EA\u4E0A\u8868\u4E14\u5C1A\u672A\u5F00\u59CB\uFF09\u3002`;
   }
   out += "\n";
   return out;
@@ -8492,8 +8511,9 @@ var buildInstantTimelyBlock = (args) => {
   return [head, ...blocks].join("\n");
 };
 var NOTIFICATION_ALWAYS = "always";
+var NOTIFICATION_SILENT_WHEN_VISIBLE = "when-visible";
 var instantNotificationTag = (charId) => `amsg-instant-${charId}`;
-var applyInstantNotificationPolicy = (payload, charId) => {
+var applyInstantNotificationPolicy = (payload, charId, isFirstSegment = false) => {
   const notification = payload.notification;
   const hasNotification = !!notification && typeof notification === "object" && !Array.isArray(notification);
   if (!hasNotification) return payload;
@@ -8505,10 +8525,11 @@ var applyInstantNotificationPolicy = (payload, charId) => {
     notification: {
       ...notification,
       show: NOTIFICATION_ALWAYS,
-      silent: true,
+      silent: NOTIFICATION_SILENT_WHEN_VISIBLE,
       // 认不出是哪个角色时就不折叠：通知栏里多几条只是吵，两个角色共用一个 tag 会
-      // 互相顶掉，那是真的丢消息。
-      ...target ? { tag: instantNotificationTag(target) } : {}
+      // 互相顶掉，那是真的丢消息。renotify 跟着 tag 走——没有 tag 时带上它，
+      // showNotification 会直接抛 TypeError。
+      ...target ? { tag: instantNotificationTag(target), ...isFirstSegment ? { renotify: true } : {} } : {}
     }
   };
 };
@@ -11233,7 +11254,7 @@ var buildDuplicateToolMessage = (name) => [
   "\u6216\u8005\u6362\u4E00\u4E2A\u8FD8\u6CA1\u7528\u8FC7\u7684\u5DE5\u5177\u3002\u524D\u9762\u5DF2\u7ECF\u8BF4\u51FA\u53BB\u7684\u5185\u5BB9\u548C\u6807\u7B7E\u4E0D\u8981\u91CD\u5199\uFF0C\u63A5\u7740\u5F80\u4E0B\u5199\u5C31\u884C\u3002]"
 ].join("\n");
 
-// node_modules/.pnpm/@rei-standard+amsg-instant@0.11.0-next.5/node_modules/@rei-standard/amsg-instant/dist/index.mjs
+// node_modules/.pnpm/@rei-standard+amsg-instant@0.11.0-next.6/node_modules/@rei-standard/amsg-instant/dist/index.mjs
 var PUSH_PAYLOAD_BYTE_ENCODER = new TextEncoder();
 function segmentTextWithProtectedBlocks(text, options) {
   if (!text) return [];
@@ -12547,10 +12568,13 @@ var sendInstantErrorPush = async (args) => {
         title: args.contactName ? `${args.contactName} \u7684\u56DE\u590D\u6CA1\u80FD\u751F\u6210` : "\u56DE\u590D\u6CA1\u80FD\u751F\u6210",
         body: instantErrorNotificationBody(args.reason),
         show: "always",
-        silent: true,
+        silent: NOTIFICATION_SILENT_WHEN_VISIBLE,
         // 跟这个角色的回复共用一个 tag：通知栏里只留最新状态，重发成功后那条回复
         // 会把这条「没能生成」盖掉。失败本身在聊天流里有系统消息留痕，不靠横幅记账。
-        tag: instantNotificationTag(args.charId)
+        tag: instantNotificationTag(args.charId),
+        // 这一轮到此为止了，横幅是唯一会去叫人的东西。同 tag 默认静默替换，不带
+        // renotify 的话它会悄悄顶掉刚才那条回复通知，用户在后台就什么都不知道。
+        renotify: true
       }
     };
     await deps.webpush.sendNotification(subscription, JSON.stringify(payload));
@@ -13376,7 +13400,7 @@ var amsgHooks = {
         payloads = budgeted;
       }
       if (stash.instant) {
-        payloads = payloads.map((payload) => applyInstantNotificationPolicy(payload, stash.charId));
+        payloads = payloads.map((payload, index) => applyInstantNotificationPolicy(payload, stash.charId, index === 0));
       }
       return { ...decision, pushPayloads: payloads };
     }
