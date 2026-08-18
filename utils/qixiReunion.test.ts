@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildQixiReunionPrompt, createQixiReunionFallback, parseQixiPromise, parseQixiReunion, QixiPortraitPlan, QIXI_PART3_TIMEOUT_MS, resolveQixiPortraitPlan } from './qixiReunion';
+import { buildQixiFinalePrompt, buildQixiReunionPrompt, createQixiReunionFallback, parseQixiPromise, parseQixiReunion, QixiPortraitPlan, QIXI_PART3_TIMEOUT_MS, resolveQixiPortraitPlan } from './qixiReunion';
 import { CharacterProfile, UserProfile } from '../types';
 
 const char = { id: 'c1', name: 'Char', avatar: 'avatar.png', description: '', systemPrompt: '', memories: [] } as CharacterProfile;
@@ -12,8 +12,8 @@ const meetingPlan: QixiPortraitPlan = {
 };
 
 describe('qixi reunion parser', () => {
-    it('allows each slow Part 3 model call up to five minutes', () => {
-        expect(QIXI_PART3_TIMEOUT_MS).toBe(300_000);
+    it('allows each slow Part 3 model call up to ten minutes', () => {
+        expect(QIXI_PART3_TIMEOUT_MS).toBe(600_000);
     });
 
     it('asks for a longer emotional arc and keeps the fallback equally substantial', () => {
@@ -22,10 +22,23 @@ describe('qixi reunion parser', () => {
         expect(prompt).toContain('reunion.lines 写 3—5 句');
         expect(prompt).toContain('companionshipReflection 写 4—7 句');
         expect(prompt).toContain('blessing 写 4—7 句');
+        expect(prompt).toContain('直到桥接通、真正看见眼前的人');
+        expect(prompt).toContain('至少有一句要用角色自己的方式完成身份揭露');
+        expect(prompt).toContain('此前一直只是怀疑，现在亲眼看见才终于确认');
         expect(fallback.reunion.lines).toHaveLength(4);
         expect(fallback.companionshipReflection).toHaveLength(5);
         expect(fallback.blessing).toHaveLength(5);
         expect(fallback.portrait.lineExpressions.reunion).toHaveLength(fallback.reunion.lines.length);
+    });
+
+    it('asks for reunion and promise in one combined JSON without dropping either prompt contract', () => {
+        const prompt = buildQixiFinalePrompt(char, user, { evidence: [] } as any, [], meetingPlan);
+        expect(prompt).toContain('Part 1：终于抵达彼此');
+        expect(prompt).toContain('Part 2：最后的约定');
+        expect(prompt).toContain('同一个响应、同一个 JSON 对象中一次完成');
+        expect(prompt).toContain('"touch"');
+        expect(prompt).toContain('"returnMessage"');
+        expect(prompt).toContain('"promise"');
     });
 
     it('never prefers the neural-link avatar over the dedicated Qixi Chibi fallback', () => {

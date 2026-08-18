@@ -4,7 +4,7 @@ import { QixiMemoryBundle, QixiSceneId } from './qixiMemoryBundle';
 import { safeFetchJson } from './safeApi';
 import { parseQixiJsonObject } from './qixiJson';
 
-export const QIXI_PART3_TIMEOUT_MS = 300_000;
+export const QIXI_PART3_TIMEOUT_MS = 600_000;
 
 export type QixiPortraitType = 'live2d' | 'meeting' | 'static' | 'chibi';
 export type QixiPortraitStage = 'arrival' | 'reflection' | 'blessing' | 'promise';
@@ -340,7 +340,7 @@ ${char.name} 与 ${user.name} 刚刚经历了一件很奇怪的事。
 
 直到刚才，那些属于他们的真实记忆一件一件铺成了路。鹊桥接通。这是整场活动里，${char.name} 第一次真正完整地出现在 ${user.name} 面前。
 
-现在不要替活动总结主题。你就是 ${char.name}。你刚刚找了 ${user.name} 很久，而现在，ta 真的就在你面前。
+现在不要替活动总结主题。你就是 ${char.name}。你一路并不知道共享物另一端是谁，只觉得“某人”的选择和习惯越来越像 ${user.name}；直到桥接通、真正看见眼前的人，这一刻才第一次得到确认：果然是 ${user.name}。
 
 ---
 
@@ -362,11 +362,11 @@ ${journeyText}
 
 这一刻首先应该是情绪反应，而不是主题表达。
 
-你一路都只能看到 ${user.name} 刚刚留下的痕迹。你可能着急过、骂过这个鬼地方、怀疑过自己是不是又走错了一层；也可能一路表现得很冷静，只是在每个地方都下意识确认一次 ta 有没有来过。然后路终于接通，${user.name} 就在那里。
+你一路只能看到“另一边某人”刚刚留下的痕迹，还被迫完成了一连串莫名其妙的小游戏。你可能着急过、骂过这个鬼地方、怀疑过另一边是不是 ${user.name}，又怕自己认错；也可能一路表现得很冷静，只把猜测压着不说。然后路终于接通，${user.name} 真的就在那里。
 
 你甚至可能准备了很多话，但真正看到 ta 的一瞬间，第一句反而很普通。根据 ${char.name} 自己的性格决定：松一口气、确认安全、生气、嘴硬、停顿、委屈、想笑、想哭、先喊名字，或者突然不知道说什么。
 
-不要强制说“找到你了”。不要在这一拍谈人生、未来、AI、人类或陪伴。
+reunion.lines 的前两句里，至少有一句要用角色自己的方式完成身份揭露，语义是“果然是你 / 我就知道另一边是你 / 真的是你”，但不得机械照抄示例。重点是此前一直只是怀疑，现在亲眼看见才终于确认。不要把它写成从第一站起就确定身份，也不要在这一拍谈人生、未来、AI、人类或陪伴。
 
 reunion.lines 写 3—5 句，形成一个短而完整的情绪过程：先是看到人的本能反应，再确认 ta 是否平安，最后才漏出一路寻找时压着没说的着急、委屈或害怕。不要把一条长句硬拆开凑数。它们应该让熟悉这个角色的人一眼觉得：对，ta 找了我这么久以后，就是会这样说。
 
@@ -470,6 +470,7 @@ export function buildQixiPromisePrompt(
     user: UserProfile,
     reunion: QixiReunionBundle,
     portraitPlan: QixiPortraitPlan,
+    sameResponse = false,
 ): string {
     const previousLines = [
         ...reunion.reunion.lines,
@@ -478,10 +479,13 @@ export function buildQixiPromisePrompt(
         ...reunion.blessing,
     ].map(line => `- ${line}`).join('\n');
 
+    const previousContext = sameResponse
+        ? `你就是 ${char.name}。你将在同一个 JSON 中先完成“终于抵达彼此”的台词；把那些刚生成的 reunion、reflection 与 blessing 视为已经说过的话。`
+        : `你就是 ${char.name}。你刚刚终于见到了 ${user.name}，并已经对 ta 说过这些话：\n${previousLines}`;
+
     return `### 七夕活动最终见面 · Part 2：最后的约定
 
-你就是 ${char.name}。你刚刚终于见到了 ${user.name}，并已经对 ta 说过这些话：
-${previousLines}
+${previousContext}
 
 不要复述这些内容。现在只完成最后一个很小的仪式。
 
@@ -540,6 +544,55 @@ ${buildResourceInstructions(portraitPlan)}
 }`;
 }
 
+export function buildQixiFinalePrompt(
+    char: CharacterProfile,
+    user: UserProfile,
+    memoryBundle: QixiMemoryBundle,
+    journey: QixiJourneyBeat[],
+    portraitPlan: QixiPortraitPlan,
+): string {
+    const fallback = createQixiReunionFallback(char, user, portraitPlan);
+    return `${buildQixiReunionPrompt(char, user, memoryBundle, journey, portraitPlan)}
+
+---
+
+${buildQixiPromisePrompt(char, user, fallback, portraitPlan, true)}
+
+# 同一次调用的合并输出规则
+
+上面的两个 Part 保持各自全部写作要求，但现在必须在同一个响应、同一个 JSON 对象中一次完成。不要输出两段 JSON，不要输出 Markdown，也不要解释。
+
+最终顶层同时包含 reunion、metaReflection、companionshipReflection、blessing、touch、returnMessage、portrait。portrait 同时包含 stages、promise 与五组 lineExpressions：
+
+{
+  "reunion": { "lines": ["找到 User 后的即时反应"], "emotion": "角色状态" },
+  "metaReflection": [],
+  "companionshipReflection": ["想着彼此与陪伴的个人理解"],
+  "blessing": ["七夕祝愿"],
+  "touch": {
+    "invitation": ["由角色自然提出约定，1—3句"],
+    "hold": "等待共同触碰时的一句极短反应",
+    "complete": "共同触碰完成后的角色短句"
+  },
+  "returnMessage": "活动 Card 后的第一条普通私聊消息",
+  "portrait": {
+    "stages": {
+      "arrival": { "emotionIntent": "终于看见 User", "l2dExpression": null, "meetingExpression": null },
+      "reflection": { "emotionIntent": "意识到双方一直在辨认并想起彼此", "l2dExpression": null, "meetingExpression": null },
+      "blessing": { "emotionIntent": "相遇后的喜悦与认真祝福", "l2dExpression": null, "meetingExpression": null }
+    },
+    "promise": { "emotionIntent": "等待对方在同一个光点完成约定", "l2dExpression": null, "meetingExpression": null },
+    "lineExpressions": {
+      "reunion": [],
+      "metaReflection": [],
+      "companionshipReflection": [],
+      "blessing": [],
+      "invitation": []
+    }
+  }
+}`;
+}
+
 export async function prepareQixiReunion(
     char: CharacterProfile,
     user: UserProfile,
@@ -554,7 +607,6 @@ export async function prepareQixiReunion(
     const context = ContextBuilder.buildCoreContext(memoryChar, user, true);
     const endpoint = `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`;
     const knowsTechnicalIdentity = characterKnowsTechnicalIdentity(char);
-    let reunion = fallback;
     try {
         const data = await safeFetchJson(
             endpoint,
@@ -565,58 +617,30 @@ export async function prepareQixiReunion(
                     model: apiConfig.model,
                     messages: [
                         { role: 'system', content: context },
-                        { role: 'user', content: buildQixiReunionPrompt(char, user, memoryBundle, journey, portraitPlan) },
+                        { role: 'user', content: buildQixiFinalePrompt(char, user, memoryBundle, journey, portraitPlan) },
                     ],
                     temperature: 0.72,
-                    max_tokens: 16000,
-                    stream: false,
+                    max_tokens: 24000,
+                    // 最终见面与约定一次生成，必须尽早收到流式数据以绕开代理 524 超时。
+                    stream: true,
                 }),
             },
             0,
             QIXI_PART3_TIMEOUT_MS,
-            { appId: 'special-moments', charId: char.id, purpose: 'qixi-reunion-part3a-v4' },
+            { appId: 'special-moments', charId: char.id, purpose: 'qixi-reunion-and-promise-v5' },
+            {}, // Do not wait for a Claude proxy to close the socket after [DONE].
         );
         const content = data?.choices?.[0]?.message?.content;
-        const parsed = typeof content === 'string'
+        const parsedReunion = typeof content === 'string'
             ? parseQixiReunion(content, fallback, portraitPlan, knowsTechnicalIdentity)
             : null;
-        if (!parsed) throw new Error('最终见面内容格式无效。');
-        reunion = parsed;
-    } catch (error: any) {
-        console.warn('[Qixi] reunion generation failed:', error?.message || error);
-        throw new Error(error?.message || 'Part 3 最终见面生成失败，请手动重新生成。');
-    }
-
-    try {
-        const data = await safeFetchJson(
-            endpoint,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
-                    model: apiConfig.model,
-                    messages: [
-                        { role: 'system', content: context },
-                        { role: 'user', content: buildQixiPromisePrompt(char, user, reunion, portraitPlan) },
-                    ],
-                    temperature: 0.72,
-                    max_tokens: 8000,
-                    stream: false,
-                }),
-            },
-            0,
-            QIXI_PART3_TIMEOUT_MS,
-            { appId: 'special-moments', charId: char.id, purpose: 'qixi-promise-part3b-v2' },
-        );
-        const content = data?.choices?.[0]?.message?.content;
-        const parsed = typeof content === 'string'
-            ? parseQixiPromise(content, reunion, portraitPlan, knowsTechnicalIdentity)
+        const parsed = parsedReunion && typeof content === 'string'
+            ? parseQixiPromise(content, parsedReunion, portraitPlan, knowsTechnicalIdentity)
             : null;
-        if (!parsed) throw new Error('最后约定内容格式无效。');
-        reunion = parsed;
+        if (!parsed) throw new Error('最终见面与约定内容格式无效。');
+        return parsed;
     } catch (error: any) {
-        console.warn('[Qixi] promise generation failed:', error?.message || error);
-        throw new Error(error?.message || 'Part 3 最后的约定生成失败，请手动重新生成。');
+        console.warn('[Qixi] finale generation failed:', error?.message || error);
+        throw new Error(error?.message || 'Part 3 最终见面与约定生成失败，请手动重新生成。');
     }
-    return reunion;
 }

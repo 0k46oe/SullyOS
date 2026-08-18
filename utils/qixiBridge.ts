@@ -1,11 +1,7 @@
-import { APIConfig, CharacterProfile, UserProfile } from '../types';
-import { ContextBuilder } from './context';
-import { QixiJourneyBeat } from './qixiReunion';
-import { QixiMemoryBundle } from './qixiMemoryBundle';
-import { safeFetchJson } from './safeApi';
+import type { UserProfile } from '../types';
+import type { QixiJourneyBeat } from './qixiReunion';
+import type { QixiMemoryBundle } from './qixiMemoryBundle';
 import { parseQixiJsonObject } from './qixiJson';
-
-export const QIXI_PART2_TIMEOUT_MS = 300_000;
 
 export type QixiMagpieOwner = 'user' | 'char';
 
@@ -67,7 +63,7 @@ export function createQixiBridgeFallback(memoryBundle: QixiMemoryBundle, userNam
         source: 'fallback',
         userMagpies,
         charMagpies,
-        finalMagpie: { name: userName, line: '一直在找的那个。', visualHint: '对岸最后亮起的名字' },
+        finalMagpie: { name: userName, line: '不会真是那个人吧。', visualHint: '对岸最后亮起的名字' },
         nodes: [...userMagpies, ...charMagpies],
     };
 }
@@ -94,49 +90,50 @@ export function normalizeQixiBridgeBundle(
             source: value?.source || 'fallback',
             userMagpies: userMagpies.length ? userMagpies : migrated.slice(0, 1),
             charMagpies: charMagpies.length ? charMagpies : migrated.slice(1, 2),
-            finalMagpie: { name: userName, line: '这次不会认错。', visualHint: '对岸最后亮起的名字' },
+            finalMagpie: { name: userName, line: '这次可别让我认错。', visualHint: '对岸最后亮起的名字' },
             nodes: migrated,
         };
     }
     return createQixiBridgeFallback(memoryBundle, userName);
 }
 
-export function parseQixiBridge(raw: string, memoryBundle: QixiMemoryBundle, userName = 'User'): QixiBridgeBundle | null {
+export function parseQixiBridge(raw: string, _memoryBundle: QixiMemoryBundle, userName = 'User'): QixiBridgeBundle | null {
     const parsed = parseQixiJsonObject(raw, ['userMagpies', 'charMagpies']);
-    if (!parsed || !Array.isArray(parsed.userMagpies) || !Array.isArray(parsed.charMagpies)) return null;
-    const evidenceIds = new Set(memoryBundle.evidence.map(item => item.id));
+    if (!parsed) return null;
+    const asList = (value: unknown): any[] => Array.isArray(value)
+        ? value
+        : value && typeof value === 'object' ? Object.values(value as Record<string, unknown>) : [];
+    const rawUserMagpies = asList(parsed.userMagpies);
+    const rawCharMagpies = asList(parsed.charMagpies);
+    if (!rawUserMagpies.length || !rawCharMagpies.length) return null;
+    const generatedText = (value: unknown): string => typeof value === 'string'
+        ? value.replace(/\r\n/g, '\n').trim()
+        : typeof value === 'number' || typeof value === 'boolean' ? String(value) : '';
     const parseSide = (items: any[], owner: QixiMagpieOwner): QixiMagpie[] => {
-        const seen = new Set<string>();
-        return items.slice(0, 6).map((item, index): QixiMagpie => ({
+        return items.map((item, index): QixiMagpie => ({
             id: `${owner}-magpie-${index + 1}`,
-            evidenceId: compact(item?.evidenceId, 32) || null,
-            name: compact(item?.name, 48),
-            memory: compact(item?.memory, 120),
-            visualHint: compact(item?.visualHint, 48),
+            evidenceId: generatedText(item?.evidenceId) || null,
+            name: generatedText(item?.name),
+            memory: generatedText(item?.memory),
+            visualHint: generatedText(item?.visualHint),
             owner,
-        })).filter(item => {
-            if (!item.evidenceId || !evidenceIds.has(item.evidenceId) || seen.has(item.evidenceId)) return false;
-            if (!item.name || item.memory.length < 4 || !item.visualHint) return false;
-            seen.add(item.evidenceId);
-            return true;
-        });
+        }));
     };
-    const userMagpies = parseSide(parsed.userMagpies, 'user');
-    const charMagpies = parseSide(parsed.charMagpies, 'char');
+    const userMagpies = parseSide(rawUserMagpies, 'user');
+    const charMagpies = parseSide(rawCharMagpies, 'char');
     if (!userMagpies.length || !charMagpies.length) return null;
     const rawFinalMagpie = parsed.finalMagpie && typeof parsed.finalMagpie === 'object' && !Array.isArray(parsed.finalMagpie)
         ? parsed.finalMagpie as Record<string, unknown>
         : null;
-    const finalLine = compact(rawFinalMagpie?.line, 80);
-    if (!finalLine) return null;
+    if (!rawFinalMagpie) return null;
     return {
         source: 'generated',
         userMagpies,
         charMagpies,
         finalMagpie: {
-            name: userName,
-            line: finalLine,
-            visualHint: compact(rawFinalMagpie?.visualHint, 48) || '从对岸飞来的名字',
+            name: generatedText(rawFinalMagpie.name) || userName,
+            line: generatedText(rawFinalMagpie.line),
+            visualHint: generatedText(rawFinalMagpie.visualHint),
         },
         nodes: [...userMagpies, ...charMagpies],
     };
@@ -164,7 +161,7 @@ ${visited}
 - memory 像两个人自己会认出来的私人标签，不写档案摘要，不把转述伪装成原话。
 - visualHint 只抽象颜色、文字、光或剪影，不新增共同经历。
 
-最后一只鹊必须从 Char 一岸飞来。finalMagpie.name 固定为“${userName}”；line 是 Char 终于辨认出 User 的一句极短反应，必须符合当前角色，不得机械套用示例。
+最后一只鹊必须从 Char 一岸飞来。finalMagpie.name 固定为“${userName}”；line 是 Char 已经强烈怀疑另一边是 User、却尚未亲眼确认的一句极短反应，必须符合当前角色。不得在这里说“果然是你 / 我就知道是你 / 找到你了”；身份确认留给最终见面。
 
 禁止在任何字段解释“思念就是鹊桥”“记忆让我们相见”等中心思想。动画会自己表达。
 
@@ -178,44 +175,17 @@ ${visited}
   ],
   "finalMagpie": {
     "name": "${userName}",
-    "line": "Char 对 User 的极短辨认反应",
+    "line": "Char 几乎猜到但还不敢确认的极短反应",
     "visualHint": "从对岸飞来的名字"
   }
 }`;
 }
 
 export async function prepareQixiBridge(
-    char: CharacterProfile,
     user: UserProfile,
-    apiConfig: APIConfig,
     memoryBundle: QixiMemoryBundle,
-    journey: QixiJourneyBeat[],
 ): Promise<QixiBridgeBundle> {
-    if (!apiConfig.baseUrl || !apiConfig.apiKey || !apiConfig.model) throw new Error('Part 2 无法生成：请先配置可用的模型 API。');
-    if (!memoryBundle.evidence.length) throw new Error('Part 2 无法生成：Part 1 没有留下可验证的真实记忆。');
-    const contextChar = { ...char, memoryPalaceInjection: '', roomPlatesInjection: '' };
-    const context = ContextBuilder.buildCoreContext(contextChar, user, true);
-    const data = await safeFetchJson(
-        `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`,
-        {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiConfig.apiKey}` },
-            body: JSON.stringify({
-                model: apiConfig.model,
-                messages: [
-                    { role: 'system', content: context },
-                    { role: 'user', content: buildQixiBridgePrompt(memoryBundle, journey, user.name) },
-                ],
-                temperature: 0.5,
-                stream: false,
-            }),
-        },
-        0,
-        QIXI_PART2_TIMEOUT_MS,
-        { appId: 'special-moments', charId: char.id, purpose: 'qixi-bridge-part2-v2' },
-    );
-    const content = data?.choices?.[0]?.message?.content;
-    const parsed = typeof content === 'string' ? parseQixiBridge(content, memoryBundle, user.name) : null;
-    if (!parsed) throw new Error('Part 2 返回的数据无法生成真实记忆鹊，请手动重新生成。');
-    return parsed;
+    if (memoryBundle.bridge) return normalizeQixiBridgeBundle(memoryBundle.bridge, memoryBundle, user.name);
+    if (memoryBundle.source === 'fallback') return createQixiBridgeFallback(memoryBundle, user.name);
+    throw new Error('Part 2 缺少随 Part 1 后半段生成的记忆鹊，请重新生成 Part 1。');
 }

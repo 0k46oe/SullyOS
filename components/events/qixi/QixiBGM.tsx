@@ -3,7 +3,7 @@ import { attachAudioMirrorFallback } from '../../../utils/assetUrl';
 
 export type QixiBGMGroup = 'fall' | 'explore' | 'otherSide' | 'bridge';
 
-const QIXI_BGM_GROUPS: Record<QixiBGMGroup, string[]> = {
+export const QIXI_BGM_GROUPS: Record<QixiBGMGroup, string[]> = {
     fall: [
         'bgm/qixi/01/02_0_褪色客厅.mp3',
         'bgm/qixi/01/1_0_褪色客厅.mp3',
@@ -14,7 +14,6 @@ const QIXI_BGM_GROUPS: Record<QixiBGMGroup, string[]> = {
     ],
     otherSide: [
         'bgm/qixi/03/01_0_鹊桥月色.mp3',
-        'bgm/qixi/03/02_0_月下双向.mp3',
         'bgm/qixi/03/03_0_月下双向.mp3',
     ],
     bridge: [
@@ -30,11 +29,27 @@ const FADE_MS = 1100;
 
 type QixiAudioTrack = Pick<HTMLAudioElement, 'currentTime' | 'pause' | 'volume'>;
 
+// The activity can briefly mount more than one view while a scene is changing.
+// Keep one module-wide owner so an outgoing view can never keep playing under
+// the incoming room's track.
+let activeQixiBGMTrack: QixiAudioTrack | null = null;
+
 export const stopQixiBGMTrack = (audio: QixiAudioTrack): void => {
     audio.pause();
     audio.volume = 0;
     try { audio.currentTime = 0; } catch { /* unloaded audio may not be seekable yet */ }
 };
+
+export const claimQixiBGMTrack = (audio: QixiAudioTrack): void => {
+    if (activeQixiBGMTrack && activeQixiBGMTrack !== audio) stopQixiBGMTrack(activeQixiBGMTrack);
+    activeQixiBGMTrack = audio;
+};
+
+export const releaseQixiBGMTrack = (audio: QixiAudioTrack): void => {
+    if (activeQixiBGMTrack === audio) activeQixiBGMTrack = null;
+};
+
+const ownsQixiBGM = (audio: QixiAudioTrack): boolean => activeQixiBGMTrack === audio;
 
 export const prepareQixiBGMFadeIn = (audio: Pick<HTMLAudioElement, 'volume'>): void => {
     audio.volume = 0;
@@ -76,6 +91,7 @@ export function useQixiBGM(stage: string, sceneIndex: number) {
     const stopImmediately = useCallback((audio: HTMLAudioElement) => {
         clearFade(audio);
         stopQixiBGMTrack(audio);
+        releaseQixiBGMTrack(audio);
     }, [clearFade]);
 
     const fade = useCallback((audio: HTMLAudioElement, target: number, duration = FADE_MS) => {
@@ -84,6 +100,12 @@ export function useQixiBGM(stage: string, sceneIndex: number) {
         const start = audio.volume;
         let step = 0;
         const timer = window.setInterval(() => {
+            if (target > 0 && !ownsQixiBGM(audio)) {
+                window.clearInterval(timer);
+                fadeTimersRef.current.delete(audio);
+                stopQixiBGMTrack(audio);
+                return;
+            }
             step += 1;
             audio.volume = Math.max(0, Math.min(1, start + (target - start) * (step / steps)));
             if (step < steps) return;
@@ -126,9 +148,10 @@ export function useQixiBGM(stage: string, sceneIndex: number) {
         let retry: (() => void) | undefined;
         const playCurrent = (audio: HTMLAudioElement) => {
             if (!group || activeGroupRef.current !== group || mutedRef.current) return;
+            claimQixiBGMTrack(audio);
             prepareQixiBGMFadeIn(audio);
             audio.play().then(() => {
-                if (activeGroupRef.current !== group || mutedRef.current) {
+                if (activeGroupRef.current !== group || mutedRef.current || !ownsQixiBGM(audio)) {
                     stopImmediately(audio);
                     return;
                 }
@@ -137,9 +160,10 @@ export function useQixiBGM(stage: string, sceneIndex: number) {
                 if (error?.name !== 'NotAllowedError') return;
                 retry = () => {
                     if (activeGroupRef.current !== group || mutedRef.current) return;
+                    claimQixiBGMTrack(audio);
                     prepareQixiBGMFadeIn(audio);
                     audio.play().then(() => {
-                        if (activeGroupRef.current === group && !mutedRef.current) fade(audio, TARGET_VOLUME);
+                        if (activeGroupRef.current === group && !mutedRef.current && ownsQixiBGM(audio)) fade(audio, TARGET_VOLUME);
                         else stopImmediately(audio);
                     }).catch(() => undefined);
                 };
@@ -174,9 +198,10 @@ export function useQixiBGM(stage: string, sceneIndex: number) {
             fade(current, 0, 450);
             return;
         }
+        claimQixiBGMTrack(current);
         prepareQixiBGMFadeIn(current);
         current.play().then(() => {
-            if (!mutedRef.current && activeGroupRef.current === activeGroup) fade(current, TARGET_VOLUME, 450);
+            if (!mutedRef.current && activeGroupRef.current === activeGroup && ownsQixiBGM(current)) fade(current, TARGET_VOLUME, 450);
             else stopImmediately(current);
         }).catch(() => undefined);
     }, [fade, muted, stopImmediately]);

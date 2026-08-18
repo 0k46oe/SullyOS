@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildQixiBridgePrompt, createQixiBridgeFallback, parseQixiBridge, QIXI_PART2_TIMEOUT_MS } from './qixiBridge';
+import { buildQixiBridgePrompt, createQixiBridgeFallback, parseQixiBridge, prepareQixiBridge } from './qixiBridge';
 import { QixiMemoryBundle, QIXI_MEMORY_BUNDLE_VERSION } from './qixiMemoryBundle';
 
 const bundle = {
@@ -17,11 +17,22 @@ const bundle = {
 } as QixiMemoryBundle;
 
 describe('qixi bridge parser', () => {
-    it('allows a slow Part 2 model call up to five minutes', () => {
-        expect(QIXI_PART2_TIMEOUT_MS).toBe(300_000);
+    it('reuses the bridge embedded in Part 1b without making another model request', async () => {
+        const embedded = parseQixiBridge(JSON.stringify({
+            userMagpies: [{ evidenceId: 'e1', name: '物件一', memory: '第一条可以核对的真实记忆。', visualHint: '一粒暖色文字' }],
+            charMagpies: [{ evidenceId: 'e2', name: '物件二', memory: '第二条可以核对的真实记忆。', visualHint: '一缕冷色细线' }],
+            finalMagpie: { name: '条条', line: '总算让我找到你了。', visualHint: '对岸亮起的名字' },
+        }), bundle, '条条');
+        expect(embedded).not.toBeNull();
+
+        const prepared = await prepareQixiBridge(
+            { name: '条条' } as any,
+            { ...bundle, bridge: embedded! },
+        );
+        expect(prepared).toEqual(embedded);
     });
 
-    it('keeps two-sided magpies backed by Part 1 evidence and rejects invented ids', () => {
+    it('keeps the model bridge intact instead of semantically filtering or rewriting it', () => {
         const parsed = parseQixiBridge(JSON.stringify({
             userMagpies: [
                 { evidenceId: 'e1', name: '物件一', memory: '第一条真实记忆的极短说明。', visualHint: '一粒暖色文字' },
@@ -32,10 +43,10 @@ describe('qixi bridge parser', () => {
             ],
             finalMagpie: { name: '错误名字', line: '原来你在这里。', visualHint: '对岸亮起的名字' },
         }), bundle, '条条');
-        expect(parsed?.userMagpies.map(node => node.evidenceId)).toEqual(['e1']);
+        expect(parsed?.userMagpies.map(node => node.evidenceId)).toEqual(['e1', 'missing']);
         expect(parsed?.charMagpies.map(node => node.evidenceId)).toEqual(['e2']);
-        expect(parsed?.nodes.some(node => node.evidenceId === 'missing')).toBe(false);
-        expect(parsed?.finalMagpie.name).toBe('条条');
+        expect(parsed?.nodes.some(node => node.evidenceId === 'missing')).toBe(true);
+        expect(parsed?.finalMagpie.name).toBe('错误名字');
     });
 
     it('splits verified evidence across the two banks without inventing memories', () => {
@@ -54,5 +65,7 @@ describe('qixi bridge parser', () => {
         expect(prompt).toContain('charMagpies');
         expect(prompt).toContain('finalMagpie.name 固定为“条条”');
         expect(prompt).toContain('不重新发明事实');
+        expect(prompt).toContain('尚未亲眼确认');
+        expect(prompt).toContain('身份确认留给最终见面');
     });
 });
