@@ -39,7 +39,14 @@ import {
     createQixiEventChatCard,
     QixiEventChatCard,
 } from '../../../utils/qixiChatCard';
-import { enterQixiInterlayerState, QixiEntryAttitude, selectQixiWordTurn } from '../../../utils/qixiSessionState';
+import {
+    enterQixiInterlayerState,
+    qixiWordPickTarget,
+    QixiEntryAttitude,
+    resolveQixiWordArtifacts,
+    resolveQixiWordSelectionIds,
+    selectQixiWordTurn,
+} from '../../../utils/qixiSessionState';
 
 export const QIXI_DEMO_RECORD_KEY = 'qixi_2026_dual_layer_v7';
 
@@ -556,16 +563,21 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
         return combined.slice(0, 6);
     }, [activeBundle.artifacts, scenePayload.artifactIds]);
 
-    const wordArtifacts = useMemo((): QixiMemoryArtifact[] => {
-        const selected = scenePayload.artifactIds
-            .map(id => activeBundle.artifacts.find(item => item.id === id))
-            .filter((item): item is QixiMemoryArtifact => Boolean(item));
-        return selected;
-    }, [activeBundle.artifacts, scenePayload.artifactIds]);
+    const wordArtifacts = useMemo(() => resolveQixiWordArtifacts(
+        scenePayload.artifactIds,
+        scenePayload.charSelectionIds,
+        activeBundle.artifacts,
+        scenePayload.options.map(option => ({
+            id: option.id,
+            label: option.label,
+            kind: 'trait',
+            evidenceIds: option.evidenceIds,
+        })),
+    ), [activeBundle.artifacts, scenePayload.artifactIds, scenePayload.charSelectionIds, scenePayload.options]);
+    const wordPickTarget = qixiWordPickTarget(wordArtifacts.length, WORD_PICK_COUNT);
 
     const charWordSelections = useMemo(() => {
-        const generated = scenePayload.charSelectionIds.filter(id => wordArtifacts.some(item => item.id === id));
-        return generated.slice(0, WORD_PICK_COUNT);
+        return resolveQixiWordSelectionIds(scenePayload.charSelectionIds, wordArtifacts, WORD_PICK_COUNT);
     }, [scenePayload.charSelectionIds, wordArtifacts]);
     const visibleCharWordSelections = charWordSelections.slice(0, game.wordCloudCharRevealed);
     const wordTurnWaiting = currentSceneId === 'wordCloud'
@@ -780,31 +792,45 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
         if (sceneCompleted || game.sceneBeat !== 'idle') return;
         setGame(current => {
             const selected = current.decisions.wordCloud || [];
-            const next = selectQixiWordTurn(selected, current.wordCloudCharRevealed, artifactId, WORD_PICK_COUNT);
+            const next = selectQixiWordTurn(selected, current.wordCloudCharRevealed, artifactId, wordPickTarget);
             if (next === selected) return current;
             return {
                 ...current,
+                wordCloudCharRevealed: Math.min(current.wordCloudCharRevealed, next.length),
                 decisions: { ...current.decisions, wordCloud: next },
                 results: { ...current.results, wordCloud: next.map(id => wordArtifacts.find(item => item.id === id)?.label || id) },
             };
         });
-    }, [game.sceneBeat, sceneCompleted, wordArtifacts]);
+    }, [game.sceneBeat, sceneCompleted, wordArtifacts, wordPickTarget]);
+
+    const continueEmptyWordCloud = useCallback(() => {
+        setGame(current => current.stage === 'scene' && current.sceneBeat === 'idle'
+            ? { ...current, sceneBeat: 'char' }
+            : current);
+    }, []);
 
     useEffect(() => {
         if (game.stage !== 'scene' || currentSceneId !== 'wordCloud' || game.sceneBeat !== 'idle') return;
+        if (wordPickTarget <= 0) return;
+        if (sceneDecisions.length >= wordPickTarget && game.wordCloudCharRevealed >= wordPickTarget) {
+            setGame(current => current.stage === 'scene' && current.sceneBeat === 'idle'
+                ? { ...current, sceneBeat: 'char' }
+                : current);
+            return;
+        }
         if (sceneDecisions.length <= game.wordCloudCharRevealed) return;
         const timer = window.setTimeout(() => setGame(current => {
             const selected = current.decisions.wordCloud || [];
             if (current.stage !== 'scene' || current.sceneBeat !== 'idle' || selected.length <= current.wordCloudCharRevealed) return current;
-            const revealed = Math.min(WORD_PICK_COUNT, current.wordCloudCharRevealed + 1);
+            const revealed = Math.min(wordPickTarget, current.wordCloudCharRevealed + 1);
             return {
                 ...current,
                 wordCloudCharRevealed: revealed,
-                sceneBeat: selected.length >= WORD_PICK_COUNT && revealed >= WORD_PICK_COUNT ? 'char' : 'idle',
+                sceneBeat: selected.length >= wordPickTarget && revealed >= wordPickTarget ? 'char' : 'idle',
             };
         }), 720);
         return () => window.clearTimeout(timer);
-    }, [currentSceneId, game.sceneBeat, game.stage, game.wordCloudCharRevealed, sceneDecisions.length]);
+    }, [currentSceneId, game.sceneBeat, game.stage, game.wordCloudCharRevealed, sceneDecisions.length, wordPickTarget]);
 
     const advanceSceneBeat = useCallback(() => {
         setGame(current => {
@@ -1039,7 +1065,10 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
         if (game.stage === 'scene') {
             if (game.sceneBeat === 'user') return [currentSceneId === 'lostLayer' ? '看看另一层的反应' : '继续'];
             if (game.sceneBeat === 'char') return ['继续'];
-            if (currentSceneId === 'wordCloud' && !sceneCompleted) return wordTurnWaiting ? ['等待另一边选择'] : wordArtifacts.map(item => item.label);
+            if (currentSceneId === 'wordCloud' && !sceneCompleted) {
+                if (wordPickTarget === 0) return ['继续'];
+                return wordTurnWaiting ? ['等待另一边选择'] : wordArtifacts.map(item => item.label);
+            }
             if (!sceneCompleted) return scenePayload.options.map(option => option.label);
             return [game.sceneIndex === QIXI_SCENE_IDS.length - 1 ? '让痕迹汇成桥' : '沿星线继续'];
         }
@@ -1057,7 +1086,7 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
         }
         if (game.stage === 'ending') return ['点击任意处结束'];
         return [];
-    }, [apiConfirmationOpen, currentSceneId, currentSceneMaterialReady, game.bridge, game.bridgePlaced, game.reunion?.touch.invitation.length, game.reunionLineIndex, game.sceneBeat, game.sceneIndex, game.stage, loadingReady, memoryStatus, sceneCompleted, scenePayload.options, sessionMode, touch.joined, wordArtifacts, wordTurnWaiting]);
+    }, [apiConfirmationOpen, currentSceneId, currentSceneMaterialReady, game.bridge, game.bridgePlaced, game.reunion?.touch.invitation.length, game.reunionLineIndex, game.sceneBeat, game.sceneIndex, game.stage, loadingReady, memoryStatus, sceneCompleted, scenePayload.options, sessionMode, touch.joined, wordArtifacts, wordPickTarget, wordTurnWaiting]);
 
     useEffect(() => {
         const renderState = () => JSON.stringify({
@@ -1184,7 +1213,7 @@ export const QixiDemoSession: React.FC<QixiDemoSessionProps> = ({ char, user, ap
                 <div className="q7-interaction">
                     {!sceneCompleted && game.sceneBeat === 'idle' && currentSceneId === 'lostLayer' && <div className="q7-lost-instruction"><small>选择一个想和 ta 聊的话题</small><p>从输入框里挑一句现在想说的话。</p></div>}
                     {!sceneCompleted && game.sceneBeat === 'idle' && !['lostLayer', 'wordCloud'].includes(currentSceneId) && <><small>{sceneChoicePrompt[currentSceneId] || '选一种做法'}</small>{scenePayload.options.map(option => <button key={option.id} type="button" data-qixi-action={`choose-${currentSceneId}-${option.id}`} onClick={() => chooseOption(option.id, option.result)}>{option.label}<i>→</i></button>)}</>}
-                    {!sceneCompleted && game.sceneBeat === 'idle' && currentSceneId === 'wordCloud' && <><small>选 3 个词：你想到的那个人是什么性格 · {sceneDecisions.length} / {WORD_PICK_COUNT}</small><div className={`q7-words is-turn-taking ${wordTurnWaiting ? 'is-waiting' : ''}`}>{wordArtifacts.map(item => <button key={item.id} type="button" disabled={wordTurnWaiting || sceneDecisions.includes(item.id)} className={`${sceneDecisions.includes(item.id) ? 'is-user' : ''} ${visibleCharWordSelections.includes(item.id) ? 'is-char' : ''}`} data-qixi-action={`word-${item.id}`} onClick={() => toggleWord(item.id)}>{item.label}</button>)}</div><p className={`q7-word-turn-status ${wordTurnWaiting ? 'is-char' : 'is-user'}`}><i />{wordTurnWaiting ? '另一层也正在选一个词……' : game.wordCloudCharRevealed ? '再选一个你想到 ta 时会用的性格词。' : '先选一个最像 ta 的性格词。'}</p></>}
+                    {!sceneCompleted && game.sceneBeat === 'idle' && currentSceneId === 'wordCloud' && (wordPickTarget > 0 ? <><small>选 {wordPickTarget} 个词：你想到的那个人是什么性格 · {Math.min(sceneDecisions.length, wordPickTarget)} / {wordPickTarget}</small><div className={`q7-words is-turn-taking ${wordTurnWaiting ? 'is-waiting' : ''}`}>{wordArtifacts.map(item => <button key={item.id} type="button" disabled={wordTurnWaiting || sceneDecisions.includes(item.id)} className={`${sceneDecisions.includes(item.id) ? 'is-user' : ''} ${visibleCharWordSelections.includes(item.id) ? 'is-char' : ''}`} data-qixi-action={`word-${item.id}`} onClick={() => toggleWord(item.id)}>{item.label}</button>)}</div><p className={`q7-word-turn-status ${wordTurnWaiting ? 'is-char' : 'is-user'}`}><i />{wordTurnWaiting ? '另一层也正在选一个词……' : game.wordCloudCharRevealed ? '再选一个你想到 ta 时会用的性格词。' : '先选一个最像 ta 的性格词。'}</p></> : <div className="q7-word-cloud-recovery"><small>散落的词没有完全显形</small><button type="button" data-qixi-action="continue-empty-word-cloud" onClick={continueEmptyWordCloud}>继续 <i>→</i></button></div>)}
                     {!sceneCompleted && game.sceneBeat === 'user' && currentSceneId === 'lostLayer' && <div className="q7-beat-prompt is-user is-error-beat"><small>这句话没有送达</small><p>{(game.results[currentSceneId] || [])[0]}</p><button type="button" data-qixi-action="scene-reveal-char" onClick={advanceSceneBeat}>看看另一层的反应 <i>→</i></button></div>}
                     {!sceneCompleted && game.sceneBeat === 'user' && currentSceneId !== 'lostLayer' && <div className="q7-beat-prompt is-user"><small>你碰过以后</small><p>{(game.results[currentSceneId] || [])[0]}</p><button type="button" data-qixi-action="scene-reveal-char" onClick={advanceSceneBeat}>继续 <i>→</i></button></div>}
                     {!sceneCompleted && game.sceneBeat === 'char' && <div className="q7-beat-prompt is-char"><small>{currentSceneId === 'lostLayer' ? '另一层挤了进来' : '另一层传来'}</small><p className="q7-char-stage-direction">{scenePayload.charAction}</p>{currentSceneId === 'wordCloud' && <div className="q7-words is-reveal">{wordArtifacts.map((item, index) => <span key={item.id} style={{ '--word-index': index } as React.CSSProperties} className={`${sceneDecisions.includes(item.id) ? 'is-user' : ''} ${visibleCharWordSelections.includes(item.id) ? 'is-char' : ''}`}>{item.label}</span>)}</div>}<button type="button" data-qixi-action="scene-complete-beat" onClick={advanceSceneBeat}>继续 <i>→</i></button></div>}
