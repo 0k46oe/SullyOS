@@ -558,3 +558,97 @@ describe('动作指令单括号掉格式兜底', () => {
         expect(bubbles.filter(m => m.type === 'text')).toHaveLength(0);
     }, 20000);
 });
+
+// 主动消息把「角色说出口」和「客户端落库」拉开了距离：一条 push 可以在收件箱里躺一夜。
+// 日程改动必须按说出口那一刻判，所以 ctx 上有个 spokenAt，由 activeMsgRuntime 传
+// push 的 sentAt。这条钉的是**接线**（ctx 字段真的被日程那一步读到了），
+// 判定规则本身在 scheduleChange.test.ts 里钉。
+describe('ctx.spokenAt — 日程改动按说出口那一刻判', () => {
+    const dateKeyOf = (d: Date) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+    const seedSchedule = async (charId: string, when: Date) => {
+        const key = dateKeyOf(when);
+        await DB.saveDailySchedule({
+            id: `${charId}_${key}`,
+            charId,
+            date: key,
+            generatedAt: new Date(when.getFullYear(), when.getMonth(), when.getDate(), 8).getTime(),
+            slots: [
+                { startTime: '08:00', activity: '起床' },
+                { startTime: '22:00', activity: '睡觉' },
+            ],
+        } as any);
+        return key;
+    };
+
+    const tag = '[[ACTION:CHANGE_SCHEDULE | 22:00 | 陪你聊天]]';
+
+    it('传了昨天的 spokenAt → 今天的表不动（隔夜 push 补收）', async () => {
+        const charId = 'c-spoken-at-stale';
+        const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const todayKey = await seedSchedule(charId, new Date());
+        await seedSchedule(charId, yesterday);
+
+        const ctx = makeCtx(charId, []);
+        await applyAssistantPostProcessing(`睡不着，陪你聊会儿。\n${tag}`, {
+            ...ctx,
+            spokenAt: yesterday.getTime(),
+        });
+
+        const today = await DB.getDailySchedule(charId, todayKey);
+        expect(today?.slots[1].activity).toBe('睡觉');
+    });
+
+    it('不传 spokenAt（本地聊天）→ 按现在判，照常落库', async () => {
+        const charId = 'c-spoken-at-live';
+        const now = new Date();
+        const todayKey = await seedSchedule(charId, now);
+
+        const ctx = makeCtx(charId, []);
+        await applyAssistantPostProcessing(`那今晚不睡了。\n${tag}`, ctx);
+
+        const today = await DB.getDailySchedule(charId, todayKey);
+        // 22:00 之前跑：那条是未来，可改；22:00 之后跑：那条是当前时段，也可改。
+        expect(today?.slots[1].activity).toBe('陪你聊天');
+    });
+
+    // 隔夜补收整批不落，是日历日门槛按设计工作，不是失败。走告知通道的话，用户会收到
+    // 一条红色的「没能改上」，而送达其实成功了；主动消息那侧还会把它记进「送达失败」，
+    // 指标从此混着一堆正常结果。
+    it('隔夜那批不落地时不走告知通道（那不是失败）', async () => {
+        const charId = 'c-spoken-at-crossday-silent';
+        const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        await seedSchedule(charId, new Date());
+        await seedSchedule(charId, yesterday);
+
+        const ctx = makeCtx(charId, []);
+        const notifyScheduleChangeFailed = vi.fn();
+        await applyAssistantPostProcessing(`睡不着，陪你聊会儿。\n${tag}`, {
+            ...ctx,
+            spokenAt: yesterday.getTime(),
+            hooks: { ...ctx.hooks, notifyScheduleChangeFailed },
+        });
+
+        expect(notifyScheduleChangeFailed).not.toHaveBeenCalled();
+        expect(ctx.hooks.addToast).not.toHaveBeenCalled();
+    });
+
+    // 反向守卫：真没落地（今天的表里没有对得上的时段）照旧要说，而且要把具体原因
+    // 带出去——那个 note 是界面上那句话的来源，吞掉的话三种原因会塌成同一句。
+    it('今天的表里没有对得上的时段时，带着原因走告知通道', async () => {
+        const charId = 'c-spoken-at-noslot';
+        await seedSchedule(charId, new Date());
+
+        const ctx = makeCtx(charId, []);
+        const notifyScheduleChangeFailed = vi.fn();
+        await applyAssistantPostProcessing(
+            '换个时间。\n[[ACTION:CHANGE_SCHEDULE | 03:15 | 陪你聊天]]',
+            { ...ctx, hooks: { ...ctx.hooks, notifyScheduleChangeFailed } },
+        );
+
+        expect(notifyScheduleChangeFailed).toHaveBeenCalledTimes(1);
+        expect(notifyScheduleChangeFailed.mock.calls[0][0]).toContain('没有找到对得上的时段');
+    });
+});
+

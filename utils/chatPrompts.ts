@@ -501,13 +501,20 @@ ${groupLogStr}\n`;
 
         // 2a. 日程注入（完整今日日程 + 当前时段 + 意识流独白，每轮都可能变）
         //     fire_pack 不烤：改由 worker 到点用 AMSG_SLOT_SCENE 现挑时段（见 amsgFireScene）。
+        //     includeClock 跟着角色的「时间感知」开关走：关掉的角色不该从日程块里读到
+        //     「23:00」这种精确钟点，那是这个开关本来要挡住的东西（同上面天气块的 includeTime）。
+        //     日程本身照给——它有自己的总开关。
         if (schedule && !forFirePack) {
             try {
                 const scheduleContext = ContextBuilder.buildScheduleInjection(
                     schedule,
                     evolvedNarrative,
                     charNow,
-                    { includeFullDay: true, includeChangeInstruction: true },
+                    {
+                        includeFullDay: true,
+                        includeChangeInstruction: true,
+                        includeClock: char.timeAwarenessEnabled !== false,
+                    },
                 );
                 if (scheduleContext) volatileState += `\n${scheduleContext}\n`;
             } catch (e) {
