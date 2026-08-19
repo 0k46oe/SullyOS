@@ -1149,7 +1149,8 @@ ${sharedScene.text}${activeGroup ? buildGroupTopicContext(activeGroup) : ''}`;
             skipWorldview: sharedScene.worldviewIsShared,
             skipWorldbookIds: sharedScene.sharedWorldbookIds,
             headerOverride: `[Group Member Profile: ${member.name}]`,
-        }, { worldbookMessages: liveGroupMsgs });
+        // conversational：群聊同样是用户正在说话的场合（见 buildTimeAwarenessBlock）
+        }, { worldbookMessages: liveGroupMsgs, conversational: true });
         // Get private gap string
         const privateGapInfo = await getPrivateTimeGap(member.id);
 

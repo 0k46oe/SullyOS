@@ -11,6 +11,7 @@ import {
   handleInstantChat,
   isInstantChatTask,
 } from './instantChat';
+import { TIME_FRAMING_CONVERSATIONAL } from '../../../utils/timeFramingNote';
 
 const USER_ID = '3637dae1-1461-4444-a747-34e406f67acc';
 const TASK_UUID = '7a1f0b4c-2c9d-4a3e-8b21-9f0f3c5d7e11';
@@ -584,6 +585,23 @@ describe('buildInstantTimelyBlock', () => {
   it('写清「现在几点」，用的是角色自己的时区', () => {
     const block = buildInstantTimelyBlock({ ...base, blocks: [] });
     expect(block).toContain('2026年8月1日 周六 早晨 08:00');
+  });
+
+  // 报时后面必须跟那句语境框定，而且跟前台聊天用的是同一份常量。少了它，深夜的那行钟
+  // 就够让角色每轮往「快睡吧、明天见」上收——本地聊天治好了、云端没治的话，同一个角色
+  // 走两条路的分寸不一样，而即时对话恰恰是主路径。
+  it('报时后面跟着语境框定，跟前台聊天同一份常量', () => {
+    const block = buildInstantTimelyBlock({ ...base, blocks: [] });
+    expect(block).toContain(TIME_FRAMING_CONVERSATIONAL);
+    // 顺序也钉住：框定必须紧跟在钟点后面（贴在注意力最强的位置才起作用）。
+    expect(block.indexOf('现在是')).toBeLessThan(block.indexOf(TIME_FRAMING_CONVERSATIONAL));
+  });
+
+  it('关了时间感知时框定也一起消失（没有钟就没有要框的东西）', () => {
+    const block = buildInstantTimelyBlock({
+      ...base, timeAwarenessEnabled: false, blocks: ['\n\n【热搜】\n- 某某'],
+    });
+    expect(block).not.toContain(TIME_FRAMING_CONVERSATIONAL);
   });
 
   it('有时差时补一行「对方那边几点」，同时区不补（一份提示词里两个钟会打架）', () => {

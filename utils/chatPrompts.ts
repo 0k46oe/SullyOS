@@ -313,7 +313,9 @@ export const ChatPrompts = {
         let volatileState = `\n[System: 实时状态 (Live Context)]\n（以下是此刻的实时状态——当前时间、你正在做的事、你的情绪底色、周边动态。你的人设与聊天规则见最上方的系统设定，此处不再重复。）\n\n`;
         volatileState += ContextBuilder.buildVolatileCoreState(char, {
             includeDetailedMemories: true,
-            timeOptions: { skipTimeAwareness: forFirePack || timelyByWorker },
+            // conversational：私聊是真的有人在这个点跟角色说话，时间块才补那句语境框定
+            // （见 ContextBuilder.buildTimeAwarenessBlock）。生成器类调用不给，默认就没有。
+            timeOptions: { skipTimeAwareness: forFirePack || timelyByWorker, conversational: true },
         });
 
         // ── 并发发起所有独立的异步取数（网络 + IndexedDB），下面按原顺序拼接 ──

@@ -1978,7 +1978,8 @@ ${sentencePlan}`;
       ? buildCallPrompt(
           userName,
           selectedChar.name,
-          ContextBuilder.buildCoreContext(selectedChar, userProfile, true),
+          // conversational：通话是实时对话，时间块补那句语境框定（见 buildTimeAwarenessBlock）
+          ContextBuilder.buildCoreContext(selectedChar, userProfile, true, undefined, undefined, { conversational: true }),
           voiceLang || undefined,
           callMode,
           resolveCharTimeZone(selectedChar),
