@@ -202,7 +202,15 @@ export type RoundDecision =
   | { decision: 'tool-request'; toolCalls: ToolCall[] }
   | { decision: 'finish'; pushPayloads: Array<Record<string, unknown>> }
   /** reason 直接进 last_skip，面板照实告诉用户那次为什么没响。 */
-  | { decision: 'skip-push'; reason: 'empty-generation' | 'side-effects-only' };
+  | {
+      decision: 'skip-push';
+      reason: 'empty-generation' | 'side-effects-only';
+      /**
+       * 这一轮被整条丢掉、但仍要送到客户端的日程改动（没有就没有这个字段）。
+       * 别的副作用丢了就丢了，日程不行——理由见下面 skip-push 那处的注释。
+       */
+      scheduleChanges?: Array<{ startTime: string; activity: string }>;
+    };
 
 /** 本轮的通用 MCP 识别输入（没配 MCP 的角色不传，行为与改动前完全一致）。 */
 export interface McpRoundInput {
@@ -435,7 +443,19 @@ export function processLLMRound(
     // 只有副作用标签、没有正文时同样放弃：角色一个字没说却在小红书点了赞、写了日记，
     // 用户看到的是「ta 什么都没说但做了事」，本身就穿帮。后台产生的副作用该等客户端
     // 上线时主动拉，不塞进一条没内容的推送里（amsg-sw README 里也是这个结论）。
-    return { decision: 'skip-push', reason: finishMeta ? 'side-effects-only' : 'empty-generation' };
+    //
+    // 日程改动是这条规矩里唯一的例外，单拎出来交给调用方走 emitResult。它不是做给用户
+    // 看的动作，是角色在纠正自己的表：一起丢掉的话，下一次 fire 读到的还是那条旧安排，
+    // 角色会反复想改又反复改不掉，用户那边则永远看到表和角色说的话对不上。emitResult
+    // 落的是服务端收件箱，不占聊天正文，也不用为它硬发一条空推送。
+    const scheduleChanges = directives
+      .filter((d): d is Extract<Directive, { type: 'change_schedule' }> => d.type === 'change_schedule')
+      .map((d) => ({ startTime: d.time, activity: d.activity }));
+    return {
+      decision: 'skip-push',
+      reason: finishMeta ? 'side-effects-only' : 'empty-generation',
+      ...(scheduleChanges.length > 0 ? { scheduleChanges } : {}),
+    };
   }
 
   const lastIdx = segments.length - 1;

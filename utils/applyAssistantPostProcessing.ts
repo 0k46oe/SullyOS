@@ -400,6 +400,16 @@ export interface PostProcessHooks {
     updateTokenUsage?: (data: any, msgCount: number, pass: string) => void;
     /** 给 ChatParser.parseAndExecuteActions 用的音乐钩子 */
     musicHooks?: PostProcessMusicHooks;
+    /**
+     * 日程改动没能落地时的告知出口。不传就走 addToast（本地聊天：用户正看着屏幕，
+     * 一条 toast 就够）。
+     *
+     * 主动消息路径必须传：那条路上的 addToast 是 console.log（推送随时到达，用户多半
+     * 不在看这个角色，狂弹 toast 反而更糟），于是「角色说今晚不睡了、日程卡还写着睡觉」
+     * 这件事对用户是完全无声的。那边把它接到 active-msg-process-failed 上——已有的
+     * 可见通道，自带每角色 60 秒节流。
+     */
+    notifyScheduleChangeFailed?: (note: string) => void;
 }
 
 export interface PostProcessCtx {
@@ -411,6 +421,14 @@ export interface PostProcessCtx {
     realtimeConfig?: RealtimeConfig;
     /** 日程被角色改写后刷新主动消息 fire_pack；旧调用方可不传。 */
     groups?: GroupProfile[];
+    /**
+     * 这段话**说出口**的时刻（ms）。只有日程改动用得上：它要按角色说这句话的那一刻
+     * 判「哪条时段还能改」，而不是按处理它的这一刻。本地聊天两者差几秒、不用传；
+     * 主动消息路径必须传 push 的 sentAt——用户隔夜才打开 App 时，昨晚那句
+     * 「22:00 改成陪你聊天」不该落到今天的 22:00 上（scheduleChange 那边还有一道
+     * 日历日门槛兜底，隔天的整批丢弃）。
+     */
+    spokenAt?: number;
     /** 上下文消息窗 — 用来匹配 quote 目标 */
     contextMsgs: Message[];
     /** 发给 API 的完整 messages 数组 — 2nd-pass LLM 调用要带上 */
@@ -491,6 +509,7 @@ export async function applyAssistantPostProcessing(
         emojis,
         realtimeConfig,
         groups,
+        spokenAt,
         contextMsgs,
         fullMessages,
         initialData,
@@ -517,6 +536,7 @@ export async function applyAssistantPostProcessing(
     const {
         setMessages,
         addToast,
+        notifyScheduleChangeFailed,
         setRecallStatus = () => {},
         setSearchStatus = () => {},
         setDiaryStatus = () => {},
@@ -590,22 +610,49 @@ export async function applyAssistantPostProcessing(
     let data: any = initialData;
 
     let scheduleFailureNotified = false;
-    const consumeScheduleChanges = async (content: string): Promise<string> => {
-        const result = await applyAssistantScheduleChanges(content, char);
+    // 这句话**说出口**的时刻。本地聊天没传就是「现在」；主动消息传 push 的 sentAt。
+    const utteranceAt = typeof spokenAt === 'number' && Number.isFinite(spokenAt)
+        ? new Date(spokenAt)
+        : new Date();
+    /**
+     * `at` 是这段文字说出口的时刻，由调用处按来源给：首轮正文用 utteranceAt，二轮
+     * LLM 产出的那段用「现在」——它是刚刚生成的，跟原始那句话隔着几次工具往返，
+     * 拿旧钟去判会把新写的日程改动当成隔夜的整批丢掉。
+     */
+    const consumeScheduleChanges = async (content: string, at: Date): Promise<string> => {
+        const result = await applyAssistantScheduleChanges(content, char, at);
         if (result.changes.length > 0 && result.schedule) {
-            if (realtimeConfig) {
-                // 本地聊天直接复用 caller 的 groups；主动消息路径只在真的改了日程时读一次，
-                // 不给每一条普通 push 平添 IndexedDB 查询和新的失败点。
-                const syncGroups = groups ?? await DB.getGroups().catch(() => undefined);
-                if (syncGroups) markAmsgStateDirty({ char, userProfile, groups: syncGroups, realtimeConfig });
-            }
+            // 本地聊天直接复用 caller 的 groups；主动消息路径只在真的改了日程时读一次，
+            // 不给每一条普通 push 平添 IndexedDB 查询和新的失败点。
+            const syncGroups = groups ?? await DB.getGroups().catch(() => undefined);
+            // realtimeConfig 缺席也照打脏：快照里它本来就是可选的，而「没开过实时设置」
+            // 就是默认状态（localStorage 里压根没这个键）。少打这一次脏，云端 fire_pack
+            // 会一直留着旧日程，下一次主动消息还在念角色刚说过不做的那件事。
+            if (syncGroups) markAmsgStateDirty({ char, userProfile, groups: syncGroups, realtimeConfig });
             announceScheduleChanges(char.id, result.schedule, result.changes);
         }
         if (!scheduleFailureNotified
             && result.changes.length === 0
             && (result.malformedCount > 0 || result.rejectedCount > 0)) {
             scheduleFailureNotified = true;
-            addToast('日程修改没有匹配到未来时段，已安全跳过', 'info');
+            if (result.rejectedReason === 'cross-day') {
+                // 隔夜补收：角色昨晚说的话，今天这张表本来就不该跟着动。这是日历日门槛
+                // 按设计工作，不是失败——弹提示会让用户以为出了错，接到送达失败那条通道
+                // 上还会把「主动消息送达失败」的指标撑起来（送达其实成功了）。留一行日志
+                // 就够，界面上什么都不用说：用户看到的消息和今天的日程表本来就不矛盾。
+                console.info('[schedule-change] 这批改动是之前说的，今天的表不动', {
+                    charId: char.id,
+                    count: result.rejectedCount,
+                });
+            } else {
+                // 剩下两种才是真没落地。两种原因分开讲：一种是标签认出来了但今天的表里
+                // 没有对得上的时段，一种是标签本身就没写对，用户能做的事不一样。
+                const failureNote = result.rejectedCount > 0
+                    ? '日程修改没有找到对得上的时段，已安全跳过'
+                    : '日程修改的格式没认出来，已安全跳过';
+                if (notifyScheduleChangeFailed) notifyScheduleChangeFailed(failureNote);
+                else addToast(failureNote, 'info');
+            }
         }
         return result.cleanedText;
     };
@@ -614,7 +661,7 @@ export async function applyAssistantPostProcessing(
     let aiContent = replayedTagPrefix ? `${replayedTagPrefix}${rawAiContent}` : rawAiContent;
     aiContent = normalizeAiContent(aiContent);
     // 先于 lead-in / 二轮渲染消费：否则控制标签会作为普通气泡短暂闪给用户看。
-    aiContent = await consumeScheduleChanges(aiContent);
+    aiContent = await consumeScheduleChanges(aiContent, utteranceAt);
     // 在任何 lead-in/二轮渲染之前先剥掉仿卡片文本，防止它被 chunkText 拆成灰色普通气泡。
     const mimickedXhsShares = extractMimickedXhsShares(aiContent);
     aiContent = mimickedXhsShares.cleanedContent;
@@ -2084,7 +2131,10 @@ export async function applyAssistantPostProcessing(
 
     // 二轮 LLM 可能新产生日程标签；在统一动作解析前再消费一次。首次那条已经从 aiContent
     // 剥掉且写入幂等（同活动不重复），因此普通单轮回复不会重放副作用。
-    aiContent = await consumeScheduleChanges(aiContent);
+    //
+    // 这一段是刚刚生成的，所以按「现在」判时段，不跟着首轮那句的 spokenAt 走：两者之间
+    // 隔着 RECALL / SEARCH / XHS 几趟往返，隔夜补收的 spokenAt 会把新写的改动整批作废。
+    aiContent = await consumeScheduleChanges(aiContent, new Date());
 
     // ─── Step 3: ChatParser.parseAndExecuteActions ───
     // mcdInheritMeta 一起传下去：戳一戳 / 转账卡 / 音乐卡 / 新闻卡 / 日程系统提示 / 生活记录卡

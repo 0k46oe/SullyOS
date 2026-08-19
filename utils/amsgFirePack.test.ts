@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   AMSG_SLOT_AWAY_HINT,
   AMSG_SLOT_CURRENT_TIME,
+  AMSG_SLOT_SCENE,
   AMSG_SLOT_SELF_LOG,
   AMSG_SLOT_TASK_INSTRUCTION,
   AMSG_SLOT_TIME_SINCE_USER,
@@ -809,3 +810,43 @@ describe('fire_pack v7 的 chat 段', () => {
   });
 });
 
+// 「此刻在做什么」那一段的钟点跟着角色的「时间感知」开关走。开关的值 worker 从
+// tool_pack.timeAwarenessEnabled 读（与今日节日同源），经 renderFirePack 透传到
+// renderFireSceneBlock。断的是「透传」这一环：渲染本身在 amsgFireScene.test.ts 里钉过。
+describe('renderFirePack — 把 includeClock 透传给场景块', () => {
+  const scenePack: AmsgFirePack = {
+    v: FIRE_PACK_VERSION,
+    builtAt: 1_700_000_000_000,
+    pendingTasks: [],
+    selfScheduleEnabled: true,
+    template: AMSG_SLOT_SCENE,
+    lastUserMessageAt: null,
+    tzId: 'Asia/Shanghai',
+    userTzId: 'Asia/Shanghai',
+    targetName: '小明同学',
+    scene: {
+      charId: 'char-clock',
+      dateKey: '2026-08-02',
+      schedule: {
+        slots: [
+          { startTime: '08:00', activity: '起床做早饭' },
+          { startTime: '22:00', activity: '睡觉' },
+        ],
+      },
+      songPool: [],
+    },
+  } as AmsgFirePack;
+
+  /** 2026-08-02 上海 23:10。 */
+  const at = Date.UTC(2026, 7, 2, 23 - 8, 10);
+
+  it('不传时照常报钟点（老行为）', () => {
+    expect(renderFirePack(scenePack, at, '指令')).toContain('当前时段：22:00 你正在睡觉');
+  });
+
+  it('includeClock=false 时钟点消失，活动还在', () => {
+    const out = renderFirePack(scenePack, at, '指令', { includeClock: false });
+    expect(out).toContain('你正在睡觉');
+    expect(out).not.toContain('22:00');
+  });
+});

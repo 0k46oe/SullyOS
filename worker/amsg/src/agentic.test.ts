@@ -202,6 +202,28 @@ describe('processLLMRound — 无正文边界', () => {
     expect(decision.reason).toBe('side-effects-only');
   });
 
+  // 日程改动是「没正文就整条丢」这条规矩里的唯一例外：它不是做给用户看的动作，是角色
+  // 在纠正自己的表。一起丢掉的话，下一次 fire 读到的还是那条旧安排，角色会反复想改又
+  // 反复改不掉。所以照旧不发推送，但把改动带出来交给调用方走 emitResult。
+  it('只有日程改动、没有正文：仍然不发推送，但把改动带出来', () => {
+    const decision = processLLMRound(
+      createFireSessionState(),
+      '[[ACTION:CHANGE_SCHEDULE | 22:00 | 陪你聊天]]',
+      build,
+    );
+    expect(decision.decision).toBe('skip-push');
+    if (decision.decision !== 'skip-push') return;
+    expect(decision.reason).toBe('side-effects-only');
+    expect(decision.scheduleChanges).toEqual([{ startTime: '22:00', activity: '陪你聊天' }]);
+  });
+
+  it('没有日程改动时不带这个字段（别让调用方对着空数组白跑一趟）', () => {
+    const decision = processLLMRound(createFireSessionState(), '[[ACTION:POKE]]', build);
+    expect(decision.decision).toBe('skip-push');
+    if (decision.decision !== 'skip-push') return;
+    expect(decision.scheduleChanges).toBeUndefined();
+  });
+
   it('既没正文也没副作用：整条不发，记 empty-generation', () => {
     const decision = processLLMRound(createFireSessionState(), '', build);
     expect(decision.decision).toBe('skip-push');

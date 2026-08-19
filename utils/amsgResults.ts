@@ -16,6 +16,7 @@
  */
 
 import { PLATE_CONSOLIDATE_RESULT_KIND } from './amsgPlateJob';
+import { SCHEDULE_CHANGE_RESULT_KIND } from './amsgScheduleResult';
 
 const HEADER = '[amsg2:result]';
 
@@ -108,6 +109,10 @@ const dispatchOne = async (payload: unknown, context?: AmsgResultContext): Promi
       case PLATE_CONSOLIDATE_RESULT_KIND: {
         const { applyPlateConsolidateResult } = await import('./memoryPalace/roomPlateCloud');
         return await applyPlateConsolidateResult(payload, context);
+      }
+      case SCHEDULE_CHANGE_RESULT_KIND: {
+        const { applyScheduleChangeResult } = await import('./amsgScheduleResultApply');
+        return await applyScheduleChangeResult(payload, context);
       }
       default:
         // 认不出来的多半是**前端比 worker 旧**：worker 可以脱开前端单独更新（fork 的

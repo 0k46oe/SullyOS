@@ -155,6 +155,7 @@ import {
   NOTIFICATION_SILENT_WHEN_VISIBLE,
   type InstantTickNamespace,
 } from './instantChat';
+import { buildScheduleChangeResult } from '../../../utils/amsgScheduleResult';
 import type { ActiveMsg2TaskRecord } from '../../../types';
 import { createHybridPushTransport, isFcmConfigured, type NativeFcmEnv } from './nativeFcm';
 
@@ -1987,6 +1988,9 @@ export const amsgHooks = {
       selfLog,
       taskListBlock,
       realtimeWorldBlock,
+      // 「此刻在做什么」里的钟点跟今日节日同一个开关：关掉时间感知的角色不该从日程块
+      // 读到「23:00」——那正是这个开关要挡的东西。日程内容本身照给。
+      includeClock: toolPack.timeAwarenessEnabled,
     }) + mcpBlock + scheduleBlock;
     return {
       messages: [{ role: 'user' as const, content: prompt }],
@@ -2121,6 +2125,42 @@ export const amsgHooks = {
     }
 
     if (decision.decision === 'skip-push') {
+      // 这一轮没有正文，所以整条不发；但角色顺手改的日程要送到客户端去，不然它下一次
+      // 读到的还是那条旧安排（见 agentic.ts 里 skip-push 那处注释）。走 emitResult：
+      // 落服务端收件箱，客户端下次拉 outbox 一定拿得到，不用为它硬发一条空推送。
+      //
+      // 老部署上 emitResult 整个方法不存在（amsg-server 2.6.0-next.21 才有），那种情况
+      // 只留一行日志——没有这条通道时，丢掉仍然比发一条空白横幅强。
+      if (decision.scheduleChanges?.length) {
+        if (typeof ctx.emitResult === 'function') {
+          try {
+            await ctx.emitResult({
+              ...buildScheduleChangeResult({
+                charId: stash.charId,
+                // 说出口的时刻用真实的此刻：模型刚照着本次 fire 的那个钟写完这批改动，
+                // 客户端也该照着同一个钟判「隔天了没有」。名义时刻 occurrenceMs 在这里
+                // 不能用——cron 延迟或者重试梯子把 23:50 的任务拖到 00:05 才跑时，两者
+                // 会分处两个日历日，整批改动会被客户端的隔天闸白白丢掉。取值跟同一段里的
+                // skippedAt、以及 self_log 的 entry.at 一致（fire ctx 上那个 now 只在
+                // onBeforeFire 里拿得到，每轮的 sessionCtx 没有这个字段）。
+                spokenAt: Date.now(),
+                directives: decision.scheduleChanges,
+              }),
+              // 角色一个字都没说，这一轮本来就不该惊动用户。show:false 的 payload 上游
+              // 只落收件箱、不发推送——既不会弹出一条空白横幅，也不占推送配额（订阅是
+              // 按 userVisibleOnly 建的，收了不弹浏览器要记账）。
+              notification: { show: false },
+            });
+          } catch (error) {
+            console.warn('[amsg:schedule-change] 日程改动没能送出去（这一轮的改动丢了）', error);
+          }
+        } else {
+          console.warn('[amsg:schedule-change] 这台 Worker 还没有 emitResult，日程改动没处送', {
+            sessionId: ctx.sessionId,
+            changes: decision.scheduleChanges.length,
+          });
+        }
+      }
       // ⑤ 没发出去也留痕：模型返回空/纯拒答、或者只做了副作用没说话时，上游把任务
       // 当成功消费，用户看到的就是「说好的消息凭空消失」。写一条 last_skip，面板能
       // 照实解释是哪种。best-effort，写不进去不影响 skip 本身。

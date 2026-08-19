@@ -2026,18 +2026,24 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       // 同一角色 60 秒内只提示一次，避免多条重试同时刷屏。
       const inboxFailToastAt: Record<string, number> = {};
       const inboxFailHandler = (e: Event) => {
-          const { charId, charName, kind } = ((e as CustomEvent).detail || {}) as
-              { charId?: string; charName?: string; kind?: 'retrying' | 'degraded' | 'swallowed' };
+          const { charId, charName, kind, note } = ((e as CustomEvent).detail || {}) as
+              { charId?: string; charName?: string; kind?: 'retrying' | 'degraded' | 'swallowed' | 'schedule-missed'; note?: string };
           if (!charId) return;
           const now = Date.now();
           if (now - (inboxFailToastAt[charId] || 0) < 60_000) return;
           inboxFailToastAt[charId] = now;
           const who = charName || '角色';
-          const text = kind === 'degraded'
-              ? `${who}有一条消息没能正常处理，已按原文显示（表情、卡片这些可能不完整）`
-              : kind === 'swallowed'
-                  ? `${who}有一条定时消息被跳过了：本地存储异常，判不出发出来会不会打断你们当前的对话`
-                  : `${who}有一条消息暂时没能显示，稍后会自动重试`;
+          // note 是发起方按具体原因写好的那句话（同一个 kind 底下可能有好几种情况），
+          // 有就用它，没有才回落到按 kind 分的通用文案。
+          const text = note
+              ? `${who}：${note}`
+              : kind === 'degraded'
+                  ? `${who}有一条消息没能正常处理，已按原文显示（表情、卡片这些可能不完整）`
+                  : kind === 'swallowed'
+                      ? `${who}有一条定时消息被跳过了：本地存储异常，判不出发出来会不会打断你们当前的对话`
+                      : kind === 'schedule-missed'
+                          ? `${who}想改今天的日程但没能改上，日程表还是原来的安排`
+                          : `${who}有一条消息暂时没能显示，稍后会自动重试`;
           addToast(text, 'error');
       };
 

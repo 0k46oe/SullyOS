@@ -25,6 +25,7 @@ import {
   formatFireTimeFull,
   type AmsgTzRef,
 } from '../../../utils/amsgFirePack';
+import { TIME_FRAMING_CONVERSATIONAL } from '../../../utils/timeFramingNote';
 
 // ─── 时间参数 ───
 
@@ -80,6 +81,11 @@ export const buildInstantTimelyBlock = (args: {
     ? [
         '【此刻的系统信息·仅你可见】',
         `现在是 ${formatFireTimeFull(args.nowMs, args.tz)}。`,
+        // 报时后面跟那句语境框定，跟前台聊天引的是同一份常量。这一轮是用户刚按下发送、
+        // 正等着回复，所以「对方还在跟你说话」是真的；少了它，深夜的那行钟就够让角色
+        // 每轮都往「快睡吧、明天见」上收——本地那条路修好了、云端没修的话，同一个角色
+        // 在两条路上的分寸会不一样。
+        TIME_FRAMING_CONVERSATIONAL,
         // buildUserClockHint 自带前导换行，没时差时返回空串。
         buildUserClockHint(args.nowMs, args.tz, { tzId: args.userTzId }, args.targetName),
       ].join('\n')

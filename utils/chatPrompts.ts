@@ -313,7 +313,9 @@ export const ChatPrompts = {
         let volatileState = `\n[System: 实时状态 (Live Context)]\n（以下是此刻的实时状态——当前时间、你正在做的事、你的情绪底色、周边动态。你的人设与聊天规则见最上方的系统设定，此处不再重复。）\n\n`;
         volatileState += ContextBuilder.buildVolatileCoreState(char, {
             includeDetailedMemories: true,
-            timeOptions: { skipTimeAwareness: forFirePack || timelyByWorker },
+            // conversational：私聊是真的有人在这个点跟角色说话，时间块才补那句语境框定
+            // （见 ContextBuilder.buildTimeAwarenessBlock）。生成器类调用不给，默认就没有。
+            timeOptions: { skipTimeAwareness: forFirePack || timelyByWorker, conversational: true },
         });
 
         // ── 并发发起所有独立的异步取数（网络 + IndexedDB），下面按原顺序拼接 ──
@@ -499,13 +501,20 @@ ${groupLogStr}\n`;
 
         // 2a. 日程注入（完整今日日程 + 当前时段 + 意识流独白，每轮都可能变）
         //     fire_pack 不烤：改由 worker 到点用 AMSG_SLOT_SCENE 现挑时段（见 amsgFireScene）。
+        //     includeClock 跟着角色的「时间感知」开关走：关掉的角色不该从日程块里读到
+        //     「23:00」这种精确钟点，那是这个开关本来要挡住的东西（同上面天气块的 includeTime）。
+        //     日程本身照给——它有自己的总开关。
         if (schedule && !forFirePack) {
             try {
                 const scheduleContext = ContextBuilder.buildScheduleInjection(
                     schedule,
                     evolvedNarrative,
                     charNow,
-                    { includeFullDay: true, includeChangeInstruction: true },
+                    {
+                        includeFullDay: true,
+                        includeChangeInstruction: true,
+                        includeClock: char.timeAwarenessEnabled !== false,
+                    },
                 );
                 if (scheduleContext) volatileState += `\n${scheduleContext}\n`;
             } catch (e) {

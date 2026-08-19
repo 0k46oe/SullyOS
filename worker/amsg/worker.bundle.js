@@ -6770,7 +6770,7 @@ function createSingleUserCloudflareWorker(buildConfig, options = {}) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-08-18";
+var AMSG_BUNDLE_VERSION = "2026-08-19";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -7111,17 +7111,22 @@ var resolveScheduleSlots = (schedule, now) => {
 var buildScheduleInjection = (schedule, evolvedNarrative, now = /* @__PURE__ */ new Date(), options = {}) => {
   if (!schedule || !schedule.slots || schedule.slots.length === 0) return "";
   const { current: currentSlot, next: nextSlot } = resolveScheduleSlots(schedule, now);
+  const withClock = options.includeClock !== false;
+  const withTime = (text, startTime) => withClock ? `${text}\uFF08${startTime}\uFF09` : text;
   const isPreDawnCarryOver = !currentSlot && now.getHours() < PRE_DAWN_END_HOUR;
   let slotHeader = "";
   if (currentSlot) {
-    slotHeader = `\u5F53\u524D\u65F6\u6BB5\uFF1A${currentSlot.startTime} \u4F60\u6B63\u5728${currentSlot.activity}`;
+    slotHeader = withClock ? `\u5F53\u524D\u65F6\u6BB5\uFF1A${currentSlot.startTime} \u4F60\u6B63\u5728${currentSlot.activity}` : `\u5F53\u524D\u65F6\u6BB5\uFF1A\u4F60\u6B63\u5728${currentSlot.activity}`;
     if (currentSlot.location) slotHeader += `\uFF08${currentSlot.location}\uFF09`;
-    if (nextSlot) slotHeader += `
-\u4E4B\u540E\u5B89\u6392\uFF1A${nextSlot.startTime} ${nextSlot.activity}`;
+    if (nextSlot) {
+      slotHeader += withClock ? `
+\u4E4B\u540E\u5B89\u6392\uFF1A${nextSlot.startTime} ${nextSlot.activity}` : `
+\u4E4B\u540E\u5B89\u6392\uFF1A${nextSlot.activity}`;
+    }
     slotHeader += "\n";
   } else if (nextSlot) {
-    slotHeader = isPreDawnCarryOver ? `\u591C\u6DF1\u4E86\uFF0C\u4ECA\u5929\u7684\u5B89\u6392\u8FD8\u6CA1\u5F00\u59CB\uFF0C\u6700\u65E9\u7684\u4E00\u4EF6\u662F${nextSlot.activity}\uFF08${nextSlot.startTime}\uFF09
-` : `\u4ECA\u5929\u8FD8\u6CA1\u5F00\u59CB\u6D3B\u52A8\uFF0C\u7A0D\u540E\u5148${nextSlot.activity}\uFF08${nextSlot.startTime}\uFF09
+    slotHeader = isPreDawnCarryOver ? `\u591C\u6DF1\u4E86\uFF0C\u4ECA\u5929\u7684\u5B89\u6392\u8FD8\u6CA1\u5F00\u59CB\uFF0C\u6700\u65E9\u7684\u4E00\u4EF6\u662F${withTime(nextSlot.activity, nextSlot.startTime)}
+` : `\u4ECA\u5929\u8FD8\u6CA1\u5F00\u59CB\u6D3B\u52A8\uFF0C\u7A0D\u540E\u5148${withTime(nextSlot.activity, nextSlot.startTime)}
 `;
   }
   let narrative = "";
@@ -7140,7 +7145,7 @@ var buildScheduleInjection = (schedule, evolvedNarrative, now = /* @__PURE__ */ 
   let out = "";
   if (options.includeFullDay) {
     const rows = schedule.slots.map((slot) => {
-      let line = `- ${slot.startTime} ${slot.activity}`;
+      let line = withClock ? `- ${slot.startTime} ${slot.activity}` : `- ${slot.activity}`;
       if (slot.location) line += `\uFF08${slot.location}\uFF09`;
       if (slot.description) line += `\uFF1A${slot.description}`;
       return line;
@@ -7153,9 +7158,11 @@ ${rows.join("\n")}
   if (narrative) {
     out += preamble + narrative + footnote;
   }
-  if (options.includeChangeInstruction && nextSlot) {
+  const changeTarget = nextSlot ?? currentSlot;
+  if (options.includeChangeInstruction && withClock && changeTarget) {
     out += `
-\u4F60\u62E5\u6709\u66F4\u6539\u672A\u6765\u65E5\u7A0B\u8BA1\u5212\u7684\u80FD\u529B\uFF1B\u9700\u8981\u65F6\u5728\u56DE\u590D\u672B\u5C3E\u5355\u72EC\u8F93\u51FA\uFF1A[[ACTION:CHANGE_SCHEDULE | ${nextSlot.startTime} | \u53BB\u8D85\u5E02]]\uFF08\u65F6\u6BB5\u5FC5\u987B\u6765\u81EA\u4E0A\u8868\u4E14\u5C1A\u672A\u5F00\u59CB\uFF09\u3002`;
+\u65E5\u7A0B\u662F\u4F60\u65E9\u4E0A\u7ED9\u81EA\u5DF1\u6392\u7684\u8BA1\u5212\uFF0C\u4E0D\u662F\u5FC5\u987B\u5C65\u884C\u7684\u547D\u4EE4\u3002\u771F\u5B9E\u53D1\u751F\u7684\u4E8B\u8DDF\u5B83\u5BF9\u4E0D\u4E0A\u65F6\uFF08\u6BD4\u5982\u8FD9\u4F1A\u513F\u8868\u4E0A\u5199\u7740\u7761\u89C9\u3001\u4F60\u5374\u9192\u7740\u5728\u8DDF\u5BF9\u65B9\u8BF4\u8BDD\uFF09\uFF0C\u628A\u5B83\u6539\u6210\u4F60\u5B9E\u9645\u5728\u505A\u7684\u4E8B\u5C31\u597D\u3002
+\u9700\u8981\u65F6\u5728\u56DE\u590D\u672B\u5C3E\u5355\u72EC\u8F93\u51FA\uFF1A[[ACTION:CHANGE_SCHEDULE | ${changeTarget.startTime} | \u53BB\u8D85\u5E02]]\uFF08\u65F6\u6BB5\u8981\u539F\u6837\u6284\u4E0A\u9762\u51FA\u73B0\u8FC7\u7684\u90A3\u51E0\u4E2A\uFF1B\u6B63\u5728\u8FDB\u884C\u7684\u8FD9\u4E00\u6761\u548C\u5B83\u4E4B\u540E\u7684\u90FD\u80FD\u6539\uFF0C\u5DF2\u7ECF\u8FC7\u53BB\u7684\u4E0D\u80FD\uFF09\u3002`;
   }
   out += "\n";
   return out;
@@ -7216,11 +7223,22 @@ var resolveFireSceneSong = (scene, nowMs, tz) => {
     scene.charId
   );
 };
-var renderFireSceneBlock = (scene, nowMs, tz) => {
+var renderFireSceneBlock = (scene, nowMs, tz, options) => {
   if (!scene?.schedule?.slots?.length) return "";
   const wallNow = nowInTimeZone(tz.tzId, new Date(nowMs));
   if (getLocalDateKey(wallNow) !== scene.dateKey) return "";
-  const scheduleText = buildScheduleInjection(scene.schedule, scene.evolvedNarrative, wallNow).trim();
+  const scheduleText = buildScheduleInjection(
+    scene.schedule,
+    scene.evolvedNarrative,
+    wallNow,
+    {
+      includeClock: options?.includeClock !== false,
+      // 到点主动开口的角色最容易撞上「表上写着睡觉、我却正在给对方发消息」，
+      // 所以这条路也要教。标签由 worker classifier 摘成 directive 随 push 回来、
+      // 客户端落库；落库按 push 的 sentAt 判时段，隔夜的整批丢弃（见 scheduleChange）。
+      includeChangeInstruction: true
+    }
+  ).trim();
   const lines = [];
   if (scheduleText) lines.push(scheduleText);
   const song = resolveFireSceneSong(scene, nowMs, tz);
@@ -7437,7 +7455,9 @@ var renderFirePack = (pack, nowMs, taskInstruction, extras) => {
     resolveMaxUnansweredSends(pack.maxUnansweredSends)
   ));
   out = fillSlot(out, AMSG_SLOT_TASK_LIST, extras?.taskListBlock ?? "");
-  out = fillSlot(out, AMSG_SLOT_SCENE, renderFireSceneBlock(pack.scene, nowMs, tz));
+  out = fillSlot(out, AMSG_SLOT_SCENE, renderFireSceneBlock(pack.scene, nowMs, tz, {
+    includeClock: extras?.includeClock !== false
+  }));
   const realtimeWorld = extras?.realtimeWorldBlock?.trim();
   out = fillSlot(out, AMSG_SLOT_REALTIME_WORLD, realtimeWorld ? `
 
@@ -8495,6 +8515,9 @@ var buildRealtimeWorldBlock = async (args) => {
   return block;
 };
 
+// utils/timeFramingNote.ts
+var TIME_FRAMING_CONVERSATIONAL = "\u65F6\u95F4\u662F\u4F60\u6B64\u523B\u6240\u5904\u7684\u80CC\u666F\uFF1A\u5B83\u4F1A\u6E17\u8FDB\u4F60\u7684\u8BED\u6C14\u3001\u4F60\u7684\u72B6\u6001\u3001\u4F60\u987A\u53E3\u63D0\u8D77\u7684\u4E8B\u3002\u81F3\u4E8E\u8FD9\u6BB5\u8BDD\u804A\u5230\u54EA\u513F\u3001\u8981\u4E0D\u8981\u7EE7\u7EED\uFF0C\u8DDF\u7740\u4F60\u4EEC\u6B63\u5728\u8BF4\u7684\u4E8B\u60C5\u8D70\u2014\u2014\u8BDD\u9898\u81EA\u5DF1\u4F1A\u8D70\u5230\u8BE5\u7ED3\u675F\u7684\u5730\u65B9\u3002\u5BF9\u65B9\u5728\u8FD9\u4E2A\u70B9\u8FD8\u5728\u8DDF\u4F60\u8BF4\u8BDD\uFF0C\u672C\u8EAB\u5C31\u662F ta \u7684\u9009\u62E9\u3002";
+
 // worker/amsg/src/instantChat.ts
 var INSTANT_TOTAL_TIMEOUT_MS = 6e5;
 var AMSG_INSTANT_CHAT_FLAG = "amsgInstantChat";
@@ -8505,6 +8528,11 @@ var buildInstantTimelyBlock = (args) => {
   const head = args.timeAwarenessEnabled ? [
     "\u3010\u6B64\u523B\u7684\u7CFB\u7EDF\u4FE1\u606F\xB7\u4EC5\u4F60\u53EF\u89C1\u3011",
     `\u73B0\u5728\u662F ${formatFireTimeFull(args.nowMs, args.tz)}\u3002`,
+    // 报时后面跟那句语境框定，跟前台聊天引的是同一份常量。这一轮是用户刚按下发送、
+    // 正等着回复，所以「对方还在跟你说话」是真的；少了它，深夜的那行钟就够让角色
+    // 每轮都往「快睡吧、明天见」上收——本地那条路修好了、云端没修的话，同一个角色
+    // 在两条路上的分寸会不一样。
+    TIME_FRAMING_CONVERSATIONAL,
     // buildUserClockHint 自带前导换行，没时差时返回空串。
     buildUserClockHint(args.nowMs, args.tz, { tzId: args.userTzId }, args.targetName)
   ].join("\n") : "\u3010\u6B64\u523B\u7684\u7CFB\u7EDF\u4FE1\u606F\xB7\u4EC5\u4F60\u53EF\u89C1\u3011";
@@ -11722,6 +11750,60 @@ function extractTransferCommands(content) {
   };
 }
 
+// utils/scheduleChangeParse.ts
+var KEYWORD_RE = /^\s*(?:ACTION\s*[:：]\s*CHANGE_SCHEDULE|change[\s_-]*(?:schedule|schedue)|modify[\s_-]*schedule|修改(?:未来)?日程|更改(?:未来)?日程|改日程)(?=\s|[:：|=→>\-（(]|\d|$)/iu;
+var parseDirectiveBody = (input) => {
+  const body = input.replace(/^[\s【\[]+|[\s】\]]+$/gu, "").trim();
+  const keyword = body.match(KEYWORD_RE);
+  if (!keyword) return { recognized: false };
+  const rest = body.slice(keyword[0].length).replace(/^\s*[:：|=→>\-]+\s*/u, "");
+  const time = rest.match(/[（(]?\s*(\d{1,2})\s*(?:[:：点时])\s*(\d{1,2})?\s*(?:分)?\s*[）)]?/u);
+  if (!time || time.index == null) return { recognized: true, directive: null };
+  const hour = Number(time[1]);
+  const minute = time[2] == null || time[2] === "" ? 0 : Number(time[2]);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return { recognized: true, directive: null };
+  }
+  const activity = rest.slice(time.index + time[0].length).replace(/^\s*(?:[:：|=→>\-]+)\s*/u, "").replace(/[】\]]+\s*$/gu, "").trim();
+  if (!activity) return { recognized: true, directive: null };
+  return {
+    recognized: true,
+    directive: {
+      startTime: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`,
+      // 日程卡本来就是短标题；截断异常长输出，避免一条标签撑坏 UI / prompt。
+      activity: activity.slice(0, 120)
+    }
+  };
+};
+var extractScheduleChangeDirectives = (text) => {
+  const directives = [];
+  let malformedCount = 0;
+  const consumeBody = (body, original) => {
+    const parsed = parseDirectiveBody(body);
+    if (!parsed.recognized) return original;
+    if (parsed.directive) directives.push(parsed.directive);
+    else malformedCount += 1;
+    return "";
+  };
+  let cleanedText = (text || "").replace(
+    /(?:【{1,2}|\[{1,2})([^【】\[\]\r\n]{1,360})(?:】{1,2}|\]{1,2})/gu,
+    (whole, body) => consumeBody(body ?? "", whole)
+  );
+  cleanedText = cleanedText.replace(
+    /^[ \t]*(?:【【?|\[\[?)?[ \t]*(?:ACTION[ \t]*[:：][ \t]*CHANGE_SCHEDULE|change[ \t_-]*(?:schedule|schedue)|modify[ \t_-]*schedule|修改(?:未来)?日程|更改(?:未来)?日程|改日程)[ \t]*[:：|]?[^\r\n]{0,360}/gimu,
+    (whole) => consumeBody(whole, whole)
+  );
+  const recognizedSomething = directives.length > 0 || malformedCount > 0;
+  if (!recognizedSomething) {
+    return { cleanedText: text || "", directives, malformedCount };
+  }
+  return {
+    cleanedText: cleanedText.replace(/[ \t]+\r?\n/gu, "\n").replace(/\n{3,}/gu, "\n\n").trim(),
+    directives,
+    malformedCount
+  };
+};
+
 // worker/instant-push/src/classifier.ts
 var DATA_TAGS = [
   // [[RECALL: 2024-05]] / [[RECALL: 2024年5]]
@@ -11941,8 +12023,13 @@ function classifyLLMOutput(text) {
       directives.push({ type: "transfer_return" });
     }
   }
+  const scheduleParsed = extractScheduleChangeDirectives(textAfterTransfers);
+  const textAfterSchedule = scheduleParsed.cleanedText;
+  for (const d of scheduleParsed.directives) {
+    directives.push({ type: "change_schedule", time: d.startTime, activity: d.activity });
+  }
   for (const spec of SIDE_EFFECT_TAGS) {
-    const matches = Array.from(textAfterTransfers.matchAll(spec.re));
+    const matches = Array.from(textAfterSchedule.matchAll(spec.re));
     for (const m of matches) {
       const d = spec.toDirective(m);
       if (d) directives.push(d);
@@ -11959,7 +12046,7 @@ function classifyLLMOutput(text) {
     seenDirectives.add(key);
     dedupedDirectives.push(d);
   }
-  let cleanedText = textAfterTransfers;
+  let cleanedText = textAfterSchedule;
   for (const spec of DATA_TAGS) cleanedText = cleanedText.replace(spec.re, "");
   for (const spec of SIDE_EFFECT_TAGS) cleanedText = cleanedText.replace(spec.re, "");
   cleanedText = cleanedText.trim();
@@ -12091,7 +12178,12 @@ function processLLMRound(state, llmOutputText, build, mcp, schedule, iteration) 
   const finishMeta = directives.length > 0 ? { directives, ...xhsSession ? { xhsSession } : {} } : void 0;
   const segments = sanitizeIntoSegments(cleanedText);
   if (segments.length === 0) {
-    return { decision: "skip-push", reason: finishMeta ? "side-effects-only" : "empty-generation" };
+    const scheduleChanges = directives.filter((d) => d.type === "change_schedule").map((d) => ({ startTime: d.time, activity: d.activity }));
+    return {
+      decision: "skip-push",
+      reason: finishMeta ? "side-effects-only" : "empty-generation",
+      ...scheduleChanges.length > 0 ? { scheduleChanges } : {}
+    };
   }
   const lastIdx = segments.length - 1;
   return {
@@ -12248,6 +12340,18 @@ var takeEmotionEvalSpec = (metadata) => {
 };
 var EMOTION_EVAL_RIDE_ALONG_MS = 1e4;
 var runAmsgEmotionEval = async (spec, api, chatMessages, charName, timeoutMs = EMOTION_EVAL_TIMEOUT_MS) => requestEmotionEval(api, restoreEvalPrompt(spec.prompt, chatMessages, charName), timeoutMs);
+
+// utils/amsgScheduleResult.ts
+var SCHEDULE_CHANGE_RESULT_KIND = "schedule-change";
+function buildScheduleChangeResult(args) {
+  return {
+    resultKind: SCHEDULE_CHANGE_RESULT_KIND,
+    v: 1,
+    charId: args.charId,
+    spokenAt: args.spokenAt,
+    directives: args.directives.map((d) => ({ startTime: d.startTime, activity: d.activity }))
+  };
+}
 
 // worker/amsg/src/nativeFcm.ts
 var accessTokenCache = null;
@@ -13223,7 +13327,10 @@ var amsgHooks = {
     const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, {
       selfLog,
       taskListBlock,
-      realtimeWorldBlock
+      realtimeWorldBlock,
+      // 「此刻在做什么」里的钟点跟今日节日同一个开关：关掉时间感知的角色不该从日程块
+      // 读到「23:00」——那正是这个开关要挡的东西。日程内容本身照给。
+      includeClock: toolPack.timeAwarenessEnabled
     }) + mcpBlock + scheduleBlock;
     return {
       messages: [{ role: "user", content: prompt }],
@@ -13310,6 +13417,36 @@ var amsgHooks = {
       });
     }
     if (decision.decision === "skip-push") {
+      if (decision.scheduleChanges?.length) {
+        if (typeof ctx.emitResult === "function") {
+          try {
+            await ctx.emitResult({
+              ...buildScheduleChangeResult({
+                charId: stash.charId,
+                // 说出口的时刻用真实的此刻：模型刚照着本次 fire 的那个钟写完这批改动，
+                // 客户端也该照着同一个钟判「隔天了没有」。名义时刻 occurrenceMs 在这里
+                // 不能用——cron 延迟或者重试梯子把 23:50 的任务拖到 00:05 才跑时，两者
+                // 会分处两个日历日，整批改动会被客户端的隔天闸白白丢掉。取值跟同一段里的
+                // skippedAt、以及 self_log 的 entry.at 一致（fire ctx 上那个 now 只在
+                // onBeforeFire 里拿得到，每轮的 sessionCtx 没有这个字段）。
+                spokenAt: Date.now(),
+                directives: decision.scheduleChanges
+              }),
+              // 角色一个字都没说，这一轮本来就不该惊动用户。show:false 的 payload 上游
+              // 只落收件箱、不发推送——既不会弹出一条空白横幅，也不占推送配额（订阅是
+              // 按 userVisibleOnly 建的，收了不弹浏览器要记账）。
+              notification: { show: false }
+            });
+          } catch (error) {
+            console.warn("[amsg:schedule-change] \u65E5\u7A0B\u6539\u52A8\u6CA1\u80FD\u9001\u51FA\u53BB\uFF08\u8FD9\u4E00\u8F6E\u7684\u6539\u52A8\u4E22\u4E86\uFF09", error);
+          }
+        } else {
+          console.warn("[amsg:schedule-change] \u8FD9\u53F0 Worker \u8FD8\u6CA1\u6709 emitResult\uFF0C\u65E5\u7A0B\u6539\u52A8\u6CA1\u5904\u9001", {
+            sessionId: ctx.sessionId,
+            changes: decision.scheduleChanges.length
+          });
+        }
+      }
       await writeLastSkip(ctx.writeState, stash.charId, {
         v: 1,
         taskUuid: stash.taskUuid,
