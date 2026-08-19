@@ -17,6 +17,7 @@ const SCALE = {
     maxMemoryCount: 1,
     maxMessageCount: 1,
     storageBytes: 0,
+    storageQuotaBytes: 1024 * 1024 * 1024,
     persistedStorage: false,
     standalone: false,
 };
@@ -360,6 +361,16 @@ describe('规模档位', () => {
         expect(a.bucketStorageBytes(1024 * MB)).toBe('1GB+');
     });
 
+    it('存储水位的档位边界', async () => {
+        const a = await loadModule(true);
+        const GB = 1024 * 1024 * 1024;
+        expect(a.bucketStorageWatermark(0, GB)).toBe('<25%');
+        expect(a.bucketStorageWatermark(0.25 * GB, GB)).toBe('25-50%');
+        expect(a.bucketStorageWatermark(0.5 * GB, GB)).toBe('50-80%');
+        expect(a.bucketStorageWatermark(0.8 * GB, GB)).toBe('80%+');
+        expect(a.bucketStorageWatermark(GB, GB)).toBe('80%+');
+    });
+
     it('每次会话最多报一次，重复调用不再发', async () => {
         installFakeDom({ withUmami: true });
         const a = await loadModule(true);
@@ -382,12 +393,13 @@ describe('规模档位', () => {
             maxMemoryCount: 388,
             maxMessageCount: 6431,
             storageBytes: 137_428_992,
+            storageQuotaBytes: 2_147_483_648,
             persistedStorage: true,
             standalone: true,
         });
 
         const payload = JSON.stringify(tracked[0][1]);
-        for (const raw of ['412', '388', '6431', '137428992']) {
+        for (const raw of ['412', '388', '6431', '137428992', '2147483648']) {
             expect(payload).not.toContain(raw);
         }
     });
@@ -413,6 +425,24 @@ describe('规模档位', () => {
         a.trackDataScaleOnce({ ...SCALE, storageBytes: null });
 
         expect(Object.keys(tracked[0][1] as object)).not.toContain('本地存储占用');
+    });
+
+    it('读不到配额上限时，水位这一项缺席', async () => {
+        installFakeDom({ withUmami: true });
+        const a = await loadModule(true);
+        a.trackDataScaleOnce({ ...SCALE, storageBytes: 100, storageQuotaBytes: null });
+
+        expect(tracked[0][1] as any).not.toHaveProperty('存储水位');
+    });
+
+    it('配额报成 0 时也缺席 —— 别拿 0 去除算出一条假的「80%+」', async () => {
+        // 隐私模式下有浏览器会回 quota: 0。除零得 Infinity，落进最高档，
+        // 结论就成了「这批人全都快满了」，正好反过来。
+        installFakeDom({ withUmami: true });
+        const a = await loadModule(true);
+        a.trackDataScaleOnce({ ...SCALE, storageBytes: 100, storageQuotaBytes: 0 });
+
+        expect(tracked[0][1] as any).not.toHaveProperty('存储水位');
     });
 
     it('全屏运行只有是/否两个值', async () => {
