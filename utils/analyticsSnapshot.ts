@@ -57,6 +57,7 @@ export async function collectDataScale(characters: CharacterProfile[]): Promise<
     maxMemoryCount: number;
     maxMessageCount: number;
     storageBytes: number | null;
+    storageQuotaBytes: number | null;
     persistedStorage: boolean | null;
     standalone: boolean;
 }> {
@@ -72,6 +73,7 @@ export async function collectDataScale(characters: CharacterProfile[]): Promise<
         maxMemoryCount: Math.max(0, ...memoryCounts),
         maxMessageCount: Math.max(0, ...messageCounts),
         storageBytes: storage.usageBytes,
+        storageQuotaBytes: storage.quotaBytes,
         persistedStorage: storage.persisted,
         // 用通用的「装成 PWA 独立窗口」判定，不只认 iOS——配合 umami 自带的
         // 系统字段，查询时就能分出 iOS 全屏、安卓全屏还是桌面装机。
