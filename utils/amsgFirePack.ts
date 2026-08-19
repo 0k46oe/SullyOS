@@ -768,13 +768,22 @@ const fillSlot = (text: string, slot: string, value: string) => text.split(slot)
  *   排程现状块、list 工具共用），同一件事不该有第二套说法。
  *   realtimeWorldBlock 到点现拉的节日 / 天气 / 热搜，见 realtimeWorldCore.renderRealtimeWorldBlock。
  *
+ * extras.includeClock 不是一块内容而是个渲染开关：角色的「时间感知」关掉时传 false，
+ * 「此刻在做什么」那段就不报钟点（见 renderFireSceneBlock）。取值与今日节日同源，
+ * 都来自 tool_pack.timeAwarenessEnabled。
+ *
  * 连发提醒长在自述块里（renderSelfLogBlock 的计数行），上限取 pack.maxUnansweredSends。
  */
 export const renderFirePack = (
   pack: AmsgFirePack,
   nowMs: number,
   taskInstruction: string,
-  extras?: { selfLog?: AmsgSelfLog | null; taskListBlock?: string; realtimeWorldBlock?: string },
+  extras?: {
+    selfLog?: AmsgSelfLog | null;
+    taskListBlock?: string;
+    realtimeWorldBlock?: string;
+    includeClock?: boolean;
+  },
 ): string => {
   const tz: AmsgTzRef = { tzId: pack.tzId };
   const currentTime = formatFireTimeFull(nowMs, tz);
@@ -795,7 +804,9 @@ export const renderFirePack = (
     extras?.selfLog ?? null, nowMs, tz, resolveMaxUnansweredSends(pack.maxUnansweredSends),
   ));
   out = fillSlot(out, AMSG_SLOT_TASK_LIST, extras?.taskListBlock ?? '');
-  out = fillSlot(out, AMSG_SLOT_SCENE, renderFireSceneBlock(pack.scene, nowMs, tz));
+  out = fillSlot(out, AMSG_SLOT_SCENE, renderFireSceneBlock(pack.scene, nowMs, tz, {
+    includeClock: extras?.includeClock !== false,
+  }));
   // 实时世界那一段是独立的一整块，前导空行在这里补：拉到东西才隔开成段，
   // 没拉到（或功能没开）填空串，输出跟没有这个槽位时一模一样。
   const realtimeWorld = extras?.realtimeWorldBlock?.trim();

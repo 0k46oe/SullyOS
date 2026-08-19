@@ -663,6 +663,9 @@ const processInboxMessageWithPostProcessing = async (
     emojis,
     categories,
     realtimeConfig,
+    // 日程改动按「角色说这句话的那一刻」判，不是按现在——这条可能在收件箱里躺了一夜，
+    // 昨晚的「22:00 改成陪你聊天」不该落到今天的 22:00 上。
+    spokenAt: message.sentAt,
     contextMsgs,
     // fullMessages / initialData: worker 不会传过来 (Phase 2 才有续跑), 二轮 LLM 又被关掉,
     // 这两个字段在 skipSecondPassLLM=true 时实际上不会被消费; 给个最小占位避免 undefined NPE。
@@ -713,6 +716,12 @@ const processInboxMessageWithPostProcessing = async (
       // 如果真要给用户可见反馈, 应该走 'active-msg-received' 那条线 (toast / 未读 / 通知)。
       addToast: (msg: string, type: 'info' | 'success' | 'error') => {
         console.log('[push:toast]', type, msg);
+      },
+      // 日程改动没落地是个例外：角色的消息里已经写着「那我今晚不睡了」，日程卡却纹丝
+      // 不动，用户看到的是两边对不上而没有任何解释。走 active-msg-process-failed——
+      // 已有的可见通道，自带每角色 60 秒节流，不会因为一串推送而狂弹。
+      notifyScheduleChangeFailed: (note: string) => {
+        notifyInboxProcessFailed(message, 'schedule-missed', note);
       },
       // musicHooks: 由 MusicProvider 注册到模块级 slot, 与 useChatAI 同一份, 见 MusicContext.loadMusicHooks.
       // slot 未填充时 (理论上 MusicProvider 未 mount, 实际单页应用不会发生) 退化为 undefined,
@@ -1427,17 +1436,27 @@ const holdUntilEarlierChunksLand = async (
  */
 const notifyInboxProcessFailed = (
   message: ActiveMsg2InboxMessage,
-  kind: 'retrying' | 'degraded' | 'swallowed',
+  kind: 'retrying' | 'degraded' | 'swallowed' | 'schedule-missed',
+  /**
+   * 给用户看的那句话，由发起方按具体原因写好。同一个 kind 底下不止一种情况
+   * （日程没落地就分「没有对得上的时段」和「格式没认出来」），这里原样带过去，
+   * 让 OSContext 讲准确的那句而不是一句盖全部的话。不传就用 kind 的默认文案。
+   */
+  note?: string,
 ) => {
   // 送达端唯一的埋点，而且只报失败：成功那条不报，免得攒出一份「谁几点收到过消息」的
   // 时间线（跟「发消息本身不打点」同一条口径，见 docs/analytics.md）。
-  // 三个代号都是这个函数入参上写死的取值，角色名 / 内容 / messageId 一概不带。
+  // 三个代号都是这个函数入参上写死的取值，角色名 / 内容 / messageId 一概不带
+  // （note 是给界面看的人话，同样不进埋点）。
   trackEvent('主动消息送达失败', {
-    kind: kind === 'degraded' ? '原文降级' : kind === 'swallowed' ? '被跳过' : '重试中',
+    kind: kind === 'degraded' ? '原文降级'
+      : kind === 'swallowed' ? '被跳过'
+        : kind === 'schedule-missed' ? '日程没落地'
+          : '重试中',
   });
   try {
     window.dispatchEvent(new CustomEvent('active-msg-process-failed', {
-      detail: { charId: message.charId, charName: message.charName, kind },
+      detail: { charId: message.charId, charName: message.charName, kind, note },
     }));
   } catch { /* SSR-safe */ }
 };
