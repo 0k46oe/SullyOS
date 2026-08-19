@@ -16,6 +16,7 @@ import { DB } from '../db';
 import { getVRApi, getVRApiLog } from './vrApi';
 import { getVRThrottleCounts } from './runSession';
 import { VRScheduler } from './scheduler';
+import { readStorageOverview, formatBytes } from '../storageStats';
 
 /** 页面这次是什么时候起来的——用来看「跑了多久攒出这些记录」。 */
 const PAGE_STARTED_AT = Date.now();
@@ -66,18 +67,13 @@ function probeLocalStorage(): string {
  * 昨天」多半就是这么来的，所以这两个数值要一起看。
  */
 async function probeStorageQuota(): Promise<string> {
-    const st = (navigator as any)?.storage;
-    if (!st?.estimate) return '这个浏览器不提供存储用量信息';
-    try {
-        const { usage = 0, quota = 0 } = await st.estimate();
-        const mb = (n: number) => `${(n / 1048576).toFixed(1)} MB`;
-        const pct = quota ? `${((usage / quota) * 100).toFixed(1)}%` : '—';
-        let persisted = '未知';
-        if (st.persisted) persisted = (await st.persisted()) ? '已获得（系统不会随手清）' : '**没有**（存储吃紧时可能被清掉）';
-        return `已用 ${mb(usage)} / 上限 ${mb(quota)}（${pct}）· 持久化许可：${persisted}`;
-    } catch (e: any) {
-        return `读不到：${e?.message || String(e)}`;
-    }
+    const ov = await readStorageOverview();
+    if (!ov.supported) return '这个浏览器不提供存储用量信息';
+    const pct = ov.usageBytes != null && ov.quotaBytes ? `${((ov.usageBytes / ov.quotaBytes) * 100).toFixed(1)}%` : '—';
+    const persisted = ov.persisted == null
+        ? '未知'
+        : ov.persisted ? '已获得（系统不会随手清）' : '**没有**（存储吃紧时可能被清掉）';
+    return `已用 ${formatBytes(ov.usageBytes)} / 上限 ${formatBytes(ov.quotaBytes)}（${pct}）· 持久化许可：${persisted}`;
 }
 
 /**

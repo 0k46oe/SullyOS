@@ -28,7 +28,8 @@
 
 import type { APIConfig, CloudBackupConfig, CharacterProfile, OSTheme, RealtimeConfig } from '../types';
 import { PRESET_THEMES } from '../components/chat/ChatConstants';
-import { anyCharToggle, bucketFewCount, presetOrCustom, readStorageBytes, tweakedOrDefault } from './analytics';
+import { anyCharToggle, bucketFewCount, presetOrCustom, tweakedOrDefault } from './analytics';
+import { readStorageOverview } from './storageStats';
 import { BUILTIN_SOUNDS } from './whiteboxSound';
 import { DB } from './db';
 import { isStandaloneDisplayMode } from './iosStandalone';
@@ -56,18 +57,22 @@ export async function collectDataScale(characters: CharacterProfile[]): Promise<
     maxMemoryCount: number;
     maxMessageCount: number;
     storageBytes: number | null;
+    persistedStorage: boolean | null;
     standalone: boolean;
 }> {
     const messageCounts = await Promise.all(
         characters.map(c => DB.countMessagesByCharId(c.id).catch(() => 0)),
     );
     const memoryCounts = characters.map(c => c.memories?.length ?? 0);
+    // 用量和持久化许可一次取回：两者都出自同一个 StorageManager，分两次问纯属浪费。
+    const storage = await readStorageOverview();
     return {
         characterCount: characters.length,
         memoryCount: memoryCounts.reduce((a, b) => a + b, 0),
         maxMemoryCount: Math.max(0, ...memoryCounts),
         maxMessageCount: Math.max(0, ...messageCounts),
-        storageBytes: await readStorageBytes(),
+        storageBytes: storage.usageBytes,
+        persistedStorage: storage.persisted,
         // 用通用的「装成 PWA 独立窗口」判定，不只认 iOS——配合 umami 自带的
         // 系统字段，查询时就能分出 iOS 全屏、安卓全屏还是桌面装机。
         standalone: isStandaloneDisplayMode(),

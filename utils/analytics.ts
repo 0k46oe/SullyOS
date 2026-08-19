@@ -313,6 +313,7 @@ export function trackDataScaleOnce(params: {
   maxMemoryCount: number;
   maxMessageCount: number;
   storageBytes: number | null;
+  persistedStorage: boolean | null;
   standalone: boolean;
 }): void {
   if (reportedScales.has('data-scale')) return;
@@ -324,6 +325,9 @@ export function trackDataScaleOnce(params: {
     单角色最大聊天条数: bucketMessageCount(params.maxMessageCount),
     // 浏览器不给配额信息时（Safari 部分版本、隐私模式）这一项直接缺席，不猜、不填 0。
     ...(params.storageBytes === null ? {} : { 本地存储占用: bucketStorageBytes(params.storageBytes) }),
+    // 有没有拿到「系统别清我」的许可。跟上面的占用放同一条，才能看出
+    // 「数据大且没许可」这批高危用户有多少；查不了的浏览器同样缺席，不猜。
+    ...(params.persistedStorage === null ? {} : { 持久化许可: params.persistedStorage ? '已获得' : '未获得' }),
     全屏运行: params.standalone ? '是' : '否',
   });
 }
@@ -445,16 +449,3 @@ export function noteMessageSent(): void {
   });
 }
 
-/**
- * 取本地存储占用字节数。浏览器不支持或拒绝回答时返回 null——
- * 这种情况就让这一项在事件里缺席，不要拿 0 顶上去污染分布。
- */
-export async function readStorageBytes(): Promise<number | null> {
-  if (typeof navigator === 'undefined') return null;
-  try {
-    const estimate = await navigator.storage?.estimate?.();
-    return typeof estimate?.usage === 'number' ? estimate.usage : null;
-  } catch {
-    return null;
-  }
-}
