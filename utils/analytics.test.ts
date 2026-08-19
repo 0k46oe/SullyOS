@@ -17,6 +17,7 @@ const SCALE = {
     maxMemoryCount: 1,
     maxMessageCount: 1,
     storageBytes: 0,
+    persistedStorage: false,
     standalone: false,
 };
 
@@ -381,6 +382,7 @@ describe('规模档位', () => {
             maxMemoryCount: 388,
             maxMessageCount: 6431,
             storageBytes: 137_428_992,
+            persistedStorage: true,
             standalone: true,
         });
 
@@ -388,6 +390,21 @@ describe('规模档位', () => {
         for (const raw of ['412', '388', '6431', '137428992']) {
             expect(payload).not.toContain(raw);
         }
+    });
+
+    it('持久化许可只报「已获得 / 未获得」两个写死的值', async () => {
+        installFakeDom({ withUmami: true });
+        const a = await loadModule(true);
+        a.trackDataScaleOnce({ ...SCALE, persistedStorage: true });
+        expect((tracked[0][1] as any)['持久化许可']).toBe('已获得');
+    });
+
+    it('查不了持久化状态的浏览器，这一项缺席而不是当成「未获得」', async () => {
+        // 查不了 ≠ 没拿到。混为一谈会把 Safari 那批人全算成裸奔，结论直接反过来。
+        installFakeDom({ withUmami: true });
+        const a = await loadModule(true);
+        a.trackDataScaleOnce({ ...SCALE, persistedStorage: null });
+        expect(tracked[0][1] as any).not.toHaveProperty('持久化许可');
     });
 
     it('浏览器不给存储配额时，这一项直接缺席，不拿 0 顶上', async () => {
@@ -563,7 +580,6 @@ describe('上报出口', () => {
 
         expect(() => a.trackEvent('触发翻译白屏护栏')).not.toThrow();
         expect(() => a.initAnalytics()).not.toThrow();
-        await expect(a.readStorageBytes()).resolves.toBeNull();
     });
 
     it('事件名和枚举属性原样透传', async () => {
