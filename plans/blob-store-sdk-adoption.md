@@ -3,6 +3,8 @@
 > 这是啥：把 `utils/blobRef.ts` 的通用部分换成 npm 包 `@rei-standard/blob-store`（从本文件所述的 blobRef 提炼、经六轮对抗复审的 SDK），SullyOS 侧只留薄壳与本项目特有逻辑，并首次接入孤儿 GC（挂开发调试面板）。
 >
 > 啥时候用：SDK 发出 `0.1.0-next.0` 之后动工。规范与包行为以 ReiStandard 仓的 `standards/blob-storage.md` 与包 README 为准。
+>
+> 现状：已随 v3.6 (Clean Sweep) 全部落地。本文档保留作实现对照；引用面清单的活版本在 `utils/blobGc.ts` 文件头，新功能动到令牌存储时更新那份即可。
 
 ## 前置条件
 

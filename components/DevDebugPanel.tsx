@@ -520,7 +520,7 @@ const DevDebugPanel: React.FC = () => {
                                         <>
                                             已清理 {blobGcResult.deleted} · 保留 {blobGcResult.kept} · 边界豁免 {blobGcResult.keptBoundary}
                                             {blobGcResult.aborted && (
-                                                <><br />引用面枚举出错，本轮已放弃、未删除任何东西。</>
+                                                <><br />引用面枚举或 blob 表扫描出错，本轮已放弃、未删除任何东西。</>
                                             )}
                                             {/* keptBoundary 是唯一报警信号：deleted:0 和「真没垃圾」同形，
                                                 它接近保留数 = 某个引用面混进了杂散令牌前缀文本，GC 整轮空转。 */}
