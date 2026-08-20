@@ -4209,6 +4209,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               //    （media_only 的 roomItems/backgrounds 提取也依赖已还原成 data:）
               //  · cc_custom_parts：捏人器自定义部件的 src / shadowSrc
               //  · messages：视频通话每轮快照的 metadata.cameraSnapshotRef
+              //  · songs：coverImage（歌曲封面）
               if (storeName === 'characters' && mode !== 'text_only' && Array.isArray(rawData)) {
                   // v1 陪伴语音存在 blob_assets（普通备份不读取该 store）。先迁移到
                   // assets 的二进制语音通道，稍后 assets store 才能把完整 Blob 写进 ZIP。
@@ -4216,7 +4217,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   collectCharacterCompanionVoiceAssetIds(rawData as CharacterProfile[])
                       .forEach(assetId => companionVoiceAssetIdsForBackup.add(assetId));
               }
-              if ((storeName === 'characters' || storeName === 'cc_custom_parts' || storeName === 'messages') && mode !== 'text_only' && Array.isArray(rawData)) {
+              if ((storeName === 'characters' || storeName === 'cc_custom_parts' || storeName === 'messages' || storeName === 'songs') && mode !== 'text_only' && Array.isArray(rawData)) {
                   for (const c of rawData) await resolveBlobRefsDeep(c);
               }
 

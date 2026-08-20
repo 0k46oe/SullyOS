@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import JSZip from 'jszip';
 import { DB, openDB } from './db';
+import { putImageBlob, dataUrlToBlob, resolveBlobRefsDeep } from './blobRef';
 import { encodeVectorsForBackup, encodeVectorsForBackupChunked, MemoryVectorDB } from './memoryPalace/db';
 import { writeV2Backup, assembleV2Backup, shardFileName, type ShardLimits } from './backupFormat';
 import { ActiveMsgStore } from './activeMsgStore';
@@ -525,5 +528,40 @@ describe('v2 真实链路：向量二进制旁路', () => {
         expect(vals).toEqual([
             expect.closeTo(0.11, 6), expect.closeTo(0.22, 6), expect.closeTo(0.33, 6), expect.closeTo(0.44, 6),
         ]);
+    });
+});
+
+describe('songs 备份守卫：封面令牌导出前必须还原', () => {
+    // songs.coverImage 可能存 blobref 令牌；令牌只在本机 blob_assets 里有意义，原样进
+    // 备份 = 跨设备恢复后是一个谁也解不开的死键。导出侧 OSContext 的逐 store
+    // resolveBlobRefsDeep 名单必须包含 songs——这里不复述名单，而是从源码里把真实名单
+    // 抠出来驱动同样的处理，songs 一旦掉出名单这条立刻变红。
+    const TINY_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+    it('coverImage 令牌走导出路径后是 data: 开头，产物里不再含 blobref:', async () => {
+        // 真存一个小 Blob 拿到令牌，存成一首歌的封面
+        const token = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        await seedStore('songs', [{ id: 'song-cover-1', title: '封面测试曲', coverImage: token }]);
+
+        // 从 OSContext 导出循环里取真实的 resolveBlobRefsDeep 门：哪些 store 会做令牌还原
+        const osContext = readFileSync(
+            fileURLToPath(new URL('../context/OSContext.tsx', import.meta.url)), 'utf8');
+        const loopAt = osContext.indexOf('await resolveBlobRefsDeep(c);');
+        expect(loopAt).toBeGreaterThan(0);
+        const gate = osContext.slice(osContext.lastIndexOf('if (', loopAt), loopAt);
+        const resolvedStores = [...gate.matchAll(/storeName === '([a-z_]+)'/g)].map(m => m[1]);
+
+        // 按导出循环的行为处理 songs 整表，再走既有 v2 打包 → 组装链路
+        const rawData: any[] = await DB.getRawStoreData('songs');
+        if (resolvedStores.includes('songs')) {
+            for (const c of rawData) await resolveBlobRefsDeep(c);
+        }
+        const zip = new FakeZip();
+        const manifest = await writeV2Backup(zip, { songs: rawData } as any, {});
+        const data: any = await assembleV2Backup(zip, manifest);
+
+        const song = data.songs.find((s: any) => s.id === 'song-cover-1');
+        expect(song.coverImage).toBe(TINY_PNG); // 令牌已还原成 data: 图
+        expect(JSON.stringify(data.songs)).not.toContain('blobref:');
     });
 });

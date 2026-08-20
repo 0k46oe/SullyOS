@@ -1290,6 +1290,40 @@ export const DB = {
       });
   },
 
+  // 按主键升序分页读一个 store 的行（afterKey 传 null 从头开始）。给 GC 的引用面
+  // 枚举用（utils/blobGc.ts）：async generator 每次 yield 都会挂起、IDB 事务撑不过
+  // 挂起，游标没法跨 yield 拿着用，只能每批开一个新的 readonly 事务。
+  // 注意：枚举失败必须把错误抛出去——GC 的安全阀靠它整轮放弃，吞错静默返回空
+  // 等于「这张表没有引用」，会把活图当孤儿删掉。
+  getStoreRowsPage: async (
+      storeName: string,
+      afterKey: IDBValidKey | null,
+      limit: number,
+  ): Promise<{ rows: unknown[]; lastKey: IDBValidKey | null }> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(storeName)) return { rows: [], lastKey: null };
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(storeName, 'readonly');
+          const store = transaction.objectStore(storeName);
+          const range = afterKey === null ? undefined : IDBKeyRange.lowerBound(afterKey, true);
+          // 同一事务里 getAll + getAllKeys：行给引用扫描，键尾巴当下一页的起点。
+          const rowsRequest = store.getAll(range, limit);
+          const keysRequest = store.getAllKeys(range, limit);
+          let rows: unknown[] | null = null;
+          let keys: IDBValidKey[] | null = null;
+          const maybeResolve = () => {
+              if (rows !== null && keys !== null) {
+                  resolve({ rows, lastKey: keys.at(-1) ?? null });
+              }
+          };
+          rowsRequest.onsuccess = () => { rows = rowsRequest.result || []; maybeResolve(); };
+          keysRequest.onsuccess = () => { keys = keysRequest.result || []; maybeResolve(); };
+          rowsRequest.onerror = () => reject(rowsRequest.error);
+          keysRequest.onerror = () => reject(keysRequest.error);
+          transaction.onabort = () => reject(transaction.error || new Error('getStoreRowsPage aborted'));
+      });
+  },
+
   getJournalStickers: async (): Promise<{name: string, url: string}[]> => {
     const db = await openDB();
     if (!db.objectStoreNames.contains(STORE_JOURNAL_STICKERS)) return [];
