@@ -11,15 +11,21 @@
 //   · 备份导出前把令牌解析回 data URL，复用既有「data:image → zip assets/*」抽取管线，
 //     备份格式与可移植性完全不变（见 context/OSContext.tsx 导出/导入）。
 //
+// 通用部分已提炼为 @rei-standard/blob-store（store 单例见 ./blobStore.ts），本文件是
+// 薄壳（导出名与签名不变，逐个委托 SDK）+ SullyOS 特有逻辑（引用扫描删除、外观预设迁移、
+// React hook）。新令牌的 id 是 SDK 生成的 `b_` 前缀；存量 `img_` 令牌照常读取，无需迁移。
+//
 // 兼容：旧值（`data:...` / `http(s)://...` / CSS 渐变字符串）一律原样透传；内置样板房
 // 的可移植令牌会按当前部署 BASE_URL 解开，避免备份跨域/跨壳恢复后家具路径失效。
 // 惰性迁移由各消费方（壁纸加载、进入小屋）在读到 data: 时顺手 put 成 Blob 完成。
 
 import { useEffect, useState } from 'react';
 import { DB } from './db';
+import { blobStore } from './blobStore';
 import type { AppearancePreset } from '../types';
 import { resolveBuiltinRoomAssetUrl } from './roomTemplateAssets';
 
+// 与 SDK 默认前缀一致（DEFAULT_PREFIX），保留字面量避免消费方多绕一层。
 export const BLOBREF_PREFIX = 'blobref:';
 
 // 用带品牌的 string 子类型做类型守卫：正分支收窄成 BlobRef，负分支仍保留 string
@@ -27,42 +33,27 @@ export const BLOBREF_PREFIX = 'blobref:';
 export type BlobRef = string & { readonly __blobRef: unique symbol };
 
 /** 是否是 blobref 令牌。 */
-export const isBlobRef = (v: unknown): v is BlobRef =>
-    typeof v === 'string' && v.startsWith(BLOBREF_PREFIX);
+export const isBlobRef = (v: unknown): v is BlobRef => blobStore.isRef(v);
 
-const idOfRef = (ref: string): string => ref.slice(BLOBREF_PREFIX.length);
-
-let seq = 0;
-const genId = (): string =>
-    `img_${Date.now().toString(36)}_${(seq++).toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-
-/** 把 Blob 存进 blob_assets，返回 `blobref:<id>` 令牌。 */
+/** 把 Blob 存进 blob_assets，返回 `blobref:<id>` 令牌（新 id 由 SDK 生成，`b_` 前缀）。 */
 export async function putImageBlob(blob: Blob): Promise<string> {
-    const id = genId();
-    await DB.putBlobAsset(id, blob);
-    return BLOBREF_PREFIX + id;
+    return blobStore.put(blob);
 }
 
 /** 读取令牌对应的 Blob（非令牌或不存在返回 null）。 */
 export async function getBlobForRef(ref: string): Promise<Blob | null> {
-    if (!isBlobRef(ref)) return null;
-    try {
-        return await DB.getBlobAsset(idOfRef(ref));
-    } catch {
-        return null;
-    }
+    return blobStore.get(ref);
 }
 
 /**
- * 删除令牌对应的 Blob（best-effort）。
+ * 删除令牌对应的 Blob（best-effort，非令牌直接返回）。
  * 注意：同一令牌可能被多处引用（小屋自定义素材的 image 会被复制进摆放的 item.image），
  * 所以调用方需自行确认无人再引用后才删，否则会删出「碎图」。当前消费方从简：不主动删，
  * 残留孤儿 Blob 由后续 GC 处理，宁可占一点空间也不冒破图风险。
  */
 export async function deleteBlobRef(ref: string | undefined | null): Promise<void> {
-    if (ref && isBlobRef(ref)) {
-        try { await DB.deleteBlobAsset(idOfRef(ref)); } catch { /* ignore */ }
-    }
+    if (!ref) return;
+    await blobStore.delete(ref);
 }
 
 /**
@@ -101,58 +92,16 @@ export async function deleteBlobRefIfUnreferenced(ref: string | undefined | null
 }
 
 // ─── data URL ⇄ Blob 互转 ───────────────────────────────────────
-
-/** `data:<mime>;base64,xxxx` → Blob。非 base64 data URL 会抛错。 */
-export function dataUrlToBlob(dataUrl: string): Blob {
-    const comma = dataUrl.indexOf(',');
-    if (comma < 0) throw new Error('Invalid data URL');
-    const header = dataUrl.slice(0, comma);
-    const mimeMatch = header.match(/^data:([^;]+)/);
-    const mime = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
-    if (!/;base64/i.test(header)) {
-        // 非 base64（极少见，如 utf8 编码的 svg），退化成 UTF-8 编码。
-        return new Blob([decodeURIComponent(dataUrl.slice(comma + 1))], { type: mime });
-    }
-    const binary = atob(dataUrl.slice(comma + 1));
-    const len = binary.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
-    return new Blob([bytes], { type: mime });
-}
-
-/**
- * Blob → `data:<mime>;base64,xxxx`。浏览器主线程走 FileReader（高效）；
- * 没有 FileReader 的环境（Worker / Node 测试）退化到 arrayBuffer + base64 手编。
- */
-export async function blobToDataUrl(blob: Blob): Promise<string> {
-    if (typeof FileReader !== 'undefined') {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result as string);
-            reader.onerror = () => reject(reader.error || new Error('blobToDataUrl failed'));
-            reader.readAsDataURL(blob);
-        });
-    }
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    let binary = '';
-    const CHUNK = 0x8000; // 分块拼字符串，避开 String.fromCharCode 的参数上限
-    for (let i = 0; i < bytes.length; i += CHUNK) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-    }
-    const mime = blob.type || 'application/octet-stream';
-    return `data:${mime};base64,${btoa(binary)}`;
-}
+// 语义随 SDK：dataUrlToBlob 非法输入抛错、非 base64 退化 UTF-8 编码；
+// blobToDataUrl 优先 FileReader，无 FileReader 环境（Worker / Node 测试）退化 arrayBuffer 手编。
+export { dataUrlToBlob, blobToDataUrl } from '@rei-standard/blob-store';
 
 /**
  * 把一个 data: 图片存成 Blob 并返回令牌（惰性迁移用）。转换失败时回退返回原字符串，
  * 保证调用方永远拿到一个可渲染的值，不会因迁移失败而丢图。
  */
 export async function migrateDataUrlToRef(dataUrl: string): Promise<string> {
-    try {
-        return await putImageBlob(dataUrlToBlob(dataUrl));
-    } catch {
-        return dataUrl;
-    }
+    return blobStore.migrateDataUrl(dataUrl);
 }
 
 /**
@@ -193,9 +142,7 @@ export async function migrateAppearancePresetBlobRefs(
  * Blob 已丢时返回空串（避免把死令牌当 img src 用）。
  */
 export async function resolveRefToDataUrl(value: string): Promise<string> {
-    if (!isBlobRef(value)) return value;
-    const blob = await getBlobForRef(value);
-    return blob ? blobToDataUrl(blob) : '';
+    return blobStore.resolveToDataUrl(value);
 }
 
 /**
@@ -205,36 +152,7 @@ export async function resolveRefToDataUrl(value: string): Promise<string> {
  */
 export async function resolveBlobRefsDeep(root: unknown): Promise<void> {
     if (root === null || typeof root !== 'object') return;
-    const hits: Array<{ container: any; key: string | number; ref: string }> = [];
-    const seen = new WeakSet<object>();
-    const stack: object[] = [root as object];
-    while (stack.length) {
-        const node = stack.pop()!;
-        if (seen.has(node)) continue;
-        seen.add(node);
-        const entries: Array<[string | number, unknown]> = Array.isArray(node)
-            ? node.map((v, i) => [i, v])
-            : Object.keys(node).map(k => [k, (node as any)[k]]);
-        for (const [key, v] of entries) {
-            if (isBlobRef(v)) {
-                hits.push({ container: node, key, ref: v });
-            } else if (v !== null && typeof v === 'object') {
-                stack.push(v as object);
-            }
-        }
-    }
-    if (!hits.length) return;
-    // 同一令牌只读一次。
-    const cache = new Map<string, string>();
-    for (const { container, key, ref } of hits) {
-        let dataUrl = cache.get(ref);
-        if (dataUrl === undefined) {
-            const blob = await getBlobForRef(ref);
-            dataUrl = blob ? await blobToDataUrl(blob) : '';
-            cache.set(ref, dataUrl);
-        }
-        container[key] = dataUrl;
-    }
+    await blobStore.resolveDeep(root);
 }
 
 // ─── React 渲染 hook ────────────────────────────────────────────

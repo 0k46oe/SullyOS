@@ -1271,6 +1271,25 @@ export const DB = {
       });
   },
 
+  // 只列 blobRef 命名空间的 id（img_ 存量 / b_ SDK 新生成）。blob_assets 是混用表，
+  // GC 的世界观必须限制在自己的前缀内；今后往这张表加新 id 族时不得使用这两个前缀。
+  listBlobAssetIds: async (): Promise<string[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_BLOB_ASSETS)) return [];
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_BLOB_ASSETS, 'readonly');
+          const store = transaction.objectStore(STORE_BLOB_ASSETS);
+          const request = store.getAllKeys();
+          request.onsuccess = () => {
+              const keys = request.result || [];
+              resolve(keys.filter((k): k is string =>
+                  typeof k === 'string' && (k.startsWith('img_') || k.startsWith('b_'))
+              ));
+          };
+          request.onerror = () => reject(request.error);
+      });
+  },
+
   getJournalStickers: async (): Promise<{name: string, url: string}[]> => {
     const db = await openDB();
     if (!db.objectStoreNames.contains(STORE_JOURNAL_STICKERS)) return [];
