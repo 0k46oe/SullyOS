@@ -12,14 +12,15 @@
 //     备份格式与可移植性完全不变（见 context/OSContext.tsx 导出/导入）。
 //
 // 通用部分已提炼为 @rei-standard/blob-store（store 单例见 ./blobStore.ts），本文件是
-// 薄壳（导出名与签名不变，逐个委托 SDK）+ SullyOS 特有逻辑（引用扫描删除、外观预设迁移、
-// React hook）。新令牌的 id 是 SDK 生成的 `b_` 前缀；存量 `img_` 令牌照常读取，无需迁移。
+// 薄壳（导出名与签名不变，逐个委托 SDK，React hook 委托 react 子路径的 useBlobUrl）
+// + SullyOS 特有逻辑（引用扫描删除、外观预设迁移、hook 里的内置样板房分支）。
+// 新令牌的 id 是 SDK 生成的 `b_` 前缀；存量 `img_` 令牌照常读取，无需迁移。
 //
 // 兼容：旧值（`data:...` / `http(s)://...` / CSS 渐变字符串）一律原样透传；内置样板房
 // 的可移植令牌会按当前部署 BASE_URL 解开，避免备份跨域/跨壳恢复后家具路径失效。
 // 惰性迁移由各消费方（壁纸加载、进入小屋）在读到 data: 时顺手 put 成 Blob 完成。
 
-import { useEffect, useState } from 'react';
+import { useBlobUrl } from '@rei-standard/blob-store/react';
 import { DB } from './db';
 import { blobStore } from './blobStore';
 import type { AppearancePreset } from '../types';
@@ -159,37 +160,15 @@ export async function resolveBlobRefsDeep(root: unknown): Promise<void> {
 
 /**
  * 把一个图片字段值解析成可直接用于 <img src>/CSS url() 的字符串。
- *   · blobref 令牌 → 读 Blob 建 objectURL，组件卸载 / value 变化时 revoke，绝不泄漏；
+ *   · blobref 令牌 → 交给 SDK 读 Blob 建 objectURL，组件卸载 / value 变化时 revoke，绝不泄漏；
+ *     解析完成前返回 undefined —— 首帧无图、令牌间切换时先空一帧再出新图，
+ *     绝不把上一个（已 revoke 的）objectURL 吐给渲染层；
  *   · builtin-room-asset 令牌 / 旧样板房绝对 URL → 当前部署下的内置资源 URL；
- *   · 其它（data: / http(s) / 渐变 / undefined）→ 原样返回。
- * 令牌解析前返回 undefined（首帧可能无图，等 Blob 读出后再渲染，属预期）。
+ *   · 其它（data: / http(s) / 渐变 / undefined）→ 渲染期直接透传，不等 effect、无一帧滞后。
+ * 语义契约钉在 ./blobRefHook.contract.test.ts。
  */
 export function useBlobRefUrl(value: string | undefined | null): string | undefined {
-    const [url, setUrl] = useState<string | undefined>(
-        isBlobRef(value) ? undefined : resolveBuiltinRoomAssetUrl(value)
-    );
-
-    useEffect(() => {
-        if (!isBlobRef(value)) {
-            setUrl(resolveBuiltinRoomAssetUrl(value));
-            return;
-        }
-        let alive = true;
-        let objUrl: string | undefined;
-        getBlobForRef(value).then(blob => {
-            if (!alive) return;
-            if (blob) {
-                objUrl = URL.createObjectURL(blob);
-                setUrl(objUrl);
-            } else {
-                setUrl(undefined);
-            }
-        });
-        return () => {
-            alive = false;
-            if (objUrl) URL.revokeObjectURL(objUrl);
-        };
-    }, [value]);
-
-    return url;
+    // builtin 分支在 SDK 之前解析；blobref 令牌绕过它直接交给 SDK。
+    const resolved = isBlobRef(value) ? value : resolveBuiltinRoomAssetUrl(value);
+    return useBlobUrl(blobStore, resolved);
 }
