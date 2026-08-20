@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowsClockwise, Check, ClipboardText, DownloadSimple, Power, Trash, Wrench, X } from '@phosphor-icons/react';
+import { ArrowsClockwise, Broom, Check, ClipboardText, DownloadSimple, Power, Trash, Wrench, X } from '@phosphor-icons/react';
 import {
     clearDevDebugLog,
     closeDevDebug,
@@ -16,6 +16,7 @@ import {
 } from '../utils/devDebug';
 import { BUILD_LABEL } from '../utils/buildInfo';
 import { trackEvent } from '../utils/analytics';
+import { runBlobGc } from '../utils/blobGc';
 import type { DevDebugCaptureCategory, DevDebugFlags, DevDebugFloatingPosition } from '../utils/devDebug';
 
 const FLOATING_BUTTON_SIZE = 44;
@@ -148,6 +149,13 @@ const DevDebugPanel: React.FC = () => {
     const [flags, setFlags] = useState<DevDebugFlags>(() => readDevDebugFlags());
     const [logCount, setLogCount] = useState(() => readDevDebugLog().length);
     const [copied, setCopied] = useState(false);
+    // 孤儿图片 GC 是一次性动作不是行为开关，状态只在本次会话内有效——不进 DevDebugFlags，不持久化。
+    const [blobGcRunning, setBlobGcRunning] = useState(false);
+    const [blobGcResult, setBlobGcResult] = useState<
+        | { kind: 'done'; deleted: number; kept: number; keptBoundary: number; aborted: boolean }
+        | { kind: 'error'; message: string }
+        | null
+    >(null);
     // 位置不持久化：每次出现都回默认角，拖动只在本次会话内有效（prod 刷新=失效=类似关闭，没必要存）。
     const [floatingPosition, setFloatingPosition] = useState<DevDebugFloatingPosition>(getDefaultFloatingPosition);
     const dragStateRef = useRef<{
@@ -241,6 +249,20 @@ const DevDebugPanel: React.FC = () => {
         setFloatingPosition(getDefaultFloatingPosition());
         closeDevDebug();
         trackEvent('强制关闭调试面板');
+    };
+    const handleBlobGc = async () => {
+        if (blobGcRunning) return;
+        setBlobGcRunning(true);
+        setBlobGcResult(null);
+        try {
+            // 不传参 = 默认 72h 新鲜豁免（挡「已 put、引用未落盘」的竞态），调试面板不提供改小的口子。
+            const result = await runBlobGc();
+            setBlobGcResult({ kind: 'done', ...result });
+        } catch (error) {
+            setBlobGcResult({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+        } finally {
+            setBlobGcRunning(false);
+        }
     };
     const copyLog = async () => {
         const text = formatDevDebugLog();
@@ -477,6 +499,39 @@ const DevDebugPanel: React.FC = () => {
                                 />
                             </>
                         )}
+                        <div className="h-px bg-white/10" />
+
+                        {/* 孤儿图片 GC：手动跑一轮（默认 72h 新鲜豁免）。SDK 宁可留孤儿绝不删活图，
+                            引用面枚举出错时整轮放弃（aborted），一个都不删。 */}
+                        <div className="py-3">
+                            <div className="flex">
+                                <LogActionButton
+                                    onClick={handleBlobGc}
+                                    disabled={blobGcRunning}
+                                    icon={<Broom size={13} weight="bold" />}
+                                    label={blobGcRunning ? '清理中…' : '清理孤儿图片'}
+                                />
+                            </div>
+                            {blobGcResult && (
+                                <div className="mt-2 text-[11px] leading-relaxed text-white/55">
+                                    {blobGcResult.kind === 'error' ? (
+                                        `清理出错：${blobGcResult.message}`
+                                    ) : (
+                                        <>
+                                            已清理 {blobGcResult.deleted} · 保留 {blobGcResult.kept} · 边界豁免 {blobGcResult.keptBoundary}
+                                            {blobGcResult.aborted && (
+                                                <><br />引用面枚举出错，本轮已放弃、未删除任何东西。</>
+                                            )}
+                                            {/* keptBoundary 是唯一报警信号：deleted:0 和「真没垃圾」同形，
+                                                它接近保留数 = 某个引用面混进了杂散令牌前缀文本，GC 整轮空转。 */}
+                                            {blobGcResult.keptBoundary > 0 && (
+                                                <><br />注意：边界豁免 &gt; 0，可能有引用面混进了杂散的令牌前缀文本；若它接近保留数，说明 GC 整轮空转，需要排查。</>
+                                            )}
+                                        </>
+                                    )}
+                                </div>
+                            )}
+                        </div>
                     </div>
 
                     <div className="flex shrink-0 items-center justify-end gap-2 border-t border-white/10 px-4 py-3">
