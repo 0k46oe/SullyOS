@@ -8,8 +8,9 @@
 // 令牌 `blobref:<id>`。这样：
 //   · 字段仍是 string —— CharacterProfile / 各 store 记录仍可 JSON 安全序列化、结构化克隆；
 //   · 渲染时把令牌解析成 objectURL（URL.createObjectURL）喂给 <img>/CSS 背景，并管好回收；
-//   · 备份导出前把令牌解析回 data URL，复用既有「data:image → zip assets/*」抽取管线，
-//     备份格式与可移植性完全不变（见 context/OSContext.tsx 导出/导入）。
+//   · 整包备份（v3）令牌原样进 JSON，二进制走 zip 的 blobs/<id> 旁路、导入按原 id 写回
+//     （见 utils/backupBlobs.ts）；单文件分享（外观预设 / 小屋模板）仍解析回 data URL 内嵌，
+//     换取单个 JSON 文件的可移植性。
 //
 // 通用部分已提炼为 @rei-standard/blob-store（store 单例见 ./blobStore.ts），本文件是
 // 薄壳（导出名与签名不变，逐个委托 SDK，React hook 委托 react 子路径的 useBlobUrl）
@@ -44,6 +45,14 @@ export async function putImageBlob(blob: Blob): Promise<string> {
 /** 读取令牌对应的 Blob（非令牌或不存在返回 null）。 */
 export async function getBlobForRef(ref: string): Promise<Blob | null> {
     return blobStore.get(ref);
+}
+
+/**
+ * 备份导入用：把 Blob 按既有令牌的原 id 写回（SDK restore）。令牌身份保住，
+ * JSON 里的引用零改写。非法令牌 / 非 Blob 由 SDK 吵着抛，调用方应中止导入。
+ */
+export async function restoreBlobRef(token: string, blob: Blob): Promise<void> {
+    await blobStore.restore(token, blob);
 }
 
 /**
@@ -148,7 +157,8 @@ export async function resolveRefToDataUrl(value: string): Promise<string> {
 
 /**
  * 深度遍历对象树，把所有 `blobref:<id>` 字符串原地替换成对应的 data URL（读 Blob 转 base64）。
- * 备份导出前调用，令牌随之变回 data:image，交给既有 zip 抽取管线处理。解析不到的令牌置空串
+ * 单文件分享（外观预设 / 小屋模板）导出前调用，令牌随之变回 data:image 内嵌进 JSON——
+ * 整包备份不走这条（v3 令牌原样进包，见 utils/backupBlobs.ts）。解析不到的令牌置空串
  * （图已丢，避免导出一个恢复端认不得的死令牌）。原地修改传入对象，调用方须传独立副本。
  */
 export async function resolveBlobRefsDeep(root: unknown): Promise<void> {

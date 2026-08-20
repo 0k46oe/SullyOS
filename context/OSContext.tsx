@@ -5,7 +5,8 @@ import { DB } from '../utils/db';
 import type { AvatarTouchRecord } from '../utils/avatarTouch';
 import { clampClaudeTemperature, modelRejectsSamplingParams, stripSamplingParams } from '../utils/samplingParamCompat';
 import { extractImagesInPlace, deepCloneForExport } from '../utils/backupExport';
-import { isBlobRef, getBlobForRef, migrateDataUrlToRef, migrateAppearancePresetBlobRefs, resolveBlobRefsDeep, BLOBREF_PREFIX, deleteBlobRefIfUnreferenced } from '../utils/blobRef';
+import { isBlobRef, getBlobForRef, restoreBlobRef, migrateDataUrlToRef, migrateAppearancePresetBlobRefs, resolveBlobRefsDeep, BLOBREF_PREFIX, deleteBlobRefIfUnreferenced } from '../utils/blobRef';
+import { collectBlobRefs, writeBlobsToZip, readBlobsIndex, restoreBlobsFromZip } from '../utils/backupBlobs';
 import { initPwaIcon, clearPwaIcon } from '../utils/appIcon';
 import { LEGACY_DEFAULT_WALLPAPER, isLegacyDefaultWallpaper, shouldPreserveLegacyDefaultWallpaper } from '../utils/wallpaperCompat';
 import { migrateSharkpanAssets } from '../utils/sharkpanAssetMigration';
@@ -3672,6 +3673,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // heavy user with 50 chats sharing a 200KB avatar this trims ~10MB.
           const assetDedupMap = new Map<string, string>();
 
+          // v3 blob 旁路：blobref 令牌原样进 JSON，这里从每段真正落包的 JSON 文本里收集
+          // 令牌（backupFormat 的 onSerialized 钩子），打包收尾把对应 Blob 直写 blobs/*。
+          // 从落包文本收集 = 没有「哪些 store 要处理」的名单可漏，嵌套 JSON 字符串里的
+          // 令牌（如 assets 表的 appearance_preset_*）也逐字可见。text_only 令牌已剥空，不收。
+          const referencedBlobTokens = new Set<string>();
+          const collectSerialized = mode === 'text_only'
+              ? undefined
+              : (s: string) => collectBlobRefs(s, referencedBlobTokens);
+
           // Strip Base64 Images (Recursive) - Used for Text Only Mode
           const stripBase64 = (obj: any): any => {
               if (typeof obj === 'string') {
@@ -3988,10 +3998,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // Pre-process specialized image fields (Social App, Theme)。processObject 是
           // 原地改，所以这里按语句调用、不接返回值，读起来就是「就地处理这个对象」。
           if (mode !== 'text_only') {
-              // 壁纸 / 小屋自定义素材 / 外观预设里可能存的是 blobref 令牌（本机 blob_assets）。
-              // 先把令牌解析回 data:image，再交给下面 processObject 的 data:→zip 抽取管线，
-              // 备份格式与可移植性完全不变。theme.wallpaper 内存里是 blob: objectURL，
-              // resolveBlobRefsDeep 认不得 blob:，所以壁纸单独按令牌指针读 assets 还原。
+              // 壁纸 / 小屋自定义素材 / 外观预设里的 blobref 令牌原样进包（二进制走 blobs/*
+              // 旁路，onSerialized 收集，无需在这里逐字段处理）。theme.wallpaper 内存里是
+              // blob: objectURL（会话临时，恢复端认不得），这里换回持久化指针
+              // （blobref 令牌 / 旧 data: / http）。旧 data: 值仍走下面 processObject 的
+              // data:→assets/* 抽取管线。
               if (backupData.theme) {
                   const wp = (backupData.theme as any).wallpaper;
                   if (typeof wp === 'string' && wp.startsWith('blob:')) {
@@ -4003,11 +4014,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       const ptr = await DB.getAsset('lock_wallpaper');
                       (backupData.theme as any).lockWallpaper = ptr || undefined;
                   }
-                  await resolveBlobRefsDeep(backupData.theme);
               }
-              if (backupData.roomCustomAssets) await resolveBlobRefsDeep(backupData.roomCustomAssets);
-              if (backupData.customIcons) await resolveBlobRefsDeep(backupData.customIcons);
-              if (backupData.appearancePresets) await resolveBlobRefsDeep(backupData.appearancePresets);
 
               if (backupData.socialAppData?.userProfile) processObject(backupData.socialAppData.userProfile);
               if (backupData.socialAppData?.userBg) processObject(backupData.socialAppData.userBg);
@@ -4203,22 +4210,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   continue;
               }
 
-              // 这些 store 的图片可能存的是 blobref 令牌，媒体/全量模式下先解析回 data:image，
-              // 令后面的 data:→zip 抽取能认得：
-              //  · characters：小屋 roomConfig.wallImage/floorImage/items[].image、sprites.chibi
-              //    （media_only 的 roomItems/backgrounds 提取也依赖已还原成 data:）
-              //  · cc_custom_parts：捏人器自定义部件的 src / shadowSrc
-              //  · messages：视频通话每轮快照的 metadata.cameraSnapshotRef
-              //  · songs：coverImage（歌曲封面）
+              // blobref 令牌（characters 的小屋图 / sprites.chibi、cc_custom_parts 的
+              // src/shadowSrc、messages 的 cameraSnapshotRef、songs 的 coverImage……）
+              // 不在这里做任何处理：v3 令牌原样进 JSON，onSerialized 统一收集、
+              // 二进制随 blobs/* 旁路走，任何 store 的令牌都覆盖，没有名单可漏。
               if (storeName === 'characters' && mode !== 'text_only' && Array.isArray(rawData)) {
                   // v1 陪伴语音存在 blob_assets（普通备份不读取该 store）。先迁移到
                   // assets 的二进制语音通道，稍后 assets store 才能把完整 Blob 写进 ZIP。
                   await ensureCompanionVoiceAssetsForBackup(rawData as CharacterProfile[]);
                   collectCharacterCompanionVoiceAssetIds(rawData as CharacterProfile[])
                       .forEach(assetId => companionVoiceAssetIdsForBackup.add(assetId));
-              }
-              if ((storeName === 'characters' || storeName === 'cc_custom_parts' || storeName === 'messages' || storeName === 'songs') && mode !== 'text_only' && Array.isArray(rawData)) {
-                  for (const c of rawData) await resolveBlobRefsDeep(c);
               }
 
               // --- MODE SPECIFIC FILTERING ---
@@ -4281,7 +4282,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                               customDateSprites: c.customDateSprites,
                               spriteConfig: c.spriteConfig,
                               roomItems: c.roomConfig?.items?.reduce((acc: any, item: any) => {
-                                  if (item.image && item.image.startsWith('data:')) {
+                                  // data:（旧值，下面 processObject 抽成 assets/*）和 blobref
+                                  // 令牌（v3 原样进包，二进制走 blobs/*）都算媒体，都带走。
+                                  if (item.image && (item.image.startsWith('data:') || isBlobRef(item.image))) {
                                       acc[item.id] = item.image;
                                   }
                                   return acc;
@@ -4407,8 +4410,25 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   vectors: vectorPayload,
                   prewrittenStores,
                   onYield: () => new Promise<void>(r => setTimeout(r, 0)),
+                  onSerialized: collectSerialized,
               },
           );
+
+          // v3 blob 旁路收尾：被引用令牌的 Blob 直写 blobs/<id>（原文件字节，全程不经
+          // base64），附 blobs/index.json。图已丢的令牌跳过——死令牌留在 JSON 里，
+          // 恢复端渲染为空，与 v2 置空串的用户可见结果等价。
+          if (collectSerialized && referencedBlobTokens.size > 0) {
+              setSysOperation({ status: 'processing', message: '正在打包图片二进制...', progress: 70 });
+              const { missing } = await writeBlobsToZip(
+                  zip as unknown as ZipFileWriter,
+                  referencedBlobTokens,
+                  getBlobForRef,
+                  { onYield: () => new Promise<void>(r => setTimeout(r, 0)) },
+              );
+              if (missing.length > 0) {
+                  console.warn(`备份时 ${missing.length} 个图片令牌已无对应数据，已跳过:`, missing);
+              }
+          }
 
           // 进度提示：每 ~5% 更新一次（避免高频 React 重渲染），同时让进度
           // 条从 70% 平滑爬到 99%，用户能确切看到"在动"。
@@ -4576,6 +4596,29 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   const entry = zip?.file(path);
                   return entry ? entry.async('uint8array') : null;
               });
+          }
+
+          // v3 blob 旁路：令牌原样在 JSON 里，二进制在 blobs/*。readBlobsIndex 先把索引
+          // 与文件齐全性验完（此时一个字节没写），再按原令牌 id 写回 blob_assets——令牌
+          // 身份保住，JSON 引用零改写、零重编码。中途失败直接中止导入：主数据尚未写库，
+          // 已写回的部分只是孤儿 blob，由手动 GC 收口。v2 老包没有索引文件，这里是 no-op。
+          if (zip) {
+              const blobEntries = await readBlobsIndex(zip as unknown as ZipFileReader);
+              if (blobEntries.length > 0) {
+                  await restoreBlobsFromZip(
+                      zip as unknown as ZipFileReader,
+                      blobEntries,
+                      restoreBlobRef,
+                      {
+                          onYield: () => new Promise<void>(r => setTimeout(r, 0)),
+                          onProgress: (done, total, id) => {
+                              showImportProgress('assets', '正在恢复图片二进制...',
+                                  30 + Math.floor((done / Math.max(1, total)) * 5),
+                                  { current: `图片二进制 ${done}/${total}`, currentFile: id });
+                          },
+                      },
+                  );
+              }
           }
 
           const hadAssetStoreBackup = data.assets !== undefined;

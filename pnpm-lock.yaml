@@ -75,8 +75,8 @@ importers:
         specifier: 2.4.0-next.6
         version: 2.4.0-next.6
       '@rei-standard/blob-store':
-        specifier: 0.1.0-next.0
-        version: 0.1.0-next.0(react@18.3.1)
+        specifier: 0.1.0-next.1
+        version: 0.1.0-next.1(react@18.3.1)
       '@zip.js/zip.js':
         specifier: ^2.8.43
         version: 2.8.43
@@ -1097,8 +1097,8 @@ packages:
     resolution: {integrity: sha512-D5z7ZB3359TmLToH7r/lu35cqsqzo4eu56vSyWbh4ec958Tby6P6A5vwL+BTzwYrjZmkslB/OounA2TjDdMQ3w==}
     engines: {node: '>=20'}
 
-  '@rei-standard/blob-store@0.1.0-next.0':
-    resolution: {integrity: sha512-kxPqwy6L0fzD4gNhziEeKAAaWu1Rp6+GmFD3iQBdN8KBtUCf49yw8D4/kgoAF9mKZR9rHBC7BO9b9oO3/D3rBw==}
+  '@rei-standard/blob-store@0.1.0-next.1':
+    resolution: {integrity: sha512-Pbfq3zijgcBDRnaCqR2ygvUnJofbg0u+nmJdjPs036vNYSwFXdUWRjNdUuuEAoRK2RzF3No44hwwj+r4byvzKA==}
     engines: {node: '>=20'}
     peerDependencies:
       react: '>=17'
@@ -3537,7 +3537,7 @@ snapshots:
     dependencies:
       '@rei-standard/amsg-shared': 0.4.0-next.8
 
-  '@rei-standard/blob-store@0.1.0-next.0(react@18.3.1)':
+  '@rei-standard/blob-store@0.1.0-next.1(react@18.3.1)':
     optionalDependencies:
       react: 18.3.1
 
