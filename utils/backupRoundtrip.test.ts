@@ -548,6 +548,9 @@ describe('songs 备份守卫：封面令牌导出前必须还原', () => {
             fileURLToPath(new URL('../context/OSContext.tsx', import.meta.url)), 'utf8');
         const loopAt = osContext.indexOf('await resolveBlobRefsDeep(c);');
         expect(loopAt).toBeGreaterThan(0);
+        // 锚必须全文件唯一：出现第二处时 indexOf 会静默锚到错误位置、gate 截错名单，
+        // 与其冒假绿风险不如直接红出来提醒人工更新这条守卫。
+        expect(osContext.indexOf('await resolveBlobRefsDeep(c);', loopAt + 1)).toBe(-1);
         const gate = osContext.slice(osContext.lastIndexOf('if (', loopAt), loopAt);
         const resolvedStores = [...gate.matchAll(/storeName === '([a-z_]+)'/g)].map(m => m[1]);
 

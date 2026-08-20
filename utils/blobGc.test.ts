@@ -114,6 +114,57 @@ describe('GC 基础三件', () => {
     });
 });
 
+describe('引用面分页（跨页不许漏 mark）', () => {
+    // 此前全部用例都在单页规模（< 200 行），分页推进坏掉（早停、lastKey 取错、排他边界
+    // 反了）一条都不会红——而第 2 页起的引用漏 mark 是删活图级别。这组用例把多页钉住。
+    const PAGE = 200;
+    const fillerRows = (count: number) =>
+        Array.from({ length: count }, (_, i) => ({ id: `c${String(i + 1).padStart(3, '0')}`, name: `填充${i + 1}` }));
+
+    it('getStoreRowsPage 跨 3 页每行恰好一次；恰好整页时以空页收尾', async () => {
+        await seedStore('characters', fillerRows(450));
+        const walk = async () => {
+            const seen: string[] = [];
+            let afterKey: IDBValidKey | null = null;
+            let pages = 0;
+            for (;;) {
+                const { rows, lastKey } = await DB.getStoreRowsPage('characters', afterKey, PAGE);
+                pages++;
+                for (const r of rows) seen.push((r as { id: string }).id);
+                if (lastKey === null || rows.length < PAGE) break;
+                afterKey = lastKey;
+            }
+            return { seen, pages };
+        };
+
+        const three = await walk();
+        expect(three.pages).toBe(3); // 200 + 200 + 50
+        expect(three.seen.length).toBe(450);
+        expect(new Set(three.seen).size).toBe(450); // 不重不漏
+
+        // 恰好整页（200 行）：末页满员时要多取一空页收尾，同样不重不漏
+        await clearStore('characters');
+        await seedStore('characters', fillerRows(PAGE));
+        const exact = await walk();
+        expect(exact.pages).toBe(2);
+        expect(new Set(exact.seen).size).toBe(PAGE);
+    });
+
+    it('引用藏在第 3 页的行里也保得住，孤儿照删', async () => {
+        await DB.putBlobAsset('img_page3_ref', tinyBlob());
+        await DB.putBlobAsset('img_orphan_dead', tinyBlob());
+        const rows: any[] = fillerRows(449);
+        rows.push({ id: 'c450', name: '第三页引用', avatar: 'blobref:img_page3_ref' });
+        await seedStore('characters', rows);
+
+        const result = await runBlobGc({ minAgeMs: 0 });
+
+        expect(result).toMatchObject({ deleted: 1, aborted: false });
+        expect(await DB.getBlobAsset('img_page3_ref')).not.toBeNull();
+        expect(await DB.getBlobAsset('img_orphan_dead')).toBeNull();
+    });
+});
+
 describe('引用面清单拼写守卫', () => {
     it('REF_SOURCE_STORES 里的每个名字都必须是真实存在的 object store', async () => {
         // 名字写错时 getStoreRowsPage 的 contains 兜底会静默返回空页——那个面等于没扫、
