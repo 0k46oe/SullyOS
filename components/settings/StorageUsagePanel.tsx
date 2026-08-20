@@ -17,6 +17,7 @@ import {
     type StorageBreakdown,
     type BreakdownProgress,
 } from '../../utils/storageStats';
+import { optimizeResourceStorage, type OptimizeProgress, type OptimizeResult } from '../../utils/storageOptimize';
 import { trackEvent } from '../../utils/analytics';
 
 /**
@@ -45,6 +46,11 @@ const StorageUsagePanel: React.FC = () => {
     const [computing, setComputing] = useState(false);
     const [progress, setProgress] = useState<BreakdownProgress | null>(null);
     const [breakdownError, setBreakdownError] = useState(false);
+
+    const [optimizing, setOptimizing] = useState(false);
+    const [optimizeProgress, setOptimizeProgress] = useState<OptimizeProgress | null>(null);
+    const [optimizeResult, setOptimizeResult] = useState<OptimizeResult | null>(null);
+    const [optimizeError, setOptimizeError] = useState<string | null>(null);
 
     const aliveRef = useRef(true);
     useEffect(() => {
@@ -82,6 +88,29 @@ const StorageUsagePanel: React.FC = () => {
         if (next) trackEvent('查看存储占用明细');
         if (next && !cachedBreakdown && !computing) void runBreakdown();
     }, [expanded, computing, runBreakdown]);
+
+    const handleOptimize = useCallback(async () => {
+        if (optimizing) return;
+        setOptimizing(true);
+        setOptimizeResult(null);
+        setOptimizeError(null);
+        setOptimizeProgress(null);
+        try {
+            const result = await optimizeResourceStorage(p => {
+                if (aliveRef.current) setOptimizeProgress(p);
+            });
+            if (!aliveRef.current) return;
+            setOptimizeResult(result);
+            // 用量和细分都变了：总量刷新，细分缓存作废（下次展开重算）
+            cachedBreakdown = null;
+            setBreakdown(null);
+            await refreshOverview();
+        } catch (error) {
+            if (aliveRef.current) setOptimizeError(error instanceof Error ? error.message : String(error));
+        } finally {
+            if (aliveRef.current) { setOptimizing(false); setOptimizeProgress(null); }
+        }
+    }, [optimizing, refreshOverview]);
 
     const handlePersist = useCallback(async () => {
         setPersisting(true);
@@ -173,6 +202,37 @@ const StorageUsagePanel: React.FC = () => {
                         : attempt === 'denied'
                             ? '浏览器这次没批准。把 SullyOS 装到主屏、或者允许通知之后再点一次，通过的概率会明显变高。'
                             : '存储吃紧时系统可能把你的数据一起清掉。把 SullyOS 装到主屏、或者允许通知，能提高申请成功率。'}
+                </p>
+            </div>
+
+            {/* ── 优化资源存储（一次性迁移，幂等可重跑） ── */}
+            <div className="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2.5 mb-3">
+                <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-bold text-slate-600">优化资源存储</span>
+                    <button
+                        type="button"
+                        onClick={handleOptimize}
+                        disabled={optimizing}
+                        className="shrink-0 px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-bold text-slate-500 active:scale-95 transition-all disabled:opacity-50"
+                    >
+                        {optimizing ? '优化中…' : '一键优化'}
+                    </button>
+                </div>
+                <p className={`mt-1.5 text-[10px] leading-relaxed ${optimizeError ? 'text-rose-500' : 'text-slate-400'}`}>
+                    {optimizing
+                        ? (optimizeProgress
+                            ? `正在处理：${optimizeProgress.label}（${optimizeProgress.done}/${optimizeProgress.total}）…`
+                            : '正在扫描…')
+                        : optimizeError
+                            ? optimizeError
+                            : optimizeResult
+                                ? (optimizeResult.converted > 0
+                                    ? `已把 ${optimizeResult.converted} 张图片转为二进制存储，释放约 ${formatBytes(Math.max(0, optimizeResult.bytesBefore - optimizeResult.bytesAfter))}。`
+                                        + (optimizeResult.failed > 0 ? `另有 ${optimizeResult.failed} 张转换失败，已保留原样。` : '')
+                                    : optimizeResult.failed > 0
+                                        ? `有 ${optimizeResult.failed} 张图片转换失败（已保留原样），其余没有需要优化的。`
+                                        : '没有需要优化的图片，存储已是最省形态。')
+                                : '把老数据里仍以 base64 存的图片一次性转成二进制，通常能省下约四分之一空间。做过一次就干净；导入过旧备份后可以再点。'}
                 </p>
             </div>
 

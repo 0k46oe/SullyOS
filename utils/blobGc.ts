@@ -28,6 +28,7 @@
 
 import { DB } from './db';
 import { blobStore } from './blobStore';
+import { tryAcquireMaintenanceLock, releaseMaintenanceLock, currentMaintenanceHolder } from './maintenanceLock';
 
 // 引用面里的 7 张表。名字与 db.ts 的 STORE_* 常量值一一对应
 // （STORE_CHARACTERS / STORE_MESSAGES / STORE_CC_PARTS / STORE_SONGS /
@@ -84,7 +85,17 @@ async function* iterateRefSources(): AsyncGenerator<string> {
  * minAgeMs 默认 72h（SDK 侧新鲜豁免，挡「已 put、引用未落盘」的竞态），0 只应出现在测试。
  * keptBoundary 接近库存量 = 某个引用面混进了杂散的令牌前缀文本，GC 整轮空转——
  * 展示侧（调试面板）必须把它露出来，deleted:0 和「真没垃圾」同形，它是唯一报警信号。
+ *
+ * 与「优化资源存储」共用 maintenanceLock：迁移是引用搬家（data: → 令牌），
+ * mark 不是一致性快照，撞上会误删活图。锁被占时直接抛（拿不到锁 ≠ 没垃圾）。
  */
 export async function runBlobGc(opts?: { minAgeMs?: number }) {
-    return blobStore.gc({ refSources: iterateRefSources(), ...opts });
+    if (!tryAcquireMaintenanceLock('孤儿图片清理')) {
+        throw new Error(`另一项存储维护（${currentMaintenanceHolder()}）正在进行，请稍后再试。`);
+    }
+    try {
+        return await blobStore.gc({ refSources: iterateRefSources(), ...opts });
+    } finally {
+        releaseMaintenanceLock();
+    }
 }
