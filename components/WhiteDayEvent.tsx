@@ -22,6 +22,7 @@ import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import TokenImg from './os/TokenImg';
+import { isImageValue, resolveRefToDataUrl } from '../utils/blobRef';
 
 // ============================================================
 // 美术资产配置（用户填入实际 PNG URL 后生效）
@@ -357,7 +358,7 @@ const SpriteDialogBox: React.FC<SpriteDialogBoxProps> = ({
 }) => {
     const [showSettings, setShowSettings] = useState(false);
     const hasSprite = !!sprite;
-    const isEmoji = hasSprite && sprite.length <= 2 && !sprite.startsWith('http') && !sprite.startsWith('data');
+    const isEmoji = hasSprite && sprite.length <= 2 && !isImageValue(sprite);
     return (
         <div
             className="fixed inset-0 z-[9997] flex flex-col cursor-pointer select-none"
@@ -436,8 +437,8 @@ const SpriteDialogBox: React.FC<SpriteDialogBoxProps> = ({
                             style={{ transform: `scale(${spriteScale}) translate(${spriteX}%, ${spriteY}%)` }}
                         >{sprite}</div>
                     ) : (
-                        <img
-                            src={sprite}
+                        <TokenImg
+                            value={sprite}
                             className="h-full w-auto max-w-none drop-shadow-lg transition-all duration-300"
                             style={{ transform: `scale(${spriteScale}) translate(${spriteX}%, ${spriteY}%)` }}
                             alt=""
@@ -1142,13 +1143,19 @@ ${answerSummary}
         ctx.fillStyle = grad;
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        const loadImg = (src: string): Promise<HTMLImageElement> => new Promise((resolve, reject) => {
-            const img = new Image();
-            img.crossOrigin = 'anonymous';
-            img.onload = () => resolve(img);
-            img.onerror = reject;
-            img.src = src;
-        });
+        // Image 对象只认真正的 URL，blobref 令牌喂进去必然加载失败（而失败会被调用处的
+        // catch 静默吞掉，明信片上只剩一个空圆圈）。所以在赋给 src 之前先解析一道：
+        // resolveRefToDataUrl 对非令牌值原样返回，可以无条件走。
+        const loadImg = async (src: string): Promise<HTMLImageElement> => {
+            const resolved = await resolveRefToDataUrl(src);
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.onload = () => resolve(img);
+                img.onerror = reject;
+                img.src = resolved;
+            });
+        };
 
         // 加载巧克力图层
         const [bottomImg, topImg] = await Promise.all([

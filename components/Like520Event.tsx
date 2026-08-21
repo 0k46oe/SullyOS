@@ -16,6 +16,7 @@ import { CharacterProfile, SpecialMomentRecord } from '../types';
 import { safeResponseJson } from '../utils/safeApi';
 import { assetMirrors, attachAudioMirrorFallback } from '../utils/assetUrl';
 import TokenImg from './os/TokenImg';
+import { isImageValue } from '../utils/blobRef';
 import {
     runLike520CallA,
     runLike520CallB,
@@ -1853,7 +1854,7 @@ const Y520Scene: React.FC<Y520SceneProps> = ({ callA, charName, charAvatar, char
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <div className="l520-charpill">
-                            {charAvatar?.startsWith('http') || charAvatar?.startsWith('data:')
+                            {isImageValue(charAvatar)
                                 ? <TokenImg value={charAvatar} alt={charName} />
                                 : <span className="l520-charpill-emoji">{charAvatar || '🌸'}</span>}
                             <span>{charName}</span>
@@ -2196,7 +2197,7 @@ const UncoveredLineView: React.FC<{
             <div className="l520-topbar" style={{ paddingBottom: 0 }}>
                 <div className="l520-header-row">
                     <div className="l520-charpill">
-                        {charAvatar?.startsWith('http') || charAvatar?.startsWith('data:')
+                        {isImageValue(charAvatar)
                             ? <TokenImg value={charAvatar} alt={charName} />
                             : <span className="l520-charpill-emoji">{charAvatar || '🌸'}</span>}
                         <span>{charName}</span>
@@ -3863,7 +3864,7 @@ export const Like520Controller: React.FC<Like520ControllerProps> = ({ onClose, i
                                         onClick={() => { setCharId(c.id); setStage('session'); }}
                                         className="flex flex-col items-center gap-2 p-3 bg-[#FFF8F1] rounded-2xl border border-[#FCEDD9] active:scale-95 transition-transform"
                                     >
-                                        {c.avatar?.startsWith('http') || c.avatar?.startsWith('data:') ? (
+                                        {isImageValue(c.avatar) ? (
                                             <TokenImg value={c.avatar} alt={c.name} className="w-12 h-12 rounded-full object-cover" />
                                         ) : (
                                             <div className="w-12 h-12 rounded-full bg-white flex items-center justify-center text-2xl">

@@ -7,6 +7,7 @@ import { ContextBuilder } from '../utils/context';
 import { processImage } from '../utils/file';
 import Modal from '../components/os/Modal';
 import TokenImg from '../components/os/TokenImg';
+import { isImageValue } from '../utils/blobRef';
 import { safeResponseJson, extractJson } from '../utils/safeApi';
 import { normalizeMessageContent } from '../utils/messageFormat';
 import { injectMemoryPalace, ingestDiaryToPalace, type DiaryIngestResult } from '../utils/memoryPalace/pipeline';
@@ -744,8 +745,8 @@ ${charPart}
                                 padding: '4px'
                             }}
                         >
-                            {s.url.startsWith('http') || s.url.startsWith('data') ? (
-                                <img src={s.url} className="w-20 h-20 object-contain pointer-events-none" draggable={false} />
+                            {isImageValue(s.url) ? (
+                                <TokenImg value={s.url} className="w-20 h-20 object-contain pointer-events-none" draggable={false} />
                             ) : s.url}
 
                             {/* Controls for Selected Sticker */}

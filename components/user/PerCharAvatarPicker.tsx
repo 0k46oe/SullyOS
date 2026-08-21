@@ -64,7 +64,9 @@ const PerCharAvatarPicker: React.FC = () => {
     const openEditor = (charId: string) => {
         setEditingId(charId);
         const cur = overrides[charId];
-        setUrlDraft(cur && !cur.startsWith('data:') ? cur : '');
+        // 只有 http(s) 直链才回填进外链输入框——上传来的图（内嵌 data: 或 blobref 令牌）
+        // 填进去既没法看也没法改，而且这个框本来也只收 http(s)（见下面 applyUrl 的校验）。
+        setUrlDraft(cur && isValidHttpImageUrl(cur) ? cur : '');
     };
 
     const applyUrl = () => {

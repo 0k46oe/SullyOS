@@ -20,7 +20,7 @@ import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { ContextBuilder } from '../utils/context';
 import { safeResponseJson, extractJson } from '../utils/safeApi';
 import { DB } from '../utils/db';
-import { putImageBlob, useBlobRefUrl } from '../utils/blobRef';
+import { putImageBlob, useBlobRefUrl, resolveRefToDataUrl } from '../utils/blobRef';
 import {
     synthesizeSong,
     buildAceStepTags,
@@ -1417,13 +1417,21 @@ const SongwritingApp: React.FC = () => {
     /** Compose user + char avatars side-by-side on canvas → data URL. */
     const buildDualCover = useCallback(async (charUrl: string, userUrl: string): Promise<string | null> => {
         try {
-            const loadImg = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
-                const img = new Image();
-                img.crossOrigin = 'anonymous';
-                img.onload = () => resolve(img);
-                img.onerror = reject;
-                img.src = src;
-            });
+            // 头像可能是 blobref 令牌，令牌本身不是能加载的地址：直接喂给 Image 会加载
+            // 失败，而失败被下面的 catch 收走，合影封面悄悄变成一张只有渐变的空白图。
+            // 所以先解析成 data URL 再加载（非令牌原样返回，可以无条件调）。
+            // 图已丢时解析结果是空串，此处抛出让调用方按「这张画不出来」处理。
+            const loadImg = async (src: string) => {
+                const url = await resolveRefToDataUrl(src);
+                if (!url) throw new Error('avatar blob missing');
+                return await new Promise<HTMLImageElement>((resolve, reject) => {
+                    const img = new Image();
+                    img.crossOrigin = 'anonymous';
+                    img.onload = () => resolve(img);
+                    img.onerror = reject;
+                    img.src = url;
+                });
+            };
             const canvas = document.createElement('canvas');
             const SIZE = 400;
             canvas.width = SIZE; canvas.height = SIZE;

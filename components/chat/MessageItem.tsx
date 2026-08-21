@@ -1293,7 +1293,7 @@ const LifeSimResetCardView: React.FC<{ card: any }> = ({ card }) => {
                 }}
             >
                 {parsed.charAvatar ? (
-                    <img src={parsed.charAvatar} className="w-8 h-8 object-cover shrink-0" style={{ borderRadius: 2, border: '2px solid rgba(255,255,255,0.25)' }} />
+                    <TokenImg value={parsed.charAvatar} className="w-8 h-8 object-cover shrink-0" style={{ borderRadius: 2, border: '2px solid rgba(255,255,255,0.25)' }} />
                 ) : (
                     <div className="w-8 h-8 flex items-center justify-center text-white text-sm font-bold shrink-0" style={{ borderRadius: 2, background: 'linear-gradient(135deg, #b86c3d, #d39b62)' }}>
                         {parsed.charName?.[0] || '?'}
@@ -1623,8 +1623,8 @@ const MessageItem = React.memo(({
             <div className={`relative ${avatarSizeClass} z-0 ${options?.className || ''}`}>
                 {visible && (
                     <>
-                        <img
-                            src={src}
+                        <TokenImg
+                            value={src}
                             className={`sully-chat-message-avatar-img w-full h-full ${avatarRadiusClass} object-cover shadow-sm ring-1 ring-black/5 relative z-0`}
                             alt="avatar"
                             loading="lazy"
@@ -1696,7 +1696,7 @@ const MessageItem = React.memo(({
                                 {/* Header — date stamp + char avatar */}
                                 <div className="px-4 pt-3 pb-2.5 flex items-center gap-2.5" style={{ borderBottom: '1px dashed rgba(200,160,100,0.3)', background: 'linear-gradient(135deg, rgba(245,210,150,0.25), rgba(240,195,130,0.15))' }}>
                                     {scoreData.charAvatar ? (
-                                        <img src={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(220,180,110,0.5)' }} />
+                                        <TokenImg value={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(220,180,110,0.5)' }} />
                                     ) : (
                                         <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0" style={{ background: 'linear-gradient(135deg, #d4a55a, #b8843a)' }}>{scoreData.charName?.[0] || '?'}</div>
                                     )}
@@ -1763,7 +1763,7 @@ const MessageItem = React.memo(({
                                 {/* Header */}
                                 <div className="px-4 pt-3 pb-2 flex items-center gap-2.5" style={{ borderBottom: '1px solid rgba(200,185,190,0.2)', background: 'linear-gradient(135deg, rgba(200,185,190,0.2), rgba(190,175,195,0.15))' }}>
                                     {scoreData.charAvatar ? (
-                                        <img src={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(180,165,170,0.4)' }} />
+                                        <TokenImg value={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(180,165,170,0.4)' }} />
                                     ) : (
                                         <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0" style={{ background: 'linear-gradient(135deg, #b8909a, #a07880)' }}>{scoreData.charName?.[0] || '?'}</div>
                                     )}
@@ -1829,7 +1829,7 @@ const MessageItem = React.memo(({
                     <div className="w-full px-5 my-3" {...interactionProps}>
                         <div className="rounded-3xl bg-gradient-to-br from-slate-50 to-slate-100/80 border border-slate-200/50 p-4 shadow-sm">
                             <div className="flex items-center gap-3">
-                                <img src={memoAvatar} alt={memoTitle} className="h-9 w-9 rounded-full object-cover ring-1 ring-slate-200/80" loading="lazy" decoding="async" />
+                                <TokenImg value={memoAvatar} alt={memoTitle} className="h-9 w-9 rounded-full object-cover ring-1 ring-slate-200/80" loading="lazy" decoding="async" />
                                 <div className="min-w-0 flex-1">
                                     <div className="text-sm font-medium text-slate-600 truncate">和 {memoTitle} 通了电话</div>
                                     <div className="text-xs text-slate-400 mt-0.5">{durationText} · {turnCount}轮对话</div>
@@ -2057,7 +2057,7 @@ const MessageItem = React.memo(({
                 }}
             >
                 {src ? (
-                    <img src={src} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer"
+                    <TokenImg value={src} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer"
                         onError={(e: any) => {
                             const img = e.target;
                             const p = img.parentElement;
@@ -3050,7 +3050,7 @@ const MessageItem = React.memo(({
                 </div>
                 <div className="p-3">
                     <div className="flex items-center gap-2 mb-2">
-                        <img src={post.authorAvatar} className="w-4 h-4 rounded-full" />
+                        <TokenImg value={post.authorAvatar} className="w-4 h-4 rounded-full" />
                         <span className="text-[10px] text-slate-500">{post.authorName}</span>
                     </div>
                     <p className="text-xs text-slate-600 line-clamp-2 leading-relaxed">{post.content}</p>
@@ -3084,7 +3084,7 @@ const MessageItem = React.memo(({
                     {/* Header bar */}
                     <div className="px-4 pt-3 pb-2 flex items-center gap-2.5" style={{ borderBottom: '1px solid rgba(200,185,190,0.2)', background: 'linear-gradient(135deg, rgba(200,185,190,0.2), rgba(190,175,195,0.15))' }}>
                         {scoreData.charAvatar ? (
-                            <img src={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(180,165,170,0.4)' }} />
+                            <TokenImg value={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(180,165,170,0.4)' }} />
                         ) : (
                             <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0" style={{ background: 'linear-gradient(135deg, #b8909a, #a07880)' }}>{scoreData.charName?.[0] || '?'}</div>
                         )}
@@ -3145,7 +3145,7 @@ const MessageItem = React.memo(({
                     {/* Header */}
                     <div className="px-4 pt-3 pb-2.5 flex items-center gap-2.5" style={{ background: 'linear-gradient(135deg, rgba(251,191,110,0.25), rgba(249,168,96,0.15))', borderBottom: '1px solid rgba(251,191,110,0.2)' }}>
                         {scoreData.charAvatar ? (
-                            <img src={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(251,191,110,0.4)' }} />
+                            <TokenImg value={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(251,191,110,0.4)' }} />
                         ) : (
                             <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0" style={{ background: 'linear-gradient(135deg, #f59e0b, #d97706)' }}>{scoreData.charName?.[0] || '?'}</div>
                         )}
