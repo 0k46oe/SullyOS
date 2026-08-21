@@ -174,6 +174,19 @@ describe('当前功能启用 · 不泄漏配置内容', () => {
         expect(flags.云端备份服务商).toBe('custom');
         expect(flags.语音合成).toBe('custom');
     });
+
+    it('ElevenLabs 是受支持的语音服务商枚举', () => {
+        const flags = collectFeatureFlags(poisonedSources({
+            apiConfig: {
+                baseUrl: '',
+                apiKey: '',
+                model: '',
+                ttsProvider: 'elevenlabs',
+                elevenLabsApiKey: POISON.key,
+            } as APIConfig,
+        }));
+        expect(flags.语音合成).toBe('elevenlabs');
+    });
 });
 
 describe('当前功能启用 · 三态不能塌成两态', () => {

@@ -123,6 +123,18 @@ export default defineConfig({
         secure: true,
         rewrite: () => '/v1/tts',
       },
+      // ElevenLabs TTS：开发环境把同源查询参数改写到官方 voice_id 路径。
+      '/api/elevenlabs/tts': {
+        target: 'https://api.elevenlabs.io',
+        changeOrigin: true,
+        secure: true,
+        rewrite: (path) => {
+          const parsed = new URL(path, 'http://localhost');
+          const voiceId = parsed.searchParams.get('voice_id') || '';
+          const outputFormat = parsed.searchParams.get('output_format') || 'mp3_44100_128';
+          return `/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream?output_format=${encodeURIComponent(outputFormat)}`;
+        },
+      },
     }
   },
   build: {

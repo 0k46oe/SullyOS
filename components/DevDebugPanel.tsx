@@ -17,6 +17,7 @@ import {
 import { BUILD_LABEL } from '../utils/buildInfo';
 import { trackEvent } from '../utils/analytics';
 import type { DevDebugCaptureCategory, DevDebugFlags, DevDebugFloatingPosition } from '../utils/devDebug';
+import { shareOrDownloadFile } from '../utils/shareExport';
 
 const FLOATING_BUTTON_SIZE = 44;
 const FLOATING_SAFE_MARGIN = 16;
@@ -250,20 +251,17 @@ const DevDebugPanel: React.FC = () => {
         trackEvent('导出调试日志', { 方式: '复制' });
         window.setTimeout(() => setCopied(false), 1200);
     };
-    const downloadLog = () => {
+    const downloadLog = async () => {
         const text = formatDevDebugLog();
         if (!text) return;
-        const blob = new Blob([text], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement('a');
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        anchor.href = url;
-        anchor.download = `devdebug-log-${__BUILD_BRANCH__}-${stamp}.json`;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        URL.revokeObjectURL(url);
-        trackEvent('导出调试日志', { 方式: '下载' });
+        const result = await shareOrDownloadFile({
+            content: text,
+            fileName: `devdebug-log-${__BUILD_BRANCH__}-${stamp}.json`,
+            mimeType: 'application/json;charset=utf-8',
+            shareTitle: 'SullyOS 调试日志',
+        });
+        trackEvent('导出调试日志', { 方式: result === 'shared' ? '分享' : '下载' });
     };
     const handlePointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
         if (open || (event.pointerType === 'mouse' && event.button !== 0)) return;

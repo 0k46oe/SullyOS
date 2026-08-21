@@ -820,6 +820,38 @@ export const DB = {
     });
   },
 
+  getMessageById: async (id: number): Promise<Message | null> => {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_MESSAGES, 'readonly');
+      const request = transaction.objectStore(STORE_MESSAGES).get(id);
+      request.onsuccess = () => resolve((request.result as Message | undefined) || null);
+      request.onerror = () => reject(request.error);
+    });
+  },
+
+  findImageMessageByUrl: async (charId: string, url: string): Promise<Message | null> => {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_MESSAGES, 'readonly');
+      const request = transaction.objectStore(STORE_MESSAGES).index('charId').openCursor(IDBKeyRange.only(charId));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          resolve(null);
+          return;
+        }
+        const message = cursor.value as Message;
+        if (!message.groupId && message.type === 'image' && message.content === url) {
+          resolve(message);
+          return;
+        }
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error);
+    });
+  },
+
   updateMessageMetadata: async (id: number, updater: (prev: any) => any): Promise<void> => {
     const db = await openDB();
     const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
@@ -842,12 +874,22 @@ export const DB = {
   },
 
   deleteMessage: async (id: number): Promise<void> => {
+    const { preserveContentFavoritesBeforeMessageDeletion } = await import('./contentFavorites');
+    await preserveContentFavoritesBeforeMessageDeletion({ ids: [id] });
     const db = await openDB();
-    const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
-    transaction.objectStore(STORE_MESSAGES).delete(id);
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
+      transaction.objectStore(STORE_MESSAGES).delete(id);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('deleteMessage aborted'));
+    });
   },
 
   deleteMessages: async (ids: number[]): Promise<void> => {
+      if (!ids.length) return;
+      const { preserveContentFavoritesBeforeMessageDeletion } = await import('./contentFavorites');
+      await preserveContentFavoritesBeforeMessageDeletion({ ids });
       const db = await openDB();
       const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
       const store = transaction.objectStore(STORE_MESSAGES);
@@ -858,6 +900,8 @@ export const DB = {
   },
 
   clearMessages: async (charId: string): Promise<void> => {
+    const { preserveContentFavoritesBeforeMessageDeletion } = await import('./contentFavorites');
+    await preserveContentFavoritesBeforeMessageDeletion({ charId });
     const db = await openDB();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
@@ -1318,6 +1362,60 @@ export const DB = {
       });
   },
 
+  getGalleryImageById: async (id: string): Promise<GalleryImage | null> => {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_GALLERY, 'readonly');
+          const request = transaction.objectStore(STORE_GALLERY).get(id);
+          request.onsuccess = () => resolve((request.result as GalleryImage | undefined) || null);
+          request.onerror = () => reject(request.error);
+      });
+  },
+
+  findGalleryImageBySourceMessageId: async (charId: string, messageId: number): Promise<GalleryImage | null> => {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_GALLERY, 'readonly');
+          const request = transaction.objectStore(STORE_GALLERY).index('charId').openCursor(IDBKeyRange.only(charId));
+          request.onsuccess = () => {
+              const cursor = request.result;
+              if (!cursor) {
+                  resolve(null);
+                  return;
+              }
+              const image = cursor.value as GalleryImage;
+              if (image.sourceMessageId === messageId) {
+                  resolve(image);
+                  return;
+              }
+              cursor.continue();
+          };
+          request.onerror = () => reject(request.error);
+      });
+  },
+
+  findGalleryImageByUrl: async (charId: string, url: string): Promise<GalleryImage | null> => {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_GALLERY, 'readonly');
+          const request = transaction.objectStore(STORE_GALLERY).index('charId').openCursor(IDBKeyRange.only(charId));
+          request.onsuccess = () => {
+              const cursor = request.result;
+              if (!cursor) {
+                  resolve(null);
+                  return;
+              }
+              const image = cursor.value as GalleryImage;
+              if (image.url === url) {
+                  resolve(image);
+                  return;
+              }
+              cursor.continue();
+          };
+          request.onerror = () => reject(request.error);
+      });
+  },
+
   updateGalleryImageReview: async (id: string, review: string): Promise<void> => {
       const db = await openDB();
       const transaction = db.transaction(STORE_GALLERY, 'readwrite');
@@ -1338,9 +1436,16 @@ export const DB = {
   },
 
   deleteGalleryImage: async (id: string): Promise<void> => {
+      const { preserveContentFavoritesBeforeGalleryDeletion } = await import('./contentFavorites');
+      await preserveContentFavoritesBeforeGalleryDeletion({ ids: [id] });
       const db = await openDB();
-      const transaction = db.transaction(STORE_GALLERY, 'readwrite');
-      transaction.objectStore(STORE_GALLERY).delete(id);
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_GALLERY, 'readwrite');
+          transaction.objectStore(STORE_GALLERY).delete(id);
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error || new Error('deleteGalleryImage aborted'));
+      });
   },
 
   // --- XHS Stock Images ---

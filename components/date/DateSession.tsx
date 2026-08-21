@@ -8,10 +8,14 @@ import ObserveHUD from './ObserveHUD';
 import { extractObservation, hasObservation } from '../../utils/datePrompts';
 import { isBlobRef } from '../../utils/blobRef';
 import { clearDateResumeAttempt } from '../../utils/dateSessionRecovery';
-import { cleanTextForTts, VALID_EMOTIONS } from '../../utils/minimaxTts';
-import { synthesizeSpeech, characterHasVoice } from '../../utils/ttsRouter';
-import { resolveTtsProvider } from '../../utils/ttsProvider';
-import { cleanTextForTtsFish, stripFishMarkupForDisplay } from '../../utils/fishAudioTts';
+import { VALID_EMOTIONS } from '../../utils/minimaxTts';
+import {
+    canSynthesizeSpeech,
+    characterHasVoice,
+    cleanTextForTtsProvider,
+    stripTtsMarkupForDisplay,
+    synthesizeSpeech,
+} from '../../utils/ttsRouter';
 import { planNovelLoadMore } from '../../utils/dateSessionHistory';
 import { getPendingReplyText } from '../../utils/pendingReply';
 import { fetchBlobForShare } from '../../utils/shareExport';
@@ -260,10 +264,9 @@ const DateSession: React.FC<DateSessionProps> = ({
     const VOICE_LANG_OPTIONS = [{v:'',l:'默认'},{v:'en',l:'EN'},{v:'ja',l:'JP'},{v:'ko',l:'KR'},{v:'fr',l:'FR'},{v:'es',l:'ES'}];
 
     const translateAndSpeak = async (text: string, emotion?: string): Promise<DateSpeechResult | null> => {
-        if (!characterHasVoice(char, apiConfig)) return null;
+        if (!canSynthesizeSpeech(char, apiConfig)) return null;
         try {
-            // 鱼声保留 inline cue，用 Fish 专属清洗；MiniMax 走原来的清洗。
-            let ttsText = resolveTtsProvider(apiConfig) === 'fishaudio' ? cleanTextForTtsFish(text) : cleanTextForTts(text);
+            let ttsText = cleanTextForTtsProvider(text, apiConfig);
             if (!ttsText || ttsText.length < 2) return null;
             if (voiceLang) {
                 const langLabel = VOICE_LANG_LABELS[voiceLang] || voiceLang;
@@ -289,9 +292,7 @@ const DateSession: React.FC<DateSessionProps> = ({
             });
             return {
                 url,
-                spokenText: resolveTtsProvider(apiConfig) === 'fishaudio'
-                    ? stripFishMarkupForDisplay(ttsText)
-                    : ttsText,
+                spokenText: stripTtsMarkupForDisplay(ttsText, apiConfig),
             };
         } catch (err: any) {
             console.warn('Date TTS failed:', err?.message);

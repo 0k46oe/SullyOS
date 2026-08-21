@@ -16,9 +16,7 @@ import { DB } from '../utils/db';
 import { ContextBuilder } from '../utils/context';
 import { safeResponseJson } from '../utils/safeApi';
 import { AppID, CharacterProfile, SpecialMomentRecord } from '../types';
-import { Capacitor } from '@capacitor/core';
-import { Filesystem, Directory } from '@capacitor/filesystem';
-import { Share } from '@capacitor/share';
+import { shareOrDownloadBlob } from '../utils/shareExport';
 import { WhiteDaySession, isWhiteDayEventAvailable, WHITEDAY_RECORD_KEY } from './WhiteDayEvent';
 import { Like520Session, isLike520EventAvailable, isLike520Past, LIKE520_RECORD_KEY } from './Like520Event';
 import {
@@ -681,27 +679,11 @@ export const ValentineSession: React.FC<ValentineSessionProps> = ({ charId, onCl
             });
             const fileName = `valentine_${char?.name || 'record'}_2026.png`;
 
-            if (Capacitor.isNativePlatform()) {
-                const dataUrl = canvas.toDataURL('image/png');
-                await Filesystem.writeFile({
-                    path: fileName,
-                    data: dataUrl,
-                    directory: Directory.Cache,
-                });
-                const uriResult = await Filesystem.getUri({
-                    directory: Directory.Cache,
-                    path: fileName,
-                });
-                await Share.share({
-                    title: '特别时光 - 导出长图',
-                    files: [uriResult.uri],
-                });
-            } else {
-                const link = document.createElement('a');
-                link.download = fileName;
-                link.href = canvas.toDataURL('image/png');
-                link.click();
-            }
+            const blob = await new Promise<Blob>((resolve, reject) => {
+                canvas.toBlob(result => result ? resolve(result) : reject(new Error('长图生成失败')), 'image/png');
+            });
+            const result = await shareOrDownloadBlob({ blob, fileName, shareTitle: '特别时光 - 导出长图' });
+            if (result === 'cancelled') return;
             addToast('导出成功', 'success');
         } catch (e: any) {
             console.error('Export failed:', e);

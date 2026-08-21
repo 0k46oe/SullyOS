@@ -315,7 +315,7 @@ export function amsg2Stage(
 const BACKUP_PROVIDERS = ['webdav', 'github'] as const;
 
 /** 语音合成服务商白名单。 */
-const TTS_PROVIDERS = ['minimax', 'fishaudio'] as const;
+const TTS_PROVIDERS = ['minimax', 'fishaudio', 'elevenlabs'] as const;
 
 /** 命中白名单就报那个值，否则报 custom；空值报 fallback。 */
 function enumOrCustom(
@@ -447,7 +447,7 @@ export function collectFeatureFlags(src: FeatureSources): Record<string, string>
 
         // ── 模型线路 ──
         // 服务商是枚举，可以报；baseUrl / key / 模型名一律不报。
-        语音合成: src.apiConfig.apiKey || src.apiConfig.minimaxApiKey || src.apiConfig.fishAudioApiKey
+        语音合成: src.apiConfig.apiKey || src.apiConfig.minimaxApiKey || src.apiConfig.fishAudioApiKey || src.apiConfig.elevenLabsApiKey
             ? enumOrCustom(src.apiConfig.ttsProvider, TTS_PROVIDERS, 'minimax')
             : '没配',
         API线路预设数: bucketFewCount(src.apiPresetCount),

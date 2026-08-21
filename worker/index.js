@@ -15,7 +15,7 @@ function corsHeaders(origin) {
   return {
     "Access-Control-Allow-Origin": origin || "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, Depth, X-Brave-API-Key, X-Notion-API-Key, X-Feishu-Token, X-Xhs-Cookie, X-Xhs-Platform, X-Rnote-API-Key, X-Xhs-Experiment-Ack, X-Netease-Cookie, X-WebDAV-Method, X-WebDAV-Depth, X-WebDAV-Range, X-GitHub-Method, X-GitHub-Api-Version, X-CF-Method, Mcp-Session-Id, Accept, Range",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, xi-api-key, Depth, X-Brave-API-Key, X-Notion-API-Key, X-Feishu-Token, X-Xhs-Cookie, X-Xhs-Platform, X-Rnote-API-Key, X-Xhs-Experiment-Ack, X-Netease-Cookie, X-WebDAV-Method, X-WebDAV-Depth, X-WebDAV-Range, X-GitHub-Method, X-GitHub-Api-Version, X-CF-Method, Mcp-Session-Id, Accept, Range",
     "Access-Control-Expose-Headers": "Mcp-Session-Id",
     "Access-Control-Max-Age": "86400",
   };
@@ -2772,14 +2772,14 @@ export default {
       if (ghAccept) ghHeaders['Accept'] = ghAccept;
       const ghApiVer = request.headers.get('X-GitHub-Api-Version');
       if (ghApiVer) ghHeaders['X-GitHub-Api-Version'] = ghApiVer;
+      const ghContentLength = request.headers.get('Content-Length');
+      if (ghContentLength) ghHeaders['Content-Length'] = ghContentLength;
       // GitHub 拒绝没有 UA 的请求
       ghHeaders['User-Agent'] = 'sully-backup-proxy';
       try {
-        let ghBody = null;
-        if (ghMethod !== 'GET' && ghMethod !== 'DELETE') {
-          ghBody = await request.arrayBuffer();
-          if (ghBody.byteLength === 0) ghBody = null;
-        }
+        // Stream upload bodies to GitHub instead of buffering the whole part
+        // inside the 128 MB Worker isolate.
+        const ghBody = ghMethod !== 'GET' && ghMethod !== 'DELETE' ? request.body : null;
         const ghUpstream = await fetch(targetUrl, {
           method: ghMethod,
           headers: ghHeaders,
@@ -2788,15 +2788,16 @@ export default {
         });
         console.log('github', ghMethod, targetUrl, '→', ghUpstream.status);
         const ghRespHeaders = new Headers(corsHeaders(origin));
-        const grct = ghUpstream.headers.get('Content-Type');
-        if (grct) ghRespHeaders.set('Content-Type', grct);
-        if (ghUpstream.status === 206) {
-          const grcl = ghUpstream.headers.get('Content-Length');
-          if (grcl) ghRespHeaders.set('Content-Length', grcl);
+        const ghForwardedResponseHeaders = [
+          'Content-Type', 'Content-Length', 'Content-Range', 'Retry-After',
+          'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset',
+          'X-RateLimit-Used', 'X-GitHub-Request-Id', 'Link',
+        ];
+        for (const header of ghForwardedResponseHeaders) {
+          const value = ghUpstream.headers.get(header);
+          if (value) ghRespHeaders.set(header, value);
         }
-        const grcr = ghUpstream.headers.get('Content-Range');
-        if (grcr) ghRespHeaders.set('Content-Range', grcr);
-        ghRespHeaders.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
+        ghRespHeaders.set('Access-Control-Expose-Headers', ghForwardedResponseHeaders.join(', '));
         return new Response(ghUpstream.body, {
           status: ghUpstream.status,
           headers: ghRespHeaders,
@@ -3827,6 +3828,45 @@ export default {
         return new Response(upstream.body, { status: upstream.status, headers: respHeaders });
       } catch (e) {
         return jsonResponse({ error: 'Fish Audio upstream fetch failed', detail: String(e && e.message || e) }, { status: 502, origin });
+      }
+    }
+
+    // ========== ElevenLabs TTS 代理（静态部署绕 CORS，纯透传）==========
+    // 前端 POST /elevenlabs/tts?voice_id=...&output_format=... + xi-api-key: <user key>
+    // Worker 不记录、不持久化 Key 或待合成文本。
+    if (url.pathname === '/elevenlabs/tts') {
+      if (request.method !== 'POST') {
+        return jsonResponse({ error: 'Method not allowed' }, { status: 405, origin });
+      }
+      const apiKey = (request.headers.get('xi-api-key') || '').trim();
+      const voiceId = (url.searchParams.get('voice_id') || '').trim();
+      const outputFormat = (url.searchParams.get('output_format') || 'mp3_44100_128').trim();
+      if (!apiKey) {
+        return jsonResponse({ error: 'Missing xi-api-key header (ElevenLabs API key)' }, { status: 401, origin });
+      }
+      if (!/^[A-Za-z0-9_-]{8,64}$/.test(voiceId)) {
+        return jsonResponse({ error: 'Missing or invalid voice_id' }, { status: 400, origin });
+      }
+      if (!/^[a-z0-9_]{3,32}$/.test(outputFormat)) {
+        return jsonResponse({ error: 'Invalid output_format' }, { status: 400, origin });
+      }
+      try {
+        const upstreamUrl = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream?output_format=${encodeURIComponent(outputFormat)}`;
+        const upstream = await fetch(upstreamUrl, {
+          method: 'POST',
+          headers: {
+            'xi-api-key': apiKey,
+            'Content-Type': request.headers.get('Content-Type') || 'application/json',
+            'Accept': 'audio/mpeg',
+          },
+          body: await request.text(),
+        });
+        const respHeaders = new Headers(corsHeaders(origin));
+        respHeaders.set('Content-Type', upstream.headers.get('Content-Type') || 'audio/mpeg');
+        respHeaders.set('Access-Control-Expose-Headers', 'Content-Length, Content-Type');
+        return new Response(upstream.body, { status: upstream.status, headers: respHeaders });
+      } catch (e) {
+        return jsonResponse({ error: 'ElevenLabs upstream fetch failed', detail: String(e && e.message || e) }, { status: 502, origin });
       }
     }
 

@@ -20,6 +20,7 @@ import { rollNpcChibi, randomNpcName } from '../../utils/vrWorld/npcRoll';
 import { getChibi } from '../../utils/vrWorld/chibi';
 import { CreatorIframe } from '../../components/Like520Event';
 import type { VRScript, VRStagedPlay, VRCastAssign, VRActorNote, VRStageMode, VRPlayRole, Emoji, EmojiCategory, CharacterProfile } from '../../types';
+import { shareOrDownloadFile } from '../../utils/shareExport';
 
 const tid = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 const SERIF = `'Noto Serif SC',serif`;
@@ -709,7 +710,12 @@ const PolishModal: React.FC<{ open: boolean; onClose: () => void; apiConfig: any
 // ============ 上传 txt ============
 const UploadButton: React.FC<{ onParsed: (p: { title: string; logline: string; roles: VRPlayRole[]; body: string }) => void }> = ({ onParsed }) => {
     const inputRef = React.useRef<HTMLInputElement>(null);
-    const dlTemplate = () => { const blob = new Blob([SCRIPT_TEMPLATE], { type: 'text/plain;charset=utf-8' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = '剧本模板.txt'; a.click(); URL.revokeObjectURL(a.href); };
+    const dlTemplate = () => shareOrDownloadFile({
+        content: SCRIPT_TEMPLATE,
+        fileName: '剧本模板.txt',
+        mimeType: 'text/plain;charset=utf-8',
+        shareTitle: '彼方剧院剧本模板',
+    });
     return (
         <>
             <TButton size="sm" icon={<UploadSimple size={13} weight="bold" />} onClick={() => inputRef.current?.click()}>传 txt</TButton>

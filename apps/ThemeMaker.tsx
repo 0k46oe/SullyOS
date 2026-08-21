@@ -8,6 +8,7 @@ import { processImage } from '../utils/file';
 import { validateScopedCss, runCssRenderabilityCheck, CssValidationResult } from '../utils/scopedCss';
 import { trackEvent } from '../utils/analytics';
 import { resolveBubbleCornerRadii, shouldHideBubbleTail } from '../utils/bubbleAppearance';
+import { shareOrDownloadFile } from '../utils/shareExport';
 
 const cloneTheme = (theme: ChatTheme): ChatTheme => {
     if (typeof structuredClone === 'function') {
@@ -645,17 +646,14 @@ const ThemeMaker: React.FC = () => {
         }
     };
 
-    const exportSavedTheme = (theme: ChatTheme) => {
-        const blob = new Blob([JSON.stringify({ kind: 'sullyos-chat-theme', version: 1, theme }, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = `${(theme.name || '自定义气泡').replace(/[\\/:*?\"<>|]/g, '_')}.sully-bubble.json`;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        URL.revokeObjectURL(url);
-        addToast(`已导出「${theme.name}」`, 'success');
+    const exportSavedTheme = async (theme: ChatTheme) => {
+        const result = await shareOrDownloadFile({
+            content: JSON.stringify({ kind: 'sullyos-chat-theme', version: 1, theme }, null, 2),
+            fileName: `${(theme.name || '自定义气泡').replace(/[\\/:*?\"<>|]/g, '_')}.sully-bubble.json`,
+            mimeType: 'application/json;charset=utf-8',
+            shareTitle: `气泡主题：${theme.name || '自定义气泡'}`,
+        });
+        addToast(result === 'shared' ? `已打开「${theme.name}」分享面板` : `已导出「${theme.name}」`, 'success');
     };
 
     // 删除只移除气泡库里的存档；若正在编辑这套气泡，工坊内容保留为未保存状态，避免用户手滑丢稿。

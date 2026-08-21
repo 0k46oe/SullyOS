@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { downloadBackup, readResponseArrayBuffer, shouldUseGithubProxy } from './githubClient';
+import {
+    downloadBackup,
+    listBackups,
+    readResponseArrayBuffer,
+    shouldUseGithubProxy,
+    uploadBackup,
+} from './githubClient';
 
 afterEach(() => {
     vi.unstubAllGlobals();
@@ -98,5 +104,266 @@ describe('GitHub 备份下载错误', () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 403 })));
 
         await expect(downloadBackup(config, file)).rejects.toThrow('HTTP 403');
+    });
+});
+
+describe('GitHub 备份列表完整性', () => {
+    const config = {
+        enabled: true,
+        provider: 'github' as const,
+        webdavUrl: '',
+        username: '',
+        password: '',
+        remotePath: '/',
+        githubToken: 'github_pat_test',
+        githubOwner: 'owner',
+        githubRepo: 'sully-backup',
+        githubUseProxy: false,
+    };
+
+    it('翻页读取超过 100 条 Release 后仍能找到备份', async () => {
+        const unrelated = Array.from({ length: 100 }, (_, index) => ({
+            id: index + 1,
+            tag_name: `unrelated-${index}`,
+            assets: [],
+        }));
+        const backup = {
+            id: 500,
+            tag_name: 'sully-backup-legacy-1',
+            draft: false,
+            created_at: '2026-08-20T00:00:00Z',
+            assets: [{
+                id: 900,
+                name: 'Sully_Backup_full_1.zip',
+                size: 3,
+                state: 'uploaded',
+                updated_at: '2026-08-20T00:00:01Z',
+            }],
+        };
+        const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+            const url = String(input);
+            const payload = new URL(url).searchParams.get('page') === '1' ? unrelated : [backup];
+            return Promise.resolve(new Response(JSON.stringify(payload), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+            }));
+        });
+        vi.stubGlobal('fetch', fetchMock);
+
+        const files = await listBackups(config);
+
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(files).toHaveLength(1);
+        expect(files[0]).toMatchObject({ name: 'Sully_Backup_full_1.zip', status: 'ready' });
+    });
+
+    it('草稿、starter 和缺少完成标记的新版 Release 会显示为上传未完成', async () => {
+        const releases = [
+            {
+                id: 10,
+                tag_name: 'sully-backup-v2-10',
+                name: 'Sully Backup interrupted',
+                draft: true,
+                created_at: '2026-08-20T00:00:00Z',
+                assets: [{ id: 11, name: 'Sully_Backup_full_10.zip', size: 0, state: 'starter' }],
+            },
+            {
+                id: 20,
+                tag_name: 'sully-backup-v2-20',
+                name: 'Sully Backup missing manifest',
+                draft: false,
+                created_at: '2026-08-20T01:00:00Z',
+                assets: [{ id: 21, name: 'Sully_Backup_full_20.zip', size: 12, state: 'uploaded' }],
+            },
+        ];
+        vi.stubGlobal('fetch', vi.fn().mockImplementation((input: RequestInfo | URL) => {
+            const url = String(input);
+            const payload = url.includes('/releases/20/assets') ? releases[1].assets : releases;
+            return Promise.resolve(new Response(JSON.stringify(payload), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+            }));
+        }));
+
+        const files = await listBackups(config);
+
+        expect(files).toHaveLength(2);
+        expect(files.every(file => file.status === 'incomplete')).toBe(true);
+        expect(files.map(file => file.statusMessage).join(' ')).toContain('0 字节');
+        expect(files.map(file => file.statusMessage).join(' ')).toContain('缺少完成标记');
+    });
+
+    it('内嵌附件达到截断边界时会读取分页附件，避免误报缺少分片', async () => {
+        const embeddedAssets = [
+            { id: 31, name: 'Sully_Backup_full_30.zip', size: 3, state: 'uploaded' },
+            ...Array.from({ length: 29 }, (_, index) => ({
+                id: 1000 + index,
+                name: `diagnostic-${index}.txt`,
+                size: 1,
+                state: 'uploaded',
+            })),
+        ];
+        const completeAssets = [
+            embeddedAssets[0],
+            { id: 32, name: 'Sully_Backup_full_30.zip.sully-backup.json', size: 20, state: 'uploaded' },
+        ];
+        const release = {
+            id: 30,
+            tag_name: 'sully-backup-v2-30',
+            draft: false,
+            created_at: '2026-08-20T02:00:00Z',
+            assets: embeddedAssets,
+        };
+        const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+            const url = String(input);
+            const payload = url.includes('/releases/30/assets') ? completeAssets : [release];
+            return Promise.resolve(new Response(JSON.stringify(payload), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+            }));
+        });
+        vi.stubGlobal('fetch', fetchMock);
+
+        const files = await listBackups(config);
+
+        expect(files).toHaveLength(1);
+        expect(files[0]).toMatchObject({ name: 'Sully_Backup_full_30.zip', status: 'ready' });
+        expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/releases/30/assets'))).toBe(true);
+    });
+
+    it('列表鉴权或限流错误不会再伪装成空数组', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+            JSON.stringify({ message: 'API rate limit exceeded' }),
+            {
+                status: 403,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-RateLimit-Remaining': '0',
+                },
+            },
+        )));
+
+        await expect(listBackups(config)).rejects.toThrow('请求过于频繁');
+    });
+});
+
+describe('GitHub 事务式上传', () => {
+    const config = {
+        enabled: true,
+        provider: 'github' as const,
+        webdavUrl: '',
+        username: '',
+        password: '',
+        remotePath: '/',
+        githubToken: 'github_pat_test',
+        githubOwner: 'owner',
+        githubRepo: 'sully-backup',
+        githubUseProxy: false,
+    };
+
+    it('附件失败时删除草稿 Release 和 tag，不留下半截备份', async () => {
+        class FailedUploadXhr {
+            status = 422;
+            responseText = '{"message":"unprocessable"}';
+            timeout = 0;
+            upload: { onprogress?: (event: ProgressEvent) => void } = {};
+            onload?: () => void;
+            onerror?: () => void;
+            onabort?: () => void;
+            ontimeout?: () => void;
+            open() {}
+            setRequestHeader() {}
+            getAllResponseHeaders() { return ''; }
+            send() { this.onload?.(); }
+        }
+        vi.stubGlobal('XMLHttpRequest', FailedUploadXhr as any);
+
+        const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+            if (url.endsWith('/releases') && init?.method === 'POST') {
+                return Promise.resolve(new Response(JSON.stringify({ id: 77 }), {
+                    status: 201,
+                    headers: { 'Content-Type': 'application/json' },
+                }));
+            }
+            if (url.includes('/releases/77/assets?') && init?.method === 'GET') {
+                return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
+            }
+            if (init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }));
+            throw new Error(`unexpected request: ${init?.method} ${url}`);
+        });
+        vi.stubGlobal('fetch', fetchMock);
+
+        const result = await uploadBackup(config, new Blob(['zip']), 'Sully_Backup_full_1.zip');
+
+        expect(result.ok).toBe(false);
+        expect(result.message).toContain('草稿已清理');
+        expect(fetchMock.mock.calls.some(([url, init]) =>
+            String(url).endsWith('/releases/77') && init?.method === 'DELETE')).toBe(true);
+        expect(fetchMock.mock.calls.some(([url, init]) =>
+            String(url).includes('/git/refs/tags/sully-backup-v2-') && init?.method === 'DELETE')).toBe(true);
+    });
+
+    it('全部附件校验成功后写完成标记并发布 Release', async () => {
+        let assetId = 100;
+        const uploadedNames: string[] = [];
+        class SuccessfulUploadXhr {
+            status = 0;
+            responseText = '';
+            timeout = 0;
+            upload: { onprogress?: (event: ProgressEvent) => void } = {};
+            onload?: () => void;
+            onerror?: () => void;
+            onabort?: () => void;
+            ontimeout?: () => void;
+            private url = '';
+            open(_method: string, url: string) { this.url = url; }
+            setRequestHeader() {}
+            getAllResponseHeaders() { return 'Content-Type: application/json\r\n'; }
+            send(body: Blob) {
+                this.status = 201;
+                const name = new URL(this.url).searchParams.get('name') || '';
+                uploadedNames.push(name);
+                this.responseText = JSON.stringify({
+                    id: assetId++,
+                    name,
+                    size: body.size,
+                    state: 'uploaded',
+                });
+                this.onload?.();
+            }
+        }
+        vi.stubGlobal('XMLHttpRequest', SuccessfulUploadXhr as any);
+
+        const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+            if (url.endsWith('/releases') && init?.method === 'POST') {
+                const body = JSON.parse(String(init.body));
+                expect(body.draft).toBe(true);
+                expect(body.tag_name).toMatch(/^sully-backup-v2-/);
+                return Promise.resolve(new Response(JSON.stringify({ id: 88 }), {
+                    status: 201,
+                    headers: { 'Content-Type': 'application/json' },
+                }));
+            }
+            if (url.endsWith('/releases/88') && init?.method === 'PATCH') {
+                const body = JSON.parse(String(init.body));
+                expect(body.draft).toBe(false);
+                return Promise.resolve(new Response(JSON.stringify({ id: 88, draft: false }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                }));
+            }
+            throw new Error(`unexpected request: ${init?.method} ${url}`);
+        });
+        vi.stubGlobal('fetch', fetchMock);
+
+        const result = await uploadBackup(config, new Blob(['zip']), 'Sully_Backup_full_2.zip');
+
+        expect(result).toMatchObject({ ok: true });
+        expect(uploadedNames).toContain('Sully_Backup_full_2.zip');
+        expect(uploadedNames.some(name => name.endsWith('.sully-backup.json'))).toBe(true);
+        expect(fetchMock.mock.calls.some(([url, init]) =>
+            String(url).endsWith('/releases/88') && init?.method === 'PATCH')).toBe(true);
     });
 });
