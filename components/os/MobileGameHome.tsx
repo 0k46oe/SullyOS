@@ -461,10 +461,10 @@ const MobileGameHome: React.FC = () => {
                                 WebkitMaskImage: 'linear-gradient(100deg, transparent 30%, #000 82%)',
                                 maskImage: 'linear-gradient(100deg, transparent 30%, #000 82%)',
                             }}>
-                            <img src={chibi.img} className="w-full h-full object-cover" alt="" loading="lazy" style={{ objectPosition: 'center 22%' }} />
+                            <TokenImg value={chibi.img} className="w-full h-full object-cover" alt="" loading="lazy" style={{ objectPosition: 'center 22%' }} />
                         </div>
                     ) : (
-                        <img src={chibi.img} alt="" loading="lazy"
+                        <TokenImg value={chibi.img} alt="" loading="lazy"
                             className="absolute right-0 bottom-0 object-contain object-bottom pointer-events-none"
                             style={{
                                 height: '64%', // 相对时钟卡高度，避免吃彼方里按 VR 调的绝对 scale 而巨大

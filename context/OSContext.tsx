@@ -5,7 +5,7 @@ import { DB } from '../utils/db';
 import type { AvatarTouchRecord } from '../utils/avatarTouch';
 import { clampClaudeTemperature, modelRejectsSamplingParams, stripSamplingParams } from '../utils/samplingParamCompat';
 import { extractImagesInPlace, deepCloneForExport } from '../utils/backupExport';
-import { isBlobRef, getBlobForRef, restoreBlobRef, migrateDataUrlToRef, migrateAppearancePresetBlobRefs, resolveBlobRefsDeep, BLOBREF_PREFIX, deleteBlobRefIfUnreferenced } from '../utils/blobRef';
+import { isBlobRef, getBlobForRef, restoreBlobRef, migrateDataUrlToRef, migrateAppearancePresetBlobRefs, resolveBlobRefsDeep, resolveRefToDataUrl, BLOBREF_PREFIX, deleteBlobRefIfUnreferenced } from '../utils/blobRef';
 import { resolveBlobRefsInRequestBody } from '../utils/apiBlobRefs';
 import { collectBlobRefs, writeBlobsToZip, readBlobsIndex, restoreBlobsFromZip } from '../utils/backupBlobs';
 import { initPwaIcon, clearPwaIcon } from '../utils/appIcon';
@@ -1801,9 +1801,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           // Web Notification
                           if (!Capacitor.isNativePlatform() && window.Notification && Notification.permission === 'granted') {
                               try {
+                                  // 通知不是 DOM，icon 只认能直接加载的地址：头像字段可能是 blobref
+                                  // 令牌，原样塞进去就是没图标。先解析（非令牌原样返回），解析不出
+                                  // 来（图已丢）时退回应用默认图标。
+                                  const icon = (await resolveRefToDataUrl(char.avatar || '')) || './icons/icon-192.png';
                                   const notif = new Notification(char.name, {
                                       body: dueMessages[0].content,
-                                      icon: char.avatar,
+                                      icon,
                                       silent: false
                                   });
                                   notif.onclick = () => {
@@ -1870,10 +1874,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // 静默失败，必须走 SW registration 才稳定。
               if (!Capacitor.isNativePlatform() && 'serviceWorker' in navigator && window.Notification && Notification.permission === 'granted') {
                   const char = characters.find(c => c.id === charId);
-                  navigator.serviceWorker.ready.then(reg => {
+                  navigator.serviceWorker.ready.then(async reg => {
+                      // 同上：令牌是个非空字符串，`char?.avatar || 默认图标` 这种写法会让默认
+                      // 图标那条兜底永远轮不到，结果一个图标都没有还不报错。所以先解析成能
+                      // 加载的地址，拿到空串才用默认图标。
+                      const icon = (await resolveRefToDataUrl(char?.avatar || '')) || './icons/icon-192.png';
                       reg.showNotification(charName, {
                           body: preview,
-                          icon: char?.avatar || './icons/icon-192.png',
+                          icon,
                           badge: './icons/icon-192.png',
                           tag: `proactive-${charId}`,
                           data: { charId, kind: 'proactive-1.0' },

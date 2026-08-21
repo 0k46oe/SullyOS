@@ -688,7 +688,7 @@ const NeteaseProfilePage: React.FC<Props> = ({ onBack, onOpenPlayer, onOpenSearc
                           trackEvent('播放「我的」页列表里的一首歌', { source: 'playlist' });
                         }}
                         className="w-full text-left flex items-center gap-2 py-1.5 px-1">
-                        <img src={s.albumPic} alt="" className="w-7 h-7 rounded-md object-cover" />
+                        <TokenImg value={s.albumPic} alt="" className="w-7 h-7 rounded-md object-cover" />
                         <div className="flex-1 min-w-0">
                           <div className="text-[11px] truncate" style={{ color: C.text }}>{s.name}</div>
                           <div className="text-[9px] truncate" style={{ color: C.muted }}>{s.artists}</div>
@@ -722,7 +722,7 @@ const NeteaseProfilePage: React.FC<Props> = ({ onBack, onOpenPlayer, onOpenSearc
                 style={{ background: 'rgba(255,255,255,0.06)' }}
               >
                 <div className="text-[10px] w-5 text-center shrink-0" style={{ color: C.faint }}>{i + 1}</div>
-                <img src={r.song.albumPic} alt="" className="w-10 h-10 rounded-lg object-cover" />
+                <TokenImg value={r.song.albumPic} alt="" className="w-10 h-10 rounded-lg object-cover" />
                 <div className="flex-1 min-w-0">
                   <div className="text-sm truncate" style={{ color: C.text }}>{r.song.name}</div>
                   <div className="text-[10px] truncate" style={{ color: C.muted }}>{r.song.artists}</div>
@@ -751,7 +751,7 @@ const NeteaseProfilePage: React.FC<Props> = ({ onBack, onOpenPlayer, onOpenSearc
                 className="w-full flex items-center gap-3 p-2 rounded-2xl text-left transition-all"
                 style={{ background: 'rgba(255,255,255,0.06)' }}
               >
-                <img src={s.albumPic || 'https://p1.music.126.net/y19E5SadGUmSR8SZxkrNtw==/109951163965029180.jpg'}
+                <TokenImg value={s.albumPic || 'https://p1.music.126.net/y19E5SadGUmSR8SZxkrNtw==/109951163965029180.jpg'}
                   alt="" className="w-10 h-10 rounded-lg object-cover" />
                 <div className="flex-1 min-w-0">
                   <div className="text-sm truncate" style={{ color: C.text }}>{s.name}</div>
