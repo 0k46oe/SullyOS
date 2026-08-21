@@ -4772,10 +4772,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   }
               }
               if (data.appearancePresets) {
-                  const cache = new Map<string, string>();
                   const migratedPresets: AppearancePreset[] = [];
                   for (const preset of data.appearancePresets) {
-                      const migrated = await migrateAppearancePresetBlobRefs(preset, cache);
+                      const migrated = await migrateAppearancePresetBlobRefs(preset);
                       migratedPresets.push(migrated);
                       await DB.saveAsset(`appearance_preset_${migrated.id}`, JSON.stringify(migrated));
                   }

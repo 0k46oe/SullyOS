@@ -132,26 +132,20 @@ export async function optimizeResourceStorage(
             mergedDuplicates: 0, reclaimableBytes: 0, skippedGroups: 0, scanUnavailable: false,
             vectorsCompacted: 0, vectorError: null,
         };
-        // 同一份 base64 全局只建一个 Blob。与 migrateAppearancePresetBlobRefs 共用
-        // （它的 cache 契约就是 dataUrl → 已存值）。
-        const cache = new Map<string, string>();
         // 已计过字节数的令牌：canonical 迁移函数产出的令牌经这里补记大小，避免重复计。
         const countedTokens = new Set<string>();
 
-        /** data:image → 令牌；非图片 data / 已是令牌 / http 一律返回 null（调用方不动原值）。 */
+        /** data:image → 令牌；非图片 data / 已是令牌 / http 一律返回 null（调用方不动原值）。
+         *
+         *  「同一份图别转两遍」这件事交给 putImageBlobDeduped——它按内容哈希认人，记的是
+         *  哈希（几十字节），不是 base64 原文。这里不要再套一层以 data URL 为键的缓存：
+         *  那层缓存等于把这一轮见过的每张图的原文都钉在内存里，表分页读了也白读。 */
         const convert = async (value: unknown): Promise<string | null> => {
             if (typeof value !== 'string' || !value.startsWith('data:image/')) return null;
-            const hit = cache.get(value);
-            if (hit) {
-                result.converted++;
-                result.bytesBefore += value.length;
-                return hit;
-            }
             try {
                 const blob = dataUrlToBlob(value);
                 // 复用命中时不计新建：那份 Blob 本来就在库里占着，这次一个字节都没多存
                 const { token, reused } = await putImageBlobDeduped(blob);
-                cache.set(value, token);
                 result.converted++;
                 result.bytesBefore += value.length;
                 if (!reused && !countedTokens.has(token)) {
@@ -226,7 +220,7 @@ export async function optimizeResourceStorage(
                 try { preset = JSON.parse(a.data); } catch { continue; }
                 if (!preset || typeof preset !== 'object' || !preset.theme) continue;
                 const beforeFields = presetImageFields(preset);
-                const migrated = await migrateAppearancePresetBlobRefs(preset, cache);
+                const migrated = await migrateAppearancePresetBlobRefs(preset);
                 const afterFields = presetImageFields(migrated);
                 let changed = false;
                 for (let i = 0; i < beforeFields.length; i++) {

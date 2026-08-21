@@ -183,19 +183,17 @@ export async function migrateDataUrlToRef(dataUrl: string): Promise<string> {
 
 /**
  * 外观预设导入专用迁移：只转换已经接入 BlobRef 渲染链路的字段，其他 data URL 保持原状。
- * cache 让同一张原图在壁纸、锁屏或多个图标中复用同一个 Blob，避免导入时重复占空间。
+ *
+ * 同一张原图在壁纸、锁屏或多个图标里出现时只会存一份 Blob——这由 migrateDataUrlToRef
+ * 的内容记忆保证（按哈希认人）。这里不再自备一层 data URL → 令牌的缓存：键是几 MB 的
+ * base64 原文，一批预设过下来等于把它们全留在内存里，而收益只是省掉一次哈希计算。
  */
 export async function migrateAppearancePresetBlobRefs(
     preset: AppearancePreset,
-    cache: Map<string, string> = new Map<string, string>(),
 ): Promise<AppearancePreset> {
     const migrate = async (value: string | undefined): Promise<string | undefined> => {
         if (!value?.startsWith('data:')) return value;
-        const cached = cache.get(value);
-        if (cached) return cached;
-        const stored = await migrateDataUrlToRef(value);
-        cache.set(value, stored);
-        return stored;
+        return await migrateDataUrlToRef(value);
     };
 
     const theme = { ...preset.theme };
