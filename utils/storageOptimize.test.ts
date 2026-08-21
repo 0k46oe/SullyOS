@@ -351,3 +351,72 @@ describe('记忆向量：压成紧凑形态', () => {
         }
     });
 });
+
+describe('分页读表：跨页不漏行，进度条对得上', () => {
+    // 这五面原本是整表 getAll 的，行都在一个数组里，怎么写都不会漏。改成按主键翻页之后，
+    // 「只跑了第一批就退出」「翻页起点取错」这类毛病在小库上一条都不会红，而漏掉的行
+    // 就是没被转换的存量图。这组用例把跨页和进度口径钉住。
+    const PAGE = 200; // 与 storageOptimize.ts 的 PAGE_SIZE 一致
+
+    async function seedStore(name: string, records: any[]): Promise<void> {
+        const db = await openDB();
+        await new Promise<void>((resolve, reject) => {
+            const tx = db.transaction(name, 'readwrite');
+            const store = tx.objectStore(name);
+            for (const r of records) store.put(r);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    it('相册行数超过一页：跨页每一行都转到，一条不漏', async () => {
+        const count = PAGE + 50;
+        await seedStore('gallery', Array.from({ length: count }, (_, i) => ({
+            id: `g${String(i + 1).padStart(4, '0')}`, charId: 'c1', url: TINY_PNG, timestamp: i + 1,
+        })));
+
+        const r = await optimizeResourceStorage();
+
+        const rows = await DB.getGalleryImages();
+        expect(rows.length).toBe(count);
+        // 第 2 页起漏掉任何一行，这里就是一堆还留着 data: 的相册图
+        expect(rows.filter(g => isBlobRef(g.url)).length).toBe(count);
+        expect(r.converted).toBe(count);
+        expect(r.uniqueBlobs).toBe(1); // 全是同一张图，去重后只建一份 Blob
+    });
+
+    it('进度回调：total 就是五面的真实行数，done 一路递增且正好停在 total', async () => {
+        // 五个面各摆几行、行数互不相同——少数了哪一面都对不上
+        await DB.saveAsset('wallpaper', TINY_PNG);
+        await DB.saveAsset('lock_wallpaper', TINY_JPEG);
+        await seedStore('characters', [
+            { id: 'c1', name: '角色一', roomConfig: { wallImage: TINY_PNG, items: [] } },
+            { id: 'c2', name: '角色二' },
+            { id: 'c3', name: '角色三' },
+        ]);
+        await seedStore('songs', [{ id: 's1', title: '测试曲', coverImage: TINY_JPEG }]);
+        await seedStore('cc_custom_parts', [
+            { id: 'p1', src: TINY_PNG, createdAt: 1 },
+            { id: 'p2', src: TINY_JPEG, createdAt: 2 },
+        ]);
+        await seedStore('gallery', [
+            { id: 'g1', charId: 'c1', url: TINY_PNG, timestamp: 1 },
+            { id: 'g2', charId: 'c1', url: TINY_JPEG, timestamp: 2 },
+            { id: 'g3', charId: 'c1', url: TINY_PNG, timestamp: 3 },
+            { id: 'g4', charId: 'c1', url: TINY_JPEG, timestamp: 4 },
+        ]);
+        const expectedRows = 2 + 3 + 1 + 2 + 4;
+
+        // 只收五面自己报的那几档：扫库 / 合并 / 向量三段各有各的进度口径，混进来会算错
+        const faceLabels = new Set(['系统外观', '小屋', '歌曲封面', '捏人器部件', '相册']);
+        const events: Array<{ done: number; total: number }> = [];
+        await optimizeResourceStorage(p => {
+            if (faceLabels.has(p.label)) events.push({ done: p.done, total: p.total });
+        });
+
+        expect(events.length).toBe(expectedRows);                   // 每行恰好报一次
+        for (const e of events) expect(e.total).toBe(expectedRows); // 总数不是估的
+        // done 从 1 数到 total：不倒退、不跳号、不越过
+        expect(events.map(e => e.done)).toEqual(Array.from({ length: expectedRows }, (_, i) => i + 1));
+    });
+});

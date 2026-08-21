@@ -23,6 +23,9 @@
 //
 // 跑过一遍后再跑就是 no-op（幂等），导入过旧备份后可以再跑。
 //
+// 五个面都是按主键分页读的，一次只有一批行在内存里。别改回整表读：真实库里这几张表
+// 加起来能有几十 MB，光是把它们读进来就够呛，何况全程还得占着。
+//
 // ─── 覆盖面即安全边界（本文件的生死线）───
 // 只允许收录「当前写入路径已产出令牌」的字段——写令牌意味着读端全链路认令牌，
 // 换成令牌不可能破图。逐面对应的现役令牌写入点：
@@ -53,13 +56,37 @@ import { blobStore } from './blobStore';
 import { collectUnmergeableRefs, buildMergePlan, rewriteBlobRefs } from './blobDedupe';
 import { creatorPartToBlobRefs } from './creatorPartsBlob';
 import { tryAcquireMaintenanceLock, releaseMaintenanceLock, currentMaintenanceHolder } from './maintenanceLock';
-import type { AppearancePreset, CustomCreatorPart } from '../types';
+import type { AppearancePreset, CharacterProfile, CustomCreatorPart, GalleryImage, SongSheet } from '../types';
 
 /** 本工具会写的表。守卫测试断言它 ⊆ blobGc 的 REF_SOURCE_STORES（转出的 Blob 必须在 GC 视野内）。 */
 export const OPTIMIZE_TARGET_STORES = ['assets', 'characters', 'songs', 'cc_custom_parts', 'gallery'] as const;
 
 /** 值形态是「裸图片字符串」的 assets 行。 */
 const PLAIN_ASSET_IDS = new Set(['wallpaper', 'lock_wallpaper', 'wallpaper_user_backup']);
+
+/** 每批读多少行。跟 utils/blobGc.ts 一个口径：批间事务各自独立，内存峰值只有一批。 */
+const PAGE_SIZE = 200;
+
+/**
+ * 按主键升序把一张表逐行吐出来，内存里一次只留一批
+ * （见 DB.getStoreRowsPage：IDB 事务撑不过 await 挂起，只能每批开一个新的 readonly 事务）。
+ *
+ * 边读边写为什么不重不漏：翻页靠主键推进，下一页从上一页最后那个键之后开始；而这几面的迁移
+ * 只改行里的图片字段，主键一个都不动——改完的行还待在它原来的位置上，翻过去的不会再回来，
+ * 没翻到的也不会挪到身后去。
+ * 反过来说，谁要是在这个循环里换主键（删掉旧行、用新 id 重写一条）或者往表里插新行，这条保证
+ * 就没了：落在游标前面的再也扫不到，落在后面的会被当成新行又处理一遍。真要删行 / 加行，
+ * 请另起一趟遍历，别混进来。
+ */
+async function* iterateStoreRows<T>(storeName: string): AsyncGenerator<T> {
+    let afterKey: IDBValidKey | null = null;
+    for (;;) {
+        const { rows, lastKey } = await DB.getStoreRowsPage(storeName, afterKey, PAGE_SIZE);
+        for (const row of rows) yield row as T;
+        if (lastKey === null || rows.length < PAGE_SIZE) break;
+        afterKey = lastKey;
+    }
+}
 
 export interface OptimizeProgress {
     /** 正在处理的面（给进度条文案用） */
@@ -176,18 +203,19 @@ export async function optimizeResourceStorage(
             primeContentMemo(safeByHash);
         }
 
-        // ── 1) assets 表 ─────────────────────────────────────────
-        const assets = await DB.getAllAssets();
-        // ── 预取其余四面（总数先算齐，进度条不跳） ──
-        const characters = await DB.getAllCharacters();
-        const songs = await DB.getAllSongs();
-        const parts = await DB.getCustomCreatorParts();
-        const gallery = await DB.getGalleryImages();
-        const total = assets.length + characters.length + songs.length + parts.length + gallery.length;
+        // ── 进度条的总数：五张表各数一下行数 ─────────────────────
+        // 只要个数字，count() 不读行里的内容，几十 MB 的图不会被顺带读进内存。
+        let total = 0;
+        for (const storeName of OPTIMIZE_TARGET_STORES) total += await DB.countStoreRows(storeName);
         let done = 0;
-        const tick = (label: string) => { done++; onProgress?.({ label, done, total }); };
+        // total 是开跑那一刻的快照。跑的中途别处往这几张表写了行，实际走过的行数就跟它对不上：
+        // 多出来的行照样处理，只是报出去的 done 按 total 封顶——done 只增不减也不越过 total，
+        // 进度条既不会倒退也不会冲过头；行变少时它停在不满格的位置，函数返回即收尾
+        // （展示侧本来就以返回为准，不靠进度条判完成）。
+        const tick = (label: string) => { done++; onProgress?.({ label, done: Math.min(done, total), total }); };
 
-        for (const a of assets) {
+        // ── 1) assets 表 ─────────────────────────────────────────
+        for await (const a of iterateStoreRows<{ id: string; data: string }>('assets')) {
             tick('系统外观');
             if (typeof a.data !== 'string') continue;
             if (PLAIN_ASSET_IDS.has(a.id) || a.id.startsWith('icon_')) {
@@ -219,7 +247,7 @@ export async function optimizeResourceStorage(
         }
 
         // ── 2) characters 的小屋图 ────────────────────────────────
-        for (const c of characters) {
+        for await (const c of iterateStoreRows<CharacterProfile>('characters')) {
             tick('小屋');
             const rc = (c as any).roomConfig;
             if (!rc) continue;
@@ -238,14 +266,14 @@ export async function optimizeResourceStorage(
         }
 
         // ── 3) songs 封面 ─────────────────────────────────────────
-        for (const s of songs) {
+        for await (const s of iterateStoreRows<SongSheet>('songs')) {
             tick('歌曲封面');
             const token = await convert((s as any).coverImage);
             if (token) { (s as any).coverImage = token; await DB.saveSong(s); await yieldMain(); }
         }
 
         // ── 4) 捏人器自定义部件 ───────────────────────────────────
-        for (const p of parts) {
+        for await (const p of iterateStoreRows<CustomCreatorPart>('cc_custom_parts')) {
             tick('捏人器部件');
             const srcIsData = typeof p.src === 'string' && p.src.startsWith('data:');
             const shadowIsData = typeof p.shadowSrc === 'string' && p.shadowSrc.startsWith('data:');
@@ -260,7 +288,7 @@ export async function optimizeResourceStorage(
 
         // ── 5) 相册 ───────────────────────────────────────────────
         // 聊天里发的每张图都会存一份进来，是最容易堆大的一面。
-        for (const g of gallery) {
+        for await (const g of iterateStoreRows<GalleryImage>('gallery')) {
             tick('相册');
             const token = await convert(g.url);
             if (token) { g.url = token; await DB.saveGalleryImage(g); await yieldMain(); }

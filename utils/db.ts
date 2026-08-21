@@ -1324,6 +1324,22 @@ export const DB = {
       });
   },
 
+  // 数一张表有多少行，不读行里的内容。给「优化资源存储」算进度条总数用
+  // （utils/storageOptimize.ts）：那几张表加起来能有几十 MB，只为算个总数就整表读进内存太亏，
+  // count() 只回行数，代价跟表里存了多大的图基本无关。
+  // 表不存在时返回 0，跟 getStoreRowsPage 的空页兜底一个口径：没有这张表 = 没有行。
+  countStoreRows: async (storeName: string): Promise<number> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(storeName)) return 0;
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(storeName, 'readonly');
+          const request = transaction.objectStore(storeName).count();
+          request.onsuccess = () => resolve(request.result || 0);
+          request.onerror = () => reject(request.error);
+          transaction.onabort = () => reject(transaction.error || new Error('countStoreRows aborted'));
+      });
+  },
+
   /**
    * 通用整行写回（引用改写用，见 utils/blobDedupe.ts）。传进来的必须是从同一张表读出、
    * 原地改过的行——引用面那 7 张表都是 inline keyPath，put(row) 自带主键，不会另起新行。
