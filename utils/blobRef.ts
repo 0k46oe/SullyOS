@@ -38,6 +38,27 @@ export type BlobRef = string & { readonly __blobRef: unique symbol };
 /** 是否是 blobref 令牌。 */
 export const isBlobRef = (v: unknown): v is BlobRef => blobStore.isRef(v);
 
+/**
+ * 这个字段值是「一张图」，还是「一段拿来直接显示的文字」（emoji、名字首字）？
+ *
+ * 头像、店员、贴纸这类字段是两用的：用户可以传图，也可以只填一个 emoji。界面上到处
+ * 都有「是图就 <img>，不是图就当文字画出来」的分叉，而这个判断历来各写各的，形如
+ * `v.startsWith('http') || v.startsWith('data')`。
+ *
+ * 图片改存 Blob 之后，字段里可能是个 `blobref:` 令牌——上面那种写法两个条件都不满足，
+ * 于是令牌被当成文字，界面上直接显示出一串 `blobref:b_xxx`。不报错、不破图，就是明晃晃
+ * 地印在那儿。所以判断收口到这里一处，新形态只需要在这个函数里认一次。
+ *
+ * 认四种：blobref 令牌、内嵌 data URL、http(s) 外链、站内绝对路径（`/assets/…`）。
+ */
+export function isImageValue(value: unknown): value is string {
+    if (typeof value !== 'string' || value === '') return false;
+    return isBlobRef(value)
+        || value.startsWith('data:')
+        || /^https?:\/\//i.test(value)
+        || value.startsWith('/');
+}
+
 /** 把 Blob 存进 blob_assets，返回 `blobref:<id>` 令牌（新 id 由 SDK 生成，`b_` 前缀）。 */
 export async function putImageBlob(blob: Blob): Promise<string> {
     return blobStore.put(blob);
