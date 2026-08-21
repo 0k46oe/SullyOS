@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { DB, openDB } from './db';
 import { optimizeResourceStorage, OPTIMIZE_TARGET_STORES } from './storageOptimize';
 import { REF_SOURCE_STORES, runBlobGc } from './blobGc';
@@ -24,7 +24,7 @@ async function clearStore(name: string): Promise<void> {
 }
 
 beforeEach(async () => {
-    for (const s of ['assets', 'characters', 'messages', 'songs', 'cc_custom_parts', 'blob_assets']) {
+    for (const s of ['assets', 'characters', 'messages', 'songs', 'cc_custom_parts', 'blob_assets', 'memory_vectors']) {
         await clearStore(s);
     }
     localStorage.clear();
@@ -229,5 +229,74 @@ describe('去重：同一张图只留一份 Blob', () => {
         const second = await optimizeResourceStorage();
         expect(second.mergedDuplicates).toBe(0);
         expect(second.converted).toBe(0);
+    });
+});
+
+describe('记忆向量：压成紧凑形态', () => {
+    /** 直接塞一条旧 number[] 形态的向量（绕开 MemoryVectorDB.save，它会当场转成紧凑形态）。 */
+    async function seedLegacyVector(memoryId: string, charId: string, dims: number): Promise<number[]> {
+        const vector = Array.from({ length: dims }, (_, i) => (i % 7) / 7 - 0.5);
+        const db = await openDB();
+        await new Promise<void>((resolve, reject) => {
+            const tx = db.transaction('memory_vectors', 'readwrite');
+            tx.objectStore('memory_vectors').put({ memoryId, charId, vector, dimensions: dims });
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+        return vector;
+    }
+
+    async function readRawVector(memoryId: string): Promise<any> {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const req = db.transaction('memory_vectors', 'readonly').objectStore('memory_vectors').get(memoryId);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    it('一键优化会把旧 number[] 向量压成紧凑字节，数值逐位不变', async () => {
+        const original = await seedLegacyVector('m1', 'c1', 16);
+
+        const r = await optimizeResourceStorage();
+
+        expect(r.vectorsCompacted).toBe(1);
+        expect(r.vectorError).toBeNull();
+        const stored = await readRawVector('m1');
+        expect(ArrayBuffer.isView(stored.vector)).toBe(true);
+        // Float32 精度内逐位一致：压缩必须是无损的，否则召回质量会静默退化
+        const back = new Float32Array(stored.vector.buffer, stored.vector.byteOffset, stored.vector.byteLength >>> 2);
+        expect(back.length).toBe(original.length);
+        for (let i = 0; i < original.length; i++) {
+            expect(back[i]).toBeCloseTo(original[i], 6);
+        }
+    });
+
+    it('幂等：已是紧凑形态的再点一次不重复计数', async () => {
+        await seedLegacyVector('m1', 'c1', 16);
+        await optimizeResourceStorage();
+        const second = await optimizeResourceStorage();
+        expect(second.vectorsCompacted).toBe(0);
+        expect(second.vectorError).toBeNull();
+    });
+
+    it('向量这步失败不吞、也不连累图片那几步的成果', async () => {
+        const mp = await import('./memoryPalace/db');
+        const spy = vi.spyOn(mp.MemoryVectorDB, 'scanAndMigrateLegacy')
+            .mockRejectedValue(new Error('磁盘满了'));
+        try {
+            await DB.saveAsset('wallpaper', TINY_PNG);
+
+            const r = await optimizeResourceStorage();
+
+            // 图片照转完，结果照报
+            expect(r.converted).toBe(1);
+            expect(isBlobRef(await DB.getAsset('wallpaper'))).toBe(true);
+            // 向量的失败原样带出来（开机那次后台扫描就是只 console.warn，卡住了没人知道）
+            expect(r.vectorsCompacted).toBe(0);
+            expect(r.vectorError).toContain('磁盘满了');
+        } finally {
+            spy.mockRestore();
+        }
     });
 });

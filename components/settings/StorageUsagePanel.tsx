@@ -51,18 +51,23 @@ function describeOptimizeResult(r: OptimizeResult): string {
     if (r.mergedDuplicates > 0) {
         parts.push(`把 ${r.mergedDuplicates} 份重复的图片并成了一份，约 ${formatBytes(r.reclaimableBytes)} 会在下次清理时释放`);
     }
+    if (r.vectorsCompacted > 0) {
+        parts.push(`把 ${r.vectorsCompacted} 条记忆向量压成了紧凑格式`);
+    }
     const reloadNote = r.mergedDuplicates > 0 ? '页面即将刷新，让界面和备份都用上合并后的图片。' : '';
+    const vectorNote = r.vectorError ? `记忆向量这一步没做完：${r.vectorError}。再点一次可以接着压。` : '';
     if (parts.length === 0) {
-        if (r.failed > 0) return `有 ${r.failed} 张图片转换失败（已保留原样），其余没有需要优化的。`;
+        if (r.failed > 0) return `有 ${r.failed} 张图片转换失败（已保留原样），其余没有需要优化的。${vectorNote}`;
+        if (vectorNote) return `没有需要优化的图片。${vectorNote}`;
         return r.scanUnavailable
             ? '没有需要优化的图片。这次没能检查重复图片，换个环境再试试。'
-            : '没有需要优化的图片，存储已是最省形态。';
+            : '没有需要优化的，存储已是最省形态。';
     }
     let text = `${parts.join('；')}。`;
     if (r.failed > 0) text += `另有 ${r.failed} 张转换失败，已保留原样。`;
     if (r.skippedGroups > 0) text += `有 ${r.skippedGroups} 组重复图片没有合并——它们被「换一张就会删掉旧图」的地方用着，并了会误删。`;
     if (r.scanUnavailable) text += '这次没能检查重复图片，换个环境再试试。';
-    return text + reloadNote;
+    return text + vectorNote + reloadNote;
 }
 
 const StorageUsagePanel: React.FC = () => {
@@ -264,7 +269,7 @@ const StorageUsagePanel: React.FC = () => {
                             ? optimizeError
                             : optimizeResult
                                 ? describeOptimizeResult(optimizeResult)
-                                : '把老数据里仍以 base64 存的图片一次性转成二进制，再把重复存了好几份的同一张图并成一份。做过一次就干净；导入过旧备份后可以再点。'}
+                                : '把老数据里仍以 base64 存的图片一次性转成二进制，把重复存了好几份的同一张图并成一份，再把记忆向量压成紧凑格式。做过一次就干净；导入过旧备份后可以再点。'}
                 </p>
                 {/* 合并动的是库里的引用，内存里的 theme / customIcons 还捏着合并前的令牌。
                     不刷新的话：界面照常显示，但导出的备份里 metadata 写的仍是旧令牌，

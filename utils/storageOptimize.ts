@@ -1,8 +1,9 @@
-// 「优化资源存储」：一个按钮还两笔存储上的债。
+// 「优化资源存储」：一个按钮还三笔存储上的债。
 //
 //   一、把已接入令牌链路的面里仍以 base64（data:image）落库的存量图片，批量转成
 //       blobref 令牌 + Blob 二进制（省掉 base64 的 ~33% 膨胀）。
 //   二、把「同一张图在库里存了好几份 Blob」收敛成一份。
+//   三、把还停留在 number[] 形态的记忆向量压成 Float32 原始字节（每维 ~20 字节 → 4 字节）。
 //
 // 第一笔债的由来：这些面平时靠惰性迁移——哪个消费点读到 data: 才顺手转（加载壁纸、
 // 进小屋……），从不打开的内容会一直躺着多占空间；导入 v2 老备份也会重新带进一批 base64。
@@ -12,8 +13,13 @@
 // 令牌在全部引用面上改写成组内保留的那个。合并只改引用、不删 Blob——失去引用的那几份
 // 变成孤儿，交给孤儿 GC 收（删除不可逆，走那条带安全阀的老路更稳）。
 //
-// 两笔债咬合在一起：扫库结果会先给 blobRef 的内容记忆预热，所以第一步转换时遇到「库里
+// 前两笔债咬合在一起：扫库结果会先给 blobRef 的内容记忆预热，所以第一步转换时遇到「库里
 // 已经有一份同样内容」的图，直接复用那个令牌，不会又存出一份新的重复来。
+//
+// 第三笔债的由来：向量的紧凑形态（Uint8Array）和读出口（ensureFloat32）早就到位，靠的却是
+// 「谁被搜到谁才转」的惰性迁移 + 一次开机后台扫描；后者跑在页面加载后台、失败只 console.warn，
+// 从外面完全看不出来它有没有跑完。这里把同一个扫描挂到手动按钮上，并把失败原样报到界面——
+// 一次没转完，下次再点就是了（幂等）。压缩是无损的：读出口两种形态都认，召回质量不受影响。
 //
 // 跑过一遍后再跑就是 no-op（幂等），导入过旧备份后可以再跑。
 //
@@ -80,6 +86,10 @@ export interface OptimizeResult {
     skippedGroups: number;
     /** 扫库没做成（keys 读不出 / 没有 crypto.subtle），这一轮没有去重 */
     scanUnavailable: boolean;
+    /** 压成紧凑形态的记忆向量条数 */
+    vectorsCompacted: number;
+    /** 向量压缩失败的原因；null = 这轮没出问题。开机那次是静默 warn 的，这里必须报出来 */
+    vectorError: string | null;
 }
 
 export async function optimizeResourceStorage(
@@ -92,6 +102,7 @@ export async function optimizeResourceStorage(
         const result: OptimizeResult = {
             converted: 0, uniqueBlobs: 0, bytesBefore: 0, bytesAfter: 0, failed: 0,
             mergedDuplicates: 0, reclaimableBytes: 0, skippedGroups: 0, scanUnavailable: false,
+            vectorsCompacted: 0, vectorError: null,
         };
         // 同一份 base64 全局只建一个 Blob。与 migrateAppearancePresetBlobRefs 共用
         // （它的 cache 契约就是 dataUrl → 已存值）。
@@ -261,6 +272,18 @@ export async function optimizeResourceStorage(
                     result.reclaimableBytes += plan.bytesByToken.get(ref) ?? 0;
                 }
             }
+        }
+
+        // ── 6) 记忆向量压成紧凑形态 ───────────────────────────────
+        // 跟图片没有任何关系，单独一个 try：图片那几步的成果不该因为向量失败就报不出来。
+        // 反过来也不吞错——开机那次后台扫描正是因为只 console.warn，卡住了也没人知道。
+        try {
+            const { MemoryVectorDB } = await import('./memoryPalace/db');
+            result.vectorsCompacted = await MemoryVectorDB.scanAndMigrateLegacy((migrated, scanned) => {
+                onProgress?.({ label: '压缩记忆向量', done: migrated, total: Math.max(scanned, migrated) });
+            });
+        } catch (e) {
+            result.vectorError = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
         }
 
         return result;
