@@ -1131,7 +1131,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                                 <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-colors shrink-0 ${visibilitySelection.has(c.id) ? 'bg-primary border-primary' : 'bg-slate-100 border-slate-300'}`}>
                                     {visibilitySelection.has(c.id) && <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
                                 </div>
-                                <img src={c.avatar} className="w-9 h-9 rounded-xl object-cover" />
+                                <TokenImg value={c.avatar} className="w-9 h-9 rounded-xl object-cover" />
                                 <div className="flex-1 min-w-0">
                                     <div className="font-bold text-sm text-slate-700">{c.name}</div>
                                     <div className="text-[10px] text-slate-400 truncate">{c.description}</div>

@@ -82,6 +82,7 @@ import {
   type AvatarTouchRecord,
 } from '../utils/avatarTouch';
 import { dataUrlToBlob, deleteBlobRef, isBlobRef, putImageBlob, useBlobRefUrl } from '../utils/blobRef';
+import TokenImg from '../components/os/TokenImg';
 import { CALL_LIGHT_THEME_CSS } from '../components/call/callLightTheme';
 import AvatarTouchFeedback, { type AvatarTouchEffect } from '../components/call/AvatarTouchFeedback';
 import { isBuiltinSullyLive2D, setBuiltinSullyLive2DQuality, type BuiltinSullyLive2DQuality } from '../utils/builtinSullyLive2D';
@@ -2957,6 +2958,8 @@ ${sentencePlan}`;
   };
   // ── 视频舞台自定义背景：blobref 令牌（本地图片）或 http(s) 图床直链 ──
   const stageBackgroundUrl = useBlobRefUrl(selectedChar?.videoCallBackground);
+  // 通话页那层模糊头像画在 CSS background-image 上，吃不到 TokenImg 的解析，这里自己解析一次。
+  const blurredAvatarUrl = useBlobRefUrl(selectedChar?.avatar);
   const applyStageBackground = async (value?: string) => {
     if (!selectedChar) return;
     const previous = selectedChar.videoCallBackground;
@@ -3103,7 +3106,7 @@ ${sentencePlan}`;
         {selectedChar?.avatar && (
           <div className="absolute top-0 right-0 w-48 h-60 pointer-events-none"
             style={{ WebkitMaskImage: 'radial-gradient(135% 105% at 100% 0%, #000 32%, transparent 72%)', maskImage: 'radial-gradient(135% 105% at 100% 0%, #000 32%, transparent 72%)' }}>
-            <img src={selectedChar.avatar} alt="" className="w-full h-full object-cover object-top opacity-60" />
+            <TokenImg value={selectedChar.avatar} alt="" className="w-full h-full object-cover object-top opacity-60" />
           </div>
         )}
 
@@ -3141,7 +3144,7 @@ ${sentencePlan}`;
                   <div className="flex items-center gap-3.5">
                     <div className="w-12 h-12 rounded-full overflow-hidden border flex items-center justify-center font-semibold shrink-0"
                       style={{ borderColor: selected ? accentColor : 'rgba(255,255,255,0.25)', backgroundColor: `${accentColor}40` }}>
-                      {char.avatar ? <img src={char.avatar} alt={char.name} className="w-full h-full object-cover" /> : (char.name?.[0] || '角')}
+                      {char.avatar ? <TokenImg value={char.avatar} alt={char.name} className="w-full h-full object-cover" /> : (char.name?.[0] || '角')}
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="font-semibold text-[15px] truncate" style={selected ? { color: accentColor } : undefined}>{char.name}</div>
@@ -3549,7 +3552,7 @@ ${sentencePlan}`;
       {/* blurred character art */}
       <div
         className="absolute inset-0 bg-cover bg-center scale-125 blur-3xl opacity-30"
-        style={{ backgroundImage: selectedChar?.avatar ? `url(${selectedChar.avatar})` : undefined }}
+        style={{ backgroundImage: blurredAvatarUrl ? `url(${blurredAvatarUrl})` : undefined }}
       />
       {/* accent aura glows */}
       <div className="absolute -top-28 left-1/2 -translate-x-1/2 w-[130%] h-72 rounded-full blur-3xl opacity-40 pointer-events-none"
@@ -3739,7 +3742,7 @@ ${sentencePlan}`;
             <div className="absolute -inset-1 rounded-full" style={{ boxShadow: `0 0 0 1px ${accentColor}55, inset 0 0 24px ${accentColor}33` }} />
             <div className={`absolute inset-0 rounded-full border ${displayCallState === 'speaking' ? 'animate-ping' : 'opacity-40'}`} style={{ borderColor: `${accentColor}66` }} />
             {selectedChar?.avatar
-              ? <img src={selectedChar.avatar} alt={selectedChar.name} draggable={false} className="relative z-10 h-full w-full rounded-full object-cover" style={{ boxShadow: `0 0 30px ${accentColor}55` }} />
+              ? <TokenImg value={selectedChar.avatar} alt={selectedChar.name} draggable={false} className="relative z-10 h-full w-full rounded-full object-cover" style={{ boxShadow: `0 0 30px ${accentColor}55` }} />
               : <div className="relative z-10 flex h-full w-full items-center justify-center rounded-full text-4xl font-serif" style={{ backgroundColor: `${accentColor}55` }}>{selectedChar?.name?.[0] || '角'}</div>}
             <AvatarTouchFeedback
               characterName={selectedChar?.name || '对方'}

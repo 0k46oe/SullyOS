@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { useOS } from '../../context/OSContext';
 import { processImage } from '../../utils/file';
+import TokenImg from '../os/TokenImg';
 
 /**
  * 档案 App「分角色聊天头像」：给每个角色的私聊单独设置「你」的头像。
@@ -144,10 +145,10 @@ const PerCharAvatarPicker: React.FC = () => {
                             return (
                                 <button key={c.id} onClick={() => openEditor(c.id)} className="flex flex-col items-center gap-1.5 group active:scale-95 transition-transform">
                                     <div className="relative">
-                                        <img src={c.avatar} alt="" className="w-14 h-14 rounded-full object-cover bg-slate-100 border border-slate-100 group-hover:border-primary/30 transition-colors" />
+                                        <TokenImg value={c.avatar} alt="" className="w-14 h-14 rounded-full object-cover bg-slate-100 border border-slate-100 group-hover:border-primary/30 transition-colors" />
                                         {/* 右下小圆 = 这个聊天里「你」的头像；设置过 → 主题色描边，否则灰显整体头像 */}
-                                        <img
-                                            src={override || userProfile.avatar}
+                                        <TokenImg
+                                            value={override || userProfile.avatar}
                                             alt=""
                                             className={`absolute -bottom-1.5 -right-1.5 w-7 h-7 rounded-full object-cover bg-white shadow-sm ${override ? 'ring-2 ring-primary' : 'ring-2 ring-white opacity-60'}`}
                                         />
@@ -198,12 +199,12 @@ const PerCharAvatarPicker: React.FC = () => {
 
                         <div className="flex items-center justify-center gap-5 mb-4">
                             <div className="flex flex-col items-center gap-1">
-                                <img src={editingChar.avatar} className="w-16 h-16 rounded-full object-cover bg-slate-100" alt="" />
+                                <TokenImg value={editingChar.avatar} className="w-16 h-16 rounded-full object-cover bg-slate-100" alt="" />
                                 <span className="text-[10px] text-slate-400">{editingChar.name}</span>
                             </div>
                             <span className="text-slate-300 text-lg">×</span>
                             <div className="flex flex-col items-center gap-1">
-                                <img src={editingOverride || userProfile.avatar} className={`w-16 h-16 rounded-full object-cover bg-slate-100 ${editingOverride ? 'ring-2 ring-primary' : 'ring-2 ring-slate-200'}`} alt="" />
+                                <TokenImg value={editingOverride || userProfile.avatar} className={`w-16 h-16 rounded-full object-cover bg-slate-100 ${editingOverride ? 'ring-2 ring-primary' : 'ring-2 ring-slate-200'}`} alt="" />
                                 <span className="text-[10px] text-slate-400">{editingOverride ? '已单独设置' : '整体头像（默认）'}</span>
                             </div>
                         </div>

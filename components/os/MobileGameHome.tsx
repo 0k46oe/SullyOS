@@ -4,6 +4,7 @@ import { Icons, INSTALLED_APPS } from '../../constants';
 import { AppID, CharacterProfile } from '../../types';
 import { DB } from '../../utils/db';
 import AppIcon from './AppIcon';
+import TokenImg from './TokenImg';
 import { getMobileGameArt } from './mobilegameArt';
 import { SCHEMES, hsl, schemePreview, type TgStyle } from './gotchiScheme';
 import { getChibi } from '../../utils/vrWorld/chibi';
@@ -373,7 +374,7 @@ const MobileGameHome: React.FC = () => {
                             style={{ background: `linear-gradient(135deg, ${PAL.pink}, ${PAL.peri}, ${PAL.lilac})`, boxShadow: '0 6px 16px rgba(150,120,200,0.35)' }}>
                             <div className="w-full h-full rounded-full overflow-hidden" style={{ border: '2px solid #fff' }}>
                                 {widgetChar?.avatar
-                                    ? <img src={widgetChar.avatar} className="w-full h-full object-cover" alt="char" loading="lazy" />
+                                    ? <TokenImg value={widgetChar.avatar} className="w-full h-full object-cover" alt="char" loading="lazy" />
                                     : <div className="w-full h-full flex items-center justify-center text-2xl" style={{ background: PAL.mist, color: PAL.lilac }}>✦</div>}
                             </div>
                         </div>

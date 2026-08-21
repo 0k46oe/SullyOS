@@ -7,6 +7,7 @@ import { processImage } from '../utils/file';
 import { safeResponseJson, extractContent } from '../utils/safeApi';
 import { buildChatFineTuneCss, mergeChatFineTune } from '../utils/chatFineTuneCss';
 import ChatFineTunePanel from '../components/chat/ChatFineTunePanel';
+import TokenImg from '../components/os/TokenImg';
 import { FadersHorizontal } from '@phosphor-icons/react';
 import { generateDailyScheduleForChar, isScheduleFeatureOn } from '../utils/scheduleGenerator';
 import { getDailyScheduleForChar } from '../utils/dailySchedule';
@@ -3706,7 +3707,7 @@ const Chat: React.FC = () => {
 
                 {instantToolStatus && !selectionMode && (
                     <div className="flex items-end gap-3 px-3 mb-4 animate-fade-in">
-                        <img src={char.avatar} className={chatPendingAvatarClass} />
+                        <TokenImg value={char.avatar} className={chatPendingAvatarClass} />
                         <div className={`max-w-[78%] px-4 py-3 rounded-2xl shadow-sm border ${
                             instantToolStatus.phase === 'failed'
                                 ? 'bg-rose-50 border-rose-100 text-rose-700'
@@ -3782,7 +3783,7 @@ const Chat: React.FC = () => {
                 {/* instantChatPending：这一轮在云端跑，本机可以关页面，指示灯靠落盘记录活着。 */}
                 {(isTyping || instantChatPending || recallStatus || searchStatus || diaryStatus || isProactiveComposing) && !selectionMode && (
                     <div className="flex items-end gap-3 px-3 mb-6 animate-fade-in">
-                        <img src={char.avatar} className={chatPendingAvatarClass} />
+                        <TokenImg value={char.avatar} className={chatPendingAvatarClass} />
                         <div className="bg-white px-4 py-3 rounded-2xl shadow-sm">
                             {isProactiveComposing && !isTyping && !recallStatus && !searchStatus && !diaryStatus ? (
                                 <div className="flex items-center gap-2 text-xs text-teal-600 font-medium">
@@ -4227,7 +4228,7 @@ const Chat: React.FC = () => {
                                     onClick={() => handleForwardToCharacter(c.id)}
                                     className="w-full flex items-center gap-3 p-3 rounded-2xl bg-slate-50 hover:bg-slate-100 active:scale-[0.98] transition-all border border-slate-100"
                                 >
-                                    <img src={c.avatar} className="w-10 h-10 rounded-xl object-cover" />
+                                    <TokenImg value={c.avatar} className="w-10 h-10 rounded-xl object-cover" />
                                     <div className="flex-1 text-left">
                                         <div className="font-bold text-sm text-slate-700">{c.name}</div>
                                         <div className="text-[10px] text-slate-400 truncate">{c.description}</div>

@@ -21,6 +21,8 @@ import { DB } from '../../utils/db';
 import { C, Sparkle, MizuHeader, BokehBg, MiniPlayer } from './MusicUI';
 import { ArrowLeft, MusicNote, Heart, Plus, MagnifyingGlass, Trash, Check } from '@phosphor-icons/react';
 import { getDailyScheduleForChar } from '../../utils/dailySchedule';
+import TokenImg from '../../components/os/TokenImg';
+import { isBlobRef } from '../../utils/blobRef';
 import { useLocalDateKey } from '../../hooks/useLocalDateKey';
 import { resolveCharTimeZone } from '../../utils/timezone';
 import { trackEvent } from '../../utils/analytics';
@@ -352,8 +354,9 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
           style={{ boxShadow: `0 10px 40px ${C.glow}15` }}>
           <div className="flex items-center gap-3">
             <div className="relative shrink-0">
-              {char.avatar && char.avatar.startsWith('data:') || char.avatar?.startsWith('http') ? (
-                <img src={char.avatar} alt="" className="w-16 h-16 rounded-2xl object-cover"
+              {/* 头像可能是 base64 / 图床直链 / blobref 令牌，三种都算图；其余当 emoji 或首字兜底。 */}
+              {char.avatar && (char.avatar.startsWith('data:') || char.avatar.startsWith('http') || isBlobRef(char.avatar)) ? (
+                <TokenImg value={char.avatar} alt="" className="w-16 h-16 rounded-2xl object-cover"
                   style={{ border: `2px solid ${C.glow}60`, boxShadow: `0 4px 20px ${C.glow}30` }} />
               ) : (
                 <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-2xl"

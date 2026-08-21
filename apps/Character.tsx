@@ -16,6 +16,8 @@ import ImpressionPanel from '../components/character/ImpressionPanel';
 import RoomPlatePanel from '../components/character/RoomPlatePanel';
 import MemoryArchivist from '../components/character/MemoryArchivist';
 import ChibiStudio, { ChibiShelfPanel } from '../components/character/ChibiStudio';
+import TokenImg from '../components/os/TokenImg';
+import { resolveBlobRefsDeep } from '../utils/blobRef';
 import { characterLaunch } from '../utils/characterLaunch';
 import { safeFetchJson, extractContent } from '../utils/safeApi';
 import { fetchMiniMaxVoices, MiniMaxVoiceItem } from '../utils/minimaxVoice';
@@ -65,7 +67,7 @@ const CharacterCard: React.FC<{
     >
         <div className="flex items-center gap-4">
             <div className="w-14 h-14 shrink-0 rounded-full overflow-hidden border border-violet-100 bg-violet-50">
-                <img src={char.avatar} className="w-full h-full object-cover" alt={char.name} />
+                <TokenImg value={char.avatar} className="w-full h-full object-cover" alt={char.name} />
             </div>
             <div className="flex-1 min-w-0 pr-6">
                 <h3 className="text-lg font-bold truncate text-slate-800">
@@ -991,9 +993,23 @@ ${isInitialGeneration ? `
       // 导出前明文密钥体检 + 二次确认：正常为「安全，可分享」；若意外检出密钥则中止并提示上报。
       if (!(await confirmExportSafety(exportData))) return;
 
+      // 角色身上的图（Q 版形象 sprites、见面皮肤 dateSkinSets）存的是令牌，令牌只有本机认得，
+      // 原样导出对方只会拿到一串死字符串、图全空。所以先在一份深拷贝上把令牌换回内嵌的 data URL
+      // （resolveBlobRefsDeep 是原地改的，绝不能拿 formData 去喂，那等于把用户自己的角色图改没了）。
+      const portableData: CharacterExportData =
+          typeof structuredClone === 'function'
+              ? structuredClone(exportData)
+              : JSON.parse(JSON.stringify(exportData));
+      try {
+          await resolveBlobRefsDeep(portableData);
+      } catch {
+          addToast('导出失败：角色身上的图读取不出来', 'error');
+          return;
+      }
+
       trackEvent('导出角色卡');
 
-      const json = JSON.stringify(exportData, null, 2);
+      const json = JSON.stringify(portableData, null, 2);
       const fileName = `${formData.name || 'Character'}_Card.json`;
       
       if (Capacitor.isNativePlatform()) {
@@ -1287,7 +1303,7 @@ ${isInitialGeneration ? `
                        <div className="space-y-6 animate-fade-in">
                            <div className="flex items-center gap-5">
                                <div className="relative group cursor-pointer w-24 h-24 shrink-0" onClick={() => fileInputRef.current?.click()}>
-                                   <div className="w-full h-full rounded-[2rem] shadow-md bg-white border-4 border-white overflow-hidden relative"><img src={formData.avatar} className={`w-full h-full object-cover ${isCompressing ? 'opacity-50 blur-sm' : ''}`} alt="A" /></div>
+                                   <div className="w-full h-full rounded-[2rem] shadow-md bg-white border-4 border-white overflow-hidden relative"><TokenImg value={formData.avatar} className={`w-full h-full object-cover ${isCompressing ? 'opacity-50 blur-sm' : ''}`} alt="A" /></div>
                                    <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleFileChange} />
                                </div>
                                <div className="flex-1 space-y-3">

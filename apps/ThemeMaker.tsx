@@ -1968,7 +1968,7 @@ const ThemeMaker: React.FC = () => {
                                         })}
                                         className={`flex items-center gap-3 p-2.5 rounded-2xl border cursor-pointer transition-all ${checked ? 'bg-indigo-50/80 border-indigo-200' : 'bg-white border-slate-100'}`}
                                     >
-                                        <img src={c.avatar} className="w-10 h-10 rounded-xl object-cover shrink-0" alt="" />
+                                        <TokenImg value={c.avatar} className="w-10 h-10 rounded-xl object-cover shrink-0" alt="" />
                                         <div className="flex-1 min-w-0">
                                             <div className="text-[13px] font-bold text-slate-700 truncate">{c.name}</div>
                                             <div className="text-[10px] text-slate-400 truncate">

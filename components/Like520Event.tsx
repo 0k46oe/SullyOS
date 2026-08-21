@@ -15,6 +15,7 @@ import { creatorPartToBlobRefs, loadCreatorPartsForRender } from '../utils/creat
 import { CharacterProfile, SpecialMomentRecord } from '../types';
 import { safeResponseJson } from '../utils/safeApi';
 import { assetMirrors, attachAudioMirrorFallback } from '../utils/assetUrl';
+import TokenImg from './os/TokenImg';
 import {
     runLike520CallA,
     runLike520CallB,
@@ -1853,7 +1854,7 @@ const Y520Scene: React.FC<Y520SceneProps> = ({ callA, charName, charAvatar, char
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <div className="l520-charpill">
                             {charAvatar?.startsWith('http') || charAvatar?.startsWith('data:')
-                                ? <img src={charAvatar} alt={charName} />
+                                ? <TokenImg value={charAvatar} alt={charName} />
                                 : <span className="l520-charpill-emoji">{charAvatar || '🌸'}</span>}
                             <span>{charName}</span>
                         </div>
@@ -2196,7 +2197,7 @@ const UncoveredLineView: React.FC<{
                 <div className="l520-header-row">
                     <div className="l520-charpill">
                         {charAvatar?.startsWith('http') || charAvatar?.startsWith('data:')
-                            ? <img src={charAvatar} alt={charName} />
+                            ? <TokenImg value={charAvatar} alt={charName} />
                             : <span className="l520-charpill-emoji">{charAvatar || '🌸'}</span>}
                         <span>{charName}</span>
                     </div>
@@ -2689,7 +2690,7 @@ const DoneView: React.FC<{
                     {charChibi ? (
                         <img src={charChibi} alt="" style={{ height: 110, objectFit: 'contain', filter: 'drop-shadow(0 0 1.5px #fff) drop-shadow(0 0 1.5px #fff) drop-shadow(0 0 3px rgba(255,255,255,0.85)) drop-shadow(0 6px 12px rgba(199,97,130,0.35))' }} />
                     ) : charAvatar ? (
-                        <img src={charAvatar} alt="" style={{ width: 80, height: 80, borderRadius: '50%', objectFit: 'cover', boxShadow: '0 6px 14px rgba(199,97,130,0.3)' }} />
+                        <TokenImg value={charAvatar} alt="" style={{ width: 80, height: 80, borderRadius: '50%', objectFit: 'cover', boxShadow: '0 6px 14px rgba(199,97,130,0.3)' }} />
                     ) : null}
                     {userChibi && (
                         <img src={userChibi} alt="" style={{ height: 110, objectFit: 'contain', filter: 'drop-shadow(0 0 1.5px #fff) drop-shadow(0 0 1.5px #fff) drop-shadow(0 0 3px rgba(255,255,255,0.85)) drop-shadow(0 6px 12px rgba(199,97,130,0.35))' }} />
@@ -3863,7 +3864,7 @@ export const Like520Controller: React.FC<Like520ControllerProps> = ({ onClose, i
                                         className="flex flex-col items-center gap-2 p-3 bg-[#FFF8F1] rounded-2xl border border-[#FCEDD9] active:scale-95 transition-transform"
                                     >
                                         {c.avatar?.startsWith('http') || c.avatar?.startsWith('data:') ? (
-                                            <img src={c.avatar} alt={c.name} className="w-12 h-12 rounded-full object-cover" />
+                                            <TokenImg value={c.avatar} alt={c.name} className="w-12 h-12 rounded-full object-cover" />
                                         ) : (
                                             <div className="w-12 h-12 rounded-full bg-white flex items-center justify-center text-2xl">
                                                 {c.avatar || '🌸'}

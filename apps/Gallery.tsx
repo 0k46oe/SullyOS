@@ -265,8 +265,8 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
                             </div>
                             {/* Image layer - hidden until loaded to prevent blank rectangles on mobile */}
                             {status !== 'error' && (
-                                <img
-                                    src={char.avatar}
+                                <TokenImg
+                                    value={char.avatar}
                                     alt={char.name}
                                     className={`absolute inset-0 w-full h-full object-cover z-10 transition-opacity duration-300 group-hover:scale-105 ${status === 'loaded' ? 'opacity-90 group-hover:opacity-100' : 'opacity-0'}`}
                                     loading="lazy"
@@ -344,7 +344,7 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
                 {selectedImage.review ? (
                     <div className="p-5 animate-slide-up">
                         <div className="flex items-start gap-3 mb-3">
-                            <img src={characters.find(c => c.id === activeCharId)?.avatar} className="w-9 h-9 rounded-full border border-white/20 object-cover shadow-sm" />
+                            <TokenImg value={characters.find(c => c.id === activeCharId)?.avatar} className="w-9 h-9 rounded-full border border-white/20 object-cover shadow-sm" />
                             <div className="flex-1">
                                 <div className="text-xs font-bold text-white/50 mb-1.5 uppercase tracking-wide">{characters.find(c => c.id === activeCharId)?.name} 的点评</div>
                                 <p className="text-[15px] text-white/90 leading-relaxed font-light select-text">"{selectedImage.review}"</p>
