@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { DB, openDB } from './db';
 import { optimizeResourceStorage, OPTIMIZE_TARGET_STORES } from './storageOptimize';
 import { REF_SOURCE_STORES, runBlobGc } from './blobGc';
-import { isBlobRef, getBlobForRef, dataUrlToBlob } from './blobRef';
+import { isBlobRef, getBlobForRef, dataUrlToBlob, putImageBlob, clearContentMemo } from './blobRef';
 import { tryAcquireMaintenanceLock, releaseMaintenanceLock } from './maintenanceLock';
 
 // fake-indexeddb 已通过 test-setup.ts 注入。
@@ -24,9 +24,12 @@ async function clearStore(name: string): Promise<void> {
 }
 
 beforeEach(async () => {
-    for (const s of ['assets', 'characters', 'songs', 'cc_custom_parts', 'blob_assets']) {
+    for (const s of ['assets', 'characters', 'messages', 'songs', 'cc_custom_parts', 'blob_assets']) {
         await clearStore(s);
     }
+    localStorage.clear();
+    // 内容记忆是模块级的，不清会让上一条用例存的令牌被这条复用，断言全乱
+    clearContentMemo();
 });
 
 async function blobBytes(token: string): Promise<Uint8Array> {
@@ -153,5 +156,78 @@ describe('优化资源存储（一次性批量迁移）', () => {
         // 释放后可正常运行（锁没被拒绝路径污染）
         const r = await optimizeResourceStorage();
         expect(r.converted).toBe(0);
+    });
+});
+
+describe('去重：同一张图只留一份 Blob', () => {
+    it('存量重复：两份一样的 Blob，优化后引用收敛到最老的那个', async () => {
+        // 造出历史上两条迁移路径各存各的局面（putImageBlob 本身不去重）
+        const older = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        const newer = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        await DB.saveAsset('wallpaper', older);
+        await DB.saveAsset('appearance_preset_1', JSON.stringify({ theme: { wallpaper: newer } }));
+
+        const r = await optimizeResourceStorage();
+
+        expect(await DB.getAsset('wallpaper')).toBe(older);
+        expect(JSON.parse((await DB.getAsset('appearance_preset_1'))!).theme.wallpaper).toBe(older);
+        expect(r.mergedDuplicates).toBe(1);
+        expect(r.reclaimableBytes).toBeGreaterThan(0);
+        expect(r.scanUnavailable).toBe(false);
+    });
+
+    it('合并只改引用，不删 Blob——多出来那份留给孤儿清理', async () => {
+        const older = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        const newer = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        await DB.saveAsset('wallpaper', older);
+        await DB.saveAsset('lock_wallpaper', newer);
+
+        await optimizeResourceStorage();
+        expect(await getBlobForRef(newer)).not.toBeNull();
+
+        const gc = await runBlobGc({ minAgeMs: 0 });
+        expect(gc.deleted).toBe(1);
+        expect(await getBlobForRef(newer)).toBeNull();
+        expect(await getBlobForRef(older)).not.toBeNull();
+    });
+
+    it('转换时复用库里已有的同内容 Blob，不再存出新的一份', async () => {
+        const existing = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        await DB.saveAsset('lock_wallpaper', existing);   // 先让它有引用，不是孤儿
+        await DB.saveAsset('wallpaper', TINY_PNG);        // 这行还是 base64，等着被转
+
+        const r = await optimizeResourceStorage();
+
+        expect(await DB.getAsset('wallpaper')).toBe(existing);
+        expect(r.converted).toBe(1);
+        expect(r.uniqueBlobs).toBe(0);   // 一个新 Blob 都没建
+        expect(r.bytesAfter).toBe(0);
+    });
+
+    it('被「换图即删」字段引用的令牌整组跳过合并（否则对方一删这边就破图）', async () => {
+        const wallpaperRef = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        const stageRef = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        await DB.saveAsset('wallpaper', wallpaperRef);
+        // videoCallBackground 换图时是裸删旧 Blob 的
+        await DB.saveCharacter({ id: 'c1', name: '测试角色', videoCallBackground: stageRef } as any);
+
+        const r = await optimizeResourceStorage();
+
+        expect(await DB.getAsset('wallpaper')).toBe(wallpaperRef);
+        expect(((await DB.getAllCharacters())[0] as any).videoCallBackground).toBe(stageRef);
+        expect(r.mergedDuplicates).toBe(0);
+        expect(r.skippedGroups).toBe(1);
+    });
+
+    it('合并跑完是幂等的：再点一次没有重复可合', async () => {
+        const older = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        const newer = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        await DB.saveAsset('wallpaper', older);
+        await DB.saveAsset('lock_wallpaper', newer);
+
+        await optimizeResourceStorage();
+        const second = await optimizeResourceStorage();
+        expect(second.mergedDuplicates).toBe(0);
+        expect(second.converted).toBe(0);
     });
 });

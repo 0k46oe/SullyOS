@@ -8,6 +8,10 @@
 // 新功能把 blobref 令牌写进新的 store / localStorage key 时，必须同步更新这份清单
 // 和下面的 iterateRefSources 生成器。
 //
+// 这份清单有两个消费者：本文件的 GC（只读，扫出谁没人引用）和 utils/blobDedupe.ts 的
+// 令牌合并（读+写，把重复令牌改写成保留的那个）。REF_SOURCE_STORES 两边共用，
+// localStorage 面两边各自枚举一次——加新面时两处都要过一眼。
+//
 // | 面 | 内容字段 | 吐法 |
 // |---|---|---|
 // | characters 表 | avatar / sprites / dateSkinSets / roomConfig（wallImage/floorImage/items[].image）

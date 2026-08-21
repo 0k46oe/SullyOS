@@ -36,6 +36,31 @@ const OTHER_USAGE_MIN_RATIO = 0.1;
 
 type PersistAttempt = 'none' | 'granted' | 'denied';
 
+/**
+ * 把优化结果讲成人话。两笔账分开说：转格式是当场就省下的，合并重复要等下一次
+ * 孤儿清理才真的把空间还回来（合并只改引用、不删图，见 utils/blobDedupe.ts）。
+ */
+function describeOptimizeResult(r: OptimizeResult): string {
+    const parts: string[] = [];
+    if (r.converted > 0) {
+        parts.push(`已把 ${r.converted} 张图片转为二进制存储，释放约 ${formatBytes(Math.max(0, r.bytesBefore - r.bytesAfter))}`);
+    }
+    if (r.mergedDuplicates > 0) {
+        parts.push(`把 ${r.mergedDuplicates} 份重复的图片并成了一份，约 ${formatBytes(r.reclaimableBytes)} 会在下次清理时释放`);
+    }
+    if (parts.length === 0) {
+        if (r.failed > 0) return `有 ${r.failed} 张图片转换失败（已保留原样），其余没有需要优化的。`;
+        return r.scanUnavailable
+            ? '没有需要优化的图片。这次没能检查重复图片，换个环境再试试。'
+            : '没有需要优化的图片，存储已是最省形态。';
+    }
+    let text = `${parts.join('；')}。`;
+    if (r.failed > 0) text += `另有 ${r.failed} 张转换失败，已保留原样。`;
+    if (r.skippedGroups > 0) text += `有 ${r.skippedGroups} 组重复图片没有合并——它们被「换一张就会删掉旧图」的地方用着，并了会误删。`;
+    if (r.scanUnavailable) text += '这次没能检查重复图片，换个环境再试试。';
+    return text;
+}
+
 const StorageUsagePanel: React.FC = () => {
     const [overview, setOverview] = useState<StorageOverview | null>(null);
     const [persisting, setPersisting] = useState(false);
@@ -226,14 +251,20 @@ const StorageUsagePanel: React.FC = () => {
                         : optimizeError
                             ? optimizeError
                             : optimizeResult
-                                ? (optimizeResult.converted > 0
-                                    ? `已把 ${optimizeResult.converted} 张图片转为二进制存储，释放约 ${formatBytes(Math.max(0, optimizeResult.bytesBefore - optimizeResult.bytesAfter))}。`
-                                        + (optimizeResult.failed > 0 ? `另有 ${optimizeResult.failed} 张转换失败，已保留原样。` : '')
-                                    : optimizeResult.failed > 0
-                                        ? `有 ${optimizeResult.failed} 张图片转换失败（已保留原样），其余没有需要优化的。`
-                                        : '没有需要优化的图片，存储已是最省形态。')
-                                : '把老数据里仍以 base64 存的图片一次性转成二进制，通常能省下约四分之一空间。做过一次就干净；导入过旧备份后可以再点。'}
+                                ? describeOptimizeResult(optimizeResult)
+                                : '把老数据里仍以 base64 存的图片一次性转成二进制，再把重复存了好几份的同一张图并成一份。做过一次就干净；导入过旧备份后可以再点。'}
                 </p>
+                {/* 合并动的是库里的引用，界面上正显示的图还指着合并前那份。不刷新也不会坏，
+                    但那几份重复的图要等刷新后才彻底没人用，清理时才能真的收走。 */}
+                {!optimizing && optimizeResult && optimizeResult.mergedDuplicates > 0 && (
+                    <button
+                        type="button"
+                        onClick={() => window.location.reload()}
+                        className="mt-2 w-full px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 text-[10px] font-bold text-slate-500 active:scale-95 transition-all"
+                    >
+                        刷新页面，让界面用上合并后的图片
+                    </button>
+                )}
             </div>
 
             {/* ── 细分（折叠） ── */}

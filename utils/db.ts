@@ -1324,6 +1324,26 @@ export const DB = {
       });
   },
 
+  /**
+   * 通用整行写回（引用改写用，见 utils/blobDedupe.ts）。传进来的必须是从同一张表读出、
+   * 原地改过的行——引用面那 7 张表都是 inline keyPath，put(row) 自带主键，不会另起新行。
+   * 一页一个事务：中途失败时先前提交的页不回滚，但引用改写是幂等的（同一份 mapping
+   * 再跑一遍结果相同），重跑即可补齐。
+   */
+  putStoreRows: async (storeName: string, rows: unknown[]): Promise<void> => {
+      if (rows.length === 0) return;
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(storeName)) return;
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(storeName, 'readwrite');
+          const store = transaction.objectStore(storeName);
+          for (const row of rows) store.put(row as any);
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error || new Error(`putStoreRows(${storeName}) aborted`));
+      });
+  },
+
   getJournalStickers: async (): Promise<{name: string, url: string}[]> => {
     const db = await openDB();
     if (!db.objectStoreNames.contains(STORE_JOURNAL_STICKERS)) return [];
