@@ -23,7 +23,7 @@
 //
 // 跑过一遍后再跑就是 no-op（幂等），导入过旧备份后可以再跑。
 //
-// 五个面都是按主键分页读的，一次只有一批行在内存里。别改回整表读：真实库里这几张表
+// 六个面都是按主键分页读的，一次只有一批行在内存里。别改回整表读：真实库里这几张表
 // 加起来能有几十 MB，光是把它们读进来就够呛，何况全程还得占着。
 //
 // ─── 覆盖面即安全边界（本文件的生死线）───
@@ -37,6 +37,7 @@
 //   songs coverImage                 ← SongwritingApp
 //   cc_custom_parts src / shadowSrc  ← creatorPartToBlobRefs（字段清单复用同一函数）
 //   gallery url                      ← Chat 把用户发的图存进相册时
+//   themes user/ai 各自的 backgroundImage / decoration / avatarDecoration ← 气泡工坊（ThemeMaker）
 // 明确不碰：
 //   · 角色 avatar、聊天图、表情包、社交/手账——写入路径还是 base64，读端不认令牌，
 //     转了就破图（待逐面迁移后再收录）；
@@ -56,10 +57,10 @@ import { blobStore } from './blobStore';
 import { collectUnmergeableRefs, buildMergePlan, rewriteBlobRefs } from './blobDedupe';
 import { creatorPartToBlobRefs } from './creatorPartsBlob';
 import { tryAcquireMaintenanceLock, releaseMaintenanceLock, currentMaintenanceHolder } from './maintenanceLock';
-import type { AppearancePreset, CharacterProfile, CustomCreatorPart, GalleryImage, SongSheet } from '../types';
+import type { AppearancePreset, ChatTheme, CharacterProfile, CustomCreatorPart, GalleryImage, SongSheet } from '../types';
 
 /** 本工具会写的表。守卫测试断言它 ⊆ blobGc 的 REF_SOURCE_STORES（转出的 Blob 必须在 GC 视野内）。 */
-export const OPTIMIZE_TARGET_STORES = ['assets', 'characters', 'songs', 'cc_custom_parts', 'gallery'] as const;
+export const OPTIMIZE_TARGET_STORES = ['assets', 'characters', 'songs', 'cc_custom_parts', 'gallery', 'themes'] as const;
 
 /** 值形态是「裸图片字符串」的 assets 行。 */
 const PLAIN_ASSET_IDS = new Set(['wallpaper', 'lock_wallpaper', 'wallpaper_user_backup']);
@@ -197,7 +198,7 @@ export async function optimizeResourceStorage(
             primeContentMemo(safeByHash);
         }
 
-        // ── 进度条的总数：五张表各数一下行数 ─────────────────────
+        // ── 进度条的总数：六张表各数一下行数 ─────────────────────
         // 只要个数字，count() 不读行里的内容，几十 MB 的图不会被顺带读进内存。
         let total = 0;
         for (const storeName of OPTIMIZE_TARGET_STORES) total += await DB.countStoreRows(storeName);
@@ -288,7 +289,24 @@ export async function optimizeResourceStorage(
             if (token) { g.url = token; await DB.saveGalleryImage(g); await yieldMain(); }
         }
 
-        // ── 6) 合并存量重复：把重复令牌在全部引用面上改写成保留的那个 ──
+        // ── 6) 聊天气泡主题 ───────────────────────────────────────
+        // 一套主题分用户侧和角色侧，每侧各带底纹、气泡贴纸、头像挂件三张图，最多 6 张。
+        // 两侧字段名一样，所以两层循环走同一份清单；漏掉一侧是这一面最容易犯的错。
+        for await (const t of iterateStoreRows<ChatTheme>('themes')) {
+            tick('气泡主题');
+            let changed = false;
+            for (const side of ['user', 'ai'] as const) {
+                const style = t[side];
+                if (!style) continue;
+                for (const key of ['backgroundImage', 'decoration', 'avatarDecoration'] as const) {
+                    const token = await convert(style[key]);
+                    if (token) { style[key] = token; changed = true; }
+                }
+            }
+            if (changed) { await DB.saveTheme(t); await yieldMain(); }
+        }
+
+        // ── 7) 合并存量重复：把重复令牌在全部引用面上改写成保留的那个 ──
         // 只改引用，不删 Blob。失去引用的那几份变成孤儿，由孤儿清理回收。
         if (!result.scanUnavailable && scan.duplicateGroups.length > 0) {
             const plan = buildMergePlan(scan.duplicateGroups, unmergeable);
@@ -306,7 +324,7 @@ export async function optimizeResourceStorage(
             }
         }
 
-        // ── 7) 记忆向量压成紧凑形态 ───────────────────────────────
+        // ── 8) 记忆向量压成紧凑形态 ───────────────────────────────
         // 跟图片没有任何关系，单独一个 try：图片那几步的成果不该因为向量失败就报不出来。
         // 反过来也不吞错——开机那次后台扫描正是因为只 console.warn，卡住了也没人知道。
         try {

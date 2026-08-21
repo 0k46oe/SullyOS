@@ -24,7 +24,8 @@
 // | assets 表 | wallpaper / lock_wallpaper / wallpaper_user_backup / icon_* /
 // |           | appearance_preset_*（JSON）/ room_custom_assets_list（JSON）/
 // |           | ls_mirror_v1（localStorage 镜像，最容易漏）/ spark_* 等 | 分页逐行 |
-// | themes、pixel_home_assets 表 | 目前未见令牌写入，纳入白名单防未来回归 | 分页逐行 |
+// | themes 表 | 聊天气泡主题：user / ai 两侧各自的 backgroundImage / decoration / avatarDecoration | 分页逐行 |
+// | pixel_home_assets 表 | 目前未见令牌写入，纳入白名单防未来回归 | 分页逐行 |
 // | localStorage 全量值 | tama_board_img_<charId> 与旧单键 / acnh_wallpaper_backup /
 // |                     | sully-call-fake-camera-image-v1 / os_theme（JSON，令牌不剥）等 | 先同步快照再逐条吐 value |
 //

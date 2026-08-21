@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { DB, openDB } from './db';
 import { optimizeResourceStorage, OPTIMIZE_TARGET_STORES } from './storageOptimize';
 import { REF_SOURCE_STORES, runBlobGc } from './blobGc';
@@ -12,6 +13,8 @@ import { tryAcquireMaintenanceLock, releaseMaintenanceLock } from './maintenance
 const TINY_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 // 字节内容随意（没人校验 jpeg 魔数），要的只是「另一份不同的 data URL」
 const TINY_JPEG = 'data:image/jpeg;base64,AQIDBAUG';
+// 第三张不同内容的图：气泡主题一侧就有三个图片字段，两张不够摆
+const TINY_GIF = 'data:image/gif;base64,BwgJCgsM';
 
 async function clearStore(name: string): Promise<void> {
     const db = await openDB();
@@ -24,7 +27,7 @@ async function clearStore(name: string): Promise<void> {
 }
 
 beforeEach(async () => {
-    for (const s of ['assets', 'characters', 'messages', 'songs', 'cc_custom_parts', 'gallery', 'blob_assets', 'memory_vectors']) {
+    for (const s of ['assets', 'characters', 'messages', 'songs', 'cc_custom_parts', 'gallery', 'themes', 'blob_assets', 'memory_vectors']) {
         await clearStore(s);
     }
     localStorage.clear();
@@ -155,6 +158,90 @@ describe('优化资源存储（一次性批量迁移）', () => {
         expect(gc.aborted).toBe(false);
         expect(gc.deleted).toBe(0);
         expect(await getBlobForRef(token)).not.toBeNull();
+    });
+
+    /** 一套气泡主题：两侧各带底纹 / 贴纸 / 头像挂件三张图，外加几个不该被碰的数值字段。 */
+    function makeTheme(): any {
+        return {
+            id: 't1', name: '我的气泡', type: 'custom',
+            user: {
+                textColor: '#ffffff', backgroundColor: '#6366f1', borderRadius: 20, opacity: 1,
+                backgroundImage: TINY_PNG, decoration: TINY_JPEG, avatarDecoration: TINY_GIF,
+                decorationX: 88, decorationY: -12, avatarDecorationScale: 1.5,
+            },
+            ai: {
+                textColor: '#1e293b', backgroundColor: '#ffffff', borderRadius: 16, opacity: 0.9,
+                backgroundImage: TINY_GIF, decoration: TINY_PNG, avatarDecoration: TINY_JPEG,
+                decorationX: 10, backgroundImageOpacity: 0.35,
+            },
+        };
+    }
+
+    it('气泡主题：两侧六个图片字段都转成令牌，Blob 字节与原图逐字节一致', async () => {
+        await DB.saveTheme(makeTheme());
+
+        const r = await optimizeResourceStorage();
+
+        const t = (await DB.getThemes()).find(x => x.id === 't1') as any;
+        // 只处理 user 一侧是这一面最容易犯的错，所以两侧逐个字段都要断言
+        for (const side of ['user', 'ai']) {
+            for (const key of ['backgroundImage', 'decoration', 'avatarDecoration']) {
+                expect(isBlobRef(t[side][key])).toBe(true);
+            }
+        }
+        expect(await blobBytes(t.user.backgroundImage)).toEqual(new Uint8Array(await dataUrlToBlob(TINY_PNG).arrayBuffer()));
+        expect(await blobBytes(t.user.decoration)).toEqual(new Uint8Array(await dataUrlToBlob(TINY_JPEG).arrayBuffer()));
+        expect(await blobBytes(t.user.avatarDecoration)).toEqual(new Uint8Array(await dataUrlToBlob(TINY_GIF).arrayBuffer()));
+        expect(await blobBytes(t.ai.backgroundImage)).toEqual(new Uint8Array(await dataUrlToBlob(TINY_GIF).arrayBuffer()));
+        expect(r.converted).toBe(6);
+        expect(r.uniqueBlobs).toBe(3);   // 三张不同的图，两侧交叉引用只建三份 Blob
+        expect(r.failed).toBe(0);
+    });
+
+    it('气泡主题的非图片字段一字不动：颜色、圆角、透明度、贴纸坐标全保持原值', async () => {
+        const before = makeTheme();
+        await DB.saveTheme(before);
+
+        await optimizeResourceStorage();
+
+        const t = (await DB.getThemes()).find(x => x.id === 't1') as any;
+        expect(t.name).toBe('我的气泡');
+        expect(t.user.textColor).toBe('#ffffff');
+        expect(t.user.backgroundColor).toBe('#6366f1');
+        expect(t.user.borderRadius).toBe(20);
+        expect(t.user.opacity).toBe(1);
+        expect(t.user.decorationX).toBe(88);
+        expect(t.user.decorationY).toBe(-12);
+        expect(t.user.avatarDecorationScale).toBe(1.5);
+        expect(t.ai.borderRadius).toBe(16);
+        expect(t.ai.opacity).toBe(0.9);
+        expect(t.ai.backgroundImageOpacity).toBe(0.35);
+    });
+
+    it('气泡主题幂等：第一遍转完，第二遍零转换', async () => {
+        await DB.saveTheme(makeTheme());
+
+        const first = await optimizeResourceStorage();
+        expect(first.converted).toBe(6);
+
+        const second = await optimizeResourceStorage();
+        expect(second.converted).toBe(0);
+        expect(second.uniqueBlobs).toBe(0);
+        expect(second.failed).toBe(0);
+    });
+
+    it('气泡主题独占引用的图不会被孤儿 GC 删掉（themes 必须在 GC 的引用面清单里）', async () => {
+        await DB.saveTheme(makeTheme());
+        await optimizeResourceStorage();
+        const t = (await DB.getThemes()).find(x => x.id === 't1') as any;
+        const tokens = [t.user.backgroundImage, t.user.decoration, t.user.avatarDecoration];
+        for (const token of tokens) expect(isBlobRef(token)).toBe(true);
+
+        // 转出来的 Blob 只有主题这一面引用着：GC 看不见这个面就会把它们全当孤儿删掉
+        const gc = await runBlobGc({ minAgeMs: 0 });
+        expect(gc.aborted).toBe(false);
+        expect(gc.deleted).toBe(0);
+        for (const token of tokens) expect(await getBlobForRef(token)).not.toBeNull();
     });
 
     it('不在清单的字段不动：avatar 的 base64 原样保留（读端还不认令牌）', async () => {
@@ -385,8 +472,8 @@ describe('分页读表：跨页不漏行，进度条对得上', () => {
         expect(r.uniqueBlobs).toBe(1); // 全是同一张图，去重后只建一份 Blob
     });
 
-    it('进度回调：total 就是五面的真实行数，done 一路递增且正好停在 total', async () => {
-        // 五个面各摆几行、行数互不相同——少数了哪一面都对不上
+    it('进度回调：total 就是六面的真实行数，done 一路递增且正好停在 total', async () => {
+        // 六个面各摆几行、行数互不相同——少数了哪一面都对不上
         await DB.saveAsset('wallpaper', TINY_PNG);
         await DB.saveAsset('lock_wallpaper', TINY_JPEG);
         await seedStore('characters', [
@@ -405,10 +492,17 @@ describe('分页读表：跨页不漏行，进度条对得上', () => {
             { id: 'g3', charId: 'c1', url: TINY_PNG, timestamp: 3 },
             { id: 'g4', charId: 'c1', url: TINY_JPEG, timestamp: 4 },
         ]);
-        const expectedRows = 2 + 3 + 1 + 2 + 4;
+        await seedStore('themes', [
+            { id: 't1', name: '气泡一', type: 'custom', user: { backgroundImage: TINY_PNG }, ai: {} },
+            { id: 't2', name: '气泡二', type: 'custom', user: {}, ai: { decoration: TINY_GIF } },
+            { id: 't3', name: '气泡三', type: 'custom', user: {}, ai: {} },
+            { id: 't4', name: '气泡四', type: 'custom', user: {}, ai: {} },
+            { id: 't5', name: '气泡五', type: 'custom', user: {}, ai: {} },
+        ]);
+        const expectedRows = 2 + 3 + 1 + 2 + 4 + 5;
 
-        // 只收五面自己报的那几档：扫库 / 合并 / 向量三段各有各的进度口径，混进来会算错
-        const faceLabels = new Set(['系统外观', '小屋', '歌曲封面', '捏人器部件', '相册']);
+        // 只收六面自己报的那几档：扫库 / 合并 / 向量三段各有各的进度口径，混进来会算错
+        const faceLabels = new Set(['系统外观', '小屋', '歌曲封面', '捏人器部件', '相册', '气泡主题']);
         const events: Array<{ done: number; total: number }> = [];
         await optimizeResourceStorage(p => {
             if (faceLabels.has(p.label)) events.push({ done: p.done, total: p.total });
@@ -418,5 +512,45 @@ describe('分页读表：跨页不漏行，进度条对得上', () => {
         for (const e of events) expect(e.total).toBe(expectedRows); // 总数不是估的
         // done 从 1 数到 total：不倒退、不跳号、不越过
         expect(events.map(e => e.done)).toEqual(Array.from({ length: expectedRows }, (_, i) => i + 1));
+    });
+});
+
+describe('气泡主题导出：分享文件里不能留令牌', () => {
+    // 工坊导出的 .sully-bubble.json 是给别人的，令牌只有本机认得——原样导出，对方导进去
+    // 拿到的是一串死字符串，三张图全空，还没有任何报错。所以导出前必须在深拷贝上跑一遍
+    // resolveBlobRefsDeep 把令牌换回内嵌 data URL。
+    // 真调一次得把整个工坊界面渲染起来，代价太大，这里用源码锚：改坏导出这条就挂。
+    const themeMakerSrc = readFileSync(new URL('../apps/ThemeMaker.tsx', import.meta.url), 'utf8');
+
+    /** 截出 exportSavedTheme 的函数体（到第一处同缩进的收尾 `};` 为止）。 */
+    function exportFnBody(): string {
+        const start = themeMakerSrc.indexOf('const exportSavedTheme');
+        expect(start).toBeGreaterThan(-1);
+        const end = themeMakerSrc.indexOf('\n    };', start);
+        expect(end).toBeGreaterThan(start);
+        return themeMakerSrc.slice(start, end);
+    }
+
+    it('导出前解析令牌，解析的是副本、写进文件的也是那份副本', () => {
+        const body = exportFnBody();
+        // 一、真的解析了
+        const resolved = /await resolveBlobRefsDeep\((\w+)\)/.exec(body);
+        expect(resolved).not.toBeNull();
+        const copyName = resolved![1];
+        // 二、解析的不是库里那份（resolveBlobRefsDeep 原地改对象，喂 theme 等于把用户的主题改空）
+        expect(copyName).not.toBe('theme');
+        expect(body).toMatch(new RegExp(`const ${copyName} = cloneTheme\\(`));
+        // 三、序列化进文件的是解析过的那份，不是原始入参
+        expect(body).toMatch(new RegExp(`theme:\\s*${copyName}\\b`));
+        expect(body.indexOf('resolveBlobRefsDeep')).toBeLessThan(body.indexOf('JSON.stringify'));
+    });
+
+    it('工坊上传的图存的是令牌，不是 base64', () => {
+        const start = themeMakerSrc.indexOf('const handleImageUpload');
+        expect(start).toBeGreaterThan(-1);
+        const body = themeMakerSrc.slice(start, themeMakerSrc.indexOf('\n    };', start));
+        // processImage 给的是 data URL，得再过一道 migrateDataUrlToRef 才进主题
+        expect(body).toMatch(/await migrateDataUrlToRef\(/);
+        expect(body).not.toMatch(/updateStyle\('(backgroundImage|decoration|avatarDecoration)', result\)/);
     });
 });

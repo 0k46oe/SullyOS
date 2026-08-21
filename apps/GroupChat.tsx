@@ -30,6 +30,8 @@ import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } fr
 import { UsersThree, Money, GearSix, Image as ImageIcon, ArrowsClockwise, PaintBrush, BellSimpleRinging, Code, Question } from '@phosphor-icons/react';
 import ChatHeaderShell from '../components/chat/ChatHeaderShell';
 import ChatInputArea from '../components/chat/ChatInputArea';
+import TokenImg from '../components/os/TokenImg';
+import { useBlobRefUrl } from '../utils/blobRef';
 import ChromeCssEditor from '../components/chat/ChromeCssEditor';
 import WhiteboxSoundEditor from '../components/chat/WhiteboxSoundEditor';
 import HtmlCard from '../components/chat/HtmlCard';
@@ -192,6 +194,9 @@ const GroupMessageItem = React.memo(({
         ...(bubbleVariant === 'wechat' ? { boxShadow: 'none', border: '1px solid rgba(15,23,42,0.05)' } : {}),
         ...(bubbleVariant === 'ios' ? { boxShadow: '0 10px 24px rgba(148,163,184,0.16)', border: '1px solid rgba(255,255,255,0.75)', backdropFilter: 'blur(12px)' } : {}),
     };
+    // 气泡底纹画在 CSS background-image 上，拿不到 <img> 那层的自动解析，只能在顶层
+    // 无条件解析一次（hook 不能进条件分支）。挂件/头像挂件走 TokenImg，各自组件内解析。
+    const bubbleBgUrl = useBlobRefUrl(styleConfig.backgroundImage);
 
     // pointer-event 手势（对齐私聊 MessageItem 的方案）：600ms 长按 → 操作菜单；
     // 触屏左滑 ≤-52px → 引用回复（带位移动画）；鼠标右键 → 操作菜单
@@ -306,8 +311,8 @@ const GroupMessageItem = React.memo(({
                         decoding="async"
                     />
                     {styleConfig.avatarDecoration && (
-                        <img
-                            src={styleConfig.avatarDecoration}
+                        <TokenImg
+                            value={styleConfig.avatarDecoration}
                             className="absolute pointer-events-none z-10 max-w-none"
                             style={{
                                 left: `${styleConfig.avatarDecorationX ?? 50}%`,
@@ -362,19 +367,19 @@ const GroupMessageItem = React.memo(({
                         className={`relative px-5 py-3 text-[15px] leading-relaxed whitespace-pre-wrap break-all overflow-visible active:scale-[0.98] transition-transform ${bubbleVariant === 'flat' || bubbleVariant === 'outline' || bubbleVariant === 'wechat' ? '' : 'shadow-sm'} ${bubbleVariant === 'outline' ? '' : 'border border-black/5'} ${isUser ? 'sully-bubble-user' : 'sully-bubble-ai'} ${bubbleGroupClasses}`}
                         style={bubbleStyle}
                     >
-                        {styleConfig.backgroundImage && (
+                        {bubbleBgUrl && (
                             <div
                                 className="absolute inset-0 bg-cover bg-center pointer-events-none z-0"
                                 style={{
-                                    backgroundImage: `url(${styleConfig.backgroundImage})`,
+                                    backgroundImage: `url(${bubbleBgUrl})`,
                                     opacity: styleConfig.backgroundImageOpacity ?? 0.5,
                                     borderRadius: 'inherit',
                                 }}
                             />
                         )}
                         {styleConfig.decoration && (
-                            <img
-                                src={styleConfig.decoration}
+                            <TokenImg
+                                value={styleConfig.decoration}
                                 className="absolute z-10 w-8 h-8 object-contain drop-shadow-sm pointer-events-none"
                                 style={{
                                     left: `${styleConfig.decorationX ?? (isUser ? 90 : 10)}%`,
