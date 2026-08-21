@@ -15,6 +15,7 @@ import { cachedCall as _cachedCall, invalidate as _invalidateCache, clearAll as 
 import { DB } from '../utils/db';
 import { getProxyWorkerUrl, DEFAULT_PROXY_WORKER, PROXY_WORKER_CHANGED_EVENT } from '../utils/proxyWorker';
 import type { PostProcessMusicHooks } from '../utils/applyAssistantPostProcessing';
+import { resolveRefToDataUrl } from '../utils/blobRef';
 
 /* ───────────── 类型 ───────────── */
 export type MusicQuality = 'standard' | 'higher' | 'exhigh' | 'lossless' | 'hires';
@@ -761,13 +762,17 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       // 媒体会话（锁屏 / 通知栏）
       if ('mediaSession' in navigator) {
         try {
+          // 锁屏/通知栏的封面不是 DOM，喂不了 blobref 令牌——那边只认能直接加载的地址。
+          // 用户自己上传的歌曲封面存的就是令牌，不解析的话锁屏上是空白（而且不报错）。
+          // resolveRefToDataUrl 对非令牌原样返回，所以可以无条件走。
+          const artworkSrc = song.albumPic ? await resolveRefToDataUrl(song.albumPic) : '';
           (navigator as any).mediaSession.metadata = new (window as any).MediaMetadata({
             title: song.name,
             artist: song.artists,
             album: song.album,
-            artwork: song.albumPic ? [
-              { src: song.albumPic, sizes: '300x300', type: 'image/jpeg' },
-              { src: song.albumPic, sizes: '512x512', type: 'image/jpeg' },
+            artwork: artworkSrc ? [
+              { src: artworkSrc, sizes: '300x300', type: 'image/jpeg' },
+              { src: artworkSrc, sizes: '512x512', type: 'image/jpeg' },
             ] : [],
           });
         } catch {}

@@ -2129,8 +2129,8 @@ const MessageItem = React.memo(({
                 {/* Cover */}
                 <div className="relative w-full h-28 overflow-hidden">
                     {song.albumPic ? (
-                        <img
-                            src={song.albumPic}
+                        <TokenImg
+                            value={song.albumPic}
                             alt=""
                             className="w-full h-full object-cover"
                             loading="lazy"
