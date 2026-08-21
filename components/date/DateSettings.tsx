@@ -4,6 +4,7 @@ import { useOS } from '../../context/OSContext';
 import { CharacterProfile, SpriteConfig, SkinSet, DateStyleConfig } from '../../types';
 import { processImage } from '../../utils/file';
 import { pickDateFallbackSprite } from '../../utils/dateSprites';
+import TokenImg from '../os/TokenImg';
 import { DATE_STYLE_PRESETS } from '../../utils/datePrompts';
 import ObserveSettings from './ObserveSettings';
 
@@ -232,8 +233,8 @@ const DateSettings: React.FC<DateSettingsProps> = ({ char, onBack }) => {
             <div className="h-64 bg-black relative overflow-hidden shrink-0 border-b border-slate-200">
                     <div className="absolute inset-0 bg-cover bg-center opacity-60" style={{ backgroundImage: char.dateBackground ? `url(${char.dateBackground})` : 'none' }}></div>
                     <div className="absolute inset-0 flex items-end justify-center pointer-events-none">
-                        <img 
-                        src={currentSpriteImg}
+                        <TokenImg
+                        value={currentSpriteImg}
                         className="max-h-[90%] object-contain transition-transform"
                         style={{ 
                             transform: `translate(${tempSpriteConfig.x}%, ${tempSpriteConfig.y}%) scale(${tempSpriteConfig.scale})`

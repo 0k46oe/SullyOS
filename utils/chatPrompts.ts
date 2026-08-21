@@ -23,6 +23,7 @@ import { getCharNameById } from './charNameRegistry';
 import { getLocalDateKey } from './localDate';
 import { getDailyScheduleForChar } from './dailySchedule';
 import { formatRelativeAge } from './groupChat/relativeTime';
+import { isBlobRef } from './blobRef';
 
 // 语音格式指导按当前 TTS 服务商二选一：用 MiniMax 才注入 MiniMax 那套（含 <#秒#> 停顿标记），
 // 用鱼声则注入鱼声版（去掉 MiniMax 专属标记，改用标点 / 省略号控制停顿）。
@@ -37,8 +38,8 @@ const voiceActingGuide = (): string => {
 };
 
 // 群活动注入专用：把一条群消息压成"适合塞进别人私聊背景"的短文本。
-// 关键：image 消息的 content 是 base64（群里发图走 processImage 压成 JPEG，单张几十 KB），
-// 卡片是大段 JSON，emoji 是图床 URL——这些原样内联进每位成员的私聊 system prompt
+// 关键：image 消息的 content 是 blobref 令牌或 base64（群里发图走 processImage 压成 JPEG，
+// 单张几十 KB），卡片是大段 JSON，emoji 是令牌或图床 URL——这些原样内联进每位成员的私聊 system prompt
 // 都是纯噪声，base64 图片更会把上下文直接撑爆（几张群图就能顶到 8w+ 字符，
 // 解散群后该角色私聊上下文从 ~10w 掉回 ~3w 即由此而来）。
 // 注意：私聊自己的历史不会有这个问题，buildMessageHistory 把图片走 image_url 结构化字段、
@@ -71,8 +72,10 @@ function summarizeGroupMsgContent(m: Message): string {
         case 'group_topic_card': return `[群聊公共话题盒${meta.groupTopicBox?.title ? '：' + meta.groupTopicBox.title : ''}] ${meta.groupTopicBox?.summary || m.content || ''}`;
         default: {
             const c = typeof m.content === 'string' ? m.content : '';
-            // 兜底：任何 data:/http(s) 链接都不内联，防止异常/未来新增类型漏网
-            if (/^(data:|https?:\/\/)/i.test(c.trim())) return '[媒体]';
+            // 兜底：任何 data:/http(s) 链接、blobref 令牌都不内联，防止异常/未来新增类型漏网
+            // （令牌内联出去还会在网络出口被还原成完整 data URL，比原样漏一个 URL 贵得多）
+            const trimmed = c.trim();
+            if (/^(data:|https?:\/\/)/i.test(trimmed) || isBlobRef(trimmed)) return '[媒体]';
             return c.length > GROUP_MSG_TEXT_CAP ? c.slice(0, GROUP_MSG_TEXT_CAP) + '…' : c;
         }
     }
@@ -1163,7 +1166,12 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                          return { role: m.role, content: textPart };
                      }
                      // 向下兼容：如果图片数据缺失（例如只导入了文字备份），不要把空 URL 发给 API，否则会报错无法回应
-                     const hasImageData = typeof m.content === 'string' && (m.content.startsWith('data:') || m.content.startsWith('http'));
+                     // 图片有三种形态：base64 data URL、外链 http(s)、本机的 blobref 令牌
+                     // （二进制在 blob_assets，见 utils/blobRef.ts）。令牌既不以 data: 也不以 http 开头，
+                     // 这里认不出来的话，图明明还在，模型收到的却是「图片数据已不可用」——不报错、不破图，最难查。
+                     // 令牌原样放进 image_url 就行，发请求时网络出口那层会统一还原成 data URL（utils/apiBlobRefs.ts）。
+                     const hasImageData = typeof m.content === 'string'
+                         && (m.content.startsWith('data:') || m.content.startsWith('http') || isBlobRef(m.content));
                      let textPart = hasImageData
                          ? `${timeStr} [User sent an image]`
                          : `${timeStr} [User sent an image, but the image data is no longer available]`;

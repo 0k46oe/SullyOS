@@ -1315,6 +1315,95 @@ export const DB = {
       });
   },
 
+  // 只列 blobRef 命名空间的 id（img_ 存量 / b_ SDK 新生成）。blob_assets 是混用表，
+  // GC 的世界观必须限制在自己的前缀内；今后往这张表加新 id 族时不得使用这两个前缀。
+  listBlobAssetIds: async (): Promise<string[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_BLOB_ASSETS)) return [];
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_BLOB_ASSETS, 'readonly');
+          const store = transaction.objectStore(STORE_BLOB_ASSETS);
+          const request = store.getAllKeys();
+          request.onsuccess = () => {
+              const keys = request.result || [];
+              resolve(keys.filter((k): k is string =>
+                  typeof k === 'string' && (k.startsWith('img_') || k.startsWith('b_'))
+              ));
+          };
+          request.onerror = () => reject(request.error);
+      });
+  },
+
+  // 按主键升序分页读一个 store 的行（afterKey 传 null 从头开始）。给 GC 的引用面
+  // 枚举用（utils/blobGc.ts）：async generator 每次 yield 都会挂起、IDB 事务撑不过
+  // 挂起，游标没法跨 yield 拿着用，只能每批开一个新的 readonly 事务。
+  // 注意：枚举失败必须把错误抛出去——GC 的安全阀靠它整轮放弃，吞错静默返回空
+  // 等于「这张表没有引用」，会把活图当孤儿删掉。
+  getStoreRowsPage: async (
+      storeName: string,
+      afterKey: IDBValidKey | null,
+      limit: number,
+  ): Promise<{ rows: unknown[]; lastKey: IDBValidKey | null }> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(storeName)) return { rows: [], lastKey: null };
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(storeName, 'readonly');
+          const store = transaction.objectStore(storeName);
+          const range = afterKey === null ? undefined : IDBKeyRange.lowerBound(afterKey, true);
+          // 同一事务里 getAll + getAllKeys：行给引用扫描，键尾巴当下一页的起点。
+          const rowsRequest = store.getAll(range, limit);
+          const keysRequest = store.getAllKeys(range, limit);
+          let rows: unknown[] | null = null;
+          let keys: IDBValidKey[] | null = null;
+          const maybeResolve = () => {
+              if (rows !== null && keys !== null) {
+                  resolve({ rows, lastKey: keys.at(-1) ?? null });
+              }
+          };
+          rowsRequest.onsuccess = () => { rows = rowsRequest.result || []; maybeResolve(); };
+          keysRequest.onsuccess = () => { keys = keysRequest.result || []; maybeResolve(); };
+          rowsRequest.onerror = () => reject(rowsRequest.error);
+          keysRequest.onerror = () => reject(keysRequest.error);
+          transaction.onabort = () => reject(transaction.error || new Error('getStoreRowsPage aborted'));
+      });
+  },
+
+  // 数一张表有多少行，不读行里的内容。给「优化资源存储」算进度条总数用
+  // （utils/storageOptimize.ts）：那几张表加起来能有几十 MB，只为算个总数就整表读进内存太亏，
+  // count() 只回行数，代价跟表里存了多大的图基本无关。
+  // 表不存在时返回 0，跟 getStoreRowsPage 的空页兜底一个口径：没有这张表 = 没有行。
+  countStoreRows: async (storeName: string): Promise<number> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(storeName)) return 0;
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(storeName, 'readonly');
+          const request = transaction.objectStore(storeName).count();
+          request.onsuccess = () => resolve(request.result || 0);
+          request.onerror = () => reject(request.error);
+          transaction.onabort = () => reject(transaction.error || new Error('countStoreRows aborted'));
+      });
+  },
+
+  /**
+   * 通用整行写回（引用改写用，见 utils/blobDedupe.ts）。传进来的必须是从同一张表读出、
+   * 原地改过的行——引用面那 7 张表都是 inline keyPath，put(row) 自带主键，不会另起新行。
+   * 一页一个事务：中途失败时先前提交的页不回滚，但引用改写是幂等的（同一份 mapping
+   * 再跑一遍结果相同），重跑即可补齐。
+   */
+  putStoreRows: async (storeName: string, rows: unknown[]): Promise<void> => {
+      if (rows.length === 0) return;
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(storeName)) return;
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(storeName, 'readwrite');
+          const store = transaction.objectStore(storeName);
+          for (const row of rows) store.put(row as any);
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error || new Error(`putStoreRows(${storeName}) aborted`));
+      });
+  },
+
   getJournalStickers: async (): Promise<{name: string, url: string}[]> => {
     const db = await openDB();
     if (!db.objectStoreNames.contains(STORE_JOURNAL_STICKERS)) return [];

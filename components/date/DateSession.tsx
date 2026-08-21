@@ -7,6 +7,7 @@ import DateSettings from './DateSettings';
 import ObserveHUD from './ObserveHUD';
 import { extractObservation, hasObservation } from '../../utils/datePrompts';
 import { isBlobRef } from '../../utils/blobRef';
+import TokenImg from '../os/TokenImg';
 import { clearDateResumeAttempt } from '../../utils/dateSessionRecovery';
 import { VALID_EMOTIONS } from '../../utils/minimaxTts';
 import {
@@ -147,7 +148,8 @@ const ReadingAvatar: React.FC<{ src?: string; name: string; light: boolean }> = 
     const [imageFailed, setImageFailed] = useState(false);
     useEffect(() => setImageFailed(false), [src]);
 
-    const canShowImage = !!src && !isBlobRef(src) && !imageFailed;
+    // TokenImg 会把 blobref 令牌解析成可用 url，这里只判「有没有头像」和「加载失败没」
+    const canShowImage = !!src && !imageFailed;
     return (
         <div
             className={`mt-1 h-9 w-9 shrink-0 overflow-hidden rounded-full ring-1 shadow-sm ${
@@ -156,8 +158,8 @@ const ReadingAvatar: React.FC<{ src?: string; name: string; light: boolean }> = 
             aria-hidden="true"
         >
             {canShowImage ? (
-                <img
-                    src={src}
+                <TokenImg
+                    value={src}
                     alt=""
                     className="h-full w-full object-cover"
                     loading="lazy"

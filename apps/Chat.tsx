@@ -7,6 +7,7 @@ import { processImage } from '../utils/file';
 import { safeResponseJson, extractContent } from '../utils/safeApi';
 import { buildChatFineTuneCss, mergeChatFineTune } from '../utils/chatFineTuneCss';
 import ChatFineTunePanel from '../components/chat/ChatFineTunePanel';
+import TokenImg from '../components/os/TokenImg';
 import { FadersHorizontal } from '@phosphor-icons/react';
 import { generateDailyScheduleForChar, isScheduleFeatureOn } from '../utils/scheduleGenerator';
 import { getDailyScheduleForChar } from '../utils/dailySchedule';
@@ -20,6 +21,7 @@ import { XhsMcpClient, extractNotesFromMcpData, normalizeXhsLiteDetail } from '.
 import { extractWebpageContent, detectFirstUrl, detectXhsShortUrl, extractXhsShareTitle, isXhsUrl, extractXhsNoteId, expandShortUrl, type ExtractedWebpage } from '../utils/webpageExtractor';
 import { isVideoShareUrl, parseVideoShareUrl } from '../utils/videoParser';
 import { isDevDebugAvailable } from '../utils/devDebug';
+import { migrateDataUrlToRef } from '../utils/blobRef';
 import { resolveLifeRecordCard } from '../utils/lifeRecords';
 import { isMcdConfigured } from '../utils/mcdMcpClient';
 import { isMcdActivatedInMessages, MCD_ACTIVATE_TRIGGER, MCD_DEACTIVATE_TRIGGER } from '../utils/mcdToolBridge';
@@ -1376,6 +1378,16 @@ const Chat: React.FC = () => {
 
         if (!customContent) { setInput(''); localStorage.removeItem(draftKey); }
         
+        // 图片 / 表情消息存的是短令牌，图片二进制单独躺在 blob_assets 里，省掉 base64 那 ~33%
+        // 的膨胀。同一张图之前存过就直接复用它的令牌；转不动时原样还回这条 data URL，图不会丢。
+        // http 外链（网络表情）和已经是令牌的值都原样通过。
+        // 注意：这条消息和下面存进相册的那条共用同一个令牌（按内容哈希认人，只存一份 Blob），
+        // 所以删消息时绝不能顺手删 Blob——那会把相册里的同一张图一起删破。失去引用的 Blob
+        // 交给孤儿 GC 收（见 utils/blobGc.ts）。
+        const storedContent = (type === 'image' || type === 'emoji') && text.startsWith('data:')
+            ? await migrateDataUrlToRef(text)
+            : text;
+
         const imageChatContext = type === 'image'
             ? messages.slice(-10).map(message => {
                 const sender = message.role === 'user' ? userProfile.name : char.name;
@@ -1383,7 +1395,7 @@ const Chat: React.FC = () => {
             })
             : null;
 
-        const msgPayload: any = { charId: char.id, role: 'user', type, content: text, metadata };
+        const msgPayload: any = { charId: char.id, role: 'user', type, content: storedContent, metadata };
         
         if (replyTarget) {
             msgPayload.replyTo = {
@@ -1400,7 +1412,7 @@ const Chat: React.FC = () => {
             await DB.saveGalleryImage({
                 id: `img-${Date.now()}-${Math.random()}`,
                 charId: char.id,
-                url: text,
+                url: storedContent,
                 timestamp: Date.now(),
                 sourceMessageId: savedUserMsgId,
                 savedDate: localDateKey,
@@ -2165,7 +2177,10 @@ const Chat: React.FC = () => {
                 const name = parts[0].trim();
                 const url = parts.slice(1).join('--').trim();
                 if (name && url) {
-                    await DB.saveEmoji(name, url, targetCatId);
+                    // 粘进来的可能是 data: 图（复制粘贴的图片），也可能是图床外链。
+                    // 前者转成令牌只留二进制，后者是别人服务器上的地址，原样存。
+                    const stored = url.startsWith('data:') ? await migrateDataUrlToRef(url) : url;
+                    await DB.saveEmoji(name, stored, targetCatId);
                 }
             }
         }
@@ -3920,7 +3935,7 @@ const Chat: React.FC = () => {
 
                 {instantToolStatus && !selectionMode && (
                     <div className="flex items-end gap-3 px-3 mb-4 animate-fade-in">
-                        <img src={char.avatar} className={chatPendingAvatarClass} />
+                        <TokenImg value={char.avatar} className={chatPendingAvatarClass} />
                         <div className={`max-w-[78%] px-4 py-3 rounded-2xl shadow-sm border ${
                             instantToolStatus.phase === 'failed'
                                 ? 'bg-rose-50 border-rose-100 text-rose-700'
@@ -3996,7 +4011,7 @@ const Chat: React.FC = () => {
                 {/* instantChatPending：这一轮在云端跑，本机可以关页面，指示灯靠落盘记录活着。 */}
                 {(isTyping || instantChatPending || recallStatus || searchStatus || diaryStatus || isProactiveComposing) && !selectionMode && (
                     <div className="flex items-end gap-3 px-3 mb-6 animate-fade-in">
-                        <img src={char.avatar} className={chatPendingAvatarClass} />
+                        <TokenImg value={char.avatar} className={chatPendingAvatarClass} />
                         <div className="bg-white px-4 py-3 rounded-2xl shadow-sm">
                             {isProactiveComposing && !isTyping && !recallStatus && !searchStatus && !diaryStatus ? (
                                 <div className="flex items-center gap-2 text-xs text-teal-600 font-medium">
@@ -4444,7 +4459,7 @@ const Chat: React.FC = () => {
                                     onClick={() => handleForwardToCharacter(c.id)}
                                     className="w-full flex items-center gap-3 p-3 rounded-2xl bg-slate-50 hover:bg-slate-100 active:scale-[0.98] transition-all border border-slate-100"
                                 >
-                                    <img src={c.avatar} className="w-10 h-10 rounded-xl object-cover" />
+                                    <TokenImg value={c.avatar} className="w-10 h-10 rounded-xl object-cover" />
                                     <div className="flex-1 text-left">
                                         <div className="font-bold text-sm text-slate-700">{c.name}</div>
                                         <div className="text-[10px] text-slate-400 truncate">{c.description}</div>

@@ -5,6 +5,7 @@ import { DB } from '../utils/db';
 import { GalleryImage, CharacterProfile } from '../types';
 import { safeResponseJson } from '../utils/safeApi';
 import ConfirmDialog from '../components/os/ConfirmDialog';
+import TokenImg from '../components/os/TokenImg';
 import { trackEvent } from '../utils/analytics';
 import { Star } from '@phosphor-icons/react';
 import {
@@ -309,8 +310,8 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
                             </div>
                             {/* Image layer - hidden until loaded to prevent blank rectangles on mobile */}
                             {status !== 'error' && (
-                                <img
-                                    src={char.avatar}
+                                <TokenImg
+                                    value={char.avatar}
                                     alt={char.name}
                                     className={`absolute inset-0 w-full h-full object-cover z-10 transition-opacity duration-300 group-hover:scale-105 ${status === 'loaded' ? 'opacity-90 group-hover:opacity-100' : 'opacity-0'}`}
                                     loading="lazy"
@@ -343,7 +344,9 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
                 <div className="grid grid-cols-3 gap-1">
                     {images.map(img => (
                         <div key={img.id} onClick={() => handleImageClick(img)} className="aspect-square bg-slate-100 relative cursor-pointer overflow-hidden rounded-sm">
-                            <img src={img.url} className="w-full h-full object-cover hover:scale-105 transition-transform duration-300" loading="lazy" />
+                            {/* 相册图存的是 blobref 令牌（见 utils/blobRef.ts），TokenImg 会解析成 objectURL；
+                                旧的 base64 / http 图原样透传，两种都显示得出来 */}
+                            <TokenImg value={img.url} className="w-full h-full object-cover hover:scale-105 transition-transform duration-300" loading="lazy" />
                             {img.review && <div className="absolute top-1.5 right-1.5 w-2 h-2 bg-primary rounded-full ring-2 ring-white shadow-sm"></div>}
                             {img.savedDate && <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/50 to-transparent px-1.5 pb-1 pt-3"><span className="text-[8px] text-white/80 font-mono">{img.savedDate}</span></div>}
                         </div>
@@ -379,8 +382,8 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
 
             {/* Main Image */}
             <div className="flex-1 min-h-0 w-full flex items-center justify-center bg-black relative overflow-hidden">
-                <img
-                    src={selectedImage.url}
+                <TokenImg
+                    value={selectedImage.url}
                     className="max-w-full max-h-full object-contain"
                     alt="Detail"
                 />
@@ -391,7 +394,7 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
                 {selectedImage.review ? (
                     <div className="p-5 animate-slide-up">
                         <div className="flex items-start gap-3 mb-3">
-                            <img src={characters.find(c => c.id === activeCharId)?.avatar} className="w-9 h-9 rounded-full border border-white/20 object-cover shadow-sm" />
+                            <TokenImg value={characters.find(c => c.id === activeCharId)?.avatar} className="w-9 h-9 rounded-full border border-white/20 object-cover shadow-sm" />
                             <div className="flex-1">
                                 <div className="text-xs font-bold text-white/50 mb-1.5 uppercase tracking-wide">{characters.find(c => c.id === activeCharId)?.name} 的点评</div>
                                 <p className="text-[15px] text-white/90 leading-relaxed font-light select-text">"{selectedImage.review}"</p>

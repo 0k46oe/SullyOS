@@ -74,6 +74,9 @@ importers:
       '@rei-standard/amsg-sw':
         specifier: 2.4.0-next.6
         version: 2.4.0-next.6
+      '@rei-standard/blob-store':
+        specifier: 0.1.0-next.2
+        version: 0.1.0-next.2(react@18.3.1)
       '@zip.js/zip.js':
         specifier: ^2.8.43
         version: 2.8.43
@@ -1093,6 +1096,15 @@ packages:
   '@rei-standard/amsg-sw@2.4.0-next.6':
     resolution: {integrity: sha512-D5z7ZB3359TmLToH7r/lu35cqsqzo4eu56vSyWbh4ec958Tby6P6A5vwL+BTzwYrjZmkslB/OounA2TjDdMQ3w==}
     engines: {node: '>=20'}
+
+  '@rei-standard/blob-store@0.1.0-next.2':
+    resolution: {integrity: sha512-l1Va5mes8EvgEkmefTKXgHVa9BJrDcJXQBYEZef632JyrkV1WwT48m4xrrinBWFTRcpnPf2RCSLlEw27H+1pnQ==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      react: '>=17'
+    peerDependenciesMeta:
+      react:
+        optional: true
 
   '@rolldown/pluginutils@1.0.0-beta.27':
     resolution: {integrity: sha512-+d0F4MKMCbeVUJwG96uQ4SgAznZNSq93I3V+9NHA4OpvqG8mRCpGdKmK8l/dl02h2CCDHwW2FqilnTyDcAnqjA==}
@@ -3524,6 +3536,10 @@ snapshots:
   '@rei-standard/amsg-sw@2.4.0-next.6':
     dependencies:
       '@rei-standard/amsg-shared': 0.4.0-next.8
+
+  '@rei-standard/blob-store@0.1.0-next.2(react@18.3.1)':
+    optionalDependencies:
+      react: 18.3.1
 
   '@rolldown/pluginutils@1.0.0-beta.27': {}
 
