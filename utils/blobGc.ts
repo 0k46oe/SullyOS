@@ -26,7 +26,18 @@
 // |           | appearance_preset_*（JSON）/ room_custom_assets_list（JSON）/
 // |           | ls_mirror_v1（localStorage 镜像，最容易漏）/ spark_* 等 | 分页逐行 |
 // | themes 表 | 聊天气泡主题：user / ai 两侧各自的 backgroundImage / decoration / avatarDecoration | 分页逐行 |
+// | user_profile 表 | avatar（我方头像）/ perCharAvatars（分角色头像） | 分页逐行 |
+// | social_posts 表 | authorAvatar（帖子作者）/ comments[].authorAvatar（评论作者） | 分页逐行 |
+// | groups 表 | avatar（群头像） | 分页逐行 |
+// | character_groups 表 | avatar（角色分组图标） | 分页逐行 |
+// | story_theater_masks 表 | avatar（剧场原创人物面具） | 分页逐行 |
+// | bank_data 表 | 店员 avatar / 留言板 avatar | 分页逐行 |
+// | guidebook、life_sim 表 | 卡片里留存的 charAvatar / actorAvatar 副本 | 分页逐行 |
 // | pixel_home_assets 表 | 目前未见令牌写入，纳入白名单防未来回归 | 分页逐行 |
+//
+// 上面从 user_profile 到 life_sim 这几张，装的都是**从角色/用户头像复制过去的副本**。
+// 头像本身在 characters 表，但它会被抄进帖子、卡片、面具、群资料里长期留着。GC 扫不到
+// 这些面，就会把还被老帖子引用着的图判成孤儿删掉——所以它们必须在清单里，哪怕平时为空。
 // | localStorage 全量值 | tama_board_img_<charId> 与旧单键 / acnh_wallpaper_backup /
 // |                     | sully-call-fake-camera-image-v1 / os_theme（JSON，令牌不剥）等 | 先同步快照再逐条吐 value |
 //
@@ -37,9 +48,12 @@ import { DB } from './db';
 import { blobStore } from './blobStore';
 import { tryAcquireMaintenanceLock, releaseMaintenanceLock, currentMaintenanceHolder } from './maintenanceLock';
 
-// 引用面里的 9 张表。名字与 db.ts 的 STORE_* 常量值一一对应
-// （STORE_CHARACTERS / STORE_MESSAGES / STORE_CC_PARTS / STORE_SONGS /
-//   STORE_GALLERY / STORE_ASSETS / STORE_THEMES / STORE_EMOJIS / pixel_home_assets）。
+// 引用面里的 17 张表。名字与 db.ts 的 STORE_* 常量值一一对应
+// （STORE_CHARACTERS / STORE_MESSAGES / STORE_CC_PARTS / STORE_SONGS / STORE_GALLERY /
+//   STORE_ASSETS / STORE_THEMES / STORE_EMOJIS / STORE_USER / STORE_SOCIAL_POSTS /
+//   STORE_GROUPS / STORE_CHAR_GROUPS / STORE_STORY_THEATER_MASKS / STORE_BANK_DATA /
+//   STORE_GUIDEBOOK / STORE_LIFE_SIM / pixel_home_assets）。
+// 全部是 inline keyPath（都用 'id'），所以 blobDedupe 的 putStoreRows 能原样写回。
 // 导出仅供测试核对拼写：名字写错时 getStoreRowsPage 的 contains 兜底会静默返回空页，
 // 等于那个面没扫、无任何报错——blobGc.test.ts 有一条守卫断言每个名字真实存在。
 export const REF_SOURCE_STORES = [
@@ -51,6 +65,14 @@ export const REF_SOURCE_STORES = [
     'assets',
     'themes',
     'emojis',
+    'user_profile',
+    'social_posts',
+    'groups',
+    'character_groups',
+    'story_theater_masks',
+    'bank_data',
+    'guidebook',
+    'life_sim',
     'pixel_home_assets',
 ] as const;
 
