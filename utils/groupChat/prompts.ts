@@ -2,6 +2,7 @@
 // 供导演模式与轮询模式（每成员一次调用）共用。
 import { Message, CharacterProfile, EmojiCategory } from '../../types';
 import { stickerNameFromUrl } from '../messageFormat';
+import { isBlobRef } from '../blobRef';
 import { packetHistoryLine } from './redpacket';
 import { formatRelativeAge } from './relativeTime';
 
@@ -66,9 +67,9 @@ function formatGapDuration(ms: number): string {
 
 /**
  * 群历史块（含最近图片结构化附带）。原 triggerDirector 内联逻辑，逐字搬出：
- * image 的 content 是 base64（processImage 压的 JPEG），emoji 是图床 URL——
- * 都不能当文本内联进 prompt。最近 N 张图片走结构化 image_url 字段
- * 附在 user 消息里，文本里用 [图片#k] 占位互相对齐。
+ * image 的 content 是 blobref 令牌或 base64（processImage 压的 JPEG），emoji 是令牌或图床 URL——
+ * 都不能当文本内联进 prompt（令牌出门时还会被还原成整段 data URL）。最近 N 张图片走结构化
+ * image_url 字段附在 user 消息里，文本里用 [图片#k] 占位互相对齐。
  */
 export function buildGroupHistoryBlock(
     msgs: Message[],
@@ -89,7 +90,8 @@ export function buildGroupHistoryBlock(
                 : '';
             if (visionDescription) return;
             const url = typeof m.content === 'string' ? m.content.trim() : '';
-            if (/^(data:|https?:\/\/)/i.test(url)) validImageWindowIdx.push(i);
+            // 认不出令牌 = 这张图永远进不了附带名单，模型看不到图却又毫无报错
+            if (/^(data:|https?:\/\/)/i.test(url) || isBlobRef(url)) validImageWindowIdx.push(i);
         }
     });
     const attachedSet = new Set(validImageWindowIdx.slice(-maxAttachedImages));
@@ -131,7 +133,8 @@ export function buildGroupHistoryBlock(
             // 回执行自带完整句子（[系统: X 领取了 Y 的红包]），不加名字前缀
             if (m.metadata?.packetReceipt) { lines.push(`${timePrefix}${packetHistoryLine(m, nameOf, now)}`); return; }
             content = packetHistoryLine(m, nameOf, now);
-        } else if (/^(data:|https?:\/\/)/i.test(rawText.trim())) {
+        } else if (/^(data:|https?:\/\/)/i.test(rawText.trim()) || isBlobRef(rawText.trim())) {
+            // 令牌也算媒体：漏认会把它当正文内联进 prompt，出门时还被还原成整段 data URL
             content = '[媒体]';
         } else {
             content = rawText;

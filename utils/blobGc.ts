@@ -17,7 +17,8 @@
 // | characters 表 | avatar / sprites / dateSkinSets / roomConfig（wallImage/floorImage/items[].image）
 // |               | / vrState.chibi / companionAvatar（含 imageWardrobe，令牌兼任条目 id 与
 // |               |   imageRef 两个值位）/ videoCallBackground / companionBackground / studio.like520 | 分页逐行 JSON.stringify(row) |
-// | messages 表 | metadata.cameraSnapshotRef | 分页逐行（表大，不 getAll 全量占内存） |
+// | messages 表 | content（type 为 image / emoji 的聊天图与表情消息）/ metadata.cameraSnapshotRef | 分页逐行（表大，不 getAll 全量占内存） |
+// | emojis 表 | url（表情库；http 外链不是令牌，一并逐字吐过去也无妨） | 分页逐行 |
 // | cc_custom_parts 表 | src / shadowSrc | 分页逐行 |
 // | songs 表 | coverImage | 分页逐行 |
 // | gallery 表 | url | 分页逐行 |
@@ -36,9 +37,9 @@ import { DB } from './db';
 import { blobStore } from './blobStore';
 import { tryAcquireMaintenanceLock, releaseMaintenanceLock, currentMaintenanceHolder } from './maintenanceLock';
 
-// 引用面里的 8 张表。名字与 db.ts 的 STORE_* 常量值一一对应
+// 引用面里的 9 张表。名字与 db.ts 的 STORE_* 常量值一一对应
 // （STORE_CHARACTERS / STORE_MESSAGES / STORE_CC_PARTS / STORE_SONGS /
-//   STORE_GALLERY / STORE_ASSETS / STORE_THEMES / pixel_home_assets）。
+//   STORE_GALLERY / STORE_ASSETS / STORE_THEMES / STORE_EMOJIS / pixel_home_assets）。
 // 导出仅供测试核对拼写：名字写错时 getStoreRowsPage 的 contains 兜底会静默返回空页，
 // 等于那个面没扫、无任何报错——blobGc.test.ts 有一条守卫断言每个名字真实存在。
 export const REF_SOURCE_STORES = [
@@ -49,6 +50,7 @@ export const REF_SOURCE_STORES = [
     'gallery',
     'assets',
     'themes',
+    'emojis',
     'pixel_home_assets',
 ] as const;
 

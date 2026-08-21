@@ -5,6 +5,8 @@ import { optimizeResourceStorage, OPTIMIZE_TARGET_STORES } from './storageOptimi
 import { REF_SOURCE_STORES, runBlobGc } from './blobGc';
 import { isBlobRef, getBlobForRef, dataUrlToBlob, putImageBlob, clearContentMemo } from './blobRef';
 import { tryAcquireMaintenanceLock, releaseMaintenanceLock } from './maintenanceLock';
+import { ChatPrompts } from './chatPrompts';
+import { buildGroupHistoryBlock } from './groupChat/prompts';
 
 // fake-indexeddb 已通过 test-setup.ts 注入。
 // 这组用例钉「优化资源存储」的安全边界：只转已接令牌链路的面、原值失败保留、
@@ -27,7 +29,7 @@ async function clearStore(name: string): Promise<void> {
 }
 
 beforeEach(async () => {
-    for (const s of ['assets', 'characters', 'messages', 'songs', 'cc_custom_parts', 'gallery', 'themes', 'blob_assets', 'memory_vectors']) {
+    for (const s of ['assets', 'characters', 'messages', 'songs', 'cc_custom_parts', 'gallery', 'themes', 'emojis', 'blob_assets', 'memory_vectors']) {
         await clearStore(s);
     }
     localStorage.clear();
@@ -242,6 +244,101 @@ describe('优化资源存储（一次性批量迁移）', () => {
         expect(gc.aborted).toBe(false);
         expect(gc.deleted).toBe(0);
         for (const token of tokens) expect(await getBlobForRef(token)).not.toBeNull();
+    });
+
+    /** 往 messages 表塞一条消息，返回它的自增 id。 */
+    async function seedMessage(type: string, content: string, charId = 'c1'): Promise<number> {
+        return DB.saveMessage({ charId, role: 'user', type, content } as any);
+    }
+
+    async function readMessage(id: number, charId = 'c1'): Promise<any> {
+        return (await DB.getMessagesByCharId(charId)).find(m => m.id === id);
+    }
+
+    it('聊天图片消息：content 转成令牌，Blob 字节与原图逐字节一致', async () => {
+        const id = await seedMessage('image', TINY_PNG);
+
+        const r = await optimizeResourceStorage();
+
+        const msg = await readMessage(id);
+        expect(isBlobRef(msg.content)).toBe(true);
+        expect(await blobBytes(msg.content)).toEqual(new Uint8Array(await dataUrlToBlob(TINY_PNG).arrayBuffer()));
+        expect(r.converted).toBe(1);
+        expect(r.uniqueBlobs).toBe(1);
+        expect(r.failed).toBe(0);
+    });
+
+    it('表情消息（type=emoji）也转成令牌', async () => {
+        const id = await seedMessage('emoji', TINY_JPEG);
+
+        await optimizeResourceStorage();
+
+        const msg = await readMessage(id);
+        expect(isBlobRef(msg.content)).toBe(true);
+        expect(await blobBytes(msg.content)).toEqual(new Uint8Array(await dataUrlToBlob(TINY_JPEG).arrayBuffer()));
+    });
+
+    it('文本消息一字不动：正文恰好长得像 data URL 也不碰', async () => {
+        // messages 表里绝大多数行跟图片无关。少了 type 那道闸，一条正文里粘了 base64 的
+        // 文本消息就会被当图片转掉，用户看到的是自己发过的一段话变成了一串令牌。
+        const id = await seedMessage('text', TINY_PNG);
+
+        const r = await optimizeResourceStorage();
+
+        const msg = await readMessage(id);
+        expect(msg.content).toBe(TINY_PNG);
+        expect(r.converted).toBe(0);
+        expect(r.uniqueBlobs).toBe(0);
+    });
+
+    it('表情库：本地图转成令牌，http 外链原样保留、分类不丢', async () => {
+        await DB.saveEmoji('本地表情', TINY_PNG, 'cat-1');
+        await DB.saveEmoji('网络表情', 'https://img.host/sticker.png', 'cat-1');
+
+        const r = await optimizeResourceStorage();
+
+        const list = await DB.getEmojis();
+        const local = list.find(e => e.name === '本地表情')!;
+        const remote = list.find(e => e.name === '网络表情')!;
+        expect(isBlobRef(local.url)).toBe(true);
+        expect(await blobBytes(local.url)).toEqual(new Uint8Array(await dataUrlToBlob(TINY_PNG).arrayBuffer()));
+        // 外链是别人服务器上的地址，本机没有它的二进制，转不了也不该动
+        expect(remote.url).toBe('https://img.host/sticker.png');
+        // 表情的主键是 name，回写时把分类带丢了的话，这个表情会掉出它原来的分组
+        expect(local.categoryId).toBe('cat-1');
+        expect(r.converted).toBe(1);
+    });
+
+    it('聊天图与表情库独占引用的 Blob 不会被孤儿 GC 删掉（两面都必须在 GC 引用面清单里）', async () => {
+        const msgId = await seedMessage('image', TINY_PNG);
+        await DB.saveEmoji('本地表情', TINY_JPEG, undefined);
+        await optimizeResourceStorage();
+
+        const msgToken = (await readMessage(msgId)).content;
+        const emojiToken = (await DB.getEmojis()).find(e => e.name === '本地表情')!.url;
+        expect(isBlobRef(msgToken)).toBe(true);
+        expect(isBlobRef(emojiToken)).toBe(true);
+
+        // 这两份 Blob 各自只有一处引用：GC 看不见那个面就会把它当孤儿删掉，用户的聊天图 / 表情全没
+        const gc = await runBlobGc({ minAgeMs: 0 });
+        expect(gc.aborted).toBe(false);
+        expect(gc.deleted).toBe(0);
+        expect(await getBlobForRef(msgToken)).not.toBeNull();
+        expect(await getBlobForRef(emojiToken)).not.toBeNull();
+    });
+
+    it('聊天图与表情库幂等：第一遍转完，第二遍零转换', async () => {
+        await seedMessage('image', TINY_PNG);
+        await seedMessage('emoji', TINY_JPEG);
+        await DB.saveEmoji('本地表情', TINY_GIF, undefined);
+
+        const first = await optimizeResourceStorage();
+        expect(first.converted).toBe(3);
+
+        const second = await optimizeResourceStorage();
+        expect(second.converted).toBe(0);
+        expect(second.uniqueBlobs).toBe(0);
+        expect(second.failed).toBe(0);
     });
 
     it('不在清单的字段不动：avatar 的 base64 原样保留（读端还不认令牌）', async () => {
@@ -472,7 +569,23 @@ describe('分页读表：跨页不漏行，进度条对得上', () => {
         expect(r.uniqueBlobs).toBe(1); // 全是同一张图，去重后只建一份 Blob
     });
 
-    it('进度回调：total 就是六面的真实行数，done 一路递增且正好停在 total', async () => {
+    it('聊天消息行数超过一页：跨页每一条图片消息都转到，一条不漏', async () => {
+        // messages 是全库最大的表，翻页出问题时漏掉的就是第 2 页往后所有存量聊天图
+        const count = PAGE + 50;
+        await seedStore('messages', Array.from({ length: count }, (_, i) => ({
+            id: i + 1, charId: 'c1', role: 'user', type: 'image', content: TINY_PNG, timestamp: i + 1,
+        })));
+
+        const r = await optimizeResourceStorage();
+
+        const rows = await DB.getMessagesByCharId('c1');
+        expect(rows.length).toBe(count);
+        expect(rows.filter(m => isBlobRef(m.content)).length).toBe(count);
+        expect(r.converted).toBe(count);
+        expect(r.uniqueBlobs).toBe(1); // 全是同一张图，去重后只建一份 Blob
+    });
+
+    it('进度回调：total 就是八面的真实行数，done 一路递增且正好停在 total', async () => {
         // 六个面各摆几行、行数互不相同——少数了哪一面都对不上
         await DB.saveAsset('wallpaper', TINY_PNG);
         await DB.saveAsset('lock_wallpaper', TINY_JPEG);
@@ -499,10 +612,22 @@ describe('分页读表：跨页不漏行，进度条对得上', () => {
             { id: 't4', name: '气泡四', type: 'custom', user: {}, ai: {} },
             { id: 't5', name: '气泡五', type: 'custom', user: {}, ai: {} },
         ]);
-        const expectedRows = 2 + 3 + 1 + 2 + 4 + 5;
+        await seedStore('messages', [
+            { id: 1, charId: 'c1', role: 'user', type: 'image', content: TINY_PNG, timestamp: 1 },
+            { id: 2, charId: 'c1', role: 'user', type: 'text', content: '一句话', timestamp: 2 },
+            { id: 3, charId: 'c1', role: 'user', type: 'emoji', content: TINY_JPEG, timestamp: 3 },
+            { id: 4, charId: 'c1', role: 'assistant', type: 'text', content: '回一句', timestamp: 4 },
+            { id: 5, charId: 'c1', role: 'user', type: 'text', content: '再一句', timestamp: 5 },
+            { id: 6, charId: 'c1', role: 'user', type: 'text', content: '还有一句', timestamp: 6 },
+        ]);
+        await seedStore('emojis', [
+            { name: '本地表情', url: TINY_GIF },
+            { name: '网络表情', url: 'https://img.host/sticker.png' },
+        ]);
+        const expectedRows = 2 + 3 + 1 + 2 + 4 + 5 + 6 + 2;
 
-        // 只收六面自己报的那几档：扫库 / 合并 / 向量三段各有各的进度口径，混进来会算错
-        const faceLabels = new Set(['系统外观', '小屋', '歌曲封面', '捏人器部件', '相册', '气泡主题']);
+        // 只收八面自己报的那几档：扫库 / 合并 / 向量三段各有各的进度口径，混进来会算错
+        const faceLabels = new Set(['系统外观', '小屋', '歌曲封面', '捏人器部件', '相册', '气泡主题', '聊天图片', '表情包']);
         const events: Array<{ done: number; total: number }> = [];
         await optimizeResourceStorage(p => {
             if (faceLabels.has(p.label)) events.push({ done: p.done, total: p.total });
@@ -552,5 +677,109 @@ describe('气泡主题导出：分享文件里不能留令牌', () => {
         // processImage 给的是 data URL，得再过一道 migrateDataUrlToRef 才进主题
         expect(body).toMatch(/await migrateDataUrlToRef\(/);
         expect(body).not.toMatch(/updateStyle\('(backgroundImage|decoration|avatarDecoration)', result\)/);
+    });
+});
+
+describe('图片令牌进提示词：靠前缀判图的地方必须认得令牌', () => {
+    // 这组守卫跟「一键优化」不是同一件事，但它们钉的是同一次迁移里最难查的那种坏法：
+    // 判定认不出 `blobref:` 令牌时，图明明还在库里，模型收到的却是「图片数据已不可用」，
+    // 或者干脆没被列进附图名单——不报错、不破图，从界面上一点看不出来。
+    // 放在这份文件里是因为它跟聊天图 / 表情包的迁移同批落地，改坏迁移和改坏判定要一起红。
+
+    const TINY_PNG_LOCAL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    const char = { id: 'c1', name: '角色', contextRangePolicyVersion: 1 } as any;
+    const userProfile = { name: '小明' } as any;
+
+    /** 只有一条图片消息的私聊历史，取转写出来的那一条。 */
+    function imageHistoryEntry(content: string): any {
+        return ChatPrompts.buildMessageHistory(
+            [{ id: 1, charId: 'c1', role: 'user', type: 'image', content, timestamp: Date.now() } as any],
+            50,
+            char,
+            userProfile,
+            [],
+        ).apiMessages[0];
+    }
+
+    it('私聊历史：令牌形态的图片照样走 image_url 结构化字段', async () => {
+        const token = await putImageBlob(dataUrlToBlob(TINY_PNG_LOCAL));
+
+        const entry = imageHistoryEntry(token);
+
+        expect(Array.isArray(entry.content)).toBe(true);
+        expect(entry.content.some((p: any) => p.type === 'image_url' && p.image_url?.url === token)).toBe(true);
+        // 认不出令牌时这里会变成「图片数据已不可用」的纯文本，图却好端端躺在库里
+        expect(JSON.stringify(entry.content)).not.toContain('no longer available');
+    });
+
+    it('私聊历史：图真丢了才说不可用（空 content 走占位文本）', () => {
+        const entry = imageHistoryEntry('');
+        expect(typeof entry.content).toBe('string');
+        expect(entry.content).toContain('no longer available');
+    });
+
+    it('群历史：令牌形态的图片进最近附图名单，不被当正文内联', async () => {
+        const token = await putImageBlob(dataUrlToBlob(TINY_PNG_LOCAL));
+
+        const block = buildGroupHistoryBlock(
+            [{ id: 1, groupId: 'g1', charId: 'user', role: 'user', type: 'image', content: token, timestamp: Date.now() } as any],
+            [],
+            [],
+            '小明',
+        );
+
+        expect(block.attachedImages.map(i => i.url)).toEqual([token]);
+        expect(block.text).toContain('[图片#1]');
+        expect(block.text).not.toContain(token);
+    });
+
+    it('群历史兜底：别的类型里躺着令牌也按媒体占位，不内联进正文', async () => {
+        // 令牌内联进正文的代价比漏一个 URL 大得多——出门时网络出口那层会把它还原成
+        // 整段 data URL，等于把几 MB 的 base64 焊进 prompt。
+        const token = await putImageBlob(dataUrlToBlob(TINY_PNG_LOCAL));
+
+        const block = buildGroupHistoryBlock(
+            [{ id: 1, groupId: 'g1', charId: 'user', role: 'user', type: 'text', content: token, timestamp: Date.now() } as any],
+            [],
+            [],
+            '小明',
+        );
+
+        expect(block.text).toContain('[媒体]');
+        expect(block.text).not.toContain(token);
+    });
+});
+
+describe('主动消息上云：先还原令牌再算体积预算', () => {
+    // worker 那边没有 IndexedDB，`blobref:` 令牌到了云端谁也解不开；而令牌只有几十字节，
+    // 先算预算再还原的话，一份「看着没超」的包还原后可能是几 MB。所以顺序是死的：
+    // 先还原，再交给 toFirePackChatMessages 算预算。
+    it('还原发生在副本上：调用方那串消息一个字节都不变，令牌换成了 data URL', async () => {
+        const { resolveChatMessagesForUpload } = await import('./activeMsgClient');
+        const token = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        const original = [
+            { role: 'user', content: [{ type: 'text', text: '看这张' }, { type: 'image_url', image_url: { url: token } }] },
+            { role: 'assistant', content: '好看' },
+        ];
+        const snapshot = JSON.stringify(original);
+
+        const resolved = await resolveChatMessagesForUpload(original);
+
+        // 一、令牌真的被还原成了可离线阅读的 data URL
+        const url = (resolved[0].content as any)[1].image_url.url as string;
+        expect(url.startsWith('data:')).toBe(true);
+        expect(isBlobRef(url)).toBe(false);
+        // 二、原数组没被就地改掉（本地这一轮还要用同一串消息）
+        expect(JSON.stringify(original)).toBe(snapshot);
+    });
+
+    it('打包点真的用上了它：chat 段是「先还原、再交给体积预算」', () => {
+        // 上面那条只证明函数本身好使。真正会静默出事的是「函数写了但没接上」——
+        // 那样打上云的还是令牌，worker 解不开，图在云端悄悄消失。
+        // 真调一次 sendInstantChat 要把整个 worker 客户端立起来，这里用源码锚。
+        const src = readFileSync(new URL('./activeMsgClient.ts', import.meta.url), 'utf8');
+        expect(src).toMatch(/messages:\s*toFirePackChatMessages\(await resolveChatMessagesForUpload\(chatMessages\)\)/);
+        // 别处不许再把没还原过的那串直接塞进去
+        expect(src).not.toMatch(/toFirePackChatMessages\(chatMessages\)/);
     });
 });

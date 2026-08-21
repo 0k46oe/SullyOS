@@ -23,8 +23,9 @@
 //
 // 跑过一遍后再跑就是 no-op（幂等），导入过旧备份后可以再跑。
 //
-// 六个面都是按主键分页读的，一次只有一批行在内存里。别改回整表读：真实库里这几张表
-// 加起来能有几十 MB，光是把它们读进来就够呛，何况全程还得占着。
+// 八个面都是按主键分页读的，一次只有一批行在内存里。别改回整表读：真实库里这几张表
+// 加起来能有几十 MB（光 messages 一张就两万多行、20 MB 量级），光是把它们读进来就够呛，
+// 何况全程还得占着。
 //
 // ─── 覆盖面即安全边界（本文件的生死线）───
 // 只允许收录「当前写入路径已产出令牌」的字段——写令牌意味着读端全链路认令牌，
@@ -38,8 +39,10 @@
 //   cc_custom_parts src / shadowSrc  ← creatorPartToBlobRefs（字段清单复用同一函数）
 //   gallery url                      ← Chat 把用户发的图存进相册时
 //   themes user/ai 各自的 backgroundImage / decoration / avatarDecoration ← 气泡工坊（ThemeMaker）
+//   messages content（只限 type 为 image / emoji 的行）← Chat / GroupChat 发图与发表情时
+//   emojis url                       ← Chat 表情导入（http 外链不是本机资源，不转）
 // 明确不碰：
-//   · 角色 avatar、聊天图、表情包、社交/手账——写入路径还是 base64，读端不认令牌，
+//   · 角色 avatar、社交/手账——写入路径还是 base64，读端不认令牌，
 //     转了就破图（待逐面迁移后再收录）；
 //   · sprites.chibi / vrState.chibi / companionAvatar / videoCallBackground 等——令牌原生，
 //     没有 base64 存量；chibiStudio.like520.img——刻意保持 dataURL（见 docs/chibi-studio.md）。
@@ -57,10 +60,10 @@ import { blobStore } from './blobStore';
 import { collectUnmergeableRefs, buildMergePlan, rewriteBlobRefs } from './blobDedupe';
 import { creatorPartToBlobRefs } from './creatorPartsBlob';
 import { tryAcquireMaintenanceLock, releaseMaintenanceLock, currentMaintenanceHolder } from './maintenanceLock';
-import type { AppearancePreset, ChatTheme, CharacterProfile, CustomCreatorPart, GalleryImage, SongSheet } from '../types';
+import type { AppearancePreset, ChatTheme, CharacterProfile, CustomCreatorPart, Emoji, GalleryImage, Message, SongSheet } from '../types';
 
 /** 本工具会写的表。守卫测试断言它 ⊆ blobGc 的 REF_SOURCE_STORES（转出的 Blob 必须在 GC 视野内）。 */
-export const OPTIMIZE_TARGET_STORES = ['assets', 'characters', 'songs', 'cc_custom_parts', 'gallery', 'themes'] as const;
+export const OPTIMIZE_TARGET_STORES = ['assets', 'characters', 'songs', 'cc_custom_parts', 'gallery', 'themes', 'messages', 'emojis'] as const;
 
 /** 值形态是「裸图片字符串」的 assets 行。 */
 const PLAIN_ASSET_IDS = new Set(['wallpaper', 'lock_wallpaper', 'wallpaper_user_backup']);
@@ -198,7 +201,7 @@ export async function optimizeResourceStorage(
             primeContentMemo(safeByHash);
         }
 
-        // ── 进度条的总数：六张表各数一下行数 ─────────────────────
+        // ── 进度条的总数：八张表各数一下行数 ─────────────────────
         // 只要个数字，count() 不读行里的内容，几十 MB 的图不会被顺带读进内存。
         let total = 0;
         for (const storeName of OPTIMIZE_TARGET_STORES) total += await DB.countStoreRows(storeName);
@@ -306,7 +309,31 @@ export async function optimizeResourceStorage(
             if (changed) { await DB.saveTheme(t); await yieldMain(); }
         }
 
-        // ── 7) 合并存量重复：把重复令牌在全部引用面上改写成保留的那个 ──
+        // ── 7) 聊天图与表情消息 ───────────────────────────────────
+        // 全库最大的一张表（两万多行、20 MB 量级），也是唯一一张「绝大多数行跟图片无关」的：
+        // 只有 type 为 image / emoji 的行，content 里躺的才是图片。别的类型（文本、各种卡片
+        // 的 JSON、转账…）一个字节都不许动——先按 type 卡一道，再交给只吃 data:image/ 的
+        // convert，两道一起挡住「正文恰好长得像 data URL 的文本消息」。
+        // 转出来的令牌可能跟相册那一面是同一个（同一张图发出去时两边各存了一份引用），
+        // 这正是要的效果：一份 Blob 两处引用，删其中一处也绝不能直接删 Blob。
+        for await (const m of iterateStoreRows<Message>('messages')) {
+            tick('聊天图片');
+            if (m.type !== 'image' && m.type !== 'emoji') continue;
+            const token = await convert(m.content);
+            if (token) { await DB.updateMessage(m.id, token); await yieldMain(); }
+        }
+
+        // ── 8) 表情库 ─────────────────────────────────────────────
+        // url 有两种：用户上传的图（data:）和加进来的网络表情（http 外链）。外链是别人
+        // 服务器上的地址，本机没有它的二进制，转不了也不用转——convert 只认 data:image/
+        // 开头的值，外链天然落在判定之外。
+        for await (const e of iterateStoreRows<Emoji>('emojis')) {
+            tick('表情包');
+            const token = await convert(e.url);
+            if (token) { await DB.saveEmoji(e.name, token, e.categoryId); await yieldMain(); }
+        }
+
+        // ── 9) 合并存量重复：把重复令牌在全部引用面上改写成保留的那个 ──
         // 只改引用，不删 Blob。失去引用的那几份变成孤儿，由孤儿清理回收。
         if (!result.scanUnavailable && scan.duplicateGroups.length > 0) {
             const plan = buildMergePlan(scan.duplicateGroups, unmergeable);
@@ -324,7 +351,7 @@ export async function optimizeResourceStorage(
             }
         }
 
-        // ── 8) 记忆向量压成紧凑形态 ───────────────────────────────
+        // ── 10) 记忆向量压成紧凑形态 ──────────────────────────────
         // 跟图片没有任何关系，单独一个 try：图片那几步的成果不该因为向量失败就报不出来。
         // 反过来也不吞错——开机那次后台扫描正是因为只 console.warn，卡住了也没人知道。
         try {

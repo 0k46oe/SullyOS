@@ -1292,20 +1292,25 @@ const Chat: React.FC = () => {
 
         if (!customContent) { setInput(''); localStorage.removeItem(draftKey); }
         
+        // 图片 / 表情消息存的是短令牌，图片二进制单独躺在 blob_assets 里，省掉 base64 那 ~33%
+        // 的膨胀。同一张图之前存过就直接复用它的令牌；转不动时原样还回这条 data URL，图不会丢。
+        // http 外链（网络表情）和已经是令牌的值都原样通过。
+        // 注意：这条消息和下面存进相册的那条共用同一个令牌（按内容哈希认人，只存一份 Blob），
+        // 所以删消息时绝不能顺手删 Blob——那会把相册里的同一张图一起删破。失去引用的 Blob
+        // 交给孤儿 GC 收（见 utils/blobGc.ts）。
+        const storedContent = (type === 'image' || type === 'emoji') && text.startsWith('data:')
+            ? await migrateDataUrlToRef(text)
+            : text;
+
         if (type === 'image') {
             const recentChat = messages.slice(-10).map(m => {
                 const sender = m.role === 'user' ? userProfile.name : char.name;
                 return `${sender}: ${m.content.substring(0, 100)}`;
             });
-            // 相册这一面已经接了令牌链路（读端是 TokenImg），存进去的是一个短令牌，
-            // 图片二进制单独躺在 blob_assets 里，省掉 base64 那 ~33% 的膨胀。
-            // 同一张图之前存过就直接复用它的令牌；转不动时原样还回这条 data URL，图不会丢。
-            // 下面 msgPayload.content 里的那张是聊天消息（messages 表），读端还不认令牌，保持 base64。
-            const galleryUrl = await migrateDataUrlToRef(text);
             await DB.saveGalleryImage({
                 id: `img-${Date.now()}-${Math.random()}`,
                 charId: char.id,
-                url: galleryUrl,
+                url: storedContent,
                 timestamp: Date.now(),
                 savedDate: localDateKey,
                 chatContext: recentChat
@@ -1313,7 +1318,7 @@ const Chat: React.FC = () => {
             addToast('图片已保存至相册', 'info');
         }
 
-        const msgPayload: any = { charId: char.id, role: 'user', type, content: text, metadata };
+        const msgPayload: any = { charId: char.id, role: 'user', type, content: storedContent, metadata };
         
         if (replyTarget) {
             msgPayload.replyTo = {
@@ -2082,7 +2087,10 @@ const Chat: React.FC = () => {
                 const name = parts[0].trim();
                 const url = parts.slice(1).join('--').trim();
                 if (name && url) {
-                    await DB.saveEmoji(name, url, targetCatId);
+                    // 粘进来的可能是 data: 图（复制粘贴的图片），也可能是图床外链。
+                    // 前者转成令牌只留二进制，后者是别人服务器上的地址，原样存。
+                    const stored = url.startsWith('data:') ? await migrateDataUrlToRef(url) : url;
+                    await DB.saveEmoji(name, stored, targetCatId);
                 }
             }
         }

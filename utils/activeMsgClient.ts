@@ -45,6 +45,7 @@ import {
   type LlmCredentialRow,
 } from './amsgLlmCredentials';
 import { flattenContentPartsToText } from './promptMessageCleanup';
+import { resolveBlobRefsDeep } from './blobRef';
 import {
   AMSG_FIRE_PACK_KEY,
   FIRE_PACK_VERSION,
@@ -882,6 +883,34 @@ const hasNonTextPart = (content: unknown): boolean =>
 // 「图片消息 → 文字占位」的拍平内核与本地 stripImages 路径共用同一份
 // （promptMessageCleanup.flattenContentPartsToText）：超预算降级产物必须与
 // 本地拍平产物严格同源，否则同一条历史消息在两条生成路上渲染成两种样子。
+
+/**
+ * 上云前把聊天消息里的图片令牌（`blobref:<id>`）还原成 data URL，返回一份独立副本。
+ *
+ * 两条理由，缺一条都不能省这一步：
+ *   · worker 那边没有 IndexedDB，令牌到了云端谁也解不开。浏览器里那层「发请求前统一
+ *     还原」（utils/apiBlobRefs.ts）够不到 worker 自己发出去的请求，图会静默消失；
+ *   · 令牌只有几十字节，而它代表的图可能几 MB。先算预算再还原的话，一份「看着没超」
+ *     的包还原后照样超限，下面那道体积闸等于白设。所以顺序是死的：**先还原，再算预算**。
+ *
+ * resolveBlobRefsDeep 原地改对象，所以先深拷贝再交给它——调用方那串 fullMessages
+ * 本地这一轮还要用，一个字节都不能被改。拷贝发生在还原之前，拷的是还带着短令牌的
+ * 小结构，不是几 MB 的 base64。
+ */
+export const resolveChatMessagesForUpload = async (
+  messages: Array<{ role: string; content: unknown }>,
+): Promise<Array<{ role: string; content: unknown }>> => {
+  const copy = messages.map((message) => ({
+    role: message.role,
+    content: message.content === null || typeof message.content !== 'object'
+      ? message.content
+      : (typeof structuredClone === 'function'
+        ? structuredClone(message.content)
+        : JSON.parse(JSON.stringify(message.content))),
+  }));
+  await resolveBlobRefsDeep(copy);
+  return copy;
+};
 
 /**
  * 本地那串 fullMessages → fire_pack 的 `chat.messages`。
@@ -2557,7 +2586,9 @@ export const ActiveMsgClient = {
       && (char.activeMsg2Config?.tasks?.length ?? 0) === 0;
     const firePack: AmsgFirePack = {
       ...(await buildFirePack(char, userProfile, groups, realtimeConfig, undefined, { templateStub })),
-      chat: { messages: toFirePackChatMessages(chatMessages), builtAt: now },
+      // 先还原图片令牌再算体积预算——反过来会让一份「看着没超」的包在云端胀成几 MB，
+      // 而 worker 那边根本解不开令牌（见 resolveChatMessagesForUpload）。
+      chat: { messages: toFirePackChatMessages(await resolveChatMessagesForUpload(chatMessages)), builtAt: now },
     };
 
     const clientTaskId = crypto.randomUUID();

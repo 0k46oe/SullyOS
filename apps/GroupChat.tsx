@@ -31,7 +31,7 @@ import { UsersThree, Money, GearSix, Image as ImageIcon, ArrowsClockwise, PaintB
 import ChatHeaderShell from '../components/chat/ChatHeaderShell';
 import ChatInputArea from '../components/chat/ChatInputArea';
 import TokenImg from '../components/os/TokenImg';
-import { useBlobRefUrl } from '../utils/blobRef';
+import { useBlobRefUrl, isBlobRef, getBlobForRef, migrateDataUrlToRef } from '../utils/blobRef';
 import ChromeCssEditor from '../components/chat/ChromeCssEditor';
 import WhiteboxSoundEditor from '../components/chat/WhiteboxSoundEditor';
 import HtmlCard from '../components/chat/HtmlCard';
@@ -338,12 +338,12 @@ const GroupMessageItem = React.memo(({
                         if (selectionMode) handleClick(e);
                         else onImageClick(msg.content);
                     }}>
-                        <img src={msg.content} className="max-w-[200px] max-h-[200px] rounded-xl shadow-sm border border-black/5" loading="lazy" />
+                        <TokenImg value={msg.content} className="max-w-[200px] max-h-[200px] rounded-xl shadow-sm border border-black/5" loading="lazy" />
                     </div>
                 );
             case 'emoji':
                 // 尺寸跟随外观 → 表情包大小（--sully-emoji-size 三挡，默认 96px = 原 w-24）
-                return <img src={msg.content} className="sully-emoji-msg max-w-[var(--sully-emoji-size,96px)] max-h-[var(--sully-emoji-size,96px)] object-contain drop-shadow-sm hover:scale-110 transition-transform" />;
+                return <TokenImg value={msg.content} className="sully-emoji-msg max-w-[var(--sully-emoji-size,96px)] max-h-[var(--sully-emoji-size,96px)] object-contain drop-shadow-sm hover:scale-110 transition-transform" />;
             case 'transfer':
                 return (
                     <div onClick={(e) => { if (selectionMode) handleClick(e); }}>
@@ -930,7 +930,9 @@ const GroupChat: React.FC = () => {
     const handleImageFile = async (file: File) => {
         try {
             const base64 = await processImage(file, { maxWidth: 600, quality: 0.7, forceJpeg: true });
-            handleSendMessage(base64, 'image');
+            // 群聊图消息存令牌，二进制单独躺在 blob_assets 里（省掉 base64 那 ~33% 的膨胀）。
+            // 同一张图之前存过就复用它的令牌；转不动时原样还回这条 data URL，图不会丢。
+            handleSendMessage(await migrateDataUrlToRef(base64), 'image');
         } catch (err) {
             addToast('图片发送失败', 'error');
         }
@@ -975,7 +977,17 @@ const GroupChat: React.FC = () => {
         setModalType('packet-detail');
     }, []);
 
-    const handleGroupImageClick = useCallback((url: string) => window.open(url, '_blank'), []);
+    // 点图看大图：新标签页只认得真正的 URL，blobref 令牌得先换成 objectURL 再开
+    // （data: 顶层导航被浏览器挡，只能走 objectURL）。开完不立刻回收——新标签页还在
+    // 用它加载；留一分钟再 revoke，图早读完了，也不至于把整张图一直挂在内存里。
+    const handleGroupImageClick = useCallback(async (url: string) => {
+        if (!isBlobRef(url)) { window.open(url, '_blank'); return; }
+        const blob = await getBlobForRef(url);
+        if (!blob) { addToast('图片数据已丢失', 'error'); return; }
+        const objectUrl = URL.createObjectURL(blob);
+        window.open(objectUrl, '_blank');
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+    }, [addToast]);
     const handleGroupReply = useCallback((target: Message) => { setReplyTarget(target); trackEvent('引用回复一条群消息'); }, []);
 
     // 用户抢/收/退：updater 内重跑状态机（以库内最新 claims 判重，防与 AI 派发并发双写）
