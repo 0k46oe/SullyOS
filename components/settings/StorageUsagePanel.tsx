@@ -34,6 +34,9 @@ let cachedBreakdown: StorageBreakdown | null = null;
 const OTHER_USAGE_MIN_BYTES = 1024 * 1024;
 const OTHER_USAGE_MIN_RATIO = 0.1;
 
+/** 合并完成后自动刷新前留的一点时间，让用户看清这轮到底做了什么。 */
+const MERGE_RELOAD_DELAY_MS = 2500;
+
 type PersistAttempt = 'none' | 'granted' | 'denied';
 
 /**
@@ -48,6 +51,7 @@ function describeOptimizeResult(r: OptimizeResult): string {
     if (r.mergedDuplicates > 0) {
         parts.push(`把 ${r.mergedDuplicates} 份重复的图片并成了一份，约 ${formatBytes(r.reclaimableBytes)} 会在下次清理时释放`);
     }
+    const reloadNote = r.mergedDuplicates > 0 ? '页面即将刷新，让界面和备份都用上合并后的图片。' : '';
     if (parts.length === 0) {
         if (r.failed > 0) return `有 ${r.failed} 张图片转换失败（已保留原样），其余没有需要优化的。`;
         return r.scanUnavailable
@@ -58,7 +62,7 @@ function describeOptimizeResult(r: OptimizeResult): string {
     if (r.failed > 0) text += `另有 ${r.failed} 张转换失败，已保留原样。`;
     if (r.skippedGroups > 0) text += `有 ${r.skippedGroups} 组重复图片没有合并——它们被「换一张就会删掉旧图」的地方用着，并了会误删。`;
     if (r.scanUnavailable) text += '这次没能检查重复图片，换个环境再试试。';
-    return text;
+    return text + reloadNote;
 }
 
 const StorageUsagePanel: React.FC = () => {
@@ -136,6 +140,14 @@ const StorageUsagePanel: React.FC = () => {
             if (aliveRef.current) { setOptimizing(false); setOptimizeProgress(null); }
         }
     }, [optimizing, refreshOverview]);
+
+    // 合并过引用就自动刷新一次：内存里的 theme / customIcons 还指着合并前的令牌，
+    // 带着它导出的话备份里同一张图又会存成两份，看起来像没生效。
+    useEffect(() => {
+        if (!optimizeResult || optimizeResult.mergedDuplicates <= 0) return;
+        const timer = setTimeout(() => window.location.reload(), MERGE_RELOAD_DELAY_MS);
+        return () => clearTimeout(timer);
+    }, [optimizeResult]);
 
     const handlePersist = useCallback(async () => {
         setPersisting(true);
@@ -254,15 +266,17 @@ const StorageUsagePanel: React.FC = () => {
                                 ? describeOptimizeResult(optimizeResult)
                                 : '把老数据里仍以 base64 存的图片一次性转成二进制，再把重复存了好几份的同一张图并成一份。做过一次就干净；导入过旧备份后可以再点。'}
                 </p>
-                {/* 合并动的是库里的引用，界面上正显示的图还指着合并前那份。不刷新也不会坏，
-                    但那几份重复的图要等刷新后才彻底没人用，清理时才能真的收走。 */}
+                {/* 合并动的是库里的引用，内存里的 theme / customIcons 还捏着合并前的令牌。
+                    不刷新的话：界面照常显示，但导出的备份里 metadata 写的仍是旧令牌，
+                    同一张图又变成两份进包——看起来就像「优化根本没生效」。所以这里自动刷新，
+                    不指望用户记得点；下面的按钮只是让人不想等的时候立刻走。 */}
                 {!optimizing && optimizeResult && optimizeResult.mergedDuplicates > 0 && (
                     <button
                         type="button"
                         onClick={() => window.location.reload()}
                         className="mt-2 w-full px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 text-[10px] font-bold text-slate-500 active:scale-95 transition-all"
                     >
-                        刷新页面，让界面用上合并后的图片
+                        立即刷新
                     </button>
                 )}
             </div>
