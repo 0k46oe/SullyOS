@@ -23,7 +23,7 @@
 //
 // 跑过一遍后再跑就是 no-op（幂等），导入过旧备份后可以再跑。
 //
-// 八个面都是按主键分页读的，一次只有一批行在内存里。别改回整表读：真实库里这几张表
+// 九个面都是按主键分页读的，一次只有一批行在内存里。别改回整表读：真实库里这几张表
 // 加起来能有几十 MB（光 messages 一张就两万多行、20 MB 量级），光是把它们读进来就够呛，
 // 何况全程还得占着。
 //
@@ -34,6 +34,7 @@
 //   assets 'icon_*'                  ← AppIconEditor
 //   assets 'appearance_preset_*'     ← migrateAppearancePresetBlobRefs（字段清单复用同一函数）
 //   assets 'room_custom_assets_list' ← RoomApp 自定义素材
+//   characters avatar                ← 角色资料页的头像上传（apps/Character.tsx）
 //   characters roomConfig.wallImage / floorImage / items[].image ← RoomApp
 //   songs coverImage                 ← SongwritingApp
 //   cc_custom_parts src / shadowSrc  ← creatorPartToBlobRefs（字段清单复用同一函数）
@@ -41,9 +42,15 @@
 //   themes user/ai 各自的 backgroundImage / decoration / avatarDecoration ← 气泡工坊（ThemeMaker）
 //   messages content（只限 type 为 image / emoji 的行）← Chat / GroupChat 发图与发表情时
 //   emojis url                       ← Chat 表情导入（http 外链不是本机资源，不转）
+//   user_profile avatar / perCharAvatars ← 个人档案的头像上传 / 分角色聊天头像
 // 明确不碰：
-//   · 角色 avatar、社交/手账——写入路径还是 base64，读端不认令牌，
+//   · 社交/手账自己的配图——写入路径还是 base64，读端不认令牌，
 //     转了就破图（待逐面迁移后再收录）；
+//   · 帖子 / 群 / 角色分组 / 剧场面具 / 银行 / 攻略本 / 生活模拟这 7 张表里的**头像副本**
+//     （authorAvatar、群 avatar、卡片上的 charAvatar…）——读端已经认令牌，转了不会破图，
+//     只是不值得专门写七段迁移：写端已经产出令牌，用户下次发帖 / 改群资料 / 存卡片时副本
+//     自然就是令牌了，存量那几份留着 base64 无非是没省下来。而且这 7 张表都在
+//     utils/blobGc.ts 的引用面清单里，头像转出来的 Blob 不会因为副本还是 base64 被当孤儿删。
 //   · sprites.chibi / vrState.chibi / companionAvatar / videoCallBackground 等——令牌原生，
 //     没有 base64 存量；chibiStudio.like520.img——刻意保持 dataURL（见 docs/chibi-studio.md）。
 // 新面收录时除了加进上面清单，还必须确认该面已在 utils/blobGc.ts 的引用面清单里——
@@ -63,7 +70,7 @@ import { tryAcquireMaintenanceLock, releaseMaintenanceLock, currentMaintenanceHo
 import type { AppearancePreset, ChatTheme, CharacterProfile, CustomCreatorPart, Emoji, GalleryImage, Message, SongSheet } from '../types';
 
 /** 本工具会写的表。守卫测试断言它 ⊆ blobGc 的 REF_SOURCE_STORES（转出的 Blob 必须在 GC 视野内）。 */
-export const OPTIMIZE_TARGET_STORES = ['assets', 'characters', 'songs', 'cc_custom_parts', 'gallery', 'themes', 'messages', 'emojis'] as const;
+export const OPTIMIZE_TARGET_STORES = ['assets', 'characters', 'songs', 'cc_custom_parts', 'gallery', 'themes', 'messages', 'emojis', 'user_profile'] as const;
 
 /** 值形态是「裸图片字符串」的 assets 行。 */
 const PLAIN_ASSET_IDS = new Set(['wallpaper', 'lock_wallpaper', 'wallpaper_user_backup']);
@@ -201,7 +208,7 @@ export async function optimizeResourceStorage(
             primeContentMemo(safeByHash);
         }
 
-        // ── 进度条的总数：八张表各数一下行数 ─────────────────────
+        // ── 进度条的总数：九张表各数一下行数 ─────────────────────
         // 只要个数字，count() 不读行里的内容，几十 MB 的图不会被顺带读进内存。
         let total = 0;
         for (const storeName of OPTIMIZE_TARGET_STORES) total += await DB.countStoreRows(storeName);
@@ -244,20 +251,27 @@ export async function optimizeResourceStorage(
             }
         }
 
-        // ── 2) characters 的小屋图 ────────────────────────────────
+        // ── 2) characters：角色头像 + 小屋图 ──────────────────────
+        // 两样东西在同一趟遍历里一起转。别拆成两趟：翻页靠主键推进，多一趟就是把整张表
+        // 连同行里那些几 MB 的图再读一遍（见 iterateStoreRows 的注释）。
         for await (const c of iterateStoreRows<CharacterProfile>('characters')) {
-            tick('小屋');
-            const rc = (c as any).roomConfig;
-            if (!rc) continue;
+            tick('角色头像与小屋');
             let changed = false;
-            for (const key of ['wallImage', 'floorImage']) {
-                const token = await convert(rc[key]);
-                if (token) { rc[key] = token; changed = true; }
-            }
-            if (Array.isArray(rc.items)) {
-                for (const item of rc.items) {
-                    const token = await convert(item?.image);
-                    if (token) { item.image = token; changed = true; }
+            // 头像是两用字段：可能是图，也可能是个 emoji，还可能是 http 外链或已经是令牌。
+            // convert 只认 data:image/ 开头的值，其余一律原样不动。
+            const avatarToken = await convert(c.avatar);
+            if (avatarToken) { c.avatar = avatarToken; changed = true; }
+            const rc = (c as any).roomConfig;
+            if (rc) {
+                for (const key of ['wallImage', 'floorImage']) {
+                    const token = await convert(rc[key]);
+                    if (token) { rc[key] = token; changed = true; }
+                }
+                if (Array.isArray(rc.items)) {
+                    for (const item of rc.items) {
+                        const token = await convert(item?.image);
+                        if (token) { item.image = token; changed = true; }
+                    }
                 }
             }
             if (changed) { await DB.saveCharacter(c); await yieldMain(); }
@@ -333,7 +347,27 @@ export async function optimizeResourceStorage(
             if (token) { await DB.saveEmoji(e.name, token, e.categoryId); await yieldMain(); }
         }
 
-        // ── 9) 合并存量重复：把重复令牌在全部引用面上改写成保留的那个 ──
+        // ── 9) 我方头像（user_profile 单例）───────────────────────
+        // 两处都要转：整体头像 avatar，和「分角色聊天头像」perCharAvatars（charId → 头像的
+        // 对象，逐个值转）。只转 avatar 是这一面最容易犯的错——分角色那几张会静默留在 base64。
+        // 写回用通用整行写回而不是 DB.saveUserProfile：后者会把主键强行按成 'me'，而这个
+        // 循环的不重不漏建立在「主键一个都不动」上（见 iterateStoreRows 的注释）。
+        for await (const p of iterateStoreRows<any>('user_profile')) {
+            tick('我的头像');
+            let changed = false;
+            const avatarToken = await convert(p?.avatar);
+            if (avatarToken) { p.avatar = avatarToken; changed = true; }
+            const perChar = p?.perCharAvatars;
+            if (perChar && typeof perChar === 'object') {
+                for (const charId of Object.keys(perChar)) {
+                    const token = await convert(perChar[charId]);
+                    if (token) { perChar[charId] = token; changed = true; }
+                }
+            }
+            if (changed) { await DB.putStoreRows('user_profile', [p]); await yieldMain(); }
+        }
+
+        // ── 10) 合并存量重复：把重复令牌在全部引用面上改写成保留的那个 ──
         // 只改引用，不删 Blob。失去引用的那几份变成孤儿，由孤儿清理回收。
         if (!result.scanUnavailable && scan.duplicateGroups.length > 0) {
             const plan = buildMergePlan(scan.duplicateGroups, unmergeable);
@@ -351,7 +385,7 @@ export async function optimizeResourceStorage(
             }
         }
 
-        // ── 10) 记忆向量压成紧凑形态 ──────────────────────────────
+        // ── 11) 记忆向量压成紧凑形态 ──────────────────────────────
         // 跟图片没有任何关系，单独一个 try：图片那几步的成果不该因为向量失败就报不出来。
         // 反过来也不吞错——开机那次后台扫描正是因为只 console.warn，卡住了也没人知道。
         try {

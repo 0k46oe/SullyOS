@@ -811,10 +811,12 @@ const GroupChat: React.FC = () => {
         if (!file || !activeGroup) return;
         try {
             const base64 = await processImage(file);
+            // 群头像存令牌，二进制单独躺在 blob_assets 里；转不动时原样还回 data URL，图不会丢
+            const avatar = await migrateDataUrlToRef(base64);
             // 走 context 的 updateGroup：同步内存 groups + DB，
             // 否则只改了本地 activeGroup，退出回列表/再次进群会读回旧头像（恢复默认）
-            await updateGroup(activeGroup.id, { avatar: base64 });
-            setActiveGroup({ ...activeGroup, avatar: base64 });
+            await updateGroup(activeGroup.id, { avatar });
+            setActiveGroup({ ...activeGroup, avatar });
             addToast('群头像已修改', 'success');
         } catch (err: any) {
             addToast('图片处理失败', 'error');

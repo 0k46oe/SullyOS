@@ -29,13 +29,26 @@ async function clearStore(name: string): Promise<void> {
 }
 
 beforeEach(async () => {
-    for (const s of ['assets', 'characters', 'messages', 'songs', 'cc_custom_parts', 'gallery', 'themes', 'emojis', 'blob_assets', 'memory_vectors']) {
+    for (const s of ['assets', 'characters', 'messages', 'songs', 'cc_custom_parts', 'gallery', 'themes', 'emojis',
+                     'user_profile', 'social_posts', 'groups', 'story_theater_masks', 'blob_assets', 'memory_vectors']) {
         await clearStore(s);
     }
     localStorage.clear();
     // 内容记忆是模块级的，不清会让上一条用例存的令牌被这条复用，断言全乱
     clearContentMemo();
 });
+
+/** 直接往某张表里塞几行（绕开 DB 的各种便捷写入口，形状随便造）。 */
+async function seedStore(name: string, records: any[]): Promise<void> {
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(name, 'readwrite');
+        const store = tx.objectStore(name);
+        for (const r of records) store.put(r);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
 
 async function blobBytes(token: string): Promise<Uint8Array> {
     const blob = await getBlobForRef(token);
@@ -341,17 +354,139 @@ describe('优化资源存储（一次性批量迁移）', () => {
         expect(second.failed).toBe(0);
     });
 
-    it('不在清单的字段不动：avatar 的 base64 原样保留（读端还不认令牌）', async () => {
+    it('角色头像：base64 转成令牌，Blob 字节与原图逐字节一致', async () => {
+        await DB.saveCharacter({ id: 'c1', name: '角色', avatar: TINY_PNG } as any);
+
+        const r = await optimizeResourceStorage();
+
+        const c = (await DB.getAllCharacters()).find(x => x.id === 'c1')!;
+        expect(isBlobRef(c.avatar)).toBe(true);
+        expect(await blobBytes(c.avatar)).toEqual(new Uint8Array(await dataUrlToBlob(TINY_PNG).arrayBuffer()));
+        expect(r.converted).toBe(1);
+        expect(r.uniqueBlobs).toBe(1);
+        expect(r.failed).toBe(0);
+    });
+
+    it('角色头像与小屋图一趟遍历里一起转，互不影响', async () => {
         await DB.saveCharacter({
-            id: 'c2', name: '角色', avatar: TINY_PNG,
+            id: 'c1', name: '角色', avatar: TINY_PNG,
             roomConfig: { wallImage: TINY_JPEG, items: [] },
         } as any);
 
+        const r = await optimizeResourceStorage();
+
+        const c = (await DB.getAllCharacters()).find(x => x.id === 'c1') as any;
+        expect(isBlobRef(c.avatar)).toBe(true);
+        expect(isBlobRef(c.roomConfig.wallImage)).toBe(true);
+        expect(r.converted).toBe(2);
+    });
+
+    it('角色头像：emoji 与 http 外链原样保留，只有 data: 才转', async () => {
+        // 头像是两用字段，用户可以只填一个 emoji；外链是别人服务器上的地址，本机没有二进制
+        await DB.saveCharacter({ id: 'c1', name: '表情头像', avatar: '🐱' } as any);
+        await DB.saveCharacter({ id: 'c2', name: '外链头像', avatar: 'https://img.host/a.png' } as any);
+
+        const r = await optimizeResourceStorage();
+
+        const chars = await DB.getAllCharacters();
+        expect(chars.find(c => c.id === 'c1')!.avatar).toBe('🐱');
+        expect(chars.find(c => c.id === 'c2')!.avatar).toBe('https://img.host/a.png');
+        expect(r.converted).toBe(0);
+    });
+
+    it('角色的非头像字段一字不动：刻意留 dataURL 的手办图和文本字段都不碰', async () => {
+        await DB.saveCharacter({
+            id: 'c1', name: '角色', avatar: TINY_PNG, personality: '话很少',
+            chibiStudio: { like520: { img: TINY_JPEG } },
+        } as any);
+
+        const r = await optimizeResourceStorage();
+
+        const c = (await DB.getAllCharacters()).find(x => x.id === 'c1') as any;
+        expect(isBlobRef(c.avatar)).toBe(true);             // 头像照转
+        expect(c.chibiStudio.like520.img).toBe(TINY_JPEG);  // 刻意保持 dataURL，见 docs/chibi-studio.md
+        expect(c.personality).toBe('话很少');
+        expect(r.converted).toBe(1);
+    });
+
+    it('我方头像：整体头像与分角色头像两处都转，外链与文本字段不动', async () => {
+        // 只转 avatar、忘了 perCharAvatars 是这一面最容易犯的错——分角色那几张会静默留在 base64
+        await DB.saveUserProfile({
+            name: '小明', bio: '爱吃辣', avatar: TINY_PNG,
+            perCharAvatars: { c1: TINY_JPEG, c2: TINY_GIF, c3: 'https://img.host/me.png' },
+        } as any);
+
+        const r = await optimizeResourceStorage();
+
+        const p = (await DB.getUserProfile())!;
+        expect(isBlobRef(p.avatar)).toBe(true);
+        expect(await blobBytes(p.avatar)).toEqual(new Uint8Array(await dataUrlToBlob(TINY_PNG).arrayBuffer()));
+        const per = p.perCharAvatars!;
+        expect(isBlobRef(per.c1)).toBe(true);
+        expect(isBlobRef(per.c2)).toBe(true);
+        expect(await blobBytes(per.c1)).toEqual(new Uint8Array(await dataUrlToBlob(TINY_JPEG).arrayBuffer()));
+        expect(await blobBytes(per.c2)).toEqual(new Uint8Array(await dataUrlToBlob(TINY_GIF).arrayBuffer()));
+        expect(per.c3).toBe('https://img.host/me.png');
+        expect(p.name).toBe('小明');
+        expect(p.bio).toBe('爱吃辣');
+        expect(r.converted).toBe(3);
+        expect(r.uniqueBlobs).toBe(3);
+        expect(r.failed).toBe(0);
+    });
+
+    it('我方头像独占引用的 Blob 不会被孤儿 GC 删掉（user_profile 必须在 GC 引用面清单里）', async () => {
+        await DB.saveUserProfile({ name: '小明', avatar: TINY_PNG, perCharAvatars: { c1: TINY_JPEG } } as any);
+        await optimizeResourceStorage();
+        const p = (await DB.getUserProfile())!;
+        const tokens = [p.avatar, p.perCharAvatars!.c1];
+        for (const t of tokens) expect(isBlobRef(t)).toBe(true);
+
+        const gc = await runBlobGc({ minAgeMs: 0 });
+        expect(gc.aborted).toBe(false);
+        expect(gc.deleted).toBe(0);
+        for (const t of tokens) expect(await getBlobForRef(t)).not.toBeNull();
+    });
+
+    it('头像被抄进帖子 / 群资料 / 剧场面具后，孤儿清理不会把图删掉', async () => {
+        // 头像会被抄进这些面长期留着。用户之后换了头像，characters 那边就不再指着原图，
+        // 只剩这些副本还引用它——GC 看不见哪一面，那一面上的头像就会碎成空白，且不可逆。
+        await DB.saveCharacter({ id: 'c1', name: '甲', avatar: TINY_PNG } as any);
+        await DB.saveCharacter({ id: 'c2', name: '乙', avatar: TINY_JPEG } as any);
+        await DB.saveCharacter({ id: 'c3', name: '丙', avatar: TINY_GIF } as any);
         await optimizeResourceStorage();
 
-        const c = (await DB.getAllCharacters()).find(x => x.id === 'c2') as any;
-        expect(c.avatar).toBe(TINY_PNG);              // 一字未动
-        expect(isBlobRef(c.roomConfig.wallImage)).toBe(true); // 清单内的照转
+        const chars = await DB.getAllCharacters();
+        const tokenOf = (id: string) => chars.find(c => c.id === id)!.avatar;
+        const postToken = tokenOf('c1');
+        const groupToken = tokenOf('c2');
+        const maskToken = tokenOf('c3');
+        for (const t of [postToken, groupToken, maskToken]) expect(isBlobRef(t)).toBe(true);
+
+        await seedStore('social_posts', [{ id: 'p1', charId: 'c1', authorAvatar: postToken, content: '今天天气不错', timestamp: 1 }]);
+        await seedStore('groups', [{ id: 'g1', name: '小群', members: ['c1'], avatar: groupToken }]);
+        await seedStore('story_theater_masks', [{ id: 'm1', name: '路人甲', avatar: maskToken }]);
+        // 三个角色随后都换成了 emoji 头像：这三份 Blob 只剩上面那三处副本引用着
+        for (const c of chars) await DB.saveCharacter({ ...c, avatar: '🐱' });
+
+        const gc = await runBlobGc({ minAgeMs: 0 });
+        expect(gc.aborted).toBe(false);
+        expect(gc.deleted).toBe(0);
+        expect(await getBlobForRef(postToken)).not.toBeNull();   // 帖子里的作者头像
+        expect(await getBlobForRef(groupToken)).not.toBeNull();  // 群资料里的群头像
+        expect(await getBlobForRef(maskToken)).not.toBeNull();   // 剧场面具上的头像
+    });
+
+    it('头像幂等：第一遍转完，第二遍零转换', async () => {
+        await DB.saveCharacter({ id: 'c1', name: '角色', avatar: TINY_PNG } as any);
+        await DB.saveUserProfile({ name: '小明', avatar: TINY_JPEG, perCharAvatars: { c1: TINY_GIF } } as any);
+
+        const first = await optimizeResourceStorage();
+        expect(first.converted).toBe(3);
+
+        const second = await optimizeResourceStorage();
+        expect(second.converted).toBe(0);
+        expect(second.uniqueBlobs).toBe(0);
+        expect(second.failed).toBe(0);
     });
 
     it('幂等：第二次运行零转换零新建', async () => {
@@ -542,17 +677,6 @@ describe('分页读表：跨页不漏行，进度条对得上', () => {
     // 就是没被转换的存量图。这组用例把跨页和进度口径钉住。
     const PAGE = 200; // 与 storageOptimize.ts 的 PAGE_SIZE 一致
 
-    async function seedStore(name: string, records: any[]): Promise<void> {
-        const db = await openDB();
-        await new Promise<void>((resolve, reject) => {
-            const tx = db.transaction(name, 'readwrite');
-            const store = tx.objectStore(name);
-            for (const r of records) store.put(r);
-            tx.oncomplete = () => resolve();
-            tx.onerror = () => reject(tx.error);
-        });
-    }
-
     it('相册行数超过一页：跨页每一行都转到，一条不漏', async () => {
         const count = PAGE + 50;
         await seedStore('gallery', Array.from({ length: count }, (_, i) => ({
@@ -585,8 +709,8 @@ describe('分页读表：跨页不漏行，进度条对得上', () => {
         expect(r.uniqueBlobs).toBe(1); // 全是同一张图，去重后只建一份 Blob
     });
 
-    it('进度回调：total 就是八面的真实行数，done 一路递增且正好停在 total', async () => {
-        // 六个面各摆几行、行数互不相同——少数了哪一面都对不上
+    it('进度回调：total 就是九面的真实行数，done 一路递增且正好停在 total', async () => {
+        // 九个面各摆几行、行数互不相同——少数了哪一面都对不上
         await DB.saveAsset('wallpaper', TINY_PNG);
         await DB.saveAsset('lock_wallpaper', TINY_JPEG);
         await seedStore('characters', [
@@ -624,10 +748,11 @@ describe('分页读表：跨页不漏行，进度条对得上', () => {
             { name: '本地表情', url: TINY_GIF },
             { name: '网络表情', url: 'https://img.host/sticker.png' },
         ]);
-        const expectedRows = 2 + 3 + 1 + 2 + 4 + 5 + 6 + 2;
+        await seedStore('user_profile', [{ id: 'me', name: '小明', avatar: TINY_JPEG }]);
+        const expectedRows = 2 + 3 + 1 + 2 + 4 + 5 + 6 + 2 + 1;
 
-        // 只收八面自己报的那几档：扫库 / 合并 / 向量三段各有各的进度口径，混进来会算错
-        const faceLabels = new Set(['系统外观', '小屋', '歌曲封面', '捏人器部件', '相册', '气泡主题', '聊天图片', '表情包']);
+        // 只收九面自己报的那几档：扫库 / 合并 / 向量三段各有各的进度口径，混进来会算错
+        const faceLabels = new Set(['系统外观', '角色头像与小屋', '歌曲封面', '捏人器部件', '相册', '气泡主题', '聊天图片', '表情包', '我的头像']);
         const events: Array<{ done: number; total: number }> = [];
         await optimizeResourceStorage(p => {
             if (faceLabels.has(p.label)) events.push({ done: p.done, total: p.total });
@@ -677,6 +802,51 @@ describe('气泡主题导出：分享文件里不能留令牌', () => {
         // processImage 给的是 data URL，得再过一道 migrateDataUrlToRef 才进主题
         expect(body).toMatch(/await migrateDataUrlToRef\(/);
         expect(body).not.toMatch(/updateStyle\('(backgroundImage|decoration|avatarDecoration)', result\)/);
+    });
+});
+
+describe('头像上传：新存进去的就是令牌', () => {
+    // 存量迁移只管库里已经躺着的那些。写端要是没接上，用户每传一张新头像就又落一份 base64，
+    // 一键优化跑完照样长回来，而界面上一点区别都看不出来。真渲染一遍这几个界面代价太大，
+    // 这里用源码锚：四个上传点里哪个漏了 migrateDataUrlToRef，这组就红。
+    const readSrc = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
+
+    /** 截出某个 handler 的函数体（到最近的一处收尾 `};` 为止；各文件缩进不同，2/4 空格都认）。 */
+    function handlerBody(src: string, decl: string): string {
+        const start = src.indexOf(decl);
+        expect(start).toBeGreaterThan(-1);
+        const ends = ['\n  };', '\n    };'].map(m => src.indexOf(m, start)).filter(i => i > start);
+        expect(ends.length).toBeGreaterThan(0);
+        return src.slice(start, Math.min(...ends));
+    }
+
+    it('角色头像（角色资料页）', () => {
+        const body = handlerBody(readSrc('../apps/Character.tsx'), 'const handleFileChange');
+        expect(body).toMatch(/handleChange\('avatar', await migrateDataUrlToRef\(/);
+        expect(body).not.toMatch(/handleChange\('avatar', processedBase64\)/);
+    });
+
+    it('我的整体头像（个人档案）', () => {
+        const body = handlerBody(readSrc('../apps/UserApp.tsx'), 'const handleAvatarChange');
+        expect(body).toMatch(/avatar: await migrateDataUrlToRef\(/);
+        expect(body).not.toMatch(/updateUserProfile\(\{ avatar: base64 \}\)/);
+    });
+
+    it('群头像（群聊设置）', () => {
+        const body = handlerBody(readSrc('../apps/GroupChat.tsx'), 'const handleGroupAvatarUpload');
+        expect(body).toMatch(/await migrateDataUrlToRef\(/);
+        // 内存那份和落库那份必须是同一个值，否则退出重进会读回令牌、当前界面还挂着 base64
+        expect(body).not.toMatch(/avatar: base64/);
+    });
+
+    it('分角色聊天头像：本地上传转令牌，图床外链那条路不碰', () => {
+        const src = readSrc('../components/user/PerCharAvatarPicker.tsx');
+        const upload = handlerBody(src, 'const handleUpload');
+        expect(upload).toMatch(/setOverride\(editingId, await migrateDataUrlToRef\(/);
+        expect(upload).not.toMatch(/setOverride\(editingId, base64\)/);
+        // 外链只是个 http 地址，本机没有它的二进制，转不了也不该转
+        const applyUrl = handlerBody(src, 'const applyUrl');
+        expect(applyUrl).not.toMatch(/migrateDataUrlToRef/);
     });
 });
 

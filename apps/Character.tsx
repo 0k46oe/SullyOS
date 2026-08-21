@@ -17,7 +17,7 @@ import RoomPlatePanel from '../components/character/RoomPlatePanel';
 import MemoryArchivist from '../components/character/MemoryArchivist';
 import ChibiStudio, { ChibiShelfPanel } from '../components/character/ChibiStudio';
 import TokenImg from '../components/os/TokenImg';
-import { resolveBlobRefsDeep } from '../utils/blobRef';
+import { resolveBlobRefsDeep, migrateDataUrlToRef } from '../utils/blobRef';
 import { characterLaunch } from '../utils/characterLaunch';
 import { safeFetchJson, extractContent } from '../utils/safeApi';
 import { fetchMiniMaxVoices, MiniMaxVoiceItem } from '../utils/minimaxVoice';
@@ -427,7 +427,9 @@ const Character: React.FC = () => {
           try {
               setIsCompressing(true);
               const processedBase64 = await processImage(file);
-              handleChange('avatar', processedBase64);
+              // 头像存令牌，二进制单独躺在 blob_assets 里（省掉 base64 那 ~33% 的膨胀）。
+              // 同一张图之前存过就复用它的令牌；转不动时原样还回这条 data URL，图不会丢。
+              handleChange('avatar', await migrateDataUrlToRef(processedBase64));
               // 清空 URL draft, 否则用户之后再触发 URL input 的 onBlur 会用脏旧 URL
               // 把刚上传的 data URL 头像盖掉. 不走 effect 监听 avatar 的方案 —— 那会
               // 在用户正在打 URL 时吃掉 draft.

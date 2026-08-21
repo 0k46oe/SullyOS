@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { useOS } from '../../context/OSContext';
 import { processImage } from '../../utils/file';
+import { migrateDataUrlToRef } from '../../utils/blobRef';
 import TokenImg from '../os/TokenImg';
 
 /**
@@ -86,7 +87,8 @@ const PerCharAvatarPicker: React.FC = () => {
         if (!file || !editingId) return;
         try {
             const base64 = await processImage(file);
-            setOverride(editingId, base64);
+            // 本地上传的图存令牌（图床外链那条路不经过这里，原样存字符串即可）
+            setOverride(editingId, await migrateDataUrlToRef(base64));
             setUrlDraft('');
             addToast('已设置该角色的聊天头像', 'success');
         } catch (err: any) {
