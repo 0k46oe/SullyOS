@@ -33,8 +33,9 @@
 //   characters roomConfig.wallImage / floorImage / items[].image ← RoomApp
 //   songs coverImage                 ← SongwritingApp
 //   cc_custom_parts src / shadowSrc  ← creatorPartToBlobRefs（字段清单复用同一函数）
+//   gallery url                      ← Chat 把用户发的图存进相册时
 // 明确不碰：
-//   · 角色 avatar、聊天图、相册、表情包、社交/手账——写入路径还是 base64，读端不认令牌，
+//   · 角色 avatar、聊天图、表情包、社交/手账——写入路径还是 base64，读端不认令牌，
 //     转了就破图（待逐面迁移后再收录）；
 //   · sprites.chibi / vrState.chibi / companionAvatar / videoCallBackground 等——令牌原生，
 //     没有 base64 存量；chibiStudio.like520.img——刻意保持 dataURL（见 docs/chibi-studio.md）。
@@ -55,7 +56,7 @@ import { tryAcquireMaintenanceLock, releaseMaintenanceLock, currentMaintenanceHo
 import type { AppearancePreset, CustomCreatorPart } from '../types';
 
 /** 本工具会写的表。守卫测试断言它 ⊆ blobGc 的 REF_SOURCE_STORES（转出的 Blob 必须在 GC 视野内）。 */
-export const OPTIMIZE_TARGET_STORES = ['assets', 'characters', 'songs', 'cc_custom_parts'] as const;
+export const OPTIMIZE_TARGET_STORES = ['assets', 'characters', 'songs', 'cc_custom_parts', 'gallery'] as const;
 
 /** 值形态是「裸图片字符串」的 assets 行。 */
 const PLAIN_ASSET_IDS = new Set(['wallpaper', 'lock_wallpaper', 'wallpaper_user_backup']);
@@ -177,11 +178,12 @@ export async function optimizeResourceStorage(
 
         // ── 1) assets 表 ─────────────────────────────────────────
         const assets = await DB.getAllAssets();
-        // ── 预取其余三面（总数先算齐，进度条不跳） ──
+        // ── 预取其余四面（总数先算齐，进度条不跳） ──
         const characters = await DB.getAllCharacters();
         const songs = await DB.getAllSongs();
         const parts = await DB.getCustomCreatorParts();
-        const total = assets.length + characters.length + songs.length + parts.length;
+        const gallery = await DB.getGalleryImages();
+        const total = assets.length + characters.length + songs.length + parts.length + gallery.length;
         let done = 0;
         const tick = (label: string) => { done++; onProgress?.({ label, done, total }); };
 
@@ -256,7 +258,15 @@ export async function optimizeResourceStorage(
             await yieldMain();
         }
 
-        // ── 5) 合并存量重复：把重复令牌在全部引用面上改写成保留的那个 ──
+        // ── 5) 相册 ───────────────────────────────────────────────
+        // 聊天里发的每张图都会存一份进来，是最容易堆大的一面。
+        for (const g of gallery) {
+            tick('相册');
+            const token = await convert(g.url);
+            if (token) { g.url = token; await DB.saveGalleryImage(g); await yieldMain(); }
+        }
+
+        // ── 6) 合并存量重复：把重复令牌在全部引用面上改写成保留的那个 ──
         // 只改引用，不删 Blob。失去引用的那几份变成孤儿，由孤儿清理回收。
         if (!result.scanUnavailable && scan.duplicateGroups.length > 0) {
             const plan = buildMergePlan(scan.duplicateGroups, unmergeable);
@@ -274,7 +284,7 @@ export async function optimizeResourceStorage(
             }
         }
 
-        // ── 6) 记忆向量压成紧凑形态 ───────────────────────────────
+        // ── 7) 记忆向量压成紧凑形态 ───────────────────────────────
         // 跟图片没有任何关系，单独一个 try：图片那几步的成果不该因为向量失败就报不出来。
         // 反过来也不吞错——开机那次后台扫描正是因为只 console.warn，卡住了也没人知道。
         try {

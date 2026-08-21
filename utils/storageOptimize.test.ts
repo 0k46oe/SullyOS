@@ -24,7 +24,7 @@ async function clearStore(name: string): Promise<void> {
 }
 
 beforeEach(async () => {
-    for (const s of ['assets', 'characters', 'messages', 'songs', 'cc_custom_parts', 'blob_assets', 'memory_vectors']) {
+    for (const s of ['assets', 'characters', 'messages', 'songs', 'cc_custom_parts', 'gallery', 'blob_assets', 'memory_vectors']) {
         await clearStore(s);
     }
     localStorage.clear();
@@ -104,6 +104,57 @@ describe('优化资源存储（一次性批量迁移）', () => {
         expect(isBlobRef(stored.customIcons.chat)).toBe(true);
         expect(stored.name).toBe('我的预设');
         expect(stored.theme.darkMode).toBe(true);
+    });
+
+    it('相册 gallery 行转成令牌，Blob 字节与原图逐字节一致', async () => {
+        await DB.saveGalleryImage({ id: 'g1', charId: 'c1', url: TINY_PNG, timestamp: 1 });
+
+        const r = await optimizeResourceStorage();
+
+        const stored = (await DB.getGalleryImages()).find(g => g.id === 'g1')!;
+        expect(isBlobRef(stored.url)).toBe(true);
+        expect(await blobBytes(stored.url)).toEqual(new Uint8Array(await dataUrlToBlob(TINY_PNG).arrayBuffer()));
+        expect(r.converted).toBe(1);
+        expect(r.uniqueBlobs).toBe(1);
+        expect(r.failed).toBe(0);
+    });
+
+    it('相册图和别处引用同一张图：收敛到同一个令牌，只建一个 Blob', async () => {
+        await DB.saveAsset('wallpaper', TINY_PNG);
+        await DB.saveGalleryImage({ id: 'g1', charId: 'c1', url: TINY_PNG, timestamp: 1 });
+
+        const r = await optimizeResourceStorage();
+
+        const stored = (await DB.getGalleryImages()).find(g => g.id === 'g1')!;
+        expect(isBlobRef(stored.url)).toBe(true);
+        expect(stored.url).toBe(await DB.getAsset('wallpaper'));
+        expect(r.converted).toBe(2);
+        expect(r.uniqueBlobs).toBe(1);
+    });
+
+    it('相册幂等：第一遍转完，第二遍零转换', async () => {
+        await DB.saveGalleryImage({ id: 'g1', charId: 'c1', url: TINY_PNG, timestamp: 1 });
+
+        const first = await optimizeResourceStorage();
+        expect(first.converted).toBe(1);
+
+        const second = await optimizeResourceStorage();
+        expect(second.converted).toBe(0);
+        expect(second.uniqueBlobs).toBe(0);
+        expect(second.failed).toBe(0);
+    });
+
+    it('相册独占引用的图不会被孤儿 GC 删掉（gallery 必须在 GC 的引用面清单里）', async () => {
+        await DB.saveGalleryImage({ id: 'g1', charId: 'c1', url: TINY_PNG, timestamp: 1 });
+        await optimizeResourceStorage();
+        const token = (await DB.getGalleryImages()).find(g => g.id === 'g1')!.url;
+        expect(isBlobRef(token)).toBe(true);
+
+        // 转出来的 Blob 只有相册这一面引用着：GC 看不见这个面就会把它当孤儿删掉，相册全没
+        const gc = await runBlobGc({ minAgeMs: 0 });
+        expect(gc.aborted).toBe(false);
+        expect(gc.deleted).toBe(0);
+        expect(await getBlobForRef(token)).not.toBeNull();
     });
 
     it('不在清单的字段不动：avatar 的 base64 原样保留（读端还不认令牌）', async () => {

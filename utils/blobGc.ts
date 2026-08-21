@@ -20,6 +20,7 @@
 // | messages 表 | metadata.cameraSnapshotRef | 分页逐行（表大，不 getAll 全量占内存） |
 // | cc_custom_parts 表 | src / shadowSrc | 分页逐行 |
 // | songs 表 | coverImage | 分页逐行 |
+// | gallery 表 | url | 分页逐行 |
 // | assets 表 | wallpaper / lock_wallpaper / wallpaper_user_backup / icon_* /
 // |           | appearance_preset_*（JSON）/ room_custom_assets_list（JSON）/
 // |           | ls_mirror_v1（localStorage 镜像，最容易漏）/ spark_* 等 | 分页逐行 |
@@ -34,9 +35,9 @@ import { DB } from './db';
 import { blobStore } from './blobStore';
 import { tryAcquireMaintenanceLock, releaseMaintenanceLock, currentMaintenanceHolder } from './maintenanceLock';
 
-// 引用面里的 7 张表。名字与 db.ts 的 STORE_* 常量值一一对应
+// 引用面里的 8 张表。名字与 db.ts 的 STORE_* 常量值一一对应
 // （STORE_CHARACTERS / STORE_MESSAGES / STORE_CC_PARTS / STORE_SONGS /
-//   STORE_ASSETS / STORE_THEMES / pixel_home_assets）。
+//   STORE_GALLERY / STORE_ASSETS / STORE_THEMES / pixel_home_assets）。
 // 导出仅供测试核对拼写：名字写错时 getStoreRowsPage 的 contains 兜底会静默返回空页，
 // 等于那个面没扫、无任何报错——blobGc.test.ts 有一条守卫断言每个名字真实存在。
 export const REF_SOURCE_STORES = [
@@ -44,6 +45,7 @@ export const REF_SOURCE_STORES = [
     'messages',
     'cc_custom_parts',
     'songs',
+    'gallery',
     'assets',
     'themes',
     'pixel_home_assets',

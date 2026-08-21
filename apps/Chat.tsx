@@ -20,6 +20,7 @@ import { XhsMcpClient, extractNotesFromMcpData, normalizeXhsLiteDetail } from '.
 import { extractWebpageContent, detectFirstUrl, detectXhsShortUrl, extractXhsShareTitle, isXhsUrl, extractXhsNoteId, expandShortUrl, type ExtractedWebpage } from '../utils/webpageExtractor';
 import { isVideoShareUrl, parseVideoShareUrl } from '../utils/videoParser';
 import { isDevDebugAvailable } from '../utils/devDebug';
+import { migrateDataUrlToRef } from '../utils/blobRef';
 import { resolveLifeRecordCard } from '../utils/lifeRecords';
 import { isMcdConfigured } from '../utils/mcdMcpClient';
 import { isMcdActivatedInMessages, MCD_ACTIVATE_TRIGGER, MCD_DEACTIVATE_TRIGGER } from '../utils/mcdToolBridge';
@@ -1296,10 +1297,15 @@ const Chat: React.FC = () => {
                 const sender = m.role === 'user' ? userProfile.name : char.name;
                 return `${sender}: ${m.content.substring(0, 100)}`;
             });
+            // 相册这一面已经接了令牌链路（读端是 TokenImg），存进去的是一个短令牌，
+            // 图片二进制单独躺在 blob_assets 里，省掉 base64 那 ~33% 的膨胀。
+            // 同一张图之前存过就直接复用它的令牌；转不动时原样还回这条 data URL，图不会丢。
+            // 下面 msgPayload.content 里的那张是聊天消息（messages 表），读端还不认令牌，保持 base64。
+            const galleryUrl = await migrateDataUrlToRef(text);
             await DB.saveGalleryImage({
                 id: `img-${Date.now()}-${Math.random()}`,
                 charId: char.id,
-                url: text,
+                url: galleryUrl,
                 timestamp: Date.now(),
                 savedDate: localDateKey,
                 chatContext: recentChat

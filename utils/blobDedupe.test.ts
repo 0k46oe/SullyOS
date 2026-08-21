@@ -199,7 +199,7 @@ describe('与孤儿 GC 的配合', () => {
         // 换成各自维护的清单时，这条会红。
         expect(REF_SOURCE_STORES.length).toBeGreaterThan(0);
         expect([...REF_SOURCE_STORES]).toEqual(
-            ['characters', 'messages', 'cc_custom_parts', 'songs', 'assets', 'themes', 'pixel_home_assets'],
+            ['characters', 'messages', 'cc_custom_parts', 'songs', 'gallery', 'assets', 'themes', 'pixel_home_assets'],
         );
     });
 
