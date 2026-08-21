@@ -337,6 +337,9 @@ const StorageUsagePanel: React.FC = () => {
                                 <p className="text-[10px] text-slate-300 leading-relaxed">
                                     {[
                                         breakdown.categories.some(c => c.estimated) ? '标「约」的项目是抽样估算' : '',
+                                        // 数据的原始大小比它实际占的地方大——浏览器落盘时会压一道。
+                                        // 不折算的话细分加起来会超过上面的总量，看着像算错了。
+                                        breakdown.calibrated ? '各项已按实际占用折算，比数据本身的大小小一些' : '',
                                         showOtherUsage ? '「网页缓存等」是离线缓存这类系统占用，删不掉也不用管' : '',
                                         breakdown.failedStores.length > 0 ? `有 ${breakdown.failedStores.length} 张表没读出来` : '',
                                     ].filter(Boolean).join('；')}

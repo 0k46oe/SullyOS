@@ -22,6 +22,11 @@ export interface StorageOverview {
     supported: boolean;
     usageBytes: number | null;
     quotaBytes: number | null;
+    /**
+     * 浏览器实报的 IndexedDB 那一份（Chrome 的 usageDetails 才有，其它家是 null）。
+     * 细分校准要用它：我们量的是原始字节，落盘时压过一道，两者天然对不上。
+     */
+    indexedDbBytes: number | null;
     /** 持久化许可。null = 这个浏览器不支持查询（不等于没有）。 */
     persisted: boolean | null;
 }
@@ -34,18 +39,23 @@ const getStorageManager = (): StorageManager | null => {
 /** 读总量 + 持久化状态。任何一环失败都降级成「读不到」，不抛。 */
 export async function readStorageOverview(): Promise<StorageOverview> {
     const sm = getStorageManager();
-    const fallback: StorageOverview = { supported: false, usageBytes: null, quotaBytes: null, persisted: null };
+    const fallback: StorageOverview = {
+        supported: false, usageBytes: null, quotaBytes: null, indexedDbBytes: null, persisted: null,
+    };
     if (!sm) return fallback;
 
     let usageBytes: number | null = null;
     let quotaBytes: number | null = null;
+    let indexedDbBytes: number | null = null;
     let supported = false;
     if (typeof sm.estimate === 'function') {
         try {
-            const est = await sm.estimate();
+            const est = await sm.estimate() as StorageEstimate & { usageDetails?: Record<string, number> };
             supported = true;
             usageBytes = typeof est.usage === 'number' ? est.usage : null;
             quotaBytes = typeof est.quota === 'number' ? est.quota : null;
+            const detail = est.usageDetails?.indexedDB;
+            indexedDbBytes = typeof detail === 'number' ? detail : null;
         } catch {
             // 隐私模式 / 权限受限会直接 reject，当成「这浏览器不给看」处理
         }
@@ -60,7 +70,7 @@ export async function readStorageOverview(): Promise<StorageOverview> {
         }
     }
 
-    return { supported, usageBytes, quotaBytes, persisted };
+    return { supported, usageBytes, quotaBytes, indexedDbBytes, persisted };
 }
 
 /**
@@ -327,12 +337,19 @@ export interface StorageCategoryUsage {
     label: string;
     bytes: number;
     estimated: boolean;
+    /**
+     * 这一类里属于二进制（Blob）的字节数。校准时它原样不动——Blob 在 IndexedDB 里
+     * 独立落盘，不跟着 LevelDB 压缩走，量到多少就是多少。
+     */
+    binaryBytes: number;
 }
 
 export interface StorageBreakdown {
     categories: StorageCategoryUsage[];
     totalBytes: number;
     failedStores: string[];
+    /** 数字有没有按浏览器实报的用量折算过（见 calibrateBreakdown）。 */
+    calibrated: boolean;
 }
 
 /** 一个库的逐表结果 + 这个库整体该归哪类（null = 按表名逐个判）。 */
@@ -349,8 +366,11 @@ export interface DatabaseUsageInput {
  */
 export function summarizeUsage(inputs: DatabaseUsageInput[]): StorageBreakdown {
     const bytes: Record<StorageCategoryKey, number> = { media: 0, chat: 0, characters: 0, memory: 0, activeMsg: 0, other: 0 };
+    const binary: Record<StorageCategoryKey, number> = { media: 0, chat: 0, characters: 0, memory: 0, activeMsg: 0, other: 0 };
     const estimated: Record<StorageCategoryKey, boolean> = { media: false, chat: false, characters: false, memory: false, activeMsg: false, other: false };
     const failedStores: string[] = [];
+    const sumBinary = (b: Partial<Record<BinaryKind, number>>) =>
+        Object.values(b).reduce((a: number, v) => a + (v ?? 0), 0);
 
     for (const { usage, forceCategory } of inputs) {
         failedStores.push(...usage.failed);
@@ -362,22 +382,29 @@ export function summarizeUsage(inputs: DatabaseUsageInput[]): StorageBreakdown {
                 const mediaBytes = store.bytes - modelBytes;
                 if (modelBytes > 0) {
                     bytes.characters += modelBytes;
+                    binary.characters += modelBytes;
                     estimated.characters ||= store.estimated;
                 }
                 if (mediaBytes > 0) {
                     bytes.media += mediaBytes;
+                    // mediaBytes 里除了图片/语音的二进制，还含这张表自己的文本开销（id 之类）
+                    binary.media += Math.min(mediaBytes, sumBinary(bin) - modelBytes);
                     estimated.media ||= store.estimated;
                 }
                 continue;
             }
             const key = forceCategory ?? categoryOfStore(store.store);
             bytes[key] += store.bytes;
+            binary[key] += Math.min(store.bytes, sumBinary(store.binaryBytes));
             estimated[key] ||= store.estimated;
         }
     }
 
     const categories = STORAGE_CATEGORY_ORDER
-        .map(key => ({ key, label: STORAGE_CATEGORY_LABELS[key], bytes: bytes[key], estimated: estimated[key] }))
+        .map(key => ({
+            key, label: STORAGE_CATEGORY_LABELS[key],
+            bytes: bytes[key], binaryBytes: binary[key], estimated: estimated[key],
+        }))
         .filter(c => c.bytes > 0)
         .sort((a, b) => {
             if (a.key === 'other') return 1;
@@ -389,6 +416,42 @@ export function summarizeUsage(inputs: DatabaseUsageInput[]): StorageBreakdown {
         categories,
         totalBytes: categories.reduce((sum, c) => sum + c.bytes, 0),
         failedStores,
+        calibrated: false,
+    };
+}
+
+/**
+ * 按浏览器实报的 IndexedDB 用量折算文本部分。
+ *
+ * 我们量的是数据的原始字节，而 Chrome 的 IndexedDB（LevelDB 后端）落盘时会压一道，
+ * 于是细分合计经常比 estimate() 报的总量还大——界面上出现「一共 180 MB、细分加起来
+ * 227 MB」纯粹是在误导人。Blob 不参与那道压缩（独立落盘），所以只折算文本那半。
+ *
+ * 只在我们量得偏大时折算。量出来比实报还小，说明有没扫到的库或别的来源，那该由
+ * 界面上的「其他占用」交代，把数字硬放大只是编圆了它。
+ */
+export function calibrateBreakdown(breakdown: StorageBreakdown, actualBytes: number | null): StorageBreakdown {
+    if (actualBytes == null || !Number.isFinite(actualBytes) || actualBytes <= 0) return breakdown;
+
+    const binaryTotal = breakdown.categories.reduce((n, c) => n + c.binaryBytes, 0);
+    const textTotal = breakdown.totalBytes - binaryTotal;
+    if (textTotal <= 0) return breakdown;
+
+    // 二进制先占掉实报的一部分，剩下的才是文本能分的
+    const textActual = actualBytes - binaryTotal;
+    if (textActual <= 0) return breakdown;      // 二进制就撑满了：多半是实报口径不同，别硬折
+    const ratio = textActual / textTotal;
+    if (ratio >= 1) return breakdown;           // 我们没有高估，交给「其他占用」去说
+
+    const categories = breakdown.categories.map(c => {
+        const text = Math.max(0, c.bytes - c.binaryBytes);
+        return { ...c, bytes: Math.round(c.binaryBytes + text * ratio) };
+    });
+    return {
+        ...breakdown,
+        categories,
+        totalBytes: categories.reduce((sum, c) => sum + c.bytes, 0),
+        calibrated: true,
     };
 }
 
@@ -518,5 +581,7 @@ export async function computeStorageBreakdown(
         }
     }
 
-    return summarizeUsage(inputs);
+    // 折算要用浏览器实报的 IndexedDB 用量；读不到（非 Chrome）就照原始字节显示
+    const overview = await readStorageOverview();
+    return calibrateBreakdown(summarizeUsage(inputs), overview.indexedDbBytes);
 }

@@ -8,6 +8,7 @@ import {
     requestPersistentStorage,
     formatBytes,
     binaryKindOfMime,
+    calibrateBreakdown,
     type DatabaseUsage,
 } from './storageStats';
 
@@ -225,7 +226,7 @@ describe('readStorageOverview', () => {
     it('完全没有 storage API 时整体降级，不抛', async () => {
         vi.stubGlobal('navigator', {});
         const ov = await readStorageOverview();
-        expect(ov).toEqual({ supported: false, usageBytes: null, quotaBytes: null, persisted: null });
+        expect(ov).toEqual({ supported: false, usageBytes: null, quotaBytes: null, indexedDbBytes: null, persisted: null });
     });
 
     it('查不了持久化状态时回 null（≠ 没拿到许可）', async () => {
@@ -310,5 +311,53 @@ describe('computeStorageBreakdown（端到端）', () => {
         }
         const names = (await indexedDB.databases()).map(d => d.name);
         expect(names).not.toContain('ActiveMsg');
+    });
+});
+
+describe('calibrateBreakdown（按浏览器实报折算）', () => {
+    // 库里量到 1000（文本 600 + Blob 400），浏览器实报 800。
+    // 差的 200 只可能压在文本上——Blob 独立落盘不参与 LevelDB 压缩。
+    const raw = () => summarizeUsage([{
+        usage: usageOf([
+            { store: 'messages', bytes: 600, count: 1, estimated: false, binaryBytes: {} },
+            { store: 'blob_assets', bytes: 400, count: 1, estimated: false, binaryBytes: { image: 400 } },
+        ]),
+    }]);
+
+    it('高估时只缩文本，二进制一个字节不动', () => {
+        const bd = calibrateBreakdown(raw(), 800);
+        expect(bd.calibrated).toBe(true);
+        // 文本能分 800-400=400，原本 600 → 系数 2/3
+        expect(bd.categories.find(c => c.key === 'chat')?.bytes).toBe(400);
+        expect(bd.categories.find(c => c.key === 'media')?.bytes).toBe(400);
+        expect(bd.totalBytes).toBe(800);
+    });
+
+    it('合计对齐实报值，不再出现「细分比总量还大」', () => {
+        const bd = calibrateBreakdown(raw(), 800);
+        expect(bd.totalBytes).toBeLessThanOrEqual(800);
+    });
+
+    it('我们没高估时保持原样，差额留给「其他占用」去交代', () => {
+        const bd = calibrateBreakdown(raw(), 5000);
+        expect(bd.calibrated).toBe(false);
+        expect(bd.totalBytes).toBe(1000);
+    });
+
+    it('读不到实报值（非 Chrome）就不折算', () => {
+        expect(calibrateBreakdown(raw(), null).calibrated).toBe(false);
+    });
+
+    it('二进制已经撑满实报值时不硬折（口径对不上，宁可不动）', () => {
+        const bd = calibrateBreakdown(raw(), 300);
+        expect(bd.calibrated).toBe(false);
+        expect(bd.totalBytes).toBe(1000);
+    });
+
+    it('纯二进制的库不折算（没有文本可缩）', () => {
+        const onlyBinary = summarizeUsage([{
+            usage: usageOf([{ store: 'blob_assets', bytes: 400, count: 1, estimated: false, binaryBytes: { image: 400 } }]),
+        }]);
+        expect(calibrateBreakdown(onlyBinary, 300).calibrated).toBe(false);
     });
 });
