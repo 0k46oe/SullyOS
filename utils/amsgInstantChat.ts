@@ -586,13 +586,19 @@ export const outboxPushToInbox = (
 /**
  * 补收的时效窗口：比这更早落账的条目不再往聊天流里放，直接销账。
  *
- * 两个理由。一是**噪音**：隔了一天才补上来的「早上好」既尴尬又打断当下的对话，
+ * 两个理由。一是**噪音**：隔太久才补上来的「早上好」既尴尬又打断当下的对话，
  * 而这条路本来是为「推送刚刚丢了」准备的，正常补收都在几十秒到几分钟内完成。
  * 二是**接上账本这一刻的存量**：账本从建表起就在攒行，而客户端是这一版才开始销账的，
  * 头一次拉会把历史积压一次性倒出来——不掐时效的话，那些早就落过库的老消息会因为
  * 超出近史去重的查询窗口而重新上屏。
+ *
+ * 定在两天而不是一天：真实场景里用户是「周五晚上丢了一条，周日才想起来打开」，
+ * 一天的窗口连隔夜加一个白天都盖不住，人还没意识到丢了消息，唯一的副本就已经在
+ * 上一次开 App 时被销掉了。两天能盖住「隔一夜 + 第二天想起来」这个最常见的节奏。
+ *
+ * 超窗的那些不会无声无息地消失，见 OutboxDrainResult.staleDropped。
  */
-export const OUTBOX_BACKFILL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const OUTBOX_BACKFILL_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 
 export interface OutboxDrainResult {
   /** 写进收件箱、等着冲刷落库的条数。 */
@@ -601,6 +607,16 @@ export interface OutboxDrainResult {
   ackNow: string[];
   /** 这一趟从账本上读到的全部条目。调用方按轮次下结论时要看它。 */
   entries: AmsgOutboxEntry[];
+  /**
+   * 这一趟里**因为超出时效窗口**被销掉的聊天内容条数。
+   *
+   * 单独数出来，是因为这一档跟 ackNow 里其它几类的性质完全不同：思维链、工具请求
+   * 那些本来就不该进聊天流，销掉不损失任何东西；而这一档是**用户本该收到、现在
+   * 永久拿不回来的消息**。混在一起的话，「开一次 App 就把唯一的副本销掉了」这件事
+   * 从头到尾没有任何一处说得出口——用户后来去点「找回没收到的消息」，只会看到
+   * 一句「账本上没有漏收的消息，这条链路是通的」。
+   */
+  staleDropped: number;
 }
 
 /**
@@ -661,14 +677,16 @@ const adoptOutboxBacklog = async (entries: AmsgOutboxEntry[]): Promise<OutboxDra
       await ActiveMsgClient.ackOutboxMessages(backlogIds);
     } catch (error) {
       console.warn(`${HEADER} 账本存量没销干净，这一趟先不接管（下次重来）`, error);
-      return { written: 0, ackNow: [], entries };
+      return { written: 0, ackNow: [], entries, staleDropped: 0 };
     }
   }
   markOutboxAdopted();
   console.log(`${HEADER} 第一次接上云端账本：存量 ${backlogIds.length} 条直接销账，不往聊天流里放`);
 
-  const { written, ackNow } = await backfillOutboxEntries(entries.filter(keep));
-  return { written, ackNow, entries };
+  // 上面整批销掉的存量走的是 ackOutboxMessages，不经过 backfillOutboxEntries，所以
+  // 不会计进 staleDropped——那批是「这台设备接上账本之前的历史」，不是「本该收到却
+  // 过期了」，报给用户只会让人以为刚丢了一堆消息。
+  return { ...await backfillOutboxEntries(entries.filter(keep)), entries };
 };
 
 /**
@@ -689,12 +707,13 @@ const backfillOutboxEntries = async (
   const now = Date.now();
   const ackNow: string[] = [];
   let written = 0;
+  let staleDropped = 0;
 
   for (const entry of entries) {
     const push = entry.push || {};
     const kind = typeof push.messageKind === 'string' ? push.messageKind : 'content';
     if (kind === 'result') {
-      // 聊天那道 24 小时的时效窗刻意不套在结果上：结果晚到本来就是常态（正是为此才上云的），
+      // 聊天那道两天的时效窗刻意不套在结果上：结果晚到本来就是常态（正是为此才上云的），
       // 隔一天回来照样该落地，跟「隔一天才弹出来的报错」不是一回事。
       // 但「多晚算太晚」得有人管——账本留 28 天，换设备 / 重装 PWA 的用户第一次接上账本
       // 会把老结果一次性拉回来。这里不替各种产物定规矩，只把账本上记的时间原样交给认领
@@ -707,6 +726,8 @@ const backfillOutboxEntries = async (
       continue;
     }
     if (entry.createdAt > 0 && now - entry.createdAt > OUTBOX_BACKFILL_MAX_AGE_MS) {
+      // 数出来交给调用方说给用户听：这一销，这条消息就永久没了（见 staleDropped）。
+      staleDropped += 1;
       ackNow.push(entry.messageId);
       continue;
     }
@@ -729,7 +750,10 @@ const backfillOutboxEntries = async (
   }
 
   if (written > 0) console.log(`${HEADER} 从云端账本补收 ${written} 条（推送多半是丢了）`);
-  return { written, ackNow };
+  if (staleDropped > 0) {
+    console.warn(`${HEADER} 账本上有 ${staleDropped} 条超出补收窗口，只销账不上屏（这些消息拿不回来了）`);
+  }
+  return { written, ackNow, staleDropped };
 };
 
 /**
@@ -762,8 +786,7 @@ export const drainOutbox = async (
     if (!options?.treatBacklogAsMissed) return await adoptOutboxBacklog(entries);
     markOutboxAdopted();
   }
-  const { written, ackNow } = await backfillOutboxEntries(entries);
-  return { written, ackNow, entries };
+  return { ...await backfillOutboxEntries(entries), entries };
 };
 
 /**

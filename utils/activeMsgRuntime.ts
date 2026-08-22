@@ -865,19 +865,45 @@ function isLastChunk(message: ActiveMsg2InboxMessage): boolean {
  * 过一会儿等本地存储缓过来再判一次（见 flushInboxToChatImpl 的 expire-unknown 分支）。
  * 猜「放行」的代价是角色可能当着正在聊天的用户冒出一句定时问候，一眼假。
  */
+/**
+ * 一次 fire 的归属键：吞放缓存按它记（多分段同吞同放），trace 也按它归组。
+ *
+ * 必须含 occurrence——sessionId 对循环任务的每次触发、对同一次的每次重试都可能重复，
+ * 裸用会把上次的判定串给下一次。两处调用抄两份的话，改一处就会静默失联（缓存按新键
+ * 存、trace 按旧键归组），所以公式只在这里写一次。
+ */
+const buildFireKey = (message: ActiveMsg2InboxMessage): string =>
+  `${(message.metadata as any)?.amsgClientTaskId}:${message.occurrenceMs ?? ''}`;
+
 async function evaluateScheduledPushExpired(message: ActiveMsg2InboxMessage): Promise<boolean> {
   const meta = (message.metadata || {}) as Record<string, any>;
   const messages = await DB.getRecentMessagesByCharId(message.charId, 200);
-  return shouldExpireFire({
+  const input = {
     policy: meta.amsgExpirePolicy,
-    recurrenceType: message.recurrenceType ?? undefined,
-    anchorMs: meta.amsgAnchorMs,
     lastUserMessageAt: getLastRealUserMessageAt(messages),
     nowMs: Date.now(),
-    // 循环任务的窗口锚定到点时刻而不是送达时刻：生成+送达可能比到点晚十几分钟，
-    // 拿 Date.now() 算 10 分钟窗会把撞上对话的消息误放行。
+    // 窗口锚定到点时刻而不是送达时刻：生成+送达可能比到点晚十几分钟，拿 Date.now()
+    // 算 10 分钟窗会把撞上对话的消息误放行。
     occurrenceMs: message.occurrenceMs ?? undefined,
+  };
+  const expired = shouldExpireFire(input);
+  // 判定输入原样留一行，**放行也留**。吞掉是这条链路上唯一「用户什么都看不到」的出口
+  // （不进聊天流、不弹提示、还会去云端账本销账），事后只剩这一行说得出发生过什么；
+  // 而放行同样要留——三种去向（吞了 / 放行了 / 闸没跑，见调用方的
+  // runtime-expire-gate-skipped）各留各的痕，才不用靠别的 trace 反推是哪一种。
+  // 判定每次 fire 只跑一趟（多分段共用缓存），不会刷屏。
+  // 与 worker 的 [amsg:expire-skip] / [amsg:expire-pass] 字段同源：两边结论分叉时
+  // （worker 放行、客户端吞掉）对照着看就知道是哪个字段不一样。
+  activeMsgTrace(expired ? 'runtime-expire-decision-swallow' : 'runtime-expire-decision-pass', {
+    sessionId: buildFireKey(message),
+    messageId: message.messageId,
+    charId: message.charId,
+    taskId: message.taskId,
+    // 判定本身已经不看任务类型了（一次性和循环同一条规则），但排查时得认得出这是哪种任务。
+    recurrenceType: message.recurrenceType ?? undefined,
+    ...input,
   });
+  return expired;
 }
 
 /**
@@ -1642,10 +1668,8 @@ const flushInboxToChatImpl = async () => {
       if (message.source === 'scheduled' && (message.metadata as any)?.amsgExpirePolicy) {
         // 缓存键必须含 occurrence（Codex #2）：sessionId 对循环任务的每次 occurrence、
         // 对同一次的每次重试都可能重复——裸 sessionId 会把上次的判定串给下一次
-        // （第一次放行 → 后续永远放行；第一次吞 → 后续全吞）。occurrence 读 push 顶层
-        // 那份（库盖的，每条任务 push 都有），归属键仍是应用自己写的 clientTaskId。
-        const meta = (message.metadata || {}) as Record<string, any>;
-        const fireKey = `${meta.amsgClientTaskId}:${message.occurrenceMs ?? ''}`;
+        // （第一次放行 → 后续永远放行；第一次吞 → 后续全吞）。公式见 buildFireKey。
+        const fireKey = buildFireKey(message);
         const now = Date.now();
         // 多分段 push 的一次 fire 共用一个决定（同吞同放）：get-or-compute + TTL 清扫
         // 抽进 resolveFireExpireDecision，见其单测。
@@ -1699,6 +1723,16 @@ const flushInboxToChatImpl = async () => {
           }
           continue;
         }
+      } else if (message.source === 'scheduled') {
+        // 这条定时 push 没带策略字段（老 worker 发的），闸整个没跑。留一行把它跟
+        // 「闸跑了、放行了」区分开——不然排查时两者长得一模一样，只能靠别的 trace
+        // 反推，而反推恰恰是这条链路最不该有的东西。
+        activeMsgTrace('runtime-expire-gate-skipped', {
+          messageId: message.messageId,
+          charId: message.charId,
+          taskId: message.taskId,
+          reason: 'no-policy-field',
+        });
       }
 
       // 多段消息的等齐守卫：前面的段还没着落就先扣住这条（见 holdUntilEarlierChunksLand）。
@@ -2038,6 +2072,22 @@ let lastOutboxDrainAt = 0;
 export const resetOutboxCatchUpThrottleForTesting = (): void => { lastOutboxDrainAt = 0; };
 
 /**
+ * 「有 N 条太旧了，没能补回来」——广播出去让 OSContext 弹一句。
+ *
+ * 只报数量，不报角色名也不报内容：这条路上手里只有账本条目，正文还是密文，而且
+ * 一趟可能跨好几个角色。用户需要知道的是「刚才有东西没了、去哪儿看不了」，具体
+ * 是哪条本来就已经拿不回来了。
+ */
+const notifyOutboxStaleDropped = (count: number): void => {
+  // 跟送达端其它失败共用一个事件名，只多一个写死的代号。条数不进上报——属性只能是
+  // 固定枚举（见 docs/analytics.md），而且这一格要的是「有没有人在丢消息」，不是丢了几条。
+  trackEvent('主动消息送达失败', { kind: '超时丢弃' });
+  try {
+    window.dispatchEvent(new CustomEvent('active-msg-backfill-stale', { detail: { count } }));
+  } catch { /* SSR-safe */ }
+};
+
+/**
  * 拉一次云端账本、把补收到的冲刷进聊天流。
  *
  * 返回这一趟读到的全部条目；**读失败返回 null**。两者不能混：「没读成」不构成任何
@@ -2046,13 +2096,17 @@ export const resetOutboxCatchUpThrottleForTesting = (): void => { lastOutboxDrai
 const drainOutboxAndFlush = async (): Promise<AmsgOutboxEntry[] | null> => {
   lastOutboxDrainAt = Date.now();
   try {
-    const { written, ackNow, entries } = await drainOutbox();
+    const { written, ackNow, entries, staleDropped } = await drainOutbox();
     // 不打算走聊天流的那些当场销账，免得每趟都把它们捞回来。纯收尾，不 await。
     if (ackNow.length > 0) {
       void ActiveMsgClient.ackOutboxMessages(ackNow).catch((e) => {
         log.warn('账本上跳过的条目销账失败（下次会再捞一遍）', { count: ackNow.length, error: e });
       });
     }
+    // 超窗销掉的那些必须说一声。这条路是**开 App 就自动跑**的，销掉之后账本上就干净了：
+    // 用户后来去点「找回没收到的消息」，看到的是一句「账本上没有漏收的消息，这条链路是
+    // 通的」——他刚丢了消息，界面却在告诉他一切正常。这一句是那件事唯一的出口。
+    if (staleDropped > 0) notifyOutboxStaleDropped(staleDropped);
     if (written > 0) await flushInboxToChat();
     return entries;
   } catch (e) {
@@ -2110,20 +2164,29 @@ export const catchUpMissedPushes = async (
  *      倒出来就是把用户收过的消息重放一遍；这个判断只有用户自己做得了。
  *
  * 时效窗口照旧（超过 OUTBOX_BACKFILL_MAX_AGE_MS 的只销账不上屏），所以 written 会
- * 小于 scanned——UI 拿这两个数字如实告诉用户「翻了多少条、补回来几条」。
+ * 小于 scanned——UI 拿这三个数字如实告诉用户「翻了多少条、补回来几条、几条太旧了」。
+ * `stale` 单独给一个数而不是让 UI 拿 scanned-written 去减：那个差里还混着思维链、
+ * 工具请求这些本来就不进聊天流的条目，减出来会把「丢了 3 条」说成「丢了 11 条」。
+ *
+ * 这条路不广播 active-msg-backfill-stale：用户正盯着这个按钮等结果，面板会把三个
+ * 数字一起说清楚，再弹一条 toast 就是同一件事说两遍。
  *
  * 读账本失败**照常抛**，让面板报错：手动操作没有「下次再说」，用户在等一个明确结果。
  */
-export const catchUpMissedPushesManually = async (): Promise<{ written: number; scanned: number }> => {
+export const catchUpMissedPushesManually = async (): Promise<{
+  written: number;
+  scanned: number;
+  stale: number;
+}> => {
   lastOutboxDrainAt = Date.now();
-  const { written, ackNow, entries } = await drainOutbox({ treatBacklogAsMissed: true });
+  const { written, ackNow, entries, staleDropped } = await drainOutbox({ treatBacklogAsMissed: true });
   if (ackNow.length > 0) {
     void ActiveMsgClient.ackOutboxMessages(ackNow).catch((e) => {
       log.warn('账本上跳过的条目销账失败（下次会再捞一遍）', { count: ackNow.length, error: e });
     });
   }
   if (written > 0) await flushInboxToChat();
-  return { written, scanned: entries.length };
+  return { written, scanned: entries.length, stale: staleDropped };
 };
 
 let instantChatStatusPollTimer: ReturnType<typeof setTimeout> | null = null;

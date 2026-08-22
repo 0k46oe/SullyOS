@@ -387,8 +387,6 @@ export interface ActiveMsg2TaskRecord {
   promptHint?: string;
   /** 防穿帮策略；fixed 任务恒为 'force'（见 amsg2Tasks.resolveExpirePolicy）。 */
   expirePolicy: ActiveMsg2ExpirePolicy;
-  /** 排程时最后一条真实用户消息的时间戳（作废判定锚点；当时无消息为 0）。 */
-  anchorLastUserMsgAt?: number;
   source: ActiveMsg2TaskSource;
   status: ActiveMsg2TaskStatus;
   createdAt: number;
