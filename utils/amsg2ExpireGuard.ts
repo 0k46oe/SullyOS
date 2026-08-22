@@ -49,13 +49,44 @@ export interface ExpireFireInput {
   occurrenceMs: number | null | undefined;
 }
 
+export interface ExpireFireOptions {
+  /**
+   * 一次性任务的锚点规则要不要生效。
+   *
+   * **客户端送达兜底传 false，worker 主判定传 true（默认）。**
+   *
+   * 锚点规则说的是「排完这条任务之后，用户只要再开过一次口就作废」，它没有时间窗：
+   * 角色半夜说「明早九点半叫你起床」，用户回一句「好，晚安」，锚点就落在那句之后，
+   * 七小时后的早安照样被判作废。这条规则本来是防短跨度的（排个十分钟后的提醒，结果
+   * 这十分钟里已经聊完了），套在跨夜任务上就是稳定误杀。
+   *
+   * 两边判定的数据新旧不同（worker 读的云端状态包可能落后，客户端读的是本地全量
+   * 历史），于是最难看的组合出现了：worker 放行 → 花钱生成 → 推送 → 通知已经弹到
+   * 用户锁屏上 → 客户端用更新的数据判作废 → 整条吞掉。用户看到的是「通知说角色发了
+   * 消息，点进去什么都没有」，而消息已经被销账、再也补不回来。
+   *
+   * 所以客户端这一层不再跑锚点规则：宁可偶尔说一句时机不太对的话（用户看得见、能
+   * 接着聊），也不要消息凭空消失（用户看不见、也没法追）。worker 侧照旧拦着——误杀
+   * 还在，但发生在云上，不花钱也不弹通知，等那边换成语义判定再收尾。
+   *
+   * 循环任务的窗口规则两边都保留：它只看「到点前后十分钟用户在不在聊」，跟任务排了
+   * 多久无关，不存在这个毛病。
+   */
+  applyOneShotAnchorRule?: boolean;
+}
+
 /**
  * fire 时刻该不该作废这次触发。worker onBeforeFire（数据来自 fire_pack /
  * task metadata）与客户端送达兜底（数据来自本地历史 / push metadata）共用。
  * 判不了（缺策略 / 缺数据）一律放行——宁可让兜底层再拦，不误杀。唯一的例外是
  * 「排程时有对话、现在一条都没有」，那不是缺数据而是对话被清空了，见函数末尾。
+ *
+ * 一次性任务那一档两边并不一样，见 ExpireFireOptions.applyOneShotAnchorRule。
  */
-export function shouldExpireFire(input: ExpireFireInput): boolean {
+export function shouldExpireFire(
+  input: ExpireFireInput,
+  options: ExpireFireOptions = {},
+): boolean {
   if (input.policy !== 'expire') return false;
   // 任务身份整组缺失（既没有 recurrenceType 也没有 occurrenceMs）：判不了，放行。
   // 客户端送达兜底闸会碰上——老版本 SW 落的收件箱行没有这两个顶层字段，循环任务会被
@@ -69,6 +100,8 @@ export function shouldExpireFire(input: ExpireFireInput): boolean {
     if (input.occurrenceMs == null) return false;
     return last > input.occurrenceMs - ACTIVE_CHAT_WINDOW_MS && last <= input.nowMs;
   }
+  // 一次性任务：锚点规则默认生效，客户端送达兜底显式关掉（见 applyOneShotAnchorRule）。
+  if (options.applyOneShotAnchorRule === false) return false;
   const anchor = input.anchorMs;
   if (anchor == null) return false;
   // 排程那一刻对话是存在的（anchor > 0），到点却一条真实用户消息都找不到 = 用户把聊天

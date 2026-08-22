@@ -24,6 +24,20 @@ describe('shouldExpireFire', () => {
   it('一次性：锚点后有用户消息 → 作废', () => {
     expect(shouldExpireFire({ ...base, lastUserMessageAt: 2000 })).toBe(true);
   });
+  // 客户端送达兜底那一层把锚点规则关了：这条规则没有时间窗，跨夜任务几乎必然误杀，
+  // 而在那一层误杀的代价是「通知已经弹到锁屏上、点进去什么都没有」。
+  // 循环任务的窗口不受影响——它只看到点前后十分钟，跟任务排了多久无关。
+  it('关掉锚点规则：一次性任务一律放行，循环任务的窗口照旧生效', () => {
+    const off = { applyOneShotAnchorRule: false } as const;
+    expect(shouldExpireFire({ ...base, lastUserMessageAt: 2000 }, off)).toBe(false);
+    // 「排程时有对话、现在一条都没有」（聊天记录被清空）那一档也一并让位，同理。
+    expect(shouldExpireFire({ ...base, lastUserMessageAt: null }, off)).toBe(false);
+    // 循环任务：到点前一分钟还在聊 → 照旧作废。
+    expect(shouldExpireFire(
+      { ...base, recurrenceType: 'daily', lastUserMessageAt: 9_400 },
+      off,
+    )).toBe(true);
+  });
   it('一次性：锚点后没有用户消息 → 放行', () => {
     expect(shouldExpireFire({ ...base, lastUserMessageAt: 1000 })).toBe(false);
     expect(shouldExpireFire({ ...base, lastUserMessageAt: 500 })).toBe(false);

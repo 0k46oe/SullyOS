@@ -448,7 +448,7 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
 
     const occurrenceMs = Date.now();
     const anchorMs = occurrenceMs - 3_600_000;
-    // 锚点之后用户又开口了 → 一次性任务判作废，这条 push 会被吞。
+    // 到点前一分钟用户还在说话 → 循环任务的「正在热聊」窗口命中，这条 push 会被吞。
     await DB.saveMessage({
       charId, role: 'user', type: 'text', content: '我在忙',
       timestamp: occurrenceMs - 60_000,
@@ -460,7 +460,7 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
       charName: '自排角色',
       messageType: 'text',
       source: 'scheduled',
-      recurrenceType: 'none',
+      recurrenceType: 'daily',
       occurrenceMs,
       metadata: {
         charId,
@@ -503,7 +503,7 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
 
     const occurrenceMs = Date.now();
     const anchorMs = occurrenceMs - 3_600_000;
-    const lastUserAt = occurrenceMs - 60_000;   // 锚点之后又开口 → 一次性任务判作废
+    const lastUserAt = occurrenceMs - 60_000;   // 到点前一分钟还在聊 → 循环任务判作废
     await DB.saveMessage({
       charId, role: 'user', type: 'text', content: '我在忙', timestamp: lastUserAt,
     } as any);
@@ -514,7 +514,7 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
       charName: '留痕角色',
       messageType: 'text',
       source: 'scheduled',
-      recurrenceType: 'none',
+      recurrenceType: 'daily',
       occurrenceMs,
       metadata: {
         charId,
@@ -535,11 +535,50 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
     expect(decision).toMatchObject({
       charId,
       policy: 'expire',
-      recurrenceType: 'none',
+      recurrenceType: 'daily',
       anchorMs,
       lastUserMessageAt: lastUserAt,
       occurrenceMs,
     });
+  }, 20000);
+
+  // 线上真实事故的最小复现：角色半夜说「明早九点半叫你起床」，用户回一句「晚安」，
+  // 七小时后那条早安到了设备上却被这一层判成「对话已经前进了」整条吞掉——不进聊天流、
+  // 不弹提示、还去云端账本销了账，而通知早就弹到锁屏上了。用户看到的是「通知说角色
+  // 发了消息，点进去什么都没有」，消息再也补不回来。
+  // 锚点规则没有时间窗，跨夜任务几乎必然中招（说完「明早叫你」，用户基本一定会再回
+  // 一句），所以客户端这一层不再跑它。这条测试就是那道闸别被顺手加回来的守卫。
+  it('跨夜的一次性任务不再被吞：说完「明早叫你」之后用户回过话，早安照样送达', async () => {
+    const charId = 'char-overnight-oneshot';
+    await DB.saveCharacter({ id: charId, name: '叫早角色' } as any);
+
+    const occurrenceMs = Date.now();
+    const anchorMs = occurrenceMs - 8 * 3_600_000;        // 八小时前排的任务
+    await DB.saveMessage({                                 // 排完之后用户回了句「晚安」
+      charId, role: 'user', type: 'text', content: '好，晚安',
+      timestamp: anchorMs + 60_000,
+    } as any);
+
+    await ActiveMsgStore.saveInboxMessage(inboxMsg({
+      messageId: 'msg-overnight-oneshot',
+      charId,
+      charName: '叫早角色',
+      messageType: 'text',
+      source: 'scheduled',
+      recurrenceType: 'none',
+      occurrenceMs,
+      metadata: {
+        charId,
+        amsgExpirePolicy: 'expire',
+        amsgClientTaskId: 'client-task-overnight',
+        amsgAnchorMs: anchorMs,
+      },
+      sentAt: occurrenceMs,
+    }));
+
+    await flushInboxToChat();
+
+    expect(await assistantMsgs(charId), '跨夜的早安不该被锚点规则吞掉').toHaveLength(1);
   }, 20000);
 
   it('闸放行时也留一条 trace（否则「判了没吞」和「闸根本没跑」长得一模一样）', async () => {
@@ -1526,7 +1565,7 @@ describe('防穿帮闸吞掉消息后撤销云端自述日志（走真库）', (
 
     const occurrenceMs = Date.now();
     const anchorMs = occurrenceMs - 3_600_000;
-    // 锚点之后用户又开口了 → 一次性任务判作废，这条 push 会被吞。
+    // 到点前一分钟用户还在说话 → 循环任务的「正在热聊」窗口命中，这条 push 会被吞。
     await DB.saveMessage({
       charId, role: 'user', type: 'text', content: '我在忙',
       timestamp: occurrenceMs - 60_000,
@@ -1550,7 +1589,7 @@ describe('防穿帮闸吞掉消息后撤销云端自述日志（走真库）', (
       body: '刚看到楼下那只猫又来了',
       messageType: 'text',
       source: 'scheduled',
-      recurrenceType: 'none',
+      recurrenceType: 'daily',
       occurrenceMs,
       receivedAt: Date.now(),
       sentAt: occurrenceMs,
