@@ -23,6 +23,7 @@ import StoryTheater from '../components/date/story/StoryTheater';
 import { dateLaunch } from '../utils/dateLaunch';
 import { materializeVisionDescriptions } from '../utils/visionApi';
 import { shareOrDownloadFile } from '../utils/shareExport';
+import { buildInPersonContinueInstruction } from '../utils/meetingContinue';
 import {
     buildDateHistoryGroups,
     formatDateHistoryDate,
@@ -402,7 +403,7 @@ const DateApp: React.FC = () => {
     }, [memoryPalaceConfig, apiConfig, userProfile?.name, updateCharacter, addToast]);
 
     // --- Session API Logic ---
-    const handleSendMessage = async (text: string): Promise<string> => {
+    const handleSendMessage = async (text: string, kind?: 'continue'): Promise<string> => {
         if (!char) throw new Error("No char");
 
         // 重发场景：如果 DB 里最后一条已经是这条 user 消息（上一轮发送后 API 失败 / 网络抖动等），
@@ -412,10 +413,19 @@ const DateApp: React.FC = () => {
             && recentCheck[0].role === 'user'
             && recentCheck[0].content === text
             && recentCheck[0].metadata?.source === 'date';
+        // API 中断后的重试只会带回显示文本；从已落库标记恢复“继续”的完整语义。
+        const isContinueTurn = kind === 'continue'
+            || (isRetry && recentCheck[0].metadata?.meetingContinue === true);
 
         if (!isRetry) {
             // 1. Save User Msg
-            await DB.saveMessage({ charId: char.id, role: 'user', type: 'text', content: text, metadata: { source: 'date' } });
+            await DB.saveMessage({
+                charId: char.id,
+                role: 'user',
+                type: 'text',
+                content: text,
+                metadata: { source: 'date', ...(isContinueTurn ? { meetingContinue: true } : {}) },
+            });
             markDateTurnDirty(char);
         }
 
@@ -429,12 +439,15 @@ const DateApp: React.FC = () => {
         setDateMessages(await loadRecentDateMessages(char.id));
 
         const emojis = await DB.getEmojis();
+        const modelText = isContinueTurn
+            ? buildInPersonContinueInstruction(userProfile?.name, char.name)
+            : text;
         const { messages } = await DatePrompts.buildSessionPayload({
             char,
             userProfile,
             allMsgs: preparedAllMsgs,
             emojis,
-            userText: text,
+            userText: modelText,
             variant: 'send',
             useVisionDescriptions: apiConfig.visionApi?.enabled === true,
         });
