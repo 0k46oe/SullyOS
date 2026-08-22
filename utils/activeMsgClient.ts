@@ -1308,6 +1308,7 @@ const fetchWorkerVapidKey = async (client: ReiClient): Promise<string> => {
 /** 共用层的失败分类 → 上报用的失败代号。两边都是源码里写死的枚举。 */
 const SUBSCRIBE_FAIL_KIND: Record<SubscribeFailureKind, AmsgFailKind> = {
   'channel-unreachable': '推送通道不通',
+  'no-subscription': '没拿到订阅',
   unsupported: '不支持推送',
   permission: '权限被拒',
   state: '订阅失败',

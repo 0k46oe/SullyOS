@@ -252,10 +252,10 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
                 <div className="mt-2 p-2 bg-rose-50 border border-rose-200 rounded-lg text-[10px] text-rose-700 leading-relaxed">
                   <p className="font-semibold mb-1">上次建订阅失败{elapsed && `（${elapsed}）`}</p>
                   <p>{failure.text}。</p>
-                  {failure.kind === 'channel-unreachable' && (
+                  {(failure.kind === 'channel-unreachable' || failure.kind === 'no-subscription') && (
                     <p className="mt-1.5 pt-1.5 border-t border-rose-200">
                       这一类<b>重试多少次都是一样的结果</b>，问题不在这个站点、也不在权限，
-                      换一个浏览器或换台设备才有用。
+                      换个浏览器、换个网络或换台设备才有用。
                     </p>
                   )}
                 </div>
