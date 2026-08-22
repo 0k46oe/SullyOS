@@ -2066,6 +2066,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           addToast(text, 'error');
       };
 
+      // 上线补收时发现有消息超出了两天的补收窗口，只销账没能上屏。
+      // 这条路是开 App 就自动跑的，销完账本就干净了——用户之后去点「找回没收到的消息」
+      // 只会看到「账本上没有漏收的消息，这条链路是通的」，明明刚丢了东西。这一句是
+      // 那件事唯一说得出口的地方，所以按 error 弹、也不做节流。
+      const backfillStaleHandler = (e: Event) => {
+          const { count } = ((e as CustomEvent).detail || {}) as { count?: number };
+          if (!count) return;
+          addToast(`有 ${count} 条消息超过两天没能收到，已经拿不回来了`, 'error');
+      };
+
       // 记忆宫殿水位线触发的全局提示：聊天/见面/通话共用同一条消息流，
       // pipeline 真正开始整理时会广播此事件——无论用户此刻在哪个 App，
       // 都统一弹「xx正在整理记忆」。
@@ -2076,6 +2086,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
       window.addEventListener('active-msg-received', handler);
       window.addEventListener('active-msg-process-failed', inboxFailHandler);
+      window.addEventListener('active-msg-backfill-stale', backfillStaleHandler);
       window.addEventListener('active-msg-progress', progressHandler);
       window.addEventListener('active-msg-open', openHandler);
       window.addEventListener('emotion-updated', buffSyncHandler);
@@ -2087,6 +2098,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       return () => {
           window.removeEventListener('active-msg-received', handler);
           window.removeEventListener('active-msg-process-failed', inboxFailHandler);
+          window.removeEventListener('active-msg-backfill-stale', backfillStaleHandler);
           window.removeEventListener('active-msg-progress', progressHandler);
           window.removeEventListener('active-msg-open', openHandler);
           window.removeEventListener('emotion-updated', buffSyncHandler);

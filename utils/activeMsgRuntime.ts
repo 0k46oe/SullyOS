@@ -2075,6 +2075,19 @@ let lastOutboxDrainAt = 0;
 export const resetOutboxCatchUpThrottleForTesting = (): void => { lastOutboxDrainAt = 0; };
 
 /**
+ * 「有 N 条太旧了，没能补回来」——广播出去让 OSContext 弹一句。
+ *
+ * 只报数量，不报角色名也不报内容：这条路上手里只有账本条目，正文还是密文，而且
+ * 一趟可能跨好几个角色。用户需要知道的是「刚才有东西没了、去哪儿看不了」，具体
+ * 是哪条本来就已经拿不回来了。
+ */
+const notifyOutboxStaleDropped = (count: number): void => {
+  try {
+    window.dispatchEvent(new CustomEvent('active-msg-backfill-stale', { detail: { count } }));
+  } catch { /* SSR-safe */ }
+};
+
+/**
  * 拉一次云端账本、把补收到的冲刷进聊天流。
  *
  * 返回这一趟读到的全部条目；**读失败返回 null**。两者不能混：「没读成」不构成任何
@@ -2083,13 +2096,17 @@ export const resetOutboxCatchUpThrottleForTesting = (): void => { lastOutboxDrai
 const drainOutboxAndFlush = async (): Promise<AmsgOutboxEntry[] | null> => {
   lastOutboxDrainAt = Date.now();
   try {
-    const { written, ackNow, entries } = await drainOutbox();
+    const { written, ackNow, entries, staleDropped } = await drainOutbox();
     // 不打算走聊天流的那些当场销账，免得每趟都把它们捞回来。纯收尾，不 await。
     if (ackNow.length > 0) {
       void ActiveMsgClient.ackOutboxMessages(ackNow).catch((e) => {
         log.warn('账本上跳过的条目销账失败（下次会再捞一遍）', { count: ackNow.length, error: e });
       });
     }
+    // 超窗销掉的那些必须说一声。这条路是**开 App 就自动跑**的，销掉之后账本上就干净了：
+    // 用户后来去点「找回没收到的消息」，看到的是一句「账本上没有漏收的消息，这条链路是
+    // 通的」——他刚丢了消息，界面却在告诉他一切正常。这一句是那件事唯一的出口。
+    if (staleDropped > 0) notifyOutboxStaleDropped(staleDropped);
     if (written > 0) await flushInboxToChat();
     return entries;
   } catch (e) {
@@ -2147,20 +2164,29 @@ export const catchUpMissedPushes = async (
  *      倒出来就是把用户收过的消息重放一遍；这个判断只有用户自己做得了。
  *
  * 时效窗口照旧（超过 OUTBOX_BACKFILL_MAX_AGE_MS 的只销账不上屏），所以 written 会
- * 小于 scanned——UI 拿这两个数字如实告诉用户「翻了多少条、补回来几条」。
+ * 小于 scanned——UI 拿这三个数字如实告诉用户「翻了多少条、补回来几条、几条太旧了」。
+ * `stale` 单独给一个数而不是让 UI 拿 scanned-written 去减：那个差里还混着思维链、
+ * 工具请求这些本来就不进聊天流的条目，减出来会把「丢了 3 条」说成「丢了 11 条」。
+ *
+ * 这条路不广播 active-msg-backfill-stale：用户正盯着这个按钮等结果，面板会把三个
+ * 数字一起说清楚，再弹一条 toast 就是同一件事说两遍。
  *
  * 读账本失败**照常抛**，让面板报错：手动操作没有「下次再说」，用户在等一个明确结果。
  */
-export const catchUpMissedPushesManually = async (): Promise<{ written: number; scanned: number }> => {
+export const catchUpMissedPushesManually = async (): Promise<{
+  written: number;
+  scanned: number;
+  stale: number;
+}> => {
   lastOutboxDrainAt = Date.now();
-  const { written, ackNow, entries } = await drainOutbox({ treatBacklogAsMissed: true });
+  const { written, ackNow, entries, staleDropped } = await drainOutbox({ treatBacklogAsMissed: true });
   if (ackNow.length > 0) {
     void ActiveMsgClient.ackOutboxMessages(ackNow).catch((e) => {
       log.warn('账本上跳过的条目销账失败（下次会再捞一遍）', { count: ackNow.length, error: e });
     });
   }
   if (written > 0) await flushInboxToChat();
-  return { written, scanned: entries.length };
+  return { written, scanned: entries.length, stale: staleDropped };
 };
 
 let instantChatStatusPollTimer: ReturnType<typeof setTimeout> | null = null;
