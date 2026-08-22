@@ -880,18 +880,13 @@ async function evaluateScheduledPushExpired(message: ActiveMsg2InboxMessage): Pr
   const messages = await DB.getRecentMessagesByCharId(message.charId, 200);
   const input = {
     policy: meta.amsgExpirePolicy,
-    recurrenceType: message.recurrenceType ?? undefined,
-    anchorMs: meta.amsgAnchorMs,
     lastUserMessageAt: getLastRealUserMessageAt(messages),
     nowMs: Date.now(),
-    // 循环任务的窗口锚定到点时刻而不是送达时刻：生成+送达可能比到点晚十几分钟，
-    // 拿 Date.now() 算 10 分钟窗会把撞上对话的消息误放行。
+    // 窗口锚定到点时刻而不是送达时刻：生成+送达可能比到点晚十几分钟，拿 Date.now()
+    // 算 10 分钟窗会把撞上对话的消息误放行。
     occurrenceMs: message.occurrenceMs ?? undefined,
   };
-  // 一次性任务的锚点规则在这一层关掉：它没有时间窗，跨夜任务会被稳定误杀，而这一层
-  // 误杀的代价是「通知已经弹到锁屏上、点进去什么都没有」——消息还被销了账，补不回来。
-  // 详见 ExpireFireOptions.applyOneShotAnchorRule。循环任务的窗口照旧生效。
-  const expired = shouldExpireFire(input, { applyOneShotAnchorRule: false });
+  const expired = shouldExpireFire(input);
   // 判定输入原样留一行，**放行也留**。吞掉是这条链路上唯一「用户什么都看不到」的出口
   // （不进聊天流、不弹提示、还会去云端账本销账），事后只剩这一行说得出发生过什么；
   // 而放行同样要留——三种去向（吞了 / 放行了 / 闸没跑，见调用方的
@@ -904,6 +899,8 @@ async function evaluateScheduledPushExpired(message: ActiveMsg2InboxMessage): Pr
     messageId: message.messageId,
     charId: message.charId,
     taskId: message.taskId,
+    // 判定本身已经不看任务类型了（一次性和循环同一条规则），但排查时得认得出这是哪种任务。
+    recurrenceType: message.recurrenceType ?? undefined,
     ...input,
   });
   return expired;
@@ -2082,6 +2079,9 @@ export const resetOutboxCatchUpThrottleForTesting = (): void => { lastOutboxDrai
  * 是哪条本来就已经拿不回来了。
  */
 const notifyOutboxStaleDropped = (count: number): void => {
+  // 跟送达端其它失败共用一个事件名，只多一个写死的代号。条数不进上报——属性只能是
+  // 固定枚举（见 docs/analytics.md），而且这一格要的是「有没有人在丢消息」，不是丢了几条。
+  trackEvent('主动消息送达失败', { kind: '超时丢弃' });
   try {
     window.dispatchEvent(new CustomEvent('active-msg-backfill-stale', { detail: { count } }));
   } catch { /* SSR-safe */ }

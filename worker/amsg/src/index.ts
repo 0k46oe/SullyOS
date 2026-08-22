@@ -392,8 +392,6 @@ interface FireStash {
   plannedSelfSendUuids: string[];
   /** 本次触发用到的角色 id / 任务归属键，排程时要写进新任务的 metadata。 */
   charId: string;
-  /** 防穿帮闸锚点：这份 fire_pack 记的「用户最后一次开口」。 */
-  anchorMs: number;
   /**
    * 角色的时间参照系（fire_pack 的 tzId）。worker 里一切「给角色看的时间」
    * ——当前时间槽、self_log 时间戳、排程清单、send_at 解析与打回文案——都从这一份出。
@@ -1234,8 +1232,6 @@ export const runFireScheduleTool = async (
         amsgMode: parsed.mode,
         amsgClientTaskId: clientTaskId,
         amsgExpirePolicy: parsed.expirePolicy,
-        // 防穿帮闸锚点：这条排下去之后，用户再开口就算「对话往前走了」。
-        amsgAnchorMs: stash.anchorMs,
         amsgTaskInstruction: buildTaskInstruction(parsed.mode, parsed.promptHint),
         // 自排标记：到点兜底闸只拦带它的任务（用户面板排的不受连发上限管）。
         amsgSelfScheduled: true,
@@ -1269,7 +1265,6 @@ export const runFireScheduleTool = async (
       || parsed.recurrence,
     ...(parsed.promptHint ? { promptHint: parsed.promptHint } : {}),
     expirePolicy: parsed.expirePolicy,
-    anchorLastUserMsgAt: stash.anchorMs,
     source: 'character',
     status: 'scheduled',
     createdAt: nowMs,
@@ -1701,8 +1696,6 @@ export const amsgHooks = {
     const presenceLastUserMessageAt = presence?.charId === charId ? presence.lastUserMessageAt : null;
     const expireInput = {
       policy,
-      recurrenceType: ctx.task.recurrenceType,
-      anchorMs: typeof taskMeta.amsgAnchorMs === 'number' ? taskMeta.amsgAnchorMs : null,
       lastUserMessageAt: laterOf(pack.lastUserMessageAt ?? null, presenceLastUserMessageAt),
       nowMs: ctx.now.getTime(),
       occurrenceMs,
@@ -1716,6 +1709,8 @@ export const amsgHooks = {
     // 字段全是时间戳与枚举，不含正文、不含角色名。
     const expireTrace = {
       taskId: ctx.task.id,
+      // 判定本身已经不看任务类型了（一次性和循环同一条规则），但排查时得认得出是哪种。
+      recurrenceType: ctx.task.recurrenceType,
       ...expireInput,
       packLastUserMessageAt: pack.lastUserMessageAt ?? null,
       presenceLastUserMessageAt,
@@ -1837,7 +1832,6 @@ export const amsgHooks = {
       plannedSelfSends: plannedSelfSendTasks.length,
       plannedSelfSendUuids: plannedSelfSendTasks.map((t) => t.taskUuid),
       charId,
-      anchorMs: pack.lastUserMessageAt ?? 0,
       tz,
       taskUuid: typeof ctx.task.uuid === 'string' ? ctx.task.uuid : null,
       taskRowId: ctx.task.id != null ? String(ctx.task.id) : null,

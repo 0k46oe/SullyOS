@@ -403,7 +403,6 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
         promptHint: promptHint.trim() || undefined,
         userMessage: userMessage.trim() || undefined,
         expirePolicy: resolveExpirePolicy(mode, expirePolicy),
-        anchorLastUserMsgAt: result.anchorMs,
         source: 'user',
         status: 'scheduled',
         createdAt: Date.now(),
