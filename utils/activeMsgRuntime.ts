@@ -865,10 +865,20 @@ function isLastChunk(message: ActiveMsg2InboxMessage): boolean {
  * 过一会儿等本地存储缓过来再判一次（见 flushInboxToChatImpl 的 expire-unknown 分支）。
  * 猜「放行」的代价是角色可能当着正在聊天的用户冒出一句定时问候，一眼假。
  */
+/**
+ * 一次 fire 的归属键：吞放缓存按它记（多分段同吞同放），trace 也按它归组。
+ *
+ * 必须含 occurrence——sessionId 对循环任务的每次触发、对同一次的每次重试都可能重复，
+ * 裸用会把上次的判定串给下一次。两处调用抄两份的话，改一处就会静默失联（缓存按新键
+ * 存、trace 按旧键归组），所以公式只在这里写一次。
+ */
+const buildFireKey = (message: ActiveMsg2InboxMessage): string =>
+  `${(message.metadata as any)?.amsgClientTaskId}:${message.occurrenceMs ?? ''}`;
+
 async function evaluateScheduledPushExpired(message: ActiveMsg2InboxMessage): Promise<boolean> {
   const meta = (message.metadata || {}) as Record<string, any>;
   const messages = await DB.getRecentMessagesByCharId(message.charId, 200);
-  return shouldExpireFire({
+  const input = {
     policy: meta.amsgExpirePolicy,
     recurrenceType: message.recurrenceType ?? undefined,
     anchorMs: meta.amsgAnchorMs,
@@ -877,7 +887,23 @@ async function evaluateScheduledPushExpired(message: ActiveMsg2InboxMessage): Pr
     // 循环任务的窗口锚定到点时刻而不是送达时刻：生成+送达可能比到点晚十几分钟，
     // 拿 Date.now() 算 10 分钟窗会把撞上对话的消息误放行。
     occurrenceMs: message.occurrenceMs ?? undefined,
+  };
+  const expired = shouldExpireFire(input);
+  // 判定输入原样留一行，**放行也留**。吞掉是这条链路上唯一「用户什么都看不到」的出口
+  // （不进聊天流、不弹提示、还会去云端账本销账），事后只剩这一行说得出发生过什么；
+  // 而放行同样要留——三种去向（吞了 / 放行了 / 闸没跑，见调用方的
+  // runtime-expire-gate-skipped）各留各的痕，才不用靠别的 trace 反推是哪一种。
+  // 判定每次 fire 只跑一趟（多分段共用缓存），不会刷屏。
+  // 与 worker 的 [amsg:expire-skip] / [amsg:expire-pass] 字段同源：两边结论分叉时
+  // （worker 放行、客户端吞掉）对照着看就知道是哪个字段不一样。
+  activeMsgTrace(expired ? 'runtime-expire-decision-swallow' : 'runtime-expire-decision-pass', {
+    sessionId: buildFireKey(message),
+    messageId: message.messageId,
+    charId: message.charId,
+    taskId: message.taskId,
+    ...input,
   });
+  return expired;
 }
 
 /**
@@ -1642,10 +1668,8 @@ const flushInboxToChatImpl = async () => {
       if (message.source === 'scheduled' && (message.metadata as any)?.amsgExpirePolicy) {
         // 缓存键必须含 occurrence（Codex #2）：sessionId 对循环任务的每次 occurrence、
         // 对同一次的每次重试都可能重复——裸 sessionId 会把上次的判定串给下一次
-        // （第一次放行 → 后续永远放行；第一次吞 → 后续全吞）。occurrence 读 push 顶层
-        // 那份（库盖的，每条任务 push 都有），归属键仍是应用自己写的 clientTaskId。
-        const meta = (message.metadata || {}) as Record<string, any>;
-        const fireKey = `${meta.amsgClientTaskId}:${message.occurrenceMs ?? ''}`;
+        // （第一次放行 → 后续永远放行；第一次吞 → 后续全吞）。公式见 buildFireKey。
+        const fireKey = buildFireKey(message);
         const now = Date.now();
         // 多分段 push 的一次 fire 共用一个决定（同吞同放）：get-or-compute + TTL 清扫
         // 抽进 resolveFireExpireDecision，见其单测。
@@ -1699,6 +1723,16 @@ const flushInboxToChatImpl = async () => {
           }
           continue;
         }
+      } else if (message.source === 'scheduled') {
+        // 这条定时 push 没带策略字段（老 worker 发的），闸整个没跑。留一行把它跟
+        // 「闸跑了、放行了」区分开——不然排查时两者长得一模一样，只能靠别的 trace
+        // 反推，而反推恰恰是这条链路最不该有的东西。
+        activeMsgTrace('runtime-expire-gate-skipped', {
+          messageId: message.messageId,
+          charId: message.charId,
+          taskId: message.taskId,
+          reason: 'no-policy-field',
+        });
       }
 
       // 多段消息的等齐守卫：前面的段还没着落就先扣住这条（见 holdUntilEarlierChunksLand）。

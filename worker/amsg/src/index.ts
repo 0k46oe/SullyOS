@@ -1707,11 +1707,25 @@ export const amsgHooks = {
       nowMs: ctx.now.getTime(),
       occurrenceMs,
     };
+    // 判定输入原样留一行，**放行也留**。客户端送达兜底闸会拿同一套规则、更新的数据
+    // 再判一次，两边结论不一样时（worker 放行 → 生成 → 推送，客户端吞掉）用户看到的
+    // 就是「通知弹出来了、点进去没有」，而这中间没有任何一处说得出发生过什么。只有把
+    // 两边的输入都留下来，事后才分得清是哪一边、因为哪个字段。
+    // 「最后一次开口」拆成两个来源分别记：合并后的那一个值看不出 fire_pack 是不是
+    // 陈旧的，而「fire_pack 落后于真实对话」正是两边判定分叉的头号原因。
+    // 字段全是时间戳与枚举，不含正文、不含角色名。
+    const expireTrace = {
+      taskId: ctx.task.id,
+      ...expireInput,
+      packLastUserMessageAt: pack.lastUserMessageAt ?? null,
+      presenceLastUserMessageAt,
+    };
     if (!instant && shouldExpireFire(expireInput)) {
-      console.log('[amsg:expire-skip]', { taskId: ctx.task.id, ...expireInput });
+      console.log('[amsg:expire-skip]', { ...expireTrace, reason: 'conversation-moved-on' });
       await recordSkip(ctx, charId, 'conversation-moved-on', occurrenceMs);
       return { skip: true } as const;
     }
+    if (!instant) console.log('[amsg:expire-pass]', expireTrace);
 
     // 任务指令缺失（开发期旧格式任务）：不能用默认 auto 指令凑一个渲染——那会把
     // prompted 任务的方向偷换掉，发出去的内容和用户当初排的不是一回事。

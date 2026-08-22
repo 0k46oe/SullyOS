@@ -44,6 +44,7 @@ import { ActiveMsgStore } from './activeMsgStore';
 import { AMSG_SELF_LOG_KEY, amsgStateNamespace } from './amsgFirePack';
 import { CHAT_GEN_EVENTS } from './chatGenEvents';
 import { DB } from './db';
+import { readAllInstantTraces } from './instantTraceLog';
 
 // resolveFireExpireDecision 是从「防穿帮闸·客户端兜底」吞没闸抽出来的 get-or-compute
 // helper（带 TTL 清扫），单测把闸的关键不变量钉住，防回归：
@@ -489,6 +490,93 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
       char?.activeMsg2Config?.tasks?.map((t: any) => t.taskUuid),
       '被吞的是这次要说的话，不是这条任务',
     ).toContain('amsgself-adopt-1');
+  }, 20000);
+
+  // 防穿帮闸的三种去向必须各留各的痕。吞掉是这条链路上唯一「用户什么都看不到」的出口
+  // （不进聊天流、不弹提示、还去云端账本销了账），线上出过一次真实事故：通知弹出来了、
+  // 点进去没有，而客户端、worker、云端账本三处加起来都说不出发生过什么。
+  // 这两条钉的就是「判定输入必须原样留在 trace 里」——不留的话下次照样只能靠猜。
+  it('被闸吞掉时，判定输入原样进 trace（吞是静默的，只剩这一行说得出为什么）', async () => {
+    localStorage.removeItem('instant_push_trace_log_v1');
+    const charId = 'char-gate-trace-swallow';
+    await DB.saveCharacter({ id: charId, name: '留痕角色' } as any);
+
+    const occurrenceMs = Date.now();
+    const anchorMs = occurrenceMs - 3_600_000;
+    const lastUserAt = occurrenceMs - 60_000;   // 锚点之后又开口 → 一次性任务判作废
+    await DB.saveMessage({
+      charId, role: 'user', type: 'text', content: '我在忙', timestamp: lastUserAt,
+    } as any);
+
+    await ActiveMsgStore.saveInboxMessage(inboxMsg({
+      messageId: 'msg-gate-trace-swallow',
+      charId,
+      charName: '留痕角色',
+      messageType: 'text',
+      source: 'scheduled',
+      recurrenceType: 'none',
+      occurrenceMs,
+      metadata: {
+        charId,
+        amsgExpirePolicy: 'expire',
+        amsgClientTaskId: 'client-task-trace-swallow',
+        amsgAnchorMs: anchorMs,
+      },
+      sentAt: occurrenceMs,
+    }));
+
+    await flushInboxToChat();
+
+    expect(await assistantMsgs(charId), '前提：这条该被吞').toHaveLength(0);
+    const decision = readAllInstantTraces()
+      .find((e) => e.event === 'runtime-expire-decision-swallow');
+    expect(decision, '吞掉必须留一条判定 trace').toBeTruthy();
+    // 这几个字段是「为什么吞」的全部依据，少一个就还得靠猜。
+    expect(decision).toMatchObject({
+      charId,
+      policy: 'expire',
+      recurrenceType: 'none',
+      anchorMs,
+      lastUserMessageAt: lastUserAt,
+      occurrenceMs,
+    });
+  }, 20000);
+
+  it('闸放行时也留一条 trace（否则「判了没吞」和「闸根本没跑」长得一模一样）', async () => {
+    localStorage.removeItem('instant_push_trace_log_v1');
+    const charId = 'char-gate-trace-pass';
+    await DB.saveCharacter({ id: charId, name: '放行角色' } as any);
+
+    const occurrenceMs = Date.now();
+    // 用户最后一次开口在锚点之前 → 一次性任务照发。
+    await DB.saveMessage({
+      charId, role: 'user', type: 'text', content: '晚安', timestamp: occurrenceMs - 7_200_000,
+    } as any);
+
+    await ActiveMsgStore.saveInboxMessage(inboxMsg({
+      messageId: 'msg-gate-trace-pass',
+      charId,
+      charName: '放行角色',
+      messageType: 'text',
+      source: 'scheduled',
+      recurrenceType: 'none',
+      occurrenceMs,
+      metadata: {
+        charId,
+        amsgExpirePolicy: 'expire',
+        amsgClientTaskId: 'client-task-trace-pass',
+        amsgAnchorMs: occurrenceMs - 3_600_000,
+      },
+      sentAt: occurrenceMs,
+    }));
+
+    await flushInboxToChat();
+
+    expect(await assistantMsgs(charId), '前提：这条该放行').toHaveLength(1);
+    expect(
+      readAllInstantTraces().some((e) => e.event === 'runtime-expire-decision-pass'),
+      '放行也要留痕',
+    ).toBe(true);
   }, 20000);
 
   it('主路径·刚送达：一样落 sentAt（本地没有更晚的消息，不需要退让）', async () => {
