@@ -30,11 +30,34 @@ describe('journalAppearance', () => {
         }
     });
 
+    it('gives every non-original preset its own layout language instead of a shared recolored shell', () => {
+        const themed = JOURNAL_APPEARANCE_PRESETS.filter(preset => preset.id !== 'original');
+        expect(new Set(themed.map(preset => preset.layout)).size).toBe(themed.length);
+
+        for (const preset of themed) {
+            expect(preset.css, preset.name).toContain(`.sully-journal-theme-${preset.id}`);
+            expect(preset.css, preset.name).toContain('.sully-journal-notebook-grid');
+            expect(preset.css, preset.name).toContain('.sully-journal-calendar-list');
+            expect(preset.css, preset.name).toContain('.sully-journal-spread');
+            expect(preset.css, preset.name).toContain('@media(max-width:719px)');
+        }
+
+        expect(resolveJournalPreset('letterpress').css).toContain('.sully-journal-post-route');
+        expect(resolveJournalPreset('sakura').css).toContain('.sully-journal-celestial-map');
+        expect(resolveJournalPreset('forest').css).toContain('.sully-journal-field-rings');
+        expect(resolveJournalPreset('midnight').css).toContain('.sully-journal-memory-circuit');
+
+        expect(resolveJournalPreset('letterpress').css).toContain('grid-template-columns:repeat(auto-fit,minmax(220px,1fr))');
+        expect(resolveJournalPreset('sakura').css).toContain('.sully-journal-notebook:first-child{grid-column:1/-1');
+        expect(resolveJournalPreset('forest').css).toContain('grid-template-columns:1fr!important');
+        expect(resolveJournalPreset('midnight').css).toContain('grid-template-columns:repeat(3,minmax(0,1fr))');
+    });
+
     it('places custom CSS after the selected preset so users can override it', () => {
         const customCss = '.sully-journal-paper{border-radius:2px!important;}';
         const css = resolveJournalAppearanceCss({ preset: 'sakura', customCss });
 
-        expect(css).toContain('.sully-journal-root');
+        expect(css).toContain('.sully-journal-theme-sakura');
         expect(css.endsWith(customCss)).toBe(true);
     });
 

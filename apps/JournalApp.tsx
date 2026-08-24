@@ -16,6 +16,7 @@ import { Sparkle, Archive } from '@phosphor-icons/react';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent } from '../utils/analytics';
 import JournalAppearanceButton from '../components/journal/JournalAppearanceEditor';
+import JournalThemeArtwork from '../components/journal/JournalThemeArtwork';
 
 const INTRO_SEEN_KEY = 'journal_app_intro_seen_v4';
 
@@ -67,7 +68,15 @@ const getLocalDateStr = () => {
 };
 
 const JournalApp: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, updateCharacter, memoryPalaceConfig, characterGroups } = useOS();
+    const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, updateCharacter, memoryPalaceConfig, characterGroups, theme } = useOS();
+    // 原本琥珀严格保留旧的单页结构；其它主题拥有各自的实体 / 设备版式。
+    const journalPreset = theme.journalAppearance?.preset || 'original';
+    const [previewJournalPreset, setPreviewJournalPreset] = useState<typeof journalPreset | undefined>();
+    const effectiveJournalPreset = previewJournalPreset || journalPreset;
+    const journalUsesScrapbookLayout = effectiveJournalPreset !== 'original';
+    const journalLayoutClass = journalUsesScrapbookLayout
+        ? ` sully-journal-designed sully-journal-theme-${effectiveJournalPreset}`
+        : '';
 
     const [mode, setMode] = useState<'select' | 'calendar' | 'write'>('select');
     const [selectedChar, setSelectedChar] = useState<CharacterProfile | null>(null);
@@ -776,6 +785,32 @@ ${charPart}
         );
     };
 
+    const renderEmptyCharPage = () => (
+        <div className="sully-journal-empty w-full h-full bg-[#252525] rounded-3xl border border-white/5 flex flex-col items-center justify-center text-white/40 gap-4 p-8 text-center">
+            <div className="opacity-20 animate-pulse"><img src={twemojiUrl('1f48c')} alt="letter" className="w-12 h-12" /></div>
+            {isThinking ? (
+                <div className="space-y-2">
+                    <p className="text-sm font-medium text-amber-500">对方正在阅读你的日记...</p>
+                    <div className="flex justify-center gap-1">
+                        <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce"></div>
+                        <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce delay-100"></div>
+                        <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce delay-200"></div>
+                    </div>
+                </div>
+            ) : (
+                <>
+                    <p className="text-sm">写完日记后，点击下方按钮<br/>邀请 {selectedChar?.name} 交换日记。</p>
+                    <button
+                        onClick={handleExchange}
+                        className="px-6 py-3 bg-amber-500 hover:bg-amber-400 text-white text-sm font-bold rounded-full shadow-[0_0_20px_rgba(245,158,11,0.3)] active:scale-95 transition-all mt-2"
+                    >
+                        查看 TA 的今日
+                    </button>
+                </>
+            )}
+        </div>
+    );
+
     // 一次性弹窗:讲清楚新版交换日记的行为变化(自动同步 / 归档移到列表 / 宫殿入向量)
     const introModal = showIntro ? (
         <Modal
@@ -916,16 +951,17 @@ ${charPart}
 
     if (mode === 'select') {
         return (
-            <div className="sully-journal-root sully-journal-select h-full w-full bg-amber-50 flex flex-col font-light">
+            <div className={`sully-journal-root sully-journal-select h-full w-full bg-amber-50 flex flex-col font-light${journalLayoutClass}`}>
                 {introModal}
                 {archiveResultModal}
+                <JournalThemeArtwork preset={effectiveJournalPreset} scene="select" />
                 <div className="sully-journal-header border-b border-amber-100 bg-amber-50/80 backdrop-blur-sm sticky top-0 z-20 shrink-0" style={{ paddingTop: 'var(--chrome-top)' }}>
                     <div className="h-12 px-6 flex items-center justify-between">
-                        <button onClick={closeApp} className="sully-journal-back p-2 -ml-2 rounded-full hover:bg-amber-100/50 active:scale-90 transition-transform">
+                        <button onClick={closeApp} aria-label="返回桌面" className="sully-journal-back p-2 -ml-2 rounded-full hover:bg-amber-100/50 active:scale-90 transition-transform">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6 text-amber-900"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                         </button>
                         <span className="sully-journal-header-title font-bold text-amber-900 text-lg tracking-wide">选择日记本</span>
-                        <JournalAppearanceButton compact />
+                        <JournalAppearanceButton compact onPreviewPreset={setPreviewJournalPreset} />
                     </div>
                 </div>
                 
@@ -950,15 +986,16 @@ ${charPart}
 
     if (mode === 'calendar' && selectedChar) {
         return (
-            <div className="sully-journal-root sully-journal-calendar h-full w-full bg-white flex flex-col font-light relative">
+            <div className={`sully-journal-root sully-journal-calendar h-full w-full bg-white flex flex-col font-light relative${journalLayoutClass}`}>
                 {introModal}
                 {archiveResultModal}
+                <JournalThemeArtwork preset={effectiveJournalPreset} scene="calendar" />
                 <div className="sully-journal-calendar-hero pb-6 px-6 bg-amber-500 shadow-lg shrink-0 rounded-b-[2rem] z-20" style={{ paddingTop: 'max(3rem, var(--safe-top))' }}>
                     <div className="flex justify-between items-start mb-4">
-                         <button onClick={() => setMode('select')} className="sully-journal-back text-white/80 hover:text-white transition-colors">
+                         <button onClick={() => setMode('select')} aria-label="返回日记本选择" className="sully-journal-back text-white/80 hover:text-white transition-colors">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18" /></svg>
                          </button>
-                         <JournalAppearanceButton tone="dark" compact />
+                         <JournalAppearanceButton tone="dark" compact onPreviewPreset={setPreviewJournalPreset} />
                     </div>
                     <div className="sully-journal-calendar-heading text-white">
                         <div className="sully-journal-calendar-kicker text-xs opacity-70 uppercase tracking-widest font-bold mb-1">Exchange Diary</div>
@@ -1030,18 +1067,19 @@ ${charPart}
 
     // --- WRITE MODE ---
     return (
-        <div className="sully-journal-root sully-journal-write h-full w-full bg-[#1a1a1a] flex flex-col relative overflow-hidden">
+        <div className={`sully-journal-root sully-journal-write h-full w-full bg-[#1a1a1a] flex flex-col relative overflow-hidden${journalLayoutClass}`}>
             {introModal}
             {archiveResultModal}
+            <JournalThemeArtwork preset={effectiveJournalPreset} scene="write" />
 
             {/* Editor Header */}
             <div className="sully-journal-editor-header bg-[#1a1a1a]/90 backdrop-blur-md text-white shrink-0 z-30" style={{ paddingTop: 'var(--chrome-top)' }}>
                 <div className="h-12 px-4 flex items-center justify-between">
-                    <button onClick={() => setMode('calendar')} className="sully-journal-back p-2 -ml-2 text-white/60 hover:text-white rounded-full active:bg-white/10 transition-colors">
+                    <button onClick={() => setMode('calendar')} aria-label="返回日记列表" className="sully-journal-back p-2 -ml-2 text-white/60 hover:text-white rounded-full active:bg-white/10 transition-colors">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                     </button>
                     <div className="flex gap-3">
-                        <JournalAppearanceButton tone="dark" compact />
+                        <JournalAppearanceButton tone="dark" compact onPreviewPreset={setPreviewJournalPreset} />
                         {/* Toggle Char Sticker Visibility Button */}
                         {activeTab === 'char' && (
                             <button
@@ -1100,36 +1138,28 @@ ${charPart}
 
             {/* Main Page Area */}
             <div className="sully-journal-editor-stage flex-1 relative w-full overflow-hidden flex flex-col">
-                <div className="flex-1 w-full max-w-xl mx-auto px-2 pb-4 pt-2 flex flex-col relative">
+                <div className={`flex-1 w-full mx-auto px-2 pb-4 pt-2 flex flex-col relative ${journalUsesScrapbookLayout ? 'max-w-5xl' : 'max-w-xl'}`}>
                     <div className="flex-1 relative rounded-3xl transition-all duration-500">
-                        {activeTab === 'user' && currentEntry && renderPage(currentEntry.userPage, 'user')}
-                        
-                        {activeTab === 'char' && (
-                            currentEntry?.charPage ? renderPage(currentEntry.charPage, 'char') : (
-                                <div className="sully-journal-empty w-full h-full bg-[#252525] rounded-3xl border border-white/5 flex flex-col items-center justify-center text-white/40 gap-4 p-8 text-center">
-                                    <div className="opacity-20 animate-pulse"><img src={twemojiUrl('1f48c')} alt="letter" className="w-12 h-12" /></div>
-                                    {isThinking ? (
-                                        <div className="space-y-2">
-                                            <p className="text-sm font-medium text-amber-500">对方正在阅读你的日记...</p>
-                                            <div className="flex justify-center gap-1">
-                                                <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce"></div>
-                                                <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce delay-100"></div>
-                                                <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce delay-200"></div>
-                                            </div>
-                                        </div>
-                                    ) : (
-                                        <>
-                                            <p className="text-sm">写完日记后，点击下方按钮<br/>邀请 {selectedChar?.name} 交换日记。</p>
-                                            <button 
-                                                onClick={handleExchange} 
-                                                className="px-6 py-3 bg-amber-500 hover:bg-amber-400 text-white text-sm font-bold rounded-full shadow-[0_0_20px_rgba(245,158,11,0.3)] active:scale-95 transition-all mt-2"
-                                            >
-                                                查看 TA 的今日
-                                            </button>
-                                        </>
-                                    )}
+                        {journalUsesScrapbookLayout ? (
+                            <div className="sully-journal-spread">
+                                <div
+                                    className={`sully-journal-spread-page sully-journal-spread-user ${activeTab === 'user' ? 'is-active' : 'is-inactive'}`}
+                                    onPointerDownCapture={() => setActiveTab('user')}
+                                >
+                                    {currentEntry && renderPage(currentEntry.userPage, 'user')}
                                 </div>
-                            )
+                                <div
+                                    className={`sully-journal-spread-page sully-journal-spread-char ${activeTab === 'char' ? 'is-active' : 'is-inactive'}`}
+                                    onPointerDownCapture={() => setActiveTab('char')}
+                                >
+                                    {currentEntry?.charPage ? renderPage(currentEntry.charPage, 'char') : renderEmptyCharPage()}
+                                </div>
+                            </div>
+                        ) : (
+                            <>
+                                {activeTab === 'user' && currentEntry && renderPage(currentEntry.userPage, 'user')}
+                                {activeTab === 'char' && (currentEntry?.charPage ? renderPage(currentEntry.charPage, 'char') : renderEmptyCharPage())}
+                            </>
                         )}
                     </div>
                 </div>

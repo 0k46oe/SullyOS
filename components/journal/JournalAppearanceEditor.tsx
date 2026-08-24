@@ -10,7 +10,7 @@ import {
     X,
 } from '@phosphor-icons/react';
 import { useOS } from '../../context/OSContext';
-import type { JournalAppearance } from '../../types';
+import type { JournalAppearance, JournalAppearancePresetId } from '../../types';
 import {
     JOURNAL_APPEARANCE_PRESETS,
     JOURNAL_CSS_SCOPE_HINT,
@@ -20,18 +20,24 @@ import {
 } from '../../utils/journalAppearance';
 import { runCssRenderabilityCheck, validateScopedCss } from '../../utils/scopedCss';
 import { shareOrDownloadFile } from '../../utils/shareExport';
+import { JournalThemeThumbnail } from './JournalThemeArtwork';
 
 const AI_PROMPT = `你是 CSS 设计师，请为 SullyOS 的「交换日记」App 写一段自定义 CSS。
 所有选择器必须以 .sully-journal-root 或 .sully-journal-* 开头；覆盖原界面样式时可使用 !important。不要输出 JavaScript。
 
+请把它设计成一套完整、可操作的实体手账界面，而不是只替换颜色。优先考虑纸张层次、装订、贴纸/胶带、日期标签、角色照片和移动端单页适配；装饰不能遮住正文与按钮。
+
 常用钩子：
 - .sully-journal-root：整个 App
+- .sully-journal-theme-letterpress / -sakura / -forest / -midnight：四套不同版式的根节点
+- .sully-journal-theme-art：主题内联 SVG 与装饰物层（仅装饰，不遮挡交互）
 - .sully-journal-header / .sully-journal-header-title：选择页顶部
 - .sully-journal-notebook / -avatar / -name：角色日记本
 - .sully-journal-calendar-hero / -list：日记列表页
 - .sully-journal-new-entry：新建日记按钮
 - .sully-journal-entry / -date / -text / -badges：日记条目
 - .sully-journal-editor-header / -stage：书写界面
+- .sully-journal-spread / -spread-page / -spread-user / -spread-char：非默认主题的响应式双页
 - .sully-journal-paper / -page-content / -page-meta / -textarea：纸张与正文
 - .sully-journal-sticker / -texture：贴纸与纸张纹理
 - .sully-journal-bottom-controls / -tabs / -tab：底部工具区
@@ -86,11 +92,13 @@ export const JournalAppearanceStyle: React.FC<{ appearance?: JournalAppearance }
 interface JournalAppearanceButtonProps {
     tone?: 'light' | 'dark';
     compact?: boolean;
+    onPreviewPreset?: (preset?: JournalAppearancePresetId) => void;
 }
 
 const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
     tone = 'light',
     compact = false,
+    onPreviewPreset,
 }) => {
     const { theme, updateTheme, addToast } = useOS();
     const [open, setOpen] = useState(false);
@@ -127,14 +135,21 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
             return;
         }
         await updateTheme({ journalAppearance: { ...draft } });
+        onPreviewPreset?.(undefined);
         addToast('交换日记样式已保存', 'success');
         setOpen(false);
     };
 
     const reset = async () => {
         await updateTheme({ journalAppearance: undefined });
+        onPreviewPreset?.(undefined);
         setDraft(normalizeAppearance());
         addToast('已还原交换日记原版样式', 'success');
+        setOpen(false);
+    };
+
+    const closePanel = () => {
+        onPreviewPreset?.(undefined);
         setOpen(false);
     };
 
@@ -215,7 +230,7 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
         <div
             className="fixed inset-0 z-[1950] flex items-end justify-center bg-black/45 backdrop-blur-sm"
             onMouseDown={event => {
-                if (event.target === event.currentTarget) setOpen(false);
+                if (event.target === event.currentTarget) closePanel();
             }}
         >
             <div
@@ -229,7 +244,7 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
                         <h2 className="mt-0.5 text-base font-black">交换日记美化</h2>
                     </div>
                     <button
-                        onClick={() => setOpen(false)}
+                        onClick={closePanel}
                         className="grid h-9 w-9 place-items-center rounded-full bg-stone-100 text-stone-500 active:scale-90"
                         aria-label="关闭交换日记样式设置"
                     >
@@ -247,18 +262,17 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
                                 return (
                                     <button
                                         key={preset.id}
-                                        onClick={() => setDraft(current => ({ ...current, preset: preset.id }))}
+                                        onClick={() => {
+                                            setDraft(current => ({ ...current, preset: preset.id }));
+                                            onPreviewPreset?.(preset.id);
+                                        }}
                                         className={`relative min-h-[92px] rounded-2xl border p-3 text-left transition-all active:scale-[.98] ${
                                             selected
                                                 ? 'border-amber-500 bg-amber-50 ring-1 ring-amber-400'
                                                 : 'border-stone-200 bg-white'
                                         }`}
                                     >
-                                        <div className="mb-3 flex gap-1.5">
-                                            {preset.colors.map(color => (
-                                                <i key={color} className="h-4 w-4 rounded-full border border-black/10" style={{ background: color }} />
-                                            ))}
-                                        </div>
+                                        <div className="mb-3"><JournalThemeThumbnail preset={preset.id} /></div>
                                         <b className="block text-[12px]">{preset.name}</b>
                                         <span className="mt-1 block text-[10px] text-slate-400">{preset.description}</span>
                                         {selected && <Check size={15} weight="bold" className="absolute right-3 top-3 text-amber-600" />}
@@ -352,10 +366,10 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
                         <details className="mt-3 text-[11px] text-slate-500">
                             <summary className="cursor-pointer font-bold">查看完整 CSS 钩子</summary>
                             <div className="mt-2 space-y-2 rounded-xl bg-stone-100 px-3 py-3 font-mono text-[10px] leading-5">
-                                <p>外层：root、select、calendar、write、header、header-title</p>
+                                <p>外层：root、select、calendar、write、header、header-title、theme-letterpress / sakura / forest / midnight、theme-art</p>
                                 <p>日记本：notebook-grid、notebook、notebook-avatar、notebook-name</p>
                                 <p>列表：calendar-hero、calendar-list、new-entry、entry、entry-accent、entry-date、entry-text、entry-year、entry-badges</p>
-                                <p>书写：editor-header、editor-stage、paper、paper-user、paper-char、page-content、page-meta、page-title、page-date、textarea、sticker、texture、empty</p>
+                                <p>书写：editor-header、editor-stage、spread、spread-page、spread-user、spread-char、paper、paper-user、paper-char、page-content、page-meta、page-title、page-date、textarea、sticker、texture、empty</p>
                                 <p>工具：bottom-controls、tabs、tab、tab-active、paper-picker、paper-swatch、sticker-button、sticker-panel</p>
                                 <p className="font-sans text-slate-400">使用时在前面加 <code>.sully-journal-</code>；也可以从 <code>.sully-journal-root</code> 开始组合后代选择器。</p>
                             </div>
@@ -391,7 +405,11 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
             <JournalAppearanceStyle appearance={previewAppearance} />
             <button
                 type="button"
-                onClick={() => setOpen(true)}
+                onClick={() => {
+                    setDraft(normalizeAppearance(theme.journalAppearance));
+                    onPreviewPreset?.(theme.journalAppearance?.preset || 'original');
+                    setOpen(true);
+                }}
                 className={`sully-journal-appearance-button grid place-items-center rounded-full border transition-all active:scale-90 ${
                     compact ? 'h-8 w-8' : 'h-9 w-9'
                 } ${
