@@ -239,6 +239,12 @@ describe('存储诊断 · 端到端跑真正的一键优化', () => {
             dateSkinSets: [{ id: 'sk1', name: '泳装', sprites: { happy: tinyImage('skin-happy') } }],
             vrState: { chibi: { img: tinyImage('char-chibi') } },
             phoneState: { contacts: [{ id: 'ct1', name: '甲', avatar: tinyImage('contact') }] },
+            companionAvatar: {
+                version: 1, source: 'upload', imageRef: tinyImage('companion'),
+                imageWardrobe: [{ id: 'w1', imageRef: tinyImage('companion-alt') }],
+            },
+            videoCallBackground: tinyImage('call-bg'),
+            companionBackground: tinyImage('companion-bg'),
             specialMomentRecords: {
                 whiteday_2026: {
                     image: tinyImage('moment-img'),

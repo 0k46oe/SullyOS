@@ -65,11 +65,14 @@
 //   social_posts authorAvatar / comments[].authorAvatar ← 社交发帖（值是角色 / 我方头像副本）
 //   groups avatar                    ← 群资料页（GroupChat 早已走 migrateDataUrlToRef）
 //   life_sim actionLog[].actorAvatar ← 生活模拟剧情日志（同样是头像副本）
+//   characters companionAvatar.imageRef 与 .imageWardrobe[].imageRef ← 桌面陪伴的静态形象与衣柜
+//   characters videoCallBackground   ← 视频通话的舞台背景（CallApp）
+//   characters companionBackground   ← 桌面陪伴的背景（CompanionHome）
+//     ↑ 末尾这三个是「换图即删」字段，走 convertExclusive（不去重、令牌独占），
+//       衣柜里那份还得跟顶层 imageRef 同令牌。两条规矩的来由见各自函数注释。
 // 明确不碰：
 //   · 手账自己的配图，以及帖子自己的配图 social_posts.images[]——读端还不认令牌，转了就破图
 //     （帖子配图还被当成「可能是 emoji 字符串」直接渲染成文本，见 MessageItem 的 social_card）；
-//   · companionAvatar.imageRef / videoCallBackground / companionBackground——这几个是「换图即删」
-//     字段（见 utils/blobDedupe.ts），令牌不能跟别处共享，转进来会被去重连坐；
 //   · chibiStudio.like520.img 与 specialMomentRecords.*.customData.charChibi / userChibi——
 //     刻意保持 dataURL（见 docs/chibi-studio.md）：520 活动那边全是裸 <img> + canvas 合成，
 //     令牌过不去。所以 specialMomentRecords 只能走 chatCard.charAvatar 那一条精确路径，
@@ -89,7 +92,7 @@
 
 import { DB } from './db';
 import {
-    isBlobRef, dataUrlToBlob, putImageBlobDeduped, getBlobForRef, migrateAppearancePresetBlobRefs,
+    isBlobRef, dataUrlToBlob, putImageBlob, putImageBlobDeduped, getBlobForRef, migrateAppearancePresetBlobRefs,
     primeContentMemo, CHAT_THEME_IMAGE_KEYS,
 } from './blobRef';
 import { blobStore } from './blobStore';
@@ -188,12 +191,11 @@ export async function optimizeResourceStorage(
         // 已计过字节数的令牌：canonical 迁移函数产出的令牌经这里补记大小，避免重复计。
         const countedTokens = new Set<string>();
 
-        /** data:image → 令牌；非图片 data / 已是令牌 / http 一律返回 null（调用方不动原值）。
-         *
-         *  「同一份图别转两遍」这件事交给 putImageBlobDeduped——它按内容哈希认人，记的是
-         *  哈希（几十字节），不是 base64 原文。这里不要再套一层以 data URL 为键的缓存：
-         *  那层缓存等于把这一轮见过的每张图的原文都钉在内存里，表分页读了也白读。 */
-        const convert = async (value: unknown): Promise<string | null> => {
+        /** convert / convertExclusive 共用的转换体。差别只在 put：走不走内容去重。 */
+        const convertWith = async (
+            value: unknown,
+            put: (blob: Blob) => Promise<{ token: string; reused: boolean }>,
+        ): Promise<string | null> => {
             if (typeof value !== 'string' || !value.startsWith('data:image/')) return null;
             // 内联 SVG 一律跳过：库里这些不是用户传的图，是代码现画出来的占位符
             // （群默认头像 ~300 字节、生活模拟的附件插图）。上传路径产出的都是 png/jpeg，
@@ -202,7 +204,7 @@ export async function optimizeResourceStorage(
             try {
                 const blob = dataUrlToBlob(value);
                 // 复用命中时不计新建：那份 Blob 本来就在库里占着，这次一个字节都没多存
-                const { token, reused } = await putImageBlobDeduped(blob);
+                const { token, reused } = await put(blob);
                 result.converted++;
                 result.bytesBefore += value.length;
                 if (!reused && !countedTokens.has(token)) {
@@ -219,6 +221,21 @@ export async function optimizeResourceStorage(
                 return null;
             }
         };
+
+        /** data:image → 令牌；非图片 data / 已是令牌 / http 一律返回 null（调用方不动原值）。
+         *
+         *  「同一份图别转两遍」这件事交给 putImageBlobDeduped——它按内容哈希认人，记的是
+         *  哈希（几十字节），不是 base64 原文。这里不要再套一层以 data URL 为键的缓存：
+         *  那层缓存等于把这一轮见过的每张图的原文都钉在内存里，表分页读了也白读。 */
+        const convert = (value: unknown) => convertWith(value, putImageBlobDeduped);
+
+        /** 「换图即删」字段专用：不走内容去重，每次都产出只归这个字段的新令牌。
+         *
+         *  这几个字段（清单见 utils/blobDedupe.ts）换图 / 移除时会直接 deleteBlobRef 掉旧
+         *  Blob，前提是「这份令牌只归我」。走 putImageBlobDeduped 的话，两个字段恰好放了
+         *  同一张图就会拿到同一个令牌，那边一换图，这边的图跟着没。宁可多存一份二进制。 */
+        const convertExclusive = (value: unknown) =>
+            convertWith(value, async blob => ({ token: await putImageBlob(blob), reused: false }));
 
         /** 一袋立绘（情绪键 → 图）整袋转成令牌，返回有没有动过。
          *  袋子里除了见面情绪立绘还混着小小窝的 chibi，两者都在令牌链路上，一起转。 */
@@ -347,6 +364,42 @@ export async function optimizeResourceStorage(
             // convert 只认 data:image/ 开头的值，其余一律原样不动。
             const avatarToken = await convert(c.avatar);
             if (avatarToken) { c.avatar = avatarToken; changed = true; }
+
+            // 桌面陪伴形象 / 视频舞台背景 / 桌面背景：这三个是「换图即删」字段，
+            // 只能走 convertExclusive，理由见那个函数的注释。
+            //
+            // 衣柜里那份必须跟顶层 imageRef 转成同一个令牌：companionWardrobe 拿令牌
+            // 当条目 id 认亲（utils/companionWardrobe.ts 的 activeUploadedOutfit 与
+            // listUploadedCompanionOutfits），两边给出不同令牌的话，当前穿着的这套会在
+            // 衣柜里裂成两条重复项。非去重的 put 每次都产新令牌，所以这里必须行内记账。
+            //
+            // 记账只在 companionAvatar 这一坨里通用，不跨到下面两个背景字段：它们各自也是
+            // 裸删的，共享令牌等于把连坐从「别的表」搬到「同一行里」。
+            const companion = (c as any).companionAvatar;
+            if (companion && typeof companion === 'object') {
+                const seen = new Map<string, string>();
+                const convertOnce = async (value: unknown): Promise<string | null> => {
+                    if (typeof value !== 'string') return null;
+                    const hit = seen.get(value);
+                    if (hit) return hit;
+                    const token = await convertExclusive(value);
+                    if (token) seen.set(value, token);
+                    return token;
+                };
+                const imageToken = await convertOnce(companion.imageRef);
+                if (imageToken) { companion.imageRef = imageToken; changed = true; }
+                if (Array.isArray(companion.imageWardrobe)) {
+                    for (const outfit of companion.imageWardrobe) {
+                        const token = await convertOnce(outfit?.imageRef);
+                        if (token) { outfit.imageRef = token; changed = true; }
+                    }
+                }
+            }
+            for (const key of ['videoCallBackground', 'companionBackground'] as const) {
+                const token = await convertExclusive((c as any)[key]);
+                if (token) { (c as any)[key] = token; changed = true; }
+            }
+
             const rc = (c as any).roomConfig;
             if (rc) {
                 for (const key of ['wallImage', 'floorImage']) {

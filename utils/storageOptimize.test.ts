@@ -864,6 +864,98 @@ describe('优化资源存储（一次性批量迁移）', () => {
     });
 });
 
+// 「换图即删」字段（清单见 utils/blobDedupe.ts）：换图 / 移除时直接 deleteBlobRef 掉旧
+// Blob，前提是那份令牌只归自己。这组用例钉住迁移过来的令牌确实独占，以及衣柜不会裂。
+describe('换图即删的字段：令牌独占，衣柜不裂', () => {
+    it('桌面静态形象转成令牌，衣柜里那条跟顶层指向同一个', async () => {
+        await seedStore('characters', [{
+            id: 'c1', name: '小明',
+            companionAvatar: {
+                version: 1, source: 'upload', imageRef: TINY_PNG,
+                imageWardrobe: [
+                    { id: TINY_PNG, imageRef: TINY_PNG },
+                    { id: TINY_JPEG, imageRef: TINY_JPEG },
+                ],
+            },
+        }]);
+
+        await optimizeResourceStorage();
+
+        const c: any = (await DB.getAllCharacters()).find(x => x.id === 'c1');
+        expect(isBlobRef(c.companionAvatar.imageRef)).toBe(true);
+        // 衣柜按 imageRef 认亲。当前穿着这套在衣柜里得还是同一条，两边令牌不一致就会裂成两条
+        expect(c.companionAvatar.imageWardrobe[0].imageRef).toBe(c.companionAvatar.imageRef);
+        // 另一套是另一张图，令牌自然是另一个
+        expect(isBlobRef(c.companionAvatar.imageWardrobe[1].imageRef)).toBe(true);
+        expect(c.companionAvatar.imageWardrobe[1].imageRef).not.toBe(c.companionAvatar.imageRef);
+        expect(await blobBytes(c.companionAvatar.imageRef))
+            .toEqual(new Uint8Array(await dataUrlToBlob(TINY_PNG).arrayBuffer()));
+    });
+
+    it('同一张图别处也有时，这个字段拿到的是自己那份令牌', async () => {
+        await seedStore('characters', [{
+            id: 'c1', name: '小明',
+            avatar: TINY_PNG,                                                      // 走去重那条
+            companionAvatar: { version: 1, source: 'upload', imageRef: TINY_PNG },  // 走独占那条
+        }]);
+
+        await optimizeResourceStorage();
+
+        const c: any = (await DB.getAllCharacters()).find(x => x.id === 'c1');
+        expect(isBlobRef(c.avatar)).toBe(true);
+        expect(isBlobRef(c.companionAvatar.imageRef)).toBe(true);
+        // 内容一样，令牌必须是两个：换掉桌面形象时它会把自己那份 Blob 直接删掉
+        expect(c.companionAvatar.imageRef).not.toBe(c.avatar);
+    });
+
+    it('两个背景字段放同一张图，也各拿各的令牌', async () => {
+        await seedStore('characters', [{
+            id: 'c1', name: '小明',
+            videoCallBackground: TINY_JPEG,
+            companionBackground: TINY_JPEG,
+        }]);
+
+        await optimizeResourceStorage();
+
+        const c: any = (await DB.getAllCharacters()).find(x => x.id === 'c1');
+        expect(isBlobRef(c.videoCallBackground)).toBe(true);
+        expect(isBlobRef(c.companionBackground)).toBe(true);
+        expect(c.videoCallBackground).not.toBe(c.companionBackground);
+    });
+
+    it('再跑一遍，去重阶段也不会把这两份一样的 Blob 并到一起', async () => {
+        await seedStore('characters', [{
+            id: 'c1', name: '小明',
+            avatar: TINY_PNG,
+            companionAvatar: { version: 1, source: 'upload', imageRef: TINY_PNG },
+        }]);
+
+        await optimizeResourceStorage();
+        const first: any = (await DB.getAllCharacters()).find(x => x.id === 'c1');
+
+        // 第二遍的去重阶段这才看得见上一遍转出来的两份同内容 Blob。
+        // collectUnmergeableRefs 把裸删字段挡在合并之外，挡漏了这里就会并成一个。
+        await optimizeResourceStorage();
+        const second: any = (await DB.getAllCharacters()).find(x => x.id === 'c1');
+
+        expect(second.companionAvatar.imageRef).toBe(first.companionAvatar.imageRef);
+        expect(second.companionAvatar.imageRef).not.toBe(second.avatar);
+    });
+
+    it('源码守卫：这几个字段不许走去重那条 put', () => {
+        const src = readFileSync(new URL('./storageOptimize.ts', import.meta.url), 'utf8');
+        const start = src.indexOf('const companion = (c as any).companionAvatar;');
+        expect(start).toBeGreaterThan(-1);
+        const end = src.indexOf('const rc = (c as any).roomConfig;', start);
+        expect(end).toBeGreaterThan(start);
+        const block = src.slice(start, end);
+
+        expect(block).toContain('convertExclusive');
+        // 换成 convert( 就是把令牌交给内容去重，别处一裸删这边的图跟着没
+        expect(block).not.toMatch(/\bconvert\(/);
+    });
+});
+
 describe('去重：同一张图只留一份 Blob', () => {
     it('存量重复：两份一样的 Blob，优化后引用收敛到最老的那个', async () => {
         // 造出历史上两条迁移路径各存各的局面（putImageBlob 本身不去重）
