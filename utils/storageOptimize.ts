@@ -117,6 +117,12 @@ export interface OptimizeResult {
     bytesAfter: number;
     /** 转换失败、原值保留的字段数（图不丢，只是这张没省下来） */
     failed: number;
+    /**
+     * 失败原因 → 出现次数，键形如「相册: TypeError: ...」。
+     * failed 只说「有几张没转成」，不说为什么；同一个原因通常成批出现，按原因归并
+     * 既压得住条数，又够定位问题。没有失败时是个空对象。
+     */
+    failureReasons: Record<string, number>;
     /** 合并掉的重复 Blob 份数（同一张图多存的那几份） */
     mergedDuplicates: number;
     /** 合并后能被孤儿清理回收的字节数 */
@@ -140,9 +146,12 @@ export async function optimizeResourceStorage(
     try {
         const result: OptimizeResult = {
             converted: 0, uniqueBlobs: 0, bytesBefore: 0, bytesAfter: 0, failed: 0,
+            failureReasons: {},
             mergedDuplicates: 0, reclaimableBytes: 0, skippedGroups: 0, scanUnavailable: false,
             vectorsCompacted: 0, vectorError: null,
         };
+        // 当前正在处理哪个面（tick 时更新）。失败原因带上它才知道是哪张表出的事。
+        let currentFace = '开始前';
         // 已计过字节数的令牌：canonical 迁移函数产出的令牌经这里补记大小，避免重复计。
         const countedTokens = new Set<string>();
 
@@ -165,8 +174,11 @@ export async function optimizeResourceStorage(
                     result.bytesAfter += blob.size;
                 }
                 return token;
-            } catch {
+            } catch (e) {
                 result.failed++; // 坏 data: 转不动：原值保留，图不丢
+                // 原因原本整个吞掉，只留一个数字，出问题时无从查起——按「面 + 原因」归并记一笔。
+                const reason = `${currentFace}: ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`;
+                result.failureReasons[reason] = (result.failureReasons[reason] ?? 0) + 1;
                 return null;
             }
         };
@@ -217,7 +229,7 @@ export async function optimizeResourceStorage(
         // 多出来的行照样处理，只是报出去的 done 按 total 封顶——done 只增不减也不越过 total，
         // 进度条既不会倒退也不会冲过头；行变少时它停在不满格的位置，函数返回即收尾
         // （展示侧本来就以返回为准，不靠进度条判完成）。
-        const tick = (label: string) => { done++; onProgress?.({ label, done: Math.min(done, total), total }); };
+        const tick = (label: string) => { currentFace = label; done++; onProgress?.({ label, done: Math.min(done, total), total }); };
 
         // ── 1) assets 表 ─────────────────────────────────────────
         for await (const a of iterateStoreRows<{ id: string; data: string }>('assets')) {

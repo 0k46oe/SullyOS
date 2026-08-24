@@ -19,6 +19,8 @@ import {
 } from '../../utils/storageStats';
 import { optimizeResourceStorage, type OptimizeProgress, type OptimizeResult } from '../../utils/storageOptimize';
 import { trackEvent } from '../../utils/analytics';
+// 临时：存储优化的测试反馈卡片，小规模测试结束后连同 StorageDiagnosticsCard / storageDiagnostics 一起撤掉
+import StorageDiagnosticsCard from './StorageDiagnosticsCard';
 
 /**
  * 算好的结果放模块级缓存：SettingsSection 收起时会把子树整个卸载，
@@ -246,6 +248,9 @@ const StorageUsagePanel: React.FC = () => {
                             : '存储吃紧时系统可能把你的数据一起清掉。把 SullyOS 装到主屏、或者允许通知，能提高申请成功率。'}
                 </p>
             </div>
+
+            {/* 临时：测试反馈卡片（跑的是同一个 optimizeResourceStorage，只是前后各扫一遍并出报告） */}
+            <StorageDiagnosticsCard />
 
             {/* ── 优化资源存储（一次性迁移，幂等可重跑） ── */}
             <div className="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2.5 mb-3">

@@ -507,6 +507,20 @@ describe('优化资源存储（一次性批量迁移）', () => {
         expect(r.converted).toBe(1);
         expect(await DB.getAsset('wallpaper')).toBe('data:image/png;base64,@@@@');
         expect(isBlobRef(await DB.getAsset('lock_wallpaper'))).toBe(true);
+
+        // 失败原因得留下来：只报一个 failed 数字的话，用户那边转不动时无从查起。
+        // 键上带着面名（这里是「系统外观」），才知道是哪张表出的事。
+        const reasons = Object.keys(r.failureReasons);
+        expect(reasons).toHaveLength(1);
+        expect(reasons[0]).toContain('系统外观');
+        expect(r.failureReasons[reasons[0]]).toBe(1);
+    });
+
+    it('没有失败时 failureReasons 是空的（别拿噪音喂给反馈报告）', async () => {
+        await DB.saveAsset('wallpaper', TINY_PNG);
+        const r = await optimizeResourceStorage();
+        expect(r.failed).toBe(0);
+        expect(r.failureReasons).toEqual({});
     });
 
     it('清单守卫：优化写入的每张表都在 GC 引用面清单里（否则转出的 Blob 会被当孤儿删）', () => {
