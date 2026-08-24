@@ -1,15 +1,16 @@
 {
   "schemaVersion": 1,
-  "versionCode": 30406,
-  "versionName": "3.4.6",
-  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.6/SullyOS-Android-v3.4.6.apk",
-  "sha256": "865073a2abfaba22fb4f1c82f65803e4c8bb895bb8a35f8f20c5edf45513f745",
-  "sizeBytes": 36983429,
-  "publishedAt": "2026-08-18T17:07:03Z",
+  "versionCode": 30407,
+  "versionName": "3.4.7",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.7/SullyOS-Android-v3.4.7.apk",
+  "sha256": "d785d07e4d24a41e5b001c74f589ea975b66fa9cc4086c57aa1e32f23b34f658",
+  "sizeBytes": 36990791,
+  "publishedAt": "2026-08-24T00:58:10Z",
   "releaseNotes": [
-    "对齐最新 master b2101e83（含 PR #595）",
-    "修复七夕词云流程可能进入死路的问题",
-    "兼容七夕阶段接口的不同响应结构，增强会话状态与记忆恢复",
+    "对齐最新 master 32151b2c（含 PR #599）",
+    "新增本机数据容量、存储水位与持久化许可状态",
+    "改进主动消息日程回传、跨日日程修改与失败日志",
+    "优化时间感知与便利贴、窗台期盼的表达分寸",
     "延续固定签名、UnifiedPush / ntfy、Android PDF 导入与应用内更新"
   ]
 }
