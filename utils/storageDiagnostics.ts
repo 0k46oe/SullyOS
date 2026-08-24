@@ -165,8 +165,11 @@ const MAX_TRACKED_PATHS = 5000;
 const OVERFLOW_PATH = '(路径过多，已合并)';
 /** localStorage 最多列多少个键 */
 const MAX_LS_ROWS = 60;
-/** 整轮扫描的墙钟上限：库特别大时宁可截断也不能把用户卡死在设置页 */
-const SCAN_TIMEOUT_MS = 150_000;
+/** 整轮扫描的墙钟上限：库特别大时宁可截断也不能把用户卡死在设置页。
+ *  真实数据校准过：一个 434 MB 的库（memory_links 150 万行、messages 9.6 万行）单次扫描
+ *  用了 145 秒——按原先 150 秒的线差 5 秒就会被截断，而截断的报告缺哪几张表并不好看出来。
+ *  慢的是行数不是图片，所以放宽到 10 分钟，别把大库用户的报告切一半。 */
+const SCAN_TIMEOUT_MS = 600_000;
 
 const EMBEDDED_BASE64_RE = /data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g;
 const EMBEDDED_REF_RE = /blobref:[A-Za-z0-9_-]+/g;

@@ -134,7 +134,7 @@ const StorageDiagnosticsCard: React.FC = () => {
                         <div className="h-full rounded-full bg-violet-400 transition-all" style={{ width: `${percent ?? 5}%` }} />
                     </div>
                     <p className="mt-1 text-[10px] text-violet-500/70">
-                        数据多的话要跑上一两分钟，中途页面会有点卡，属正常。
+                        数据多的话要跑上几分钟（记录条数特别多的话可能到十分钟），中途页面会有点卡，属正常。
                     </p>
                 </div>
             )}
