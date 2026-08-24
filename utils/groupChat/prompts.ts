@@ -9,6 +9,19 @@ import { formatRelativeAge } from './relativeTime';
 interface EmojiItem { name: string; url: string; categoryId?: string }
 
 /**
+ * 这个值是「一张图 / 一段媒体」而不是正文吗？认三种形态：内嵌 data URL、http(s) 外链、
+ * blobref 令牌。令牌只有 ~28 字，按长度截断的兜底拦不住它；而发请求时网络出口那层
+ * （utils/apiBlobRefs.ts）会把令牌统一还原成完整 data URL —— 混进 prompt 就是每轮
+ * 重发几 MB 的 base64。
+ */
+const isMediaValue = (value: unknown): boolean => {
+    if (typeof value !== 'string') return false;
+    const trimmed = value.trim();
+    return /^(data:|https?:\/\/)/i.test(trimmed) || isBlobRef(trimmed);
+};
+
+
+/**
  * 按分类拼可用表情清单（按群成员可见性过滤）。
  * 原 GroupChat.tsx triggerDirector 内的 IIFE，逐字搬出。
  */
@@ -133,7 +146,7 @@ export function buildGroupHistoryBlock(
             // 回执行自带完整句子（[系统: X 领取了 Y 的红包]），不加名字前缀
             if (m.metadata?.packetReceipt) { lines.push(`${timePrefix}${packetHistoryLine(m, nameOf, now)}`); return; }
             content = packetHistoryLine(m, nameOf, now);
-        } else if (/^(data:|https?:\/\/)/i.test(rawText.trim()) || isBlobRef(rawText.trim())) {
+        } else if (isMediaValue(rawText)) {
             // 令牌也算媒体：漏认会把它当正文内联进 prompt，出门时还被还原成整段 data URL
             content = '[媒体]';
         } else {
@@ -142,7 +155,11 @@ export function buildGroupHistoryBlock(
         // 引用回复：对齐私聊 chatPrompts 的格式——被引用原话独立成行，新回复另起一行突出
         if (m.replyTo) {
             const rawQuote = typeof m.replyTo.content === 'string' ? m.replyTo.content : '';
-            const quoted = rawQuote.length > 60 ? rawQuote.slice(0, 60) + '…' : rawQuote;
+            // 被引用的可能本来就是一条图片消息 —— 此时 rawQuote 是 data URL / 外链 / blobref
+            // 令牌，截 60 字只会切出一段没意义的 base64 碎片，令牌更是整条活着进 prompt。
+            const quoted = isMediaValue(rawQuote)
+                ? '[图片]'
+                : (rawQuote.length > 60 ? rawQuote.slice(0, 60) + '…' : rawQuote);
             lines.push(`${timePrefix}[${name} 引用了 ${m.replyTo.name || '对方'} 说的「${quoted}」，并回复了 ↓]\n${name}: ${content}`);
             return;
         }

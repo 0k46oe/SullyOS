@@ -323,7 +323,7 @@ const DesktopSquareImage = React.memo(({ image, contentColor, onClick, acnh = fa
             }}
         >
             {image ? (
-                <img src={image} alt="" className="w-full h-full object-cover" loading="lazy" />
+                <TokenImg value={image} alt="" className="w-full h-full object-cover" loading="lazy" />
             ) : (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-3 text-center">
                     <div className="w-9 h-9 rounded-full flex items-center justify-center"
@@ -1099,14 +1099,14 @@ const Launcher: React.FC = () => {
                                       <div className="flex gap-2">
                                         {['tl', 'tr'].map(key => w[key] ? (
                                           <div key={key} className="flex-1 aspect-square rounded-2xl overflow-hidden shadow-md border border-white/20">
-                                            <img src={w[key]} className="w-full h-full object-cover" alt="" loading="lazy" />
+                                            <TokenImg value={w[key]} className="w-full h-full object-cover" alt="" loading="lazy" />
                                           </div>
                                         ) : <div key={key} className="flex-1"></div>)}
                                       </div>
                                     )}
                                     {w['wide'] && (
                                       <div className="w-full h-32 rounded-2xl overflow-hidden shadow-md border border-white/20">
-                                        <img src={w['wide']} className="w-full h-full object-cover" alt="" loading="lazy" />
+                                        <TokenImg value={w['wide']} className="w-full h-full object-cover" alt="" loading="lazy" />
                                       </div>
                                     )}
                                   </div>

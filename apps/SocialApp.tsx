@@ -4,7 +4,8 @@ import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { CharacterProfile, SocialPost, SocialComment, SubAccount, SocialAppProfile } from '../types';
 import { ContextBuilder } from '../utils/context';
-import { processImage } from '../utils/file';
+import { processImageToBlob } from '../utils/file';
+import { putImageBlob } from '../utils/blobRef';
 import Modal from '../components/os/Modal';
 import { safeResponseJson } from '../utils/safeApi';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
@@ -362,10 +363,13 @@ const SocialApp: React.FC = () => {
         const file = e.target.files?.[0];
         if (file) {
             try {
-                const base64 = await processImage(file, { skipCompression: true });
-                setUserBgImage(base64);
+                // 背景图存二进制：assets 行里只留 blobref 令牌，渲染走 TokenImg。
+                // 旧令牌不主动删（同一张图可能被别处引用），交给孤儿 GC。
+                const blob = await processImageToBlob(file, { skipCompression: true });
+                const ref = await putImageBlob(blob);
+                setUserBgImage(ref);
                 // Save to DB Assets
-                await DB.saveAsset('spark_user_bg', base64);
+                await DB.saveAsset('spark_user_bg', ref);
                 addToast('背景图已更新', 'success');
             } catch (err) {
                 addToast('图片处理失败', 'error');
@@ -377,8 +381,11 @@ const SocialApp: React.FC = () => {
         const file = e.target.files?.[0];
         if (file) {
             try {
-                const base64 = await processImage(file);
-                setSocialProfile(prev => ({ ...prev, avatar: base64 }));
+                // 头像同样只存令牌；这里改的是 socialProfile 内存态，
+                // 落库在 saveUserProfileChanges（点「保存资料」时整个 JSON 写回）。
+                const blob = await processImageToBlob(file);
+                const ref = await putImageBlob(blob);
+                setSocialProfile(prev => ({ ...prev, avatar: ref }));
                 trackEvent('更换 Spark 头像');
             } catch (err: any) {
                 addToast(err.message, 'error');
@@ -388,7 +395,7 @@ const SocialApp: React.FC = () => {
 
     const saveUserProfileChanges = async () => {
         localStorage.setItem('spark_user_id', userSparkId);
-        // Save Profile to DB Assets (contains base64 avatar)
+        // Save Profile to DB Assets（avatar 是 blobref 令牌，二进制在 IndexedDB）
         await DB.saveAsset('spark_social_profile', JSON.stringify(socialProfile));
         setIsEditingId(false);
         addToast('主页资料已保存 (仅在 Spark 生效)', 'success');
@@ -1197,7 +1204,7 @@ ${identityMap}
                             <div className="relative group">
                                 <div className="h-40 w-full overflow-hidden bg-slate-200 relative cursor-pointer" onClick={() => userBgInputRef.current?.click()}>
                                     {userBgImage ? (
-                                        <img src={userBgImage} className="w-full h-full object-cover" />
+                                        <TokenImg value={userBgImage} className="w-full h-full object-cover" />
                                     ) : (
                                         <TokenImg value={userProfile.avatar} className="w-full h-full object-cover blur-2xl opacity-60 scale-125" />
                                     )}

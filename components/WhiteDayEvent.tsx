@@ -22,7 +22,7 @@ import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import TokenImg from './os/TokenImg';
-import { isImageValue, resolveRefToDataUrl } from '../utils/blobRef';
+import { dataUrlToBlob, isImageValue, putImageBlob, resolveRefToDataUrl } from '../utils/blobRef';
 
 // ============================================================
 // 美术资产配置（用户填入实际 PNG URL 后生效）
@@ -1299,6 +1299,9 @@ ${answerSummary}
 
             // 更新角色记录（保留 quiz 数据，追加明信片图片）
             if (char) {
+                // 明信片本体是一张 300KB 上下的 PNG，落进 Blob 库，角色记录里只留 blobref 令牌。
+                // 上面的 exportedBase64 仍是真 base64——下载/分享、发到小屋、喂视觉模型都要它。
+                const imageRef = await putImageBlob(dataUrlToBlob(base64));
                 const prev = char.specialMomentRecords || {};
                 const existingContent = prev[WHITEDAY_RECORD_KEY]?.content;
                 let existingData: any = {};
@@ -1311,7 +1314,7 @@ ${answerSummary}
                                 ...existingData,
                                 score: reviewData?.finalScore ?? existingData.score ?? 0,
                             }),
-                            image: base64,
+                            image: imageRef,
                             timestamp: Date.now(),
                             source: 'generated',
                         },
@@ -2002,8 +2005,11 @@ ${answerSummary}
             if (!savedImage || isExporting) return;
             setIsExporting(true);
             try {
+                // a.download / fetch / Filesystem 都只认真的 data URL，令牌得先还原回来
+                const dataUrl = await resolveRefToDataUrl(savedImage);
+                if (!dataUrl) { addToast('明信片图片已丢失', 'error'); return; }
                 const fileName = `whiteday_${char?.name || 'chocolate'}_2026.png`;
-                await downloadOrShare(savedImage, fileName, '白色情人节巧克力');
+                await downloadOrShare(dataUrl, fileName, '白色情人节巧克力');
                 addToast('导出成功！', 'success');
             } catch (e: any) {
                 if (e?.name !== 'AbortError') addToast('导出失败', 'error');
@@ -2027,7 +2033,7 @@ ${answerSummary}
                     {/* 明信片 */}
                     {savedImage ? (
                         <div className="flex flex-col items-center gap-2">
-                            <img src={savedImage} className="w-full max-w-[320px] rounded-2xl shadow-md border border-amber-200" alt="白色情人节明信片" />
+                            <TokenImg value={savedImage} className="w-full max-w-[320px] rounded-2xl shadow-md border border-amber-200" alt="白色情人节明信片" />
                             <button
                                 onClick={handleReExport}
                                 disabled={isExporting}

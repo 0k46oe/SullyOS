@@ -23,10 +23,10 @@ function tinyImage(seed: string, mime = 'png'): string {
     return `data:image/${mime};base64,${body}`;
 }
 
-const SEEDED_STORES = [
-    'assets', 'characters', 'songs', 'cc_custom_parts', 'gallery', 'themes', 'messages',
-    'emojis', 'user_profile', 'social_posts', 'groups', 'blob_assets', 'memory_vectors',
-];
+// 清库范围跟着一键优化的覆盖面走：那边新收一张表，这边自动跟上。
+// 手写一份清单的话，漏掉的那张表不会报错——只是上一条用例的行漏进下一条，
+// 让某个不相干的用例莫名其妙多数出一行来。
+const SEEDED_STORES = [...new Set([...OPTIMIZE_TARGET_STORES, 'blob_assets', 'memory_vectors'])];
 
 async function clearStore(name: string): Promise<void> {
     const db = await openDB();
@@ -226,6 +226,70 @@ describe('存储诊断 · 扫描器认得出库里每个面', () => {
 });
 
 describe('存储诊断 · 端到端跑真正的一键优化', () => {
+    it('这轮新收的字段，诊断一个不漏地看得见，优化后一条 base64 都不剩', async () => {
+        // 诊断扫的是 db.objectStoreNames（全库），字段路径靠递归发现而不是写死，
+        // 所以「一键优化」收录面一扩，它自动跟上。这条用例把新收的字段各摆一份，
+        // 钉住「优化器转走的」和「诊断扫到的」是同一批——两边各算各的，对得上才算数。
+        // 将来再收新字段时，往这里补一份 seed 就能立刻知道诊断跟没跟上。
+        await seedStore('characters', [{
+            id: 'c1', name: '角色一',
+            chatBackground: tinyImage('chat-bg'),
+            dateBackground: tinyImage('date-bg'),
+            sprites: { normal: tinyImage('sprite-normal') },
+            dateSkinSets: [{ id: 'sk1', name: '泳装', sprites: { happy: tinyImage('skin-happy') } }],
+            vrState: { chibi: { img: tinyImage('char-chibi') } },
+            phoneState: { contacts: [{ id: 'ct1', name: '甲', avatar: tinyImage('contact') }] },
+            specialMomentRecords: {
+                whiteday_2026: {
+                    image: tinyImage('moment-img'),
+                    customData: { chatCard: { charAvatar: tinyImage('card-avatar') } },
+                },
+            },
+        }]);
+        await seedStore('user_profile', [{ id: 'me', name: '小明', vrState: { chibi: { img: tinyImage('my-chibi') } } }]);
+        await seedStore('social_posts', [{
+            id: 'p1', authorName: '甲', authorAvatar: tinyImage('post-author'), images: [], timestamp: 1,
+            comments: [{ id: 'cm1', authorName: '乙', authorAvatar: tinyImage('comment-author') }],
+        }]);
+        await seedStore('groups', [{ id: 'g1', name: '群一', avatar: tinyImage('group') }]);
+        await seedStore('life_sim', [{ id: 'ls1', actionLog: [{ turnNumber: 1, actor: '甲', actorAvatar: tinyImage('actor') }] }]);
+        await seedStore('messages', [{
+            id: 1, charId: 'c1', role: 'assistant', type: 'score_card', timestamp: 1,
+            content: JSON.stringify({ charAvatar: tinyImage('card-content'), photoDataUrl: tinyImage('photo') }),
+            metadata: {
+                characterAvatar: tinyImage('call-avatar'),
+                scoreCard: { charAvatar: tinyImage('card-meta'), photoDataUrl: tinyImage('photo-meta') },
+                post: {
+                    authorName: '甲', authorAvatar: tinyImage('shared-author'), images: [],
+                    comments: [{ authorName: '乙', authorAvatar: tinyImage('shared-comment') }],
+                },
+            },
+        }]);
+        await seedStore('assets', [
+            { id: 'widget_dsq', data: tinyImage('widget') },
+            { id: 'spark_user_bg', data: tinyImage('spark-bg') },
+            { id: 'spark_social_profile', data: JSON.stringify({ name: '小明', avatar: tinyImage('spark-avatar') }) },
+            { id: 'appearance_preset_ap1', data: JSON.stringify({
+                id: 'ap1', name: '预设', createdAt: 1,
+                theme: { wallpaper: 'linear-gradient(#fff,#000)', launcherWidgets: { dsq: tinyImage('preset-widget') } },
+                chatThemes: [{
+                    id: 'ct1', name: '气泡', type: 'custom',
+                    user: { decoration: tinyImage('preset-bubble-user') },
+                    ai: { avatarDecoration: tinyImage('preset-bubble-ai') },
+                }],
+            }) },
+        ]);
+
+        const report = await runStorageDiagnostics();
+
+        expect(report.optimize.ok, report.optimize.error ?? '').toBe(true);
+        // 优化后一条 base64 都不剩——哪个字段没被收录，它就会留在 base64Left 里点名
+        expect(report.delta!.base64Left).toEqual([]);
+        expect(report.after!.totals.base64Count).toBe(0);
+        // 两边各算各的，对得上才说明看的是同一批数据
+        expect(report.optimize.result!.converted).toBe(report.before!.totals.base64Count);
+    });
+
     it('优化前扫到的 base64，优化后原地变成令牌，字节账对得上', async () => {
         await seedStore('characters', [{ id: 'c1', name: '角色一', avatar: tinyImage('e2e-avatar') }]);
         await seedStore('gallery', [

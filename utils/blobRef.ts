@@ -25,7 +25,7 @@ import { useBlobUrl } from '@rei-standard/blob-store/react';
 import { dataUrlToBlob, blobToDataUrl, hashBlob } from '@rei-standard/blob-store';
 import { DB } from './db';
 import { blobStore } from './blobStore';
-import type { AppearancePreset } from '../types';
+import type { AppearancePreset, ChatTheme } from '../types';
 import { resolveBuiltinRoomAssetUrl } from './roomTemplateAssets';
 
 // 与 SDK 默认前缀一致（DEFAULT_PREFIX），保留字面量避免消费方多绕一层。
@@ -203,6 +203,36 @@ export async function migrateDataUrlToRef(dataUrl: string): Promise<string> {
 }
 
 /**
+ * 气泡主题里参与令牌迁移的图片字段名。user / ai 两侧字段完全一样，共用这一份清单——
+ * 分开写两份的结果一定是其中一侧漏掉某个字段，而漏掉的那侧不报错也不破图，只是没省下来。
+ */
+export const CHAT_THEME_IMAGE_KEYS = ['backgroundImage', 'decoration', 'avatarDecoration'] as const;
+
+/**
+ * 一套气泡主题里的六张图（user / ai 两侧各三张）转成令牌。
+ *
+ * 两个调用方共用它：themes 表的存量转换，和外观预设里内嵌的那份 chatThemes。
+ * 后者尤其要紧——应用一个老预设时若把预设里的 base64 原样写回 themes 表，
+ * 等于把刚优化掉的图又倒回去，用户会看到「优化完过几天又涨回来了」。
+ */
+export async function migrateChatThemeBlobRefs(theme: ChatTheme): Promise<ChatTheme> {
+    const migrated: ChatTheme = { ...theme };
+    for (const side of ['user', 'ai'] as const) {
+        const style = theme[side];
+        if (!style) continue;
+        const next = { ...style };
+        for (const key of CHAT_THEME_IMAGE_KEYS) {
+            const value = next[key];
+            if (typeof value === 'string' && value.startsWith('data:')) {
+                next[key] = await migrateDataUrlToRef(value);
+            }
+        }
+        migrated[side] = next;
+    }
+    return migrated;
+}
+
+/**
  * 外观预设导入专用迁移：只转换已经接入 BlobRef 渲染链路的字段，其他 data URL 保持原状。
  *
  * 同一张原图在壁纸、锁屏或多个图标里出现时只会存一份 Blob——这由 migrateDataUrlToRef
@@ -221,6 +251,21 @@ export async function migrateAppearancePresetBlobRefs(
     theme.wallpaper = (await migrate(theme.wallpaper)) || theme.wallpaper;
     if ('lockWallpaper' in theme) theme.lockWallpaper = await migrate(theme.lockWallpaper);
 
+    // 桌面小组件图。槽位键遍历全部，不写死 tl/tr/wide/dsq——老美化包的预设里还压着
+    // polaroid_* 这类历史键，一并转掉，免得它们以 base64 形态一直躺在预设 JSON 里。
+    if (theme.launcherWidgets) {
+        const widgets: Record<string, string> = {};
+        for (const [slot, value] of Object.entries(theme.launcherWidgets)) {
+            widgets[slot] = (await migrate(value)) || value;
+        }
+        theme.launcherWidgets = widgets;
+    }
+
+    // launcherWidgetImage 是死字段：types.ts 标了 DEPRECATED，OSContext 加载 / 应用预设时
+    // 一律剥掉，永远不会渲染。老美化包的预设里还压着一张几百 KB 的 base64，转成令牌只是
+    // 把死重量换个地方存，直接扔掉。
+    if ('launcherWidgetImage' in theme) (theme as any).launcherWidgetImage = undefined;
+
     let customIcons = preset.customIcons;
     if (customIcons) {
         customIcons = {};
@@ -229,7 +274,16 @@ export async function migrateAppearancePresetBlobRefs(
         }
     }
 
-    return { ...preset, theme, customIcons };
+    // 预设里内嵌的气泡主题：保存预设时是从 themes 表原样抄过来的，themes 表转了、这里没转，
+    // 下次应用预设就把 base64 又灌回 themes 表。两边必须一起转。
+    let chatThemes = preset.chatThemes;
+    if (chatThemes) {
+        const next: ChatTheme[] = [];
+        for (const ct of chatThemes) next.push(await migrateChatThemeBlobRefs(ct));
+        chatThemes = next;
+    }
+
+    return { ...preset, theme, customIcons, chatThemes };
 }
 
 /**

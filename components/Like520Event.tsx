@@ -16,7 +16,7 @@ import { CharacterProfile, SpecialMomentRecord } from '../types';
 import { safeResponseJson } from '../utils/safeApi';
 import { assetMirrors, attachAudioMirrorFallback } from '../utils/assetUrl';
 import TokenImg from './os/TokenImg';
-import { isImageValue } from '../utils/blobRef';
+import { dataUrlToBlob, isImageValue, putImageBlob } from '../utils/blobRef';
 import {
     runLike520CallA,
     runLike520CallB,
@@ -3240,10 +3240,19 @@ export const Like520Session: React.FC<SessionProps> = ({ charId, onClose }) => {
         if (sessionMode !== 'fresh') return;                   // 回放/看信模式不重存
         if (!char || !callA || !callB || !charChibi || !userChibi || !chosenTucao) return;
         savedRef.current = true;
+        // 带相框的定妆照有 500KB 上下，落进 Blob 库、记录里只留 blobref 令牌。
+        // 落库失败也别把整条记录（信、锚点、两只手办的 state）连坐掉，记一笔继续存。
+        // 注意下面 customData 里的两张手办图仍然是 dataURL：合成大头贴的 canvas 只认能同步开始加载的值。
+        let framedRef = '';
+        try {
+            framedRef = await putImageBlob(dataUrlToBlob(charChibi.frameDataUrl));
+        } catch (e) {
+            console.warn('[520] 定妆照落库失败，本次记录不带图', e);
+        }
         const previousRecords = char.specialMomentRecords || {};
         const record: SpecialMomentRecord = {
             content: callB.letter,
-            image: charChibi.frameDataUrl,
+            image: framedRef,
             timestamp: Date.now(),
             source: 'generated',
             customData: {

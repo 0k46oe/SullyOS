@@ -29,8 +29,8 @@ async function clearStore(name: string): Promise<void> {
 }
 
 beforeEach(async () => {
-    for (const s of ['assets', 'characters', 'messages', 'songs', 'cc_custom_parts', 'gallery', 'themes', 'emojis',
-                     'user_profile', 'social_posts', 'groups', 'story_theater_masks', 'blob_assets', 'memory_vectors']) {
+    // 清库范围跟着覆盖面走：收了新表这里自动跟上，不用手工维护第二份清单
+    for (const s of [...new Set([...OPTIMIZE_TARGET_STORES, 'story_theater_masks', 'blob_assets', 'memory_vectors'])]) {
         await clearStore(s);
     }
     localStorage.clear();
@@ -122,6 +122,327 @@ describe('优化资源存储（一次性批量迁移）', () => {
         expect(isBlobRef(stored.customIcons.chat)).toBe(true);
         expect(stored.name).toBe('我的预设');
         expect(stored.theme.darkMode).toBe(true);
+    });
+
+    it('卡片消息：content 和 metadata.scoreCard 两份副本一起转（读端优先读后者）', async () => {
+        await seedStore('messages', [{
+            id: 101, charId: 'c1', role: 'assistant', type: 'score_card', timestamp: 1,
+            content: JSON.stringify({ type: 'anniv520_card', charAvatar: TINY_PNG, photoDataUrl: TINY_JPEG, title: '心动瞬间' }),
+            metadata: { scoreCard: { type: 'anniv520_card', charAvatar: TINY_PNG, photoDataUrl: TINY_JPEG, title: '心动瞬间' } },
+        }]);
+
+        await optimizeResourceStorage();
+
+        const [m]: any = (await DB.getStoreRowsPage('messages', null, 10)).rows;
+        const card = JSON.parse(m.content);
+        expect(isBlobRef(card.charAvatar)).toBe(true);
+        expect(isBlobRef(card.photoDataUrl)).toBe(true);
+        expect(isBlobRef(m.metadata.scoreCard.charAvatar)).toBe(true);
+        expect(isBlobRef(m.metadata.scoreCard.photoDataUrl)).toBe(true);
+        expect(card.title).toBe('心动瞬间');
+    });
+
+    it('雷区守卫：卡片 JSON 里的 520 手办图不能被顺手转走', async () => {
+        await seedStore('messages', [{
+            id: 102, charId: 'c1', role: 'assistant', type: 'score_card', timestamp: 1,
+            content: JSON.stringify({ charAvatar: TINY_PNG, charChibi: { dataUrl: TINY_JPEG } }),
+            metadata: { scoreCard: { charAvatar: TINY_PNG, charChibi: { dataUrl: TINY_JPEG } } },
+        }]);
+
+        await optimizeResourceStorage();
+
+        const [m]: any = (await DB.getStoreRowsPage('messages', null, 10)).rows;
+        expect(isBlobRef(JSON.parse(m.content).charAvatar)).toBe(true);
+        expect(JSON.parse(m.content).charChibi.dataUrl).toBe(TINY_JPEG);
+        expect(m.metadata.scoreCard.charChibi.dataUrl).toBe(TINY_JPEG);
+    });
+
+    it('通话结束卡的头像、分享帖快照的作者与评论头像都转，帖子配图不碰', async () => {
+        await seedStore('messages', [{
+            id: 103, charId: 'c1', role: 'assistant', type: 'text', content: '通话结束', timestamp: 1,
+            metadata: {
+                characterAvatar: TINY_PNG,
+                post: {
+                    authorName: '甲', authorAvatar: TINY_JPEG, images: [TINY_PNG],
+                    comments: [{ authorName: '乙', authorAvatar: TINY_PNG }],
+                },
+            },
+        }]);
+
+        await optimizeResourceStorage();
+
+        const [m]: any = (await DB.getStoreRowsPage('messages', null, 10)).rows;
+        expect(isBlobRef(m.metadata.characterAvatar)).toBe(true);
+        expect(isBlobRef(m.metadata.post.authorAvatar)).toBe(true);
+        expect(isBlobRef(m.metadata.post.comments[0].authorAvatar)).toBe(true);
+        expect(m.metadata.post.images[0]).toBe(TINY_PNG);   // 读端把它当可能是 emoji 的文本渲染
+    });
+
+    it('引用快照：图片副本换成占位符，不留令牌（留了会让孤儿清理整轮不敢删）', async () => {
+        await seedStore('messages', [
+            { id: 104, charId: 'c1', role: 'assistant', type: 'text', content: '好可爱', timestamp: 1,
+              replyTo: { name: '小明', content: TINY_PNG } },
+            { id: 105, charId: 'c1', role: 'assistant', type: 'text', content: '嗯嗯', timestamp: 2,
+              replyTo: { name: '小明', content: '今天去看海啦' } },
+        ]);
+
+        await optimizeResourceStorage();
+
+        const rows: any[] = (await DB.getStoreRowsPage('messages', null, 10)).rows;
+        const withImage = rows.find(r => r.id === 104);
+        const withText = rows.find(r => r.id === 105);
+        expect(withImage.replyTo.content).toBe('[图片]');
+        expect(withImage.replyTo.content).not.toContain('blobref');
+        expect(withText.replyTo.content).toBe('今天去看海啦');   // 普通文字原样
+    });
+
+    it('我方的彼方 Q 版形象也转（角色那侧和我方这侧是两段代码，只改一边会漏）', async () => {
+        await seedStore('user_profile', [{ id: 'me', name: '小明', vrState: { chibi: { img: TINY_PNG } } }]);
+
+        await optimizeResourceStorage();
+
+        const [me]: any = (await DB.getStoreRowsPage('user_profile', null, 10)).rows;
+        expect(isBlobRef(me.vrState.chibi.img)).toBe(true);
+    });
+
+    it('聊天背景与见面背景都转（文件头列了就得真的在代码里）', async () => {
+        await DB.saveCharacter({
+            id: 'c-bg', name: '背景角色',
+            chatBackground: TINY_PNG, dateBackground: TINY_JPEG,
+        } as any);
+
+        await optimizeResourceStorage();
+
+        const c: any = (await DB.getAllCharacters()).find(x => x.id === 'c-bg')!;
+        expect(isBlobRef(c.chatBackground)).toBe(true);
+        expect(isBlobRef(c.dateBackground)).toBe(true);
+    });
+
+    it('见面立绘：角色默认那套和每个换装套装都转，换装那侧不漏', async () => {
+        await DB.saveCharacter({
+            id: 'c-sprite', name: '立绘角色',
+            sprites: { normal: TINY_PNG, happy: TINY_JPEG, chibi: TINY_PNG },
+            dateSkinSets: [{ id: 'skin1', name: '泳装', sprites: { normal: TINY_JPEG, shy: TINY_PNG } }],
+        } as any);
+
+        await optimizeResourceStorage();
+
+        const c: any = (await DB.getAllCharacters()).find(x => x.id === 'c-sprite')!;
+        for (const key of ['normal', 'happy', 'chibi']) expect(isBlobRef(c.sprites[key])).toBe(true);
+        for (const key of ['normal', 'shy']) expect(isBlobRef(c.dateSkinSets[0].sprites[key])).toBe(true);
+    });
+
+    it('见面存档：currentSprite 整个删掉，情绪键先反查出来补上', async () => {
+        // 这个字段是历史残留（新存档只记 currentSpriteKey），存的是整张立绘的 base64 副本。
+        // 反查必须发生在立绘转令牌之前，否则值就对不上了。
+        await DB.saveCharacter({
+            id: 'c-saved', name: '有存档的角色',
+            sprites: { normal: TINY_PNG, happy: TINY_JPEG },
+            savedDateState: { currentSprite: TINY_JPEG, timestamp: 1 },
+        } as any);
+
+        await optimizeResourceStorage();
+
+        const c: any = (await DB.getAllCharacters()).find(x => x.id === 'c-saved')!;
+        expect(c.savedDateState.currentSprite).toBeUndefined();   // 空间归零
+        expect(c.savedDateState.currentSpriteKey).toBe('happy');  // 表情没丢
+        expect(isBlobRef(c.sprites.happy)).toBe(true);
+    });
+
+    it('见面存档：已经记了情绪键的存档，不覆盖它', async () => {
+        await DB.saveCharacter({
+            id: 'c-saved2', name: '新存档',
+            sprites: { normal: TINY_PNG, happy: TINY_JPEG },
+            savedDateState: { currentSprite: TINY_JPEG, currentSpriteKey: 'normal', timestamp: 1 },
+        } as any);
+
+        await optimizeResourceStorage();
+
+        const c: any = (await DB.getAllCharacters()).find(x => x.id === 'c-saved2')!;
+        expect(c.savedDateState.currentSpriteKey).toBe('normal');
+        expect(c.savedDateState.currentSprite).toBeUndefined();
+    });
+
+    it('彼方 Q 版形象、查手机通讯录头像、活动卡片头像都转', async () => {
+        await DB.saveCharacter({
+            id: 'c-misc', name: '杂项角色',
+            vrState: { chibi: { img: TINY_PNG } },
+            phoneState: { contacts: [{ id: 'ct1', name: '甲', avatar: TINY_JPEG }, { id: 'ct2', name: '乙', avatar: TINY_PNG }] },
+            specialMomentRecords: { qixi_2026_x: { customData: { chatCard: { charAvatar: TINY_JPEG } } } },
+        } as any);
+
+        await optimizeResourceStorage();
+
+        const c: any = (await DB.getAllCharacters()).find(x => x.id === 'c-misc')!;
+        expect(isBlobRef(c.vrState.chibi.img)).toBe(true);
+        expect(isBlobRef(c.phoneState.contacts[0].avatar)).toBe(true);
+        expect(isBlobRef(c.phoneState.contacts[1].avatar)).toBe(true);
+        expect(isBlobRef(c.specialMomentRecords.qixi_2026_x.customData.chatCard.charAvatar)).toBe(true);
+    });
+
+    it('活动留存的大图也转（白色情人节明信片 / 520 定妆照）', async () => {
+        await DB.saveCharacter({
+            id: 'c-moment', name: '活动角色',
+            specialMomentRecords: {
+                whiteday_2026: { image: TINY_PNG, timestamp: 1 },
+                like520_2026: { image: TINY_JPEG, timestamp: 2 },
+            },
+        } as any);
+
+        await optimizeResourceStorage();
+
+        const m: any = ((await DB.getAllCharacters()).find(x => x.id === 'c-moment') as any).specialMomentRecords;
+        expect(isBlobRef(m.whiteday_2026.image)).toBe(true);
+        expect(isBlobRef(m.like520_2026.image)).toBe(true);
+    });
+
+    it('雷区守卫：活动记录里的 520 手办图刻意保持 dataURL，绝不能被顺手转走', async () => {
+        // 520 活动那边全是裸 <img> + canvas 合成，令牌过不去。谁要是把
+        // specialMomentRecords 改成整体深度遍历，这条会挂。
+        await DB.saveCharacter({
+            id: 'c-520', name: '520 角色',
+            specialMomentRecords: {
+                like520_2026: {
+                    customData: {
+                        chatCard: { charAvatar: TINY_PNG },
+                        charChibi: { dataUrl: TINY_JPEG },
+                        userChibi: { dataUrl: TINY_JPEG },
+                    },
+                },
+            },
+        } as any);
+
+        await optimizeResourceStorage();
+
+        const cd: any = ((await DB.getAllCharacters()).find(x => x.id === 'c-520') as any).specialMomentRecords.like520_2026.customData;
+        expect(isBlobRef(cd.chatCard.charAvatar)).toBe(true);     // 这个该转
+        expect(cd.charChibi.dataUrl).toBe(TINY_JPEG);             // 这两个一个字节都不许动
+        expect(cd.userChibi.dataUrl).toBe(TINY_JPEG);
+    });
+
+    it('社交帖子：作者头像与评论头像都转，帖子自己的配图不碰', async () => {
+        await DB.putStoreRows('social_posts', [{
+            id: 'p1', authorName: '小明', authorAvatar: TINY_PNG,
+            title: 't', content: 'c', images: [TINY_JPEG],
+            comments: [{ id: 'cm1', authorName: '乙', authorAvatar: TINY_JPEG, content: 'hi' }],
+            likes: 0, timestamp: 1, tags: [], isCollected: false, isLiked: false,
+        }]);
+
+        await optimizeResourceStorage();
+
+        const [post]: any = (await DB.getStoreRowsPage('social_posts', null, 100)).rows;
+        expect(isBlobRef(post.authorAvatar)).toBe(true);
+        expect(isBlobRef(post.comments[0].authorAvatar)).toBe(true);
+        expect(post.images[0]).toBe(TINY_JPEG);   // 读端还没改造，不在收录范围
+    });
+
+    it('群头像转令牌，但代码现画的 SVG 占位符跳过（换一条 Blob 行不值几百字节）', async () => {
+        const SVG = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg"><circle r="9"/></svg>';
+        await DB.putStoreRows('groups', [
+            { id: 'g1', name: '真头像群', avatar: TINY_PNG },
+            { id: 'g2', name: '默认头像群', avatar: SVG },
+        ]);
+
+        await optimizeResourceStorage();
+
+        const rows: any[] = (await DB.getStoreRowsPage('groups', null, 100)).rows;
+        expect(isBlobRef(rows.find(g => g.id === 'g1').avatar)).toBe(true);
+        expect(rows.find(g => g.id === 'g2').avatar).toBe(SVG);
+    });
+
+    it('雷区守卫：生活模拟只转角色头像副本，剧情插图不碰', async () => {
+        // attachments[].imageUrl 是裸 <img> 渲染的（apps/lifesim/StoryAttachments.tsx）。
+        // 谁把 life_sim 改成整行深度遍历，这条会挂。
+        await DB.putStoreRows('life_sim', [{
+            id: 'sim1',
+            actionLog: [{
+                turnNumber: 1, actor: '甲', actorAvatar: TINY_PNG,
+                attachments: [{ id: 'a1', imageUrl: TINY_JPEG }],
+            }],
+        }]);
+
+        await optimizeResourceStorage();
+
+        const [sim]: any = (await DB.getStoreRowsPage('life_sim', null, 100)).rows;
+        expect(isBlobRef(sim.actionLog[0].actorAvatar)).toBe(true);
+        expect(sim.actionLog[0].attachments[0].imageUrl).toBe(TINY_JPEG);
+    });
+
+    it('社交主页：背景图（裸字符串）和资料 JSON 里的头像都转', async () => {
+        await DB.saveAsset('spark_user_bg', TINY_PNG);
+        await DB.saveAsset('spark_social_profile', JSON.stringify({ name: '小明', avatar: TINY_JPEG, bio: '你好' }));
+
+        const r = await optimizeResourceStorage();
+        expect(r.converted).toBe(2);
+
+        expect(isBlobRef((await DB.getAsset('spark_user_bg'))!)).toBe(true);
+        const profile = JSON.parse((await DB.getAsset('spark_social_profile'))!);
+        expect(isBlobRef(profile.avatar)).toBe(true);
+        expect(profile.name).toBe('小明');   // 非图片字段原样
+        expect(profile.bio).toBe('你好');
+    });
+
+    it('桌面小组件图：assets 里的 widget_* 行和预设里内嵌的那份都转', async () => {
+        await DB.saveAsset('widget_dsq', TINY_PNG);
+        await DB.saveAsset('appearance_preset_ap4', JSON.stringify({
+            id: 'ap4', name: '带小组件的预设', createdAt: 1,
+            theme: {
+                wallpaper: 'linear-gradient(#fff,#000)',
+                // polaroid_* 是老美化包留下的历史槽位，桌面只认 tl/tr/wide/dsq，
+                // 但它一样占着预设 JSON 的体积，一起转
+                launcherWidgets: { dsq: TINY_JPEG, wide: TINY_PNG, polaroid_tl: TINY_JPEG },
+            },
+        }));
+
+        await optimizeResourceStorage();
+
+        expect(isBlobRef((await DB.getAsset('widget_dsq'))!)).toBe(true);
+        const stored = JSON.parse((await DB.getAsset('appearance_preset_ap4'))!);
+        for (const slot of ['dsq', 'wide', 'polaroid_tl']) {
+            expect(isBlobRef(stored.theme.launcherWidgets[slot])).toBe(true);
+        }
+    });
+
+    it('外观预设内嵌的气泡主题：user / ai 两侧六张图都转，一侧都不漏', async () => {
+        // 存预设时 chatThemes 是从 themes 表原样抄过来的。themes 表转了、预设里这份没转，
+        // 下次应用预设就把 base64 又灌回 themes 表——两边必须一起转。
+        const preset = {
+            id: 'ap2', name: '带气泡的预设', createdAt: 1,
+            theme: { wallpaper: TINY_PNG },
+            chatThemes: [{
+                id: 'ct1', name: '主题一', type: 'custom',
+                user: { backgroundImage: TINY_PNG, decoration: TINY_JPEG, avatarDecoration: TINY_PNG },
+                ai: { backgroundImage: TINY_JPEG, decoration: TINY_PNG, avatarDecoration: TINY_JPEG },
+            }],
+        };
+        await DB.saveAsset('appearance_preset_ap2', JSON.stringify(preset));
+
+        await optimizeResourceStorage();
+
+        const stored = JSON.parse((await DB.getAsset('appearance_preset_ap2'))!);
+        for (const side of ['user', 'ai']) {
+            for (const key of ['backgroundImage', 'decoration', 'avatarDecoration']) {
+                expect(isBlobRef(stored.chatThemes[0][side][key])).toBe(true);
+            }
+        }
+        expect(stored.chatThemes[0].name).toBe('主题一');   // 非图片字段原样
+    });
+
+    it('外观预设里的 launcherWidgetImage 直接扔掉，不占位也不转成令牌', async () => {
+        // 这个字段 types.ts 标了 DEPRECATED、加载时必被剥离、永远不渲染。
+        // 老美化包的预设里压着几百 KB 的 base64，转成令牌只是把死重量换个地方存。
+        const preset = {
+            id: 'ap3', name: '老美化包', createdAt: 1,
+            theme: { wallpaper: 'linear-gradient(#fff,#000)', launcherWidgetImage: TINY_PNG },
+        };
+        await DB.saveAsset('appearance_preset_ap3', JSON.stringify(preset));
+
+        const r = await optimizeResourceStorage();
+
+        const stored = JSON.parse((await DB.getAsset('appearance_preset_ap3'))!);
+        expect(stored.theme.launcherWidgetImage).toBeUndefined();
+        expect(stored.theme.wallpaper).toBe('linear-gradient(#fff,#000)');   // 渐变不动
+        expect(r.converted).toBe(0);   // 扔掉不算「转换」，不该虚报收益
     });
 
     it('相册 gallery 行转成令牌，Blob 字节与原图逐字节一致', async () => {
@@ -723,8 +1044,8 @@ describe('分页读表：跨页不漏行，进度条对得上', () => {
         expect(r.uniqueBlobs).toBe(1); // 全是同一张图，去重后只建一份 Blob
     });
 
-    it('进度回调：total 就是九面的真实行数，done 一路递增且正好停在 total', async () => {
-        // 九个面各摆几行、行数互不相同——少数了哪一面都对不上
+    it('进度回调：total 就是十二面的真实行数，done 一路递增且正好停在 total', async () => {
+        // 十二个面各摆几行、行数互不相同——少数了哪一面都对不上
         await DB.saveAsset('wallpaper', TINY_PNG);
         await DB.saveAsset('lock_wallpaper', TINY_JPEG);
         await seedStore('characters', [
@@ -763,10 +1084,40 @@ describe('分页读表：跨页不漏行，进度条对得上', () => {
             { name: '网络表情', url: 'https://img.host/sticker.png' },
         ]);
         await seedStore('user_profile', [{ id: 'me', name: '小明', avatar: TINY_JPEG }]);
-        const expectedRows = 2 + 3 + 1 + 2 + 4 + 5 + 6 + 2 + 1;
+        await seedStore('social_posts', [
+            { id: 'sp1', authorName: '甲', authorAvatar: TINY_PNG, comments: [], images: [], timestamp: 1 },
+            { id: 'sp2', authorName: '乙', authorAvatar: TINY_JPEG, comments: [], images: [], timestamp: 2 },
+            { id: 'sp3', authorName: '丙', authorAvatar: '', comments: [], images: [], timestamp: 3 },
+            { id: 'sp4', authorName: '丁', authorAvatar: '', comments: [], images: [], timestamp: 4 },
+            { id: 'sp5', authorName: '戊', authorAvatar: '', comments: [], images: [], timestamp: 5 },
+            { id: 'sp6', authorName: '己', authorAvatar: '', comments: [], images: [], timestamp: 6 },
+            { id: 'sp7', authorName: '庚', authorAvatar: '', comments: [], images: [], timestamp: 7 },
+        ]);
+        await seedStore('groups', [
+            { id: 'gp1', name: '群一', avatar: TINY_PNG },
+            { id: 'gp2', name: '群二', avatar: '' },
+            { id: 'gp3', name: '群三', avatar: '' },
+            { id: 'gp4', name: '群四', avatar: '' },
+            { id: 'gp5', name: '群五', avatar: '' },
+            { id: 'gp6', name: '群六', avatar: '' },
+            { id: 'gp7', name: '群七', avatar: '' },
+            { id: 'gp8', name: '群八', avatar: '' },
+        ]);
+        await seedStore('life_sim', [
+            { id: 'ls1', actionLog: [{ turnNumber: 1, actor: '甲', actorAvatar: TINY_JPEG }] },
+            { id: 'ls2', actionLog: [] },
+            { id: 'ls3', actionLog: [] },
+            { id: 'ls4', actionLog: [] },
+            { id: 'ls5', actionLog: [] },
+            { id: 'ls6', actionLog: [] },
+            { id: 'ls7', actionLog: [] },
+            { id: 'ls8', actionLog: [] },
+            { id: 'ls9', actionLog: [] },
+        ]);
+        const expectedRows = 2 + 3 + 1 + 2 + 4 + 5 + 6 + 2 + 1 + 7 + 8 + 9;
 
-        // 只收九面自己报的那几档：扫库 / 合并 / 向量三段各有各的进度口径，混进来会算错
-        const faceLabels = new Set(['系统外观', '角色头像与小屋', '歌曲封面', '捏人器部件', '相册', '气泡主题', '聊天图片', '表情包', '我的头像']);
+        // 只收十二面自己报的那几档：扫库 / 合并 / 向量三段各有各的进度口径，混进来会算错
+        const faceLabels = new Set(['系统外观', '角色头像与小屋', '歌曲封面', '捏人器部件', '相册', '气泡主题', '聊天图片', '表情包', '我的头像', '社交帖子', '群头像', '生活模拟']);
         const events: Array<{ done: number; total: number }> = [];
         await optimizeResourceStorage(p => {
             if (faceLabels.has(p.label)) events.push({ done: p.done, total: p.total });
