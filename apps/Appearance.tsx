@@ -34,6 +34,22 @@ const CompanionPortraitPreview: React.FC<{ value?: string; alt: string }> = ({ v
     return url ? <img src={url} className="h-full w-full object-contain" alt={alt} /> : <ImageSquare size={28} className="text-slate-300" />;
 };
 
+/**
+ * 这个令牌还挂在衣柜里吗？
+ *
+ * 桌面静态形象的令牌是「顶层 imageRef 指着现在穿的那套，衣柜里同时留着一条同令牌的条目」
+ * （utils/companionWardrobe.ts 拿令牌当条目 id 认亲，id 与 imageRef 两个值位同值）。
+ * 所以换图 / 移除时不能无条件删旧 Blob——衣柜里还留着的话，那套旧衣服就再也切不回去了。
+ */
+const isCompanionOutfitKeptInWardrobe = (
+    companionAvatar: { imageWardrobe?: unknown } | undefined,
+    ref: string,
+): boolean => {
+    const wardrobe = companionAvatar?.imageWardrobe;
+    if (!Array.isArray(wardrobe)) return false;
+    return wardrobe.some((outfit: any) => outfit?.imageRef === ref || outfit?.id === ref);
+};
+
 // Touch-friendly long-press wrapper. `onContextMenu` alone misses iOS Safari /
 // Capacitor WebView, so we also wire pointer/touch timers to fire after ~550ms.
 // When a long-press fires, the subsequent click is suppressed.
@@ -637,7 +653,10 @@ const Appearance: React.FC = () => {
                   importedAt: Date.now(),
               },
           });
-          if (previousRef && previousRef !== imageRef) await deleteBlobRef(previousRef);
+          if (previousRef && previousRef !== imageRef
+              && !isCompanionOutfitKeptInWardrobe(appearanceCharacter.companionAvatar, previousRef)) {
+              await deleteBlobRef(previousRef);
+          }
           trackEvent('导入桌面静态形象', { 格式: file.type === 'image/gif' ? 'GIF' : 'PNG' });
           addToast(file.type === 'image/gif' ? 'GIF 已原样导入，动画会保留' : 'PNG 静态形象已导入', 'success');
       } catch (error: any) {
@@ -672,7 +691,9 @@ const Appearance: React.FC = () => {
               importedAt: undefined,
           },
       });
-      await deleteBlobRef(previousRef);
+      if (!isCompanionOutfitKeptInWardrobe(appearanceCharacter.companionAvatar, previousRef)) {
+          await deleteBlobRef(previousRef);
+      }
       trackEvent('移除桌面静态形象');
       addToast('已移除导入图片', 'success');
   };

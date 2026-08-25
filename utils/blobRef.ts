@@ -25,6 +25,7 @@ import { useBlobUrl } from '@rei-standard/blob-store/react';
 import { dataUrlToBlob, blobToDataUrl, hashBlob } from '@rei-standard/blob-store';
 import { DB } from './db';
 import { blobStore } from './blobStore';
+import { REF_SOURCE_STORES } from './blobGc';
 import type { AppearancePreset, ChatTheme } from '../types';
 import { resolveBuiltinRoomAssetUrl } from './roomTemplateAssets';
 
@@ -93,33 +94,63 @@ export async function deleteBlobRef(ref: string | undefined | null): Promise<voi
     await blobStore.delete(ref);
 }
 
+// 引用面扫描的分页大小。与 blobGc / blobDedupe 同值：批间事务各自独立，内存峰值只有一批。
+const REF_SCAN_PAGE_SIZE = 200;
+
 /**
- * 仅在令牌已不再被持久化设置引用时删除 Blob。
+ * 这个令牌还被任何一个持久化面引用着吗？
  *
- * 壁纸、锁屏和外观预设可能共享同一令牌；直接在换图时 delete 会让预设或“切回默认”备份
- * 变成死图。这里检查 assets（含 appearance_preset_* JSON）和 localStorage（含皮肤壁纸备份）
- * 后再清理。读取引用表失败时宁可保留，也绝不冒险删图。
+ * 面的清单直接用 blobGc 的 REF_SOURCE_STORES（+ localStorage 全量），跟孤儿 GC 同源。
+ * 「优化资源存储」的内容去重会把同一张图在这十几个面上收敛成同一个令牌，所以一张图
+ * 完全可能既当着壁纸又躺在聊天记录里——只查壁纸那两处就会把它判成「没人要了」删掉，
+ * 聊天和相册里那张跟着一起裂。
+ *
+ * 判断是整行 JSON 里找子串，不按字段挑：字段加了删了都自动覆盖。子串比精确匹配宽
+ * （令牌 A 是令牌 B 的前缀时会算成「还有人引用」），偏的是「宁可留孤儿也不删活图」，
+ * 多留下的孤儿归手动 GC 收。
+ *
+ * 会走到这里的都是换壁纸、删衣柜这类低频操作，扫一遍全库的代价可以接受。
+ */
+async function isRefStillReferenced(ref: string): Promise<boolean> {
+    for (const storeName of REF_SOURCE_STORES) {
+        let afterKey: IDBValidKey | null = null;
+        for (;;) {
+            const { rows, lastKey } = await DB.getStoreRowsPage(storeName, afterKey, REF_SCAN_PAGE_SIZE);
+            for (const row of rows) {
+                const text = JSON.stringify(row);
+                if (typeof text === 'string' && text.includes(ref)) return true;
+            }
+            if (lastKey === null || rows.length < REF_SCAN_PAGE_SIZE) break;
+            afterKey = lastKey;
+        }
+    }
+
+    if (typeof localStorage !== 'undefined') {
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (!key) continue;
+            if (localStorage.getItem(key)?.includes(ref)) return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * 仅在令牌已不再被任何持久化面引用时删除 Blob。
+ *
+ * 壁纸、锁屏、外观预设、聊天记录、相册……都可能共享同一令牌；直接在换图时 delete
+ * 会让别处变成死图。调用方须先把自己那一处的指针落盘，再调这里——扫描看到的是
+ * 库里的现状，指针还没写回去的话这张图会被当成「还有人用」而留下。
+ *
+ * 扫描中途出错（哪怕只有一张表读不出来）一律当作「还有人引用」保留：删除不可逆，
+ * 留下的孤儿则有手动 GC 兜着。
  */
 export async function deleteBlobRefIfUnreferenced(ref: string | undefined | null): Promise<boolean> {
     if (!ref || !isBlobRef(ref)) return false;
 
     try {
-        const assets = await DB.getAllAssets();
-        if (assets.some(asset => typeof asset.data === 'string' && asset.data.includes(ref))) {
-            return false;
-        }
-    } catch {
-        return false;
-    }
-
-    try {
-        if (typeof localStorage !== 'undefined') {
-            for (let i = 0; i < localStorage.length; i++) {
-                const key = localStorage.key(i);
-                if (!key) continue;
-                if (localStorage.getItem(key)?.includes(ref)) return false;
-            }
-        }
+        if (await isRefStillReferenced(ref)) return false;
     } catch {
         return false;
     }
