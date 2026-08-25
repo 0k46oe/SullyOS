@@ -1410,3 +1410,102 @@ describe('主动消息上云：先还原令牌再算体积预算', () => {
         expect(src).not.toMatch(/toFirePackChatMessages\(chatMessages\)/);
     });
 });
+
+// ═══ 全库对账（从测试期的诊断卡片迁来，卡片撤了守卫留下） ═══
+//
+// 上面的用例都是「一个面一个面」地钉；这条反过来从全库视角问一句：收录清单里的
+// 每种字段各摆一份，跑完优化后还扫得出 data:image 吗？哪个字段没被收录，它就会
+// 按表点名。将来新收字段时往 seed 里补一份，就能立刻知道优化器跟没跟上。
+describe('全库对账：收录字段各摆一份，优化后一条 base64 都不剩', () => {
+    /** 每张图内容都不同：内容相同的会被去重合并成一份，令牌计数就对不上了。 */
+    const tinyImage = (seed: string): string =>
+        `data:image/png;base64,${Buffer.from(`sullyos-guard-${seed}`).toString('base64')}`;
+
+    /** 全库逐表 stringify，按表数 data:image 出现次数。跟优化器各算各的，
+     *  两边对得上才说明看的是同一批数据。 */
+    async function scanBase64ByStore(): Promise<Record<string, number>> {
+        const db = await openDB();
+        const hits: Record<string, number> = {};
+        for (const store of Array.from(db.objectStoreNames)) {
+            let count = 0;
+            let afterKey: IDBValidKey | null = null;
+            for (;;) {
+                const { rows, lastKey } = await DB.getStoreRowsPage(store, afterKey, 200);
+                for (const row of rows) count += (JSON.stringify(row)?.match(/data:image\//g) ?? []).length;
+                if (lastKey === null || rows.length < 200) break;
+                afterKey = lastKey;
+            }
+            if (count > 0) hits[store] = count;
+        }
+        return hits;
+    }
+
+    it('十二个面的收录字段全摆上，优化后全库扫不出一条 data:image', async () => {
+        await seedStore('characters', [{
+            id: 'c1', name: '角色一',
+            chatBackground: tinyImage('chat-bg'),
+            dateBackground: tinyImage('date-bg'),
+            sprites: { normal: tinyImage('sprite-normal') },
+            dateSkinSets: [{ id: 'sk1', name: '泳装', sprites: { happy: tinyImage('skin-happy') } }],
+            vrState: { chibi: { img: tinyImage('char-chibi') } },
+            phoneState: { contacts: [{ id: 'ct1', name: '甲', avatar: tinyImage('contact') }] },
+            companionAvatar: {
+                version: 1, source: 'upload', imageRef: tinyImage('companion'),
+                imageWardrobe: [{ id: 'w1', imageRef: tinyImage('companion-alt') }],
+            },
+            videoCallBackground: tinyImage('call-bg'),
+            companionBackground: tinyImage('companion-bg'),
+            specialMomentRecords: {
+                whiteday_2026: {
+                    image: tinyImage('moment-img'),
+                    customData: { chatCard: { charAvatar: tinyImage('card-avatar') } },
+                },
+            },
+        }]);
+        await seedStore('user_profile', [{ id: 'me', name: '小明', vrState: { chibi: { img: tinyImage('my-chibi') } } }]);
+        await seedStore('social_posts', [{
+            id: 'p1', authorName: '甲', authorAvatar: tinyImage('post-author'), images: [], timestamp: 1,
+            comments: [{ id: 'cm1', authorName: '乙', authorAvatar: tinyImage('comment-author') }],
+        }]);
+        await seedStore('groups', [{ id: 'g1', name: '群一', avatar: tinyImage('group') }]);
+        await seedStore('life_sim', [{ id: 'ls1', actionLog: [{ turnNumber: 1, actor: '甲', actorAvatar: tinyImage('actor') }] }]);
+        await seedStore('messages', [{
+            id: 1, charId: 'c1', role: 'assistant', type: 'score_card', timestamp: 1,
+            content: JSON.stringify({ charAvatar: tinyImage('card-content'), photoDataUrl: tinyImage('photo') }),
+            metadata: {
+                characterAvatar: tinyImage('call-avatar'),
+                scoreCard: { charAvatar: tinyImage('card-meta'), photoDataUrl: tinyImage('photo-meta') },
+                post: {
+                    authorName: '甲', authorAvatar: tinyImage('shared-author'), images: [],
+                    comments: [{ authorName: '乙', authorAvatar: tinyImage('shared-comment') }],
+                },
+            },
+        }]);
+        await seedStore('assets', [
+            { id: 'widget_dsq', data: tinyImage('widget') },
+            { id: 'spark_user_bg', data: tinyImage('spark-bg') },
+            { id: 'spark_social_profile', data: JSON.stringify({ name: '小明', avatar: tinyImage('spark-avatar') }) },
+            { id: 'appearance_preset_ap1', data: JSON.stringify({
+                id: 'ap1', name: '预设', createdAt: 1,
+                theme: { wallpaper: 'linear-gradient(#fff,#000)', launcherWidgets: { dsq: tinyImage('preset-widget') } },
+                chatThemes: [{
+                    id: 'ct1', name: '气泡', type: 'custom',
+                    user: { decoration: tinyImage('preset-bubble-user') },
+                    ai: { avatarDecoration: tinyImage('preset-bubble-ai') },
+                }],
+            }) },
+        ]);
+
+        const before = await scanBase64ByStore();
+        const beforeTotal = Object.values(before).reduce((a, b) => a + b, 0);
+        expect(beforeTotal).toBeGreaterThan(0); // seed 本身得先被看见，全零 = 摆错了地方
+
+        const r = await optimizeResourceStorage();
+
+        // 哪个字段没被收录，它就留在这里按表点名
+        expect(await scanBase64ByStore()).toEqual({});
+        expect(r.failed).toBe(0);
+        // 优化器报的转换数 == 扫描数出来的张数，两边对得上才说明没有静默漏转
+        expect(r.converted).toBe(beforeTotal);
+    });
+});
