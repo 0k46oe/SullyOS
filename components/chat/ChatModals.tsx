@@ -1,6 +1,7 @@
 
 import React, { useRef, useState } from 'react';
 import Modal from '../os/Modal';
+import TokenImg from '../os/TokenImg';
 import { CharacterProfile, Message, EmojiCategory, DailySchedule, ScheduleSlot, ApiPreset, APIConfig } from '../../types';
 import ScheduleCard from '../schedule/ScheduleCard';
 import EmotionSettingsPanel from './EmotionSettingsPanel';
@@ -430,7 +431,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                      <div>
                          <label className="text-xs font-bold text-slate-400 uppercase mb-2 block">聊天背景</label>
                          <div onClick={() => bgInputRef.current?.click()} className="h-24 bg-slate-100 rounded-xl border-2 border-dashed border-slate-200 flex items-center justify-center cursor-pointer hover:border-primary/50 overflow-hidden relative">
-                             {activeCharacter.chatBackground ? <img src={activeCharacter.chatBackground} className="w-full h-full object-cover opacity-60" /> : <span className="text-xs text-slate-400">点击上传图片 (原画质)</span>}
+                             {activeCharacter.chatBackground ? <TokenImg value={activeCharacter.chatBackground} className="w-full h-full object-cover opacity-60" /> : <span className="text-xs text-slate-400">点击上传图片 (原画质)</span>}
                              {activeCharacter.chatBackground && <span className="absolute z-10 text-xs bg-white/80 px-2 py-1 rounded">更换</span>}
                          </div>
                          <input type="file" ref={bgInputRef} className="hidden" accept="image/*" onChange={(e) => e.target.files?.[0] && onBgUpload(e.target.files[0])} />
@@ -1021,11 +1022,11 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                     {Array.isArray(selectedEmoji) ? (
                         <div className="flex flex-wrap justify-center gap-2 max-h-48 overflow-y-auto no-scrollbar w-full px-2">
                             {selectedEmoji.map((e: any, idx: number) => (
-                                <img key={idx} src={e.url} className="w-16 h-16 object-contain rounded-xl border border-slate-200" />
+                                <TokenImg key={idx} value={e.url} className="w-16 h-16 object-contain rounded-xl border border-slate-200" />
                             ))}
                         </div>
                     ) : (
-                        selectedEmoji && <img src={selectedEmoji.url} className="w-24 h-24 object-contain rounded-xl border" />
+                        selectedEmoji && <TokenImg value={selectedEmoji.url} className="w-24 h-24 object-contain rounded-xl border" />
                     )}
                     <p className="text-center text-sm text-slate-500">
                         {Array.isArray(selectedEmoji) ? `确定要删除这 ${selectedEmoji.length} 个表情包吗？` : "确定要删除这个表情包吗？"}
@@ -1038,7 +1039,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                 <div className="flex flex-col items-center gap-4 py-1">
                     {selectedEmoji && !Array.isArray(selectedEmoji) && (
                         <div className="flex flex-col items-center gap-2">
-                            <img src={selectedEmoji.url} className="w-20 h-20 object-contain rounded-xl border border-slate-200" />
+                            <TokenImg value={selectedEmoji.url} className="w-20 h-20 object-contain rounded-xl border border-slate-200" />
                             <span className="text-sm font-medium text-slate-600 max-w-[12rem] truncate">{selectedEmoji.name}</span>
                         </div>
                     )}
@@ -1130,7 +1131,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                                 <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-colors shrink-0 ${visibilitySelection.has(c.id) ? 'bg-primary border-primary' : 'bg-slate-100 border-slate-300'}`}>
                                     {visibilitySelection.has(c.id) && <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
                                 </div>
-                                <img src={c.avatar} className="w-9 h-9 rounded-xl object-cover" />
+                                <TokenImg value={c.avatar} className="w-9 h-9 rounded-xl object-cover" />
                                 <div className="flex-1 min-w-0">
                                     <div className="font-bold text-sm text-slate-700">{c.name}</div>
                                     <div className="text-[10px] text-slate-400 truncate">{c.description}</div>

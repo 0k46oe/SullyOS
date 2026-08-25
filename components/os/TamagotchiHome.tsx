@@ -1065,7 +1065,7 @@ const TamagotchiHome: React.FC = () => {
                         <button onClick={switchChar} className={`relative w-[46px] h-[46px] rounded-full p-[2px] shrink-0 ${characters.length > 1 ? 'active:scale-90 transition-transform' : ''}`}
                             style={{ border: `1.5px solid ${PAL.frame}`, boxShadow: '0 0 10px var(--tg-frame-a30)' }}>
                             <div className="w-full h-full rounded-full overflow-hidden" style={{ background: PAL.cardHi }}>
-                                <img src={char.avatar} className="w-full h-full object-cover" alt="" loading="lazy" draggable={false} />
+                                <TokenImg value={char.avatar} className="w-full h-full object-cover" alt="" loading="lazy" draggable={false} />
                             </div>
                             {characters.length > 1 && <span className="absolute -bottom-0.5 -right-0.5 w-[15px] h-[15px] rounded-full flex items-center justify-center text-[8px]" style={{ background: PAL.cardHi, border: `1px solid ${PAL.frameSoft}`, color: PAL.ink }}>⇄</span>}
                         </button>

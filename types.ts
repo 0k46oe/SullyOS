@@ -387,8 +387,6 @@ export interface ActiveMsg2TaskRecord {
   promptHint?: string;
   /** 防穿帮策略；fixed 任务恒为 'force'（见 amsg2Tasks.resolveExpirePolicy）。 */
   expirePolicy: ActiveMsg2ExpirePolicy;
-  /** 排程时最后一条真实用户消息的时间戳（作废判定锚点；当时无消息为 0）。 */
-  anchorLastUserMsgAt?: number;
   source: ActiveMsg2TaskSource;
   status: ActiveMsg2TaskStatus;
   createdAt: number;
@@ -2199,7 +2197,7 @@ export interface StoryTheaterPreset {
 
 export interface SpecialMomentRecord {
     content: string;
-    image?: string; // base64 PNG (stored separately so export tools can handle it)
+    image?: string; // 活动留存的大图，存 blobref 令牌（二进制在 blob_assets）
     timestamp: number;
     source?: 'generated' | 'migrated';
     /** Free-form per-event extra data (e.g. like520 captureface state, anchors, etc.) */
@@ -2726,14 +2724,14 @@ export interface CharacterProfile {
   companionAvatar?: CompanionAvatarConfig;
   /**
    * 视频通话舞台的自定义背景：`blobref:<id>` 令牌（本地图片，存 IndexedDB
-   * blob_assets，备份导出时由 resolveBlobRefsDeep 自动还原）或 http(s) 图床直链。
+   * blob_assets，备份令牌原样进包、二进制走 blobs/* 旁路）或 http(s) 图床直链。
    * 空 = 默认氛围渐变。
    */
   videoCallBackground?: string;
   /**
    * 触感陪伴桌面（companion 皮肤）的背景：`preset:<id>`（内置华丽渐变场景）、
-   * `blobref:<id>` 令牌（本地图片，备份由 resolveBlobRefsDeep 还原）或 http(s)
-   * 图床直链。空 = 默认时段天光。
+   * `blobref:<id>` 令牌（本地图片，备份令牌原样进包、二进制走 blobs/* 旁路）
+   * 或 http(s) 图床直链。空 = 默认时段天光。
    */
   companionBackground?: string;
   /**

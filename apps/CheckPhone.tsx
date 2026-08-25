@@ -4,6 +4,8 @@ import { DB } from '../utils/db';
 import { CharacterProfile, PhoneEvidence, PhoneCustomApp, PhoneContact, PhoneSimLog, ConvTopic, AiSession, AiServiceKind, TavernCard } from '../types';
 import { ContextBuilder } from '../utils/context';
 import Modal from '../components/os/Modal';
+import TokenImg from '../components/os/TokenImg';
+import { useBlobRefUrl } from '../utils/blobRef';
 import { safeResponseJson, extractContent, extractJson } from '../utils/safeApi';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import {
@@ -348,6 +350,10 @@ const CheckPhone: React.FC = () => {
     // Swipe tracking for paging
     const touchStartX = useRef<number | null>(null);
     const touchStartY = useRef<number | null>(null);
+
+    // 桌面底图用的是角色的见面背景，字段里存的是 blobref 令牌（二进制在 IndexedDB）。
+    // 令牌塞不进 CSS url()，先在组件顶层解析成能用的地址；非令牌值原样透传。
+    const dateBackgroundUrl = useBlobRefUrl(targetChar?.dateBackground);
 
     // Derived state for evidence records
     const records = (targetChar?.phoneState?.records || []).map(normalizePhoneEvidence);
@@ -2045,7 +2051,7 @@ ${olderText}
                             <div key={r.id} onClick={() => { setSelectedChatRecord(r); setTranscriptExpanded(false); setActiveAppId('chat_detail'); }}
                                 className="group relative flex items-center gap-3.5 rounded-2xl p-3.5 bg-white/[0.035] border border-white/[0.06] active:scale-[0.99] transition cursor-pointer animate-fade-in">
                                 {av ? (
-                                    <img src={av} alt="" className="w-12 h-12 rounded-2xl object-cover shrink-0" />
+                                    <TokenImg value={av} alt="" className="w-12 h-12 rounded-2xl object-cover shrink-0" />
                                 ) : (
                                     <div className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 text-white font-semibold text-lg"
                                         style={{ background: `linear-gradient(135deg, ${accent}40, ${accent}10)`, boxShadow: `inset 0 0 18px ${accent}25` }}>
@@ -2099,7 +2105,7 @@ ${olderText}
                         <div key={idx} className={`flex items-end gap-2 ${msg.isMe ? 'justify-end' : 'justify-start'}`}>
                             {!msg.isMe && (
                                 partnerAvatar ? (
-                                    <img src={partnerAvatar} alt="" className="w-8 h-8 rounded-xl object-cover shrink-0" />
+                                    <TokenImg value={partnerAvatar} alt="" className="w-8 h-8 rounded-xl object-cover shrink-0" />
                                 ) : (
                                     <div className="w-8 h-8 rounded-xl flex items-center justify-center text-xs text-white shrink-0"
                                         style={{ background: `linear-gradient(135deg, ${accent}40, ${accent}10)` }}>
@@ -2115,7 +2121,7 @@ ${olderText}
                                 style={msg.isMe ? { background: `linear-gradient(135deg, ${accent}, ${accent}bb)` } : undefined}>
                                 {msg.content}
                             </div>
-                            {msg.isMe && <img src={targetChar.avatar} className="w-8 h-8 rounded-xl object-cover shrink-0" />}
+                            {msg.isMe && <TokenImg value={targetChar.avatar} className="w-8 h-8 rounded-xl object-cover shrink-0" />}
                         </div>
                     ))}
                     <div ref={chatEndRef} />
@@ -2174,7 +2180,7 @@ ${olderText}
                         <article>
                             <div className="flex items-center gap-3 pb-4 border-b border-white/[0.07]">
                                 {targetChar?.avatar
-                                    ? <img src={targetChar.avatar} alt="" className="w-12 h-12 rounded-full object-cover" />
+                                    ? <TokenImg value={targetChar.avatar} alt="" className="w-12 h-12 rounded-full object-cover" />
                                     : <div className="w-12 h-12 rounded-full flex items-center justify-center text-white font-semibold" style={{ background: accent }}>{charName.slice(0, 1)}</div>}
                                 <div className="min-w-0">
                                     <div className="text-[15px] font-semibold text-white/95">{charName}</div>
@@ -2382,7 +2388,7 @@ ${olderText}
                             className="group relative rounded-2xl p-4 pr-8 bg-white/[0.035] border border-white/[0.06] animate-slide-up cursor-pointer active:scale-[0.99] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60">
                             <div className="flex items-center gap-3 mb-2.5">
                                 {targetChar?.avatar
-                                    ? <img src={targetChar.avatar} className="w-9 h-9 rounded-full object-cover" />
+                                    ? <TokenImg value={targetChar.avatar} className="w-9 h-9 rounded-full object-cover" />
                                     : <div className="w-9 h-9 rounded-full" style={{ background: accent }} />}
                                 <div className="min-w-0">
                                     <div className="text-[13px] font-semibold text-white/95">{charName}</div>
@@ -2473,7 +2479,7 @@ ${olderText}
                                     <span className={`w-5 h-5 rounded-full border flex items-center justify-center shrink-0 text-[11px] font-bold transition ${selected ? 'bg-pink-500 border-pink-500 text-white' : 'border-white/30 text-transparent'}`}>✓</span>
                                 )}
                                 {av ? (
-                                    <img src={av} alt="" className="w-12 h-12 rounded-2xl object-cover shrink-0" />
+                                    <TokenImg value={av} alt="" className="w-12 h-12 rounded-2xl object-cover shrink-0" />
                                 ) : (
                                     <div className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 text-white font-semibold text-lg"
                                         style={{ background: `linear-gradient(135deg, ${accent}40, ${accent}10)`, boxShadow: `inset 0 0 18px ${accent}25` }}>
@@ -2769,7 +2775,7 @@ ${olderText}
                                 <div className="flex items-center gap-2 mb-2">
                                     <div className="w-7 h-7 rounded-lg flex items-center justify-center overflow-hidden shrink-0"
                                         style={{ background: f.isMe ? 'transparent' : `${t.accent}1f` }}>
-                                        {f.isMe ? <img src={targetChar.avatar} className="w-7 h-7 object-cover" /> : <span className="text-base">{partnerEmoji}</span>}
+                                        {f.isMe ? <TokenImg value={targetChar.avatar} className="w-7 h-7 object-cover" /> : <span className="text-base">{partnerEmoji}</span>}
                                     </div>
                                     <span className="text-[12.5px] font-semibold" style={{ color: f.isMe ? t.accent : t.text }}>{who}</span>
                                     {f.isMe && <span className="text-[9px] px-1.5 py-0.5 rounded-full" style={{ background: `${t.accent}26`, color: t.accent }}>玩家</span>}
@@ -2798,7 +2804,7 @@ ${olderText}
                                     }}>
                                     {m.text}
                                 </div>
-                                {m.isMe && <img src={targetChar.avatar} className="w-8 h-8 rounded-xl object-cover shrink-0" />}
+                                {m.isMe && <TokenImg value={targetChar.avatar} className="w-8 h-8 rounded-xl object-cover shrink-0" />}
                             </div>
                         );
                     })}
@@ -2858,7 +2864,7 @@ ${olderText}
         const commitAff = () => { if (affinityDraft != null) { handleSetAffinity(c, affinityDraft); setAffinityDraft(null); } };
         const closeProfile = () => { setShowProfile(false); setEditingIdentity(false); setEditingNote(false); };
         const avatarNode = (size: string, txt: string) => av
-            ? <img src={av} alt="" className={`${size} rounded-2xl object-cover shrink-0`} />
+            ? <TokenImg value={av} alt="" className={`${size} rounded-2xl object-cover shrink-0`} />
             : <div className={`${size} rounded-2xl flex items-center justify-center shrink-0 text-white font-semibold ${txt}`} style={{ background: `linear-gradient(135deg, ${accent}40, ${accent}10)` }}>{c.name[0]}</div>;
         return (
             <SubAppShell>
@@ -2911,11 +2917,11 @@ ${olderText}
                                 <span className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 text-[9px] font-bold self-center ${sel ? 'bg-pink-500 border-pink-500 text-white' : 'border-white/30 text-transparent'} ${m.isMe ? 'order-last' : ''}`}>✓</span>
                             )}
                             {!m.isMe && (av
-                                ? <img src={av} alt="" className="w-7 h-7 rounded-xl object-cover shrink-0" />
+                                ? <TokenImg value={av} alt="" className="w-7 h-7 rounded-xl object-cover shrink-0" />
                                 : <div className="w-7 h-7 rounded-xl flex items-center justify-center text-[11px] text-white shrink-0" style={{ background: `linear-gradient(135deg, ${accent}40, ${accent}10)` }}>{c.name[0]}</div>)}
                             <div className={`px-3.5 py-2.5 rounded-2xl max-w-[76%] text-[13px] leading-relaxed break-words ${m.isMe ? 'text-white rounded-br-md' : 'bg-white/[0.07] text-white/90 border border-white/[0.06] rounded-bl-md'}`}
                                 style={m.isMe ? { background: `linear-gradient(135deg, ${accent}, ${accent}bb)` } : undefined}>{m.content}</div>
-                            {m.isMe && <img src={targetChar.avatar} alt="" className="w-7 h-7 rounded-xl object-cover shrink-0" />}
+                            {m.isMe && <TokenImg value={targetChar.avatar} alt="" className="w-7 h-7 rounded-xl object-cover shrink-0" />}
                         </div>
                     );})}
                     {isLoading && (
@@ -3411,7 +3417,7 @@ ${olderText}
     );
 
     const renderDesktop = () => {
-        const hasBg = !!targetChar?.dateBackground;
+        const hasBg = !!dateBackgroundUrl;
         const totalPages = customApps.length > 0 ? 2 : 1;
 
         const onTouchStart = (e: React.TouchEvent) => {
@@ -3437,7 +3443,7 @@ ${olderText}
                     style={{ background: 'radial-gradient(120% 80% at 50% 0%, #1a1d2b 0%, #0a0c12 55%, #060709 100%)' }} />
                 {hasBg && (
                     <div className="absolute inset-0 opacity-25 pointer-events-none"
-                        style={{ backgroundImage: `url(${targetChar!.dateBackground})`, backgroundSize: 'cover', backgroundPosition: 'center' }} />
+                        style={{ backgroundImage: `url("${dateBackgroundUrl}")`, backgroundSize: 'cover', backgroundPosition: 'center' }} />
                 )}
                 <div className="absolute inset-0 pointer-events-none"
                     style={{ background: 'linear-gradient(to bottom, rgba(7,8,9,0.35) 0%, rgba(7,8,9,0.1) 30%, rgba(7,8,9,0.85) 100%)' }} />
@@ -3527,7 +3533,7 @@ ${olderText}
                                         className="min-h-0 rounded-3xl border border-white/[0.07] bg-white/[0.03] backdrop-blur-xl p-4 flex flex-col items-center justify-center gap-3 cursor-pointer active:scale-95 transition group hover:border-violet-400/50 hover:shadow-[0_0_24px_rgba(157,124,255,0.25)] relative overflow-hidden">
                                         <div className="absolute -top-10 -right-10 w-28 h-28 rounded-full blur-3xl bg-violet-500/0 group-hover:bg-violet-500/20 transition" />
                                         <div className="w-20 h-20 rounded-full p-[2px] border-2 border-white/15 group-hover:border-violet-400/70 transition-colors relative z-10 shrink-0">
-                                            <img src={c.avatar} className="w-full h-full rounded-full object-cover grayscale group-hover:grayscale-0 transition-all" />
+                                            <TokenImg value={c.avatar} className="w-full h-full rounded-full object-cover grayscale group-hover:grayscale-0 transition-all" />
                                         </div>
                                         <div className="text-center relative z-10">
                                             <div className="font-semibold text-white/90 text-sm group-hover:text-violet-300">{c.name}</div>
@@ -3878,7 +3884,7 @@ ${olderText}
                                             onClick={() => handleRebindContact(selectedContact, { kind: 'real', charId: rc.id })}
                                             disabled={current}
                                             className={`w-full flex items-center gap-2.5 rounded-xl p-2.5 border text-left transition ${current ? 'border-pink-300 bg-pink-50' : 'border-slate-200 bg-slate-50 active:scale-[0.99]'}`}>
-                                            <img src={rc.avatar} alt="" className="w-8 h-8 rounded-lg object-cover shrink-0" />
+                                            <TokenImg value={rc.avatar} alt="" className="w-8 h-8 rounded-lg object-cover shrink-0" />
                                             <span className="text-[13px] font-semibold text-slate-700 flex-1 truncate">{rc.name}</span>
                                             {current && <span className="text-[10px] font-bold text-pink-500 shrink-0">当前绑定</span>}
                                         </button>

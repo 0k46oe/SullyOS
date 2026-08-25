@@ -6,6 +6,8 @@ import { CharacterProfile, DiaryEntry, StickerData, DiaryPage, MemoryFragment } 
 import { ContextBuilder } from '../utils/context';
 import { processImage } from '../utils/file';
 import Modal from '../components/os/Modal';
+import TokenImg from '../components/os/TokenImg';
+import { isImageValue } from '../utils/blobRef';
 import { safeResponseJson, extractJson } from '../utils/safeApi';
 import { normalizeMessageContent } from '../utils/messageFormat';
 import { injectMemoryPalace, ingestDiaryToPalace, type DiaryIngestResult } from '../utils/memoryPalace/pipeline';
@@ -743,8 +745,8 @@ ${charPart}
                                 padding: '4px'
                             }}
                         >
-                            {s.url.startsWith('http') || s.url.startsWith('data') ? (
-                                <img src={s.url} className="w-20 h-20 object-contain pointer-events-none" draggable={false} />
+                            {isImageValue(s.url) ? (
+                                <TokenImg value={s.url} className="w-20 h-20 object-contain pointer-events-none" draggable={false} />
                             ) : s.url}
 
                             {/* Controls for Selected Sticker */}
@@ -934,7 +936,7 @@ ${charPart}
                         <div key={c.id} onClick={() => handleCharSelect(c)} className="aspect-[3/4] bg-white rounded-r-2xl rounded-l-md border-l-4 border-l-amber-800 shadow-[2px_4px_12px_rgba(0,0,0,0.08)] p-4 flex flex-col items-center justify-center gap-3 cursor-pointer active:scale-95 transition-all relative overflow-hidden group">
                             <div className="absolute inset-y-0 left-0 w-2 bg-gradient-to-r from-black/10 to-transparent"></div>
                             <div className="w-16 h-16 rounded-full p-[2px] border border-amber-100 bg-amber-50">
-                                <img src={c.avatar} className="w-full h-full rounded-full object-cover" />
+                                <TokenImg value={c.avatar} className="w-full h-full rounded-full object-cover" />
                             </div>
                             <span className="font-bold text-amber-900 text-sm">{c.name}</span>
                             <span className="text-[9px] text-amber-600 bg-amber-50 px-2 py-1 rounded-full font-mono uppercase tracking-wide">Journal</span>

@@ -5,6 +5,7 @@ import { AppID, OSTheme, DesktopDecoration, AppearancePreset, Toast } from '../t
 import { INSTALLED_APPS, Icons } from '../constants';
 import { processImage, processImageToBlob } from '../utils/file';
 import { deleteBlobRef, putImageBlob, useBlobRefUrl } from '../utils/blobRef';
+import TokenImg from '../components/os/TokenImg';
 import {
     companionAvatarSource,
     companionSkinSetPatchValue,
@@ -31,6 +32,22 @@ const CustomIconImage: React.FC<{ value: string; alt: string; preserveOutline?: 
 const CompanionPortraitPreview: React.FC<{ value?: string; alt: string }> = ({ value, alt }) => {
     const url = useBlobRefUrl(value);
     return url ? <img src={url} className="h-full w-full object-contain" alt={alt} /> : <ImageSquare size={28} className="text-slate-300" />;
+};
+
+/**
+ * 这个令牌还挂在衣柜里吗？
+ *
+ * 桌面静态形象的令牌是「顶层 imageRef 指着现在穿的那套，衣柜里同时留着一条同令牌的条目」
+ * （utils/companionWardrobe.ts 拿令牌当条目 id 认亲，id 与 imageRef 两个值位同值）。
+ * 所以换图 / 移除时不能无条件删旧 Blob——衣柜里还留着的话，那套旧衣服就再也切不回去了。
+ */
+const isCompanionOutfitKeptInWardrobe = (
+    companionAvatar: { imageWardrobe?: unknown } | undefined,
+    ref: string,
+): boolean => {
+    const wardrobe = companionAvatar?.imageWardrobe;
+    if (!Array.isArray(wardrobe)) return false;
+    return wardrobe.some((outfit: any) => outfit?.imageRef === ref || outfit?.id === ref);
 };
 
 // Touch-friendly long-press wrapper. `onContextMenu` alone misses iOS Safari /
@@ -238,6 +255,47 @@ const buildAcnhLeaves = (): DesktopDecoration[] => ACNH_LEAF_LAYOUT.map((p, i) =
   zIndex: 5 + i, flip: p.flip,
 }));
 
+/**
+ * 预设卡片顶部那条缩略图（壁纸打底 + 两个色块 + 装饰数量角标）。
+ *
+ * 预设是直接从 assets 表读出来的 JSON，没走 OSContext 那层壁纸解析，所以
+ * `theme.wallpaper` 很可能还是个 `blobref:` 令牌，直接拼进 CSS 的 url() 加载不出来。
+ * 这里过一道 useBlobRefUrl 把令牌换成 objectURL —— 它对 data: / http(s) / 渐变这类
+ * 非令牌值是渲染期原样透传的，所以只有令牌会真的去读盘。
+ * 因为 hook 不能写在 map 回调里，这块预览单独抽成组件，一个预设一份解析和回收。
+ */
+const PresetPreview: React.FC<{ preset: AppearancePreset }> = ({ preset }) => {
+    const { hue, saturation, lightness, contentColor, desktopDecorations, wallpaper } = preset.theme;
+    const resolvedWallpaper = useBlobRefUrl(wallpaper);
+
+    const themeGradient = `linear-gradient(135deg, hsl(${hue}, ${saturation}%, ${lightness}%), hsl(${hue + 30}, ${saturation}%, ${Math.max(lightness - 15, 10)}%))`;
+    const isCssGradient = !!wallpaper
+        && (wallpaper.startsWith('linear-gradient') || wallpaper.startsWith('radial-gradient') || wallpaper.startsWith('conic-gradient'));
+
+    // 没设壁纸 → 主题色兜底；壁纸本身就是 CSS 渐变 → 原样用；否则当图片铺进 url()。
+    // 令牌还在读盘、或者图已经丢了时 resolvedWallpaper 是 undefined，同样退回主题色，
+    // 免得渲染出一个 url("undefined")。
+    let background: string;
+    if (!wallpaper) background = themeGradient;
+    else if (isCssGradient) background = wallpaper;
+    else background = resolvedWallpaper ? `url("${resolvedWallpaper}") center/cover` : themeGradient;
+
+    return (
+        <div className="h-14 relative overflow-hidden" style={{ background }}>
+            <div className="absolute inset-0 bg-black/10" />
+            <div className="absolute bottom-1.5 left-3 flex gap-1">
+                <div className="w-4 h-4 rounded-full" style={{ backgroundColor: `hsl(${hue}, ${saturation}%, ${lightness}%)` }} />
+                <div className="w-4 h-4 rounded-full" style={{ backgroundColor: contentColor || '#fff' }} />
+            </div>
+            {desktopDecorations && desktopDecorations.length > 0 && (
+                <div className="absolute bottom-1.5 right-3 text-[8px] text-white/80 bg-black/30 px-1.5 py-0.5 rounded-full backdrop-blur-sm">
+                    {desktopDecorations.length} 装饰
+                </div>
+            )}
+        </div>
+    );
+};
+
 // --- Preset Manager Component ---
 interface PresetManagerProps {
     presets: AppearancePreset[];
@@ -428,26 +486,7 @@ const PresetManager: React.FC<PresetManagerProps> = ({ presets, onSave, onApply,
                         {presets.map(preset => (
                             <div key={preset.id} className="bg-slate-50 rounded-2xl border border-slate-100 overflow-hidden">
                                 {/* Preview bar */}
-                                <div className="h-14 relative overflow-hidden"
-                                    style={{
-                                        background: (() => {
-                                            const wp = preset.theme.wallpaper;
-                                            if (!wp) return `linear-gradient(135deg, hsl(${preset.theme.hue}, ${preset.theme.saturation}%, ${preset.theme.lightness}%), hsl(${preset.theme.hue + 30}, ${preset.theme.saturation}%, ${Math.max(preset.theme.lightness - 15, 10)}%))`;
-                                            if (wp.startsWith('linear-gradient') || wp.startsWith('radial-gradient') || wp.startsWith('conic-gradient')) return wp;
-                                            return `url("${wp}") center/cover`;
-                                        })(),
-                                    }}>
-                                    <div className="absolute inset-0 bg-black/10" />
-                                    <div className="absolute bottom-1.5 left-3 flex gap-1">
-                                        <div className="w-4 h-4 rounded-full" style={{ backgroundColor: `hsl(${preset.theme.hue}, ${preset.theme.saturation}%, ${preset.theme.lightness}%)` }} />
-                                        <div className="w-4 h-4 rounded-full" style={{ backgroundColor: preset.theme.contentColor || '#fff' }} />
-                                    </div>
-                                    {preset.theme.desktopDecorations && preset.theme.desktopDecorations.length > 0 && (
-                                        <div className="absolute bottom-1.5 right-3 text-[8px] text-white/80 bg-black/30 px-1.5 py-0.5 rounded-full backdrop-blur-sm">
-                                            {preset.theme.desktopDecorations.length} 装饰
-                                        </div>
-                                    )}
-                                </div>
+                                <PresetPreview preset={preset} />
 
                                 {/* Info & actions */}
                                 <div className="p-3">
@@ -614,7 +653,10 @@ const Appearance: React.FC = () => {
                   importedAt: Date.now(),
               },
           });
-          if (previousRef && previousRef !== imageRef) await deleteBlobRef(previousRef);
+          if (previousRef && previousRef !== imageRef
+              && !isCompanionOutfitKeptInWardrobe(appearanceCharacter.companionAvatar, previousRef)) {
+              await deleteBlobRef(previousRef);
+          }
           trackEvent('导入桌面静态形象', { 格式: file.type === 'image/gif' ? 'GIF' : 'PNG' });
           addToast(file.type === 'image/gif' ? 'GIF 已原样导入，动画会保留' : 'PNG 静态形象已导入', 'success');
       } catch (error: any) {
@@ -649,7 +691,9 @@ const Appearance: React.FC = () => {
               importedAt: undefined,
           },
       });
-      await deleteBlobRef(previousRef);
+      if (!isCompanionOutfitKeptInWardrobe(appearanceCharacter.companionAvatar, previousRef)) {
+          await deleteBlobRef(previousRef);
+      }
       trackEvent('移除桌面静态形象');
       addToast('已移除导入图片', 'success');
   };
@@ -783,9 +827,10 @@ const Appearance: React.FC = () => {
       if (!activeWidgetSlot) return;
       try {
           const maxW = activeWidgetSlot === 'wide' ? 800 : activeWidgetSlot === 'dsq' ? 600 : 500;
-          const dataUrl = await processImage(file, { maxWidth: maxW, quality: 0.9 });
+          const blob = await processImageToBlob(file, { maxWidth: maxW, quality: 0.9 });
+          const ref = await putImageBlob(blob);
           const current = theme.launcherWidgets || {};
-          updateTheme({ launcherWidgets: { ...current, [activeWidgetSlot]: dataUrl } });
+          updateTheme({ launcherWidgets: { ...current, [activeWidgetSlot]: ref } });
           addToast('小组件已更新', 'success');
       } catch (e: any) {
           addToast(e.message, 'error');
@@ -1430,7 +1475,7 @@ const Appearance: React.FC = () => {
                                 >
                                     {img ? (
                                         <>
-                                            <img src={img} className="w-full h-full object-cover" />
+                                            <TokenImg value={img} className="w-full h-full object-cover" />
                                             <div className="absolute inset-0 bg-black/0 hover:bg-black/20 transition-colors flex items-center justify-center opacity-0 hover:opacity-100">
                                                 <span className="text-white text-[10px] font-bold bg-black/40 px-2 py-0.5 rounded-full">更换</span>
                                             </div>
@@ -1470,7 +1515,7 @@ const Appearance: React.FC = () => {
                                     >
                                         {img ? (
                                             <>
-                                                <img src={img} className="w-full h-full object-cover" />
+                                                <TokenImg value={img} className="w-full h-full object-cover" />
                                                 <div className="absolute inset-0 bg-black/0 hover:bg-black/20 transition-colors flex items-center justify-center opacity-0 hover:opacity-100">
                                                     <span className="text-white text-[10px] font-bold bg-black/40 px-2 py-0.5 rounded-full">更换</span>
                                                 </div>
@@ -1501,7 +1546,7 @@ const Appearance: React.FC = () => {
                                 >
                                     {img ? (
                                         <>
-                                            <img src={img} className="w-full h-full object-cover" />
+                                            <TokenImg value={img} className="w-full h-full object-cover" />
                                             <div className="absolute inset-0 bg-black/0 hover:bg-black/20 transition-colors flex items-center justify-center opacity-0 hover:opacity-100">
                                                 <span className="text-white text-[10px] font-bold bg-black/40 px-2 py-0.5 rounded-full">更换</span>
                                             </div>
@@ -1540,12 +1585,12 @@ const Appearance: React.FC = () => {
                                         {(w['tl'] || w['tr']) && (
                                             <div className="flex gap-1.5">
                                                 {['tl', 'tr'].map(k => w[k] ? (
-                                                    <div key={k} className="flex-1 aspect-square rounded-lg overflow-hidden opacity-70"><img src={w[k]} className="w-full h-full object-cover" /></div>
+                                                    <div key={k} className="flex-1 aspect-square rounded-lg overflow-hidden opacity-70"><TokenImg value={w[k]} className="w-full h-full object-cover" /></div>
                                                 ) : <div key={k} className="flex-1" />)}
                                             </div>
                                         )}
                                         {w['wide'] && (
-                                            <div className="w-full h-8 rounded-lg overflow-hidden opacity-70"><img src={w['wide']} className="w-full h-full object-cover" /></div>
+                                            <div className="w-full h-8 rounded-lg overflow-hidden opacity-70"><TokenImg value={w['wide']} className="w-full h-full object-cover" /></div>
                                         )}
                                     </>
                                 );

@@ -31,6 +31,7 @@ export type AmsgFailKind =
   | 'worker没配VAPID'
   | '订阅失败'
   | '推送通道不通'
+  | '没拿到订阅'
   | '端点僵尸'
   | '其他';
 

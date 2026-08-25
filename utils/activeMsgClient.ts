@@ -45,6 +45,7 @@ import {
   type LlmCredentialRow,
 } from './amsgLlmCredentials';
 import { flattenContentPartsToText } from './promptMessageCleanup';
+import { resolveBlobRefsDeep } from './blobRef';
 import {
   AMSG_FIRE_PACK_KEY,
   FIRE_PACK_VERSION,
@@ -778,6 +779,19 @@ export const buildFirePack = async (
     '【本次任务】',
     AMSG_SLOT_TASK_INSTRUCTION,
     '',
+    // 「这件事是不是已经聊过了」是语义问题，只有看得到完整对话的角色判得了。代码那道闸
+    // （utils/amsg2ExpireGuard.ts）只判「到点那会儿用户在不在聊天」这一件确定的事——早先
+    // 它还兼管一次性任务的「排完之后用户再开过口就作废」，那条规则没有时间窗，跨夜任务
+    // 几乎必然被误杀，现在整条交给这里。
+    // 判据必须是「这件事发生过没有」这种能对照上下文查证的事实。写成「你觉得合不合适」
+    // 的话，模型会拿「怕打扰」「时机不太对」当理由沉默，主动消息就整体哑掉了。
+    // 一个字都不输出 → worker 走 skip-push 出口：不推送、不占连发额度、面板照实说明。
+    '【开口之前】',
+    '先对照上面的【最近对话上下文】：这条任务要说的事，是不是已经在你们的对话里发生过、或者已经聊完了？',
+    '已经发生过 → 什么都不要输出。一个字都不要写，也不要解释自己为什么不说。这次就当没有这条任务。',
+    '还没发生 → 照常说你要说的话。',
+    '判据只有「这件事发生过没有」这一条。不要因为「怕打扰」「时机好像不太对」而沉默，那些不归你判。',
+    '',
     // recency 末位人声锚：上面【角色系统设定】里已带「回到你自己」钢印，但被任务说明压在后面、
     // 失了 recency。这里在最后一句把它拎回来，让主动消息也从「你这个人」长出来，而不是滑回均值腔。
     `（开口前回到你自己：这条得是 ${char.name} 会发的那一条——语气、用词、节奏都只属于你。哪怕只是随口一句，也要是你。）`,
@@ -882,6 +896,34 @@ const hasNonTextPart = (content: unknown): boolean =>
 // 「图片消息 → 文字占位」的拍平内核与本地 stripImages 路径共用同一份
 // （promptMessageCleanup.flattenContentPartsToText）：超预算降级产物必须与
 // 本地拍平产物严格同源，否则同一条历史消息在两条生成路上渲染成两种样子。
+
+/**
+ * 上云前把聊天消息里的图片令牌（`blobref:<id>`）还原成 data URL，返回一份独立副本。
+ *
+ * 两条理由，缺一条都不能省这一步：
+ *   · worker 那边没有 IndexedDB，令牌到了云端谁也解不开。浏览器里那层「发请求前统一
+ *     还原」（utils/apiBlobRefs.ts）够不到 worker 自己发出去的请求，图会静默消失；
+ *   · 令牌只有几十字节，而它代表的图可能几 MB。先算预算再还原的话，一份「看着没超」
+ *     的包还原后照样超限，下面那道体积闸等于白设。所以顺序是死的：**先还原，再算预算**。
+ *
+ * resolveBlobRefsDeep 原地改对象，所以先深拷贝再交给它——调用方那串 fullMessages
+ * 本地这一轮还要用，一个字节都不能被改。拷贝发生在还原之前，拷的是还带着短令牌的
+ * 小结构，不是几 MB 的 base64。
+ */
+export const resolveChatMessagesForUpload = async (
+  messages: Array<{ role: string; content: unknown }>,
+): Promise<Array<{ role: string; content: unknown }>> => {
+  const copy = messages.map((message) => ({
+    role: message.role,
+    content: message.content === null || typeof message.content !== 'object'
+      ? message.content
+      : (typeof structuredClone === 'function'
+        ? structuredClone(message.content)
+        : JSON.parse(JSON.stringify(message.content))),
+  }));
+  await resolveBlobRefsDeep(copy);
+  return copy;
+};
 
 /**
  * 本地那串 fullMessages → fire_pack 的 `chat.messages`。
@@ -1279,6 +1321,7 @@ const fetchWorkerVapidKey = async (client: ReiClient): Promise<string> => {
 /** 共用层的失败分类 → 上报用的失败代号。两边都是源码里写死的枚举。 */
 const SUBSCRIBE_FAIL_KIND: Record<SubscribeFailureKind, AmsgFailKind> = {
   'channel-unreachable': '推送通道不通',
+  'no-subscription': '没拿到订阅',
   unsupported: '不支持推送',
   permission: '权限被拒',
   state: '订阅失败',
@@ -2159,10 +2202,6 @@ export const ActiveMsgClient = {
     const firePack = task.mode === 'fixed'
       ? null
       : await buildFirePack(char, userProfile, groups, realtimeConfig);
-    // 防穿帮闸锚点：排程这一刻的最后一条真实用户消息（见 utils/amsg2ExpireGuard.ts）。
-    // 与 fire_pack 的 lastUserMessageAt 同源，直接复用——各读各的就是同一段 200 条历史
-    // 扫两遍。fixed 任务恒 force，锚点用不到，也就不必去读。
-    const anchorMs = firePack?.lastUserMessageAt ?? 0;
     // 任务身份：客户端自造 clientTaskId——远端 uuid 要创建成功后才有，而 metadata
     // 必须在创建时就带上归属键；push 原样透传，送达归属全靠它。
     const clientTaskId = crypto.randomUUID();
@@ -2192,7 +2231,6 @@ export const ActiveMsgClient = {
         // 角色在 fire 里自排的任务也一样有，抄一份反而多一处会漏写的地方。
         amsgClientTaskId: clientTaskId,
         amsgExpirePolicy: resolveExpirePolicy(task.mode, task.expirePolicy),
-        amsgAnchorMs: anchorMs,
         // 自排标记：到点兜底闸只拦带它的任务（用户面板排的不带、不受连发上限管）。
         ...(task.selfScheduled ? { amsgSelfScheduled: true } : {}),
       },
@@ -2308,7 +2346,6 @@ export const ActiveMsgClient = {
 
     return {
       ...(response.data as { uuid: string; status: string; nextSendAt?: string }),
-      anchorMs,
       clientTaskId,
       replacedCancelFailed,
       // 解析好的绝对时刻（UTC ISO）。任务记录存这一份，字段口径才只有一种。
@@ -2557,7 +2594,9 @@ export const ActiveMsgClient = {
       && (char.activeMsg2Config?.tasks?.length ?? 0) === 0;
     const firePack: AmsgFirePack = {
       ...(await buildFirePack(char, userProfile, groups, realtimeConfig, undefined, { templateStub })),
-      chat: { messages: toFirePackChatMessages(chatMessages), builtAt: now },
+      // 先还原图片令牌再算体积预算——反过来会让一份「看着没超」的包在云端胀成几 MB，
+      // 而 worker 那边根本解不开令牌（见 resolveChatMessagesForUpload）。
+      chat: { messages: toFirePackChatMessages(await resolveChatMessagesForUpload(chatMessages)), builtAt: now },
     };
 
     const clientTaskId = crypto.randomUUID();
@@ -2654,7 +2693,7 @@ export const ActiveMsgClient = {
         // 老 worker 那条路还带着副 API 的 apiKey，它只能待在这个加密信封里——worker
         // 组推送前会把它摘掉，一个字节都不许跟着 push 出门。
         ...(emotionEvalSpec ? { amsgEmotionEval: emotionEvalSpec } : {}),
-        // 刻意不带 amsgExpirePolicy / amsgAnchorMs：防穿帮闸问的是「到点还该不该主动开口」，
+        // 刻意不带 amsgExpirePolicy：防穿帮闸问的是「到点还该不该主动开口」，
         // 对「回一句用户刚说的话」不适用，带上去反而会把用户等着的回复吞掉。
       },
     };

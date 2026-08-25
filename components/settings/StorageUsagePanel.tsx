@@ -17,6 +17,7 @@ import {
     type StorageBreakdown,
     type BreakdownProgress,
 } from '../../utils/storageStats';
+import { optimizeResourceStorage, type OptimizeProgress, type OptimizeResult } from '../../utils/storageOptimize';
 import { trackEvent } from '../../utils/analytics';
 
 /**
@@ -33,7 +34,56 @@ let cachedBreakdown: StorageBreakdown | null = null;
 const OTHER_USAGE_MIN_BYTES = 1024 * 1024;
 const OTHER_USAGE_MIN_RATIO = 0.1;
 
+/** 合并完成后自动刷新前留的一点时间，让用户看清这轮到底做了什么。 */
+const MERGE_RELOAD_DELAY_MS = 2500;
+
+/**
+ * 合并过重复图片就排一次整页刷新，排过了就不再排。
+ *
+ * 计时器和标记都放在组件外面，是因为这次刷新是数据一致性动作，不是界面上的顺手事：
+ * 合并只改了库里的引用，内存里的 theme / customIcons 还捏着合并前的令牌，带着它导出
+ * 备份，同一张图会被写成两份。所以用户在这 2.5 秒里收起板块、退出设置页、或者再点一次
+ * 「一键优化」（这些都会把面板卸掉或重置状态），刷新照样得来。
+ */
+let mergeReloadScheduled = false;
+function scheduleMergeReload(): void {
+    if (mergeReloadScheduled) return;
+    mergeReloadScheduled = true;
+    setTimeout(() => window.location.reload(), MERGE_RELOAD_DELAY_MS);
+}
+
 type PersistAttempt = 'none' | 'granted' | 'denied';
+
+/**
+ * 把优化结果讲成人话。两笔账分开说：转格式是当场就省下的，合并重复要等下一次
+ * 孤儿清理才真的把空间还回来（合并只改引用、不删图，见 utils/blobDedupe.ts）。
+ */
+function describeOptimizeResult(r: OptimizeResult): string {
+    const parts: string[] = [];
+    if (r.converted > 0) {
+        parts.push(`已把 ${r.converted} 张图片转为二进制存储，释放约 ${formatBytes(Math.max(0, r.bytesBefore - r.bytesAfter))}`);
+    }
+    if (r.mergedDuplicates > 0) {
+        parts.push(`把 ${r.mergedDuplicates} 份重复的图片并成了一份，约 ${formatBytes(r.reclaimableBytes)} 会在下次清理时释放`);
+    }
+    if (r.vectorsCompacted > 0) {
+        parts.push(`把 ${r.vectorsCompacted} 条记忆向量压成了紧凑格式`);
+    }
+    const reloadNote = r.mergedDuplicates > 0 ? '页面即将刷新，让界面和备份都用上合并后的图片。' : '';
+    const vectorNote = r.vectorError ? `记忆向量这一步没做完：${r.vectorError}。再点一次可以接着压。` : '';
+    if (parts.length === 0) {
+        if (r.failed > 0) return `有 ${r.failed} 张图片转换失败（已保留原样），其余没有需要优化的。${vectorNote}`;
+        if (vectorNote) return `没有需要优化的图片。${vectorNote}`;
+        return r.scanUnavailable
+            ? '没有需要优化的图片。这次没能检查重复图片，换个环境再试试。'
+            : '没有需要优化的，存储已是最省形态。';
+    }
+    let text = `${parts.join('；')}。`;
+    if (r.failed > 0) text += `另有 ${r.failed} 张转换失败，已保留原样。`;
+    if (r.skippedGroups > 0) text += `有 ${r.skippedGroups} 组重复图片没有合并——它们被「换一张就会删掉旧图」的地方用着，并了会误删。`;
+    if (r.scanUnavailable) text += '这次没能检查重复图片，换个环境再试试。';
+    return text + vectorNote + reloadNote;
+}
 
 const StorageUsagePanel: React.FC = () => {
     const [overview, setOverview] = useState<StorageOverview | null>(null);
@@ -45,6 +95,11 @@ const StorageUsagePanel: React.FC = () => {
     const [computing, setComputing] = useState(false);
     const [progress, setProgress] = useState<BreakdownProgress | null>(null);
     const [breakdownError, setBreakdownError] = useState(false);
+
+    const [optimizing, setOptimizing] = useState(false);
+    const [optimizeProgress, setOptimizeProgress] = useState<OptimizeProgress | null>(null);
+    const [optimizeResult, setOptimizeResult] = useState<OptimizeResult | null>(null);
+    const [optimizeError, setOptimizeError] = useState<string | null>(null);
 
     const aliveRef = useRef(true);
     useEffect(() => {
@@ -82,6 +137,32 @@ const StorageUsagePanel: React.FC = () => {
         if (next) trackEvent('查看存储占用明细');
         if (next && !cachedBreakdown && !computing) void runBreakdown();
     }, [expanded, computing, runBreakdown]);
+
+    const handleOptimize = useCallback(async () => {
+        if (optimizing) return;
+        setOptimizing(true);
+        setOptimizeResult(null);
+        setOptimizeError(null);
+        setOptimizeProgress(null);
+        try {
+            const result = await optimizeResourceStorage(p => {
+                if (aliveRef.current) setOptimizeProgress(p);
+            });
+            // 排在面板存活判断之前：引用已经在库里合并了，内存里的旧令牌就得靠刷新换掉，
+            // 这件事跟面板还在不在没关系。
+            if (result.mergedDuplicates > 0) scheduleMergeReload();
+            if (!aliveRef.current) return;
+            setOptimizeResult(result);
+            // 用量和细分都变了：总量刷新，细分缓存作废（下次展开重算）
+            cachedBreakdown = null;
+            setBreakdown(null);
+            await refreshOverview();
+        } catch (error) {
+            if (aliveRef.current) setOptimizeError(error instanceof Error ? error.message : String(error));
+        } finally {
+            if (aliveRef.current) { setOptimizing(false); setOptimizeProgress(null); }
+        }
+    }, [optimizing, refreshOverview]);
 
     const handlePersist = useCallback(async () => {
         setPersisting(true);
@@ -176,6 +257,46 @@ const StorageUsagePanel: React.FC = () => {
                 </p>
             </div>
 
+            {/* ── 优化资源存储（一次性迁移，幂等可重跑） ── */}
+            <div className="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2.5 mb-3">
+                <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-bold text-slate-600">优化资源存储</span>
+                    <button
+                        type="button"
+                        onClick={handleOptimize}
+                        disabled={optimizing}
+                        className="shrink-0 px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-bold text-slate-500 active:scale-95 transition-all disabled:opacity-50"
+                    >
+                        {optimizing ? '优化中…' : '一键优化'}
+                    </button>
+                </div>
+                <p className={`mt-1.5 text-[10px] leading-relaxed ${optimizeError ? 'text-rose-500' : 'text-slate-400'}`}>
+                    {optimizing
+                        ? (optimizeProgress
+                            ? `正在处理：${optimizeProgress.label}（${optimizeProgress.done}/${optimizeProgress.total}）…`
+                            : '正在扫描…')
+                        : optimizeError
+                            ? optimizeError
+                            : optimizeResult
+                                ? describeOptimizeResult(optimizeResult)
+                                : '把老数据里仍以 base64 存的图片一次性转成二进制，把重复存了好几份的同一张图并成一份，再把记忆向量压成紧凑格式。做过一次就干净；导入过旧备份后可以再点。'}
+                </p>
+                {/* 合并动的是库里的引用，内存里的 theme / customIcons 还捏着合并前的令牌。
+                    不刷新的话：界面照常显示，但导出的备份里 metadata 写的仍是旧令牌，
+                    同一张图又变成两份进包——看起来就像「优化根本没生效」。所以优化一跑完就
+                    排好了自动刷新（见 scheduleMergeReload），不指望用户记得点；
+                    这个按钮只是让人不想等的时候立刻走。 */}
+                {!optimizing && optimizeResult && optimizeResult.mergedDuplicates > 0 && (
+                    <button
+                        type="button"
+                        onClick={() => window.location.reload()}
+                        className="mt-2 w-full px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 text-[10px] font-bold text-slate-500 active:scale-95 transition-all"
+                    >
+                        立即刷新
+                    </button>
+                )}
+            </div>
+
             {/* ── 细分（折叠） ── */}
             <button
                 type="button"
@@ -232,6 +353,9 @@ const StorageUsagePanel: React.FC = () => {
                                 <p className="text-[10px] text-slate-300 leading-relaxed">
                                     {[
                                         breakdown.categories.some(c => c.estimated) ? '标「约」的项目是抽样估算' : '',
+                                        // 数据的原始大小比它实际占的地方大——浏览器落盘时会压一道。
+                                        // 不折算的话细分加起来会超过上面的总量，看着像算错了。
+                                        breakdown.calibrated ? '各项已按实际占用折算，比数据本身的大小小一些' : '',
                                         showOtherUsage ? '「网页缓存等」是离线缓存这类系统占用，删不掉也不用管' : '',
                                         breakdown.failedStores.length > 0 ? `有 ${breakdown.failedStores.length} 张表没读出来` : '',
                                     ].filter(Boolean).join('；')}

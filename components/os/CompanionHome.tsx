@@ -53,6 +53,7 @@ import {
   type AvatarStageFraming,
 } from '../../utils/avatarPerformance';
 import { deleteBlobRef, deleteBlobRefIfUnreferenced, isBlobRef, putImageBlob, useBlobRefUrl } from '../../utils/blobRef';
+import TokenImg from './TokenImg';
 import { hslToHex, hueFromGradient, hueFromImage, normalizeHue } from '../../utils/dominantHue';
 import { characterHasVoice } from '../../utils/ttsRouter';
 import { CallAudioFeed } from '../../utils/callAudioFeed';
@@ -602,17 +603,19 @@ const CompanionHome: React.FC = () => {
   };
 
   // ── 主色跟角色走：从头像提取主色相（跟电子宠物小窝同一套提取器）──
+  // 头像存的是 blobref 令牌，令牌喂给 new Image() 只会静默加载失败（取色器 onerror → null），
+  // 所以先解析成可加载的 URL 再取色（跟下面背景取色同一套路）。令牌没解析完时是 undefined，跳过。
+  const avatarImageUrl = useBlobRefUrl(character?.avatar);
   const [charHue, setCharHue] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
     setCharHue(null);
-    const source = character?.avatar;
-    if (!source) return;
-    void hueFromImage(source).then(hue => {
+    if (!avatarImageUrl) return;
+    void hueFromImage(avatarImageUrl).then(hue => {
       if (!cancelled && hue !== null) setCharHue(((Math.round(hue) % 360) + 360) % 360);
     });
     return () => { cancelled = true; };
-  }, [character?.id, character?.avatar]);
+  }, [avatarImageUrl]);
 
   // ── 背景：preset:<id> / blobref / http 直链；空 = 时段天光 ──
   const background = character?.companionBackground;
@@ -2585,7 +2588,7 @@ const CompanionHome: React.FC = () => {
             <header className="flex h-12 items-center justify-between gap-3 px-3 sm:h-14 sm:px-4">
               <button onClick={() => openApp(AppID.Character)} className="flex min-w-0 items-center gap-2 text-left active:scale-[.98]">
                 <span className="companion-avatar-frame relative h-8 w-8 shrink-0 overflow-hidden border bg-black/20 p-0.5 sm:h-10 sm:w-10" style={{ borderColor: `${uiTint}c9`, clipPath: 'polygon(20% 0, 80% 0, 100% 20%, 100% 80%, 80% 100%, 20% 100%, 0 80%, 0 20%)' }}>
-                  <img src={character.avatar} alt="" className="h-full w-full object-cover" />
+                  <TokenImg value={character.avatar} alt="" className="h-full w-full object-cover" />
                 </span>
                 <span className="min-w-0">
                   <span className="block truncate text-[13px] font-semibold tracking-wide sm:text-[15px]">{character.name}</span>

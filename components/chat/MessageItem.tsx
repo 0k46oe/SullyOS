@@ -10,6 +10,9 @@ import { stripFishCuesForDisplay } from '../../utils/fishAudioTts';
 import { formatStatCount } from '../../utils/videoParser';
 import { trackEvent } from '../../utils/analytics';
 import { resolveBubbleCornerRadii, shouldHideBubbleTail } from '../../utils/bubbleAppearance';
+import { isImageValue, useBlobRefUrl } from '../../utils/blobRef';
+import { buildReplySnapshotContent } from '../../utils/applyAssistantPostProcessing';
+import TokenImg from '../os/TokenImg';
 import McdCard from './McdCard';
 import HtmlCard from './HtmlCard';
 import LuckinCard from './LuckinCard';
@@ -781,8 +784,8 @@ const ForwardCard: React.FC<{
                                     <div className={`max-w-[80%] ${isUser ? 'items-end' : 'items-start'} flex flex-col`}>
                                         <div className="text-[10px] text-slate-400 mb-1 px-1">{senderName} {msg.timestamp ? formatTime(msg.timestamp) : ''}</div>
                                         <div className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-all ${isUser ? 'bg-primary text-white rounded-br-sm' : 'bg-white text-slate-700 rounded-bl-sm shadow-sm border border-slate-100'}`}>
-                                            {msg.type === 'image' ? (msg.content ? <img src={msg.content} className="max-w-[200px] rounded-xl" /> : <span className="italic opacity-60">[图片已丢失]</span>) :
-                                             msg.type === 'emoji' ? (msg.content ? <img src={msg.content} className="max-w-[100px]" /> : <span className="italic opacity-60">[表情已丢失]</span>) :
+                                            {msg.type === 'image' ? (msg.content ? <TokenImg value={msg.content} className="max-w-[200px] rounded-xl" /> : <span className="italic opacity-60">[图片已丢失]</span>) :
+                                             msg.type === 'emoji' ? (msg.content ? <TokenImg value={msg.content} className="max-w-[100px]" /> : <span className="italic opacity-60">[表情已丢失]</span>) :
                                              msg.content}
                                         </div>
                                     </div>
@@ -1107,7 +1110,7 @@ const Like520ChatCard: React.FC<{ data: any }> = ({ data }) => {
                     boxShadow: '0 2px 6px rgba(74,36,24,0.18), inset 0 0 0 1px rgba(184,146,63,0.25)',
                 }}>
                     {data.photoDataUrl
-                        ? <img src={data.photoDataUrl} alt="合照" style={{ width: '100%', display: 'block' }} />
+                        ? <TokenImg value={data.photoDataUrl} alt="合照" style={{ width: '100%', display: 'block' }} />
                         : <div style={{ width: '100%', aspectRatio: '1200 / 780', background: 'linear-gradient(180deg, #FFE0E8, #FFD3DC)' }} />}
                 </div>
 
@@ -1235,7 +1238,7 @@ const Like520ChatCard: React.FC<{ data: any }> = ({ data }) => {
 
                         {data.photoDataUrl ? (
                             <>
-                                <img src={data.photoDataUrl} alt="合照" draggable={false} style={{ width: '100%', display: 'block', borderRadius: 8, boxShadow: '0 8px 20px rgba(122,46,58,0.2), 0 0 0 1px rgba(184,146,63,0.4)' }} />
+                                <TokenImg value={data.photoDataUrl} alt="合照" draggable={false} style={{ width: '100%', display: 'block', borderRadius: 8, boxShadow: '0 8px 20px rgba(122,46,58,0.2), 0 0 0 1px rgba(184,146,63,0.4)' }} />
                                 <div style={{ fontSize: 10, fontStyle: 'italic', color: '#9D7585', textAlign: 'center', marginTop: 4, fontFamily: '"Cormorant Garamond", serif', letterSpacing: 2 }}>长按图片保存到相册</div>
                             </>
                         ) : null}
@@ -1291,7 +1294,7 @@ const LifeSimResetCardView: React.FC<{ card: any }> = ({ card }) => {
                 }}
             >
                 {parsed.charAvatar ? (
-                    <img src={parsed.charAvatar} className="w-8 h-8 object-cover shrink-0" style={{ borderRadius: 2, border: '2px solid rgba(255,255,255,0.25)' }} />
+                    <TokenImg value={parsed.charAvatar} className="w-8 h-8 object-cover shrink-0" style={{ borderRadius: 2, border: '2px solid rgba(255,255,255,0.25)' }} />
                 ) : (
                     <div className="w-8 h-8 flex items-center justify-center text-white text-sm font-bold shrink-0" style={{ borderRadius: 2, background: 'linear-gradient(135deg, #b86c3d, #d39b62)' }}>
                         {parsed.charName?.[0] || '?'}
@@ -1490,6 +1493,9 @@ const MessageItem = React.memo(({
     const replyReadyRef = useRef(false);
 
     const styleConfig = isUser ? activeTheme.user : activeTheme.ai;
+    // 气泡底纹画在 CSS background-image 上，拿不到 <img> 那层的自动解析，只能在顶层
+    // 无条件解析一次（hook 不能进条件分支）。挂件/头像挂件走 TokenImg，各自组件内解析。
+    const bubbleBgUrl = useBlobRefUrl(styleConfig.backgroundImage);
     const [showVoiceText, setShowVoiceText] = useState(false);
     const [replyOffset, setReplyOffset] = useState(0);
     const [isReplyGestureActive, setIsReplyGestureActive] = useState(false);
@@ -1618,16 +1624,16 @@ const MessageItem = React.memo(({
             <div className={`relative ${avatarSizeClass} z-0 ${options?.className || ''}`}>
                 {visible && (
                     <>
-                        <img
-                            src={src}
+                        <TokenImg
+                            value={src}
                             className={`sully-chat-message-avatar-img w-full h-full ${avatarRadiusClass} object-cover shadow-sm ring-1 ring-black/5 relative z-0`}
                             alt="avatar"
                             loading="lazy"
                             decoding="async"
                         />
                         {styleConfig.avatarDecoration && (
-                            <img
-                                src={styleConfig.avatarDecoration}
+                            <TokenImg
+                                value={styleConfig.avatarDecoration}
                                 className="absolute pointer-events-none z-10 max-w-none"
                                 style={{
                                     left: `${styleConfig.avatarDecorationX ?? 50}%`,
@@ -1691,7 +1697,7 @@ const MessageItem = React.memo(({
                                 {/* Header — date stamp + char avatar */}
                                 <div className="px-4 pt-3 pb-2.5 flex items-center gap-2.5" style={{ borderBottom: '1px dashed rgba(200,160,100,0.3)', background: 'linear-gradient(135deg, rgba(245,210,150,0.25), rgba(240,195,130,0.15))' }}>
                                     {scoreData.charAvatar ? (
-                                        <img src={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(220,180,110,0.5)' }} />
+                                        <TokenImg value={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(220,180,110,0.5)' }} />
                                     ) : (
                                         <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0" style={{ background: 'linear-gradient(135deg, #d4a55a, #b8843a)' }}>{scoreData.charName?.[0] || '?'}</div>
                                     )}
@@ -1758,7 +1764,7 @@ const MessageItem = React.memo(({
                                 {/* Header */}
                                 <div className="px-4 pt-3 pb-2 flex items-center gap-2.5" style={{ borderBottom: '1px solid rgba(200,185,190,0.2)', background: 'linear-gradient(135deg, rgba(200,185,190,0.2), rgba(190,175,195,0.15))' }}>
                                     {scoreData.charAvatar ? (
-                                        <img src={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(180,165,170,0.4)' }} />
+                                        <TokenImg value={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(180,165,170,0.4)' }} />
                                     ) : (
                                         <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0" style={{ background: 'linear-gradient(135deg, #b8909a, #a07880)' }}>{scoreData.charName?.[0] || '?'}</div>
                                     )}
@@ -1824,7 +1830,7 @@ const MessageItem = React.memo(({
                     <div className="w-full px-5 my-3" {...interactionProps}>
                         <div className="rounded-3xl bg-gradient-to-br from-slate-50 to-slate-100/80 border border-slate-200/50 p-4 shadow-sm">
                             <div className="flex items-center gap-3">
-                                <img src={memoAvatar} alt={memoTitle} className="h-9 w-9 rounded-full object-cover ring-1 ring-slate-200/80" loading="lazy" decoding="async" />
+                                <TokenImg value={memoAvatar} alt={memoTitle} className="h-9 w-9 rounded-full object-cover ring-1 ring-slate-200/80" loading="lazy" decoding="async" />
                                 <div className="min-w-0 flex-1">
                                     <div className="text-sm font-medium text-slate-600 truncate">和 {memoTitle} 通了电话</div>
                                     <div className="text-xs text-slate-400 mt-0.5">{durationText} · {turnCount}轮对话</div>
@@ -2052,7 +2058,7 @@ const MessageItem = React.memo(({
                 }}
             >
                 {src ? (
-                    <img src={src} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer"
+                    <TokenImg value={src} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer"
                         onError={(e: any) => {
                             const img = e.target;
                             const p = img.parentElement;
@@ -2124,8 +2130,8 @@ const MessageItem = React.memo(({
                 {/* Cover */}
                 <div className="relative w-full h-28 overflow-hidden">
                     {song.albumPic ? (
-                        <img
-                            src={song.albumPic}
+                        <TokenImg
+                            value={song.albumPic}
                             alt=""
                             className="w-full h-full object-cover"
                             loading="lazy"
@@ -3045,7 +3051,7 @@ const MessageItem = React.memo(({
                 </div>
                 <div className="p-3">
                     <div className="flex items-center gap-2 mb-2">
-                        <img src={post.authorAvatar} className="w-4 h-4 rounded-full" />
+                        <TokenImg value={post.authorAvatar} className="w-4 h-4 rounded-full" />
                         <span className="text-[10px] text-slate-500">{post.authorName}</span>
                     </div>
                     <p className="text-xs text-slate-600 line-clamp-2 leading-relaxed">{post.content}</p>
@@ -3079,7 +3085,7 @@ const MessageItem = React.memo(({
                     {/* Header bar */}
                     <div className="px-4 pt-3 pb-2 flex items-center gap-2.5" style={{ borderBottom: '1px solid rgba(200,185,190,0.2)', background: 'linear-gradient(135deg, rgba(200,185,190,0.2), rgba(190,175,195,0.15))' }}>
                         {scoreData.charAvatar ? (
-                            <img src={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(180,165,170,0.4)' }} />
+                            <TokenImg value={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(180,165,170,0.4)' }} />
                         ) : (
                             <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0" style={{ background: 'linear-gradient(135deg, #b8909a, #a07880)' }}>{scoreData.charName?.[0] || '?'}</div>
                         )}
@@ -3140,7 +3146,7 @@ const MessageItem = React.memo(({
                     {/* Header */}
                     <div className="px-4 pt-3 pb-2.5 flex items-center gap-2.5" style={{ background: 'linear-gradient(135deg, rgba(251,191,110,0.25), rgba(249,168,96,0.15))', borderBottom: '1px solid rgba(251,191,110,0.2)' }}>
                         {scoreData.charAvatar ? (
-                            <img src={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(251,191,110,0.4)' }} />
+                            <TokenImg value={scoreData.charAvatar} className="w-9 h-9 rounded-xl object-cover shadow-sm shrink-0" style={{ boxShadow: '0 0 0 2px rgba(251,191,110,0.4)' }} />
                         ) : (
                             <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0" style={{ background: 'linear-gradient(135deg, #f59e0b, #d97706)' }}>{scoreData.charName?.[0] || '?'}</div>
                         )}
@@ -3277,7 +3283,7 @@ const MessageItem = React.memo(({
     if (m.type === 'emoji') {
         return commonLayout(
             m.content ? (
-                <img src={m.content} className="sully-emoji-msg max-w-[var(--sully-emoji-size,96px)] max-h-[var(--sully-emoji-size,96px)] w-auto h-auto object-contain hover:scale-105 transition-transform drop-shadow-md active:scale-95" loading="lazy" decoding="async" />
+                <TokenImg value={m.content} className="sully-emoji-msg max-w-[var(--sully-emoji-size,96px)] max-h-[var(--sully-emoji-size,96px)] w-auto h-auto object-contain hover:scale-105 transition-transform drop-shadow-md active:scale-95" loading="lazy" decoding="async" />
             ) : (
                 <div className="px-3 py-2 rounded-2xl bg-slate-100 text-slate-400 text-xs italic">[表情已丢失]</div>
             )
@@ -3288,8 +3294,8 @@ const MessageItem = React.memo(({
         return commonLayout(
             <div className="relative group">
                 {m.content ? (
-                    <img
-                        src={m.content}
+                    <TokenImg
+                        value={m.content}
                         className="max-w-[200px] max-h-[300px] rounded-2xl"
                         alt="Uploaded"
                         loading={isLatestMessage ? 'eager' : 'lazy'}
@@ -3457,8 +3463,14 @@ const MessageItem = React.memo(({
     // 两家服务商的演出标记都不会漏给用户看。
     const cleanVoiceText = (t?: string | null) => stripFishCuesForDisplay(cleanVoiceMarkupForDisplay(t ?? ''));
 
-    // 引用快照原样存着 %%BILINGUAL%% 等原始标记（双语消息），预览前先清洗
-    const replyPreview = m.replyTo ? stripJunk(m.replyTo.content) : '';
+    // 引用快照原样存着 %%BILINGUAL%% 等原始标记（双语消息），预览前先清洗。
+    // 历史快照里还可能原样躺着图片令牌 / data: / 图床 URL（用户侧引用图片消息时曾直接落库），
+    // 那种值洗不出正文、截 10 个字就是一串 `blobref:b_`，交给写入端同一个快照函数换成占位符。
+    const replyPreview = m.replyTo
+        ? (isImageValue(m.replyTo.content)
+            ? buildReplySnapshotContent({ content: m.replyTo.content })
+            : stripJunk(m.replyTo.content))
+        : '';
 
     // Parse %%BILINGUAL%% for bilingual display (langA = "选" language, langB = "译" language)
     const bilingualIdx = rawContent.toLowerCase().indexOf('%%bilingual%%');
@@ -3506,11 +3518,11 @@ const MessageItem = React.memo(({
             style={isVoiceOnlyMsg ? undefined : containerStyle}>
 
             {/* Layer 1: Background Image with Independent Opacity */}
-            {styleConfig.backgroundImage && (
+            {bubbleBgUrl && (
                 <div
                     className="absolute inset-0 bg-cover bg-center pointer-events-none z-0"
                     style={{
-                        backgroundImage: `url(${styleConfig.backgroundImage})`,
+                        backgroundImage: `url(${bubbleBgUrl})`,
                         opacity: styleConfig.backgroundImageOpacity ?? 0.5,
                         borderRadius: 'inherit'
                     }}
@@ -3519,8 +3531,8 @@ const MessageItem = React.memo(({
 
             {/* Layer 2: Decoration Sticker (Custom Position) */}
             {styleConfig.decoration && (
-                <img
-                    src={styleConfig.decoration}
+                <TokenImg
+                    value={styleConfig.decoration}
                     className="absolute z-10 w-8 h-8 object-contain drop-shadow-sm pointer-events-none"
                     style={{
                         left: `${styleConfig.decorationX ?? (isUser ? 90 : 10)}%`,

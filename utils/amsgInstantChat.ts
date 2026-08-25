@@ -586,21 +586,45 @@ export const outboxPushToInbox = (
 /**
  * 补收的时效窗口：比这更早落账的条目不再往聊天流里放，直接销账。
  *
- * 两个理由。一是**噪音**：隔了一天才补上来的「早上好」既尴尬又打断当下的对话，
+ * 两个理由。一是**噪音**：隔太久才补上来的「早上好」既尴尬又打断当下的对话，
  * 而这条路本来是为「推送刚刚丢了」准备的，正常补收都在几十秒到几分钟内完成。
  * 二是**接上账本这一刻的存量**：账本从建表起就在攒行，而客户端是这一版才开始销账的，
  * 头一次拉会把历史积压一次性倒出来——不掐时效的话，那些早就落过库的老消息会因为
  * 超出近史去重的查询窗口而重新上屏。
+ *
+ * 定在两天而不是一天：真实场景里用户是「周五晚上丢了一条，周日才想起来打开」，
+ * 一天的窗口连隔夜加一个白天都盖不住，人还没意识到丢了消息，唯一的副本就已经在
+ * 上一次开 App 时被销掉了。两天能盖住「隔一夜 + 第二天想起来」这个最常见的节奏。
+ *
+ * 超窗的那些不会无声无息地消失，见 OutboxDrainResult.staleDropped。
  */
-export const OUTBOX_BACKFILL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const OUTBOX_BACKFILL_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 
 export interface OutboxDrainResult {
   /** 写进收件箱、等着冲刷落库的条数。 */
   written: number;
+  /**
+   * 写进收件箱的那几条的 messageId。
+   *
+   * 「写进收件箱」离「上了屏」还差一道冲刷（防穿帮闸、落库去重、多段等齐都可能把它
+   * 拦下）。调用方要如实告诉用户「补回了几条」时，得拿这份名单跟冲刷那边真正落库的
+   * 名单对一次，光看 written 会把被拦下的也算成补回来了。
+   */
+  writtenIds: string[];
   /** 不走聊天流、当场就能销账的 messageId（太老的、不进聊天流的那几类）。 */
   ackNow: string[];
   /** 这一趟从账本上读到的全部条目。调用方按轮次下结论时要看它。 */
   entries: AmsgOutboxEntry[];
+  /**
+   * 这一趟里**因为超出时效窗口**被销掉的聊天内容条数。
+   *
+   * 单独数出来，是因为这一档跟 ackNow 里其它几类的性质完全不同：思维链、工具请求
+   * 那些本来就不该进聊天流，销掉不损失任何东西；而这一档是**用户本该收到、现在
+   * 永久拿不回来的消息**。混在一起的话，「开一次 App 就把唯一的副本销掉了」这件事
+   * 从头到尾没有任何一处说得出口——用户后来去点「找回没收到的消息」，只会看到
+   * 一句「账本上没有漏收的消息，这条链路是通的」。
+   */
+  staleDropped: number;
 }
 
 /**
@@ -661,14 +685,52 @@ const adoptOutboxBacklog = async (entries: AmsgOutboxEntry[]): Promise<OutboxDra
       await ActiveMsgClient.ackOutboxMessages(backlogIds);
     } catch (error) {
       console.warn(`${HEADER} 账本存量没销干净，这一趟先不接管（下次重来）`, error);
-      return { written: 0, ackNow: [], entries };
+      return { written: 0, writtenIds: [], ackNow: [], entries, staleDropped: 0 };
     }
   }
   markOutboxAdopted();
   console.log(`${HEADER} 第一次接上云端账本：存量 ${backlogIds.length} 条直接销账，不往聊天流里放`);
 
-  const { written, ackNow } = await backfillOutboxEntries(entries.filter(keep));
-  return { written, ackNow, entries };
+  // 上面整批销掉的存量走的是 ackOutboxMessages，不经过 backfillOutboxEntries，所以
+  // 不会计进 staleDropped——那批是「这台设备接上账本之前的历史」，不是「本该收到却
+  // 过期了」，报给用户只会让人以为刚丢了一堆消息。
+  return { ...await backfillOutboxEntries(entries.filter(keep)), entries };
+};
+
+/**
+ * 这条账本行对应的消息，本地聊天记录里是不是已经有了。
+ *
+ * 判据跟冲刷那侧的落库去重是同一条：每条落库气泡都继承 `metadata.activeMsg2.messageId`
+ * （见 activeMsgRuntime.flushInboxToChatImpl 里的 isAlreadyPersisted）。两处各留一份是
+ * 因为这个模块不能反过来 import activeMsgRuntime（会成环，见文件头），改判据时两边一起改。
+ *
+ * 近史查询按角色缓存：一趟补收里同一个角色常常有好几条要核对。查不出来就按「本地没有」
+ * 处理——这一档只决定要不要跟用户说「拿不回来了」，宁可多说一次也别把丢消息说成没事。
+ */
+const isPushAlreadyInChat = async (
+  push: Record<string, any>,
+  cache: Map<string, Set<string>>,
+): Promise<boolean> => {
+  const charId = push?.metadata?.charId;
+  const messageId = push?.messageId;
+  if (typeof charId !== 'string' || !charId) return false;
+  if (typeof messageId !== 'string' || !messageId) return false;
+  let ids = cache.get(charId);
+  if (!ids) {
+    try {
+      const recent = await DB.getRecentMessagesByCharId(charId, 200);
+      ids = new Set(
+        recent
+          .map((m: any) => m?.metadata?.activeMsg2?.messageId)
+          .filter((id: unknown): id is string => typeof id === 'string' && !!id),
+      );
+    } catch (error) {
+      console.warn(`${HEADER} 核对本地聊天记录失败，这条按「本地没有」处理`, { charId, error });
+      ids = new Set<string>();
+    }
+    cache.set(charId, ids);
+  }
+  return ids.has(messageId);
 };
 
 /**
@@ -688,13 +750,17 @@ const backfillOutboxEntries = async (
 ): Promise<Omit<OutboxDrainResult, 'entries'>> => {
   const now = Date.now();
   const ackNow: string[] = [];
+  const writtenIds: string[] = [];
   let written = 0;
+  let staleDropped = 0;
+  // 超龄行核对本地聊天记录时用的近史缓存，一趟补收内每个角色只查一次。
+  const persistedIdsByChar = new Map<string, Set<string>>();
 
   for (const entry of entries) {
     const push = entry.push || {};
     const kind = typeof push.messageKind === 'string' ? push.messageKind : 'content';
     if (kind === 'result') {
-      // 聊天那道 24 小时的时效窗刻意不套在结果上：结果晚到本来就是常态（正是为此才上云的），
+      // 聊天那道两天的时效窗刻意不套在结果上：结果晚到本来就是常态（正是为此才上云的），
       // 隔一天回来照样该落地，跟「隔一天才弹出来的报错」不是一回事。
       // 但「多晚算太晚」得有人管——账本留 28 天，换设备 / 重装 PWA 的用户第一次接上账本
       // 会把老结果一次性拉回来。这里不替各种产物定规矩，只把账本上记的时间原样交给认领
@@ -707,6 +773,16 @@ const backfillOutboxEntries = async (
       continue;
     }
     if (entry.createdAt > 0 && now - entry.createdAt > OUTBOX_BACKFILL_MAX_AGE_MS) {
+      // 超龄不等于用户没收到。账本行躺到超龄，最常见的成因恰恰是**消息早就送达了**，
+      // 只是收尾那笔销账是 fire-and-forget（锁屏 / 切后台就被掐断），账一直挂着没销。
+      // 所以先拿 messageId 去本地聊天记录里核对一遍：找得到就只是补一次销账，既不算
+      // 「拿不回来了」，也不该弹那句「已经拿不回来了」的红字——用户明明看过这条消息。
+      if (await isPushAlreadyInChat(push, persistedIdsByChar)) {
+        ackNow.push(entry.messageId);
+        continue;
+      }
+      // 数出来交给调用方说给用户听：这一销，这条消息就永久没了（见 staleDropped）。
+      staleDropped += 1;
       ackNow.push(entry.messageId);
       continue;
     }
@@ -722,6 +798,7 @@ const backfillOutboxEntries = async (
     try {
       await ActiveMsgStore.saveInboxMessage(message);
       written += 1;
+      writtenIds.push(message.messageId);
     } catch (error) {
       // 写不进去就**不销账**，下次拉回来再试。
       console.warn(`${HEADER} 补收写入收件箱失败（账没销，下次再来）`, { messageId: entry.messageId, error });
@@ -729,7 +806,10 @@ const backfillOutboxEntries = async (
   }
 
   if (written > 0) console.log(`${HEADER} 从云端账本补收 ${written} 条（推送多半是丢了）`);
-  return { written, ackNow };
+  if (staleDropped > 0) {
+    console.warn(`${HEADER} 账本上有 ${staleDropped} 条超出补收窗口，只销账不上屏（这些消息拿不回来了）`);
+  }
+  return { written, writtenIds, ackNow, staleDropped };
 };
 
 /**
@@ -743,7 +823,8 @@ const backfillOutboxEntries = async (
  * 「我丢了的消息」。
  *
  * 调用方拿到 written > 0 之后要自己 flush 一次收件箱（见文件头注：不在这里 flush
- * 是为了避免和 activeMsgRuntime 成环）。
+ * 是为了避免和 activeMsgRuntime 成环）。要跟用户报「补回了几条」的，还得拿 writtenIds
+ * 跟冲刷返回的落库名单对一次——写进收件箱不等于上了屏。
  */
 export const drainOutbox = async (
   options?: {
@@ -762,8 +843,7 @@ export const drainOutbox = async (
     if (!options?.treatBacklogAsMissed) return await adoptOutboxBacklog(entries);
     markOutboxAdopted();
   }
-  const { written, ackNow } = await backfillOutboxEntries(entries);
-  return { written, ackNow, entries };
+  return { ...await backfillOutboxEntries(entries), entries };
 };
 
 /**

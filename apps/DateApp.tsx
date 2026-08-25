@@ -10,6 +10,7 @@ import { incrementDigestRound, runCognitiveDigestion } from '../utils/memoryPala
 import { getRoomLabel } from '../utils/memoryPalace/types';
 import { safeResponseJson, extractContent } from '../utils/safeApi';
 import Modal from '../components/os/Modal';
+import TokenImg from '../components/os/TokenImg';
 import DateSession from '../components/date/DateSession';
 import DateSettings from '../components/date/DateSettings';
 import { armDateResumeAttempt, clearDateResumeAttempt, takeCrashedDateResume } from '../utils/dateSessionRecovery';
@@ -817,7 +818,7 @@ const DateApp: React.FC = () => {
                                                 <div className="absolute inset-[8px] rounded-full" style={{ border: `1px solid ${th.ring1}` }} />
                                                 <div className="absolute inset-[12px] rounded-full" style={{ border: `1px solid ${th.ring2}` }} />
                                                 <div className="w-[70px] h-[70px] rounded-full overflow-hidden" style={{ boxShadow: `0 0 18px ${th.avGlow}` }}>
-                                                    <img src={c.avatar} className="w-full h-full object-cover" alt={c.name} />
+                                                    <TokenImg value={c.avatar} className="w-full h-full object-cover" alt={c.name} />
                                                 </div>
                                                 {c.savedDateState && (
                                                     <div title="有存档" className="absolute bottom-0 right-1.5 w-[22px] h-[22px] rounded-full flex items-center justify-center" style={{ background: '#fbbf24', boxShadow: '0 1px 5px rgba(180,120,20,0.4)' }}>

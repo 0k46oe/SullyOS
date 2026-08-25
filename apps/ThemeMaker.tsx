@@ -8,12 +8,46 @@ import { processImage } from '../utils/file';
 import { validateScopedCss, runCssRenderabilityCheck, CssValidationResult } from '../utils/scopedCss';
 import { trackEvent } from '../utils/analytics';
 import { resolveBubbleCornerRadii, shouldHideBubbleTail } from '../utils/bubbleAppearance';
+import { migrateDataUrlToRef, resolveBlobRefsDeep, useBlobRefUrl } from '../utils/blobRef';
+import TokenImg from '../components/os/TokenImg';
 
 const cloneTheme = (theme: ChatTheme): ChatTheme => {
     if (typeof structuredClone === 'function') {
         return structuredClone(theme);
     }
     return JSON.parse(JSON.stringify(theme));
+};
+
+/**
+ * 一侧气泡里的图片改存令牌：底纹 / 贴纸 / 头像挂件三个字段，还是 base64 的换成
+ * `blobref:<id>`（二进制进 blob_assets，见 utils/blobRef.ts），其余值原样。
+ * 转不动时 migrateDataUrlToRef 会把原串还回来，图不会丢。
+ */
+async function bubbleStyleToBlobRefs(style: BubbleStyle): Promise<BubbleStyle> {
+    const toRef = async (value: string | undefined): Promise<string | undefined> => (
+        typeof value === 'string' && value.startsWith('data:image/') ? await migrateDataUrlToRef(value) : value
+    );
+    const next = { ...style };
+    next.backgroundImage = await toRef(next.backgroundImage);
+    next.decoration = await toRef(next.decoration);
+    next.avatarDecoration = await toRef(next.avatarDecoration);
+    return next;
+}
+
+/**
+ * 气泡底纹层。底纹画在 CSS background-image 上，享受不到 <img>（TokenImg）那层的
+ * 自动解析，得自己调 hook 把令牌解成 objectURL；而预览气泡是在一个普通函数里渲染的
+ * （hook 不能写在那儿），所以单独包成组件，解析放在它自己内部。
+ */
+const BubbleBgLayer: React.FC<{ value?: string; opacity?: number }> = ({ value, opacity }) => {
+    const url = useBlobRefUrl(value);
+    if (!url) return null;
+    return (
+        <div
+            className="absolute inset-0 bg-cover bg-center pointer-events-none z-0"
+            style={{ backgroundImage: `url(${url})`, opacity: opacity ?? 0.5, borderRadius: 'inherit' }}
+        />
+    );
 };
 
 const DEFAULT_STYLE: BubbleStyle = {
@@ -638,6 +672,10 @@ const ThemeMaker: React.FC = () => {
             const baseName = String(raw.name || '导入的气泡').slice(0, 30);
             const name = customThemes.some(t => t.name === baseName) ? `${baseName}（导入）` : baseName;
             const imported: ChatTheme = { ...raw, id: `custom-${Date.now()}-${Math.floor(Math.random() * 1e4)}`, type: 'custom', name };
+            // 别人分享的文件里图是内嵌 base64，入库前顺手转成令牌：省掉 ~33% 的膨胀，
+            // 内容一样的图还会跟库里已有的那份共用，不用等下次「优化资源存储」来收。
+            imported.user = await bubbleStyleToBlobRefs(imported.user);
+            imported.ai = await bubbleStyleToBlobRefs(imported.ai);
             addCustomTheme(imported);
             addToast(`已导入「${name}」，在作品区可选用`, 'success');
         } catch {
@@ -645,8 +683,18 @@ const ThemeMaker: React.FC = () => {
         }
     };
 
-    const exportSavedTheme = (theme: ChatTheme) => {
-        const blob = new Blob([JSON.stringify({ kind: 'sullyos-chat-theme', version: 1, theme }, null, 2)], { type: 'application/json' });
+    // 导出成分享文件：主题里的图存的是令牌，令牌只有本机认得，原样导出对方只会拿到
+    // 一串死字符串、图全空。所以先在一份深拷贝上把令牌换回内嵌的 data URL
+    // （resolveBlobRefsDeep 是原地改的，绝不能拿库里那套主题去喂）。
+    const exportSavedTheme = async (theme: ChatTheme) => {
+        const portable = cloneTheme(theme);
+        try {
+            await resolveBlobRefsDeep(portable);
+        } catch {
+            addToast('导出失败：图片读取不出来', 'error');
+            return;
+        }
+        const blob = new Blob([JSON.stringify({ kind: 'sullyos-chat-theme', version: 1, theme: portable }, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement('a');
         anchor.href = url;
@@ -732,9 +780,11 @@ const ThemeMaker: React.FC = () => {
     const handleImageUpload = async (file: File, type: 'bg' | 'deco' | 'avatarDeco') => {
         try {
             const result = await processImage(file);
-            if (type === 'bg') updateStyle('backgroundImage', result);
-            else if (type === 'deco') updateStyle('decoration', result);
-            else if (type === 'avatarDeco') updateStyle('avatarDecoration', result);
+            // 主题里存的是令牌，不是几 MB 的 base64（二进制进 blob_assets，见 utils/blobRef.ts）
+            const stored = await migrateDataUrlToRef(result);
+            if (type === 'bg') updateStyle('backgroundImage', stored);
+            else if (type === 'deco') updateStyle('decoration', stored);
+            else if (type === 'avatarDeco') updateStyle('avatarDecoration', stored);
             addToast('图片上传成功', 'success');
         } catch (e: any) {
             addToast(e.message, 'error');
@@ -1000,8 +1050,8 @@ const ThemeMaker: React.FC = () => {
                          <div className="absolute inset-0 flex items-center justify-center text-white/50 font-bold text-[10px]">{isUser ? 'ME' : 'AI'}</div>
                     </div>
                     {style.avatarDecoration && (
-                        <img 
-                            src={style.avatarDecoration}
+                        <TokenImg
+                            value={style.avatarDecoration}
                             className="absolute pointer-events-none z-10 max-w-none"
                             style={{
                                 left: `${style.avatarDecorationX ?? 50}%`,
@@ -1016,8 +1066,8 @@ const ThemeMaker: React.FC = () => {
 
                 <div className={`relative group max-w-[78%] ${isUser ? 'mr-12' : 'ml-12'}`}>
                     {style.decoration && (
-                        <img 
-                            src={style.decoration} 
+                        <TokenImg
+                            value={style.decoration}
                             className="absolute z-10 w-8 h-8 object-contain drop-shadow-sm pointer-events-none"
                             style={{
                                 left: `${style.decorationX ?? (isUser ? 90 : 10)}%`,
@@ -1033,15 +1083,8 @@ const ThemeMaker: React.FC = () => {
                             : `relative px-5 py-3 shadow-sm border border-black/5 text-sm overflow-visible ${isUser ? 'sully-bubble-user' : 'sully-bubble-ai'} ${isLastInGroup ? 'sully-bubble-group-last' : ''} ${hideTail ? 'sully-bubble-tail-hidden' : 'sully-bubble-tail-visible'} ${isActive ? 'ring-2 ring-primary/70' : ''}`}
                         style={isVoice ? undefined : containerStyle}
                     >
-                        {!isVoice && showPreviewBgImage && style.backgroundImage && (
-                            <div 
-                                className="absolute inset-0 bg-cover bg-center pointer-events-none z-0"
-                                style={{ 
-                                    backgroundImage: `url(${style.backgroundImage})`,
-                                    opacity: style.backgroundImageOpacity ?? 0.5,
-                                    borderRadius: 'inherit'
-                                }}
-                            ></div>
+                        {!isVoice && showPreviewBgImage && (
+                            <BubbleBgLayer value={style.backgroundImage} opacity={style.backgroundImageOpacity} />
                         )}
                         {mock.replyTo && (
                             <div className="relative z-10 mb-1 text-[10px] bg-black/5 p-1.5 rounded-md border-l-2 border-current opacity-60 flex flex-col gap-0.5 max-w-full overflow-hidden">
@@ -1204,7 +1247,7 @@ const ThemeMaker: React.FC = () => {
                                 </div>
                                 <div className="grid grid-cols-3 gap-1.5 mt-2.5">
                                     <button onClick={() => editSavedTheme(theme)} className="py-1.5 rounded-xl bg-indigo-50 text-indigo-600 text-[11px] font-bold">选择载入</button>
-                                    <button onClick={() => exportSavedTheme(theme)} className="py-1.5 rounded-xl bg-slate-100 text-slate-600 text-[11px] font-bold">导出</button>
+                                    <button onClick={() => void exportSavedTheme(theme)} className="py-1.5 rounded-xl bg-slate-100 text-slate-600 text-[11px] font-bold">导出</button>
                                     <button onClick={() => setPendingDeleteTheme(theme)} className="py-1.5 rounded-xl bg-red-50 text-red-500 text-[11px] font-bold">删除</button>
                                 </div>
                             </div>
@@ -1621,7 +1664,7 @@ const ThemeMaker: React.FC = () => {
                             <div onClick={() => fileInputRef.current?.click()} className="cursor-pointer group relative h-24 bg-slate-50 rounded-xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center text-slate-400 overflow-hidden hover:border-primary/50 hover:text-primary transition-all">
                                 {activeStyle.backgroundImage ? (
                                     <>
-                                        <img src={activeStyle.backgroundImage} className="absolute inset-0 w-full h-full object-cover opacity-50" />
+                                        <TokenImg value={activeStyle.backgroundImage} className="absolute inset-0 w-full h-full object-cover opacity-50" />
                                         <span className="relative z-10 text-[10px] bg-white/80 px-2 py-1 rounded shadow-sm font-bold">更换底纹</span>
                                     </>
                                 ) : <span className="text-xs font-bold">+ 上传底纹图片 (Texture)</span>}
@@ -1750,7 +1793,7 @@ const ThemeMaker: React.FC = () => {
                     {activeTab !== 'css' && toolSection === 'sticker' && (
                         <div className="space-y-6 animate-fade-in">
                             <div onClick={() => decorationInputRef.current?.click()} className="cursor-pointer group relative h-20 bg-slate-50 rounded-xl border-2 border-dashed border-slate-200 flex items-center justify-center text-slate-400 hover:border-primary/50 hover:text-primary transition-all">
-                                 {activeStyle.decoration ? <img src={activeStyle.decoration} className="h-10 w-10 object-contain" /> : <span className="text-xs font-bold">+ 上传气泡角标/贴纸</span>}
+                                 {activeStyle.decoration ? <TokenImg value={activeStyle.decoration} className="h-10 w-10 object-contain" /> : <span className="text-xs font-bold">+ 上传气泡角标/贴纸</span>}
                                  <input type="file" ref={decorationInputRef} className="hidden" accept="image/*" onChange={(e) => e.target.files?.[0] && handleImageUpload(e.target.files[0], 'deco')} />
                                  {activeStyle.decoration && <button onClick={(e) => { e.stopPropagation(); updateStyle('decoration', undefined); }} className="absolute top-2 right-2 text-[10px] bg-red-100 text-red-500 px-2 py-0.5 rounded-full">移除</button>}
                             </div>
@@ -1793,7 +1836,7 @@ const ThemeMaker: React.FC = () => {
                     {activeTab !== 'css' && toolSection === 'avatar' && (
                         <div className="space-y-6 animate-fade-in">
                             <div onClick={() => avatarDecoInputRef.current?.click()} className="cursor-pointer group relative h-20 bg-slate-50 rounded-xl border-2 border-dashed border-slate-200 flex items-center justify-center text-slate-400 hover:border-primary/50 hover:text-primary transition-all">
-                                 {activeStyle.avatarDecoration ? <img src={activeStyle.avatarDecoration} className="h-10 w-10 object-contain" /> : <span className="text-xs font-bold">+ 上传头像框/挂件</span>}
+                                 {activeStyle.avatarDecoration ? <TokenImg value={activeStyle.avatarDecoration} className="h-10 w-10 object-contain" /> : <span className="text-xs font-bold">+ 上传头像框/挂件</span>}
                                  <input type="file" ref={avatarDecoInputRef} className="hidden" accept="image/*" onChange={(e) => e.target.files?.[0] && handleImageUpload(e.target.files[0], 'avatarDeco')} />
                                  {activeStyle.avatarDecoration && <button onClick={(e) => { e.stopPropagation(); updateStyle('avatarDecoration', undefined); }} className="absolute top-2 right-2 text-[10px] bg-red-100 text-red-500 px-2 py-0.5 rounded-full">移除</button>}
                             </div>
@@ -1925,7 +1968,7 @@ const ThemeMaker: React.FC = () => {
                                         })}
                                         className={`flex items-center gap-3 p-2.5 rounded-2xl border cursor-pointer transition-all ${checked ? 'bg-indigo-50/80 border-indigo-200' : 'bg-white border-slate-100'}`}
                                     >
-                                        <img src={c.avatar} className="w-10 h-10 rounded-xl object-cover shrink-0" alt="" />
+                                        <TokenImg value={c.avatar} className="w-10 h-10 rounded-xl object-cover shrink-0" alt="" />
                                         <div className="flex-1 min-w-0">
                                             <div className="text-[13px] font-bold text-slate-700 truncate">{c.name}</div>
                                             <div className="text-[10px] text-slate-400 truncate">
