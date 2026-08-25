@@ -37,6 +37,21 @@ const OTHER_USAGE_MIN_RATIO = 0.1;
 /** 合并完成后自动刷新前留的一点时间，让用户看清这轮到底做了什么。 */
 const MERGE_RELOAD_DELAY_MS = 2500;
 
+/**
+ * 合并过重复图片就排一次整页刷新，排过了就不再排。
+ *
+ * 计时器和标记都放在组件外面，是因为这次刷新是数据一致性动作，不是界面上的顺手事：
+ * 合并只改了库里的引用，内存里的 theme / customIcons 还捏着合并前的令牌，带着它导出
+ * 备份，同一张图会被写成两份。所以用户在这 2.5 秒里收起板块、退出设置页、或者再点一次
+ * 「一键优化」（这些都会把面板卸掉或重置状态），刷新照样得来。
+ */
+let mergeReloadScheduled = false;
+function scheduleMergeReload(): void {
+    if (mergeReloadScheduled) return;
+    mergeReloadScheduled = true;
+    setTimeout(() => window.location.reload(), MERGE_RELOAD_DELAY_MS);
+}
+
 type PersistAttempt = 'none' | 'granted' | 'denied';
 
 /**
@@ -133,6 +148,9 @@ const StorageUsagePanel: React.FC = () => {
             const result = await optimizeResourceStorage(p => {
                 if (aliveRef.current) setOptimizeProgress(p);
             });
+            // 排在面板存活判断之前：引用已经在库里合并了，内存里的旧令牌就得靠刷新换掉，
+            // 这件事跟面板还在不在没关系。
+            if (result.mergedDuplicates > 0) scheduleMergeReload();
             if (!aliveRef.current) return;
             setOptimizeResult(result);
             // 用量和细分都变了：总量刷新，细分缓存作废（下次展开重算）
@@ -145,14 +163,6 @@ const StorageUsagePanel: React.FC = () => {
             if (aliveRef.current) { setOptimizing(false); setOptimizeProgress(null); }
         }
     }, [optimizing, refreshOverview]);
-
-    // 合并过引用就自动刷新一次：内存里的 theme / customIcons 还指着合并前的令牌，
-    // 带着它导出的话备份里同一张图又会存成两份，看起来像没生效。
-    useEffect(() => {
-        if (!optimizeResult || optimizeResult.mergedDuplicates <= 0) return;
-        const timer = setTimeout(() => window.location.reload(), MERGE_RELOAD_DELAY_MS);
-        return () => clearTimeout(timer);
-    }, [optimizeResult]);
 
     const handlePersist = useCallback(async () => {
         setPersisting(true);
@@ -273,8 +283,9 @@ const StorageUsagePanel: React.FC = () => {
                 </p>
                 {/* 合并动的是库里的引用，内存里的 theme / customIcons 还捏着合并前的令牌。
                     不刷新的话：界面照常显示，但导出的备份里 metadata 写的仍是旧令牌，
-                    同一张图又变成两份进包——看起来就像「优化根本没生效」。所以这里自动刷新，
-                    不指望用户记得点；下面的按钮只是让人不想等的时候立刻走。 */}
+                    同一张图又变成两份进包——看起来就像「优化根本没生效」。所以优化一跑完就
+                    排好了自动刷新（见 scheduleMergeReload），不指望用户记得点；
+                    这个按钮只是让人不想等的时候立刻走。 */}
                 {!optimizing && optimizeResult && optimizeResult.mergedDuplicates > 0 && (
                     <button
                         type="button"

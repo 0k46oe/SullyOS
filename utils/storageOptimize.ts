@@ -151,7 +151,8 @@ export interface OptimizeResult {
     bytesBefore: number;
     /** 对应 Blob 的总字节数（去重后） */
     bytesAfter: number;
-    /** 转换失败、原值保留的字段数（图不丢，只是这张没省下来） */
+    /** 转换失败、原值保留的字段数（图不丢，只是这张没省下来）。
+     *  两种来源：这张图本身转不动，以及转好了但那一行写不回去（配额满） */
     failed: number;
     /**
      * 失败原因 → 出现次数，键形如「相册: TypeError: ...」。
@@ -190,6 +191,14 @@ export async function optimizeResourceStorage(
         let currentFace = '开始前';
         // 已计过字节数的令牌：canonical 迁移函数产出的令牌经这里补记大小，避免重复计。
         const countedTokens = new Set<string>();
+        // 这一行开跑时的记账读数 + 这一行新计过的令牌（tick 时刷新）。
+        // 行写回失败时按它把这一行的账原样退回去，见 writeRow。
+        const rowStart = () => ({
+            converted: result.converted, bytesBefore: result.bytesBefore,
+            uniqueBlobs: result.uniqueBlobs, bytesAfter: result.bytesAfter,
+            newTokens: [] as string[],
+        });
+        let rowTally = rowStart();
 
         /** convert / convertExclusive 共用的转换体。差别只在 put：走不走内容去重。 */
         const convertWith = async (
@@ -209,6 +218,7 @@ export async function optimizeResourceStorage(
                 result.bytesBefore += value.length;
                 if (!reused && !countedTokens.has(token)) {
                     countedTokens.add(token);
+                    rowTally.newTokens.push(token);
                     result.uniqueBlobs++;
                     result.bytesAfter += blob.size;
                 }
@@ -257,6 +267,7 @@ export async function optimizeResourceStorage(
             result.bytesBefore += before.length;
             if (!countedTokens.has(after)) {
                 countedTokens.add(after);
+                rowTally.newTokens.push(after);
                 result.uniqueBlobs++;
                 const blob = await getBlobForRef(after);
                 if (blob) result.bytesAfter += blob.size;
@@ -264,6 +275,37 @@ export async function optimizeResourceStorage(
         };
 
         const yieldMain = () => new Promise<void>(r => setTimeout(r, 0));
+
+        /**
+         * 行级写回：这一行写不进去就只记一笔失败，接着跑下一行。
+         *
+         * 这几张表的写入口会等事务真的提交完才 resolve，配额满 / 事务 abort 都是从这里抛
+         * 上来的。而本函数只有 finally 没有 catch，不在这儿接住的话，一行写失败就把整轮掐断
+         * 在半路——后面的面全不跑，连回收最省的那步「合并重复图片」都轮不到，结果也返回不了。
+         * 偏偏「存储快满」正是有人来点这个按钮的时候。
+         *
+         * 账按行退：这一行转出来的令牌一个都没落库，库里还是原来那份 base64，所以算
+         * 「没省下来」（failed）而不是「省了」（converted）。退不掉的只有已经写进 blob 表的
+         * 那几份二进制——它们现在没有任何字段引用着，是孤儿，交给孤儿清理收。
+         */
+        const writeRow = async (save: () => Promise<unknown>): Promise<void> => {
+            try {
+                await save();
+            } catch (e) {
+                const rolledBack = result.converted - rowTally.converted;
+                result.converted = rowTally.converted;
+                result.bytesBefore = rowTally.bytesBefore;
+                result.uniqueBlobs = rowTally.uniqueBlobs;
+                result.bytesAfter = rowTally.bytesAfter;
+                for (const token of rowTally.newTokens) countedTokens.delete(token);
+                // 一行里可能好几个字段一起没写进去，各记一笔。一个字段都没转、只改了别的
+                // 东西的行（比如只归一化了引用快照）也得留下一笔，别让失败静默过去。
+                const lost = Math.max(rolledBack, 1);
+                result.failed += lost;
+                const reason = `${currentFace}: ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`;
+                result.failureReasons[reason] = (result.failureReasons[reason] ?? 0) + lost;
+            }
+        };
 
         // ── 0) 扫库：谁和谁装的是同一份内容 ───────────────────────
         // 结果有两个用处：给内容记忆预热（下面转换时直接复用库里已有的那份），
@@ -273,7 +315,10 @@ export async function optimizeResourceStorage(
         });
         // 每条都算不出哈希（非安全上下文没有 crypto.subtle）和「真没重复」长得一模一样，
         // 这里一并当作「这轮没做成去重」报出去，别让它静默过去。
-        result.scanUnavailable = scan.aborted || (scan.scanned > 0 && scan.skipped === scan.scanned);
+        // 判据靠 SDK 那两个计数器互斥：算出哈希才 scanned++，读不出 / 算不动一律 skipped++。
+        // 所以「一条都没成」写作 skipped > 0 且 scanned === 0——空库两个都是 0，不算不可用；
+        // 只坏了几条时 scanned 仍大于 0，去重照跑，也不算。
+        result.scanUnavailable = scan.aborted || (scan.skipped > 0 && scan.scanned === 0);
 
         // 被「换图即删」的字段引用着的令牌不能拿来共享：对方一删，这边就破图。
         const unmergeable = result.scanUnavailable ? new Set<string>() : await collectUnmergeableRefs();
@@ -295,7 +340,9 @@ export async function optimizeResourceStorage(
         // 多出来的行照样处理，只是报出去的 done 按 total 封顶——done 只增不减也不越过 total，
         // 进度条既不会倒退也不会冲过头；行变少时它停在不满格的位置，函数返回即收尾
         // （展示侧本来就以返回为准，不靠进度条判完成）。
-        const tick = (label: string) => { currentFace = label; done++; onProgress?.({ label, done: Math.min(done, total), total }); };
+        // 每行开头都会走一趟，顺手把记账起点也刷了——writeRow 退账靠的就是这个读数，
+        // 少刷一次就会把上一行的账一起退掉。
+        const tick = (label: string) => { currentFace = label; rowTally = rowStart(); done++; onProgress?.({ label, done: Math.min(done, total), total }); };
 
         // ── 1) assets 表 ─────────────────────────────────────────
         for await (const a of iterateStoreRows<{ id: string; data: string }>('assets')) {
@@ -303,7 +350,7 @@ export async function optimizeResourceStorage(
             if (typeof a.data !== 'string') continue;
             if (PLAIN_ASSET_IDS.has(a.id) || a.id.startsWith('icon_') || a.id.startsWith('widget_')) {
                 const token = await convert(a.data);
-                if (token) { await DB.saveAsset(a.id, token); await yieldMain(); }
+                if (token) { await writeRow(() => DB.saveAsset(a.id, token)); await yieldMain(); }
             } else if (a.id.startsWith('appearance_preset_')) {
                 let preset: AppearancePreset;
                 try { preset = JSON.parse(a.data); } catch { continue; }
@@ -315,14 +362,14 @@ export async function optimizeResourceStorage(
                 for (let i = 0; i < beforeFields.length; i++) {
                     if (beforeFields[i] !== afterFields[i]) { changed = true; await tallyPair(beforeFields[i], afterFields[i]); }
                 }
-                if (changed) { await DB.saveAsset(a.id, JSON.stringify(migrated)); await yieldMain(); }
+                if (changed) { await writeRow(() => DB.saveAsset(a.id, JSON.stringify(migrated))); await yieldMain(); }
             } else if (a.id === 'spark_social_profile') {
                 // 社交主页的个人资料 JSON，图只有 avatar 一个字段。
                 let profile: { avatar?: string };
                 try { profile = JSON.parse(a.data); } catch { continue; }
                 if (!profile || typeof profile !== 'object') continue;
                 const token = await convert(profile.avatar);
-                if (token) { profile.avatar = token; await DB.saveAsset(a.id, JSON.stringify(profile)); await yieldMain(); }
+                if (token) { profile.avatar = token; await writeRow(() => DB.saveAsset(a.id, JSON.stringify(profile))); await yieldMain(); }
             } else if (a.id === 'room_custom_assets_list') {
                 let list: Array<{ image?: string }>;
                 try { list = JSON.parse(a.data); } catch { continue; }
@@ -332,7 +379,7 @@ export async function optimizeResourceStorage(
                     const token = await convert(entry?.image);
                     if (token) { entry.image = token; changed = true; }
                 }
-                if (changed) { await DB.saveAsset(a.id, JSON.stringify(list)); await yieldMain(); }
+                if (changed) { await writeRow(() => DB.saveAsset(a.id, JSON.stringify(list))); await yieldMain(); }
             }
         }
 
@@ -459,14 +506,14 @@ export async function optimizeResourceStorage(
                     if (await migrateSpriteMap(skin?.sprites)) changed = true;
                 }
             }
-            if (changed) { await DB.saveCharacter(c); await yieldMain(); }
+            if (changed) { await writeRow(() => DB.saveCharacter(c)); await yieldMain(); }
         }
 
         // ── 3) songs 封面 ─────────────────────────────────────────
         for await (const s of iterateStoreRows<SongSheet>('songs')) {
             tick('歌曲封面');
             const token = await convert((s as any).coverImage);
-            if (token) { (s as any).coverImage = token; await DB.saveSong(s); await yieldMain(); }
+            if (token) { (s as any).coverImage = token; await writeRow(() => DB.saveSong(s)); await yieldMain(); }
         }
 
         // ── 4) 捏人器自定义部件 ───────────────────────────────────
@@ -479,7 +526,7 @@ export async function optimizeResourceStorage(
             if (migrated.src === p.src && migrated.shadowSrc === p.shadowSrc) continue;
             await tallyPair(p.src, migrated.src);
             await tallyPair(p.shadowSrc, migrated.shadowSrc);
-            await DB.saveCustomCreatorPart(migrated);
+            await writeRow(() => DB.saveCustomCreatorPart(migrated));
             await yieldMain();
         }
 
@@ -488,7 +535,7 @@ export async function optimizeResourceStorage(
         for await (const g of iterateStoreRows<GalleryImage>('gallery')) {
             tick('相册');
             const token = await convert(g.url);
-            if (token) { g.url = token; await DB.saveGalleryImage(g); await yieldMain(); }
+            if (token) { g.url = token; await writeRow(() => DB.saveGalleryImage(g)); await yieldMain(); }
         }
 
         // ── 6) 聊天气泡主题 ───────────────────────────────────────
@@ -505,7 +552,7 @@ export async function optimizeResourceStorage(
                     if (token) { style[key] = token; changed = true; }
                 }
             }
-            if (changed) { await DB.saveTheme(t); await yieldMain(); }
+            if (changed) { await writeRow(() => DB.saveTheme(t)); await yieldMain(); }
         }
 
         // ── 7) 聊天图与表情消息 ───────────────────────────────────
@@ -515,64 +562,73 @@ export async function optimizeResourceStorage(
         // convert，两道一起挡住「正文恰好长得像 data URL 的文本消息」。
         // 转出来的令牌可能跟相册那一面是同一个（同一张图发出去时两边各存了一份引用），
         // 这正是要的效果：一份 Blob 两处引用，删其中一处也绝不能直接删 Blob。
+        // 一行最多有两处要动：正文（图片行是整张图，卡片行是 JSON 里的头像副本）和引用快照。
+        // 两处合成一次整行写回——图片行也可能带引用（引用一条图片消息后回了张图 / 一个表情），
+        // 谁要是让某类行提前跳过引用那段，那几 MB 的快照副本就永久留库：正文一旦转成令牌，
+        // 重跑优化连正文都不动了，再也补不上。
         for await (const m of iterateStoreRows<Message>('messages')) {
             tick('聊天图片');
-            if (m.type === 'image' || m.type === 'emoji') {
-                const token = await convert(m.content);
-                if (token) { await DB.updateMessage(m.id, token); await yieldMain(); }
-                continue;
-            }
-
-            // 其余类型的行里也压着图，但都是「副本」：卡片上印的角色头像、通话结束卡上的
-            // 头像、分享出去的帖子快照、引用回复的内容快照。逐个字段定向处理，不做深度遍历
-            // ——同一坨 JSON 里还躺着 520 的手办图，那个是刻意留 dataURL 的。
             let changed = false;
 
-            // 卡片正文：content 是一段 JSON。只认这两个字段名。
-            if (typeof m.content === 'string' && m.content.startsWith('{')) {
-                try {
-                    const card = JSON.parse(m.content);
+            if (m.type === 'image' || m.type === 'emoji') {
+                const token = await convert(m.content);
+                if (token) { m.content = token; changed = true; }
+            } else {
+                // 其余类型的行里也压着图，但都是「副本」：卡片上印的角色头像、通话结束卡上的
+                // 头像、分享出去的帖子快照。逐个字段定向处理，不做深度遍历
+                // ——同一坨 JSON 里还躺着 520 的手办图，那个是刻意留 dataURL 的。
+
+                // 卡片正文：content 是一段 JSON。只认这两个字段名。
+                if (typeof m.content === 'string' && m.content.startsWith('{')) {
+                    try {
+                        const card = JSON.parse(m.content);
+                        if (card && typeof card === 'object') {
+                            // 用行内的小旗子而不是外面那个 changed：外面那个会被别处的改动
+                            // 点亮，拿它当判据的话，一张图都没转到的卡片也会被重新 stringify
+                            let cardChanged = false;
+                            for (const key of CARD_IMAGE_KEYS) {
+                                const token = await convert(card[key]);
+                                if (token) { card[key] = token; cardChanged = true; }
+                            }
+                            if (cardChanged) { m.content = JSON.stringify(card); changed = true; }
+                        }
+                    } catch { /* 不是 JSON 的正文原样不动 */ }
+                }
+
+                const meta = (m as any).metadata;
+                if (meta && typeof meta === 'object') {
+                    // metadata.scoreCard 是同一张卡的另一份副本，而且读端优先读它——
+                    // 只转 content 那份等于白转。两边必须一起。
+                    const card = meta.scoreCard;
                     if (card && typeof card === 'object') {
                         for (const key of CARD_IMAGE_KEYS) {
                             const token = await convert(card[key]);
                             if (token) { card[key] = token; changed = true; }
                         }
-                        if (changed) m.content = JSON.stringify(card);
                     }
-                } catch { /* 不是 JSON 的正文原样不动 */ }
-            }
-
-            const meta = (m as any).metadata;
-            if (meta && typeof meta === 'object') {
-                // metadata.scoreCard 是同一张卡的另一份副本，而且读端优先读它——
-                // 只转 content 那份等于白转。两边必须一起。
-                const card = meta.scoreCard;
-                if (card && typeof card === 'object') {
-                    for (const key of CARD_IMAGE_KEYS) {
-                        const token = await convert(card[key]);
-                        if (token) { card[key] = token; changed = true; }
-                    }
-                }
-                // 通话结束卡上留的角色头像
-                const callAvatar = await convert(meta.characterAvatar);
-                if (callAvatar) { meta.characterAvatar = callAvatar; changed = true; }
-                // 分享到聊天里的社交帖子快照
-                const post = meta.post;
-                if (post && typeof post === 'object') {
-                    const authorToken = await convert(post.authorAvatar);
-                    if (authorToken) { post.authorAvatar = authorToken; changed = true; }
-                    if (Array.isArray(post.comments)) {
-                        for (const comment of post.comments) {
-                            const token = await convert(comment?.authorAvatar);
-                            if (token) { comment.authorAvatar = token; changed = true; }
+                    // 通话结束卡上留的角色头像
+                    const callAvatar = await convert(meta.characterAvatar);
+                    if (callAvatar) { meta.characterAvatar = callAvatar; changed = true; }
+                    // 分享到聊天里的社交帖子快照
+                    const post = meta.post;
+                    if (post && typeof post === 'object') {
+                        const authorToken = await convert(post.authorAvatar);
+                        if (authorToken) { post.authorAvatar = authorToken; changed = true; }
+                        if (Array.isArray(post.comments)) {
+                            for (const comment of post.comments) {
+                                const token = await convert(comment?.authorAvatar);
+                                if (token) { comment.authorAvatar = token; changed = true; }
+                            }
                         }
+                        // post.images[] 不碰：渲染那头把它当成「可能是 emoji 的字符串」
+                        // 直接印成文本（见 MessageItem 的 social_card 分支）。
                     }
-                    // post.images[] 不碰：渲染那头把它当成「可能是 emoji 的字符串」
-                    // 直接印成文本（见 MessageItem 的 social_card 分支）。
                 }
             }
 
             // 引用回复的内容快照：被引用的若是图片，这里存的是整张图的副本。
+            // 这一段对所有类型的行都要跑到（图片 / 表情行照样能带引用），
+            // 所以它待在上面那个 if / else 外面。
             // 不转令牌而是换成占位符——引用块本来就只显示纯文本（还截前 10 字），
             // 令牌摆在那儿既难看，被截断后剩下的 'blobref:b_' 还正好是所有令牌 id 的
             // 公共前缀，会让孤儿清理判定「引用面被截断了」从而整轮不敢删。
@@ -587,7 +643,7 @@ export async function optimizeResourceStorage(
                 }
             }
 
-            if (changed) { await DB.putStoreRows('messages', [m]); await yieldMain(); }
+            if (changed) { await writeRow(() => DB.putStoreRows('messages', [m])); await yieldMain(); }
         }
 
         // ── 8) 表情库 ─────────────────────────────────────────────
@@ -597,7 +653,7 @@ export async function optimizeResourceStorage(
         for await (const e of iterateStoreRows<Emoji>('emojis')) {
             tick('表情包');
             const token = await convert(e.url);
-            if (token) { await DB.saveEmoji(e.name, token, e.categoryId); await yieldMain(); }
+            if (token) { await writeRow(() => DB.saveEmoji(e.name, token, e.categoryId)); await yieldMain(); }
         }
 
         // ── 9) 我方头像（user_profile 单例）───────────────────────
@@ -623,7 +679,7 @@ export async function optimizeResourceStorage(
                 const token = await convert(myChibi.img);
                 if (token) { myChibi.img = token; changed = true; }
             }
-            if (changed) { await DB.putStoreRows('user_profile', [p]); await yieldMain(); }
+            if (changed) { await writeRow(() => DB.putStoreRows('user_profile', [p])); await yieldMain(); }
         }
 
         // ── 10) 社交帖子：作者头像与评论头像 ─────────────────────
@@ -640,7 +696,7 @@ export async function optimizeResourceStorage(
                     if (token) { comment.authorAvatar = token; changed = true; }
                 }
             }
-            if (changed) { await DB.putStoreRows('social_posts', [post]); await yieldMain(); }
+            if (changed) { await writeRow(() => DB.putStoreRows('social_posts', [post])); await yieldMain(); }
         }
 
         // ── 11) 群头像 ────────────────────────────────────────────
@@ -648,7 +704,7 @@ export async function optimizeResourceStorage(
         for await (const g of iterateStoreRows<any>('groups')) {
             tick('群头像');
             const token = await convert(g?.avatar);
-            if (token) { g.avatar = token; await DB.putStoreRows('groups', [g]); await yieldMain(); }
+            if (token) { g.avatar = token; await writeRow(() => DB.putStoreRows('groups', [g])); await yieldMain(); }
         }
 
         // ── 12) 生活模拟：剧情日志里的角色头像副本 ────────────────
@@ -663,7 +719,7 @@ export async function optimizeResourceStorage(
                 const token = await convert(action?.actorAvatar);
                 if (token) { action.actorAvatar = token; changed = true; }
             }
-            if (changed) { await DB.putStoreRows('life_sim', [sim]); await yieldMain(); }
+            if (changed) { await writeRow(() => DB.putStoreRows('life_sim', [sim])); await yieldMain(); }
         }
 
         // ── 13) 合并存量重复：把重复令牌在全部引用面上改写成保留的那个 ──

@@ -4,6 +4,7 @@ import { DB, openDB } from './db';
 import { optimizeResourceStorage, OPTIMIZE_TARGET_STORES } from './storageOptimize';
 import { REF_SOURCE_STORES, runBlobGc } from './blobGc';
 import { isBlobRef, getBlobForRef, dataUrlToBlob, putImageBlob, clearContentMemo } from './blobRef';
+import { blobStore } from './blobStore';
 import { tryAcquireMaintenanceLock, releaseMaintenanceLock } from './maintenanceLock';
 import { ChatPrompts } from './chatPrompts';
 import { buildGroupHistoryBlock } from './groupChat/prompts';
@@ -194,6 +195,30 @@ describe('优化资源存储（一次性批量迁移）', () => {
         expect(withImage.replyTo.content).toBe('[图片]');
         expect(withImage.replyTo.content).not.toContain('blobref');
         expect(withText.replyTo.content).toBe('今天去看海啦');   // 普通文字原样
+    });
+
+    it('引用快照：图片 / 表情行的引用也要归一化，正文转令牌不能顶掉这一步', async () => {
+        // 引用一条图片消息后回了张图或一个表情，这两行的 type 就是 image / emoji。
+        // 正文和引用快照是一行里的两处改动，得一起写回去：漏掉引用那处的话，正文下一轮
+        // 已经是令牌、不会再被处理，快照里那份几 MB 的 dataURL 就永久留在库里了。
+        await seedStore('messages', [
+            { id: 201, charId: 'c1', role: 'user', type: 'image', content: TINY_PNG, timestamp: 1,
+              replyTo: { name: '小明', content: TINY_JPEG } },
+            { id: 202, charId: 'c1', role: 'user', type: 'emoji', content: TINY_GIF, timestamp: 2,
+              replyTo: { name: '小明', content: TINY_PNG } },
+        ]);
+
+        await optimizeResourceStorage();
+
+        const rows: any[] = (await DB.getStoreRowsPage('messages', null, 10)).rows;
+        const image = rows.find(r => r.id === 201);
+        const emoji = rows.find(r => r.id === 202);
+        expect(image.replyTo.content).toBe('[图片]');
+        expect(emoji.replyTo.content).toBe('[图片]');
+        // 正文照转，两处改动合成一次整行写回
+        expect(isBlobRef(image.content)).toBe(true);
+        expect(isBlobRef(emoji.content)).toBe(true);
+        expect(JSON.stringify(rows)).not.toContain('data:image');
     });
 
     it('我方的彼方 Q 版形象也转（角色那侧和我方这侧是两段代码，只改一边会漏）', async () => {
@@ -837,6 +862,43 @@ describe('优化资源存储（一次性批量迁移）', () => {
         expect(r.failureReasons[reasons[0]]).toBe(1);
     });
 
+    it('行写回失败（配额满）：只丢这一行，整轮跑完不中断，也不虚报省下的量', async () => {
+        // 各表的写入口会等事务真的提交完才 resolve，配额满 / 事务 abort 都从那儿抛上来。
+        // 整个优化只有 finally 没有 catch，不在行级接住的话，一行写不进去就把后面的面
+        // 全掐了——连回收最省的那步「合并重复图片」都轮不到。而存储快满恰恰正是有人来点
+        // 这个按钮的时候。
+        await DB.saveGalleryImage({ id: 'g1', charId: 'c1', url: TINY_PNG, timestamp: 1 });
+        await DB.saveGalleryImage({ id: 'g2', charId: 'c1', url: TINY_JPEG, timestamp: 2 });
+        // 表情包在相册后面，用它看整轮到底有没有跑到头
+        await DB.saveEmoji('本地表情', TINY_GIF, undefined);
+
+        const quota = new Error('存储空间不足');
+        quota.name = 'QuotaExceededError';
+        const spy = vi.spyOn(DB, 'saveGalleryImage').mockRejectedValueOnce(quota);
+        let r: Awaited<ReturnType<typeof optimizeResourceStorage>>;
+        try {
+            r = await optimizeResourceStorage();   // 不许抛
+        } finally {
+            spy.mockRestore();
+        }
+
+        // 挂掉的那一行原值还在（图不丢），后面的行和后面的面照常处理
+        const gallery = await DB.getGalleryImages();
+        expect(gallery.find(g => g.id === 'g1')!.url).toBe(TINY_PNG);
+        expect(isBlobRef(gallery.find(g => g.id === 'g2')!.url)).toBe(true);
+        expect(isBlobRef((await DB.getEmojis()).find(e => e.name === '本地表情')!.url)).toBe(true);
+
+        // 口径不许撒谎：没落库的那张算「没省下来」，不算转换、也不算新建的 Blob
+        expect(r!.failed).toBe(1);
+        expect(r!.converted).toBe(2);     // g2 + 表情
+        expect(r!.uniqueBlobs).toBe(2);
+        const reasons = Object.keys(r!.failureReasons);
+        expect(reasons).toHaveLength(1);
+        expect(reasons[0]).toContain('相册');
+        expect(reasons[0]).toContain('QuotaExceededError');
+        expect(r!.failureReasons[reasons[0]]).toBe(1);
+    });
+
     it('没有失败时 failureReasons 是空的（别拿噪音喂给反馈报告）', async () => {
         await DB.saveAsset('wallpaper', TINY_PNG);
         const r = await optimizeResourceStorage();
@@ -1014,6 +1076,50 @@ describe('去重：同一张图只留一份 Blob', () => {
         expect(((await DB.getAllCharacters())[0] as any).videoCallBackground).toBe(stageRef);
         expect(r.mergedDuplicates).toBe(0);
         expect(r.skippedGroups).toBe(1);
+    });
+
+    /** 造一份扫库结果：scanned 与 skipped 在 SDK 里互斥（算出哈希才 scanned++，
+     *  读不出 / 算不动一律 skipped++），所以两个数字分别摆就够描述各种局面。 */
+    function stubScan(scanned: number, skipped: number) {
+        return vi.spyOn(blobStore, 'scanContent').mockResolvedValue({
+            byHash: new Map<string, string[]>(), duplicateGroups: [],
+            scanned, skipped, wastedBytes: 0, aborted: false,
+        });
+    }
+
+    it('一条都没算出哈希（非安全上下文没有 crypto.subtle）：报「这轮没做成去重」', async () => {
+        // scanUnavailable 要抓的就是这个场景。判反了的话面板会说「已是最省形态」，
+        // 用户完全不知道换个环境还能再省一截。
+        await DB.saveAsset('wallpaper', TINY_PNG);
+        const spy = stubScan(0, 3);
+        try {
+            const r = await optimizeResourceStorage();
+            expect(r.scanUnavailable).toBe(true);
+            expect(r.converted).toBe(1);   // 去重停摆，转换照跑
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    it('只有几条读坏：去重照跑，不许误报成没做成', async () => {
+        await DB.saveAsset('wallpaper', TINY_PNG);
+        const spy = stubScan(3, 3);
+        try {
+            const r = await optimizeResourceStorage();
+            expect(r.scanUnavailable).toBe(false);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    it('空库：一条都没有也不算「没做成」', async () => {
+        const spy = stubScan(0, 0);
+        try {
+            const r = await optimizeResourceStorage();
+            expect(r.scanUnavailable).toBe(false);
+        } finally {
+            spy.mockRestore();
+        }
     });
 
     it('合并跑完是幂等的：再点一次没有重复可合', async () => {
