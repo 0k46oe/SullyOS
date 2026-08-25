@@ -939,6 +939,38 @@ describe('推送丢了的补收（服务端账本）', () => {
     expect(staleDropped, '超窗的要数出来，界面靠它说话').toBe(1);
   });
 
+  // 账本行躺到超龄，最常见的成因根本不是「消息丢了」，而是**消息早就送达了**：收尾那笔
+  // 销账是 fire-and-forget，用户看完随手锁屏就被掐断，账一直挂着。不核对本地就一律按
+  // 「永久拿不回来了」报的话，用户会收到一句红字说自己丢了消息——而那条消息就躺在聊天
+  // 记录里，他刚刚才看过。
+  it('超龄但本地已经有同 id 的消息 → 只补销账，不算「拿不回来了」', async () => {
+    const messageId = 'msg_task_7@1700000000000_hook_0';
+    const tooOld = Date.now() - OUTBOX_BACKFILL_MAX_AGE_MS - 1;
+    stubOutbox([entry(messageId, outboxPush(messageId), tooOld)]);
+    // 落库的每条气泡都继承 metadata.activeMsg2.messageId，核对认的就是它。
+    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([
+      { role: 'assistant', metadata: { activeMsg2: { messageId } } },
+    ] as any);
+
+    const { written, ackNow, staleDropped } = await drainOutbox();
+
+    expect(written).toBe(0);
+    expect(ackNow, '账还是要销，不然每趟都把它捞回来').toEqual([messageId]);
+    expect(staleDropped, '消息就在聊天记录里，一条都没丢').toBe(0);
+  });
+
+  it('超龄且本地确实没有 → 照旧算「拿不回来了」', async () => {
+    const messageId = 'msg-really-lost';
+    const tooOld = Date.now() - OUTBOX_BACKFILL_MAX_AGE_MS - 1;
+    stubOutbox([entry(messageId, outboxPush(messageId), tooOld)]);
+    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
+
+    const { ackNow, staleDropped } = await drainOutbox();
+
+    expect(ackNow).toEqual([messageId]);
+    expect(staleDropped).toBe(1);
+  });
+
   // staleDropped 只数「本该收到、现在永久拿不回来」的那一档。思维链、工具请求这些
   // 本来就不进聊天流，销掉不损失任何东西——混进来的话，界面会把「丢了 1 条」说成
   // 「丢了 3 条」，用户白紧张一场，真出事时也就不信这个数了。

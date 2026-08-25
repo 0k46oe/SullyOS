@@ -1556,8 +1556,10 @@ const handleInboxStageFailure = async (
   notifyInboxProcessFailed(message, 'swallowed');
 };
 
-const flushInboxToChatImpl = async () => {
+const flushInboxToChatImpl = async (): Promise<string[]> => {
   const pendingMessages = await ActiveMsgStore.consumeInboxMessages();
+  // 这一趟真正落进聊天流的那几条（见 flushInboxToChat 的返回值说明）。
+  const landedMessageIds: string[] = [];
   activeMsgTrace('runtime-flush-start', { count: pendingMessages.length });
   // 这一趟处理谁「还没着落」的记账从空开始（见 retainedInboxMessageIds）。
   retainedInboxMessageIds.clear();
@@ -1876,6 +1878,10 @@ const flushInboxToChatImpl = async () => {
         }
       }
 
+      // 走到这里 = 这条真的落进聊天流了（主路径落库完 / 降级存了原稿）。上面每一个
+      // continue 都是「没上屏」：闸吞了、跟已有的重了、等前面的分段、压回收件箱重试。
+      landedMessageIds.push(message.messageId);
+
       // 不管走 post-processing 还是 raw fallback, 单条 inbox message 触发一次 'active-msg-received',
       // 保留原有 toast / 未读 / 通知 / sendInstantPush resolver 语义。body 用原文做预览即可。
       // sessionId 必须带出来: instantPushClient 的 observed listener 用它做 receipt identity 匹配,
@@ -1960,6 +1966,7 @@ const flushInboxToChatImpl = async () => {
       });
     }
   }
+  return landedMessageIds;
 };
 
 /**
@@ -1981,15 +1988,25 @@ const sweepSettledInstantRound = async (charId: string, uuid: string): Promise<v
 //      await flushInboxToChat() 保证 round-1 旁白已落库, 再去跑 tool runner (它会触发 round-2),
 //      从根上消除跨轮 B 抢在 A 前面入库 (用户看到的 "B+A").
 // 每段都吞掉自身异常, 保证链不被一个失败的 flush 卡死.
-let flushChain: Promise<void> = Promise.resolve();
-// （导出仅为让 activeMsgRuntime.test.ts 走真库钉「主路径 / 降级路径落库时间戳同口径」，
-//   运行时入口仍是 ActiveMsgRuntime.init 挂的监听器。）
-export const flushInboxToChat = (): Promise<void> => {
+let flushChain: Promise<unknown> = Promise.resolve();
+/**
+ * 排空收件箱、把里面的消息冲进聊天流。
+ *
+ * 返回**这一趟真正落进聊天流**的 messageId 名单。绝大多数调用方不看它（冲刷是纯副作用），
+ * 但手动补收要拿它跟自己写进收件箱的名单对一次才敢说「补回了 N 条」——写进收件箱只是
+ * 排上队，防穿帮闸、落库去重、多段等齐都可能把它拦在上屏之前。整趟挂掉时返回空数组
+ * （异常在这里吞掉，跟原来一样不外抛）。
+ *
+ * （导出仅为让 activeMsgRuntime.test.ts 走真库钉「主路径 / 降级路径落库时间戳同口径」，
+ *   运行时入口仍是 ActiveMsgRuntime.init 挂的监听器。）
+ */
+export const flushInboxToChat = (): Promise<string[]> => {
   const next = flushChain.then(async () => {
     try {
-      await flushInboxToChatImpl();
+      return await flushInboxToChatImpl();
     } catch (e) {
       log.warn('flushInboxToChat failed', { error: e });
+      return [];
     }
   });
   flushChain = next;
@@ -2168,6 +2185,10 @@ export const catchUpMissedPushes = async (
  * `stale` 单独给一个数而不是让 UI 拿 scanned-written 去减：那个差里还混着思维链、
  * 工具请求这些本来就不进聊天流的条目，减出来会把「丢了 3 条」说成「丢了 11 条」。
  *
+ * `written` 数的是**真的上了屏**的条数，不是写进收件箱的条数：中间还隔着一趟冲刷，
+ * 防穿帮闸、落库去重、多段等齐都会把消息拦在上屏之前。按收件箱那个数报的话，界面会
+ * 说「补回 3 条，去聊天里看看」，用户翻遍聊天记录一条也找不到。
+ *
  * 这条路不广播 active-msg-backfill-stale：用户正盯着这个按钮等结果，面板会把三个
  * 数字一起说清楚，再弹一条 toast 就是同一件事说两遍。
  *
@@ -2179,14 +2200,18 @@ export const catchUpMissedPushesManually = async (): Promise<{
   stale: number;
 }> => {
   lastOutboxDrainAt = Date.now();
-  const { written, ackNow, entries, staleDropped } = await drainOutbox({ treatBacklogAsMissed: true });
+  const { written, writtenIds, ackNow, entries, staleDropped } = await drainOutbox({ treatBacklogAsMissed: true });
   if (ackNow.length > 0) {
     void ActiveMsgClient.ackOutboxMessages(ackNow).catch((e) => {
       log.warn('账本上跳过的条目销账失败（下次会再捞一遍）', { count: ackNow.length, error: e });
     });
   }
-  if (written > 0) await flushInboxToChat();
-  return { written, scanned: entries.length, stale: staleDropped };
+  // 报给用户的是「上了屏几条」，所以要等冲刷跑完、再拿这一趟落库的名单跟自己写进收件箱
+  // 的名单对一次。只认自己那几条：同一趟冲刷可能顺手把收件箱里别人（推送刚写的）留下的
+  // 也带走了，那些不是这次补收的功劳。
+  const landed = written > 0 ? new Set(await flushInboxToChat()) : new Set<string>();
+  const persisted = writtenIds.filter((id) => landed.has(id)).length;
+  return { written: persisted, scanned: entries.length, stale: staleDropped };
 };
 
 let instantChatStatusPollTimer: ReturnType<typeof setTimeout> | null = null;

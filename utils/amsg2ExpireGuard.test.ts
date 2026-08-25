@@ -44,11 +44,36 @@ describe('shouldExpireFire', () => {
   });
 
   it('热聊窗口锚在到点时刻，判定晚十几分钟也不放行（worker 与客户端送达兜底同一口径）', () => {
-    // 到点 24h，客户端送达兜底在 15 分钟后才判：窗口仍是 (到点-10min, now]，
+    // 到点 24h，客户端送达兜底在 15 分钟后才判：窗口仍是到点前后各十分钟，
     // 拿 nowMs 当锚点的话这条 9 分钟前的用户消息会落到窗外被误放行。
     const late = { policy: 'expire', occurrenceMs: 24 * H, nowMs: 24 * H + 15 * 60_000 };
     expect(shouldExpireFire({ ...late, lastUserMessageAt: 24 * H - 9 * 60_000 })).toBe(true);
     expect(shouldExpireFire({ ...late, lastUserMessageAt: 24 * H - 11 * 60_000 })).toBe(false);
+  });
+
+  // 窗口的**右**边界也必须锚在到点时刻。右界拿 nowMs 的话，窗口在晚判定的路径上会一路
+  // 撑成 (到点-10min, 现在]：推送晚送达、或者 48h 补收把消息捞回来时，用户到点之后随便
+  // 哪个时刻开过一次口，这条定时消息就被吞掉 + 销账 + 撤掉云端自述日志。更糟的是排程
+  // 现状块用的是对称窗 (到点±10min]，它查不到这次吞没，作废回执整段失联——角色既没说
+  // 那句话，也不知道自己那条排程已经没了。
+  it('到点两小时后才开的口，晚判定时也不算热聊（右界跟检出侧的对称窗一致）', () => {
+    const occurrenceMs = 9 * H;
+    expect(shouldExpireFire({
+      policy: 'expire',
+      lastUserMessageAt: 11 * H,       // 到点两小时后随口说了句话
+      occurrenceMs,
+      nowMs: 14 * H,                   // 五小时后补收才把这条消息捞回来判定
+    })).toBe(false);
+  });
+
+  it('到点后五分钟内开的口照旧算热聊（对称窗的右半边没被改坏）', () => {
+    const occurrenceMs = 9 * H;
+    expect(shouldExpireFire({
+      policy: 'expire',
+      lastUserMessageAt: occurrenceMs + 5 * 60_000,
+      occurrenceMs,
+      nowMs: 14 * H,
+    })).toBe(true);
   });
 
   it('到点之后才开的口不算（那是消息发出去之后用户回的话）', () => {

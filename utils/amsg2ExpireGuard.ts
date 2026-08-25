@@ -11,7 +11,8 @@
  *   - force：闹钟型，照发。
  *
  * 这道闸只判一件确定的事：**到点前后 ACTIVE_CHAT_WINDOW_MS 内，用户在不在聊天**。
- * 一次性任务和循环任务同一条规则，窗口都锚在触发时刻。
+ * 一次性任务和循环任务同一条规则，窗口都锚在触发时刻，两边都锚——左右界都是触发时刻
+ * 加减这个窗宽，跟排程现状块的检出（detectExpiredOccurrences）用的是同一个对称窗。
  *
  * 「这件事是不是已经聊过了」不归它管——那是语义问题，判据在角色自己手上（提示词里
  * 那段「开口之前」：已经发生过的事就一个字都不要输出，走 worker 的 skip-push 出口）。
@@ -67,7 +68,15 @@ export function shouldExpireFire(input: ExpireFireInput): boolean {
   if (input.occurrenceMs == null) return false;
   const last = input.lastUserMessageAt;
   if (last == null) return false;
-  return last > input.occurrenceMs - ACTIVE_CHAT_WINDOW_MS && last <= input.nowMs;
+  // 两边都锚在触发时刻，跟 detectExpiredOccurrences 的对称窗同一个口径。
+  // 右界要是拿 nowMs：worker 在到点当时判（now≈到点）看不出差别，客户端送达兜底 /
+  // 48h 补收却是 now=Date.now()，窗口会一路撑成 (到点-10min, 现在]——用户到点之后
+  // 随便哪个时刻开过一次口，晚送到的定时消息就被吞掉、销账、连云端自述日志一起撤销，
+  // 而检出那边用对称窗根本查不到这次吞没，作废回执整段失联。
+  return last > input.occurrenceMs - ACTIVE_CHAT_WINDOW_MS
+    && last <= input.occurrenceMs + ACTIVE_CHAT_WINDOW_MS
+    // last 是过去的消息时间戳，这条理论上恒真；留着挡时钟歪掉时冒出来的未来时间戳。
+    && last <= input.nowMs;
 }
 
 export interface RealUserMessageLike {

@@ -9,6 +9,7 @@ import {
   PUSH_SUBSCRIPTION_CHANGED_KV_ID,
   buildSelfLogEntryId,
   catchUpMissedPushes,
+  catchUpMissedPushesManually,
   resetOutboxCatchUpThrottleForTesting,
   findInboxArtifacts,
   findMissingChunkIndexes,
@@ -2727,5 +2728,95 @@ describe('上线补收不看有没有在等回复（走真库）', () => {
     vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockRejectedValue(new Error('worker 500'));
 
     await expect(catchUpMissedPushes('startup')).resolves.toBe('failed');
+  }, 20000);
+});
+
+// 手动补收那个按钮报的「补回 N 条消息，去聊天里看看」必须是真话。
+//
+// 「写进收件箱」离「上了屏」还差一整趟冲刷：防穿帮闸会吞、落库去重会丢、多段等齐会扣。
+// 按收件箱那个数报的话，用户点完按钮看到「补回 2 条」，翻遍聊天记录一条也找不到——
+// 而这个按钮存在的全部意义就是让他确认「消息到底还在不在」。
+describe('手动补收报的是真上了屏的条数（走真库）', () => {
+  const WORKER_URL = 'https://amsg-manual-catchup.example.workers.dev';
+
+  beforeAll(() => {
+    (globalThis as any).window ??= { dispatchEvent: () => true, addEventListener: () => {} };
+  });
+
+  beforeEach(async () => {
+    localStorage.setItem(AMSG_OUTBOX_ADOPTED_LS_KEY, JSON.stringify({ at: Date.now() }));
+    resetOutboxCatchUpThrottleForTesting();
+    await ActiveMsgStore.saveGlobalConfig({ workerUrl: WORKER_URL });
+    vi.spyOn(ActiveMsgClient, 'ackOutboxMessages').mockResolvedValue(undefined);
+    // 被吞那条会顺手去云端撤自述日志（best-effort），别让它真打网络。
+    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
+    vi.spyOn(ActiveMsgClient, 'clearClientStateValue').mockResolvedValue(undefined);
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await ActiveMsgStore.saveGlobalConfig({ workerUrl: '' });
+  });
+
+  /** 账本上的一条定时主动消息。messageType 用 'scheduled'，走原稿落库那条最短的路。 */
+  const scheduledEntry = (charId: string, messageId: string, occurrenceMs: number) => ({
+    id: 1,
+    messageId,
+    taskUuid: null,
+    sessionId: null,
+    messageIndex: 1,
+    totalMessages: 1,
+    createdAt: Date.now(),
+    deliveredAt: null,
+    push: {
+      messageKind: 'content',
+      messageType: 'scheduled',
+      source: 'scheduled',
+      message: `${charId} 的定时消息`,
+      contactName: '定时角色',
+      messageId,
+      messageIndex: 1,
+      totalMessages: 1,
+      occurrenceMs,
+      timestamp: new Date(occurrenceMs).toISOString(),
+      metadata: {
+        charId,
+        charName: '定时角色',
+        amsgExpirePolicy: 'expire',
+        amsgClientTaskId: `client-task-${charId}`,
+      },
+    },
+  });
+
+  it('两条都写进了收件箱，闸吞掉一条 → 只报 1 条', async () => {
+    const swallowedChar = 'char-manual-swallowed';
+    const landedChar = 'char-manual-landed';
+    await DB.saveCharacter({ id: swallowedChar, name: '定时角色' } as any);
+    await DB.saveCharacter({ id: landedChar, name: '定时角色' } as any);
+
+    const occurrenceMs = Date.now();
+    // 到点前一分钟这个角色那边用户还在说话 → 防穿帮闸命中，这条不上屏。
+    // 另一个角色没有任何用户消息，闸判不了、照常放行。
+    await DB.saveMessage({
+      charId: swallowedChar, role: 'user', type: 'text', content: '我在忙',
+      timestamp: occurrenceMs - 60_000,
+    } as any);
+
+    vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue([
+      scheduledEntry(swallowedChar, 'msg-manual-swallowed', occurrenceMs),
+      scheduledEntry(landedChar, 'msg-manual-landed', occurrenceMs),
+    ] as any);
+
+    const { written, scanned, stale } = await catchUpMissedPushesManually();
+
+    expect(scanned, '账本上翻过两条').toBe(2);
+    expect(stale, '都是刚落账的，没有超窗的').toBe(0);
+    expect(written, '修复前这里会报 2 条——闸吞掉的那条也被算成「补回来了」').toBe(1);
+
+    // 数字得跟聊天记录对得上：被吞的那个角色一条助手消息都不该有。
+    const swallowedMsgs = await DB.getRecentMessagesByCharId(swallowedChar, 20);
+    expect(swallowedMsgs.some((m: any) => m.role === 'assistant')).toBe(false);
+    const landedMsgs = await DB.getRecentMessagesByCharId(landedChar, 20);
+    expect(landedMsgs.some((m: any) => m.role === 'assistant')).toBe(true);
   }, 20000);
 });
