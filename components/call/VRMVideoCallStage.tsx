@@ -20,6 +20,7 @@ import {
   type AvatarTouchZone,
 } from '../../utils/avatarTouch';
 import StaticCompanionPortrait from '../os/StaticCompanionPortrait';
+import TokenImg from '../os/TokenImg';
 
 interface VRMVideoCallStageProps {
   characterName: string;
@@ -517,7 +518,9 @@ const VRMVideoCallStage: React.FC<VRMVideoCallStageProps> = ({
         <div className="absolute inset-0 flex flex-col items-center justify-center px-8 text-center">
           {fallbackAvatar ? (
             <div className={`relative overflow-hidden rounded-full border border-white/15 ${companionMode ? 'h-36 w-36' : 'h-20 w-20'}`} style={{ animation: 'vrm-stage-drift 5.5s ease-in-out infinite', boxShadow: `0 0 55px ${accentColor}4d` }}>
-              <img src={fallbackAvatar} alt={characterName} className="h-full w-full object-cover" />
+              {/* 兜底头像来自 char.avatar：上传的头像存的是 blobref 令牌，裸 <img> 会裂图，
+                  交给 TokenImg 统一解析（旧的 data: / http 外链原样透传） */}
+              <TokenImg value={fallbackAvatar} alt={characterName} className="h-full w-full object-cover" />
             </div>
           ) : (
             <div className="flex h-28 w-28 items-center justify-center rounded-full border border-white/15 text-5xl font-light" style={{ background: `${accentColor}22`, color: accentColor }}>{characterName[0] || '角'}</div>

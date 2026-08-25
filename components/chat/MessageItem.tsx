@@ -10,7 +10,8 @@ import { stripFishCuesForDisplay } from '../../utils/fishAudioTts';
 import { formatStatCount } from '../../utils/videoParser';
 import { trackEvent } from '../../utils/analytics';
 import { resolveBubbleCornerRadii, shouldHideBubbleTail } from '../../utils/bubbleAppearance';
-import { useBlobRefUrl } from '../../utils/blobRef';
+import { isImageValue, useBlobRefUrl } from '../../utils/blobRef';
+import { buildReplySnapshotContent } from '../../utils/applyAssistantPostProcessing';
 import TokenImg from '../os/TokenImg';
 import McdCard from './McdCard';
 import HtmlCard from './HtmlCard';
@@ -3462,8 +3463,14 @@ const MessageItem = React.memo(({
     // 两家服务商的演出标记都不会漏给用户看。
     const cleanVoiceText = (t?: string | null) => stripFishCuesForDisplay(cleanVoiceMarkupForDisplay(t ?? ''));
 
-    // 引用快照原样存着 %%BILINGUAL%% 等原始标记（双语消息），预览前先清洗
-    const replyPreview = m.replyTo ? stripJunk(m.replyTo.content) : '';
+    // 引用快照原样存着 %%BILINGUAL%% 等原始标记（双语消息），预览前先清洗。
+    // 历史快照里还可能原样躺着图片令牌 / data: / 图床 URL（用户侧引用图片消息时曾直接落库），
+    // 那种值洗不出正文、截 10 个字就是一串 `blobref:b_`，交给写入端同一个快照函数换成占位符。
+    const replyPreview = m.replyTo
+        ? (isImageValue(m.replyTo.content)
+            ? buildReplySnapshotContent({ content: m.replyTo.content })
+            : stripJunk(m.replyTo.content))
+        : '';
 
     // Parse %%BILINGUAL%% for bilingual display (langA = "选" language, langB = "译" language)
     const bilingualIdx = rawContent.toLowerCase().indexOf('%%bilingual%%');

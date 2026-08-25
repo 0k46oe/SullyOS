@@ -603,17 +603,19 @@ const CompanionHome: React.FC = () => {
   };
 
   // ── 主色跟角色走：从头像提取主色相（跟电子宠物小窝同一套提取器）──
+  // 头像存的是 blobref 令牌，令牌喂给 new Image() 只会静默加载失败（取色器 onerror → null），
+  // 所以先解析成可加载的 URL 再取色（跟下面背景取色同一套路）。令牌没解析完时是 undefined，跳过。
+  const avatarImageUrl = useBlobRefUrl(character?.avatar);
   const [charHue, setCharHue] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
     setCharHue(null);
-    const source = character?.avatar;
-    if (!source) return;
-    void hueFromImage(source).then(hue => {
+    if (!avatarImageUrl) return;
+    void hueFromImage(avatarImageUrl).then(hue => {
       if (!cancelled && hue !== null) setCharHue(((Math.round(hue) % 360) + 360) % 360);
     });
     return () => { cancelled = true; };
-  }, [character?.id, character?.avatar]);
+  }, [avatarImageUrl]);
 
   // ── 背景：preset:<id> / blobref / http 直链；空 = 时段天光 ──
   const background = character?.companionBackground;

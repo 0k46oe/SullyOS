@@ -70,3 +70,105 @@ describe('引用解析的调用点', () => {
         expect(source).not.toMatch(/replyTo:\s*\{/);
     });
 });
+
+// ─── 用户侧：自己引用一条图片消息 ────────────────────────────────────────────
+//
+// 上面那套只管角色回复。用户在输入框里点「回复」再发出去，走的是各 App 自己的落库代码，
+// 一直是把被引用消息的 content 原样抄进快照——图片消息抄进去的就是 `blobref:b_...` 令牌，
+// 于是气泡里、相册详情里都会明晃晃印着一串令牌，孤儿清理那边也照样被截断前缀噎住。
+
+const readSource = (rel: string) => readFileSync(path.resolve(__dirname, rel), 'utf8');
+
+describe('私聊（apps/Chat.tsx）的用户引用', () => {
+    const source = readSource('../apps/Chat.tsx');
+
+    it('落库的快照经过 buildReplySnapshotContent，不再原样抄 content', () => {
+        expect(source).toContain('content: buildReplySnapshotContent(replyTarget)');
+        expect(source).not.toMatch(/replyTo\s*=\s*\{[\s\S]{0,200}content:\s*replyTarget\.content\b/);
+    });
+
+    it('输入框上方的「正在回复」条也不再裸截 10 个字', () => {
+        expect(source).not.toMatch(/replyTarget\.content\.slice\(0,\s*10\)/);
+    });
+
+    it('存相册的聊天上下文对图片/表情消息用占位符', () => {
+        expect(source).not.toContain('${sender}: ${m.content.substring(0, 100)}');
+        expect(source).toMatch(/buildReplySnapshotContent\(m\)[\s\S]{0,120}m\.content\.substring\(0, 100\)/);
+    });
+
+    it('存相册失败不拖垮发消息：saveGalleryImage 被 try 包住', () => {
+        // 输入框在这一步之前已经清空，放任它抛出去就是「图片发着发着没了」
+        const calls = source.match(/DB\.saveGalleryImage\(/g) || [];
+        const guarded = source.match(/try\s*\{\s*await DB\.saveGalleryImage\(/g) || [];
+        expect(guarded.length).toBeGreaterThan(0);
+        expect(calls).toHaveLength(guarded.length);
+    });
+
+    it('拼出来的相册上下文长成「小明: [图片]」', () => {
+        const line = `小明: ${buildReplySnapshotContent({ type: 'image', content: BLOB_TOKEN })}`;
+        expect(line).toBe('小明: [图片]');
+    });
+});
+
+describe('群聊（apps/GroupChat.tsx）的用户引用', () => {
+    const source = readSource('../apps/GroupChat.tsx');
+
+    it('落库的快照经过 buildReplySnapshotContent', () => {
+        expect(source).toContain('content: buildReplySnapshotContent(replyTarget)');
+        expect(source).not.toMatch(/replyTo\s*=\s*\{[\s\S]{0,200}content:\s*replyTarget\.content\b/);
+    });
+
+    it('气泡里的引用预览显示前先换占位符', () => {
+        expect(source).toContain('buildReplySnapshotContent({ content: msg.replyTo.content })');
+        expect(source).not.toMatch(/msg\.replyTo\.content\.slice\(0,\s*10\)/);
+    });
+
+    it('输入框上方的「正在回复」条也不再裸截 10 个字', () => {
+        expect(source).not.toMatch(/replyTarget\.content\.slice\(0,\s*10\)/);
+    });
+});
+
+describe('私聊气泡（components/chat/MessageItem.tsx）的引用预览', () => {
+    const source = readSource('../components/chat/MessageItem.tsx');
+
+    it('历史里已经存下的令牌快照，显示前换成占位符', () => {
+        expect(source).toMatch(/replyPreview\s*=\s*m\.replyTo[\s\S]{0,300}buildReplySnapshotContent/);
+        expect(source).not.toMatch(/const replyPreview = m\.replyTo \? stripJunk\(m\.replyTo\.content\) : '';/);
+    });
+
+    it('媒体判定复用 utils/blobRef 的 isImageValue，没有另起一份', () => {
+        expect(source).toMatch(/import \{[^}]*isImageValue[^}]*\} from '\.\.\/\.\.\/utils\/blobRef'/);
+        expect(source).not.toMatch(/const isMediaValue\s*=/);
+    });
+});
+
+// ─── 读端漏网的两处令牌 ──────────────────────────────────────────────────────
+
+describe('通话舞台的兜底头像（components/call/VRMVideoCallStage.tsx）', () => {
+    const source = readSource('../components/call/VRMVideoCallStage.tsx');
+
+    it('没配 VRM 模型时的兜底头像走 TokenImg，不是裸 <img>', () => {
+        // fallbackAvatar 传的是 char.avatar，上传的头像已经是 blobref 令牌
+        expect(source).toContain('<TokenImg value={fallbackAvatar}');
+        expect(source).not.toMatch(/<img\s+src=\{fallbackAvatar\}/);
+    });
+
+    it('确实 import 了 TokenImg', () => {
+        expect(source).toMatch(/import TokenImg from '\.\.\/os\/TokenImg'/);
+    });
+});
+
+describe('桌面陪伴的主色提取（components/os/CompanionHome.tsx）', () => {
+    const source = readSource('../components/os/CompanionHome.tsx');
+
+    it('头像先解析成可加载 URL 再取色，不把令牌直接喂给 new Image()', () => {
+        expect(source).toContain('useBlobRefUrl(character?.avatar)');
+        expect(source).toContain('hueFromImage(avatarImageUrl)');
+    });
+
+    it('文件里每一处取色的入参都是解析后的 URL', () => {
+        const args = [...source.matchAll(/hueFromImage\(([^)]*)\)/g)].map(m => m[1].trim());
+        expect(args.length).toBeGreaterThan(0);
+        expect(args.every(arg => arg === 'avatarImageUrl' || arg === 'backgroundImageUrl')).toBe(true);
+    });
+});
