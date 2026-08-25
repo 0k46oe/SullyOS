@@ -804,6 +804,8 @@ export const DB = {
     const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
     const store = transaction.objectStore(STORE_MESSAGES);
     
+    // 同 saveAsset：等事务落盘再 resolve。put 发完就 resolve 的话，配额不足
+    // （iOS Safari 常见）时改写静默丢失，界面上还是新内容、库里却是旧的。
     return new Promise((resolve, reject) => {
         const req = store.get(id);
         req.onsuccess = () => {
@@ -811,12 +813,14 @@ export const DB = {
             if (data) {
                 data.content = content;
                 store.put(data);
-                resolve();
             } else {
                 reject(new Error('Message not found'));
             }
         };
         req.onerror = () => reject(req.error);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error || new Error('updateMessage transaction aborted'));
     });
   },
 
@@ -987,8 +991,15 @@ export const DB = {
 
   saveEmoji: async (name: string, url: string, categoryId?: string): Promise<void> => {
     const db = await openDB();
-    const transaction = db.transaction(STORE_EMOJIS, 'readwrite');
-    transaction.objectStore(STORE_EMOJIS).put({ name, url, categoryId });
+    // 同 saveAsset：等事务真正落盘并把失败抛出去。发完 put 就返回的话，配额不足
+    // （iOS Safari 常见）时写入静默丢失，「一键优化」还会照报「已转 N 张」。
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_EMOJIS, 'readwrite');
+      transaction.objectStore(STORE_EMOJIS).put({ name, url, categoryId });
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('saveEmoji transaction aborted'));
+    });
   },
 
   deleteEmoji: async (name: string): Promise<void> => {
@@ -1155,8 +1166,14 @@ export const DB = {
 
   saveTheme: async (theme: ChatTheme): Promise<void> => {
     const db = await openDB();
-    const transaction = db.transaction(STORE_THEMES, 'readwrite');
-    transaction.objectStore(STORE_THEMES).put(theme);
+    // 同 saveAsset：等事务落盘，配额不足时把错误抛给调用方，别让主题「保存成功」是假的。
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_THEMES, 'readwrite');
+      transaction.objectStore(STORE_THEMES).put(theme);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('saveTheme transaction aborted'));
+    });
   },
 
   deleteTheme: async (id: string): Promise<void> => {
@@ -1386,8 +1403,14 @@ export const DB = {
 
   saveGalleryImage: async (img: GalleryImage): Promise<void> => {
       const db = await openDB();
-      const transaction = db.transaction(STORE_GALLERY, 'readwrite');
-      transaction.objectStore(STORE_GALLERY).put(img);
+      // 同 saveAsset：等事务落盘并把失败抛出去，配额不足时不再静默丢图。
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_GALLERY, 'readwrite');
+          transaction.objectStore(STORE_GALLERY).put(img);
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error || new Error('saveGalleryImage transaction aborted'));
+      });
   },
 
   getGalleryImages: async (charId?: string): Promise<GalleryImage[]> => {
@@ -2294,8 +2317,14 @@ export const DB = {
 
   saveCustomCreatorPart: async (part: CustomCreatorPart): Promise<void> => {
       const db = await openDB();
-      const transaction = db.transaction(STORE_CC_PARTS, 'readwrite');
-      transaction.objectStore(STORE_CC_PARTS).put(part);
+      // 同 saveAsset：等事务落盘并把失败抛出去，配额不足时不再静默丢部件。
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_CC_PARTS, 'readwrite');
+          transaction.objectStore(STORE_CC_PARTS).put(part);
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error || new Error('saveCustomCreatorPart transaction aborted'));
+      });
   },
 
   deleteCustomCreatorPart: async (id: string): Promise<void> => {
@@ -2789,8 +2818,14 @@ export const DB = {
 
   saveSong: async (song: SongSheet): Promise<void> => {
       const db = await openDB();
-      const transaction = db.transaction(STORE_SONGS, 'readwrite');
-      transaction.objectStore(STORE_SONGS).put(song);
+      // 同 saveAsset：等事务落盘并把失败抛出去，配额不足时不再静默丢歌。
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_SONGS, 'readwrite');
+          transaction.objectStore(STORE_SONGS).put(song);
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error || new Error('saveSong transaction aborted'));
+      });
   },
 
   deleteSong: async (id: string): Promise<void> => {
