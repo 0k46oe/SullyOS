@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import JSZip from 'jszip';
-import { extractImagesInPlace, deepCloneForExport, EXPORT_CHUNK_SIZE, parseImageDataUrlForBackup, sliceRanges } from './backupExport';
+import { buildMalformedImageDiagnostics, extractImagesInPlace, deepCloneForExport, EXPORT_CHUNK_SIZE, parseImageDataUrlForBackup, sliceRanges, type MalformedBackupImageDiagnostic } from './backupExport';
 
 const IMG = 'data:image/png;base64,AAAA';
 
@@ -120,28 +120,74 @@ describe('parseImageDataUrlForBackup', () => {
         expect(parseImageDataUrlForBackup('data:image/png;base64,')).toMatchObject({ ok: false });
     });
 
-    it('坏图保留原值但不进入 JSZip base64 队列，整包仍能生成', async () => {
+    it('坏图只从导出副本置空，不进入 JSZip，也不污染下一台设备', async () => {
         const zip = new JSZip();
         const assets = zip.folder('assets')!;
         const broken = 'data:image/png;base64,A';
-        const root = { broken, valid: IMG };
+        const liveData = { broken, valid: IMG };
+        const root = deepCloneForExport(liveData);
         let malformed = 0;
+        const diagnostics: MalformedBackupImageDiagnostic[] = [];
 
-        extractImagesInPlace(root, (value) => {
+        extractImagesInPlace(root, (value, path) => {
             const parsed = parseImageDataUrlForBackup(value);
             if (!parsed.ok) {
-                if (parsed.reason !== 'unsupported-header') malformed++;
-                return value;
+                if (parsed.reason === 'unsupported-header') return value;
+                malformed++;
+                diagnostics.push({
+                    location: path.join('.'),
+                    reason: parsed.reason,
+                    originalLength: value.length,
+                });
+                return '';
             }
             assets.file(`asset.${parsed.extension}`, parsed.base64, { base64: true, compression: 'STORE' });
             return `assets/asset.${parsed.extension}`;
         });
 
         zip.file('data.json', JSON.stringify(root));
-        await expect(zip.generateAsync({ type: 'uint8array' })).resolves.toBeInstanceOf(Uint8Array);
+        zip.file('diagnostics/malformed-images.json', JSON.stringify(buildMalformedImageDiagnostics({
+            createdAt: '2026-08-26T00:00:00.000Z',
+            mode: 'full',
+            total: malformed,
+            items: diagnostics,
+        })));
+        const bytes = await zip.generateAsync({ type: 'uint8array' });
+        const generated = await JSZip.loadAsync(bytes);
+        const diagnosticDocument = JSON.parse(await generated.file('diagnostics/malformed-images.json')!.async('string'));
+
         expect(malformed).toBe(1);
-        expect(root.broken).toBe(broken);
+        expect(root.broken).toBe('');
         expect(root.valid).toBe('assets/asset.png');
+        expect(JSON.stringify(root)).not.toContain(broken);
+        expect(liveData.broken).toBe(broken);
+        expect(diagnosticDocument).toMatchObject({
+            format: 'sully-backup-malformed-images',
+            total: 1,
+            included: 1,
+            truncated: false,
+            items: [{ location: 'broken', reason: 'invalid-length', originalLength: broken.length }],
+        });
+    });
+
+    it('坏图过多时诊断清单会明确标记已截断', () => {
+        const one: MalformedBackupImageDiagnostic = {
+            location: 'messages[0].image',
+            reason: 'invalid-length',
+            originalLength: 25,
+        };
+        const document = buildMalformedImageDiagnostics({
+            createdAt: '2026-08-26T00:00:00.000Z',
+            mode: 'media_only',
+            total: 101,
+            items: [one],
+        });
+
+        expect(document.truncated).toBe(true);
+        expect(document.total).toBe(101);
+        expect(document.included).toBe(1);
+        expect(document.items).toEqual([one]);
+        expect(document).not.toHaveProperty('base64');
     });
 
     it('SVG 等旧流程本来就不抽取的 data URL 原样保留，不算损坏', () => {

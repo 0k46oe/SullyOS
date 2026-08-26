@@ -64,9 +64,41 @@ export function extractImagesInPlace(
     }
 }
 
+export type BackupMalformedImageReason = 'empty-content' | 'invalid-characters-or-padding' | 'invalid-length';
+
 export type BackupImageDataUrlParseResult =
     | { ok: true; extension: string; base64: string }
-    | { ok: false; reason: 'unsupported-header' | 'empty-content' | 'invalid-characters-or-padding' | 'invalid-length' };
+    | { ok: false; reason: 'unsupported-header' | BackupMalformedImageReason };
+
+export type MalformedBackupImageDiagnostic = {
+    location: string;
+    reason: BackupMalformedImageReason;
+    originalLength: number;
+};
+
+/**
+ * 生成随备份携带的轻量坏图诊断。只记录定位信息，不复制坏 Base64 正文，避免把
+ * 无法恢复的脏数据继续带到新设备，同时也不会让诊断文件本身显著增大备份体积。
+ */
+export function buildMalformedImageDiagnostics(options: {
+    createdAt: string;
+    mode: 'text_only' | 'media_only' | 'full';
+    total: number;
+    items: MalformedBackupImageDiagnostic[];
+}) {
+    const items = options.items.map(item => ({ ...item }));
+    return {
+        format: 'sully-backup-malformed-images',
+        version: 1 as const,
+        createdAt: options.createdAt,
+        mode: options.mode,
+        total: options.total,
+        included: items.length,
+        truncated: options.total > items.length,
+        note: '这些字段仅在导出副本中置空，原设备上的本地数据未被修改。',
+        items,
+    };
+}
 
 /**
  * 把旧数据里的 data:image URL 拆成能安全交给 JSZip `{ base64: true }` 的正文。

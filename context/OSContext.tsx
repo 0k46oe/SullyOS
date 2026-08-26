@@ -4,7 +4,7 @@ import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, CharacterGrou
 import { DB } from '../utils/db';
 import type { AvatarTouchRecord } from '../utils/avatarTouch';
 import { clampClaudeTemperature, modelRejectsSamplingParams, stripSamplingParams } from '../utils/samplingParamCompat';
-import { extractImagesInPlace, deepCloneForExport, parseImageDataUrlForBackup, type BackupObjectPath } from '../utils/backupExport';
+import { buildMalformedImageDiagnostics, extractImagesInPlace, deepCloneForExport, parseImageDataUrlForBackup, type BackupObjectPath, type MalformedBackupImageDiagnostic } from '../utils/backupExport';
 import { isBlobRef, getBlobForRef, restoreBlobRef, migrateDataUrlToRef, migrateAppearancePresetBlobRefs, migrateChatThemeBlobRefs, resolveBlobRefsDeep, resolveRefToDataUrl, BLOBREF_PREFIX, deleteBlobRefIfUnreferenced } from '../utils/blobRef';
 import { resolveBlobRefsInRequestBody } from '../utils/apiBlobRefs';
 import { collectBlobRefs, writeBlobsToZip, readBlobsIndex, restoreBlobsFromZip } from '../utils/backupBlobs';
@@ -3738,7 +3738,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           const assetsFolder = zip.folder("assets");
           let assetCount = 0;
           let malformedImageCount = 0;
-          const malformedImageLocations: string[] = [];
+          const malformedImageDiagnostics: MalformedBackupImageDiagnostic[] = [];
+          const maxMalformedImageDiagnostics = 100;
 
           // Dedup table — same base64 payload reused across stores (角色头像在
           // 多个 chat / handbook / room 里被嵌入) gets stored exactly once. Key
@@ -3798,8 +3799,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           };
 
           // 把一条 data:image base64 落进 ZIP 的 assets/ 文件夹，返回它的 assets/* 路径。
-          // 同一份 base64 全局只存一份（assetDedupMap 按完整 base64 去重）；无法识别的
-          // data url 原样返回，不动它。
+          // 同一份 base64 全局只存一份（assetDedupMap 按完整 base64 去重）。无法识别但
+          // 不一定损坏的 data url 原样保留；确认损坏的正文只在导出副本里置空。
           const resolveImage = (value: string, location: string): string => {
               try {
                   const cached = assetDedupMap.get(value);
@@ -3810,13 +3811,17 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       // 原样留在 JSON，也不把它误报成「损坏图片」。
                       if (parsed.reason === 'unsupported-header') return value;
                       malformedImageCount++;
-                      if (malformedImageLocations.length < 20) {
-                          malformedImageLocations.push(`${location} (${parsed.reason})`);
+                      if (malformedImageDiagnostics.length < maxMalformedImageDiagnostics) {
+                          malformedImageDiagnostics.push({
+                              location,
+                              reason: parsed.reason,
+                              originalLength: value.length,
+                          });
                       }
-                      // 原值继续进入备份 JSON，避免为了救整包而静默删字段；只是不要再把它
-                      // 以 `{ base64: true }` 交给 JSZip，否则最终 generateAsync 才异步炸掉整包。
-                      console.warn(`[Backup] 损坏图片未写入素材文件: ${location} (${parsed.reason})`);
-                      return value;
+                      // 坏 Base64 已无法还原；不把正文写进 assets 或备份 JSON，避免恢复后继续
+                      // 传播脏数据。这里只修改 IDB 结构化克隆/运行态深拷贝，不会改用户本地库。
+                      console.warn(`[Backup] 损坏图片已从导出副本跳过: ${location} (${parsed.reason}, ${value.length} chars)`);
+                      return '';
                   }
                   const filename = `asset_${Date.now()}_${assetCount++}.${parsed.extension}`;
                   // JPEG/PNG/WebP/GIF 本身已压缩，再跑 DEFLATE 只会浪费手机 CPU；直接存储。
@@ -4543,6 +4548,18 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }
           }
 
+          if (malformedImageCount > 0) {
+              zip.file(
+                  'diagnostics/malformed-images.json',
+                  JSON.stringify(buildMalformedImageDiagnostics({
+                      createdAt: new Date().toISOString(),
+                      mode,
+                      total: malformedImageCount,
+                      items: malformedImageDiagnostics,
+                  }), null, 2),
+              );
+          }
+
           // 进度提示：每 ~5% 更新一次（避免高频 React 重渲染），同时让进度
           // 条从 70% 平滑爬到 99%，用户能确切看到"在动"。
           let lastReportedPercent = -10;
@@ -4571,8 +4588,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // 备份成功 → 推进「该备份啦」提醒的计时（本地导出 / 云备份都走这里，一处覆盖两条路径）
           markBackupDone();
           if (malformedImageCount > 0) {
-              console.warn(`[Backup] 备份已完成，但有 ${malformedImageCount} 处损坏图片未写入素材文件`, malformedImageLocations);
-              addToast(`备份已生成，但有 ${malformedImageCount} 处原本就损坏的图片无法打包；其他数据已正常保存`, 'info');
+              console.warn(`[Backup] 备份已完成，已从导出副本跳过 ${malformedImageCount} 处损坏图片`, malformedImageDiagnostics);
+              addToast(`备份已生成，已跳过 ${malformedImageCount} 处无法恢复的损坏图片；其他数据已正常保存`, 'info');
           }
           return content;
 
