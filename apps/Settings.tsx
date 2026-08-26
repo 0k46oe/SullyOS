@@ -526,6 +526,8 @@ const Settings: React.FC = () => {
   const [editPresetUrl, setEditPresetUrl] = useState('');
   const [editPresetKey, setEditPresetKey] = useState('');
   const [editPresetModel, setEditPresetModel] = useState('');
+  const [editPresetStream, setEditPresetStream] = useState(false);
+  const [editPresetTemperature, setEditPresetTemperature] = useState(0.85);
   const [holdingDeletePresetId, setHoldingDeletePresetId] = useState<string | null>(null);
   const presetDeleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
@@ -981,11 +983,22 @@ const Settings: React.FC = () => {
 
   const openEditPreset = (preset: typeof apiPresets[0]) => {
       cancelPresetDeleteHold();
+      const isActive = activePresetId === preset.id;
       setEditingPresetId(preset.id);
       setEditPresetName(preset.name);
       setEditPresetUrl(preset.config.baseUrl || '');
       setEditPresetKey(preset.config.apiKey || '');
       setEditPresetModel(preset.config.model || '');
+      // 当前正在使用的预设要接住主表单里刚改的高级设置：用户点铅笔再点保存即可写回，
+      // 不必猜还要额外按一次「用当前配置填入」。非当前/老预设则读取自身，缺字段才回退。
+      setEditPresetStream(
+          isActive ? localStream : (typeof preset.config.stream === 'boolean' ? preset.config.stream : localStream),
+      );
+      setEditPresetTemperature(
+          isActive
+              ? localTemperature
+              : (typeof preset.config.temperature === 'number' ? preset.config.temperature : localTemperature),
+      );
   };
 
   const handleUpdatePreset = () => {
@@ -1001,6 +1014,8 @@ const Settings: React.FC = () => {
           baseUrl: normalizeApiBaseUrl(editPresetUrl),
           apiKey: normalizeApiCredential(editPresetKey),
           model: normalizeApiModel(editPresetModel),
+          stream: editPresetStream,
+          temperature: editPresetTemperature,
       };
       // 「正在用的就是这条」要在改之前问，改完值就对不上了
       const wasActive = activePresetId === preset.id;
@@ -3876,7 +3891,7 @@ const Settings: React.FC = () => {
           <div className="space-y-2">
               <label className="text-[10px] font-bold text-slate-400 uppercase">预设名称 (例如: DeepSeek)</label>
               <input value={newPresetName} onChange={e => setNewPresetName(e.target.value)} className="w-full bg-slate-100 rounded-xl px-4 py-3 text-sm focus:outline-primary" autoFocus placeholder="Name..." />
-              <p className="text-[10px] text-slate-400 leading-relaxed pt-1">用上面表单里现在填的 URL / Key / Model 存一张新的存档卡。</p>
+              <p className="text-[10px] text-slate-400 leading-relaxed pt-1">会保存上面表单里的 URL / Key / Model，以及高级设置中的流式与温度。</p>
           </div>
       </Modal>
 
@@ -3904,17 +3919,52 @@ const Settings: React.FC = () => {
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Model</label>
                   <input value={editPresetModel} onChange={e => setEditPresetModel(e.target.value)} placeholder="模型名称" className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary" />
               </div>
+              <div className="rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-3 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                      <div>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">流式输出 (Stream)</p>
+                          <p className="text-[9px] text-slate-300 mt-0.5">随这条预设独立保存</p>
+                      </div>
+                      <button
+                          type="button"
+                          aria-label="预设流式输出"
+                          aria-pressed={editPresetStream}
+                          onClick={() => setEditPresetStream(value => !value)}
+                          className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${editPresetStream ? 'bg-primary' : 'bg-slate-200'}`}
+                      >
+                          <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${editPresetStream ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                      </button>
+                  </div>
+                  <div>
+                      <div className="flex items-center justify-between">
+                          <label htmlFor="edit-preset-temperature" className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">温度 (Temperature)</label>
+                          <span className="text-[10px] font-mono text-slate-400">{editPresetTemperature.toFixed(2)}</span>
+                      </div>
+                      <input
+                          id="edit-preset-temperature"
+                          type="range"
+                          min="0"
+                          max="2"
+                          step="0.05"
+                          value={editPresetTemperature}
+                          onChange={event => setEditPresetTemperature(parseFloat(event.target.value))}
+                          className="w-full accent-primary mt-1"
+                      />
+                  </div>
+              </div>
               <button
                   type="button"
                   onClick={() => {
                       setEditPresetUrl(localUrl);
                       setEditPresetKey(localKey);
                       setEditPresetModel(localModel);
+                      setEditPresetStream(localStream);
+                      setEditPresetTemperature(localTemperature);
                       addToast('已填入当前配置', 'info');
                   }}
                   className="w-full py-2 bg-slate-100 text-slate-500 text-xs font-bold rounded-xl active:scale-95 transition-transform"
               >
-                  用当前配置填入
+                  用当前完整配置填入
               </button>
               <p className="text-[10px] text-slate-400 leading-relaxed">
                   {editingPresetId && activePresetId === editingPresetId

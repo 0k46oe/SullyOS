@@ -75,6 +75,28 @@ describe('保存配置不反写预设', () => {
     );
     expect(handleUpdatePreset).toMatch(/if \(wasActive\) commitApiConfig\(/);
   });
+
+  it('铅笔编辑会读取并保存每条预设自己的流式与温度', () => {
+    const openEditPreset = bodyOf('openEditPreset');
+    const handleUpdatePreset = bodyOf('handleUpdatePreset');
+
+    // 正在使用的那条优先拿主表单值：改完高级设置后，点铅笔再保存就能真正写回预设。
+    expect(openEditPreset).toMatch(/const isActive = activePresetId === preset\.id/);
+    expect(openEditPreset).toMatch(/setEditPresetStream\([\s\S]*isActive \? localStream/);
+    expect(openEditPreset).toMatch(/setEditPresetTemperature\([\s\S]*isActive[\s\S]*localTemperature/);
+    // 非当前预设仍读自己的值，不能被当前 API 的高级设置覆盖。
+    expect(openEditPreset).toMatch(/typeof preset\.config\.stream === 'boolean'/);
+    expect(openEditPreset).toMatch(/setEditPresetTemperature\([\s\S]*preset\.config\.temperature/);
+    expect(handleUpdatePreset).toMatch(/stream:\s*editPresetStream/);
+    expect(handleUpdatePreset).toMatch(/temperature:\s*editPresetTemperature/);
+  });
+
+  it('用当前配置填入时不会漏掉高级设置', () => {
+    expect(settings).toMatch(/setEditPresetStream\(localStream\)/);
+    expect(settings).toMatch(/setEditPresetTemperature\(localTemperature\)/);
+    expect(settings).toMatch(/aria-pressed=\{editPresetStream\}/);
+    expect(settings).toMatch(/value=\{editPresetTemperature\}/);
+  });
 });
 
 describe('换 API 一定连着换云端凭据', () => {
