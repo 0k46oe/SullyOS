@@ -4,11 +4,13 @@ import { useOS } from '../context/OSContext';
 import { extractContent, safeFetchJson } from '../utils/safeApi';
 import { minimaxFetch } from '../utils/minimaxEndpoint';
 import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
-import { hashTtsParams, getCachedTts, saveCachedTts } from '../utils/ttsCache';
-import { cleanTextForTts, insertSpeechBreaks, convertHexAudioToBlob, fetchRemoteAudioBlob, VALID_EMOTIONS, stripEmotionTags, VOICE_ACTING_GUIDE, cleanVoiceMarkupForDisplay } from '../utils/minimaxTts';
+import { getCachedTts, saveCachedTts } from '../utils/ttsCache';
+import { buildMiniMaxTtsCacheKey, buildMiniMaxTtsPayload, cleanTextForTts, convertHexAudioToBlob, fetchRemoteAudioBlob, getMiniMaxParamVersion, prepareMiniMaxSpeechText, VALID_EMOTIONS, stripEmotionTags, VOICE_ACTING_GUIDE } from '../utils/minimaxTts';
 import { normalizeVoiceTags } from '../utils/sanitize';
-import { FISH_VOICE_ACTING_GUIDE, synthesizeSpeechFishDetailed, resolveFishAudioApiKey, cleanTextForTtsFish, stripFishMarkupForDisplay } from '../utils/fishAudioTts';
-import { resolveTtsProvider, getTtsProvider, getVoicePromptOverride } from '../utils/ttsProvider';
+import { FISH_VOICE_ACTING_GUIDE, stripFishMarkupForDisplay } from '../utils/fishAudioTts';
+import { resolveTtsProvider, getElevenLabsModel, getTtsProvider, getVoicePromptOverride } from '../utils/ttsProvider';
+import { getElevenLabsVoiceActingGuide, stripElevenLabsMarkupForDisplay } from '../utils/elevenLabsTts';
+import { canSynthesizeSpeech, stripTtsMarkupForDisplay, synthesizeSpeechDetailed as synthesizeSpeechRoutedDetailed } from '../utils/ttsRouter';
 import { VOICE_LANGUAGE_OPTIONS } from '../utils/voiceLanguage';
 import { startStt, isSttSupported, type SttSession } from '../utils/speechToText';
 import { ContextBuilder } from '../utils/context';
@@ -305,19 +307,6 @@ const extractVoiceTag = (text: string): { display: string; speech: string; voice
   const display = text.replace(/<[语語]音[^>]*>[\s\S]*?<\/\s*[语語]音\s*>/g, '').trim();
   return { display, speech: voiceText, voiceText, emotion };
 };
-// Derive the shared TTS cache key from the MiniMax payload. Must match the
-// key used by `synthesizeSpeechDetailed` so chat/date/call can reuse each
-// other's cached audio when the effective request matches.
-const ttsCacheKeyFromPayload = (payload: any): string => hashTtsParams({
-  kind: 'minimax-t2a',
-  text: payload.text,
-  model: payload.model,
-  voice_setting: payload.voice_setting,
-  timber_weights: payload.timber_weights,
-  voice_modify: payload.voice_modify,
-  language_boost: payload.language_boost,
-  audio_setting: payload.audio_setting,
-});
 const splitTextForTts = (rawText: string, maxChunkLen = 120): string[] => {
   const normalized = rawText.replace(/\s+/g, ' ').trim();
   if (!normalized) return [];
@@ -365,11 +354,29 @@ const SoundWaveGlyph = () => (
     ))}
   </span>
 );
+const currentVoiceActingGuide = (): string => {
+  const provider = getTtsProvider();
+  const custom = getVoicePromptOverride(provider);
+  if (custom) return custom;
+  if (provider === 'fishaudio') return FISH_VOICE_ACTING_GUIDE;
+  if (provider === 'elevenlabs') return getElevenLabsVoiceActingGuide(getElevenLabsModel());
+  return VOICE_ACTING_GUIDE;
+};
+
+const cleanCurrentVoiceMarkupForDisplay = (text?: string | null): string => {
+  if (!text) return '';
+  const provider = getTtsProvider();
+  if (provider === 'fishaudio') return stripFishMarkupForDisplay(text);
+  if (provider === 'elevenlabs') return stripElevenLabsMarkupForDisplay(text);
+  // MiniMax 的 (sighs)/(chuckle) 会在 renderAssistantLine 里渲染成声音动作图标，不能提前剥掉。
+  return text;
+};
+
 const renderAssistantLine = (text: string, accent = '#8b5cf6') => {
   // 朗读用的停顿标记 <#0.4#> 不显示出来
   let trimmed = text.replace(/<#[\d.]+#>/g, '').trim();
   // 鱼声的 inline cue（[whispering]/[break] 等）是演出指令，不该显示给用户。
-  if (getTtsProvider() === 'fishaudio') trimmed = stripFishMarkupForDisplay(trimmed);
+  trimmed = cleanCurrentVoiceMarkupForDisplay(trimmed);
   // 按 中文舞台指示（…）、英文语气词标签 (sighs)、换行 切分，前两者作为特殊元素渲染
   const parts = trimmed.split(SOUND_TAG_SPLIT_RE).filter(Boolean);
   return parts.map((part, idx) => {
@@ -444,7 +451,7 @@ const buildCallPrompt = (
 ✅ 要这样——有自己的节奏，像真人一样不完美：
 “嘶……你刚说的那个，等一下。”
 “……好吧确实挺离谱的。”
-“(chuckle) 我刚差点把咖啡洒了，你别逗我。”
+"……我刚差点把咖啡洒了，你别逗我。"
 “说真的，今天有件事我还挺想跟你说的——但你先说完你那个。”
 
 ### 你能感受到对方
@@ -466,21 +473,9 @@ const buildCallPrompt = (
 
 ### 让声音有情绪（重要——直接写进文本，不要靠旁白）
 
-你的话会被转成真实语音，所以**情绪和语气要由你自己标出来**，不要写中文舞台指示（系统不会朗读它们，只会被删掉）。两种工具：
+你的话会被转成真实语音。不同引擎识别的演出标记不同，严格遵守下面这份**当前引擎规则**；不要混用别家的标签，也不要写会被念出来的小说旁白。
 
-1) **整段情绪**（可选，最多一个）：如果这通回复整体有明显情绪，**只在整段回复的最最开头**放一个标签，从这些里选一个：
-\`[happy] [sad] [angry] [fearful] [disgusted] [surprised] [calm] [fluent]\`
-   例：\`[angry] 你昨晚十二点半还喝咖啡？不要命了是吧。\`
-   **铁律**：整段回复最多一个，且必须在最开头。**绝对不要每段都标、不要标在句子中间、不要标在第二段以后**——放错位置只会被删掉、还会让声音忽高忽低。情绪不强就别标。
-
-2) **句中语气声**（要克制）：偶尔想要笑、叹气这种真实反应，直接写官方英文标签（**别写中文的（轻笑）（叹气）**）：
-\`(chuckle) (laughs) (sighs) (coughs) (groans) (breath) (pant) (gasps) (sniffs) (snorts) (hissing) (emm)\`
-   例：\`(sighs) 算了，听你的。\`
-   **整段回复里这种标签最多一两个**，多了声音会飘、很假。
-
-注意：不要写小说式中文旁白，如”（我靠在椅背上，目光看向远方）”——会被直接删掉，等于白写。
-
-${getVoicePromptOverride(getTtsProvider()) ?? (getTtsProvider() === 'fishaudio' ? FISH_VOICE_ACTING_GUIDE : VOICE_ACTING_GUIDE)}
+${currentVoiceActingGuide()}
 
 ### 历史消息的来源标记（重要）
 
@@ -501,14 +496,14 @@ ${getVoicePromptOverride(getTtsProvider()) ?? (getTtsProvider() === 'fishaudio' 
 
 示例：
 啊，我知道了
-<语音 emotion="happy">Ok, I get it (chuckle)</语音>
+<语音 emotion="happy">Okay, I get it now!</语音>
 
 你说真的？那也太离谱了吧。
 <语音 emotion="surprised">Wait... are you serious? That's insane.</语音>
 
 要求：
 - <语音> 里的翻译要自然口语化，不要机翻味，要符合你的角色性格
-- <语音> 里只写会被朗读的文字；想要笑/叹气等真实语气，用官方英文标签 (laughs)/(sighs)/(chuckle) 等，**不要写中文（轻笑）**，也不要写中文舞台旁白
+- <语音> 里只写会被朗读的文字；演出标记继续遵守上方「当前引擎规则」，不要混用其它引擎语法，也不要写中文舞台旁白
 - 每条消息只有一个 <语音> 标签，emotion 属性可选；情绪不强就别加
 - 中文部分和 <语音> 部分表达的意思要一致` : '';
   return [coreContext, timeContext, callPrompt, voiceLangPrompt].filter(Boolean).join('\n\n');
@@ -1210,105 +1205,47 @@ const CallApp: React.FC = () => {
     setVoiceLang(selectedChar?.callVoiceLang || '');
   }, [selectedCharId]);
   const resolveVoiceId = () => selectedChar?.voiceProfile?.voiceId?.trim() || '';
-  const resolveModel = () => selectedChar?.voiceProfile?.model?.trim() || 'speech-2.8-hd';
   const resolveGroupId = () => (apiConfig.minimaxGroupId || '').trim();
-  const buildTtsExtras = () => {
-    const vp = selectedChar?.voiceProfile;
-    if (!vp) return {};
-    const extras: any = {};
-    const tw = vp.timberWeights;
-    if (tw && tw.length > 1) {
-      extras.timber_weights = (() => {
-        const totalWeight = tw.reduce((sum: number, t: any) => sum + (t.weight || 0), 0);
-        if (totalWeight === 0) return tw.map((t: any) => ({ voice_id: t.voice_id, weight: Math.round(100 / tw.length) }));
-        const raw = tw.map((t: any) => ({ voice_id: t.voice_id, weight: Math.round((t.weight / totalWeight) * 100) }));
-        const diff = 100 - raw.reduce((s: number, r: any) => s + r.weight, 0);
-        if (diff !== 0) raw[0].weight += diff;
-        return raw;
-      })();
-    }
-    if (vp.voiceModify) {
-      const vm: any = {};
-      // Soft-clamp voice_modify to prevent extreme spikes during excited speech
-      const sc = (v: number, limit: number) => {
-        if (Math.abs(v) <= limit) return v;
-        const sign = v > 0 ? 1 : -1;
-        return sign * (limit + Math.log1p(Math.abs(v) - limit) * (limit * 0.15));
-      };
-      if (vp.voiceModify.pitch) vm.pitch = Math.round(sc(vp.voiceModify.pitch, 40));
-      if (vp.voiceModify.intensity) vm.intensity = Math.round(sc(vp.voiceModify.intensity, 30));
-      if (vp.voiceModify.timbre) vm.timbre = Math.round(sc(vp.voiceModify.timbre, 40));
-      if (vp.voiceModify.sound_effects) vm.sound_effects = vp.voiceModify.sound_effects;
-      if (Object.keys(vm).length) extras.voice_modify = vm;
-    }
-    return extras;
-  };
-  const resolveVoiceSettingFields = (emotionOverride?: string) => {
-    const vp = selectedChar?.voiceProfile;
-    // Per-utterance emotion from <语音 emotion="…"> wins over the static voiceProfile emotion.
-    const emotion = (emotionOverride && VALID_EMOTIONS.has(emotionOverride)) ? emotionOverride : (vp?.emotion || '');
-    return {
-      // Clamp speed & pitch to safe human-like ranges
-      speed: Math.max(0.75, Math.min(1.4, vp?.speed ?? 1)),
-      vol: Math.max(0.3, Math.min(2, vp?.vol ?? 1)),
-      pitch: Math.max(-8, Math.min(8, vp?.pitch ?? 0)),
-      english_normalization: true,
-      ...(emotion ? { emotion } : {}),
-    };
-  };
-  // ── TTS 服务商分发：电话语音也支持 MiniMax ↔ 鱼声二选一 ──
-  const isFishTts = resolveTtsProvider(apiConfig) === 'fishaudio';
+  // ── TTS 服务商分发：MiniMax 保留电话专用分段兜底；Fish / ElevenLabs 走共享适配器。 ──
+  const activeTtsProvider = resolveTtsProvider(apiConfig);
   // 当前服务商下，这个角色能否合成语音（决定要不要走 TTS / 给"语音未配置"提示）。
   const hasConfiguredVoice = (): boolean => {
-    if (isFishTts) {
-      return !!resolveFishAudioApiKey(apiConfig) && !!selectedChar?.voiceProfile?.fishReferenceId;
-    }
-    const voiceId = resolveVoiceId();
-    const hasTimber = (selectedChar?.voiceProfile?.timberWeights?.length || 0) > 1;
-    return !!resolveMiniMaxApiKey(apiConfig) && (!!voiceId || hasTimber);
+    return !!selectedChar && canSynthesizeSpeech(selectedChar, apiConfig);
   };
   const canSpeakVoice = (): boolean => isSpeakerOn && hasConfiguredVoice();
-  // 鱼声合成：直接把（带 inline cue 的）文本交给鱼声合成器，由 cleanTextForTtsFish 做
-  // 鱼声专属清洗——保留 [happy]/[whispering]/[break] 等 cue，只清系统标记 / <#秒#> 残留。
-  // 绝不能先走 MiniMax 的 cleanTextForTts，那会把方括号 cue 全剥掉。
-  const synthesizeFishCallUrl = async (rawText: string, emotion?: string): Promise<string> => {
-    if (!selectedChar) throw new Error('未选择角色');
-    if (!cleanTextForTtsFish(rawText).trim()) throw new Error('可朗读文本为空');
-    const { url } = await synthesizeSpeechFishDetailed(rawText, selectedChar, apiConfig, {
-      languageBoost: voiceLang || undefined,
-      emotion,
-    });
-    return url;
-  };
   // ── 通话语音合成统一入口：开场白 / 正常回合 / 重roll / 主动开口共用 ──
-  // MiniMax：缓存命中 → 单发合成 → 失败再分段兜底；鱼声：直接合成。
+  // MiniMax：缓存命中 → 单发合成 → 失败再分段兜底；Fish / ElevenLabs：共享 router 直接合成。
   // 抛错或返回空 url 都表示没有可播放音频，由调用方降级为纯文字。
   const synthesizeCallAudioUrl = async (rawText: string, emotion?: string): Promise<{ url: string; traceIds: string[] }> => {
-    if (isFishTts) {
-      const fishUrl = await synthesizeFishCallUrl(rawText, emotion);
-      return { url: fishUrl || '', traceIds: [] };
+    if (activeTtsProvider !== 'minimax') {
+      if (!selectedChar) throw new Error('未选择角色');
+      const { url } = await synthesizeSpeechRoutedDetailed(rawText, selectedChar, apiConfig, {
+        languageBoost: voiceLang || undefined,
+        emotion,
+      });
+      return { url: url || '', traceIds: [] };
     }
     const minimaxApiKey = resolveMiniMaxApiKey(apiConfig);
     const voiceId = resolveVoiceId();
     const groupId = resolveGroupId();
-    const speechText = insertSpeechBreaks(cleanTextForTts(rawText));
-    const model = resolveModel();
+    const voiceProfile = selectedChar?.voiceProfile;
+    const paramVersion = getMiniMaxParamVersion(voiceProfile);
+    const speechText = prepareMiniMaxSpeechText(cleanTextForTts(rawText), voiceProfile);
+    const model = voiceProfile?.model?.trim() || 'speech-2.8-hd';
     if (!speechText.trim()) throw new Error('可朗读文本为空');
 
     const synthesizeChunk = async (chunk: string, idx = 0, total = 1): Promise<{ blob?: Blob; remoteUrl?: string; traceId: string }> => {
-      const ttsPayload: any = {
+      const ttsPayload = buildMiniMaxTtsPayload(chunk, voiceProfile, {
+        voiceId,
         model,
-        text: chunk,
-        stream: false,
-        output_format: 'url',
-        voice_setting: { voice_id: voiceId, ...resolveVoiceSettingFields(emotion) },
-        audio_setting: { format: 'mp3', sample_rate: 32000, bitrate: 128000, channel: 1 },
-        ...(voiceLang ? { language_boost: voiceLang } : {}),
-        ...buildTtsExtras(),
-      };
-      if (groupId) ttsPayload.group_id = groupId;
+        emotion,
+        languageBoost: voiceLang || undefined,
+        groupId: groupId || undefined,
+        legacyTransport: 'call',
+        textAlreadyPrepared: true,
+      });
 
-      const chunkCacheKey = ttsCacheKeyFromPayload(ttsPayload);
+      const chunkCacheKey = buildMiniMaxTtsCacheKey(ttsPayload, paramVersion);
       const cachedChunk = await getCachedTts(chunkCacheKey);
       if (cachedChunk) {
         return { blob: cachedChunk, traceId: 'cache' };
@@ -1369,6 +1306,7 @@ const CallApp: React.FC = () => {
       model,
       voice_id: voiceId,
       group_id: groupId,
+      param_version: paramVersion,
       assistant_text_length: rawText.length,
       speech_text_length: speechText.length,
       speech_text_preview: speechText.slice(0, 120),
@@ -2303,9 +2241,9 @@ ${sentencePlan}`;
 
       const parsed = extractVoiceTag(target.bubble.text);
       const originalText = stripCallTextFormatting(parsed.display).trim()
-        || cleanVoiceMarkupForDisplay(parsed.voiceText)
+        || stripTtsMarkupForDisplay(parsed.voiceText, apiConfig)
         || stripCallTextFormatting(target.bubble.text).trim();
-      const spokenText = cleanVoiceMarkupForDisplay(parsed.voiceText) || originalText;
+      const spokenText = stripTtsMarkupForDisplay(parsed.voiceText, apiConfig) || originalText;
       await saveVoiceFavorite({
         source: 'call',
         sourceKey,
@@ -3470,7 +3408,7 @@ ${sentencePlan}`;
               <div className="text-sm mt-1 leading-relaxed">{(() => {
                 if (item.role !== 'assistant') return item.text;
                 const { display, voiceText } = extractVoiceTag(item.text);
-                const cleanVoice = cleanVoiceMarkupForDisplay(voiceText);
+                const cleanVoice = stripTtsMarkupForDisplay(voiceText, apiConfig);
                 return <>{renderAssistantLine(display, accentColor)}{cleanVoice && <div className="mt-1 text-[10px] text-white/40 italic">{cleanVoice}</div>}</>;
               })()}</div>
               {item.role === 'assistant' && (
@@ -3507,7 +3445,7 @@ ${sentencePlan}`;
           favorited={voiceFavoriteSaved}
           busy={voiceFavoriteBusy}
           title="通话语音"
-          preview={voiceFavoriteTarget ? (stripCallTextFormatting(extractVoiceTag(voiceFavoriteTarget.bubble.text).display) || cleanVoiceMarkupForDisplay(extractVoiceTag(voiceFavoriteTarget.bubble.text).voiceText)) : ''}
+          preview={voiceFavoriteTarget ? (stripCallTextFormatting(extractVoiceTag(voiceFavoriteTarget.bubble.text).display) || stripTtsMarkupForDisplay(extractVoiceTag(voiceFavoriteTarget.bubble.text).voiceText, apiConfig)) : ''}
           onToggle={() => void toggleCallVoiceFavorite()}
           onClose={() => { if (!voiceFavoriteBusy) setVoiceFavoriteTarget(null); }}
         />
@@ -3860,7 +3798,7 @@ ${sentencePlan}`;
             <div className={`${sizeClass} whitespace-pre-wrap leading-relaxed ${bubble.role === 'user' ? 'inline-block text-left text-white/90 bg-white/[0.06] border border-white/10 rounded-2xl rounded-tr-sm px-3 py-1.5' : 'text-white/95'}`}>
               {bubble.role === 'assistant' ? (() => {
                 const { display, voiceText } = extractVoiceTag(line || bubble.text);
-                const cleanVoice = cleanVoiceMarkupForDisplay(voiceText);
+                const cleanVoice = stripTtsMarkupForDisplay(voiceText, apiConfig);
                 return <>
                   {bubble.thinkingChain && (
                     <details className="group mb-2 rounded-xl border border-white/10 bg-white/[0.035] px-2.5 py-2 text-[11px] text-white/55">
@@ -4091,7 +4029,7 @@ ${sentencePlan}`;
         favorited={voiceFavoriteSaved}
         busy={voiceFavoriteBusy}
         title="通话语音"
-        preview={voiceFavoriteTarget ? (stripCallTextFormatting(extractVoiceTag(voiceFavoriteTarget.bubble.text).display) || cleanVoiceMarkupForDisplay(extractVoiceTag(voiceFavoriteTarget.bubble.text).voiceText)) : ''}
+        preview={voiceFavoriteTarget ? (stripCallTextFormatting(extractVoiceTag(voiceFavoriteTarget.bubble.text).display) || stripTtsMarkupForDisplay(extractVoiceTag(voiceFavoriteTarget.bubble.text).voiceText, apiConfig)) : ''}
         onToggle={() => void toggleCallVoiceFavorite()}
         onClose={() => { if (!voiceFavoriteBusy) setVoiceFavoriteTarget(null); }}
       />

@@ -260,23 +260,42 @@ const VRWorldApp: React.FC = () => {
     }, [novels]);
 
     // 用户在留言簿发言：落墙 + 以小卡片广播给所有接入彼方的角色私聊
-    const onUserBoardPost = useCallback(async (content: string) => {
+    const onUserBoardPost = useCallback(async (content: string, replyTo?: VRGuestbookMessage) => {
         const t = content.trim();
         if (!t) return;
         const board = (await DB.getVRGuestbook()) || { id: 'board', messages: [], updatedAt: Date.now() };
         const id = `gb_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-        board.messages = [...board.messages, { id, authorId: 'user', authorName: userName, content: t, createdAt: Date.now() }];
+        board.messages = [...board.messages, {
+            id,
+            authorId: 'user',
+            authorName: userName,
+            content: t,
+            replyToId: replyTo?.id,
+            replyToName: replyTo?.authorName,
+            createdAt: Date.now(),
+        }];
         board.updatedAt = Date.now();
         await DB.saveVRGuestbook(board);
+        const activity = replyTo
+            ? `${userName} 在留言墙上回复 ${replyTo.authorName}：${t}`
+            : `${userName} 在留言墙上发了：${t}`;
         const enabled = characters.filter(c => c.vrState?.enabled);
         for (const c of enabled) {
             await DB.saveMessage({
                 charId: c.id, role: 'user', type: 'vr_card',
-                content: `「彼方 · 留言簿」${userName} 在留言墙上发了：${t}`,
-                metadata: { vrCard: true, room: 'guestbook', userBoardPost: true, activity: `${userName} 在留言墙上发了：${t}`, boardPost: t },
+                content: `「彼方 · 留言簿」${activity}`,
+                metadata: {
+                    vrCard: true,
+                    room: 'guestbook',
+                    userBoardPost: true,
+                    activity,
+                    boardPost: t,
+                    boardReplyToName: replyTo?.authorName,
+                },
             } as any);
         }
-        addToast?.(enabled.length > 0 ? `已留言，并广播给 ${enabled.length} 位接入角色` : '已留言', 'success');
+        const action = replyTo ? `已回复 ${replyTo.authorName}` : '已留言';
+        addToast?.(enabled.length > 0 ? `${action}，并广播给 ${enabled.length} 位接入角色` : action, 'success');
     }, [characters, userName, addToast]);
 
     // 用户更新自己的彼方状态：以行为卡片广播给所有接入彼方的角色（机制同留言簿发言）
@@ -2356,7 +2375,7 @@ const RoomScene: React.FC<{
     onJump: (novelId: string | undefined, segIdx: number) => void;
     characters: CharacterProfile[];
     userName: string;
-    onUserBoardPost: (content: string) => Promise<void>;
+    onUserBoardPost: (content: string, replyTo?: VRGuestbookMessage) => Promise<void>;
     addToast?: (m: string, t?: any) => void;
 }> = ({ roomId, occupants, latestByChar, onClose, onJump, characters, userName, onUserBoardPost, addToast }) => {
     const room = getRoom(roomId);
@@ -2370,6 +2389,8 @@ const RoomScene: React.FC<{
     const [musicState, setMusicState] = useState<VRMusicRoomState | null>(null);
     const [board, setBoard] = useState<VRGuestbookState | null>(null);
     const [postText, setPostText] = useState('');
+    const [replyingTo, setReplyingTo] = useState<VRGuestbookMessage | null>(null);
+    const postInputRef = useRef<HTMLInputElement>(null);
     const [posting, setPosting] = useState(false);
     const [gbPage, setGbPage] = useState(0);          // 留言墙翻页：0 = 最新一页
     const [confirmClear, setConfirmClear] = useState(false); // 一键清空二次确认
@@ -2389,8 +2410,20 @@ const RoomScene: React.FC<{
         const t = postText.trim();
         if (!t || posting) return;
         setPosting(true);
-        try { await onUserBoardPost(t); setPostText(''); setGbPage(0); setBoard(await DB.getVRGuestbook()); }
+        try {
+            await onUserBoardPost(t, replyingTo || undefined);
+            setPostText('');
+            setReplyingTo(null);
+            setGbPage(0);
+            setBoard(await DB.getVRGuestbook());
+        }
         finally { setPosting(false); }
+    };
+
+    const startReply = (message: VRGuestbookMessage) => {
+        if (message.authorId === 'user') return;
+        setReplyingTo(message);
+        requestAnimationFrame(() => postInputRef.current?.focus());
     };
 
     // 一键清空留言墙（只清这面公共墙；已广播进各角色私聊的卡片不动）
@@ -2398,6 +2431,7 @@ const RoomScene: React.FC<{
         await DB.clearVRGuestbook();
         setBoard(await DB.getVRGuestbook());
         setGbPage(0);
+        setReplyingTo(null);
         setConfirmClear(false);
         trackEvent('清空彼方留言墙');
         addToast?.('留言墙已清空', 'success');
@@ -2508,7 +2542,7 @@ const RoomScene: React.FC<{
                     }
                     return (
                         <div className="absolute left-3 right-3 z-20 rounded-2xl overflow-hidden flex flex-col backdrop-blur-md"
-                            style={{ top: VR_ROOM_PANEL_TOP, bottom: vrBottomPad('4rem'), background: 'rgba(10,22,38,0.62)', border: '1px solid rgba(140,200,255,0.22)', boxShadow: '0 8px 26px rgba(0,0,0,.4)' }}>
+                            style={{ top: VR_ROOM_PANEL_TOP, bottom: vrBottomPad(replyingTo ? '5.8rem' : '4rem'), background: 'rgba(10,22,38,0.62)', border: '1px solid rgba(140,200,255,0.22)', boxShadow: '0 8px 26px rgba(0,0,0,.4)' }}>
                             <div className="flex items-center gap-2 px-3 py-2 border-b border-white/10">
                                 <span className="text-[10px] tracking-[0.25em] text-sky-200/70" style={{ fontFamily: `'Noto Serif SC',serif` }}>留言墙</span>
                                 {all.length > 0 && <span className="text-[9px] text-white/30 tabular-nums">{all.length} 条</span>}
@@ -2543,10 +2577,14 @@ const RoomScene: React.FC<{
                                                 </div>
                                                 <div className="mt-1 space-y-1">
                                                     {g.map(m => (
-                                                        <div key={m.id} className="text-[12.5px] leading-relaxed text-white/85 px-2.5 py-1 rounded-lg w-fit max-w-full" style={{ background: 'rgba(255,255,255,0.055)' }}>
+                                                        <button key={m.id} type="button" onClick={() => startReply(m)} disabled={m.authorId === 'user'}
+                                                            aria-label={m.authorId === 'user' ? undefined : `回复 ${m.authorName}：${m.content}`}
+                                                            className="block text-left text-[12.5px] leading-relaxed text-white/85 px-2.5 py-1 rounded-lg w-fit max-w-full disabled:cursor-default active:scale-[0.99]"
+                                                            style={{ background: replyingTo?.id === m.id ? 'rgba(96,165,250,0.18)' : 'rgba(255,255,255,0.055)', border: replyingTo?.id === m.id ? '1px solid rgba(125,211,252,.35)' : '1px solid transparent' }}>
                                                             {m.replyToName && <span className="text-[10px] text-sky-200/45 mr-1">↩{m.replyToName}</span>}
                                                             {m.content}
-                                                        </div>
+                                                            {m.authorId !== 'user' && <span className="ml-2 text-[9px] text-sky-200/35">回复</span>}
+                                                        </button>
                                                     ))}
                                                 </div>
                                             </div>
@@ -2596,18 +2634,27 @@ const RoomScene: React.FC<{
 
                 {/* 留言簿：用户发言（广播给所有接入角色） */}
                 {isGuestbook && (
-                    <div className="absolute left-0 right-0 z-30 flex items-center gap-2 px-3 py-2.5"
+                    <div className="absolute left-0 right-0 z-30 flex flex-col gap-1.5 px-3 py-2.5"
                         style={{ bottom: vrBottomPad('0px'), background: 'linear-gradient(0deg,rgba(5,12,22,.92),transparent)' }}>
-                        <input value={postText} onChange={e => setPostText(e.target.value)}
-                            onKeyDown={e => { if (e.key === 'Enter') submitPost(); }}
-                            placeholder={`以 ${userName} 的身份留句话…`}
-                            className="flex-1 rounded-full px-4 py-2 text-[12.5px] text-white placeholder-white/35 outline-none backdrop-blur-md"
-                            style={{ background: 'rgba(255,255,255,.08)', border: '1px solid rgba(140,200,255,.25)' }} />
-                        <button onClick={submitPost} disabled={!postText.trim() || posting}
-                            className="h-9 px-4 rounded-full text-[12px] font-semibold text-white disabled:opacity-40 shrink-0"
-                            style={{ background: 'linear-gradient(120deg, rgba(120,180,255,.9), rgba(150,200,235,.85))' }}>
-                            {posting ? '…' : '留言'}
-                        </button>
+                        {replyingTo && (
+                            <div className="flex items-center gap-2 px-3 text-[10px] text-sky-100/70 min-w-0">
+                                <span className="shrink-0">回复 {replyingTo.authorName}</span>
+                                <span className="truncate text-white/35">{replyingTo.content}</span>
+                                <button type="button" onClick={() => setReplyingTo(null)} aria-label="取消回复" className="ml-auto shrink-0 text-white/45 active:text-white"><X size={13} /></button>
+                            </div>
+                        )}
+                        <div className="flex items-center gap-2 w-full">
+                            <input ref={postInputRef} value={postText} onChange={e => setPostText(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') submitPost(); }}
+                                placeholder={replyingTo ? `回复 ${replyingTo.authorName}…` : `以 ${userName} 的身份留句话…`}
+                                className="flex-1 min-w-0 rounded-full px-4 py-2 text-[12.5px] text-white placeholder-white/35 outline-none backdrop-blur-md"
+                                style={{ background: 'rgba(255,255,255,.08)', border: '1px solid rgba(140,200,255,.25)' }} />
+                            <button onClick={submitPost} disabled={!postText.trim() || posting}
+                                className="h-9 px-4 rounded-full text-[12px] font-semibold text-white disabled:opacity-40 shrink-0"
+                                style={{ background: 'linear-gradient(120deg, rgba(120,180,255,.9), rgba(150,200,235,.85))' }}>
+                                {posting ? '…' : replyingTo ? '回复' : '留言'}
+                            </button>
+                        </div>
                     </div>
                 )}
             </div>

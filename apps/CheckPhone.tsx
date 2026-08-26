@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { CharacterProfile, PhoneEvidence, PhoneCustomApp, PhoneContact, PhoneSimLog, ConvTopic, AiSession, AiServiceKind, TavernCard } from '../types';
+import { CharacterProfile, PhoneEvidence, PhoneCustomApp, PhoneContact, PhoneSimLog, ConvTopic, AiSession, AiServiceKind, TavernCard, APIConfig } from '../types';
 import { ContextBuilder } from '../utils/context';
 import Modal from '../components/os/Modal';
 import TokenImg from '../components/os/TokenImg';
@@ -19,6 +19,7 @@ import { getLastInnerState } from '../utils/emotionApply';
 import { trackEvent } from '../utils/analytics';
 import { normalizePhoneEvidence, phoneFieldToText } from '../utils/phoneEvidence';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
+import { getCheckPhoneApi, resolveCheckPhoneApi, setCheckPhoneApi } from '../utils/checkPhoneApi';
 import {
     User, Phone, ChatCircleDots, ChatCircle, ShoppingBag, Hamburger, Compass, GearSix,
     Plus, SignOut, CaretLeft, CaretRight, Cloud, ImagesSquare, LockSimple, Package,
@@ -256,7 +257,7 @@ const HomeCard: React.FC<{
 );
 
 const CheckPhone: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, updateCharacter, apiConfig, addToast, userProfile, characterGroups } = useOS();
+    const { closeApp, characters, activeCharacterId, updateCharacter, apiConfig, apiPresets, addToast, userProfile, characterGroups } = useOS();
     const [view, setView] = useState<'select' | 'phone'>('select');
     // activeAppId: 'home' | 'chat_detail' | 'app_id'
     const [activeAppId, setActiveAppId] = useState<string>('home');
@@ -265,6 +266,12 @@ const CheckPhone: React.FC = () => {
     const [page, setPage] = useState(0); // 0 = home, 1 = custom apps
     const [selectPage, setSelectPage] = useState(0); // Target Device 选人界面的翻页（每页 6 人）
     const [selectGroupId, setSelectGroupId] = useState(GROUP_FILTER_ALL); // 选人界面的分组筛选
+    const [showApiSettings, setShowApiSettings] = useState(false);
+    const [phoneApiConfig, setPhoneApiConfigState] = useState<APIConfig | null>(() => getCheckPhoneApi());
+    const [testingPhoneApi, setTestingPhoneApi] = useState(false);
+    const [phoneApiTestResult, setPhoneApiTestResult] = useState<string | null>(null);
+    const effectiveApiConfig = resolveCheckPhoneApi(phoneApiConfig, apiConfig);
+    const phoneApiFollowsDefault = !phoneApiConfig?.baseUrl;
 
     // Detail State
     const [selectedChatRecord, setSelectedChatRecord] = useState<PhoneEvidence | null>(null);
@@ -411,6 +418,12 @@ const CheckPhone: React.FC = () => {
         }
     }, [characters]);
 
+    useEffect(() => {
+        const sync = () => setPhoneApiConfigState(getCheckPhoneApi());
+        window.addEventListener('check-phone-api-changed', sync);
+        return () => window.removeEventListener('check-phone-api-changed', sync);
+    }, []);
+
     // Reset page scroll on navigation to prevent mobile layout shift
     useEffect(() => {
         window.scrollTo(0, 0);
@@ -449,6 +462,60 @@ const CheckPhone: React.FC = () => {
         setSelectedEvidenceRecord(null);
         setEvidenceBackAppId('home');
         setPage(0);
+    };
+
+    const apiHost = (url?: string) => {
+        try { return url ? new URL(url).host : '未配置'; }
+        catch { return url || '未配置'; }
+    };
+    const isSamePhoneApi = (config: APIConfig) => Boolean(phoneApiConfig)
+        && phoneApiConfig!.baseUrl === config.baseUrl
+        && phoneApiConfig!.model === config.model
+        && phoneApiConfig!.apiKey === config.apiKey;
+
+    const choosePhoneApi = (config: APIConfig | null) => {
+        setCheckPhoneApi(config);
+        setPhoneApiConfigState(config?.baseUrl ? config : null);
+        setPhoneApiTestResult(null);
+        addToast(config ? '查手机已切换到独立 API' : '查手机已改为跟随聊天默认', 'success');
+        trackEvent('切换查手机独立 API', { mode: config ? 'independent' : 'default' });
+    };
+
+    const testPhoneApi = async () => {
+        const config = effectiveApiConfig;
+        if (!config?.baseUrl || !config?.model) {
+            setPhoneApiTestResult('当前没有可用的 API');
+            return;
+        }
+        setTestingPhoneApi(true);
+        setPhoneApiTestResult(null);
+        try {
+            const response = await fetch(`${config.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${config.apiKey || 'sk-none'}`,
+                },
+                body: JSON.stringify({
+                    model: config.model,
+                    messages: [{ role: 'user', content: 'Hi' }],
+                    max_tokens: 5,
+                    stream: false,
+                }),
+            });
+            if (!response.ok) {
+                const detail = await response.text().catch(() => '');
+                setPhoneApiTestResult(`HTTP ${response.status}${detail ? `：${detail.slice(0, 80)}` : ''}`);
+                return;
+            }
+            const data = await safeResponseJson(response);
+            const reply = extractContent(data) || '';
+            setPhoneApiTestResult(`连接成功${reply ? ` · ${reply.slice(0, 24)}` : ''}`);
+        } catch (error: any) {
+            setPhoneApiTestResult(`连接失败：${error?.message || '网络错误'}`);
+        } finally {
+            setTestingPhoneApi(false);
+        }
     };
 
     const handleExitPhone = () => {
@@ -622,7 +689,7 @@ const CheckPhone: React.FC = () => {
 
     // --- Core Generation Logic ---
     const handleGenerate = async (type: string, customPrompt?: string, layout?: LayoutId) => {
-        if (!targetChar || !apiConfig.apiKey) {
+        if (!targetChar || !effectiveApiConfig.apiKey) {
             addToast('配置错误', 'error');
             return;
         }
@@ -749,11 +816,11 @@ ${realCharRule}
 
             const fullPrompt = `${context}\n\n### [你和用户「${userProfile.name}」的最近聊天（仅背景参考）]\n${recentMsgs}\n\n${perspectiveLock}\n\n### [Task]\n${promptInstruction}\n请结合上面的「当前时间 / 距离上次联系」和人设调整生成内容的时间戳和情绪。如果很久没联系，记录可能是近期的独处状态；如果刚聊过，记录可能与聊天内容相关。`;
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+            const response = await fetch(`${effectiveApiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApiConfig.apiKey}` },
                 body: JSON.stringify({
-                    model: apiConfig.model,
+                    model: effectiveApiConfig.model,
                     messages: [{ role: "user", content: fullPrompt }],
                     temperature: 0.8
                 })
@@ -888,10 +955,10 @@ ${realCharRule}
 
     // 裸 LLM 调用（智能体生成 / 互动续写共用）
     const callLLM = async (prompt: string, temperature = 0.85): Promise<string> => {
-        const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+        const response = await fetch(`${effectiveApiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature }),
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApiConfig.apiKey}` },
+            body: JSON.stringify({ model: effectiveApiConfig.model, messages: [{ role: 'user', content: prompt }], temperature }),
         });
         if (!response.ok) throw new Error('API Error');
         const data = await safeResponseJson(response);
@@ -917,7 +984,7 @@ ${realCharRule}
 
     // 生成：偷看机主在某个 AI 服务里的使用记录
     const handleGenerateAiAgent = async (service: AiServiceKind) => {
-        if (!targetChar || !apiConfig.apiKey) { addToast('配置错误', 'error'); return; }
+        if (!targetChar || !effectiveApiConfig.apiKey) { addToast('配置错误', 'error'); return; }
         setIsLoading(true);
         trackEvent('偷看 AI 助手使用记录', { service });
         try {
@@ -1126,7 +1193,7 @@ ${olderText}
     const handleAiSend = async () => {
         const session = selectedAiSession;
         const text = aiInput.trim();
-        if (!session || !text || !targetChar || !apiConfig.apiKey) return;
+        if (!session || !text || !targetChar || !effectiveApiConfig.apiKey) return;
         const isTavern = session.service === 'tavern';
         setAiSending(true);
         setAiInput('');
@@ -1183,7 +1250,7 @@ ${olderText}
     // 自然推进：不用 user 开口，让 LLM 接着剧情自己往下写一轮（双方都由 AI 演）
     const handleAiAutoContinue = async () => {
         const session = selectedAiSession;
-        if (!session || !targetChar || !apiConfig.apiKey || aiSending) return;
+        if (!session || !targetChar || !effectiveApiConfig.apiKey || aiSending) return;
         const isTavern = session.service === 'tavern';
         setAiSending(true);
         try {
@@ -1321,7 +1388,7 @@ ${olderText}
 
     // 用指定的卡开一局：生成一段以这张卡为对手的酒馆剧情（卡片本身不新增、不顶掉）
     const handlePlayCard = async (card: TavernCard) => {
-        if (!targetChar || !apiConfig.apiKey) { addToast('配置错误', 'error'); return; }
+        if (!targetChar || !effectiveApiConfig.apiKey) { addToast('配置错误', 'error'); return; }
         setIsLoading(true);
         trackEvent('用角色卡开一局');
         try {
@@ -1661,8 +1728,8 @@ ${olderText}
             const aChunk = serializeTurns(aLines.slice(mark, mark + ARCHIVE_EVERY));
             const bChunk = flipTranscript(aChunk);
             const [aSum, bSum] = await Promise.all([
-                summarizeConversation({ api: apiConfig as any, speakerName: targetChar.name, otherName: b.name, transcript: aChunk }),
-                summarizeConversation({ api: apiConfig as any, speakerName: b.name, otherName: targetChar.name, transcript: bChunk }),
+                summarizeConversation({ api: effectiveApiConfig as any, speakerName: targetChar.name, otherName: b.name, transcript: aChunk }),
+                summarizeConversation({ api: effectiveApiConfig as any, speakerName: b.name, otherName: targetChar.name, transcript: bChunk }),
             ]);
             const ts = Date.now();
             const mk = () => `tp-${ts}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1690,7 +1757,7 @@ ${olderText}
 
     // P1：真角色双向对话（A 发 B 回，双 LLM，镜像到 B）
     const handleRealConversation = async (contact: PhoneContact) => {
-        if (!targetChar || !apiConfig.apiKey) { addToast('请先配置 API', 'error'); return; }
+        if (!targetChar || !effectiveApiConfig.apiKey) { addToast('请先配置 API', 'error'); return; }
         const b = characters.find(c => c.id === contact.linkedCharId);
         if (!b) { addToast('该联系人未绑定真实角色', 'error'); return; }
         setIsLoading(true);
@@ -1704,7 +1771,7 @@ ${olderText}
             const archivedALines = aAllLines.slice(0, aArchived);            // 留着给用户看的原文
             const recentDetail = serializeTurns(aAllLines.slice(aArchived));  // 喂上下文的近段
             const result = await runRealConversation({
-                a: targetChar, b, user: userProfile, api: apiConfig as any,
+                a: targetChar, b, user: userProfile, api: effectiveApiConfig as any,
                 affinityA: contact.affinity, affinityB: bToA?.affinity ?? 0,
                 existingDetail: recentDetail,
                 // bNote = A 对 B 的备注（喂给 A）；aNote = B 对 A 的备注（喂给 B）。别接反。
@@ -1733,13 +1800,13 @@ ${olderText}
 
     // 与虚构 NPC 的对话（机主脑补，单 LLM，纯虚构、不镜像）
     const handleNpcConversation = async (contact: PhoneContact) => {
-        if (!targetChar || !apiConfig.apiKey) { addToast('请先配置 API', 'error'); return; }
+        if (!targetChar || !effectiveApiConfig.apiKey) { addToast('请先配置 API', 'error'); return; }
         setIsLoading(true);
         trackEvent('生成一段与联系人的对话', { contactKind: 'npc' });
         try {
             const existing = (targetChar.phoneState?.records || []).find(r => r.type === 'chat' && (r.contactId === contact.id || normName(r.title) === normName(contact.name)));
             const { detail, learnedNew } = await runNpcConversation({
-                host: targetChar, user: userProfile, api: apiConfig as any,
+                host: targetChar, user: userProfile, api: effectiveApiConfig as any,
                 npcName: contact.name, identity: contact.identity, note: contact.note,
                 learned: contact.learned, rounds: 4, existingDetail: existing?.detail,
             });
@@ -1889,14 +1956,14 @@ ${olderText}
     // ----- 人格模拟：后台生成（生成期间用户可离开本 App 去别处逛） -----
     const runSim = async (m: 'daily' | 'event', t: string, presence: 'default' | 'light' | 'none' = 'default', tone: 'mix' | 'depressive' | 'darkhumor' | 'cute' = 'mix') => {
         if (!targetChar) return;
-        if (!apiConfig.apiKey) { addToast('请先配置 API', 'error'); return; }
+        if (!effectiveApiConfig.apiKey) { addToast('请先配置 API', 'error'); return; }
         const cid = targetChar.id, cname = targetChar.name;
         personaSimStore.set({ status: 'loading', mode: m, theme: t, charId: cid, charName: cname });
         // 只报模式（日常/事件）这个固定枚举；主题 t 是用户自己写的文本，不上报
         trackEvent('生成人格模拟演出', { mode: m });
         try {
             const generated = await generatePersonaScript({
-                char: targetChar, userProfile, apiConfig: apiConfig as any, mode: m, theme: t, userPresence: presence, tone,
+                char: targetChar, userProfile, apiConfig: effectiveApiConfig as any, mode: m, theme: t, userPresence: presence, tone,
             });
             personaSimStore.set({ status: 'ready', mode: m, theme: t, script: generated, charId: cid, charName: cname });
             addToast('演出已就绪', 'success');
@@ -3514,7 +3581,11 @@ ${olderText}
                         <CaretLeft size={18} weight="bold" />
                     </button>
                     <span className="font-semibold tracking-[0.25em] uppercase text-[13px] text-white/80">Target Device</span>
-                    <div className="w-9" />
+                    <button onClick={() => { setPhoneApiTestResult(null); setShowApiSettings(true); }} aria-label="查手机 API 设置"
+                        className="relative w-9 h-9 rounded-full flex items-center justify-center text-white/75 bg-white/[0.05] border border-white/[0.08] active:scale-90 transition">
+                        <GearSix size={17} weight={phoneApiFollowsDefault ? 'regular' : 'fill'} />
+                        {!phoneApiFollowsDefault && <span className="absolute right-1.5 bottom-1.5 h-1.5 w-1.5 rounded-full bg-violet-400 shadow-[0_0_6px_#a78bfa]" />}
+                    </button>
                 </div>
                 {(() => {
                     const PER_PAGE = 6;
@@ -3563,6 +3634,59 @@ ${olderText}
                         </div>
                     );
                 })()}
+                <Modal isOpen={showApiSettings} title="查手机 · API 设置" onClose={() => setShowApiSettings(false)}>
+                    <div className="space-y-3">
+                        <p className="text-[11px] leading-relaxed text-slate-500">
+                            查手机里的内容生成、人际关系对话、智能体和人格模拟都会走这里。单独选择后不影响聊天；不设置则跟随聊天默认。
+                        </p>
+                        <div className="rounded-2xl bg-slate-50 border border-slate-200 p-3.5">
+                            <div className="text-[10px] tracking-[0.18em] text-slate-400 mb-1">当前生效</div>
+                            <div className="text-[13px] font-bold text-slate-800 break-all">{effectiveApiConfig?.model || '未配置'}</div>
+                            <div className="text-[10.5px] text-slate-400 mt-0.5 break-all">
+                                {apiHost(effectiveApiConfig?.baseUrl)} · {phoneApiFollowsDefault ? '跟随聊天默认' : '查手机独立'}
+                            </div>
+                            <button onClick={testPhoneApi} disabled={testingPhoneApi}
+                                className="mt-2.5 px-3 py-1.5 rounded-full bg-violet-100 text-violet-700 text-[11px] font-bold disabled:opacity-50">
+                                {testingPhoneApi ? '测试中…' : '测试连接'}
+                            </button>
+                            {phoneApiTestResult && (
+                                <div className={`mt-2 rounded-xl px-2.5 py-2 text-[10.5px] leading-relaxed ${phoneApiTestResult.startsWith('连接成功') ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+                                    {phoneApiTestResult}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="text-[10px] tracking-[0.18em] text-slate-400 px-1">选择 API</div>
+                        <button onClick={() => choosePhoneApi(null)}
+                            className={`w-full rounded-2xl border p-3 text-left transition ${phoneApiFollowsDefault ? 'border-violet-300 bg-violet-50' : 'border-slate-200 bg-white'}`}>
+                            <div className="flex items-center gap-2">
+                                <div className="min-w-0 flex-1">
+                                    <div className="text-[12px] font-bold text-slate-800">跟随聊天默认</div>
+                                    <div className="text-[10px] text-slate-400 truncate">{apiConfig?.model || '未配置'} · {apiHost(apiConfig?.baseUrl)}</div>
+                                </div>
+                                {phoneApiFollowsDefault && <span className="text-[10px] font-bold text-violet-600">✓ 使用中</span>}
+                            </div>
+                        </button>
+
+                        {apiPresets.length === 0 ? (
+                            <p className="px-1 text-[10.5px] leading-relaxed text-slate-400">“设置”里还没有保存的 API 预设。先保存预设，这里就能单独选择。</p>
+                        ) : apiPresets.map(preset => {
+                            const active = isSamePhoneApi(preset.config);
+                            return (
+                                <button key={preset.id} onClick={() => choosePhoneApi(preset.config)}
+                                    className={`w-full rounded-2xl border p-3 text-left transition ${active ? 'border-violet-300 bg-violet-50' : 'border-slate-200 bg-white'}`}>
+                                    <div className="flex items-center gap-2">
+                                        <div className="min-w-0 flex-1">
+                                            <div className="text-[12px] font-bold text-slate-800 truncate">{preset.name}</div>
+                                            <div className="text-[10px] text-slate-400 truncate">{preset.config.model || '未配置'} · {apiHost(preset.config.baseUrl)}</div>
+                                        </div>
+                                        {active && <span className="text-[10px] font-bold text-violet-600">✓ 使用中</span>}
+                                    </div>
+                                </button>
+                            );
+                        })}
+                    </div>
+                </Modal>
             </div>
         );
     }

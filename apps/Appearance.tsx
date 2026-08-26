@@ -20,9 +20,7 @@ import { trackEvent } from '../utils/analytics';
 import { Check, ImageSquare, Sparkle, Trash, UploadSimple } from '@phosphor-icons/react';
 import { ChatAppearanceEditor as ModularChatAppearanceEditor } from '../components/appearance/ChatAppearanceEditor';
 import AppIconEditor from '../components/appearance/AppIconEditor';
-import { Capacitor } from '@capacitor/core';
-import { Filesystem, Directory } from '@capacitor/filesystem';
-import { Share } from '@capacitor/share';
+import { shareOrDownloadBlob } from '../utils/shareExport';
 
 const CustomIconImage: React.FC<{ value: string; alt: string; preserveOutline?: boolean }> = ({ value, alt, preserveOutline = false }) => {
     const url = useBlobRefUrl(value);
@@ -344,45 +342,9 @@ const PresetManager: React.FC<PresetManagerProps> = ({ presets, onSave, onApply,
             const fileName = `appearance_${preset?.name || 'preset'}.zip`;
             const title = `外观预设 - ${preset?.name || 'preset'}`;
 
-            if (Capacitor.isNativePlatform()) {
-                // Native: 写到 Cache 再调系统分享
-                const base64 = await new Promise<string>((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onloadend = () => resolve(String(reader.result).split(',')[1] || '');
-                    reader.onerror = () => reject(reader.error);
-                    reader.readAsDataURL(blob);
-                });
-                await Filesystem.writeFile({ path: fileName, data: base64, directory: Directory.Cache });
-                const uri = await Filesystem.getUri({ directory: Directory.Cache, path: fileName });
-                await Share.share({ title, files: [uri.uri] });
-            } else {
-                // Web: 先触发浏览器原生下载，再尝试拉起系统分享面板
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = fileName;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
-
-                try {
-                    const file = new File([blob], fileName, { type: 'application/zip' });
-                    if (
-                        typeof navigator !== 'undefined' &&
-                        typeof navigator.share === 'function' &&
-                        (typeof (navigator as any).canShare !== 'function' || (navigator as any).canShare({ files: [file] }))
-                    ) {
-                        await navigator.share({ title, files: [file] });
-                    }
-                } catch (shareErr: any) {
-                    // 用户取消分享是正常情况，吞掉
-                    if (shareErr?.name !== 'AbortError') {
-                        console.warn('[Appearance] share failed', shareErr);
-                    }
-                }
-            }
-            addToast('预设已导出', 'success');
+            const result = await shareOrDownloadBlob({ blob, fileName, shareTitle: title });
+            if (result === 'cancelled') return;
+            addToast(result === 'shared' ? '已打开预设分享面板' : '预设已导出', 'success');
         } catch (e: any) {
             addToast(e.message || '导出失败', 'error');
         }

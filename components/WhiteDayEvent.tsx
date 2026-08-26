@@ -17,10 +17,8 @@ import { DB } from '../utils/db';
 import { ContextBuilder } from '../utils/context';
 import { safeResponseJson } from '../utils/safeApi';
 import { CharacterProfile } from '../types';
-import { Capacitor } from '@capacitor/core';
-import { Filesystem, Directory } from '@capacitor/filesystem';
-import { Share } from '@capacitor/share';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
+import { shareOrDownloadBlob } from '../utils/shareExport';
 import TokenImg from './os/TokenImg';
 import { dataUrlToBlob, isImageValue, putImageBlob, resolveRefToDataUrl } from '../utils/blobRef';
 
@@ -1067,41 +1065,12 @@ ${answerSummary}
     };
 
     // ============================================================
-    // 下载/分享辅助
-    // - Capacitor 原生：Filesystem + Share.share()
-    // - Web/WebView：先触发 a.download（浏览器原生下载条），同时弹出 navigator.share（系统分享面板）
-    //   两者并行，不互斥。封装 WebView 里 a.download 可能无效但 share 有效；普通浏览器两个都能用
+    // 下载/分享辅助：原生强制系统分享，移动 Web 优先文件分享，桌面 Web 才下载。
     // ============================================================
     const downloadOrShare = async (base64: string, fileName: string, title: string) => {
-        if (Capacitor.isNativePlatform()) {
-            await Filesystem.writeFile({ path: fileName, data: base64, directory: Directory.Cache });
-            const uri = await Filesystem.getUri({ directory: Directory.Cache, path: fileName });
-            await Share.share({ title, files: [uri.uri] });
-            return;
-        }
-        // 先触发浏览器原生下载（非阻塞，立即派发）
-        const link = document.createElement('a');
-        link.download = fileName;
-        link.href = base64;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        // 同时尝试系统分享面板（iOS Safari / Android Chrome / PWA）
-        try {
-            const res = await fetch(base64);
-            const blob = await res.blob();
-            const file = new File([blob], fileName, { type: blob.type || 'image/png' });
-            if (
-                typeof navigator !== 'undefined' &&
-                typeof navigator.share === 'function' &&
-                (typeof (navigator as any).canShare !== 'function' || (navigator as any).canShare({ files: [file] }))
-            ) {
-                await navigator.share({ title, files: [file] });
-            }
-        } catch (e: any) {
-            if (e?.name === 'AbortError') return; // 用户主动取消分享，正常
-            // 其他错误忽略（下载已触发）
-        }
+        const response = await fetch(base64);
+        const blob = await response.blob();
+        await shareOrDownloadBlob({ blob, fileName, shareTitle: title });
     };
 
     // ============================================================

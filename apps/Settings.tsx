@@ -2,11 +2,9 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useOS } from '../context/OSContext';
 import { Capacitor } from '@capacitor/core';
-import { Filesystem, Directory } from '@capacitor/filesystem';
-import { Share } from '@capacitor/share';
 import { extractContent, safeResponseJson } from '../utils/safeApi';
 import { extractModelIds, normalizeModelIds } from '../utils/modelList';
-import { EXPORT_CHUNK_SIZE, sliceRanges } from '../utils/backupExport';
+import { shareOrDownloadBlob } from '../utils/shareExport';
 import { bucketRetryCount, isAnalyticsConfigured, isAnalyticsEnabled, setAnalyticsEnabled, trackEvent } from '../utils/analytics';
 import Modal from '../components/os/Modal';
 import { NotionManager, FeishuManager, RealtimeContextManager, fetchOwmWeather, fetchOpenMeteoWeather } from '../utils/realtimeContext';
@@ -17,6 +15,11 @@ import { getLuckinToken, setLuckinToken as saveLuckinToken, isLuckinEnabled, set
 import { consumeProxyWorkerSettingsFocus, getProxyWorkerUrl, setProxyWorkerUrl, DEFAULT_PROXY_WORKER } from '../utils/proxyWorker';
 import { VOICE_ACTING_GUIDE } from '../utils/minimaxTts';
 import { FISH_VOICE_ACTING_GUIDE } from '../utils/fishAudioTts';
+import {
+    DEFAULT_ELEVENLABS_MODEL,
+    ELEVENLABS_MODEL_OPTIONS,
+    getElevenLabsVoiceActingGuide,
+} from '../utils/elevenLabsTts';
 import { DATE_VOICE_GUIDE } from '../utils/datePrompts';
 import { Sun, Newspaper, NotePencil, Notebook, Book, ForkKnife, Coffee, PlugsConnected } from '@phosphor-icons/react';
 import { loadMcpServers, saveMcpServers, createMcpServer, testMcpConnection, resetMcpSession, getMcpUseNativeTools, setMcpUseNativeTools, type McpServerConfig } from '../utils/mcpClient';
@@ -43,8 +46,15 @@ import {
 } from '../utils/avatarModelBackup';
 import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '../utils/apiConfigNormalize';
 import { configFromPreset, findActivePresetId, type PresetSwitchPatch } from '../utils/apiPresetSwitch';
-import type { APIConfig } from '../types';
+import type { APIConfig, TtsProvider } from '../types';
 import { describeImageWithVisionApi, VISION_API_TEST_IMAGE_DATA_URL, visionApiConfigFromPreset } from '../utils/visionApi';
+import {
+    FIRECRAWL_API_KEYS_URL,
+    getFirecrawlApiKey,
+    getFirecrawlCreditUsage,
+    setFirecrawlApiKey,
+    type FirecrawlCreditUsage,
+} from '../utils/firecrawl';
 
 // hot_news（news.orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
 const HOTNEWS_PLATFORM_OPTIONS: { key: string; label: string }[] = [
@@ -73,6 +83,9 @@ const HOTNEWS_PLATFORM_OPTIONS: { key: string; label: string }[] = [
 // 「主动消息 Push 加速」面板入口开关。底层逻辑（心跳、订阅、诊断）全部保留，
 // 这里设为 false 只是把设置页里的入口隐藏掉，想恢复改回 true 即可。
 const SHOW_PROACTIVE_PUSH_ACCEL_UI = false;
+// Firecrawl「方舟计划」：实现、额度检测和抓取降级链全部保留，默认不向用户展示配置入口。
+// 需要重新启用时只改为 true。
+const SHOW_FIRECRAWL_ARK_UI = false;
 const VISION_MODEL_LIST_STORAGE_KEY = 'os_vision_available_models';
 
 const readStoredVisionModels = (): string[] => {
@@ -481,14 +494,23 @@ const Settings: React.FC = () => {
     apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic'
   );
   const [localAceStepKey, setLocalAceStepKey] = useState(apiConfig.aceStepApiKey || '');
-  const [localTtsProvider, setLocalTtsProvider] = useState<'minimax' | 'fishaudio'>(
-    apiConfig.ttsProvider === 'fishaudio' ? 'fishaudio' : 'minimax'
+  const [localTtsProvider, setLocalTtsProvider] = useState<TtsProvider>(
+    apiConfig.ttsProvider === 'fishaudio' || apiConfig.ttsProvider === 'elevenlabs'
+      ? apiConfig.ttsProvider
+      : 'minimax'
   );
   const [localFishKey, setLocalFishKey] = useState(apiConfig.fishAudioApiKey || '');
   const [localFishModel, setLocalFishModel] = useState(apiConfig.fishAudioModel || 's2.1-pro');
-  // 自定义语音表演指南（留空 → 用内置默认）。按服务商分两份。
+  const [localElevenLabsKey, setLocalElevenLabsKey] = useState(apiConfig.elevenLabsApiKey || '');
+  const [localElevenLabsModel, setLocalElevenLabsModel] = useState(apiConfig.elevenLabsModel || DEFAULT_ELEVENLABS_MODEL);
+  const [localElevenLabsStability, setLocalElevenLabsStability] = useState(apiConfig.elevenLabsStability ?? 0.5);
+  const [localElevenLabsSimilarityBoost, setLocalElevenLabsSimilarityBoost] = useState(apiConfig.elevenLabsSimilarityBoost ?? 0.8);
+  const [localElevenLabsStyle, setLocalElevenLabsStyle] = useState(apiConfig.elevenLabsStyle ?? 0);
+  const [localElevenLabsUseSpeakerBoost, setLocalElevenLabsUseSpeakerBoost] = useState(apiConfig.elevenLabsUseSpeakerBoost === true);
+  // 自定义语音表演指南（留空 → 用内置默认）。按服务商分别保存。
   const [localVoicePromptMinimax, setLocalVoicePromptMinimax] = useState(apiConfig.voicePrompts?.minimax || '');
   const [localVoicePromptFish, setLocalVoicePromptFish] = useState(apiConfig.voicePrompts?.fishaudio || '');
+  const [localVoicePromptElevenLabs, setLocalVoicePromptElevenLabs] = useState(apiConfig.voicePrompts?.elevenlabs || '');
   const [localVoicePromptDate, setLocalVoicePromptDate] = useState(apiConfig.voicePrompts?.dateVoice || '');
   const [showVoicePrompts, setShowVoicePrompts] = useState(false);
   const [showAceStepGuide, setShowAceStepGuide] = useState(false);
@@ -523,6 +545,8 @@ const Settings: React.FC = () => {
   const [showGithubModal, setShowGithubModal] = useState(false);
   const [showCloudRestoreModal, setShowCloudRestoreModal] = useState(false);
   const [cloudBackupFiles, setCloudBackupFiles] = useState<import('../types').CloudBackupFile[]>([]);
+  const [cloudBackupListState, setCloudBackupListState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [cloudBackupListError, setCloudBackupListError] = useState('');
   const [cloudTestResult, setCloudTestResult] = useState<string>('');
   const [cloudTesting, setCloudTesting] = useState(false);
   const [avatarModelInventory, setAvatarModelInventory] = useState<AvatarModelBackupInventory | null>(null);
@@ -558,6 +582,10 @@ const Settings: React.FC = () => {
   const [showProxyConfig, setShowProxyConfig] = useState(focusProxyConfigOnMount);
   const proxyConfigSectionRef = useRef<HTMLElement | null>(null);
   const [analyticsEnabled, setAnalyticsEnabledState] = useState(() => isAnalyticsEnabled());
+  const [firecrawlKeyInput, setFirecrawlKeyInput] = useState(getFirecrawlApiKey);
+  const [firecrawlUsage, setFirecrawlUsage] = useState<FirecrawlCreditUsage | null>(null);
+  const [firecrawlChecking, setFirecrawlChecking] = useState(false);
+  const [firecrawlCheckResult, setFirecrawlCheckResult] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
       if (!focusProxyConfigOnMount || !showProxyConfig) return;
@@ -566,6 +594,28 @@ const Settings: React.FC = () => {
       });
       return () => window.cancelAnimationFrame(frame);
   }, [focusProxyConfigOnMount, showProxyConfig]);
+
+  // 每次打开实时感知面板时查余额，不消耗抓取 credit。失败不影响其他配置。
+  useEffect(() => {
+      if (!showRealtimeModal) return;
+      const key = getFirecrawlApiKey();
+      if (!key) return;
+      let active = true;
+      setFirecrawlChecking(true);
+      getFirecrawlCreditUsage(key)
+          .then(usage => {
+              if (!active) return;
+              setFirecrawlUsage(usage);
+              setFirecrawlCheckResult({ ok: true, text: 'Firecrawl 已连接' });
+          })
+          .catch((error: any) => {
+              if (!active) return;
+              setFirecrawlUsage(null);
+              setFirecrawlCheckResult({ ok: false, text: error?.message || 'Firecrawl 连接失败' });
+          })
+          .finally(() => { if (active) setFirecrawlChecking(false); });
+      return () => { active = false; };
+  }, [showRealtimeModal]);
 
   // 实时感知配置的本地状态
   const [rtWeatherEnabled, setRtWeatherEnabled] = useState(realtimeConfig.weatherEnabled);
@@ -858,16 +908,30 @@ const Settings: React.FC = () => {
       setLocalMiniMaxGroupId(apiConfig.minimaxGroupId || '');
       setLocalMiniMaxRegion(apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic');
       setLocalAceStepKey(apiConfig.aceStepApiKey || '');
-      setLocalTtsProvider(apiConfig.ttsProvider === 'fishaudio' ? 'fishaudio' : 'minimax');
+      setLocalTtsProvider(
+          apiConfig.ttsProvider === 'fishaudio' || apiConfig.ttsProvider === 'elevenlabs'
+              ? apiConfig.ttsProvider
+              : 'minimax'
+      );
       setLocalFishKey(apiConfig.fishAudioApiKey || '');
       setLocalFishModel(apiConfig.fishAudioModel || 's2.1-pro');
+      setLocalElevenLabsKey(apiConfig.elevenLabsApiKey || '');
+      setLocalElevenLabsModel(apiConfig.elevenLabsModel || DEFAULT_ELEVENLABS_MODEL);
+      setLocalElevenLabsStability(apiConfig.elevenLabsStability ?? 0.5);
+      setLocalElevenLabsSimilarityBoost(apiConfig.elevenLabsSimilarityBoost ?? 0.8);
+      setLocalElevenLabsStyle(apiConfig.elevenLabsStyle ?? 0);
+      setLocalElevenLabsUseSpeakerBoost(apiConfig.elevenLabsUseSpeakerBoost === true);
       setLocalVoicePromptMinimax(apiConfig.voicePrompts?.minimax || '');
       setLocalVoicePromptFish(apiConfig.voicePrompts?.fishaudio || '');
+      setLocalVoicePromptElevenLabs(apiConfig.voicePrompts?.elevenlabs || '');
       setLocalVoicePromptDate(apiConfig.voicePrompts?.dateVoice || '');
   }, [
       apiConfig.minimaxApiKey, apiConfig.minimaxGroupId, apiConfig.minimaxRegion, apiConfig.aceStepApiKey,
       apiConfig.ttsProvider, apiConfig.fishAudioApiKey, apiConfig.fishAudioModel,
-      apiConfig.voicePrompts?.minimax, apiConfig.voicePrompts?.fishaudio, apiConfig.voicePrompts?.dateVoice,
+      apiConfig.elevenLabsApiKey, apiConfig.elevenLabsModel, apiConfig.elevenLabsStability,
+      apiConfig.elevenLabsSimilarityBoost, apiConfig.elevenLabsStyle, apiConfig.elevenLabsUseSpeakerBoost,
+      apiConfig.voicePrompts?.minimax, apiConfig.voicePrompts?.fishaudio,
+      apiConfig.voicePrompts?.elevenlabs, apiConfig.voicePrompts?.dateVoice,
   ]);
 
   // 当前生效的是哪条预设 —— 按已保存的配置反查，不额外记状态。
@@ -1109,8 +1173,7 @@ const Settings: React.FC = () => {
     }
   };
 
-  const handleSaveOtherApis = () => {
-    updateApiConfig({
+  const buildOtherApiConfig = (overrides: Partial<APIConfig> = {}): Partial<APIConfig> => ({
       minimaxApiKey: localMiniMaxKey,
       minimaxGroupId: localMiniMaxGroupId,
       minimaxRegion: localMiniMaxRegion,
@@ -1118,12 +1181,23 @@ const Settings: React.FC = () => {
       ttsProvider: localTtsProvider,
       fishAudioApiKey: localFishKey,
       fishAudioModel: localFishModel,
+      elevenLabsApiKey: localElevenLabsKey,
+      elevenLabsModel: localElevenLabsModel,
+      elevenLabsStability: localElevenLabsStability,
+      elevenLabsSimilarityBoost: localElevenLabsSimilarityBoost,
+      elevenLabsStyle: localElevenLabsStyle,
+      elevenLabsUseSpeakerBoost: localElevenLabsUseSpeakerBoost,
       voicePrompts: {
         minimax: localVoicePromptMinimax.trim() ? localVoicePromptMinimax : undefined,
         fishaudio: localVoicePromptFish.trim() ? localVoicePromptFish : undefined,
+        elevenlabs: localVoicePromptElevenLabs.trim() ? localVoicePromptElevenLabs : undefined,
         dateVoice: localVoicePromptDate.trim() ? localVoicePromptDate : undefined,
       },
-    });
+      ...overrides,
+  });
+
+  const handleSaveOtherApis = () => {
+    updateApiConfig(buildOtherApiConfig());
     setOtherStatusMsg('已保存');
     setTimeout(() => setOtherStatusMsg(''), 2000);
   };
@@ -1131,42 +1205,23 @@ const Settings: React.FC = () => {
   // 选「谁来做语音生成」立即落库——不需要再点下面的保存。
   // 连同当前「其他 API」草稿一起提交（与保存按钮同一份 payload）：一是即时生效，
   // 二是避免 [apiConfig] 同步 effect 把刚填、还没保存的 Key 草稿冲掉。
-  const selectTtsProvider = (provider: 'minimax' | 'fishaudio') => {
+  const selectTtsProvider = (provider: TtsProvider) => {
     setLocalTtsProvider(provider);
-    updateApiConfig({
-      minimaxApiKey: localMiniMaxKey,
-      minimaxGroupId: localMiniMaxGroupId,
-      minimaxRegion: localMiniMaxRegion,
-      aceStepApiKey: localAceStepKey,
-      fishAudioApiKey: localFishKey,
-      fishAudioModel: localFishModel,
-      voicePrompts: {
-        minimax: localVoicePromptMinimax.trim() ? localVoicePromptMinimax : undefined,
-        fishaudio: localVoicePromptFish.trim() ? localVoicePromptFish : undefined,
-        dateVoice: localVoicePromptDate.trim() ? localVoicePromptDate : undefined,
-      },
-      ttsProvider: provider,
-    });
-    addToast(provider === 'fishaudio' ? '语音生成已切到鱼声 Fish' : '语音生成已切到 MiniMax', 'success');
+    updateApiConfig(buildOtherApiConfig({ ttsProvider: provider }));
+    const providerLabel = provider === 'fishaudio' ? '鱼声 Fish' : provider === 'elevenlabs' ? 'ElevenLabs' : 'MiniMax';
+    addToast(`语音生成已切到 ${providerLabel}`, 'success');
   };
 
   // 选鱼声模型：立即落库（同上，连带草稿一起提交，避免被同步 effect 冲掉）。
   const selectFishModel = (model: string) => {
     setLocalFishModel(model);
-    updateApiConfig({
-      minimaxApiKey: localMiniMaxKey,
-      minimaxGroupId: localMiniMaxGroupId,
-      minimaxRegion: localMiniMaxRegion,
-      aceStepApiKey: localAceStepKey,
-      fishAudioApiKey: localFishKey,
-      ttsProvider: localTtsProvider,
-      fishAudioModel: model,
-      voicePrompts: {
-        minimax: localVoicePromptMinimax.trim() ? localVoicePromptMinimax : undefined,
-        fishaudio: localVoicePromptFish.trim() ? localVoicePromptFish : undefined,
-        dateVoice: localVoicePromptDate.trim() ? localVoicePromptDate : undefined,
-      },
-    });
+    updateApiConfig(buildOtherApiConfig({ fishAudioModel: model }));
+  };
+
+  // ElevenLabs 模型会改变可用的语音标签，因此和鱼声模型一样立即落库。
+  const selectElevenLabsModel = (model: string) => {
+    setLocalElevenLabsModel(model);
+    updateApiConfig(buildOtherApiConfig({ elevenLabsModel: model }));
   };
 
   const fetchModels = async () => {
@@ -1247,68 +1302,23 @@ const Settings: React.FC = () => {
           // Trigger export (Context handles loading state UI)
           const blob = await exportSystem(mode);
           
-          if (Capacitor.isNativePlatform()) {
-              // 手机端分片写盘：整包一次性 readAsDataURL 会把几十~上百 MB 的 base64
-              // 一股脑塞进内存，WebView 容易 OOM 闪退。改成按 3MiB 切片，每片转成纯
-              // base64 再 appendFile 追加。先写临时文件，全部写完才改名+分享；中途任何
-              // 一步失败都删掉残片，避免留下一个看着像成功、其实损坏的 .zip。
-              const fileName = `Sully_Backup_${mode}_${Date.now()}.zip`;
-              const tempName = `${fileName}.part`;
-
-              // 读一个 Blob 分片为纯 base64（去掉 data:...;base64, 前缀）。
-              const sliceToBase64 = (slice: Blob): Promise<string> => new Promise((resolve, reject) => {
-                  const reader = new FileReader();
-                  reader.onloadend = () => {
-                      const result = String(reader.result);
-                      const comma = result.indexOf(',');
-                      resolve(comma >= 0 ? result.slice(comma + 1) : result);
-                  };
-                  reader.onerror = () => reject(reader.error || new Error('读取备份分片失败'));
-                  reader.onabort = () => reject(new Error('读取备份分片被中断'));
-                  reader.readAsDataURL(slice);
-              });
-
-              try {
-                  const ranges = sliceRanges(blob.size, EXPORT_CHUNK_SIZE);
-                  for (let i = 0; i < ranges.length; i++) {
-                      const [start, end] = ranges[i];
-                      const base64 = await sliceToBase64(blob.slice(start, end));
-                      if (i === 0) {
-                          await Filesystem.writeFile({ path: tempName, data: base64, directory: Directory.Cache });
-                      } else {
-                          await Filesystem.appendFile({ path: tempName, data: base64, directory: Directory.Cache });
-                      }
-                  }
-                  // 全部分片写盘成功，才把临时文件改名为正式名并分享。
-                  await Filesystem.rename({ from: tempName, to: fileName, directory: Directory.Cache });
-                  const uriResult = await Filesystem.getUri({ directory: Directory.Cache, path: fileName });
-                  await Share.share({ title: `Sully Backup`, files: [uriResult.uri] });
-              } catch (e) {
-                  console.error("Native write failed", e);
-                  // 尽力清掉写了一半的残片，别留下损坏文件。
-                  try { await Filesystem.deleteFile({ path: tempName, directory: Directory.Cache }); } catch { /* ignore */ }
-                  trackEvent('保存备份文件到手机失败', { mode });
-                  addToast("保存文件失败", "error");
-              }
-          } else {
-              // Web Download
-              // 上一次导出的 object URL 先 revoke 掉，否则它会一直占着整包内存直到刷新页面。
+          const fileName = `Sully_Backup_${mode}_${new Date().toISOString().slice(0, 10)}.zip`;
+          if (!Capacitor.isNativePlatform()) {
+              // 网页额外保留一条手动下载链接，作为浏览器禁用文件分享/自动下载时的最终救援。
               if (downloadUrlRef.current) URL.revokeObjectURL(downloadUrlRef.current);
               const url = URL.createObjectURL(blob);
               downloadUrlRef.current = url;
               setDownloadUrl(url);
-              const fileName = 'Sully_Backup_' + mode + '_' + new Date().toISOString().slice(0,10) + '.zip';
               setDownloadFileName(fileName);
               setShowExportModal(true);
-
-              // Auto click
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = fileName;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
           }
+          const result = await shareOrDownloadBlob({
+              blob,
+              fileName,
+              shareTitle: 'Sully Backup',
+              nativeChunked: true,
+          });
+          if (result === 'cancelled') return;
       } catch (e: any) {
           // 只报导出档位，错误文案是动态串不能进属性
           trackEvent('导出备份失败', { mode });
@@ -1343,53 +1353,15 @@ const Settings: React.FC = () => {
   };
 
   const deliverStandaloneBackup = async (blob: Blob, fileName: string, shareTitle: string) => {
-      if (Capacitor.isNativePlatform()) {
-          const tempName = `${fileName}.part`;
-          const sliceToBase64 = (slice: Blob): Promise<string> => new Promise((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onloadend = () => {
-                  const result = String(reader.result);
-                  const comma = result.indexOf(',');
-                  resolve(comma >= 0 ? result.slice(comma + 1) : result);
-              };
-              reader.onerror = () => reject(reader.error || new Error('读取模型备份分片失败'));
-              reader.onabort = () => reject(new Error('读取模型备份分片被中断'));
-              reader.readAsDataURL(slice);
-          });
-
-          try {
-              const ranges = sliceRanges(blob.size, EXPORT_CHUNK_SIZE);
-              for (let index = 0; index < ranges.length; index++) {
-                  const [start, end] = ranges[index];
-                  const base64 = await sliceToBase64(blob.slice(start, end));
-                  if (index === 0) {
-                      await Filesystem.writeFile({ path: tempName, data: base64, directory: Directory.Cache });
-                  } else {
-                      await Filesystem.appendFile({ path: tempName, data: base64, directory: Directory.Cache });
-                  }
-              }
-              await Filesystem.rename({ from: tempName, to: fileName, directory: Directory.Cache });
-              const uriResult = await Filesystem.getUri({ directory: Directory.Cache, path: fileName });
-              await Share.share({ title: shareTitle, files: [uriResult.uri] });
-          } catch (error) {
-              try { await Filesystem.deleteFile({ path: tempName, directory: Directory.Cache }); } catch { /* ignore */ }
-              throw error;
-          }
-          return;
+      if (!Capacitor.isNativePlatform()) {
+          if (downloadUrlRef.current) URL.revokeObjectURL(downloadUrlRef.current);
+          const url = URL.createObjectURL(blob);
+          downloadUrlRef.current = url;
+          setDownloadUrl(url);
+          setDownloadFileName(fileName);
+          setShowExportModal(true);
       }
-
-      if (downloadUrlRef.current) URL.revokeObjectURL(downloadUrlRef.current);
-      const url = URL.createObjectURL(blob);
-      downloadUrlRef.current = url;
-      setDownloadUrl(url);
-      setDownloadFileName(fileName);
-      setShowExportModal(true);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = fileName;
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
+      await shareOrDownloadBlob({ blob, fileName, shareTitle, nativeChunked: true });
   };
 
   const handleAvatarModelExport = async () => {
@@ -1520,6 +1492,39 @@ const Settings: React.FC = () => {
       addToast('已恢复为默认 Worker', 'info');
   };
 
+  const handleCheckFirecrawl = async () => {
+      const key = firecrawlKeyInput.trim();
+      if (!key) {
+          setFirecrawlApiKey('');
+          setFirecrawlUsage(null);
+          setFirecrawlCheckResult({ ok: false, text: '请先填写 Firecrawl API Key' });
+          return;
+      }
+      setFirecrawlChecking(true);
+      setFirecrawlCheckResult(null);
+      try {
+          const usage = await getFirecrawlCreditUsage(key);
+          setFirecrawlApiKey(key);
+          setFirecrawlKeyInput(key);
+          setFirecrawlUsage(usage);
+          setFirecrawlCheckResult({ ok: true, text: 'Key 有效，网页读取已启用' });
+          addToast('Firecrawl 已连接', 'success');
+      } catch (error: any) {
+          setFirecrawlUsage(null);
+          setFirecrawlCheckResult({ ok: false, text: error?.message || 'Firecrawl 连接失败' });
+      } finally {
+          setFirecrawlChecking(false);
+      }
+  };
+
+  const handleClearFirecrawl = () => {
+      setFirecrawlApiKey('');
+      setFirecrawlKeyInput('');
+      setFirecrawlUsage(null);
+      setFirecrawlCheckResult(null);
+      addToast('已停用 Firecrawl，网页读取将继续使用原有兜底', 'info');
+  };
+
   const handleCloudBackup = async (mode: 'text_only' | 'full') => {
       try { await cloudBackupToWebDAV(mode); } catch { /* toast handled in context */ }
   };
@@ -1527,17 +1532,27 @@ const Settings: React.FC = () => {
   const handleOpenCloudRestore = async () => {
       setShowCloudRestoreModal(true);
       setCloudBackupFiles([]);
+      setCloudBackupListState('loading');
+      setCloudBackupListError('');
       try {
           const files = await listCloudBackups();
           setCloudBackupFiles(files);
+          setCloudBackupListState('ready');
           trackEvent('加载云端备份列表', { provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav', result: '成功' });
-      } catch {
+      } catch (error: any) {
+          const message = error?.message || '获取云端备份列表失败';
+          setCloudBackupListError(message);
+          setCloudBackupListState('error');
           trackEvent('加载云端备份列表', { provider: cloudBackupConfig.provider === 'github' ? 'github' : 'webdav', result: '失败' });
-          addToast('获取云端备份列表失败', 'error');
+          addToast(message, 'error');
       }
   };
 
   const handleCloudRestore = async (file: import('../types').CloudBackupFile) => {
+      if (file.status === 'incomplete') {
+          addToast(file.statusMessage || '这个备份上传未完成，暂时不能恢复', 'error');
+          return;
+      }
       setShowCloudRestoreModal(false);
       try {
           await cloudRestoreFromWebDAV(file);
@@ -2072,7 +2087,7 @@ const Settings: React.FC = () => {
                 <div className="space-y-3 py-2">
                     <p className="text-[11px] text-slate-400 leading-relaxed text-center">
                         把备份上传到你自己的云端，换设备、丢手机都不怕。<br/>
-                        国内推荐 <b>GitHub</b>（不用梯子，2GB/份）。
+                        大文件推荐 <b>GitHub</b>（自动分片上传）。
                     </p>
                     <div className="grid grid-cols-2 gap-2">
                         <button
@@ -2082,7 +2097,7 @@ const Settings: React.FC = () => {
                             <span className="absolute top-1 right-1.5 text-[8px] bg-amber-300 text-slate-800 px-1.5 py-0.5 rounded-full font-bold">推荐</span>
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5"><path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.203 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0022 12.017C22 6.484 17.522 2 12 2z" /></svg>
                             <span>GitHub</span>
-                            <span className="text-[9px] text-slate-300 font-normal">不用梯子 · 2GB</span>
+                            <span className="text-[9px] text-slate-300 font-normal">大文件自动分片</span>
                         </button>
                         <button
                             onClick={() => { trackEvent('连接云端备份服务商', { provider: 'webdav' }); setShowCloudModal(true); }}
@@ -2138,7 +2153,7 @@ const Settings: React.FC = () => {
                                 className="w-full py-2 bg-gradient-to-r from-slate-800 to-slate-900 text-white rounded-xl text-[11px] font-bold shadow-sm active:scale-95 transition-all flex items-center justify-center gap-2"
                             >
                                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-3.5 h-3.5"><path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.203 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0022 12.017C22 6.484 17.522 2 12 2z" /></svg>
-                                <span>{cloudBackupConfig.githubToken ? '切换到 GitHub' : '试试 GitHub 备份（不用梯子 · 2GB/份）'}</span>
+                                <span>{cloudBackupConfig.githubToken ? '切换到 GitHub' : '试试 GitHub 备份（大文件自动分片）'}</span>
                             </button>
                             <p className="text-[10px] text-slate-400 text-center">
                                 你 WebDAV 上的旧备份不会被动，可随时切回。
@@ -2598,7 +2613,7 @@ const Settings: React.FC = () => {
 
             <div className="space-y-4">
                 <p className="text-[11px] text-slate-400 -mt-1 pl-1 leading-relaxed">
-                    🎙️ 语音生成支持 <span className="font-semibold text-slate-500">MiniMax</span> 和 <span className="font-semibold text-slate-500">鱼声 Fish</span> 两家——下面两边都可以填，最后在底部「当前语音引擎」里二选一。
+                    🎙️ 语音生成支持 <span className="font-semibold text-slate-500">MiniMax</span>、<span className="font-semibold text-slate-500">鱼声 Fish</span> 和 <span className="font-semibold text-slate-500">ElevenLabs</span>。三家的配置都会保留，最后在底部选择当前引擎。
                 </p>
 
                 <div className="group">
@@ -2662,14 +2677,80 @@ const Settings: React.FC = () => {
                     </p>
                 </div>
 
-                {/* 底部：当前语音引擎二选一 —— radio 样式（不是 tab 切换，配置都在上面，这里只挑用哪家） */}
+                {/* ElevenLabs —— Voice ID 在角色页配置，这里保存账号、全局模型和通用声音参数。 */}
+                <div className="group">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">ElevenLabs API Key</label>
+                    <input
+                        type="password"
+                        name="elevenlabs-api-key"
+                        autoComplete="new-password"
+                        spellCheck={false}
+                        value={localElevenLabsKey}
+                        onChange={(e) => setLocalElevenLabsKey(e.target.value)}
+                        placeholder="ElevenLabs API Key"
+                        className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all"
+                    />
+                    <p className="text-[11px] text-slate-400 mt-1 pl-1">
+                        在 <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline font-semibold">ElevenLabs API Keys</a> 创建。角色音色在「角色 → 语音」填写 Voice ID；网页端合成会通过项目代理转发，不写入服务端存储。
+                    </p>
+
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-3 mb-1.5 block pl-1">ElevenLabs 模型</label>
+                    <select
+                        value={localElevenLabsModel}
+                        onChange={(e) => selectElevenLabsModel(e.target.value)}
+                        className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-3 py-2.5 text-sm focus:bg-white transition-all"
+                    >
+                        {ELEVENLABS_MODEL_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                    </select>
+                    <p className="text-[11px] text-slate-400 mt-1 pl-1">
+                        Flash v2.5 默认更适合实时聊天；v3 支持更丰富的方括号 Audio Tags。切换后对应的内置语音提示规则也会同步切换。
+                    </p>
+
+                    <details className="mt-3 rounded-xl border border-slate-200/60 bg-white/35 px-3 py-2">
+                        <summary className="cursor-pointer text-[11px] font-semibold text-slate-500 select-none">声音参数（高级）</summary>
+                        <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            {([
+                                ['稳定度', localElevenLabsStability, setLocalElevenLabsStability],
+                                ['相似度', localElevenLabsSimilarityBoost, setLocalElevenLabsSimilarityBoost],
+                                ['风格强度', localElevenLabsStyle, setLocalElevenLabsStyle],
+                            ] as const).map(([label, value, setter]) => (
+                                <label key={label} className="text-[11px] text-slate-500">
+                                    <span className="flex justify-between mb-1"><span>{label}</span><span className="font-mono">{value.toFixed(2)}</span></span>
+                                    <input
+                                        type="range"
+                                        min="0"
+                                        max="1"
+                                        step="0.05"
+                                        value={value}
+                                        onChange={(e) => setter(Number(e.target.value))}
+                                        className="w-full accent-primary"
+                                    />
+                                </label>
+                            ))}
+                            <label className="flex items-center justify-between gap-3 text-[11px] text-slate-500 sm:col-span-2">
+                                <span>Speaker Boost（更贴近原音色，可能增加少量延迟）</span>
+                                <input
+                                    type="checkbox"
+                                    checked={localElevenLabsUseSpeakerBoost}
+                                    onChange={(e) => setLocalElevenLabsUseSpeakerBoost(e.target.checked)}
+                                    className="w-4 h-4 accent-primary"
+                                />
+                            </label>
+                        </div>
+                    </details>
+                </div>
+
+                {/* 底部：当前语音引擎三选一 —— radio 样式（配置都在上面，这里只挑用哪家） */}
                 <div className="group rounded-2xl border border-slate-200/70 bg-slate-50/60 p-3">
-                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-0.5 block">当前语音引擎（二选一）</label>
-                    <p className="text-[11px] text-slate-400 mb-2.5">聊天语音条 / 约会 / 电话用哪一家。上面两边的 Key 都会保留，这里只切换当前生效的。</p>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-0.5 block">当前语音引擎（三选一）</label>
+                    <p className="text-[11px] text-slate-400 mb-2.5">聊天语音条 / 约会 / 电话用哪一家。上面三家的配置都会保留，这里只切换当前生效的。</p>
                     <div className="space-y-2">
                         {([
                             ['minimax', 'MiniMax', '国内可直连，默认推荐'],
                             ['fishaudio', '鱼声 Fish', '需科学上网（梯子 / 魔法），否则一直合成失败'],
+                            ['elevenlabs', 'ElevenLabs', '多语言音色丰富；需可访问 ElevenLabs API'],
                         ] as const).map(([key, name, desc]) => {
                             const active = localTtsProvider === key;
                             return (
@@ -2693,7 +2774,7 @@ const Settings: React.FC = () => {
                     </div>
                 </div>
 
-                {/* 语音提示词（高级）—— 自定义注入角色 system prompt 的「语音表演指南」，按服务商分两份 */}
+                {/* 语音提示词（高级）—— 自定义注入角色 system prompt 的「语音表演指南」，按服务商分别保存 */}
                 <div className="group rounded-2xl border border-slate-200/70 bg-slate-50/60 p-3">
                     <button
                         type="button"
@@ -2716,6 +2797,7 @@ const Settings: React.FC = () => {
                             {([
                                 ['minimax', 'MiniMax 语音指南', localVoicePromptMinimax, setLocalVoicePromptMinimax, VOICE_ACTING_GUIDE, '聊天 + 电话 · MiniMax 引擎时生效'] as const,
                                 ['fishaudio', '鱼声 Fish 语音指南', localVoicePromptFish, setLocalVoicePromptFish, FISH_VOICE_ACTING_GUIDE, '聊天 + 电话 · 鱼声引擎时生效'] as const,
+                                ['elevenlabs', 'ElevenLabs 语音指南', localVoicePromptElevenLabs, setLocalVoicePromptElevenLabs, getElevenLabsVoiceActingGuide(localElevenLabsModel), '聊天 + 电话 · ElevenLabs 引擎时生效；默认模板随模型变化'] as const,
                                 ['dateVoice', '见面（约会）语音情绪', localVoicePromptDate, setLocalVoicePromptDate, DATE_VOICE_GUIDE, '见面专用 [v:xxx] 规则 · 角色开了见面语音时生效，与引擎无关'] as const,
                             ]).map(([key, title, value, setValue, def, hint]) => {
                                 const active = localTtsProvider === key;
@@ -3547,7 +3629,7 @@ const Settings: React.FC = () => {
                       </label>
                       <p className="text-[10px] text-slate-400 leading-relaxed pl-5">
                           开启后，GitHub 请求会由所选 Worker 转发，备份仍存放在你的 GitHub 私有仓库；
-                          项目不建立备份数据库，也不主动留存 Token 或备份文件。大于 80MB 时仍会自动分片。
+                          项目不建立备份数据库，也不主动留存 Token 或备份文件。大于 32MB 时会自动分片，并在全部完成后发布。
                       </p>
                   </div>
               )}
@@ -3572,14 +3654,40 @@ const Settings: React.FC = () => {
       {/* Cloud Restore Modal */}
       <Modal isOpen={showCloudRestoreModal} title="从云端恢复" onClose={() => setShowCloudRestoreModal(false)}>
           <div className="space-y-2 p-1">
-              {cloudBackupFiles.length === 0 ? (
+              {cloudBackupListState === 'loading' ? (
                   <div className="text-center py-8"><p className="text-[11px] text-slate-400">正在加载云端备份列表...</p></div>
+              ) : cloudBackupListState === 'error' ? (
+                  <div className="text-center py-7 px-3 space-y-3">
+                      <p className="text-[11px] text-red-500 leading-relaxed">{cloudBackupListError || '获取云端备份列表失败'}</p>
+                      <button onClick={handleOpenCloudRestore} className="px-4 py-2 rounded-xl bg-slate-800 text-white text-[11px] font-bold">重新加载</button>
+                  </div>
+              ) : cloudBackupListState === 'ready' && cloudBackupFiles.length === 0 ? (
+                  <div className="text-center py-8"><p className="text-[11px] text-slate-400">云端还没有备份</p></div>
               ) : (
                   <>
                       <p className="text-[10px] text-slate-400 mb-2">选择要恢复的备份文件:</p>
                       <div className="max-h-[50vh] overflow-y-auto space-y-2">
-                          {cloudBackupFiles.map((file, i) => (
-                              <button key={i} onClick={() => handleCloudRestore(file)} className="w-full p-3 bg-white border border-slate-200 rounded-xl text-left hover:bg-sky-50 hover:border-sky-200 transition-colors active:scale-[0.98]">
+                          {cloudBackupFiles.map((file, i) => file.status === 'incomplete' ? (
+                              <div key={file.href || i} className="w-full p-3 bg-amber-50/70 border border-amber-200 rounded-xl text-left">
+                                  <div className="flex items-start justify-between gap-2">
+                                      <p className="text-[11px] text-slate-700 font-medium truncate">{file.name}</p>
+                                      <span className="shrink-0 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[9px] font-bold">上传未完成</span>
+                                  </div>
+                                  <p className="text-[10px] text-amber-700 mt-1 leading-relaxed">{file.statusMessage || '附件不完整，不能恢复'}</p>
+                                  <div className="flex items-center justify-between gap-3 mt-2">
+                                      <span className="text-[10px] text-slate-400">{file.lastModified ? new Date(file.lastModified).toLocaleString('zh-CN') : '未知时间'}</span>
+                                      {cloudBackupConfig.provider === 'github' && cloudBackupConfig.githubOwner && (
+                                          <a
+                                              href={`https://github.com/${cloudBackupConfig.githubOwner}/${cloudBackupConfig.githubRepo || 'sully-backup'}/releases`}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              className="text-[10px] text-amber-700 font-semibold hover:underline"
+                                          >去 GitHub 查看 ↗</a>
+                                      )}
+                                  </div>
+                              </div>
+                          ) : (
+                              <button key={file.href || i} onClick={() => handleCloudRestore(file)} className="w-full p-3 bg-white border border-slate-200 rounded-xl text-left hover:bg-sky-50 hover:border-sky-200 transition-colors active:scale-[0.98]">
                                   <p className="text-[11px] text-slate-700 font-medium truncate">{file.name}</p>
                                   <div className="flex items-center gap-3 mt-1">
                                       <span className="text-[10px] text-slate-400">{file.lastModified ? new Date(file.lastModified).toLocaleString('zh-CN') : '未知时间'}</span>
@@ -3917,6 +4025,93 @@ const Settings: React.FC = () => {
                       </div>
                   )}
               </div>
+
+              {/* Firecrawl 网页读取：方舟计划默认隐藏，代码与降级能力保留。 */}
+              {SHOW_FIRECRAWL_ARK_UI && (
+              <div className="bg-amber-50/60 p-4 rounded-2xl space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2 min-w-0">
+                          <PlugsConnected size={20} weight="fill" className="text-amber-600 shrink-0" />
+                          <div className="min-w-0">
+                              <span className="text-sm font-bold text-amber-800">Firecrawl 网页读取</span>
+                              <p className="text-[10px] text-amber-700/60">网页分享抓取增强 · 可选</p>
+                          </div>
+                      </div>
+                      <a
+                          href={FIRECRAWL_API_KEYS_URL}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="shrink-0 text-[10px] bg-white border border-amber-200 text-amber-700 px-2.5 py-1.5 rounded-full font-bold"
+                      >
+                          前往免费注册 ↗
+                      </a>
+                  </div>
+
+                  <p className="text-[10px] text-amber-800/70 leading-relaxed">
+                      聊天里粘贴普通网页时，原有提取失败后会自动用 Firecrawl 读取动态页面；再失败仍会回落 Jina 与 Worker，不会因额度耗尽让分享失效。免费计划目前每月约 1,000 页。
+                  </p>
+
+                  {!firecrawlKeyInput.trim() && (
+                      <ol className="rounded-xl border border-amber-200/80 bg-white/70 px-3 py-2 text-[10px] text-amber-900/75 leading-relaxed space-y-1">
+                          <li><b>1.</b> 点击“前往免费注册”，在 Firecrawl 注册或登录。</li>
+                          <li><b>2.</b> 进入 API Keys，创建并复制一个以 <b>fc-</b> 开头的 Key。</li>
+                          <li><b>3.</b> 回到这里粘贴，点击“保存并检查额度”。</li>
+                      </ol>
+                  )}
+
+                  <input
+                      type="password"
+                      value={firecrawlKeyInput}
+                      onChange={e => {
+                          setFirecrawlKeyInput(e.target.value);
+                          setFirecrawlCheckResult(null);
+                          setFirecrawlUsage(null);
+                      }}
+                      className="w-full bg-white/90 border border-amber-200 rounded-xl px-3 py-2 text-sm font-mono"
+                      placeholder="fc-..."
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                  />
+
+                  <div className="grid grid-cols-2 gap-2">
+                      <button
+                          type="button"
+                          onClick={handleClearFirecrawl}
+                          disabled={firecrawlChecking || !firecrawlKeyInput}
+                          className="py-2 bg-white/80 border border-amber-200 text-amber-700 text-xs font-bold rounded-xl disabled:opacity-40 active:scale-95 transition-transform"
+                      >
+                          清除
+                      </button>
+                      <button
+                          type="button"
+                          onClick={() => void handleCheckFirecrawl()}
+                          disabled={firecrawlChecking}
+                          className="py-2 bg-amber-500 text-white text-xs font-bold rounded-xl disabled:opacity-50 active:scale-95 transition-transform"
+                      >
+                          {firecrawlChecking ? '检查中…' : '保存并检查额度'}
+                      </button>
+                  </div>
+
+                  {firecrawlUsage && (
+                      <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[10px] text-emerald-800 leading-relaxed">
+                          <b>剩余 {firecrawlUsage.remainingCredits.toLocaleString()} / {firecrawlUsage.planCredits.toLocaleString()} credits</b>
+                          {firecrawlUsage.billingPeriodEnd && (
+                              <span> · {new Date(firecrawlUsage.billingPeriodEnd).toLocaleDateString('zh-CN')} 刷新</span>
+                          )}
+                      </div>
+                  )}
+                  {firecrawlCheckResult && !firecrawlUsage && (
+                      <p className={`text-[10px] leading-relaxed ${firecrawlCheckResult.ok ? 'text-emerald-600' : 'text-rose-600'}`}>
+                          {firecrawlCheckResult.ok ? '✓ ' : '✗ '}{firecrawlCheckResult.text}
+                      </p>
+                  )}
+
+                  <p className="text-[9px] text-slate-400 leading-relaxed">
+                      Key 仅保存在当前设备，并由设备直接连接 Firecrawl，不经过项目 Worker。请求明确关闭 Firecrawl 页面缓存；请勿分享需要登录的私密链接。
+                  </p>
+              </div>
+              )}
 
               {/* Notion 配置 */}
               <div className="bg-orange-50/50 p-4 rounded-2xl space-y-3">

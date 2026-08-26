@@ -1,8 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { DB } from '../../utils/db';
-import { Capacitor } from '@capacitor/core';
-import { Directory, Encoding, Filesystem } from '@capacitor/filesystem';
-import { Share } from '@capacitor/share';
+import { shareOrDownloadFile } from '../../utils/shareExport';
 
 // 聊天「白框」自定义 CSS 编辑器（Appearance 全局默认 与 单角色定制 共用）。
 // 选择器钩子覆盖顶栏、输入栏、整屏背景与普通消息布局；完整清单见下方 AI_PROMPT。
@@ -336,27 +334,12 @@ const ChromeCssEditor: React.FC<{ value: string; onChange: (css: string) => void
         const dateKey = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
         const fileName = `sullyos-whitebox-${dateKey}.txt`;
         try {
-            if (Capacitor.isNativePlatform()) {
-                await Filesystem.writeFile({
-                    path: fileName,
-                    data: value,
-                    directory: Directory.Cache,
-                    encoding: Encoding.UTF8,
-                });
-                const uri = await Filesystem.getUri({ directory: Directory.Cache, path: fileName });
-                await Share.share({ title: 'SullyOS 白框样式', files: [uri.uri] });
-                return;
-            }
-
-            const blob = new Blob([value], { type: 'text/plain;charset=utf-8' });
-            const url = URL.createObjectURL(blob);
-            const anchor = document.createElement('a');
-            anchor.href = url;
-            anchor.download = fileName;
-            document.body.appendChild(anchor);
-            anchor.click();
-            anchor.remove();
-            URL.revokeObjectURL(url);
+            await shareOrDownloadFile({
+                content: value,
+                fileName,
+                mimeType: 'text/plain;charset=utf-8',
+                shareTitle: 'SullyOS 白框样式',
+            });
         } catch (error: any) {
             if (error?.name !== 'AbortError') window.alert('TXT 导出失败，请重试。');
         }

@@ -37,6 +37,7 @@ import { INSTALLED_APPS, HIDDEN_APP_NAMES } from '../constants';
 import { isAnalyticsRequestUrl, trackEvent, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, trackCurrentFeaturesOnce } from '../utils/analytics';
 import { collectAppearance, collectCharSettings, collectDataScale, collectFeatureFlagsAsync } from '../utils/analyticsSnapshot';
 import { normalizeApiConfig, normalizeApiPreset } from '../utils/apiConfigNormalize';
+import { getCheckPhoneApi, setCheckPhoneApi } from '../utils/checkPhoneApi';
 import { markBackupDone } from '../utils/backupReminder';
 import { normalizeCharacterImpression, normalizeCharacterDefaults } from '../utils/impression';
 import { normalizeModelIds } from '../utils/modelList';
@@ -66,7 +67,7 @@ import { markAmsgStateDirty, markAmsgStateDirtyForAll, resumePendingAmsgStateSyn
 import { loadMusicPlaybackSnapshot } from './MusicContext';
 import { setCharNameRegistry } from '../utils/charNameRegistry';
 import { setMinimaxRegion } from '../utils/minimaxEndpoint';
-import { setTtsProvider, setVoicePromptOverrides } from '../utils/ttsProvider';
+import { setElevenLabsModel, setTtsProvider, setVoicePromptOverrides } from '../utils/ttsProvider';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Capacitor } from '@capacitor/core';
 import { formatBytes } from '../utils/format';
@@ -628,6 +629,14 @@ const defaultApiConfig: APIConfig = {
   minimaxApiKey: '',
   minimaxGroupId: '',
   minimaxRegion: 'domestic',
+  ttsProvider: 'minimax',
+  fishAudioModel: 's2.1-pro',
+  elevenLabsApiKey: '',
+  elevenLabsModel: 'eleven_flash_v2_5',
+  elevenLabsStability: 0.5,
+  elevenLabsSimilarityBoost: 0.8,
+  elevenLabsStyle: 0,
+  elevenLabsUseSpeakerBoost: false,
   model: 'gpt-4o-mini',
   stream: false,
   temperature: 0.85,
@@ -2137,6 +2146,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   useEffect(() => {
     setTtsProvider(apiConfig.ttsProvider);
   }, [apiConfig.ttsProvider]);
+  // ElevenLabs 的 v3 与 Flash/Multilingual 使用不同的提示词标记；prompt 构建器靠单例读当前模型。
+  useEffect(() => {
+    setElevenLabsModel(apiConfig.elevenLabsModel);
+  }, [apiConfig.elevenLabsModel]);
   // 同步用户自定义语音表演指南（同上：chatPrompts 拿不到 apiConfig，靠单例读最新值）。
   useEffect(() => {
     setVoicePromptOverrides(apiConfig.voicePrompts);
@@ -3882,6 +3895,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               timestamp: Date.now(),
               version: 3,
               apiConfig: (mode === 'text_only' || mode === 'full') ? apiConfig : undefined,
+              checkPhoneApi: (mode === 'text_only' || mode === 'full') ? getCheckPhoneApi() : undefined,
               apiPresets: (mode === 'text_only' || mode === 'full') ? apiPresets : undefined,
               availableModels: (mode === 'text_only' || mode === 'full') ? availableModels : undefined,
               realtimeConfig: (mode === 'text_only' || mode === 'full') ? realtimeConfig : undefined,
@@ -4794,6 +4808,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               await updateTheme(data.theme);
           }
           if (data.apiConfig) updateApiConfig(data.apiConfig);
+          if (data.checkPhoneApi !== undefined) setCheckPhoneApi(data.checkPhoneApi ?? null);
           if (data.availableModels) saveModels(data.availableModels);
           if (data.apiPresets) savePresets(data.apiPresets);
           if (data.realtimeConfig) updateRealtimeConfig(data.realtimeConfig); // 恢复实时感知配置

@@ -24,7 +24,7 @@
 | 🧠 **神经链接** | 角色管理中枢：创建 / 导入 / 编辑角色，分组归档，捏人上装 |
 | 🏛️ **记忆宫殿** | 向量化长期记忆 + Russell 情感空间 + 熟悉度加成，角色真·记得住你说过的每件事。一键清空、全自动巩固、独立 API 通道 |
 | 💬 **Message** | 跟角色聊天，支持文字 / 图片 / 表情包 |
-| 📞 **电话** | 语音通话 + TTS（MiniMax / Fish Audio 音色），听得到角色的声音 |
+| 📞 **电话** | 语音通话 + TTS（MiniMax / Fish Audio / ElevenLabs 音色），听得到角色的声音 |
 | 👥 **群聊** | 拉一群角色互相唠嗑，看它们修罗场 |
 | 🏠 **小小窝** | 布置房间放角色进去挂机；内含**像素家园**和**记忆潜行**（3DS 双屏像素 RPG，潜进角色的记忆里逛一圈）|
 | 🔍 **查手机** | 检查角色手机里的秘密，发现它们背着你干什么 |
@@ -96,7 +96,7 @@ npm run dev
 | **API Key** | 你的密钥，别告诉别人 |
 | **Model** | 模型名，如 `gpt-4o-mini`、`claude-3-sonnet`、`deepseek-chat` |
 
-**MiniMax TTS（可选）**：想在「电话」里用语音功能，需要在设置里填 MiniMax 的 API Key 和 Group ID。不然你就只能看文字，听不到我性感的声音。
+**TTS（可选）**：语音支持 MiniMax、Fish Audio、ElevenLabs 三选一。在「设置 → 其他 API」填写所选服务的 Key 和模型，再到角色的语音设置填写对应音色 ID；未配置时仍可正常使用文字聊天。
 
 > 也可以建 `.env.local` 文件预填默认值，但设置里的优先级更高。
 
@@ -290,7 +290,7 @@ Phase 2 Round 2 起 push 路径跟本地 fetch 路径**功能对齐**，不再�
 **好消息**：现在**主代理已经统一成一个中心配置**，不用再满仓库改硬编码。
 
 **① 主代理 Worker**（默认作者公共实例 `sullymeow.ccwu.cc`，源码单文件 [`worker/index.js`](./worker/index.js)）
-覆盖：联网搜索 / 热榜（Brave）、WebDAV 云备份、GitHub 云备份、Notion、飞书多维表格、麦当劳 / 瑞幸点单 MCP、网页抓取、Fish Audio TTS、音乐生成、网易云音乐（默认）。
+覆盖：联网搜索 / 热榜（Brave）、WebDAV 云备份、GitHub 云备份、Notion、飞书多维表格、麦当劳 / 瑞幸点单 MCP、网页抓取、Fish Audio / ElevenLabs TTS、音乐生成、网易云音乐（默认）。
 👉 二改只要在 **「设置 → 网络代理 (Worker)」** 填上你自己部署的地址，以上能力**一键全切走，不用改任何代码**。（`wrangler deploy` 把 `worker/index.js` 丢自己 CF 账号，拿到地址填进去即可。）
 
 **② 还是独立、要各自部署 / 配置的 Worker**：

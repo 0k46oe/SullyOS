@@ -7,6 +7,14 @@ import { safeResponseJson } from '../utils/safeApi';
 import ConfirmDialog from '../components/os/ConfirmDialog';
 import TokenImg from '../components/os/TokenImg';
 import { trackEvent } from '../utils/analytics';
+import { Star } from '@phosphor-icons/react';
+import {
+    CONTENT_FAVORITES_CHANGED_EVENT,
+    getContentFavoriteById,
+    makeImageContentFavoriteId,
+    removeContentFavoriteById,
+    saveGalleryImageContentFavorite,
+} from '../utils/contentFavorites';
 
 const Gallery: React.FC = () => {
     const { closeApp, characters, apiConfig, addToast } = useOS();
@@ -16,6 +24,7 @@ const Gallery: React.FC = () => {
     const [selectedImage, setSelectedImage] = useState<GalleryImage | null>(null);
     const [isReviewing, setIsReviewing] = useState(false);
     const [showChatContext, setShowChatContext] = useState(false);
+    const [imageFavorited, setImageFavorited] = useState(false);
 
     // Long-press delete state
     const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -54,6 +63,42 @@ const Gallery: React.FC = () => {
     const handleImageClick = (img: GalleryImage) => {
         setSelectedImage(img);
         setView('detail');
+    };
+
+    const refreshSelectedFavorite = useCallback(async () => {
+        if (!selectedImage) {
+            setImageFavorited(false);
+            return;
+        }
+        const favorite = await getContentFavoriteById(makeImageContentFavoriteId(selectedImage.url)).catch(() => null);
+        setImageFavorited(!!favorite);
+    }, [selectedImage?.id]);
+
+    useEffect(() => {
+        void refreshSelectedFavorite();
+        window.addEventListener(CONTENT_FAVORITES_CHANGED_EVENT, refreshSelectedFavorite);
+        return () => window.removeEventListener(CONTENT_FAVORITES_CHANGED_EVENT, refreshSelectedFavorite);
+    }, [refreshSelectedFavorite]);
+
+    const handleToggleImageFavorite = async () => {
+        if (!selectedImage) return;
+        const favoriteId = makeImageContentFavoriteId(selectedImage.url);
+        try {
+            if (imageFavorited) {
+                await removeContentFavoriteById(favoriteId);
+                setImageFavorited(false);
+                addToast('已取消收藏图片', 'info');
+                return;
+            }
+            const charName = characters.find(character => character.id === selectedImage.charId)?.name || '未知角色';
+            await saveGalleryImageContentFavorite(selectedImage, charName);
+            setImageFavorited(true);
+            addToast('已收藏图片（仅保存引用）', 'success');
+            trackEvent('收藏相册图片');
+        } catch (error) {
+            console.warn('[Gallery] favorite image failed', error);
+            addToast('收藏失败，请稍后重试', 'error');
+        }
     };
 
     const handleBack = () => {
@@ -318,9 +363,14 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
                 <button onClick={() => setView('grid')} className="text-white bg-black/40 backdrop-blur-md p-2 rounded-full pointer-events-auto active:scale-95 transition-transform hover:bg-black/60 border border-white/10">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                 </button>
-                <button onClick={handleDeleteImage} className="text-white bg-black/40 backdrop-blur-md p-2 rounded-full pointer-events-auto active:scale-95 transition-transform hover:bg-red-600/60 border border-white/10">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" /></svg>
-                </button>
+                <div className="flex items-center gap-2 pointer-events-auto">
+                    <button onClick={() => void handleToggleImageFavorite()} className={`text-white backdrop-blur-md p-2 rounded-full active:scale-95 transition-transform border border-white/10 ${imageFavorited ? 'bg-amber-500/80' : 'bg-black/40 hover:bg-black/60'}`} aria-label={imageFavorited ? '取消收藏图片' : '收藏图片'}>
+                        <Star size={20} weight={imageFavorited ? 'fill' : 'regular'} />
+                    </button>
+                    <button onClick={handleDeleteImage} className="text-white bg-black/40 backdrop-blur-md p-2 rounded-full active:scale-95 transition-transform hover:bg-red-600/60 border border-white/10">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" /></svg>
+                    </button>
+                </div>
             </div>
 
             {/* Date badge */}

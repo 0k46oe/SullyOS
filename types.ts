@@ -89,6 +89,20 @@ export interface ScheduleCardAppearance {
   customCss?: string;
 }
 
+export type JournalAppearancePresetId =
+  | 'original'
+  | 'letterpress'
+  | 'sakura'
+  | 'forest'
+  | 'midnight';
+
+/** 交换日记 App 的全局皮肤。预设负责开箱即用，自定义 CSS 最后注入并可覆盖预设。 */
+export interface JournalAppearance {
+  preset?: JournalAppearancePresetId;
+  /** 仅允许 .sully-journal-* 作用域，避免样式影响其它 App。 */
+  customCss?: string;
+}
+
 export interface OSTheme {
   hue: number;
   saturation: number;
@@ -124,6 +138,8 @@ export interface OSTheme {
   nowPlayingWidgetLight?: boolean;
   /** 日程卡片统一皮肤：桌面、全屏、房间与聊天内同步。 */
   scheduleCardAppearance?: ScheduleCardAppearance;
+  /** 交换日记 App 全局皮肤与自定义 CSS。 */
+  journalAppearance?: JournalAppearance;
   desktopDecorations?: DesktopDecoration[];
   customFont?: string;
   /** 顶部时间栏布局：安全显示（安全区下方）/ 紧凑显示（嵌入安全区）/ 完全隐藏。 */
@@ -232,9 +248,8 @@ export interface VirtualTime {
 
 export type MinimaxRegion = 'domestic' | 'overseas';
 
-// 语音合成（TTS）服务商。'minimax'（默认）走 MiniMax T2A；'fishaudio' 走鱼声 Fish Audio。
-// 全局二选一：切换后所有语音场景（聊天语音条 / 约会 / 电话）统一用同一家。
-export type TtsProvider = 'minimax' | 'fishaudio';
+// 语音合成（TTS）服务商。全局三选一：切换后聊天语音条 / 约会 / 电话统一用同一家。
+export type TtsProvider = 'minimax' | 'fishaudio' | 'elevenlabs';
 
 export interface VisionApiConfig {
   /** 开启后，聊天图片先由独立视觉模型转成文字，再交给主对话模型。 */
@@ -255,15 +270,24 @@ export interface APIConfig {
   // 'overseas' → https://api.minimax.io  (海外站)
   // Missing / unknown falls back to domestic.
   minimaxRegion?: MinimaxRegion;
-  // 语音服务商二选一。缺省 → 'minimax'。
+  // 语音服务商三选一。缺省 → 'minimax'。
   ttsProvider?: TtsProvider;
   // 鱼声 Fish Audio API Key（https://fish.audio/）。仅 ttsProvider === 'fishaudio' 时使用。
   fishAudioApiKey?: string;
   // 鱼声默认模型（s2.1-pro / s2-pro / s1）。缺省 → 's2.1-pro'。
   // 角色 voiceProfile.fishModel 优先于这个全局默认。
   fishAudioModel?: string;
+  // ElevenLabs BYOK 配置。Voice ID 存在角色 voiceProfile.elevenLabsVoiceId，避免角色串音色。
+  elevenLabsApiKey?: string;
+  // 缺省使用低延迟 eleven_flash_v2_5；也支持 eleven_v3 / eleven_multilingual_v2。
+  elevenLabsModel?: string;
+  // ElevenLabs Voice Settings（请求级覆盖，不修改 ElevenLabs 控制台里的音色默认值）。
+  elevenLabsStability?: number;
+  elevenLabsSimilarityBoost?: number;
+  elevenLabsStyle?: number;
+  elevenLabsUseSpeakerBoost?: boolean;
   // 用户自定义「语音表演指南」——注入到角色 system prompt、教模型怎么写出有情绪的语音台词。
-  // minimax / fishaudio：聊天 + 电话共用，按 TTS 服务商分别存（两家标记体系不同，不能共用一份）；
+  // minimax / fishaudio / elevenlabs：聊天 + 电话共用，按 TTS 服务商分别存；
   //   留空 → 用内置默认（minimaxTts.VOICE_ACTING_GUIDE / fishAudioTts.FISH_VOICE_ACTING_GUIDE）。
   // dateVoice：见面（DateApp）专用的 [v:xxx] 语音情绪规则，与服务商无关、单独一份；
   //   留空 → 用内置默认（datePrompts.DATE_VOICE_GUIDE）。
@@ -271,6 +295,7 @@ export interface APIConfig {
   voicePrompts?: {
     minimax?: string;
     fishaudio?: string;
+    elevenlabs?: string;
     dateVoice?: string;
   };
   // Replicate token (r8_xxx) for ACE-Step song generation in 写歌 App.
@@ -2860,11 +2885,15 @@ export interface CharacterProfile {
   voiceProfile?: {
       provider?: 'minimax' | 'custom';
       voiceId?: string;
+      // MiniMax 合成参数版本。缺省/legacy 保持历史效果；natural-v2 需由用户主动开启。
+      minimaxParamVersion?: 'legacy' | 'natural-v2';
       // 鱼声 Fish Audio 音色：从 fish.audio 语音库复制的 reference_id。
       // 与 MiniMax 的 voiceId 不通用，单独保存，切换 provider 时各取各的。
       fishReferenceId?: string;
       // 该角色单独指定的鱼声模型（覆盖全局 fishAudioModel）。
       fishModel?: string;
+      // ElevenLabs 角色音色 ID。与 MiniMax voiceId / Fish reference_id 各存各的。
+      elevenLabsVoiceId?: string;
       voiceName?: string;
       source?: 'system' | 'voice_cloning' | 'voice_generation' | 'custom';
       model?: string;
@@ -3192,6 +3221,8 @@ export interface GalleryImage {
     charId: string;
     url: string;
     timestamp: number;
+    /** 原图来自聊天时指向消息主键；相册与收藏只关联，不再复制第三份图片。 */
+    sourceMessageId?: number;
     review?: string;
     reviewTimestamp?: number;
     savedDate?: string; // YYYY-MM-DD format
@@ -3767,6 +3798,8 @@ export interface FullBackupData {
     version: number;
     theme?: OSTheme;
     apiConfig?: APIConfig;
+    /** 查手机 App 独立 API；null/缺省时跟随聊天默认。 */
+    checkPhoneApi?: APIConfig | null;
     instantPushConfig?: InstantPushConfig;
     pushVapid?: { vapidPublicKey: string; vapidPrivateKey: string; vapidEmail?: string; updatedAt?: number; };
     /**
@@ -3972,8 +4005,13 @@ export interface CloudBackupConfig {
 export interface CloudBackupFile {
     name: string;
     size: number;
-    lastModified: string;       // ISO date string
+    lastModified: string | number; // ISO date string or epoch timestamp
     href: string;               // WebDAV: remote path. GitHub: 'releaseId:assetId'
+    /** GitHub can expose an interrupted draft/release without a restorable asset set. */
+    status?: 'ready' | 'incomplete';
+    statusMessage?: string;
+    /** Expected GitHub asset sizes, in the same order as the ids encoded in href. */
+    partSizes?: number[];
 }
 
 // --- GUIDEBOOK (攻略本) APP TYPES ---
