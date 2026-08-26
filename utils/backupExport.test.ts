@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { extractImagesInPlace, deepCloneForExport, EXPORT_CHUNK_SIZE, sliceRanges } from './backupExport';
+import JSZip from 'jszip';
+import { extractImagesInPlace, deepCloneForExport, EXPORT_CHUNK_SIZE, parseImageDataUrlForBackup, sliceRanges } from './backupExport';
 
 const IMG = 'data:image/png;base64,AAAA';
 
@@ -58,6 +59,16 @@ describe('extractImagesInPlace', () => {
         expect(root[1].img).toBe('assets/p.png');
     });
 
+    it('把图片所在对象路径交给解析器，导出日志能指出具体字段', () => {
+        const root = { rows: [{ id: 'row-1', nested: { image: IMG } }] };
+        const paths: Array<Array<string | number>> = [];
+        extractImagesInPlace(root, (_value, path) => {
+            paths.push(path);
+            return 'assets/p.png';
+        });
+        expect(paths).toEqual([['rows', 0, 'nested', 'image']]);
+    });
+
     // 回归：QQ捏人工坊往整合导出/导入。抽取是全字段递归、无白名单，所以角色里
     // 深埋在 chibiStudio / vrState.chibi / specialMomentRecords 下的 data:image 都必须
     // 被抽走（换成 assets/*）。若日后有人给抽取加字段白名单，这条会红。
@@ -84,6 +95,59 @@ describe('extractImagesInPlace', () => {
         // state（选件 JSON）不是图，不动
         expect(char.chibiStudio.room.state.selected.fronthair).toBe('f_1');
         expect(char.vrState.chibi.state.selected.skin).toBe('skin_1');
+    });
+});
+
+describe('parseImageDataUrlForBackup', () => {
+    it('合法图片正文规范化后可安全交给 JSZip', () => {
+        expect(parseImageDataUrlForBackup('data:image/jpeg;base64,AQID\nBA==')).toEqual({
+            ok: true,
+            extension: 'jpg',
+            base64: 'AQIDBA==',
+        });
+    });
+
+    it('提前拦住截图里的 bad content length，不等 generateAsync 才炸整包', () => {
+        expect(parseImageDataUrlForBackup('data:image/png;base64,A')).toEqual({
+            ok: false,
+            reason: 'invalid-length',
+        });
+    });
+
+    it('非法字符、错误 padding、空正文都按损坏素材处理', () => {
+        expect(parseImageDataUrlForBackup('data:image/png;base64,@@@@')).toMatchObject({ ok: false });
+        expect(parseImageDataUrlForBackup('data:image/png;base64,AA=A')).toMatchObject({ ok: false });
+        expect(parseImageDataUrlForBackup('data:image/png;base64,')).toMatchObject({ ok: false });
+    });
+
+    it('坏图保留原值但不进入 JSZip base64 队列，整包仍能生成', async () => {
+        const zip = new JSZip();
+        const assets = zip.folder('assets')!;
+        const broken = 'data:image/png;base64,A';
+        const root = { broken, valid: IMG };
+        let malformed = 0;
+
+        extractImagesInPlace(root, (value) => {
+            const parsed = parseImageDataUrlForBackup(value);
+            if (!parsed.ok) {
+                if (parsed.reason !== 'unsupported-header') malformed++;
+                return value;
+            }
+            assets.file(`asset.${parsed.extension}`, parsed.base64, { base64: true, compression: 'STORE' });
+            return `assets/asset.${parsed.extension}`;
+        });
+
+        zip.file('data.json', JSON.stringify(root));
+        await expect(zip.generateAsync({ type: 'uint8array' })).resolves.toBeInstanceOf(Uint8Array);
+        expect(malformed).toBe(1);
+        expect(root.broken).toBe(broken);
+        expect(root.valid).toBe('assets/asset.png');
+    });
+
+    it('SVG 等旧流程本来就不抽取的 data URL 原样保留，不算损坏', () => {
+        const svg = 'data:image/svg+xml;base64,PHN2Zy8+';
+        const parsed = parseImageDataUrlForBackup(svg);
+        expect(parsed).toEqual({ ok: false, reason: 'unsupported-header' });
     });
 });
 

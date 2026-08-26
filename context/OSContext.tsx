@@ -4,7 +4,7 @@ import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, CharacterGrou
 import { DB } from '../utils/db';
 import type { AvatarTouchRecord } from '../utils/avatarTouch';
 import { clampClaudeTemperature, modelRejectsSamplingParams, stripSamplingParams } from '../utils/samplingParamCompat';
-import { extractImagesInPlace, deepCloneForExport } from '../utils/backupExport';
+import { extractImagesInPlace, deepCloneForExport, parseImageDataUrlForBackup, type BackupObjectPath } from '../utils/backupExport';
 import { isBlobRef, getBlobForRef, restoreBlobRef, migrateDataUrlToRef, migrateAppearancePresetBlobRefs, migrateChatThemeBlobRefs, resolveBlobRefsDeep, resolveRefToDataUrl, BLOBREF_PREFIX, deleteBlobRefIfUnreferenced } from '../utils/blobRef';
 import { resolveBlobRefsInRequestBody } from '../utils/apiBlobRefs';
 import { collectBlobRefs, writeBlobsToZip, readBlobsIndex, restoreBlobsFromZip } from '../utils/backupBlobs';
@@ -3737,6 +3737,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           const zip = new JSZip();
           const assetsFolder = zip.folder("assets");
           let assetCount = 0;
+          let malformedImageCount = 0;
+          const malformedImageLocations: string[] = [];
 
           // Dedup table — same base64 payload reused across stores (角色头像在
           // 多个 chat / handbook / room 里被嵌入) gets stored exactly once. Key
@@ -3798,17 +3800,27 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // 把一条 data:image base64 落进 ZIP 的 assets/ 文件夹，返回它的 assets/* 路径。
           // 同一份 base64 全局只存一份（assetDedupMap 按完整 base64 去重）；无法识别的
           // data url 原样返回，不动它。
-          const resolveImage = (value: string): string => {
+          const resolveImage = (value: string, location: string): string => {
               try {
                   const cached = assetDedupMap.get(value);
                   if (cached) return cached;
-                  const extMatch = value.match(/data:image\/([a-zA-Z0-9]+);base64,/);
-                  if (!extMatch) return value;
-                  const ext = extMatch[1] === 'jpeg' ? 'jpg' : extMatch[1];
-                  const filename = `asset_${Date.now()}_${assetCount++}.${ext}`;
-                  const base64Data = value.split(',')[1];
+                  const parsed = parseImageDataUrlForBackup(value);
+                  if (!parsed.ok) {
+                      // SVG、带额外 MIME 参数等本来就不走 assets/* 的 data URL 沿用旧行为，
+                      // 原样留在 JSON，也不把它误报成「损坏图片」。
+                      if (parsed.reason === 'unsupported-header') return value;
+                      malformedImageCount++;
+                      if (malformedImageLocations.length < 20) {
+                          malformedImageLocations.push(`${location} (${parsed.reason})`);
+                      }
+                      // 原值继续进入备份 JSON，避免为了救整包而静默删字段；只是不要再把它
+                      // 以 `{ base64: true }` 交给 JSZip，否则最终 generateAsync 才异步炸掉整包。
+                      console.warn(`[Backup] 损坏图片未写入素材文件: ${location} (${parsed.reason})`);
+                      return value;
+                  }
+                  const filename = `asset_${Date.now()}_${assetCount++}.${parsed.extension}`;
                   // JPEG/PNG/WebP/GIF 本身已压缩，再跑 DEFLATE 只会浪费手机 CPU；直接存储。
-                  assetsFolder?.file(filename, base64Data, { base64: true, compression: 'STORE' });
+                  assetsFolder?.file(filename, parsed.base64, { base64: true, compression: 'STORE' });
                   const path = `assets/${filename}`;
                   assetDedupMap.set(value, path);
                   return path;
@@ -3822,8 +3834,32 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // 原地把 base64 换成 assets/* 路径，不再另建一棵对象树，导出大 store 时峰值内存更省。
           // 传进来的必须是独立副本：store 数据是 IDB 结构化克隆副本（安全）；theme /
           // customIcons / appearancePresets 引用了运行态 state，已在上面 backupData 里深拷贝。
-          const processObject = (obj: any): any => {
-              extractImagesInPlace(obj, resolveImage);
+          const processObject = (obj: any, source = 'backupData'): any => {
+              const safeRecordId = (value: unknown): string | null => {
+                  if (typeof value !== 'string' && typeof value !== 'number') return null;
+                  return String(value).replace(/[\r\n]/g, ' ').slice(0, 80);
+              };
+              const describeLocation = (path: BackupObjectPath): string => {
+                  let label = source;
+                  let pathStart = 0;
+                  if (Array.isArray(obj) && typeof path[0] === 'number') {
+                      const index = path[0];
+                      const row = obj[index];
+                      const id = row && typeof row === 'object'
+                          ? safeRecordId((row as any).id ?? (row as any).uuid ?? (row as any).key)
+                          : null;
+                      label += `[${index}]${id ? `(id=${id})` : ''}`;
+                      pathStart = 1;
+                  } else if (obj && typeof obj === 'object' && !source.includes('(id=')) {
+                      const id = safeRecordId((obj as any).id ?? (obj as any).uuid ?? (obj as any).key);
+                      if (id) label += `(id=${id})`;
+                  }
+                  for (const segment of path.slice(pathStart)) {
+                      label += typeof segment === 'number' ? `[${segment}]` : `.${segment}`;
+                  }
+                  return label;
+              };
+              extractImagesInPlace(obj, (dataUrl, path) => resolveImage(dataUrl, describeLocation(path)));
               return obj;
           };
 
@@ -4088,12 +4124,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   }
               }
 
-              if (backupData.socialAppData?.userProfile) processObject(backupData.socialAppData.userProfile);
-              if (backupData.socialAppData?.userBg) processObject(backupData.socialAppData.userBg);
-              if (backupData.roomCustomAssets) processObject(backupData.roomCustomAssets);
-              if (backupData.theme) processObject(backupData.theme);
-              if (backupData.customIcons) processObject(backupData.customIcons);
-              if (backupData.appearancePresets) processObject(backupData.appearancePresets);
+              if (backupData.socialAppData?.userProfile) processObject(backupData.socialAppData.userProfile, 'socialAppData.userProfile');
+              if (backupData.socialAppData?.userBg) processObject(backupData.socialAppData.userBg, 'socialAppData.userBg');
+              if (backupData.roomCustomAssets) processObject(backupData.roomCustomAssets, 'roomCustomAssets');
+              if (backupData.theme) processObject(backupData.theme, 'theme');
+              if (backupData.customIcons) processObject(backupData.customIcons, 'customIcons');
+              if (backupData.appearancePresets) processObject(backupData.appearancePresets, 'appearancePresets');
           } else {
               // Strip images for text only
               if (backupData.socialAppData?.userProfile) backupData.socialAppData.userProfile = stripBase64(backupData.socialAppData.userProfile);
@@ -4134,11 +4170,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           ]);
 
           // Chunked processObject for large arrays — yields to main thread every 200 items
-          const processArrayChunked = async (arr: any[], fn: (item: any) => any, chunkSize = 200): Promise<any[]> => {
+          const processArrayChunked = async (arr: any[], fn: (item: any, index: number) => any, chunkSize = 200): Promise<any[]> => {
               if (arr.length <= chunkSize) return arr.map(fn);
               const result: any[] = [];
               for (let i = 0; i < arr.length; i += chunkSize) {
-                  const chunk = arr.slice(i, i + chunkSize).map(fn);
+                  const chunk = arr.slice(i, i + chunkSize).map((item, offset) => fn(item, i + offset));
                   result.push(...chunk);
                   if (i + chunkSize < arr.length) {
                       await new Promise(r => setTimeout(r, 0));
@@ -4340,7 +4376,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   if (storeName === 'characters' && mode === 'media_only') {
                       // Character Logic: Export ONLY visual assets to mediaAssets array
                       // Do not export the full character array to avoid overwriting text data on import
-                      const mediaList = rawData.map((c: CharacterProfile) => {
+                      const mediaList = rawData.map((c: CharacterProfile, index: number) => {
                           const extracted = {
                               charId: c.id,
                               avatar: c.avatar,
@@ -4368,15 +4404,20 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                                   roomFloor: c.roomConfig?.floorImage
                               }
                           };
-                          return processObject(extracted);
+                          return processObject(extracted, `characters[${index}](id=${String(c.id).slice(0, 80)})`);
                       });
                       backupData.mediaAssets = mediaList;
                       continue; // Skip standard assignment
                   }
 
                   processedData = Array.isArray(rawData) && rawData.length > 200
-                      ? await processArrayChunked(rawData, processObject)
-                      : processObject(rawData);
+                      ? await processArrayChunked(rawData, (item, index) => {
+                          const id = item && typeof item === 'object'
+                              ? String(item.id ?? item.uuid ?? item.key ?? '').replace(/[\r\n]/g, ' ').slice(0, 80)
+                              : '';
+                          return processObject(item, `${storeName}[${index}]${id ? `(id=${id})` : ''}`);
+                      })
+                      : processObject(rawData, storeName);
               }
 
               // Assign to Backup Data
@@ -4529,6 +4570,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           setSysOperation({ status: 'idle', message: '', progress: 100 });
           // 备份成功 → 推进「该备份啦」提醒的计时（本地导出 / 云备份都走这里，一处覆盖两条路径）
           markBackupDone();
+          if (malformedImageCount > 0) {
+              console.warn(`[Backup] 备份已完成，但有 ${malformedImageCount} 处损坏图片未写入素材文件`, malformedImageLocations);
+              addToast(`备份已生成，但有 ${malformedImageCount} 处原本就损坏的图片无法打包；其他数据已正常保存`, 'info');
+          }
           return content;
 
       } catch (e: any) {
