@@ -9,6 +9,7 @@ import {
   PUSH_SUBSCRIPTION_CHANGED_KV_ID,
   buildSelfLogEntryId,
   catchUpMissedPushes,
+  catchUpMissedPushesManually,
   resetOutboxCatchUpThrottleForTesting,
   findInboxArtifacts,
   findMissingChunkIndexes,
@@ -44,6 +45,7 @@ import { ActiveMsgStore } from './activeMsgStore';
 import { AMSG_SELF_LOG_KEY, amsgStateNamespace } from './amsgFirePack';
 import { CHAT_GEN_EVENTS } from './chatGenEvents';
 import { DB } from './db';
+import { readAllInstantTraces } from './instantTraceLog';
 
 // resolveFireExpireDecision 是从「防穿帮闸·客户端兜底」吞没闸抽出来的 get-or-compute
 // helper（带 TTL 清扫），单测把闸的关键不变量钉住，防回归：
@@ -425,7 +427,6 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
         charId,
         amsgExpirePolicy: 'expire',
         amsgClientTaskId: 'client-task-selfsched',
-        amsgAnchorMs: anchorMs,
         // 角色自排那条路径不往 metadata 抄 recurrence，这里刻意留空。
       },
       sentAt: occurrenceMs,
@@ -447,7 +448,7 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
 
     const occurrenceMs = Date.now();
     const anchorMs = occurrenceMs - 3_600_000;
-    // 锚点之后用户又开口了 → 一次性任务判作废，这条 push 会被吞。
+    // 到点前一分钟用户还在说话 → 循环任务的「正在热聊」窗口命中，这条 push 会被吞。
     await DB.saveMessage({
       charId, role: 'user', type: 'text', content: '我在忙',
       timestamp: occurrenceMs - 60_000,
@@ -459,13 +460,12 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
       charName: '自排角色',
       messageType: 'text',
       source: 'scheduled',
-      recurrenceType: 'none',
+      recurrenceType: 'daily',
       occurrenceMs,
       metadata: {
         charId,
         amsgExpirePolicy: 'expire',
         amsgClientTaskId: 'client-task-adopt',
-        amsgAnchorMs: anchorMs,
         amsgSelfScheduled: [{
           taskUuid: 'amsgself-adopt-1',
           clientTaskId: 'client-task-adopt-next',
@@ -489,6 +489,128 @@ describe('flushInboxToChat 落库时间戳（走真库）', () => {
       char?.activeMsg2Config?.tasks?.map((t: any) => t.taskUuid),
       '被吞的是这次要说的话，不是这条任务',
     ).toContain('amsgself-adopt-1');
+  }, 20000);
+
+  // 防穿帮闸的三种去向必须各留各的痕。吞掉是这条链路上唯一「用户什么都看不到」的出口
+  // （不进聊天流、不弹提示、还去云端账本销了账），线上出过一次真实事故：通知弹出来了、
+  // 点进去没有，而客户端、worker、云端账本三处加起来都说不出发生过什么。
+  // 这两条钉的就是「判定输入必须原样留在 trace 里」——不留的话下次照样只能靠猜。
+  it('被闸吞掉时，判定输入原样进 trace（吞是静默的，只剩这一行说得出为什么）', async () => {
+    localStorage.removeItem('instant_push_trace_log_v1');
+    const charId = 'char-gate-trace-swallow';
+    await DB.saveCharacter({ id: charId, name: '留痕角色' } as any);
+
+    const occurrenceMs = Date.now();
+    const anchorMs = occurrenceMs - 3_600_000;
+    const lastUserAt = occurrenceMs - 60_000;   // 到点前一分钟还在聊 → 循环任务判作废
+    await DB.saveMessage({
+      charId, role: 'user', type: 'text', content: '我在忙', timestamp: lastUserAt,
+    } as any);
+
+    await ActiveMsgStore.saveInboxMessage(inboxMsg({
+      messageId: 'msg-gate-trace-swallow',
+      charId,
+      charName: '留痕角色',
+      messageType: 'text',
+      source: 'scheduled',
+      recurrenceType: 'daily',
+      occurrenceMs,
+      metadata: {
+        charId,
+        amsgExpirePolicy: 'expire',
+        amsgClientTaskId: 'client-task-trace-swallow',
+      },
+      sentAt: occurrenceMs,
+    }));
+
+    await flushInboxToChat();
+
+    expect(await assistantMsgs(charId), '前提：这条该被吞').toHaveLength(0);
+    const decision = readAllInstantTraces()
+      .find((e) => e.event === 'runtime-expire-decision-swallow');
+    expect(decision, '吞掉必须留一条判定 trace').toBeTruthy();
+    // 这几个字段是「为什么吞」的全部依据，少一个就还得靠猜。
+    expect(decision).toMatchObject({
+      charId,
+      policy: 'expire',
+      recurrenceType: 'daily',
+      lastUserMessageAt: lastUserAt,
+      occurrenceMs,
+    });
+  }, 20000);
+
+  // 线上真实事故的最小复现：角色半夜说「明早九点半叫你起床」，用户回一句「晚安」，
+  // 七小时后那条早安到了设备上却被这一层判成「对话已经前进了」整条吞掉——不进聊天流、
+  // 不弹提示、还去云端账本销了账，而通知早就弹到锁屏上了。用户看到的是「通知说角色
+  // 发了消息，点进去什么都没有」，消息再也补不回来。
+  // 锚点规则没有时间窗，跨夜任务几乎必然中招（说完「明早叫你」，用户基本一定会再回
+  // 一句），所以客户端这一层不再跑它。这条测试就是那道闸别被顺手加回来的守卫。
+  it('跨夜的一次性任务不再被吞：说完「明早叫你」之后用户回过话，早安照样送达', async () => {
+    const charId = 'char-overnight-oneshot';
+    await DB.saveCharacter({ id: charId, name: '叫早角色' } as any);
+
+    const occurrenceMs = Date.now();
+    const anchorMs = occurrenceMs - 8 * 3_600_000;        // 八小时前排的任务
+    await DB.saveMessage({                                 // 排完之后用户回了句「晚安」
+      charId, role: 'user', type: 'text', content: '好，晚安',
+      timestamp: anchorMs + 60_000,
+    } as any);
+
+    await ActiveMsgStore.saveInboxMessage(inboxMsg({
+      messageId: 'msg-overnight-oneshot',
+      charId,
+      charName: '叫早角色',
+      messageType: 'text',
+      source: 'scheduled',
+      recurrenceType: 'none',
+      occurrenceMs,
+      metadata: {
+        charId,
+        amsgExpirePolicy: 'expire',
+        amsgClientTaskId: 'client-task-overnight',
+      },
+      sentAt: occurrenceMs,
+    }));
+
+    await flushInboxToChat();
+
+    expect(await assistantMsgs(charId), '跨夜的早安不该被锚点规则吞掉').toHaveLength(1);
+  }, 20000);
+
+  it('闸放行时也留一条 trace（否则「判了没吞」和「闸根本没跑」长得一模一样）', async () => {
+    localStorage.removeItem('instant_push_trace_log_v1');
+    const charId = 'char-gate-trace-pass';
+    await DB.saveCharacter({ id: charId, name: '放行角色' } as any);
+
+    const occurrenceMs = Date.now();
+    // 用户最后一次开口在锚点之前 → 一次性任务照发。
+    await DB.saveMessage({
+      charId, role: 'user', type: 'text', content: '晚安', timestamp: occurrenceMs - 7_200_000,
+    } as any);
+
+    await ActiveMsgStore.saveInboxMessage(inboxMsg({
+      messageId: 'msg-gate-trace-pass',
+      charId,
+      charName: '放行角色',
+      messageType: 'text',
+      source: 'scheduled',
+      recurrenceType: 'none',
+      occurrenceMs,
+      metadata: {
+        charId,
+        amsgExpirePolicy: 'expire',
+        amsgClientTaskId: 'client-task-trace-pass',
+      },
+      sentAt: occurrenceMs,
+    }));
+
+    await flushInboxToChat();
+
+    expect(await assistantMsgs(charId), '前提：这条该放行').toHaveLength(1);
+    expect(
+      readAllInstantTraces().some((e) => e.event === 'runtime-expire-decision-pass'),
+      '放行也要留痕',
+    ).toBe(true);
   }, 20000);
 
   it('主路径·刚送达：一样落 sentAt（本地没有更晚的消息，不需要退让）', async () => {
@@ -1438,7 +1560,7 @@ describe('防穿帮闸吞掉消息后撤销云端自述日志（走真库）', (
 
     const occurrenceMs = Date.now();
     const anchorMs = occurrenceMs - 3_600_000;
-    // 锚点之后用户又开口了 → 一次性任务判作废，这条 push 会被吞。
+    // 到点前一分钟用户还在说话 → 循环任务的「正在热聊」窗口命中，这条 push 会被吞。
     await DB.saveMessage({
       charId, role: 'user', type: 'text', content: '我在忙',
       timestamp: occurrenceMs - 60_000,
@@ -1462,7 +1584,7 @@ describe('防穿帮闸吞掉消息后撤销云端自述日志（走真库）', (
       body: '刚看到楼下那只猫又来了',
       messageType: 'text',
       source: 'scheduled',
-      recurrenceType: 'none',
+      recurrenceType: 'daily',
       occurrenceMs,
       receivedAt: Date.now(),
       sentAt: occurrenceMs,
@@ -1470,7 +1592,6 @@ describe('防穿帮闸吞掉消息后撤销云端自述日志（走真库）', (
         charId,
         amsgExpirePolicy: 'expire',
         amsgClientTaskId: 'client-task-swallow',
-        amsgAnchorMs: anchorMs,
       },
     } as any);
 
@@ -2607,5 +2728,95 @@ describe('上线补收不看有没有在等回复（走真库）', () => {
     vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockRejectedValue(new Error('worker 500'));
 
     await expect(catchUpMissedPushes('startup')).resolves.toBe('failed');
+  }, 20000);
+});
+
+// 手动补收那个按钮报的「补回 N 条消息，去聊天里看看」必须是真话。
+//
+// 「写进收件箱」离「上了屏」还差一整趟冲刷：防穿帮闸会吞、落库去重会丢、多段等齐会扣。
+// 按收件箱那个数报的话，用户点完按钮看到「补回 2 条」，翻遍聊天记录一条也找不到——
+// 而这个按钮存在的全部意义就是让他确认「消息到底还在不在」。
+describe('手动补收报的是真上了屏的条数（走真库）', () => {
+  const WORKER_URL = 'https://amsg-manual-catchup.example.workers.dev';
+
+  beforeAll(() => {
+    (globalThis as any).window ??= { dispatchEvent: () => true, addEventListener: () => {} };
+  });
+
+  beforeEach(async () => {
+    localStorage.setItem(AMSG_OUTBOX_ADOPTED_LS_KEY, JSON.stringify({ at: Date.now() }));
+    resetOutboxCatchUpThrottleForTesting();
+    await ActiveMsgStore.saveGlobalConfig({ workerUrl: WORKER_URL });
+    vi.spyOn(ActiveMsgClient, 'ackOutboxMessages').mockResolvedValue(undefined);
+    // 被吞那条会顺手去云端撤自述日志（best-effort），别让它真打网络。
+    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(null);
+    vi.spyOn(ActiveMsgClient, 'clearClientStateValue').mockResolvedValue(undefined);
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await ActiveMsgStore.saveGlobalConfig({ workerUrl: '' });
+  });
+
+  /** 账本上的一条定时主动消息。messageType 用 'scheduled'，走原稿落库那条最短的路。 */
+  const scheduledEntry = (charId: string, messageId: string, occurrenceMs: number) => ({
+    id: 1,
+    messageId,
+    taskUuid: null,
+    sessionId: null,
+    messageIndex: 1,
+    totalMessages: 1,
+    createdAt: Date.now(),
+    deliveredAt: null,
+    push: {
+      messageKind: 'content',
+      messageType: 'scheduled',
+      source: 'scheduled',
+      message: `${charId} 的定时消息`,
+      contactName: '定时角色',
+      messageId,
+      messageIndex: 1,
+      totalMessages: 1,
+      occurrenceMs,
+      timestamp: new Date(occurrenceMs).toISOString(),
+      metadata: {
+        charId,
+        charName: '定时角色',
+        amsgExpirePolicy: 'expire',
+        amsgClientTaskId: `client-task-${charId}`,
+      },
+    },
+  });
+
+  it('两条都写进了收件箱，闸吞掉一条 → 只报 1 条', async () => {
+    const swallowedChar = 'char-manual-swallowed';
+    const landedChar = 'char-manual-landed';
+    await DB.saveCharacter({ id: swallowedChar, name: '定时角色' } as any);
+    await DB.saveCharacter({ id: landedChar, name: '定时角色' } as any);
+
+    const occurrenceMs = Date.now();
+    // 到点前一分钟这个角色那边用户还在说话 → 防穿帮闸命中，这条不上屏。
+    // 另一个角色没有任何用户消息，闸判不了、照常放行。
+    await DB.saveMessage({
+      charId: swallowedChar, role: 'user', type: 'text', content: '我在忙',
+      timestamp: occurrenceMs - 60_000,
+    } as any);
+
+    vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue([
+      scheduledEntry(swallowedChar, 'msg-manual-swallowed', occurrenceMs),
+      scheduledEntry(landedChar, 'msg-manual-landed', occurrenceMs),
+    ] as any);
+
+    const { written, scanned, stale } = await catchUpMissedPushesManually();
+
+    expect(scanned, '账本上翻过两条').toBe(2);
+    expect(stale, '都是刚落账的，没有超窗的').toBe(0);
+    expect(written, '修复前这里会报 2 条——闸吞掉的那条也被算成「补回来了」').toBe(1);
+
+    // 数字得跟聊天记录对得上：被吞的那个角色一条助手消息都不该有。
+    const swallowedMsgs = await DB.getRecentMessagesByCharId(swallowedChar, 20);
+    expect(swallowedMsgs.some((m: any) => m.role === 'assistant')).toBe(false);
+    const landedMsgs = await DB.getRecentMessagesByCharId(landedChar, 20);
+    expect(landedMsgs.some((m: any) => m.role === 'assistant')).toBe(true);
   }, 20000);
 });

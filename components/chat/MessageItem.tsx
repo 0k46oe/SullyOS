@@ -10,7 +10,8 @@ import { stripFishCuesForDisplay } from '../../utils/fishAudioTts';
 import { formatStatCount } from '../../utils/videoParser';
 import { trackEvent } from '../../utils/analytics';
 import { resolveBubbleCornerRadii, shouldHideBubbleTail } from '../../utils/bubbleAppearance';
-import { useBlobRefUrl } from '../../utils/blobRef';
+import { isImageValue, useBlobRefUrl } from '../../utils/blobRef';
+import { buildReplySnapshotContent } from '../../utils/applyAssistantPostProcessing';
 import TokenImg from '../os/TokenImg';
 import McdCard from './McdCard';
 import HtmlCard from './HtmlCard';
@@ -1109,7 +1110,7 @@ const Like520ChatCard: React.FC<{ data: any }> = ({ data }) => {
                     boxShadow: '0 2px 6px rgba(74,36,24,0.18), inset 0 0 0 1px rgba(184,146,63,0.25)',
                 }}>
                     {data.photoDataUrl
-                        ? <img src={data.photoDataUrl} alt="合照" style={{ width: '100%', display: 'block' }} />
+                        ? <TokenImg value={data.photoDataUrl} alt="合照" style={{ width: '100%', display: 'block' }} />
                         : <div style={{ width: '100%', aspectRatio: '1200 / 780', background: 'linear-gradient(180deg, #FFE0E8, #FFD3DC)' }} />}
                 </div>
 
@@ -1237,7 +1238,7 @@ const Like520ChatCard: React.FC<{ data: any }> = ({ data }) => {
 
                         {data.photoDataUrl ? (
                             <>
-                                <img src={data.photoDataUrl} alt="合照" draggable={false} style={{ width: '100%', display: 'block', borderRadius: 8, boxShadow: '0 8px 20px rgba(122,46,58,0.2), 0 0 0 1px rgba(184,146,63,0.4)' }} />
+                                <TokenImg value={data.photoDataUrl} alt="合照" draggable={false} style={{ width: '100%', display: 'block', borderRadius: 8, boxShadow: '0 8px 20px rgba(122,46,58,0.2), 0 0 0 1px rgba(184,146,63,0.4)' }} />
                                 <div style={{ fontSize: 10, fontStyle: 'italic', color: '#9D7585', textAlign: 'center', marginTop: 4, fontFamily: '"Cormorant Garamond", serif', letterSpacing: 2 }}>长按图片保存到相册</div>
                             </>
                         ) : null}
@@ -3462,8 +3463,14 @@ const MessageItem = React.memo(({
     // 两家服务商的演出标记都不会漏给用户看。
     const cleanVoiceText = (t?: string | null) => stripFishCuesForDisplay(cleanVoiceMarkupForDisplay(t ?? ''));
 
-    // 引用快照原样存着 %%BILINGUAL%% 等原始标记（双语消息），预览前先清洗
-    const replyPreview = m.replyTo ? stripJunk(m.replyTo.content) : '';
+    // 引用快照原样存着 %%BILINGUAL%% 等原始标记（双语消息），预览前先清洗。
+    // 历史快照里还可能原样躺着图片令牌 / data: / 图床 URL（用户侧引用图片消息时曾直接落库），
+    // 那种值洗不出正文、截 10 个字就是一串 `blobref:b_`，交给写入端同一个快照函数换成占位符。
+    const replyPreview = m.replyTo
+        ? (isImageValue(m.replyTo.content)
+            ? buildReplySnapshotContent({ content: m.replyTo.content })
+            : stripJunk(m.replyTo.content))
+        : '';
 
     // Parse %%BILINGUAL%% for bilingual display (langA = "选" language, langB = "译" language)
     const bilingualIdx = rawContent.toLowerCase().indexOf('%%bilingual%%');

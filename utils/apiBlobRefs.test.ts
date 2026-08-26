@@ -63,15 +63,65 @@ describe('令牌不出门：请求体里的 blobref 还原成 data URL', () => {
         expect(await resolveBlobRefsInRequestBody(null)).toBeNull();
     });
 
-    it('令牌旁边的普通文本不受影响（只吃令牌那一段）', async () => {
+    it('整串是令牌的字段值，还原后旁边的 JSON 结构完好', async () => {
         const token = await putImageBlob(dataUrlToBlob(TINY_PNG));
         const out = await resolveBlobRefsInRequestBody(
-            JSON.stringify({ text: `前面 ${token} 后面` }),
+            JSON.stringify({ before: '前面', url: token, after: '后面' }),
         ) as string;
 
-        const value = JSON.parse(out).text;
-        expect(value.startsWith('前面 data:image/')).toBe(true);
-        expect(value.endsWith(' 后面')).toBe(true);
+        const parsed = JSON.parse(out);
+        expect(parsed.url.startsWith('data:image/')).toBe(true);
+        expect(parsed.before).toBe('前面');
+        expect(parsed.after).toBe('后面');
+    });
+});
+
+// 令牌只在「整个字段值就是它」时才代表一张图。嵌在一段文本中间的令牌是构造 prompt 时
+// 把图片消息的原始值当文字拼进去了——对面不会把它当图片解析，还原成 base64 只是白花钱，
+// 而且这段文本在上下文里待多久就每轮重发多久。这组用例钉住那条分界。
+describe('嵌在文本里的令牌换成占位符，不撑成 base64', () => {
+    it('文本中间的令牌不还原，也不泄漏令牌本身', async () => {
+        const token = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        const out = await resolveBlobRefsInRequestBody(
+            JSON.stringify({ text: `[用户引用了「${token}」，并回复了 ↓]` }),
+        ) as string;
+
+        expect(out).not.toContain('data:image/');   // 没被撑开
+        expect(out).not.toContain(BLOBREF_PREFIX);  // 也没原样漏出去
+        expect(JSON.parse(out).text).toBe('[用户引用了「[图片]」，并回复了 ↓]');
+    });
+
+    it('同一个请求体里，图片字段照常还原、文本里的同一个令牌只换占位符', async () => {
+        const token = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        const out = await resolveBlobRefsInRequestBody(JSON.stringify({
+            messages: [
+                { role: 'user', content: `我刚发的 ${token} 你看到了吗` },
+                { role: 'user', content: [{ type: 'image_url', image_url: { url: token } }] },
+            ],
+        })) as string;
+
+        const parsed = JSON.parse(out);
+        expect(parsed.messages[0].content).toBe('我刚发的 [图片] 你看到了吗');
+        expect(parsed.messages[1].content[0].image_url.url.startsWith('data:image/')).toBe(true);
+    });
+
+    it('一段文本里塞了很多个令牌，也不会一个个撑成 base64', async () => {
+        const token = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        const text = Array.from({ length: 20 }, () => token).join(' / ');
+        const out = await resolveBlobRefsInRequestBody(JSON.stringify({ text })) as string;
+
+        // 旧实现在这里会产出 20 份 base64；现在整个请求体应该比原文还短
+        expect(out.length).toBeLessThan(JSON.stringify({ text }).length);
+        expect(out).not.toContain('data:image/');
+    });
+
+    it('图已经丢了的令牌嵌在文本里，同样只换占位符（不会去查库）', async () => {
+        const dead = `${BLOBREF_PREFIX}b_deadbeef_1_zzzzzz`;
+        const out = await resolveBlobRefsInRequestBody(
+            JSON.stringify({ text: `前面 ${dead} 后面` }),
+        ) as string;
+
+        expect(JSON.parse(out).text).toBe('前面 [图片] 后面');
     });
 });
 

@@ -25,7 +25,8 @@ import { useBlobUrl } from '@rei-standard/blob-store/react';
 import { dataUrlToBlob, blobToDataUrl, hashBlob } from '@rei-standard/blob-store';
 import { DB } from './db';
 import { blobStore } from './blobStore';
-import type { AppearancePreset } from '../types';
+import { REF_SOURCE_STORES } from './blobGc';
+import type { AppearancePreset, ChatTheme } from '../types';
 import { resolveBuiltinRoomAssetUrl } from './roomTemplateAssets';
 
 // 与 SDK 默认前缀一致（DEFAULT_PREFIX），保留字面量避免消费方多绕一层。
@@ -93,33 +94,63 @@ export async function deleteBlobRef(ref: string | undefined | null): Promise<voi
     await blobStore.delete(ref);
 }
 
+// 引用面扫描的分页大小。与 blobGc / blobDedupe 同值：批间事务各自独立，内存峰值只有一批。
+const REF_SCAN_PAGE_SIZE = 200;
+
 /**
- * 仅在令牌已不再被持久化设置引用时删除 Blob。
+ * 这个令牌还被任何一个持久化面引用着吗？
  *
- * 壁纸、锁屏和外观预设可能共享同一令牌；直接在换图时 delete 会让预设或“切回默认”备份
- * 变成死图。这里检查 assets（含 appearance_preset_* JSON）和 localStorage（含皮肤壁纸备份）
- * 后再清理。读取引用表失败时宁可保留，也绝不冒险删图。
+ * 面的清单直接用 blobGc 的 REF_SOURCE_STORES（+ localStorage 全量），跟孤儿 GC 同源。
+ * 「优化资源存储」的内容去重会把同一张图在这十几个面上收敛成同一个令牌，所以一张图
+ * 完全可能既当着壁纸又躺在聊天记录里——只查壁纸那两处就会把它判成「没人要了」删掉，
+ * 聊天和相册里那张跟着一起裂。
+ *
+ * 判断是整行 JSON 里找子串，不按字段挑：字段加了删了都自动覆盖。子串比精确匹配宽
+ * （令牌 A 是令牌 B 的前缀时会算成「还有人引用」），偏的是「宁可留孤儿也不删活图」，
+ * 多留下的孤儿归手动 GC 收。
+ *
+ * 会走到这里的都是换壁纸、删衣柜这类低频操作，扫一遍全库的代价可以接受。
+ */
+async function isRefStillReferenced(ref: string): Promise<boolean> {
+    for (const storeName of REF_SOURCE_STORES) {
+        let afterKey: IDBValidKey | null = null;
+        for (;;) {
+            const { rows, lastKey } = await DB.getStoreRowsPage(storeName, afterKey, REF_SCAN_PAGE_SIZE);
+            for (const row of rows) {
+                const text = JSON.stringify(row);
+                if (typeof text === 'string' && text.includes(ref)) return true;
+            }
+            if (lastKey === null || rows.length < REF_SCAN_PAGE_SIZE) break;
+            afterKey = lastKey;
+        }
+    }
+
+    if (typeof localStorage !== 'undefined') {
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (!key) continue;
+            if (localStorage.getItem(key)?.includes(ref)) return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * 仅在令牌已不再被任何持久化面引用时删除 Blob。
+ *
+ * 壁纸、锁屏、外观预设、聊天记录、相册……都可能共享同一令牌；直接在换图时 delete
+ * 会让别处变成死图。调用方须先把自己那一处的指针落盘，再调这里——扫描看到的是
+ * 库里的现状，指针还没写回去的话这张图会被当成「还有人用」而留下。
+ *
+ * 扫描中途出错（哪怕只有一张表读不出来）一律当作「还有人引用」保留：删除不可逆，
+ * 留下的孤儿则有手动 GC 兜着。
  */
 export async function deleteBlobRefIfUnreferenced(ref: string | undefined | null): Promise<boolean> {
     if (!ref || !isBlobRef(ref)) return false;
 
     try {
-        const assets = await DB.getAllAssets();
-        if (assets.some(asset => typeof asset.data === 'string' && asset.data.includes(ref))) {
-            return false;
-        }
-    } catch {
-        return false;
-    }
-
-    try {
-        if (typeof localStorage !== 'undefined') {
-            for (let i = 0; i < localStorage.length; i++) {
-                const key = localStorage.key(i);
-                if (!key) continue;
-                if (localStorage.getItem(key)?.includes(ref)) return false;
-            }
-        }
+        if (await isRefStillReferenced(ref)) return false;
     } catch {
         return false;
     }
@@ -203,6 +234,36 @@ export async function migrateDataUrlToRef(dataUrl: string): Promise<string> {
 }
 
 /**
+ * 气泡主题里参与令牌迁移的图片字段名。user / ai 两侧字段完全一样，共用这一份清单——
+ * 分开写两份的结果一定是其中一侧漏掉某个字段，而漏掉的那侧不报错也不破图，只是没省下来。
+ */
+export const CHAT_THEME_IMAGE_KEYS = ['backgroundImage', 'decoration', 'avatarDecoration'] as const;
+
+/**
+ * 一套气泡主题里的六张图（user / ai 两侧各三张）转成令牌。
+ *
+ * 两个调用方共用它：themes 表的存量转换，和外观预设里内嵌的那份 chatThemes。
+ * 后者尤其要紧——应用一个老预设时若把预设里的 base64 原样写回 themes 表，
+ * 等于把刚优化掉的图又倒回去，用户会看到「优化完过几天又涨回来了」。
+ */
+export async function migrateChatThemeBlobRefs(theme: ChatTheme): Promise<ChatTheme> {
+    const migrated: ChatTheme = { ...theme };
+    for (const side of ['user', 'ai'] as const) {
+        const style = theme[side];
+        if (!style) continue;
+        const next = { ...style };
+        for (const key of CHAT_THEME_IMAGE_KEYS) {
+            const value = next[key];
+            if (typeof value === 'string' && value.startsWith('data:')) {
+                next[key] = await migrateDataUrlToRef(value);
+            }
+        }
+        migrated[side] = next;
+    }
+    return migrated;
+}
+
+/**
  * 外观预设导入专用迁移：只转换已经接入 BlobRef 渲染链路的字段，其他 data URL 保持原状。
  *
  * 同一张原图在壁纸、锁屏或多个图标里出现时只会存一份 Blob——这由 migrateDataUrlToRef
@@ -221,6 +282,21 @@ export async function migrateAppearancePresetBlobRefs(
     theme.wallpaper = (await migrate(theme.wallpaper)) || theme.wallpaper;
     if ('lockWallpaper' in theme) theme.lockWallpaper = await migrate(theme.lockWallpaper);
 
+    // 桌面小组件图。槽位键遍历全部，不写死 tl/tr/wide/dsq——老美化包的预设里还压着
+    // polaroid_* 这类历史键，一并转掉，免得它们以 base64 形态一直躺在预设 JSON 里。
+    if (theme.launcherWidgets) {
+        const widgets: Record<string, string> = {};
+        for (const [slot, value] of Object.entries(theme.launcherWidgets)) {
+            widgets[slot] = (await migrate(value)) || value;
+        }
+        theme.launcherWidgets = widgets;
+    }
+
+    // launcherWidgetImage 是死字段：types.ts 标了 DEPRECATED，OSContext 加载 / 应用预设时
+    // 一律剥掉，永远不会渲染。老美化包的预设里还压着一张几百 KB 的 base64，转成令牌只是
+    // 把死重量换个地方存，直接扔掉。
+    if ('launcherWidgetImage' in theme) (theme as any).launcherWidgetImage = undefined;
+
     let customIcons = preset.customIcons;
     if (customIcons) {
         customIcons = {};
@@ -229,7 +305,16 @@ export async function migrateAppearancePresetBlobRefs(
         }
     }
 
-    return { ...preset, theme, customIcons };
+    // 预设里内嵌的气泡主题：保存预设时是从 themes 表原样抄过来的，themes 表转了、这里没转，
+    // 下次应用预设就把 base64 又灌回 themes 表。两边必须一起转。
+    let chatThemes = preset.chatThemes;
+    if (chatThemes) {
+        const next: ChatTheme[] = [];
+        for (const ct of chatThemes) next.push(await migrateChatThemeBlobRefs(ct));
+        chatThemes = next;
+    }
+
+    return { ...preset, theme, customIcons, chatThemes };
 }
 
 /**

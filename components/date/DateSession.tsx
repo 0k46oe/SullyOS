@@ -6,7 +6,7 @@ import { DB } from '../../utils/db';
 import DateSettings from './DateSettings';
 import ObserveHUD from './ObserveHUD';
 import { extractObservation, hasObservation } from '../../utils/datePrompts';
-import { isBlobRef } from '../../utils/blobRef';
+import { useBlobRefUrl } from '../../utils/blobRef';
 import TokenImg from '../os/TokenImg';
 import { clearDateResumeAttempt } from '../../utils/dateSessionRecovery';
 import { VALID_EMOTIONS } from '../../utils/minimaxTts';
@@ -199,6 +199,8 @@ const DateSession: React.FC<DateSessionProps> = ({
     // Core VN State
     const [isNovelMode, setIsNovelMode] = useState(false);
     const [bgImage, setBgImage] = useState<string>(char.dateBackground || '');
+    // bgImage state 里存的一直是原始字段值（令牌 / data: / 外链），只在渲染这一刻解析成能喂 CSS 的 url
+    const bgImageUrl = useBlobRefUrl(bgImage);
     const [currentSprite, setCurrentSprite] = useState<string>('');
     const [currentSpriteKey, setCurrentSpriteKey] = useState<string>('');
     const [spriteConfig, setSpriteConfig] = useState(char.spriteConfig || { scale: 1, x: 0, y: 0 });
@@ -531,11 +533,14 @@ const DateSession: React.FC<DateSessionProps> = ({
     const activeSprites = React.useMemo(() => getSpritesForSkin(), [char.activeSkinSetId, char.dateSkinSets, char.sprites]);
 
     const pickFallbackSprite = (sprites: Record<string, string>) => {
-        const key = ['normal', 'default', ...dateEmotionKeys].find(k => sprites[k] && !isBlobRef(sprites[k]));
-        const stray = Object.entries(sprites).find(([k, v]) => k !== 'chibi' && v && !isBlobRef(v));
+        const key = ['normal', 'default', ...dateEmotionKeys].find(k => sprites[k]);
+        const stray = Object.entries(sprites).find(([k, v]) => k !== 'chibi' && v);
         return { key: key || stray?.[0] || '', src: (key && sprites[key]) || stray?.[1] || char.avatar || '' };
     };
 
+    // 拿立绘的「字段值」反查它是哪个情绪键，靠的是跟 sprites 表里的值逐字相等。
+    // 所以 currentSprite state 里必须一直是原始字段值（blobref 令牌 / data: / 外链），
+    // 解析成 objectURL 只能发生在渲染那一刻（交给 TokenImg），否则这里永远查不到键。
     const inferSpriteKey = (src?: string, skinId?: string): string => {
         if (!src) return '';
         const sprites = getSpritesForSkin(skinId);
@@ -544,7 +549,7 @@ const DateSession: React.FC<DateSessionProps> = ({
 
     const resolveSpriteByKey = (key?: string, skinId?: string) => {
         const sprites = getSpritesForSkin(skinId);
-        if (key && sprites[key] && !isBlobRef(sprites[key])) return { key, src: sprites[key] };
+        if (key && sprites[key]) return { key, src: sprites[key] };
         return pickFallbackSprite(sprites);
     };
 
@@ -554,10 +559,7 @@ const DateSession: React.FC<DateSessionProps> = ({
         const legacyKey = inferSpriteKey(state.currentSprite, state.activeSkinSetId) || inferSpriteKey(state.currentSprite);
         if (legacyKey) return resolveSpriteByKey(legacyKey, state.activeSkinSetId);
         const fallback = resolveSpriteByKey(undefined, state.activeSkinSetId);
-        const legacySprite = state.currentSprite && !isBlobRef(state.currentSprite)
-            ? state.currentSprite
-            : fallback.src;
-        return { key: fallback.key, src: legacySprite };
+        return { key: fallback.key, src: state.currentSprite || fallback.src };
     };
 
     // Filter messages for Novel Mode: Show only current session
@@ -586,7 +588,7 @@ const DateSession: React.FC<DateSessionProps> = ({
             // Resume: 新快照只保存 sprite key，不再复制 base64；旧快照的 bg/currentSprite 仍兼容读取一次。
             const restoredSprite = resolveSpriteFromState(initialState);
             setBgImage(char.dateBackground || initialState.bgImage || '');
-            setCurrentSprite(isBlobRef(restoredSprite.src) ? (char.avatar || '') : restoredSprite.src);
+            setCurrentSprite(restoredSprite.src);
             setCurrentSpriteKey(restoredSprite.key);
             setCurrentText(initialState.currentText || '');
             setDisplayedText(initialState.currentText || '');
@@ -937,7 +939,7 @@ const DateSession: React.FC<DateSessionProps> = ({
             {/* Background Layer */}
             <div 
                 className={`absolute inset-0 bg-cover bg-center transition-all duration-1000 ${isNovelMode ? 'blur-xl opacity-30' : 'opacity-80'}`} 
-                style={{ backgroundImage: bgImage ? `url(${bgImage})` : 'none' }}
+                style={{ backgroundImage: bgImageUrl ? `url(${bgImageUrl})` : 'none' }}
             ></div>
 
             {/* Menu Layer — 常驻只留「输入」+「菜单」两钮，其余操作收进带文字标签的下拉菜单 */}
@@ -1240,7 +1242,7 @@ const DateSession: React.FC<DateSessionProps> = ({
             {!isNovelMode && (
                 <>
                     <div className="absolute inset-x-0 bottom-0 h-[90%] flex items-end justify-center pointer-events-none z-10 overflow-hidden">
-                        {currentSprite && <img src={currentSprite} className="max-h-full max-w-full object-contain drop-shadow-[0_10px_20px_rgba(0,0,0,0.5)] transition-all duration-300 origin-bottom" style={{ filter: showInputBox ? 'brightness(1)' : (isTextAnimating ? 'brightness(1.05)' : 'brightness(1)'), transform: `translate(${spriteConfig.x}%, ${spriteConfig.y}%) scale(${isTextAnimating ? spriteConfig.scale * 1.02 : spriteConfig.scale})` }} />}
+                        {currentSprite && <TokenImg value={currentSprite} className="max-h-full max-w-full object-contain drop-shadow-[0_10px_20px_rgba(0,0,0,0.5)] transition-all duration-300 origin-bottom" style={{ filter: showInputBox ? 'brightness(1)' : (isTextAnimating ? 'brightness(1.05)' : 'brightness(1)'), transform: `translate(${spriteConfig.x}%, ${spriteConfig.y}%) scale(${isTextAnimating ? spriteConfig.scale * 1.02 : spriteConfig.scale})` }} />}
                     </div>
                     {!isTyping && (
                         <div className="absolute inset-x-0 bottom-8 z-30 flex justify-center">

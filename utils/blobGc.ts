@@ -15,9 +15,14 @@
 // | 面 | 内容字段 | 吐法 |
 // |---|---|---|
 // | characters 表 | avatar / sprites / dateSkinSets / roomConfig（wallImage/floorImage/items[].image）
-// |               | / vrState.chibi / companionAvatar（含 imageWardrobe，令牌兼任条目 id 与
+// |               | / chatBackground / dateBackground / vrState.chibi / phoneState.contacts[].avatar
+// |               | / specialMomentRecords.*（.image 与 customData 里的头像、手办图）
+// |               | / companionAvatar（含 imageWardrobe，令牌兼任条目 id 与
 // |               |   imageRef 两个值位）/ videoCallBackground / companionBackground / studio.like520 | 分页逐行 JSON.stringify(row) |
-// | messages 表 | content（type 为 image / emoji 的聊天图与表情消息）/ metadata.cameraSnapshotRef | 分页逐行（表大，不 getAll 全量占内存） |
+// | messages 表 | content（type 为 image / emoji 的聊天图与表情消息；卡片行的 content 是 JSON，
+// |             |   里面还有 charAvatar / photoDataUrl）/ metadata.cameraSnapshotRef /
+// |             |   metadata.scoreCard 的同名两字段 / metadata.characterAvatar /
+// |             |   metadata.post（authorAvatar 与 comments[].authorAvatar） | 分页逐行（表大，不 getAll 全量占内存） |
 // | emojis 表 | url（表情库；http 外链不是令牌，一并逐字吐过去也无妨） | 分页逐行 |
 // | cc_custom_parts 表 | src / shadowSrc | 分页逐行 |
 // | songs 表 | coverImage | 分页逐行 |
@@ -40,6 +45,10 @@
 // 这些面，就会把还被老帖子引用着的图判成孤儿删掉——所以它们必须在清单里，哪怕平时为空。
 // | localStorage 全量值 | tama_board_img_<charId> 与旧单键 / acnh_wallpaper_backup /
 // |                     | sully-call-fake-camera-image-v1 / os_theme（JSON，令牌不剥）等 | 先同步快照再逐条吐 value |
+//
+// 上面各行的字段列表只是「这张表里都有哪些图」的说明，**不是枚举依据**——真正的枚举是
+// 整行 JSON.stringify，字段加了删了都自动覆盖。谁要是照着表格改成按字段挑，漏掉的那个
+// 字段引用的 Blob 就会被判成孤儿删掉，而且删除不可逆。
 //
 // 各面都是 JSON / 裸字符串，令牌逐字可见，不需要解压解密。若未来某个面压缩 / 加密后才
 // 落盘，必须先还原成明文再吐——那种情况枚举不报错、安全阀也不触发，等于这个面没扫。

@@ -37,6 +37,20 @@ const voiceActingGuide = (): string => {
   return VOICE_ACTING_GUIDE;
 };
 
+/**
+ * 这个值是「一张图 / 一段媒体」而不是正文吗？认三种形态：内嵌 data URL、http(s) 外链、
+ * blobref 令牌（二进制在 IndexedDB，字段里只留 `blobref:<id>` 短令牌，见 utils/blobRef.ts）。
+ *
+ * 令牌尤其要认：它只有 ~28 字，任何按长度截断的兜底都拦不住它整条溜进 prompt；而发请求时
+ * 网络出口那层（utils/apiBlobRefs.ts）会把请求体里的令牌统一还原成完整 data URL——
+ * 于是一个短短的令牌到了对面就是几 MB 的 base64，而且每轮对话重发一次。
+ */
+const isMediaValue = (value: unknown): boolean => {
+    if (typeof value !== 'string') return false;
+    const trimmed = value.trim();
+    return /^(data:|https?:\/\/)/i.test(trimmed) || isBlobRef(trimmed);
+};
+
 // 群活动注入专用：把一条群消息压成"适合塞进别人私聊背景"的短文本。
 // 关键：image 消息的 content 是 blobref 令牌或 base64（群里发图走 processImage 压成 JPEG，
 // 单张几十 KB），卡片是大段 JSON，emoji 是令牌或图床 URL——这些原样内联进每位成员的私聊 system prompt
@@ -74,8 +88,7 @@ function summarizeGroupMsgContent(m: Message): string {
             const c = typeof m.content === 'string' ? m.content : '';
             // 兜底：任何 data:/http(s) 链接、blobref 令牌都不内联，防止异常/未来新增类型漏网
             // （令牌内联出去还会在网络出口被还原成完整 data URL，比原样漏一个 URL 贵得多）
-            const trimmed = c.trim();
-            if (/^(data:|https?:\/\/)/i.test(trimmed) || isBlobRef(trimmed)) return '[媒体]';
+            if (isMediaValue(c)) return '[媒体]';
             return c.length > GROUP_MSG_TEXT_CAP ? c.slice(0, GROUP_MSG_TEXT_CAP) + '…' : c;
         }
     }
@@ -1148,7 +1161,12 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                         .replace(/<翻译>\s*<原文>([\s\S]*?)<\/原文>\s*<译文>[\s\S]*?<\/译文>\s*<\/翻译>/g, '$1')
                         .replace(/<\/?翻译>|<\/?原文>|<\/?译文>/g, '')
                         .trim();
-                    const quoted = rawQuote.length > 60 ? rawQuote.slice(0, 60) + '…' : rawQuote;
+                    // 被引用的可能本来就是一条图片消息 —— 此时 rawQuote 是 data URL / 外链 / blobref
+                    // 令牌，截 60 字只会切出一段没意义的 base64 碎片，令牌更是整条活着进 prompt。
+                    // 一律换成占位符：模型知道"引用的是张图"就够了。
+                    const quoted = isMediaValue(rawQuote)
+                        ? '[图片]'
+                        : (rawQuote.length > 60 ? rawQuote.slice(0, 60) + '…' : rawQuote);
                     // name 记的是被引用消息的说话人：char.name = 用户在回复 char 本人之前的话；'我' = 用户引用自己。
                     const whose = m.replyTo.name === char.name ? '你之前说的' : (m.replyTo.name === '我' ? '自己说的' : (m.replyTo.name || '对方') + '说的');
                     const speaker = m.role === 'user' ? '用户' : '你';
@@ -1392,7 +1410,16 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                             ).join('\n') || '';
                             content = `${timeStr} [白色情人节默契测验结果] ${uName}完成了你出的白色情人节小测验，答对了 ${card.score}/${card.total} 题，${passedStr}。\n${questionsText}\n你的最终评价：${card.finalDialogue || '无'}`;
                         } else {
-                            content = `${timeStr} [系统卡片] ${m.content.slice(0, 200)}`;
+                            // 兜底：上面没被任何一种卡片认领的（比如各种活动卡）。这里不能直接塞
+                            // 消息原文 —— 卡片 JSON 通常一开头就是 charAvatar 之类的图片字段，
+                            // 值是 blobref 令牌，正好落在前 200 字符里，出门被还原成整张头像的
+                            // base64、每轮重发。改成按 card 重新序列化，图片值先剥成占位符再截断。
+                            const safeJson = card == null
+                                ? ''
+                                : (JSON.stringify(card, (_k, v) => (isMediaValue(v) ? '[图片]' : v)) || '');
+                            content = safeJson
+                                ? `${timeStr} [系统卡片] ${safeJson.slice(0, 200)}`
+                                : `${timeStr} [系统卡片]`;
                         }
                     } catch {
                         content = `${timeStr} [系统卡片]`;

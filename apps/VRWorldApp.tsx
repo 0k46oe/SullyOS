@@ -78,6 +78,7 @@ import type { CharacterProfile, UserProfile, VRWorldNovel, VRNovelAnnotation, VR
 import { getChibi } from '../utils/vrWorld/chibi';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent } from '../utils/analytics';
+import { formatHours } from '../utils/format';
 import TokenImg from '../components/os/TokenImg';
 
 type Tab = 'world' | 'library' | 'settings' | 'api';
@@ -3599,7 +3600,7 @@ const SettingsView: React.FC<{
                                 <div className="text-[13px] font-bold truncate">{char.name}</div>
                                 {enabled ? (
                                     <div className="text-[10px] text-indigo-300/60">
-                                        每 {interval >= 60 ? `${interval / 60} 小时` : `${interval} 分`}登入一次
+                                        每 {interval >= 60 ? `${formatHours(interval)} 小时` : `${interval} 分`}登入一次
                                         {/* 后台失败本来一点声响都没有，攒到熔断前先让用户看见 */}
                                         {failStreak > 0 && <span className="text-amber-300/80"> · 已连续 {failStreak} 次没调通</span>}
                                     </div>
@@ -3616,7 +3617,7 @@ const SettingsView: React.FC<{
                                     {INTERVAL_OPTIONS.map(opt => (
                                         <button key={opt} onClick={() => setInterval(char, opt)}
                                             className={`text-[10.5px] rounded-full px-2.5 py-1 font-semibold ${interval === opt ? 'bg-indigo-400 text-white' : 'bg-white/10 text-indigo-200/70'}`}>
-                                            {opt >= 60 ? `${opt / 60}h` : `${opt}min`}
+                                            {opt >= 60 ? `${formatHours(opt)}h` : `${opt}min`}
                                         </button>
                                     ))}
                                 </div>

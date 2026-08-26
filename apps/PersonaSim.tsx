@@ -9,6 +9,7 @@ import { isScheduleFeatureOn } from '../utils/scheduleGenerator';
 import { safeResponseJson } from '../utils/safeApi';
 import { parsePersonaScriptApiResponse } from '../utils/personaSimParser';
 import { trackEvent } from '../utils/analytics';
+import { useBlobRefUrl } from '../utils/blobRef';
 import {
     CaretLeft, Play, Pause, FastForward, Lock, MagnifyingGlass, MusicNotes,
     BellRinging, ImageSquare, NotePencil, Globe, CloudSun, ArrowClockwise,
@@ -922,14 +923,19 @@ const AppView: React.FC<{ app: NonNullable<Beat['app']>; char: CharacterProfile 
 // ============================================================
 //  SHARED CHROME
 // ============================================================
-const Shell: React.FC<{ children: React.ReactNode; wallpaper?: string }> = ({ children, wallpaper }) => (
+const Shell: React.FC<{ children: React.ReactNode; wallpaper?: string }> = ({ children, wallpaper }) => {
+    // 传进来的是角色见面背景的原始字段值（blobref 令牌 / 旧 data: / 外链），
+    // 令牌喂不了 CSS url()，在这儿解析一次；非令牌值原样透传。
+    const wallpaperUrl = useBlobRefUrl(wallpaper);
+    return (
     <div className="absolute inset-0 z-[80] flex flex-col overflow-hidden text-white" style={{ background: '#07080c' }}>
         <div className="absolute inset-0 pointer-events-none" style={{ background: 'radial-gradient(130% 80% at 50% 0%, #1a1726 0%, #0a0b12 60%, #07080c 100%)' }} />
-        {wallpaper && <div className="absolute inset-0 opacity-20 pointer-events-none" style={{ backgroundImage: `url(${wallpaper})`, backgroundSize: 'cover', backgroundPosition: 'center' }} />}
+        {wallpaperUrl && <div className="absolute inset-0 opacity-20 pointer-events-none" style={{ backgroundImage: `url("${wallpaperUrl}")`, backgroundSize: 'cover', backgroundPosition: 'center' }} />}
         <div className="absolute inset-0 pointer-events-none" style={{ background: 'linear-gradient(to bottom, rgba(7,8,12,0.4), rgba(7,8,12,0.2) 40%, rgba(7,8,12,0.9))' }} />
         <div className="relative z-10 flex flex-col flex-1 min-h-0">{children}</div>
     </div>
-);
+    );
+};
 
 const TopBar: React.FC<{ onBack: () => void; right?: React.ReactNode; title?: string }> = ({ onBack, right, title }) => (
     // 顶部安全区：iOS 刘海/状态栏会盖住返回键和「生活记录」，给个 safe-area-inset 兜底

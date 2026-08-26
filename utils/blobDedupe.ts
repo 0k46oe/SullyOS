@@ -196,6 +196,9 @@ export async function rewriteBlobRefs(
  * | 字段 | 裸删发生在 |
  * |---|---|
  * | characters.companionAvatar.imageRef | apps/Appearance.tsx（换图 / 移除桌面静态形象） |
+ * | characters.companionAvatar.imageWardrobe[].imageRef | 同上：衣柜条目跟顶层 imageRef 共用同一个
+ * |                                     | 令牌（令牌兼任条目 id，见 utils/companionWardrobe.ts），
+ * |                                     | 换图时衣柜里没留着这套就跟着一起删 |
  * | characters.videoCallBackground      | apps/CallApp.tsx（换 / 清视频舞台背景） |
  * | characters.companionBackground      | components/os/CompanionHome.tsx（换 / 清桌面背景） |
  * | messages.metadata.cameraSnapshotRef | apps/CallApp.tsx（快照替换 / 过期淘汰 / 删通话记录） |
@@ -219,6 +222,15 @@ export async function collectUnmergeableRefs(): Promise<Set<string>> {
         for (const row of rows as any[]) {
             if (!row || typeof row !== 'object') continue;
             take(row.companionAvatar?.imageRef);
+            // 衣柜条目：令牌同时占着 id 和 imageRef 两个值位，两个都收——只登记一半的话，
+            // 另一半仍会被当成普通令牌合并进共享组。
+            const wardrobe = row.companionAvatar?.imageWardrobe;
+            if (Array.isArray(wardrobe)) {
+                for (const outfit of wardrobe) {
+                    take(outfit?.imageRef);
+                    take(outfit?.id);
+                }
+            }
             take(row.videoCallBackground);
             take(row.companionBackground);
         }

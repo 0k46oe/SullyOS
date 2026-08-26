@@ -258,6 +258,34 @@ describe('不参与合并的令牌（裸删字段）', () => {
         expect(refs.has(roomWall)).toBe(false);
     });
 
+    it('衣柜条目的令牌也被捞出来（跟顶层 imageRef 共用令牌，换图时会跟着一起删）', async () => {
+        const active = `${BLOBREF_PREFIX}b_active`;
+        const spare = `${BLOBREF_PREFIX}b_spare`;
+
+        await seedStore('characters', [{
+            id: 'c1',
+            companionAvatar: {
+                imageRef: active,
+                imageWardrobe: [
+                    { id: active, imageRef: active, fileName: '现在穿的.png' },
+                    { id: spare, imageRef: spare, fileName: '备用.png' },
+                ],
+            },
+        }]);
+
+        const refs = await collectUnmergeableRefs();
+        expect([...refs].sort()).toEqual([active, spare].sort());
+    });
+
+    it('imageWardrobe 不是数组时照常收顶层，不炸', async () => {
+        const active = `${BLOBREF_PREFIX}b_active`;
+        await seedStore('characters', [
+            { id: 'c1', companionAvatar: { imageRef: active, imageWardrobe: '坏数据' } },
+            { id: 'c2', companionAvatar: { imageWardrobe: null } },
+        ]);
+        expect([...await collectUnmergeableRefs()]).toEqual([active]);
+    });
+
     it('字段是普通图片地址 / 空值时不误收', async () => {
         await seedStore('characters', [{
             id: 'c1',

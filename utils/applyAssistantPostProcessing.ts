@@ -53,8 +53,28 @@ import { getLocalDateKey } from './localDate';
 import { normalizeAssistantActionFormatting } from './assistantActionFormat';
 import { markAmsgStateDirty } from './amsgStateSync';
 import { announceScheduleChanges, applyAssistantScheduleChanges } from './scheduleChange';
+import { isBlobRef } from './blobRef';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
+
+/**
+ * 引用回复的内容快照 —— 写进 `replyTo.content`，界面上就是引用气泡里那一小行。
+ *
+ * 被引用的那条是图片 / 表情时给占位符，不能截原值：图片存的是 `blobref:<id>` 令牌，
+ * 截前 10 个字刚好是 `blobref:b_`。messages 表是 Blob 孤儿清理的引用面（utils/blobGc.ts
+ * 把每条消息 JSON.stringify 后交给 SDK 扫），SDK 从这半截前缀提取出来的 id 是它生成的
+ * 每一个 id 的公共前缀，于是判定「引用面像是被截断过，不安全」→ 整库豁免，一个 Blob 都不删，
+ * 而且不报任何错（唯一能察觉的信号是 runGc 返回值里的 keptBoundary）。
+ */
+export function buildReplySnapshotContent(msg: { type?: string; content: string }): string {
+    const content = msg.content || '';
+    const trimmed = content.trim();
+    // 值形态判断跟 chatPrompts 的 isMediaValue 同义：data: / http(s) / blobref 令牌都是"一张图"
+    const looksLikeMedia = /^(data:|https?:\/\/)/i.test(trimmed) || isBlobRef(trimmed);
+    if (msg.type === 'emoji') return '[表情包]';
+    if (msg.type === 'image' || looksLikeMedia) return '[图片]';
+    return content.length > 10 ? content.slice(0, 10) + '...' : content;
+}
 
 /** 第一遍粗洗 — 剥 <think> / 时间戳 / 历史里漏出的 [聊天]/[通话]/[约会] / 表情包反向 tag */
 const normalizeAiContent = (raw: string): string => {
@@ -759,8 +779,7 @@ export async function applyAssistantPostProcessing(
             // 兜底：精确匹配失败但角色明确想引用 → 取最近一条用户文字消息，避免空引用
             if (!targetMsg) targetMsg = users.filter((m: Message) => m.type === 'text' || !m.type).slice(-1)[0] || users.slice(-1)[0];
             if (!targetMsg) return undefined;
-            const truncated = targetMsg.content.length > 10 ? targetMsg.content.slice(0, 10) + '...' : targetMsg.content;
-            return { id: targetMsg.id, content: truncated, name: userProfile.name };
+            return { id: targetMsg.id, content: buildReplySnapshotContent(targetMsg), name: userProfile.name };
         };
 
         // Quote/Reply 目标 (双语路径用)

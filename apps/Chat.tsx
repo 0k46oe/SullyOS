@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { Message, MessageType, MemoryFragment, Emoji, EmojiCategory, DailySchedule, ScheduleSlot } from '../types';
-import { processImage } from '../utils/file';
+import { processImage, processImageToBlob } from '../utils/file';
 import { safeResponseJson, extractContent } from '../utils/safeApi';
 import { buildChatFineTuneCss, mergeChatFineTune } from '../utils/chatFineTuneCss';
 import ChatFineTunePanel from '../components/chat/ChatFineTunePanel';
@@ -21,7 +21,8 @@ import { XhsMcpClient, extractNotesFromMcpData, normalizeXhsLiteDetail } from '.
 import { extractWebpageContent, detectFirstUrl, detectXhsShortUrl, extractXhsShareTitle, isXhsUrl, extractXhsNoteId, expandShortUrl, type ExtractedWebpage } from '../utils/webpageExtractor';
 import { isVideoShareUrl, parseVideoShareUrl } from '../utils/videoParser';
 import { isDevDebugAvailable } from '../utils/devDebug';
-import { migrateDataUrlToRef } from '../utils/blobRef';
+import { isImageValue, migrateDataUrlToRef, putImageBlob, useBlobRefUrl } from '../utils/blobRef';
+import { buildReplySnapshotContent } from '../utils/applyAssistantPostProcessing';
 import { resolveLifeRecordCard } from '../utils/lifeRecords';
 import { isMcdConfigured } from '../utils/mcdMcpClient';
 import { isMcdActivatedInMessages, MCD_ACTIVATE_TRIGGER, MCD_DEACTIVATE_TRIGGER } from '../utils/mcdToolBridge';
@@ -70,6 +71,7 @@ import { trackEvent, noteMessageSent, presetOrCustom } from '../utils/analytics'
 import { markAmsgStateDirty, markAmsgStateDirtyForAll } from '../utils/amsgStateSync';
 import { AMSG_INSTANT_CHAT_PENDING_EVENT, AMSG_INSTANT_CHAT_PENDING_LS_KEY, getInstantChatPending } from '../utils/amsgInstantChat';
 import { formatAmsgToolTrace } from '../utils/amsgToolTrace';
+import { formatHours } from '../utils/format';
 import {
     VOICE_FAVORITES_CHANGED_EVENT,
     getVoiceFavorite,
@@ -1389,9 +1391,13 @@ const Chat: React.FC = () => {
             : text;
 
         const imageChatContext = type === 'image'
-            ? messages.slice(-10).map(message => {
-                const sender = message.role === 'user' ? userProfile.name : char.name;
-                return `${sender}: ${message.content.substring(0, 100)}`;
+            ? messages.slice(-10).map(m => {
+                const sender = m.role === 'user' ? userProfile.name : char.name;
+                const isMedia = m.type === 'image' || m.type === 'emoji' || isImageValue(m.content);
+                const preview = isMedia
+                    ? buildReplySnapshotContent(m)
+                    : m.content.substring(0, 100);
+                return `${sender}: ${preview}`;
             })
             : null;
 
@@ -1399,8 +1405,10 @@ const Chat: React.FC = () => {
         
         if (replyTarget) {
             msgPayload.replyTo = {
+                // 引用图片 / 表情时快照存 '[图片]' 之类的占位符，不把令牌原样带进这条消息
+                // （跟角色侧的引用快照同一个函数，口径一致）
                 id: replyTarget.id,
-                content: replyTarget.content,
+                content: buildReplySnapshotContent(replyTarget),
                 name: replyTarget.role === 'user' ? '我' : char.name
             };
             setReplyTarget(null);
@@ -1409,16 +1417,23 @@ const Chat: React.FC = () => {
         const savedUserMsgId = await DB.saveMessage(msgPayload);
 
         if (type === 'image') {
-            await DB.saveGalleryImage({
-                id: `img-${Date.now()}-${Math.random()}`,
-                charId: char.id,
-                url: storedContent,
-                timestamp: Date.now(),
-                sourceMessageId: savedUserMsgId,
-                savedDate: localDateKey,
-                chatContext: imageChatContext || undefined,
-            });
-            addToast('图片已保存至相册', 'info');
+            // 相册是消息的附带记录：保留来源消息引用供收藏/去重使用，但相册写入失败
+            // 不能阻断已经落库的聊天消息。
+            try {
+                await DB.saveGalleryImage({
+                    id: `img-${Date.now()}-${Math.random()}`,
+                    charId: char.id,
+                    url: storedContent,
+                    timestamp: Date.now(),
+                    sourceMessageId: savedUserMsgId,
+                    savedDate: localDateKey,
+                    chatContext: imageChatContext || undefined,
+                });
+                addToast('图片已保存至相册', 'info');
+            } catch (err) {
+                console.warn('[Chat] 图片存相册失败，消息照常发送', err);
+                addToast('图片没能存进相册，消息照常发送', 'error');
+            }
         }
 
         // 小红书链接 → xhs_card。主路径不依赖任何后端：小红书分享文案自带标题（【标题】）
@@ -2266,8 +2281,11 @@ const Chat: React.FC = () => {
 
     const handleBgUpload = async (file: File) => {
         try {
-            const dataUrl = await processImage(file, { skipCompression: true });
-            updateCharacter(char.id, { chatBackground: dataUrl });
+            // 改存 Blob：原画质不重绘，二进制进 blob_assets，字段只存 blobref 令牌
+            // （省掉 base64 的 ~33% 膨胀，也不再把整张图常驻在角色行里）。
+            const blob = await processImageToBlob(file, { skipCompression: true });
+            const ref = await putImageBlob(blob);
+            updateCharacter(char.id, { chatBackground: ref });
             addToast('聊天背景已更新', 'success');
         } catch(err: any) {
             addToast(err.message, 'error');
@@ -3213,9 +3231,13 @@ const Chat: React.FC = () => {
     // Memoize ChatInputArea callbacks
     const handleSendCallback = useCallback(() => handleSendText(), [char, input, replyTarget]);
     const handleCharSelectCallback = useCallback((id: string) => { setActiveCharacterId(id); setShowPanel('none'); }, []);
+    // 角色自定义聊天背景：字段值可能是 blobref 令牌（二进制在 IndexedDB），这里解析成能直接
+    // 喂进 CSS url() 的地址；data: / http(s) 之类的非令牌值渲染期原样透传。
+    // hook 必须在下面的空态早退之前调用，所以用可选链读 char。
+    const resolvedChatBackground = useBlobRefUrl(char?.chatBackground);
     // 兜底：正常情况下 OSContext 启动时一定会保底一个角色，char 不该为空。
     // 但若 init 期间某个 store 读取失败（数据其实还在 IndexedDB 里），characters 可能暂时为空，
-    // 此时下面 char.chatBackground 会直接抛 "undefined is not an object" 把整个 App 崩到错误页。
+    // 此时下面读 char 上的字段会直接抛 "undefined is not an object" 把整个 App 崩到错误页。
     // 这里给个温和空态，避免硬崩，也好让用户能退回桌面/重启恢复。
     if (!char) {
         return (
@@ -3240,9 +3262,11 @@ const Chat: React.FC = () => {
               : chatChromeStyle === 'floating'
                 ? 'flex flex-col h-full bg-[#eef2ff] overflow-hidden relative font-sans transition-[background-image,background-color] duration-500'
                 : 'flex flex-col h-full bg-[#f1f5f9] overflow-hidden relative font-sans transition-[background-image,background-color] duration-500';
-    const chatRootStyle: React.CSSProperties = char.chatBackground
+    // 令牌还在读盘、或者图已经丢了时 resolvedChatBackground 是 undefined，这一帧按「没设背景」
+    // 的样式走，免得渲染出一个 url("undefined")。
+    const chatRootStyle: React.CSSProperties = resolvedChatBackground
         ? {
-            backgroundImage: `url(${char.chatBackground})`,
+            backgroundImage: `url("${resolvedChatBackground}")`,
             backgroundSize: 'cover',
             backgroundPosition: 'center',
         }
@@ -4088,7 +4112,8 @@ const Chat: React.FC = () => {
                 )}
                 {replyTarget && (
                     <div className="flex items-center justify-between px-4 py-2 bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
-                        <div className="flex items-center gap-2 truncate"><span className="font-bold text-slate-700">正在回复:</span><span className="truncate max-w-[200px]">{replyTarget.content.length > 10 ? replyTarget.content.slice(0, 10) + '...' : replyTarget.content}</span></div>
+                        {/* 引用的是图片 / 表情时这里显示占位符，跟落库的快照同一口径 */}
+                        <div className="flex items-center gap-2 truncate"><span className="font-bold text-slate-700">正在回复:</span><span className="truncate max-w-[200px]">{buildReplySnapshotContent(replyTarget)}</span></div>
                         <button onClick={() => setReplyTarget(null)} className="p-1 text-slate-400 hover:text-slate-600">×</button>
                     </div>
                 )}
@@ -4152,7 +4177,7 @@ const Chat: React.FC = () => {
                                     '没设',
                                 ),
                             });
-                            addToast(`已启动主动消息，每 ${config.intervalMinutes >= 60 ? (config.intervalMinutes / 60) + ' 小时' : config.intervalMinutes + ' 分钟'}发送一次`, 'success');
+                            addToast(`已启动主动消息，每 ${config.intervalMinutes >= 60 ? formatHours(config.intervalMinutes) + ' 小时' : config.intervalMinutes + ' 分钟'}发送一次`, 'success');
                         } else {
                             stopProactiveChat();
                             addToast('已关闭主动消息', 'info');

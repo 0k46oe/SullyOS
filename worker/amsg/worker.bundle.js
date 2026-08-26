@@ -7611,17 +7611,10 @@ var DAY_MS2 = 24 * 36e5;
 var recurrencePeriodMs = (recurrenceType) => recurrenceType === "daily" ? DAY_MS2 : recurrenceType === "weekly" ? 7 * DAY_MS2 : null;
 function shouldExpireFire(input) {
   if (input.policy !== "expire") return false;
-  if (input.recurrenceType == null && input.occurrenceMs == null) return false;
+  if (input.occurrenceMs == null) return false;
   const last = input.lastUserMessageAt;
-  if (input.recurrenceType === "daily" || input.recurrenceType === "weekly") {
-    if (last == null) return false;
-    if (input.occurrenceMs == null) return false;
-    return last > input.occurrenceMs - ACTIVE_CHAT_WINDOW_MS && last <= input.nowMs;
-  }
-  const anchor = input.anchorMs;
-  if (anchor == null) return false;
-  if (last == null) return anchor > 0;
-  return last > anchor;
+  if (last == null) return false;
+  return last > input.occurrenceMs - ACTIVE_CHAT_WINDOW_MS && last <= input.occurrenceMs + ACTIVE_CHAT_WINDOW_MS && last <= input.nowMs;
 }
 var DELIVERED_WINDOW_MS = 30 * 6e4;
 
@@ -12889,8 +12882,6 @@ var runFireScheduleTool = async (stash, scheduleTask, args, nowMs) => {
         amsgMode: parsed.mode,
         amsgClientTaskId: clientTaskId,
         amsgExpirePolicy: parsed.expirePolicy,
-        // 防穿帮闸锚点：这条排下去之后，用户再开口就算「对话往前走了」。
-        amsgAnchorMs: stash.anchorMs,
         amsgTaskInstruction: buildTaskInstruction(parsed.mode, parsed.promptHint),
         // 自排标记：到点兜底闸只拦带它的任务（用户面板排的不受连发上限管）。
         amsgSelfScheduled: true
@@ -12914,7 +12905,6 @@ var runFireScheduleTool = async (stash, scheduleTask, args, nowMs) => {
     recurrenceType: remote?.recurrenceType || parsed.recurrence,
     ...parsed.promptHint ? { promptHint: parsed.promptHint } : {},
     expirePolicy: parsed.expirePolicy,
-    anchorLastUserMsgAt: stash.anchorMs,
     source: "character",
     status: "scheduled",
     createdAt: nowMs
@@ -13157,17 +13147,24 @@ var amsgHooks = {
     const presenceLastUserMessageAt = presence?.charId === charId ? presence.lastUserMessageAt : null;
     const expireInput = {
       policy,
-      recurrenceType: ctx.task.recurrenceType,
-      anchorMs: typeof taskMeta.amsgAnchorMs === "number" ? taskMeta.amsgAnchorMs : null,
       lastUserMessageAt: laterOf(pack.lastUserMessageAt ?? null, presenceLastUserMessageAt),
       nowMs: ctx.now.getTime(),
       occurrenceMs
     };
+    const expireTrace = {
+      taskId: ctx.task.id,
+      // 判定本身已经不看任务类型了（一次性和循环同一条规则），但排查时得认得出是哪种。
+      recurrenceType: ctx.task.recurrenceType,
+      ...expireInput,
+      packLastUserMessageAt: pack.lastUserMessageAt ?? null,
+      presenceLastUserMessageAt
+    };
     if (!instant && shouldExpireFire(expireInput)) {
-      console.log("[amsg:expire-skip]", { taskId: ctx.task.id, ...expireInput });
+      console.log("[amsg:expire-skip]", { ...expireTrace, reason: "conversation-moved-on" });
       await recordSkip(ctx, charId, "conversation-moved-on", occurrenceMs);
       return { skip: true };
     }
+    if (!instant) console.log("[amsg:expire-pass]", expireTrace);
     if (!instant && typeof taskMeta.amsgTaskInstruction !== "string") {
       throw fail2("\u4EFB\u52A1 metadata \u7F3A amsgTaskInstruction\uFF08\u65E7\u683C\u5F0F\u4EFB\u52A1\uFF09");
     }
@@ -13228,7 +13225,6 @@ var amsgHooks = {
       plannedSelfSends: plannedSelfSendTasks.length,
       plannedSelfSendUuids: plannedSelfSendTasks.map((t) => t.taskUuid),
       charId,
-      anchorMs: pack.lastUserMessageAt ?? 0,
       tz,
       taskUuid: typeof ctx.task.uuid === "string" ? ctx.task.uuid : null,
       taskRowId: ctx.task.id != null ? String(ctx.task.id) : null,

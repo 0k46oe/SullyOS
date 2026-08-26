@@ -32,6 +32,7 @@ import ChatHeaderShell from '../components/chat/ChatHeaderShell';
 import ChatInputArea from '../components/chat/ChatInputArea';
 import TokenImg from '../components/os/TokenImg';
 import { useBlobRefUrl, isBlobRef, getBlobForRef, migrateDataUrlToRef } from '../utils/blobRef';
+import { buildReplySnapshotContent } from '../utils/applyAssistantPostProcessing';
 import ChromeCssEditor from '../components/chat/ChromeCssEditor';
 import WhiteboxSoundEditor from '../components/chat/WhiteboxSoundEditor';
 import HtmlCard from '../components/chat/HtmlCard';
@@ -392,7 +393,9 @@ const GroupMessageItem = React.memo(({
                         {msg.replyTo && (
                             <div className="relative z-10 mb-1 text-[10px] bg-black/5 p-1.5 rounded-md border-l-2 border-current opacity-60 flex flex-col gap-0.5 max-w-full overflow-hidden">
                                 <span className="font-bold opacity-90 truncate">{msg.replyTo.name}</span>
-                                <span className="truncate italic">"{msg.replyTo.content.length > 10 ? msg.replyTo.content.slice(0, 10) + '...' : msg.replyTo.content}"</span>
+                                {/* 历史快照里可能原样存着令牌 / data: / 图床 URL，直接截 10 个字
+                                    就成了气泡里一串 `blobref:b_`；交给写入端同一个快照函数换占位符 */}
+                                <span className="truncate italic">"{buildReplySnapshotContent({ content: msg.replyTo.content })}"</span>
                             </div>
                         )}
                         <div className="relative z-10 select-text" style={{ color: styleConfig.textColor }}>{msg.content}</div>
@@ -904,11 +907,12 @@ const GroupChat: React.FC = () => {
             metadata
         };
 
-        // 引用回复：落快照（对齐私聊 Chat.tsx 的做法），发完清空
+        // 引用回复：落快照（对齐私聊 Chat.tsx 的做法），发完清空。
+        // 图片 / 表情走占位符，不把 blobref 令牌原样存进快照。
         if (replyTarget) {
             newMessage.replyTo = {
                 id: replyTarget.id,
-                content: replyTarget.content,
+                content: buildReplySnapshotContent(replyTarget),
                 name: replyTarget.role === 'user'
                     ? '我'
                     : (characters.find(c => c.id === replyTarget.charId)?.name || '成员'),
@@ -1877,7 +1881,8 @@ ${memberTimeline || '(暂无互动记录)'}
             {/* 回复预览条（对齐私聊 Chat.tsx 的样式与位置） */}
             {replyTarget && !selectionMode && (
                 <div className="flex items-center justify-between px-4 py-2 bg-slate-50 border-t border-slate-200 text-xs text-slate-500 shrink-0 z-40">
-                    <div className="flex items-center gap-2 truncate"><span className="font-bold text-slate-700">正在回复:</span><span className="truncate max-w-[200px]">{replyTarget.content.length > 10 ? replyTarget.content.slice(0, 10) + '...' : replyTarget.content}</span></div>
+                    {/* 引用的是图片 / 表情时这里显示占位符，跟落库的快照同一口径 */}
+                    <div className="flex items-center gap-2 truncate"><span className="font-bold text-slate-700">正在回复:</span><span className="truncate max-w-[200px]">{buildReplySnapshotContent(replyTarget)}</span></div>
                     <button onClick={() => setReplyTarget(null)} className="p-1 text-slate-400 hover:text-slate-600">×</button>
                 </div>
             )}
