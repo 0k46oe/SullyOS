@@ -14,6 +14,145 @@ export interface JournalAppearancePreset {
 export const JOURNAL_CSS_SCOPE_REGEX = /^\.sully-journal(?:\b|-)/;
 export const JOURNAL_CSS_SCOPE_HINT = '.sully-journal-root / .sully-journal-*';
 
+/**
+ * Public CSS hooks for the exchange-journal skin editor. Keep this list in
+ * sync with JournalApp and JournalThemeArtwork: it is copied verbatim into
+ * the AI prompt so generated skins do not have to guess DOM class names.
+ */
+export const JOURNAL_CUSTOM_CSS_SELECTOR_GROUPS = [
+    {
+        label: 'App 与页面状态',
+        selectors: [
+            '.sully-journal-root', '.sully-journal-select', '.sully-journal-calendar',
+            '.sully-journal-write', '.sully-journal-designed',
+            '.sully-journal-theme-letterpress', '.sully-journal-theme-sakura',
+            '.sully-journal-theme-forest', '.sully-journal-theme-midnight',
+        ],
+    },
+    {
+        label: '顶部与导航',
+        selectors: [
+            '.sully-journal-header', '.sully-journal-header-title', '.sully-journal-back',
+            '.sully-journal-appearance-button', '.sully-journal-group-filter',
+        ],
+    },
+    {
+        label: '日记本选择页',
+        selectors: [
+            '.sully-journal-notebook-grid', '.sully-journal-notebook',
+            '.sully-journal-notebook-avatar', '.sully-journal-notebook-name',
+            '.sully-journal-notebook-label',
+        ],
+    },
+    {
+        label: '日记列表页',
+        selectors: [
+            '.sully-journal-calendar-hero', '.sully-journal-calendar-heading',
+            '.sully-journal-calendar-kicker', '.sully-journal-calendar-title',
+            '.sully-journal-calendar-list', '.sully-journal-new-entry',
+            '.sully-journal-entry', '.sully-journal-entry-accent',
+            '.sully-journal-entry-date', '.sully-journal-entry-text',
+            '.sully-journal-entry-year', '.sully-journal-entry-badges',
+            '.sully-journal-empty',
+        ],
+    },
+    {
+        label: '书写与双页',
+        selectors: [
+            '.sully-journal-editor-header', '.sully-journal-editor-stage',
+            '.sully-journal-spread', '.sully-journal-spread-page',
+            '.sully-journal-spread-page.is-inactive', '.sully-journal-spread-user',
+            '.sully-journal-spread-char', '.sully-journal-paper',
+            '.sully-journal-paper-user', '.sully-journal-paper-char',
+            '.sully-journal-page-content', '.sully-journal-page-meta',
+            '.sully-journal-page-title', '.sully-journal-page-date',
+            '.sully-journal-textarea', '.sully-journal-sticker', '.sully-journal-texture',
+        ],
+    },
+    {
+        label: '底部工具',
+        selectors: [
+            '.sully-journal-bottom-controls', '.sully-journal-tabs', '.sully-journal-tab',
+            '.sully-journal-tab-active', '.sully-journal-paper-picker',
+            '.sully-journal-paper-swatch', '.sully-journal-sticker-button',
+            '.sully-journal-sticker-panel',
+        ],
+    },
+    {
+        label: '主题装饰层',
+        selectors: [
+            '.sully-journal-theme-art', '.sully-journal-theme-art-letterpress',
+            '.sully-journal-theme-art-sakura', '.sully-journal-theme-art-forest',
+            '.sully-journal-theme-art-midnight', '.sully-journal-theme-art-select',
+            '.sully-journal-theme-art-calendar', '.sully-journal-theme-art-write',
+            '.sully-journal-post-route', '.sully-journal-post-plane',
+            '.sully-journal-postmark', '.sully-journal-envelope-corner',
+            '.sully-journal-airmail-stripe', '.sully-journal-celestial-map',
+            '.sully-journal-orbits', '.sully-journal-constellation',
+            '.sully-journal-star-medallion', '.sully-journal-photo-corners',
+            '.sully-journal-satin-ribbon', '.sully-journal-botanical-sheet',
+            '.sully-journal-botanical-stem', '.sully-journal-measure-lines',
+            '.sully-journal-specimen-arrow', '.sully-journal-field-rings',
+            '.sully-journal-field-tabs', '.sully-journal-specimen-seal',
+            '.sully-journal-memory-circuit', '.sully-journal-window-chrome',
+            '.sully-journal-inspector-ghost', '.sully-journal-cursor-spark',
+        ],
+    },
+] as const;
+
+export const JOURNAL_CUSTOM_CSS_SELECTORS = JOURNAL_CUSTOM_CSS_SELECTOR_GROUPS
+    .flatMap(group => [...group.selectors]);
+
+const journalSelectorPrompt = JOURNAL_CUSTOM_CSS_SELECTOR_GROUPS
+    .map(group => `${group.label}：\n${group.selectors.join('、')}`)
+    .join('\n\n');
+
+export const JOURNAL_AI_CSS_PROMPT = `你是 CSS 设计师，请为 SullyOS 的「交换日记」App 写一段完整的自定义 CSS。
+
+要求：
+1. 只能使用下列公开选择器；每条普通规则都必须以 .sully-journal-root 或 .sully-journal-* 开头。
+2. 可以组合后代、子元素、伪类、伪元素和媒体查询，覆盖原样式时可使用 !important；不要输出 JavaScript、HTML 或全局 body/html 规则。
+3. 顶部返回键和美化入口是安全出口，不得用 display:none、visibility:hidden、opacity:0、pointer-events:none 或移出屏幕的方式隐藏。
+4. 同时适配手机单页与较宽屏幕；正文、日期、返回键、新建按钮、输入区和底部工具必须清晰可操作。
+5. 请做成一套完整的实体手账界面，不只是换颜色。可以设计纸张层次、装订、贴纸、胶带、日期标签、角色照片与轻量动画，但装饰层必须 pointer-events:none，不能遮住正文和按钮。
+
+全部可用选择器：
+${journalSelectorPrompt}
+
+请直接输出一整段可粘贴的 CSS，可以带少量注释，不要长篇解释。
+我想要的风格是：______`;
+
+/**
+ * Written after preset/custom CSS. A broken imported skin may restyle the
+ * header, but it must never remove the controls needed to leave the App or
+ * reopen this editor and reset the skin.
+ */
+export const JOURNAL_APPEARANCE_SAFETY_CSS = `
+html body .sully-journal-root.sully-journal-root{
+  display:flex!important;
+  visibility:visible!important;
+  opacity:1!important;
+  pointer-events:auto!important;
+  min-height:100%!important;
+}
+html body .sully-journal-root.sully-journal-root .sully-journal-header,
+html body .sully-journal-root.sully-journal-root .sully-journal-calendar-hero,
+html body .sully-journal-root.sully-journal-root .sully-journal-editor-header{
+  display:block!important;
+  visibility:visible!important;
+  opacity:1!important;
+  pointer-events:auto!important;
+}
+html body .sully-journal-root.sully-journal-root .sully-journal-back,
+html body .sully-journal-root.sully-journal-root .sully-journal-appearance-button{
+  display:grid!important;
+  visibility:visible!important;
+  opacity:1!important;
+  pointer-events:auto!important;
+  position:relative!important;
+  z-index:2147483000!important;
+}`;
+
 /* 邮局档案：横向信封、打字机索引卡、航空邮路。 */
 const LETTERPRESS_CSS = `.sully-journal-theme-letterpress{
   --postal-red:#a34e3d;--postal-blue:#355d65;--postal-ink:#352a24;--postal-paper:#f4e7cb;--postal-desk:#44362e;

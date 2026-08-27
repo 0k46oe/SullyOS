@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+    describeGithubUploadTransportFailure,
     downloadBackup,
     listBackups,
     readResponseArrayBuffer,
@@ -44,6 +45,25 @@ describe('GitHub 备份代理安全默认', () => {
             githubUseProxy: false,
             githubProxyConsentVersion: 1,
         })).toBe(false);
+    });
+
+    it('直连失败时明确区分 GitHub 网页、API 与附件域名', () => {
+        const message = describeGithubUploadTransportFailure(base);
+        expect(message).toContain('uploads.github.com');
+        expect(message).toContain('api.github.com');
+        expect(message).toContain('开着梯子');
+        expect(message).toContain('应用内 Cloudflare 中转');
+    });
+
+    it('中转失败时说明当前走的是独立 Worker 线路', () => {
+        const message = describeGithubUploadTransportFailure({
+            ...base,
+            githubUseProxy: true,
+            githubProxyConsentVersion: 1,
+        });
+        expect(message).toContain('应用内 Cloudflare 中转');
+        expect(message).toContain('sullymeow.ccwu.cc');
+        expect(message).toContain('自定义网络代理 (Worker)');
     });
 });
 
