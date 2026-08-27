@@ -143,6 +143,19 @@ html body .sully-journal-root.sully-journal-root .sully-journal-editor-header{
   opacity:1!important;
   pointer-events:auto!important;
 }
+html body .sully-journal-root.sully-journal-root::before,
+html body .sully-journal-root.sully-journal-root::after,
+html body .sully-journal-root.sully-journal-root *::before,
+html body .sully-journal-root.sully-journal-root *::after{
+  pointer-events:none!important;
+}
+html body .sully-journal-root.sully-journal-root .sully-journal-header,
+html body .sully-journal-root.sully-journal-root .sully-journal-editor-header{
+  padding-top:max(var(--chrome-top,0px),env(safe-area-inset-top,0px))!important;
+}
+html body .sully-journal-root.sully-journal-root .sully-journal-calendar-hero{
+  padding-top:max(3rem,var(--safe-top,0px),env(safe-area-inset-top,0px))!important;
+}
 html body .sully-journal-root.sully-journal-root .sully-journal-back,
 html body .sully-journal-root.sully-journal-root .sully-journal-appearance-button{
   display:grid!important;

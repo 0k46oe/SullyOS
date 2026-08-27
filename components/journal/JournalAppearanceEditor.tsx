@@ -111,9 +111,12 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
     const [open, setOpen] = useState(false);
     const [copied, setCopied] = useState(false);
     const cssImportRef = useRef<HTMLInputElement>(null);
+    const appearanceButtonRef = useRef<HTMLButtonElement>(null);
+    const [savedStyleBlocksButton, setSavedStyleBlocksButton] = useState(false);
     const [draft, setDraft] = useState<JournalAppearance>(() =>
         normalizeAppearance(theme.journalAppearance)
     );
+    const hasSavedCustomCss = Boolean(theme.journalAppearance?.customCss?.trim());
 
     useEffect(() => {
         if (open) setDraft(normalizeAppearance(previewAppearance || theme.journalAppearance));
@@ -125,6 +128,67 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
         document.body.style.overflow = 'hidden';
         return () => { document.body.style.overflow = previous; };
     }, [open]);
+
+    // A saved skin can leave the button visible while an invisible overlay,
+    // zero-sized ancestor or pointer-events rule steals every tap. Test the
+    // actual hit target and expose a body-level reset only when the normal
+    // entrance is genuinely unreachable. The capture listener also catches a
+    // user's first failed tap if the skin changes after the initial check.
+    useEffect(() => {
+        if (!hasSavedCustomCss || isPreviewing) {
+            setSavedStyleBlocksButton(false);
+            return;
+        }
+
+        const detectBlockedButton = () => {
+            const button = appearanceButtonRef.current;
+            if (!button) return;
+            const rect = button.getBoundingClientRect();
+            const hasUsableRect = rect.width >= 24
+                && rect.height >= 24
+                && rect.right > 0
+                && rect.bottom > 0
+                && rect.left < window.innerWidth
+                && rect.top < window.innerHeight;
+            if (!hasUsableRect) {
+                setSavedStyleBlocksButton(true);
+                return;
+            }
+            const hit = document.elementFromPoint(
+                Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2)),
+                Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2)),
+            );
+            setSavedStyleBlocksButton(!hit || (hit !== button && !button.contains(hit)));
+        };
+
+        const handleCapturedPointer = (event: PointerEvent) => {
+            const button = appearanceButtonRef.current;
+            if (!button) return;
+            const rect = button.getBoundingClientRect();
+            const aimedAtButton = event.clientX >= rect.left
+                && event.clientX <= rect.right
+                && event.clientY >= rect.top
+                && event.clientY <= rect.bottom;
+            if (aimedAtButton && event.target instanceof Node && !button.contains(event.target)) {
+                setSavedStyleBlocksButton(true);
+            }
+        };
+
+        let secondFrame = 0;
+        const frame = window.requestAnimationFrame(() => {
+            secondFrame = window.requestAnimationFrame(detectBlockedButton);
+        });
+        const timer = window.setTimeout(detectBlockedButton, 400);
+        document.addEventListener('pointerdown', handleCapturedPointer, true);
+        window.addEventListener('resize', detectBlockedButton);
+        return () => {
+            window.cancelAnimationFrame(frame);
+            window.cancelAnimationFrame(secondFrame);
+            window.clearTimeout(timer);
+            document.removeEventListener('pointerdown', handleCapturedPointer, true);
+            window.removeEventListener('resize', detectBlockedButton);
+        };
+    }, [hasSavedCustomCss, isPreviewing]);
 
     const validation = useMemo(
         () => validateScopedCss(
@@ -489,9 +553,39 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
         document.body,
     ) : null;
 
+    const savedStyleRescue = savedStyleBlocksButton && !isPreviewing ? createPortal(
+        <>
+            <style>{`
+#sully-journal-saved-style-rescue{
+  display:flex!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important;
+  position:fixed!important;z-index:2147483647!important;left:50%!important;
+  bottom:calc(var(--safe-bottom,0px) + 12px)!important;top:auto!important;
+  transform:translateX(-50%)!important;width:auto!important;min-width:0!important;max-width:92vw!important;
+  box-sizing:border-box!important;margin:0!important;padding:10px 14px!important;
+  border:1px solid rgba(254,215,170,.7)!important;border-radius:999px!important;
+  background:rgba(124,45,18,.94)!important;color:white!important;
+  box-shadow:0 10px 30px rgba(0,0,0,.34)!important;
+  font:800 12px/1.2 system-ui,-apple-system,"Microsoft YaHei",sans-serif!important;
+  white-space:nowrap!important;text-decoration:none!important;cursor:pointer!important;
+  -webkit-tap-highlight-color:transparent!important;touch-action:manipulation!important;
+}
+            `}</style>
+            <button
+                type="button"
+                id="sully-journal-saved-style-rescue"
+                onClick={reset}
+                aria-label="日记美化挡住了设置按钮，一键恢复原版"
+            >
+                ⟲ 日记美化急救：恢复原版
+            </button>
+        </>,
+        document.body,
+    ) : null;
+
     return (
         <>
             <button
+                ref={appearanceButtonRef}
                 type="button"
                 onClick={() => {
                     setDraft(normalizeAppearance(previewAppearance || theme.journalAppearance));
@@ -511,6 +605,7 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
             </button>
             {panel}
             {previewRescue}
+            {savedStyleRescue}
         </>
     );
 };
