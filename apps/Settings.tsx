@@ -462,6 +462,7 @@ const McpServersCard: React.FC<{
 const Settings: React.FC = () => {
   const {
       apiConfig, updateApiConfig, closeApp, availableModels, setAvailableModels,
+      theme, updateTheme,
       exportSystem, importSystem, addToast, showError, resetSystem, updateCharacter,
       apiPresets, addApiPreset, updateApiPreset, removeApiPreset,
       sysOperation, // Get progress state
@@ -558,6 +559,16 @@ const Settings: React.FC = () => {
   // 「该备份啦」提醒频率（1~30 天）。改动即落 localStorage（backupReminder 模块自管持久化）。
   const [backupReminderDays, setBackupReminderDays] = useState<number>(() => getBackupReminderState().intervalDays);
   const backupDaysAgo = daysSinceLastBackup();
+  const hasJournalAppearanceOverride = Boolean(
+    theme.journalAppearance
+    && ((theme.journalAppearance.preset || 'original') !== 'original'
+      || theme.journalAppearance.customCss?.trim())
+  );
+
+  const handleJournalAppearanceEmergencyReset = async () => {
+    await updateTheme({ journalAppearance: undefined });
+    addToast('已从系统设置还原交换日记原版样式', 'success');
+  };
 
   // Cloud backup local config state (WebDAV)
   const [cbUrl, setCbUrl] = useState(cloudBackupConfig.webdavUrl);
@@ -1928,6 +1939,31 @@ const Settings: React.FC = () => {
       </div>
 
       <div className="flex-1 overflow-y-auto p-5 space-y-6 no-scrollbar pb-20">
+
+        {/* 美化入口本身被错误 CSS 盖住时，必须有一个完全不经过日记 App 的急救通道。 */}
+        <SettingsSection
+            title="外观急救"
+            badge={hasJournalAppearanceOverride
+                ? <span className="text-[9px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full font-bold shrink-0">日记美化已启用</span>
+                : undefined}
+            icon={
+                <div className="p-2 bg-amber-100/70 rounded-xl text-amber-700">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.7} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M11.42 15.17 17.25 21a2.12 2.12 0 0 0 3-3l-5.84-5.84M11.42 15.17l2.83-2.83M11.42 15.17l-4.68 4.68a2.121 2.121 0 0 1-3-3l6.59-6.59m4.08 1.9 2.83-2.83m0 0 1.5-1.5a2.121 2.121 0 0 0-3-3l-1.5 1.5m3 3-3-3m-3.91 3.91-4.95-4.95a2.121 2.121 0 0 0-3 3l4.95 4.95" /></svg>
+                </div>
+            }
+        >
+            <p className="text-xs text-slate-500 leading-relaxed">
+                如果交换日记的自定义 CSS 把返回键、设置键遮住或变得无法点击，可以从这里直接清除日记主题与 CSS，不影响日记内容。
+            </p>
+            <button
+                type="button"
+                disabled={!hasJournalAppearanceOverride}
+                onClick={handleJournalAppearanceEmergencyReset}
+                className="mt-3 w-full rounded-xl bg-amber-600 px-4 py-3 text-xs font-bold text-white shadow-sm transition active:scale-[.98] disabled:bg-slate-100 disabled:text-slate-400 disabled:shadow-none"
+            >
+                {hasJournalAppearanceOverride ? '重置交换日记美化' : '交换日记当前为原版'}
+            </button>
+        </SettingsSection>
         
         {/* 数据备份区域 */}
         <SettingsSection

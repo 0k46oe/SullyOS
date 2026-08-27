@@ -125,6 +125,8 @@ describe('journalAppearance', () => {
         }
         expect(JOURNAL_APPEARANCE_SAFETY_CSS).toContain('visibility:visible!important');
         expect(JOURNAL_APPEARANCE_SAFETY_CSS).toContain('pointer-events:auto!important');
+        expect(JOURNAL_APPEARANCE_SAFETY_CSS).toContain('pointer-events:none!important');
+        expect(JOURNAL_APPEARANCE_SAFETY_CSS).toContain('env(safe-area-inset-top,0px)');
     });
 
     it('wires a non-persistent, cross-page preview with a body-level one-click rescue', () => {
@@ -138,5 +140,16 @@ describe('journalAppearance', () => {
         expect(editor).toContain('正在预览日记本美化');
         expect(editor).toContain('一键撤销');
         expect(editor).toContain('document.body');
+    });
+
+    it('provides recovery paths for users whose already-saved CSS steals taps', () => {
+        const editor = readFileSync(fileURLToPath(new URL('../components/journal/JournalAppearanceEditor.tsx', import.meta.url)), 'utf8');
+        const settings = readFileSync(fileURLToPath(new URL('../apps/Settings.tsx', import.meta.url)), 'utf8');
+
+        expect(editor).toContain('elementFromPoint');
+        expect(editor).toContain('sully-journal-saved-style-rescue');
+        expect(editor).toContain('日记美化急救：恢复原版');
+        expect(settings).toContain('handleJournalAppearanceEmergencyReset');
+        expect(settings).toContain('重置交换日记美化');
     });
 });
