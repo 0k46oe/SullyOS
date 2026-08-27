@@ -9,14 +9,12 @@
  *     UX as WebDAV ('cleanupOldBackups keeps latest N').
  *
  * Two transports, mirroring webdavClient.ts:
- *   - Native (Capacitor): CapacitorHttp talks straight to api.github.com /
- *     uploads.github.com. Bypasses CORS and the worker entirely.
- *   - Web: direct fetch by default. api.github.com sets CORS for any origin
- *     (per GitHub docs); uploads.github.com does too. If the user's network
- *     can't reach github.com (GFW), they flip 'githubUseProxy' on and we
- *     route through the same sully-n CF Worker that handles WebDAV — Worker
- *     free tier caps each request body at ~100 MB, but it's enough to
- *     unblock most users.
+ *   - Direct: api.github.com and uploads.github.com are contacted separately.
+ *     Reachability differs by device, browser/PWA, VPN rules and network; being
+ *     able to open github.com or pass token verification proves neither route.
+ *   - App-level proxy: after explicit user consent, both requests go through
+ *     the configured Cloudflare Worker. This is independent of the system VPN
+ *     and can succeed or fail independently too.
  */
 import { Capacitor, CapacitorHttp } from '@capacitor/core';
 
@@ -116,6 +114,29 @@ export const shouldUseGithubProxy = (config: CloudBackupConfig): boolean =>
 
 const proxify = (url: string): string =>
     `${getProxyWorkerUrl()}/github?url=${encodeURIComponent(url)}`;
+
+/**
+ * A browser reports DNS failures, blocked domains, VPN split-routing misses,
+ * CORS rejection and some iOS PWA networking failures through the same opaque
+ * XHR/fetch error. Do not flatten that into "开梯子"：the GitHub website,
+ * REST API, release-upload host and the optional Worker are separate routes.
+ */
+export const describeGithubUploadTransportFailure = (
+    config: CloudBackupConfig,
+    kind: 'network' | 'timeout' = 'network',
+): string => {
+    const prefix = kind === 'timeout' ? '上传超时' : '上传失败：网络请求未完成';
+    if (shouldUseGithubProxy(config)) {
+        let workerHost = getProxyWorkerUrl();
+        try { workerHost = new URL(workerHost).host; } catch { /* keep the configured URL */ }
+        return `${prefix}。当前走应用内 Cloudflare 中转（${workerHost}），说明这台设备到中转、`
+            + '中转到 GitHub、或大文件传输中的某一段未打通。能打开 github.com、Token 测试通过或开着梯子，'
+            + '都不能证明这条上传线路可用；请到「自定义网络代理 (Worker)」检查或更换 Worker，也可关闭中转改试直连。';
+    }
+    return `${prefix}。当前正在直连 GitHub 附件域名 uploads.github.com；它与 github.com、api.github.com 是不同线路。`
+        + '能打开 GitHub、Token 测试通过或开着梯子，都不代表附件域名已被代理接管；请到「GitHub 备份 → 高级选项」'
+        + '开启“应用内 Cloudflare 中转”后重试。';
+};
 
 const authHeaders = (token: string, extra: Record<string, string> = {}): Record<string, string> => ({
     Authorization: `Bearer ${token}`,
@@ -419,9 +440,9 @@ const uploadOneAsset = async (
         // CapacitorHttp 在原生这边不能正确转发二进制 body — 把 Blob/ArrayBuffer
         // 通过 JS↔native 桥传过去，桥会尝试 JSON 化导致 upstream 收到 0 字节体，
         // GitHub 还是 201 创建了 asset，但 size = 0（用户看到的就是 0.0 MB）。
-        // WebView 自带的 fetch() 直接处理 Blob body 没问题，且 GitHub 给所有
-        // origin 都返了 CORS 头，所以 Capacitor 里 fetch() 直连 uploads.github.com
-        // 是 OK 的。useProxy 决定走代理还是直连，原生默认直连但用户可以勾选。
+        // WebView 自带的 fetch() 可以直接处理 Blob body；是否真的能触达
+        // uploads.github.com 仍取决于设备网络、VPN/PWA 接管和服务端跨域行为。
+        // useProxy 决定走应用内 Worker 还是直连。
         const abortController = new AbortController();
         const timeoutId = setTimeout(() => abortController.abort(), UPLOAD_TIMEOUT_MS);
         try {
@@ -462,8 +483,8 @@ const uploadOneAsset = async (
                 message: `上传失败 (${res.status}): ${text.slice(0, 120)}`,
             };
         } catch (e: any) {
-            const message = e?.name === 'AbortError' ? '上传超时' : `上传失败: ${e?.message || '未知错误'}`;
-            return { ok: false, message };
+            const kind = e?.name === 'AbortError' ? 'timeout' : 'network';
+            return { ok: false, message: describeGithubUploadTransportFailure(config, kind) };
         } finally {
             clearTimeout(timeoutId);
         }
@@ -506,9 +527,9 @@ const uploadOneAsset = async (
                 });
             }
         };
-        xhr.onerror = () => resolve({ ok: false, message: '上传失败: 网络错误（如果在国内，试试在高级设置里开启代理）' });
+        xhr.onerror = () => resolve({ ok: false, message: describeGithubUploadTransportFailure(config) });
         xhr.onabort = () => resolve({ ok: false, message: '上传已取消' });
-        xhr.ontimeout = () => resolve({ ok: false, message: '上传超时' });
+        xhr.ontimeout = () => resolve({ ok: false, message: describeGithubUploadTransportFailure(config, 'timeout') });
         xhr.send(blob);
     });
 };

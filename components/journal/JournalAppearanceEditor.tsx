@@ -5,14 +5,18 @@ import {
     Check,
     Copy,
     DownloadSimple,
+    Eye,
     GearSix,
     UploadSimple,
     X,
 } from '@phosphor-icons/react';
 import { useOS } from '../../context/OSContext';
-import type { JournalAppearance, JournalAppearancePresetId } from '../../types';
+import type { JournalAppearance } from '../../types';
 import {
+    JOURNAL_AI_CSS_PROMPT,
     JOURNAL_APPEARANCE_PRESETS,
+    JOURNAL_APPEARANCE_SAFETY_CSS,
+    JOURNAL_CUSTOM_CSS_SELECTOR_GROUPS,
     JOURNAL_CSS_SCOPE_HINT,
     JOURNAL_CSS_SCOPE_REGEX,
     flattenJournalAppearance,
@@ -21,29 +25,6 @@ import {
 import { runCssRenderabilityCheck, validateScopedCss } from '../../utils/scopedCss';
 import { shareOrDownloadFile } from '../../utils/shareExport';
 import { JournalThemeThumbnail } from './JournalThemeArtwork';
-
-const AI_PROMPT = `你是 CSS 设计师，请为 SullyOS 的「交换日记」App 写一段自定义 CSS。
-所有选择器必须以 .sully-journal-root 或 .sully-journal-* 开头；覆盖原界面样式时可使用 !important。不要输出 JavaScript。
-
-请把它设计成一套完整、可操作的实体手账界面，而不是只替换颜色。优先考虑纸张层次、装订、贴纸/胶带、日期标签、角色照片和移动端单页适配；装饰不能遮住正文与按钮。
-
-常用钩子：
-- .sully-journal-root：整个 App
-- .sully-journal-theme-letterpress / -sakura / -forest / -midnight：四套不同版式的根节点
-- .sully-journal-theme-art：主题内联 SVG 与装饰物层（仅装饰，不遮挡交互）
-- .sully-journal-header / .sully-journal-header-title：选择页顶部
-- .sully-journal-notebook / -avatar / -name：角色日记本
-- .sully-journal-calendar-hero / -list：日记列表页
-- .sully-journal-new-entry：新建日记按钮
-- .sully-journal-entry / -date / -text / -badges：日记条目
-- .sully-journal-editor-header / -stage：书写界面
-- .sully-journal-spread / -spread-page / -spread-user / -spread-char：非默认主题的响应式双页
-- .sully-journal-paper / -page-content / -page-meta / -textarea：纸张与正文
-- .sully-journal-sticker / -texture：贴纸与纸张纹理
-- .sully-journal-bottom-controls / -tabs / -tab：底部工具区
-- .sully-journal-paper-picker / -paper-swatch / -sticker-button / -sticker-panel：纸张和贴纸工具
-
-请直接输出完整 CSS。我想要的风格是：______`;
 
 const CSS_SNIPPETS = [
     {
@@ -73,6 +54,26 @@ const normalizeAppearance = (appearance?: JournalAppearance): JournalAppearance 
     customCss: appearance?.customCss || '',
 });
 
+const copyText = async (text: string): Promise<boolean> => {
+    try {
+        await navigator.clipboard.writeText(text);
+        return true;
+    } catch { /* iOS/PWA may deny Clipboard API; fall back to a selection copy. */ }
+    try {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand('copy');
+        textarea.remove();
+        return copied;
+    } catch {
+        return false;
+    }
+};
+
 export const JournalAppearanceStyle: React.FC<{ appearance?: JournalAppearance }> = ({ appearance }) => {
     const validation = useMemo(
         () => validateScopedCss(
@@ -86,19 +87,25 @@ export const JournalAppearanceStyle: React.FC<{ appearance?: JournalAppearance }
         ...appearance,
         customCss: validation.isValid ? appearance?.customCss : '',
     });
-    return css ? <style>{css}</style> : null;
+    return css ? <style>{`${css}\n${JOURNAL_APPEARANCE_SAFETY_CSS}`}</style> : null;
 };
 
 interface JournalAppearanceButtonProps {
     tone?: 'light' | 'dark';
     compact?: boolean;
-    onPreviewPreset?: (preset?: JournalAppearancePresetId) => void;
+    previewAppearance?: JournalAppearance;
+    isPreviewing?: boolean;
+    onStartPreview: (appearance: JournalAppearance) => void;
+    onCancelPreview: () => void;
 }
 
 const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
     tone = 'light',
     compact = false,
-    onPreviewPreset,
+    previewAppearance,
+    isPreviewing = false,
+    onStartPreview,
+    onCancelPreview,
 }) => {
     const { theme, updateTheme, addToast } = useOS();
     const [open, setOpen] = useState(false);
@@ -109,8 +116,8 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
     );
 
     useEffect(() => {
-        if (open) setDraft(normalizeAppearance(theme.journalAppearance));
-    }, [open, theme.journalAppearance]);
+        if (open) setDraft(normalizeAppearance(previewAppearance || theme.journalAppearance));
+    }, [open, previewAppearance, theme.journalAppearance]);
 
     useEffect(() => {
         if (!open) return;
@@ -135,30 +142,39 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
             return;
         }
         await updateTheme({ journalAppearance: { ...draft } });
-        onPreviewPreset?.(undefined);
+        onCancelPreview();
         addToast('交换日记样式已保存', 'success');
+        setOpen(false);
+    };
+
+    const startPreview = () => {
+        const renderability = runCssRenderabilityCheck(draft.customCss || '', validation);
+        if (!renderability.ok) {
+            addToast(renderability.message, 'error');
+            return;
+        }
+        onStartPreview({ ...draft });
+        addToast('已进入日记本预览，可自由翻页；顶部救援条可随时撤销', 'info');
         setOpen(false);
     };
 
     const reset = async () => {
         await updateTheme({ journalAppearance: undefined });
-        onPreviewPreset?.(undefined);
+        onCancelPreview();
         setDraft(normalizeAppearance());
         addToast('已还原交换日记原版样式', 'success');
         setOpen(false);
     };
 
     const closePanel = () => {
-        onPreviewPreset?.(undefined);
         setOpen(false);
     };
 
     const copyPrompt = async () => {
-        try {
-            await navigator.clipboard.writeText(AI_PROMPT);
+        if (await copyText(JOURNAL_AI_CSS_PROMPT)) {
             setCopied(true);
             window.setTimeout(() => setCopied(false), 1400);
-        } catch {
+        } else {
             addToast('复制失败，请手动选择提示词', 'error');
         }
     };
@@ -227,7 +243,15 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
     };
 
     const panel = open ? createPortal(
+        <>
+        <style>{`
+#sully-journal-appearance-editor{
+  display:flex!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important;
+  position:fixed!important;inset:0!important;z-index:2147483647!important;
+}
+        `}</style>
         <div
+            id="sully-journal-appearance-editor"
             className="fixed inset-0 z-[1950] flex items-end justify-center bg-black/45 backdrop-blur-sm"
             onMouseDown={event => {
                 if (event.target === event.currentTarget) closePanel();
@@ -255,7 +279,7 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
                 <div className="space-y-7 p-5">
                     <section>
                         <h3 className="text-sm font-bold">默认主题</h3>
-                        <p className="mt-1 text-[11px] text-slate-400">点击即可在背后的日记界面即时预览，保存后对所有角色生效。</p>
+                        <p className="mt-1 text-[11px] text-slate-400">先选择主题和 CSS，再点底部“预览并浏览”；保存后才会对所有角色生效。</p>
                         <div className="mt-3 grid grid-cols-2 gap-2.5">
                             {JOURNAL_APPEARANCE_PRESETS.map(preset => {
                                 const selected = (draft.preset || 'original') === preset.id;
@@ -264,7 +288,6 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
                                         key={preset.id}
                                         onClick={() => {
                                             setDraft(current => ({ ...current, preset: preset.id }));
-                                            onPreviewPreset?.(preset.id);
                                         }}
                                         className={`relative min-h-[92px] rounded-2xl border p-3 text-left transition-all active:scale-[.98] ${
                                             selected
@@ -366,48 +389,112 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
                         <details className="mt-3 text-[11px] text-slate-500">
                             <summary className="cursor-pointer font-bold">查看完整 CSS 钩子</summary>
                             <div className="mt-2 space-y-2 rounded-xl bg-stone-100 px-3 py-3 font-mono text-[10px] leading-5">
-                                <p>外层：root、select、calendar、write、header、header-title、theme-letterpress / sakura / forest / midnight、theme-art</p>
-                                <p>日记本：notebook-grid、notebook、notebook-avatar、notebook-name</p>
-                                <p>列表：calendar-hero、calendar-list、new-entry、entry、entry-accent、entry-date、entry-text、entry-year、entry-badges</p>
-                                <p>书写：editor-header、editor-stage、spread、spread-page、spread-user、spread-char、paper、paper-user、paper-char、page-content、page-meta、page-title、page-date、textarea、sticker、texture、empty</p>
-                                <p>工具：bottom-controls、tabs、tab、tab-active、paper-picker、paper-swatch、sticker-button、sticker-panel</p>
-                                <p className="font-sans text-slate-400">使用时在前面加 <code>.sully-journal-</code>；也可以从 <code>.sully-journal-root</code> 开始组合后代选择器。</p>
+                                {JOURNAL_CUSTOM_CSS_SELECTOR_GROUPS.map(group => (
+                                    <p key={group.label}>
+                                        <b className="font-sans">{group.label}：</b>{group.selectors.join(' / ')}
+                                    </p>
+                                ))}
+                                <p className="font-sans text-slate-400">复制给 AI 的提示词包含上面全部选择器和安全限制。</p>
                             </div>
                         </details>
                     </section>
                 </div>
 
-                <div className="sticky bottom-0 flex gap-2 border-t border-stone-200/80 bg-[#fbfaf8]/95 px-5 pb-1 pt-3 backdrop-blur">
+                <div className="sticky bottom-0 grid grid-cols-[auto_1fr_1fr] gap-2 border-t border-stone-200/80 bg-[#fbfaf8]/95 px-5 pb-1 pt-3 backdrop-blur">
                     <button
                         onClick={reset}
-                        className="flex h-12 items-center gap-2 rounded-2xl bg-stone-100 px-4 text-xs font-bold text-stone-500"
+                        className="flex h-12 items-center gap-1.5 rounded-2xl bg-stone-100 px-3 text-[11px] font-bold text-stone-500"
                     >
                         <ArrowCounterClockwise size={15} />
-                        还原
+                        恢复默认
+                    </button>
+                    <button
+                        onClick={startPreview}
+                        disabled={!validation.isValid}
+                        className="flex h-12 items-center justify-center gap-1.5 rounded-2xl border border-amber-300 bg-amber-50 px-2 text-[11px] font-bold text-amber-800 disabled:opacity-40"
+                    >
+                        <Eye size={15} />
+                        预览并浏览
                     </button>
                     <button
                         onClick={save}
                         disabled={!validation.isValid}
-                        className="h-12 flex-1 rounded-2xl bg-stone-900 text-sm font-bold text-white disabled:opacity-40"
+                        className="h-12 rounded-2xl bg-stone-900 px-2 text-[11px] font-bold text-white disabled:opacity-40"
                     >
                         保存样式
                     </button>
                 </div>
             </div>
-        </div>,
+        </div>
+        </>,
         document.body,
     ) : null;
 
-    const previewAppearance = open ? draft : theme.journalAppearance;
+    const previewRescue = isPreviewing && !open ? createPortal(
+        <>
+            <style>{`
+#sully-journal-preview-rescue{
+  display:flex!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important;
+  position:fixed!important;z-index:2147483647!important;left:50%!important;
+  top:max(10px,env(safe-area-inset-top))!important;transform:translateX(-50%)!important;
+  width:min(94vw,520px)!important;box-sizing:border-box!important;align-items:center!important;
+  justify-content:space-between!important;gap:10px!important;padding:10px 12px!important;
+  border:1px solid rgba(245,158,11,.45)!important;border-radius:16px!important;
+  background:rgba(24,20,16,.94)!important;color:white!important;
+  box-shadow:0 12px 32px rgba(0,0,0,.32)!important;backdrop-filter:blur(14px)!important;
+  font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif!important;
+}
+#sully-journal-preview-rescue *{box-sizing:border-box!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important;}
+#sully-journal-preview-rescue .preview-copy{display:flex!important;min-width:0!important;align-items:center!important;gap:8px!important;}
+#sully-journal-preview-rescue .preview-copy span{display:block!important;white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important;font-size:12px!important;font-weight:800!important;color:white!important;}
+#sully-journal-preview-rescue .preview-copy small{display:block!important;margin-top:2px!important;white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important;font-size:9px!important;color:rgba(255,255,255,.62)!important;}
+#sully-journal-preview-rescue .preview-actions{display:flex!important;flex:none!important;gap:6px!important;}
+#sully-journal-preview-rescue button{display:block!important;position:static!important;min-width:0!important;height:32px!important;margin:0!important;padding:0 10px!important;border:0!important;border-radius:10px!important;font-size:10px!important;font-weight:800!important;line-height:32px!important;transform:none!important;}
+#sully-journal-preview-rescue .preview-edit{background:rgba(255,255,255,.12)!important;color:white!important;}
+#sully-journal-preview-rescue .preview-cancel{background:#f59e0b!important;color:#2b1900!important;}
+@media(max-width:420px){#sully-journal-preview-rescue{padding:8px 9px!important}#sully-journal-preview-rescue .preview-copy small{display:none!important}#sully-journal-preview-rescue button{padding:0 8px!important}}
+            `}</style>
+            <div id="sully-journal-preview-rescue" role="status" aria-live="polite">
+                <div className="preview-copy">
+                    <Eye size={18} weight="bold" />
+                    <div>
+                        <span>正在预览日记本美化</span>
+                        <small>可以自由翻页；目前没有写入正式设置</small>
+                    </div>
+                </div>
+                <div className="preview-actions">
+                    <button
+                        type="button"
+                        className="preview-edit"
+                        onClick={() => {
+                            setDraft(normalizeAppearance(previewAppearance || theme.journalAppearance));
+                            setOpen(true);
+                        }}
+                    >
+                        返回编辑
+                    </button>
+                    <button
+                        type="button"
+                        className="preview-cancel"
+                        onClick={() => {
+                            onCancelPreview();
+                            addToast('已撤销日记本预览，正式样式没有改动', 'success');
+                        }}
+                    >
+                        一键撤销
+                    </button>
+                </div>
+            </div>
+        </>,
+        document.body,
+    ) : null;
 
     return (
         <>
-            <JournalAppearanceStyle appearance={previewAppearance} />
             <button
                 type="button"
                 onClick={() => {
-                    setDraft(normalizeAppearance(theme.journalAppearance));
-                    onPreviewPreset?.(theme.journalAppearance?.preset || 'original');
+                    setDraft(normalizeAppearance(previewAppearance || theme.journalAppearance));
                     setOpen(true);
                 }}
                 className={`sully-journal-appearance-button grid place-items-center rounded-full border transition-all active:scale-90 ${
@@ -423,6 +510,7 @@ const JournalAppearanceButton: React.FC<JournalAppearanceButtonProps> = ({
                 <GearSix size={compact ? 15 : 17} weight="bold" />
             </button>
             {panel}
+            {previewRescue}
         </>
     );
 };

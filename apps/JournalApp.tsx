@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { CharacterProfile, DiaryEntry, StickerData, DiaryPage, MemoryFragment } from '../types';
+import { CharacterProfile, DiaryEntry, StickerData, DiaryPage, MemoryFragment, type JournalAppearance } from '../types';
 import { ContextBuilder } from '../utils/context';
 import { processImage } from '../utils/file';
 import Modal from '../components/os/Modal';
@@ -15,7 +15,7 @@ import { getRoomLabel } from '../utils/memoryPalace/types';
 import { Sparkle, Archive } from '@phosphor-icons/react';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent } from '../utils/analytics';
-import JournalAppearanceButton from '../components/journal/JournalAppearanceEditor';
+import JournalAppearanceButton, { JournalAppearanceStyle } from '../components/journal/JournalAppearanceEditor';
 import JournalThemeArtwork from '../components/journal/JournalThemeArtwork';
 
 const INTRO_SEEN_KEY = 'journal_app_intro_seen_v4';
@@ -69,14 +69,22 @@ const getLocalDateStr = () => {
 
 const JournalApp: React.FC = () => {
     const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, updateCharacter, memoryPalaceConfig, characterGroups, theme } = useOS();
+    // 预览草稿只活在当前 JournalApp 会话里，不写 theme/localStorage。状态放在
+    // App 顶层，才能在选择页、列表页与书写页之间切换时继续预览同一套 CSS。
+    const [previewJournalAppearance, setPreviewJournalAppearance] = useState<JournalAppearance | undefined>();
+    const effectiveJournalAppearance = previewJournalAppearance || theme.journalAppearance;
     // 原本琥珀严格保留旧的单页结构；其它主题拥有各自的实体 / 设备版式。
-    const journalPreset = theme.journalAppearance?.preset || 'original';
-    const [previewJournalPreset, setPreviewJournalPreset] = useState<typeof journalPreset | undefined>();
-    const effectiveJournalPreset = previewJournalPreset || journalPreset;
+    const effectiveJournalPreset = effectiveJournalAppearance?.preset || 'original';
     const journalUsesScrapbookLayout = effectiveJournalPreset !== 'original';
     const journalLayoutClass = journalUsesScrapbookLayout
         ? ` sully-journal-designed sully-journal-theme-${effectiveJournalPreset}`
         : '';
+    const journalAppearanceButtonProps = {
+        previewAppearance: previewJournalAppearance,
+        isPreviewing: Boolean(previewJournalAppearance),
+        onStartPreview: setPreviewJournalAppearance,
+        onCancelPreview: () => setPreviewJournalAppearance(undefined),
+    };
 
     const [mode, setMode] = useState<'select' | 'calendar' | 'write'>('select');
     const [selectedChar, setSelectedChar] = useState<CharacterProfile | null>(null);
@@ -952,6 +960,7 @@ ${charPart}
     if (mode === 'select') {
         return (
             <div className={`sully-journal-root sully-journal-select h-full w-full bg-amber-50 flex flex-col font-light${journalLayoutClass}`}>
+                <JournalAppearanceStyle appearance={effectiveJournalAppearance} />
                 {introModal}
                 {archiveResultModal}
                 <JournalThemeArtwork preset={effectiveJournalPreset} scene="select" />
@@ -961,7 +970,7 @@ ${charPart}
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6 text-amber-900"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                         </button>
                         <span className="sully-journal-header-title font-bold text-amber-900 text-lg tracking-wide">选择日记本</span>
-                        <JournalAppearanceButton compact onPreviewPreset={setPreviewJournalPreset} />
+                        <JournalAppearanceButton compact {...journalAppearanceButtonProps} />
                     </div>
                 </div>
                 
@@ -987,6 +996,7 @@ ${charPart}
     if (mode === 'calendar' && selectedChar) {
         return (
             <div className={`sully-journal-root sully-journal-calendar h-full w-full bg-white flex flex-col font-light relative${journalLayoutClass}`}>
+                <JournalAppearanceStyle appearance={effectiveJournalAppearance} />
                 {introModal}
                 {archiveResultModal}
                 <JournalThemeArtwork preset={effectiveJournalPreset} scene="calendar" />
@@ -995,7 +1005,7 @@ ${charPart}
                          <button onClick={() => setMode('select')} aria-label="返回日记本选择" className="sully-journal-back text-white/80 hover:text-white transition-colors">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18" /></svg>
                          </button>
-                         <JournalAppearanceButton tone="dark" compact onPreviewPreset={setPreviewJournalPreset} />
+                         <JournalAppearanceButton tone="dark" compact {...journalAppearanceButtonProps} />
                     </div>
                     <div className="sully-journal-calendar-heading text-white">
                         <div className="sully-journal-calendar-kicker text-xs opacity-70 uppercase tracking-widest font-bold mb-1">Exchange Diary</div>
@@ -1068,6 +1078,7 @@ ${charPart}
     // --- WRITE MODE ---
     return (
         <div className={`sully-journal-root sully-journal-write h-full w-full bg-[#1a1a1a] flex flex-col relative overflow-hidden${journalLayoutClass}`}>
+            <JournalAppearanceStyle appearance={effectiveJournalAppearance} />
             {introModal}
             {archiveResultModal}
             <JournalThemeArtwork preset={effectiveJournalPreset} scene="write" />
@@ -1079,7 +1090,7 @@ ${charPart}
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                     </button>
                     <div className="flex gap-3">
-                        <JournalAppearanceButton tone="dark" compact onPreviewPreset={setPreviewJournalPreset} />
+                        <JournalAppearanceButton tone="dark" compact {...journalAppearanceButtonProps} />
                         {/* Toggle Char Sticker Visibility Button */}
                         {activeTab === 'char' && (
                             <button
