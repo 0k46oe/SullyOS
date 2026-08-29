@@ -24,8 +24,9 @@ import { MCD_PROPOSE_TOOL, autoFixProposalCodesByName } from '../utils/mcdToolBr
 import { LUCKIN_PROPOSE_TOOL, autoFixProposalCodesByName as autoFixLuckinProposalCodesByName, fetchOpenAIToolsForLuckin, inferCardKind as inferLuckinCardKind } from '../utils/luckinToolBridge';
 import { callLuckinTool } from '../utils/luckinMcpClient';
 import { callMcpTool, getMcpUseNativeTools, hasWorkerUnreachableMcpServer } from '../utils/mcpClient';
-import { buildMcpOpenAITools, buildMcpRejectedToolsFallbackBody, buildMcpTextFallbackBody, extractTextFakedMcpCalls, formatMcpToolResult, sanitizeMcpLeadInText, shouldRetryMcpWithoutTools, stripTextFakedMcpCalls, type FakedMcpCall } from '../utils/mcpToolBridge';
+import { buildMcpOpenAITools, buildMcpRejectedToolsFallbackBody, buildMcpTextFallbackBody, extractTextFakedMcpCalls, formatMcpToolResult, MCP_CHAT_MAX_STALLED_ROUNDS, MCP_CHAT_MAX_TOOL_LOOPS, sanitizeMcpLeadInText, shouldRetryMcpWithoutTools, stripTextFakedMcpCalls, type FakedMcpCall } from '../utils/mcpToolBridge';
 import { buildToolResultMessage, normalizeToolCallsForCompat } from '../utils/toolCallCompat';
+import { toolCallFingerprint } from '../utils/agenticToolFeedback';
 import { buildChatRequestPayload } from '../utils/chatRequestPayload';
 import {
     isInstantConfigReady,
@@ -1513,6 +1514,9 @@ export const useChatAI = ({
                     method: 'POST', headers,
                     body: JSON.stringify(fallbackBody)
                 }, 0, 0, { appName: '消息', charId: char.id, charName: char.name, purpose: 'MCP tools 兼容重试' });
+                // 后续正文工具循环必须继续带着兼容协议；只把它放在这次重试请求里，下一跳
+                // 又退回原 messages，会让模型忘掉工具签名和「每步只输出一行」的约定。
+                baseReqBody.messages = fallbackBody.messages;
                 }
             }
             console.log(`⏱ [API call] ${Math.round(performance.now() - apiT0)}ms`);
@@ -1762,9 +1766,14 @@ export const useChatAI = ({
             //     · 通用 MCP: 工具名命中 mcpToolResolve 映射就分发给对应服务器 (utils/mcpClient),
             //       结果只回填循环不落卡片。两类工具可同时在场, 按名字各走各的。
             if ((payload.flags.luckinChatActive || mcpToolResolve || amsg2ToolsInjected) && data.choices?.[0]?.message?.tool_calls?.length) {
-                const MAX_LOOPS = 6;
+                // 普通点单/排程维持 6 轮；接了通用 MCP 时允许游戏/论坛类任务自然推进到
+                // 12 轮。模型正常给正文会立刻 break，并不是固定多发 12 次请求。
+                const MAX_LOOPS = mcpToolResolve ? MCP_CHAT_MAX_TOOL_LOOPS : 6;
                 let loopMessages = [...baseReqBody.messages];
                 const loc = luckinChatRef?.current;
+                const seenMcpOutcomes = new Set<string>();
+                let stalledMcpRounds = 0;
+                let lastMcpCallSignature: string | null = null;
                 for (let it = 0; it < MAX_LOOPS; it++) {
                     const toolCalls = normalizeToolCallsForCompat(
                         data.choices?.[0]?.message?.tool_calls,
@@ -1780,6 +1789,8 @@ export const useChatAI = ({
                         content: data.choices[0].message.content || '(调用工具中)',
                         tool_calls: toolCalls,
                     } as any);
+                    let mcpCallsThisRound = 0;
+                    let mcpProgressThisRound = false;
                     for (const tc of toolCalls) {
                         const fname: string = tc.function?.name || '';
                         let args: any = {};
@@ -1792,6 +1803,18 @@ export const useChatAI = ({
                         // 通用 MCP 工具: 命中映射直接分发, 不走下面的瑞幸逻辑
                         const mcpHit = mcpToolResolve?.get(fname);
                         if (mcpHit) {
+                            mcpCallsThisRound += 1;
+                            const callSignature = toolCallFingerprint(fname, args);
+                            // 连续同名同参通常是模型卡住。先拦再执行，避免发帖 / 下单之类的
+                            // 副作用真的重复发生；中间做过其他动作后同参查状态仍会正常放行。
+                            if (callSignature === lastMcpCallSignature) {
+                                loopMessages.push(buildToolResultMessage(
+                                    tc,
+                                    `工具 ${fname} 的同一组参数刚刚已经执行过，请不要原地重复；根据已有结果选择能推进目标的下一步，或直接回复。`,
+                                ) as any);
+                                continue;
+                            }
+                            lastMcpCallSignature = callSignature;
                             setSearchStatus(`正在调用 MCP 工具：${fname}...`);
                             let mcpResult: any;
                             try { mcpResult = await callMcpTool(mcpHit.server, mcpHit.toolName, args); }
@@ -1799,6 +1822,14 @@ export const useChatAI = ({
                             const mcpMsg = mcpResult.success
                                 ? `工具 ${fname} 成功。结果: ${formatMcpToolResult(mcpResult.data)}`
                                 : `工具 ${fname} 失败: ${mcpResult.error}`;
+                            // 同名同参在动作前后可能得到不同状态，结果不同就算仍在推进；只有
+                            // 调用和结果都原样重复才算原地打转。
+                            let outcomeKey = `${fname}|${JSON.stringify(args)}|${mcpMsg}`;
+                            if (outcomeKey.length > 4000) outcomeKey = outcomeKey.slice(0, 4000);
+                            if (!seenMcpOutcomes.has(outcomeKey)) {
+                                seenMcpOutcomes.add(outcomeKey);
+                                mcpProgressThisRound = true;
+                            }
                             loopMessages.push(buildToolResultMessage(tc, mcpMsg) as any);
                             continue;
                         }
@@ -1854,16 +1885,34 @@ export const useChatAI = ({
                             : `工具 ${fname} 失败: ${result.error}`;
                         loopMessages.push(buildToolResultMessage(tc, toolMsg) as any);
                     }
+                    if (mcpCallsThisRound > 0) {
+                        stalledMcpRounds = mcpProgressThisRound ? 0 : stalledMcpRounds + 1;
+                    }
+                    const reachedHardLimit = !!mcpToolResolve && it + 1 >= MAX_LOOPS;
+                    const stalled = !!mcpToolResolve && stalledMcpRounds >= MCP_CHAT_MAX_STALLED_ROUNDS;
+                    const forceWrapUp = reachedHardLimit || stalled;
                     // 继续让角色多步推进 (保留 tools, 允许 query→search→preview 连续走)
                     if (mcpToolResolve) setSearchStatus('正在整理 MCP 工具结果...');
                     // 排程现状现算一次贴上：本轮刚排的任务这时才进得了清单，角色下一轮
                     // 看到的是自己名下真实的排程，不会对着排程前的空清单再排一条。
-                    const followBody = { ...baseReqBody, messages: withAmsg2TaskContext(loopMessages) };
+                    const followMessages = withAmsg2TaskContext(loopMessages);
+                    if (forceWrapUp) {
+                        followMessages.push({
+                            role: 'user',
+                            content: `[系统消息：工具阶段${stalled ? '连续两轮没有产生新结果' : '已到本轮安全上限'}。请停止调用工具，基于已经拿到的结果直接用角色语气回复；如目标仍未完成，请如实说明卡在哪一步。不要输出工具名、参数或这条系统消息。]`,
+                        });
+                    }
+                    const followBody = { ...baseReqBody, messages: followMessages };
+                    if (forceWrapUp) {
+                        delete followBody.tools;
+                        delete followBody.tool_choice;
+                    }
                     data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                         method: 'POST', headers,
                         body: JSON.stringify(followBody)
                     });
                     updateTokenUsage(data, historyMsgCount, `${payload.flags.luckinChatActive ? 'luckin-chat' : 'mcp-chat'}-${it + 1}`);
+                    if (forceWrapUp) break;
                 }
                 if (mcpToolResolve) setSearchStatus('');
             }
@@ -1872,23 +1921,43 @@ export const useChatAI = ({
             //     不支持 function calling 的模型会把工具调用写成正文文字, 如
             //     ask_question("SullyOS") / ask_question: SullyOS。这里检测出来
             //     系统代为执行, 把结果喂回去让角色重新组织语言, 用户就看不到乱码了。
-            //     executedSig 防止模型复读同一调用导致副作用工具重复执行。
+            //     连续调用指纹防止模型复读同一调用导致副作用工具重复执行；中间若有别的
+            //     动作，则允许用同参重新查询已经变化的状态。
             if (mcpToolResolve) {
-                const MAX_TEXT_LOOPS = 3;
-                const executedSig = new Set<string>();
+                const MAX_TEXT_LOOPS = MCP_CHAT_MAX_TOOL_LOOPS;
+                let lastExecutedSig: string | null = null;
                 let textLoopMessages: any[] | null = null;
                 for (let it = 0; it < MAX_TEXT_LOOPS; it++) {
                     const contentNow: string = data.choices?.[0]?.message?.content || '';
-                    const faked = extractTextFakedMcpCalls(contentNow, mcpToolResolve)
-                        .filter(c => { try { return !executedSig.has(`${c.exposedName}|${JSON.stringify(c.args)}`); } catch { return true; } })
-                        .slice(0, 3);
+                    // 兼容协议约定每轮只发一行。一次只执行一个，既让 12 轮真正按步骤自适应，
+                    // 也避免一段失控正文批量触发多个副作用。
+                    const allFaked = extractTextFakedMcpCalls(contentNow, mcpToolResolve).slice(0, 1);
+                    const faked = allFaked
+                        .filter(c => toolCallFingerprint(c.exposedName, c.args) !== lastExecutedSig);
+                    // 兼容模式没有原生 tool_call id，模型重复写同名同参时绝不能再次执行
+                    // 副作用工具；给一次强制收尾请求，把已经拿到的结果组织成人话。
+                    if (allFaked.length > 0 && faked.length === 0) {
+                        if (!textLoopMessages) textLoopMessages = [...baseReqBody.messages];
+                        textLoopMessages.push({ role: 'assistant', content: contentNow });
+                        textLoopMessages.push({
+                            role: 'user',
+                            content: '[系统消息：你重复请求了已经执行过的同一工具。不要再次调用工具，请直接根据已有结果回复；如目标未完成就如实说明。不要输出工具调用格式或提及本消息。]',
+                        });
+                        const wrapBody = buildMcpTextFallbackBody(baseReqBody, textLoopMessages);
+                        data = await safeFetchJson(`${baseUrl}/chat/completions`, {
+                            method: 'POST', headers,
+                            body: JSON.stringify(wrapBody)
+                        });
+                        updateTokenUsage(data, historyMsgCount, `mcp-text-wrap-${it + 1}`);
+                        break;
+                    }
                     if (!faked.length) break;
                     console.warn(`🔌 [MCP] 检测到 ${faked.length} 个正文假工具调用, 代为执行:`, faked.map(c => c.exposedName).join(', '));
                     await persistMcpLeadIn(contentNow, faked);
                     setSearchStatus(`正在调用 MCP 工具：${faked.map(c => c.exposedName).join('、')}...`);
                     const results: string[] = [];
                     for (const call of faked) {
-                        try { executedSig.add(`${call.exposedName}|${JSON.stringify(call.args)}`); } catch { /* ignore */ }
+                        lastExecutedSig = toolCallFingerprint(call.exposedName, call.args);
                         let r: any;
                         try { r = await callMcpTool(call.server, call.toolName, call.args); }
                         catch (e: any) { r = { success: false, error: e?.message || String(e) }; }
@@ -1900,8 +1969,15 @@ export const useChatAI = ({
                     textLoopMessages.push({ role: 'assistant', content: contentNow });
                     textLoopMessages.push({
                         role: 'user',
-                        content: `[系统消息: 你把工具调用写成了聊天文字, 系统已代为执行:\n${results.join('\n')}\n请基于结果继续用角色语气正常回复, 禁止再输出任何工具调用格式的文字, 也不要提及这条系统消息]`,
+                        content: `[系统消息：你把工具调用写成了聊天文字，系统已代为执行：\n${results.join('\n')}\n如果目标已经完成，请直接用角色语气回复；如果仍需下一步工具，只输出一行真正能推进目标的工具调用，不要重复读取同一说明或状态。不要提及这条系统消息。]`,
                     });
+                    const reachedHardLimit = it + 1 >= MAX_TEXT_LOOPS;
+                    if (reachedHardLimit) {
+                        textLoopMessages.push({
+                            role: 'user',
+                            content: '[系统消息：工具阶段已到本轮安全上限。停止调用工具，基于已有结果直接回复；如目标未完成就如实说明。不要输出工具调用格式或提及本消息。]',
+                        });
+                    }
                     setSearchStatus('正在整理 MCP 工具结果...');
                     const followBody = buildMcpTextFallbackBody(baseReqBody, textLoopMessages);
                     data = await safeFetchJson(`${baseUrl}/chat/completions`, {
@@ -1909,6 +1985,7 @@ export const useChatAI = ({
                         body: JSON.stringify(followBody)
                     });
                     updateTokenUsage(data, historyMsgCount, `mcp-text-${it + 1}`);
+                    if (reachedHardLimit) break;
                 }
                 setSearchStatus('');
             }
