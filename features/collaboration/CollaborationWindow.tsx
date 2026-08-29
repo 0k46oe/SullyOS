@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
   ArrowLeft,
@@ -72,6 +72,7 @@ import {
 } from './types';
 
 interface CollaborationWindowProps {
+  open: boolean;
   character: CharacterProfile;
   user: UserProfile;
   theme: ChatTheme;
@@ -436,7 +437,7 @@ const ModePicker: React.FC<{
            <div><dt className="font-semibold text-slate-700">这是什么？</dt><dd>独立在 ChatApp 外围的工作窗口。我仍然是 {character.name}，但会把更多注意力放在拆解、制作、检查和交付上。</dd></div>
            <div><dt className="font-semibold text-slate-700">两个模式差在哪？</dt><dd><b>沉浸式</b>会带日常聊天同款完整上下文和最近聊天，最像刚从聊天里一起过来；<b>中度</b>只记得我们是谁和最多 5 条相关记忆，更轻、更专心办事。</dd></div>
            <div><dt className="font-semibold text-slate-700">会进入角色记忆吗？</dt><dd>默认不会。你可以手动把内容发回聊天，让它走日常聊天自己的记忆流程；也可以在归档窗口时选择只写入一条总结。</dd></div>
-           <div><dt className="font-semibold text-slate-700">“当前聊天的有限协同桥接”有什么用？</dt><dd>开启后我会知道自己有协同文件柜，能看见、读取并在聊天里把我们已经做好的文件发给你；但我不能在聊天里直接调用制作能力，新建 Word、PDF 或美化仍要来这里。</dd></div>
+           <div><dt className="font-semibold text-slate-700">“让角色在日常聊天中知道协同功能”有什么用？</dt><dd>开启后，{character.name} 会知道你们另有一个独立工作区，也能读取并发送文件柜里已有的文件。普通聊天不会变成工作模式，不能在那里新建、修改或整理文件；真正干活仍要进入这里。</dd></div>
          </dl>
        </section>
 
@@ -471,12 +472,14 @@ const ApiSettingsPanel: React.FC<{
   settings: CollaborationSettings;
   character: CharacterProfile;
   user: UserProfile;
+  chatCollaborationEnabled: boolean;
   chatApi: APIConfig;
   apiPresets: ApiPreset[];
   availableModels: string[];
+  onToggleChatCollaboration: (enabled: boolean) => void;
   onSave: (settings: CollaborationSettings) => Promise<void>;
   onClose: () => void;
-}> = ({ settings, character, user, chatApi, apiPresets, availableModels, onSave, onClose }) => {
+}> = ({ settings, character, user, chatCollaborationEnabled, chatApi, apiPresets, availableModels, onToggleChatCollaboration, onSave, onClose }) => {
   const [draft, setDraft] = useState<CollaborationSettings>(() => ({
     ...settings,
     immersive: { ...settings.immersive },
@@ -547,7 +550,7 @@ const ApiSettingsPanel: React.FC<{
         </button>
         <div className="min-w-0 flex-1 px-2">
           <h2 className="text-[15px] font-semibold text-slate-800">协同设置</h2>
-          <p className="text-[10px] text-slate-400">界面风格全局生效；API 按协同模式独立配置</p>
+          <p className="text-[10px] text-slate-400">界面与聊天感知全局生效；API 按协同模式独立配置</p>
         </div>
         <button type="button" onClick={save} disabled={saving} className="rounded-full bg-slate-900 px-4 py-2 text-xs font-semibold text-white disabled:opacity-50">
           {saving ? '保存中' : '保存'}
@@ -650,6 +653,26 @@ const ApiSettingsPanel: React.FC<{
               </div>
             </div>
             <p className="mt-2 text-[9px] leading-4 text-slate-400">“跟随风格”只决定默认显示谁；头像形状仍由你选择。界面内不会显示第三方品牌 Logo。</p>
+          </section>
+
+          <section>
+            <div className="mb-3">
+              <h3 className="text-xs font-semibold text-slate-600">日常聊天感知</h3>
+              <p className="mt-0.5 text-[10px] text-slate-400">决定角色在普通聊天里是否知道协同入口和文件柜</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => onToggleChatCollaboration(!chatCollaborationEnabled)}
+              className="flex w-full items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white px-4 py-4 text-left active:bg-slate-50"
+            >
+              <span>
+                <span className="block text-sm font-semibold text-slate-700">让角色知道自己有协同功能</span>
+                <span className="mt-1 block text-[10px] leading-relaxed text-slate-500">开启后，角色会知道可以引导你从 ChatApp 加号页进入协同工作，也能读取、发送文件柜里已有的文件。不会向普通聊天注入制作规则，也不能在那里干活。</span>
+              </span>
+              <span className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${chatCollaborationEnabled ? 'bg-indigo-600' : 'bg-slate-200'}`}>
+                <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${chatCollaborationEnabled ? 'translate-x-[22px]' : 'translate-x-0.5'}`} />
+              </span>
+            </button>
           </section>
 
           <section>
@@ -784,11 +807,9 @@ const AttachmentButton: React.FC<{
 
 const MakerStudio: React.FC<{
   activeKind?: CollaborationMakerKind;
-  chatCollaborationEnabled: boolean;
   onChoose: (kind: CollaborationMakerKind) => void;
-  onToggleChatCollaboration: (enabled: boolean) => void;
   onClose: () => void;
-}> = ({ activeKind, chatCollaborationEnabled, onChoose, onToggleChatCollaboration, onClose }) => (
+}> = ({ activeKind, onChoose, onClose }) => (
   <div className="absolute inset-0 z-[70] flex flex-col bg-[#f7f8fb] animate-[collabFade_.18s_ease-out]">
     <header className="collab-safe-header flex h-16 shrink-0 items-center border-b border-slate-200/80 bg-white/90 px-3 backdrop-blur-xl">
       <button type="button" onClick={onClose} className="grid h-10 w-10 place-items-center rounded-full text-slate-600 active:bg-slate-100" aria-label="返回"><ArrowLeft size={22} /></button>
@@ -807,16 +828,6 @@ const MakerStudio: React.FC<{
           ))}
         </div>
         <p className="mt-5 text-[10px] leading-relaxed text-slate-400">作品会先留在协同窗口里。只有你点「预览」并确认「使用该作品」后，才会写入角色或对应的原生预设。</p>
-        <div className="mt-8 border-t border-slate-200 pt-5">
-          <button
-            type="button"
-            onClick={() => onToggleChatCollaboration(!chatCollaborationEnabled)}
-            className="flex w-full items-center justify-between gap-4 text-left"
-          >
-            <span><span className="block text-sm font-semibold text-slate-700">让当前聊天具备有限协同桥接</span><span className="mt-1 block text-[10px] leading-relaxed text-amber-700">只强化办事，并允许角色查看、读取和发送文件柜已有文件；不能在聊天里现场新建 Word、PDF、美化或可安装作品。提示词较多，也可能分散日常陪伴的注意力。</span></span>
-            <span className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${chatCollaborationEnabled ? 'bg-indigo-600' : 'bg-slate-200'}`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${chatCollaborationEnabled ? 'translate-x-[22px]' : 'translate-x-0.5'}`} /></span>
-          </button>
-        </div>
       </div>
     </div>
   </div>
@@ -1351,6 +1362,7 @@ const SessionDrawer: React.FC<{
 };
 
 const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
+  open,
   character,
   user,
   theme,
@@ -1405,6 +1417,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
   const actionDialogRef = useRef<CollaborationDialogState | null>(null);
   const collaborationAudioRef = useRef<HTMLAudioElement | null>(null);
   const collaborationVoiceBlobUrlsRef = useRef<Set<string>>(new Set());
+  const previousOpenRef = useRef(false);
 
   const requestActionDialog = useCallback((request: CollaborationDialogRequest): Promise<CollaborationDialogResult> => (
     new Promise(resolve => {
@@ -1425,6 +1438,34 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
   useEffect(() => {
     notifyRef.current = notify;
   }, [notify]);
+
+  // The sidecar stays mounted (and preloaded) while ChatApp is open. Reset the
+  // route before paint on every re-entry so the previous thread never flashes
+  // for one frame before the new/old-session chooser appears.
+  useLayoutEffect(() => {
+    const justOpened = open && !previousOpenRef.current;
+    previousOpenRef.current = open;
+    if (!justOpened || !loaded) return;
+    setActiveSessionId(null);
+    setMessages([]);
+    setDrawerOpen(false);
+    setLibraryOpen(false);
+    setSettingsOpen(false);
+    setMakerOpen(false);
+    setPreviewArtifact(null);
+    setShowEntryChooser(sessions.length > 0);
+    setShowModePicker(sessions.length === 0);
+  }, [loaded, open, sessions.length]);
+
+  useEffect(() => {
+    if (open) return;
+    abortCollaborationRequest(abortRef.current, '协同窗口已关闭');
+    collaborationAudioRef.current?.pause();
+    setPlayingVoiceId(null);
+    actionDialogRef.current?.resolve('cancel');
+    actionDialogRef.current = null;
+    setActionDialog(null);
+  }, [open]);
 
   // Only an actual character switch / sidecar unmount may stop an in-flight
   // request. Ordinary OSContext rerenders (including API call logging) must not.
@@ -1536,6 +1577,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
 
   useEffect(() => {
     let cancelled = false;
+    setLoaded(false);
     Promise.all([
       CollaborationStore.listSessions(character.id),
       CollaborationStore.listCategories(),
@@ -1846,9 +1888,9 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
       return;
     }
     const choice = await requestActionDialog({
-      title: '在日常聊天开启有限协同？',
-      description: `${character.name} 会知道自己有协同文件柜，能查看、读取并发送已经做好的文件。`,
-      detail: '这不等于把完整工作室搬进聊天：不能现场新建 Word、PDF、美化或可安装作品。额外提示词也可能分散日常陪伴的注意力。',
+      title: `让 ${character.name} 在日常聊天中知道协同功能？`,
+      description: `${character.name} 会知道你们另有一个独立工作区，也能读取并发送文件柜里已经做好的文件。`,
+      detail: '普通聊天不会因此变成工作模式：不能在那里新建、修改、整理或重新导出 Word、PDF、美化和可安装作品。真正干活仍要进入「协同工作」。',
       confirmLabel: '仍然开启',
       cancelLabel: '暂不开启',
       tone: 'warning',
@@ -2057,6 +2099,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
       ? '正在发送表情包…'
       : '正在制作作品…';
 
+  if (!open) return null;
+
   if (!loaded) {
     return <div className="absolute inset-0 z-[120] grid place-items-center bg-[#f7f8fb]"><SpinnerGap size={28} className="animate-spin text-slate-400" /></div>;
   }
@@ -2231,16 +2275,18 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
           settings={settings}
           character={character}
           user={user}
+          chatCollaborationEnabled={chatCollaborationEnabled}
           chatApi={chatApi}
           apiPresets={apiPresets}
           availableModels={availableModels}
+          onToggleChatCollaboration={enabled => void toggleChatCollaboration(enabled)}
           onSave={saveSettings}
           onClose={() => setSettingsOpen(false)}
         />
       )}
 
       {makerOpen && activeSession && (
-        <MakerStudio activeKind={activeSession.makerKind} chatCollaborationEnabled={chatCollaborationEnabled} onChoose={kind => void chooseMaker(kind)} onToggleChatCollaboration={enabled => void toggleChatCollaboration(enabled)} onClose={() => setMakerOpen(false)} />
+        <MakerStudio activeKind={activeSession.makerKind} onChoose={kind => void chooseMaker(kind)} onClose={() => setMakerOpen(false)} />
       )}
 
       {previewArtifact && (

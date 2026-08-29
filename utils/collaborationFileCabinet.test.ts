@@ -48,16 +48,19 @@ describe('current-chat collaboration file cabinet', () => {
     expect(resolveCollaborationFileByTitle(files, '项目说名.pdf')).toBeNull();
   });
 
-  it('shows every title but expands full content only on title mention or a recent delivery', () => {
+  it('shows every title but expands exact content only for a title mention or recent delivery', () => {
     const files = [
       file('项目说明.pdf', 'asset-1', '这是项目说明的完整正文。'),
       file('预算.docx', 'asset-2', '这是预算正文。'),
+      file('会议纪要.docx', 'asset-3', '这是会议纪要正文。'),
+      file('旧方案.pdf', 'asset-4', '这是旧方案正文。'),
     ];
     const byTitle = buildCollaborationFileCabinetBlock(files, [message({ content: '顺便看看《项目说明》里写了什么' })], '条条');
     expect(byTitle).toContain('《项目说明.pdf》');
     expect(byTitle).toContain('《预算.docx》');
     expect(byTitle).toContain('这是项目说明的完整正文。');
     expect(byTitle).not.toContain('#### 《预算.docx》的可读内容');
+    expect(byTitle).not.toContain('#### 《旧方案.pdf》的可读内容');
 
     const afterDelivery = buildCollaborationFileCabinetBlock(files, [message({
       role: 'assistant',
@@ -66,6 +69,8 @@ describe('current-chat collaboration file cabinet', () => {
       metadata: { collaborationAssetId: 'asset-2', fileName: '预算.docx' },
     })], '条条');
     expect(afterDelivery).toContain('#### 《预算.docx》的可读内容');
+    expect(afterDelivery).toContain('这是预算正文。');
+    expect(afterDelivery).not.toContain('#### 《项目说明.pdf》的可读内容');
   });
 
   it('uses the actual user profile name in the character-facing prompt', () => {

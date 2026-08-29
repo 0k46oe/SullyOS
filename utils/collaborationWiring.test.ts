@@ -15,6 +15,42 @@ describe('collaboration sidecar wiring', () => {
     expect(hook).not.toContain('collaborationApi');
   });
 
+  it('preloads the sidecar while closed and resets to the entry chooser before repaint', () => {
+    const chat = read('apps/Chat.tsx');
+    const windowSource = read('features/collaboration/CollaborationWindow.tsx');
+    expect(chat).toContain('{char && (');
+    expect(chat).toContain('open={collaborationOpen}');
+    expect(windowSource).toContain('useLayoutEffect(() =>');
+    expect(windowSource).toContain('const justOpened = open && !previousOpenRef.current');
+    expect(windowSource).toContain('setShowEntryChooser(sessions.length > 0)');
+    expect(windowSource).toContain('if (!open) return null');
+  });
+
+  it('keeps ordinary-chat awareness in collaboration settings and out of the maker picker', () => {
+    const windowSource = read('features/collaboration/CollaborationWindow.tsx');
+    const settingsStart = windowSource.indexOf('const ApiSettingsPanel');
+    const makerStart = windowSource.indexOf('const MakerStudio');
+    const makerEnd = windowSource.indexOf('const CHARACTER_PICKER_PAGE_SIZE');
+    expect(windowSource.slice(settingsStart, makerStart)).toContain('日常聊天感知');
+    expect(windowSource.slice(settingsStart, makerStart)).toContain('让角色知道自己有协同功能');
+    expect(windowSource.slice(makerStart, makerEnd)).not.toContain('日常聊天感知');
+    expect(windowSource.slice(makerStart, makerEnd)).not.toContain('chatCollaborationEnabled');
+  });
+
+  it('injects only capability/file awareness into normal chat, not collaboration execution rules', () => {
+    const prompts = read('utils/chatPrompts.ts');
+    const context = read('features/collaboration/context.ts');
+    const awarenessStart = prompts.indexOf('### 你知道「协同工作」功能');
+    const awarenessEnd = prompts.indexOf('`;', awarenessStart);
+    const awareness = prompts.slice(awarenessStart, awarenessEnd);
+    expect(awareness).toContain('从 ChatApp 加号页进入');
+    expect(awareness).toContain('不要在普通聊天里执行或假装执行这些工作');
+    expect(awareness).not.toContain('主动拆解');
+    expect(awareness).not.toContain('artifact');
+    expect(context).toContain('const COLLABORATION_PROTOCOL = `### 协同工作规则');
+    expect(context).toContain('chatCollaborationEnabled: false');
+  });
+
   it('keeps collaboration persistence in its own IndexedDB database', () => {
     const store = read('features/collaboration/store.ts');
     expect(store).toContain("const DB_NAME = 'SullyOS_Collaboration'");
@@ -153,7 +189,8 @@ describe('collaboration sidecar wiring', () => {
     expect(windowSource).toContain('这是什么？');
     expect(windowSource).toContain('两个模式差在哪？');
     expect(windowSource).toContain('会进入角色记忆吗？');
-    expect(windowSource).toContain('我不能在聊天里直接调用制作能力');
+    expect(windowSource).toContain('普通聊天不会变成工作模式');
+    expect(windowSource).toContain('真正干活仍要进入这里');
   });
 
   it('opens on a new-or-history chooser when records exist instead of resuming the latest one', () => {
@@ -212,9 +249,9 @@ describe('collaboration sidecar wiring', () => {
     const types = read('types.ts');
     expect(types).toContain('chatCollaborationEnabled?: boolean');
     expect(prompts).toContain('if (char.chatCollaborationEnabled)');
-    expect(prompts).toContain('不能凭空伪造“已生成文件/已上传附件”');
-    expect(windowSourceForDailyMode()).toContain('有限协同桥接');
-    expect(windowSourceForDailyMode()).toContain('不能在聊天里现场新建 Word、PDF、美化或可安装作品');
+    expect(prompts).toContain('不要在普通聊天里执行或假装执行这些工作');
+    expect(windowSourceForDailyMode()).toContain('日常聊天感知');
+    expect(windowSourceForDailyMode()).toContain('不会向普通聊天注入制作规则，也不能在那里干活');
   });
 
   it('uses the same iOS safe-top contract as ChatApp for every collaboration header', () => {
