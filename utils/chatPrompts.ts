@@ -964,7 +964,7 @@ ${xhsEnabled ? `${[notionEnabled, feishuEnabled, notionNotesEnabled].filter(Bool
             baseSystemPrompt += `
 
 ### 协同功能
-你在普通聊天。需要处理文件时，可引导用户从 ChatApp 加号页进入“协同工作”；不要在这里假装制作。系统另给已有文件标题，可按规则发送。
+你在普通聊天。需要处理文件时，可引导${userProfile.name}从 ChatApp 加号页进入“协同工作”；不要在这里假装制作。系统另给已有文件标题，可按规则发送。
 `;
         }
 

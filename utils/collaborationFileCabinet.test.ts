@@ -91,6 +91,24 @@ describe('current-chat collaboration file cabinet', () => {
     expect(block).not.toContain('引导「用户」');
   });
 
+  it('does not truncate or cap explicitly requested readable file bodies', () => {
+    const longBody = `开头-${'正文'.repeat(7_000)}-结尾`;
+    const files = [
+      file('长文档.pdf', 'asset-10', longBody),
+      file('第二份.pdf', 'asset-11', '第二份全文'),
+      file('第三份.pdf', 'asset-12', '第三份全文'),
+      file('第四份.pdf', 'asset-13', '第四份全文'),
+    ];
+    const block = buildCollaborationFileCabinetBlock(files, [message({
+      content: '读取《长文档》《第二份》《第三份》《第四份》',
+    })], '条条');
+    expect(block).toContain(longBody);
+    expect(block).toContain('第二份全文');
+    expect(block).toContain('第三份全文');
+    expect(block).toContain('第四份全文');
+    expect(block).not.toContain('已截断');
+  });
+
   it('keeps chat message metadata reference-only', () => {
     const metadata = collaborationFileMessageMetadata(file('交付.pdf', 'asset-9', '很长的正文'));
     expect(metadata.collaborationAssetId).toBe('asset-9');

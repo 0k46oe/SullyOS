@@ -3,9 +3,6 @@ import { CollaborationStore } from './store';
 import type { CollaborationLibraryFile } from './types';
 
 const FILE_DIRECTIVE_RE = /\[\[(?:COLLAB_FILE|协同文件)\s*[:：]\s*([^\]\r\n]+?)\s*\]\]/gi;
-const MAX_FULL_TEXT_FILES = 3;
-const MAX_FULL_TEXT_CHARS = 12_000;
-
 const stripTitleWrapper = (value: string): string => value
   .trim()
   .replace(/^[《「『“"'`]+/, '')
@@ -132,18 +129,14 @@ export const buildCollaborationFileCabinetBlock = (
     return `\n\n### 协同文件\n当前无文件。需要制作时，引导「${displayUserName}」从 ChatApp 加号页进入“协同工作”。`;
   }
 
-  const fullContextFiles = selectFilesForFullContext(files, historyMessages).slice(0, MAX_FULL_TEXT_FILES);
+  const fullContextFiles = selectFilesForFullContext(files, historyMessages);
   const inventory = files.map(file => `- 《${file.name}》`).join('\n');
 
-  let usedChars = 0;
   const fullTextBlocks: string[] = [];
   fullContextFiles.forEach(file => {
     const source = (file.extractedText || '').trim();
-    if (!source || usedChars >= MAX_FULL_TEXT_CHARS) return;
-    const excerpt = source.slice(0, MAX_FULL_TEXT_CHARS - usedChars);
-    usedChars += excerpt.length;
-    const clipped = excerpt.length < source.length ? '\n[正文因上下文长度限制已截断]' : '';
-    fullTextBlocks.push(`#### 《${file.name}》的可读内容\n<collaboration-file-content title="${file.name.replace(/"/g, '&quot;')}">\n${excerpt}${clipped}\n</collaboration-file-content>`);
+    if (!source) return;
+    fullTextBlocks.push(`#### 《${file.name}》的可读内容\n<collaboration-file-content title="${file.name.replace(/"/g, '&quot;')}">\n${source}\n</collaboration-file-content>`);
   });
 
   return `\n\n### 协同文件

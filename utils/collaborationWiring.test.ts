@@ -44,6 +44,7 @@ describe('collaboration sidecar wiring', () => {
     const awarenessEnd = prompts.indexOf('`;', awarenessStart);
     const awareness = prompts.slice(awarenessStart, awarenessEnd);
     expect(awareness).toContain('从 ChatApp 加号页进入');
+    expect(awareness).toContain('${userProfile.name}从 ChatApp 加号页进入');
     expect(awareness).toContain('不要在这里假装制作');
     expect(awareness).not.toContain('主动拆解');
     expect(awareness).not.toContain('artifact');
