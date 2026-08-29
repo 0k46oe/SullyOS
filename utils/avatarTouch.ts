@@ -16,7 +16,7 @@ import {
   inferAvatarPerformanceFromText,
   type AvatarPerformanceDirection,
 } from './avatarPerformance';
-import { voiceLanguageLabel } from './voiceLanguage';
+import { voiceLanguagePromptLabel } from './voiceLanguage';
 
 export const AVATAR_TOUCH_ZONES = ['head', 'face', 'hand', 'body', 'other'] as const;
 export type AvatarTouchZone = typeof AVATAR_TOUCH_ZONES[number];
@@ -530,7 +530,7 @@ export const buildAvatarTouchReactionPackPrompt = (
     ? modelActions.slice(0, 60).map(formatAvatarTouchModelAction).join('\n')
     : '（当前没有模型专属动作）';
   const zoneList = zones.map(zone => `- ${zone}: ${avatarTouchZoneLabel(zone)}`).join('\n');
-  const spokenLanguage = voiceLanguage ? voiceLanguageLabel(voiceLanguage) : '简体中文（与原文一致）';
+  const spokenLanguage = voiceLanguage ? voiceLanguagePromptLabel(voiceLanguage) : '简体中文（与原文一致）';
   const schema = Object.fromEntries(zones.map(zone => [
     zone,
     Array.from({ length: reactionsPerZone }, (_, index) => {

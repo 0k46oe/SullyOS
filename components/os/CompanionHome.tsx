@@ -57,7 +57,7 @@ import TokenImg from './TokenImg';
 import { hslToHex, hueFromGradient, hueFromImage, normalizeHue } from '../../utils/dominantHue';
 import { characterHasVoice } from '../../utils/ttsRouter';
 import { CallAudioFeed } from '../../utils/callAudioFeed';
-import { VOICE_LANGUAGE_OPTIONS, voiceLanguageLabel } from '../../utils/voiceLanguage';
+import { VOICE_LANGUAGE_OPTIONS, voiceLanguageAnalyticsValue, voiceLanguageLabel } from '../../utils/voiceLanguage';
 import {
   generateCompanionStartupVoice,
   createAvatarTouchVoiceUrl,
@@ -2822,6 +2822,7 @@ const CompanionHome: React.FC = () => {
                 onChange={event => {
                   setSelectedStartupPresetId('');
                   setStartupVoiceLanguage(event.target.value);
+                  trackEvent('设置桌面陪伴语音语种', { 用途: '开机', 语种: voiceLanguageAnalyticsValue(event.target.value) });
                 }}
                 className="mt-1 w-full border border-white/12 bg-[#151021] px-3 py-2 text-[10px] text-white/82 outline-none disabled:opacity-45"
               >
@@ -3200,6 +3201,7 @@ const CompanionHome: React.FC = () => {
               onChange={event => {
                 setSelectedTouchPresetId('');
                 setTouchVoiceLanguage(event.target.value);
+                trackEvent('设置桌面陪伴语音语种', { 用途: '触摸', 语种: voiceLanguageAnalyticsValue(event.target.value) });
               }}
               className="mt-1 w-full border border-white/12 bg-[#151021] px-3 py-2 text-[10px] text-white/82 outline-none disabled:opacity-45"
             >

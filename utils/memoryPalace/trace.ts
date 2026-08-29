@@ -22,6 +22,7 @@ export const DEFAULT_MEMORY_PALACE_FEATURE_FLAGS: MemoryPalaceFeatureFlags = Obj
 
 export type RecallEntryPoint =
     | 'chat_app'
+    | 'collaboration'
     | 'emotion_eval'
     | 'proactive_chat'
     | 'vr_world'

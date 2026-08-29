@@ -98,6 +98,7 @@ function poisonedSources(overrides: Partial<FeatureSources> = {}): FeatureSource
         // Worker 地址和共享密钥同样是用户填的，一起塞毒药。即时对话开关是布尔，
         // 放个 true 让「即时对话」那一格也走一遍扫毒。
         amsg2Global: { workerUrl: POISON.url, initializedAt: 1_700_000_000_000, instantChatEnabled: true },
+        collaborationUsage: { sessions: 2, messages: 9, assets: 1 },
         ...overrides,
     };
 }
@@ -227,6 +228,26 @@ describe('当前功能启用 · 三态不能塌成两态', () => {
 });
 
 describe('当前功能启用 · 开关值的判定', () => {
+    it('智能语境区分全开、部分开和全关', () => {
+        expect(collectFeatureFlags(poisonedSources({
+            memoryPalaceConfig: { featureFlags: { recallRouter: true, interactionAdaptation: true, deepEngagement: true } },
+        })).智能语境).toBe('全开');
+        expect(collectFeatureFlags(poisonedSources({
+            memoryPalaceConfig: { featureFlags: { recallRouter: true } },
+        })).智能语境).toBe('部分开');
+        expect(collectFeatureFlags(poisonedSources({ memoryPalaceConfig: {} })).智能语境).toBe('全关');
+    });
+
+    it('协同工作只报 count 分桶，不读取窗口、消息或文件内容', () => {
+        const flags = collectFeatureFlags(poisonedSources({
+            collaborationUsage: { sessions: 2, messages: 18, assets: 1 },
+        }));
+        expect(flags.协同工作).toBe('用过');
+        expect(flags.协同窗口数).toBe('2-3');
+        expect(flags.协同消息数).toBe('4+');
+        expect(flags.协同文件数).toBe('1');
+    });
+
     it("QQ 桥的 enabled 存 '0' 时算关着，不能当成「有值就是开」", () => {
         localStorage.setItem('qqBridge:wsUrl', POISON.url);
         localStorage.setItem('qqBridge:enabled', '0');
@@ -388,6 +409,16 @@ describe('当前角色设置 · 不泄漏角色内容', () => {
             'active',
         );
         expect(flags.定时消息任务数).toBe('4+');
+    });
+
+    it('日常聊天协同和粤语只报有没有角色使用，不报是哪个角色', () => {
+        const flags = collectCharSettings([
+            poisonedChar(),
+            poisonedChar({ chatCollaborationEnabled: true, chatVoiceLang: 'yue' }),
+        ], 'c1');
+        expect(flags.日常聊天协同).toBe('有人开');
+        expect(flags.粤语语音).toBe('有人选');
+        expectNoLeak(flags);
     });
 });
 

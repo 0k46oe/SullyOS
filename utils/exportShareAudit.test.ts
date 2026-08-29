@@ -12,7 +12,7 @@ const walk = (directory: string): string[] => readdirSync(directory).flatMap(nam
 describe('文件导出统一分享适配', () => {
     it('业务代码不再直接触发 anchor.download', () => {
         const forbidden = ['.down', 'load ='].join('');
-        const sourceRoots = ['apps', 'components', 'context', 'utils'];
+        const sourceRoots = ['apps', 'components', 'context', 'features', 'utils'];
         const violations = sourceRoots
             .flatMap(root => walk(`${projectRoot}/${root}`))
             .filter(path => /\.(?:ts|tsx)$/.test(path))

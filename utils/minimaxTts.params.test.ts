@@ -65,7 +65,13 @@ describe('MiniMax parameter versions', () => {
   it('maps project language codes to official MiniMax values', () => {
     expect(normalizeMiniMaxLanguageBoost('en')).toBe('English');
     expect(normalizeMiniMaxLanguageBoost('ko')).toBe('Korean');
+    expect(normalizeMiniMaxLanguageBoost('yue')).toBe('Chinese,Yue');
     expect(normalizeMiniMaxLanguageBoost('French')).toBe('French');
+  });
+
+  it('uses the official Cantonese enum on both parameter versions', () => {
+    expect(buildMiniMaxTtsPayload('今日去饮茶。', profile(), { languageBoost: 'yue' }).language_boost).toBe('Chinese,Yue');
+    expect(buildMiniMaxTtsPayload('今日去饮茶。', profile({ minimaxParamVersion: 'natural-v2' }), { languageBoost: 'yue' }).language_boost).toBe('Chinese,Yue');
   });
 
   it('separates natural-v2 audio from legacy cache entries', () => {

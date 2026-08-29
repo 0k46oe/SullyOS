@@ -13,6 +13,7 @@ const DEFAULT_MODEL = 'speech-2.8-hd';
 // 多语言试听样例：点一下切换试听文本 + 对应 language_boost，方便听不同语种下的发音
 const PREVIEW_SAMPLES: { code: string; label: string; boost: string; text: string }[] = [
   { code: 'zh', label: '中文', boost: 'Chinese', text: '你好呀，这是捏出来的新声音，听听看喜不喜欢？' },
+  { code: 'yue', label: '粤语', boost: 'Chinese,Yue', text: '你好呀，呢把聲係我啱啱整好嘅，聽下鍾唔鍾意？' },
   { code: 'en', label: 'English', boost: 'English', text: 'Hey, this is the new voice I just put together — what do you think?' },
   { code: 'ja', label: '日本語', boost: 'Japanese', text: 'こんにちは、これは新しく作った声だよ。気に入ってくれるといいな。' },
   { code: 'ko', label: '한국어', boost: 'Korean', text: '안녕, 이건 내가 새로 만든 목소리야. 마음에 들었으면 좋겠다.' },
