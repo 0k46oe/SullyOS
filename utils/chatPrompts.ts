@@ -963,9 +963,8 @@ ${xhsEnabled ? `${[notionEnabled, feishuEnabled, notionNotesEnabled].filter(Bool
         if (char.chatCollaborationEnabled) {
             baseSystemPrompt += `
 
-### 你知道「协同工作」功能
-你现在在普通聊天窗口。你知道自己可以和用户进入独立的「协同工作」区域办正事；遇到需要制作、修改或整理文件的需求，可以自然地引导用户从 ChatApp 加号页进入那里。不要在普通聊天里执行或假装执行这些工作。
-系统会另行告诉你当前文件柜里有哪些已有文件以及哪些正文实际可读；你可以把清单中的已有文件发给用户。没有清单时不要猜文件。
+### 协同功能
+你在普通聊天。需要处理文件时，可引导用户从 ChatApp 加号页进入“协同工作”；不要在这里假装制作。系统另给已有文件标题，可按规则发送。
 `;
         }
 

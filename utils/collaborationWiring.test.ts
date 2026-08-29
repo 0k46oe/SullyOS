@@ -40,11 +40,11 @@ describe('collaboration sidecar wiring', () => {
   it('injects only capability/file awareness into normal chat, not collaboration execution rules', () => {
     const prompts = read('utils/chatPrompts.ts');
     const context = read('features/collaboration/context.ts');
-    const awarenessStart = prompts.indexOf('### 你知道「协同工作」功能');
+    const awarenessStart = prompts.indexOf('### 协同功能');
     const awarenessEnd = prompts.indexOf('`;', awarenessStart);
     const awareness = prompts.slice(awarenessStart, awarenessEnd);
     expect(awareness).toContain('从 ChatApp 加号页进入');
-    expect(awareness).toContain('不要在普通聊天里执行或假装执行这些工作');
+    expect(awareness).toContain('不要在这里假装制作');
     expect(awareness).not.toContain('主动拆解');
     expect(awareness).not.toContain('artifact');
     expect(context).toContain('const COLLABORATION_PROTOCOL = `### 协同工作规则');
@@ -249,7 +249,7 @@ describe('collaboration sidecar wiring', () => {
     const types = read('types.ts');
     expect(types).toContain('chatCollaborationEnabled?: boolean');
     expect(prompts).toContain('if (char.chatCollaborationEnabled)');
-    expect(prompts).toContain('不要在普通聊天里执行或假装执行这些工作');
+    expect(prompts).toContain('不要在这里假装制作');
     expect(windowSourceForDailyMode()).toContain('日常聊天感知');
     expect(windowSourceForDailyMode()).toContain('不会向普通聊天注入制作规则，也不能在那里干活');
   });
