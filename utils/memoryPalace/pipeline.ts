@@ -1188,11 +1188,12 @@ export async function injectMemoryPalace(
     }
 
     let explicitEntityAnalysis: ExplicitEntityAnalysis | undefined;
+    const interactiveRecall = trace.entryPoint === 'chat_app' || trace.entryPoint === 'collaboration';
     if (!trace.featureFlagsSnapshot.recallRouter) {
         trace.explicitEntityRecall = { status: 'disabled' };
         trace.eventBoxMetadataRecall = { status: 'disabled' };
         trace.recallResolver = { status: 'disabled' };
-    } else if (trace.entryPoint !== 'chat_app') {
+    } else if (!interactiveRecall) {
         trace.explicitEntityRecall = { status: 'out_of_scope' };
         trace.eventBoxMetadataRecall = { status: 'out_of_scope' };
         trace.recallResolver = { status: 'out_of_scope' };
@@ -1246,7 +1247,7 @@ export async function injectMemoryPalace(
 
     if (!trace.featureFlagsSnapshot.interactionAdaptation) {
         trace.interactionAdaptation = { status: 'disabled' };
-    } else if (trace.entryPoint !== 'chat_app') {
+    } else if (!interactiveRecall) {
         trace.interactionAdaptation = { status: 'out_of_scope' };
     } else {
         const interactionStartedAt = performance.now();
@@ -1275,7 +1276,7 @@ export async function injectMemoryPalace(
 
     if (!trace.featureFlagsSnapshot.deepEngagement) {
         trace.deepEngagement = { status: 'disabled' };
-    } else if (trace.entryPoint !== 'chat_app') {
+    } else if (!interactiveRecall) {
         trace.deepEngagement = { status: 'out_of_scope' };
     } else {
         const depthStartedAt = performance.now();

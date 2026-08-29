@@ -24,6 +24,7 @@ import { getLocalDateKey } from './localDate';
 import { getDailyScheduleForChar } from './dailySchedule';
 import { formatRelativeAge } from './groupChat/relativeTime';
 import { isBlobRef } from './blobRef';
+import { voiceLanguagePromptLabel } from './voiceLanguage';
 
 // 语音格式指导按当前 TTS 服务商二选一：用 MiniMax 才注入 MiniMax 那套（含 <#秒#> 停顿标记），
 // 用鱼声则注入鱼声版（去掉 MiniMax 专属标记，改用标点 / 省略号控制停顿）。
@@ -959,6 +960,16 @@ ${xhsEnabled ? `${[notionEnabled, feishuEnabled, notionNotesEnabled].filter(Bool
 
 `;
 
+        if (char.chatCollaborationEnabled) {
+            baseSystemPrompt += `
+
+### 当前聊天已开启「协同工作能力」
+用户主动允许你在日常 ChatApp 中兼顾陪伴与办事。遇到明确任务时，把可靠完成任务放在单纯延续气氛之前：主动澄清目标、拆解步骤、检查遗漏，并直接给出可执行的成品内容；只有缺少会实质改变结果的信息时才追问。
+你仍然是角色本人，保持自己的判断、语言习惯和关系立场，不要变成客服，也不要为了演绎而拖延任务。没有任务时照常聊天，不要擅自把每句话都项目化。
+当前 ChatApp 不能凭空伪造“已生成文件/已上传附件”。每一轮会另行提供实时「协同文件柜」清单：清单中已有的文件可以由你主动、自然地作为真实文件卡交给用户；新建、改写、重新导出 Word/PDF 或制作可安装美化，仍应去独立「协同工作」窗口完成。没有看到文件柜清单时绝不能猜标题或伪造文件。
+`;
+        }
+
         // 特殊模式结束后的第一轮必须把输出格式重新锚定到 ChatApp。
         // 主聊天路径会从完整 DB 历史算好 returningFromMode；直接调用 ChatPrompts 的旧路径
         // 则用 currentMsgs 兜底。不能再看固定的倒数第二条：用户可能连续发多个气泡，界面
@@ -980,9 +991,8 @@ ${xhsEnabled ? `${[notionEnabled, feishuEnabled, notionNotesEnabled].filter(Bool
 
         // Voice message prompt injection
         if (char.chatVoiceEnabled) {
-            const VOICE_LANG_LABELS: Record<string, string> = { en: 'English', ja: '日本語', ko: '한국어', fr: 'Français', es: 'Español', de: 'Deutsch', ru: 'Русский' };
             const voiceLang = char.chatVoiceLang || '';
-            const langLabel = voiceLang ? (VOICE_LANG_LABELS[voiceLang] || voiceLang) : '';
+            const langLabel = voiceLang ? voiceLanguagePromptLabel(voiceLang) : '';
             if (voiceLang) {
                 baseSystemPrompt += `\n\n### 🎤 语音消息功能
 
@@ -1205,6 +1215,10 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                 // TODO(记录形态): 戳一戳 / 时间间隔提示等其他系统事件, 等转账的 [[记录:TRANSFER]]
                 // 观察一段时间后再迁 (transferFormat.ts 头注) —— 防线已按整个记录命名空间就位。
                 if (m.type === 'interaction') content = `${timeStr} [系统: 用户戳了你一下]`;
+                else if (m.type === 'collaboration_file') {
+                    const fileName = String(m.metadata?.fileName || m.content || '未命名文件');
+                    content = `${timeStr} [你在聊天界面向用户交付了协同文件：《${fileName}》]`;
+                }
                 else if (m.type === 'transfer') {
                     // 统一记录形态 [[记录:TRANSFER|to=|amount=|status=]] —— 跟输出语法
                     // [[ACTION:TRANSFER|to=|amount=]] 共用词汇表 (见 transferFormat.ts 头注)。

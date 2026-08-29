@@ -1422,6 +1422,8 @@ interface MessageItemProps {
     onResolveTransfer?: (m: Message, action: 'accepted' | 'returned') => void;
     /** 用户点「生活记录」卡 → 确认 / 否决（角色代记的记录） */
     onResolveLifeRecord?: (m: Message, action: 'confirmed' | 'rejected') => void;
+    /** 打开协同文件柜里的原始 Blob；消息本身只保存 assetId 引用。 */
+    onOpenCollaborationFile?: (m: Message) => void | Promise<void>;
     /** 思考链卡片视觉与交互 */
     thinkingChainOptions?: {
         styleId?: ThinkingChainStyleId;
@@ -1471,6 +1473,7 @@ const MessageItem = React.memo(({
     onLuckinCandidate,
     onResolveTransfer,
     onResolveLifeRecord,
+    onOpenCollaborationFile,
     thinkingChainOptions,
 }: MessageItemProps) => {
     const isUser = m.role === 'user';
@@ -1497,6 +1500,7 @@ const MessageItem = React.memo(({
     // 无条件解析一次（hook 不能进条件分支）。挂件/头像挂件走 TokenImg，各自组件内解析。
     const bubbleBgUrl = useBlobRefUrl(styleConfig.backgroundImage);
     const [showVoiceText, setShowVoiceText] = useState(false);
+    const [openingCollaborationFile, setOpeningCollaborationFile] = useState(false);
     const [replyOffset, setReplyOffset] = useState(0);
     const [isReplyGestureActive, setIsReplyGestureActive] = useState(false);
     const [isReplyReady, setIsReplyReady] = useState(false);
@@ -3275,6 +3279,67 @@ const MessageItem = React.memo(({
 
     if (m.type === 'life_card') {
         return <LifeRecordCard m={m} charName={charName} commonLayout={commonLayout} selectionMode={selectionMode} onResolveLifeRecord={onResolveLifeRecord} />;
+    }
+
+    if (m.type === 'collaboration_file') {
+        const fileName = String(m.metadata?.fileName || m.content || '未命名文件');
+        const mimeType = String(m.metadata?.mimeType || 'application/octet-stream');
+        const rawSize = Number(m.metadata?.fileSize || 0);
+        const fileSize = rawSize >= 1024 * 1024
+            ? `${(rawSize / (1024 * 1024)).toFixed(rawSize >= 10 * 1024 * 1024 ? 0 : 1)} MB`
+            : rawSize >= 1024 ? `${Math.max(1, Math.round(rawSize / 1024))} KB` : `${rawSize || 0} B`;
+        const extension = String(m.metadata?.format || fileName.split('.').pop() || 'FILE').toUpperCase().slice(0, 8);
+        const isPdf = extension === 'PDF' || mimeType.includes('pdf');
+        const isWord = ['DOC', 'DOCX'].includes(extension) || mimeType.includes('wordprocessingml');
+        const accentClass = isPdf
+            ? 'bg-rose-50 text-rose-600 border-rose-100'
+            : isWord ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-slate-100 text-slate-600 border-slate-200';
+        const badgeClass = isPdf ? 'bg-rose-600' : isWord ? 'bg-blue-600' : 'bg-slate-600';
+        const openFile = async (event: React.MouseEvent<HTMLButtonElement>) => {
+            event.stopPropagation();
+            if (selectionMode) {
+                onToggleSelect(m.id);
+                return;
+            }
+            if (!onOpenCollaborationFile || openingCollaborationFile) return;
+            setOpeningCollaborationFile(true);
+            try {
+                await onOpenCollaborationFile(m);
+            } finally {
+                setOpeningCollaborationFile(false);
+            }
+        };
+        return commonLayout(
+            <button
+                type="button"
+                onClick={openFile}
+                disabled={openingCollaborationFile && !selectionMode}
+                className="sully-collaboration-file group w-[min(276px,72vw)] overflow-hidden rounded-[18px] border border-slate-200/90 bg-white text-left shadow-[0_8px_24px_rgba(15,23,42,0.08)] transition-[transform,box-shadow,opacity] duration-150 active:scale-[0.985] disabled:opacity-70"
+                aria-label={`打开文件 ${fileName}`}
+            >
+                <span className="flex min-w-0 items-center gap-3.5 px-3.5 py-3.5">
+                    <span className={`sully-collaboration-file-icon relative grid h-12 w-11 shrink-0 place-items-center rounded-[13px] border ${accentClass}`}>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" className="h-6 w-6" aria-hidden="true">
+                            <path d="M7 3.75h6.75L18.5 8.5v11.75H7z" />
+                            <path d="M13.5 3.75V8.5h5" />
+                        </svg>
+                        <span className={`absolute -bottom-1 rounded-[5px] px-1.5 py-[1px] text-[7px] font-black tracking-[0.08em] text-white ${badgeClass}`}>{extension}</span>
+                    </span>
+                    <span className="sully-collaboration-file-meta min-w-0 flex-1">
+                        <span className="sully-collaboration-file-name block max-h-[2.7em] overflow-hidden break-words text-[13px] font-semibold leading-[1.35] text-slate-800">{fileName}</span>
+                        <span className="sully-collaboration-file-detail mt-1.5 block text-[10px] font-medium tracking-wide text-slate-400">{extension} · {fileSize}</span>
+                    </span>
+                    <span className="sully-collaboration-file-action grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition-colors group-hover:text-slate-700">
+                        {openingCollaborationFile ? (
+                            <svg viewBox="0 0 24 24" fill="none" className="h-[18px] w-[18px] animate-spin" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity=".22"/><path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
+                        ) : (
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-[18px] w-[18px]" aria-hidden="true"><path d="M12 3v12"/><path d="m7.5 11 4.5 4.5 4.5-4.5"/><path d="M5 20h14"/></svg>
+                        )}
+                    </span>
+                </span>
+                <span className="block border-t border-slate-100 px-3.5 py-2 text-[9px] font-semibold tracking-[0.12em] text-slate-400">协同工作 · 原始文件</span>
+            </button>
+        );
     }
 
     // 表情气泡默认尺寸 160→96（吸收社区美化的共识尺寸）。sully-emoji-msg 是给自定义 CSS 用的

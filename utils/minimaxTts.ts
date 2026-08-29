@@ -399,7 +399,9 @@ export const buildMiniMaxTtsPayload = (
     ...buildTtsExtras(vp, paramVersion),
   };
 
-  const languageBoost = paramVersion === 'natural-v2'
+  // 旧版参数路径继续保留原始 ISO 短码，唯独粤语必须发送 MiniMax 官方枚举
+  // `Chinese,Yue`；`yue` 本身不是 language_boost 的合法值。
+  const languageBoost = paramVersion === 'natural-v2' || options.languageBoost?.trim().toLowerCase() === 'yue'
     ? normalizeMiniMaxLanguageBoost(options.languageBoost)
     : options.languageBoost || undefined;
   if (languageBoost) payload.language_boost = languageBoost;

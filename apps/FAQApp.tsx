@@ -16,6 +16,7 @@ import {
     CHANGELOG_2026_07_10,
     CHANGELOG_2026_08_03,
     CHANGELOG_2026_08_10,
+    CHANGELOG_2026_08_30,
 } from '../components/UpdateNotificationEvent';
 import { trackEvent } from '../utils/analytics';
 
@@ -109,6 +110,14 @@ interface ChangelogEntry {
 }
 
 const CHANGELOG_ENTRIES: ChangelogEntry[] = [
+    {
+        id: CHANGELOG_2026_08_30,
+        title: '2026 年 8 月 30 日 · 协同工作台',
+        subtitle: '角色协同工作双模式 · Word / PDF 与文件交付 · 可安装美化、角色卡和世界书 · 独立文件库与归档记忆 · 协同数据随系统备份导入导出',
+        date: '2026-08-30',
+        src: 'changelogs/2026-8-30.html',
+        accent: 'from-indigo-100 to-stone-100 border-indigo-200',
+    },
     {
         id: CHANGELOG_2026_08_10,
         title: '2026 年 8 月 10 日 · Live2D 陪伴升级',

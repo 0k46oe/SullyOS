@@ -374,7 +374,7 @@ interface OSContextType {
 
   // Appearance Presets
   appearancePresets: AppearancePreset[];
-  saveAppearancePreset: (name: string) => void;
+  saveAppearancePreset: (name: string, themeOverride?: OSTheme) => void;
   applyAppearancePreset: (id: string) => void;
   deleteAppearancePreset: (id: string) => void;
   renameAppearancePreset: (id: string, name: string) => void;
@@ -821,7 +821,15 @@ Sully是小手机的内置AI。
 // Fallback for factory reset (empty db)
 const initialCharacter = sullyV2;
 
-const OSContext = createContext<OSContextType | undefined>(undefined);
+// Vite 热更新会重新执行本模块。若此时 createContext() 产出一份新实例，而屏幕上的
+// OSProvider 还在使用更新前的实例，懒加载的 Chat 就会短暂读到 undefined 并触发整页崩溃。
+// 开发环境把 Context 本体挂在 globalThis 上保持身份稳定；正式构建仍使用普通模块单例。
+const osContextHmrGlobal = globalThis as typeof globalThis & {
+  __SULLYOS_OS_CONTEXT_HMR__?: React.Context<OSContextType | undefined>;
+};
+const OSContext = import.meta.env.DEV
+  ? (osContextHmrGlobal.__SULLYOS_OS_CONTEXT_HMR__ ??= createContext<OSContextType | undefined>(undefined))
+  : createContext<OSContextType | undefined>(undefined);
 
 export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // ... (State declarations same as before) ...
@@ -1058,8 +1066,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   //
   // 收敛全在 utils/analyticsSnapshot.ts 里做，这里只负责把 OSContext 手上那几份
   // state 递过去。地址、密钥、token、账号名一个字都不会进上报。
-  // 自己拦一道「只跑一次」：上报侧本来就有 once 门，但取数要读两次 IndexedDB
-  // （彼方独立线路、主动消息 2.0 的全局配置），让它跟着 characters 每次变更白跑不值当。
+  // 自己拦一道「只跑一次」：上报侧本来就有 once 门，但取数要读 IndexedDB
+  // （彼方独立线路、主动消息 2.0 全局配置、协同库 count），不让它随 state 变更白跑。
   const featuresReportedRef = useRef(false);
   useEffect(() => {
       if (!isDataLoaded || featuresReportedRef.current) return;
@@ -3475,10 +3483,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const dismissError = () => { setErrorDialog(null); };
 
   // --- APPEARANCE PRESETS ---
-  const saveAppearancePreset = async (name: string) => {
+  const saveAppearancePreset = async (name: string, themeOverride?: OSTheme) => {
       // theme.wallpaper 在内存里是 blob: objectURL（会话临时），不能存进预设。
       // 换成 assets 'wallpaper' 里的持久指针（blobref 令牌 / http / 渐变）。
-      const presetTheme: OSTheme = { ...theme };
+      const presetTheme: OSTheme = { ...(themeOverride || theme) };
       if (presetTheme.wallpaper && presetTheme.wallpaper.startsWith('blob:')) {
           presetTheme.wallpaper = (await DB.getAsset('wallpaper')) || '';
       }
@@ -4105,6 +4113,43 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // data URL 才能跨设备），所以在对象字面量外单独 await。text_only 只带配色偏好、跳过看板大图。
           backupData.desktopSkinLocal = await exportDesktopSkinLocal(mode !== 'text_only');
 
+          // 协同工作是可拆卸的独立 IndexedDB，不在主 DB store 清单里，必须单独打包。
+          // text_only 带窗口/消息/分类/API 设置但不带文件字节；media_only 只带文件字节；
+          // full 两者都带。文件原始 Blob 直写 ZIP，避免 base64 放大和重复保存。
+          const { CollaborationStore } = await import('../features/collaboration/store');
+          const includeCollaborationText = mode !== 'media_only';
+          const includeCollaborationAssets = mode !== 'text_only';
+          const collaborationBackup = await CollaborationStore.exportBackup(
+              includeCollaborationAssets,
+              includeCollaborationText,
+          );
+          backupData.collaborationBackupVersion = 1;
+          backupData.collaborationBackupMode = mode;
+          if (includeCollaborationText) {
+              backupData.collaborationSessions = collaborationBackup.sessions || [];
+              backupData.collaborationMessages = collaborationBackup.messages || [];
+              backupData.collaborationCategories = collaborationBackup.categories || [];
+              backupData.collaborationSettings = collaborationBackup.settings;
+          }
+          if (includeCollaborationAssets) {
+              backupData.collaborationAssetIndex = [];
+              const collaborationAssets = collaborationBackup.assets || [];
+              for (let index = 0; index < collaborationAssets.length; index++) {
+                  const asset = collaborationAssets[index];
+                  const safeId = asset.id.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || `asset-${index}`;
+                  const path = `collaboration/assets/${String(index).padStart(5, '0')}-${safeId}.bin`;
+                  zip.file(path, new Uint8Array(await asset.blob.arrayBuffer()), { compression: 'STORE' });
+                  backupData.collaborationAssetIndex.push({
+                      id: asset.id,
+                      path,
+                      mimeType: asset.blob.type || 'application/octet-stream',
+                      size: asset.blob.size,
+                      createdAt: asset.createdAt,
+                  });
+                  if (index % 10 === 0) await new Promise<void>(resolve => setTimeout(resolve, 0));
+              }
+          }
+
           const totalSteps = storesToProcess.length + 3;
           let currentStep = 0;
 
@@ -4722,6 +4767,36 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // 备份一旦命中特征就整包拒绝，不能出现“导入了一半才报错”的状态。
           assertSupportedSullyBackup(data);
 
+          // 协同文件先完整读出并校验，再开始写任何主数据库。这样文件索引损坏或 ZIP
+          // 缺项时会整包中止，不会出现主数据已恢复、协同文件只回来一半的状态。
+          let collaborationAssetRecords: Array<{ id: string; blob: Blob; createdAt: number }> | undefined;
+          if (data.collaborationAssetIndex !== undefined) {
+              collaborationAssetRecords = [];
+              if (data.collaborationAssetIndex.length > 0 && !zip) {
+                  throw new Error('损坏的备份包：协同文件缺少 ZIP 数据');
+              }
+              for (let index = 0; index < data.collaborationAssetIndex.length; index++) {
+                  const item = data.collaborationAssetIndex[index];
+                  if (!item?.id || !item.path?.startsWith('collaboration/assets/')) {
+                      throw new Error('损坏的备份包：协同文件索引无效');
+                  }
+                  const entry = zip?.file(item.path);
+                  if (!entry) throw new Error(`损坏的备份包：缺少协同文件 ${item.path}`);
+                  const bytes = await entry.async('uint8array');
+                  if (typeof item.size === 'number' && item.size >= 0 && bytes.byteLength !== item.size) {
+                      throw new Error(`损坏的备份包：协同文件大小不符 ${item.path}`);
+                  }
+                  const fileBytes = new Uint8Array(bytes.byteLength);
+                  fileBytes.set(bytes);
+                  collaborationAssetRecords.push({
+                      id: item.id,
+                      blob: new Blob([fileBytes.buffer], { type: item.mimeType || 'application/octet-stream' }),
+                      createdAt: Number(item.createdAt) || Date.now(),
+                  });
+                  if (index % 10 === 0) await new Promise<void>(resolve => setTimeout(resolve, 0));
+              }
+          }
+
           // v2 backups keep favorite voice bytes outside JSON. Rehydrate every marker
           // before DB.importFullData starts, so a missing/truncated file aborts while
           // the current database is still untouched.
@@ -4863,6 +4938,25 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   });
               },
           });
+
+          const hasCollaborationBackup = data.collaborationSessions !== undefined
+              || data.collaborationMessages !== undefined
+              || data.collaborationCategories !== undefined
+              || data.collaborationSettings !== undefined
+              || collaborationAssetRecords !== undefined;
+          if (hasCollaborationBackup) {
+              showImportProgress('database', '正在恢复协同工作...', 91, { current: '协同窗口与文件', currentFile: '' });
+              const { CollaborationStore } = await import('../features/collaboration/store');
+              await CollaborationStore.importBackup({
+                  sessions: data.collaborationSessions,
+                  messages: data.collaborationMessages,
+                  categories: data.collaborationCategories,
+                  settings: data.collaborationSettings,
+                  assets: collaborationAssetRecords,
+              }, {
+                  replaceAssets: data.collaborationBackupMode === 'full',
+              });
+          }
           
           showImportProgress('settings', '正在恢复系统设置...', 92, { current: '系统设置', currentFile: '' });
           if (data.theme) {

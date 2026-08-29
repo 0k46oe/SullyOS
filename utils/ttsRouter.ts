@@ -27,12 +27,30 @@ export type { TtsResult };
 
 type SynthOptions = { languageBoost?: string; groupId?: string; emotion?: string };
 
+/** 粤语并非三家所有模型都支持；在发起计费请求前给出明确错误。 */
+export const assertTtsLanguageSupported = (
+  char: CharacterProfile,
+  apiConfig: APIConfig,
+  languageBoost?: string,
+): void => {
+  if ((languageBoost || '').trim().toLowerCase() !== 'yue') return;
+  const provider = resolveTtsProvider(apiConfig);
+  if (provider === 'elevenlabs' && resolveElevenLabsModel(apiConfig) !== 'eleven_v3') {
+    throw new Error('ElevenLabs 粤语需要 Eleven v3，请先在「设置 → 其他 API」切换模型');
+  }
+  const fishModel = (char.voiceProfile?.fishModel || apiConfig.fishAudioModel || 's2.1-pro').trim().toLowerCase();
+  if (provider === 'fishaudio' && fishModel === 's1') {
+    throw new Error('鱼声粤语需要 S2 系列，请先在「设置 → 其他 API」切换到 S2.1 Pro 或 S2 Pro');
+  }
+};
+
 export async function synthesizeSpeechDetailed(
   text: string,
   char: CharacterProfile,
   apiConfig: APIConfig,
   options?: SynthOptions,
 ): Promise<TtsResult> {
+  assertTtsLanguageSupported(char, apiConfig, options?.languageBoost);
   const provider = resolveTtsProvider(apiConfig);
   if (provider === 'fishaudio') {
     return synthesizeSpeechFishDetailed(text, char, apiConfig, options);

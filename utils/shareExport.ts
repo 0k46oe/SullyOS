@@ -19,6 +19,8 @@ export interface ShareOrDownloadBlobOptions {
     shareTitle?: string;
     /** 大型 ZIP 在原生 WebView 中分片转 base64 并追加写盘，避免一次性读入导致 OOM。 */
     nativeChunked?: boolean;
+    /** 网页端明确显示为“下载”的入口跳过 Web Share；原生 App 仍使用系统分享。 */
+    preferDownloadOnWeb?: boolean;
 }
 
 const NATIVE_WRITE_CHUNK_SIZE = 3 * 1024 * 1024;
@@ -66,7 +68,7 @@ export async function fetchBlobForShare(sourceUrl: string, fallbackMimeType = 'a
  * 桌面浏览器才使用 a.download。WebView 普遍不可靠的裸 download 点击只作为末级兜底。
  */
 export async function shareOrDownloadBlob(options: ShareOrDownloadBlobOptions): Promise<'shared' | 'downloaded' | 'cancelled'> {
-    const { blob, fileName, shareTitle = fileName, nativeChunked = false } = options;
+    const { blob, fileName, shareTitle = fileName, nativeChunked = false, preferDownloadOnWeb = false } = options;
     if (!(blob instanceof Blob) || blob.size === 0) throw new Error('文件为空，无法保存');
 
     const nativePlatform = Capacitor.isNativePlatform();
@@ -107,6 +109,7 @@ export async function shareOrDownloadBlob(options: ShareOrDownloadBlobOptions): 
     try {
         const file = new File([blob], fileName, { type: blob.type || 'application/octet-stream' });
         const canShareFile = typeof navigator !== 'undefined'
+            && !preferDownloadOnWeb
             && typeof navigator.share === 'function'
             && (typeof navigator.canShare !== 'function' || navigator.canShare({ files: [file] }));
         if (canShareFile) {
@@ -115,7 +118,9 @@ export async function shareOrDownloadBlob(options: ShareOrDownloadBlobOptions): 
         }
     } catch (error: any) {
         if (error?.name === 'AbortError') return 'cancelled';
-        console.error('Web Blob Share Error', error);
+        const expectedPermissionFallback = error?.name === 'NotAllowedError'
+            || /permission denied|not allowed|user activation/i.test(String(error?.message || error));
+        if (!expectedPermissionFallback) console.error('Web Blob Share Error', error);
     }
 
     // 原生壳绝不能伪装成“浏览器已下载”：WebView 的 a.download 正是最常见的无反应来源。
