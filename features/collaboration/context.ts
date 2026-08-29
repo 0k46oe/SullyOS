@@ -134,6 +134,10 @@ export const buildCollaborationContextSnapshot = async ({
 
   const staticChar: CharacterProfile = {
     ...char,
+    // This snapshot is already inside the real collaboration window. Do not
+    // carry ChatApp's tiny “you can guide the user to collaboration” notice
+    // back into the workspace and create contradictory location instructions.
+    chatCollaborationEnabled: false,
     memoryPalaceEnabled: false,
     memoryPalaceInjection: '',
     roomPlatesInjection: '',
@@ -182,6 +186,7 @@ export const buildImmersiveChatContextSnapshot = async ({
   // omitted here: collaboration adds a fresh recall block on every turn.
   const staticChar: CharacterProfile = {
     ...char,
+    chatCollaborationEnabled: false,
     memoryPalaceEnabled: false,
     memoryPalaceInjection: '',
     roomPlatesInjection: '',
