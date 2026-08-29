@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
-  "versionCode": 30407,
-  "versionName": "3.4.7",
-  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.7/SullyOS-Android-v3.4.7.apk",
-  "sha256": "d785d07e4d24a41e5b001c74f589ea975b66fa9cc4086c57aa1e32f23b34f658",
-  "sizeBytes": 36990791,
-  "publishedAt": "2026-08-24T00:58:10Z",
+  "versionCode": 30408,
+  "versionName": "3.4.8",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.8/SullyOS-Android-v3.4.8.apk",
+  "sha256": "6af6d563dead8d48d88249dcaa9672f2d21d156f60744bff84d1e0bd14317b53",
+  "sizeBytes": 37109938,
+  "publishedAt": "2026-08-29T20:27:28Z",
   "releaseNotes": [
-    "对齐最新 master 32151b2c（含 PR #599）",
-    "新增本机数据容量、存储水位与持久化许可状态",
-    "改进主动消息日程回传、跨日日程修改与失败日志",
-    "优化时间感知与便利贴、窗台期盼的表达分寸",
-    "延续固定签名、UnifiedPush / ntfy、Android PDF 导入与应用内更新"
+    "对齐最新 master 9f720928（含 PR #612）",
+    "升级二进制 Blob 存储、图片去重清理、批量优化与备份恢复",
+    "新增角色协同工作台、协同文件交付与上下文能力",
+    "增强主动消息任务恢复、跨午夜一次性消息与诊断轨迹",
+    "延续固定签名、UnifiedPush / ntfy、Android PDF 导入、Umami 与应用内更新"
   ]
 }
