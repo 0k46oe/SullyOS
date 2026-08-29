@@ -132,7 +132,7 @@ import type { ToolCall } from '../../instant-push/src/classifier';
 import {
   classifyNativeToolCalls,
   createFireSessionState,
-  MAX_TOOL_ITERATIONS,
+  resolveToolIterationBudget,
   processLLMRound,
   type FireSessionState,
 } from './agentic';
@@ -306,7 +306,7 @@ interface SessionCtx {
    * `resultKind` 是唯一必填字段，其余形状由宿主定。老部署上整个方法不存在。
    */
   emitResult?: (payload: Record<string, unknown>) => Promise<{ messageId: string; pushed: boolean }>;
-  /** 本次 fire 的第几轮 LLM（0-based）。最后一轮不再放行工具请求，见 MAX_TOOL_ITERATIONS。 */
+  /** 本次 fire 的第几轮 LLM（0-based）。最后一轮不再放行工具请求，预算在 scratch.fire。 */
   iteration?: number;
   /** 任务行 id；没有任务行的 in-server instant 路径为 null。 */
   taskId: number | string | null;
@@ -339,6 +339,8 @@ interface FireStash {
   selfLogDirty: boolean;
   /** 通用 MCP：暴露名 → 服务器/工具。tool_config 里没配（或对该角色不可见）时为 null。 */
   mcpResolve: Map<string, McpResolvedToolCore> | null;
+  /** 本次 fire 真正回给上游的自适应轮次预算；最后一轮判断与提示都读这一份。 */
+  maxToolIterations: number;
   /**
    * 本次 fire 声明给模型的非 MCP native 工具名（schedule / cancel / renew 按各自开关
    * 在场与否）。onLLMOutput 认领 native tool_call 时拿它当清单（MCP 那份在 mcpResolve）。
@@ -1437,12 +1439,12 @@ export const runFireRenewTool = async (
 const FINAL_ROUND_NOTICE = '（提醒：这是最后一轮了，不要再调用任何工具，直接把想说的话写完。）';
 
 /** 本轮的工具结果是不是喂给最后一轮的（ctx.iteration 缺失的老部署不提示）。 */
-const feedsFinalRound = (iteration: number | undefined): boolean =>
-  typeof iteration === 'number' && iteration >= MAX_TOOL_ITERATIONS - 2;
+const feedsFinalRound = (iteration: number | undefined, maxToolIterations: number): boolean =>
+  typeof iteration === 'number' && iteration >= maxToolIterations - 2;
 
 /**
- * 单个 MCP 调用的超时。总 fire 预算 240s / 最多 5 轮，一个慢服务器不能吃光
- * 整条链（浏览器侧是 60s，那边没有轮次预算压力）。
+ * 单个 MCP 调用的超时。总 fire 预算 240s；MCP 虽可自适应推进到 12 轮，一个慢服务器
+ * 仍不能吃光整条链（浏览器侧是 60s，那边没有同一份 fire 总预算压力）。
  *
  * 单次上限之外还有下面那条共享总预算：native FC 一轮可以吐好几个调用，
  * executeToolCalls 是串行 await 的，只卡单次的话 25s × N 照样能顶穿 240s。
@@ -1482,7 +1484,7 @@ export const runMcpFireTool = async (
       message: 'MCP 调用时间预算已用完，这轮别再调外部工具了，用手上已有的信息收尾。',
     };
   }
-  // 每台服务器一份会话，单次 fire 内跨轮复用：一次 fire 最多五轮，每轮重握手就是白烧往返。
+  // 每台服务器一份会话，单次 fire 内跨轮复用：多步 MCP 最多十二轮，每轮重握手就是白烧往返。
   let session = stash.mcpSessions.get(hit.server.id);
   if (!session) {
     session = createMcpSessionState();
@@ -1748,7 +1750,7 @@ export const amsgHooks = {
 
     // 通用 MCP：提示词块 / tools 数组与凭据同源同拍（都来自这一行 tool_config），
     // 不存在「教了角色用、凭据却没到」的窗口。charIds 过滤与前台同语义。
-    // mcpUseNativeTools=false = 用户的中转拒 tools（前台兼容模式同款开关），
+    // mcpUseNativeTools=false = 用户的中转拒 tools（前台「原生 tools」开关已关闭），
     // 请求不带 tools 参数、提示词块教正文协议，识别走 processLLMRound 第二层。
     const mcpServers = filterMcpServersForChar(toolConfig.mcpServers, charId);
     // 暴露名后面要拼 MCP_FIRE_NAME_PREFIX，长度预算得先把前缀那几个字符扣掉。
@@ -1756,6 +1758,9 @@ export const amsgHooks = {
       ? buildMcpNameMap(mcpServers, { maxNameLen: MCP_FIRE_NAME_BUDGET })
       : null;
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
+    // 只有通用 MCP 使用长预算；普通搜索/记忆/排程仍是原来的 5 轮。长预算也不是固定
+    // 跑满：模型正常收尾立即结束，连续重复调用则由 duplicate 闸提前收束。
+    const maxToolIterations = resolveToolIterationBudget(!!mcpResolve);
 
     // 角色上次到点自己说了什么：对齐到本次的 fire_pack 与用户发言状态。
     // 连发记录（entries）只在用户开口时清零，fire_pack 换代只作废 tasks 段
@@ -1816,6 +1821,7 @@ export const amsgHooks = {
       selfLog,
       selfLogDirty: false,
       mcpResolve,
+      maxToolIterations,
       fireToolNames: new Set(),
       mcpSessions: new Map(),
       mcpSpentMs: 0,
@@ -1914,7 +1920,7 @@ export const amsgHooks = {
     // 而上游只有内部默认值、没导出常量，各写各的迟早对不上。
     // tools 由 amsg-server 带 agentic-fire-tools feature 的版本起透传给每轮 LLM 请求。
     const common = {
-      maxToolIterations: MAX_TOOL_ITERATIONS,
+      maxToolIterations,
       ...(fireTools.length ? { tools: fireTools } : {}),
     };
 
@@ -2114,8 +2120,9 @@ export const amsgHooks = {
     // manage 池里可能还有 cancel / renew——它们被认领的前提是声明过（canManageTasks），
     // 而 canManageTasks ⊆ canSelfSchedule ⊆「scheduleTask 是函数」，这道闸不会误拦。
     typeof ctx.scheduleTask === 'function' ? { nativeToolCalls: nativeCalls.manage } : null,
-    // 最后一轮不再放行工具请求，改成用手上的内容收尾（见 agentic.ts 的 MAX_TOOL_ITERATIONS）。
-    ctx.iteration);
+    // 最后一轮不再放行工具请求，改成用手上的内容收尾（预算由 MCP 与否自适应）。
+    ctx.iteration,
+    stash.maxToolIterations);
 
     if (decision.decision === 'tool-request') {
       console.log('[amsg:agentic]', {
@@ -2367,7 +2374,11 @@ export const amsgHooks = {
         // 同名同参第二次直接打回，一次请求都不发。软提示（下面那段回喂）挡不住时靠它兜底：
         // 转满上限会抛 AGENTIC_LOOP_EXCEEDED，任务不出清、下一分钟整条从头重跑，代价远大于
         // 少查一次。只拦完全一样的调用——换月份、换关键词照常放行，多轮能力不受影响。
-        if (stash.session.toolCalls.some((r) => r.fingerprint === fingerprint)) {
+        // 只拦「连续原地重复」。游戏型 MCP 的正常流程会是 get_state({}) → act(...)
+        // → get_state({})；旧逻辑扫描整段历史，把第二次状态查询也当重复，角色永远看不到
+        // 动作后的新状态。中间只要有别的有效调用，就允许同名同参再次执行。
+        const previousCall = stash.session.toolCalls[stash.session.toolCalls.length - 1];
+        if (previousCall?.fingerprint === fingerprint) {
           // 计数交给 processLLMRound：连着重复到阈值就直接收尾，不陪它转到轮次上限
           // （上限一到整条任务失败重跑，用户一个字都收不到）。
           stash.session.duplicateToolCalls += 1;
@@ -2396,6 +2407,9 @@ export const amsgHooks = {
               : name.startsWith(MCP_FIRE_NAME_PREFIX)
                 ? await runMcpFireTool(stash, name, args)
                 : await dispatchAgenticTool(name, args, stash.toolCtx);
+        // duplicateToolCalls 语义是「连续打转」；任何一个新调用跑过都说明任务仍在推进，
+        // 立刻清零。否则两次不相邻的合法重复也会累计到阈值，提前误杀游戏流程。
+        stash.session.duplicateToolCalls = 0;
         // ran 记的是「这次值不值得写进工具痕迹」：查东西的看有没有真去查，改排程的看有没有
         // 真改成（见 toolDidSomething）。回喂给模型的措辞另有一套口径（buildToolResultMessage
         // 里的 neverRan），两者不共用——痕迹是给用户看的，只说真发生过的事。
@@ -2416,7 +2430,7 @@ export const amsgHooks = {
     }
 
     // 只挂在最后一条 tool 消息末尾（离模型下一次输出最近），不逐条重复刷屏。
-    if (feedsFinalRound(ctx.iteration) && results.length > 0) {
+    if (feedsFinalRound(ctx.iteration, stash.maxToolIterations) && results.length > 0) {
       const last = results[results.length - 1];
       last.content = `${last.content}\n${FINAL_ROUND_NOTICE}`;
     }
@@ -2471,8 +2485,8 @@ export const buildWorkerConfig = (env: Env) => {
     // 角色的云端状态抹掉。判据是行本来就有的 updated_at 列，不加列、不动表结构。
     clientStateTtl: { [AMSG_JOB_NAMESPACE]: AMSG_JOB_TTL_DAYS },
     // 满血 fire-time hooks（onBeforeFire 现场填槽 + onLLMOutput 分类 +
-    // executeToolCalls 服务端工具循环）；轮数/超时用库默认（5 轮 / 240s），
-    // 即时对话那条单独把超时抬到 INSTANT_TOTAL_TIMEOUT_MS（onBeforeFire 返回值里给）。
+    // executeToolCalls 服务端工具循环）；总超时用库默认 240s，轮数由 onBeforeFire 按
+    // 是否接入 MCP 返回 5 / 12；即时对话再把总超时抬到 INSTANT_TOTAL_TIMEOUT_MS。
     hooks: amsgHooks,
     // 租约不再显式配：amsg-server 2.6.0-next.15 起投递期间按心跳滚动续租（30s 一跳、
     // 90s TTL），fire 跑多久租约就滚多久——以前为了盖住即时对话 600s 的 fire 把

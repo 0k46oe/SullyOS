@@ -15,7 +15,9 @@ import {
   buildXhsSessionPayload,
   classifyNativeToolCalls,
   createFireSessionState,
-  MAX_TOOL_ITERATIONS,
+  DEFAULT_TOOL_ITERATIONS,
+  MCP_MAX_TOOL_ITERATIONS,
+  resolveToolIterationBudget,
   processLLMRound,
   type PushBuildInput,
 } from './agentic';
@@ -520,7 +522,7 @@ describe('processLLMRound — 最后一轮不再放行工具请求', () => {
     processLLMRound(state, '顺便看看天气。\n[[SEARCH: 明天 天气]]', build, null, null, 1);
 
     const decision = processLLMRound(
-      state, '还得再查一次。\n[[RECALL: 2026-07]]', build, null, null, MAX_TOOL_ITERATIONS - 1);
+      state, '还得再查一次。\n[[RECALL: 2026-07]]', build, null, null, DEFAULT_TOOL_ITERATIONS - 1);
     expect(decision.decision).toBe('finish');
     if (decision.decision !== 'finish') return;
     const text = decision.pushPayloads.map((p) => p.message).join('\n');
@@ -532,13 +534,36 @@ describe('processLLMRound — 最后一轮不再放行工具请求', () => {
 
   it('倒数第二轮照常给工具机会', () => {
     const decision = processLLMRound(
-      createFireSessionState(), '查一下。\n[[SEARCH: 天气]]', build, null, null, MAX_TOOL_ITERATIONS - 2);
+      createFireSessionState(), '查一下。\n[[SEARCH: 天气]]', build, null, null, DEFAULT_TOOL_ITERATIONS - 2);
     expect(decision.decision).toBe('tool-request');
   });
 
   it('不传轮次（拿不到 ctx.iteration 的老部署）行为不变', () => {
     const decision = processLLMRound(createFireSessionState(), '查一下。\n[[SEARCH: 天气]]', build);
     expect(decision.decision).toBe('tool-request');
+  });
+});
+
+describe('工具轮次预算 — 普通任务省成本，MCP 多步任务可继续', () => {
+  it('没有 MCP 保持 5 轮，有 MCP 放宽到 12 轮', () => {
+    expect(resolveToolIterationBudget(false)).toBe(DEFAULT_TOOL_ITERATIONS);
+    expect(resolveToolIterationBudget(true)).toBe(MCP_MAX_TOOL_ITERATIONS);
+    expect(DEFAULT_TOOL_ITERATIONS).toBe(5);
+    expect(MCP_MAX_TOOL_ITERATIONS).toBe(12);
+  });
+
+  it('MCP 的第 5 轮仍可继续，第 12 轮才强制收尾', () => {
+    const fifth = processLLMRound(
+      createFireSessionState(), '继续查。\n[[SEARCH: 天气]]', build, null, null,
+      DEFAULT_TOOL_ITERATIONS - 1, MCP_MAX_TOOL_ITERATIONS,
+    );
+    expect(fifth.decision).toBe('tool-request');
+
+    const last = processLLMRound(
+      createFireSessionState(), '再查。\n[[SEARCH: 天气]]', build, null, null,
+      MCP_MAX_TOOL_ITERATIONS - 1, MCP_MAX_TOOL_ITERATIONS,
+    );
+    expect(last.decision).not.toBe('tool-request');
   });
 });
 

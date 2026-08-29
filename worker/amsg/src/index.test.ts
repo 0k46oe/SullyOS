@@ -15,7 +15,7 @@ import worker, {
   runFireScheduleTool, runMcpFireTool, splitSchemaMissing, classifySchemaProbeError,
 } from './index';
 import * as workerEntry from './index';
-import { MAX_TOOL_ITERATIONS } from './agentic';
+import { DEFAULT_TOOL_ITERATIONS, MCP_MAX_TOOL_ITERATIONS } from './agentic';
 import { MAX_PUSH_PAYLOAD_BYTES } from '@rei-standard/amsg-server/cloudflare';
 import { amsgEmotionUpdateKey, EMOTION_EVAL_RIDE_ALONG_MS } from './emotionEval';
 import { INSTANT_TOTAL_TIMEOUT_MS } from './instantChat';
@@ -163,6 +163,7 @@ const makeCtx = (opts: {
 interface FiredResult {
   messages: Array<{ role: string; content: string }>;
   tools?: Array<{ function: { name: string; parameters: unknown } }>;
+  maxToolIterations?: number;
 }
 
 /** 取生成路径的返回值；顺手确认没退回 skip / null，省得每条用例各自强转。 */
@@ -712,6 +713,7 @@ describe('onBeforeFire 注入通用 MCP', () => {
     expect(prompt).toContain('search_memory');
 
     expect(result.tools?.map((t) => t.function.name)).toEqual(['mcp__search_memory']);
+    expect(result.maxToolIterations).toBe(MCP_MAX_TOOL_ITERATIONS);
     // 参数表要原样带上，不然模型只能瞎猜字段名
     expect(result.tools?.[0].function.parameters).toMatchObject({
       properties: { query: { type: 'string' } },
@@ -725,6 +727,7 @@ describe('onBeforeFire 注入通用 MCP', () => {
     const result = fired(await amsgHooks.onBeforeFire(ctx));
 
     expect(result).not.toHaveProperty('tools');
+    expect(result.maxToolIterations).toBe(DEFAULT_TOOL_ITERATIONS);
     expect(result.messages[0].content).not.toContain('【外部工具');
     expect((scratch.fire as any).mcpResolve).toBeNull();
   });
@@ -749,7 +752,7 @@ describe('onBeforeFire 注入通用 MCP', () => {
     expect((scratch.fire as any).mcpResolve).toBeNull();
   });
 
-  it('用户关了兼容模式（中转拒 tools）→ 不带 tools 参数，改用正文协议教一遍', async () => {
+  it('用户关了原生 tools（中转拒 tools）→ 不带 tools 参数，改用正文协议教一遍', async () => {
     const { ctx, scratch } = makeCtx({
       globalRows: [{
         key: AMSG_TOOL_CONFIG_KEY,
@@ -1072,6 +1075,29 @@ describe('executeToolCalls 的工具编排', () => {
     expect(other.content).not.toContain('没有再执行');
   });
 
+  it('状态查询中间执行过动作后允许再次查询——游戏流程不会被历史去重误杀', async () => {
+    const session = await readySession();
+    await amsgHooks.executeToolCalls(
+      [toolCall('c1', 'recall', { year: '2026', month: '06' })],
+      session,
+    );
+    await amsgHooks.executeToolCalls(
+      [toolCall('c2', 'recall', { year: '2026', month: '07' })],
+      session,
+    );
+    const [afterAction] = await amsgHooks.executeToolCalls(
+      [toolCall('c3', 'recall', { year: '2026', month: '06' })],
+      session,
+    );
+    expect(afterAction.content).not.toContain('没有再执行');
+
+    const [immediateRepeat] = await amsgHooks.executeToolCalls(
+      [toolCall('c4', 'recall', { year: '2026', month: '06' })],
+      session,
+    );
+    expect(immediateRepeat.content).toContain('没有再执行');
+  });
+
   it('参数字段顺序变了仍算同一次调用', async () => {
     const session = await readySession();
     await amsgHooks.executeToolCalls(
@@ -1091,7 +1117,7 @@ describe('executeToolCalls 的工具编排', () => {
     const session = await readySession();
     const [out] = await amsgHooks.executeToolCalls(
       [toolCall('c1', 'recall', { year: '2026', month: '06' })],
-      { ...session, iteration: MAX_TOOL_ITERATIONS - 2 },
+      { ...session, iteration: DEFAULT_TOOL_ITERATIONS - 2 },
     );
     expect(out.content).toContain('最后一轮');
   });
@@ -1124,7 +1150,7 @@ describe('轮次上限与上游共用同一个数', () => {
   it('onBeforeFire 把轮次上限显式回传给上游', async () => {
     const { ctx } = makeCtx({});
     const result = await amsgHooks.onBeforeFire(ctx) as { maxToolIterations?: number };
-    expect(result.maxToolIterations).toBe(MAX_TOOL_ITERATIONS);
+    expect(result.maxToolIterations).toBe(DEFAULT_TOOL_ITERATIONS);
   });
 
   it('最后一轮还想调工具 → 直接收尾，不把 tool-request 交回上游', async () => {
@@ -1136,7 +1162,7 @@ describe('轮次上限与上游共用同一个数', () => {
     expect(first.decision).toBe('tool-request');
 
     const last = await amsgHooks.onLLMOutput(
-      sessionCtx(scratch, '再查一次。\n[[RECALL: 2026-07]]', MAX_TOOL_ITERATIONS - 1)) as any;
+      sessionCtx(scratch, '再查一次。\n[[RECALL: 2026-07]]', DEFAULT_TOOL_ITERATIONS - 1)) as any;
     expect(last.decision).toBe('finish');
     expect(last.pushPayloads.map((p: any) => p.message).join('\n')).toContain('我先想想六月的事');
   });
