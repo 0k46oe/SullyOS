@@ -9147,9 +9147,22 @@ var extractTextFakedMcpCalls = (content, resolve, opts = {}) => {
   }
   return found.sort((a, b) => a.index - b.index).map(({ index: _index, ...call }) => call);
 };
-var MCP_PROTOCOL_VERSION = "2024-11-05";
+var MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION = "2025-11-25";
+var MCP_SUPPORTED_HANDSHAKE_PROTOCOL_VERSIONS = [
+  "2025-11-25",
+  "2025-06-18",
+  "2025-03-26"
+];
 var MCP_REQUEST_TIMEOUT_MS = 6e4;
-var createMcpSessionState = () => ({ sessionId: null, initialized: false, initPromise: null, nextId: 0 });
+var createMcpSessionState = () => ({
+  sessionId: null,
+  initialized: false,
+  initPromise: null,
+  protocolVersion: null,
+  serverInfo: null,
+  serverCapabilities: null,
+  nextId: 0
+});
 var buildRpcRequest = (session, method, params, isNotification = false) => {
   const req = { jsonrpc: "2.0", method, params };
   if (!isNotification) req.id = ++session.nextId;
@@ -9224,7 +9237,7 @@ var readSseResponse = async (resp, expectedId) => {
   }
 };
 var postCore = async (target, session, body, timeoutMs, expectResponse = true) => {
-  const headers = target.headers(session.sessionId);
+  const headers = target.headers(session.sessionId, session.protocolVersion);
   let resp;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -9284,12 +9297,23 @@ var postCore = async (target, session, body, timeoutMs, expectResponse = true) =
 };
 var initializeCore = async (target, session, timeoutMs) => {
   const initReq = buildRpcRequest(session, "initialize", {
-    protocolVersion: MCP_PROTOCOL_VERSION,
+    protocolVersion: MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION,
     capabilities: {},
-    clientInfo: { name: "SullyOS-MCP", version: "1.0.0" }
+    clientInfo: { name: "sullyos", title: "SullyOS", version: "1.0.0" }
   });
   const { response } = await postCore(target, session, initReq, timeoutMs);
   if (response?.error) throw new Error(`Initialize \u5931\u8D25: ${response.error.message}`);
+  const negotiated = String(
+    response?.result?.protocolVersion || MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION
+  );
+  if (!MCP_SUPPORTED_HANDSHAKE_PROTOCOL_VERSIONS.includes(negotiated)) {
+    throw new Error(
+      `MCP \u534F\u8BAE\u7248\u672C\u4E0D\u517C\u5BB9\uFF1A\u670D\u52A1\u5668\u9009\u62E9\u4E86 ${negotiated}\u3002SullyOS \u7684 Streamable HTTP \u63A5\u7EBF\u652F\u6301 ${MCP_SUPPORTED_HANDSHAKE_PROTOCOL_VERSIONS.join(" / ")}\uFF1B2024-11-05 \u5C5E\u4E8E\u65E7 HTTP+SSE \u53CC\u7AEF\u70B9\uFF0C2026-07-28 \u5219\u9700\u8981\u65B0\u7684\u65E0\u63E1\u624B\u751F\u547D\u5468\u671F\u3002`
+    );
+  }
+  session.protocolVersion = negotiated;
+  session.serverInfo = response?.result?.serverInfo || null;
+  session.serverCapabilities = response?.result?.capabilities || null;
   const notif = buildRpcRequest(session, "notifications/initialized", {}, true);
   await postCore(target, session, notif, timeoutMs, false).catch(() => {
   });
@@ -9424,6 +9448,13 @@ var callMcpToolCore = async (target, session, toolName, args = {}, opts = {}) =>
     if (!response) return finish({ success: false, error: "\u7A7A\u54CD\u5E94" });
     if (response.error) return finish({ success: false, error: `MCP \u9519\u8BEF [${response.error.code}]: ${response.error.message}` });
     const result = response.result;
+    if (result?.resultType === "input_required") {
+      return finish({
+        success: false,
+        error: "\u8FD9\u4E2A\u5DE5\u5177\u9700\u8981\u5728\u6267\u884C\u9014\u4E2D\u8865\u5145\u786E\u8BA4\u6216\u8F93\u5165\uFF1BSullyOS \u5F53\u524D\u4E0D\u4F1A\u66FF\u4F60\u81EA\u52A8\u56DE\u7B54\uFF0C\u8BF7\u56DE\u5230\u804A\u5929\u4E2D\u660E\u786E\u8981\u6C42\u540E\u91CD\u8BD5\u3002",
+        data: result
+      });
+    }
     if (result?.content && Array.isArray(result.content)) {
       const textParts = result.content.filter((c) => c?.type === "text").map((c) => c.text || "");
       const fullText = textParts.join("\n").trim();
@@ -9439,7 +9470,7 @@ var callMcpToolCore = async (target, session, toolName, args = {}, opts = {}) =>
     return finish({ success: false, error: e?.message || String(e) });
   }
 };
-var buildMcpDirectHeaders = (server, sessionId) => {
+var buildMcpDirectHeaders = (server, sessionId, protocolVersion = null) => {
   const headers = {
     "Content-Type": "application/json",
     "Accept": "application/json, text/event-stream"
@@ -9451,6 +9482,7 @@ var buildMcpDirectHeaders = (server, sessionId) => {
   }
   if (server.token) headers["Authorization"] = `Bearer ${server.token}`;
   if (sessionId) headers["Mcp-Session-Id"] = sessionId;
+  if (protocolVersion) headers["MCP-Protocol-Version"] = protocolVersion;
   return headers;
 };
 var filterMcpServersForChar = (servers, charId) => (servers || []).filter(
@@ -13040,7 +13072,10 @@ var runMcpFireTool = async (stash, name, args) => {
   const started = Date.now();
   const result = await callMcpToolCore(
     // worker 侧 fetch 没有 CORS，直连用户配的地址，不经代理。
-    { url: hit.server.url, headers: (sid) => buildMcpDirectHeaders(hit.server, sid) },
+    {
+      url: hit.server.url,
+      headers: (sid, protocolVersion) => buildMcpDirectHeaders(hit.server, sid, protocolVersion)
+    },
     session,
     hit.toolName,
     args,
