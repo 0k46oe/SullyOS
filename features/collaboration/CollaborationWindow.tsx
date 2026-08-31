@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import {
   Archive,
   ArrowLeft,
+  ArrowCounterClockwise,
   ArrowUUpLeft,
   Briefcase,
   CaretDown,
@@ -312,6 +313,23 @@ const abortCollaborationRequest = (controller: AbortController | null, reason: s
   } catch {
     controller.abort();
   }
+};
+
+const collaborationMessageTaskText = (message: CollaborationMessage): string => [
+  message.content,
+  ...(message.attachments || []).map(attachment => attachment.extractedText || ''),
+].join('\n').slice(0, 80_000);
+
+const collaborationMessagePreview = (message?: CollaborationMessage): string | undefined => {
+  if (!message) return undefined;
+  if (message.role === 'assistant') {
+    const rich = parseCollaborationRichOutput(message.content);
+    const label = rich.text
+      || (rich.voice ? '[语音]' : '')
+      || (rich.emojiNames.length > 0 ? `[表情包：${rich.emojiNames[0]}]` : '');
+    return shortPreview(label || message.attachments?.[0]?.name || '已完成');
+  }
+  return shortPreview(message.content || message.attachments?.[0]?.name || (message.role === 'system' ? '系统提示' : '上传了文件'));
 };
 
 type CollaborationDialogResult = 'confirm' | 'secondary' | 'cancel';
@@ -1094,6 +1112,55 @@ const CollaborationEmojiCard: React.FC<{ name: string; emoji?: Emoji }> = ({ nam
     : <div className="mt-2 rounded-xl border border-dashed border-current/15 px-3 py-2 text-[10px] opacity-55">表情包未找到：{name}</div>
 );
 
+const useCollaborationLongPress = (onLongPress: () => void) => {
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressedRef = useRef(false);
+  const originRef = useRef<{ x: number; y: number } | null>(null);
+  const clearTimer = useCallback(() => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = null;
+    originRef.current = null;
+  }, []);
+  useEffect(() => clearTimer, [clearTimer]);
+  const isInteractiveTarget = (target: EventTarget | null) => (
+    target instanceof Element && !!target.closest('button, a, input, textarea, select, label')
+  );
+  return {
+    onPointerDown: (event: React.PointerEvent<HTMLElement>) => {
+      if (event.button !== 0 || isInteractiveTarget(event.target)) return;
+      clearTimer();
+      longPressedRef.current = false;
+      originRef.current = { x: event.clientX, y: event.clientY };
+      timerRef.current = setTimeout(() => {
+        longPressedRef.current = true;
+        originRef.current = null;
+        if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') navigator.vibrate(12);
+        onLongPress();
+      }, 520);
+    },
+    onPointerMove: (event: React.PointerEvent<HTMLElement>) => {
+      const origin = originRef.current;
+      if (origin && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 10) clearTimer();
+    },
+    onPointerUp: clearTimer,
+    onPointerCancel: clearTimer,
+    onPointerLeave: clearTimer,
+    onContextMenu: (event: React.MouseEvent<HTMLElement>) => {
+      if (isInteractiveTarget(event.target)) return;
+      event.preventDefault();
+      clearTimer();
+      if (longPressedRef.current) return;
+      onLongPress();
+    },
+    onClickCapture: (event: React.MouseEvent<HTMLElement>) => {
+      if (!longPressedRef.current) return;
+      event.preventDefault();
+      event.stopPropagation();
+      longPressedRef.current = false;
+    },
+  };
+};
+
 const MessageBubble: React.FC<{
   message: CollaborationMessage;
   character: CharacterProfile;
@@ -1105,16 +1172,18 @@ const MessageBubble: React.FC<{
   voiceState?: CollaborationVoiceUiState;
   onPlayVoice: (message: CollaborationMessage) => void;
   onOpenAttachment: (attachment: CollaborationAttachment) => void;
-}> = ({ message, character, user, theme, uiTheme, emojis, emojiCategories, voiceState, onPlayVoice, onOpenAttachment }) => {
+  onLongPress: (message: CollaborationMessage) => void;
+}> = ({ message, character, user, theme, uiTheme, emojis, emojiCategories, voiceState, onPlayVoice, onOpenAttachment, onLongPress }) => {
+  const longPressHandlers = useCollaborationLongPress(() => onLongPress(message));
   if (message.role === 'system') {
-    return <div className="collab-message-system mx-auto my-3 max-w-[82%] rounded-full bg-slate-900/6 px-4 py-2 text-center text-[11px] leading-relaxed text-slate-500">{message.content}</div>;
+    return <div {...longPressHandlers} className="collab-message-system mx-auto my-3 max-w-[82%] rounded-full bg-slate-900/6 px-4 py-2 text-center text-[11px] leading-relaxed text-slate-500">{message.content}</div>;
   }
   const isUser = message.role === 'user';
   const richOutput = isUser ? null : parseCollaborationRichOutput(message.content);
   const style = isUser ? theme.user : theme.ai;
   const avatar = isUser ? (user.perCharAvatars?.[character.id] || user.avatar) : character.avatar;
   return (
-    <div className={`collab-message-row ${isUser ? 'collab-message-row-user flex-row-reverse' : 'collab-message-row-assistant'} flex items-end gap-2.5 px-4 py-2`}>
+    <div {...longPressHandlers} className={`collab-message-row ${isUser ? 'collab-message-row-user flex-row-reverse' : 'collab-message-row-assistant'} flex items-end gap-2.5 px-4 py-2`}>
       <TokenImg value={avatar} alt={isUser ? user.name : character.name} className={`collab-message-avatar ${isUser ? 'collab-message-avatar-user' : 'collab-message-avatar-assistant'} h-8 w-8 shrink-0 rounded-full object-cover shadow-sm ring-1 ring-black/5`} />
       <div className={`collab-message-stack min-w-0 max-w-[78%] ${isUser ? 'items-end' : 'items-start'} flex flex-col`} data-ui-theme={uiTheme}>
         <div
@@ -1952,87 +2021,73 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
     })));
   };
 
-  const send = async () => {
-    if (!activeSession || isGenerating || uploadStatus) return;
-    const content = draft.trim();
-    if (!content && pendingAttachments.length === 0) return;
-    const profile = settings[activeSession.mode];
+  const generateCollaborationReply = async (
+    sessionAtStart: CollaborationSession,
+    requestMessages: CollaborationMessage[],
+    latestUserMessage: CollaborationMessage,
+  ) => {
+    const profile = settings[sessionAtStart.mode];
     if (!isCollaborationApiConfigured(profile)) {
       setSettingsOpen(true);
-      notify(`请先配置${MODE_LABELS[activeSession.mode]}使用的 API`, 'info');
+      notify(`请先配置${MODE_LABELS[sessionAtStart.mode]}使用的 API`, 'info');
       return;
     }
-
-    const now = Date.now();
-    const userMessage: CollaborationMessage = {
-      id: collaborationId('message'),
-      sessionId: activeSession.id,
-      role: 'user',
-      content,
-      createdAt: now,
-      attachments: pendingAttachments.map(item => item.attachment),
-    };
-    await persistPendingAttachments();
-    await CollaborationStore.saveMessage(userMessage);
-    const nextMessages = [...messages, userMessage];
-    setMessages(nextMessages);
-    setDraft('');
-    setPendingAttachments([]);
-
-    const taskText = [content, ...userMessage.attachments!.map(attachment => attachment.extractedText || '')].join('\n').slice(0, 80_000);
-    let contextSnapshot = activeSession.contextSnapshot || '';
-    let chatContextSnapshot = activeSession.chatContextSnapshot;
-    if (activeSession.mode === 'immersive' && (!contextSnapshot || !chatContextSnapshot?.length)) {
-      const immersiveSnapshot = await buildImmersiveChatContextSnapshot({
-        char: character,
-        user,
-        groups,
-        emojis,
-        categories: emojiCategories,
-        recentChatMessages,
-        realtimeConfig,
-      });
-      contextSnapshot = immersiveSnapshot.contextSnapshot;
-      chatContextSnapshot = immersiveSnapshot.chatContextSnapshot;
-    } else if (!contextSnapshot) {
-      contextSnapshot = await buildCollaborationContextSnapshot({
-        char: character,
-        user,
-        mode: activeSession.mode,
-        taskText,
-        emojis,
-        categories: emojiCategories,
-      });
-    }
-    const turnMemoryContext = await buildCollaborationTurnMemoryContext({
-      char: character,
-      user,
-      mode: activeSession.mode,
-      messages: nextMessages,
-      taskText,
-    });
-    const nextTitle = activeSession.title === '新的协同'
-      ? shortPreview(content || userMessage.attachments?.[0]?.name || '新的协同', 28)
-      : activeSession.title;
-    const startedSession = {
-      ...activeSession,
-      title: nextTitle,
-      contextSnapshot,
-      chatContextSnapshot,
-      updatedAt: now,
-      lastMessagePreview: shortPreview(content || `上传了 ${userMessage.attachments?.length || 0} 个文件`),
-    };
-    await updateSession(startedSession);
 
     const abortController = new AbortController();
     abortRef.current = abortController;
     setIsGenerating(true);
     setStreamingText('');
+    const taskText = collaborationMessageTaskText(latestUserMessage);
+    let startedSession = sessionAtStart;
     try {
+      let contextSnapshot = sessionAtStart.contextSnapshot || '';
+      let chatContextSnapshot = sessionAtStart.chatContextSnapshot;
+      if (sessionAtStart.mode === 'immersive' && (!contextSnapshot || !chatContextSnapshot?.length)) {
+        const immersiveSnapshot = await buildImmersiveChatContextSnapshot({
+          char: character,
+          user,
+          groups,
+          emojis,
+          categories: emojiCategories,
+          recentChatMessages,
+          realtimeConfig,
+        });
+        contextSnapshot = immersiveSnapshot.contextSnapshot;
+        chatContextSnapshot = immersiveSnapshot.chatContextSnapshot;
+      } else if (!contextSnapshot) {
+        contextSnapshot = await buildCollaborationContextSnapshot({
+          char: character,
+          user,
+          mode: sessionAtStart.mode,
+          taskText,
+          emojis,
+          categories: emojiCategories,
+        });
+      }
+      const turnMemoryContext = await buildCollaborationTurnMemoryContext({
+        char: character,
+        user,
+        mode: sessionAtStart.mode,
+        messages: requestMessages,
+        taskText,
+      });
+      const nextTitle = sessionAtStart.title === '新的协同'
+        ? shortPreview(latestUserMessage.content || latestUserMessage.attachments?.[0]?.name || '新的协同', 28)
+        : sessionAtStart.title;
+      startedSession = {
+        ...sessionAtStart,
+        title: nextTitle,
+        contextSnapshot,
+        chatContextSnapshot,
+        updatedAt: Date.now(),
+        lastMessagePreview: collaborationMessagePreview(latestUserMessage),
+      };
+      await updateSession(startedSession);
+
       const reply = await runCollaborationTurn({
         profile,
         contextSnapshot,
-        messages: nextMessages,
+        messages: requestMessages,
         signal: abortController.signal,
         onDelta: setStreamingText,
         makerKind: startedSession.makerKind,
@@ -2064,7 +2119,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
       }
       const assistantMessage: CollaborationMessage = {
         id: collaborationId('message'),
-        sessionId: activeSession.id,
+        sessionId: sessionAtStart.id,
         role: 'assistant',
         content: visibleReply || (generatedAttachments.length ? '我做好了，作品放在这里。' : sanitizeCollaborationRichOutputSource(normalizeCollaborationVisibleText(reply.content))),
         thinkingChain: reply.thinkingChain,
@@ -2072,33 +2127,135 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
         attachments: generatedAttachments,
       };
       await CollaborationStore.saveMessage(assistantMessage);
-      setMessages(previous => [...previous, assistantMessage]);
-      const assistantRichPreview = parseCollaborationRichOutput(assistantMessage.content);
-      const richPreviewLabel = assistantRichPreview.text
-        || (assistantRichPreview.voice ? '[语音]' : '')
-        || (assistantRichPreview.emojiNames.length > 0 ? `[表情包：${assistantRichPreview.emojiNames[0]}]` : '');
+      setMessages([...requestMessages, assistantMessage]);
       await updateSession({
         ...startedSession,
         updatedAt: assistantMessage.createdAt,
-        lastMessagePreview: shortPreview(richPreviewLabel || generatedAttachments[0]?.name || '已完成'),
+        lastMessagePreview: collaborationMessagePreview(assistantMessage),
       });
+      if (libraryOpen) void refreshLibrary();
     } catch (error: any) {
       const stopped = abortController.signal.aborted || /abort/i.test(error?.message || '');
       const systemMessage: CollaborationMessage = {
         id: collaborationId('message'),
-        sessionId: activeSession.id,
+        sessionId: sessionAtStart.id,
         role: 'system',
         content: stopped ? '已停止这次生成。' : `这次没有完成：${error?.message || 'API 请求失败'}`,
         createdAt: Date.now(),
       };
       await CollaborationStore.saveMessage(systemMessage);
-      setMessages(previous => [...previous, systemMessage]);
+      setMessages([...requestMessages, systemMessage]);
+      await updateSession({
+        ...startedSession,
+        updatedAt: systemMessage.createdAt,
+        lastMessagePreview: collaborationMessagePreview(systemMessage),
+      });
       if (!stopped) notify(error?.message || '协同请求失败', 'error');
     } finally {
       if (abortRef.current === abortController) abortRef.current = null;
       setIsGenerating(false);
       setStreamingText('');
     }
+  };
+
+  const send = async () => {
+    if (!activeSession || isGenerating || uploadStatus) return;
+    const content = draft.trim();
+    if (!content && pendingAttachments.length === 0) return;
+    const profile = settings[activeSession.mode];
+    if (!isCollaborationApiConfigured(profile)) {
+      setSettingsOpen(true);
+      notify(`请先配置${MODE_LABELS[activeSession.mode]}使用的 API`, 'info');
+      return;
+    }
+
+    const now = Date.now();
+    const userMessage: CollaborationMessage = {
+      id: collaborationId('message'),
+      sessionId: activeSession.id,
+      role: 'user',
+      content,
+      createdAt: now,
+      attachments: pendingAttachments.map(item => item.attachment),
+    };
+    await persistPendingAttachments();
+    await CollaborationStore.saveMessage(userMessage);
+    const nextMessages = [...messages, userMessage];
+    setMessages(nextMessages);
+    setDraft('');
+    setPendingAttachments([]);
+
+    await generateCollaborationReply(activeSession, nextMessages, userMessage);
+  };
+
+  const rerollLatestReply = async () => {
+    if (!activeSession || isGenerating || uploadStatus) return;
+    let lastUserIndex = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === 'user') {
+        lastUserIndex = index;
+        break;
+      }
+    }
+    if (lastUserIndex < 0) {
+      notify('还没有可以重新生成的用户消息', 'info');
+      return;
+    }
+    const profile = settings[activeSession.mode];
+    if (!isCollaborationApiConfigured(profile)) {
+      setSettingsOpen(true);
+      notify(`请先配置${MODE_LABELS[activeSession.mode]}使用的 API`, 'info');
+      return;
+    }
+    const requestMessages = messages.slice(0, lastUserIndex + 1);
+    const latestUserMessage = requestMessages[lastUserIndex];
+    const replacedMessages = messages.slice(lastUserIndex + 1);
+    await CollaborationStore.deleteMessages(replacedMessages.map(message => message.id));
+    setMessages(requestMessages);
+    trackEvent('重新生成协同回复', {
+      上次结果: replacedMessages.some(message => message.role === 'assistant') ? '已完成' : replacedMessages.length > 0 ? '失败或停止' : '无回复',
+    });
+    await generateCollaborationReply(activeSession, requestMessages, latestUserMessage);
+  };
+
+  const deleteMessage = async (message: CollaborationMessage) => {
+    if (!activeSession || isGenerating) {
+      if (isGenerating) notify('请先停止这次生成，再删除消息', 'info');
+      return;
+    }
+    const messageIndex = messages.findIndex(item => item.id === message.id);
+    if (messageIndex < 0) return;
+    let deleteEnd = messageIndex + 1;
+    if (message.role === 'user') {
+      while (deleteEnd < messages.length && messages[deleteEnd].role !== 'user') deleteEnd += 1;
+    }
+    const rowsToDelete = messages.slice(messageIndex, deleteEnd);
+    const choice = await requestActionDialog({
+      title: message.role === 'user' ? '删除这一轮协同？' : message.role === 'assistant' ? '删除这条回复？' : '删除这条提示？',
+      description: message.role === 'user'
+        ? `这条用户消息和 ${character.name} 紧随其后的回复会一起删除。`
+        : '只会删除你刚刚长按的这一条内容。',
+      detail: rowsToDelete.some(row => (row.attachments || []).length > 0)
+        ? '消息中的文件会从协同文件柜列表移除；已经发到 ChatApp 的附件仍可打开。此操作不可撤销。'
+        : '删除后不会影响其它协同窗口，也不会改动普通聊天与角色记忆。此操作不可撤销。',
+      confirmLabel: message.role === 'user' ? '永久删除这一轮' : '永久删除这条内容',
+      cancelLabel: '保留内容',
+      tone: 'danger',
+    });
+    if (choice !== 'confirm') return;
+    await CollaborationStore.deleteMessages(rowsToDelete.map(row => row.id));
+    const deletedIds = new Set(rowsToDelete.map(row => row.id));
+    const remainingMessages = messages.filter(row => !deletedIds.has(row.id));
+    setMessages(remainingMessages);
+    const lastMessage = remainingMessages[remainingMessages.length - 1];
+    await updateSession({
+      ...activeSession,
+      updatedAt: Date.now(),
+      lastMessagePreview: collaborationMessagePreview(lastMessage),
+    });
+    if (libraryOpen) void refreshLibrary();
+    trackEvent('删除协同消息', { 范围: message.role === 'user' ? '整轮' : '单条' });
+    notify(message.role === 'user' ? '这一轮协同已删除' : '这条内容已删除', 'success');
   };
 
   const transferToChat = async () => {
@@ -2172,7 +2329,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
             <p className="collab-header-meta truncate text-[9px] text-slate-400">{activeSession ? `${character.name} · ${MODE_LABELS[activeSession.mode]}${activeSession.makerKind ? ` · ${COLLABORATION_MAKER_MAP[activeSession.makerKind].shortLabel}` : ''}` : showEntryChooser ? '新建或继续一项协同' : '选择协同模式'}</p>
           </div>
         </div>
-        <button type="button" onClick={transferToChat} disabled={!activeSession || messages.length === 0} className="grid h-10 w-10 place-items-center rounded-full text-slate-600 disabled:opacity-25 active:bg-slate-100/80" aria-label="发送上下文到 ChatApp"><PaperPlaneRight size={20} /></button>
+        <button type="button" onClick={() => void rerollLatestReply()} disabled={!activeSession || isGenerating || !messages.some(message => message.role === 'user')} className="grid h-10 w-10 place-items-center rounded-full text-slate-600 disabled:opacity-25 active:bg-slate-100/80" aria-label="重新生成上一条回复" title="重新生成上一条回复"><ArrowCounterClockwise size={20} /></button>
+        <button type="button" onClick={transferToChat} disabled={!activeSession || messages.length === 0} className="grid h-10 w-10 place-items-center rounded-full text-slate-600 disabled:opacity-25 active:bg-slate-100/80" aria-label="发送上下文到 ChatApp" title="发送上下文到 ChatApp"><PaperPlaneRight size={20} /></button>
         <button type="button" onClick={() => { setLibraryOpen(true); trackEvent('打开协同文件库'); }} className="grid h-10 w-10 place-items-center rounded-full text-slate-600 active:bg-slate-100/80" aria-label="协同文件库"><Folder size={20} /></button>
         <button type="button" onClick={() => setSettingsOpen(true)} className="grid h-10 w-10 place-items-center rounded-full text-slate-600 active:bg-slate-100/80" aria-label="协同设置"><GearSix size={20} /></button>
       </header>
@@ -2225,6 +2383,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
                 }}
                 onPlayVoice={playCollaborationVoice}
                 onOpenAttachment={openAttachment}
+                onLongPress={deleteMessage}
               />
             ))}
             {isGenerating && (
