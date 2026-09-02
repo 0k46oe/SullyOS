@@ -1,8 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Modal from '../os/Modal';
+import ConfirmDialog from '../os/ConfirmDialog';
 import { ActiveMsg2GlobalConfig, RealtimeConfig } from '../../types';
 import {
   ActiveMsgClient, ActiveMsg2PushStatus, fetchWorkerDiagnostics, readAmsgFailKind,
+  type AmsgCronTriggerState,
 } from '../../utils/activeMsgClient';
 import {
   AmsgDiagnosticLevel, AmsgDiagnosticsProbe,
@@ -217,6 +219,16 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   >(null);
   /** 自更新成功后 worker 报回来的代码指纹，显示出来好让人确认这次真换了。 */
   const [selfUpdateHash, setSelfUpdateHash] = useState('');
+  /**
+   * 后台任务的定时触发（Worker 的 cron trigger）现在开着没有，见 ActiveMsgClient.getCronTriggerState。
+   * null = 这台 Worker 没有这个端点（旧版）或没读到，按钮整个不显示。
+   * token-missing = 端点在、但 Worker 没配 CF_API_TOKEN，点按钮先引导补钥匙。
+   */
+  const [cronState, setCronState] = useState<
+    { kind: 'known'; enabled: boolean } | { kind: 'token-missing'; message: string } | null
+  >(null);
+  /** 「暂停后台任务」的确认框开着没有。恢复不用确认。 */
+  const [pauseConfirmOpen, setPauseConfirmOpen] = useState(false);
   // Instant Push 也开着：聊天会走它，2.0 挂在本地那条路上的几样东西全静默失效——设置页
   // 两道双向门通常已经拦住这种组合，这里读一次是给漏网脏配置兜底，关掉后立刻更新。
   const [instantOn, setInstantOn] = useState(false);
@@ -267,6 +279,25 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     }
   };
 
+  /** 把 worker 报回来的定时触发状态翻成界面上的三态（见 cronState 的说明）。 */
+  const applyCronTriggerState = (state: AmsgCronTriggerState | null) => {
+    if (!state) {
+      setCronState(null);
+      return;
+    }
+    if (state.supported && typeof state.enabled === 'boolean') {
+      setCronState({ kind: 'known', enabled: state.enabled });
+      return;
+    }
+    if (state.code === 'CF_TOKEN_MISSING') {
+      setCronState({ kind: 'token-missing', message: state.message || '' });
+      return;
+    }
+    // 别的原因（认不出 Worker 名、CF 那边读不到）：按钮不显示，原因留在 console 里备查。
+    if (state.message) console.warn('[amsg2] 读不到后台任务的定时触发状态：', state.message);
+    setCronState(null);
+  };
+
   /**
    * 报一次「即时对话此刻能不能开、开不了卡在哪」。
    *
@@ -305,10 +336,14 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         }, Boolean(nextConfig.instantChatEnabled));
       });
       void runDiagnostics();
+      // 已连接才问定时触发开没开：没连上的时候这事还轮不到操心。
+      if (nextConfig.initializedAt) void ActiveMsgClient.getCronTriggerState().then(applyCronTriggerState);
+      else setCronState(null);
     } else {
       setInstantChatSupported(false);
       setDiagnosticsProbe(null);
       setWorkerVersion(null);
+      setCronState(null);
     }
   };
 
@@ -340,6 +375,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     setAttachNeedsScriptName(false);
     setAttachAccounts(null);
     setAttachError('');
+    setPauseConfirmOpen(false);
     void refresh();
   }, [isOpen]);
 
@@ -606,6 +642,48 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   };
 
   /**
+   * 暂停 / 恢复后台任务：让 Worker 摘掉或加回自己的 cron trigger（见 worker/amsg/src/cronTrigger.ts）。
+   *
+   * 暂停期间到点的任务在 D1 里排着，不会丢；恢复后的第一跳一起补发。
+   * 走 GitHub 的 Sync fork 重新部署会按 wrangler.toml 把 cron 加回来，所以这不是永久开关。
+   */
+  const applyCronTrigger = async (enabled: boolean) => {
+    setPauseConfirmOpen(false);
+    setLoading(true);
+    const action = enabled ? 'resume' : 'pause';
+    try {
+      const result = await ActiveMsgClient.setCronTriggerEnabled(enabled);
+      if (result.ok) {
+        setCronState({ kind: 'known', enabled });
+        addToast(result.message, 'success');
+      } else {
+        addToast(result.message, 'error');
+        // 缺 CF_API_TOKEN 是这里唯一能就地解决的一种，跟自更新一样露出补钥匙那一块。
+        if (result.code === 'CF_TOKEN_MISSING') setAttachOpen(true);
+      }
+      trackEvent('暂停后台任务', { action, result: result.ok ? 'ok' : 'failed' });
+    } catch (error: any) {
+      addToast(error?.message || (enabled ? '恢复失败。' : '暂停失败。'), 'error');
+      trackEvent('暂停后台任务', { action, result: 'failed' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /** 暂停要先确认（点错一下角色就全哑了），恢复直接做。 */
+  const handleCronTriggerClick = () => {
+    if (!cronState) return;
+    if (cronState.kind === 'token-missing') {
+      // 钥匙还没装，先把补装那一块露出来；装好之后再点就能真的暂停了。
+      addToast(cronState.message || '这台 Worker 还没配 CF_API_TOKEN，先在下面补一把钥匙。', 'info');
+      setAttachOpen(true);
+      return;
+    }
+    if (cronState.enabled) setPauseConfirmOpen(true);
+    else void applyCronTrigger(true);
+  };
+
+  /**
    * 给已经装好的后端补上「自己更新自己」的钥匙。
    *
    * 只写 CF_API_TOKEN / CF_SCRIPT_NAME 两条密钥，不碰脚本也不碰别的绑定——手动部署的
@@ -654,6 +732,8 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       setAttachNeedsScriptName(false);
       addToast('钥匙装好了，现在可以点上面的「更新 Worker」了。', 'success');
       trackEvent('补装后端更新能力', { result: '成功' });
+      // 钥匙一到位，暂停后台任务那个按钮也能用了，重新问一次它的状态。
+      void ActiveMsgClient.getCronTriggerState().then(applyCronTriggerState);
     } catch (error: any) {
       setAttachError(error?.message || '装钥匙时出错了。');
       trackEvent('补装后端更新能力', { result: '失败' });
@@ -827,6 +907,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   const instantChatBlockedReason = instantChatBlocker ? INSTANT_CHAT_BLOCKER_HINTS[instantChatBlocker] : '';
 
   return (
+    <>
     <Modal
       isOpen={isOpen}
       title="主动消息 2.0"
@@ -841,6 +922,13 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       )}
     >
       <div className="space-y-4 text-sm text-slate-600">
+        {/* 后台任务暂停着的时候常驻这一条：下面的按钮在折叠区里，不然一眼看不出角色为什么都不响。 */}
+        {cronState?.kind === 'known' && !cronState.enabled ? (
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 text-xs leading-relaxed text-amber-700">
+            后台任务已暂停，到点的消息先攒着，恢复后一起补发。
+          </div>
+        ) : null}
+
         {/* 体检。主动消息坏掉的那几种方式在界面上全是隐形的：D1 没绑、表结构是旧的、
             VAPID 没配、云端没登记收件设备——任务照建、面板照常，就是一条都不发。
             Worker 的 /debug 一直算得出这些，这里只是把它摆到看得见的地方。 */}
@@ -1390,6 +1478,30 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
                 </p>
               ) : null}
 
+              {/* 暂停 / 恢复后台任务：摘掉或加回 Worker 的 cron trigger。旧版 Worker 没这个端点时整块不显示。 */}
+              {cronState ? (
+                <>
+                  <button
+                    onClick={handleCronTriggerClick}
+                    disabled={loading}
+                    className={`w-full py-2.5 font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50 ${
+                      cronState.kind === 'known' && !cronState.enabled
+                        ? 'bg-amber-500 text-white border border-amber-500'
+                        : 'bg-white border border-slate-300 text-slate-700'
+                    }`}
+                  >
+                    {loading
+                      ? '处理中...'
+                      : cronState.kind === 'known' && !cronState.enabled
+                        ? '恢复后台任务'
+                        : '暂停后台任务'}
+                  </button>
+                  <p className="text-xs leading-relaxed text-slate-500">
+                    暂停会摘掉 Worker 的定时触发，到点的主动消息和定时消息先攒在云端，不会丢；恢复后一起补发。
+                  </p>
+                </>
+              ) : null}
+
               {attachOpen ? (
                 <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-2.5">
                   <p className="text-[11px] font-bold text-slate-600">给这台后端补一把更新用的钥匙</p>
@@ -1603,6 +1715,17 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         </div>
       </div>
     </Modal>
+    {/* 摆在 Modal 外面：它自己是全屏 fixed 定位，放进面板里会被面板的动画容器框住。 */}
+    <ConfirmDialog
+      isOpen={pauseConfirmOpen}
+      title="暂停后台任务"
+      message="暂停后，到点的主动消息和定时消息会先攒着，不会丢。点「恢复后台任务」之后，攒下的会一起补发。"
+      confirmText="暂停"
+      variant="warning"
+      onConfirm={() => void applyCronTrigger(false)}
+      onCancel={() => setPauseConfirmOpen(false)}
+    />
+    </>
   );
 };
 

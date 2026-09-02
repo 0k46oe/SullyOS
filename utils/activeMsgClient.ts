@@ -338,6 +338,21 @@ export interface AmsgSelfUpdateResult {
   code?: string;
 }
 
+/**
+ * 后台任务的定时触发（Worker 的 cron trigger）现在开着没有（`GET /cron-trigger`，
+ * 见 worker/amsg/src/cronTrigger.ts）。
+ * supported 为 false 是端点在、但 Worker 自己查不了（多半是没配 CF_API_TOKEN），code 说明卡在哪。
+ */
+export interface AmsgCronTriggerState {
+  supported: boolean;
+  /** 开着 = true。supported 为 false 时没有这一项。 */
+  enabled?: boolean;
+  /** worker 报的代号（`CF_TOKEN_MISSING` / `SCRIPT_NAME_UNKNOWN` 之类），supported 为 false 时才有。 */
+  code?: string;
+  /** 给人看的一句，supported 为 false 时才有。 */
+  message?: string;
+}
+
 /** init-tenant 没成功时按 HTTP 状态归类：三种状态要用户去改的地方完全不同。 */
 const resolveInitFailKind = (status: number): AmsgFailKind => {
   if (status === 401 || status === 403) return '鉴权失败';   // 共享密钥两边对不上
@@ -3083,6 +3098,75 @@ export const ActiveMsgClient = {
       ok: false,
       supported: true,
       message: body?.error?.message || `更新没成功（HTTP ${status}）。`,
+      code: typeof body?.error?.code === 'string' ? body.error.code : undefined,
+    };
+  },
+
+  /**
+   * 问一下这台 Worker 的定时触发（cron trigger）现在开着没有。
+   *
+   * 回 null 表示问不到：旧版 Worker 没有这个端点（404）、没填地址、或者这一次没连上。
+   * 三种都按「不支持」处理——设置页不显示那个按钮，也不报错。
+   */
+  async getCronTriggerState(): Promise<AmsgCronTriggerState | null> {
+    try {
+      const config = await ensureWorkerReady();
+      const { status, body } = await fetchWithAuthRaw('cron-trigger', config, { method: 'GET' }, '后台任务状态');
+      // 旧 worker 没有这个端点：可能回 404，也可能被上游当成未知路由回一段自己的 JSON。
+      if (status === 404 || body?.error?.code === 'NOT_FOUND') return null;
+      if (status === 200 && body?.success === true) {
+        const data = body.data ?? {};
+        if (data.supported === true && typeof data.enabled === 'boolean') {
+          return { supported: true, enabled: data.enabled };
+        }
+        return {
+          supported: false,
+          code: typeof data.code === 'string' ? data.code : undefined,
+          message: typeof data.message === 'string' ? data.message : undefined,
+        };
+      }
+      return {
+        supported: false,
+        code: typeof body?.error?.code === 'string' ? body.error.code : undefined,
+        message: body?.error?.message || `HTTP ${status}`,
+      };
+    } catch {
+      return null;
+    }
+  },
+
+  /**
+   * 暂停（false）或恢复（true）后台任务：让 Worker 摘掉或加回自己的 cron trigger。
+   *
+   * 暂停期间到点的任务在 D1 里排着，一条都不丢；恢复后的第一跳一起补发。
+   * 成功和失败都带一句能直接显示的话；code 是 worker 报的代号，缺 CF_API_TOKEN 时
+   * 面板据此露出补钥匙那一块。网络层面的失败照常抛（跟 selfUpdateWorker 一样），调用方兜。
+   */
+  async setCronTriggerEnabled(enabled: boolean): Promise<{ ok: boolean; message: string; code?: string }> {
+    const config = await ensureWorkerReady();
+    const { status, body } = await fetchWithAuthRaw(
+      'cron-trigger',
+      config,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) },
+      enabled ? '恢复后台任务' : '暂停后台任务',
+    );
+    if (status === 404 || body?.error?.code === 'NOT_FOUND') {
+      return {
+        ok: false,
+        message: '这台 Worker 还是旧版本，没有暂停后台任务的能力。先点「更新 Worker」，之后就能在这儿点了。',
+      };
+    }
+    if (status === 200 && body?.success === true) {
+      return {
+        ok: true,
+        message: enabled
+          ? '后台任务已恢复，攒下的消息会在下一分钟一起补发。'
+          : '后台任务已暂停，到点的消息先攒着，恢复后一起补发。',
+      };
+    }
+    return {
+      ok: false,
+      message: body?.error?.message || `${enabled ? '恢复' : '暂停'}没成功（HTTP ${status}）。`,
       code: typeof body?.error?.code === 'string' ? body.error.code : undefined,
     };
   },

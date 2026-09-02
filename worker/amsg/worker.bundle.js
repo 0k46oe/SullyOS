@@ -6990,7 +6990,7 @@ function stripReasoningTags2(content) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-09-01";
+var AMSG_BUNDLE_VERSION = "2026-09-02";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -8831,17 +8831,17 @@ var isEncryptedEnvelope2 = (value) => {
 var handleInstantChat = async (args) => {
   const { request, env, upstream: upstream2, json } = args;
   const stateBackoffMs = args.stateBackoffMs ?? STATE_FORWARD_BACKOFF_MS;
-  const fail2 = (status, code, message, extra) => json(status, { success: false, error: { code, message, ...extra ?? {} } });
+  const fail3 = (status, code, message, extra) => json(status, { success: false, error: { code, message, ...extra ?? {} } });
   const token = (env.AMSG_SERVER_TOKEN ?? "").trim();
   const clientToken = request.headers.get("X-Client-Token") ?? "";
   if (token) {
     if (!clientToken || !await constantTimeEqual2(clientToken, token)) {
-      return fail2(401, "INVALID_CLIENT_TOKEN", "\u5171\u4EAB\u5BC6\u94A5\u65E0\u6548\u6216\u7F3A\u5931");
+      return fail3(401, "INVALID_CLIENT_TOKEN", "\u5171\u4EAB\u5BC6\u94A5\u65E0\u6548\u6216\u7F3A\u5931");
     }
   }
   const userId = request.headers.get("X-User-Id") ?? "";
-  if (!userId) return fail2(400, "USER_ID_REQUIRED", "\u7F3A\u5C11\u7528\u6237\u6807\u8BC6\u7B26");
-  if (!UUID_V4_RE.test(userId)) return fail2(400, "INVALID_USER_ID_FORMAT", "X-User-Id \u5FC5\u987B\u662F UUID v4 \u683C\u5F0F");
+  if (!userId) return fail3(400, "USER_ID_REQUIRED", "\u7F3A\u5C11\u7528\u6237\u6807\u8BC6\u7B26");
+  if (!UUID_V4_RE.test(userId)) return fail3(400, "INVALID_USER_ID_FORMAT", "X-User-Id \u5FC5\u987B\u662F UUID v4 \u683C\u5F0F");
   let body;
   try {
     const text = await readMaybeGzippedBody(request);
@@ -8849,13 +8849,13 @@ var handleInstantChat = async (args) => {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     body = parsed;
   } catch {
-    return fail2(400, "INVALID_JSON", "\u8BF7\u6C42\u4F53\u4E0D\u662F\u5408\u6CD5\u7684 JSON \u5BF9\u8C61");
+    return fail3(400, "INVALID_JSON", "\u8BF7\u6C42\u4F53\u4E0D\u662F\u5408\u6CD5\u7684 JSON \u5BF9\u8C61");
   }
   if (!isEncryptedEnvelope2(body.statePayload)) {
-    return fail2(400, "INVALID_STATE_PAYLOAD", "statePayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
+    return fail3(400, "INVALID_STATE_PAYLOAD", "statePayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
   }
   if (!isEncryptedEnvelope2(body.taskPayload)) {
-    return fail2(400, "INVALID_TASK_PAYLOAD", "taskPayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
+    return fail3(400, "INVALID_TASK_PAYLOAD", "taskPayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
   }
   const requestUrl = new URL(request.url);
   const mountPath = requestUrl.pathname.replace(/\/+$/, "").replace(/\/instant-chat$/, "");
@@ -8946,7 +8946,7 @@ var handleInstantChat = async (args) => {
   }
   const uuid = taskBody?.data?.uuid;
   if (typeof uuid !== "string" || !uuid) {
-    return fail2(502, "INSTANT_CHAT_TASK_UUID_MISSING", "\u4E0A\u6E38\u6CA1\u6709\u56DE\u4EFB\u52A1 uuid\uFF0C\u65E0\u6CD5\u8DDF\u8E2A\u8FD9\u4E00\u8F6E", {
+    return fail3(502, "INSTANT_CHAT_TASK_UUID_MISSING", "\u4E0A\u6E38\u6CA1\u6709\u56DE\u4EFB\u52A1 uuid\uFF0C\u65E0\u6CD5\u8DDF\u8E2A\u8FD9\u4E00\u8F6E", {
       step: "schedule-message"
     });
   }
@@ -8984,7 +8984,7 @@ async function cf(token, path, init = {}) {
   try {
     res = await fetch(`${CF_API}${path}`, {
       method: init.method ?? "GET",
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, ...init.headers },
       body: init.body
     });
   } catch (err5) {
@@ -9192,6 +9192,87 @@ async function handleSelfUpdate(request, env) {
     bundleBytes: bytes,
     scriptName
   };
+}
+
+// worker/amsg/src/cronTrigger.ts
+var AMSG_CRON_EXPRESSION = "* * * * *";
+var isCronTriggerAuthFailure = (code) => code === "SERVER_TOKEN_REQUIRED" || code === "UNAUTHORIZED";
+var fail2 = (code, message) => ({ code, message });
+async function prepare(env, request) {
+  const serverToken = env.AMSG_SERVER_TOKEN?.trim();
+  if (!serverToken) {
+    return {
+      ok: false,
+      failure: fail2(
+        "SERVER_TOKEN_REQUIRED",
+        "\u8FD9\u4E2A Worker \u6CA1\u8BBE\u5171\u4EAB\u5BC6\u94A5\uFF08AMSG_SERVER_TOKEN\uFF09\uFF0C\u51FA\u4E8E\u5B89\u5168\u8003\u8651\u4E0D\u5F00\u653E\u6682\u505C\u540E\u53F0\u4EFB\u52A1\u3002\u5148\u8865\u4E0A\u518D\u8BD5\u3002"
+      )
+    };
+  }
+  const clientToken = request.headers.get("X-Client-Token");
+  if (!clientToken || !await constantTimeEqual2(clientToken, serverToken)) {
+    return { ok: false, failure: fail2("UNAUTHORIZED", "\u5171\u4EAB\u5BC6\u94A5\u5BF9\u4E0D\u4E0A\u3002") };
+  }
+  const token = env.CF_API_TOKEN?.trim();
+  if (!token) {
+    return {
+      ok: false,
+      failure: fail2(
+        "CF_TOKEN_MISSING",
+        "\u6CA1\u914D CF_API_TOKEN\uFF0C\u6CA1\u6CD5\u6539\u5B9A\u65F6\u89E6\u53D1\u3002\u53BB Cloudflare \u5EFA\u4E00\u679A\u53EA\u52FE Workers Scripts \u2192 Edit \u7684 API Token\uFF0C\u52A0\u8FDB\u8FD9\u4E2A Worker \u7684\u53D8\u91CF\u91CC\u3002"
+      )
+    };
+  }
+  const scriptName = resolveScriptName(env, request.url);
+  if (!scriptName) {
+    return {
+      ok: false,
+      failure: fail2(
+        "SCRIPT_NAME_UNKNOWN",
+        "\u8BA4\u4E0D\u51FA\u8FD9\u4E2A Worker \u53EB\u4EC0\u4E48\uFF08\u591A\u534A\u662F\u5957\u4E86\u4EE3\u7406\u57DF\u540D\uFF09\u3002\u7ED9\u5B83\u52A0\u4E00\u6761 CF_SCRIPT_NAME \u53D8\u91CF\uFF0C\u503C\u586B Worker \u7684\u540D\u5B57\u3002"
+      )
+    };
+  }
+  const located = await locateScript(env, token, scriptName);
+  if (!located.ok) return { ok: false, failure: fail2("SCRIPT_NOT_LOCATED", located.message) };
+  return {
+    ok: true,
+    token,
+    schedulesPath: `/accounts/${located.accountId}/workers/scripts/${encodeURIComponent(scriptName)}/schedules`
+  };
+}
+var readSchedules = (result) => {
+  const schedules = result?.schedules;
+  return Array.isArray(schedules) ? schedules : [];
+};
+async function handleCronTriggerRead(env, request) {
+  const prepared = await prepare(env, request);
+  if (!prepared.ok) return { supported: false, ...prepared.failure };
+  const current = await cf(prepared.token, prepared.schedulesPath);
+  if (!current.ok) {
+    return { supported: false, ...fail2("CF_ERROR", `\u8BFB\u4E0D\u5230\u5B9A\u65F6\u89E6\u53D1\u7684\u72B6\u6001\uFF08${current.detail}\uFF09\u3002`) };
+  }
+  return { supported: true, enabled: readSchedules(current.result).length > 0 };
+}
+async function handleCronTriggerWrite(env, request, enabled) {
+  const prepared = await prepare(env, request);
+  if (!prepared.ok) return { ok: false, ...prepared.failure };
+  const schedules = enabled ? [{ cron: AMSG_CRON_EXPRESSION }] : [];
+  const written = await cf(prepared.token, prepared.schedulesPath, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(schedules)
+  });
+  if (!written.ok) {
+    return {
+      ok: false,
+      ...fail2(
+        "CF_ERROR",
+        `${enabled ? "\u6062\u590D" : "\u6682\u505C"}\u6CA1\u6210\u529F\uFF08${written.detail}\uFF09\u3002\u5B9A\u65F6\u89E6\u53D1\u4FDD\u6301\u539F\u6837\u3002`
+      )
+    };
+  }
+  return { ok: true, enabled };
 }
 
 // utils/mcpFireCore.ts
@@ -13316,7 +13397,7 @@ var amsgHooks = {
       throw fireStateError("task metadata \u7F3A charId", { taskId: ctx.task.id });
     }
     const instant = isInstantChatTask(ctx.task.metadata ?? {});
-    const fail2 = (reason, extra) => {
+    const fail3 = (reason, extra) => {
       if (instant && typeof ctx.task.uuid === "string" && ctx.task.uuid) {
         if (typeof ctx.writeState === "function") {
           void writeChatFail(ctx.writeState, charId, {
@@ -13338,7 +13419,7 @@ var amsgHooks = {
       try {
         return await unpackStateValue(value);
       } catch (error) {
-        throw fail2(`${label} \u89E3\u538B\u5931\u8D25\uFF08\u6570\u636E\u635F\u574F\uFF09`, { error: String(error) });
+        throw fail3(`${label} \u89E3\u538B\u5931\u8D25\uFF08\u6570\u636E\u635F\u574F\uFF09`, { error: String(error) });
       }
     };
     const taskMeta = ctx.task.metadata ?? {};
@@ -13348,13 +13429,13 @@ var amsgHooks = {
     if (taskKind) {
       const handler = FIRE_KIND_HANDLERS[taskKind];
       if (!handler) {
-        throw fail2(`\u4E0D\u8BA4\u8BC6\u7684\u4EFB\u52A1\u79CD\u7C7B amsgKind=${taskKind}\uFF08worker \u4EE3\u7801\u6BD4\u524D\u7AEF\u65E7\uFF0C\u53BB\u8BBE\u7F6E\u9875\u91CD\u65B0\u90E8\u7F72\u4E00\u6B21\uFF09`);
+        throw fail3(`\u4E0D\u8BA4\u8BC6\u7684\u4EFB\u52A1\u79CD\u7C7B amsgKind=${taskKind}\uFF08worker \u4EE3\u7801\u6BD4\u524D\u7AEF\u65E7\uFF0C\u53BB\u8BBE\u7F6E\u9875\u91CD\u65B0\u90E8\u7F72\u4E00\u6B21\uFF09`);
       }
       let plan;
       try {
         plan = await handler.beforeFire({ ctx, charId, taskMeta });
       } catch (error) {
-        throw fail2(error instanceof Error ? error.message : String(error), { kind: taskKind });
+        throw fail3(error instanceof Error ? error.message : String(error), { kind: taskKind });
       }
       if ("skip" in plan) {
         console.log("[amsg:kind-skip]", { taskId: ctx.task.id, kind: taskKind, reason: plan.reason });
@@ -13385,12 +13466,12 @@ var amsgHooks = {
       return { skip: true };
     }
     const packRow = charRows.find((r) => r.key === AMSG_FIRE_PACK_KEY);
-    if (!packRow) throw fail2("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 fire_pack");
+    if (!packRow) throw fail3("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 fire_pack");
     const packJson = await unpackOrFail("fire_pack", packRow.value);
     const pack = parseFirePack(packJson);
-    if (!pack) throw fail2(`fire_pack \u89E3\u6790\u5931\u8D25\uFF1A${describeFirePackVersion(packJson)}`);
+    if (!pack) throw fail3(`fire_pack \u89E3\u6790\u5931\u8D25\uFF1A${describeFirePackVersion(packJson)}`);
     if (instant && !pack.chat) {
-      throw fail2("\u5373\u65F6\u5BF9\u8BDD\u4EFB\u52A1\u7684 fire_pack \u91CC\u6CA1\u6709 chat \u6BB5\uFF08\u4E91\u7AEF\u72B6\u6001\u6CA1\u8DDF\u4E0A\uFF09");
+      throw fail3("\u5373\u65F6\u5BF9\u8BDD\u4EFB\u52A1\u7684 fire_pack \u91CC\u6CA1\u6709 chat \u6BB5\uFF08\u4E91\u7AEF\u72B6\u6001\u6CA1\u8DDF\u4E0A\uFF09");
     }
     if (!instant && pack.template === AMSG2_INSTANT_STUB_TEMPLATE) {
       console.warn("[amsg:fire-pack-stub] fire_pack \u8FD8\u662F\u5373\u65F6\u5BF9\u8BDD\u7684\u5360\u4F4D\u6A21\u677F\uFF0C\u7B49\u5BA2\u6237\u7AEF\u8865\u4F20\u540E\u91CD\u8BD5", {
@@ -13401,7 +13482,7 @@ var amsgHooks = {
     }
     const occurrenceMs = Date.parse(String(ctx.task.nextSendAt));
     if (!Number.isFinite(occurrenceMs)) {
-      throw fail2("\u4EFB\u52A1\u884C next_send_at \u89E3\u6790\u4E0D\u51FA\u89E6\u53D1\u65F6\u523B", { nextSendAt: ctx.task.nextSendAt });
+      throw fail3("\u4EFB\u52A1\u884C next_send_at \u89E3\u6790\u4E0D\u51FA\u89E6\u53D1\u65F6\u523B", { nextSendAt: ctx.task.nextSendAt });
     }
     const presenceLastUserMessageAt = presence?.charId === charId ? presence.lastUserMessageAt : null;
     const expireInput = {
@@ -13425,17 +13506,17 @@ var amsgHooks = {
     }
     if (!instant) console.log("[amsg:expire-pass]", expireTrace);
     if (!instant && typeof taskMeta.amsgTaskInstruction !== "string") {
-      throw fail2("\u4EFB\u52A1 metadata \u7F3A amsgTaskInstruction\uFF08\u65E7\u683C\u5F0F\u4EFB\u52A1\uFF09");
+      throw fail3("\u4EFB\u52A1 metadata \u7F3A amsgTaskInstruction\uFF08\u65E7\u683C\u5F0F\u4EFB\u52A1\uFF09");
     }
     const globalRows = await ctx.readState(AMSG_GLOBAL_NAMESPACE);
     const toolPackRow = charRows.find((r) => r.key === AMSG_TOOL_PACK_KEY);
     const toolConfigRow = globalRows.find((r) => r.key === AMSG_TOOL_CONFIG_KEY);
-    if (!toolPackRow) throw fail2("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 tool_pack");
-    if (!toolConfigRow) throw fail2("\u4E91\u7AEF\u6CA1\u6709 tool_config");
+    if (!toolPackRow) throw fail3("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 tool_pack");
+    if (!toolConfigRow) throw fail3("\u4E91\u7AEF\u6CA1\u6709 tool_config");
     const toolPack = parseToolPack(await unpackOrFail("tool_pack", toolPackRow.value));
-    if (!toolPack) throw fail2("tool_pack \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
+    if (!toolPack) throw fail3("tool_pack \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
     const toolConfig = parseToolConfig(await unpackOrFail("tool_config", toolConfigRow.value));
-    if (!toolConfig) throw fail2("tool_config \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
+    if (!toolConfig) throw fail3("tool_config \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
     const mcpServers = filterMcpServersForChar(toolConfig.mcpServers, charId);
     const mcpResolve = mcpServers.length ? buildMcpNameMap(mcpServers, { maxNameLen: MCP_FIRE_NAME_BUDGET }) : null;
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
@@ -14188,6 +14269,43 @@ var src_default = {
         success: result.ok,
         data: result.ok ? result : void 0,
         error: result.ok ? void 0 : { code: result.code, message: result.message }
+      });
+    }
+    if (pathname.endsWith("/cron-trigger")) {
+      if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
+      if (method === "GET") {
+        const state = await handleCronTriggerRead(env, request);
+        if (!state.supported && isCronTriggerAuthFailure(state.code)) {
+          return jsonWithCors(401, {
+            success: false,
+            error: { code: state.code, message: state.message }
+          });
+        }
+        return jsonWithCors(200, { success: true, data: state });
+      }
+      if (method !== "POST") {
+        return jsonWithCors(405, {
+          success: false,
+          error: { code: "METHOD_NOT_ALLOWED", message: "/cron-trigger \u53EA\u63A5\u53D7 GET \u548C POST" }
+        });
+      }
+      let enabled;
+      try {
+        enabled = (await request.json())?.enabled;
+      } catch {
+        enabled = void 0;
+      }
+      if (typeof enabled !== "boolean") {
+        return jsonWithCors(400, {
+          success: false,
+          error: { code: "BAD_REQUEST", message: '\u8BF7\u6C42\u4F53\u8981\u662F { "enabled": true | false }' }
+        });
+      }
+      const result = await handleCronTriggerWrite(env, request, enabled);
+      if (result.ok) return jsonWithCors(200, { success: true, data: result });
+      return jsonWithCors(isCronTriggerAuthFailure(result.code) ? 401 : 400, {
+        success: false,
+        error: { code: result.code, message: result.message }
       });
     }
     const report = inspectWorkerEnv(env);
