@@ -3,7 +3,7 @@
 // worker/amsg/src/index.ts
 import { DurableObject } from "cloudflare:workers";
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.26_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.27_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
 var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
   "user_id",
   "uuid",
@@ -1136,7 +1136,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.26_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-4YH3TS4W.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.27_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-FPVXATA4.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -2133,7 +2133,7 @@ async function writeClientStateEntries({ db, userId, userKey, entries, now }) {
   const cleanups = [];
   const rootRowIndexes = [];
   const rootRowEntries = [];
-  let deleted = 0;
+  const deletions = [];
   for (const entry of entries) {
     const rawGuardAt = Number.isInteger(entry.version) && entry.version > 0 ? entry.version : entry.updatedAt;
     const guardAt = Math.min(rawGuardAt, at);
@@ -2143,12 +2143,12 @@ async function writeClientStateEntries({ db, userId, userKey, entries, now }) {
       updatedAt: guardAt
     });
     if (entry.value === null) {
+      deletions.push({ cleanupIndex: cleanups.length, entry });
       cleanups.push({
         namespace: entry.namespace,
         key: entry.key,
         updatedAt: guardAt
       });
-      deleted++;
       continue;
     }
     rootRowIndexes.push(physicalRows.length);
@@ -2185,6 +2185,7 @@ async function writeClientStateEntries({ db, userId, userKey, entries, now }) {
   const result = await db.upsertClientState(userId, physicalRows, cleanups, at);
   let upserted = 0;
   let skipped = 0;
+  let deleted = 0;
   const skippedEntries = [];
   if (Array.isArray(result.outcomes) && result.outcomes.length === physicalRows.length) {
     for (let i = 0; i < rootRowIndexes.length; i++) {
@@ -2199,6 +2200,15 @@ async function writeClientStateEntries({ db, userId, userKey, entries, now }) {
   } else {
     upserted = result.upserted;
     skipped = result.skipped;
+  }
+  const cleanupOutcomes = Array.isArray(result.cleanupOutcomes) && result.cleanupOutcomes.length === cleanups.length ? result.cleanupOutcomes : null;
+  for (const { cleanupIndex, entry } of deletions) {
+    if (cleanupOutcomes && cleanupOutcomes[cleanupIndex] === false) {
+      skipped++;
+      skippedEntries.push({ namespace: entry.namespace, key: entry.key });
+    } else {
+      deleted++;
+    }
   }
   return { upserted, skipped, deleted, skippedEntries };
 }
@@ -5147,6 +5157,19 @@ var CLIENT_STATE_TABLE_SQL = `
     PRIMARY KEY (user_id, namespace, key)
   )
 `;
+var CLIENT_STATE_INDEXES = [
+  {
+    name: "idx_client_state_cleanup",
+    // 服务 cleanupClientState 的
+    //   DELETE FROM client_state WHERE namespace = ? AND updated_at < ?
+    // 主键 (user_id, namespace, key) 最左列是 user_id，按 namespace 起头的条件
+    // 吃不到它。
+    sql: `CREATE INDEX IF NOT EXISTS idx_client_state_cleanup
+          ON client_state (namespace, updated_at)`,
+    description: "TTL cleanup index (cleanupClientState by namespace + updated_at)",
+    critical: false
+  }
+];
 var PUSH_SUBSCRIPTION_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS push_subscriptions (
     user_id TEXT PRIMARY KEY,
@@ -5180,11 +5203,57 @@ var MESSAGE_OUTBOX_TABLE_SQL = `
     UNIQUE (user_id, message_id)
   )
 `;
-var MESSAGE_OUTBOX_INDEX_SQL = `
-  CREATE INDEX IF NOT EXISTS idx_outbox_unacked
-    ON message_outbox (user_id, id)
-    WHERE acked_at IS NULL
-`;
+var MESSAGE_OUTBOX_INDEXES = [
+  {
+    name: "idx_outbox_unacked",
+    // 服务 listUnackedOutbox 的
+    //   SELECT … WHERE user_id = ? AND acked_at IS NULL AND id > ? ORDER BY id
+    sql: `CREATE INDEX IF NOT EXISTS idx_outbox_unacked
+          ON message_outbox (user_id, id)
+          WHERE acked_at IS NULL`,
+    description: "Unacked outbox paging index (GET /outbox)",
+    critical: false
+  },
+  {
+    name: "idx_outbox_created",
+    // 服务 cleanupOutbox 的
+    //   DELETE FROM message_outbox WHERE created_at < ?
+    sql: `CREATE INDEX IF NOT EXISTS idx_outbox_created
+          ON message_outbox (created_at)`,
+    description: "Outbox retention cleanup index (cleanupOutbox by created_at)",
+    critical: false
+  },
+  {
+    name: "idx_outbox_acked",
+    // 服务 cleanupOutbox 的
+    //   DELETE FROM message_outbox WHERE acked_at IS NOT NULL AND acked_at < ?
+    // 部分索引只收已 ack 的行：未 ack 的那部分本来就不是这条语句的目标，
+    // idx_outbox_unacked 的 WHERE 条件与它正好互补。
+    sql: `CREATE INDEX IF NOT EXISTS idx_outbox_acked
+          ON message_outbox (acked_at)
+          WHERE acked_at IS NOT NULL`,
+    description: "Acked outbox cleanup index (cleanupOutbox by acked_at)",
+    critical: false
+  },
+  {
+    name: "idx_outbox_task_undelivered",
+    // 服务 discardUndeliveredOutboxForTask 的
+    //   DELETE FROM message_outbox
+    //   WHERE user_id = ? AND task_uuid = ? AND delivered_at IS NULL AND acked_at IS NULL
+    // 没有它这条只能靶着 user_id 走 (user_id, message_id) 或 idx_outbox_unacked，
+    // 单用户部署下 user_id 对每一行都成立，等于把整个未 ack 积压扫一遍。
+    sql: `CREATE INDEX IF NOT EXISTS idx_outbox_task_undelivered
+          ON message_outbox (user_id, task_uuid)
+          WHERE delivered_at IS NULL AND acked_at IS NULL`,
+    description: "Undelivered-by-task discard index (cancel / supersede)",
+    critical: false
+  }
+];
+var SQLITE_ALL_INDEXES = [
+  ...SQLITE_INDEXES,
+  ...CLIENT_STATE_INDEXES,
+  ...MESSAGE_OUTBOX_INDEXES
+];
 function parseTableName(sql) {
   const match = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)/i.exec(sql);
   return match ? match[1] : "";
@@ -5219,7 +5288,7 @@ var SQLITE_REQUIRED_SCHEMA = Object.freeze({
     describeTable(LLM_CREDENTIALS_TABLE_SQL),
     describeTable(MESSAGE_OUTBOX_TABLE_SQL)
   ])),
-  indexes: Object.freeze(SQLITE_INDEXES.filter((index) => index.critical).map((index) => index.name))
+  indexes: Object.freeze(SQLITE_ALL_INDEXES.filter((index) => index.critical).map((index) => index.name))
 });
 function prefixRangeEnd(prefix) {
   const points = Array.from(prefix);
@@ -5322,7 +5391,6 @@ var D1Adapter = class {
     await this._db.prepare(PUSH_SUBSCRIPTION_TABLE_SQL).run();
     await this._db.prepare(LLM_CREDENTIALS_TABLE_SQL).run();
     await this._db.prepare(MESSAGE_OUTBOX_TABLE_SQL).run();
-    await this._db.prepare(MESSAGE_OUTBOX_INDEX_SQL).run();
     for (const migration of SQLITE_MIGRATIONS) {
       try {
         await this._db.prepare(migration.sql).run();
@@ -5331,7 +5399,7 @@ var D1Adapter = class {
       }
     }
     const indexResults = [];
-    for (const index of SQLITE_INDEXES) {
+    for (const index of SQLITE_ALL_INDEXES) {
       try {
         await this._db.prepare(index.sql).run();
         indexResults.push({ name: index.name, status: "success", description: index.description, critical: !!index.critical });
@@ -5700,8 +5768,11 @@ var D1Adapter = class {
    * @param {number} [now] - 服务端当前时刻（epoch 毫秒），判定「这行来自未来」用的
    *   就是它。调用方（lib/client-state-store.js）传下来，测试可以钉住一个假时钟；
    *   自定义调用方不传时退回本机时钟。
-   * @returns {Promise<{ upserted: number, skipped: number, outcomes: boolean[] }>}
+   * @returns {Promise<{ upserted: number, skipped: number, outcomes: boolean[], cleanupOutcomes?: Array<boolean|null> }>}
    *   `outcomes[i]` 对应 entries[i] 是否真的写入（changes > 0）。
+   *   `cleanupOutcomes[i]` 对应 cleanups[i]（传了 cleanups 才有）：精确 key 形态
+   *   回 `true` = 这个 key 的行已经不在（删掉了，或本来就没有）、`false` = 行还在
+   *   （库里那行更新，删除被条件写拦下）；前缀形态不探测，回 `null`。
    */
   async upsertClientState(userId, entries, cleanups = [], now = Date.now()) {
     const UPSERT_SQL = `INSERT INTO client_state (user_id, namespace, key, value, updated_at)
@@ -5717,29 +5788,53 @@ var D1Adapter = class {
     const CLEANUP_KEY_SQL = `DELETE FROM client_state
        WHERE user_id = ? AND namespace = ? AND key = ?
          AND (updated_at <= ? OR updated_at > ?)`;
-    const buildStatements = () => [
-      ...cleanups.map((c) => typeof c.key === "string" ? this._db.prepare(CLEANUP_KEY_SQL).bind(userId, c.namespace, c.key, c.updatedAt, now) : this._db.prepare(CLEANUP_PREFIX_SQL).bind(userId, c.namespace, c.keyPrefix, prefixRangeEnd(c.keyPrefix), c.updatedAt, now)),
-      ...entries.map(
-        (entry) => this._db.prepare(UPSERT_SQL).bind(userId, entry.namespace, entry.key, entry.value, entry.updatedAt, now)
-      )
-    ];
+    const PROBE_KEY_SQL = `SELECT COUNT(*) AS n FROM client_state
+       WHERE user_id = ? AND namespace = ? AND key = ?`;
+    const statements = [];
+    const probeIndexes = [];
+    for (const c of cleanups) {
+      if (typeof c.key === "string") {
+        statements.push(this._db.prepare(CLEANUP_KEY_SQL).bind(userId, c.namespace, c.key, c.updatedAt, now));
+        probeIndexes.push(statements.length);
+        statements.push(this._db.prepare(PROBE_KEY_SQL).bind(userId, c.namespace, c.key));
+      } else {
+        statements.push(
+          this._db.prepare(CLEANUP_PREFIX_SQL).bind(userId, c.namespace, c.keyPrefix, prefixRangeEnd(c.keyPrefix), c.updatedAt, now)
+        );
+        probeIndexes.push(null);
+      }
+    }
+    const upsertStart = statements.length;
+    for (const entry of entries) {
+      statements.push(
+        this._db.prepare(UPSERT_SQL).bind(userId, entry.namespace, entry.key, entry.value, entry.updatedAt, now)
+      );
+    }
     let results;
     if (typeof this._db.batch === "function") {
-      results = await this._db.batch(buildStatements());
+      results = await this._db.batch(statements);
     } else {
       results = [];
-      for (const stmt of buildStatements()) {
+      for (const stmt of statements) {
         results.push(await stmt.run());
       }
     }
-    const outcomes = results.slice(cleanups.length).map((res) => res.meta.changes > 0);
+    const outcomes = results.slice(upsertStart).map((res) => res.meta.changes > 0);
     let upserted = 0;
     let skipped = 0;
     for (const wrote of outcomes) {
       if (wrote) upserted++;
       else skipped++;
     }
-    return { upserted, skipped, outcomes };
+    const result = { upserted, skipped, outcomes };
+    if (cleanups.length > 0) {
+      result.cleanupOutcomes = probeIndexes.map((probeAt) => {
+        if (probeAt === null) return null;
+        const row = results[probeAt] && Array.isArray(results[probeAt].results) ? results[probeAt].results[0] : null;
+        return Number(row?.n ?? 0) === 0;
+      });
+    }
+    return result;
   }
   /**
    * All entries of one namespace (values still encrypted).
@@ -6218,12 +6313,14 @@ function validateEntry(entry, index, maxValueBytes) {
   if (INTERNAL_STATE_CHAR_RE.test(entry.key)) {
     return rejectEntry(entry, index, "INVALID_STATE_KEY", `entries[${index}].key \u4E0D\u80FD\u5305\u542B\u63A7\u5236\u5B57\u7B26\uFF08\\u0000-\\u001f \u4E3A\u5E93\u5185\u90E8\u4FDD\u7559\uFF09`);
   }
-  if (typeof entry.value !== "string") {
-    return rejectEntry(entry, index, "INVALID_STATE_VALUE", `entries[${index}].value \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\uFF08\u5BBF\u4E3B\u81EA\u884C\u5E8F\u5217\u5316\uFF09`);
+  if (entry.value !== null && typeof entry.value !== "string") {
+    return rejectEntry(entry, index, "INVALID_STATE_VALUE", `entries[${index}].value \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\uFF08\u5BBF\u4E3B\u81EA\u884C\u5E8F\u5217\u5316\uFF09\uFF0C\u6216 null \u8868\u793A\u5220\u9664`);
   }
-  const bytes = stateValueBytes(entry.value);
-  if (bytes > maxValueBytes) {
-    return rejectEntry(entry, index, "STATE_VALUE_TOO_LARGE", `entries[${index}].value \u8D85\u8FC7\u5355\u6761\u603B\u4E0A\u9650`, { bytes, maxBytes: maxValueBytes });
+  if (typeof entry.value === "string") {
+    const bytes = stateValueBytes(entry.value);
+    if (bytes > maxValueBytes) {
+      return rejectEntry(entry, index, "STATE_VALUE_TOO_LARGE", `entries[${index}].value \u8D85\u8FC7\u5355\u6761\u603B\u4E0A\u9650`, { bytes, maxBytes: maxValueBytes });
+    }
   }
   if (!Number.isInteger(entry.updatedAt) || entry.updatedAt <= 0) {
     return rejectEntry(entry, index, "INVALID_STATE_UPDATED_AT", `entries[${index}].updatedAt \u5FC5\u987B\u662F\u6B63\u6574\u6570\uFF08epoch \u6BEB\u79D2\uFF09`);
@@ -6284,8 +6381,9 @@ function createClientStateHandler(ctx) {
     if (typeof db.upsertClientState !== "function") {
       return err3(501, "CLIENT_STATE_NOT_SUPPORTED", "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301 client_state");
     }
-    const { upserted, skipped, skippedEntries } = await writeClientStateEntries({ db, userId, userKey, entries: accepted });
+    const { upserted, skipped, deleted, skippedEntries } = await writeClientStateEntries({ db, userId, userKey, entries: accepted });
     const data = { upserted, skipped };
+    if (deleted > 0) data.deleted = deleted;
     if (skippedEntries.length > 0) data.skippedEntries = skippedEntries;
     if (rejected.length > 0) data.rejected = rejected;
     return { status: 200, body: { success: true, data } };
@@ -6330,7 +6428,7 @@ function createClientStateHandler(ctx) {
   }
   return { PUT, GET, DELETE };
 }
-var SERVER_VERSION = true ? "2.6.0-next.26" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.6.0-next.27" : "0.0.0-dev";
 var SERVER_FEATURES = Object.freeze([
   "client-state",
   "client-state-chunking",
@@ -6414,7 +6512,10 @@ var SERVER_FEATURES = Object.freeze([
   // client_state 按命名空间过期清理（config 的 clientStateTtl，cron 每跳顺手做）。
   "client-state-ttl",
   // hook ctx 带 emitResult(payload)：往客户端补一条自定义结果（落收件箱 + 推送）。
-  "emit-result"
+  "emit-result",
+  // PUT /client-state 的 entry 认 value: null（删掉这个 key，连切片行一起；同一套
+  // last-write-wins，被拦下的进 skippedEntries；删掉的条数在 data.deleted）。
+  "client-state-delete"
 ]);
 function createCapabilitiesHandler(ctx) {
   async function GET(url, headers) {

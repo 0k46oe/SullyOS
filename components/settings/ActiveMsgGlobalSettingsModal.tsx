@@ -117,8 +117,17 @@ const REQUIRED_WORKER_FEATURES = [
 //            以及新写入的护栏值钳到服务端当前时刻（不再产生新的脏行）。旧部署上前端
 //            的水位（utils/amsgStateClock.ts）能兜住发不出去这一半，但云端那行会一直
 //            停在未来，只有升上来才会第一次写入就回到现实。
+//   next.27 — 两件事。一、cron 每跳顺手跑的几条清理 DELETE 有了索引：client_state 和
+//            message_outbox 上原先没有对应的索引，每分钟整表扫一遍，扫过的行全算进
+//            D1 的 rows read，两张表合计一千七百行就把免费额度（每天 500 万行）用完，
+//            之后整个 worker 报「exceeded daily row read limit」、所有查询都拒。索引在
+//            用户点「重新连接并验证」（POST /init-tenant）时补上，「更新 Worker」会自动
+//            接一次。二、PUT /client-state 认 value: null 删行：客户端取回旁路存的大
+//            内容后把那行真的删掉，不再留空壳（即时对话每轮的键都是新的，空壳只涨不
+//            跌，worker 每次生成都要把整个角色命名空间读一遍）。前端接入见
+//            utils/activeMsgClient.ts 的 clearClientStateValue 与存量空壳清理。
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
-const REQUIRED_WORKER_VERSION = '2.6.0-next.26';
+const REQUIRED_WORKER_VERSION = '2.6.0-next.27';
 
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';
