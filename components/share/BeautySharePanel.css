@@ -17,3 +17,9 @@
 .beauty-share-message{white-space:pre-wrap}
 .beauty-share-code{font-family:monospace;user-select:all}
 .beauty-share-panel .beauty-share-error{color:#b91c1c}
+.beauty-preset-preview{width:100%;min-width:0;margin:16px auto}
+.beauty-preview-caption{font-size:11px;color:#64748b;text-align:center}
+.beauty-poster-dialog{padding:0;border:0;background:transparent;width:min(480px,96vw);max-height:calc(100dvh - 32px);overflow:auto;border-radius:20px}
+.beauty-poster-dialog::backdrop{background:#17202b99}
+.beauty-poster-dialog .beauty-share-panel{margin:0}
+.beauty-poster-dialog header{align-items:center;justify-content:space-between}

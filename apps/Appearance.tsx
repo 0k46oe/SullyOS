@@ -24,8 +24,7 @@ import BootAnimationSettings from '../components/appearance/BootAnimationSetting
 import FullscreenSettings from '../components/appearance/FullscreenSettings';
 import { shareOrDownloadBlob } from '../utils/shareExport';
 import { readShareFile } from '../utils/pngShare';
-import BeautySharePanel from '../components/share/BeautySharePanel';
-import { readBeautyPackage } from '../utils/beautyShareClient';
+import BeautyShareChannel from '../components/appearance/BeautyShareChannel';
 
 const CustomIconImage: React.FC<{ value: string; alt: string; preserveOutline?: boolean }> = ({ value, alt, preserveOutline = false }) => {
     const url = useBlobRefUrl(value);
@@ -396,7 +395,6 @@ const PresetManager: React.FC<PresetManagerProps> = ({ presets, onSave, onApply,
             </section>
 
             {/* Preset List */}
-            <BeautySharePanel kind="appearance" sources={presets.map(preset => ({id:preset.id,name:preset.name,read:async()=>readBeautyPackage(new File([await onExport(preset.id)],'preset.zip'),'appearance')}))} onReceive={async data=>onImport(new File([JSON.stringify(data)],'beauty-preset.json',{type:'application/json'}))}/>
             <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
                 <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-3">已保存预设 ({presets.length})</h2>
                 {presets.length === 0 ? (
@@ -484,7 +482,8 @@ const PresetManager: React.FC<PresetManagerProps> = ({ presets, onSave, onApply,
 
 const Appearance: React.FC = () => {
   const { theme, updateTheme, closeApp, openApp, setCustomIcon, customIcons, addToast, appearancePresets, saveAppearancePreset, applyAppearancePreset, deleteAppearancePreset, renameAppearancePreset, exportAppearancePreset, importAppearancePreset, characters, activeCharacterId, updateCharacter } = useOS();
-  const [activeTab, setActiveTab] = useState<'theme' | 'icons' | 'presets'>('theme');
+  const [activeTab, setActiveTab] = useState<'theme' | 'icons' | 'presets' | 'sharing'>('theme');
+  const [shareBusy, setShareBusy] = useState(false);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const [wallpaperUrl, setWallpaperUrl] = useState('');
   const lockWallpaperInputRef = useRef<HTMLInputElement>(null);
@@ -863,7 +862,7 @@ const Appearance: React.FC = () => {
       <div className="bg-white/70 backdrop-blur-md border-b border-white/40 shrink-0 z-10 sticky top-0" style={{ paddingTop: 'var(--safe-top)' }}>
         <div className="flex items-center px-4 py-3">
           <div className="flex items-center gap-2 w-full">
-              <button onClick={closeApp} className="p-2 -ml-2 rounded-full hover:bg-black/5 active:scale-90 transition-transform">
+              <button disabled={shareBusy} onClick={closeApp} className="p-2 -ml-2 rounded-full hover:bg-black/5 active:scale-90 transition-transform">
                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6 text-slate-600">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
                   </svg>
@@ -873,11 +872,12 @@ const Appearance: React.FC = () => {
         </div>
       </div>
 
-      <div className="flex border-b border-slate-200 bg-white sticky top-0 z-20">
+      <fieldset disabled={shareBusy} className="flex border-0 border-b border-slate-200 bg-white sticky top-0 z-20 m-0 p-0 min-w-0">
           <button onClick={() => { setActiveTab('theme'); trackEvent('切换外观定制标签页', { tab: 'theme' }); }} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'theme' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>系统主题</button>
           <button onClick={() => { setActiveTab('icons'); trackEvent('切换外观定制标签页', { tab: 'icons' }); }} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'icons' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>应用图标</button>
           <button onClick={() => { setActiveTab('presets'); trackEvent('切换外观定制标签页', { tab: 'presets' }); }} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'presets' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>外观预设</button>
-      </div>
+          <button onClick={() => setActiveTab('sharing')} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'sharing' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>美化分享</button>
+      </fieldset>
 
       <div className="flex-1 overflow-y-auto p-5 space-y-6 no-scrollbar">
         {activeTab === 'theme' ? (
@@ -1773,6 +1773,8 @@ const Appearance: React.FC = () => {
                 currentTheme={theme}
             />
 
+        ) : activeTab === 'sharing' ? (
+            <BeautyShareChannel presets={appearancePresets} onExport={exportAppearancePreset} onImport={importAppearancePreset} onBusyChange={setShareBusy}/>
         ) : null}
       </div>
     </div>

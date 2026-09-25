@@ -158,6 +158,8 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           if (id.includes('node_modules')) {
+            // Only load the image renderer when exporting a beauty preview.
+            if (id.includes('html2canvas')) return 'beauty-preview-renderer';
             // Local camera emotion calibration is opt-in. Keep MediaPipe out of
             // the preloaded common vendor so its JS is fetched only after the
             // user explicitly enables their camera.
