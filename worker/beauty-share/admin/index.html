@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><title>美化提交管理</title><link rel="stylesheet" href="/admin/style.css"></head>
+<body><main>
+  <header><span>SULLYOS</span><h1>美化提交管理</h1><p>文件内容由管理员人工检查。这里不会直接应用或预览投稿中的 CSS。</p></header>
+  <form id="login"><h2 id="login-title">管理员登录</h2><label>账号<input id="username" required autocomplete="username" minlength="3" maxlength="40"></label><label>密码<input id="password" required type="password" autocomplete="current-password" minlength="12" maxlength="128"></label><button id="login-button">登录</button><p id="setup-note" hidden>这是一次性管理员初始化。请自行设置账号与密码并妥善保存，初始化完成后此链接失效。</p></form>
+  <section id="workspace" hidden><nav><label>提交状态<select id="filter"><option value="pending">审核中</option><option value="approved">已通过</option><option value="rejected">已退回</option><option value="all">全部</option></select></label><button id="refresh">刷新</button><button id="logout">退出登录</button></nav><div id="submissions"></div><button id="more" hidden>下一页</button></section>
+  <p id="notice" role="status"></p>
+</main><script src="/admin/app.js" defer></script></body></html>

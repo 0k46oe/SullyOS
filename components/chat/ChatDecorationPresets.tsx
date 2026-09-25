@@ -1,4 +1,5 @@
 import React,{useEffect,useRef,useState} from 'react';
+import BeautySharePanel from '../share/BeautySharePanel';
 import {FileOrImageImport} from '../share/FileOrImageImport';
 import {DB} from '../../utils/db';
 import {shareOrDownloadFile} from '../../utils/shareExport';
@@ -25,6 +26,7 @@ export default function ChatDecorationPresets({target,scope,currentBubble,export
  return <div className="chat-decoration-presets">
   <h3>预设</h3><p className="chat-decoration-note">把布局、气泡、背景、声音和进阶样式存成一套，随时换上或导出分享。CSS、TXT 和图片也能从这里导入，再选择用途。</p><p className="chat-decoration-note">确认后才会应用到 <b>{target}</b>，没有勾选的部分保持原样。</p>
   <FileOrImageImport className="chat-decoration-import" disabled={busy} imageAccept="image/*" onChange={e=>{const file=e.target.files?.[0];e.target.value='';if(file)void run(async()=>stage(await readDecorationFile(file)));}}/>
+  <BeautySharePanel kind="chat-decoration" onBusyChange={onBusyChange} sources={[{id:'current',name:'当前整套装扮',read:()=>exportCurrent(name.trim()||'我的聊天装扮')},...saved.map((preset,index)=>({id:`saved-${index}`,name:preset.name,read:async()=>preset}))]} onReceive={async data=>stage({kind:'preset',preset:validateDecoration(data)})}/>
   {error&&<p role="alert" className="chat-decoration-error">{error}</p>}{notice&&<p role="status" className="chat-decoration-note">{notice}</p>}
   {pending&&<section className="chat-decoration-import-review">
    <h3>{pending.kind==='image'?'这张图片用在哪里？':pending.preset.name}</h3>

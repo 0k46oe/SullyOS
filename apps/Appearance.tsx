@@ -24,6 +24,8 @@ import BootAnimationSettings from '../components/appearance/BootAnimationSetting
 import FullscreenSettings from '../components/appearance/FullscreenSettings';
 import { shareOrDownloadBlob } from '../utils/shareExport';
 import { readShareFile } from '../utils/pngShare';
+import BeautySharePanel from '../components/share/BeautySharePanel';
+import { readBeautyPackage } from '../utils/beautyShareClient';
 
 const CustomIconImage: React.FC<{ value: string; alt: string; preserveOutline?: boolean }> = ({ value, alt, preserveOutline = false }) => {
     const url = useBlobRefUrl(value);
@@ -394,6 +396,7 @@ const PresetManager: React.FC<PresetManagerProps> = ({ presets, onSave, onApply,
             </section>
 
             {/* Preset List */}
+            <BeautySharePanel kind="appearance" sources={presets.map(preset => ({id:preset.id,name:preset.name,read:async()=>readBeautyPackage(new File([await onExport(preset.id)],'preset.zip'),'appearance')}))} onReceive={async data=>onImport(new File([JSON.stringify(data)],'beauty-preset.json',{type:'application/json'}))}/>
             <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
                 <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-3">已保存预设 ({presets.length})</h2>
                 {presets.length === 0 ? (

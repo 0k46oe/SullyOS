@@ -1,0 +1,19 @@
+.beauty-share-panel{color:#334155;background:#fff;border:1px solid #e2e8f0;border-radius:18px;padding:16px;margin:12px 0;font-size:13px;line-height:1.7;overflow-wrap:anywhere;text-align:left}
+.beauty-share-panel .beauty-share-heading{display:flex;width:100%;justify-content:space-between;gap:12px;text-align:left;font-weight:600;background:transparent;border:0;padding:0}
+.beauty-share-heading span{font-size:11px;font-weight:400;color:#64748b}
+.beauty-share-panel nav,.beauty-share-actions{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.beauty-share-panel button{font:inherit;border:1px solid #cbd5e1;background:#f8fafc;border-radius:9px;padding:7px 12px;color:inherit;margin:3px 3px 3px 0;cursor:pointer}
+.beauty-share-panel button[aria-pressed=true]{background:#334155;color:#fff;border-color:#334155}
+.beauty-share-panel button:disabled{opacity:.5;cursor:default}
+.beauty-share-panel fieldset{border:0;margin:0;padding:0;min-width:0}
+.beauty-share-panel label{display:block;margin:12px 0}
+.beauty-share-panel input:not([type=checkbox]),.beauty-share-panel select,.beauty-share-panel textarea{display:block;box-sizing:border-box;width:100%;min-width:0;margin-top:5px;border:1px solid #cbd5e1;border-radius:9px;background:#fff;color:#1e293b;padding:9px;font-size:16px;line-height:1.5}
+.beauty-share-panel textarea{max-height:240px;overflow-y:auto;touch-action:pan-y;resize:vertical}
+.beauty-share-panel .beauty-share-check{display:flex;align-items:flex-start;gap:9px}
+.beauty-share-check input{margin-top:5px;flex-shrink:0;width:16px;height:16px}
+.beauty-share-panel p{margin:8px 0}
+.beauty-share-panel article{border-top:1px solid #e2e8f0;margin-top:18px;padding-top:14px}
+.beauty-share-terms{border-left:2px solid #94a3b8;padding-left:12px;margin:16px 0}
+.beauty-share-message{white-space:pre-wrap}
+.beauty-share-code{font-family:monospace;user-select:all}
+.beauty-share-panel .beauty-share-error{color:#b91c1c}

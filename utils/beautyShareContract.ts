@@ -1,0 +1,80 @@
+/** Shared wire format; no browser, database or model dependencies. */
+export const BEAUTY_MAX_BYTES = 20 * 1024 * 1024;
+export const BEAUTY_PLATFORMS = ['糯米机美化群', '糯米机官方DC'] as const;
+export type BeautyKind = 'chat-decoration' | 'appearance';
+export interface BeautyMetadata {
+  name: string;
+  credit: string;
+  platforms: string[];
+  contact: string;
+  allowRemix: boolean;
+  allowRedistribute: boolean;
+  exportVersion: string;
+  bugFeedback: 'welcome' | 'self-fix';
+  message: string;
+}
+export interface BeautySubmission {
+  id: string;
+  kind: BeautyKind;
+  shareCode: string | null;
+  publishedRevision: string | null;
+  pendingRevision: string | null;
+  latestRevision: string;
+  status: 'pending' | 'approved' | 'rejected';
+  metadata: BeautyMetadata;
+  reviewNote: string;
+  updatedAt: number;
+  authorCode?: string;
+}
+export interface BeautyShare {
+  code: string;
+  kind: BeautyKind;
+  revision: string;
+  metadata: BeautyMetadata;
+  bytes: number;
+  sha256: string;
+}
+export const isRecord = (value: unknown): value is Record<string, any> =>
+  !!value && typeof value === 'object' && !Array.isArray(value);
+
+function text(value: unknown, label: string, max: number, required = false): string {
+  if (typeof value !== 'string') throw Error(`${label}格式不正确`);
+  const result = value.trim();
+  if (result.length > max || (required && !result)) throw Error(`${label}${required ? '不能为空，且' : ''}最多 ${max} 字`);
+  return result;
+}
+export function validateBeautyMetadata(value: unknown): BeautyMetadata {
+  if (!isRecord(value)) throw Error('分享说明格式不正确');
+  if (!Array.isArray(value.platforms) || value.platforms.length < 1 || value.platforms.some((p: unknown) => !BEAUTY_PLATFORMS.includes(p as any))) throw Error('请选择发放平台');
+  if (typeof value.allowRemix !== 'boolean' || typeof value.allowRedistribute !== 'boolean') throw Error('请设置二改和二次传播权限');
+  if (value.bugFeedback !== 'welcome' && value.bugFeedback !== 'self-fix') throw Error('请选择反馈偏好');
+  return {
+    name: text(value.name, '美化名', 80, true), credit: text(value.credit, '署名', 60, true),
+    platforms: [...new Set(value.platforms)] as string[], contact: text(value.contact, '联系说明', 160),
+    allowRemix: value.allowRemix, allowRedistribute: value.allowRedistribute,
+    exportVersion: text(value.exportVersion, '导出版本', 80, true), bugFeedback: value.bugFeedback,
+    message: text(value.message, '作者留言', 2000),
+  };
+}
+
+/** Structural admission only, not content review. Never accept whole-system backups. */
+export function validateBeautyPackage(value: unknown): { kind: BeautyKind; data: Record<string, any> } {
+  if (!isRecord(value) || typeof value.name !== 'string' || !value.name.trim() || value.name.length > 200) throw Error('请提交有效的美化预设文件');
+  if (value.format === 'sullyos-chat-decoration' && value.version === 1 && isRecord(value.parts)) {
+    const keys = Object.keys(value.parts);
+    if (!keys.length || keys.some(key => !['layout', 'bubbles', 'background', 'sound', 'css'].includes(key))) throw Error('聊天装扮包含未知内容');
+    if (value.parts.css !== undefined && typeof value.parts.css !== 'string') throw Error('CSS 格式不正确');
+    return { kind: 'chat-decoration', data: { format: value.format, version: 1, name: value.name, parts: value.parts } };
+  }
+  if (value.type === 'sully_appearance_preset' && value.version === 1 && isRecord(value.theme)) {
+    const data: Record<string, any> = { type: value.type, version: 1, name: value.name, theme: value.theme };
+    for (const key of ['customIcons', 'chatThemes', 'chatLayout']) if (value[key] !== undefined) data[key] = value[key];
+    return { kind: 'appearance', data };
+  }
+  throw Error('只支持聊天装扮和外观预设，不接受角色卡或整机备份');
+}
+
+export function validateBeautyPassword(value: unknown): string {
+  if (typeof value !== 'string' || value.length < 12 || value.length > 128) throw Error('密码需为 12–128 个字符，请勿复用其他账号密码');
+  return value;
+}
