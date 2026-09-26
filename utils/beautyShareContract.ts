@@ -34,6 +34,21 @@ export interface BeautyShare {
   bytes: number;
   sha256: string;
 }
+export interface BeautyRepoInput {
+  code: string;
+  revision: string;
+  requestId: string;
+  deviceId: string;
+  signature: string;
+  message: string;
+  consent: true;
+}
+export function validateBeautyRepo(value: unknown): BeautyRepoInput {
+  if (!isRecord(value) || value.consent !== true) throw Error('请同意将署名与反馈交给管理员，人工转达给作者');
+  if (!/^S-[A-F0-9]{12}$/.test(value.code) || !/^[a-f0-9]{32}$/.test(value.revision)) throw Error('美化信息无效，请重新领取');
+  if (!/^[a-f0-9-]{32,64}$/.test(value.requestId) || !/^[a-f0-9-]{32,64}$/.test(value.deviceId)) throw Error('提交标识无效');
+  return { code: value.code, revision: value.revision, requestId: value.requestId, deviceId: value.deviceId, signature: text(value.signature, '署名', 60, true), message: text(value.message, 'Repo', 1200, true), consent: true };
+}
 export const isRecord = (value: unknown): value is Record<string, any> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
 

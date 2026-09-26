@@ -1,4 +1,5 @@
 import React, {useState} from 'react';
+import { startBeautyUsage, decorationSourceKey } from '../../utils/beautyUsage';
 import {createPortal} from 'react-dom';
 import type {CharacterProfile, ChatTheme, OSTheme} from '../../types';
 import ChatLayoutSettings from './ChatLayoutSettings';
@@ -60,7 +61,7 @@ export default function ChatDecorationPanel({character:char,theme,themes,updateC
     <p className="chat-decoration-summary">{global?'全局修改会影响未单独定制的聊天。':`布局${customized?'已单独定制':'跟随全局'} · 气泡 ${activeBubble?.name||'默认'}`}</p>
     <nav className="chat-decoration-tabs" aria-label="装扮分类">{tabs.map(item=><button key={item.id} type="button" aria-pressed={tab===item.id} disabled={presetBusy} onClick={()=>switchTab(item.id)}>{item.name}</button>)}</nav>
     <div className="chat-decoration-body" key={tab}>
-     {tab==='presets'&&<ChatDecorationPresets onBusyChange={setPresetBusy} target={global?'全局默认':`${char.name}专属`} scope={scope} currentBubble={activeBubble} exportCurrent={name=>exportDecoration(name,theme,global?undefined:char,activeBubble)} onApply={async(preset,parts)=>{const changes=await decorationPatches(preset,parts,scope,char,theme);if(changes.bubble)await onSaveBubble(changes.bubble);if(global)await updateTheme(changes.theme);else await updateCharacter(changes.character);}}/>}
+     {tab==='presets'&&<ChatDecorationPresets onBusyChange={setPresetBusy} target={global?'全局默认':`${char.name}专属`} scope={scope} currentBubble={activeBubble} exportCurrent={name=>exportDecoration(name,theme,global?undefined:char,activeBubble)} onApply={async(preset,parts)=>{const changes=await decorationPatches(preset,parts,scope,char,theme);if(changes.bubble)await onSaveBubble(changes.bubble);if(global)await updateTheme(changes.theme);else await updateCharacter(changes.character);await startBeautyUsage(await decorationSourceKey(preset),global?'chat:global':'chat:'+char.id);}}/>}
      {tab==='layout'&&<>
       <h3>界面与头像</h3>
       {!global&&<label className="chat-decoration-toggle"><span>为 {char.name} 单独调整布局<small>关闭后跟随全局，已调好的内容会保留。</small></span><input type="checkbox" checked={customized} onChange={()=>updateCharacter({chatFineTune:{...override,enabled:!customized}})}/></label>}

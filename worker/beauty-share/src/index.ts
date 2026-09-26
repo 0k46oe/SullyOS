@@ -1,4 +1,4 @@
-import { BEAUTY_MAX_BYTES, isRecord, validateBeautyMetadata, validateBeautyPackage, validateBeautyPassword } from '../../../utils/beautyShareContract';
+import { BEAUTY_MAX_BYTES, isRecord, validateBeautyMetadata, validateBeautyPackage, validateBeautyPassword, validateBeautyRepo } from '../../../utils/beautyShareContract';
 import { equal, identity, newSession, passwordHash, randomHex, sha256 } from './auth';
 import type { Env } from './types';
 
@@ -45,6 +45,23 @@ const toSubmission = (row: any, admin = false) => ({
   ...(admin ? { authorCode: row.author_code } : {}),
 });
 const selectSubmission = `SELECT s.*,r.status,r.metadata,r.review_note FROM submissions s JOIN revisions r ON r.id=s.latest_revision`;
+const PAGE_SIZE = 12;
+function pageOffset(url: URL) { return Math.min(100000, Math.max(0, Math.floor(Number(url.searchParams.get('offset')) || 0))); }
+async function listSubmissions(env: Env, url: URL, author?: string) {
+  const status = url.searchParams.get('status') || (author ? 'all' : 'pending');
+  if (!['pending', 'approved', 'rejected', 'all'].includes(status)) fail(400, '状态无效');
+  const search = (url.searchParams.get('q') || '').trim().slice(0, 80);
+  const clauses = ['s.deleted_at IS NULL']; const args: unknown[] = [];
+  if (author) { clauses.push('s.author_code=?'); args.push(author); }
+  if (status !== 'all') { clauses.push('r.status=?'); args.push(status); }
+  if (search) { clauses.push("(instr(lower(json_extract(r.metadata,'$.name')),lower(?))>0 OR instr(lower(s.author_code),lower(?))>0 OR instr(lower(COALESCE(s.share_code,'')),lower(?))>0)"); args.push(search, search, search); }
+  const where = ' WHERE ' + clauses.join(' AND ');
+  const count = await env.DB.prepare('SELECT count(*) AS n FROM submissions s JOIN revisions r ON r.id=s.latest_revision' + where).bind(...args).first();
+  const total = Number(count?.n || 0);
+  const offset = Math.min(pageOffset(url), Math.max(0, Math.ceil(total / PAGE_SIZE) - 1) * PAGE_SIZE);
+  const { results } = await env.DB.prepare(selectSubmission + where + ' ORDER BY s.updated_at DESC,s.id DESC LIMIT ? OFFSET ?').bind(...args, PAGE_SIZE, offset).all();
+  return json({ submissions: results.map(row => toSubmission(row, !author)), total, offset, pageSize: PAGE_SIZE, nextOffset: offset + PAGE_SIZE < total ? offset + PAGE_SIZE : null });
+}
 
 async function submit(request: Request, env: Env, author: string, id?: string) {
   if (env.UPLOADS_ENABLED !== 'true') fail(503, '投稿暂未开放，请稍后再试');
@@ -192,8 +209,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     const who = await principal(request, env, 'author');
     if (method === 'POST') return submit(request, env, who.code);
     if (method === 'GET') {
-      const { results } = await env.DB.prepare(selectSubmission + ' WHERE s.author_code=? AND s.deleted_at IS NULL ORDER BY s.updated_at DESC LIMIT 50').bind(who.code).all();
-      return json({ submissions: results.map(row => toSubmission(row)) });
+      return listSubmissions(env, url, who.code);
     }
   }
   const workMatch = path.match(/^\/api\/submissions\/([a-f0-9]{32})$/);
@@ -214,12 +230,47 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   if (path === '/api/admin/submissions' && method === 'GET') {
     await principal(request, env, 'admin');
+    return listSubmissions(env, url);
+  }
+  if (path === '/api/repos' && method === 'POST') {
+    let body;
+    try { body = validateBeautyRepo(await readJson(request, 8192)); } catch (error) { if (error instanceof HttpError) throw error; return fail(400, (error as Error).message); }
+    const requestKey = await sha256(env.AUTH_PEPPER + ':' + body.deviceId + ':' + body.requestId);
+    const existing = await env.DB.prepare('SELECT id FROM beauty_repos WHERE request_key=?').bind(requestKey).first();
+    if (existing) return json({ id: existing.id, received: true });
+    const work = await env.DB.prepare(`SELECT s.id,r.metadata FROM submissions s JOIN revisions r ON r.submission_id=s.id
+      WHERE s.share_code=? AND s.deleted_at IS NULL AND s.published_revision IS NOT NULL AND r.id=? AND r.status='approved'`).bind(body.code, body.revision).first();
+    if (!work) fail(404, '这份美化已停止分享，暂不能代收 Repo');
+    await limit(env, `repo-ip:${ip}`, 5, 86400_000);
+    await limit(env, `repo-device:${await sha256(env.AUTH_PEPPER + body.deviceId)}`, 3, 86400_000);
+    await limit(env, 'repo-global', 1000, 86400_000);
+    const id = randomHex();
+    await env.DB.prepare(`INSERT INTO beauty_repos(id,request_key,submission_id,revision_id,metadata,signature,message,created_at)
+      VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(request_key) DO NOTHING`).bind(id, requestKey, work.id, body.revision, work.metadata, body.signature, body.message, now()).run();
+    const saved = await env.DB.prepare('SELECT id FROM beauty_repos WHERE request_key=?').bind(requestKey).first();
+    return json({ id: saved?.id, received: true }, 201);
+  }
+  if (path === '/api/admin/repos' && method === 'GET') {
+    await principal(request, env, 'admin');
     const status = url.searchParams.get('status') || 'pending';
-    if (!['pending', 'approved', 'rejected', 'all'].includes(status)) fail(400, '状态无效');
-    const offset = Math.min(100000, Math.max(0, Number(url.searchParams.get('offset')) || 0));
-    const { results } = await env.DB.prepare(selectSubmission + ` WHERE s.deleted_at IS NULL${status === 'all' ? '' : ' AND r.status=?'} ORDER BY s.updated_at DESC LIMIT 50 OFFSET ?`)
-      .bind(...(status === 'all' ? [offset] : [status, offset])).all();
-    return json({ submissions: results.map(row => toSubmission(row, true)), nextOffset: results.length === 50 ? offset + 50 : null });
+    if (!['pending', 'sent', 'archived', 'all'].includes(status)) fail(400, '状态无效');
+    const search = (url.searchParams.get('q') || '').trim().slice(0, 80);
+    const clauses = ['1=1']; const args: unknown[] = [];
+    if (status !== 'all') { clauses.push('f.status=?'); args.push(status); }
+    if (search) { clauses.push("(instr(lower(s.author_code),lower(?))>0 OR instr(lower(s.share_code),lower(?))>0 OR instr(lower(json_extract(f.metadata,'$.name')),lower(?))>0)"); args.push(search, search, search); }
+    const from = ' FROM beauty_repos f JOIN submissions s ON s.id=f.submission_id WHERE ' + clauses.join(' AND ');
+    const count = await env.DB.prepare('SELECT count(*) AS n' + from).bind(...args).first();
+    const total = Number(count?.n || 0); const offset = Math.min(pageOffset(url), Math.max(0, Math.ceil(total / PAGE_SIZE) - 1) * PAGE_SIZE);
+    const { results } = await env.DB.prepare('SELECT f.id,f.signature,f.message,f.status,f.created_at,f.metadata,s.author_code,s.share_code' + from + ' ORDER BY f.created_at DESC,f.id DESC LIMIT ? OFFSET ?').bind(...args, PAGE_SIZE, offset).all();
+    return json({ repos: results.map(row => ({ ...row, metadata: JSON.parse(row.metadata) })), total, offset, pageSize: PAGE_SIZE, nextOffset: offset + PAGE_SIZE < total ? offset + PAGE_SIZE : null });
+  }
+  const repoStatus = path.match(/^\/api\/admin\/repos\/([a-f0-9]{32})$/);
+  if (repoStatus && method === 'POST') {
+    await principal(request, env, 'admin'); const body = await readJson(request, 1024);
+    if (!['pending', 'sent', 'archived'].includes(body.status)) fail(400, '状态无效');
+    const result = await env.DB.prepare('UPDATE beauty_repos SET status=?,handled_at=? WHERE id=?').bind(body.status, body.status === 'pending' ? null : now(), repoStatus[1]).run();
+    if (!result.meta.changes) fail(404, 'Repo 不存在');
+    return json({ ok: true });
   }
   const review = path.match(/^\/api\/admin\/revisions\/([a-f0-9]{32})\/review$/);
   if (review && method === 'POST') {

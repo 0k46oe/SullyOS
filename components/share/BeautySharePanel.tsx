@@ -11,7 +11,7 @@ export interface BeautySource { id: string; name: string; read: () => Promise<un
 interface Props {
   kind: BeautyKind;
   sources: BeautySource[];
-  onReceive: (data: any) => Promise<void>;
+  onReceive: (data: any, share: BeautyShare) => Promise<void>;
   onBusyChange?: (busy: boolean) => void;
   defaultOpen?: boolean;
   initialTab?: 'receive' | 'submit' | 'mine';
@@ -45,6 +45,11 @@ export default function BeautySharePanel({ kind, sources, onReceive, onBusyChang
   const [editing, setEditing] = useState<BeautySubmission | null>(null);
   const [submissions, setSubmissions] = useState<BeautySubmission[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [page, setPage] = useState({ offset: 0, total: 0, pageSize: 12, nextOffset: null as number | null });
+  const [filter, setFilter] = useState('all');
+  const [query, setQuery] = useState('');
+  const [appliedQuery, setAppliedQuery] = useState('');
+  const [deleteId, setDeleteId] = useState<string | null>(null);
   const [code, setCode] = useState('');
   const [share, setShare] = useState<BeautyShare | null>(null);
   const [accepted, setAccepted] = useState(false);
@@ -54,17 +59,17 @@ export default function BeautySharePanel({ kind, sources, onReceive, onBusyChang
     try { await work(); } catch (e) { setError(e instanceof Error ? e.message : '操作失败，请重试'); }
     finally { setBusy(false); onBusyChange?.(false); }
   };
-  const refresh = async (auth = session) => {
+  const refresh = async (auth = session, offset = page.offset, status = filter, search = appliedQuery) => {
     if (!auth) return;
-    const result = await beautyRequest<{ submissions: BeautySubmission[] }>('/submissions', { token: auth.token });
-    setSubmissions(result.submissions); setLoaded(true);
+    const result = await beautyRequest<{ submissions: BeautySubmission[]; total: number; offset: number; pageSize: number; nextOffset: number | null }>(`/submissions?offset=${offset}&status=${status}&q=${encodeURIComponent(search)}`, { token: auth.token });
+    setSubmissions(result.submissions); setPage(result); setLoaded(true); setDeleteId(null);
   };
   const authenticate = () => run(async () => {
     validateBeautyPassword(password);
     if (!loginMode && password !== repeat) throw Error('两次输入的密码不一致');
     const next = await beautyRequest<BeautySession>(loginMode ? '/auth/login' : '/auth/register', { method: 'POST', body: loginMode ? { authorCode, password } : { password } });
     saveBeautySession(next); setSession(next); setPassword(''); setRepeat(''); setMustSave(!loginMode);
-    await refresh(next);
+    await refresh(next, 0);
   });
   const submit = () => run(async () => {
     if (!session || mustSave) throw Error('请先保存作者码和密码');
@@ -76,7 +81,7 @@ export default function BeautySharePanel({ kind, sources, onReceive, onBusyChang
     if (!(await confirmExportSafety(pack))) return;
     await beautyRequest(editing ? `/submissions/${editing.id}` : '/submissions', { method: 'POST', token: session.token, body: { metadata: m, package: pack, ...(editing ? { expectedRevision: editing.latestRevision } : {}) } });
     localStorage.setItem(DEFAULTS, JSON.stringify({ ...m, name: '' }));
-    setEditing(null); setTab('mine'); await refresh(); setNotice('已提交审核。通过后可在这里复制美化码。');
+    setEditing(null); setTab('mine'); setFilter('all'); setQuery(''); setAppliedQuery(''); await refresh(session, 0, 'all', ''); setNotice('已提交审核。通过后可在这里复制美化码。');
   });
 
   return <section className="beauty-share-panel">
@@ -96,7 +101,7 @@ export default function BeautySharePanel({ kind, sources, onReceive, onBusyChang
             if (result.kind !== kind) throw Error(kind === 'appearance' ? '这是聊天装扮，请到聊天装扮中领取' : '这是外观预设，请到外观预设中领取');
             setShare(result);
           })}>查看说明</button>
-          {share && <><Terms metadata={share.metadata}/><label className="beauty-share-check"><input type="checkbox" checked={accepted} onChange={e => setAccepted(e.target.checked)}/>我已阅读作者的使用规范</label><button disabled={!accepted} onClick={() => run(async () => { const pack = await downloadBeauty(share, kind); await onReceive(pack); setNotice(receivedMessage || (kind === 'appearance' ? '已存入外观预设，可在预设列表中选择应用。' : '已载入，请在装扮确认区选择需要应用的部分。')); })}>领取并载入预设</button></>}
+          {share && <><Terms metadata={share.metadata}/><label className="beauty-share-check"><input type="checkbox" checked={accepted} onChange={e => setAccepted(e.target.checked)}/>我已阅读作者的使用规范</label><button disabled={!accepted} onClick={() => run(async () => { const pack = await downloadBeauty(share, kind); await onReceive(pack, share); setNotice(receivedMessage || (kind === 'appearance' ? '已存入外观预设，可在预设列表中选择应用。' : '已载入，请在装扮确认区选择需要应用的部分。')); })}>领取并载入预设</button></>}
         </> : <>
           {!session ? <div>
             <p>首次提交建立作者身份，当前浏览器会记住登录。换设备时，用作者码和密码恢复。</p>
@@ -122,11 +127,13 @@ export default function BeautySharePanel({ kind, sources, onReceive, onBusyChang
               <label>作者留言<textarea rows={4} value={metadata.message} maxLength={2000} onChange={e => field('message', e.target.value)}/></label>
               <button disabled={mustSave} onClick={submit}>提交审核</button>
             </> : <>
-              <button onClick={() => run(() => refresh())}>刷新状态</button>
-              {loaded && !submissions.length && <p>还没有提交。可以从「导出分享码」开始。</p>}
-              {submissions.map(item => <article key={item.id}><strong>{item.metadata.name}</strong><p>{item.kind === 'appearance' ? '外观预设' : '聊天装扮'} · {item.status === 'pending' ? '审核中' : item.status === 'approved' ? '审核通过' : '已退回'}</p>{item.reviewNote && <p className="beauty-share-message">审核说明：{item.reviewNote}</p>}{item.shareCode && <><p className="beauty-share-code">{item.shareCode}</p>{item.status !== 'approved' && <p>分享码仍提供上次审核通过的版本。</p>}<button onClick={() => run(async () => { await shareOrDownloadFile({ content: `${item.shareCode}\n在糯米机的${item.kind === 'appearance' ? '外观预设' : '聊天装扮'}中选择「美化分享码 → 用码领取」。`, fileName: '美化分享码.txt', mimeType: 'text/plain' }); })}>分享码保存为文件</button><button onClick={() => run(async () => { await navigator.clipboard.writeText(item.shareCode!); setNotice('美化码已复制'); })}>复制美化码</button></>}
-                <div className="beauty-share-actions">{item.shareCode && <button onClick={() => run(async () => { const { openBeautyPoster } = await import('./BeautyPosterDialog'); await openBeautyPoster(item.shareCode!); })}>分享预览图</button>}<button disabled={!!item.pendingRevision || item.kind !== kind} onClick={() => { setEditing(item); setMetadata({ ...item.metadata, exportVersion: APP_VERSION }); setTab('submit'); }}>更新</button><button onClick={() => run(async () => { if (!window.confirm(`删除「${item.metadata.name}」？分享码会立即失效，已被下载的文件无法收回。`)) return; await beautyRequest(`/submissions/${item.id}`, { method: 'DELETE', token: session.token }); if (editing?.id === item.id) setEditing(null); await refresh(); })}>删除</button></div>{item.kind !== kind && <p>请到{item.kind === 'appearance' ? '外观预设' : '聊天装扮'}更新此作品。</p>}
-              </article>)}
+              <div className="beauty-list-tools"><label>提交状态<select value={filter} onChange={e => { setFilter(e.target.value); void run(() => refresh(session, 0, e.target.value)); }}><option value="all">全部</option><option value="pending">审核中</option><option value="approved">已通过</option><option value="rejected">已退回</option></select></label><label>查找作品<input value={query} maxLength={80} placeholder="名称或美化码" onChange={e => setQuery(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); setAppliedQuery(query); void run(() => refresh(session, 0, filter, query)); } }}/></label></div>
+              <div className="beauty-share-actions"><button onClick={() => { setAppliedQuery(query); void run(() => refresh(session, 0, filter, query)); }}>查找</button><button onClick={() => run(() => refresh())}>刷新状态</button><span className="beauty-list-count">共 {page.total} 份作品</span></div>
+              {loaded && !submissions.length && <p className="beauty-empty">{filter !== 'all' || appliedQuery ? '没有符合条件的提交，试试其他状态或名称。' : '还没有提交。从「导出分享码」分享你的第一份美化吧。'}</p>}
+              {submissions.map(item => <article key={item.id}><strong>{item.metadata.name}</strong><p className="beauty-item-meta">{item.kind === 'appearance' ? '外观预设' : '聊天装扮'} <span className={`beauty-status is-${item.status}`}>{item.status === 'pending' ? '审核中' : item.status === 'approved' ? '审核通过' : '已退回'}</span></p>{item.reviewNote && <p className="beauty-share-message">审核说明：{item.reviewNote}</p>}{item.shareCode && <><p className="beauty-share-code">{item.shareCode}</p>{item.status !== 'approved' && <p>分享码仍提供上次审核通过的版本。</p>}<button onClick={() => run(async () => { await shareOrDownloadFile({ content: `${item.shareCode}\n在糯米机的${item.kind === 'appearance' ? '外观预设' : '聊天装扮'}中选择「美化分享码 → 用码领取」。`, fileName: '美化分享码.txt', mimeType: 'text/plain' }); })}>分享码保存为文件</button><button onClick={() => run(async () => { await navigator.clipboard.writeText(item.shareCode!); setNotice('美化码已复制'); })}>复制美化码</button></>}
+                <div className="beauty-share-actions">{item.shareCode && <button onClick={() => run(async () => { const { openBeautyPoster } = await import('./BeautyPosterDialog'); await openBeautyPoster(item.shareCode!); })}>分享预览图</button>}<button disabled={!!item.pendingRevision || item.kind !== kind} onClick={() => { setEditing(item); setMetadata({ ...item.metadata, exportVersion: APP_VERSION }); setTab('submit'); }}>更新</button><button onClick={() => setDeleteId(item.id)}>删除</button></div>{item.kind !== kind && <p>请到{item.kind === 'appearance' ? '外观预设' : '聊天装扮'}更新此作品。</p>}
+              {deleteId === item.id && <div className="beauty-delete-confirm"><p>删除「{item.metadata.name}」？分享码立即失效，已下载的副本无法收回。</p><button onClick={() => run(async () => { await beautyRequest(`/submissions/${item.id}`, { method: 'DELETE', token: session.token }); if (editing?.id === item.id) setEditing(null); await refresh(); setNotice('已删除该作品。'); })}>确认删除</button><button onClick={() => setDeleteId(null)}>取消</button></div>}</article>)}
+              {page.total > 0 && <div className="beauty-pagination" aria-label="我的提交分页"><button disabled={!page.offset} onClick={() => run(() => refresh(session, Math.max(0, page.offset - page.pageSize)))}>上一页</button><span>第 {Math.floor(page.offset / page.pageSize) + 1} / {Math.max(1, Math.ceil(page.total / page.pageSize))} 页</span><button disabled={page.nextOffset === null} onClick={() => run(() => refresh(session, page.nextOffset!))}>下一页</button></div>}
             </>}
           </>}
         </>}

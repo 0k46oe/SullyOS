@@ -306,7 +306,7 @@ interface PresetManagerProps {
     onDelete: (id: string) => void;
     onRename: (id: string, name: string) => void;
     onExport: (id: string) => Promise<Blob>;
-    onImport: (file: File) => Promise<void>;
+    onImport: (file: File) => Promise<unknown>;
     addToast: (msg: string, type?: Toast['type']) => void;
     currentTheme: OSTheme;
 }

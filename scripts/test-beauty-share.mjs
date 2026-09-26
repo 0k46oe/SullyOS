@@ -1,6 +1,6 @@
 // Run only against a fresh local Wrangler D1/R2 instance. Never accepts a remote URL.
 import assert from 'node:assert/strict';
-const base = 'http://127.0.0.1:8793';
+const base = process.env.BEAUTY_TEST_PORT === '8794' ? 'http://127.0.0.1:8794' : 'http://127.0.0.1:8793';
 const password = 'local-test-password-only';
 let checks = 0;
 async function request(path, status = 200, token, body, method = body === undefined ? 'GET' : 'POST') {
@@ -39,6 +39,27 @@ await request(`/api/admin/revisions/${first.revision}/review`, 409, admin.token,
 own = (await request('/api/submissions', 200, author.token)).value.submissions[0];
 const share = (await request(`/api/shares/${own.shareCode}`)).value;
 assert.equal(share.revision, first.revision);
+const repoBody = { code: own.shareCode, revision: first.revision, deviceId: 'b'.repeat(32), requestId: 'c'.repeat(32), signature: '测试读者', message: '很喜欢这套配色，谢谢作者。', consent: true };
+await request('/api/repos', 400, undefined, { ...repoBody, consent: false });
+await request('/api/repos', 404, undefined, { ...repoBody, revision: 'f'.repeat(32) });
+const repo = (await request('/api/repos', 201, undefined, repoBody)).value;
+assert.equal((await request('/api/repos', 200, undefined, repoBody)).value.id, repo.id);
+await request('/api/admin/repos', 401);
+await request('/api/admin/repos', 403, author.token);
+await request('/api/repos', 404);
+const repoList = (await request('/api/admin/repos', 200, admin.token)).value;
+assert.equal(repoList.total, 1); assert.equal(repoList.repos[0].signature, '测试读者');
+assert.equal(repoList.repos[0].metadata.name, metadata.name);
+await request(`/api/admin/repos/${repo.id}`, 403, author.token, { status: 'sent' });
+await request(`/api/admin/repos/${repo.id}`, 400, admin.token, { status: 'public' });
+await request(`/api/admin/repos/${repo.id}`, 200, admin.token, { status: 'sent' });
+assert.equal((await request('/api/admin/repos', 200, admin.token)).value.total, 0);
+assert.equal((await request('/api/admin/repos?status=sent', 200, admin.token)).value.total, 1);
+await request(`/api/admin/repos/${repo.id}`, 200, admin.token, { status: 'pending' });
+const page = (await request('/api/admin/submissions?status=all&offset=99999', 200, admin.token)).value;
+assert.equal(page.offset, 0); assert.equal(page.total, 1); assert.equal(page.nextOffset, null);
+assert.equal((await request('/api/submissions?q=not-found', 200, author.token)).value.total, 0);
+await request('/api/admin/repos?status=unknown', 400, admin.token);
 const download = await request(`/api/shares/${own.shareCode}/file?revision=${share.revision}`);
 assert.equal(download.response.headers.get('cache-control'), 'no-store');
 assert.deepEqual(download.value, pack);
