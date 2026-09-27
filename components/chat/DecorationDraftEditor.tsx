@@ -1,5 +1,6 @@
 import {trackBeauty} from '../../utils/beautyAnalytics';
 import OutfitCollection from './OutfitCollection';
+import {usePreviewDraft} from '../../hooks/usePreviewDraft';
 import {JOURNAL_APPEARANCE_PRESETS} from '../../utils/journalAppearance';
 import {SCHEDULE_CARD_PRESETS} from '../../utils/scheduleAppearance';
 import React,{useMemo,useState} from 'react';
@@ -45,12 +46,15 @@ export default function DecorationDraftEditor({outfits=[],onOutfitsChange,preset
    return {...old,parts:{...old.parts,css}};
  });
  const preview=useMemo(()=>({...draft,parts:{...draft.parts,...(extraCss.trim()?{css:[draft.parts.css,extraCss].filter(Boolean).join('\n')}: {})}}),[draft,extraCss]);
+ const settledPreview=usePreviewDraft(preview,!!maker);
+ const renderedPreview=settledPreview;
  const save=async(apply=false)=>{setBusy(true);setError('');try{
    if(!canEditDecoration(combinedOrigin))throw Error('作者禁止二改');
    if(!draft.name.trim())throw Error('请填写预设名称');
-   if(maker)checkWorkshopCss(maker,categoryCss+(maker==='whitebox'?'\n'+extraCss:''));
+   const checkedCss=maker?checkWorkshopCss(maker,maker==='whitebox'?preview.parts.css||'':categoryCss):undefined;
    if(maker==='avatar'&&!categoryCss.trim())throw Error('请先选择头像框图片或填写头像框 CSS');
    const result=maker?projectWorkshopPreset({...preview,name:draft.name.trim()},maker):{...preview,name:draft.name.trim()};
+   if(maker==='whitebox')result.parts.css=checkedCss;
    if(apply&&onApply){await onApply(result,combinedOrigin);return;}
    await saveLibraryDecoration(result,remixOrigin(combinedOrigin),update?originalKey:undefined,maker?undefined:'outfit');
    trackBeauty('save',maker||'outfit');onSaved(result);
@@ -79,7 +83,7 @@ export default function DecorationDraftEditor({outfits=[],onOutfitsChange,preset
  return createPortal(<div data-dress-guide={!maker?'outfit':undefined} className={`decoration-draft ${maker?'decoration-maker':'decoration-current'}`} role="dialog" aria-modal="true" aria-label={maker?`${shelves.find(([id])=>id===maker)?.[1]}制作器`:'我的搭配'}>
   <header><button data-dress-guide={!maker?'outfit-back':undefined} disabled={busy} onClick={onClose}>‹ 返回</button><strong>{maker?`${shelves.find(([id])=>id===maker)?.[1]}制作器`:'我的搭配'}</strong><button disabled={busy||locked} onClick={()=>save(!maker)}>{busy?'保存中…':maker?'保存预设':'应用搭配'}</button></header>
   <div className="decoration-composer-body"><div className="decoration-composer-preview">
-   <BeautyPresetPreview data={preview} sceneScope={!maker||maker==='whitebox'?'all':'preset'}/>
+   <BeautyPresetPreview data={renderedPreview} sceneScope={!maker||maker==='whitebox'?'all':'preset'}/>
    {(!maker||maker==='whitebox')&&<button className="decoration-layout-orb" disabled={busy||locked} aria-label="调整布局" aria-expanded={layoutOpen} onClick={()=>setLayoutOpen(!layoutOpen)}><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M4 7h16M4 17h16"/><rect x="7" y="4" width="4" height="6" rx="2"/><rect x="14" y="14" width="4" height="6" rx="2"/></svg><span>布局</span></button>}
    {layoutOpen&&<aside className="decoration-layout-popover" aria-label="布局浮窗"><header><div><strong>布局微调</strong><small>边调整，边看效果</small></div><button aria-label="收起布局浮窗" onClick={()=>setLayoutOpen(false)}>×</button></header><div className="decoration-layout-fields"><ChatLayoutSettings theme={{...theme,...LAYOUT_DEFAULTS,...draft.parts.layout}} updateTheme={patch=>setDraft(old=>({...old,parts:{...old.parts,layout:{...old.parts.layout,...patch}}}))}/></div></aside>}
   </div>
@@ -91,9 +95,9 @@ export default function DecorationDraftEditor({outfits=[],onOutfitsChange,preset
    {maker&&<label className="decoration-name">名称<input disabled={busy} value={draft.name} maxLength={60} onChange={e=>setDraft({...draft,name:e.target.value})}/></label>}
    {originalKey&&['self','remix'].includes(origin.kind)&&<label><input disabled={busy} type="checkbox" checked={update} onChange={e=>setUpdate(e.target.checked)}/>更新原预设，否则另存一份</label>}
    {!maker&&<button className="decoration-save-outfit" disabled={busy||locked} onClick={()=>setSaveOpen(true)}>保存当前搭配</button>}
-   {!maker&&<div className="decoration-current-grid">{shelves.filter(([id])=>id!=='schedule'&&id!=='journal').map(([id,label])=><button key={id} disabled={busy||locked} onClick={()=>{setShelf(id);setQuery('');setPage(0);setError('');}}><span className="decoration-current-image"><DecorationMiniPreview preset={preview} category={id}/></span><small>{labels[id]||'当前使用'}</small><strong>{label}</strong></button>)}</div>}
+   {!maker&&<div className="decoration-current-grid">{shelves.filter(([id])=>id!=='schedule'&&id!=='journal').map(([id,label])=><button key={id} disabled={busy||locked} onClick={()=>{setShelf(id);setQuery('');setPage(0);setError('');}}><span className="decoration-current-image"><DecorationMiniPreview preset={renderedPreview} category={id}/></span><small>{labels[id]||'当前使用'}</small><strong>{label}</strong></button>)}</div>}
    {maker&&<div key={category} className="decoration-category-panel" aria-label={`${shelves.find(([id])=>id===category)?.[1]}设置`}>
-    <details open className="decoration-composer-section"><summary>选择预设</summary><button className="decoration-preset-choice" disabled={busy} onClick={()=>{setShelf(category);setQuery('');setPage(0);setError('');}}><span className="decoration-selected-thumb"><DecorationMiniPreview preset={preview} category={category}/></span><span className="decoration-selected-copy"><small>{labels[category]?'当前搭配':'效果预览'}</small><strong>{labels[category]||`选择${shelves.find(([id])=>id===category)?.[1]}预设`}</strong><em>点开挑选更多款式</em></span><span className="decoration-choice-arrow" aria-hidden="true">›</span></button></details>
+    <details open className="decoration-composer-section"><summary>选择预设</summary><button className="decoration-preset-choice" disabled={busy} onClick={()=>{setShelf(category);setQuery('');setPage(0);setError('');}}><span className="decoration-selected-thumb"><DecorationMiniPreview preset={renderedPreview} category={category}/></span><span className="decoration-selected-copy"><small>{labels[category]?'当前搭配':'效果预览'}</small><strong>{labels[category]||`选择${shelves.find(([id])=>id===category)?.[1]}预设`}</strong><em>点开挑选更多款式</em></span><span className="decoration-choice-arrow" aria-hidden="true">›</span></button></details>
     <details open className="decoration-composer-section"><summary>{category==='sound'?'制作提示音':`${shelves.find(([id])=>id===category)?.[1]} CSS`}</summary>
      {category==='journal'&&<label>日记主题<select aria-label="日记主题" value={draft.parts.journal?.preset||'original'} onChange={e=>setDraft(old=>({...old,parts:{...old.parts,journal:{...old.parts.journal,preset:e.target.value as any}}}))}>{JOURNAL_APPEARANCE_PRESETS.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
      {category==='schedule'&&<div><p>全局样式：同步桌面组件与聊天日程表，不更改日程内容。</p><label>日程配色<select aria-label="日程配色" value={draft.parts.schedule?.preset||'original'} onChange={e=>setDraft(old=>({...old,parts:{...old.parts,schedule:{...old.parts.schedule,preset:e.target.value as any}}}))}>{SCHEDULE_CARD_PRESETS.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}<option value="custom">自定义配色</option></select></label>{draft.parts.schedule?.preset==='custom'&&(['background','textColor','accentColor'] as const).map((key,index)=><label key={key}>{['背景（颜色或渐变）','文字颜色','强调色'][index]}<input value={draft.parts.schedule?.[key]||''} onChange={e=>setDraft(old=>({...old,parts:{...old.parts,schedule:{...old.parts.schedule,[key]:e.target.value}}}))}/></label>)}</div>}

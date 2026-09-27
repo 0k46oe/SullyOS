@@ -1,5 +1,6 @@
 import {decorationPreviewScenes,decorationThumbnailPart,type DecorationThumbnailPart} from '../../utils/decorationPreviewScenes';
-import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import React, { forwardRef, memo, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import {enqueuePreviewBuild} from '../../utils/previewRenderQueue';
 import { beautyPreviewDocument, PREVIEW_WIDTH, PREVIEW_HEIGHT } from '../../utils/beautyPreview';
 import {bindDecorationPreview,type DecorationPreviewState} from '../../utils/decorationPreviewInteraction';
 
@@ -27,7 +28,7 @@ function copyPaint(element: Element, scrolls: Array<[HTMLElement,number,number]>
   if(element instanceof HTMLElement && (element.scrollTop||element.scrollLeft))scrolls.push([clone,element.scrollTop,element.scrollLeft]);
   return clone;
 }
-export default forwardRef<BeautyPreviewHandle, Props>(function BeautyPresetPreview({ data, compact = false, sceneScope = 'preset', thumbnailPart }, ref) {
+export default memo(forwardRef<BeautyPreviewHandle, Props>(function BeautyPresetPreview({ data, compact = false, sceneScope = 'preset', thumbnailPart }, ref) {
   const host = useRef<HTMLDivElement>(null);
   const container = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(PREVIEW_WIDTH);
@@ -46,11 +47,21 @@ export default forwardRef<BeautyPreviewHandle, Props>(function BeautyPresetPrevi
   useEffect(()=>setInteraction(null),[data,sceneId]);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState('');
+  const [visible,setVisible]=useState(!compact);
+  useEffect(()=>{
+    if(!compact||typeof IntersectionObserver==='undefined'){setVisible(true);return;}
+    const observer=new IntersectionObserver(items=>setVisible(items.some(item=>item.isIntersecting)),{rootMargin:'80px'});
+    if(container.current)observer.observe(container.current);
+    return()=>observer.disconnect();
+  },[compact]);
   useEffect(() => {
+    if(!visible)return;
     setReady(false); setError('');
     let alive = true;let cleanup:undefined|(()=>void);
     const build = async () => { try {
-      const sample = isChat ? await import('../chat/ChatDecorationSample').then(module=>module.renderChatDecorationSample(data,sceneId,part,liveState)) : await import('./DesktopDecorationSample').then(module=>module.renderDesktopDecorationSample(data,compact ? 0 : desktopPage));
+      const sample = isChat
+        ? await import('../chat/ChatDecorationSample').then(module=>alive?module.renderChatDecorationSample(data,sceneId,part,liveState):null)
+        : await import('./DesktopDecorationSample').then(module=>alive?module.renderDesktopDecorationSample(data,compact ? 0 : desktopPage):null);
       if (!alive || !host.current) return;
       const shadow = host.current.shadowRoot || host.current.attachShadow({ mode: 'open' });
       const scrollTop=shadow.querySelector('.sample-messages')?.scrollTop||0;
@@ -73,8 +84,10 @@ export default forwardRef<BeautyPreviewHandle, Props>(function BeautyPresetPrevi
       for (const [key, value] of Object.entries({ width: '360px', height: `${height}px`, display: 'block', position: 'relative', overflow: 'hidden', contain: 'strict', 'pointer-events': compact ? 'none' : 'auto' })) host.current.style.setProperty(key, value, 'important');
       setReady(true);
     } catch (e) { if(alive)setError(e instanceof Error ? e.message : '预览失败'); } };
-    void build(); return () => {alive=false;cleanup?.();};
-  }, [data,sceneId,isChat,compact,part,height,liveState,desktopPage]);
+    const cancel=compact?enqueuePreviewBuild(build):undefined;
+    if(!compact)void build();
+    return () => {alive=false;cancel?.();cleanup?.();};
+  }, [data,sceneId,isChat,compact,part,height,liveState,desktopPage,visible]);
   useEffect(() => {
     if (!container.current) return;
     const observer = new ResizeObserver(entries => setWidth(Math.min(PREVIEW_WIDTH, entries[0].contentRect.width)));
@@ -114,4 +127,4 @@ export default forwardRef<BeautyPreviewHandle, Props>(function BeautyPresetPrevi
     </div>
     {!compact && <p className="beauty-preview-caption">{isChat && sceneId==='journal-app'?'交换日记样式预览 · 示例日记本，不读取真实内容。':isChat && sceneId==='schedule-card' ? '日程表样式预览 · 示例日程，不读取真实安排。' : isChat ? <>试着点击心象、转账卡或聊天加号 · 仅演示，不影响真实聊天。 <button type="button" onClick={()=>setInteraction(null)}>重置演示</button></> : desktopPages > 1 ? '桌面预览 · 示例角色与消息，未应用到本机。' : '特殊皮肤示意预览 · 不代表实际桌面布局。'}</p>}
   </div>;
-});
+}));

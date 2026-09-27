@@ -38,3 +38,22 @@ it('saves the current outfit as a new local preset without applying it',async()=
  await click('保存当前搭配');expect(document.querySelector('dialog')?.textContent).toContain('保存这次组合');await click('保存到搭配栏');expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({name:'Sully的搭配'}),expect.objectContaining({kind:'self'}),undefined,'outfit');expect(applied).not.toHaveBeenCalled();expect(saved).not.toHaveBeenCalled();expect(refreshed).toHaveBeenCalledTimes(1);
  }finally{await act(async()=>root.unmount());host.remove();}
 });
+
+it('coalesces rapid CSS edits for preview but saves the latest text immediately',async()=>{
+ vi.useFakeTimers();mocks.save.mockClear();
+ const host=document.createElement('div');document.body.append(host);const root=createRoot(host);
+ try{
+  await act(async()=>root.render(React.createElement(DecorationDraftEditor,{maker:'whitebox',preset:{format:'sullyos-chat-decoration',version:1,name:'旧白框',parts:{css:'.flex{color:red}'}},origin:{kind:'self'},theme:{} as any,sources:[],onClose:()=>{},onOpenWorkshop:()=>{},onSaved:()=>{}})));
+  const preview=document.querySelector('[data-testid=preview]')!;
+  const textarea=document.querySelector('textarea[aria-label="白框 CSS"]') as HTMLTextAreaElement;
+  const initial=preview.textContent;
+  for(let i=0;i<20;i++){
+   await act(async()=>{Simulate.change(textarea,{target:{value:`.flex{padding:${i}px}`} } as any);vi.advanceTimersByTime(10);});
+   expect(preview.textContent).toBe(initial);
+  }
+  await act(async()=>{Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='保存预设')!.click();});
+  expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({parts:{css:'.flex{padding:19px}'}}),expect.anything(),undefined,undefined);
+  await act(async()=>vi.advanceTimersByTime(300));
+  expect(preview.textContent).toContain('.flex{padding:19px}');
+ }finally{await act(async()=>root.unmount());host.remove();vi.useRealTimers();}
+});
