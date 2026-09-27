@@ -1,31 +1,17 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EventBox, MemoryNode } from './types';
 
 const mocks = vi.hoisted(() => ({
-    boxes: new Map<string, any>(),
-    nodes: new Map<string, any>(),
     responses: [] as any[],
     safeFetchJson: vi.fn(),
-    vectorizeAndStore: vi.fn(),
+    getEmbeddings: vi.fn(),
 }));
 
-vi.mock('./db', () => ({
-    EventBoxDB: {
-        getById: vi.fn(async (id: string) => mocks.boxes.get(id)),
-        save: vi.fn(async (box: EventBox) => { mocks.boxes.set(box.id, { ...box }); }),
-    },
-    MemoryNodeDB: {
-        getById: vi.fn(async (id: string) => mocks.nodes.get(id)),
-        save: vi.fn(async (node: MemoryNode) => { mocks.nodes.set(node.id, { ...node }); }),
-    },
-}));
-
-vi.mock('./vectorStore', () => ({
-    vectorizeAndStore: mocks.vectorizeAndStore,
-}));
+vi.mock('./embedding', () => ({ getEmbeddings: mocks.getEmbeddings, cosineSimilarity: vi.fn() }));
 
 vi.mock('./supabaseVector', () => ({
     bulkSetArchived: vi.fn(async () => true),
+    upsertVector: vi.fn(async () => true),
 }));
 
 vi.mock('./roomPlates', () => ({
@@ -44,7 +30,10 @@ vi.mock('../safeApi', () => ({
 import {
     hasSummaryReasoningLeak,
     regenerateEventBoxSummary,
+    maybeCompressEventBoxes,
 } from './eventBoxCompression';
+import { EventBoxDB, MemoryNodeDB, MemoryVectorDB } from './db';
+import { bulkSetArchived } from './supabaseVector';
 
 const llmConfig = { baseUrl: 'https://llm.example/v1', apiKey: 'key', model: 'flash' };
 const embeddingConfig = {
@@ -104,26 +93,23 @@ function completion(content: string) {
     };
 }
 
-beforeEach(() => {
-    mocks.boxes.clear();
-    mocks.nodes.clear();
+afterEach(() => vi.restoreAllMocks());
+beforeEach(async () => {
     mocks.responses.length = 0;
     mocks.safeFetchJson.mockReset();
     mocks.safeFetchJson.mockImplementation(async () => mocks.responses.shift());
-    mocks.vectorizeAndStore.mockReset();
-    mocks.vectorizeAndStore.mockImplementation(async (nodes: MemoryNode[]) => {
-        const node = { ...nodes[0], embedded: true };
-        mocks.nodes.set(node.id, node);
-        return { stored: 1, skipped: 0 };
-    });
+    mocks.getEmbeddings.mockReset();
+    mocks.getEmbeddings.mockResolvedValue([new Float32Array([1, 0, 0])]);
+    vi.mocked(bulkSetArchived).mockClear();
 
-    mocks.boxes.set('box-1', box());
-    mocks.nodes.set('summary-1', memory('summary-1', 'Wait, let’s count...旧坏总结', {
+    await EventBoxDB.save(box());
+    await MemoryNodeDB.save(memory('summary-1', 'Wait, let’s count...旧坏总结', {
         isBoxSummary: true,
         archived: false,
     }));
-    mocks.nodes.set('archived-1', memory('archived-1', '第一条归档原始记忆'));
-    mocks.nodes.set('live-1', memory('live-1', '第二条活跃原始记忆', { archived: false }));
+    await MemoryNodeDB.save(memory('archived-1', '第一条归档原始记忆'));
+    await MemoryNodeDB.save(memory('live-1', '第二条活跃原始记忆', { archived: false }));
+    await MemoryVectorDB.save({ memoryId: 'summary-1', charId: 'char-1', vector: new Float32Array([0, 1, 0]), dimensions: 3, model: 'embed' });
 });
 
 describe('hasSummaryReasoningLeak', () => {
@@ -147,11 +133,11 @@ describe('regenerateEventBoxSummary', () => {
         expect(result.summary.id).toBe('summary-1');
         expect(result.summary.content).toBe('这是重新整合后的干净回忆。');
         expect(result.summary.embedded).toBe(true);
-        expect(mocks.vectorizeAndStore).toHaveBeenCalledTimes(1);
-        expect(mocks.vectorizeAndStore.mock.calls[0][0][0]).toMatchObject({
+        expect(mocks.getEmbeddings).toHaveBeenCalledTimes(1);
+        expect(await MemoryNodeDB.getById('summary-1')).toMatchObject({
             id: 'summary-1',
             content: '这是重新整合后的干净回忆。',
-            embedded: false,
+            embedded: true,
         });
 
         const requestBody = JSON.parse(mocks.safeFetchJson.mock.calls[0][1].body);
@@ -160,11 +146,12 @@ describe('regenerateEventBoxSummary', () => {
         expect(sourcePrompt).toContain('第二条活跃原始记忆');
         expect(sourcePrompt).not.toContain('旧坏总结');
 
-        const savedBox = mocks.boxes.get('box-1') as EventBox;
+        const savedBox = (await EventBoxDB.getById('box-1'))!;
         expect(savedBox.sealed).toBe(true);
-        expect(savedBox.compressionCount).toBe(3);
-        expect(savedBox.liveMemoryIds).toEqual(['live-1']);
-        expect(savedBox.archivedMemoryIds).toEqual(['archived-1']);
+        expect(savedBox.compressionCount).toBe(4);
+        expect(savedBox.liveMemoryIds).toEqual([]);
+        expect(savedBox.archivedMemoryIds).toEqual(['archived-1', 'live-1']);
+        expect((await MemoryNodeDB.getById('live-1'))?.archived).toBe(true);
         expect(savedBox.name).toBe('干净盒名');
         expect(savedBox.tags).toEqual(['人物甲', '地点乙']);
     });
@@ -180,19 +167,127 @@ describe('regenerateEventBoxSummary', () => {
         );
 
         expect(mocks.safeFetchJson).toHaveBeenCalledTimes(2);
-        expect(mocks.vectorizeAndStore).toHaveBeenCalledTimes(1);
+        expect(mocks.getEmbeddings).toHaveBeenCalledTimes(1);
         expect(result.summary.content).toBe('第二次返回的干净回忆。');
     });
 
     it('Embedding 失败时不覆盖旧 summary 和事件盒元数据', async () => {
         mocks.responses.push(completion('本来准备写入的新回忆。'));
-        mocks.vectorizeAndStore.mockRejectedValueOnce(new Error('embedding unavailable'));
+        mocks.getEmbeddings.mockRejectedValueOnce(new Error('embedding unavailable'));
 
         await expect(regenerateEventBoxSummary(
             'box-1', llmConfig, embeddingConfig, '角色甲', '用户乙',
         )).rejects.toThrow('embedding unavailable');
 
-        expect(mocks.nodes.get('summary-1').content).toBe('Wait, let’s count...旧坏总结');
-        expect(mocks.boxes.get('box-1').name).toBe('旧盒名');
+        expect((await MemoryNodeDB.getById('summary-1'))?.content).toBe('Wait, let’s count...旧坏总结');
+        expect((await EventBoxDB.getById('box-1'))?.name).toBe('旧盒名');
+        expect((await MemoryNodeDB.getById('live-1'))?.archived).toBe(false);
+    });
+
+    it('复现 4 归档 + 8 活节点：成功后活 0 归档 12 并封盒，再重做不重复计数', async () => {
+        const sources = Array.from({ length: 12 }, (_, i) => memory(`source-${i}`, `原始回忆 ${i}`, { archived: i < 4 }));
+        for (const node of sources) await MemoryNodeDB.save(node);
+        await EventBoxDB.save({ ...box(), sealed: false, compressionCount: 1,
+            liveMemoryIds: sources.slice(4).map(n => n.id), archivedMemoryIds: sources.slice(0, 4).map(n => n.id) });
+        const remote = { enabled: true, initialized: true, supabaseUrl: 'https://test.invalid', supabaseAnonKey: 'test' };
+        // No real network: the summary upload and archive sync are both mocked.
+        mocks.responses.push(completion('全部十二条的总结。'), completion('再次修订总结。'));
+        const first = await regenerateEventBoxSummary('box-1', llmConfig, embeddingConfig, '角色', '用户', remote);
+        expect(first.sourceCount).toBe(12);
+        expect(first.box).toMatchObject({ liveMemoryIds: [], sealed: true, compressionCount: 2 });
+        expect(first.box.archivedMemoryIds).toHaveLength(12);
+        expect((await Promise.all(sources.map(n => MemoryNodeDB.getById(n.id)))).every(n => n?.archived)).toBe(true);
+        expect(bulkSetArchived).toHaveBeenCalledWith(remote, expect.arrayContaining(sources.map(n => n.id)), true);
+        const second = await regenerateEventBoxSummary('box-1', llmConfig, embeddingConfig, '角色');
+        expect(second.box.compressionCount).toBe(2);
+        expect(second.box.archivedMemoryIds).toHaveLength(12);
+    });
+
+    it('API 等待期间新进的节点不归档，不进入本次总结', async () => {
+        mocks.responses.push(completion('只总结原来的两条。'));
+        mocks.getEmbeddings.mockImplementationOnce(async () => {
+            await MemoryNodeDB.save(memory('late', '后来加入的回忆', { archived: false }));
+            const fresh = (await EventBoxDB.getById('box-1'))!;
+            await EventBoxDB.save({ ...fresh, sealed: false, liveMemoryIds: [...fresh.liveMemoryIds, 'late'] });
+            return [new Float32Array([1, 0, 0])];
+        });
+        const result = await regenerateEventBoxSummary('box-1', llmConfig, embeddingConfig, '角色');
+        expect(result.box.liveMemoryIds).toEqual(['late']);
+        expect(result.box.sealed).toBe(false);
+        expect((await MemoryNodeDB.getById('late'))?.archived).toBe(false);
+        expect(result.sourceCount).toBe(2);
+    });
+
+    it('没有旧总结也能手动整合，重复成员只归档一次，少于阈值不封盒', async () => {
+        await EventBoxDB.save({ ...box(), summaryNodeId: null, sealed: false, compressionCount: 0,
+            liveMemoryIds: ['live-1', 'live-1'], archivedMemoryIds: [] });
+        mocks.responses.push(completion('首次整合。'));
+        const result = await regenerateEventBoxSummary('box-1', llmConfig, embeddingConfig, '角色');
+        expect(result.sourceCount).toBe(1);
+        expect(result.box).toMatchObject({ liveMemoryIds: [], archivedMemoryIds: ['live-1'], sealed: false, compressionCount: 1 });
+        expect(await MemoryVectorDB.getByMemoryId(result.summary.id)).toBeDefined();
+    });
+
+    it.each(['llm', 'vector'])('%s 返回无效结果时不归档、不覆盖总结', async stage => {
+        if (stage === 'vector') {
+            mocks.responses.push(completion('向量无效，不能保存。'));
+            mocks.getEmbeddings.mockResolvedValueOnce([]);
+        } else mocks.responses.push({}, {});
+        await expect(regenerateEventBoxSummary('box-1', llmConfig, embeddingConfig, '角色')).rejects.toThrow();
+        expect((await MemoryNodeDB.getById('summary-1'))?.content).toContain('旧坏总结');
+        expect((await MemoryNodeDB.getById('live-1'))?.archived).toBe(false);
+        expect((await EventBoxDB.getById('box-1'))?.compressionCount).toBe(3);
+        expect(bulkSetArchived).not.toHaveBeenCalled();
+    });
+
+    it.each(['edit', 'unbind', 'delete', 'delete-box', 'other-summary'])('并发 %s 拒绝旧结果，不改原总结和向量', async action => {
+        mocks.responses.push(completion('不得写入的旧快照总结。'));
+        mocks.getEmbeddings.mockImplementationOnce(async () => {
+            const fresh = (await EventBoxDB.getById('box-1'))!;
+            if (action === 'edit') await MemoryNodeDB.save({ ...(await MemoryNodeDB.getById('live-1'))!, content: '已编辑' });
+            if (action === 'unbind') await EventBoxDB.save({ ...fresh, liveMemoryIds: [] });
+            if (action === 'delete') await MemoryNodeDB.delete('live-1');
+            if (action === 'delete-box') await EventBoxDB.delete('box-1');
+            if (action === 'other-summary') await EventBoxDB.save({ ...fresh, lastCompressedAt: 999 });
+            return [new Float32Array([1, 0, 0])];
+        });
+        await expect(regenerateEventBoxSummary('box-1', llmConfig, embeddingConfig, '角色')).rejects.toThrow();
+        expect((await MemoryNodeDB.getById('summary-1'))?.content).toContain('旧坏总结');
+        expect(Array.from((await MemoryVectorDB.getByMemoryId('summary-1'))!.vector)).toEqual([0, 1, 0]);
+        expect(bulkSetArchived).not.toHaveBeenCalled();
+    });
+
+    it('事务最后写盒子失败时，总结、向量和已排队的归档全部回滚', async () => {
+        mocks.responses.push(completion('不得部分保存的总结。'));
+        const put = IDBObjectStore.prototype.put;
+        vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (this: IDBObjectStore, value, key) {
+            if (this.name === 'event_boxes') throw new Error('模拟存储失败');
+            return put.call(this, value, key);
+        });
+        await expect(regenerateEventBoxSummary('box-1', llmConfig, embeddingConfig, '角色')).rejects.toThrow('模拟存储失败');
+        expect((await MemoryNodeDB.getById('summary-1'))?.content).toContain('旧坏总结');
+        expect((await MemoryNodeDB.getById('live-1'))?.archived).toBe(false);
+        expect((await EventBoxDB.getById('box-1'))?.liveMemoryIds).toEqual(['live-1']);
+        expect(Array.from((await MemoryVectorDB.getByMemoryId('summary-1'))!.vector)).toEqual([0, 1, 0]);
+    });
+
+    it('手动整合期间阻止重复点击和自动压缩，失败后释放锁允许重试', async () => {
+        let release!: () => void;
+        let started!: () => void;
+        const entered = new Promise<void>(resolve => { started = resolve; });
+        const pending = new Promise<void>(resolve => { release = resolve; });
+        mocks.safeFetchJson.mockImplementationOnce(async () => { started(); await pending; return completion('单次整合。'); });
+        mocks.getEmbeddings.mockRejectedValueOnce(new Error('embedding failed'));
+        const first = regenerateEventBoxSummary('box-1', llmConfig, embeddingConfig, '角色');
+        const rejected = expect(first).rejects.toThrow('embedding failed');
+        await entered;
+        try {
+            await expect(regenerateEventBoxSummary('box-1', llmConfig, embeddingConfig, '角色')).rejects.toThrow('正在整合');
+            expect(await maybeCompressEventBoxes(['box-1'], llmConfig, embeddingConfig, '角色')).toEqual({ compressed: 0, skipped: 1 });
+            expect(mocks.safeFetchJson).toHaveBeenCalledTimes(1);
+        } finally { release(); }
+        await rejected;
+        mocks.responses.push(completion('重试成功。'));
+        expect((await regenerateEventBoxSummary('box-1', llmConfig, embeddingConfig, '角色')).summary.content).toBe('重试成功。');
     });
 });
