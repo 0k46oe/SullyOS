@@ -42,8 +42,14 @@ const scopes={
 } as const;
 export function checkWorkshopCss(category:DecorationWorkshop,css:string){
  if(category==='sound')return;
- const [scope,hint]=scopes[category];const check=validateScopedCss(css,scope,hint);
- if(!check.isValid)throw Error(check.errors.join('\n'));
+ // The old whitebox editor accepts arbitrary CSS. Stable hooks are authoring
+ // guidance, not a new hard restriction on existing work. Other makers stay scoped.
+ const [scope,hint]=scopes[category];const check=validateScopedCss(css,category==='whitebox'?/^[\s\S]*$/:scope,hint);
+ if(!check.isValid){
+  const errors=[...new Set(check.errors)];
+  throw Error(`有 ${errors.length} 处 CSS 需要调整。\n`+errors.slice(0,3).join('\n')+(errors.length>3?'\n其余提示已收起，请先修正以上内容。':''));
+ }
+ return css;
 }
 export function workshopPrompt(category:DecorationWorkshop){
  if(category==='journal')return JOURNAL_AI_CSS_PROMPT;

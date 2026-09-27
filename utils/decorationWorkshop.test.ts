@@ -20,3 +20,26 @@ it('applying an avatar frame preserves the existing whitebox and background CSS'
  expect(()=>checkWorkshopCss('psyche','.sully-chat-header{color:red}')).toThrow();
  expect(()=>checkWorkshopCss('psyche','.sully-psyche-card{color:red}')).not.toThrow();
 });
+
+it('keeps legacy whitebox CSS unchanged while specialized makers remain scoped',()=>{
+ const css=String.raw`/* 旧版白框 */
+.flex.justify-center.my-6.px-10.w-full { color: purple; }
+.fixed.inset-0.bg-slate-900\/45 { background: #3338; }
+:root { --old-accent: purple; }
+@media (max-width: 600px) { .flex.items-center { padding: 5px; } }
+.sully-chat-message:is(.user, .assistant)::after { content: "}"; }
+@keyframes old-pulse { from { opacity: 0; } to { opacity: 1; } }`;
+ expect(checkWorkshopCss('whitebox',css)).toBe(css);
+ expect(()=>checkWorkshopCss('bubbles',css)).toThrow();
+ expect(()=>checkWorkshopCss('psyche','.sully-psyche-card:is(.a, .b)::after {content:"}"}')).not.toThrow();
+ expect(()=>checkWorkshopCss('whitebox','.flex {color:red')).toThrow('未闭合');
+});
+
+it('summarizes repeated validation problems instead of flooding the editor',()=>{
+ const css=Array.from({length:30},(_,i)=>`.outside-${i}{color:red}`).join('\n');
+ try{checkWorkshopCss('avatar',css);throw Error('expected rejection');}catch(e){
+  expect((e as Error).message).toContain('30 处');
+  expect((e as Error).message.split('超出限定范围')).toHaveLength(4);
+  expect((e as Error).message).toContain('其余提示已收起');
+ }
+});
