@@ -11,6 +11,7 @@
 ## 数据与维护
 
 - 国家列表快照来自 https://date.nager.at/api/v3/AvailableCountries （2026-09-27）。国际日历使用 Nager.Date v3 PublicHolidays，只接受 Public 类型，按 global/counties 过滤，不能据此推算中国调休。
+- 马来西亚（MY）不在 Nager v3 支持范围，单独接入 `https://malaysia-holiday.dydxsoft.my/api/v1/holidays?year={year}`（Malaysia Holiday API，按政府公告整理的第三方服务）。必须取不带州属过滤的年度接口并校验 `meta.year`、日期与 `state_codes`；13 州和 3 个联邦直辖区的代码转换为 ISO 3166-2，界面显示中英文名称。只有覆盖全部 16 地的记录才视为全国假期，未选州属不提醒地区假期；例如屠妖节不适用于砂拉越。空年度、未知州属或错误响应不冒充有效日历。仅使用来源已收录的日期，不自行推算补假／临时假期；数据源可能未收录所有后续公告。沿用同年份缓存和失败重试，不发送用户姓名或所选州属。接口文档：https://malaysia-holiday.dydxsoft.my/api/docs ，公告：https://www.kabinet.gov.my/hari-kelepasan-am/ 。新增 MY 同时更新 amsg bundle，旧自托管 Worker 需更新。
 - 中国单独使用 NateScarlet/holiday-cn 的公告整理数据（MIT），2026 年日历内置于 `presets/holidays/cn-2026.json`，来源文件的 papers 保留国务院链接。其他年份从项目公布的 jsDelivr 地址获取，年度公告未公布时不猜测。十二月合并下一年的公告（可能包含上一年十二月补班）。内置年份如有修订，需要更新该 JSON 随版本发布。
 - 2026 公告：https://www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm
 - 数据项目与格式：https://github.com/NateScarlet/holiday-cn

@@ -7629,7 +7629,7 @@ function createSingleUserCloudflareWorker(buildConfig, options = {}) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-09-27";
+var AMSG_BUNDLE_VERSION = "2026-09-27.2";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -9743,9 +9743,30 @@ var cn_2026_default = {
   ]
 };
 
+// utils/malaysiaHolidayRegions.ts
+var MALAYSIA_HOLIDAY_REGIONS = [
+  { sourceCode: "JHR", code: "MY-01", name: "\u67D4\u4F5B", english: "Johor" },
+  { sourceCode: "KDH", code: "MY-02", name: "\u5409\u6253", english: "Kedah" },
+  { sourceCode: "KTN", code: "MY-03", name: "\u5409\u5170\u4E39", english: "Kelantan" },
+  { sourceCode: "MLK", code: "MY-04", name: "\u9A6C\u516D\u7532", english: "Melaka" },
+  { sourceCode: "NSN", code: "MY-05", name: "\u68EE\u7F8E\u5170", english: "Negeri Sembilan" },
+  { sourceCode: "PHG", code: "MY-06", name: "\u5F6D\u4EA8", english: "Pahang" },
+  { sourceCode: "PNG", code: "MY-07", name: "\u69DF\u57CE", english: "Pulau Pinang" },
+  { sourceCode: "PRK", code: "MY-08", name: "\u9739\u96F3", english: "Perak" },
+  { sourceCode: "PLS", code: "MY-09", name: "\u73BB\u7483\u5E02", english: "Perlis" },
+  { sourceCode: "SGR", code: "MY-10", name: "\u96EA\u5170\u83AA", english: "Selangor" },
+  { sourceCode: "TRG", code: "MY-11", name: "\u767B\u5609\u697C", english: "Terengganu" },
+  { sourceCode: "SBH", code: "MY-12", name: "\u6C99\u5DF4", english: "Sabah" },
+  { sourceCode: "SWK", code: "MY-13", name: "\u7802\u62C9\u8D8A", english: "Sarawak" },
+  { sourceCode: "KUL", code: "MY-14", name: "\u5409\u9686\u5761", english: "Kuala Lumpur" },
+  { sourceCode: "LBN", code: "MY-15", name: "\u7EB3\u95FD", english: "Labuan" },
+  { sourceCode: "PJY", code: "MY-16", name: "\u5E03\u57CE", english: "Putrajaya" }
+];
+var malaysiaHolidayRegion = (code) => MALAYSIA_HOLIDAY_REGIONS.find((r) => r.code === code);
+
 // utils/userHolidays.ts
 var HOLIDAY_CACHE_PREFIX = "user_holidays_v1_";
-var HOLIDAY_COUNTRIES = countries_default;
+var HOLIDAY_COUNTRIES = [...countries_default, { countryCode: "MY", name: "Malaysia" }];
 function holidayCountryName(code) {
   try {
     return new Intl.DisplayNames(["zh-CN"], { type: "region" }).of(code) || code;
@@ -9760,6 +9781,20 @@ var DAY = 864e5;
 var cleanName = (name) => typeof name === "string" ? name.replace(/[\r\n\x00-\x1f]/g, " ").slice(0, 80).trim() : "";
 var validDate = (date) => typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date);
 function parseHolidayCalendar(country, year, raw, now) {
+  if (country === "MY") {
+    if (raw?.meta?.year !== year || !Array.isArray(raw.data) || !raw.data.length) return null;
+    const states = new Map(MALAYSIA_HOLIDAY_REGIONS.map((r) => [r.sourceCode, r.code]));
+    if (!raw.data.every((d) => validDate(d?.date) && d.date.startsWith(`${year}-`) && cleanName(d.name) && Array.isArray(d.state_codes) && d.state_codes.length > 0 && d.state_codes.every((code) => typeof code === "string" && states.has(code)))) return null;
+    return { country, year, fetchedAt: now, days: raw.data.map((d) => {
+      const regions = [...new Set(d.state_codes.map((code) => states.get(code)))];
+      return {
+        date: d.date,
+        name: cleanName(d.name),
+        off: true,
+        ...regions.length === states.size ? {} : { regions }
+      };
+    }) };
+  }
   if (country === "CN") {
     if (raw?.year !== year || !Array.isArray(raw.papers) || !raw.papers.length || !Array.isArray(raw.days)) return null;
     if (!raw.days.every((d) => validDate(d?.date) && cleanName(d?.name) && typeof d?.isOffDay === "boolean")) return null;
@@ -9806,7 +9841,7 @@ async function loadHolidayCalendar(country, year, cache, now = Date.now()) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 3e3);
     try {
-      const url = country === "CN" ? `https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/${year}.json` : `https://date.nager.at/api/v3/PublicHolidays/${year}/${country}`;
+      const url = country === "CN" ? `https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/${year}.json` : country === "MY" ? `https://malaysia-holiday.dydxsoft.my/api/v1/holidays?year=${year}` : `https://date.nager.at/api/v3/PublicHolidays/${year}/${country}`;
       const res = await fetch(url, { signal: controller.signal });
       if (!res.ok) throw new Error("holiday unavailable");
       const fresh = parseHolidayCalendar(country, year, await res.json(), now);
@@ -9836,7 +9871,8 @@ function renderUserHoliday(config, date, days, userName) {
   if (!matches.length) return "";
   const working = matches.some((d) => !d.off);
   const names = [...new Set(matches.filter((d) => d.off === !working).map((d) => cleanName(d.name)))].join("\u3001");
-  const region = config.subdivisionCode ? `\uFF08${config.subdivisionCode}\uFF09` : "";
+  const regionName = config.countryCode === "MY" ? malaysiaHolidayRegion(config.subdivisionCode || "")?.name : void 0;
+  const region = config.subdivisionCode ? `\uFF08${regionName || config.subdivisionCode}\uFF09` : "";
   const person = cleanName(userName) || "\u7528\u6237";
   return `${person}\u6240\u5728\u5730${holidayCountryName(config.countryCode)}${region} ${date} \u4E3A${names}${working ? "\u8C03\u4F11\u8865\u73ED\u65E5" : "\u516C\u5171\u5047\u671F"}\uFF0C\u5B9E\u9645\u4F11\u606F\u4E0E\u5426\u4EE5${person}\u81EA\u5DF1\u7684\u65E5\u7A0B\u548C\u8BF4\u660E\u4E3A\u51C6\u3002`;
 }

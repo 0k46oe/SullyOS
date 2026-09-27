@@ -3,6 +3,7 @@ import countries from '../presets/holidays/countries.json';
 import china2026 from '../presets/holidays/cn-2026.json';
 import { nowInTimeZone } from './timezone';
 import { getLocalDateKey } from './localDate';
+import { MALAYSIA_HOLIDAY_REGIONS, malaysiaHolidayRegion } from './malaysiaHolidayRegions';
 
 export interface UserHolidayConfig {
     introChoice?: 'configure' | 'configured' | 'declined';
@@ -34,7 +35,8 @@ export function hasChosenHolidayIntro(): boolean {
         return !!config?.introChoice || config?.enabled === true;
     } catch { return true; } // Storage unavailable: do not repeatedly interrupt startup.
 }
-export const HOLIDAY_COUNTRIES = countries as { countryCode: string; name: string }[];
+// Nager v3 does not serve MY; countries with a dedicated provider belong here too.
+export const HOLIDAY_COUNTRIES = [...countries, { countryCode: 'MY', name: 'Malaysia' }];
 export function holidayCountryName(code: string): string {
     try { return new Intl.DisplayNames(['zh-CN'], { type: 'region' }).of(code) || code; }
     catch { return HOLIDAY_COUNTRIES.find(c => c.countryCode === code)?.name || code; }
@@ -48,6 +50,21 @@ const cleanName = (name: unknown) => typeof name === 'string' ? name.replace(/[\
 const validDate = (date: unknown): date is string => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date);
 
 export function parseHolidayCalendar(country: string, year: number, raw: any, now: number): HolidayCalendar | null {
+    if (country === 'MY') {
+        // Fetch the unfiltered annual endpoint: only it includes state_codes.
+        // Empty/unpublished years are unavailable, never an authoritative no-holiday calendar.
+        if (raw?.meta?.year !== year || !Array.isArray(raw.data) || !raw.data.length) return null;
+        const states = new Map<string, string>(MALAYSIA_HOLIDAY_REGIONS.map(r => [r.sourceCode, r.code]));
+        if (!raw.data.every((d: any) => validDate(d?.date) && d.date.startsWith(`${year}-`) && cleanName(d.name)
+            && Array.isArray(d.state_codes) && d.state_codes.length > 0
+            && d.state_codes.every((code: unknown) => typeof code === 'string' && states.has(code)))) return null;
+        return { country, year, fetchedAt: now, days: raw.data.map((d: any) => {
+            const regions = [...new Set<string>(d.state_codes.map((code: string) => states.get(code)!))];
+            // Federal designation alone is insufficient: Deepavali, for example, excludes Sarawak.
+            return { date: d.date, name: cleanName(d.name), off: true,
+                ...(regions.length === states.size ? {} : { regions }) };
+        }) };
+    }
     if (country === 'CN') {
         // No annual announcement yet is unknown, not an empty official work calendar.
         if (raw?.year !== year || !Array.isArray(raw.papers) || !raw.papers.length || !Array.isArray(raw.days)) return null;
@@ -124,6 +141,7 @@ export async function loadHolidayCalendar(country: string, year: number, cache?:
         try {
             const url = country === 'CN'
                 ? `https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/${year}.json`
+                : country === 'MY' ? `https://malaysia-holiday.dydxsoft.my/api/v1/holidays?year=${year}`
                 : `https://date.nager.at/api/v3/PublicHolidays/${year}/${country}`;
             const res = await fetch(url, { signal: controller.signal });
             if (!res.ok) throw new Error('holiday unavailable');
@@ -147,7 +165,8 @@ export function renderUserHoliday(config: UserHolidayConfig, date: string, days:
     if (!matches.length) return '';
     const working = matches.some(d => !d.off);
     const names = [...new Set(matches.filter(d => d.off === !working).map(d => cleanName(d.name)))].join('、');
-    const region = config.subdivisionCode ? `（${config.subdivisionCode}）` : '';
+    const regionName = config.countryCode === 'MY' ? malaysiaHolidayRegion(config.subdivisionCode || '')?.name : undefined;
+    const region = config.subdivisionCode ? `（${regionName || config.subdivisionCode}）` : '';
     const person = cleanName(userName) || '用户';
     return `${person}所在地${holidayCountryName(config.countryCode)}${region} ${date} 为${names}${working ? '调休补班日' : '公共假期'}，实际休息与否以${person}自己的日程和说明为准。`;
 }
