@@ -13,6 +13,26 @@ vi.mock('../components/share/BeautyRepoInvitation', () => ({ BeautyRepoBadge: ()
 vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
 Element.prototype.scrollIntoView = vi.fn();
 
+it('keeps deletion available for unreadable presets and provenance without unlocking editing or sharing',async()=>{
+ vi.stubGlobal('IntersectionObserver',class {constructor(private callback:any){}observe(){this.callback([{isIntersecting:true}]);}disconnect(){}});
+ const host=document.createElement('div');const root=createRoot(host);const remove=vi.fn();
+ const entries:WardrobeEntry[]=[
+  {id:'broken',name:'缺少素材',read:async()=>{throw Error('部分素材已丢失');},attributionKey:async()=>'broken'},
+  {id:'origin-error',name:'来源损坏',read:async()=>({}),attributionKey:async()=>{throw Error('来源读取失败');}},
+ ];
+ try{
+  await act(async()=>root.render(React.createElement(BeautyWardrobe,{entries,onApply:vi.fn(),onEdit:vi.fn(),onShare:vi.fn(),onDelete:remove})));
+  expect(host.textContent).not.toContain('正在读取来源');
+  expect(host.textContent).toContain('部分素材已丢失');
+  expect(host.textContent).toContain('来源读取失败');
+  for(const entry of entries){
+   const buttons=Array.from(host.querySelector(`[aria-label="${entry.name}的操作"]`)!.querySelectorAll('button'));
+   expect(buttons.map(b=>b.textContent)).toEqual(['删除']);
+   await act(async()=>buttons[0].click());expect(remove).toHaveBeenCalledWith(entry);
+  }
+ }finally{await act(async()=>root.unmount());vi.stubGlobal('IntersectionObserver',class {observe(){}disconnect(){}});}
+});
+
 it('paginates only local entries, clamps a shortened list, and does not eagerly read offscreen packages', async () => {
   const host = document.createElement('div'); const root = createRoot(host);
   const read = vi.fn(async () => ({}));

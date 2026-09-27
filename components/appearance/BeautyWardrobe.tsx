@@ -17,7 +17,7 @@ function WardrobeTile({ entry, onOpen, ...actions }: WardrobeActions & { entry: 
   const latest = useRef(entry); latest.current = entry;
   const [visible, setVisible] = useState(false);
   const [loaded, setLoaded] = useState<Loaded>();
-  const [error, setError] = useState(false);
+  const [error, setError] = useState('');
   useEffect(() => {
     const observer = new IntersectionObserver(items => {
       if (items.some(item => item.isIntersecting)) { setVisible(true); observer.disconnect(); }
@@ -27,20 +27,23 @@ function WardrobeTile({ entry, onOpen, ...actions }: WardrobeActions & { entry: 
   }, []);
   useEffect(() => {
     if (!visible) return;
-    let alive = true; setLoaded(undefined); setError(false);
-    loadEntry(latest.current).then(value => { if (alive) setLoaded(value); }).catch(() => { if (alive) setError(true); });
+    let alive = true; setLoaded(undefined); setError('');
+    loadEntry(latest.current).then(value => { if (alive) setLoaded(value); }).catch(e => { if (alive) setError(e instanceof Error ? e.message : '装扮读取失败'); });
     return () => { alive = false; };
   }, [visible, entry.id, entry.revision]);
   return <article className="wardrobe-item"><button ref={tile} type="button" className="wardrobe-tile" onClick={() => onOpen(entry, loaded)} aria-label={`预览 ${entry.name}`}>
     <div className="wardrobe-cover" aria-hidden="true">
       {loaded ? <BeautyPresetPreview data={loaded.pack} compact/> : <span className="wardrobe-placeholder">{error ? '点按重试预览' : '预览载入中'}</span>}
     </div>
-    <strong>{entry.name}</strong><span className="wardrobe-credit">{loaded ? `${originLabel(loaded.origin)}${loaded.origin.credit?' · '+loaded.origin.credit:''}${!canEditDecoration(loaded.origin)?' · 禁止二改':''}` : '正在读取来源'}</span>
-  </button>{loaded&&<CardActions entry={entry} origin={loaded.origin} {...actions}/ >}{loaded?.share && <BeautyRepoBadge share={loaded.share}/>}</article>;
+    <strong>{entry.name}</strong><span className="wardrobe-credit">{loaded ? `${originLabel(loaded.origin)}${loaded.origin.credit?' · '+loaded.origin.credit:''}${!canEditDecoration(loaded.origin)?' · 禁止二改':''}` : error ? '读取失败 · 可重试或删除' : '正在读取来源'}</span>
+  </button>{error&&<p className="wardrobe-credit" role="alert">{error}</p>}<CardActions entry={entry} origin={loaded?.origin} {...actions}/ >{loaded?.share && <BeautyRepoBadge share={loaded.share}/>}</article>;
 }
 
-function CardActions({entry,origin,onEdit,onShare,onDelete,onUpdate}:WardrobeActions & {entry:WardrobeEntry;origin:DecorationOrigin}){
+function CardActions({entry,origin,onEdit,onShare,onDelete,onUpdate}:WardrobeActions & {entry:WardrobeEntry;origin?:DecorationOrigin}){
  const [checking,setChecking]=useState(false);
+ // Removal only needs the local identity, never a readable preview or author metadata.
+ // Unknown permissions must not unlock editing or sharing.
+ if(!origin)return onDelete?<div className="wardrobe-card-actions" aria-label={`${entry.name}的操作`}><button className="is-danger" onClick={()=>onDelete(entry)}>删除</button></div>:null;
  if(origin.kind==='builtin')return null;
  return <div className="wardrobe-card-actions" aria-label={`${entry.name}的操作`}>
   {origin.kind==='imported'&&origin.share&&onUpdate&&<button disabled={checking} onClick={async()=>{setChecking(true);try{await onUpdate(entry);}finally{setChecking(false);}}}>{checking?'检查中…':'检查更新'}</button>}
@@ -80,7 +83,7 @@ function WardrobeDetail({ entry, initial, onClose, onApply,onEdit,onExport,onSha
       <div className="wardrobe-detail-stage">{loaded ? <BeautyPresetPreview data={loaded.pack}/> : error ? <div role="alert"><p>{error}</p><button onClick={() => setAttempt(v => v + 1)}>重新载入</button></div> : <p role="status">正在载入预览…</p>}</div>
       <div className="wardrobe-detail-info"><h2 id="wardrobe-detail-title">{entry.name}</h2><p>{metadata ? `作者 · ${metadata.credit}` : '保存在这台设备上的装扮'}</p>
         {loaded&&<p>{originLabel(loaded.origin)}{!canEditDecoration(loaded.origin)?' · 作者禁止二改，编辑已锁定':''}</p>}
-        {loaded&&<CardActions entry={entry} origin={loaded.origin} onEdit={onEdit?item=>{onClose();onEdit(item);}:undefined} onShare={onShare?item=>{onClose();onShare(item);}:undefined} onUpdate={onUpdate?item=>{onClose();onUpdate(item);}:undefined} onDelete={onDelete?item=>{onClose();onDelete(item);}:undefined}/>}
+        <CardActions entry={entry} origin={loaded?.origin} onEdit={onEdit?item=>{onClose();onEdit(item);}:undefined} onShare={onShare?item=>{onClose();onShare(item);}:undefined} onUpdate={onUpdate?item=>{onClose();onUpdate(item);}:undefined} onDelete={onDelete?item=>{onClose();onDelete(item);}:undefined}/>
         {entry.contents && <p>会应用：{entry.contents}。按作者提供的完整作品应用。</p>}
         {metadata && <details><summary>作者留言与使用规范</summary>
           {metadata.message && <p className="wardrobe-message">{metadata.message}</p>}
