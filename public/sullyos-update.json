@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
-  "versionCode": 30502,
-  "versionName": "3.5.2",
-  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.5.2/SullyOS-Android-v3.5.2.apk",
-  "sha256": "4ad90712105232b75000b463cdde7b32b4cd679d46266bfcf95af8b611903edd",
-  "sizeBytes": 46337288,
-  "publishedAt": "2026-09-16T15:11:57Z",
+  "versionCode": 30503,
+  "versionName": "3.5.3",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.5.3/SullyOS-Android-v3.5.3.apk",
+  "sha256": "13451b474ef4f77be4bd2f56d73cf3e77201cfffec685c8ba75ac1bcaee43300",
+  "sizeBytes": 50584041,
+  "publishedAt": "2026-09-27T15:00:53Z",
   "releaseNotes": [
-    "同步 master 7a26f52c：表情包导出、鱼市、记忆归档与聊天装扮等更新",
-    "支持网页版格式 3 备份及图片二进制恢复，继续兼容格式 2；请先更新 APK 再导入原始备份",
-    "同步主动消息 2.0 最新后端与诊断更新",
-    "应用显示名称对齐为 SullyOS·糯米机",
-    "保留 UnifiedPush / ntfy、Android PDF 导入、Umami、应用内更新与 DirectoryExists 修复；沿用固定签名覆盖升级"
+    "同步最新 master 15aab7d2，包含 Pixi 生产环境启动循环修复",
+    "同步美化分享、预览与装扮工作流，以及相机和节假日感知等上游更新",
+    "同步主动消息 2.0 后端自动更新、即时对话凭据与频率设置改动",
+    "保留 UnifiedPush / ntfy、PDF 导入、Umami 与应用内更新，沿用固定签名覆盖升级",
+    "本次仅对齐 master，未新增跨域处理或 ntfy 推送修复"
   ]
 }
