@@ -29,7 +29,7 @@ import BeautyPresetPicker from '../share/BeautyPresetPicker';
 import { BeautyRepoLibrary } from '../share/BeautyRepoInvitation';
 import BeautyWardrobe, { type WardrobeEntry } from './BeautyWardrobe';
 import DecorationDraftEditor from '../chat/DecorationDraftEditor';
-import {readDecorationFile,portableDecoration} from '../../utils/chatDecoration';
+import {readDecorationFile,portableDecoration,readBubbleDecoration} from '../../utils/chatDecoration';
 import {readDecorationOrigin,writeDecorationOrigin,saveLibraryDecoration,saveLibraryDecorationBatch,canEditDecoration,importedOrigin,type DecorationOrigin} from '../../utils/decorationLibrary';
 import {shareOrDownloadBlob} from '../../utils/shareExport';
 import {safeShareFileName,isPng,pngHasShare,extractShareFromPng} from '../../utils/pngShare';
@@ -202,7 +202,7 @@ export default function BeautyShareChannel({ presets, onExport, onImport, onBusy
     ...presets.map(preset => ({ id: preset.id, bindingId:preset.id, name: preset.name, kind: 'appearance' as const, categories: ['appearance'] as BeautyCategory[], contents: '作者保存的桌面主题与搭配', revision: preset, attributionKey: async () => preset.id, read: async () => readBeautyPackage(new File([await onExport(preset.id)], 'preset.zip'), 'appearance') })),
     ...saved.map(preset => ({ id:preset._libraryId,bindingId:preset._libraryId, name: preset.name, kind: 'chat-decoration' as const, categories: decorationCategories(preset), contents: decorationContents(preset), revision: preset, attributionKey: async () => preset._libraryId, read: async()=>portableDecoration(preset), readCurrent: async () => {const latest=(await readLibraryDecorations()).find(item=>item._libraryId===preset._libraryId);if(!latest)throw Error('原装扮已删除');return portableDecoration(latest);} })),
     ...legacyCss.map((preset,index)=>({id:`legacy-${index}`,name:preset.name,kind:'chat-decoration' as const,categories:decorationCategories(preset),contents:decorationContents(preset),revision:preset,attributionKey:()=>decorationSourceKey(preset),read:async()=>preset})),
-    ...customThemes.map(bubbles=>({id:'bubble-'+bubbles.id,bindingId:'bubble-'+bubbles.id,name:bubbles.name,kind:'chat-decoration' as const,categories:['bubbles'] as BeautyCategory[],contents:'聊天气泡',revision:bubbles,attributionKey:async()=>'bubble-'+bubbles.id,read:async()=>portableDecoration(validateDecoration({format:'sullyos-chat-decoration',version:1,name:bubbles.name,parts:{bubbles}}))})),
+    ...customThemes.map(bubbles=>({id:'bubble-'+bubbles.id,bindingId:'bubble-'+bubbles.id,name:bubbles.name,kind:'chat-decoration' as const,categories:['bubbles'] as BeautyCategory[],contents:'聊天气泡',revision:bubbles,attributionKey:async()=>'bubble-'+bubbles.id,read:()=>readBubbleDecoration(bubbles)})),
   ];
   const builtinWhitebox: WardrobeEntry[] = BUILTIN_WHITEBOX_PRESETS.map(item=>({id:item.id,name:item.name,kind:'chat-decoration',categories:['chat','whitebox'],contents:'完整聊天装扮 · 布局、气泡、背景与心象',attributionKey:async()=>'',read:async()=>item.read()}));
   const builtinBubbles: WardrobeEntry[] = Object.values(PRESET_THEMES).map(bubbles=>({id:'builtin-bubble-'+bubbles.id,name:bubbles.name,kind:'chat-decoration',categories:['bubbles'],contents:'聊天气泡',attributionKey:async()=>'',read:async()=>validateDecoration({format:'sullyos-chat-decoration',version:1,name:bubbles.name,parts:{bubbles:structuredClone(bubbles)}})}));

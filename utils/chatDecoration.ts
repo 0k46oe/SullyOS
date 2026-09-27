@@ -81,6 +81,10 @@ async function portableTree(value:any):Promise<any>{
  if(record(value)){const out:Record<string,any>={};for(const [key,v]of Object.entries(value))out[key]=await portableTree(v);return out;}return value;
 }
 export async function portableDecoration(preset:DecorationPreset):Promise<DecorationPreset>{return validateDecoration(await portableTree(preset));}
+// Local bubble themes may contain blobref assets; resolve them before the share-format validator.
+export function readBubbleDecoration(bubbles:ChatTheme):Promise<DecorationPreset>{
+ return portableDecoration({format:'sullyos-chat-decoration',version:1,name:bubbles.name,parts:{bubbles}});
+}
 export async function exportDecoration(name:string,theme:OSTheme,char:CharacterProfile|undefined,bubble:ChatTheme):Promise<DecorationPreset>{
  const effective=resolveDecorationTheme(theme,char);
  const layout=char?{...effective,...mergeChatFineTune(effective,char.chatFineTune)}:theme;
