@@ -46,6 +46,7 @@ export interface AmsgToolPack {
  * worker 到点就静默拿 undefined（编译期一声不吭），正是窄接口想消灭的那类失配。
  */
 export interface AmsgToolConfig extends AgenticToolRealtimeConfig {
+  userHolidays?: RealtimeConfig['userHolidays'];
   v: 1;
   /** 搜索 / Notion / 飞书都经它转发；worker 端用 setProxyWorkerUrlOverride 注入。 */
   proxyWorkerUrl: string;
@@ -132,6 +133,7 @@ export const buildToolConfig = (
     v: 1,
     proxyWorkerUrl: getProxyWorkerUrl(),
     weatherEnabled: !!rc?.weatherEnabled,
+    ...(rc?.userHolidays ? { userHolidays: { ...rc.userHolidays, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone } } : {}),
     ...(rc?.weatherCity ? { weatherCity: rc.weatherCity } : {}),
     ...(rc?.weatherApiKey ? { weatherApiKey: rc.weatherApiKey } : {}),
     newsEnabled: !!rc?.newsEnabled,

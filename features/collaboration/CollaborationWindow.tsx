@@ -47,15 +47,18 @@ import type { CollaborationInlineSpan } from './markdown';
 import { parseCollaborationRichOutput, resolveCollaborationEmoji, sanitizeCollaborationRichOutputSource } from './richOutput';
 import { canSynthesizeSpeech, providerUsesRawVoiceMarkup, synthesizeSpeechDetailed } from '../../utils/ttsRouter';
 import { CollaborationStore } from './store';
+import { changeMakerSelection } from './makerSelection';
 import { COLLABORATION_LIBRARY_GROUP_LABELS, collaborationLibraryGroupOf, type CollaborationLibraryGroup } from './chatLibrary';
 import {
   buildInstallablePreviewDocument,
+  installableToChatTheme,
   COLLABORATION_MAKERS,
   COLLABORATION_MAKER_MAP,
   materializeInstallableArtifact,
   parseInstallableArtifactBlocks,
   validateInstallableArtifact,
 } from './makers';
+import BeautyPresetPreview from '../../components/share/BeautyPresetPreview';
 import type {
   CollaborationApiProfile,
   CollaborationArtifactFormat,
@@ -956,7 +959,7 @@ const AttachmentButton: React.FC<{
 
 const MakerStudio: React.FC<{
   activeKind?: CollaborationMakerKind;
-  onChoose: (kind: CollaborationMakerKind) => void;
+  onChoose: (kind?: CollaborationMakerKind) => void;
   onClose: () => void;
 }> = ({ activeKind, onChoose, onClose }) => (
   <div className="absolute inset-0 z-[70] flex flex-col bg-[#f7f8fb] animate-[collabFade_.18s_ease-out]">
@@ -967,9 +970,10 @@ const MakerStudio: React.FC<{
     <div className="flex-1 overflow-y-auto px-5 pb-10 pt-7">
       <div className="mx-auto max-w-xl">
         <p className="text-[11px] font-semibold uppercase tracking-[.18em] text-slate-400">Beautification & Assets</p>
+        {activeKind && <button type="button" onClick={() => onChoose(undefined)} className="mt-3 flex items-center gap-2 rounded-full bg-white px-4 py-2 text-xs text-slate-600"><X size={14} />取消制作，回到普通协同</button>}
         <div className="mt-4 border-y border-slate-200/80">
           {COLLABORATION_MAKERS.map((maker, index) => (
-            <button key={maker.kind} type="button" onClick={() => onChoose(maker.kind)} className={`group flex w-full items-center gap-4 py-4 text-left transition-colors active:bg-white ${index < COLLABORATION_MAKERS.length - 1 ? 'border-b border-slate-200/70' : ''}`}>
+            <button key={maker.kind} type="button" aria-pressed={activeKind === maker.kind} onClick={() => onChoose(maker.kind)} className={`group flex w-full items-center gap-4 py-4 text-left transition-colors active:bg-white ${index < COLLABORATION_MAKERS.length - 1 ? 'border-b border-slate-200/70' : ''}`}>
               <span className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl text-sm font-bold text-white shadow-sm" style={{ background: maker.accent }}>{maker.shortLabel.slice(0, 1)}</span>
               <span className="min-w-0 flex-1"><span className="flex items-center gap-2 text-sm font-semibold text-slate-800">{maker.label}{activeKind === maker.kind && <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[9px] text-indigo-600">当前</span>}</span><span className="mt-1 block text-[11px] leading-relaxed text-slate-400">{maker.description}</span></span>
               <span className="text-slate-300 transition-transform group-hover:translate-x-1">→</span>
@@ -1077,6 +1081,10 @@ const InstallablePreview: React.FC<{
   onClose: () => void;
 }> = ({ artifact, characters, currentCharacterId, onInstall, onClose }) => {
   const definition = COLLABORATION_MAKER_MAP[artifact.kind];
+  const chatPreview = useMemo(()=> {
+    if(!['whitebox-css','bubble-theme','psyche-css'].includes(artifact.kind))return null;
+    try{return {format:'sullyos-chat-decoration',version:1,name:artifact.title,parts:artifact.kind==='bubble-theme'?{bubbles:installableToChatTheme(artifact)}:artifact.kind==='psyche-css'?{psyche:{styleId:'echo',customCss:String(artifact.payload.css||'')}}:{css:String(artifact.payload.css||'')}};}catch{return null;}
+  },[artifact]);
   const errors = useMemo(() => validateInstallableArtifact(artifact), [artifact]);
   const [targetId, setTargetId] = useState(definition.target === 'optional-character' ? '' : currentCharacterId);
   const [targetPickerOpen, setTargetPickerOpen] = useState(false);
@@ -1093,8 +1101,8 @@ const InstallablePreview: React.FC<{
         <button type="button" onClick={onClose} className="grid h-10 w-10 place-items-center rounded-full text-white/75 active:bg-white/10" aria-label="关闭预览"><X size={21} /></button>
         <div className="min-w-0 flex-1 px-2"><p className="text-[9px] uppercase tracking-[.18em] text-white/40">{definition.label} · Preview</p><h2 className="truncate text-sm font-semibold">{artifact.title}</h2></div>
       </header>
-      <div className="min-h-0 flex-1 bg-[#1a1d26] p-3 sm:p-5">
-        <iframe title={`${artifact.title}预览`} sandbox="" srcDoc={buildInstallablePreviewDocument(artifact)} className="h-full w-full rounded-[24px] border-0 bg-white shadow-2xl" />
+      <div className="min-h-0 flex-1 overflow-y-auto bg-[#1a1d26] p-3 sm:p-5">
+        {chatPreview ? <div className="mx-auto max-w-sm rounded-2xl bg-white p-3 text-slate-700"><BeautyPresetPreview data={chatPreview}/></div> : <iframe title={`${artifact.title}预览`} sandbox="" srcDoc={buildInstallablePreviewDocument(artifact)} className="h-full w-full rounded-[24px] border-0 bg-white shadow-2xl" />}
       </div>
       <div className="shrink-0 border-t border-white/10 bg-[#11131a] px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3">
         {errors.length > 0 ? <div className="mb-3 rounded-xl bg-rose-500/12 px-3 py-2 text-[11px] leading-relaxed text-rose-200">{errors[0]}</div> : null}
@@ -1619,6 +1627,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>('active');
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [draft, setDraft] = useState('');
+  const [makerSaving, setMakerSaving] = useState(false);
+  const makerSavingRef = useRef(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [requestedOutputFormat, setRequestedOutputFormat] = useState<CollaborationArtifactFormat | null>(null);
   const [uploadStatus, setUploadStatus] = useState('');
@@ -2158,12 +2168,28 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
     }
   };
 
-  const chooseMaker = async (kind: CollaborationMakerKind) => {
-    if (!activeSession) return;
-    await updateSession({ ...activeSession, makerKind: kind, updatedAt: Date.now() });
-    trackEvent('选择协同制作类型', { 类型: analyticsMakerKind(kind) });
+  const chooseMaker = async (kind?: CollaborationMakerKind, sourceDraft = draft) => {
+    if (!activeSession || isGenerating || makerSavingRef.current) return;
+    const next = changeMakerSelection(activeSession.makerKind, kind, sourceDraft);
+    makerSavingRef.current = true;
+    setMakerSaving(true);
     setMakerOpen(false);
-    if (!draft.trim()) setDraft(`请和我一起做「${COLLABORATION_MAKER_MAP[kind].label}」。我希望它的感觉是：`);
+    try {
+      await updateSession({ ...activeSession, makerKind: next.makerKind, updatedAt: Date.now() });
+      setDraft(next.draft);
+      if (next.makerKind) trackEvent('选择协同制作类型', { 类型: analyticsMakerKind(next.makerKind) });
+      else notify('已取消制作，后续不再附加制作要求', 'info');
+    } catch {
+      notify('制作类型保存失败，请重试', 'error');
+    } finally {
+      makerSavingRef.current = false;
+      setMakerSaving(false);
+    }
+  };
+
+  const changeComposerDraft = (value: string) => {
+    setDraft(value);
+    if (!value.trim() && activeSession?.makerKind && !isGenerating) void chooseMaker(undefined, value);
   };
 
   const toggleChatCollaboration = async (enabled: boolean) => {
@@ -2359,7 +2385,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
   };
 
   const send = async () => {
-    if (!activeSession || isGenerating || uploadStatus) return;
+    if (!activeSession || isGenerating || uploadStatus || makerSavingRef.current) return;
     const content = draft.trim();
     if (!content && pendingAttachments.length === 0) return;
     const profile = settings[activeSession.mode];
@@ -2391,7 +2417,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
   };
 
   const rerollLatestReply = async () => {
-    if (!activeSession || isGenerating || uploadStatus) return;
+    if (!activeSession || isGenerating || uploadStatus || makerSavingRef.current) return;
     let lastUserIndex = -1;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       if (messages[index].role === 'user') {
@@ -2720,9 +2746,10 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
                 {OUTPUT_FORMAT_OPTIONS.map(option => <option key={option.value || 'auto'} value={option.value}>{option.label}</option>)}
               </select>
               {COLLABORATION_MAKERS.slice(0, 5).map(maker => (
-                <button key={maker.kind} type="button" onClick={() => void chooseMaker(maker.kind)} disabled={isGenerating} className={`shrink-0 rounded-full px-3 py-1.5 text-[10px] font-medium transition-colors disabled:opacity-40 ${activeSession.makerKind === maker.kind ? 'collab-accent-chip bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-500'}`}>{maker.shortLabel}</button>
+                <button key={maker.kind} type="button" aria-pressed={activeSession.makerKind === maker.kind} title={activeSession.makerKind === maker.kind ? '再次点击取消制作' : maker.label} onClick={() => void chooseMaker(maker.kind)} disabled={isGenerating || makerSaving} className={`flex shrink-0 items-center gap-1 rounded-full px-3 py-1.5 text-[10px] font-medium transition-colors disabled:opacity-40 ${activeSession.makerKind === maker.kind ? 'collab-accent-chip bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-500'}`}>{maker.shortLabel}{activeSession.makerKind === maker.kind && <X size={12} />}</button>
               ))}
             </div>
+            {activeSession.makerKind && <div className="mb-2 flex items-center justify-between gap-2 px-1 text-[11px] text-slate-500"><span>正在制作：{COLLABORATION_MAKER_MAP[activeSession.makerKind].shortLabel}</span><button type="button" disabled={isGenerating || makerSaving} onClick={() => void chooseMaker()} className="flex min-h-8 items-center gap-1 rounded-full px-3 text-slate-600 disabled:opacity-40"><X size={13} />取消制作</button></div>}
             {(pendingAttachments.length > 0 || uploadStatus) && (
               <div className="mb-2 flex gap-2 overflow-x-auto no-scrollbar">
                 {pendingAttachments.map(item => (
@@ -2740,7 +2767,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
               <input ref={fileInputRef} type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.docx,.doc,.txt,.md,.markdown,.json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml" className="hidden" onChange={event => void handleFiles(event.target.files)} />
               <textarea
                 value={draft}
-                onChange={event => setDraft(event.target.value)}
+                disabled={makerSaving}
+                onChange={event => changeComposerDraft(event.target.value)}
                 onKeyDown={event => {
                   if (event.key === 'Enter' && !event.shiftKey) {
                     event.preventDefault();
@@ -2754,7 +2782,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
               {isGenerating ? (
                 <button type="button" onClick={() => abortCollaborationRequest(abortRef.current, '用户已停止生成')} className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-900 text-white active:scale-95" aria-label="停止生成"><Stop size={15} weight="fill" /></button>
               ) : (
-                <button type="button" onClick={() => void send()} disabled={(!draft.trim() && pendingAttachments.length === 0) || !!uploadStatus} className="collab-primary-action grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-900 text-white disabled:bg-slate-200 disabled:text-slate-400 active:scale-95" aria-label="发送"><PaperPlaneRight size={18} weight="fill" /></button>
+                <button type="button" onClick={() => void send()} disabled={makerSaving || (!draft.trim() && pendingAttachments.length === 0) || !!uploadStatus} className="collab-primary-action grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-900 text-white disabled:bg-slate-200 disabled:text-slate-400 active:scale-95" aria-label="发送"><PaperPlaneRight size={18} weight="fill" /></button>
               )}
             </div>
           </div>

@@ -1,3 +1,4 @@
+import {BUBBLE_SELECTOR_GROUPS,WHITEBOX_SELECTOR_GROUPS,PSYCHE_SELECTOR_GROUPS,WHITEBOX_DESIGN_RULES,WHITEBOX_OPTIONAL_CARD_REFERENCE,WHITEBOX_LAYOUT_REFERENCE,WHITEBOX_SCOPE_REGEX,WHITEBOX_SCOPE_HINT} from '../../utils/chatWhitebox';
 import type {
   BubbleStyle,
   ChatTheme,
@@ -52,75 +53,6 @@ const formatSelectorGroups = (groups: ReadonlyArray<{ label: string; selectors: 
   .map(group => `${group.label}：${group.selectors.join('、')}`)
   .join('\n');
 
-const BUBBLE_SELECTOR_GROUPS = [
-  {
-    label: '两侧气泡',
-    selectors: [
-      '.sully-bubble-user', '.sully-bubble-ai', '.sully-bubble-group-first',
-      '.sully-bubble-group-last', '.sully-bubble-tail-visible', '.sully-bubble-tail-hidden',
-    ],
-  },
-  {
-    label: '语音条',
-    selectors: [
-      '.sully-voice-bar', '.sully-voice-bar-shell', '.sully-voice-bar-button',
-      '.sully-voice-bar-toggle', '.sully-voice-bar-loading', '.sully-voice-bar-placeholder',
-      '.sully-voice-bar-transcript', '.sully-voice-bar-wave', '.sully-voice-bar-wave-segment',
-    ],
-  },
-] as const;
-
-const WHITEBOX_SELECTOR_GROUPS = [
-  {
-    label: '整屏与顶栏',
-    selectors: [
-      '.sully-chat-root', '.sully-chat-header', '.sully-chat-back', '.sully-chat-avatar',
-      '.sully-chat-info', '.sully-chat-name', '.sully-chat-status', '.sully-chat-buffs',
-      '.sully-chat-token', '.sully-chat-trigger',
-    ],
-  },
-  {
-    label: '输入与功能面板',
-    selectors: ['.sully-chat-inputbar', '.sully-chat-panel', '.sully-chat-panel button'],
-  },
-  {
-    label: '消息布局',
-    selectors: [
-      '.sully-chat-message', '.sully-chat-message-user', '.sully-chat-message-ai',
-      '.sully-chat-message-group-first', '.sully-chat-message-group-last', '.sully-chat-message-module',
-      '.sully-chat-message-content', '.sully-chat-message-sender', '.sully-chat-message-avatar-slot',
-      '.sully-chat-message-avatar', '.sully-chat-message-avatar-img', '.sully-chat-turn-avatar-slot',
-      '.sully-chat-turn-avatar', '.sully-chat-avatar-wrap', '.sully-chat-avatar-frame',
-    ],
-  },
-  {
-    label: '气泡、表情与语音',
-    selectors: [
-      ...BUBBLE_SELECTOR_GROUPS[0].selectors, '.sully-emoji-msg', ...BUBBLE_SELECTOR_GROUPS[1].selectors,
-    ],
-  },
-  {
-    label: '转账主卡、回执与详情',
-    selectors: ['card', 'receipt', 'header', 'icon', 'brand', 'watermark', 'amount', 'note', 'recipient', 'status', 'overlay', 'dialog', 'accept', 'return'].map(part => `.sully-chat-transfer-${part}`),
-  },
-  {
-    label: '正式文件附件',
-    selectors: [
-      '.sully-collaboration-file', '.sully-collaboration-file-icon', '.sully-collaboration-file-meta',
-      '.sully-collaboration-file-name', '.sully-collaboration-file-detail', '.sully-collaboration-file-action',
-    ],
-  },
-  {
-    label: '日程修改回执',
-    selectors: SCHEDULE_CUSTOM_CSS_SELECTOR_GROUPS[2].selectors,
-  },
-] as const;
-
-const PSYCHE_SELECTOR_GROUPS = [{
-  label: '心象卡全部结构',
-  selectors: ['.sully-psyche', '.sully-psyche-card', '.sully-psyche-title', '.sully-psyche-preview', '.sully-psyche-body'],
-}] as const;
-
 const cssDesignBrief = (surface: string, selectorGroups: ReadonlyArray<{ label: string; selectors: readonly string[] }>, extra: string): string => `
 你要交付的是一套完整、可直接安装的「${surface}」视觉系统，不是只换背景色。先从用户描述中提炼 3—5 个设计关键词，在自然回复里简短说明材质、层级、排版和动效判断；随后在作品 JSON 中给出完整 CSS。
 
@@ -146,8 +78,8 @@ const ALL_COLLABORATION_MAKERS: CollaborationMakerDefinition[] = [
   },
   {
     kind: 'whitebox-css', label: '白框制作', shortLabel: '白框', target: 'character', accent: '#ec4899',
-    description: '聊天顶栏、输入栏、消息布局与整屏背景。',
-    prompt: protocol('whitebox-css', '{ "css": ".sully-chat-root{...}" }', cssDesignBrief('聊天白框、消息布局与整屏外壳', WHITEBOX_SELECTOR_GROUPS, '转账与头像框选择器已经在真实聊天页面开放，可直接使用，不需要用户另行添加白名单。转账主卡/回执用 data-status 区分 pending/accepted/returned（回执无 pending）。头像框画在 .sully-chat-avatar-wrap::after，使用透明背景图、pointer-events:none，容器 overflow:visible；圆角或 clip-path 只作用于 .sully-chat-message-avatar-img。已有贴图 .sully-chat-avatar-frame 可隐藏避免叠加。顶栏头像是 img，不可用伪元素。顶栏已预留安全区；需要贴顶时使用 var(--safe-top)。若做“每轮头像在上方”，显示 .sully-chat-turn-avatar-slot、隐藏 .sully-chat-message-avatar，并同步调整组首留白和消息列边距。正式文件附件是独立工作交付物，不应伪装成普通文本气泡。')),
+    description: '聊天外壳与普通聊天、语音条、转账、心象；其他卡片按需设计。',
+    prompt: protocol('whitebox-css', '{ "css": ".sully-chat-root{...}" }', cssDesignBrief('聊天白框、消息布局与整屏外壳', WHITEBOX_SELECTOR_GROUPS, WHITEBOX_LAYOUT_REFERENCE + WHITEBOX_OPTIONAL_CARD_REFERENCE + '\n【实际输出要求：完整接口清单不等于必须逐项输出】\n' + WHITEBOX_DESIGN_RULES + '转账与头像框选择器已经在真实聊天页面开放，可直接使用，不需要用户另行添加白名单。转账主卡/回执用 data-status 区分 pending/accepted/returned（回执无 pending）。头像框画在 .sully-chat-avatar-wrap::after，使用透明背景图、pointer-events:none，容器 overflow:visible；圆角或 clip-path 只作用于 .sully-chat-message-avatar-img。已有贴图 .sully-chat-avatar-frame 可隐藏避免叠加。顶栏头像是 img，不可用伪元素。顶栏已预留安全区；需要贴顶时使用 var(--safe-top)。若做“每轮头像在上方”，显示 .sully-chat-turn-avatar-slot、隐藏 .sully-chat-message-avatar，并同步调整组首留白和消息列边距。')),
   },
   {
     kind: 'appearance-preset', label: '当前界面美化', shortLabel: '整套界面', target: 'global', accent: '#2563eb',
@@ -281,7 +213,6 @@ export const materializeInstallableArtifact = (artifact: CollaborationInstallabl
 };
 
 const bubbleSelector = /^(?:\.sully-bubble(?:\b|-)|\.sully-voice-bar(?:\b|-))/;
-const whiteboxSelector = /^(?:\.sully-chat(?:\b|-)|\.sully-bubble(?:\b|-)|\.sully-voice-bar(?:\b|-)|\.sully-emoji-msg\b|\.sully-collaboration-file(?:\b|-)|\.sully-schedule-change(?:\b|-))/;
 const psycheSelector = /^\.sully-psyche\b/;
 
 const cssOf = (artifact: CollaborationInstallableArtifact): string => (
@@ -308,7 +239,7 @@ export const validateInstallableArtifact = (artifact: CollaborationInstallableAr
     const css = typeof artifact.payload.customCss === 'string' ? artifact.payload.customCss : '';
     if (!artifact.payload.user || !artifact.payload.ai) errors.push('气泡主题缺少 user 或 ai 两侧样式。');
     if (css) errors.push(...validateScopedCss(css, bubbleSelector, '.sully-bubble-user / .sully-bubble-ai / .sully-voice-bar').errors);
-  } else if (artifact.kind === 'whitebox-css') requireCss(whiteboxSelector, '.sully-chat-* / .sully-bubble-* / .sully-schedule-change*');
+  } else if (artifact.kind === 'whitebox-css') requireCss(WHITEBOX_SCOPE_REGEX, WHITEBOX_SCOPE_HINT);
   else if (artifact.kind === 'journal-css') requireCss(JOURNAL_CSS_SCOPE_REGEX, JOURNAL_CSS_SCOPE_HINT);
   else if (artifact.kind === 'schedule-css') requireCss(SCHEDULE_CSS_SCOPE_REGEX, SCHEDULE_CSS_SCOPE_HINT);
   else if (artifact.kind === 'psyche-css') requireCss(psycheSelector, '.sully-psyche*');

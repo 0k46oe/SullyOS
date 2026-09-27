@@ -415,7 +415,7 @@ export const buildCollaborationModelMessages = (
   return [
     ...(cleanChatContextSnapshot.length > 0 ? cleanChatContextSnapshot : [{ role: 'system' as const, content: cleanContextSnapshot }]),
     ...(cleanChatContextSnapshot.length > 0 ? [{ role: 'system' as const, content: cleanContextSnapshot }] : []),
-    ...(makerPrompt ? [{ role: 'system' as const, content: makerPrompt }] : []),
+    ...(makerPrompt ? [{ role: 'system' as const, content: makerPrompt }] : [{ role: 'system' as const, content: '当前未选择专用制作类型。按用户本轮明确需求协作；不要仅因历史消息中选过某种制作类型，就额外生成该类作品。用户说明误触或取消时，遵从其最新要求。' }]),
     ...omitted,
     ...(turnContext.trim() ? [{ role: 'system' as const, content: turnContext.trim() }] : []),
     ...kept,

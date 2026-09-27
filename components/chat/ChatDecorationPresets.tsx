@@ -1,4 +1,10 @@
+import {readLibraryDecorations,saveLibraryDecoration,deleteLibraryDecoration,type LibraryDecoration} from '../../utils/decorationLibrary';
 import React,{useEffect,useRef,useState} from 'react';
+import BeautySharePanel from '../share/BeautySharePanel';
+import { useOS } from '../../context/OSContext';
+import { AppID } from '../../types';
+import { requestBeautyReceive } from '../../utils/beautyNavigation';
+import { rememberBeautySource, decorationSourceKey } from '../../utils/beautyUsage';
 import {FileOrImageImport} from '../share/FileOrImageImport';
 import {DB} from '../../utils/db';
 import {shareOrDownloadFile} from '../../utils/shareExport';
@@ -8,11 +14,12 @@ import type {ChatTheme} from '../../types';
 const STORE='chat_decoration_presets_v1';
 interface Props{onBusyChange:(busy:boolean)=>void;target:string;scope:'character'|'global';currentBubble:ChatTheme;exportCurrent:(name:string)=>Promise<DecorationPreset>;onApply:(preset:DecorationPreset,parts:DecorationPart[])=>Promise<void>}
 export default function ChatDecorationPresets({target,scope,currentBubble,exportCurrent,onApply,onBusyChange}:Props){
- const [name,setName]=useState('我的聊天装扮');const [saved,setSaved]=useState<DecorationPreset[]>([]);const [pending,setPending]=useState<DecorationImport|null>(null);const [parts,setParts]=useState<DecorationPart[]>([]);const [imageUse,setImageUse]=useState<'background'|'user'|'ai'>('background');const [busy,setBusy]=useState(false);const [error,setError]=useState('');const [notice,setNotice]=useState('');const saveReady=useRef(false);
- useEffect(()=>{let alive=true;DB.getAsset(STORE).then(raw=>{if(!alive)return;const list=raw?JSON.parse(raw):[];setSaved(Array.isArray(list)?list.map(validateDecoration):[]);saveReady.current=true;}).catch(()=>{if(alive)setError('预设列表读取失败，请重新打开后再保存。');});return()=>{alive=false;};},[]);
+ const { openApp } = useOS();
+ const [name,setName]=useState('我的聊天装扮');const [saved,setSaved]=useState<LibraryDecoration[]>([]);const [pending,setPending]=useState<DecorationImport|null>(null);const [parts,setParts]=useState<DecorationPart[]>([]);const [imageUse,setImageUse]=useState<'background'|'user'|'ai'>('background');const [busy,setBusy]=useState(false);const [error,setError]=useState('');const [notice,setNotice]=useState('');const saveReady=useRef(false);
+ useEffect(()=>{let alive=true;readLibraryDecorations().then(list=>{if(!alive)return;setSaved(list);saveReady.current=true;}).catch(()=>{if(alive)setError('预设列表读取失败，请重新打开后再保存。');});return()=>{alive=false;};},[]);
  const run=async(work:()=>Promise<void>)=>{setBusy(true);onBusyChange(true);setError('');setNotice('');try{await work();}catch(e){setError(e instanceof Error?e.message:'操作失败，请重试');}finally{setBusy(false);onBusyChange(false);}};
  const stage=(item:DecorationImport)=>{setPending(item);setError('');setNotice('');if(item.kind==='preset')setParts(Object.keys(item.preset.parts) as DecorationPart[]);else setImageUse('background');};
- const save=()=>run(async()=>{if(!saveReady.current)throw Error('预设列表尚未加载，请稍后再试');const preset=await exportCurrent(name.trim()||'我的聊天装扮');const next=[preset,...saved];await DB.saveAsset(STORE,JSON.stringify(next));setSaved(next);setNotice('整套装扮已存入我的预设。');});
+ const save=()=>run(async()=>{if(!saveReady.current)throw Error('预设列表尚未加载，请稍后再试');const preset=await exportCurrent(name.trim()||'我的聊天装扮');await saveLibraryDecoration(preset,{kind:'self'});setSaved(await readLibraryDecorations());setNotice('整套装扮已存入我的预设。');});
  const share=()=>run(async()=>{const preset=await exportCurrent(name.trim()||'我的聊天装扮');await shareOrDownloadFile({content:JSON.stringify(preset,null,2),fileName:safeShareFileName(preset.name)+'.json',mimeType:'application/json',card:{kind:'chat-decoration',title:preset.name}});setNotice('装扮文件已交给系统分享或下载。');});
  const apply=()=>run(async()=>{
   if(!pending)return;
@@ -25,6 +32,7 @@ export default function ChatDecorationPresets({target,scope,currentBubble,export
  return <div className="chat-decoration-presets">
   <h3>预设</h3><p className="chat-decoration-note">把布局、气泡、背景、声音和进阶样式存成一套，随时换上或导出分享。CSS、TXT 和图片也能从这里导入，再选择用途。</p><p className="chat-decoration-note">确认后才会应用到 <b>{target}</b>，没有勾选的部分保持原样。</p>
   <FileOrImageImport className="chat-decoration-import" disabled={busy} imageAccept="image/*" onChange={e=>{const file=e.target.files?.[0];e.target.value='';if(file)void run(async()=>stage(await readDecorationFile(file)));}}/>
+  <BeautySharePanel initialTab="submit" onOpenReceiver={() => { requestBeautyReceive(); openApp(AppID.Appearance); }} kind="chat-decoration" onBusyChange={onBusyChange} sources={[{id:'current',name:'当前整套装扮',read:()=>exportCurrent(name.trim()||'我的聊天装扮')},...saved.map((preset,index)=>({id:preset._libraryId,bindingId:preset._libraryId,kind:'chat-decoration' as const,name:preset.name,revision:preset,read:async()=>preset}))]} onReceive={async(data,share)=>{const preset=validateDecoration(data);await rememberBeautySource(await decorationSourceKey(preset),share);stage({kind:'preset',preset});}}/>
   {error&&<p role="alert" className="chat-decoration-error">{error}</p>}{notice&&<p role="status" className="chat-decoration-note">{notice}</p>}
   {pending&&<section className="chat-decoration-import-review">
    <h3>{pending.kind==='image'?'这张图片用在哪里？':pending.preset.name}</h3>
@@ -36,6 +44,6 @@ export default function ChatDecorationPresets({target,scope,currentBubble,export
    <div className="chat-decoration-preset-actions"><button disabled={busy||(pending.kind==='preset'&&!parts.length)} onClick={apply}>{busy?'处理中…':'确认应用'}</button><button disabled={busy} onClick={()=>setPending(null)}>取消</button></div>
   </section>}
   <section className="chat-decoration-preset-save"><h3>保存当前整套装扮</h3><label className="chat-decoration-field">预设名称<input value={name} maxLength={60} onChange={e=>setName(e.target.value)} aria-label="装扮预设名称"/></label><p className="chat-decoration-note">包含当前布局、气泡、背景、声音和 CSS。本地图片会打包进文件，外链素材仍需联网。</p><div className="chat-decoration-preset-actions"><button disabled={busy} onClick={save}>存为预设</button><button disabled={busy} onClick={share}>导出分享</button></div></section>
-  <section className="chat-decoration-preset-save"><h3>我的预设</h3>{saved.length?saved.map((preset,index)=><div key={index} className="chat-decoration-saved"><button disabled={busy} onClick={()=>stage({kind:'preset',preset})}>{preset.name}<small>查看并应用 →</small></button><button aria-label={`删除预设 ${preset.name}`} disabled={busy} onClick={()=>run(async()=>{const next=saved.filter((_,i)=>i!==index);await DB.saveAsset(STORE,JSON.stringify(next));setSaved(next);})}>删除</button></div>):<p className="chat-decoration-note">保存喜欢的搭配，下次可以整套换上。</p>}</section>
+  <section className="chat-decoration-preset-save"><h3>我的预设</h3>{saved.length?saved.map((preset,index)=><div key={index} className="chat-decoration-saved"><button disabled={busy} onClick={()=>stage({kind:'preset',preset})}>{preset.name}<small>查看并应用 →</small></button><button aria-label={`删除预设 ${preset.name}`} disabled={busy} onClick={()=>run(async()=>{await deleteLibraryDecoration(preset._libraryId);setSaved(await readLibraryDecorations());})}>删除</button></div>):<p className="chat-decoration-note">保存喜欢的搭配，下次可以整套换上。</p>}</section>
  </div>;
 }

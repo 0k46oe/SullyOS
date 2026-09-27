@@ -26,7 +26,7 @@ export async function createAnniversaryGiftArchive(): Promise<Blob> {
     `壁纸与头像框作者：${ANNIVERSARY_ARTIST}`,
     '',
     '内含两张壁纸与一枚透明 PNG 头像框，均为未经裁切、重绘或重新压缩的原图。',
-    '解压后，可在手机壁纸、聊天背景或气泡工坊的头像挂件设置中自行上传。',
+    '解压后，可在手机壁纸、聊天背景或聊天装扮 → 气泡制作器的头像挂件设置中自行上传。',
     '',
     '头像框位置参考（先把聊天头像设为圆形）：',
     `缩放 ${ANNIVERSARY_FRAME_STYLE.avatarDecorationScale} 倍；X ${ANNIVERSARY_FRAME_STYLE.avatarDecorationX}%；Y ${ANNIVERSARY_FRAME_STYLE.avatarDecorationY}%；旋转 0°。`,

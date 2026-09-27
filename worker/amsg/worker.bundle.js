@@ -3,7 +3,7 @@
 // worker/amsg/src/index.ts
 import { DurableObject } from "cloudflare:workers";
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.30_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2_e6f2312f5e9a7bcdb7f479ab757e7745/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
 var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
   "user_id",
   "uuid",
@@ -1215,7 +1215,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.30_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-VBDBORLR.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2_e6f2312f5e9a7bcdb7f479ab757e7745/node_modules/@rei-standard/amsg-server/dist/chunk-VBDBORLR.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -7629,7 +7629,7 @@ function createSingleUserCloudflareWorker(buildConfig, options = {}) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-09-25.3";
+var AMSG_BUNDLE_VERSION = "2026-09-27";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -9533,6 +9533,333 @@ var renderRealtimeWorldBlock = (input) => {
   return parts.join("\n");
 };
 
+// presets/holidays/countries.json
+var countries_default = [{ countryCode: "AD", name: "Andorra" }, { countryCode: "AG", name: "Antigua and Barbuda" }, { countryCode: "AI", name: "Anguilla" }, { countryCode: "AL", name: "Albania" }, { countryCode: "AM", name: "Armenia" }, { countryCode: "AO", name: "Angola" }, { countryCode: "AR", name: "Argentina" }, { countryCode: "AT", name: "Austria" }, { countryCode: "AU", name: "Australia" }, { countryCode: "AW", name: "Aruba" }, { countryCode: "AX", name: "\xC5land Islands" }, { countryCode: "BA", name: "Bosnia and Herzegovina" }, { countryCode: "BB", name: "Barbados" }, { countryCode: "BD", name: "Bangladesh" }, { countryCode: "BE", name: "Belgium" }, { countryCode: "BF", name: "Burkina Faso" }, { countryCode: "BG", name: "Bulgaria" }, { countryCode: "BH", name: "Bahrain" }, { countryCode: "BI", name: "Burundi" }, { countryCode: "BJ", name: "Benin" }, { countryCode: "BL", name: "Saint Barth\xE9lemy" }, { countryCode: "BM", name: "Bermuda" }, { countryCode: "BO", name: "Bolivia" }, { countryCode: "BQ", name: "Caribbean Netherlands" }, { countryCode: "BR", name: "Brazil" }, { countryCode: "BS", name: "Bahamas" }, { countryCode: "BW", name: "Botswana" }, { countryCode: "BY", name: "Belarus" }, { countryCode: "BZ", name: "Belize" }, { countryCode: "CA", name: "Canada" }, { countryCode: "CC", name: "Cocos (Keeling) Islands" }, { countryCode: "CD", name: "DR Congo" }, { countryCode: "CF", name: "Central African Republic" }, { countryCode: "CG", name: "Congo" }, { countryCode: "CH", name: "Switzerland" }, { countryCode: "CI", name: "Ivory Coast" }, { countryCode: "CK", name: "Cook Islands" }, { countryCode: "CL", name: "Chile" }, { countryCode: "CM", name: "Cameroon" }, { countryCode: "CN", name: "China" }, { countryCode: "CO", name: "Colombia" }, { countryCode: "CR", name: "Costa Rica" }, { countryCode: "CU", name: "Cuba" }, { countryCode: "CV", name: "Cape Verde" }, { countryCode: "CW", name: "Cura\xE7ao" }, { countryCode: "CX", name: "Christmas Island" }, { countryCode: "CY", name: "Cyprus" }, { countryCode: "CZ", name: "Czechia" }, { countryCode: "DE", name: "Germany" }, { countryCode: "DJ", name: "Djibouti" }, { countryCode: "DK", name: "Denmark" }, { countryCode: "DM", name: "Dominica" }, { countryCode: "DO", name: "Dominican Republic" }, { countryCode: "DZ", name: "Algeria" }, { countryCode: "EC", name: "Ecuador" }, { countryCode: "EE", name: "Estonia" }, { countryCode: "EG", name: "Egypt" }, { countryCode: "ER", name: "Eritrea" }, { countryCode: "ES", name: "Spain" }, { countryCode: "ET", name: "Ethiopia" }, { countryCode: "FI", name: "Finland" }, { countryCode: "FK", name: "Falkland Islands" }, { countryCode: "FM", name: "Micronesia" }, { countryCode: "FO", name: "Faroe Islands" }, { countryCode: "FR", name: "France" }, { countryCode: "GA", name: "Gabon" }, { countryCode: "GB", name: "United Kingdom" }, { countryCode: "GD", name: "Grenada" }, { countryCode: "GE", name: "Georgia" }, { countryCode: "GF", name: "French Guiana" }, { countryCode: "GG", name: "Guernsey" }, { countryCode: "GH", name: "Ghana" }, { countryCode: "GI", name: "Gibraltar" }, { countryCode: "GL", name: "Greenland" }, { countryCode: "GM", name: "Gambia" }, { countryCode: "GN", name: "Guinea" }, { countryCode: "GP", name: "Guadeloupe" }, { countryCode: "GQ", name: "Equatorial Guinea" }, { countryCode: "GR", name: "Greece" }, { countryCode: "GT", name: "Guatemala" }, { countryCode: "GW", name: "Guinea-Bissau" }, { countryCode: "GY", name: "Guyana" }, { countryCode: "HK", name: "Hong Kong" }, { countryCode: "HN", name: "Honduras" }, { countryCode: "HR", name: "Croatia" }, { countryCode: "HT", name: "Haiti" }, { countryCode: "HU", name: "Hungary" }, { countryCode: "ID", name: "Indonesia" }, { countryCode: "IE", name: "Ireland" }, { countryCode: "IM", name: "Isle of Man" }, { countryCode: "IQ", name: "Iraq" }, { countryCode: "IS", name: "Iceland" }, { countryCode: "IT", name: "Italy" }, { countryCode: "JE", name: "Jersey" }, { countryCode: "JM", name: "Jamaica" }, { countryCode: "JP", name: "Japan" }, { countryCode: "KE", name: "Kenya" }, { countryCode: "KH", name: "Cambodia" }, { countryCode: "KI", name: "Kiribati" }, { countryCode: "KM", name: "Comoros" }, { countryCode: "KN", name: "Saint Kitts and Nevis" }, { countryCode: "KR", name: "South Korea" }, { countryCode: "KY", name: "Cayman Islands" }, { countryCode: "KZ", name: "Kazakhstan" }, { countryCode: "LC", name: "Saint Lucia" }, { countryCode: "LI", name: "Liechtenstein" }, { countryCode: "LR", name: "Liberia" }, { countryCode: "LS", name: "Lesotho" }, { countryCode: "LT", name: "Lithuania" }, { countryCode: "LU", name: "Luxembourg" }, { countryCode: "LV", name: "Latvia" }, { countryCode: "LY", name: "Libya" }, { countryCode: "MA", name: "Morocco" }, { countryCode: "MC", name: "Monaco" }, { countryCode: "MD", name: "Moldova" }, { countryCode: "ME", name: "Montenegro" }, { countryCode: "MF", name: "Saint Martin" }, { countryCode: "MG", name: "Madagascar" }, { countryCode: "MH", name: "Marshall Islands" }, { countryCode: "MK", name: "North Macedonia" }, { countryCode: "ML", name: "Mali" }, { countryCode: "MN", name: "Mongolia" }, { countryCode: "MP", name: "Northern Mariana Islands" }, { countryCode: "MQ", name: "Martinique" }, { countryCode: "MR", name: "Mauritania" }, { countryCode: "MS", name: "Montserrat" }, { countryCode: "MT", name: "Malta" }, { countryCode: "MW", name: "Malawi" }, { countryCode: "MX", name: "Mexico" }, { countryCode: "MZ", name: "Mozambique" }, { countryCode: "NA", name: "Namibia" }, { countryCode: "NC", name: "New Caledonia" }, { countryCode: "NE", name: "Niger" }, { countryCode: "NF", name: "Norfolk Island" }, { countryCode: "NG", name: "Nigeria" }, { countryCode: "NI", name: "Nicaragua" }, { countryCode: "NL", name: "Netherlands" }, { countryCode: "NO", name: "Norway" }, { countryCode: "NR", name: "Nauru" }, { countryCode: "NU", name: "Niue" }, { countryCode: "NZ", name: "New Zealand" }, { countryCode: "PA", name: "Panama" }, { countryCode: "PE", name: "Peru" }, { countryCode: "PF", name: "French Polynesia" }, { countryCode: "PG", name: "Papua New Guinea" }, { countryCode: "PH", name: "Philippines" }, { countryCode: "PL", name: "Poland" }, { countryCode: "PM", name: "Saint Pierre and Miquelon" }, { countryCode: "PN", name: "Pitcairn Islands" }, { countryCode: "PR", name: "Puerto Rico" }, { countryCode: "PT", name: "Portugal" }, { countryCode: "PW", name: "Palau" }, { countryCode: "PY", name: "Paraguay" }, { countryCode: "RO", name: "Romania" }, { countryCode: "RS", name: "Serbia" }, { countryCode: "RU", name: "Russia" }, { countryCode: "RW", name: "Rwanda" }, { countryCode: "SB", name: "Solomon Islands" }, { countryCode: "SC", name: "Seychelles" }, { countryCode: "SD", name: "Sudan" }, { countryCode: "SE", name: "Sweden" }, { countryCode: "SG", name: "Singapore" }, { countryCode: "SH", name: "Saint Helena, Ascension and Tristan da Cunha" }, { countryCode: "SI", name: "Slovenia" }, { countryCode: "SJ", name: "Svalbard and Jan Mayen" }, { countryCode: "SK", name: "Slovakia" }, { countryCode: "SL", name: "Sierra Leone" }, { countryCode: "SM", name: "San Marino" }, { countryCode: "SN", name: "Senegal" }, { countryCode: "SO", name: "Somalia" }, { countryCode: "SR", name: "Suriname" }, { countryCode: "SS", name: "South Sudan" }, { countryCode: "ST", name: "S\xE3o Tom\xE9 and Pr\xEDncipe" }, { countryCode: "SV", name: "El Salvador" }, { countryCode: "SX", name: "Sint Maarten" }, { countryCode: "SY", name: "Syria" }, { countryCode: "SZ", name: "Eswatini" }, { countryCode: "TC", name: "Turks and Caicos Islands" }, { countryCode: "TD", name: "Chad" }, { countryCode: "TG", name: "Togo" }, { countryCode: "TK", name: "Tokelau" }, { countryCode: "TN", name: "Tunisia" }, { countryCode: "TO", name: "Tonga" }, { countryCode: "TR", name: "T\xFCrkiye" }, { countryCode: "TT", name: "Trinidad and Tobago" }, { countryCode: "TV", name: "Tuvalu" }, { countryCode: "TZ", name: "Tanzania" }, { countryCode: "UA", name: "Ukraine" }, { countryCode: "UG", name: "Uganda" }, { countryCode: "US", name: "United States" }, { countryCode: "UY", name: "Uruguay" }, { countryCode: "VA", name: "Vatican City" }, { countryCode: "VC", name: "Saint Vincent and the Grenadines" }, { countryCode: "VE", name: "Venezuela" }, { countryCode: "VG", name: "British Virgin Islands" }, { countryCode: "VI", name: "United States Virgin Islands" }, { countryCode: "VN", name: "Vietnam" }, { countryCode: "VU", name: "Vanuatu" }, { countryCode: "WF", name: "Wallis and Futuna" }, { countryCode: "WS", name: "Samoa" }, { countryCode: "YE", name: "Yemen" }, { countryCode: "ZA", name: "South Africa" }, { countryCode: "ZM", name: "Zambia" }, { countryCode: "ZW", name: "Zimbabwe" }];
+
+// presets/holidays/cn-2026.json
+var cn_2026_default = {
+  $schema: "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/schema.json",
+  $id: "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/2026.json",
+  year: 2026,
+  papers: [
+    "https://www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm"
+  ],
+  days: [
+    {
+      name: "\u5143\u65E6",
+      date: "2026-01-01",
+      isOffDay: true
+    },
+    {
+      name: "\u5143\u65E6",
+      date: "2026-01-02",
+      isOffDay: true
+    },
+    {
+      name: "\u5143\u65E6",
+      date: "2026-01-03",
+      isOffDay: true
+    },
+    {
+      name: "\u5143\u65E6",
+      date: "2026-01-04",
+      isOffDay: false
+    },
+    {
+      name: "\u6625\u8282",
+      date: "2026-02-14",
+      isOffDay: false
+    },
+    {
+      name: "\u6625\u8282",
+      date: "2026-02-15",
+      isOffDay: true
+    },
+    {
+      name: "\u6625\u8282",
+      date: "2026-02-16",
+      isOffDay: true
+    },
+    {
+      name: "\u6625\u8282",
+      date: "2026-02-17",
+      isOffDay: true
+    },
+    {
+      name: "\u6625\u8282",
+      date: "2026-02-18",
+      isOffDay: true
+    },
+    {
+      name: "\u6625\u8282",
+      date: "2026-02-19",
+      isOffDay: true
+    },
+    {
+      name: "\u6625\u8282",
+      date: "2026-02-20",
+      isOffDay: true
+    },
+    {
+      name: "\u6625\u8282",
+      date: "2026-02-21",
+      isOffDay: true
+    },
+    {
+      name: "\u6625\u8282",
+      date: "2026-02-22",
+      isOffDay: true
+    },
+    {
+      name: "\u6625\u8282",
+      date: "2026-02-23",
+      isOffDay: true
+    },
+    {
+      name: "\u6625\u8282",
+      date: "2026-02-28",
+      isOffDay: false
+    },
+    {
+      name: "\u6E05\u660E\u8282",
+      date: "2026-04-04",
+      isOffDay: true
+    },
+    {
+      name: "\u6E05\u660E\u8282",
+      date: "2026-04-05",
+      isOffDay: true
+    },
+    {
+      name: "\u6E05\u660E\u8282",
+      date: "2026-04-06",
+      isOffDay: true
+    },
+    {
+      name: "\u52B3\u52A8\u8282",
+      date: "2026-05-01",
+      isOffDay: true
+    },
+    {
+      name: "\u52B3\u52A8\u8282",
+      date: "2026-05-02",
+      isOffDay: true
+    },
+    {
+      name: "\u52B3\u52A8\u8282",
+      date: "2026-05-03",
+      isOffDay: true
+    },
+    {
+      name: "\u52B3\u52A8\u8282",
+      date: "2026-05-04",
+      isOffDay: true
+    },
+    {
+      name: "\u52B3\u52A8\u8282",
+      date: "2026-05-05",
+      isOffDay: true
+    },
+    {
+      name: "\u52B3\u52A8\u8282",
+      date: "2026-05-09",
+      isOffDay: false
+    },
+    {
+      name: "\u7AEF\u5348\u8282",
+      date: "2026-06-19",
+      isOffDay: true
+    },
+    {
+      name: "\u7AEF\u5348\u8282",
+      date: "2026-06-20",
+      isOffDay: true
+    },
+    {
+      name: "\u7AEF\u5348\u8282",
+      date: "2026-06-21",
+      isOffDay: true
+    },
+    {
+      name: "\u56FD\u5E86\u8282",
+      date: "2026-09-20",
+      isOffDay: false
+    },
+    {
+      name: "\u4E2D\u79CB\u8282",
+      date: "2026-09-25",
+      isOffDay: true
+    },
+    {
+      name: "\u4E2D\u79CB\u8282",
+      date: "2026-09-26",
+      isOffDay: true
+    },
+    {
+      name: "\u4E2D\u79CB\u8282",
+      date: "2026-09-27",
+      isOffDay: true
+    },
+    {
+      name: "\u56FD\u5E86\u8282",
+      date: "2026-10-01",
+      isOffDay: true
+    },
+    {
+      name: "\u56FD\u5E86\u8282",
+      date: "2026-10-02",
+      isOffDay: true
+    },
+    {
+      name: "\u56FD\u5E86\u8282",
+      date: "2026-10-03",
+      isOffDay: true
+    },
+    {
+      name: "\u56FD\u5E86\u8282",
+      date: "2026-10-04",
+      isOffDay: true
+    },
+    {
+      name: "\u56FD\u5E86\u8282",
+      date: "2026-10-05",
+      isOffDay: true
+    },
+    {
+      name: "\u56FD\u5E86\u8282",
+      date: "2026-10-06",
+      isOffDay: true
+    },
+    {
+      name: "\u56FD\u5E86\u8282",
+      date: "2026-10-07",
+      isOffDay: true
+    },
+    {
+      name: "\u56FD\u5E86\u8282",
+      date: "2026-10-10",
+      isOffDay: false
+    }
+  ]
+};
+
+// utils/userHolidays.ts
+var HOLIDAY_CACHE_PREFIX = "user_holidays_v1_";
+var HOLIDAY_COUNTRIES = countries_default;
+function holidayCountryName(code) {
+  try {
+    return new Intl.DisplayNames(["zh-CN"], { type: "region" }).of(code) || code;
+  } catch {
+    return HOLIDAY_COUNTRIES.find((c) => c.countryCode === code)?.name || code;
+  }
+}
+var memory = /* @__PURE__ */ new Map();
+var inFlight = /* @__PURE__ */ new Map();
+var retryAfter = /* @__PURE__ */ new Map();
+var DAY = 864e5;
+var cleanName = (name) => typeof name === "string" ? name.replace(/[\r\n\x00-\x1f]/g, " ").slice(0, 80).trim() : "";
+var validDate = (date) => typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date);
+function parseHolidayCalendar(country, year, raw, now) {
+  if (country === "CN") {
+    if (raw?.year !== year || !Array.isArray(raw.papers) || !raw.papers.length || !Array.isArray(raw.days)) return null;
+    if (!raw.days.every((d) => validDate(d?.date) && cleanName(d?.name) && typeof d?.isOffDay === "boolean")) return null;
+    return { country, year, fetchedAt: now, days: raw.days.map((d) => ({ date: d.date, name: cleanName(d.name), off: d.isOffDay })) };
+  }
+  if (!Array.isArray(raw) || !raw.every((d) => validDate(d?.date) && d.countryCode === country && Array.isArray(d.types))) return null;
+  return { country, year, fetchedAt: now, days: raw.filter((d) => d.types.includes("Public") && cleanName(d.localName || d.name) && (d.global === true || Array.isArray(d.counties))).map((d) => ({
+    date: d.date,
+    name: cleanName(d.localName || d.name),
+    off: true,
+    ...d.global === true ? {} : { regions: d.counties.filter((v) => typeof v === "string") }
+  })) };
+}
+function validCached(raw, country, year) {
+  return raw?.country === country && raw.year === year && Number.isFinite(raw.fetchedAt) && Array.isArray(raw.days) && raw.days.every((d) => validDate(d?.date) && typeof d.name === "string" && d.name === cleanName(d.name) && typeof d.off === "boolean" && (d.regions === void 0 || Array.isArray(d.regions) && d.regions.every((r) => typeof r === "string")));
+}
+function insertUserHolidayInProfile(prompt, reminder) {
+  if (!reminder) return prompt;
+  const heading = "### \u4E92\u52A8\u5BF9\u8C61 (User)\n";
+  return prompt.includes(heading) ? prompt.replace(heading, `${heading}- ${reminder}
+`) : `${prompt}
+
+### \u4E92\u52A8\u5BF9\u8C61\u4FE1\u606F\u8865\u5145
+${reminder}
+`;
+}
+async function loadHolidayCalendar(country, year, cache, now = Date.now()) {
+  if (!HOLIDAY_COUNTRIES.some((c) => c.countryCode === country) || !Number.isInteger(year) || year < 2e3 || year > 2200) return null;
+  if (country === "CN" && year === 2026) return parseHolidayCalendar(country, year, cn_2026_default, now);
+  const key = `${HOLIDAY_CACHE_PREFIX}${country}_${year}`;
+  let saved = memory.get(key);
+  if (!saved && cache) {
+    try {
+      const raw = await cache.read(key);
+      if (validCached(raw, country, year)) saved = raw;
+    } catch {
+    }
+  }
+  if (saved && now >= saved.fetchedAt && now - saved.fetchedAt < DAY) return saved;
+  if ((retryAfter.get(key) || 0) > now) return saved || null;
+  const existing = inFlight.get(key);
+  if (existing) return existing;
+  const job = (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3e3);
+    try {
+      const url = country === "CN" ? `https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/${year}.json` : `https://date.nager.at/api/v3/PublicHolidays/${year}/${country}`;
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) throw new Error("holiday unavailable");
+      const fresh = parseHolidayCalendar(country, year, await res.json(), now);
+      if (!fresh) throw new Error("holiday unconfirmed");
+      memory.set(key, fresh);
+      try {
+        await cache?.write(key, fresh);
+      } catch {
+      }
+      return fresh;
+    } catch {
+      retryAfter.set(key, now + 36e5);
+      return saved || null;
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+  inFlight.set(key, job);
+  try {
+    return await job;
+  } finally {
+    inFlight.delete(key);
+  }
+}
+function renderUserHoliday(config, date, days, userName) {
+  const matches = days.filter((d) => d.date === date && (!d.regions || !!config.subdivisionCode && d.regions.includes(config.subdivisionCode)));
+  if (!matches.length) return "";
+  const working = matches.some((d) => !d.off);
+  const names = [...new Set(matches.filter((d) => d.off === !working).map((d) => cleanName(d.name)))].join("\u3001");
+  const region = config.subdivisionCode ? `\uFF08${config.subdivisionCode}\uFF09` : "";
+  const person = cleanName(userName) || "\u7528\u6237";
+  return `${person}\u6240\u5728\u5730${holidayCountryName(config.countryCode)}${region} ${date} \u4E3A${names}${working ? "\u8C03\u4F11\u8865\u73ED\u65E5" : "\u516C\u5171\u5047\u671F"}\uFF0C\u5B9E\u9645\u4F11\u606F\u4E0E\u5426\u4EE5${person}\u81EA\u5DF1\u7684\u65E5\u7A0B\u548C\u8BF4\u660E\u4E3A\u51C6\u3002`;
+}
+async function getUserHolidayReminder(config, cache, now = Date.now(), userName) {
+  if (!config?.enabled || !config.countryCode) return "";
+  const local = nowInTimeZone(config.timeZone, new Date(now));
+  const year = local.getFullYear();
+  const calendars = await Promise.all([
+    loadHolidayCalendar(config.countryCode, year, cache, now),
+    // CN next year's New Year announcement can change December's schedule.
+    config.countryCode === "CN" && local.getMonth() === 11 ? loadHolidayCalendar("CN", year + 1, cache, now) : null
+  ]);
+  const days = /* @__PURE__ */ new Map();
+  for (const calendar of calendars) {
+    if (!calendar) continue;
+    const grouped = /* @__PURE__ */ new Map();
+    for (const day of calendar.days) grouped.set(day.date, [...grouped.get(day.date) || [], day]);
+    for (const [date2, values] of grouped) days.set(date2, values);
+  }
+  const date = getLocalDateKey(local);
+  return renderUserHoliday(config, date, days.get(date) || [], userName);
+}
+
 // worker/amsg/src/realtimeWorld.ts
 var AMSG_WEATHER_SNAPSHOT_KEY = "world_weather";
 var AMSG_HOTNEWS_SNAPSHOT_KEY = "world_hotnews";
@@ -9621,6 +9948,22 @@ var loadHotNews = async (cfg, nowMs, globalRows, pendingWrites) => {
     return snap.items;
   }
   return [];
+};
+var buildUserHolidayBlock = async (args) => {
+  const { toolConfig: cfg, nowMs, globalRows } = args;
+  if (!args.timeAwarenessEnabled || !cfg.userHolidays?.timeZone) return "";
+  return getUserHolidayReminder(cfg.userHolidays, {
+    async read(key) {
+      try {
+        return JSON.parse(globalRows.find((row) => row.key === key)?.value || "null");
+      } catch {
+        return null;
+      }
+    },
+    async write(key, data) {
+      await args.writeState?.(args.globalNamespace, [{ key, value: JSON.stringify(data) }]);
+    }
+  }, nowMs, args.userName);
 };
 var buildRealtimeWorldBlock = async (args) => {
   const { toolConfig: cfg, nowMs, globalRows } = args;
@@ -15403,15 +15746,20 @@ var amsgHooks = {
     }) : "";
     const taskListBlock = baseTaskListBlock && canManageTasks ? `${baseTaskListBlock}
 \uFF08\u6E05\u5355\u91CC\u7684\u4EFB\u52A1\u5F52\u4F60\u7BA1\uFF1A\u60C5\u51B5\u53D8\u4E86\u4E0D\u8BE5\u54CD\u7684\u53EF\u4EE5\u7528 cancel_active_message \u53D6\u6D88\uFF0C\u53EA\u662F\u8981\u6362\u65F6\u95F4\u7684\u7528 renew_active_message \u6539\u671F\uFF0Ctask_id \u5C31\u662F\u6E05\u5355\u91CC\u7684\u77ED id\u3002\uFF09` : baseTaskListBlock;
-    const realtimeWorldBlock = await buildRealtimeWorldBlock({
+    const worldArgs = {
       toolConfig,
+      userName: pack.targetName,
       timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
       tzId: pack.tzId,
       nowMs: ctx.now.getTime(),
       globalRows,
       globalNamespace: AMSG_GLOBAL_NAMESPACE,
       writeState: ctx.writeState
-    });
+    };
+    const [realtimeWorldBlock, userHoliday] = await Promise.all([
+      buildRealtimeWorldBlock(worldArgs),
+      buildUserHolidayBlock(worldArgs)
+    ]);
     const mcpBlock = mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? "native" : "text" }) : "";
     const limitsBrief = canSelfSchedule ? buildLimitsBrief({
       limits,
@@ -15462,6 +15810,12 @@ var amsgHooks = {
         ...pack.chat.messages.map((m) => ({ role: m.role, content: m.content })),
         ...timelyBlock ? [{ role: "system", content: timelyBlock }] : []
       ];
+      if (userHoliday) {
+        const profileMessage = instantMessages.find((m) => m.role === "system" && typeof m.content === "string" && m.content.includes("### \u4E92\u52A8\u5BF9\u8C61 (User)\n"));
+        if (profileMessage) profileMessage.content = insertUserHolidayInProfile(profileMessage.content, userHoliday);
+        else instantMessages.push({ role: "system", content: `### \u4E92\u52A8\u5BF9\u8C61\u4FE1\u606F\u8865\u5145
+${userHoliday}` });
+      }
       if (emotionEvalSpec) {
         const storedEvalRaw = clientTaskId ? charRows.find((r) => r.key === amsgEmotionUpdateKey(clientTaskId))?.value : void 0;
         stash.emotionEvalPromise = storedEvalRaw ? Promise.resolve({ raw: storedEvalRaw, error: null }) : (async () => {
@@ -15489,7 +15843,7 @@ var amsgHooks = {
         totalTimeoutMs: INSTANT_TOTAL_TIMEOUT_MS
       };
     }
-    const prompt = renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, {
+    const prompt = insertUserHolidayInProfile(renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, {
       maxUnansweredSends,
       selfLog,
       taskListBlock,
@@ -15497,7 +15851,7 @@ var amsgHooks = {
       // 「此刻在做什么」里的钟点跟今日节日同一个开关：关掉时间感知的角色不该从日程块
       // 读到「23:00」——那正是这个开关要挡的东西。日程内容本身照给。
       includeClock: toolPack.timeAwarenessEnabled
-    }) + mcpBlock + scheduleBlock;
+    }), userHoliday) + mcpBlock + scheduleBlock;
     return {
       messages: [{ role: "user", content: prompt }],
       ...common

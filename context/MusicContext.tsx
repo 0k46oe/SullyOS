@@ -379,6 +379,7 @@ interface MusicContextType {
 }
 
 const MusicContext = createContext<MusicContextType | undefined>(undefined);
+export const MusicPreviewProvider = MusicContext.Provider;
 
 /* ───────────── Provider ───────────── */
 export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {

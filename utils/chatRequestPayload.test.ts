@@ -37,6 +37,22 @@ const baseInput = (): BuildChatPayloadInput => ({
 const joinMessages = (messages: Array<{ content: any }>): string =>
     messages.map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
 
+it('本地仅节假日感知可独立注入一句，云端生成不烤进本地提醒', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date(2026, 8, 27, 12));
+    const input = baseInput();
+    input.realtimeConfig = { ...realtimeConfig, weatherEnabled: false, newsEnabled: false, userHolidays: { enabled: true, countryCode: 'CN' } };
+    const reminder = '小明所在地中国 2026-09-27 为中秋节公共假期，实际休息与否以小明自己的日程和说明为准。';
+    vi.spyOn(RealtimeContextManager, 'getUserHoliday').mockResolvedValue(reminder);
+    const local = await buildChatRequestPayload(input);
+    expect(joinMessages(local.fullMessages)).toContain(reminder);
+    expect(RealtimeContextManager.getUserHoliday).toHaveBeenCalledWith(input.realtimeConfig, '小明');
+    const disabled = await buildChatRequestPayload({ ...input, char: { ...input.char, timeAwarenessEnabled: false } });
+    expect(joinMessages(disabled.fullMessages)).not.toContain(reminder);
+    const cloud = await buildChatRequestPayload({ ...input, timelyByWorker: true });
+    expect(joinMessages(cloud.fullMessages)).not.toContain(reminder);
+    vi.useRealTimers();
+});
+
 it('keeps this request history when the archive waterline advances during async prompt construction', async () => {
     const input = baseInput();
     input.char = { ...input.char, autoArchiveEnabled: true, contextRangeMode: 'adaptive' };

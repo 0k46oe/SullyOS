@@ -1,4 +1,7 @@
+import PsycheAppearanceEditor from './PsycheAppearanceEditor';
+import {resolvePsycheAppearance} from '../../utils/psycheAppearance';
 import React, {useState} from 'react';
+import { startBeautyUsage, decorationSourceKey } from '../../utils/beautyUsage';
 import {createPortal} from 'react-dom';
 import type {CharacterProfile, ChatTheme, OSTheme} from '../../types';
 import ChatLayoutSettings from './ChatLayoutSettings';
@@ -11,8 +14,8 @@ import ChatDecorationPresets from './ChatDecorationPresets';
 import {exportDecoration,decorationPatches,resolveDecorationTheme,decorationCssPatch} from '../../utils/chatDecoration';
 import {useBlobRefUrl,putImageBlob} from '../../utils/blobRef';
 
-export type DecorationTab = 'layout'|'bubbles'|'background'|'sound'|'css'|'presets';
-const tabs: {id:DecorationTab;name:string}[] = [{id:'layout',name:'布局'},{id:'bubbles',name:'气泡'},{id:'background',name:'背景'},{id:'sound',name:'声音'},{id:'css',name:'进阶'},{id:'presets',name:'预设'}];
+export type DecorationTab = 'library'|'layout'|'bubbles'|'background'|'sound'|'css'|'presets'|'psyche';
+const tabs: {id:DecorationTab;name:string}[] = [{id:'layout',name:'布局'},{id:'bubbles',name:'气泡'},{id:'background',name:'背景'},{id:'psyche',name:'心象'},{id:'sound',name:'声音'},{id:'css',name:'白框'},{id:'presets',name:'预设'}];
 interface Props {
  character: CharacterProfile; theme: OSTheme; themes: ChatTheme[];
  updateCharacter: (patch:Partial<CharacterProfile>)=>void|Promise<void>;
@@ -60,18 +63,18 @@ export default function ChatDecorationPanel({character:char,theme,themes,updateC
     <p className="chat-decoration-summary">{global?'全局修改会影响未单独定制的聊天。':`布局${customized?'已单独定制':'跟随全局'} · 气泡 ${activeBubble?.name||'默认'}`}</p>
     <nav className="chat-decoration-tabs" aria-label="装扮分类">{tabs.map(item=><button key={item.id} type="button" aria-pressed={tab===item.id} disabled={presetBusy} onClick={()=>switchTab(item.id)}>{item.name}</button>)}</nav>
     <div className="chat-decoration-body" key={tab}>
-     {tab==='presets'&&<ChatDecorationPresets onBusyChange={setPresetBusy} target={global?'全局默认':`${char.name}专属`} scope={scope} currentBubble={activeBubble} exportCurrent={name=>exportDecoration(name,theme,global?undefined:char,activeBubble)} onApply={async(preset,parts)=>{const changes=await decorationPatches(preset,parts,scope,char,theme);if(changes.bubble)await onSaveBubble(changes.bubble);if(global)await updateTheme(changes.theme);else await updateCharacter(changes.character);}}/>}
+     {tab==='presets'&&<ChatDecorationPresets onBusyChange={setPresetBusy} target={global?'全局默认':`${char.name}专属`} scope={scope} currentBubble={activeBubble} exportCurrent={name=>exportDecoration(name,theme,global?undefined:char,activeBubble)} onApply={async(preset,parts)=>{const changes=await decorationPatches(preset,parts,scope,char,theme);if(changes.bubble)await onSaveBubble(changes.bubble);if(global)await updateTheme(changes.theme);else await updateCharacter(changes.character);await startBeautyUsage(await decorationSourceKey(preset),global?'chat:global':'chat:'+char.id);}}/>}
      {tab==='layout'&&<>
       <h3>界面与头像</h3>
       {!global&&<label className="chat-decoration-toggle"><span>为 {char.name} 单独调整布局<small>关闭后跟随全局，已调好的内容会保留。</small></span><input type="checkbox" checked={customized} onChange={()=>updateCharacter({chatFineTune:{...override,enabled:!customized}})}/></label>}
       {(global||customized)?<ChatLayoutSettings theme={effective} updateTheme={patch=>{if(global){void updateTheme(patch);return;}const fine=Object.fromEntries(Object.entries(patch).filter(([key])=>(CHAT_FINE_TUNE_KEYS as readonly string[]).includes(key)));void updateCharacter({chatAppearance:{...char.chatAppearance,...patch},chatFineTune:{...override,...fine,enabled:true}});}}/>:<p className="chat-decoration-note">想一起调整所有聊天，可以在上方切换到「全局默认」。</p>}
-      <p className="chat-decoration-note">{char.chromeCustomCss||theme.chatChromeCustomCss?'当前有进阶 CSS，可能覆盖布局和气泡的部分效果。可在「进阶」查看。':'布局调整会实时显示在聊天中。'}</p>
+      <p className="chat-decoration-note">{char.chromeCustomCss||theme.chatChromeCustomCss?'当前有进阶 CSS，可能覆盖布局和气泡的部分效果。可在「白框」查看。':'布局调整会实时显示在聊天中。'}</p>
      </>}
      {tab==='bubbles'&&<>
       <h3>气泡主题</h3>
       {!global&&<button className="chat-decoration-link" onClick={()=>updateCharacter({bubbleStyle:undefined})}>跟随全局气泡</button>}
       {<div className="chat-decoration-bubbles">{themes.map(item=><button key={item.id} type="button" aria-pressed={activeBubble?.id===item.id} onClick={()=>global?updateTheme({chatDefaultBubbleStyle:item.id}):updateCharacter({bubbleStyle:item.id})}><span className="chat-decoration-bubble-sample" style={{background:item.user.backgroundColor,color:item.user.textColor,borderRadius:Math.min(item.user.borderRadius,16)}}>你好呀</span><span>{item.name}</span></button>)}</div>}
-      <button className="chat-decoration-link" onClick={onOpenWorkshop}>打开气泡工坊 · 制作与导入 →</button>
+      <button className="chat-decoration-link" onClick={onOpenWorkshop}>打开气泡制作器 →</button>
      </>}
      {tab==='background'&&<>
       <h3>聊天背景</h3>
@@ -80,12 +83,13 @@ export default function ChatDecorationPanel({character:char,theme,themes,updateC
        <label className="chat-decoration-upload">选择背景图片<input aria-label="选择背景图片" type="file" accept="image/*" onChange={e=>{const f=e.target.files?.[0];if(f){if(global)void putImageBlob(f).then(ref=>updateTheme({chatBackground:ref}));else onBgUpload(f);}e.target.value='';}}/></label>
        {(global?theme.chatBackground:char.chatBackground!==undefined)&&<button className="chat-decoration-link" onClick={()=>global?updateTheme({chatBackground:undefined}):updateCharacter({chatBackground:undefined})}>{global?'移除全局背景图片':'移除专属背景，跟随全局'}</button>}
      </>}
+     {tab==='psyche'&&<> {!global&&<button className="chat-decoration-link" onClick={()=>updateCharacter({thinkingChainStyle:undefined,thinkingChainCustomColors:undefined,thinkingChainCustomCss:undefined})}>跟随全局心象</button>}<PsycheAppearanceEditor appearance={resolvePsycheAppearance(theme,global?undefined:char)} onChange={patch=>{const next={...resolvePsycheAppearance(theme,global?undefined:char),...patch};if(global)void updateTheme({chatPsyche:next});else void updateCharacter({thinkingChainStyle:next.styleId,thinkingChainCustomColors:{bg:'#1f2937',accent:'#fbbf24',text:'#f1f5f9',...next.customColors},thinkingChainCustomCss:next.customCss||''});}}/></>}
      {tab==='sound'&&<>
       <h3>消息提示音</h3>
       <WhiteboxSoundEditor key={scope} sound={sound} bound={bound} showBind={!global} onChangeSound={changeSound} onChangeBound={changeBound} hint={global?'未设置专属提示音的角色会使用这里的声音。':'角色的新回复到达时响一次。不设置则跟随全局提示音。'}/>
      </>}
      {tab==='css'&&<>
-      <h3>进阶 CSS <span className="chat-decoration-former">原白框</span></h3>
+      <h3>白框 CSS <span className="chat-decoration-former">完整聊天样式</span></h3>
       <p className="chat-decoration-note">{global?'全局 CSS 先应用，再叠加角色 CSS。':char.chatDecorationCssIsolated?'当前使用导入预设的独立 CSS，不叠加全局 CSS。':'角色 CSS 叠加在全局之上；原来的预设与分享文件仍可使用。'}</p>
       <details className="chat-decoration-sources"><summary>查看生效来源</summary><p>全局 CSS：{theme.chatChromeCustomCss?.trim()?'已设置':'未设置'}<br/>角色 CSS：{char.chromeCustomCss?.trim()?'已设置':'未设置'}<br/>气泡主题：{activeBubble?.name||'默认'}{activeBubble?.customCss?'（含 CSS）':''}</p></details>
       <ChromeCssEditor key={scope} value={css||''} onChange={value=>setCss(value)}/>

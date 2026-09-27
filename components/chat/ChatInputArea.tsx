@@ -1,4 +1,5 @@
 import EmojiExportDialog from './EmojiExportDialog';
+import ChatCamera from './ChatCamera';
 import React, { useRef, useState, useEffect, useMemo } from 'react';
 import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Lightning, Money, BookOpenText, GearSix, Image, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, Alarm, Sparkle, FadersHorizontal, LinkSimple, Star, Briefcase } from '@phosphor-icons/react';
 import { CharacterProfile, ChatTheme, EmojiCategory, Emoji } from '../../types';
@@ -13,6 +14,8 @@ const EMOJI_PAGE_SIZE = 40;
 const ACTION_PAGE_SIZE = 8;
 
 interface ChatInputAreaProps {
+    /** Initial page for static decoration previews; does not run menu actions. */
+    previewActionsPage?: number;
     input: string;
     setInput: (v: string) => void;
     isTyping: boolean;
@@ -86,6 +89,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     unreadMessages = {},
     customThemes = [], onUpdateTheme = () => {}, onRemoveTheme = () => {}, activeThemeId = '',
     actionsContent,
+    previewActionsPage=0,
     onPanelAction, onImageSelect, isSummarizing,
     categories = [], activeCategory = 'default',
     onReroll, canReroll,
@@ -102,6 +106,8 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     acnh = false,
 }) => {
     const chatImageInputRef = useRef<HTMLInputElement>(null);
+    const [cameraOpen, setCameraOpen] = useState(false);
+    useEffect(() => setCameraOpen(false), [activeCharacterId]);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const sendButtonRef = useRef<HTMLButtonElement>(null);
     const suggestionsRef = useRef<HTMLDivElement>(null);
@@ -141,7 +147,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
         document.addEventListener('pointerdown', blurOnOutsidePointer, true);
         return () => document.removeEventListener('pointerdown', blurOnOutsidePointer, true);
     }, [canEndEditing, isInputFocused]);
-    const [actionsPage, setActionsPage] = useState(0);
+    const [actionsPage, setActionsPage] = useState(previewActionsPage);
     // 气泡样式面板：搜索 + 两步确认删除（防止 hover 小 × 误删）
     const [bubbleSearch, setBubbleSearch] = useState('');
     // 会话面板的主要用途仍是切换聊天；气泡选择作为次级工具默认收起。
@@ -491,12 +497,12 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
             <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border ${isDiscordStyle ? 'bg-slate-800 border-sky-400/20' : 'bg-sky-50 border-sky-100'}`}><img src="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f449.png" alt="poke" className="w-6 h-6" /></div>)}
             <span className="text-xs font-bold">戳一戳</span>
         </button>,
-        <button key="archive" onClick={() => onPanelAction('archive')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
-            {acnh ? <AcnhActionTile kind="archive" /> : (
-            <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border ${isDiscordStyle ? 'bg-slate-800 text-indigo-300 border-indigo-400/20' : 'bg-indigo-50 text-indigo-400 border-indigo-100'}`}>
-                <BookOpenText className="w-6 h-6" weight="bold" />
+        <button key="image" onClick={() => setCameraOpen(true)} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
+            {acnh ? <AcnhActionTile kind="image" /> : (
+            <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border ${isDiscordStyle ? 'bg-slate-800 text-pink-300 border-pink-400/20' : 'bg-pink-50 text-pink-400 border-pink-100'}`}>
+                <Image className="w-6 h-6" weight="bold" />
             </div>)}
-            <span className="text-xs font-bold">{isSummarizing ? '归档中...' : '记忆归档'}</span>
+            <span className="text-xs font-bold">相册</span>
         </button>,
         <button key="settings" onClick={() => onPanelAction('settings')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
             {acnh ? <AcnhActionTile kind="settings" /> : (
@@ -608,12 +614,12 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
           </div>
           <span className="text-xs font-bold">聊天装扮</span>
         </button>,
-        <button key="image" onClick={() => chatImageInputRef.current?.click()} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
-            {acnh ? <AcnhActionTile kind="image" /> : (
-            <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border ${isDiscordStyle ? 'bg-slate-800 text-pink-300 border-pink-400/20' : 'bg-pink-50 text-pink-400 border-pink-100'}`}>
-                <Image className="w-6 h-6" weight="bold" />
+        <button key="archive" onClick={() => onPanelAction('archive')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
+            {acnh ? <AcnhActionTile kind="archive" /> : (
+            <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border ${isDiscordStyle ? 'bg-slate-800 text-indigo-300 border-indigo-400/20' : 'bg-indigo-50 text-indigo-400 border-indigo-100'}`}>
+                <BookOpenText className="w-6 h-6" weight="bold" />
             </div>)}
-            <span className="text-xs font-bold">相册</span>
+            <span className="text-xs font-bold">{isSummarizing ? '归档中...' : '记忆归档'}</span>
         </button>,
         <button key="memory-link"
           onClick={() => onPanelAction('memory-link')}
@@ -643,6 +649,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
             <div className={`fixed inset-0 z-[-1] ${isPixelStyle ? 'bg-[#eadfce]/70 backdrop-blur-[2px]' : isDiscordStyle ? 'bg-slate-950/70 backdrop-blur-[2px]' : 'bg-white/60 backdrop-blur-[2px]'}`} />
         )}
         {exportEmojis && <EmojiExportDialog emojis={exportEmojis} onClose={() => setExportEmojis(null)} />}
+        {cameraOpen && <ChatCamera character={characters.find(c => c.id === activeCharacterId)} onClose={() => setCameraOpen(false)} onCapture={onImageSelect} onGallery={() => { chatImageInputRef.current?.click(); setCameraOpen(false); }} />}
         {/* 辅助提示保持在输入栏外，避免改变社区 CSS 的 > div:first-child / nth-child 目标。 */}
             {suggestedEmojis.length > 0 && (
                 <div ref={suggestionsRef} role="region" aria-label="表情包联想"
@@ -954,7 +961,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                 </button>
                                 {isBubbleSectionOpen && <div className="mt-3">
                                 <div className="flex justify-end px-1 mb-2">
-                                    <span className="text-[10px] text-slate-400">新气泡去「气泡工坊」App 制作</span>
+                                    <span className="text-[10px] text-slate-400">在「聊天装扮 → 气泡制作器」制作新气泡</span>
                                 </div>
                                 {customThemes.length > 6 && (
                                     <input
@@ -1024,19 +1031,19 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                 </div>}
                             </div>
                             <div>
-                                <h3 className="text-xs font-bold text-slate-400 px-1 tracking-wider uppercase mb-3">切换会话</h3>
+                                <h3 className="sully-chat-switch-title text-xs font-bold text-slate-400 px-1 tracking-wider uppercase mb-3">切换会话</h3>
                                 <div className="space-y-3">
                                     {characters.map(c => {
                                         const unread = c.id !== activeCharacterId ? (unreadMessages[c.id] || 0) : 0;
                                         return (
-                                        <div key={c.id} onClick={() => onCharSelect(c.id)} className={`flex items-center gap-4 p-3 rounded-[20px] border cursor-pointer ${c.id === activeCharacterId ? 'bg-white border-primary/30 shadow-md' : 'bg-white/50 border-transparent'}`}>
+                                        <div key={c.id} data-active={c.id === activeCharacterId} onClick={() => onCharSelect(c.id)} className={`sully-chat-switch-item flex items-center gap-4 p-3 rounded-[20px] border cursor-pointer ${c.id === activeCharacterId ? 'bg-white border-primary/30 shadow-md' : 'bg-white/50 border-transparent'}`}>
                                             <div className="relative shrink-0">
                                                 <TokenImg value={c.avatar} className="w-12 h-12 rounded-2xl object-cover" />
                                                 {unread > 0 && (
                                                     <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center shadow-[0_0_8px_rgba(244,63,94,0.6)] ring-2 ring-white" aria-label={`${unread} 条未读消息`}>{unread > 99 ? '99+' : unread}</span>
                                                 )}
                                             </div>
-                                            <div className="flex-1"><div className="font-bold text-sm text-slate-700">{c.name}</div><div className="text-xs text-slate-400 truncate">{c.description}</div></div>
+                                            <div className="flex-1 min-w-0"><div className="sully-chat-switch-name font-bold text-sm text-slate-700">{c.name}</div><div className="sully-chat-switch-description text-xs text-slate-400 truncate">{c.description}</div></div>
                                         </div>
                                         );
                                     })}

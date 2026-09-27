@@ -6,7 +6,10 @@ describe('chat image bottom anchoring wiring', () => {
   it('eagerly decodes the latest image and reports its final layout', () => {
     const source = readFileSync(path.resolve(__dirname, '../components/chat/MessageItem.tsx'), 'utf8');
 
-    expect(source).toContain("loading={isLatestMessage ? 'eager' : 'lazy'}");
+    const imageSource = readFileSync(path.resolve(__dirname, '../components/chat/ChatImage.tsx'), 'utf8');
+    expect(source).toContain('eager={isLatestMessage}');
+    expect(imageSource).toContain("loading={eager ? 'eager' : 'lazy'}");
+    expect(imageSource).toContain('onLoad={onLoad}');
     expect(source).toContain('onLoad={() => onMediaLoad?.(m.id)}');
     expect(source).toContain('prev.isLatestMessage === next.isLatestMessage');
   });

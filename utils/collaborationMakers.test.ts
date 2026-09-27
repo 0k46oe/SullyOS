@@ -9,6 +9,14 @@ import {
 } from '../features/collaboration/makers';
 
 describe('collaboration installable makers', () => {
+  it('whitebox defaults to core content while accepting optional card styles',()=>{
+    const css='.sully-psyche-body{color:#345!important}.sully-chat-card[data-card-kind="world_card"] .sully-chat-card-surface{border-radius:12px}';
+    expect(validateInstallableArtifact({kind:'whitebox-css',title:'完整白框',payload:{css}})).toEqual([]);
+    expect(COLLABORATION_MAKER_MAP['whitebox-css'].prompt).toContain('其他 App 卡片仅在用户明确点名时增加样式');
+    expect(COLLABORATION_MAKER_MAP['whitebox-css'].prompt).toContain('.sully-psyche-body');
+    expect(COLLABORATION_MAKER_MAP['whitebox-css'].prompt).toContain('diary_card');
+    expect(COLLABORATION_MAKER_MAP['whitebox-css'].prompt).toContain('完整接口清单不等于必须逐项输出');
+  });
   it('parses typed installable blocks without exposing the internal protocol', () => {
     const parsed = parseInstallableArtifactBlocks(`我按你的气质做了一版。\n\n\`\`\`sully-artifact
 kind: journal-css

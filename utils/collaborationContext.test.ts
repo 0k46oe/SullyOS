@@ -58,6 +58,7 @@ describe('collaboration context isolation', () => {
     ]);
     expect(modelMessages).toEqual([
       { role: 'system', content: '角色快照' },
+      { role: 'system', content: expect.stringContaining('当前未选择专用制作类型') },
       { role: 'user', content: '这个窗口的任务' },
       { role: 'assistant', content: '这个窗口的回答' },
     ]);
@@ -78,6 +79,7 @@ describe('collaboration context isolation', () => {
       { role: 'user', content: '日常聊天里的上一句' },
       { role: 'assistant', content: '日常聊天里的上一条回复' },
       { role: 'system', content: '协同任务协议' },
+      { role: 'system', content: expect.stringContaining('当前未选择专用制作类型') },
       { role: 'user', content: '现在做报告' },
     ]);
   });
@@ -98,6 +100,7 @@ describe('collaboration context isolation', () => {
     ], undefined, [], '### 本轮动态记忆（仅本次请求）\n- 昨天一起确定了目录');
     expect(messages).toEqual([
       { role: 'system', content: '冻结角色身份' },
+      { role: 'system', content: expect.stringContaining('当前未选择专用制作类型') },
       { role: 'system', content: '### 本轮动态记忆（仅本次请求）\n- 昨天一起确定了目录' },
       { role: 'user', content: '继续昨天那份报告' },
     ]);
@@ -121,8 +124,9 @@ describe('collaboration context isolation', () => {
     const messages = buildCollaborationModelMessages('角色快照', [
       { id: 'm1', sessionId: 'session-a', role: 'user', content: '整理成报告', requestedFormat: 'docx', createdAt: 1 },
     ]);
-    expect(messages[1].content).toContain('[本轮文件交付格式：docx');
-    expect(messages[1].content).toContain('artifact 真文件');
+    const userMessage = messages.find(message => message.role === 'user');
+    expect(userMessage?.content).toContain('[本轮文件交付格式：docx');
+    expect(userMessage?.content).toContain('artifact 真文件');
   });
 
   it('removes stale one-time recall blocks from pre-upgrade session snapshots', () => {

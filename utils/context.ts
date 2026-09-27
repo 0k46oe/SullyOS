@@ -1,4 +1,5 @@
 import { readableContextMemories } from './contextMemories';
+import { getCachedUserHolidayReminder, type UserHolidayConfig } from './userHolidays';
 
 import { CharacterProfile, UserProfile, DailySchedule, MountedWorldbook } from '../types';
 import { normalizeUserImpression } from './impression';
@@ -512,6 +513,9 @@ const renderCoreContext = (
             skipTimeAwareness?: boolean;
             /** 正有人在跟角色实时对话（私聊 / 见面）。见 buildTimeAwarenessBlock 同名字段。 */
             conversational?: boolean;
+            /** Cloud requests fill this user's date-dependent line at generation time. */
+            skipUserHoliday?: boolean;
+            userHolidays?: UserHolidayConfig;
             /** Recent messages used to activate keyword-based worldbook entries. */
             worldbookMessages?: WorldbookScanMessage[];
         },
@@ -570,6 +574,10 @@ const renderCoreContext = (
             context += `### 互动对象 (User)\n`;
             context += `- 名字: ${user.name}\n`;
             context += `- 设定/备注: ${user.bio || '无'}\n\n`;
+            if (char.timeAwarenessEnabled !== false && !timeOptions?.skipTimeAwareness && !timeOptions?.skipUserHoliday) {
+                const holiday = getCachedUserHolidayReminder(user.name, timeOptions?.userHolidays);
+                if (holiday) context += `- ${holiday}\n\n`;
+            }
         }
 
         // 4. [NEW] 印象档案 (Private Impression)

@@ -12,9 +12,9 @@ const wrap=(parts:any)=>({format:'sullyos-chat-decoration',version:1,name:'Test'
 describe('portable chat decoration',()=>{
  it('keeps legacy global layout and CSS unchanged without imported overrides',()=>{const old={...base,chatAvatarMode:'every_message',chatEmojiSize:'large'};expect(resolveDecorationTheme(old,{...char,chatAppearance:undefined})).toEqual(old);});
  it('round trips migrated avatar frequency and sticker size within layout only',async()=>{const old={...base,chatAvatarMode:'every_message',chatEmojiSize:'large'};const preset=await exportDecoration('Legacy layout',old,undefined,PRESET_THEMES.default);const patch=await decorationPatches(preset,['layout'],'character',char,base);expect(patch.character.chatAppearance).toMatchObject({chatAvatarMode:'every_message',chatEmojiSize:'large'});expect(patch.character.chromeCustomCss).toBeUndefined();expect(base.chatEmojiSize).toBeUndefined();});
- it('exports five effective parts, inherited layout/css and local assets without private data',async()=>{
+ it('exports six effective parts including psyche, inherited layout/css and local assets without private data',async()=>{
   const p=await exportDecoration('Test',base,{...char,chatBackground:'blobref:picture'},PRESET_THEMES.dream);
-  expect(Object.keys(p.parts)).toHaveLength(5);expect(p.parts.layout).toMatchObject({chatHeaderStyle:'telegram',chatBubbleFontSize:18});expect(p.parts.css).toContain('.base');expect(p.parts.background?.image).toMatch(/^data:image/);expect(JSON.stringify(p)).not.toMatch(/SECRET|Private name|blobref:/);
+  expect(Object.keys(p.parts)).toHaveLength(6);expect(p.parts.psyche?.styleId).toBe('echo');expect(p.parts.layout).toMatchObject({chatHeaderStyle:'telegram',chatBubbleFontSize:18});expect(p.parts.css).toContain('.base');expect(p.parts.background?.image).toMatch(/^data:image/);expect(JSON.stringify(p)).not.toMatch(/SECRET|Private name|blobref:/);
  });
  it('fails instead of sharing a dead local asset',async()=>{await expect(exportDecoration('x',base,{...char,chatBackground:'blobref:missing'},PRESET_THEMES.default)).rejects.toThrow('丢失');});
  it('never interprets leading CSS comments as image URLs',async()=>{const p=await exportDecoration('x',{...base,chatChromeCustomCss:'/* comment */ .x{color:red}'},undefined,PRESET_THEMES.default);expect(p.parts.css).toContain('/* comment */');});

@@ -1,18 +1,19 @@
-import { avatarDecorationImageStyle } from '../utils/anniversaryGifts';
+import {readDecorationOrigin,writeDecorationOrigin,importedOrigin,remixOrigin,canEditDecoration} from '../../utils/decorationLibrary';
+import { avatarDecorationImageStyle } from '../../utils/anniversaryGifts';
 
 
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { useOS } from '../context/OSContext';
-import { ChatTheme, BubbleStyle } from '../types';
-import { processImage } from '../utils/file';
-import { validateScopedCss, runCssRenderabilityCheck, CssValidationResult } from '../utils/scopedCss';
-import { trackEvent } from '../utils/analytics';
-import { resolveBubbleCornerRadii, shouldHideBubbleTail } from '../utils/bubbleAppearance';
-import { shareOrDownloadFile } from '../utils/shareExport';
-import { readShareText } from '../utils/pngShare';
-import { migrateDataUrlToRef, resolveBlobRefsDeep, useBlobRefUrl } from '../utils/blobRef';
-import TokenImg from '../components/os/TokenImg';
+import { useOS } from '../../context/OSContext';
+import { ChatTheme, BubbleStyle } from '../../types';
+import { processImage } from '../../utils/file';
+import { validateScopedCss, runCssRenderabilityCheck, CssValidationResult } from '../../utils/scopedCss';
+import { trackEvent } from '../../utils/analytics';
+import { resolveBubbleCornerRadii, shouldHideBubbleTail } from '../../utils/bubbleAppearance';
+import { shareOrDownloadFile } from '../../utils/shareExport';
+import { readShareText } from '../../utils/pngShare';
+import { migrateDataUrlToRef, resolveBlobRefsDeep, useBlobRefUrl } from '../../utils/blobRef';
+import TokenImg from '../../components/os/TokenImg';
 
 const cloneTheme = (theme: ChatTheme): ChatTheme => {
     if (typeof structuredClone === 'function') {
@@ -484,10 +485,12 @@ const PREVIEW_SCENES: PreviewScene[] = [
     }
 ];
 
-const ThemeMaker: React.FC = () => {
-    const { closeApp, addCustomTheme, removeCustomTheme, addToast, characters, updateCharacter, customThemes } = useOS();
+interface ThemeMakerProps { embedded?:boolean; initialTheme?:ChatTheme; onClose?:()=>void; onSaveTheme?:(theme:ChatTheme)=>Promise<void> }
+const ThemeMaker: React.FC<ThemeMakerProps> = ({embedded=false,initialTheme,onClose,onSaveTheme}) => {
+    const { closeApp:closeOSApp, addCustomTheme, removeCustomTheme, addToast, characters, updateCharacter, customThemes } = useOS();
+    const closeApp=onClose||closeOSApp;
     const [initialThemeId] = useState(() => `theme-${Date.now()}`);
-    const [editingTheme, setEditingTheme] = useState<ChatTheme>({ ...DEFAULT_THEME, id: initialThemeId });
+    const [editingTheme, setEditingTheme] = useState<ChatTheme>(()=>initialTheme?{...cloneTheme(initialTheme),id:initialThemeId}:{ ...DEFAULT_THEME, id: initialThemeId });
     const [activeTab, setActiveTab] = useState<'user' | 'ai' | 'css'>('user');
     const [toolSection, setToolSection] = useState<'base' | 'sticker' | 'avatar'>('base'); 
     const [previewSceneId, setPreviewSceneId] = useState(PREVIEW_SCENES[0].id);
@@ -495,7 +498,7 @@ const ThemeMaker: React.FC = () => {
     const [isPreviewDark, setIsPreviewDark] = useState(false);
     const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
     const [userFollowAi, setUserFollowAi] = useState(false);
-    const [lastSavedTheme, setLastSavedTheme] = useState<ChatTheme>(() => cloneTheme({ ...DEFAULT_THEME, id: initialThemeId }));
+    const [lastSavedTheme, setLastSavedTheme] = useState<ChatTheme>(() => cloneTheme(initialTheme?{...initialTheme,id:initialThemeId}:{ ...DEFAULT_THEME, id: initialThemeId }));
     const [isDirty, setIsDirty] = useState(false);
     const [pendingDiscardAction, setPendingDiscardAction] = useState<(() => void) | null>(null);
     const [pendingDeleteTheme, setPendingDeleteTheme] = useState<ChatTheme | null>(null);
@@ -569,7 +572,7 @@ const ThemeMaker: React.FC = () => {
         editorBubbleDragRef.current = null;
         if (drag && !drag.moved) {
             setEditorPanelOpen(open => !open);
-            trackEvent('开关气泡工坊悬浮设置');
+            trackEvent('开关气泡制作器悬浮设置');
         }
     };
 
@@ -679,7 +682,8 @@ const ThemeMaker: React.FC = () => {
             // 内容一样的图还会跟库里已有的那份共用，不用等下次「优化资源存储」来收。
             imported.user = await bubbleStyleToBlobRefs(imported.user);
             imported.ai = await bubbleStyleToBlobRefs(imported.ai);
-            addCustomTheme(imported);
+            await addCustomTheme(imported);
+            await writeDecorationOrigin('bubble-'+imported.id,importedOrigin(parsed));
             addToast(`已导入「${name}」，在作品区可选用`, 'success');
         } catch {
             addToast('导入失败：无法解析文件', 'error');
@@ -699,9 +703,11 @@ const ThemeMaker: React.FC = () => {
         }
 
         try {
+            const origin=await readDecorationOrigin('bubble-'+theme.id);
+            if(origin.allowRedistribute===false){addToast('作者禁止二次传播','error');return;}
             const result = await shareOrDownloadFile({
                 card: { kind: 'chat-theme', title: theme.name || '自定义气泡' },
-                content: JSON.stringify({ kind: 'sullyos-chat-theme', version: 1, theme: portable }, null, 2),
+                content: JSON.stringify({ kind: 'sullyos-chat-theme', version: 1, theme: portable,beautyOrigin:{...origin,share:undefined} }, null, 2),
                 fileName: `${(theme.name || '自定义气泡').replace(/[\\/:*?\"<>|]/g, '_')}.sully-bubble.json`,
                 mimeType: 'application/json;charset=utf-8',
                 shareTitle: `气泡主题：${theme.name || '自定义气泡'}`,
@@ -817,9 +823,19 @@ const ThemeMaker: React.FC = () => {
         addToast('已应用图床图片', 'success');
     };
 
-    const doSaveTheme = (exitAfterSave: boolean) => {
-        addCustomTheme(editingTheme);
-        setLastSavedTheme(cloneTheme(editingTheme));
+    const [savingEmbedded,setSavingEmbedded]=useState(false);
+    const doSaveTheme = async (exitAfterSave: boolean) => {
+        if(onSaveTheme){if(savingEmbedded)return;setSavingEmbedded(true);try{const {checkWorkshopCss}=await import('../../utils/decorationWorkshop');checkWorkshopCss('bubbles',editingTheme.customCss||'');await onSaveTheme(editingTheme);setLastSavedTheme(cloneTheme(editingTheme));setIsDirty(false);}catch(e){addToast(e instanceof Error?e.message:'保存失败','error');}finally{setSavingEmbedded(false);}return;}
+        const existing=customThemes.some(item=>item.id===editingTheme.id);
+        let savedTheme=editingTheme;
+        try{
+            const origin=existing?await readDecorationOrigin('bubble-'+editingTheme.id):{kind:'self' as const};
+            if(!canEditDecoration(origin)){addToast('作者禁止二改，这份作品已锁定编辑','error');return;}
+            if(origin.kind==='imported')savedTheme={...editingTheme,id:'custom-'+crypto.randomUUID()};
+            await addCustomTheme(savedTheme);await writeDecorationOrigin('bubble-'+savedTheme.id,remixOrigin(origin));
+            setEditingTheme(savedTheme);
+        }catch(e){addToast(e instanceof Error?e.message:'保存失败','error');return;}
+        setLastSavedTheme(cloneTheme(savedTheme));
         setIsDirty(false);
         setIsAppliedToPreview(true);
         addToast('已保存到气泡库', 'success');
@@ -827,7 +843,7 @@ const ThemeMaker: React.FC = () => {
         // 保存 ≠ 生效：气泡要指派给角色才会在聊天里出现。保存完直接弹「应用到角色」，
         // 预勾选已经在用这套气泡的角色（再次保存同名主题时不打乱现状）。
         if (characters.length > 0) {
-            setApplySelection(new Set(characters.filter(c => (c as any).bubbleStyle === editingTheme.id).map(c => c.id)));
+            setApplySelection(new Set(characters.filter(c => (c as any).bubbleStyle === savedTheme.id).map(c => c.id)));
             setShowApplySheet(true);
         }
     };
@@ -1109,7 +1125,7 @@ const ThemeMaker: React.FC = () => {
                                 onClick={(event) => {
                                     event.stopPropagation();
                                     toggleVoicePreview(voicePreviewKey);
-                                    if (!isVoicePreviewPlaying) trackEvent('播放气泡工坊语音预览');
+                                    if (!isVoicePreviewPlaying) trackEvent('播放气泡制作器语音预览');
                                 }}
                                 aria-pressed={isVoicePreviewPlaying}
                                 aria-label={isVoicePreviewPlaying ? '暂停语音条播放预览' : '播放语音条样式预览'}
@@ -1187,7 +1203,7 @@ const ThemeMaker: React.FC = () => {
                         </svg>
                     </button>
                     <div className="flex flex-col">
-                        <h1 className="text-xl font-medium text-slate-700">气泡工坊</h1>
+                        <h1 className="text-xl font-medium text-slate-700">气泡制作器</h1>
                         <div className="text-[10px] flex items-center gap-1.5 text-slate-500">
                             <span className={`inline-flex w-2 h-2 rounded-full ${isAppliedToPreview && !isDirty ? 'bg-emerald-500' : 'bg-amber-400'}`}></span>
                             {isAppliedToPreview && !isDirty ? '已保存到气泡库' : '有未保存的改动'}
@@ -1195,7 +1211,7 @@ const ThemeMaker: React.FC = () => {
                     </div>
                 </div>
                 <div className="flex items-center gap-2">
-                    <button onClick={() => saveTheme({ exitAfterSave: false })} className="px-4 py-1.5 bg-primary text-white rounded-full text-xs font-bold shadow-lg shadow-primary/30 active:scale-95 transition-all">
+                    <button disabled={savingEmbedded} onClick={() => saveTheme({ exitAfterSave: false })} className="px-4 py-1.5 bg-primary text-white rounded-full text-xs font-bold shadow-lg shadow-primary/30 active:scale-95 transition-all">
                         保存
                     </button>
                 </div>
@@ -1203,7 +1219,7 @@ const ThemeMaker: React.FC = () => {
             </div>
 
             {/* 用户作品区：保存后的气泡可回到工坊继续编辑，也可单独导出分享。 */}
-            <section className="shrink-0 bg-white/80 border-b border-slate-100 px-4 py-3">
+            {!embedded&&<section className="shrink-0 bg-white/80 border-b border-slate-100 px-4 py-3">
                 <button type="button" onClick={() => { setIsThemeLibraryOpen(prev => !prev); if (!isThemeLibraryOpen) trackEvent('展开我的气泡作品库'); }} aria-expanded={isThemeLibraryOpen} className="w-full flex items-center justify-between text-left">
                     <div>
                         <h2 className="text-xs font-bold text-slate-600">我的自定义气泡</h2>
@@ -1261,7 +1277,7 @@ const ThemeMaker: React.FC = () => {
                         还没有作品。完成设计并保存后，会陈列在这里。
                     </div>
                 ))}
-            </section>
+            </section>}
 
             {/* Preview Area (Realistic Chat Row) */}
             <div className={`${isPreviewFullscreen ? 'fixed inset-0 z-[120]' : 'flex-1 min-h-0'} relative overflow-y-auto flex flex-col p-4 pb-20 justify-start sm:justify-center items-center gap-4 no-scrollbar ${isPreviewDark ? 'bg-slate-900' : 'bg-slate-100'}`}>
@@ -1412,7 +1428,7 @@ const ThemeMaker: React.FC = () => {
                     <div className="flex px-6 border-b border-slate-100 mb-2 overflow-x-auto no-scrollbar">
                         <button onClick={() => requestToolSectionSwitch('base')} className={`px-4 py-3 text-xs font-bold uppercase tracking-wider border-b-2 transition-all shrink-0 ${toolSection === 'base' ? 'border-primary text-primary' : 'border-transparent text-slate-400'}`}>基础样式</button>
                         <button onClick={() => requestToolSectionSwitch('sticker')} className={`px-4 py-3 text-xs font-bold uppercase tracking-wider border-b-2 transition-all shrink-0 ${toolSection === 'sticker' ? 'border-primary text-primary' : 'border-transparent text-slate-400'}`}>气泡贴纸</button>
-                        <button onClick={() => requestToolSectionSwitch('avatar')} className={`px-4 py-3 text-xs font-bold uppercase tracking-wider border-b-2 transition-all shrink-0 ${toolSection === 'avatar' ? 'border-primary text-primary' : 'border-transparent text-slate-400'}`}>头像挂件</button>
+                        {!embedded&&<button onClick={() => requestToolSectionSwitch('avatar')} className={`px-4 py-3 text-xs font-bold uppercase tracking-wider border-b-2 transition-all shrink-0 ${toolSection === 'avatar' ? 'border-primary text-primary' : 'border-transparent text-slate-400'}`}>头像挂件</button>}
                     </div>
                 )}
 
