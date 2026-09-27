@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
-  "versionCode": 30503,
-  "versionName": "3.5.3",
-  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.5.3/SullyOS-Android-v3.5.3.apk",
-  "sha256": "13451b474ef4f77be4bd2f56d73cf3e77201cfffec685c8ba75ac1bcaee43300",
-  "sizeBytes": 50584041,
-  "publishedAt": "2026-09-27T15:00:53Z",
+  "versionCode": 30504,
+  "versionName": "3.5.4",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.5.4/SullyOS-Android-v3.5.4.apk",
+  "sha256": "a038057739828a18edfc087a6dfa606eeedcbbcf4e8903c936d345993be470d3",
+  "sizeBytes": 50588938,
+  "publishedAt": "2026-09-27T16:33:29Z",
   "releaseNotes": [
-    "同步最新 master 15aab7d2，包含 Pixi 生产环境启动循环修复",
-    "同步美化分享、预览与装扮工作流，以及相机和节假日感知等上游更新",
-    "同步主动消息 2.0 后端自动更新、即时对话凭据与频率设置改动",
+    "同步最新 master f963a1e3，包含马来西亚地区节假日、气泡美化应用与记忆事件盒修复",
+    "修复切换设置页面后重复下载、删除正在下载的 APK；下载进度在同一会话内共享",
+    "权限跳转和取消安装后可继续打开安装器；本次从旧版升级请留在更新页等待，不要重复点击",
     "保留 UnifiedPush / ntfy、PDF 导入、Umami 与应用内更新，沿用固定签名覆盖升级",
-    "本次仅对齐 master，未新增跨域处理或 ntfy 推送修复"
+    "本次未新增跨域处理或 ntfy 推送修复，不提供进程被杀后的断点续传"
   ]
 }
