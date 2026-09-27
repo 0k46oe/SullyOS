@@ -112,7 +112,48 @@ export const fetchAndroidUpdateManifest = async (): Promise<AndroidUpdateManifes
   return parseAndroidUpdateManifest(await response.json());
 };
 
-export const downloadAndVerifyAndroidUpdate = async (
+interface ActiveDownload {
+  key: string;
+  promise: Promise<string>;
+  progress: number;
+  listeners: Set<(fraction: number) => void>;
+}
+
+let activeDownload: ActiveDownload | null = null;
+
+// The native transfer outlives React pages. Acquire this lock synchronously,
+// before mkdir/deleteFile, and hold it through signature/version verification.
+export const downloadAndVerifyAndroidUpdate = (
+  manifest: AndroidUpdateManifest,
+  onProgress?: (fraction: number) => void,
+): Promise<string> => {
+  const key = JSON.stringify([manifest.versionCode, manifest.apkUrl, manifest.sha256, manifest.sizeBytes]);
+  if (activeDownload) {
+    if (activeDownload.key !== key) return Promise.reject(new Error('另一个更新正在下载或校验，请等待完成'));
+    if (onProgress) {
+      activeDownload.listeners.add(onProgress);
+      try { onProgress(activeDownload.progress); } catch { /* UI cannot interrupt a transfer. */ }
+    }
+    return activeDownload.promise;
+  }
+  const listeners = new Set<(fraction: number) => void>();
+  if (onProgress) listeners.add(onProgress);
+  const promise = Promise.resolve().then(() => performDownload(manifest, fraction => {
+    if (!Number.isFinite(fraction)) return;
+    task.progress = Math.max(task.progress, Math.min(1, Math.max(0, fraction)));
+    for (const listener of task.listeners) {
+      try { listener(task.progress); } catch { /* Keep other subscribers and verification alive. */ }
+    }
+  })).finally(() => {
+    if (activeDownload === task) activeDownload = null;
+    task.listeners.clear();
+  });
+  const task: ActiveDownload = { key, promise, progress: 0, listeners };
+  activeDownload = task;
+  return promise;
+};
+
+const performDownload = async (
   manifest: AndroidUpdateManifest,
   onProgress?: (fraction: number) => void,
 ): Promise<string> => {
@@ -139,7 +180,8 @@ export const downloadAndVerifyAndroidUpdate = async (
       progress: Boolean(onProgress),
     });
   } finally {
-    await progressHandle?.remove();
+    // A listener cleanup failure must not skip APK verification or strand the lock.
+    await progressHandle?.remove().catch(() => undefined);
   }
 
   const { uri } = await Filesystem.getUri({ path: UPDATE_PATH, directory: Directory.Cache });
