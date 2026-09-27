@@ -77,7 +77,8 @@ export function validateBeautyPackage(value: unknown): { kind: BeautyKind; data:
   if (!isRecord(value) || typeof value.name !== 'string' || !value.name.trim() || value.name.length > 200) throw Error('请提交有效的美化预设文件');
   if (value.format === 'sullyos-chat-decoration' && value.version === 1 && isRecord(value.parts)) {
     const keys = Object.keys(value.parts);
-    if (!keys.length || keys.some(key => !['layout', 'bubbles', 'background', 'sound', 'css'].includes(key))) throw Error('聊天装扮包含未知内容');
+    if (!keys.length || keys.some(key => !['layout', 'bubbles', 'background', 'sound', 'css', 'psyche', 'schedule', 'journal'].includes(key))) throw Error('聊天装扮包含未知内容');
+    if ((keys.includes('schedule')||keys.includes('journal'))&&keys.length!==1) throw Error('App 美化请按分类分别提交');
     if (value.parts.css !== undefined && typeof value.parts.css !== 'string') throw Error('CSS 格式不正确');
     return { kind: 'chat-decoration', data: { format: value.format, version: 1, name: value.name, parts: value.parts } };
   }

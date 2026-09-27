@@ -1,3 +1,4 @@
+import {validateScopedCss} from './scopedCss';
 import type { JournalAppearance, JournalAppearancePresetId } from '../types';
 
 export type JournalLayoutId = 'classic' | 'postal-archive' | 'celestial-album' | 'field-dossier' | 'memory-editor';
@@ -322,3 +323,11 @@ export const flattenJournalAppearance = (appearance?: JournalAppearance): Journa
     preset: 'original',
     customCss: resolveJournalAppearanceCss(appearance),
 });
+
+export function validateJournalAppearance(value:unknown):JournalAppearance {
+ if(!value||typeof value!=='object'||Array.isArray(value))throw Error('交换日记样式无效');const v=value as Record<string,unknown>;
+ if(v.preset!==undefined&&(typeof v.preset!=='string'||!JOURNAL_APPEARANCE_PRESETS.some(p=>p.id===v.preset)))throw Error('交换日记主题无效');
+ if(v.customCss!==undefined&&(typeof v.customCss!=='string'||v.customCss.length>1024*1024||/<\/?(?:script|style|html|iframe)\b/i.test(v.customCss)))throw Error('交换日记 CSS 无效');
+ const css=typeof v.customCss==='string'?v.customCss:'';const check=validateScopedCss(css,JOURNAL_CSS_SCOPE_REGEX,JOURNAL_CSS_SCOPE_HINT);if(!check.isValid)throw Error(check.errors.join('\n'));
+ return {preset:(v.preset||'original') as JournalAppearancePresetId,customCss:css};
+}

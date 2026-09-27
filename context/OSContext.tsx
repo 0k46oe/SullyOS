@@ -1,3 +1,9 @@
+import {isBuiltinAppearance, readBuiltinAppearance} from '../utils/builtinAppearance';
+import { browserHolidayCache, deviceTimeZone, getUserHolidayReminder } from '../utils/userHolidays';
+import {exportDecorationMedia} from '../utils/decorationMediaBackup';
+import {migrateLegacyWhiteboxPresets} from '../utils/legacyWhiteboxPresets';
+import {exportBeautyPreferences} from '../utils/beautyPreferencesBackup';
+import {exportBeautyAuthorBackup} from '../utils/beautyAuthorBackup';
 
 import { initializeFirstUseGuide } from '../utils/firstUseGuide';
 import { startBeautyUsage, stopBeautyUsage, stopBeautyForThemeChange } from '../utils/beautyUsage';
@@ -416,6 +422,7 @@ interface OSContextType {
   saveAppearancePreset: (name: string, themeOverride?: OSTheme) => void;
   applyAppearancePreset: (id: string) => Promise<void>;
   deleteAppearancePreset: (id: string) => void;
+  replaceAppearancePreset: (id:string, data:unknown, origin:import('../utils/decorationLibrary').DecorationOrigin)=>Promise<void>;
   renameAppearancePreset: (id: string, name: string) => void;
   exportAppearancePreset: (id: string) => Promise<Blob>;
   importAppearancePreset: (file: File) => Promise<string>;
@@ -870,6 +877,9 @@ const OSContext = import.meta.env.DEV
   ? (osContextHmrGlobal.__SULLYOS_OS_CONTEXT_HMR__ ??= createContext<OSContextType | undefined>(undefined))
   : createContext<OSContextType | undefined>(undefined);
 
+// Static previews supply fictional state without mounting the live provider or its effects.
+export const OSPreviewProvider = OSContext.Provider;
+
 export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // ... (State declarations same as before) ...
   const [activeApp, setActiveApp] = useState<AppID>(AppID.Launcher);
@@ -956,6 +966,18 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [apiPresets, setApiPresets] = useState<ApiPreset[]>([]);
   const [realtimeConfig, setRealtimeConfig] = useState<RealtimeConfig>(defaultRealtimeConfig);
+  useEffect(() => {
+    const refresh = () => {
+      if (realtimeConfig.userHolidays?.enabled) {
+        void getUserHolidayReminder({ ...realtimeConfig.userHolidays, timeZone: deviceTimeZone() }, browserHolidayCache).catch(() => {});
+      }
+    };
+    refresh();
+    const timer = setInterval(refresh, 60 * 60 * 1000);
+    const onVisible = () => { if (document.visibilityState === 'visible') refresh(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
+  }, [realtimeConfig.userHolidays]);
   const [memoryPalaceConfig, setMemoryPalaceConfig] = useState<MemoryPalaceGlobalConfig>(() => {
     try {
       const saved = localStorage.getItem('os_memory_palace_config');
@@ -3240,7 +3262,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       id: `char-${Date.now()}`,
       name,
       avatar: generateAvatar(name),
-      description: '点击编辑设定...',
+      description: '',
       systemPrompt: '',
       memories: [],
       contextLimit: DEFAULT_MANUAL_CONTEXT_LIMIT,
@@ -3587,11 +3609,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       };
       setAppearancePresets(prev => [preset, ...prev]);
       await DB.saveAsset(`appearance_preset_${preset.id}`, JSON.stringify(preset));
+      await DB.saveAsset(`decoration_origin_${preset.id}`, JSON.stringify({kind:'self'}));
       addToast(`外观预设「${name}」已保存`, 'success');
   };
 
   const applyAppearancePreset = async (id: string) => {
-      const preset = appearancePresets.find(p => p.id === id);
+      const builtin = isBuiltinAppearance(id);
+      const preset = builtin ? await readBuiltinAppearance(id, theme) : appearancePresets.find(p => p.id === id);
       if (!preset) throw new Error('外观预设不存在，请重新导入');
       // Strip banned legacy widget data from preset before applying — old beautification packs
       // may still carry launcherWidgetImage / bl / br, and they must never reach the UI.
@@ -3673,6 +3697,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               persistedIcons[appId] = stored;
               await DB.saveAsset(`icon_${appId}`, stored);
           }
+          if (builtin) {
+              for (const appId of Object.keys(customIcons)) {
+                  if (!(appId in persistedIcons) && appId !== '_pwa_') await DB.deleteAsset(`icon_${appId}`);
+              }
+              // The installed app icon is independent of desktop artwork.
+              if (customIcons._pwa_) persistedIcons._pwa_ = customIcons._pwa_;
+          }
           setCustomIcons(persistedIcons);
       }
       // Apply chat themes if present
@@ -3706,7 +3737,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           }
       }
       await startBeautyUsage(preset.id, 'appearance');
-      stopBeautyUsage('chat:global');
+      if (!builtin) stopBeautyUsage('chat:global');
       addToast(`已应用预设「${preset.name}」`, 'success');
   };
 
@@ -3765,6 +3796,21 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       }
   };
 
+  const replaceAppearancePreset = async (id:string, data:unknown, origin:import('../utils/decorationLibrary').DecorationOrigin) => {
+      const existing=await DB.getAsset(`appearance_preset_${id}`);
+      if(!existing)throw Error('原主题已删除，请重新领取');
+      const old=JSON.parse(existing) as AppearancePreset;
+      const raw=data as any;
+      if(raw?.type!=='sully_appearance_preset'||!raw.theme)throw Error('主题格式无效');
+      const presetTheme={...raw.theme};
+      if(presetTheme.wallpaper?.startsWith('blob:'))presetTheme.wallpaper=(await DB.getAsset('wallpaper'))||'';
+      if(presetTheme.lockWallpaper?.startsWith('blob:'))presetTheme.lockWallpaper=(await DB.getAsset('lock_wallpaper'))||undefined;
+      const preset=await migrateAppearancePresetBlobRefs({id,name:raw.name||old.name,createdAt:old.createdAt,theme:presetTheme,customIcons:raw.customIcons,chatThemes:raw.chatThemes,chatLayout:raw.chatLayout} as AppearancePreset);
+      const {originAssets}=await import('../utils/decorationLibrary');
+      await DB.saveAssetBatch([{id:`appearance_preset_${id}`,data:JSON.stringify(preset)},...originAssets(id,origin)]);
+      setAppearancePresets(prev=>prev.map(item=>item.id===id?preset:item));
+  };
+
   const renameAppearancePreset = async (id: string, name: string) => {
       setAppearancePresets(prev => prev.map(p => {
           if (p.id !== id) return p;
@@ -3783,7 +3829,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       const exportPreset = deepCloneForExport(preset);
       await resolveBlobRefsDeep(exportPreset);
       // 保留原始壁纸画质，把整个预设 JSON 塞进 zip 包压体积
-      const data = JSON.stringify({ type: 'sully_appearance_preset', version: 1, ...exportPreset }, null, 2);
+      const {readDecorationOrigin} = await import('../utils/decorationLibrary');
+      const origin = await readDecorationOrigin(id);
+      const data = JSON.stringify({ type: 'sully_appearance_preset', version: 1, ...exportPreset, beautyOrigin:{...origin,share:undefined} }, null, 2);
       const JSZip = await loadJSZip();
       const zip = new JSZip();
       (zip as any).file('preset.json', data);
@@ -3819,6 +3867,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           chatLayout: raw.chatLayout,
       } as AppearancePreset);
       await DB.saveAsset(`appearance_preset_${preset.id}`, JSON.stringify(preset));
+      const {importedOrigin} = await import('../utils/decorationLibrary');
+      await DB.saveAsset(`decoration_origin_${preset.id}`, JSON.stringify(importedOrigin(raw)));
       setAppearancePresets(prev => [preset, ...prev]);
       addToast(`已导入预设「${preset.name}」`, 'success');
       return preset.id;
@@ -4185,6 +4235,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
           // 桌面皮肤偏好（电子宠物/手游风的界面配色 + 看板 banner）——异步（看板图令牌需解析为
           // data URL 才能跨设备），所以在对象字面量外单独 await。text_only 只带配色偏好、跳过看板大图。
+          if(mode==='full'||mode==='text_only')await migrateLegacyWhiteboxPresets(DB);
+          if(mode==='full'){backupData.beautyAuthorLocal=exportBeautyAuthorBackup();backupData.beautyPreferences=exportBeautyPreferences();}
           backupData.desktopSkinLocal = await exportDesktopSkinLocal(mode !== 'text_only');
 
           // 协同工作是可拆卸的独立 IndexedDB，不在主 DB store 清单里，必须单独打包。
@@ -4505,6 +4557,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       const mediaList = rawData.map((c: CharacterProfile, index: number) => {
                           const extracted = {
                               charId: c.id,
+                              decoration: exportDecorationMedia(c),
                               avatar: c.avatar,
                               companionAvatar: c.companionAvatar,
                               companionTouchSettings: c.companionTouchSettings,
@@ -5477,6 +5530,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     saveAppearancePreset,
     applyAppearancePreset,
     deleteAppearancePreset,
+    replaceAppearancePreset,
     renameAppearancePreset,
     exportAppearancePreset,
     importAppearancePreset,

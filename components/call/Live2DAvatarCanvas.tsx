@@ -71,6 +71,8 @@ interface Live2DAvatarCanvasProps {
   onLoadingChange?: (loading: boolean, stage?: string) => void;
   onError?: (message: string) => void;
   onReady?: () => void;
+  /** 提供透明背景的当前姿态快照；卸载时清空，供相机贴纸使用。 */
+  onSnapshotReady?: (capture: (() => HTMLCanvasElement) | null) => void;
   touchRequest?: AvatarTouchRequest | null;
   touchImpulseNonce?: number;
   onAvatarTouch?: (hit: AvatarTouchHit) => void;
@@ -317,6 +319,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   onLoadingChange,
   onError,
   onReady,
+  onSnapshotReady,
   touchRequest,
   touchImpulseNonce,
   onAvatarTouch,
@@ -343,6 +346,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   const onLoadingChangeRef = useRef(onLoadingChange);
   const onErrorRef = useRef(onError);
   const onReadyRef = useRef(onReady);
+  const onSnapshotReadyRef = useRef(onSnapshotReady);
   const onAvatarTouchRef = useRef(onAvatarTouch);
   const touchRegionsRef = useRef<AvatarTouchRegion[]>(touchRegions ?? config.touchRegions ?? []);
   const onTouchRegionsChangeRef = useRef(onTouchRegionsChange);
@@ -419,6 +423,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
   useEffect(() => { onLoadingChangeRef.current = onLoadingChange; }, [onLoadingChange]);
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
   useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
+  useEffect(() => { onSnapshotReadyRef.current = onSnapshotReady; }, [onSnapshotReady]);
   useEffect(() => { onAvatarTouchRef.current = onAvatarTouch; }, [onAvatarTouch]);
   useEffect(() => { touchRegionsRef.current = touchRegions ?? config.touchRegions ?? []; }, [touchRegions, config.touchRegions]);
   useEffect(() => { onTouchRegionsChangeRef.current = onTouchRegionsChange; }, [onTouchRegionsChange]);
@@ -1416,7 +1421,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
         };
         internal.on('beforeModelUpdate', applyFinalHeadLock);
 
-        app.ticker.add(() => {
+        const updateStage = (instant = false) => {
           if (!app) return;
           if (ambientAutonomyDisabledRef.current && motionStateRef.current === 'idle') {
             const mainManager = internal?.motionManager;
@@ -1472,16 +1477,19 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
           const targetY = cameraY + bobY;
           const currentScale = model.scale.x || targetScale;
           const currentY = model.position.y || targetY;
-          model.scale.set(currentScale + (targetScale - currentScale) * 0.08);
+          const blend = instant ? 1 : 0.08;
+          model.scale.set(currentScale + (targetScale - currentScale) * blend);
           model.position.set(
             cameraX + frame.bodyX * 5,
-            currentY + (targetY - currentY) * 0.08,
+            currentY + (targetY - currentY) * blend,
           );
           // `frame.rotation` is also produced by AvatarAutonomy and rotates the
           // entire Live2D display, which visually turns the head even when all
           // head parameters are zero.
           model.rotation = headMotionLockedRef.current || ambientAutonomyDisabledRef.current ? 0 : frame.rotation;
-        });
+        };
+        app.ticker.add(() => updateStage());
+        if (onSnapshotReadyRef.current) updateStage(true);
 
         const initialPerformance = performanceRef.current;
         if (initialPerformance) {
@@ -1498,6 +1506,22 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
         });
         onLoadingChangeRef.current?.(false, '角色已就绪');
         onReadyRef.current?.();
+        onSnapshotReadyRef.current?.(() => {
+          if (disposed || !app) throw new Error('Live2D 舞台已关闭');
+          updateStage(true);
+          const width = app.screen.width, height = app.screen.height, resolution = app.renderer.resolution;
+          // Only the still capture renders at higher density; the small live preview stays cheap.
+          try {
+            app.renderer.resize(width, height, 1024 / Math.max(1, width, height));
+            app.render();
+            const snapshot = document.createElement('canvas');
+            snapshot.width = app.canvas.width; snapshot.height = app.canvas.height;
+            const context = snapshot.getContext('2d');
+            if (!context) throw new Error('无法生成 Live2D 快照');
+            context.drawImage(app.canvas as HTMLCanvasElement, 0, 0);
+            return snapshot;
+          } finally { app.renderer.resize(width, height, resolution); }
+        });
 
         model.once('destroy', () => {
           host.removeEventListener('pointermove', onPointerMove);
@@ -1528,6 +1552,7 @@ const Live2DAvatarCanvas: React.FC<Live2DAvatarCanvasProps> = ({
     void boot();
     return () => {
       disposed = true;
+      onSnapshotReadyRef.current?.(null);
       resizeObserver?.disconnect();
       intersectionObserver?.disconnect();
       document.removeEventListener('visibilitychange', onDocumentVisibilityChange);

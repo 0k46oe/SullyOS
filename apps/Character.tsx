@@ -1,4 +1,5 @@
 import CharacterStatsPanel from '../components/character/CharacterStatsPanel';
+import { characterRemark } from '../utils/characterRemark';
 import { loadCharacterContextMessages } from '../utils/chatContextRange';
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
@@ -1360,9 +1361,16 @@ ${isInitialGeneration ? `
                                    <div className="w-full h-full rounded-[2rem] shadow-md bg-white border-4 border-white overflow-hidden relative"><TokenImg value={formData.avatar} className={`w-full h-full object-cover ${isCompressing ? 'opacity-50 blur-sm' : ''}`} alt="A" /></div>
                                    <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleFileChange} />
                                </div>
-                               <div className="flex-1 space-y-3">
+                               <div className="min-w-0 flex-1 space-y-3">
                                    <input value={formData.name} onChange={(e) => handleChange('name', e.target.value)} className="w-full bg-transparent py-1 text-xl font-medium text-slate-800 border-b border-slate-200" placeholder="名称" />
-                                   <input value={formData.description} onChange={(e) => handleChange('description', e.target.value)} className="w-full bg-transparent py-1 text-sm text-slate-500 border-b border-slate-200" placeholder="描述" />
+                                   <div className="flex min-w-0 items-center gap-2 border-b border-slate-200">
+                                       <input value={characterRemark(formData.description)} onChange={(e) => handleChange('description', e.target.value)} className="min-w-0 flex-1 bg-transparent py-1 text-sm text-slate-500 outline-none focus-visible:ring-1 focus-visible:ring-primary" placeholder="输入备注" aria-label="输入备注" />
+                                       <label title="聊天显示备注" className="relative flex shrink-0 cursor-pointer items-center gap-1.5 py-2 text-[10px] text-slate-400">
+                                           <span>聊天显示</span>
+                                           <input type="checkbox" role="switch" aria-label="聊天显示备注" checked={!!formData.chatShowRemark} onChange={e => handleChange('chatShowRemark', e.target.checked)} className="peer sr-only" />
+                                           <span aria-hidden="true" className="relative h-4 w-7 rounded-full bg-slate-200 transition-colors peer-checked:bg-primary peer-focus-visible:ring-2 peer-focus-visible:ring-primary peer-focus-visible:ring-offset-2 after:absolute after:left-0.5 after:top-0.5 after:h-3 after:w-3 after:rounded-full after:bg-white after:shadow-sm after:transition-transform peer-checked:after:translate-x-3" />
+                                       </label>
+                                   </div>
                                    {/* 头像 URL 入口: 与左侧上传文件平级. 走 draft -> 失焦/回车 commit,
                                        避免逐字 commit 导致所有引用 char.avatar 的 <img> 在打字时疯狂
                                        请求不完整 URL. https URL 会作为主动消息的通知图标传到 worker;

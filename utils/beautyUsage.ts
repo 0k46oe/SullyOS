@@ -1,6 +1,7 @@
 import { DB } from './db';
 import type { BeautyShare } from './beautyShareContract';
 import { validateDecoration } from './chatDecoration';
+import { readBeautyRepoStatus } from './beautyRepoStatus';
 
 const KEY = 'sully-beauty-usage-v1';
 export const BEAUTY_USAGE_EVENT = 'sully-beauty-usage-change';
@@ -39,12 +40,14 @@ export function stopBeautyUsage(target: string) {
 }
 export function stopBeautyForThemeChange(updates: Record<string, unknown>) {
   const keys = Object.keys(updates);
+  if(keys.includes('scheduleCardAppearance'))stopBeautyUsage('appearance:schedule');
+  if(keys.includes('journalAppearance'))stopBeautyUsage('appearance:journal');
   if (keys.some(key => key.startsWith('chat'))) stopBeautyUsage('chat:*');
   if (keys.some(key => /^(hue|saturation|lightness|wallpaper|desktop|launcher|customFont|contentColor|icon|darkMode)/.test(key))) stopBeautyUsage('appearance');
 }
 export function dueBeautyRepo(state: UsageState, now: number, validTargets: string[]): BeautyUse | undefined {
   if (state.disabled || now - state.lastPromptAt < 86400_000) return;
-  return state.uses.find(item => validTargets.includes(item.target) && now - item.startedAt > BEAUTY_REPO_DELAY && !state.reminded.includes(item.share.code));
+  return state.uses.find(item => validTargets.includes(item.target) && now - item.startedAt > BEAUTY_REPO_DELAY && !state.reminded.includes(item.share.code) && !readBeautyRepoStatus(item.share.code));
 }
 export function markBeautyRepoPrompt(code: string) { const state = readBeautyUsage(); if (!state.reminded.includes(code)) state.reminded.push(code); state.lastPromptAt = Date.now(); write(state); }
 export function setBeautyRepoDisabled(disabled: boolean) { write({ ...readBeautyUsage(), disabled }); }

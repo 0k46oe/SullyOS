@@ -630,6 +630,16 @@ export async function rerollWorldCharBeat(
             for (const oldBeat of episode.beats) rollbackWorldBeat(baseline, episode, oldBeat.charId, members);
         }
         const relationshipsBefore = episode.relationshipsBefore || baseline.relationships.map(r => ({ ...r }));
+        // 用旧发言后第一条保留消息作锚点，避免重演把发起方挪到回复方后面。
+        const insertBefore = new Map<string, string>();
+        for (const thread of world.threads || []) {
+            const replaced = (m: (typeof thread.messages)[number]) =>
+                m.fromId === charId && m.round === episode.round && m.storyTime === episode.storyTime;
+            const first = thread.messages.findIndex(replaced);
+            if (first < 0) continue;
+            const next = thread.messages.slice(first + 1).find(m => !replaced(m));
+            if (next) insertBefore.set(thread.id, next.id);
+        }
         rollbackWorldBeat(world, episode, charId, members);
 
         dispatch('world-episode-start', { worldId: world.id, worldName: world.name, storyTime: episode.storyTime, total: 1 });
@@ -707,7 +717,7 @@ export async function rerollWorldCharBeat(
             }
         }
 
-        applyBeatToThreads(world, beat, members, episode.round, episode.storyTime);
+        applyBeatToThreads(world, beat, members, episode.round, episode.storyTime, insertBefore);
         collectSeeds(world, beat, episode.round, episode.storyTime);
         applyRelationshipDeltas(world, [beat], members);
         await DB.replaceWorldBeat(world, updatedEp, charId, {

@@ -197,6 +197,7 @@ export function collectCharSettings(
     return {
         // ── 开关：默认关的，问有没有人开过 ──
         记忆宫殿: anyOn(x => x.memoryPalaceEnabled),
+        聊天显示备注: anyOn(x => x.chatShowRemark === true),
         自动归档: anyOn(x => x.autoArchiveEnabled),
         思考过程: anyOn(x => x.showThinkingChain),
         日程与情绪: anyOn(x => x.scheduleFeatureEnabled),
@@ -463,6 +464,7 @@ export function collectFeatureFlags(src: FeatureSources): Record<string, string>
         // ── 外部服务接入 ──
         // 天气和热点走免鉴权的公共源，没有「配了」这一态，只有开没开。
         天气: rt.weatherEnabled ? '开' : '关',
+        节假日感知: rt.userHolidays?.enabled && rt.userHolidays.countryCode ? '开' : '关',
         // 自备 key 的人走 OpenWeatherMap，留空走 Open-Meteo。只报有没有，不报 key。
         天气自备key: rt.weatherApiKey?.trim() ? '有' : '无',
         热点: rt.newsEnabled ? '开' : '关',

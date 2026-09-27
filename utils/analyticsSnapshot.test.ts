@@ -39,9 +39,18 @@ const POISON = {
     css: '.bubble{content:"我写的CSS"}',
 };
 
+it('聊天备注快照仅报开关，不含备注或非法开关内容', () => {
+    for (const value of [true, false, undefined, POISON.key]) {
+        const result = collectCharSettings([{ id: 'private', name: POISON.myName, description: POISON.token, chatShowRemark: value } as CharacterProfile], 'private');
+        expect(result.聊天显示备注).toBe(value === true ? '有人开' : '都没开');
+        for (const secret of Object.values(POISON)) expect(JSON.stringify(result)).not.toContain(secret);
+    }
+});
+
 /** 全部字段都塞了毒药的实时感知配置。 */
 function poisonedRealtimeConfig(overrides: Partial<RealtimeConfig> = {}): RealtimeConfig {
     return {
+        userHolidays: { enabled: true, countryCode: POISON.city, subdivisionCode: POISON.myName, timeZone: POISON.url },
         weatherEnabled: true,
         weatherApiKey: POISON.key,
         weatherCity: POISON.city,

@@ -9,6 +9,10 @@ const metadata = { name: '月光', credit: '作者', platforms: ['糯米机美�
 const pack = { type: 'sully_appearance_preset', version: 1, name: '月光', theme: { primaryColor: '#fff' } };
 const file = (content: BlobPart, name: string) => new File([content as any], name) as unknown as globalThis.File;
 describe('美化分享格式边界', () => {
+  it('accepts a reviewed chat package with the new psyche appearance part',()=>{
+    const pack={format:'sullyos-chat-decoration',version:1,name:'心象',parts:{psyche:{styleId:'ink',customCss:''}}};
+    expect(validateBeautyPackage(pack)).toEqual({kind:'chat-decoration',data:pack});
+  });
   it('要求平台、署名、权限与反馈偏好明确', () => {
     expect(validateBeautyMetadata(metadata).allowRedistribute).toBe(true);
     for (const patch of [{ platforms: [] }, { credit: '' }, { allowRemix: 'yes' }, { bugFeedback: 'unknown' }]) expect(() => validateBeautyMetadata({ ...metadata, ...patch })).toThrow();

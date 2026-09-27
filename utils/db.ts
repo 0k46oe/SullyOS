@@ -1,3 +1,7 @@
+import {migrateLegacyWhiteboxPresets} from './legacyWhiteboxPresets';
+import {restoreDecorationMedia} from './decorationMediaBackup';
+import {exportBeautyPreferences,importBeautyPreferences} from './beautyPreferencesBackup';
+import {exportBeautyAuthorBackup,importBeautyAuthorBackup} from './beautyAuthorBackup';
 import { toMountedWorldbook } from './worldbook';
 import { orderWorldEpisodes } from './worldHome/episodeOrder';
 
@@ -1345,6 +1349,19 @@ export const DB = {
         transaction.oncomplete = () => resolve();
         transaction.onerror = () => reject(transaction.error);
         transaction.onabort = () => reject(transaction.error || new Error('IndexedDB transaction aborted'));
+    });
+  },
+
+  // Commit a preset together with its provenance so a failed save cannot advance its version.
+  saveAssetBatch: async (entries: Array<{id:string;data:string}>): Promise<void> => {
+    const db=await openDB();
+    return new Promise((resolve,reject)=>{
+      const transaction=db.transaction(STORE_ASSETS,'readwrite');
+      const store=transaction.objectStore(STORE_ASSETS);
+      for(const entry of entries)store.put(entry);
+      transaction.oncomplete=()=>resolve();
+      transaction.onerror=()=>reject(transaction.error);
+      transaction.onabort=()=>reject(transaction.error||new Error('Asset batch aborted'));
     });
   },
 
@@ -3361,6 +3378,7 @@ export const DB = {
   exportFullData: async (
       options: { includeBackendConnection?: boolean } = {},
   ): Promise<Partial<FullBackupData>> => {
+      await migrateLegacyWhiteboxPresets(DB);
       const db = await openDB();
       
       const getAllFromStore = (storeName: string): Promise<any[]> => {
@@ -3480,6 +3498,8 @@ export const DB = {
           mcdLocal: exportMcdLocal(),             // 麦当劳 token + 启用状态（存 localStorage）
           mcpLocal: exportMcpLocal(),             // 通用 MCP 服务器配置（存 localStorage）
           amsg2GlobalConfig: await exportAmsg2GlobalConfig(options), // 主动消息 2.0 全局配置（存独立的 ActiveMsg 库；后端连接默认不带走）
+          beautyAuthorLocal: exportBeautyAuthorBackup(),
+          beautyPreferences: exportBeautyPreferences(),
           desktopSkinLocal: await exportDesktopSkinLocal(), // 桌面皮肤：界面配色 + 看板 banner（看板图令牌解析为 data URL）
       };
   },
@@ -3746,7 +3766,8 @@ export const DB = {
                       const img = media.roomItems?.[item.id];
                       return img ? { ...item, image: img } : item;
                   })
-              } : c.roomConfig
+              } : c.roomConfig,
+              ...restoreDecorationMedia(media.decoration),
           } as CharacterProfile;
       };
 
@@ -3961,6 +3982,12 @@ export const DB = {
           );
           (data as any).amsg2GlobalConfig = undefined;
       }, 1);
+      await runSection('美化偏好', data.beautyPreferences !== undefined, async () => {
+          importBeautyPreferences(data.beautyPreferences);data.beautyPreferences=undefined;
+      });
+      await runSection('美化作者身份', data.beautyAuthorLocal !== undefined, async () => {
+          importBeautyAuthorBackup(data.beautyAuthorLocal);data.beautyAuthorLocal=undefined;
+      });
       await runSection('桌面皮肤偏好', (data as any).desktopSkinLocal !== undefined, async () => {
           await importDesktopSkinLocal((data as any).desktopSkinLocal); // 界面配色 + 看板 banner（data URL→本机 blob）
           (data as any).desktopSkinLocal = undefined;

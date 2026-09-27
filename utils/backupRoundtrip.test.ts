@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import JSZip from 'jszip';
 import { DB, openDB } from './db';
-import { putImageBlob, dataUrlToBlob, getBlobForRef } from './blobRef';
+import { putImageBlob, dataUrlToBlob, getBlobForRef, deleteBlobRef, restoreBlobRef } from './blobRef';
 import { collectBlobRefs, writeBlobsToZip, readBlobsIndex, restoreBlobsFromZip, BLOBS_INDEX_FILE } from './backupBlobs';
 import { encodeVectorsForBackup, encodeVectorsForBackupChunked, MemoryVectorDB } from './memoryPalace/db';
 import { writeV2Backup, assembleV2Backup, shardFileName, type ShardLimits } from './backupFormat';
@@ -70,6 +70,34 @@ function vecValues(v: any): number[] {
 }
 
 describe('v2 真实链路：分片 → 组装 → importFullData', () => {
+    it('聊天备注开关与相机成片在清库后完整恢复，不依赖原设备图片', async () => {
+        const photo = new Blob([new Uint8Array([255, 216, 255, 217])], { type: 'image/jpeg' });
+        const token = await putImageBlob(photo);
+        await seedStore('characters', [
+            { id: 'camera-on', name: '实际名称', description: '用户备注', chatShowRemark: true },
+            { id: 'camera-off', name: '关闭备注', chatShowRemark: false },
+        ]);
+        await seedStore('messages', [{ id: 901, charId: 'camera-on', role: 'user', type: 'image', content: token }]);
+        await seedStore('gallery', [{ id: 'camera-photo', url: token }]);
+        const exported = await DB.exportFullData();
+        const zip = new FakeZip(), tokens = new Set<string>();
+        const manifest = await writeV2Backup(zip, exported as any, { onSerialized: s => collectBlobRefs(s, tokens) });
+        expect(tokens.has(token)).toBe(true);
+        expect((await writeBlobsToZip(zip, tokens, getBlobForRef)).missing).toEqual([]);
+        for (const store of ['characters', 'messages', 'gallery']) await seedStore(store, []);
+        await deleteBlobRef(token);
+        expect(await getBlobForRef(token)).toBeNull();
+        await restoreBlobsFromZip(zip, await readBlobsIndex(zip), restoreBlobRef);
+        await DB.importFullData(await assembleV2Backup(zip, manifest) as any);
+        const chars = await DB.getRawStoreData('characters');
+        expect(chars.find((c: any) => c.id === 'camera-on')).toMatchObject({ name: '实际名称', description: '用户备注', chatShowRemark: true });
+        expect(chars.find((c: any) => c.id === 'camera-off').chatShowRemark).toBe(false);
+        expect((await DB.getRawStoreData('messages'))[0].content).toBe(token);
+        expect((await DB.getRawStoreData('gallery'))[0].url).toBe(token);
+        const restored = await getBlobForRef(token);
+        expect(restored?.type).toBe('image/jpeg');
+        expect(new Uint8Array(await restored!.arrayBuffer())).toEqual(new Uint8Array(await photo.arrayBuffer()));
+    });
     it('跨分片 clear-and-add：所有片的数据都落库、不只剩最后一片（Finding 1）', async () => {
         await seedStore('gallery', [{ id: 'old', url: 'old' }]);
         const items = Array.from({ length: 5 }, (_, i) => ({ id: `g${i}`, url: `u${i}` }));

@@ -8,6 +8,8 @@ import { extractModelIds, normalizeModelIds } from '../utils/modelList';
 import { shareOrDownloadBlob } from '../utils/shareExport';
 import { bucketRetryCount, isAnalyticsConfigured, isAnalyticsEnabled, setAnalyticsEnabled, trackEvent } from '../utils/analytics';
 import Modal from '../components/os/Modal';
+import UserHolidaySettings from '../components/settings/UserHolidaySettings';
+import { consumeHolidaySettings, hasHolidaySettingsRequest, type UserHolidayConfig } from '../utils/userHolidays';
 import { NotionManager, FeishuManager, RealtimeContextManager, fetchOwmWeather, fetchOpenMeteoWeather } from '../utils/realtimeContext';
 import { XhsMcpClient } from '../utils/xhsMcpClient';
 import { resolveXhsDeploymentMode } from '../utils/xhsMcpConfig';
@@ -568,7 +570,9 @@ const Settings: React.FC = () => {
   const [resetCloudFailure, setResetCloudFailure] = useState<{ workerUrl: string; detail: string } | null>(null);
   const [showPresetModal, setShowPresetModal] = useState(false);
   const [showApiCallLog, setShowApiCallLog] = useState(false);
-  const [showRealtimeModal, setShowRealtimeModal] = useState(false);
+  const [holidaySettingsFocus] = useState(hasHolidaySettingsRequest);
+  useEffect(() => { if (holidaySettingsFocus) consumeHolidaySettings(); }, [holidaySettingsFocus]);
+  const [showRealtimeModal, setShowRealtimeModal] = useState(holidaySettingsFocus);
   const [showMcpModal, setShowMcpModal] = useState(false);
   const [showMcpHelp, setShowMcpHelp] = useState(false);
   const [showCloudModal, setShowCloudModal] = useState(false);
@@ -677,6 +681,7 @@ const Settings: React.FC = () => {
 
   // 实时感知配置的本地状态
   const [rtWeatherEnabled, setRtWeatherEnabled] = useState(realtimeConfig.weatherEnabled);
+  const [rtUserHolidays, setRtUserHolidays] = useState<UserHolidayConfig>(() => ({ ...(realtimeConfig.userHolidays || { enabled: false, countryCode: '' }), ...(holidaySettingsFocus ? { enabled: true } : {}) }));
   const [rtWeatherKey, setRtWeatherKey] = useState(realtimeConfig.weatherApiKey);
   const [rtWeatherCity, setRtWeatherCity] = useState(realtimeConfig.weatherCity);
   const [rtNewsEnabled, setRtNewsEnabled] = useState(realtimeConfig.newsEnabled);
@@ -720,7 +725,11 @@ const Settings: React.FC = () => {
   const [rtXhsCookie, setRtXhsCookie] = useState(realtimeConfig.xhsMcpConfig?.cookie || '');
   const [rtXhsPlatform, setRtXhsPlatform] = useState<'xhs' | 'rednote' | undefined>(realtimeConfig.xhsMcpConfig?.platform);
   const [rtXhsGuideOpen, setRtXhsGuideOpen] = useState(false);
-  const [rtTestStatus, setRtTestStatus] = useState('');
+  const [rtTestStatuses, setRtTestStatuses] = useState<Record<string, string>>({});
+  const renderRtTestStatus = (key: string) => {
+      const status = rtTestStatuses[key];
+      return status ? <div role="status" aria-live="polite" className={`p-3 rounded-xl text-xs font-medium whitespace-pre-wrap break-words [overflow-wrap:anywhere] ${status.includes('成功') ? 'bg-emerald-100 text-emerald-700' : status.includes('失败') || status.includes('错误') ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-600'}`}>{status}</div> : null;
+  };
 
   // 麦当劳 MCP (token / 启用态都直接存 localStorage, 不进 realtimeConfig)
   const [mcdToken, setMcdTokenState] = useState(() => getMcdToken());
@@ -1833,8 +1842,10 @@ const Settings: React.FC = () => {
 
   // 保存实时感知配置
   const handleSaveRealtimeConfig = () => {
+      if (rtUserHolidays.enabled && !rtUserHolidays.countryCode) { addToast('请选择生活所在的国家／地区，或关闭节假日感知', 'error'); return; }
       const updates = {
           weatherEnabled: rtWeatherEnabled,
+          userHolidays: { ...rtUserHolidays, introChoice: rtUserHolidays.enabled ? 'configured' as const : 'declined' as const },
           weatherApiKey: rtWeatherKey,
           weatherCity: rtWeatherCity,
           newsEnabled: rtNewsEnabled,
@@ -1872,6 +1883,7 @@ const Settings: React.FC = () => {
 
   // 测试天气API连接：填了 key 测 OpenWeatherMap，没填测免费的 Open-Meteo
   const testWeatherApi = async () => {
+      const setRtTestStatus = (value: string) => setRtTestStatuses(previous => ({ ...previous, weather: value }));
       if (!rtWeatherCity) {
           setRtTestStatus('请先填写城市');
           return;
@@ -1893,6 +1905,7 @@ const Settings: React.FC = () => {
 
   // 测试Notion连接
   const testNotionApi = async () => {
+      const setRtTestStatus = (value: string) => setRtTestStatuses(previous => ({ ...previous, notion: value }));
       if (!rtNotionKey || !rtNotionDbId) {
           setRtTestStatus('请填写 Notion API Key 和 Database ID');
           return;
@@ -1910,6 +1923,7 @@ const Settings: React.FC = () => {
 
   // 测试飞书连接
   const testFeishuApi = async () => {
+      const setRtTestStatus = (value: string) => setRtTestStatuses(previous => ({ ...previous, feishu: value }));
       if (!rtFeishuAppId || !rtFeishuAppSecret || !rtFeishuBaseId || !rtFeishuTableId) {
           setRtTestStatus('请填写飞书 App ID、App Secret、多维表格 ID 和数据表 ID');
           return;
@@ -1927,6 +1941,8 @@ const Settings: React.FC = () => {
 
   // 测试小红书 Bridge 连接
   const testXhsMcp = async () => {
+      const statusKey = rtXhsMode === 'lite' ? 'xhs-lite' : 'xhs-local';
+      const setRtTestStatus = (value: string) => setRtTestStatuses(previous => ({ ...previous, [statusKey]: value }));
       const urlToUse = rtXhsMode === 'lite' ? XHS_LITE_URL : rtXhsLocalUrl;
       const cookieToUse = rtXhsMode === 'lite' ? (rtXhsCookie.trim() || undefined) : undefined;
       if (!urlToUse) {
@@ -2206,6 +2222,8 @@ const Settings: React.FC = () => {
                 • <b>整合导出</b>: 一次性导出文字与图片媒体；VRM / Live2D 模型请使用下方独立备份。<br/>
                 • <b>纯文字备份</b>: 包含所有聊天记录、角色设定、剧情数据。所有图片会被移除（减小体积）。<br/>
                 • <b>媒体与美化素材</b>: 导出相册、表情包、聊天图片、头像、主题气泡、壁纸、图标等图片资源和外观配置。<br/>
+                • <b>装扮与搭配</b>: 整合/媒体备份包含桌面主题、聊天装扮、搭配收藏、旧气泡及实际素材，并保留来源权限、角色搭配和投稿更新绑定。纯文字备份不能完整恢复美化。<br/>
+                • <b>作者搬家</b>: 整合备份还包含 Repo 状态、美化偏好和引导记录；已在作者页开启“记住作者身份”时，也携带作者码与密码。导入后恢复这些数据，不会自动登录或投稿。<br/>
                 • <b>语音范围</b>: 整合/媒体备份仅包含已收藏语音，以及 Live2D 开机、触摸预设实际引用的语音；未收藏的聊天、通话等临时语音不会导出。<br/>
                 • 兼容旧版 JSON 备份文件的导入。
             </p>
@@ -4255,6 +4273,7 @@ const Settings: React.FC = () => {
           footer={<button onClick={handleSaveRealtimeConfig} className="w-full py-3 bg-violet-500 text-white font-bold rounded-2xl shadow-lg">保存配置</button>}
       >
           <div className="space-y-5 max-h-[60vh] overflow-y-auto no-scrollbar">
+              <UserHolidaySettings value={rtUserHolidays} onChange={setRtUserHolidays} />
               {/* 天气配置 */}
               <div className="bg-emerald-50/50 p-4 rounded-2xl space-y-3">
                   <div className="flex items-center justify-between">
@@ -4277,7 +4296,8 @@ const Settings: React.FC = () => {
                               <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">城市</label>
                               <input type="text" value={rtWeatherCity} onChange={e => setRtWeatherCity(e.target.value)} className="w-full bg-white/80 border border-emerald-200 rounded-xl px-3 py-2 text-sm" placeholder="北京 / Beijing / Shanghai" />
                           </div>
-                          <button onClick={testWeatherApi} className="w-full py-2 bg-emerald-100 text-emerald-600 text-xs font-bold rounded-xl active:scale-95 transition-transform">测试天气API</button>
+<button onClick={testWeatherApi} className="w-full py-2 bg-emerald-100 text-emerald-600 text-xs font-bold rounded-xl active:scale-95 transition-transform">测试天气API</button>
+                          {renderRtTestStatus('weather')}
                       </div>
                   )}
               </div>
@@ -4443,6 +4463,7 @@ const Settings: React.FC = () => {
                               <input type="text" value={rtNotionDbId} onChange={e => setRtNotionDbId(e.target.value)} className="w-full bg-white/80 border border-orange-200 rounded-xl px-3 py-2 text-sm font-mono" placeholder="从数据库URL复制" />
                           </div>
                           <button onClick={testNotionApi} className="w-full py-2 bg-orange-100 text-orange-600 text-xs font-bold rounded-xl active:scale-95 transition-transform">测试Notion连接</button>
+                          {renderRtTestStatus('notion')}
                           <div className="border-t border-orange-200/50 pt-2 mt-2">
                               <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">笔记数据库 ID（可选）</label>
                               <input type="text" value={rtNotionNotesDbId} onChange={e => setRtNotionNotesDbId(e.target.value)} className="w-full bg-white/80 border border-orange-200 rounded-xl px-3 py-2 text-sm font-mono" placeholder="用户日常笔记的数据库ID" />
@@ -4495,6 +4516,7 @@ const Settings: React.FC = () => {
                               <input type="text" value={rtFeishuTableId} onChange={e => setRtFeishuTableId(e.target.value)} className="w-full bg-white/80 border border-indigo-200 rounded-xl px-3 py-2 text-sm font-mono" placeholder="tblxxxxxxxx" />
                           </div>
                            <button onClick={testFeishuApi} className="w-full py-2 bg-indigo-100 text-indigo-600 text-xs font-bold rounded-xl active:scale-95 transition-transform">测试读取连接</button>
+                          {renderRtTestStatus('feishu')}
                            <p className="rounded-xl bg-amber-50 px-3 py-2 text-[10px] leading-relaxed text-amber-700">
                                测试不会新增记录，只验证凭据、读取权限和 Table ID。读取成功但写入提示 Forbidden，说明还缺新增记录权限。
                            </p>
@@ -4533,6 +4555,7 @@ const Settings: React.FC = () => {
                               <input value={rtXhsLocalUrl} onChange={e => setRtXhsLocalUrl(e.target.value)} className="w-full bg-white/80 border border-red-200 rounded-xl px-3 py-2 text-[11px] font-mono" placeholder="http://localhost:18060/mcp" />
                           </div>
                           <button onClick={testXhsMcp} className="w-full py-2 bg-red-100 text-red-600 text-xs font-bold rounded-xl active:scale-95 transition-transform">测试连接</button>
+                          {renderRtTestStatus('xhs-local')}
                           <div className="grid grid-cols-2 gap-2">
                               <div>
                                   <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">小红书昵称</label>
@@ -4576,6 +4599,7 @@ const Settings: React.FC = () => {
                               <textarea value={rtXhsCookie} onChange={e => { setRtXhsCookie(e.target.value); setRtXhsPlatform(undefined); }} rows={2} className="w-full bg-white/80 border border-rose-200 rounded-xl px-3 py-2 text-[10px] font-mono resize-y" placeholder="a1=...; web_session=...; （从浏览器登录后复制完整 cookie）" />
                           </div>
                           <button onClick={testXhsMcp} className="w-full py-2 bg-rose-100 text-rose-600 text-xs font-bold rounded-xl active:scale-95 transition-transform">测试连接</button>
+                          {renderRtTestStatus('xhs-lite')}
                           <div className="grid grid-cols-2 gap-2">
                               <div>
                                   <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">小红书昵称</label>
@@ -4682,12 +4706,6 @@ const Settings: React.FC = () => {
                   )}
               </div>
 
-              {/* 测试状态 */}
-              {rtTestStatus && (
-                  <div className={`p-3 rounded-xl text-xs font-medium text-center ${rtTestStatus.includes('成功') ? 'bg-emerald-100 text-emerald-700' : rtTestStatus.includes('失败') || rtTestStatus.includes('错误') ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-600'}`}>
-                      {rtTestStatus}
-                  </div>
-              )}
           </div>
       </Modal>
 

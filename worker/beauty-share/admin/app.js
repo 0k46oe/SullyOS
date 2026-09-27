@@ -2,8 +2,20 @@
 const $ = id => document.getElementById(id);
 let token = sessionStorage.getItem('beauty-admin-session') || '';
 let setupToken = new URLSearchParams(location.hash.slice(1)).get('setup') || '';
+let resetToken = new URLSearchParams(location.hash.slice(1)).get('reset') || '';
 if (setupToken) { history.replaceState(null, '', location.pathname); $('login-title').textContent = '建立管理员账号'; $('login-button').textContent = '建立账号'; $('setup-note').hidden = false; $('password').autocomplete = 'new-password'; }
 let offset = 0, pageSize = 12, nextOffset = null, view = 'submissions', query = '';
+if (setupToken || resetToken) {
+  token = ''; sessionStorage.removeItem('beauty-admin-session');
+  $('password-confirm-label').hidden = false; $('password-confirm').required = true;
+}
+if (resetToken) {
+  setupToken = ''; history.replaceState(null, '', location.pathname);
+  $('login-title').textContent = '重置管理员密码'; $('login-button').textContent = '确认重置';
+  $('username').required = false; $('username').parentElement.hidden = true;
+  $('password').autocomplete = 'new-password'; $('setup-note').hidden = false;
+  $('setup-note').textContent = '请输入两次新密码（至少 12 位）。成功后旧会话失效，作品和分享码不受影响。';
+}
 let repos = []; const selected = new Set();
 function notice(message) { $('notice').textContent = message; }
 function show() { $('login').hidden = !!token; $('workspace').hidden = !token; }
@@ -39,7 +51,7 @@ function renderSubmission(item) {
   const article = element('article', '', $('submissions')); const m = item.metadata;
   const head = element('div', '', article); head.className = 'item-heading';
   element('h2', m.name, head); badge(({ pending: '审核中', approved: '已通过', rejected: '已退回' })[item.status], item.status, head);
-  element('small', `${item.kind === 'appearance' ? '外观预设' : '聊天装扮'} · ${m.credit} · ${new Date(item.updatedAt).toLocaleString()}`, article);
+  element('small', `${item.kind === 'appearance' ? '桌面主题' : '美化预设'} · ${m.credit} · ${new Date(item.updatedAt).toLocaleString()}`, article);
   const details = element('details', '', article); element('summary', '作品说明与作者规范', details);
   element('p', `作者码：${item.authorCode}\n平台：${m.platforms.join('、')}\n联系说明：${m.contact || '未填写'}\n允许二改：${m.allowRemix ? '是' : '否'} · 允许二次传播：${m.allowRedistribute ? '是' : '否'}\n导出版本：${m.exportVersion}\nBug 反馈：${m.bugFeedback === 'welcome' ? '欢迎' : '请自行修复处理'}\n作者留言：${m.message || '未填写'}`, details);
   if (item.shareCode) { const code = element('p', `分享码：${item.shareCode}${item.pendingRevision ? '（旧版仍可领取）' : ''}`, article); code.className = 'share-code'; }
@@ -79,32 +91,20 @@ async function exportCards(items) {
   if (!items.length) throw Error('请先勾选要整理的 Repo。');
   if (items.length > 3) throw Error('一张合集卡最多放 3 份 Repo，请分批整理。');
   if (new Set(items.map(item => item.author_code)).size !== 1) throw Error('一张合集卡只整理同一位作者的 Repo，避免转达错人。');
-  const canvas = document.createElement('canvas'); canvas.width = 1080;
-  let ctx = canvas.getContext('2d'); const lines = [];
-  const wrap = (text, size, color = '#374735') => {
-    ctx.font = `${size}px system-ui,sans-serif`;
-    for (const paragraph of String(text).replace(/\s*\n\s*/g, ' ').split('\n')) {
-      let line = '';
-      for (const char of paragraph) { if (ctx.measureText(line + char).width > 880) { lines.push({ text: line, size, color }); line = char; } else line += char; }
-      lines.push({ text: line, size, color });
-    }
-  };
-  wrap('SULLYOS  /  REPO LETTER', 23, '#7b8872'); lines.push({ space: 34 });
-  wrap('有一些喜欢，想告诉你。', 46); lines.push({ space: 24 });
-  wrap('致 ' + items[0].metadata.credit, 30); lines.push({ space: 24 });
-  for (const item of items) { wrap(item.metadata.name, 34); wrap(item.share_code, 22, '#7b8872'); lines.push({ space: 18 }); wrap(item.message, 30); lines.push({ space: 14 }); wrap('— ' + item.signature, 25, '#607456'); lines.push({ space: 40 }); }
-  wrap('由 Sully 整理转达 · 私密 Repo，请尊重署名与反馈内容', 21, '#7b8872');
-  canvas.height = Math.ceil(160 + lines.reduce((sum, line) => sum + (line.space || line.size * 1.65), 0));
-  ctx = canvas.getContext('2d'); ctx.fillStyle = '#faf8ee'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#65815a'; ctx.fillRect(64, 66, 4, canvas.height - 132); let y = 90;
-  for (const line of lines) { if (line.space) { y += line.space; continue; } ctx.font = `${line.size}px system-ui,sans-serif`; ctx.fillStyle = line.color; ctx.textBaseline = 'top'; ctx.fillText(line.text, 100, y); y += line.size * 1.65; }
-  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png')); if (!blob) throw Error('卡片生成失败，请重试');
+  const canvases = renderRepoCards(items);
   const preview = element('dialog', '', document.body); preview.className = 'repo-card-preview';
   const tools = element('div', '', preview); tools.className = 'actions';
-  const save = element('button', '保存 PNG 卡片', tools); save.className = 'primary'; save.onclick = () => downloadBlob(blob, `Sully-Repo-${items[0].author_code}-${items[0].id.slice(0,8)}.png`);
   const close = element('button', '关闭', tools); close.onclick = () => { preview.close(); preview.remove(); };
-  preview.addEventListener('cancel', () => preview.remove()); preview.append(canvas); preview.showModal();
-  notice('卡片已生成。请手动发送给作者，发送后再标记「已转达」。');
+  preview.addEventListener('cancel', () => preview.remove());
+  for (const [index, canvas] of canvases.entries()) {
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) { preview.remove(); throw Error('卡片生成失败，请重试'); }
+    const save = element('button', canvases.length === 1 ? '保存 PNG 卡片' : `保存第 ${index + 1} 页`, preview);
+    save.className = 'primary'; save.onclick = () => downloadBlob(blob, `Sully-Repo-${items[0].id.slice(0,8)}-${index + 1}.png`);
+    preview.append(canvas);
+  }
+  preview.showModal();
+  notice('卡片已生成，可交给机器人或手动转发；确认送达后再标记「已转达」。');
 }
 async function load() {
   const result = await (await api(`admin/${view}?status=${$('filter').value}&offset=${offset}&q=${encodeURIComponent(query)}`)).json();
@@ -126,9 +126,18 @@ function switchView(next) {
   return load();
 }
 $('login').onsubmit = event => { event.preventDefault(); void busy(async () => {
+  if ((setupToken || resetToken) && $('password').value !== $('password-confirm').value) throw Error('两次输入的密码不一致');
+  if (resetToken) {
+    const result = await (await api('admin/reset-password', { method: 'POST', body: JSON.stringify({ token: resetToken, password: $('password').value, passwordConfirm: $('password-confirm').value }) })).json();
+    resetToken = ''; $('password').value = ''; $('password-confirm').value = '';
+    $('password-confirm').required = false; $('password-confirm-label').hidden = true;
+    $('username').parentElement.hidden = false; $('username').required = true; $('username').value = result.username;
+    $('password').autocomplete = 'current-password'; $('login-title').textContent = '管理员登录'; $('login-button').textContent = '登录'; $('setup-note').hidden = true;
+    notice('密码已重置，旧会话已注销。请用新密码登录。'); return;
+  }
   const body = { username: $('username').value.trim(), password: $('password').value, ...(setupToken ? { token: setupToken } : {}) };
   const result = await (await api(setupToken ? 'admin/setup' : 'admin/login', { method: 'POST', body: JSON.stringify(body) })).json();
-  token = result.token; setupToken = ''; $('password').value = ''; sessionStorage.setItem('beauty-admin-session', token); show(); await load();
+  token = result.token; setupToken = ''; $('password').value = ''; $('password-confirm').value = ''; $('password-confirm').required = false; $('password-confirm-label').hidden = true; sessionStorage.setItem('beauty-admin-session', token); show(); await load();
 }); };
 $('tab-submissions').onclick = () => busy(() => switchView('submissions')); $('tab-repos').onclick = () => busy(() => switchView('repos'));
 $('filter').onchange = () => busy(async () => { offset = 0; await load(); }); $('refresh').onclick = () => busy(load);

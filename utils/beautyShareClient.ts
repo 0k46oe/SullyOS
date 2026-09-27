@@ -3,7 +3,8 @@ import { readShareFile } from './pngShare';
 import { validateDecoration } from './chatDecoration';
 
 // Deployments can override this at build time; authors never enter a server URL.
-export const BEAUTY_SHARE_URL = (import.meta.env.VITE_BEAUTY_SHARE_URL || 'https://beauty.friedsully.com').replace(/\/$/, '');
+import {BEAUTY_SHARE_URL} from './beautyShareConfig';
+export {BEAUTY_SHARE_URL} from './beautyShareConfig';
 const SESSION_KEY = 'sully-beauty-author-session-v1';
 export interface BeautySession { token: string; authorCode: string; expiresAt: number }
 export function readBeautySession(): BeautySession | null {

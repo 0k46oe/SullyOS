@@ -19,4 +19,10 @@ describe('美化预览隔离', () => {
     const html = beautyPreviewDocument({ type: 'sully_appearance_preset', version: 1, name: '样例', theme: { desktopDecorations: [{ content: '<script>bad()', x: NaN }] } });
     expect(html).not.toContain('<script>'); expect(html).not.toContain('NaN');
   });
+  it('按 App 对应图标和中文名称，包括彼方与热点', () => {
+    const html = beautyPreviewDocument({type:'sully_appearance_preset',version:1,name:'SULLY',theme:{},customIcons:{vrworld:'/planet.webp',hot_news:'/news.webp',bank:'/bank.webp'}});
+    expect(html).toContain('/planet.webp'); expect(html).toContain('/news.webp');
+    expect(html).toContain('<small>彼方</small>'); expect(html).toContain('<small>热点</small>');
+    expect(html).not.toContain('/bank.webp');
+  });
 });

@@ -164,6 +164,27 @@ async function route(request: Request, env: Env): Promise<Response> {
   const ip = await sha256(env.AUTH_PEPPER + ':' + (request.headers.get('CF-Connecting-IP') || 'local'));
   await limit(env, `requests:${ip}`, 180, 60_000);
 
+  if (method === 'POST' && path === '/api/admin/reset-password') {
+    await limit(env, `admin-reset:${ip}`, 10, 3600_000);
+    const body = await readJson(request, 4096);
+    if (typeof body.token !== 'string' || !/^[a-f0-9]{64}$/.test(body.token)) fail(403, '重置链接无效或已过期');
+    let password: string;
+    try { password = validateBeautyPassword(body.password); } catch (error) { return fail(400, (error as Error).message); }
+    if (body.passwordConfirm !== password) fail(400, '两次输入的密码不一致');
+    const key = `admin-reset:${await sha256(body.token)}`;
+    const grant = await env.DB.prepare('SELECT key FROM limits WHERE key=? AND expires_at>?').bind(key, now()).first();
+    if (!grant) fail(403, '重置链接无效或已过期');
+    const hash = await passwordHash(password, env.AUTH_PEPPER);
+    // D1 batch is transactional; conditional UPDATE makes concurrent token replay fail.
+    const results = await env.DB.batch([
+      env.DB.prepare("UPDATE authors SET password_hash=? WHERE role='admin' AND EXISTS(SELECT 1 FROM limits WHERE key=? AND expires_at>?)").bind(hash, key, now()),
+      env.DB.prepare("DELETE FROM sessions WHERE author_code IN (SELECT code FROM authors WHERE role='admin' AND password_hash=?)").bind(hash),
+      env.DB.prepare('DELETE FROM limits WHERE key=?').bind(key),
+    ]);
+    if (results[0].meta.changes !== 1) fail(403, '重置链接无效或已过期');
+    const admin = await env.DB.prepare("SELECT code FROM authors WHERE role='admin'").first<{ code: string }>();
+    return json({ username: admin!.code.slice('admin:'.length) });
+  }
   if (method === 'POST' && path === '/api/admin/setup') {
     const body = await readJson(request, 4096);
     if (!env.BOOTSTRAP_HASH || typeof body.token !== 'string' || !equal(await sha256(body.token), env.BOOTSTRAP_HASH)) fail(403, '初始化凭据无效');

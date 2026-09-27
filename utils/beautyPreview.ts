@@ -18,9 +18,8 @@ export function beautyPreviewDocument(value: unknown): string {
     const t = data.theme;
     const hue = number(t.hue, 265, 0, 360), saturation = number(t.saturation, 30, 0, 100), lightness = number(t.lightness, 75, 0, 100);
     baseBackground = background(t.wallpaper, `linear-gradient(145deg,hsl(${hue},${saturation}%,${lightness}%),#f2eee9)`);
-    const icons = Object.entries(data.customIcons || {}).filter(([, v]) => resource(v)).slice(0, 8);
-    const names = ['聊天', '外观', '音乐', '日记', '相册', '彼方', '设置', '日历'];
-    const iconMarkup = names.map((name, i) => `<div class="app"><div class="icon" style="background:hsla(${hue + i * 9},${saturation}%,${lightness}%,.85)">${icons[i] ? image(icons[i][1], 'custom-icon') : `<span>${name[0]}</span>`}</div><small>${escapePreviewText(icons[i]?.[0] || name)}</small></div>`).join('');
+    const apps = [['chat', '聊天'], ['appearance', '外观'], ['music', '音乐'], ['journal', '日记'], ['gallery', '相册'], ['vrworld', '彼方'], ['hot_news', '热点'], ['settings', '设置']];
+    const iconMarkup = apps.map(([id, name], i) => `<div class="app"><div class="icon" style="background:hsla(${hue + i * 9},${saturation}%,${lightness}%,.85)">${resource(data.customIcons?.[id]) ? image(data.customIcons[id], 'custom-icon') : `<span>${name[0]}</span>`}</div><small>${escapePreviewText(name)}</small></div>`).join('');
     const stickers = (Array.isArray(t.desktopDecorations) ? t.desktopDecorations : []).slice(0, 30).map((d: any) => {
       const style = `left:${number(d.x, 50, 0, 100)}%;top:${number(d.y, 50, 0, 100)}%;transform:translate(-50%,-50%) rotate(${number(d.rotation, 0, -180, 180)}deg) scale(${number(d.scale, 1, .2, 3)});opacity:${number(d.opacity, 1, 0, 1)}`;
       return resource(d.content) ? image(d.content, 'sticker', style) : `<span class="sticker" style="${escapePreviewText(style)}">${escapePreviewText(String(d.content || '').slice(0, 12))}</span>`;

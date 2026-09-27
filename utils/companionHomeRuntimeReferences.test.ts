@@ -406,7 +406,7 @@ describe('CompanionHome touch request boundaries', () => {
     expect(source).not.toContain('data-testid="companion-generate-startup"');
     expect(source).toContain('中文原文（界面显示）');
     expect(source).toContain('语音译文（实际朗读）');
-    expect(source).toContain("label: '开机自启'");
+    expect(source).toContain("label: '开场预演'");
     expect(source).toContain('onModelReady={handleStageModelReady}');
     expect(source).toContain('COMPANION_BOOT_LOCK_PERFORMANCE');
     expect(source).toContain('const companionStartupPlayedThisSession = new Set<string>()');

@@ -752,6 +752,15 @@ const ChatModals: React.FC<ChatModalsProps> = ({
             </Modal>
 
             {/* Archive Settings Modal */}
+            <Modal isOpen={modalType === 'archive-legacy-warning'} title="旧版记忆归档" onClose={() => setModalType('none')} footer={
+                <div className="flex w-full flex-col gap-2">
+                    <button type="button" onClick={() => setModalType('none')} className="w-full py-3 bg-primary text-white font-bold rounded-2xl">确定</button>
+                    <button type="button" onClick={() => setModalType('archive-settings')} className="w-full px-3 py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl">我有必须使用的原因</button>
+                </div>
+            }>
+                <p className="text-sm leading-relaxed text-slate-600">您已启用记忆宫殿，该功能为旧版记忆系统，无需使用。</p>
+            </Modal>
+
             <Modal isOpen={modalType === 'archive-settings'} title="记忆归档设置" onClose={() => { if (!isSummarizing) setModalType('none'); }} footer={
                 isSummarizing ?
                 <div className="w-full py-3 bg-slate-100 text-indigo-600 font-bold rounded-2xl text-center flex items-center justify-center gap-2"><div className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>{archiveProgress || '归档中...'}</div> :

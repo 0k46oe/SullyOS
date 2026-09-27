@@ -1333,7 +1333,7 @@ describe('气泡主题导出：分享文件里不能留令牌', () => {
     // 拿到的是一串死字符串，三张图全空，还没有任何报错。所以导出前必须在深拷贝上跑一遍
     // resolveBlobRefsDeep 把令牌换回内嵌 data URL。
     // 真调一次得把整个工坊界面渲染起来，代价太大，这里用源码锚：改坏导出这条就挂。
-    const themeMakerSrc = readFileSync(new URL('../apps/ThemeMaker.tsx', import.meta.url), 'utf8');
+    const themeMakerSrc = readFileSync(new URL('../components/chat/BubbleMaker.tsx', import.meta.url), 'utf8');
 
     /** 截出 exportSavedTheme 的函数体（到第一处同缩进的收尾 `};` 为止）。 */
     function exportFnBody(): string {

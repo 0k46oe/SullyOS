@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { DB } from './db';
-import { isChatPreviewMessage, isVisibleChatMessage } from './chatMessageVisibility';
+import { isChatPreviewMessage, isVisibleChatMessage, chatPreviewText } from './chatMessageVisibility';
 import type { Message } from '../types';
 
 const message = (overrides: Partial<Message> = {}): Message => ({
@@ -13,6 +13,12 @@ const nextCharId = () => `chat-visibility-${++sequence}`;
 afterEach(() => localStorage.clear());
 
 describe('私聊与桌面预览的消息范围', () => {
+    it('图片与表情只显示类型标签，不泄漏底层存储引用', () => {
+        expect(chatPreviewText(message({ type: 'image', content: 'blobref:private' }))).toBe('[图片]');
+        expect(chatPreviewText(message({ type: 'emoji', content: 'https://example.com/emoji.png' }))).toBe('[表情]');
+        expect(chatPreviewText(message({ content: 'data:image/png;base64,abc' }))).toBe('[图片]');
+        expect(chatPreviewText(message())).toBe('晚安');
+    });
     it.each(['date', 'call', 'story_theater_memory'])('%s 正文不出现在私聊和桌面消息卡', source => {
         const row = message({ metadata: { source } });
         expect(isVisibleChatMessage(row)).toBe(false);

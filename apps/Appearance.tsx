@@ -18,13 +18,13 @@ import { resolveStatusBarMode, type StatusBarMode } from '../utils/iosStandalone
 import { confirmExportSafety } from '../utils/exportGuard';
 import { trackEvent } from '../utils/analytics';
 import { Check, ImageSquare, Sparkle, Trash, UploadSimple } from '@phosphor-icons/react';
-import ChatDecorationAnnouncement from '../components/chat/ChatDecorationAnnouncement';
 import AppIconEditor from '../components/appearance/AppIconEditor';
 import BootAnimationSettings from '../components/appearance/BootAnimationSettings';
 import FullscreenSettings from '../components/appearance/FullscreenSettings';
 import { shareOrDownloadBlob } from '../utils/shareExport';
 import { readShareFile } from '../utils/pngShare';
 import BeautyShareChannel from '../components/appearance/BeautyShareChannel';
+import { hasBeautyReceiveRequest,hasBeautyLibraryRequest } from '../utils/beautyNavigation';
 
 const CustomIconImage: React.FC<{ value: string; alt: string; preserveOutline?: boolean }> = ({ value, alt, preserveOutline = false }) => {
     const url = useBlobRefUrl(value);
@@ -482,7 +482,7 @@ const PresetManager: React.FC<PresetManagerProps> = ({ presets, onSave, onApply,
 
 const Appearance: React.FC = () => {
   const { theme, updateTheme, closeApp, openApp, setCustomIcon, customIcons, addToast, appearancePresets, saveAppearancePreset, applyAppearancePreset, deleteAppearancePreset, renameAppearancePreset, exportAppearancePreset, importAppearancePreset, characters, activeCharacterId, updateCharacter } = useOS();
-  const [activeTab, setActiveTab] = useState<'theme' | 'icons' | 'presets' | 'sharing'>('theme');
+  const [activeTab, setActiveTab] = useState<'theme' | 'icons' | 'presets' | 'sharing'>(() => (hasBeautyReceiveRequest()||hasBeautyLibraryRequest()) ? 'sharing' : 'theme');
   const [shareBusy, setShareBusy] = useState(false);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const [wallpaperUrl, setWallpaperUrl] = useState('');
@@ -858,8 +858,7 @@ const Appearance: React.FC = () => {
 
   return (
     <div className="h-full w-full bg-slate-50 flex flex-col font-light">
-      <ChatDecorationAnnouncement surface="appearance"/>
-      <div className="bg-white/70 backdrop-blur-md border-b border-white/40 shrink-0 z-10 sticky top-0" style={{ paddingTop: 'var(--safe-top)' }}>
+      {activeTab !== 'sharing' && <><div className="bg-white/70 backdrop-blur-md border-b border-white/40 shrink-0 z-10 sticky top-0" style={{ paddingTop: 'var(--safe-top)' }}>
         <div className="flex items-center px-4 py-3">
           <div className="flex items-center gap-2 w-full">
               <button disabled={shareBusy} onClick={closeApp} className="p-2 -ml-2 rounded-full hover:bg-black/5 active:scale-90 transition-transform">
@@ -876,10 +875,10 @@ const Appearance: React.FC = () => {
           <button onClick={() => { setActiveTab('theme'); trackEvent('切换外观定制标签页', { tab: 'theme' }); }} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'theme' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>系统主题</button>
           <button onClick={() => { setActiveTab('icons'); trackEvent('切换外观定制标签页', { tab: 'icons' }); }} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'icons' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>应用图标</button>
           <button onClick={() => { setActiveTab('presets'); trackEvent('切换外观定制标签页', { tab: 'presets' }); }} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'presets' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>外观预设</button>
-          <button onClick={() => setActiveTab('sharing')} className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'sharing' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}>美化分享</button>
-      </fieldset>
+          <button onClick={() => setActiveTab('sharing')} className="flex-1 py-3 text-sm font-medium transition-colors text-slate-400">外观装扮</button>
+      </fieldset></>}
 
-      <div className="flex-1 overflow-y-auto p-5 space-y-6 no-scrollbar">
+      <div className={activeTab === 'sharing' ? 'flex-1 overflow-y-auto min-h-0 no-scrollbar' : 'flex-1 overflow-y-auto p-5 space-y-6 no-scrollbar'}>
         {activeTab === 'theme' ? (
             <>
                 <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
@@ -1774,7 +1773,7 @@ const Appearance: React.FC = () => {
             />
 
         ) : activeTab === 'sharing' ? (
-            <BeautyShareChannel presets={appearancePresets} onExport={exportAppearancePreset} onImport={importAppearancePreset} onBusyChange={setShareBusy}/>
+            <BeautyShareChannel presets={appearancePresets} onExport={exportAppearancePreset} onImport={importAppearancePreset} onBusyChange={setShareBusy} onBack={() => setActiveTab('theme')}/>
         ) : null}
       </div>
     </div>

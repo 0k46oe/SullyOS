@@ -1,3 +1,8 @@
+import DecorationUpdatePopup from './chat/DecorationUpdatePopup';
+import UserHolidayIntro from './settings/UserHolidayIntro';
+import SmallUpdatesPopup, { SMALL_UPDATES_KEY } from './os/SmallUpdatesPopup';
+import { HOLIDAY_NOTICE_KEY, hasChosenHolidayIntro } from '../utils/userHolidays';
+import {DECORATION_UPDATE_KEY} from '../utils/decorationGuide';
 import { SARUpdatePopup } from './os/SARUpdatePopup';
 import { SAR_UPDATE_KEY, SAR_CHANGELOG, sarLaunch } from '../utils/sarUpdate';
 /**
@@ -53,6 +58,7 @@ export const CHANGELOG_2026_08_30 = 'changelog-2026-08-30';
 
 /** storage 读不出来时当成看过：宁可少弹一次，也别每次开机都糊用户一脸。 */
 const isUpdateSeen = (key: string): boolean => {
+    if (key === HOLIDAY_NOTICE_KEY) return hasChosenHolidayIntro();
     try {
         return !!localStorage.getItem(key);
     } catch {
@@ -582,6 +588,9 @@ const SARUpdateAnnouncement: React.FC<UpdatePopupProps> = ({ onDone, onExit }) =
 };
 
 const UPDATE_QUEUE: { key: string; render: (props: UpdatePopupProps) => React.ReactNode }[] = [
+    { key: SMALL_UPDATES_KEY, render: props => <SmallUpdatesPopup onDone={props.onDone} /> },
+    { key: HOLIDAY_NOTICE_KEY, render: props => <UserHolidayIntro {...props} /> },
+    { key: DECORATION_UPDATE_KEY, render: props => <DecorationUpdatePopup onClose={props.onExit}/> },
     { key: SAR_UPDATE_KEY, render: (props) => <SARUpdateAnnouncement {...props} /> },
     { key: NETWORK_TRANSIT_NOTICE_KEY_2026_08, render: (props) => <NetworkTransitNoticePopup {...props} /> },
     { key: UPDATE_NOTIFICATION_KEY_2026_08_10, render: (props) => <Live2DUpdatePopup {...props} /> },
