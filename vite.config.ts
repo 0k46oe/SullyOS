@@ -178,7 +178,9 @@ export default defineConfig({
             if (id.includes('untitled-pixi-live2d-engine')) {
               return 'vendor-live2d-engine';
             }
-            if (id.includes('@pixi/') || /[\\/]node_modules[\\/]pixi\.js[\\/]/.test(id)) {
+            // Filters extend Pixi classes during module evaluation. Keeping them
+            // in common vendor creates vendor -> Pixi -> vendor TDZ cycles.
+            if (id.includes('pixi-filters') || id.includes('@pixi/') || /[\\/]node_modules[\\/]pixi\.js[\\/]/.test(id)) {
               return 'vendor-live2d';
             }
             if (id.includes('react') || id.includes('react-dom') || id.includes('scheduler')) {
