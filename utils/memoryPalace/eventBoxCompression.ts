@@ -36,6 +36,24 @@ const VALID_ROOMS: MemoryRoom[] = [
     'self_room', 'attic', 'windowsill',
 ];
 
+// Automatic compression and manual regeneration must never publish over each other.
+const compressingBoxes = new Set<string>();
+async function withEventBoxCompressionLock<T>(boxId: string, work: () => Promise<T>): Promise<T> {
+    const busy = () => new Error('这个事件盒正在整合，请等待本次完成后再试');
+    if (compressingBoxes.has(boxId)) throw busy();
+    compressingBoxes.add(boxId);
+    try {
+        // Web Locks also coordinate other tabs. The Set covers runtimes without Web Locks.
+        if (typeof navigator !== 'undefined' && navigator.locks?.request) {
+            return await navigator.locks.request(`sullyos:event-box-compression:${boxId}`, { ifAvailable: true }, lock => {
+                if (!lock) throw busy();
+                return work();
+            });
+        }
+        return await work();
+    } finally { compressingBoxes.delete(boxId); }
+}
+
 function generateNodeId(): string {
     return `mn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -479,11 +497,24 @@ export interface RegenerateEventBoxSummaryResult {
  *
  * 与自动增量压缩刻意不同：
  * - 原料始终是 archived + live 的全部成员，不使用旧 summary，避免坏总结自我复制；
- * - 不改变 live/archived/sealed/compressionCount，只替换总结与盒元数据；
+ * - 成功后归档本次参与的原始节点，新增归档记一次压缩，达到阈值封盒；
  * - 新总结必须先成功生成 Embedding，才会覆盖旧 summary 节点；
  * - 已封盒同样允许执行。
  */
 export async function regenerateEventBoxSummary(
+    boxId: string,
+    llmConfig: LightLLMConfig,
+    embeddingConfig: EmbeddingConfig,
+    charName: string,
+    userName?: string,
+    remoteVectorConfig?: RemoteVectorConfig,
+): Promise<RegenerateEventBoxSummaryResult> {
+    return withEventBoxCompressionLock(boxId, () => regenerateEventBoxSummaryUnlocked(
+        boxId, llmConfig, embeddingConfig, charName, userName, remoteVectorConfig,
+    ));
+}
+
+async function regenerateEventBoxSummaryUnlocked(
     boxId: string,
     llmConfig: LightLLMConfig,
     embeddingConfig: EmbeddingConfig,
@@ -503,6 +534,7 @@ export async function regenerateEventBoxSummary(
         .filter((node): node is MemoryNode => Boolean(
             node
             && node.charId === box.charId
+            && (!node.eventBoxId || node.eventBoxId === box.id)
             && node.id !== box.summaryNodeId
             && !node.isBoxSummary,
         ))
@@ -553,31 +585,27 @@ export async function regenerateEventBoxSummary(
         }
         : createSummaryNode(box, result, now);
 
-    // vectorizeAndStore 先请求 Embedding，拿到向量后才保存 node/vector。
-    // 不预存 summaryNode，确保网络侧 Embedding 失败时旧正文完全不被覆盖。
+    // Embedding 成功后，在同一事务写总结、向量、归档标记和成员列表。
+    // 不预存 summaryNode，任何一步失败都保留原内容。
     const remoteCfg = remoteVectorConfig?.enabled && remoteVectorConfig.initialized
         ? remoteVectorConfig
         : getRemoteVectorConfig();
+    let committed: { box: EventBox; archived: MemoryNode[] } | undefined;
     const vectorized = await vectorizeAndStore(
         [summaryNode],
         embeddingConfig,
         remoteCfg,
-        { skipDedup: true },
+        { skipDedup: true, commit: async entries => {
+            if (entries.length !== 1) throw new Error('整合回忆向量不完整，原内容已保留');
+            committed = await EventBoxDB.commitRegeneration(box, sourceNodes, entries[0], result.name, now);
+        } },
     );
-    if (vectorized.stored !== 1) {
+    if (vectorized.stored !== 1 || !committed) {
         throw new Error('整合回忆已生成，但语义向量没有成功写入，原内容已保留');
     }
 
-    // LLM/Embedding 等待期间盒子可能又进了新成员；重新读取后只覆盖总结元数据，
-    // 保留最新的成员列表与 sealed 状态。
-    const freshBox = await EventBoxDB.getById(box.id);
-    if (!freshBox) throw new Error('整合完成时事件盒已不存在');
-    freshBox.summaryNodeId = summaryNode.id;
-    freshBox.name = result.name;
-    freshBox.tags = result.tags;
-    freshBox.updatedAt = now;
-    freshBox.lastCompressedAt = now;
-    await EventBoxDB.save(freshBox);
+    const freshBox = committed.box;
+    if (remoteCfg) await bulkSetArchived(remoteCfg, committed.archived.map(node => node.id), true).catch(() => {});
 
     // 与自动压缩保持一致：若总结属于门牌房间，让新的干净结论继续沉淀。
     // 门牌失败不影响已经成功落库的总结与向量。
@@ -621,14 +649,12 @@ export async function maybeCompressEventBoxes(
     let skipped = 0;
 
     for (const id of boxIds) {
-        const box = await EventBoxDB.getById(id);
-        if (!box) { skipped++; continue; }
-        if (box.liveMemoryIds.length < EVENT_BOX_COMPRESSION_THRESHOLD) {
-            skipped++;
-            continue;
-        }
         try {
-            const ok = await compressEventBox(box, llmConfig, embeddingConfig, charName, userName);
+            const ok = await withEventBoxCompressionLock(id, async () => {
+                const box = await EventBoxDB.getById(id);
+                if (!box || box.liveMemoryIds.length < EVENT_BOX_COMPRESSION_THRESHOLD) return false;
+                return compressEventBox(box, llmConfig, embeddingConfig, charName, userName);
+            });
             if (ok) compressed++;
             else skipped++;
         } catch (e: any) {

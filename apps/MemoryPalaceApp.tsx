@@ -1253,7 +1253,7 @@ export default function MemoryPalaceApp() {
         if (!window.confirm(
             `重新整合「${box.name || '未命名事件'}」？\n\n`
             + `副 API 会重新读取盒内全部 ${sourceCount} 条原始记忆，不使用当前整合回忆；`
-            + `随后重新生成语义向量。新总结和向量都成功后才会覆盖当前内容。`,
+            + `随后重新生成语义向量。成功后，本次参与整合的活节点会归档（保留原文），累计归档满 12 条会封盒；失败则保持原样。`,
         )) return;
 
         setRegeneratingBoxId(box.id);
@@ -1284,7 +1284,7 @@ export default function MemoryPalaceApp() {
             setAllBoxes(boxes);
             setSelectedNode(prev => prev?.id === result.summary.id ? result.summary : prev);
             await loadStats();
-            addToast(`已重新整合 ${result.sourceCount} 条原始记忆，语义向量已更新`, 'success');
+            addToast(`已重新整合并归档 ${result.sourceCount} 条原始记忆，语义向量已更新`, 'success');
         } catch (e: any) {
             addToast(`重新整合失败：${e?.message || e}`, 'error');
         } finally {

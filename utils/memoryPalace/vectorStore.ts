@@ -30,7 +30,11 @@ export async function vectorizeAndStore(
     nodes: MemoryNode[],
     embeddingConfig: EmbeddingConfig,
     remoteVectorConfig?: RemoteVectorConfig,
-    options: { skipDedup?: boolean } = {},
+    options: {
+        skipDedup?: boolean;
+        /** Commit related state in the same local transaction; remote publish still follows success only. */
+        commit?: (entries: { node: MemoryNode; vector: MemoryVector }[]) => Promise<void>;
+    } = {},
 ): Promise<{ stored: number; skipped: number }> {
     if (nodes.length === 0) return { stored: 0, skipped: 0 };
 
@@ -82,7 +86,8 @@ export async function vectorizeAndStore(
         stored++;
     }
 
-    await MemoryNodeDB.saveVectorizedMany(entries);
+    if (options.commit) await options.commit(entries);
+    else await MemoryNodeDB.saveVectorizedMany(entries);
     const committedIds = new Set(entries.map(entry => entry.node.id));
     for (const node of nodes) if (committedIds.has(node.id)) node.embedded = true;
     // Only publish remote state after the local batch committed successfully.
