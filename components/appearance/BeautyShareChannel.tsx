@@ -16,7 +16,8 @@ import {createPortal} from 'react-dom';
 import { AppID, type AppearancePreset } from '../../types';
 import { useOS } from '../../context/OSContext';
 import { DB } from '../../utils/db';
-import { decorationPatches, validateDecoration, type DecorationPart, type DecorationPreset } from '../../utils/chatDecoration';
+import { validateDecoration, type DecorationPart, type DecorationPreset } from '../../utils/chatDecoration';
+import { prepareDecorationApplication } from '../../utils/decorationApplication';
 import { beautyRequest,downloadBeauty,readBeautyPackage } from '../../utils/beautyShareClient';
 import type { BeautyShare } from '../../utils/beautyShareContract';
 import { BEAUTY_CATEGORIES, decorationCategories, decorationContents, type BeautyCategory } from '../../utils/beautyCategories';
@@ -171,15 +172,13 @@ export default function BeautyShareChannel({ presets, onExport, onImport, onBusy
         const key=await decorationSourceKey(received.preset);
         const parts=Object.keys(received.preset.parts) as DecorationPart[];
         // Prepare every patch before writing, so malformed input cannot partly apply.
-        const prepared=await Promise.all(targets.map(async character=>({character,changes:await decorationPatches(received.preset,parts,'character',character,theme)})));
+        const origin=await readDecorationOrigin(key);
+        const customIds=new Set(customThemes.map(item=>item.id));
+        const {prepared,bubbles}=await prepareDecorationApplication(received.preset,parts,targets,theme,
+          [...customThemes,...Object.values(PRESET_THEMES)],origin,
+          id=>customIds.has(id)?readDecorationOrigin('bubble-'+id):Promise.resolve({kind:'builtin'}));
+        for(const bubble of bubbles){await addCustomTheme(bubble);await writeDecorationOrigin('bubble-'+bubble.id,origin);}
         for(const {character,changes} of prepared){
-          if(changes.bubble){
-            // A bubbles-only work keeps each character's independently chosen avatar frame.
-            const bubbleOnly=!received.preset.parts.css&&!received.preset.parts.layout;
-            const previous=customThemes.find(item=>item.id===(character.bubbleStyle||theme.chatDefaultBubbleStyle));
-            if(bubbleOnly&&previous)for(const side of ['user','ai'] as const)if(!received.preset.parts.bubbles?.[side].avatarDecoration&&previous[side].avatarDecoration)for(const field of ['avatarDecoration','avatarDecorationX','avatarDecorationY','avatarDecorationScale','avatarDecorationRotate'] as const)(changes.bubble[side] as any)[field]=previous[side][field];
-            await addCustomTheme(changes.bubble);await writeDecorationOrigin('bubble-'+changes.bubble.id,await readDecorationOrigin(key));
-          }
           await updateCharacter(character.id,changes.character);
           await DB.saveAsset('decoration_applied_'+character.id,key);
           const rawSlots=await DB.getAsset('decoration_slots_'+character.id);
