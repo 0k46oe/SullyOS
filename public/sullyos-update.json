@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
-  "versionCode": 30505,
-  "versionName": "3.5.5",
-  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.5.5/SullyOS-Android-v3.5.5.apk",
-  "sha256": "71d3657f10b9b5b869e8aa79c9450bec3a54de008e667e58d4c6e5a8c8d7ec30",
-  "sizeBytes": 50589479,
-  "publishedAt": "2026-09-27T17:14:48Z",
+  "versionCode": 30506,
+  "versionName": "3.5.6",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.5.6/SullyOS-Android-v3.5.6.apk",
+  "sha256": "8d2dbc2313856c1541135a50e5b59ba291b4c363b5f0a546e764ce6afd5cfc49",
+  "sizeBytes": 50590617,
+  "publishedAt": "2026-09-28T13:39:02Z",
   "releaseNotes": [
-    "同步最新 master 6ec0534c，包含聊天相机随手机横竖屏方向调整取景和成片的修复",
-    "补齐 Android 相机权限声明，在打开相机功能时申请授权；系统选图不新增整库相册权限",
-    "保留 3.5.4 更新器防重复下载修复；如系统不再弹相机授权，请到系统应用权限中允许后重试",
-    "保留 UnifiedPush / ntfy、PDF 导入、Umami 与应用内更新，沿用固定签名覆盖升级",
+    "同步最新 master 9fe99615，包含相机与查手机对话修复",
+    "优化相机贴纸拖动预览，并确保发送完整分辨率成片",
+    "兼容查手机对话中的数组和对象格式，保留相机横竖屏与权限修复",
+    "保留 UnifiedPush / ntfy、PDF 导入、Umami 和更新器防重复下载，沿用固定签名覆盖升级",
     "本次未新增跨域处理或 ntfy 推送修复"
   ]
 }
