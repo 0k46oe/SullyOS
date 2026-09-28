@@ -8,6 +8,7 @@ import { ContextBuilder, type CharacterContextInput, type ContextMessage } from 
 import { injectMemoryPalace } from './memoryPalace/pipeline';
 import { DB } from './db';
 import { safeResponseJson } from './safeApi';
+import { phoneTranscriptToText } from './phoneTranscript';
 
 export interface MiniApiConfig {
     baseUrl: string;
@@ -182,10 +183,10 @@ export function applyRealConversationToPhoneState(
  * - text: 剥掉前缀后的正文
  * 空行被跳过。首行若无前缀，默认归为「对方」。
  */
-export function parseTranscript(detail: string, firstUnprefixedIsMe = false): { isMe: boolean; text: string }[] {
+export function parseTranscript(detail: unknown, firstUnprefixedIsMe = false): { isMe: boolean; text: string }[] {
     const out: { isMe: boolean; text: string }[] = [];
     let lastIsMe = firstUnprefixedIsMe; // 首行无前缀时的兜底归属（续写时可指定「下一个该谁说」）
-    for (const raw of (detail || '').split('\n')) {
+    for (const raw of phoneTranscriptToText(detail).split('\n')) {
         const line = raw.trim();
         if (!line) continue;
         const m = line.match(/^(我|对方|Me|Them)\s*[:：]\s*(.*)$/);

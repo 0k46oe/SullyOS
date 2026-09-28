@@ -97,6 +97,7 @@ A 发起 / NPC 推进的 prompt 里给了一份**具体动机清单**（好奇�
 
 - 脚本统一是「我:/对方:」逐行格式。一条消息可能跨多行（模型连发几条），**存库时每一行都补回说话人前缀**（`runRealConversation` 的 `lineify` / `runNpcConversation` 走 `serializeTurns(parseTranscript())`）。
 - 解析一律走 `parseTranscript()`：无前缀的续行**继承上一条说话人**，不会被误判给对方（修复「A 发的消息 UI 分给 B」）。渲染（`renderChatDetail`/`renderContactDetail`）、翻转（`flipTranscript`）、续写回解析都用它，保证无损。
+- 模型或旧备份的脚本可能是数组/对象，不能直接 `.split()`。`phoneTranscriptToText` 保留字符串、兼容逐行数组和带 `role/content`、`speaker/text`、`isMe/text` 的消息；未知对象保留可读字段。智能体（含深度对话）的生成落库、历史会话读取和编辑回写统一经过 `normalizePhoneAiSession`，`parseTranscript` 也有兜底，避免一条异常记录拖垮列表；不要求用户删除原记录。
 - `upsertContact` 合并时**只覆盖有值的字段**，且不动已有非空 `note`——扫描通讯录/对话回填不会把用户手填的备注抹掉（修复「角色不看备注」）。备注在 prompt 里以「必须遵守的已确立事实」注入。
 
 ## 注意

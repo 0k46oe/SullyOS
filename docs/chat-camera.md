@@ -37,8 +37,11 @@ Live2D 静态快照在读取瞬间以 1024px 长边重新渲染，再恢复实�
 - 素材列表走 `cameraStickerSources`：各槽位独立列出，当前见面皮肤优先，所有立绘排除混装字段 `sprites.chibi`，不把头像冒充专属 chibi；520 已保存活动图优先于工坊待用图。兼容 blobref；远程图片必须支持跨域读取。Live2D 只在打开角色预览时懒加载，复用透明快照接口和服装配置。
 - 「匹配环境光」仅在确认照片时为选中角色贴纸开启，默认关闭，可调溶图强度与边缘光。原照片缩小后生成低频光色场，按亮度分位数区分暗部与亮部、抑制孤立高亮点，在线性 RGB 中做有限曝光匹配、暗部乘色、亮部柔和滤色及高光压缩。根据背景亮区重心和贴纸 alpha 轮廓补可选边缘光；这是方向性近似，不代表识别了真实光源或三维表面。
 - 背景光场与原始贴纸像素缓存；单个贴纸的溶图结果按位置、尺寸、角度、强度缓存。拖动期间复用上次结果，松手重新计算，取景阶段不做溶图。不改 alpha、角色原素材或数据库形象。
+- 贴纸拖动按动画帧合并坐标更新，复用合成画布；拖动时预览长边最多 720px，松手、取消或失去指针捕获时补上最后坐标并恢复原照片分辨率，发送不使用拖动中的低分辨率预览。滤镜、特效与相框顺序保持一致。
 - 整图滤镜提供原色、清透、樱粉、夕照、胶片、黑白，可调强度；VFX 提供高光阈值柔光、确定性颗粒、暗角。顺序为原照片 → 角色溶图与贴纸合成 → 整图滤镜/VFX → 相框。柔光只扩散亮区，不模糊原图细节；颗粒的固定噪声保证预览与导出一致。眼睛按钮按住显示原照片，重置按钮只重置滤镜与 VFX。
 
 设计参考：[VTube Studio Display Light Overlay](https://github.com/DenchiSoft/VTubeStudio/wiki/Display-Light-Overlay)、[Live2D Multiply/Screen Color](https://docs.live2d.com/en/cubism-editor-manual/multiply-color-screen-color/)、[Shoost 作者的分层调色与边缘光示例](https://www.patreon.com/MuRo_CG/posts/shoost-v0-10-0-87407825)。采用自有二维像素处理，不依赖这些软件，不声称复现其内部算法；没有三维法线、投影、景深识别或遮挡重建。
 
 实现：`components/chat/ChatCamera.tsx`、`utils/cameraLighting.ts`、`utils/cameraPhotoEffects.ts`、`utils/cameraStickerSources.ts`。验证：对应 utils 单测与 `scripts/test-chat-camera.cjs`（Playwright 模拟摄像头，默认 Edge；可用 `CAMERA_QA_BROWSER`、`CAMERA_QA_URL` 指定环境）。
+
+无外网的验证环境可设置 `CAMERA_QA_SKIP_LIVE2D=1`，明确跳过依赖在线模型的 Live2D 用例；其余拍照、贴纸拖动分辨率恢复、滤镜与发送用例照常执行，不代表 Live2D 已验证。
