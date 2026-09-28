@@ -96,9 +96,19 @@ const out = 'output/chat-camera'; mkdirSync(out, { recursive: true });
         }
         await page.evaluate(() => ['--primary-hue', '--primary-sat', '--primary-lightness'].forEach(key => document.documentElement.style.removeProperty(key)));
         const before = await canvas.evaluate(c => c.toDataURL());
+        const fullSize = await canvas.evaluate(c => ({ width: c.width, height: c.height }));
         const box = await canvas.boundingBox();
         await page.mouse.move(box.x + box.width * .5, box.y + box.height * .55);
-        await page.mouse.down(); await page.mouse.move(box.x + box.width * .7, box.y + box.height * .7, { steps: 5 }); await page.mouse.up();
+        await page.mouse.down(); await page.mouse.move(box.x + box.width * .7, box.y + box.height * .7, { steps: 5 });
+        await page.waitForFunction(() => {
+            const c = document.querySelector('[aria-label="照片预览"]');
+            return Math.max(c.width, c.height) <= 720;
+        });
+        await page.mouse.up();
+        await page.waitForFunction(size => {
+            const c = document.querySelector('[aria-label="照片预览"]');
+            return c.width === size.width && c.height === size.height;
+        }, fullSize);
         assert.notEqual(await canvas.evaluate(c => c.toDataURL()), before);
         for (const width of [320, 390, 1280]) {
             await page.setViewportSize({ width, height: 844 });
@@ -110,13 +120,15 @@ const out = 'output/chat-camera'; mkdirSync(out, { recursive: true });
         await page.screenshot({ path: `${out}/edit-small.png` });
         const smallSend = await page.getByRole('button', { name: '发送照片' }).boundingBox(); assert(smallSend.y + smallSend.height <= 568);
         await page.setViewportSize({ width: 1280, height: 844 });
-        await page.getByRole('button', { name: 'Live2D', exact: true }).click();
-        console.log('Loading Live2D');
-        await page.waitForFunction(() => { const button = document.querySelector('.chat-camera-live button'); return document.querySelector('[role="alert"]') || (button && !button.disabled); }, null, { timeout: 60000 });
-        assert.equal(await page.getByRole('alert').count(), 0, await page.getByRole('alert').allTextContents());
-        await page.getByRole('button', { name: '使用当前姿态' }).click();
-        await page.getByRole('checkbox', { name: '匹配环境光' }).check();
-        await page.screenshot({ path: `${out}/live2d-sticker.png` });
+        if (process.env.CAMERA_QA_SKIP_LIVE2D !== '1') {
+            await page.getByRole('button', { name: 'Live2D', exact: true }).click();
+            console.log('Loading Live2D');
+            await page.waitForFunction(() => { const button = document.querySelector('.chat-camera-live button'); return document.querySelector('[role="alert"]') || (button && !button.disabled); }, null, { timeout: 60000 });
+            assert.equal(await page.getByRole('alert').count(), 0, await page.getByRole('alert').allTextContents());
+            await page.getByRole('button', { name: '使用当前姿态' }).click();
+            await page.getByRole('checkbox', { name: '匹配环境光' }).check();
+            await page.screenshot({ path: `${out}/live2d-sticker.png` });
+        } else console.log('SKIPPED: Live2D network assets (CAMERA_QA_SKIP_LIVE2D=1)');
         await page.getByRole('tab', { name: '滤镜', exact: true }).click();
         const unfiltered = await canvas.evaluate(c => c.toDataURL());
         await page.getByRole('button', { name: '滤镜 CCD', exact: true }).click();
@@ -195,7 +207,7 @@ const out = 'output/chat-camera'; mkdirSync(out, { recursive: true });
         await page.getByRole('button', { name: '发送照片' }).click();
         await page.getByText('已接收照片').waitFor();
         assert.deepEqual(errors, []);
-        console.log('Camera QA passed: capture, switch, cleanup, frames, stickers, drag, lighting, Live2D, send, retake, permission error, mobile/desktop.');
+        console.log('Camera QA passed: capture, switch, cleanup, frames, stickers, drag resolution, lighting, filters, send, retake, permission error, mobile/desktop.');
     } catch (e) { await page.screenshot({ path: `${out}/failure.png` }); console.error(await page.locator('body').innerText(), errors); throw e; }
     finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exitCode = 1; });

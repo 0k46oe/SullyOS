@@ -60,9 +60,12 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
     const video = useRef<HTMLVideoElement>(null);
     const view = useRef<HTMLDivElement>(null);
     const canvas = useRef<HTMLCanvasElement>(null);
+    const composite = useRef<HTMLCanvasElement | null>(null);
     const stream = useRef<MediaStream | null>(null);
     const nextId = useRef(0);
     const drag = useRef<{ id: number; dx: number; dy: number } | null>(null);
+    const dragFrame = useRef<number | null>(null);
+    const pendingDrag = useRef<{ id: number; x: number; y: number } | null>(null);
     const alive = useRef(true);
     const filterPreviews = useMemo(() => {
         if (!photo) return [];
@@ -103,7 +106,16 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
 
     useEffect(() => {
         lightCache.current.clear();
+        composite.current = null;
+        drag.current = null;
+        pendingDrag.current = null;
+        if (dragFrame.current !== null) cancelAnimationFrame(dragFrame.current);
+        dragFrame.current = null;
     }, [photo]);
+
+    useEffect(() => () => {
+        if (dragFrame.current !== null) cancelAnimationFrame(dragFrame.current);
+    }, []);
 
     useEffect(() => {
         alive.current = true;
@@ -150,14 +162,20 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
     useEffect(() => {
         const display = canvas.current;
         if (!photo || !display) return;
-        const output = document.createElement('canvas');
+        const output = composite.current ??= document.createElement('canvas');
         let cancelled = false;
         setRendering(false);
-        output.width = photo.width; output.height = photo.height;
+        // Interactive preview only; pointer release always redraws at original resolution.
+        const scale = drag.current ? Math.min(1, 720 / Math.max(photo.width, photo.height)) : 1;
+        const width = Math.max(1, Math.round(photo.width * scale));
+        const height = Math.max(1, Math.round(photo.height * scale));
+        if (output.width !== width) output.width = width;
+        if (output.height !== height) output.height = height;
         const ctx = output.getContext('2d');
         if (!ctx) return;
         const { width: w, height: h } = output;
-        ctx.drawImage(photo, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        ctx.drawImage(photo, 0, 0, w, h);
         if (compareOriginal) { drawCameraFrame(output, display, 0); return; }
         for (const s of stickers) {
             ctx.save(); ctx.translate(s.x * w, s.y * h); ctx.rotate(s.angle * Math.PI / 180);
@@ -213,7 +231,9 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
         stop(); setPhoto(image); setError('');
     };
     const send = () => {
-        if (!canvas.current || busy || compareOriginal || rendering) return;
+        if (!photo || !canvas.current || busy || compareOriginal || rendering || drag.current) return;
+        const fullSize = cameraFrameLayout(photo.width, photo.height, frame);
+        if (canvas.current.width !== fullSize.width || canvas.current.height !== fullSize.height) return;
         setBusy(true);
         canvas.current.toBlob(blob => {
             if (!alive.current) return;
@@ -258,6 +278,19 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
         finally { URL.revokeObjectURL(url); }
     };
     const updateSticker = (patch: Partial<Sticker>) => setStickers(items => items.map(s => s.id === selected ? { ...s, ...patch } : s));
+    const flushDrag = () => {
+        dragFrame.current = null;
+        const pending = pendingDrag.current;
+        pendingDrag.current = null;
+        if (pending) setStickers(items => items.map(s => s.id === pending.id ? { ...s, x: pending.x, y: pending.y } : s));
+    };
+    const finishDrag = () => {
+        if (!drag.current) return;
+        if (dragFrame.current !== null) cancelAnimationFrame(dragFrame.current);
+        flushDrag();
+        drag.current = null;
+        setLightRevision(n => n + 1);
+    };
     const pointer = (e: React.PointerEvent<HTMLCanvasElement>) => {
         const bounds = e.currentTarget.getBoundingClientRect();
         const layout = cameraFrameLayout(photo!.width, photo!.height, frame);
@@ -281,7 +314,7 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
             </div> : <>
                 <div className="chat-camera-view" ref={view}>
                     {photo ? <canvas ref={canvas} aria-label="照片预览" onPointerDown={e => {
-                        if (compareOriginal || rendering) return;
+                        if (compareOriginal || rendering || drag.current) return;
                         const p = pointer(e), w = photo.width, h = photo.height;
                         const hit = [...stickers].reverse().find(s => {
                             const angle = -s.angle * Math.PI / 180, dx = (p.x - s.x) * w, dy = (p.y - s.y) * h;
@@ -294,8 +327,9 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
                         const moving = drag.current;
                         if (!moving) return;
                         const p = pointer(e);
-                        setStickers(items => items.map(s => s.id === moving.id ? { ...s, x: clamp(p.x - moving.dx), y: clamp(p.y - moving.dy) } : s));
-                    }} onPointerUp={() => { drag.current = null; setLightRevision(n => n + 1); }} onPointerCancel={() => { drag.current = null; setLightRevision(n => n + 1); }} />
+                        pendingDrag.current = { id: moving.id, x: clamp(p.x - moving.dx), y: clamp(p.y - moving.dy) };
+                        if (dragFrame.current === null) dragFrame.current = requestAnimationFrame(flushDrag);
+                    }} onPointerUp={finishDrag} onPointerCancel={finishDrag} onLostPointerCapture={finishDrag} />
                         : <video ref={video} autoPlay muted playsInline onLoadedData={() => { if (stream.current?.active) setReady(true); }} style={{
                             width: viewfinder.width, height: viewfinder.height, objectFit: 'cover', objectPosition: 'center',
                             transform: facing === 'user' ? 'scaleX(-1)' : undefined,
