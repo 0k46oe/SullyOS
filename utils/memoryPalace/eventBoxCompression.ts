@@ -403,15 +403,10 @@ async function compressEventBox(
         summaryNode = createSummaryNode(box, result, now);
         box.summaryNodeId = summaryNode.id;
     }
-    await MemoryNodeDB.save(summaryNode);
-
-    // 5. 向量化 summary（跳过去重，因为内容必然和 live 节点重叠）
+    // 先生成向量再保存新摘要；限流/失败时保留旧摘要和全部活节点。
     const remoteCfg = getRemoteVectorConfig();
-    try {
-        await vectorizeAndStore([summaryNode], embeddingConfig, remoteCfg, { skipDedup: true });
-    } catch (e: any) {
-        console.warn(`🗜️ [Compression] summary 向量化失败（继续后续步骤）: ${e?.message}`);
-    }
+    const vectorized = await vectorizeAndStore([summaryNode], embeddingConfig, remoteCfg, { skipDedup: true });
+    if (vectorized.stored !== 1) throw new Error('摘要向量化未完成，事件盒仍保留原始记忆');
 
     // 6. 标记活节点 archived（本地）
     const liveIds = box.liveMemoryIds.slice();
@@ -453,7 +448,7 @@ async function compressEventBox(
     //    封盒的沉淀物就是语义事实——这是"情景→语义"固化的即时触发点。
     try {
         const { isPlateRoom, updatePlateFromBoxSummary } = await import('./roomPlates');
-        if (isPlateRoom(summaryNode.room)) {
+        if (!llmConfig.deferPlateMaintenance && isPlateRoom(summaryNode.room)) {
             await updatePlateFromBoxSummary(
                 box.charId, summaryNode.room, summaryNode.content,
                 llmConfig, charName, userName,

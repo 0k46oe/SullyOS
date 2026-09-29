@@ -5,6 +5,7 @@
  * 支持硅基流动 / 阿里云 / 字节等端点。
  */
 
+import { waitForPalaceRequest, readMaintenanceSettings } from './maintenanceMode';
 import type { EmbeddingConfig } from './types';
 
 // ─── 核心 API 调用 ────────────────────────────────────
@@ -124,6 +125,7 @@ async function callEmbeddingAPI(
     }
 
     try {
+        await waitForPalaceRequest();
         const response = await fetch(url, {
             method: 'POST',
             headers: {
@@ -161,7 +163,7 @@ async function callEmbeddingAPI(
         const status: number | undefined = err?.status;
         // 参数类 4xx 重试同样的请求不会变好；网络错误 / 5xx / 429 才值得重试一次
         const retryable = status === undefined || status >= 500 || status === 429;
-        if (retryable && retryCount < 1) {
+        if (retryable && retryCount < 1 && !(status === 429 && readMaintenanceSettings().enabled)) {
             console.warn(`⚡ [Embedding] Retry after error: ${err.message}`);
             await new Promise(r => setTimeout(r, 1000));
             return callEmbeddingAPI(input, config, retryCount + 1);

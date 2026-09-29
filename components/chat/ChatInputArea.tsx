@@ -769,7 +769,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                     {showPanel === 'emojis' && (
                         <>
                             {/* Categories Bar */}
-                            <div className={`relative flex shrink-0 ${panelTopBarSurfaceClass}`}>
+                            <div className={`sully-chat-emoji-categories relative flex shrink-0 ${panelTopBarSurfaceClass}`} style={{ backgroundColor: 'inherit' }}>
                                 {/* touch-action: pan-x —— 显式告诉浏览器"从分组 chip 上起手的触摸就是横向滚动"，
                                     防止 chip 的长按/点击手势让部分浏览器犹豫而吞掉滑动（分组多时滑不到末尾的 +） */}
                                 <div className={panelTopBarClass} style={{ touchAction: 'pan-x' }}>

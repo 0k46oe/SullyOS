@@ -291,3 +291,18 @@ describe('regenerateEventBoxSummary', () => {
         expect((await regenerateEventBoxSummary('box-1', llmConfig, embeddingConfig, '角色')).summary.content).toBe('重试成功。');
     });
 });
+
+describe('automatic compression rate-limit safety', () => {
+    it('embedding failure leaves summary, vectors and live nodes unchanged', async () => {
+        const current = box(); current.liveMemoryIds = ['live-1', 'live-2', 'live-3', 'live-4']; current.sealed = false;
+        await EventBoxDB.save(current);
+        for (const id of current.liveMemoryIds) await MemoryNodeDB.save(memory(id, '待压缩的原始记忆 ' + id, { archived: false }));
+        mocks.responses.push(completion('新的摘要，不应在向量失败时保存。'));
+        mocks.getEmbeddings.mockRejectedValue(new Error('Embedding API error 429'));
+        const result = await maybeCompressEventBoxes([current.id], llmConfig, embeddingConfig, '角色甲', '用户乙');
+        expect(result.compressed).toBe(0);
+        expect((await MemoryNodeDB.getById('summary-1'))?.content).toContain('旧坏总结');
+        expect((await EventBoxDB.getById(current.id))?.liveMemoryIds).toEqual(current.liveMemoryIds);
+        for (const id of current.liveMemoryIds) expect((await MemoryNodeDB.getById(id))?.archived).toBe(false);
+    });
+});

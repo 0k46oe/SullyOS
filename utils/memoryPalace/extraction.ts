@@ -548,6 +548,7 @@ pinDays 仅在需要置顶时才写，大多数记忆不需要。
         return { memories, crossTimeLinks, eventBoxHints, unpinIds, corrections };
 
     } catch (err: any) {
+        if (llmConfig.deferPlateMaintenance) throw err;
         console.error(`❌ [Extraction] 缓冲区提取失败 (${messages.length} 条消息):`, err.message);
         return { memories: [], crossTimeLinks: [], eventBoxHints: [], unpinIds: [], corrections: [] };
     }

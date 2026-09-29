@@ -5,7 +5,7 @@ import TokenImg from '../os/TokenImg';
 import { useBlobRefUrl } from '../../utils/blobRef';
 import './ChatImage.css';
 
-function ImageViewer({ value, fallback, name, onClose }: { value: string; fallback: string; name?: string; onClose: () => void }) {
+export function ImageViewer({ value, fallback, name, onClose }: { value: string; fallback: string; name?: string; onClose: () => void }) {
     const [failed, setFailed] = useState(false), [zoom, setZoom] = useState(false);
     const src = useBlobRefUrl(failed ? fallback : value);
     const close = useRef<HTMLButtonElement>(null);

@@ -37,7 +37,8 @@ import { loadChatInputPreferences, saveChatInputPreferences } from '../utils/cha
 import ChatInputSettings from '../components/chat/ChatInputSettings';
 import { useChatAutoReply } from '../hooks/useChatAutoReply';
 import TokenImg from '../components/os/TokenImg';
-import { useBlobRefUrl, isBlobRef, getBlobForRef, migrateDataUrlToRef } from '../utils/blobRef';
+import { ImageViewer } from '../components/chat/ChatImage';
+import { useBlobRefUrl, migrateDataUrlToRef } from '../utils/blobRef';
 import { buildReplySnapshotContent } from '../utils/applyAssistantPostProcessing';
 import ChromeCssEditor from '../components/chat/ChromeCssEditor';
 import WhiteboxSoundEditor from '../components/chat/WhiteboxSoundEditor';
@@ -338,7 +339,7 @@ const GroupMessageItem = React.memo(({
                 return (
                     <div className="relative group cursor-pointer" onClick={(e) => {
                         if (selectionMode) handleClick(e);
-                        else onImageClick(msg.content);
+                        else { e.stopPropagation(); onImageClick(msg.content); }
                     }}>
                         <TokenImg value={msg.content} className="max-w-[200px] max-h-[200px] rounded-xl shadow-sm border border-black/5" loading="lazy" />
                     </div>
@@ -1021,17 +1022,9 @@ const GroupChat: React.FC = () => {
         setModalType('packet-detail');
     }, []);
 
-    // 点图看大图：新标签页只认得真正的 URL，blobref 令牌得先换成 objectURL 再开
-    // （data: 顶层导航被浏览器挡，只能走 objectURL）。开完不立刻回收——新标签页还在
-    // 用它加载；留一分钟再 revoke，图早读完了，也不至于把整张图一直挂在内存里。
-    const handleGroupImageClick = useCallback(async (url: string) => {
-        if (!isBlobRef(url)) { window.open(url, '_blank'); return; }
-        const blob = await getBlobForRef(url);
-        if (!blob) { addToast('图片数据已丢失', 'error'); return; }
-        const objectUrl = URL.createObjectURL(blob);
-        window.open(objectUrl, '_blank');
-        setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
-    }, [addToast]);
+    // 应用内预览，避免移动浏览器打开 blob 新页时白屏或被拦截。
+    const [previewImage, setPreviewImage] = useState<string | null>(null);
+    const handleGroupImageClick = useCallback((url: string) => setPreviewImage(url), []);
     const handleGroupReply = useCallback((target: Message) => { setReplyTarget(target); trackEvent('引用回复一条群消息'); }, []);
 
     // 用户抢/收/退：updater 内重跑状态机（以库内最新 claims 判重，防与 AI 派发并发双写）
@@ -1935,6 +1928,7 @@ ${memberTimeline || '(暂无互动记录)'}
 
             {/* 输入区 — 复用私聊 ChatInputArea（输入/表情面板/多选删除随 OS 外观设置），
                 actions 面板整体替换为群聊自己的 4 格 */}
+            {previewImage && <ImageViewer value={previewImage} fallback={previewImage} onClose={() => setPreviewImage(null)} />}
             <ChatInputArea
                 input={input}
                 setInput={setInput}

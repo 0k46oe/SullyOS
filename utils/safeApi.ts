@@ -13,6 +13,7 @@
 import { appendDevDebugApiLog, makeDebugLogger } from './devDebug';
 import { getApiCallAmbientContext, recordApiCall, type ApiCallMeta } from './apiCallLog';
 import { resolveBlobRefsInRequestBody } from './apiBlobRefs';
+import { waitForPalaceRequest } from './memoryPalace/maintenanceMode';
 
 const log = makeDebugLogger('api', 'SafeAPI');
 
@@ -389,6 +390,7 @@ export async function safeFetchJson(
         : { ...metaOptions, body: resolvedBody as BodyInit };
 
     for (let attempt = 0; attempt <= automaticRetryLimit; attempt++) {
+        if (meta?.appName === '记忆宫殿') await waitForPalaceRequest(options.signal ?? undefined);
         // 全局 fetch 拦截器和这里的“已解析响应兜底”共享 ID。前者覆盖裸 fetch，
         // 后者不依赖 Response.clone()，避免部分 iOS/WebView 克隆流不结束时漏记。
         const requestId = `api-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
