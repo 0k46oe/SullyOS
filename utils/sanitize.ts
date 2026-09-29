@@ -1,3 +1,4 @@
+import { deduplicateVoiceText } from './voiceTextDedup';
 /**
  * 共享 sanitize 工具 — 零依赖纯字符串处理.
  *
@@ -450,6 +451,7 @@ export function sanitizeForBubble(
   // 5. 老翻译标记
   result = stripLegacyTrans(result);
   // 6. 收尾
+  result = deduplicateVoiceText(result);
   result = collapseWhitespace(result);
   return result;
 }
@@ -507,7 +509,7 @@ export function sanitizeIntoSegments(text: string): Segment[] {
   // Phase 1: 全文 suppress
   let cleaned = stripLiteralBackslashN(text);
   cleaned = stripThinkBlocks(cleaned);
-  cleaned = normalizeVoiceTags(cleaned); // 语音标签自愈 — Phase 1.5 的配对保护靠它兜底
+  cleaned = deduplicateVoiceText(normalizeVoiceTags(cleaned)); // 语音标签自愈 — Phase 1.5 的配对保护靠它兜底
   cleaned = normalizeTranslationTags(cleaned); // 翻译标签自愈 — 同上, Phase 1.5 的 <翻译> 原子保护靠它命中
 
   // Phase 1.5: 原子语义块交给 amsg-instant 标准 protected-block splitter 识别,

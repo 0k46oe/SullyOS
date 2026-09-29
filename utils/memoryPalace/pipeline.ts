@@ -1,3 +1,4 @@
+import { readMaintenanceSettings } from './maintenanceMode';
 import { loadRangeMessageContents } from './rangeMessagePage';
 import { loadCharacterContextMessages } from '../chatContextRange';
 /**
@@ -132,6 +133,8 @@ import {
  * 而不是主聊天模型。
  */
 export interface LightLLMConfig {
+    /** Manual wizard: compression must not start another plate request. */
+    deferPlateMaintenance?: boolean;
     baseUrl: string;
     apiKey: string;
     model: string;
@@ -1706,11 +1709,11 @@ export interface PipelineResult {
      * 软跳过原因（非错误）：LLM 根本没跑，原因可能是缓冲区未到阈值 / 热区还没被挤出 / 已有任务在跑。
      * caller 看到这个字段就应当提示"聊天还不够，继续聊"，而不是报"LLM 提取失败"。
      */
-    skipReason?: 'lock' | 'hot_zone' | 'threshold';
+    skipReason?: 'lock' | 'hot_zone' | 'threshold' | 'manual';
 }
 
 /** 构造一个"软跳过"结果，统一 caller 的分支处理 */
-function makeSkipResult(reason: 'lock' | 'hot_zone' | 'threshold'): PipelineResult {
+function makeSkipResult(reason: 'lock' | 'hot_zone' | 'threshold' | 'manual'): PipelineResult {
     return { stored: 0, skipped: 0, memories: [], batches: [], skipReason: reason };
 }
 
@@ -1983,7 +1986,7 @@ async function applyMemorySideEffects(
         }
 
         // 10c. EventBox 压缩：扫描刚被触达的盒，活节点 ≥ 4 → LLM 二次总结
-        if (touchedBoxIds.size > 0) {
+        if (touchedBoxIds.size > 0 && !llmConfig.deferPlateMaintenance && !readMaintenanceSettings().enabled) {
             try {
                 const { maybeCompressEventBoxes } = await import('./eventBoxCompression');
                 await maybeCompressEventBoxes(touchedBoxIds, llmConfig, embeddingConfig, charName, userName);
@@ -2050,6 +2053,8 @@ async function applyMemorySideEffects(
 }
 
 export interface ProcessNewMessagesOptions {
+    /** Explicit user step may run while automatic maintenance is paused. */
+    manualMaintenanceStep?: boolean;
     /** 一键存入后仍保留为聊天原文的最近消息数；只在 drainBuffer=true 时生效。 */
     retainRecentMessages?: number;
     /** 处理水位线到目标边界之间的全部内容，不套用日常档位热区与 85% 尾部保留。 */
@@ -2073,6 +2078,7 @@ export async function processNewMessages(
     onProgress?: (stage: string) => void,
     options: ProcessNewMessagesOptions = {},
 ): Promise<PipelineResult | null> {
+    if (!force && !options.manualMaintenanceStep && readMaintenanceSettings().enabled) return makeSkipResult('manual');
     // 并发锁：同一角色同时只能跑一次
     if (processingLocks.has(charId)) {
         console.log(`🏰 [Pipeline] 跳过：${charName} 已有处理任务在运行`);
