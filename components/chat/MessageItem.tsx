@@ -451,25 +451,6 @@ const ForwardCard: React.FC<{
 
     const formatTime = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 
-    const formatTimestamp = (ts: number) => {
-        const d = new Date(ts);
-        const now = new Date();
-        const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-
-        const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-        const dayDiff = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
-
-        if (dayDiff === 0) return time;
-        if (dayDiff === 1) return `昨天 ${time}`;
-        if (dayDiff < 7) return `${dayDiff}天前 ${time}`;
-
-        const sameYear = d.getFullYear() === now.getFullYear();
-        const dateStr = sameYear
-            ? `${d.getMonth() + 1}月${d.getDate()}日`
-            : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
-        return `${dateStr} ${time}`;
-    };
-
     return (
         <>
             {commonLayout(
@@ -1349,6 +1330,22 @@ const MessageItem = React.memo(({
     };
 
     const formatTime = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+
+const formatTimestamp = (ts: number) => {
+    const d = new Date(ts);
+    const now = new Date();
+    const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const dayDiff = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
+    if (dayDiff === 0) return time;
+    if (dayDiff === 1) return `昨天 ${time}`;
+    if (dayDiff < 7) return `${dayDiff}天前 ${time}`;
+    const sameYear = d.getFullYear() === now.getFullYear();
+    const dateStr = sameYear
+        ? `${d.getMonth() + 1}月${d.getDate()}日`
+        : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+    return `${dateStr} ${time}`;
+};
 
     // Render Avatar with potential decoration/frame
     // Removed mb-5 from here, handled via absolute positioning in parent
