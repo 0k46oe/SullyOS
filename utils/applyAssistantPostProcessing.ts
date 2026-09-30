@@ -74,8 +74,7 @@ export function buildReplySnapshotContent(msg: { type?: string; content: string 
     const looksLikeMedia = /^(data:|https?:\/\/)/i.test(trimmed) || isBlobRef(trimmed);
     if (msg.type === 'emoji') return '[表情包]';
     if (msg.type === 'image' || looksLikeMedia) return '[图片]';
-    return content.length > 10 ? content.slice(0, 10) + '...' : content;
-}
+return content;}
 
 /** 第一遍粗洗 — 剥 <think> / 时间戳 / 历史里漏出的 [聊天]/[通话]/[约会] / 表情包反向 tag */
 const normalizeAiContent = (raw: string): string => {
