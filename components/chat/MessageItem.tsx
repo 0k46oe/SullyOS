@@ -1658,6 +1658,13 @@ const MessageItem = React.memo(({
     ) : null;
     const commonLayout = (content: React.ReactNode) => (
         <>
+        {isFirstInGroup && showTimestamp !== 'never' && (
+            <div className="w-full flex justify-center pt-3 pb-0.5 select-none pointer-events-none">
+                <span className="text-[10px] text-slate-400/80 font-medium">
+                    {formatTimestamp(m.timestamp)}
+                </span>
+            </div>
+        )}
             {centerModules && thinkingChainNode && (
                 <div className="px-3 flex justify-center">
                     <div className="w-[72%] max-w-[72%]">{thinkingChainNode}</div>
