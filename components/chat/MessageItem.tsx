@@ -1335,18 +1335,23 @@ const formatTimestamp = (ts: number) => {
     const d = new Date(ts);
     const now = new Date();
     const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+
     const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
     const dayDiff = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
+
     if (dayDiff === 0) return time;
     if (dayDiff === 1) return `昨天 ${time}`;
-    if (dayDiff < 7) return `${dayDiff}天前 ${time}`;
+    if (dayDiff <= 7) {
+        const week = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'][d.getDay()];
+        return `${week} ${time}`;
+    }
+
     const sameYear = d.getFullYear() === now.getFullYear();
     const dateStr = sameYear
         ? `${d.getMonth() + 1}月${d.getDate()}日`
         : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
     return `${dateStr} ${time}`;
 };
-
     // Render Avatar with potential decoration/frame
     // Removed mb-5 from here, handled via absolute positioning in parent
     const renderAvatar = (
@@ -1656,12 +1661,11 @@ const formatTimestamp = (ts: number) => {
     const commonLayout = (content: React.ReactNode) => (
         <>
         {isFirstInGroup && showTimestamp !== 'never' && (
-            <div className="w-full flex justify-center pt-3 pb-0.5 select-none pointer-events-none">
-                <span className="text-[10px] text-slate-400/80 font-medium">
-                    {formatTimestamp(m.timestamp)}
-                </span>
-            </div>
-        )}
+<div className="sully-chat-timestamp-divider w-full flex justify-center pt-3 pb-0.5 select-none pointer-events-none">
+    <span className="sully-chat-timestamp-text text-[10px] text-slate-400/80 font-medium">
+        {formatTimestamp(m.timestamp)}
+    </span>
+</div>        )}
             {centerModules && thinkingChainNode && (
                 <div className="px-3 flex justify-center">
                     <div className="w-[72%] max-w-[72%]">{thinkingChainNode}</div>
