@@ -3390,13 +3390,12 @@ const formatTimestamp = (ts: number) => {
             )}
 
             {/* Layer 3: Reply/Quote Block */}
-            {m.replyTo && (
-                <div className="relative z-10 mb-1 text-[10px] bg-black/5 p-1.5 rounded-md border-l-2 border-current opacity-60 flex flex-col gap-0.5 max-w-full overflow-hidden">
-                    <span className="font-bold opacity-90 truncate">{m.replyTo.name}</span>
-                    <span className="truncate italic">"{replyPreview.length > 10 ? replyPreview.slice(0, 10) + '...' : replyPreview}"</span>
-                </div>
-            )}
-
+{m.replyTo && (
+    <div className="relative z-10 mb-1 text-[10px] bg-black/5 p-1.5 rounded-md border-l-2 border-current opacity-60 flex flex-col gap-0.5 max-w-full overflow-hidden">
+        <span className="font-bold opacity-90 truncate">{m.replyTo.name}</span>
+        <span className="italic line-clamp-2">"{replyPreview}"</span>
+    </div>
+)}
             {/* Layer 4: Text Content — shown when there's visible text after stripping voice tags */}
             {/* 外语语音消息把双语文字交给下方语音条渲染，顶部不再重复正文 */}
             {displayContent && !isForeignVoiceMsg && (
