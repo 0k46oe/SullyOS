@@ -278,12 +278,13 @@ export function mergePalaceFragmentsIntoMemories(
     }
 
     for (const frag of incoming) {
+        if (result.some(memory => memory.id === frag.id)) continue;
         if (frag.palaceMemoryId) {
             // Never merge a new link into a pre-upgrade daily snapshot, even on the same date.
             if (!result.some(memory => memory.palaceMemoryId === frag.palaceMemoryId)) result.push(frag);
             continue;
         }
-        const existingIdx = palaceByDate.get(frag.date);
+        const existingIdx = frag.mood === 'palace' ? palaceByDate.get(frag.date) : undefined;
         if (existingIdx !== undefined) {
             // merge：把新 bullets 直接追加到 summary。
             // 不做字符串去重——LLM 偶尔写出相同短句的合法情况会被误杀，
@@ -298,7 +299,7 @@ export function mergePalaceFragmentsIntoMemories(
             };
         } else {
             result.push(frag);
-            palaceByDate.set(frag.date, result.length - 1);
+            if (frag.mood === 'palace') palaceByDate.set(frag.date, result.length - 1);
         }
     }
 

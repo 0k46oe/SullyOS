@@ -80,7 +80,7 @@ import {wallFaces,mountOnFace,wallPlacementError} from './wallMount.js';
 import {wateringSpot,roomPlants} from './watering.js';
 import {createWateringEffect} from './wateringEffect.js';
 import {seatEntry,seatChangePose} from './seatChange.js';
-import {body2BedTransform,bedEntry,bedEdge} from './bedMotion.js';
+import {body2BedTransform,bedFootSurface,bedEntry,bedEdge} from './bedMotion.js';
 import {seatChangeDuration} from './chibi/roomMotionFrame.ts';
 import {meshyMotions} from './chibi/meshyMotions';
 import {BUILDING_ASSETS,BUILDING_LENGTH,buildingScale,ROOM_EDGES,buildingEdge,placeBuildingOnEdge,snapBuildingToEdge} from './building.js';
@@ -363,7 +363,7 @@ export async function mountHomeEditor(host,{assetBase,initialState,onChange,onBa
  function currentSeatPose(){
   if(!visitor?.rig||!visitorSeat)return null;
   const seat=resolvedVisitorSeat();
-  if(visitorSeat.bed)return seat?.pose==='bed'?{kind:'bed-rest',hands:[],bedWeight:1,bedRecline:1,bedMode:visitorSeat.bedMode,bedFrom:visitorSeat.bedFrom,bedFromTime:visitorSeat.bedFromTime,bedTime:Math.max(0,elapsed-(visitorSeat.modeStart??elapsed))}:null;
+  if(visitorSeat.bed)return seat?.pose==='bed'?{kind:'bed-rest',hands:[],bedFootSurface:bedFootSurface(seat,visitor.seatScale),bedWeight:1,bedRecline:1,bedMode:visitorSeat.bedMode,bedFrom:visitorSeat.bedFrom,bedFromTime:visitorSeat.bedFromTime,bedTime:Math.max(0,elapsed-(visitorSeat.modeStart??elapsed))}:null;
   return seat?{kind:'seat-rest',hands:[],seatPose:seat.pose,seatHeight:seat.height/(visitor.seatScale??1),...(visitorSeat.alternate&&seat.pose==='floor'?{clip:'sit-alternate',clipTime:Math.max(0,elapsed-visitorStart-seatChangeDuration('floor')),clipWeight:seatChange?0:1}:{})}:null;
  }
  function beginSeatChange(rising,entry){
@@ -948,7 +948,7 @@ export async function mountHomeEditor(host,{assetBase,initialState,onChange,onBa
   if(seatChange){
    const f=seatChangePose(seatChange,elapsed-seatChange.start);
    resident.position.fromArray(f.position);setResidentHeading(resident,f.rotation??seatChange.rotation);
-   seatPose=seatChange.pose==='bed'?{kind:'bed-change',hands:[],bedFrom:seatChange.bedFrom,bedFromTime:seatChange.bedFromTime,bedTime:elapsed-seatChange.start,bedWeight:f.weight,bedRecline:f.recline,bedLegLift:f.legLift,bedStep:f.stepping,...(f.clipBlend>0?{clip:'sleep',clipTime:f.recline*meshyMotions.sleep.duration,clipWeight:f.clipBlend}:{})}:{...currentSeatPose(),kind:'seat-change',hands:[],seatWeight:f.weight,seatLean:f.lean,seatFold:f.fold,seatSupport:f.support};
+   seatPose=seatChange.pose==='bed'?{kind:'bed-change',hands:[],bedFootSurface:currentSeatPose()?.bedFootSurface,bedFrom:seatChange.bedFrom,bedFromTime:seatChange.bedFromTime,bedTime:elapsed-seatChange.start,bedWeight:f.weight,bedRecline:f.recline,bedLegLift:f.legLift,bedStep:f.stepping,...(f.clipBlend>0?{clip:'sleep',clipTime:f.recline*meshyMotions.sleep.duration,clipWeight:f.clipBlend}:{})}:{...currentSeatPose(),kind:'seat-change',hands:[],seatWeight:f.weight,seatLean:f.lean,seatFold:f.fold,seatSupport:f.support};
    renderer.shadowMap.needsUpdate=true;
    if(f.done){
     if(seatChange.rising){visitorSeat=null;visitorLocation={x:resident.position.x+current().x*ROOM_STEP.x,z:resident.position.z+current().z*ROOM_STEP.z,level:current().level};}

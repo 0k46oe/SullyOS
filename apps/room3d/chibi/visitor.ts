@@ -19,7 +19,7 @@ export const NEW_BODY_HOME_PERCENT=200;
 
 export async function decodeParts(result:RollResult,hair?:HairSettings):Promise<Parts>{
  const parts:Parts={};
- await Promise.all(Object.entries(result.layers).map(async([key,url])=>{const img=new Image();img.src=url;await img.decode();parts[key]=img;}));
+ await Promise.all(Object.entries(result.layers).map(async([key,url])=>{const img=new Image();img.src=url;await img.decode();img.dataset.creatorLineart=String((result.state as {preserveLineart?:number})?.preserveLineart??25);parts[key]=img;}));
  await Promise.all((hair?.extras??[]).filter(e=>e.src).map(async e=>{const img=new Image();img.src=e.src!;await img.decode();parts[e.source]=img;}));
  return parts;
 }

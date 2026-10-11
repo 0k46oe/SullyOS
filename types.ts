@@ -2205,6 +2205,14 @@ export interface StoryTheaterArchive {
     /** summary 策略的事件盒正文；vector 策略留空，由独立 charId 分区召回。 */
     summary?: string;
     createdAt: number;
+    /** 用户主动转为角色记忆的回执；与聊天高水位无关，随整机备份保留。 */
+    memoryConversions?: Record<string, {
+        date: string;
+        convertedAt: number;
+        destination: 'palace' | 'neural';
+        memoryIds: string[];
+        skipped: number;
+    }>;
 }
 
 /** 剧场里用户所扮演的身份；已有角色按 characterId 动态读取，自定义身份来自面具箱。 */

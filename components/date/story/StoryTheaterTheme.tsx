@@ -130,7 +130,25 @@ const STORY_THEME_CSS = `
 .story-theme .story-safe-footer { padding-bottom: calc(var(--safe-bottom) + 12px); }
 .story-theme .story-safe-sheet { padding-bottom: calc(var(--safe-bottom) + 18px); }
 .story-theme .story-quick-preset { bottom: calc(var(--safe-bottom) + 112px); }
-.story-theme .story-page-scroll { overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; }
+.story-theme .story-page-scroll {
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: var(--story-line) transparent;
+}
+.story-theme .story-page-scroll:hover,
+.story-theme .story-page-scroll:focus-within { scrollbar-color: var(--story-faint) transparent; }
+/* WebKit styling also removes the Windows arrow buttons and opaque track. */
+@supports selector(::-webkit-scrollbar) {
+  .story-theme .story-page-scroll { scrollbar-width: auto; scrollbar-color: auto; }
+  .story-theme .story-page-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+  .story-theme .story-page-scroll::-webkit-scrollbar-track,
+  .story-theme .story-page-scroll::-webkit-scrollbar-corner { background: transparent; }
+  .story-theme .story-page-scroll::-webkit-scrollbar-thumb { background: var(--story-line); border-radius: 999px; }
+  .story-theme .story-page-scroll:hover::-webkit-scrollbar-thumb,
+  .story-theme .story-page-scroll:focus-within::-webkit-scrollbar-thumb { background: var(--story-faint); }
+  .story-theme .story-page-scroll::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+}
 .story-theme.story-decor-plain .shadow-sm { box-shadow: none !important; }
 .story-theme.story-decor-cinema .story-cinema-rule { position: relative; }
 .story-theme.story-decor-cinema .story-cinema-rule::after {
