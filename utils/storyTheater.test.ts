@@ -30,7 +30,7 @@ import {
     getPendingStoryRetryInput,
     isProtectedStoryPrompt,
     isStoryUserLastCompatibilityError,
-    memoryTimestampForCharacter,
+    storyTimelineTimestampForCharacter,
     parseStoryDisplayBlocks,
     parseStoryMiniTheater,
     parseStoryTheaterPreset,
@@ -432,7 +432,7 @@ describe('剧情沙盒辅助逻辑', () => {
 
     it('把同一正文映射到每位角色自己的时间锚点', () => {
         const createdAt = new Date('2026-08-01T10:00:00Z').getTime();
-        const output = memoryTimestampForCharacter({
+        const output = storyTimelineTimestampForCharacter({
             id: 's', title: 't', premise: '', characterIds: ['a'], writesToCharacterMemory: true,
             characterMemoryDates: { a: '2020-01-02T03:04' }, carryCharacterMemory: true,
             characterContextLimits: {}, archiveAfter: 40, archiveStrategy: 'summary', archives: [],

@@ -1455,12 +1455,27 @@ export const describeEmptyStoryCompletion = (data: unknown): string => {
     return `没有生成正文${finishReason ? `（finish_reason=${finishReason}）` : '：上游返回了空内容'}，请重试`;
 };
 
-export const memoryTimestampForCharacter = (entry: StoryTheaterEntry, charId: string, realTimestamp: number): number => {
+/** 仅表示设定中的剧情时间，禁止写入 Message.timestamp 或用于现实互动间隔。 */
+export const storyTimelineTimestampForCharacter = (entry: StoryTheaterEntry, charId: string, realTimestamp: number): number => {
     const anchorText = entry.characterMemoryDates?.[charId];
     const storyAnchor = anchorText ? new Date(anchorText).getTime() : NaN;
     if (!Number.isFinite(storyAnchor)) return realTimestamp;
     return storyAnchor + Math.max(0, realTimestamp - entry.createdAt);
 };
+
+/** 现实时间用于共享历史排序；角色的剧情时间单独保存，不改变消息收发时间。 */
+export const createStoryTheaterMirrorMessage = (
+    entry: StoryTheaterEntry,
+    charId: string,
+    central: Pick<Message, 'id' | 'role' | 'content' | 'timestamp'>,
+): Omit<Message, 'id'> => ({
+    charId, role: central.role, type: 'text', content: central.content, timestamp: central.timestamp,
+    metadata: {
+        source: 'story_theater_memory', theaterId: entry.id, theaterTitle: entry.title,
+        theaterCentralId: central.id, theaterTimestampVersion: 1, theaterReceivedAt: central.timestamp,
+        theaterTimelineTimestamp: storyTimelineTimestampForCharacter(entry, charId, central.timestamp),
+    },
+});
 
 export const makeStoryPresetFileName = (name: string): string => {
     const safeName = name.replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 80) || '剧情预设';

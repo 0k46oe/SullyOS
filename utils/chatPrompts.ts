@@ -1,6 +1,7 @@
 import {secretNoteContext} from './secretNote';
 import { buildCharacterResponsePrinciples } from './characterResponsePrinciples';
 import { expandHomeContextHistory } from './homeContextSegments';
+import { hasReliableMessageTimestamp, protectPendingChatTurn } from './storyTheaterTimeline';
 import { sarPublicContext } from './vrWorld/kanataPublicContext';
 import { kanataTitleContext } from './vrWorld/kanataTitle';
 import { selectCharacterContextMessages } from './chatContextRange';
@@ -128,6 +129,8 @@ export const detectChatModeTransition = (messages: readonly Message[]): ChatMode
         const mode = getChatModeTransition(message);
         if (mode) return hasPendingChatInput ? mode : null;
 
+        // 刚送达的定时主动消息不是对待回复输入的回答，也不代表线上格式已经切换。
+        if (message.role === 'assistant' && message.metadata?.activeMsg2?.taskId != null) continue;
         if (message.role === 'assistant') return null;
         if (message.role === 'user') hasPendingChatInput = true;
     }
@@ -1081,6 +1084,8 @@ ${voiceActingGuide()}`;
             contextHighWaterMark?: number;
             /** 默认使用聊天时间感知；见面入口传线下开关，控制时间戳与互动间隔。 */
             timeAwarenessEnabled?: boolean;
+            /** 线上请求兜底旧剧情副本的错序，见面自身历史不启用。 */
+            protectPendingChatTurn?: boolean;
         },
     ) => {
         // Filter Logic
@@ -1091,7 +1096,9 @@ ${voiceActingGuide()}`;
         if (processedExcludeIds && processedExcludeIds.size > 0) {
             effectiveHistory = effectiveHistory.filter(m => !processedExcludeIds.has(m.id));
         }
-        const historySlice = expandHomeContextHistory(effectiveHistory.slice(-limit));
+        const orderedHistory = options?.protectPendingChatTurn ? protectPendingChatTurn(effectiveHistory) : effectiveHistory;
+        const expandedHistory = expandHomeContextHistory(orderedHistory.slice(-limit));
+        const historySlice = options?.protectPendingChatTurn ? protectPendingChatTurn(expandedHistory) : expandedHistory;
         const charTz = resolveCharTimeZone(char);
         const timeAwarenessOn = options?.timeAwarenessEnabled ?? (char.timeAwarenessEnabled !== false);
 
@@ -1102,20 +1109,20 @@ ${voiceActingGuide()}`;
             let lastRealMsg: Message | undefined;
             for (let i = historySlice.length - 2; i >= 0; i--) {
                 const m = historySlice[i];
-                if (!m.metadata?.proactiveHint && !(m.role === 'assistant' && i > 0 && historySlice[i - 1]?.metadata?.proactiveHint)) {
+                if (hasReliableMessageTimestamp(m) && !m.metadata?.proactiveHint && !(m.role === 'assistant' && i > 0 && historySlice[i - 1]?.metadata?.proactiveHint)) {
                     lastRealMsg = m;
                     break;
                 }
             }
             // 时间感知关闭时，互动间隔与现实消息时间戳一起遮住。
-            if (lastRealMsg && currentMsg && timeAwarenessOn) timeGapHint = ChatPrompts.getTimeGapHint(lastRealMsg, currentMsg.timestamp, charTz);
+            if (lastRealMsg && currentMsg && timeAwarenessOn && hasReliableMessageTimestamp(currentMsg)) timeGapHint = ChatPrompts.getTimeGapHint(lastRealMsg, currentMsg.timestamp, charTz);
         }
 
         return {
             apiMessages: historySlice.map((m, index) => {
                 if (m.type === 'secret_note') return {role: m.role, content: secretNoteContext(m.content)};
                 let content: any = m.content;
-                const timeStr = timeAwarenessOn ? `[${ChatPrompts.formatDate(m.timestamp, charTz)}]` : '';
+                const timeStr = timeAwarenessOn && hasReliableMessageTimestamp(m) ? `[${ChatPrompts.formatDate(m.timestamp, charTz)}]` : '';
                 const sourceTag = (() => {
                     const source = m.metadata?.source;
                     if (source === 'call') return '[通话]';
