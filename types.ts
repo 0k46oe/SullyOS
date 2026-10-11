@@ -1012,7 +1012,7 @@ export interface SimScript {
     buff?: { name?: string; label: string; emoji?: string; color?: string; intensity?: 1 | 2 | 3; description?: string };
 }
 
-// 「人格模拟」演出结束后写入「生活记录」的一条留存（角色不记得，仅作为用户的体验档案）
+// 「人格模拟」生成后写入「生活记录」的剧本与播放进度（角色不记得，仅作为用户的体验档案）
 export interface PhoneSimLog {
     id: string;
     mode: 'daily' | 'event';
@@ -1025,6 +1025,8 @@ export interface PhoneSimLog {
     memoryText?: string;  // 演出可读梗概，作为回忆发给角色时用（让角色真的"知道"发生了什么）
     timestamp: number;
     script?: SimScript;   // 完整脚本快照——存在则「生活记录」可原样重播（旧记录没有，仅可发送）
+    playback?: { beatIndex: number; status: 'ready' | 'playing' | 'completed' };
+    completedAt?: number; // 首次播到结尾的时间；重播不再应用情绪效果。无 playback 的旧记录视为已完成。
 }
 
 // ============================================================

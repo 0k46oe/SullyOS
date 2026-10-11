@@ -16,6 +16,7 @@ import {
 } from '../utils/relationshipChat';
 import PersonaSim, { LifeLog, generatePersonaScript } from './PersonaSim';
 import { usePersonaSim, personaSimStore } from '../utils/personaSimStore';
+import { createPersonaSimLog, getPersonaSimBeatIndex } from '../utils/personaSimLog';
 import { getLastInnerState } from '../utils/emotionApply';
 import { trackEvent } from '../utils/analytics';
 import { buildPhoneEvidenceChatCard, normalizePhoneEvidence, phoneFieldToText } from '../utils/phoneEvidence';
@@ -1962,7 +1963,14 @@ ${olderText}
             const generated = await generatePersonaScript({
                 char: targetChar, userProfile, apiConfig: effectiveApiConfig as any, mode: m, theme: t, userPresence: presence, tone,
             });
-            personaSimStore.set({ status: 'ready', mode: m, theme: t, script: generated, charId: cid, charName: cname });
+            const log = createPersonaSimLog(generated, m, t);
+            updateCharacter(cid, cur => ({
+                phoneState: {
+                    ...cur.phoneState, records: cur.phoneState?.records || [],
+                    simLogs: [log, ...(cur.phoneState?.simLogs || [])],
+                },
+            }));
+            personaSimStore.set({ status: 'ready', mode: m, theme: t, script: generated, logId: log.id, charId: cid, charName: cname });
             addToast('演出已就绪', 'success');
         } catch (e) {
             console.error(e);
@@ -3758,16 +3766,16 @@ ${olderText}
                     {activeAppId === 'aiagent' && renderAiAgent()}
                     {activeAppId === 'ai_session' && renderAiSession()}
                     {activeAppId === 'persona' && targetChar && (
-                        <PersonaSim targetChar={targetChar} onExit={() => setActiveAppId('home')} openLifeLog={() => setActiveAppId('lifelog')}
-                            sim={sim} onStart={runSim} onConsumed={() => personaSimStore.reset()} />
+                        <PersonaSim key={targetChar.id} targetChar={targetChar} onExit={() => setActiveAppId('home')} openLifeLog={() => setActiveAppId('lifelog')}
+                            sim={sim.charId === targetChar.id ? sim : { status: 'idle' }} onStart={runSim} onConsumed={() => personaSimStore.reset()} />
                     )}
                     {activeAppId === 'lifelog' && targetChar && (
                         <LifeLog targetChar={targetChar} onBack={() => setActiveAppId('home')}
                             onRequestDelete={requestDeleteSimLog}
-                            onReplay={(log) => {
+                            onReplay={(log, action) => {
                                 if (!log.script) return;
                                 // 用存下来的脚本快照原样回放——直接喂给全局 store 的 ready 态
-                                personaSimStore.set({ status: 'ready', mode: log.mode, theme: log.theme, script: log.script, replay: true, charId: targetChar.id, charName: targetChar.name });
+                                personaSimStore.set({ status: 'ready', mode: log.mode, theme: log.theme, script: log.script, logId: log.id, startIndex: action === 'resume' ? getPersonaSimBeatIndex(log) : 0, charId: targetChar.id, charName: targetChar.name });
                                 setActiveAppId('persona');
                             }} />
                     )}
