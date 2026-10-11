@@ -1,3 +1,4 @@
+import type {WardrobeUsage, WardrobeUsageReader} from '../../utils/wardrobeUsage';
 import React,{useEffect,useMemo,useRef,useState} from 'react';
 import BeautyPresetPreview from '../share/BeautyPresetPreview';
 import type {WardrobeEntry} from '../appearance/BeautyWardrobe';
@@ -19,13 +20,15 @@ export function DecorationMiniPreview({preset,category}:{preset:DecorationPreset
  return <div className="decoration-mini-preview" aria-hidden="true"><BeautyPresetPreview data={sample} compact thumbnailPart={category==='whitebox'?'full':category}/></div>;
 }
 
-export default function DecorationPresetThumb({entry,category,disabled,onChoose}:{entry:WardrobeEntry;category:DecorationShelf;disabled:boolean;onChoose:()=>void}){
+export default function DecorationPresetThumb({getUsage,entry,category,disabled,onChoose}:{getUsage?:WardrobeUsageReader;entry:WardrobeEntry;category:DecorationShelf;disabled:boolean;onChoose:()=>void}){
  const read=useRef(entry.readLocal || entry.read);read.current=entry.readLocal || entry.read;
  const [preset,setPreset]=useState<DecorationPreset|null>(null);
  const [error,setError]=useState(false);
  useEffect(()=>{let alive=true;setPreset(null);setError(false);Promise.resolve().then(()=>read.current()).then(value=>{if(alive)setPreset(validateDecoration(value));}).catch(()=>{if(alive)setError(true);});return()=>{alive=false;};},[entry.id,entry.revision]);
+ const [usage,setUsage]=useState<WardrobeUsage>('');
+ useEffect(()=>{let alive=true;setUsage('');if(preset&&getUsage)void getUsage(preset).then(value=>{if(alive)setUsage(value);});return()=>{alive=false;};},[preset,getUsage]);
  return <button className="decoration-preset-tile" aria-label={`选择 ${entry.name}`} disabled={disabled} onClick={onChoose}>
   <span className="decoration-preset-tile-image" data-category={category}>{preset?<DecorationMiniPreview preset={preset} category={category}/>:<span className="decoration-thumbnail-loading">{error?'预览暂不可用':'载入预览…'}</span>}</span>
-  <strong>{entry.name}</strong><small>选择这款 <span aria-hidden="true">↗</span></small>
+  <strong>{entry.name}</strong>{usage&&<span className="wardrobe-usage">{usage}</span>}<small>选择这款 <span aria-hidden="true">↗</span></small>
  </button>;
 }
