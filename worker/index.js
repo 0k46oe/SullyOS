@@ -3858,29 +3858,36 @@ export default {
       const apiKey = (request.headers.get('xi-api-key') || '').trim();
       const voiceId = (url.searchParams.get('voice_id') || '').trim();
       const outputFormat = (url.searchParams.get('output_format') || 'mp3_44100_128').trim();
+      const dialogue = url.searchParams.get('mode') === 'dialogue';
+      const timestamps = url.searchParams.get('timestamps') === '1';
       if (!apiKey) {
         return jsonResponse({ error: 'Missing xi-api-key header (ElevenLabs API key)' }, { status: 401, origin });
       }
-      if (!/^[A-Za-z0-9_-]{8,64}$/.test(voiceId)) {
+      if (!dialogue && !/^[A-Za-z0-9_-]{8,64}$/.test(voiceId)) {
         return jsonResponse({ error: 'Missing or invalid voice_id' }, { status: 400, origin });
       }
       if (!/^[a-z0-9_]{3,32}$/.test(outputFormat)) {
         return jsonResponse({ error: 'Invalid output_format' }, { status: 400, origin });
       }
       try {
-        const upstreamUrl = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream?output_format=${encodeURIComponent(outputFormat)}`;
+        const endpoint = dialogue ? 'text-to-dialogue' : `text-to-speech/${encodeURIComponent(voiceId)}`;
+        const upstreamUrl = `https://api.elevenlabs.io/v1/${endpoint}/stream${timestamps ? '/with-timestamps' : ''}?output_format=${encodeURIComponent(outputFormat)}`;
         const upstream = await fetch(upstreamUrl, {
           method: 'POST',
+          signal: request.signal,
           headers: {
             'xi-api-key': apiKey,
             'Content-Type': request.headers.get('Content-Type') || 'application/json',
-            'Accept': 'audio/mpeg',
+            'Accept': timestamps ? 'application/json' : 'audio/mpeg',
           },
           body: await request.text(),
         });
         const respHeaders = new Headers(corsHeaders(origin));
         respHeaders.set('Content-Type', upstream.headers.get('Content-Type') || 'audio/mpeg');
-        respHeaders.set('Access-Control-Expose-Headers', 'Content-Length, Content-Type');
+        respHeaders.set('Access-Control-Expose-Headers', 'Content-Length, Content-Type, request-id');
+        respHeaders.set('Cache-Control', 'no-store, no-transform');
+        const requestId = upstream.headers.get('request-id');
+        if (requestId) respHeaders.set('request-id', requestId);
         return new Response(upstream.body, { status: upstream.status, headers: respHeaders });
       } catch (e) {
         return jsonResponse({ error: 'ElevenLabs upstream fetch failed', detail: String(e && e.message || e) }, { status: 502, origin });

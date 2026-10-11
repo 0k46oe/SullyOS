@@ -28,8 +28,9 @@ import {
     DEFAULT_ELEVENLABS_MODEL,
     ELEVENLABS_MODEL_OPTIONS,
     getElevenLabsVoiceActingGuide,
+    isElevenLabsV4Model,
 } from '../utils/elevenLabsTts';
-import { DATE_VOICE_GUIDE } from '../utils/datePrompts';
+import { getDateVoiceGuide } from '../utils/datePrompts';
 import { Sun, Newspaper, NotePencil, Notebook, Book, ForkKnife, Coffee, PlugsConnected } from '@phosphor-icons/react';
 import { loadMcpServers, saveMcpServers, createMcpServer, testMcpConnection, resetMcpSession, getMcpUseNativeTools, setMcpUseNativeTools, type McpServerConfig } from '../utils/mcpClient';
 import { loadPushConfig, savePushConfig, registerScheduleOnWorker, startHeartbeat, stopHeartbeat, isPushConfigAvailable, ensureSubscribed, sendTestPush, getPushDiagnostics, resetSubscription, deepResetSubscription, type PushDiagnostics } from '../utils/proactivePushConfig';
@@ -2896,8 +2897,13 @@ const Settings: React.FC = () => {
                         ))}
                     </select>
                     <p className="text-[11px] text-slate-400 mt-1 pl-1">
-                        Flash v2.5 默认更适合实时聊天；v3 支持更丰富的方括号 Audio Tags。切换后对应的内置语音提示规则也会同步切换。
+                        默认推荐 v4，音质与表现力优先；v4 Turbo 生成更快。两者都支持情绪、音效、节奏等 Audio Tags，内置语音指南随模型切换；已有自定义指南会保留。
                     </p>
+                    {isElevenLabsV4Model(localElevenLabsModel) && (
+                        <p className="text-[11px] text-slate-500 mt-2 pl-1">
+                            v4 只支持稳定度与相似度；角色语速、风格强度、Speaker Boost 和 SSML 不生效，请用 Audio Tags 控制节奏与表演。当前播放需等待整段音频生成完成；跨语言时会采用目标语言的自然发音。
+                        </p>
+                    )}
 
                     <details className="mt-3 rounded-xl border border-slate-200/60 bg-white/35 px-3 py-2">
                         <summary className="cursor-pointer text-[11px] font-semibold text-slate-500 select-none">声音参数（高级）</summary>
@@ -2906,7 +2912,7 @@ const Settings: React.FC = () => {
                                 ['稳定度', localElevenLabsStability, setLocalElevenLabsStability],
                                 ['相似度', localElevenLabsSimilarityBoost, setLocalElevenLabsSimilarityBoost],
                                 ['风格强度', localElevenLabsStyle, setLocalElevenLabsStyle],
-                            ] as const).map(([label, value, setter]) => (
+                            ] as const).filter(([label]) => !isElevenLabsV4Model(localElevenLabsModel) || label !== '风格强度').map(([label, value, setter]) => (
                                 <label key={label} className="text-[11px] text-slate-500">
                                     <span className="flex justify-between mb-1"><span>{label}</span><span className="font-mono">{value.toFixed(2)}</span></span>
                                     <input
@@ -2920,7 +2926,7 @@ const Settings: React.FC = () => {
                                     />
                                 </label>
                             ))}
-                            <label className="flex items-center justify-between gap-3 text-[11px] text-slate-500 sm:col-span-2">
+                            {!isElevenLabsV4Model(localElevenLabsModel) && <label className="flex items-center justify-between gap-3 text-[11px] text-slate-500 sm:col-span-2">
                                 <span>Speaker Boost（更贴近原音色，可能增加少量延迟）</span>
                                 <input
                                     type="checkbox"
@@ -2928,7 +2934,7 @@ const Settings: React.FC = () => {
                                     onChange={(e) => setLocalElevenLabsUseSpeakerBoost(e.target.checked)}
                                     className="w-4 h-4 accent-primary"
                                 />
-                            </label>
+                            </label>}
                         </div>
                     </details>
                 </div>
@@ -2989,7 +2995,7 @@ const Settings: React.FC = () => {
                                 ['minimax', 'MiniMax 语音指南', localVoicePromptMinimax, setLocalVoicePromptMinimax, VOICE_ACTING_GUIDE, '聊天 + 电话 · MiniMax 引擎时生效'] as const,
                                 ['fishaudio', '鱼声 Fish 语音指南', localVoicePromptFish, setLocalVoicePromptFish, FISH_VOICE_ACTING_GUIDE, '聊天 + 电话 · 鱼声引擎时生效'] as const,
                                 ['elevenlabs', 'ElevenLabs 语音指南', localVoicePromptElevenLabs, setLocalVoicePromptElevenLabs, getElevenLabsVoiceActingGuide(localElevenLabsModel), '聊天 + 电话 · ElevenLabs 引擎时生效；默认模板随模型变化'] as const,
-                                ['dateVoice', '见面（约会）语音情绪', localVoicePromptDate, setLocalVoicePromptDate, DATE_VOICE_GUIDE, '见面专用 [v:xxx] 规则 · 角色开了见面语音时生效，与引擎无关'] as const,
+                                ['dateVoice', '见面（约会）语音情绪', localVoicePromptDate, setLocalVoicePromptDate, getDateVoiceGuide(localTtsProvider, localElevenLabsModel), '见面专用 [v:xxx] 规则 · v4 默认支持台词内 Audio Tags'] as const,
                             ]).map(([key, title, value, setValue, def, hint]) => {
                                 const active = localTtsProvider === key;
                                 const usingDefault = !value.trim();

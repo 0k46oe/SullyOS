@@ -91,6 +91,7 @@ import { loadMusicPlaybackSnapshot } from './MusicContext';
 import { setCharNameRegistry } from '../utils/charNameRegistry';
 import { setMinimaxRegion } from '../utils/minimaxEndpoint';
 import { setElevenLabsModel, setTtsProvider, setVoicePromptOverrides } from '../utils/ttsProvider';
+import { DEFAULT_ELEVENLABS_MODEL } from '../utils/elevenLabsModels';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Capacitor } from '@capacitor/core';
 import { formatBytes } from '../utils/format';
@@ -690,7 +691,7 @@ const defaultApiConfig: APIConfig = {
   ttsProvider: 'minimax',
   fishAudioModel: 's2.1-pro',
   elevenLabsApiKey: '',
-  elevenLabsModel: 'eleven_flash_v2_5',
+  elevenLabsModel: DEFAULT_ELEVENLABS_MODEL,
   elevenLabsStability: 0.5,
   elevenLabsSimilarityBoost: 0.8,
   elevenLabsStyle: 0,

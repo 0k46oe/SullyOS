@@ -3,6 +3,8 @@ import { ChatCircleDots, Gear, Phone, SpeakerHigh, X } from '@phosphor-icons/rea
 import type { CallPreferences } from '../../utils/callPreferences';
 
 interface CallPreferencesSheetProps {
+  incrementalVoice?: boolean;
+  onIncrementalChange?: (enabled: boolean) => void;
   preferences: CallPreferences;
   accentColor: string;
   lightTheme: boolean;
@@ -13,6 +15,8 @@ interface CallPreferencesSheetProps {
 
 const CallPreferencesSheet: React.FC<CallPreferencesSheetProps> = ({
   preferences,
+  incrementalVoice,
+  onIncrementalChange,
   accentColor,
   lightTheme,
   onChange,
@@ -92,6 +96,14 @@ const CallPreferencesSheet: React.FC<CallPreferencesSheetProps> = ({
               })}
             </div>
           </div>
+
+          {incrementalVoice !== undefined && <label className="flex items-center gap-3 py-3">
+            <span className="min-w-0 flex-1">
+              <span className={`block text-[13px] font-medium ${lightTheme ? 'text-[#262239]/90' : 'text-white/85'}`}>边想边说</span>
+              <span className={`mt-0.5 block text-[10px] leading-4 ${lightTheme ? 'text-[#262239]/55' : 'text-white/38'}`}>写好一句就开始说。需要文字接口支持流式；高质量视频演出会先完成动作排练，再开始说话。</span>
+            </span>
+            <input type="checkbox" checked={incrementalVoice} onChange={event => onIncrementalChange?.(event.target.checked)} className="h-5 w-5" style={{ accentColor }} />
+          </label>}
 
           <div className="flex min-h-[4.75rem] items-center gap-3 py-3">
             <span
