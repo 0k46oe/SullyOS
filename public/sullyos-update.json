@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
-  "versionCode": 30508,
-  "versionName": "3.5.8",
-  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.5.8/SullyOS-Android-v3.5.8.apk",
-  "sha256": "9babc22962afaf563f14f2cad4fa5a3387f173f8bb091d27adfea70dbf48adfa",
-  "sizeBytes": 80054069,
-  "publishedAt": "2026-10-07T17:19:42Z",
+  "versionCode": 30509,
+  "versionName": "3.5.9",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.5.9/SullyOS-Android-v3.5.9.apk",
+  "sha256": "904f031520e2ed4bc30cfa79b68050b0a17610605e9ef776f90c629e41f23f04",
+  "sizeBytes": 80116280,
+  "publishedAt": "2026-10-11T17:37:48Z",
   "releaseNotes": [
-    "同步最新 master 78f1f15f，包含 v3.13 At Home 居家桌面与 3D 家园",
-    "包含启动恢复、外观选择保留、3D 家园备份与自定义部件修复",
-    "宠物移除支持确认和撤销，同步角色 API、会话收藏与美化更新",
-    "主动消息 2.0 跟随上游；保留 ntfy、相机权限、PDF、Umami 和应用内更新",
-    "沿用固定正式签名，可直接覆盖升级保留数据"
+    "同步最新 master 70e3e7f5，包含内置音效试听和当前使用标记",
+    "美化分享支持范围确认与截图封面，修复家园设置层级与外观",
+    "同步启动保护、资源加载、悬浮导航、剧情记忆与续播修复",
+    "同步上游流式语音与字幕；保留 ntfy、相机权限、PDF、Umami 和应用内更新",
+    "沿用固定正式签名，可覆盖升级保留数据"
   ]
 }
