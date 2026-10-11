@@ -64,6 +64,26 @@ export function createStaticCache(deps: CacheDependencies) {
     }
     return undefined;
   };
+  const isBuildScript = (entry: StaticEntry) => immutablePath(entry.url) && entry.url.endsWith('.js');
+  // Cache writes were already checked, but the browser must not execute an unchecked network
+  // response (or a damaged cached body) while that background check is still running.
+  async function verifiedScript(response: Response, entry: StaticEntry): Promise<Response | undefined> {
+    try {
+      if (response.status !== 200 || entry.bytes > MAX_FILE_BYTES) return;
+      const bytes = await response.arrayBuffer();
+      if (bytes.byteLength !== entry.bytes || await deps.digest(bytes) !== entry.revision) return;
+      const headers = new Headers(response.headers);
+      headers.delete('Content-Encoding');
+      headers.set('Content-Length', String(bytes.byteLength));
+      return new Response(bytes, { headers });
+    } catch { /* Truncated/erroring response streams are also integrity failures. */ }
+  }
+  const discardDamaged = (key: string) => serial(async () => {
+    runtimeIndex = undefined;
+    for (const name of (await caches.keys()).filter(name => name.startsWith(prefix))) {
+      await (await caches.open(name)).delete(key);
+    }
+  }).catch(() => {});
 
   // Hosts may add scripts to HTML or rewrite parts of it. Such an entry page still belongs to
   // this build as long as every build file it references is one of ours.
@@ -179,15 +199,24 @@ export function createStaticCache(deps: CacheDependencies) {
       async function prepare(path: string) {
         const entry = entries.get(absolute(path));
         if (!entry) throw new Error(`Missing shell entry: ${path}`);
-        const old = await findOwned(keyFor(entry));
+        let old = await findOwned(keyFor(entry));
+        let damaged = false;
+        if (old && isBuildScript(entry)) {
+          old = await verifiedScript(old, entry);
+          if (!old) { damaged = true; await discardDamaged(keyFor(entry)); }
+        }
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 20000);
         try {
           // Some hosts redirect /index.html to the directory URL, which serves the same page everywhere.
           // A hashed name always has the same content, so the copy the page just downloaded is reused.
           const request = new Request(path === 'index.html' ? scope.href : absolute(path),
-            { cache: immutablePath(path) ? 'default' : 'no-cache', signal: controller.signal });
-          const response = old || await cacheable(await deps.fetch(request), entry);
+            { cache: damaged ? 'reload' : immutablePath(path) ? 'default' : 'no-cache', signal: controller.signal });
+          let response = old || await cacheable(await deps.fetch(request), entry).catch(() => undefined);
+          // A broken immutable HTTP-cache entry otherwise poisons every update attempt.
+          if (!response && isBuildScript(entry) && request.cache !== 'reload') {
+            response = await cacheable(await deps.fetch(new Request(request, { cache: 'reload' })), entry);
+          }
           if (!response) throw new Error(`Resource changed during deployment: ${path}`);
           await cache.put(keyFor(entry), response);
         } finally { clearTimeout(timer); }
@@ -256,6 +285,11 @@ export function createStaticCache(deps: CacheDependencies) {
       }
       const age = hit ? now() - Number(hit.headers.get(SAVED_HEADER)) : 0;
       if (hit && !shell && age > MAX_AGE) hit = undefined;
+      let damaged = false;
+      if (hit && entry && isBuildScript(entry)) {
+        hit = await verifiedScript(hit, entry);
+        if (!hit) { damaged = true; await discardDamaged(key); }
+      }
       if (hit) {
         if (stored && !shell && age > REFRESH_MS && !refreshing.has(key)) {
           refreshing.add(key);
@@ -266,12 +300,30 @@ export function createStaticCache(deps: CacheDependencies) {
       }
       // A hashed name always has the same content, so the HTTP cache may answer. Other known
       // revisions are revalidated: an older HTTP force-cache response must not satisfy them.
-      let response = await deps.fetch(entry && !hashed ? new Request(request, { cache: 'no-cache' }) : request);
+      let response = await deps.fetch(damaged ? new Request(request, { cache: 'reload' })
+        : entry && !hashed ? new Request(request, { cache: 'no-cache' }) : request);
+      let reloaded = damaged || request.cache === 'reload';
       if (entry && hashed && missing(response)) {
         // An HTTP cache can hold a fallback page under this name; ask the server before deciding.
-        void response.body?.cancel().catch(() => {});
-        response = await deps.fetch(new Request(request, { cache: 'reload' }));
+        if (!reloaded) {
+          void response.body?.cancel().catch(() => {});
+          response = await deps.fetch(new Request(request, { cache: 'reload' }));
+        }
+        reloaded = true;
         if (missing(response)) waitUntil(markShellStale());
+      }
+      if (entry && isBuildScript(entry) && response.ok && !missing(response)) {
+        let verified = await verifiedScript(response, entry);
+        if (!verified && !reloaded) {
+          response = await deps.fetch(new Request(request, { cache: 'reload' }));
+          if (missing(response)) { waitUntil(markShellStale()); return response; }
+          verified = await verifiedScript(response, entry);
+        }
+        if (!verified) {
+          waitUntil(markShellStale());
+          return Response.error();
+        }
+        response = verified;
       }
       // A missing old shell must not be replaced by HTML from a different deployment.
       if (!isShell && (entry || external)) waitUntil(remember(key, response.clone(), entry));

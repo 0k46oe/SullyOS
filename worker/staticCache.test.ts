@@ -59,6 +59,65 @@ async function fixture(buildId = 'one', storage = new MemoryCaches(), limits: { 
 }
 
 describe('static resource cache', () => {
+  it('repairs truncated immutable HTTP responses before returning script bytes to the page', async () => {
+    const f = await fixture();
+    f.hooks.respond = request => request.url.endsWith(f.main) && request.cache !== 'reload'
+      ? new Response('console.log(') : undefined;
+    expect(await f.text(f.main)).toBe('console.log(1)');
+    expect(f.requestModes).toEqual(['default', 'reload']);
+    await f.settle(); f.offline();
+    expect(await f.text(f.main)).toBe('console.log(1)');
+  });
+  it('checks the hash, not just the length, and fails closed after one retry', async () => {
+    const f = await fixture(); f.bodies[f.main] = 'console.log(2)';
+    const response = await f.engine.handle(new Request(BASE + f.main));
+    expect(response!.type).toBe('error');
+    expect(f.requestModes).toEqual(['default', 'reload']);
+    await f.settle();
+    expect((await f.engine.stats()).runtimeEntries).toBe(0);
+    f.bodies['index.html'] = '<html>new version</html>';
+    expect(await f.text('')).toContain('new version');
+  });
+  it('retries a stream that fails before completion instead of handing partial JS to the browser', async () => {
+    const f = await fixture();
+    f.hooks.respond = request => request.url.endsWith(f.main) && request.cache !== 'reload'
+      ? new Response(new ReadableStream({ start(controller) { controller.error(new Error('connection closed')); } })) : undefined;
+    expect(await f.text(f.main)).toBe('console.log(1)');
+    expect(f.requestModes).toEqual(['default', 'reload']);
+  });
+  it('repairs a damaged cached script without touching another app or healthy shell files', async () => {
+    const f = await fixture(); await f.engine.install();
+    const shell = [...f.storage.stores.values()][0];
+    await shell.put(BASE + f.main, new Response('console.log('));
+    const unrelated = await f.storage.open('another-app');
+    await unrelated.put(BASE + f.main, new Response('keep'));
+    f.requests.length = 0; f.requestModes.length = 0;
+    expect(await f.text(f.main)).toBe('console.log(1)'); await f.settle();
+    expect(f.requestModes).toEqual(['reload']);
+    expect(await (await unrelated.match(BASE + f.main))!.text()).toBe('keep');
+    f.offline(); expect(await f.text('')).toContain('<html>one');
+    expect(await f.text(f.main)).toBe('console.log(1)');
+  });
+  it('does not execute a damaged cached script offline', async () => {
+    const f = await fixture(); await f.engine.install();
+    await [...f.storage.stores.values()][0].put(BASE + f.main, new Response('broken'));
+    f.offline(); await expect(f.text(f.main)).rejects.toThrow('offline');
+  });
+  it('bypasses a poisoned HTTP cache while preparing an update', async () => {
+    const f = await fixture();
+    f.hooks.respond = request => request.url.endsWith(f.main) && request.cache !== 'reload'
+      ? new Response('console.log(') : undefined;
+    await f.engine.install();
+    expect(f.requestModes.slice(0, 2)).toEqual(['default', 'reload']);
+    f.offline(); expect(await f.text(f.main)).toBe('console.log(1)');
+  });
+  it('revalidates cached scripts before reusing them during installation', async () => {
+    const f = await fixture(); await f.engine.install();
+    await [...f.storage.stores.values()][0].put(BASE + f.main, new Response('broken'));
+    const next = await fixture('one', f.storage); await next.engine.install();
+    expect(next.requestModes).toEqual(['reload']);
+    next.offline(); expect(await next.text(next.main)).toBe('console.log(1)');
+  });
   it('serves a complete installed shell offline under a repository subpath', async () => {
     const f = await fixture(); await f.engine.install(); f.offline();
     expect(await (await f.engine.handle(new Request('https://example.com/SullyOS/'))!).text()).toContain('<html>one');
