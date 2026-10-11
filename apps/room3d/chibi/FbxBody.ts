@@ -27,7 +27,10 @@ export async function loadBody() { return new FBXLoader().loadAsync(referenceUrl
 export function buildBody(source: T.Group, sourceParts: Parts, appearance: 'skin' | 'hair' | 'outfit', hair?:HairSettings) {
     const parts:Record<string,PartSurface>={...sourceParts};
     const hairColor=validAppearanceColor(hair?.hairColor);
-    if(hairColor) for(const key of new Set(['fronthair','earhair','back1','back2',...(hair?.extras??[]).map(e=>e.source)])) if(parts[key])parts[key]=tintAppearancePart(parts[key],hairColor,hair?.hairTipColor);
+    if(hairColor) for(const key of new Set(['fronthair','earhair','back1','back2',...(hair?.extras??[]).map(e=>e.source)])) {
+      // Like Chibi, fixed artwork skips palette tint but accepts an explicit custom dye.
+      if(parts[key]&&(!parts[key+'-raw-fixed']||!hair?.hairTint||hair.hairTint.color))parts[key]=tintAppearancePart(parts[key+'-raw']??parts[key+'-raw-fixed']??parts[key],hairColor,hair?.hairTipColor,hair?.hairTint,parts[key+'-shadow']);
+    }
     const blank=hair?.bodyShape==='blank';
     const headDepth=.82;
     const resources: Array<{ dispose(): void }> = [];
@@ -138,7 +141,7 @@ export function buildBody(source: T.Group, sourceParts: Parts, appearance: 'skin
         makeTexture(faceKeys,skin,'squeeze',cuteMap);
     };
     const setFaceSettings=async(value?:FaceSettings)=>{
-        const version=++faceVersion,next=value?cleanFace(value):undefined;
+        const version=++faceVersion,next=value?cleanFace({...value,preserveLineart:Number(parts.eyes?.dataset?.creatorLineart??25)}):undefined;
         const loaded=next?.enabled?await loadFaceImages(next):undefined;
         if(disposed||version!==faceVersion)return;
         faceSettings=next;faceImages=loaded;

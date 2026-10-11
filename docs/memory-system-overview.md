@@ -202,6 +202,18 @@
 一次，仍失败则整次不入库并保留输入，避免出现“前几批成功、后几批丢失”
 的半份搬家。
 
+### 剧情事件盒手动转为角色记忆
+
+剧情会话右上角「查看事件盒与转化记忆」及剧情列表的事件盒按钮进入独立页面。只展示 summary 策略产生的事件盒，支持展开摘要、勾选导出 TXT、选择参与角色，并为每个选中的盒子填写记忆日期。没有事件盒时说明生成条件，向量策略仍走原独立向量入口。故事无需结束，也不切换真实/虚构模式。
+
+`storyTheaterMemoryConversion.ts` 复用正常水位线的 `extractMemoriesFromBuffer`、`vectorizeAndStore`、`buildAutoArchiveFragments` 和神经链接合并规则。完整事件盒摘要拆成小段再提取，避免抽取器单条 600 字截断。LLM 按目标角色视角二次整理，明确区分用户、扮演身份与其他人物；正文保留剧情来源，日期由用户指定，不把剧情时间写回聊天时间。
+
+开启宫殿时写入带向量的节点，并以 `palaceMemoryId` 关联神经链接；关闭宫殿时只写 `mood='story'` 的传统记忆，不调用 Embedding。手动操作不要求自动归档开关打开。不会推进 `mp_lastMsgId_*` 或 `hideBeforeMessageId`，也不隐藏、删除原文。
+
+以「剧情 ID + 事件盒 ID + 接收角色 ID」防重：同页执行锁 + 事务内回执检查。宫殿正文、向量、神经链接及 `archives[].memoryConversions` 回执同事务保存，只有成功后才更新界面与发布远端向量；空提取、向量失败、源摘要变更或角色配置变更均不留下半份记录。同一次多盒转化逐盒提交，失败时保留已完成盒，重试只处理未完成项。语义去重跳过的节点不生成悬空神经链接关联，回执展示跳过数量。
+
+回执随完整剧情备份保留；删除剧情不反向删除手动转入角色的记忆，删除页会提示。回归：`storyTheaterMemoryConversion.test.ts`、`storyTheaterArchivePanel.test.ts`、`db.storyTheater.test.ts`；实际界面 + IndexedDB、模拟 API 验收页 `test/fixtures/story-archive.html`（独立端口 5191）。
+
 ### 三、检索逻辑（Retrieval Pipeline）
 
 **查询源清洗（querySanitizer.ts）**：query 构建前先过 `sanitizeQuerySourceMessages`——图片/表情包/语音消息整条剔除（图片 content 是几万字符的 base64 data URI，进 embedding 批量请求会把 token 总量顶爆，硅基流动直接 400 code 20015），卡片类消息经 `normalizeMessageContent` 翻成可读文本，文本里的 data URI 也一律剥离。入库管线的 `isMessageSemanticallyRelevant` 是同一口径。
