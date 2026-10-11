@@ -12,6 +12,8 @@ import { DB } from '../utils/db';
 import { Message, GroupProfile, CharacterProfile, MessageType, ChatTheme, BubbleStyle, EmojiCategory } from '../types';
 import { safeResponseJson } from '../utils/safeApi';
 import Modal from '../components/os/Modal';
+import DialogueVoicePanel from '../components/voice/DialogueVoicePanel';
+import type { DialogueLine } from '../utils/elevenLabsStream';
 import { ContextBuilder } from '../utils/context';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { deleteGroupMemoriesByGroupId } from '../utils/memoryPalace/groupPipeline';
@@ -571,6 +573,8 @@ const GroupChat: React.FC = () => {
     // Selection Mode
     const [selectionMode, setSelectionMode] = useState(false);
     const [selectedMsgIds, setSelectedMsgIds] = useState<Set<number>>(new Set());
+    const [voiceDialogueLines, setVoiceDialogueLines] = useState<DialogueLine[] | null>(null);
+    useEffect(() => { setVoiceDialogueLines(null); }, [activeGroup?.id, view]);
 
     // Data State
     const [emojis, setEmojis] = useState<{name: string, url: string, categoryId?: string}[]>([]);
@@ -1860,6 +1864,17 @@ ${memberTimeline || '(暂无互动记录)'}
             />
 
             {/* Messages Area */}
+            {apiConfig.ttsProvider === 'elevenlabs' && <div className="flex shrink-0 justify-end px-4 py-1">
+                <button className="rounded-full bg-white/80 px-3 py-1.5 text-xs text-emerald-700" onClick={() => {
+                    if (!selectionMode) { setSelectionMode(true); setSelectedMsgIds(new Set()); return; }
+                    const lines = messages.filter(message => selectedMsgIds.has(message.id) && message.role === 'assistant' && message.type === 'text')
+                        .map(message => ({ text: message.content, character: characters.find(character => character.id === message.charId) }))
+                        .filter((line): line is DialogueLine => !!line.character);
+                    if (!lines.length) { addToast('请先选中要配音的角色文字消息', 'info'); return; }
+                    setVoiceDialogueLines(lines);
+                }}>{selectionMode ? `为所选角色消息配音` : '选择消息配音'}</button>
+            </div>}
+            {voiceDialogueLines && <DialogueVoicePanel lines={voiceDialogueLines} apiConfig={apiConfig} onClose={() => setVoiceDialogueLines(null)} />}
             <div className="flex-1 overflow-y-auto overflow-x-hidden pt-6 pb-6 no-scrollbar" ref={scrollRef} onClick={() => { if (inputPreferences.autoReply) setShowPanel('none'); }}>
                 {collapsedCount > 0 && activeGroup && (
                     <div className="flex justify-center mb-6">

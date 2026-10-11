@@ -244,7 +244,7 @@ const base64ToBlob = (base64: string, mime = 'audio/mpeg'): Blob => {
   return new Blob([bytes], { type: mime });
 };
 
-const friendlyElevenLabsError = (status: number, detail: string): string => {
+export const friendlyElevenLabsError = (status: number, detail: string): string => {
   const normalized = detail.toLowerCase();
   if (status === 401 || normalized.includes('invalid api key')) return 'ElevenLabs API Key 无效或已过期';
   if (status === 402 || normalized.includes('quota') || normalized.includes('credits')) return 'ElevenLabs 额度不足';

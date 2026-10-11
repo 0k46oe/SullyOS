@@ -146,7 +146,9 @@ export default defineConfig({
           const parsed = new URL(path, 'http://localhost');
           const voiceId = parsed.searchParams.get('voice_id') || '';
           const outputFormat = parsed.searchParams.get('output_format') || 'mp3_44100_128';
-          return `/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream?output_format=${encodeURIComponent(outputFormat)}`;
+          const endpoint = parsed.searchParams.get('mode') === 'dialogue' ? 'text-to-dialogue' : `text-to-speech/${encodeURIComponent(voiceId)}`;
+          const timing = parsed.searchParams.get('timestamps') === '1' ? '/with-timestamps' : '';
+          return `/v1/${endpoint}/stream${timing}?output_format=${encodeURIComponent(outputFormat)}`;
         },
       },
     }

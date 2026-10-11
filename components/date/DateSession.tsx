@@ -30,6 +30,9 @@ import { SARSpeechSwitch } from '../sar/SARSpeechSwitch';
 import { resolveSARDateSpeech } from '../../utils/sarDatePresentation';
 import { extractDateDialogueText as extractDialogueText } from '../../utils/dateVoiceText';
 import { isElevenLabsV4Model } from '../../utils/elevenLabsModels';
+import { useStreamingVoice } from '../../hooks/useStreamingVoice';
+import StreamingVoiceBar from '../voice/StreamingVoiceBar';
+import type { StreamedVoice } from '../../utils/elevenLabsStream';
 
 // 语音情绪标记 [v:xxx]：跟立绘情绪 [emotion] 分开的独立通道。立绘的 happy 是
 // 夸张的表情、语音的 happy 是音色情绪，两者强度/语义差异大，不能一概而论。
@@ -132,7 +135,7 @@ interface DateSessionProps {
 
 const REQUIRED_EMOTIONS_SET = ['normal', 'happy', 'angry', 'sad', 'shy'];
 
-type DateSpeechResult = { url: string; spokenText: string };
+type DateSpeechResult = { url: string; spokenText: string; recording?: StreamedVoice };
 type DateVoiceFavoriteTarget = {
     sourceKey: string;
     originalText: string;
@@ -267,6 +270,22 @@ const DateSession: React.FC<DateSessionProps> = ({
     const [novelPlayingId, setNovelPlayingId] = useState<string | null>(null);
 
     const dateAudioRef = useRef<HTMLAudioElement | null>(null);
+    const streamingVoice = useStreamingVoice(char.id);
+    const dateVoiceGenerationRef = useRef(0);
+    const dateStreamUrls = useRef(new Set<string>());
+    const stopDateStream = () => { dateVoiceGenerationRef.current += 1; streamingVoice.stop(); };
+    useEffect(() => () => {
+        dateVoiceGenerationRef.current += 1;
+        dateStreamUrls.current.forEach(url => URL.revokeObjectURL(url));
+        dateStreamUrls.current.clear();
+    }, [char.id]);
+    useEffect(() => {
+        if (apiConfig.ttsProvider !== 'elevenlabs') return;
+        const state = streamingVoice.state;
+        setDateVoicePlaying(state?.status === 'playing');
+        setGalVoiceLoading(state?.id === 'gal' && state.status === 'loading');
+        setNovelPlayingId(state && ['loading', 'playing'].includes(state.status) ? state.id : null);
+    }, [streamingVoice.state, apiConfig.ttsProvider]);
     const voiceEnabled = !!char.dateVoiceEnabled;
     const voiceLang = char.dateVoiceLang || '';
     const preserveAudioTags = apiConfig.ttsProvider === 'elevenlabs' && isElevenLabsV4Model(apiConfig.elevenLabsModel);
@@ -280,8 +299,9 @@ const DateSession: React.FC<DateSessionProps> = ({
     const voiceFavoriteLongPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const voiceFavoriteLongPressTriggered = useRef(false);
 
-    const translateAndSpeak = async (text: string, emotion?: string): Promise<DateSpeechResult | null> => {
+    const translateAndSpeak = async (text: string, emotion?: string, streamId?: string): Promise<DateSpeechResult | null> => {
         if (!canSynthesizeSpeech(char, apiConfig)) return null;
+        const generation = dateVoiceGenerationRef.current;
         try {
             let ttsText = cleanTextForTtsProvider(text, apiConfig);
             if (!ttsText || ttsText.length < 2) return null;
@@ -302,6 +322,14 @@ const DateSession: React.FC<DateSessionProps> = ({
                     if (translated) ttsText = translated;
                 } catch { /* use original */ }
             }
+            if (streamId && apiConfig.ttsProvider === 'elevenlabs') {
+                if (generation !== dateVoiceGenerationRef.current) return null;
+                dateAudioRef.current?.pause();
+                const recording = await streamingVoice.speak(streamId, ttsText, char, apiConfig, { languageBoost: voiceLang || undefined, emotion });
+                const url = URL.createObjectURL(recording.blob);
+                dateStreamUrls.current.add(url);
+                return { url, spokenText: stripTtsMarkupForDisplay(ttsText, apiConfig), recording };
+            }
             const url = await synthesizeSpeech(ttsText, char, apiConfig, {
                 languageBoost: voiceLang || undefined,
                 groupId: apiConfig.minimaxGroupId || undefined,
@@ -312,7 +340,9 @@ const DateSession: React.FC<DateSessionProps> = ({
                 spokenText: stripTtsMarkupForDisplay(ttsText, apiConfig),
             };
         } catch (err: any) {
+            if (err?.name === 'AbortError') return null;
             console.warn('Date TTS failed:', err?.message);
+            if (apiConfig.ttsProvider === 'elevenlabs') addToast(err?.message || '语音生成失败', 'error');
             return null;
         }
     };
@@ -333,6 +363,12 @@ const DateSession: React.FC<DateSessionProps> = ({
         if (!isDialogueLine(galShownText)) return;
         let cancelled = false;
         const dialogueText = extractDialogueText(galShownText, preserveAudioTags);
+        if (apiConfig.ttsProvider === 'elevenlabs') {
+            void translateAndSpeak(dialogueText, currentLineEmotionRef.current, 'gal').then(speech => {
+                if (speech && !cancelled) voiceCacheRef.current[dialogueText] = speech;
+            });
+            return () => { cancelled = true; stopDateStream(); };
+        }
         const cacheKey = dialogueText;
         const play = async () => {
             // Check cache first
@@ -359,6 +395,14 @@ const DateSession: React.FC<DateSessionProps> = ({
     // GAL mode: manual play/pause for the current dialogue line
     const handleGalVoiceToggle = async () => {
         if (!galShownText || !isDialogueLine(galShownText)) return;
+        if (apiConfig.ttsProvider === 'elevenlabs') {
+            if (streamingVoice.state && ['loading', 'playing'].includes(streamingVoice.state.status)) { stopDateStream(); return; }
+            stopDateStream();
+            const text = extractDialogueText(galShownText, preserveAudioTags);
+            const speech = await translateAndSpeak(text, currentLineEmotionRef.current, 'gal');
+            if (speech) voiceCacheRef.current[text] = speech;
+            return;
+        }
         // If playing, pause
         if (dateVoicePlaying && dateAudioRef.current) {
             dateAudioRef.current.pause();
@@ -387,6 +431,13 @@ const DateSession: React.FC<DateSessionProps> = ({
     // 且命中同一条持久缓存（ttsCache/IndexedDB）——退出见面再进来点旧台词也能从本地缓存秒取，
     // 不必按不同的 key 重新联网合成。
     const handleNovelLinePlay = async (lineKey: string, dialogueText: string, voiceEmotion?: string) => {
+        if (apiConfig.ttsProvider === 'elevenlabs') {
+            if (streamingVoice.state?.id === lineKey && ['loading', 'playing'].includes(streamingVoice.state.status)) { stopDateStream(); return; }
+            stopDateStream();
+            const speech = await translateAndSpeak(dialogueText, voiceEmotion, lineKey);
+            if (speech) voiceCacheRef.current[dialogueText] = speech;
+            return;
+        }
         const cached = voiceCacheRef.current[dialogueText];
         if (cached) {
             // Already have URL (from GAL or previous novel play), just play/pause
@@ -882,7 +933,10 @@ const DateSession: React.FC<DateSessionProps> = ({
     const canReroll = messages.length > 0 && messages[messages.length - 1].role === 'assistant';
 
     return (
-        <div className={`h-full w-full relative bg-black overflow-hidden font-sans select-none ${decoratedReading ? 'meeting-reading' : ''}`} data-reading-preset={readingStyle.id} onClick={handleScreenClick}><style>{MEETING_READING_CSS}</style>
+        <div className={`h-full w-full relative bg-black overflow-hidden font-sans select-none ${decoratedReading ? 'meeting-reading' : ''}`} data-reading-preset={readingStyle.id} onPointerDownCapture={() => { if (voiceEnabled && apiConfig.ttsProvider === 'elevenlabs') streamingVoice.prime(); }} onClick={handleScreenClick}><style>{MEETING_READING_CSS}</style>
+            <div className="absolute inset-x-0 bottom-28 z-[105] pointer-events-auto">
+                <StreamingVoiceBar state={streamingVoice.state} onStop={stopDateStream} />
+            </div>
             
             {/* Background Layer */}
             <div 
@@ -1016,8 +1070,17 @@ const DateSession: React.FC<DateSessionProps> = ({
 
             {/* Novel Mode View */}
             {isNovelMode && (
-                <div ref={novelScrollRef} onScroll={onReadingScroll} style={{ overflowAnchor: 'none' }} className={`meeting-reading-page absolute inset-0 z-20 overflow-y-auto no-scrollbar pt-24 pb-32 px-8 mask-image-gradient overscroll-contain ${lightReading ? 'bg-[#faf8f5]' : 'bg-black/90 backdrop-blur-sm'}`} onClick={(e) => { e.stopPropagation(); if (showMenu) { setShowMenu(false); setShowVoiceLangPicker(false); return; } setShowInputBox(true); }}>
+                <div ref={novelScrollRef} onScroll={onReadingScroll} style={{ overflowAnchor: 'none', paddingBottom: streamingVoice.state && streamingVoice.state.status !== 'done' ? '13rem' : undefined }} className={`meeting-reading-page absolute inset-0 z-20 overflow-y-auto no-scrollbar pt-24 pb-32 px-8 mask-image-gradient overscroll-contain ${lightReading ? 'bg-[#faf8f5]' : 'bg-black/90 backdrop-blur-sm'}`} onClick={(e) => { e.stopPropagation(); if (showMenu) { setShowMenu(false); setShowVoiceLangPicker(false); return; } setShowInputBox(true); }}>
                     <div className="min-h-full flex flex-col justify-end">
+                        {voiceEnabled && apiConfig.ttsProvider === 'elevenlabs' && <button className="self-center mb-4 rounded-full border border-emerald-300/40 bg-white/90 px-4 py-2 text-xs text-emerald-800" onClick={event => {
+                            event.stopPropagation(); stopDateStream();
+                            const chosen = messages.filter(message => message.role === 'assistant' && (!isBatchSelectMode || selectedMsgIds.has(message.id)));
+                            const source = isBatchSelectMode ? chosen : chosen.slice(-1);
+                            const script = source.map(message => extractObservation(message.content || '', { lenient: observeEnabled, custom: char.dateObserve?.custom }).rest)
+                                .map(body => body.replace(/^\s*\[[a-z_]+\]\s*/gim, '').replace(/\[v:[^\]]+\]/g, '')).join('\n\n');
+                            if (script.trim()) void translateAndSpeak(script, undefined, 'reading').then(speech => { if (speech) voiceCacheRef.current[script] = speech; });
+                            else addToast('请先选择有正文的角色消息', 'info');
+                        }}>{isBatchSelectMode ? '连续朗读所选内容' : '朗读最新一段'}</button>}
                         <div className="max-w-2xl mx-auto animate-fade-in space-y-6">
                             {isBatchSelectMode && (
                                 <div className="sticky top-0 z-20 flex items-center justify-between bg-white/90 border border-stone-200 rounded-xl px-3 py-2 text-xs text-stone-700">
