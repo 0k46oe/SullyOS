@@ -1641,6 +1641,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
         await loadSettings();
 
+        // 旧剧情副本曾把设定日期写成现实收发时间。先校正，再让历史/记忆/云端读取。
+        const storyTimelineRepair = await DB.ensureStoryTheaterTimestamps().catch(error => {
+            console.error('剧情收发时间校正失败，将在读取历史时重试', error);
+            return { repairedCharacterIds: [] as string[] };
+        });
+
         // 老用户库存的鲨盘图链接就地改写成 jsDelivr（幂等、跑一次）。放在读 characters 之前，
         // 让下面 getAllCharacters 拿到的就是改好的数据。见 utils/sharkpanAssetMigration.ts。
         await migrateSharkpanAssets();
@@ -1795,13 +1801,19 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         try {
           const savedRealtime = localStorage.getItem('os_realtime_config');
           const savedApiRaw = localStorage.getItem('os_api_config');
+          const restoredRealtime = savedRealtime
+            ? { ...defaultRealtimeConfig, ...JSON.parse(savedRealtime) }
+            : defaultRealtimeConfig;
+          for (const char of finalChars) {
+            if (storyTimelineRepair.repairedCharacterIds.includes(char.id)) {
+              markAmsgStateDirty({ char, userProfile: dbUser ?? defaultUserProfile, groups: dbGroups, realtimeConfig: restoredRealtime });
+            }
+          }
           resumePendingAmsgStateSync({
             characters: finalChars,
             userProfile: dbUser ?? defaultUserProfile,
             groups: dbGroups,
-            realtimeConfig: savedRealtime
-              ? { ...defaultRealtimeConfig, ...JSON.parse(savedRealtime) }
-              : defaultRealtimeConfig,
+            realtimeConfig: restoredRealtime,
             // 上次没传成功的 LLM 凭据行按这份重算补传；没有就跳过那一项。
             apiConfig: savedApiRaw ? JSON.parse(savedApiRaw) : undefined,
           });

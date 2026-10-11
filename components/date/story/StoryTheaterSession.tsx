@@ -35,7 +35,7 @@ import {
     isStoryUserLastCompatibilityError,
     makeStoryTheaterId,
     makeStoryTheaterFileName,
-    memoryTimestampForCharacter,
+    createStoryTheaterMirrorMessage,
     parseStoryDisplayBlocks,
     REAL_COMPANION_MEMORY_GUARD,
     RELATIONSHIP_TEXTURE_GUIDE,
@@ -484,14 +484,9 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
         if (!entry.writesToCharacterMemory) return centralId;
         const theaterMirrorIds: Record<string, number> = {};
         for (const actor of memoryActors) {
-            theaterMirrorIds[actor.id] = await DB.saveMessage({
-                charId: actor.id,
-                role,
-                type: 'text',
-                content,
-                timestamp: memoryTimestampForCharacter(entry, actor.id, now),
-                metadata: { source: 'story_theater_memory', theaterId: entry.id, theaterTitle: entry.title, theaterCentralId: centralId },
-            });
+            theaterMirrorIds[actor.id] = await DB.saveMessage(createStoryTheaterMirrorMessage(
+                entry, actor.id, { id: centralId, role, content, timestamp: now },
+            ));
         }
         await DB.updateMessageMetadata(centralId, previous => ({ ...previous, theaterMirrorIds }));
         return centralId;
