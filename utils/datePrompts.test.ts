@@ -3,6 +3,7 @@ import { DatePrompts, DATE_STYLE_PRESETS, extractObservation, stripObservation, 
 import type { CharacterProfile, UserProfile, Message, MountedWorldbook } from '../types';
 import { buildCharacterResponsePrinciples } from './characterResponsePrinciples';
 import { buildChatRequestPayload } from './chatRequestPayload';
+import { setElevenLabsModel, setTtsProvider, setVoicePromptOverrides } from './ttsProvider';
 
 const makeChar = (overrides: Partial<CharacterProfile> = {}): CharacterProfile => ({
     id: 'char-1',
@@ -42,6 +43,27 @@ describe('DatePrompts.buildSessionPayload', () => {
         emojis: [],
         userText: '我来了',
         variant: 'send' as const,
+    });
+
+    it('adds v4 audio directions inside VN dialogue while preserving the sprite and voice emotion channels', async () => {
+        setTtsProvider('elevenlabs');
+        setElevenLabsModel('eleven_v4');
+        try {
+            const { messages } = await DatePrompts.buildSessionPayload(baseInput(makeChar({ dateVoiceEnabled: true })));
+            const sys = sysOf(messages);
+            expect(sys).toContain('ElevenLabs v4');
+            expect(sys).toContain('Audio Tags');
+            expect(sys).toContain('放在台词引号内部');
+            expect(sys).toContain('[v:xxx]');
+            setVoicePromptOverrides({ dateVoice: '只按用户的见面语音规则' });
+            const custom = await DatePrompts.buildSessionPayload(baseInput(makeChar({ dateVoiceEnabled: true })));
+            expect(sysOf(custom.messages)).toContain('只按用户的见面语音规则');
+            expect(sysOf(custom.messages)).not.toContain('ElevenLabs v4');
+        } finally {
+            setTtsProvider('minimax');
+            setElevenLabsModel(undefined);
+            setVoicePromptOverrides(undefined);
+        }
     });
 
     it('默认注入电影感风格块，不注入人称块', async () => {

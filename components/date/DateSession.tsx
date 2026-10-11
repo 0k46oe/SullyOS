@@ -28,6 +28,8 @@ import { VOICE_LANGUAGE_OPTIONS, voiceLanguageAnalyticsValue, voiceLanguageLabel
 import { trackEvent } from '../../utils/analytics';
 import { SARSpeechSwitch } from '../sar/SARSpeechSwitch';
 import { resolveSARDateSpeech } from '../../utils/sarDatePresentation';
+import { extractDateDialogueText as extractDialogueText } from '../../utils/dateVoiceText';
+import { isElevenLabsV4Model } from '../../utils/elevenLabsModels';
 
 // 语音情绪标记 [v:xxx]：跟立绘情绪 [emotion] 分开的独立通道。立绘的 happy 是
 // 夸张的表情、语音的 happy 是音色情绪，两者强度/语义差异大，不能一概而论。
@@ -67,17 +69,6 @@ const cleanTextForDisplay = (text: string) => {
 const isDialogueLine = (text: string) => {
     const clean = cleanTextForDisplay(text);
     return /^[""\u201C\u300C]/.test(clean);
-};
-
-// Helper: Extract only the dialogue text from a line for TTS
-const extractDialogueText = (text: string): string => {
-    const clean = cleanTextForDisplay(text);
-    const matches = clean.match(/["\u201C]([^"\u201D]*)["\u201D]/g)
-        || clean.match(/[\u300C]([^\u300D]*)[\u300D]/g);
-    if (matches) {
-        return matches.map(m => m.replace(/["\u201C\u201D\u300C\u300D]/g, '')).join(' ');
-    }
-    return clean;
 };
 
 const parseDialogue = (fullText: string, initialEmotion: string = 'normal'): DialogueItem[] => {
@@ -147,6 +138,7 @@ type DateVoiceFavoriteTarget = {
     originalText: string;
     sourceTimestamp: number;
     voiceEmotion?: string;
+    speechText?: string;
 };
 
 const ReadingAvatar: React.FC<{ src?: string; name: string; light: boolean }> = ({ src, name, light }) => {
@@ -277,6 +269,7 @@ const DateSession: React.FC<DateSessionProps> = ({
     const dateAudioRef = useRef<HTMLAudioElement | null>(null);
     const voiceEnabled = !!char.dateVoiceEnabled;
     const voiceLang = char.dateVoiceLang || '';
+    const preserveAudioTags = apiConfig.ttsProvider === 'elevenlabs' && isElevenLabsV4Model(apiConfig.elevenLabsModel);
     // Bridges the current line's VOICE emotion ([v:xxx], 跟立绘情绪分开) to the GAL
     // voice effect (which keys off currentText only). undefined = 不传情绪，自然朗读。
     // A ref so it doesn't churn the effect's deps.
@@ -300,7 +293,7 @@ const DateSession: React.FC<DateSessionProps> = ({
                         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiConfig.apiKey}` },
                         body: JSON.stringify({
                             model: apiConfig.model,
-                            messages: [{ role: 'system', content: `Translate the following text to ${langLabel}. Output ONLY the translation, nothing else.` }, { role: 'user', content: ttsText }],
+                            messages: [{ role: 'system', content: `Translate the following text to ${langLabel}. Output ONLY the translation, nothing else.${preserveAudioTags ? ' Preserve all square-bracketed English audio tags and /IPA/ pronunciation instructions exactly; translate only spoken dialogue.' : ''}` }, { role: 'user', content: ttsText }],
                             temperature: 0.3,
                         }),
                     });
@@ -339,7 +332,7 @@ const DateSession: React.FC<DateSessionProps> = ({
         if (isShowingOpening) return;
         if (!isDialogueLine(galShownText)) return;
         let cancelled = false;
-        const dialogueText = extractDialogueText(galShownText);
+        const dialogueText = extractDialogueText(galShownText, preserveAudioTags);
         const cacheKey = dialogueText;
         const play = async () => {
             // Check cache first
@@ -361,7 +354,7 @@ const DateSession: React.FC<DateSessionProps> = ({
         };
         play();
         return () => { cancelled = true; setGalVoiceLoading(false); if (dateAudioRef.current) { dateAudioRef.current.pause(); } };
-    }, [galShownText, voiceEnabled, isNovelMode]);
+    }, [galShownText, voiceEnabled, isNovelMode, preserveAudioTags]);
 
     // GAL mode: manual play/pause for the current dialogue line
     const handleGalVoiceToggle = async () => {
@@ -372,7 +365,7 @@ const DateSession: React.FC<DateSessionProps> = ({
             setDateVoicePlaying(false);
             return;
         }
-        const dialogueText = extractDialogueText(galShownText);
+        const dialogueText = extractDialogueText(galShownText, preserveAudioTags);
         const cacheKey = dialogueText;
         let speech: DateSpeechResult | undefined = voiceCacheRef.current[cacheKey];
         if (!speech) {
@@ -435,6 +428,7 @@ const DateSession: React.FC<DateSessionProps> = ({
                     return {
                         sourceKey: `${char.id}:${message.id}-${lineIndex}`,
                         originalText,
+                        speechText: extractDialogueText(parsed.rest, preserveAudioTags),
                         sourceTimestamp: message.timestamp,
                         voiceEmotion: parsed.voiceEmotion || currentLineEmotionRef.current,
                     };
@@ -444,6 +438,7 @@ const DateSession: React.FC<DateSessionProps> = ({
         return {
             sourceKey: `${char.id}:live:${makeVoiceFavoriteId('date', originalText)}`,
             originalText,
+            speechText: extractDialogueText(galShownText, preserveAudioTags),
             sourceTimestamp: Date.now(),
             voiceEmotion: currentLineEmotionRef.current,
         };
@@ -484,10 +479,11 @@ const DateSession: React.FC<DateSessionProps> = ({
                 addToast('已取消收藏语音', 'info');
                 return;
             }
-            let speech: DateSpeechResult | undefined = voiceCacheRef.current[target.originalText];
+            const speechText = target.speechText || target.originalText;
+            let speech: DateSpeechResult | undefined = voiceCacheRef.current[speechText];
             if (!speech) {
-                speech = await translateAndSpeak(target.originalText, target.voiceEmotion) || undefined;
-                if (speech) voiceCacheRef.current[target.originalText] = speech;
+                speech = await translateAndSpeak(speechText, target.voiceEmotion) || undefined;
+                if (speech) voiceCacheRef.current[speechText] = speech;
             }
             if (!speech) throw new Error('语音合成失败，请稍后重试');
             const blob = await fetchBlobForShare(speech.url, 'audio/mpeg');
@@ -655,23 +651,24 @@ const DateSession: React.FC<DateSessionProps> = ({
 
     // Typewriter effect
     useEffect(() => {
+        const displayText = preserveAudioTags ? stripTtsMarkupForDisplay(currentText, apiConfig) : currentText;
         if (!currentText || isNovelMode) {
-            if (isNovelMode) setDisplayedText(currentText);
+            if (isNovelMode) setDisplayedText(displayText);
             return;
         }
         setIsTextAnimating(true);
         setDisplayedText('');
         let i = 0;
         const timer = setInterval(() => {
-            setDisplayedText(currentText.substring(0, i + 1));
+            setDisplayedText(displayText.substring(0, i + 1));
             i++;
-            if (i >= currentText.length) {
+            if (i >= displayText.length) {
                 clearInterval(timer);
                 setIsTextAnimating(false);
             }
         }, 20);
         return () => clearInterval(timer);
-    }, [currentText, isNovelMode]);
+    }, [currentText, isNovelMode, preserveAudioTags]);
 
     // --- Logic ---
 
@@ -736,7 +733,7 @@ const DateSession: React.FC<DateSessionProps> = ({
 
         // Skip animation
         if (isTextAnimating) {
-            setDisplayedText(currentText);
+            setDisplayedText(preserveAudioTags ? stripTtsMarkupForDisplay(currentText, apiConfig) : currentText);
             setIsTextAnimating(false);
             return;
         }
@@ -1124,10 +1121,11 @@ const DateSession: React.FC<DateSessionProps> = ({
                                                 const lineKey = `${msg.id}-${idx}`;
                                                 const isOpeningMsg = msg.metadata?.isOpening === true;
                                                 const parsedVoiceLine = extractVoiceEmotionTag(line);
-                                                const dialogueText = extractDialogueText(parsedVoiceLine.rest);
+                                                const dialogueText = extractDialogueText(parsedVoiceLine.rest, preserveAudioTags);
                                                 const voiceTarget: DateVoiceFavoriteTarget = {
                                                     sourceKey: `${char.id}:${lineKey}`,
-                                                    originalText: dialogueText,
+                                                    originalText: extractDialogueText(parsedVoiceLine.rest),
+                                                    speechText: dialogueText,
                                                     sourceTimestamp: msg.timestamp,
                                                     voiceEmotion: parsedVoiceLine.voiceEmotion,
                                                 };
@@ -1249,7 +1247,7 @@ const DateSession: React.FC<DateSessionProps> = ({
                                     </div>
                                 )}
                                 <p className="text-white/90 text-[16px] leading-relaxed font-light tracking-wide drop-shadow-md mt-2 whitespace-pre-wrap" data-sar-gal-text>
-                                    {galShownText === currentText ? displayedText : galShownText}
+                                    {galShownText === currentText ? displayedText : (preserveAudioTags ? stripTtsMarkupForDisplay(galShownText, apiConfig) : galShownText)}
                                     {isTextAnimating && galShownText === currentText && <span className="inline-block w-2 h-4 bg-white/70 ml-1 animate-pulse align-middle"></span>}
                                 </p>
                                 {!isTextAnimating && dialogueQueue.length > 0 && <div className="absolute bottom-3 right-4 animate-bounce opacity-70"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5 text-white"><path fillRule="evenodd" d="M12.53 16.28a.75.75 0 0 1-1.06 0l-7.5-7.5a.75.75 0 0 1 1.06-1.06L12 14.69l6.97-6.97a.75.75 0 1 1 1.06 1.06l-7.5 7.5Z" clipRule="evenodd" /></svg></div>}

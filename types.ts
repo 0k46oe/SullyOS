@@ -295,9 +295,9 @@ export interface APIConfig {
   fishAudioModel?: string;
   // ElevenLabs BYOK 配置。Voice ID 存在角色 voiceProfile.elevenLabsVoiceId，避免角色串音色。
   elevenLabsApiKey?: string;
-  // 缺省使用低延迟 eleven_flash_v2_5；也支持 eleven_v3 / eleven_multilingual_v2。
+  // 缺省使用 eleven_v4；也支持 v4 Turbo、Flash v2.5、v3 和 Multilingual v2。
   elevenLabsModel?: string;
-  // ElevenLabs Voice Settings（请求级覆盖，不修改 ElevenLabs 控制台里的音色默认值）。
+  // 请求级覆盖；v4 / v4 Turbo 只发送稳定度与相似度，保留其他模型的旧参数。
   elevenLabsStability?: number;
   elevenLabsSimilarityBoost?: number;
   elevenLabsStyle?: number;

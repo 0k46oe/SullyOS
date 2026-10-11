@@ -370,7 +370,7 @@ const cleanCurrentVoiceMarkupForDisplay = (text?: string | null): string => {
   if (!text) return '';
   const provider = getTtsProvider();
   if (provider === 'fishaudio') return stripFishMarkupForDisplay(text);
-  if (provider === 'elevenlabs') return stripElevenLabsMarkupForDisplay(text);
+  if (provider === 'elevenlabs') return stripElevenLabsMarkupForDisplay(text, getElevenLabsModel());
   // MiniMax 的 (sighs)/(chuckle) 会在 renderAssistantLine 里渲染成声音动作图标，不能提前剥掉。
   return text;
 };
