@@ -1,3 +1,4 @@
+import {withAvatarFrameTarget} from './avatarFrameTarget';
 import {describe,it,expect,vi} from 'vitest';
 import {createWardrobeUsageReader} from './wardrobeUsage';
 import {PRESET_THEMES} from '../components/chat/ChatConstants';
@@ -23,6 +24,11 @@ describe('wardrobe current usage',()=>{
  it('finds avatar/background blocks within a complete whitebox',async()=>{
   const avatar='/* sully-composer:avatar */\n.sully-chat-avatar-frame{color:red}\n/* end-sully-composer:avatar */';
   expect(await reader({}, {chromeCustomCss:'.sully-chat-root{color:blue}'+avatar})(pack({css:avatar}))).toBe('当前使用中');
+ });
+ it('recognizes the same frame after selecting only one side',async()=>{
+  const original={format:'sullyos-chat-decoration' as const,version:1 as const,name:'Frame',parts:{css:'/* sully-composer:avatar */\n.sully-chat-avatar-wrap::after {content:""; background:red} .sully-chat-message-avatar-img {border-radius:50%}\n/* end-sully-composer:avatar */'}};
+  const selected=withAvatarFrameTarget(original,'user');
+  expect(await reader({}, {chromeCustomCss:selected.parts.css})(original)).toBe('当前使用中');
  });
  it('keeps date per character and story/schedule/journal global',async()=>{
   const read=reader({storyAppearance:{preset:'paper',name:'Book'},scheduleCardAppearance:{preset:'cream'},journalAppearance:{preset:'original'}},{dateAppearance:{preset:'night',name:'Night'}});
