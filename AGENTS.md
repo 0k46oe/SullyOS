@@ -45,6 +45,8 @@
 
 > README 的「给想二改的人」区域信息量很大（数据流、ContextBuilder、sfworker 清单），动后端 / 加功能前先扫一遍。
 
+用户定位、隐私区域、地点查询与位置提示词：先读 [`docs/user-location.md`](./docs/user-location.md)。中心坐标仅本机；命中隐私圈不得查地图；不得通过 Worker／代理转发定位，也不得把原始坐标写入提示词、日志、备份或云端状态。
+
 ## 什么时候改版本号
 
 [`utils/appVersion.ts`](./utils/appVersion.ts) 里的 `APP_VERSION`（形如 `v3.0 (Ambient Presence)`）是手工维护的，**只有大功能更新才动它**：加了新 App、新系统，或者一整套用户能直接感知到的新玩法。

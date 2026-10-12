@@ -2,6 +2,7 @@ import {getDailyScheduleForChar} from './dailySchedule';
 import {getLastInnerState} from './emotionState';
 import { readableContextMemories } from './contextMemories';
 import { getCachedUserHolidayReminder, type UserHolidayConfig } from './userHolidays';
+import { getUserLocationContext } from './userLocation';
 
 import { CharacterProfile, UserProfile, DailySchedule, MountedWorldbook } from '../types';
 import { normalizeUserImpression } from './impression';
@@ -540,6 +541,8 @@ const renderCoreContext = async (
             /** Cloud requests fill this user's date-dependent line at generation time. */
             skipUserHoliday?: boolean;
             userHolidays?: UserHolidayConfig;
+            /** Only foreground conversation surfaces opt in; never generators/fire-packs. */
+            includeUserLocation?: boolean;
             /** Recent messages used to activate keyword-based worldbook entries. */
             worldbookMessages?: WorldbookScanMessage[];
         },
@@ -599,6 +602,9 @@ const renderCoreContext = async (
             context += `### 互动对象 (User)\n`;
             context += `- 名字: ${user.name}\n`;
             context += `- 设定/备注: ${user.bio || '无'}\n\n`;
+            if (timeOptions?.includeUserLocation && !timeOptions.skipTimeAwareness) {
+                context += await getUserLocationContext(user.name);
+            }
             if (char.timeAwarenessEnabled !== false && !timeOptions?.skipTimeAwareness && !timeOptions?.skipUserHoliday) {
                 const holiday = getCachedUserHolidayReminder(user.name, timeOptions?.userHolidays);
                 if (holiday) context += `- ${holiday}\n\n`;

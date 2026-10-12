@@ -690,7 +690,7 @@ export const DatePrompts = {
             history: apiMessages.map(message => ({ ...message, content: typeof message.content === 'string'
                 ? message.content : message.content.filter((part: any) => part?.type === 'text').map((part: any) => part.text).join(' ') })),
             includeDetailedMemories: false,
-            timeOptions: { skipTimeAwareness: !isDateTimeAwarenessOn(char) },
+            timeOptions: { skipTimeAwareness: !isDateTimeAwarenessOn(char), includeUserLocation: true },
         }));
 
         // 文风预设也作用于开场感知；人称（pov）刻意不作用——peek 的设计就是
@@ -764,7 +764,7 @@ ${extraBlock ? `\n${extraBlock}` : ''}${isObserveOn(char) ? `\n${buildObserveBlo
         await injectMemoryPalace(char, allMsgs, undefined, userProfile?.name);
         const context = (await ContextBuilder.buildCharacterContext({
             char, user: userProfile, history: conversation,
-            timeOptions: { skipTimeAwareness: !isDateTimeAwarenessOn(char), conversational: true },
+            timeOptions: { skipTimeAwareness: !isDateTimeAwarenessOn(char), conversational: true, includeUserLocation: true },
         }));
         const systemPrompt = context.coreContext
             + buildVNModeBlock(char, userProfile?.name || '')

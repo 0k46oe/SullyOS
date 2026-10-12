@@ -17,6 +17,7 @@ import { computeCurrentListening, getCurrentSlot } from './charMusicSchedule';
 import { getCharLyricSnippet } from './charLyricCache';
 import { MusicCfg, loadMusicCfgStandalone } from '../context/MusicContext';
 import { RealtimeContextManager, NotionManager, FeishuManager, defaultRealtimeConfig } from './realtimeContext';
+import { getBackgroundUserLocationContext, getUserLocationContext } from './userLocation';
 import { isScheduleFeatureOn } from './scheduleFeature';
 import { VOICE_ACTING_GUIDE } from './minimaxTts';
 import { FISH_VOICE_ACTING_GUIDE } from './fishAudioTts';
@@ -161,6 +162,8 @@ export interface PromptBuildOptions {
     /** 已完成清洗的实际消息，由公共上下文管线统一处理世界书。 */
     history?: import('./context').ContextMessage[];
     forFirePack?: boolean;
+    /** Device-only foreground lookup; cloud templates never carry a location snapshot. */
+    includeUserLocation?: boolean;
     /** 主 API 从完整数据库历史识别出的「刚从哪种模式回到 ChatApp」。 */
     returningFromMode?: ChatModeTransition;
     /**
@@ -336,6 +339,9 @@ export const ChatPrompts = {
                 return null;
             })
             : Promise.resolve(null);
+        const userLocationPromise = forFirePack
+            ? Promise.resolve(getBackgroundUserLocationContext(userProfile.name))
+            : promptOptions?.includeUserLocation ? getUserLocationContext(userProfile.name) : Promise.resolve('');
 
         // 记忆宫殿检索结果现在从 char.memoryPalaceInjection 读取。
         // deferVolatile：时间/宫殿召回/情绪 buff 三块不进 stable，由下面的 volatileState 承接。
@@ -396,6 +402,7 @@ export const ChatPrompts = {
                     // 「当前真实时间」，那是这个开关本来要挡住的东西。
                     const realtimeContext = await RealtimeContextManager.buildFullContext(config, charTz, {
                         includeTime: char.timeAwarenessEnabled !== false,
+                        userLocation: userLocationPromise,
                     });
                     return `\n${realtimeContext}\n`;
                 }
@@ -522,7 +529,7 @@ ${groupLogStr}\n`;
                 return '';
             });
 
-        const [realtimeText, schedule, groupContextText, notionDiaryText, feishuDiaryText, notionNotesText, lifeRecordText] =
+        const [realtimeText, schedule, groupContextText, notionDiaryText, feishuDiaryText, notionNotesText, lifeRecordText, userLocationText] =
             await Promise.all([
                 timed('realtime', realtimePromise),
                 timed('schedule', schedulePromise),
@@ -531,10 +538,14 @@ ${groupLogStr}\n`;
                 timed('feishuDiary', feishuDiaryPromise),
                 timed('notionNotes', notionNotesPromise),
                 timed('lifeRecord', lifeRecordPromise),
+                timed('userLocation', userLocationPromise),
             ]);
 
         // ── 拼接：易变的进 volatileState，稳定的进 baseSystemPrompt ──
         volatileState += realtimeText;
+        // Local weather rendering already embeds it beside weather. Instant chat's
+        // weather arrives from the worker, so keep this per-turn text in Live Context.
+        if (timelyByWorker || (!config.weatherEnabled && !config.newsEnabled) || !realtimeText) volatileState += userLocationText;
 
         // 日程已由 ContextBuilder 实时块统一注入；这里的 schedule 仅供音乐氛围使用。
 
