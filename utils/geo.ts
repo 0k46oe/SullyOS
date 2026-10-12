@@ -15,20 +15,34 @@ import { Capacitor } from '@capacitor/core';
  */
 export interface GeoResult { longitude: number; latitude: number; accuracy: number; }
 
+export class DevicePositionError extends Error {
+    constructor(message: string, public readonly code: number) { super(message); }
+}
+
+/** Fixed explanations only: never show the native/browser error's raw message. */
+export function describeDevicePositionError(error: unknown): string {
+    const code = (error as { code?: number } | undefined)?.code;
+    if (code === 0) return '当前浏览器不支持设备定位，请换浏览器或在手机上使用。';
+    if (code === 1) return '没有定位权限，请在浏览器或系统设置中允许定位。';
+    if (code === 2) return '设备没有取得坐标，请检查系统定位是否开启，或在手机上重试。';
+    if (code === 3) return '设备定位超时，请检查系统定位和网络，或在手机上重试。';
+    return '没有取得设备坐标，请检查定位权限和系统定位，或在手机上重试。';
+}
+
 const getPositionViaNavigator = (): Promise<GeoResult> => {
     if (typeof navigator === 'undefined' || !navigator.geolocation) {
-        throw new Error('当前环境不支持定位, 请选城市或手输坐标');
+        throw new DevicePositionError('当前环境不支持定位, 请选城市或手输坐标', 0);
     }
     return new Promise<GeoResult>((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(
             (pos) => resolve({ longitude: pos.coords.longitude, latitude: pos.coords.latitude, accuracy: pos.coords.accuracy ?? 99999 }),
-            (err) => reject(new Error(err.message || '定位失败')),
+            (err) => reject(new DevicePositionError(err.message || '定位失败', err.code)),
             { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
         );
     });
 };
 
-export const getCurrentPositionSmart = async (): Promise<GeoResult> => {
+export const getCurrentPositionSmart = async (options?: { quiet?: boolean }): Promise<GeoResult> => {
     // 原生: 先用插件弹权限, 取坐标失败再回退 navigator
     if (Capacitor.isNativePlatform()) {
         const { Geolocation } = await import('@capacitor/geolocation');
@@ -42,14 +56,14 @@ export const getCurrentPositionSmart = async (): Promise<GeoResult> => {
             }
         } catch (e: any) {
             // checkPermissions/requestPermissions 在个别机型会抛, 不阻塞, 直接尝试取位置
-            console.warn('[geo] 权限检查异常, 继续尝试取位置:', e?.message || e);
+            if (!options?.quiet) console.warn('[geo] 权限检查异常, 继续尝试取位置:', e?.message || e);
         }
         try {
             const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
             return { longitude: pos.coords.longitude, latitude: pos.coords.latitude, accuracy: pos.coords.accuracy ?? 99999 };
         } catch (e: any) {
             // 没 GMS 的机器插件取坐标会抛 "Google Play services unavailable" —— 回退 WebView 定位 (走系统 LocationManager)
-            console.warn('[geo] Capacitor 插件取位置失败, 回退 navigator.geolocation:', e?.message || e);
+            if (!options?.quiet) console.warn('[geo] Capacitor 插件取位置失败, 回退 navigator.geolocation:', e?.message || e);
             return getPositionViaNavigator();
         }
     }

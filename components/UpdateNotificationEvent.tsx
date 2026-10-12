@@ -9,6 +9,7 @@ import HomeUpdatePopup from './os/HomeUpdatePopup';
 import { HOME_UPDATE_KEY, HOME_CHANGELOG } from '../utils/homeUpdate';
 import { roomLaunch } from '../utils/roomLaunch';
 import NavigationBallNotice, { NAVIGATION_BALL_NOTICE_KEY } from './os/NavigationBallNotice';
+import UserLocationNotice, { USER_LOCATION_NOTICE_KEY } from './os/UserLocationNotice';
 import { requestSettingsFocus } from '../utils/settingsNavigation';
 /**
  * 全局版本更新提醒。
@@ -609,7 +610,15 @@ const NavigationBallAnnouncement: React.FC<UpdatePopupProps> = ({ onDone, onExit
     }} />;
 };
 
+const UserLocationAnnouncement: React.FC<UpdatePopupProps> = ({ onDone, onExit }) => {
+    const { openApp } = useOS();
+    return <UserLocationNotice onDone={onDone} onConfigure={() => {
+        requestSettingsFocus('location'); openApp(AppID.Settings); onExit();
+    }} />;
+};
+
 const UPDATE_QUEUE: { key: string; render: (props: UpdatePopupProps) => React.ReactNode }[] = [
+    { key: USER_LOCATION_NOTICE_KEY, render: props => <UserLocationAnnouncement {...props} /> },
     { key: NAVIGATION_BALL_NOTICE_KEY, render: props => <NavigationBallAnnouncement {...props} /> },
     { key: HOME_UPDATE_KEY, render: props => <HomeUpdateAnnouncement {...props} /> },
     { key: SMALL_UPDATES_KEY, render: props => <SmallUpdatesPopup onDone={props.onDone} /> },

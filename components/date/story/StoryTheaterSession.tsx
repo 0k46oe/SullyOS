@@ -1,6 +1,7 @@
 import {meetingAppearance} from '../../../utils/meetingAppearance';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { loadStoryActorContext, replaceStoryTheaterReply, STORY_REROLL_INSTRUCTION } from '../../../utils/storyTheaterReply';
+import { generateStoryArchiveSummary } from '../../../utils/storyTheaterArchive';
 import { Archive, ArrowBendDownRight, ArrowClockwise, ArrowLeft, Broadcast, CaretDown, CaretLeft, CaretRight, ChatCircleDots, Clock, Database, DownloadSimple, Eye, EyeSlash, FilmSlate, GearSix, HeartStraight, Key, MapPin, PaperPlaneTilt, PencilSimple, SlidersHorizontal, SpinnerGap, Trash, X } from '@phosphor-icons/react';
 import { useOS } from '../../../context/OSContext';
 import TokenImg from '../../os/TokenImg';
@@ -588,11 +589,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
 
             if (entry.archiveStrategy === 'summary') {
                 setMemoryStatus(`正在把 ${batch.length} 条正文压成事件盒……`);
-                const transcript = batch.map(message => `${message.role === 'user' ? '推进' : '正文'}：${message.content}`).join('\n\n');
-                summary = await callCompletion([
-                    { role: 'system', content: '把剧场片段压缩成一只可长期常驻上下文的事件盒。使用第三人称，严格保留人物、因果、承诺、关系变化、未解决冲突和当前场景落点；不要评论写作，不要虚构片段外事实。控制在 800 字以内。' },
-                    { role: 'user', content: `剧情：${entry.title}\n\n${transcript}` },
-                ], { temperature: 0.2, max_tokens: 1600 });
+                summary = await generateStoryArchiveSummary(entry.title, batch, apiConfig);
             } else {
                 const embedding = memoryPalaceConfig.embedding;
                 const light = memoryPalaceConfig.lightLLM?.baseUrl ? memoryPalaceConfig.lightLLM : { baseUrl: apiConfig.baseUrl, apiKey: apiConfig.apiKey, model: apiConfig.model };
@@ -631,7 +628,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
             archiveLock.current = false;
             setMemoryStatus('');
         }
-    }, [addToast, apiConfig, callCompletion, entry, loadMessages, mask.name, memoryPalaceConfig, onEntryChange, threadId]);
+    }, [addToast, apiConfig, entry, loadMessages, mask.name, memoryPalaceConfig, onEntryChange, threadId]);
 
     const send = useCallback(async (rerollTarget?: Message, continueRequested = false) => {
         if (sendLock.current || actors.length === 0) return;

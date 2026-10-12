@@ -47,6 +47,7 @@ import { migrateWorldDaySegs } from '../utils/worldHome/prompts';
 import { ChatParser } from '../utils/chatParser';
 import { safeFetchJson } from '../utils/safeApi';
 import { captureApiRequestOnce, getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext, updateApiRequestCaptureUsage } from '../utils/apiCallLog';
+import { isUserLocationLookupUrl } from '../utils/userLocationPrivacy';
 import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
 import { buildFetchFailureDetail, classifyFetchFailure, describeReachabilityProbe, parseTargetUrl, probeOriginReachability, shouldProbeReachability, summarizeFetchRequestBody } from '../utils/networkFailureDiagnosis';
@@ -1188,6 +1189,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   : resource instanceof URL
                       ? resource.href
                       : String(resource);
+          // Location lookup URLs contain device coordinates. Keep them out of API
+          // capture, network diagnostics and request comparison caches; direct only.
+          if (isUserLocationLookupUrl(urlStr)) return originalFetch(...args);
           const fetchStartedAt = Date.now();
           // 失败诊断要按发起时刻去 Resource Timing 里认领本次那条记录，而 entry.startTime 跟
           // performance.now() 同一条时间轴、跟 Date.now() 不是——两者不能混用，详见

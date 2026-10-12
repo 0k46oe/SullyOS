@@ -379,6 +379,7 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
         {
             history: cleanedApiMessages,
             timelyByWorker: input.timelyByWorker === true,
+            includeUserLocation: isChatConversationEntry(input.recallEntryPoint),
             returningFromMode: returningFromMode || undefined,
             appRules: input.appPrompt?.rules,
         },

@@ -6,10 +6,13 @@ import type {StoryTheaterEntry} from '../types';
 import StoryArchivePanel from '../components/date/story/StoryArchivePanel';
 import {convertStoryArchiveToMemory} from './storyTheaterMemoryConversion';
 import {shareOrDownloadFile} from './shareExport';
+import {regenerateStoryArchiveSummary} from './storyTheaterArchive';
+vi.mock('@phosphor-icons/react',()=>({Archive:()=>null,ArrowClockwise:()=>null,ArrowLeft:()=>null,DownloadSimple:()=>null,SpinnerGap:()=>null}));
 vi.mock('../context/OSContext',()=>({useOS:()=>({characters:[{id:'a',name:'阿泽',memoryPalaceEnabled:true},{id:'b',name:'小北',memoryPalaceEnabled:false}],userProfile:{name:'用户'},apiConfig:{baseUrl:'mock',model:'test'},memoryPalaceConfig:{lightLLM:{baseUrl:'mock',model:'test'},embedding:{}},addToast:vi.fn()})}));
 vi.mock('../components/date/story/StoryTheaterTheme',()=>({StoryAppearanceButton:()=>null}));
 vi.mock('./storyTheaterMemoryConversion',async original=>({...await original<any>(),convertStoryArchiveToMemory:vi.fn()}));
 vi.mock('./shareExport',()=>({shareOrDownloadFile:vi.fn().mockResolvedValue('downloaded')}));
+vi.mock('./storyTheaterArchive',()=>({regenerateStoryArchiveSummary:vi.fn()}));
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
 let root:ReturnType<typeof createRoot>,host:HTMLDivElement,entry:StoryTheaterEntry;
 beforeEach(()=>{
@@ -39,4 +42,22 @@ it('retains failed selections and completed receipts so retry does not re-conver
  expect(host.textContent).toContain('已转化给 阿泽');expect(host.querySelector('[role="alert"]')!.textContent).toContain('已完成 1 个');
  expect(host.querySelector<HTMLInputElement>('[aria-label="选择事件盒 1"]')!.checked).toBe(false);expect(host.querySelector<HTMLInputElement>('[aria-label="选择事件盒 2"]')!.checked).toBe(true);
  await act(async()=>button('一键转为记忆').click());expect(vi.mocked(convertStoryArchiveToMemory).mock.calls.map(([o])=>o.archiveId)).toEqual(['one','two','two']);
+});
+it('regenerates one box without selection or a memory date, disables actions while pending, and renders the saved summary',async()=>{
+ let release!:(value:StoryTheaterEntry)=>void;
+ vi.mocked(regenerateStoryArchiveSummary).mockImplementationOnce(()=>new Promise(resolve=>{release=resolve;}));
+ mount();const regenerateButton=host.querySelector<HTMLButtonElement>('[aria-label="重新总结事件盒 1"]')!;
+ await act(async()=>regenerateButton.click());
+ expect(regenerateStoryArchiveSummary).toHaveBeenCalledWith('story','one',expect.objectContaining({model:'test'}));
+ expect(regenerateButton.disabled).toBe(true);expect(button('导出选中').disabled).toBe(true);expect(host.querySelector<HTMLButtonElement>('[aria-label="返回剧情"]')!.disabled).toBe(true);
+ expect(convertStoryArchiveToMemory).not.toHaveBeenCalled();
+ await act(async()=>release({...entry,archives:entry.archives.map(b=>b.id==='one'?{...b,summary:'已重新整理的剧情正文'}:b)}));
+ expect(host.textContent).toContain('已重新整理的剧情正文');expect(host.textContent).toContain('第二幕一起回家');expect(regenerateButton.disabled).toBe(false);
+});
+it('retains summary after a failed regeneration, and exposes empty boxes for recovery',async()=>{
+ entry.archives[1].summary='';vi.mocked(regenerateStoryArchiveSummary).mockRejectedValueOnce(new Error('模型没有返回事件盒正文'));
+ mount();expect(host.querySelector('[aria-label="重新总结事件盒 2"]')).not.toBeNull();
+ await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="重新总结事件盒 1"]')!.click());
+ expect(host.querySelector('[role="alert"]')!.textContent).toContain('没有返回事件盒正文');expect(host.textContent).toContain('雨夜等待的完整摘要');
+ expect(host.querySelector<HTMLButtonElement>('[aria-label="重新总结事件盒 1"]')!.disabled).toBe(false);
 });

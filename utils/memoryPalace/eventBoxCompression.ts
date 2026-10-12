@@ -30,6 +30,8 @@ import { bulkSetArchived } from './supabaseVector';
 import { safeFetchJson, extractContent, extractJson } from '../safeApi';
 import { enforceSummaryLengthBudget } from './summaryLengthBudget';
 import { buildSARMemoryBoundaryInstruction } from '../messageFormat';
+import { hasSummaryReasoningLeak } from '../summaryReasoning';
+export { hasSummaryReasoningLeak } from '../summaryReasoning';
 
 const VALID_ROOMS: MemoryRoom[] = [
     'living_room', 'bedroom', 'study', 'user_room',
@@ -74,29 +76,6 @@ interface CompressionLLMResult {
     room: MemoryRoom;
     importance: number;
     mood: string;
-}
-
-/**
- * 检测模型把“怎么算字数 / 怎么压缩”的过程误塞进整合回忆正文。
- *
- * 只凭一个英文短语就拒绝会误伤真实对话，所以要求至少命中两种典型信号；
- * 显式 think 标签则可以直接判定。这个守卫主要兜 Gemini/推理中转把未标记
- * reasoning 混进 content 的情况，例如：Paragraph 1: 31 chars / Still too long。
- */
-export function hasSummaryReasoningLeak(content: string): boolean {
-    const text = content.trim();
-    if (!text) return false;
-    if (/<(?:think|thinking|thought)>/i.test(text)) return true;
-
-    const signals = [
-        /\bparagraph\s*\d+\s*:\s*\d+\s*(?:chars?|characters?)\b/i,
-        /\btotal\s*:\s*[\d\s+]+\s*(?:chars?|characters?)\b/i,
-        /\bstill\s+too\s+long\b/i,
-        /\bneed\s+to\s+get\s+under\s+\d+\b/i,
-        /\blet(?:'|’)s\s+(?:count|condense|compress|shorten)\b/i,
-        /(?:^|\n)\s*(?:analysis|reasoning)\s*:/i,
-    ];
-    return signals.reduce((count, pattern) => count + (pattern.test(text) ? 1 : 0), 0) >= 2;
 }
 
 /**
