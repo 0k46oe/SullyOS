@@ -1,16 +1,15 @@
 {
   "schemaVersion": 1,
-  "versionCode": 30510,
-  "versionName": "3.5.10",
-  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.5.10/SullyOS-Android-v3.5.10.apk",
-  "sha256": "a7eace939e2445bd8a6febe9379d386a64ed1c798561aba7806568d0f1bd12d5",
-  "sizeBytes": 80126311,
-  "publishedAt": "2026-10-12T12:00:38Z",
+  "versionCode": 30511,
+  "versionName": "3.5.11",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.5.11/SullyOS-Android-v3.5.11.apk",
+  "sha256": "6c4fc2e8b3ed154ef9b65a04d9d5942193068a652085bb7045c768791026d8ab",
+  "sizeBytes": 80127866,
+  "publishedAt": "2026-10-12T14:12:45Z",
   "releaseNotes": [
-    "同步最新 master 00ae4bdc，包含真实定位、隐藏地点与高德设置",
-    "真实定位默认关闭；Android 补齐前台定位授权，不添加后台定位权限",
-    "同步上游剧情摘要与记忆修复，网页业务保持 master 原样",
-    "保留 ntfy、相机权限、PDF、Umami 和应用内更新",
+    "同步最新 master 6acadfd2，修复头像框被气泡美化覆盖",
+    "头像框支持选择双方、用户或角色使用，并正确识别当前使用标记",
+    "网页业务保持 master 原样；保留 ntfy、PDF、相机、前台定位、Umami 和应用内更新",
     "沿用固定正式签名，可覆盖升级保留数据"
   ]
 }
