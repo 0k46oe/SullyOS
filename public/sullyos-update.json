@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
-  "versionCode": 30509,
-  "versionName": "3.5.9",
-  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.5.9/SullyOS-Android-v3.5.9.apk",
-  "sha256": "904f031520e2ed4bc30cfa79b68050b0a17610605e9ef776f90c629e41f23f04",
-  "sizeBytes": 80116280,
-  "publishedAt": "2026-10-11T17:37:48Z",
+  "versionCode": 30510,
+  "versionName": "3.5.10",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.5.10/SullyOS-Android-v3.5.10.apk",
+  "sha256": "a7eace939e2445bd8a6febe9379d386a64ed1c798561aba7806568d0f1bd12d5",
+  "sizeBytes": 80126311,
+  "publishedAt": "2026-10-12T12:00:38Z",
   "releaseNotes": [
-    "同步最新 master 70e3e7f5，包含内置音效试听和当前使用标记",
-    "美化分享支持范围确认与截图封面，修复家园设置层级与外观",
-    "同步启动保护、资源加载、悬浮导航、剧情记忆与续播修复",
-    "同步上游流式语音与字幕；保留 ntfy、相机权限、PDF、Umami 和应用内更新",
+    "同步最新 master 00ae4bdc，包含真实定位、隐藏地点与高德设置",
+    "真实定位默认关闭；Android 补齐前台定位授权，不添加后台定位权限",
+    "同步上游剧情摘要与记忆修复，网页业务保持 master 原样",
+    "保留 ntfy、相机权限、PDF、Umami 和应用内更新",
     "沿用固定正式签名，可覆盖升级保留数据"
   ]
 }
