@@ -1,6 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { getCurrentPositionSmart } from './geo';
 import { saveUserLocationConfig } from './userLocation';
+import { USER_LOCATION_STORAGE_KEY } from './userLocationPrivacy';
 import { buildChatRequestPayload } from './chatRequestPayload';
 import { ContextBuilder } from './context';
 import { ChatPrompts } from './chatPrompts';
@@ -40,9 +41,27 @@ it('explicit realtime call/date context can know the private range; fictional an
     expect(getCurrentPositionSmart).not.toHaveBeenCalled();
 });
 
-it('fire-pack templates never capture a location even if callers accidentally opt in', async () => {
+it('scheduled fire-pack templates say unknown without capturing device data, even after a foreground lookup', async () => {
+    const foreground = await buildChatRequestPayload({ char, userProfile: user, groups: [], emojis: [], categories: [],
+        recallEntryPoint: 'chat_app', contextLimit: 10, historyMsgs: [],
+    });
+    expect(JSON.stringify(foreground.fullMessages)).toContain('在家附近');
+    vi.mocked(getCurrentPositionSmart).mockClear();
     const parts = await ChatPrompts.buildSystemPromptParts(char, user, [], [], [], [], undefined, undefined, undefined, false, undefined, undefined, { forFirePack: true, includeUserLocation: true });
-    expect(parts.stable + parts.volatileState).not.toContain('小雨当前的位置');
+    const template = parts.stable + parts.volatileState + parts.recencyTail;
+    expect(template).toContain('小雨现在的定位未知，作为辅助参考背景信息，具体以小雨的说明为准');
+    for (const secret of ['家附近', '31.2304', '121.4737', '不推断', '不要追问']) expect(template).not.toContain(secret);
+    expect(getCurrentPositionSmart).not.toHaveBeenCalled();
+});
+it('scheduled templates omit location when it is disabled or settings cannot be read', async () => {
+    const build = async () => {
+        const parts = await ChatPrompts.buildSystemPromptParts(char, user, [], [], [], [], undefined, undefined, undefined, false, undefined, undefined, { forFirePack: true });
+        return parts.stable + parts.volatileState + parts.recencyTail;
+    };
+    saveUserLocationConfig({ ...config, enabled: false });
+    expect(await build()).not.toContain('小雨当前的位置');
+    localStorage.setItem(USER_LOCATION_STORAGE_KEY, '{broken');
+    expect(await build()).not.toContain('小雨当前的位置');
     expect(getCurrentPositionSmart).not.toHaveBeenCalled();
 });
 it('local live location sits immediately after weather and before news, exactly once', async () => {

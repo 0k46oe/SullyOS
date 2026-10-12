@@ -123,6 +123,14 @@ export async function getUserLocationContext(userName?: string): Promise<string>
     return renderUserLocationContext(await refreshUserLocation(), userName);
 }
 
+/** Scheduled cloud messages cannot read the device. Never freeze a current fix in a template. */
+export function getBackgroundUserLocationContext(userName?: string): string {
+    try {
+        return loadUserLocationConfig().enabled
+            ? renderUserLocationContext({ kind: 'unavailable', description: '' }, userName) : '';
+    } catch { return ''; }
+}
+
 /** Preview shares one lookup with the prompt, but provider diagnostics stay in UI. */
 export async function getUserLocationPreview(userName?: string): Promise<{ context: string; failureHint?: string }> {
     const snapshot = await refreshUserLocation();

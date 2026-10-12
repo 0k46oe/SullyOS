@@ -17,7 +17,7 @@ import { computeCurrentListening, getCurrentSlot } from './charMusicSchedule';
 import { getCharLyricSnippet } from './charLyricCache';
 import { MusicCfg, loadMusicCfgStandalone } from '../context/MusicContext';
 import { RealtimeContextManager, NotionManager, FeishuManager, defaultRealtimeConfig } from './realtimeContext';
-import { getUserLocationContext } from './userLocation';
+import { getBackgroundUserLocationContext, getUserLocationContext } from './userLocation';
 import { isScheduleFeatureOn } from './scheduleFeature';
 import { VOICE_ACTING_GUIDE } from './minimaxTts';
 import { FISH_VOICE_ACTING_GUIDE } from './fishAudioTts';
@@ -339,8 +339,9 @@ export const ChatPrompts = {
                 return null;
             })
             : Promise.resolve(null);
-        const userLocationPromise = !forFirePack && promptOptions?.includeUserLocation
-            ? getUserLocationContext(userProfile.name) : Promise.resolve('');
+        const userLocationPromise = forFirePack
+            ? Promise.resolve(getBackgroundUserLocationContext(userProfile.name))
+            : promptOptions?.includeUserLocation ? getUserLocationContext(userProfile.name) : Promise.resolve('');
 
         // 记忆宫殿检索结果现在从 char.memoryPalaceInjection 读取。
         // deferVolatile：时间/宫殿召回/情绪 buff 三块不进 stable，由下面的 volatileState 承接。
