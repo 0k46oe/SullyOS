@@ -1,3 +1,4 @@
+import {AVATAR_FRAME_TARGETS,hasAvatarFrameCss,readAvatarFrameTarget,withAvatarFrameTarget,type AvatarFrameTarget} from '../../utils/avatarFrameTarget';
 import {createWardrobeUsageReader} from '../../utils/wardrobeUsage';
 import {BUILTIN_SOUNDS} from '../../utils/whiteboxSound';
 import { useLocalBackHandler } from '../../hooks/useLocalBackHandler';
@@ -77,6 +78,8 @@ export default function BeautyShareChannel({ presets, onExport, onImport, onBusy
   const [target, setTarget] = useState(targetCharacterId || activeCharacterId || characters[0]?.id || '');
   const targetCharacter = characters.find(character => character.id === target);
   const getUsage=useMemo(()=>createWardrobeUsageReader(theme,targetCharacter,[...customThemes,...Object.values(PRESET_THEMES)].find(item=>item.id===(targetCharacter?.bubbleStyle||theme.chatDefaultBubbleStyle||'default'))||PRESET_THEMES.default,customIcons),[theme,targetCharacter,customThemes,customIcons]);
+  const [avatarTarget,setAvatarTarget]=useState<AvatarFrameTarget>('both');
+  useEffect(()=>{if(received?.kind==='chat-decoration')setAvatarTarget(readAvatarFrameTarget(received.preset.parts.css||''));},[received]);
   const [applyAll,setApplyAll]=useState(false);
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState('');
@@ -210,7 +213,7 @@ export default function BeautyShareChannel({ presets, onExport, onImport, onBusy
         // Prepare every patch before writing, so malformed input cannot partly apply.
         const origin=await readDecorationOrigin(key);
         const customIds=new Set(customThemes.map(item=>item.id));
-        const {prepared,bubbles}=await prepareDecorationApplication(received.preset,parts,targets,theme,
+        const {prepared,bubbles}=await prepareDecorationApplication(hasAvatarFrameCss(received.preset)?withAvatarFrameTarget(received.preset,avatarTarget):received.preset,parts,targets,theme,
           [...customThemes,...Object.values(PRESET_THEMES)],origin,
           id=>customIds.has(id)?readDecorationOrigin('bubble-'+id):Promise.resolve({kind:'builtin'}));
         for(const bubble of bubbles){await addCustomTheme(bubble);await writeDecorationOrigin('bubble-'+bubble.id,origin);}
@@ -377,6 +380,7 @@ export default function BeautyShareChannel({ presets, onExport, onImport, onBusy
           <label className="block text-sm mt-4">选择应用角色<select disabled={applying||applyAll} value={target} onChange={e => setTarget(e.target.value)} className="block w-full mt-2 p-3 border rounded-xl">
             <option value="">请选择角色</option>{characters.map(character => <option key={character.id} value={character.id}>{character.name}</option>)}
           </select></label>
+          {hasAvatarFrameCss(received.preset)&&<label className="block text-sm mt-4">头像框给谁用<select aria-label="头像框给谁用" disabled={applying} value={avatarTarget} onChange={e=>setAvatarTarget(e.target.value as AvatarFrameTarget)} className="block w-full mt-2 p-3 border rounded-xl">{AVATAR_FRAME_TARGETS.map(([id,label])=><option key={id} value={id}>{label}</option>)}</select></label>}
           <label className="beauty-share-check"><input type="checkbox" disabled={applying} checked={applyAll} onChange={e=>setApplyAll(e.target.checked)}/>应用到所有角色（{characters.length}）</label>
           <p className="text-xs text-slate-500 mt-2">{applyAll?'将替换全部现有角色的对应装扮。':'只替换所选角色的对应装扮。'}{!characters.length && '暂无角色，可稍后创建角色再应用。'}</p>
         </>}

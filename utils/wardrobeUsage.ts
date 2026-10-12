@@ -1,3 +1,4 @@
+import {targetAvatarFrameCss} from './avatarFrameTarget';
 import type {CharacterProfile, OSTheme, ChatTheme} from '../types';
 import {LAYOUT_DEFAULTS, pickDecorationLayout, resolveDecorationTheme} from './chatDecoration';
 import {mergeChatFineTune} from './chatFineTuneCss';
@@ -66,7 +67,7 @@ export function createWardrobeUsageReader(theme: OSTheme, char: CharacterProfile
      const source=String(value||'');
      const blocks=[...source.matchAll(/\/\* sully-composer:(avatar|background) \*\/\n?([\s\S]*?)\/\* end-sully-composer:\1 \*\//g)];
      if(blocks.length&&!source.replace(workshopBlock('avatar'),'').replace(workshopBlock('background'),'').trim()){
-      for(const block of blocks){const installed=[...String(actual).matchAll(workshopBlock(block[1] as 'avatar'|'background'))].map(m=>m[1]).join('\n');matches.push(await equal(css(block[2]),css(installed)));}
+      for(const block of blocks){const installed=[...String(actual).matchAll(workshopBlock(block[1] as 'avatar'|'background'))].map(m=>m[1]).join('\n');matches.push(await equal(targetAvatarFrameCss(css(block[2]),'both').trim(),targetAvatarFrameCss(css(installed),'both').trim()));}
       continue;
      }
      expected=css(source);actual=css(actual);

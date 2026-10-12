@@ -1,3 +1,4 @@
+import {avatarFrameLayer} from '../utils/avatarFrameTarget';
 import ChatRuntimeStyle from '../components/chat/ChatRuntimeStyle';
 import {homePhoneAppearance,HOME_PHONE_BUBBLES} from './room3d/homePhoneAppearance';
 
@@ -3619,6 +3620,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     // CSS 全默认时为空串不注入；chatModuleAlign 不走 CSS，作为布局属性传给 MessageItem。
     const mergedFineTune = useMemo(() => mergeChatFineTune(osTheme, homePhone?undefined:char?.chatFineTune), [osTheme, char?.chatFineTune,!!homePhone]);
     const chatFineTuneCss = useMemo(() => buildChatFineTuneCss(mergedFineTune), [mergedFineTune]);
+    const selectedAvatarFrameCss=useMemo(()=>avatarFrameLayer([osTheme.chatChromeCustomCss,char?.chromeCustomCss].filter(Boolean).join('\n')),[osTheme.chatChromeCustomCss,char?.chromeCustomCss]);
     const chatAvatarSizeClass = osTheme.chatAvatarSize === 'small' ? 'w-7 h-7' : osTheme.chatAvatarSize === 'large' ? 'w-12 h-12' : 'w-9 h-9';
     const chatAvatarRadiusClass = osTheme.chatAvatarShape === 'square' ? 'rounded-sm' : osTheme.chatAvatarShape === 'rounded' ? 'rounded-xl' : 'rounded-full';
     const chatPendingAvatarClass = `${chatAvatarSizeClass} ${chatAvatarRadiusClass} object-cover`;
@@ -3657,6 +3659,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
              )}
 
              {activeTheme.customCss && <style>{activeTheme.customCss}</style>}
+             {!homePhone && selectedAvatarFrameCss && <BlobRefStyle css={selectedAvatarFrameCss} />}
              {/* 气泡工坊的尾巴频率依赖直接挂在气泡上的稳定类。用户 CSS 即使给
                  ::before/::after 写了 !important，中间气泡仍会按“仅组末/隐藏”设置收起尾巴。 */}
              <style>{`
