@@ -1083,17 +1083,17 @@ const DateSession: React.FC<DateSessionProps> = ({
                         }}>{isBatchSelectMode ? '连续朗读所选内容' : '朗读最新一段'}</button>}
                         <div className="max-w-2xl mx-auto animate-fade-in space-y-6">
                             {isBatchSelectMode && (
-                                <div className="sticky top-0 z-20 flex items-center justify-between bg-white/90 border border-stone-200 rounded-xl px-3 py-2 text-xs text-stone-700">
+                                <div className="meeting-batch-toolbar sticky top-0 z-20 flex flex-col items-center gap-2 bg-white/90 border border-stone-200 rounded-xl px-3 py-2 text-xs text-stone-700">
                                     <span>已选 {selectedMsgIds.size} 条</span>
-                                    <div className="flex gap-2">
+                                    <div className="flex justify-center gap-3">
                                         <button
                                             onClick={(e) => { e.stopPropagation(); exitBatchMode(); }}
-                                            className="px-3 py-1 rounded-full bg-stone-200 text-stone-600"
+                                            className="min-h-[44px] min-w-[64px] px-4 py-2 rounded-full bg-stone-200 text-stone-600"
                                         >完成</button>
                                         <button
                                             onClick={(e) => { e.stopPropagation(); handleBatchDelete(); }}
                                             disabled={selectedMsgIds.size === 0}
-                                            className="px-3 py-1 rounded-full bg-red-500 text-white disabled:opacity-40"
+                                            className="min-h-[44px] min-w-[64px] px-4 py-2 rounded-full bg-red-500 text-white disabled:opacity-40"
                                         >删除</button>
                                     </div>
                                 </div>
