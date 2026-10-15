@@ -12,6 +12,7 @@ const ERROR_TITLE = '\u5e94\u7528\u8fd0\u884c\u9519\u8bef';
 const ERROR_RETURN_LABEL = '\u8fd4\u56de\u684c\u9762';
 const CHUNK_ERROR_TITLE = '\u8d44\u6e90\u52a0\u8f7d\u5931\u8d25';
 const CHUNK_ERROR_HINT = '页面组件未能加载或解析，可能与网络中断或版本更新有关。可以刷新重试；如果仍然报错，请复制报错信息反馈。';
+const CHUNK_ERROR_OFFLINE_HINT = '检测到网络已断开，已暂停自动刷新。请联网后点击「刷新重试」；如果仍然报错，请复制报错信息反馈。';
 const CHUNK_ERROR_RELOADING = '\u6b63\u5728\u81ea\u52a8\u5237\u65b0\u6062\u590d\u2026';
 const CHUNK_ERROR_RELOAD_LABEL = '\u5237\u65b0\u91cd\u8bd5';
 
@@ -29,6 +30,8 @@ type AppErrorBoundaryState = {
     isChunkError: boolean;
     /** 已发起自动整页刷新, 页面即将重载 */
     autoReloading: boolean;
+    /** 加载失败时明确离线，保留页面等待用户联网后手动重试 */
+    offlineRecovery: boolean;
 };
 
 class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundaryState> {
@@ -42,6 +45,7 @@ class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundary
             copyLabel: ERROR_COPY_LABEL,
             isChunkError: false,
             autoReloading: false,
+            offlineRecovery: false,
         };
     }
 
@@ -67,14 +71,16 @@ class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundary
             错误类型: isChunkLoadError(error) ? '资源加载失败' : '运行错误',
             ...(appName ? { 所在App: appName } : {}),
         });
-        // chunk 加载失败: Safari 会把失败缓存进模块表, 同一 URL 本页内重试必失败,
-        // 只有整页 reload 能恢复 — 自动刷一次 (冷却期内返回 false, 留给手动按钮)。
-        if (isChunkLoadError(error) && tryAutoReloadForChunkError()) {
-            trackEvent('自动刷新恢复资源加载失败', { 恢复方式: '已自动刷新' });
-            this.setState({ autoReloading: true });
-        } else if (isChunkLoadError(error)) {
-            // 走到这里 = 是 chunk 错但没自动刷（冷却期内 / sessionStorage 不可用），页面还在。
-            trackEvent('自动刷新恢复资源加载失败', { 恢复方式: '冷却期内不刷' });
+        // chunk 加载失败需要整页重试；明确离线时保留页面，不在联网后擅自刷新。
+        if (isChunkLoadError(error)) {
+            const result = tryAutoReloadForChunkError();
+            trackEvent('自动刷新恢复资源加载失败', {
+                恢复方式: result === 'reloading' ? '已自动刷新'
+                    : result === 'offline' ? '离线不刷'
+                    : result === 'storage-unavailable' ? '存储不可用不刷'
+                    : '冷却期内不刷',
+            });
+            this.setState({ autoReloading: result === 'reloading', offlineRecovery: result === 'offline' });
         }
     }
 
@@ -86,6 +92,7 @@ class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundary
                 copyLabel: ERROR_COPY_LABEL,
                 isChunkError: false,
                 autoReloading: false,
+                offlineRecovery: false,
             });
         }
     }
@@ -160,6 +167,7 @@ class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundary
             copyLabel: ERROR_COPY_LABEL,
             isChunkError: false,
             autoReloading: false,
+            offlineRecovery: false,
         });
         this.props.onCloseApp();
     };
@@ -184,7 +192,7 @@ class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundary
                     />
                     <h2 className="text-lg font-bold">{CHUNK_ERROR_TITLE}</h2>
                     <p className="text-xs text-slate-300 max-w-xs leading-relaxed">
-                        {CHUNK_ERROR_HINT}
+                        {this.state.offlineRecovery ? CHUNK_ERROR_OFFLINE_HINT : CHUNK_ERROR_HINT}
                     </p>
                     <p className="text-xs text-slate-300 font-mono bg-black/30 p-3 rounded-2xl max-w-full overflow-auto max-h-40 select-text break-all whitespace-pre-wrap">
                         {this.state.error?.message || 'Unknown Error'}
