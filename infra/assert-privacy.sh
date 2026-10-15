@@ -134,7 +134,15 @@ if [[ -n "$NONCE" ]]; then
   # umami 的写入不是同步的，给它一点时间，别把 CI 做成 flaky 的。
   n=0
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    n=$(Q "SELECT count(*) FROM website_event WHERE event_name = '$ev';")
+    # 这里只需要判断「有没有」，不需要数完。先用 created_at 索引找近期探针；
+    # 没找到仍查全部历史，所以延迟 / 重跑的旧探针不会被排除。
+    # 后面的 session 检查、属性全量扫描、清理与清理复核仍保留原范围。
+    n=$(Q "SELECT CASE WHEN EXISTS (
+             SELECT 1 FROM website_event
+             WHERE created_at >= now() - interval '1 hour' AND event_name = '$ev'
+           ) THEN 1 ELSE (
+             SELECT EXISTS (SELECT 1 FROM website_event WHERE event_name = '$ev')::int
+           ) END;")
     [[ "$n" =~ ^[0-9]+$ ]] && (( n > 0 )) && break
     sleep 2
   done
