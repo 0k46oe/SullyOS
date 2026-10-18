@@ -1,3 +1,5 @@
+import CharacterApiPanel from '../components/character/CharacterApiPanel';
+import CharacterSettingsSection from '../components/character/CharacterSettingsSection';
 import CharacterStatsPanel from '../components/character/CharacterStatsPanel';
 import { characterRemark } from '../utils/characterRemark';
 import { loadCharacterContextMessages } from '../utils/chatContextRange';
@@ -27,6 +29,7 @@ import { safeFetchJson, extractContent } from '../utils/safeApi';
 import { fetchMiniMaxVoices, MiniMaxVoiceItem } from '../utils/minimaxVoice';
 import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
 import { normalizeElevenLabsVoiceId, synthesizeSpeechElevenLabsDetailed } from '../utils/elevenLabsTts';
+import { isElevenLabsV4Model } from '../utils/elevenLabsModels';
 import { normalizeUserImpression } from '../utils/impression';
 import { parseGeneratedImpression } from '../utils/impressionGeneration';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
@@ -155,8 +158,17 @@ const Character: React.FC = () => {
           .catch(() => {});
   }, []);
   useEffect(() => {
-      characterLaunch.consume();
-  }, []);
+      const apply = () => {
+          const intent = characterLaunch.consume();
+          if (!intent) return;
+          if (!characters.some(character => character.id === intent.charId)) { setView('list'); return; }
+          setEditingId(intent.charId); setView('detail');
+          setDetailTab(intent.detailTab || (intent.openChibiStudio ? 'chibi' : 'identity'));
+          setShowChibiStudio(!!intent.openChibiStudio);
+      };
+      apply();
+      return characterLaunch.subscribe(apply);
+  }, [characters]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cardImportRef = useRef<HTMLInputElement>(null);
   
@@ -619,6 +631,7 @@ const Character: React.FC = () => {
    *                        没提供则退回到当前 selectedPromptId
    */
   const handleForceArchiveDate = async (dateStr: string, overridePromptId?: string): Promise<void> => {
+
       if (!apiConfig.apiKey || !formData) { addToast('请先配置 API Key', 'error'); return; }
       const targetId = formData.id;
       try {
@@ -640,7 +653,6 @@ const Character: React.FC = () => {
           const effectivePromptId = overridePromptId || selectedPromptId;
           const templateObj = archivePrompts.find(p => p.id === effectivePromptId) || DEFAULT_ARCHIVE_PROMPTS[0];
           const characterContextInput = { char: formData, user: userProfile };
-
           let prompt = '' + '\n\n' + templateObj.content;
           const sarMemoryBoundary = buildSARMemoryBoundaryInstruction(rawLog);
           if (sarMemoryBoundary) prompt = `${sarMemoryBoundary}\n\n${prompt}`;
@@ -652,7 +664,7 @@ const Character: React.FC = () => {
           const data = await safeFetchJson(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-              body: JSON.stringify({ model: apiConfig.model, messages: ContextBuilder.buildCharacterRequest(characterContextInput, [{ role: 'user', content: prompt }]), temperature: 0.5, max_tokens: 8000, stream: false }),
+              body: JSON.stringify({ model: apiConfig.model, messages: (await ContextBuilder.buildCharacterRequest(characterContextInput, [{ role: 'user', content: prompt }])), temperature: 0.5, max_tokens: 8000, stream: false }),
           }, 0);
           let summary = extractContent(data).replace(/^["']|["']$/g, '');
           if (!summary) throw new Error('空响应');
@@ -779,6 +791,7 @@ const Character: React.FC = () => {
   };
   
   const handleBatchSummarize = async () => {
+
         if (!apiConfig.apiKey || !formData) return;
         
         const targetId = formData.id; // LOCK ID
@@ -811,7 +824,6 @@ const Character: React.FC = () => {
             await injectMemoryPalace(formData);
             const characterContextInput = { char: formData, user: userProfile };
 
-
             for (let i = 0; i < dates.length; i++) {
                 const date = dates[i];
                 setBatchProgress(`Processing ${date} (${i+1}/${dates.length})`);
@@ -839,7 +851,7 @@ const Character: React.FC = () => {
                         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
                         body: JSON.stringify({
                             model: apiConfig.model,
-                            messages: ContextBuilder.buildCharacterRequest(characterContextInput, [{ role: "user", content: prompt }]),
+                            messages: (await ContextBuilder.buildCharacterRequest(characterContextInput, [{ role: "user", content: prompt }])),
                             max_tokens: 8000,
                             temperature: 0.5
                         })
@@ -902,6 +914,7 @@ const Character: React.FC = () => {
     };
 
   const handleGenerateImpression = async (type: 'initial' | 'update') => {
+
       if (!formData || !apiConfig.apiKey) {
           addToast('请先配置 API Key', 'error');
           return;
@@ -1025,7 +1038,7 @@ ${isInitialGeneration ? `
               headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
               body: JSON.stringify({
                   model: apiConfig.model,
-                  messages: ContextBuilder.buildCharacterRequest(characterContextInput, [{ role: "user", content: prompt }]),
+                  messages: (await ContextBuilder.buildCharacterRequest(characterContextInput, [{ role: "user", content: prompt }])),
                   max_tokens: 8000,
                   temperature: 0.5,
                   // 与「设置 → API → 流式输出」保持一致，不在印象功能里强制覆盖用户选择。
@@ -1051,7 +1064,7 @@ ${isInitialGeneration ? `
       }
   };
 
-  // 真正执行删除。名下有 amsg2 任务的角色 deleteCharacter 会先 await 云端清理，
+  // 真正执行删除。新版 Worker 先停用云端归属，清理操作受理后才放行本地删除，
   // 清不掉返回 cloud-cleanup-failed 且本地未删 → 转进「重试 / 仍然删除」弹窗；
   // force=true 是用户在那个弹窗里选了「仍然删除」，放行本地删除。
   const runDeleteCharacter = async (targetId: string, force = false) => {
@@ -1065,7 +1078,7 @@ ${isInitialGeneration ? `
           }
           setDeleteConfirmTarget(null);
           setCloudCleanupFailTarget(null);
-          addToast('连接已断开', 'success');
+          addToast(result.cloudUnconfirmed ? '本地角色已删除，云端清理未确认，请到设置里的云端数据管理重试。' : result.cloudPending ? '角色已删除，云端清理已受理，可在设置里查看进度。' : '连接已断开', result.cloudUnconfirmed ? 'error' : 'success');
       } finally {
           setIsDeleting(false);
       }
@@ -1462,6 +1475,7 @@ ${isInitialGeneration ? `
                                 />
                            </div>
 
+                           <CharacterSettingsSection title="时间感知与时区" summary={formData.customTimezoneEnabled ? formData.customTimezone || '自定义时区' : '跟随本机时区'}>
                            {/* 时间感知 & 时区：三个独立开关，可任意组合（聊天时间感知 / 自定义时区 / 线下时间感知） */}
                            <div className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 space-y-4">
                                <div>
@@ -1474,7 +1488,7 @@ ${isInitialGeneration ? `
                                    <div className="flex items-center justify-between gap-3">
                                        <div className="min-w-0">
                                            <p className="text-xs font-bold text-slate-700">聊天 · 时间感知强化</p>
-                                           <p className="text-[10px] text-slate-400 mt-0.5 leading-relaxed">默认开。开启后角色会记得你们多久没聊、主动贴近真实时间；关掉后这种感觉会变弱。</p>
+                                           <p className="text-[10px] text-slate-400 mt-0.5 leading-relaxed">默认开。开启后角色会知道现实时间和你们多久没聊；关掉后不再提供现实时间与消息时间戳，更适合架空剧情。</p>
                                        </div>
                                        <button
                                            onClick={() => handleChange('timeAwarenessEnabled', formData.timeAwarenessEnabled === false)}
@@ -1530,6 +1544,9 @@ ${isInitialGeneration ? `
                                </div>
                            </div>
 
+                           </CharacterSettingsSection>
+
+                           <CharacterSettingsSection title="生活记录注入" summary={formData.lifeRecordEnabled ? '已开启' : '未开启'}>
                            {/* 生活记录注入：总开关 + 4 个模块小开关（数据在档案 App「生活记录」里维护） */}
                            <div className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 space-y-4">
                                <div>
@@ -1577,6 +1594,9 @@ ${isInitialGeneration ? `
                                </div>
                            </div>
 
+                           </CharacterSettingsSection>
+
+                           <CharacterSettingsSection title="角色语音音色" summary={formData.voiceProfile?.voiceName || '音色与合成参数'}>
                            <div className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 space-y-3">
                                <div className="flex items-center justify-between">
                                    <label className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest flex items-center gap-1"><SpeakerHigh size={12} /> 角色语音音色</label>
@@ -1720,7 +1740,11 @@ ${isInitialGeneration ? `
                                        })}
                                        className="w-full accent-primary"
                                    />
-                                   <p className="text-[10px] text-slate-400">越小越慢、越像娓娓道来。1.0 正常；觉得“赶”就拉到 0.85–0.95。MiniMax、鱼声与 ElevenLabs 共用该角色的语速。</p>
+                                   <p className="text-[10px] text-slate-400">
+                                       {apiConfig.ttsProvider === 'elevenlabs' && isElevenLabsV4Model(apiConfig.elevenLabsModel)
+                                           ? '当前 ElevenLabs v4 不支持数值语速，这个值会保留给其他模型。v4 请用 [measured]、[Quick, light, playful pace] 等 Audio Tags 控制节奏。'
+                                           : '越小越慢、越像娓娓道来。1.0 正常；觉得“赶”就拉到 0.85–0.95。MiniMax、鱼声与支持语速参数的 ElevenLabs 模型共用该角色的语速。'}
+                                   </p>
                                </div>
 
                                {(voiceOptions.system.length + voiceOptions.voice_cloning.length + voiceOptions.voice_generation.length) > 0 && (
@@ -1753,6 +1777,10 @@ ${isInitialGeneration ? `
                                    </div>
                                )}
                            </div>
+
+                           </CharacterSettingsSection>
+
+                           <CharacterApiPanel key={formData.id} character={formData} onChange={api => handleChange('dialogueApi', api)} />
 
                            {/* Worldbook Section */}
                            <div>
@@ -1813,6 +1841,19 @@ ${isInitialGeneration ? `
                    
                    {detailTab === 'memory' && (
                        <div className="space-y-4 animate-fade-in">
+                           <details className="rounded-2xl border border-slate-100 bg-white shadow-sm">
+                               <summary className="cursor-pointer px-4 py-3 text-xs font-semibold text-slate-600">记忆设置</summary>
+                               <label className="flex items-center justify-between gap-4 border-t border-slate-100 px-4 py-3">
+                               <span className="min-w-0">
+                                   <span className="block text-sm font-semibold text-slate-700">隐藏 RECALL 指令提示</span>
+                                   <span className="mt-1 block text-xs leading-relaxed text-slate-400">聊天时不再提示角色按月份调阅旧版记忆。使用记忆宫殿时可保持开启。</span>
+                               </span>
+                               <span className="shrink-0">
+                                   <input type="checkbox" role="switch" aria-label="隐藏 RECALL 指令提示" checked={formData.hideMonthlyRecallPrompt !== false} onChange={e => handleChange('hideMonthlyRecallPrompt', e.target.checked)} className="peer sr-only" />
+                                   <span aria-hidden="true" className="relative block h-6 w-11 rounded-full bg-slate-200 transition-colors peer-checked:bg-primary peer-focus-visible:ring-2 peer-focus-visible:ring-primary peer-focus-visible:ring-offset-2 after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform peer-checked:after:translate-x-5" />
+                               </span>
+                               </label>
+                           </details>
                            <div className="flex justify-center gap-2 mb-4">
                                <button onClick={() => { setShowBatchModal(true); trackEvent('打开批量记忆总结弹窗'); }} className="px-4 py-2 bg-white rounded-full text-xs font-semibold text-slate-500 shadow-sm border border-slate-100">批量总结（可指定日期）</button>
                                <button onClick={() => setShowImportModal(true)} className="px-4 py-2 bg-white rounded-full text-xs font-semibold text-slate-500 shadow-sm border border-slate-100">导入/清洗</button>
@@ -2131,7 +2172,7 @@ ${isInitialGeneration ? `
             在这里给出重试或强行放行的选择。 */}
         <Modal
             isOpen={!!cloudCleanupFailTarget}
-            title="云端还有任务没清掉"
+            title="云端清理尚未确认"
             onClose={() => setCloudCleanupFailTarget(null)}
             footer={<div className="flex gap-2 w-full">
                 <button
@@ -2147,9 +2188,9 @@ ${isInitialGeneration ? `
             </div>}
         >
             <p className="text-sm text-slate-600 leading-relaxed py-2">
-                ta 名下还有主动消息 2.0 任务没能在云端取消（可能是断网或 Worker 没响应），角色暂时没有删除。<br/>
+                ta 的云端数据还没能确认清理（可能是断网或 Worker 没响应），本地角色暂时没有删除。<br/>
                 <span className="text-xs text-red-400 font-bold">选「仍然删除」的话，残留的任务之后可能仍会到点推送</span>
-                <span className="text-xs text-slate-400">——届时可去设置里「清除云端状态」兜底。</span>
+                <span className="text-xs text-slate-400">——可以去设置 → 主动消息 2.0 → 云端数据管理继续检查。</span>
             </p>
         </Modal>
     </div>

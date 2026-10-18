@@ -53,6 +53,10 @@ xiaohongshu-skills/
 .claude/
 .codex/
 .pnpm-store/
+/.cache/retained-build-assets/
+
+# Local research downloads, QA builds/screenshots and temporary worktrees.
+/.tmp/
 
 # TIAO-Capacitor local Android toolchain and caches (D: only, never committed)
 .android-sdk/
@@ -84,6 +88,31 @@ xiaohongshu-skills/
 
 # Local generated previews, browser QA and isolated build artifacts.
 /output/
+
+# Keep the standalone clothing workbench's runtime dependencies reviewable.
+# Original uploads, intake galleries and QA screenshots remain local output.
+!/output/
+/output/*
+!/output/cardigan-controller/
+/output/cardigan-controller/*
+!/output/cardigan-controller/garment-fit.js
+!/output/cardigan-controller/lowerwear-controls.js
+!/output/cardigan-controller/footwear-controls.js
+!/output/cardigan-controller/apparel-controls.js
+!/output/cardigan-controller/body-occlusion.js
+!/output/cardigan-controller/pleated-skirt.js
+!/output/cardigan-controller/lowerwear/
+!/output/cardigan-controller/shoes/
+!/output/cardigan-controller/clothing-0920b/
+/output/cardigan-controller/lowerwear/*
+/output/cardigan-controller/shoes/*
+/output/cardigan-controller/clothing-0920b/*
+!/output/cardigan-controller/lowerwear/*.glb
+!/output/cardigan-controller/lowerwear/manifest.json
+!/output/cardigan-controller/shoes/*.glb
+!/output/cardigan-controller/shoes/manifest.json
+!/output/cardigan-controller/clothing-0920b/*.glb
+!/output/cardigan-controller/clothing-0920b/manifest.json
 
 # Local Worker checks and generated artwork previews.
 /worker/beauty-share/output/

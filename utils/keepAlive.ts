@@ -10,18 +10,32 @@
  *   KeepAlive.stop();    // after API call completes
  */
 
-let registered = false;
+import { changeWebUpdateActivity, watchWebUpdates } from './webUpdateSession';
+import { recordDatabaseOpen } from './databaseOpenDiagnostics';
 
-async function ensureRegistered(): Promise<void> {
-  if (registered || !('serviceWorker' in navigator)) return;
+let registered = false;
+let registering: Promise<void> | null = null;
+
+function ensureRegistered(): Promise<void> {
+  if (registered || !('serviceWorker' in navigator)) return Promise.resolve();
+  // Startup and a fast first reply share registration instead of issuing it twice.
+  if (!registering) registering = register().finally(() => { registering = null; });
+  return registering;
+}
+
+async function register(): Promise<void> {
+  recordDatabaseOpen('sw-requested');
   try {
     const base = import.meta.env.BASE_URL || '/';
     const scriptUrl = base + 'sw-keep-alive.js';
-    const reg = await navigator.serviceWorker.register(scriptUrl, { scope: base });
+    const reg = await navigator.serviceWorker.register(scriptUrl, { scope: base, updateViaCache: 'none' });
+    watchWebUpdates(reg);
     await navigator.serviceWorker.ready;
     registered = true;
+    recordDatabaseOpen('sw-ready');
     console.log('[KeepAlive] Service Worker registered', reg.scope);
   } catch (e) {
+    recordDatabaseOpen('sw-error', {}, e);
     console.warn('[KeepAlive] SW registration failed, keep-alive disabled:', e);
   }
 }
@@ -37,12 +51,14 @@ export const KeepAlive = {
 
   /** Signal that a long-running request is starting. */
   async start() {
+    changeWebUpdateActivity(1);
     await ensureRegistered();
     postToSW({ type: 'keepalive-start' });
   },
 
   /** Signal that the request has finished. */
   stop() {
+    changeWebUpdateActivity(-1);
     postToSW({ type: 'keepalive-stop' });
   },
 

@@ -1,3 +1,4 @@
+import {UPLOADED_AVATAR_FRAME_STYLE} from '../../utils/avatarFrameUpload';
 import {readDecorationOrigin,writeDecorationOrigin,importedOrigin,remixOrigin,canEditDecoration} from '../../utils/decorationLibrary';
 import { avatarDecorationImageStyle } from '../../utils/anniversaryGifts';
 
@@ -797,7 +798,7 @@ const ThemeMaker: React.FC<ThemeMakerProps> = ({embedded=false,initialTheme,onCl
             const stored = await migrateDataUrlToRef(result);
             if (type === 'bg') updateStyle('backgroundImage', stored);
             else if (type === 'deco') updateStyle('decoration', stored);
-            else if (type === 'avatarDeco') updateStyle('avatarDecoration', stored);
+            else if (type === 'avatarDeco' && activeTab !== 'css') updateTheme(prev => ({...prev,[activeTab]:{...prev[activeTab],...UPLOADED_AVATAR_FRAME_STYLE,avatarDecoration:stored}}));
             addToast('图片上传成功', 'success');
         } catch (e: any) {
             addToast(e.message, 'error');
@@ -817,7 +818,7 @@ const ThemeMaker: React.FC<ThemeMakerProps> = ({embedded=false,initialTheme,onCl
 
         if (type === 'bg') updateStyle('backgroundImage', url);
         else if (type === 'deco') updateStyle('decoration', url);
-        else updateStyle('avatarDecoration', url);
+        else if(activeTab !== 'css') updateTheme(prev => ({...prev,[activeTab]:{...prev[activeTab],...UPLOADED_AVATAR_FRAME_STYLE,avatarDecoration:url}}));
 
         setAssetUrlDraft(prev => ({ ...prev, [type]: '' }));
         addToast('已应用图床图片', 'success');
@@ -1169,7 +1170,7 @@ const ThemeMaker: React.FC<ThemeMakerProps> = ({embedded=false,initialTheme,onCl
                         ) : mock.kind === 'emoji' ? (
                             <div className="relative z-10 text-3xl leading-none">{mock.content}</div>
                         ) : (
-                            <div className="relative z-10 text-[15px] leading-relaxed whitespace-pre-wrap break-all" style={{ color: style.textColor }}>
+                            <div className="relative z-10 text-[15px] leading-relaxed whitespace-pre-wrap break-normal [overflow-wrap:anywhere]" style={{ color: style.textColor }}>
                                 {mock.content}
                             </div>
                         )}

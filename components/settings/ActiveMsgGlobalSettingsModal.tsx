@@ -16,7 +16,7 @@ import {
 } from '../../utils/amsgDiagnostics';
 import { ActiveMsgStore, maskActiveMsgUserId } from '../../utils/activeMsgStore';
 import { formatTaskTime } from '../../utils/amsg2Tasks';
-import { isWorkerUrlCleared, wipeAmsgCloudData } from '../../utils/amsgStateSync';
+import { isWorkerUrlCleared } from '../../utils/amsgStateSync';
 import { rememberDetachedWorker } from '../../utils/amsgDetachedWorkers';
 import { buildCloudflareDashboardUrl } from '../../utils/workerDeploy';
 import { generateClientToken } from '../../utils/vapidGen';
@@ -62,6 +62,8 @@ const REQUIRED_WORKER_FEATURES = [
   // ——包括角色在触发时给自己排的那些——下次触发就用新凭据。缺了它就退回「凭据冻结
   // 进每条任务」的老路：换 Key 要逐条补刷，漏一条到点就是 401。
   'llm-credentials',
+  // 即时对话通过正式策略关闭生成重试，收尾读取上游的 willRetry 决定。
+  'max-generation-retries',
 ];
 // features 之外还必须比版本：这波依赖的能力大多没发独立 flag，光查 features 分不出新旧。
 //   next.5 — GET /messages 投影（charId/clientTaskId）、onBeforeFire 的 { skip } 出口
@@ -130,33 +132,44 @@ const REQUIRED_WORKER_FEATURES = [
 //            上这类响应被当成模型「这轮没说话」静默跳过，面板上只写「没写出要说的话」，
 //            看不出是中转站在报错。同一批还带上 0.4.0-next.9 的脱敏补漏：形状像模型名
 //            的自建网关 Key 不再明文进 last_error。
+//   next.31 — 正式支持按任务配置生成重试次数。即时对话设为 0，失败立即结束；
+//            已整批入箱的内容仍可补推。收尾通过 willRetry 读取上游决定，不修改错误对象。
+//            旧部署缺少这项策略，会继续让用户等自动重试，需更新 Worker。
+//   next.32 — 执行中的即时对话可取消，模型请求与工具循环共享取消信号。
+//   next.33 — onBeforeFire 可以推迟一次触发（{ defer }）。到点时页面正在本地生成回复，
+//            定时消息靠它等那一轮结束再生成。
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
 //
-const REQUIRED_WORKER_VERSION = '2.6.0-next.28';
-
-/**
- * 门槛故意落后于依赖时，把当前依赖的版本写在这里，表示「知道，是有意的」。
- *
- * next.29 多了按命名空间 / 按前缀清理的四条端点（「云端数据」清点用的就是它们），但那是
- * **可选增强**：没有它的 worker 照样能清点和清理，只是「只在云端留了上下文、既没任务也
- * 没凭据」的角色列不出来——那一页会自己说明清单不是全集。为这个亮一次「版本过旧」、
- * 逼所有人重贴一遍部署，不值当。
- *
- * next.30 让投递重试少花钱：模型明确拒了请求（Key 失效、余额不足、模型名写错……）一跳就
- * 终审，不再白试 4 次；内容已经落进收件箱、只是推送没成的，重试只补推原文，不再重新生成。
- * 老 worker 上这些照旧是多花钱、不出错，所以同样不抬门槛——bundle 版本已经往前推了，
- * 设置页会提示有更新。
- *
- * 守卫在 utils/amsgWorkerVersion.test.ts：门槛和这里两个都没跟上依赖，测试就会红，
- * 免得哪天真有「不更新就出错」的改动被当成可选的漏过去。
- */
-const WORKER_VERSION_LAG_ACK = '2.6.0-next.30';
+const REQUIRED_WORKER_VERSION = '2.6.0-next.33';
+// next.35 修复可选云端管理的 D1 维护开销，next.36 让云端清理出错时消息照常投递；
+// 协议门槛仍是 next.33，bundle 日期照常提示更新，旧 Worker 的清单摘要仍有兼容回退。
+const WORKER_VERSION_LAG_ACK = '2.6.0-next.36';
 
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';
 const SETUP_WALKTHROUGH_URL = 'https://github.com/qegj567-cloud/SullyOS/blob/master/docs/amsg2-setup-walkthrough.md';
 /** 一键部署要的那枚 API Token 在这里建。 */
 const CF_TOKEN_URL = 'https://dash.cloudflare.com/profile/api-tokens';
+
+// 浏览器的 SW ready 和存储读取都可能一直不返回，不能让配置入口跟着消失。
+const SETTINGS_CHECK_TIMEOUT_MS = 10_000;
+const waitForSettingsCheck = async <T,>(check: Promise<T>): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      check,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error('设置检查超时');
+          error.name = 'TimeoutError';
+          reject(error);
+        }, SETTINGS_CHECK_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 // 探测结果每次会话只报一次。refresh() 在开面板、连接成功、订阅成功后都会跑一遍，
 // 一个连不上、反复点「连接」的人否则能一个人刷出十几条同样的结果，把分布带歪。
@@ -200,6 +213,9 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   onOpenCloudData,
 }) => {
   const [config, setConfig] = useState<ActiveMsg2GlobalConfig | null>(null);
+  const [configLoadError, setConfigLoadError] = useState('');
+  const configRequestIdRef = useRef(0);
+  const pushRequestIdRef = useRef(0);
   const [loading, setLoading] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [deployOpen, setDeployOpen] = useState(false);
@@ -208,6 +224,8 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   // Deno 门面：workers.dev 在国内连不上时才需要，默认收着。
   const [denoProxyOpen, setDenoProxyOpen] = useState(false);
   const [pushStatus, setPushStatus] = useState<ActiveMsg2PushStatus | null>(null);
+  const [checkingPush, setCheckingPush] = useState(false);
+  const [pushCheckError, setPushCheckError] = useState('');
   // 「生成 Master Key」只在本次打开期间展示，前端不落盘——它是 worker 侧密钥，粘进 CF env 即可。
   const [generatedMasterKey, setGeneratedMasterKey] = useState('');
   const [generatedServerToken, setGeneratedServerToken] = useState('');
@@ -351,23 +369,60 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     });
   };
 
+  const refreshPushStatus = async (nextConfig: ActiveMsg2GlobalConfig) => {
+    const requestId = ++pushRequestIdRef.current;
+    setCheckingPush(true);
+    setPushCheckError('');
+    setPushStatus(null);
+    try {
+      const nextPushStatus = await waitForSettingsCheck(ActiveMsgClient.getPushStatus());
+      if (requestId !== pushRequestIdRef.current) return;
+      setPushStatus(nextPushStatus);
+      if (nextConfig.workerUrl?.trim()) {
+        void ActiveMsgClient.probeInstantChatSupport().then((supported) => {
+          if (requestId !== pushRequestIdRef.current) return;
+          setInstantChatSupported(supported);
+          reportInstantChatGate({
+            connected: Boolean(nextConfig.initializedAt),
+            pushSubscribed: Boolean(nextPushStatus.hasSubscription),
+            workerSupportsInstantChat: supported,
+          }, Boolean(nextConfig.instantChatEnabled));
+        }).catch(() => {
+          if (requestId === pushRequestIdRef.current) setInstantChatSupported(false);
+        });
+      }
+    } catch (error) {
+      if (requestId !== pushRequestIdRef.current) return;
+      setPushCheckError(error instanceof Error && error.name === 'TimeoutError'
+        ? '推送状态检查超时，可以重试；其他配置仍可正常修改。'
+        : '推送状态读取失败，可以重试；其他配置仍可正常修改。');
+    } finally {
+      if (requestId === pushRequestIdRef.current) setCheckingPush(false);
+    }
+  };
+
   const refresh = async () => {
-    const nextConfig = await ActiveMsgClient.getGlobalConfig();
-    const nextPushStatus = await ActiveMsgClient.getPushStatus();
+    const requestId = ++configRequestIdRef.current;
+    ++pushRequestIdRef.current;
+    setConfigLoadError('');
+    let nextConfig: ActiveMsg2GlobalConfig;
+    try {
+      nextConfig = await waitForSettingsCheck(ActiveMsgClient.getGlobalConfig());
+    } catch (error) {
+      if (requestId !== configRequestIdRef.current) return;
+      setConfigLoadError(error instanceof Error && error.name === 'TimeoutError'
+        ? '本地配置读取超时，请重试。'
+        : '本地配置读取失败，请重试。');
+      throw error;
+    }
+    if (requestId !== configRequestIdRef.current) return;
     savedWorkerUrlRef.current = nextConfig.workerUrl || '';
+    // 先交出表单，推送就绪与否只影响推送区域，不挡住整个面板。
     setConfig(nextConfig);
-    setPushStatus(nextPushStatus);
+    void refreshPushStatus(nextConfig);
     void probeWorkerCaps(Boolean(nextConfig.workerUrl?.trim()));
     if (nextConfig.workerUrl?.trim()) {
       void ActiveMsgClient.probeWorkerVersion().then(setWorkerVersion);
-      void ActiveMsgClient.probeInstantChatSupport().then((supported) => {
-        setInstantChatSupported(supported);
-        reportInstantChatGate({
-          connected: Boolean(nextConfig.initializedAt),
-          pushSubscribed: Boolean(nextPushStatus?.hasSubscription),
-          workerSupportsInstantChat: supported,
-        }, Boolean(nextConfig.instantChatEnabled));
-      });
       void runDiagnostics();
       // 已连接才问定时触发开没开：没连上的时候这事还轮不到操心。
       if (nextConfig.initializedAt) void ActiveMsgClient.getCronTriggerState().then(applyCronTriggerState);
@@ -383,6 +438,9 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
 
   useEffect(() => {
     if (!isOpen) return;
+    setConfig(null);
+    setPushStatus(null);
+    setInstantChatSupported(false);
     setAdvancedOpen(false);
     setDiagnosticsOpen(false);
     setDeployOpen(false);
@@ -403,7 +461,12 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     setAttachAccounts(null);
     setAttachError('');
     setPauseConfirmOpen(false);
-    void refresh();
+    // refresh 已把读取错误放进面板；操作按钮仍可用它的 rejection 显示操作失败。
+    void refresh().catch(() => {});
+    return () => {
+      ++configRequestIdRef.current;
+      ++pushRequestIdRef.current;
+    };
   }, [isOpen]);
 
   /**
@@ -843,63 +906,6 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     return revealAndCopy(ActiveMsgClient.generateMasterKey(), setGeneratedMasterKey, 'AMSG_MASTER_KEY');
   };
 
-  const handleWipeCloudData = async () => {
-    if (!confirm(
-      '确定清空云端数据？Worker D1 里属于你的这几样会一起删掉：\n\n'
-      + '· 已排程的主动消息任务（含角色自己排的）\n'
-      + '· 同步上去的角色上下文与工具凭据\n'
-      + '· 登记的 API 凭据\n'
-      + '· 推送订阅登记\n\n'
-      + '任务删了要重新排。角色上下文下次聊天会自动传回去，API 凭据下次排程/发消息时重新登记，'
-      + '工具凭据和推送订阅当场就补登记。'
-    )) return;
-    setLoading(true);
-    try {
-      const result = await wipeAmsgCloudData(realtimeConfig, {
-        pushRegistered: Boolean(pushStatus?.hasSubscription),
-      });
-
-      // 没清干净的地方逐条说明白：这个按钮多半是在「云端数据已经出问题」时点的，
-      // 含糊一句「部分失败」会让人不知道下一步该干嘛。
-      const problems: string[] = [];
-      if (!result.tasks.listed) {
-        problems.push('任务清单读不出来（换过 AMSG_MASTER_KEY 的话旧任务解不开就会这样），这些任务到点会失败，Worker 会在 7 天后自动清掉它们');
-      } else if (result.tasks.failed > 0) {
-        problems.push(`${result.tasks.failed} 个任务没取消成功，建议到角色的主动消息面板里逐个处理`);
-      }
-      if (result.stateDeleted === null) {
-        problems.push('角色上下文没能删掉');
-      } else if (!result.toolConfigRestored) {
-        problems.push('工具凭据没能补传回去，请到「实时感知」里重新保存一次配置，否则已排程的 AI 任务会一直失败');
-      }
-      if (result.llmCredentialsDeleted === null) {
-        // 老 Worker 上压根没有这张表，这一句同样成立：那边确实没清成，而下次排程会
-        // 走回「凭据冻结进任务」的老路，也就无所谓残留。
-        problems.push('登记的 API 凭据没能删掉（Worker 版本较旧的话本来就没有这一项）');
-      }
-      if (result.push === 'failed') {
-        problems.push('推送订阅没能收拾干净，建议到上面的推送区域重新订阅一次');
-      }
-
-      if (problems.length > 0) {
-        addToast(`云端数据没能全部清干净：${problems.join('；')}。`, 'error');
-      } else {
-        const done = [
-          `任务 ${result.tasks.total} 个`,
-          `状态 ${result.stateDeleted} 条`,
-          `API 凭据 ${result.llmCredentialsDeleted} 行`,
-        ];
-        if (result.push === 'reregistered') done.push('推送订阅已重新登记');
-        addToast(`已清空云端数据（${done.join('、')}）。`, 'success');
-      }
-    } catch (error: any) {
-      addToast(error?.message || '清空云端数据失败。', 'error');
-    } finally {
-      setLoading(false);
-      void refresh();
-    }
-  };
-
   /**
    * 开关即时对话。直接落盘而不是走那条 1 秒去抖的自动保存：开关是一次明确的动作，
    * 点完立刻生效（下一条消息就按新路走），而不是「点完还得等一下」。
@@ -920,13 +926,32 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     return revealAndCopy(token, setGeneratedServerToken, 'AMSG_SERVER_TOKEN');
   };
 
-  if (!config) return null;
+  if (!config) {
+    return (
+      <Modal isOpen={isOpen} title="主动消息 2.0" onClose={onClose}>
+        <div className="space-y-3 text-sm text-slate-600">
+          <p role={configLoadError ? 'alert' : 'status'}>
+            {configLoadError || '正在读取本地配置…'}
+          </p>
+          {configLoadError ? (
+            <button
+              type="button"
+              onClick={() => void refresh().catch(() => {})}
+              className="w-full py-3 bg-violet-500 text-white font-bold rounded-2xl active:scale-95 transition-transform"
+            >
+              重试读取配置
+            </button>
+          ) : null}
+        </div>
+      </Modal>
+    );
+  }
 
   const isConnected = Boolean(config.initializedAt);
 
   // 体检：探测结果 + 「这台设备订阅了没」这个只有前端知道的事实，红绿灯判定全在
   // amsgDiagnostics 那份纯函数里（那边有回归测试钉着）。
-  const diagnosticRows = diagnosticsProbe
+  const diagnosticRows = diagnosticsProbe && pushStatus
     ? buildAmsgDiagnosticRows({
       probe: diagnosticsProbe,
       localPushSubscribed: Boolean(pushStatus?.hasSubscription),
@@ -944,7 +969,11 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     pushSubscribed: Boolean(pushStatus?.hasSubscription),
     workerSupportsInstantChat: instantChatSupported,
   });
-  const instantChatBlockedReason = instantChatBlocker ? INSTANT_CHAT_BLOCKER_HINTS[instantChatBlocker] : '';
+  const instantChatBlockedReason = isConnected && checkingPush
+    ? '正在检查推送状态…'
+    : isConnected && pushCheckError
+      ? '暂时无法确认推送状态，请先重试推送检查。'
+      : instantChatBlocker ? INSTANT_CHAT_BLOCKER_HINTS[instantChatBlocker] : '';
 
   return (
     <>
@@ -962,6 +991,14 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       )}
     >
       <div className="space-y-4 text-sm text-slate-600">
+        {configLoadError ? (
+          <div role="alert" className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 text-xs text-amber-700 space-y-2">
+            <p>{configLoadError}</p>
+            <button type="button" onClick={() => void refresh().catch(() => {})} className="font-bold underline">
+              重试读取配置
+            </button>
+          </div>
+        ) : null}
         {/* 后台任务暂停着的时候常驻这一条：下面的按钮在折叠区里，不然一眼看不出角色为什么都不响。 */}
         {cronState?.kind === 'known' && !cronState.enabled ? (
           <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 text-xs leading-relaxed text-amber-700">
@@ -1045,7 +1082,9 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
               </div>
             ) : (
               <p className="text-xs leading-relaxed text-slate-400">
-                {diagnosing ? '正在问 Worker…' : '还没有结果，点右上角检查一次。'}
+                {checkingPush ? '正在检查这台设备的推送状态…'
+                  : pushCheckError ? '推送状态暂时无法确认，请先重试推送检查。'
+                  : diagnosing ? '正在问 Worker…' : '还没有结果，点右上角检查一次。'}
               </p>
             )}
           </div>
@@ -1636,7 +1675,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
               {pushStatus?.transport === 'unified-push' ? 'UnifiedPush 通知' : '通知权限'}
             </span>
             <span className={`text-xs font-bold ${pushStatus?.hasSubscription ? 'text-emerald-600' : 'text-amber-600'}`}>
-              {pushStatus?.hasSubscription ? '已开启' : '未开启'}
+              {checkingPush ? '检查中…' : pushCheckError ? '暂时无法检查' : pushStatus?.hasSubscription ? '已开启' : '未开启'}
             </span>
           </div>
           <p className="text-xs leading-relaxed text-slate-500">
@@ -1665,6 +1704,14 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
           ) : null}
           {pushStatus?.detail ? (
             <p className="text-xs leading-relaxed text-amber-600">{pushStatus.detail}</p>
+          ) : null}
+          {pushCheckError ? (
+            <div role="alert" className="space-y-2 text-xs text-amber-600">
+              <p>{pushCheckError}</p>
+              <button type="button" onClick={() => void refreshPushStatus(config)} className="font-bold underline">
+                重试推送检查
+              </button>
+            </div>
           ) : null}
           <button
             onClick={handleCreateSubscription}
@@ -1747,35 +1794,18 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
                 <div className="bg-white border border-slate-200 rounded-2xl p-3 space-y-2">
                   <div className="font-semibold text-slate-700">云端数据</div>
                   <p className="text-[11px] leading-relaxed text-slate-500">
-                    看看 Worker 上按角色存着些什么，把本地已经没有的角色留下的那份清掉。
-                    删过角色、导入过别的备份之后，云端多半还留着他们的上下文和 API 凭据。
+                    直接查看 Worker 保存的任务、上下文、凭据和结果，按实际范围清理。
+                    本机未关联的角色也会显示；其他设备可能还在使用。
                   </p>
                   <button
                     onClick={onOpenCloudData}
                     className="w-full py-2.5 bg-slate-100 text-slate-700 font-bold rounded-2xl active:scale-95 transition-transform"
                   >
-                    清点云端数据
+                    云端数据管理
                   </button>
                 </div>
               ) : null}
-              <div className="bg-rose-50 border border-rose-100 rounded-2xl p-3 space-y-2">
-                <div className="font-semibold text-rose-700">清空云端数据</div>
-                <p className="text-[11px] leading-relaxed text-rose-600">
-                  把 Worker D1 里属于你的数据全部删掉：已排程的主动消息任务（含角色自己排的）、
-                  同步上去的角色上下文（角色卡、最近聊天窗口等）与工具凭据、推送订阅登记。
-                </p>
-                <p className="text-[11px] leading-relaxed text-rose-600">
-                  清完角色上下文下次聊天会自动传回去，工具凭据和推送订阅当场补登记，任务要自己重新排。
-                  换过 <code className="font-mono">AMSG_MASTER_KEY</code> 之后旧数据解不开，也从这里清干净。
-                </p>
-                <button
-                  onClick={() => void handleWipeCloudData()}
-                  disabled={loading}
-                  className="w-full py-2.5 bg-rose-500 text-white font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50"
-                >
-                  {loading ? '处理中...' : '清空云端数据'}
-                </button>
-              </div>
+
             </div>
           ) : null}
         </div>

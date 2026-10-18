@@ -4,7 +4,7 @@
  *
  * 彼方的角色会自主、频繁地登入触发 LLM 调用，比较费 API，所以允许用户单独
  * 指定一份 API（与聊天 App 共用同一批已保存的预设 os_api_presets，但选择独立）。
- * 不设则回退聊天默认 apiConfig。同时记录每次调用，方便对账。
+ * 不设则由调用用途决定：角色回复跟随角色默认再回退全局，系统任务继续使用全局。同时记录每次调用，方便对账。
  */
 import type { APIConfig } from '../../types';
 import { DB } from '../db';
@@ -54,7 +54,7 @@ async function migrateOnce(): Promise<void> {
     } catch { /* ignore */ }
 }
 
-/** 彼方独立 API；null = 跟随聊天默认。 */
+/** 彼方独立 API；null = 由调用方按角色回复 / 系统任务规则选择。 */
 export async function getVRApi(): Promise<APIConfig | null> {
     await migrateOnce();
     return (await DB.getVRApiConfig()) as APIConfig | null;

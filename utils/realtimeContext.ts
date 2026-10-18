@@ -420,7 +420,7 @@ export const RealtimeContextManager = {
         tz: string | undefined,
         // includeTime=false：角色关掉了「时间感知」。天气/新闻还要，但当前时间和今日节日
         // 属于时间感知的范畴，这个开关关着就不该从这一段里漏出去。
-        opts: { includeTime: boolean },
+        opts: { includeTime: boolean; userLocation?: Promise<string> },
     ): Promise<string> => {
         const includeTime = opts.includeTime;
 
@@ -439,7 +439,7 @@ export const RealtimeContextManager = {
         const newsPool = config.newsEnabled ? await RealtimeContextManager.fetchNews(config) : [];
         const picks = pickRandomNews(newsPool, REALTIME_NEWS_PICK_COUNT);
 
-        const fullContext = renderRealtimeWorldBlock({ timeLine, specialDates, weather, news: picks });
+        const fullContext = renderRealtimeWorldBlock({ timeLine, specialDates, weather, news: picks, userLocationText: await opts.userLocation });
 
         // ── F12 探针：本轮真正注入 prompt 的热点 + 文本量（评估 token 用）──
         try {

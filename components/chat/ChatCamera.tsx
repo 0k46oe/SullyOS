@@ -6,18 +6,20 @@ import { createCameraAnalytics } from '../../utils/cameraAnalytics';
 import type { CharacterProfile } from '../../types';
 import { cameraStickerSources, type CameraStickerGroup, type CameraStickerSource } from '../../utils/cameraStickerSources';
 import TokenImg from '../os/TokenImg';
-import { resolveRefToDataUrl } from '../../utils/blobRef';
+import { getBlobForRef, isBlobRef } from '../../utils/blobRef';
 import { lightCameraSticker, trimCameraSticker } from '../../utils/cameraLighting';
 import { applyCameraPhotoEffects, CAMERA_FILTERS, DEFAULT_CAMERA_EFFECTS } from '../../utils/cameraPhotoEffects';
 import { CAMERA_DECORATIONS } from '../../utils/cameraDecorations';
 import type { createCameraGpuEffects } from '../../utils/cameraGpuEffects';
 import { CAMERA_FRAMES as FRAMES, cameraFrameLayout, drawCameraFrame } from '../../utils/cameraFrames';
+import { CameraStickerGesture, type StickerTransform } from '../../utils/cameraStickerGesture';
 import { cameraCaptureLayout, cameraIsPortrait } from '../../utils/cameraCapture';
+import { createCameraPreview } from '../../utils/cameraPreview';
+import { applyCameraZoom, cameraZoomRange, type CameraZoom } from '../../utils/cameraZoom';
 
 const Live2DAvatarCanvas = lazy(() => import('../call/Live2DAvatarCanvas'));
 
 type Sticker = { id: number; text: string; x: number; y: number; size: number; angle: number; image?: HTMLCanvasElement; light?: boolean; lightStrength?: number; rim?: number; softness?: number; skinWarmth?: number; opacity?: number; glow?: boolean };
-const clamp = (n: number) => Math.max(0.05, Math.min(0.95, n));
 
 export default function ChatCamera({ onClose, onGallery, onCapture, character }: {
     onClose: () => void; onGallery: () => void; onCapture: (file: File) => void; character?: CharacterProfile;
@@ -30,7 +32,15 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
     const [viewfinder, setViewfinder] = useState({ width: 0, height: 0 });
     const [retry, setRetry] = useState(0);
     const [ready, setReady] = useState(false);
+    const [cameraTrack, setCameraTrack] = useState<MediaStreamTrack | null>(null);
+    const currentCameraTrack = useRef(cameraTrack); currentCameraTrack.current = cameraTrack;
+    const cameraFacing = cameraTrack?.getSettings?.().facingMode || facing;
+    const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
+    const [deviceId, setDeviceId] = useState('');
+    const [zoom, setZoom] = useState<CameraZoom>({ min: 1, max: 3, step: 0.1, value: 1, hardware: false });
+    const zoomQueue = useRef<Promise<void>>(Promise.resolve());
     const [error, setError] = useState('');
+    const [cameraStatus, setCameraStatus] = useState('正在打开相机…');
     const [photo, setPhoto] = useState<HTMLCanvasElement | null>(null);
     const [frame, setFrame] = useState(0);
     const [tool, setTool] = useState<'stickers' | 'frames' | 'filters'>('stickers');
@@ -61,12 +71,30 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
     const view = useRef<HTMLDivElement>(null);
     const canvas = useRef<HTMLCanvasElement>(null);
     const composite = useRef<HTMLCanvasElement | null>(null);
-    const stream = useRef<MediaStream | null>(null);
+    const preview = useMemo(() => createCameraPreview({
+        video: () => video.current,
+        getUserMedia: constraints => {
+            if (!navigator.mediaDevices?.getUserMedia) return Promise.reject(new Error('当前环境无法使用站内相机，请使用 HTTPS 浏览器打开。'));
+            return navigator.mediaDevices.getUserMedia(constraints);
+        },
+        ready: setReady, error: setError, status: setCameraStatus, track: setCameraTrack, portrait: cameraIsPortrait,
+    }), []);
     const nextId = useRef(0);
-    const drag = useRef<{ id: number; dx: number; dy: number } | null>(null);
+    const drag = useRef<CameraStickerGesture | null>(null);
     const dragFrame = useRef<number | null>(null);
-    const pendingDrag = useRef<{ id: number; x: number; y: number } | null>(null);
+    const pendingDrag = useRef<({ id: number } & StickerTransform) | null>(null);
     const alive = useRef(true);
+    const previewPhoto = useMemo(() => {
+        if (!photo) return null;
+        const resize = (edge: number) => {
+            const small = document.createElement('canvas');
+            const scale = Math.min(1, edge / Math.max(photo.width, photo.height));
+            small.width = Math.max(1, Math.round(photo.width * scale)); small.height = Math.max(1, Math.round(photo.height * scale));
+            small.getContext('2d')!.drawImage(photo, 0, 0, small.width, small.height);
+            return small;
+        };
+        return {idle: resize(720), gesture: resize(360)};
+    }, [photo]);
     const filterPreviews = useMemo(() => {
         if (!photo) return [];
         return CAMERA_FILTERS.map(preset => {
@@ -76,10 +104,33 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
             return { ...preset, preview: thumb.toDataURL('image/jpeg', 0.8) };
         });
     }, [photo]);
-    const stop = () => { stream.current?.getTracks().forEach(t => t.stop()); stream.current = null; };
+    const stop = () => preview.stop();
 
     useEffect(() => {
-        const update = () => setPortrait(cameraIsPortrait());
+        if (!cameraTrack) return;
+        let cancelled = false;
+        const range = cameraZoomRange(cameraTrack);
+        setZoom(range);
+        if (range.hardware) zoomQueue.current = applyCameraZoom(cameraTrack, range.value).catch(() => {
+            if (!cancelled) setZoom({ min: 1, max: 3, step: 0.1, value: 1, hardware: false });
+        });
+        void navigator.mediaDevices?.enumerateDevices?.().then(devices => {
+            if (!cancelled) setCameras(devices.filter(device => device.kind === 'videoinput' && device.deviceId));
+        }).catch(() => {});
+        return () => { cancelled = true; };
+    }, [cameraTrack]);
+    const changeZoom = (value: number) => {
+        if (!zoom.hardware || !cameraTrack) { setZoom(current => ({ ...current, value })); return; }
+        // Serialize hardware changes so an older slider request cannot finish last.
+        zoomQueue.current = zoomQueue.current.catch(() => {}).then(async () => {
+            if (cameraTrack.readyState !== 'live' || currentCameraTrack.current !== cameraTrack) return;
+            try { await applyCameraZoom(cameraTrack, value); if(currentCameraTrack.current === cameraTrack) setZoom(current => ({ ...current, value })); }
+            catch { if(currentCameraTrack.current === cameraTrack) setError('这个镜头无法调整变焦，请切换镜头或重试。'); }
+        });
+    };
+
+    useEffect(() => {
+        const update = () => { setPortrait(cameraIsPortrait()); preview.reframe(); };
         window.addEventListener('resize', update);
         window.addEventListener('orientationchange', update);
         screen.orientation?.addEventListener('change', update);
@@ -92,9 +143,10 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
 
     useEffect(() => {
         const element = view.current;
-        if (!element || mode !== 'camera' || photo) return;
+        if (!element || mode !== 'camera') return;
         const resize = () => {
-            const aspect = portrait ? 3 / 4 : 4 / 3;
+            const layout = photo ? cameraFrameLayout(photo.width, photo.height, compareOriginal ? 0 : frame) : null;
+            const aspect = layout ? layout.width / layout.height : portrait ? 3 / 4 : 4 / 3;
             const width = Math.min(element.clientWidth, element.clientHeight * aspect);
             setViewfinder({ width, height: width / aspect });
         };
@@ -102,7 +154,7 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
         const observer = new ResizeObserver(resize);
         observer.observe(element);
         return () => observer.disconnect();
-    }, [mode, photo, portrait]);
+    }, [mode, photo, portrait, frame, compareOriginal]);
 
     useEffect(() => {
         lightCache.current.clear();
@@ -126,56 +178,32 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
 
     useEffect(() => {
         if (mode !== 'camera' || photo) return;
-        let cancelled = false;
-        setReady(false); setError('');
-        const start = async () => {
-            try {
-                if (!navigator.mediaDevices?.getUserMedia) throw new Error('当前环境无法使用站内相机，请使用 HTTPS 浏览器打开。');
-                const media = await navigator.mediaDevices.getUserMedia({ audio: false, video: {
-                    facingMode: { ideal: facing }, aspectRatio: { ideal: portrait ? 3 / 4 : 4 / 3 },
-                    width: { ideal: portrait ? 1440 : 1920 }, height: { ideal: portrait ? 1920 : 1440 },
-                } });
-                if (cancelled) { media.getTracks().forEach(t => t.stop()); return; }
-                stream.current = media;
-                media.getVideoTracks().forEach(t => t.addEventListener('ended', () => {
-                    if (!cancelled) { setReady(false); setError('摄像头已断开，请重试。'); }
-                }));
-                if (video.current) { video.current.srcObject = media; await video.current.play(); }
-            } catch (e) {
-                if (cancelled) return;
-                stop();
-                const name = e instanceof Error ? e.name : '';
-                setError(name === 'NotAllowedError' ? '未获得相机权限，请在浏览器设置中允许访问相机后重试。'
-                    : name === 'NotFoundError' ? '没有找到可用摄像头。'
-                    : name === 'NotReadableError' ? '摄像头暂时不可用，可能正被其他应用占用。'
-                    : e instanceof Error ? e.message : '无法打开相机，请重试。');
-            }
+        let suspended = false;
+        const pause = () => { suspended = true; preview.stop(); setError(''); setCameraStatus('相机已暂停，返回后恢复'); };
+        const resume = () => { if (!document.hidden && suspended) { suspended = false; preview.start(facing, deviceId); } };
+        const visibility = () => {
+            if (document.hidden) pause(); else resume();
         };
-        void start();
-        const hide = () => {
-            if (document.hidden) { cancelled = true; stop(); setReady(false); setError('相机已暂停，请重试。'); }
+        if (document.hidden) pause(); else preview.start(facing, deviceId);
+        document.addEventListener('visibilitychange', visibility);
+        window.addEventListener('pagehide', pause); window.addEventListener('pageshow', resume);
+        return () => {
+            preview.stop(); document.removeEventListener('visibilitychange', visibility);
+            window.removeEventListener('pagehide', pause); window.removeEventListener('pageshow', resume);
         };
-        document.addEventListener('visibilitychange', hide);
-        return () => { cancelled = true; stop(); document.removeEventListener('visibilitychange', hide); };
-    }, [mode, facing, retry, photo, portrait]);
+    }, [mode, facing, deviceId, retry, photo, preview]);
 
-    useEffect(() => {
-        const display = canvas.current;
-        if (!photo || !display) return;
-        const output = composite.current ??= document.createElement('canvas');
-        let cancelled = false;
-        setRendering(false);
-        // Interactive preview only; pointer release always redraws at original resolution.
-        const scale = drag.current ? Math.min(1, 720 / Math.max(photo.width, photo.height)) : 1;
-        const width = Math.max(1, Math.round(photo.width * scale));
-        const height = Math.max(1, Math.round(photo.height * scale));
-        if (output.width !== width) output.width = width;
-        if (output.height !== height) output.height = height;
+    const renderPhoto = async (display: HTMLCanvasElement, fullSize: boolean, cancelled: () => boolean) => {
+        if (!photo || !previewPhoto) return;
+        const base = fullSize ? photo : drag.current ? previewPhoto.gesture : previewPhoto.idle;
+        const output = fullSize ? document.createElement('canvas') : (composite.current ??= document.createElement('canvas'));
+        if (output.width !== base.width) output.width = base.width;
+        if (output.height !== base.height) output.height = base.height;
         const ctx = output.getContext('2d');
-        if (!ctx) return;
+        if (!ctx) throw new Error('无法处理照片，请重试。');
         const { width: w, height: h } = output;
         ctx.clearRect(0, 0, w, h);
-        ctx.drawImage(photo, 0, 0, w, h);
+        ctx.drawImage(base, 0, 0, w, h);
         if (compareOriginal) { drawCameraFrame(output, display, 0); return; }
         for (const s of stickers) {
             ctx.save(); ctx.translate(s.x * w, s.y * h); ctx.rotate(s.angle * Math.PI / 180);
@@ -186,10 +214,10 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
                 let image = s.image;
                 if (s.light) {
                     const key = [s.x, s.y, s.size, s.angle, s.lightStrength ?? 0.7, s.rim ?? 0.4, s.softness ?? 0, s.skinWarmth ?? 0.35].join(':');
-                    let cached = lightCache.current.get(s.id);
+                    let cached = fullSize ? undefined : lightCache.current.get(s.id);
                     if (!cached || (cached.key !== key && !drag.current)) {
-                        cached = { key, image: lightCameraSticker(s.image, photo, { x: s.x, y: s.y, width: width / w, height: height / h, angle: s.angle, strength: s.lightStrength ?? 0.7, aspect: w / h, rim: s.rim ?? 0.4, softness: s.softness ?? 0, skinWarmth: s.skinWarmth ?? 0.35 }) };
-                        lightCache.current.set(s.id, cached);
+                        cached = { key, image: lightCameraSticker(s.image, photo, { x: s.x, y: s.y, width: width / w, height: height / h, angle: s.angle, strength: s.lightStrength ?? 0.7, aspect: w / h, rim: s.rim ?? 0.4, softness: s.softness ?? 0, skinWarmth: s.skinWarmth ?? 0.35 }, !fullSize) };
+                        if (!fullSize) lightCache.current.set(s.id, cached);
                     }
                     image = cached.image;
                 }
@@ -199,47 +227,63 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
             ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(s.text, 0, 0); ctx.restore();
         }
         applyCameraPhotoEffects(output, effects);
-        const drawFrame = () => drawCameraFrame(output, display, frame);
         if (gpuEffects.dispersion > 0 || gpuEffects.miniature > 0) {
-            setRendering(true);
-            const source = document.createElement('canvas'); source.width = w; source.height = h;
-            source.getContext('2d')!.drawImage(output, 0, 0);
             gpu.current ??= import('../../utils/cameraGpuEffects').then(module => module.createCameraGpuEffects());
-            void gpu.current.then(renderer => {
-                if (cancelled) return;
-                renderer.apply(source, gpuEffects.dispersion, gpuEffects.miniature);
-                ctx.clearRect(0, 0, w, h); ctx.drawImage(source, 0, 0); drawFrame();
-            }).catch(() => {
-                if (!cancelled) { setError('当前设备无法使用进阶特效，已保留原有滤镜。'); setGpuEffects({ dispersion: 0, miniature: 0 }); }
-            }).finally(() => { if (!cancelled) setRendering(false); });
-        } else drawFrame();
+            const renderer = await gpu.current;
+            if (cancelled()) return;
+            renderer.apply(output, gpuEffects.dispersion, gpuEffects.miniature);
+        }
+        if (cancelled()) return;
+        drawCameraFrame(output, display, frame);
         for (const id of lightCache.current.keys()) if (!stickers.some(s => s.id === id)) lightCache.current.delete(id);
-        return () => { cancelled = true; };
-    }, [photo, frame, stickers, lightRevision, effects, compareOriginal, gpuEffects]);
+    };
+    useEffect(() => {
+        const display = canvas.current;
+        if (!photo || !display || busy) return;
+        let cancelled = false;
+        setRendering(true);
+        // Coalesce slider/gesture changes; never rebuild full-resolution effects while editing.
+        const task = requestAnimationFrame(() => {
+            void renderPhoto(display, false, () => cancelled).catch(() => {
+                if (cancelled) return;
+                if (gpuEffects.dispersion > 0 || gpuEffects.miniature > 0) {
+                    setError('当前设备无法使用进阶特效，已保留原有滤镜。'); setGpuEffects({ dispersion: 0, miniature: 0 });
+                } else setError('照片预览处理失败，请重试。');
+            }).finally(() => { if (!cancelled) setRendering(false); });
+        });
+        return () => { cancelled = true; cancelAnimationFrame(task); };
+    }, [photo, frame, stickers, lightRevision, effects, compareOriginal, gpuEffects, busy]);
 
     const capture = () => {
         const v = video.current;
         if (!v || !ready) return;
-        const layout = cameraCaptureLayout(v.videoWidth, v.videoHeight, portrait);
+        const layout = cameraCaptureLayout(v.videoWidth, v.videoHeight, portrait, 1440, zoom.hardware ? 1 : zoom.value);
         if (!layout) return;
         const image = document.createElement('canvas');
         image.width = layout.width; image.height = layout.height;
         const ctx = image.getContext('2d');
         if (!ctx) { setError('无法处理照片，请重试。'); return; }
-        if (facing === 'user') { ctx.translate(image.width, 0); ctx.scale(-1, 1); }
+        if (cameraFacing === 'user') { ctx.translate(image.width, 0); ctx.scale(-1, 1); }
         ctx.drawImage(v, layout.x, layout.y, layout.sourceWidth, layout.sourceHeight, 0, 0, image.width, image.height);
         stop(); setPhoto(image); setError('');
     };
-    const send = () => {
-        if (!photo || !canvas.current || busy || compareOriginal || rendering || drag.current) return;
-        const fullSize = cameraFrameLayout(photo.width, photo.height, frame);
-        if (canvas.current.width !== fullSize.width || canvas.current.height !== fullSize.height) return;
-        setBusy(true);
-        canvas.current.toBlob(blob => {
+    const send = async () => {
+        if (!photo || busy || compareOriginal || rendering || drag.current) return;
+        setBusy(true); setError('');
+        try {
+            // Let the busy state paint before the one full-size export pass.
+            await new Promise<void>(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
             if (!alive.current) return;
-            if (!blob) { setBusy(false); setError('照片处理失败，请重试。'); return; }
+            const output = document.createElement('canvas');
+            await renderPhoto(output, true, () => !alive.current);
+            if (!alive.current) return;
+            const blob = await new Promise<Blob>((resolve, reject) => output.toBlob(
+                result => result ? resolve(result) : reject(new Error('照片处理失败，请重试。')), 'image/jpeg', 0.9,
+            ));
+            if (!alive.current) return;
             onCapture(new File([blob], 'camera-photo.jpg', { type: 'image/jpeg' })); onClose();
-        }, 'image/jpeg', 0.9);
+        } catch (e) { if (alive.current) setError(e instanceof Error ? e.message : '照片处理失败，请重试。'); }
+        finally { if (alive.current) setBusy(false); }
     };
     const active = stickers.find(s => s.id === selected);
     const addImage = (source: HTMLCanvasElement, name: string, decoration?: { glow: boolean }) => {
@@ -250,9 +294,16 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
     const addSource = async (item: Pick<CameraStickerSource, 'image' | 'name' | 'flip'>, decoration?: { glow: boolean }, uploaded = false) => {
         if (loadingSticker || stickers.length >= 12) return;
         setLoadingSticker(true); setError('');
+        let localUrl: string | undefined;
         try {
             const image = new window.Image(); image.crossOrigin = 'anonymous';
-            image.src = await resolveRefToDataUrl(item.image);
+            let sourceUrl = item.image;
+            if (isBlobRef(sourceUrl)) {
+                const blob = await getBlobForRef(sourceUrl);
+                if (!blob) throw new Error('贴纸素材已丢失');
+                sourceUrl = localUrl = URL.createObjectURL(blob);
+            }
+            image.src = sourceUrl;
             await image.decode();
             if (!alive.current) return;
             const source = document.createElement('canvas');
@@ -264,7 +315,7 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
             addImage(source, item.name, decoration); setSourcePicker(false);
             trackCamera(uploaded ? 'upload' : decoration ? 'decoration' : 'stickers');
         } catch { if (alive.current) setError('无法读取图片，请换一张浏览器支持的图片重试；远程图片需要允许跨域读取。'); }
-        finally { if (alive.current) setLoadingSticker(false); }
+        finally { if (localUrl) URL.revokeObjectURL(localUrl); if (alive.current) setLoadingSticker(false); }
     };
     const uploadSticker = async (file?: File) => {
         if (!file || loadingSticker || stickers.length >= 12) return;
@@ -282,19 +333,24 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
         dragFrame.current = null;
         const pending = pendingDrag.current;
         pendingDrag.current = null;
-        if (pending) setStickers(items => items.map(s => s.id === pending.id ? { ...s, x: pending.x, y: pending.y } : s));
+        if (pending) setStickers(items => items.map(s => s.id === pending.id ? { ...s, ...pending } : s));
     };
-    const finishDrag = () => {
-        if (!drag.current) return;
+    const finishDrag = (e: React.PointerEvent<HTMLCanvasElement>) => {
+        const gesture = drag.current;
+        if (!gesture?.has(e.pointerId)) return;
+        if (e.type === 'pointerup') {
+            const next = gesture.move(e.pointerId, pointer(e));
+            if (next) pendingDrag.current = {id: gesture.id, ...next};
+        }
         if (dragFrame.current !== null) cancelAnimationFrame(dragFrame.current);
         flushDrag();
-        drag.current = null;
-        setLightRevision(n => n + 1);
+        gesture.remove(e.pointerId);
+        if (!gesture.count) {drag.current = null; setLightRevision(n => n + 1);}
     };
     const pointer = (e: React.PointerEvent<HTMLCanvasElement>) => {
         const bounds = e.currentTarget.getBoundingClientRect();
         const layout = cameraFrameLayout(photo!.width, photo!.height, frame);
-        return { x: ((e.clientX - bounds.left) / bounds.width * layout.width - layout.x) / layout.photoWidth, y: ((e.clientY - bounds.top) / bounds.height * layout.height - layout.y) / layout.photoHeight };
+        return { x: ((e.clientX - bounds.left) / bounds.width * layout.width - layout.x) / layout.photoWidth * photo!.width, y: ((e.clientY - bounds.top) / bounds.height * layout.height - layout.y) / layout.photoHeight * photo!.height };
     };
     const keyboard = (e: React.KeyboardEvent) => {
         if (e.key === 'Escape') { e.stopPropagation(); onClose(); }
@@ -313,31 +369,44 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
                 <button type="button" onClick={openGallery}><ImageSquare size={28} /><span>从相册选择</span></button>
             </div> : <>
                 <div className="chat-camera-view" ref={view}>
-                    {photo ? <canvas ref={canvas} aria-label="照片预览" onPointerDown={e => {
-                        if (compareOriginal || rendering || drag.current) return;
+                    {photo ? <canvas ref={canvas} style={{width:viewfinder.width,height:viewfinder.height}} aria-label="照片预览" onPointerDown={e => {
+                        if (compareOriginal || busy || (e.pointerType === 'mouse' && e.button !== 0)) return;
                         const p = pointer(e), w = photo.width, h = photo.height;
+                        if (drag.current) {
+                            if (drag.current.add(e.pointerId, p)) {e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId);}
+                            return;
+                        }
                         const hit = [...stickers].reverse().find(s => {
-                            const angle = -s.angle * Math.PI / 180, dx = (p.x - s.x) * w, dy = (p.y - s.y) * h;
+                            const angle = -s.angle * Math.PI / 180, dx = p.x - s.x * w, dy = p.y - s.y * h;
                             const height = s.size * Math.min(w, h), width = height * (s.image ? s.image.width / s.image.height : 1);
                             return Math.abs(dx * Math.cos(angle) - dy * Math.sin(angle)) <= width * 0.6 && Math.abs(dx * Math.sin(angle) + dy * Math.cos(angle)) <= height * 0.6;
                         });
                         setSelected(hit?.id ?? null);
-                        if (hit) { drag.current = { id: hit.id, dx: p.x - hit.x, dy: p.y - hit.y }; e.currentTarget.setPointerCapture(e.pointerId); }
+                        if (hit) {
+                            drag.current = new CameraStickerGesture(hit.id, hit, w, h, hit.image ? 1.2 : 0.4);
+                            drag.current.add(e.pointerId, p); e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId);
+                        }
                     }} onPointerMove={e => {
                         const moving = drag.current;
                         if (!moving) return;
-                        const p = pointer(e);
-                        pendingDrag.current = { id: moving.id, x: clamp(p.x - moving.dx), y: clamp(p.y - moving.dy) };
+                        const next = moving.move(e.pointerId, pointer(e));
+                        if (!next) return;
+                        e.preventDefault(); pendingDrag.current = { id: moving.id, ...next };
                         if (dragFrame.current === null) dragFrame.current = requestAnimationFrame(flushDrag);
                     }} onPointerUp={finishDrag} onPointerCancel={finishDrag} onLostPointerCapture={finishDrag} />
-                        : <video ref={video} autoPlay muted playsInline onLoadedData={() => { if (stream.current?.active) setReady(true); }} style={{
-                            width: viewfinder.width, height: viewfinder.height, objectFit: 'cover', objectPosition: 'center',
-                            transform: facing === 'user' ? 'scaleX(-1)' : undefined,
-                        }} />}
-                    {!photo && !ready && !error && <p className="chat-camera-status" role="status">正在打开相机…</p>}
+                        : <div className="chat-camera-sensor" style={{width:viewfinder.width,height:viewfinder.height}}><video ref={video} autoPlay muted playsInline style={{
+                            width: '100%', height: '100%', objectFit: 'contain', objectPosition: 'center',
+                            transform: `scale(${zoom.hardware ? 1 : zoom.value})${cameraFacing === 'user' ? ' scaleX(-1)' : ''}`,
+                        }} /></div>}
+                    {!photo && !ready && !error && <p className="chat-camera-status" role="status">{cameraStatus}</p>}
                 </div>
+                {!photo && <div className="chat-camera-lenses">
+                    {cameras.length > 1 && <label>镜头<select aria-label="选择摄像头" value={deviceId || cameraTrack?.getSettings?.().deviceId || ''} onChange={e => setDeviceId(e.target.value)}><option value="">自动选择</option>{cameras.map((camera, i) => <option key={camera.deviceId} value={camera.deviceId}>{camera.label || `镜头 ${i + 1}`}</option>)}</select></label>}
+                    <label>{zoom.hardware ? '变焦' : '画面缩放'}<input aria-label="相机变焦" type="range" min={zoom.min} max={zoom.max} step={zoom.step} value={zoom.value} disabled={!ready} onChange={e => changeZoom(Number(e.target.value))}/><output>{zoom.value.toFixed(1)}×</output></label>
+                </div>}
                 {error && <div className="chat-camera-error" role="alert">{error}{photo ? <button type="button" onClick={() => setError('')}>知道了</button> : <><button type="button" onClick={() => setRetry(n => n + 1)}>重试</button><button type="button" onClick={openGallery}>从相册选择</button></>}</div>}
-                {photo && <div className="chat-camera-editor">
+                {photo && <fieldset className="chat-camera-editor" disabled={busy}>
+                    {selected !== null && <p className="chat-camera-gesture-hint">单指拖动 · 双指缩放、旋转</p>}
                     <div className="chat-camera-tools" role="tablist" aria-label="照片装饰"><button type="button" role="tab" aria-selected={tool === 'stickers'} onClick={() => setTool('stickers')}><StickerIcon size={20} />贴纸</button><button type="button" role="tab" aria-selected={tool === 'frames'} onClick={() => setTool('frames')}><FrameCorners size={20} />相框</button><button type="button" role="tab" aria-selected={tool === 'filters'} onClick={() => { setTool('filters'); setLivePreview(false); }}><SlidersHorizontal size={20} />滤镜</button></div>
                     {tool === 'stickers' && <>
                     <div className="chat-camera-characters">
@@ -375,8 +444,8 @@ export default function ChatCamera({ onClose, onGallery, onCapture, character }:
                     {active?.image && <label className="chat-camera-light-strength">不透明度<input aria-label="贴纸不透明度" type="range" min="0.05" max="1" step="0.05" value={active.opacity ?? 1} onChange={e => updateSticker({ opacity: Number(e.target.value) })} /></label>}
                     {active && <div className="chat-camera-adjust"><label>大小<input aria-label="贴纸大小" type="range" min="0.08" max={active.image ? '1.2' : '0.4'} step="0.01" value={active.size} onChange={e => updateSticker({ size: Number(e.target.value) })} /></label><label>旋转<input aria-label="贴纸旋转" type="range" min="-180" max="180" value={active.angle} onChange={e => updateSticker({ angle: Number(e.target.value) })} /></label><button type="button" title="删除贴纸" aria-label="删除贴纸" onClick={() => { setStickers(items => items.filter(s => s.id !== selected)); setSelected(null); }}><Trash size={20} /></button></div>}
                     </>}
-                </div>}
-                <footer>{photo ? <><button type="button" disabled={busy || loadingSticker} onClick={() => { setPhoto(null); setStickers([]); setSelected(null); setReady(false); setLivePreview(false); }}><ArrowCounterClockwise size={20} />重拍</button><button type="button" className="chat-camera-send" disabled={busy || loadingSticker || rendering || compareOriginal} onClick={send}><PaperPlaneTilt size={20} />{busy || rendering ? '处理中…' : '发送照片'}</button></> : <><button type="button" aria-label="从相册选择" title="从相册选择" onClick={openGallery}><ImageSquare size={24} /></button><button type="button" className="chat-camera-shutter" aria-label="拍摄照片" title="拍摄照片" disabled={!ready} onClick={capture}><span /></button><button type="button" aria-label="切换镜头" title="切换镜头" onClick={() => { setReady(false); setFacing(f => f === 'user' ? 'environment' : 'user'); }}><ArrowsClockwise size={24} /></button></>}</footer>
+                </fieldset>}
+                <footer>{photo ? <><button type="button" disabled={busy || loadingSticker} onClick={() => { setPhoto(null); setStickers([]); setSelected(null); setReady(false); setLivePreview(false); }}><ArrowCounterClockwise size={20} />重拍</button><button type="button" className="chat-camera-send" disabled={busy || loadingSticker || rendering || compareOriginal} onClick={send}><PaperPlaneTilt size={20} />{busy || rendering ? '处理中…' : '发送照片'}</button></> : <><button type="button" aria-label="从相册选择" title="从相册选择" onClick={openGallery}><ImageSquare size={24} /></button><button type="button" className="chat-camera-shutter" aria-label="拍摄照片" title="拍摄照片" disabled={!ready} onClick={capture}><span /></button><button type="button" aria-label="切换镜头" title="切换镜头" onClick={() => { setReady(false); setDeviceId(''); setFacing(f => f === 'user' ? 'environment' : 'user'); }}><ArrowsClockwise size={24} /></button></>}</footer>
             </>}
         </div>
     </div>, document.body);

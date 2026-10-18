@@ -1,3 +1,4 @@
+import { resolveDialogueApi } from '../characterApi';
 import type { APIConfig, CharacterProfile, GroupProfile, Message, RealtimeConfig, UserProfile } from '../../types';
 import { findSARPendingReply, isSARDeletedReply, replaceSARSimulationReply, resolveSARReplyRetry } from './sarSimulationEdits';
 import { DB } from '../db';
@@ -814,7 +815,7 @@ ${directorState ? JSON.stringify(directorState) : '暂无独立记录，依据�
 {"worldNarration":"必要旁白，或空字符串","character":"本轮角色真正呈现给 User 的动作与台词","directorState":{"sceneFacts":[],"openThreads":[],"offscreenFacts":[],"declinedHooks":[],"revealedFacts":[]}}`;
 
 export const resolveSARSimulationApi = (char: CharacterProfile, vrGlobalApi: APIConfig | null, chatApi: APIConfig): APIConfig =>
-    char.vrState?.api?.baseUrl ? { ...chatApi, ...char.vrState.api } : (vrGlobalApi?.baseUrl ? vrGlobalApi : chatApi);
+    resolveDialogueApi(chatApi, char, vrGlobalApi?.baseUrl ? vrGlobalApi : undefined);
 
 export async function forgeSARIdentityCard(input: ForgeSARIdentityInput): Promise<SARIdentityCard> {
     const { char, variant, story, apiConfig, userProfile } = input;
@@ -823,7 +824,8 @@ export async function forgeSARIdentityCard(input: ForgeSARIdentityInput): Promis
     if (!collection[variant.id] || !collection[story.id]) throw new Error('装入的模块不在陈列收藏中');
 
     const vrGlobalApi = await getVRApi();
-    const api = resolveSARSimulationApi(char, vrGlobalApi, apiConfig);
+    // 铸造身份卡是系统任务，保持彼方 / 全局配置。
+    const api = vrGlobalApi?.baseUrl ? vrGlobalApi : apiConfig;
     if (!api?.baseUrl || !api.model) throw new Error('请先在「彼方 → API」配置可用模型');
 
     const longTermContext = await prepareSARDoorplateContext(char, userProfile, true);

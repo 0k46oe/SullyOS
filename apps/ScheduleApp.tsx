@@ -83,6 +83,7 @@ const ScheduleApp: React.FC = () => {
     const [tasks, setTasks] = useState<Task[]>([]);
     const [anniversaries, setAnniversaries] = useState<Anniversary[]>([]);
     const [activeTab, setActiveTab] = useState<'quest' | 'server_events'>('quest');
+    useAppShortcut(ShortcutAppID.Schedule, intent => setActiveTab(intent.entryId === 'server_events' ? 'server_events' : 'quest'));
     
     // Processing State for feedback
     const [processingTaskIds, setProcessingTaskIds] = useState<Set<string>>(new Set());
@@ -132,6 +133,7 @@ const ScheduleApp: React.FC = () => {
     // --- AI Logic ---
 
     const generateTaskReward = async (task: Task) => {
+
         const supervisor = characters.find(c => c.id === task.supervisorId);
         if (!supervisor || !apiConfig.apiKey) {
             addToast('任务已完成', 'success');
@@ -177,7 +179,7 @@ const ScheduleApp: React.FC = () => {
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
                 body: JSON.stringify({
                     model: apiConfig.model,
-                    messages: ContextBuilder.buildCharacterRequest(characterContextInput, messages),
+                    messages: (await ContextBuilder.buildCharacterRequest(characterContextInput, messages)),
                     temperature: 0.9, 
                     max_tokens: 8000 
                 })
@@ -219,6 +221,7 @@ const ScheduleApp: React.FC = () => {
     };
 
     const generateAnniversaryThought = async (anni: Anniversary) => {
+
         const char = characters.find(c => c.id === anni.charId);
         if (!char || !apiConfig.apiKey) return;
 
@@ -262,7 +265,7 @@ const ScheduleApp: React.FC = () => {
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
                 body: JSON.stringify({
                     model: apiConfig.model,
-                    messages: ContextBuilder.buildCharacterRequest(characterContextInput, messages),
+                    messages: (await ContextBuilder.buildCharacterRequest(characterContextInput, messages)),
                     temperature: 0.8,
                     max_tokens: 8000
                 })
@@ -606,3 +609,5 @@ const ScheduleApp: React.FC = () => {
 };
 
 export default ScheduleApp;
+import { useAppShortcut } from '../utils/appShortcutLaunch';
+import { AppID as ShortcutAppID } from '../types';

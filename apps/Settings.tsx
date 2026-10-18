@@ -1,3 +1,9 @@
+import NavigationBallSettings from '../components/settings/NavigationBallSettings';
+import { useSettingsFocus } from '../utils/settingsNavigation';
+import ApiPresetGroups from '../components/settings/ApiPresetGroups';
+import DialogueApiFields from '../components/settings/DialogueApiFields';
+import ModelPicker from '../components/settings/ModelPicker';
+import { buildModelPickerView } from '../utils/modelPickerView';
 
 import { useFirstUseGuideStep } from '../utils/firstUseGuide';
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
@@ -9,6 +15,10 @@ import { shareOrDownloadBlob } from '../utils/shareExport';
 import { bucketRetryCount, isAnalyticsConfigured, isAnalyticsEnabled, setAnalyticsEnabled, trackEvent } from '../utils/analytics';
 import Modal from '../components/os/Modal';
 import UserHolidaySettings from '../components/settings/UserHolidaySettings';
+import UserLocationSettings, { USER_LOCATION_PAGE_TITLES, getUserLocationParentPage, type UserLocationSettingsPage } from '../components/settings/UserLocationSettings';
+import { useLocalBackHandler } from '../hooks/useLocalBackHandler';
+import { loadUserLocationConfig, type UserLocationConfig } from '../utils/userLocationPrivacy';
+import { saveUserLocationConfig } from '../utils/userLocation';
 import { consumeHolidaySettings, hasHolidaySettingsRequest, type UserHolidayConfig } from '../utils/userHolidays';
 import { NotionManager, FeishuManager, RealtimeContextManager, fetchOwmWeather, fetchOpenMeteoWeather } from '../utils/realtimeContext';
 import { XhsMcpClient } from '../utils/xhsMcpClient';
@@ -22,8 +32,9 @@ import {
     DEFAULT_ELEVENLABS_MODEL,
     ELEVENLABS_MODEL_OPTIONS,
     getElevenLabsVoiceActingGuide,
+    isElevenLabsV4Model,
 } from '../utils/elevenLabsTts';
-import { DATE_VOICE_GUIDE } from '../utils/datePrompts';
+import { getDateVoiceGuide } from '../utils/datePrompts';
 import { Sun, Newspaper, NotePencil, Notebook, Book, ForkKnife, Coffee, PlugsConnected } from '@phosphor-icons/react';
 import { loadMcpServers, saveMcpServers, createMcpServer, testMcpConnection, resetMcpSession, getMcpUseNativeTools, setMcpUseNativeTools, type McpServerConfig } from '../utils/mcpClient';
 import { loadPushConfig, savePushConfig, registerScheduleOnWorker, startHeartbeat, stopHeartbeat, isPushConfigAvailable, ensureSubscribed, sendTestPush, getPushDiagnostics, resetSubscription, deepResetSubscription, type PushDiagnostics } from '../utils/proactivePushConfig';
@@ -38,6 +49,7 @@ import VersionInfo from '../components/settings/VersionInfo';
 import { isPushVapidReady } from '../utils/pushVapid';
 import ApiCallLogModal from '../components/settings/ApiCallLogModal';
 import StorageUsagePanel from '../components/settings/StorageUsagePanel';
+import WebCacheControl from '../components/settings/WebCacheControl';
 import McpConnectionConsole from '../components/settings/McpConnectionConsole';
 import { DB } from '../utils/db';
 import { getBackupReminderState, setBackupReminderIntervalDays, daysSinceLastBackup, BACKUP_REMINDER_MIN_DAYS, BACKUP_REMINDER_MAX_DAYS } from '../utils/backupReminder';
@@ -100,27 +112,6 @@ const readStoredVisionModels = (): string[] => {
     }
 };
 
-const buildModelPickerView = (models: unknown[], filter: string) => {
-    const q = filter.trim().toLowerCase();
-    const safeModels = normalizeModelIds(models);
-    const filtered = q ? safeModels.filter(model => model.toLowerCase().includes(q)) : safeModels;
-    let commonPrefix = '';
-    if (filtered.length >= 2) {
-        let prefix = filtered[0];
-        for (let index = 1; index < filtered.length; index += 1) {
-            const candidate = filtered[index];
-            let cursor = 0;
-            while (cursor < prefix.length && cursor < candidate.length && prefix[cursor] === candidate[cursor]) cursor += 1;
-            prefix = prefix.slice(0, cursor);
-            if (!prefix) break;
-        }
-        const cut = Math.max(prefix.lastIndexOf('/'), prefix.lastIndexOf('-'));
-        if (cut > 3) prefix = prefix.slice(0, cut + 1);
-        if (prefix.length >= 4) commonPrefix = prefix;
-    }
-    return { filtered, commonPrefix };
-};
-
 const DiagRow: React.FC<{ label: string; value: string; bad?: boolean }> = ({ label, value, bad }) => (
     <div className="flex items-start justify-between gap-3">
         <span className="text-slate-500 shrink-0">{label}</span>
@@ -153,6 +144,14 @@ const SettingsSection: React.FC<{
 }> = ({ icon, title, badge, actions, sectionProps, children }) => {
     const guideStep = useFirstUseGuideStep();
     const [open, setOpen] = useState(() => title === 'API 配置' && guideStep === 0);
+    const sectionRef = useRef<HTMLElement>(null);
+    const [focusRequest, setFocusRequest] = useState(0);
+    useSettingsFocus(title === 'API 配置' ? 'api' : undefined, () => {
+        setOpen(true); setFocusRequest(value => value + 1);
+    });
+    useEffect(() => {
+        if (focusRequest) sectionRef.current?.scrollIntoView({ block: 'start' });
+    }, [focusRequest]);
     useEffect(() => {
         const reveal = () => { if (title === 'API 配置' && guideStep === 0) setOpen(true); };
         reveal();
@@ -160,7 +159,7 @@ const SettingsSection: React.FC<{
         return () => window.removeEventListener('sully:guide-navigate', reveal);
     }, [guideStep, title]);
     return (
-        <section {...sectionProps} className="bg-[#fffefe] rounded-3xl p-5 shadow-[0_8px_24px_rgba(15,23,42,0.05)] border border-slate-200/80">
+        <section {...sectionProps} ref={sectionRef} className="bg-[#fffefe] rounded-3xl p-5 shadow-[0_8px_24px_rgba(15,23,42,0.05)] border border-slate-200/80">
             <div className={`flex items-center justify-between gap-2 ${open ? 'mb-4' : ''}`}>
                 <button type="button" onClick={() => setOpen(v => !v)} className="flex items-center gap-2 flex-1 min-w-0 text-left">
                     {icon}
@@ -539,10 +538,11 @@ const Settings: React.FC = () => {
   const [showAceStepGuide, setShowAceStepGuide] = useState(false);
   const [otherStatusMsg, setOtherStatusMsg] = useState('');
   // 高级设置（流式/温度）默认折叠 — 大多数用户不需要碰
-  const [showApiAdvanced, setShowApiAdvanced] = useState(false);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [isLoadingVisionModels, setIsLoadingVisionModels] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
+  const [newPresetGroup, setNewPresetGroup] = useState('');
+  const [editPresetGroup, setEditPresetGroup] = useState('');
   // 就地编辑某条预设：只改预设本身；改的正好是当前生效那条时，生效配置一并跟着走
   const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
   // 保存前在用某条预设、保存后跟它对不上了：记下是哪条和刚存的配置，弹窗问要不要存回去
@@ -560,7 +560,6 @@ const Settings: React.FC = () => {
   const [showModelModal, setShowModelModal] = useState(false);
   // 打开模型弹窗那一刻的模型名：点 × 关掉时退回它，只有「确定」/点选列表才算数。
   const modelBeforePickerRef = useRef('');
-  const [modelFilter, setModelFilter] = useState('');
   const [showVisionModelModal, setShowVisionModelModal] = useState(false);
   const [visionModelFilter, setVisionModelFilter] = useState('');
   const [showExportModal, setShowExportModal] = useState(false); // Used for completion now
@@ -681,6 +680,19 @@ const Settings: React.FC = () => {
 
   // 实时感知配置的本地状态
   const [rtWeatherEnabled, setRtWeatherEnabled] = useState(realtimeConfig.weatherEnabled);
+  const [rtUserLocation, setRtUserLocation] = useState<UserLocationConfig>(() => { try { return loadUserLocationConfig(); } catch { return { enabled: false, regions: [] }; } });
+  const [rtUserLocationPage, setRtUserLocationPage] = useState<UserLocationSettingsPage>('main');
+  const [rtUserLocationBusy, setRtUserLocationBusy] = useState(false);
+  useSettingsFocus('location', () => {
+      setRtUserLocationPage('location');
+      setShowRealtimeModal(true);
+  });
+  const closeRealtimePage = () => {
+      if (rtUserLocationBusy) return;
+      if (rtUserLocationPage !== 'main') setRtUserLocationPage(getUserLocationParentPage(rtUserLocationPage));
+      else setShowRealtimeModal(false);
+  };
+  useLocalBackHandler(() => { closeRealtimePage(); return true; }, 30, showRealtimeModal);
   const [rtUserHolidays, setRtUserHolidays] = useState<UserHolidayConfig>(() => ({ ...(realtimeConfig.userHolidays || { enabled: false, countryCode: '' }), ...(holidaySettingsFocus ? { enabled: true } : {}) }));
   const [rtWeatherKey, setRtWeatherKey] = useState(realtimeConfig.weatherApiKey);
   const [rtWeatherCity, setRtWeatherCity] = useState(realtimeConfig.weatherCity);
@@ -771,10 +783,6 @@ const Settings: React.FC = () => {
   const [vapidReadyTick, setVapidReadyTick] = useState(0); // 关闭 VAPID 弹窗后刷新顶层徽标
 
   // 模型选择 Modal 的过滤 + 公共前缀（memo 掉，避免每次 Settings 重渲染都重算）
-  const modelPickerView = useMemo(
-      () => buildModelPickerView(availableModels, modelFilter),
-      [modelFilter, availableModels],
-  );
   const visionModelPickerView = useMemo(
       () => buildModelPickerView(availableVisionModels, visionModelFilter),
       [visionModelFilter, availableVisionModels],
@@ -1024,24 +1032,8 @@ const Settings: React.FC = () => {
    */
   const commitApiConfig = (patch: PresetSwitchPatch | Partial<APIConfig>) => {
     updateApiConfig(patch);
-    // 支持凭据表的 Worker 上，任务只带引用，换 Key 只要覆盖云端那几行——不用逐条改任务。
-    // 老 Worker 上这句是 no-op，凭据靠下面那条逐条补刷的老路续命。
+    // 凭据行与存量任务统一从同步队列更新，失败自动重试并留底账供下次启动补传。
     syncAmsgLlmCredentials({ ...apiConfig, ...patch });
-    // 已排程的主动消息 2.0 AI 任务里冻结的是排程那一刻的凭据——换 Key / 换模型后
-    // 不重传的话，到点全拿旧凭据打请求（旧 Key 一吊销就是连环 401）。best-effort：
-    // 保存本身不等它，失败只提示；没配 2.0 / 没有 pending AI 任务时它是 no-op。
-    // 存量的内联任务还靠它，所以走引用那条路的用户这里照跑（带 credRefs 的任务
-    // 到点只认引用，这一份补刷落在它们身上是无害的空转）。
-    void ActiveMsgClient.refreshApiCredentialsForPendingTasks({ ...apiConfig, ...patch })
-      .then((result) => {
-        if (result.status === 'partial') {
-          addToast(`API 已保存，但有 ${result.failed} 条已排程的主动消息没换上新凭据，稍后再保存一次可重试。`, 'error');
-        }
-      })
-      .catch((error) => {
-        console.warn('[Settings] 刷新已排程任务的 API 凭据失败', error);
-        addToast('API 已保存，但已排程的主动消息凭据刷新失败，稍后再保存一次可重试。', 'error');
-      });
   };
 
   /**
@@ -1061,6 +1053,7 @@ const Settings: React.FC = () => {
       const isActive = activePresetId === preset.id;
       setEditingPresetId(preset.id);
       setEditPresetName(preset.name);
+      setEditPresetGroup(preset.group || '');
       setEditPresetUrl(preset.config.baseUrl || '');
       setEditPresetKey(preset.config.apiKey || '');
       setEditPresetModel(preset.config.model || '');
@@ -1094,7 +1087,7 @@ const Settings: React.FC = () => {
       };
       // 「正在用的就是这条」要在改之前问，改完值就对不上了
       const wasActive = activePresetId === preset.id;
-      updateApiPreset(preset.id, name, nextConfig);
+      updateApiPreset(preset.id, name, nextConfig, editPresetGroup);
       // 改的正好是当前生效那条 → 生效配置跟着走，否则界面写着新 Key、请求还在用旧的
       if (wasActive) commitApiConfig(configFromPreset({ ...preset, name, config: nextConfig }));
       setEditingPresetId(null);
@@ -1144,8 +1137,9 @@ const Settings: React.FC = () => {
         model: normalizeApiModel(localModel),
         stream: localStream,
         temperature: localTemperature,
-      });
+      }, newPresetGroup);
       setNewPresetName('');
+      setNewPresetGroup('');
       setShowPresetModal(false);
       addToast('预设已保存', 'success');
   };
@@ -1841,8 +1835,13 @@ const Settings: React.FC = () => {
   };
 
   // 保存实时感知配置
+  const handleSaveUserLocation = () => {
+      try { saveUserLocationConfig(rtUserLocation); return true; }
+      catch (error: any) { addToast(error?.message || '定位配置未保存', 'error'); return false; }
+  };
   const handleSaveRealtimeConfig = () => {
       if (rtUserHolidays.enabled && !rtUserHolidays.countryCode) { addToast('请选择生活所在的国家／地区，或关闭节假日感知', 'error'); return; }
+      if (!handleSaveUserLocation()) return;
       const updates = {
           weatherEnabled: rtWeatherEnabled,
           userHolidays: { ...rtUserHolidays, introChoice: rtUserHolidays.enabled ? 'configured' as const : 'declined' as const },
@@ -2100,6 +2099,7 @@ const Settings: React.FC = () => {
 
       <div className="flex-1 overflow-y-auto p-5 space-y-6 no-scrollbar pb-20">
 
+        <NavigationBallSettings characters={characters} loadWorlds={() => DB.getWorlds()} />
         {/* 外观救急入口统一放在设置顶部，无需进入已被错误 CSS 遮住的聊天或日记。 */}
         <SettingsSection
             title="外观急救"
@@ -2171,6 +2171,7 @@ const Settings: React.FC = () => {
             }
         >
             <StorageUsagePanel />
+            <WebCacheControl />
 
             <label className="mb-3 flex items-start gap-2 rounded-xl border border-slate-200 bg-white p-3 cursor-pointer">
                 <input
@@ -2511,8 +2512,7 @@ const Settings: React.FC = () => {
             {apiPresets.length > 0 && (
                 <div className="mb-4">
                     <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 block pl-1">我的预设 (Presets)</label>
-                    <div className="flex gap-2 flex-wrap">
-                        {apiPresets.map(preset => (
+                    <ApiPresetGroups presets={apiPresets}>{preset => (
                             <div key={preset.id} className={`flex items-center rounded-lg pl-3 pr-1 py-1 shadow-sm border transition-colors ${
                                 activePresetId === preset.id
                                     ? 'bg-primary/5 border-primary/30'
@@ -2552,93 +2552,25 @@ const Settings: React.FC = () => {
                                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
                                 </button>
                             </div>
-                        ))}
-                    </div>
+                        )}</ApiPresetGroups>
                     <p className="text-[9px] text-slate-300 mt-1.5 pl-1">点名称直接切换并生效；铅笔改这条预设的内容；长按或双击 × 才会删除。</p>
                 </div>
             )}
 
             <div className="space-y-4">
-                <div className="group">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">URL</label>
-                    <input type="text" value={localUrl} onChange={(e) => setLocalUrl(e.target.value)} placeholder="https://..." className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
-                </div>
-
-                <div className="group">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Key</label>
-                    <input type="password" value={localKey} onChange={(e) => setLocalKey(e.target.value)} placeholder="sk-..." className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
-                </div>
-
-                {/* 高级（流式 / 温度）— 默认折叠，灰色低调，明确写"不建议修改" */}
-                <div className="pt-1">
-                    <button
-                        type="button"
-                        onClick={() => setShowApiAdvanced(v => !v)}
-                        className="text-[10px] text-slate-300 hover:text-slate-400 transition-colors flex items-center gap-1 pl-1 active:scale-95"
-                    >
-                        <span>高级（不建议修改）</span>
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={`w-2.5 h-2.5 transition-transform ${showApiAdvanced ? 'rotate-180' : ''}`}>
-                            <path fillRule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
-                        </svg>
-                    </button>
-                    {showApiAdvanced && (
-                        <div className="mt-2 pl-2 border-l-2 border-slate-100 space-y-3 py-2">
-                            <p className="text-[10px] text-slate-300 leading-relaxed">
-                                这两项绝大多数用户保持默认即可。除非接口报错"only stream supported"或对回复风格有强需求，否则不建议改。
-                            </p>
-                            <div className="flex items-center justify-between">
-                                <div>
-                                    <span className="text-[10px] text-slate-400">流式输出 (Stream)</span>
-                                    <p className="text-[9px] text-slate-300 mt-0.5">仅在你的 API 强制要求时打开</p>
-                                </div>
-                                <button
-                                    type="button"
-                                    onClick={() => setLocalStream(v => !v)}
-                                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${localStream ? 'bg-slate-400' : 'bg-slate-200'}`}
-                                >
-                                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${localStream ? 'translate-x-4' : 'translate-x-0.5'}`} />
-                                </button>
-                            </div>
-                            <div>
-                                <div className="flex items-center justify-between">
-                                    <span className="text-[10px] text-slate-400">温度 (Temperature)</span>
-                                    <span className="text-[10px] font-mono text-slate-400">{localTemperature.toFixed(2)}</span>
-                                </div>
-                                <input
-                                    type="range"
-                                    min="0"
-                                    max="2"
-                                    step="0.05"
-                                    value={localTemperature}
-                                    onChange={(e) => setLocalTemperature(parseFloat(e.target.value))}
-                                    className="w-full accent-slate-400 mt-1"
-                                />
-                                <p className="text-[9px] text-slate-300 mt-0.5">默认 0.85；只作用于聊天和约会的主回复</p>
-                            </div>
-                        </div>
-                    )}
-                </div>
-
-                <div className="pt-2">
-                     <div className="flex justify-between items-center mb-1.5 pl-1">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Model</label>
-                        <button onClick={fetchModels} disabled={isLoadingModels} className="text-[10px] text-primary font-bold">{isLoadingModels ? 'Fetching...' : '刷新模型列表'}</button>
-                    </div>
-                    
-                    <button
-                        onClick={openModelPicker}
-                        title={localModel || 'Select Model...'}
-                        className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-3 text-sm text-slate-700 flex justify-between items-center gap-2 active:bg-white transition-all shadow-sm"
-                    >
-                        <span
-                            className="font-mono overflow-hidden whitespace-nowrap min-w-0 flex-1 text-left"
-                            style={{ direction: 'rtl', textOverflow: 'ellipsis' }}
-                        >
-                            <bdi style={{ direction: 'ltr' }}>{localModel || 'Select Model...'}</bdi>
-                        </span>
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-slate-400 flex-shrink-0"><path fillRule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" /></svg>
-                    </button>
-                </div>
+                <DialogueApiFields
+                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, stream: localStream, temperature: localTemperature }}
+                    onChange={patch => {
+                        if (patch.baseUrl !== undefined) setLocalUrl(patch.baseUrl);
+                        if (patch.apiKey !== undefined) setLocalKey(patch.apiKey);
+                        if (patch.stream !== undefined) setLocalStream(patch.stream);
+                        if (patch.temperature !== undefined) setLocalTemperature(patch.temperature);
+                    }}
+                    fetchModels={fetchModels} isLoadingModels={isLoadingModels} openModelPicker={openModelPicker}
+                />
+                <p className="text-xs text-slate-500 leading-relaxed break-words">
+                    当前使用独立模型的角色为：{characters.filter(c => c.dialogueApi).map(c => c.name).join('、') || '暂无'}
+                </p>
 
                 <button onClick={() => handleSaveApi()} className="w-full py-3 rounded-2xl font-bold text-white shadow-lg shadow-primary/20 bg-primary active:scale-95 transition-all mt-2">
                     {statusMsg || '保存配置'}
@@ -2987,8 +2919,13 @@ const Settings: React.FC = () => {
                         ))}
                     </select>
                     <p className="text-[11px] text-slate-400 mt-1 pl-1">
-                        Flash v2.5 默认更适合实时聊天；v3 支持更丰富的方括号 Audio Tags。切换后对应的内置语音提示规则也会同步切换。
+                        默认推荐 v4，音质与表现力优先；v4 Turbo 生成更快。两者都支持情绪、音效、节奏等 Audio Tags，内置语音指南随模型切换；已有自定义指南会保留。
                     </p>
+                    {isElevenLabsV4Model(localElevenLabsModel) && (
+                        <p className="text-[11px] text-slate-500 mt-2 pl-1">
+                            v4 只支持稳定度与相似度；角色语速、风格强度、Speaker Boost 和 SSML 不生效，请用 Audio Tags 控制节奏与表演。当前播放需等待整段音频生成完成；跨语言时会采用目标语言的自然发音。
+                        </p>
+                    )}
 
                     <details className="mt-3 rounded-xl border border-slate-200/60 bg-white/35 px-3 py-2">
                         <summary className="cursor-pointer text-[11px] font-semibold text-slate-500 select-none">声音参数（高级）</summary>
@@ -2997,7 +2934,7 @@ const Settings: React.FC = () => {
                                 ['稳定度', localElevenLabsStability, setLocalElevenLabsStability],
                                 ['相似度', localElevenLabsSimilarityBoost, setLocalElevenLabsSimilarityBoost],
                                 ['风格强度', localElevenLabsStyle, setLocalElevenLabsStyle],
-                            ] as const).map(([label, value, setter]) => (
+                            ] as const).filter(([label]) => !isElevenLabsV4Model(localElevenLabsModel) || label !== '风格强度').map(([label, value, setter]) => (
                                 <label key={label} className="text-[11px] text-slate-500">
                                     <span className="flex justify-between mb-1"><span>{label}</span><span className="font-mono">{value.toFixed(2)}</span></span>
                                     <input
@@ -3011,7 +2948,7 @@ const Settings: React.FC = () => {
                                     />
                                 </label>
                             ))}
-                            <label className="flex items-center justify-between gap-3 text-[11px] text-slate-500 sm:col-span-2">
+                            {!isElevenLabsV4Model(localElevenLabsModel) && <label className="flex items-center justify-between gap-3 text-[11px] text-slate-500 sm:col-span-2">
                                 <span>Speaker Boost（更贴近原音色，可能增加少量延迟）</span>
                                 <input
                                     type="checkbox"
@@ -3019,7 +2956,7 @@ const Settings: React.FC = () => {
                                     onChange={(e) => setLocalElevenLabsUseSpeakerBoost(e.target.checked)}
                                     className="w-4 h-4 accent-primary"
                                 />
-                            </label>
+                            </label>}
                         </div>
                     </details>
                 </div>
@@ -3080,7 +3017,7 @@ const Settings: React.FC = () => {
                                 ['minimax', 'MiniMax 语音指南', localVoicePromptMinimax, setLocalVoicePromptMinimax, VOICE_ACTING_GUIDE, '聊天 + 电话 · MiniMax 引擎时生效'] as const,
                                 ['fishaudio', '鱼声 Fish 语音指南', localVoicePromptFish, setLocalVoicePromptFish, FISH_VOICE_ACTING_GUIDE, '聊天 + 电话 · 鱼声引擎时生效'] as const,
                                 ['elevenlabs', 'ElevenLabs 语音指南', localVoicePromptElevenLabs, setLocalVoicePromptElevenLabs, getElevenLabsVoiceActingGuide(localElevenLabsModel), '聊天 + 电话 · ElevenLabs 引擎时生效；默认模板随模型变化'] as const,
-                                ['dateVoice', '见面（约会）语音情绪', localVoicePromptDate, setLocalVoicePromptDate, DATE_VOICE_GUIDE, '见面专用 [v:xxx] 规则 · 角色开了见面语音时生效，与引擎无关'] as const,
+                                ['dateVoice', '见面（约会）语音情绪', localVoicePromptDate, setLocalVoicePromptDate, getDateVoiceGuide(localTtsProvider, localElevenLabsModel), '见面专用 [v:xxx] 规则 · v4 默认支持台词内 Audio Tags'] as const,
                             ]).map(([key, title, value, setValue, def, hint]) => {
                                 const active = localTtsProvider === key;
                                 const usingDefault = !value.trim();
@@ -3549,6 +3486,10 @@ const Settings: React.FC = () => {
             <p className="text-xs text-slate-500 leading-relaxed">
                 角色到点自动给你发消息，App 关着也能收。需要你自己部署一个 Cloudflare Worker（自带 D1 数据库 + 定时触发），在配置里填地址即可。聊天上云（即时对话）与定时主动消息都由它承担。
             </p>
+            <button type="button" onClick={() => setShowAmsgCloudData(true)} className="mt-3 w-full rounded-2xl border border-violet-100 bg-violet-50/60 px-4 py-3 text-left text-xs text-violet-700">
+                <span className="block font-semibold">云端数据管理</span>
+                <span className="mt-1 block text-[11px] text-slate-500">查看 Worker 实际保存的数据，按项清理或彻底移除角色。</span>
+            </button>
         </section>
 
         {/* 自定义网络代理 — 刻意低调的高级入口。默认折叠，不主动指引基本发现不了。
@@ -3971,82 +3912,7 @@ const Settings: React.FC = () => {
 
       {/* 模型选择 Modal */}
       <Modal isOpen={showModelModal} title="选择模型" onClose={cancelModelPicker}>
-        {(() => {
-            const { filtered, commonPrefix } = modelPickerView;
-            return (
-                <div className="space-y-3 p-1">
-                    <div className="flex gap-2">
-                        <input
-                            type="text"
-                            value={localModel}
-                            onChange={(e) => setLocalModel(e.target.value)}
-                            placeholder="手动输入模型名称..."
-                            className="flex-1 bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary focus:bg-white transition-all"
-                        />
-                        <button
-                            onClick={() => confirmModelPicker(localModel)}
-                            className="px-4 py-2.5 bg-primary text-white text-sm font-bold rounded-xl active:scale-95 transition-all"
-                        >
-                            确定
-                        </button>
-                    </div>
-                    {availableModels.length > 0 && (
-                        <div className="relative">
-                            <input
-                                type="text"
-                                value={modelFilter}
-                                onChange={(e) => setModelFilter(e.target.value)}
-                                placeholder={`🔍 搜索 ${availableModels.length} 个模型...`}
-                                className="w-full bg-slate-50 border border-slate-200/60 rounded-xl px-4 py-2 text-xs focus:outline-primary focus:bg-white transition-all"
-                            />
-                            {modelFilter && (
-                                <button
-                                    onClick={() => setModelFilter('')}
-                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs px-2"
-                                >
-                                    ×
-                                </button>
-                            )}
-                        </div>
-                    )}
-                    {commonPrefix && (
-                        <div className="text-[10px] text-slate-400 px-1 flex items-center gap-1 flex-wrap">
-                            <span>共同前缀:</span>
-                            <code className="font-mono bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded break-all">{commonPrefix}</code>
-                            <span className="text-slate-300">(下方已弱化显示)</span>
-                        </div>
-                    )}
-                    <div className="max-h-[40vh] overflow-y-auto no-scrollbar space-y-2">
-                        {filtered.length > 0 ? filtered.map(m => {
-                            const suffix = commonPrefix && m.startsWith(commonPrefix) ? m.slice(commonPrefix.length) : m;
-                            const selected = m === localModel;
-                            return (
-                                <button
-                                    key={m}
-                                    onClick={() => confirmModelPicker(m)}
-                                    title={m}
-                                    className={`w-full text-left px-4 py-3 rounded-xl text-sm font-mono flex justify-between items-start gap-2 ${selected ? 'bg-primary/10 text-primary font-bold ring-1 ring-primary/20' : 'bg-slate-50 text-slate-600 hover:bg-slate-100'}`}
-                                >
-                                    <span className="break-all min-w-0 flex-1 leading-relaxed">
-                                        {commonPrefix && suffix !== m && (
-                                            <span className={selected ? 'text-primary/40 font-normal' : 'text-slate-400 font-normal'}>{commonPrefix}</span>
-                                        )}
-                                        <span>{suffix}</span>
-                                    </span>
-                                    {selected && <div className="w-2 h-2 rounded-full bg-primary mt-1.5 flex-shrink-0"></div>}
-                                </button>
-                            );
-                        }) : (
-                            <div className="text-center text-slate-400 py-8 text-xs">
-                                {availableModels.length === 0
-                                    ? '列表为空，可手动输入或点击"刷新模型列表"拉取'
-                                    : `没有匹配 "${modelFilter}" 的模型`}
-                            </div>
-                        )}
-                    </div>
-                </div>
-            );
-        })()}
+        <ModelPicker availableModels={availableModels} localModel={localModel} setLocalModel={setLocalModel} confirmModelPicker={confirmModelPicker} />
       </Modal>
 
       {/* 识图 API 使用独立模型列表，避免覆盖主 API 的模型选择。 */}
@@ -4144,6 +4010,9 @@ const Settings: React.FC = () => {
           <div className="space-y-2">
               <label className="text-[10px] font-bold text-slate-400 uppercase">预设名称 (例如: DeepSeek)</label>
               <input value={newPresetName} onChange={e => setNewPresetName(e.target.value)} className="w-full bg-slate-100 rounded-xl px-4 py-3 text-sm focus:outline-primary" autoFocus placeholder="Name..." />
+              <label className="text-[10px] font-bold text-slate-400 block">API 预设分组（选填）</label>
+              <input aria-label="API 预设分组" value={newPresetGroup} onChange={e => setNewPresetGroup(e.target.value)} list="newPresetGroup-options" placeholder="例如：日常聊天 / 写作" className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm focus:outline-primary" />
+              <datalist id="newPresetGroup-options">{[...new Set(apiPresets.map(p => p.group).filter(Boolean))].map(group => <option key={group} value={group} />)}</datalist>
               <p className="text-[10px] text-slate-400 leading-relaxed pt-1">会保存上面表单里的 URL / Key / Model，以及高级设置中的流式与温度。</p>
           </div>
       </Modal>
@@ -4159,6 +4028,9 @@ const Settings: React.FC = () => {
               <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">名称</label>
                   <input value={editPresetName} onChange={e => setEditPresetName(e.target.value)} placeholder="预设名称" className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm focus:outline-primary" />
+                  <label className="text-[10px] font-bold text-slate-400 block">API 预设分组（选填）</label>
+              <input aria-label="API 预设分组" value={editPresetGroup} onChange={e => setEditPresetGroup(e.target.value)} list="editPresetGroup-options" placeholder="例如：日常聊天 / 写作" className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm focus:outline-primary" />
+              <datalist id="editPresetGroup-options">{[...new Set(apiPresets.map(p => p.group).filter(Boolean))].map(group => <option key={group} value={group} />)}</datalist>
               </div>
               <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">URL</label>
@@ -4268,12 +4140,16 @@ const Settings: React.FC = () => {
       {/* 实时感知配置 Modal */}
       <Modal
           isOpen={showRealtimeModal}
-          title="实时感知配置"
-          onClose={() => setShowRealtimeModal(false)}
-          footer={<button onClick={handleSaveRealtimeConfig} className="w-full py-3 bg-violet-500 text-white font-bold rounded-2xl shadow-lg">保存配置</button>}
+          title={USER_LOCATION_PAGE_TITLES[rtUserLocationPage]}
+          onClose={closeRealtimePage}
+          footer={rtUserLocationPage === 'main'
+              ? <button disabled={rtUserLocationBusy} onClick={handleSaveRealtimeConfig} className="w-full py-3 bg-violet-500 text-white font-bold rounded-2xl shadow-lg disabled:opacity-40">保存配置</button>
+              : <button disabled={rtUserLocationBusy} onClick={() => { if (rtUserLocationPage === 'about' || handleSaveUserLocation()) setRtUserLocationPage(getUserLocationParentPage(rtUserLocationPage)); }} className="w-full py-3 bg-sky-700 text-white font-bold rounded-2xl disabled:opacity-40">{rtUserLocationPage === 'about' ? '返回真实定位' : '保存并返回'}</button>}
       >
           <div className="space-y-5 max-h-[60vh] overflow-y-auto no-scrollbar">
-              <UserHolidaySettings value={rtUserHolidays} onChange={setRtUserHolidays} />
+              {rtUserLocationPage === 'main' && <UserHolidaySettings value={rtUserHolidays} onChange={setRtUserHolidays} />}
+              <UserLocationSettings value={rtUserLocation} onChange={setRtUserLocation} onSave={handleSaveUserLocation} page={rtUserLocationPage} onNavigate={setRtUserLocationPage} onBusyChange={setRtUserLocationBusy} userName={userProfile.name} />
+              {rtUserLocationPage === 'main' && <>
               {/* 天气配置 */}
               <div className="bg-emerald-50/50 p-4 rounded-2xl space-y-3">
                   <div className="flex items-center justify-between">
@@ -4705,7 +4581,7 @@ const Settings: React.FC = () => {
                       </div>
                   )}
               </div>
-
+              </>}
           </div>
       </Modal>
 

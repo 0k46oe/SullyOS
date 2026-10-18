@@ -103,12 +103,12 @@ describe('凭据行取值', () => {
     });
   });
 
-  it('定时消息那行：开了单独 API → 写单独 API 的值（绝不能被全局盖掉）', () => {
+  it('旧备份带单独 API 时，定时消息仍使用主 API', () => {
     const row = buildCharChatCredRow(
       CHAR, { enabled: true, useSecondaryApi: true, secondaryApi: SECONDARY } as any, API,
     );
     expect(row?.value).toEqual({
-      apiUrl: 'https://alt.example.dev/v1/chat/completions', apiKey: 'sk-alt', primaryModel: 'gpt-alt',
+      apiUrl: 'https://api.example.dev/v1/chat/completions', apiKey: 'sk-global', primaryModel: 'gpt-global',
     });
   });
 

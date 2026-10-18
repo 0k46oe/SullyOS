@@ -141,6 +141,13 @@ type DesktopSkinOption = { id: string; name: string; desc: string; swatch: strin
 
 const DESKTOP_SKINS: DesktopSkinOption[] = [
   {
+    id: 'homely',
+    name: '居家',
+    desc: '小屋日常同步 · 面对面聊天 · 家园小手机',
+    swatch: 'linear-gradient(90deg,#ebc2a1 0%,#f4dfcc 48%,#faf3e7 48%,#fffaf2 100%)',
+    config: { skin: 'homely', wallpaper: 'linear-gradient(180deg,#faf3e7,#ebc2a1)', contentColor: '#695344' },
+  },
+  {
     id: 'animalcrossing',
     name: '动森风格',
     desc: 'NookPhone 彩色图标 · 草地天空 · 暖色界面',
@@ -483,6 +490,7 @@ const PresetManager: React.FC<PresetManagerProps> = ({ presets, onSave, onApply,
 const Appearance: React.FC = () => {
   const { theme, updateTheme, closeApp, openApp, setCustomIcon, customIcons, addToast, appearancePresets, saveAppearancePreset, applyAppearancePreset, deleteAppearancePreset, renameAppearancePreset, exportAppearancePreset, importAppearancePreset, characters, activeCharacterId, updateCharacter } = useOS();
   const [activeTab, setActiveTab] = useState<'theme' | 'icons' | 'presets' | 'sharing'>(() => (hasBeautyReceiveRequest()||hasBeautyLibraryRequest()) ? 'sharing' : 'theme');
+  useAppShortcut(ShortcutAppID.Appearance, intent => setActiveTab((intent.entryId || 'theme') as typeof activeTab));
   const [shareBusy, setShareBusy] = useState(false);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const [wallpaperUrl, setWallpaperUrl] = useState('');
@@ -1781,3 +1789,5 @@ const Appearance: React.FC = () => {
 };
 
 export default Appearance;
+import { useAppShortcut } from '../utils/appShortcutLaunch';
+import { AppID as ShortcutAppID } from '../types';

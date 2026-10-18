@@ -14,6 +14,12 @@ export interface EmotionEvalApi { baseUrl: string; apiKey: string; model: string
 export const EMOTION_EVAL_SYSTEM_SLOT = '__EMOTION_EVAL_SYSTEM_PROMPT__';
 export const EMOTION_EVAL_HISTORY_SLOT = '__EMOTION_EVAL_HISTORY__';
 
+/** Trusted transport marker keeps the expected task ID even if the model omits its mandatory fields. */
+export const tagHomeSecretEval = (raw: string, requestId?: string): string =>
+  requestId && /^[\w-]+$/.test(requestId) ? `HOME_SECRET_REQUEST:${requestId}\n${raw}` : raw;
+export const homeSecretEvalRequestId = (raw: string): string | undefined =>
+  raw.match(/^HOME_SECRET_REQUEST:([\w-]+)\r?\n/)?.[1];
+
 /** 单次评估请求的上限；副 API 卡住的话，主流程不该跟着一起被扣在这儿。 */
 export const EMOTION_EVAL_TIMEOUT_MS = 120_000;
 
@@ -96,8 +102,12 @@ export const requestEmotionEval = async (
   api: EmotionEvalApi,
   promptContent: string,
   timeoutMs: number = EMOTION_EVAL_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<EmotionEvalOutcome> => {
   const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) return { raw: null, error: null };
+  signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const baseUrl = String(api.baseUrl).replace(/\/+$/, '');
@@ -140,6 +150,7 @@ export const requestEmotionEval = async (
     }
     return { raw, error: null };
   } catch (error) {
+    if (signal?.aborted) return { raw: null, error: null };
     console.warn('[emotion-eval] 评估失败（主流程不受影响）', error);
     // 只带异常名/消息，不带栈：这句要走 push 出门，短一点、也别把内部路径抖出去。
     // 异常消息同样过打码：fetch 异常一般不含请求头，但 URL 解析类错误会回显传入的
@@ -150,5 +161,6 @@ export const requestEmotionEval = async (
     return { raw: null, error: reason };
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
   }
 };

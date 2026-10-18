@@ -1,3 +1,5 @@
+import { isChatConversationEntry } from './trace';
+
 import { readMaintenanceSettings } from './maintenanceMode';
 import { loadRangeMessageContents } from './rangeMessagePage';
 import { loadCharacterContextMessages } from '../chatContextRange';
@@ -276,12 +278,13 @@ export function mergePalaceFragmentsIntoMemories(
     }
 
     for (const frag of incoming) {
+        if (result.some(memory => memory.id === frag.id)) continue;
         if (frag.palaceMemoryId) {
             // Never merge a new link into a pre-upgrade daily snapshot, even on the same date.
             if (!result.some(memory => memory.palaceMemoryId === frag.palaceMemoryId)) result.push(frag);
             continue;
         }
-        const existingIdx = palaceByDate.get(frag.date);
+        const existingIdx = frag.mood === 'palace' ? palaceByDate.get(frag.date) : undefined;
         if (existingIdx !== undefined) {
             // merge：把新 bullets 直接追加到 summary。
             // 不做字符串去重——LLM 偶尔写出相同短句的合法情况会被误杀，
@@ -296,7 +299,7 @@ export function mergePalaceFragmentsIntoMemories(
             };
         } else {
             result.push(frag);
-            palaceByDate.set(frag.date, result.length - 1);
+            if (frag.mood === 'palace') palaceByDate.set(frag.date, result.length - 1);
         }
     }
 
@@ -1209,7 +1212,7 @@ export async function injectMemoryPalace(
     }
 
     let explicitEntityAnalysis: ExplicitEntityAnalysis | undefined;
-    const interactiveRecall = trace.entryPoint === 'chat_app' || trace.entryPoint === 'collaboration';
+    const interactiveRecall = isChatConversationEntry(trace.entryPoint) || trace.entryPoint === 'collaboration';
     if (!trace.featureFlagsSnapshot.recallRouter) {
         trace.explicitEntityRecall = { status: 'disabled' };
         trace.eventBoxMetadataRecall = { status: 'disabled' };
@@ -1351,6 +1354,32 @@ export async function injectMemoryPalace(
         trace.stages.push({ name: 'finalize', durationMs: 0, outcome: 'skipped' });
         return finishRecallTrace(trace, 'skipped_palace_disabled');
     }
+    // 调用方没显式传 userName 时，兜底从全局用户档案取，保证各入口
+    // （群聊/通话/事件/学习等）召回的房间名都统一显示「{用户名}的房间」，
+    // 而不是回退成「用户房间」。
+    let resolvedUserName = userName;
+    if (!resolvedUserName) {
+        try { resolvedUserName = (await DB.getUserProfile())?.name || undefined; } catch {}
+    }
+
+    // 门牌（常驻语义层）：纯 IDB 读 + 格式化，不调 LLM。
+    // 无条件赋值（包括 ''）—— 门牌被清空/删除后，persist 过的旧注入必须被冲掉。
+    const roomPlatesStartedAt = performance.now();
+    let roomPlateOutcome: RecallTraceStage['outcome'] = 'ok';
+    try {
+        const { buildRoomPlatesInjection } = await import('./roomPlates');
+        char.roomPlatesInjection = await buildRoomPlatesInjection(char.id, resolvedUserName);
+    } catch {
+        char.roomPlatesInjection = '';
+        roomPlateOutcome = 'error';
+    }
+    trace.injection.roomPlateChars = char.roomPlatesInjection.length;
+    trace.stages.push({
+        name: 'room_plates',
+        durationMs: Math.round(performance.now() - roomPlatesStartedAt),
+        outcome: roomPlateOutcome,
+    });
+
     const embeddingConfig = getEmbeddingConfig(char.embeddingConfig);
     if (!embeddingConfig) {
         trace.stages.push({ name: 'finalize', durationMs: 0, outcome: 'skipped' });
@@ -1365,32 +1394,6 @@ export async function injectMemoryPalace(
             outcome: 'ok',
         });
         const currentMood = char.activeBuffs?.[0]?.name;
-        // 调用方没显式传 userName 时，兜底从全局用户档案取，保证各入口
-        // （群聊/通话/事件/学习等）召回的房间名都统一显示「{用户名}的房间」，
-        // 而不是回退成「用户房间」。
-        let resolvedUserName = userName;
-        if (!resolvedUserName) {
-            try { resolvedUserName = (await DB.getUserProfile())?.name || undefined; } catch {}
-        }
-
-        // 门牌（常驻语义层）：纯 IDB 读 + 格式化，不调 LLM。
-        // 无条件赋值（包括 ''）—— 门牌被清空/删除后，persist 过的旧注入必须被冲掉。
-        const roomPlatesStartedAt = performance.now();
-        let roomPlateOutcome: RecallTraceStage['outcome'] = 'ok';
-        try {
-            const { buildRoomPlatesInjection } = await import('./roomPlates');
-            char.roomPlatesInjection = await buildRoomPlatesInjection(char.id, resolvedUserName);
-        } catch {
-            char.roomPlatesInjection = '';
-            roomPlateOutcome = 'error';
-        }
-        trace.injection.roomPlateChars = char.roomPlatesInjection.length;
-        trace.stages.push({
-            name: 'room_plates',
-            durationMs: Math.round(performance.now() - roomPlatesStartedAt),
-            outcome: roomPlateOutcome,
-        });
-
         const retrieveStartedAt = performance.now();
         let retrievalTelemetry: RecallRetrievalTelemetry | undefined;
         const context = await retrieveMemories(
@@ -2090,7 +2093,7 @@ export async function processNewMessages(
         // 1. 加载全部消息（含已处理的），计算热区和缓冲区
         //    过滤：保留任何有语义的消息类型（文字、带转写的语音、卡片、系统事件等），
         //    只排除纯视觉资源和无转写的纯音频，避免 URL / base64 污染 LLM。
-        const allMessages = await DB.getMessagesByCharId(charId, true);
+        const allMessages = await DB.getMessagesByCharId(charId, true, options.drainBuffer === true);
         const privateMessages = allMessages
             .filter(message => !message.groupId)
             .sort((a, b) => a.id - b.id);

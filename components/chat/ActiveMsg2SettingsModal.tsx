@@ -128,10 +128,6 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
   const [maxTokens, setMaxTokens] = useState(String(saved?.maxTokens ?? ''));
   // 「主动频率」那一页开没开（它自带保存按钮，见 ActiveMsg2PacingModal）。
   const [pacingOpen, setPacingOpen] = useState(false);
-  const [useSecondaryApi, setUseSecondaryApi] = useState(saved?.useSecondaryApi ?? false);
-  const [secUrl, setSecUrl] = useState(saved?.secondaryApi?.baseUrl ?? '');
-  const [secKey, setSecKey] = useState(saved?.secondaryApi?.apiKey ?? '');
-  const [secModel, setSecModel] = useState(saved?.secondaryApi?.model ?? '');
   const [globalReady, setGlobalReady] = useState(false);
   const [pushSummary, setPushSummary] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -149,13 +145,13 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
     status?: string;
     lastError: RemoteTaskLastError | null;
   }> | null>(null);
-  // 防穿帮闸最近一次跳过的记录（worker 写的）。null = 没有记录 / 没读到。
+  // 最近一次到点没发的记录（worker 写的）。null = 没有记录 / 没读到。
   const [lastSkip, setLastSkip] = useState<AmsgLastSkip | null>(null);
   // 今天主动找了几次（worker 每次发完累加的那份）。null = 没有记录 / 没读到。
   const [dailySends, setDailySends] = useState<AmsgDailySends | null>(null);
 
   // 表单值重置：面板打开或切换编辑对象时，用被编辑任务的字段填表单（新建则填默认值）。
-  // 角色级共享设置（maxTokens / 单独 API）始终跟随保存值。
+  // 角色级共享设置（maxTokens）始终跟随保存值。
   useEffect(() => {
     if (!isOpen) return;
 
@@ -166,10 +162,6 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
     setEnabled(isAmsg2EnabledForChar(char));
     setInstantChatOn(config?.instantChatEnabled !== false);
     setMaxTokens(config?.maxTokens ? String(config.maxTokens) : '');
-    setUseSecondaryApi(config?.useSecondaryApi ?? false);
-    setSecUrl(config?.secondaryApi?.baseUrl ?? '');
-    setSecKey(config?.secondaryApi?.apiKey ?? '');
-    setSecModel(config?.secondaryApi?.model ?? '');
 
     const editing = editingTaskUuid ? list.find((t) => t.taskUuid === editingTaskUuid) : undefined;
     if (editing) {
@@ -263,7 +255,7 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
 
   /**
    * 拼一份要落盘的 config：
-   *   - 角色级共享设置（maxTokens / 单独 API）以面板表单为准——只有面板编辑它们；
+   *   - 角色级共享设置（maxTokens）以面板表单为准——只有面板编辑它们；
    *   - 任务清单以「落盘那一刻的最新清单」为准，面板只通过 tasksOf 声明自己动了哪一条。
    * 别把渲染时的 tasks 整份传下去，原因见 onSave 的注释。
    */
@@ -281,10 +273,6 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
     // 开着就存 undefined（= 跟随全局默认开），只有显式关掉才落 false。
     instantChatEnabled: instantChatOn ? undefined : false,
     maxTokens: maxTokens.trim() ? Number(maxTokens) : undefined,
-    useSecondaryApi: useSecondaryApi && !!secUrl,
-    secondaryApi: useSecondaryApi && secUrl
-      ? { baseUrl: secUrl.trim(), apiKey: secKey.trim(), model: secModel.trim() }
-      : undefined,
     lastSyncedAt: prev?.lastSyncedAt,
     ...extra,
   });
@@ -303,7 +291,7 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
   const handleToggleEnabled = () => {
     const turningOn = !enabled;
     setEnabled(!enabled);
-    // 顺手把面板上其它角色级设置（maxTokens / 单独 API）一起带上，与
+    // 顺手把面板上其它角色级设置（maxTokens）一起带上，与
     // buildConfig 的口径一致：这几项本来就只有面板会写。
     if (turningOn) {
       onSave((prev) => buildConfig(prev, (list) => list, { enabled: true }));
@@ -395,7 +383,7 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
    * 给角色留一句「这几条被人工取消了」。
    *
    * 聊天历史里那句「明早八点叫你～」是角色自己许的承诺，任务在面板里被删掉之后它并不
-   * 知道——下次聊天照旧说「放心我叫你」。所以取消也写进作废回执台账（按 id 幂等），
+   * 知道——下次聊天照旧说「放心我叫你」。所以取消也写进回执台账（按 id 幂等），
    * 下一轮的排程现状块会把它读出来告诉角色。写失败不打断取消本身：任务确实已经没了。
    */
   const writeCancelledNotices = async (cancelled: ActiveMsg2TaskRecord[]) => {
@@ -565,14 +553,8 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
           : `任务已创建 [${shortTaskId(result.uuid)}]。`),
       result.replacedCancelFailed ? 'error' : 'success');
 
-      // 角色级 API（单独 API 开关 / 三件套）这次可能刚改过：支持凭据表的 Worker 上
-      // 只要把这个角色那几行覆盖掉，已排的任务（含角色自排的）下次触发就跟上了。
-      // 老 Worker 上是 no-op，凭据靠下面逐条补刷。
+      // 同步主 API，并为存量任务补刷凭据。失败只提示，不把已成功排程标成失败。
       syncAmsgLlmCredentials(apiConfig);
-      // 角色级 API（单独 API 开关 / 三件套）也可能这次刚改过：刚排的这条已带新凭据
-      // （排程时现算），但同角色**其它** pending AI 任务里冻结的还是旧的，就地刷一遍。
-      // 用渲染时清单近似「其它任务」——保存期间角色刚用工具排的新任务会漏，下次保存
-      // 或全局 API 保存时会补上。失败只提示，不能掉进外层 catch 把整次保存标成失败。
       const otherAiTasks = tasks.filter((t) =>
         t.taskUuid !== result.uuid
         && t.taskUuid !== editingTaskUuid
@@ -830,8 +812,8 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
                 <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 block pl-1">到点时用户正在聊天</label>
                 <div className="grid grid-cols-2 gap-2">
                   {([
-                    { id: 'expire', label: '自动作废', desc: '转为对话里自然带出' },
-                    { id: 'force', label: '强制发送', desc: '闹钟型，照发' },
+                    { id: 'expire', label: '看情况', desc: 'ta 看着对话决定说不说' },
+                    { id: 'force', label: '到点必发', desc: '闹钟型，照发' },
                   ] as const).map((option) => (
                     <button
                       key={option.id}
@@ -884,28 +866,9 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
               </>
             )}
 
-            <div className="pt-1 border-t border-slate-100">
-              <div className="flex items-center justify-between mb-2">
-                <div>
-                  <div className="font-bold text-slate-700">使用单独 API</div>
-                  <div className="text-xs text-slate-400 mt-1">不开启则复用当前聊天主 API。</div>
-                </div>
-                <button
-                  onClick={() => setUseSecondaryApi(!useSecondaryApi)}
-                  className={`w-12 h-7 rounded-full transition-colors relative ${useSecondaryApi ? 'bg-fuchsia-500' : 'bg-slate-200'}`}
-                >
-                  <span className={`absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow transition-all duration-200 ${useSecondaryApi ? 'translate-x-5' : 'translate-x-0'}`} />
-                </button>
-              </div>
-
-              {useSecondaryApi ? (
-                <div className="space-y-3 bg-slate-50 rounded-2xl p-3">
-                  <input value={secUrl} onChange={(event) => setSecUrl(event.target.value)} placeholder="API URL" className="w-full px-3 py-2 bg-white rounded-xl text-sm border border-slate-200" />
-                  <input type="password" value={secKey} onChange={(event) => setSecKey(event.target.value)} placeholder="API Key" className="w-full px-3 py-2 bg-white rounded-xl text-sm border border-slate-200" />
-                  <input value={secModel} onChange={(event) => setSecModel(event.target.value)} placeholder="Model" className="w-full px-3 py-2 bg-white rounded-xl text-sm border border-slate-200" />
-                </div>
-              ) : null}
-            </div>
+            <p className="pt-1 border-t border-slate-100 text-xs text-slate-400">
+              主动消息使用当前聊天主 API，调用费用也由主 API 承担。
+            </p>
           </>
         ) : null}
       </div>

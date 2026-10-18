@@ -72,6 +72,7 @@ const BankApp: React.FC = () => {
     
     // Tabs: 'game' (Shop) | 'manage' (Menu) | 'report' (Finance)
     const [activeTab, setActiveTab] = useState<'game' | 'manage' | 'report'>('game');
+    useAppShortcut(ShortcutAppID.Bank, intent => setActiveTab((intent.entryId || 'game') as typeof activeTab));
     
     // UI Modals
     const [showAddTxModal, setShowAddTxModal] = useState(false);
@@ -507,6 +508,7 @@ const BankApp: React.FC = () => {
 
     // --- Guestbook Logic (Gossip & Drama) ---
     const handleRefreshGuestbook = async () => {
+
         const COST = 40;
         if (stateRef.current.shop.actionPoints < COST) {
             addToast(`AP 不足 (需 ${COST})。去省钱吧！`, 'error');
@@ -563,7 +565,7 @@ ${previousGuestbook}
             const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ model: apiConfig.model, messages: ContextBuilder.buildCharacterRequest(characterContextInput, [{ role: 'user', content: prompt }]) })
+                body: JSON.stringify({ model: apiConfig.model, messages: (await ContextBuilder.buildCharacterRequest(characterContextInput, [{ role: 'user', content: prompt }])) })
             });
 
             if (response.ok) {
@@ -1178,3 +1180,5 @@ ${previousGuestbook}
 };
 
 export default BankApp;
+import { useAppShortcut } from '../utils/appShortcutLaunch';
+import { AppID as ShortcutAppID } from '../types';

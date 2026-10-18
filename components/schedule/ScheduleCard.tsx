@@ -7,6 +7,9 @@ import { useOS } from '../../context/OSContext';
 import { resolveScheduleCardPalette } from '../../utils/scheduleAppearance';
 import ScheduleAppearanceButton, { ScheduleCustomCssStyle } from './ScheduleAppearanceButton';
 import TokenImg from '../os/TokenImg';
+import {homePositionLabel} from '../../utils/homeSchedule';
+
+import { putImageBlob } from '../../utils/blobRef';
 
 interface ScheduleCardProps {
     schedule: DailySchedule | null;
@@ -16,7 +19,7 @@ interface ScheduleCardProps {
     onEdit?: (index: number, slot: ScheduleSlot) => void;
     onDelete?: (index: number) => void;
     onReroll?: () => void;
-    onCoverImageChange?: (dataUrl: string) => void;
+    onCoverImageChange?: (imageRef: string) => void | Promise<void>;
     onPlayTheater?: (index: number) => void; // 点某个「已过去/正在进行」时段的播放按钮 → 小剧场
     isGenerating?: boolean;
 }
@@ -62,7 +65,9 @@ export const ScheduleCardView: React.FC<ScheduleCardProps & {theme:OSTheme;previ
     const [editActivity, setEditActivity] = useState('');
     const [editDesc, setEditDesc] = useState('');
     const [editEmoji, setEditEmoji] = useState('');
+    const [editHomePosition, setEditHomePosition] = useState('');
     const coverInputRef = useRef<HTMLInputElement>(null);
+    const [coverUploadError, setCoverUploadError] = useState('');
 
     // 长按菜单状态：记录哪一条日程被长按触发 action sheet（修改 / 删除）
     const [actionIdx, setActionIdx] = useState<number | null>(null);
@@ -113,6 +118,7 @@ export const ScheduleCardView: React.FC<ScheduleCardProps & {theme:OSTheme;previ
         setEditTime(slot.startTime);
         setEditActivity(slot.activity);
         setEditDesc(slot.description || '');
+        setEditHomePosition(slot.homePosition?.kind === 'away' ? '__away' : slot.homePosition?.kind === 'home' ? slot.homePosition.roomId : '');
         setEditEmoji(slot.emoji || '');
     };
 
@@ -123,30 +129,22 @@ export const ScheduleCardView: React.FC<ScheduleCardProps & {theme:OSTheme;previ
                 activity: editActivity,
                 description: editDesc || undefined,
                 emoji: editEmoji || undefined,
+                homePosition: editHomePosition === '__away' ? {kind: 'away'} : character?.home3D?.rooms.some(room => room.id === editHomePosition) ? {kind: 'home', roomId: editHomePosition} : undefined,
+                location: editHomePosition === '__away' ? '外出' : character?.home3D?.rooms.find(room => room.id === editHomePosition)?.name,
             });
         }
         setEditingIdx(null);
     };
 
-    const handleCoverUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file || !onCoverImageChange) return;
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-            const img = new window.Image();
-            img.onload = () => {
-                const canvas = document.createElement('canvas');
-                const maxW = 400;
-                const scale = Math.min(1, maxW / img.width);
-                canvas.width = img.width * scale;
-                canvas.height = img.height * scale;
-                canvas.getContext('2d')?.drawImage(img, 0, 0, canvas.width, canvas.height);
-                onCoverImageChange(canvas.toDataURL('image/jpeg', 0.8));
-            };
-            img.src = ev.target?.result as string;
-        };
-        reader.readAsDataURL(file);
         e.target.value = '';
+        setCoverUploadError('');
+        try {
+            // Store original pixels once; each day's schedule keeps a durable token.
+            await onCoverImageChange(await putImageBlob(file));
+        } catch { setCoverUploadError('头图保存失败，请重试'); }
     };
 
     const palette = resolveScheduleCardPalette(
@@ -225,6 +223,7 @@ export const ScheduleCardView: React.FC<ScheduleCardProps & {theme:OSTheme;previ
                 </div>
             </div>
 
+            {coverUploadError && <p role="alert" className="px-4 py-2 text-xs text-red-500">{coverUploadError}</p>}
             {/* Content: Character Image Banner on top, Schedule List below */}
             <div className="flex flex-col">
                 {/* Character Image Banner */}
@@ -306,6 +305,7 @@ export const ScheduleCardView: React.FC<ScheduleCardProps & {theme:OSTheme;previ
                                             placeholder="描述 (可选)"
                                             className="w-full bg-white/10 rounded-lg px-2 py-1 text-xs border border-white/10 focus:outline-none opacity-70"
                                         />
+                                        {!!character?.home3D?.rooms.length && <select aria-label="日程所在房间" value={editHomePosition} onChange={event => setEditHomePosition(event.target.value)} className="w-full text-slate-800 bg-white rounded-lg px-2 py-2 text-xs mt-2"><option value="">位置待补全</option><option value="__away">外出</option>{character.home3D.rooms.map(room => <option key={room.id} value={room.id}>{room.name}</option>)}</select>}
                                         <div className="flex gap-2 mt-2">
                                             <button onClick={saveEdit} className="text-[10px] font-bold px-3 py-1 rounded-lg bg-white/20 hover:bg-white/30 transition-colors">保存</button>
                                             <button onClick={() => setEditingIdx(null)} className="text-[10px] font-bold px-3 py-1 rounded-lg bg-white/10 hover:bg-white/20 transition-colors opacity-60">取消</button>
@@ -376,6 +376,7 @@ export const ScheduleCardView: React.FC<ScheduleCardProps & {theme:OSTheme;previ
                                             {slot.emoji && <span className="text-sm flex-shrink-0">{slot.emoji}</span>}
                                             <span className="sully-schedule-activity text-sm font-bold">{slot.activity}</span>
                                         </div>
+                                        {slot.homePosition && <p className="text-[11px] opacity-60 mt-1">{homePositionLabel(slot, character)}</p>}
                                         {slot.description && (
                                             <p className="sully-schedule-description text-[11px] opacity-50 mt-0.5 leading-tight">{slot.description}</p>
                                         )}

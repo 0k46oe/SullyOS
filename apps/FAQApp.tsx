@@ -1,4 +1,6 @@
+import { MEMORY_GUIDE_SECTIONS } from '../utils/memoryGuide';
 import { SAR_CHANGELOG } from '../utils/sarUpdate';
+import { HOME_CHANGELOG } from '../utils/homeUpdate';
 
 import React, { useEffect, useState } from 'react';
 import { useOS } from '../context/OSContext';
@@ -22,6 +24,13 @@ import {
 import { trackEvent } from '../utils/analytics';
 
 const FAQ_DATA = [
+    {
+        q: '角色的记忆如何互通？自动与手动整理怎么选？',
+        reason: '聊天、通话、见面与其他 App 的记忆说明。',
+        solution: MEMORY_GUIDE_SECTIONS.map(([title, text]) => '**' + title + '**\n' + text).join('\n\n'),
+        icon: 'https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f9e0.png',
+        color: 'bg-violet-50 text-violet-700',
+    },
     {
         q: "1. 进不去网页 / 白屏 / 点了没反应",
         reason: "网络有点小脾气，不够通畅。",
@@ -111,6 +120,14 @@ interface ChangelogEntry {
 }
 
 const CHANGELOG_ENTRIES: ChangelogEntry[] = [
+    {
+        id: HOME_CHANGELOG,
+        title: '3D 家园测试版 · 住进同一个日常',
+        subtitle: '当面聊天接入上下文 · 小手机线上私聊 · 说话邀请与自动开口图解',
+        date: '2026-10-07',
+        src: 'changelogs/2026-10-home3d-beta.html',
+        accent: 'from-orange-50 to-amber-50 border-orange-200',
+    },
     {
         id: SAR_CHANGELOG,
         title: '2026 年 9 月 11 日 · 彼方来信 · SAR',

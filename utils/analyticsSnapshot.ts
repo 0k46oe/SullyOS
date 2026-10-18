@@ -44,9 +44,16 @@ import { getPendingTasks, isAmsg2EnabledForChar } from './amsg2Tasks';
 import { ActiveMsgStore } from './activeMsgStore';
 import { getVRApi } from './vrWorld/vrApi';
 import { isBuiltinSullyLive2D } from './builtinSullyLive2D';
+import { loadUserLocationConfig } from './userLocationPrivacy';
 
 /** 布尔开关转「开 / 关」，带默认值。 */
 const onOff = (v: boolean | undefined, dflt = false) => ((v ?? dflt) ? '开' : '关');
+
+/** Only the saved switch. Never locate, or report a Key, region or provider response. */
+function realLocationEnabled(): string {
+    try { return onOff(loadUserLocationConfig().enabled); }
+    catch { return '读取失败'; }
+}
 
 /**
  * 收集数据规模。全部是数出来的计数，没有一项来自内容本身——
@@ -96,7 +103,9 @@ export function collectAppearance(
 ): Record<string, string> {
     return {
         // ── 桌面 ──
-        桌面皮肤: theme.skin ?? 'default',
+        桌面皮肤: presetOrCustom(theme.skin ?? 'default', ['default','animalcrossing','mobilegame','tamagotchi','companion','homely']),
+        居家配色: theme.skin === 'homely' ? presetOrCustom(theme.homelyPalette ?? 'apricot', ['apricot','blue','rose','lilac','oat']) : '未使用',
+        居家锁定角色: theme.skin === 'homely' ? onOff(!!theme.homelyLockedCharacterId) : '未使用',
         桌面版本: theme.desktopVariant ?? 'paper',
         深色模式: onOff(theme.darkMode),
         隐藏状态栏: onOff(theme.hideStatusBar),
@@ -196,6 +205,7 @@ export function collectCharSettings(
     const now = Date.now();
     return {
         // ── 开关：默认关的，问有没有人开过 ──
+        '3D家园角色数': bucketFewCount(characters.filter(x => x.home3D?.rooms?.length).length),
         记忆宫殿: anyOn(x => x.memoryPalaceEnabled),
         聊天显示备注: anyOn(x => x.chatShowRemark === true),
         自动归档: anyOn(x => x.autoArchiveEnabled),
@@ -465,6 +475,7 @@ export function collectFeatureFlags(src: FeatureSources): Record<string, string>
         // 天气和热点走免鉴权的公共源，没有「配了」这一态，只有开没开。
         天气: rt.weatherEnabled ? '开' : '关',
         节假日感知: rt.userHolidays?.enabled && rt.userHolidays.countryCode ? '开' : '关',
+        真实定位: realLocationEnabled(),
         // 自备 key 的人走 OpenWeatherMap，留空走 Open-Meteo。只报有没有，不报 key。
         天气自备key: rt.weatherApiKey?.trim() ? '有' : '无',
         热点: rt.newsEnabled ? '开' : '关',

@@ -15,7 +15,7 @@ let container: HTMLDivElement;
 let root: Root;
 let props: React.ComponentProps<typeof ChatInputArea>;
 const textarea = () => container.querySelector('textarea')!;
-const primary = () => container.querySelector<HTMLButtonElement>('button[aria-label="发送文字"], button[aria-label="生成回复"], button[aria-label="正在生成回复"]')!;
+const primary = () => container.querySelector<HTMLButtonElement>('button[aria-label="发送文字"], button[aria-label="生成回复"], button[aria-label="停止回复"]')!;
 const renderInput = (patch: Partial<typeof props> = {}) => {
     props = { ...props, ...patch };
     act(() => root.render(React.createElement(ChatInputArea, props)));
@@ -109,11 +109,12 @@ describe('private chat input controls', () => {
         expect(props.setInput).not.toHaveBeenCalled();
     });
 
-    it('disables generation while replying but still allows sending text', () => {
+    it('offers stop while replying and still allows sending text when editing', () => {
         renderInput({ sendButtonGenerates: true, isTyping: true });
-        expect(primary().disabled).toBe(true);
+        expect(primary().disabled).toBe(false);
+        expect(primary().getAttribute('aria-label')).toBe('停止回复');
         act(() => primary().click());
-        expect(props.onGenerate).not.toHaveBeenCalled();
+        expect(props.onGenerate).toHaveBeenCalledTimes(1);
         act(() => textarea().focus());
         expect(primary().disabled).toBe(false);
         act(() => primary().click());
@@ -148,22 +149,22 @@ describe('private chat input controls', () => {
         const onChange = vi.fn();
         act(() => root.render(React.createElement(ChatInputSettings, { value: loadChatInputPreferences(), onChange })));
         const boxes = container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
-        expect(Array.from(boxes, box => box.checked)).toEqual([false, true, false, false]);
+        expect(Array.from(boxes, box => box.checked)).toEqual([false, true, false, false, true, true]);
         const help = container.querySelector<HTMLButtonElement>('button[aria-label="发送按钮代替生成按钮说明"]')!;
         act(() => help.click());
         expect(help.getAttribute('aria-expanded')).toBe('true');
         expect(container.querySelector<HTMLParagraphElement>('#chat-input-help-sendButtonGenerates')!.hidden).toBe(false);
         expect(onChange).not.toHaveBeenCalled();
         act(() => boxes[0].click());
-        expect(onChange).toHaveBeenCalledWith({ sendButtonGenerates: true, enterToSend: true, autoReply: false, emojiSuggestions: false });
+        expect(onChange).toHaveBeenCalledWith({ sendButtonGenerates: true, enterToSend: true, autoReply: false, emojiSuggestions: false, linkCards: true, xhsCards: true, linkCardNoticeSeen: false, xhsCardNoticeSeen: false });
     });
 
     it('persists global preferences and falls back safely for old or broken storage', () => {
-        saveChatInputPreferences({ sendButtonGenerates: true, enterToSend: false, autoReply: true, emojiSuggestions: true });
-        expect(loadChatInputPreferences()).toEqual({ sendButtonGenerates: true, enterToSend: false, autoReply: true, emojiSuggestions: true });
+        saveChatInputPreferences({ sendButtonGenerates: true, enterToSend: false, autoReply: true, emojiSuggestions: true, linkCards: true, xhsCards: true, linkCardNoticeSeen: false, xhsCardNoticeSeen: false });
+        expect(loadChatInputPreferences()).toEqual({ sendButtonGenerates: true, enterToSend: false, autoReply: true, emojiSuggestions: true, linkCards: true, xhsCards: true, linkCardNoticeSeen: false, xhsCardNoticeSeen: false });
         for (const raw of ['{broken', 'null', '{}', '{"sendButtonGenerates":"true","enterToSend":null,"emojiSuggestions":"true"}']) {
             localStorage.setItem(CHAT_INPUT_PREFERENCES_KEY, raw);
-            expect(loadChatInputPreferences()).toEqual({ sendButtonGenerates: false, enterToSend: true, autoReply: false, emojiSuggestions: false });
+            expect(loadChatInputPreferences()).toEqual({ sendButtonGenerates: false, enterToSend: true, autoReply: false, emojiSuggestions: false, linkCards: true, xhsCards: true, linkCardNoticeSeen: false, xhsCardNoticeSeen: false });
         }
     });
 

@@ -1,3 +1,4 @@
+import { resolveDialogueApi } from '../characterApi';
 import { acquireCharacterModule, consumeCharacterModule, characterModuleAllowance, characterModuleCount } from './sarCharacterCommerce';
 import { rollSARActivity, sarActivityPool } from './activityChoices';
 import type { VRSARActivity } from '../../types';
@@ -299,9 +300,9 @@ async function runVRSessionUnlocked(deps: VRSessionDeps): Promise<VRSessionResul
         }
     }
 
-    // API 优先级：角色自带覆盖 > 彼方独立 API > 聊天默认
+    // 角色活动回复：彼方独立 API > 角色默认 API > 全局 API
     const vrGlobalApi = await getVRApi();
-    const vrApi = char.vrState?.api?.baseUrl ? char.vrState.api : (vrGlobalApi?.baseUrl ? vrGlobalApi : apiConfig);
+    const vrApi = resolveDialogueApi(apiConfig, char, vrGlobalApi?.baseUrl ? vrGlobalApi : undefined);
     if (!vrApi.baseUrl) return { ok: false, reason: 'no-api' };
 
     const novels = await DB.getVRNovels();
@@ -612,7 +613,7 @@ async function runVRSessionUnlocked(deps: VRSessionDeps): Promise<VRSessionResul
                 body: JSON.stringify({
                     model: vrApi.model,
                     messages: [{ role: 'system', content: systemPrompt }, ...payload.cleanedApiMessages, { role: 'user', content: roomTurn }],
-                    temperature: 0.9, stream: false,
+                    temperature: vrApi.temperature ?? 0.9, stream: vrApi.stream ?? false,
                 }),
             }, 2, 0, { appName: '彼方', charId: char.id, charName: char.name, purpose: '自由活动' });
             logVRApiCall({ ts: callStart, charId: char.id, charName: char.name, charEnabled: !!char.vrState?.enabled, room: room.id, model: vrApi.model, baseUrl, ok: true, ms: Date.now() - callStart });

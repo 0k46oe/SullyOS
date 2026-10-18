@@ -325,13 +325,15 @@ describe('SAR 推演与备份状态', () => {
         expect(state.runs[0]).toMatchObject({ interactionsUsed: 0, maxInteractions: 50 });
     });
 
-    it('API 优先级为角色覆盖、彼方独立、聊天默认', () => {
+    it('API 优先级为彼方独立、角色默认、全局；不再使用不可见的旧覆盖', () => {
         const api = (baseUrl: string) => ({ baseUrl, apiKey: '', model: 'test' });
         const char = { id: 'c', name: 'C', avatar: '' } as any;
         expect(resolveSARSimulationApi(char, api('vr'), api('chat')).baseUrl).toBe('vr');
         char.vrState = { enabled: true, intervalMinutes: 60, api: api('char') };
-        expect(resolveSARSimulationApi(char, api('vr'), api('chat')).baseUrl).toBe('char');
-        delete char.vrState.api;
+        char.dialogueApi = api('role');
+        expect(resolveSARSimulationApi(char, api('vr'), api('chat')).baseUrl).toBe('vr');
+        expect(resolveSARSimulationApi(char, null, api('chat')).baseUrl).toBe('role');
+        delete char.dialogueApi;
         expect(resolveSARSimulationApi(char, null, api('chat')).baseUrl).toBe('chat');
     });
 

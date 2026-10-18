@@ -131,6 +131,7 @@ sullyos.devDebug.log.v1.<branch>        ← 分类捕获日志（各类混存，
 |------|------|------|--------|
 | `skipPromptBuild` | 行为 | 只发聊天历史，不注入 system prompt | 双语 / MCD / HTML / thinking 等增强全部关掉 |
 | `skipEmotionEval` | 行为 | 主回复照常，但不跑情绪副评估（本地和即时对话都算） | 关掉后情绪不更新 |
+| `forceHomeSecretRoll` | 行为 | 「秘密必定命中」：跳过本地秘密任务的 20% 抽签；即时对话缺少完整回合绑定时不生成秘密 | 默认关；仍需情绪评估开启、有 3D 小屋、已完成素材对话及本轮成功回复的明确来源，同一片段不重复；没有宠物仍不生成宠物事件。调试不可用时不生效，测试后关闭恢复 20% |
 | `mergeSystemMessages` | 行为 | 把聊天请求的多条 `role:system`（稳定前缀 / 易变尾段 / 双语·MCP 提醒条）合并成开头一条再发送（`utils/systemMessageMerge.ts`）。用途：A/B 对照中转适配层对多 system 请求的计量——同一段聊天开关各发一条，对比中转记的 prompt_tokens；合并后骤降 = 中转把「历史后的 system」重复拼接了 | 易变尾段失去 recency 位置、稳定前缀缓存失效；只作临时排障，测完关掉 |
 | `captureEnabled`<br>（记录日志·总开关） | 行为 | 日志录制总闸：关掉时所有捕获类都不抓 | 默认关；关掉只是停录，**不清**已抓日志 |
 | 捕获类 `api` | 捕获 | 抓所有走 `safeFetchJson`（`safeApi`）的 chat completions 请求 + 响应：普通聊天直发，外加 Character 里的记忆精炼/强制归档/导入清洗/批量总结/印象生成。每条带 `durationMs`（最后一次 attempt 从发起到成功/报错的耗时）和 `requestChars`（请求体字符数，messages 折叠后靠它看体积） | 取消勾选只停此后抓取，**不清**已有日志 |
@@ -292,8 +293,11 @@ LLM 日志里的聊天历史动辄几十条，整段塞进 localStorage 很快�
 
 | 字段 | 在哪条记录上 | 说明 |
 |---|---|---|
-| `trigger` | `runtime-flush-start` | 这趟冲刷是谁发起的。`SW通知` 是推送直达的那条；`本地巡查` 是页面自己隔几秒数收件箱数出来的（见下）；其余（`回到前台` / `启动` / `轮询补收` / `上线补收`…）各自带着更长的固有延迟 |
+| `trigger` | `runtime-flush-start` | 这趟冲刷是谁发起的。`生成前收件` 是聊天组装上下文前的本机收件（当前角色没有待收消息时不留这条）；`SW通知` 是推送直达的那条；`本地巡查` 是页面自己隔几秒数收件箱数出来的（见下）；其余（`回到前台` / `启动` / `轮询补收` / `上线补收`…）各自带着更长的固有延迟 |
 | `waitedMs` | `runtime-inbox-message` | 这条消息在收件箱里躺了多久才轮到它。跟正文长短无关，纯粹是「没人来捞」的时间。算的是它**第一次**落到这台设备的时刻——补收把同一条重新写一遍时会保住这个值，否则它永远显示「刚到」 |
+| `charId` / `waitedMs` | `runtime-before-chat-inbox-timeout` | 生成前收件等待达到 30 秒，本轮先继续，原收件管线仍在工作。这一趟跑完之前，同角色后续的生成不再等、也不再记这条 |
+| `charId` / `count` | `runtime-before-chat-inbox-pending` | 生成前收件结束时，当前角色还有 `count` 条留在收件箱（多段没到齐被扣住，或处理失败等重试）；本轮先继续 |
+| `messageId` / `charId` / `taskUuid` | `runtime-scheduled-delivery-accepted` | 已发送的定时消息进入接收流程，与用户此后是否发言无关。是否最终落库还需接着看后处理与重试记录 |
 | `count` / `posted` / `targets` | `notify-clients`（SW 侧） | SW 喊页面时找到几个页面、各自可见性、发成功几个 |
 | `portAck` / `clientsAck` | `runtime-sw-channel-probe` | 启动时的通道体检。两条路分开测：port 通而 clients 不通 = SW 活着但找不到页面 |
 
@@ -385,16 +389,16 @@ SW 跑在自己的 context，没法直接访问 page 的 `localStorage` / `appen
 在 `catch` 里调用它：
 
 ```
-URL: https://sullymeow.ccwu.cc/api/health
+URL: https://proxy.friedsully.com/api/health
 请求: GET · 失败于 43ms
 错误: TypeError: Failed to fetch
-目标域名: sullymeow.ccwu.cc（跨域请求，受 CORS 约束）
+目标域名: proxy.friedsully.com（跨域请求，受 CORS 约束）
 本页来源: https://xxx.pages.dev
 浏览器联网状态: 在线
 Resource Timing: responseStatus=429, transferSize=0 → 对方其实回了 HTTP 429，是响应被 CORS 拦掉的，不是网络不通
 初判: 请求在拿到响应头之前就失败了——浏览器没告诉我们具体是哪一步断的。
 可能原因: 梯子/代理把这个域名的连接掐了 · DNS 解析不到 · ...
-连通性复检: no-cors 直连 sullymeow.ccwu.cc 成功 → 网络路径是通的，问题出在响应本身（...）
+连通性复检: no-cors 直连 proxy.friedsully.com 成功 → 网络路径是通的，问题出在响应本身（...）
 ```
 
 两个关键设计：
@@ -443,3 +447,14 @@ Resource Timing: responseStatus=429, transferSize=0 → 对方其实回了 HTTP 
 ## SAR 剧情与表情校对
 
 扳手内仅在 `pnpm dev` 显示此开关，默认关闭；开启后临时开放名册全部 84 段原稿及逐句表情编辑、分支返回和 JSON 导出。关闭立即恢复真实收藏锁定，未解锁预览退出；不修改星级、奖励或收藏记录，既有校对草稿保留。正式构建即使手动解锁扳手也不能启用。开关按分支随调试标志保存，细节见 [SAR 个人线](./sar-personal-lines.md)。
+
+## 家园自主行为观察（2026-10-04）
+扳手面板顶部的 HomeCompanionDebug 读取 utils/homeCompanionDebug.ts 的会话内快照。useHomeCompanion 在原有三秒决策周期发布当前阻塞条件、坐姿、距离、冷却、判断/尝试/启动/失败次数及最近八次尝试；editor 返回实际寻路失败或降级原因。面板一秒刷新倒计时，不主动调用引擎，不触发 LLM。仅在 isDevDebugAvailable 门禁内可读写，不持久化，不收录聊天/门牌文本；不属于 capture 日志，无须打开记录日志。家园退出/挂起标记已停止，重新挂载重置计数；启动数不是完成数。日程家具动作的并行槽限制另行提示，不能把这份陪伴统计当作全部日程执行记录。
+
+### 私聊与家园请求准备耗时（2026-10-08）
+
+共享 `buildChatRequestPayload` 提供本地 `onPreparationStage`，将识图、记忆召回、提示词组装、协同文件柜、家园任务回执分别计时，保留原顺序和内容。家园进度区分「记忆召回」「组装提示词」，`Home timing` 的 API 日志记录对应毫秒数；ChatApp 原有 `[send→API]` 汇总增加 `payload.memory` / `payload.prompt` 等字段。计时从 `KeepAlive.start()` 前开始，`keepAlive` 单列 SW 准备等待，避免首次请求等待被漏算。`payload` 是总时间，其子阶段不得相加后再与它累加。此处只加阶段名与耗时，不加遥测、不记录正文；真实设备的额外等待需要同角色、同配置的日志对照，不能用隔离测试耗时替代。范围内已存在的家园输入不再额外整份读取角色；新输入仍读持久化记录核对范围，范围外重试继续拒绝。
+
+### 3D 素材的正常取消
+
+`Home3DView` 将实际编辑器初始化推迟到微任务，跳过 StrictMode 已清理的首次 effect，不发出废弃的素材请求。卸载时由 signal 通知编辑器清理，取消原因标记为 `Home3D disposed`。全局 fetch 日志只对 room3d 路径、信号确已取消且原因为该标记的 AbortError 不生成网络故障日志；仍把异常交回调用方。未标记取消、超时、HTTP 失败和真实联网失败保持原有诊断。回归：homeEditorLifecycle / homeAssetCancellation / networkFailureDiagnosis。

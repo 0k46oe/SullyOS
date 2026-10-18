@@ -28,11 +28,6 @@ const ProactiveSettingsModal: React.FC<ProactiveSettingsModalProps> = ({
     const saved = char.proactiveConfig;
     const [enabled, setEnabled] = useState(saved?.enabled ?? false);
     const [interval, setInterval_] = useState(saved?.intervalMinutes ?? 60);
-    const [useSecondaryApi, setUseSecondaryApi] = useState(saved?.useSecondaryApi ?? false);
-    const [secUrl, setSecUrl] = useState(saved?.secondaryApi?.baseUrl ?? '');
-    const [secKey, setSecKey] = useState(saved?.secondaryApi?.apiKey ?? '');
-    const [secModel, setSecModel] = useState(saved?.secondaryApi?.model ?? '');
-    const [showApiSection, setShowApiSection] = useState(saved?.useSecondaryApi ?? false);
 
     // Reset form when modal opens with new char data
     useEffect(() => {
@@ -40,11 +35,6 @@ const ProactiveSettingsModal: React.FC<ProactiveSettingsModalProps> = ({
             const s = char.proactiveConfig;
             setEnabled(s?.enabled ?? false);
             setInterval_(s?.intervalMinutes ?? 60);
-            setUseSecondaryApi(s?.useSecondaryApi ?? false);
-            setSecUrl(s?.secondaryApi?.baseUrl ?? '');
-            setSecKey(s?.secondaryApi?.apiKey ?? '');
-            setSecModel(s?.secondaryApi?.model ?? '');
-            setShowApiSection(s?.useSecondaryApi ?? false);
         }
     }, [isOpen, char.id]);
 
@@ -52,12 +42,6 @@ const ProactiveSettingsModal: React.FC<ProactiveSettingsModalProps> = ({
         onSave({
             enabled,
             intervalMinutes: interval,
-            useSecondaryApi: useSecondaryApi && !!secUrl,
-            secondaryApi: useSecondaryApi && secUrl ? {
-                baseUrl: secUrl,
-                apiKey: secKey,
-                model: secModel,
-            } : undefined,
         });
         onClose();
     };
@@ -130,56 +114,9 @@ const ProactiveSettingsModal: React.FC<ProactiveSettingsModalProps> = ({
                             </div>
                         </div>
 
-                        {/* Secondary API Toggle */}
-                        <div className="pt-2 border-t border-slate-100">
-                            <div className="flex items-center justify-between mb-1">
-                                <span className="text-sm font-bold text-slate-700">使用副 API</span>
-                                <button
-                                    onClick={() => { setUseSecondaryApi(!useSecondaryApi); setShowApiSection(!useSecondaryApi); }}
-                                    className={`w-12 h-7 rounded-full transition-colors relative ${useSecondaryApi ? 'bg-violet-500' : 'bg-slate-200'}`}
-                                >
-                                    <span className={`absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow transition-all duration-200 ${useSecondaryApi ? 'translate-x-5' : 'translate-x-0'}`} />
-                                </button>
-                            </div>
-                            <p className="text-[11px] text-slate-400 leading-relaxed mb-3">
-                                使用单独的 API 发送主动消息，避免消耗主 API 额度。不开启则使用主 API。
-                            </p>
-
-                            {showApiSection && (
-                                <div className="space-y-3 bg-slate-50 rounded-2xl p-3">
-                                    <div>
-                                        <label className="text-xs text-slate-500 font-medium block mb-1">API URL</label>
-                                        <input
-                                            type="text"
-                                            value={secUrl}
-                                            onChange={e => setSecUrl(e.target.value)}
-                                            placeholder="https://api.example.com/v1"
-                                            className="w-full px-3 py-2 bg-white rounded-xl text-sm border border-slate-200 focus:border-violet-300 focus:outline-none transition-colors"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="text-xs text-slate-500 font-medium block mb-1">API Key</label>
-                                        <input
-                                            type="password"
-                                            value={secKey}
-                                            onChange={e => setSecKey(e.target.value)}
-                                            placeholder="sk-..."
-                                            className="w-full px-3 py-2 bg-white rounded-xl text-sm border border-slate-200 focus:border-violet-300 focus:outline-none transition-colors"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="text-xs text-slate-500 font-medium block mb-1">Model</label>
-                                        <input
-                                            type="text"
-                                            value={secModel}
-                                            onChange={e => setSecModel(e.target.value)}
-                                            placeholder="gpt-4o-mini"
-                                            className="w-full px-3 py-2 bg-white rounded-xl text-sm border border-slate-200 focus:border-violet-300 focus:outline-none transition-colors"
-                                        />
-                                    </div>
-                                </div>
-                            )}
-                        </div>
+                        <p className="pt-2 border-t border-slate-100 text-[11px] text-slate-400 leading-relaxed">
+                            主动消息使用当前聊天主 API，调用费用也由主 API 承担。
+                        </p>
                     </>
                 )}
             </div>

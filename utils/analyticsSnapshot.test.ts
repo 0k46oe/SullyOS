@@ -24,6 +24,7 @@ import {
 import { createBuiltinSullyLive2DConfig } from './builtinSullyLive2D';
 import { createFishingMarketState, FISHING_MARKET_STORAGE_KEY } from './vrWorld/fishingMarket';
 import { freshFamiliarity } from './vrWorld/sarFamiliarity/storageTypes';
+import { USER_LOCATION_STORAGE_KEY } from './userLocationPrivacy';
 
 /**
  * 毒药串：每一条都放进某个用户可填字段里。它们只要出现在上报里就是泄漏。
@@ -155,6 +156,28 @@ beforeEach(() => {
 });
 
 describe('当前功能启用 · 不泄漏配置内容', () => {
+    it('真实定位只报告开关，不报告坐标、Key、隐藏地点名或半径', () => {
+        const location = { enabled: true, provider: 'amap', amapKey: 'LOC-KEY-POISON-801', regions: [
+            { id: 'region-poison-802', name: '私密家庭地址-803', latitude: 31.123456, longitude: 121.654321, radiusKm: 3.456789 },
+        ] };
+        localStorage.setItem(USER_LOCATION_STORAGE_KEY, JSON.stringify(location));
+        const flags = collectFeatureFlags(poisonedSources());
+        expect(flags.真实定位).toBe('开');
+        for (const secret of [location.amapKey, ...Object.values(location.regions[0])]) {
+            expect(JSON.stringify(flags)).not.toContain(String(secret));
+        }
+        expectNoLeak(flags);
+        localStorage.setItem(USER_LOCATION_STORAGE_KEY, JSON.stringify({ ...location, enabled: false }));
+        expect(collectFeatureFlags(poisonedSources()).真实定位).toBe('关');
+    });
+    it('没有定位配置记关，坏配置记读取失败，不透传任何字段', () => {
+        expect(collectFeatureFlags(poisonedSources()).真实定位).toBe('关');
+        localStorage.setItem(USER_LOCATION_STORAGE_KEY, '{broken');
+        expect(collectFeatureFlags(poisonedSources()).真实定位).toBe('读取失败');
+        localStorage.setItem(USER_LOCATION_STORAGE_KEY, JSON.stringify({ enabled: POISON.key, regions: [], provider: POISON.url }));
+        const flags = collectFeatureFlags(poisonedSources());
+        expect(flags.真实定位).toBe('读取失败'); expectNoLeak(flags);
+    });
     it('所有配置塞满密钥地址名字，上报里一个片段都不出现', () => {
         localStorage.setItem('aetheros.mcp.servers', JSON.stringify([
             { id: 'a', name: POISON.myName, url: POISON.url, enabled: true, tools: [{ name: 'x' }] },
@@ -586,4 +609,16 @@ describe('快照事件的属性宽度', () => {
     it('当前功能启用', () => {
         expect(Object.keys(collectFeatureFlags(poisonedSources())).length).toBeLessThanOrEqual(35);
     });
+});
+
+
+it('3D 家园快照只输出档位与内置配色，不泄漏用户内容',()=>{
+ const theme={skin:'homely',homelyPalette:POISON.key,homelyLockedCharacterId:POISON.dbId} as unknown as OSTheme;
+ const appearance=collectAppearance(theme,undefined);
+ expect(appearance.居家配色).toBe('custom');expect(appearance.居家锁定角色).toBe('开');
+ expect(collectAppearance({...theme,homelyPalette:'rose'},undefined).居家配色).toBe('rose');
+ expect(collectAppearance({...theme,skin:'default'},undefined).居家配色).toBe('未使用');
+ const chars=collectCharSettings([{id:POISON.dbId,name:POISON.myName,home3D:{rooms:[{name:POISON.city}],records:[{text:POISON.token}],autonomy:false,directSpeech:true},chibiStudio:{home3D:{state:{selected:{eyes:POISON.key}}}}} as unknown as CharacterProfile],POISON.dbId);
+ expect(chars['3D家园角色数']).toBe('1');
+ for(const secret of Object.values(POISON))expect(JSON.stringify([appearance,chars])).not.toContain(secret);
 });

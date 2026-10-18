@@ -31,7 +31,7 @@
 
 ## 全 App 世界书构建管线
 
-新 App 的默认入口是 `ContextBuilder.buildCharacterRequest({ char, user }, messages)`，返回可直接发送的完整消息数组。角色档案、挂载世界书、固定位置和指定深度一次装配；不要先拼 `buildCoreContext` 再调用它，否则会重复人设。App 只负责本次玩法规则、输出格式和本场景历史。
+新 App 的默认入口是 `await ContextBuilder.buildCharacterRequest({ char, user }, messages)`，返回可直接发送的完整消息数组。角色档案、挂载世界书、固定位置和指定深度一次装配；不要先拼 `buildCoreContext` 再调用它，否则会重复人设。App 只负责本次玩法规则、输出格式和本场景历史。
 
 `buildCharacterContext({ char, user, history, instructions })` 是需要拆分主提示词与历史的同一管线接口（聊天、见面、通话使用）。`buildWorldbookRequest` 服务剧场的自定义预设布局，`buildGroupWorldbookRequest` 服务多人布局；这些都在 ContextBuilder 内调用同一解析器和深度放置器。App 不得直接调用世界书解析/插入函数。
 
@@ -54,6 +54,16 @@
 
 新增 App 必须使用消息入口，不再新增文本兼容调用。`utils/contextPipeline.test.ts` 限制旧入口扩散和 App 私自解析世界书，`utils/contextWorldbook.test.ts` 验证公共行为。后续若调整旧后台模板协议，应连同 Worker 契约与对应测试迁移，不能仅改文本拼接。
 
+### 笔友会写作人格
+
+「深度分析写作风格」使用 `buildCharacterRequest`，携带角色核心设定、当前挂载且满足触发条件的世界书、用户档案及按公共规则可读的记忆。分析规则放在系统指令中，不参与世界书关键词扫描；指定深度和消息角色由公共管线保持。
+
+`CharacterProfile.impression` 是角色对 **用户** 的印象，不是角色自己的性格档案。笔友会不得把其中的 MBTI、特质、喜恶、习惯、总结拿来充当作者人格、写作禁忌、范文或采样参数。世界书绑定给角色也不代表条目里每个人物都属于角色；分析和共创提示词明确区分 char、user 和小说人物，用户资料仅用于互动关系。
+
+未生成创作档案时使用中性占位与通用写作指导，不从备注、混合世界观或用户印象猜出固定性格。保存的 `writerPersona`（包括手工修改）原样保留；旧分析如已混淆，需要用户点「深度分析写作风格」重新生成或手动修正。请求失败或输出为空不会覆盖旧档案，也不会以本地兜底冒充分析成功。
+
+验证：`utils/novelPersona.test.ts`。
+
 ### 发送统计
 
 统计按正文标题拆分；沿用 master 的修复，世界书条目内部小标题不再拆散世界书分区。`apiCallLog.findBlockHeaders` 通过 `formatWorldbookSection` 的收尾格式（条目末尾 `---`，整段末尾额外空行）识别边界，修改格式须同步统计解析与测试。完整请求 JSON 用于确认实际发送内容。见面用户输入参与关键词匹配，VN 指令不参与；depth=0 条目不会被错误追加用户输入的 System Note。
@@ -61,3 +71,14 @@
 验证：`utils/contextPipeline.test.ts`、`utils/contextWorldbook.test.ts`、`utils/chatRequestPayload.test.ts`、`utils/datePrompts.test.ts`、`utils/worldbook.test.ts`、`utils/storyTheater.test.ts`、`utils/apiCallLog.test.ts`。
 
 视频通话先给真实用户消息贴摄像头快照，再构建世界书消息；不支持图片时只还原原用户消息，保留同轮世界书的激活结果与顺序。群聊输出继续沿用 master 的思考块清理逻辑。
+
+
+### 3D 实验分支对齐（2026-10-05）
+
+本分支沿用 master 的 `25468054`（PR #674）公共管线及其前置世界书修复，不维护第二套 contextRequest/worldbookRequest 组装器。随后已完整合并 master（0e8d3534），保留 3D 家园适配与分支功能。
+
+分支已有日程从 IndexedDB 异步读取，因此 `buildCoreContext`、`buildCharacterContext`、`buildCharacterRequest` 返回 Promise，调用时必须 await。世界书解析、消息角色和深度放置仍复用 master 的实现。
+
+3D 家园通过 `buildChatRequestPayload` 复用 ChatApp 的历史清洗、世界书装配、记忆召回和实时上下文，替换本应用的行为/输出提示词。2026-10-06 修正记录粒度：发言各自保留 user / assistant，连续短动作合段，跨发言、其他 App 消息或归档边界不合并；旧整轮记录保留数据库 ID，在范围筛选后展开角色与时间，世界书扫描和深度插入消费展开后的实际历史。家园生成前也复用本机收件准备。`homeChatPipelineParity.test.ts` 对照共享组装器输出，`homeContextSegments.integration.test.ts` 补充跨 App 顺序、收件、迁移回滚、归档并发及旧输入重试边界；不能仅凭共享组装器测试推断整个入口的准备流程一致。
+
+后台保留既有 fire_pack v7、门牌输入 v1 和文本兼容边界。本次撤回额外的后台结构化世界书协议扩展，不要求为此升级云端协议。

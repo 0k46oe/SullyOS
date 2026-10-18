@@ -1,5 +1,9 @@
+import { resolveDialogueApi } from './characterApi';
+import { stoppedReplyStateEntries } from './amsgStoppedReplyClient';
 import { loadCharacterContextMessages } from './chatContextRange';
 import { ReiClient } from '@rei-standard/amsg-client';
+import { createCloudDataSession } from './amsgCloudData';
+import { captureCloudOwnerGenerations, rememberCloudOwnerGeneration, stampCloudWrite, captureCloudWriteCheck, invalidateCloudOwnerWrites } from './amsgCloudOwnerGeneration';
 import {
   ActiveMsg2CharacterConfig,
   ActiveMsg2ExpirePolicy,
@@ -50,6 +54,7 @@ import {
   forgetAllCredIds,
   forgetCredIds,
   normalizeChatApiUrl,
+  parseCharCredId,
   pickChangedCredRows,
   rememberCredRows,
   supportsLlmCredentials,
@@ -67,6 +72,7 @@ import {
   AMSG_FIRE_PACK_KEY,
   FIRE_PACK_VERSION,
   AMSG_SLOT_AWAY_HINT,
+  BEFORE_SPEAK_LINES,
   AMSG_SLOT_CURRENT_TIME,
   AMSG_SLOT_REALTIME_WORLD,
   AMSG_SLOT_SCENE,
@@ -202,12 +208,15 @@ const REMOTE_TASK_ALREADY_COMPLETED_CODE = 'TASK_ALREADY_COMPLETED';
 // 配了 serverToken 就每次带 X-Client-Token；worker 端配了就强制校验，缺/错回 401。
 const normalizeWorkerBase = (workerUrl: string) => workerUrl.trim().replace(/\/+$/, '');
 
-const createClient = (config: Pick<ActiveMsg2GlobalConfig, 'userId' | 'workerUrl' | 'serverToken'>) =>
-  new ReiClient({
+const createClient = (config: Pick<ActiveMsg2GlobalConfig, 'userId' | 'workerUrl' | 'serverToken'>) => {
+  const client = new ReiClient({
     baseUrl: normalizeWorkerBase(config.workerUrl),
     userId: config.userId,
     serverToken: config.serverToken || undefined,
   });
+  captureCloudOwnerGenerations(client, config);
+  return client;
+};
 
 /** 面板新建任务的默认时间：半小时后，折成 datetime-local 认的本地墙钟。 */
 export const getDefaultActiveMsgFirstSendTime = () =>
@@ -565,9 +574,8 @@ const initializeClient = (config: ActiveMsg2GlobalConfig) => {
   return promise;
 };
 
-const resolveApiConfig = (char: CharacterProfile, config: ActiveMsg2CharacterConfig, apiConfig: APIConfig) => {
-  const useSecondary = config.useSecondaryApi && config.secondaryApi?.baseUrl;
-  const source = useSecondary ? config.secondaryApi! : apiConfig;
+const resolveApiConfig = (char: CharacterProfile, _config: ActiveMsg2CharacterConfig, apiConfig: APIConfig) => {
+  const source = resolveDialogueApi(apiConfig, char);
 
   if (!source.baseUrl || !source.apiKey || !source.model) {
     throw new Error('主动消息 2.0 缺少可用的 API URL / Key / Model。');
@@ -576,12 +584,7 @@ const resolveApiConfig = (char: CharacterProfile, config: ActiveMsg2CharacterCon
   return source;
 };
 
-/**
- * 一个角色的 AI 任务此刻该用的凭据补丁（update-message 载荷）。
- * 生效凭据的算法与排程时同一份 resolveApiConfig：角色开了单独 API 就写单独 API 的值，
- * 没开才用全局聊天 API——凭据刷新绝不能把单独 API 的任务盖成全局凭据。
- * 凭据配不齐（比如单独 API 缺字段）沿用 resolveApiConfig 的抛错，调用方按角色记失败。
- */
+/** 存量内联任务的凭据补丁，与新排程一样取聊天主 API。 */
 const resolveTaskCredentialUpdates = (
   char: CharacterProfile,
   config: ActiveMsg2CharacterConfig,
@@ -640,14 +643,15 @@ export const isClientStateDeleteReady = async (): Promise<boolean> => {
  */
 const putLlmCredentialRows = async (
   rows: LlmCredentialRow[],
-  options: { force?: boolean } = {},
+  options: { force?: boolean; client?: ReiClient } = {},
 ): Promise<number> => {
+  const assertWriteCurrent = captureCloudWriteCheck(rows.flatMap(row => { const owner = parseCharCredId(row.credId); return owner ? [owner.charId] : []; }));
   const pending = options.force ? rows : pickChangedCredRows(rows);
   if (pending.length === 0) return 0;
-  const globalConfig = await ensureWorkerReady();
-  const client = await initializeClient(globalConfig);
+  const client = options.client ?? await initializeClient(await ensureWorkerReady());
+  assertWriteCurrent();
   for (const batch of chunkCredRows(pending)) {
-    const response = await client.putLlmCredentials(batch);
+    const response = await client.putLlmCredentials(batch.map(row => stampCloudWrite(client, row)));
     if (!response?.success) {
       throw new Error(response?.error?.message || '登记 LLM 凭据失败。');
     }
@@ -881,18 +885,8 @@ export const buildFirePack = async (
     '【本次任务】',
     AMSG_SLOT_TASK_INSTRUCTION,
     '',
-    // 「这件事是不是已经聊过了」是语义问题，只有看得到完整对话的角色判得了。代码那道闸
-    // （utils/amsg2ExpireGuard.ts）只判「到点那会儿用户在不在聊天」这一件确定的事——早先
-    // 它还兼管一次性任务的「排完之后用户再开过口就作废」，那条规则没有时间窗，跨夜任务
-    // 几乎必然被误杀，现在整条交给这里。
-    // 判据必须是「这件事发生过没有」这种能对照上下文查证的事实。写成「你觉得合不合适」
-    // 的话，模型会拿「怕打扰」「时机不太对」当理由沉默，主动消息就整体哑掉了。
-    // 一个字都不输出 → worker 走 skip-push 出口：不推送、不占连发额度、面板照实说明。
-    '【开口之前】',
-    '先对照上面的【最近对话上下文】：这条任务要说的事，是不是已经在你们的对话里发生过、或者已经聊完了？',
-    '已经发生过 → 什么都不要输出。一个字都不要写，也不要解释自己为什么不说。这次就当没有这条任务。',
-    '还没发生 → 照常说你要说的话。',
-    '判据只有「这件事发生过没有」这一条。不要因为「怕打扰」「时机好像不太对」而沉默，那些不归你判。',
+    // 到点说不说由角色自己判（见 amsgFirePack 的 BEFORE_SPEAK_LINES）。
+    ...BEFORE_SPEAK_LINES,
     '',
     // recency 末位人声锚：上面【角色系统设定】里已带「回到你自己」钢印，但被任务说明压在后面、
     // 失了 recency。这里在最后一句把它拎回来，让主动消息也从「你这个人」长出来，而不是滑回均值腔。
@@ -1192,10 +1186,13 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * 抛出来。注意 putClientState 失败有两种形态——抛异常和回 { success: false }，
  * 两种都要接住，只判 try/catch 会漏掉后者。
  */
+const putCloudClientState = (client: ReiClient, entries: Parameters<ReiClient['putClientState']>[0]) =>
+  client.putClientState(entries.map(entry => stampCloudWrite(client, entry)));
+
 export const putClientStateOrThrow = async (
   client: ReiClient,
   // value 为 null 表示删掉这一行（只在 isClientStateDeleteReady 为 true 时才能发）。
-  entries: Array<{ namespace: string; key: string; value: string | null; updatedAt: number }>,
+  entries: Array<{ namespace: string; key: string; value: string | null; updatedAt: number; owner?: { type: string; id: string; label?: string } }>,
   phase: string,
 ): Promise<void> => {
   let lastError: unknown;
@@ -1205,7 +1202,7 @@ export const putClientStateOrThrow = async (
 
     let response: { success?: boolean; data?: { rejected?: Array<{ key: string; message?: string }> }; error?: { message?: string } } | undefined;
     try {
-      response = await client.putClientState(entries) as typeof response;
+      response = await putCloudClientState(client, entries) as typeof response;
     } catch (error) {
       lastError = error;
       continue;
@@ -1404,6 +1401,7 @@ export const owesInstantChatReply = (charId: string): boolean =>
  */
 const buildLimitsEntry = (char: CharacterProfile, updatedAt: number) => ({
   namespace: amsgStateNamespace(char.id),
+  owner: { type: 'character', id: char.id, label: char.name },
   key: AMSG_LIMITS_KEY,
   value: JSON.stringify(buildAmsgLimitsRecord(char.activeMsg2Config, isAmsg2EnabledForChar(char))),
   updatedAt,
@@ -1414,10 +1412,12 @@ const buildCharStateEntries = async (
   firePack: AmsgFirePack,
   updatedAt: number,
 ) => [
+  ...(await stoppedReplyStateEntries(char.id)).map(entry => ({ ...entry, namespace: amsgStateNamespace(char.id), updatedAt })),
   buildLimitsEntry(char, updatedAt),
   {
     namespace: amsgStateNamespace(char.id),
     key: AMSG_FIRE_PACK_KEY,
+    owner: { type: 'character', id: char.id, label: char.name },
     // 压在加密之前：上游 putClientState 先加密再发，密文压不动（见 amsgFirePack）。
     value: await packStateValue(JSON.stringify(firePack)),
     updatedAt,
@@ -1426,6 +1426,7 @@ const buildCharStateEntries = async (
   {
     namespace: amsgStateNamespace(char.id),
     key: AMSG_TOOL_PACK_KEY,
+    owner: { type: 'character', id: char.id, label: char.name },
     value: await packStateValue(JSON.stringify(buildToolPack(char))),
     updatedAt,
   },
@@ -1681,7 +1682,7 @@ const fetchWithAuth = async (path: string, config: ActiveMsg2GlobalConfig, init:
   (await fetchWithAuthRaw(path, config, init, phase)).body;
 
 const encryptPayload = async (client: ReiClient, payload: unknown) => {
-  return (client as unknown as ReiCryptoBridge)._encrypt(JSON.stringify(payload));
+  return (client as unknown as ReiCryptoBridge)._encrypt(JSON.stringify(payload && typeof payload === 'object' && !Array.isArray(payload) ? stampCloudWrite(client, payload as Record<string, unknown>) : payload));
 };
 
 const decryptPayload = async (client: ReiClient, payload: { iv: string; authTag: string; encryptedData: string }) => {
@@ -2410,8 +2411,9 @@ export const ActiveMsgClient = {
   },
 
   async scheduleCharacterTask(params: {
+    signal?: AbortSignal;
     char: CharacterProfile;
-    /** 角色级共享设置（secondaryApi / maxTokens）。 */
+    /** 角色级共享设置（maxTokens）。 */
     config: ActiveMsg2CharacterConfig;
     /** 本次要排的任务。 */
     task: {
@@ -2431,9 +2433,11 @@ export const ActiveMsgClient = {
     realtimeConfig: RealtimeConfig;
     apiConfig: APIConfig;
   }) {
+    const assertWriteCurrent = captureCloudWriteCheck([params.char.id]);
     const { char, config, task, replaceTaskUuid, userProfile, groups, realtimeConfig, apiConfig } = params;
     const globalConfig = await ensureWorkerReady();
     const client = await initializeClient(globalConfig);
+    assertWriteCurrent();
     // 任务体不带订阅，worker 到点读用户级那一份——所以建任务前先把它登记上去。
     const nativeToken = readNativePushToken();
     if (nativeToken) await this.registerNativePushToken(nativeToken);
@@ -2483,7 +2487,8 @@ export const ActiveMsgClient = {
         // worker 满血链路的 onLLMOutput 拿不到任务顶层的 messageType，靠 metadata 透传
         // 还原 push.messageType（老任务没这字段时 worker 回退 'auto'，收侧只展示不路由）。
         amsgMode: task.mode,
-        // 防穿帮闸字段：worker onBeforeFire 与客户端送达兜底都从这里读。
+        // 到点策略字段：worker onBeforeFire 从这里读；amsgClientTaskId 还随 push 落到气泡上，
+        // 是这条任务在客户端的归属键。
         // fixed 恒为 force——它走不了 worker 闸（taskNeedsLlm=false），语义统一钉死。
         // recurrenceType / occurrenceMs 不往这儿抄：库会把它们盖在每条 push 顶层，
         // 角色在 fire 里自排的任务也一样有，抄一份反而多一处会漏写的地方。
@@ -2559,12 +2564,14 @@ export const ActiveMsgClient = {
 
     // 凭据行要先在云端存在：上游建任务前会挨个查引用，缺一个就 409 CREDENTIAL_NOT_FOUND。
     // 只在值变过时真的发请求（指纹底账），所以常态下这一步一个请求都不发。
-    if (credRow) await putLlmCredentialRows([credRow]);
+    if (credRow) await putLlmCredentialRows([credRow], { client });
 
     const postSchedule = async () => {
+      params.signal?.throwIfAborted();
       const encrypted = await encryptPayload(client, payload);
       return fetchWithAuth('schedule-message', globalConfig, {
         method: 'POST',
+        signal: params.signal,
         headers: {
           'Content-Type': 'application/json',
           'X-Payload-Encrypted': 'true',
@@ -2581,7 +2588,7 @@ export const ActiveMsgClient = {
     if (!response?.success && response?.error?.code === 'CREDENTIAL_NOT_FOUND' && credRow) {
       console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 云端没有这行凭据，补传后重排一次`, credRow.credId);
       forgetCredIds([credRow.credId]);
-      await putLlmCredentialRows([credRow], { force: true });
+      await putLlmCredentialRows([credRow], { force: true, client });
       response = await postSchedule();
     }
 
@@ -2710,8 +2717,10 @@ export const ActiveMsgClient = {
     temperature?: number;
     maxTokens?: number;
   }): Promise<{ uuid: string }> {
+    const assertWriteCurrent = captureCloudWriteCheck([params.charId]);
     const globalConfig = await ensureWorkerReady();
     const client = await initializeClient(globalConfig);
+    assertWriteCurrent();
 
     if (!await isLlmCredentialsReady()) {
       throw new Error('这台 Worker 还不支持凭据存表，后台任务跑不了（去设置页重新部署一次）。');
@@ -2721,11 +2730,12 @@ export const ActiveMsgClient = {
     await putClientStateOrThrow(client, [{
       namespace: AMSG_JOB_NAMESPACE,
       key: params.jobKey,
+      owner: { type: 'character', id: params.charId, label: params.charName },
       value: await packStateValue(JSON.stringify(params.jobInput)),
       updatedAt: now,
     }], '上传后台任务输入');
 
-    await putLlmCredentialRows([params.credRow]);
+    await putLlmCredentialRows([params.credRow], { client });
 
     const payload: Record<string, any> = {
       contactName: params.charName,
@@ -2783,7 +2793,7 @@ export const ActiveMsgClient = {
     if (!response?.success && response?.error?.code === 'CREDENTIAL_NOT_FOUND') {
       console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 云端没有这行凭据，补传后重排一次`, params.credRow.credId);
       forgetCredIds([params.credRow.credId]);
-      await putLlmCredentialRows([params.credRow], { force: true });
+      await putLlmCredentialRows([params.credRow], { force: true, client });
       response = await postSchedule();
     }
 
@@ -2805,13 +2815,13 @@ export const ActiveMsgClient = {
    * 绝不退回本地生成——静默分流那种查无可查的坑踩过一次就够了。
    */
   async sendInstantChat(params: {
+    uuid?: string;
+    signal?: AbortSignal;
     char: CharacterProfile;
     /** 本地生成会 POST 给 /chat/completions 的那串 fullMessages，原样带上去。 */
     chatMessages: Array<{ role: string; content: unknown }>;
     /**
      * 这一轮该用的聊天凭据——**必须是本地生成那一轮会用的同一份**（effectiveApi）。
-     * 换成主动消息的「角色单独 API」的话，同一句话开不开即时对话会由不同的模型来答，
-     * 而用户完全看不出这件事发生过。
      */
     api: { baseUrl: string; apiKey: string; model: string };
     /**
@@ -2843,11 +2853,15 @@ export const ActiveMsgClient = {
     /** 上一条还没被认领的即时对话任务，连发两条时用它顶掉（合并成一起回）。 */
     supersedesUuid?: string;
   }): Promise<{ uuid: string; clientTaskId: string }> {
+    params.signal?.throwIfAborted();
+    const assertWriteCurrent = captureCloudWriteCheck([params.char.id]);
     const { char, chatMessages, api, userProfile, groups, realtimeConfig } = params;
     if (!api.baseUrl || !api.model) throw new Error('即时对话没发出去：聊天 API 地址或模型没配齐。');
     const globalConfig = await ensureWorkerReady();
     const client = await initializeClient(globalConfig);
+    assertWriteCurrent();
 
+    params.signal?.throwIfAborted();
     const now = Date.now();
     const tzId = resolveCharTimeZone(char) ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
     // 模板只有定时任务那条路才渲染：角色 2.0 关着（云端 fire 不注入排程工具，排不出
@@ -2864,6 +2878,7 @@ export const ActiveMsgClient = {
 
     const clientTaskId = crypto.randomUUID();
 
+    params.signal?.throwIfAborted();
     // ── 这一轮的凭据走引用还是内联 ──
     //
     // 走引用时两行一起登记：
@@ -2897,11 +2912,15 @@ export const ActiveMsgClient = {
     const inlineCreds = !credRefs.chat;
     // 评估配置：凭据走引用时只留提示词模板，副 API 的 apiKey 一个字节都不进任务 metadata。
     const emotionEvalSpec = params.emotionEval
-      ? (credRefs.emotion ? { prompt: params.emotionEval.prompt } : params.emotionEval)
+      ? (credRefs.emotion ? {
+          prompt: params.emotionEval.prompt,
+          ...(params.emotionEval.homeSecretRequestId ? {homeSecretRequestId: params.emotionEval.homeSecretRequestId} : {}),
+        } : params.emotionEval)
       : undefined;
 
     const remoteAvatarUrl = toRemoteAvatarUrl(char.avatar);
     const taskPayload: Record<string, unknown> = {
+      ...(params.uuid ? { uuid: params.uuid } : {}),
       contactName: char.name,
       ...(remoteAvatarUrl ? { avatarUrl: remoteAvatarUrl } : {}),
       // 用 'auto' 而不是 'instant'：'instant' 在上游是「当场跑完」的行型，走不到 fire hooks，
@@ -2991,22 +3010,28 @@ export const ActiveMsgClient = {
     // 旧 bundle 的 worker 不认 credPayload，凭据行还得靠这一步单独登记（上游建任务前会
     // 挨个查引用）。只有值跟底账不一样才真的发请求，常态下是零请求；新 bundle 上它最多是
     // 值刚变的那一轮多写一遍。
-    if (credRows.length > 0) await putLlmCredentialRows(credRows);
+    params.signal?.throwIfAborted();
+    if (credRows.length > 0) await putLlmCredentialRows(credRows, { client });
 
-    const postInstantChat = () => fetchWithAuthRaw('instant-chat', globalConfig, {
-      method: 'POST',
-      // 外壳是明文：里头两个信封已经加密好，别再给外壳挂加密头（包装层会当它是整体密文）。
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ statePayload, taskPayload: encryptedTask, ...(credPayload ? { credPayload } : {}) }),
-    }, '即时对话');
+    const postInstantChat = () => {
+      params.signal?.throwIfAborted();
+      // 已发出的受理请求读完 UUID 后再取消，避免请求断开却留下不知道身份的任务。
+      return fetchWithAuthRaw('instant-chat', globalConfig, {
+        method: 'POST',
+        // 外壳是明文：里头两个信封已经加密好，别再给外壳挂加密头（包装层会当它是整体密文）。
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ statePayload, taskPayload: encryptedTask, ...(credPayload ? { credPayload } : {}) }),
+      }, '即时对话');
+    };
 
     let { status, body } = await postInstantChat();
+    if (status !== 202) params.signal?.throwIfAborted();
     // 云端说引用的凭据不存在（本地底账脏了）：绕过指纹强传一次再发一次，只自愈一次。
     // 包装层把上游那份原样塞在 error.upstream 里，所以要往里再剥一层看错误码。
     if (status !== 202 && credRows.length > 0 && isCredentialNotFound(body)) {
       console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 云端没有这一轮引用的凭据，补传后重发一次`);
       forgetCredIds(credRows.map((row) => row.credId));
-      await putLlmCredentialRows(credRows, { force: true });
+      await putLlmCredentialRows(credRows, { force: true, client });
       ({ status, body } = await postInstantChat());
     }
     // 云端拒收了这一轮的状态：不是内容有问题，是这台设备盖的时间戳跨不过云端那一行
@@ -3033,9 +3058,11 @@ export const ActiveMsgClient = {
   // worker 对 expire AI 任务到点前先读它——新鲜则 skip，避免正在聊天时又弹主动消息。
   // 写入失败由调用方（amsgStateSync 的 lease timer）只 warn，45s TTL 自然失效。
   async syncChatPresence(charId: string, presence: AmsgChatPresence): Promise<void> {
+    const assertWriteCurrent = captureCloudWriteCheck([charId]);
     const globalConfig = await ensureWorkerReady();
     const client = await initializeClient(globalConfig);
-    const response = await client.putClientState([{
+    assertWriteCurrent();
+    const response = await putCloudClientState(client, [{
       namespace: amsgStateNamespace(charId),
       key: AMSG_CHAT_PRESENCE_KEY,
       value: JSON.stringify(presence),
@@ -3057,10 +3084,14 @@ export const ActiveMsgClient = {
     userProfile: UserProfile;
     groups: GroupProfile[];
     realtimeConfig?: RealtimeConfig;
+    /** 队列快照的授权仍有效；必须在真正发送前再次确认。 */
+    isCurrent?: () => boolean;
   }>): Promise<void> {
+    const assertWriteCurrent = captureCloudWriteCheck(items.map(item => item.char.id));
     if (!items.length) return;
     const globalConfig = await ensureWorkerReady();
     const client = await initializeClient(globalConfig);
+    assertWriteCurrent();
     const now = stampStateUpdatedAt();
     // 表情包全库与角色无关，整批读一次就够——放在循环里的话 N 个角色要跑 2N 次全表
     // getAll（表情记录带图片数据），拿回来的还是同一份。
@@ -3068,6 +3099,7 @@ export const ActiveMsgClient = {
     const entries = [];
     // 逐个串行：并发跑会同时开 N 个 IDB 事务，容易撞上 IndexedDB 连接风暴（写失败、确认超时）。
     for (const item of items) {
+      if (item.isCurrent?.() === false) continue;
       const firePack = await buildFirePack(
         item.char, item.userProfile, item.groups, item.realtimeConfig, emojiLibrary,
       );
@@ -3075,7 +3107,10 @@ export const ActiveMsgClient = {
       // 内容一个字不裁；老 worker 拒超限条目 → 设置页 capabilities 探测亮牌。
       entries.push(...(await buildCharStateEntries(item.char, firePack, now)));
     }
-    const response = await client.putClientState(entries);
+    const authorizedNamespaces = new Set(items.filter(item => item.isCurrent?.() !== false).map(item => amsgStateNamespace(item.char.id)));
+    const authorizedEntries = entries.filter(entry => authorizedNamespaces.has(entry.namespace));
+    if (!authorizedEntries.length) return;
+    const response = await putCloudClientState(client, authorizedEntries);
     if (!response?.success) {
       throw new Error(response?.error?.message || '上传云端状态失败。');
     }
@@ -3107,13 +3142,13 @@ export const ActiveMsgClient = {
       await alignStateClockWithRemote(client, [...new Set(skipped.map((s) => s.namespace))]);
     }
     // 同步已经落定，顺路把这几个角色的存量空壳清一遍（每角色一次，失败只 warn）。
-    await sweepSidechannelShells(client, items.map((item) => item.char.id));
+    await sweepSidechannelShells(client, items.filter(item => item.isCurrent?.() !== false).map(item => item.char.id));
   },
 
   async syncToolConfig(realtimeConfig: RealtimeConfig | undefined): Promise<void> {
     const globalConfig = await ensureWorkerReady();
     const client = await initializeClient(globalConfig);
-    const response = await client.putClientState([buildToolConfigEntry(realtimeConfig, stampStateUpdatedAt())]);
+    const response = await putCloudClientState(client, [buildToolConfigEntry(realtimeConfig, stampStateUpdatedAt())]);
     if (!response?.success) {
       throw new Error(response?.error?.message || '上传工具凭据失败。');
     }
@@ -3242,7 +3277,7 @@ export const ActiveMsgClient = {
    * 列出云端 client_state 里有哪些命名空间，各占多少。给「云端数据」清点用。
    *
    * 这是唯一一条能发现「本地已经没有、云端只剩一份上下文」的角色的线索：任务表和凭据
-   * 表都问不到它们（没排过任务、没配过单独 API），而角色命名空间在 worker 侧没有 TTL，
+   * 表都问不到它们（还没创建过任务或凭据行），而角色命名空间在 worker 侧没有 TTL，
    * 不主动去看就永远不知道它在那儿。
    *
    * 要用户那台 worker 更新到带 `client-state-namespaces` 的版本。老 worker 上那条路由
@@ -3503,6 +3538,28 @@ export const ActiveMsgClient = {
     return client.getCapabilities();
   },
 
+  /** 一次管理会话固定连接；界面直接使用上游的完整清单与持久清理操作。 */
+  async openCloudDataSession() {
+    const config = await ensureWorkerReady();
+    const client = await initializeClient(config);
+    return createCloudDataSession(client, { workerUrl: config.workerUrl, userId: config.userId }, {
+      onRestored: async state => {
+        invalidateCloudOwnerWrites(state.owner);
+        if (state.owner.type === 'character') (await import('./amsgStateSync')).discardAmsgPendingState(state.owner.id);
+        rememberCloudOwnerGeneration(config, state.owner, state.generation);
+        forgetAllCredIds();
+        invalidateClientCache();
+      },
+      onCleanupStarted: async operation => {
+        forgetAllCredIds();
+        if (operation.mode === 'retire-owner' && operation.owner?.type === 'character') {
+          invalidateCloudOwnerWrites(operation.owner);
+          (await import('./amsgStateSync')).discardAmsgPendingState(operation.owner.id);
+        }
+      },
+    });
+  },
+
   /**
    * 逐条 PUT update-message，返回成功数与失败的 uuid。
    * TASK_NOT_FOUND / TASK_ALREADY_COMPLETED 不算失败——远端已经没有 / 已完结的
@@ -3544,6 +3601,8 @@ export const ActiveMsgClient = {
     config: ActiveMsg2CharacterConfig;
     apiConfig: APIConfig;
     tasks: ActiveMsg2TaskRecord[];
+    /** 全局刷新已读过列表时复用，避免每个角色再读一遍。 */
+    remoteTasks?: any[];
   }): Promise<{
     status: 'no-tasks' | 'ok' | 'partial';
     updated: number;
@@ -3554,57 +3613,88 @@ export const ActiveMsgClient = {
       .map((t) => t.taskUuid);
     if (aiTaskUuids.length === 0) return { status: 'no-tasks', updated: 0, failed: 0 };
 
-    const updates = resolveTaskCredentialUpdates(params.char, params.config, params.apiConfig);
-    const { updated, failed } = await this.updatePendingTasksRemote(aiTaskUuids, updates);
-    return { status: failed.length ? 'partial' : 'ok', updated, failed: failed.length };
+    const inlineUpdates = resolveTaskCredentialUpdates(params.char, params.config, params.apiConfig);
+    const remoteTasks = params.remoteTasks ?? await this.listAllTasks();
+    const remoteByUuid = new Map(remoteTasks.map((task) => [task.uuid, task]));
+    const credRow = buildCharChatCredRow(params.char, params.config, params.apiConfig)!;
+    // 引用任务不能写内联凭据；先确保主 API 行存在，再改 chat 引用。其它 purpose 原样保留。
+    if (aiTaskUuids.some((uuid) => remoteByUuid.get(uuid)?.credRefs?.chat)) {
+      await this.putLlmCredentials([credRow]);
+    }
+    let updated = 0;
+    let failed = 0;
+    for (const uuid of aiTaskUuids) {
+      const refs = remoteByUuid.get(uuid)?.credRefs;
+      const updates = refs?.chat
+        ? { credRefs: { ...refs, chat: credRow.credId } }
+        : inlineUpdates;
+      const result = await this.updatePendingTasksRemote([uuid], updates);
+      updated += result.updated;
+      failed += result.failed.length;
+    }
+    return { status: failed ? 'partial' : 'ok', updated, failed };
   },
 
   /**
-   * 聊天 API 配置保存后，把新凭据写回还会响的远端 AI 任务（设置页保存路径调）。
-   * 任务体里的 apiUrl / apiKey / primaryModel 是排程那一刻冻结的——换了 Key、
-   * 旧 Key 吊销后，已排程任务到点全部 401，用户只看到「主动消息怎么不来了」。
-   *
-   * 范围：开着 2.0（enabled:true）且有 pending AI 任务（mode !== 'fixed'）的
-   * 角色。fixed 不走 LLM 用不到凭据；关掉 2.0 的角色残留任务是「待取消」而不是
-   * 「待续命」，不给它们续新凭据。生效凭据按 resolveTaskCredentialUpdates 算——
-   * 开了单独 API 的角色写的是单独 API 的值，不会被全局配置覆盖。
+   * 主 API 变更 / 启动时同步存量任务。远端列表补齐关闭页面期间角色自己排的任务；
+   * 即时对话和后台作业各有自己的凭据生命周期，不在这里改它们的请求终值。
    */
   async refreshApiCredentialsForPendingTasks(apiConfig: APIConfig): Promise<{
     status: 'no-tasks' | 'ok' | 'partial';
     updated: number;
     failed: number;
   }> {
-    const now = Date.now();
-    const targets = (await DB.getAllCharacters())
-      .filter((char) => isAmsg2EnabledForChar(char))
-      .map((char) => ({
-        char,
-        config: char.activeMsg2Config ?? { enabled: true },
-        aiTaskUuids: getPendingTasks(char.activeMsg2Config, now)
-          .filter((t) => t.mode !== 'fixed')
-          .map((t) => t.taskUuid),
-      }))
-      .filter((item) => item.aiTaskUuids.length > 0);
-    // 没有要刷的任务直接返回：没配 2.0 的用户每次保存 API 不该多打一个请求。
-    if (targets.length === 0) return { status: 'no-tasks', updated: 0, failed: 0 };
-
+    const characters = (await DB.getAllCharacters()).filter(isAmsg2EnabledForChar);
+    if (!characters.length) return { status: 'no-tasks', updated: 0, failed: 0 };
+    const remoteTasks = await this.listAllTasks();
     let updated = 0;
     let failed = 0;
-    for (const item of targets) {
-      let updates: Record<string, unknown>;
-      try {
-        updates = resolveTaskCredentialUpdates(item.char, item.config, apiConfig);
-      } catch (error) {
-        // 这个角色的凭据配不齐（多半是单独 API 缺字段），整组记失败，别拦着其他角色。
-        console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 角色凭据解析失败，跳过其任务的凭据刷新`, item.char.id, error);
-        failed += item.aiTaskUuids.length;
-        continue;
+    let hasTasks = false;
+    for (const char of characters) {
+      const tasksByUuid = new Map(getPendingTasks(char.activeMsg2Config, Date.now())
+        .filter((task) => task.mode !== 'fixed').map((task) => [task.taskUuid, task]));
+      for (const remote of remoteTasks) {
+        if (remote.charId !== char.id || remote.status !== 'pending') continue;
+        if (remote.messageType !== 'auto' && remote.messageType !== 'prompted') continue;
+        if (remote.messageSubtype === AMSG_INSTANT_CHAT_SUBTYPE) {
+          // 上游自排会继承父任务的 subtype。只看标签会漏掉从即时对话排出的子任务；
+          // 读 metadata 确认是自排任务，不能改用户正在等待的那一轮即时回复。
+          try {
+            const globalConfig = await ensureWorkerReady();
+            const response = await fetchWithAuth(`message?id=${encodeURIComponent(remote.uuid)}`, globalConfig, {
+              method: 'GET',
+              headers: { 'X-Response-Encrypted': 'true', 'X-Encryption-Version': '1' },
+            }, '查询任务凭据');
+            if (!response?.success) {
+              const code = response?.error?.code;
+              if (code === 'TASK_NOT_FOUND' || code === 'TASK_ALREADY_COMPLETED') continue;
+              throw new Error(response?.error?.message || '读取任务失败');
+            }
+            const client = await initializeClient(globalConfig);
+            const metadata = (await decryptPayload(client, response.data))?.task?.metadata;
+            if (metadata?.amsgInstantChat || metadata?.amsgSelfScheduled !== true) continue;
+          } catch {
+            failed += 1;
+            continue;
+          }
+        } else if (remote.messageSubtype && remote.messageSubtype !== 'chat') continue;
+        tasksByUuid.set(remote.uuid, { taskUuid: remote.uuid, mode: remote.messageType } as ActiveMsg2TaskRecord);
       }
-      const result = await this.updatePendingTasksRemote(item.aiTaskUuids, updates);
-      updated += result.updated;
-      failed += result.failed.length;
+      const tasks = [...tasksByUuid.values()];
+      if (!tasks.length) continue;
+      hasTasks = true;
+      try {
+        const result = await this.refreshCharPendingAiTaskCredentials({
+          char, config: char.activeMsg2Config!, apiConfig, tasks, remoteTasks,
+        });
+        updated += result.updated;
+        failed += result.failed;
+      } catch (error) {
+        console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 任务凭据同步失败，下次重试`, char.id, error);
+        failed += tasks.length;
+      }
     }
-    return { status: failed ? 'partial' : 'ok', updated, failed };
+    return { status: failed ? 'partial' : hasTasks ? 'ok' : 'no-tasks', updated, failed };
   },
 
   /**
@@ -3748,7 +3838,7 @@ export const ActiveMsgClient = {
     const config = await ensureWorkerReady();
     const client = await initializeClient(config);
     const value = (await isClientStateDeleteReady()) ? null : '';
-    await client.putClientState([{ namespace, key, value, updatedAt: stampStateUpdatedAt() }]);
+    await putCloudClientState(client, [{ namespace, key, value, updatedAt: stampStateUpdatedAt() }]);
   },
 
   /**

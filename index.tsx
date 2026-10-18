@@ -1,12 +1,17 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
+import DatabaseGuard from './components/DatabaseGuard';
+import { openDB } from './utils/db';
+import { checkDatabaseReadable } from './utils/databaseHealth';
+import { startDatabaseOpenDiagnostics, releaseDatabaseDiagnosticPersistence, recordDatabaseOpen } from './utils/databaseOpenDiagnostics';
 import { installTranslateCrashGuard } from './utils/translateCrashGuard';
 import { ActiveMsgRuntime } from './utils/activeMsgRuntime';
 import { KeepAlive } from './utils/keepAlive';
 import { ProactiveChat } from './utils/proactiveChat';
 import { VRScheduler } from './utils/vrWorld/scheduler';
 import { installIOSStandaloneWorkaround } from './utils/iosStandalone';
+import { installIOSStatusBarEdge } from './utils/iosStatusBarEdge';
 import { installWakeListener } from './utils/proactivePushConfig';
 import { initAnalytics } from './utils/analytics';
 import { Capacitor } from '@capacitor/core';
@@ -20,8 +25,14 @@ if (import.meta.env.VITE_AMSG_NATIVE_PUSH === 'true' && Capacitor.isNativePlatfo
   }
 }
 
-// Register the keep-alive Service Worker early so it's ready before any AI calls
-KeepAlive.init().then(() => {
+// Prepare storage and the SW in parallel. Only background writers wait for both;
+// DatabaseGuard shares this read check and never waits for the SW/offline downloads.
+startDatabaseOpenDiagnostics();
+const databaseReady = checkDatabaseReadable(openDB);
+void databaseReady.then(releaseDatabaseDiagnosticPersistence, releaseDatabaseDiagnosticPersistence);
+const keepAliveReady = KeepAlive.init();
+Promise.all([databaseReady, keepAliveReady]).then(() => {
+  recordDatabaseOpen('background-ready');
   // Resume any active proactive schedule after SW is ready
   ProactiveChat.resume();
   // Resume 「彼方」 autonomous-login schedules
@@ -29,9 +40,11 @@ KeepAlive.init().then(() => {
   void ActiveMsgRuntime.init();
   // Record every wake the SW reports so the diagnostic panel can show "last received".
   installWakeListener();
-});
+}).catch(error => console.error('后台任务暂未启动：本地数据或保活服务未就绪', error));
 
+const disposeIOSStatusBarEdge = installIOSStatusBarEdge();
 installIOSStandaloneWorkaround();
+if (import.meta.hot) import.meta.hot.dispose(disposeIOSStatusBarEdge);
 
 // 使用统计。构建时没配 VITE_UMAMI_* 就整个不生效，自部署实例默认如此。
 // 用户关掉开关、或浏览器开了 DNT，同样在这里就返回，连脚本都不会挂上去。
@@ -49,6 +62,6 @@ if (!rootElement) {
 const root = ReactDOM.createRoot(rootElement);
 root.render(
   <React.StrictMode>
-    <App />
+    <DatabaseGuard readiness={databaseReady}><App /></DatabaseGuard>
   </React.StrictMode>
 );

@@ -82,3 +82,16 @@ describe('stripSensitiveCardFields', () => {
     }
   });
 });
+
+
+it('角色分享卡不携带家园私人数据或同步版本，也不修改本机原档',()=>{
+ const card={name:'角色',home3D:{records:[{text:'秘密'}]},homeDefinition:{notes:'私密设定'},homeContextBridgeVersion:3,chibiStudio:{home3D:{state:{selected:{eyes:'自绘'}}}}};
+ const before=structuredClone(card),out=stripSensitiveCardFields(card);
+ expect(out).toEqual({name:'角色'});expect(card).toEqual(before);
+});
+
+it('角色分享卡不携带聊天备注与 RECALL 提示开关，备注内容照常保留', () => {
+  const card = { name: '小明', description: '一段很长的角色介绍', chatShowRemark: true, hideMonthlyRecallPrompt: false };
+  const out = stripSensitiveCardFields(card);
+  expect(out).toEqual({ name: '小明', description: '一段很长的角色介绍' });
+});
