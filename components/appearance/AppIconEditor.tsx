@@ -102,12 +102,11 @@ const AppIconEditor: React.FC = () => {
     addToast('PWA 图标已恢复默认', 'info');
   }, [setCustomIcon, addToast]);
 
-  const chooseBuiltin = async (classic: boolean) => {
+  const chooseClassic = async () => {
     if (processing) return;
     setProcessing(true);
     try {
-      if (classic) await saveIcon(PWA_CLASSIC_ICON_VALUE);
-      else await handleReset();
+      await saveIcon(PWA_CLASSIC_ICON_VALUE);
     } catch { addToast('图标保存失败，请重试', 'error'); }
     finally { setProcessing(false); }
   };
@@ -124,11 +123,11 @@ const AppIconEditor: React.FC = () => {
         <span className="text-sm font-medium text-slate-700">PWA 应用图标</span>
       </div>
 
-      <div className="grid grid-cols-2 gap-3" role="group" aria-label="内置 PWA 图标">
-        {[{ classic: false, name: '水母', image: PWA_DEFAULT_ICON_URL }, { classic: true, name: '经典', image: PWA_CLASSIC_ICON_URL }].map(option => {
-          const selected = option.classic ? currentValue === PWA_CLASSIC_ICON_VALUE : !currentValue;
+      <div className="grid grid-cols-1 gap-3" role="group" aria-label="内置 PWA 图标">
+        {[{ name: '经典', image: PWA_CLASSIC_ICON_URL }].map(option => {
+          const selected = !currentValue || currentValue === PWA_CLASSIC_ICON_VALUE;
           return <button key={option.name} type="button" disabled={processing} aria-pressed={selected}
-            onClick={()=>void chooseBuiltin(option.classic)} className={`flex flex-col items-center gap-2 p-3 rounded-2xl border transition-colors disabled:opacity-50 ${selected ? 'border-primary bg-primary/5' : 'border-slate-200'}`}>
+            onClick={()=>void chooseClassic()} className={`flex flex-col items-center gap-2 p-3 rounded-2xl border transition-colors disabled:opacity-50 ${selected ? 'border-primary bg-primary/5' : 'border-slate-200'}`}>
             <img src={option.image} alt="" className="w-20 h-20 rounded-2xl"/>
             <span className="text-xs text-slate-700">{option.name}{selected ? ' · 已选' : ''}</span>
           </button>;
@@ -150,7 +149,7 @@ const AppIconEditor: React.FC = () => {
         </div>
         <div className="min-w-0">
           <div className="text-xs text-slate-500">
-            {currentValue === PWA_CLASSIC_ICON_VALUE ? '经典图标' : currentValue ? '已设置自定义图标' : '水母图标 · 默认'}
+            {currentValue === PWA_CLASSIC_ICON_VALUE ? '经典图标' : currentValue ? '已设置自定义图标' : '经典图标 · 默认'}
           </div>
           {currentValue && (
             <button

@@ -19,7 +19,6 @@ import { confirmExportSafety } from '../utils/exportGuard';
 import { trackEvent } from '../utils/analytics';
 import { Check, ImageSquare, Sparkle, Trash, UploadSimple } from '@phosphor-icons/react';
 import AppIconEditor from '../components/appearance/AppIconEditor';
-import BootAnimationSettings from '../components/appearance/BootAnimationSettings';
 import FullscreenSettings from '../components/appearance/FullscreenSettings';
 import { shareOrDownloadBlob } from '../utils/shareExport';
 import { readShareFile } from '../utils/pngShare';
@@ -1392,7 +1391,6 @@ const Appearance: React.FC = () => {
                             应用网络锁屏壁纸
                         </button>
                     </div>
-                <BootAnimationSettings theme={theme} updateTheme={updateTheme} />
                 </section>
 
                 {/* Page 1 Desktop Square Image */}
