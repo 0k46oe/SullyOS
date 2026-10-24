@@ -31,8 +31,8 @@ const prefersReducedMotion = () =>
 const ClassicBootSequence: React.FC<Props> = ({ dataReady, wallpaper, onDone }) => {
   // 壁纸解析：url/data/blob 走 url() 并虚化压暗；渐变/颜色字符串直接当背景；空则回退深空渐变。
   const wp = wallpaper?.trim() || '';
-  const wpIsImage = /^(https?:|data:|blob:|\.?\/)/.test(wp);
-  const wpBackground = wp ? (wpIsImage ? `url(${wp})` : wp) : '';
+  const wpIsImage = /^(https?:|data:|blob:|\.?\/)/i.test(wp);
+  const wpBackground = wp ? (wpIsImage ? `url(${JSON.stringify(wp)}) center / cover no-repeat` : wp) : '';
   // 本会话是否首次看到开场：刷新页面仍属同 session → 走极短版。
   const firstThisSession = useMemo(() => {
     try { return !sessionStorage.getItem(BOOT_SEEN_KEY); } catch { return true; }
@@ -44,6 +44,9 @@ const ClassicBootSequence: React.FC<Props> = ({ dataReady, wallpaper, onDone }) 
   const EXIT = cinematic ? 680 : 300;  // 推进式退场时长
 
   const [phase, setPhase] = useState<'enter' | 'exit'>('enter');
+  const [skipRequested, setSkipRequested] = useState(false);
+  const onDoneRef = useRef(onDone);
+  onDoneRef.current = onDone;
   const startRef = useRef(0);
   if (startRef.current === 0) {
     startRef.current = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -53,18 +56,18 @@ const ClassicBootSequence: React.FC<Props> = ({ dataReady, wallpaper, onDone }) 
     try { sessionStorage.setItem(BOOT_SEEN_KEY, '1'); } catch { /* ignore */ }
   }, []);
 
-  // 「数据就绪 且 停留够 HOLD」→ 退场；否则一直呼吸等待。
+  // 点击只跳过 HOLD；数据/壁纸尚未就绪时保留欢迎画面，不能提前露出深色兜底屏。
   useEffect(() => {
     if (phase === 'exit') return;
     let raf = 0;
     const tick = () => {
       const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-      if (dataReady && now - startRef.current >= HOLD) {
+      if (dataReady && (skipRequested || now - startRef.current >= HOLD)) {
         setPhase('exit');
         // 只报区间不报精确毫秒。注意这里的时长带 HOLD 下限（完整版 2000ms / 极短版 520ms），
         // 真正有信息量的是 3-8s / 8s+ 这条尾巴 —— 数据加载慢才会落到那儿。
         const waited = now - startRef.current;
-        trackEvent('冷启动等待数据就绪', {
+        if (!skipRequested) trackEvent('冷启动等待数据就绪', {
           等待档位: waited < 1000 ? '<1s' : waited < 3000 ? '1-3s' : waited < 8000 ? '3-8s' : '8s+',
           开场版本: cinematic ? '完整版' : '极短版',
         });
@@ -74,19 +77,19 @@ const ClassicBootSequence: React.FC<Props> = ({ dataReady, wallpaper, onDone }) 
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [dataReady, phase, HOLD]);
+  }, [dataReady, phase, HOLD, skipRequested, cinematic]);
 
   // 退场动画播完 → 交还控制权。
   useEffect(() => {
     if (phase !== 'exit') return;
-    const t = setTimeout(onDone, EXIT);
+    const t = setTimeout(() => onDoneRef.current(), EXIT);
     return () => clearTimeout(t);
-  }, [phase, EXIT, onDone]);
+  }, [phase, EXIT]);
 
   // 轻触跳过：进入平滑退场（非硬切）。
   const skip = () => {
-    if (phase !== 'exit') {
-      setPhase('exit');
+    if (phase !== 'exit' && !skipRequested) {
+      setSkipRequested(true);
       trackEvent('跳过开机动画', {
         数据是否已就绪: dataReady ? '是' : '否',
         开场版本: cinematic ? '完整版' : '极短版',
@@ -163,8 +166,6 @@ const ClassicBootSequence: React.FC<Props> = ({ dataReady, wallpaper, onDone }) 
             <>
               <div className="absolute inset-0 bg-cover bg-center" style={{
                 background: wpBackground,
-                backgroundSize: 'cover',
-                backgroundPosition: 'center',
                 filter: wpIsImage ? 'blur(10px)' : 'none',
                 transform: wpIsImage ? 'scale(1.14)' : undefined,
                 animation: cinematic ? 'bootSceneIn 700ms ease-out both' : 'bootSceneIn 300ms ease-out both',
@@ -241,10 +242,10 @@ const ClassicBootSequence: React.FC<Props> = ({ dataReady, wallpaper, onDone }) 
       </div>
 
       {/* 轻触跳过提示（仅完整版、过 1.8s 后；极淡，不打扰） */}
-      {cinematic && !exiting && (
+      {(cinematic || skipRequested) && !exiting && (
         <div className="absolute bottom-10 left-0 right-0 text-center text-[10px] tracking-[0.3em] text-white/40"
              style={{ animation: 'bootHintIn 800ms ease-out 1800ms both' }}>
-          轻触进入
+          {skipRequested ? '正在准备界面…' : '轻触进入'}
         </div>
       )}
     </div>

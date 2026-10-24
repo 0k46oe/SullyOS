@@ -821,11 +821,11 @@ const PhoneShell: React.FC = () => {
   useEffect(() => {
     if (typeof document === 'undefined') return;
 
-    const wallpaper = theme.wallpaper;
+    const wallpaper = isLocked ? theme.lockWallpaper || theme.wallpaper : theme.wallpaper;
     const backgroundValue = !wallpaper
       ? '#0f1115'
       : (wallpaper.startsWith('http') || wallpaper.startsWith('data:') || wallpaper.startsWith('blob:') || wallpaper.startsWith('./') || wallpaper.startsWith('/'))
-        ? `url(${wallpaper})`
+        ? `#0f1115 url(${JSON.stringify(wallpaper)})`
         : wallpaper;
 
     [document.documentElement, document.body].forEach((element) => {
@@ -834,15 +834,15 @@ const PhoneShell: React.FC = () => {
       element.style.backgroundSize = 'cover';
       element.style.backgroundRepeat = 'no-repeat';
     });
-  }, [theme.wallpaper]);
+  }, [theme.wallpaper, theme.lockWallpaper, isLocked]);
 
   // 冷启动：先放「世界入场」cinematic（数据没就绪时它持续呼吸等待，绝不出现 spinner）。
   // BootSequence 在「数据就绪 + 停留够时长」后推进退场，再交还控制权给下方的锁屏/桌面。
   if (!bootDone && bootAnimationEnabled) {
-    return <BootSequence dataReady={isDataLoaded} wallpaper={theme.wallpaper} style={theme.bootAnimationStyle} onDone={() => setBootDone(true)} />;
+    return <BootSequence dataReady={isDataLoaded} wallpaper={isLocked ? theme.lockWallpaper || theme.wallpaper : theme.wallpaper} style={theme.bootAnimationStyle} onDone={() => setBootDone(true)} />;
   }
 
-  // 兜底：理论上 bootDone 时数据已就绪；万一未就绪（极端慢）退化为最简静态深色屏，不闪 spinner。
+  // 关闭开机动画时的数据等待兜底；启用动画时由 BootSequence 等待就绪。
   if (!isDataLoaded) {
     return <div className="w-full h-full" style={{ background: '#05060f' }} />;
   }
@@ -885,7 +885,7 @@ const PhoneShell: React.FC = () => {
             unlock();
         }}
         className="relative w-full h-full bg-cover bg-center cursor-pointer overflow-hidden group font-light select-none overscroll-none"
-        style={{ backgroundImage: lockBgImageValue, color: contentColor, animation: 'lockReveal 600ms ease-out both' }}
+        style={{ background: lockBgImageValue.startsWith('url(') ? `${lockBgImageValue} center / cover no-repeat` : lockBgImageValue, color: contentColor, animation: 'lockReveal 600ms ease-out both' }}
       >
         {/* 锁屏柔和淡入：与开机「世界入场」退场衔接；body 背景本就是壁纸，故是无缝融入而非硬切。 */}
         <style>{`@keyframes lockReveal{from{opacity:0}to{opacity:1}}`}</style>

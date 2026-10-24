@@ -10,7 +10,7 @@ function Settings(){
     <BootAnimationSettings theme={theme} updateTheme={async patch=>{setSaved(false);await updateTheme(patch);setSaved(true);}}/>
     {saved&&<p>已保存</p>}
     <button onClick={()=>setPreview(true)}>预览所选开场</button>
-    {preview&&<BootSequence dataReady={false} style={theme.bootAnimationStyle} wallpaper={theme.wallpaper} onDone={()=>setPreview(false)}/>}
+    {preview&&<BootSequence dataReady={true} style={theme.bootAnimationStyle} wallpaper={theme.wallpaper} onDone={()=>setPreview(false)}/>}
   </main>;
 }
 createRoot(document.getElementById('root')!).render(<OSProvider><Settings/></OSProvider>);
