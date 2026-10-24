@@ -504,6 +504,7 @@ const Settings: React.FC = () => {
   const [localUrl, setLocalUrl] = useState(apiConfig.baseUrl);
   const [localModel, setLocalModel] = useState(String(apiConfig.model || ''));
   const [localStream, setLocalStream] = useState<boolean>(apiConfig.stream === true);
+  const [localMaxTokens, setLocalMaxTokens] = useState(apiConfig.maxTokens ?? 8000);
   const [localTemperature, setLocalTemperature] = useState<number>(
     typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85
   );
@@ -560,6 +561,7 @@ const Settings: React.FC = () => {
   const [editPresetModel, setEditPresetModel] = useState('');
   const [editPresetStream, setEditPresetStream] = useState(false);
   const [editPresetTemperature, setEditPresetTemperature] = useState(0.85);
+  const [editPresetMaxTokens, setEditPresetMaxTokens] = useState(8000);
   const [holdingDeletePresetId, setHoldingDeletePresetId] = useState<string | null>(null);
   const presetDeleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
@@ -983,8 +985,9 @@ const Settings: React.FC = () => {
       setLocalKey(apiConfig.apiKey);
       setLocalModel(String(apiConfig.model || ''));
       setLocalStream(apiConfig.stream === true);
+      setLocalMaxTokens(apiConfig.maxTokens ?? 8000);
       setLocalTemperature(typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85);
-  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.stream, apiConfig.temperature]);
+  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.stream, apiConfig.temperature, apiConfig.maxTokens]);
 
   useEffect(() => {
       setLocalVisionEnabled(apiConfig.visionApi?.enabled === true);
@@ -1065,6 +1068,7 @@ const Settings: React.FC = () => {
       setEditPresetUrl(preset.config.baseUrl || '');
       setEditPresetKey(preset.config.apiKey || '');
       setEditPresetModel(preset.config.model || '');
+      setEditPresetMaxTokens(isActive ? localMaxTokens : (preset.config.maxTokens ?? localMaxTokens));
       // 当前正在使用的预设要接住主表单里刚改的高级设置：用户点铅笔再点保存即可写回，
       // 不必猜还要额外按一次「用当前配置填入」。非当前/老预设则读取自身，缺字段才回退。
       setEditPresetStream(
@@ -1092,6 +1096,7 @@ const Settings: React.FC = () => {
           model: normalizeApiModel(editPresetModel),
           stream: editPresetStream,
           temperature: editPresetTemperature,
+          maxTokens: editPresetMaxTokens,
       };
       // 「正在用的就是这条」要在改之前问，改完值就对不上了
       const wasActive = activePresetId === preset.id;
@@ -1157,6 +1162,7 @@ const Settings: React.FC = () => {
         model: normalizeApiModel(localModel),
         stream: localStream,
         temperature: localTemperature,
+        maxTokens: localMaxTokens,
       }, newPresetGroup);
       setNewPresetName('');
       setNewPresetGroup('');
@@ -1178,6 +1184,7 @@ const Settings: React.FC = () => {
       model: normalizeApiModel(modelOverride ?? localModel),
       stream: localStream,
       temperature: localTemperature,
+      maxTokens: localMaxTokens,
     };
     // 「是不是来自某条预设」要在保存之前问，存完值就对不上了
     const sourcePreset = apiPresets.find(preset => preset.id === activePresetId);
@@ -2602,12 +2609,13 @@ const Settings: React.FC = () => {
 
             <div className="space-y-4">
                 <DialogueApiFields
-                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, stream: localStream, temperature: localTemperature }}
+                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, stream: localStream, temperature: localTemperature, maxTokens: localMaxTokens }}
                     onChange={patch => {
                         if (patch.baseUrl !== undefined) setLocalUrl(patch.baseUrl);
                         if (patch.apiKey !== undefined) setLocalKey(patch.apiKey);
                         if (patch.stream !== undefined) setLocalStream(patch.stream);
                         if (patch.temperature !== undefined) setLocalTemperature(patch.temperature);
+                        if ('maxTokens' in patch) setLocalMaxTokens(patch.maxTokens ?? 8000);
                     }}
                     fetchModels={fetchModels} isLoadingModels={isLoadingModels} openModelPicker={openModelPicker}
                 />
@@ -4165,6 +4173,11 @@ const Settings: React.FC = () => {
                           className="w-full accent-primary mt-1"
                       />
                   </div>
+                  <label className="block text-[10px] text-slate-400">私聊最大生成 Token
+                      <input type="number" min={1} step={1} value={editPresetMaxTokens} aria-label="预设最大生成 Token"
+                          onChange={event => { const n = Number(event.target.value); if (Number.isSafeInteger(n) && n > 0) setEditPresetMaxTokens(n); }}
+                          className="mt-1 w-full bg-white rounded-xl px-3 py-2 text-sm" />
+                  </label>
               </div>
               <button
                   type="button"
@@ -4174,6 +4187,7 @@ const Settings: React.FC = () => {
                       setEditPresetModel(localModel);
                       setEditPresetStream(localStream);
                       setEditPresetTemperature(localTemperature);
+                      setEditPresetMaxTokens(localMaxTokens);
                       addToast('已填入当前配置', 'info');
                   }}
                   className="w-full py-2 bg-slate-100 text-slate-500 text-xs font-bold rounded-xl active:scale-95 transition-transform"

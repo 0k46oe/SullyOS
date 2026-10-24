@@ -1,4 +1,4 @@
-import { resolveDialogueApi } from '../utils/characterApi';
+import { resolveDialogueApi, dialogueMaxTokens } from '../utils/characterApi';
 import { createReplyRun, withReplyCancellation } from '../utils/chatReplyCancellation';
 
 import { useState, useRef, useEffect, useSyncExternalStore, MutableRefObject } from 'react';
@@ -1089,7 +1089,7 @@ export const useChatAI = ({
                 model: effectiveApi.model,
                 messages: fullMessages,
                 temperature: userTemp,
-                max_tokens: 8000,
+                max_tokens: dialogueMaxTokens(effectiveApi),
                 stream: userStream,
             };
             // 思考过程展示开启时显式向后端请求 extended thinking。
@@ -1107,7 +1107,7 @@ export const useChatAI = ({
             // 拼进 tools，但参数取舍必须现在就定）。角色级开关关掉的不注入——否则被用户显式
             // 关掉的功能会被角色一次工具调用重新打开。
             const amsg2ToolsInjected = isAmsg2EnabledForChar(char) && await replyStep(async () => isAmsg2GlobalReady());
-            if (shouldSendThinkingParams({
+            if (baseReqBody.max_tokens > 1024 && shouldSendThinkingParams({
                 thinkingActive: !!payload.flags.thinkingActive,
                 legacyToolModeActive: !!toolModeActive,
                 amsg2ToolsInjected,
@@ -1117,9 +1117,10 @@ export const useChatAI = ({
                 if (/^claude-/i.test(m) && !/-thinking$/i.test(m)) {
                     baseReqBody.model = `${m}-thinking`;
                 }
-                baseReqBody.thinking = { type: 'enabled', budget_tokens: 4000 };
+                const thinkingBudget = Math.min(4000, baseReqBody.max_tokens - 1);
+                baseReqBody.thinking = { type: 'enabled', budget_tokens: thinkingBudget };
                 baseReqBody.reasoning_effort = 'medium';
-                baseReqBody.extra_body = { ...(baseReqBody.extra_body || {}), thinking: { type: 'enabled', budget_tokens: 4000 } };
+                baseReqBody.extra_body = { ...(baseReqBody.extra_body || {}), thinking: { type: 'enabled', budget_tokens: thinkingBudget } };
                 // 开思考时不要带采样参数: Claude 系（含各种中转 claude-*）在 thinking 启用时
                 // 只接受 temperature=1，传 0.85 会被 400 ("temperature may only be set to 1 when
                 // thinking is enabled")。删掉让服务端用默认即可——对其它模型(非 Claude)也安全:

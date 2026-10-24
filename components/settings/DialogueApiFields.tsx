@@ -36,8 +36,15 @@ export default function DialogueApiFields({ value, onChange, fetchModels, isLoad
                     {showApiAdvanced && (
                         <div className="mt-2 pl-2 border-l-2 border-slate-100 space-y-3 py-2">
                             <p className="text-[10px] text-slate-300 leading-relaxed">
-                                这两项绝大多数用户保持默认即可。除非接口报错"only stream supported"或对回复风格有强需求，否则不建议改。
+                                通常保持默认即可；如接口有输出额度或流式要求，可按服务商说明调整。
                             </p>
+                            <label className="block text-[10px] text-slate-400">
+                                私聊最大生成 Token（max_tokens）
+                                <input type="number" min={1} step={1} value={value.maxTokens ?? ''} placeholder="跟随全局，默认 8000"
+                                    onChange={e => { const n = Number(e.target.value); if (!e.target.value || (Number.isSafeInteger(n) && n > 0)) onChange({ maxTokens: e.target.value ? n : undefined }); }}
+                                    className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" />
+                                <span className="block mt-1 text-[9px] leading-relaxed">限制一次回复的输出量，不是历史消息条数。较小值可减少预留额度，过小可能截断回复；历史输入超限仍需调整上下文或归档。需在模型支持范围内填写。</span>
+                            </label>
                             <div className="flex items-center justify-between">
                                 <div>
                                     <span className="text-[10px] text-slate-400">流式输出 (Stream)</span>

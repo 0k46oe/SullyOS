@@ -22,7 +22,7 @@ import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '
  * 把用户手调过的温度、流式开关顺手重置掉。
  */
 export type PresetSwitchPatch =
-  Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'stream' | 'temperature'>>;
+  Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'stream' | 'temperature' | 'maxTokens'>>;
 
 export function configFromPreset(preset: ApiPreset): PresetSwitchPatch {
   const patch: PresetSwitchPatch = {
@@ -32,6 +32,7 @@ export function configFromPreset(preset: ApiPreset): PresetSwitchPatch {
   };
   if (typeof preset.config.stream === 'boolean') patch.stream = preset.config.stream;
   if (typeof preset.config.temperature === 'number') patch.temperature = preset.config.temperature;
+  if (Number.isSafeInteger(preset.config.maxTokens) && preset.config.maxTokens! > 0) patch.maxTokens = preset.config.maxTokens;
   return patch;
 }
 
@@ -53,9 +54,10 @@ export function presetMatchesConfig(
  */
 export function presetDiffersFromConfig(
   preset: ApiPreset,
-  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'stream' | 'temperature'>>,
+  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'stream' | 'temperature' | 'maxTokens'>>,
 ): boolean {
   if (!presetMatchesConfig(preset, config)) return true;
+  if ((preset.config.maxTokens ?? 8000) !== (config.maxTokens ?? 8000)) return true;
   if (typeof preset.config.stream === 'boolean' && preset.config.stream !== (config.stream === true)) return true;
   if (typeof preset.config.temperature === 'number' && typeof config.temperature === 'number'
     && preset.config.temperature !== config.temperature) return true;

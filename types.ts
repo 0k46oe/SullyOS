@@ -276,9 +276,11 @@ export interface VisionApiConfig {
 }
 
 /** A complete dialogue endpoint, separate from TTS/vision configuration. */
-export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'stream' | 'temperature'>;
+export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'stream' | 'temperature' | 'maxTokens'>;
 
 export interface APIConfig {
+  /** 私聊单次生成上限；未设置沿用 8000，不改变历史范围。 */
+  maxTokens?: number;
   baseUrl: string;
   apiKey: string;
   // 可选识图中转：给不支持 image_url 的主模型补视觉能力。
