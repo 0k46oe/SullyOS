@@ -1224,8 +1224,16 @@ export async function mountHomeEditor(host,{assetBase,initialState,onChange,onBa
   for(const root of [content,interiorBackdrop.root])root.traverse(o=>{const edge=o.userData.boundaryEdge;if(!edge)return;const visible=wallView==='cutaway'&&!edit?automaticWallVisible(edge,dx,dz,o.visible):wallVisible(effectiveWallView(),edge);if(o.visible!==visible){o.visible=visible;changed=true;}});
   if(changed)invalidateRoomShadows();
  }
- let lastViewKey='';
+ let lastViewKey='',furnitureContextRoom=null,furnitureContextEditing=false;
  function rebuild(){
+  // Furniture poses belong to the old room/layout, including the parked user after swapping control.
+  if(furnitureContextRoom&&(furnitureContextRoom!==state.activeRoomId||edit&&!furnitureContextEditing)){
+   // Walking through a doorway is also a room transition. Preserve locomotion when no furniture is active.
+   if(edit||visitorSeat||visitorActivity||visitorPlant||seatChange||heldPlush){restoreFurnitureCharacter();cancelCompanionAction();resetFurnitureMotion();}
+   for(const entry of socialEntries){entry.parkedSeat=null;entry.parkedPose=null;entry.parkedActivity=null;entry.settledRoom=null;entry.visitor.animate(0,'idle','standing');}
+   parkedMealEffects?.dispose();parkedMealEffects=null;socialPlacementMap=null;
+  }
+  furnitureContextRoom=state.activeRoomId;furnitureContextEditing=edit;
   const missing=neededAssets();if(missing.length){loadRoomAssets(missing);return;}
   socialPlacementMap=null;lastWallCamera='';
   petSystem?.reconcile();

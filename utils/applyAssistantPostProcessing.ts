@@ -1,4 +1,5 @@
 import { withReplyCancellation, type ReplyRun } from './chatReplyCancellation';
+import { dialogueMaxTokens } from './characterApi';
 /**
  * applyAssistantPostProcessing — 抽自 hooks/useChatAI.ts 的 sendMessage 后处理管线
  *
@@ -1058,7 +1059,7 @@ export async function applyAssistantPostProcessing(
                 data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                     method: 'POST', headers,
-                    body: JSON.stringify({ model: effectiveApi.model, messages: recallMessages, temperature: 0.8, max_tokens: 8000, stream: false })
+                    body: JSON.stringify({ model: effectiveApi.model, messages: recallMessages, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
                 }, 2, 0, { ...apiLogMeta, purpose: '调阅记忆' }));
                 updateTokenUsage(data, historyMsgCount, 'recall');
                 aiContent = data.choices?.[0]?.message?.content || '';
@@ -1099,7 +1100,7 @@ export async function applyAssistantPostProcessing(
                 data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                     method: 'POST', headers,
-                    body: JSON.stringify({ model: effectiveApi.model, messages: searchMessages, temperature: 0.8, max_tokens: 8000, stream: false })
+                    body: JSON.stringify({ model: effectiveApi.model, messages: searchMessages, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
                 }, 2, 0, { ...apiLogMeta, purpose: '联网搜索' }));
                 updateTokenUsage(data, historyMsgCount, 'search');
                 aiContent = data.choices?.[0]?.message?.content || '';
@@ -1237,7 +1238,7 @@ export async function applyAssistantPostProcessing(
             data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                 method: 'POST', headers,
-                body: JSON.stringify({ model: effectiveApi.model, messages: msgs, temperature: 0.8, max_tokens: 8000, stream: false })
+                body: JSON.stringify({ model: effectiveApi.model, messages: msgs, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
             }, 2, 0, { ...apiLogMeta, purpose: '写日记' }));
             updateTokenUsage(data, historyMsgCount, 'diary-fallback');
             aiContent = data.choices?.[0]?.message?.content || '';
@@ -1292,7 +1293,7 @@ export async function applyAssistantPostProcessing(
                         data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                             method: 'POST', headers,
-                            body: JSON.stringify({ model: effectiveApi.model, messages: diaryMessages, temperature: 0.8, max_tokens: 8000, stream: false })
+                            body: JSON.stringify({ model: effectiveApi.model, messages: diaryMessages, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
                         }, 2, 0, { ...apiLogMeta, purpose: '翻阅日记' }));
                         updateTokenUsage(data, historyMsgCount, 'read-diary-notion');
                         aiContent = data.choices?.[0]?.message?.content || '';
@@ -1325,7 +1326,7 @@ export async function applyAssistantPostProcessing(
                         data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                             method: 'POST', headers,
-                            body: JSON.stringify({ model: effectiveApi.model, messages: nodiaryMessages, temperature: 0.8, max_tokens: 8000, stream: false })
+                            body: JSON.stringify({ model: effectiveApi.model, messages: nodiaryMessages, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
                         }, 2, 0, { ...apiLogMeta, purpose: '翻阅日记' }));
                         updateTokenUsage(data, historyMsgCount, 'no-diary-notion');
                         aiContent = data.choices?.[0]?.message?.content || '';
@@ -1470,7 +1471,7 @@ export async function applyAssistantPostProcessing(
                         data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                             method: 'POST', headers,
-                            body: JSON.stringify({ model: effectiveApi.model, messages: diaryMessages, temperature: 0.8, max_tokens: 8000, stream: false })
+                            body: JSON.stringify({ model: effectiveApi.model, messages: diaryMessages, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
                         }, 2, 0, { ...apiLogMeta, purpose: '翻阅日记' }));
                         updateTokenUsage(data, historyMsgCount, 'read-diary-feishu');
                         aiContent = data.choices?.[0]?.message?.content || '';
@@ -1497,7 +1498,7 @@ export async function applyAssistantPostProcessing(
                         data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                             method: 'POST', headers,
-                            body: JSON.stringify({ model: effectiveApi.model, messages: nodiaryMessages, temperature: 0.8, max_tokens: 8000, stream: false })
+                            body: JSON.stringify({ model: effectiveApi.model, messages: nodiaryMessages, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
                         }, 2, 0, { ...apiLogMeta, purpose: '翻阅日记' }));
                         updateTokenUsage(data, historyMsgCount, 'no-diary-feishu');
                         aiContent = data.choices?.[0]?.message?.content || '';
@@ -1549,7 +1550,7 @@ export async function applyAssistantPostProcessing(
                     data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                         method: 'POST', headers,
-                        body: JSON.stringify({ model: effectiveApi.model, messages: noteMessages, temperature: 0.8, max_tokens: 8000, stream: false })
+                        body: JSON.stringify({ model: effectiveApi.model, messages: noteMessages, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
                     }, 2, 0, { ...apiLogMeta, purpose: '翻阅笔记' }));
                     updateTokenUsage(data, historyMsgCount, 'read-note');
                     aiContent = data.choices?.[0]?.message?.content || '';
@@ -1580,7 +1581,7 @@ export async function applyAssistantPostProcessing(
                     data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                         method: 'POST', headers,
-                        body: JSON.stringify({ model: effectiveApi.model, messages: nonoteMessages, temperature: 0.8, max_tokens: 8000, stream: false })
+                        body: JSON.stringify({ model: effectiveApi.model, messages: nonoteMessages, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
                     }, 2, 0, { ...apiLogMeta, purpose: '翻阅笔记' }));
                     updateTokenUsage(data, historyMsgCount, 'read-note-empty');
                     aiContent = data.choices?.[0]?.message?.content || '';
@@ -1624,7 +1625,7 @@ export async function applyAssistantPostProcessing(
                 data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                     method: 'POST', headers,
-                    body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: 8000, stream: false })
+                    body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
                 }, 2, 0, { ...apiLogMeta, purpose: '小红书搜索' }));
                 updateTokenUsage(data, historyMsgCount, 'xhs-search');
                 aiContent = data.choices?.[0]?.message?.content || '';
@@ -1672,7 +1673,7 @@ export async function applyAssistantPostProcessing(
                 data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                     method: 'POST', headers,
-                    body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: 8000, stream: false })
+                    body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
                 }, 2, 0, { ...apiLogMeta, purpose: '小红书浏览' }));
                 updateTokenUsage(data, historyMsgCount, 'xhs-browse');
                 aiContent = data.choices?.[0]?.message?.content || '';
@@ -2009,7 +2010,7 @@ export async function applyAssistantPostProcessing(
                 data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                     method: 'POST', headers,
-                    body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: 8000, stream: false })
+                    body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
                 }, 2, 0, { ...apiLogMeta, purpose: '小红书主页' }));
                 updateTokenUsage(data, historyMsgCount, 'xhs-profile');
                 aiContent = data.choices?.[0]?.message?.content || '';
@@ -2028,7 +2029,7 @@ export async function applyAssistantPostProcessing(
                 data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                     method: 'POST', headers,
-                    body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: 8000, stream: false })
+                    body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
                 }, 2, 0, { ...apiLogMeta, purpose: '小红书主页' }));
                 updateTokenUsage(data, historyMsgCount, 'xhs-profile');
                 aiContent = data.choices?.[0]?.message?.content || '';
@@ -2048,7 +2049,7 @@ export async function applyAssistantPostProcessing(
                 data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                     method: 'POST', headers,
-                    body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: 8000, stream: false })
+                    body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
                 }, 2, 0, { ...apiLogMeta, purpose: '小红书主页' }));
                 updateTokenUsage(data, historyMsgCount, 'xhs-profile-unreachable');
                 aiContent = data.choices?.[0]?.message?.content || '';
@@ -2101,7 +2102,7 @@ export async function applyAssistantPostProcessing(
             data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
                     signal: ctx.replyRun?.signal,
                 method: 'POST', headers,
-                body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: 8000, stream: false })
+                body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
             }, 2, 0, { ...apiLogMeta, purpose: '小红书详情' }));
             updateTokenUsage(data, historyMsgCount, 'xhs-detail');
             aiContent = data.choices?.[0]?.message?.content || '';

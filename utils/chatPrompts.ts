@@ -1016,7 +1016,7 @@ ${xhsEnabled ? `${[notionEnabled, feishuEnabled, notionNotesEnabled].filter(Bool
 规则：
 1. \`<语音>\` 里写${langLabel}——只写会被朗读的文字。可选 emotion 属性标整条情绪：\`<语音 emotion="happy">…</语音>\`，emotion 只能取 happy/sad/angry/fearful/disgusted/surprised/calm/fluent（情绪不强就别加）
 2. \`<字幕>\` 里写这条语音的中文版，内容和${langLabel}一致、逐段对齐（${langLabel}分几段中文就分几段）。**<字幕> 必须紧跟在 </语音> 后面，永远成对出现，不能单独用**
-3. 标签外可以照常发普通中文短消息（正常闲聊打字），它们显示成普通气泡，和语音内容互相独立、不要复读
+3. 标签外可以发补充新信息的普通中文短消息。整轮只有一份回复，文字和语音分工表达，不得各自完整回答一遍；语音说过的信息，也不要换种说法在文字里再讲一次。
 
 示例：
 你说真的假的？

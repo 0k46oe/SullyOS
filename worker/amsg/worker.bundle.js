@@ -16404,8 +16404,8 @@ function deduplicateVoiceText(text2) {
   const normalize2 = (s) => s.replace(/[\s\p{P}\p{S}]/gu, "").toLowerCase();
   const blocks = [];
   const spoken = [];
-  const protectedText = text2.replace(/<[语語]音[^>]*>([\s\S]*?)<\/[语語]音>(?:\s*<字幕>([\s\S]*?)<\/字幕>)?/g, (block, voice, subtitle) => {
-    spoken.push(normalize2(voice), ...subtitle ? [normalize2(subtitle)] : []);
+  const protectedText = text2.replace(/(?:<字幕>([\s\S]*?)<\/字幕>\s*)?<[语語]音[^>]*>([\s\S]*?)<\/[语語]音>(?:\s*<字幕>([\s\S]*?)<\/字幕>)?/g, (block, leadingSubtitle, voice, subtitle) => {
+    spoken.push(normalize2(voice), ...[leadingSubtitle, subtitle].filter(Boolean).map(normalize2));
     return "\nVOICE" + (blocks.push(block) - 1) + "\n";
   });
   if (!blocks.length) return text2;
