@@ -9,7 +9,7 @@ export const DEFAULT_NAVIGATION_BALL_APPEARANCE: Readonly<NavigationBallAppearan
 export const navigationBallShapeRadius: Record<NavigationBallShape, string> = { circle: '50%', square: '0px', rounded: '14px' };
 const MAX_IMAGE_LENGTH = 800_000;
 const isSafeImage = (image: unknown): image is string => typeof image === 'string'
-  && image.length <= MAX_IMAGE_LENGTH && /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(image);
+  && image.length <= MAX_IMAGE_LENGTH && /^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(image);
 
 export function normalizeNavigationBallAppearance(value: unknown): NavigationBallAppearance {
   const source = value && typeof value === 'object' ? value as Partial<NavigationBallAppearance> : {};
@@ -43,7 +43,7 @@ function subscribe(listener: () => void) {
   return () => { listeners.delete(listener); window.removeEventListener('storage', onStorage); };
 }
 export function setNavigationBallAppearance(patch: Partial<NavigationBallAppearance>) {
-  if (patch.image && !isSafeImage(patch.image)) throw new Error('图片过大或格式不支持，请使用 PNG、JPEG 或 WebP 图片');
+  if (patch.image && !isSafeImage(patch.image)) throw new Error('图片过大或格式不支持，请使用 PNG、JPEG、WebP 或不超过 580KB 的 GIF');
   const next = normalizeNavigationBallAppearance({ ...snapshot(), ...patch });
   // Persist before publishing: never claim that an upload survived a quota failure.
   try { localStorage.setItem(NAVIGATION_BALL_APPEARANCE_KEY, JSON.stringify(next)); }

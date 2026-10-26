@@ -11,6 +11,8 @@ import { clampBubblePos, resolveSafeTopInset } from '../../utils/floatingBallBou
 import { isIOSStandaloneWebApp, readSafeAreaInsets } from '../../utils/iosStandalone';
 import { navigationBallShapeRadius, useNavigationBallAppearance } from '../../utils/navigationBallAppearance';
 import NavigationBallFace from './NavigationBallFace';
+import { useNavigationPetPreferences } from '../../utils/navigationBallPet';
+import NavigationPetControls from './NavigationPetControls';
 import './NavigationBall.css';
 const NavigationApiSwitcher = React.lazy(() => import('./NavigationApiSwitcher'));
 
@@ -42,6 +44,7 @@ type NavigationActions = {
 export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onConfigure, characters = [], apiLabel = 'API 配置' }: NavigationActions) {
   const slots = useNavigationBallSlots();
   const appearance = useNavigationBallAppearance();
+  const pet = useNavigationPetPreferences();
   const root = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<Position | null>(readPosition);
   const [open, setOpen] = useState(false);
@@ -87,7 +90,7 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
   };
   const run = (action: () => void) => { setOpen(false); action(); };
   const panelWidth = Math.min(288, Math.max(144, parentSize.width - 24));
-  const panelHeight = 288;
+  const panelHeight = pet.enabled ? 374 : 288;
   const availableHeight = Math.max(44, parentSize.height - parentSize.top - parentSize.bottom - 24);
   const panelLeft = (parentSize.width - panelWidth) / 2 - (position?.x || 0);
   const panelTop = parentSize.top + 12 + Math.max(0, (availableHeight - panelHeight) / 2) - (position?.y || 0);
@@ -105,7 +108,7 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
   };
   return <div ref={root} className="navigation-ball" style={{ ...(position ? { left: position.x, top: position.y } : { right: 12, bottom: 96 }), '--navigation-ball-size': `${appearance.size}px` } as React.CSSProperties & { '--navigation-ball-size': string }}>
     <button type="button" className="navigation-ball-toggle" aria-label="快捷导航悬浮球" aria-expanded={open}
-      data-custom-image={!!appearance.image} data-image-border={appearance.imageBorder} style={{ borderRadius: navigationBallShapeRadius[appearance.shape], opacity: appearance.opacity }}
+      data-custom-image={pet.enabled || !!appearance.image} data-pet={pet.enabled} data-image-border={appearance.imageBorder} style={{ borderRadius: navigationBallShapeRadius[appearance.shape], opacity: appearance.opacity }}
       onPointerDown={event => {
         if (event.button !== 0 || !root.current?.parentElement || !latest.current) return;
         const { bounds } = measure(root.current.parentElement, appearance.size);
@@ -136,6 +139,7 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
       {slotButton(3)}
       <button type="button" onClick={() => run(onConfigure)}><SlidersHorizontal className="navigation-ball-action-icon" /><span>自定义</span></button>
       <button type="button" onClick={() => setOpen(false)}><X className="navigation-ball-action-icon" /><span>收起</span></button>
+      {pet.enabled && <NavigationPetControls compact />}
     </div>}
   </div>;
 }

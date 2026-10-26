@@ -7,6 +7,7 @@ import { DB } from '../utils/db';
 import { ChatPrompts } from '../utils/chatPrompts';
 import { safeFetchJson, safeResponseJson } from '../utils/safeApi';
 import { createDialogueFetch, isAnthropicApi } from '../utils/dialogueTransport';
+import { beginNavigationPetChat } from '../utils/navigationBallPet';
 import { KeepAlive } from '../utils/keepAlive';
 import { ProactiveChat } from '../utils/proactiveChat';
 import { ContextBuilder } from '../utils/context';
@@ -668,6 +669,8 @@ export const useChatAI = ({
         const releaseReply = acquireChatReply(char.id);
         if (!releaseReply) return;
         const replyRun = createReplyRun(char.id);
+        const navigationPet = beginNavigationPetChat();
+        let navigationPetOutcome: 'success' | 'error' | 'cancelled' = 'cancelled';
         amsg2Session.signal = replyRun.signal;
         const replyStep = <T>(operation: () => Promise<T>) => withReplyCancellation(replyRun, operation);
         setLocalTyping(true);
@@ -729,7 +732,18 @@ export const useChatAI = ({
             const keepAliveMs = Math.round(performance.now() - perfSendT0);
             const baseUrl = effectiveApi.baseUrl.replace(/\/+$/, '');
             const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApi.apiKey || 'sk-none'}` };
-            const fetchChatJson = createDialogueFetch(effectiveApi);
+            const fetchDialogueJson = createDialogueFetch(effectiveApi);
+            const fetchChatJson: typeof fetchDialogueJson = (url, options, retries, timeout, meta, hooks) => {
+                navigationPet.phase('thinking');
+                let streaming = false;
+                try { streaming = (typeof options.body === 'string' ? JSON.parse(options.body) : options.body)?.stream === true; }
+                catch { /* The existing transport reports malformed requests. */ }
+                return fetchDialogueJson(url, options, retries, timeout, meta, streaming ? {
+                    ...hooks,
+                    onDelta: (delta, fullText) => { navigationPet.phase('typing'); hooks?.onDelta?.(delta, fullText); },
+                    onReasoningDelta: (delta, fullText) => { navigationPet.phase('thinking'); hooks?.onReasoningDelta?.(delta, fullText); },
+                } : hooks);
+            };
 
             // ── 分段计时（从用户发送到 API 发出）──
             const perfStages: Record<string, number> = { keepAlive: keepAliveMs };
@@ -2110,6 +2124,7 @@ export const useChatAI = ({
                 sarModuleSurface: assistantSurfaceMeta,
             }));
             replyRun.markCompleted();
+            navigationPetOutcome = 'success';
             // 最后一批正式消息已交给 setMessages；同一轮更新撤掉预览，不再逐条补弹。
             setStreamingBubbles([]);
             setStreamingThinking('');
@@ -2144,6 +2159,7 @@ export const useChatAI = ({
 
         } catch (e: any) {
             if (replyRun.signal.aborted) return;
+            navigationPetOutcome = 'error';
             // 注意: 这个 catch 兜的是「拿到 API 响应之后」的整条后处理管线 (applyAssistantPostProcessing,
             // 13 步)。这里抛错多半不是网络问题, 而是解析/正则/落库异常。别再叫"连接中断"误导排查。
             const errMsg = e?.message || String(e);
@@ -2164,7 +2180,10 @@ export const useChatAI = ({
                 if (replyRun.signal.aborted) setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
             } catch (error) {
                 console.error('[chat-stop] 回复收尾失败', error);
-            } finally { releaseReply(); }
+            } finally {
+                releaseReply();
+                navigationPet.finish(replyRun.signal.aborted ? 'cancelled' : navigationPetOutcome);
+            }
             setLocalTyping(false);
             KeepAlive.stop();
             // 本轮生成结束（成功/失败/中断都经过）→ 停止本地续租；远端靠 45s TTL 自然失效。

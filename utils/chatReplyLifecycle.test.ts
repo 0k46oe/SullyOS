@@ -4,15 +4,18 @@ import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useChatAI } from '../hooks/useChatAI';
 import { KeepAlive } from './keepAlive';
+import { useNavigationPetForm } from './navigationBallPet';
 
 vi.mock('../context/MusicContext', () => ({ useMusic: () => ({}), loadMusicHooks: () => null }));
 vi.mock('./keepAlive', () => ({ KeepAlive: { start: vi.fn(), stop: vi.fn() } }));
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 let current: ReturnType<typeof useChatAI>;
+let petForm: string;
 const container = document.createElement('div');
 let root = createRoot(container);
 function Probe({ charId = 'reply-test' }: { charId?: string }) {
+    petForm = useNavigationPetForm();
     current = useChatAI({
         char: { id: charId, name: '甲' } as any, userProfile: { name: '用户' } as any,
         apiConfig: { baseUrl: 'https://example.test/v1' }, groups: [], emojis: [], categories: [],
@@ -36,6 +39,7 @@ describe('useChatAI 请求生命周期', () => {
         });
         expect(KeepAlive.start).toHaveBeenCalledTimes(1);
         expect(current!.isTyping).toBe(true);
+        expect(petForm).toBe('thinking');
         await act(async () => { root.render(createElement(Probe, { charId: 'other' })); });
         expect(current!.isTyping).toBe(true); // 同一实例的流式状态不能同时被两个角色写
         await act(async () => { await current!.triggerAI([]); });
@@ -48,6 +52,7 @@ describe('useChatAI 请求生命周期', () => {
         expect(KeepAlive.start).toHaveBeenCalledTimes(1);
         await act(async () => { rejectStart(new Error('初始化失败')); await first; });
         expect(current!.isTyping).toBe(false);
+        expect(petForm).toBe('error');
         vi.mocked(KeepAlive.start).mockRejectedValue(new Error('再次失败'));
         await act(async () => { await current!.triggerAI([]); });
         expect(KeepAlive.start).toHaveBeenCalledTimes(2);
@@ -64,7 +69,9 @@ it('停止正在等待的初始化会立即解除占位，不留下错误消息'
     let pending!: Promise<void>;
     await act(async () => { pending = current.triggerAI([]); });
     expect(current.isTyping).toBe(true);
+    expect(petForm).toBe('thinking');
     await act(async () => { stopReplyRuns('stop-lifecycle'); await pending; });
     expect(current.isTyping).toBe(false);
+    expect(petForm).toBe('idle');
     expect(await DB.getRecentMessagesByCharId('stop-lifecycle', 20)).toEqual([]);
 });
