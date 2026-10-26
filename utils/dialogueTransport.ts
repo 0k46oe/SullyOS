@@ -3,7 +3,7 @@ import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiProtocol } fro
 import { safeFetchJson } from './safeApi';
 import { readAnthropicResponse } from './anthropicStream';
 import { resolveBlobRefsInRequestBody } from './apiBlobRefs';
-import { captureApiRequestOnce, getApiCallAmbientContext, updateApiRequestCaptureUsage } from './apiCallLog';
+import { captureApiRequestOnce, getApiCallAmbientContext, MAX_API_RAW_USAGE_EVENTS, updateApiRequestCaptureUsage, type ApiRawUsageEvent } from './apiCallLog';
 import { compareAnthropicCachePrefix, splitAnthropicCacheText } from './anthropicPromptCache';
 
 export const isAnthropicApi = (api: Pick<DialogueApiConfig, 'protocol'>): boolean =>
@@ -207,19 +207,25 @@ export function createDialogueFetch(api: DialogueApiConfig): typeof safeFetchJso
     // one-shot switch here after conversion, so it contains the actual Messages
     // request (including system, tools, thinking and cache_control).
     const captureId = captureApiRequestOnce({ url: endpoint, body: nativeBody, meta: nativeMeta });
+    const rawUsageEvents: ApiRawUsageEvent[] = [];
+    let rawUsageEventsDropped = 0;
+    const onUsage = captureId ? (event: ApiRawUsageEvent) => {
+      if (rawUsageEvents.length < MAX_API_RAW_USAGE_EVENTS) rawUsageEvents.push(event);
+      else rawUsageEventsDropped++;
+    } : undefined;
     try {
       const result = await safeFetchJson(endpoint, {
         ...options, headers: dialogueHeaders(api), body: nativeBody,
       }, 0, timeout, nativeMeta, {
         ...(body.stream === true ? hooks : {}),
         responseParser: (response, _streamHooks, timing, startedAt) =>
-          readAnthropicResponse(response, body.stream === true ? hooks : undefined, timing, startedAt, options.signal),
+          readAnthropicResponse(response, body.stream === true ? hooks : undefined, timing, startedAt, options.signal, onUsage),
       });
       const completion = fromAnthropicResponse(result);
-      updateApiRequestCaptureUsage({ captureId, ok: true, response: result });
+      updateApiRequestCaptureUsage({ captureId, ok: true, response: result, rawUsageEvents, rawUsageEventsDropped });
       return completion;
     } catch (error) {
-      updateApiRequestCaptureUsage({ captureId, ok: false });
+      updateApiRequestCaptureUsage({ captureId, ok: false, rawUsageEvents, rawUsageEventsDropped });
       throw error;
     }
   };

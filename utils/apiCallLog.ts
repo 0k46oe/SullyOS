@@ -145,6 +145,20 @@ export interface ApiRequestCaptureSection {
     end?: number;
 }
 
+/** Only provider usage objects, never response text, reasoning or headers. */
+export interface ApiRawUsageEvent {
+    source: 'response' | 'message_start' | 'message_delta' | 'stream_chunk';
+    usage: unknown;
+}
+
+export const MAX_API_RAW_USAGE_EVENTS = 64;
+
+export function snapshotApiRawUsage(source: ApiRawUsageEvent['source'], usage: unknown): ApiRawUsageEvent | undefined {
+    if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return undefined;
+    try { return { source, usage: JSON.parse(JSON.stringify(usage)) }; }
+    catch { return undefined; }
+}
+
 /**
  * 用户主动开启后，仅保存下一次本地对话的完整请求体（OpenAI / Anthropic）。
  * 普通 5 天日志仍然只存统计；这条记录永远覆盖上一条，避免原文长期堆积。
@@ -166,6 +180,12 @@ export interface ApiRequestCapture {
     cacheReadTokens?: number;
     cacheCreationTokens?: number;
     usageStatus?: 'pending' | 'reported' | 'not-reported' | 'failed';
+    /** Raw JSON objects before token normalization; only the one-shot capture retains these. */
+    rawUsageEvents?: ApiRawUsageEvent[];
+    rawUsageEventsDropped?: number;
+    /** Native SSE usage after field merging, before OpenAI-shaped conversion. */
+    responseUsage?: unknown;
+    backendModel?: string;
     messageCount: number;
     binaryPlaceholders: number;
     sections: ApiRequestCaptureSection[];
@@ -944,6 +964,16 @@ export function formatApiRequestCaptureTxt(capture: ApiRequestCapture): string {
             content || '（空内容）',
         ].join('\n');
     });
+    const rawUsageRows = capture.rawUsageEvents?.length
+        ? capture.rawUsageEvents.flatMap((event, index) => [
+            `--- 原始 usage ${index + 1} · ${event.source} ---`,
+            JSON.stringify(event.usage, null, 2),
+            '',
+        ])
+        : [capture.usageStatus === 'pending' ? '等待接口响应，回复结束后重新导出。'
+            : capture.rawUsageEvents == null ? '旧记录未采集原始 usage，请开启本次发送统计后重新发送。'
+                : capture.usageStatus === 'failed' ? '请求失败或中断，尚未收到可用的 usage。'
+                    : '接口未返回可用的原始 usage；缺失字段不等于返回了 0。'];
 
     return [
         'SullyOS·糯米机 · LLM 本次发送统计',
@@ -954,6 +984,7 @@ export function formatApiRequestCaptureTxt(capture: ApiRequestCapture): string {
         `角色：${capture.meta.charName || '—'}`,
         `API：${capture.presetName || capture.baseUrl || '—'}`,
         `模型：${capture.model || '—'}`,
+        ...(capture.backendModel ? [`响应自报模型：${capture.backendModel}`] : []),
         `输入 Token（模型响应自报）：${capture.promptTokens != null ? fmt(capture.promptTokens) : capture.usageStatus === 'pending' ? '等待响应' : capture.usageStatus === 'failed' ? '请求失败，无法取得' : '接口未返回 usage'}`,
         `输出 Token：${capture.completionTokens != null ? fmt(capture.completionTokens) : '—'}`,
         `总 Token：${capture.totalTokens != null ? fmt(capture.totalTokens) : '—'}`,
@@ -966,6 +997,16 @@ export function formatApiRequestCaptureTxt(capture: ApiRequestCapture): string {
         capture.binaryPlaceholders > 0
             ? `二进制占位：${capture.binaryPlaceholders} 个（图片/音频正文未保存，已保留原始长度）`
             : '二进制占位：0',
+        '',
+        '===== 接口原始 usage（用于缓存排查） =====',
+        '以下仅保留接口返回的 usage 对象；流式事件按接收顺序列出，未换算、补零或改写字段。',
+        ...rawUsageRows,
+        ...(capture.rawUsageEventsDropped ? [`超出保留上限，另有 ${capture.rawUsageEventsDropped} 条 usage 事件未保存。`] : []),
+        ...(capture.responseUsage !== undefined ? [
+            '===== 解析后汇总 usage =====',
+            '流式为按事件顺序合并的 usage；非流式为响应 usage。用于与上方原始事件和 Token 统计对照。',
+            JSON.stringify(capture.responseUsage, null, 2),
+        ] : []),
         '',
         '===== 客户端发出前重复检查 =====',
         duplicateSummary.groups === 0
@@ -1011,14 +1052,38 @@ export function updateApiRequestCaptureUsage(input: {
     ok: boolean;
     response?: unknown;
     responseText?: string;
+    rawUsageEvents?: ApiRawUsageEvent[];
+    rawUsageEventsDropped?: number;
 }): void {
     if (!input.captureId) return;
     try {
         let responseForUsage = input.response;
+        const rawUsageEvents: ApiRawUsageEvent[] = [];
+        let dropped = input.rawUsageEventsDropped || 0;
+        const append = (event: ApiRawUsageEvent | undefined) => {
+            if (!event) return;
+            if (rawUsageEvents.length < MAX_API_RAW_USAGE_EVENTS) rawUsageEvents.push(event);
+            else dropped++;
+        };
+        if (input.rawUsageEvents) {
+            for (const event of input.rawUsageEvents) append(snapshotApiRawUsage(event.source, event.usage));
+        }
         if (responseForUsage === undefined && typeof input.responseText === 'string') {
             const scanned = scanSseForLog(input.responseText);
             if (scanned.usage) responseForUsage = { usage: scanned.usage };
+            if (!input.rawUsageEvents) for (const line of input.responseText.split(/\r?\n/)) {
+                if (!line.startsWith('data:')) continue;
+                let chunk: any;
+                try { chunk = JSON.parse(line.slice(5).trim()); } catch { continue; }
+                if (chunk?.type === 'message_start') append(snapshotApiRawUsage('message_start', chunk.message?.usage));
+                else append(snapshotApiRawUsage(chunk?.type === 'message_delta' ? 'message_delta' : 'stream_chunk', chunk?.usage));
+            }
+            if (scanned.model) responseForUsage = { ...(responseForUsage as object || {}), model: scanned.model };
         }
+        const root = responseForUsage as any;
+        const rawUsage = root?.usage ?? root?.usage_metadata ?? root?.usageMetadata;
+        const responseUsage = snapshotApiRawUsage('response', rawUsage)?.usage;
+        if (!input.rawUsageEvents && input.response !== undefined) append(snapshotApiRawUsage('response', rawUsage));
         const usage = extractApiTokenUsage(responseForUsage);
         const patch: Partial<ApiRequestCapture> = {
             promptTokens: usage.prompt,
@@ -1027,6 +1092,10 @@ export function updateApiRequestCaptureUsage(input: {
             cacheReadTokens: usage.cacheRead,
             cacheCreationTokens: usage.cacheCreation,
             usageStatus: !input.ok ? 'failed' : usage.prompt != null ? 'reported' : 'not-reported',
+            rawUsageEvents,
+            rawUsageEventsDropped: dropped,
+            responseUsage,
+            backendModel: typeof root?.model === 'string' ? root.model : undefined,
         };
         const pending = captureSaveInFlight?.id === input.captureId
             ? captureSaveInFlight.promise.catch(() => {})

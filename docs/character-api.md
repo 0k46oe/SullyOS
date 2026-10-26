@@ -32,6 +32,8 @@ API 调用记录和本次发送统计增加「缓存前缀对比」：本页首�
 
 顶层原生 system 按正文分区索引，可展开、复制和导出 TXT。完整原始 JSON 保留结构；超长原生 base64 图片源与旧 data URL 一样只保存格式和原始长度，避免文档塞入大块二进制，普通文本不截断。此功能记录的是**发给模型的完整请求**，不是模型回复全文；思考和正文回复仍由聊天原流程展示和保存。原文只保存本机最后一份，沿用原来的隐私提示和删除入口，不增加数据库迁移。
 
+TXT 的「接口原始 usage（用于缓存排查）」保留响应中的原始字段和嵌套统计，不换算或补零。Anthropic 流式分别记录 `message_start` 与各次 `message_delta` 的 usage；非流式及忽略流式参数的 JSON 响应记录完整 usage 对象。另列「解析后汇总 usage」和响应自报模型，与文档头部的 Token 数对照。OpenAI 原有抓包入口也记录 JSON / SSE usage。仅开启本次发送统计时保存，正常日志不增加原始响应；不保存响应正文、思考或请求头。断流、取消或接口错误保留此前已收到的 usage，标记失败；旧记录和未返回 usage 分别说明，不把缺失当成零。每次最多保留 64 条 usage 事件，超出时明确写出省略条数，汇总统计仍按原流程更新。此处是中转返回给浏览器的数据，不能直接证明中转真实上游的缓存或计费行为。
+
 缓存参数及边界参考 Anthropic 官方提示词缓存文档：<https://platform.claude.com/docs/en/build-with-claude/prompt-caching>。缓存读取／写入仍只按服务实际回传值记账。
 
 设置 → API 调用记录接入本地原生 Messages 请求，按接口实际返回的 `cache_creation_input_tokens` / `cache_read_input_tokens` 显示「缓存写入 Token／缓存读取 Token」；未报告时不展示该项，明确报告 0 时展示 0。原生输入总量 = `input_tokens` + 缓存写入 + 缓存读取，输出单列，总量只相加一次。流式合并起始和末尾 usage 后记账，OpenAI 的已有统计保持其原有口径。参数契约核对了 Anthropic 官方 SDK 的 Messages 类型声明；未使用真实 Key 调用服务，也未验证任何中转的实际计费或命中。

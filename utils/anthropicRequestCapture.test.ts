@@ -35,6 +35,15 @@ it.each([false, true])('captures the actual native request once, exports complet
   expect(captured.meta).toMatchObject({ appName: '消息', purpose: '聊天回复', charId: 'test' });
   expect(captured.binaryPlaceholders).toBe(1);
   const txt = formatApiRequestCaptureTxt(captured);
+  expect(captured.rawUsageEvents).toEqual(stream ? [
+    { source: 'message_start', usage: { ...response.usage, output_tokens: 0 } },
+    { source: 'message_delta', usage: { output_tokens: 20 } },
+  ] : [{ source: 'response', usage: response.usage }]);
+  expect(captured.responseUsage).toEqual(response.usage);
+  expect(captured.backendModel).toBe(api.model);
+  expect(txt).toContain('接口原始 usage（用于缓存排查）');
+  expect(txt).toContain('"cache_read_input_tokens": 1200');
+  expect(txt).toContain('解析后汇总 usage');
   for (const text of ['完整人设', '完整记忆', '完整设定', '当前时间及动态召回', '今天看这张图片', 'calendar', 'cache_control', 'thinking', '完整原始请求 JSON', '缓存读取 Token：1,200']) expect(txt).toContain(text);
   expect(txt).not.toContain(api.apiKey); expect(txt).not.toContain('a'.repeat(100));
   expect(captured.sections.filter(part => part.systemBlockIndex != null).map(part => getApiRequestCaptureSectionContent(captured, part)).join('')).toContain('完整记忆');

@@ -1,4 +1,5 @@
 import { isSseResponseText, safeResponseJson, type StreamHooks } from './safeApi';
+import { snapshotApiRawUsage, type ApiRawUsageEvent } from './apiCallLog';
 
 type StreamBlock = { value: Record<string, any>; partialJson: string; stopped: boolean };
 
@@ -9,6 +10,7 @@ export async function readAnthropicResponse(
   timing?: { firstDeltaMs?: number },
   startedAt?: number,
   signal?: AbortSignal | null,
+  onUsage?: (event: ApiRawUsageEvent) => void,
 ): Promise<any> {
   let message: any;
   const blocks = new Map<number, StreamBlock>();
@@ -23,6 +25,11 @@ export async function readAnthropicResponse(
   const fail = (detail: string): never => { throw new Error(`Anthropic 流式响应错误：${detail}`); };
   const throwIfAborted = () => {
     if (signal?.aborted) throw signal.reason ?? new DOMException('请求已取消', 'AbortError');
+  };
+  const reportUsage = (source: ApiRawUsageEvent['source'], usage: unknown) => {
+    if (!onUsage) return;
+    const event = snapshotApiRawUsage(source, usage);
+    if (event) try { onUsage(event); } catch { /* Diagnostics must never interrupt a reply. */ }
   };
   const emit = (text: string) => {
     if (!text) return;
@@ -51,6 +58,7 @@ export async function readAnthropicResponse(
     if (type === 'ping') return;
     if (type === 'message_start') {
       if (message || !event.message || !Array.isArray(event.message.content)) fail('message_start 格式不正确');
+      reportUsage('message_start', event.message.usage);
       message = { ...event.message, content: [], usage: { ...event.message.usage } };
       event.message.content.forEach((value: Record<string, any>, index: number) => {
         blocks.set(index, { value: { ...value }, partialJson: '', stopped: true });
@@ -93,6 +101,7 @@ export async function readAnthropicResponse(
       block!.stopped = true;
     } else if (type === 'message_delta') {
       if (!message) fail('缺少 message_start');
+      reportUsage('message_delta', event.usage);
       if (event.delta?.stop_reason !== undefined) message.stop_reason = event.delta.stop_reason;
       if (event.delta?.stop_sequence !== undefined) message.stop_sequence = event.delta.stop_sequence;
       if (event.usage) message.usage = { ...message.usage, ...event.usage };
@@ -151,7 +160,9 @@ export async function readAnthropicResponse(
       return message;
     }
     // A proxy can ignore stream:true and return ordinary JSON, even with a mislabeled MIME type.
-    return safeResponseJson(new Response(pending, { status: response.status, headers: response.headers }));
+    const result = await safeResponseJson(new Response(pending, { status: response.status, headers: response.headers }));
+    reportUsage('response', result?.usage);
+    return result;
   } finally {
     signal?.removeEventListener('abort', abort);
     if (reader) {
