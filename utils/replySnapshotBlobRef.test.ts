@@ -49,8 +49,10 @@ describe('引用回复的内容快照', () => {
         expect(buildReplySnapshotContent({ type: 'emoji', content: BLOB_TOKEN })).toBe('[表情包]');
     });
 
-    it('普通文字还是老样子：长的截 10 个字，短的原样', () => {
-        expect(buildReplySnapshotContent({ type: 'text', content: '今天天气真好我们出去走走吧' })).toBe('今天天气真好我们出去...');
+    it('普通文字显示 15 个字符，短的原样，完整原消息不受影响', () => {
+        expect(buildReplySnapshotContent({ type: 'text', content: '今天天气真好我们出去走走吧' })).toBe('今天天气真好我们出去走走吧');
+        expect(buildReplySnapshotContent({ type: 'text', content: '12345678901234567890' })).toBe('123456789012345...');
+        expect(buildReplySnapshotContent({ type: 'text', content: '😀'.repeat(16) })).toBe('😀'.repeat(15) + '...');
         expect(buildReplySnapshotContent({ type: 'text', content: '好呀' })).toBe('好呀');
     });
 });

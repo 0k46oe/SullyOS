@@ -1,0 +1,253 @@
+{
+  "repository": "0k46oe/SullyOS",
+  "branch": "master",
+  "baseCommit": "cb6e1e0f23f7db430c0de57f5deb3df79ca32411",
+  "created": "2026-10-26",
+  "files": [
+    {
+      "path": "apps/Settings.tsx",
+      "action": "replace",
+      "bytes": 325901,
+      "sha256": "c216db7008f41e4854c135c7f0cd1f7a153c57068c525b5ef7f364698de3b4a2",
+      "beforeSha256": "ccf297c812f6646b8d762fa027397cac181a5139cef0f4f7379864c1c5c770f4"
+    },
+    {
+      "path": "components/character/CharacterApiPanel.tsx",
+      "action": "replace",
+      "bytes": 8211,
+      "sha256": "c3412daa6a550c14553d5cbc32a69a3446ed37883792d25eb4ebe2e07ae871c3",
+      "beforeSha256": "370d7a8fef5cfd3ed60d22bdba9e4f9adb2d2fc34a74a59b4f2d79129fb54b94"
+    },
+    {
+      "path": "components/chat/MessageItem.tsx",
+      "action": "replace",
+      "bytes": 240720,
+      "sha256": "2c4594054fec66af78685d592f534b2399e26fd2ea0b05f10d8acd935e63220e",
+      "beforeSha256": "83d36e8e307f66719547e251b830ab79b6338eb80f6fac28a8effa9f5d7faf7d"
+    },
+    {
+      "path": "components/os/NavigationApiSwitcher.tsx",
+      "action": "add",
+      "bytes": 6487,
+      "sha256": "b13d9913f110997efa32ec243beac72a3822c1a6d6a09248bbd3da7e19006501",
+      "beforeSha256": null
+    },
+    {
+      "path": "components/os/NavigationBall.css",
+      "action": "replace",
+      "bytes": 2594,
+      "sha256": "986d0e40977496b42d3f1d8d2f53360ccaa161c84c0d212a6bfcd14c2ec0e78d",
+      "beforeSha256": "9f81ad04bf4961a5b468a0ff51d8e7d3ade5f87e9ec3f61ffa39945e14640474"
+    },
+    {
+      "path": "components/os/NavigationBall.tsx",
+      "action": "replace",
+      "bytes": 10922,
+      "sha256": "dae197c1c851e2651bba79594421e528ac9116e747c9c8a07a1e50ef30b4a59e",
+      "beforeSha256": "48f353ea47958fa27c97db9780df87617710925d6d476e08318c6047182f3eb1"
+    },
+    {
+      "path": "components/os/NavigationBallFace.tsx",
+      "action": "add",
+      "bytes": 651,
+      "sha256": "f524027463119bf519f25f2adb8f82efcf35c1421ec2f1b627d422f58f6d2aca",
+      "beforeSha256": null
+    },
+    {
+      "path": "components/settings/DialogueApiFields.tsx",
+      "action": "replace",
+      "bytes": 9714,
+      "sha256": "4dbdcf10ce2cacf27c2f6dd2bd2aa4932d3e3abb1ee72f63b4e98273639e7473",
+      "beforeSha256": "6b800decc1fd28d3e3567fbff9835ef9d95d73038cff859f1227e4a5da545e8c"
+    },
+    {
+      "path": "components/settings/NavigationBallSettings.tsx",
+      "action": "replace",
+      "bytes": 11381,
+      "sha256": "3a9341a28f16dc45759c2b1319900b01a701cd49be24e61e829e4eb01f4a9dc3",
+      "beforeSha256": "e513ef44a74a5639738230bfc0ad4ba9e060732c028fc7b032751bdb444590be"
+    },
+    {
+      "path": "docs/character-api.md",
+      "action": "replace",
+      "bytes": 7547,
+      "sha256": "de2d9692a9fe457959a7ab6dfd558c0f1b4754efbb4ee176a1f5282bfa07b3fc",
+      "beforeSha256": "dcefef0a3355ae6fba2232cb81f2e2348530336e9ba736601399f18b7a7e58b3"
+    },
+    {
+      "path": "docs/navigation.md",
+      "action": "replace",
+      "bytes": 8091,
+      "sha256": "5d80ec2658891296365b1aa47ec75470c01987b56e05c436d89c7269d2eded50",
+      "beforeSha256": "64264755edfd36744ac731b0871874e6d6f6d7b129297b54744775fd7bdcb891"
+    },
+    {
+      "path": "hooks/useChatAI.ts",
+      "action": "replace",
+      "bytes": 168284,
+      "sha256": "8b4f91bb6035783daa7eb0035d7b1e01007985a794753784d3b6eb30c513b924",
+      "beforeSha256": "e6281b6f5c5f26ac7a5585ff2bdbadf0f00c04d4855e47916c96ac54f55d5ffa"
+    },
+    {
+      "path": "test/fixtures/custom-chat-api.html",
+      "action": "add",
+      "bytes": 650,
+      "sha256": "d29f965abf9490a70a818e6d59ddca2e6f8e21db023cdff53247765a98452523",
+      "beforeSha256": null
+    },
+    {
+      "path": "test/fixtures/custom-chat-api.tsx",
+      "action": "add",
+      "bytes": 2586,
+      "sha256": "72f7f66191e6a89221a66231c13aa78693e5381022200b8f93f259e4f44e8366",
+      "beforeSha256": null
+    },
+    {
+      "path": "types.ts",
+      "action": "replace",
+      "bytes": 187553,
+      "sha256": "bbb96730daeb49c8f480aa06b8e7c1f88e0613c7fc94324713e63cd1cfa7a3cd",
+      "beforeSha256": "1a11df4009e9eb263e7040d9dff186e85e07d45b74a82efb62066887c5b282a0"
+    },
+    {
+      "path": "utils/anthropicChatImages.test.ts",
+      "action": "add",
+      "bytes": 8396,
+      "sha256": "b8438724e74e8840d0f9afd1c625599c87bb57d39644be8822b42df94ccf5822",
+      "beforeSha256": null
+    },
+    {
+      "path": "utils/anthropicChatStreaming.test.ts",
+      "action": "add",
+      "bytes": 5866,
+      "sha256": "3e48db3939b99f38ee8577ded15131b8a15d48cecbe717c1590f249eb78b72e8",
+      "beforeSha256": null
+    },
+    {
+      "path": "utils/anthropicStream.test.ts",
+      "action": "add",
+      "bytes": 10691,
+      "sha256": "ad3fd3e421873fdec36ce03e23920e7d4c484bbe8441a65f5600e74530bc5d88",
+      "beforeSha256": null
+    },
+    {
+      "path": "utils/anthropicStream.ts",
+      "action": "add",
+      "bytes": 6972,
+      "sha256": "a298a1e998876be66f46718f3a2f51c91ac45af9bca65b57646a79c2609fbc2e",
+      "beforeSha256": null
+    },
+    {
+      "path": "utils/apiConfigNormalize.test.ts",
+      "action": "replace",
+      "bytes": 1865,
+      "sha256": "1d594e27e60a247f893c4726c1f352804a9ae56379e84b3e60e00c3b6a4a7fb0",
+      "beforeSha256": "d0946668c08c250a43e6be96fc25a7234022f3235f1d33ead87619bda8d291dc"
+    },
+    {
+      "path": "utils/apiConfigNormalize.ts",
+      "action": "replace",
+      "bytes": 1760,
+      "sha256": "7a49e80eb53105d132b78f3d506c4771a8b3efde26b7d9bf3a9b1882b243b2d8",
+      "beforeSha256": "1e4d1f9ecc8de9a991045c27f09af50bb29ff145df776e6bbd9f426c26914e75"
+    },
+    {
+      "path": "utils/apiPresetSwitch.test.ts",
+      "action": "replace",
+      "bytes": 4556,
+      "sha256": "47d31f51668549df86cbe25b460544b0766d0a79b6080c7db40294f907cd4374",
+      "beforeSha256": "c5cf120961f3236e833d0864c3fe1307832cce00ef95efff6d1041948a08a699"
+    },
+    {
+      "path": "utils/apiPresetSwitch.ts",
+      "action": "replace",
+      "bytes": 4089,
+      "sha256": "a151d96f581ed8569fbcfeaba505d3dc1d390c0f92ea755f2761817e48ffae32",
+      "beforeSha256": "4928b3ab7565dae9c24057029970fdb1e0aac9c24f334e47cd5a3ac78a814c5a"
+    },
+    {
+      "path": "utils/apiPresetSwitch.wiring.test.ts",
+      "action": "replace",
+      "bytes": 8168,
+      "sha256": "d2ad177d3daf56bb2bce7367868fdc70b5cd28bf76bc4d1a250fda351bbe1289",
+      "beforeSha256": "e9962a1cbf66843f6abdd766c8358bcfe05675dcc16e973a7ef0954cff31cbd6"
+    },
+    {
+      "path": "utils/applyAssistantPostProcessing.ts",
+      "action": "replace",
+      "bytes": 149156,
+      "sha256": "fab740b0a77d1f69b1d313e2ac20225ea8ed97844cb1a016183cedd6e484ef10",
+      "beforeSha256": "1902ff80e5788ee2957e4b6ce27e7dad2d33d599e9ab13731ed5de40e9190db0"
+    },
+    {
+      "path": "utils/characterApi.ts",
+      "action": "replace",
+      "bytes": 1542,
+      "sha256": "8cb0de5367845fe002c0f8cb9dc4dffcb76c094b54e2b02b25d3e91e17478f62",
+      "beforeSha256": "59ad4abeca491457bd9dbcfac958d5902f9abb3f84f09753da1d474d4ab9ee7b"
+    },
+    {
+      "path": "utils/characterApiPanel.test.ts",
+      "action": "replace",
+      "bytes": 5947,
+      "sha256": "e63b6b9b033cf343703aa94b446b033a7195d36b3e948335a12dbae6b6539948",
+      "beforeSha256": "5dfdc67498db6bbdd4e5a46f8c729132b4ab3c2693f598069ea1ef7c88fec52d"
+    },
+    {
+      "path": "utils/characterApiPersistence.test.ts",
+      "action": "replace",
+      "bytes": 8306,
+      "sha256": "73bd43185dccc32fa34e2842fb49d4aa853da734bfd1e8c595438277de4ee2ec",
+      "beforeSha256": "2bad54da0ace7495c32e6b3852b3b66ef36ae5974db6556b364fe82910050f2d"
+    },
+    {
+      "path": "utils/dialogueTransport.test.ts",
+      "action": "add",
+      "bytes": 12888,
+      "sha256": "f2fd686fa267361c3c959318609873eaf93eba6313ef0c0b9deeb02f05236f0f",
+      "beforeSha256": null
+    },
+    {
+      "path": "utils/dialogueTransport.ts",
+      "action": "add",
+      "bytes": 8943,
+      "sha256": "14a80ffca483ed97bde75e25de2730f43d1147efdb4e0c6b8014a57cd36be257",
+      "beforeSha256": null
+    },
+    {
+      "path": "utils/navigationApiSwitcher.test.ts",
+      "action": "add",
+      "bytes": 4365,
+      "sha256": "8965f916208d0467562dae545f91c7f5287aa0ac51c3566772982a9eda948913",
+      "beforeSha256": null
+    },
+    {
+      "path": "utils/navigationBallAppearance.test.ts",
+      "action": "add",
+      "bytes": 6282,
+      "sha256": "6b0996f951f9964ba7ee3a59cf354c8fefaef193304534837e647bc823bd4881",
+      "beforeSha256": null
+    },
+    {
+      "path": "utils/navigationBallAppearance.ts",
+      "action": "add",
+      "bytes": 3221,
+      "sha256": "f9e0b5a58c907bbd70d437e543f3b4faf51476d2ae96b46fe4a2b4e5d50aa143",
+      "beforeSha256": null
+    },
+    {
+      "path": "utils/replySnapshotBlobRef.test.ts",
+      "action": "replace",
+      "bytes": 9559,
+      "sha256": "8c4cd6a6c49057172d85ad5dc32ed729cc7b51b53505c79ad6bece0559534465",
+      "beforeSha256": "354ea647f63187ab6151ca283ae5c8097f4994af1d422e0c6af1780667422ba9"
+    },
+    {
+      "path": "utils/safeApi.ts",
+      "action": "replace",
+      "bytes": 37307,
+      "sha256": "4b5908a59fea32872b325551c2d198cb79adbc02252a5ee7cfe37c6925d3d6a9",
+      "beforeSha256": "a8d691f570638dc3b9dabadb7cdb4d0ce43e341b329e5a4d026b120a4e880360"
+    }
+  ]
+}

@@ -9,7 +9,10 @@ import { describeNavigationShortcut, type NavigationShortcut, type ShortcutChara
 import { launchNavigationShortcut } from '../../utils/navigationShortcutLaunch';
 import { clampBubblePos, resolveSafeTopInset } from '../../utils/floatingBallBounds';
 import { isIOSStandaloneWebApp, readSafeAreaInsets } from '../../utils/iosStandalone';
+import { navigationBallShapeRadius, useNavigationBallAppearance } from '../../utils/navigationBallAppearance';
+import NavigationBallFace from './NavigationBallFace';
 import './NavigationBall.css';
+const NavigationApiSwitcher = React.lazy(() => import('./NavigationApiSwitcher'));
 
 const POSITION_KEY = NAVIGATION_BALL_POSITION_KEY;
 const SIZE = 44;
@@ -35,9 +38,11 @@ type NavigationActions = {
   onBack: () => void; onHome: () => void; onApi: () => void;
   onShortcut: (shortcut: NavigationShortcut) => void; onConfigure: () => void;
   characters?: readonly ShortcutCharacter[];
+  apiLabel?: string;
 };
-export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onConfigure, characters = [] }: NavigationActions) {
+export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onConfigure, characters = [], apiLabel = 'API 配置' }: NavigationActions) {
   const slots = useNavigationBallSlots();
+  const appearance = useNavigationBallAppearance();
   const root = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<Position | null>(readPosition);
   const [open, setOpen] = useState(false);
@@ -100,6 +105,7 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
   };
   return <div ref={root} className="navigation-ball" style={position ? { left: position.x, top: position.y } : { right: 12, bottom: 96 }}>
     <button type="button" className="navigation-ball-toggle" aria-label="快捷导航悬浮球" aria-expanded={open}
+      data-custom-image={!!appearance.image} style={{ borderRadius: navigationBallShapeRadius[appearance.shape], opacity: appearance.opacity }}
       onPointerDown={event => {
         if (event.button !== 0 || !root.current?.parentElement || !latest.current) return;
         const { bounds } = measure(root.current.parentElement);
@@ -117,12 +123,12 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
         latest.current = next; setPosition(next);
       }} onPointerUp={event => finish(event)} onPointerCancel={event => finish(event, true)}
       onClick={event => { if (event.detail !== 0 && suppressClick.current) { suppressClick.current = false; return; } setOpen(value => !value); }}>
-      <span aria-hidden="true" />
+      <NavigationBallFace appearance={appearance} />
     </button>
     {open && <div className="navigation-ball-panel" role="group" aria-label="快捷导航"
       style={{ left: panelLeft, top: panelTop, width: panelWidth, maxHeight: availableHeight, overflowY: 'auto' }}>
       {slotButton(0)}
-      <button type="button" onClick={() => run(onApi)}><PlugsConnected className="navigation-ball-action-icon" /><span>API 配置</span></button>
+      <button type="button" onClick={() => run(onApi)}><PlugsConnected className="navigation-ball-action-icon" /><span>{apiLabel}</span></button>
       <button type="button" aria-label="返回上一级" onClick={() => run(onBack)}><ArrowUUpLeft className="navigation-ball-action-icon" /><span>上一级</span></button>
       {slotButton(1)}
       <button type="button" aria-label="回到桌面" onClick={() => run(onHome)}><House className="navigation-ball-action-icon" /><span>桌面</span></button>
@@ -136,11 +142,17 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
 export default function NavigationBall() {
   const enabled = useNavigationBallEnabled();
   const pickerOpen = useNavigationPickerOpen();
-  const { isLocked, handleBack, closeApp, openApp, characters = [], setActiveCharacterId, addToast } = useOS();
+  const { isLocked, handleBack, closeApp, openApp, characters = [], setActiveCharacterId, addToast, apiPresets = [], activeApp, activeCharacterId } = useOS();
+  const [apiPickerOpen, setApiPickerOpen] = useState(false);
+  useEffect(() => { setApiPickerOpen(false); }, [enabled, isLocked, pickerOpen, activeApp, activeCharacterId]);
   const openSettingsAt = (target: 'api' | 'navigation') => { requestSettingsFocus(target); openApp(AppID.Settings); };
-  return enabled && !isLocked && !pickerOpen ? <DraggableNavigationBall onBack={handleBack} onHome={closeApp}
-    onApi={() => openSettingsAt('api')} characters={characters}
+  return enabled && !isLocked && !pickerOpen ? <><DraggableNavigationBall onBack={handleBack} onHome={closeApp}
+    onApi={() => apiPresets.length ? setApiPickerOpen(true) : openSettingsAt('api')} characters={characters} apiLabel={apiPresets.length ? '切换 API' : 'API 配置'}
     onShortcut={shortcut => launchNavigationShortcut(shortcut, { characters, openApp, setActiveCharacterId,
       onMissingTarget: () => { addToast('这个角色已不存在，请重新设置槽位', 'error'); openSettingsAt('navigation'); } })}
-    onConfigure={() => openSettingsAt('navigation')} /> : null;
+    onConfigure={() => openSettingsAt('navigation')} />
+    {apiPickerOpen && <React.Suspense fallback={<p role="status" className="absolute bottom-4 left-4 rounded-xl bg-white p-3 text-xs text-slate-500">正在打开 API 预设…</p>}>
+      <NavigationApiSwitcher onClose={() => setApiPickerOpen(false)} onOpenSettings={() => { setApiPickerOpen(false); openSettingsAt('api'); }} />
+    </React.Suspense>}
+  </> : null;
 }

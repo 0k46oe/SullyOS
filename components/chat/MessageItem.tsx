@@ -3391,7 +3391,7 @@ const formatTimestamp = (ts: number) => {
             {m.replyTo && (
                 <div className="relative z-10 mb-1 text-[10px] bg-black/5 p-1.5 rounded-md border-l-2 border-current opacity-60 flex flex-col gap-0.5 max-w-full overflow-hidden">
                     <span className="font-bold opacity-90 truncate">{m.replyTo.name}</span>
-                    <span className="truncate italic">{replyPreview.length > 20 ? replyPreview.slice(0, 20) + '...' : replyPreview}</span>
+                    <span className="truncate italic">{Array.from(replyPreview).length > 15 ? Array.from(replyPreview).slice(0, 15).join('') + '...' : replyPreview}</span>
                 </div>
             )}
 

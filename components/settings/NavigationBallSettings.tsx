@@ -4,6 +4,9 @@ import { describeNavigationShortcut, type ShortcutCharacter, type ShortcutWorld,
 import { useSettingsFocus } from '../../utils/settingsNavigation';
 import { useOS } from '../../context/OSContext';
 import { AppID } from '../../types';
+import { processImage } from '../../utils/file';
+import { navigationBallShapeRadius, resetNavigationBallAppearance, setNavigationBallAppearance, useNavigationBallAppearance, type NavigationBallAppearance, type NavigationBallShape } from '../../utils/navigationBallAppearance';
+import NavigationBallFace from '../os/NavigationBallFace';
 const NavigationSlotPicker = React.lazy(() => import('./NavigationSlotPicker'));
 // Only mounted when a slot is being edited. Project titles, never message/book bodies.
 function SlotPickerWithResources(props: React.ComponentProps<typeof NavigationSlotPicker>) {
@@ -19,6 +22,32 @@ function SlotPickerWithResources(props: React.ComponentProps<typeof NavigationSl
 export default function NavigationBallSettings({ characters = [], loadWorlds, resources }: { characters?: readonly ShortcutCharacter[]; loadWorlds?: () => Promise<ShortcutWorld[]>; resources?: ShortcutResources }) {
   const enabled = useNavigationBallEnabled();
   const slots = useNavigationBallSlots();
+  const appearance = useNavigationBallAppearance();
+  const imageInput = useRef<HTMLInputElement>(null);
+  const uploadVersion = useRef(0);
+  const [uploading, setUploading] = useState(false);
+  const [appearanceStatus, setAppearanceStatus] = useState('');
+  useEffect(() => () => { uploadVersion.current += 1; }, []);
+  const updateAppearance = (patch: Partial<NavigationBallAppearance>) => {
+    try { setNavigationBallAppearance(patch); setAppearanceStatus('外观已保存在本机'); }
+    catch (error) { setAppearanceStatus(error instanceof Error ? error.message : '保存失败'); }
+  };
+  const uploadImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]; event.target.value = '';
+    if (!file) return;
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+      setAppearanceStatus('请选择不超过 5MB 的 PNG、JPEG 或 WebP 图片'); return;
+    }
+    const version = ++uploadVersion.current;
+    setUploading(true); setAppearanceStatus('正在处理图片…');
+    try {
+      const image = await processImage(file, { maxWidth: 128, quality: 0.85 });
+      if (version !== uploadVersion.current) return;
+      setNavigationBallAppearance({ image }); setAppearanceStatus('图片已保存在本机');
+    } catch (error) {
+      if (version === uploadVersion.current) setAppearanceStatus(error instanceof Error ? error.message : '图片处理失败');
+    } finally { if (version === uploadVersion.current) setUploading(false); }
+  };
   const section = useRef<HTMLElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [focusRequest, setFocusRequest] = useState(0);
@@ -52,6 +81,41 @@ export default function NavigationBallSettings({ characters = [], loadWorlds, re
         className={`h-7 w-12 shrink-0 rounded-full p-1 transition-colors ${enabled ? 'bg-primary' : 'bg-slate-200'}`}>
         <span className={`block h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${enabled ? 'translate-x-5' : ''}`} />
       </button>
+    </div>
+    <div className="mt-5 border-t border-slate-100 pt-4 space-y-4">
+      <div className="flex items-center gap-4">
+        <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl bg-slate-100" aria-label="悬浮球外观预览">
+          <div className="navigation-ball-face-preview" data-custom-image={!!appearance.image}
+            style={{ borderRadius: navigationBallShapeRadius[appearance.shape], opacity: appearance.opacity }}>
+            <NavigationBallFace appearance={appearance} />
+          </div>
+        </div>
+        <div className="min-w-0">
+          <h3 className="text-xs font-medium text-slate-600">自定义外观</h3>
+          <p className="mt-1 text-[11px] leading-relaxed text-slate-400">图片按形状居中裁切；自动缩小至 128px，仅保存在本机。</p>
+          <input ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp" aria-label="上传悬浮球图片" className="hidden" onChange={event => { void uploadImage(event); }} />
+          <button type="button" disabled={uploading} onClick={() => imageInput.current?.click()} className="mt-2 rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600 disabled:opacity-50">{uploading ? '处理中…' : '上传图片'}</button>
+          {appearance.image && <button type="button" disabled={uploading} onClick={() => updateAppearance({ image: '' })} className="ml-2 text-xs text-slate-400">移除图片</button>}
+        </div>
+      </div>
+      <fieldset>
+        <legend className="mb-2 text-xs text-slate-500">形状</legend>
+        <div className="flex flex-wrap gap-2">
+          {([['circle', '圆形'], ['square', '正方形'], ['rounded', '圆角正方形']] as const).map(([shape, label]) => <button key={shape} type="button" aria-pressed={appearance.shape === shape}
+            onClick={() => updateAppearance({ shape: shape as NavigationBallShape })} className={`rounded-xl border px-3 py-2 text-xs ${appearance.shape === shape ? 'border-primary text-primary bg-primary/5' : 'border-slate-200 text-slate-500'}`}>{label}</button>)}
+        </div>
+      </fieldset>
+      <label className="block text-xs text-slate-500">不透明度 · {Math.round(appearance.opacity * 100)}%
+        <input aria-label="悬浮球不透明度" type="range" min="10" max="100" step="1" value={Math.round(appearance.opacity * 100)}
+          onChange={event => updateAppearance({ opacity: Number(event.target.value) / 100 })} className="mt-3 block w-full accent-slate-500" />
+      </label>
+      <p className="text-[11px] text-slate-400">仅改变球体，展开菜单保持清晰；最低保留 10% 可见度。</p>
+      <button type="button" onClick={() => {
+        uploadVersion.current += 1; setUploading(false);
+        try { resetNavigationBallAppearance(); setAppearanceStatus('已恢复默认外观，位置与快捷入口已保留'); }
+        catch (error) { setAppearanceStatus(error instanceof Error ? error.message : '恢复失败'); }
+      }} className="rounded-xl bg-slate-100 px-4 py-2.5 text-xs text-slate-600">恢复默认外观</button>
+      {appearanceStatus && <p role="status" className="text-[11px] leading-relaxed text-slate-500">{appearanceStatus}</p>}
     </div>
     <div className="mt-4 border-t border-slate-100 pt-4">
       <button type="button" onClick={() => { resetNavigationBallPosition(); setPositionReset(true); }}

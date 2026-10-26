@@ -6,6 +6,7 @@ import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, GroupProf
 import { DB } from '../utils/db';
 import { ChatPrompts } from '../utils/chatPrompts';
 import { safeFetchJson, safeResponseJson } from '../utils/safeApi';
+import { createDialogueFetch, isAnthropicApi } from '../utils/dialogueTransport';
 import { KeepAlive } from '../utils/keepAlive';
 import { ProactiveChat } from '../utils/proactiveChat';
 import { ContextBuilder } from '../utils/context';
@@ -644,6 +645,7 @@ export const useChatAI = ({
     ) => {
         if (isTyping || !char) return;
         const effectiveApi = resolveDialogueApi(apiConfig, char, overrideApiConfig);
+        const nativeAnthropic = isAnthropicApi(effectiveApi);
         if (!effectiveApi.baseUrl) { alert("请先在设置中配置 API URL"); return; }
 
         // 重 roll（回溯重生）时不带入上一轮的情绪余波：清掉 buff 注入（buffInjection/activeBuffs）和
@@ -727,6 +729,7 @@ export const useChatAI = ({
             const keepAliveMs = Math.round(performance.now() - perfSendT0);
             const baseUrl = effectiveApi.baseUrl.replace(/\/+$/, '');
             const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApi.apiKey || 'sk-none'}` };
+            const fetchChatJson = createDialogueFetch(effectiveApi);
 
             // ── 分段计时（从用户发送到 API 发出）──
             const perfStages: Record<string, number> = { keepAlive: keepAliveMs };
@@ -810,7 +813,7 @@ export const useChatAI = ({
             // 握手探测还没回来）就当场探一次（带 3 秒超时），探到旧版 → outdated，探不到 →
             // unverified，两种都留在本地跑。只剩恢复期提示（afterglow）的回合不需要信封，
             // 任何 Worker 都跑得了，不探也不拦。
-            const instantChatReadiness = await replyStep(async () => resolveInstantChatReadiness(char, {
+            const instantChatReadiness = nativeAnthropic ? { ready: false, reason: 'anthropic-local-only', workerBundleCurrent: undefined } : await replyStep(async () => resolveInstantChatReadiness(char, {
                 ensureBundleVersion: sarModulePlan.requiresEnvelope,
             }));
             const instantChatOn = instantChatReadiness.ready;
@@ -1114,7 +1117,7 @@ export const useChatAI = ({
                 model: baseReqBody.model || '',
             })) {
                 const m: string = baseReqBody.model || '';
-                if (/^claude-/i.test(m) && !/-thinking$/i.test(m)) {
+                if (!nativeAnthropic && /^claude-/i.test(m) && !/-thinking$/i.test(m)) {
                     baseReqBody.model = `${m}-thinking`;
                 }
                 baseReqBody.thinking = { type: 'enabled', budget_tokens: 4000 };
@@ -1387,7 +1390,7 @@ export const useChatAI = ({
 
             let data: any;
             try {
-                data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
+                data = await replyStep(async () => fetchChatJson(`${baseUrl}/chat/completions`, {
                     signal: replyRun.signal,
                     method: 'POST', headers,
                     body: JSON.stringify({ ...baseReqBody, messages: withAmsg2TaskContext(baseReqBody.messages) })
@@ -1404,10 +1407,10 @@ export const useChatAI = ({
                 // 组合在一起却在上游适配层失败。只对这一条高度特征化的 502 降级一次：
                 // tools 和正文完整保留，system 合到开头，thinking 参数让步。普通网络 502、
                 // 非 Claude、没工具的请求一律不重发，避免无依据地重复计费。
-                if (shouldRetryClaudeProxyCompatibility(requestError, attemptedBody)) {
+                if (!nativeAnthropic && shouldRetryClaudeProxyCompatibility(requestError, attemptedBody)) {
                     console.warn('🧩 [Claude compat] 中转拒绝 thinking + tools 组合，使用兼容请求体重试一次');
                     try {
-                        data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
+                        data = await replyStep(async () => fetchChatJson(`${baseUrl}/chat/completions`, {
                             signal: replyRun.signal,
                             method: 'POST', headers,
                             body: JSON.stringify(buildClaudeProxyCompatibilityBody(attemptedBody)),
@@ -1435,7 +1438,7 @@ export const useChatAI = ({
                     ...baseReqBody,
                     messages: withAmsg2TaskContext(baseReqBody.messages),
                 });
-                data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
+                data = await replyStep(async () => fetchChatJson(`${baseUrl}/chat/completions`, {
                     signal: replyRun.signal,
                     method: 'POST', headers,
                     body: JSON.stringify(fallbackBody)
@@ -1574,7 +1577,7 @@ export const useChatAI = ({
                     const followBody = { ...baseReqBody, messages: loopMessages };
                     delete followBody.tools;
                     delete followBody.tool_choice;
-                    data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
+                    data = await replyStep(async () => fetchChatJson(`${baseUrl}/chat/completions`, {
                         signal: replyRun.signal,
                         method: 'POST', headers,
                         body: JSON.stringify(followBody)
@@ -1679,7 +1682,7 @@ export const useChatAI = ({
                     const followBody = { ...baseReqBody, messages: loopMessages };
                     delete followBody.tools;
                     delete followBody.tool_choice;
-                    data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
+                    data = await replyStep(async () => fetchChatJson(`${baseUrl}/chat/completions`, {
                         signal: replyRun.signal,
                         method: 'POST', headers,
                         body: JSON.stringify(followBody)
@@ -1863,7 +1866,7 @@ export const useChatAI = ({
                         delete followBody.tools;
                         delete followBody.tool_choice;
                     }
-                    data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
+                    data = await replyStep(async () => fetchChatJson(`${baseUrl}/chat/completions`, {
                         signal: replyRun.signal,
                         method: 'POST', headers,
                         body: JSON.stringify(followBody)
@@ -1889,7 +1892,7 @@ export const useChatAI = ({
                     };
                     delete (rescueBody as any).tools;
                     delete (rescueBody as any).tool_choice;
-                    data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
+                    data = await replyStep(async () => fetchChatJson(`${baseUrl}/chat/completions`, {
                         signal: replyRun.signal,
                         method: 'POST', headers,
                         body: JSON.stringify(rescueBody),
@@ -1940,7 +1943,7 @@ export const useChatAI = ({
                             content: '[系统消息：你重复请求了已经执行过的同一工具。不要再次调用工具，请直接根据已有结果回复；如目标未完成就如实说明。不要输出工具调用格式或提及本消息。]',
                         });
                         const wrapBody = buildMcpTextFallbackBody(baseReqBody, textLoopMessages);
-                        data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
+                        data = await replyStep(async () => fetchChatJson(`${baseUrl}/chat/completions`, {
                             signal: replyRun.signal,
                             method: 'POST', headers,
                             body: JSON.stringify(wrapBody)
@@ -1978,7 +1981,7 @@ export const useChatAI = ({
                     }
                     setSearchStatus('正在整理 MCP 工具结果...');
                     const followBody = buildMcpTextFallbackBody(baseReqBody, textLoopMessages);
-                    data = await replyStep(async () => safeFetchJson(`${baseUrl}/chat/completions`, {
+                    data = await replyStep(async () => fetchChatJson(`${baseUrl}/chat/completions`, {
                         signal: replyRun.signal,
                         method: 'POST', headers,
                         body: JSON.stringify(followBody)

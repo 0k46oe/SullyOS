@@ -6,6 +6,12 @@ import {
 } from './apiConfigNormalize';
 
 describe('API config normalization', () => {
+  it('normalizes an explicit protocol and leaves older snapshots structurally compatible', () => {
+    const api = { baseUrl: '', apiKey: '', model: '' };
+    expect(normalizeApiConfig(api)).not.toHaveProperty('protocol');
+    expect(normalizeApiConfig({ ...api, protocol: 'anthropic' }).protocol).toBe('anthropic');
+    expect(normalizeApiConfig({ ...api, protocol: 'unknown' as any }).protocol).toBe('openai');
+  });
   it('removes pasted whitespace and invisible edge characters from credentials', () => {
     expect(normalizeApiCredential(' \n\u200Bsk-example\u2060\r ')).toBe('sk-example');
   });

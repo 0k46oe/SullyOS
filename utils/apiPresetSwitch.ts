@@ -12,7 +12,7 @@
  */
 
 import type { APIConfig, ApiPreset } from '../types';
-import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from './apiConfigNormalize';
+import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel, normalizeApiProtocol } from './apiConfigNormalize';
 
 /**
  * 切换预设时覆盖的字段。
@@ -22,13 +22,14 @@ import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '
  * 把用户手调过的温度、流式开关顺手重置掉。
  */
 export type PresetSwitchPatch =
-  Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'stream' | 'temperature'>>;
+  Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'protocol' | 'stream' | 'temperature'>>;
 
 export function configFromPreset(preset: ApiPreset): PresetSwitchPatch {
   const patch: PresetSwitchPatch = {
     baseUrl: normalizeApiBaseUrl(preset.config.baseUrl),
     apiKey: normalizeApiCredential(preset.config.apiKey),
     model: normalizeApiModel(preset.config.model),
+    protocol: normalizeApiProtocol(preset.config.protocol),
   };
   if (typeof preset.config.stream === 'boolean') patch.stream = preset.config.stream;
   if (typeof preset.config.temperature === 'number') patch.temperature = preset.config.temperature;
@@ -38,11 +39,12 @@ export function configFromPreset(preset: ApiPreset): PresetSwitchPatch {
 /** 三件套一致才算「就是这条预设」。都归一化后比，免得末尾斜杠 / 空格造成假不一致。 */
 export function presetMatchesConfig(
   preset: ApiPreset,
-  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'>,
+  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol'>,
 ): boolean {
   return normalizeApiBaseUrl(preset.config.baseUrl) === normalizeApiBaseUrl(config.baseUrl)
     && normalizeApiCredential(preset.config.apiKey) === normalizeApiCredential(config.apiKey)
-    && normalizeApiModel(preset.config.model) === normalizeApiModel(config.model);
+    && normalizeApiModel(preset.config.model) === normalizeApiModel(config.model)
+    && normalizeApiProtocol(preset.config.protocol) === normalizeApiProtocol(config.protocol);
 }
 
 /**
@@ -53,7 +55,7 @@ export function presetMatchesConfig(
  */
 export function presetDiffersFromConfig(
   preset: ApiPreset,
-  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'stream' | 'temperature'>>,
+  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol'> & Partial<Pick<APIConfig, 'stream' | 'temperature'>>,
 ): boolean {
   if (!presetMatchesConfig(preset, config)) return true;
   if (typeof preset.config.stream === 'boolean' && preset.config.stream !== (config.stream === true)) return true;
@@ -70,7 +72,7 @@ export function presetDiffersFromConfig(
  */
 export function findActivePresetId(
   presets: ApiPreset[],
-  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'>,
+  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol'>,
 ): string | null {
   if (!normalizeApiBaseUrl(config.baseUrl) && !normalizeApiModel(config.model)) return null;
   return presets.find(preset => presetMatchesConfig(preset, config))?.id ?? null;

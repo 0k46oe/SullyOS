@@ -245,6 +245,8 @@ class SseAssembler {
 
 /** safeFetchJson 的可选流式钩子（只在响应确实是 SSE 流时触发） */
 export interface StreamHooks {
+    /** Optional native protocol parser; omitted by existing OpenAI callers. */
+    responseParser?: ApiResponseParser;
     /**
      * 每收到一段正文增量时回调。fullText 是**本次尝试**累计的完整正文——
      * safeFetchJson 内部重试会重新开一条流，fullText 从空串重新累计，
@@ -256,6 +258,14 @@ export interface StreamHooks {
     /** 收到第一个正文增量时回调一次（TTFT 参考点） */
     onFirstDelta?: () => void;
 }
+
+/** Provider-specific parsing at the response boundary; fetch/error/cancellation policy stays shared. */
+export type ApiResponseParser = (
+    response: Response,
+    hooks: StreamHooks | undefined,
+    timing: { firstDeltaMs?: number },
+    startedAt: number,
+) => Promise<any>;
 
 /**
  * 真·流式读取响应体：边到边解析 SSE 行并回调 onDelta。
@@ -434,9 +444,11 @@ export async function safeFetchJson(
             }
 
             const timing: { firstDeltaMs?: number } = {};
-            const data = streamHooks
-                ? await readBodyWithStreaming(response, streamHooks, timing, attemptStartedAt)
-                : await safeResponseJson(response);
+            const data = streamHooks?.responseParser
+                ? await streamHooks.responseParser(response, streamHooks, timing, attemptStartedAt)
+                : streamHooks
+                    ? await readBodyWithStreaming(response, streamHooks, timing, attemptStartedAt)
+                    : await safeResponseJson(response);
             if (isChatCompletionUrl(urlStr)) {
                 // TTFT 拆分埋点：headers = 首包响应头到达（≈排队+prefill 起点），
                 // firstDelta = 第一段正文增量（≈真正的 TTFT，仅流式路径有），

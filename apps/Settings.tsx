@@ -2,6 +2,8 @@ import NavigationBallSettings from '../components/settings/NavigationBallSetting
 import { useSettingsFocus } from '../utils/settingsNavigation';
 import ApiPresetGroups from '../components/settings/ApiPresetGroups';
 import DialogueApiFields from '../components/settings/DialogueApiFields';
+import { createDialogueFetch, dialogueEndpoint, dialogueHeaders } from '../utils/dialogueTransport';
+import type { ApiProtocol } from '../types';
 import ModelPicker from '../components/settings/ModelPicker';
 import { buildModelPickerView } from '../utils/modelPickerView';
 
@@ -495,6 +497,7 @@ const Settings: React.FC = () => {
   } = useOS();
   
   const [localKey, setLocalKey] = useState(apiConfig.apiKey);
+  const [localProtocol, setLocalProtocol] = useState<ApiProtocol>(apiConfig.protocol || 'openai');
   const [localUrl, setLocalUrl] = useState(apiConfig.baseUrl);
   const [localModel, setLocalModel] = useState(String(apiConfig.model || ''));
   const [localStream, setLocalStream] = useState<boolean>(apiConfig.stream === true);
@@ -551,6 +554,7 @@ const Settings: React.FC = () => {
   const [editPresetUrl, setEditPresetUrl] = useState('');
   const [editPresetKey, setEditPresetKey] = useState('');
   const [editPresetModel, setEditPresetModel] = useState('');
+  const [editPresetProtocol, setEditPresetProtocol] = useState<ApiProtocol>('openai');
   const [editPresetStream, setEditPresetStream] = useState(false);
   const [editPresetTemperature, setEditPresetTemperature] = useState(0.85);
   const [holdingDeletePresetId, setHoldingDeletePresetId] = useState<string | null>(null);
@@ -973,11 +977,12 @@ const Settings: React.FC = () => {
   // 主 API 这边还没保存的输入就被悄悄冲回旧值了，而且界面上完全看不出来。
   useEffect(() => {
       setLocalUrl(apiConfig.baseUrl);
+      setLocalProtocol(apiConfig.protocol || 'openai');
       setLocalKey(apiConfig.apiKey);
       setLocalModel(String(apiConfig.model || ''));
       setLocalStream(apiConfig.stream === true);
       setLocalTemperature(typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85);
-  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.stream, apiConfig.temperature]);
+  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.protocol, apiConfig.stream, apiConfig.temperature]);
 
   useEffect(() => {
       setLocalVisionEnabled(apiConfig.visionApi?.enabled === true);
@@ -1023,7 +1028,7 @@ const Settings: React.FC = () => {
   // 这样刷新、手改 URL、导入备份之后，界面上的「使用中」永远等于请求真的会发去哪。
   const activePresetId = useMemo(
       () => findActivePresetId(apiPresets, apiConfig),
-      [apiPresets, apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model],
+      [apiPresets, apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.protocol],
   );
 
   /**
@@ -1033,7 +1038,7 @@ const Settings: React.FC = () => {
   const commitApiConfig = (patch: PresetSwitchPatch | Partial<APIConfig>) => {
     updateApiConfig(patch);
     // 凭据行与存量任务统一从同步队列更新，失败自动重试并留底账供下次启动补传。
-    syncAmsgLlmCredentials({ ...apiConfig, ...patch });
+    if ((patch.protocol ?? apiConfig.protocol) !== 'anthropic') syncAmsgLlmCredentials({ ...apiConfig, ...patch });
   };
 
   /**
@@ -1057,6 +1062,7 @@ const Settings: React.FC = () => {
       setEditPresetUrl(preset.config.baseUrl || '');
       setEditPresetKey(preset.config.apiKey || '');
       setEditPresetModel(preset.config.model || '');
+      setEditPresetProtocol(preset.config.protocol || 'openai');
       // 当前正在使用的预设要接住主表单里刚改的高级设置：用户点铅笔再点保存即可写回，
       // 不必猜还要额外按一次「用当前配置填入」。非当前/老预设则读取自身，缺字段才回退。
       setEditPresetStream(
@@ -1082,6 +1088,7 @@ const Settings: React.FC = () => {
           baseUrl: normalizeApiBaseUrl(editPresetUrl),
           apiKey: normalizeApiCredential(editPresetKey),
           model: normalizeApiModel(editPresetModel),
+          protocol: editPresetProtocol,
           stream: editPresetStream,
           temperature: editPresetTemperature,
       };
@@ -1147,6 +1154,7 @@ const Settings: React.FC = () => {
         baseUrl: normalizeApiBaseUrl(localUrl),
         apiKey: normalizeApiCredential(localKey),
         model: normalizeApiModel(localModel),
+        protocol: localProtocol,
         stream: localStream,
         temperature: localTemperature,
       }, newPresetGroup);
@@ -1168,6 +1176,7 @@ const Settings: React.FC = () => {
       apiKey: normalizeApiCredential(localKey),
       baseUrl: normalizeApiBaseUrl(localUrl),
       model: normalizeApiModel(modelOverride ?? localModel),
+      protocol: localProtocol,
       stream: localStream,
       temperature: localTemperature,
     };
@@ -1379,9 +1388,10 @@ const Settings: React.FC = () => {
     setIsLoadingModels(true);
     setStatusMsg('正在连接...');
     try {
-        const response = await fetch(`${baseUrl}/models`, {
+        const modelApi = { baseUrl, apiKey, model: localModel, protocol: localProtocol };
+        const response = await fetch(dialogueEndpoint(modelApi, 'models'), {
             method: 'GET',
-            headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
+            headers: dialogueHeaders(modelApi)
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await safeResponseJson(response);
@@ -2571,8 +2581,9 @@ const Settings: React.FC = () => {
 
             <div className="space-y-4">
                 <DialogueApiFields
-                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, stream: localStream, temperature: localTemperature }}
+                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, protocol: localProtocol, stream: localStream, temperature: localTemperature }}
                     onChange={patch => {
+                        if (patch.protocol !== undefined) setLocalProtocol(patch.protocol);
                         if (patch.baseUrl !== undefined) setLocalUrl(patch.baseUrl);
                         if (patch.apiKey !== undefined) setLocalKey(patch.apiKey);
                         if (patch.stream !== undefined) setLocalStream(patch.stream);
@@ -2599,7 +2610,8 @@ const Settings: React.FC = () => {
                         setTestingApi(true);
                         setTestApiResult(null);
                         try {
-                            const res = await fetch(`${localUrl.trim().replace(/\/+$/, '')}/chat/completions`, {
+                            const testApi = { baseUrl: localUrl, apiKey: localKey, model: localModel, protocol: localProtocol };
+                            const data = await createDialogueFetch(testApi)(dialogueEndpoint(testApi), {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localKey.trim()}` },
                                 body: JSON.stringify({
@@ -2609,14 +2621,9 @@ const Settings: React.FC = () => {
                                     stream: localStream,
                                 }),
                             });
-                            if (res.ok) {
-                                // 走 safeResponseJson —— 它能透明把 SSE 流响应拼成普通 chat/completion 结构
-                                const data = await safeResponseJson(res);
+                            {
                                 const reply = extractContent(data);
                                 setTestApiResult(`✅ 连接成功 — 模型回复: "${reply.slice(0, 30)}"`);
-                            } else {
-                                const text = await res.text().catch(() => '');
-                                setTestApiResult(`❌ HTTP ${res.status}: ${text.slice(0, 100)}`);
                             }
                         } catch (err: any) {
                             setTestApiResult(`❌ 连接失败: ${err.message}`);
@@ -4047,6 +4054,10 @@ const Settings: React.FC = () => {
               <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">URL</label>
                   <input value={editPresetUrl} onChange={e => setEditPresetUrl(e.target.value)} placeholder="https://..." className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary" />
+                  <label className="text-[10px] font-bold text-slate-400 block">接口格式</label>
+                  <select aria-label="预设接口格式" value={editPresetProtocol} onChange={e => setEditPresetProtocol(e.target.value as ApiProtocol)} className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm">
+                    <option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 原生（Messages）</option>
+                  </select>
               </div>
               <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Key</label>
@@ -4095,6 +4106,7 @@ const Settings: React.FC = () => {
                       setEditPresetUrl(localUrl);
                       setEditPresetKey(localKey);
                       setEditPresetModel(localModel);
+                      setEditPresetProtocol(localProtocol);
                       setEditPresetStream(localStream);
                       setEditPresetTemperature(localTemperature);
                       addToast('已填入当前配置', 'info');

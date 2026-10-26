@@ -273,9 +273,12 @@ export interface VisionApiConfig {
 }
 
 /** A complete dialogue endpoint, separate from TTS/vision configuration. */
-export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'stream' | 'temperature'>;
+export type ApiProtocol = 'openai' | 'anthropic';
+export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol' | 'stream' | 'temperature'>;
 
 export interface APIConfig {
+  /** Missing in older configurations means OpenAI-compatible. Native Anthropic is opt-in for local private chat. */
+  protocol?: ApiProtocol;
   baseUrl: string;
   apiKey: string;
   // 可选识图中转：给不支持 image_url 的主模型补视觉能力。

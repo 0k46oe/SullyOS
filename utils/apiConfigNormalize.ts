@@ -1,4 +1,7 @@
-import type { APIConfig, ApiPreset } from '../types';
+import type { APIConfig, ApiPreset, ApiProtocol } from '../types';
+
+export const normalizeApiProtocol = (value: unknown): ApiProtocol =>
+  value === 'anthropic' ? 'anthropic' : 'openai';
 
 // Clipboard contents can carry zero-width characters that String.trim() does not
 // remove. They are never valid at the edges of an API URL, token, or model id.
@@ -23,6 +26,7 @@ export function normalizeApiConfig(config: APIConfig): APIConfig {
     baseUrl: normalizeApiBaseUrl(config.baseUrl),
     apiKey: normalizeApiCredential(config.apiKey),
     model: normalizeApiModel(config.model),
+    ...(config.protocol !== undefined ? { protocol: normalizeApiProtocol(config.protocol) } : {}),
     ...(visionApi ? {
       visionApi: {
         enabled: visionApi.enabled === true,

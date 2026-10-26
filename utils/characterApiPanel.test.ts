@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { Simulate } from 'react-dom/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CharacterApiPanel from '../components/character/CharacterApiPanel';
 import type { CharacterProfile } from '../types';
@@ -34,6 +35,33 @@ beforeEach(async () => {
 afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
 describe('character API draft transaction', () => {
+  it('persists the selected native protocol only after the role draft is confirmed', async () => {
+    await click('为角色使用独立 API');
+    await act(async () => { const select = host.querySelector('select')!; select.value = 'anthropic'; Simulate.change(select); });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(host.textContent).toContain('用于普通私聊');
+    expect(host.textContent).toContain('支持视觉的模型可直接接收图片，无需配置独立识图');
+    expect(host.textContent).not.toContain('图片需开启独立识图');
+    const stream = host.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="流式输出"]')!;
+    expect(stream.disabled).toBe(false);
+    expect(stream.getAttribute('aria-checked')).toBe('false');
+    await act(async () => stream.click());
+    expect(stream.getAttribute('aria-checked')).toBe('true');
+    await click('确定');
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ protocol: 'anthropic', stream: true, baseUrl: os.apiConfig.baseUrl }));
+  });
+  it('can turn native streaming off and cancel without overwriting the saved role preference', async () => {
+    const character = { ...char, dialogueApi: { ...os.apiConfig, protocol: 'anthropic' as const, stream: true } };
+    await render(character);
+    await click('修改独立 API');
+    const stream = host.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="流式输出"]')!;
+    expect(stream.getAttribute('aria-checked')).toBe('true');
+    await act(async () => stream.click());
+    expect(stream.getAttribute('aria-checked')).toBe('false');
+    await click('取消');
+    expect(onChange).not.toHaveBeenCalled();
+    expect(character.dialogueApi.stream).toBe(true);
+  });
   it('loads grouped presets as drafts; cancellation never mutates the role or global config', async () => {
     expect(host.textContent).toContain('目前跟随设置中的 API：global.test · global-model');
     await click('为角色使用独立 API');
@@ -48,7 +76,7 @@ describe('character API draft transaction', () => {
   });
   it('confirms only the role snapshot and can return to following Settings', async () => {
     await click('为角色使用独立 API'); await click('写作预设'); await click('确定');
-    expect(onChange).toHaveBeenCalledWith(os.apiPresets[1].config);
+    expect(onChange).toHaveBeenCalledWith({ ...os.apiPresets[1].config, protocol: 'openai' });
     const saved = { ...char, dialogueApi: onChange.mock.calls[0][0] };
     await render(saved);
     expect(host.textContent).toContain('目前使用的为：b.test · model-b');

@@ -75,7 +75,8 @@ export function buildReplySnapshotContent(msg: { type?: string; content: string 
     const looksLikeMedia = /^(data:|https?:\/\/)/i.test(trimmed) || isBlobRef(trimmed);
     if (msg.type === 'emoji') return '[表情包]';
     if (msg.type === 'image' || looksLikeMedia) return '[图片]';
-return content.length > 20 ? content.slice(0, 20) + '...' : content;
+    const characters = Array.from(content);
+    return characters.length > 15 ? characters.slice(0, 15).join('') + '...' : content;
 }
 
 

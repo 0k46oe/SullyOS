@@ -1,5 +1,5 @@
 import type { APIConfig, CharacterProfile, DialogueApiConfig } from '../types';
-import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from './apiConfigNormalize';
+import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel, normalizeApiProtocol } from './apiConfigNormalize';
 
 /** Only dialogue calls opt in. Directors, memory, vision and TTS keep their own routes. */
 export function resolveDialogueApi(
@@ -10,7 +10,7 @@ export function resolveDialogueApi(
   const source = appApi ?? character?.dialogueApi;
   if (!source) return globalApi;
   // Credentials are atomic; never fill a missing key/model from a different provider.
-  return { ...globalApi, ...pickDialogueApi(source) };
+  return { ...globalApi, ...pickDialogueApi(source), protocol: normalizeApiProtocol(source.protocol) };
 }
 
 export function pickDialogueApi(api: DialogueApiConfig): DialogueApiConfig {
@@ -18,6 +18,7 @@ export function pickDialogueApi(api: DialogueApiConfig): DialogueApiConfig {
     baseUrl: normalizeApiBaseUrl(api.baseUrl),
     apiKey: normalizeApiCredential(api.apiKey),
     model: normalizeApiModel(api.model),
+    ...(api.protocol !== undefined ? { protocol: normalizeApiProtocol(api.protocol) } : {}),
     ...(typeof api.stream === 'boolean' ? { stream: api.stream } : {}),
     ...(typeof api.temperature === 'number' ? { temperature: api.temperature } : {}),
   };

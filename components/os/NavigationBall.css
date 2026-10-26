@@ -1,6 +1,10 @@
 .navigation-ball{position:absolute;z-index:58;width:44px;height:44px}
-.navigation-ball-toggle{width:44px;height:44px;display:grid;place-items:center;border:1px solid #ffffff45;border-radius:14px;background:#23262bd9;box-shadow:0 3px 12px #0003;touch-action:none;user-select:none;-webkit-user-select:none;cursor:pointer}
-.navigation-ball-toggle>span{width:24px;height:24px;border:4px solid #fff;border-radius:50%;box-shadow:0 0 0 3px #ffffff35}
+.navigation-ball-toggle,.navigation-ball-face-preview{width:44px;height:44px;display:grid;place-items:center;border:1px solid #ffffff45;border-radius:14px;background:#23262bd9;box-shadow:0 3px 12px #0003;touch-action:none;user-select:none;-webkit-user-select:none;cursor:pointer}
+.navigation-ball-toggle>span,.navigation-ball-face-preview>span{width:24px;height:24px;border:4px solid #fff;border-radius:50%;box-shadow:0 0 0 3px #ffffff35}
+.navigation-ball-toggle[data-custom-image=true],.navigation-ball-face-preview[data-custom-image=true]{padding:0;overflow:hidden}
+.navigation-api-dialog{position:fixed;inset:0;margin:auto;width:calc(100% - 24px);max-width:360px;max-height:calc(100dvh - 48px);overflow-y:auto;overscroll-behavior:contain;padding:20px;border:1px solid #e2e8f0;border-radius:24px;background:#fff;color:#334155;box-shadow:0 20px 60px #0004}
+.navigation-api-dialog::backdrop{background:#0006}
+.navigation-ball-custom-image{display:block;width:100%;height:100%;object-fit:cover;border-radius:inherit;pointer-events:none;user-select:none;-webkit-user-select:none}
 .navigation-ball-toggle:focus-visible{outline:3px solid #86efac;outline-offset:3px}
 .navigation-ball-panel{position:absolute;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:12px;border:1px solid #ffffff20;border-radius:26px;background:#25272bf5;box-shadow:0 12px 40px #0004;animation:navigation-panel-in .13s ease-out}
 .navigation-ball-panel>button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;min-width:0;min-height:84px;padding:8px 2px;border:0;border-radius:16px;background:transparent;color:#fff;text-align:center;font-size:11px;line-height:1.3;cursor:pointer;transition:background .12s,transform .12s}

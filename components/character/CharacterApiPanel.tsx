@@ -4,7 +4,8 @@ import { useOS } from '../../context/OSContext';
 import { describeDialogueApi, pickDialogueApi } from '../../utils/characterApi';
 import { configFromPreset, findActivePresetId } from '../../utils/apiPresetSwitch';
 import { extractModelIds } from '../../utils/modelList';
-import { extractContent, safeResponseJson } from '../../utils/safeApi';
+import { extractContent } from '../../utils/safeApi';
+import { createDialogueFetch, dialogueEndpoint, dialogueHeaders } from '../../utils/dialogueTransport';
 import Modal from '../os/Modal';
 import DialogueApiFields from '../settings/DialogueApiFields';
 import ModelPicker from '../settings/ModelPicker';
@@ -31,13 +32,13 @@ export default function CharacterApiPanel({ character, onChange }: {
     // A response from the previous provider must never populate the next provider's picker.
     requestVersion.current += 1;
     setLoading(false); setTesting(false); setStatus('');
-    if (patch.baseUrl !== undefined || patch.apiKey !== undefined) setModels([]);
+    if (patch.baseUrl !== undefined || patch.apiKey !== undefined || patch.protocol !== undefined) setModels([]);
     setDraft(previous => previous ? { ...previous, ...patch } : previous);
   };
   const open = () => {
     const source = character.dialogueApi || apiConfig;
     setDraft(pickDialogueApi(source));
-    setModels(source.baseUrl === apiConfig.baseUrl && source.apiKey === apiConfig.apiKey ? availableModels : []);
+    setModels(source.baseUrl === apiConfig.baseUrl && source.apiKey === apiConfig.apiKey && (source.protocol || 'openai') === (apiConfig.protocol || 'openai') ? availableModels : []);
     setStatus('');
   };
   const fetchModels = async () => {
@@ -47,7 +48,7 @@ export default function CharacterApiPanel({ character, onChange }: {
     const version = ++requestVersion.current;
     setLoading(true); setStatus('');
     try {
-      const response = await fetch(`${api.baseUrl}/models`, { headers: { Authorization: `Bearer ${api.apiKey || 'sk-none'}` } });
+      const response = await fetch(dialogueEndpoint(api, 'models'), { headers: dialogueHeaders(api) });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const next = extractModelIds(await response.json());
       if (version !== requestVersion.current) return;
@@ -64,12 +65,11 @@ export default function CharacterApiPanel({ character, onChange }: {
     const version = ++requestVersion.current;
     setTesting(true); setStatus('');
     try {
-      const response = await fetch(`${api.baseUrl}/chat/completions`, {
+      const data = await createDialogueFetch(api)(dialogueEndpoint(api), {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${api.apiKey || 'sk-none'}` },
         body: JSON.stringify({ model: api.model, messages: [{ role: 'user', content: 'Hi' }], max_tokens: 5, stream: api.stream ?? false }),
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const content = extractContent(await safeResponseJson(response));
+      const content = extractContent(data);
       if (version === requestVersion.current) setStatus(content ? '连接成功' : '接口已响应，但回复为空');
     } catch (error) {
       if (version === requestVersion.current) setStatus(`连接失败：${error instanceof Error ? error.message : '请检查配置'}`);

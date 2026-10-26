@@ -37,7 +37,7 @@ describe('草稿同步不跨区块打架', () => {
 
   it('主 API 那份只盯自己的五个字段', () => {
     expect(settings).toMatch(
-      /\}, \[apiConfig\.baseUrl, apiConfig\.apiKey, apiConfig\.model, apiConfig\.stream, apiConfig\.temperature\]\);/,
+      /\}, \[apiConfig\.baseUrl, apiConfig\.apiKey, apiConfig\.model, apiConfig\.protocol, apiConfig\.stream, apiConfig\.temperature\]\);/,
     );
   });
 });

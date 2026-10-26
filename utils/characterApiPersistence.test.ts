@@ -31,6 +31,38 @@ async function clearCharacters() {
 }
 afterEach(() => { vi.clearAllMocks(); });
 
+it('sends a restored native role through the real private-chat hook without OpenAI headers or proxy model suffixes', async () => {
+    const native = { ...roleApi, protocol: 'anthropic' as const, baseUrl: 'https://native.test', model: 'claude-test-model', stream: true };
+    const char = { id: 'native-private-chat', name: '原生测试角色', dialogueApi: native, showThinkingChain: true, emotionConfig: { enabled: false } } as any;
+    await DB.saveCharacter(char);
+    await DB.saveMessage({ charId: char.id, role: 'user', type: 'text', content: '普通文字聊天测试' } as any);
+    let current!: ReturnType<typeof useChatAI>;
+    function Probe() {
+        current = useChatAI({ char, apiConfig: globalApi, userProfile: { name: '用户' } as any,
+            groups: [], emojis: [], categories: [], realtimeConfig: {} as any,
+            addToast: vi.fn(), setMessages: vi.fn(), updateCharacter: vi.fn(), updateUserProfile: vi.fn() });
+        return null;
+    }
+    const root = createRoot(document.createElement('div'));
+    vi.mocked(safeFetchJson).mockRejectedValue(new Error('test: native request captured'));
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+        await act(async () => root.render(createElement(Probe)));
+        await act(async () => { await current.triggerAI([]); });
+        expect(safeFetchJson).toHaveBeenCalledOnce();
+        const [url, init] = vi.mocked(safeFetchJson).mock.calls[0];
+        expect(url).toBe('https://native.test/v1/messages');
+        expect(init.headers).toMatchObject({ 'x-api-key': native.apiKey, 'anthropic-version': '2023-06-01' });
+        expect(init.headers).not.toHaveProperty('Authorization');
+        const request = JSON.parse(init.body as string);
+        expect(request.model).toBe(native.model); expect(request.stream).toBe(true);
+        expect(vi.mocked(safeFetchJson).mock.calls[0][5]?.responseParser).toEqual(expect.any(Function));
+        expect(request.system).toContain('原生测试角色');
+        expect(request.messages.some((message: any) => message.role === 'system')).toBe(false);
+        expect(JSON.stringify(request.messages)).toContain('普通文字聊天测试');
+    } finally { act(() => root.unmount()); errors.mockRestore(); }
+});
+
 it.each(['full', 'text_only'] as const)('%s ZIP restores role credentials and preset groups, then sends them through useChatAI', async mode => {
     await clearCharacters();
     const character = { id: `restore-${mode}`, name: '备份角色', dialogueApi: roleApi, emotionConfig: { enabled: false },
