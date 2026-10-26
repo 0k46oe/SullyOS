@@ -27,6 +27,8 @@ export function normalizeApiConfig(config: APIConfig): APIConfig {
     apiKey: normalizeApiCredential(config.apiKey),
     model: normalizeApiModel(config.model),
     ...(config.protocol !== undefined ? { protocol: normalizeApiProtocol(config.protocol) } : {}),
+    ...(config.anthropicPromptCache !== undefined ? { anthropicPromptCache: config.anthropicPromptCache !== false } : {}),
+    ...(config.anthropicCustomTemperature !== undefined ? { anthropicCustomTemperature: config.anthropicCustomTemperature === true } : {}),
     ...(visionApi ? {
       visionApi: {
         enabled: visionApi.enabled === true,

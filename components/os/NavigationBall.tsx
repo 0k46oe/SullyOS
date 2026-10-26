@@ -15,7 +15,6 @@ import './NavigationBall.css';
 const NavigationApiSwitcher = React.lazy(() => import('./NavigationApiSwitcher'));
 
 const POSITION_KEY = NAVIGATION_BALL_POSITION_KEY;
-const SIZE = 44;
 type Position = { x: number; y: number };
 function readPosition(): Position | null {
   try {
@@ -24,13 +23,13 @@ function readPosition(): Position | null {
   } catch { /* Use the default position. */ }
   return null;
 }
-function measure(parent: HTMLElement) {
+function measure(parent: HTMLElement, size: number) {
   const rect = parent.getBoundingClientRect(), style = getComputedStyle(parent), safe = readSafeAreaInsets();
   const top = resolveSafeTopInset({
     standaloneSafeTop: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--standalone-safe-area-top')) || 0,
     probedSafeTop: safe.top, isIOSStandalone: isIOSStandaloneWebApp(),
   });
-  return { rect, bounds: { parentW: rect.width, parentH: rect.height, bubble: SIZE,
+  return { rect, bounds: { parentW: rect.width, parentH: rect.height, bubble: size,
     insetTop: Math.max(parseFloat(style.paddingTop) || 0, top),
     insetBottom: Math.max(parseFloat(style.paddingBottom) || 0, safe.bottom) } };
 }
@@ -55,12 +54,13 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
     const parent = root.current?.parentElement;
     if (!parent) return;
     const constrain = () => {
-      const { bounds } = measure(parent);
+      const { bounds } = measure(parent, appearance.size);
       setParentSize({ width: bounds.parentW, height: bounds.parentH, top: bounds.insetTop, bottom: bounds.insetBottom });
-      const value = latest.current || { x: bounds.parentW - SIZE - 12, y: bounds.parentH - SIZE - 96 };
+      const value = latest.current || { x: bounds.parentW - appearance.size - 12, y: bounds.parentH - appearance.size - 96 };
       const next = clampBubblePos(value.x, value.y, bounds);
       latest.current = next; setPosition(next);
     };
+    drag.current = null;
     constrain();
     const unsubscribeReset = subscribeNavigationBallPositionReset(() => {
       drag.current = null; suppressClick.current = false; setOpen(false);
@@ -68,7 +68,7 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
     });
     const observer = new ResizeObserver(constrain); observer.observe(parent);
     return () => { observer.disconnect(); unsubscribeReset(); };
-  }, []);
+  }, [appearance.size]);
   useEffect(() => {
     if (!open) return;
     const dismiss = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
@@ -103,12 +103,12 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
       </span>
     </button>;
   };
-  return <div ref={root} className="navigation-ball" style={position ? { left: position.x, top: position.y } : { right: 12, bottom: 96 }}>
+  return <div ref={root} className="navigation-ball" style={{ ...(position ? { left: position.x, top: position.y } : { right: 12, bottom: 96 }), '--navigation-ball-size': `${appearance.size}px` } as React.CSSProperties & { '--navigation-ball-size': string }}>
     <button type="button" className="navigation-ball-toggle" aria-label="快捷导航悬浮球" aria-expanded={open}
       data-custom-image={!!appearance.image} style={{ borderRadius: navigationBallShapeRadius[appearance.shape], opacity: appearance.opacity }}
       onPointerDown={event => {
         if (event.button !== 0 || !root.current?.parentElement || !latest.current) return;
-        const { bounds } = measure(root.current.parentElement);
+        const { bounds } = measure(root.current.parentElement, appearance.size);
         suppressClick.current = false;
         drag.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, origin: latest.current, bounds, moved: false };
         try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* Pointer events remain usable. */ }

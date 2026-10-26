@@ -449,7 +449,7 @@ export async function safeFetchJson(
                 : streamHooks
                     ? await readBodyWithStreaming(response, streamHooks, timing, attemptStartedAt)
                     : await safeResponseJson(response);
-            if (isChatCompletionUrl(urlStr)) {
+            if (isChatCompletionUrl(urlStr) || /\/messages(?:[?#]|$)/.test(urlStr)) {
                 // TTFT 拆分埋点：headers = 首包响应头到达（≈排队+prefill 起点），
                 // firstDelta = 第一段正文增量（≈真正的 TTFT，仅流式路径有），
                 // total = 整包收完。定位「API 慢 20s」到底慢在 prefill 还是生成。
@@ -502,7 +502,7 @@ export async function safeFetchJson(
                 continue;
             }
 
-            if (isChatCompletionUrl(urlStr)) {
+            if (isChatCompletionUrl(urlStr) || /\/messages(?:[?#]|$)/.test(urlStr)) {
                 appendDevDebugApiLog({
                     url: urlStr,
                     method: options.method,

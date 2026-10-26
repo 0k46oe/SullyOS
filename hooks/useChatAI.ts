@@ -1488,6 +1488,7 @@ export const useChatAI = ({
                         // 空 content + tool_calls 在 Gemini 兼容层会被判 INVALID_ARGUMENT, 给个占位
                         content: data.choices[0].message.content || '(调用工具中)',
                         tool_calls: toolCalls,
+                        ...(data.choices[0].message.anthropic_thinking ? { anthropic_thinking: data.choices[0].message.anthropic_thinking } : {}),
                     } as any);
                     for (const tc of toolCalls) {
                         const fname: string = tc.function?.name || '';
@@ -1600,6 +1601,7 @@ export const useChatAI = ({
                         // 空 content + tool_calls 在 Gemini 兼容层会被判 INVALID_ARGUMENT, 给个占位
                         content: data.choices[0].message.content || '(调用工具中)',
                         tool_calls: toolCalls,
+                        ...(data.choices[0].message.anthropic_thinking ? { anthropic_thinking: data.choices[0].message.anthropic_thinking } : {}),
                     } as any);
                     for (const tc of toolCalls) {
                         const fname: string = tc.function?.name || '';
@@ -1724,6 +1726,7 @@ export const useChatAI = ({
                         // 空 content + tool_calls 在 Gemini 兼容层会被判 INVALID_ARGUMENT, 给个占位
                         content: data.choices[0].message.content || '(调用工具中)',
                         tool_calls: toolCalls,
+                        ...(data.choices[0].message.anthropic_thinking ? { anthropic_thinking: data.choices[0].message.anthropic_thinking } : {}),
                     } as any);
                     let mcpCallsThisRound = 0;
                     let mcpProgressThisRound = false;

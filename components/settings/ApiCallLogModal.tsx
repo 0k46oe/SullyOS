@@ -311,6 +311,8 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                                             </span>
                                         </div>
                                     )}
+                                    {e.cacheReadTokens != null && <Field label="缓存读取 Token" value={e.cacheReadTokens.toLocaleString('en-US')} />}
+                                    {e.cacheCreationTokens != null && <Field label="缓存写入 Token" value={e.cacheCreationTokens.toLocaleString('en-US')} />}
                                 </div>
                                 {hasBreakdown && (
                                     <div className="mt-1.5 text-[10px] text-slate-300 select-none">

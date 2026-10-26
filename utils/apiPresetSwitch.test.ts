@@ -14,6 +14,13 @@ const preset = (id: string, config: Partial<APIConfig>): ApiPreset => ({
 });
 
 describe('configFromPreset', () => {
+  it('preserves native custom temperature, resets legacy native presets to model defaults and detects mode edits', () => {
+    const custom = preset('native', { protocol: 'anthropic', baseUrl: 'https://native.test', model: 'native', temperature: 0, anthropicCustomTemperature: true });
+    expect(configFromPreset(custom)).toMatchObject({ temperature: 0, anthropicCustomTemperature: true });
+    expect(configFromPreset(preset('old-native', { protocol: 'anthropic' })).anthropicCustomTemperature).toBe(false);
+    expect(presetDiffersFromConfig(custom, { ...custom.config, anthropicCustomTemperature: false })).toBe(true);
+    expect(presetDiffersFromConfig(custom, custom.config)).toBe(false);
+  });
   it('带上三件套并归一化（末尾斜杠、粘贴带进来的空格）', () => {
     const patch = configFromPreset(preset('a', {
       baseUrl: ' https://api.example.com/v1/ ',

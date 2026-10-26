@@ -68,12 +68,19 @@ function contentBlocks(content: unknown, allowImages = true): Block[] {
 }
 
 /** Keep the existing prompt/history pipeline; convert only at the local chat boundary. */
-export function toAnthropicBody(body: Record<string, any>): Record<string, any> {
-  const system: string[] = [];
+export function toAnthropicBody(body: Record<string, any>, api?: Pick<DialogueApiConfig, 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache'>): Record<string, any> {
+  const system: Block[] = [];
   const messages: Turn[] = [];
+  const cacheEnabled = api?.anthropicPromptCache !== false;
   for (const message of body.messages || []) {
     if (message.role === 'system' || message.role === 'developer') {
-      system.push(...contentBlocks(message.content, false).map(block => block.text));
+      const parts = contentBlocks(message.content, false);
+      // Only the stable leading prompt is cached. Later system messages contain
+      // the current time, recall and other per-turn context and stay beyond it.
+      if (cacheEnabled && message === body.messages[0] && parts.length) {
+        parts[parts.length - 1].cache_control = { type: 'ephemeral' };
+      }
+      system.push(...parts);
       continue;
     }
     let role: Turn['role'];
@@ -85,6 +92,11 @@ export function toAnthropicBody(body: Record<string, any>): Record<string, any> 
     } else if (message.role === 'user' || message.role === 'assistant') {
       role = message.role;
       content = contentBlocks(message.content);
+      if (role === 'assistant' && Array.isArray(message.anthropic_thinking)) {
+        content.unshift(...message.anthropic_thinking.filter((block: any) =>
+          (block?.type === 'thinking' && typeof block.thinking === 'string' && typeof block.signature === 'string')
+          || (block?.type === 'redacted_thinking' && typeof block.data === 'string')).map((block: any) => ({ ...block })));
+      }
       if (role === 'assistant') for (const call of message.tool_calls || []) {
         const args = call.function?.arguments;
         content.push({ type: 'tool_use', id: call.id, name: call.function?.name,
@@ -106,8 +118,22 @@ export function toAnthropicBody(body: Record<string, any>): Record<string, any> 
     max_tokens: Number.isFinite(body.max_tokens) && body.max_tokens > 0 ? Math.floor(body.max_tokens) : 8000,
     messages,
     stream: body.stream === true,
-    ...(system.length ? { system: system.join('\n\n') } : {}),
+    ...(system.length ? { system: cacheEnabled ? system : system.map(block => block.text).join('\n\n') } : {}),
   };
+  if (body.thinking?.type === 'enabled') {
+    const budget = body.thinking.budget_tokens;
+    if (!Number.isInteger(budget) || budget < 1024 || budget >= result.max_tokens) {
+      throw new Error('Anthropic 思考预算须至少为 1024 且小于最大输出 Token 数');
+    }
+    result.thinking = { type: 'enabled', budget_tokens: budget };
+  }
+  if (!result.thinking && api?.anthropicCustomTemperature === true) {
+    const temperature = api.temperature ?? body.temperature ?? 0.85;
+    if (typeof temperature !== 'number' || !Number.isFinite(temperature) || temperature < 0 || temperature > 1) {
+      throw new Error('Anthropic 自定义温度须在 0～1 之间，请调整温度或改用模型默认');
+    }
+    result.temperature = temperature;
+  }
   // These are local chat tools (e.g. an enabled scheduler), not cloud transport.
   // Convert them so their automatic injection cannot break an ordinary chat.
   if (body.tools?.length) {
@@ -120,7 +146,7 @@ export function toAnthropicBody(body: Record<string, any>): Record<string, any> 
     else if (body.tool_choice === 'none') delete result.tools;
   }
   // Native v1 uses no proxy -thinking suffix, sampling dialects, or OpenAI-only fields.
-  // Keep the selected streaming mode and the model's sampling defaults.
+  // Default to model sampling, or send temperature only on explicit user opt-in.
   return result;
 }
 
@@ -132,13 +158,25 @@ export function fromAnthropicResponse(data: any): any {
   }));
   const input = Number(data.usage?.input_tokens || 0);
   const output = Number(data.usage?.output_tokens || 0);
+  const cachedWrite = data.usage?.cache_creation_input_tokens;
+  const cachedRead = data.usage?.cache_read_input_tokens;
+  const cacheUsage = {
+    ...(typeof cachedWrite === 'number' ? { cache_creation_input_tokens: cachedWrite } : {}),
+    ...(typeof cachedRead === 'number' ? { cache_read_input_tokens: cachedRead,
+      prompt_tokens_details: { cached_tokens: cachedRead } } : {}),
+  };
+  const promptTokens = input + (cachedWrite || 0) + (cachedRead || 0);
+  const thinking = data.content.filter((block: any) => block.type === 'thinking' && typeof block.thinking === 'string').map((block: any) => block.thinking).join('\n\n');
+  const thinkingBlocks = data.content.filter((block: any) => block.type === 'thinking' || block.type === 'redacted_thinking');
   return {
     id: data.id, model: data.model, object: 'chat.completion',
     choices: [{ index: 0, message: { role: 'assistant',
       content: data.content.filter((block: any) => block.type === 'text').map((block: any) => block.text).join(''),
+      ...(thinking ? { reasoning_content: thinking } : {}),
+      ...(thinkingBlocks.length ? { anthropic_thinking: thinkingBlocks } : {}),
       ...(calls.length ? { tool_calls: calls } : {}) },
       finish_reason: data.stop_reason === 'max_tokens' ? 'length' : calls.length ? 'tool_calls' : 'stop' }],
-    usage: { prompt_tokens: input, completion_tokens: output, total_tokens: input + output },
+    usage: { prompt_tokens: promptTokens, completion_tokens: output, total_tokens: promptTokens + output, ...cacheUsage },
   };
 }
 
@@ -154,7 +192,7 @@ export function createDialogueFetch(api: DialogueApiConfig): typeof safeFetchJso
     options.signal?.throwIfAborted();
     const body = typeof resolvedBody === 'string' ? JSON.parse(resolvedBody) : {};
     const result = await safeFetchJson(dialogueEndpoint(api), {
-      ...options, headers: dialogueHeaders(api), body: JSON.stringify(toAnthropicBody(body)),
+      ...options, headers: dialogueHeaders(api), body: JSON.stringify(toAnthropicBody(body, api)),
     }, 0, timeout, meta, {
       ...(body.stream === true ? hooks : {}),
       responseParser: (response, _streamHooks, timing, startedAt) =>

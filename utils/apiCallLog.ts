@@ -89,6 +89,8 @@ export interface ApiCallLogEntry extends ApiCallMeta {
     completionTokens?: number;
     /** 总 token（total_tokens） */
     totalTokens?: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
     /** 请求从发起到响应 / 报错的耗时 ms（NetworkError 类失败时 = 等了多久才断） */
     durationMs?: number;
     /**
@@ -194,7 +196,7 @@ function stripTrailingSlash(s: string): string {
 
 /** 把 `https://host/v1/chat/completions` 还原成 `https://host/v1`（预设里存的 baseUrl 形态）。 */
 function deriveBaseUrl(url: string): string {
-    return stripTrailingSlash(url.replace(/\/chat\/completions\/?$/i, ''));
+    return stripTrailingSlash(url.replace(/\/(?:chat\/completions|messages)\/?(?:[?#].*)?$/i, ''));
 }
 
 function hostOf(url: string): string {
@@ -305,15 +307,23 @@ function resolvePresetName(baseUrl: string, model: string): string {
  * 在 safeFetchJson 里对 `/chat/completions` 的成功与失败都会调用。
  */
 /** 从 OpenAI 兼容响应里抠 usage（各家代理大多遵循这个字段）。 */
-export function extractApiTokenUsage(response: unknown): { prompt?: number; completion?: number; total?: number } {
+export function extractApiTokenUsage(response: unknown): { prompt?: number; completion?: number; total?: number; cacheRead?: number; cacheCreation?: number } {
     const root = response as any;
     const usage = root?.usage || root?.usage_metadata || root?.usageMetadata;
     if (!usage || typeof usage !== 'object') return {};
     const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+    const cacheRead = num(usage.cache_read_input_tokens ?? usage.prompt_tokens_details?.cached_tokens);
+    const cacheCreation = num(usage.cache_creation_input_tokens);
+    const nativeInput = num(usage.input_tokens);
+    const prompt = num(usage.prompt_tokens ?? usage.promptTokenCount)
+        ?? (nativeInput == null ? undefined : nativeInput + (cacheRead ?? 0) + (cacheCreation ?? 0));
+    const completion = num(usage.completion_tokens ?? usage.output_tokens ?? usage.candidatesTokenCount);
     return {
-        prompt: num(usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokenCount),
-        completion: num(usage.completion_tokens ?? usage.output_tokens ?? usage.candidatesTokenCount),
-        total: num(usage.total_tokens ?? usage.totalTokenCount),
+        prompt,
+        completion,
+        total: num(usage.total_tokens ?? usage.totalTokenCount) ?? (nativeInput != null && prompt != null && completion != null ? prompt + completion : undefined),
+        ...(cacheRead != null ? { cacheRead } : {}),
+        ...(cacheCreation != null ? { cacheCreation } : {}),
     };
 }
 
@@ -484,6 +494,7 @@ export function buildPromptBreakdown(body: unknown): PromptBlockStat[] | undefin
         if (!Array.isArray(messages) || messages.length === 0) return undefined;
 
         const out: PromptBlockStat[] = [];
+        if (parsed.system) out.push(...splitSystemBlocks(contentToText(parsed.system)));
         let userChars = 0, userCount = 0, asstChars = 0, asstCount = 0, otherChars = 0, otherCount = 0;
         // 情绪评估等路径把「完整 system prompt + 展平历史 + 任务说明」整个打包成一条
         // user 消息发送——不拆的话构成面板只会显示「用户消息 ×1 · 100%」，看不出内里。
@@ -1022,6 +1033,8 @@ export function recordApiCall(input: {
             completionTokens: usage.completion,
             totalTokens: usage.total,
             durationMs: input.durationMs,
+            cacheReadTokens: usage.cacheRead,
+            cacheCreationTokens: usage.cacheCreation,
             promptBreakdown: buildPromptBreakdown(input.body),
             appId: meta.appId,
             appName: meta.appName,

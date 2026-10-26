@@ -10,6 +10,15 @@ const app = { baseUrl: 'https://app.test/v1', apiKey: 'app-key', model: 'app' };
 const char = { id: 'a', dialogueApi: personal };
 
 describe('dialogue routing', () => {
+  it('keeps sampling opt-in with the selected native endpoint rather than inheriting it from another provider', () => {
+    const nativeGlobal = { ...globalApi, protocol: 'anthropic' as const, anthropicCustomTemperature: true };
+    const nativeRole = { ...personal, protocol: 'anthropic' as const, temperature: 0.37, anthropicCustomTemperature: true };
+    expect(resolveDialogueApi(nativeGlobal).anthropicCustomTemperature).toBe(true);
+    expect(resolveDialogueApi(nativeGlobal, char).anthropicCustomTemperature).toBe(false);
+    expect(resolveDialogueApi(nativeGlobal, { dialogueApi: nativeRole })).toMatchObject({ temperature: 0.37, anthropicCustomTemperature: true });
+    expect(resolveDialogueApi(nativeGlobal, { dialogueApi: nativeRole }, { ...app, protocol: 'anthropic' }).anthropicCustomTemperature).toBe(false);
+    expect(pickDialogueApi(nativeRole)).toMatchObject({ temperature: 0.37, anthropicCustomTemperature: true });
+  });
   it('uses app, character, then global without changing the global config', () => {
     expect(resolveDialogueApi(globalApi)).toBe(globalApi);
     expect(resolveDialogueApi(globalApi, char)).toMatchObject(personal);

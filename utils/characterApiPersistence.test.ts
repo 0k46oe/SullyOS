@@ -31,9 +31,26 @@ async function clearCharacters() {
 }
 afterEach(() => { vi.clearAllMocks(); });
 
-it('sends a restored native role through the real private-chat hook without OpenAI headers or proxy model suffixes', async () => {
-    const native = { ...roleApi, protocol: 'anthropic' as const, baseUrl: 'https://native.test', model: 'claude-test-model', stream: true };
-    const char = { id: 'native-private-chat', name: '原生测试角色', dialogueApi: native, showThinkingChain: true, emotionConfig: { enabled: false } } as any;
+it.each(['full', 'text_only'] as const)('%s ZIP preserves native temperature opt-in through role restore and the real private-chat hook', async mode => {
+    const native = { ...roleApi, protocol: 'anthropic' as const, baseUrl: 'https://native.test', model: 'claude-test-model', stream: true, temperature: 0.37, anthropicCustomTemperature: true, anthropicPromptCache: false };
+    const original = { id: `native-private-chat-${mode}`, name: '原生测试角色', dialogueApi: native, showThinkingChain: false, emotionConfig: { enabled: false } } as any;
+    await clearCharacters(); await DB.saveCharacter(original);
+    const zip = new JSZip();
+    const data: any = { apiConfig: native, apiPresets: [{ ...preset, config: native }] };
+    const prewrittenStores: any = {};
+    if (mode === 'text_only') {
+        const writer = createV2ArrayFieldWriter(zip, 'characters');
+        await DB.streamRawStoreData('characters', item => { writer.appendSync([stripBackupImages(item)]); });
+        prewrittenStores.characters = await writer.finish();
+    } else data.characters = await DB.getRawStoreData('characters');
+    await writeV2Backup(zip, data, { prewrittenStores });
+    const loaded = await JSZip.loadAsync(await zip.generateAsync({ type: 'uint8array' }));
+    const restored: any = await assembleV2Backup(loaded, JSON.parse(await loaded.file('manifest.json')!.async('string')));
+    expect(restored.apiConfig).toEqual(native); expect(restored.apiPresets.map(normalizeApiPreset)[0].config).toEqual(native);
+    await clearCharacters(); await DB.importFullData(restored);
+    const saved = (await DB.getAllCharacters()).find(item => item.id === original.id)!;
+    const char = migrateCharacterContextRange(normalizeCharacterDefaults(normalizeCharacterImpression(saved))).character;
+    expect(char.dialogueApi).toEqual(native);
     await DB.saveCharacter(char);
     await DB.saveMessage({ charId: char.id, role: 'user', type: 'text', content: '普通文字聊天测试' } as any);
     let current!: ReturnType<typeof useChatAI>;
@@ -55,7 +72,7 @@ it('sends a restored native role through the real private-chat hook without Open
         expect(init.headers).toMatchObject({ 'x-api-key': native.apiKey, 'anthropic-version': '2023-06-01' });
         expect(init.headers).not.toHaveProperty('Authorization');
         const request = JSON.parse(init.body as string);
-        expect(request.model).toBe(native.model); expect(request.stream).toBe(true);
+        expect(request.model).toBe(native.model); expect(request.stream).toBe(true); expect(request.temperature).toBe(0.37);
         expect(vi.mocked(safeFetchJson).mock.calls[0][5]?.responseParser).toEqual(expect.any(Function));
         expect(request.system).toContain('原生测试角色');
         expect(request.messages.some((message: any) => message.role === 'system')).toBe(false);

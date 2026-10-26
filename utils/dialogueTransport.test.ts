@@ -19,14 +19,14 @@ describe('native Anthropic local chat', () => {
     expect(dialogueHeaders(api)).not.toHaveProperty('Authorization');
   });
   it('moves every system block to the top, merges adjacent turns, preserves history and omits proxy dialects', () => {
-    const next = toAnthropicBody({ ...body, stream: true, temperature: 2, thinking: { type: 'enabled' }, reasoning_effort: 'high',
+    const next = toAnthropicBody({ ...body, stream: true, temperature: 2, thinking: { type: 'enabled', budget_tokens: 4000 }, reasoning_effort: 'high',
       messages: [body.messages[0], { role: 'assistant', content: '已有回复' }, { role: 'system', content: '当轮规则' }, body.messages[1], { role: 'user', content: '补充' }] });
-    expect(next.system).toBe('角色设定\n\n当轮规则');
+    expect(next.system).toEqual([{ type: 'text', text: '角色设定', cache_control: { type: 'ephemeral' } }, { type: 'text', text: '当轮规则' }]);
     expect(next.stream).toBe(true);
     expect(next.messages[0].role).toBe('user');
     expect(next.messages[1].content[0].text).toBe('已有回复');
     expect(next.messages[2].content).toEqual([{ type: 'text', text: '你好' }, { type: 'text', text: '补充' }]);
-    expect(next).not.toHaveProperty('thinking'); expect(next).not.toHaveProperty('temperature');
+    expect(next.thinking).toEqual({ type: 'enabled', budget_tokens: 4000 }); expect(next).not.toHaveProperty('temperature');
     expect(next).not.toHaveProperty('reasoning_effort');
   });
   it('returns the completion shape expected by the existing parser and token accounting', () => {
@@ -41,6 +41,37 @@ describe('native Anthropic local chat', () => {
     expect(toAnthropicBody(body).stream).toBe(false);
     expect(toAnthropicBody({ ...body, stream: false }).stream).toBe(false);
     expect(toAnthropicBody({ ...body, stream: true, stream_options: { include_usage: true } })).not.toHaveProperty('stream_options');
+  });
+  it.each([0, 0.37, 1])('sends custom native temperature %s only on explicit opt-in, including image and streaming requests', async temperature => {
+    const fetch = vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify(response))));
+    vi.stubGlobal('fetch', fetch);
+    for (const stream of [false, true]) {
+      await createDialogueFetch({ ...api, temperature, anthropicCustomTemperature: true })('unused', { method: 'POST', body: JSON.stringify({ ...body, temperature: 0.85, stream,
+        messages: [{ role: 'user', content: [{ type: 'text', text: '看图' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AQIDBA==' } }] }] }) });
+      const request = JSON.parse(fetch.mock.calls.at(-1)![1].body);
+      expect(request).toMatchObject({ temperature, stream });
+      expect(request.messages[0].content[1].source.type).toBe('base64');
+    }
+  });
+  it('omits native temperature in default mode and uses the selected config for a connection-test body', async () => {
+    expect(toAnthropicBody({ ...body, temperature: 0.85 }, { temperature: 0.37 })).not.toHaveProperty('temperature');
+    expect(toAnthropicBody({ ...body, temperature: 0.85 }, { temperature: 0.37, anthropicCustomTemperature: false })).not.toHaveProperty('temperature');
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(response)));
+    vi.stubGlobal('fetch', fetch);
+    await createDialogueFetch({ ...api, temperature: 0.42, anthropicCustomTemperature: true })('unused', { method: 'POST', body: JSON.stringify(body) });
+    expect(JSON.parse(fetch.mock.calls[0][1].body).temperature).toBe(0.42);
+  });
+  it.each([-0.01, 1.01, NaN, Infinity])('rejects invalid custom native temperature %s before a network request', async temperature => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    await expect(createDialogueFetch({ ...api, temperature, anthropicCustomTemperature: true })('unused', { method: 'POST', body: JSON.stringify(body) })).rejects.toThrow('0～1');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it('surfaces a model temperature rejection once without changing configuration or retrying', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { message: 'temperature is not supported by this model' } }), { status: 400 }));
+    vi.stubGlobal('fetch', fetch);
+    const config = { ...api, temperature: 0.37, anthropicCustomTemperature: true };
+    await expect(createDialogueFetch(config)('unused', { method: 'POST', body: JSON.stringify(body) }, 3)).rejects.toThrow('temperature is not supported');
+    expect(fetch).toHaveBeenCalledOnce(); expect(config.temperature).toBe(0.37);
   });
   it('converts automatically injected local tools and their follow-up results', () => {
     const converted = toAnthropicBody({ ...body, tools: [{ type: 'function', function: { name: 'test_tool', parameters: { type: 'object' } } }], tool_choice: 'auto',
@@ -61,7 +92,7 @@ describe('native Anthropic local chat', () => {
     expect((await send('unused', { method: 'POST', signal: controller.signal, body: JSON.stringify(body) })).choices[0].message.content).toBe('你好呀');
     expect(fetch.mock.calls[0][0]).toBe('https://native.test/v1/messages');
     expect(fetch.mock.calls[0][1].signal).toBe(controller.signal);
-    expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ stream: false, system: '角色设定' });
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ stream: false, system: [{ type: 'text', text: '角色设定', cache_control: { type: 'ephemeral' } }] });
     await expect(send('unused', { method: 'POST', body: JSON.stringify(body) }, 2)).rejects.toThrow('overloaded');
     expect(fetch).toHaveBeenCalledTimes(2);
   });

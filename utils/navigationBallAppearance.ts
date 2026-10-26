@@ -1,11 +1,13 @@
 import { useSyncExternalStore } from 'react';
 
 export type NavigationBallShape = 'circle' | 'square' | 'rounded';
-export type NavigationBallAppearance = { shape: NavigationBallShape; opacity: number; image: string };
+export type NavigationBallAppearance = { shape: NavigationBallShape; opacity: number; image: string; size: number };
+export const NAVIGATION_BALL_SIZE_MIN = 24;
+export const NAVIGATION_BALL_SIZE_MAX = 160;
 export const NAVIGATION_BALL_APPEARANCE_KEY = 'sully_navigation_ball_appearance_v1';
-export const DEFAULT_NAVIGATION_BALL_APPEARANCE: Readonly<NavigationBallAppearance> = Object.freeze({ shape: 'rounded', opacity: 1, image: '' });
+export const DEFAULT_NAVIGATION_BALL_APPEARANCE: Readonly<NavigationBallAppearance> = Object.freeze({ shape: 'rounded', opacity: 1, image: '', size: 44 });
 export const navigationBallShapeRadius: Record<NavigationBallShape, string> = { circle: '50%', square: '0px', rounded: '14px' };
-const MAX_IMAGE_LENGTH = 180_000;
+const MAX_IMAGE_LENGTH = 800_000;
 const isSafeImage = (image: unknown): image is string => typeof image === 'string'
   && image.length <= MAX_IMAGE_LENGTH && /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(image);
 
@@ -15,6 +17,8 @@ export function normalizeNavigationBallAppearance(value: unknown): NavigationBal
     shape: source.shape === 'circle' || source.shape === 'square' ? source.shape : 'rounded',
     opacity: typeof source.opacity === 'number' && Number.isFinite(source.opacity) ? Math.min(1, Math.max(0.1, source.opacity)) : 1,
     image: isSafeImage(source.image) ? source.image : '',
+    size: typeof source.size === 'number' && Number.isFinite(source.size)
+      ? Math.round(Math.min(NAVIGATION_BALL_SIZE_MAX, Math.max(NAVIGATION_BALL_SIZE_MIN, source.size))) : 44,
   };
 }
 

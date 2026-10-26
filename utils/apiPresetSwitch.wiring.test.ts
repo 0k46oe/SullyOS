@@ -37,7 +37,7 @@ describe('草稿同步不跨区块打架', () => {
 
   it('主 API 那份只盯自己的五个字段', () => {
     expect(settings).toMatch(
-      /\}, \[apiConfig\.baseUrl, apiConfig\.apiKey, apiConfig\.model, apiConfig\.protocol, apiConfig\.stream, apiConfig\.temperature\]\);/,
+      /\}, \[apiConfig\.baseUrl, apiConfig\.apiKey, apiConfig\.model, apiConfig\.protocol, apiConfig\.stream, apiConfig\.temperature, apiConfig\.anthropicCustomTemperature, apiConfig\.anthropicPromptCache\]\);/,
     );
   });
 });
@@ -98,17 +98,20 @@ describe('保存配置不反写预设', () => {
     // 正在使用的那条优先拿主表单值：改完高级设置后，点铅笔再保存就能真正写回预设。
     expect(openEditPreset).toMatch(/const isActive = activePresetId === preset\.id/);
     expect(openEditPreset).toMatch(/setEditPresetStream\([\s\S]*isActive \? localStream/);
-    expect(openEditPreset).toMatch(/setEditPresetTemperature\([\s\S]*isActive[\s\S]*localTemperature/);
+    expect(openEditPreset).toMatch(/const temperature = isActive \? localTemperature/);
     // 非当前预设仍读自己的值，不能被当前 API 的高级设置覆盖。
     expect(openEditPreset).toMatch(/typeof preset\.config\.stream === 'boolean'/);
-    expect(openEditPreset).toMatch(/setEditPresetTemperature\([\s\S]*preset\.config\.temperature/);
+    expect(openEditPreset).toMatch(/const temperature = [\s\S]*preset\.config\.temperature/);
+    expect(openEditPreset).toMatch(/setEditPresetTemperature\(preset\.config\.protocol === 'anthropic' \? Math\.min\(1, Math\.max\(0, temperature\)\) : temperature\)/);
+    expect(openEditPreset).toContain('setEditPresetCustomTemperature(isActive ? localAnthropicCustomTemperature : preset.config.anthropicCustomTemperature === true)');
     expect(handleUpdatePreset).toMatch(/stream:\s*editPresetStream/);
     expect(handleUpdatePreset).toMatch(/temperature:\s*editPresetTemperature/);
   });
 
   it('用当前配置填入时不会漏掉高级设置', () => {
     expect(settings).toMatch(/setEditPresetStream\(localStream\)/);
-    expect(settings).toMatch(/setEditPresetTemperature\(localTemperature\)/);
+    expect(settings).toMatch(/setEditPresetTemperature\(localProtocol === 'anthropic' \? Math\.min\(1, Math\.max\(0, localTemperature\)\) : localTemperature\)/);
+    expect(settings).toContain('setEditPresetCustomTemperature(localAnthropicCustomTemperature)');
     expect(settings).toMatch(/aria-pressed=\{editPresetStream\}/);
     expect(settings).toMatch(/value=\{editPresetTemperature\}/);
   });

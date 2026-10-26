@@ -274,7 +274,7 @@ export interface VisionApiConfig {
 
 /** A complete dialogue endpoint, separate from TTS/vision configuration. */
 export type ApiProtocol = 'openai' | 'anthropic';
-export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol' | 'stream' | 'temperature'>;
+export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol' | 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache'>;
 
 export interface APIConfig {
   /** Missing in older configurations means OpenAI-compatible. Native Anthropic is opt-in for local private chat. */
@@ -325,6 +325,10 @@ export interface APIConfig {
   stream?: boolean;
   // Per-API temperature for chat / 约会 main calls. Missing → 0.85.
   temperature?: number;
+  /** Native Messages only: false/missing omits temperature; true sends a validated 0–1 value. */
+  anthropicCustomTemperature?: boolean;
+  /** Native Messages: cache the stable leading system prompt; enabled unless explicitly disabled. */
+  anthropicPromptCache?: boolean;
 }
 
 export type ActiveMsg2Mode = 'fixed' | 'auto' | 'prompted';

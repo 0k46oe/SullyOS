@@ -35,6 +35,27 @@ beforeEach(async () => {
 afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
 describe('character API draft transaction', () => {
+  it('edits native temperature only in the draft until confirmed, with model-default mode available', async () => {
+    await click('为角色使用独立 API');
+    await act(async () => { const select = host.querySelector('select')!; select.value = 'anthropic'; Simulate.change(select); });
+    const toggle = host.querySelector<HTMLButtonElement>('[aria-label="Anthropic 自定义温度"]')!;
+    const slider = host.querySelector<HTMLInputElement>('[aria-label="Anthropic 温度"]')!;
+    expect(toggle.getAttribute('aria-checked')).toBe('false'); expect(slider.disabled).toBe(true);
+    expect(host.textContent).toContain('模型默认 · 不发送温度参数');
+    await act(async () => toggle.click());
+    await act(async () => { slider.value = '0.37'; Simulate.change(slider); });
+    expect(slider.max).toBe('1'); expect(host.textContent).toContain('当前发送：0.37');
+    expect(onChange).not.toHaveBeenCalled(); await click('确定');
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ anthropicCustomTemperature: true, temperature: 0.37 }));
+    const saved = { ...char, dialogueApi: onChange.mock.calls[0][0] }; await render(saved); onChange.mockClear();
+    await click('修改独立 API');
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Anthropic 自定义温度"]')!.click());
+    await click('取消'); expect(onChange).not.toHaveBeenCalled(); expect(saved.dialogueApi.anthropicCustomTemperature).toBe(true);
+    await click('修改独立 API');
+    expect(host.querySelector('[aria-label="Anthropic 自定义温度"]')?.getAttribute('aria-checked')).toBe('true');
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Anthropic 自定义温度"]')!.click());
+    await click('确定'); expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ anthropicCustomTemperature: false, temperature: 0.37 }));
+  });
   it('persists the selected native protocol only after the role draft is confirmed', async () => {
     await click('为角色使用独立 API');
     await act(async () => { const select = host.querySelector('select')!; select.value = 'anthropic'; Simulate.change(select); });

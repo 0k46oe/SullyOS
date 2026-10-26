@@ -32,10 +32,10 @@ const click = async (label: string) => act(async () => {
 
 it('normalizes corrupt shapes, opacity, unsafe URLs and oversized images', () => {
   expect(normalizeNavigationBallAppearance(null)).toEqual(DEFAULT_NAVIGATION_BALL_APPEARANCE);
-  expect(normalizeNavigationBallAppearance({ shape: 'bad', opacity: 0, image: 'javascript:bad' })).toEqual({ shape: 'rounded', opacity: 0.1, image: '' });
-  expect(normalizeNavigationBallAppearance({ shape: 'circle', opacity: NaN, image })).toEqual({ shape: 'circle', opacity: 1, image });
+  expect(normalizeNavigationBallAppearance({ shape: 'bad', opacity: 0, image: 'javascript:bad' })).toEqual({ shape: 'rounded', opacity: 0.1, image: '', size: 44 });
+  expect(normalizeNavigationBallAppearance({ shape: 'circle', opacity: NaN, image })).toEqual({ shape: 'circle', opacity: 1, image, size: 44 });
   expect(() => setNavigationBallAppearance({ image: 'https://remote.test/image.png' })).toThrow('格式不支持');
-  expect(() => setNavigationBallAppearance({ image: 'data:image/png;base64,' + 'a'.repeat(180000) })).toThrow('图片过大');
+  expect(() => setNavigationBallAppearance({ image: 'data:image/png;base64,' + 'a'.repeat(800000) })).toThrow('图片过大');
 });
 
 it('updates only the ball face, preserves menu opacity and rehydrates the saved shape', async () => {
@@ -50,7 +50,7 @@ it('updates only the ball face, preserves menu opacity and rehydrates the saved 
   expect(ball.querySelector('img')?.getAttribute('src')).toBe(image);
   await act(async () => ball.click());
   expect((host.querySelector('.navigation-ball-panel') as HTMLElement).style.opacity).toBe('');
-  expect(JSON.parse(localStorage.getItem(NAVIGATION_BALL_APPEARANCE_KEY)!)).toEqual({ shape: 'circle', opacity: 0.35, image });
+  expect(JSON.parse(localStorage.getItem(NAVIGATION_BALL_APPEARANCE_KEY)!)).toEqual({ shape: 'circle', opacity: 0.35, image, size: 44 });
   await act(async () => window.dispatchEvent(new StorageEvent('storage', { key: NAVIGATION_BALL_APPEARANCE_KEY })));
   expect(ball.style.borderRadius).toBe('50%');
   await click('正方形'); expect(ball.style.borderRadius).toBe('0px');
@@ -86,8 +86,45 @@ it('compresses uploaded images and ignores a late upload after restore-default',
     const input = host.querySelector('input[type=file]') as HTMLInputElement;
     Simulate.change(input, { target: { files: [new File(['test'], 'test.png', { type: 'image/png' })], value: '' } } as any);
   });
-  expect(processImage).toHaveBeenCalledWith(expect.any(File), { maxWidth: 128, quality: 0.85 });
+  expect(processImage).toHaveBeenCalledWith(expect.any(File), { maxWidth: 512, quality: 0.9 });
   await click('恢复默认外观'); await act(async () => resolve(image));
   expect(localStorage.getItem(NAVIGATION_BALL_APPEARANCE_KEY)).toBeNull();
   expect(host.querySelector('.navigation-ball-custom-image')).toBeNull();
+});
+
+it('migrates old appearance records and clamps finite sizes without accepting corrupt values', () => {
+  expect(normalizeNavigationBallAppearance({ shape: 'square', opacity: 0.4, image }).size).toBe(44);
+  for (const [input, expected] of [[1, 24], [96.4, 96], [96.8, 97], [999, 160], [NaN, 44], [Infinity, 44], ['96', 44]] as const) {
+    expect(normalizeNavigationBallAppearance({ size: input }).size).toBe(expected);
+  }
+});
+
+it('accepts a multi-digit exact size on commit, syncs the slider and persists across remounts', async () => {
+  await render(); await click('悬浮球设置');
+  const input = host.querySelector('[aria-label="悬浮球尺寸数值"]') as HTMLInputElement;
+  await act(async () => { input.value = '9'; Simulate.change(input); });
+  expect(JSON.parse(localStorage.getItem(NAVIGATION_BALL_APPEARANCE_KEY) || '{}').size).toBeUndefined();
+  await act(async () => { input.value = '96'; Simulate.change(input); });
+  await act(async () => Simulate.blur(input));
+  expect((host.querySelector('.navigation-ball') as HTMLElement).style.getPropertyValue('--navigation-ball-size')).toBe('96px');
+  expect((host.querySelector('[aria-label="悬浮球尺寸"]') as HTMLInputElement).value).toBe('96');
+  await act(async () => {
+    const slider = host.querySelector('[aria-label="悬浮球尺寸"]') as HTMLInputElement;
+    slider.value = '160'; Simulate.change(slider);
+  });
+  expect(input.value).toBe('160');
+  expect(JSON.parse(localStorage.getItem(NAVIGATION_BALL_APPEARANCE_KEY)!).size).toBe(160);
+  await act(async () => root.unmount()); root = createRoot(host); await render();
+  expect((host.querySelector('.navigation-ball') as HTMLElement).style.getPropertyValue('--navigation-ball-size')).toBe('160px');
+});
+
+it('constrains an enlarged ball at the old edge and restores the default size without moving it', async () => {
+  localStorage.setItem('sully_navigation_ball_position_v1', '{"x":270,"y":550}');
+  await render(); await act(async () => setNavigationBallAppearance({ size: 160 }));
+  const ball = host.querySelector('.navigation-ball') as HTMLElement;
+  expect(parseFloat(ball.style.left)).toBeLessThanOrEqual(160);
+  expect(parseFloat(ball.style.top)).toBeLessThanOrEqual(440);
+  await click('悬浮球设置'); await click('恢复默认外观');
+  expect(ball.style.getPropertyValue('--navigation-ball-size')).toBe('44px');
+  expect(localStorage.getItem('sully_navigation_ball_position_v1')).toBe('{"x":270,"y":550}');
 });

@@ -156,7 +156,7 @@ describe('one-shot full API request capture', () => {
         expect(extractApiTokenUsage({ usage: { prompt_tokens: 123, completion_tokens: 45, total_tokens: 168 } }))
             .toEqual({ prompt: 123, completion: 45, total: 168 });
         expect(extractApiTokenUsage({ usage: { input_tokens: 70, output_tokens: 20 } }))
-            .toEqual({ prompt: 70, completion: 20, total: undefined });
+            .toEqual({ prompt: 70, completion: 20, total: 90 });
         expect(extractApiTokenUsage({ usageMetadata: { promptTokenCount: 80, candidatesTokenCount: 10, totalTokenCount: 90 } }))
             .toEqual({ prompt: 80, completion: 10, total: 90 });
     });

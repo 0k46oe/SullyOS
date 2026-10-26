@@ -5,7 +5,7 @@ import { useSettingsFocus } from '../../utils/settingsNavigation';
 import { useOS } from '../../context/OSContext';
 import { AppID } from '../../types';
 import { processImage } from '../../utils/file';
-import { navigationBallShapeRadius, resetNavigationBallAppearance, setNavigationBallAppearance, useNavigationBallAppearance, type NavigationBallAppearance, type NavigationBallShape } from '../../utils/navigationBallAppearance';
+import { NAVIGATION_BALL_SIZE_MIN, NAVIGATION_BALL_SIZE_MAX, navigationBallShapeRadius, resetNavigationBallAppearance, setNavigationBallAppearance, useNavigationBallAppearance, type NavigationBallAppearance, type NavigationBallShape } from '../../utils/navigationBallAppearance';
 import NavigationBallFace from '../os/NavigationBallFace';
 const NavigationSlotPicker = React.lazy(() => import('./NavigationSlotPicker'));
 // Only mounted when a slot is being edited. Project titles, never message/book bodies.
@@ -23,6 +23,8 @@ export default function NavigationBallSettings({ characters = [], loadWorlds, re
   const enabled = useNavigationBallEnabled();
   const slots = useNavigationBallSlots();
   const appearance = useNavigationBallAppearance();
+  const [sizeDraft, setSizeDraft] = useState(String(appearance.size));
+  useEffect(() => setSizeDraft(String(appearance.size)), [appearance.size]);
   const imageInput = useRef<HTMLInputElement>(null);
   const uploadVersion = useRef(0);
   const [uploading, setUploading] = useState(false);
@@ -31,6 +33,11 @@ export default function NavigationBallSettings({ characters = [], loadWorlds, re
   const updateAppearance = (patch: Partial<NavigationBallAppearance>) => {
     try { setNavigationBallAppearance(patch); setAppearanceStatus('外观已保存在本机'); }
     catch (error) { setAppearanceStatus(error instanceof Error ? error.message : '保存失败'); }
+  };
+  const commitSize = () => {
+    const input = sizeDraft.trim() ? Number(sizeDraft) : appearance.size;
+    const size = Number.isFinite(input) ? Math.round(Math.min(NAVIGATION_BALL_SIZE_MAX, Math.max(NAVIGATION_BALL_SIZE_MIN, input))) : appearance.size;
+    setSizeDraft(String(size)); updateAppearance({ size });
   };
   const uploadImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]; event.target.value = '';
@@ -41,7 +48,7 @@ export default function NavigationBallSettings({ characters = [], loadWorlds, re
     const version = ++uploadVersion.current;
     setUploading(true); setAppearanceStatus('正在处理图片…');
     try {
-      const image = await processImage(file, { maxWidth: 128, quality: 0.85 });
+      const image = await processImage(file, { maxWidth: 512, quality: 0.9 });
       if (version !== uploadVersion.current) return;
       setNavigationBallAppearance({ image }); setAppearanceStatus('图片已保存在本机');
     } catch (error) {
@@ -86,17 +93,28 @@ export default function NavigationBallSettings({ characters = [], loadWorlds, re
       <div className="flex items-center gap-4">
         <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl bg-slate-100" aria-label="悬浮球外观预览">
           <div className="navigation-ball-face-preview" data-custom-image={!!appearance.image}
-            style={{ borderRadius: navigationBallShapeRadius[appearance.shape], opacity: appearance.opacity }}>
+            style={{ borderRadius: navigationBallShapeRadius[appearance.shape], opacity: appearance.opacity, '--navigation-ball-size': `${Math.min(appearance.size, 64)}px` } as React.CSSProperties}>
             <NavigationBallFace appearance={appearance} />
           </div>
         </div>
         <div className="min-w-0">
           <h3 className="text-xs font-medium text-slate-600">自定义外观</h3>
-          <p className="mt-1 text-[11px] leading-relaxed text-slate-400">图片按形状居中裁切；自动缩小至 128px，仅保存在本机。</p>
+          <p className="mt-1 text-[11px] leading-relaxed text-slate-400">大小在下方调整；预览按比例缩放。图片最长边压缩至 512px，仅保存在本机。</p>
           <input ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp" aria-label="上传悬浮球图片" className="hidden" onChange={event => { void uploadImage(event); }} />
           <button type="button" disabled={uploading} onClick={() => imageInput.current?.click()} className="mt-2 rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600 disabled:opacity-50">{uploading ? '处理中…' : '上传图片'}</button>
           {appearance.image && <button type="button" disabled={uploading} onClick={() => updateAppearance({ image: '' })} className="ml-2 text-xs text-slate-400">移除图片</button>}
         </div>
+      </div>
+      <div>
+        <div className="flex items-center justify-between gap-3">
+          <label htmlFor={`${contentId}-size`} className="text-xs text-slate-500">悬浮球尺寸</label>
+          <span className="flex items-center gap-1 text-xs text-slate-400"><input aria-label="悬浮球尺寸数值" type="number" min={NAVIGATION_BALL_SIZE_MIN} max={NAVIGATION_BALL_SIZE_MAX} step="1"
+            value={sizeDraft} onChange={event => setSizeDraft(event.target.value)} onBlur={commitSize} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+            className="w-16 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-right text-xs text-slate-600" />px</span>
+        </div>
+        <input id={`${contentId}-size`} aria-label="悬浮球尺寸" type="range" min={NAVIGATION_BALL_SIZE_MIN} max={NAVIGATION_BALL_SIZE_MAX} step="1" value={appearance.size}
+          onChange={event => updateAppearance({ size: Number(event.target.value) })} className="mt-3 block w-full accent-slate-500" />
+        <p className="mt-1 text-[11px] text-slate-400">24～160px，默认 44px；可拖动滑块或输入具体数值。</p>
       </div>
       <fieldset>
         <legend className="mb-2 text-xs text-slate-500">形状</legend>

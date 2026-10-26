@@ -498,6 +498,8 @@ const Settings: React.FC = () => {
   
   const [localKey, setLocalKey] = useState(apiConfig.apiKey);
   const [localProtocol, setLocalProtocol] = useState<ApiProtocol>(apiConfig.protocol || 'openai');
+  const [localAnthropicPromptCache, setLocalAnthropicPromptCache] = useState(apiConfig.anthropicPromptCache !== false);
+  const [localAnthropicCustomTemperature, setLocalAnthropicCustomTemperature] = useState(apiConfig.anthropicCustomTemperature === true);
   const [localUrl, setLocalUrl] = useState(apiConfig.baseUrl);
   const [localModel, setLocalModel] = useState(String(apiConfig.model || ''));
   const [localStream, setLocalStream] = useState<boolean>(apiConfig.stream === true);
@@ -557,6 +559,8 @@ const Settings: React.FC = () => {
   const [editPresetProtocol, setEditPresetProtocol] = useState<ApiProtocol>('openai');
   const [editPresetStream, setEditPresetStream] = useState(false);
   const [editPresetTemperature, setEditPresetTemperature] = useState(0.85);
+  const [editPresetPromptCache, setEditPresetPromptCache] = useState(true);
+  const [editPresetCustomTemperature, setEditPresetCustomTemperature] = useState(false);
   const [holdingDeletePresetId, setHoldingDeletePresetId] = useState<string | null>(null);
   const presetDeleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
@@ -982,7 +986,9 @@ const Settings: React.FC = () => {
       setLocalModel(String(apiConfig.model || ''));
       setLocalStream(apiConfig.stream === true);
       setLocalTemperature(typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85);
-  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.protocol, apiConfig.stream, apiConfig.temperature]);
+      setLocalAnthropicCustomTemperature(apiConfig.anthropicCustomTemperature === true);
+      setLocalAnthropicPromptCache(apiConfig.anthropicPromptCache !== false);
+  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.protocol, apiConfig.stream, apiConfig.temperature, apiConfig.anthropicCustomTemperature, apiConfig.anthropicPromptCache]);
 
   useEffect(() => {
       setLocalVisionEnabled(apiConfig.visionApi?.enabled === true);
@@ -1063,16 +1069,15 @@ const Settings: React.FC = () => {
       setEditPresetKey(preset.config.apiKey || '');
       setEditPresetModel(preset.config.model || '');
       setEditPresetProtocol(preset.config.protocol || 'openai');
+      setEditPresetPromptCache(isActive ? localAnthropicPromptCache : preset.config.anthropicPromptCache !== false);
+      setEditPresetCustomTemperature(isActive ? localAnthropicCustomTemperature : preset.config.anthropicCustomTemperature === true);
       // 当前正在使用的预设要接住主表单里刚改的高级设置：用户点铅笔再点保存即可写回，
       // 不必猜还要额外按一次「用当前配置填入」。非当前/老预设则读取自身，缺字段才回退。
       setEditPresetStream(
           isActive ? localStream : (typeof preset.config.stream === 'boolean' ? preset.config.stream : localStream),
       );
-      setEditPresetTemperature(
-          isActive
-              ? localTemperature
-              : (typeof preset.config.temperature === 'number' ? preset.config.temperature : localTemperature),
-      );
+      const temperature = isActive ? localTemperature : (typeof preset.config.temperature === 'number' ? preset.config.temperature : localTemperature);
+      setEditPresetTemperature(preset.config.protocol === 'anthropic' ? Math.min(1, Math.max(0, temperature)) : temperature);
   };
 
   const handleUpdatePreset = () => {
@@ -1091,6 +1096,8 @@ const Settings: React.FC = () => {
           protocol: editPresetProtocol,
           stream: editPresetStream,
           temperature: editPresetTemperature,
+          anthropicCustomTemperature: editPresetCustomTemperature,
+          anthropicPromptCache: editPresetPromptCache,
       };
       // 「正在用的就是这条」要在改之前问，改完值就对不上了
       const wasActive = activePresetId === preset.id;
@@ -1157,6 +1164,7 @@ const Settings: React.FC = () => {
         protocol: localProtocol,
         stream: localStream,
         temperature: localTemperature,
+        anthropicPromptCache: localAnthropicPromptCache, anthropicCustomTemperature: localAnthropicCustomTemperature,
       }, newPresetGroup);
       setNewPresetName('');
       setNewPresetGroup('');
@@ -1179,6 +1187,7 @@ const Settings: React.FC = () => {
       protocol: localProtocol,
       stream: localStream,
       temperature: localTemperature,
+      anthropicPromptCache: localAnthropicPromptCache, anthropicCustomTemperature: localAnthropicCustomTemperature,
     };
     // 「是不是来自某条预设」要在保存之前问，存完值就对不上了
     const sourcePreset = apiPresets.find(preset => preset.id === activePresetId);
@@ -2581,13 +2590,15 @@ const Settings: React.FC = () => {
 
             <div className="space-y-4">
                 <DialogueApiFields
-                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, protocol: localProtocol, stream: localStream, temperature: localTemperature }}
+                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, protocol: localProtocol, stream: localStream, temperature: localTemperature, anthropicPromptCache: localAnthropicPromptCache, anthropicCustomTemperature: localAnthropicCustomTemperature }}
                     onChange={patch => {
                         if (patch.protocol !== undefined) setLocalProtocol(patch.protocol);
                         if (patch.baseUrl !== undefined) setLocalUrl(patch.baseUrl);
                         if (patch.apiKey !== undefined) setLocalKey(patch.apiKey);
                         if (patch.stream !== undefined) setLocalStream(patch.stream);
                         if (patch.temperature !== undefined) setLocalTemperature(patch.temperature);
+                        if (patch.anthropicPromptCache !== undefined) setLocalAnthropicPromptCache(patch.anthropicPromptCache);
+                        if (patch.anthropicCustomTemperature !== undefined) setLocalAnthropicCustomTemperature(patch.anthropicCustomTemperature);
                     }}
                     fetchModels={fetchModels} isLoadingModels={isLoadingModels} openModelPicker={openModelPicker}
                 />
@@ -2610,7 +2621,7 @@ const Settings: React.FC = () => {
                         setTestingApi(true);
                         setTestApiResult(null);
                         try {
-                            const testApi = { baseUrl: localUrl, apiKey: localKey, model: localModel, protocol: localProtocol };
+                            const testApi = { baseUrl: localUrl, apiKey: localKey, model: localModel, protocol: localProtocol, temperature: localTemperature, anthropicPromptCache: localAnthropicPromptCache, anthropicCustomTemperature: localAnthropicCustomTemperature };
                             const data = await createDialogueFetch(testApi)(dialogueEndpoint(testApi), {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localKey.trim()}` },
@@ -4055,7 +4066,7 @@ const Settings: React.FC = () => {
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">URL</label>
                   <input value={editPresetUrl} onChange={e => setEditPresetUrl(e.target.value)} placeholder="https://..." className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary" />
                   <label className="text-[10px] font-bold text-slate-400 block">接口格式</label>
-                  <select aria-label="预设接口格式" value={editPresetProtocol} onChange={e => setEditPresetProtocol(e.target.value as ApiProtocol)} className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm">
+                  <select aria-label="预设接口格式" value={editPresetProtocol} onChange={e => { setEditPresetProtocol(e.target.value as ApiProtocol); if (e.target.value === 'anthropic') setEditPresetTemperature(value => Math.min(1, Math.max(0, value))); }} className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm">
                     <option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 原生（Messages）</option>
                   </select>
               </div>
@@ -4086,19 +4097,29 @@ const Settings: React.FC = () => {
                   <div>
                       <div className="flex items-center justify-between">
                           <label htmlFor="edit-preset-temperature" className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">温度 (Temperature)</label>
-                          <span className="text-[10px] font-mono text-slate-400">{editPresetTemperature.toFixed(2)}</span>
+                          <span className="text-[10px] font-mono text-slate-400">{editPresetProtocol === 'anthropic' && !editPresetCustomTemperature ? '模型默认' : editPresetTemperature.toFixed(2)}</span>
                       </div>
                       <input
                           id="edit-preset-temperature"
                           type="range"
                           min="0"
-                          max="2"
+                          max={editPresetProtocol === 'anthropic' ? 1 : 2}
+                          disabled={editPresetProtocol === 'anthropic' && !editPresetCustomTemperature}
                           step="0.05"
                           value={editPresetTemperature}
                           onChange={event => setEditPresetTemperature(parseFloat(event.target.value))}
                           className="w-full accent-primary mt-1"
                       />
                   </div>
+                  {editPresetProtocol === 'anthropic' && <label className="flex items-center gap-2 text-xs text-slate-500">
+                    <input type="checkbox" aria-label="预设自定义温度" checked={editPresetCustomTemperature}
+                      onChange={event => { setEditPresetCustomTemperature(event.target.checked); setEditPresetTemperature(value => Math.min(1, Math.max(0, value))); }} />
+                    自定义温度（0～1）；关闭时使用模型默认
+                  </label>}
+                  {editPresetProtocol === 'anthropic' && <label className="flex items-center gap-2 text-xs text-slate-500">
+                    <input type="checkbox" aria-label="预设提示词缓存" checked={editPresetPromptCache} onChange={event => setEditPresetPromptCache(event.target.checked)} />
+                    提示词缓存（稳定前缀；实际命中以服务返回为准）
+                  </label>}
               </div>
               <button
                   type="button"
@@ -4108,7 +4129,9 @@ const Settings: React.FC = () => {
                       setEditPresetModel(localModel);
                       setEditPresetProtocol(localProtocol);
                       setEditPresetStream(localStream);
-                      setEditPresetTemperature(localTemperature);
+                      setEditPresetTemperature(localProtocol === 'anthropic' ? Math.min(1, Math.max(0, localTemperature)) : localTemperature);
+                      setEditPresetCustomTemperature(localAnthropicCustomTemperature);
+                      setEditPresetPromptCache(localAnthropicPromptCache);
                       addToast('已填入当前配置', 'info');
                   }}
                   className="w-full py-2 bg-slate-100 text-slate-500 text-xs font-bold rounded-xl active:scale-95 transition-transform"

@@ -6,6 +6,12 @@ import {
 } from './apiConfigNormalize';
 
 describe('API config normalization', () => {
+  it('preserves the native sampling opt-in while leaving old configurations in model-default mode', () => {
+    const api = { baseUrl: '', apiKey: '', model: '', protocol: 'anthropic' as const, temperature: 0 };
+    expect(normalizeApiConfig(api)).not.toHaveProperty('anthropicCustomTemperature');
+    expect(normalizeApiConfig({ ...api, anthropicCustomTemperature: true })).toMatchObject({ anthropicCustomTemperature: true, temperature: 0 });
+    expect(normalizeApiConfig({ ...api, anthropicCustomTemperature: 'true' as any }).anthropicCustomTemperature).toBe(false);
+  });
   it('normalizes an explicit protocol and leaves older snapshots structurally compatible', () => {
     const api = { baseUrl: '', apiKey: '', model: '' };
     expect(normalizeApiConfig(api)).not.toHaveProperty('protocol');

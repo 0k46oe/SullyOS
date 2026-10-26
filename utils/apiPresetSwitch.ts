@@ -22,7 +22,7 @@ import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel, normali
  * 把用户手调过的温度、流式开关顺手重置掉。
  */
 export type PresetSwitchPatch =
-  Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'protocol' | 'stream' | 'temperature'>>;
+  Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'protocol' | 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache'>>;
 
 export function configFromPreset(preset: ApiPreset): PresetSwitchPatch {
   const patch: PresetSwitchPatch = {
@@ -33,6 +33,10 @@ export function configFromPreset(preset: ApiPreset): PresetSwitchPatch {
   };
   if (typeof preset.config.stream === 'boolean') patch.stream = preset.config.stream;
   if (typeof preset.config.temperature === 'number') patch.temperature = preset.config.temperature;
+  if (typeof preset.config.anthropicCustomTemperature === 'boolean' || patch.protocol === 'anthropic') {
+    patch.anthropicCustomTemperature = preset.config.anthropicCustomTemperature === true;
+  }
+  if (typeof preset.config.anthropicPromptCache === 'boolean' || patch.protocol === 'anthropic') patch.anthropicPromptCache = preset.config.anthropicPromptCache !== false;
   return patch;
 }
 
@@ -55,9 +59,12 @@ export function presetMatchesConfig(
  */
 export function presetDiffersFromConfig(
   preset: ApiPreset,
-  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol'> & Partial<Pick<APIConfig, 'stream' | 'temperature'>>,
+  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol'> & Partial<Pick<APIConfig, 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache'>>,
 ): boolean {
   if (!presetMatchesConfig(preset, config)) return true;
+  if (normalizeApiProtocol(preset.config.protocol) === 'anthropic' && (preset.config.anthropicPromptCache !== false) !== (config.anthropicPromptCache !== false)) return true;
+  if (normalizeApiProtocol(preset.config.protocol) === 'anthropic'
+    && (preset.config.anthropicCustomTemperature === true) !== (config.anthropicCustomTemperature === true)) return true;
   if (typeof preset.config.stream === 'boolean' && preset.config.stream !== (config.stream === true)) return true;
   if (typeof preset.config.temperature === 'number' && typeof config.temperature === 'number'
     && preset.config.temperature !== config.temperature) return true;

@@ -13,6 +13,7 @@ export async function readAnthropicResponse(
   let message: any;
   const blocks = new Map<number, StreamBlock>();
   let fullText = '';
+  let fullThinking = '';
   let firstDelta = false;
   let finished = false;
   let pending = '';
@@ -33,6 +34,11 @@ export async function readAnthropicResponse(
     }
     try { hooks?.onDelta?.(text, fullText); } catch { /* Keep consuming valid provider output. */ }
   };
+  const emitThinking = (text: string) => {
+    if (!text) return;
+    fullThinking += text;
+    try { hooks?.onReasoningDelta?.(text, fullThinking); } catch { /* UI callbacks cannot interrupt the stream. */ }
+  };
   const dispatch = () => {
     if (!dataLines.length || finished) { dataLines = []; eventName = ''; return; }
     let event: any;
@@ -49,12 +55,14 @@ export async function readAnthropicResponse(
       event.message.content.forEach((value: Record<string, any>, index: number) => {
         blocks.set(index, { value: { ...value }, partialJson: '', stopped: true });
         if (value.type === 'text') emit(value.text || '');
+        if (value.type === 'thinking') emitThinking(value.thinking || '');
       });
     } else if (type === 'content_block_start') {
       if (!message || !Number.isInteger(event.index) || event.index < 0 || blocks.has(event.index) || !event.content_block?.type) fail('内容块起始事件不完整');
       const value = { ...event.content_block };
       blocks.set(event.index, { value, partialJson: '', stopped: false });
       if (value.type === 'text') emit(value.text || '');
+      if (value.type === 'thinking') emitThinking(value.thinking || '');
     } else if (type === 'content_block_delta') {
       const block = blocks.get(event.index);
       if (!block || block.stopped) fail('内容增量缺少对应的起始事件');
@@ -63,6 +71,13 @@ export async function readAnthropicResponse(
         if (block!.value.type !== 'text' || typeof delta.text !== 'string') fail('文字增量格式不正确');
         block!.value.text = (block!.value.text || '') + delta.text;
         emit(delta.text);
+      } else if (delta?.type === 'thinking_delta') {
+        if (block!.value.type !== 'thinking' || typeof delta.thinking !== 'string') fail('思考增量格式不正确');
+        block!.value.thinking = (block!.value.thinking || '') + delta.thinking;
+        emitThinking(delta.thinking);
+      } else if (delta?.type === 'signature_delta') {
+        if (block!.value.type !== 'thinking' || typeof delta.signature !== 'string') fail('思考签名格式不正确');
+        block!.value.signature = (block!.value.signature || '') + delta.signature;
       } else if (delta?.type === 'input_json_delta') {
         if (block!.value.type !== 'tool_use' || typeof delta.partial_json !== 'string') fail('工具参数增量格式不正确');
         block!.partialJson += delta.partial_json;

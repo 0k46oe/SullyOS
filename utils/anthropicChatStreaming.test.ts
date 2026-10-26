@@ -25,10 +25,17 @@ const finish = [
   { type: 'message_stop' },
 ];
 
-const cases = (['complete', 'error', 'cancel'] as const).flatMap(outcome => ([false, true].map(image => ({ outcome, image }))));
-it.each(cases)('native stream reaches the real chat hook and handles $outcome (image=$image) without duplicate replies', async ({ outcome, image }) => {
-  const char = { id: `native-stream-${outcome}-${image}`, name: '流式测试角色', emotionConfig: { enabled: false },
-    dialogueApi: { baseUrl: 'https://native.test', apiKey: 'fake-test-key', model: 'claude-test', protocol: 'anthropic', stream: true } } as any;
+const cases = (['complete', 'error', 'cancel'] as const).flatMap(outcome => ([false, true].flatMap(image => [false, true].map(thinkingMode => ({ outcome, image, thinkingMode })))));
+it.each(cases)('native stream reaches the real chat hook and handles $outcome (image=$image, thinking=$thinkingMode) without duplicate replies', async ({ outcome, image, thinkingMode }) => {
+  const atTextIndex = (event: any) => event.index === undefined ? event : { ...event, index: thinkingMode ? 1 : 0 };
+  const thinkingEvents = thinkingMode ? [
+    { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '服务返回的思考摘要' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'test-signature' } },
+    { type: 'content_block_stop', index: 0 },
+  ] : [];
+  const char = { id: `native-stream-${outcome}-${image}-${thinkingMode}`, name: '流式测试角色', showThinkingChain: thinkingMode, emotionConfig: { enabled: false },
+    dialogueApi: { baseUrl: 'https://native.test', apiKey: 'fake-test-key', model: '【反重力】claude-opus-4-6-thinking', protocol: 'anthropic', stream: true } } as any;
   await DB.saveCharacter(char);
   if (image) {
     vi.stubGlobal('Blob', NodeBlob);
@@ -60,19 +67,24 @@ it.each(cases)('native stream reaches the real chat hook and handles $outcome (i
     await act(async () => {
       run = current.triggerAI([]);
       await requestStarted;
-      controller.enqueue(encode([...begin, text('已经显示的正文')]));
+      controller.enqueue(encode([begin[0], ...thinkingEvents, ...[begin[1], text('已经显示的正文')].map(atTextIndex)]));
       await new Promise(resolve => setTimeout(resolve, 0));
     });
     expect(current.streamingBubbles).toEqual(['已经显示的正文']);
+    expect(current.streamingThinking).toBe(thinkingMode ? '服务返回的思考摘要' : '');
     expect((await DB.getRecentMessagesByCharId(char.id, 20)).filter(message => message.role === 'assistant')).toEqual([]);
     const options = (fetch.mock.calls as unknown as Array<[string, RequestInit]>)[0][1];
     expect(options.headers).toMatchObject({ 'x-api-key': 'fake-test-key' });
-    expect(JSON.parse(options.body as string)).toMatchObject({ stream: true, model: 'claude-test' });
+    expect(JSON.parse(options.body as string)).toMatchObject({ stream: true, model: '【反重力】claude-opus-4-6-thinking' });
+    const request = JSON.parse(options.body as string);
+    if (thinkingMode) { expect(request.thinking).toEqual({ type: 'enabled', budget_tokens: 4000 }); expect(request).not.toHaveProperty('temperature'); }
+    else expect(request).not.toHaveProperty('thinking');
+    expect(request.system[0].cache_control).toEqual({ type: 'ephemeral' });
     const images = JSON.parse(options.body as string).messages.flatMap((message: any) => message.content).filter((block: any) => block.type === 'image');
     expect(images).toHaveLength(image ? 1 : 0);
     if (image) expect(images[0].source).toEqual({ type: 'base64', media_type: 'image/png', data: 'AQIDBA==' });
     await act(async () => {
-      if (outcome === 'complete') controller.enqueue(encode([text('，完整回复。'), ...finish]));
+      if (outcome === 'complete') controller.enqueue(encode([text('，完整回复。'), ...finish].map(atTextIndex)));
       else if (outcome === 'error') controller.enqueue(encode([{ type: 'error', error: { message: '测试中的流式故障' } }]));
       else { publishReplyDisplay(char.id, [], current.streamingBubbles); stopReplyRuns(char.id); }
       await run;
@@ -81,7 +93,10 @@ it.each(cases)('native stream reaches the real chat hook and handles $outcome (i
     expect(current.isTyping).toBe(false);
     const saved = await DB.getRecentMessagesByCharId(char.id, 20);
     const replies = saved.filter(message => message.role === 'assistant').map(message => message.content);
-    if (outcome === 'complete') expect(replies).toEqual(['已经显示的正文，完整回复。']);
+    if (outcome === 'complete') {
+      expect(replies).toEqual(['已经显示的正文，完整回复。']);
+      if (thinkingMode) expect(saved.find(message => message.role === 'assistant')?.metadata?.thinkingChain).toBe('服务返回的思考摘要');
+    }
     else if (outcome === 'error') {
       expect(replies).toEqual([]);
       expect(saved.some(message => message.role === 'system' && message.content.includes('测试中的流式故障'))).toBe(true);
