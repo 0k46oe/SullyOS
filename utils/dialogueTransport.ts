@@ -3,6 +3,8 @@ import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiProtocol } fro
 import { safeFetchJson } from './safeApi';
 import { readAnthropicResponse } from './anthropicStream';
 import { resolveBlobRefsInRequestBody } from './apiBlobRefs';
+import { captureApiRequestOnce, getApiCallAmbientContext, updateApiRequestCaptureUsage } from './apiCallLog';
+import { compareAnthropicCachePrefix, splitAnthropicCacheText } from './anthropicPromptCache';
 
 export const isAnthropicApi = (api: Pick<DialogueApiConfig, 'protocol'>): boolean =>
   normalizeApiProtocol(api.protocol) === 'anthropic';
@@ -74,11 +76,14 @@ export function toAnthropicBody(body: Record<string, any>, api?: Pick<DialogueAp
   const cacheEnabled = api?.anthropicPromptCache !== false;
   for (const message of body.messages || []) {
     if (message.role === 'system' || message.role === 'developer') {
-      const parts = contentBlocks(message.content, false);
-      // Only the stable leading prompt is cached. Later system messages contain
-      // the current time, recall and other per-turn context and stay beyond it.
+      let parts = contentBlocks(message.content, false);
+      // Up to four checkpoints within the stable leading prompt let an earlier
+      // unchanged prefix survive edits in later memories/impressions. Existing
+      // multi-block content retains its original boundaries and whitespace.
       if (cacheEnabled && message === body.messages[0] && parts.length) {
-        parts[parts.length - 1].cache_control = { type: 'ephemeral' };
+        if (parts.length === 1) parts = splitAnthropicCacheText(parts[0].text)
+          .map(text => ({ type: 'text', text, cache_control: { type: 'ephemeral' } }));
+        else parts[parts.length - 1].cache_control = { type: 'ephemeral' };
       }
       system.push(...parts);
       continue;
@@ -184,6 +189,7 @@ export function fromAnthropicResponse(data: any): any {
 export function createDialogueFetch(api: DialogueApiConfig): typeof safeFetchJson {
   return async (url, options, retries, timeout, meta, hooks) => {
     if (!isAnthropicApi(api)) return safeFetchJson(url, options, retries, timeout, meta, hooks);
+    const nativeMeta = { ...(meta || getApiCallAmbientContext()) };
     options.signal?.throwIfAborted();
     // Convert only after restoring local images. safeFetchJson's later restoration
     // cannot split a data URL into Anthropic's media_type/data fields for us.
@@ -191,13 +197,30 @@ export function createDialogueFetch(api: DialogueApiConfig): typeof safeFetchJso
     const resolvedBody = await resolveBlobRefsInRequestBody(options.body);
     options.signal?.throwIfAborted();
     const body = typeof resolvedBody === 'string' ? JSON.parse(resolvedBody) : {};
-    const result = await safeFetchJson(dialogueEndpoint(api), {
-      ...options, headers: dialogueHeaders(api), body: JSON.stringify(toAnthropicBody(body, api)),
-    }, 0, timeout, meta, {
-      ...(body.stream === true ? hooks : {}),
-      responseParser: (response, _streamHooks, timing, startedAt) =>
-        readAnthropicResponse(response, body.stream === true ? hooks : undefined, timing, startedAt, options.signal),
-    });
-    return fromAnthropicResponse(result);
+    const endpoint = dialogueEndpoint(api);
+    const payload = toAnthropicBody(body, api);
+    const cacheDiagnostic = await compareAnthropicCachePrefix({ endpoint, credential: normalizeApiCredential(api.apiKey), charId: nativeMeta.charId, purpose: nativeMeta.purpose }, payload);
+    options.signal?.throwIfAborted();
+    const nativeBody = JSON.stringify(payload);
+    if (cacheDiagnostic) nativeMeta.cacheDiagnostic = cacheDiagnostic;
+    // The legacy global interceptor only captures /chat/completions. Claim the
+    // one-shot switch here after conversion, so it contains the actual Messages
+    // request (including system, tools, thinking and cache_control).
+    const captureId = captureApiRequestOnce({ url: endpoint, body: nativeBody, meta: nativeMeta });
+    try {
+      const result = await safeFetchJson(endpoint, {
+        ...options, headers: dialogueHeaders(api), body: nativeBody,
+      }, 0, timeout, nativeMeta, {
+        ...(body.stream === true ? hooks : {}),
+        responseParser: (response, _streamHooks, timing, startedAt) =>
+          readAnthropicResponse(response, body.stream === true ? hooks : undefined, timing, startedAt, options.signal),
+      });
+      const completion = fromAnthropicResponse(result);
+      updateApiRequestCaptureUsage({ captureId, ok: true, response: result });
+      return completion;
+    } catch (error) {
+      updateApiRequestCaptureUsage({ captureId, ok: false });
+      throw error;
+    }
   };
 }

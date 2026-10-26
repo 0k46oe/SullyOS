@@ -6,9 +6,11 @@ import NavigationBall from '../../components/os/NavigationBall';
 import NavigationBallSettings from '../../components/settings/NavigationBallSettings';
 import CharacterApiPanel from '../../components/character/CharacterApiPanel';
 import { setNavigationBallEnabled } from '../../utils/navigationBall';
+import ApiCallLogModal from '../../components/settings/ApiCallLogModal';
 
 function Preview() {
   const os = useOS();
+  const [showLog, setShowLog] = React.useState(false);
   const character = os.characters.find(item => item.id === os.activeCharacterId) || os.characters[0];
   const seed = () => {
     os.updateApiConfig({ baseUrl: 'https://openai.example/v1', apiKey: 'demo-only-key', model: 'demo-openai', protocol: 'openai', stream: false });
@@ -23,6 +25,7 @@ function Preview() {
       <h1 className="text-base font-semibold text-slate-700">普通聊天 API 与悬浮球验收</h1>
       <p className="mt-2 text-xs leading-relaxed text-slate-400">此页仅写入本预览站点的虚构配置，不调用模型。</p>
       <button disabled={!os.isDataLoaded} onClick={seed} className="mt-3 rounded-xl bg-violet-500 px-4 py-2 text-xs text-white disabled:opacity-50">加载演示配置</button>
+      <button onClick={() => setShowLog(true)} className="ml-2 rounded-xl bg-slate-100 px-4 py-2 text-xs text-slate-600">查看调用记录</button>
     </header>
     <main className="min-h-0 flex-1 space-y-4 overflow-auto p-3">
       <NavigationBallSettings characters={os.characters} />
@@ -30,6 +33,7 @@ function Preview() {
       <p data-testid="effective-api" className="break-all text-xs text-slate-500">角色协议：{character?.dialogueApi?.protocol || '跟随全局'}；全局协议：{os.apiConfig.protocol || 'openai'}</p>
     </main>
     <NavigationBall />
+    <ApiCallLogModal isOpen={showLog} onClose={() => setShowLog(false)} />
   </div>;
 }
 createRoot(document.getElementById('root')!).render(<OSProvider><Preview /></OSProvider>);

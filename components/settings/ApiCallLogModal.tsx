@@ -21,6 +21,7 @@ import type {
 } from '../../utils/apiCallLog';
 import { trackEvent } from '../../utils/analytics';
 import { shareOrDownloadFile } from '../../utils/shareExport';
+import { formatAnthropicCacheDiagnostic } from '../../utils/anthropicPromptCache';
 
 interface ApiCallLogModalProps {
     isOpen: boolean;
@@ -313,6 +314,7 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                                     )}
                                     {e.cacheReadTokens != null && <Field label="缓存读取 Token" value={e.cacheReadTokens.toLocaleString('en-US')} />}
                                     {e.cacheCreationTokens != null && <Field label="缓存写入 Token" value={e.cacheCreationTokens.toLocaleString('en-US')} />}
+                                    {e.cacheDiagnostic && <p className="col-span-2 mt-1 break-words text-[10px] leading-relaxed text-slate-400">{formatAnthropicCacheDiagnostic(e.cacheDiagnostic)}</p>}
                                 </div>
                                 {hasBreakdown && (
                                     <div className="mt-1.5 text-[10px] text-slate-300 select-none">
@@ -522,7 +524,7 @@ const OneShotCapturePanel: React.FC<{
                         <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-semibold text-slate-400">一次后自动关闭</span>
                     </div>
                     <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
-                        开启后，完整记录下一次发给 LLM 的内容，用来查是哪段记忆、提示词或历史撑大了上下文。
+                        开启后，完整记录下一次发给 LLM 的内容（支持 OpenAI / Anthropic），用来查是哪段记忆、提示词或历史撑大了上下文。
                     </p>
                 </div>
                 <button
@@ -573,6 +575,8 @@ const OneShotCapturePanel: React.FC<{
                             <div className="mt-2 border-t border-emerald-100/70 pt-2 text-[9px] leading-relaxed text-slate-400">
                                 辅助计数：请求 JSON {fmt(capture.totalChars)} 字符（非 Token） · {capture.messageCount} 条消息 · {capture.sections.length} 个分区
                             </div>
+                             {(capture.cacheReadTokens != null || capture.cacheCreationTokens != null) && <p className="mt-2 text-[10px] text-slate-500">缓存读取 {capture.cacheReadTokens == null ? '未报告' : fmt(capture.cacheReadTokens)} · 缓存写入 {capture.cacheCreationTokens == null ? '未报告' : fmt(capture.cacheCreationTokens)} Token</p>}
+                             {capture.meta.cacheDiagnostic && <p className="mt-2 text-[10px] leading-relaxed text-slate-400">{formatAnthropicCacheDiagnostic(capture.meta.cacheDiagnostic)}</p>}
                         </div>
 
                         {duplicateSummary && (

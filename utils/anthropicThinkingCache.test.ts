@@ -27,13 +27,15 @@ it('does not infer thinking from a suffix and respects the existing character/to
 it.each([undefined, 1000, 4000.5, 8000, 9000])('rejects invalid thinking budget %s before sending', budget_tokens => {
   expect(() => toAnthropicBody({ ...body, thinking: { type: 'enabled', budget_tokens } })).toThrow('思考预算');
 });
-it('marks only the stable leading system block and leaves changing context outside its breakpoint', () => {
+it('marks only the stable leading system prefix and leaves changing context outside its checkpoints', () => {
   const original = structuredClone(body);
   const first = toAnthropicBody(body, api);
   const second = toAnthropicBody({ ...body, messages: [...body.messages.slice(0, 2), { role: 'system', content: '当前时间与召回 B' }] }, api);
-  expect(first.system[0]).toEqual({ type: 'text', text: body.messages[0].content, cache_control: { type: 'ephemeral' } });
-  expect(first.system[0]).toEqual(second.system[0]); expect(first.system[1]).not.toHaveProperty('cache_control');
-  expect(first.system[1].text).not.toBe(second.system[1].text); expect(body).toEqual(original);
+  const stable = first.system.filter((part: any) => part.cache_control);
+  expect(stable.map((part: any) => part.text).join('')).toBe(body.messages[0].content);
+  expect(stable).toEqual(second.system.filter((part: any) => part.cache_control));
+  expect(first.system.at(-1)).not.toHaveProperty('cache_control');
+  expect(first.system.at(-1).text).not.toBe(second.system.at(-1).text); expect(body).toEqual(original);
   expect(JSON.stringify(toAnthropicBody(body, { anthropicPromptCache: false }))).not.toContain('cache_control');
   expect(JSON.stringify(toAnthropicBody({ ...body, messages: body.messages.slice(1) }, api))).not.toContain('cache_control');
 });

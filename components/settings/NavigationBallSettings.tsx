@@ -92,7 +92,7 @@ export default function NavigationBallSettings({ characters = [], loadWorlds, re
     <div className="mt-5 border-t border-slate-100 pt-4 space-y-4">
       <div className="flex items-center gap-4">
         <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl bg-slate-100" aria-label="悬浮球外观预览">
-          <div className="navigation-ball-face-preview" data-custom-image={!!appearance.image}
+          <div className="navigation-ball-face-preview" data-custom-image={!!appearance.image} data-image-border={appearance.imageBorder}
             style={{ borderRadius: navigationBallShapeRadius[appearance.shape], opacity: appearance.opacity, '--navigation-ball-size': `${Math.min(appearance.size, 64)}px` } as React.CSSProperties}>
             <NavigationBallFace appearance={appearance} />
           </div>
@@ -123,6 +123,14 @@ export default function NavigationBallSettings({ characters = [], loadWorlds, re
             onClick={() => updateAppearance({ shape: shape as NavigationBallShape })} className={`rounded-xl border px-3 py-2 text-xs ${appearance.shape === shape ? 'border-primary text-primary bg-primary/5' : 'border-slate-200 text-slate-500'}`}>{label}</button>)}
         </div>
       </fieldset>
+      {appearance.image && <div className="flex items-center justify-between gap-4">
+        <div><span className="text-xs text-slate-500">图片边框</span><p className="mt-1 text-[11px] leading-relaxed text-slate-400">关闭时移除外框、底色和阴影；默认悬浮球仍保留原边框。</p></div>
+        <button type="button" role="switch" aria-label="悬浮球图片边框" aria-checked={appearance.imageBorder}
+          onClick={() => updateAppearance({ imageBorder: !appearance.imageBorder })}
+          className={`h-6 w-11 shrink-0 rounded-full p-1 transition-colors ${appearance.imageBorder ? 'bg-primary' : 'bg-slate-200'}`}>
+          <span className={`block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${appearance.imageBorder ? 'translate-x-5' : ''}`} />
+        </button>
+      </div>}
       <label className="block text-xs text-slate-500">不透明度 · {Math.round(appearance.opacity * 100)}%
         <input aria-label="悬浮球不透明度" type="range" min="10" max="100" step="1" value={Math.round(appearance.opacity * 100)}
           onChange={event => updateAppearance({ opacity: Number(event.target.value) / 100 })} className="mt-3 block w-full accent-slate-500" />

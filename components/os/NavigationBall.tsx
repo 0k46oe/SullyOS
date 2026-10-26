@@ -105,7 +105,7 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
   };
   return <div ref={root} className="navigation-ball" style={{ ...(position ? { left: position.x, top: position.y } : { right: 12, bottom: 96 }), '--navigation-ball-size': `${appearance.size}px` } as React.CSSProperties & { '--navigation-ball-size': string }}>
     <button type="button" className="navigation-ball-toggle" aria-label="快捷导航悬浮球" aria-expanded={open}
-      data-custom-image={!!appearance.image} style={{ borderRadius: navigationBallShapeRadius[appearance.shape], opacity: appearance.opacity }}
+      data-custom-image={!!appearance.image} data-image-border={appearance.imageBorder} style={{ borderRadius: navigationBallShapeRadius[appearance.shape], opacity: appearance.opacity }}
       onPointerDown={event => {
         if (event.button !== 0 || !root.current?.parentElement || !latest.current) return;
         const { bounds } = measure(root.current.parentElement, appearance.size);

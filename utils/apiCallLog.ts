@@ -17,6 +17,8 @@
  * 吞掉，绝不影响主请求链路。
  */
 
+import { formatAnthropicCacheDiagnostic, type AnthropicCacheDiagnostic } from './anthropicPromptCache';
+
 /** 调用方可补充的语义信息（哪个 App / 角色 / 用途）。能填多少填多少。 */
 export interface ApiCallMeta {
     /** AppID 字符串，如 'chat' / 'lifesim'，可空 */
@@ -29,6 +31,8 @@ export interface ApiCallMeta {
     charName?: string;
     /** 具体用途，如 '聊天回复' / '情绪评估' / '记忆提取'，可空 */
     purpose?: string;
+    /** 本地原生缓存前缀对比；不含提示词、Key 或哈希正文。 */
+    cacheDiagnostic?: AnthropicCacheDiagnostic;
 }
 
 /**
@@ -134,13 +138,15 @@ export interface ApiRequestCaptureSection {
     path?: string;
     role?: string;
     messageIndex?: number;
+    /** Anthropic 顶层 system：数组块索引；字符串 system 使用 -1。 */
+    systemBlockIndex?: number;
     /** 字符串消息被按标题拆块时，对应 content 的起止位置。 */
     start?: number;
     end?: number;
 }
 
 /**
- * 用户主动开启后，仅保存下一次 chat/completions 的完整请求体。
+ * 用户主动开启后，仅保存下一次本地对话的完整请求体（OpenAI / Anthropic）。
  * 普通 5 天日志仍然只存统计；这条记录永远覆盖上一条，避免原文长期堆积。
  */
 export interface ApiRequestCapture {
@@ -157,6 +163,8 @@ export interface ApiRequestCapture {
     promptTokens?: number;
     completionTokens?: number;
     totalTokens?: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
     usageStatus?: 'pending' | 'reported' | 'not-reported' | 'failed';
     messageCount: number;
     binaryPlaceholders: number;
@@ -342,8 +350,11 @@ export function scanSseForLog(text: string): { model?: string; usage?: unknown }
         if (!payload || payload === '[DONE]') continue;
         let chunk: any;
         try { chunk = JSON.parse(payload); } catch { continue; }
-        if (!model && typeof chunk?.model === 'string' && chunk.model) model = chunk.model;
-        if (chunk?.usage && typeof chunk.usage === 'object') usage = chunk.usage;
+        const start = chunk?.type === 'message_start' ? chunk.message : undefined;
+        if (!model && typeof (start?.model ?? chunk?.model) === 'string') model = start?.model || chunk.model;
+        if (start?.usage && typeof start.usage === 'object') usage = start.usage;
+        if (chunk?.usage && typeof chunk.usage === 'object') usage = chunk.type === 'message_delta'
+            ? { ...(usage as object || {}), ...chunk.usage } : chunk.usage;
     }
     return { model, usage };
 }
@@ -616,8 +627,16 @@ function sanitizeCapturePayload(value: unknown, stats: { binaryPlaceholders: num
     }
     if (Array.isArray(value)) return value.map(item => sanitizeCapturePayload(item, stats));
     if (value && typeof value === 'object') {
+        const source = value as Record<string, unknown>;
         const out: Record<string, unknown> = {};
-        for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        for (const [key, child] of Object.entries(source)) {
+            // Native Messages embeds bare base64 instead of an OpenAI data URL.
+            if (key === 'data' && source.type === 'base64' && typeof source.media_type === 'string'
+                && typeof child === 'string' && child.length > INLINE_DATA_URL_LIMIT) {
+                stats.binaryPlaceholders++;
+                out[key] = `[${source.media_type} base64 正文未保存；原始 ${child.length.toLocaleString('en-US')} 字符]`;
+                continue;
+            }
             out[key] = sanitizeCapturePayload(child, stats);
         }
         return out;
@@ -712,7 +731,7 @@ export function buildApiRequestCapture(input: {
         : { rawBody: payload };
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const sections: ApiRequestCaptureSection[] = [];
-    const requestOptions = Object.fromEntries(Object.entries(body).filter(([key]) => key !== 'messages' && key !== 'tools'));
+    const requestOptions = Object.fromEntries(Object.entries(body).filter(([key]) => !['messages', 'tools', 'system'].includes(key)));
     if (Object.keys(requestOptions).length > 0) {
         sections.push({
             id: 'request-options',
@@ -720,7 +739,7 @@ export function buildApiRequestCapture(input: {
             kind: 'request',
             chars: jsonLength(requestOptions),
             source: CAPTURE_SOURCE_DESCRIPTIONS.request,
-            path: '请求体顶层（messages / tools 除外）',
+            path: '请求体顶层（messages / tools / system 除外）',
         });
     }
     if (body.tools !== undefined) {
@@ -733,6 +752,26 @@ export function buildApiRequestCapture(input: {
             path: 'tools',
         });
     }
+
+    const systemBlocks = typeof body.system === 'string' ? [body.system] : Array.isArray(body.system) ? body.system : [];
+    systemBlocks.forEach((block, blockIndex) => {
+        const systemBlockIndex = typeof body.system === 'string' ? -1 : blockIndex;
+        const path = systemBlockIndex === -1 ? 'system' : `system[${blockIndex}].text`;
+        const content = typeof block === 'string' ? block : block?.text;
+        if (typeof content === 'string') {
+            splitCaptureTextBlocks(content).forEach((part, partIndex) => {
+                const kind = captureKindForLabel(part.label);
+                sections.push({ id: `system-${blockIndex}-block-${partIndex}`, label: part.label, kind,
+                    chars: part.end - part.start, source: CAPTURE_SOURCE_DESCRIPTIONS[kind],
+                    path: `${path} · 分块 ${partIndex + 1}`, role: 'system', systemBlockIndex,
+                    start: part.start, end: part.end });
+            });
+        } else {
+            sections.push({ id: `system-${blockIndex}`, label: '系统内容块', kind: 'system',
+                chars: jsonLength(block), source: CAPTURE_SOURCE_DESCRIPTIONS.system,
+                path: `system[${blockIndex}]`, role: 'system', systemBlockIndex });
+        }
+    });
 
     messages.forEach((rawMessage, messageIndex) => {
         const message: Record<string, unknown> = rawMessage && typeof rawMessage === 'object' ? rawMessage as Record<string, unknown> : { content: rawMessage };
@@ -805,9 +844,15 @@ export function getApiRequestCaptureSectionContent(
             ? capture.payload as Record<string, unknown>
             : { rawBody: capture.payload };
         if (section.kind === 'request') {
-            return JSON.stringify(Object.fromEntries(Object.entries(body).filter(([key]) => key !== 'messages' && key !== 'tools')), null, 2);
+            return JSON.stringify(Object.fromEntries(Object.entries(body).filter(([key]) => !['messages', 'tools', 'system'].includes(key))), null, 2);
         }
         if (section.kind === 'tools') return JSON.stringify(body.tools, null, 2);
+        if (section.systemBlockIndex != null) {
+            const block = section.systemBlockIndex === -1 ? body.system : (body.system as any[])?.[section.systemBlockIndex];
+            const content = typeof block === 'string' ? block : block?.text;
+            if (typeof content !== 'string') return JSON.stringify(block, null, 2) || '';
+            return section.start != null && section.end != null ? content.slice(section.start, section.end) : content;
+        }
         const messages = Array.isArray(body.messages) ? body.messages : [];
         const message = messages[section.messageIndex ?? -1] as any;
         if (!message) return '';
@@ -912,6 +957,9 @@ export function formatApiRequestCaptureTxt(capture: ApiRequestCapture): string {
         `输入 Token（模型响应自报）：${capture.promptTokens != null ? fmt(capture.promptTokens) : capture.usageStatus === 'pending' ? '等待响应' : capture.usageStatus === 'failed' ? '请求失败，无法取得' : '接口未返回 usage'}`,
         `输出 Token：${capture.completionTokens != null ? fmt(capture.completionTokens) : '—'}`,
         `总 Token：${capture.totalTokens != null ? fmt(capture.totalTokens) : '—'}`,
+        `缓存读取 Token：${capture.cacheReadTokens != null ? fmt(capture.cacheReadTokens) : '—'}`,
+        `缓存写入 Token：${capture.cacheCreationTokens != null ? fmt(capture.cacheCreationTokens) : '—'}`,
+        ...(capture.meta.cacheDiagnostic ? [`缓存前缀对比：${formatAnthropicCacheDiagnostic(capture.meta.cacheDiagnostic)}`] : []),
         `请求体总字符（不是 Token）：${fmt(capture.totalChars)}`,
         `消息数：${capture.messageCount}`,
         `分区数：${capture.sections.length}`,
@@ -976,6 +1024,8 @@ export function updateApiRequestCaptureUsage(input: {
             promptTokens: usage.prompt,
             completionTokens: usage.completion,
             totalTokens: usage.total,
+            cacheReadTokens: usage.cacheRead,
+            cacheCreationTokens: usage.cacheCreation,
             usageStatus: !input.ok ? 'failed' : usage.prompt != null ? 'reported' : 'not-reported',
         };
         const pending = captureSaveInFlight?.id === input.captureId
@@ -1014,7 +1064,7 @@ export function recordApiCall(input: {
         let backendModel: string | undefined =
             typeof (input.response as any)?.model === 'string' && (input.response as any).model
                 ? (input.response as any).model : undefined;
-        if (input.response === undefined && typeof input.responseText === 'string' && input.responseText.trimStart().startsWith('data:')) {
+        if (input.response === undefined && typeof input.responseText === 'string' && /(?:^|\n)data:/.test(input.responseText.trimStart())) {
             const scanned = scanSseForLog(input.responseText);
             backendModel = scanned.model;
             if (scanned.usage) responseForExtract = { usage: scanned.usage };
@@ -1041,6 +1091,7 @@ export function recordApiCall(input: {
             charId: meta.charId,
             charName: meta.charName,
             purpose: meta.purpose,
+            cacheDiagnostic: meta.cacheDiagnostic,
         };
         // 动态 import 避开 safeApi ↔ db 的潜在加载顺序问题；写库失败静默吞掉。
         import('./db')
