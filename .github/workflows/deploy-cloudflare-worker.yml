@@ -1,8 +1,8 @@
 name: Deploy static site to Cloudflare
 
 on:
-  push:
-    branches: [master]
+  # GitHub Pages is the automatically deployed site. Keep Cloudflare available
+  # only for an explicit manual dispatch; unrelated pushes do not deploy here.
   workflow_dispatch:
 
 permissions:
