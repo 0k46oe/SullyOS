@@ -24,15 +24,17 @@ export interface BubbleBoundsInput {
   insetBottom: number;
   bubble?: number;
   pad?: number;
+  padRight?: number;
 }
 
 /** 折叠小球（left/top 定位）：横向只留 EDGE_PAD，纵向额外让出 safe area。 */
 export const clampBubblePos = (
   x: number,
   y: number,
-  { parentW, parentH, insetTop, insetBottom, bubble = DEFAULT_BUBBLE_SIZE, pad = DEFAULT_EDGE_PAD }: BubbleBoundsInput,
+  { parentW, parentH, insetTop, insetBottom, bubble = DEFAULT_BUBBLE_SIZE, pad = DEFAULT_EDGE_PAD,
+    padRight = pad }: BubbleBoundsInput,
 ): { x: number; y: number } => ({
-  x: clampRange(x, pad, parentW - bubble - pad),
+  x: clampRange(x, pad, parentW - bubble - padRight),
   y: clampRange(y, pad + insetTop, parentH - bubble - pad - insetBottom),
 });
 

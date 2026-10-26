@@ -11,7 +11,7 @@ import { clampBubblePos, resolveSafeTopInset } from '../../utils/floatingBallBou
 import { isIOSStandaloneWebApp, readSafeAreaInsets } from '../../utils/iosStandalone';
 import { navigationBallShapeRadius, useNavigationBallAppearance } from '../../utils/navigationBallAppearance';
 import NavigationBallFace from './NavigationBallFace';
-import { useNavigationPetPreferences } from '../../utils/navigationBallPet';
+import { CLAWD_STANDARD_FORM_SCALE, useNavigationPetForm, useNavigationPetPreferences } from '../../utils/navigationBallPet';
 import NavigationPetControls from './NavigationPetControls';
 import './NavigationBall.css';
 const NavigationApiSwitcher = React.lazy(() => import('./NavigationApiSwitcher'));
@@ -25,15 +25,19 @@ function readPosition(): Position | null {
   } catch { /* Use the default position. */ }
   return null;
 }
-function measure(parent: HTMLElement, size: number) {
+function measure(parent: HTMLElement, size: number, alignRight: boolean) {
   const rect = parent.getBoundingClientRect(), style = getComputedStyle(parent), safe = readSafeAreaInsets();
   const top = resolveSafeTopInset({
     standaloneSafeTop: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--standalone-safe-area-top')) || 0,
     probedSafeTop: safe.top, isIOSStandalone: isIOSStandaloneWebApp(),
   });
-  return { rect, bounds: { parentW: rect.width, parentH: rect.height, bubble: size,
+  return { rect, bounds: { parentW: rect.width, parentH: rect.height, bubble: size, ...(alignRight ? { padRight: 0 } : {}),
     insetTop: Math.max(parseFloat(style.paddingTop) || 0, top),
     insetBottom: Math.max(parseFloat(style.paddingBottom) || 0, safe.bottom) } };
+}
+function clampRenderedBallPosition(x: number, y: number, bounds: ReturnType<typeof measure>['bounds'], overflow: number) {
+  const visible = clampBubblePos(x - overflow, y - overflow, bounds);
+  return { x: visible.x + overflow, y: visible.y + overflow };
 }
 type NavigationActions = {
   onBack: () => void; onHome: () => void; onApi: () => void;
@@ -45,33 +49,42 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
   const slots = useNavigationBallSlots();
   const appearance = useNavigationBallAppearance();
   const pet = useNavigationPetPreferences();
+  const automaticPetForm = useNavigationPetForm();
+  const petForm = pet.selection === 'auto' ? automaticPetForm : pet.selection;
+  const enlargedPet = pet.enabled && !petForm.startsWith('mini-');
+  const visualSize = appearance.size * (enlargedPet ? CLAWD_STANDARD_FORM_SCALE : 1);
+  const visualOverflow = visualSize - appearance.size;
   const root = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<Position | null>(readPosition);
+  const hasManualPosition = useRef(position !== null);
   const [open, setOpen] = useState(false);
   const [parentSize, setParentSize] = useState({ width: 0, height: 0, top: 0, bottom: 0 });
   const latest = useRef(position); latest.current = position;
   const suppressClick = useRef(false);
   const drag = useRef<{ pointerId: number; startX: number; startY: number; origin: Position;
-    bounds: ReturnType<typeof measure>['bounds']; moved: boolean } | null>(null);
+    bounds: ReturnType<typeof measure>['bounds']; overflow: number; moved: boolean } | null>(null);
   useLayoutEffect(() => {
     const parent = root.current?.parentElement;
     if (!parent) return;
     const constrain = () => {
-      const { bounds } = measure(parent, appearance.size);
+      const { bounds } = measure(parent, visualSize, enlargedPet);
       setParentSize({ width: bounds.parentW, height: bounds.parentH, top: bounds.insetTop, bottom: bounds.insetBottom });
-      const value = latest.current || { x: bounds.parentW - appearance.size - 12, y: bounds.parentH - appearance.size - 96 };
-      const next = clampBubblePos(value.x, value.y, bounds);
+      const value = hasManualPosition.current && latest.current
+        ? latest.current
+        : { x: bounds.parentW - appearance.size - (enlargedPet ? 0 : 12), y: bounds.parentH - appearance.size - 96 };
+      const next = clampRenderedBallPosition(value.x, value.y, bounds, visualOverflow);
       latest.current = next; setPosition(next);
     };
     drag.current = null;
     constrain();
     const unsubscribeReset = subscribeNavigationBallPositionReset(() => {
       drag.current = null; suppressClick.current = false; setOpen(false);
+      hasManualPosition.current = false;
       latest.current = null; constrain();
     });
     const observer = new ResizeObserver(constrain); observer.observe(parent);
     return () => { observer.disconnect(); unsubscribeReset(); };
-  }, [appearance.size]);
+  }, [appearance.size, enlargedPet, visualOverflow, visualSize]);
   useEffect(() => {
     if (!open) return;
     const dismiss = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
@@ -79,10 +92,11 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
     document.addEventListener('pointerdown', dismiss); document.addEventListener('keydown', escape);
     return () => { document.removeEventListener('pointerdown', dismiss); document.removeEventListener('keydown', escape); };
   }, [open]);
-  const finish = (event: React.PointerEvent<HTMLButtonElement>, cancelled = false) => {
+  const finish = (event: React.PointerEvent<HTMLDivElement>, cancelled = false) => {
     if (!drag.current || drag.current.pointerId !== event.pointerId) return;
     suppressClick.current = cancelled || drag.current.moved;
     if (drag.current.moved && latest.current) {
+      hasManualPosition.current = true;
       try { localStorage.setItem(POSITION_KEY, JSON.stringify(latest.current)); } catch { /* Keep the current position. */ }
     }
     drag.current = null;
@@ -92,8 +106,10 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
   const panelWidth = Math.min(288, Math.max(144, parentSize.width - 24));
   const panelHeight = pet.enabled ? 374 : 288;
   const availableHeight = Math.max(44, parentSize.height - parentSize.top - parentSize.bottom - 24);
-  const panelLeft = (parentSize.width - panelWidth) / 2 - (position?.x || 0);
-  const panelTop = parentSize.top + 12 + Math.max(0, (availableHeight - panelHeight) / 2) - (position?.y || 0);
+  const renderedLeft = (position?.x || 0) - visualOverflow;
+  const renderedTop = (position?.y || 0) - visualOverflow;
+  const panelLeft = (parentSize.width - panelWidth) / 2 - renderedLeft;
+  const panelTop = parentSize.top + 12 + Math.max(0, (availableHeight - panelHeight) / 2) - renderedTop;
   const slotButton = (index: number) => {
     const shortcut = slots[index];
     const app = NAVIGATION_SLOT_APPS.find(item => item.id === shortcut?.appId);
@@ -106,26 +122,40 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
       </span>
     </button>;
   };
-  return <div ref={root} className="navigation-ball" style={{ ...(position ? { left: position.x, top: position.y } : { right: 12, bottom: 96 }), '--navigation-ball-size': `${appearance.size}px` } as React.CSSProperties & { '--navigation-ball-size': string }}>
+  return <div ref={root} className="navigation-ball" style={{ ...(position ? { left: renderedLeft, top: renderedTop } : { right: enlargedPet ? 0 : 12, bottom: 96 }), '--navigation-ball-size': `${appearance.size}px`, '--navigation-ball-rendered-size': `${visualSize}px` } as React.CSSProperties & { '--navigation-ball-size': string; '--navigation-ball-rendered-size': string }}
+    onPointerDown={event => {
+      const button = root.current?.querySelector<HTMLButtonElement>('.navigation-ball-toggle');
+      const panel = root.current?.querySelector<HTMLElement>('.navigation-ball-panel');
+      if (event.button !== 0 || !root.current?.parentElement || !latest.current || panel?.contains(event.target as Node)) return;
+      const rect = button?.getBoundingClientRect();
+      if (!rect || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return;
+      const { bounds } = measure(root.current.parentElement, visualSize, enlargedPet);
+      suppressClick.current = false;
+      drag.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, origin: latest.current, bounds, overflow: visualOverflow, moved: false };
+      try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* Pointer events remain usable. */ }
+    }}
+    onPointerMove={event => {
+      const state = drag.current;
+      if (!state || state.pointerId !== event.pointerId) return;
+      const dx = event.clientX - state.startX, dy = event.clientY - state.startY;
+      if (!state.moved && Math.hypot(dx, dy) <= 4) return;
+      state.moved = true; setOpen(false);
+      const next = clampRenderedBallPosition(state.origin.x + dx, state.origin.y + dy, state.bounds, state.overflow);
+      latest.current = next; setPosition(next);
+    }} onPointerUp={event => finish(event)} onPointerCancel={event => finish(event, true)}
+    onClick={event => {
+      const button = root.current?.querySelector<HTMLButtonElement>('.navigation-ball-toggle');
+      const panel = root.current?.querySelector<HTMLElement>('.navigation-ball-panel');
+      if (!button || panel?.contains(event.target as Node)) return;
+      const fromButton = button.contains(event.target as Node);
+      const rect = button.getBoundingClientRect();
+      const insideButton = event.detail !== 0 && event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
+      if (!fromButton && !insideButton) return;
+      if (event.detail !== 0 && suppressClick.current) { suppressClick.current = false; return; }
+      setOpen(value => !value);
+    }}>
     <button type="button" className="navigation-ball-toggle" aria-label="快捷导航悬浮球" aria-expanded={open}
-      data-custom-image={pet.enabled || !!appearance.image} data-pet={pet.enabled} data-image-border={appearance.imageBorder} style={{ borderRadius: navigationBallShapeRadius[appearance.shape], opacity: appearance.opacity }}
-      onPointerDown={event => {
-        if (event.button !== 0 || !root.current?.parentElement || !latest.current) return;
-        const { bounds } = measure(root.current.parentElement, appearance.size);
-        suppressClick.current = false;
-        drag.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, origin: latest.current, bounds, moved: false };
-        try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* Pointer events remain usable. */ }
-      }}
-      onPointerMove={event => {
-        const state = drag.current;
-        if (!state || state.pointerId !== event.pointerId) return;
-        const dx = event.clientX - state.startX, dy = event.clientY - state.startY;
-        if (!state.moved && Math.hypot(dx, dy) <= 4) return;
-        state.moved = true; setOpen(false);
-        const next = clampBubblePos(state.origin.x + dx, state.origin.y + dy, state.bounds);
-        latest.current = next; setPosition(next);
-      }} onPointerUp={event => finish(event)} onPointerCancel={event => finish(event, true)}
-      onClick={event => { if (event.detail !== 0 && suppressClick.current) { suppressClick.current = false; return; } setOpen(value => !value); }}>
+      data-custom-image={pet.enabled || !!appearance.image} data-pet={pet.enabled} data-pet-large={enlargedPet} data-pet-form={pet.enabled ? petForm : undefined} data-image-border={appearance.imageBorder} style={{ borderRadius: navigationBallShapeRadius[appearance.shape], opacity: appearance.opacity }}>
       <NavigationBallFace appearance={appearance} />
     </button>
     {open && <div className="navigation-ball-panel" role="group" aria-label="快捷导航"

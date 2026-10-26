@@ -26,6 +26,12 @@ describe('clampBubblePos（折叠小球）', () => {
     expect(clampBubblePos(9999, 100, { parentW, parentH, insetTop, insetBottom }).x).toBe(parentW - bubble - pad);
   });
 
+  it('可单独贴齐右侧，同时保留左侧间距和上下安全区', () => {
+    const bounds = { parentW, parentH, insetTop, insetBottom, bubble: 200, padRight: 0 };
+    expect(clampBubblePos(9999, 9999, bounds)).toEqual({ x: parentW - 200, y: parentH - 200 - pad - insetBottom });
+    expect(clampBubblePos(-9999, -9999, bounds)).toEqual({ x: pad, y: pad + insetTop });
+  });
+
   it('无安全区设备退化为纯物理边界', () => {
     const { x, y } = clampBubblePos(9999, 9999, { parentW, parentH, insetTop: 0, insetBottom: 0 });
     expect(x).toBe(parentW - bubble - pad);

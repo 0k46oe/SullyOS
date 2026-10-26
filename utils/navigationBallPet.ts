@@ -3,6 +3,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 // Only this pinned public asset directory is used; never send credentials or chat data.
 export const CLAWD_ASSET_BASE = 'https://raw.githubusercontent.com/0k46oe/clawd-on-desk/ea846be1182ed387cde628b28f53244edc840ce5/assets/gif/';
 const CLAWD_CDN_BASE = 'https://cdn.jsdelivr.net/gh/0k46oe/clawd-on-desk@ea846be1182ed387cde628b28f53244edc840ce5/assets/gif/';
+export const CLAWD_STANDARD_FORM_SCALE = 1.25;
 export const CLAWD_FORMS = [
   ['idle', '待机'], ['thinking', '思考'], ['typing', '打字'], ['happy', '开心'],
   ['error', '出错'], ['sleeping', '睡觉'], ['notification', '提醒'], ['building', '搭建'],
@@ -13,6 +14,36 @@ export const CLAWD_FORMS = [
   ['mini-alert', '迷你提醒'], ['mini-crabwalk', '迷你横走'], ['mini-peek', '迷你探头'], ['mini-enter', '迷你登场'],
 ] as const;
 export type ClawdForm = typeof CLAWD_FORMS[number][0];
+// Union of every composited frame's alpha bounds in the pinned GIFs above.
+// Keep whole animations (including props) while removing only empty outer canvas.
+export const CLAWD_FRAME_BOUNDS: Partial<Record<ClawdForm, readonly [number, number, number, number, number, number]>> = {
+  idle: [302, 300, 99, 207, 201, 273],
+  thinking: [302, 300, 80, 134, 199, 268],
+  typing: [302, 300, 96, 126, 203, 275],
+  happy: [302, 300, 50, 103, 243, 273],
+  error: [302, 300, 90, 136, 217, 275],
+  sleeping: [302, 300, 91, 139, 209, 273],
+  notification: [302, 300, 61, 124, 200, 273],
+  building: [303, 300, 94, 157, 247, 277],
+  sweeping: [302, 300, 77, 184, 199, 283],
+  carrying: [302, 300, 91, 177, 215, 274],
+  conducting: [302, 300, 90, 133, 220, 270],
+  'headphones-groove': [302, 300, 61, 180, 225, 273],
+  'idle-reading': [302, 300, 92, 169, 201, 273],
+  juggling: [302, 300, 95, 152, 205, 273],
+  debugger: [302, 300, 93, 191, 222, 274],
+  bubble: [302, 300, 100, 137, 258, 273],
+  'react-annoyed': [302, 300, 100, 127, 236, 273],
+  'react-double-jump': [302, 300, 89, 112, 213, 273],
+};
+export function clawdFrameStyle(form: ClawdForm) {
+  const bounds = CLAWD_FRAME_BOUNDS[form];
+  if (!bounds) return undefined;
+  const [width, height, left, top, right, bottom] = bounds;
+  const span = Math.max(right - left, bottom - top);
+  return { width: `${width / span * 100}%`, height: `${height / span * 100}%`,
+    left: `${(span - right) / span * 100}%`, top: `${(span - bottom) / span * 100}%` };
+}
 export type NavigationPetSelection = 'auto' | ClawdForm;
 export type NavigationPetPreferences = { enabled: boolean; selection: NavigationPetSelection };
 export const NAVIGATION_PET_KEY = 'sully_navigation_ball_pet_v1';
