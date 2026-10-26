@@ -35,15 +35,15 @@
     {
       "path": "components/os/NavigationBall.css",
       "action": "replace",
-      "bytes": 8900,
-      "sha256": "d438d56954cb34bba4b76048b0a50ed5dd93ff36e2a228e9130bce660d4e3a03",
+      "bytes": 9142,
+      "sha256": "388c5806e1190fa92581f5ea459d9e393c5ce852804699a8f49645b5efdbd242",
       "beforeSha256": "9f81ad04bf4961a5b468a0ff51d8e7d3ade5f87e9ec3f61ffa39945e14640474"
     },
     {
       "path": "components/os/NavigationBall.tsx",
       "action": "replace",
-      "bytes": 11136,
-      "sha256": "66ed7a7157a89199f3b780a1b5bb056d6e969ee8e9c76ef58d96287bfd2f2b5a",
+      "bytes": 11179,
+      "sha256": "fb294c907ea9fc816c8deff38471a061c32f711ae84b848115ab6bacb84d5a4e",
       "beforeSha256": "48f353ea47958fa27c97db9780df87617710925d6d476e08318c6047182f3eb1"
     },
     {
@@ -56,8 +56,8 @@
     {
       "path": "components/settings/ApiCallLogModal.tsx",
       "action": "replace",
-      "bytes": 48191,
-      "sha256": "14ce69e0328804584b8f05d40a27b700b5ec37fb253b610759b2b2cddbb088f8",
+      "bytes": 49062,
+      "sha256": "af6de5d2081e28984c40e14de1ddf7d2e30db80cff478dbcd133e0764feb088a",
       "beforeSha256": "612cce7e0095f7b5dcd1dc1b8991fbba1cb97609b8de48bfdd5c39fcdd28b8b9"
     },
     {
@@ -70,22 +70,22 @@
     {
       "path": "components/settings/NavigationBallSettings.tsx",
       "action": "replace",
-      "bytes": 13197,
-      "sha256": "3187dd21ffeb363e40d005bd1288b9089366bd90d47ca672d5952bf23661ecb7",
+      "bytes": 14077,
+      "sha256": "32fa709a66778dda2df5dcf90cd6625221bffd986799a7eba09a9cefe376de27",
       "beforeSha256": "e513ef44a74a5639738230bfc0ad4ba9e060732c028fc7b032751bdb444590be"
     },
     {
       "path": "docs/character-api.md",
       "action": "replace",
-      "bytes": 11230,
-      "sha256": "abdd591136c531c448fb1b2cb68fcc9de437b6ae1265425ece48b95911dbd258",
+      "bytes": 14037,
+      "sha256": "fc7954019b413351da690525142231e8c4a6c4ba15a8cb7f66755a3546cac5e8",
       "beforeSha256": "dcefef0a3355ae6fba2232cb81f2e2348530336e9ba736601399f18b7a7e58b3"
     },
     {
       "path": "docs/navigation.md",
       "action": "replace",
-      "bytes": 8650,
-      "sha256": "78def216be287c5d54896be8744169e51ee3dc06d40122d20a5866fb85a727df",
+      "bytes": 9071,
+      "sha256": "893a20b6c5065ecad5703ecf0b83c1b2b562eecfb7235286f32e3eab34f8f0c1",
       "beforeSha256": "64264755edfd36744ac731b0871874e6d6f6d7b129297b54744775fd7bdcb891"
     },
     {
@@ -105,8 +105,8 @@
     {
       "path": "test/fixtures/custom-chat-api.tsx",
       "action": "add",
-      "bytes": 2586,
-      "sha256": "72f7f66191e6a89221a66231c13aa78693e5381022200b8f93f259e4f44e8366",
+      "bytes": 2938,
+      "sha256": "a2367cbdc3b82c5276f11170ca1a746e5ba85c5f9b5ae183f5378a60e587c850",
       "beforeSha256": null
     },
     {
@@ -138,6 +138,27 @@
       "beforeSha256": null
     },
     {
+      "path": "utils/anthropicPromptCache.test.ts",
+      "action": "add",
+      "bytes": 5903,
+      "sha256": "79e7abe4467dc7e36e73c2bc0e1286580972f729b536b73efe5bf7d350cbe6fc",
+      "beforeSha256": null
+    },
+    {
+      "path": "utils/anthropicPromptCache.ts",
+      "action": "add",
+      "bytes": 4057,
+      "sha256": "0ff1179ee7c97e2843dea0023e633031ede9761d23e07fec7a193e57505b094e",
+      "beforeSha256": null
+    },
+    {
+      "path": "utils/anthropicRequestCapture.test.ts",
+      "action": "add",
+      "bytes": 7476,
+      "sha256": "fcf80552394f1b77a8a3d0216585a6ac27cc91440277177f39eda2dbcab7ae84",
+      "beforeSha256": null
+    },
+    {
       "path": "utils/anthropicStream.test.ts",
       "action": "add",
       "bytes": 10691,
@@ -154,8 +175,8 @@
     {
       "path": "utils/anthropicThinkingCache.test.ts",
       "action": "add",
-      "bytes": 8939,
-      "sha256": "9594302e5f40d2c375527f29f54307a1c7bad3eff961ae7b86e2b6f215c41dd0",
+      "bytes": 9023,
+      "sha256": "8ae0d5fcd7ff2380f66969c0828eab84d233010c0253c595c98ac963069cca66",
       "beforeSha256": null
     },
     {
@@ -168,8 +189,8 @@
     {
       "path": "utils/apiCallLog.ts",
       "action": "replace",
-      "bytes": 53394,
-      "sha256": "bffd28ce611a22f3450fff28e47149e4bf2abdf428327c7017f5d06aeb83d3cd",
+      "bytes": 56953,
+      "sha256": "f96b15130caf398cb95a83e5004593688036bd393a791528c8586cb06e54573a",
       "beforeSha256": "81779829a232600074dfe0027b800d25e4dab7d20d1cd7ebb84b94e7a738c8b1"
     },
     {
@@ -252,8 +273,8 @@
     {
       "path": "utils/dialogueTransport.ts",
       "action": "add",
-      "bytes": 11577,
-      "sha256": "6da2e2701283f39a13291563447538bbccd590ed8b509550c9a75ea9f6ebe122",
+      "bytes": 13077,
+      "sha256": "5a5cc270c0165af6db484eca3ef666e21cefbecedc3fd7ea791ebcae60cc3f6a",
       "beforeSha256": null
     },
     {
@@ -266,15 +287,15 @@
     {
       "path": "utils/navigationBallAppearance.test.ts",
       "action": "add",
-      "bytes": 8769,
-      "sha256": "e2313d8e8be14c3d313ba53ca87838a1309a32482ceda99c48e2fede5be05be5",
+      "bytes": 10120,
+      "sha256": "98b701ff74a09f99c8a30c4735edf7b724e78f87d06042de34cbdb97faff3142",
       "beforeSha256": null
     },
     {
       "path": "utils/navigationBallAppearance.ts",
       "action": "add",
-      "bytes": 3518,
-      "sha256": "ec243ae953e7bb85c7560ca0675c5f28dfefafa1bfd9f92c329969d68947cf68",
+      "bytes": 3606,
+      "sha256": "140479af7b3cd7b6e0a9a5692b620d276d6b62e39881a0ef3ab026b888e37eb6",
       "beforeSha256": null
     },
     {
