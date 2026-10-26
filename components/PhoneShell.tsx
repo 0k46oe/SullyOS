@@ -1075,7 +1075,6 @@ const PhoneShell: React.FC = () => {
 
           {/* Overlays: Global Mini Player (when music is playing in background) */}
           <GlobalMiniPlayer />
-          <NavigationBall />
           {!isLocked && <SARModuleMonitor />}
 
           {/* Overlays: 人格模拟生成全局指示条 */}
@@ -1096,6 +1095,9 @@ const PhoneShell: React.FC = () => {
               ))}
            </div>
        </div>
+
+       {/* Anchor the draggable ball to the full device shell, outside the safe-area content layer. */}
+       <NavigationBall />
 
        {/* Global error dialog (长报错走它, 替代单行 toast) */}
        <ErrorDialog

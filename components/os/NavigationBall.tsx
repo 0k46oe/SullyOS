@@ -17,7 +17,81 @@ import './NavigationBall.css';
 const NavigationApiSwitcher = React.lazy(() => import('./NavigationApiSwitcher'));
 
 const POSITION_KEY = NAVIGATION_BALL_POSITION_KEY;
+const POSITION_MIGRATION_KEY = `${POSITION_KEY}_clawd_edge_v1`;
 type Position = { x: number; y: number };
+const alphaCanvases = new WeakMap<HTMLImageElement, HTMLCanvasElement>();
+
+function isInsideBallShape(button: HTMLButtonElement, x: number, y: number) {
+  const rect = button.getBoundingClientRect();
+  if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return false;
+  const radiusValue = getComputedStyle(button).borderTopLeftRadius;
+  if (radiusValue.endsWith('%')) {
+    const rx = rect.width / 2, ry = rect.height / 2;
+    if (!rx || !ry) return false;
+    return ((x - (rect.left + rx)) / rx) ** 2 + ((y - (rect.top + ry)) / ry) ** 2 <= 1;
+  }
+  const radius = Math.min(parseFloat(radiusValue) || 0, rect.width / 2, rect.height / 2);
+  if (!radius) return true;
+  const dx = Math.min(x - rect.left, rect.right - x);
+  const dy = Math.min(y - rect.top, rect.bottom - y);
+  return dx >= radius || dy >= radius || (dx - radius) ** 2 + (dy - radius) ** 2 <= radius ** 2;
+}
+
+/** Reads the currently displayed image/GIF frame to ignore transparent canvas pixels. */
+function isOpaqueImagePoint(image: HTMLImageElement, x: number, y: number): boolean | null {
+  if (!image.complete || !image.naturalWidth || !image.naturalHeight) return null;
+  const rect = image.getBoundingClientRect();
+  if (!rect.width || !rect.height || x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return false;
+
+  const style = getComputedStyle(image);
+  const fit = style.objectFit;
+  let contentLeft = rect.left, contentTop = rect.top, contentWidth = rect.width, contentHeight = rect.height;
+  if (fit === 'contain' || fit === 'cover') {
+    const scale = fit === 'contain'
+      ? Math.min(rect.width / image.naturalWidth, rect.height / image.naturalHeight)
+      : Math.max(rect.width / image.naturalWidth, rect.height / image.naturalHeight);
+    contentWidth = image.naturalWidth * scale;
+    contentHeight = image.naturalHeight * scale;
+    const position = style.objectPosition.split(/\s+/);
+    const fraction = (value: string | undefined, farEdge: 'right' | 'bottom') => {
+      if (value === farEdge) return 1;
+      if (value === 'left' || value === 'top') return 0;
+      const percent = value?.match(/(-?\d+(?:\.\d+)?)%/);
+      return percent ? Number(percent[1]) / 100 : 0.5;
+    };
+    contentLeft += (rect.width - contentWidth) * fraction(position[0], 'right');
+    contentTop += (rect.height - contentHeight) * fraction(position[1], 'bottom');
+  }
+  const sourceX = Math.floor((x - contentLeft) / contentWidth * image.naturalWidth);
+  const sourceY = Math.floor((y - contentTop) / contentHeight * image.naturalHeight);
+  if (sourceX < 0 || sourceX >= image.naturalWidth || sourceY < 0 || sourceY >= image.naturalHeight) return false;
+
+  let canvas = alphaCanvases.get(image);
+  if (!canvas) {
+    canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+    alphaCanvases.set(image, canvas);
+  }
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) return false;
+  try {
+    context.clearRect(0, 0, 1, 1);
+    context.drawImage(image, sourceX, sourceY, 1, 1, 0, 0, 1, 1);
+    return context.getImageData(0, 0, 1, 1).data[3] > 16;
+  } catch {
+    return false;
+  }
+}
+
+function isNavigationBallHit(button: HTMLButtonElement, x: number, y: number, petEnabled: boolean) {
+  const rect = button.getBoundingClientRect();
+  if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return false;
+  if (!petEnabled && !isInsideBallShape(button, x, y)) return false;
+  const image = button.querySelector('img');
+  if (!image) return petEnabled ? false : isInsideBallShape(button, x, y);
+  // Unknown or cross-origin pixels should not turn the full transparent image box into a hit target.
+  return isOpaqueImagePoint(image, x, y) ?? false;
+}
+
 function readPosition(): Position | null {
   try {
     const value = JSON.parse(localStorage.getItem(POSITION_KEY) || 'null');
@@ -57,6 +131,7 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
   const root = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<Position | null>(readPosition);
   const hasManualPosition = useRef(position !== null);
+  const clawdPositionMigrated = useRef(false);
   const [open, setOpen] = useState(false);
   const [parentSize, setParentSize] = useState({ width: 0, height: 0, top: 0, bottom: 0 });
   const latest = useRef(position); latest.current = position;
@@ -67,11 +142,23 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
     const parent = root.current?.parentElement;
     if (!parent) return;
     const constrain = () => {
-      const { bounds } = measure(parent, visualSize, enlargedPet);
+      const { bounds } = measure(parent, visualSize, pet.enabled);
       setParentSize({ width: bounds.parentW, height: bounds.parentH, top: bounds.insetTop, bottom: bounds.insetBottom });
-      const value = hasManualPosition.current && latest.current
+      let value = hasManualPosition.current && latest.current
         ? latest.current
-        : { x: bounds.parentW - appearance.size - (enlargedPet ? 0 : 12), y: bounds.parentH - appearance.size - 96 };
+        : { x: bounds.parentW - appearance.size - (pet.enabled ? 0 : 12), y: bounds.parentH - appearance.size - (pet.enabled ? 8 : 96) };
+      if (pet.enabled && !clawdPositionMigrated.current) {
+        clawdPositionMigrated.current = true;
+        try {
+          if (localStorage.getItem(POSITION_MIGRATION_KEY) !== '1') {
+            if (hasManualPosition.current && latest.current) {
+              value = { x: bounds.parentW - appearance.size, y: bounds.parentH - appearance.size - 8 };
+              localStorage.setItem(POSITION_KEY, JSON.stringify(value));
+            }
+            localStorage.setItem(POSITION_MIGRATION_KEY, '1');
+          }
+        } catch { /* Keep the live position if storage is unavailable. */ }
+      }
       const next = clampRenderedBallPosition(value.x, value.y, bounds, visualOverflow);
       latest.current = next; setPosition(next);
     };
@@ -84,7 +171,7 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
     });
     const observer = new ResizeObserver(constrain); observer.observe(parent);
     return () => { observer.disconnect(); unsubscribeReset(); };
-  }, [appearance.size, enlargedPet, visualOverflow, visualSize]);
+  }, [appearance.size, enlargedPet, pet.enabled, visualOverflow, visualSize]);
   useEffect(() => {
     if (!open) return;
     const dismiss = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
@@ -122,15 +209,14 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
       </span>
     </button>;
   };
-  return <div ref={root} className="navigation-ball" style={{ ...(position ? { left: renderedLeft, top: renderedTop } : { right: enlargedPet ? 0 : 12, bottom: 96 }), '--navigation-ball-size': `${appearance.size}px`, '--navigation-ball-rendered-size': `${visualSize}px` } as React.CSSProperties & { '--navigation-ball-size': string; '--navigation-ball-rendered-size': string }}
+  return <div ref={root} className="navigation-ball" style={{ ...(position ? { left: renderedLeft, top: renderedTop } : { right: pet.enabled ? 0 : 12, bottom: pet.enabled ? 8 : 96 }), '--navigation-ball-size': `${appearance.size}px`, '--navigation-ball-rendered-size': `${visualSize}px` } as React.CSSProperties & { '--navigation-ball-size': string; '--navigation-ball-rendered-size': string }}
     onPointerDown={event => {
+      suppressClick.current = false;
       const button = root.current?.querySelector<HTMLButtonElement>('.navigation-ball-toggle');
       const panel = root.current?.querySelector<HTMLElement>('.navigation-ball-panel');
-      if (event.button !== 0 || !root.current?.parentElement || !latest.current || panel?.contains(event.target as Node)) return;
-      const rect = button?.getBoundingClientRect();
-      if (!rect || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return;
-      const { bounds } = measure(root.current.parentElement, visualSize, enlargedPet);
-      suppressClick.current = false;
+      if (event.button !== 0 || !root.current?.parentElement || !latest.current || panel?.contains(event.target as Node) || !button
+        || !isNavigationBallHit(button, event.clientX, event.clientY, pet.enabled)) return;
+      const { bounds } = measure(root.current.parentElement, visualSize, pet.enabled);
       drag.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, origin: latest.current, bounds, overflow: visualOverflow, moved: false };
       try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* Pointer events remain usable. */ }
     }}
@@ -147,11 +233,8 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
       const button = root.current?.querySelector<HTMLButtonElement>('.navigation-ball-toggle');
       const panel = root.current?.querySelector<HTMLElement>('.navigation-ball-panel');
       if (!button || panel?.contains(event.target as Node)) return;
-      const fromButton = button.contains(event.target as Node);
-      const rect = button.getBoundingClientRect();
-      const insideButton = event.detail !== 0 && event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
-      if (!fromButton && !insideButton) return;
       if (event.detail !== 0 && suppressClick.current) { suppressClick.current = false; return; }
+      if (event.detail !== 0 && !isNavigationBallHit(button, event.clientX, event.clientY, pet.enabled)) return;
       setOpen(value => !value);
     }}>
     <button type="button" className="navigation-ball-toggle" aria-label="快捷导航悬浮球" aria-expanded={open}
