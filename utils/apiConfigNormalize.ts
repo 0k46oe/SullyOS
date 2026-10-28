@@ -28,6 +28,7 @@ export function normalizeApiConfig(config: APIConfig): APIConfig {
     model: normalizeApiModel(config.model),
     ...(config.protocol !== undefined ? { protocol: normalizeApiProtocol(config.protocol) } : {}),
     ...(config.anthropicPromptCache !== undefined ? { anthropicPromptCache: config.anthropicPromptCache !== false } : {}),
+    ...(config.anthropicPromptCacheTtl === '1h' ? { anthropicPromptCacheTtl: '1h' as const } : config.anthropicPromptCacheTtl === '5m' ? { anthropicPromptCacheTtl: '5m' as const } : {}),
     ...(config.anthropicCustomTemperature !== undefined ? { anthropicCustomTemperature: config.anthropicCustomTemperature === true } : {}),
     ...(visionApi ? {
       visionApi: {

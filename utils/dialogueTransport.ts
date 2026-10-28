@@ -70,10 +70,11 @@ function contentBlocks(content: unknown, allowImages = true): Block[] {
 }
 
 /** Keep the existing prompt/history pipeline; convert only at the local chat boundary. */
-export function toAnthropicBody(body: Record<string, any>, api?: Pick<DialogueApiConfig, 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache'>): Record<string, any> {
+export function toAnthropicBody(body: Record<string, any>, api?: Pick<DialogueApiConfig, 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'anthropicPromptCacheTtl'>): Record<string, any> {
   const system: Block[] = [];
   const messages: Turn[] = [];
   const cacheEnabled = api?.anthropicPromptCache !== false;
+  const cacheControl = { type: 'ephemeral', ...(api?.anthropicPromptCacheTtl === '1h' ? { ttl: '1h' } : {}) };
   for (const message of body.messages || []) {
     if (message.role === 'system' || message.role === 'developer') {
       let parts = contentBlocks(message.content, false);
@@ -82,8 +83,8 @@ export function toAnthropicBody(body: Record<string, any>, api?: Pick<DialogueAp
       // multi-block content retains its original boundaries and whitespace.
       if (cacheEnabled && message === body.messages[0] && parts.length) {
         if (parts.length === 1) parts = splitAnthropicCacheText(parts[0].text)
-          .map(text => ({ type: 'text', text, cache_control: { type: 'ephemeral' } }));
-        else parts[parts.length - 1].cache_control = { type: 'ephemeral' };
+          .map(text => ({ type: 'text', text, cache_control: cacheControl }));
+        else parts[parts.length - 1].cache_control = cacheControl;
       }
       system.push(...parts);
       continue;

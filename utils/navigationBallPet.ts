@@ -40,8 +40,10 @@ export function clawdFrameStyle(form: ClawdForm) {
   const bounds = CLAWD_FRAME_BOUNDS[form];
   if (!bounds) return undefined;
   const [width, height, left, top, right, bottom] = bounds;
-  const span = Math.max(right - left, bottom - top);
-  return { width: `${width / span * 100}%`, height: `${height / span * 100}%`,
+  // Use the visible alpha height as the common scale. Props can extend
+  // horizontally, but the character height stays comparable across forms.
+  const span = Math.max(1, bottom - top);
+  return { width: `${302 / span * 100}%`, height: `${300 / span * 100}%`,
     left: `${(span - right) / span * 100}%`, top: `${(span - bottom) / span * 100}%` };
 }
 export type NavigationPetSelection = 'auto' | ClawdForm;

@@ -10,6 +10,7 @@ export default function DialogueApiFields({ value, onChange, fetchModels, isLoad
  const protocolId = useId();
  const displayStream = localStream;
  const nativeCustomTemperature = value.anthropicCustomTemperature === true;
+ const promptCacheTtl = value.anthropicPromptCacheTtl === '1h' ? '1h' : '5m';
  const nativeTemperature = Math.min(1, Math.max(0, Number.isFinite(localTemperature) ? localTemperature : 0.85));
  const setLocalUrl = (baseUrl: string) => onChange({ baseUrl });
  const setLocalKey = (apiKey: string) => onChange({ apiKey });
@@ -65,6 +66,13 @@ export default function DialogueApiFields({ value, onChange, fetchModels, isLoad
                         </button>
                     </div>
                     <p className="text-[10px] leading-relaxed text-slate-400">首次通常写入缓存；相同前缀在有效期内再次请求才可能命中，还需达到模型的最小长度且中转支持。调用记录显示服务返回的缓存读写量；不支持缓存标记的接口可关闭此项。</p>
+                    <label className="flex items-center justify-between gap-3 text-[10px] text-slate-500">缓存有效期
+                        <select aria-label="Anthropic 缓存有效期" value={promptCacheTtl} disabled={value.anthropicPromptCache === false}
+                            onChange={event => onChange({ anthropicPromptCacheTtl: event.target.value as '5m' | '1h' })}
+                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600 disabled:opacity-40">
+                            <option value="5m">5 分钟</option><option value="1h">1 小时</option>
+                        </select>
+                    </label>
                     <p className="text-[10px] leading-relaxed text-slate-400">思考沿用角色的「心象／思维链」开关，只显示接口实际返回的思考内容或摘要。启用原生思考时不发送自定义温度；模型名（含前后缀）完整保留。</p>
                 </div>}
                 {/* Advanced sampling options stay collapsed by default. */}

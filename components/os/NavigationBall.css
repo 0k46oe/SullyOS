@@ -55,7 +55,7 @@
 @media(prefers-reduced-motion:reduce){.navigation-api-preset{transition:none}}
 .navigation-ball-custom-image{display:block;width:100%;height:100%;object-fit:cover;border-radius:inherit;pointer-events:none;user-select:none;-webkit-user-select:none}
 .navigation-ball-custom-image[data-pet=true]{object-fit:contain;object-position:right bottom;image-rendering:pixelated;border-radius:0}
-.navigation-clawd-frame{position:relative;width:100%;height:100%;overflow:hidden;pointer-events:none}
+.navigation-clawd-frame{position:relative;width:100%;height:100%;overflow:visible;pointer-events:none}
 .navigation-ball-custom-image[data-pet-trimmed=true]{position:absolute;max-width:none;object-fit:fill}
 .navigation-ball-toggle[data-pet=true],.navigation-ball-face-preview[data-pet=true]{overflow:visible}
 .navigation-ball-image-fallback{background:#475569;outline:3px solid #475569}

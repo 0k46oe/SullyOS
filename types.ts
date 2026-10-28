@@ -274,7 +274,8 @@ export interface VisionApiConfig {
 
 /** A complete dialogue endpoint, separate from TTS/vision configuration. */
 export type ApiProtocol = 'openai' | 'anthropic';
-export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol' | 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache'>;
+export type AnthropicPromptCacheTtl = '5m' | '1h';
+export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol' | 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'anthropicPromptCacheTtl'>;
 
 export interface APIConfig {
   /** Missing in older configurations means OpenAI-compatible. Native Anthropic is opt-in for local private chat. */
@@ -329,6 +330,8 @@ export interface APIConfig {
   anthropicCustomTemperature?: boolean;
   /** Native Messages: cache the stable leading system prompt; enabled unless explicitly disabled. */
   anthropicPromptCache?: boolean;
+  /** Native Messages prompt-cache lifetime. Anthropic currently supports 5m and 1h ephemeral caches. */
+  anthropicPromptCacheTtl?: AnthropicPromptCacheTtl;
 }
 
 export type ActiveMsg2Mode = 'fixed' | 'auto' | 'prompted';
