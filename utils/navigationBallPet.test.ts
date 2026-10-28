@@ -45,8 +45,12 @@ it('uses only pinned Clawd URLs and validates every selectable form', () => {
   expect(CLAWD_FORMS.length).toBe(24);
   for (const [form] of CLAWD_FORMS) expect(clawdImageUrl(form)).toMatch(/^https:\/\/raw\.githubusercontent\.com\/0k46oe\/clawd-on-desk\/[a-f0-9]{40}\/assets\/gif\/clawd-[a-z-]+\.gif$/);
   expect(clawdFrameStyle('idle')).toMatchObject({
-    width: `${302 / 102 * 100}%`, height: `${300 / 102 * 100}%`,
-    left: `${(102 - 201) / 102 * 100}%`, top: `${(102 - 273) / 102 * 100}%`,
+    width: `${302 / 102 * 0.5 * 100}%`, height: `${300 / 102 * 0.5 * 100}%`,
+    left: `${(1 - 201 / 102 * 0.5) * 100}%`, top: `${(1 - 273 / 102 * 0.5) * 100}%`,
+  });
+  expect(clawdFrameStyle('headphones-groove')).toMatchObject({
+    width: `${302 / 93 * 0.9 * 100}%`, height: `${300 / 93 * 0.9 * 100}%`,
+    left: `${(1 - 225 / 93 * 0.9) * 100}%`, top: `${(1 - 273 / 93 * 0.9) * 100}%`,
   });
   expect(clawdFrameStyle('mini-idle')).toBeUndefined();
 });

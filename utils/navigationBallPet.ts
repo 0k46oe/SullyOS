@@ -36,6 +36,10 @@ export const CLAWD_FRAME_BOUNDS: Partial<Record<ClawdForm, readonly [number, num
   'react-annoyed': [302, 300, 100, 127, 236, 273],
   'react-double-jump': [302, 300, 89, 112, 213, 273],
 };
+const CLAWD_FORM_SCALE: Partial<Record<ClawdForm, number>> = {
+  idle: 0.5,
+  'headphones-groove': 0.9,
+};
 export function clawdFrameStyle(form: ClawdForm) {
   const bounds = CLAWD_FRAME_BOUNDS[form];
   if (!bounds) return undefined;
@@ -43,8 +47,10 @@ export function clawdFrameStyle(form: ClawdForm) {
   // Use the visible alpha height as the common scale. Props can extend
   // horizontally, but the character height stays comparable across forms.
   const span = Math.max(1, bottom - top);
-  return { width: `${302 / span * 100}%`, height: `${300 / span * 100}%`,
-    left: `${(span - right) / span * 100}%`, top: `${(span - bottom) / span * 100}%` };
+  const scale = CLAWD_FORM_SCALE[form] ?? 1;
+  // Keep scaled forms anchored to the same bottom-right visible-pixel point.
+  return { width: `${302 / span * scale * 100}%`, height: `${300 / span * scale * 100}%`,
+    left: `${(1 - right / span * scale) * 100}%`, top: `${(1 - bottom / span * scale) * 100}%` };
 }
 export type NavigationPetSelection = 'auto' | ClawdForm;
 export type NavigationPetPreferences = { enabled: boolean; selection: NavigationPetSelection };
