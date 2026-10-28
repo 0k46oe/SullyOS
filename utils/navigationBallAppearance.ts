@@ -1,11 +1,13 @@
 import { useSyncExternalStore } from 'react';
 
 export type NavigationBallShape = 'circle' | 'square' | 'rounded';
-export type NavigationBallAppearance = { shape: NavigationBallShape; opacity: number; image: string; size: number; imageBorder: boolean };
+export type NavigationBallAppearance = { shape: NavigationBallShape; opacity: number; image: string; size: number; clawdSize: number; imageBorder: boolean };
 export const NAVIGATION_BALL_SIZE_MIN = 24;
 export const NAVIGATION_BALL_SIZE_MAX = 160;
+export const CLAWD_SIZE_MIN = 24;
+export const CLAWD_SIZE_MAX = 160;
 export const NAVIGATION_BALL_APPEARANCE_KEY = 'sully_navigation_ball_appearance_v1';
-export const DEFAULT_NAVIGATION_BALL_APPEARANCE: Readonly<NavigationBallAppearance> = Object.freeze({ shape: 'rounded', opacity: 1, image: '', size: 44, imageBorder: false });
+export const DEFAULT_NAVIGATION_BALL_APPEARANCE: Readonly<NavigationBallAppearance> = Object.freeze({ shape: 'rounded', opacity: 1, image: '', size: 44, clawdSize: 44, imageBorder: false });
 export const navigationBallShapeRadius: Record<NavigationBallShape, string> = { circle: '50%', square: '0px', rounded: '14px' };
 const MAX_IMAGE_LENGTH = 800_000;
 const isSafeImage = (image: unknown): image is string => typeof image === 'string'
@@ -20,6 +22,10 @@ export function normalizeNavigationBallAppearance(value: unknown): NavigationBal
     imageBorder: source.imageBorder === true,
     size: typeof source.size === 'number' && Number.isFinite(source.size)
       ? Math.round(Math.min(NAVIGATION_BALL_SIZE_MAX, Math.max(NAVIGATION_BALL_SIZE_MIN, source.size))) : 44,
+    clawdSize: typeof source.clawdSize === 'number' && Number.isFinite(source.clawdSize)
+      ? Math.round(Math.min(CLAWD_SIZE_MAX, Math.max(CLAWD_SIZE_MIN, source.clawdSize)))
+      : typeof source.size === 'number' && Number.isFinite(source.size)
+        ? Math.round(Math.min(CLAWD_SIZE_MAX, Math.max(CLAWD_SIZE_MIN, source.size))) : 44,
   };
 }
 

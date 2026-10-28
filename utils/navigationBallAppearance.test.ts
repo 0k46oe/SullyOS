@@ -32,8 +32,8 @@ const click = async (label: string) => act(async () => {
 
 it('normalizes corrupt shapes, opacity, unsafe URLs and oversized images', () => {
   expect(normalizeNavigationBallAppearance(null)).toEqual(DEFAULT_NAVIGATION_BALL_APPEARANCE);
-  expect(normalizeNavigationBallAppearance({ shape: 'bad', opacity: 0, image: 'javascript:bad' })).toEqual({ shape: 'rounded', opacity: 0.1, image: '', size: 44, imageBorder: false });
-  expect(normalizeNavigationBallAppearance({ shape: 'circle', opacity: NaN, image })).toEqual({ shape: 'circle', opacity: 1, image, size: 44, imageBorder: false });
+  expect(normalizeNavigationBallAppearance({ shape: 'bad', opacity: 0, image: 'javascript:bad' })).toEqual({ shape: 'rounded', opacity: 0.1, image: '', size: 44, clawdSize: 44, imageBorder: false });
+  expect(normalizeNavigationBallAppearance({ shape: 'circle', opacity: NaN, image })).toEqual({ shape: 'circle', opacity: 1, image, size: 44, clawdSize: 44, imageBorder: false });
   expect(() => setNavigationBallAppearance({ image: 'https://remote.test/image.png' })).toThrow('格式不支持');
   expect(() => setNavigationBallAppearance({ image: 'data:image/png;base64,' + 'a'.repeat(800000) })).toThrow('图片过大');
 });
@@ -50,7 +50,7 @@ it('updates only the ball face, preserves menu opacity and rehydrates the saved 
   expect(ball.querySelector('img')?.getAttribute('src')).toBe(image);
   await act(async () => ball.click());
   expect((host.querySelector('.navigation-ball-panel') as HTMLElement).style.opacity).toBe('');
-  expect(JSON.parse(localStorage.getItem(NAVIGATION_BALL_APPEARANCE_KEY)!)).toEqual({ shape: 'circle', opacity: 0.35, image, size: 44, imageBorder: false });
+  expect(JSON.parse(localStorage.getItem(NAVIGATION_BALL_APPEARANCE_KEY)!)).toEqual({ shape: 'circle', opacity: 0.35, image, size: 44, clawdSize: 44, imageBorder: false });
   await act(async () => window.dispatchEvent(new StorageEvent('storage', { key: NAVIGATION_BALL_APPEARANCE_KEY })));
   expect(ball.style.borderRadius).toBe('50%');
   await click('正方形'); expect(ball.style.borderRadius).toBe('0px');

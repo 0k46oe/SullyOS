@@ -64,6 +64,11 @@
 .navigation-pet-controls small{font-size:10px;opacity:.7}
 .navigation-pet-controls select{display:block;width:100%;min-height:38px;margin-top:8px;padding:6px 9px;border:1px solid #d8d1e0;border-radius:10px;background:#fff;color:#665b72;font:inherit;font-size:13px}
 .navigation-pet-controls p{margin:7px 0 0;font-size:11px;line-height:1.6}
+.navigation-pet-scale-list{margin-top:12px;padding-top:10px;border-top:1px solid #e5e0ea}
+.navigation-pet-scale-title{display:block;margin-bottom:8px;font-size:11px;color:#8f849b}
+.navigation-pet-scale-row{display:grid!important;grid-template-columns:64px 38px minmax(0,1fr);align-items:center;gap:7px;margin:6px 0;font-size:11px!important;color:#71667d}
+.navigation-pet-scale-row output{text-align:right;color:#a096ab;font-size:10px}
+.navigation-pet-scale-row input{width:100%;accent-color:#8e7aa5}
 .navigation-pet-controls-compact{grid-column:1/-1;background:#ffffff0d;color:#e2dbea}
 .navigation-pet-controls-compact select{background:#36333d;color:#fff;border-color:#ffffff25;color-scheme:dark}
 .navigation-ball-toggle:focus-visible{outline:3px solid #86efac;outline-offset:3px}

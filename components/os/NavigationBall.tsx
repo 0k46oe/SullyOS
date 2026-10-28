@@ -126,8 +126,10 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
   const automaticPetForm = useNavigationPetForm();
   const petForm = pet.selection === 'auto' ? automaticPetForm : pet.selection;
   const enlargedPet = pet.enabled && !petForm.startsWith('mini-');
-  const visualSize = appearance.size * (enlargedPet ? CLAWD_STANDARD_FORM_SCALE : 1);
-  const visualOverflow = visualSize - appearance.size;
+  const layoutSize = pet.enabled ? appearance.clawdSize : appearance.size;
+  const formScale = pet.enabled ? pet.scales[petForm] ?? 1 : 1;
+  const visualSize = layoutSize * (enlargedPet ? CLAWD_STANDARD_FORM_SCALE * formScale : formScale);
+  const visualOverflow = visualSize - layoutSize;
   const root = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<Position | null>(readPosition);
   const hasManualPosition = useRef(position !== null);
@@ -146,13 +148,13 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
       setParentSize({ width: bounds.parentW, height: bounds.parentH, top: bounds.insetTop, bottom: bounds.insetBottom });
       let value = hasManualPosition.current && latest.current
         ? latest.current
-        : { x: bounds.parentW - appearance.size - (pet.enabled ? 0 : 12), y: bounds.parentH - appearance.size - (pet.enabled ? 8 : 96) };
+        : { x: bounds.parentW - layoutSize - (pet.enabled ? 0 : 12), y: bounds.parentH - layoutSize - (pet.enabled ? 8 : 96) };
       if (pet.enabled && !clawdPositionMigrated.current) {
         clawdPositionMigrated.current = true;
         try {
           if (localStorage.getItem(POSITION_MIGRATION_KEY) !== '1') {
             if (hasManualPosition.current && latest.current) {
-              value = { x: bounds.parentW - appearance.size, y: bounds.parentH - appearance.size - 8 };
+              value = { x: bounds.parentW - layoutSize, y: bounds.parentH - layoutSize - 8 };
               localStorage.setItem(POSITION_KEY, JSON.stringify(value));
             }
             localStorage.setItem(POSITION_MIGRATION_KEY, '1');
@@ -171,7 +173,7 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
     });
     const observer = new ResizeObserver(constrain); observer.observe(parent);
     return () => { observer.disconnect(); unsubscribeReset(); };
-  }, [appearance.size, enlargedPet, pet.enabled, visualOverflow, visualSize]);
+  }, [appearance.size, appearance.clawdSize, enlargedPet, formScale, layoutSize, pet.enabled, visualOverflow, visualSize]);
   useEffect(() => {
     if (!open) return;
     const dismiss = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
@@ -209,7 +211,7 @@ export function DraggableNavigationBall({ onBack, onHome, onApi, onShortcut, onC
       </span>
     </button>;
   };
-  return <div ref={root} className="navigation-ball" style={{ ...(position ? { left: renderedLeft, top: renderedTop } : { right: pet.enabled ? 0 : 12, bottom: pet.enabled ? 8 : 96 }), '--navigation-ball-size': `${appearance.size}px`, '--navigation-ball-rendered-size': `${visualSize}px` } as React.CSSProperties & { '--navigation-ball-size': string; '--navigation-ball-rendered-size': string }}
+  return <div ref={root} className="navigation-ball" style={{ ...(position ? { left: renderedLeft, top: renderedTop } : { right: pet.enabled ? 0 : 12, bottom: pet.enabled ? 8 : 96 }), '--navigation-ball-size': `${layoutSize}px`, '--navigation-ball-rendered-size': `${visualSize}px` } as React.CSSProperties & { '--navigation-ball-size': string; '--navigation-ball-rendered-size': string }}
     onPointerDown={event => {
       suppressClick.current = false;
       const button = root.current?.querySelector<HTMLButtonElement>('.navigation-ball-toggle');

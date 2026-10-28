@@ -4,6 +4,8 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 export const CLAWD_ASSET_BASE = 'https://raw.githubusercontent.com/0k46oe/clawd-on-desk/ea846be1182ed387cde628b28f53244edc840ce5/assets/gif/';
 const CLAWD_CDN_BASE = 'https://cdn.jsdelivr.net/gh/0k46oe/clawd-on-desk@ea846be1182ed387cde628b28f53244edc840ce5/assets/gif/';
 export const CLAWD_STANDARD_FORM_SCALE = 1.25;
+export const CLAWD_FORM_SCALE_MIN = 0.25;
+export const CLAWD_FORM_SCALE_MAX = 2;
 export const CLAWD_FORMS = [
   ['idle', '待机'], ['thinking', '思考'], ['typing', '打字'], ['happy', '开心'],
   ['error', '出错'], ['sleeping', '睡觉'], ['notification', '提醒'], ['building', '搭建'],
@@ -14,6 +16,9 @@ export const CLAWD_FORMS = [
   ['mini-alert', '迷你提醒'], ['mini-crabwalk', '迷你横走'], ['mini-peek', '迷你探头'], ['mini-enter', '迷你登场'],
 ] as const;
 export type ClawdForm = typeof CLAWD_FORMS[number][0];
+export const CLAWD_FORM_DEFAULT_SCALES: Readonly<Record<ClawdForm, number>> = Object.freeze(
+  Object.fromEntries(CLAWD_FORMS.map(([form]) => [form, form === 'idle' ? 0.5 : form === 'headphones-groove' ? 0.9 : 1])) as Record<ClawdForm, number>,
+);
 // Union of every composited frame's alpha bounds in the pinned GIFs above.
 // Keep whole animations (including props) while removing only empty outer canvas.
 export const CLAWD_FRAME_BOUNDS: Partial<Record<ClawdForm, readonly [number, number, number, number, number, number]>> = {
@@ -36,30 +41,35 @@ export const CLAWD_FRAME_BOUNDS: Partial<Record<ClawdForm, readonly [number, num
   'react-annoyed': [302, 300, 100, 127, 236, 273],
   'react-double-jump': [302, 300, 89, 112, 213, 273],
 };
-const CLAWD_FORM_SCALE: Partial<Record<ClawdForm, number>> = {
-  idle: 0.5,
-  'headphones-groove': 0.9,
-};
-export function clawdFrameStyle(form: ClawdForm) {
+function normalizeClawdScales(value: unknown): Record<ClawdForm, number> {
+  const source = value && typeof value === 'object' ? value as Partial<Record<ClawdForm, unknown>> : {};
+  return Object.fromEntries(CLAWD_FORMS.map(([form]) => {
+    const raw = source[form];
+    const fallback = CLAWD_FORM_DEFAULT_SCALES[form];
+    const scale = typeof raw === 'number' && Number.isFinite(raw) ? raw : fallback;
+    return [form, Math.min(CLAWD_FORM_SCALE_MAX, Math.max(CLAWD_FORM_SCALE_MIN, scale))];
+  })) as Record<ClawdForm, number>;
+}
+export function clawdFrameStyle(form: ClawdForm, formScale = CLAWD_FORM_DEFAULT_SCALES[form] ?? 1) {
   const bounds = CLAWD_FRAME_BOUNDS[form];
-  if (!bounds) return undefined;
+  const scale = Math.min(CLAWD_FORM_SCALE_MAX, Math.max(CLAWD_FORM_SCALE_MIN, formScale));
+  if (!bounds) return scale === 1 ? undefined : { transform: `scale(${scale})`, transformOrigin: 'right bottom' };
   const [width, height, left, top, right, bottom] = bounds;
   // Use the visible alpha height as the common scale. Props can extend
   // horizontally, but the character height stays comparable across forms.
   const span = Math.max(1, bottom - top);
-  const scale = CLAWD_FORM_SCALE[form] ?? 1;
   // Keep scaled forms anchored to the same bottom-right visible-pixel point.
   return { width: `${302 / span * scale * 100}%`, height: `${300 / span * scale * 100}%`,
     left: `${(1 - right / span * scale) * 100}%`, top: `${(1 - bottom / span * scale) * 100}%` };
 }
 export type NavigationPetSelection = 'auto' | ClawdForm;
-export type NavigationPetPreferences = { enabled: boolean; selection: NavigationPetSelection };
+export type NavigationPetPreferences = { enabled: boolean; selection: NavigationPetSelection; scales: Record<ClawdForm, number> };
 export const NAVIGATION_PET_KEY = 'sully_navigation_ball_pet_v1';
-const defaults: NavigationPetPreferences = Object.freeze({ enabled: false, selection: 'auto' });
+const defaults: NavigationPetPreferences = Object.freeze({ enabled: false, selection: 'auto', scales: normalizeClawdScales(null) });
 const validForm = (value: unknown): value is ClawdForm => CLAWD_FORMS.some(([form]) => form === value);
 export function normalizeNavigationPet(value: unknown): NavigationPetPreferences {
   const source = value && typeof value === 'object' ? value as Partial<NavigationPetPreferences> : {};
-  return { enabled: source.enabled === true, selection: validForm(source.selection) ? source.selection : 'auto' };
+  return { enabled: source.enabled === true, selection: validForm(source.selection) ? source.selection : 'auto', scales: normalizeClawdScales(source.scales) };
 }
 export function clawdImageUrl(form: ClawdForm): string { return `${CLAWD_ASSET_BASE}clawd-${validForm(form) ? form : 'idle'}.gif`; }
 export function clawdFallbackUrl(form: ClawdForm): string { return `${CLAWD_CDN_BASE}clawd-${validForm(form) ? form : 'idle'}.gif`; }
@@ -87,6 +97,10 @@ export function setNavigationPet(patch: Partial<NavigationPetPreferences>) {
   try { localStorage.setItem(NAVIGATION_PET_KEY, JSON.stringify(next)); }
   catch { throw new Error('宠物设置保存失败，请检查浏览器本地存储空间'); }
   preferences = next; preferenceListeners.forEach(notify => notify());
+}
+export function setNavigationPetFormScale(form: ClawdForm, scale: number) {
+  const nextScale = Math.min(CLAWD_FORM_SCALE_MAX, Math.max(CLAWD_FORM_SCALE_MIN, scale));
+  setNavigationPet({ scales: { ...snapshot().scales, [form]: nextScale } });
 }
 export function useNavigationPetPreferences() { return useSyncExternalStore(subscribe, snapshot, () => defaults); }
 

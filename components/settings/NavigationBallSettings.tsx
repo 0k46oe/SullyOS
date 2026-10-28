@@ -5,7 +5,7 @@ import { useSettingsFocus } from '../../utils/settingsNavigation';
 import { useOS } from '../../context/OSContext';
 import { AppID } from '../../types';
 import { processImage } from '../../utils/file';
-import { NAVIGATION_BALL_SIZE_MIN, NAVIGATION_BALL_SIZE_MAX, navigationBallShapeRadius, resetNavigationBallAppearance, setNavigationBallAppearance, useNavigationBallAppearance, type NavigationBallAppearance, type NavigationBallShape } from '../../utils/navigationBallAppearance';
+import { CLAWD_SIZE_MAX, CLAWD_SIZE_MIN, NAVIGATION_BALL_SIZE_MIN, NAVIGATION_BALL_SIZE_MAX, navigationBallShapeRadius, resetNavigationBallAppearance, setNavigationBallAppearance, useNavigationBallAppearance, type NavigationBallAppearance, type NavigationBallShape } from '../../utils/navigationBallAppearance';
 import NavigationBallFace from '../os/NavigationBallFace';
 import NavigationPetControls from '../os/NavigationPetControls';
 import { setNavigationPet, useNavigationPetPreferences } from '../../utils/navigationBallPet';
@@ -26,8 +26,9 @@ export default function NavigationBallSettings({ characters = [], loadWorlds, re
   const slots = useNavigationBallSlots();
   const appearance = useNavigationBallAppearance();
   const pet = useNavigationPetPreferences();
-  const [sizeDraft, setSizeDraft] = useState(String(appearance.size));
-  useEffect(() => setSizeDraft(String(appearance.size)), [appearance.size]);
+  const controlledSize = pet.enabled ? appearance.clawdSize : appearance.size;
+  const [sizeDraft, setSizeDraft] = useState(String(controlledSize));
+  useEffect(() => setSizeDraft(String(controlledSize)), [controlledSize]);
   const imageInput = useRef<HTMLInputElement>(null);
   const uploadVersion = useRef(0);
   const [uploading, setUploading] = useState(false);
@@ -38,9 +39,11 @@ export default function NavigationBallSettings({ characters = [], loadWorlds, re
     catch (error) { setAppearanceStatus(error instanceof Error ? error.message : '保存失败'); }
   };
   const commitSize = () => {
-    const input = sizeDraft.trim() ? Number(sizeDraft) : appearance.size;
-    const size = Number.isFinite(input) ? Math.round(Math.min(NAVIGATION_BALL_SIZE_MAX, Math.max(NAVIGATION_BALL_SIZE_MIN, input))) : appearance.size;
-    setSizeDraft(String(size)); updateAppearance({ size });
+    const input = sizeDraft.trim() ? Number(sizeDraft) : controlledSize;
+    const min = pet.enabled ? CLAWD_SIZE_MIN : NAVIGATION_BALL_SIZE_MIN;
+    const max = pet.enabled ? CLAWD_SIZE_MAX : NAVIGATION_BALL_SIZE_MAX;
+    const size = Number.isFinite(input) ? Math.round(Math.min(max, Math.max(min, input))) : controlledSize;
+    setSizeDraft(String(size)); updateAppearance(pet.enabled ? { clawdSize: size } : { size });
   };
   const uploadImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]; event.target.value = '';
@@ -109,7 +112,7 @@ export default function NavigationBallSettings({ characters = [], loadWorlds, re
       <div className="flex items-center gap-4">
         <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl bg-slate-100" aria-label="悬浮球外观预览">
           <div className="navigation-ball-face-preview" data-custom-image={pet.enabled || !!appearance.image} data-pet={pet.enabled} data-image-border={appearance.imageBorder}
-            style={{ borderRadius: navigationBallShapeRadius[appearance.shape], opacity: appearance.opacity, '--navigation-ball-size': `${Math.min(appearance.size, 64)}px` } as React.CSSProperties}>
+            style={{ borderRadius: navigationBallShapeRadius[appearance.shape], opacity: appearance.opacity, '--navigation-ball-size': `${Math.min(controlledSize, 64)}px` } as React.CSSProperties}>
             <NavigationBallFace appearance={appearance} />
           </div>
         </div>
@@ -123,14 +126,14 @@ export default function NavigationBallSettings({ characters = [], loadWorlds, re
       </div>
       <div>
         <div className="flex items-center justify-between gap-3">
-          <label htmlFor={`${contentId}-size`} className="text-xs text-slate-500">悬浮球尺寸</label>
-          <span className="flex items-center gap-1 text-xs text-slate-400"><input aria-label="悬浮球尺寸数值" type="number" min={NAVIGATION_BALL_SIZE_MIN} max={NAVIGATION_BALL_SIZE_MAX} step="1"
+            <label htmlFor={`${contentId}-size`} className="text-xs text-slate-500">{pet.enabled ? 'Clawd 基础尺寸' : '悬浮球尺寸'}</label>
+          <span className="flex items-center gap-1 text-xs text-slate-400"><input aria-label={pet.enabled ? 'Clawd 基础尺寸数值' : '悬浮球尺寸数值'} type="number" min={pet.enabled ? CLAWD_SIZE_MIN : NAVIGATION_BALL_SIZE_MIN} max={pet.enabled ? CLAWD_SIZE_MAX : NAVIGATION_BALL_SIZE_MAX} step="1"
             value={sizeDraft} onChange={event => setSizeDraft(event.target.value)} onBlur={commitSize} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }}
             className="w-16 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-right text-xs text-slate-600" />px</span>
         </div>
-        <input id={`${contentId}-size`} aria-label="悬浮球尺寸" type="range" min={NAVIGATION_BALL_SIZE_MIN} max={NAVIGATION_BALL_SIZE_MAX} step="1" value={appearance.size}
-          onChange={event => updateAppearance({ size: Number(event.target.value) })} className="mt-3 block w-full accent-slate-500" />
-        <p className="mt-1 text-[11px] text-slate-400">24～160px，默认 44px；可拖动滑块或输入具体数值。</p>
+        <input id={`${contentId}-size`} aria-label={pet.enabled ? 'Clawd 基础尺寸' : '悬浮球尺寸'} type="range" min={pet.enabled ? CLAWD_SIZE_MIN : NAVIGATION_BALL_SIZE_MIN} max={pet.enabled ? CLAWD_SIZE_MAX : NAVIGATION_BALL_SIZE_MAX} step="1" value={controlledSize}
+          onChange={event => updateAppearance(pet.enabled ? { clawdSize: Number(event.target.value) } : { size: Number(event.target.value) })} className="mt-3 block w-full accent-slate-500" />
+        <p className="mt-1 text-[11px] text-slate-400">{pet.enabled ? 'Clawd 独立基础尺寸；下方可分别微调每张 GIF。' : '24～160px，默认 44px；可拖动滑块或输入具体数值。'}</p>
       </div>
       <fieldset>
         <legend className="mb-2 text-xs text-slate-500">形状</legend>

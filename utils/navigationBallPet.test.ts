@@ -40,8 +40,8 @@ const selectForm = (value: string) => act(async () => {
 });
 
 it('uses only pinned Clawd URLs and validates every selectable form', () => {
-  expect(normalizeNavigationPet(null)).toEqual({ enabled: false, selection: 'auto' });
-  expect(normalizeNavigationPet({ enabled: true, selection: 'https://unsafe.test' })).toEqual({ enabled: true, selection: 'auto' });
+  expect(normalizeNavigationPet(null)).toMatchObject({ enabled: false, selection: 'auto' });
+  expect(normalizeNavigationPet({ enabled: true, selection: 'https://unsafe.test' })).toMatchObject({ enabled: true, selection: 'auto' });
   expect(CLAWD_FORMS.length).toBe(24);
   for (const [form] of CLAWD_FORMS) expect(clawdImageUrl(form)).toMatch(/^https:\/\/raw\.githubusercontent\.com\/0k46oe\/clawd-on-desk\/[a-f0-9]{40}\/assets\/gif\/clawd-[a-z-]+\.gif$/);
   expect(clawdFrameStyle('idle')).toMatchObject({
@@ -64,7 +64,7 @@ it('follows waiting, text, reasoning, completion, idle and sleep without persist
   await act(async () => request.finish('success')); expect(ballImage()).toBe(clawdImageUrl('happy'));
   await act(async () => vi.advanceTimersByTime(3500)); expect(ballImage()).toBe(clawdImageUrl('idle'));
   await act(async () => vi.advanceTimersByTime(56500)); expect(ballImage()).toBe(clawdImageUrl('sleeping'));
-  expect(JSON.parse(localStorage.getItem(NAVIGATION_PET_KEY)!)).toEqual({ enabled: true, selection: 'auto' });
+  expect(JSON.parse(localStorage.getItem(NAVIGATION_PET_KEY)!)).toMatchObject({ enabled: true, selection: 'auto' });
 });
 
 it('holds a manually selected form across requests and reload, and resumes auto immediately', async () => {
@@ -118,7 +118,7 @@ it('preserves custom images on mode switch and restores the original default app
   await click('普通 / 自定义图片'); expect(host.querySelector('.navigation-ball-toggle img')).toBeNull();
   await click('Clawd 动图'); expect(ballImage()).toBe(clawdImageUrl('sleeping'));
   await click('恢复默认外观'); expect(host.querySelector('.navigation-ball-toggle img')).toBeNull();
-  expect(JSON.parse(localStorage.getItem(NAVIGATION_PET_KEY)!)).toEqual({ enabled: false, selection: 'auto' });
+  expect(JSON.parse(localStorage.getItem(NAVIGATION_PET_KEY)!)).toMatchObject({ enabled: false, selection: 'auto' });
   expect(normalizeNavigationBallAppearance(null)).toEqual(DEFAULT_NAVIGATION_BALL_APPEARANCE);
 });
 
