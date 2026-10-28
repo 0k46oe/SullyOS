@@ -348,6 +348,68 @@ async function readBodyWithStreaming(
 }
 
 /**
+ * 把非 2xx 响应体里的错误详情提取成可读字符串：
+ * - 避免 `data.error` 是无 `.message` 的对象时拼出 `[object Object]`；
+ * - 保留 `error.code` / `error.type` / `error.param` / `error.details`；
+ * - 兼容 FastAPI / vLLM / 自建中转常见的顶层 `detail` / `message` / `msg`。
+ */
+export function formatApiErrorPayload(data: any, status: number): string {
+    if (data == null) return `HTTP ${status}`;
+    if (typeof data === 'string') return data.trim() || `HTTP ${status}`;
+    if (typeof data !== 'object') return String(data) || `HTTP ${status}`;
+
+    const stringifyExtra = (val: unknown): string => {
+        if (val == null || val === '') return '';
+        if (typeof val === 'string') return val.trim();
+        if (typeof val === 'number' || typeof val === 'boolean') return String(val);
+        try {
+            return JSON.stringify(val);
+        } catch {
+            return String(val);
+        }
+    };
+
+    const err = data.error;
+    if (typeof err === 'string' && err.trim()) {
+        return err.trim();
+    }
+    if (err && typeof err === 'object' && !Array.isArray(err)) {
+        const message = typeof err.message === 'string' ? err.message.trim() : '';
+        const code = typeof err.code === 'string' || typeof err.code === 'number' ? String(err.code).trim() : '';
+        const type = typeof err.type === 'string' ? err.type.trim() : '';
+        const param = typeof err.param === 'string' && err.param.trim() ? `param=${err.param.trim()}` : '';
+        const details = stringifyExtra(err.details ?? err.detail ?? err.data);
+
+        const tags = [code, type !== code ? type : '', param].filter((t) => t && !message.includes(t));
+        const tagSuffix = tags.length > 0 ? ` [${tags.join(', ')}]` : '';
+        const detailSuffix = details && !message.includes(details) ? ` (${details})` : '';
+
+        if (message) {
+            return `${message}${tagSuffix}${detailSuffix}`;
+        }
+        const fallbackStructured = `${tags.join(', ')}${detailSuffix}`.trim();
+        if (fallbackStructured) return fallbackStructured;
+        return stringifyExtra(err) || `HTTP ${status}`;
+    }
+
+    const topMessage = typeof data.message === 'string' ? data.message.trim()
+        : typeof data.msg === 'string' ? data.msg.trim()
+            : '';
+    const topDetail = stringifyExtra(data.detail ?? data.details);
+    const topCode = typeof data.code === 'string' || typeof data.code === 'number' ? String(data.code).trim() : '';
+    if (topMessage) {
+        const codePart = topCode && !topMessage.includes(topCode) ? ` [${topCode}]` : '';
+        const detailPart = topDetail && !topMessage.includes(topDetail) ? ` (${topDetail})` : '';
+        return `${topMessage}${codePart}${detailPart}`;
+    }
+    if (topDetail) {
+        return topCode && !topDetail.includes(topCode) ? `${topDetail} [${topCode}]` : topDetail;
+    }
+
+    return `HTTP ${status}`;
+}
+
+/**
  * Fetch with automatic retry for transient errors on non-billable endpoints.
  * Chat completions never retry automatically: a timeout/network error does not
  * prove the upstream generation stopped, so retrying can charge the user twice.
@@ -429,7 +491,7 @@ export async function safeFetchJson(
                 // Non-retryable or last attempt: parse body for error details
                 const data = await safeResponseJson(response);
                 // If we somehow got valid JSON with error info, wrap it
-                const errMsg = data?.error?.message || data?.error || `HTTP ${response.status}`;
+                const errMsg = formatApiErrorPayload(data, response.status);
                 throw new Error(`API Error ${response.status}: ${errMsg}`);
             }
 
