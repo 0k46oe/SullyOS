@@ -57,7 +57,7 @@ export default function FriendFeedFollowing({characters, groups=[], weibo, onPro
             {!weibo.connection?<button className="ff-following-load" onClick={onConnect}>连接微博</button>:<>
                 <button className="ff-following-load" disabled={weibo.busy} onClick={()=>void weibo.load()}>{weibo.busy?'正在读取…':weibo.loaded?'刷新微博关注':'读取微博关注'}</button>
                 {weibo.accounts.map(account=><button className="ff-following-person" key={account.uid} onClick={()=>onProfile('weibo:'+account.uid)}>
-                    <FriendFeedAvatar name={account.name} avatar={isWeiboImageUrl(account.avatar)?account.avatar:undefined}/><span><strong>{account.name}</strong><small>{account.description||'查看真实微博主页'}</small></span><CaretRight size={16}/>
+                    <FriendFeedAvatar name={account.name} avatar={isWeiboImageUrl(account.avatar)?account.avatar:undefined}/><span><strong>{account.name}</strong><small>{account.description||'在微博打开主页 ↗'}</small></span><CaretRight size={16}/>
                 </button>)}
                 {weibo.next&&<button className="ff-following-load" disabled={weibo.busy} onClick={()=>void weibo.load(true)}>更多微博关注</button>}
                 {weibo.loaded&&!weibo.accounts.length&&<p>微博暂未返回可见的关注账号。</p>}

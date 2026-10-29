@@ -80,3 +80,11 @@
 .friend-feed .ff-detail-comment footer{display:flex;align-items:center;gap:14px}.friend-feed .ff-comment-reply{padding:4px 8px;font-size:11px;color:var(--ff-muted);background:none;border:0;cursor:pointer}.friend-feed .ff-comment-reply:hover{color:var(--ff-accent)}.friend-feed .ff-comment-to{font-size:11px;color:var(--ff-muted)}
 
 .friend-feed .ff-thread-toggle{display:block;padding:10px 0;font-size:12px;color:var(--ff-accent);background:none;border:0;cursor:pointer}.friend-feed .ff-detail-comment[data-highlighted=true]{background:color-mix(in srgb,var(--ff-accent) 9%,transparent);border-radius:8px;outline:none;scroll-margin-block:24px}
+
+.friend-feed .ff-weibo-home-toolbar,.friend-feed .ff-weibo-home-entry,.friend-feed .ff-my-weibo{padding:14px 20px;border-bottom:1px solid var(--ff-border,rgba(128,128,128,.16))}
+.friend-feed .ff-weibo-home-toolbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.friend-feed .ff-weibo-home-toolbar>div{flex:1;min-width:120px}
+.friend-feed .ff-weibo-home-toolbar small{display:block;margin-top:4px;font-size:12px;opacity:.65}
+.friend-feed .ff-weibo-home-entry>.ff-setting-link{width:100%;justify-content:space-between}
+.friend-feed .ff-weibo-home>.ff-setting-status,.friend-feed .ff-weibo-home>.friend-feed-error{margin:12px 20px}
+.friend-feed .ff-my-weibo .ff-setting-actions{margin:0}

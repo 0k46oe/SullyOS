@@ -135,19 +135,20 @@ it('an already connected account reads its real home timeline and displays its o
     const avatar='https://tvax1.sinaimg.cn/crop/avatar.jpg';
     const fetcher=vi.fn(async(_url,options)=>Response.json(JSON.parse(options.body).action==='profile'
         ?{session,profile:{uid:'123456',name:'我的真实微博名',avatar,description:''}}
+        :JSON.parse(options.body).action==='posts'?{session,posts:[{platform:'weibo',accountId:'123456',externalId:'888888',url:'https://weibo.com/123456/888888',author:'我',text:'我自己发的微博',publishedAt:Date.now()-1000,fetchedAt:Date.now(),truncated:false}],nextPage:null}
         :{session,posts:[{platform:'weibo',accountId:'654321',externalId:'111111',url:'https://weibo.com/654321/111111',author:'关注的人',text:'关注的人发的真实内容',publishedAt:Date.now()-1000,fetchedAt:Date.now(),truncated:false}],nextCursor:null}));vi.stubGlobal('fetch',fetcher);
     const host=await render(React.createElement(FriendFeedApp));
     await click(host,'哔哔设置');await click(host,'微博与真实内容');
     await click(host,'同步微博首页');
     await act(async()=>{await vi.waitFor(()=>expect(host.textContent).toContain('已读取 1 条微博，新增 1 条'));});
-    expect(fetcher.mock.calls.map(([,o])=>JSON.parse(o.body).action)).toEqual(['profile','following']);
+    expect(fetcher.mock.calls.map(([,o])=>JSON.parse(o.body).action).sort()).toEqual(['home','posts','profile']);
     await click(host,'查看动态');
     expect(host.textContent).toContain('关注的人发的真实内容');expect(host.textContent).toContain('我的真实微博名');
     expect(host.querySelector(`img[src="${avatar}"]`)).not.toBeNull();
     expect(refreshFriendFeed).not.toHaveBeenCalled();
-    expect((await readFriendFeed()).weiboBindings||[]).toHaveLength(0);
+    expect((await readFriendFeed()).weiboBindings).toEqual([expect.objectContaining({ownerId:'user',uid:'123456'})]);
     await click(host,'我的主页');
-    expect(host.textContent).not.toContain('关注的人发的真实内容');
+    expect(host.textContent).not.toContain('关注的人发的真实内容');expect(host.textContent).toContain('我自己发的微博');
     expect(host.querySelector(`img[src="${avatar}"]`)).not.toBeNull();
 });
 it('automatically reads identity and the home timeline immediately after QR confirmation',async()=>{
@@ -164,31 +165,67 @@ it('automatically reads identity and the home timeline immediately after QR conf
     const host=await render(React.createElement(FriendFeedWeiboConnection,{circleId}));
     await act(async()=>{host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();});await click(host,'扫码连接微博');
     await act(async()=>{await new Promise(r=>setTimeout(r,2650));});
-    expect(fetcher.mock.calls.map(([,o])=>JSON.parse(o.body).action)).toEqual(['start','poll','profile','following']);
+    expect(fetcher.mock.calls.map(([,o])=>JSON.parse(o.body).action).sort()).toEqual(['home','poll','posts','profile','start']);
     expect(host.textContent).toContain('返回 0 条');expect((await readFriendFeed()).weiboStreams?.[0].enabled).toBe(true);
 });
-it('opens a real author, paginates their posts and reads original comments without importing browsing history into the home feed',async()=>{
+it('opens real author profiles on Weibo without mounting or fetching an in-app profile',async()=>{
+    const circle=await saveFriendCircle({name:'圈',description:'',memberIds:m.chars.map(c=>c.id)});
+    await importFriendSource(circle,{platform:'weibo',accountId:'654321',externalId:'111111',url:'https://weibo.com/654321/111111',author:'真实作者',text:'真实原帖',publishedAt:Date.now(),fetchedAt:Date.now(),truncated:false});
+    const opened=vi.spyOn(window,'open').mockImplementation(()=>null),fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);
+    const host=await render(React.createElement(FriendFeedApp));await click(host,'查看真实作者的主页');
+    expect(opened).toHaveBeenCalledWith('https://weibo.com/u/654321','_blank','noopener,noreferrer');
+    expect(host.querySelector('[aria-label="真实微博主页"]')).toBeNull();expect(fetcher).not.toHaveBeenCalled();
+});
+it('refreshes ranked batches, retains them on return, changes endpoint through settings and preserves errors without AI calls',async()=>{
     const {getProxyWorkerUrl}=await import('./proxyWorker');
     const session={version:2,origin:window.location.origin,kind:'account',uid:'123456',expires:Date.now()+60000,cookies:[]};
-    sessionStorage.setItem('sully:weibo-session:v2',JSON.stringify({id:'real-browser',proxy:getProxyWorkerUrl(),uid:'123456',session,expires:session.expires}));
-    const circleId=await saveFriendCircle({name:'圈',description:'',memberIds:m.chars.map(c=>c.id)});
-    const source=(id:string,text:string)=>({platform:'weibo' as const,accountId:'654321',externalId:id,url:`https://weibo.com/654321/${id}`,author:'真实作者',authorAvatar:'https://tvax1.sinaimg.cn/avatar.jpg',text,publishedAt:Date.now()-1000,fetchedAt:Date.now(),truncated:false});
-    await mutateFriendFeed(f=>{f.weiboStreams=[{circleId,enabled:true,generation:'g',since:0}];f.posts.push({id:'home-real',circleId,authorId:'weibo:654321',authorName:'真实作者',text:'首页原帖',createdAt:Date.now(),source:source('111111','首页原帖'),synced:true,audienceIds:[],comments:[]});});
-    const fetcher=vi.fn(async(_url,options)=>{
-        const body=JSON.parse(options.body);
-        if(body.action==='profile')return Response.json({session,profile:{uid:body.uid,name:body.uid==='654321'?'真实作者':'原评论作者',description:'来自微博的个人简介',avatar:'https://tvax1.sinaimg.cn/avatar.jpg'}});
-        if(body.action==='posts')return Response.json({session,posts:body.uid==='654321'?[source(body.page===1?'222222':'333333',body.page===1?'对方主页首帖':'对方更早微博')]:[],nextPage:body.uid==='654321'&&body.page===1?2:null});
-        return Response.json({session,comments:[{id:'999999',authorId:'777777',authorName:'原评论作者',text:'来自微博的原评论',createdAt:Date.now()}],nextCursor:null});
-    });vi.stubGlobal('fetch',fetcher);
-    const host=await render(React.createElement(FriendFeedApp));await click(host,'查看真实作者的主页');
-    await act(async()=>{await vi.waitFor(()=>expect(host.textContent).toContain('对方主页首帖'));});
-    expect(host.textContent).toContain('来自微博的个人简介');await click(host,'加载更早微博');
-    expect(host.textContent).toContain('对方更早微博');
-    await click(host,'查看微博与原评论');expect(host.textContent).toContain('来自微博的原评论');
-    await click(host,'原评论作者');expect(host.textContent).toContain('UID 777777');
-    await click(host,'返回上一级');expect(host.textContent).toContain('来自微博的原评论');
-    expect((await readFriendFeed()).posts.map(p=>p.text)).toEqual(['首页原帖']);
-    expect(refreshFriendFeed).not.toHaveBeenCalled();
+    sessionStorage.setItem('sully:weibo-session:v2',JSON.stringify({id:'ranked-home',proxy:getProxyWorkerUrl(),uid:session.uid,session,expires:session.expires}));
+    const circle=await saveFriendCircle({name:'圈',description:'',memberIds:m.chars.map(c=>c.id),realContentEnabled:true});
+    await saveFriendFeedSettings({...defaultFriendFeedSettings(),realContentEnabled:true,theme:'weibo'});
+    const source=(id:string,text:string,time:number)=>({platform:'weibo',accountId:'654321',externalId:id,url:`https://weibo.com/654321/${id}`,author:'真实作者',text,publishedAt:time,fetchedAt:Date.now(),truncated:false});
+    const older=source('111111','推荐在前的旧微博',Date.now()-20000),newer=source('222222','排在后的新微博',Date.now()-1000),third=source('333333','刷新后的另一批',Date.now()-10000);
+    let reads=0,fail=false;
+    const fetcher=vi.fn(async(_url,options)=>{const body=JSON.parse(options.body);
+        if(body.action==='comments')return Response.json({session,comments:[],nextCursor:null});
+        if(fail)return Response.json({error:'微博读取测试错误'},{status:502});
+        return Response.json({session,posts:reads++===0?[older,newer]:[third],nextCursor:null});});vi.stubGlobal('fetch',fetcher);
+    const host=await render(React.createElement(FriendFeedApp));await click(host,'微博首页');
+    await act(async()=>{await vi.waitFor(()=>expect(host.textContent).toContain('推荐在前的旧微博'));});
+    expect([...host.querySelectorAll('.ff-post-text')].map(p=>p.textContent)).toEqual(['推荐在前的旧微博','排在后的新微博']);
+    expect((await readFriendFeed()).posts.map(p=>p.source?.externalId).sort()).toEqual(['111111','222222']);
+    await act(async()=>{host.querySelector<HTMLElement>('[aria-label="查看动态评论区：推荐在前的旧微博"]')!.click();await new Promise(r=>setTimeout(r,20));});await click(host,'返回上一级');
+    expect(reads).toBe(1);expect(host.textContent).toContain('推荐在前的旧微博');
+    await click(host,'刷新微博首页');expect(host.textContent).toContain('刷新后的另一批');expect(host.textContent).not.toContain('推荐在前的旧微博');
+    expect(JSON.parse(fetcher.mock.calls.filter(([,o])=>JSON.parse(o.body).action==='home').at(-1)![1].body).cursor).toBe('0');
+    fail=true;await click(host,'刷新微博首页');expect(host.textContent).toContain('微博读取测试错误');expect(host.textContent).toContain('刷新后的另一批');fail=false;
+    await click(host,'首页设置');const select=host.querySelector<HTMLSelectElement>('[aria-label="微博首页模式"]')!;
+    await act(async()=>{select.value='latest';select.dispatchEvent(new Event('change',{bubbles:true}));await new Promise(r=>setTimeout(r,20));});
+    await click(host,'返回上一级');await act(async()=>{await vi.waitFor(()=>expect(fetcher.mock.calls.some(([,o])=>JSON.parse(o.body).action==='following')).toBe(true));});
+    expect(host.textContent).toContain('最新关注');expect((await readFriendFeed()).settings?.realContentEnabled).toBe(true);expect(refreshFriendFeed).not.toHaveBeenCalled();
+});
+it('automatically restores my own posts on entry and retries a failed read without requiring an AI API',async()=>{
+    const {getProxyWorkerUrl}=await import('./proxyWorker');
+    const session={version:2,origin:window.location.origin,kind:'account',uid:'123456',expires:Date.now()+60000,cookies:[]};
+    sessionStorage.setItem('sully:weibo-session:v2',JSON.stringify({id:'own-profile',proxy:getProxyWorkerUrl(),uid:session.uid,session,expires:session.expires}));
+    const own={platform:'weibo',accountId:'123456',externalId:'999999',url:'https://weibo.com/123456/999999',author:'我',text:'找回我的真实微博',publishedAt:Date.now(),fetchedAt:Date.now(),truncated:false};
+    const fetcher=vi.fn().mockResolvedValueOnce(Response.json({error:'我的微博暂时不可读取'},{status:502})).mockImplementation(async()=>Response.json({session,posts:[own],nextPage:null}));vi.stubGlobal('fetch',fetcher);
+    const host=await render(React.createElement(FriendFeedApp));await click(host,'我的主页');
+    await act(async()=>{await vi.waitFor(()=>expect(host.textContent).toContain('我的微博暂时不可读取'));});
+    await click(host,'刷新我的微博');expect(host.textContent).toContain('找回我的真实微博');
+    const scroll=host.querySelector('.friend-feed-scroll')!;
+    await act(async()=>{for(const [type,y] of [['touchstart',0],['touchmove',120],['touchend',120]] as const){const e=new Event(type,{bubbles:true,cancelable:true});Object.defineProperty(e,'touches',{value:[{clientX:0,clientY:y}]});scroll.dispatchEvent(e);}await new Promise(r=>setTimeout(r,25));});
+    expect(fetcher).toHaveBeenCalledTimes(3);expect(host.textContent).toContain('找回我的真实微博');
+    expect(fetcher.mock.calls.every(([,o])=>JSON.parse(o.body).action==='posts')).toBe(true);expect(refreshFriendFeed).not.toHaveBeenCalled();
+});
+it('continues syncing followed posts when a personal source fails',async()=>{
+    const {getProxyWorkerUrl}=await import('./proxyWorker');
+    const session={version:2,origin:window.location.origin,kind:'account',uid:'123456',expires:Date.now()+60000,cookies:[]};
+    sessionStorage.setItem('sully:weibo-session:v2',JSON.stringify({id:'partial-sync',proxy:getProxyWorkerUrl(),uid:session.uid,session,expires:session.expires}));
+    const circle=await saveFriendCircle({name:'圈',description:'',memberIds:m.chars.map(c=>c.id)});
+    await saveWeiboBinding('user','123456');await mutateFriendFeed(f=>{f.weiboStreams=[{circleId:circle,enabled:true,generation:'partial',since:Date.now(),cursor:'0'}];});
+    const fetcher=vi.fn(async(_url,options)=>JSON.parse(options.body).action==='posts'?Response.json({error:'本人来源测试失败'},{status:502}):Response.json({session,posts:[{platform:'weibo',accountId:'654321',externalId:'111111',url:'https://weibo.com/654321/111111',author:'关注的人',text:'其他来源仍然成功',publishedAt:Date.now(),fetchedAt:Date.now(),truncated:false}],nextCursor:null}));vi.stubGlobal('fetch',fetcher);
+    const host=await render(React.createElement(FriendFeedWeiboTimeline,{feed:await readFriendFeed(),circleId:circle,onConnect:()=>{}}));await click(host,'同步最新动态');
+    expect(host.textContent).toContain('本人来源测试失败');expect(host.textContent).toContain('新增 1 条');expect((await readFriendFeed()).posts[0].text).toBe('其他来源仍然成功');
 });
 it('filters real and local posts visually without changing either model context or source permissions',async()=>{
     const {friendPostsForCharacter}=await import('./friendFeed');
@@ -683,6 +720,7 @@ it('deduplicates the real following list separately and discards it on disconnec
     const fetcher=vi.fn().mockResolvedValueOnce(Response.json({session,accounts:[{uid:'222222',name:'真实甲',description:'简介'}],nextPage:2,nextCursor:'20'}))
         .mockResolvedValueOnce(Response.json({session,accounts:[{uid:'222222',name:'真实甲',description:'简介'},{uid:'333333',name:'真实乙',description:''}],nextPage:null,nextCursor:null}));
     vi.stubGlobal('fetch',fetcher);
+    await saveWeiboBinding('user','123456',false);
     const host=await render(React.createElement(FriendFeedApp));await click(host,'我的主页');await click(host,'我的关注');expect(fetcher).not.toHaveBeenCalled();
     await click(host,'读取微博关注');await click(host,'更多微博关注');
     const real=host.querySelector('[aria-label="真实微博关注"]')!;expect(real.querySelectorAll('.ff-following-person')).toHaveLength(2);

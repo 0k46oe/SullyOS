@@ -5,7 +5,7 @@ import {mutateFriendFeed, readFriendFeed} from './friendFeed';
 import {enqueueFriendNotices, syncedPostEnabled} from './friendFeedActivity';
 import {isWeiboOriginalComment, type WeiboOriginalComment} from './friendFeedSourceComments';
 import {isFriendFeedSource, isWeiboImageUrl, type FriendFeedSource} from './friendFeedSource';
-import {friendAccounts, resolveFriendFeedSettings} from './friendFeedSettings';
+import {friendAccounts, resolveFriendFeedSettings,type WeiboHomeMode} from './friendFeedSettings';
 const KEY='sully:weibo-session:v2', LEGACY_KEY='sully:weibo-session:v1';
 const CONNECTION_LIFETIME=24*60*60*1000;
 export const WEIBO_CONNECTION_CHANGED='sully:weibo-connection-changed';
@@ -17,7 +17,7 @@ export interface WeiboSession {
 export interface WeiboConnection {proxy:string; session:WeiboSession; uid:string; expires:number; id:string}
 export interface WeiboFollowAccount {uid:string;name:string;description:string;avatar?:string}
 export interface WeiboProfile {uid:string;name:string;description:string;avatar?:string}
-export interface WeiboSyncResult {received:number;added:number;existing:number;hidden:number}
+export interface WeiboSyncResult {received:number;added:number;existing:number;hidden:number;posts?:FriendFeedSource[];nextCursor?:string|null}
 export function weiboSyncMessage(result:WeiboSyncResult) {
     if(!result.received)return '微博本次返回 0 条动态，没有新增内容';
     return `已读取 ${result.received} 条微博，新增 ${result.added} 条`
@@ -95,7 +95,7 @@ export async function pollWeiboLogin(ticket:{proxy:string;session:WeiboSession;g
     }
     return {...ticket,...data};
 }
-export async function fetchWeibo(action:'profile'|'posts'|'following'|'followingAccounts'|'comments',options:{uid?:string;page?:number;cursor?:string;mid?:string}={},signal?:AbortSignal) {
+export async function fetchWeibo(action:'profile'|'posts'|'following'|'home'|'followingAccounts'|'comments',options:{uid?:string;page?:number;cursor?:string;mid?:string}={},signal?:AbortSignal) {
     const connection=readWeiboConnection(), generation=epoch;
     if(!connection)throw Error('请先连接微博');
     const data=await requestWeibo(connection.proxy,{action,session:connection.session,...options},signal);
@@ -132,6 +132,42 @@ export async function readWeiboProfile(uid:string,signal?:AbortSignal):Promise<W
     if(!profile || profile.uid!==uid || typeof profile.name!=='string' || !profile.name.trim()
         || profile.avatar!==undefined && profile.avatar!=='' && !isWeiboImageUrl(profile.avatar))throw Error('微博个人资料不完整，未使用默认资料替代');
     return {...profile,description:typeof profile.description==='string'?profile.description:''};
+}
+export async function saveWeiboHomeMode(mode:WeiboHomeMode) {
+    if(mode!=='default'&&mode!=='latest')throw Error('请选择微博首页模式');
+    await mutateFriendFeed(feed=>{
+        if(resolveFriendFeedSettings(feed.settings).weiboHomeMode===mode)return;
+        feed.settings={...resolveFriendFeedSettings(feed.settings),weiboHomeMode:mode};
+        // Modes use different cursors. Invalidate in-flight imports from the previous mode.
+        for(const stream of feed.weiboStreams||[]){stream.cursor='0';stream.generation=createLocalId();stream.initialized=false;}
+    });
+}
+export async function readWeiboHome(mode:WeiboHomeMode,cursor='0',signal?:AbortSignal) {
+    const result=await fetchWeibo(mode==='latest'?'following':'home',{cursor},signal);
+    if(!Array.isArray(result.posts)||result.posts.length>50||!result.posts.every(p=>isFriendFeedSource(p)&&p.platform==='weibo'))throw Error('微博首页内容格式不正确');
+    if(result.nextCursor!==null&&!(typeof result.nextCursor==='string'&&(mode==='latest'?/^\d{1,25}$/:/^[\w,.:=-]{1,512}$/).test(result.nextCursor)))throw Error('微博首页分页格式不正确');
+    return {posts:result.posts,nextCursor:result.nextCursor!};
+}
+/** The displayed batch keeps upstream order; enabled imports retain the normal context permissions. */
+export async function readWeiboHomePage(circleId:string,mode:WeiboHomeMode,cursor='0',signal?:AbortSignal) {
+    const feed=await readFriendFeed();
+    if(resolveFriendFeedSettings(feed.settings).weiboHomeMode!==mode)throw Error('首页模式已变化，请重新读取');
+    const stream=feed.weiboStreams?.find(s=>s.circleId===circleId);
+    if(!stream)await setWeiboStream(circleId,true);
+    if(stream?.enabled===false)return readWeiboHome(mode,cursor,signal);
+    const result=await syncWeibo(circleId,'following',cursor!=='0',signal,{cursor,browse:true});
+    return {posts:result.posts!,nextCursor:result.nextCursor!};
+}
+/** Entering My profile restores own posts without replacing a user-selected binding or re-enabling a disabled source. */
+export async function syncWeiboOwnPosts(circleId:string,older=false,signal?:AbortSignal) {
+    const connection=readWeiboConnection();if(!connection)throw Error('请先连接微博');
+    await mutateFriendFeed(feed=>{
+        if(signal?.aborted)throw signal.reason;
+        if(readWeiboConnection()?.id!==connection.id)throw Error('微博连接已切换');
+        if(!feed.weiboBindings?.some(b=>b.ownerId==='user'))feed.weiboBindings=[...(feed.weiboBindings||[]),
+            {ownerId:'user',uid:connection.uid,enabled:true,generation:createLocalId(),since:Date.now(),initialized:false,page:1}];
+    });
+    return syncWeibo(circleId,'user',older,signal);
 }
 /** Browse real profiles without importing their entire history into the home feed. */
 export async function readWeiboProfilePosts(uid:string,page=1,signal?:AbortSignal) {
@@ -215,21 +251,24 @@ export async function syncWeiboComments(postId:string,older=false):Promise<void>
     try{await promise;}finally{if(commentReads.get(postId)===promise)commentReads.delete(postId);}
 }
 /** One upstream page per user action. Old pages never emit new-activity notifications. */
-export async function syncWeibo(circleId:string,ownerId:string|'following',older=false,signal?:AbortSignal):Promise<WeiboSyncResult> {
+export async function syncWeibo(circleId:string,ownerId:string|'following',older=false,signal?:AbortSignal,browse?:{cursor:string;browse:true}):Promise<WeiboSyncResult> {
     const lock=`${circleId}:${ownerId}`;if(running.has(lock))throw Error('正在同步该微博，请等待本次读取完成');running.add(lock);
     try {
         const feed=await readFriendFeed(), connection=readWeiboConnection(), generation=epoch;
         const target=ownerId==='following'?feed.weiboStreams?.find(b=>b.circleId===circleId):feed.weiboBindings?.find(b=>b.ownerId===ownerId);
         if(!target?.enabled)throw Error('请先开启微博来源');
         const page='page' in target ? target.page : undefined, cursor='cursor' in target ? target.cursor : undefined;
-        if(older && (ownerId==='following'?cursor===null:page===null))throw Error('没有更早的微博可读取');
+        if(older && !browse && (ownerId==='following'?cursor===null:page===null))throw Error('没有更早的微博可读取');
         const isOwned=(p:typeof feed.posts[number])=>p.circleId===circleId && p.synced && (ownerId==='following'?p.authorId.startsWith('weibo:'):p.authorId===ownerId);
         const limit=[25,50,100,200].includes(feed.syncLimit||0)?feed.syncLimit!:50;
-        if(older && feed.posts.filter(isOwned).length>=limit)throw Error('已达到同步保留上限，可在首页「微博同步」提高上限后继续');
-        const result=await fetchWeibo(ownerId==='following'?'following':'posts',ownerId==='following'?{cursor:older?cursor||'0':'0'}:{uid:'uid' in target?target.uid:undefined,page:older?page||1:1},signal);
+        if(older && !browse && feed.posts.filter(isOwned).length>=limit)throw Error('已达到同步保留上限，可在首页「微博同步」提高上限后继续');
+        const result:Pick<WeiboResponse,'posts'|'nextCursor'|'nextPage'>=ownerId==='following'
+            ?await readWeiboHome(resolveFriendFeedSettings(feed.settings).weiboHomeMode,browse?.cursor??(older?cursor||'0':'0'),signal)
+            :await fetchWeibo('posts',{uid:'uid' in target?target.uid:undefined,page:older?page||1:1},signal);
         if(!Array.isArray(result.posts) || !result.posts.every(p=>p.platform==='weibo' && isFriendFeedSource(p)))throw Error('微博内容格式不正确');
         if(ownerId!=='following' && 'uid' in target && result.posts.some(p=>p.accountId!==target.uid))throw Error('微博返回的账号与绑定主页不符，未导入内容');
         const summary:WeiboSyncResult={received:result.posts.length,added:0,existing:0,hidden:0};
+        if(browse){summary.posts=[];summary.nextCursor=result.nextCursor??null;}
         const userName=(await DB.getUserProfile())?.name||'我';
         await mutateFriendFeed((state,chars)=>{
             if(signal?.aborted)throw signal.reason;
@@ -248,6 +287,7 @@ export async function syncWeibo(circleId:string,ownerId:string|'following',older
                 const name=authorId==='user'?settings.userNickname||settings.weiboProfile?.name||userName:char?friendAccounts(settings,char)[0].name:source.author;
                 const hidden=`${circleId}:${authorId}:${source.externalId}`;
                 if(state.hiddenSources?.includes(hidden)){summary.hidden++;continue;}
+                summary.posts?.push(source);
                 const existingPost=state.posts.find(p=>p.circleId===circleId && p.synced && p.source?.externalId===source.externalId
                     && (p.authorId===authorId || p.authorId===`weibo:${source.accountId}`));
                 if(existingPost){
@@ -260,13 +300,13 @@ export async function syncWeibo(circleId:string,ownerId:string|'following',older
                     existingPost.authorName=name;
                     continue;
                 }
-                if(older && state.posts.filter(isOwned).length>=cap){capped=true;continue;}
+                if(older && !browse && state.posts.filter(isOwned).length>=cap){capped=true;continue;}
                 const post={id:createLocalId(),circleId,authorId,accountId:'main',authorName:name,text:source.text,createdAt:source.publishedAt!,source,synced:true,
                     audienceIds:circle.memberIds.filter(id=>chars.some(c=>c.id===id)),comments:[]};
                 state.posts.push(post);added++;summary.added++;
                 if(current.initialized && !older && source.publishedAt!>current.since)enqueueFriendNotices(state,post,true);
             }
-            if((older || !current.initialized) && !capped){
+            if((older || !current.initialized || ownerId==='following') && !capped){
                 if('uid' in current) current.page=result.nextPage ?? null;else current.cursor=result.nextCursor ?? null;
             }
             if(older && !added && !capped) {if('uid' in current)current.page=null;else current.cursor=null;}
