@@ -67,6 +67,14 @@ it('parses only JSON from the homepage',()=>{
     expect(weiboPageUid('<script>window.$CONFIG={uid:evil()};</script>')).toBe('');
     expect(normalizeWeiboPost({text:'error'})).toBeNull();
 });
+it('returns the requested real profile and a safe avatar, rejecting another account response',async()=>{
+    const session={version:2,origin,kind:'account',uid:'123456',expires:Date.now()+60000,cookies:[]};
+    const fetcher=vi.fn().mockResolvedValueOnce(Response.json({ok:1,data:{user:{idstr:'123456',screen_name:'真实昵称',avatar_hd:'http://tvax1.sinaimg.cn/crop/avatar.jpg',description:'简介',private:'do-not-return'}}}))
+        .mockResolvedValueOnce(Response.json({ok:1,data:{user:{idstr:'999999',screen_name:'另一人'}}}));vi.stubGlobal('fetch',fetcher);
+    const response=await handleWeibo(request({action:'profile',session}),{});
+    expect(response.status).toBe(200);expect((await response.json()).profile).toEqual({uid:'123456',name:'真实昵称',avatar:'https://tvax1.sinaimg.cn/crop/avatar.jpg',description:'简介'});
+    expect((await handleWeibo(request({action:'profile',session}),{})).status).toBe(502);
+});
 it('rejects malformed credentials, injected cookie headers and old encrypted tickets before networking',async()=>{
     const fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);
     const valid={version:2,origin,kind:'account',uid:'123456',expires:Date.now()+60000,cookies:[]};
@@ -83,7 +91,7 @@ it('rejects malformed credentials, injected cookie headers and old encrypted tic
 it('keeps concurrent callers isolated and never retains cookies for a later credential-free request',async()=>{
     const input=(value:string)=>({version:2,origin,kind:'account',uid:'123456',expires:Date.now()+60000,
         cookies:[{name:'SUB',value,domain:'weibo.com',path:'/',hostOnly:false}]});
-    const fetcher=vi.fn(async()=>Response.json({ok:1,data:{user:{screen_name:'test',description:''}}}));vi.stubGlobal('fetch',fetcher);
+    const fetcher=vi.fn(async()=>Response.json({ok:1,data:{user:{idstr:'123456',screen_name:'test',description:''}}}));vi.stubGlobal('fetch',fetcher);
     const results=await Promise.all(['user-a','user-b'].map(value=>handleWeibo(request({action:'profile',session:input(value)}),{})));
     expect(results.map(r=>r.status)).toEqual([200,200]);
     expect(fetcher.mock.calls.map((call:any)=>call[1].headers.Cookie).sort()).toEqual(['SUB=user-a','SUB=user-b']);

@@ -1,11 +1,12 @@
 import React, {useEffect, useRef, useState} from 'react';
-import {ArrowSquareOut, CaretRight} from '@phosphor-icons/react';
+import {CaretRight} from '@phosphor-icons/react';
 import type {CharacterGroup,CharacterProfile,UserProfile} from '../types';
 import {FriendFeedGroupedList} from './FriendFeedGroupedList';
 import type {FriendFeedState} from '../utils/friendFeed';
 import {activeFriendAccounts,friendAccountName,friendAccountRef} from '../utils/friendFeedGraph';
 import {fetchWeibo, readWeiboConnection, WEIBO_CONNECTION_CHANGED, type WeiboFollowAccount} from '../utils/friendFeedWeibo';
 import FriendFeedAvatar from './FriendFeedAvatar';
+import {isWeiboImageUrl} from '../utils/friendFeedSource';
 
 /** Session-only UI data; never added to character subscriptions, memory or model context. */
 export function useWeiboFollowing() {
@@ -55,9 +56,9 @@ export default function FriendFeedFollowing({characters, groups=[], weibo, onPro
             <p>来自你登录的微博账号，与角色关注分开展示。</p>
             {!weibo.connection?<button className="ff-following-load" onClick={onConnect}>连接微博</button>:<>
                 <button className="ff-following-load" disabled={weibo.busy} onClick={()=>void weibo.load()}>{weibo.busy?'正在读取…':weibo.loaded?'刷新微博关注':'读取微博关注'}</button>
-                {weibo.accounts.map(account=><a className="ff-following-person" key={account.uid} href={`https://weibo.com/u/${account.uid}`} target="_blank" rel="noopener noreferrer">
-                    <FriendFeedAvatar name={account.name}/><span><strong>{account.name}</strong><small>{account.description||'在微博查看主页'}</small></span><ArrowSquareOut size={16}/>
-                </a>)}
+                {weibo.accounts.map(account=><button className="ff-following-person" key={account.uid} onClick={()=>onProfile('weibo:'+account.uid)}>
+                    <FriendFeedAvatar name={account.name} avatar={isWeiboImageUrl(account.avatar)?account.avatar:undefined}/><span><strong>{account.name}</strong><small>{account.description||'查看真实微博主页'}</small></span><CaretRight size={16}/>
+                </button>)}
                 {weibo.next&&<button className="ff-following-load" disabled={weibo.busy} onClick={()=>void weibo.load(true)}>更多微博关注</button>}
                 {weibo.loaded&&!weibo.accounts.length&&<p>微博暂未返回可见的关注账号。</p>}
                 {weibo.filtered&&<p>微博隐藏了部分账号，这里只能展示接口返回的可见名单。</p>}

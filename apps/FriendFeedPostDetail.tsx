@@ -48,7 +48,7 @@ export default function FriendFeedPostDetail({post,characters,user,onComment,onP
     </article>;
     return <div className="ff-post-detail" ref={container}>
         <article className="ff-detail-original"><header><button onClick={()=>onProfile(post.authorId,post.accountId)} aria-label={`查看${name}的主页`}>
-            <FriendFeedAvatar name={name} avatar={post.accountId&&post.accountId!=='main'?undefined:post.authorId==='user'?user.avatar:author?.avatar}/><strong>{name}</strong></button>
+            <FriendFeedAvatar name={name} avatar={post.accountId&&post.accountId!=='main'?undefined:post.authorId==='user'?user.avatar:author?.avatar||(post.authorId.startsWith('weibo:')||post.authorKind==='external'?post.source?.authorAvatar:undefined)}/><strong>{name}</strong></button>
             <time>{new Date(post.createdAt).toLocaleString('zh-CN')}</time></header>
             {!!post.accountTags?.length&&<small className="ff-account-tags">{post.accountTags.map(t=>'#'+t).join(' · ')}</small>}
             <p>{post.text}</p>
@@ -73,6 +73,6 @@ export default function FriendFeedPostDetail({post,characters,user,onComment,onP
             </div>)}
         </section>
         <button className="ff-detail-compose" onClick={onComment}><PencilSimple size={18}/>写评论…</button>
-        {post.source?.platform==='weibo'&&<FriendFeedWeiboComments key={post.id} post={post} onReply={onReply?id=>onReply({kind:'source',id}):undefined}/>}
+        {post.source?.platform==='weibo'&&<FriendFeedWeiboComments key={post.id} post={post} onProfile={uid=>onProfile('weibo:'+uid)} onReply={onReply?id=>onReply({kind:'source',id}):undefined}/>}
     </div>;
 }

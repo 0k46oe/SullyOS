@@ -33,8 +33,7 @@ export default function FriendFeedSettingsMenu({onPreferences, onApi, onSources,
         </div></section>
         <section><h2>内容与连接</h2><div className="ff-settings-menu">
             {row('哔哔 API 设置', onApi)}
-            {row('管理动态来源', onSources)}
-            {preference('content', '阅读与配图权限')}
+            {row('微博与真实内容', onSources, '连接 · 同步 · 主页 · 阅读权限')}
         </div></section>
         <section><h2>帮助与其他</h2><div className="ff-settings-menu">
             {row('重新查看入门引导', onSetup)}

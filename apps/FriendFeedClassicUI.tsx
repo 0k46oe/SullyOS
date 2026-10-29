@@ -50,7 +50,7 @@ export function ClassicPost({theme, post, index, user, characters, onProfile, on
 }) {
     const [fullText, setFullText] = useState(false);
     const name = post.accountId && post.accountId !== 'main' ? post.authorName : post.authorId === 'user' ? user.name || '我' : characters.find(c => c.id === post.authorId)?.name || post.authorName;
-    const avatar = post.accountId&&post.accountId!=='main'?undefined:post.authorId === 'user' ? user.avatar : characters.find(c => c.id === post.authorId)?.avatar;
+    const avatar = post.accountId&&post.accountId!=='main'?undefined:post.authorId === 'user' ? user.avatar : characters.find(c => c.id === post.authorId)?.avatar || (post.authorId.startsWith('weibo:')||post.authorKind==='external'?post.source?.authorAvatar:undefined);
     const time = new Date(post.createdAt).toLocaleString('zh-CN', {month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit'});
     const media = friendPostMediaCount(post) ? <FriendFeedImages images={friendPostImages(post)} imageCards={post.imageCards} carousel={theme === 'insta'}/> : null;
     const limit = theme === 'insta' ? 140 : theme === 'moments' ? 240 : 360;

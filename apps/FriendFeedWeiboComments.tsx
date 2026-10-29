@@ -4,7 +4,7 @@ import type {FriendPost} from '../utils/friendFeed';
 import {readWeiboConnection, syncWeiboComments} from '../utils/friendFeedWeibo';
 import FriendFeedAvatar from './FriendFeedAvatar';
 
-export default function FriendFeedWeiboComments({post,onReply}:{post:FriendPost;onReply?:(id:string)=>void}) {
+export default function FriendFeedWeiboComments({post,onReply,onProfile}:{post:FriendPost;onReply?:(id:string)=>void;onProfile?:(uid:string)=>void}) {
     const [busy,setBusy]=useState(false), [error,setError]=useState('');
     const active=useRef(true), running=useRef(false);
     async function load(older=false) {
@@ -27,7 +27,7 @@ export default function FriendFeedWeiboComments({post,onReply}:{post:FriendPost;
         {!page&&!busy&&!error&&<button className="ff-following-load" onClick={()=>void load()}>读取微博原评论</button>}
         {page&&!page.rows.length&&<p className="ff-comments-empty">暂时没有可读取的原评论。</p>}
         {page?.rows.map(c=><article className="ff-detail-comment" key={c.id}>
-            <FriendFeedAvatar name={c.authorName}/><div><strong>{c.authorName}</strong>
+            <FriendFeedAvatar name={c.authorName}/><div>{onProfile?<button className="ff-setting-link" onClick={()=>onProfile(c.authorId)}>{c.authorName}</button>:<strong>{c.authorName}</strong>}
                 {c.parentId&&<small className="ff-discussion-hint"> · 楼中楼回复</small>}
                 <p>{c.text}</p><time>{new Date(c.createdAt).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}</time>
                 {onReply&&<button type="button" className="ff-comment-reply" aria-label={`在本地回复${c.authorName}的微博评论`} onClick={()=>onReply(c.id)}>在本地回复</button>}
