@@ -4,11 +4,13 @@ import { processHomeMemoryAfterSave } from '../utils/homeMemoryPostHook';
 import { homeSharedRecipients } from '../utils/homeSharedEvents';
 import { homeRecords } from '../utils/homeRecords';
 import { readFriendFeed } from '../utils/friendFeed';
+import { collectFriendFeedMedia, exportActivityTextAsset, isActivityTextAsset } from '../utils/activityBackup';
 import { prepareFriendFeedMainTask, consumeFriendFeedMainReply } from '../utils/friendFeedMain';
 import { releaseFriendFeedEmotionTask } from '../utils/friendFeedEmotion';
 import { retireCloudCharacter } from '../utils/amsgCloudRetirement';
 import { resolveDialogueApi } from '../utils/characterApi';
 import {isBuiltinAppearance, readBuiltinAppearance} from '../utils/builtinAppearance';
+import { sameSullyIconSnapshot, SULLY_BIBI_UPGRADE_KEY, upgradeBuiltinSullyBibiIcon } from '../utils/builtinAppearanceUpgrade';
 import { browserHolidayCache, deviceTimeZone, getUserHolidayReminder } from '../utils/userHolidays';
 import {exportDecorationMedia} from '../utils/decorationMediaBackup';
 import {migrateLegacyWhiteboxPresets} from '../utils/legacyWhiteboxPresets';
@@ -1585,6 +1587,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                 }
                 setCustomIcons(loadedIcons);
                 initPwaIcon(loadedIcons); // 启动时恢复自定义 PWA 图标（见 utils/appIcon.ts）
+                void upgradeBuiltinSullyBibiIcon(loadedIcons).then(icon => {
+                    if (icon) setCustomIcons(current => sameSullyIconSnapshot(current, loadedIcons) ? { ...current, friend_feed: icon } : current);
+                }).catch(() => { /* Optional artwork upgrade: retry next startup after offline/storage failures. */ });
                 // Strip deprecated slots that may have been imported via beautification packs.
                 if (loadedTheme.launcherWidgets) {
                     for (const slot of DEPRECATED_WIDGET_SLOTS) {
@@ -3661,6 +3666,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const removeCustomTheme = async (id: string) => { setCustomThemes(prev => prev.filter(t => t.id !== id)); await DB.deleteTheme(id); };
   const setCustomIcon = async (appId: string, iconUrl: string | undefined) => {
       stopBeautyUsage('appearance');
+      // Explicit edits (including removing the icon) opt out of this one-time backfill.
+      if (appId === AppID.FriendFeed) await DB.saveAsset(SULLY_BIBI_UPGRADE_KEY, '1');
       const stored = iconUrl?.startsWith('data:') ? await migrateDataUrlToRef(iconUrl) : iconUrl;
       setCustomIcons(prev => {
           const next = { ...prev };
@@ -4136,7 +4143,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (mode === 'full') {
               storesToProcess = allStores; // Include everything
           } else if (mode === 'text_only') {
-              storesToProcess = allStores.filter(s => s !== 'assets'); // Exclude raw assets store
+              storesToProcess = allStores; // assets is filtered to activity text records below
           } else if (mode === 'media_only') {
               // media_only now includes themes/assets for complete media backup
               storesToProcess = ['gallery', 'emojis', 'emoji_categories', 'journal_stickers', 'user_profile', 'characters', 'messages', 'themes', 'assets', 'bank_data',
@@ -4155,7 +4162,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           const cloneForInPlace = <T,>(v: T): T => (mode === 'text_only' ? v : deepCloneForExport(v));
 
           const backupData: Partial<FullBackupData> = {
-              friendFeed: mode === 'text_only' ? await readFriendFeed() : undefined,
+              friendFeed: mode === 'text_only' ? stripBackupImages(await readFriendFeed()) : undefined,
+              friendFeedMedia: mode === 'media_only' ? collectFriendFeedMedia(await readFriendFeed()) : undefined,
               contentFavoritesIndex: mode === 'text_only'
                   ? stripBackupImages(await DB.getAssetRaw('content_favorites_index_v1')) : undefined,
               timestamp: Date.now(),
@@ -4531,7 +4539,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
               const arrayField = backupArrayFieldByStore[storeName];
               if (arrayField) {
-                  const field = storeName === 'characters' && mode === 'media_only' ? 'mediaAssets' : arrayField;
+                  const field = storeName === 'characters' && mode === 'media_only' ? 'mediaAssets'
+                      : storeName === 'assets' && mode === 'text_only' ? 'activityTextAssets' : arrayField;
                   prewrittenStores[field] = await streamBackupArrayStore(zip, storeName, field, {
                       onSerialized: collectSerialized,
                       transform: (item, index) => {
@@ -4544,10 +4553,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           }
                           if (storeName === 'assets') {
                               const id = item?.id;
+                              if (mode === 'text_only') return exportActivityTextAsset(item);
+                              if (mode === 'media_only' && typeof id === 'string' && isActivityTextAsset(id)) return undefined;
                               if (typeof id === 'string' && (
                                   isRedundantManagedAssetId(id)
                                   || (isCompanionVoiceAssetId(id) && !companionVoiceAssetIdsForBackup.has(id))
-                                  || !shouldIncludeVoiceRelatedAssetInBackup(item, mode !== 'text_only')
+                                  || !shouldIncludeVoiceRelatedAssetInBackup(item, true)
                               )) return undefined;
                               externalizeVoiceMessageBlob(item, index, (path, blob) => {
                                   zip.fileBlob(path, blob, { compression: 'STORE' });

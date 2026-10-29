@@ -1,6 +1,7 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {ArrowSquareOut, CaretRight} from '@phosphor-icons/react';
-import type {CharacterProfile,UserProfile} from '../types';
+import type {CharacterGroup,CharacterProfile,UserProfile} from '../types';
+import {FriendFeedGroupedList} from './FriendFeedGroupedList';
 import type {FriendFeedState} from '../utils/friendFeed';
 import {activeFriendAccounts,friendAccountName,friendAccountRef} from '../utils/friendFeedGraph';
 import {fetchWeibo, readWeiboConnection, WEIBO_CONNECTION_CHANGED, type WeiboFollowAccount} from '../utils/friendFeedWeibo';
@@ -36,18 +37,19 @@ export function useWeiboFollowing() {
     return {connection,accounts,next,loaded,busy,error,filtered,load};
 }
 
-export default function FriendFeedFollowing({characters, weibo, onProfile, onConnect,feed,user,onManage}: {
+export default function FriendFeedFollowing({characters, groups=[], weibo, onProfile, onConnect,feed,user,onManage}: {
     feed:FriendFeedState;user:UserProfile;onManage:()=>void;
-    characters:CharacterProfile[];weibo:ReturnType<typeof useWeiboFollowing>;onProfile:(id:string)=>void;onConnect:()=>void;
+    characters:CharacterProfile[];groups?:CharacterGroup[];weibo:ReturnType<typeof useWeiboFollowing>;onProfile:(id:string)=>void;onConnect:()=>void;
 }) {
     const source=friendAccountRef(feed,{authorId:'user'});
     const accounts=activeFriendAccounts(feed,characters).filter(a=>source&&feed.accountGraph?.follows[source.id]?.includes(a.id));
+    const characterMap=new Map(characters.map(c=>[c.id,c]));
     return <div className="ff-following-directory">
         <section aria-label="关注的角色"><header><h2>账号 <small>{accounts.length}</small></h2><button className="ff-setting-link" onClick={onManage}>管理关注与身份</button></header>
             {!accounts.length&&<p>还没有关注的账号，可以在关系设置里添加。</p>}
-            {accounts.map(account=>{const name=friendAccountName(feed,account,characters,user.name);return <button className="ff-following-person" key={account.id} onClick={()=>onProfile(account.id)}>
+            {!!accounts.length&&<FriendFeedGroupedList items={accounts.map(a=>({...a,groupId:characterMap.get(a.ownerId)?.groupId,searchText:`${friendAccountName(feed,a,characters,user.name)} ${characterMap.get(a.ownerId)?.name??''}`}))} groups={groups} label="关注账号" searchLabel="搜索关注账号" renderItem={account=>{const name=friendAccountName(feed,account,characters,user.name);return <button className="ff-following-person" key={account.id} onClick={()=>onProfile(account.id)}>
                 <FriendFeedAvatar name={name} avatar={account.accountId==='main'?characters.find(c=>c.id===account.ownerId)?.avatar:undefined}/><span><strong>{name}</strong><small>查看这个账号的主页</small></span><CaretRight size={16}/>
-            </button>;})}
+            </button>;}}/>}
         </section>
         <section aria-label="真实微博关注"><header><h2>微博关注</h2>{weibo.loaded&&<span>已读取 {weibo.accounts.length} 人</span>}</header>
             <p>来自你登录的微博账号，与角色关注分开展示。</p>

@@ -1,9 +1,11 @@
 import {friendPostMediaCount} from '../utils/friendFeedImages';
 import React, {useCallback, useEffect, useLayoutEffect, useRef, useState} from 'react';
-import {ArrowLeft, ChatCircle, CircleNotch, ArrowClockwise, GearSix, PencilSimple, Plus} from '@phosphor-icons/react';
+import {trackBibiEntry, trackBibiFeature} from '../utils/octoberAnalytics';
+import {ArrowLeft, ChatCircle, CircleNotch, ArrowClockwise, GearSix, Plus} from '@phosphor-icons/react';
 import BibiIcon from '../components/os/BibiIcon';
 import FriendFeedImagePicker from './FriendFeedImagePicker';
 import FriendFeedSetup from './FriendFeedSetup';
+import FriendFeedCoverEditor from './FriendFeedCover';
 import FriendFeedApi from './FriendFeedApi';
 import FriendFeedInbox, {FriendFeedInboxButton} from './FriendFeedInbox';
 import {friendUserInbox, markFriendInboxRead, consumeFriendInbox, subscribeFriendInboxOpen} from '../utils/friendFeedInbox';
@@ -19,11 +21,12 @@ import {commentOnFriendPost, deleteFriendPost, emptyFriendFeed, publishFriendPos
     ensurePublicFriendFeed, mutateFriendFeed, saveFriendFeedSettings, subscribeFriendFeed} from '../utils/friendFeed';
 import type {FriendReplyTarget} from '../utils/friendFeed';
 import {defaultFriendFeedSettings, resolveFriendFeedSettings} from '../utils/friendFeedSettings';
-import {ClassicHeader, ClassicCover, ClassicProfile, ClassicPost} from './FriendFeedClassicUI';
+import {ClassicHeader, ClassicCover, ClassicProfile, ClassicPost, ClassicComposer} from './FriendFeedClassicUI';
 import FriendFeedPreferences from './FriendFeedPreferences';
+import FriendFeedSettingsMenu, {preferenceTitles, type PreferenceSection} from './FriendFeedSettingsMenu';
+import {FriendFeedDirectoryProvider} from './FriendFeedGroupedList';
 import FriendFeedRelations from './FriendFeedRelations';
 import {friendAccountName,friendAccountRef} from '../utils/friendFeedGraph';
-import FriendFeedAvatar from './FriendFeedAvatar';
 import {FriendFeedWeiboConnection,FriendFeedProfileControls,FriendFeedWeiboTimeline} from './FriendFeedWeibo';
 import {syncedPostEnabled} from '../utils/friendFeedActivity';
 import {runImmediateFriendReplies} from '../utils/friendFeedReplies';
@@ -41,10 +44,11 @@ import './friendFeedNavigation.css';
 
 export interface FriendFeedProps {embedded?: boolean; initialCharacterId?: string; onBack?: () => void}
 type Panel = {kind: 'post'; circleId: string}
-    | {kind: 'comment'; postId: string; replyTarget?:FriendReplyTarget} | {kind:'share';postId:string} | {kind:'detail';postId:string;focusComment?:{id:string}} | {kind: 'delete'; postId: string} | {kind: 'settings'} | {kind:'inbox'} | {kind:'api'} | {kind: 'weibo'} | {kind:'sources'} | {kind:'following'} | {kind:'relations'};
+    | {kind:'cover';ownerId:string}
+    | {kind: 'comment'; postId: string; replyTarget?:FriendReplyTarget} | {kind:'share';postId:string} | {kind:'detail';postId:string;focusComment?:{id:string}} | {kind: 'delete'; postId: string} | {kind: 'settings'; section?: PreferenceSection} | {kind:'inbox'} | {kind:'api'} | {kind: 'weibo'} | {kind:'sources'} | {kind:'following'} | {kind:'relations'};
 
 export default function FriendFeedApp({embedded = false, initialCharacterId, onBack}: FriendFeedProps) {
-    const {characters, userProfile, closeApp, openApp, apiConfig, realtimeConfig} = useOS();
+    const {characters, characterGroups = [], userProfile, closeApp, openApp, apiConfig, realtimeConfig} = useOS();
     const [feed, setFeed] = useState(emptyFriendFeed), [loaded, setLoaded] = useState(false);
     const [limit, setLimit] = useState(5);
     const [panel, setPanel] = useState<Panel>(), [body, setBody] = useState('');
@@ -52,11 +56,12 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
     const [showSetup,setShowSetup]=useState(false);
     const [appApi,setAppApi]=useState<DialogueApiConfig|null>(null);
     const [settingsSection,setSettingsSection]=useState('');
-    const [returnToSettings,setReturnToSettings]=useState(false);
     const [returnToInbox,setReturnToInbox]=useState(false);
-    const [returnToSources,setReturnToSources]=useState(false);
-    const [returnToFollowing,setReturnToFollowing]=useState(false);
+    const panelHistory = useRef<{panel?: Panel; profileId: string; showSetup: boolean; section: string; scrollTop: number}[]>([]);
+    const restoredScroll = useRef<number>();
     const [profileFromFollowing,setProfileFromFollowing]=useState(false);
+    const profileFromPanel = useRef(false);
+    const [relationsOwner,setRelationsOwner]=useState('user');
     const [returnToPost,setReturnToPost]=useState(''),[profileReturnPost,setProfileReturnPost]=useState('');
     const detailOriginProfile=useRef('');
     const weiboFollowing=useWeiboFollowing();
@@ -73,7 +78,11 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
         finally{refreshRunning.current=false;if(alive.current)setRefreshing(false);}
     };
     const [settingsDraft, setSettingsDraft] = useState(defaultFriendFeedSettings);
-    const settings = panel?.kind === 'settings' ? settingsDraft : resolveFriendFeedSettings(feed.settings);
+    const preferenceSection = panel?.kind === 'settings' ? panel.section : undefined;
+    const settingsPageTitle = panel?.kind === 'settings' ? (preferenceSection ? preferenceTitles[preferenceSection] : '哔哔设置')
+        : panel?.kind === 'api' ? '哔哔 API 设置' : panel?.kind === 'sources' ? '动态来源'
+        : panel?.kind === 'weibo' ? '微博连接' : panel?.kind === 'relations' ? '关注与身份关系' : panel?.kind === 'cover' ? '主页封面' : '';
+    const settings = preferenceSection ? settingsDraft : resolveFriendFeedSettings(feed.settings);
     const displayUser={...userProfile,name:settings.userNickname||userProfile.name};
     const displayCharacters=characters.map(c=>({...c,name:settings.identities[c.id]?.nickname||c.name}));
     const theme = embedded ? 'island' : settings.theme;
@@ -85,11 +94,17 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
     const pullDistance=useFriendFeedPullRefresh(scroller,loaded&&(!panel&&!profileId||panel?.kind==='detail')&&!refreshing&&!(feed.refreshLease&&feed.refreshLease.until>Date.now()),()=>void refreshHome(panel?.kind==='detail'?panel.postId:undefined));
     const navigateProfile=(id:string)=>{
         if(!id&&!profileId&&!panel)void refreshHome();
+        panelHistory.current=[];
+        profileFromPanel.current=false;
         setProfileId(id);setProfileFromFollowing(false);setProfileReturnPost('');setPanel(undefined);setPostFilter('all');
         if(scroller.current)scroller.current.scrollTop=0;
     };
     useEffect(()=>{if(!refreshStatus||refreshing)return;const timer=setTimeout(()=>setRefreshStatus(''),6000);return()=>clearTimeout(timer);},[refreshStatus,refreshing]);
     const [retry, setRetry] = useState(0);
+    const countedEntry = useRef(false);
+    useEffect(() => {
+        if (loaded && !countedEntry.current) { countedEntry.current = true; trackBibiEntry(embedded ? 'phone' : 'app'); }
+    }, [loaded, embedded]);
     const [replying, setReplying] = useState('');
     const replyRunning = useRef(false);
     const runReplies = async (postId: string, triggerId?: string) => {
@@ -122,32 +137,44 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
     const posts=profilePosts.filter(p=>!social||postFilter==='all'||!!friendPostMediaCount(p));
     const profileName=profileRef?friendAccountName(feed,profileRef,characters,displayUser.name):profileOwner==='user'?displayUser.name||'我':displayCharacters.find(c=>c.id===profileOwner)?.name||feed.posts.find(p=>p.authorId===profileOwner)?.authorName||'主页';
     useEffect(() => {setLimit(5);}, [circle?.id]);
-    useLayoutEffect(() => {if (scroller.current) scroller.current.scrollTop = 0;}, [circle?.id, panel?.kind, profileId]);
+    useLayoutEffect(() => {
+        if (scroller.current) scroller.current.scrollTop = restoredScroll.current ?? 0;
+        restoredScroll.current = undefined;
+    }, [circle?.id, panel?.kind, preferenceSection, profileId, showSetup]);
     useLayoutEffect(()=>{if(panel?.kind!=='settings'||!settingsSection)return;
         const target=scroller.current?.querySelector<HTMLElement>(`[data-setup-section="${settingsSection}"]`);
         target?.scrollIntoView?.({block:'start'});target?.focus({preventScroll:true});
-    },[panel?.kind,settingsSection]);
+    },[panel?.kind,preferenceSection,settingsSection]);
     useEffect(()=>{let active=true;void readFriendFeedApi().then(value=>{if(active)setAppApi(value);}).catch(e=>{if(active)setError(e.message);});return()=>{active=false;};},[panel?.kind]);
     useEffect(() => {setLimit(5);}, [profileId]);
     useEffect(()=>{setPostFilter('all');},[profileId,circle?.id]);
     useEffect(()=>{setProfileId('');},[circle?.id]);
-    const back = () => {if (saving.current||processingImages) return; if(panel?.kind==='weibo'&&returnToSources){setPanel({kind:'sources'});setReturnToSources(false);setError('');}
-        else if(panel?.kind==='weibo'&&returnToFollowing){setPanel({kind:'following'});setReturnToFollowing(false);setError('');}
+    const rememberPage = () => panelHistory.current.push({panel, profileId, showSetup, section: settingsSection, scrollTop: scroller.current?.scrollTop ?? 0});
+    const restorePage = () => {
+        const previous = panelHistory.current.pop();
+        if (!previous) return false;
+        restoredScroll.current = previous.scrollTop;
+        setPanel(previous.panel); setProfileId(previous.profileId); setShowSetup(previous.showSetup);
+        setSettingsSection(previous.section); setError('');
+        return true;
+    };
+    const back = () => {if (saving.current||processingImages) return;
+        if ((panel || showSetup) && restorePage()) return;
+        if (!panel && profileFromPanel.current) {profileFromPanel.current=false; if (restorePage()) return;}
+        if (showSetup && !panel) {setShowSetup(false); setError('');}
         else if((panel?.kind==='comment'||panel?.kind==='share')&&returnToPost){setPanel({kind:'detail',postId:returnToPost});setReturnToPost('');setError('');}
-        else if((panel?.kind==='api'||panel?.kind==='relations')&&returnToSettings){setPanel({kind:'settings'});setReturnToSettings(false);setError('');}
         else if(panel?.kind==='detail'&&returnToInbox){setPanel({kind:'inbox'});setReturnToInbox(false);setError('');}
         else if (panel) {setPanel(undefined); setError(''); actionButton.current?.focus();}
         else if(profileReturnPost){setPanel({kind:'detail',postId:profileReturnPost});setProfileId(detailOriginProfile.current);setProfileReturnPost('');}
         else if(profileId&&profileFromFollowing){setProfileId('user');setPanel({kind:'following'});setProfileFromFollowing(false);}
         else if(profileId)setProfileId('');else (onBack || closeApp)();};
-    useLocalBackHandler(() => {back(); return true;}, embedded ? 75 : 30, embedded || !!panel || !!profileId);
+    useLocalBackHandler(() => {back(); return true;}, embedded ? 75 : 30, embedded || !!panel || !!profileId || showSetup);
     const open = (next: Panel) => {
-        setReturnToSettings((next.kind==='api'||next.kind==='relations')&&panel?.kind==='settings');
+        trackBibiFeature(next.kind);
+        rememberPage();
         setSettingsSection('');
         if(next.kind==='detail'){detailOriginProfile.current=profileId;setReturnToInbox(panel?.kind==='inbox');}
         setReturnToPost((next.kind==='comment'||next.kind==='share')&&panel?.kind==='detail'?panel.postId:'');
-        setReturnToSources(next.kind==='weibo'&&panel?.kind==='sources');
-        setReturnToFollowing(next.kind==='weibo'&&panel?.kind==='following');
         setError(''); setBody(''); setDraftImages([]); setPanel(next);
         if (next.kind === 'settings') setSettingsDraft(resolveFriendFeedSettings(feed.settings));
     };
@@ -155,6 +182,7 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
     useEffect(()=>{
         if(embedded||!loaded)return;
         const receive=()=>{const target=consumeFriendInbox();if(!target)return;
+            panelHistory.current=[];
             setProfileId('');setPostFilter('all');setError('');setReturnToPost('');setReturnToInbox(!!target.postId);
             detailOriginProfile.current='';setPanel(target.postId?{kind:'detail',postId:target.postId,focusComment:target.commentId?{id:target.commentId}:undefined}:{kind:'inbox'});
         };
@@ -170,6 +198,7 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
     const submit = async (event: React.FormEvent) => {
         event.preventDefault();
         if (!panel || saving.current || processingImages) return;
+        if (panel.kind === 'settings' && !panel.section) return;
         saving.current = true; setBusy(true); setError('');
         try {
             if (panel.kind === 'settings') await saveFriendFeedSettings(settingsDraft);
@@ -185,7 +214,7 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
                 void runReplies(panel.postId, triggerId);
             }
             else if (panel.kind === 'delete') await deleteFriendPost(panel.postId);
-            if (alive.current) {setPanel(panel.kind==='comment'&&returnToPost?{kind:'detail',postId:returnToPost}:undefined); setReturnToPost('');setBody(''); actionButton.current?.focus();}
+            if (alive.current) {if (!restorePage()) setPanel(panel.kind==='comment'&&returnToPost?{kind:'detail',postId:returnToPost}:undefined); setReturnToPost('');setBody(''); actionButton.current?.focus();}
         } catch (e) {if (alive.current) setError(e instanceof Error ? e.message : '保存失败，请重试');}
         finally {saving.current = false; if (alive.current) setBusy(false);}
     };
@@ -195,17 +224,17 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
     const followingProps=profileOwner==='user'?{onFollowing:()=>open({kind:'following'}),followingCount:feed.accountGraph?.follows[friendAccountRef(feed,{authorId:'user'})?.id||'']?.length||0}:{};
     const finishSetup=async()=>{
         if(saving.current)return;saving.current=true;setBusy(true);setError('');
-        try{await mutateFriendFeed(state=>{state.setupSeen=true;});if(alive.current)setShowSetup(false);}
+        try{await mutateFriendFeed(state=>{state.setupSeen=true;});if(alive.current){if (!showSetup || !restorePage()) setShowSetup(false);}}
         catch(e){if(alive.current)setError(e instanceof Error?e.message:'保存失败');}
         finally{saving.current=false;if(alive.current)setBusy(false);}
     };
-    return <section className={`friend-feed${embedded ? ' friend-feed-embedded' : ''}`} aria-label="哔哔"
+    return <FriendFeedDirectoryProvider><section className={`friend-feed${embedded ? ' friend-feed-embedded' : ''}`} aria-label="哔哔"
         data-layout={settings.layout} data-cover={settings.showCover} data-theme={theme}
         style={{'--ff-body-size': `${settings.fontSize}px`} as React.CSSProperties}>
         {social&&!panel ? <SocialHeader notifications={inboxButton} theme={theme} profileId={profileId} profileName={profileName} count={profilePosts.length}
-            onBack={back} onProfile={navigateProfile} onSettings={()=>open({kind:'settings'})}/> : !panel ? <ClassicHeader notifications={inboxButton} theme={theme as 'island'|'moments'|'insta'|'journal'} onBack={back} onSettings={()=>open({kind:'settings'})} onCompose={()=>circle&&open({kind:'post',circleId:circle.id})}/> : <header className="friend-feed-header">
-            <button type="button" aria-label={panel || profileId ? '返回哔哔' : embedded ? '返回小手机' : '返回桌面'} onClick={back} disabled={busy}><ArrowLeft size={21}/></button>
-            <div><h1><BibiIcon size={28}/>{panel.kind==='inbox'?'互动提醒':panel.kind==='detail'?'动态':panel.kind==='following'?'我的关注':'哔哔'}</h1><span>{panel ? panel.kind === 'inbox' ? '回复与留言' : panel.kind === 'detail' ? '评论区' : panel.kind === 'following' ? '角色与微博账号' : panel.kind === 'sources' ? '动态来源' : panel.kind === 'weibo' ? '微博连接与隐私' : panel.kind === 'api' ? '独立 API 配置' : panel.kind === 'settings' ? '排版与互动风格' : panel.kind === 'share' ? '分享给角色' : panel.kind === 'comment' ? '回应这条动态' : panel.kind === 'delete' ? '删除动态' : '记录日常' : '朋友们的日常留言板'}</span></div>
+            onBack={back} onProfile={navigateProfile} onSettings={()=>open({kind:'settings'})}/> : !panel ? <ClassicHeader backLabel={profileId || showSetup ? '返回上一级' : undefined} notifications={inboxButton} theme={theme as 'island'|'moments'|'insta'|'journal'} onBack={back} onSettings={()=>open({kind:'settings'})} onProfile={()=>navigateProfile('user')} onHome={()=>navigateProfile('')}/> : <header className={`friend-feed-header${settingsPageTitle?' ff-preferences-header':''}`}>
+            <button type="button" aria-label="返回上一级" onClick={back} disabled={busy}><ArrowLeft size={21}/></button>
+            <div>{settingsPageTitle?<h1>{settingsPageTitle}</h1>:<><h1><BibiIcon size={28}/>{panel.kind==='inbox'?'互动提醒':panel.kind==='detail'?'动态':panel.kind==='following'?'我的关注':'哔哔'}</h1><span>{panel.kind === 'inbox' ? '回复与留言' : panel.kind === 'detail' ? '评论区' : panel.kind === 'following' ? '角色与微博账号' : panel.kind === 'share' ? '分享给角色' : panel.kind === 'comment' ? '回应这条动态' : panel.kind === 'delete' ? '删除动态' : '记录日常'}</span></>}</div>
             <div className="friend-feed-header-actions">{panel.kind!=='inbox'&&inboxButton}{!panel && loaded && <>
                 <button type="button" aria-label="哔哔设置" onClick={() => open({kind: 'settings'})}><GearSix size={21}/></button>
                 <button ref={actionButton} type="button" aria-label="发布新动态" disabled={!circle} onClick={() => circle&&open({kind: 'post',circleId:circle.id})}><Plus size={21}/></button>
@@ -219,7 +248,7 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
             {!loaded && !error && <p className="friend-feed-loading" role="status"><CircleNotch className="friend-feed-spinner"/>正在读取哔哔…</p>}
             {loaded&&!panel&&(showSetup||!feed.setupSeen)&&<FriendFeedSetup characters={characters} api={apiConfig} appApi={appApi} settings={settings} busy={busy}
                 onApi={()=>open({kind:'api'})} onCharacters={()=>openApp(AppID.Character)}
-                onPreferences={section=>{open({kind:'settings'});setSettingsSection(section);}} onWeibo={()=>open({kind:'weibo'})} onDone={()=>void finishSetup()}/>}
+                onPreferences={section=>{open({kind:'settings',section});setSettingsSection(section);}} onWeibo={()=>open({kind:'weibo'})} onDone={()=>void finishSetup()}/>}
             {panel?.kind==='inbox'?<FriendFeedInbox feed={feed} onOpen={(postId,commentId)=>open({kind:'detail',postId,focusComment:{id:commentId}})} onReadAll={ids=>{void markFriendInboxRead(ids).catch(e=>setError(e instanceof Error?e.message:'标记已读失败'));}}/>
             : panel?.kind==='detail'?<FriendFeedPostDetail onReadVisible={readVisibleComments} key={panel.postId} focusComment={panel.focusComment} post={feed.posts.find(p=>p.id===panel.postId&&syncedPostEnabled(feed,p)&&(!settings.hideRealPosts||!(p.synced||p.authorKind==='external')))} characters={displayCharacters} user={displayUser}
                 onProfile={(id,accountId)=>{setProfileReturnPost(panel.postId);setProfileId(accountProfile(id,accountId));setPanel(undefined);}} onComment={()=>open({kind:'comment',postId:panel.postId})}
@@ -227,18 +256,24 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
                 onReply={replyTarget=>open({kind:'comment',postId:panel.postId,replyTarget})}
                 onRefresh={()=>void refreshHome(panel.postId)} busy={refreshing||!!feed.refreshLease&&feed.refreshLease.until>Date.now()} status={refreshTarget===panel.postId?refreshStatus:''}
                 replying={replying===panel.postId}/>
-            : panel?.kind==='share'?<FriendFeedSharePanel key={panel.postId} post={feed.posts.find(p=>p.id===panel.postId)} characters={characters} imagesEnabled={settings.shareImagesEnabled} onBack={back}
+            : panel?.kind==='share'?<FriendFeedSharePanel key={panel.postId} post={feed.posts.find(p=>p.id===panel.postId)} characters={characters} groups={characterGroups} imagesEnabled={settings.shareImagesEnabled} onBack={back}
                 onBusy={value=>{saving.current=value;setBusy(value);}}/>
-            : panel?.kind==='relations'?<FriendFeedRelations feed={feed} characters={characters} user={userProfile} onProfile={id=>{setPanel(undefined);setProfileId(id);}}/>
-            : panel?.kind==='following'?<FriendFeedFollowing feed={feed} user={displayUser} onManage={()=>open({kind:'relations'})} characters={characters} weibo={weiboFollowing} onConnect={()=>open({kind:'weibo'})}
+            : panel?.kind==='relations'?<FriendFeedRelations feed={feed} characters={characters} groups={characterGroups} user={userProfile} initialOwner={relationsOwner} onOwnerChange={setRelationsOwner} onProfile={id=>{rememberPage();profileFromPanel.current=true;setPanel(undefined);setProfileId(id);}}/>
+            : panel?.kind==='following'?<FriendFeedFollowing feed={feed} user={displayUser} onManage={()=>open({kind:'relations'})} characters={characters} groups={characterGroups} weibo={weiboFollowing} onConnect={()=>open({kind:'weibo'})}
                 onProfile={id=>{setPanel(undefined);setProfileId(id);setProfileFromFollowing(true);}}/>
-            : panel?.kind==='sources'&&circle ? <div className="friend-feed-form ff-settings-page"><header className="ff-settings-intro"><h2>动态来源</h2><p>管理主页绑定与微博同步。绑定的微博动态发布在对应人物的主号，小号不会自动同步。</p></header>
-                {profileId&&(profileOwner==='user'||circle.memberIds.includes(profileOwner)) ? <FriendFeedProfileControls key={profileOwner} feed={feed} ownerId={profileOwner} circleId={circle.id} characters={characters} onConnect={()=>open({kind:'weibo'})}/>
+            : panel?.kind==='sources'&&circle ? <div className="friend-feed-form ff-settings-page"><p className="ff-setting-status">管理主页绑定与微博同步。绑定的微博动态发布在对应人物的主号，小号不会自动同步。</p>
+                {profileId&&(profileOwner==='user'||circle.memberIds.includes(profileOwner)) ? <FriendFeedProfileControls key={profileOwner} feed={feed} ownerId={profileOwner} circleId={circle.id} characters={characters} groups={characterGroups} onConnect={()=>open({kind:'weibo'})}/>
                     : <FriendFeedWeiboTimeline feed={feed} circleId={circle.id} onConnect={()=>open({kind:'weibo'})}/>}
 </div>
+            : panel?.kind === 'cover' ? <FriendFeedCoverEditor key={panel.ownerId} ownerId={panel.ownerId} value={settings.coverImages?.[panel.ownerId]} onBack={back} onSaved={back} onBusy={value=>{saving.current=value;setBusy(value);}}/>
             : panel?.kind === 'api' ? <FriendFeedApi onSaved={back} onBack={back}/>
             : panel?.kind === 'weibo' ? <div className="friend-feed-form ff-settings-page"><FriendFeedWeiboConnection/></div> : panel ? <form className={`friend-feed-form${panel.kind==='settings'?' ff-settings-page':''}`} onSubmit={submit}>
-                {panel.kind === 'settings' ? <><button className="ff-setting-link" type="button" onClick={()=>{setShowSetup(true);back();}}>重新查看入门引导 →</button><button className="ff-setting-link" type="button" onClick={()=>open({kind:'api'})}>哔哔 API 设置 →</button><button className="ff-setting-link" type="button" onClick={()=>open({kind:'sources'})}>管理动态来源 →</button><button className="ff-setting-link" type="button" onClick={()=>open({kind:'relations'})}>关注与身份关系 →</button><FriendFeedPreferences value={settingsDraft} onChange={setSettingsDraft} disabled={busy} embedded={embedded} characters={characters}/></> : panel.kind === 'delete' ? <p>删除这条动态及其评论？删除后两个入口都会更新。</p> : <>
+                {panel.kind === 'settings' ? preferenceSection
+                    ? <FriendFeedPreferences section={preferenceSection} value={settingsDraft} onChange={setSettingsDraft} disabled={busy} embedded={embedded} characters={characters} groups={characterGroups}/>
+                    : <FriendFeedSettingsMenu disabled={busy} onPreferences={section=>open({kind:'settings',section})}
+                        onApi={()=>open({kind:'api'})} onSources={()=>open({kind:'sources'})} onRelations={()=>open({kind:'relations'})}
+                        onSetup={()=>{rememberPage();setShowSetup(true);setPanel(undefined);}}/>
+                : panel.kind === 'delete' ? <p>删除这条动态及其评论？删除后两个入口都会更新。</p> : <>
                     <p className="friend-feed-author-label">以 {displayUser.name || '我'} 的身份{panel.kind === 'post' ? '发布' : '评论'}</p>
                     {panel.kind === 'comment' && <blockquote>{replyTarget?<><strong>{replyComment?`回复 ${replyComment.authorName}${replyTarget.kind==='source'?'（仅本地）':''}`:'该评论已不可用'}</strong><p>{replyComment?.text}</p></>:commentPost?.text}</blockquote>}
                     <label>{panel.kind === 'post' ? '今天有什么想说的？' : '写下评论'}<textarea autoFocus required={panel.kind!=='post'||!draftImages.length} value={body} onChange={e => setBody(e.target.value)}
@@ -247,22 +282,18 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
                     {panel.kind === 'post' && <FriendFeedImagePicker value={draftImages} onChange={setDraftImages} disabled={busy} onBusy={setProcessingImages} onError={setError}/>}
                     {panel.kind === 'comment' && <small>发表后立即调用一次 API，由角色或路人接话；帖主私聊会收到评论记录。</small>}
                 </>}
-                <div className="friend-feed-form-actions"><button type="button" onClick={back} disabled={busy}>取消</button>
+                {(panel.kind !== 'settings' || preferenceSection) && <div className="friend-feed-form-actions"><button type="button" onClick={back} disabled={busy}>取消</button>
                     <button className="friend-feed-primary" disabled={busy||processingImages} type="submit">
-                        {busy ? '正在保存…' : panel.kind === 'settings' ? '保存设置' : panel.kind === 'delete' ? '确认删除' : panel.kind === 'comment' ? '发表评论' : '发布动态'}</button></div>
+                        {busy ? '正在保存…' : panel.kind === 'settings' ? '保存设置' : panel.kind === 'delete' ? '确认删除' : panel.kind === 'comment' ? '发表评论' : '发布动态'}</button></div>}
             </form> : loaded && circle ? <>
-                {!social&&<nav className="friend-feed-views" aria-label="哔哔栏目"><button aria-label="朋友动态" title="再次点击刷新首页" aria-pressed={!profileId} onClick={() => navigateProfile('')}>首页</button>
-                    <button aria-pressed={profileId==='user'} onClick={() => navigateProfile('user')}>我的主页</button></nav>}
                 {profileId&&profileOwner!=='user'&&<nav className="ff-account-tabs" aria-label="此角色的账号（管理视角）">{feed.accountGraph?.accounts.filter(a=>a.ownerId===profileOwner&&(a.accountId==='main'||settings.identities[profileOwner]?.accounts.some(alias=>alias.id===a.accountId))).map(a=><button key={a.id} aria-pressed={a.accountId===profileAccount} onClick={()=>setProfileId(a.id)}>{friendAccountName(feed,a,characters,displayUser.name)}</button>)}</nav>}
                 {social ? <>{profileId&&<SocialProfile theme={theme} name={profileName} avatar={profileAvatar}
-                    posts={profilePosts} circle={circle} canManage={profileOwner==='user'||circle.memberIds.includes(profileOwner)} onSettings={()=>open({kind:'sources'})} {...followingProps}/>}
+                    posts={profilePosts} circle={circle} canManage={profileOwner==='user'||circle.memberIds.includes(profileOwner)} onSettings={()=>open({kind:'sources'})} coverImage={settings.coverImages?.[profileOwner]} onEditCover={()=>open({kind:'cover',ownerId:profileOwner})} {...followingProps}/>}
                     <SocialToolbar theme={theme} filter={postFilter} onFilter={next=>{setPostFilter(next);setLimit(5);}}/>
                     {!profileId&&postFilter==='all'&&<SocialComposer theme={theme} user={displayUser} onCompose={()=>open({kind:'post',circleId:circle.id})}/>}</>
-                : profileId ? <ClassicProfile theme={theme} name={profileName} avatar={profileAvatar} posts={profilePosts} onSettings={()=>open({kind:'sources'})} {...followingProps}/>
-                : <ClassicCover theme={theme} user={displayUser} count={profilePosts.length} onProfile={()=>navigateProfile('user')}/>}
-                {theme==='island'&&(!profileId||profileId==='user') && <button className="friend-feed-compose" onClick={() => open({kind: 'post', circleId: circle.id})} >
-                    <FriendFeedAvatar name={displayUser.name || '我'} avatar={userProfile.avatar}/><span>分享今天的一件小事</span><PencilSimple size={20}/>
-                </button>}
+                : profileId ? <ClassicProfile theme={theme} name={profileName} avatar={profileAvatar} posts={profilePosts} onSettings={()=>open({kind:'sources'})} coverImage={settings.coverImages?.[profileOwner]} onEditCover={profileOwner==='user'||circle.memberIds.includes(profileOwner)?()=>open({kind:'cover',ownerId:profileOwner}):undefined} {...followingProps}/>
+                : <ClassicCover theme={theme} user={displayUser} count={profilePosts.length} onProfile={()=>navigateProfile('user')} coverImage={settings.coverImages?.user} onEditCover={()=>open({kind:'cover',ownerId:'user'})}/>}
+                {!social&&(!profileId||profileOwner==='user') && <ClassicComposer user={displayUser} onCompose={()=>open({kind:'post',circleId:circle.id})}/>}
                 {!posts.length && <div className="friend-feed-empty friend-feed-empty-small"><ChatCircle size={35} weight="light"/><h2>{social&&postFilter==='photos'?'还没有图文动态':'第一条日常，留给你'}</h2><p>发一条动态，或在主页设置中同步微博。</p></div>}
                 {!!posts.length&&theme==='island' && <div className="friend-feed-list-heading"><span>最近的日常</span><span>{posts.length} 条动态</span></div>}
                 <div className="friend-feed-posts">{posts.slice(0, limit).map(post => social ? <SocialPost key={post.id} theme={theme} post={post} user={displayUser} characters={displayCharacters}
@@ -278,5 +309,5 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
         </div>
         {social&&!panel&&loaded&&circle&&<SocialBottomNav theme={theme} profileId={profileId} canPost={true} onProfile={navigateProfile}
             onCircle={()=>open({kind:'settings'})} onSources={()=>open({kind:'sources'})} onCompose={()=>open({kind:'post',circleId:circle.id})}/>}
-    </section>;
+    </section></FriendFeedDirectoryProvider>;
 }

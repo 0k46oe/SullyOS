@@ -83,15 +83,49 @@ it.each(['island','moments','insta','journal','weibo','twitter'] as const)('keep
     expect(runImmediateFriendReplies).not.toHaveBeenCalled();expect(refreshFriendFeed).not.toHaveBeenCalled();
 });
 
-it('edits nicknames and exact-account follows, previews knowledge, and returns to the unsaved settings draft',async()=>{
-    await saveFriendFeedSettings({...defaultFriendFeedSettings(),userNickname:'橘子汽水',identities:{[m.chars[1].id]:{nickname:'绿灯',tags:[],accounts:[{id:'private-id',name:'半夜吃面',purpose:'匿名日常',tags:[]}]}}});
+it('separates preference pages and returns through sources and connection without exiting the app',async()=>{
+    await mutateFriendFeed(feed=>{feed.setupSeen=true;});
     const host=await render(React.createElement(FriendFeedApp));
     await click(host,'哔哔设置');
+    expect(host.querySelector('[aria-label="设置目录"]')).not.toBeNull();
+    expect(host.querySelector('input,textarea')).toBeNull();
+    for (const [name,selector] of [
+        ['外观与阅读','.friend-feed-theme-options'], ['互动方式','[aria-label="互动与提示词"]'],
+        ['真实内容','[aria-label="真实内容权限"]'], ['我的网名','[aria-label="我的哔哔网名"]'],
+        ['角色与小号','[aria-label="角色账号"]'], ['角色与内容权重','[aria-label="刷新与抽取"]'],
+    ]) {
+        await click(host,name);
+        expect(host.querySelector(selector)).not.toBeNull();
+        expect(host.querySelectorAll('.ff-preferences-section')).toHaveLength(1);
+        await act(async()=>{expect(handleLocalBack()).toBe(true);});
+        expect(host.querySelector('[aria-label="设置目录"]')).not.toBeNull();
+        expect(m.close).not.toHaveBeenCalled();
+    }
+    const scroll=host.querySelector('.friend-feed-scroll')!;scroll.scrollTop=143;
+    await click(host,'管理动态来源');await click(host,'管理微博连接');
+    await act(async()=>{expect(handleLocalBack()).toBe(true);});
+    expect(host.querySelector('.friend-feed-header h1')?.textContent).toBe('动态来源');
+    await click(host,'返回上一级');
+    expect(host.querySelector('[aria-label="设置目录"]')).not.toBeNull();expect(scroll.scrollTop).toBe(143);
+    await click(host,'重新查看入门引导');await click(host,'选择 API');await click(host,'取消');
+    expect(host.querySelector('[aria-label="哔哔入门引导"]')).not.toBeNull();
+    await act(async()=>{expect(handleLocalBack()).toBe(true);});
+    expect(host.querySelector('[aria-label="设置目录"]')).not.toBeNull();
+    await click(host,'返回上一级');expect(host.querySelector('[aria-label="设置目录"]')).toBeNull();
+    expect(m.close).not.toHaveBeenCalled();
+    await act(async()=>{expect(handleLocalBack()).toBe(false);});
+});
+
+it('keeps nickname edits local to their page and returns from relations to the settings directory',async()=>{
+    await saveFriendFeedSettings({...defaultFriendFeedSettings(),userNickname:'橘子汽水',identities:{[m.chars[1].id]:{nickname:'绿灯',tags:[],accounts:[{id:'private-id',name:'半夜吃面',purpose:'匿名日常',tags:[]}]}}});
+    const host=await render(React.createElement(FriendFeedApp));
+    await click(host,'哔哔设置');await click(host,'我的网名');
     const nickname=host.querySelector('[aria-label="我的哔哔网名"]') as HTMLInputElement;
     await act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!.call(nickname,'新汽水');nickname.dispatchEvent(new Event('input',{bubbles:true}));});
+    await click(host,'取消');
     await click(host,'关注与身份关系');
-    const owner=host.querySelector('[aria-label="关系所属人物"]') as HTMLSelectElement;
-    await act(async()=>{owner.value=m.chars[0].id;owner.dispatchEvent(new Event('change',{bubbles:true}));});
+    await act(async()=>{(host.querySelector('[aria-label="关系所属人物"]') as HTMLElement).click();});
+    await click(host,'小白');
     await act(async()=>{(host.querySelector('[aria-label="关注 半夜吃面"]') as HTMLInputElement).click();await new Promise(r=>setTimeout(r,30));});
     let feed=await readFriendFeed();const source=friendAccountRef(feed,{authorId:m.chars[0].id})!,alias=friendAccountRef(feed,{authorId:m.chars[1].id,accountId:'private-id'})!;
     expect(feed.accountGraph?.follows[source.id]).toContain(alias.id);
@@ -100,12 +134,14 @@ it('edits nicknames and exact-account follows, previews knowledge, and returns t
     expect(host.querySelector('.ff-relation-list')?.textContent).toContain('半夜吃面');
     expect(host.querySelector('.ff-relation-list')?.textContent).toContain('身份未知');
     expect(host.querySelector('.ff-relation-list')?.textContent).not.toContain('小绿');
-    expect(host.querySelector('.ff-relation-list input')).toBeNull();
+    expect(host.querySelector('.ff-relation-list input[type=checkbox]')).toBeNull();
     await click(host,'管理关系');
     await act(async()=>{(host.querySelector('[aria-label="知道 半夜吃面 是谁"]') as HTMLInputElement).click();await new Promise(r=>setTimeout(r,30));});
     feed=await readFriendFeed();expect(knowsFriendAccount(feed,m.chars[0].id,alias)).toBe(true);
-    await click(host,'返回哔哔');
-    expect((host.querySelector('[aria-label="我的哔哔网名"]') as HTMLInputElement).value).toBe('新汽水');
+    await click(host,'返回上一级');
+    expect(host.querySelector('[aria-label="设置目录"]')).not.toBeNull();
+    await click(host,'我的网名');
+    expect((host.querySelector('[aria-label="我的哔哔网名"]') as HTMLInputElement).value).toBe('橘子汽水');
     await click(host,'取消');expect((await readFriendFeed()).settings?.userNickname).toBe('橘子汽水');
     expect(runImmediateFriendReplies).not.toHaveBeenCalled();expect(refreshFriendFeed).not.toHaveBeenCalled();
 });
@@ -119,7 +155,7 @@ it('opens an alias profile without mixing the owner main posts and retains accou
     ];});await new Promise(r=>setTimeout(r,30));});
     await click(host,'查看半夜吃面的主页');
     expect(host.querySelector('.friend-feed-posts')?.textContent).toContain('深夜的面');expect(host.querySelector('.friend-feed-posts')?.textContent).not.toContain('白天的工作');
-    await click(host,'哔哔设置');await click(host,'恢复默认设置');await click(host,'保存设置');
+    await click(host,'哔哔设置');await click(host,'更多设置');await click(host,'恢复默认设置');await click(host,'保存设置');
     expect((await readFriendFeed()).settings?.identities[m.chars[1].id].accounts[0].name).toBe('半夜吃面');
 });
 afterEach(() => {act(() => roots.forEach(r => r.unmount())); hosts.forEach(h => h.remove()); vi.unstubAllGlobals(); vi.clearAllMocks();});
@@ -180,11 +216,11 @@ it.each(['island','moments','insta','journal','weibo','twitter'] as const)('lets
     expect(host.querySelector('form')).toBeNull();
 });
 it('keeps the separate NPC prompt as a settings draft until saved',async()=>{
-    const host=await render(React.createElement(FriendFeedApp));await click(host,'哔哔设置');
+    const host=await render(React.createElement(FriendFeedApp));await click(host,'哔哔设置');await click(host,'互动方式');
     const textarea=[...host.querySelectorAll('textarea')].find(t=>t.closest('label')?.textContent?.includes('路人怎么说话'))!;
     const old=textarea.value;
     await act(async()=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')!.set!.call(textarea,'只聊公开的烘焙细节');textarea.dispatchEvent(new Event('input',{bubbles:true}));});
-    await click(host,'取消');await click(host,'哔哔设置');
+    await click(host,'取消');await click(host,'互动方式');
     const again=[...host.querySelectorAll('textarea')].find(t=>t.closest('label')?.textContent?.includes('路人怎么说话'))!;
     expect(again.value).toBe(old);
     await act(async()=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')!.set!.call(again,'只聊公开的烘焙细节');again.dispatchEvent(new Event('input',{bubbles:true}));});
@@ -202,7 +238,7 @@ it.each(['island','moments','insta','journal','weibo','twitter'] as const)('show
         await click(host,'一起来聊0');
         expect(host.textContent).toContain('我的咖啡动态');
         expect(friendUserInbox(await readFriendFeed()).filter(r=>!r.notice.read)).toHaveLength(0);
-        await click(host,'返回哔哔');expect(host.querySelector('[aria-label="哔哔互动提醒"]')).not.toBeNull();
+        await click(host,'返回上一级');expect(host.querySelector('[aria-label="哔哔互动提醒"]')).not.toBeNull();
         expect(runImmediateFriendReplies).not.toHaveBeenCalled();expect(refreshFriendFeed).not.toHaveBeenCalled();
     }finally{visible.mockRestore();}
 });
@@ -217,20 +253,29 @@ it('aggregates global replies into one clickable banner and opens the target aft
         const host=await render(React.createElement(FriendFeedApp));
         expect(host.textContent).toContain('我的咖啡动态');expect(host.textContent).toContain('一起来聊0');
         expect(host.querySelector('[data-highlighted=true]')?.textContent).toContain('一起来聊');
-        await click(host,'返回哔哔');expect(host.querySelector('[aria-label="哔哔互动提醒"]')).not.toBeNull();
+        await click(host,'返回上一级');expect(host.querySelector('[aria-label="哔哔互动提醒"]')).not.toBeNull();
         await act(async()=>{requestFriendInbox();});expect(host.querySelector('[aria-label="哔哔互动提醒"]')).not.toBeNull();
         expect(runImmediateFriendReplies).not.toHaveBeenCalled();expect(refreshFriendFeed).not.toHaveBeenCalled();
     }finally{visible.mockRestore();}
 });
 it('shows setup once without calling a model, persists dismissal and reopens it from settings',async()=>{
+    const clock=vi.spyOn(performance,'now').mockReturnValue(0);
+    try{
     const host=await render(React.createElement(FriendFeedApp));
     expect(host.querySelector('[aria-label="哔哔入门引导"]')).not.toBeNull();
     expect(host.textContent).toContain('0/2 位参与角色');
     expect(runImmediateFriendReplies).not.toHaveBeenCalled();expect(refreshFriendFeed).not.toHaveBeenCalled();
+    const confirm=host.querySelector('.ff-setup > button') as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);expect(confirm.textContent).toContain('10s');
+    await click(host,'请先阅读');expect((await readFriendFeed()).setupSeen).not.toBe(true);
+    clock.mockReturnValue(10_000);
+    await act(async()=>{await new Promise(resolve=>setTimeout(resolve,300));});
     await click(host,'知道了，开始逛');expect((await readFriendFeed()).setupSeen).toBe(true);
     expect(host.querySelector('[aria-label="哔哔入门引导"]')).toBeNull();
     await click(host,'哔哔设置');await click(host,'重新查看入门引导');
     expect(host.querySelector('[aria-label="哔哔入门引导"]')).not.toBeNull();
+    expect((host.querySelector('.ff-setup > button') as HTMLButtonElement).disabled).toBe(true);
+    }finally{clock.mockRestore();}
 });
 it('keeps API setup inside Bibi, cancels drafts and targets the relevant preference section',async()=>{
     const host=await render(React.createElement(FriendFeedApp));
@@ -254,7 +299,7 @@ it('saves an independent preset only on explicit save and retains it when appear
     await click(host,'哔哔测试预设');expect(await readFriendFeedApi()).toBeNull();
     await click(host,'保存 API 设置');expect(await readFriendFeedApi()).toMatchObject({model:'test-bibi',apiKey:'test-only'});
     expect(host.textContent).toContain('已使用哔哔独立 API');
-    await click(host,'哔哔设置');await click(host,'保存设置');
+    await click(host,'哔哔设置');await click(host,'外观与阅读');await click(host,'保存设置');
     expect(await readFriendFeedApi()).toMatchObject({model:'test-bibi'});
     expect(JSON.stringify(await readFriendFeed())).not.toContain('test-only');
 });
@@ -316,8 +361,8 @@ it('registers a standalone app and shows the same persisted circle inside the ho
     expect(desktop.querySelector('.friend-feed-member-faces')).toBeNull();
     expect(desktop.textContent).not.toContain('管理生活圈');
     await click(desktop, '哔哔设置');
-    expect(desktop.textContent).toContain('标签与小号');
-    await click(desktop, '取消');
+    expect(desktop.textContent).toContain('角色与小号');
+    await click(desktop, '返回上一级');
     await act(async () => {await publishFriendPost(circleId, '小雨', '新的一条'); await new Promise(resolve => setTimeout(resolve, 15));});
     expect(phone.textContent).toContain('新的一条'); expect(desktop.textContent).toContain('新的一条');
     await click(phone, '评论');
@@ -337,7 +382,7 @@ it('shows the unified public feed in the embedded phone without choosing groups'
 it('publishes as the user and requires confirmation before deleting a post', async () => {
     await saveFriendCircle({name: '客厅', description: '', memberIds: [m.chars[0].id]});
     const host = await render(React.createElement(FriendFeedApp));
-    await click(host, '分享今天的一件小事');
+    await click(host, '发布新动态');
     const textarea = host.querySelector('textarea')!;
     await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, '你好，朋友们');
@@ -354,7 +399,7 @@ it('previews settings locally, discards cancelled edits and shares saved prefere
     await saveFriendCircle({name: '客厅', description: '', memberIds: [m.chars[0].id]});
     const desktop = await render(React.createElement(FriendFeedApp));
     const embedded = await render(React.createElement(FriendFeedApp, {embedded: true, initialCharacterId: m.chars[0].id}));
-    await click(desktop, '哔哔设置');
+    await click(desktop, '哔哔设置');await click(desktop, '外观与阅读');
     expect(desktop.textContent).toContain('微信朋友圈');
     expect(desktop.textContent).toContain('Ins 风格');
     expect(desktop.textContent).toContain('蓝墨杂志');
@@ -368,8 +413,8 @@ it('previews settings locally, discards cancelled edits and shares saved prefere
     expect(embedded.querySelector('.friend-feed')?.getAttribute('data-layout')).toBe('paper');
     await click(desktop, '取消');
     expect(desktop.querySelector('.friend-feed')?.getAttribute('data-layout')).toBe('paper');
-    expect(desktop.querySelector('.friend-feed')?.getAttribute('data-theme')).toBe('island');
-    await click(desktop, '哔哔设置');
+    expect(desktop.querySelector('.friend-feed')?.getAttribute('data-theme')).toBe('moments');
+    await click(desktop, '外观与阅读');
     await act(async () => {(desktop.querySelector('input[value=moments]') as HTMLInputElement).click();});
     await act(async () => {(desktop.querySelector('input[value=compact]') as HTMLInputElement).click();});
     await click(desktop, '保存设置');
@@ -377,13 +422,13 @@ it('previews settings locally, discards cancelled edits and shares saved prefere
     expect(embedded.querySelector('.friend-feed')?.getAttribute('data-layout')).toBe('compact');
     expect(embedded.querySelector('.friend-feed')?.getAttribute('data-theme')).toBe('island');
     expect((await readFriendFeed()).settings?.theme).toBe('moments');
-    await click(embedded, '哔哔设置');
+    await click(embedded, '哔哔设置');await click(embedded, '外观与阅读');
     expect(embedded.querySelector('input[name=feed-theme]')).toBeNull();
-    await click(embedded, '恢复默认设置');
+    await click(embedded, '取消');await click(embedded, '更多设置');await click(embedded, '恢复默认设置');
     await click(embedded, '保存设置');
     expect((await readFriendFeed()).settings?.theme).toBe('moments');
     expect(desktop.querySelector('.friend-feed')?.getAttribute('data-theme')).toBe('moments');
-    await click(desktop, '哔哔设置'); await click(desktop, '恢复默认设置'); await click(desktop, '保存设置');
+    await click(desktop, '更多设置'); await click(desktop, '恢复默认设置'); await click(desktop, '保存设置');
     await settle(embedded);
     expect((await readFriendFeed()).settings?.layout).toBe('paper');
     expect(embedded.querySelector('.friend-feed')?.getAttribute('data-layout')).toBe('paper');
@@ -432,9 +477,9 @@ it('always starts immediate replies and retains their saved comment when the API
     expect(host.textContent).toContain('评论已保存');
     expect(host.textContent).not.toContain('现在接话');
     expect(host.textContent).not.toContain('搭主 API 便车');
-    await click(host,'返回哔哔');
+    await click(host,'返回上一级');
     await click(host, '哔哔设置');
-    expect(host.textContent).toContain('立即调用一次对话 API'); expect(host.textContent).toContain('让路人也来串场');
+    await click(host,'互动方式');expect(host.textContent).toContain('立即调用一次对话 API'); expect(host.textContent).toContain('让路人也来串场');
 });
 
 it('hides paid import controls while keeping imported sources readable and old keys removable', async () => {
@@ -446,6 +491,7 @@ it('hides paid import controls while keeping imported sources readable and old k
     await click(host, '朋友动态');
     expect(host.textContent).toContain('真实咖啡帖子'); expect(host.textContent).not.toContain('粘贴链接导入');
     await click(host, '哔哔设置');
+    await click(host, '更多设置');
     expect(host.querySelector('input[type=password]')).toBeNull();
     expect(host.textContent).not.toContain('注册 TikHub');
     await click(host, '移除旧 Key'); expect(readTikHubKey()).toBe('');
@@ -476,16 +522,17 @@ it.each(['island','moments','insta','journal','weibo','twitter'] as const)('hide
             {id:'repost',circleId,authorId:m.chars[1].id,authorName:'小绿',text:'自己的转发感想',createdAt:Date.now(),audienceIds:m.chars.map(c=>c.id),comments:[],source});});
     const host=await render(React.createElement(FriendFeedApp));
     expect(host.textContent).toContain('同步的原帖');
-    const toggleReal=async()=>{await click(host,'哔哔设置');await act(async()=>{(Array.from(host.querySelectorAll('label')).find(l=>l.textContent?.startsWith('隐藏真实微博帖子'))!.querySelector('input') as HTMLInputElement).click();});await click(host,'保存设置');};
+    const toggleReal=async()=>{await click(host,'哔哔设置');await click(host,'真实内容');await act(async()=>{(Array.from(host.querySelectorAll('label')).find(l=>l.textContent?.startsWith('隐藏真实微博帖子'))!.querySelector('input') as HTMLInputElement).click();});await click(host,'保存设置');await click(host,'返回上一级');};
     expect(host.querySelector('[aria-label="更多动态选项"]')).toBeNull();
     await toggleReal();expect(host.textContent).not.toContain('同步的原帖');expect(host.textContent).toContain('自己的转发感想');
     const feed=await readFriendFeed();expect(feed.posts).toHaveLength(2);expect(feed.settings?.realContentEnabled).toBe(true);
     await toggleReal();expect(host.textContent).toContain('同步的原帖');
 });
 it('saves three aliases and per-character refresh weights without a model request',async()=>{
-    const host=await render(React.createElement(FriendFeedApp));await click(host,'哔哔设置');
+    const host=await render(React.createElement(FriendFeedApp));await click(host,'哔哔设置');await click(host,'角色与小号');
     for(let i=0;i<3;i++)await click(host,'添加小号');
     const add=[...host.querySelectorAll('button')].find(b=>b.textContent?.includes('添加小号'))!;expect(add.disabled).toBe(true);
+    await click(host,'保存设置');await click(host,'角色与内容权重');
     const weight=host.querySelector('input[aria-label="小白的抽取权重"]')!;
     await act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!.call(weight,'0');weight.dispatchEvent(new Event('input',{bubbles:true}));});
     await click(host,'保存设置');const feed=await readFriendFeed();
@@ -568,7 +615,7 @@ it.each(['island','moments','insta','journal','weibo','twitter'] as const)('open
         }
         expect(refreshFriendFeed).not.toHaveBeenCalled();
         await click(host,'写评论');expect(host.querySelector('textarea')).not.toBeNull();await click(host,'取消');
-        expect(host.querySelector('.ff-post-detail')).not.toBeNull();await click(host,'返回哔哔');
+        expect(host.querySelector('.ff-post-detail')).not.toBeNull();await click(host,'返回上一级');
     }
     await click(host,theme==='twitter'?'回复':'评论');await click(host,'刷新评论区');expect(refreshFriendFeed).toHaveBeenCalledTimes(1);
     expect(vi.mocked(refreshFriendFeed).mock.calls[0][5]).toBeTruthy();

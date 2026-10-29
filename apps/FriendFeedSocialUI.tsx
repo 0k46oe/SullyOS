@@ -5,6 +5,7 @@ import type {CharacterProfile, UserProfile} from '../types';
 import type {FriendCircle, FriendPost} from '../utils/friendFeed';
 import FriendFeedAvatar from './FriendFeedAvatar';
 import FriendFeedImages from './FriendFeedImages';
+import {FriendFeedCoverLayer} from './FriendFeedCover';
 import {FriendFeedSourceQuote} from './FriendFeedTikHub';
 
 export type SocialTheme = 'weibo' | 'twitter';
@@ -37,12 +38,12 @@ export function SocialBottomNav({theme, profileId, canPost, onProfile, onCircle,
     </>;
 }
 
-export function SocialProfile({theme,name,avatar,posts,circle,onSettings,canManage,onFollowing,followingCount}: {
-    theme:SocialTheme;name:string;avatar?:string;posts:FriendPost[];circle:FriendCircle;onSettings:()=>void;canManage:boolean;onFollowing?:()=>void;followingCount?:number;
+export function SocialProfile({theme,name,avatar,posts,circle,onSettings,canManage,onFollowing,followingCount,coverImage,onEditCover}: {
+    theme:SocialTheme;name:string;avatar?:string;posts:FriendPost[];circle:FriendCircle;onSettings:()=>void;canManage:boolean;onFollowing?:()=>void;followingCount?:number;coverImage?:string;onEditCover?:()=>void;
 }) {
     const pictures=posts.filter(p=>friendPostMediaCount(p)).length, replies=posts.reduce((n,p)=>n+p.comments.length,0);
     return <section className={`ff-social-profile ff-${theme}-profile`} aria-label={`${name}的个人主页`}>
-        <div className="ff-profile-cover" aria-hidden="true"/>
+        <div className="ff-profile-cover"><FriendFeedCoverLayer value={coverImage} onEdit={canManage?onEditCover:undefined}/></div>
         <div className="ff-profile-identity"><FriendFeedAvatar name={name} avatar={avatar}/>
             {canManage&&<button className="ff-profile-edit" onClick={onSettings}>主页设置</button>}
             <h2>{name}</h2><p>{circle.name}</p></div>

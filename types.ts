@@ -3918,6 +3918,10 @@ export interface Emoji {
 export interface FullBackupData {
     /** 好友圈正文；文字备份单列，完整备份随 assets 保存。 */
     friendFeed?: import('./utils/friendFeed').FriendFeedState;
+    /** Media-only patches never replace feed text or settings. */
+    friendFeedMedia?: import('./utils/activityBackup').FriendFeedMediaBackup;
+    /** Text records stored in assets; restore only this allowlisted subset. */
+    activityTextAssets?: import('./utils/activityBackup').ActivityTextAsset[];
     /** 纯文字备份单独携带收藏索引，不覆盖整个资源库。 */
     contentFavoritesIndex?: unknown;
     timestamp: number;

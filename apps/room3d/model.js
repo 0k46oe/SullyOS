@@ -30,6 +30,8 @@ export function validateHome(raw,catalog){
  for(const r of raw.rooms){
   if(typeof r.id!=='string'||ids.has(r.id)||typeof r.name!=='string'||r.name.length>40||![r.x,r.z,r.level].every(Number.isInteger)||Math.abs(r.x)>12||Math.abs(r.z)>12||r.level<0||r.level>5)throw Error('房间信息不正确');
   ids.add(r.id);const key=[r.x,r.z,r.level].join();if(cells.has(key))throw Error('房间位置重复');cells.add(key);
+  if(r.fixedPalette!=null&&r.fixedPalette!=='halloween')throw Error('房间主题配色不正确');
+  if(r.activityRoom!=null&&(r.activityRoom!=='halloween'||r.level!==0||raw.rooms.filter(v=>v.activityRoom===r.activityRoom).length!==1))throw Error('活动别馆信息不正确');
   if(!/^#[0-9a-f]{6}$/i.test(r.wall)||!Array.isArray(r.items)||r.items.length>100)throw Error('房间内容不正确');
   for(const part of ['trim','floor'])if(r[part]!=null&&!/^#[0-9a-f]{6}$/i.test(r[part]))throw Error('房屋颜色不正确');
   validateFinishes(r);

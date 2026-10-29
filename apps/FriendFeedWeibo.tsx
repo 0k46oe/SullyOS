@@ -5,7 +5,8 @@ import {disconnectWeibo,readWeiboConnection,startWeiboLogin,pollWeiboLogin,WEIBO
     saveWeiboBinding,setWeiboStream,syncWeibo,saveWeiboSyncLimit} from '../utils/friendFeedWeibo';
 import {saveFriendFollows,type FriendFeedState} from '../utils/friendFeed';
 import {followedAuthors} from '../utils/friendFeedActivity';
-import type {CharacterProfile} from '../types';
+import type {CharacterGroup,CharacterProfile} from '../types';
+import {FriendFeedGroupedList} from './FriendFeedGroupedList';
 
 export function FriendFeedWeiboConnection() {
     const [connection,setConnection]=useState(readWeiboConnection),[proxy,setProxy]=useState(getProxyWorkerUrl);
@@ -55,15 +56,15 @@ export function FriendFeedWeiboConnection() {
     </section>;
 }
 
-export function FriendFeedProfileControls({feed,ownerId,circleId,characters,onConnect}:{feed:FriendFeedState;ownerId:string;circleId:string;characters:CharacterProfile[];onConnect:()=>void}) {
+export function FriendFeedProfileControls({feed,ownerId,circleId,characters,groups=[],onConnect}:{feed:FriendFeedState;ownerId:string;circleId:string;characters:CharacterProfile[];groups?:CharacterGroup[];onConnect:()=>void}) {
     const binding=feed.weiboBindings?.find(b=>b.ownerId===ownerId);
     const [uid,setUid]=useState(binding?.uid||''),[busy,setBusy]=useState(false),[status,setStatus]=useState('');
     useEffect(()=>{setUid(binding?.uid||'');setStatus('');},[ownerId,binding?.uid]);
     const run=async(action:()=>Promise<unknown>)=>{if(busy)return;setBusy(true);setStatus('');try{await action();setStatus('已更新');}catch(e){setStatus(e instanceof Error?e.message:'操作失败');}finally{setBusy(false);}};
-    const authors=[{id:'user',name:'我'},...characters.filter(c=>feed.circles.find(c=>c.id===circleId)?.memberIds.includes(c.id)).map(c=>({id:c.id,name:c.name})),
-        ...feed.posts.filter(p=>p.circleId===circleId&&p.authorId.startsWith('weibo:')).map(p=>({id:p.authorId,name:p.authorName}))]
+    const authors=[{id:'user',name:'我',groupId:'__bibi_user__'},...characters.filter(c=>feed.circles.find(c=>c.id===circleId)?.memberIds.includes(c.id)).map(c=>({id:c.id,name:c.name,groupId:c.groupId})),
+        ...feed.posts.filter(p=>p.circleId===circleId&&p.authorId.startsWith('weibo:')).map(p=>({id:p.authorId,name:p.authorName,groupId:'__bibi_weibo__'}))]
         .filter((a,i,all)=>a.id!==ownerId&&all.findIndex(b=>b.id===a.id)===i);
-    return <details className="friend-feed-profile-controls ff-disclosure"><summary><span>主页设置 · 微博与关注</span><small>{binding?.enabled?'已绑定':'未绑定'}</small><CaretDown size={16} aria-hidden="true"/></summary>
+    return <details open className="friend-feed-profile-controls ff-disclosure"><summary><span>主页设置 · 微博与关注</span><small>{binding?.enabled?'已绑定':'未绑定'}</small><CaretDown size={16} aria-hidden="true"/></summary>
         <div className="ff-disclosure-body"><div className="ff-settings-section">
         <label className="ff-setting-field">绑定微博主页<input value={uid} onChange={e=>setUid(e.target.value)} placeholder="微博 UID 或 /u/数字 主页链接" disabled={busy}/></label>
         <p>{ownerId==='user'?'同步到我的动态，按发布时间混排。':'绑定内容视为这个 RP 角色自己发过的动态；不会登录或操作被绑定的账号。'}</p>
@@ -75,8 +76,9 @@ export function FriendFeedProfileControls({feed,ownerId,circleId,characters,onCo
             <button className="ff-setting-link" type="button" disabled={busy||binding.page===null} onClick={()=>void run(()=>syncWeibo(circleId,ownerId,true))}>加载更早微博</button></div>}
         </div>
         <button className="ff-settings-navigation" type="button" onClick={onConnect}><LinkSimple size={18} aria-hidden="true"/><span>管理微博连接<small>扫码、连接状态与隐私</small></span><ArrowRight size={17} aria-hidden="true"/></button>
-        {ownerId!=='user'&&<fieldset className="ff-follow-options" disabled={busy}><legend>TA 关注谁</legend><p>只订阅哔哔的新动态，不会修改微博关注列表。</p>{authors.map(a=><label className="ff-toggle-row" key={a.id}>
-            <span>{a.name}</span><input type="checkbox" checked={followedAuthors(feed,ownerId).includes(a.id)} onChange={e=>void run(()=>saveFriendFollows(ownerId,e.target.checked?[...followedAuthors(feed,ownerId),a.id]:followedAuthors(feed,ownerId).filter(id=>id!==a.id)))}/></label>)}</fieldset>}
+        {ownerId!=='user'&&<fieldset className="ff-follow-options" disabled={busy}><legend>TA 关注谁</legend><p>只订阅哔哔的新动态，不会修改微博关注列表。</p>
+            <FriendFeedGroupedList items={authors.map(a=>({...a,searchText:a.name}))} groups={[{id:'__bibi_user__',name:'我',order:-1},...groups,{id:'__bibi_weibo__',name:'微博账号',order:Number.MAX_SAFE_INTEGER}]} label="主页关注" disabled={busy} renderItem={a=><label className="ff-toggle-row" key={a.id}>
+            <span>{a.name}</span><input type="checkbox" checked={followedAuthors(feed,ownerId).includes(a.id)} onChange={e=>void run(()=>saveFriendFollows(ownerId,e.target.checked?[...followedAuthors(feed,ownerId),a.id]:followedAuthors(feed,ownerId).filter(id=>id!==a.id)))}/></label>}/></fieldset>}
         {status&&<p className="ff-setting-status" role="status">{status}</p>}</div>
     </details>;
 }
@@ -86,7 +88,7 @@ export function FriendFeedWeiboTimeline({feed,circleId,onConnect}:{feed:FriendFe
     const stream=feed.weiboStreams?.find(s=>s.circleId===circleId);
     const [busy,setBusy]=useState(false),[status,setStatus]=useState('');
     const run=async(action:()=>Promise<unknown>)=>{if(busy)return;setBusy(true);setStatus('');try{await action();setStatus('同步完成');}catch(e){setStatus(e instanceof Error?e.message:'同步失败');}finally{setBusy(false);}};
-    return <details className="friend-feed-profile-controls ff-disclosure"><summary><span>微博同步</span><small>{feed.syncLimit||50} 条</small><CaretDown size={16} aria-hidden="true"/></summary>
+    return <details open className="friend-feed-profile-controls ff-disclosure"><summary><span>微博同步</span><small>{feed.syncLimit||50} 条</small><CaretDown size={16} aria-hidden="true"/></summary>
         <div className="ff-disclosure-body">
         <p>关注流与本地动态按时间混排。第一次同步和翻历史不会通知角色。</p>
         <button className="ff-settings-navigation" type="button" onClick={onConnect}><LinkSimple size={18} aria-hidden="true"/><span>管理微博连接<small>使用系统设置中的网络代理</small></span><ArrowRight size={17} aria-hidden="true"/></button>

@@ -1,5 +1,23 @@
 /* Navigation stays light; secondary actions live in settings. */
 .friend-feed-scroll { overscroll-behavior-y: contain; }
+.friend-feed .ff-classic-header { display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr); gap:6px; padding:10px 12px; }
+.friend-feed .ff-classic-header h1 { text-align:center; min-width:0; }
+.friend-feed .ff-classic-header .ff-feed-title { width:auto; height:44px; font:inherit; letter-spacing:inherit; padding:0 2px; border:0; border-radius:0; background:transparent; color:inherit; box-shadow:none; }
+.friend-feed .ff-header-leading,.friend-feed .ff-header-trailing { display:flex; align-items:center; gap:2px; }
+.friend-feed .ff-header-trailing { justify-content:flex-end; }
+.friend-feed .ff-classic-header > div > button { width:34px; height:44px; min-height:44px; border:0; border-radius:0; background:transparent; color:var(--ff-ink); box-shadow:none; }
+/* Keep back targets usable in every theme and nested page, including the home phone. */
+.friend-feed .ff-header-leading > button:first-child,
+.friend-feed .ff-social-header > button:first-child,
+.friend-feed .friend-feed-header > button:first-child { width:44px; height:44px; min-width:44px; min-height:44px; }
+.friend-feed .ff-social-bottom { padding-bottom:4px; }
+.friend-feed .ff-twitter-fab { bottom:calc(76px + var(--safe-bottom, 0px)); }
+.friend-feed .ff-classic-compose { display:flex; align-items:center; gap:12px; width:100%; min-height:70px; padding:16px 20px; text-align:left; background:var(--ff-paper); border-bottom:1px solid var(--ff-line); }
+.friend-feed .ff-classic-compose > span:not(.friend-feed-avatar) { flex:1; font-size:13px; color:var(--ff-muted); }
+.friend-feed .ff-classic-compose > svg { flex:none; color:var(--ff-control-accent); }
+.friend-feed .ff-classic-compose .friend-feed-avatar { width:34px; height:34px; flex:none; }
+.friend-feed[data-theme=moments] .ff-classic-compose .friend-feed-avatar { border-radius:5px; }
+.friend-feed[data-theme=insta] .ff-classic-compose > svg { color:var(--ff-ink); }
 .friend-feed .friend-feed-views { align-items:center; }
 .friend-feed .ff-social-toolbar { display:flex; align-items:center; padding:0; }
 .friend-feed .ff-social-filter { flex:1; }

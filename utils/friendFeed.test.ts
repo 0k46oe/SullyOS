@@ -29,7 +29,7 @@ it('publishes image-only posts, preserves local refs through backup parsing and 
 });
 it('keeps old feeds compatible and saves preferences without losing concurrent comments or circle-specific prompts', async () => {
     expect(resolveFriendFeedSettings(parseFriendFeed(JSON.stringify(emptyFriendFeed())).settings)).toEqual(defaultFriendFeedSettings());
-    expect(resolveFriendFeedSettings({theme: 'unknown'} as any).theme).toBe('island');
+    expect(resolveFriendFeedSettings({theme: 'unknown'} as any).theme).toBe('moments');
     const circleId = await saveFriendCircle({name: '客厅', description: '', memberIds: [chars[0].id], interactionPrompt: '像老朋友一样接梗'});
     const postId = await publishFriendPost(circleId, '我', '新动态');
     await Promise.all([

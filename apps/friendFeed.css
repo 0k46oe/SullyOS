@@ -10,7 +10,9 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
-    padding-top: var(--safe-area-top, 24px);
+    box-sizing: border-box;
+    padding-top: var(--chrome-top, 24px);
+    padding-bottom: var(--safe-bottom, 0px);
     background: var(--ff-bg);
     color: var(--ff-ink);
     font-family: var(--animal-font-family, inherit);
@@ -130,7 +132,7 @@
 .friend-feed-loading { display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 12px; padding: 40px 16px; color: var(--ff-muted); }
 .friend-feed-more { display: block; margin: 24px auto 0; padding: 10px 20px!important; border: 1px dashed #c8b995!important; border-radius: 20px; background: var(--ff-paper)!important; font-size: 12px!important; }
 .friend-feed-spinner { animation: friend-feed-spin 1s linear infinite; }
-.friend-feed-embedded { padding-top: 0; }
+.friend-feed-embedded { padding-top: 0; padding-bottom: 0; }
 .friend-feed-embedded .friend-feed-header { padding: 11px 12px 14px; }
 .friend-feed-embedded .friend-feed-header h1 { font-size: 20px; }
 .friend-feed-embedded .friend-feed-header h1 svg { width: 21px; }

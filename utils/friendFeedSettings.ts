@@ -11,6 +11,7 @@ export interface FriendIdentity {nickname?:string; tags: string[]; accounts: Fri
 export type FriendRefreshKind = 'self' | 'related' | 'stranger';
 export interface FriendFeedSettings {
     userNickname?:string;
+    coverImages?: Record<string,string>;
     interactionPrompt: string;
     npcPrompt: string;
     theme: 'island' | 'moments' | 'insta' | 'journal' | 'weibo' | 'twitter';
@@ -28,7 +29,8 @@ export interface FriendFeedSettings {
 }
 export const defaultFriendFeedSettings = (): FriendFeedSettings => ({
     userNickname: '',
-    interactionPrompt: DEFAULT_FRIEND_FEED_PROMPT, npcPrompt: DEFAULT_FRIEND_NPC_PROMPT, theme: 'island', layout: 'paper', fontSize: 14, showCover: true,
+    coverImages: {},
+    interactionPrompt: DEFAULT_FRIEND_FEED_PROMPT, npcPrompt: DEFAULT_FRIEND_NPC_PROMPT, theme: 'moments', layout: 'paper', fontSize: 14, showCover: true,
     replyMode: 'immediate', npcEnabled: true, realContentEnabled: false, hideRealPosts: false, shareImagesEnabled: false,
     characterWeights: {}, contentWeights: {self: 60, related: 30, stranger: 10}, identities: {},
 });
@@ -61,6 +63,7 @@ export function resolveFriendFeedSettings(value?: Partial<FriendFeedSettings> | 
     const defaults = defaultFriendFeedSettings();
     return {
         userNickname:typeof value?.userNickname==='string'?value.userNickname.trim().slice(0,40):'',
+        coverImages:record(value?.coverImages)?Object.fromEntries(Object.entries(value.coverImages).filter((entry):entry is [string,string]=>typeof entry[1]==='string'&&/^blobref:[a-zA-Z0-9_-]+$/.test(entry[1]))):{},
         interactionPrompt: typeof value?.interactionPrompt === 'string' ? value.interactionPrompt.slice(0, 3000) : defaults.interactionPrompt,
         npcPrompt: typeof value?.npcPrompt === 'string' ? value.npcPrompt.slice(0, 3000) : defaults.npcPrompt,
         theme: ['island', 'moments', 'insta', 'journal', 'weibo', 'twitter'].includes(value?.theme || '') ? value!.theme! : defaults.theme,

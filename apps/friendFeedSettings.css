@@ -3,9 +3,27 @@
 .friend-feed[data-theme=island] { --ff-control-accent: #287c68; --ff-control-radius: 15px; }
 .friend-feed[data-theme=journal] { --ff-control-radius: 4px; }
 .friend-feed .friend-feed-form.ff-settings-page {
-    margin: 0; padding: 28px 22px 20px; border: 0; border-radius: 0; box-shadow: none;
-    min-height: 100%; background: var(--ff-paper); gap: 24px;
+    margin: 0; padding: 20px 20px 0; border: 0; border-radius: 0; box-shadow: none;
+    min-height: 100%; background: var(--ff-paper); gap: 20px;
 }
+.friend-feed[data-theme] .ff-preferences-header { grid-template-columns: 44px minmax(0,1fr) 44px; padding: 10px 16px; min-height: 60px; background: var(--ff-paper); border-bottom: 1px solid var(--ff-line); }
+.friend-feed[data-theme] .ff-preferences-header h1 { font: inherit; font-size: 17px; font-weight: 650; letter-spacing: 0; }
+.friend-feed .ff-preferences-header > button { width: 40px; height: 40px; background: transparent; }
+.friend-feed .ff-preferences-header .friend-feed-header-actions { visibility: hidden; }
+.friend-feed .ff-settings-directory { display: flex; flex-direction: column; gap: 24px; padding: 0 0 24px; }
+.friend-feed .ff-settings-directory h2 { margin: 0 0 8px; font-size: 11px; font-weight: 500; color: var(--ff-muted); }
+.friend-feed .ff-settings-menu { border-block: 1px solid var(--ff-line); }
+.friend-feed .ff-settings-menu > button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 50px; padding: 12px 0; border-radius: 0; text-align: left; font-size: 14px; line-height: 1.5; }
+.friend-feed .ff-settings-menu > button + button { border-top: 1px solid color-mix(in srgb,var(--ff-line) 55%,transparent); }
+.friend-feed .ff-settings-menu > button > span { flex: 1; }
+.friend-feed .ff-settings-menu > button > small { color: var(--ff-muted); font-size: 10px; font-weight: 400; }
+.friend-feed .ff-settings-menu svg { flex: none; color: var(--ff-muted); }
+.friend-feed .ff-settings-page > .ff-preferences { flex: 1; }
+.friend-feed .ff-preferences > .ff-preferences-section { gap: 22px; }
+.friend-feed .ff-preferences-section > .ff-toggle-row + .ff-toggle-row { border-top: 1px solid var(--ff-line); padding-top: 18px; }
+.friend-feed .ff-preferences-section > .friend-feed-settings-hint:first-child { margin: 0; }
+.friend-feed .ff-preferences-section > .ff-setting-field:first-child { margin-top: 0; }
+.friend-feed .ff-settings-page:has(.ff-settings-directory) { background: var(--ff-paper); }
 .friend-feed-scroll:has(.ff-settings-page) { background: var(--ff-paper); padding-bottom: 0; scroll-padding-bottom: 90px; }
 .ff-settings-intro { margin-bottom: 26px; }
 .ff-settings-kicker { display: block; font-size: 10px; font-weight: 600; color: var(--ff-muted); letter-spacing: .12em; margin-bottom: 9px; }
@@ -106,6 +124,9 @@
 .friend-feed-embedded .ff-settings-intro { margin-bottom: 18px; }
 .friend-feed-embedded .ff-scan-stage { min-height: 155px; padding: 16px 0; }
 .friend-feed-embedded .ff-scan-stage .friend-feed-qr { width: 152px; height: 152px; }
+@media (max-width: 360px) {
+    .friend-feed .ff-settings-menu > button > small { display: none; }
+}
 @media (hover:hover) {
     .friend-feed .ff-setting-primary:hover:not(:disabled) { background: color-mix(in srgb,var(--ff-control-accent) 88%,#000); }
     .ff-settings-navigation:hover > svg:last-child, .ff-setting-link:hover > svg { transform: translateX(2px); }

@@ -2,6 +2,7 @@ import {uid,placementError,findResidentSpot} from './model.js';
 import {snapToWall} from './wallMount.js';
 
 export function furnishHalloween(room,catalog){
+ room.fixedPalette='halloween';
  const asset=id=>catalog.find(a=>a.id===id);
  const put=(name,x,z,rotation=0,y=.15)=>{
   const assetId='halloween_'+name,a=asset(assetId);if(!a)throw Error('缺少万圣节家具：'+assetId);

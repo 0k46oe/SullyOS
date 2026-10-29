@@ -1,6 +1,5 @@
 import * as T from 'three';
-import {GLTFLoader} from 'three/examples/jsm/loaders/GLTFLoader.js';
-import {MeshoptDecoder} from 'three/examples/jsm/libs/meshopt_decoder.module.js';
+import {loadHomeGLTF} from '../resourcePackGLTF';
 import {approvedGarments,cleanApprovedWardrobe,type ApprovedWardrobe} from './approvedWardrobe';
 import type {bindBlankBody} from './blankRig';
 import {createClothingMask} from './clothingMask';
@@ -12,7 +11,7 @@ import {bodyHeightY,bodyBaseY,bodyHeightSlope} from './bodyHeight';
 import {fitSockSurface} from './fitSockSurface';
 import {halloweenCoverage} from './halloweenCoverage';
 const assets=new Map<string,Promise<T.Group>>();
-function load(asset:string){let task=assets.get(asset);if(!task){task=new GLTFLoader().setMeshoptDecoder(MeshoptDecoder).loadAsync(`${import.meta.env.BASE_URL}room3d/wardrobe/${asset}`).then(g=>{g.scene.traverse(o=>{if(o instanceof T.Mesh)for(const m of Array.isArray(o.material)?o.material:[o.material])m.userData.wardrobeMaterialIndex=g.parser.associations.get(m)?.materials;});g.scene.updateMatrixWorld(true);return g.scene;}).catch(e=>{assets.delete(asset);throw e;});assets.set(asset,task);}return task;}
+function load(asset:string){let task=assets.get(asset);if(!task){task=loadHomeGLTF(`${import.meta.env.BASE_URL}room3d/wardrobe/${asset}`).then(g=>{g.scene.traverse(o=>{if(o instanceof T.Mesh)for(const m of Array.isArray(o.material)?o.material:[o.material])m.userData.wardrobeMaterialIndex=g.parser.associations.get(m)?.materials;});g.scene.updateMatrixWorld(true);return g.scene;}).catch(e=>{assets.delete(asset);throw e;});assets.set(asset,task);}return task;}
 type Rig=ReturnType<typeof bindBlankBody>;
 /** Attach authored primitives by bone name; retain UVs, materials and authored weights. */
 export async function prepareApprovedWardrobe(rig:Rig,value:ApprovedWardrobe,fits:WardrobeFits={},colors:WardrobeColors={},layering=true,signal?:AbortSignal){

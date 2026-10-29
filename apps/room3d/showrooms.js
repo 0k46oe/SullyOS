@@ -6,6 +6,7 @@ import {furnishReferenceBedroom} from './bedroomReference.js';
 import {furnishGamingStudy} from './studyShowroom.js';
 import {furnishReferenceLiving} from './livingReference.js';
 import {furnishHalloween} from './halloweenShowroom.js';
+import {hasFixedRoomPalette} from './roomPalettes.js';
 // Whole furniture groups are editable after placement. No room-sized mesh.
 export const SHOWROOMS={
  halloween:{name:'万圣节魔法小屋',wall:'#663977',floor:'#806044',trim:'#28222e',floorStyle:'wood',wallStyle:'halloween',items:[],door:'walnut'},
@@ -25,6 +26,7 @@ const DECOR={
 Object.assign(SHOWROOMS.study,{door:'oak'});Object.assign(SHOWROOMS.kitchen,{door:'oak'});Object.assign(SHOWROOMS.living,{door:'walnut',wallStyle:'framed'});Object.assign(SHOWROOMS.bedroom,{door:'walnut',wallStyle:'framed'});
 export function applyShowroomStyle(room,key){
  const t=SHOWROOMS[key];if(!t)throw Error('找不到这套房间配色');
+ if(hasFixedRoomPalette(room))return;
  for(const part of ['wall','trim','floor','floorStyle','wallStyle'])room[part]=t[part];
 }
 export function furnishShowroom(room,key,catalog,{compact=false}={}){

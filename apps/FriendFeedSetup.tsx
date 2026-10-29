@@ -1,4 +1,4 @@
-import React from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import BibiIcon from '../components/os/BibiIcon';
 import type {APIConfig, CharacterProfile, DialogueApiConfig} from '../types';
 import type {FriendFeedSettings} from '../utils/friendFeedSettings';
@@ -8,6 +8,13 @@ export default function FriendFeedSetup({characters,api,appApi,settings,onApi,on
     characters:CharacterProfile[];api?:APIConfig;appApi?:DialogueApiConfig|null;settings:FriendFeedSettings;busy:boolean;
     onApi:()=>void;onCharacters:()=>void;onPreferences:(section:'accounts'|'interaction')=>void;onWeibo:()=>void;onDone:()=>void;
 }) {
+    const deadline=useRef(performance.now()+10_000);
+    const [remaining,setRemaining]=useState(10);
+    useEffect(()=>{
+        const tick=()=>{const seconds=Math.max(0,Math.ceil((deadline.current-performance.now())/1000));setRemaining(seconds);return seconds;};
+        const timer=setInterval(()=>{if(tick()===0)clearInterval(timer);},250);
+        return()=>clearInterval(timer);
+    },[]);
     const participants=characters.filter(c=>(settings.characterWeights[c.id]??10)>0);
     const ready=participants.filter(c=>{const config=resolveDialogueApi(api||{} as APIConfig,c,appApi);return !!config.baseUrl?.trim()&&!!config.model?.trim();}).length;
     const emotion=participants.filter(c=>c.emotionConfig?.enabled).length;
@@ -21,7 +28,7 @@ export default function FriendFeedSetup({characters,api,appApi,settings,onApi,on
             <li><div><strong>真实微博 · 可选</strong><span>想混入真实帖子再扫码连接自己的账号。使用公共代理无需自己部署；角色阅读真实内容需另行开启；评论只留在本地。</span></div><button type="button" onClick={onWeibo}>连接微博</button></li>
         </ol>
         <p className="ff-setup-note">角色实际发帖、评论和转发会留下轻量记忆卡；单纯同步微博不会写成角色记忆。这里只检查配置，不会自动生成内容或测试 API。</p>
-        <button type="button" className="friend-feed-primary" disabled={busy} onClick={onDone}>{busy?'正在保存…':'知道了，开始逛'}</button>
+        <button type="button" className="friend-feed-primary" disabled={busy||remaining>0} onClick={()=>{if(!busy&&performance.now()>=deadline.current)onDone();}}>{busy?'正在保存…':remaining>0?`请先阅读 · ${remaining}s`:'知道了，开始逛'}</button>
         <small>以后可以从哔哔设置重新打开这份引导。</small>
     </section>;
 }
