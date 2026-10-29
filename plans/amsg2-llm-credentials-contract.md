@@ -202,4 +202,4 @@ purpose」的组合，会产出既无引用可解析、又无内联凭据的空�
 
 ### Anthropic 原生端点（2026-10-29）
 
-凭据仍为加密三字段。`apiUrl` 为完整 `/v1/messages`（自定义服务保留自己的路径前缀）时，由 SullyOS Worker 的无状态出口转换为原生请求；不增加协议字段或明文 Key。前端先确认该地址的 `/config-check` 返回 `anthropicMessages: true`，否则不上传原生凭据、不创建或改写原生云端任务。用户更新 Worker 后重新连接验证即可。详细映射与缓存边界见 [Anthropic Messages](../docs/anthropic-messages.md)。
+凭据仍为加密三字段。`apiUrl` 为完整 `/v1/messages`（自定义服务保留自己的路径前缀）时，由 SullyOS Worker 的无状态出口转换为原生请求；不增加协议字段或明文 Key。前端先确认该地址的 `/config-check` 返回 `anthropicMessages: true`，否则不上传原生凭据、不创建或改写原生云端任务。沿用冷启动自动更新，成功后自动复查能力；首次原生调用还会限时复查旧的不支持结果，不要求用户手动重连。详细映射与缓存边界见 [Anthropic Messages](../docs/anthropic-messages.md)。

@@ -624,9 +624,14 @@ export const isLlmCredentialsReady = async (): Promise<boolean> => {
 
 export const requireAnthropicWorker = async (urls: string[]): Promise<void> => {
   if (!urls.some(isAnthropicEndpoint)) return;
-  const config = await ActiveMsgStore.getGlobalConfig();
+  let config = await ActiveMsgStore.getGlobalConfig();
+  if (config.anthropicMessagesSupported === true && config.anthropicMessagesWorkerUrl === config.workerUrl) return;
+  // An automatic deployment can finish after the startup probe. Recheck the
+  // current Worker instead of making users reconnect to clear a stale negative.
+  await ActiveMsgClient.probeInstantChatSupportDetailed({ timeoutMs: 5000 });
+  config = await ActiveMsgStore.getGlobalConfig();
   if (config.anthropicMessagesSupported !== true || config.anthropicMessagesWorkerUrl !== config.workerUrl) {
-    throw new Error('Anthropic 原生接口需要更新主动消息 2.0 Worker，并在设置中重新连接验证；本次未提交云端生成。');
+    throw new Error('主动消息 2.0 的 Anthropic 支持尚未就绪，已自动检查。请稍后重试；若持续失败，请检查网络或 Worker 自动更新设置。');
   }
 };
 
@@ -3636,6 +3641,10 @@ export const ActiveMsgClient = {
       // 用户刚把后端升上去，接下来这几分钟每一轮消化还是照着升级前那句「不支持」在前台
       // 跑那一两分钟的整理，页面一关就死。
       forgetBackgroundJobProbe();
+      // Both startup auto-update and the Settings button use this path. Refresh
+      // capabilities without a new handshake; a rollout still in progress is
+      // checked again by requireAnthropicWorker before its next native request.
+      await this.probeInstantChatSupportDetailed({ timeoutMs: 5000 });
       return {
         ok: true,
         supported: true,

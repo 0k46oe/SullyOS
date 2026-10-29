@@ -24,7 +24,9 @@
 
 `llm_credentials` 继续使用既有加密三字段 `apiUrl / apiKey / primaryModel`，原生协议由完整 `/messages` URL 表达。无数据库迁移，无新增明文凭据字段，工具续答保留 Anthropic 签名。
 
-已有 Worker 必须更新到本次 bundle 并重新连接验证。`/config-check` 返回 `anthropicMessages: true`；前台把能力结果绑定到探测过的 Worker 地址，未确认支持时阻止提交原生云端任务或凭据。OpenAI 任务不受此门槛影响。后端 bundle 版本为 `2026-10-29`，应用 APP_VERSION 不变。
+发布并同步新版 Worker 成品包后，已配置自动更新的用户打开新版 App 即会后台更新，成功后自动复查能力，无需手动重新连接。若部署完成晚于启动探测，首次原生请求会限时复查旧的不支持结果；确认支持后不再逐次预检。只有自动更新未配置、失败或网络异常持续存在时，才需要检查设置、手动更新等兜底操作。
+
+`/config-check` 返回 `anthropicMessages: true`；前台把能力结果绑定到探测过的 Worker 地址，仍未确认支持时阻止提交原生云端任务或凭据。OpenAI 任务不受此门槛影响。后端 bundle 版本为 `2026-10-29`，应用 APP_VERSION 不变。
 
 ## 验证
 
