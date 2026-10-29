@@ -27,7 +27,7 @@ export default function FriendFeedWeiboBrowser({post,theme,user,onConnect}:{post
         void load();
         const changed=()=>{controller.current?.abort();running.current=false;setBusy(false);setComments([]);setLoaded(false);setCursor('0');setError('微博连接已变化，请重新读取');};
         window.addEventListener(WEIBO_CONNECTION_CHANGED,changed);
-        return()=>{controller.current?.abort();window.removeEventListener(WEIBO_CONNECTION_CHANGED,changed);};
+        return()=>{controller.current?.abort();running.current=false;window.removeEventListener(WEIBO_CONNECTION_CHANGED,changed);};
     },[post.externalId]);
     return <div className="ff-post-detail" aria-label="真实微博详情">
         <WeiboPostCard source={post} theme={theme} user={user} onComment={()=>commentSection.current?.scrollIntoView?.({block:'start'})}/>

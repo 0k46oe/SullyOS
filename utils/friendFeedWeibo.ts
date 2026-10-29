@@ -151,9 +151,11 @@ export async function readWeiboHome(mode:WeiboHomeMode,cursor='0',signal?:AbortS
 /** The displayed batch keeps upstream order; enabled imports retain the normal context permissions. */
 export async function readWeiboHomePage(circleId:string,mode:WeiboHomeMode,cursor='0',signal?:AbortSignal) {
     const feed=await readFriendFeed();
+    if(signal?.aborted)throw signal.reason;
     if(resolveFriendFeedSettings(feed.settings).weiboHomeMode!==mode)throw Error('首页模式已变化，请重新读取');
     const stream=feed.weiboStreams?.find(s=>s.circleId===circleId);
     if(!stream)await setWeiboStream(circleId,true);
+    if(signal?.aborted)throw signal.reason;
     if(stream?.enabled===false)return readWeiboHome(mode,cursor,signal);
     const result=await syncWeibo(circleId,'following',cursor!=='0',signal,{cursor,browse:true});
     return {posts:result.posts!,nextCursor:result.nextCursor!};
@@ -252,9 +254,11 @@ export async function syncWeiboComments(postId:string,older=false):Promise<void>
 }
 /** One upstream page per user action. Old pages never emit new-activity notifications. */
 export async function syncWeibo(circleId:string,ownerId:string|'following',older=false,signal?:AbortSignal,browse?:{cursor:string;browse:true}):Promise<WeiboSyncResult> {
+    if(signal?.aborted)throw signal.reason;
     const lock=`${circleId}:${ownerId}`;if(running.has(lock))throw Error('正在同步该微博，请等待本次读取完成');running.add(lock);
     try {
         const feed=await readFriendFeed(), connection=readWeiboConnection(), generation=epoch;
+        if(signal?.aborted)throw signal.reason;
         const target=ownerId==='following'?feed.weiboStreams?.find(b=>b.circleId===circleId):feed.weiboBindings?.find(b=>b.ownerId===ownerId);
         if(!target?.enabled)throw Error('请先开启微博来源');
         const page='page' in target ? target.page : undefined, cursor='cursor' in target ? target.cursor : undefined;

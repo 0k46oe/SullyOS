@@ -20,6 +20,7 @@ import {mutateFriendFeed} from './friendFeed';
 import {saveWeiboBinding} from './friendFeedWeibo';
 import {FriendFeedWeiboTimeline,FriendFeedWeiboConnection} from '../apps/FriendFeedWeibo';
 import FriendFeedImages from '../apps/FriendFeedImages';
+import FriendFeedWeiboBrowser from '../apps/FriendFeedWeiboBrowser';
 import {setProxyWorkerUrl} from './proxyWorker';
 import {refreshFriendFeed,refreshFriendWeibo} from './friendFeedRefresh';
 import * as imageFiles from './file';
@@ -189,7 +190,7 @@ it('refreshes ranked batches, retains them on return, changes endpoint through s
         if(body.action==='comments')return Response.json({session,comments:[],nextCursor:null});
         if(fail)return Response.json({error:'微博读取测试错误'},{status:502});
         return Response.json({session,posts:reads++===0?[older,newer]:[third],nextCursor:null});});vi.stubGlobal('fetch',fetcher);
-    const host=await render(React.createElement(FriendFeedApp));await click(host,'微博首页');
+    const host=await render(React.createElement(React.StrictMode,null,React.createElement(FriendFeedApp)));await click(host,'微博首页');
     await act(async()=>{await vi.waitFor(()=>expect(host.textContent).toContain('推荐在前的旧微博'));});
     expect([...host.querySelectorAll('.ff-post-text')].map(p=>p.textContent)).toEqual(['推荐在前的旧微博','排在后的新微博']);
     expect((await readFriendFeed()).posts.map(p=>p.source?.externalId).sort()).toEqual(['111111','222222']);
@@ -209,13 +210,24 @@ it('automatically restores my own posts on entry and retries a failed read witho
     sessionStorage.setItem('sully:weibo-session:v2',JSON.stringify({id:'own-profile',proxy:getProxyWorkerUrl(),uid:session.uid,session,expires:session.expires}));
     const own={platform:'weibo',accountId:'123456',externalId:'999999',url:'https://weibo.com/123456/999999',author:'我',text:'找回我的真实微博',publishedAt:Date.now(),fetchedAt:Date.now(),truncated:false};
     const fetcher=vi.fn().mockResolvedValueOnce(Response.json({error:'我的微博暂时不可读取'},{status:502})).mockImplementation(async()=>Response.json({session,posts:[own],nextPage:null}));vi.stubGlobal('fetch',fetcher);
-    const host=await render(React.createElement(FriendFeedApp));await click(host,'我的主页');
+    const host=await render(React.createElement(React.StrictMode,null,React.createElement(FriendFeedApp)));await click(host,'我的主页');
     await act(async()=>{await vi.waitFor(()=>expect(host.textContent).toContain('我的微博暂时不可读取'));});
     await click(host,'刷新我的微博');expect(host.textContent).toContain('找回我的真实微博');
     const scroll=host.querySelector('.friend-feed-scroll')!;
     await act(async()=>{for(const [type,y] of [['touchstart',0],['touchmove',120],['touchend',120]] as const){const e=new Event(type,{bubbles:true,cancelable:true});Object.defineProperty(e,'touches',{value:[{clientX:0,clientY:y}]});scroll.dispatchEvent(e);}await new Promise(r=>setTimeout(r,25));});
     expect(fetcher).toHaveBeenCalledTimes(3);expect(host.textContent).toContain('找回我的真实微博');
     expect(fetcher.mock.calls.every(([,o])=>JSON.parse(o.body).action==='posts')).toBe(true);expect(refreshFriendFeed).not.toHaveBeenCalled();
+});
+it('reads original comments after StrictMode remounts and opens their authors on the original site',async()=>{
+    const {getProxyWorkerUrl}=await import('./proxyWorker');
+    const session={version:2,origin:window.location.origin,kind:'account',uid:'123456',expires:Date.now()+60000,cookies:[]};
+    sessionStorage.setItem('sully:weibo-session:v2',JSON.stringify({id:'strict-comments',proxy:getProxyWorkerUrl(),uid:session.uid,session,expires:session.expires}));
+    vi.stubGlobal('fetch',vi.fn(async()=>Response.json({session,comments:[{id:'888888',authorId:'654321',authorName:'原评论作者',text:'真实接口评论',createdAt:Date.now()}],nextCursor:null})));
+    const opened=vi.spyOn(window,'open').mockImplementation(()=>null);
+    const post={platform:'weibo' as const,accountId:'123456',externalId:'999999',url:'https://weibo.com/123456/999999',author:'我',text:'原帖',publishedAt:Date.now(),fetchedAt:Date.now(),truncated:false};
+    const host=await render(React.createElement(React.StrictMode,null,React.createElement(FriendFeedWeiboBrowser,{post,theme:'weibo',user:{name:'我'} as any,onConnect:()=>{}})));
+    await act(async()=>{await vi.waitFor(()=>expect(host.textContent).toContain('真实接口评论'));});
+    await click(host,'原评论作者');expect(opened).toHaveBeenCalledWith('https://weibo.com/u/654321','_blank','noopener,noreferrer');
 });
 it('continues syncing followed posts when a personal source fails',async()=>{
     const {getProxyWorkerUrl}=await import('./proxyWorker');
