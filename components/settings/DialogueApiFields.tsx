@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { DialogueApiConfig } from '../../types';
+import { llmApiType } from '../../utils/llmEndpoint';
 
 export default function DialogueApiFields({ value, onChange, fetchModels, isLoadingModels, openModelPicker }: {
  value: DialogueApiConfig; onChange: (patch: Partial<DialogueApiConfig>) => void;
@@ -11,6 +12,12 @@ export default function DialogueApiFields({ value, onChange, fetchModels, isLoad
  const setLocalKey = (apiKey: string) => onChange({ apiKey });
  const setLocalTemperature = (temperature: number) => onChange({ temperature });
  return <div className="space-y-4">
+                <label className="block text-xs text-slate-500">接口类型
+                    <select aria-label="接口类型" value={llmApiType(value)} onChange={e => onChange({apiType:e.target.value as 'openai'|'anthropic'})} className="mt-1 w-full rounded-xl border border-slate-200 px-4 py-2.5 bg-white/50">
+                        <option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 原生 Messages</option>
+                    </select>
+                </label>
+                {llmApiType(value) === 'anthropic' && <p className="text-[10px] text-slate-400 leading-relaxed">直连服务商，启用 5 分钟 Prompt Caching；首次写入缓存也会计费，能否命中取决于模型、长度与前缀是否相同。支持填写根地址、/v1 或完整 /v1/messages。主动消息 2.0 需更新现有 Worker。</p>}
                 <div className="group">
                     <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">URL</label>
                     <input type="text" value={localUrl} onChange={(e) => setLocalUrl(e.target.value)} placeholder="https://..." className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
@@ -66,7 +73,7 @@ export default function DialogueApiFields({ value, onChange, fetchModels, isLoad
                                 <input
                                     type="range"
                                     min="0"
-                                    max="2"
+                                    max={llmApiType(value) === 'anthropic' ? '1' : '2'}
                                     step="0.05"
                                     value={localTemperature}
                                     onChange={(e) => setLocalTemperature(parseFloat(e.target.value))}

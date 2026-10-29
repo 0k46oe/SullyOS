@@ -43,7 +43,7 @@ vi.mock('./activeMsgStore', () => ({
   },
 }));
 
-import { ActiveMsgClient } from './activeMsgClient';
+import { ActiveMsgClient, requireAnthropicWorker } from './activeMsgClient';
 import { forgetAllCredIds } from './amsgLlmCredentials';
 import { clearInstantChatPending } from './amsgInstantChat';
 import { ChatPrompts } from './chatPrompts';
@@ -81,6 +81,8 @@ beforeEach(() => {
   postedBodies = [];
   scheduleResponses = [{ status: 200, body: { success: true, data: { uuid: 'remote-uuid', status: 'pending' } } }];
   globalConfig.llmCredentialsSupported = true;
+  delete globalConfig.anthropicMessagesSupported;
+  delete globalConfig.anthropicMessagesWorkerUrl;
   forgetAllCredIds();
   reiClient.init.mockReset().mockResolvedValue(undefined);
   reiClient.putClientState.mockReset().mockResolvedValue({ success: true });
@@ -110,6 +112,22 @@ afterEach(() => {
   clearInstantChatPending(CHAR_ID);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+it('原生接口只提交给已确认支持且地址一致的 Worker，OpenAI 不受新门槛影响', async () => {
+  await expect(requireAnthropicWorker(['https://api.test/v1/chat/completions'])).resolves.toBeUndefined();
+  await expect(requireAnthropicWorker(['https://api.anthropic.com/v1/messages'])).rejects.toThrow('更新主动消息');
+  globalConfig.anthropicMessagesSupported=true;
+  globalConfig.anthropicMessagesWorkerUrl='https://other-worker.test';
+  await expect(requireAnthropicWorker(['https://api.anthropic.com/v1/messages'])).rejects.toThrow('更新主动消息');
+  globalConfig.anthropicMessagesWorkerUrl=globalConfig.workerUrl;
+  await expect(requireAnthropicWorker(['https://api.anthropic.com/v1/messages'])).resolves.toBeUndefined();
+});
+
+it('旧 Worker 的存量内联任务不会被更新成它不支持的原生凭据', async () => {
+  const update=vi.spyOn(ActiveMsgClient,'updatePendingTasksRemote');
+  await expect(ActiveMsgClient.refreshCharPendingAiTaskCredentials({char:CHAR,config:{enabled:true,tasks:[]},apiConfig:{...API,baseUrl:'https://api.anthropic.com',apiType:'anthropic'},tasks:[{taskUuid:'legacy',mode:'auto'} as any],remoteTasks:[{uuid:'legacy'}]})).rejects.toThrow('更新主动消息');
+  expect(update).not.toHaveBeenCalled();expect(reiClient.putLlmCredentials).not.toHaveBeenCalled();
 });
 
 /** 排程 POST 出去的那份任务载荷（云端状态那份没有 messageType，据此认出来）。 */

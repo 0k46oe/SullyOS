@@ -58,6 +58,7 @@ import { isAnalyticsRequestUrl, trackEvent, shouldReportSnapshot, trackDataScale
 import { loadChatInputPreferences, saveChatInputPreferences } from '../utils/chatInputPreferences';
 import { collectAppearance, collectCharSettings, collectDataScale, collectFeatureFlagsAsync, collectSARFeatureFlags } from '../utils/analyticsSnapshot';
 import { normalizeApiConfig, normalizeApiPreset } from '../utils/apiConfigNormalize';
+import { fetchLlm } from '../utils/anthropicApi';
 import { getCheckPhoneApi, setCheckPhoneApi } from '../utils/checkPhoneApi';
 import { markBackupDone } from '../utils/backupReminder';
 import { collectSARLocalBackup, restoreSARLocalBackup } from '../utils/vrWorld/sarBackup';
@@ -1261,7 +1262,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           }
 
           try {
-              let response = await originalFetch(...sendArgs);
+              let response = await fetchLlm(sendArgs[0], sendArgs[1], originalFetch, true);
 
               // /chat/completions 是可能已经开始计费的请求。拿到任何 HTTP 响应后都不在
               // 兼容层静默重发：中转站可能在返回错误前已经把任务交给上游，重发会让用户
@@ -1400,6 +1401,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           }
       };
 
+      Object.assign(patchedFetch, { __sullyAnthropic: true });
       try {
           window.fetch = patchedFetch;
       } catch (e) {

@@ -1,4 +1,5 @@
 import type { APIConfig, CharacterProfile, DialogueApiConfig } from '../types';
+import { normalizeLlmBaseUrl, llmApiType } from './llmEndpoint';
 import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from './apiConfigNormalize';
 
 export function normalizeDialogueMaxTokens(value: unknown): number | undefined {
@@ -18,12 +19,13 @@ export function resolveDialogueApi(
   const source = appApi ?? character?.dialogueApi;
   if (!source) return globalApi;
   // Credentials are atomic; never fill a missing key/model from a different provider.
-  return { ...globalApi, ...pickDialogueApi(source) };
+  return { ...globalApi, ...pickDialogueApi(source), apiType: llmApiType(source) };
 }
 
 export function pickDialogueApi(api: DialogueApiConfig): DialogueApiConfig {
   return {
-    baseUrl: normalizeApiBaseUrl(api.baseUrl),
+    baseUrl: normalizeLlmBaseUrl(normalizeApiBaseUrl(api.baseUrl), api.apiType),
+    ...(api.apiType ? {apiType: api.apiType} : {}),
     apiKey: normalizeApiCredential(api.apiKey),
     model: normalizeApiModel(api.model),
     ...(typeof api.stream === 'boolean' ? { stream: api.stream } : {}),

@@ -276,9 +276,10 @@ export interface VisionApiConfig {
 }
 
 /** A complete dialogue endpoint, separate from TTS/vision configuration. */
-export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'stream' | 'temperature' | 'maxTokens'>;
+export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'stream' | 'temperature' | 'maxTokens' | 'apiType'>;
 
 export interface APIConfig {
+  apiType?: 'openai' | 'anthropic';
   /** 私聊单次生成上限；未设置沿用 8000，不改变历史范围。 */
   maxTokens?: number;
   baseUrl: string;
@@ -335,6 +336,9 @@ export type ActiveMsg2Mode = 'fixed' | 'auto' | 'prompted';
 export type ActiveMsg2Recurrence = 'none' | 'daily' | 'weekly';
 
 export interface ActiveMsg2GlobalConfig {
+  /** Confirmed by /config-check, scoped to the Worker URL that was checked. */
+  anthropicMessagesSupported?: boolean;
+  anthropicMessagesWorkerUrl?: string;
   userId: string;
   /** 单用户 Cloudflare Worker 地址，例如 https://amsg.your-worker.dev */
   workerUrl: string;

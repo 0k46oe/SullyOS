@@ -2,6 +2,8 @@ import NavigationBallSettings from '../components/settings/NavigationBallSetting
 import { useSettingsFocus } from '../utils/settingsNavigation';
 import ApiPresetGroups from '../components/settings/ApiPresetGroups';
 import DialogueApiFields from '../components/settings/DialogueApiFields';
+import { llmApiType, normalizeLlmBaseUrl, type LlmApiType } from '../utils/llmEndpoint';
+import { fetchLlm } from '../utils/anthropicApi';
 import ModelPicker from '../components/settings/ModelPicker';
 import { buildModelPickerView } from '../utils/modelPickerView';
 
@@ -502,6 +504,7 @@ const Settings: React.FC = () => {
   
   const [localKey, setLocalKey] = useState(apiConfig.apiKey);
   const [localUrl, setLocalUrl] = useState(apiConfig.baseUrl);
+  const [localApiType, setLocalApiType] = useState<LlmApiType>(llmApiType(apiConfig));
   const [localModel, setLocalModel] = useState(String(apiConfig.model || ''));
   const [localStream, setLocalStream] = useState<boolean>(apiConfig.stream === true);
   const [localMaxTokens, setLocalMaxTokens] = useState(apiConfig.maxTokens ?? 8000);
@@ -557,6 +560,7 @@ const Settings: React.FC = () => {
   const [presetWriteback, setPresetWriteback] = useState<{ presetId: string; config: PresetSwitchPatch } | null>(null);
   const [editPresetName, setEditPresetName] = useState('');
   const [editPresetUrl, setEditPresetUrl] = useState('');
+  const [editPresetApiType, setEditPresetApiType] = useState<LlmApiType>('openai');
   const [editPresetKey, setEditPresetKey] = useState('');
   const [editPresetModel, setEditPresetModel] = useState('');
   const [editPresetStream, setEditPresetStream] = useState(false);
@@ -982,12 +986,13 @@ const Settings: React.FC = () => {
   // 主 API 这边还没保存的输入就被悄悄冲回旧值了，而且界面上完全看不出来。
   useEffect(() => {
       setLocalUrl(apiConfig.baseUrl);
+      setLocalApiType(llmApiType(apiConfig));
       setLocalKey(apiConfig.apiKey);
       setLocalModel(String(apiConfig.model || ''));
       setLocalStream(apiConfig.stream === true);
       setLocalMaxTokens(apiConfig.maxTokens ?? 8000);
       setLocalTemperature(typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85);
-  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.stream, apiConfig.temperature, apiConfig.maxTokens]);
+  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.stream, apiConfig.temperature, apiConfig.maxTokens, apiConfig.apiType]);
 
   useEffect(() => {
       setLocalVisionEnabled(apiConfig.visionApi?.enabled === true);
@@ -1066,6 +1071,7 @@ const Settings: React.FC = () => {
       setEditPresetName(preset.name);
       setEditPresetGroup(preset.group || '');
       setEditPresetUrl(preset.config.baseUrl || '');
+      setEditPresetApiType(llmApiType(preset.config));
       setEditPresetKey(preset.config.apiKey || '');
       setEditPresetModel(preset.config.model || '');
       setEditPresetMaxTokens(isActive ? localMaxTokens : (preset.config.maxTokens ?? localMaxTokens));
@@ -1091,7 +1097,8 @@ const Settings: React.FC = () => {
       }
       const nextConfig = {
           ...preset.config,
-          baseUrl: normalizeApiBaseUrl(editPresetUrl),
+          baseUrl: normalizeLlmBaseUrl(normalizeApiBaseUrl(editPresetUrl), editPresetApiType),
+          apiType: editPresetApiType,
           apiKey: normalizeApiCredential(editPresetKey),
           model: normalizeApiModel(editPresetModel),
           stream: editPresetStream,
@@ -1157,7 +1164,8 @@ const Settings: React.FC = () => {
           return;
       }
       addApiPreset(newPresetName, {
-        baseUrl: normalizeApiBaseUrl(localUrl),
+        baseUrl: normalizeLlmBaseUrl(normalizeApiBaseUrl(localUrl), localApiType),
+        apiType: localApiType,
         apiKey: normalizeApiCredential(localKey),
         model: normalizeApiModel(localModel),
         stream: localStream,
@@ -1180,7 +1188,8 @@ const Settings: React.FC = () => {
   const handleSaveApi = (modelOverride?: string) => {
     const nextConfig = {
       apiKey: normalizeApiCredential(localKey),
-      baseUrl: normalizeApiBaseUrl(localUrl),
+      baseUrl: normalizeLlmBaseUrl(normalizeApiBaseUrl(localUrl), localApiType),
+      apiType: localApiType,
       model: normalizeApiModel(modelOverride ?? localModel),
       stream: localStream,
       temperature: localTemperature,
@@ -1411,13 +1420,13 @@ const Settings: React.FC = () => {
   };
 
   const fetchModels = async () => {
-    const baseUrl = normalizeApiBaseUrl(localUrl);
+    const baseUrl = normalizeLlmBaseUrl(normalizeApiBaseUrl(localUrl), localApiType);
     const apiKey = normalizeApiCredential(localKey);
     if (!baseUrl) { setStatusMsg('请先填写 URL'); return; }
     setIsLoadingModels(true);
     setStatusMsg('正在连接...');
     try {
-        const response = await fetch(`${baseUrl}/models`, {
+        const response = await fetchLlm(`${baseUrl}/models`, {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
         });
@@ -2609,8 +2618,9 @@ const Settings: React.FC = () => {
 
             <div className="space-y-4">
                 <DialogueApiFields
-                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, stream: localStream, temperature: localTemperature, maxTokens: localMaxTokens }}
+                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, stream: localStream, temperature: localTemperature, maxTokens: localMaxTokens, apiType: localApiType }}
                     onChange={patch => {
+                        if (patch.apiType !== undefined) setLocalApiType(patch.apiType);
                         if (patch.baseUrl !== undefined) setLocalUrl(patch.baseUrl);
                         if (patch.apiKey !== undefined) setLocalKey(patch.apiKey);
                         if (patch.stream !== undefined) setLocalStream(patch.stream);
@@ -2638,7 +2648,7 @@ const Settings: React.FC = () => {
                         setTestingApi(true);
                         setTestApiResult(null);
                         try {
-                            const res = await fetch(`${localUrl.trim().replace(/\/+$/, '')}/chat/completions`, {
+                            const res = await fetchLlm(`${normalizeLlmBaseUrl(localUrl, localApiType)}/chat/completions`, {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localKey.trim()}` },
                                 body: JSON.stringify({
@@ -4131,6 +4141,7 @@ const Settings: React.FC = () => {
               </div>
               <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">URL</label>
+                  <select aria-label="预设接口类型" value={editPresetApiType} onChange={e => setEditPresetApiType(e.target.value as LlmApiType)} className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 原生 Messages</option></select>
                   <input value={editPresetUrl} onChange={e => setEditPresetUrl(e.target.value)} placeholder="https://..." className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary" />
               </div>
               <div className="space-y-1.5">
@@ -4183,6 +4194,7 @@ const Settings: React.FC = () => {
                   type="button"
                   onClick={() => {
                       setEditPresetUrl(localUrl);
+                      setEditPresetApiType(localApiType);
                       setEditPresetKey(localKey);
                       setEditPresetModel(localModel);
                       setEditPresetStream(localStream);
