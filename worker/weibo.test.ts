@@ -21,6 +21,23 @@ it('reads newest comments through a fixed GET, preserves large cursor IDs and re
     expect(fetcher).not.toHaveBeenCalled();
 });
 const request=(body:object,source=origin)=>new Request('https://proxy.test/weibo',{method:'POST',headers:{Origin:source,'Content-Type':'application/json'},body:JSON.stringify(body)});
+it('reads ranked followed batches with account-owned list IDs, exact cursors and no chronological fallback',async()=>{
+    const session={version:2,origin,kind:'account',uid:'123456',expires:Date.now()+60000,cookies:[]};
+    const row=(id:string,time:string)=>({idstr:id,user:{idstr:'654321',screen_name:'关注的人'},text_raw:id,created_at:time});
+    const fetcher=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ok:1,statuses:[row('111111','2026-10-20T12:00:00Z'),row('222222','2026-10-21T12:00:00Z')]}).replace('"ok":1','"since_id":99999999999999999,"ok":1')))
+        .mockResolvedValueOnce(Response.json({ok:1,since_id:'part:2=-a',statuses:[row('333333','2026-10-19T12:00:00Z')]}))
+        .mockResolvedValueOnce(Response.json({ok:0,msg:'upstream rejected'}));vi.stubGlobal('fetch',fetcher);
+    const first=await (await handleWeibo(request({action:'home',session}),{})).json();
+    expect(first.posts.map((p:any)=>p.externalId)).toEqual(['111111','222222']);expect(first.nextCursor).toBe('99999999999999999');
+    const url=new URL(fetcher.mock.calls[0][0]);expect(url.pathname).toBe('/ajax/feed/unreadfriendstimeline');
+    expect(Object.fromEntries(url.searchParams)).toEqual({list_id:'10001123456',refresh:'4',since_id:'0',count:'25'});
+    const next=await (await handleWeibo(request({action:'home',session,cursor:first.nextCursor}),{})).json();expect(next.nextCursor).toBe('part:2=-a');
+    expect(new URL(fetcher.mock.calls[1][0]).searchParams.get('since_id')).toBe(first.nextCursor);
+    expect((await handleWeibo(request({action:'home',session}),{})).status).toBe(502);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    for(const extra of [{uid:'654321'},{cursor:'x&target=evil'},{cursor:'x'.repeat(513)}])expect((await handleWeibo(request({action:'home',session,...extra}),{})).status).toBe(400);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+});
 afterEach(()=>vi.unstubAllGlobals());
 it('relays only public raster images without forwarding credentials and blocks redirects and oversized responses',async()=>{
     const req=(url:string)=>new Request('https://proxy.test/weibo-image?url='+encodeURIComponent(url),{headers:{Cookie:'private',Authorization:'secret'}});

@@ -9,8 +9,10 @@ export const DEFAULT_FRIEND_NPC_PROMPT = `你写的是各自刷手机的网友�
 export interface FriendAccount {id: string; name: string; purpose: string; tags: string[]}
 export interface FriendIdentity {nickname?:string; tags: string[]; accounts: FriendAccount[]}
 export type FriendRefreshKind = 'self' | 'related' | 'stranger';
+export type WeiboHomeMode = 'default' | 'latest';
 export interface FriendFeedSettings {
     userNickname?:string;
+    weiboHomeMode: WeiboHomeMode;
     weiboProfile?:{uid:string;name:string;avatar?:string};
     coverImages?: Record<string,string>;
     interactionPrompt: string;
@@ -30,6 +32,7 @@ export interface FriendFeedSettings {
 }
 export const defaultFriendFeedSettings = (): FriendFeedSettings => ({
     userNickname: '',
+    weiboHomeMode: 'default',
     coverImages: {},
     interactionPrompt: DEFAULT_FRIEND_FEED_PROMPT, npcPrompt: DEFAULT_FRIEND_NPC_PROMPT, theme: 'moments', layout: 'paper', fontSize: 14, showCover: true,
     replyMode: 'immediate', npcEnabled: true, realContentEnabled: false, hideRealPosts: false, shareImagesEnabled: false,
@@ -64,6 +67,7 @@ export function resolveFriendFeedSettings(value?: Partial<FriendFeedSettings> | 
     const defaults = defaultFriendFeedSettings();
     return {
         userNickname:typeof value?.userNickname==='string'?value.userNickname.trim().slice(0,40):'',
+        weiboHomeMode:value?.weiboHomeMode==='latest'?'latest':'default',
         weiboProfile:value?.weiboProfile && /^\d{4,25}$/.test(value.weiboProfile.uid) && typeof value.weiboProfile.name==='string' && value.weiboProfile.name.trim()
             ? {uid:value.weiboProfile.uid,name:value.weiboProfile.name.trim().slice(0,150),
                 avatar:typeof value.weiboProfile.avatar==='string' && /^https:\/\/[a-z\d.-]+\.sinaimg\.cn\/[^\s]{1,1900}$/i.test(value.weiboProfile.avatar)?value.weiboProfile.avatar:undefined}:undefined,

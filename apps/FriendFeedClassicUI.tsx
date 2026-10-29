@@ -46,7 +46,7 @@ export function ClassicProfile({theme, name, avatar, posts, onSettings, onFollow
 }
 export function ClassicPost({theme, post, index, user, characters, onProfile, onComment, onDelete, children}: {
     theme: Theme; post: FriendPost; index: number; user: UserProfile; characters: CharacterProfile[];
-    onProfile: (id: string,accountId?:string) => void; onComment: () => void; onDelete: () => void; children?: React.ReactNode;
+    onProfile: (id: string,accountId?:string) => void; onComment: () => void; onDelete?: () => void; children?: React.ReactNode;
 }) {
     const [fullText, setFullText] = useState(false);
     const name = post.accountId && post.accountId !== 'main' ? post.authorName : post.authorId === 'user' ? user.name || '我' : characters.find(c => c.id === post.authorId)?.name || post.authorName;
@@ -63,7 +63,7 @@ export function ClassicPost({theme, post, index, user, characters, onProfile, on
         {theme === 'journal' && <div className="ff-editorial-index"><span>{String(index + 1).padStart(2, '0')}</span><small>{media ? 'PHOTO DIARY' : 'FIELD NOTES'}</small></div>}
         <header className="ff-classic-byline"><button onClick={() => onProfile(post.authorId,post.accountId)} aria-label={`查看${name}的主页`}><FriendFeedAvatar name={name} avatar={avatar}/></button>
             <div><button onClick={() => onProfile(post.authorId,post.accountId)}><strong>{name}</strong></button><time dateTime={new Date(post.createdAt).toISOString()}>{time}</time></div>
-            <details className="ff-post-menu"><summary aria-label="动态操作"><DotsThree size={22}/></summary><button aria-label={`删除动态：${post.text.slice(0, 12)}`} onClick={onDelete}><Trash size={15}/>删除动态</button></details>
+            {onDelete&&<details className="ff-post-menu"><summary aria-label="动态操作"><DotsThree size={22}/></summary><button aria-label={`删除动态：${post.text.slice(0, 12)}`} onClick={onDelete}><Trash size={15}/>删除动态</button></details>}
         </header>
         <div className="ff-classic-content">
             {theme === 'insta' && media}

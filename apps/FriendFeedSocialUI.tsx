@@ -70,7 +70,7 @@ export function SocialComposer({theme,user,onCompose}: {theme:SocialTheme;user:U
 }
 
 export function SocialPost({theme,post,user,characters,onProfile,onComment,onDelete,children}: {
-    theme:SocialTheme;post:FriendPost;user:UserProfile;characters:CharacterProfile[];onProfile:(id:string,accountId?:string)=>void;onComment:()=>void;onDelete:()=>void;children?:React.ReactNode;
+    theme:SocialTheme;post:FriendPost;user:UserProfile;characters:CharacterProfile[];onProfile:(id:string,accountId?:string)=>void;onComment:()=>void;onDelete?:()=>void;children?:React.ReactNode;
 }) {
     const [fullText,setFullText]=useState(false);
     const textCharacters=Array.from(post.text), textLimit=theme==='weibo'?220:320;
@@ -85,7 +85,7 @@ export function SocialPost({theme,post,user,characters,onProfile,onComment,onDel
             <div className="ff-byline-identity"><button onClick={()=>onProfile(post.authorId,post.accountId)}>{name}</button>
                 <time dateTime={new Date(post.createdAt).toISOString()}>{time}</time>
                 {theme==='weibo'&&post.synced&&<span>来自真实微博</span>}</div>
-            <details className="ff-post-menu"><summary aria-label="动态操作"><DotsThree size={23}/></summary><button onClick={onDelete}><Trash size={15}/>删除动态</button></details>
+            {onDelete&&<details className="ff-post-menu"><summary aria-label="动态操作"><DotsThree size={23}/></summary><button onClick={onDelete}><Trash size={15}/>删除动态</button></details>}
         </header>
         <div className="ff-post-content">
             {!!post.accountTags?.length&&<small className="ff-account-tags">{post.accountTags.map(t=>`#${t}`).join(' · ')}</small>}

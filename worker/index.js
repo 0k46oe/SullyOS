@@ -175,7 +175,7 @@ async function handleWeibo(request) {
     let input; try {input = JSON.parse(raw);} catch {throw fail('请求格式错误');}
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail('请求格式错误');
     const {action} = input;
-    if (!['start','poll','profile','posts','following','followingAccounts','comments'].includes(action)) throw fail('不支持的微博操作');
+    if (!['start','poll','profile','posts','following','home','followingAccounts','comments'].includes(action)) throw fail('不支持的微博操作');
     let session = action === 'start' ? {version:2,origin,cookies:[],expires:Date.now()+240000,kind:'qr'} : readWeiboSession(input.session,origin);
     const get = upstreamFor(session.cookies,controller.signal);
     const json = async path => {try {return JSON.parse(await get(path));} catch(e) {if (e.status) throw e; throw fail('微博未返回有效数据，请在微博检查登录状态',502);}};
@@ -234,6 +234,19 @@ async function handleWeibo(request) {
       }
       const next = String(data.max_id ?? '0');
       result = {comments,nextCursor:data.data.length && /^\d{1,25}$/.test(next) && next!=='0' && next!==cursor ? next : null};
+    } else if (action === 'home') {
+      // Default followed feed: keep Weibo's ranking, not the chronological friendstimeline.
+      const cursor = String(input.cursor ?? '0');
+      if (input.uid !== undefined || !/^[\w,.:=-]{1,512}$/.test(cursor)) throw fail('首页分页参数无效');
+      const query = new URLSearchParams({list_id:'10001'+session.uid,refresh:cursor==='0'?'4':'0',since_id:cursor,count:'25'});
+      const rawHome = await get('/ajax/feed/unreadfriendstimeline?'+query);
+      let data; try {data=JSON.parse(rawHome.replace(/"(id|since_id)"\s*:\s*(\d{16,})(?=\s*[,}])/g,'"$1":"$2"'));}
+      catch {throw fail('微博首页未返回有效数据',502);}
+      const list=data.statuses || data.data?.statuses;
+      if(Number(data.ok)!==1 || !Array.isArray(list))throw fail('微博默认关注首页暂时不可读取，请稍后重试',502);
+      const next=String(data.since_id ?? data.data?.since_id ?? '0');
+      result={posts:list.slice(0,50).map(normalizeWeiboPost).filter(Boolean),
+        nextCursor:list.length && /^[\w,.:=-]{1,512}$/.test(next) && next!=='0' && next!==cursor ? next : null};
     } else if (action === 'followingAccounts') {
       // Logged-in user's own list, not inferred from timeline authors. No upstream writes.
       const page = input.page ?? 1, cursor = String(input.cursor ?? '');
