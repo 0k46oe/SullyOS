@@ -31,7 +31,7 @@
 .ff-following-directory h2 small { font-size:12px; font-weight:400; color:var(--ff-muted); margin-left:5px; }
 .ff-following-directory header>span,.ff-following-directory p { font-size:11px; line-height:1.7; color:var(--ff-muted); }
 .friend-feed .ff-following-person { display:flex; align-items:center; gap:12px; width:100%; padding:14px 0; border:0; border-bottom:1px solid var(--ff-line); background:transparent; text-align:left; text-decoration:none; color:var(--ff-ink); }
-.ff-following-person>span { flex:1; min-width:0; }
+.friend-feed .ff-following-person>span:not(.friend-feed-avatar) { flex:1; min-width:0; }
 .ff-following-person strong { font-size:14px; overflow-wrap:anywhere; }
 .ff-following-person small { display:block; font-size:11px; color:var(--ff-muted); margin-top:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .ff-following-person>svg { flex:none; color:var(--ff-muted); }
