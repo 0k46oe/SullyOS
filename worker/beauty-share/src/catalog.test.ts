@@ -58,6 +58,15 @@ describe('公开装扮库：真实 SQL、审批和快照边界',()=>{
     const entry=f.snapshot().entries[0];expect(entry.categories).toEqual([part]);
     expect(JSON.parse(f.pub.get(entry.file)!.value as string).parts).toEqual({[part]:appearance});
     expect((await f.api('/shares/'+entry.code)).status).toBe(200);
+    const updated={...appearance,preset:'paper',customCss:'.meeting-reading { --meeting-paper: #ffeedd; }'};
+    const next=await f.api('/submissions/'+response.value.id,'author',{metadata,package:{...pack,parts:{[part]:updated}},catalogCover:cover,expectedRevision:response.value.revision});
+    expect(next.status).toBe(201);
+    // Pending updates must not replace the version already available by code.
+    expect((await f.api('/shares/'+entry.code+'/file?revision='+response.value.revision)).value.parts).toEqual({[part]:appearance});
+    await f.approve(next.value.revision);await f.fire();
+    const published=f.snapshot().entries[0];expect(published.code).toBe(entry.code);
+    expect(JSON.parse(f.pub.get(published.file)!.value as string).parts).toEqual({[part]:updated});
+    expect((await f.api('/shares/'+entry.code+'/file?revision='+next.value.revision)).value.parts).toEqual({[part]:updated});
   });
   it('协同工作投稿通过审核后进入独立分类，分享码只带外观',async()=>{
     const f=await fixture();
