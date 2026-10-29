@@ -1,5 +1,7 @@
 # 静态资源缓存与网页更新
 
+3D 家园万圣节系列另有用户主动下载的 [可选资源包](home-resource-packs.md)：独立 IndexedDB 保存，不随备份导出；下载使用 `no-store` 绕过 SW 写缓存，模型与贴图优先从完整本地包读取。
+
 ## 设计
 
 资源缓存模块装在 `worker/sw-keep-alive.ts` 这个 SW 里，和推送共用同一次注册。它只读写自己名下的 Cache Storage，不碰 IndexedDB、推送订阅和别的应用缓存；网络失败时返回真实的失败，不拿空内容顶替。
