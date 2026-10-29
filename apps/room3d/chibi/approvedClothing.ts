@@ -1,5 +1,6 @@
 import * as T from 'three';
 import {GLTFLoader} from 'three/examples/jsm/loaders/GLTFLoader.js';
+import {MeshoptDecoder} from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import {approvedGarments,cleanApprovedWardrobe,type ApprovedWardrobe} from './approvedWardrobe';
 import type {bindBlankBody} from './blankRig';
 import {createClothingMask} from './clothingMask';
@@ -9,8 +10,9 @@ import {layeringForGarment,usesPosedInnerFit} from './wardrobeLayering';
 import type {LayeringReport} from './garmentLayering';
 import {bodyHeightY,bodyBaseY,bodyHeightSlope} from './bodyHeight';
 import {fitSockSurface} from './fitSockSurface';
+import {halloweenCoverage} from './halloweenCoverage';
 const assets=new Map<string,Promise<T.Group>>();
-function load(asset:string){let task=assets.get(asset);if(!task){task=new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}room3d/wardrobe/${asset}`).then(g=>{g.scene.traverse(o=>{if(o instanceof T.Mesh)for(const m of Array.isArray(o.material)?o.material:[o.material])m.userData.wardrobeMaterialIndex=g.parser.associations.get(m)?.materials;});g.scene.updateMatrixWorld(true);return g.scene;}).catch(e=>{assets.delete(asset);throw e;});assets.set(asset,task);}return task;}
+function load(asset:string){let task=assets.get(asset);if(!task){task=new GLTFLoader().setMeshoptDecoder(MeshoptDecoder).loadAsync(`${import.meta.env.BASE_URL}room3d/wardrobe/${asset}`).then(g=>{g.scene.traverse(o=>{if(o instanceof T.Mesh)for(const m of Array.isArray(o.material)?o.material:[o.material])m.userData.wardrobeMaterialIndex=g.parser.associations.get(m)?.materials;});g.scene.updateMatrixWorld(true);return g.scene;}).catch(e=>{assets.delete(asset);throw e;});assets.set(asset,task);}return task;}
 type Rig=ReturnType<typeof bindBlankBody>;
 /** Attach authored primitives by bone name; retain UVs, materials and authored weights. */
 export async function prepareApprovedWardrobe(rig:Rig,value:ApprovedWardrobe,fits:WardrobeFits={},colors:WardrobeColors={},layering=true,signal?:AbortSignal){
@@ -26,7 +28,14 @@ export async function prepareApprovedWardrobe(rig:Rig,value:ApprovedWardrobe,fit
   await checkpoint();
   const d=defs[k];let found=0;
   loaded[k].traverse(o=>{if(!(o instanceof T.SkinnedMesh)||!o.name.startsWith(d.prefix))return;found++;
-   const g=o.geometry.clone(),p=g.attributes.position,n=g.attributes.normal,si=g.attributes.skinIndex,sw=g.attributes.skinWeight;
+   const g=o.geometry.clone();
+   // Fitting and clipping edit packed arrays. Decode normalized/interleaved
+   // glTF attributes into independent values before those operations.
+   for(const [name,attribute] of Object.entries(g.attributes))if(attribute.normalized||attribute instanceof T.InterleavedBufferAttribute){
+    const values=Array.from({length:attribute.count*attribute.itemSize},(_,i)=>attribute.getComponent(Math.floor(i/attribute.itemSize),i%attribute.itemSize));
+    g.setAttribute(name,name==='skinIndex'?new T.Uint16BufferAttribute(values,attribute.itemSize):new T.Float32BufferAttribute(values,attribute.itemSize));
+   }
+   const p=g.attributes.position,n=g.attributes.normal,si=g.attributes.skinIndex,sw=g.attributes.skinWeight;
    const morphIndex=o.morphTargetDictionary?.VNeck;
    if(morphIndex!==undefined){const amount=fitById.get(d.id)!.neckline/100;for(const name of ['position','normal']){const base=g.attributes[name],target=g.morphAttributes[name]?.[morphIndex];if(!base||!target)continue;for(let i=0;i<base.count;i++)for(let axis=0;axis<3;axis++){const v=base.getComponent(i,axis),t=target.getComponent(i,axis);base.setComponent(i,axis,g.morphTargetsRelative?v+t*amount:T.MathUtils.lerp(v,t,amount));}}g.normalizeNormals();g.morphAttributes={};}
    const remap=o.skeleton.bones.map(b=>targetIds.get(b.name)??targetIds.get(b.name.replace(/twist[123]/,'forearm')));
@@ -76,6 +85,8 @@ export async function prepareApprovedWardrobe(rig:Rig,value:ApprovedWardrobe,fit
  const clipMesh=(mesh:T.SkinnedMesh,covers:(p:T.Vector3)=>boolean)=>{if(!mesh.geometry.groups.length)mesh.geometry.addGroup(0,mesh.geometry.index!.count,0);const clipped=createClothingMask(mesh.geometry,covers,-Infinity);mesh.geometry=clipped;resources.push(clipped);};
  // Socks stay complete as an asset; only their buried section is clipped while shoes are worn.
  if(shoeOpening>0)for(const mesh of meshes.filter(m=>defs.find(d=>d.id===m.userData.garmentId)?.slot==='socks')){
+  const sockDef=defs.find(d=>d.id===mesh.userData.garmentId)!;
+  if(sockDef.collection==='halloween'&&sockDef.halloweenOutfit!=='pumpkin'&&shoe?.collection==='halloween')continue;
   // These two pieces were split along their existing shared triangle seam;
   // clipping that seam again would cut holes and add interpolated vertices.
   const unchangedSeam=['original-shoes','original-socks'].every(id=>{const f=fitById.get(id);return f&&f.width===100&&f.depth===100&&f.length===100&&f.clearance===0&&f.offsetX===0&&f.offsetY===0&&f.offsetZ===0;});
@@ -148,6 +159,7 @@ export async function prepareApprovedWardrobe(rig:Rig,value:ApprovedWardrobe,fit
    const fit=fitById.get(d.id)!;
    if(manualCoverage(p,fit.hide,rig.bodyHeight))return true;
    if(!fit.autoHide)return false;
+   if(d.collection==='halloween')return halloweenCoverage(d.halloweenPart!,d.halloweenOutfit!,x,y);
    // These shells follow the original body triangles. Mask boundary subdivision
    // interpolates rest positions and weights, which does not preserve their
    // posed surface under LBS (especially at shoulders); keep that body intact.

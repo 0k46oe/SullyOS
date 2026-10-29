@@ -2,6 +2,7 @@ import React,{useEffect,useState} from 'react';
 import type {HairSettings} from '../../apps/room3d/chibi/types';
 import {resolveWardrobeColors,cleanWardrobeColors,garmentColorRegions,normalizeGarmentColor} from '../../apps/room3d/chibi/wardrobeColors';
 import './garment-colors.css';
+import {halloweenPalette} from '../../apps/room3d/chibi/halloweenPalettes';
 
 const swatches=[['奶白','#f3ede2'],['炭黑','#303039'],['雾灰','#929398'],['莓红','#b85d72'],['藕粉','#dbacb8'],['姜黄','#d6b171'],['鼠尾草','#8fa68c'],['湖蓝','#6f9ea5'],['海军蓝','#3f5378'],['雾紫','#a193b9']] as const;
 export function GarmentColors({parts,id,hair,onChange,onBegin,onEnd}:{parts?:import('../../apps/room3d/chibi/types').Parts;id:string;hair:HairSettings;onChange:(v:HairSettings)=>void;onBegin?:()=>void;onEnd?:()=>void}){
@@ -38,6 +39,7 @@ export function GarmentColors({parts,id,hair,onChange,onBegin,onEnd}:{parts?:imp
  };
  return <section className="garment-dye" aria-label="衣服换色">
   <div className="garment-dye-heading"><strong>配色</strong><button disabled={!Object.keys(saved).length} onClick={()=>{delete colors[id];onChange({...hair,wardrobeColors:colors});}}>恢复本件原色</button></div>
+  {id.startsWith('halloween-')&&<div className="garment-dye-regions" aria-label="万圣节单品配色">{[['midnight','午夜黑灰'],['crimson','绯红晚宴'],['moonlight','月光蓝银']].map(([key,label])=><button key={key} onClick={()=>onChange({...hair,wardrobeColors:{...colors,[id]:halloweenPalette(id.split('-')[1],key)!}})}>{label}</button>)}</div>}
   {hair.wardrobe?.tail===id&&hair.wardrobe?.ears&&<p>{saved.fur?'毛色已单独设置，恢复毛色原色即可跟随兽耳。':'毛色默认跟随当前兽耳，耳色改变时同步更新。'}</p>}
   {regions.some(r=>r.id==='fur')&&<button onClick={matchHair}>毛色跟随当前发色</button>}
   {colorError&&<p role="status">{colorError}</p>}

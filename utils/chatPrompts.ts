@@ -80,6 +80,7 @@ function summarizeGroupMsgContent(m: Message): string {
         // BARE_TRANSFER_RE 兜得住。
         case 'transfer': return `[转账${meta.amount ?? ''}]`;
         case 'social_card': return `[分享帖子${meta.post?.title ? '：' + meta.post.title : ''}]`;
+        case 'friend_feed_share_card': return '[分享好友圈帖子]';
         case 'chat_forward': return '[转发的聊天记录]';
         case 'xhs_card': return '[小红书笔记]';
         case 'score_card': return '[评分卡]';
@@ -1132,6 +1133,16 @@ ${voiceActingGuide()}`;
         return {
             apiMessages: historySlice.map((m, index) => {
                 if (m.type === 'secret_note') return {role: m.role, content: secretNoteContext(m.content)};
+                if (m.type === 'friend_feed_card') return {role: 'system', content: m.content};
+                if (m.type === 'friend_feed_share_card') {
+                    const text=normalizeMessageContent(m,char.name,userProfile?.name||'用户');
+                    const share=m.metadata?.friendFeedShare;
+                    const images=share?.imagesEnabled&&Array.isArray(share.imageRefs)?share.imageRefs.filter((r:unknown)=>isBlobRef(r)||typeof r==='string'&&r.startsWith('data:image/')).slice(0,18):[];
+                    const description=options?.useVisionDescriptions&&typeof m.metadata?.visionDescription==='string'?m.metadata.visionDescription:'';
+                    if(description)return {role:m.role,content:text};
+                    if(options?.useVisionDescriptions || !images.length)return {role:m.role,content:text+(images.length?'\n配图描述暂不可用，请不要猜测。':'')};
+                    return {role:m.role,content:[{type:'text',text},...images.map((url:string)=>({type:'image_url',image_url:{url}}))]};
+                }
                 let content: any = m.content;
                 const timeStr = timeAwarenessOn && hasReliableMessageTimestamp(m) ? `[${ChatPrompts.formatDate(m.timestamp, charTz)}]` : '';
                 const sourceTag = (() => {

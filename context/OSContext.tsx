@@ -1,6 +1,11 @@
 import { handleLocalBack } from '../utils/localBackHandlers';
 import {isHomeAssetDisposal} from '../utils/homeAssetCancellation';
 import { processHomeMemoryAfterSave } from '../utils/homeMemoryPostHook';
+import { homeSharedRecipients } from '../utils/homeSharedEvents';
+import { homeRecords } from '../utils/homeRecords';
+import { readFriendFeed } from '../utils/friendFeed';
+import { prepareFriendFeedMainTask, consumeFriendFeedMainReply } from '../utils/friendFeedMain';
+import { releaseFriendFeedEmotionTask } from '../utils/friendFeedEmotion';
 import { retireCloudCharacter } from '../utils/amsgCloudRetirement';
 import { resolveDialogueApi } from '../utils/characterApi';
 import {isBuiltinAppearance, readBuiltinAppearance} from '../utils/builtinAppearance';
@@ -2236,6 +2241,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (char) markAmsgStateDirty({char, userProfile: userProfileRef.current, groups: groupsRef.current, realtimeConfig: realtimeConfigRef.current});
       };
       window.addEventListener(HOME_SECRETS_UPDATED, secretSyncHandler);
+      window.addEventListener('friend-feed-history-updated', secretSyncHandler);
       window.addEventListener('emotion-updated', buffSyncHandler);
       window.addEventListener(CHAT_GEN_EVENTS.replyArrived, chatReplyArrivedHandler);
       window.addEventListener(CHAT_GEN_EVENTS.replyEnd, chatReplyEndHandler);
@@ -2250,6 +2256,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           window.removeEventListener('active-msg-progress', progressHandler);
           window.removeEventListener('active-msg-open', openHandler);
           window.removeEventListener(HOME_SECRETS_UPDATED, secretSyncHandler);
+          window.removeEventListener('friend-feed-history-updated', secretSyncHandler);
           window.removeEventListener('emotion-updated', buffSyncHandler);
           window.removeEventListener(CHAT_GEN_EVENTS.replyArrived, chatReplyArrivedHandler);
           window.removeEventListener(CHAT_GEN_EVENTS.replyEnd, chatReplyEndHandler);
@@ -2370,6 +2377,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           setProactiveComposingChars(prev => prev[charId] ? prev : { ...prev, [charId]: true });
           console.log(`🔔 [Proactive/Global] Trigger fired for ${char.name}`);
 
+          let friendFeedTask: Awaited<ReturnType<typeof prepareFriendFeedMainTask>>;
           try {
               // 1. Calculate time gap
               const recentMsgs = await DB.getRecentMessagesByCharId(charId, 200);
@@ -2453,6 +2461,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               const systemPrompt = payload.systemPrompt;
               const apiMessages = payload.cleanedApiMessages;
               const fullMessages = payload.fullMessages;
+              if (!payload.flags.promptBuildSkipped) {
+                  try {
+                      friendFeedTask = await prepareFriendFeedMainTask(charId);
+                      if (friendFeedTask) fullMessages.splice(Math.max(1, payload.volatileTailIndex), 0,
+                          {role: 'system', content: friendFeedTask.prompt});
+                  } catch (error) { console.warn('[Friend feed] Proactive reply preparation failed', error); }
+              }
 
               // 3c. 情绪评估 fire-and-forget — 与主 API 并行，沿用 useChatAI 的 API 选择逻辑：
               //     角色专属情绪 API > 主 apiConfig（与记忆宫殿副 API 完全独立）
@@ -2495,6 +2510,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
               // 5. Process & save response
               let aiContent = data.choices?.[0]?.message?.content || '';
+              aiContent = await consumeFriendFeedMainReply(charId, aiContent, [], friendFeedTask?.id);
               // 思考链抽取 — 与 useChatAI 保持一致:reasoning_content 字段 + 主 content 里的 <think>/<thinking>/<thought> 块,
               // 拼接后挂到本回合首条 assistant 消息的 metadata.thinkingChain
               let pendingThinkingChain: string | null = null;
@@ -2714,6 +2730,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           } catch (err) {
               console.error(`[Proactive/Global] Error for ${char.name}:`, err);
           } finally {
+              if (friendFeedTask) await releaseFriendFeedEmotionTask(charId, friendFeedTask.id)
+                  .catch(error => console.warn('[Friend feed] Proactive reply release failed', error));
               proactiveRunningRef.current = false;
               setProactiveComposingChars(prev => {
                   if (!prev[charId]) return prev;
@@ -3342,6 +3360,19 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
             addToast('家园记忆整理失败', 'error');
           });
           markAmsgStateDirty({ char: target, userProfile, groups, realtimeConfig });
+          const oldHomeEvents=new Map(homeRecords(before?.home3D).map(record=>[record.id,record]));
+          const nextHomeEvents=homeRecords(target.home3D);
+          const nextHomeIds=new Set(nextHomeEvents.map(record=>record.id));
+          const changedHomeEvents=[
+            ...nextHomeEvents.filter(record=>JSON.stringify(record)!==JSON.stringify(oldHomeEvents.get(record.id))),
+            ...[...oldHomeEvents.values()].filter(record=>!nextHomeIds.has(record.id)),
+          ];
+          for(const participantId of homeSharedRecipients(changedHomeEvents)){
+            if(participantId===target.id)continue;
+            void DB.getCharacter(participantId).then(participant=>{
+              if(participant)markAmsgStateDirty({char:participant,userProfile,groups,realtimeConfig});
+            }).catch(error=>console.warn('[Home3D] 共享经历快照刷新失败',error));
+          }
           if (JSON.stringify(before?.dialogueApi) !== JSON.stringify(target.dialogueApi)) {
             // Fresh snapshot also distinguishes consecutive role-only changes during an upload.
             syncAmsgLlmCredentials({ ...apiConfig });
@@ -4124,6 +4155,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           const cloneForInPlace = <T,>(v: T): T => (mode === 'text_only' ? v : deepCloneForExport(v));
 
           const backupData: Partial<FullBackupData> = {
+              friendFeed: mode === 'text_only' ? await readFriendFeed() : undefined,
               contentFavoritesIndex: mode === 'text_only'
                   ? stripBackupImages(await DB.getAssetRaw('content_favorites_index_v1')) : undefined,
               timestamp: Date.now(),

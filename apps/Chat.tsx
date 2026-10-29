@@ -2938,7 +2938,11 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             void reloadMessages(visibleCount);
         };
         window.addEventListener('home-secrets-updated',refresh);
-        return()=>window.removeEventListener('home-secrets-updated',refresh);
+        window.addEventListener('friend-feed-history-updated',refresh);
+        return()=>{
+            window.removeEventListener('home-secrets-updated',refresh);
+            window.removeEventListener('friend-feed-history-updated',refresh);
+        };
     },[char?.id,visibleCount,reloadMessages]);
 
     // --- Message Management ---

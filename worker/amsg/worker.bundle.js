@@ -1134,7 +1134,7 @@ function reconcileStoppedReplies(log, rows) {
 // worker/amsg/src/index.ts
 import { DurableObject } from "cloudflare:workers";
 
-// node_modules/.pnpm/@rei-standard+amsg-server@3.1.0-next.0_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@3_e9d3913ffaf26ee4ddf80944d8866838/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
 var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
   "user_id",
   "uuid",
@@ -2346,7 +2346,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@3.1.0-next.0_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-6TCZEACV.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@3_e9d3913ffaf26ee4ddf80944d8866838/node_modules/@rei-standard/amsg-server/dist/chunk-6TCZEACV.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -16231,6 +16231,46 @@ function deduplicateVoiceText(text2) {
   }).join("\n").replace(/\u0002VOICE(\d+)\u0002/g, (_, i) => blocks[Number(i)]).trim();
 }
 
+// utils/friendFeedReplyFormat.ts
+var FRIEND_FEED_MAIN_PROMPT_PREFIX = "\u3010\u987A\u4FBF\u56DE\u597D\u53CB\u5708\u3011";
+function extractFriendFeedReplyTags(raw, namespace = "FRIEND_FEED_REPLY") {
+  const marker = new RegExp("\\[\\[" + namespace + "\\s*:", "gi");
+  const actions = [];
+  let text2 = "", cursor = 0, match;
+  while (match = marker.exec(raw)) {
+    text2 += raw.slice(cursor, match.index);
+    let start = marker.lastIndex;
+    while (start < raw.length && /\s/.test(raw[start])) start++;
+    let depth = 0, quoted = false, escaped = false, end = -1;
+    if (raw[start] === "{") for (let i = start; i < raw.length; i++) {
+      const c = raw[i];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (c === "\\") escaped = true;
+        else if (c === '"') quoted = false;
+      } else if (c === '"') quoted = true;
+      else if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+    const close = end >= 0 ? /^\s*\]\]/.exec(raw.slice(end)) : null;
+    if (close) {
+      try {
+        actions.push(JSON.parse(raw.slice(start, end)));
+      } catch {
+      }
+      cursor = end + close[0].length;
+    } else {
+      const fallback = raw[start] === "{" && end < 0 ? -1 : raw.indexOf("]]", end >= 0 ? end : start);
+      cursor = fallback < 0 ? raw.length : fallback + 2;
+    }
+    marker.lastIndex = cursor;
+  }
+  return { text: text2 + raw.slice(cursor), actions };
+}
+
 // node_modules/.pnpm/@rei-standard+amsg-instant@0.11.0-next.9/node_modules/@rei-standard/amsg-instant/dist/index.mjs
 var WEB_PUSH_MAX_BODY_BYTES2 = 4096;
 var WEB_PUSH_ENCRYPTION_OVERHEAD_BYTES2 = 16 + 4 + 1 + 65 + 1 + 16;
@@ -16326,7 +16366,7 @@ var stripLeakedSourceTags = (t) => t.replace(
 var stripTimestamps = (t) => t.replace(/\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\]\s*/g, "").replace(/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s*/gm, "").replace(/（[上下]午\d{1,2}[：:]\d{2}）/g, "").replace(/\(\d{1,2}:\d{2}\s*[AP]M\)/gi, "");
 var stripChineseDate = (t) => t.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, "");
 var stripRoleNamePrefix = (t) => t.replace(/^[\w一-龥]+:\s*/, "");
-var stripBusinessTagsForBubble = (t) => t.replace(/\[\[(?:ACTION|RECALL|SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END|MUSIC_ACTION)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[\s*[记記][录錄]\s*[:：][\s\S]*?\]\]/g, "").replace(/\[schedule_message[^\]]*\]/g, "");
+var stripBusinessTagsForBubble = (t) => extractFriendFeedReplyTags(extractFriendFeedReplyTags(t).text, "HOME_VISIT_REPLY").text.replace(/\[\[(?:ACTION|RECALL|SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END|MUSIC_ACTION)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[\s*[记記][录錄]\s*[:：][\s\S]*?\]\]/g, "").replace(/\[schedule_message[^\]]*\]/g, "");
 var stripBusinessTagsForNotification = (t) => stripBusinessTagsForBubble(t).replace(/\[\[(?:READ_NOTE|XHS_[A-Z_]+|LIFE|NEWS_CARD)[:\s][\s\S]*?\]\]/g, "").replace(/\[\[XHS_[A-Z_]+\]\]/g, "");
 var stripAllDoubleBracketTags = (t) => t.replace(/\[\[[\s\S]*?\]\]/g, "");
 var stripQuotes2 = (t) => t.replace(/\[\[(?:QU[OA]TE|引用)[：:][\s\S]*?\]\]/g, "").replace(/\[(?:QU[OA]TE|引用)[：:][^\]]*\]/g, "").replace(/\[回复\s*[""“][^""”]*?[""”](?:\.{0,3})\]\s*[：:]?\s*/g, "").replace(/\[[^\[\]\n「」]{0,24}引用了[^\[\]\n「」]{0,24}「[^」\n]*?」[^\[\]\n]{0,24}\]\s*/g, "");
@@ -16949,6 +16989,9 @@ function parseDiaryShort(m, type) {
   return { type, title, content };
 }
 function classifyLLMOutput(text2) {
+  const social = extractFriendFeedReplyTags(text2);
+  const visits = extractFriendFeedReplyTags(social.text, "HOME_VISIT_REPLY");
+  text2 = visits.text;
   const toolCalls = [];
   for (const spec of DATA_TAGS) {
     const matches = Array.from(text2.matchAll(spec.re));
@@ -16966,11 +17009,14 @@ function classifyLLMOutput(text2) {
     let prefix = text2;
     for (const spec of DATA_TAGS) prefix = prefix.replace(spec.re, "");
     prefix = prefix.trim();
+    if (social.actions.length) prefix += "\n" + social.actions.map((action) => "[[FRIEND_FEED_REPLY:" + JSON.stringify(action) + "]]").join("\n");
+    if (visits.actions.length) prefix += "\n" + visits.actions.map((action) => "[[HOME_VISIT_REPLY:" + JSON.stringify(action) + "]]").join("\n");
     const sanitizedPrefix = sanitizeForNotification(prefix);
     return { kind: "tool-request", prefix, sanitizedPrefix, toolCalls };
   }
-  const directives = [];
-  const { text: textAfterTransfers, events: transferEvents } = extractTransferCommands(text2);
+  const directives = social.actions.map((action) => ({ type: "friend_feed_reply", action }));
+  directives.push(...visits.actions.map((action) => ({ type: "home_visit_reply", action })));
+  const { text: textAfterTransfers, events: transferEvents } = extractTransferCommands(visits.text);
   for (const ev of transferEvents) {
     if (ev.kind === "send") {
       const amount = parseTransferAmount(ev.amount);
@@ -17534,7 +17580,8 @@ var takeEmotionEvalSpec = (metadata) => {
 };
 var EMOTION_EVAL_RIDE_ALONG_MS = 1e4;
 var runAmsgEmotionEval = async (spec, api, chatMessages, charName, timeoutMs = EMOTION_EVAL_TIMEOUT_MS, signal) => {
-  const result = await requestEmotionEval(api, restoreEvalPrompt(spec.prompt, chatMessages, charName), timeoutMs, signal);
+  const emotionMessages = chatMessages.filter((message) => !(message.role === "system" && typeof message.content === "string" && message.content.startsWith(FRIEND_FEED_MAIN_PROMPT_PREFIX)));
+  const result = await requestEmotionEval(api, restoreEvalPrompt(spec.prompt, emotionMessages, charName), timeoutMs, signal);
   return result.raw ? { ...result, raw: tagHomeSecretEval(result.raw, spec.homeSecretRequestId) } : result;
 };
 

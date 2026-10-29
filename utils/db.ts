@@ -3799,6 +3799,7 @@ export const DB = {
           data.savedEmojis !== undefined,
           data.emojiCategories !== undefined,
           data.assets !== undefined,
+          data.friendFeed !== undefined,
           data.savedJournalStickers !== undefined,
           data.galleryImages !== undefined,
           data.diaries !== undefined,
@@ -4045,6 +4046,11 @@ export const DB = {
           await clearAndAdd(STORE_ASSETS, data.assets || [], '系统资源', true);
           data.assets = undefined as any;
       }, data.assets?.length || 0);
+      await runSection('好友圈', data.friendFeed !== undefined, async () => {
+          const {FRIEND_FEED_KEY, parseFriendFeed} = await import('./friendFeed');
+          const state = parseFriendFeed(JSON.stringify(data.friendFeed));
+          await DB.saveAsset(FRIEND_FEED_KEY, JSON.stringify(state));
+      });
       await runSection('聊天收藏', data.contentFavoritesIndex != null, async () => {
           await DB.saveAssetRaw('content_favorites_index_v1', data.contentFavoritesIndex);
       });
