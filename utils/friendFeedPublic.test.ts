@@ -5,13 +5,13 @@ import {defaultFriendFeedSettings, resolveFriendFeedSettings} from './friendFeed
 import {prepareFriendFeedEmotionTask, landFriendFeedEmotionAction} from './friendFeedEmotion';
 import {refreshFriendFeed, weightedFriendPick} from './friendFeedRefresh';
 import {safeFetchJson} from './safeApi';
-import {syncWeibo} from './friendFeedWeibo';
+import {syncWeibo,syncWeiboHome,readWeiboConnection} from './friendFeedWeibo';
 import type {CharacterProfile, APIConfig, UserProfile} from '../types';
 import {friendCommentPool} from './friendFeedCommunity';
 import {saveFriendFeedApi, resolveFriendFeedApi} from './friendFeedApi';
 
 vi.mock('./safeApi', async original => ({...await original<typeof import('./safeApi')>(), safeFetchJson: vi.fn()}));
-vi.mock('./friendFeedWeibo', () => ({syncWeibo: vi.fn(), readWeiboConnection: vi.fn(), syncWeiboComments: vi.fn()}));
+vi.mock('./friendFeedWeibo', async original => ({...await original<typeof import('./friendFeedWeibo')>(),syncWeibo: vi.fn(),syncWeiboHome:vi.fn(), readWeiboConnection: vi.fn(), syncWeiboComments: vi.fn()}));
 const a = {id: 'public-a', name: '阿白', systemPrompt: '只有阿白的设定', memories: [], mountedWorldbooks: [],
     contextRangePolicyVersion: 1, contextRangeMode: 'manual', contextLimit: 20} as unknown as CharacterProfile;
 const b = {...a, id: 'public-b', name: '阿绿', systemPrompt: '只有阿绿的设定'};
@@ -19,6 +19,7 @@ const user = {name: '小雨'} as UserProfile;
 const api = {baseUrl: 'https://example.invalid/v1', model: 'test', apiKey: ''} as APIConfig;
 beforeEach(async () => {
     vi.mocked(safeFetchJson).mockReset(); vi.mocked(syncWeibo).mockReset();
+    vi.mocked(readWeiboConnection).mockReset();vi.mocked(syncWeiboHome).mockReset();
     await DB.deleteDB(); localStorage.clear();
     await DB.saveCharacter(a); await DB.saveCharacter(b); await DB.saveUserProfile(user);
 });
@@ -110,10 +111,10 @@ it('refreshes enabled Weibo first, calls only the rolled character with own cont
     await DB.saveMessage({charId: b.id, role: 'user', type: 'text', content: '只给阿绿的秘密原文', timestamp: Date.now()});
     await mutateFriendFeed(f => {f.weiboBindings = [{ownerId: 'user', uid: '123456', enabled: true, generation: 'g', since: 0}];});
     const order: string[] = [];
-    vi.mocked(syncWeibo).mockImplementation(async () => {order.push('weibo'); await publishFriendPost('public', user.name, '微博已到达');});
+    vi.mocked(syncWeibo).mockImplementation(async () => {order.push('weibo'); await publishFriendPost('public', user.name, '微博已到达');return {received:1,added:1,existing:0,hidden:0};});
     response({kind: 'post', accountId: 'work', text: '今天研磨调细了一格。'});
     const result = await refreshFriendFeed(user, api, undefined, status => order.push(status), () => 0);
-    expect(order.slice(0, 3)).toEqual(['正在刷新微博…', 'weibo', '朋友们正在赶来发动态…']);
+    expect(order.slice(0, 3)).toEqual(['正在刷新微博…', 'weibo', '已读取 1 条微博，新增 1 条']);
     expect(safeFetchJson).toHaveBeenCalledTimes(1);
     const sent = JSON.stringify(JSON.parse(vi.mocked(safeFetchJson).mock.calls[0][1]!.body as string).messages);
     expect(sent).toContain('只给阿白的秘密原文'); expect(sent).not.toContain('只给阿绿的秘密原文');
@@ -132,6 +133,27 @@ it('NPC refresh can publish several strangers but creates no autobiographical ca
     expect(await DB.getMessagesByCharId(a.id, true)).toHaveLength(0);
     expect(await DB.getMessagesByCharId(b.id, true)).toHaveLength(0);
     expect(JSON.stringify(vi.mocked(safeFetchJson).mock.calls[0])).toContain('完全无关的陌生网友');
+});
+it.each(['missing','offline','busy'] as const)('refreshes real Weibo independently when the character API is %s',async mode=>{
+    await publicSettings();
+    await mutateFriendFeed(f=>{f.weiboStreams=[{circleId:'public',enabled:true,generation:'home',since:0}];if(mode==='busy')f.refreshLease={id:'pending-ai',until:Date.now()+60000};});
+    vi.mocked(syncWeibo).mockImplementation(async()=>{await mutateFriendFeed(f=>{f.posts.push({id:'real-home',circleId:'public',authorId:'weibo:654321',authorName:'真实关注作者',text:'真实微博已读取',createdAt:Date.now(),audienceIds:[],comments:[],synced:true,source:{platform:'weibo',accountId:'654321',externalId:'111111',author:'真实关注作者',text:'真实微博已读取',url:'https://weibo.com/654321/111111',publishedAt:Date.now(),fetchedAt:Date.now(),truncated:false}});});return {received:1,added:1,existing:0,hidden:0};});
+    vi.mocked(safeFetchJson).mockRejectedValue(new Error('API offline'));
+    const result=await refreshFriendFeed(user,mode==='missing'?{} as APIConfig:api,undefined,undefined,()=>0);
+    expect(syncWeibo).toHaveBeenCalledWith('public','following');expect(result.message).toContain('已读取 1 条微博');
+    expect(result.warnings.join('；')).toContain('角色 API');
+    expect((await readFriendFeed()).posts.map(p=>p.text)).toEqual(['真实微博已读取']);
+    if(mode==='busy'){expect(safeFetchJson).not.toHaveBeenCalled();expect((await readFriendFeed()).refreshLease?.id).toBe('pending-ai');}
+    else expect((await readFriendFeed()).refreshLease).toBeUndefined();
+});
+it('starts the home timeline for an existing scanned connection on refresh, but respects an explicitly disabled stream',async()=>{
+    await publicSettings();vi.mocked(readWeiboConnection).mockReturnValue({uid:'123456'} as any);
+    vi.mocked(syncWeiboHome).mockResolvedValue({received:2,added:2,existing:0,hidden:0,profileError:undefined});
+    const result=await refreshFriendFeed(user,{} as APIConfig);
+    expect(syncWeiboHome).toHaveBeenCalledWith('public');expect(result.message).toContain('已读取 2 条微博');
+    await mutateFriendFeed(f=>{f.weiboStreams=[{circleId:'public',enabled:false,generation:'off',since:0}];});
+    vi.mocked(syncWeiboHome).mockClear();await expect(refreshFriendFeed(user,{} as APIConfig)).rejects.toThrow('配置独立 API');
+    expect(syncWeiboHome).not.toHaveBeenCalled();
 });
 it('no enabled pool means no API call; failures preserve synced content and release the refresh lock', async () => {
     await publicSettings({characterWeights: {[a.id]: 0, [b.id]: 0}});

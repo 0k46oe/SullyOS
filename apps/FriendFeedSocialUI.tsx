@@ -75,7 +75,7 @@ export function SocialPost({theme,post,user,characters,onProfile,onComment,onDel
     const [fullText,setFullText]=useState(false);
     const textCharacters=Array.from(post.text), textLimit=theme==='weibo'?220:320;
     const name=post.accountId&&post.accountId!=='main'?post.authorName:post.authorId==='user'?user.name||'我':characters.find(c=>c.id===post.authorId)?.name||post.authorName;
-    const avatar=post.accountId&&post.accountId!=='main'?undefined:post.authorId==='user'?user.avatar:characters.find(c=>c.id===post.authorId)?.avatar;
+    const avatar=post.accountId&&post.accountId!=='main'?undefined:post.authorId==='user'?user.avatar:characters.find(c=>c.id===post.authorId)?.avatar||(post.authorId.startsWith('weibo:')||post.authorKind==='external'?post.source?.authorAvatar:undefined);
     const visible=post.comments.slice(0,2);
     const time=new Date(post.createdAt).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
     return <article className={`ff-social-post ff-${theme}-post${post.synced?' is-real':''}`} tabIndex={0} aria-label={`查看动态评论区：${post.text.slice(0,30)}`}

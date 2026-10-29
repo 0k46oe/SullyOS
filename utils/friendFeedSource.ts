@@ -12,6 +12,8 @@ export interface FriendFeedSource {
     externalId: string;
     url: string;
     author: string;
+    /** Public display metadata; excluded from model material. */
+    authorAvatar?: string;
     text: string;
     fetchedAt: number;
     publishedAt?: number;
@@ -32,6 +34,7 @@ export function isFriendFeedSource(value: unknown): value is FriendFeedSource {
         || typeof s.truncated !== 'boolean') return false;
     if (s.images !== undefined && (s.platform !== 'weibo' || !Array.isArray(s.images) || s.images.length > 18
         || !s.images.every(i => i && isWeiboImageUrl(i.url) && isWeiboImageUrl(i.thumbnail)))) return false;
+    if(s.authorAvatar!==undefined&&!isWeiboImageUrl(s.authorAvatar))return false;
     if (s.platform === 'weibo') return validTime(s.publishedAt) && /^\d{4,25}$/.test(s.accountId || '') &&
         new RegExp('^https://weibo\\.com/' + s.accountId + '/[a-zA-Z0-9]{5,25}$').test(s.url);
     return s.url === (s.platform === 'x' ? `https://x.com/i/status/${s.externalId}` : `https://www.xiaohongshu.com/explore/${s.externalId}`);

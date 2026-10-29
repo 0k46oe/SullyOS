@@ -150,6 +150,7 @@ function normalizeWeiboPost(post) {
   const quote = post.retweeted_status ? '\n转发 @' + plain(post.retweeted_status.user?.screen_name) + '：' + plain(post.retweeted_status.text_raw || post.retweeted_status.text) : '';
   const full = text + quote;
   return {platform:'weibo',externalId:id,accountId:uid,author:plain(post.user.screen_name).slice(0,150) || '微博用户',
+    authorAvatar:weiboImageUrl(post.user.avatar_hd || post.user.avatar_large || post.user.profile_image_url)||undefined,
     url:`https://weibo.com/${uid}/${/^[a-z\d]{5,20}$/i.test(post.mblogid || '') ? post.mblogid : id}`,
     text:full.slice(0,12000),images:weiboImages(post),truncated:full.length > 12000 || !!post.isLongText,publishedAt,fetchedAt:Date.now()};
 }
@@ -210,7 +211,10 @@ async function handleWeibo(request) {
     if (action === 'profile') {
       const data = await json('/ajax/profile/info?uid='+uid), user = data.data?.user;
       if (Number(data.ok)!==1 || !user) throw fail('该微博主页不可读取',502);
-      result = {profile:{uid,name:plain(user.screen_name),description:plain(user.description).slice(0,1000)}};
+      const actualUid=String(user.idstr || user.id || '');
+      if(actualUid!==uid)throw fail('微博返回的账号与请求主页不符',502);
+      result = {profile:{uid,name:plain(user.screen_name).slice(0,150),description:plain(user.description).slice(0,1000),
+        avatar:weiboImageUrl(user.avatar_hd || user.avatar_large || user.profile_image_url)}};
     } else if (action === 'comments') {
       const mid = input.mid, cursor = String(input.cursor ?? '0');
       if (typeof mid !== 'string' || !/^\d{5,25}$/.test(mid) || !uidOK(String(input.uid || '')) || !/^\d{1,25}$/.test(cursor)) throw fail('评论分页参数无效');
@@ -238,7 +242,8 @@ async function handleWeibo(request) {
       const follows = data.data?.follows;
       if (Number(data.ok)!==1 || !Array.isArray(follows?.users)) throw fail('微博关注名单暂时不可读取',502);
       const accounts = follows.users.slice(0,200).filter(u=>u && uidOK(String(u.idstr || u.id || ''))).map(u=>({
-        uid:String(u.idstr || u.id),name:plain(u.screen_name || u.name).slice(0,150) || '微博用户',description:plain(u.description).slice(0,200)}));
+        uid:String(u.idstr || u.id),name:plain(u.screen_name || u.name).slice(0,150) || '微博用户',description:plain(u.description).slice(0,200),
+        avatar:weiboImageUrl(u.avatar_hd || u.avatar_large || u.profile_image_url)||undefined}));
       const next = String(follows.next_cursor ?? '');
       const more = follows.users.length > 0 && page < 200 && next !== cursor && next !== '0' && /^[\w,.:=-]{1,512}$/.test(next);
       result = {accounts,nextPage:more?page+1:null,nextCursor:more?next:null,filtered:!!follows.has_filtered_attentions};

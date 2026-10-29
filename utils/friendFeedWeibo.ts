@@ -4,7 +4,7 @@ import {DB} from './db';
 import {mutateFriendFeed, readFriendFeed} from './friendFeed';
 import {enqueueFriendNotices, syncedPostEnabled} from './friendFeedActivity';
 import {isWeiboOriginalComment, type WeiboOriginalComment} from './friendFeedSourceComments';
-import {isFriendFeedSource, type FriendFeedSource} from './friendFeedSource';
+import {isFriendFeedSource, isWeiboImageUrl, type FriendFeedSource} from './friendFeedSource';
 import {friendAccounts, resolveFriendFeedSettings} from './friendFeedSettings';
 const KEY='sully:weibo-session:v2', LEGACY_KEY='sully:weibo-session:v1';
 const CONNECTION_LIFETIME=24*60*60*1000;
@@ -15,9 +15,16 @@ export interface WeiboSession {
 }
 // expires is the browser's retention deadline; session.expires belongs to the proxy clock.
 export interface WeiboConnection {proxy:string; session:WeiboSession; uid:string; expires:number; id:string}
-export interface WeiboFollowAccount {uid:string;name:string;description:string}
+export interface WeiboFollowAccount {uid:string;name:string;description:string;avatar?:string}
+export interface WeiboProfile {uid:string;name:string;description:string;avatar?:string}
+export interface WeiboSyncResult {received:number;added:number;existing:number;hidden:number}
+export function weiboSyncMessage(result:WeiboSyncResult) {
+    if(!result.received)return '微博本次返回 0 条动态，没有新增内容';
+    return `已读取 ${result.received} 条微博，新增 ${result.added} 条`
+        +(result.existing?`，已有 ${result.existing} 条`:'')+(result.hidden?`，${result.hidden} 条此前已删除，未恢复`:'');
+}
 interface WeiboResponse {session:WeiboSession; phase?:string; image?:string; uid?:string; expires?:number;
-    profile?:{uid:string;name:string;description:string}; posts?:FriendFeedSource[];nextPage?:number|null;nextCursor?:string|null;
+    profile?:WeiboProfile; posts?:FriendFeedSource[];nextPage?:number|null;nextCursor?:string|null;
     accounts?:WeiboFollowAccount[];filtered?:boolean; comments?:WeiboOriginalComment[]}
 let epoch=0;
 function validSession(s:WeiboSession):boolean {
@@ -47,9 +54,14 @@ export function parseWeiboUid(value:string) {
     }}catch{} throw Error('请填写微博 UID，或 https://weibo.com/u/数字 形式的主页链接');
 }
 async function requestWeibo(proxy:string, payload:object, signal?:AbortSignal):Promise<WeiboResponse> {
+    const controller=new AbortController();let timedOut=false;
+    const abort=()=>controller.abort(signal?.reason);
+    if(signal?.aborted)abort();else signal?.addEventListener('abort',abort,{once:true});
+    const timer=setTimeout(()=>{timedOut=true;controller.abort();},60000);
+    try{
     // Always the currently selected proxy, including development; never fall back to a public instance.
     const response=await fetch(proxy.replace(/\/+$/,'')+'/weibo',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(payload),signal,credentials:'omit',cache:'no-store',redirect:'error',referrerPolicy:'no-referrer'});
+        body:JSON.stringify(payload),signal:controller.signal,credentials:'omit',cache:'no-store',redirect:'error',referrerPolicy:'no-referrer'});
     if(!response.ok) {
         // Preserve the bridge's explicit reason: upstream rejection is not an expired local login.
         let reason='';try{const data=await response.json();if(typeof data?.error==='string')reason=data.error.slice(0,200);}catch{}
@@ -62,6 +74,8 @@ async function requestWeibo(proxy:string, payload:object, signal?:AbortSignal):P
     if(result?.session?.version!==2)throw Error('微博连接格式不兼容，请更新当前代理后重新扫码');
     if(!validSession(result.session))throw Error('微博返回的会话信息不完整或与当前页面不符，请重新扫码');
     return result;
+    }catch(e){if(timedOut)throw Error('微博读取超时，请重试；已保存的动态仍保留');throw e;}
+    finally{clearTimeout(timer);signal?.removeEventListener('abort',abort);}
 }
 export async function startWeiboLogin(signal?:AbortSignal) {
     const proxy=getProxyWorkerUrl(), generation=epoch;
@@ -112,6 +126,59 @@ export async function saveWeiboSyncLimit(limit:number) {
     if(![25,50,100,200].includes(limit))throw Error('请选择同步上限'); await mutateFriendFeed(feed=>{feed.syncLimit=limit;});
 }
 const running=new Set<string>();
+export async function readWeiboProfile(uid:string,signal?:AbortSignal):Promise<WeiboProfile> {
+    uid=parseWeiboUid(uid);
+    const {profile}=await fetchWeibo('profile',{uid},signal);
+    if(!profile || profile.uid!==uid || typeof profile.name!=='string' || !profile.name.trim()
+        || profile.avatar!==undefined && profile.avatar!=='' && !isWeiboImageUrl(profile.avatar))throw Error('微博个人资料不完整，未使用默认资料替代');
+    return {...profile,description:typeof profile.description==='string'?profile.description:''};
+}
+/** Browse real profiles without importing their entire history into the home feed. */
+export async function readWeiboProfilePosts(uid:string,page=1,signal?:AbortSignal) {
+    uid=parseWeiboUid(uid);const result=await fetchWeibo('posts',{uid,page},signal);
+    if(!Array.isArray(result.posts)||result.posts.length>50||!result.posts.every(p=>isFriendFeedSource(p)&&p.platform==='weibo'&&p.accountId===uid))throw Error('微博主页内容格式不正确');
+    if(result.nextPage!==null&&(!Number.isInteger(result.nextPage)||result.nextPage!<=page||result.nextPage!>200))throw Error('微博主页分页格式不正确');
+    return {posts:result.posts,nextPage:result.nextPage!};
+}
+export async function readWeiboOriginalComments(uid:string,mid:string,cursor='0',signal?:AbortSignal) {
+    const result=await fetchWeibo('comments',{uid:parseWeiboUid(uid),mid,cursor},signal);
+    if(!Array.isArray(result.comments)||result.comments.length>120||!result.comments.every(isWeiboOriginalComment)
+        ||!(result.nextCursor===null||typeof result.nextCursor==='string'&&/^\d{1,25}$/.test(result.nextCursor)))throw Error('微博原评论格式不正确');
+    return {rows:result.comments,cursor:result.nextCursor};
+}
+/** Read the scanned identity without changing any RP homepage binding. */
+async function syncWeiboIdentity(signal?:AbortSignal) {
+    const connection=readWeiboConnection();if(!connection)throw Error('请先连接微博');
+    if(signal?.aborted)throw signal.reason;
+    const profile=await readWeiboProfile(connection.uid,signal);
+    await mutateFriendFeed(feed=>{
+        if(signal?.aborted)throw signal.reason;
+        if(readWeiboConnection()?.id!==connection.id)throw Error('微博连接已切换，请重新同步');
+        feed.settings={...resolveFriendFeedSettings(feed.settings),weiboProfile:{uid:profile.uid,name:profile.name,avatar:profile.avatar}};
+    });
+    if(signal?.aborted)throw signal.reason;
+    if(readWeiboConnection()?.id!==connection.id)throw Error('微博连接已切换，请重新同步');
+    return connection;
+}
+/** Default after login: the real home timeline from accounts the user follows. */
+export async function syncWeiboHome(circleId:string,signal?:AbortSignal) {
+    const connection=readWeiboConnection();if(!connection)throw Error('请先连接微博');
+    let profileError:string|undefined;
+    try{await syncWeiboIdentity(signal);}catch(e){if(signal?.aborted)throw e;profileError=e instanceof Error?e.message:'账号资料读取失败';}
+    if(readWeiboConnection()?.id!==connection.id)throw Error('微博连接已切换，请重新同步');
+    await setWeiboStream(circleId,true);
+    if(signal?.aborted)throw signal.reason;
+    if(readWeiboConnection()?.id!==connection.id)throw Error('微博连接已切换，请重新同步');
+    return {...await syncWeibo(circleId,'following',false,signal),profileError};
+}
+/** Only the explicit own-profile control binds and reads the user's own posts. */
+export async function syncMyWeibo(circleId:string,signal?:AbortSignal) {
+    const connection=await syncWeiboIdentity(signal);
+    await saveWeiboBinding('user',connection.uid);
+    if(signal?.aborted)throw signal.reason;
+    if(readWeiboConnection()?.id!==connection.id)throw Error('微博连接已切换，请重新同步');
+    return syncWeibo(circleId,'user',false,signal);
+}
 const commentReads = new Map<string,Promise<void>>();
 /** Read-only import; no reply jobs, activity notices, or memory cards. */
 export async function syncWeiboComments(postId:string,older=false):Promise<void> {
@@ -148,21 +215,24 @@ export async function syncWeiboComments(postId:string,older=false):Promise<void>
     try{await promise;}finally{if(commentReads.get(postId)===promise)commentReads.delete(postId);}
 }
 /** One upstream page per user action. Old pages never emit new-activity notifications. */
-export async function syncWeibo(circleId:string,ownerId:string|'following',older=false) {
-    const lock=`${circleId}:${ownerId}`;if(running.has(lock))return;running.add(lock);
+export async function syncWeibo(circleId:string,ownerId:string|'following',older=false,signal?:AbortSignal):Promise<WeiboSyncResult> {
+    const lock=`${circleId}:${ownerId}`;if(running.has(lock))throw Error('正在同步该微博，请等待本次读取完成');running.add(lock);
     try {
         const feed=await readFriendFeed(), connection=readWeiboConnection(), generation=epoch;
         const target=ownerId==='following'?feed.weiboStreams?.find(b=>b.circleId===circleId):feed.weiboBindings?.find(b=>b.ownerId===ownerId);
         if(!target?.enabled)throw Error('请先开启微博来源');
         const page='page' in target ? target.page : undefined, cursor='cursor' in target ? target.cursor : undefined;
-        if(older && (ownerId==='following'?cursor===null:page===null))return;
+        if(older && (ownerId==='following'?cursor===null:page===null))throw Error('没有更早的微博可读取');
         const isOwned=(p:typeof feed.posts[number])=>p.circleId===circleId && p.synced && (ownerId==='following'?p.authorId.startsWith('weibo:'):p.authorId===ownerId);
         const limit=[25,50,100,200].includes(feed.syncLimit||0)?feed.syncLimit!:50;
         if(older && feed.posts.filter(isOwned).length>=limit)throw Error('已达到同步保留上限，可在首页「微博同步」提高上限后继续');
-        const result=await fetchWeibo(ownerId==='following'?'following':'posts',ownerId==='following'?{cursor:older?cursor||'0':'0'}:{uid:'uid' in target?target.uid:undefined,page:older?page||1:1});
+        const result=await fetchWeibo(ownerId==='following'?'following':'posts',ownerId==='following'?{cursor:older?cursor||'0':'0'}:{uid:'uid' in target?target.uid:undefined,page:older?page||1:1},signal);
         if(!Array.isArray(result.posts) || !result.posts.every(p=>p.platform==='weibo' && isFriendFeedSource(p)))throw Error('微博内容格式不正确');
+        if(ownerId!=='following' && 'uid' in target && result.posts.some(p=>p.accountId!==target.uid))throw Error('微博返回的账号与绑定主页不符，未导入内容');
+        const summary:WeiboSyncResult={received:result.posts.length,added:0,existing:0,hidden:0};
         const userName=(await DB.getUserProfile())?.name||'我';
         await mutateFriendFeed((state,chars)=>{
+            if(signal?.aborted)throw signal.reason;
             if(generation!==epoch || !connection || readWeiboConnection()?.id!==connection.id)throw Error('连接已变化，未写入旧响应');
             const current=ownerId==='following'?state.weiboStreams?.find(b=>b.circleId===circleId):state.weiboBindings?.find(b=>b.ownerId===ownerId);
             if(!current?.enabled || current.generation!==target.generation)throw Error('来源绑定已变化，请重新同步');
@@ -175,14 +245,16 @@ export async function syncWeibo(circleId:string,ownerId:string|'following',older
                 const mapped=state.weiboBindings?.find(b=>b.enabled && b.uid===source.accountId && (b.ownerId==='user'||circle.memberIds.includes(b.ownerId)));
                 const authorId=ownerId==='following'?mapped?.ownerId||`weibo:${source.accountId}`:ownerId;
                 const settings=resolveFriendFeedSettings(state.settings), char=chars.find(c=>c.id===authorId);
-                const name=authorId==='user'?settings.userNickname||userName:char?friendAccounts(settings,char)[0].name:source.author;
+                const name=authorId==='user'?settings.userNickname||settings.weiboProfile?.name||userName:char?friendAccounts(settings,char)[0].name:source.author;
                 const hidden=`${circleId}:${authorId}:${source.externalId}`;
-                if(state.hiddenSources?.includes(hidden))continue;
+                if(state.hiddenSources?.includes(hidden)){summary.hidden++;continue;}
                 const existingPost=state.posts.find(p=>p.circleId===circleId && p.synced && p.source?.externalId===source.externalId
                     && (p.authorId===authorId || p.authorId===`weibo:${source.accountId}`));
                 if(existingPost){
+                    summary.existing++;
                     // Enrich old text-only entries without moving them, notifying again or losing comments.
                     if(source.images?.length) existingPost.source={...existingPost.source!,images:source.images};
+                    if(source.authorAvatar)existingPost.source={...existingPost.source!,authorAvatar:source.authorAvatar};
                     // Binding an account after reading its following stream preserves one timeline entry and its comments.
                     if(existingPost.authorId!==authorId){existingPost.authorId=authorId;existingPost.accountId='main';}
                     existingPost.authorName=name;
@@ -191,7 +263,7 @@ export async function syncWeibo(circleId:string,ownerId:string|'following',older
                 if(older && state.posts.filter(isOwned).length>=cap){capped=true;continue;}
                 const post={id:createLocalId(),circleId,authorId,accountId:'main',authorName:name,text:source.text,createdAt:source.publishedAt!,source,synced:true,
                     audienceIds:circle.memberIds.filter(id=>chars.some(c=>c.id===id)),comments:[]};
-                state.posts.push(post);added++;
+                state.posts.push(post);added++;summary.added++;
                 if(current.initialized && !older && source.publishedAt!>current.since)enqueueFriendNotices(state,post,true);
             }
             if((older || !current.initialized) && !capped){
@@ -206,5 +278,6 @@ export async function syncWeibo(circleId:string,ownerId:string|'following',older
             const remove=new Set(owned.slice(cap).filter(p=>!p.comments.length && !state.notices?.some(n=>!n.done && n.postId===p.id)).map(p=>p.id));
             state.posts=state.posts.filter(p=>!remove.has(p.id));
         });
+        return summary;
     }finally{running.delete(lock);}
 }

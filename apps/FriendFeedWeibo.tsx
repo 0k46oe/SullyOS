@@ -2,13 +2,13 @@ import React,{useEffect,useId,useRef,useState} from 'react';
 import {ArrowRight,CaretDown,CheckCircle,QrCode,LinkSimple,ArrowClockwise} from '@phosphor-icons/react';
 import {getProxyWorkerUrl,PROXY_WORKER_CHANGED_EVENT} from '../utils/proxyWorker';
 import {disconnectWeibo,readWeiboConnection,startWeiboLogin,pollWeiboLogin,WEIBO_CONNECTION_CHANGED,
-    saveWeiboBinding,setWeiboStream,syncWeibo,saveWeiboSyncLimit} from '../utils/friendFeedWeibo';
+    saveWeiboBinding,setWeiboStream,syncWeibo,syncMyWeibo,syncWeiboHome,weiboSyncMessage,saveWeiboSyncLimit,type WeiboSyncResult} from '../utils/friendFeedWeibo';
 import {saveFriendFollows,type FriendFeedState} from '../utils/friendFeed';
 import {followedAuthors} from '../utils/friendFeedActivity';
 import type {CharacterGroup,CharacterProfile} from '../types';
 import {FriendFeedGroupedList} from './FriendFeedGroupedList';
 
-export function FriendFeedWeiboConnection() {
+export function FriendFeedWeiboConnection({circleId,onTimeline}:{circleId?:string;onTimeline?:()=>void}={}) {
     const [connection,setConnection]=useState(readWeiboConnection),[proxy,setProxy]=useState(getProxyWorkerUrl);
     const [accepted,setAccepted]=useState(false),[image,setImage]=useState(''),[status,setStatus]=useState(''),[busy,setBusy]=useState(false);
     const controller=useRef<AbortController>(), timer=useRef<ReturnType<typeof setTimeout>>();
@@ -19,20 +19,27 @@ export function FriendFeedWeiboConnection() {
         window.addEventListener(PROXY_WORKER_CHANGED_EVENT,changed);window.addEventListener(WEIBO_CONNECTION_CHANGED,connected);
         return ()=>{controller.current?.abort();clearTimeout(timer.current);window.removeEventListener(PROXY_WORKER_CHANGED_EVENT,changed);window.removeEventListener(WEIBO_CONNECTION_CHANGED,connected);};
     },[]);
+    const readMine=async(abort:AbortController)=>{
+        if(!circleId){setStatus('已登录，请先选择生活圈再同步');setBusy(false);return;}
+        setBusy(true);setStatus('正在读取账号资料和微博首页关注动态…');
+        try{const result=await syncWeiboHome(circleId,abort.signal);if(!abort.signal.aborted)setStatus((result.profileError?'账号资料读取失败：'+result.profileError+'；':'账号资料已更新；')+weiboSyncMessage(result));}
+        catch(e){if(!abort.signal.aborted)setStatus(e instanceof Error?e.message:'微博读取失败，请重试');}
+        finally{if(!abort.signal.aborted)setBusy(false);}
+    };
     const connect=async()=>{
         controller.current?.abort();clearTimeout(timer.current);const abort=new AbortController();controller.current=abort;
         setBusy(true);setStatus('正在准备二维码…');
         try {
             let ticket=await startWeiboLogin(abort.signal);if(abort.signal.aborted)return;setImage(ticket.image!);setStatus('用微博 App 扫码，并在手机上确认');
             const poll=async()=>{try{const next=await pollWeiboLogin(ticket,abort.signal);if(abort.signal.aborted)return;ticket={...ticket,...next};
-                if(next.phase==='connected'){setImage('');setBusy(false);setStatus('已连接，可绑定主页并同步动态');setConnection(readWeiboConnection());return;}
+                if(next.phase==='connected'){setImage('');setConnection(readWeiboConnection());await readMine(abort);return;}
                 setStatus(next.phase==='scanned'?'已扫码，请在微博 App 确认':'等待扫码');timer.current=setTimeout(poll,2500);
             }catch(e){if(!abort.signal.aborted){setStatus(e instanceof Error?e.message:'连接失败');setBusy(false);setImage('');}}};
             timer.current=setTimeout(poll,2500);
         }catch(e){if(!abort.signal.aborted){setStatus(e instanceof Error?e.message:'连接失败');setBusy(false);}}
     };
     return <section className="friend-feed-weibo-connection">
-        <header className="ff-settings-intro"><span className="ff-settings-kicker">账号与来源</span><h2>连接微博</h2><p>扫码后，同步你的主页与关注动态。</p></header>
+        <header className="ff-settings-intro"><span className="ff-settings-kicker">账号与来源</span><h2>连接微博</h2><p>扫码后，同步微博首页中你关注的人发的动态。</p></header>
         <div className="ff-connection-route"><LinkSimple size={20} aria-hidden="true"/><div><span>当前连接服务</span><code className="friend-feed-proxy">{proxy}</code><small>跟随系统「网络代理」设置</small></div><span className="ff-connection-state" data-connected={!!connection}>{connection?'已连接':'未连接'}</span></div>
         <details className="friend-feed-privacy ff-disclosure"><summary><span>这会涉及哪些隐私？</span><CaretDown size={16} aria-hidden="true"/></summary>
             <p>扫码会产生微博登录凭据，相当于登录状态，属于敏感信息。当前代理会处理这份凭据，以及读取到的主页、关注动态、原评论和你主动读取的关注名单；代理运营者在技术上能够接触这些数据。</p>
@@ -44,9 +51,13 @@ export function FriendFeedWeiboConnection() {
         <div className="ff-scan-stage" aria-live="polite">
             {image?<img className="friend-feed-qr" src={image} alt="微博登录二维码" referrerPolicy="no-referrer"/>:connection?<CheckCircle size={52} weight="light" aria-hidden="true"/>:<QrCode size={68} weight="light" aria-hidden="true"/>}
             <strong>{connection?'微博已连接':image?'用微博 App 扫一扫':busy?'正在准备二维码':'扫码连接你的账号'}</strong>
-            <p>{connection?`UID ${connection.uid}`:image?'请在手机上确认登录':'连接后，再选择要同步的主页。'}</p>
+            <p>{connection?`UID ${connection.uid}`:image?'请在手机上确认登录':'确认登录后，读取昵称、头像和首页关注动态。'}</p>
         </div>
-        {connection?<button type="button" className="ff-setting-button ff-setting-secondary ff-full-width" onClick={()=>{disconnectWeibo();setStatus('已断开，已同步内容保留');}}>断开连接</button>:<>
+        {connection?<>
+            <button type="button" className="ff-setting-button ff-setting-primary ff-full-width" disabled={busy||!circleId} onClick={()=>{controller.current?.abort();const abort=new AbortController();controller.current=abort;void readMine(abort);}}>{busy?'正在读取微博…':'同步微博首页'}</button>
+            {onTimeline&&<button type="button" className="ff-setting-link ff-full-width" onClick={onTimeline}>查看动态<ArrowRight size={17} aria-hidden="true"/></button>}
+            <button type="button" className="ff-setting-button ff-setting-secondary ff-full-width" onClick={()=>{controller.current?.abort();clearTimeout(timer.current);setBusy(false);disconnectWeibo();setStatus('已断开，已同步内容保留');}}>断开连接</button>
+        </>:<>
             <label className="friend-feed-cover-option ff-consent"><input type="checkbox" checked={accepted} onChange={e=>setAccepted(e.target.checked)} disabled={busy}/>
                 <span>我了解登录凭据和读取内容会经过上述代理，愿意连接</span></label>
             {!busy&&<button type="button" className="ff-setting-button ff-setting-primary ff-full-width" disabled={!accepted} onClick={()=>void connect()}>扫码连接微博<ArrowRight size={17} aria-hidden="true"/></button>}
@@ -60,7 +71,7 @@ export function FriendFeedProfileControls({feed,ownerId,circleId,characters,grou
     const binding=feed.weiboBindings?.find(b=>b.ownerId===ownerId);
     const [uid,setUid]=useState(binding?.uid||''),[busy,setBusy]=useState(false),[status,setStatus]=useState('');
     useEffect(()=>{setUid(binding?.uid||'');setStatus('');},[ownerId,binding?.uid]);
-    const run=async(action:()=>Promise<unknown>)=>{if(busy)return;setBusy(true);setStatus('');try{await action();setStatus('已更新');}catch(e){setStatus(e instanceof Error?e.message:'操作失败');}finally{setBusy(false);}};
+    const run=async(action:()=>Promise<void|WeiboSyncResult>)=>{if(busy)return;setBusy(true);setStatus('');try{const result=await action();setStatus(result?weiboSyncMessage(result):'设置已保存');}catch(e){setStatus(e instanceof Error?e.message:'操作失败');}finally{setBusy(false);}};
     const authors=[{id:'user',name:'我',groupId:'__bibi_user__'},...characters.filter(c=>feed.circles.find(c=>c.id===circleId)?.memberIds.includes(c.id)).map(c=>({id:c.id,name:c.name,groupId:c.groupId})),
         ...feed.posts.filter(p=>p.circleId===circleId&&p.authorId.startsWith('weibo:')).map(p=>({id:p.authorId,name:p.authorName,groupId:'__bibi_weibo__'}))]
         .filter((a,i,all)=>a.id!==ownerId&&all.findIndex(b=>b.id===a.id)===i);
@@ -72,7 +83,7 @@ export function FriendFeedProfileControls({feed,ownerId,circleId,characters,grou
         <div className="ff-setting-actions"><button className="ff-setting-button ff-setting-primary" type="button" disabled={busy||!uid.trim()} onClick={()=>void run(()=>saveWeiboBinding(ownerId,uid))}>保存绑定并开启</button>
             {binding?.enabled&&<button className="ff-setting-link" type="button" disabled={busy} onClick={()=>void run(()=>saveWeiboBinding(ownerId,binding.uid,false))}>关闭这个来源</button>}
         </div>
-        {binding?.enabled&&<div className="ff-setting-actions"><button className="ff-setting-button ff-setting-secondary" type="button" disabled={busy} onClick={()=>void run(()=>syncWeibo(circleId,ownerId))}><ArrowClockwise size={16} aria-hidden="true"/>同步最新微博</button>
+        {binding?.enabled&&<div className="ff-setting-actions"><button className="ff-setting-button ff-setting-secondary" type="button" disabled={busy} onClick={()=>void run(()=>ownerId==='user'&&binding.uid===readWeiboConnection()?.uid?syncMyWeibo(circleId):syncWeibo(circleId,ownerId))}><ArrowClockwise size={16} aria-hidden="true"/>同步最新微博</button>
             <button className="ff-setting-link" type="button" disabled={busy||binding.page===null} onClick={()=>void run(()=>syncWeibo(circleId,ownerId,true))}>加载更早微博</button></div>}
         </div>
         <button className="ff-settings-navigation" type="button" onClick={onConnect}><LinkSimple size={18} aria-hidden="true"/><span>管理微博连接<small>扫码、连接状态与隐私</small></span><ArrowRight size={17} aria-hidden="true"/></button>
@@ -83,20 +94,26 @@ export function FriendFeedProfileControls({feed,ownerId,circleId,characters,grou
     </details>;
 }
 
-export function FriendFeedWeiboTimeline({feed,circleId,onConnect}:{feed:FriendFeedState;circleId:string;onConnect:()=>void}) {
+export function FriendFeedWeiboTimeline({feed,circleId,onConnect,showConnectionLink=true}:{feed:FriendFeedState;circleId:string;onConnect:()=>void;showConnectionLink?:boolean}) {
     const syncGroup=useId();
     const stream=feed.weiboStreams?.find(s=>s.circleId===circleId);
     const [busy,setBusy]=useState(false),[status,setStatus]=useState('');
-    const run=async(action:()=>Promise<unknown>)=>{if(busy)return;setBusy(true);setStatus('');try{await action();setStatus('同步完成');}catch(e){setStatus(e instanceof Error?e.message:'同步失败');}finally{setBusy(false);}};
+    const run=async(action:()=>Promise<void|WeiboSyncResult>)=>{if(busy)return;setBusy(true);setStatus('');try{const result=await action();setStatus(result?weiboSyncMessage(result):'设置已保存');}catch(e){setStatus(e instanceof Error?e.message:'同步失败');}finally{setBusy(false);}};
     return <details open className="friend-feed-profile-controls ff-disclosure"><summary><span>微博同步</span><small>{feed.syncLimit||50} 条</small><CaretDown size={16} aria-hidden="true"/></summary>
         <div className="ff-disclosure-body">
         <p>关注流与本地动态按时间混排。第一次同步和翻历史不会通知角色。</p>
-        <button className="ff-settings-navigation" type="button" onClick={onConnect}><LinkSimple size={18} aria-hidden="true"/><span>管理微博连接<small>使用系统设置中的网络代理</small></span><ArrowRight size={17} aria-hidden="true"/></button>
+        {showConnectionLink&&<button className="ff-settings-navigation" type="button" onClick={onConnect}><LinkSimple size={18} aria-hidden="true"/><span>管理微博连接<small>使用系统设置中的网络代理</small></span><ArrowRight size={17} aria-hidden="true"/></button>}
         <fieldset className="ff-sync-limit" disabled={busy}><legend>同步保留上限</legend><div>{[25,50,100,200].map(n=><label key={n}><input type="radio" name={syncGroup} checked={(feed.syncLimit||50)===n} onChange={()=>void run(()=>saveWeiboSyncLimit(n))}/><span>{n}<small> 条</small></span></label>)}</div></fieldset>
         <label className="ff-toggle-row"><span>加入微博关注流<small>同步我登录账号关注的人</small></span><input aria-label="加入我登录账号的微博关注流" type="checkbox" checked={!!stream?.enabled} disabled={busy} onChange={e=>void run(()=>setWeiboStream(circleId,e.target.checked))}/></label>
         <div className="ff-setting-actions"><button className="ff-setting-button ff-setting-primary" type="button" disabled={busy} onClick={()=>void run(async()=>{
-            for(const binding of feed.weiboBindings||[])if(binding.enabled&&(binding.ownerId==='user'||feed.circles.find(c=>c.id===circleId)?.memberIds.includes(binding.ownerId)))await syncWeibo(circleId,binding.ownerId);
-            if(stream?.enabled)await syncWeibo(circleId,'following');
+            const bindings=(feed.weiboBindings||[]).filter(binding=>binding.enabled&&(binding.ownerId==='user'||feed.circles.find(c=>c.id===circleId)?.memberIds.includes(binding.ownerId)));
+            if(!bindings.length&&!stream?.enabled)throw Error('尚未开启微博来源，请在「管理微博连接」同步微博首页，或绑定一个主页');
+            const total:WeiboSyncResult={received:0,added:0,existing:0,hidden:0};
+            for(const ownerId of [...bindings.map(b=>b.ownerId),...(stream?.enabled?['following']:[])]){
+                const result=ownerId==='user'&&bindings.find(b=>b.ownerId==='user')?.uid===readWeiboConnection()?.uid?await syncMyWeibo(circleId):await syncWeibo(circleId,ownerId);
+                for(const key of ['received','added','existing','hidden'] as const)total[key]+=result[key];
+            }
+            return total;
         })}><ArrowClockwise size={16} aria-hidden="true"/>同步最新动态</button>{stream?.enabled&&<button className="ff-setting-link" type="button" disabled={busy||stream.cursor===null} onClick={()=>void run(()=>syncWeibo(circleId,'following',true))}>加载更早关注动态</button>}</div>
         {status&&<p className="ff-setting-status" role="status">{status}</p>}</div>
     </details>;

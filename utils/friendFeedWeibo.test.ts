@@ -2,7 +2,7 @@
 import {beforeEach,afterEach,expect,it,vi} from 'vitest';
 import {DB} from './db';
 import {saveFriendCircle,readFriendFeed,publishFriendPost,saveFriendFollows,friendPostsForCharacter,mutateFriendFeed} from './friendFeed';
-import {saveWeiboBinding,syncWeibo,syncWeiboComments,disconnectWeibo,readWeiboConnection,fetchWeibo,parseWeiboUid,setWeiboStream,saveWeiboSyncLimit,startWeiboLogin,pollWeiboLogin} from './friendFeedWeibo';
+import {saveWeiboBinding,syncWeibo,syncMyWeibo,syncWeiboHome,weiboSyncMessage,syncWeiboComments,disconnectWeibo,readWeiboConnection,fetchWeibo,parseWeiboUid,setWeiboStream,saveWeiboSyncLimit,startWeiboLogin,pollWeiboLogin} from './friendFeedWeibo';
 import {recentSourceComments} from './friendFeedSourceComments';
 import {setProxyWorkerUrlOverride} from './proxyWorker';
 import {prepareFriendFeedMainTask,consumeFriendFeedMainReply} from './friendFeedMain';
@@ -97,6 +97,58 @@ it('does not accept a late QR confirmation after disconnect or a different accou
     await expect(fetchWeibo('profile')).rejects.toThrow('账号不匹配');expect(readWeiboConnection()?.uid).toBe('123456');
 });
 const original=(n:number)=>({id:String(700000+n),authorId:'987654',authorName:'原评论者',text:`原话${n}`,createdAt:Date.now()-60000+n});
+it('defaults to the followed home timeline and leaves personal and RP homepage bindings untouched',async()=>{
+    await saveWeiboBinding(a.id,'777777');
+    const fetcher=vi.fn(async(_url,options)=>Response.json(JSON.parse(options.body).action==='profile'
+        ?{session:session(),profile:{uid:'123456',name:'真实微博名',avatar:'https://tvax1.sinaimg.cn/crop/avatar.jpg',description:''}}
+        :{session:session(),posts:[{...post('111111'),accountId:'654321',author:'关注的人',url:'https://weibo.com/654321/111111'}],nextCursor:'888888'}));vi.stubGlobal('fetch',fetcher);
+    expect(await syncWeiboHome(circle)).toMatchObject({received:1,added:1});
+    const feed=await readFriendFeed();
+    expect(fetcher.mock.calls.map(([,o])=>JSON.parse(o.body).action)).toEqual(['profile','following']);
+    expect(feed.settings?.weiboProfile?.name).toBe('真实微博名');
+    expect(feed.weiboStreams).toEqual([expect.objectContaining({circleId:circle,enabled:true,cursor:'888888'})]);
+    expect(feed.weiboBindings).toEqual([expect.objectContaining({ownerId:a.id,uid:'777777'})]);
+    expect(feed.posts[0]).toMatchObject({authorId:'weibo:654321',authorName:'关注的人'});
+});
+it('still reads the home timeline when profile retrieval fails, and reports the partial failure',async()=>{
+    const fetcher=vi.fn().mockResolvedValueOnce(Response.json({error:'该微博主页不可读取'},{status:502}))
+        .mockResolvedValueOnce(Response.json({session:session(),posts:[post('111111')],nextCursor:null}));vi.stubGlobal('fetch',fetcher);
+    expect(await syncWeiboHome(circle)).toMatchObject({received:1,added:1,profileError:'该微博主页不可读取'});
+    expect((await readFriendFeed()).settings?.weiboProfile).toBeUndefined();
+    expect(fetcher.mock.calls.map(([,o])=>JSON.parse(o.body).action)).toEqual(['profile','following']);
+});
+it('reads the scanned profile and own posts, stores no credentials and reports deduplication and empty upstream pages',async()=>{
+    let posts=[post('111111')];
+    const fetcher=vi.fn(async(_url,options)=>Response.json(JSON.parse(options.body).action==='profile'
+        ?{session:session(),profile:{uid:'123456',name:'真实微博名',avatar:'https://tvax1.sinaimg.cn/crop/avatar.jpg',description:''}}
+        :{session:session(),posts,nextPage:null}));vi.stubGlobal('fetch',fetcher);
+    expect(await syncMyWeibo(circle)).toEqual({received:1,added:1,existing:0,hidden:0});
+    const feed=await readFriendFeed();
+    expect(feed.settings?.weiboProfile).toEqual({uid:'123456',name:'真实微博名',avatar:'https://tvax1.sinaimg.cn/crop/avatar.jpg'});
+    expect(feed.weiboBindings).toEqual([expect.objectContaining({ownerId:'user',uid:'123456',enabled:true})]);
+    expect(feed.posts[0]).toMatchObject({authorId:'user',authorName:'真实微博名',text:'今天的咖啡'});
+    expect(JSON.stringify(feed)).not.toContain('private-browser-cookie');
+    expect((await DB.getUserProfile())?.name).toBe('小雨');
+    expect(weiboSyncMessage(await syncMyWeibo(circle))).toContain('新增 0 条，已有 1 条');
+    posts=[];expect(weiboSyncMessage(await syncMyWeibo(circle))).toContain('返回 0 条');
+    expect((await readFriendFeed()).posts).toHaveLength(1);
+});
+it('surfaces profile and posts failures without importing placeholders or losing the scanned login',async()=>{
+    const fetcher=vi.fn().mockResolvedValueOnce(Response.json({error:'微博要求重新验证'},{status:502}));vi.stubGlobal('fetch',fetcher);
+    await expect(syncMyWeibo(circle)).rejects.toThrow('微博要求重新验证');
+    expect((await readFriendFeed()).settings?.weiboProfile).toBeUndefined();
+    fetcher.mockResolvedValueOnce(Response.json({session:session(),profile:{uid:'123456',name:'真实微博名',description:''}}))
+        .mockResolvedValueOnce(Response.json({error:'微博列表暂时不可读取'},{status:502}));
+    await expect(syncMyWeibo(circle)).rejects.toThrow('微博列表暂时不可读取');
+    expect((await readFriendFeed()).posts).toHaveLength(0);expect(readWeiboConnection()?.uid).toBe('123456');
+    expect((await readFriendFeed()).settings?.weiboProfile?.name).toBe('真实微博名');
+});
+it('rejects another account profile instead of overwriting my identity',async()=>{
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({session:session(),profile:{uid:'999999',name:'另一人'}})));
+    await expect(syncMyWeibo(circle)).rejects.toThrow('个人资料不完整');
+    expect((await readFriendFeed()).settings?.weiboProfile).toBeUndefined();
+    expect((await readFriendFeed()).posts).toHaveLength(0);
+});
 async function importedPost(){
     await saveWeiboBinding(a.id,'123456');
     vi.stubGlobal('fetch',vi.fn().mockResolvedValueOnce(Response.json({session:session(),posts:[post('111111')],nextPage:null})));

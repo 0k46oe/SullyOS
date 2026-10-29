@@ -38,6 +38,9 @@
 .friend-feed .ff-following-load { padding:10px 0; font-size:12px; color:var(--ff-accent); background:transparent; border:0; }
 .friend-feed .ff-following-load:disabled { opacity:.5; }
 .ff-post-detail { min-height:100%; background:var(--ff-paper); padding-bottom:18px; }
+.friend-feed .ff-source-filter{display:flex;gap:6px;padding:10px 18px;border-bottom:1px solid var(--ff-line)}
+.friend-feed .ff-source-filter button{padding:7px 12px;border:1px solid transparent;border-radius:18px;background:none;color:var(--ff-muted);font-size:12px;cursor:pointer}
+.friend-feed .ff-source-filter button[aria-pressed=true]{color:var(--ff-accent);border-color:var(--ff-line);background:var(--ff-bg)}
 .ff-detail-original { padding:20px; border-bottom:1px solid var(--ff-line); }
 .ff-detail-original>header { display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
 .ff-detail-original>header button { display:flex; align-items:center; gap:10px; padding:0; text-align:left; }
