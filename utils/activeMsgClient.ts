@@ -1,5 +1,6 @@
 import { buildChatOutputStylePrompt, readChatTranslationConfig } from './chatOutputStylePrompt';
 import { resolveDialogueApi } from './characterApi';
+import { isAnthropicEndpoint } from './llmEndpoint';
 import { ackStoppedReplyReceipts, stoppedReplyStateEntries } from './amsgStoppedReplyClient';
 import { loadCharacterContextMessages } from './chatContextRange';
 import { ReiClient, classifyClientStateWrite } from '@rei-standard/amsg-client';
@@ -593,7 +594,7 @@ const resolveTaskCredentialUpdates = (
 ): Record<string, unknown> => {
   const active = resolveApiConfig(char, config, apiConfig);
   return {
-    apiUrl: normalizeChatApiUrl(active.baseUrl),
+    apiUrl: normalizeChatApiUrl(active.baseUrl, active.apiType),
     apiKey: active.apiKey,
     primaryModel: active.model,
   };
@@ -618,6 +619,19 @@ export const isLlmCredentialsReady = async (): Promise<boolean> => {
     return (await ActiveMsgStore.getGlobalConfig()).llmCredentialsSupported === true;
   } catch {
     return false;
+  }
+};
+
+export const requireAnthropicWorker = async (urls: string[]): Promise<void> => {
+  if (!urls.some(isAnthropicEndpoint)) return;
+  let config = await ActiveMsgStore.getGlobalConfig();
+  if (config.anthropicMessagesSupported === true && config.anthropicMessagesWorkerUrl === config.workerUrl) return;
+  // An automatic deployment can finish after the startup probe. Recheck the
+  // current Worker instead of making users reconnect to clear a stale negative.
+  await ActiveMsgClient.probeInstantChatSupportDetailed({ timeoutMs: 5000 });
+  config = await ActiveMsgStore.getGlobalConfig();
+  if (config.anthropicMessagesSupported !== true || config.anthropicMessagesWorkerUrl !== config.workerUrl) {
+    throw new Error('主动消息 2.0 的 Anthropic 支持尚未就绪，已自动检查。请稍后重试；若持续失败，请检查网络或 Worker 自动更新设置。');
   }
 };
 
@@ -648,6 +662,7 @@ const putLlmCredentialRows = async (
 ): Promise<number> => {
   const assertWriteCurrent = captureCloudWriteCheck(rows.flatMap(row => { const owner = parseCharCredId(row.credId); return owner ? [owner.charId] : []; }));
   const pending = options.force ? rows : pickChangedCredRows(rows);
+  await requireAnthropicWorker(rows.map(row => row.value.apiUrl));
   if (pending.length === 0) return 0;
   const client = options.client ?? await initializeClient(await ensureWorkerReady());
   assertWriteCurrent();
@@ -1816,10 +1831,12 @@ const fetchWithAuthRaw = async (
  * 即时对话里需要新协议的回合（SAR 信封）靠这份存量判断能不能上云，所以两处探
  * /config-check 的地方都顺手记一笔。存不下只是这一次的结论留不到下次，不影响探测本身。
  */
-const rememberWorkerBundleVersion = async (body: any): Promise<void> => {
+const rememberWorkerBundleVersion = async (body: any, checkedWorkerUrl?: string): Promise<void> => {
   const deployed = typeof body?.data?.workerVersion === 'string' ? body.data.workerVersion : null;
   try {
-    await ActiveMsgStore.saveGlobalConfig({ workerBundleVersion: deployed });
+    const current = await ActiveMsgStore.getGlobalConfig();
+    if (checkedWorkerUrl && current.workerUrl !== checkedWorkerUrl) return;
+    await ActiveMsgStore.saveGlobalConfig({ workerBundleVersion: deployed, anthropicMessagesSupported: body?.data?.anthropicMessages === true, anthropicMessagesWorkerUrl: checkedWorkerUrl || current.workerUrl });
   } catch (error) {
     console.warn('[AmsgInstantChat] Worker 的 bundle 版本没存下来（下次探测再补）', error);
   }
@@ -2287,6 +2304,8 @@ export const ActiveMsgClient = {
     const {
       instantChatSupported: _staleSupported,
       workerBundleVersion: _staleBundleVersion,
+      anthropicMessagesSupported: _staleAnthropicSupported,
+      anthropicMessagesWorkerUrl: _staleAnthropicWorkerUrl,
       ...handshakeConfig
     } = config;
     await ActiveMsgStore.saveGlobalConfig({ ...handshakeConfig, initializedAt: Date.now() });
@@ -2657,6 +2676,7 @@ export const ActiveMsgClient = {
       payload.userMessage = userMessage;
     } else {
       const activeApi = resolveApiConfig(char, config, apiConfig);
+      await requireAnthropicWorker([normalizeChatApiUrl(activeApi.baseUrl, activeApi.apiType)]);
       // 「本次任务」指令随任务 metadata 走，worker 到点拿它填 fire_pack 的指令槽。
       payload.metadata.amsgTaskInstruction = buildTaskInstruction(task.mode, task.promptHint);
       // 服务端要求「completePrompt 或 messages」二选一，且 messages 必须非空、
@@ -2672,7 +2692,7 @@ export const ActiveMsgClient = {
         if (!credRow) throw new Error('主动消息 2.0 缺少可用的 API URL / Key / Model。');
         payload.credRefs = { chat: credRow.credId };
       } else {
-        payload.apiUrl = normalizeChatApiUrl(activeApi.baseUrl);
+        payload.apiUrl = normalizeChatApiUrl(activeApi.baseUrl, activeApi.apiType);
         payload.apiKey = activeApi.apiKey;
         payload.primaryModel = activeApi.model;
       }
@@ -3004,6 +3024,7 @@ export const ActiveMsgClient = {
     params.signal?.throwIfAborted();
     const assertWriteCurrent = captureCloudWriteCheck([params.char.id]);
     const { char, chatMessages, api, userProfile, groups, realtimeConfig } = params;
+    await requireAnthropicWorker([api.baseUrl, params.emotionEval?.api?.baseUrl || '']);
     if (!api.baseUrl?.trim() || !api.apiKey?.trim() || !api.model?.trim()) {
       throw new Error('即时对话没发出去：聊天 API 地址、密钥或模型没配齐。');
     }
@@ -3033,7 +3054,7 @@ export const ActiveMsgClient = {
     //
     // 走引用时两行一起登记：
     //   char:<id>/instant  这一轮真正会用的聊天凭据（model 是请求体终值，claude 系开思考
-    //                      时带 -thinking 后缀）。**必须带上它**——只带 emotion 一个引用的话，
+    //                      在兼容模式带 -thinking 后缀，原生模式保留真实模型 ID）。**必须带上它**——只带 emotion 一个引用的话，
     //                      角色在这一轮里给自己排的任务会继承一份「有引用、没聊天凭据」的
     //                      空壳（上游 scheduleTask 见到任何 credRefs 就不再复制内联三件套）。
     //   char:<id>/emotion  情绪评估的副 API。有了它，评估配置里就不必再塞一份凭据。
@@ -3382,7 +3403,7 @@ export const ActiveMsgClient = {
         // 「那台 Worker 跑不动即时对话」，一律留在 unknown。
         if (status === 200 && body?.success === true) {
           outcome = body?.data?.instantTick === true ? 'supported' : 'unsupported';
-          await rememberWorkerBundleVersion(body);
+          await rememberWorkerBundleVersion(body, config.workerUrl);
         }
       } finally {
         if (timer) clearTimeout(timer);
@@ -3555,7 +3576,7 @@ export const ActiveMsgClient = {
       }
       const { status, body } = await fetchWithAuthRaw('config-check', config, init, '后端版本探测');
       if (status !== 200 || body?.success !== true) return { state: 'unknown', deployed: null, expected, autoUpdate: null };
-      await rememberWorkerBundleVersion(body);
+      await rememberWorkerBundleVersion(body, config.workerUrl);
       const deployed = typeof body?.data?.workerVersion === 'string' ? body.data.workerVersion : null;
       const autoUpdate = parseSelfUpdateReport(body?.data?.selfUpdate);
       if (!deployed) return { state: 'outdated', deployed: null, expected, autoUpdate };
@@ -3620,6 +3641,10 @@ export const ActiveMsgClient = {
       // 用户刚把后端升上去，接下来这几分钟每一轮消化还是照着升级前那句「不支持」在前台
       // 跑那一两分钟的整理，页面一关就死。
       forgetBackgroundJobProbe();
+      // Both startup auto-update and the Settings button use this path. Refresh
+      // capabilities without a new handshake; a rollout still in progress is
+      // checked again by requireAnthropicWorker before its next native request.
+      await this.probeInstantChatSupportDetailed({ timeoutMs: 5000 });
       return {
         ok: true,
         supported: true,
@@ -3786,6 +3811,7 @@ export const ActiveMsgClient = {
     if (aiTaskUuids.length === 0) return { status: 'no-tasks', updated: 0, failed: 0 };
 
     const inlineUpdates = resolveTaskCredentialUpdates(params.char, params.config, params.apiConfig);
+    await requireAnthropicWorker([String(inlineUpdates.apiUrl || '')]);
     const remoteTasks = params.remoteTasks ?? await this.listAllTasks();
     const remoteByUuid = new Map(remoteTasks.map((task) => [task.uuid, task]));
     const credRow = buildCharChatCredRow(params.char, params.config, params.apiConfig)!;

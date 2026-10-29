@@ -14,11 +14,13 @@ import { appendDevDebugApiLog, makeDebugLogger } from './devDebug';
 import { getApiCallAmbientContext, recordApiCall, type ApiCallMeta } from './apiCallLog';
 import { resolveBlobRefsInRequestBody } from './apiBlobRefs';
 import { waitForPalaceRequest } from './memoryPalace/maintenanceMode';
+import { fetchLlm } from './anthropicApi';
+import { isAnthropicEndpoint } from './llmEndpoint';
 
 const log = makeDebugLogger('api', 'SafeAPI');
 
 export function isChatCompletionUrl(url: string): boolean {
-    return url.includes('/chat/completions');
+    return url.includes('/chat/completions') || isAnthropicEndpoint(url);
 }
 
 /** Parse a fetch Response as JSON safely (text-first, then JSON.parse) */
@@ -115,6 +117,8 @@ interface SseFeedDelta {
 }
 
 class SseAssembler {
+    private anthropicContent: any[] | undefined;
+    private anthropicThinking: any[] | undefined;
     content = '';
     private role = 'assistant';
     private finishReason: string | null = null;
@@ -157,6 +161,8 @@ class SseAssembler {
         let reasoningDelta = '';
         // delta 路径（OpenAI 流式常见）
         if (choice.delta) {
+            if (Array.isArray(choice.delta.anthropic_content)) this.anthropicContent = choice.delta.anthropic_content;
+            if (Array.isArray(choice.delta.anthropic_thinking)) this.anthropicThinking = choice.delta.anthropic_thinking;
             for (const k of Object.keys(choice.delta)) this.deltaKeys.add(k);
             if (typeof choice.delta.content === 'string') {
                 delta = choice.delta.content;
@@ -232,6 +238,8 @@ class SseAssembler {
                     role: this.role,
                     content: this.content,
                     ...(this.reasoning ? { reasoning_content: this.reasoning } : {}),
+                    ...(this.anthropicThinking ? { anthropic_thinking: this.anthropicThinking } : {}),
+                    ...(this.anthropicContent ? { anthropic_content: this.anthropicContent } : {}),
                     ...(this.toolCalls.length ? {
                         tool_calls: this.toolCalls.filter(Boolean).map((tc, i) => ({ ...tc, id: tc.id || `call_sse_${i}` })),
                     } : {}),
@@ -475,7 +483,7 @@ export async function safeFetchJson(
         }
         const attemptStartedAt = Date.now();
         try {
-            const response = await fetch(url, attemptOptions);
+            const response = await fetchLlm(url, attemptOptions);
             if (timeoutHandle) clearTimeout(timeoutHandle);
             lastStatus = response.status;
             const headersMs = Date.now() - attemptStartedAt;

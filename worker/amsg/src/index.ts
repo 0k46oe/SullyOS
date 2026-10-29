@@ -1,4 +1,9 @@
 import { INSTANT_INPUT_NAMESPACE, INSTANT_INPUT_TTL_DAYS, parseInstantInputEnvelope, parseInstantInputRef } from './instantInput';
+import { installAnthropicFetch } from '../../../utils/anthropicApi';
+
+// Stateless endpoint adapter also covers the upstream SDK's private LLM transport.
+// No request/tenant credentials are retained in the isolate.
+installAnthropicFetch(false);
 import { resolveSullyCloudOwnership } from './cloudDataOwnership';
 import { pickStaleStoppedReplyKeys, reconcileStoppedReplies, stoppedReplyKey } from '../../../utils/amsgStoppedReply';
 /**
@@ -3654,6 +3659,7 @@ export default {
         data: {
           ...inspectWorkerEnv(env),
           instantChat: true,
+          anthropicMessages: true,
           instantTick: !!env.INSTANT_TICK,
           // 这份代码认不认识「后台任务」（metadata.amsgKind → handler，见 fireKinds.ts）。
           // 老 bundle 没有这个字段，前端据此不去建那种任务——老 worker 会把它当聊天任务

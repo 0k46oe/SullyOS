@@ -39,6 +39,7 @@ URL / Key / Model 整套选择，禁止逐字段从不同配置补齐。空 Key 
 - 角色变更落库后触发现有 `syncAmsgLlmCredentials` 队列；传入新的配置快照，避免连续修改同一角色时被正在运行的同步清掉欠账。新 Worker 更新凭据行，旧 Worker 更新存量任务，沿用失败重试。
 - `char:<id>/chat` 根据角色当前配置计算。`instant` 仍由本地当轮请求终值提供，情绪 / 记忆凭据不受角色对话 API 影响。
 - 预设分组保存在 `ApiPreset.group`，缺省为未分组，改组不改变预设内容。
+- 原生接口类型 `apiType` 随整套对话凭据与预设保存，原生 URL 归一化为 `/messages`；详情见 [Anthropic Messages](./anthropic-messages.md)。旧 Worker 未确认原生能力时不更新为原生凭据。
 
 ## 验证
 
