@@ -265,6 +265,9 @@ export type MinimaxRegion = 'domestic' | 'overseas';
 // 语音合成（TTS）服务商。全局三选一：切换后聊天语音条 / 约会 / 电话统一用同一家。
 export type TtsProvider = 'minimax' | 'fishaudio' | 'elevenlabs';
 
+// 语音转文字（STT）服务商。电话麦克风收音可选任意已配置 Key 的平台（与 TTS 独立），或浏览器自带免费识别。
+export type SttProvider = 'minimax' | 'fishaudio' | 'elevenlabs' | 'browser';
+
 export interface VisionApiConfig {
   /** 开启后，聊天图片先由独立视觉模型转成文字，再交给主对话模型。 */
   enabled: boolean;
@@ -274,9 +277,12 @@ export interface VisionApiConfig {
 }
 
 /** A complete dialogue endpoint, separate from TTS/vision configuration. */
-export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'stream' | 'temperature'>;
+export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'stream' | 'temperature' | 'maxTokens' | 'apiType'>;
 
 export interface APIConfig {
+  apiType?: 'openai' | 'anthropic';
+  /** 私聊单次生成上限；未设置沿用 8000，不改变历史范围。 */
+  maxTokens?: number;
   baseUrl: string;
   apiKey: string;
   // 可选识图中转：给不支持 image_url 的主模型补视觉能力。
@@ -289,6 +295,8 @@ export interface APIConfig {
   minimaxRegion?: MinimaxRegion;
   // 语音服务商三选一。缺省 → 'minimax'。
   ttsProvider?: TtsProvider;
+  // 语音转文字（STT）服务商。可与 ttsProvider 不同（只允许选已填好 Key 的平台或 'browser'）。
+  sttProvider?: SttProvider;
   // 鱼声 Fish Audio API Key（https://fish.audio/）。仅 ttsProvider === 'fishaudio' 时使用。
   fishAudioApiKey?: string;
   // 鱼声默认模型（s2.1-pro / s2-pro / s1）。缺省 → 's2.1-pro'。
@@ -329,6 +337,9 @@ export type ActiveMsg2Mode = 'fixed' | 'auto' | 'prompted';
 export type ActiveMsg2Recurrence = 'none' | 'daily' | 'weekly';
 
 export interface ActiveMsg2GlobalConfig {
+  /** Confirmed by /config-check, scoped to the Worker URL that was checked. */
+  anthropicMessagesSupported?: boolean;
+  anthropicMessagesWorkerUrl?: string;
   userId: string;
   /** 单用户 Cloudflare Worker 地址，例如 https://amsg.your-worker.dev */
   workerUrl: string;
@@ -2358,6 +2369,8 @@ export interface HomeFigureSlot extends ChibiStudioSlot {
 // --- BANK / SHOP GAME TYPES (NEW) ---
 export interface BankTransaction {
     id: string;
+    /** 旧流水未带类型时按支出读取。金额始终为正数。 */
+    type?: 'expense' | 'income';
     amount: number;
     category: string; 
     note: string;
@@ -3628,7 +3641,7 @@ export type LifeRecordModule = 'period' | 'med' | 'expense' | 'exercise';
 export interface LifeRecord {
     id: string;
     module: LifeRecordModule;
-    /** period: 'start' | 'end'；med: 'taken'；expense: 'expense'；exercise: 'session' */
+    /** period: 'start' | 'end'；med: 'taken'；expense: 'expense' | 'income'；exercise: 'session' */
     kind: string;
     date: string;              // YYYY-MM-DD（事件归属日）
     timestamp: number;

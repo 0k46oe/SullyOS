@@ -17,6 +17,316 @@ var parseInstantInputEnvelope = (value) => {
   }
 };
 
+// utils/llmEndpoint.ts
+function isAnthropicEndpoint(value) {
+  try {
+    return /\/messages(?:\/(?:chat\/completions|models))?\/?$/.test(new URL(value).pathname);
+  } catch {
+    return false;
+  }
+}
+function nativeRequestUrl(value) {
+  const url = new URL(value);
+  url.pathname = url.pathname.replace(/\/messages\/chat\/completions\/?$/, "/messages").replace(/\/messages\/models\/?$/, "/models");
+  return url.href;
+}
+
+// utils/samplingParamCompat.ts
+function modelRejectsSamplingParams(model) {
+  if (typeof model !== "string" || !model) return false;
+  const m = model.toLowerCase();
+  if (/opus[-.\s]?4[-.\s]?(7|8|9)\b/.test(m)) return true;
+  if (/opus[-.\s]?(?:[5-9]|\d\d)\b/.test(m)) return true;
+  if (/sonnet[-.\s]?(?:[5-9]|\d\d)\b/.test(m)) return true;
+  if (/\b(?:fable|mythos)[-.\s]?\d/.test(m)) return true;
+  if (/\bgpt-?5/.test(m)) return true;
+  return false;
+}
+
+// utils/anthropicApi.ts
+var ephemeral = { type: "ephemeral" };
+var finishReason = (reason) => reason === "tool_use" ? "tool_calls" : reason === "max_tokens" ? "length" : "stop";
+function contentBlocks(content) {
+  if (content == null || content === "") return [];
+  if (typeof content === "string") return [{ type: "text", text: content }];
+  if (!Array.isArray(content)) throw Error("Anthropic \u6D88\u606F\u5185\u5BB9\u5FC5\u987B\u4E3A\u6587\u672C\u6216\u5185\u5BB9\u5757");
+  return content.flatMap((part) => {
+    if (part.type === "text") return part.text ? [{ type: "text", text: part.text }] : [];
+    if (part.type === "image_url") {
+      const url = typeof part.image_url === "string" ? part.image_url : part.image_url?.url;
+      const data = typeof url === "string" && url.match(/^data:(image\/(?:jpeg|png|gif|webp));base64,([\s\S]+)$/i);
+      if (data) return [{ type: "image", source: { type: "base64", media_type: data[1].toLowerCase(), data: data[2] } }];
+      if (typeof url === "string" && /^https?:\/\//i.test(url)) return [{ type: "image", source: { type: "url", url } }];
+      throw Error("Anthropic \u56FE\u7247\u9700\u4E3A HTTP \u5730\u5740\u6216\u53D7\u652F\u6301\u7684 base64 \u56FE\u7247");
+    }
+    if (["image", "document", "tool_result", "tool_use", "thinking", "redacted_thinking"].includes(part.type)) return [structuredClone(part)];
+    throw Error(`Anthropic \u6682\u4E0D\u652F\u6301\u5185\u5BB9\u5757\uFF1A${String(part.type)}`);
+  });
+}
+function toAnthropicRequest(body) {
+  if (!Array.isArray(body.messages)) throw Error("Anthropic \u8BF7\u6C42\u7F3A\u5C11 messages");
+  const system = [];
+  const messages = [];
+  let lastHistoryBlock;
+  let sawReminder = false;
+  const append = (role, blocks) => {
+    if (!blocks.length) return;
+    const previous = messages.at(-1);
+    if (previous?.role === role) previous.content.push(...blocks);
+    else messages.push({ role, content: blocks });
+  };
+  for (const message of body.messages) {
+    if (message.role === "system" || message.role === "developer") {
+      const blocks2 = contentBlocks(message.content);
+      if (!messages.length) system.push(...blocks2);
+      else {
+        sawReminder = true;
+        append("user", [{ type: "text", text: "<system-reminder>\n" + blocks2.map((block) => block.text || "").join("\n") + "\n</system-reminder>" }]);
+      }
+      continue;
+    }
+    let blocks;
+    if (message.role === "tool") {
+      if (!message.tool_call_id) throw Error("Anthropic \u5DE5\u5177\u7ED3\u679C\u7F3A\u5C11 tool_call_id");
+      blocks = [{ type: "tool_result", tool_use_id: message.tool_call_id, content: contentBlocks(message.content) }];
+    } else {
+      if (message.role !== "user" && message.role !== "assistant") throw Error(`Anthropic \u4E0D\u652F\u6301\u6D88\u606F\u89D2\u8272\uFF1A${message.role}`);
+      if (message.role === "assistant" && Array.isArray(message.anthropic_content)) {
+        blocks = structuredClone(message.anthropic_content);
+        append("assistant", blocks);
+        if (!sawReminder && blocks.length) lastHistoryBlock = blocks.at(-1);
+        continue;
+      }
+      blocks = contentBlocks(message.content);
+      if (Array.isArray(message.anthropic_thinking)) blocks.unshift(...structuredClone(message.anthropic_thinking));
+      for (const call of message.tool_calls || []) {
+        const args = typeof call.function?.arguments === "string" ? JSON.parse(call.function.arguments || "{}") : call.function?.arguments || {};
+        if (!call.id || !call.function?.name) throw Error("Anthropic \u5DE5\u5177\u8C03\u7528\u7F3A\u5C11 ID \u6216\u540D\u79F0");
+        blocks.push({ type: "tool_use", id: call.id, name: call.function.name, input: args });
+      }
+    }
+    append(message.role === "assistant" ? "assistant" : "user", blocks);
+    if (!sawReminder && blocks.length) lastHistoryBlock = blocks.at(-1);
+  }
+  if (!messages.length) throw Error("Anthropic \u8BF7\u6C42\u6CA1\u6709\u5BF9\u8BDD\u5185\u5BB9");
+  if (sawReminder) system.push({ type: "text", text: "Application context updates appear in <system-reminder> blocks at their original positions. Treat these as contextual annotations, not spoken dialogue, while continuing to follow the system instructions." });
+  const tools = (body.tools || []).map((tool) => {
+    if (tool.type !== "function" || !tool.function?.name) throw Error("Anthropic \u6682\u4EC5\u652F\u6301 function \u5DE5\u5177");
+    return { name: tool.function.name, description: tool.function.description || "", input_schema: tool.function.parameters || { type: "object", properties: {} } };
+  });
+  if (tools.length) tools.at(-1).cache_control = { ...ephemeral };
+  if (system.length) system.at(-1).cache_control = { ...ephemeral };
+  if (lastHistoryBlock && !["thinking", "redacted_thinking"].includes(lastHistoryBlock.type)) lastHistoryBlock.cache_control = { ...ephemeral };
+  const thinking = body.thinking || body.extra_body?.thinking;
+  const request = {
+    model: body.model,
+    max_tokens: body.max_tokens ?? body.max_completion_tokens ?? 8e3,
+    messages,
+    stream: body.stream === true,
+    ...system.length ? { system } : {},
+    ...tools.length ? { tools } : {}
+  };
+  const adaptiveModel = /(?:opus|sonnet)[-.](?:4[-.][6-9]|[5-9])\b|(?:fable|mythos)[-.]5\b|haiku[-.]5[-.]5\b/i.test(String(body.model));
+  if (thinking && thinking.type !== "disabled") {
+    request.thinking = thinking.type === "enabled" && adaptiveModel ? { type: "adaptive" } : thinking;
+    if (request.thinking.type === "adaptive" && ["low", "medium", "high"].includes(body.reasoning_effort)) {
+      request.output_config = { effort: body.reasoning_effort };
+    }
+  } else if (!modelRejectsSamplingParams(body.model) && typeof body.temperature === "number") request.temperature = Math.max(0, Math.min(1, body.temperature));
+  if (!request.thinking && !modelRejectsSamplingParams(body.model) && typeof body.top_p === "number") request.top_p = body.top_p;
+  if (body.stop) request.stop_sequences = Array.isArray(body.stop) ? body.stop : [body.stop];
+  if (body.tool_choice && tools.length) {
+    request.tool_choice = typeof body.tool_choice === "string" ? { type: body.tool_choice === "required" ? "any" : body.tool_choice } : { type: "tool", name: body.tool_choice.function?.name };
+  }
+  if (tools.length && body.parallel_tool_calls === false) {
+    request.tool_choice = { ...request.tool_choice || { type: "auto" }, disable_parallel_tool_use: true };
+  }
+  if (body.response_format?.type === "json_object") {
+    request.system = [...system, { type: "text", text: "Return a valid JSON value only, without Markdown fences." }];
+  } else if (body.response_format?.type === "json_schema") {
+    request.output_config = { ...request.output_config, format: { type: "json_schema", schema: body.response_format.json_schema?.schema } };
+  }
+  return request;
+}
+function anthropicUsage(usage = {}) {
+  const input = usage.input_tokens || 0, read = usage.cache_read_input_tokens || 0, write = usage.cache_creation_input_tokens || 0;
+  return { ...usage, prompt_tokens: input + read + write, completion_tokens: usage.output_tokens || 0, total_tokens: input + read + write + (usage.output_tokens || 0), prompt_tokens_details: { cached_tokens: read }, cache_creation_input_tokens: write };
+}
+function fromAnthropicMessage(message) {
+  if (message.type === "error") throw Error(message.error?.message || "Anthropic \u8FD4\u56DE\u9519\u8BEF");
+  if (message.type !== "message" || !Array.isArray(message.content)) throw Error("Anthropic \u8FD4\u56DE\u4E86\u65E0\u6548 Messages \u54CD\u5E94");
+  const text2 = message.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+  const thinking = message.content.filter((b) => b.type === "thinking" || b.type === "redacted_thinking");
+  const calls = message.content.filter((b) => b.type === "tool_use").map((b) => ({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input) } }));
+  return { id: message.id, object: "chat.completion", model: message.model, choices: [{ index: 0, finish_reason: finishReason(message.stop_reason), message: {
+    role: "assistant",
+    content: text2,
+    ...thinking.length ? { reasoning_content: thinking.map((b) => b.thinking || "").join(""), anthropic_thinking: thinking } : {},
+    ...thinking.length || calls.length ? { anthropic_content: message.content } : {},
+    ...calls.length ? { tool_calls: calls } : {}
+  } }], usage: anthropicUsage(message.usage) };
+}
+function convertAnthropicStream(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder(), encoder2 = new TextEncoder();
+  let pending = "", eventData = [], stopped = false, id = "", model = "", usage = {}, emitted = 0;
+  const toolIndices = /* @__PURE__ */ new Map();
+  const thinking = /* @__PURE__ */ new Map();
+  const blocks = /* @__PURE__ */ new Map(), toolJson = /* @__PURE__ */ new Map();
+  const emitEvent = (controller) => {
+    if (stopped) {
+      eventData = [];
+      return;
+    }
+    if (!eventData.length) return;
+    const event = JSON.parse(eventData.join("\n"));
+    eventData = [];
+    if (event.type === "error") throw Error(event.error?.message || "Anthropic \u6D41\u5F0F\u9519\u8BEF");
+    let delta = {}, end = null;
+    if (event.type === "message_start") {
+      id = event.message.id;
+      model = event.message.model;
+      usage = { ...event.message.usage };
+      delta.role = "assistant";
+    } else if (event.type === "content_block_start") {
+      const block = structuredClone(event.content_block);
+      blocks.set(event.index, block);
+      if (block.type === "tool_use") {
+        const index = toolIndices.size;
+        toolIndices.set(event.index, index);
+        delta.tool_calls = [{ index, id: block.id, type: "function", function: { name: block.name, arguments: Object.keys(block.input || {}).length ? JSON.stringify(block.input) : "" } }];
+      } else if (block.type === "text") delta.content = block.text || "";
+      else if (block.type === "thinking" || block.type === "redacted_thinking") {
+        thinking.set(event.index, block);
+        delta.reasoning_content = block.thinking || "";
+      }
+    } else if (event.type === "content_block_delta") {
+      if (event.delta.type === "text_delta") delta.content = event.delta.text;
+      if (event.delta.type === "text_delta" && blocks.has(event.index)) blocks.get(event.index).text += event.delta.text;
+      if (event.delta.type === "input_json_delta") toolJson.set(event.index, (toolJson.get(event.index) || "") + event.delta.partial_json);
+      if (event.delta.type === "input_json_delta") {
+        const index = toolIndices.get(event.index);
+        if (index === void 0) throw Error("Anthropic \u5DE5\u5177\u6D41\u7F3A\u5C11\u8D77\u59CB\u4E8B\u4EF6");
+        delta.tool_calls = [{ index, function: { arguments: event.delta.partial_json } }];
+      }
+      if (event.delta.type === "thinking_delta") {
+        delta.reasoning_content = event.delta.thinking;
+        const block = thinking.get(event.index);
+        if (block) block.thinking = (block.thinking || "") + event.delta.thinking;
+      }
+      if (event.delta.type === "signature_delta") {
+        const block = thinking.get(event.index);
+        if (block) block.signature = (block.signature || "") + event.delta.signature;
+      }
+    } else if (event.type === "message_delta") {
+      usage = { ...usage, ...event.usage };
+    } else if (event.type === "message_stop") {
+      stopped = true;
+      end = "stop";
+    }
+    if (event.delta?.stop_reason) usage.__stop_reason = event.delta.stop_reason;
+    if (stopped) {
+      end = finishReason(usage.__stop_reason);
+      for (const [index, json] of toolJson) blocks.get(index).input = JSON.parse(json || "{}");
+      if (thinking.size) delta.anthropic_thinking = [...thinking.values()];
+      if (thinking.size || toolIndices.size) delta.anthropic_content = [...blocks.values()];
+    }
+    if (Object.keys(delta).length || stopped || event.type === "message_delta") {
+      emitted++;
+      const { __stop_reason, ...reportedUsage } = usage;
+      controller.enqueue(encoder2.encode(`data: ${JSON.stringify({ id, model, object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason: end }], usage: anthropicUsage(reportedUsage) })}
+
+`));
+    }
+    if (stopped) controller.enqueue(encoder2.encode("data: [DONE]\n\n"));
+  };
+  const stream = new ReadableStream({
+    async pull(controller) {
+      try {
+        const before = emitted;
+        while (true) {
+          const result = await reader.read();
+          pending += decoder.decode(result.value, { stream: !result.done });
+          let newline;
+          while ((newline = pending.indexOf("\n")) >= 0) {
+            const line = pending.slice(0, newline).replace(/\r$/, "");
+            pending = pending.slice(newline + 1);
+            if (!line) emitEvent(controller);
+            else if (line.startsWith("data:")) eventData.push(line.slice(5).trimStart());
+          }
+          if (result.done) {
+            if (pending.startsWith("data:")) eventData.push(pending.slice(5).trimStart());
+            emitEvent(controller);
+            if (!stopped) throw Error("Anthropic \u6D41\u5F0F\u8FDE\u63A5\u63D0\u524D\u7ED3\u675F\uFF0C\u672A\u6536\u5230 message_stop");
+            controller.close();
+            reader.releaseLock();
+            return;
+          }
+          if (stopped) {
+            controller.close();
+            await reader.cancel();
+            return;
+          }
+          if (emitted > before) return;
+        }
+      } catch (error) {
+        controller.error(error);
+        await reader.cancel().catch(() => {
+        });
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason);
+    }
+  });
+  return new Response(stream, { status: response.status, statusText: response.statusText, headers: { "content-type": "text/event-stream", "x-request-id": response.headers.get("request-id") || "" } });
+}
+async function fetchLlm(resource, init, transport = globalThis.fetch, browser = typeof window !== "undefined") {
+  if (transport.__sullyAnthropic) return transport(resource, init);
+  const inputUrl = typeof resource === "string" ? resource : resource instanceof URL ? resource.href : resource.url;
+  if (!isAnthropicEndpoint(inputUrl)) return transport(resource, init);
+  const request = resource instanceof Request ? resource : void 0;
+  const method = (init?.method || request?.method || "GET").toUpperCase();
+  const body = init?.body ?? (request && method === "POST" ? await request.clone().text() : void 0);
+  let parsed;
+  if (method === "POST") {
+    try {
+      parsed = typeof body === "string" ? JSON.parse(body) : void 0;
+    } catch {
+    }
+    if (typeof parsed?.model !== "string" || !Array.isArray(parsed.messages)) return transport(resource, init);
+  } else if (method !== "GET" || !/\/messages\/models\/?$/.test(new URL(inputUrl).pathname)) return transport(resource, init);
+  const headers = new Headers(init?.headers || request?.headers);
+  const key = headers.get("x-api-key") || headers.get("authorization")?.replace(/^Bearer\s+/i, "") || "";
+  headers.delete("authorization");
+  headers.set("x-api-key", key);
+  headers.set("anthropic-version", "2023-06-01");
+  if (browser) headers.set("anthropic-dangerous-direct-browser-access", "true");
+  const url = nativeRequestUrl(inputUrl);
+  const inherited = request ? { cache: request.cache, credentials: request.credentials, integrity: request.integrity, keepalive: request.keepalive, mode: request.mode, redirect: request.redirect, referrer: request.referrer, referrerPolicy: request.referrerPolicy } : {};
+  const options = { ...inherited, ...init, method, headers, signal: init?.signal || request?.signal };
+  if (method === "POST") {
+    if (typeof body !== "string") throw Error("Anthropic \u8BF7\u6C42\u5FC5\u987B\u4E3A JSON");
+    options.body = JSON.stringify(toAnthropicRequest(parsed));
+    headers.set("content-type", "application/json");
+    headers.delete("content-length");
+  }
+  const response = await transport(url, options);
+  if (!response.ok || method !== "POST") return response;
+  if (response.headers.get("content-type")?.includes("text/event-stream")) {
+    if (!response.body) throw Error("Anthropic \u8FD4\u56DE\u4E86\u7A7A\u6D41");
+    return convertAnthropicStream(response);
+  }
+  return new Response(JSON.stringify(fromAnthropicMessage(await response.json())), { status: response.status, statusText: response.statusText, headers: { "content-type": "application/json" } });
+}
+function installAnthropicFetch(browser = false) {
+  if (globalThis.fetch.__sullyAnthropic) return;
+  const original = globalThis.fetch.bind(globalThis);
+  const wrapped = (resource, init) => fetchLlm(resource, init, original, browser);
+  wrapped.__sullyAnthropic = true;
+  globalThis.fetch = wrapped;
+}
+
 // utils/proxyWorker.ts
 var DEFAULT_PROXY_WORKER = "https://proxy.friedsully.com";
 var LS_KEY = "sully_proxy_worker_url_v1";
@@ -1112,29 +1422,66 @@ async function resolveSullyCloudOwnership(input) {
 }
 
 // utils/amsgStoppedReply.ts
-var stoppedReplyKey = (uuid) => `chat_stop:${uuid}`;
+var STOPPED_REPLY_KEY_PREFIX = "chat_stop:";
+var stoppedReplyKey = (uuid) => `${STOPPED_REPLY_KEY_PREFIX}${uuid}`;
+var MAX_CLOUD_STOPPED_REPLY_KEYS = 8;
+var STOPPED_REPLY_CLOUD_TTL_MS = 24 * 60 * 60 * 1e3;
 function reconcileStoppedReplies(log, rows) {
   if (!log) return log;
   const kept = /* @__PURE__ */ new Map();
   for (const row of rows) {
-    if (!row.key.startsWith("chat_stop:")) continue;
+    if (!row.key.startsWith(STOPPED_REPLY_KEY_PREFIX)) continue;
     try {
       const value = JSON.parse(row.value);
-      if (typeof value.text === "string") kept.set(row.key.slice("chat_stop:".length), value.text);
+      if (typeof value.text === "string") kept.set(row.key.slice(STOPPED_REPLY_KEY_PREFIX.length), value.text);
     } catch {
     }
   }
-  return { ...log, entries: log.entries.flatMap((entry) => {
+  if (kept.size === 0) return log;
+  let changed = false;
+  const entries = log.entries.flatMap((entry) => {
     if (!entry.taskUuid || !kept.has(entry.taskUuid)) return [entry];
     const text2 = kept.get(entry.taskUuid);
-    return text2 ? [{ ...entry, text: text2 }] : [];
-  }) };
+    if (!text2) {
+      changed = true;
+      return [];
+    }
+    if (text2 !== entry.text) changed = true;
+    return [{ ...entry, text: text2 }];
+  });
+  return changed ? { ...log, entries } : log;
+}
+function pickStaleStoppedReplyKeys(rows, nowMs = Date.now(), protectKey) {
+  const stopRows = rows.map((row, index) => ({ key: row.key, updatedAt: row.updatedAt, index })).filter((row) => row.key.startsWith(STOPPED_REPLY_KEY_PREFIX) && row.key !== protectKey);
+  if (stopRows.length === 0) return [];
+  const cutoff = nowMs - STOPPED_REPLY_CLOUD_TTL_MS;
+  const stale = /* @__PURE__ */ new Set();
+  const fresh = [];
+  for (const row of stopRows) {
+    if (typeof row.updatedAt === "number" && row.updatedAt > 0 && row.updatedAt < cutoff) {
+      stale.add(row.key);
+    } else {
+      fresh.push(row);
+    }
+  }
+  if (fresh.length > MAX_CLOUD_STOPPED_REPLY_KEYS) {
+    fresh.sort((a, b) => {
+      const ta = typeof a.updatedAt === "number" ? a.updatedAt : 0;
+      const tb = typeof b.updatedAt === "number" ? b.updatedAt : 0;
+      return ta !== tb ? ta - tb : a.index - b.index;
+    });
+    const overflow = fresh.length - MAX_CLOUD_STOPPED_REPLY_KEYS;
+    for (let i = 0; i < overflow; i += 1) {
+      stale.add(fresh[i].key);
+    }
+  }
+  return [...stale];
 }
 
 // worker/amsg/src/index.ts
 import { DurableObject } from "cloudflare:workers";
 
-// node_modules/.pnpm/@rei-standard+amsg-server@3_e9d3913ffaf26ee4ddf80944d8866838/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@3_04a7d0876d4bfad11669a8b82156c2ad/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
 var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
   "user_id",
   "uuid",
@@ -2346,7 +2693,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@3_e9d3913ffaf26ee4ddf80944d8866838/node_modules/@rei-standard/amsg-server/dist/chunk-6TCZEACV.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@3_04a7d0876d4bfad11669a8b82156c2ad/node_modules/@rei-standard/amsg-server/dist/chunk-EIM3PKFY.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -2469,14 +2816,33 @@ function nextFutureOccurrence(occurrenceMs, recurrenceType, nowMs, tzId) {
 }
 var base64ToBytes2 = base64UrlToBytes;
 var TAG_LENGTH_BYTES = 16;
+var AES_KEY_CACHE_MAX = 128;
+var aesKeyCache = /* @__PURE__ */ new Map();
 function importAesKey(hexKey, usage) {
-  return globalThis.crypto.subtle.importKey(
-    "raw",
-    hexToBytes(hexKey),
-    { name: "AES-GCM" },
-    false,
-    [usage]
-  );
+  const cacheKey = `${usage}:${hexKey}`;
+  const cached = aesKeyCache.get(cacheKey);
+  if (cached) return cached;
+  let promise;
+  try {
+    promise = globalThis.crypto.subtle.importKey(
+      "raw",
+      hexToBytes(hexKey),
+      { name: "AES-GCM" },
+      false,
+      [usage]
+    ).catch((err6) => {
+      aesKeyCache.delete(cacheKey);
+      throw err6;
+    });
+  } catch (err6) {
+    return Promise.reject(err6);
+  }
+  if (aesKeyCache.size >= AES_KEY_CACHE_MAX) {
+    const oldest = aesKeyCache.keys().next().value;
+    if (oldest !== void 0) aesKeyCache.delete(oldest);
+  }
+  aesKeyCache.set(cacheKey, promise);
+  return promise;
 }
 async function aesGcmSeal(hexKey, iv, plaintextBytes) {
   const key = await importAesKey(hexKey, "encrypt");
@@ -7669,12 +8035,37 @@ var D1Adapter = class {
     const row = await this._db.prepare("SELECT encrypted_value FROM cloud_resource_metadata WHERE user_id=? AND resource_key=?").bind(userId, resourceKey).first();
     return row?.encrypted_value ?? null;
   }
+  async getOutboxPayload(userId, messageId) {
+    const row = await this._db.prepare(
+      "SELECT payload FROM message_outbox WHERE user_id = ? AND message_id = ? LIMIT 1"
+    ).bind(userId, messageId).first();
+    return row?.payload ?? null;
+  }
   async listCloudResourceRows(userId) {
-    const tables = { task: "scheduled_messages", state: "client_state", credential: "llm_credentials", outbox: "message_outbox", subscription: "push_subscriptions", metadata: "cloud_resource_metadata" };
+    const queries = {
+      task: "SELECT * FROM scheduled_messages WHERE user_id = ?",
+      state: `SELECT user_id, namespace, key,
+        CASE WHEN LENGTH(value) <= 1024 THEN value ELSE NULL END AS value,
+        LENGTH(CAST(value AS BLOB)) AS byte_size,
+        substr(value, 1, 128) AS value_prefix,
+        CASE WHEN LENGTH(value) > 128 THEN substr(value, -64) ELSE '' END AS value_suffix,
+        updated_at
+        FROM client_state WHERE user_id = ?`,
+      credential: "SELECT * FROM llm_credentials WHERE user_id = ?",
+      outbox: `SELECT id, user_id, message_id, task_uuid, session_id, message_index, total_messages,
+        CASE WHEN LENGTH(payload) <= 1024 THEN payload ELSE NULL END AS payload,
+        LENGTH(CAST(payload AS BLOB)) AS byte_size,
+        substr(payload, 1, 128) AS payload_prefix,
+        CASE WHEN LENGTH(payload) > 128 THEN substr(payload, -64) ELSE '' END AS payload_suffix,
+        created_at, delivered_at, acked_at
+        FROM message_outbox WHERE user_id = ?`,
+      subscription: "SELECT * FROM push_subscriptions WHERE user_id = ?",
+      metadata: "SELECT * FROM cloud_resource_metadata WHERE user_id = ?"
+    };
     const result = { gaps: [] };
-    await Promise.all(Object.entries(tables).map(async ([type, table]) => {
+    await Promise.all(Object.entries(queries).map(async ([type, sql]) => {
       try {
-        const response = await this._db.prepare(`SELECT * FROM ${table} WHERE user_id = ?`).bind(userId).all();
+        const response = await this._db.prepare(sql).bind(userId).all();
         result[type] = response.results || [];
       } catch {
         result[type] = [];
@@ -7739,7 +8130,10 @@ var D1Adapter = class {
     if (idempotencyKey) {
       return this._cloudRecord(await this._db.prepare(`SELECT * FROM cloud_data_records WHERE user_id=? AND kind=? AND idempotency_key=?`).bind(userId, kind, idempotencyKey).first());
     }
-    return this.getCloudDataRecord(userId, kind, id);
+    if (createOnly) {
+      return this.getCloudDataRecord(userId, kind, id);
+    }
+    return { id, userId, kind, data, updatedAt: now };
   }
   async getCloudDataRecord(userId, kind, id) {
     return this._cloudRecord(await this._db.prepare("SELECT * FROM cloud_data_records WHERE user_id=? AND kind=? AND id=?").bind(userId, kind, id).first());
@@ -7948,6 +8342,29 @@ var D1Adapter = class {
     const row = await this._db.prepare(`SELECT ${condition.sql} AS valid`).bind(...condition.args).first();
     return !!row?.valid;
   }
+  _rowSnapshotMatch(spec, row) {
+    const clauses = [];
+    const args = [];
+    for (const column of spec.columns) {
+      if (!Object.hasOwn(row, column)) continue;
+      if ((column === "value" || column === "payload") && row[column] === null && typeof row.byte_size === "number") {
+        clauses.push(
+          `LENGTH(CAST(${column} AS BLOB)) IS ?`,
+          `substr(${column}, 1, 128) IS ?`,
+          `(CASE WHEN LENGTH(${column}) > 128 THEN substr(${column}, -64) ELSE '' END) IS ?`
+        );
+        args.push(
+          row.byte_size,
+          row[`${column}_prefix`] ?? null,
+          row[`${column}_suffix`] ?? ""
+        );
+      } else {
+        clauses.push(`${column} IS ?`);
+        args.push(row[column]);
+      }
+    }
+    return { predicate: clauses.join(" AND "), values: args };
+  }
   /** Delete only the exact physical snapshot; no untrusted SQL identifiers. */
   async deleteCloudResourceRows(userId, locators, { operationId, leaseToken } = {}) {
     const specs = {
@@ -7995,9 +8412,7 @@ var D1Adapter = class {
         ).bind(userId, namespace, key, "amsg-chunks" + namespace, key + "", key + " ", identities));
       }
       for (const row of locator.rows) {
-        const columns = spec.columns.filter((column) => Object.hasOwn(row, column));
-        const predicate = columns.map((column) => `${column} IS ?`).join(" AND ");
-        const values = columns.map((column) => row[column]);
+        const { predicate, values } = this._rowSnapshotMatch(spec, row);
         const identity = spec.keys.map((column) => `${column} IS ?`).join(" AND ");
         statements.push(this._db.prepare(
           `INSERT INTO cloud_guard_assertions (allowed)
@@ -8006,8 +8421,8 @@ var D1Adapter = class {
         ).bind(...spec.keys.map((column) => row[column]), ...values));
       }
       for (const row of locator.rows) {
-        const columns = spec.columns.filter((column) => Object.hasOwn(row, column));
-        statements.push(this._db.prepare(`DELETE FROM ${spec.table} WHERE ${columns.map((column) => `${column} IS ?`).join(" AND ")}`).bind(...columns.map((column) => row[column])));
+        const { predicate, values } = this._rowSnapshotMatch(spec, row);
+        statements.push(this._db.prepare(`DELETE FROM ${spec.table} WHERE ${predicate}`).bind(...values));
       }
       if (locator.metadataKey) statements.push(this._db.prepare("DELETE FROM cloud_resource_metadata WHERE user_id=? AND resource_key=?").bind(userId, locator.metadataKey));
       try {
@@ -9364,7 +9779,7 @@ function createClientStateNamespacesHandler(ctx) {
   }
   return { GET };
 }
-var SERVER_VERSION = true ? "3.1.0-next.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.1.0-next.1" : "0.0.0-dev";
 var SERVER_FEATURES = Object.freeze([
   "client-state",
   "client-state-chunking",
@@ -9528,6 +9943,39 @@ function objectOrText(value) {
     return value;
   }
 }
+function utf8ByteLength(text2) {
+  if (typeof text2 !== "string" || text2.length === 0) return 0;
+  return /[^\x00-\x7f]/.test(text2) ? encoder.encode(text2).length : text2.length;
+}
+function rowByteSize(row) {
+  if (typeof row.byte_size === "number") return row.byte_size;
+  return utf8ByteLength(
+    String(
+      row.value ?? row.encrypted_payload ?? row.encrypted_value ?? row.payload ?? row.subscription ?? ""
+    )
+  );
+}
+var STORAGE_PREFIX_RE = /^[0-9a-f]{32}:[0-9a-f]{24,32}:[0-9a-f]*$/i;
+var HEX_RE = /^[0-9a-f]*$/i;
+function isValidStorageCiphertext(fullText, prefix, suffix, byteSize) {
+  if (typeof fullText === "string") {
+    if (!STORAGE_PREFIX_RE.test(fullText)) return false;
+    const secondColon = fullText.indexOf(":", 33);
+    return secondColon > 32 && (fullText.length - secondColon - 1) % 2 === 0;
+  }
+  if (typeof prefix === "string" && typeof byteSize === "number") {
+    if (!STORAGE_PREFIX_RE.test(prefix)) return false;
+    if (typeof suffix === "string" && !HEX_RE.test(suffix)) return false;
+    const secondColon = prefix.indexOf(":", 33);
+    return secondColon > 32 && (byteSize - secondColon - 1) % 2 === 0;
+  }
+  return false;
+}
+function hasCompleteStoredMetadata(stored) {
+  return Boolean(
+    stored && safeOwner(stored.owner) !== null && typeof stored.kind === "string" && stored.kind.length > 0
+  );
+}
 async function buildCloudDataInventory({
   db,
   userId,
@@ -9540,6 +9988,20 @@ async function buildCloudDataInventory({
   const metadata = new Map(
     (raw.metadata || []).map((row) => [row.resource_key, row.encrypted_value])
   );
+  const readStoredMetadata = async (metadataKey) => {
+    const encryptedMetadata = metadata.get(metadataKey) || null;
+    if (!encryptedMetadata) {
+      return { encryptedMetadata: null, stored: null, unreadable: false };
+    }
+    try {
+      const stored = JSON.parse(
+        await decryptFromStorage(encryptedMetadata, userKey)
+      );
+      return { encryptedMetadata, stored, unreadable: false };
+    } catch {
+      return { encryptedMetadata, stored: null, unreadable: true };
+    }
+  };
   const taskPayloads = /* @__PURE__ */ new Map();
   const taskByUuid = /* @__PURE__ */ new Map();
   for (const row of raw.task || []) {
@@ -9564,23 +10026,19 @@ async function buildCloudDataInventory({
     status = null,
     namespace,
     key,
-    credId
+    credId,
+    metadataInfo
   }) => {
     const metadataKey = JSON.stringify([type, ...identity]);
     const id = await cloudDataHash(JSON.stringify([userId, metadataKey]));
-    let stored = null;
-    const encryptedMetadata = metadata.get(metadataKey);
-    if (encryptedMetadata) {
-      try {
-        stored = JSON.parse(
-          await decryptFromStorage(encryptedMetadata, userKey)
-        );
-      } catch {
-        unreadable = true;
-      }
-    }
+    const {
+      encryptedMetadata,
+      stored,
+      unreadable: metadataUnreadable
+    } = metadataInfo ?? await readStoredMetadata(metadataKey);
+    if (metadataUnreadable) unreadable = true;
     let resolved = null;
-    if (resolveOwner) {
+    if (resolveOwner && !hasCompleteStoredMetadata(stored)) {
       try {
         resolved = await resolveOwner({
           type,
@@ -9603,14 +10061,7 @@ async function buildCloudDataInventory({
     const owner = safeOwner(stored?.owner) || safeOwner(payload?.__cloudOwnerGuard?.owner) || safeOwner(payload?.metadata?.cloudOwner) || safeOwner(payload?.metadata?.owner) || safeOwner(payload?.owner) || safeOwner(task?.__cloudOwnerGuard?.owner) || safeOwner(task?.metadata?.cloudOwner) || safeOwner(task?.metadata?.owner) || safeOwner(task?.owner) || safeOwner(resolved?.owner);
     const kind = stored?.kind ?? payload?.metadata?.kind ?? payload?.kind ?? resolved?.kind ?? null;
     const times = rows.map((row) => timestamp(row.updated_at ?? row.created_at)).filter((time) => time !== null);
-    const byteSize = rows.reduce(
-      (sum, row) => sum + encoder.encode(
-        String(
-          row.value ?? row.encrypted_payload ?? row.encrypted_value ?? row.payload ?? row.subscription ?? ""
-        )
-      ).length,
-      0
-    );
+    const byteSize = rows.reduce((sum, row) => sum + rowByteSize(row), 0);
     const label = type === "state" ? `${namespace}/${key}` : type === "credential" ? credId : type === "task" ? rows[0].uuid || `task row ${rows[0].id}` : type === "outbox" ? rows[0].message_id : "Web Push subscription";
     entries.push({
       resource: {
@@ -9665,22 +10116,75 @@ async function buildCloudDataInventory({
     const slices = chunks.get(group) || [];
     chunks.delete(group);
     const rows = [row, ...slices.sort((a, b) => a.key.localeCompare(b.key))];
-    let value, unreadable = false;
+    const metadataKey = JSON.stringify(["state", row.namespace, row.key]);
+    const metadataInfo = await readStoredMetadata(metadataKey);
+    const skipFullDecrypt = !metadataInfo.unreadable && hasCompleteStoredMetadata(metadataInfo.stored);
+    let value, unreadable = metadataInfo.unreadable;
     try {
-      const count = parseChunkedRootCount(row.value);
-      if (count === null) value = await decryptFromStorage(row.value, userKey);
-      else {
+      const rootMarker = row.value ?? row.value_prefix ?? "";
+      const count = parseChunkedRootCount(rootMarker);
+      if (count === null) {
+        if (typeof row.value === "string" && (!skipFullDecrypt || row.value.length <= 1024)) {
+          value = await decryptFromStorage(row.value, userKey);
+        } else if (skipFullDecrypt) {
+          if (!isValidStorageCiphertext(
+            row.value,
+            row.value_prefix,
+            row.value_suffix,
+            row.byte_size
+          )) {
+            throw new Error("Invalid state ciphertext");
+          }
+        } else {
+          const fetched = typeof db.getClientState === "function" ? await db.getClientState(userId, row.namespace, { key: row.key }) : [];
+          const rawValue = fetched?.[0]?.value;
+          if (typeof rawValue !== "string") {
+            throw new Error("Missing state value");
+          }
+          value = await decryptFromStorage(rawValue, userKey);
+        }
+      } else {
         if (count > slices.length) throw new Error("Missing state chunks");
-        const parts = [];
+        const sliceByKey = new Map(
+          slices.map((candidate) => [candidate.key, candidate])
+        );
+        const orderedSlices = [];
         for (let i = 0; i < count; i++) {
-          const slice = slices.find(
-            (candidate) => candidate.key === chunkKeyFor(row.key, i)
-          );
+          const slice = sliceByKey.get(chunkKeyFor(row.key, i));
           if (!slice || slice.updated_at !== row.updated_at)
             throw new Error("Mismatched state chunks");
-          parts.push(await decryptFromStorage(slice.value, userKey));
+          if (!isValidStorageCiphertext(
+            slice.value,
+            slice.value_prefix,
+            slice.value_suffix,
+            slice.byte_size
+          )) {
+            throw new Error("Corrupt state chunk");
+          }
+          orderedSlices.push(slice);
         }
-        value = parts.join("");
+        if (!skipFullDecrypt) {
+          let fetchedByKey = null;
+          if (orderedSlices.some((slice) => typeof slice.value !== "string")) {
+            const fetchedSlices = typeof db.getClientState === "function" ? await db.getClientState(
+              userId,
+              CHUNK_NAMESPACE_PREFIX + row.namespace,
+              { keyPrefix: `${row.key}` }
+            ) : [];
+            fetchedByKey = new Map(
+              fetchedSlices.map((candidate) => [candidate.key, candidate.value])
+            );
+          }
+          const parts = [];
+          for (const slice of orderedSlices) {
+            const rawSliceValue = typeof slice.value === "string" ? slice.value : fetchedByKey?.get(slice.key);
+            if (typeof rawSliceValue !== "string") {
+              throw new Error("Missing state chunk value");
+            }
+            parts.push(await decryptFromStorage(rawSliceValue, userKey));
+          }
+          value = parts.join("");
+        }
       }
     } catch {
       unreadable = true;
@@ -9693,7 +10197,8 @@ async function buildCloudDataInventory({
       rows,
       value,
       unreadable,
-      status: null
+      status: null,
+      metadataInfo
     });
   }
   for (const [group, rows] of chunks) {
@@ -9717,9 +10222,29 @@ async function buildCloudDataInventory({
     });
   }
   for (const row of raw.outbox || []) {
-    let payload, unreadable = false;
+    const metadataKey = JSON.stringify(["outbox", row.message_id]);
+    const metadataInfo = await readStoredMetadata(metadataKey);
+    const skipFullDecrypt = !metadataInfo.unreadable && hasCompleteStoredMetadata(metadataInfo.stored);
+    let payload, unreadable = metadataInfo.unreadable;
     try {
-      payload = objectOrText(await decryptFromStorage(row.payload, userKey));
+      if (typeof row.payload === "string" && (!skipFullDecrypt || row.payload.length <= 1024)) {
+        payload = objectOrText(await decryptFromStorage(row.payload, userKey));
+      } else if (skipFullDecrypt) {
+        if (!isValidStorageCiphertext(
+          row.payload,
+          row.payload_prefix,
+          row.payload_suffix,
+          row.byte_size
+        )) {
+          throw new Error("Invalid outbox ciphertext");
+        }
+      } else {
+        const rawPayload = typeof db.getOutboxPayload === "function" ? await db.getOutboxPayload(userId, row.message_id) : null;
+        if (typeof rawPayload !== "string") {
+          throw new Error("Missing outbox payload");
+        }
+        payload = objectOrText(await decryptFromStorage(rawPayload, userKey));
+      }
     } catch {
       unreadable = true;
     }
@@ -9730,7 +10255,8 @@ async function buildCloudDataInventory({
       payload,
       task: taskByUuid.get(row.task_uuid),
       unreadable,
-      status: row.acked_at != null ? "acked" : row.delivered_at != null ? "delivered" : "pending"
+      status: row.acked_at != null ? "acked" : row.delivered_at != null ? "delivered" : "pending",
+      metadataInfo
     });
   }
   for (const row of raw.subscription || []) {
@@ -9851,10 +10377,12 @@ async function makeCleanupPlan(ctx, db, userId, key, input) {
       "\u4E91\u7AEF\u6E05\u5355\u4E0D\u5B8C\u6574\uFF0C\u6682\u4E0D\u80FD\u751F\u6210\u6E05\u7406\u8BA1\u5212",
       409
     );
+  const resourceIdSet = resourceIds ? new Set(resourceIds) : null;
+  const typeSet = types ? new Set(types) : null;
   const entries = inventory.entries.filter(
-    (e) => (!owner || ownerEquals(e.resource.owner, owner)) && (!resourceIds || resourceIds.includes(e.resource.id)) && (!types || types.includes(e.resource.type))
+    (e) => (!owner || ownerEquals(e.resource.owner, owner)) && (!resourceIdSet || resourceIdSet.has(e.resource.id)) && (!typeSet || typeSet.has(e.resource.type))
   );
-  if (resourceIds && new Set(resourceIds).size !== entries.length)
+  if (resourceIdSet && resourceIdSet.size !== entries.length)
     throw cloudError(
       "CLOUD_RESOURCE_NOT_FOUND",
       "\u90E8\u5206\u9009\u4E2D\u8D44\u6E90\u4E0D\u5B58\u5728\u6216\u4E0D\u5C5E\u4E8E\u5F53\u524D\u8303\u56F4",
@@ -10012,6 +10540,7 @@ async function advanceCleanup(ctx, db, userId, key, operation) {
     if (operation.status === "completed" || operation.status === "failed")
       return operation;
     operation.status = "running";
+    let retirementInventory = null;
     if (operation.mode === "retire-owner") {
       if (operation.fencedGeneration == null) {
         const state = await db.setCloudOwnerActive(
@@ -10039,6 +10568,7 @@ async function advanceCleanup(ctx, db, userId, key, operation) {
           "\u65E0\u6CD5\u786E\u8BA4\u5F85\u6E05\u7406\u8D44\u6E90",
           503
         );
+      retirementInventory = inventory;
       const known = new Set(operation.knownResourceIds || []);
       operation.knownResourceVersions ||= {};
       operation.entries = inventory.entries.filter((entry) => {
@@ -10065,7 +10595,7 @@ async function advanceCleanup(ctx, db, userId, key, operation) {
         ).length;
       await save(db, userId, key, "operation", operation, { leaseToken });
     }
-    const beforeBatch = await cloudInventory(ctx, db, userId, key);
+    const beforeBatch = retirementInventory ?? await cloudInventory(ctx, db, userId, key);
     if (!beforeBatch.complete)
       throw cloudError("CLOUD_INVENTORY_INCOMPLETE", "\u65E0\u6CD5\u786E\u8BA4\u5F85\u6E05\u7406\u8D44\u6E90", 503);
     const currentById = new Map(
@@ -10103,7 +10633,6 @@ async function advanceCleanup(ctx, db, userId, key, operation) {
       delete entry.locator;
       operation.cursor++;
       operation.updatedAt = Date.now();
-      await save(db, userId, key, "operation", operation, { leaseToken });
     }
     await renewLease();
     const current = await cloudInventory(ctx, db, userId, key);
@@ -10114,8 +10643,9 @@ async function advanceCleanup(ctx, db, userId, key, operation) {
         503
       );
     const selected = new Set(operation.entries.map((e) => e.resource.id));
+    const knownIds = new Set(operation.knownResourceIds || []);
     const remaining = current.entries.filter(
-      (e) => operation.mode === "retire-owner" ? ownerEquals(e.resource.owner, operation.owner) || (operation.knownResourceIds || []).includes(e.resource.id) : selected.has(e.resource.id)
+      (e) => operation.mode === "retire-owner" ? ownerEquals(e.resource.owner, operation.owner) || knownIds.has(e.resource.id) : selected.has(e.resource.id)
     );
     for (const count of operation.counts)
       count.remaining = remaining.filter(
@@ -11182,7 +11712,7 @@ function stripReasoningTags2(content) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-10-19.2";
+var AMSG_BUNDLE_VERSION = "2026-10-29";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -12842,6 +13372,8 @@ var handleInstantChat = async (args) => {
       namespace: INSTANT_INPUT_NAMESPACE,
       key: inputKey,
       value: JSON.stringify({ v: 1, charId, packedFirePack: inputEntry.value }),
+      owner: { type: "character", id: charId },
+      kind: "instant-input",
       updatedAt: Date.now()
     });
     [body.statePayload, body.taskPayload] = await Promise.all([
@@ -14134,6 +14666,24 @@ var postCore = async (target, session, body, timeoutMs, expectResponse = true) =
     target.signal?.removeEventListener("abort", abort);
   }
 };
+var formatMcpRpcError = (err6) => {
+  const code = err6?.code !== void 0 ? `[${err6.code}]: ` : "";
+  const message = err6?.message || "\u672A\u77E5\u9519\u8BEF";
+  let dataText = "";
+  if (err6?.data !== void 0 && err6?.data !== null && err6?.data !== "") {
+    if (typeof err6.data === "string") {
+      dataText = err6.data.trim();
+    } else {
+      try {
+        dataText = JSON.stringify(err6.data);
+      } catch {
+        dataText = String(err6.data);
+      }
+    }
+  }
+  const suffix = dataText && !message.includes(dataText) ? `\uFF08${dataText}\uFF09` : "";
+  return `${code}${message}${suffix}`;
+};
 var initializeCore = async (target, session, timeoutMs) => {
   const initReq = buildRpcRequest(session, "initialize", {
     protocolVersion: MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION,
@@ -14141,7 +14691,7 @@ var initializeCore = async (target, session, timeoutMs) => {
     clientInfo: { name: "sullyos", title: "SullyOS", version: "1.0.0" }
   });
   const { response } = await postCore(target, session, initReq, timeoutMs);
-  if (response?.error) throw new Error(`Initialize \u5931\u8D25: ${response.error.message}`);
+  if (response?.error) throw new Error(`Initialize \u5931\u8D25 ${formatMcpRpcError(response.error)}`);
   const negotiated = String(
     response?.result?.protocolVersion || MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION
   );
@@ -14287,7 +14837,7 @@ var callMcpToolCore = async (target, session, toolName, args = {}, opts = {}) =>
       }
     }
     if (!response) return finish({ success: false, error: "\u7A7A\u54CD\u5E94" });
-    if (response.error) return finish({ success: false, error: `MCP \u9519\u8BEF [${response.error.code}]: ${response.error.message}` });
+    if (response.error) return finish({ success: false, error: `MCP \u9519\u8BEF ${formatMcpRpcError(response.error)}` });
     const result = response.result;
     if (result?.resultType === "input_required") {
       return finish({
@@ -16219,8 +16769,8 @@ function deduplicateVoiceText(text2) {
   const normalize2 = (s) => s.replace(/[\s\p{P}\p{S}]/gu, "").toLowerCase();
   const blocks = [];
   const spoken = [];
-  const protectedText = text2.replace(/<[语語]音[^>]*>([\s\S]*?)<\/[语語]音>(?:\s*<字幕>([\s\S]*?)<\/字幕>)?/g, (block, voice, subtitle) => {
-    spoken.push(normalize2(voice), ...subtitle ? [normalize2(subtitle)] : []);
+  const protectedText = text2.replace(/(?:<字幕>([\s\S]*?)<\/字幕>\s*)?<[语語]音[^>]*>([\s\S]*?)<\/[语語]音>(?:\s*<字幕>([\s\S]*?)<\/字幕>)?/g, (block, leadingSubtitle, voice, subtitle) => {
+    spoken.push(normalize2(voice), ...[leadingSubtitle, subtitle].filter(Boolean).map(normalize2));
     return "\nVOICE" + (blocks.push(block) - 1) + "\n";
   });
   if (!blocks.length) return text2;
@@ -17729,6 +18279,7 @@ var isFcmConfigured = (env) => Boolean(
 );
 
 // worker/amsg/src/index.ts
+installAnthropicFetch(false);
 var getFireStash = (scratch) => scratch?.fire;
 var REPLY_IN_FLIGHT_DEFER_MS = 45e3;
 var laterOf = (a, b) => a == null ? b : b == null ? a : Math.max(a, b);
@@ -18055,11 +18606,30 @@ var amsgFireSettled = async (info) => {
     stash.selfLogDirty = false;
     stateWrites.push({ key: AMSG_SELF_LOG_KEY, value: JSON.stringify(stash.selfLog) });
   }
-  if (stateWrites.length === 0) return;
-  try {
-    await info.writeState(amsgStateNamespace(stash.charId), stateWrites);
-  } catch (error) {
-    console.warn("[amsg:self-log] \u5199\u5165\u5931\u8D25\uFF08\u8FD9\u6B21\u7167\u5E38\u53D1\u9001\uFF0C\u4F46\u4E0B\u4E00\u6B21\u5230\u70B9\u89D2\u8272\u4E0D\u4F1A\u77E5\u9053\u8BF4\u8FC7\u8FD9\u53E5\uFF0C\u6BCF\u65E5\u8BA1\u6570\u4E5F\u5C11\u8BB0\u4E00\u6B21\uFF09", error);
+  if (stash.staleStoppedKeys && stash.staleStoppedKeys.length > 0) {
+    const staleKeys = stash.staleStoppedKeys;
+    stash.staleStoppedKeys = [];
+    for (const key of staleKeys) {
+      if (stateWrites.length >= 190) break;
+      stateWrites.push({ key, value: null });
+    }
+  }
+  if (stateWrites.length > 0) {
+    try {
+      await info.writeState(amsgStateNamespace(stash.charId), stateWrites);
+    } catch (error) {
+      console.warn("[amsg:self-log] \u5199\u5165\u5931\u8D25\uFF08\u8FD9\u6B21\u7167\u5E38\u53D1\u9001\uFF0C\u4F46\u4E0B\u4E00\u6B21\u5230\u70B9\u89D2\u8272\u4E0D\u4F1A\u77E5\u9053\u8BF4\u8FC7\u8FD9\u53E5\uFF0C\u6BCF\u65E5\u8BA1\u6570\u4E5F\u5C11\u8BB0\u4E00\u6B21\uFF09", error);
+    }
+  }
+  const instantSettled = stash.instant && (delivered || info.status === "skipped" || cancelled || info.status === "failed" && info.willRetry === false);
+  if (instantSettled && stash.instantInputKey) {
+    const inputKey = stash.instantInputKey;
+    stash.instantInputKey = null;
+    try {
+      await info.writeState(INSTANT_INPUT_NAMESPACE, [{ key: inputKey, value: null }]);
+    } catch (error) {
+      console.warn("[amsg:instant-chat] \u6E05\u7406\u5DF2\u6D88\u8D39\u7684 instant-input \u5931\u8D25\uFF08\u7559\u5F85 TTL \u8FC7\u671F\uFF09", error);
+    }
   }
 };
 var amsgStaleSkip = async (task, info) => {
@@ -18430,8 +19000,15 @@ var amsgHooks = {
       throw fireStateError("task metadata \u7F3A charId", { taskId: ctx.task.id });
     }
     const instant = isInstantChatTask(ctx.task.metadata ?? {});
+    let instantInputKey = null;
     const fail3 = (reason, extra) => {
       ctx.throwIfCancelled?.();
+      if (instant && instantInputKey && typeof ctx.writeState === "function") {
+        const keyToDelete = instantInputKey;
+        instantInputKey = null;
+        void ctx.writeState(INSTANT_INPUT_NAMESPACE, [{ key: keyToDelete, value: null }]).catch(() => {
+        });
+      }
       if (instant && typeof ctx.task.uuid === "string" && ctx.task.uuid) {
         if (typeof ctx.writeState === "function") {
           void writeChatFail(ctx.writeState, charId, {
@@ -18518,6 +19095,7 @@ var amsgHooks = {
         const inputRows = await ctx.readState(ref.namespace, { key: ref.key });
         const envelope = parseInstantInputEnvelope(inputRows.find((row) => row.key === ref.key)?.value ?? "");
         if (!envelope || envelope.charId !== charId) throw fail3("\u5373\u65F6\u8F93\u5165\u7F3A\u5931\u6216\u89D2\u8272\u4E0D\u5339\u914D");
+        if (instant && ref.namespace === INSTANT_INPUT_NAMESPACE) instantInputKey = ref.key;
         boundJson = await unpackOrFail("instant-input", envelope.packedFirePack);
       }
     }
@@ -18584,9 +19162,22 @@ var amsgHooks = {
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
     const maxToolIterations = resolveToolIterationBudget(!!mcpResolve);
     if (instant && ctx.task.uuid && charRows.some((row) => row.key === stoppedReplyKey(ctx.task.uuid))) {
+      if (instantInputKey && typeof ctx.writeState === "function") {
+        const keyToDelete = instantInputKey;
+        instantInputKey = null;
+        await ctx.writeState(INSTANT_INPUT_NAMESPACE, [{ key: keyToDelete, value: null }]).catch(() => {
+        });
+      }
       return { skip: true };
     }
-    const storedSelfLog = reconcileStoppedReplies(parseSelfLog(charRows.find((r) => r.key === AMSG_SELF_LOG_KEY)?.value ?? ""), charRows);
+    const rawSelfLog = parseSelfLog(charRows.find((r) => r.key === AMSG_SELF_LOG_KEY)?.value ?? "");
+    const storedSelfLog = reconcileStoppedReplies(rawSelfLog, charRows);
+    const selfLogReconciled = storedSelfLog !== rawSelfLog;
+    const staleStoppedKeys = pickStaleStoppedReplyKeys(
+      charRows,
+      ctx.now.getTime(),
+      typeof ctx.task.uuid === "string" && ctx.task.uuid ? stoppedReplyKey(ctx.task.uuid) : null
+    );
     const selfLog = reconcileSelfLogWithPack(storedSelfLog, pack, lastUserMessageAt);
     const taskBrief = findTaskBrief([...pack.pendingTasks, ...selfLog.tasks], ctx.task.uuid);
     const clientTaskId = typeof taskMeta.amsgClientTaskId === "string" ? taskMeta.amsgClientTaskId : "";
@@ -18696,7 +19287,8 @@ var amsgHooks = {
       xhsCookie,
       occurrenceMs,
       selfLog,
-      selfLogDirty: false,
+      selfLogDirty: selfLogReconciled && staleStoppedKeys.length > 0,
+      staleStoppedKeys,
       mcpResolve,
       maxToolIterations,
       fireToolNames: /* @__PURE__ */ new Set(),
@@ -18730,6 +19322,7 @@ var amsgHooks = {
       // （resolveFireSceneSong 与 renderFireSceneBlock 共用判定），冻的必然是正文里那首。
       sceneSong: resolveFireSceneSong(pack.scene, ctx.now.getTime(), tz),
       instant,
+      instantInputKey,
       // 下面即时对话那一支起跑（要等请求消息拼完才知道给评估喂什么）。
       emotionEvalPromise: null,
       emotionLatePending: false
@@ -19505,6 +20098,7 @@ var src_default = {
         data: {
           ...inspectWorkerEnv(env),
           instantChat: true,
+          anthropicMessages: true,
           instantTick: !!env.INSTANT_TICK,
           // 这份代码认不认识「后台任务」（metadata.amsgKind → handler，见 fireKinds.ts）。
           // 老 bundle 没有这个字段，前端据此不去建那种任务——老 worker 会把它当聊天任务
