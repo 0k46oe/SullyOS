@@ -7,11 +7,13 @@ import {isWeiboOriginalComment, type WeiboOriginalComment} from './friendFeedSou
 import {isFriendFeedSource, type FriendFeedSource} from './friendFeedSource';
 import {friendAccounts, resolveFriendFeedSettings} from './friendFeedSettings';
 const KEY='sully:weibo-session:v2', LEGACY_KEY='sully:weibo-session:v1';
+const CONNECTION_LIFETIME=24*60*60*1000;
 export const WEIBO_CONNECTION_CHANGED='sully:weibo-connection-changed';
 export interface WeiboSession {
     version:2;origin:string;kind:'qr'|'account';expires:number;uid?:string;qrid?:string;
     cookies:{name:string;value:string;domain:string;path:string;hostOnly:boolean}[];
 }
+// expires is the browser's retention deadline; session.expires belongs to the proxy clock.
 export interface WeiboConnection {proxy:string; session:WeiboSession; uid:string; expires:number; id:string}
 export interface WeiboFollowAccount {uid:string;name:string;description:string}
 interface WeiboResponse {session:WeiboSession; phase?:string; image?:string; uid?:string; expires?:number;
@@ -20,7 +22,9 @@ interface WeiboResponse {session:WeiboSession; phase?:string; image?:string; uid
 let epoch=0;
 function validSession(s:WeiboSession):boolean {
     return !!s && s.version===2 && s.origin===window.location.origin && ['qr','account'].includes(s.kind)
-        && Number.isFinite(s.expires) && s.expires>Date.now() && s.expires<=Date.now()+24*60*60*1000
+        // The proxy validates its own deadline on every request. Comparing it with the
+        // device clock rejects successful QR logins even with a few seconds of skew.
+        && Number.isSafeInteger(s.expires) && s.expires>0
         && (s.kind==='account'?/^\d{4,25}$/.test(s.uid||''):typeof s.qrid==='string'&&/^[\w.-]{1,512}$/.test(s.qrid))
         && Array.isArray(s.cookies) && s.cookies.length<=40 && JSON.stringify(s.cookies).length<=14000
         && s.cookies.every(c=>c&&typeof c.name==='string'&&typeof c.value==='string'&&typeof c.domain==='string'&&typeof c.path==='string'&&typeof c.hostOnly==='boolean');
@@ -30,7 +34,9 @@ if(typeof window!=='undefined') {window.addEventListener(PROXY_WORKER_CHANGED_EV
     window.addEventListener('storage',e=>{if(e.key==='sully_proxy_worker_url_v1' || e.key===null) disconnectWeibo();});}
 export function readWeiboConnection():WeiboConnection|undefined {
     try {sessionStorage.removeItem(LEGACY_KEY);const c=JSON.parse(sessionStorage.getItem(KEY)||'null');
-        if(c && c.proxy===getProxyWorkerUrl() && validSession(c.session) && c.session.kind==='account' && c.uid===c.session.uid && c.expires===c.session.expires)return c;
+        const now=Date.now();
+        if(c && c.proxy===getProxyWorkerUrl() && validSession(c.session) && c.session.kind==='account' && c.uid===c.session.uid
+            && Number.isSafeInteger(c.expires) && c.expires>now && c.expires<=now+CONNECTION_LIFETIME)return c;
         if(c)disconnectWeibo();
     }catch{} return undefined;
 }
@@ -52,7 +58,10 @@ async function requestWeibo(proxy:string, payload:object, signal?:AbortSignal):P
         if(response.status===503)throw Error('微博连接服务暂不可用；若代理尚未启用微博，请联系代理维护者完成配置');
         if(response.status===404||response.status===405)throw Error('当前代理可能尚未支持微博连接，请联系代理维护者检查接口版本');
         throw Error(`微博读取失败（${response.status}），旧内容已保留`);}
-    const result=await response.json(); if(!validSession(result.session))throw Error('微博连接格式不兼容，请更新公共代理后重新扫码'); return result;
+    const result=await response.json();
+    if(result?.session?.version!==2)throw Error('微博连接格式不兼容，请更新当前代理后重新扫码');
+    if(!validSession(result.session))throw Error('微博返回的会话信息不完整或与当前页面不符，请重新扫码');
+    return result;
 }
 export async function startWeiboLogin(signal?:AbortSignal) {
     const proxy=getProxyWorkerUrl(), generation=epoch;
@@ -67,7 +76,7 @@ export async function pollWeiboLogin(ticket:{proxy:string;session:WeiboSession;g
     if(ticket.proxy!==getProxyWorkerUrl() || ticket.generation!==epoch)throw Error('连接设置已变化，请重新扫码');
     if(data.phase==='connected') {
         if(data.session.kind!=='account'||data.uid!==data.session.uid||data.expires!==data.session.expires)throw Error('微博会话格式不正确');
-        sessionStorage.setItem(KEY,JSON.stringify({proxy:ticket.proxy,session:data.session,uid:data.uid,expires:data.expires,id:createLocalId()}));
+        sessionStorage.setItem(KEY,JSON.stringify({proxy:ticket.proxy,session:data.session,uid:data.uid,expires:Date.now()+CONNECTION_LIFETIME,id:createLocalId()}));
         window.dispatchEvent(new Event(WEIBO_CONNECTION_CHANGED));
     }
     return {...ticket,...data};
@@ -78,7 +87,8 @@ export async function fetchWeibo(action:'profile'|'posts'|'following'|'following
     const data=await requestWeibo(connection.proxy,{action,session:connection.session,...options},signal);
     if(generation!==epoch || readWeiboConnection()?.id!==connection.id)throw Error('微博连接已切换，已丢弃旧响应');
     if(data.session.kind!=='account'||data.session.uid!==connection.uid)throw Error('微博账号不匹配，请重新扫码');
-    sessionStorage.setItem(KEY,JSON.stringify({...connection,session:data.session,expires:data.session.expires}));
+    // Reads may refresh cookies, but must never renew the browser's retention window.
+    sessionStorage.setItem(KEY,JSON.stringify({...connection,session:data.session}));
     return data;
 }
 export async function saveWeiboBinding(ownerId:string,value:string,enabled=true) {
