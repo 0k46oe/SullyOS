@@ -18,7 +18,7 @@ const post=(id:string,at=Date.now()-10000)=>({platform:'weibo',accountId:'123456
 beforeEach(async()=>{vi.restoreAllMocks();localStorage.clear();sessionStorage.clear();setProxyWorkerUrlOverride('https://proxy.test');
     await DB.deleteDB();await DB.saveCharacter(a);await DB.saveCharacter(b);await DB.saveUserProfile({name:'小雨'} as any);
     circle=await saveFriendCircle({name:'客厅',description:'',memberIds:[a.id,b.id],realContentEnabled:true});connection();});
-afterEach(()=>{vi.unstubAllGlobals();setProxyWorkerUrlOverride(null);});
+afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();setProxyWorkerUrlOverride(null);});
 it('keeps scanned credentials only in browser session storage, sends them in POST bodies and clears them on disconnect',async()=>{
     disconnectWeibo();const account=session(),qr={...account,kind:'qr',uid:undefined,qrid:'test-qr.with-dot',expires:Date.now()+240000};
     const fetcher=vi.fn().mockResolvedValueOnce(Response.json({phase:'waiting',image:'https://v2.qr.weibo.cn/test',session:qr}))
@@ -42,8 +42,48 @@ it('retires encrypted v1 sessions and rejects old proxies without leaking old ti
     const fetcher=vi.fn().mockResolvedValue(Response.json({phase:'waiting',image:'https://v2.qr.weibo.cn/test',token:'old-returned-ticket'}));vi.stubGlobal('fetch',fetcher);
     expect(readWeiboConnection()).toBeUndefined();expect(sessionStorage.getItem('sully:weibo-session:v1')).toBeNull();
     await expect(fetchWeibo('profile')).rejects.toThrow('先连接');expect(fetcher).not.toHaveBeenCalled();
-    await expect(startWeiboLogin()).rejects.toThrow('更新公共代理');
+    await expect(startWeiboLogin()).rejects.toThrow('更新当前代理');
     expect(fetcher.mock.calls[0][1].body).toBe(JSON.stringify({action:'start'}));
+});
+it.each([10000,-600000])('accepts QR login with proxy clock skew %i ms and expires locally without extending on reads',async skew=>{
+    disconnectWeibo();const now=Date.now();vi.spyOn(Date,'now').mockReturnValue(now);
+    const day=24*60*60*1000,account={...session(),expires:now+day+skew};
+    const qr={...account,kind:'qr',uid:undefined,qrid:'clock-skew-qr',expires:now+240000+skew};
+    const fetcher=vi.fn()
+        .mockResolvedValueOnce(Response.json({phase:'waiting',image:'https://v2.qr.weibo.cn/test',session:qr}))
+        .mockResolvedValueOnce(Response.json({phase:'connected',uid:account.uid,expires:account.expires,session:account}))
+        .mockResolvedValueOnce(Response.json({session:account,profile:{uid:account.uid,name:'我',description:''}}));
+    vi.stubGlobal('fetch',fetcher);
+    const pending=await startWeiboLogin();
+    await pollWeiboLogin(pending);
+    expect(readWeiboConnection()).toMatchObject({uid:account.uid,expires:now+day,session:{expires:account.expires}});
+    vi.mocked(Date.now).mockReturnValue(now+60000);
+    await fetchWeibo('profile');
+    expect(JSON.parse(fetcher.mock.calls[2][1].body).session.expires).toBe(account.expires);
+    expect(readWeiboConnection()?.expires).toBe(now+day);
+    vi.mocked(Date.now).mockReturnValue(now+day);
+    expect(readWeiboConnection()).toBeUndefined();
+    expect(sessionStorage.getItem('sully:weibo-session:v2')).toBeNull();
+    await expect(fetchWeibo('profile')).rejects.toThrow('先连接');
+    expect(fetcher).toHaveBeenCalledTimes(3);
+});
+it('rejects malformed v2 sessions without incorrectly asking for a proxy update',async()=>{
+    disconnectWeibo();
+    for(const change of [{origin:'https://another.test'},{uid:'invalid'},{expires:0},{cookies:[{name:'SUB',value:'private-browser-cookie'}]}]){
+        vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({session:{...session(),...change}})));
+        await expect(startWeiboLogin()).rejects.toThrow('会话信息不完整或与当前页面不符');
+        expect(readWeiboConnection()).toBeUndefined();
+    }
+});
+it('keeps existing v2 retention deadlines and rejects expired or unbounded local credentials',()=>{
+    const now=Date.now();vi.spyOn(Date,'now').mockReturnValue(now);connection();
+    expect(readWeiboConnection()?.expires).toBe(now+60000);
+    const stored=JSON.parse(sessionStorage.getItem('sully:weibo-session:v2')!);
+    for(const expires of [now,now-1,now+24*60*60*1000+1,null,'forever']){
+        sessionStorage.setItem('sully:weibo-session:v2',JSON.stringify({...stored,expires}));
+        expect(readWeiboConnection()).toBeUndefined();
+        expect(sessionStorage.getItem('sully:weibo-session:v2')).toBeNull();
+    }
 });
 it('does not accept a late QR confirmation after disconnect or a different account returned by a read',async()=>{
     disconnectWeibo();const account=session(),qr={...account,kind:'qr',uid:undefined,qrid:'test-qr',expires:Date.now()+240000};
