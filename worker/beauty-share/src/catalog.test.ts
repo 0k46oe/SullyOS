@@ -49,6 +49,16 @@ async function fixture(){
   return {db,env,files,pub,api,submit,approve,snapshot,fire,storage};
 }
 describe('公开装扮库：真实 SQL、审批和快照边界',()=>{
+  it.each(['date','story'])('%s 自定义阅读 CSS 经投稿审核与目录导出完整保留',async part=>{
+    const f=await fixture();
+    const appearance={preset:'night',customCss:'.meeting-reading { --meeting-paper: #112233; }'};
+    const response=await f.api('/submissions','author',{metadata,package:{...pack,parts:{[part]:{...appearance,messages:['PRIVATE']}}},catalogCover:cover});
+    expect(response.status).toBe(201);
+    await f.approve(response.value.revision);await f.fire();
+    const entry=f.snapshot().entries[0];expect(entry.categories).toEqual([part]);
+    expect(JSON.parse(f.pub.get(entry.file)!.value as string).parts).toEqual({[part]:appearance});
+    expect((await f.api('/shares/'+entry.code)).status).toBe(200);
+  });
   it('协同工作投稿通过审核后进入独立分类，分享码只带外观',async()=>{
     const f=await fixture();
     const collaboration={uiTheme:'midnight',customCss:'.collab-ui-root { --collab-accent: pink; }',avatarMode:'both',avatarStyle:'circle'};
