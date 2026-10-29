@@ -26,8 +26,8 @@ import './DecorationDraftEditor.css';
 import {DECORATION_WORKSHOPS,workshopCss,replaceWorkshopCss,projectWorkshopPreset,checkWorkshopCss,workshopPrompt,type DecorationWorkshop} from '../../utils/decorationWorkshop';
 type Shelf=DecorationWorkshop;
 const shelves=DECORATION_WORKSHOPS;
-interface Props {getUsage?:WardrobeUsageReader;outfits?:WardrobeEntry[];onOutfitsChange?:()=>Promise<void>;preset:DecorationPreset;origin:DecorationOrigin;originalKey?:string;theme:OSTheme;sources:WardrobeEntry[];onOpenWorkshop:()=>void;onClose:()=>void;onSaved:(preset:DecorationPreset)=>void;maker?:Shelf;characterName?:string;onApply?:(preset:DecorationPreset,origin:DecorationOrigin)=>void|Promise<void>}
-export default function DecorationDraftEditor({getUsage,outfits=[],onOutfitsChange,preset,origin,originalKey,theme,sources,onOpenWorkshop,onClose,onSaved,maker,characterName,onApply}:Props){
+interface Props {getUsage?:WardrobeUsageReader;outfits?:WardrobeEntry[];onOutfitsChange?:()=>Promise<void>;preset:DecorationPreset;origin:DecorationOrigin;originalKey?:string;theme:OSTheme;sources:WardrobeEntry[];onOpenWorkshop:()=>void;onClose:()=>void;onSaved:(preset:DecorationPreset)=>void;onShareSaved?:(id:string)=>Promise<void>;maker?:Shelf;characterName?:string;onApply?:(preset:DecorationPreset,origin:DecorationOrigin)=>void|Promise<void>}
+export default function DecorationDraftEditor({getUsage,outfits=[],onOutfitsChange,preset,origin,originalKey,theme,sources,onOpenWorkshop,onClose,onSaved,onShareSaved,maker,characterName,onApply}:Props){
  const [draft,setDraft]=useState(()=>structuredClone(preset));
  const [extraCss,setExtraCss]=useState('');
  const [origins,setOrigins]=useState<Record<string,DecorationOrigin>>(()=>Object.fromEntries(Object.keys(preset.parts).map(key=>[key,origin])));
@@ -68,16 +68,18 @@ export default function DecorationDraftEditor({getUsage,outfits=[],onOutfitsChan
  const preview=useMemo(()=>({...draft,parts:{...draft.parts,...(extraCss.trim()?{css:[draft.parts.css,extraCss].filter(Boolean).join('\n')}: {})}}),[draft,extraCss]);
  const settledPreview=usePreviewDraft(preview,!!maker);
  const renderedPreview=settledPreview;
- const save=async(apply=false)=>{setBusy(true);setError('');try{
+ const save=async(apply=false,share=false)=>{if(busy)return;setBusy(true);setError('');try{
    if(!canEditDecoration(combinedOrigin))throw Error('作者禁止二改');
+   if(share&&combinedOrigin.allowRedistribute===false)throw Error('作者禁止二次传播，这份作品不能投稿分享');
    if(!draft.name.trim())throw Error('请填写预设名称');
    const checkedCss=maker?checkWorkshopCss(maker,maker==='whitebox'?preview.parts.css||'':categoryCss):undefined;
    if(maker==='avatar'&&!categoryCss.trim())throw Error('请先选择头像框图片或填写头像框 CSS');
    const result=maker?projectWorkshopPreset({...preview,name:draft.name.trim()},maker):{...preview,name:draft.name.trim()};
    if(maker==='whitebox')result.parts.css=checkedCss;
    if(apply&&onApply){await onApply(result,combinedOrigin);return;}
-   await saveLibraryDecoration(result,remixOrigin(combinedOrigin),update?originalKey:undefined,maker?undefined:'outfit');
-   trackBeauty('save',maker||'outfit');onSaved(result);
+   const id=await saveLibraryDecoration(result,remixOrigin(combinedOrigin),update?originalKey:undefined,maker?undefined:'outfit');
+   trackBeauty('save',maker||'outfit');
+   if(share&&onShareSaved)await onShareSaved(id);else onSaved(result);
  }catch(e){setError(e instanceof Error?e.message:'保存失败');}finally{setBusy(false);}};
  const choose=async(entry:WardrobeEntry)=>{if(!shelf)return;setBusy(true);setError('');try{
    const nextOrigin=await readDecorationOrigin(await entry.attributionKey());
@@ -113,6 +115,7 @@ export default function DecorationDraftEditor({getUsage,outfits=[],onOutfitsChan
   <aside className="decoration-composer-controls" data-open={sideOpen}>{!maker&&<header className="decoration-side-header"><strong>我的选择</strong><button aria-label="关闭搭配侧栏" onClick={()=>setSideOpen(false)}>×</button></header>}{locked&&<p role="status">当前搭配包含禁止二改的作品，已锁定编辑；可以返回装扮库更换作品。</p>}
    {!maker&&<p className="decoration-current-character">当前角色：{characterName||'当前角色'} · 点选预设搭配</p>}
    {maker&&<label className="decoration-name">名称<input disabled={busy} value={draft.name} maxLength={60} onChange={e=>setDraft({...draft,name:e.target.value})}/></label>}
+   {(maker==='story'||maker==='date')&&onShareSaved&&<div><button className="decoration-save-outfit" disabled={busy||locked||combinedOrigin.allowRedistribute===false} onClick={()=>void save(false,true)}>保存并投稿云端</button><p>先保存到本机，再确认作品、署名和使用规范。人工审核通过后获得分享码；公开展示需另行勾选。</p></div>}
    {originalKey&&['self','remix'].includes(origin.kind)&&<label><input disabled={busy} type="checkbox" checked={update} onChange={e=>setUpdate(e.target.checked)}/>更新原预设，否则另存一份</label>}
    {!maker&&<button className="decoration-save-outfit" disabled={busy||locked} onClick={()=>setSaveOpen(true)}>保存当前搭配</button>}
    {!maker&&<div className="decoration-current-grid">{shelves.filter(([id])=>id!=='schedule'&&id!=='journal'&&id!=='date'&&id!=='story'&&id!=='collaboration').map(([id,label])=><button key={id} disabled={busy||locked} onClick={()=>{setShelf(id);setQuery('');setPage(0);setError('');}}><span className="decoration-current-image"><DecorationMiniPreview preset={renderedPreview} category={id}/></span><small>{labels[id]||'当前使用'}</small><strong>{label}</strong></button>)}</div>}
