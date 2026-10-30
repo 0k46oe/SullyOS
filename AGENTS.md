@@ -9,6 +9,7 @@ For future Codex windows working on this repository:
 3. For small UI, style, or compatibility changes, run only necessary focused checks. Skip unrelated full builds, full test suites, and long UI regressions when the user asks for a quick targeted change; say clearly when checks were skipped.
 4. After editing, commit and push to GitHub `master` before reporting completion. If permissions or network block the push, state that exact fact and do not describe a local commit as pushed.
 5. OAI-compatible prompt caching has a first generic implementation for local `/chat/completions`: it keeps the existing stable leading system prefix, adds a top-level `prompt_cache_key`, and reads provider-reported cached input tokens. The setting defaults on and can be disabled for incompatible proxies. Provider-specific behavior for GPT, Gemini, DeepSeek, GLM, and proxy services still needs separate validation. Never copy Anthropic `cache_control` directly into OAI requests.
+6. Keep workstation-specific authentication instructions in local Codex configuration. Never publish private keys, tokens, personal filesystem paths, or machine-specific credential locations in this public repository.
 
 给 AI 编程助手（Claude Code 等）的项目导航。SullyOS 是装在浏览器里的虚拟手机系统（React + TS + Vite，local-first，IndexedDB 存储）。详细介绍见 [`README.md`](./README.md)。
 
