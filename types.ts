@@ -2897,6 +2897,15 @@ export interface CharacterProfile {
   chatShowRemark?: boolean;
   systemPrompt: string;
   worldview?: string;
+  /** Imported author-facing card information; never executed or injected as author instructions. */
+  tavernImport?: {
+      firstMessage: string;
+      alternateGreetings: string[];
+      creatorNotes: string;
+      creator: string;
+      characterVersion: string;
+      tags: string[];
+  };
   /** 角色分组：指向 CharacterGroup.id；空或指向已删分组 = 未分组。仅本地组织用，不随角色卡导出 */
   groupId?: string;
   memories: MemoryFragment[];

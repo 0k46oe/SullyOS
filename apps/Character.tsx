@@ -37,7 +37,7 @@ import { COMMON_TIMEZONES } from '../utils/timezone';
 import { toMountedWorldbook } from '../utils/worldbook';
 import { stripSensitiveCardFields } from '../utils/characterCard';
 import { shareOrDownloadFile } from '../utils/shareExport';
-import { readShareText } from '../utils/pngShare';
+import { readImportedCharacterCard } from '../utils/tavernImport';
 import { confirmExportSafety } from '../utils/exportGuard';
 import { trackEvent } from '../utils/analytics';
 import { sortCharacterGroups, GROUP_FILTER_UNGROUPED } from '../components/character/CharacterGroupFilter';
@@ -177,6 +177,8 @@ const Character: React.FC = () => {
   
   // Modals
   const [showImportModal, setShowImportModal] = useState(false);
+  const [showCardImportModal, setShowCardImportModal] = useState(false);
+  const [isImportingCard, setIsImportingCard] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [showBatchModal, setShowBatchModal] = useState(false); 
   const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<string | null>(null);
@@ -1145,14 +1147,13 @@ ${isInitialGeneration ? `
 
   const handleImportCard = async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
-      if (!file) return;
+      if (!file || isImportingCard) return;
+      setIsImportingCard(true);
 
       try {
-          const json = await readShareText(file, 'character');
-          const data: CharacterExportData = JSON.parse(json);
-
-          if (data.type !== 'sully_character_card') {
-              throw new Error('无效的角色卡文件');
+          const { card: data, avatarFile } = await readImportedCharacterCard(file);
+          if (avatarFile) {
+              data.avatar = await processImage(new File([avatarFile], avatarFile.name, { type: 'image/png' }), { maxWidth: 512 });
           }
 
           // 导入侧同样剥离凭据 / 美化 / 语言 / 运行时状态：即便对方给的是旧版
@@ -1206,12 +1207,21 @@ ${isInitialGeneration ? `
           console.error(err);
           addToast(err.message || '导入失败', 'error');
       } finally {
+          setIsImportingCard(false);
           if (cardImportRef.current) cardImportRef.current.value = '';
       }
   };
 
   return (
     <div className="h-full w-full bg-slate-50/30 font-light relative">
+       <Modal isOpen={showCardImportModal} title="导入角色卡" onClose={() => setShowCardImportModal(false)}
+           footer={<button disabled={isImportingCard} onClick={() => { setShowCardImportModal(false); cardImportRef.current?.click(); }} className="w-full py-3 rounded-2xl bg-primary text-white font-bold disabled:opacity-50">{isImportingCard ? '正在导入…' : '选择 PNG / JSON 文件'}</button>}>
+           <div className="space-y-3 text-sm text-slate-600 leading-relaxed">
+               <p>支持酒馆 PNG / JSON 角色卡，以及糯米机导出的角色卡。</p>
+               <p>酒馆卡的头像、人设和内嵌世界书会一起导入；开场白与作者备注可在角色设定的「酒馆卡附加资料」中查看。</p>
+               <p className="text-xs text-slate-400">PNG 请选原文件，截图或压缩后的图片可能不含角色资料。</p>
+           </div>
+       </Modal>
        {view === 'list' ? (
            <div className="flex flex-col h-full animate-fade-in relative"
                 style={{ background: 'linear-gradient(180deg, #f5f2fb 0%, #ece6f6 100%)' }}>
@@ -1229,7 +1239,7 @@ ${isInitialGeneration ? `
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" />
                             </svg>
                         </ToolButton>
-                        <ToolButton label="导入" title="导入角色卡" onClick={() => cardImportRef.current?.click()}>
+                        <ToolButton label="导入" title="导入角色卡（糯米机 / 酒馆）" onClick={() => setShowCardImportModal(true)}>
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-5 h-5">
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
                             </svg>
@@ -1237,7 +1247,7 @@ ${isInitialGeneration ? `
                         <ToolButton label="关闭" title="关闭" onClick={closeApp}>
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
                         </ToolButton>
-                        <input type="file" ref={cardImportRef} className="hidden" accept=".json,.png,application/json,image/png" onChange={handleImportCard} />
+                        <input type="file" ref={cardImportRef} className="hidden" accept=".json,.png,application/json,image/png" disabled={isImportingCard} onChange={handleImportCard} />
                    </div>
                </div>
                <div className="flex-1 overflow-y-auto px-5 pb-20 no-scrollbar flex flex-col gap-3">
@@ -1474,6 +1484,22 @@ ${isInitialGeneration ? `
                                     placeholder="在这个世界里，魔法是存在的..."
                                 />
                            </div>
+
+                           {formData.tavernImport && (
+                               <CharacterSettingsSection title="酒馆卡附加资料" summary="开场白 · 作者备注">
+                                   <div className="bg-white rounded-3xl p-4 shadow-sm space-y-4 text-sm text-slate-600">
+                                       {formData.tavernImport.creator && <p className="text-xs text-slate-400">作者：{formData.tavernImport.creator}{formData.tavernImport.characterVersion ? ` · ${formData.tavernImport.characterVersion}` : ''}</p>}
+                                       <p className="text-xs text-slate-400 leading-relaxed">保留原卡资料供查看；开场白不会自动写入聊天记录，作者备注不作为角色指令发送。</p>
+                                       {[
+                                           ['开场白', formData.tavernImport.firstMessage],
+                                           ...formData.tavernImport.alternateGreetings.map((greeting, index) => [`备选开场白 ${index + 1}`, greeting]),
+                                           ['作者备注', formData.tavernImport.creatorNotes],
+                                       ].filter(([, content]) => content).map(([label, content]) => (
+                                           <div key={label}><p className="text-xs font-bold text-violet-500 mb-2">{label}</p><p className="whitespace-pre-wrap break-words max-h-48 overflow-y-auto">{content}</p></div>
+                                       ))}
+                                   </div>
+                               </CharacterSettingsSection>
+                           )}
 
                            <CharacterSettingsSection title="时间感知与时区" summary={formData.customTimezoneEnabled ? formData.customTimezone || '自定义时区' : '跟随本机时区'}>
                            {/* 时间感知 & 时区：三个独立开关，可任意组合（聊天时间感知 / 自定义时区 / 线下时间感知） */}

@@ -47,6 +47,20 @@ function crc32(bytes: Uint8Array): number {
 export function isPng(bytes: Uint8Array): boolean {
     return SIGNATURE.every((b, i) => bytes[i] === b);
 }
+
+/** Read standard PNG text metadata without decoding or redrawing the image. */
+export function extractPngTextChunks(bytes: Uint8Array): { keyword: string; text: string }[] {
+    const textDecoder = new TextDecoder('latin1');
+    return chunks(bytes).flatMap(chunk => {
+        if (chunk.type !== 'tEXt') return [];
+        const separator = chunk.data.indexOf(0);
+        if (separator < 1 || separator > 79) return [];
+        return [{
+            keyword: textDecoder.decode(chunk.data.subarray(0, separator)),
+            text: textDecoder.decode(chunk.data.subarray(separator + 1)),
+        }];
+    });
+}
 function chunks(bytes: Uint8Array): { type: string; start: number; end: number; data: Uint8Array }[] {
     if (!isPng(bytes)) throw new Error('请选择 PNG 原文件；截图或转换格式后的图片无法导入');
     if (bytes.length > MAX_PNG_BYTES) throw new Error('图片过大，请使用原格式文件导入');
