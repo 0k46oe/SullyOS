@@ -108,7 +108,8 @@
 .ff-twitter-fab svg:last-child {position:absolute;top:12px;left:12px;}
 .ff-social-profile {position:relative;background:var(--ff-paper);}
 .ff-profile-cover {height:110px;}
-.ff-profile-identity {position:relative;}
+.friend-feed .ff-social-profile .ff-profile-identity {position:relative;z-index:2;pointer-events:none;}
+.friend-feed .ff-social-profile .ff-profile-identity > * {pointer-events:auto;}
 .ff-profile-identity h2 {margin:0;font-size:22px;font-weight:800;line-height:1.4;}
 .ff-profile-identity p {font-size:11px;color:var(--ff-muted);margin:4px 0 0;}
 .friend-feed .ff-profile-edit {font-size:11px;min-height:33px;padding:6px 14px;border:1px solid #cfd9de;border-radius:20px;}

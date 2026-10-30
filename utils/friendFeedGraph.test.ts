@@ -39,6 +39,23 @@ async function seed(){
         ]});
     });
 }
+it.each(['main','a-work'])('accepts the current actor public account ID for %s and stores the local identity',async accountId=>{
+    const task=(await prepareFriendFeedEmotionTask(a.id,()=>0))!;
+    const publicId=(await ref(a.id,accountId)).id;
+    expect(await landFriendFeedEmotionAction(a.id,{requestId:task.id,kind:'post',accountId:publicId,text:'今日一杯热茶'})).toBe(true);
+    const post=(await readFriendFeed()).posts[0];expect(post.authorId).toBe(a.id);expect(post.accountId).toBe(accountId);
+    expect(await DB.getMessagesByCharId(a.id,true)).toHaveLength(1);
+});
+it('rejects another actor public account and a retired own alias',async()=>{
+    const old=(await ref(a.id,'a-work')).id;
+    const next=settings();next.identities[a.id].accounts=[];await saveFriendFeedSettings(next);
+    for(const accountId of [(await ref(b.id)).id,old]){
+        const task=(await prepareFriendFeedEmotionTask(a.id,()=>0))!;const rejected=vi.fn();
+        expect(await landFriendFeedEmotionAction(a.id,{requestId:task.id,kind:'post',accountId,text:'不能冒名'},'emotion',rejected)).toBe(false);
+        expect(rejected).toHaveBeenCalledWith('模型选择的账号不属于本角色，或该小号已停用');
+    }
+    expect((await readFriendFeed()).posts).toHaveLength(0);
+});
 it('defaults the user to main accounts only; renaming does not change IDs or relationships',async()=>{
     const before=await readFriendFeed(),main=await ref(b.id),alias=await ref(b.id,'secret-rant');
     expect(followsFriendPost(before,'user',{authorId:b.id})).toBe(true);

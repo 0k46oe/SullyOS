@@ -2,6 +2,7 @@ import {FigureSlider as FitSlider} from './FigureSlider';
 import {OutfitPreview} from './OutfitPreview';
 import React,{useEffect,useRef,useState} from 'react';
 import {MyWardrobe} from './MyWardrobe';
+import {HalloweenWardrobe} from './HalloweenWardrobe';
 import {PackImage,confirmResourcePack,useResourcePackInstalled} from '../../apps/room3d/ResourcePackPanel';
 import {applyOutfit,outfitClothes} from '../../apps/room3d/chibi/outfitLibrary';
 import {approvedGarments,approvedPresets,wardrobeSlots,cleanApprovedWardrobe,type WardrobeSlot} from '../../apps/room3d/chibi/approvedWardrobe';
@@ -29,7 +30,8 @@ export function WardrobePicker({parts,hair,onChange,onBegin,onEnd,layeringReport
  {packError&&<p role="alert">{packError}</p>}
  <nav className="garment-slots" aria-label="服装分类"><button aria-pressed={slot==='mine'} onClick={()=>setSlot('mine')}>我的衣柜</button><button aria-pressed={slot==='sets'} onClick={()=>setSlot('sets')}>套装</button><button aria-pressed={slot==='halloween'} onClick={()=>setSlot('halloween')}>万圣节专属衣柜</button>{Object.entries(wardrobeSlots).map(([id,label])=><button key={id} aria-pressed={slot===id} onClick={()=>setSlot(id as WardrobeSlot)}>{label}{items[id as WardrobeSlot]?' ·':''}</button>)}</nav>
  {slot==='mine'&&<MyWardrobe parts={parts} hair={hair} onChange={next=>withPack(next.wardrobe,()=>onChange(next))}/>}
- {(slot==='sets'||slot==='halloween')&&<div className="wardrobe-items garment-grid outfit-grid" aria-label="套装款式">{Object.entries(approvedPresets).filter(([,p])=>slot==='halloween'?p.collection==='halloween':p.collection!=='halloween').map(([id,p])=>{
+ {slot==='halloween'&&<HalloweenWardrobe parts={parts} hair={hair} installed={halloweenInstalled} onSelect={next=>withPack(next.wardrobe,()=>onChange(next))}/>}
+ {slot==='sets'&&<div className="wardrobe-items garment-grid outfit-grid" aria-label="套装款式">{Object.entries(approvedPresets).filter(([,p])=>p.collection!=='halloween').map(([id,p])=>{
  const active=Object.entries(p.items).every(([key,value])=>items[key as WardrobeSlot]===value)&&Object.keys(items).length===Object.keys(p.items).length&&(!p.clothes||JSON.stringify(outfitClothes(hair))===JSON.stringify(outfitClothes(p.clothes)));
  return <button className="garment-tile" data-pack-locked={p.collection==='halloween'&&!halloweenInstalled} key={id} aria-label={p.label} aria-pressed={active} onClick={()=>withPack(p.items,()=>p.clothes?onChange(applyOutfit(hair,{id,name:p.label,clothes:p.clothes})):onChange({...hair,bodyShape:'blank',wardrobe:{...p.items},wardrobeFits:scopedFits}))}><OutfitPreview name={p.label} parts={parts} hair={p.clothes?applyOutfit(hair,{id,name:p.label,clothes:p.clothes}):{...hair,wardrobe:p.items}}/><small>{p.label}</small>{active&&<b aria-label="已穿">✓</b>}</button>;
  })}</div>}

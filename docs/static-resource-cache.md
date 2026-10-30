@@ -90,6 +90,8 @@ Cloudflare 部署使用 assets-first，正常文件直接由静态资源服务�
 
 `DatabaseGuard` 在主界面及其 Provider 挂载前，打开现有数据库并以 readonly 事务检查核心表可读性；失败展示独立诊断，不继续加载空桌面。`openDB` 后续失败也会通知保护界面，即使业务调用方吞掉了异常。入口后台任务同样等待读取检查，角色读取失败后停止默认角色、后续迁移与启动补传。保护页不读取聊天内容、不清存储、不上传诊断；手动复制只含构建、网址路径、浏览器与错误信息。这是失败保护，不是浏览器内部数据库修复，不承诺已损坏存档可恢复。
 
+正常启动时只在后台做上述检查，不再显示「正在读取本地数据」整页提示；检查通过后直接挂载桌面。等待期间保留不可见的挂载标记，避免入口恢复脚本把数据库等待误判成主程序未挂载。只有实际读取失败才显示诊断与重试入口，失败保护和后台任务的等待条件不变。
+
 参考：[WebKit SQLiteIDBBackingStore.cpp](https://github.com/WebKit/WebKit/blob/main/Source/WebCore/Modules/indexeddb/server/SQLiteIDBBackingStore.cpp)。测试：`utils/databaseHealth.test.ts`、`utils/databaseGuard.test.ts`；独立失败 fixture：`test/fixtures/database-guard.html`（模拟 open 错误，不连接用户数据库）。
 
 ### 主程序加载前的纯黑屏

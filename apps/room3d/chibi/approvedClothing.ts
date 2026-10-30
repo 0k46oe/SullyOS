@@ -10,6 +10,7 @@ import type {LayeringReport} from './garmentLayering';
 import {bodyHeightY,bodyBaseY,bodyHeightSlope} from './bodyHeight';
 import {fitSockSurface} from './fitSockSurface';
 import {halloweenCoverage} from './halloweenCoverage';
+import {splitHalloweenShoeSeam} from './halloweenShoeSkin';
 const assets=new Map<string,Promise<T.Group>>();
 function load(asset:string){let task=assets.get(asset);if(!task){task=loadHomeGLTF(`${import.meta.env.BASE_URL}room3d/wardrobe/${asset}`).then(g=>{g.scene.traverse(o=>{if(o instanceof T.Mesh)for(const m of Array.isArray(o.material)?o.material:[o.material])m.userData.wardrobeMaterialIndex=g.parser.associations.get(m)?.materials;});g.scene.updateMatrixWorld(true);return g.scene;}).catch(e=>{assets.delete(asset);throw e;});assets.set(asset,task);}return task;}
 type Rig=ReturnType<typeof bindBlankBody>;
@@ -34,6 +35,7 @@ export async function prepareApprovedWardrobe(rig:Rig,value:ApprovedWardrobe,fit
     const values=Array.from({length:attribute.count*attribute.itemSize},(_,i)=>attribute.getComponent(Math.floor(i/attribute.itemSize),i%attribute.itemSize));
     g.setAttribute(name,name==='skinIndex'?new T.Uint16BufferAttribute(values,attribute.itemSize):new T.Float32BufferAttribute(values,attribute.itemSize));
    }
+   if(d.collection==='halloween'&&d.slot==='shoes')splitHalloweenShoeSeam(g,o.skeleton.bones);
    const p=g.attributes.position,n=g.attributes.normal,si=g.attributes.skinIndex,sw=g.attributes.skinWeight;
    const morphIndex=o.morphTargetDictionary?.VNeck;
    if(morphIndex!==undefined){const amount=fitById.get(d.id)!.neckline/100;for(const name of ['position','normal']){const base=g.attributes[name],target=g.morphAttributes[name]?.[morphIndex];if(!base||!target)continue;for(let i=0;i<base.count;i++)for(let axis=0;axis<3;axis++){const v=base.getComponent(i,axis),t=target.getComponent(i,axis);base.setComponent(i,axis,g.morphTargetsRelative?v+t*amount:T.MathUtils.lerp(v,t,amount));}}g.normalizeNormals();g.morphAttributes={};}
@@ -72,7 +74,12 @@ export async function prepareApprovedWardrobe(rig:Rig,value:ApprovedWardrobe,fit
   for(const mesh of meshes.filter(m=>m.userData.garmentId===d.id)){const positions=mesh.geometry.attributes.position;for(let i=0;i<positions.count;i++){p.fromBufferAttribute(positions,i);(p.x<0?left:right).expandByPoint(p);}}
   if(!left.isEmpty()&&!right.isEmpty())sleeveCenters.set(d.id,{left:left.getCenter(new T.Vector3()),right:right.getCenter(new T.Vector3())});
  }
- for(const mesh of meshes){const d=defs.find(d=>d.id===mesh.userData.garmentId)!;deformGarment(mesh.geometry,garmentTransform(d.sleeveOnly?'top':d.slot,fitById.get(d.id)!,rig.bodyHeight,originalBounds.get(d.id)!,sleeveCenters.get(d.id)));}
+ for(const mesh of meshes){const d=defs.find(d=>d.id===mesh.userData.garmentId)!;
+  if(d.id==='halloween-witch-hat'){
+   const p=mesh.geometry.attributes.position,box=originalBounds.get(d.id)!,center=box.getCenter(new T.Vector3());center.y=box.min.y;
+   for(let i=0;i<p.count;i++){const v=new T.Vector3().fromBufferAttribute(p,i).sub(center).multiplyScalar(1.2).add(center);p.setXYZ(i,v.x,v.y,v.z);}
+  }
+  deformGarment(mesh.geometry,garmentTransform(d.sleeveOnly?'top':d.slot,fitById.get(d.id)!,rig.bodyHeight,originalBounds.get(d.id)!,sleeveCenters.get(d.id)));}
  for(const mesh of meshes)if(mesh.userData.garmentId==='school-socks')fitSockSurface(mesh.geometry,rig);
  // Actual loaded hems can differ from the original manifest after fitting edits.
  const hems=new Map<string,number>(),tops=new Map<string,number>();for(const mesh of meshes){mesh.geometry.computeBoundingBox();const id=mesh.userData.garmentId;hems.set(id,Math.min(hems.get(id)??Infinity,bodyBaseY(mesh.geometry.boundingBox!.min.y,rig.bodyHeight)));tops.set(id,Math.max(tops.get(id)??-Infinity,bodyBaseY(mesh.geometry.boundingBox!.max.y,rig.bodyHeight)));}
