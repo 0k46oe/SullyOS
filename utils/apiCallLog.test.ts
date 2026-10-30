@@ -159,6 +159,10 @@ describe('one-shot full API request capture', () => {
             .toEqual({ prompt: 70, completion: 20, total: 90 });
         expect(extractApiTokenUsage({ usageMetadata: { promptTokenCount: 80, candidatesTokenCount: 10, totalTokenCount: 90 } }))
             .toEqual({ prompt: 80, completion: 10, total: 90 });
+        expect(extractApiTokenUsage({ usage: { prompt_tokens: 100, completion_tokens: 12, total_tokens: 112, prompt_tokens_details: { cached_tokens: 64 } } }))
+            .toEqual({ prompt: 100, completion: 12, total: 112, cacheRead: 64 });
+        expect(extractApiTokenUsage({ usage: { prompt_tokens: 100, completion_tokens: 12, total_tokens: 112, input_tokens_details: { cached_tokens: 32 } } }))
+            .toEqual({ prompt: 100, completion: 12, total: 112, cacheRead: 32 });
     });
 
     it('backfills the real response usage into the same one-shot capture', async () => {

@@ -22,7 +22,7 @@ import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel, normali
  * 把用户手调过的温度、流式开关顺手重置掉。
  */
 export type PresetSwitchPatch =
-  Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'protocol' | 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache'>>;
+  Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'protocol' | 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'openaiPromptCache'>>;
 
 export function configFromPreset(preset: ApiPreset): PresetSwitchPatch {
   const patch: PresetSwitchPatch = {
@@ -37,6 +37,7 @@ export function configFromPreset(preset: ApiPreset): PresetSwitchPatch {
     patch.anthropicCustomTemperature = preset.config.anthropicCustomTemperature === true;
   }
   if (typeof preset.config.anthropicPromptCache === 'boolean' || patch.protocol === 'anthropic') patch.anthropicPromptCache = preset.config.anthropicPromptCache !== false;
+  if (typeof preset.config.openaiPromptCache === 'boolean' || patch.protocol !== 'anthropic') patch.openaiPromptCache = preset.config.openaiPromptCache !== false;
   return patch;
 }
 
@@ -59,10 +60,11 @@ export function presetMatchesConfig(
  */
 export function presetDiffersFromConfig(
   preset: ApiPreset,
-  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol'> & Partial<Pick<APIConfig, 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache'>>,
+  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol'> & Partial<Pick<APIConfig, 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'openaiPromptCache'>>,
 ): boolean {
   if (!presetMatchesConfig(preset, config)) return true;
   if (normalizeApiProtocol(preset.config.protocol) === 'anthropic' && (preset.config.anthropicPromptCache !== false) !== (config.anthropicPromptCache !== false)) return true;
+  if (normalizeApiProtocol(preset.config.protocol) !== 'anthropic' && (preset.config.openaiPromptCache !== false) !== (config.openaiPromptCache !== false)) return true;
   if (normalizeApiProtocol(preset.config.protocol) === 'anthropic'
     && (preset.config.anthropicCustomTemperature === true) !== (config.anthropicCustomTemperature === true)) return true;
   if (typeof preset.config.stream === 'boolean' && preset.config.stream !== (config.stream === true)) return true;

@@ -1,5 +1,11 @@
 # 角色默认对话 API
 
+## OpenAI 兼容接口提示词缓存
+
+OpenAI 兼容接口使用单独的通用缓存路径：聊天载荷沿用 `chatRequestPayload` 的首条稳定 system 前缀，本地请求边界按端点、模型、角色和用途生成稳定的 `prompt_cache_key`，作为顶层 OAI 字段发送。不会发送 Anthropic 的 `cache_control`。设置页可关闭该字段以兼容不接受未知请求参数的中转；缓存是否真正命中只看服务返回的 usage。
+
+调用记录会读取 OpenAI 常见的 `prompt_tokens_details.cached_tokens`，也兼容部分代理使用的 `input_tokens_details.cached_tokens`；未返回时保持“未报告”，不补零、不伪造命中。
+
 ## 本地普通私聊：Anthropic 原生接口
 
 设置和角色独立 API 的「接口格式」可选 OpenAI 兼容或 Anthropic 原生 Messages。协议随预设、角色配置和备份保存；旧配置缺省为 OpenAI，不会因全局选择 Anthropic 而改变旧角色独立配置的协议。URL / Key / Model / 协议整体选择。

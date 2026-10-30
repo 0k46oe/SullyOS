@@ -501,6 +501,7 @@ const Settings: React.FC = () => {
   const [localAnthropicPromptCache, setLocalAnthropicPromptCache] = useState(apiConfig.anthropicPromptCache !== false);
   const [localAnthropicPromptCacheTtl, setLocalAnthropicPromptCacheTtl] = useState<'5m' | '1h'>(apiConfig.anthropicPromptCacheTtl === '1h' ? '1h' : '5m');
   const [localAnthropicCustomTemperature, setLocalAnthropicCustomTemperature] = useState(apiConfig.anthropicCustomTemperature === true);
+  const [localOpenaiPromptCache, setLocalOpenaiPromptCache] = useState(apiConfig.openaiPromptCache !== false);
   const [localUrl, setLocalUrl] = useState(apiConfig.baseUrl);
   const [localModel, setLocalModel] = useState(String(apiConfig.model || ''));
   const [localStream, setLocalStream] = useState<boolean>(apiConfig.stream === true);
@@ -563,6 +564,7 @@ const Settings: React.FC = () => {
   const [editPresetPromptCache, setEditPresetPromptCache] = useState(true);
   const [editPresetPromptCacheTtl, setEditPresetPromptCacheTtl] = useState<'5m' | '1h'>('5m');
   const [editPresetCustomTemperature, setEditPresetCustomTemperature] = useState(false);
+  const [editPresetOpenaiPromptCache, setEditPresetOpenaiPromptCache] = useState(true);
   const [holdingDeletePresetId, setHoldingDeletePresetId] = useState<string | null>(null);
   const presetDeleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
@@ -991,7 +993,8 @@ const Settings: React.FC = () => {
       setLocalAnthropicCustomTemperature(apiConfig.anthropicCustomTemperature === true);
       setLocalAnthropicPromptCache(apiConfig.anthropicPromptCache !== false);
       setLocalAnthropicPromptCacheTtl(apiConfig.anthropicPromptCacheTtl === '1h' ? '1h' : '5m');
-  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.protocol, apiConfig.stream, apiConfig.temperature, apiConfig.anthropicCustomTemperature, apiConfig.anthropicPromptCache, apiConfig.anthropicPromptCacheTtl]);
+      setLocalOpenaiPromptCache(apiConfig.openaiPromptCache !== false);
+  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.protocol, apiConfig.stream, apiConfig.temperature, apiConfig.anthropicCustomTemperature, apiConfig.anthropicPromptCache, apiConfig.anthropicPromptCacheTtl, apiConfig.openaiPromptCache]);
 
   useEffect(() => {
       setLocalVisionEnabled(apiConfig.visionApi?.enabled === true);
@@ -1075,6 +1078,7 @@ const Settings: React.FC = () => {
       setEditPresetPromptCache(isActive ? localAnthropicPromptCache : preset.config.anthropicPromptCache !== false);
       setEditPresetPromptCacheTtl(isActive ? localAnthropicPromptCacheTtl : preset.config.anthropicPromptCacheTtl === '1h' ? '1h' : '5m');
       setEditPresetCustomTemperature(isActive ? localAnthropicCustomTemperature : preset.config.anthropicCustomTemperature === true);
+      setEditPresetOpenaiPromptCache(isActive ? localOpenaiPromptCache : preset.config.openaiPromptCache !== false);
       // 当前正在使用的预设要接住主表单里刚改的高级设置：用户点铅笔再点保存即可写回，
       // 不必猜还要额外按一次「用当前配置填入」。非当前/老预设则读取自身，缺字段才回退。
       setEditPresetStream(
@@ -1103,6 +1107,7 @@ const Settings: React.FC = () => {
           anthropicCustomTemperature: editPresetCustomTemperature,
           anthropicPromptCache: editPresetPromptCache,
           anthropicPromptCacheTtl: editPresetPromptCacheTtl,
+          openaiPromptCache: editPresetOpenaiPromptCache,
       };
       // 「正在用的就是这条」要在改之前问，改完值就对不上了
       const wasActive = activePresetId === preset.id;
@@ -1170,6 +1175,7 @@ const Settings: React.FC = () => {
         stream: localStream,
         temperature: localTemperature,
         anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl, anthropicCustomTemperature: localAnthropicCustomTemperature,
+        openaiPromptCache: localOpenaiPromptCache,
       }, newPresetGroup);
       setNewPresetName('');
       setNewPresetGroup('');
@@ -1193,6 +1199,7 @@ const Settings: React.FC = () => {
       stream: localStream,
       temperature: localTemperature,
       anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl, anthropicCustomTemperature: localAnthropicCustomTemperature,
+      openaiPromptCache: localOpenaiPromptCache,
     };
     // 「是不是来自某条预设」要在保存之前问，存完值就对不上了
     const sourcePreset = apiPresets.find(preset => preset.id === activePresetId);
@@ -2595,7 +2602,7 @@ const Settings: React.FC = () => {
 
             <div className="space-y-4">
                 <DialogueApiFields
-                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, protocol: localProtocol, stream: localStream, temperature: localTemperature, anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl, anthropicCustomTemperature: localAnthropicCustomTemperature }}
+                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, protocol: localProtocol, stream: localStream, temperature: localTemperature, anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl, anthropicCustomTemperature: localAnthropicCustomTemperature, openaiPromptCache: localOpenaiPromptCache }}
                     onChange={patch => {
                         if (patch.protocol !== undefined) setLocalProtocol(patch.protocol);
                         if (patch.baseUrl !== undefined) setLocalUrl(patch.baseUrl);
@@ -2605,6 +2612,7 @@ const Settings: React.FC = () => {
                         if (patch.anthropicPromptCache !== undefined) setLocalAnthropicPromptCache(patch.anthropicPromptCache);
                         if (patch.anthropicPromptCacheTtl !== undefined) setLocalAnthropicPromptCacheTtl(patch.anthropicPromptCacheTtl);
                         if (patch.anthropicCustomTemperature !== undefined) setLocalAnthropicCustomTemperature(patch.anthropicCustomTemperature);
+                        if (patch.openaiPromptCache !== undefined) setLocalOpenaiPromptCache(patch.openaiPromptCache);
                     }}
                     fetchModels={fetchModels} isLoadingModels={isLoadingModels} openModelPicker={openModelPicker}
                 />
@@ -4134,6 +4142,10 @@ const Settings: React.FC = () => {
                       <option value="5m">5 分钟</option><option value="1h">1 小时</option>
                     </select>
                   </label>}
+                  {editPresetProtocol !== 'anthropic' && <label className="flex items-center gap-2 text-xs text-slate-500">
+                    <input type="checkbox" aria-label="预设 OpenAI 提示词缓存" checked={editPresetOpenaiPromptCache} onChange={event => setEditPresetOpenaiPromptCache(event.target.checked)} />
+                    OpenAI 提示词缓存（prompt_cache_key）
+                  </label>}
               </div>
               <button
                   type="button"
@@ -4147,6 +4159,7 @@ const Settings: React.FC = () => {
                       setEditPresetCustomTemperature(localAnthropicCustomTemperature);
                       setEditPresetPromptCache(localAnthropicPromptCache);
                       setEditPresetPromptCacheTtl(localAnthropicPromptCacheTtl);
+                      setEditPresetOpenaiPromptCache(localOpenaiPromptCache);
                       addToast('已填入当前配置', 'info');
                   }}
                   className="w-full py-2 bg-slate-100 text-slate-500 text-xs font-bold rounded-xl active:scale-95 transition-transform"

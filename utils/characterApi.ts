@@ -10,11 +10,13 @@ export function resolveDialogueApi(
   const source = appApi ?? character?.dialogueApi;
   if (!source) return globalApi;
   // Credentials are atomic; never fill a missing key/model from a different provider.
+  const openaiPromptCache = source.openaiPromptCache ?? globalApi.openaiPromptCache;
   return { ...globalApi, ...pickDialogueApi(source), protocol: normalizeApiProtocol(source.protocol),
     ...((globalApi.anthropicPromptCache !== undefined || source.anthropicPromptCache !== undefined)
       ? { anthropicPromptCache: source.anthropicPromptCache !== false } : {}),
     ...((globalApi.anthropicCustomTemperature !== undefined || source.anthropicCustomTemperature !== undefined)
       ? { anthropicCustomTemperature: source.anthropicCustomTemperature === true } : {}),
+    ...(openaiPromptCache !== undefined ? { openaiPromptCache: openaiPromptCache !== false } : {}),
   };
 }
 
@@ -28,6 +30,7 @@ export function pickDialogueApi(api: DialogueApiConfig): DialogueApiConfig {
     ...(typeof api.temperature === 'number' ? { temperature: api.temperature } : {}),
     ...(typeof api.anthropicPromptCache === 'boolean' ? { anthropicPromptCache: api.anthropicPromptCache } : {}),
     ...(typeof api.anthropicCustomTemperature === 'boolean' ? { anthropicCustomTemperature: api.anthropicCustomTemperature } : {}),
+    ...(typeof api.openaiPromptCache === 'boolean' ? { openaiPromptCache: api.openaiPromptCache } : {}),
   };
 }
 

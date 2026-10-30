@@ -35,9 +35,9 @@ describe('草稿同步不跨区块打架', () => {
     expect(settings).not.toMatch(/\}, \[apiConfig\]\);/);
   });
 
-  it('主 API 那份只盯自己的五个字段', () => {
+  it('主 API 那份只盯自己的字段', () => {
     expect(settings).toMatch(
-      /\}, \[apiConfig\.baseUrl, apiConfig\.apiKey, apiConfig\.model, apiConfig\.protocol, apiConfig\.stream, apiConfig\.temperature, apiConfig\.anthropicCustomTemperature, apiConfig\.anthropicPromptCache\]\);/,
+      /\}, \[apiConfig\.baseUrl, apiConfig\.apiKey, apiConfig\.model, apiConfig\.protocol, apiConfig\.stream, apiConfig\.temperature, apiConfig\.anthropicCustomTemperature, apiConfig\.anthropicPromptCache, apiConfig\.anthropicPromptCacheTtl, apiConfig\.openaiPromptCache\]\);/,
     );
   });
 });

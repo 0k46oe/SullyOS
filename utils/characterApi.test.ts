@@ -36,6 +36,10 @@ describe('dialogue routing', () => {
       .toMatchObject({ baseUrl: personal.baseUrl, apiKey: '', model: '' });
     expect(resolveDialogueApi(globalApi, char, { ...app, apiKey: '' }).apiKey).toBe('');
   });
+  it('inherits the generic OAI cache switch when an independent endpoint omits it', () => {
+    expect(resolveDialogueApi({ ...globalApi, openaiPromptCache: false }, char).openaiPromptCache).toBe(false);
+    expect(resolveDialogueApi(globalApi, { dialogueApi: { ...personal, openaiPromptCache: true } }).openaiPromptCache).toBe(true);
+  });
   it('preserves voice and vision, but follows the selected endpoint stream and temperature', () => {
     const result = resolveDialogueApi(globalApi, { dialogueApi: { ...personal, ttsProvider: 'minimax', visionApi: undefined } as any });
     expect(result).toMatchObject({ ...personal, ttsProvider: 'fishaudio', visionApi: globalApi.visionApi });

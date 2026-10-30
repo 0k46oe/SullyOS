@@ -5,6 +5,7 @@ import { readAnthropicResponse } from './anthropicStream';
 import { resolveBlobRefsInRequestBody } from './apiBlobRefs';
 import { captureApiRequestOnce, getApiCallAmbientContext, MAX_API_RAW_USAGE_EVENTS, updateApiRequestCaptureUsage, type ApiRawUsageEvent } from './apiCallLog';
 import { compareAnthropicCachePrefix, splitAnthropicCacheText } from './anthropicPromptCache';
+import { decorateOpenAIPromptCache } from './openaiPromptCache';
 
 export const isAnthropicApi = (api: Pick<DialogueApiConfig, 'protocol'>): boolean =>
   normalizeApiProtocol(api.protocol) === 'anthropic';
@@ -186,10 +187,27 @@ export function fromAnthropicResponse(data: any): any {
   };
 }
 
-/** Same signature as safeFetchJson: the OpenAI branch stays completely unchanged. */
+/** Same signature as safeFetchJson: OAI decoration is isolated to this boundary. */
 export function createDialogueFetch(api: DialogueApiConfig): typeof safeFetchJson {
   return async (url, options, retries, timeout, meta, hooks) => {
-    if (!isAnthropicApi(api)) return safeFetchJson(url, options, retries, timeout, meta, hooks);
+    if (!isAnthropicApi(api)) {
+      // OAI-compatible prompt caching uses a top-level prompt_cache_key. Keep
+      // this isolated from the Anthropic content-block cache_control dialect.
+      if (typeof options.body === 'string' && /\/chat\/completions(?:[?#]|$)/i.test(url) && api.openaiPromptCache !== false) {
+        try {
+          const body = JSON.parse(options.body);
+          const decorated = await decorateOpenAIPromptCache(body, {
+            endpoint: url, credential: normalizeApiCredential(api.apiKey), model: api.model, charId: meta?.charId, purpose: meta?.purpose,
+          });
+          const nextMeta = decorated.diagnostic ? { ...(meta || getApiCallAmbientContext()), cacheDiagnostic: decorated.diagnostic } : meta;
+          return safeFetchJson(url, { ...options, body: JSON.stringify(decorated.body) }, retries, timeout, nextMeta, hooks);
+        } catch {
+          // Preserve the existing request path if a provider body is unusual or
+          // local cache decoration is unavailable.
+        }
+      }
+      return safeFetchJson(url, options, retries, timeout, meta, hooks);
+    }
     const nativeMeta = { ...(meta || getApiCallAmbientContext()) };
     options.signal?.throwIfAborted();
     // Convert only after restoring local images. safeFetchJson's later restoration

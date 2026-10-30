@@ -31,7 +31,7 @@ export interface ApiCallMeta {
     charName?: string;
     /** 具体用途，如 '聊天回复' / '情绪评估' / '记忆提取'，可空 */
     purpose?: string;
-    /** 本地原生缓存前缀对比；不含提示词、Key 或哈希正文。 */
+    /** 本地缓存前缀对比；不含提示词、Key 或哈希正文。 */
     cacheDiagnostic?: AnthropicCacheDiagnostic;
 }
 
@@ -340,7 +340,10 @@ export function extractApiTokenUsage(response: unknown): { prompt?: number; comp
     const usage = root?.usage || root?.usage_metadata || root?.usageMetadata;
     if (!usage || typeof usage !== 'object') return {};
     const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
-    const cacheRead = num(usage.cache_read_input_tokens ?? usage.prompt_tokens_details?.cached_tokens);
+    const cacheRead = num(usage.cache_read_input_tokens
+        ?? usage.prompt_tokens_details?.cached_tokens
+        ?? usage.input_tokens_details?.cached_tokens
+        ?? usage.input_token_details?.cached_tokens);
     const cacheCreation = num(usage.cache_creation_input_tokens);
     const nativeInput = num(usage.input_tokens);
     const prompt = num(usage.prompt_tokens ?? usage.promptTokenCount)

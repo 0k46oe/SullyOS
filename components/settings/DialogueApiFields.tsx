@@ -56,6 +56,17 @@ export default function DialogueApiFields({ value, onChange, fetchModels, isLoad
                         onChange={event => onChange({ temperature: Number(event.target.value) })} className="block w-full accent-slate-500 disabled:opacity-35" />
                     <p className="text-[10px] leading-relaxed text-slate-400">范围 0～1。部分模型不接受温度参数，如接口报错可关闭此项改用模型默认；不会自动重发请求。</p>
                 </div>}
+                {value.protocol !== 'anthropic' && <div className="rounded-xl border border-slate-200/60 bg-white/40 px-3 py-3 space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                        <div><span className="text-xs text-slate-500">OpenAI 提示词缓存</span><p className="mt-1 text-[10px] leading-relaxed text-slate-400">发送稳定前缀的 prompt_cache_key；实际命中以服务返回的 usage 为准。</p></div>
+                        <button type="button" role="switch" aria-label="OpenAI 提示词缓存" aria-checked={value.openaiPromptCache !== false}
+                            onClick={() => onChange({ openaiPromptCache: value.openaiPromptCache === false })}
+                            className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${value.openaiPromptCache !== false ? 'bg-slate-400' : 'bg-slate-200'}`}>
+                            <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${value.openaiPromptCache !== false ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                        </button>
+                    </div>
+                    <p className="text-[10px] leading-relaxed text-slate-400">通用 OAI 兼容字段；不支持该字段的中转可关闭。Anthropic 原生接口使用独立的缓存设置。</p>
+                </div>}
                 {value.protocol === 'anthropic' && <div className="rounded-xl border border-slate-200/60 bg-white/40 px-3 py-3 space-y-3">
                     <div className="flex items-center justify-between gap-3">
                         <div><span className="text-xs text-slate-500">提示词缓存</span><p className="mt-1 text-[10px] leading-relaxed text-slate-400">缓存稳定的角色设定前缀，默认开启。</p></div>

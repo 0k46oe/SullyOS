@@ -200,3 +200,16 @@ describe('native Anthropic local chat', () => {
     expect(JSON.parse(fetch.mock.calls[0][1].body).messages[0].content).toEqual([{ type: 'image_url', image_url: { url: image, detail: 'high' } }]);
   });
 });
+
+describe('OpenAI-compatible local chat', () => {
+  it('adds prompt_cache_key without Anthropic cache_control', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 } })));
+    vi.stubGlobal('fetch', fetch);
+    await createDialogueFetch({ ...api, protocol: 'openai', baseUrl: 'https://oai.test', openaiPromptCache: true })('https://oai.test/v1/chat/completions', { method: 'POST',
+      body: JSON.stringify(body),
+    });
+    const sent = JSON.parse(fetch.mock.calls[0][1].body);
+    expect(sent.prompt_cache_key).toMatch(/^oai-/);
+    expect(sent).not.toHaveProperty('cache_control');
+  });
+});
