@@ -3,6 +3,8 @@ import { ArrowLeft, DownloadSimple, LockSimple, UploadSimple, UserCircle } from 
 import TokenImg from '../../os/TokenImg';
 import type { CharacterProfile, StoryTheaterEntry, StoryTheaterMask, StoryTheaterPreset, UserProfile } from '../../../types';
 import { dedupeTheaterWorldbooks, downloadStoryPreset, estimateStoryTokens, getPresetPromptStats, resolveStoryPresetDocument, resolveStoryTheaterMask } from '../../../utils/storyTheater';
+import { getStoryCardGreetings } from '../../../utils/storyTheaterOpening';
+import StoryPresetImportNotes from './StoryPresetImportNotes';
 
 interface Props {
     initial: StoryTheaterEntry;
@@ -35,6 +37,8 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
     const preset = presets.find(item => item.id === draft.presetId) || presets[0] || null;
     const effectivePreset = preset ? { ...preset, document: resolveStoryPresetDocument(preset, draft.presetOverride) } : null;
     const presetStats = getPresetPromptStats(effectivePreset);
+    const greetings = useMemo(() => getStoryCardGreetings(actors), [actors]);
+    const validOpening = draft.openingMode !== 'card' || draft.cardOpeningConsumed || Boolean(draft.cardOpening?.content.trim() && draft.characterIds.includes(draft.cardOpening.characterId));
 
     const update = <K extends keyof StoryTheaterEntry>(key: K, value: StoryTheaterEntry[K]) => setDraft(current => ({ ...current, [key]: value, updatedAt: Date.now() }));
     const toggleCharacter = (char: CharacterProfile) => setDraft(current => {
@@ -45,6 +49,7 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
         return {
             ...current,
             characterIds,
+            ...(!maskLocked && current.cardOpening && !characterIds.includes(current.cardOpening.characterId) ? { cardOpening: undefined } : {}),
             selectedWorldbookIds: adding ? Array.from(new Set([...current.selectedWorldbookIds, ...(char.mountedWorldbooks || []).map(book => book.id)])) : current.selectedWorldbookIds.filter(id => validBooks.has(id)),
             characterContextLimits: { ...current.characterContextLimits, ...(adding && !current.characterContextLimits[char.id] ? { [char.id]: 100 } : {}) },
             updatedAt: Date.now(),
@@ -58,7 +63,7 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
         return { actor: estimateStoryTokens(actorText), book: estimateStoryTokens(bookText), preset: estimateStoryTokens(presetText), archive: estimateStoryTokens(archiveText) };
     }, [actors, books, draft, effectivePreset, resolvedMask]);
     const save = async () => {
-        if (!draft.title.trim() || draft.characterIds.length === 0) return;
+        if (!draft.title.trim() || draft.characterIds.length === 0 || !validOpening) return;
         setSaving(true);
         const archiveAfter = Math.max(2, Math.min(200, Number(draft.archiveAfter) || 40));
         const archiveKeepRecent = Math.max(1, Math.min(archiveAfter - 1, Number(draft.archiveKeepRecent) || 5));
@@ -71,7 +76,7 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
             <div className='h-16 px-4 flex items-center gap-3'>
                 <button onClick={onCancel} className='w-9 h-9 rounded-full grid place-items-center'><ArrowLeft size={20} /></button>
                 <div><div className='text-[9px] tracking-[.24em] uppercase font-bold text-violet-500'>Story setup</div><div className='font-semibold'>{initial.title ? '调整剧情沙盒' : '新增剧情'}</div></div>
-                <button onClick={save} disabled={saving || !draft.title.trim() || draft.characterIds.length === 0} className='ml-auto h-9 px-4 rounded-full bg-slate-900 text-white text-xs font-bold disabled:opacity-30'>{saving ? '保存中' : '保存并进入'}</button>
+                <button onClick={save} disabled={saving || !draft.title.trim() || draft.characterIds.length === 0 || !validOpening} className='ml-auto h-9 px-4 rounded-full bg-slate-900 text-white text-xs font-bold disabled:opacity-30'>{saving ? '保存中' : '保存并进入'}</button>
             </div>
         </header>
         <main className='story-page-scroll flex-1 overflow-y-auto px-5 py-6 pb-28'><div className='max-w-2xl mx-auto space-y-8'>
@@ -79,7 +84,16 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
                 <div className='text-[9px] tracking-[.22em] uppercase font-bold text-violet-500'>01 / Story</div>
                 <label className='block mt-2'><span className='text-[10px] font-bold text-slate-500'>标题 · 必填</span><input value={draft.title} onChange={event => update('title', event.target.value)} placeholder='剧情名称' className='mt-1 w-full bg-transparent text-3xl font-serif font-semibold outline-none placeholder:text-slate-300' /></label>
                 <label className='block mt-5'><span className='text-[10px] font-bold text-slate-500'>剧情介绍 · 可选</span><textarea value={draft.premise} onChange={event => update('premise', event.target.value)} placeholder='不填写也能直接开场；也可以写地点、冲突或必须守住的设定……' className='mt-2 w-full min-h-28 p-4 rounded-2xl bg-white border border-slate-200 text-sm leading-7 resize-y outline-none' /></label>
-                <div className='mt-5'><div className='text-[10px] font-bold text-slate-500'>谁先落笔</div><div className='mt-2 grid grid-cols-2 p-1 rounded-xl bg-slate-200'><button disabled={maskLocked} onClick={() => update('openingMode', 'user')} className={`py-2.5 rounded-lg text-[11px] font-bold disabled:opacity-60 ${(draft.openingMode || 'user') === 'user' ? 'bg-white shadow-sm text-violet-700' : 'text-slate-500'}`}>我先写</button><button disabled={maskLocked} onClick={() => update('openingMode', 'assistant')} className={`py-2.5 rounded-lg text-[11px] font-bold disabled:opacity-60 ${draft.openingMode === 'assistant' ? 'bg-white shadow-sm text-violet-700' : 'text-slate-500'}`}>故事先写</button></div><p className='mt-2 text-[10px] text-slate-400'>{draft.openingMode === 'assistant' ? '进入后可直接让故事根据标题与介绍写出第一幕。' : '进入后由你用当前身份写下第一句话。'}</p></div>
+                <div className='mt-5'><div className='text-[10px] font-bold text-slate-500'>谁先落笔</div><div className='mt-2 grid grid-cols-3 p-1 rounded-xl bg-slate-200'><button disabled={maskLocked} onClick={() => update('openingMode', 'user')} className={`py-2.5 rounded-lg text-[11px] font-bold disabled:opacity-60 ${(draft.openingMode || 'user') === 'user' ? 'bg-white shadow-sm text-violet-700' : 'text-slate-500'}`}>我先写</button><button disabled={maskLocked} onClick={() => update('openingMode', 'assistant')} className={`py-2.5 rounded-lg text-[11px] font-bold disabled:opacity-60 ${draft.openingMode === 'assistant' ? 'bg-white shadow-sm text-violet-700' : 'text-slate-500'}`}>故事先写</button><button disabled={maskLocked || draft.writesToCharacterMemory} onClick={() => setDraft(current => ({ ...current, openingMode: 'card', cardOpening: current.cardOpening || greetings[0], updatedAt: Date.now() }))} className={`py-2.5 rounded-lg text-[11px] font-bold disabled:opacity-40 ${draft.openingMode === 'card' ? 'bg-white shadow-sm text-violet-700' : 'text-slate-500'}`}>酒馆开场白</button></div><p className='mt-2 text-[10px] text-slate-400'>{draft.openingMode === 'card' ? '直接把所选开场白放入虚构剧场第一楼，你从下一句接戏，无需生成。' : draft.openingMode === 'assistant' ? '进入后可直接让故事根据标题与介绍写出第一幕。' : '进入后由你用当前身份写下第一句话。'}</p></div>
+                {draft.openingMode === 'card' && <div className='mt-4 rounded-2xl border border-violet-200 bg-white p-4'>
+                    <label className='block text-[11px] font-semibold text-violet-700'>选用角色卡开场白</label>
+                    {!maskLocked && <select aria-label='酒馆开场白' value={draft.cardOpening ? JSON.stringify([draft.cardOpening.characterId, draft.cardOpening.greetingIndex]) : ''} onChange={event => { const selected = greetings.find(item => JSON.stringify([item.characterId, item.greetingIndex]) === event.target.value); update('cardOpening', selected); }} className='mt-2 w-full rounded-xl border border-slate-200 bg-stone-50 p-3 text-xs'>
+                        <option value=''>请先在下方选择已导入酒馆卡的角色</option>
+                        {greetings.map(item => <option key={JSON.stringify([item.characterId, item.greetingIndex])} value={JSON.stringify([item.characterId, item.greetingIndex])}>{item.characterName} · {item.greetingIndex === 0 ? '主开场白' : '备选开场白 ' + item.greetingIndex}</option>)}
+                    </select>}
+                    {draft.cardOpening ? <p className='mt-3 max-h-64 overflow-y-auto whitespace-pre-wrap text-xs leading-7 text-slate-600'>{draft.cardOpening.content}</p> : <p className='mt-3 text-[11px] leading-6 text-slate-500'>角色需要先在神经链接中导入酒馆 PNG / JSON 卡，且卡内包含开场白。</p>}
+                    <p className='mt-2 text-[10px] leading-5 text-slate-400'>{'{{user}}、{{char}}'} 会按当前身份和开场白所属角色替换。开始后不能切换开场白；也可长按第一楼编辑正文。</p>
+                </div>}
             </section>
             <section className='pt-6 border-t border-slate-200'>
                 <div className='text-[9px] tracking-[.22em] uppercase font-bold text-violet-500'>02 / Cast</div><h2 className='mt-1 text-lg font-semibold'>让谁参与</h2>
@@ -94,7 +108,7 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
             </section>
             <section className='pt-6 border-t border-slate-200'>
                 <div className='text-[9px] tracking-[.22em] uppercase font-bold text-violet-500'>03 / Memory</div><h2 className='mt-1 text-lg font-semibold'>这段故事是真的吗</h2>
-                <div className='mt-4 grid grid-cols-2 p-1 rounded-xl bg-slate-200'><button disabled={maskLocked} onClick={() => setDraft(current => ({ ...current, mask: { type: 'user' }, writesToCharacterMemory: true, carryCharacterMemory: true, updatedAt: Date.now() }))} className={`py-3 rounded-lg text-[11px] font-bold disabled:opacity-35 ${draft.writesToCharacterMemory ? 'bg-white shadow-sm text-violet-700' : 'text-slate-500'}`}>真实时间陪伴</button><button disabled={maskLocked} onClick={() => setDraft(current => ({ ...current, writesToCharacterMemory: false, carryCharacterMemory: false, updatedAt: Date.now() }))} className={`py-3 rounded-lg text-[11px] font-bold disabled:opacity-35 ${!draft.writesToCharacterMemory ? 'bg-white shadow-sm text-violet-700' : 'text-slate-500'}`}>虚构剧场</button></div>
+                <div className='mt-4 grid grid-cols-2 p-1 rounded-xl bg-slate-200'><button disabled={maskLocked} onClick={() => setDraft(current => ({ ...current, mask: { type: 'user' }, openingMode: current.openingMode === 'card' ? 'user' : current.openingMode, writesToCharacterMemory: true, carryCharacterMemory: true, updatedAt: Date.now() }))} className={`py-3 rounded-lg text-[11px] font-bold disabled:opacity-35 ${draft.writesToCharacterMemory ? 'bg-white shadow-sm text-violet-700' : 'text-slate-500'}`}>真实时间陪伴</button><button disabled={maskLocked} onClick={() => setDraft(current => ({ ...current, writesToCharacterMemory: false, carryCharacterMemory: false, updatedAt: Date.now() }))} className={`py-3 rounded-lg text-[11px] font-bold disabled:opacity-35 ${!draft.writesToCharacterMemory ? 'bg-white shadow-sm text-violet-700' : 'text-slate-500'}`}>虚构剧场</button></div>
                 {maskLocked && <p className='mt-2 text-[10px] text-slate-400'>故事开始后，真实/虚构模式也会固定；虚构剧场的记忆输入仍可单独调整。</p>}
                 {draft.writesToCharacterMemory ? <div className='mt-5 p-4 rounded-2xl bg-amber-50 border border-amber-200'>
                     <div className='text-xs font-bold text-amber-800'>记忆输入与输出都会开启</div>
@@ -118,10 +132,11 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
                 <div className='mt-3 divide-y divide-slate-100 border-y border-slate-200'>{books.length === 0 ? <div className='py-6 text-center text-xs text-slate-400'>所选角色没有挂载世界书</div> : books.map(book => { const selected = draft.selectedWorldbookIds.includes(book.id); return <button key={book.id} onClick={() => update('selectedWorldbookIds', selected ? draft.selectedWorldbookIds.filter(id => id !== book.id) : [...draft.selectedWorldbookIds, book.id])} className='w-full py-3 flex items-center gap-3 text-left'><span className={`w-4 h-4 rounded border text-[10px] text-center text-white ${selected ? 'bg-violet-600 border-violet-600' : 'border-slate-300'}`}>{selected ? '✓' : ''}</span><span className='min-w-0'><span className='block text-xs font-semibold truncate'>{book.title}</span><span className='block text-[9px] text-slate-400'>{book.category || '未分类'}</span></span></button>; })}</div>
             </section>
             <section className='pt-6 border-t border-slate-200'>
-                <div className='text-[9px] tracking-[.22em] uppercase font-bold text-violet-500'>05 / Preset</div><h2 className='mt-1 text-lg font-semibold'>装载剧情预设</h2><p className='text-[10px] text-slate-500'>只支持糯米机专属剧情预设文件；内置预设复制后可编辑。</p>
+                <div className='text-[9px] tracking-[.22em] uppercase font-bold text-violet-500'>05 / Preset</div><h2 className='mt-1 text-lg font-semibold'>装载剧情预设</h2><p className='text-[10px] text-slate-500'>支持糯米机预设及酒馆 Chat Completion 预设 JSON；导入后可在制作器中调整。</p>
                 <div className='mt-3 flex gap-2'><select value={preset?.id || ''} onChange={event => setDraft(current => ({ ...current, presetId: event.target.value, presetOverride: undefined, updatedAt: Date.now() }))} className='min-w-0 flex-1 px-3 py-3 rounded-xl bg-white border border-slate-200 text-xs'>{presets.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select><button onClick={() => fileInput.current?.click()} className='w-11 rounded-xl bg-white border border-slate-200 grid place-items-center'><UploadSimple size={18} /></button><button disabled={!preset} onClick={() => { if (preset) void downloadStoryPreset(preset); }} className='w-11 rounded-xl bg-white border border-slate-200 grid place-items-center disabled:opacity-30'><DownloadSimple size={18} /></button></div>
                 <input ref={fileInput} type='file' accept='.json,.png,application/json,image/png' className='hidden' onChange={async event => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (!file) return; const imported = await onImportPreset(file); if (imported) setDraft(current => ({ ...current, presetId: imported.id, presetOverride: undefined, updatedAt: Date.now() })); }} />
                 {preset && <div className='mt-3 flex items-center justify-between'><span className='text-[10px] text-slate-500'>启用 {presetStats.enabled}/{presetStats.total} 条 · 按当前顺序与插入位置发送</span><button onClick={() => onEditPreset(preset, draft)} className='text-[10px] font-bold text-violet-600'>打开制作器</button></div>}
+                <StoryPresetImportNotes notes={effectivePreset?.document.importNotes} />
                 <div className='mt-5 pt-4 border-t border-slate-200'>
                     <div className='flex items-start justify-between gap-5'>
                         <div><div className='text-sm font-semibold'>不发送高级采样参数</div><p className='mt-1 text-[10px] leading-5 text-slate-500'>默认关闭。仅当接口不接受这些字段时开启；开启后不发送 top_p、frequency_penalty 和 presence_penalty。</p></div>
@@ -129,6 +144,7 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
                     </div>
                     {draft.omitSamplingParams && <p className='mt-3 border-l-2 border-amber-400 pl-3 text-[10px] leading-5 text-amber-700'>这会忽略当前预设中的三项参数，包括非默认值。正常支持酒馆参数的接口请保持关闭。</p>}
                 </div>
+
                 <div className='mt-5 pt-4 border-t border-slate-200'>
                     <div className='flex items-start justify-between gap-5'>
                         <div><div className='text-sm font-semibold'>400 兼容模式</div><p className='mt-1 text-[10px] leading-5 text-slate-500'>仅当接口提示“最后一条消息必须是 user”时开启。</p></div>
@@ -142,7 +158,7 @@ const StoryTheaterEditor: React.FC<Props> = ({ initial, characters, user, masks,
                 <div className='mt-2 flex items-end justify-between gap-4'><div><h2 className='text-lg font-semibold'>静态配置预算</h2><p className='mt-1 text-[10px] leading-5 text-slate-500'>这里只比较角色、世界书、预设与归档；剧场内会按续写实际使用的完整上下文统计历史、召回和本轮输入。</p></div><strong className='text-2xl font-serif'>{Object.values(tokenPreview).reduce((sum, value) => sum + value, 0).toLocaleString()}</strong></div>
                 <div className='mt-4 grid grid-cols-4 gap-2'>{Object.entries({ '角色': tokenPreview.actor, '世界书': tokenPreview.book, '预设': tokenPreview.preset, '归档': tokenPreview.archive }).map(([label, value]) => <div key={label} className='py-3 rounded-xl bg-white border border-slate-200 text-center'><div className='text-[9px] text-slate-400'>{label}</div><div className='mt-1 text-xs font-bold'>{value.toLocaleString()}</div></div>)}</div>
             </section>
-            <button onClick={save} disabled={saving || !draft.title.trim() || draft.characterIds.length === 0} className='w-full py-4 rounded-2xl bg-slate-900 text-white text-sm font-bold disabled:opacity-30'>{saving ? '正在保存……' : '保存并进入剧情'}</button>
+            <button onClick={save} disabled={saving || !draft.title.trim() || draft.characterIds.length === 0 || !validOpening} className='w-full py-4 rounded-2xl bg-slate-900 text-white text-sm font-bold disabled:opacity-30'>{saving ? '正在保存……' : '保存并进入剧情'}</button>
         </div></main>
     </div>;
 };

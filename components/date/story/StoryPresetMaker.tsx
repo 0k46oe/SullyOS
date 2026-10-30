@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import StoryPresetImportNotes from './StoryPresetImportNotes';
 import { ArrowDown, ArrowLeft, ArrowUp, Copy, DownloadSimple, FloppyDisk, LockSimple, Plus, Trash } from '@phosphor-icons/react';
 import type { StoryTheaterPreset, StoryTheaterPresetDocument, StoryTheaterPresetPrompt } from '../../../types';
 import {
@@ -207,6 +208,11 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
             {selected && <div className='mt-7 pt-6 border-t border-slate-200'>
                 {activeGroup.protected || isProtectedStoryPrompt(selected) ? <div className='py-8 text-center'><LockSimple size={28} className='mx-auto text-amber-400' /><div className='mt-2 text-xs font-bold'>系统连接内容已锁定</div><p className='mt-1 text-[10px] text-slate-400'>你仍可以在上方调整它与其他连接位的顺序。</p></div> : <>
                     <div className='grid grid-cols-2 gap-3'><label><span className='text-[10px] text-slate-500'>名称</span><input disabled={readOnly} value={selected.name} onChange={event => patchPrompt(selected.id, { name: event.target.value })} className='mt-1 w-full px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-xs' /></label><label><span className='text-[10px] text-slate-500'>消息位置</span><select disabled={readOnly} value={selected.role} onChange={event => patchPrompt(selected.id, { role: event.target.value as StoryTheaterPresetPrompt['role'] })} className='mt-1 w-full px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-xs'><option value='system'>规则</option><option value='user'>你</option><option value='assistant'>正文</option></select></label></div>
+                    <div className='mt-3 grid grid-cols-3 gap-2'>
+                        <label className='text-[10px] text-slate-500'>插入方式<select aria-label='提示词插入方式' disabled={readOnly} value={selected.injection ? 'depth' : 'relative'} onChange={event => patchPrompt(selected.id, { injection: event.target.value === 'depth' ? { depth: 4, order: 100 } : undefined })} className='mt-1 w-full rounded-xl border border-slate-200 bg-white p-2 text-xs'><option value='relative'>按列表顺序</option><option value='depth'>聊天深度</option></select></label>
+                        {selected.injection && <><label className='text-[10px] text-slate-500'>深度<input aria-label='提示词深度' type='number' min={0} max={10000} disabled={readOnly} value={selected.injection.depth} onChange={event => patchPrompt(selected.id, { injection: { ...selected.injection!, depth: Math.max(0, Math.min(10000, Math.round(Number(event.target.value) || 0))) } })} className='mt-1 w-full rounded-xl border border-slate-200 bg-white p-2 text-xs' /></label><label className='text-[10px] text-slate-500'>同深度顺序<input aria-label='提示词同深度顺序' type='number' disabled={readOnly} value={selected.injection.order} onChange={event => patchPrompt(selected.id, { injection: { ...selected.injection!, order: Number(event.target.value) || 0 } })} className='mt-1 w-full rounded-xl border border-slate-200 bg-white p-2 text-xs' /></label></>}
+                    </div>
+                    {selected.injection && <p className='mt-2 text-[10px] text-slate-400'>按实际聊天消息从末尾倒数，包含本轮输入；0 在本轮输入后，超长深度放在历史开头。</p>}
                     <textarea disabled={readOnly} value={selected.content} onChange={event => patchPrompt(selected.id, { content: event.target.value })} className='mt-3 w-full min-h-64 p-4 rounded-2xl bg-white border border-slate-200 font-mono text-[11px] leading-6 resize-y' placeholder='支持 {{user}} / {{char}} / {{group}}' />
                     {!readOnly && <label className='mt-3 block text-xs text-slate-500'>移动到分组<select aria-label='移动到分组' value='' onChange={event => { const target = event.target.value; if (!target) return; replaceDocument(moveStoryPresetPromptToGroup(draft.document, selected.id, target)); setActiveGroupKey(target); }} className='mt-2 w-full p-3 rounded-xl bg-white border border-slate-200'><option value=''>选择目标分组</option>{groups.filter(group => !group.protected && group.key !== activeGroup.key).map(group => <option key={group.key} value={group.key}>{group.label}</option>)}</select></label>}
                 </>}
@@ -231,6 +237,7 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
 
         <main className='story-page-scroll flex-1 overflow-y-auto px-5 py-6 pb-24'>
             <div className='max-w-2xl mx-auto'>
+                <StoryPresetImportNotes notes={draft.document.importNotes} />
                 {mode === 'simple' ? <>
                     <section className='pb-5 border-b border-slate-200'><div className='text-[9px] uppercase tracking-[.22em] font-bold text-violet-500'>Easy controls</div><h1 className='mt-1 text-3xl font-serif font-semibold'>只调看得懂的部分</h1><p className='mt-3 text-[11px] leading-6 text-slate-500'>角色、世界书、历史注入和底层发送结构由糯米机照管。这里的选择不会修改角色档案。</p>{readOnly && <p className='mt-3 text-[10px] text-amber-700'>这是内置原版。点右上角“复制调整”后即可保存你的选择。</p>}</section>
                     <div className='divide-y divide-slate-200'>{STORY_PRESET_SIMPLE_CHOICES.filter(choice => choice.ids.some(id => draft.document.prompts.some(prompt => prompt.id === id))).map(choice => {

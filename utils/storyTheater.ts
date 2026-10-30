@@ -15,6 +15,7 @@ import {
     type WorldbookScanMessage,
 } from './worldbook';
 import { shareOrDownloadFile } from './shareExport';
+import { convertTavernPreset } from './tavernPreset';
 
 export type StoryApiRole = 'system' | 'user' | 'assistant';
 export interface StoryApiMessage { role: StoryApiRole; content: string; }
@@ -201,7 +202,14 @@ export const normalizeStoryTheater = (entry: StoryTheaterEntry): StoryTheaterEnt
         ...entry,
         title: String(entry.title || '未命名剧情'),
         premise: String(entry.premise || ''),
-        openingMode: entry.openingMode === 'assistant' ? 'assistant' : 'user',
+        openingMode: entry.openingMode === 'card' && !entry.writesToCharacterMemory ? 'card' : entry.openingMode === 'assistant' ? 'assistant' : 'user',
+        cardOpening: entry.cardOpening && typeof entry.cardOpening.content === 'string' ? {
+            characterId: String(entry.cardOpening.characterId || ''),
+            characterName: String(entry.cardOpening.characterName || '角色'),
+            greetingIndex: Math.max(0, Math.round(Number(entry.cardOpening.greetingIndex) || 0)),
+            content: entry.cardOpening.content,
+        } : undefined,
+        cardOpeningConsumed: entry.cardOpeningConsumed === true,
         mask: entry.writesToCharacterMemory ? { type: 'user' } : entry.mask?.type === 'character' && entry.mask.id
             ? { type: 'character', id: entry.mask.id }
             : entry.mask?.type === 'custom' && entry.mask.id
@@ -301,6 +309,10 @@ const normalizeDocument = (value: any, fallbackName: string): StoryTheaterPreset
             section: { id: String(prompt.section.id), name: String(prompt.section.name || '自定义分组'), edge: prompt.section.edge },
         } : {}),
         ...(NATIVE_MARKERS.includes(prompt?.marker) ? { marker: prompt.marker } : {}),
+        ...(!prompt?.marker && prompt?.injection ? { injection: {
+            depth: Math.round(clampNumber(prompt.injection.depth, 0, 10000, 4)),
+            order: clampNumber(prompt.injection.order, -100000, 100000, 100),
+        } } : {}),
     }));
     if (prompts.length === 0) throw new Error('预设中没有提示词条目');
     return {
@@ -317,6 +329,8 @@ const normalizeDocument = (value: any, fallbackName: string): StoryTheaterPreset
         },
         prompts,
         assistantPrefill: String(value.assistantPrefill || ''),
+        ...(value.layout === 'tavern' ? { layout: 'tavern' as const } : {}),
+        ...(Array.isArray(value.importNotes) ? { importNotes: value.importNotes.filter((note: unknown) => typeof note === 'string').slice(0, 100) } : {}),
     };
 };
 
@@ -542,8 +556,7 @@ export const parseStoryTheaterPreset = (rawText: string, sourceFileName: string,
     let data: Record<string, any>;
     try { data = JSON.parse(rawText); } catch { throw new Error('不是有效的 JSON 预设'); }
     const fileBase = sourceFileName.replace(/\.json$/i, '').trim() || '导入预设';
-    if (data.schema !== 'sullyos.story-preset') throw new Error('只接受糯米机剧情预设（schema: sullyos.story-preset）');
-    const document = normalizeDocument(data, fileBase);
+    const document = normalizeDocument(data?.schema === 'sullyos.story-preset' ? data : convertTavernPreset(data, fileBase), fileBase);
     return { id: makeStoryTheaterId(), name: document.name, sourceFileName, format: 'sullyos-story-preset', document, createdAt: now, updatedAt: now };
 };
 
@@ -692,10 +705,11 @@ export const applyStoryPresetChoice = (
     prompts: document.prompts.map(prompt => optionIds.includes(prompt.id) ? { ...prompt, enabled: prompt.id === selectedId } : prompt),
 });
 
-const macroReplace = (text: string, userName: string, characterNames: string[]): string => text
-    .replace(/\{\{user\}\}/gi, userName || '你')
-    .replace(/\{\{char\}\}/gi, characterNames.join('、') || '角色')
-    .replace(/\{\{group\}\}/gi, characterNames.join('、') || '角色');
+export const replaceStoryMacros = (text: string, userName: string, characterNames: string[]): string => text
+    .replace(/\{\{user\}\}/gi, () => userName || '你')
+    .replace(/\{\{char\}\}/gi, () => characterNames.join('、') || '角色')
+    .replace(/\{\{group\}\}/gi, () => characterNames.join('、') || '角色');
+const macroReplace = replaceStoryMacros;
 
 export const STORY_MINI_THEATER_PROMPT_IDS = [
     'nmj-v3-theater-ai',
@@ -1011,9 +1025,9 @@ export const compileStoryPreset = (input: {
     const worldBeforePrompts = document.prompts.filter(prompt => prompt.marker === 'world_before');
     const enabledWorldBeforePrompt = worldBeforePrompts.find(prompt => prompt.enabled);
     const firstEnabledCharacterIndex = document.prompts.findIndex(prompt => prompt.enabled && prompt.marker === 'characters');
-    const shouldBackfillWorldBefore = worldBeforePrompts.length === 0 && Boolean(slots.worldBefore.trim());
+    const shouldBackfillWorldBefore = document.layout !== 'tavern' && worldBeforePrompts.length === 0 && Boolean(slots.worldBefore.trim());
     const shouldMoveWorldBeforeAheadOfCharacters = Boolean(
-        enabledWorldBeforePrompt
+        document.layout !== 'tavern' && enabledWorldBeforePrompt
         && firstEnabledCharacterIndex >= 0
         && document.prompts.indexOf(enabledWorldBeforePrompt) > firstEnabledCharacterIndex
         && slots.worldBefore.trim(),
@@ -1035,7 +1049,7 @@ export const compileStoryPreset = (input: {
             );
             injectedMarkers.add('world_before');
         }
-        if (!prompt.enabled || prompt.section) continue;
+        if (!prompt.enabled || prompt.section || prompt.injection) continue;
         let raw = prompt.content;
         if (prompt.marker) {
             if (injectedMarkers.has(prompt.marker)) continue;

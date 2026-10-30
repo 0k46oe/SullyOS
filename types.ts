@@ -2253,8 +2253,12 @@ export interface StoryTheaterEntry {
     id: string;
     title: string;
     premise: string;
-    /** 谁写下本剧情第一段：用户当前身份或模型故事正文。 */
-    openingMode?: 'user' | 'assistant';
+    /** 第一段来自用户、模型生成或已导入的角色卡。 */
+    openingMode?: 'user' | 'assistant' | 'card';
+    /** 选中的酒馆开场白快照；只用于虚构剧场的第一条正文。 */
+    cardOpening?: { characterId: string; characterName: string; greetingIndex: number; content: string };
+    /** 开场白已处理；删除第一楼后也不能再次自动插入。 */
+    cardOpeningConsumed?: boolean;
     /** 本剧情中用户执笔的身份；缺省时使用真实用户档案。 */
     mask?: StoryTheaterMaskSelection;
     characterIds: string[];
@@ -2295,6 +2299,8 @@ export interface StoryTheaterPresetPrompt {
     section?: { id: string; name: string; edge: 'start' | 'end' };
     /** marker 由发送器替换为角色/世界书/用户/场景/历史，不把占位条目当普通正文。 */
     marker?: 'characters' | 'world_before' | 'user' | 'world_after' | 'scenario' | 'examples' | 'history';
+    /** 酒馆的聊天深度插入；按实际历史消息倒数，0 位于本轮输入之后。 */
+    injection?: { depth: number; order: number };
 }
 
 export interface StoryTheaterPresetDocument {
@@ -2311,9 +2317,12 @@ export interface StoryTheaterPresetDocument {
     };
     prompts: StoryTheaterPresetPrompt[];
     assistantPrefill?: string;
+    /** 酒馆转换后保留原顺序，不使用旧版原生预设的世界书位置补全。 */
+    layout?: 'tavern';
+    importNotes?: string[];
 }
 
-/** 糯米机专属剧情预设。导入器只接受 sullyos.story-preset，不兼容其它应用格式。 */
+/** 存储和导出统一使用糯米机格式；酒馆 Chat Completion 预设在导入时转换。 */
 export interface StoryTheaterPreset {
     id: string;
     name: string;

@@ -186,9 +186,9 @@ describe('糯米机原生剧情预设边界', () => {
         expect(resolved.prompts.find(prompt => prompt.id === 'nmj-v616-silent-preflight')?.enabled).toBe(true);
     });
 
-    it('拒绝其它应用的 prompt/completion JSON', () => {
-        expect(() => parseStoryTheaterPreset(JSON.stringify({ prompts: [], prompt_order: [] }), 'foreign.json')).toThrow('只接受糯米机剧情预设');
-        expect(() => parseStoryTheaterPreset(JSON.stringify({ model: 'x', messages: [] }), 'completion.json')).toThrow('只接受糯米机剧情预设');
+    it('拒绝空预设和普通 completion 请求 JSON', () => {
+        expect(() => parseStoryTheaterPreset(JSON.stringify({ prompts: [], prompt_order: [] }), 'foreign.json')).toThrow('请选择糯米机剧情预设或酒馆');
+        expect(() => parseStoryTheaterPreset(JSON.stringify({ model: 'x', messages: [] }), 'completion.json')).toThrow('请选择糯米机剧情预设或酒馆');
     });
 
     it('内置小剧场对外只使用“你”和“角色”的称呼', () => {
@@ -203,7 +203,7 @@ describe('糯米机原生剧情预设边界', () => {
         }
     });
 
-    it('只导入 sullyos.story-preset 并归一化参数', () => {
+    it('导入原生 sullyos.story-preset 并归一化参数', () => {
         const imported = parseStoryTheaterPreset(JSON.stringify({
             schema: 'sullyos.story-preset',
             version: 1,

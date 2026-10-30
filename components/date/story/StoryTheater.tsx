@@ -25,6 +25,7 @@ import StoryVectorMemoryPanel from './StoryVectorMemoryPanel';
 import StoryArchivePanel from './StoryArchivePanel';
 import { StoryAppearanceButton, StoryTheaterThemeProvider } from './StoryTheaterTheme';
 import { deleteStoryTheaterData } from '../../../utils/storyTheaterDeletion';
+import { saveStoryTheaterWithCardOpening } from '../../../utils/storyTheaterOpening';
 
 interface Props {
     onSwitchCompanion: () => void;
@@ -62,7 +63,7 @@ const StoryTheaterContent: React.FC<Props> = ({ onSwitchCompanion, onClose }) =>
             const imported = parseStoryTheaterPreset(await source.text(), source.name);
             await DB.saveStoryTheaterPreset(imported);
             setCustomPresets(current => [imported, ...current.filter(item => item.id !== imported.id)]);
-            addToast(`已导入糯米机剧情预设「${imported.name}」`, 'success');
+            addToast(`已导入剧情预设「${imported.name}」${imported.document.importNotes?.length ? '，请查看兼容说明' : ''}`, 'success');
             return imported;
         } catch (error: any) {
             addToast(error?.message || '预设导入失败', 'error');
@@ -71,12 +72,22 @@ const StoryTheaterContent: React.FC<Props> = ({ onSwitchCompanion, onClose }) =>
     }, [addToast]);
 
     const saveEntry = useCallback(async (next: StoryTheaterEntry) => {
-        const normalized = normalizeStoryTheater(next);
-        await DB.saveStoryTheater(normalized);
+        let normalized = normalizeStoryTheater(next);
+        try {
+            if (normalized.openingMode === 'card') {
+                const identity = resolveStoryTheaterMask(normalized.mask, userProfile, characters, masks);
+                normalized = await saveStoryTheaterWithCardOpening(normalized, identity.name);
+            } else {
+                await DB.saveStoryTheater(normalized);
+            }
+        } catch (error: any) {
+            addToast(error?.message || '剧情保存失败，请重试', 'error');
+            return;
+        }
         setEntries(current => [normalized, ...current.filter(item => item.id !== normalized.id)].sort((a, b) => b.updatedAt - a.updatedAt));
         setActiveEntry(normalized);
         setView('session');
-    }, []);
+    }, [addToast, characters, masks, userProfile]);
 
     const persistEntryInSession = useCallback(async (next: StoryTheaterEntry) => {
         const normalized = normalizeStoryTheater(next);
@@ -262,7 +273,7 @@ const StoryTheaterContent: React.FC<Props> = ({ onSwitchCompanion, onClose }) =>
 
                 <section className='pt-6 border-t border-slate-200'>
                     <div className='flex items-center justify-between'><div><div className='text-[9px] tracking-[.22em] uppercase font-bold text-violet-500'>Native presets</div><h2 className='mt-1 text-lg font-semibold'>糯米机预设制作器</h2></div><div className='flex gap-2'><button onClick={() => importInput.current?.click()} className='w-10 h-10 rounded-full bg-white border border-slate-200 grid place-items-center'><UploadSimple size={17} /></button><button onClick={() => { setEditingPreset(createBlankStoryPreset()); setView('preset'); }} className='w-10 h-10 rounded-full bg-white border border-slate-200 grid place-items-center'><Plus size={17} /></button></div></div>
-                    <p className='mt-2 text-[10px] leading-5 text-slate-500'>仅支持导入与导出糯米机专属剧情预设文件，不支持其他应用的预设格式。</p>
+                    <p className='mt-2 text-[10px] leading-5 text-slate-500'>支持糯米机预设与酒馆 Chat Completion 预设 JSON；酒馆文件转换后可编辑，导出统一为糯米机格式。</p>
                     <input ref={importInput} type='file' accept='.json,.png,application/json,image/png' className='hidden' onChange={async event => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) await importPreset(file); }} />
                     <div className='mt-4 divide-y divide-slate-200'>{presets.map(preset => <div key={preset.id} className='flex items-center gap-2'><button onClick={() => { setEditingPreset(preset); setView('preset'); }} className='min-w-0 flex-1 py-3 flex items-center gap-3 text-left'><span className={`w-2 h-2 rounded-full ${preset.builtIn ? 'bg-amber-400' : 'bg-violet-500'}`} /><span className='min-w-0 flex-1 text-xs font-semibold truncate'>{preset.name}</span><span className='text-[9px] text-slate-400'>{preset.builtIn ? '内置只读' : `${preset.document.prompts.length} 条`}</span></button><button onClick={() => { void downloadStoryPreset(preset); }} className='w-9 h-9 shrink-0 rounded-full grid place-items-center text-slate-400' title={`导出 ${preset.name}`}><DownloadSimple size={15} /></button></div>)}</div>
                 </section>
