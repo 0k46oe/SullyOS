@@ -36,6 +36,14 @@ function response(action: object) {
         return reply({requestId: id, ...action});
     });
 }
+it.each(['main','evening'])('publishes a manual refresh when the model echoes its own public %s account ID',async accountId=>{
+    await publicSettings({identities:{[a.id]:{nickname:'白桃汽水',tags:[],accounts:[{id:'evening',name:'晚间茶话',purpose:'日常',tags:[]}]}}});
+    const feed=await readFriendFeed(),id=feed.accountGraph!.accounts.find(r=>r.ownerId===a.id&&r.accountId===accountId)!.id;
+    response({kind:'post',accountId:id,text:'傍晚把窗台收拾好了'});
+    const result=await refreshFriendFeed(user,api,undefined,undefined,()=>0);
+    expect(result.message).toBe('新动态已送达');expect(safeFetchJson).toHaveBeenCalledTimes(1);
+    expect((await readFriendFeed()).posts[0]).toMatchObject({authorId:a.id,accountId,authorName:accountId==='main'?'白桃汽水':'晚间茶话'});
+});
 it('uses the saved app API atomically for refresh, honors stream/temperature and keeps credentials out of material',async()=>{
     await publicSettings();
     const charApi={...api,model:'character-model',apiKey:'character-secret'};

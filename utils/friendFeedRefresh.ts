@@ -81,7 +81,8 @@ export async function refreshFriendFeed(user: UserProfile, globalApi: APIConfig,
         const action = result.friendFeedAction === null ? {requestId: task.id, kind: 'none'} : result.friendFeedAction;
         if (!action || typeof action !== 'object' || (action as {requestId?: string}).requestId !== task.id)
             throw Error('动态生成任务不匹配，请重试');
-        if (!await landFriendFeedEmotionAction(charId, action, source)) throw Error('内容未发布：账号或任务已变更，或内容重复');
+        let rejection='模型返回的动作不符合本轮要求，内容未保存';
+        if (!await landFriendFeedEmotionAction(charId, action, source,reason=>{rejection=reason;})) throw Error('内容未发布：'+rejection);
         const row = action as {kind?: string; npcActions?: unknown[]};
         return {warnings, message: row.kind === 'none' && !row.npcActions?.length ? '刷新完成，这次朋友们没有新回应' : commentPostId?'新评论已送达':'新动态已送达'};
     } catch(e) {

@@ -28,6 +28,14 @@
 @media(max-height:520px){.home-photo-mode .photo-dock{left:auto;right:12px;width:300px;max-width:48vw}.home-photo-mode .photo-dock .photo-controls{max-height:calc(100svh - 155px)}.home-photo-mode .photo-controls .photo-settings{max-height:calc(100svh - 225px)}.photo-dock-tools{flex-wrap:wrap;gap:4px}.photo-dock-tools button{min-height:30px;padding:5px}.photo-dock[data-preview=true] .photo-settings{max-height:100px}}
 /* The photo has its own aspect; rotating the controls never rotates exported pixels. */
 .photo-shell{position:absolute;inset:0;z-index:100;overflow:hidden;background:#181020}
+.photo-formats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.photo-formats button{text-align:left;transition:background .16s ease,color .16s ease}
+.photo-lettering{margin:12px 0;padding:10px 0;border-block:1px solid #ffffff20;font-size:12px}
+.photo-lettering summary{cursor:pointer;padding:4px 0}
+.photo-lettering label{display:flex;flex-direction:column;gap:6px;margin-top:12px;color:#e0d2e7}
+.photo-lettering input,.photo-lettering select{width:100%;min-width:0;min-height:42px;border:1px solid #ffffff30;border-radius:10px;background:#30253e;color:#fff3ff;padding:9px;font:inherit;font-size:16px}
+.photo-lettering input:focus-visible,.photo-lettering select:focus-visible{outline:2px solid #dca8f4;outline-offset:2px}
+@media(prefers-reduced-motion:reduce){.photo-formats button{transition:none}}
 .photo-frame{position:absolute;box-shadow:0 0 0 1px #ffffff12,0 18px 50px #0004;background:#131018}
 .photo-frame .photo-view{width:100%;height:100%;object-fit:fill}
 .photo-format-label{position:absolute;bottom:-22px;left:0;color:#c9bacd;font-size:9px;letter-spacing:1.5px;pointer-events:none}
