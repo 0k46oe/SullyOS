@@ -6,6 +6,7 @@ import { readableContextMemories } from './contextMemories';
 import { cleanApiMessages, flattenImageContentParts } from './promptMessageCleanup';
 import { normalizeUserImpression } from './impression';
 import { isScheduleFeatureOn } from './scheduleFeature';
+import { getCharacterInstructions } from './characterInstructions';
 
 export const countContextCharacters = (text: string) => Array.from(text).length;
 /** Local heuristic only, not a provider tokenizer or billing count. */
@@ -48,7 +49,7 @@ export function buildCharacterStats(char: CharacterProfile, user: UserProfile, r
     const historyCharacters = [...sources.values()].reduce((sum, s) => sum + s.characters, 0);
     const imp = normalizeUserImpression(char.impression);
     const otherRows = [
-        { title: '角色身份与核心设定', content: [char.name, char.description || '无', char.systemPrompt || '你是一个温柔、拟人化的AI伴侣。'].join('\n') },
+        { title: '角色身份与核心设定', content: [char.name, char.description || '无', getCharacterInstructions(char)].join('\n') },
         { title: '世界观', content: char.worldview || '' },
         { title: '内在认知', content: (char.selfInsights || []).join('\n') },
         { title: '用户画像', content: [user.name, user.bio || '无'].join('\n') },

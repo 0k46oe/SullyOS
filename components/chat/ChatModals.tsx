@@ -7,6 +7,8 @@ import ScheduleCard from '../schedule/ScheduleCard';
 import EmotionSettingsPanel from './EmotionSettingsPanel';
 import ChatInputSettings from './ChatInputSettings';
 import ChatSettingsSection from './ChatSettingsSection';
+import ChatRecordsPanel from './ChatRecordsPanel';
+import { isDefaultAiCompanionEnabled } from '../../utils/characterInstructions';
 import SecretNote from './SecretNote';
 import type { ChatInputPreferences } from '../../utils/chatInputPreferences';
 import { isTranslationLangPreset, normalizeTranslationLangLabel, TRANSLATION_LANG_MAX_LENGTH, TRANSLATION_LANG_PRESETS } from '../../utils/translationLang';
@@ -73,6 +75,8 @@ interface ChatModalsProps {
     onImportEmoji: () => void;
     onSaveSettings: () => void;
     onOpenHistoryCleanup?: () => void;
+    onSetDefaultAiCompanion?: (enabled: boolean) => void;
+    userName?: string;
     onArchive: () => void;
     onCreatePrompt: () => void;
     onEditPrompt: () => void;
@@ -260,7 +264,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     allHistoryMessages = [],
     contextRangeSnapshot,
     onTransfer, onImportEmoji, onSaveSettings,
-    onOpenHistoryCleanup,
+    onOpenHistoryCleanup, onSetDefaultAiCompanion, userName = '用户',
     onArchive, onCreatePrompt, onEditPrompt, onSavePrompt, onDeletePrompt,
     onSetHistoryStart, onRestoreAdaptiveContext, onJumpToMessageInChat, onEnterSelectionMode, onReplyMessage, onEditMessageStart, onConfirmEditMessage, onDeleteMessage, onCopyMessage, onToggleMessageFavorite, messageFavorited, onDeleteEmoji, onDeleteCategory, onRenameCategory, onDownloadCategory,
     allCharacters = [], onSaveCategoryVisibility,
@@ -396,6 +400,15 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                 <div className="space-y-3">
                     <ChatSettingsSection title="输入与发送" summary="表情联想、回车与自动回复">
                         <ChatInputSettings value={settingsInputPreferences} onChange={setSettingsInputPreferences} />
+                    </ChatSettingsSection>
+                    <ChatSettingsSection title="角色身份" summary="默认 AI 伴侣提示词与角色扮演">
+                        <label className="flex items-center justify-between gap-3 text-xs font-bold text-slate-700">
+                            默认 AI 伴侣提示词
+                            <input type="checkbox" role="switch" checked={isDefaultAiCompanionEnabled(activeCharacter)}
+                                onChange={event => onSetDefaultAiCompanion?.(event.target.checked)} />
+                        </label>
+                        <p className="text-[10px] leading-relaxed text-slate-500">开启：核心指令留空时使用“你是一个温柔、拟人化的AI伴侣。”。关闭：按人物设定扮演角色，不补入这句默认身份；已有角色指令和世界观继续使用。</p>
+                        <p className="text-[10px] text-slate-400">仅对当前角色生效，切换立即保存。导入酒馆卡默认关闭。</p>
                     </ChatSettingsSection>
                     <ChatSettingsSection title="消息显示" summary="系统日志显示设置">
                         <div className="pt-2 border-t border-slate-100">
@@ -688,7 +701,8 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                             )}
                         </div>
                     </ChatSettingsSection>
-                    <ChatSettingsSection title="聊天记录" summary="按范围清理或保留最近消息">
+                    <ChatSettingsSection title="聊天记录" summary="完整导出、本地高频词与记录清理">
+                        {modalType === 'chat-settings' && <ChatRecordsPanel key={activeCharacter.id} character={activeCharacter} userName={userName} />}
                         {onOpenHistoryCleanup && <div>
                             <button type="button" onClick={onOpenHistoryCleanup} className="w-full rounded-2xl border border-red-100 bg-red-50 py-3 text-sm font-bold text-red-600">清理指定范围 / 保留最近 N 条</button>
                             <p className="mt-2 text-center text-[10px] text-slate-400">按页选择记录，永久删除前需要两次确认。</p>

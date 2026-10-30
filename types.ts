@@ -2905,6 +2905,8 @@ export interface CharacterProfile {
   /** Only the chat title uses the remark; the canonical name stays unchanged. */
   chatShowRemark?: boolean;
   systemPrompt: string;
+  /** Per-character identity fallback. Tavern imports default off, other profiles default on. */
+  defaultAiCompanionEnabled?: boolean;
   worldview?: string;
   /** Imported author-facing card information; never executed or injected as author instructions. */
   tavernImport?: {

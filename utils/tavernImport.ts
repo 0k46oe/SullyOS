@@ -99,6 +99,7 @@ export function parseImportedCharacterCard(raw: string, now = Date.now()): Chara
         avatar: defaultAvatar,
         description: '',
         systemPrompt: sections.join('\n\n'),
+        defaultAiCompanionEnabled: false,
         worldview: text(data.scenario),
         mountedWorldbooks: books.map(toMountedWorldbook),
         tavernImport: {

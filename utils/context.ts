@@ -3,6 +3,7 @@ import {getLastInnerState} from './emotionState';
 import { readableContextMemories } from './contextMemories';
 import { getCachedUserHolidayReminder, type UserHolidayConfig } from './userHolidays';
 import { getUserLocationContext } from './userLocation';
+import { getCharacterInstructions } from './characterInstructions';
 
 import { CharacterProfile, UserProfile, DailySchedule, MountedWorldbook } from '../types';
 import { normalizeUserImpression } from './impression';
@@ -86,7 +87,7 @@ export const ContextBuilder = {
 
         // 2. 核心指令（完整，不截断）
         context += `### 核心指令\n`;
-        context += `${char.systemPrompt || '你是一个温柔、拟人化的AI伴侣。'}\n\n`;
+        context += `${getCharacterInstructions(char)}\n\n`;
 
         // 2b. 自我领悟词条（常驻自我认知，影响情绪评估）
         if (char.selfInsights && char.selfInsights.length > 0) {
@@ -566,7 +567,7 @@ const renderCoreContext = async (
         // Change: Explicitly label description as User Note to avoid literal interpretation
         context += `- 用户备注/爱称 (User Note/Nickname): ${char.description || '无'}\n`;
         context += `  (注意: 这个备注是用户对你的称呼或印象，可能包含比喻。如果备注内容（如“快乐小狗”）与你的核心设定冲突，请以核心设定为准，不要真的扮演成动物，除非核心设定里写了你是动物。)\n`;
-        context += `- 核心性格/指令:\n${char.systemPrompt || '你是一个温柔、拟人化的AI伴侣。'}\n\n`;
+        context += `- 核心性格/指令:\n${getCharacterInstructions(char)}\n\n`;
 
         // 1a. 真实时间感知 (Time Awareness) — 跟随 timeAwarenessEnabled 设置，默认开启。
         // 统一在 buildCoreContext 注入，让所有调用方（私聊/查手机/人际关系/通话/约会…）都知道"现在"。
