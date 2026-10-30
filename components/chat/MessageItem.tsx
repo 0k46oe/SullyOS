@@ -3092,6 +3092,7 @@ const formatTimestamp = (ts: number) => {
                     <span className="sully-collaboration-file-meta min-w-0 flex-1">
                         <span className="sully-collaboration-file-name block max-h-[2.7em] overflow-hidden break-words text-[13px] font-semibold leading-[1.35] text-slate-800">{fileName}</span>
                         <span className="sully-collaboration-file-detail mt-1.5 block text-[10px] font-medium tracking-wide text-slate-400">{displayExtension} · {fileSize}</span>
+                        {typeof m.metadata?.jsonKindLabel === 'string' && <span className="mt-1 block truncate text-[10px] text-slate-400">{m.metadata.jsonKindLabel}</span>}
                     </span>
                     <span className="sully-collaboration-file-action grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition-colors group-hover:text-slate-700">
                         {openingCollaborationFile ? (

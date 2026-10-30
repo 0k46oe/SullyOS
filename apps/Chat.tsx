@@ -134,6 +134,7 @@ import {
     validateInstallableArtifact,
 } from '../features/collaboration/makers';
 import { upsertMountedWorldbooks } from '../utils/worldbook';
+import { parseJsonFile, jsonKindLabel } from '../utils/jsonFile';
 
 const CollaborationWindow = React.lazy(() => import('../features/collaboration/CollaborationWindow'));
 
@@ -1666,7 +1667,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         const finish = autoReply.beginSend(char?.id || null);
         try {
             const sent = await sendText(customContent, customType, metadata);
-            finish(sent === true && (!customType || ['text', 'image', 'emoji'].includes(customType)));
+            finish(sent === true && (!customType || ['text', 'image', 'emoji', 'collaboration_file'].includes(customType)));
         } catch (error) {
             finish(false);
             throw error;
@@ -1766,6 +1767,34 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         } finally {
             // 是否真正发出由 handleSendText 标记；这里仅解除图片处理期间的暂停。
             finishImage(false);
+        }
+    };
+
+    const handleJsonSelect = async (file: File) => {
+        const finishJson = autoReply.beginSend(char?.id || null);
+        try {
+            if (!char) return;
+            const parsed = await parseJsonFile(file);
+            const assetId = `chat_json_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+            await CollaborationStore.saveAsset({ id: assetId, blob: file, createdAt: Date.now() });
+            if (!inputPreferences.autoReply) setShowPanel('none');
+            await handleSendText(`[JSON 文件：${file.name}]`, 'collaboration_file', {
+                collaborationAssetId: assetId,
+                collaborationAttachmentKind: 'source',
+                fileName: file.name,
+                mimeType: parsed.mimeType || 'application/json',
+                fileSize: parsed.size,
+                format: 'json',
+                jsonKind: parsed.kind,
+                jsonKindLabel: jsonKindLabel(parsed.kind),
+                jsonSummary: parsed.summary,
+                extractedText: parsed.text,
+            });
+            addToast(`已读取 ${jsonKindLabel(parsed.kind)}：${file.name}`, 'success');
+        } catch (err: any) {
+            addToast(err?.message || 'JSON 文件读取失败', 'error');
+        } finally {
+            finishJson(false);
         }
     };
 
@@ -4460,6 +4489,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     onRemoveTheme={removeCustomTheme} activeThemeId={currentThemeId}
                     onPanelAction={handlePanelAction}
                     onImageSelect={handleImageSelect}
+                    onJsonSelect={handleJsonSelect}
                     isSummarizing={isSummarizing}
                     categories={visibleCategories}
                     activeCategory={activeCategory}

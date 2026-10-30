@@ -52,6 +52,22 @@ afterEach(() => {
 });
 
 describe('private chat input controls', () => {
+    it('opens the JSON chooser and delivers the selected file without using the image handler', () => {
+        const onJsonSelect = vi.fn();
+        renderInput({ showPanel: 'actions', onJsonSelect });
+        const tile = [...container.querySelectorAll('button')].find(button => button.textContent === 'JSON')!;
+        const chooser = container.querySelector<HTMLInputElement>('input[accept=".json,application/json,text/json"]')!;
+        const click = vi.spyOn(chooser, 'click');
+        act(() => tile.click());
+        expect(click).toHaveBeenCalledOnce();
+        const file = new File(['{}'], 'preset.json', { type: 'application/json' });
+        Object.defineProperty(chooser, 'files', { value: [file] });
+        act(() => chooser.dispatchEvent(new Event('change', { bubbles: true })));
+        expect(onJsonSelect).toHaveBeenCalledWith(file);
+        expect(props.onImageSelect).not.toHaveBeenCalled();
+        expect(chooser.value).toBe('');
+    });
+
     it('keeps the existing send button and Enter behavior by default', () => {
         renderInput();
         expect(primary().getAttribute('aria-label')).toBe('发送文字');

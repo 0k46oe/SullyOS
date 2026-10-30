@@ -18,6 +18,10 @@ import React, { useEffect, useState } from 'react';
 import { AMSG_INSTANT_CHAT_ROUTE_EVENT, type InstantChatRouteDetail } from '../../utils/amsgInstantChat';
 
 const NOTICES: Record<string, { title: string; hint: string }> = {
+    'json-file-local-only': {
+        title: 'JSON 文件在本地生成',
+        hint: '为保留完整文件，请保持当前页面打开直到完成',
+    },
     'worker-outdated': {
         title: '这一轮在本地生成',
         hint: '云端 Worker 版本较旧，暂不支持即时对话，请去设置里更新一下',

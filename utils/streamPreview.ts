@@ -19,6 +19,8 @@ import type { Message } from '../types';
 
 /** 跨行块规则：open 命中进入抑制态，直到 close 命中（含闭合行本身）。 */
 const BLOCK_RULES: Array<{ open: RegExp; close: RegExp }> = [
+    // JSON/file bodies are delivered as attachments, never as preview bubbles.
+    { open: /^```artifact\s*$/i, close: /^```\s*$/ },
     // Notion / 飞书日记多行块 —— 正文是日记内容，不是聊天气泡
     { open: /\[\[(?:FS_)?DIARY_START/i, close: /\[\[(?:FS_)?DIARY_END\]\]/i },
     // HTML 卡片块
@@ -77,7 +79,7 @@ export function computeStreamPreviewBubbles(fullText: string): string[] {
     // Stream the unfinished tail too, but stop before a possible control/tag prefix.
     // This keeps ordinary one-paragraph replies live without flashing partial directives.
     if (!inBlockClose && trailing.trim()) {
-        const markerIndexes = [trailing.indexOf('['), trailing.indexOf('<'), trailing.indexOf('%%')]
+        const markerIndexes = [trailing.indexOf('['), trailing.indexOf('<'), trailing.indexOf('%%'), trailing.indexOf('`')]
             .filter(index => index >= 0);
         const safeEnd = markerIndexes.length > 0 ? Math.min(...markerIndexes) : trailing.length;
         const safeTrailing = trailing.slice(0, safeEnd).trim();

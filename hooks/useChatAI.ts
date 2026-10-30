@@ -52,6 +52,7 @@ import { announceInstantChatRoute, getInstantChatPending, resolveInstantChatRead
 // worker 模块的常量叶子（零运行时依赖，前端引它不带进 worker 环境）：
 // 云端 fire 的总时长上限，安全网超时从它推导，worker 调预算时前端自动跟上。
 import { INSTANT_TOTAL_TIMEOUT_MS } from '../worker/amsg/src/instantChat';
+import { requiresLocalJsonFiles } from '../utils/jsonFile';
 import { appendInstantTraceEntry } from '../utils/instantTraceLog';
 import { AMSG2_TOOL_NAMES, buildAmsg2Tools, createAmsg2ToolSession, executeAmsg2ToolWithOutcome, isAmsg2GlobalReady, type Amsg2ToolOutcome } from '../utils/amsg2ToolBridge';
 import { AMSG2_EMPTY_REPLY_PROMPT, AMSG2_WRAP_UP_PROMPT, createAmsg2StallTracker, extractToolRoundLeadIn, mergeToolRoundLeadIns } from '../utils/amsg2ToolLoop';
@@ -838,6 +839,7 @@ export const useChatAI = ({
                     : instantChatReadiness.workerBundleCurrent === undefined ? 'sar-module-worker-unverified'
                         : null;
             const instantChatVeto: string | null = sarWorkerVeto
+                ?? (requiresLocalJsonFiles(contextMsgs) ? 'json-file-local-only' : null)
                 ?? (luckinChatOn ? 'luckin-chat'
                 : mcdMiniOpen ? 'mcd'
                     : luckinMiniOpen ? 'luckin'
@@ -861,6 +863,8 @@ export const useChatAI = ({
                         ? '[AmsgInstantChat] 这一轮没上云（SAR 模块生效中，没问到那台 Worker 的版本、确认不了它认得模块的回复信封），本地生成。连上云端探到版本后会自己回到云端'
                         : skipReason === 'mcp-worker-unreachable'
                         ? '[AmsgInstantChat] 这一轮没上云（有 MCP 服务器填的是本机/内网地址，worker 够不着），本地生成，工具照常可用'
+                        : skipReason === 'json-file-local-only'
+                        ? '[AmsgInstantChat] JSON 文件读写在本地生成，保留完整文件，避免推送分段改写内容'
                         : `[AmsgInstantChat] 这一轮没上云（${skipReason} 点单流程需要客户端交互），本地生成`,
                 );
                 appendInstantTraceEntry({

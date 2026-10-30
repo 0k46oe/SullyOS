@@ -38,6 +38,8 @@ export interface CollaborationAttachment {
   size: number;
   createdAt: number;
   extractedText?: string;
+  jsonKind?: 'tavern-preset' | 'character-card' | 'worldbook' | 'generic-json';
+  jsonSummary?: string;
   pageCount?: number;
   format?: CollaborationArtifactFormat;
   installableKind?: CollaborationMakerKind;

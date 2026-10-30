@@ -49,6 +49,7 @@ import {
 import { buildCollaborationContextSnapshot, buildCollaborationTurnMemoryContext, buildLiveCollaborationChatContext } from './context';
 import { runCollaborationTurn, isCollaborationApiConfigured, summarizeCollaborationForMemory } from './engine';
 import { collaborationBlobToDataUrl, extractSourceFile, isCollaborationImageFile, materializeArtifact, parseArtifactBlocks } from './files';
+import { jsonKindLabel } from '../../utils/jsonFile';
 import { normalizeCollaborationVisibleText, parseCollaborationMarkdown } from './markdown';
 import type { CollaborationInlineSpan } from './markdown';
 import { parseCollaborationRichOutput, resolveCollaborationEmoji, sanitizeCollaborationRichOutputSource } from './richOutput';
@@ -1973,6 +1974,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
           : file;
         let extractedText: string | undefined;
         let pageCount: number | undefined;
+        let jsonKind: CollaborationAttachment['jsonKind'];
+        let jsonSummary: string | undefined;
         if (isImage) {
           if (chatApi.visionApi?.enabled) {
             try {
@@ -1990,6 +1993,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
           const extracted = await extractSourceFile(file, setUploadStatus);
           extractedText = extracted.text;
           pageCount = extracted.pageCount;
+          jsonKind = extracted.jsonKind;
+          jsonSummary = extracted.jsonSummary;
         }
         const attachment: CollaborationAttachment = {
           id: collaborationId('attachment'),
@@ -2001,6 +2006,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
           createdAt: Date.now(),
           extractedText,
           pageCount,
+          jsonKind,
+          jsonSummary,
         };
         setPendingAttachments(previous => [...previous, { attachment, blob }]);
         acceptedCount += 1;
@@ -2102,7 +2109,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
     const choice = await requestActionDialog({
       title: `让 ${character.name} 在日常聊天中知道协同功能？`,
       description: `${character.name} 会知道你们另有一个独立工作区，也能读取并发送文件柜里已经做好的文件。`,
-      detail: '普通聊天不会因此变成工作模式：不能在那里新建、修改、整理或重新导出 Word、PDF、美化和可安装作品。真正干活仍要进入「协同工作」。',
+      detail: '普通聊天支持直接读取和导出 JSON；Word、PDF、美化和可安装作品仍在「协同工作」中制作。',
       confirmLabel: '仍然开启',
       cancelLabel: '暂不开启',
       tone: 'warning',
@@ -2666,7 +2673,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
                 {pendingAttachments.map(item => (
                   <div key={item.attachment.id} className="flex max-w-[220px] shrink-0 items-center gap-2 rounded-xl bg-slate-100 px-3 py-2">
                     {/^image\//i.test(item.attachment.mimeType) ? <ImageSquare size={16} className="shrink-0 text-sky-500" /> : <FileText size={16} className="shrink-0 text-indigo-500" />}
-                    <span className="truncate text-[10px] text-slate-600">{item.attachment.name}</span>
+                    <span className="min-w-0 text-[10px] text-slate-600"><span className="block truncate">{item.attachment.name}</span>{item.attachment.jsonKind && <span className="block truncate text-[9px] text-slate-400">{jsonKindLabel(item.attachment.jsonKind)}</span>}</span>
                     <button type="button" onClick={() => setPendingAttachments(previous => previous.filter(pending => pending.attachment.id !== item.attachment.id))} className="text-slate-400"><X size={13} /></button>
                   </div>
                 ))}
@@ -2675,7 +2682,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
             )}
             <div className="collab-composer-field flex items-end gap-2 rounded-[24px] border border-slate-200/90 bg-white px-2 py-2 shadow-[0_8px_30px_rgba(15,23,42,.08)]">
               <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isGenerating || !!uploadStatus} className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-slate-500 active:bg-slate-100 disabled:opacity-40" aria-label="上传文件或参考图片" title="支持图片、PDF、Word 与文本资料"><FileArrowUp size={21} /></button>
-              <input ref={fileInputRef} type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.docx,.doc,.txt,.md,.markdown,.json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml" className="hidden" onChange={event => void handleFiles(event.target.files)} />
+              <input ref={fileInputRef} type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.docx,.doc,.txt,.md,.markdown,.json,application/json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml" className="hidden" onChange={event => void handleFiles(event.target.files)} />
               <textarea
                 value={draft}
                 disabled={makerSaving}
