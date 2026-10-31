@@ -1091,6 +1091,13 @@ const Appearance: React.FC = () => {
                 )}
 
                 <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+                    <h2 className="text-sm font-bold text-slate-400 mb-3">界面风格</h2>
+                    <div className="grid grid-cols-3 gap-2 mb-4" role="group" aria-label="界面风格">
+                        {([{id:'claude-paper',name:'纸页 · Claude 色系'},{id:'monochrome',name:'黑白简约'},{id:'legacy',name:'原版配色'}] as const).map(item => <button key={item.id} type="button" aria-pressed={(theme.interfaceStyle || 'claude-paper') === item.id} onClick={() => updateTheme({interfaceStyle:item.id})} className={`rounded-xl border p-3 text-xs ${(theme.interfaceStyle || 'claude-paper') === item.id ? 'border-primary bg-primary-light text-primary' : 'border-slate-200 text-slate-600'}`}>{item.name}</button>)}
+                    </div>
+                    <div className="flex gap-2 mb-6" role="group" aria-label="界面日夜模式">
+                        {([{id:'light',name:'日间'},{id:'dark',name:'夜间'},{id:'system',name:'跟随系统'}] as const).map(item => <button key={item.id} type="button" aria-pressed={(theme.interfaceColorMode || (theme.darkMode ? 'dark' : 'light')) === item.id} onClick={() => updateTheme({interfaceColorMode:item.id,darkMode:item.id==='dark'})} className={`flex-1 rounded-lg py-2 text-xs ${(theme.interfaceColorMode || (theme.darkMode ? 'dark' : 'light')) === item.id ? 'bg-primary text-white' : 'bg-slate-100 text-slate-500'}`}>{item.name}</button>)}
+                    </div>
                     <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4">Preset Themes</h2>
                     <div className="flex gap-3 mb-6 overflow-x-auto no-scrollbar pb-1">
                         {THEME_PRESETS.map(preset => (

@@ -85,7 +85,7 @@ describe('October release: Settings backup categories', () => {
     it('media ZIP restores Bibi image bytes without overwriting newer posts, comments, API or home records', async () => {
         const pixels = new Uint8Array([137,80,78,71]);
         const token = await putImageBlob(new Blob([pixels],{type:'image/png'}));
-        const restored = await archive({collaborationBackupMode:'media_only',assets:[{id:'media-test',data:'new-image'}],friendFeedMedia:collectFriendFeedMedia(feed(token))});
+        const restored = await archive({collaborationBackupMode:'media_only',assets:[{id:'media-test',data:token}],friendFeedMedia:collectFriendFeedMedia(feed(token))});
         const current = stripBackupImages(feed()) as FriendFeedState;
         current.posts[0].text='导出之后改过的正文';
         current.posts[0].comments=[{id:'reply',authorId:'user',authorName:'我',text:'后来写的评论',createdAt:124}];
@@ -98,7 +98,7 @@ describe('October release: Settings backup categories', () => {
         await DB.importFullData(restored as any);
         expect(await currentFeed()).toEqual({...current,posts:[{...current.posts[0],images:[{url:token,thumbnail:token}]},current.posts[1]]});
         for(const [key,value] of [['home_visits_v1','keep-visits'],['home_secrets_v1_char','keep-secrets'],['friend_feed_api','keep-api'],['unrelated-setting','keep-setting']]) expect(await DB.getAsset(key)).toBe(value);
-        expect(await DB.getAsset('media-test')).toBe('new-image');
+        expect(await DB.getAsset('media-test')).toBe(token);
         expect(new Uint8Array(await (await getBlobForRef(token))!.arrayBuffer())).toEqual(pixels);
     });
 

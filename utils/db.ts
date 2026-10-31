@@ -1,6 +1,7 @@
 import { readLocalCursor } from './localRead';
 import { applyFriendFeedMedia, collectFriendFeedMedia, isActivityTextAsset } from './activityBackup';
 import { compactMemoryLink } from './memoryPalace/linkPrecision';
+import { backupMode, stripSplitMetadata, mergeTextMedia, mergeMediaOnly, mergeSplitAsset, isAppearanceAsset, preserveCharacterMedia, PENDING_CHARACTER_MEDIA } from './backupSplitMerge';
 import { reportDatabaseFailure } from './databaseHealth';
 import { associateDatabaseOpen, beginDatabaseOpen, recordDatabaseOpen } from './databaseOpenDiagnostics';
 import {migrateLegacyWhiteboxPresets} from './legacyWhiteboxPresets';
@@ -3582,6 +3583,57 @@ export const DB = {
       }
   },
 
+  /** Bounded bulk reads in one snapshot. A cheap count request keeps the readonly
+   * transaction alive while the consumer compresses a batch. No getAll of the
+   * entire table, no cursor IPC per record, and no cross-transaction torn scan. */
+  streamStoreBatches: async (
+      storeName: string,
+      onBatch: (rows: any[]) => Promise<void>,
+      batchSize = 1000,
+  ): Promise<void> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(storeName)) return;
+      if (!Number.isSafeInteger(batchSize) || batchSize < 1) throw new Error('备份批次大小无效');
+      await new Promise<void>((resolve, reject) => {
+          const tx = db.transaction(storeName, 'readonly');
+          const store = tx.objectStore(storeName);
+          let failed: unknown, waiting = false, ended = false;
+          let nextKey: IDBValidKey | undefined;
+          const fail = (error: unknown) => { failed = error; try { tx.abort(); } catch { reject(error); } };
+          const keepAlive = () => {
+              if (ended || failed) return;
+              const request = store.count(IDBKeyRange.only('__sully_backup_keepalive__'));
+              request.onsuccess = () => {
+                  if (ended || failed) return;
+                  // Schedule IDB requests from an IDB event, where WebKit also
+                  // considers the transaction active after an async consumer.
+                  if (waiting) keepAlive();
+                  else read(nextKey);
+              };
+          };
+          const read = (last?: IDBValidKey) => {
+              if (failed) return;
+              const range = last === undefined ? undefined : IDBKeyRange.lowerBound(last, true);
+              const rows = store.getAll(range, batchSize);
+              const keys = store.getAllKeys(range, batchSize);
+              keys.onsuccess = () => {
+                  const batch = rows.result;
+                  if (!batch.length) { ended = true; return; }
+                  waiting = true; keepAlive();
+                  Promise.resolve().then(() => onBatch(batch)).then(() => {
+                      waiting = false;
+                      if (batch.length < batchSize) ended = true;
+                      else nextKey = keys.result[keys.result.length - 1];
+                  }).catch(fail);
+              };
+          };
+          tx.oncomplete = () => ended ? resolve() : reject(new Error('备份读取事务提前结束'));
+          tx.onerror = () => reject(failed || tx.error || new Error('备份读取失败'));
+          tx.onabort = () => reject(failed || tx.error || new Error('备份读取已中止'));
+          read();
+      });
+  },
+
   exportFullData: async (
       options: { includeBackendConnection?: boolean } = {},
   ): Promise<Partial<FullBackupData>> => {
@@ -3715,6 +3767,7 @@ export const DB = {
   importFullData: async (
       data: FullBackupData,
       options: {
+          memoryLinks?: import('./backupFormat').DeferredBackupArray;
           beforeWrite?: (root: any, label: string) => Promise<void>;
           onProgress?: (progress: {
               label: string;
@@ -3761,6 +3814,16 @@ export const DB = {
       ].filter(name => db.objectStoreNames.contains(name));
 
       const hasStore = (storeName: string) => availableStores.includes(storeName);
+      const keyPaths = new Map<string, string | string[] | null>();
+      const schemaTx = db.transaction(availableStores, 'readonly');
+      for (const name of availableStores) keyPaths.set(name, schemaTx.objectStore(name).keyPath);
+      const recordKey = (name: string, row: any): IDBValidKey => {
+          const path = keyPaths.get(name);
+          const valueAt = (path: string) => path.split('.').reduce((value, key) => value?.[key], row);
+          const key = Array.isArray(path) ? path.map(valueAt) : path ? valueAt(path) : row.id ?? row.memoryId;
+          if (key === undefined) throw new Error(`备份记录缺少主键：${name}`);
+          return key;
+      };
 
       const waitForTransaction = (tx: IDBTransaction) => new Promise<void>((resolve, reject) => {
           tx.oncomplete = () => resolve();
@@ -3792,7 +3855,9 @@ export const DB = {
           });
       };
 
-      const mediaOnly = data.collaborationBackupMode === 'media_only';
+      const splitMode = backupMode(data);
+      stripSplitMetadata(data as any);
+      const mediaOnly = splitMode === 'media_only';
       // Older media archives included entire text records from assets. Recover
       // their pictures only; never roll a user's current history back with them.
       if (mediaOnly && !data.friendFeedMedia) {
@@ -3839,7 +3904,7 @@ export const DB = {
           data.xhsStockImages !== undefined,
           data.memoryNodes !== undefined,
           data.memoryVectors !== undefined,
-          data.memoryLinks !== undefined,
+          data.memoryLinks !== undefined || options.memoryLinks !== undefined,
           data.topicBoxes !== undefined,
           data.anticipations !== undefined,
           data.eventBoxes !== undefined,
@@ -3931,12 +3996,38 @@ export const DB = {
           const total = items.length;
           for (let i = 0; i < total; i += CHUNK_SIZE) {
               const end = Math.min(i + CHUNK_SIZE, total);
-              const chunk = items.slice(i, end).filter(Boolean);
+              let chunk = items.slice(i, end).filter(Boolean);
               if (chunk.length === 0) {
                   report(label, 'items', end, total);
                   continue;
               }
               await beforeWrite(chunk, label, restoreAssets);
+              if (splitMode !== 'full' && !['memory_links', 'memory_nodes', 'memory_vectors', 'memory_batches', 'memory_links', STORE_CHAR_GROUPS].includes(storeName)) {
+                  const existing = await new Promise<any[]>((resolve, reject) => {
+                      const tx = db.transaction(storeName, 'readonly');
+                      const store = tx.objectStore(storeName); const result: any[] = [];
+                      for (const item of chunk) {
+                          const key = recordKey(storeName, item);
+                          const request = store.get(key);
+                          request.onsuccess = () => result.push([key, request.result]);
+                      }
+                      tx.oncomplete = () => resolve(result); tx.onerror = () => reject(tx.error);
+                  });
+                  const byId = new Map<any, any>(existing);
+                  chunk = chunk.map(item => {
+                      const key = recordKey(storeName, item);
+                      const old = Array.isArray(key) ? existing.find(([k]) => JSON.stringify(k) === JSON.stringify(key))?.[1] : byId.get(key);
+                      if (mediaOnly && storeName === STORE_CHARACTERS) return item; // already projected by applyMediaToChar
+                      if (storeName === STORE_ASSETS) {
+                          if (mediaOnly && isAppearanceAsset(item.id)) return item;
+                          return mergeSplitAsset(old, item, splitMode);
+                      }
+                      if (!mediaOnly) return storeName === STORE_CHARACTERS ? preserveCharacterMedia(old, item) : mergeTextMedia(old, item);
+                      if ([STORE_THEMES, STORE_EMOJIS, STORE_EMOJI_CATEGORIES, STORE_JOURNAL_STICKERS, STORE_GALLERY, 'pixel_home_assets', STORE_CC_PARTS].includes(storeName)) return item;
+                      if (!old) return storeName === STORE_MESSAGES ? item : undefined;
+                      return { ...mergeMediaOnly(old, item), id: old.id };
+                  }).filter(Boolean);
+              }
               await withStore(storeName, store => {
                   chunk.forEach(item => store.put(storeName === 'memory_links' ? compactMemoryLink(item) : item));
               });
@@ -3954,7 +4045,16 @@ export const DB = {
           restoreAssets = true
       ) => {
           if (!hasStore(storeName) || items === undefined || items === null) return;
-          await clearStore(storeName);
+          if (splitMode === 'full') await clearStore(storeName);
+          else if (!mediaOnly) {
+              // Stage old values during putItems, then remove records absent from
+              // the incoming text snapshot. Media placeholders can borrow old bytes.
+              const ids = new Set(items.map(item => JSON.stringify(recordKey(storeName, item))));
+              await withStore(storeName, store => {
+                  const cursor = store.openKeyCursor();
+                  cursor.onsuccess = () => { const c = cursor.result; if (!c) return; if (!ids.has(JSON.stringify(c.primaryKey))) store.delete(c.primaryKey); c.continue(); };
+              });
+          }
           await putItems(storeName, items, label, restoreAssets);
       };
 
@@ -3997,6 +4097,16 @@ export const DB = {
       const hasCharacterBackup = Array.isArray(data.characters);
 
       await runSection('角色资料', data.characters !== undefined || data.mediaAssets !== undefined, async () => {
+          if (mediaOnly && data.mediaAssets) {
+              await beforeWrite(data.mediaAssets, '角色媒体', true);
+              const pending = await DB.getAssetRaw(PENDING_CHARACTER_MEDIA) || {};
+              for (const media of data.mediaAssets) pending[media.charId] = media;
+              await DB.saveAssetRaw(PENDING_CHARACTER_MEDIA, pending);
+          }
+          if (splitMode === 'text_only' && data.characters) {
+              const pending = await DB.getAssetRaw(PENDING_CHARACTER_MEDIA) || {};
+              data.characters = data.characters.map(c => pending[c.id] ? applyMediaToChar(c, pending[c.id]) : c);
+          }
           if (data.characters) {
               if (data.mediaAssets) {
                   await beforeWrite(data.mediaAssets, '角色媒体', true);
@@ -4032,10 +4142,8 @@ export const DB = {
           if (!hasStore(STORE_MESSAGES)) return;
           try {
               const isPatchMode = !hasCharacterBackup;
-              if (!isPatchMode) {
-                  await clearStore(STORE_MESSAGES);
-              }
-              await putItems(STORE_MESSAGES, data.messages || [], '聊天记录', true);
+              if (!isPatchMode) await clearAndAdd(STORE_MESSAGES, data.messages || [], '聊天记录', true);
+              else await putItems(STORE_MESSAGES, data.messages || [], '聊天记录', true);
               data.messages = undefined as any;
           } finally {
               // 分批导入中途失败也可能已覆盖旧记录；中途读取建立的缓存必须作废。
@@ -4067,6 +4175,10 @@ export const DB = {
               || !isActivityTextAsset(a.id) || a.id === 'friend_feed_v1' || typeof a.data !== 'string')) {
               throw new Error('活动文字备份格式不正确');
           }
+          if (splitMode === 'text_only') for (let i = 0; i < records.length; i++) {
+              const current = await DB.getAssetRaw(records[i].id);
+              records[i] = mergeSplitAsset(current === undefined ? undefined : { id: records[i].id, data: current }, records[i], splitMode);
+          }
           // A present section replaces its own subset, including an empty one.
           // Other assets (pictures, themes, and the separately restored feed) survive.
           await withStore(STORE_ASSETS, store => {
@@ -4080,13 +4192,20 @@ export const DB = {
       });
       await runSection('好友圈', data.friendFeed !== undefined && !mediaOnly, async () => {
           const {FRIEND_FEED_KEY, parseFriendFeed} = await import('./friendFeed');
-          const state = parseFriendFeed(JSON.stringify(data.friendFeed));
+          let state = parseFriendFeed(JSON.stringify(data.friendFeed));
+          const current = parseFriendFeed(await DB.getAsset(FRIEND_FEED_KEY));
+          if (splitMode === 'text_only') {
+              state = mergeTextMedia(current, state);
+              const pending = await DB.getAssetRaw('sully_split_feed_media_v1');
+              if (pending) state = applyFriendFeedMedia(state, pending);
+          }
           await DB.saveAsset(FRIEND_FEED_KEY, JSON.stringify(state));
       });
       await runSection('哔哔图片', data.friendFeedMedia !== undefined, async () => {
           const { FRIEND_FEED_KEY, parseFriendFeed } = await import('./friendFeed');
           const current = parseFriendFeed(await DB.getAsset(FRIEND_FEED_KEY));
           const state = applyFriendFeedMedia(current, data.friendFeedMedia!);
+          await DB.saveAssetRaw('sully_split_feed_media_v1', data.friendFeedMedia);
           await DB.saveAsset(FRIEND_FEED_KEY, JSON.stringify(state));
           data.friendFeedMedia = undefined;
       });
@@ -4341,10 +4460,19 @@ export const DB = {
           }
           data.memoryVectors = undefined as any;
       }, data.memoryVectors?.length || 0);
-      await runSection('记忆关系', data.memoryLinks !== undefined, async () => {
-          await clearAndAdd('memory_links', data.memoryLinks, '记忆关系', false);
+      await runSection('记忆关系', data.memoryLinks !== undefined || options.memoryLinks !== undefined, async () => {
+          if (options.memoryLinks) {
+              await clearStore('memory_links');
+              let done = 0;
+              for await (const batch of options.memoryLinks.batches()) {
+                  const length = batch.length;
+                  await putItems('memory_links', batch, '记忆关系', false);
+                  done += length; report('记忆关系', 'items', done, options.memoryLinks.count);
+                  await new Promise(resolve => setTimeout(resolve, 0));
+              }
+          } else await clearAndAdd('memory_links', data.memoryLinks, '记忆关系', false);
           data.memoryLinks = undefined as any;
-      }, data.memoryLinks?.length || 0);
+      }, options.memoryLinks?.count ?? data.memoryLinks?.length ?? 0);
       await runSection('话题盒', data.topicBoxes !== undefined, async () => {
           await clearAndAdd('topic_boxes', data.topicBoxes, '话题盒', false);
           data.topicBoxes = undefined as any;
@@ -4425,6 +4553,10 @@ export const DB = {
       await runSection('用户资料', data.userProfile !== undefined, async () => {
           if (!hasStore(STORE_USER)) return;
           await beforeWrite(data.userProfile, '用户资料', true);
+          if (splitMode !== 'full') {
+              const existing = await DB.getUserProfile();
+              data.userProfile = (mediaOnly ? mergeMediaOnly(existing, data.userProfile) : mergeTextMedia(existing, data.userProfile)) as any;
+          }
           await withStore(STORE_USER, store => {
               store.clear();
               if (data.userProfile) {
@@ -4437,6 +4569,19 @@ export const DB = {
       await runSection('银行状态', data.bankState !== undefined || data.bankDollhouse !== undefined, async () => {
           if (!hasStore(STORE_BANK_DATA)) return;
           await beforeWrite([data.bankState, data.bankDollhouse], '银行状态', true);
+          const old = await getAllFromStore<any>(STORE_BANK_DATA);
+          if (mediaOnly) {
+              const pending = await DB.getAssetRaw('sully_split_bank_media_v1') || {};
+              if (data.bankState) pending.state = data.bankState;
+              if (data.bankDollhouse) pending.dollhouse = data.bankDollhouse;
+              await DB.saveAssetRaw('sully_split_bank_media_v1', pending);
+              data.bankState = mergeMediaOnly(old.find(r => r.id === 'main_state'), data.bankState);
+              data.bankDollhouse = mergeMediaOnly(old.find(r => r.id === 'dollhouse_state')?.data, data.bankDollhouse);
+          } else if (splitMode === 'text_only') {
+              const pending = await DB.getAssetRaw('sully_split_bank_media_v1') || {};
+              if (data.bankState) data.bankState = mergeTextMedia(mergeMediaOnly(pending.state, old.find(r => r.id === 'main_state')), data.bankState);
+              if (data.bankDollhouse) data.bankDollhouse = mergeTextMedia(mergeMediaOnly(pending.dollhouse, old.find(r => r.id === 'dollhouse_state')?.data), data.bankDollhouse);
+          }
           await withStore(STORE_BANK_DATA, store => {
               store.clear();
               if (data.bankState) {
@@ -4452,5 +4597,10 @@ export const DB = {
       // 导入会覆盖相同 ID 的旧记录，不能复用导入前或中途建立的校正缓存。
       invalidateStoryTimelineRepair(db);
       await ensureStoryTimelineRepair(db);
+      if (splitMode === 'full') {
+          await DB.deleteAsset(PENDING_CHARACTER_MEDIA);
+          await DB.deleteAsset('sully_split_feed_media_v1');
+          await DB.deleteAsset('sully_split_bank_media_v1');
+      }
   }
 };

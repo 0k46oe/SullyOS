@@ -24,6 +24,12 @@ import React, { createContext, useContext, useEffect, useState, useRef, useCallb
 import type { VRSARActivity } from '../types';
 import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, CharacterGroup, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, CloudBackupConfig, CloudBackupFile, MemoryPalaceFeatureFlags } from '../types';
 import { DB } from '../utils/db';
+import { resolveSystemPalette } from '../utils/systemPalette';
+import type { BackupVolumeOutput } from '../utils/backupVolumes';
+import { validateVolumeFiles } from '../utils/backupVolumes';
+import { openBackupZip } from '../utils/backupZipReader';
+import '../components/os/systemPalette.css';
+import { backupMode, stripSplitMetadata, mergeMediaOnly, mergeTextMedia, projectMedia, isAppearanceAsset, mergeSplitAsset } from '../utils/backupSplitMerge';
 import { reportDatabaseFailure } from '../utils/databaseHealth';
 import type { AvatarTouchRecord } from '../utils/avatarTouch';
 import { clampClaudeTemperature, modelRejectsSamplingParams, stripSamplingParams } from '../utils/samplingParamCompat';
@@ -338,6 +344,9 @@ export type DeleteCharacterResult = { status: 'deleted'; cloudPending?: boolean;
  */
 /** importSystem 的可选行为。 */
 export interface ImportSystemOptions {
+  /** Prevalidated lazy ZIP reader for a combined/multipart restore. */
+  archive?: Awaited<ReturnType<typeof openBackupZip>>;
+  deferCompletion?: boolean;
   /**
    * 备份里带着 Worker 后端连接（地址 + 共享密钥 + 主密钥 + 用户 id）时问一句要不要连上。
    *
@@ -486,8 +495,8 @@ interface OSContextType {
   listCloudBackups: () => Promise<CloudBackupFile[]>;
 
   // System
-  exportSystem: (mode: 'text_only' | 'media_only' | 'full', options?: { includeBackendConnection?: boolean }) => Promise<Blob>;
-  importSystem: (fileOrJson: File | string, options?: ImportSystemOptions) => Promise<void>; // Accept File or String
+  exportSystem: (mode: 'text_only' | 'media_only' | 'full', options?: { includeBackendConnection?: boolean; volumeId?: string; onVolume?: (part: BackupVolumeOutput) => Promise<void> }) => Promise<Blob>;
+  importSystem: (fileOrJson: File | string | File[], options?: ImportSystemOptions) => Promise<void>;
   resetSystem: (options?: { force?: boolean }) => Promise<ResetSystemResult>;
   sysOperation: { status: 'idle' | 'processing', message: string, progress: number }; // Progress state
 
@@ -1924,6 +1933,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
       // 桌面皮肤：写到 <html data-skin>，供全局 CSS（index.html）与组件读取。
       root.dataset.skin = theme.skin || 'default';
+      const query = window.matchMedia('(prefers-color-scheme: dark)');
+      const applyPalette = () => {
+          const palette = resolveSystemPalette(theme, query.matches);
+          root.dataset.interface = palette.style;
+          root.dataset.interfaceDark = String(palette.dark);
+      };
+      applyPalette();
+      query.addEventListener('change', applyPalette);
+      return () => query.removeEventListener('change', applyPalette);
   }, [theme]);
 
   // --- Update: Handle Scheduled Messages with Unread Flags & Web Notifications ---
@@ -4038,12 +4056,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // --- MODIFIED EXPORT SYSTEM WITH SEPARATED ASSETS ZIP ---
   const exportSystem = async (
       mode: 'text_only' | 'media_only' | 'full',
-      exportOptions: { includeBackendConnection?: boolean } = {},
+      exportOptions: { includeBackendConnection?: boolean; volumeId?: string; onVolume?: (part: BackupVolumeOutput) => Promise<void> } = {},
   ): Promise<Blob> => {
+      const zip = createBackupArchive({ ...exportOptions, mode });
       try {
           setSysOperation({ status: 'processing', message: '正在初始化打包引擎...', progress: 0 });
           
-          const zip = createBackupArchive();
           const assetsFolder = zip.folder("assets");
           let assetCount = 0;
           let malformedImageCount = 0;
@@ -4203,11 +4221,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (mode === 'full') {
               storesToProcess = allStores; // Include everything
           } else if (mode === 'text_only') {
-              storesToProcess = allStores; // assets is filtered to activity text records below
+              storesToProcess = allStores.filter(name => !['themes', 'emojis', 'emoji_categories', 'gallery', 'journal_stickers', 'pixel_home_assets', 'cc_custom_parts'].includes(name));
           } else if (mode === 'media_only') {
               // media_only now includes themes/assets for complete media backup
               storesToProcess = ['gallery', 'emojis', 'emoji_categories', 'journal_stickers', 'user_profile', 'characters', 'messages', 'themes', 'assets', 'bank_data',
-                  'pixel_home_assets', 'pixel_home_layouts', 'daily_schedule', 'cc_custom_parts'];
+                  'pixel_home_assets', 'cc_custom_parts'];
           }
 
           // Fetch Social App & Room Assets (Optional, depends on mode)
@@ -4437,10 +4455,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       size: asset.blob.size,
                       createdAt: asset.createdAt,
                   });
+                  await zip.flush();
                   if (index % 10 === 0) await new Promise<void>(resolve => setTimeout(resolve, 0));
               }
           }
 
+          stripSplitMetadata(backupData as Record<string, any>);
+          if (mode === 'media_only' && backupData.socialAppData?.userProfile) backupData.socialAppData.userProfile = projectMedia(backupData.socialAppData.userProfile);
           const totalSteps = storesToProcess.length + 3;
           let currentStep = 0;
 
@@ -4603,6 +4624,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       : storeName === 'assets' && mode === 'text_only' ? 'activityTextAssets' : arrayField;
                   prewrittenStores[field] = await streamBackupArrayStore(zip, storeName, field, {
                       onSerialized: collectSerialized,
+                      onProgress: count => setSysOperation({ status: 'processing', message: `正在打包: ${storeName} · 已处理 ${count.toLocaleString()} 条`, progress: (currentStep / totalSteps) * 70 }),
                       transform: (item, index) => {
                           if (storeName === 'characters') {
                               normalizeCharacterRoomAssetsInPlace(item);
@@ -4613,6 +4635,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           }
                           if (storeName === 'assets') {
                               const id = item?.id;
+                              if (typeof id === 'string' && id.startsWith('sully_split_')) return undefined;
                               if (mode === 'text_only') return exportActivityTextAsset(item);
                               if (mode === 'media_only' && typeof id === 'string' && isActivityTextAsset(id)) return undefined;
                               if (typeof id === 'string' && (
@@ -4620,6 +4643,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                                   || (isCompanionVoiceAssetId(id) && !companionVoiceAssetIdsForBackup.has(id))
                                   || !shouldIncludeVoiceRelatedAssetInBackup(item, true)
                               )) return undefined;
+                              if (mode === 'media_only' && typeof id === 'string' && !isAppearanceAsset(id)) {
+                                  const projected = mergeSplitAsset(undefined, item, 'media_only');
+                                  if (!projected) return undefined;
+                                  item = projected;
+                              }
                               externalizeVoiceMessageBlob(item, index, (path, blob) => {
                                   zip.fileBlob(path, blob, { compression: 'STORE' });
                               });
@@ -4680,7 +4708,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               const processedData = mode === 'text_only'
                   ? stripTextOnlyMedia(rawData) : processObject(rawData, storeName);
               switch (storeName) {
-                  case 'user_profile': if (processedData[0]) backupData.userProfile = processedData[0]; break;
+                  case 'user_profile': if (processedData[0]) backupData.userProfile = mode === 'media_only' ? projectMedia(processedData[0]) : processedData[0]; break;
                   case 'bank_data': {
                       if (Array.isArray(processedData)) {
                           const mainState = processedData.find((item: any) => item.id === 'main_state');
@@ -4697,6 +4725,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }
               await new Promise(resolve => setTimeout(resolve, 10));
           }
+
+          stripSplitMetadata(backupData as Record<string, any>);
 
           // 进度条停在 70% 让用户看到接下来的"压缩中 X%"实际推进，而不是卡在 95% 干等。
           // ZIP 逐文件压缩，统一 level 6；媒体原字节 STORE。
@@ -4780,21 +4810,76 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           return content;
 
       } catch (e: any) {
+          await zip.dispose().catch(() => {});
           console.error("Export Failed", e);
           setSysOperation({ status: 'idle', message: '', progress: 0 });
           throw new Error("导出失败: " + e.message);
       }
   };
 
-  const importSystem = async (
-      fileOrJson: File | string,
+  const importBusyRef = useRef(false);
+  const importSystem = async (file: File | string | File[], options: ImportSystemOptions = {}): Promise<void> => {
+      if (importBusyRef.current) throw new Error('已有备份正在恢复，请等待完成');
+      importBusyRef.current = true;
+      try { await runImportSystem(file, options); }
+      finally { importBusyRef.current = false; setSysOperation({ status: 'idle', message: '', progress: 0 }); }
+  };
+  const runImportSystem = async (
+      fileOrJson: File | string | File[],
       importOptions: ImportSystemOptions = {},
   ): Promise<void> => {
+      if (Array.isArray(fileOrJson)) {
+          setSysOperation({ status: 'processing', message: '正在校验备份文件，数据尚未改动…', progress: 1 });
+          const files = fileOrJson;
+          const indexes = files.filter(f => f.name.endsWith('.sullyindex.json'));
+          const sources: Array<{ file: File; archive?: Awaited<ReturnType<typeof openBackupZip>> }> = [];
+          try {
+              const claimed = new Set<string>();
+              for (const index of indexes) {
+                  if (index.size > 4 * 1024 * 1024) throw new Error('分卷索引过大');
+                  const info = JSON.parse(await index.text());
+                  for (const part of info.parts || []) {
+                      if (claimed.has(part.name)) throw new Error('多个索引引用了同一个分卷，请分别恢复');
+                      claimed.add(part.name);
+                  }
+              }
+              if (files.some(f => f.name.endsWith('.sullypart') && !claimed.has(f.name))) throw new Error('选择了不属于索引的分卷，请检查文件');
+              // Verify every part of every set before touching the primary DB.
+              for (const index of indexes) {
+                  const blob = await validateVolumeFiles(index, files);
+                  sources.push({ file: index, archive: await openBackupZip(blob) });
+              }
+              if (!indexes.length && files.some(f => f.name.endsWith('.sullypart'))) throw new Error('请选择分卷索引 .sullyindex.json 和全部 .sullypart 文件');
+              for (const file of files.filter(f => !f.name.endsWith('.sullypart') && !f.name.endsWith('.sullyindex.json'))) {
+                  sources.push({ file, archive: file.name.toLowerCase().endsWith('.zip') ? await openBackupZip(file) : undefined });
+              }
+              if (!sources.length) throw new Error('没有可恢复的备份文件');
+              // Preflight all roots/manifests, then restore text before media.
+              const prepared: Array<typeof sources[number] & {mode?: string}> = [];
+              for (const source of sources) {
+                  const manifest = source.archive?.file('manifest.json');
+                  if (manifest) {
+                      const value = JSON.parse(await manifest.async('string'));
+                      const metadata = await assembleV2Backup(source.archive! as unknown as ZipFileReader, value, { validateOnly: true });
+                      assertSupportedSullyBackup(metadata);
+                      prepared.push({ ...source, mode: value.mode }); continue;
+                  }
+                  const root = source.archive ? await source.archive.file('data.json')?.async('string') : await source.file.text();
+                  const data = JSON.parse(root || 'null'); assertSupportedSullyBackup(data);
+                  prepared.push({ ...source, mode: backupMode(data) });
+              }
+              if (prepared.length > 1 && (prepared.length !== 2 || !prepared.some(p => p.mode === 'text_only') || !prepared.some(p => p.mode === 'media_only'))) throw new Error('组合恢复请选择一份文字备份和一份美化备份；全量备份请单独恢复');
+              prepared.sort((a, b) => Number(a.mode === 'media_only') - Number(b.mode === 'media_only'));
+              for (let i = 0; i < prepared.length; i++) await runImportSystem(prepared[i].file, { ...importOptions, archive: prepared[i].archive, deferCompletion: i < prepared.length - 1 });
+          } finally { for (const source of sources) await source.archive?.close(); }
+          return;
+      }
       const sourceName = typeof fileOrJson === 'string' ? 'json' : fileOrJson.name;
       const sourceSize = typeof fileOrJson === 'string'
           ? (typeof Blob !== 'undefined' ? new Blob([fileOrJson]).size : fileOrJson.length)
           : fileOrJson.size;
       const restoredAssetFiles = new Set<string>();
+      const deferredStores = new Map<string, import('../utils/backupFormat').DeferredBackupArray>();
       let totalAssetFiles = 0;
       let lastProgress = 0;
       let lastCurrent = '解析备份文件';
@@ -4855,14 +4940,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       };
 
       showImportProgress('parsing', '正在解析备份文件...', 1, { current: '解析备份文件', sourceSize });
+      let zip: JSZipLike | null = null;
       try {
           let data: FullBackupData;
-          let zip: JSZipLike | null = null;
 
           if (typeof fileOrJson === 'string') {
               data = JSON.parse(fileOrJson);
           } else {
-              if (!fileOrJson.name.endsWith('.zip')) {
+              if (!fileOrJson.name.toLowerCase().endsWith('.zip') && !importOptions.archive) {
                   try {
                       const text = await fileOrJson.text();
                       data = JSON.parse(text);
@@ -4870,10 +4955,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       throw new Error("无效的文件格式，请上传 .zip 或 .json");
                   }
               } else {
-                  const JSZip = await loadJSZip();
-                  const loadedZip = await JSZip.loadAsync(fileOrJson);
-                  zip = loadedZip;
-                  totalAssetFiles = countZipAssetFiles(loadedZip);
+                  const loadedZip = importOptions.archive || await openBackupZip(fileOrJson);
+                  zip = loadedZip as unknown as JSZipLike;
+                  totalAssetFiles = countZipAssetFiles(zip);
                   const manifestFile = loadedZip.file("manifest.json");
                   if (manifestFile) {
                       // v2：manifest 驱动的分片备份。assembleV2Backup 只读 zip、组装内存对象，
@@ -4888,6 +4972,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           loadedZip as unknown as ZipFileReader,
                           manifest,
                           {
+                              deferred: deferredStores,
                               onYield: () => new Promise<void>(r => setTimeout(r, 0)),
                               onShardProgress: (field, idx, total) => {
                                   showImportProgress('parsing', '正在解析备份分片...',
@@ -4896,6 +4981,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                               },
                           },
                       ) as FullBackupData;
+                      (data as any).backupMode = manifest.mode ?? (data as any).collaborationBackupMode;
                   } else {
                       // v1（老备份）：单根 data.json，原样保留，老备份永远打得开。
                       const dataFile = loadedZip.file("data.json");
@@ -4910,6 +4996,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // 必须发生在 restoreAssetsInPlace / DB.importFullData 之前：不受支持的第三方
           // 备份一旦命中特征就整包拒绝，不能出现“导入了一半才报错”的状态。
           assertSupportedSullyBackup(data);
+          stripSplitMetadata(data as any);
 
           // 在 importFullData 为释放内存逐项清空 data 字段前冻结“这是否是主历史替换”。
           // 新版 media_only 明确不动 SAR；旧备份没有 mode 时，只要带 characters/messages
@@ -5084,6 +5171,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           showImportProgress('database', '正在写入数据库...', 50, { current: '准备写入数据库', currentFile: '' });
           suppressFeedbackInvitation();
           await DB.importFullData(data, {
+              memoryLinks: deferredStores.get('memoryLinks'),
               allowBackendConnection,
               beforeWrite: restoreAssetsInPlace,
               onProgress: progress => {
@@ -5258,7 +5346,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               if (data.socialAppData.userId) localStorage.setItem('spark_user_id', data.socialAppData.userId);
               
               // Restore heavy assets to DB
-              if (data.socialAppData.userProfile) await DB.saveAsset('spark_social_profile', JSON.stringify(data.socialAppData.userProfile));
+              if (data.socialAppData.userProfile) {
+                  let current = {};
+                  try { current = JSON.parse(await DB.getAsset('spark_social_profile') || '{}'); } catch {}
+                  const mode = backupMode(data);
+                  const profile = mode === 'media_only' ? mergeMediaOnly(current, data.socialAppData.userProfile)
+                      : mode === 'text_only' ? mergeTextMedia(current, data.socialAppData.userProfile) : data.socialAppData.userProfile;
+                  await DB.saveAsset('spark_social_profile', JSON.stringify(profile));
+              }
               if (data.socialAppData.userBg) await DB.saveAsset('spark_user_bg', data.socialAppData.userBg);
           }
           
@@ -5341,7 +5436,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // 整段 best-effort：这是恢复流程的收尾，云端够不着不该让已经写好的本地数据回滚。
           try {
               const amsgWorkerUrl = (await ActiveMsgStore.getGlobalConfig()).workerUrl?.trim();
-              if (amsgWorkerUrl) {
+              if (amsgWorkerUrl && !importOptions.deferCompletion) {
                   const knownCharIds = new Set(importedChars.map(c => c.id));
                   const orphanCharIds = new Set<string>();
                   const remoteTasks = await ActiveMsgClient.listAllTasks();
@@ -5386,8 +5481,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           await snapshotLocalStorageMirror().catch(() => {});
           setSysOperation({ status: 'idle', message: '', progress: 100 });
           clearImportInProgress();
-          addToast('恢复成功，系统即将重启...', 'success');
-          setTimeout(() => window.location.reload(), 1500);
+          if (!importOptions.deferCompletion) addToast('恢复成功，系统即将重启...', 'success');
+          if (!importOptions.deferCompletion) setTimeout(() => window.location.reload(), 1500);
 
       } catch (e: any) {
           console.error("Import Error:", e);
@@ -5403,6 +5498,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               error: msg,
           });
           throw new Error(`恢复失败: ${msg}`);
+      } finally {
+          if (!importOptions.archive) await (zip as any)?.close?.();
       }
   };
 

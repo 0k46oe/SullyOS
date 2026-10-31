@@ -1,0 +1,46 @@
+import { expect, it } from 'vitest';
+import JSZip from 'jszip';
+import { createBackupArchive } from './backupArchive';
+import { validateVolumeFiles, cacheBackupVolume, finishCachedBackupSet, listCachedBackupSets, readCachedBackupFile, deleteCachedBackupSet, type BackupVolumeIndex } from './backupVolumes';
+import { openBackupZip } from './backupZipReader';
+import { writeV2Backup, assembleV2Backup, type DeferredBackupArray } from './backupFormat';
+import { DB } from './db';
+it('incremental split ZIP + shuffled files + checksum + lazy reader restores exact bytes and deferred links',async()=>{
+    const files:File[]=[];
+    const archive=createBackupArchive({volumeId:'test',volumeBytes:1024,mode:'full',onVolume:async p=>{files.push(new File([p.blob],p.name));}});
+    const binary=Uint8Array.from({length:13001},(_,i)=>(i*13)&255);
+    archive.file('assets/photo.bin',binary,{compression:'STORE'});await archive.flush();
+    const links=Array.from({length:123},(_,i)=>({id:`link_${i}`,sourceId:'a',targetId:'b',strength:.25}));
+    await writeV2Backup(archive,{characters:[],memoryLinks:links},{limits:{maxLen:2000,maxItems:30,hardMaxLen:10000},mode:'full'});
+    const index=await archive.generateBlob();
+    const indexFile=new File([index],'test.sullyindex.json');
+    const manifest:BackupVolumeIndex=JSON.parse(await index.text());
+    expect(files.length).toBeGreaterThan(3);expect(manifest.parts.every(p=>p.size<=1024)).toBe(true);
+    await expect(validateVolumeFiles(indexFile,files.slice(1))).rejects.toThrow(/缺少分卷/);
+    const damaged=[...files];damaged[0]=new File([new Uint8Array(files[0].size)],files[0].name);
+    await expect(validateVolumeFiles(indexFile,damaged)).rejects.toThrow(/损坏/);
+    const blob=await validateVolumeFiles(indexFile,[...files].reverse());
+    const zip=await openBackupZip(blob);
+    expect(await zip.file('assets/photo.bin')!.async('uint8array')).toEqual(binary);
+    const deferred=new Map<string,DeferredBackupArray>();
+    const data:any=await assembleV2Backup(zip,JSON.parse(await zip.file('manifest.json')!.async('string')),{deferred});
+    expect(data.memoryLinks).toBeUndefined();expect(deferred.get('memoryLinks')!.count).toBe(123);
+    await DB.importFullData(data,{memoryLinks:deferred.get('memoryLinks')});
+    expect(await DB.getRawStoreData('memory_links')).toHaveLength(123);
+    await zip.close();
+    const legacy=await JSZip.loadAsync(await blob.arrayBuffer());expect(await legacy.file('assets/photo.bin')!.async('uint8array')).toEqual(binary);
+});
+it('a volume write/quota failure rejects the export instead of reporting success',async()=>{
+    const archive=createBackupArchive({volumeId:'bad',volumeBytes:30,onVolume:async()=>{throw new Error('quota');}});
+    archive.file('data','some content');await expect(archive.generateBlob()).rejects.toThrow('quota');
+});
+it('temporary volumes survive reopening and cleanup only removes the selected backup set',async()=>{
+    await cacheBackupVolume('a',{blob:new Blob(['a']),name:'a.part',index:1});
+    await cacheBackupVolume('b',{blob:new Blob(['b']),name:'b.part',index:1});
+    expect((await listCachedBackupSets()).find(s=>s.id==='a')?.complete).toBe(false);
+    await finishCachedBackupSet({id:'a',createdAt:1,files:[{name:'a.part',size:1}]});
+    expect((await listCachedBackupSets()).some(s=>s.id==='a')).toBe(true);
+    expect(await(await readCachedBackupFile('a.part')).text()).toBe('a');
+    await deleteCachedBackupSet('a');await expect(readCachedBackupFile('a.part')).rejects.toThrow();
+    expect(await(await readCachedBackupFile('b.part')).text()).toBe('b');await deleteCachedBackupSet('b');
+});

@@ -17,6 +17,7 @@ import { Capacitor } from '@capacitor/core';
 import { extractContent, safeResponseJson } from '../utils/safeApi';
 import { extractModelIds, normalizeModelIds } from '../utils/modelList';
 import { shareOrDownloadBlob } from '../utils/shareExport';
+import { cacheBackupVolume, finishCachedBackupSet, listCachedBackupSets, readCachedBackupFile, deleteCachedBackupSet, type CachedBackupSet } from '../utils/backupVolumes';
 import { bucketRetryCount, isAnalyticsConfigured, isAnalyticsEnabled, setAnalyticsEnabled, trackEvent } from '../utils/analytics';
 import Modal from '../components/os/Modal';
 import UserHolidaySettings from '../components/settings/UserHolidaySettings';
@@ -587,6 +588,10 @@ const Settings: React.FC = () => {
   const [showVisionModelModal, setShowVisionModelModal] = useState(false);
   const [visionModelFilter, setVisionModelFilter] = useState('');
   const [showExportModal, setShowExportModal] = useState(false); // Used for completion now
+  const [volumeExport, setVolumeExport] = useState(true);
+  const [cachedBackupSets, setCachedBackupSets] = useState<CachedBackupSet[]>([]);
+  const [savingVolume, setSavingVolume] = useState<string | null>(null);
+  useEffect(() => { listCachedBackupSets().then(setCachedBackupSets).catch(() => {}); }, []);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
   /** 云端没清干净时停在这里：本地还一个字节都没动，等用户决定重试还是照样重置。 */
@@ -1509,7 +1514,7 @@ const Settings: React.FC = () => {
       trackEvent('导出本地备份', { scope: mode });
       try {
           // 二次确认：整包备份（full / text_only）本就包含你的 API 密钥等设置——这是预期行为，
-          // 但绝不能发给别人。media_only 只有媒体、不含密钥，视为可分享。
+          // 但绝不能发给别人。media_only 包含用户选择保存的媒体，分享前仍需确认内容。
           if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
               const includesSettings = mode !== 'media_only';
               const includesBackend = includesSettings && exportBackendConnection;
@@ -1517,7 +1522,7 @@ const Settings: React.FC = () => {
                   ? '该导出数据包含了明文密钥，以及主动消息 2.0 的后端连接（Worker 地址与主密钥）。拿到这个文件的人可以连上你那台 Worker，请不要发送给任何人'
                   : includesSettings
                   ? '该导出数据包含了明文密钥，请不要发送给任何人'
-                  : '该导出内容安全，可以用于分享';
+                  : '该导出包含头像、图片、装扮和媒体文件，请确认这些内容适合分享';
               if (!window.confirm(`${msg}\n\n点「确定」继续导出，「取消」中止。`)) {
                   trackEvent('取消导出前的密钥确认', { mode });
                   return;
@@ -1525,6 +1530,23 @@ const Settings: React.FC = () => {
           }
 
           // Trigger export (Context handles loading state UI)
+          if (volumeExport) {
+              const id = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0,8)}`;
+              const files: CachedBackupSet['files'] = [];
+              try {
+                  const index = await exportSystem(mode, { includeBackendConnection: exportBackendConnection, volumeId: id, onVolume: async part => {
+                      await cacheBackupVolume(id, part);
+                      files.push({ name: part.name, size: part.blob.size });
+                  }});
+                  const name = `Sully_${id}.sullyindex.json`;
+                  await cacheBackupVolume(id, { blob: index, name, index: 0 });
+                  files.unshift({ name, size: index.size });
+                  await finishCachedBackupSet({ id, files, createdAt: Date.now() });
+                  setCachedBackupSets(await listCachedBackupSets());
+                  addToast('分卷已生成，请在下方逐个保存索引和全部分卷', 'success');
+              } catch (error) { await deleteCachedBackupSet(id).catch(() => {}); throw error; }
+              return;
+          }
           const blob = await exportSystem(mode, { includeBackendConnection: exportBackendConnection });
           
           const fileName = `Sully_Backup_${mode}_${new Date().toISOString().slice(0, 10)}.zip`;
@@ -1552,11 +1574,12 @@ const Settings: React.FC = () => {
   };
 
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
+      const files = Array.from(e.target.files || []);
+      const file = files[0];
       if (!file) return;
 
       // Pass the File object directly to importSystem
-      importSystem(file, {
+      importSystem(files, {
           // 备份里带着 Worker 后端连接时问一句。程序分不清这份文件是自己的还是别人的
           // （换新设备时用户 id 本来就对不上），只有拿着文件的人知道，所以把话问出去。
           confirmBackendRestore: (workerUrl) => window.confirm(
@@ -2151,7 +2174,7 @@ const Settings: React.FC = () => {
   };
 
   return (
-    <div className="h-full w-full bg-[#f3f4f8] flex flex-col font-light relative isolate">
+    <div className="sully-settings h-full w-full bg-[#f3f4f8] flex flex-col font-light relative isolate">
 
       {/* GLOBAL PROGRESS OVERLAY */}
       {sysOperation.status === 'processing' && (
@@ -2169,7 +2192,7 @@ const Settings: React.FC = () => {
       )}
 
       {/* Header */}
-      <div className="bg-[#fffefe] border-b border-slate-200 shrink-0 z-10 sticky top-0" style={{ paddingTop: 'var(--safe-top)' }}>
+      <div className="sully-settings-header bg-[#fffefe] border-b border-slate-200 shrink-0 z-10 sticky top-0" style={{ paddingTop: 'var(--safe-top)' }}>
         <div className="flex items-center px-4 py-3">
         <div className="flex items-center gap-2 w-full">
             <button onClick={closeApp} className="p-2 -ml-2 rounded-full hover:bg-black/5 active:scale-90 transition-transform">
@@ -2257,6 +2280,19 @@ const Settings: React.FC = () => {
         >
             <StorageUsagePanel />
             <WebCacheControl />
+            <label className="mb-3 flex items-start gap-2 rounded-xl border border-slate-200 bg-white p-3">
+                <input type="checkbox" checked={volumeExport} onChange={e => setVolumeExport(e.target.checked)} className="mt-1" />
+                <span className="text-xs text-slate-600"><b>分卷导出（推荐手机使用）</b><span className="block text-[11px] text-slate-400">边生成边暂存，每卷约 16 MB。完成后逐个保存索引与全部分卷；取消勾选使用单个 ZIP。</span></span>
+            </label>
+            {cachedBackupSets.map(set => <div key={set.id} className="mb-4 rounded-xl border border-slate-200 p-3">
+                <div className="flex items-center justify-between mb-2"><b className="text-xs text-slate-600">{set.complete === false ? '未完成的临时备份' : '待保存的分卷备份'} · {set.files.length} 个文件</b><button type="button" className="text-xs text-slate-500" onClick={async () => { if (!window.confirm('确认移除这份临时备份？请先确认索引和全部分卷都已保存到文件。')) return; await deleteCachedBackupSet(set.id); setCachedBackupSets(await listCachedBackupSets()); }}>移除临时备份</button></div>
+                <p className="text-[11px] text-slate-400 mb-2">{set.complete === false ? '上次导出中断，这些分卷不完整，无法用于恢复。可移除后重新导出。' : '这些文件目前仍在本机缓存。请全部保存到“文件”，恢复时一起选择。索引也包含私人信息，不要分享。'}</p>
+                <div className="space-y-2">{set.files.map(file => <button key={file.name} type="button" disabled={savingVolume !== null || set.complete === false} onClick={async () => {
+                    setSavingVolume(file.name);
+                    try { const blob = await readCachedBackupFile(file.name); await shareOrDownloadBlob({ blob, fileName: file.name, shareTitle: '保存备份分卷', nativeChunked: true }); }
+                    catch (error: any) { addToast(error.message, 'error'); } finally { setSavingVolume(null); }
+                }} className="w-full flex justify-between gap-2 rounded-lg bg-slate-100 p-2 text-left text-[11px] text-slate-600"><span className="break-all">{file.name}</span><span className="shrink-0">{savingVolume === file.name ? '保存中…' : file.name.endsWith('.json') ? '保存索引' : `${(file.size / 1048576).toFixed(1)} MB · 保存`}</span></button>)}</div>
+            </div>)}
 
             <label className="mb-3 flex items-start gap-2 rounded-xl border border-slate-200 bg-white p-3 cursor-pointer">
                 <input
@@ -2276,7 +2312,7 @@ const Settings: React.FC = () => {
             </label>
 
             <div className="mb-3">
-                <button onClick={() => handleExport('full')} className="w-full py-4 bg-gradient-to-r from-violet-500 to-purple-600 border border-violet-300 rounded-xl text-xs font-bold text-white shadow-sm active:scale-95 transition-all flex flex-col items-center gap-2 relative overflow-hidden mb-3">
+                <button onClick={() => handleExport('full')} className="sully-backup-full w-full py-4 bg-gradient-to-r from-violet-500 to-purple-600 border border-violet-300 rounded-xl text-xs font-bold text-white shadow-sm active:scale-95 transition-all flex flex-col items-center gap-2 relative overflow-hidden mb-3">
                     <div className="absolute top-0 right-0 px-1.5 py-0.5 bg-white/20 text-[9px] text-white rounded-bl-lg font-bold">完整</div>
                     <div className="p-2 bg-white/20 rounded-full"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0-3-3m3 3 3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" /></svg></div>
                     <span>整合导出 (文字+媒体)</span>
@@ -2299,9 +2335,9 @@ const Settings: React.FC = () => {
             <div className="grid grid-cols-1 gap-3 mb-4">
                  <div onClick={() => importInputRef.current?.click()} className="py-4 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-600 shadow-sm active:scale-95 transition-all flex flex-col items-center gap-2 cursor-pointer hover:bg-emerald-50 hover:border-emerald-200">
                     <div className="p-2 bg-emerald-100 rounded-full text-emerald-600"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg></div>
-                    <span>导入备份 (.zip / .json)</span>
+                    <span>导入 / 组合恢复备份</span>
                 </div>
-                <input type="file" ref={importInputRef} className="hidden" accept=".json,.zip" onChange={handleImport} />
+                <input type="file" ref={importInputRef} className="hidden" multiple accept=".json,.zip,.sullypart" onChange={handleImport} />
             </div>
 
             <p className="text-[10px] text-slate-400 px-1 mb-4 leading-relaxed">
@@ -2312,6 +2348,8 @@ const Settings: React.FC = () => {
                 • <b>装扮与搭配</b>: 整合/媒体备份包含桌面主题、聊天装扮、搭配收藏、旧气泡及实际素材，并保留来源权限、角色搭配和投稿更新绑定。纯文字备份不能完整恢复美化。<br/>
                 • <b>作者搬家</b>: 整合备份还包含 Repo 状态、美化偏好和引导记录；已在作者页开启“记住作者身份”时，也携带作者码与密码。导入后恢复这些数据，不会自动登录或投稿。<br/>
                 • <b>语音范围</b>: 整合/媒体备份仅包含已收藏语音，以及 Live2D 开机、触摸预设实际引用的语音；未收藏的聊天、通话等临时语音不会导出。<br/>
+                • 可同时选择文字与美化 ZIP 组合恢复；单独导入时，文字保留已有美化，美化保留已有文字。<br/>
+                • 分卷恢复请同时选择 .sullyindex.json 和对应的全部 .sullypart；缺卷或校验失败会在写入前中止。<br/>
                 • 兼容旧版 JSON 备份文件的导入。
             </p>
 

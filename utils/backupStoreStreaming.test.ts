@@ -8,7 +8,7 @@ import { assembleV2Backup, writeV2Backup } from './backupFormat';
 
 it('全备份逐条读连接并收敛精度，跨片零丢失，旧导入器可直接还原', async () => {
     const db = await openDB();
-    const count = 1203;
+    const count = 6203;
     await new Promise<void>((resolve, reject) => {
         const tx = db.transaction('memory_links', 'readwrite');
         const store = tx.objectStore('memory_links');
@@ -17,7 +17,11 @@ it('全备份逐条读连接并收敛精度，跨片零丢失，旧导入器可�
         tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
     });
     // A regression to getAll is observable, not inferred from implementation text.
-    const forbidden = vi.spyOn(IDBObjectStore.prototype, 'getAll').mockImplementation(() => { throw new Error('whole-store allocation'); });
+    const getAll = IDBObjectStore.prototype.getAll;
+    const forbidden = vi.spyOn(IDBObjectStore.prototype, 'getAll').mockImplementation(function (range, count) {
+        if (!count || count > 1000) throw new Error('whole-store allocation');
+        return getAll.call(this, range, count);
+    });
     const zip = createBackupArchive();
     let result;
     try { result = await streamBackupArrayStore(zip, 'memory_links', 'memoryLinks'); }
@@ -65,4 +69,28 @@ it('转换失败直接拒绝整次备份，不把半张表伪装为完成', asyn
     await expect(streamBackupArrayStore(zip, 'gallery', 'galleryImages', {
         transform: () => { throw new Error('test transformation failure'); },
     })).rejects.toThrow('test transformation failure');
+});
+
+it('async compression preserves a single snapshot and queues concurrent writers', async () => {
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('memory_links', 'readwrite'); const store = tx.objectStore('memory_links'); store.clear();
+        for (let i = 0; i < 6; i++) store.put({id:`snapshot-${i}`,value:1});
+        tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);
+    });
+    let writer: Promise<void> | undefined;
+    const values: number[] = [];
+    await DB.streamStoreBatches('memory_links', async rows => {
+        if (!writer) writer = new Promise<void>((resolve,reject) => {
+            const tx = db.transaction('memory_links','readwrite');
+            tx.objectStore('memory_links').put({id:'snapshot-5',value:2});
+            tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);
+        });
+        await new Promise(resolve=>setTimeout(resolve,5));
+        values.push(...rows.map(r=>r.value));
+    },2);
+    await writer;
+    expect(values).toEqual([1,1,1,1,1,1]);
+    expect((await DB.getRawStoreData('memory_links')).find(r=>r.id==='snapshot-5').value).toBe(2);
+    await expect(DB.streamStoreBatches('memory_links', async()=>{await new Promise(r=>setTimeout(r,1));throw new Error('async sink failed');},2)).rejects.toThrow('async sink failed');
 });

@@ -22,7 +22,7 @@ export default function ChatToolDialog({ title, onClose, children, footer }: {
     }, []);
 
     return <div ref={panel} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}
-        className="absolute inset-0 z-[100] flex min-h-0 flex-col bg-white text-slate-800 outline-none"
+        className="sully-tool-dialog absolute inset-0 z-[100] flex min-h-0 flex-col bg-white text-slate-800 outline-none"
         style={{ paddingTop: 'var(--safe-top, 0px)', paddingBottom: 'var(--safe-bottom, 0px)' }}
         onKeyDown={event => {
             if (event.nativeEvent.isComposing) return;

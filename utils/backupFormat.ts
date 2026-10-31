@@ -62,6 +62,8 @@ export interface BackupManifest {
 
 /** 写端：往 zip 里塞文本文件，或二进制（Uint8Array）文件。二进制直写，绝不经 base64 大字符串。 */
 export interface ZipFileWriter {
+    /** Drain queued shards before reading more records. */
+    flush?(): Promise<void>;
     /** Optional native Blob path: keep large media out of the JS byte heap. */
     fileBlob?(name: string, data: Blob, options?: { compression?: 'STORE' | 'DEFLATE' }): void;
     file(name: string, data: string | Uint8Array, options?: {
@@ -268,11 +270,15 @@ export async function writeV2Backup(
 }
 
 export interface AssembleV2Options {
+    validateOnly?: boolean;
+    /** Large relationship tables are preflighted but replayed one shard at a time. */
+    deferred?: Map<string, DeferredBackupArray>;
     /** React 端传让出主线程的函数；测试端可不传 */
     onYield?: () => Promise<void>;
     /** 进度回调：当前字段、已处理字段序号、字段总数 */
     onShardProgress?: (field: string, fieldIndex: number, fieldTotal: number) => void;
 }
+export interface DeferredBackupArray { count: number; batches: () => AsyncGenerator<any[]> }
 
 /**
  * 读 v2 备份，把各分片拼回「与 v1 完全相同的 data 对象」。
@@ -315,6 +321,9 @@ export async function assembleV2Backup(
     // 先一遍校验所有声明的分片文件都在（缺则 abort，此时还没拼任何数据、DB 未动）
     for (const field of fields) {
         const { parts } = stores[field];
+        if (!Number.isSafeInteger(parts) || parts < 0 || !Number.isSafeInteger(stores[field].count) || stores[field].count < 0) {
+            throw new Error('损坏的备份包：分片数量无效，数据未改动');
+        }
         for (let p = 0; p < parts; p++) {
             const name = shardFileName(field, p);
             if (!zip.file(name)) {
@@ -328,6 +337,7 @@ export async function assembleV2Backup(
         const field = fields[fi];
         const { parts, count } = stores[field];
         const arr: any[] = [];
+        let actualCount = 0;
         for (let p = 0; p < parts; p++) {
             const name = shardFileName(field, p);
             let str = await zip.file(name)!.async('string');
@@ -341,16 +351,21 @@ export async function assembleV2Backup(
             if (!Array.isArray(chunk)) {
                 throw new Error(`损坏的备份包：${name} 不是数组，已中止导入（数据未改动）。`);
             }
-            for (const item of chunk) arr.push(item);
+            actualCount += chunk.length;
+            if (!options.validateOnly && !(field === 'memoryLinks' && options.deferred)) for (const item of chunk) arr.push(item);
             if (options.onYield) await options.onYield();
         }
-        if (arr.length !== count) {
+        if (actualCount !== count) {
             throw new Error(
-                `损坏的备份包：${field} 实际拼出 ${arr.length} 条、manifest 声明 ${count} 条，对不上，` +
+                `损坏的备份包：${field} 实际拼出 ${actualCount} 条、manifest 声明 ${count} 条，对不上，` +
                 `已中止导入（数据未改动）。`,
             );
         }
-        data[field] = arr;
+        if (field === 'memoryLinks' && options.deferred && !options.validateOnly) {
+            options.deferred.set(field, { count, batches: async function* () {
+                for (let p = 0; p < parts; p++) yield JSON.parse(await zip.file(shardFileName(field, p))!.async('string'));
+            }});
+        } else if (!options.validateOnly) data[field] = arr;
         options.onShardProgress?.(field, fi, fields.length);
     }
 
@@ -391,13 +406,14 @@ export async function assembleV2Backup(
             }
             // slice 切出独立 buffer（不是 subarray 视图）：否则 IndexedDB 结构化克隆会把整根 bin
             // 给每条向量各复制一遍。importFullData 的 memory_vectors 段对 Uint8Array 形态原样存。
+            if (options.validateOnly) return undefined;
             const vector = bin.slice(e.byteOffset, e.byteOffset + e.byteLength);
             if (vector.byteLength !== e.byteLength) {
                 throw new Error(`损坏的备份包：向量 ${e.memoryId} 切片长度异常，已中止导入（数据未改动）。`);
             }
             return { memoryId: e.memoryId, charId: e.charId, dimensions: e.dimensions, model: e.model, vector };
         });
-        data.memoryVectors = vectors;
+        if (!options.validateOnly) data.memoryVectors = vectors;
         options.onShardProgress?.('memoryVectors', fields.length, fields.length + 1);
     }
 

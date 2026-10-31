@@ -3719,10 +3719,15 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const chatAvatarSizeClass = osTheme.chatAvatarSize === 'small' ? 'w-7 h-7' : osTheme.chatAvatarSize === 'large' ? 'w-12 h-12' : 'w-9 h-9';
     const chatAvatarRadiusClass = osTheme.chatAvatarShape === 'square' ? 'rounded-sm' : osTheme.chatAvatarShape === 'rounded' ? 'rounded-xl' : 'rounded-full';
     const chatPendingAvatarClass = `${chatAvatarSizeClass} ${chatAvatarRadiusClass} object-cover`;
+    const useSystemChatPalette = !acnh && !homePhone && !char.chatBackground && !osTheme.chatBackground
+        && !osTheme.chatChromeCustomCss && !char.chromeCustomCss && !activeTheme.customCss
+        && !chatFineTuneCss && chatChromeStyle === 'soft' && chatBackgroundStyle === 'plain';
 
     return (
         <div
             className={`sully-chat-root ${finalRootClass}`}
+            data-system-chat-palette={useSystemChatPalette}
+            data-system-bubble-palette={useSystemChatPalette && currentThemeId === 'default' && !customThemes.some(t => t.id === 'default')}
             style={finalRootStyle}
         >
              <ChatRuntimeStyle />
