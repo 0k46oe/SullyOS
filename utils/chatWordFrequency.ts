@@ -8,6 +8,7 @@ export interface WordFrequencyResult {
 }
 
 const STOP_WORDS = new Set(('的 了 着 过 我 你 您 他 她 它 我们 你们 他们 她们 它们 自己 这个 那个 这些 那些 这 那 是 在 和 与 或 也 都 就 才 又 很 更 最 还 有 没有 一个 一些 什么 怎么 为什么 但是 不过 然后 因为 所以 如果 还是 不是 可以 可能 这样 那样 已经 一下 一点 现在 时候 觉得 知道 真的 其实 一直 一起 呢 吗 啊 吧 哦 嗯 ' +
+    '这是 那是 那么 这么 这些 那些 这种 那种 这里 那里 这儿 那儿 这个 那个 这样 那样 于是 而且 并且 或者 还是 就是 只是 也是 都是 总是 但是 可是 不过 然而 因此 所以 因为 如果 虽然 即使 无论 既然 其实 确实 似乎 好像 大概 也许 可能 应该 必须 能够 不能 不会 不要 不用 需要 时候 现在 刚才 后来 然后 接着 之后 之前 已经 仍然 依然 一直 一下 一点 一些 有些 有点 有的 什么 怎么 怎样 如何 为什么 是否 还有 以及 对于 关于 作为 为了 通过 进行 觉得 认为 知道 明白 真的 非常 特别 比较 更加 最后 首先 其次 另外 总之 啊呀 哎呀 哈哈 呵呵 嗯嗯 哦哦 好的 好吧 可以 没有 不知 这就 那就 这也 那也 就这 就那 ' +
     'a an the and or but if then so to of in on at for with from as by is am are was were be been being i me my mine we us our you your he him his she her it its they them their this that these those do does did not no yes have has had will would can could should may might just very').split(/\s+/));
 
 type WordSegment = { segment: string; isWordLike?: boolean };
