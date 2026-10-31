@@ -1,3 +1,4 @@
+import {FRIEND_POST_TEXT_LIMIT, FRIEND_COMMENT_TEXT_LIMIT} from '../utils/friendFeedLimits';
 import {friendPostMediaCount} from '../utils/friendFeedImages';
 import React, {useCallback, useEffect, useLayoutEffect, useRef, useState} from 'react';
 import {trackBibiEntry, trackBibiFeature} from '../utils/octoberAnalytics';
@@ -17,7 +18,7 @@ import {AppID} from '../types';
 import './friendFeedCompose.css';
 import {useOS} from '../context/OSContext';
 import {useLocalBackHandler} from '../hooks/useLocalBackHandler';
-import {commentOnFriendPost, deleteFriendPost, emptyFriendFeed, publishFriendPost, readFriendFeed,
+import {commentOnFriendPost, editFriendComment, deleteFriendComment, deleteFriendPost, emptyFriendFeed, publishFriendPost, readFriendFeed,
     ensurePublicFriendFeed, mutateFriendFeed, saveFriendFeedSettings, subscribeFriendFeed} from '../utils/friendFeed';
 import type {FriendReplyTarget} from '../utils/friendFeed';
 import {defaultFriendFeedSettings, resolveFriendFeedSettings} from '../utils/friendFeedSettings';
@@ -50,6 +51,7 @@ export interface FriendFeedProps {embedded?: boolean; initialCharacterId?: strin
 type Panel = {kind: 'post'; circleId: string}
     | {kind:'weibo-detail';post:FriendFeedSource} | {kind:'weibo-home'}
     | {kind:'cover';ownerId:string}
+    | {kind:'edit-comment'|'delete-comment';postId:string;commentId:string;original:string;authorName:string}
     | {kind: 'comment'; postId: string; replyTarget?:FriendReplyTarget} | {kind:'share';postId:string} | {kind:'detail';postId:string;focusComment?:{id:string}} | {kind: 'delete'; postId: string} | {kind: 'settings'; section?: PreferenceSection} | {kind:'inbox'} | {kind:'api'} | {kind: 'weibo'} | {kind:'sources'} | {kind:'following'} | {kind:'relations'};
 
 export default function FriendFeedApp({embedded = false, initialCharacterId, onBack}: FriendFeedProps) {
@@ -253,6 +255,8 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
                 const triggerId = await commentOnFriendPost(panel.postId, userProfile.name || '我', body, undefined, Math.random, panel.replyTarget);
                 void runReplies(panel.postId, triggerId);
             }
+            else if (panel.kind === 'edit-comment') await editFriendComment(panel.postId, panel.commentId, body, panel.original);
+            else if (panel.kind === 'delete-comment') await deleteFriendComment(panel.postId, panel.commentId, panel.original);
             else if (panel.kind === 'delete') await deleteFriendPost(panel.postId);
             if (alive.current) {if (!restorePage()) setPanel(panel.kind==='comment'&&returnToPost?{kind:'detail',postId:returnToPost}:undefined); setReturnToPost('');setBody(''); actionButton.current?.focus();}
         } catch (e) {if (alive.current) setError(e instanceof Error ? e.message : '保存失败，请重试');}
@@ -274,7 +278,7 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
         {social&&!panel ? <SocialHeader notifications={inboxButton} theme={theme} profileId={profileId} profileName={profileName} count={profilePosts.length}
             onBack={back} onProfile={navigateProfile} onSettings={()=>open({kind:'settings'})}/> : !panel ? <ClassicHeader backLabel={profileId || showSetup ? '返回上一级' : undefined} notifications={inboxButton} theme={theme as 'island'|'moments'|'insta'|'journal'} onBack={back} onSettings={()=>open({kind:'settings'})} onProfile={()=>navigateProfile('user')} onHome={()=>navigateProfile('')}/> : <header className={`friend-feed-header${settingsPageTitle?' ff-preferences-header':''}`}>
             <button type="button" aria-label="返回上一级" onClick={back} disabled={busy}><ArrowLeft size={21}/></button>
-            <div>{settingsPageTitle?<h1>{settingsPageTitle}</h1>:<><h1><BibiIcon size={28}/>{panel.kind==='inbox'?'互动提醒':panel.kind==='detail'?'动态':panel.kind==='following'?'我的关注':'哔哔'}</h1><span>{panel.kind === 'inbox' ? '回复与留言' : panel.kind === 'detail' ? '评论区' : panel.kind === 'following' ? '角色与微博账号' : panel.kind === 'share' ? '分享给角色' : panel.kind === 'comment' ? '回应这条动态' : panel.kind === 'delete' ? '删除动态' : '记录日常'}</span></>}</div>
+            <div>{settingsPageTitle?<h1>{settingsPageTitle}</h1>:<><h1><BibiIcon size={28}/>{panel.kind==='inbox'?'互动提醒':panel.kind==='detail'?'动态':panel.kind==='following'?'我的关注':'哔哔'}</h1><span>{panel.kind === 'inbox' ? '回复与留言' : panel.kind === 'detail' ? '评论区' : panel.kind === 'following' ? '角色与微博账号' : panel.kind === 'share' ? '分享给角色' : panel.kind === 'comment' ? '回应这条动态' : panel.kind === 'edit-comment' ? '编辑评论' : panel.kind === 'delete-comment' ? '删除评论' : panel.kind === 'delete' ? '删除动态' : '记录日常'}</span></>}</div>
             <div className="friend-feed-header-actions">{panel.kind!=='inbox'&&inboxButton}{!panel && loaded && <>
                 <button type="button" aria-label="哔哔设置" onClick={() => open({kind: 'settings'})}><GearSix size={21}/></button>
                 <button ref={actionButton} type="button" aria-label="发布新动态" disabled={!circle} onClick={() => circle&&open({kind: 'post',circleId:circle.id})}><Plus size={21}/></button>
@@ -293,6 +297,8 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
             : panel?.kind==='detail'?<FriendFeedPostDetail onReadVisible={readVisibleComments} key={panel.postId} focusComment={panel.focusComment} post={feed.posts.find(p=>p.id===panel.postId&&syncedPostEnabled(feed,p)&&(!settings.hideRealPosts||sourceFilter==='weibo'||!(p.synced||p.authorKind==='external')))} characters={displayCharacters} user={displayUser}
                 onProfile={(id,accountId)=>{if(openRealProfile(id))return;setProfileReturnPost(panel.postId);setProfileId(accountProfile(id,accountId));setPanel(undefined);}} onComment={()=>open({kind:'comment',postId:panel.postId})}
                 onShare={()=>open({kind:'share',postId:panel.postId})}
+                onEdit={comment=>{open({kind:'edit-comment',postId:panel.postId,commentId:comment.id,original:comment.text,authorName:comment.authorName});setBody(comment.text);}}
+                onDelete={comment=>open({kind:'delete-comment',postId:panel.postId,commentId:comment.id,original:comment.text,authorName:comment.authorName})}
                 onReply={replyTarget=>open({kind:'comment',postId:panel.postId,replyTarget})}
                 onRefresh={()=>void refreshHome(panel.postId)} busy={refreshing||!!feed.refreshLease&&feed.refreshLease.until>Date.now()} status={refreshTarget===panel.postId?refreshStatus:''}
                 replying={replying===panel.postId}/>
@@ -324,18 +330,19 @@ export default function FriendFeedApp({embedded = false, initialCharacterId, onB
                     : <FriendFeedSettingsMenu disabled={busy} onPreferences={section=>open({kind:'settings',section})}
                         onApi={()=>open({kind:'api'})} onSources={()=>open({kind:'sources'})} onRelations={()=>open({kind:'relations'})}
                         onSetup={()=>{rememberPage();setShowSetup(true);setPanel(undefined);}}/>
-                : panel.kind === 'delete' ? <p>删除这条动态及其评论？删除后两个入口都会更新。</p> : <>
-                    <p className="friend-feed-author-label">以 {displayUser.name || '我'} 的身份{panel.kind === 'post' ? '发布' : '评论'}</p>
+                : panel.kind === 'delete-comment' ? <><p>删除 {panel.authorName} 的这条评论？其他人的回复会保留。</p><blockquote>{panel.original}</blockquote></> : panel.kind === 'delete' ? <p>删除这条动态及其评论？删除后两个入口都会更新。</p> : <>
+                    <p className="friend-feed-author-label">{panel.kind === 'edit-comment' ? `编辑 ${panel.authorName} 的评论` : `以 ${displayUser.name || '我'} 的身份`}{panel.kind === 'edit-comment' ? '' : panel.kind === 'post' ? '发布' : '评论'}</p>
                     {panel.kind === 'comment' && <blockquote>{replyTarget?<><strong>{replyComment?`回复 ${replyComment.authorName}${replyTarget.kind==='source'?'（仅本地）':''}`:'该评论已不可用'}</strong><p>{replyComment?.text}</p></>:commentPost?.text}</blockquote>}
                     <label>{panel.kind === 'post' ? '今天有什么想说的？' : '写下评论'}<textarea autoFocus required={panel.kind!=='post'||!draftImages.length} value={body} onChange={e => setBody(e.target.value)}
-                        maxLength={panel.kind === 'post' ? 2000 : 500} rows={6} disabled={busy}/></label>
+                        maxLength={panel.kind === 'post' ? FRIEND_POST_TEXT_LIMIT : FRIEND_COMMENT_TEXT_LIMIT} rows={6} disabled={busy}/></label>
+                    <small>{body.length} / {panel.kind === 'post' ? FRIEND_POST_TEXT_LIMIT : FRIEND_COMMENT_TEXT_LIMIT}</small>
                     {panel.kind === 'post' && <small>发布到「{feed.circles.find(c => c.id === panel.circleId)?.name}」</small>}
                     {panel.kind === 'post' && <FriendFeedImagePicker value={draftImages} onChange={setDraftImages} disabled={busy} onBusy={setProcessingImages} onError={setError}/>}
                     {panel.kind === 'comment' && <small>发表后立即调用一次 API，由角色或路人接话；帖主私聊会收到评论记录。</small>}
                 </>}
                 {(panel.kind !== 'settings' || preferenceSection) && <div className="friend-feed-form-actions"><button type="button" onClick={back} disabled={busy}>取消</button>
                     <button className="friend-feed-primary" disabled={busy||processingImages} type="submit">
-                        {busy ? '正在保存…' : panel.kind === 'settings' ? '保存设置' : panel.kind === 'delete' ? '确认删除' : panel.kind === 'comment' ? '发表评论' : '发布动态'}</button></div>}
+                        {busy ? '正在保存…' : panel.kind === 'settings' ? '保存设置' : panel.kind === 'edit-comment' ? '保存修改' : panel.kind === 'delete' || panel.kind === 'delete-comment' ? '确认删除' : panel.kind === 'comment' ? '发表评论' : '发布动态'}</button></div>}
             </form> : loaded && circle ? <>
                 {profileId&&profileOwner!=='user'&&<nav className="ff-account-tabs" aria-label="此角色的账号（管理视角）">{feed.accountGraph?.accounts.filter(a=>a.ownerId===profileOwner&&(a.accountId==='main'||settings.identities[profileOwner]?.accounts.some(alias=>alias.id===a.accountId))).map(a=><button key={a.id} aria-pressed={a.accountId===profileAccount} onClick={()=>setProfileId(a.id)}>{friendAccountName(feed,a,characters,displayUser.name)}</button>)}</nav>}
                 {social ? <>{profileId&&<SocialProfile theme={theme} name={profileName} avatar={profileAvatar}

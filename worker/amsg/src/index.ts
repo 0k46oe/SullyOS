@@ -2403,6 +2403,7 @@ export const amsgHooks = {
     // 「外面的世界此刻什么样」：今日节日 + 实时天气 + 热搜，到点现拉现填。
     // 拉不到 / 超时都只是返回空串，那一段整个消失，这次触发照常往下走。
     const worldArgs = {
+      charId,
       toolConfig,
       userName: pack.targetName,
       timeAwarenessEnabled: toolPack.timeAwarenessEnabled,

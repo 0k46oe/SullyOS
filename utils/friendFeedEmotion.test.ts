@@ -201,7 +201,7 @@ it('never publishes truncated generated text or invalid-length comments, without
     expect(parseEmotionEvalOutput(raw)?.friendFeedAction).toBeUndefined();
     await applyEmotionEvalRaw(raw, char);
     expect((await readFriendFeed()).posts[0].comments).toHaveLength(0);
-    expect(await landFriendFeedEmotionAction(char.id, actionFor(task.id, '长'.repeat(181)))).toBe(false);
+    expect(await landFriendFeedEmotionAction(char.id, actionFor(task.id, '长'.repeat(2001)))).toBe(false);
     expect(await landFriendFeedEmotionAction(char.id, actionFor(task.id, '   '))).toBe(false);
 });
 
@@ -223,7 +223,7 @@ it('piggybacks on the actual emotion call, reuses the same task on stream retry,
     expect(prompts[0]).toContain('已有的人设与世界书');
     expect(prompts[0]).toContain('全局偏好：短句，少用感叹号');
     expect(prompts[0]).toContain('本圈偏好：可以互损，不要敬语');
-    expect(prompts[0]).toContain('最多评论一条，1–180 字');
+    expect(prompts[0]).toContain('最多评论一条，1–2000 字');
     expect((await readFriendFeed()).posts[0].comments).toHaveLength(1);
     expect(await DB.getMessagesByCharId(char.id, true)).toHaveLength(1);
 });
@@ -240,4 +240,10 @@ it('no-interest and failed evaluations leave no comment cards and do not add ind
     expect(safeFetchJson).toHaveBeenCalledTimes(2);
     expect((await readFriendFeed()).posts[0].comments).toHaveLength(0);
     expect(await prepareFriendFeedEmotionTask(char.id, () => 0)).toBeDefined();
+});
+
+it('accepts longer comments and harmless field spelling variations with the original task identity',async()=>{
+    const task=(await prepareFriendFeedEmotionTask(char.id,()=>0))!;
+    expect(await landFriendFeedEmotionAction(char.id,{request_id:task.id,post_id:postId,kind:' COMMENT ',content:'长'.repeat(2000),replyToCommentId:null})).toBe(true);
+    expect((await readFriendFeed()).posts[0].comments[0].text).toHaveLength(2000);
 });
