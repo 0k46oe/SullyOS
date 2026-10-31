@@ -241,3 +241,15 @@ it('rejects off-target comments and new posts, and does not read real posts with
     await mutateFriendFeed(f=>{f.posts[0].authorKind='external';f.posts[0].source={platform:'weibo',accountId:'123456',externalId:'111111',url:'https://weibo.com/123456/111111',author:'外部',text:'真实材料',fetchedAt:Date.now(),publishedAt:Date.now(),truncated:false};});
     vi.mocked(safeFetchJson).mockClear();await refreshFriendFeed(user,api,undefined,undefined,()=>0,id);expect(safeFetchJson).not.toHaveBeenCalled();
 });
+
+it('publishes a complete bare action with alternate fields at the higher output allowance',async()=>{
+    await publicSettings();
+    vi.mocked(safeFetchJson).mockImplementation(async(_url,init)=>{
+        const body=JSON.parse(init!.body as string);
+        const match=JSON.stringify(body.messages).match(/\\"requestId\\":\\"([^"\\]+)\\"/)!;
+        expect(body.max_tokens).toBe(16000);
+        return {choices:[{message:{content:JSON.stringify({request_id:match[1],kind:' POST ',content:'风'.repeat(4000)})}}]};
+    });
+    await refreshFriendFeed(user,api,undefined,undefined,()=>0);
+    expect((await readFriendFeed()).posts[0].text).toHaveLength(4000);expect(safeFetchJson).toHaveBeenCalledOnce();
+});

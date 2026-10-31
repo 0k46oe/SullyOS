@@ -770,3 +770,20 @@ it.each(['island','moments','insta','journal','weibo','twitter'] as const)('open
     await click(host,theme==='twitter'?'回复':'评论');await click(host,'刷新评论区');expect(refreshFriendFeed).toHaveBeenCalledTimes(1);
     expect(vi.mocked(refreshFriendFeed).mock.calls[0][5]).toBeTruthy();
 });
+
+it.each(['island','moments','insta','journal','weibo','twitter'] as const)('edits and deletes a character comment from %s discussion without a generation call',async theme=>{
+    const circle=await saveFriendCircle({name:'预览',description:'',memberIds:m.chars.map(c=>c.id)});
+    const postId=await publishFriendPost(circle,'小雨','讨论电影');
+    await mutateFriendFeed(feed=>{feed.setupSeen=true;feed.posts[0].comments=[{id:'editable',authorId:m.chars[0].id,authorName:'小白',text:'原来的评论',createdAt:1}];});
+    await saveFriendFeedSettings({...defaultFriendFeedSettings(),theme});
+    const host=await render(React.createElement(FriendFeedApp));
+    await act(async()=>requestFriendInbox({postId,commentId:'editable'}));await settle(host);
+    vi.mocked(runImmediateFriendReplies).mockClear();
+    await click(host,'编辑小白的评论');
+    const input=host.querySelector('textarea')!;expect(input.value).toBe('原来的评论');expect(input.maxLength).toBe(2000);
+    await act(async()=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')!.set!.call(input,'修改后的评论');input.dispatchEvent(new Event('input',{bubbles:true}));});
+    await click(host,'保存修改');expect(host.querySelector('.ff-post-detail')?.textContent).toContain('修改后的评论');
+    await click(host,'删除小白的评论');await click(host,'取消');expect((await readFriendFeed()).posts[0].comments).toHaveLength(1);
+    await click(host,'删除小白的评论');await click(host,'确认删除');expect((await readFriendFeed()).posts[0].comments).toHaveLength(0);
+    expect(host.querySelector('.ff-post-detail')).not.toBeNull();expect(runImmediateFriendReplies).not.toHaveBeenCalled();
+});

@@ -77,7 +77,7 @@
 
 .friend-feed .ff-thread-replies{margin:0 0 10px 26px;padding-left:12px;border-left:2px solid var(--ff-line)}
 .friend-feed .ff-thread-replies .friend-feed-avatar{width:26px;height:26px;font-size:12px;flex:none}.friend-feed .ff-thread-replies .ff-detail-comment{padding:12px 0}
-.friend-feed .ff-detail-comment footer{display:flex;align-items:center;gap:14px}.friend-feed .ff-comment-reply{padding:4px 8px;font-size:11px;color:var(--ff-muted);background:none;border:0;cursor:pointer}.friend-feed .ff-comment-reply:hover{color:var(--ff-accent)}.friend-feed .ff-comment-to{font-size:11px;color:var(--ff-muted)}
+.friend-feed .ff-detail-comment footer{display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap}.friend-feed .ff-comment-reply{min-height:36px;padding:6px 8px;font-size:11px;color:var(--ff-muted);background:none;border:0;cursor:pointer}.friend-feed .ff-comment-reply:hover{color:var(--ff-accent)}.friend-feed .ff-comment-to{font-size:11px;color:var(--ff-muted)}
 
 .friend-feed .ff-thread-toggle{display:block;padding:10px 0;font-size:12px;color:var(--ff-accent);background:none;border:0;cursor:pointer}.friend-feed .ff-detail-comment[data-highlighted=true]{background:color-mix(in srgb,var(--ff-accent) 9%,transparent);border-radius:8px;outline:none;scroll-margin-block:24px}
 
@@ -88,3 +88,5 @@
 .friend-feed .ff-weibo-home-entry>.ff-setting-link{width:100%;justify-content:space-between}
 .friend-feed .ff-weibo-home>.ff-setting-status,.friend-feed .ff-weibo-home>.friend-feed-error{margin:12px 20px}
 .friend-feed .ff-my-weibo .ff-setting-actions{margin:0}
+
+.friend-feed .ff-comment-meta{display:inline-flex;align-items:center;gap:6px;color:var(--ff-muted)}.friend-feed .ff-comment-actions{display:inline-flex;align-items:center;gap:2px;margin-left:auto}.friend-feed .ff-comment-actions .ff-comment-reply{min-width:42px;min-height:42px}

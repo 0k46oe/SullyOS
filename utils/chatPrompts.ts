@@ -1,3 +1,4 @@
+import {weatherForCharacter} from './characterWeather';
 import {secretNoteContext} from './secretNote';
 import { buildCharacterResponsePrinciples } from './characterResponsePrinciples';
 import { expandHomeContextHistory } from './homeContextSegments';
@@ -341,13 +342,13 @@ export const ChatPrompts = {
             })
             : Promise.resolve(null);
         const userLocationPromise = forFirePack
-            ? Promise.resolve(getBackgroundUserLocationContext(userProfile.name))
-            : promptOptions?.includeUserLocation ? getUserLocationContext(userProfile.name) : Promise.resolve('');
+            ? Promise.resolve(getBackgroundUserLocationContext(userProfile.name, char.id))
+            : promptOptions?.includeUserLocation ? getUserLocationContext(userProfile.name, char.id) : Promise.resolve('');
 
         // 记忆宫殿检索结果现在从 char.memoryPalaceInjection 读取。
         // deferVolatile：时间/宫殿召回/情绪 buff 三块不进 stable，由下面的 volatileState 承接。
         const coreT0 = performance.now();
-        const config = realtimeConfig || defaultRealtimeConfig;
+        const config = weatherForCharacter(realtimeConfig || defaultRealtimeConfig, char.id);
         if (!forFirePack && !timelyByWorker && char.timeAwarenessEnabled !== false && config.userHolidays?.enabled) {
             await RealtimeContextManager.getUserHoliday(config, userProfile.name);
         }

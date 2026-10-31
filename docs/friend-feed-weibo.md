@@ -68,9 +68,9 @@ Origin/有效期字段只做客户端误用检查，不是签名或身份认证�
 
 提示词必须带可用操作、字段、候选 ID 和示例。复用 `[[FRIEND_FEED_REPLY:{...}]]`；整段 JSON 场景用顶层 friendFeedAction，SAR 用 CHAR_TRUE。不要求工具调用。
 
-- 评论：`{requestId,kind:"comment",postId,comment}`（1–180 字）。
-- 发帖：`{requestId,kind:"post",text}`（1–800 字，已有五分钟冷却）。
-- 转发真实来源：`{requestId,kind:"repost",postId,text}`（1–800 字，同发帖冷却）。
+- 评论：`{requestId,kind:"comment",postId,comment}`（1–2000 字）。
+- 发帖：`{requestId,kind:"post",text}`（1–4000 字，已有五分钟冷却）。
+- 转发真实来源：`{requestId,kind:"repost",postId,text}`（1–4000 字，同发帖冷却）。
 - 关注/取关：`{requestId,kind:"follow"|"unfollow",authorId}`。
 - 忽略：`{requestId,kind:"none"}`。
 - 发帖 / 评论 / 转发可带 `accountId`，必须是提示词中本角色的主号或小号；省略为主号。

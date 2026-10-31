@@ -1,3 +1,5 @@
+import {FRIEND_REPLY_OUTPUT_TOKENS} from './friendFeedLimits';
+import {parseDedicatedFriendFeedAction} from './friendFeedOutput';
 import type {APIConfig, UserProfile, CharacterProfile, RealtimeConfig} from '../types';
 import {DB} from './db';
 import {readFriendFeed, mutateFriendFeed} from './friendFeed';
@@ -6,7 +8,7 @@ import {loadCharacterContextRange} from './chatContextRange';
 import {buildChatRequestPayload} from './chatRequestPayload';
 import {resolveFriendFeedApi} from './friendFeedApi';
 import {loadMusicPlaybackSnapshot} from '../context/MusicContext';
-import {extractAssistantText, parseEmotionEvalOutput} from './emotionApply';
+import {extractAssistantText} from './emotionApply';
 import {safeFetchJson} from './safeApi';
 
 /** Each real participant uses their own context. NPCs share only their host's world.
@@ -41,20 +43,21 @@ export async function runImmediateFriendReplies(postId: string, user: UserProfil
             const api = await resolveFriendFeedApi(globalApi, char);
             if (!api?.baseUrl || !api.model) throw new Error('请先配置 API');
             const messages = (await buildFriendFeedReplyPayload(char, user, globalApi, task.prompt, realtimeConfig)).fullMessages;
-            const body = {model: api.model, messages, temperature: api.temperature ?? .85, max_tokens: 3000};
+            const body = {model: api.model, messages, temperature: api.temperature ?? .85, max_tokens: FRIEND_REPLY_OUTPUT_TOKENS};
             const stream = (api as {stream?: boolean}).stream ?? globalApi?.stream ?? false;
             const send = (stream: boolean) => safeFetchJson(`${api.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
                 method: 'POST', headers: {'Content-Type': 'application/json', Authorization: `Bearer ${api.apiKey || 'sk-none'}`},
                 body: JSON.stringify({...body, stream, ...(stream ? {stream_options: {include_usage: true}} : {})}),
             }, 0, 0, {appName: '哔哔', charId: char.id, charName: char.name, purpose: '评论接话'});
             const data = await send(stream);
-            const result = parseEmotionEvalOutput(extractAssistantText(data.choices?.[0]?.message));
-            if (!result || result.friendFeedAction === undefined) throw new Error('回复格式不完整');
-            const action = result.friendFeedAction === null
-                ? {requestId: task.id, kind: 'none', npcActions: []} : result.friendFeedAction;
+            const result = parseDedicatedFriendFeedAction(extractAssistantText(data.choices?.[0]?.message));
+            if (result === undefined) throw new Error('回复格式不完整');
+            const action = result === null
+                ? {requestId: task.id, kind: 'none', npcActions: []} : result;
             if (!action || typeof action !== 'object' || (action as {requestId?: unknown}).requestId !== task.id)
                 throw new Error('回复任务不匹配');
-            if (!await landFriendFeedEmotionAction(char.id, action, 'immediate')) throw new Error('回复已过期或不符合本圈规则');
+            let rejection = '回复已过期或不符合本圈规则';
+            if (!await landFriendFeedEmotionAction(char.id, action, 'immediate', reason => {rejection = reason;})) throw new Error(rejection);
             const row = action as {kind?: string; npcActions?: unknown[]};
             commentCount += (row.kind === 'comment' ? 1 : 0) + (row.npcActions?.length || 0);
         } catch (error) {

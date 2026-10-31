@@ -32,3 +32,33 @@ export function extractFriendFeedReplyTags(raw: string, namespace:'FRIEND_FEED_R
     }
     return {text: text + raw.slice(cursor), actions};
 }
+
+const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+/** Only equivalent field spellings; identities, task IDs and reply targets stay authoritative. */
+export function normalizeFriendFeedAction(value: unknown): unknown {
+    if (!record(value)) return value;
+    const normalize = (input: Record<string, unknown>, npc: boolean) => {
+        const row = {...input};
+        for (const [canonical, alias] of [['requestId','request_id'], ['accountId','account_id'], ['postId','post_id']]) {
+            if (row[alias] !== undefined) {
+                if (row[canonical] !== undefined && row[canonical] !== row[alias]) return null;
+                row[canonical] = row[alias]; delete row[alias];
+            }
+        }
+        if (typeof row.kind === 'string') row.kind = row.kind.trim().toLowerCase();
+        const field = !npc && (row.kind === 'comment' || row.kind === undefined) ? 'comment' : 'text';
+        if (row[field] === undefined) {
+            const aliases = [row.content, row[field === 'text' ? 'comment' : 'text']].filter(v => v !== undefined);
+            if (aliases.length && aliases.every(v => v === aliases[0])) row[field] = aliases[0];
+        }
+        if (row.text === undefined && ['post','repost'].includes(String(row.kind)) && Array.isArray(row.imageCards) && row.imageCards.length) row.text = '';
+        // JSON schemas often emit null for unused optional fields.
+        for (const key of ['accountId','imageCards','replyToCommentId','replyToSourceCommentId','replyToNpcIndex','followAuthorId','learnIdentities']) {
+            if (row[key] === null) delete row[key];
+        }
+        return row;
+    };
+    const row = normalize(value, false);
+    if (row && Array.isArray(row.npcActions)) row.npcActions = row.npcActions.map(n => record(n) ? normalize(n, true) : n);
+    return row;
+}
