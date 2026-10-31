@@ -1,3 +1,4 @@
+import { parseArtifactFileBlocks } from '../../utils/artifactBlocks';
 import JSZip from 'jszip';
 import { extractPdfText, isPdfFile } from '../../utils/pdfText';
 import type {
@@ -378,35 +379,10 @@ export interface ParsedArtifactRequest {
   content: string;
 }
 
-const ARTIFACT_BLOCK = /^```artifact[^\S\r\n]*\r?\n([\s\S]*?)^```[^\S\r\n]*(?=\r?$)/gim;
-const ALLOWED_FORMATS = new Set<CollaborationArtifactFormat>(['txt', 'md', 'html', 'json', 'docx', 'pdf']);
-
+const ALLOWED_FORMATS = new Set(['txt', 'md', 'html', 'json', 'docx', 'pdf']);
 export const parseArtifactBlocks = (response: string): { visibleText: string; artifacts: ParsedArtifactRequest[] } => {
-  const artifacts: ParsedArtifactRequest[] = [];
-  const visibleText = response.replace(ARTIFACT_BLOCK, (_block, blockText: string) => {
-    try {
-      const parsed = JSON.parse(blockText.trim());
-      const format = String(parsed?.format || '').toLowerCase() as CollaborationArtifactFormat;
-      if (!ALLOWED_FORMATS.has(format) || typeof parsed?.content !== 'string') return _block;
-      artifacts.push({
-        title: typeof parsed.title === 'string' ? parsed.title : '协同工作文件',
-        format,
-        content: parsed.content,
-      });
-      return '';
-    } catch {
-      const separator = blockText.indexOf('\n---');
-      if (separator < 0) return _block;
-      const header = blockText.slice(0, separator).trim();
-      const content = blockText.slice(separator + 4).replace(/^\s*\n/, '').trimEnd();
-      const title = header.match(/^title\s*:\s*(.+)$/im)?.[1]?.trim();
-      const format = header.match(/^format\s*:\s*([a-z0-9]+)$/im)?.[1]?.toLowerCase() as CollaborationArtifactFormat | undefined;
-      if (!title || !format || !ALLOWED_FORMATS.has(format) || !content) return _block;
-      artifacts.push({ title, format, content });
-      return '';
-    }
-  }).trim();
-  return { visibleText, artifacts };
+  const parsed = parseArtifactFileBlocks(response, { formats: ALLOWED_FORMATS, defaultTitle: '协同工作文件' });
+  return { visibleText: parsed.visibleText, artifacts: parsed.artifacts as ParsedArtifactRequest[] };
 };
 
 const artifactMimeType = (format: CollaborationArtifactFormat): string => {

@@ -1,3 +1,4 @@
+import { parseArtifactFileBlocks } from './artifactBlocks';
 import type { Message } from '../types';
 
 export type JsonFileKind = 'tavern-preset' | 'character-card' | 'worldbook' | 'generic-json';
@@ -65,44 +66,11 @@ export const requiresLocalJsonFiles = (messages: Message[]): boolean => {
   return /json/i.test(latestUser?.content || '');
 };
 
-// Closing fences must occupy their own line: backticks inside JSON strings are data.
-const JSON_ARTIFACT_BLOCK = /<(think|thinking|thought)>[\s\S]*?<\/\1>|^```artifact[^\S\r\n]*\r?\n([\s\S]*?)^```[^\S\r\n]*(?=\r?$)/gim;
-
 export const parseJsonArtifactBlocks = (response: string): { visibleText: string; artifacts: JsonArtifactRequest[] } => {
-  const artifacts: JsonArtifactRequest[] = [];
-  let visibleText = response.replace(JSON_ARTIFACT_BLOCK, (block, thinkingTag: string | undefined, raw: string) => {
-    if (thinkingTag) return block;
-    try {
-      let parsed: any;
-      try { parsed = JSON.parse(raw.trim()); } catch {
-        const separator = raw.match(/\r?\n---[^\S\r\n]*(?:\r?\n|$)/);
-        if (!separator || separator.index == null) {
-          if (/"format"\s*:\s*"json"/i.test(raw)) throw new Error('invalid artifact envelope');
-          return block;
-        }
-        const header = raw.slice(0, separator.index);
-        parsed = {
-          title: header.match(/^title\s*:\s*(.+)$/im)?.[1]?.trim(),
-          format: header.match(/^format\s*:\s*([a-z0-9]+)\s*$/im)?.[1],
-          content: raw.slice(separator.index + separator[0].length).trimEnd(),
-        };
-      }
-      if (String(parsed?.format).toLowerCase() !== 'json') return block;
-      if (typeof parsed.content !== 'string') throw new Error('missing JSON content');
-      JSON.parse(parsed.content);
-      const title = (typeof parsed.title === 'string' ? parsed.title : '聊天导出的 JSON')
-        .trim().replace(/\.json$/i, '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-').slice(0, 80) || '聊天导出的 JSON';
-      artifacts.push({ title, content: parsed.content });
-      return '';
-    } catch { return '[JSON 文件未生成：内容不是合法 JSON，请重新生成完整文件。]'; }
-  }).trim();
-  const openings = [...visibleText.matchAll(/^```artifact[^\S\r\n]*(?:\r?\n|$)/gim)];
-  const lastOpening = openings[openings.length - 1];
-  if (lastOpening?.index != null && !/^```[^\S\r\n]*\r?$/m.test(visibleText.slice(lastOpening.index + lastOpening[0].length))) {
-    visibleText = visibleText.slice(0, lastOpening.index).trimEnd()
-      + '\n[JSON 文件未生成：输出被截断或文件块没有结束，请重新生成完整文件。]';
-  }
-  return { visibleText, artifacts };
+  const parsed = parseArtifactFileBlocks(response, { formats: new Set(['json']), defaultTitle: '聊天导出的 JSON', validateJson: true, reportTruncation: true });
+  return { visibleText: parsed.visibleText, artifacts: parsed.artifacts.map(({ title, content }) => ({
+    title: title.trim().replace(/\.json$/i, '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-').slice(0, 80) || '聊天导出的 JSON', content,
+  })) };
 };
 
 export const JSON_FILE_OUTPUT_PROMPT = [
