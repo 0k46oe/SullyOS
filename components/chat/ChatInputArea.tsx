@@ -1,7 +1,8 @@
 import EmojiExportDialog from './EmojiExportDialog';
 import ChatCamera from './ChatCamera';
 import React, { useRef, useState, useEffect, useMemo } from 'react';
-import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Lightning, Money, BookOpenText, GearSix, Image, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, Alarm, Sparkle, FadersHorizontal, LinkSimple, Star, Briefcase } from '@phosphor-icons/react';
+import { createPortal } from 'react-dom';
+import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Lightning, Money, BookOpenText, GearSix, Image, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, Alarm, Sparkle, FadersHorizontal, LinkSimple, Star, Briefcase, MagnifyingGlass } from '@phosphor-icons/react';
 import { CharacterProfile, ChatTheme, EmojiCategory, Emoji } from '../../types';
 import { PRESET_THEMES } from './ChatConstants';
 import TokenImg from '../os/TokenImg';
@@ -10,6 +11,9 @@ import { isIOSStandaloneWebApp } from '../../utils/iosStandalone';
 import { trackEvent } from '../../utils/analytics';
 import { findEmojiSuggestions } from '../../utils/emojiSuggestions';
 import { useEmojiThumbnailCache } from '../../utils/useEmojiThumbnailCache';
+import { CHAT_ACTION_ORDER_CHANGED, CHAT_ACTION_ORDER_KEY, loadChatActionOrder, normalizeChatActionOrder, saveChatActionOrder } from '../../utils/chatActionOrder';
+
+const ChatActionOrderEditor = React.lazy(() => import('./ChatActionOrderEditor'));
 
 const EMOJI_PAGE_SIZE = 40;
 const ACTION_PAGE_SIZE = 8;
@@ -155,6 +159,19 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
         return () => document.removeEventListener('pointerdown', blurOnOutsidePointer, true);
     }, [canEndEditing, isInputFocused]);
     const [actionsPage, setActionsPage] = useState(previewActionsPage);
+    const [savedActionOrder, setSavedActionOrder] = useState(loadChatActionOrder);
+    const [editingActionOrder, setEditingActionOrder] = useState(false);
+    const [actionOrderNotice, setActionOrderNotice] = useState('');
+    useEffect(() => {
+        const sync = (event: Event) => {
+            if (event instanceof StorageEvent && event.key !== null && event.key !== CHAT_ACTION_ORDER_KEY) return;
+            setSavedActionOrder(event instanceof CustomEvent ? event.detail : loadChatActionOrder());
+        };
+        window.addEventListener('storage', sync);
+        window.addEventListener(CHAT_ACTION_ORDER_CHANGED, sync);
+        return () => { window.removeEventListener('storage', sync); window.removeEventListener(CHAT_ACTION_ORDER_CHANGED, sync); };
+    }, []);
+    useEffect(() => { setEditingActionOrder(false); }, [activeCharacterId]);
     // 气泡样式面板：搜索 + 两步确认删除（防止 hover 小 × 误删）
     const [bubbleSearch, setBubbleSearch] = useState('');
     // 会话面板的主要用途仍是切换聊天；气泡选择作为次级工具默认收起。
@@ -485,7 +502,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     const selectedEmojiNames = emojiSelectionMode ? new Set(selectedEmojis.map(se => se.name)) : new Set();
 
     // Keep one ordered list so removed or added entries cannot leave holes between pages.
-    const actionTiles = [
+    const defaultActionTiles = [
         <button key="collaboration" onClick={() => onPanelAction('collaboration')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
             <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border ${acnh ? 'bg-white/70 border-[#e6dab4] text-[#7c6ee6]' : isDiscordStyle ? 'bg-slate-800 text-indigo-300 border-indigo-400/20' : 'bg-indigo-50 text-indigo-500 border-indigo-100'}`}>
                 <Briefcase className="w-6 h-6" weight="fill" />
@@ -658,16 +675,36 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
           </span>
           <span className="text-xs font-bold">收藏</span>
         </button>,
+        <button key="chat-search" onClick={() => onPanelAction('chat-search')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
+          <span className={`w-14 h-14 rounded-2xl grid place-items-center shadow-sm border ${acnh ? 'bg-white/70 border-[#e6dab4]' : isDiscordStyle ? 'bg-slate-800 border-slate-600 text-indigo-300' : 'bg-indigo-50 border-indigo-100 text-indigo-500'}`}><MagnifyingGlass className="w-6 h-6" weight="bold" /></span>
+          <span className="text-xs font-bold">查找聊天记录</span>
+        </button>,
         <button key="export-chat" onClick={() => onPanelAction('export-chat')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
           <span className={`w-14 h-14 rounded-2xl grid place-items-center shadow-sm border ${acnh ? 'bg-white/70 border-[#e6dab4]' : isDiscordStyle ? 'bg-slate-800 border-slate-600' : 'bg-slate-50 border-slate-200'}`}><BookOpenText className="w-6 h-6" weight="bold" /></span>
           <span className="text-xs font-bold">导出记录</span>
         </button>
     ].filter(tile=>!compactHome||['transfer','poke','image','reroll','memory-link','favorites'].includes(String(tile.key)));
+    const actionOrder = normalizeChatActionOrder(savedActionOrder, defaultActionTiles.map(tile => String(tile.key)));
+    const actionTileById = new Map(defaultActionTiles.map(tile => [String(tile.key), tile]));
+    const actionTiles = actionOrder.map(id => actionTileById.get(id)!);
     const actionPageCount = Math.max(1, Math.ceil(actionTiles.length / ACTION_PAGE_SIZE));
     useEffect(() => setActionsPage(page => Math.min(page, actionPageCount - 1)), [actionPageCount]);
 
     return (
         <>
+        {editingActionOrder && createPortal(<React.Suspense fallback={null}><ChatActionOrderEditor
+            items={defaultActionTiles.map(tile => {
+                const children = React.Children.toArray(tile.props.children);
+                const label = children.reverse().find(child => React.isValidElement(child) && child.type === 'span');
+                return { id: String(tile.key), label: React.isValidElement(label) && typeof label.props.children === 'string' ? label.props.children : String(tile.key), content: tile.props.children };
+            })}
+            initialOrder={actionOrder} onClose={() => setEditingActionOrder(false)}
+            onSave={order => {
+                const persisted = saveChatActionOrder(order);
+                setSavedActionOrder(order); setActionsPage(0); setEditingActionOrder(false);
+                setActionOrderNotice(persisted ? '' : '设备存储不可用，排列仅在本次打开期间生效');
+            }}
+        /></React.Suspense>, chatImageInputRef.current?.closest('.sully-chat-root') || document.body)}
         {emojiSelectionMode && (
             <div className={`fixed inset-0 z-[-1] ${isPixelStyle ? 'bg-[#eadfce]/70 backdrop-blur-[2px]' : isDiscordStyle ? 'bg-slate-950/70 backdrop-blur-[2px]' : 'bg-white/60 backdrop-blur-[2px]'}`} />
         )}
@@ -963,6 +1000,10 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                         >
                           <input type="file" ref={chatImageInputRef} className="hidden" accept="image/*" onChange={(e) => handleImageChange(e, 'chat')} />
                           <input type="file" ref={chatJsonInputRef} className="hidden" accept=".json,application/json,text/json" onChange={(e) => { const file = e.target.files?.[0]; if (file) onJsonSelect?.(file); e.target.value = ''; }} />
+                          {!compactHome && <div className="flex items-center justify-end px-5 pt-2">
+                            <button type="button" onClick={() => setEditingActionOrder(true)} className={`rounded-lg px-2 py-1.5 text-[11px] ${isDiscordStyle ? 'text-slate-400' : 'text-slate-500'}`}>整理工具</button>
+                          </div>}
+                          {actionOrderNotice && <p role="status" className="px-5 text-[10px] text-amber-600">{actionOrderNotice}</p>}
                           {Array.from({length: actionPageCount}, (_, page) => (
                             <div key={page} role="group" aria-label={`聊天功能第 ${page + 1} 页`} className={`p-6 grid grid-cols-4 grid-rows-[repeat(2,96px)] gap-x-4 gap-y-8 ${actionsPage === page ? '' : 'hidden'}`}>
                               {actionTiles.slice(page * ACTION_PAGE_SIZE, (page + 1) * ACTION_PAGE_SIZE)}

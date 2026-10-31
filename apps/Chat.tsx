@@ -60,6 +60,7 @@ import FavoritesPortal from '../components/chat/VoiceFavoritesPortal';
 import ChatModals from '../components/chat/ChatModals';
 import ChatHistoryCleanupModal from '../components/chat/ChatHistoryCleanupModal';
 import type { ChatCleanupPlan } from '../utils/chatHistoryCleanup';
+import { useLocalBackHandler } from '../hooks/useLocalBackHandler';
 import Modal from '../components/os/Modal';
 import MemoryContextSelfCheck from '../components/chat/MemoryContextSelfCheck';
 import ProactiveSettingsModal from '../components/chat/ProactiveSettingsModal';
@@ -138,6 +139,7 @@ import { upsertMountedWorldbooks } from '../utils/worldbook';
 import { parseJsonFile, jsonKindLabel } from '../utils/jsonFile';
 
 const CollaborationWindow = React.lazy(() => import('../features/collaboration/CollaborationWindow'));
+const ChatRecordSearch = React.lazy(() => import('../components/chat/ChatRecordSearch'));
 
 const HISTORY_WINDOW_RADIUS = 25;
 const HISTORY_WINDOW_BATCH_SIZE = 30;
@@ -169,6 +171,10 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const [windowedFocusMsgId, setWindowedFocusMsgId] = useState<number | null>(null);
     const [historyWindowRange, setHistoryWindowRange] = useState<ChatHistoryWindowRange | null>(null);
     const [flashMsgId, setFlashMsgId] = useState<number | null>(null);
+    const [showChatSearch, setShowChatSearch] = useState(false);
+    const historyJumpSequenceRef = useRef(0);
+    const historyJumpPendingRef = useRef(false);
+    const historyFlashTimerRef = useRef<number | null>(null);
     // 角色切换/进入时的缓入开关：先 false（透明），下一帧转 true，靠 CSS transition 平滑淡入。
     // 初值 false 让首次打开也是淡入、且不会有"先显示再变透明"的闪烁。
     // 角色切换「登场」过场是否显示。切换/进入角色时由 useLayoutEffect 在绘制前置真，覆盖住加载、避免闪到新聊天。
@@ -301,7 +307,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     // --- Multi-Select State ---
     const [selectionMode, setSelectionMode] = useState(false);
     const [showHistoryCleanup, setShowHistoryCleanup] = useState(false);
-    useEffect(() => setShowHistoryCleanup(false), [activeCharacterId]);
+    useEffect(() => { setShowHistoryCleanup(false); setShowChatSearch(false); }, [activeCharacterId]);
     const [selectedMsgIds, setSelectedMsgIds] = useState<Set<number>>(new Set());
     // 思维链是 metadata.thinkingChain，没有独立 id，所以用宿主消息 id 作为键，
     // 与 selectedMsgIds 并行存在 —— 只勾思维链时只清 metadata，宿主消息保留。
@@ -1065,6 +1071,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         if (!activeCharacterId) return;
 
         const charIdAtStart = activeCharacterId;
+        const historySequenceAtStart = historyJumpSequenceRef.current;
         // 倒序游标先过滤展示范围再取最近 N 条。缓冲只用于判断是否还有历史，
         // 不能靠固定缓冲抵消见面/通话记录：它们可能连续几百条，挤掉真正的私聊。
         const fetchLimit = requestedVisibleCount >= 100000 ? requestedVisibleCount : requestedVisibleCount + 16;
@@ -1087,26 +1094,55 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             const { messages: recent, totalCount } = await DB.getRecentMessagesWithCount(activeCharacterId, fetchLimit, accept);
             // Guard against stale async results: if the user switched characters
             // while the DB query was in flight, discard this result.
-            if (activeCharIdRef.current !== charIdAtStart) return;
+            if (activeCharIdRef.current !== charIdAtStart || historyJumpSequenceRef.current !== historySequenceAtStart) return;
             applyResult(recent, totalCount);
         } catch (e) {
             // DB read failed — retry once after a short delay
-            if (activeCharIdRef.current !== charIdAtStart) return;
+            if (activeCharIdRef.current !== charIdAtStart || historyJumpSequenceRef.current !== historySequenceAtStart) return;
             await new Promise(r => setTimeout(r, 200));
-            if (activeCharIdRef.current !== charIdAtStart) return;
+            if (activeCharIdRef.current !== charIdAtStart || historyJumpSequenceRef.current !== historySequenceAtStart) return;
             try {
                 const { messages: recent, totalCount } = await DB.getRecentMessagesWithCount(activeCharacterId, fetchLimit, accept);
-                if (activeCharIdRef.current !== charIdAtStart) return;
+                if (activeCharIdRef.current !== charIdAtStart || historyJumpSequenceRef.current !== historySequenceAtStart) return;
                 applyResult(recent, totalCount);
             } catch { /* give up silently */ }
         }
     }, [activeCharacterId]);
+
+    const leaveHistoryBrowsing = useCallback((goToLatest = true) => {
+        const range = historyWindowRangeRef.current;
+        const count = goToLatest ? LOAD_BATCH_SIZE : Math.max(1, (range?.end || 0) - (range?.start || 0));
+        historyJumpSequenceRef.current += 1;
+        historyJumpPendingRef.current = false;
+        setWindowedFocusMsgId(null);
+        setHistoryWindowRange(null);
+        historyWindowRangeRef.current = null;
+        historyWindowTotalRef.current = 0;
+        historyWindowLoadingRef.current = false;
+        historyPrependAnchorRef.current = null;
+        historyWindowScrollEnabledRef.current = false;
+        if (historyJumpUnlockTimerRef.current) window.clearTimeout(historyJumpUnlockTimerRef.current);
+        historyJumpUnlockTimerRef.current = null;
+        if (historyFlashTimerRef.current) window.clearTimeout(historyFlashTimerRef.current);
+        historyFlashTimerRef.current = null;
+        setFlashMsgId(null);
+        visibleCountRef.current = count;
+        setVisibleCount(count);
+        if (goToLatest) {
+            // The full history is already in memory; preserve the latest tail before refreshing DB.
+            setMessages(current => current.filter(message => isVisibleChatMessage(message, !!charRef.current?.hideSystemLogs)).slice(-count));
+            requestAnimationFrame(() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'auto' }));
+        }
+        void reloadMessages(count);
+    }, [reloadMessages]);
 
     useEffect(() => {
         if (activeCharacterId) {
             // Update ref BEFORE any async work so stale reloadMessages calls
             // from a previous character can detect the switch and bail out.
             activeCharIdRef.current = activeCharacterId;
+            historyJumpSequenceRef.current += 1;
+            historyJumpPendingRef.current = false;
 
             // Clear messages immediately to prevent showing stale chat from previous character
             setMessages([]);
@@ -1158,6 +1194,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             setVectorizeResult(null);
             setShowingTargetIds(new Set());
             setWindowedFocusMsgId(null);
+            if (historyFlashTimerRef.current) window.clearTimeout(historyFlashTimerRef.current);
+            historyFlashTimerRef.current = null;
             setHistoryWindowRange(null);
             historyWindowRangeRef.current = null;
             historyWindowTotalRef.current = 0;
@@ -1171,6 +1209,12 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             setFlashMsgId(null);
         }
     }, [activeCharacterId, reloadMessages]);
+
+    useEffect(() => () => {
+        historyJumpSequenceRef.current += 1;
+        if (historyFlashTimerRef.current) window.clearTimeout(historyFlashTimerRef.current);
+        if (historyJumpUnlockTimerRef.current) window.clearTimeout(historyJumpUnlockTimerRef.current);
+    }, []);
 
     // 进入/切换角色时触发「登场」过场。useLayoutEffect 在浏览器绘制前置真，
     // 让过场层先盖住，避免一帧闪到新角色的空聊天界面。
@@ -1352,10 +1396,12 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         if (distanceFromBottom > 96) pendingMediaAutoScrollIdRef.current = null;
 
         if (historyWindowScrollEnabledRef.current && historyWindowRangeRef.current) {
-            if (scroller.scrollTop <= 96) extendHistoryWindow('older');
-            else if (distanceFromBottom <= 96) extendHistoryWindow('newer');
+            const range = historyWindowRangeRef.current;
+            if (distanceFromBottom <= 32 && range.end >= historyWindowTotalRef.current) leaveHistoryBrowsing(false);
+            else if (distanceFromBottom <= 96 && range.end < historyWindowTotalRef.current) extendHistoryWindow('newer');
+            else if (scroller.scrollTop <= 96) extendHistoryWindow('older');
         }
-    }, [extendHistoryWindow]);
+    }, [extendHistoryWindow, leaveHistoryBrowsing]);
 
     const handleMessageMediaLoad = useCallback((messageId: number) => {
         if (windowedFocusMsgId !== null || pendingMediaAutoScrollIdRef.current !== messageId) return;
@@ -1428,15 +1474,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         const type = customType || 'text';
 
         // 发消息隐含"回到当前聊天"——退出 windowed 旧消息浏览模式
-        if (windowedFocusMsgId !== null) {
-            setWindowedFocusMsgId(null);
-            setHistoryWindowRange(null);
-            historyWindowRangeRef.current = null;
-            historyWindowTotalRef.current = 0;
-            historyWindowScrollEnabledRef.current = false;
-            visibleCountRef.current = LOAD_BATCH_SIZE;
-            setVisibleCount(LOAD_BATCH_SIZE);
-            setFlashMsgId(null);
+        if (windowedFocusMsgId !== null || historyJumpPendingRef.current) {
+            leaveHistoryBrowsing();
         }
 
         // 用户手打"麦请求"三个字 → 等价于点击麦克风按钮 (拉起麦当劳菜单)
@@ -1724,6 +1763,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             });
             return;
         }
+        if (historyWindowRangeRef.current || historyJumpPendingRef.current) leaveHistoryBrowsing();
         triggerAI(messages);
     };
 
@@ -1834,6 +1874,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             trackEvent('打开聊天功能面板项', { action: type });
         }
         switch (type) {
+            case 'chat-search': setShowPanel('none'); setShowChatSearch(true); break;
             case 'export-chat': setShowPanel('none'); setExportWithThinking(false); setShowChatExport(true); break;
             case 'collaboration': setShowPanel('none'); setCollaborationOpen(true); break;
             case 'memory-link': setShowPanel('none'); setMemoryRepairOpen(true); break;
@@ -2731,19 +2772,30 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const handleJumpToMessageInChat = async (messageId: number) => {
         if (!activeCharacterId) return;
         setModalType('none');
+        setShowChatSearch(false);
+        setShowPanel('none');
+        const sequence = ++historyJumpSequenceRef.current;
+        historyJumpPendingRef.current = true;
         const requestCharId = activeCharacterId;
         const LARGE = 999999;
         visibleCountRef.current = LARGE;
         setVisibleCount(LARGE);
-        const allMsgs = await DB.getMessagesByCharId(requestCharId, true);
-        if (activeCharIdRef.current !== requestCharId) return;
+        let allMsgs: Message[];
+        try { allMsgs = await DB.getMessagesByCharId(requestCharId, true); }
+        catch {
+            if (activeCharIdRef.current === requestCharId && historyJumpSequenceRef.current === sequence) {
+                addToast('原消息读取失败，请重新查找', 'error');
+                leaveHistoryBrowsing();
+            }
+            return;
+        }
+        if (activeCharIdRef.current !== requestCharId || historyJumpSequenceRef.current !== sequence) return;
+        historyJumpPendingRef.current = false;
         const browseableMessages = allMsgs.filter(message => isVisibleChatMessage(message, !!char?.hideSystemLogs));
         const targetIndex = browseableMessages.findIndex(message => message.id === messageId);
         if (targetIndex < 0) {
-            visibleCountRef.current = LOAD_BATCH_SIZE;
-            setVisibleCount(LOAD_BATCH_SIZE);
             addToast('这条记录当前未显示在聊天界面中', 'info');
-            await reloadMessages(LOAD_BATCH_SIZE);
+            leaveHistoryBrowsing();
             return;
         }
 
@@ -2760,9 +2812,12 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         setHistoryWindowRange(nextRange);
         setWindowedFocusMsgId(messageId);
         setFlashMsgId(messageId);
+        if (historyFlashTimerRef.current) window.clearTimeout(historyFlashTimerRef.current);
+        historyFlashTimerRef.current = window.setTimeout(() => { setFlashMsgId(null); historyFlashTimerRef.current = null; }, 2200);
         // 等窗口节点挂上 DOM 再定位；定位动画结束后才开放边缘续载，避免滚动动画
         // 自己触发 onScroll，提前改动窗口。
         requestAnimationFrame(() => requestAnimationFrame(() => {
+            if (activeCharIdRef.current !== requestCharId || historyJumpSequenceRef.current !== sequence) return;
             const el = document.getElementById(`chat-msg-${messageId}`);
             el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
             if (historyJumpUnlockTimerRef.current) window.clearTimeout(historyJumpUnlockTimerRef.current);
@@ -2771,7 +2826,6 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 historyJumpUnlockTimerRef.current = null;
             }, 450);
         }));
-        window.setTimeout(() => setFlashMsgId(null), 2200);
     };
 
     const refreshContentFavoriteIds = useCallback(async () => {
@@ -2830,26 +2884,11 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activeCharacterId]);
 
-    const handleBackToCurrent = async () => {
-        setWindowedFocusMsgId(null);
-        setHistoryWindowRange(null);
-        historyWindowRangeRef.current = null;
-        historyWindowTotalRef.current = 0;
-        historyWindowLoadingRef.current = false;
-        historyPrependAnchorRef.current = null;
-        historyWindowScrollEnabledRef.current = false;
-        if (historyJumpUnlockTimerRef.current) {
-            window.clearTimeout(historyJumpUnlockTimerRef.current);
-            historyJumpUnlockTimerRef.current = null;
-        }
-        setFlashMsgId(null);
-        visibleCountRef.current = LOAD_BATCH_SIZE;
-        setVisibleCount(LOAD_BATCH_SIZE);
-        await reloadMessages(LOAD_BATCH_SIZE);
-        requestAnimationFrame(() => {
-            scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-        });
-    };
+    useLocalBackHandler(() => {
+        if (modalType !== 'none' || showChatSearch || showPanel !== 'none' || favoritesOpen || memoryRepairOpen || collaborationOpen || showChatExport) return false;
+        leaveHistoryBrowsing();
+        return true;
+    }, 10, windowedFocusMsgId !== null);
 
     const handleFullArchive = async () => {
         if (!apiConfig.apiKey || !char) {
@@ -3588,7 +3627,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     }), [aiVisibleEmojis, activeCategory]);
 
     // Memoize ChatInputArea callbacks
-    const handleSendCallback = useCallback(() => handleSendText(), [char, input, replyTarget, inputPreferences]);
+    const handleSendCallback = useCallback(() => handleSendText(), [char, input, replyTarget, inputPreferences, windowedFocusMsgId]);
     const handleCharSelectCallback = useCallback((id: string) => { setActiveCharacterId(id); setShowPanel('none'); }, []);
     const autoReply = useChatAutoReply({
         enabled: inputPreferences.autoReply,
@@ -3596,7 +3635,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         active: (activeApp === AppID.Chat || !!homePhone) && !!char,
         blocked: isInputFocused || !!input.trim() || showPanel !== 'none' || modalType !== 'none'
             || selectionMode || isSummarizing || collaborationOpen || memoryRepairOpen || favoritesOpen
-            || showChatExport || showProactiveModal || showActiveMsg2Modal || showThinkingChainModal
+            || showChatExport || showChatSearch || showProactiveModal || showActiveMsg2Modal || showThinkingChainModal
             || mcdAppOpen || luckinAppOpen || showForwardModal,
         generating: isTyping || instantChatPending || isProactiveComposing,
         onGenerate: handleManualTrigger,
@@ -3687,6 +3726,10 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             style={finalRootStyle}
         >
              <ChatRuntimeStyle />
+             {showChatSearch && <React.Suspense fallback={null}><ChatRecordSearch key={activeCharacterId}
+                 charId={activeCharacterId} characterName={chatCharacterDisplayName(char)} userName={userProfile.name || '我'}
+                 onClose={() => setShowChatSearch(false)} onJump={handleJumpToMessageInChat}
+             /></React.Suspense>}
              {/* 聊天细节微调（外观 App 可视化设置生成）：排在用户自定义 CSS 之前——
                  同为 !important 时后写的胜，手写美化代码永远可覆盖可视化设置。 */}
              {chatFineTuneCss && <style>{chatFineTuneCss}</style>}
@@ -3945,7 +3988,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 onSetDefaultAiCompanion={enabled => { void updateCharacter(char.id, { defaultAiCompanionEnabled: enabled }); }}
                 onOpenHistoryCleanup={() => { setModalType('none'); setShowHistoryCleanup(true); }} onArchive={handleFullArchive}
                 onCreatePrompt={createNewPrompt} onEditPrompt={editSelectedPrompt} onSavePrompt={handleSavePrompt} onDeletePrompt={handleDeletePrompt}
-                onSetHistoryStart={handleSetHistoryStart} onRestoreAdaptiveContext={restoreAdaptiveContext} onJumpToMessageInChat={handleJumpToMessageInChat} onEnterSelectionMode={handleEnterSelectionMode}
+                onSetHistoryStart={handleSetHistoryStart} onRestoreAdaptiveContext={restoreAdaptiveContext} onEnterSelectionMode={handleEnterSelectionMode}
                 onReplyMessage={handleReplyMessage} onEditMessageStart={() => { if (selectedMessage) { setEditContent(selectedMessage.content); setModalType('edit-message'); } }}
                 onConfirmEditMessage={confirmEditMessage} onDeleteMessage={handleDeleteMessage} onCopyMessage={handleCopyMessage}
                 messageFavorited={!!(selectedMessage && contentFavoriteIds.has(contentFavoriteIdForMessage(selectedMessage)))}
@@ -4215,14 +4258,6 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
 
             <StreamingVoiceBar state={streamingVoice.state} onStop={stopStreamingVoice} />
             <div ref={scrollRef} onScroll={handleChatScroll} onClick={() => { if (inputPreferences.autoReply) setShowPanel('none'); }} className="flex-1 overflow-y-auto overflow-x-hidden pt-6 pb-6 no-scrollbar" style={{ backgroundImage: activeTheme.type === 'custom' && activeTheme.user.backgroundImage ? 'none' : undefined }}>
-                {windowedFocusMsgId !== null && (
-                    <div className="sticky top-0 z-20 flex justify-center pb-2 pointer-events-none">
-                        <button onClick={handleBackToCurrent} className="pointer-events-auto px-4 py-2 bg-primary text-white rounded-full text-xs font-bold shadow-lg active:scale-95 transition-transform flex items-center gap-1.5">
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.2} stroke="currentColor" className="w-3.5 h-3.5"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 13.5 12 21m0 0-7.5-7.5M12 21V3" /></svg>
-                            回到当前聊天
-                        </button>
-                    </div>
-                )}
                 {collapsedCount > 0 && windowedFocusMsgId === null && (
                     <div className="flex justify-center mb-6">
                         <button onClick={async () => {
@@ -4502,7 +4537,10 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     autoReplyEnabled={inputPreferences.autoReply}
                     autoReplySeconds={autoReply.seconds}
                     onCancelAutoReply={autoReply.cancel}
-                    onInputFocusChange={setIsInputFocused}
+                    onInputFocusChange={focused => {
+                        setIsInputFocused(focused);
+                        if (focused && (historyWindowRangeRef.current || historyJumpPendingRef.current)) leaveHistoryBrowsing();
+                    }}
                     onDeleteSelected={handleBatchDelete}
                     onForwardSelected={handleForwardSelected}
                     onFavoriteSelected={handleFavoriteSelected}

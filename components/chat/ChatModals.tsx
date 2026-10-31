@@ -1,5 +1,5 @@
 
-import React, { useRef, useState } from 'react';
+import React, { useState } from 'react';
 import Modal from '../os/Modal';
 import TokenImg from '../os/TokenImg';
 import { CharacterProfile, Message, EmojiCategory, DailySchedule, ScheduleSlot, ApiPreset, APIConfig } from '../../types';
@@ -84,7 +84,6 @@ interface ChatModalsProps {
     onDeletePrompt: (id: string) => void;
     onSetHistoryStart: (id: number | undefined) => void;
     onRestoreAdaptiveContext?: () => void;
-    onJumpToMessageInChat?: (id: number) => void;
     onEnterSelectionMode: () => void;
     onReplyMessage: () => void;
     onEditMessageStart: () => void;
@@ -266,7 +265,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     onTransfer, onImportEmoji, onSaveSettings,
     onOpenHistoryCleanup, onSetDefaultAiCompanion, userName = '用户',
     onArchive, onCreatePrompt, onEditPrompt, onSavePrompt, onDeletePrompt,
-    onSetHistoryStart, onRestoreAdaptiveContext, onJumpToMessageInChat, onEnterSelectionMode, onReplyMessage, onEditMessageStart, onConfirmEditMessage, onDeleteMessage, onCopyMessage, onToggleMessageFavorite, messageFavorited, onDeleteEmoji, onDeleteCategory, onRenameCategory, onDownloadCategory,
+    onSetHistoryStart, onRestoreAdaptiveContext, onEnterSelectionMode, onReplyMessage, onEditMessageStart, onConfirmEditMessage, onDeleteMessage, onCopyMessage, onToggleMessageFavorite, messageFavorited, onDeleteEmoji, onDeleteCategory, onRenameCategory, onDownloadCategory,
     allCharacters = [], onSaveCategoryVisibility,
     translationEnabled, onToggleTranslation, translationExpanded, onToggleTranslationExpanded, translateSourceLang, translateTargetLang, onSetTranslateSourceLang, onSetTranslateLang,
     xhsEnabled, onToggleXhs,
@@ -283,38 +282,9 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     const [visibilitySelection, setVisibilitySelection] = useState<Set<string>>(new Set());
     const [historyPage, setHistoryPage] = useState(0);
     const [historySearch, setHistorySearch] = useState('');
-    const longPressTimerRef = useRef<number | null>(null);
-    const longPressTriggeredRef = useRef(false);
     const HISTORY_PAGE_SIZE = 50;
     const HISTORY_SEARCH_MAX = 200;
-    const LONG_PRESS_MS = 450;
-
-    const startHistoryLongPress = (msgId: number) => {
-        longPressTriggeredRef.current = false;
-        if (longPressTimerRef.current) window.clearTimeout(longPressTimerRef.current);
-        longPressTimerRef.current = window.setTimeout(() => {
-            longPressTriggeredRef.current = true;
-            // Paper notes already show their original text here; never expose them in normal chat.
-            if (allHistoryMessages.some(m => m.id === msgId && m.type === 'secret_note')) return;
-            if (onJumpToMessageInChat) {
-                setModalType('none');
-                setHistoryPage(0);
-                setHistorySearch('');
-                onJumpToMessageInChat(msgId);
-            }
-        }, LONG_PRESS_MS);
-    };
-    const cancelHistoryLongPress = () => {
-        if (longPressTimerRef.current) {
-            window.clearTimeout(longPressTimerRef.current);
-            longPressTimerRef.current = null;
-        }
-    };
     const handleHistoryItemClick = (msgId: number) => {
-        if (longPressTriggeredRef.current) {
-            longPressTriggeredRef.current = false;
-            return;
-        }
         // 范围内直接设置；范围外由上层直接提示先调整拉杆。
         onSetHistoryStart(msgId);
     };
@@ -529,7 +499,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
 
                         <div className="pt-2 border-t border-slate-100">
                             <button onClick={() => setModalType('history-manager')} className="w-full py-3 bg-slate-50 text-slate-600 font-bold rounded-2xl border border-slate-200 active:scale-95 transition-transform flex items-center justify-center gap-2">
-                                查看原文范围 / 设置用户断点
+                                设置 AI 原文读取范围 / 用户断点
                             </button>
                             <p className="text-[10px] text-slate-400 mt-2 text-center">查看拉杆上限、记忆水位线，并可在最大范围内进一步缩小 AI 原文范围。</p>
                         </div>
@@ -870,7 +840,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                 footer={<><button onClick={() => onSetHistoryStart(undefined)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl">清除用户断点</button><button onClick={() => { setModalType('none'); setHistoryPage(0); setHistorySearch(''); }} className="flex-1 py-3 bg-primary text-white font-bold rounded-2xl">完成</button></>}
             >
                 <div className="space-y-2 max-h-[50vh] overflow-y-auto no-scrollbar p-1">
-                    <p className="text-xs text-slate-400 text-center mb-2"><b>短按</b>记录 = 设置用户断点（只能缩小范围） · <b>长按</b>普通消息 = 跳转查看原文。秘密小纸条在此查看，每张占一条上下文。</p>
+                    <p className="text-xs text-slate-400 text-center mb-2">此页用于设置 AI 读取范围，点击记录会设置用户断点（只能缩小范围）。查找或浏览聊天请使用聊天工具区的「查找聊天记录」。秘密小纸条在此查看，每张占一条上下文。</p>
                     <div className="grid gap-2 mb-2">
                         <div className="bg-violet-50 border border-violet-200 rounded-xl p-2.5 text-[11px] text-violet-800 leading-relaxed">
                             <b>紫色 · 记忆宫殿水位线</b>：此前消息已经处理，不会因调整上下文再次向量化。
@@ -954,10 +924,6 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                                         key={m.id}
                                         id={`history-msg-${m.id}`}
                                         onClick={() => handleHistoryItemClick(m.id)}
-                                        onPointerDown={() => startHistoryLongPress(m.id)}
-                                        onPointerUp={cancelHistoryLongPress}
-                                        onPointerLeave={cancelHistoryLongPress}
-                                        onPointerCancel={cancelHistoryLongPress}
                                         onContextMenu={(e) => e.preventDefault()}
                                         className={`p-3 rounded-xl border cursor-pointer text-xs flex gap-2 items-start transition-colors select-none ${cls}`}
                                     >
