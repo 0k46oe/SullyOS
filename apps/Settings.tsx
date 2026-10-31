@@ -1,9 +1,12 @@
+import {CharacterWeatherCities} from '../components/settings/CharacterAwarenessSettings';
+import {cleanCharacterWeatherCities} from '../utils/characterWeather';
 import NavigationBallSettings from '../components/settings/NavigationBallSettings';
 import { useSettingsFocus } from '../utils/settingsNavigation';
 import ApiPresetGroups from '../components/settings/ApiPresetGroups';
 import DialogueApiFields from '../components/settings/DialogueApiFields';
-import { createDialogueFetch, dialogueEndpoint, dialogueHeaders } from '../utils/dialogueTransport';
-import type { ApiProtocol } from '../types';
+import { llmApiType, normalizeLlmBaseUrl, type LlmApiType } from '../utils/llmEndpoint';
+import { fetchLlm } from '../utils/anthropicApi';
+import { anthropicRequestOptions } from '../utils/dialogueTransport';
 import ModelPicker from '../components/settings/ModelPicker';
 import { buildModelPickerView } from '../utils/modelPickerView';
 
@@ -64,7 +67,13 @@ import {
 } from '../utils/avatarModelBackup';
 import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '../utils/apiConfigNormalize';
 import { configFromPreset, findActivePresetId, presetDiffersFromConfig, type PresetSwitchPatch } from '../utils/apiPresetSwitch';
-import type { APIConfig, TtsProvider } from '../types';
+import type { APIConfig, TtsProvider, SttProvider } from '../types';
+import {
+    STT_PROVIDER_OPTIONS,
+    isSttProviderConfigured,
+    resolveSttProvider,
+    getSttProviderLabel,
+} from '../utils/speechToText';
 import { describeImageWithVisionApi, VISION_API_TEST_IMAGE_DATA_URL, visionApiConfigFromPreset } from '../utils/visionApi';
 import {
     FIRECRAWL_API_KEYS_URL,
@@ -497,14 +506,15 @@ const Settings: React.FC = () => {
   } = useOS();
   
   const [localKey, setLocalKey] = useState(apiConfig.apiKey);
-  const [localProtocol, setLocalProtocol] = useState<ApiProtocol>(apiConfig.protocol || 'openai');
   const [localAnthropicPromptCache, setLocalAnthropicPromptCache] = useState(apiConfig.anthropicPromptCache !== false);
   const [localAnthropicPromptCacheTtl, setLocalAnthropicPromptCacheTtl] = useState<'5m' | '1h'>(apiConfig.anthropicPromptCacheTtl === '1h' ? '1h' : '5m');
   const [localAnthropicCustomTemperature, setLocalAnthropicCustomTemperature] = useState(apiConfig.anthropicCustomTemperature === true);
   const [localOpenaiPromptCache, setLocalOpenaiPromptCache] = useState(apiConfig.openaiPromptCache !== false);
   const [localUrl, setLocalUrl] = useState(apiConfig.baseUrl);
+  const [localApiType, setLocalApiType] = useState<LlmApiType>(llmApiType(apiConfig));
   const [localModel, setLocalModel] = useState(String(apiConfig.model || ''));
   const [localStream, setLocalStream] = useState<boolean>(apiConfig.stream === true);
+  const [localMaxTokens, setLocalMaxTokens] = useState(apiConfig.maxTokens ?? 8000);
   const [localTemperature, setLocalTemperature] = useState<number>(
     typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85
   );
@@ -528,6 +538,7 @@ const Settings: React.FC = () => {
       ? apiConfig.ttsProvider
       : 'minimax'
   );
+  const [localSttProvider, setLocalSttProvider] = useState<SttProvider | undefined>(apiConfig.sttProvider);
   const [localFishKey, setLocalFishKey] = useState(apiConfig.fishAudioApiKey || '');
   const [localFishModel, setLocalFishModel] = useState(apiConfig.fishAudioModel || 's2.1-pro');
   const [localElevenLabsKey, setLocalElevenLabsKey] = useState(apiConfig.elevenLabsApiKey || '');
@@ -556,15 +567,16 @@ const Settings: React.FC = () => {
   const [presetWriteback, setPresetWriteback] = useState<{ presetId: string; config: PresetSwitchPatch } | null>(null);
   const [editPresetName, setEditPresetName] = useState('');
   const [editPresetUrl, setEditPresetUrl] = useState('');
+  const [editPresetApiType, setEditPresetApiType] = useState<LlmApiType>('openai');
   const [editPresetKey, setEditPresetKey] = useState('');
   const [editPresetModel, setEditPresetModel] = useState('');
-  const [editPresetProtocol, setEditPresetProtocol] = useState<ApiProtocol>('openai');
   const [editPresetStream, setEditPresetStream] = useState(false);
   const [editPresetTemperature, setEditPresetTemperature] = useState(0.85);
   const [editPresetPromptCache, setEditPresetPromptCache] = useState(true);
   const [editPresetPromptCacheTtl, setEditPresetPromptCacheTtl] = useState<'5m' | '1h'>('5m');
   const [editPresetCustomTemperature, setEditPresetCustomTemperature] = useState(false);
   const [editPresetOpenaiPromptCache, setEditPresetOpenaiPromptCache] = useState(true);
+  const [editPresetMaxTokens, setEditPresetMaxTokens] = useState(8000);
   const [holdingDeletePresetId, setHoldingDeletePresetId] = useState<string | null>(null);
   const presetDeleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
@@ -707,6 +719,7 @@ const Settings: React.FC = () => {
   useLocalBackHandler(() => { closeRealtimePage(); return true; }, 30, showRealtimeModal);
   const [rtUserHolidays, setRtUserHolidays] = useState<UserHolidayConfig>(() => ({ ...(realtimeConfig.userHolidays || { enabled: false, countryCode: '' }), ...(holidaySettingsFocus ? { enabled: true } : {}) }));
   const [rtWeatherKey, setRtWeatherKey] = useState(realtimeConfig.weatherApiKey);
+  const [rtWeatherCities, setRtWeatherCities] = useState(()=>cleanCharacterWeatherCities(realtimeConfig.weatherCities));
   const [rtWeatherCity, setRtWeatherCity] = useState(realtimeConfig.weatherCity);
   const [rtNewsEnabled, setRtNewsEnabled] = useState(realtimeConfig.newsEnabled);
   const [rtNewsApiKey, setRtNewsApiKey] = useState(realtimeConfig.newsApiKey || '');
@@ -985,16 +998,17 @@ const Settings: React.FC = () => {
   // 主 API 这边还没保存的输入就被悄悄冲回旧值了，而且界面上完全看不出来。
   useEffect(() => {
       setLocalUrl(apiConfig.baseUrl);
-      setLocalProtocol(apiConfig.protocol || 'openai');
+      setLocalApiType(llmApiType(apiConfig));
       setLocalKey(apiConfig.apiKey);
       setLocalModel(String(apiConfig.model || ''));
       setLocalStream(apiConfig.stream === true);
+      setLocalMaxTokens(apiConfig.maxTokens ?? 8000);
       setLocalTemperature(typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85);
       setLocalAnthropicCustomTemperature(apiConfig.anthropicCustomTemperature === true);
       setLocalAnthropicPromptCache(apiConfig.anthropicPromptCache !== false);
       setLocalAnthropicPromptCacheTtl(apiConfig.anthropicPromptCacheTtl === '1h' ? '1h' : '5m');
       setLocalOpenaiPromptCache(apiConfig.openaiPromptCache !== false);
-  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.protocol, apiConfig.stream, apiConfig.temperature, apiConfig.anthropicCustomTemperature, apiConfig.anthropicPromptCache, apiConfig.anthropicPromptCacheTtl, apiConfig.openaiPromptCache]);
+  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.stream, apiConfig.temperature, apiConfig.maxTokens, apiConfig.apiType, apiConfig.protocol, apiConfig.anthropicCustomTemperature, apiConfig.anthropicPromptCache, apiConfig.anthropicPromptCacheTtl, apiConfig.openaiPromptCache]);
 
   useEffect(() => {
       setLocalVisionEnabled(apiConfig.visionApi?.enabled === true);
@@ -1015,6 +1029,7 @@ const Settings: React.FC = () => {
               ? apiConfig.ttsProvider
               : 'minimax'
       );
+      setLocalSttProvider(apiConfig.sttProvider);
       setLocalFishKey(apiConfig.fishAudioApiKey || '');
       setLocalFishModel(apiConfig.fishAudioModel || 's2.1-pro');
       setLocalElevenLabsKey(apiConfig.elevenLabsApiKey || '');
@@ -1029,7 +1044,7 @@ const Settings: React.FC = () => {
       setLocalVoicePromptDate(apiConfig.voicePrompts?.dateVoice || '');
   }, [
       apiConfig.minimaxApiKey, apiConfig.minimaxGroupId, apiConfig.minimaxRegion, apiConfig.aceStepApiKey,
-      apiConfig.ttsProvider, apiConfig.fishAudioApiKey, apiConfig.fishAudioModel,
+      apiConfig.ttsProvider, apiConfig.sttProvider, apiConfig.fishAudioApiKey, apiConfig.fishAudioModel,
       apiConfig.elevenLabsApiKey, apiConfig.elevenLabsModel, apiConfig.elevenLabsStability,
       apiConfig.elevenLabsSimilarityBoost, apiConfig.elevenLabsStyle, apiConfig.elevenLabsUseSpeakerBoost,
       apiConfig.voicePrompts?.minimax, apiConfig.voicePrompts?.fishaudio,
@@ -1040,7 +1055,7 @@ const Settings: React.FC = () => {
   // 这样刷新、手改 URL、导入备份之后，界面上的「使用中」永远等于请求真的会发去哪。
   const activePresetId = useMemo(
       () => findActivePresetId(apiPresets, apiConfig),
-      [apiPresets, apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.protocol],
+      [apiPresets, apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.apiType, apiConfig.protocol],
   );
 
   /**
@@ -1050,7 +1065,7 @@ const Settings: React.FC = () => {
   const commitApiConfig = (patch: PresetSwitchPatch | Partial<APIConfig>) => {
     updateApiConfig(patch);
     // 凭据行与存量任务统一从同步队列更新，失败自动重试并留底账供下次启动补传。
-    if ((patch.protocol ?? apiConfig.protocol) !== 'anthropic') syncAmsgLlmCredentials({ ...apiConfig, ...patch });
+    syncAmsgLlmCredentials({ ...apiConfig, ...patch });
   };
 
   /**
@@ -1072,20 +1087,21 @@ const Settings: React.FC = () => {
       setEditPresetName(preset.name);
       setEditPresetGroup(preset.group || '');
       setEditPresetUrl(preset.config.baseUrl || '');
+      setEditPresetApiType(llmApiType(preset.config));
       setEditPresetKey(preset.config.apiKey || '');
       setEditPresetModel(preset.config.model || '');
-      setEditPresetProtocol(preset.config.protocol || 'openai');
       setEditPresetPromptCache(isActive ? localAnthropicPromptCache : preset.config.anthropicPromptCache !== false);
       setEditPresetPromptCacheTtl(isActive ? localAnthropicPromptCacheTtl : preset.config.anthropicPromptCacheTtl === '1h' ? '1h' : '5m');
       setEditPresetCustomTemperature(isActive ? localAnthropicCustomTemperature : preset.config.anthropicCustomTemperature === true);
       setEditPresetOpenaiPromptCache(isActive ? localOpenaiPromptCache : preset.config.openaiPromptCache !== false);
+      setEditPresetMaxTokens(isActive ? localMaxTokens : (preset.config.maxTokens ?? localMaxTokens));
       // 当前正在使用的预设要接住主表单里刚改的高级设置：用户点铅笔再点保存即可写回，
       // 不必猜还要额外按一次「用当前配置填入」。非当前/老预设则读取自身，缺字段才回退。
       setEditPresetStream(
           isActive ? localStream : (typeof preset.config.stream === 'boolean' ? preset.config.stream : localStream),
       );
       const temperature = isActive ? localTemperature : (typeof preset.config.temperature === 'number' ? preset.config.temperature : localTemperature);
-      setEditPresetTemperature(preset.config.protocol === 'anthropic' ? Math.min(1, Math.max(0, temperature)) : temperature);
+      setEditPresetTemperature(llmApiType(preset.config) === 'anthropic' ? Math.min(1, Math.max(0, temperature)) : temperature);
   };
 
   const handleUpdatePreset = () => {
@@ -1098,16 +1114,17 @@ const Settings: React.FC = () => {
       }
       const nextConfig = {
           ...preset.config,
-          baseUrl: normalizeApiBaseUrl(editPresetUrl),
+          baseUrl: normalizeLlmBaseUrl(normalizeApiBaseUrl(editPresetUrl), editPresetApiType),
+          apiType: editPresetApiType,
           apiKey: normalizeApiCredential(editPresetKey),
           model: normalizeApiModel(editPresetModel),
-          protocol: editPresetProtocol,
           stream: editPresetStream,
           temperature: editPresetTemperature,
           anthropicCustomTemperature: editPresetCustomTemperature,
           anthropicPromptCache: editPresetPromptCache,
           anthropicPromptCacheTtl: editPresetPromptCacheTtl,
           openaiPromptCache: editPresetOpenaiPromptCache,
+          maxTokens: editPresetMaxTokens,
       };
       // 「正在用的就是这条」要在改之前问，改完值就对不上了
       const wasActive = activePresetId === preset.id;
@@ -1168,14 +1185,15 @@ const Settings: React.FC = () => {
           return;
       }
       addApiPreset(newPresetName, {
-        baseUrl: normalizeApiBaseUrl(localUrl),
+        baseUrl: normalizeLlmBaseUrl(normalizeApiBaseUrl(localUrl), localApiType),
+        apiType: localApiType,
         apiKey: normalizeApiCredential(localKey),
         model: normalizeApiModel(localModel),
-        protocol: localProtocol,
         stream: localStream,
         temperature: localTemperature,
         anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl, anthropicCustomTemperature: localAnthropicCustomTemperature,
         openaiPromptCache: localOpenaiPromptCache,
+        maxTokens: localMaxTokens,
       }, newPresetGroup);
       setNewPresetName('');
       setNewPresetGroup('');
@@ -1193,13 +1211,14 @@ const Settings: React.FC = () => {
   const handleSaveApi = (modelOverride?: string) => {
     const nextConfig = {
       apiKey: normalizeApiCredential(localKey),
-      baseUrl: normalizeApiBaseUrl(localUrl),
+      baseUrl: normalizeLlmBaseUrl(normalizeApiBaseUrl(localUrl), localApiType),
+      apiType: localApiType,
       model: normalizeApiModel(modelOverride ?? localModel),
-      protocol: localProtocol,
       stream: localStream,
       temperature: localTemperature,
       anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl, anthropicCustomTemperature: localAnthropicCustomTemperature,
       openaiPromptCache: localOpenaiPromptCache,
+      maxTokens: localMaxTokens,
     };
     // 「是不是来自某条预设」要在保存之前问，存完值就对不上了
     const sourcePreset = apiPresets.find(preset => preset.id === activePresetId);
@@ -1357,6 +1376,7 @@ const Settings: React.FC = () => {
       minimaxRegion: localMiniMaxRegion,
       aceStepApiKey: localAceStepKey,
       ttsProvider: localTtsProvider,
+      sttProvider: localSttProvider,
       fishAudioApiKey: localFishKey,
       fishAudioModel: localFishModel,
       elevenLabsApiKey: localElevenLabsKey,
@@ -1374,6 +1394,17 @@ const Settings: React.FC = () => {
       ...overrides,
   });
 
+  const draftSttLookupConfig: Partial<APIConfig> = {
+      ...apiConfig,
+      baseUrl: localUrl,
+      apiKey: localKey,
+      minimaxApiKey: localMiniMaxKey,
+      fishAudioApiKey: localFishKey,
+      elevenLabsApiKey: localElevenLabsKey,
+      ttsProvider: localTtsProvider,
+      sttProvider: localSttProvider,
+  };
+
   const handleSaveOtherApis = () => {
     updateApiConfig(buildOtherApiConfig());
     setOtherStatusMsg('已保存');
@@ -1390,6 +1421,17 @@ const Settings: React.FC = () => {
     addToast(`语音生成已切到 ${providerLabel}`, 'success');
   };
 
+  const selectSttProvider = (provider: SttProvider) => {
+    if (!isSttProviderConfigured(provider, draftSttLookupConfig)) {
+      const opt = STT_PROVIDER_OPTIONS.find(o => o.id === provider);
+      addToast(opt?.keyHint || '请先在上方填写对应平台的 API Key', 'error');
+      return;
+    }
+    setLocalSttProvider(provider);
+    updateApiConfig(buildOtherApiConfig({ sttProvider: provider }));
+    addToast(`语音转文字已切到 ${getSttProviderLabel(provider)}`, 'success');
+  };
+
   // 选鱼声模型：立即落库（同上，连带草稿一起提交，避免被同步 effect 冲掉）。
   const selectFishModel = (model: string) => {
     setLocalFishModel(model);
@@ -1403,16 +1445,15 @@ const Settings: React.FC = () => {
   };
 
   const fetchModels = async () => {
-    const baseUrl = normalizeApiBaseUrl(localUrl);
+    const baseUrl = normalizeLlmBaseUrl(normalizeApiBaseUrl(localUrl), localApiType);
     const apiKey = normalizeApiCredential(localKey);
     if (!baseUrl) { setStatusMsg('请先填写 URL'); return; }
     setIsLoadingModels(true);
     setStatusMsg('正在连接...');
     try {
-        const modelApi = { baseUrl, apiKey, model: localModel, protocol: localProtocol };
-        const response = await fetch(dialogueEndpoint(modelApi, 'models'), {
+        const response = await fetchLlm(`${baseUrl}/models`, {
             method: 'GET',
-            headers: dialogueHeaders(modelApi)
+            headers: { Authorization: `Bearer ${apiKey || 'sk-none'}` }
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await safeResponseJson(response);
@@ -1889,7 +1930,8 @@ const Settings: React.FC = () => {
           weatherEnabled: rtWeatherEnabled,
           userHolidays: { ...rtUserHolidays, introChoice: rtUserHolidays.enabled ? 'configured' as const : 'declined' as const },
           weatherApiKey: rtWeatherKey,
-          weatherCity: rtWeatherCity,
+          weatherCity: rtWeatherCity.trim(),
+          weatherCities: cleanCharacterWeatherCities(rtWeatherCities),
           newsEnabled: rtNewsEnabled,
           newsApiKey: rtNewsApiKey,
           newsPlatforms: rtNewsPlatforms,
@@ -2266,6 +2308,7 @@ const Settings: React.FC = () => {
                 • <b>整合导出</b>: 一次性导出文字与图片媒体；VRM / Live2D 模型请使用下方独立备份。<br/>
                 • <b>纯文字备份</b>: 包含所有聊天记录、角色设定、剧情数据。所有图片会被移除（减小体积）。<br/>
                 • <b>媒体与美化素材</b>: 导出相册、表情包、聊天图片、头像、主题气泡、壁纸、图标等图片资源和外观配置。<br/>
+                • <b>活动与哔哔</b>: 万圣节收集、装扮选择、恐龙箱庭、哔哔正文与设置、家园串门和秘密记录随纯文字/整合备份保存；哔哔上传配图随媒体/整合备份保存，补导媒体不覆盖正文或活动进度。<br/>
                 • <b>装扮与搭配</b>: 整合/媒体备份包含桌面主题、聊天装扮、搭配收藏、旧气泡及实际素材，并保留来源权限、角色搭配和投稿更新绑定。纯文字备份不能完整恢复美化。<br/>
                 • <b>作者搬家</b>: 整合备份还包含 Repo 状态、美化偏好和引导记录；已在作者页开启“记住作者身份”时，也携带作者码与密码。导入后恢复这些数据，不会自动登录或投稿。<br/>
                 • <b>语音范围</b>: 整合/媒体备份仅包含已收藏语音，以及 Live2D 开机、触摸预设实际引用的语音；未收藏的聊天、通话等临时语音不会导出。<br/>
@@ -2602,9 +2645,9 @@ const Settings: React.FC = () => {
 
             <div className="space-y-4">
                 <DialogueApiFields
-                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, protocol: localProtocol, stream: localStream, temperature: localTemperature, anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl, anthropicCustomTemperature: localAnthropicCustomTemperature, openaiPromptCache: localOpenaiPromptCache }}
+                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, stream: localStream, temperature: localTemperature, maxTokens: localMaxTokens, apiType: localApiType, anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl, anthropicCustomTemperature: localAnthropicCustomTemperature, openaiPromptCache: localOpenaiPromptCache }}
                     onChange={patch => {
-                        if (patch.protocol !== undefined) setLocalProtocol(patch.protocol);
+                        if (patch.apiType !== undefined) setLocalApiType(patch.apiType);
                         if (patch.baseUrl !== undefined) setLocalUrl(patch.baseUrl);
                         if (patch.apiKey !== undefined) setLocalKey(patch.apiKey);
                         if (patch.stream !== undefined) setLocalStream(patch.stream);
@@ -2613,6 +2656,7 @@ const Settings: React.FC = () => {
                         if (patch.anthropicPromptCacheTtl !== undefined) setLocalAnthropicPromptCacheTtl(patch.anthropicPromptCacheTtl);
                         if (patch.anthropicCustomTemperature !== undefined) setLocalAnthropicCustomTemperature(patch.anthropicCustomTemperature);
                         if (patch.openaiPromptCache !== undefined) setLocalOpenaiPromptCache(patch.openaiPromptCache);
+                        if ('maxTokens' in patch) setLocalMaxTokens(patch.maxTokens ?? 8000);
                     }}
                     fetchModels={fetchModels} isLoadingModels={isLoadingModels} openModelPicker={openModelPicker}
                 />
@@ -2635,8 +2679,7 @@ const Settings: React.FC = () => {
                         setTestingApi(true);
                         setTestApiResult(null);
                         try {
-                            const testApi = { baseUrl: localUrl, apiKey: localKey, model: localModel, protocol: localProtocol, temperature: localTemperature, anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl, anthropicCustomTemperature: localAnthropicCustomTemperature };
-                            const data = await createDialogueFetch(testApi)(dialogueEndpoint(testApi), {
+                            const res = await fetchLlm(`${normalizeLlmBaseUrl(localUrl, localApiType)}/chat/completions`, {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localKey.trim()}` },
                                 body: JSON.stringify({
@@ -2644,9 +2687,12 @@ const Settings: React.FC = () => {
                                     messages: [{ role: 'user', content: 'Hi' }],
                                     max_tokens: 5,
                                     stream: localStream,
+                                      temperature: localTemperature,
+                                      ...(localApiType === 'anthropic' ? { __sullyAnthropicOptions: anthropicRequestOptions({ baseUrl: localUrl, apiKey: localKey, model: localModel, anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl, anthropicCustomTemperature: localAnthropicCustomTemperature }) } : {}),
                                 }),
                             });
                             {
+                                const data = await safeResponseJson(res);
                                 const reply = extractContent(data);
                                 setTestApiResult(`✅ 连接成功 — 模型回复: "${reply.slice(0, 30)}"`);
                             }
@@ -3008,7 +3054,7 @@ const Settings: React.FC = () => {
                 {/* 底部：当前语音引擎三选一 —— radio 样式（配置都在上面，这里只挑用哪家） */}
                 <div className="group rounded-2xl border border-slate-200/70 bg-slate-50/60 p-3">
                     <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-0.5 block">当前语音引擎（三选一）</label>
-                    <p className="text-[11px] text-slate-400 mb-2.5">聊天语音条 / 约会 / 电话用哪一家。上面三家的配置都会保留，这里只切换当前生效的。</p>
+                    <p className="text-[11px] text-slate-400 mb-2.5">聊天语音条 / 约会 / 电话里角色开口用哪一家。上面三家的配置都会保留，这里只切换当前生效的。</p>
                     <div className="space-y-2">
                         {([
                             ['minimax', 'MiniMax', '国内可直连，默认推荐'],
@@ -3031,6 +3077,52 @@ const Settings: React.FC = () => {
                                         <span className="block text-[11px] text-slate-400 mt-0.5">{desc}</span>
                                     </span>
                                     {active && <span className="text-[10px] font-bold text-primary shrink-0">使用中</span>}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+
+                {/* 通话语音转文字（你开口说话 → 转文字）四选一 —— 可与角色发声平台自由搭配，填了 Key 才能选对应平台 */}
+                <div className="group rounded-2xl border border-slate-200/70 bg-slate-50/60 p-3">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-0.5 block">语音转文字 · 通话麦克风（四选一）</label>
+                    <p className="text-[11px] text-slate-400 mb-2.5">
+                        电话里点麦克风说话走哪条路转成文字。可与上方角色发声平台分开搭配（比如语音用 MiniMax、识别用 ElevenLabs 或鱼声）；填好对应官方 Key 后即可切换。
+                    </p>
+                    <div className="space-y-2">
+                        {STT_PROVIDER_OPTIONS.map((opt) => {
+                            const configured = isSttProviderConfigured(opt.id, draftSttLookupConfig);
+                            const resolvedCurrent = resolveSttProvider(draftSttLookupConfig);
+                            const active = resolvedCurrent === opt.id;
+                            return (
+                                <button
+                                    key={opt.id}
+                                    type="button"
+                                    onClick={() => selectSttProvider(opt.id)}
+                                    className={`w-full flex items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${
+                                        active
+                                            ? 'border-primary bg-primary/5 shadow-sm'
+                                            : configured
+                                                ? 'border-slate-200 bg-white/70 active:bg-white'
+                                                : 'border-slate-200/60 bg-slate-100/60 opacity-65'
+                                    }`}
+                                >
+                                    <span className={`shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center ${active ? 'border-primary' : 'border-slate-300'}`}>
+                                        {active && <span className="w-2 h-2 rounded-full bg-primary" />}
+                                    </span>
+                                    <span className="flex-1 min-w-0">
+                                        <span className={`text-sm font-semibold ${active ? 'text-primary' : configured ? 'text-slate-700' : 'text-slate-500'}`}>
+                                            {opt.label}
+                                        </span>
+                                        <span className="block text-[11px] text-slate-400 mt-0.5">
+                                            {configured ? opt.desc : `${opt.desc}（${opt.keyHint}）`}
+                                        </span>
+                                    </span>
+                                    {active ? (
+                                        <span className="text-[10px] font-bold text-primary shrink-0">使用中</span>
+                                    ) : !configured ? (
+                                        <span className="text-[10px] font-medium text-slate-400 shrink-0">未填 Key</span>
+                                    ) : null}
                                 </button>
                             );
                         })}
@@ -4078,11 +4170,8 @@ const Settings: React.FC = () => {
               </div>
               <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">URL</label>
+                  <select aria-label="预设接口类型" value={editPresetApiType} onChange={e => setEditPresetApiType(e.target.value as LlmApiType)} className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 原生 Messages</option></select>
                   <input value={editPresetUrl} onChange={e => setEditPresetUrl(e.target.value)} placeholder="https://..." className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary" />
-                  <label className="text-[10px] font-bold text-slate-400 block">接口格式</label>
-                  <select aria-label="预设接口格式" value={editPresetProtocol} onChange={e => { setEditPresetProtocol(e.target.value as ApiProtocol); if (e.target.value === 'anthropic') setEditPresetTemperature(value => Math.min(1, Math.max(0, value))); }} className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm">
-                    <option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 原生（Messages）</option>
-                  </select>
               </div>
               <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Key</label>
@@ -4111,30 +4200,30 @@ const Settings: React.FC = () => {
                   <div>
                       <div className="flex items-center justify-between">
                           <label htmlFor="edit-preset-temperature" className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">温度 (Temperature)</label>
-                          <span className="text-[10px] font-mono text-slate-400">{editPresetProtocol === 'anthropic' && !editPresetCustomTemperature ? '模型默认' : editPresetTemperature.toFixed(2)}</span>
+                          <span className="text-[10px] font-mono text-slate-400">{editPresetApiType === 'anthropic' && !editPresetCustomTemperature ? '模型默认' : editPresetTemperature.toFixed(2)}</span>
                       </div>
                       <input
                           id="edit-preset-temperature"
                           type="range"
                           min="0"
-                          max={editPresetProtocol === 'anthropic' ? 1 : 2}
-                          disabled={editPresetProtocol === 'anthropic' && !editPresetCustomTemperature}
+                          max={editPresetApiType === 'anthropic' ? 1 : 2}
+                          disabled={editPresetApiType === 'anthropic' && !editPresetCustomTemperature}
                           step="0.05"
                           value={editPresetTemperature}
                           onChange={event => setEditPresetTemperature(parseFloat(event.target.value))}
                           className="w-full accent-primary mt-1"
                       />
                   </div>
-                  {editPresetProtocol === 'anthropic' && <label className="flex items-center gap-2 text-xs text-slate-500">
+                  {editPresetApiType === 'anthropic' && <label className="flex items-center gap-2 text-xs text-slate-500">
                     <input type="checkbox" aria-label="预设自定义温度" checked={editPresetCustomTemperature}
                       onChange={event => { setEditPresetCustomTemperature(event.target.checked); setEditPresetTemperature(value => Math.min(1, Math.max(0, value))); }} />
                     自定义温度（0～1）；关闭时使用模型默认
                   </label>}
-                  {editPresetProtocol === 'anthropic' && <label className="flex items-center gap-2 text-xs text-slate-500">
+                  {editPresetApiType === 'anthropic' && <label className="flex items-center gap-2 text-xs text-slate-500">
                     <input type="checkbox" aria-label="预设提示词缓存" checked={editPresetPromptCache} onChange={event => setEditPresetPromptCache(event.target.checked)} />
                     提示词缓存（稳定前缀；实际命中以服务返回为准）
                   </label>}
-                  {editPresetProtocol === 'anthropic' && <label className="flex items-center justify-between gap-2 text-xs text-slate-500">
+                  {editPresetApiType === 'anthropic' && <label className="flex items-center justify-between gap-2 text-xs text-slate-500">
                     <span>缓存有效期</span>
                     <select aria-label="预设缓存有效期" value={editPresetPromptCacheTtl} disabled={!editPresetPromptCache}
                       onChange={event => setEditPresetPromptCacheTtl(event.target.value as '5m' | '1h')}
@@ -4142,23 +4231,29 @@ const Settings: React.FC = () => {
                       <option value="5m">5 分钟</option><option value="1h">1 小时</option>
                     </select>
                   </label>}
-                  {editPresetProtocol !== 'anthropic' && <label className="flex items-center gap-2 text-xs text-slate-500">
+                  {editPresetApiType !== 'anthropic' && <label className="flex items-center gap-2 text-xs text-slate-500">
                     <input type="checkbox" aria-label="预设 OpenAI 提示词缓存" checked={editPresetOpenaiPromptCache} onChange={event => setEditPresetOpenaiPromptCache(event.target.checked)} />
                     OpenAI 提示词缓存（prompt_cache_key）
                   </label>}
+                  <label className="block text-[10px] text-slate-400">私聊最大生成 Token
+                      <input type="number" min={1} step={1} value={editPresetMaxTokens} aria-label="预设最大生成 Token"
+                          onChange={event => { const n = Number(event.target.value); if (Number.isSafeInteger(n) && n > 0) setEditPresetMaxTokens(n); }}
+                          className="mt-1 w-full bg-white rounded-xl px-3 py-2 text-sm" />
+                  </label>
               </div>
               <button
                   type="button"
                   onClick={() => {
                       setEditPresetUrl(localUrl);
+                      setEditPresetApiType(localApiType);
                       setEditPresetKey(localKey);
                       setEditPresetModel(localModel);
-                      setEditPresetProtocol(localProtocol);
                       setEditPresetStream(localStream);
-                      setEditPresetTemperature(localProtocol === 'anthropic' ? Math.min(1, Math.max(0, localTemperature)) : localTemperature);
-                      setEditPresetCustomTemperature(localAnthropicCustomTemperature);
+                      setEditPresetTemperature(localTemperature);
+                      setEditPresetMaxTokens(localMaxTokens);
                       setEditPresetPromptCache(localAnthropicPromptCache);
                       setEditPresetPromptCacheTtl(localAnthropicPromptCacheTtl);
+                      setEditPresetCustomTemperature(localAnthropicCustomTemperature);
                       setEditPresetOpenaiPromptCache(localOpenaiPromptCache);
                       addToast('已填入当前配置', 'info');
                   }}
@@ -4223,7 +4318,7 @@ const Settings: React.FC = () => {
       >
           <div className="space-y-5 max-h-[60vh] overflow-y-auto no-scrollbar">
               {rtUserLocationPage === 'main' && <UserHolidaySettings value={rtUserHolidays} onChange={setRtUserHolidays} />}
-              <UserLocationSettings value={rtUserLocation} onChange={setRtUserLocation} onSave={handleSaveUserLocation} page={rtUserLocationPage} onNavigate={setRtUserLocationPage} onBusyChange={setRtUserLocationBusy} userName={userProfile.name} />
+              <UserLocationSettings characters={characters} value={rtUserLocation} onChange={setRtUserLocation} onSave={handleSaveUserLocation} page={rtUserLocationPage} onNavigate={setRtUserLocationPage} onBusyChange={setRtUserLocationBusy} userName={userProfile.name} />
               {rtUserLocationPage === 'main' && <>
               {/* 天气配置 */}
               <div className="bg-emerald-50/50 p-4 rounded-2xl space-y-3">
@@ -4244,11 +4339,12 @@ const Settings: React.FC = () => {
                               <input type="password" value={rtWeatherKey} onChange={e => setRtWeatherKey(e.target.value)} className="w-full bg-white/80 border border-emerald-200 rounded-xl px-3 py-2 text-sm font-mono" placeholder="留空则用免费的 Open-Meteo，无需注册" />
                           </div>
                           <div>
-                              <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">城市</label>
+                              <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">默认天气城市</label>
                               <input type="text" value={rtWeatherCity} onChange={e => setRtWeatherCity(e.target.value)} className="w-full bg-white/80 border border-emerald-200 rounded-xl px-3 py-2 text-sm" placeholder="北京 / Beijing / Shanghai" />
                           </div>
 <button onClick={testWeatherApi} className="w-full py-2 bg-emerald-100 text-emerald-600 text-xs font-bold rounded-xl active:scale-95 transition-transform">测试天气API</button>
                           {renderRtTestStatus('weather')}
+                          <CharacterWeatherCities characters={characters} value={rtWeatherCities} defaultCity={rtWeatherCity} onChange={setRtWeatherCities}/>
                       </div>
                   )}
               </div>

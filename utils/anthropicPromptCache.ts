@@ -6,24 +6,6 @@ export interface AnthropicCacheDiagnostic {
   elapsedMs?: number;
 }
 
-/** Fixed leading boundaries keep earlier checkpoints stable when a later part
- * of the prompt changes. Text order, whitespace and surrogate pairs survive.
- * These are character boundaries, never a claim about provider token limits. */
-export function splitAnthropicCacheText(text: string): string[] {
-  if (!text) return [];
-  const parts: string[] = [];
-  let start = 0;
-  for (const target of [8192, 16384, 32768]) {
-    if (target >= text.length) break;
-    const newline = text.lastIndexOf('\n', target - 1);
-    let end = newline >= target - 1024 ? newline + 1 : target;
-    if (end > 0 && /[\uD800-\uDBFF]/.test(text[end - 1]) && /[\uDC00-\uDFFF]/.test(text[end])) end--;
-    if (end > start) { parts.push(text.slice(start, end)); start = end; }
-  }
-  parts.push(text.slice(start));
-  return parts;
-}
-
 // Session-only, bounded comparison. No prompt, API key or digest is persisted
 // in normal logs. Only the comparison and character counts leave this module.
 const recent = new Map<string, { hashes: string[]; at: number }>();

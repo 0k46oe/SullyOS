@@ -1,3 +1,5 @@
+> 当前合并已采用原作者的通用 Anthropic Messages 与 TXT 聊天导出。二改保留的额外选项与最新行为见 [角色 API](docs/character-api.md) 和 [角色身份、导出与词频](docs/chat-records.md)。下文为此前补丁记录，其中“仅本地”和“四个稳定前缀断点”等历史描述不再代表当前实现。
+
 # SullyOS 普通聊天与悬浮球替换补丁
 
 日期：2026-10-26

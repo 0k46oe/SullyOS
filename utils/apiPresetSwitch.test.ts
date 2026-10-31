@@ -32,7 +32,8 @@ describe('configFromPreset', () => {
       baseUrl: 'https://api.example.com/v1',
       apiKey: 'sk-abc',
       model: 'gpt-x',
-      protocol: 'openai',
+      apiType: 'openai',
+      openaiPromptCache: true,
     });
   });
 

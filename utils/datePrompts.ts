@@ -1,3 +1,4 @@
+import { resolveCharacterUserProfile } from './characterUserProfile';
 /**
  * 见面（DateApp）提示词统一构造器
  *
@@ -661,7 +662,8 @@ export const DatePrompts = {
         openingMode?: 'approach' | 'invite';
     }): Promise<{ messages: ApiMessage[] }> => {
 
-        const { char, userProfile, allMsgs, emojis } = input;
+        const { char, allMsgs, emojis } = input;
+        const userProfile = resolveCharacterUserProfile(input.userProfile, char);
         const charTz = resolveCharTimeZone(char);
         const dateTimeOn = isDateTimeAwarenessOn(char);
         const timeStr = dateTimeOn ? getRealTimeStr(charTz) : '';
@@ -748,7 +750,8 @@ ${extraBlock ? `\n${extraBlock}` : ''}${isObserveOn(char) ? `\n${buildObserveBlo
         useVisionDescriptions?: boolean;
     }): Promise<{ messages: ApiMessage[] }> => {
 
-        const { char, userProfile, allMsgs, emojis, userText, variant } = input;
+        const { char, allMsgs, emojis, userText, variant } = input;
+        const userProfile = resolveCharacterUserProfile(input.userProfile, char);
 
         const historyMsgs = buildDateHistory(
             allMsgs,

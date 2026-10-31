@@ -1485,6 +1485,25 @@ ${isInitialGeneration ? `
                                 />
                            </div>
 
+                           {formData.tavernImport && <CharacterSettingsSection title="专属用户档案" summary={formData.characterUserProfile?.enabled ? formData.characterUserProfile.name || '已启用' : '使用全局档案'}>
+                               <div className="rounded-3xl bg-white p-4 shadow-sm space-y-4">
+                                   <label className="flex items-center justify-between gap-3 text-sm text-slate-600">
+                                       为这个角色使用专属用户档案
+                                       <input type="checkbox" checked={formData.characterUserProfile?.enabled === true} onChange={event => handleChange('characterUserProfile', { name: userProfile.name, bio: userProfile.bio || '', ...formData.characterUserProfile, enabled: event.target.checked })} />
+                                   </label>
+                                   <p className="text-xs text-slate-400">只影响与这个角色的互动；关闭后恢复档案里的通用身份。剧情主动选择的面具优先。</p>
+                                   {formData.characterUserProfile?.enabled && <>
+                                       <label className="block text-xs text-slate-500">你的姓名／称呼
+                                           <input aria-label="专属用户姓名" className="mt-2 w-full rounded-xl border border-slate-200 p-3 text-sm" value={formData.characterUserProfile.name} placeholder={userProfile.name} onChange={event => handleChange('characterUserProfile', { ...formData.characterUserProfile!, name: event.target.value })} />
+                                       </label>
+                                       <label className="block text-xs text-slate-500">你的设定／个人信息
+                                           <textarea aria-label="专属用户设定" className="mt-2 h-36 w-full resize-y rounded-xl border border-slate-200 p-3 text-sm" value={formData.characterUserProfile.bio} placeholder="例如：身份、年龄、外貌、背景、与这个角色的关系……" onChange={event => handleChange('characterUserProfile', { ...formData.characterUserProfile!, bio: event.target.value })} />
+                                       </label>
+                                       <p className="text-xs text-slate-400">姓名留空时沿用全局称呼；设定留空则不发送全局简介。随完整备份保存，分享角色卡时自动排除。</p>
+                                   </>}
+                               </div>
+                           </CharacterSettingsSection>}
+
                            {formData.tavernImport && (
                                <CharacterSettingsSection title="酒馆卡附加资料" summary="开场白 · 作者备注">
                                    <div className="bg-white rounded-3xl p-4 shadow-sm space-y-4 text-sm text-slate-600">
@@ -1601,7 +1620,7 @@ ${isInitialGeneration ? `
                                    {([
                                        ['lifeRecordPeriodEnabled', 'period', '生理期', '经期状态 / 周期预测 + 代记「来了 / 结束了」'],
                                        ['lifeRecordMedEnabled', 'med', '药盒', '今日用药计划与打卡情况 + 代记「吃了 xx 药」'],
-                                       ['lifeRecordExpenseEnabled', 'expense', '记账', '今日支出（与银行 App 打通）+ 代记「花了 xx 钱」'],
+                                       ['lifeRecordExpenseEnabled', 'expense', '记账', '今日收支（与银行 App 打通）+ 代记花费与到账收入'],
                                        ['lifeRecordExerciseEnabled', 'exercise', '锻炼', '今日 / 本周锻炼情况 + 代记「做了 xx 运动」'],
                                    ] as const).filter(([, moduleKey]) => !hiddenLifeModules.includes(moduleKey)).map(([field, , label, desc]) => (
                                        <div key={field} className="flex items-center justify-between gap-3">

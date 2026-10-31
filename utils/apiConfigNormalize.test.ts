@@ -41,6 +41,7 @@ describe('API config normalization', () => {
         model: ' vision-model ',
       },
     })).toEqual({
+      apiType: 'openai',
       baseUrl: 'https://api.example.com/v1',
       apiKey: 'sk-test',
       model: 'gpt-test',

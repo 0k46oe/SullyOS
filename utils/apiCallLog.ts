@@ -89,11 +89,12 @@ export interface ApiCallLogEntry extends ApiCallMeta {
     ok: boolean;
     /** 输入 token（prompt_tokens），来自响应 usage，拿不到则空 */
     promptTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
     /** 输出 token（completion_tokens） */
     completionTokens?: number;
     /** 总 token（total_tokens） */
     totalTokens?: number;
-    cacheReadTokens?: number;
     cacheCreationTokens?: number;
     /** 请求从发起到响应 / 报错的耗时 ms（NetworkError 类失败时 = 等了多久才断） */
     durationMs?: number;
@@ -1154,6 +1155,7 @@ export function recordApiCall(input: {
             promptTokens: usage.prompt,
             completionTokens: usage.completion,
             totalTokens: usage.total,
+            ...(usage.cacheCreation !== undefined ? {cacheWriteTokens:usage.cacheCreation} : {}),
             durationMs: input.durationMs,
             cacheReadTokens: usage.cacheRead,
             cacheCreationTokens: usage.cacheCreation,

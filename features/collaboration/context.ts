@@ -1,3 +1,4 @@
+import { resolveCharacterUserProfile } from '../../utils/characterUserProfile';
 import type { CharacterProfile, Emoji, EmojiCategory, GroupProfile, Message, RealtimeConfig, UserProfile } from '../../types';
 import { ContextBuilder } from '../../utils/context';
 import { buildChatRequestPayload } from '../../utils/chatRequestPayload';
@@ -121,6 +122,7 @@ export const buildCollaborationContextSnapshot = async ({
   emojis = [],
   categories = [],
 }: BuildCollaborationContextInput): Promise<string> => {
+  user = resolveCharacterUserProfile(user, char);
   if (mode === 'focused') {
     return [
       '[System: Focused Collaboration Character Context]\n',
@@ -188,6 +190,7 @@ export const buildLiveCollaborationChatContext = async ({
   contextSnapshot: string;
   chatContextSnapshot: CollaborationContextMessage[];
 }> => {
+  user = resolveCharacterUserProfile(user, char);
   const history = selectRecentCollaborationChatMessages(recentChatMessages, chatContextLimit);
   // Memory Palace is deliberately omitted here: collaboration adds a fresh
   // recall block on every turn through its own isolated entry point.
@@ -308,7 +311,8 @@ export const buildCollaborationTurnMemoryContext = async (input: {
   messages: CollaborationMessage[];
   taskText: string;
 }): Promise<string> => {
-  const { char, user, mode, messages, taskText } = input;
+  const { char, mode, messages, taskText } = input;
+  const user = resolveCharacterUserProfile(input.user, char);
   if (!char.memoryPalaceEnabled) return '';
   const recallChar: CharacterProfile = {
     ...char,

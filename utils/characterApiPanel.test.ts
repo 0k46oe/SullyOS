@@ -60,8 +60,8 @@ describe('character API draft transaction', () => {
     await click('为角色使用独立 API');
     await act(async () => { const select = host.querySelector('select')!; select.value = 'anthropic'; Simulate.change(select); });
     expect(onChange).not.toHaveBeenCalled();
-    expect(host.textContent).toContain('用于普通私聊');
-    expect(host.textContent).toContain('支持视觉的模型可直接接收图片，无需配置独立识图');
+    expect(host.textContent).toContain('直连服务商');
+    expect(host.textContent).toContain('Prompt Caching');
     expect(host.textContent).not.toContain('图片需开启独立识图');
     const stream = host.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="流式输出"]')!;
     expect(stream.disabled).toBe(false);
@@ -69,7 +69,7 @@ describe('character API draft transaction', () => {
     await act(async () => stream.click());
     expect(stream.getAttribute('aria-checked')).toBe('true');
     await click('确定');
-    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ protocol: 'anthropic', stream: true, baseUrl: os.apiConfig.baseUrl }));
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ apiType: 'anthropic', stream: true, baseUrl: os.apiConfig.baseUrl + '/messages' }));
   });
   it('can turn native streaming off and cancel without overwriting the saved role preference', async () => {
     const character = { ...char, dialogueApi: { ...os.apiConfig, protocol: 'anthropic' as const, stream: true } };
@@ -82,6 +82,34 @@ describe('character API draft transaction', () => {
     await click('取消');
     expect(onChange).not.toHaveBeenCalled();
     expect(character.dialogueApi.stream).toBe(true);
+  });
+  it('native protocol draft tests and saves a Messages endpoint without changing global settings', async () => {
+    const network=vi.fn(async()=>new Response(JSON.stringify({type:'message',id:'m',model:'global-model',content:[{type:'text',text:'你好'}],stop_reason:'end_turn',usage:{input_tokens:1,output_tokens:2}}),{headers:{'content-type':'application/json'}}));
+    vi.stubGlobal('fetch',network);
+    await click('为角色使用独立 API');
+    const select=host.querySelector('select[aria-label="接口类型"]') as HTMLSelectElement;
+    await act(async()=>{select.value='anthropic';select.dispatchEvent(new Event('change',{bubbles:true}));});
+    await act(async()=>{
+      const ttl=host.querySelector<HTMLSelectElement>('[aria-label="Anthropic 缓存有效期"]')!;
+      ttl.value='1h';Simulate.change(ttl);
+      host.querySelector<HTMLButtonElement>('[aria-label="Anthropic 自定义温度"]')!.click();
+    });
+    await act(async()=>{
+      const temperature=host.querySelector<HTMLInputElement>('[aria-label="Anthropic 温度"]')!;
+      temperature.value='0';Simulate.change(temperature);
+    });
+    await click('测试连接');
+    expect(host.textContent).toContain('连接成功');
+    const [url,options]=network.mock.calls[0] as any;
+    expect(url).toBe('https://global.test/v1/messages');
+    expect(new Headers(options.headers).get('anthropic-dangerous-direct-browser-access')).toBe('true');
+    const request=JSON.parse(options.body);
+    expect(request.temperature).toBe(0);
+    expect(request.messages[0].content[0].cache_control).toEqual({type:'ephemeral',ttl:'1h'});
+    expect(request).not.toHaveProperty('__sullyAnthropicOptions');
+    await click('确定');
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({baseUrl:'https://global.test/v1/messages',apiType:'anthropic'}));
+    expect(os.apiConfig.baseUrl).toBe('https://global.test/v1');
   });
   it('loads grouped presets as drafts; cancellation never mutates the role or global config', async () => {
     expect(host.textContent).toContain('目前跟随设置中的 API：global.test · global-model');
@@ -97,7 +125,7 @@ describe('character API draft transaction', () => {
   });
   it('confirms only the role snapshot and can return to following Settings', async () => {
     await click('为角色使用独立 API'); await click('写作预设'); await click('确定');
-    expect(onChange).toHaveBeenCalledWith({ ...os.apiPresets[1].config, protocol: 'openai' });
+    expect(onChange).toHaveBeenCalledWith({ ...os.apiPresets[1].config, apiType: 'openai', openaiPromptCache: true });
     const saved = { ...char, dialogueApi: onChange.mock.calls[0][0] };
     await render(saved);
     expect(host.textContent).toContain('目前使用的为：b.test · model-b');

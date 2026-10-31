@@ -1,3 +1,4 @@
+import { resolveCharacterUserProfile } from './characterUserProfile';
 import {getDailyScheduleForChar} from './dailySchedule';
 import {getLastInnerState} from './emotionState';
 import { readableContextMemories } from './contextMemories';
@@ -52,7 +53,7 @@ export const ContextBuilder = {
     /** Read-only eligibility preview: never samples probability or performs recall. */
     inspectWorldbooks: (char: CharacterProfile, user: UserProfile, history: WorldbookScanMessage[]) =>
         (char.mountedWorldbooks || []).map(book => {
-            const content = expandWorldbookMacros(book.content || '', char.name, user.name);
+            const content = expandWorldbookMacros(book.content || '', char.name, resolveCharacterUserProfile(user, char).name);
             const n = Number(book.probability);
             const probability = book.useProbability ? (Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 100) : 100;
             const matches = isWorldbookEntryActive({ ...book, useProbability: false }, history);
@@ -70,7 +71,7 @@ export const ContextBuilder = {
         char: CharacterProfile,
         user: UserProfile,
         surface: 'chat' | 'date' | 'home',
-    ): string => buildSARModulePrompt(char, user, surface),
+    ): string => buildSARModulePrompt(char, resolveCharacterUserProfile(user, char), surface),
 
     /**
      * 构建角色设定+记忆上下文（角色名、核心指令、世界观 + 月度总结 & 当月日度总结）
@@ -558,6 +559,7 @@ const renderCoreContext = async (
             emotion?: EmotionContextOptions;
         },
     ): Promise<string> => {
+        user = resolveCharacterUserProfile(user, char);
         let context = formatWorldbookSection(worldbookSections.beforeCharacter, '世界书 · 角色设定前');
         context += `${groupOptions?.headerOverride ?? '[System: Roleplay Configuration]'}\n\n`;
 
@@ -604,7 +606,7 @@ const renderCoreContext = async (
             context += `- 名字: ${user.name}\n`;
             context += `- 设定/备注: ${user.bio || '无'}\n\n`;
             if (timeOptions?.includeUserLocation && !timeOptions.skipTimeAwareness) {
-                context += await getUserLocationContext(user.name);
+                context += await getUserLocationContext(user.name, char.id);
             }
             if (char.timeAwarenessEnabled !== false && !timeOptions?.skipTimeAwareness && !timeOptions?.skipUserHoliday) {
                 const holiday = getCachedUserHolidayReminder(user.name, timeOptions?.userHolidays);
@@ -735,7 +737,8 @@ export interface CharacterContextInput {
 }
 
 async function resolveCharacterContext(input: CharacterContextInput) {
-    const { char, user, history, groupOptions, timeOptions } = input;
+    const { char, history, groupOptions, timeOptions } = input;
+    const user = resolveCharacterUserProfile(input.user, char);
     const entries = resolveWorldbookEntries(
         (char.mountedWorldbooks || []).filter(book => !groupOptions?.skipWorldbookIds?.has(book.id)),
         history ?? timeOptions?.worldbookMessages ?? [], char.name, user.name,

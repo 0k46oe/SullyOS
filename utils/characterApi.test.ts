@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { describeDialogueApi, pickDialogueApi, resolveDialogueApi } from './characterApi';
+import { describeDialogueApi, pickDialogueApi, resolveDialogueApi, dialogueMaxTokens } from './characterApi';
 import { buildCharChatCredRow, buildCharEmotionCredRow, buildCharInstantCredRow } from './amsgLlmCredentials';
 import { stripSensitiveCardFields } from './characterCard';
 
@@ -18,6 +18,11 @@ describe('dialogue routing', () => {
     expect(resolveDialogueApi(nativeGlobal, { dialogueApi: nativeRole })).toMatchObject({ temperature: 0.37, anthropicCustomTemperature: true });
     expect(resolveDialogueApi(nativeGlobal, { dialogueApi: nativeRole }, { ...app, protocol: 'anthropic' }).anthropicCustomTemperature).toBe(false);
     expect(pickDialogueApi(nativeRole)).toMatchObject({ temperature: 0.37, anthropicCustomTemperature: true });
+  });
+  it('validates output limits and inherits the global setting unless explicitly overridden', () => {
+    for (const maxTokens of [0, -1, 1.5, NaN, Infinity, '2000']) expect(dialogueMaxTokens({ maxTokens } as any)).toBe(8000);
+    expect(dialogueMaxTokens(resolveDialogueApi({ ...globalApi, maxTokens: 2048 }, char))).toBe(2048);
+    expect(dialogueMaxTokens(resolveDialogueApi({ ...globalApi, maxTokens: 2048 }, { dialogueApi: { ...personal, maxTokens: 16000 } }))).toBe(16000);
   });
   it('uses app, character, then global without changing the global config', () => {
     expect(resolveDialogueApi(globalApi)).toBe(globalApi);
@@ -54,7 +59,7 @@ describe('dialogue routing', () => {
   });
   it('normalizes pasted values and never exposes keys in the status or shared character cards', () => {
     expect(pickDialogueApi({ baseUrl: ' https://role.test/v1/ ', apiKey: ' key ', model: ' role ' }))
-      .toEqual({ baseUrl: personal.baseUrl, apiKey: 'key', model: 'role' });
+      .toEqual({ baseUrl: personal.baseUrl, apiKey: 'key', model: 'role', apiType: 'openai' });
     expect(describeDialogueApi(personal)).toBe('role.test · role');
     expect(describeDialogueApi({ ...personal, baseUrl: 'https://user:secret@role.test/v1?token=secret' })).not.toContain('secret');
     expect(stripSensitiveCardFields({ ...char, name: 'A' })).toEqual({ id: 'a', name: 'A' });

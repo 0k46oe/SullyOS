@@ -16,7 +16,7 @@ it.each([false, true])('saves native non-stream thinking separately from the rep
       anthropicCustomTemperature: true, temperature: 0.37, anthropicPromptCache: true } } as any;
   await DB.saveCharacter(char);
   await DB.saveMessage({ charId: char.id, role: 'user', type: image ? 'image' : 'text', content: image ? 'data:image/png;base64,AQIDBA==' : '你好' } as any);
-  const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 'test-native-thinking', content: [
+  const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ type: 'message', id: 'test-native-thinking', content: [
     { type: 'thinking', thinking: '仅展示服务提供的思考摘要', signature: 'opaque-test-signature' },
     { type: 'redacted_thinking', data: 'opaque-redacted-data' }, { type: 'text', text: '正常正文回复' },
   ], usage: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 4096 } })));
@@ -33,9 +33,9 @@ it.each([false, true])('saves native non-stream thinking separately from the rep
     await act(async () => { await current.triggerAI([]); });
     expect(fetch).toHaveBeenCalledOnce();
     const request = JSON.parse(fetch.mock.calls[0][1].body);
-    expect(request).toMatchObject({ model: char.dialogueApi.model, stream: false, thinking: { type: 'enabled', budget_tokens: 4000 } });
+    expect(request).toMatchObject({ model: char.dialogueApi.model, stream: false, thinking: { type: 'adaptive' } });
     expect(request).not.toHaveProperty('temperature');
-    expect(request.system[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(request.system.at(-1).cache_control).toEqual({ type: 'ephemeral' });
     const messages = (await DB.getRecentMessagesByCharId(char.id, 20)).filter(message => message.role === 'assistant');
     expect(messages).toHaveLength(1);
     expect(messages[0].content).toBe('正常正文回复');

@@ -1,3 +1,4 @@
+import { llmApiType } from '../../utils/llmEndpoint';
 import React, { useEffect, useRef, useState } from 'react';
 import { useOS } from '../../context/OSContext';
 import { AppID, type ApiPreset } from '../../types';
@@ -40,8 +41,8 @@ export default function NavigationApiSwitcher({ onClose, onOpenSettings }: { onC
       } else if (preset) {
         const patch = configFromPreset(preset);
         updateApiConfig(patch);
-        // Native Anthropic is local-only in this release; the Worker still speaks OpenAI.
-        if (patch.protocol !== 'anthropic') syncAmsgLlmCredentials({ ...apiConfig, ...patch });
+        // Credential sync performs the upstream native-Worker capability check.
+        syncAmsgLlmCredentials({ ...apiConfig, ...patch });
       }
       addToast(preset ? `已为${forCharacter ? character!.name : '全局'}切换到「${preset.name}」，下次发送生效` : '当前角色已恢复跟随全局 API', 'success');
       onClose();
@@ -63,7 +64,7 @@ export default function NavigationApiSwitcher({ onClose, onOpenSettings }: { onC
         <button type="button" disabled={busy} aria-pressed={!forCharacter} onClick={() => setScope('global')}><GlobeHemisphereWest size={17} />全局默认</button>
       </div>
       <section className="navigation-api-current" aria-label="当前 API 配置">
-        <div className="navigation-api-current-label"><span className="navigation-api-status-dot" /><span>{forCharacter ? character!.name : '全局默认 API'}</span><span className="navigation-api-protocol">{current.protocol === 'anthropic' ? 'Anthropic' : 'OpenAI'}</span></div>
+        <div className="navigation-api-current-label"><span className="navigation-api-status-dot" /><span>{forCharacter ? character!.name : '全局默认 API'}</span><span className="navigation-api-protocol">{llmApiType(current) === 'anthropic' ? 'Anthropic' : 'OpenAI'}</span></div>
         <p className="navigation-api-current-name">{apiPresets.find(preset => preset.id === activeId)?.name || '当前配置'}</p>
         <p className="navigation-api-current-detail" title={describeDialogueApi(current)}>{describeDialogueApi(current)}</p>
         {forCharacter && (character!.dialogueApi
@@ -76,7 +77,7 @@ export default function NavigationApiSwitcher({ onClose, onOpenSettings }: { onC
           <h3>{name}<span>{presets.length}</span></h3>
           <div className="navigation-api-grid">{presets.map(preset => {
             const active = activeId === preset.id;
-            const native = preset.config.protocol === 'anthropic';
+            const native = llmApiType(preset.config) === 'anthropic';
             return <button key={preset.id} type="button" disabled={busy || !preset.config.baseUrl?.trim() || !preset.config.model?.trim()}
               aria-pressed={active} onClick={() => { void apply(preset); }} className="navigation-api-preset" title={`${preset.name} · ${preset.config.model}`}>
               <span className="navigation-api-preset-top"><span className="navigation-api-avatar" data-protocol={native ? 'anthropic' : 'openai'} aria-hidden="true">{native ? 'A' : 'O'}</span><span className="navigation-api-selection">{active ? <><Check size={12} weight="bold" />使用中</> : <ArrowRight size={15} aria-hidden="true" />}</span></span>
@@ -89,7 +90,7 @@ export default function NavigationApiSwitcher({ onClose, onOpenSettings }: { onC
         {!filtered.length && <p className="navigation-api-empty">{apiPresets.length ? '没有匹配的预设，试试其他关键词' : '请先在 API 设置中保存预设'}</p>}
       </div>
       {error && <p role="alert" className="navigation-api-error">{error}</p>}
-      <p className="navigation-api-hint">全局切换保留角色独立配置，进行中的回复不受影响。{apiPresets.some(preset => preset.config.protocol === 'anthropic') && 'Anthropic 支持普通图文私聊，建议为当前角色单独选用。'}</p>
+      <p className="navigation-api-hint">全局切换保留角色独立配置，进行中的回复不受影响。{apiPresets.some(preset => llmApiType(preset.config) === 'anthropic') && 'Anthropic 支持图文、工具与原生 Messages；后台使用需 Worker 支持。'}</p>
     </div>
     <footer className="navigation-api-footer"><button type="button" disabled={busy} onClick={onOpenSettings}><SlidersHorizontal size={16} />打开完整 API 设置<ArrowRight size={14} /></button></footer>
   </dialog>;

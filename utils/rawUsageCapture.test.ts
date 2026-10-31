@@ -2,7 +2,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createDialogueFetch } from './dialogueTransport';
 import { DB } from './db';
 import { buildApiRequestCapture, captureApiRequestOnce, formatApiRequestCaptureTxt, MAX_API_RAW_USAGE_EVENTS, setApiRequestCaptureArmed, snapshotApiRawUsage, updateApiRequestCaptureUsage } from './apiCallLog';
-import { readAnthropicResponse } from './anthropicStream';
+import { fetchLlm } from './anthropicApi';
+import { safeResponseJson } from './safeApi';
 
 const api = { protocol: 'anthropic' as const, baseUrl: 'https://usage.test', apiKey: 'secret-never-export', model: '【渠道】claude-opus-4-6-thinking' };
 const request = { model: api.model, stream: true, messages: [{ role: 'system', content: 'stable system' }, { role: 'user', content: 'hi' }] };
@@ -57,7 +58,7 @@ it.each(['truncated', 'provider-error', 'cancelled'] as const)('retains usage al
     const controller = new AbortController();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sse(events)));
     setApiRequestCaptureArmed(true);
-    await expect(createDialogueFetch(api)('unused', { body: JSON.stringify(request), signal: controller.signal }, 0, 0, undefined, { onDelta: () => controller.abort() })).rejects.toThrow();
+    await expect(createDialogueFetch(api)('unused', { method: 'POST', body: JSON.stringify(request), signal: controller.signal }, 0, 0, undefined, { onDelta: () => controller.abort() })).rejects.toThrow();
   } else await expect(captureSend(events)).rejects.toThrow();
   const capture = await waitCapture();
   expect(capture.usageStatus).toBe('failed');
@@ -78,7 +79,7 @@ it('does not invent raw zeros or usage events when the stream returns no usage',
 });
 
 it('captures JSON usage when a proxy ignores stream=true', async () => {
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ model: 'upstream-json', content: [{ type: 'text', text: 'ok' }], usage: startUsage }))));
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ type: 'message', model: 'upstream-json', content: [{ type: 'text', text: 'ok' }], usage: startUsage }))));
   setApiRequestCaptureArmed(true);
   await createDialogueFetch(api)('unused', { body: JSON.stringify(request) }, 0);
   const capture = await waitCapture();
@@ -124,9 +125,10 @@ it('bounds pathological usage event counts and explicitly reports omitted events
 });
 
 it('keeps successful replies intact if the diagnostic observer throws', async () => {
-  const result = await readAnthropicResponse(sse([start(), ...textEvents, end(), stop]), undefined, undefined, undefined, undefined, () => { throw new Error('diagnostic failed'); });
-  expect(result.content[0].text).toBe('private reply excluded');
-  expect(result.usage).toEqual({ ...startUsage, output_tokens: 20 });
+  const response = await fetchLlm('https://usage.test/v1/messages', { method: 'POST', body: JSON.stringify(request), __sullyAnthropicObserver: { onUsage: () => { throw Error('diagnostic failed'); } } } as RequestInit, vi.fn(async () => sse([start(), ...textEvents, end(), stop])));
+  const result = await safeResponseJson(response);
+  expect(result.choices[0].message.content).toBe('private reply excluded');
+  expect(result.usage.input_tokens).toBe(startUsage.input_tokens);
 });
 
 it('explains pending and old records without claiming zero usage', () => {

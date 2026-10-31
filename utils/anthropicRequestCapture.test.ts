@@ -9,7 +9,7 @@ const body = { model: api.model, thinking: { type: 'enabled', budget_tokens: 400
   { role: 'user', content: [{ type: 'text', text: '今天看这张图片' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,' + 'a'.repeat(5000) } }] },
   { role: 'system', content: '当前时间及动态召回' },
 ], tools: [{ type: 'function', function: { name: 'calendar', parameters: { type: 'object', properties: {} } } }] };
-const response = { model: api.model, content: [{ type: 'text', text: '回复' }], usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 1200, cache_creation_input_tokens: 100 } };
+const response = { type: 'message', model: api.model, content: [{ type: 'text', text: '回复' }], usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 1200, cache_creation_input_tokens: 100 } };
 beforeEach(async () => { setApiRequestCaptureArmed(false); await DB.clearApiRequestCapture(); });
 afterEach(() => { setApiRequestCaptureArmed(false); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
@@ -72,7 +72,7 @@ it.each(['failure', 'abort'] as const)('keeps the sent request document and mark
 
 it('does not consume the switch on a local validation error or double-capture OpenAI', async () => {
   setApiRequestCaptureArmed(true);
-  await expect(createDialogueFetch(api)('unused', { body: JSON.stringify({ ...body, thinking: { type: 'enabled', budget_tokens: 1 } }) }, 0)).rejects.toThrow('思考预算');
+  await expect(createDialogueFetch(api)('unused', { body: JSON.stringify({ ...body, messages: [{ role: 'unsupported', content: 'bad input' }] }) }, 0)).rejects.toThrow('不支持消息角色');
   expect(isApiRequestCaptureArmed()).toBe(true);
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }))));
   await createDialogueFetch({ ...api, protocol: 'openai' })('https://oai.test/v1/chat/completions', { body: JSON.stringify({ model: 'test', messages: [{ role: 'user', content: 'hi' }] }) }, 0);

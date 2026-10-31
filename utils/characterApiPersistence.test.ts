@@ -17,8 +17,8 @@ vi.mock('./keepAlive', () => ({ KeepAlive: { start: vi.fn(), stop: vi.fn() } }))
 vi.mock('./safeApi', async importOriginal => ({ ...await importOriginal<typeof import('./safeApi')>(), safeFetchJson: vi.fn() }));
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-const globalApi = { baseUrl: 'https://global.test/v1', apiKey: 'global-key', model: 'global-model', stream: true, temperature: 0.3 };
-const roleApi = { baseUrl: 'https://role.test/v1', apiKey: 'role-key', model: 'role-model', stream: false, temperature: 1.2 };
+const globalApi = { baseUrl: 'https://global.test/v1', apiKey: 'global-key', model: 'global-model', stream: true, temperature: 0.3, maxTokens: 2048 };
+const roleApi = { baseUrl: 'https://role.test/v1', apiKey: 'role-key', model: 'role-model', stream: false, temperature: 1.2, maxTokens: 16000 };
 const appApi = { baseUrl: 'https://app.test/v1', apiKey: 'app-key', model: 'app-model' };
 const preset = { id: 'role-preset', name: '角色模型', group: '写作', config: roleApi };
 async function clearCharacters() {
@@ -33,7 +33,7 @@ afterEach(() => { vi.clearAllMocks(); });
 
 it.each(['full', 'text_only'] as const)('%s ZIP preserves native temperature opt-in through role restore and the real private-chat hook', async mode => {
     const native = { ...roleApi, protocol: 'anthropic' as const, baseUrl: 'https://native.test', model: 'claude-test-model', stream: true, temperature: 0.37, anthropicCustomTemperature: true, anthropicPromptCache: false };
-    const original = { id: `native-private-chat-${mode}`, name: '原生测试角色', dialogueApi: native, showThinkingChain: false, emotionConfig: { enabled: false } } as any;
+    const original = { characterUserProfile: { enabled: true, name: '专属玩家', bio: '专属故事背景' }, id: `native-private-chat-${mode}`, name: '原生测试角色', dialogueApi: native, showThinkingChain: false, emotionConfig: { enabled: false } } as any;
     await clearCharacters(); await DB.saveCharacter(original);
     const zip = new JSZip();
     const data: any = { apiConfig: native, apiPresets: [{ ...preset, config: native }] };
@@ -46,7 +46,7 @@ it.each(['full', 'text_only'] as const)('%s ZIP preserves native temperature opt
     await writeV2Backup(zip, data, { prewrittenStores });
     const loaded = await JSZip.loadAsync(await zip.generateAsync({ type: 'uint8array' }));
     const restored: any = await assembleV2Backup(loaded, JSON.parse(await loaded.file('manifest.json')!.async('string')));
-    expect(restored.apiConfig).toEqual(native); expect(restored.apiPresets.map(normalizeApiPreset)[0].config).toEqual(native);
+    expect(restored.apiConfig).toEqual(native); expect(restored.apiPresets.map(normalizeApiPreset)[0].config).toMatchObject({ ...native, apiType: 'anthropic', baseUrl: 'https://native.test/v1/messages' });
     await clearCharacters(); await DB.importFullData(restored);
     const saved = (await DB.getAllCharacters()).find(item => item.id === original.id)!;
     const char = migrateCharacterContextRange(normalizeCharacterDefaults(normalizeCharacterImpression(saved))).character;
@@ -68,14 +68,15 @@ it.each(['full', 'text_only'] as const)('%s ZIP preserves native temperature opt
         await act(async () => { await current.triggerAI([]); });
         expect(safeFetchJson).toHaveBeenCalledOnce();
         const [url, init] = vi.mocked(safeFetchJson).mock.calls[0];
-        expect(url).toBe('https://native.test/v1/messages');
-        expect(init.headers).toMatchObject({ 'x-api-key': native.apiKey, 'anthropic-version': '2023-06-01' });
-        expect(init.headers).not.toHaveProperty('Authorization');
+        expect(url).toBe('https://native.test/v1/messages/chat/completions');
+        expect(new Headers(init.headers).get('Authorization')).toBe('Bearer ' + native.apiKey);
         const request = JSON.parse(init.body as string);
         expect(request.model).toBe(native.model); expect(request.stream).toBe(true); expect(request.temperature).toBe(0.37);
-        expect(vi.mocked(safeFetchJson).mock.calls[0][5]?.responseParser).toEqual(expect.any(Function));
-        expect(request.system).toContain('原生测试角色');
-        expect(request.messages.some((message: any) => message.role === 'system')).toBe(false);
+        expect(request.__sullyAnthropicOptions).toMatchObject({ cache: false, customTemperature: true });
+        expect(request.messages[0].content).toContain('原生测试角色');
+        expect(request.messages[0].content).toContain('专属玩家');
+        expect(request.messages[0].content).toContain('专属故事背景');
+        expect(char.characterUserProfile).toEqual(original.characterUserProfile);
         expect(JSON.stringify(request.messages)).toContain('普通文字聊天测试');
     } finally { act(() => root.unmount()); errors.mockRestore(); }
 });
@@ -101,7 +102,7 @@ it.each(['full', 'text_only'] as const)('%s ZIP restores role credentials and pr
     await writeV2Backup(zip, data, { prewrittenStores });
     const loaded = await JSZip.loadAsync(await zip.generateAsync({ type: 'uint8array' }));
     const restored: any = await assembleV2Backup(loaded, JSON.parse(await loaded.file('manifest.json')!.async('string')));
-    expect(restored.apiPresets.map(normalizeApiPreset)).toEqual([preset]);
+    expect(restored.apiPresets.map(normalizeApiPreset)).toEqual([{ ...preset, config: { ...roleApi, apiType: 'openai' } }]);
     expect(restored.apiConfig).toEqual(globalApi);
     await clearCharacters();
     expect(await DB.getAllCharacters()).toEqual([]);
@@ -137,8 +138,8 @@ it.each(['full', 'text_only'] as const)('%s ZIP restores role credentials and pr
             expect(safeFetchJson, errorSpy.mock.calls.map(args => args.map(String).join(' ')).join('\n')).toHaveBeenCalled();
             const [url, init] = vi.mocked(safeFetchJson).mock.calls[0];
             expect(url).toBe(expected.baseUrl + '/chat/completions');
-            expect(init?.headers).toMatchObject({ Authorization: `Bearer ${expected.apiKey}` });
-            expect(JSON.parse(init!.body as string)).toMatchObject({ model: expected.model, stream: expected.stream, temperature: expected.temperature });
+            expect(new Headers(init?.headers).get('Authorization')).toBe(`Bearer ${expected.apiKey}`);
+            expect(JSON.parse(init!.body as string)).toMatchObject({ model: expected.model, stream: expected.stream, temperature: expected.temperature, max_tokens: expected.maxTokens });
         }
     } finally {
         act(() => root.unmount()); errorSpy.mockRestore();

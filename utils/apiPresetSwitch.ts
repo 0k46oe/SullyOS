@@ -12,7 +12,8 @@
  */
 
 import type { APIConfig, ApiPreset } from '../types';
-import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel, normalizeApiProtocol } from './apiConfigNormalize';
+import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from './apiConfigNormalize';
+import { normalizeLlmBaseUrl, llmApiType } from './llmEndpoint';
 
 /**
  * 切换预设时覆盖的字段。
@@ -22,34 +23,36 @@ import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel, normali
  * 把用户手调过的温度、流式开关顺手重置掉。
  */
 export type PresetSwitchPatch =
-  Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'protocol' | 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'openaiPromptCache'>>;
+  Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'apiType' | 'maxTokens' | 'anthropicPromptCacheTtl' | 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'openaiPromptCache'>>;
 
 export function configFromPreset(preset: ApiPreset): PresetSwitchPatch {
   const patch: PresetSwitchPatch = {
-    baseUrl: normalizeApiBaseUrl(preset.config.baseUrl),
+    baseUrl: normalizeLlmBaseUrl(normalizeApiBaseUrl(preset.config.baseUrl), llmApiType(preset.config)),
+    apiType: llmApiType(preset.config),
     apiKey: normalizeApiCredential(preset.config.apiKey),
     model: normalizeApiModel(preset.config.model),
-    protocol: normalizeApiProtocol(preset.config.protocol),
   };
   if (typeof preset.config.stream === 'boolean') patch.stream = preset.config.stream;
   if (typeof preset.config.temperature === 'number') patch.temperature = preset.config.temperature;
-  if (typeof preset.config.anthropicCustomTemperature === 'boolean' || patch.protocol === 'anthropic') {
+  if (typeof preset.config.anthropicCustomTemperature === 'boolean' || patch.apiType === 'anthropic') {
     patch.anthropicCustomTemperature = preset.config.anthropicCustomTemperature === true;
   }
-  if (typeof preset.config.anthropicPromptCache === 'boolean' || patch.protocol === 'anthropic') patch.anthropicPromptCache = preset.config.anthropicPromptCache !== false;
-  if (typeof preset.config.openaiPromptCache === 'boolean' || patch.protocol !== 'anthropic') patch.openaiPromptCache = preset.config.openaiPromptCache !== false;
+  if (typeof preset.config.anthropicPromptCache === 'boolean' || patch.apiType === 'anthropic') patch.anthropicPromptCache = preset.config.anthropicPromptCache !== false;
+  if (typeof preset.config.openaiPromptCache === 'boolean' || patch.apiType !== 'anthropic') patch.openaiPromptCache = preset.config.openaiPromptCache !== false;
+  if (Number.isSafeInteger(preset.config.maxTokens) && preset.config.maxTokens! > 0) patch.maxTokens = preset.config.maxTokens;
+  if (patch.apiType === 'anthropic') patch.anthropicPromptCacheTtl = preset.config.anthropicPromptCacheTtl === '1h' ? '1h' : '5m';
   return patch;
 }
 
-/** 三件套一致才算「就是这条预设」。都归一化后比，免得末尾斜杠 / 空格造成假不一致。 */
+/** 接口类型及三件套一致才算同一预设；归一化后比较，避免末尾斜杠或空格造成假不一致。 */
 export function presetMatchesConfig(
   preset: ApiPreset,
-  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol'>,
+  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'apiType'>,
 ): boolean {
-  return normalizeApiBaseUrl(preset.config.baseUrl) === normalizeApiBaseUrl(config.baseUrl)
+  return llmApiType(preset.config) === llmApiType(config)
+    && normalizeLlmBaseUrl(normalizeApiBaseUrl(preset.config.baseUrl), llmApiType(preset.config)) === normalizeLlmBaseUrl(normalizeApiBaseUrl(config.baseUrl), llmApiType(config))
     && normalizeApiCredential(preset.config.apiKey) === normalizeApiCredential(config.apiKey)
-    && normalizeApiModel(preset.config.model) === normalizeApiModel(config.model)
-    && normalizeApiProtocol(preset.config.protocol) === normalizeApiProtocol(config.protocol);
+    && normalizeApiModel(preset.config.model) === normalizeApiModel(config.model);
 }
 
 /**
@@ -60,12 +63,14 @@ export function presetMatchesConfig(
  */
 export function presetDiffersFromConfig(
   preset: ApiPreset,
-  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol'> & Partial<Pick<APIConfig, 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'openaiPromptCache'>>,
+  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'apiType'> & Partial<Pick<APIConfig, 'maxTokens' | 'anthropicPromptCacheTtl' | 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'openaiPromptCache'>>,
 ): boolean {
   if (!presetMatchesConfig(preset, config)) return true;
-  if (normalizeApiProtocol(preset.config.protocol) === 'anthropic' && (preset.config.anthropicPromptCache !== false) !== (config.anthropicPromptCache !== false)) return true;
-  if (normalizeApiProtocol(preset.config.protocol) !== 'anthropic' && (preset.config.openaiPromptCache !== false) !== (config.openaiPromptCache !== false)) return true;
-  if (normalizeApiProtocol(preset.config.protocol) === 'anthropic'
+  if ((preset.config.maxTokens ?? 8000) !== (config.maxTokens ?? 8000)) return true;
+  if ((preset.config.anthropicPromptCacheTtl ?? '5m') !== (config.anthropicPromptCacheTtl ?? '5m')) return true;
+  if (llmApiType(preset.config) === 'anthropic' && (preset.config.anthropicPromptCache !== false) !== (config.anthropicPromptCache !== false)) return true;
+  if (llmApiType(preset.config) !== 'anthropic' && (preset.config.openaiPromptCache !== false) !== (config.openaiPromptCache !== false)) return true;
+  if (llmApiType(preset.config) === 'anthropic'
     && (preset.config.anthropicCustomTemperature === true) !== (config.anthropicCustomTemperature === true)) return true;
   if (typeof preset.config.stream === 'boolean' && preset.config.stream !== (config.stream === true)) return true;
   if (typeof preset.config.temperature === 'number' && typeof config.temperature === 'number'
@@ -81,7 +86,7 @@ export function presetDiffersFromConfig(
  */
 export function findActivePresetId(
   presets: ApiPreset[],
-  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'protocol'>,
+  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'apiType' | 'protocol'>,
 ): string | null {
   if (!normalizeApiBaseUrl(config.baseUrl) && !normalizeApiModel(config.model)) return null;
   return presets.find(preset => presetMatchesConfig(preset, config))?.id ?? null;

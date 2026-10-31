@@ -75,7 +75,7 @@ const StoryTheaterContent: React.FC<Props> = ({ onSwitchCompanion, onClose }) =>
         let normalized = normalizeStoryTheater(next);
         try {
             if (normalized.openingMode === 'card') {
-                const identity = resolveStoryTheaterMask(normalized.mask, userProfile, characters, masks);
+                const identity = resolveStoryTheaterMask(normalized.mask, userProfile, characters, masks, characters.find(char => char.id === (normalized.cardOpening?.characterId || normalized.characterIds[0])));
                 normalized = await saveStoryTheaterWithCardOpening(normalized, identity.name);
             } else {
                 await DB.saveStoryTheater(normalized);
@@ -164,7 +164,7 @@ const StoryTheaterContent: React.FC<Props> = ({ onSwitchCompanion, onClose }) =>
             const characterIds = selection.type === 'character'
                 ? current.characterIds.filter(id => id !== selection.id)
                 : current.characterIds;
-            const remainingActors = characters.filter(char => characterIds.includes(char.id));
+            const remainingActors = characters.filter(char => characterIds.includes(char.id) || (selection.type === 'character' && selection.id === char.id));
             const validBookIds = new Set(dedupeTheaterWorldbooks(remainingActors).map(book => book.id));
             const characterContextLimits = { ...current.characterContextLimits };
             if (selection.type === 'character') {
@@ -174,7 +174,11 @@ const StoryTheaterContent: React.FC<Props> = ({ onSwitchCompanion, onClose }) =>
                 ...current,
                 mask: selection,
                 characterIds,
-                selectedWorldbookIds: current.selectedWorldbookIds.filter(id => validBookIds.has(id)),
+                selectedWorldbookIds: Array.from(new Set([
+                    ...current.selectedWorldbookIds.filter(id => validBookIds.has(id)),
+                    ...(selection.type === 'character' && (current.mask?.type !== 'character' || current.mask.id !== selection.id)
+                        ? (characters.find(char => char.id === selection.id)?.mountedWorldbooks || []).map(book => book.id) : []),
+                ])),
                 characterContextLimits,
                 updatedAt: Date.now(),
             };
@@ -254,7 +258,7 @@ const StoryTheaterContent: React.FC<Props> = ({ onSwitchCompanion, onClose }) =>
                 <section className='py-6'>
                     {entries.length === 0 ? <button onClick={() => { setMaskLocked(false); setActiveEntry({ ...createStoryTheaterDraft(), presetId: presets[0]?.id }); setView('editor'); }} className='w-full py-14 rounded-3xl border border-dashed border-slate-300 text-center'><span className='block text-sm font-semibold'>新增第一条剧情</span><span className='block mt-2 text-[10px] text-slate-400'>选择多位角色、记忆方式、世界书与原生预设</span></button> : <div className='divide-y divide-slate-200'>{entries.map(item => {
                         const cast = characters.filter(char => item.characterIds.includes(char.id));
-                        const mask = resolveStoryTheaterMask(item.mask, userProfile, characters, masks);
+                        const mask = resolveStoryTheaterMask(item.mask, userProfile, characters, masks, characters.find(char => char.id === (item.cardOpening?.characterId || item.characterIds[0])));
                         const youLabel = mask.selection.type === 'user' ? '你' : `你（${mask.name}）`;
                         const vectorEnabled = item.archiveStrategy === 'vector' && !item.writesToCharacterMemory;
                         const hasVectorArchive = vectorEnabled || item.archives.some(archive => archive.strategy === 'vector');

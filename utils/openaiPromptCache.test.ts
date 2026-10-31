@@ -16,6 +16,7 @@ describe('OpenAI-compatible prompt caching', () => {
   });
 
   it('reports a stable prefix on repeated requests and a changed prefix after edits', async () => {
+    const scope = { endpoint: 'https://comparison.test/v1/chat/completions', model: 'gpt-test', charId: 'char-a', purpose: 'chat' };
     const first = { model: 'gpt-test', messages: [{ role: 'system', content: 'a'.repeat(9000) }, { role: 'user', content: 'one' }] };
     const second = { model: 'gpt-test', messages: [{ role: 'system', content: 'a'.repeat(9000) }, { role: 'user', content: 'two' }] };
     const changed = { model: 'gpt-test', messages: [{ role: 'system', content: 'b'.repeat(9000) }, { role: 'user', content: 'three' }] };

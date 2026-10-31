@@ -1,5 +1,6 @@
-import React, { useId, useState } from 'react';
+import React, { useState } from 'react';
 import type { DialogueApiConfig } from '../../types';
+import { llmApiType } from '../../utils/llmEndpoint';
 
 export default function DialogueApiFields({ value, onChange, fetchModels, isLoadingModels, openModelPicker }: {
  value: DialogueApiConfig; onChange: (patch: Partial<DialogueApiConfig>) => void;
@@ -7,7 +8,6 @@ export default function DialogueApiFields({ value, onChange, fetchModels, isLoad
 }) {
  const { baseUrl: localUrl, apiKey: localKey, model: localModel, stream: localStream = false, temperature: localTemperature = 0.85 } = value;
  const [showApiAdvanced, setShowApiAdvanced] = useState(false);
- const protocolId = useId();
  const displayStream = localStream;
  const nativeCustomTemperature = value.anthropicCustomTemperature === true;
  const promptCacheTtl = value.anthropicPromptCacheTtl === '1h' ? '1h' : '5m';
@@ -16,15 +16,12 @@ export default function DialogueApiFields({ value, onChange, fetchModels, isLoad
  const setLocalKey = (apiKey: string) => onChange({ apiKey });
  const setLocalTemperature = (temperature: number) => onChange({ temperature });
  return <div className="space-y-4">
-                <div className="group">
-                    <label htmlFor={protocolId} className="text-[10px] font-bold text-slate-400 block mb-1.5 pl-1">接口格式</label>
-                    <select id={protocolId} value={value.protocol || 'openai'} onChange={e => onChange({ protocol: e.target.value as 'openai' | 'anthropic', ...(e.target.value === 'anthropic' ? { temperature: nativeTemperature } : {}) })}
-                        className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm">
-                        <option value="openai">OpenAI 兼容</option>
-                        <option value="anthropic">Anthropic 原生（Messages）</option>
+                <label className="block text-xs text-slate-500">接口类型
+                    <select aria-label="接口类型" value={llmApiType(value)} onChange={e => onChange({apiType:e.target.value as 'openai'|'anthropic'})} className="mt-1 w-full rounded-xl border border-slate-200 px-4 py-2.5 bg-white/50">
+                        <option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 原生 Messages</option>
                     </select>
-                    {value.protocol === 'anthropic' && <p className="mt-2 text-[11px] text-slate-500 leading-relaxed">用于普通私聊，可在下方选择流式或非流式，也可使用模型默认或自定义温度。支持视觉的模型可直接接收图片，无需配置独立识图；已开启独立识图时仍先转成文字。地址可填服务根地址、/v1 或完整 /v1/messages；接口需允许浏览器跨域访问。云端即时聊天、其他 App 和专用 API 暂未适配。</p>}
-                </div>
+                </label>
+                {llmApiType(value) === 'anthropic' && <p className="text-[10px] text-slate-400 leading-relaxed">直连服务商，支持 Prompt Caching；首次写入缓存也会计费，能否命中取决于模型、长度与前缀是否相同。支持填写根地址、/v1 或完整 /v1/messages。主动消息 2.0 在 Worker 自动更新完成后可用，无需手动重连。</p>}
                 <div className="group">
                     <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">URL</label>
                     <input type="text" value={localUrl} onChange={(e) => setLocalUrl(e.target.value)} placeholder="https://..." className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
@@ -36,14 +33,14 @@ export default function DialogueApiFields({ value, onChange, fetchModels, isLoad
                 </div>
 
                 {/* Anthropic streaming is a normal chat option, visible without expanding advanced settings. */}
-                {value.protocol === 'anthropic' && <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200/60 bg-white/40 px-3 py-3">
+                {llmApiType(value) === 'anthropic' && <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200/60 bg-white/40 px-3 py-3">
                     <div><span className="text-xs text-slate-500">流式输出</span><p className="mt-1 text-[10px] leading-relaxed text-slate-400">开启后逐步显示回复；关闭后等待完整回复。</p></div>
                     <button type="button" role="switch" aria-label="流式输出" aria-checked={displayStream} onClick={() => onChange({ stream: !localStream })}
                         className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${displayStream ? 'bg-slate-400' : 'bg-slate-200'}`}>
                         <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${displayStream ? 'translate-x-4' : 'translate-x-0.5'}`} />
                     </button>
                 </div>}
-                {value.protocol === 'anthropic' && <div className="rounded-xl border border-slate-200/60 bg-white/40 px-3 py-3 space-y-3">
+                {llmApiType(value) === 'anthropic' && <div className="rounded-xl border border-slate-200/60 bg-white/40 px-3 py-3 space-y-3">
                     <div className="flex items-center justify-between gap-3">
                         <div><span className="text-xs text-slate-500">自定义温度</span><p className="mt-1 text-[10px] leading-relaxed text-slate-400">{nativeCustomTemperature ? `当前发送：${nativeTemperature.toFixed(2)}` : '模型默认 · 不发送温度参数'}</p></div>
                         <button type="button" role="switch" aria-label="Anthropic 自定义温度" aria-checked={nativeCustomTemperature}
@@ -56,7 +53,7 @@ export default function DialogueApiFields({ value, onChange, fetchModels, isLoad
                         onChange={event => onChange({ temperature: Number(event.target.value) })} className="block w-full accent-slate-500 disabled:opacity-35" />
                     <p className="text-[10px] leading-relaxed text-slate-400">范围 0～1。部分模型不接受温度参数，如接口报错可关闭此项改用模型默认；不会自动重发请求。</p>
                 </div>}
-                {value.protocol !== 'anthropic' && <div className="rounded-xl border border-slate-200/60 bg-white/40 px-3 py-3 space-y-2">
+                {llmApiType(value) !== 'anthropic' && <div className="rounded-xl border border-slate-200/60 bg-white/40 px-3 py-3 space-y-2">
                     <div className="flex items-center justify-between gap-3">
                         <div><span className="text-xs text-slate-500">OpenAI 提示词缓存</span><p className="mt-1 text-[10px] leading-relaxed text-slate-400">发送稳定前缀的 prompt_cache_key；实际命中以服务返回的 usage 为准。</p></div>
                         <button type="button" role="switch" aria-label="OpenAI 提示词缓存" aria-checked={value.openaiPromptCache !== false}
@@ -67,7 +64,7 @@ export default function DialogueApiFields({ value, onChange, fetchModels, isLoad
                     </div>
                     <p className="text-[10px] leading-relaxed text-slate-400">通用 OAI 兼容字段；不支持该字段的中转可关闭。Anthropic 原生接口使用独立的缓存设置。</p>
                 </div>}
-                {value.protocol === 'anthropic' && <div className="rounded-xl border border-slate-200/60 bg-white/40 px-3 py-3 space-y-3">
+                {llmApiType(value) === 'anthropic' && <div className="rounded-xl border border-slate-200/60 bg-white/40 px-3 py-3 space-y-3">
                     <div className="flex items-center justify-between gap-3">
                         <div><span className="text-xs text-slate-500">提示词缓存</span><p className="mt-1 text-[10px] leading-relaxed text-slate-400">缓存稳定的角色设定前缀，默认开启。</p></div>
                         <button type="button" role="switch" aria-label="Anthropic 提示词缓存" aria-checked={value.anthropicPromptCache !== false}
@@ -101,9 +98,16 @@ export default function DialogueApiFields({ value, onChange, fetchModels, isLoad
                     {showApiAdvanced && (
                         <div className="mt-2 pl-2 border-l-2 border-slate-100 space-y-3 py-2">
                             <p className="text-[10px] text-slate-300 leading-relaxed">
-                                {value.protocol === 'anthropic' ? '流式与自定义温度在上方单独设置。' : '这两项绝大多数用户保持默认即可。除非接口报错"only stream supported"或对回复风格有强需求，否则不建议改。'}
+                                通常保持默认即可；如接口有输出额度或流式要求，可按服务商说明调整。
                             </p>
-                            {value.protocol !== 'anthropic' && <div className="flex items-center justify-between">
+                            <label className="block text-[10px] text-slate-400">
+                                私聊最大生成 Token（max_tokens）
+                                <input type="number" min={1} step={1} value={value.maxTokens ?? ''} placeholder="跟随全局，默认 8000"
+                                    onChange={e => { const n = Number(e.target.value); if (!e.target.value || (Number.isSafeInteger(n) && n > 0)) onChange({ maxTokens: e.target.value ? n : undefined }); }}
+                                    className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" />
+                                <span className="block mt-1 text-[9px] leading-relaxed">限制一次回复的输出量，不是历史消息条数。较小值可减少预留额度，过小可能截断回复；历史输入超限仍需调整上下文或归档。需在模型支持范围内填写。</span>
+                            </label>
+                            {llmApiType(value) !== 'anthropic' && <div className="flex items-center justify-between">
                                 <div>
                                     <span className="text-[10px] text-slate-400">流式输出 (Stream)</span>
                                     <p className="text-[9px] text-slate-300 mt-0.5">仅在你的 API 强制要求时打开</p>
@@ -117,7 +121,7 @@ export default function DialogueApiFields({ value, onChange, fetchModels, isLoad
                                     <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${displayStream ? 'translate-x-4' : 'translate-x-0.5'}`} />
                                 </button>
                             </div>}
-                            {value.protocol !== 'anthropic' && <div>
+                            {llmApiType(value) !== 'anthropic' && <div>
                                 <div className="flex items-center justify-between">
                                     <span className="text-[10px] text-slate-400">温度 (Temperature)</span>
                                     <span className="text-[10px] font-mono text-slate-400">{localTemperature.toFixed(2)}</span>
@@ -125,7 +129,7 @@ export default function DialogueApiFields({ value, onChange, fetchModels, isLoad
                                 <input
                                     type="range"
                                     min="0"
-                                    max="2"
+                                    max={llmApiType(value) === 'anthropic' ? '1' : '2'}
                                     step="0.05"
                                     value={localTemperature}
                                     onChange={(e) => setLocalTemperature(parseFloat(e.target.value))}

@@ -74,12 +74,12 @@ it.each(cases)('native stream reaches the real chat hook and handles $outcome (i
     expect(current.streamingThinking).toBe(thinkingMode ? '服务返回的思考摘要' : '');
     expect((await DB.getRecentMessagesByCharId(char.id, 20)).filter(message => message.role === 'assistant')).toEqual([]);
     const options = (fetch.mock.calls as unknown as Array<[string, RequestInit]>)[0][1];
-    expect(options.headers).toMatchObject({ 'x-api-key': 'fake-test-key' });
+    expect(new Headers(options.headers).get('x-api-key')).toBe('fake-test-key');
     expect(JSON.parse(options.body as string)).toMatchObject({ stream: true, model: '【反重力】claude-opus-4-6-thinking' });
     const request = JSON.parse(options.body as string);
-    if (thinkingMode) { expect(request.thinking).toEqual({ type: 'enabled', budget_tokens: 4000 }); expect(request).not.toHaveProperty('temperature'); }
+    if (thinkingMode) { expect(request.thinking).toEqual({ type: 'adaptive' }); expect(request).not.toHaveProperty('temperature'); }
     else expect(request).not.toHaveProperty('thinking');
-    expect(request.system[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(request.system.at(-1).cache_control).toEqual({ type: 'ephemeral' });
     const images = JSON.parse(options.body as string).messages.flatMap((message: any) => message.content).filter((block: any) => block.type === 'image');
     expect(images).toHaveLength(image ? 1 : 0);
     if (image) expect(images[0].source).toEqual({ type: 'base64', media_type: 'image/png', data: 'AQIDBA==' });

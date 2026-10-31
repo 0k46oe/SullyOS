@@ -1,7 +1,8 @@
 import { webcrypto } from 'node:crypto';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { compareAnthropicCachePrefix, formatAnthropicCacheDiagnostic, splitAnthropicCacheText } from './anthropicPromptCache';
-import { createDialogueFetch, toAnthropicBody } from './dialogueTransport';
+import { compareAnthropicCachePrefix, formatAnthropicCacheDiagnostic } from './anthropicPromptCache';
+import { createDialogueFetch } from './dialogueTransport';
+import { toAnthropicRequest as toAnthropicBody } from './anthropicApi';
 import { DB } from './db';
 
 beforeEach(() => vi.stubGlobal('crypto', webcrypto));
@@ -12,21 +13,11 @@ const request = (text = source) => toAnthropicBody({ model: '【渠道】custom-
 ] });
 const scope = (name: string) => ({ endpoint: `https://${name}.test/v1/messages`, credential: 'fake-secret', charId: 'role-a', purpose: '聊天回复' });
 
-it.each(['', '短人设', source, 'a'.repeat(8191) + '🙂' + '\n\n' + '后文'.repeat(18000)])('keeps exact prompt text and whole Unicode characters when segmenting', text => {
-  const parts = splitAnthropicCacheText(text);
-  expect(parts.join('')).toBe(text); expect(parts.length).toBeLessThanOrEqual(4);
-  for (const part of parts) {
-    expect(part).not.toMatch(/^[\uDC00-\uDFFF]/); expect(part).not.toMatch(/[\uD800-\uDBFF]$/);
-  }
-});
-
-it('uses at most four stable checkpoints and keeps all volatile system blocks outside them', () => {
+it('keeps volatile system reminders after history outside the cached system', () => {
   const payload = request();
-  expect(payload.system.filter((part: any) => part.cache_control)).toHaveLength(4);
-  expect(payload.system.slice(0, -1).map((part: any) => part.text).join('')).toBe(source);
-  expect(payload.system.at(-1)).toEqual({ type: 'text', text: 'volatile context' });
-  const changed = request(source.slice(0, -1) + 'b');
-  expect(changed.system.slice(0, 3)).toEqual(payload.system.slice(0, 3));
+  expect(payload.system.filter((part: any) => part.cache_control)).toHaveLength(1);
+  expect(payload.system[0].text).toBe(source);
+  expect(payload.messages.at(-1).content.at(-1).text).toContain('volatile context');
 });
 
 it('preserves original multi-block system boundaries and whitespace', () => {
@@ -39,11 +30,11 @@ it('preserves original multi-block system boundaries and whitespace', () => {
 it('compares only actual cached prefixes, including native tools and thinking, without exporting secrets or hashes', async () => {
   const key = scope('comparison');
   expect((await compareAnthropicCachePrefix(key, request()))?.comparison).toBe('first');
-  const next = request(); next.system.at(-1).text = 'new clock'; next.messages[0].content[0].text = 'new user message';
+  const next = request(); next.messages.at(-1).content.at(-1).text = 'new clock'; next.messages[0].content[0].text = 'new user message';
   const same = await compareAnthropicCachePrefix(key, next);
-  expect(same).toMatchObject({ comparison: 'same', breakpoints: 4, matchedPrefixChars: source.length });
-  const partial = await compareAnthropicCachePrefix(key, request(source.slice(0, -1) + 'b'));
-  expect(partial).toMatchObject({ comparison: 'partial', matchedPrefixChars: 32768 });
+  expect(same).toMatchObject({ comparison: 'same', breakpoints: 1 });
+  const changed = await compareAnthropicCachePrefix(key, request(source.slice(0, -1) + 'b'));
+  expect(changed).toMatchObject({ comparison: 'changed' });
   expect((await compareAnthropicCachePrefix(key, request('b' + source.slice(1))))?.comparison).toBe('changed');
   const withTools = { ...request('b' + source.slice(1)), tools: [{ name: 'tool', input_schema: { type: 'object' } }] };
   expect((await compareAnthropicCachePrefix(key, withTools))?.comparison).toBe('changed');
@@ -69,9 +60,9 @@ it('skips disabled caches and treats unavailable hashing as optional diagnostics
 
 it('reports same local prefix alongside provider-reported zero reads, without turning it into a hit', async () => {
   const append = vi.spyOn(DB, 'appendApiCallLog').mockResolvedValue(undefined as any);
-  vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 10, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 5000 } })))));
+  vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ type:'message', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 10, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 5000 } })))));
   const send = createDialogueFetch({ protocol: 'anthropic', baseUrl: 'https://zero-read.test', apiKey: 'fake-only', model: 'prefixed-model' });
-  for (let i = 0; i < 2; i++) await send('unused', { body: JSON.stringify({ model: 'prefixed-model', messages: [{ role: 'system', content: source }, { role: 'user', content: String(i) }] }) }, 0);
+  for (let i = 0; i < 2; i++) await send('unused', { method:'POST', body: JSON.stringify({ model: 'prefixed-model', messages: [{ role: 'system', content: source }, { role: 'user', content: String(i) }] }) }, 0);
   await vi.waitFor(() => expect(append).toHaveBeenCalledTimes(2));
   expect(append.mock.calls[1][0]).toMatchObject({ cacheReadTokens: 0, cacheCreationTokens: 5000, cacheDiagnostic: { comparison: 'same' } });
   expect(JSON.stringify(append.mock.calls)).not.toContain('fake-only'); expect(JSON.stringify(append.mock.calls)).not.toContain(source);

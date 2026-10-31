@@ -1,15 +1,17 @@
+import { llmApiType } from '../../utils/llmEndpoint';
 import React, { useRef, useState } from 'react';
 import type { CharacterProfile, DialogueApiConfig } from '../../types';
 import { useOS } from '../../context/OSContext';
 import { describeDialogueApi, pickDialogueApi } from '../../utils/characterApi';
 import { configFromPreset, findActivePresetId } from '../../utils/apiPresetSwitch';
 import { extractModelIds } from '../../utils/modelList';
-import { extractContent } from '../../utils/safeApi';
-import { createDialogueFetch, dialogueEndpoint, dialogueHeaders } from '../../utils/dialogueTransport';
+import { extractContent, safeResponseJson } from '../../utils/safeApi';
 import Modal from '../os/Modal';
 import DialogueApiFields from '../settings/DialogueApiFields';
 import ModelPicker from '../settings/ModelPicker';
 import ApiPresetGroups from '../settings/ApiPresetGroups';
+import { fetchLlm } from '../../utils/anthropicApi';
+import { anthropicRequestOptions } from '../../utils/dialogueTransport';
 
 export default function CharacterApiPanel({ character, onChange }: {
   character: CharacterProfile;
@@ -32,13 +34,13 @@ export default function CharacterApiPanel({ character, onChange }: {
     // A response from the previous provider must never populate the next provider's picker.
     requestVersion.current += 1;
     setLoading(false); setTesting(false); setStatus('');
-    if (patch.baseUrl !== undefined || patch.apiKey !== undefined || patch.protocol !== undefined) setModels([]);
+    if (patch.baseUrl !== undefined || patch.apiKey !== undefined || patch.apiType !== undefined) setModels([]);
     setDraft(previous => previous ? { ...previous, ...patch } : previous);
   };
   const open = () => {
     const source = character.dialogueApi || apiConfig;
     setDraft(pickDialogueApi(source));
-    setModels(source.baseUrl === apiConfig.baseUrl && source.apiKey === apiConfig.apiKey && (source.protocol || 'openai') === (apiConfig.protocol || 'openai') ? availableModels : []);
+    setModels(source.baseUrl === apiConfig.baseUrl && source.apiKey === apiConfig.apiKey && llmApiType(source) === llmApiType(apiConfig) ? availableModels : []);
     setStatus('');
   };
   const fetchModels = async () => {
@@ -48,7 +50,7 @@ export default function CharacterApiPanel({ character, onChange }: {
     const version = ++requestVersion.current;
     setLoading(true); setStatus('');
     try {
-      const response = await fetch(dialogueEndpoint(api, 'models'), { headers: dialogueHeaders(api) });
+      const response = await fetchLlm(`${api.baseUrl}/models`, { headers: { Authorization: `Bearer ${api.apiKey || 'sk-none'}` } });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const next = extractModelIds(await response.json());
       if (version !== requestVersion.current) return;
@@ -65,10 +67,14 @@ export default function CharacterApiPanel({ character, onChange }: {
     const version = ++requestVersion.current;
     setTesting(true); setStatus('');
     try {
-      const data = await createDialogueFetch(api)(dialogueEndpoint(api), {
+      const response = await fetchLlm(`${api.baseUrl}/chat/completions`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${api.apiKey || 'sk-none'}` },
-        body: JSON.stringify({ model: api.model, messages: [{ role: 'user', content: 'Hi' }], max_tokens: 5, stream: api.stream ?? false }),
+        body: JSON.stringify({ model: api.model, messages: [{ role: 'user', content: 'Hi' }], max_tokens: 5, stream: api.stream ?? false,
+          temperature: api.temperature,
+          ...(api.apiType === 'anthropic' ? { __sullyAnthropicOptions: anthropicRequestOptions(api) } : {}),
+        }),
       });
+      const data = await safeResponseJson(response);
       const content = extractContent(data);
       if (version === requestVersion.current) setStatus(content ? '连接成功' : '接口已响应，但回复为空');
     } catch (error) {

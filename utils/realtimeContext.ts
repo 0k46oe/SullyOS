@@ -56,6 +56,7 @@ export interface RealtimeConfig {
     // 天气配置
     weatherEnabled: boolean;
     weatherApiKey: string;  // OpenWeatherMap API Key（可选；留空走免 key 的 Open-Meteo）
+    weatherCities?: Record<string, string>; // Per-character override; missing/blank inherits weatherCity.
     weatherCity: string;    // 城市名 (如 "北京"、"Beijing"，Open-Meteo 支持中文)
 
     // 新闻配置
@@ -121,7 +122,7 @@ export const defaultRealtimeConfig: RealtimeConfig = {
 };
 
 // 缓存
-let weatherCache: { data: WeatherData | null; timestamp: number } = { data: null, timestamp: 0 };
+const weatherCache = new Map<string, {data: WeatherData; timestamp: number}>();
 let newsCache: { data: NewsItem[]; timestamp: number } = { data: [], timestamp: 0 };
 
 
@@ -139,8 +140,10 @@ export const RealtimeContextManager = {
         const cacheMs = config.cacheMinutes * 60 * 1000;
 
         // 检查缓存
-        if (weatherCache.data && (now - weatherCache.timestamp) < cacheMs) {
-            return weatherCache.data;
+        const key = JSON.stringify([config.weatherCity.trim(), config.weatherApiKey]);
+        const cached = weatherCache.get(key);
+        if (cached && (now - cached.timestamp) < cacheMs) {
+            return cached.data;
         }
 
         const weather = await fetchWeatherWithFallback(config.weatherCity, config.weatherApiKey);
@@ -149,7 +152,8 @@ export const RealtimeContextManager = {
         }
 
         // 更新缓存
-        weatherCache = { data: weather, timestamp: now };
+        if (weatherCache.size >= 100) weatherCache.delete(weatherCache.keys().next().value!);
+        weatherCache.set(key, { data: weather, timestamp: now });
 
         return weather;
     },
@@ -467,7 +471,7 @@ export const RealtimeContextManager = {
      * 清除缓存
      */
     clearCache: () => {
-        weatherCache = { data: null, timestamp: 0 };
+        weatherCache.clear();
         newsCache = { data: [], timestamp: 0 };
         clearGeocodeCache();
     },

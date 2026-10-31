@@ -7,7 +7,7 @@ import ScheduleCard from '../schedule/ScheduleCard';
 import EmotionSettingsPanel from './EmotionSettingsPanel';
 import ChatInputSettings from './ChatInputSettings';
 import ChatSettingsSection from './ChatSettingsSection';
-import ChatRecordsPanel from './ChatRecordsPanel';
+import ChatWordFrequencyPanel from './ChatWordFrequencyPanel';
 import { isDefaultAiCompanionEnabled } from '../../utils/characterInstructions';
 import SecretNote from './SecretNote';
 import type { ChatInputPreferences } from '../../utils/chatInputPreferences';
@@ -701,8 +701,8 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                             )}
                         </div>
                     </ChatSettingsSection>
-                    <ChatSettingsSection title="聊天记录" summary="完整导出、本地高频词与记录清理">
-                        {modalType === 'chat-settings' && <ChatRecordsPanel key={activeCharacter.id} character={activeCharacter} userName={userName} />}
+                    <ChatSettingsSection title="聊天记录" summary="本地高频词与记录清理">
+                        {modalType === 'chat-settings' && <ChatWordFrequencyPanel key={activeCharacter.id} character={activeCharacter} userName={userName} />}
                         {onOpenHistoryCleanup && <div>
                             <button type="button" onClick={onOpenHistoryCleanup} className="w-full rounded-2xl border border-red-100 bg-red-50 py-3 text-sm font-bold text-red-600">清理指定范围 / 保留最近 N 条</button>
                             <p className="mt-2 text-center text-[10px] text-slate-400">按页选择记录，永久删除前需要两次确认。</p>

@@ -46,6 +46,7 @@ export function buildBody(source: T.Group, sourceParts: Parts, appearance: 'skin
     const garment=composeGarments(parts,{outfit:hair?.layers.outfit?.length??1,outer:hair?.layers.outer?.length??1});
     const frontScalp=keep(new T.MeshStandardMaterial({color:average(parts.fronthair),roughness:1}));
     const rearScalp=keep(new T.MeshStandardMaterial({color:average(parts.back1||parts.back2||parts.fronthair),roughness:1}));
+    frontScalp.userData.illustrationHair=rearScalp.userData.illustrationHair=true;
     // Match the actual face/body material boundary (model y=.60) in the original
     // 472px canvas. Split spatially, so several rolled decorations can land on
     // different surfaces without classifying the whole decor layer as one item.

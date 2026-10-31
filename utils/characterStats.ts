@@ -1,3 +1,4 @@
+import { resolveCharacterUserProfile } from './characterUserProfile';
 import type { CharacterProfile, Emoji, UserProfile } from '../types';
 import type { ContextRangeSnapshot } from './chatContextRange';
 import { ChatPrompts } from './chatPrompts';
@@ -47,6 +48,7 @@ export function buildCharacterStats(char: CharacterProfile, user: UserProfile, r
     const memoryCharacters = memoryRows.reduce((sum, m) => sum + countContextCharacters(m.content), 0);
     const worldbookCharacters = books.filter(b => b.status === 'readable').reduce((sum, b) => sum + countContextCharacters(b.content), 0);
     const historyCharacters = [...sources.values()].reduce((sum, s) => sum + s.characters, 0);
+    user = resolveCharacterUserProfile(user, char);
     const imp = normalizeUserImpression(char.impression);
     const otherRows = [
         { title: '角色身份与核心设定', content: [char.name, char.description || '无', getCharacterInstructions(char)].join('\n') },

@@ -1,3 +1,4 @@
+import { resolveCharacterUserProfile } from './characterUserProfile';
 import type {
     CharacterProfile,
     Message,
@@ -18,6 +19,10 @@ import { shareOrDownloadFile } from './shareExport';
 import { convertTavernPreset } from './tavernPreset';
 
 export type StoryApiRole = 'system' | 'user' | 'assistant';
+export function hasStoryTheaterParticipant(entry: StoryTheaterEntry, characters: CharacterProfile[]): boolean {
+    return characters.some(char => entry.characterIds.includes(char.id)
+        || (!entry.writesToCharacterMemory && entry.mask?.type === 'character' && entry.mask.id === char.id));
+}
 export interface StoryApiMessage { role: StoryApiRole; content: string; }
 
 export interface StoryPromptSlots {
@@ -268,6 +273,7 @@ export const resolveStoryTheaterMask = (
     user: UserProfile,
     characters: CharacterProfile[],
     masks: StoryTheaterMask[],
+    character?: CharacterProfile,
 ): ResolvedStoryTheaterMask => {
     if (selection?.type === 'character') {
         const char = characters.find(item => item.id === selection.id);
@@ -292,6 +298,7 @@ export const resolveStoryTheaterMask = (
             worldview: mask.worldview,
         };
     }
+    user = resolveCharacterUserProfile(user, character);
     return { selection: { type: 'user' }, name: user.name || '你', avatar: user.avatar, description: user.bio || '' };
 };
 

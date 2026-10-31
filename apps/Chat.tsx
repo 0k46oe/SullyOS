@@ -1,3 +1,4 @@
+import { resolveCharacterUserProfile } from '../utils/characterUserProfile';
 import {avatarFrameLayer} from '../utils/avatarFrameTarget';
 import ChatRuntimeStyle from '../components/chat/ChatRuntimeStyle';
 import {homePhoneAppearance,HOME_PHONE_BUBBLES} from './room3d/homePhoneAppearance';
@@ -328,6 +329,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const [showingTargetIds, setShowingTargetIds] = useState<Set<number>>(new Set());
 
     const char = characters.find(c => c.id === activeCharacterId) || characters[0];
+    const chatUserProfile = resolveCharacterUserProfile(userProfile, char);
     const memoryRepairRound = useMemo(() => {
         let assistantIndex = -1;
         for (let i = messages.length - 1; i >= 0; i--) {
@@ -1477,7 +1479,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
 
         const imageChatContext = type === 'image'
             ? messages.slice(-10).map(m => {
-                const sender = m.role === 'user' ? userProfile.name : char.name;
+                const sender = m.role === 'user' ? chatUserProfile.name : char.name;
                 const isMedia = m.type === 'image' || m.type === 'emoji' || isImageValue(m.content);
                 const preview = isMedia
                     ? buildReplySnapshotContent(m)
@@ -1597,7 +1599,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                         console.log('[卡片调试] 小红书卡片·metadata =', note);
                         console.log('[卡片调试] 小红书卡片·角色将读到 =\n' + normalizeMessageContent(
                             { type: 'xhs_card', role: 'user', content: note.title || '小红书笔记', metadata: { xhsNote: note } } as any,
-                            char.name, userProfile.name,
+                            char.name, chatUserProfile.name,
                         ));
                     }
                     xhsCardCreated = true;
@@ -1643,7 +1645,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                         console.log('[卡片调试] 网页卡片·metadata =', webpage);
                         console.log('[卡片调试] 网页卡片·角色将读到 =\n' + normalizeMessageContent(
                             { type: 'webpage_card', role: 'user', content: webpage.title, metadata: { webpage } } as any,
-                            char.name, userProfile.name,
+                            char.name, chatUserProfile.name,
                         ));
                     }
                     webpageCardCreated = true;
@@ -1797,6 +1799,26 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             finishJson(false);
         }
     };
+    const exportingChatRef = useRef(false);
+    const [showChatExport, setShowChatExport] = useState(false);
+    const [exportWithThinking, setExportWithThinking] = useState(false);
+    const handleExportChat = async (includeThinking: boolean) => {
+        if (!char || exportingChatRef.current) return;
+        exportingChatRef.current = true;
+        setShowChatExport(false);
+        const target = char;
+        setShowPanel('none');
+        try {
+            const [{ formatChatTextExport }, { shareOrDownloadFile }] = await Promise.all([
+                import('../utils/chatTextExport'), import('../utils/shareExport'),
+            ]);
+            const content = formatChatTextExport(await DB.getMessagesByCharId(target.id, true), { includeThinking });
+            if (!content.slice(1).trim()) { addToast('暂无可导出的聊天记录', 'info'); return; }
+            await shareOrDownloadFile({ content, fileName: `${target.name.replace(/[\\/:*?"<>|]/g, '_')}_聊天原文.txt`, mimeType: 'text/plain;charset=utf-8', shareTitle: `${target.name}的聊天原文` });
+            addToast('聊天原文已导出（含每条消息的原始时间）', 'success');
+        } catch { addToast('聊天记录导出失败，请重试', 'error'); }
+        finally { exportingChatRef.current = false; }
+    };
 
     const handlePanelAction = (type: string, payload?: any) => {
         // 只统计「打开某个面板 / 开关某个能力」这几个固定入口，名单写死在这里；
@@ -1812,6 +1834,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             trackEvent('打开聊天功能面板项', { action: type });
         }
         switch (type) {
+            case 'export-chat': setShowPanel('none'); setExportWithThinking(false); setShowChatExport(true); break;
             case 'collaboration': setShowPanel('none'); setCollaborationOpen(true); break;
             case 'memory-link': setShowPanel('none'); setMemoryRepairOpen(true); break;
             case 'favorites': setShowPanel('none'); setFavoritesOpen(true); break;
@@ -2867,7 +2890,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 setArchiveProgress(`归档中 ${dateStr} (${idx + 1}/${datesToProcess.length})`);
                 const dayMsgs = msgsByDate[dateStr];
                 const rawLog = dayMsgs
-                    .map(m => formatMessageWithTime(m, char.name, userProfile.name, formatTime))
+                    .map(m => formatMessageWithTime(m, char.name, chatUserProfile.name, formatTime))
                     .join('\n');
                 
                 let prompt = template;
@@ -2875,7 +2898,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 if (sarMemoryBoundary) prompt = `${sarMemoryBoundary}\n\n${prompt}`;
                 prompt = prompt.replace(/\$\{dateStr\}/g, dateStr);
                 prompt = prompt.replace(/\$\{char\.name\}/g, char.name);
-                prompt = prompt.replace(/\$\{userProfile\.name\}/g, userProfile.name);
+                prompt = prompt.replace(/\$\{userProfile\.name\}/g, chatUserProfile.name);
                 prompt = prompt.replace(/\$\{rawLog.*?\}/g, rawLog.substring(0, 200000));
 
                 const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
@@ -2967,7 +2990,11 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             void reloadMessages(visibleCount);
         };
         window.addEventListener('home-secrets-updated',refresh);
-        return()=>window.removeEventListener('home-secrets-updated',refresh);
+        window.addEventListener('friend-feed-history-updated',refresh);
+        return()=>{
+            window.removeEventListener('home-secrets-updated',refresh);
+            window.removeEventListener('friend-feed-history-updated',refresh);
+        };
     },[char?.id,visibleCount,reloadMessages]);
 
     // --- Message Management ---
@@ -3180,7 +3207,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         if (!selected.length) { addToast('请勾选消息正文后再收藏', 'info'); return; }
         savingConversationFavorite.current = true;
         try {
-            await saveConversationContentFavorite(selected, char.id, char.name, userProfile.name);
+            await saveConversationContentFavorite(selected, char.id, char.name, chatUserProfile.name);
             addToast(`已将 ${selected.length} 条消息合并收藏`, 'success');
             setSelectionMode(false);
             setSelectedMsgIds(new Set());
@@ -3207,14 +3234,14 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
 
         // Build preview text (first few messages)
         const previewLines = selectedMsgs.slice(0, 4).map(m => {
-            const sender = m.role === 'user' ? userProfile.name : char.name;
+            const sender = m.role === 'user' ? chatUserProfile.name : char.name;
             const text = m.type === 'text' ? m.content.slice(0, 30) : `[${m.type === 'image' ? '图片' : m.type === 'emoji' ? '表情' : m.type}]`;
             return `${sender}: ${text}`;
         });
         if (selectedMsgs.length > 4) previewLines.push(`... 共 ${selectedMsgs.length} 条消息`);
 
         const forwardData = {
-            fromUserName: userProfile.name,
+            fromUserName: chatUserProfile.name,
             fromCharName: char.name,
             count: selectedMsgs.length,
             preview: previewLines,
@@ -3298,12 +3325,12 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     ) => {
         if (!char || transferredMessages.length === 0) return;
         const preview = transferredMessages.slice(0, 4).map(message => {
-            const sender = message.role === 'user' ? userProfile.name : char.name;
+            const sender = message.role === 'user' ? chatUserProfile.name : char.name;
             return `${sender}: ${message.content.replace(/\s+/g, ' ').slice(0, 36)}`;
         });
         if (transferredMessages.length > 4) preview.push(`… 共 ${transferredMessages.length} 条消息`);
         const forwardData = {
-            fromUserName: userProfile.name,
+            fromUserName: chatUserProfile.name,
             fromCharName: `${char.name} · 协同工作`,
             count: transferredMessages.length,
             preview,
@@ -3351,7 +3378,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 char.name,
                 embedding,
                 lightLLM,
-                userProfile.name,
+                chatUserProfile.name,
             );
             if (imported.error && imported.error !== 'no_memories') {
                 throw new Error(`记忆宫殿没有存好：${imported.error}`);
@@ -3385,7 +3412,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 : [...(current.memories || []), archiveFragment],
         }));
         return `已把这次协作的一条总结存入 ${char.name} 的神经链接`;
-    }, [char, memoryPalaceConfig.embedding, memoryPalaceConfig.lightLLM, updateCharacter, userProfile.name]);
+    }, [char, memoryPalaceConfig.embedding, memoryPalaceConfig.lightLLM, updateCharacter, chatUserProfile.name]);
 
     const handleCollaborationInstall = useCallback(async (
         artifact: CollaborationInstallableArtifact,
@@ -3569,7 +3596,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         active: (activeApp === AppID.Chat || !!homePhone) && !!char,
         blocked: isInputFocused || !!input.trim() || showPanel !== 'none' || modalType !== 'none'
             || selectionMode || isSummarizing || collaborationOpen || memoryRepairOpen || favoritesOpen
-            || showProactiveModal || showActiveMsg2Modal || showThinkingChainModal
+            || showChatExport || showProactiveModal || showActiveMsg2Modal || showThinkingChainModal
             || mcdAppOpen || luckinAppOpen || showForwardModal,
         generating: isTyping || instantChatPending || isProactiveComposing,
         onGenerate: handleManualTrigger,
@@ -3914,7 +3941,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 onTransfer={() => { if(transferAmt) handleSendText(`[转账]`, 'transfer', { amount: transferAmt, note: transferNote.trim() || undefined, status: 'pending' }); setTransferNote(''); setModalType('none'); }}
                 onImportEmoji={handleImportEmoji}
                 onSaveSettings={saveSettings}
-                userName={userProfile.name}
+                userName={chatUserProfile.name}
                 onSetDefaultAiCompanion={enabled => { void updateCharacter(char.id, { defaultAiCompanionEnabled: enabled }); }}
                 onOpenHistoryCleanup={() => { setModalType('none'); setShowHistoryCleanup(true); }} onArchive={handleFullArchive}
                 onCreatePrompt={createNewPrompt} onEditPrompt={editSelectedPrompt} onSavePrompt={handleSavePrompt} onDeletePrompt={handleDeletePrompt}
@@ -4706,6 +4733,17 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 const closing = new Set(months);
                 updateCharacter(char.id, current => ({ activeMemoryMonths: (current.activeMemoryMonths || []).filter(month => !closing.has(month)) }));
             }} />}
+            <Modal isOpen={showChatExport} title="导出聊天记录" onClose={() => setShowChatExport(false)}>
+                <div className="space-y-4">
+                    <p className="text-xs text-slate-500">导出此角色完整聊天正文和原始时间，包含已归档记录。</p>
+                    <label className="flex items-center gap-2 text-sm text-slate-600">
+                        <input type="checkbox" checked={exportWithThinking} onChange={event => setExportWithThinking(event.target.checked)} />
+                        同时包含思考内容
+                    </label>
+                    <p className="text-xs text-slate-400">勾选后，回复正文与当时保存的思考一起导出。</p>
+                    <button className="w-full rounded-xl bg-primary py-3 text-sm font-bold text-white" onClick={() => void handleExportChat(exportWithThinking)}>导出 TXT</button>
+                </div>
+            </Modal>
             <Modal isOpen={showForwardModal} title="转发聊天记录" onClose={() => setShowForwardModal(false)}>
                 {(() => {
                     const forwardCandidates = characters.filter(c => c.id !== activeCharacterId);

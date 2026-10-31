@@ -5,12 +5,14 @@ import { Simulate } from 'react-dom/test-utils';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import NavigationApiSwitcher from '../components/os/NavigationApiSwitcher';
 import { AppID } from '../types';
+import { configFromPreset } from './apiPresetSwitch';
+import { pickDialogueApi } from './characterApi';
 import { syncAmsgLlmCredentials } from './amsgStateSync';
 
 const state = vi.hoisted(() => ({ activeApp: 'chat', activeCharacterId: 'role',
   apiConfig: { baseUrl: 'https://global.test/v1', apiKey: 'global-key', model: 'global-model', temperature: 0.6, minimaxApiKey: 'voice-key' },
   characters: [{ id: 'role', name: '测试角色', dialogueApi: { baseUrl: 'https://role.test/v1', apiKey: 'role-key', model: 'role-model' } }],
-  apiPresets: [{ id: 'native', name: '原生测试预设', group: '对话', config: { protocol: 'anthropic', baseUrl: 'https://native.test', apiKey: 'native-key', model: 'native-model' } },
+  apiPresets: [{ id: 'native', name: '原生测试预设', group: '对话', config: { protocol: 'anthropic' as const, baseUrl: 'https://native.test', apiKey: 'native-key', model: 'native-model' } },
     { id: 'legacy', name: '兼容测试预设', config: { baseUrl: 'https://legacy.test/v1', apiKey: 'legacy-key', model: 'legacy-model' } }],
   updateApiConfig: vi.fn(), updateCharacter: vi.fn(), addToast: vi.fn() }));
 vi.mock('../context/OSContext', () => ({ useOS: () => state }));
@@ -32,19 +34,19 @@ it('defaults to the actual chat role and preserves protocol in a role snapshot',
   await render(); expect(host.querySelector('[aria-label="API 切换范围"] button')?.getAttribute('aria-pressed')).toBe('true');
   expect(host.textContent).not.toContain('role-key'); expect(host.textContent).not.toContain('native-key');
   await click('原生测试预设');
-  expect(state.updateCharacter).toHaveBeenCalledWith('role', { dialogueApi: { ...state.apiPresets[0].config, temperature: 0.6, anthropicCustomTemperature: false, anthropicPromptCache: true } });
+  expect(state.updateCharacter).toHaveBeenCalledWith('role', { dialogueApi: pickDialogueApi({ ...state.apiConfig, ...configFromPreset(state.apiPresets[0]) } as any) });
   expect(state.updateApiConfig).not.toHaveBeenCalled(); expect(onClose).toHaveBeenCalledOnce();
 });
 it('changes global credentials without overwriting a role and synchronizes legacy cloud credentials', async () => {
   await render(); await setGlobal(); await click('兼容测试预设');
-  expect(state.updateApiConfig).toHaveBeenCalledWith({ ...state.apiPresets[1].config, protocol: 'openai' });
+  expect(state.updateApiConfig).toHaveBeenCalledWith(configFromPreset(state.apiPresets[1] as any));
   expect(state.updateCharacter).not.toHaveBeenCalled();
-  expect(syncAmsgLlmCredentials).toHaveBeenCalledWith({ ...state.apiConfig, ...state.apiPresets[1].config, protocol: 'openai' });
+  expect(syncAmsgLlmCredentials).toHaveBeenCalledWith({ ...state.apiConfig, ...configFromPreset(state.apiPresets[1] as any) });
 });
-it('does not send unsupported native credentials to the OpenAI-only Worker', async () => {
+it('synchronizes native credentials through the upstream Worker capability check', async () => {
   await render(); await setGlobal(); await click('原生测试预设');
-  expect(state.updateApiConfig).toHaveBeenCalledWith({ ...state.apiPresets[0].config, anthropicCustomTemperature: false, anthropicPromptCache: true });
-  expect(syncAmsgLlmCredentials).not.toHaveBeenCalled();
+  expect(state.updateApiConfig).toHaveBeenCalledWith(configFromPreset(state.apiPresets[0] as any));
+  expect(syncAmsgLlmCredentials).toHaveBeenCalledWith({ ...state.apiConfig, ...configFromPreset(state.apiPresets[0] as any) });
 });
 it('restores the current role to following global and uses global scope outside private chat', async () => {
   await render(); await click('恢复跟随全局 API');
@@ -85,6 +87,6 @@ it('keeps a custom native temperature with the selected card configuration', asy
   config.temperature = 0.28; config.anthropicCustomTemperature = true;
   try {
     await render(); await click('原生测试预设');
-    expect(state.updateCharacter).toHaveBeenCalledWith('role', { dialogueApi: expect.objectContaining({ temperature: 0.28, anthropicCustomTemperature: true, protocol: 'anthropic', model: config.model }) });
+    expect(state.updateCharacter).toHaveBeenCalledWith('role', { dialogueApi: expect.objectContaining({ temperature: 0.28, anthropicCustomTemperature: true, apiType: 'anthropic', model: config.model }) });
   } finally { delete config.temperature; delete config.anthropicCustomTemperature; }
 });

@@ -15,7 +15,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 const image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 const reply = '我看到了你发来的图片。';
-const completion = { id: 'image-reply', role: 'assistant', model: 'vision-test-model', content: [{ type: 'text', text: reply }], stop_reason: 'end_turn', usage: { input_tokens: 20, output_tokens: 8 } };
+const completion = { type: 'message', id: 'image-reply', role: 'assistant', model: 'vision-test-model', content: [{ type: 'text', text: reply }], stop_reason: 'end_turn', usage: { input_tokens: 20, output_tokens: 8 } };
 const streamEvents = [
   { type: 'message_start', message: { ...completion, content: [], usage: { input_tokens: 20, output_tokens: 0 } } },
   { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
@@ -65,12 +65,12 @@ it.each([false, true])('real private chat sends current and historical images to
     expect(fetch).toHaveBeenCalledOnce();
     const [url, options] = (fetch.mock.calls as unknown as Array<[string, RequestInit]>)[0];
     expect(url).toBe('https://native.test/v1/messages');
-    expect(options.headers).toMatchObject({ 'x-api-key': 'fake-native-key' });
+    expect(new Headers(options.headers).get('x-api-key')).toBe('fake-native-key');
     const sent = JSON.parse(options.body as string);
     expect(sent.model).toBe('vision-test-model');
     expect(sent.stream).toBe(stream);
     const blocks = sent.messages.flatMap((message: any) => message.content);
-    expect(blocks.filter((block: any) => block.type === 'image')).toEqual([
+    expect(blocks.filter((block: any) => block.type === 'image').map(({ cache_control, ...block }: any) => block)).toEqual([
       { type: 'image', source: { type: 'base64', media_type: 'image/png', data: image.split(',')[1] } },
       { type: 'image', source: { type: 'base64', media_type: 'image/png', data: image.split(',')[1] } },
       { type: 'image', source: { type: 'url', url: 'https://images.test/new.jpg' } },
