@@ -24,11 +24,9 @@ import React, { createContext, useContext, useEffect, useState, useRef, useCallb
 import type { VRSARActivity } from '../types';
 import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, CharacterGroup, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, CloudBackupConfig, CloudBackupFile, MemoryPalaceFeatureFlags } from '../types';
 import { DB } from '../utils/db';
-import { resolveSystemPalette } from '../utils/systemPalette';
 import type { BackupVolumeOutput } from '../utils/backupVolumes';
 import { validateVolumeFiles } from '../utils/backupVolumes';
 import { openBackupZip } from '../utils/backupZipReader';
-import '../components/os/systemPalette.css';
 import { backupMode, stripSplitMetadata, mergeMediaOnly, mergeTextMedia, projectMedia, isAppearanceAsset, mergeSplitAsset } from '../utils/backupSplitMerge';
 import { reportDatabaseFailure } from '../utils/databaseHealth';
 import type { AvatarTouchRecord } from '../utils/avatarTouch';
@@ -1933,15 +1931,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
       // 桌面皮肤：写到 <html data-skin>，供全局 CSS（index.html）与组件读取。
       root.dataset.skin = theme.skin || 'default';
-      const query = window.matchMedia('(prefers-color-scheme: dark)');
-      const applyPalette = () => {
-          const palette = resolveSystemPalette(theme, query.matches);
-          root.dataset.interface = palette.style;
-          root.dataset.interfaceDark = String(palette.dark);
-      };
-      applyPalette();
-      query.addEventListener('change', applyPalette);
-      return () => query.removeEventListener('change', applyPalette);
   }, [theme]);
 
   // --- Update: Handle Scheduled Messages with Unread Flags & Web Notifications ---

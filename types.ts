@@ -113,9 +113,6 @@ export interface OSTheme {
   /** 独立锁屏壁纸；未设置时跟随桌面 wallpaper。 */
   lockWallpaper?: string;
   darkMode: boolean;
-  /** Base interface palette; custom chat decoration remains independent. */
-  interfaceStyle?: 'claude-paper' | 'monochrome' | 'legacy';
-  interfaceColorMode?: 'light' | 'dark' | 'system';
   contentColor?: string;
   /** 冷启动时是否播放整机开机过场。默认开启（undefined 视为 true）。 */
   bootAnimationEnabled?: boolean;

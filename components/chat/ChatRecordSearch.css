@@ -1,0 +1,69 @@
+/* Loaded inside the search page's ShadowRoot only. No global palette or inherited chat styling. */
+:host { all: initial !important; position: absolute !important; inset: 0 !important; z-index: 100 !important; isolation: isolate !important; }
+*, *::before, *::after { box-sizing: border-box; }
+button, input, select { margin: 0; font: inherit; color: inherit; }
+button { cursor: pointer; border: 0; background: transparent; }
+button:disabled { cursor: default; }
+input, select { border: 0; min-width: 0; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--search-accent); outline-offset: 2px; }
+h2, p { margin: 0; }
+.chat-record-search {
+    --search-page: #faf9f5; --search-surface: #faf9f5; --search-field: #e8e6dc;
+    --search-ink: #141413; --search-muted: #62615b; --search-line: #dedcd2;
+    --search-accent: #a84e32; --search-soft: #eee1d6; --search-mark: #eed5af;
+    position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0;
+    background: var(--search-page); color: var(--search-ink); color-scheme: light;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+    text-align: left; letter-spacing: normal; outline: none;
+}
+.chat-record-search.search-dark {
+    --search-page: #141413; --search-surface: #20201e; --search-field: #2b2b28;
+    --search-ink: #faf9f5; --search-muted: #b0aea5; --search-line: #3b3a35;
+    --search-accent: #d97757; --search-soft: #443129; --search-mark: #61472e;
+    color-scheme: dark;
+}
+.chat-record-search > header { display: flex; flex-shrink: 0; align-items: center; gap: 8px; padding: 12px; border-bottom: 1px solid var(--search-line); }
+.chat-record-search > header > button { width: 36px; height: 40px; flex-shrink: 0; border-radius: 6px; font-size: 24px; color: var(--search-muted); }
+.chat-record-search > header h2 { min-width: 0; flex: 1; font: 500 16px/1.4 Georgia, 'Songti SC', SimSun, serif; }
+.search-mode { display: flex; flex-shrink: 0; gap: 2px; padding: 3px; border-radius: 6px; background: var(--search-field); }
+.search-mode button { min-height: 34px; padding: 4px 9px; border-radius: 4px; font-size: 12px; color: var(--search-muted); }
+.search-mode [aria-pressed='true'] { background: var(--search-surface); color: var(--search-accent); }
+.search-filters { flex-shrink: 0; padding: 16px; border-bottom: 1px solid var(--search-line); }
+.search-filters > * + * { margin-top: 12px; }
+.search-row { display: flex; gap: 8px; }
+.search-input { flex: 1; width: 0; padding: 10px 12px; border-radius: 6px; background: var(--search-field); font-size: 14px; }
+.search-input::placeholder { color: var(--search-muted); opacity: .85; }
+.search-date-toggle { flex-shrink: 0; padding: 0 12px; border-radius: 6px; background: var(--search-field); color: var(--search-muted); font-size: 12px; font-weight: 600; }
+.search-role { min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding: 8px; border-radius: 6px; background: var(--search-surface); color: var(--search-muted); font-size: 12px; }
+.search-selected { background: var(--search-soft); color: var(--search-accent); font-weight: 600; }
+.search-date-chip { padding: 4px 12px; border-radius: 6px; font-size: 12px; }
+.search-scroll { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; }
+.search-calendar { border-bottom: 1px solid var(--search-line); padding: 16px; }
+.search-calendar-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+.search-month-step { width: 36px; height: 36px; border-radius: 6px; background: var(--search-field); }
+.search-month-step:disabled, .search-pagination button:disabled { opacity: .3; }
+.search-month-fields { display: flex; min-width: 0; gap: 4px; font-weight: 600; }
+.search-month-fields select { padding: 8px; border-radius: 6px; background: var(--search-field); }
+.search-calendar-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; text-align: center; font-size: 12px; }
+.search-weekday { padding: 4px 0; color: var(--search-muted); }
+.search-day { display: flex; height: 40px; flex-direction: column; align-items: center; justify-content: center; border-radius: 6px; }
+.search-day:disabled { color: var(--search-muted); opacity: .4; }
+.search-day-dot { width: 4px; height: 4px; margin-top: 4px; border-radius: 50%; background: var(--search-accent); }
+.search-day-dot-empty { background: transparent; }
+.search-calendar-note { margin-top: 12px; font-size: 11px; color: var(--search-muted); }
+.search-empty { padding: 32px; text-align: center; font-size: 14px; color: var(--search-muted); }
+.search-error { color: var(--search-accent); }
+.search-retry { margin-left: 8px; text-decoration: underline; }
+.search-count { padding: 12px 16px; font-size: 12px; color: var(--search-muted); }
+.search-result { display: flex; width: 100%; gap: 12px; padding: 16px; border-bottom: 1px solid var(--search-line); text-align: left; }
+.search-result:active { background: var(--search-field); }
+.search-avatar { display: flex; width: 40px; height: 40px; flex-shrink: 0; align-items: center; justify-content: center; border-radius: 6px; background: var(--search-field); color: var(--search-muted); font-weight: 600; }
+.search-avatar-ai { background: var(--search-soft); color: var(--search-accent); }
+.search-result-body { min-width: 0; flex: 1; }
+.search-result-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.search-result-name { min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; }
+.search-result-time { flex-shrink: 0; font-size: 10px; color: var(--search-muted); }
+.search-snippet { display: block; overflow-wrap: anywhere; font-size: 12px; line-height: 1.65; color: var(--search-muted); }
+.search-snippet mark { border-radius: 3px; background: var(--search-mark); color: var(--search-ink); }
+.search-pagination { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 16px; font-size: 12px; color: var(--search-muted); }
+.search-pagination button { padding: 8px 12px; border-radius: 6px; background: var(--search-field); }
