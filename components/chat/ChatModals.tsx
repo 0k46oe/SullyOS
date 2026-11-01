@@ -307,7 +307,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
         setImageBusy(true); setImageStatus('正在整理提示词…');
         try {
             const user = (await DB.getUserProfile()) || { name: userName, avatar: '', bio: '' };
-            const record = await generateAndSaveChatImage(activeCharacter, user, imageRequirement, { apiPresets, onProgress: setImageStatus });
+            const record = await generateAndSaveChatImage(activeCharacter, user, imageRequirement, { presets: apiPresets, onProgress: setImageStatus });
             setSelectedSavedImage(record); setImageRequirement(''); setImageStatus('已保存到本机生图记录，可发送到聊天。');
             await loadSavedImages();
         } catch (error) { setImageStatus(error instanceof Error ? error.message : '生图失败'); }

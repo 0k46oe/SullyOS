@@ -2,6 +2,7 @@ import type { CharacterProfile, ImageGenerationConfig, ImageGenerationProvider }
 import { getProxyWorkerUrl } from './proxyWorker';
 import { putImageBlob } from './blobRef';
 import { readImageGenerationConfig, resolveImageSelection } from './chatImageConfig';
+import { buildNaiRequest, buildOaiRequest, oaiImageMime } from './imageGenerationParams';
 function imageEndpoint(provider: ImageGenerationProvider, base: string): string {
     const raw = base.trim() || (provider === 'oai' ? 'https://api.openai.com/v1' : 'https://image.novelai.net');
     const url = new URL(raw);
@@ -18,22 +19,9 @@ function imageEndpoint(provider: ImageGenerationProvider, base: string): string 
 export function buildImageRequest(provider: ImageGenerationProvider, api: NonNullable<ImageGenerationConfig['oai']>, prompt: string) {
     if (!prompt.trim()) throw new Error('请填写图片生成要求');
     if (!api.apiKey.trim() || !api.model.trim()) throw new Error('请先在设置中填写所选生图接口的 Key 和模型');
-    const width = api.width ?? 1024, height = api.height ?? 1024;
-    if (![width, height].every(n => Number.isSafeInteger(n) && n >= 64 && n <= 4096 && n % 64 === 0)) throw new Error('图片宽高须为 64～4096 内的 64 倍数');
-    if (provider === 'oai') return { model: api.model.trim(), prompt: prompt.trim(), n: 1, size: width + 'x' + height };
-    const negative = api.negativePrompt || '';
-    const parameters: Record<string, unknown> = {
-        params_version: 3, width, height, scale: 5, sampler: 'k_euler_ancestral', steps: 28,
-        n_samples: 1, seed: crypto.getRandomValues(new Uint32Array(1))[0],
-        ucPreset: 0, qualityToggle: true, negative_prompt: negative,
-        noise_schedule: 'native', sm: false, sm_dyn: false, dynamic_thresholding: false,
-    };
-    if (/nai-diffusion-4/.test(api.model)) {
-        parameters.v4_prompt = { caption: { base_caption: prompt.trim(), char_captions: [] }, use_coords: false, use_order: true };
-        parameters.v4_negative_prompt = { caption: { base_caption: negative, char_captions: [] }, legacy_uc: false };
-        parameters.use_coords = false;
-    }
-    return { input: prompt.trim(), model: api.model.trim(), action: 'generate', parameters };
+    return provider === 'oai'
+        ? buildOaiRequest(api, prompt.trim())
+        : buildNaiRequest(api, prompt.trim(), () => crypto.getRandomValues(new Uint32Array(1))[0]);
 }
 export async function generateChatImage(char: CharacterProfile, prompt: string, options: { config?: ImageGenerationConfig; signal?: AbortSignal } = {}): Promise<string> {
     const config = options.config || readImageGenerationConfig();
@@ -65,7 +53,7 @@ export async function generateChatImage(char: CharacterProfile, prompt: string, 
         if (typeof item?.b64_json === 'string' && item.b64_json) {
             const binary = atob(item.b64_json);
             const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
-            blob = new Blob([bytes], { type: /^gpt-image/.test(selection.api.model) ? 'image/png' : 'image/png' });
+            blob = new Blob([bytes], { type: oaiImageMime(selection.api) });
         } else if (typeof item?.url === 'string' && /^https:\/\//i.test(item.url)) {
             const download = await fetch(item.url, { signal: options.signal, credentials: 'omit' });
             if (!download.ok) throw new Error('图片已生成，但下载失败；未重新发起生图');

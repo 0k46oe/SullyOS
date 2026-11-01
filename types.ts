@@ -283,9 +283,34 @@ export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' |
 
 export type ImageGenerationProvider = 'oai' | 'nai';
 export interface ImagePromptPreset { id: string; name: string; content: string }
+/** 生图接口配置。未填写的参数不发送或使用默认值，规则见 utils/imageGenerationParams.ts */
 export interface ImageGenerationApi {
   baseUrl: string; apiKey: string; model: string;
-  width?: number; height?: number; negativePrompt?: string;
+  /** NAI 画布宽高；OAI 只在旧配置或「自定义宽高」时使用 */
+  width?: number; height?: number;
+  negativePrompt?: string;
+  // ── OAI（OpenAI 官方 images/generations 参数）──
+  /** 'auto' / '1024x1024' 等固定档位，或 'custom' 表示使用 width/height */
+  size?: string;
+  quality?: string;
+  background?: 'auto' | 'transparent' | 'opaque';
+  outputFormat?: 'png' | 'jpeg' | 'webp';
+  outputCompression?: number;
+  moderation?: 'auto' | 'low';
+  // ── NAI ──
+  steps?: number;
+  /** 提示词引导（CFG scale） */
+  scale?: number;
+  cfgRescale?: number;
+  sampler?: string;
+  noiseSchedule?: string;
+  /** 不填 = 每次随机 */
+  seed?: number;
+  qualityToggle?: boolean;
+  ucPreset?: number;
+  /** 仅 V3 模型 */
+  smea?: boolean;
+  smeaDyn?: boolean;
 }
 export interface ImageGenerationConfig {
   textApiPresetId?: string;
