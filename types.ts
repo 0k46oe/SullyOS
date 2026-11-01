@@ -2792,27 +2792,17 @@ export interface MemoryPalaceWaterlineConfig {
 }
 
 /**
- * 酒馆剧情时间的一段：从 realAnchor（现实时间）起，剧情时间从用户填写的值开始 1:1 流逝。
- * 用户每次手动改剧情时间就追加一段，旧段不改，所以之前的消息和记忆日期不会跟着平移。
+ * 酒馆导入角色的剧情时间。用户只填一个初始年份文字，月日时分跟现实一致，
+ * 现实每跨一年剧情年份往后推一年。真实消息时间戳不变。见 utils/tavernStoryTime.ts
  */
-export interface TavernStoryTimeSegment {
-  /** 用户保存这段剧情时间时的现实时间（ms） */
-  realAnchor: number;
-  /** calendar：标准年月日自动推进；label：纪年是用户填写的文本（如庚辰年），只推进时分 */
-  mode: 'calendar' | 'label';
-  /** calendar 模式：剧情日期 YYYY-MM-DD，年份可以是 3777 这类架空年份 */
-  storyDate?: string;
-  /** 剧情时刻 HH:MM */
-  storyClock: string;
-  /** label 模式：纪年文本 */
-  label?: string;
-}
-
-/** 酒馆导入角色的剧情时间。真实消息时间戳不变，只在给 AI / 记忆显示时换算。见 utils/tavernStoryTime.ts */
 export interface TavernStoryTimeConfig {
   enabled: boolean;
-  /** 按 realAnchor 升序；最后一段是当前剧情时间 */
-  segments: TavernStoryTimeSegment[];
+  /** 初始年份文字：3777年、星历2077年、庚辰年、天启三年…… */
+  yearLabel?: string;
+  /** 填写 yearLabel 那一年的现实年份 */
+  baseRealYear?: number;
+  /** 第一版（2026-11-01 早些时候）的分段格式，只读兼容，读取时换成 yearLabel */
+  segments?: Array<{ realAnchor: number; mode: 'calendar' | 'label'; storyDate?: string; storyClock?: string; label?: string }>;
 }
 
 export interface CharacterProfile {

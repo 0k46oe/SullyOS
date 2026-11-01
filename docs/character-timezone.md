@@ -129,14 +129,13 @@
 
 3D 家园自动天色按房主角色时区运行（`Home3DView` → `resolveCharTimeZone` → 编辑器 `roomLighting.js` → `nowInTimeZone`）。无自定义时区时跟随设备；同屋多个居民共用房主时间。光影面板可固定清晨/白天/夕阳/夜晚作为本机预览，恢复「自动」后重新读取当前时刻。自动时段边界和跨时区逻辑由 `room3dTimeLighting.test.ts` 覆盖。
 
-## 酒馆角色剧情时间（只对导入的酒馆角色）
+## 酒馆角色剧情年份（只对导入的酒馆角色）
 
-酒馆导入角色（`char.tavernImport` 存在）可以在角色设置「剧情时间」里开启 `tavernStoryTime`。换算统一走 `utils/tavernStoryTime.ts`，记忆宫殿的接入点在 `utils/memoryPalace/storyTime.ts`。普通角色 `getActiveTavernStoryTime` 返回 `null`，原有现实时间和时区逻辑完全不变。
+酒馆导入角色（`char.tavernImport` 存在）可以在角色设置「剧情年份」里开启 `tavernStoryTime`。换算统一走 `utils/tavernStoryTime.ts`，记忆宫殿的接入点在 `utils/memoryPalace/storyTime.ts`。普通角色 `getActiveTavernStoryTime` 返回 `null`，原有现实时间和时区逻辑完全不变。
 
-- 数据库里的 `Message.timestamp`、`MemoryNode.createdAt` 永远是真实时间；剧情时间只用于发给模型的日期文本。
-- 剧情时间按段存储：每次保存追加一段（现实时间起点 + 剧情时间起点），之后 1:1 流逝。旧段不改，所以手动跳日之后，之前的消息和记忆仍显示原来的剧情日期。
-- `calendar` 模式按年月日推进（年份可以是 3777）；`label` 模式（庚辰年等）纪年文字固定，只推进时分。
-- 记忆提取：消息行首改成 `[D1 · 3777年11月1日 14:20]`，`date` 字段填 D 编号，代码映射回真实时间戳；剧情模式下关闭现实日期的相对时间补注。
-- 记忆召回、事件盒压缩、认知消化、纠正记录、交换日记入库：酒馆角色只出现剧情日期。
-
-本轮**还没做**：聊天/见面里「现在是」的当前时间、历史消息时间戳、聊天气泡显示和点击切换现实时间。这些仍是现实时间。
+- 用户只填一个初始年份文字（3777年、星历2077年、庚辰年、天启三年）。月、日、时、分跟现实（含角色自定义时区）一致；现实每跨一年，年份往后推一年：阿拉伯数字直接加，「年」前的中文数字按中文数字加，天干地支按六十年一轮。认不出数字的文字保持原样。
+- 不提星期几。数据库里的 `Message.timestamp`、`MemoryNode.createdAt` 永远是真实时间。
+- 生效范围：线上聊天（`recallEntryPoint === 'chat_app'`）、见面（`datePrompts`）、查手机（`CheckPhone` 传 `tavernStoryTime: true`）、记忆宫殿。调用方显式传 `tavernStoryTime` 才换算，其他 App（打电话、小房间、群聊、主动消息）仍是现实时间。
+- 开启后，线上聊天不注入天气、新闻、现实节日；聊天、见面、查手机不注入纪念日。
+- 即时对话（云端生成）按现实时间补时钟，所以酒馆角色开了剧情年份时这类回合留在本地生成（否决名 `tavern-story-time`）。
+- 聊天页分组时间默认显示剧情年份，点一下整页切到现实时间，只改显示。

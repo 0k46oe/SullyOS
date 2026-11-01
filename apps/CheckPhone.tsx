@@ -735,7 +735,7 @@ const CheckPhone: React.FC = () => {
             const lastMsg = msgs[msgs.length - 1];
 
             // 「距离上次联系多久」交给 buildCoreContext 统一注入（受时间感知开关管控、口径与聊天/见面一致）
-            const characterContextInput = { char: targetChar, user: userProfile, includeDetailedMemories: true, timeOptions: { lastInteractionTs: lastMsg?.timestamp } };
+            const characterContextInput = { char: targetChar, user: userProfile, includeDetailedMemories: true, timeOptions: { lastInteractionTs: lastMsg?.timestamp, tavernStoryTime: true } };
 
 
             const recentMsgs = msgs.map(m => {
@@ -984,7 +984,7 @@ ${realCharRule}
     const callLLM = async (prompt: string, temperature = 0.85, withCharacter = true): Promise<string> => {
         const recent = withCharacter && targetChar ? await loadCharacterContextMessages(targetChar) : [];
         const messages = withCharacter && targetChar ? (await ContextBuilder.buildCharacterRequest({
-            char: targetChar, user: userProfile, timeOptions: { lastInteractionTs: recent[recent.length - 1]?.timestamp },
+            char: targetChar, user: userProfile, timeOptions: { lastInteractionTs: recent[recent.length - 1]?.timestamp, tavernStoryTime: true },
         }, [{ role: 'user', content: prompt }])) : [{ role: 'user', content: prompt }];
         const response = await fetch(`${effectiveApiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
             method: 'POST',

@@ -26,6 +26,7 @@ import { ContextBuilder } from './context';
 import { ChatPrompts } from './chatPrompts';
 import { injectMemoryPalace } from './memoryPalace/pipeline';
 import { resolveCharTimeZone, nowInTimeZone } from './timezone';
+import { formatStoryDateTime, getActiveTavernStoryTime } from './tavernStoryTime';
 import { getElevenLabsModel, getTtsProvider, getVoicePromptOverride } from './ttsProvider';
 import { getElevenLabsVoiceActingGuide } from './elevenLabsTts';
 import { isElevenLabsV4Model } from './elevenLabsModels';
@@ -72,7 +73,10 @@ export const getDateVoiceGuide = (provider = getTtsProvider(), model = getEleven
  * 不要从 OSContext 的 virtualTime 取——那个名字唬人，实际也是每秒同步的真实
  * 时间，但只有"星期 + 时:分"，缺日期，而且没必要让 prompt 构建依赖 React 状态。
  */
-const getRealTimeStr = (tz?: string): string => {
+const getRealTimeStr = (tz?: string, char?: CharacterProfile): string => {
+    // 酒馆角色剧情年份：年份换成用户填的，不提星期几
+    const story = getActiveTavernStoryTime(char);
+    if (story) return formatStoryDateTime(story, Date.now());
     // formatDate 自己会按 tz 折算，所以这里要喂真实时刻。
     // nowInTimeZone 返回的 Date 是「本地 getter 读出来正好是角色墙上时间」的形式，
     // 它的绝对时间戳已经被挪过一次——再交给 formatDate 就会多减一个时差。
@@ -591,7 +595,7 @@ const getTimeGapHint = (lastMsgTimestamp: number | undefined, tz?: string): stri
  */
 const buildVNModeBlock = (char: CharacterProfile, userName: string): string => {
     const dateTimeOn = isDateTimeAwarenessOn(char);
-    const timeLine = dateTimeOn ? `1. **Time**: 当前时间 ${getRealTimeStr(resolveCharTimeZone(char))}。\n` : '';
+    const timeLine = dateTimeOn ? `1. **Time**: 当前时间 ${getRealTimeStr(resolveCharTimeZone(char), char)}。\n` : '';
     const dateEmotions = getDateEmotions(char);
     const styleConfig = char.dateStyleConfig;
     const preset = getStylePreset(styleConfig);
@@ -640,7 +644,7 @@ const buildDateHistory = (
         userProfile || ({} as UserProfile),
         emojis,
         undefined,
-        { useVisionDescriptions, timeAwarenessEnabled: isDateTimeAwarenessOn(char) },
+        { useVisionDescriptions, timeAwarenessEnabled: isDateTimeAwarenessOn(char), tavernStoryTime: true },
     );
     return apiMessages;
 };
@@ -666,7 +670,7 @@ export const DatePrompts = {
         const userProfile = resolveCharacterUserProfile(input.userProfile, char);
         const charTz = resolveCharTimeZone(char);
         const dateTimeOn = isDateTimeAwarenessOn(char);
-        const timeStr = dateTimeOn ? getRealTimeStr(charTz) : '';
+        const timeStr = dateTimeOn ? getRealTimeStr(charTz, char) : '';
         const selected = selectCharacterContextMessages(allMsgs, char);
         const lastMsg = allMsgs[allMsgs.length - 1];
         const gapHint = dateTimeOn ? getTimeGapHint(lastMsg?.timestamp, charTz) : '';
@@ -681,6 +685,7 @@ export const DatePrompts = {
             {
                 useVisionDescriptions: input.useVisionDescriptions === true,
                 timeAwarenessEnabled: dateTimeOn,
+                tavernStoryTime: true,
             },
         );
 
@@ -692,7 +697,7 @@ export const DatePrompts = {
             history: apiMessages.map(message => ({ ...message, content: typeof message.content === 'string'
                 ? message.content : message.content.filter((part: any) => part?.type === 'text').map((part: any) => part.text).join(' ') })),
             includeDetailedMemories: false,
-            timeOptions: { skipTimeAwareness: !isDateTimeAwarenessOn(char), includeUserLocation: true },
+            timeOptions: { skipTimeAwareness: !isDateTimeAwarenessOn(char), includeUserLocation: true, tavernStoryTime: true },
         }));
 
         // 文风预设也作用于开场感知；人称（pov）刻意不作用——peek 的设计就是
@@ -767,7 +772,7 @@ ${extraBlock ? `\n${extraBlock}` : ''}${isObserveOn(char) ? `\n${buildObserveBlo
         await injectMemoryPalace(char, allMsgs, undefined, userProfile?.name);
         const context = (await ContextBuilder.buildCharacterContext({
             char, user: userProfile, history: conversation,
-            timeOptions: { skipTimeAwareness: !isDateTimeAwarenessOn(char), conversational: true, includeUserLocation: true },
+            timeOptions: { skipTimeAwareness: !isDateTimeAwarenessOn(char), conversational: true, includeUserLocation: true, tavernStoryTime: true },
         }));
         const systemPrompt = context.coreContext
             + buildVNModeBlock(char, userProfile?.name || '')

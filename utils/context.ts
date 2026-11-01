@@ -14,6 +14,7 @@ import { isScheduleFeatureOn } from './scheduleFeature';
 import { buildScheduleInjection as buildScheduleInjectionText } from './scheduleInjection';
 import { TIME_FRAMING_CONVERSATIONAL } from './timeFramingNote';
 import { resolveCharTimeZone, nowInTimeZone, tzAwarenessNote, interactionGapNote } from './timezone';
+import { formatStoryDate, getActiveTavernStoryTime } from './tavernStoryTime';
 import {
     isWorldbookEntryActive,
     expandWorldbookMacros,
@@ -188,6 +189,8 @@ export const ContextBuilder = {
              * 手册 / 小剧场这些生成器同样走 buildCoreContext，但那边并没有人在对话。
              */
             conversational?: boolean;
+            /** 酒馆角色剧情年份：只有聊天 / 见面 / 查手机传 true，其他 App 保持现实时间。普通角色传了也不生效 */
+            tavernStoryTime?: boolean;
         },
     ): string => {
         // skipTimeAwareness：见面纯架空时由调用方传入，彻底抑制时间注入（修「线下时间感知」关掉后仍漏时间）。
@@ -201,10 +204,16 @@ export const ContextBuilder = {
         const timeOfDay =
             h < 5 ? '凌晨' : h < 9 ? '早晨' : h < 12 ? '上午' : h < 14 ? '中午'
             : h < 17 ? '下午' : h < 19 ? '傍晚' : h < 22 ? '晚上' : '深夜';
-        const dateStr = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日`;
         const timeStr = `${h.toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+        // 酒馆角色剧情年份：年份换成用户填的，月日时分照旧；不提星期几（古代/修仙背景说「周一」会出戏）
+        const story = timeOptions?.tavernStoryTime ? getActiveTavernStoryTime(char) : null;
         let context = `### 当前时间 (Now)\n`;
-        context += `现在是 ${dateStr} ${dayNames[now.getDay()]} ${timeOfDay} ${timeStr}。请据此自然地拥有真实的时间观念（早晚作息、工作日/周末、距离上次互动多久等），不要凭空假设时间。\n`;
+        if (story) {
+            context += `现在是 ${formatStoryDate(story, Date.now())} ${timeOfDay} ${timeStr}。这是你所在世界的时间，请据此自然地拥有时间观念（早晚作息、距离上次互动多久等），不要凭空假设时间。\n`;
+        } else {
+            const dateStr = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日`;
+            context += `现在是 ${dateStr} ${dayNames[now.getDay()]} ${timeOfDay} ${timeStr}。请据此自然地拥有真实的时间观念（早晚作息、工作日/周末、距离上次互动多久等），不要凭空假设时间。\n`;
+        }
         // 报时后面那句语境框定（这句话本身和「为什么只在对话时给」都在
         // utils/timeFramingNote.ts）。即时对话走的是云端那条路，时间由 worker 到点补，
         // 那边引的是同一份常量——同一句话不抄两遍，免得两条路上的角色分寸不一样。
@@ -237,7 +246,7 @@ export const ContextBuilder = {
             /** 仅本次请求共用的读取结果；不缓存到下一轮，null 也不重复查询。 */
             scheduleSnapshot?: Promise<DailySchedule | null>;
             memoryPalaceContext?: string;
-            timeOptions?: { lastInteractionTs?: number; skipTimeAwareness?: boolean; conversational?: boolean };
+            timeOptions?: { lastInteractionTs?: number; skipTimeAwareness?: boolean; conversational?: boolean; tavernStoryTime?: boolean };
         },
     ): Promise<string> => {
         let context = ContextBuilder.buildTimeAwarenessBlock(char, options?.timeOptions);
@@ -547,6 +556,8 @@ const renderCoreContext = async (
             includeUserLocation?: boolean;
             /** Recent messages used to activate keyword-based worldbook entries. */
             worldbookMessages?: WorldbookScanMessage[];
+            /** 酒馆角色剧情年份，见 buildTimeAwarenessBlock 同名字段 */
+            tavernStoryTime?: boolean;
         },
         layout?: {
             /**
@@ -608,7 +619,9 @@ const renderCoreContext = async (
             if (timeOptions?.includeUserLocation && !timeOptions.skipTimeAwareness) {
                 context += await getUserLocationContext(user.name, char.id);
             }
-            if (char.timeAwarenessEnabled !== false && !timeOptions?.skipTimeAwareness && !timeOptions?.skipUserHoliday) {
+            // 剧情年份开着时不提现实纪念日
+            if (char.timeAwarenessEnabled !== false && !timeOptions?.skipTimeAwareness && !timeOptions?.skipUserHoliday
+                && !(timeOptions?.tavernStoryTime && getActiveTavernStoryTime(char))) {
                 const holiday = getCachedUserHolidayReminder(user.name, timeOptions?.userHolidays);
                 if (holiday) context += `- ${holiday}\n\n`;
             }

@@ -28,6 +28,7 @@ import {SERIF, resolveThinkingChainStyle, type ThinkingChainStyleId, type Thinki
 export {THINKING_CHAIN_PRESETS,resolveThinkingChainStyle} from '../../utils/psycheAppearance';
 export type {ThinkingChainStyleId,ThinkingChainStyleSpec} from '../../utils/psycheAppearance';
 import {ChatCardSurface} from './ChatCardSurface';
+import { formatStoryClock, storyYearAt, type ActiveStoryTime } from '../../utils/tavernStoryTime';
 import {FriendFeedNote} from './FriendFeedNote';
 import FriendFeedShareCard from './FriendFeedShareCard';
 // 心象卡片的「破格」装饰：溢出卡片边框的风格化元素。
@@ -1119,6 +1120,12 @@ interface MessageItemProps {
     bubbleVariant?: 'modern' | 'flat' | 'outline' | 'shadow' | 'wechat' | 'ios';
     messageSpacing?: 'compact' | 'default' | 'spacious';
     showTimestamp?: 'always' | 'hover' | 'never';
+    /** 酒馆角色剧情年份；有值且 showRealTime 不为 true 时，分组时间显示剧情年份 */
+    storyTime?: ActiveStoryTime | null;
+    /** 整页切到现实时间显示（只改显示，不改发给 AI 的内容） */
+    showRealTime?: boolean;
+    /** 点分组时间：整页在剧情时间 / 现实时间之间切换 */
+    onToggleTimeMode?: () => void;
     /** HTML / 心象 / 音乐卡片的出现位置（聊天细节微调 chatModuleAlign 合并后的生效值）。缺省 = 居中 */
     moduleAlign?: 'anchor' | 'center';
     /** 流式预览无缝接棒时，正式消息首帧已经可见，不应再次从透明态淡入。 */
@@ -1176,6 +1183,9 @@ const MessageItem = React.memo(({
     bubbleVariant = 'modern',
     messageSpacing = 'default',
     showTimestamp = 'always',
+    storyTime = null,
+    showRealTime = false,
+    onToggleTimeMode,
     moduleAlign = 'center',
     suppressEntranceAnimation = false,
     onMcdSendCart,
@@ -1328,6 +1338,21 @@ const MessageItem = React.memo(({
     };
 
     const formatTime = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+
+/** 剧情年份版本：今天 / 昨天 只写时刻；更早的写剧情年份 + 月日。不提星期几 */
+const formatStoryTimestamp = (ts: number, story: ActiveStoryTime) => {
+    const d = new Date(ts);
+    const now = new Date();
+    const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const dayDiff = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
+    const time = formatStoryClock(story, ts);
+    if (dayDiff === 0) return time;
+    if (dayDiff === 1) return `昨天 ${time}`;
+    const year = storyYearAt(story, ts);
+    const sameYear = year === storyYearAt(story, now.getTime());
+    const monthDay = `${d.getMonth() + 1}月${d.getDate()}日`;
+    return `${sameYear ? monthDay : `${year}${year.endsWith('年') ? '' : ' '}${monthDay}`} ${time}`;
+};
 
 const formatTimestamp = (ts: number) => {
     const d = new Date(ts);
@@ -1671,10 +1696,17 @@ const formatTimestamp = (ts: number) => {
     const commonLayout = (content: React.ReactNode) => (
         <>
         {isFirstInGroup && showTimestamp !== 'never' && (
-<div className="sully-chat-timestamp-divider w-full flex justify-center pt-3 pb-0.5 select-none pointer-events-none">
-    <span className="sully-chat-timestamp-text text-[10px] text-slate-400/80 font-medium">
-        {formatTimestamp(m.timestamp)}
-    </span>
+<div className={`sully-chat-timestamp-divider w-full flex justify-center pt-3 pb-0.5 select-none ${storyTime && onToggleTimeMode && !selectionMode ? '' : 'pointer-events-none'}`}>
+    {storyTime && onToggleTimeMode && !selectionMode
+        ? <button type="button" title={showRealTime ? '点一下切回剧情时间' : '点一下切到现实时间'}
+            className="sully-chat-timestamp-text text-[10px] text-slate-400/80 font-medium"
+            onPointerDown={e => e.stopPropagation()} onTouchStart={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()}
+            onClick={e => { e.stopPropagation(); onToggleTimeMode(); }}>
+            {showRealTime ? formatTimestamp(m.timestamp) : formatStoryTimestamp(m.timestamp, storyTime)}
+        </button>
+        : <span className="sully-chat-timestamp-text text-[10px] text-slate-400/80 font-medium">
+            {storyTime && !showRealTime ? formatStoryTimestamp(m.timestamp, storyTime) : formatTimestamp(m.timestamp)}
+        </span>}
 </div>        )}
             {!isUser && m.metadata?.chatActionDescription && <div className="sully-chat-action-description w-full px-6 py-2 text-center text-xs leading-relaxed text-slate-500 whitespace-pre-wrap">{String(m.metadata.chatActionDescription)}</div>}
             {centerModules && thinkingChainNode && (
@@ -3670,6 +3702,9 @@ const formatTimestamp = (ts: number) => {
            prev.bubbleVariant === next.bubbleVariant &&
            prev.messageSpacing === next.messageSpacing &&
            prev.showTimestamp === next.showTimestamp &&
+           prev.storyTime === next.storyTime &&
+           prev.showRealTime === next.showRealTime &&
+           prev.onToggleTimeMode === next.onToggleTimeMode &&
            prev.moduleAlign === next.moduleAlign &&
            prev.previewExpanded === next.previewExpanded &&
            prev.previewTransferOpen === next.previewTransferOpen &&

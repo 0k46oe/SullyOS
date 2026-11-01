@@ -5,7 +5,7 @@ import { extractMemoriesFromBuffer } from './extraction';
 import { expandAndFormat } from './formatter';
 import { MemoryNodeDB } from './db';
 import { safeFetchJson } from '../safeApi';
-import { appendStorySegment, getActiveTavernStoryTime } from '../tavernStoryTime';
+import { getActiveTavernStoryTime } from '../tavernStoryTime';
 
 vi.mock('../safeApi', () => ({ safeFetchJson: vi.fn() }));
 const fetchJson = vi.mocked(safeFetchJson);
@@ -15,7 +15,7 @@ const T0 = new Date(2026, 10, 1, 14, 20).getTime();
 const tavern = { firstMessage: '', alternateGreetings: [], creatorNotes: '', creator: '', characterVersion: '', tags: [] };
 const story = getActiveTavernStoryTime({
     tavernImport: tavern,
-    tavernStoryTime: appendStorySegment(undefined, { mode: 'calendar', storyDate: '3777-11-01', storyClock: '14:20', label: '' }, T0)!,
+    tavernStoryTime: { enabled: true, yearLabel: '3777年', baseRealYear: 2026 },
 })!;
 const config = { baseUrl: 'https://memory.test/v1', apiKey: 'test', model: 'test' };
 // 第一条在剧情 11月1日，第二条在现实 12 小时后 = 剧情 11月2日 02:20

@@ -259,6 +259,8 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
     );
     // 正文、召回、世界书扫描和识图共用可见范围；UI 近窗可能仍缓存着范围外旧消息。
     const contextHighWaterMark = input.contextHighWaterMark ?? getMemoryPalaceHighWaterMarkForContext(char.id);
+    // 酒馆角色剧情年份只在线上聊天生效；主动消息、家园、彼方等入口保持现实时间
+    const tavernStoryTime = input.recallEntryPoint === 'chat_app';
     const selectedHistory = selectCharacterContextMessages(historyMsgs, char, contextHighWaterMark);
     const visibleIds = new Set(selectedHistory.map(message => message.id));
     const rawRecentMsgsHint = input.recentMsgsHint && !isChatConversationEntry(input.recallEntryPoint)
@@ -363,7 +365,7 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
         userProfile,
         emojis,
         undefined,
-        { useVisionDescriptions, contextHighWaterMark, protectPendingChatTurn: true },
+        { useVisionDescriptions, contextHighWaterMark, protectPendingChatTurn: true, tavernStoryTime },
     );
 
     // ── 8. 剥离历史里旧的双语标签（stripImages 时先压平 image_url → 纯文本占位） ──
@@ -384,6 +386,7 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
             includeUserLocation: isChatConversationEntry(input.recallEntryPoint),
             returningFromMode: returningFromMode || undefined,
             appRules: input.appPrompt?.rules,
+            tavernStoryTime,
         },
     ));
     input.signal?.throwIfAborted();

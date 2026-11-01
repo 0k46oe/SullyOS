@@ -37,6 +37,7 @@ import { formatRelativeAge } from './groupChat/relativeTime';
 import { isBlobRef } from './blobRef';
 import { voiceLanguagePromptLabel } from './voiceLanguage';
 import { clampJsonText, JSON_FILE_OUTPUT_PROMPT } from './jsonFile';
+import { formatStoryDateTime, getActiveTavernStoryTime } from './tavernStoryTime';
 
 // 语音格式指导按当前 TTS 服务商二选一：用 MiniMax 才注入 MiniMax 那套（含 <#秒#> 停顿标记），
 // 用鱼声则注入鱼声版（去掉 MiniMax 专属标记，改用标点 / 省略号控制停顿）。
@@ -182,6 +183,11 @@ export interface PromptBuildOptions {
      * scheduleMessageTagEnabled 处的说明。
      */
     timelyByWorker?: boolean;
+    /**
+     * 酒馆角色剧情年份：只有线上聊天（chat_app）传 true。角色开了剧情年份时，当前时间与
+     * 历史时间戳换成剧情年份，天气/新闻/现实节日/纪念日不注入。普通角色传了也不生效。
+     */
+    tavernStoryTime?: boolean;
 }
 
 export const ChatPrompts = {
@@ -353,12 +359,13 @@ export const ChatPrompts = {
         // deferVolatile：时间/宫殿召回/情绪 buff 三块不进 stable，由下面的 volatileState 承接。
         const coreT0 = performance.now();
         const config = weatherForCharacter(realtimeConfig || defaultRealtimeConfig, char.id);
-        if (!forFirePack && !timelyByWorker && char.timeAwarenessEnabled !== false && config.userHolidays?.enabled) {
+        const storyTime = promptOptions?.tavernStoryTime ? getActiveTavernStoryTime(char) : null;
+        if (!forFirePack && !timelyByWorker && !storyTime && char.timeAwarenessEnabled !== false && config.userHolidays?.enabled) {
             await RealtimeContextManager.getUserHoliday(config, userProfile.name);
         }
         const context = await ContextBuilder.buildCharacterContext({
             char, user: userProfile, history: promptOptions?.history,
-            timeOptions: { worldbookMessages: currentMsgs, userHolidays: config.userHolidays, skipUserHoliday: forFirePack || timelyByWorker },
+            timeOptions: { worldbookMessages: currentMsgs, userHolidays: config.userHolidays, skipUserHoliday: forFirePack || timelyByWorker, tavernStoryTime: !!storyTime },
             layout: { deferVolatile: true },
         });
         let baseSystemPrompt = context.coreContext;
@@ -375,7 +382,7 @@ export const ChatPrompts = {
             scheduleSnapshot: schedulePromise,
             // conversational：私聊是真的有人在这个点跟角色说话，时间块才补那句语境框定
             // （见 ContextBuilder.buildTimeAwarenessBlock）。生成器类调用不给，默认就没有。
-            timeOptions: { skipTimeAwareness: forFirePack || timelyByWorker, conversational: true },
+            timeOptions: { skipTimeAwareness: forFirePack || timelyByWorker, conversational: true, tavernStoryTime: !!storyTime },
         }));
 
         // ── 并发发起所有独立的异步取数（网络 + IndexedDB），下面按原顺序拼接 ──
@@ -401,7 +408,8 @@ export const ChatPrompts = {
         // 两句自称「来自真实世界」——包括天气热搜关掉时那条「今日特殊」节日兜底，
         // worker 的 realtimeWorld 里也有它（同样跟着角色的时间感知开关走）。
         const realtimePromise: Promise<string> = (async () => {
-            if (forFirePack || timelyByWorker) return '';
+            // 剧情年份开着时，现实的天气/新闻/节日都不告诉酒馆角色
+            if (forFirePack || timelyByWorker || storyTime) return '';
             try {
                 if (config.weatherEnabled || config.newsEnabled) {
                     // 时间行跟着角色的「时间感知」开关走：关掉的角色不该从天气块里读到
@@ -459,7 +467,7 @@ export const ChatPrompts = {
                     // 时间戳按角色所在时区读：同一份 prompt 里私聊历史用的就是角色的钟
                     // （下面 buildMessageHistory 走 formatDate(ts, charTz)），群聊这行要是
                     // 跟着设备走，纽约角色会看到两套时间。
-                    const dateStr = ChatPrompts.formatDate(m.timestamp, charTz);
+                    const dateStr = storyTime ? formatStoryDateTime(storyTime, m.timestamp) : ChatPrompts.formatDate(m.timestamp, charTz);
                     // 「约 X 分钟前」是相对打包时刻算的，fire_pack 到点渲染时早就不是那个「刚才」了
                     // ——角色会把昨天的群聊说成「刚才群里说晚上一起吃饭」。绝对时间戳留着，角色
                     // 自己对着当前时间就能判断远近。
@@ -1107,6 +1115,8 @@ ${voiceActingGuide()}`;
             timeAwarenessEnabled?: boolean;
             /** 线上请求兜底旧剧情副本的错序，见面自身历史不启用。 */
             protectPendingChatTurn?: boolean;
+            /** 酒馆角色剧情年份：历史时间戳换成剧情年份。只有聊天 / 见面 / 查手机传 */
+            tavernStoryTime?: boolean;
         },
     ) => {
         userProfile = resolveCharacterUserProfile(userProfile, char);
@@ -1123,6 +1133,7 @@ ${voiceActingGuide()}`;
         const historySlice = options?.protectPendingChatTurn ? protectPendingChatTurn(expandedHistory) : expandedHistory;
         const charTz = resolveCharTimeZone(char);
         const timeAwarenessOn = options?.timeAwarenessEnabled ?? (char.timeAwarenessEnabled !== false);
+        const storyTime = options?.tavernStoryTime ? getActiveTavernStoryTime(char) : null;
 
         let timeGapHint = "";
         if (historySlice.length >= 2) {
@@ -1154,7 +1165,8 @@ ${voiceActingGuide()}`;
                     return {role:m.role,content:[{type:'text',text},...images.map((url:string)=>({type:'image_url',image_url:{url}}))]};
                 }
                 let content: any = m.content;
-                const timeStr = timeAwarenessOn && hasReliableMessageTimestamp(m) ? `[${ChatPrompts.formatDate(m.timestamp, charTz)}]` : '';
+                const timeStr = timeAwarenessOn && hasReliableMessageTimestamp(m)
+                    ? `[${storyTime ? formatStoryDateTime(storyTime, m.timestamp) : ChatPrompts.formatDate(m.timestamp, charTz)}]` : '';
                 const sourceTag = (() => {
                     const source = m.metadata?.source;
                     if (source === 'call') return '[通话]';

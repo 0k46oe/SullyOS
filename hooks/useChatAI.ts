@@ -7,6 +7,7 @@ import { useState, useRef, useEffect, useSyncExternalStore, MutableRefObject } f
 import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, GroupProfile, RealtimeConfig, CharacterBuff, Amsg2ExpiredNoticeRecord } from '../types';
 import { DB } from '../utils/db';
 import { ChatPrompts } from '../utils/chatPrompts';
+import { getActiveTavernStoryTime } from '../utils/tavernStoryTime';
 import { safeFetchJson, safeResponseJson } from '../utils/safeApi';
 import { createDialogueFetch, anthropicRequestOptions } from '../utils/dialogueTransport';
 import { beginNavigationPetChat } from '../utils/navigationBallPet';
@@ -860,7 +861,9 @@ export const useChatAI = ({
                 ?? (luckinChatOn ? 'luckin-chat'
                 : mcdMiniOpen ? 'mcd'
                     : luckinMiniOpen ? 'luckin'
-                        : mcpWorkerUnreachable ? 'mcp-worker-unreachable' : null);
+                        : mcpWorkerUnreachable ? 'mcp-worker-unreachable'
+                            // 酒馆角色剧情年份：云端那条路按现实时间补时钟，这类回合留在本地生成
+                            : getActiveTavernStoryTime(char) ? 'tavern-story-time' : null);
             const instantChatRoute = instantChatOn && !instantChatVeto;
             // 「即时对话开着、这一轮却没上云」的所有情形都在这一处留痕，都是留在本地跑：
             //   · SAR 模块生效期、但没能确认那台 Worker 是当前 bundle（探到旧版 / 没探到）：

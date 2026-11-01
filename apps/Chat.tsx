@@ -1,4 +1,5 @@
 import { resolveCharacterUserProfile } from '../utils/characterUserProfile';
+import { getActiveTavernStoryTime } from '../utils/tavernStoryTime';
 import {avatarFrameLayer} from '../utils/avatarFrameTarget';
 import ChatRuntimeStyle from '../components/chat/ChatRuntimeStyle';
 import {homePhoneAppearance,HOME_PHONE_BUBBLES} from './room3d/homePhoneAppearance';
@@ -336,6 +337,11 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
 
     const char = characters.find(c => c.id === activeCharacterId) || characters[0];
     const chatUserProfile = resolveCharacterUserProfile(userProfile, char);
+    // 酒馆角色剧情年份：分组时间默认显示剧情年份，点一下整页切到现实时间（只改显示，换角色时恢复默认）
+    const storyTime = useMemo(() => getActiveTavernStoryTime(char), [char?.tavernImport, char?.tavernStoryTime, char?.customTimezoneEnabled, char?.customTimezone]);
+    const [showRealTime, setShowRealTime] = useState(false);
+    useEffect(() => { setShowRealTime(false); }, [char?.id]);
+    const toggleTimeMode = useCallback(() => setShowRealTime(value => !value), []);
     const memoryRepairRound = useMemo(() => {
         let assistantIndex = -1;
         for (let i = messages.length - 1; i >= 0; i--) {
@@ -4347,6 +4353,9 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                             bubbleVariant={osTheme.chatBubbleStyle}
                             messageSpacing={osTheme.chatMessageSpacing}
                             showTimestamp={osTheme.chatShowTimestamp}
+                            storyTime={storyTime}
+                            showRealTime={showRealTime}
+                            onToggleTimeMode={toggleTimeMode}
                             suppressEntranceAnimation={suppressEntranceAnimation}
                             onMcdSendCart={handleMcdSendCart}
                             onMcdCandidate={handleMcdCandidate}
@@ -4427,6 +4436,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                     bubbleVariant={osTheme.chatBubbleStyle}
                                     messageSpacing={osTheme.chatMessageSpacing}
                                     showTimestamp={osTheme.chatShowTimestamp}
+                                    storyTime={storyTime}
+                                    showRealTime={showRealTime}
                                     thinkingChainOptions={thinkingChainOptions}
                                 />
                             </div>
