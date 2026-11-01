@@ -28,7 +28,8 @@ describe('shareOrDownloadBlob web file sharing', () => {
     expect(canShare).toHaveBeenCalledTimes(1);
     expect(share).toHaveBeenCalledTimes(1);
     const payload = share.mock.calls[0][0] as ShareData;
-    expect(payload.title).toBe('协同交付');
+    // 不带 title：接收方（微信/QQ 等）会把它另存成一个说明文档
+    expect(payload.title).toBeUndefined();
     expect(payload.files?.[0]?.name).toBe('协同交付.pdf');
     expect(payload.files?.[0]?.size).toBe(9);
   });

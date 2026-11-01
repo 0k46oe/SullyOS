@@ -35,7 +35,7 @@ describe('native binary share files', () => {
         const write = mocks.write.mock.calls[0][0];
         expect(write.encoding).toBeUndefined();
         expect(Buffer.from(write.data, 'base64')).toEqual(Buffer.from(bytes));
-        expect(mocks.share).toHaveBeenCalledWith({ title: '分享.png', files: ['file:///cache/分享.png'] });
+        expect(mocks.share).toHaveBeenCalledWith({ dialogTitle: '分享.png', files: ['file:///cache/分享.png'] });
     });
     it.each(['Share canceled', 'Share cancelled'])('treats %s as cancellation without a second share/download', async message => {
         const webShare = vi.fn(); vi.stubGlobal('navigator', { share: webShare });

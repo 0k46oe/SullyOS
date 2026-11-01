@@ -106,7 +106,8 @@ export async function shareOrDownloadBlob(options: ShareOrDownloadBlobOptions): 
                 });
             }
             const uriResult = await Filesystem.getUri({ directory: Directory.Cache, path: fileName });
-            await Share.share({ title: shareTitle, files: [uriResult.uri] });
+            // 只给 Android 选择器标题（dialogTitle），不传 title：微信/QQ 等会把 title 当成一段文字，另存成一个说明文档
+            await Share.share({ dialogTitle: shareTitle, files: [uriResult.uri] });
             return 'shared';
         } catch (error: any) {
             if (isShareCancelled(error)) return 'cancelled';
@@ -125,7 +126,8 @@ export async function shareOrDownloadBlob(options: ShareOrDownloadBlobOptions): 
             && typeof navigator.share === 'function'
             && (typeof navigator.canShare !== 'function' || navigator.canShare({ files: [file] }));
         if (canShareFile) {
-            await navigator.share({ title: shareTitle, files: [file] });
+            // 只交文件，不带 title：接收方会把 title 另存成一个说明文档
+            await navigator.share({ files: [file] });
             return 'shared';
         }
     } catch (error: any) {
@@ -183,8 +185,9 @@ export async function shareOrDownloadFile(options: ShareOrDownloadOptions): Prom
                 directory: Directory.Cache,
                 path: fileName,
             });
+            // 同上：dialogTitle 只是 Android 选择器标题，不会变成额外的文字内容
             await Share.share({
-                title: shareTitle,
+                dialogTitle: shareTitle,
                 files: [uriResult.uri],
             });
             return 'shared';
@@ -204,7 +207,6 @@ export async function shareOrDownloadFile(options: ShareOrDownloadOptions): Prom
 
         if (canShareFile) {
             await navigator.share({
-                title: shareTitle,
                 files: [file],
             });
             return 'shared';
