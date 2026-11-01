@@ -1153,8 +1153,21 @@ ${voiceActingGuide()}`;
             if (lastRealMsg && currentMsg && timeAwarenessOn && hasReliableMessageTimestamp(currentMsg)) timeGapHint = ChatPrompts.getTimeGapHint(lastRealMsg, currentMsg.timestamp, charTz);
         }
 
+        // 酒馆角色开着「线上聊天动描」时，把每轮存下的动描按原格式放回它那条回复前面，
+        // 角色才记得自己做过的动作；关掉后旧动描也不再发
+        const showActions = !!char.tavernImport && char.chatActionDescriptionEnabled === true;
+        const withAction = (m: Message, apiMessage: { role: string; content: any }) => {
+            const action = showActions && m.role === 'assistant' && typeof m.metadata?.chatActionDescription === 'string'
+                ? m.metadata.chatActionDescription.trim() : '';
+            if (!action) return apiMessage;
+            const tag = `<线上动描>${action}</线上动描>\n`;
+            if (typeof apiMessage.content === 'string') return { ...apiMessage, content: tag + apiMessage.content };
+            if (Array.isArray(apiMessage.content)) return { ...apiMessage, content: [{ type: 'text', text: tag.trimEnd() }, ...apiMessage.content] };
+            return apiMessage;
+        };
+
         return {
-            apiMessages: historySlice.map((m, index) => {
+            apiMessages: historySlice.map((m, index) => withAction(m, (() => {
                 if (m.type === 'secret_note') return {role: m.role, content: secretNoteContext(m.content)};
                 if (m.type === 'friend_feed_card') return {role: 'system', content: m.content};
                 if (m.type === 'friend_feed_share_card') {
@@ -1480,7 +1493,7 @@ ${voiceActingGuide()}`;
                 else content = `${timeStr} ${sourceTag} ${content}`;
 
                 return { role: m.role, content: typeof content === 'string' ? content.trimStart() : content };
-            }),
+            })())),
             historySlice // Return original slice for Quote lookup
         };
     }
