@@ -309,12 +309,15 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                                                 {/* 云端这一轮调了不止一次模型时，回传的用量只有最后那次。
                                                     不注明的话这个数拿去对账永远对不上，还会以为是被多扣了 */}
                                                 {e.tokensPartial && <span className="text-amber-500"> · 只算末轮</span>}
-                                                {(e.cacheReadTokens != null || e.cacheWriteTokens != null) && <span className="block text-emerald-600">缓存读取 {(e.cacheReadTokens ?? 0).toLocaleString('en-US')} · 缓存写入 {(e.cacheWriteTokens ?? 0).toLocaleString('en-US')}</span>}
+                                                {(e.cacheReadTokens != null || (e.cacheWriteTokens ?? e.cacheCreationTokens) != null) && <span className="block text-emerald-600">缓存读取 {(e.cacheReadTokens ?? 0).toLocaleString('en-US')} · 缓存写入 {(e.cacheWriteTokens ?? e.cacheCreationTokens ?? 0).toLocaleString('en-US')}</span>}
                                             </span>
                                         </div>
                                     )}
-                                    {e.cacheReadTokens != null && <Field label="缓存读取 Token" value={e.cacheReadTokens.toLocaleString('en-US')} />}
-                                    {e.cacheCreationTokens != null && <Field label="缓存写入 Token" value={e.cacheCreationTokens.toLocaleString('en-US')} />}
+                                    {/* 有 Token 行时缓存数字已经显示在它下面（绿色那行），这里不再重复 */}
+                                    {e.totalTokens == null && e.promptTokens == null && e.completionTokens == null && <>
+                                        {e.cacheReadTokens != null && <Field label="缓存读取 Token" value={e.cacheReadTokens.toLocaleString('en-US')} />}
+                                        {e.cacheCreationTokens != null && <Field label="缓存写入 Token" value={e.cacheCreationTokens.toLocaleString('en-US')} />}
+                                    </>}
                                     {e.cacheDiagnostic && <p className="col-span-2 mt-1 break-words text-[10px] leading-relaxed text-slate-400">{formatAnthropicCacheDiagnostic(e.cacheDiagnostic)}</p>}
                                 </div>
                                 {hasBreakdown && (
