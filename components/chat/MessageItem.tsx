@@ -28,7 +28,7 @@ import {SERIF, resolveThinkingChainStyle, type ThinkingChainStyleId, type Thinki
 export {THINKING_CHAIN_PRESETS,resolveThinkingChainStyle} from '../../utils/psycheAppearance';
 export type {ThinkingChainStyleId,ThinkingChainStyleSpec} from '../../utils/psycheAppearance';
 import {ChatCardSurface} from './ChatCardSurface';
-import { formatStoryClock, storyYearAt, type ActiveStoryTime } from '../../utils/tavernStoryTime';
+import { formatStoryDateTime, type ActiveStoryTime } from '../../utils/tavernStoryTime';
 import {FriendFeedNote} from './FriendFeedNote';
 import FriendFeedShareCard from './FriendFeedShareCard';
 // 心象卡片的「破格」装饰：溢出卡片边框的风格化元素。
@@ -1339,20 +1339,12 @@ const MessageItem = React.memo(({
 
     const formatTime = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 
-/** 剧情年份版本：今天 / 昨天 只写时刻；更早的写剧情年份 + 月日。不提星期几 */
-const formatStoryTimestamp = (ts: number, story: ActiveStoryTime) => {
-    const d = new Date(ts);
-    const now = new Date();
-    const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-    const dayDiff = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
-    const time = formatStoryClock(story, ts);
-    if (dayDiff === 0) return time;
-    if (dayDiff === 1) return `昨天 ${time}`;
-    const year = storyYearAt(story, ts);
-    const sameYear = year === storyYearAt(story, now.getTime());
-    const monthDay = `${d.getMonth() + 1}月${d.getDate()}日`;
-    return `${sameYear ? monthDay : `${year}${year.endsWith('年') ? '' : ' '}${monthDay}`} ${time}`;
-};
+/**
+ * 剧情年份版本：始终写出剧情年份 + 月日 + 时刻（「3777年11月1日 14:20」）。
+ * 剧情年份只换年份，月日时分和现实一样；如果像现实格式那样今天只写「14:20」，
+ * 两种模式看起来一模一样，点了也像没切换。不提星期几。
+ */
+const formatStoryTimestamp = (ts: number, story: ActiveStoryTime) => formatStoryDateTime(story, ts);
 
 const formatTimestamp = (ts: number) => {
     const d = new Date(ts);
