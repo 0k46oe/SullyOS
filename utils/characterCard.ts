@@ -20,6 +20,10 @@ export const CARD_STRIPPED_FIELDS = [
   // 1) 凭据（含 apiKey，灾难级泄漏）
   'dialogueApi',
   'characterUserProfile',
+    'imageGenerationSelection',
+    'imageTextApiPresetId',
+  'chatImageGenerationEnabled',
+  'chatActionDescriptionEnabled',
   'emotionConfig',
   'embeddingConfig',
   'proactiveConfig',

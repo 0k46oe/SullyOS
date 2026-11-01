@@ -20,6 +20,8 @@ import type { Message } from '../types';
 
 /** 跨行块规则：open 命中进入抑制态，直到 close 命中（含闭合行本身）。 */
 const BLOCK_RULES: Array<{ open: RegExp; close: RegExp }> = [
+    { open: /<线上动描>/, close: /<\/线上动描>/ },
+    { open: /<生成图片>/, close: /<\/生成图片>/ },
     // JSON/file bodies are delivered as attachments, never as preview bubbles.
     { open: /^```artifact\s*$/i, close: /^```\s*$/ },
     // Notion / 飞书日记多行块 —— 正文是日记内容，不是聊天气泡

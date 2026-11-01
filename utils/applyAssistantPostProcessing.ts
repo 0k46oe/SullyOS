@@ -28,6 +28,10 @@ import { dialogueMaxTokens } from './characterApi';
 
 import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, RealtimeConfig, GroupProfile, DialogueApiConfig } from '../types';
 import { resolveCharacterUserProfile } from './characterUserProfile';
+import { extractChatExtras } from './chatExtras';
+import { readImageGenerationConfig } from './chatImageConfig';
+import { generateChatImage } from './chatImageGeneration';
+import { saveGeneratedChatImage } from './chatImageLibrary';
 import { DB } from './db';
 import { ChatParser, type FrozenMusicSong } from './chatParser';
 import { resolveCharTimeZone } from './timezone';
@@ -330,6 +334,8 @@ async function xhsReplyComment(conf: { mcpUrl: string }, feedId: string, xsecTok
  * discriminator, 其他字段是 flat 而不是 nested payload (减少 push body 嵌套).
  */
 export type PostProcessDirective =
+    | { type: 'chat_action_description'; text: string }
+    | { type: 'chat_generate_image'; prompt: string }
     | { type: 'friend_feed_reply'; action: unknown }
     | { type: 'home_visit_reply'; action: unknown }
     | { type: 'poke' }
@@ -650,8 +656,18 @@ export async function applyAssistantPostProcessing(
     // 统一落库入口：ctx.messageTimestamp（若有）盖到每条消息上，保证同一轮拆出的
     // 正文 / 表情 / 卡片 / 系统提示时间戳一致；没传则维持 DB.saveMessage 默认（写库当刻）。
     // 全函数落库一律走这里，别直接调 DB.saveMessage——漏一处就会出现气泡时间戳互相打架。
-    const persistMessage: typeof DB.saveMessage = (msg) =>
-        (ctx.replyRun?.saveMessage ?? DB.saveMessage)(messageTimestamp != null ? { ...msg, timestamp: messageTimestamp } : msg);
+    let actionDescription = directives?.find(d => d.type === 'chat_action_description') as Extract<PostProcessDirective, {type: 'chat_action_description'}> | undefined;
+    let pendingImage = (directives?.find(d => d.type === 'chat_generate_image') as Extract<PostProcessDirective, {type: 'chat_generate_image'}> | undefined)?.prompt;
+    let actionClaimed = false;
+    const imageConfig = readImageGenerationConfig();
+    const persistMessage: typeof DB.saveMessage = async (msg) => {
+        const action = char.tavernImport && char.chatActionDescriptionEnabled && !actionClaimed && msg.role === 'assistant' && msg.type !== 'system' ? actionDescription?.text : undefined;
+        const row = { ...msg, ...(messageTimestamp != null ? {timestamp: messageTimestamp} : {}),
+            ...(action ? {metadata: {...msg.metadata, chatActionDescription: action}} : {}) };
+        const id = await (ctx.replyRun?.saveMessage ?? DB.saveMessage)(row);
+        if (action) actionClaimed = true;
+        return id;
+    };
     const {
         setMessages,
         addToast,
@@ -788,7 +804,10 @@ export async function applyAssistantPostProcessing(
             first ? (directives || []).flatMap(d => d.type === 'home_visit_reply' ? [d.action] : []) : []));
         visible = await replyStep(() => consumeFriendFeedMainReply(char.id, visible,
             first ? (directives || []).flatMap(d => d.type === 'friend_feed_reply' ? [d.action] : []) : []));
-        return normalizeAiContent(visible);
+        const extras = extractChatExtras(visible);
+        if (extras.action && !actionDescription) actionDescription = {type: 'chat_action_description', text: extras.action};
+        pendingImage ||= extras.image;
+        return normalizeAiContent(extras.text);
     };
     let aiContent = await normalizeReplyContent(replayedTagPrefix ? replayedTagPrefix + rawAiContent : rawAiContent, true);
     // 先于 lead-in / 二轮渲染消费：否则控制标签会作为普通气泡短暂闪给用户看。
@@ -2422,6 +2441,23 @@ export async function applyAssistantPostProcessing(
             await replyStep(async () => renderAndPersist('嗯...', pendingThinkingChain));
         } else {
             setMessages(await replyStep(async () => DB.getRecentMessagesByCharId(char.id, 200)));
+        }
+    }
+    if (pendingImage && char.chatImageGenerationEnabled) {
+        try {
+            const content = await replyStep(() => generateChatImage(char, pendingImage!, { config: imageConfig, signal: ctx.replyRun?.signal }));
+            await replyStep(() => saveGeneratedChatImage({
+                characterId: char.id,
+                provider: char.imageGenerationSelection!.provider,
+                requirement: pendingImage!,
+                prompt: pendingImage!,
+                imageRef: content,
+            }));
+            await replyStep(() => persistMessage({ charId: char.id, role: 'assistant', type: 'image', content, metadata: { generatedImage: true } }));
+            setMessages(await replyStep(() => DB.getRecentMessagesByCharId(char.id, 200)));
+        } catch (error) {
+            ctx.replyRun?.check();
+            addToast(error instanceof Error ? error.message : '图片生成失败', 'error');
         }
     }
 }

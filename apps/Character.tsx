@@ -38,6 +38,7 @@ import { toMountedWorldbook } from '../utils/worldbook';
 import { stripSensitiveCardFields } from '../utils/characterCard';
 import { shareOrDownloadFile } from '../utils/shareExport';
 import { readImportedCharacterCard } from '../utils/tavernImport';
+import CharacterImageSettings from '../components/character/CharacterImageSettings';
 import { confirmExportSafety } from '../utils/exportGuard';
 import { trackEvent } from '../utils/analytics';
 import { sortCharacterGroups, GROUP_FILTER_UNGROUPED } from '../components/character/CharacterGroupFilter';
@@ -1192,13 +1193,9 @@ ${isInitialGeneration ? `
               mountedWorldbooks: incomingMounted,
           } as CharacterProfile;
 
-          await DB.saveCharacter(newChar);
+          await addCharacter(newChar);
           trackEvent('导入角色卡');
-          // 不要调用 addCharacter()——它不是"刷新"，而是真的新建一个空白
-          // "New Character" 并写进 DB，reload 后就会多出一张空白卡。
-          // 导入的角色已经存进了 DB（上一行），reload 时 OSContext 会从
-          // DB 重新读全部角色，导入的角色自然会出现，无需手动刷新 state。
-          setTimeout(() => window.location.reload(), 500);
+          setShowCardImportModal(false);
 
           const wbToastSuffix = importedWbCount > 0 ? `，并同步 ${importedWbCount} 本世界书` : '';
           addToast(`角色 ${newChar.name} 导入成功${wbToastSuffix}`, 'success');
@@ -1489,12 +1486,12 @@ ${isInitialGeneration ? `
                                <div className="rounded-3xl bg-white p-4 shadow-sm space-y-4">
                                    <label className="flex items-center justify-between gap-3 text-sm text-slate-600">
                                        为这个角色使用专属用户档案
-                                       <input type="checkbox" checked={formData.characterUserProfile?.enabled === true} onChange={event => handleChange('characterUserProfile', { name: userProfile.name, bio: userProfile.bio || '', ...formData.characterUserProfile, enabled: event.target.checked })} />
+                                       <input type="checkbox" checked={formData.characterUserProfile?.enabled === true} onChange={event => handleChange('characterUserProfile', { name: '', bio: '', ...formData.characterUserProfile, enabled: event.target.checked })} />
                                    </label>
                                    <p className="text-xs text-slate-400">只影响与这个角色的互动；关闭后恢复档案里的通用身份。剧情主动选择的面具优先。</p>
                                    {formData.characterUserProfile?.enabled && <>
                                        <label className="block text-xs text-slate-500">你的姓名／称呼
-                                           <input aria-label="专属用户姓名" className="mt-2 w-full rounded-xl border border-slate-200 p-3 text-sm" value={formData.characterUserProfile.name} placeholder={userProfile.name} onChange={event => handleChange('characterUserProfile', { ...formData.characterUserProfile!, name: event.target.value })} />
+                                           <input aria-label="专属用户姓名" className="mt-2 w-full rounded-xl border border-slate-200 p-3 text-sm" value={formData.characterUserProfile.name} placeholder="填写这个角色专属的用户姓名" onChange={event => handleChange('characterUserProfile', { ...formData.characterUserProfile!, name: event.target.value })} />
                                        </label>
                                        <label className="block text-xs text-slate-500">你的设定／个人信息
                                            <textarea aria-label="专属用户设定" className="mt-2 h-36 w-full resize-y rounded-xl border border-slate-200 p-3 text-sm" value={formData.characterUserProfile.bio} placeholder="例如：身份、年龄、外貌、背景、与这个角色的关系……" onChange={event => handleChange('characterUserProfile', { ...formData.characterUserProfile!, bio: event.target.value })} />
@@ -1826,6 +1823,7 @@ ${isInitialGeneration ? `
                            </CharacterSettingsSection>
 
                            <CharacterApiPanel key={formData.id} character={formData} onChange={api => handleChange('dialogueApi', api)} />
+                           <CharacterImageSettings character={formData} onChange={patch => setFormData(prev => prev ? { ...prev, ...patch } : prev)} />
 
                            {/* Worldbook Section */}
                            <div>

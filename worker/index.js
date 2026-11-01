@@ -4290,6 +4290,35 @@ export default {
       }
     }
 
+    // ========== 官方生图接口代理（固定目的地，纯透传） ==========
+    // 浏览器不能直接跨域访问官方接口时使用。用户 Key 只在本次请求中转发，不记录、不保存。
+    if (url.pathname === '/image-generation/oai' || url.pathname === '/image-generation/nai') {
+      if (request.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, { status: 405, origin });
+      const apiKey = (request.headers.get('Authorization') || '').trim();
+      if (!/^Bearer\s+\S+$/i.test(apiKey)) return jsonResponse({ error: 'Missing Authorization header' }, { status: 401, origin });
+      const upstreamUrl = url.pathname.endsWith('/oai')
+        ? 'https://api.openai.com/v1/images/generations'
+        : 'https://image.novelai.net/ai/generate-image';
+      try {
+        const upstream = await fetch(upstreamUrl, {
+          method: 'POST',
+          signal: request.signal,
+          headers: {
+            Authorization: apiKey,
+            'Content-Type': request.headers.get('Content-Type') || 'application/json',
+            Accept: request.headers.get('Accept') || 'application/json, image/png, application/zip',
+          },
+          body: await request.arrayBuffer(),
+        });
+        const responseHeaders = new Headers(corsHeaders(origin));
+        responseHeaders.set('Content-Type', upstream.headers.get('Content-Type') || 'application/octet-stream');
+        responseHeaders.set('Cache-Control', 'no-store, no-transform');
+        return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
+      } catch (error) {
+        return jsonResponse({ error: 'Image generation upstream fetch failed', detail: String(error && error.message || error) }, { status: 502, origin });
+      }
+    }
+
     // ========== 麦当劳 MCP 代理 (浏览器 CORS 兜底, 纯透传) ==========
     // 前端 POST /mcp/mcd  + Authorization: Bearer <user_mcp_token>
     // body 即 MCP JSON-RPC 报文 (initialize / tools/list / tools/call ...)

@@ -1676,6 +1676,7 @@ const formatTimestamp = (ts: number) => {
         {formatTimestamp(m.timestamp)}
     </span>
 </div>        )}
+            {!isUser && m.metadata?.chatActionDescription && <div className="sully-chat-action-description w-full px-6 py-2 text-center text-xs leading-relaxed text-slate-500 whitespace-pre-wrap">{String(m.metadata.chatActionDescription)}</div>}
             {centerModules && thinkingChainNode && (
                 <div className="px-3 flex justify-center">
                     <div className="w-[72%] max-w-[72%]">{thinkingChainNode}</div>

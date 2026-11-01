@@ -281,7 +281,22 @@ export type ApiProtocol = 'openai' | 'anthropic';
 export type AnthropicPromptCacheTtl = '5m' | '1h';
 export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'stream' | 'temperature' | 'maxTokens' | 'apiType' | 'protocol' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'anthropicPromptCacheTtl' | 'openaiPromptCache'>;
 
+export type ImageGenerationProvider = 'oai' | 'nai';
+export interface ImagePromptPreset { id: string; name: string; content: string }
+export interface ImageGenerationApi {
+  baseUrl: string; apiKey: string; model: string;
+  width?: number; height?: number; negativePrompt?: string;
+}
+export interface ImageGenerationConfig {
+  textApiPresetId?: string;
+  systemPrompt?: string;
+  oai?: ImageGenerationApi;
+  nai?: ImageGenerationApi;
+  presets?: Partial<Record<ImageGenerationProvider, ImagePromptPreset[]>>;
+}
+
 export interface APIConfig {
+  imageGeneration?: ImageGenerationConfig;
   /** Legacy fork format; read for migration. New settings use apiType. */
   protocol?: ApiProtocol;
   apiType?: 'openai' | 'anthropic';
@@ -2926,6 +2941,10 @@ export interface CharacterProfile {
   /** Imported author-facing card information; never executed or injected as author instructions. */
   /** Private player identity for this character; included in system backups, excluded from character shares. */
   characterUserProfile?: { enabled: boolean; name: string; bio: string };
+  chatActionDescriptionEnabled?: boolean;
+  chatImageGenerationEnabled?: boolean;
+  imageGenerationSelection?: { provider: ImageGenerationProvider; presetId?: string };
+  imageTextApiPresetId?: string;
   tavernImport?: {
       firstMessage: string;
       alternateGreetings: string[];

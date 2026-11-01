@@ -24,6 +24,7 @@ import { isScheduleFeatureOn } from './scheduleFeature';
 import { VOICE_ACTING_GUIDE } from './minimaxTts';
 import { FISH_VOICE_ACTING_GUIDE } from './fishAudioTts';
 import { getElevenLabsModel, getTtsProvider, getVoicePromptOverride } from './ttsProvider';
+import { buildChatImagePrompt, CHAT_ACTION_PROMPT } from './chatImageConfig';
 import { getElevenLabsVoiceActingGuide } from './elevenLabsTts';
 import { resolveCharTimeZone, nowInTimeZone } from './timezone';
 import { buildLifeRecordInjection } from './lifeRecords';
@@ -1073,6 +1074,8 @@ ${voiceActingGuide()}`;
         }
 
         baseSystemPrompt += '\n\n' + JSON_FILE_OUTPUT_PROMPT;
+        if (char.chatActionDescriptionEnabled) baseSystemPrompt += CHAT_ACTION_PROMPT;
+        baseSystemPrompt += buildChatImagePrompt(char);
 
         }
 

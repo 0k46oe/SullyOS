@@ -9,6 +9,7 @@ import ChatInputSettings from './ChatInputSettings';
 import ChatSettingsSection from './ChatSettingsSection';
 import ChatWordFrequencyPanel from './ChatWordFrequencyPanel';
 import { isDefaultAiCompanionEnabled } from '../../utils/characterInstructions';
+import { useOS } from '../../context/OSContext';
 import SecretNote from './SecretNote';
 import type { ChatInputPreferences } from '../../utils/chatInputPreferences';
 import { isTranslationLangPreset, normalizeTranslationLangLabel, TRANSLATION_LANG_MAX_LENGTH, TRANSLATION_LANG_PRESETS } from '../../utils/translationLang';
@@ -16,6 +17,17 @@ import type { ContextRangeMode, ContextRangeSnapshot } from '../../utils/chatCon
 import { trackEvent } from '../../utils/analytics';
 import { CANTONESE_VOICE_SUPPORT_NOTE, VOICE_LANGUAGE_OPTIONS } from '../../utils/voiceLanguage';
 import { chatMessageFuzzyMatchesKeyword } from '../../utils/chatMessageSearch';
+import { useBlobRefUrl } from '../../utils/blobRef';
+import { generateAndSaveChatImage } from '../../utils/chatImageTask';
+import { listGeneratedChatImages, type GeneratedChatImage } from '../../utils/chatImageLibrary';
+import { DB } from '../../utils/db';
+
+const GeneratedImagePreview: React.FC<{ imageRef: string; compact?: boolean }> = ({ imageRef, compact }) => {
+    const src = useBlobRefUrl(imageRef);
+    return src
+        ? <img src={src} alt="已保存的生图" className={`w-full ${compact ? 'aspect-square' : 'max-h-64'} object-cover rounded-xl`} />
+        : <div className={`w-full ${compact ? 'aspect-square' : 'h-40'} rounded-xl bg-[#eee8db] flex items-center justify-center text-xs text-[#9a8e7b]`}>图片加载中</div>;
+};
 
 interface ChatModalsProps {
     compactHome?: boolean;
@@ -87,6 +99,7 @@ interface ChatModalsProps {
     onEnterSelectionMode: () => void;
     onReplyMessage: () => void;
     onEditMessageStart: () => void;
+    onSendGeneratedImage?: (imageRef: string) => void;
     onConfirmEditMessage: () => void;
     onDeleteMessage: () => void;
     onCopyMessage: () => void;
@@ -265,7 +278,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     onTransfer, onImportEmoji, onSaveSettings,
     onOpenHistoryCleanup, onSetDefaultAiCompanion, userName = '用户',
     onArchive, onCreatePrompt, onEditPrompt, onSavePrompt, onDeletePrompt,
-    onSetHistoryStart, onRestoreAdaptiveContext, onEnterSelectionMode, onReplyMessage, onEditMessageStart, onConfirmEditMessage, onDeleteMessage, onCopyMessage, onToggleMessageFavorite, messageFavorited, onDeleteEmoji, onDeleteCategory, onRenameCategory, onDownloadCategory,
+    onSetHistoryStart, onRestoreAdaptiveContext, onEnterSelectionMode, onReplyMessage, onEditMessageStart, onSendGeneratedImage, onConfirmEditMessage, onDeleteMessage, onCopyMessage, onToggleMessageFavorite, messageFavorited, onDeleteEmoji, onDeleteCategory, onRenameCategory, onDownloadCategory,
     allCharacters = [], onSaveCategoryVisibility,
     translationEnabled, onToggleTranslation, translationExpanded, onToggleTranslationExpanded, translateSourceLang, translateTargetLang, onSetTranslateSourceLang, onSetTranslateLang,
     xhsEnabled, onToggleXhs,
@@ -279,9 +292,27 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     retainRecentForVectorize, setRetainRecentForVectorize, vectorizeResult, onForceVectorize,
     apiPresets, onAddApiPreset, onSaveEmotion, onClearBuffs,
 }) => {
+    const { updateCharacter } = useOS();
     const [visibilitySelection, setVisibilitySelection] = useState<Set<string>>(new Set());
     const [historyPage, setHistoryPage] = useState(0);
     const [historySearch, setHistorySearch] = useState('');
+    const [imageRequirement, setImageRequirement] = useState('');
+    const [imageBusy, setImageBusy] = useState(false);
+    const [imageStatus, setImageStatus] = useState('');
+    const [savedImages, setSavedImages] = useState<GeneratedChatImage[]>([]);
+    const [selectedSavedImage, setSelectedSavedImage] = useState<GeneratedChatImage | null>(null);
+    const loadSavedImages = async () => setSavedImages(await listGeneratedChatImages(undefined, 8).catch(() => []));
+    const generateImage = async () => {
+        if (!imageRequirement.trim() || imageBusy) return;
+        setImageBusy(true); setImageStatus('正在整理提示词…');
+        try {
+            const user = (await DB.getUserProfile()) || { name: userName, avatar: '', bio: '' };
+            const record = await generateAndSaveChatImage(activeCharacter, user, imageRequirement, { apiPresets, onProgress: setImageStatus });
+            setSelectedSavedImage(record); setImageRequirement(''); setImageStatus('已保存到本机生图记录，可发送到聊天。');
+            await loadSavedImages();
+        } catch (error) { setImageStatus(error instanceof Error ? error.message : '生图失败'); }
+        finally { setImageBusy(false); }
+    };
     const HISTORY_PAGE_SIZE = 50;
     const HISTORY_SEARCH_MAX = 200;
     const handleHistoryItemClick = (msgId: number) => {
@@ -331,6 +362,16 @@ const ChatModals: React.FC<ChatModalsProps> = ({
 
     return (
         <>
+            <Modal isOpen={modalType === 'generate-image'} title="生成图片" onClose={() => setModalType('none')} footer={<button type="button" onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl">关闭</button>}>
+                <div className="space-y-3 rounded-2xl bg-[#faf7f1] p-4 text-[#5d5547]">
+                    <p className="text-xs text-[#9a8e7b]">图片会先保存到本机生图记录，不会自动发进聊天。</p>
+                    <textarea value={imageRequirement} onChange={e => setImageRequirement(e.target.value)} placeholder="填写你想生成的画面、人物、动作、场景或风格…" className="w-full h-28 resize-none rounded-xl border border-[#e5dece] bg-[#fffcf7] p-3 text-sm outline-none" disabled={imageBusy} />
+                    <button type="button" onClick={generateImage} disabled={imageBusy || !imageRequirement.trim()} className="w-full rounded-xl bg-[#8a917c] p-3 text-sm font-bold text-white disabled:opacity-40">{imageBusy ? imageStatus || '生成中…' : '生成并保存'}</button>
+                    {imageStatus && <p role="status" className="text-xs text-[#8f8475]">{imageStatus}</p>}
+                </div>
+                {selectedSavedImage && <div className="mt-4 rounded-2xl border border-[#e5dece] bg-[#fffcf7] p-3"><GeneratedImagePreview imageRef={selectedSavedImage.imageRef} /><div className="mt-3 grid grid-cols-2 gap-2"><button type="button" onClick={() => onSendGeneratedImage?.(selectedSavedImage.imageRef)} className="rounded-xl border border-[#b9b09f] p-2 text-xs font-bold">发送到聊天</button><button type="button" onClick={() => setSelectedSavedImage(null)} className="rounded-xl border border-[#e5dece] p-2 text-xs">继续生成</button></div></div>}
+                <div className="mt-4"><div className="mb-2 flex justify-between text-xs font-bold"><span>最近生图</span><button type="button" onClick={() => void loadSavedImages()} className="text-[#8a917c]">刷新</button></div><div className="grid grid-cols-4 gap-2">{savedImages.map(image => <button type="button" key={image.id} onClick={() => setSelectedSavedImage(image)} className="overflow-hidden rounded-lg border border-[#e5dece]"><GeneratedImagePreview imageRef={image.thumbnailRef || image.imageRef} compact /></button>)}</div></div>
+            </Modal>
             <Modal 
                 isOpen={modalType === 'transfer'} title="Credits 转账" onClose={() => setModalType('none')}
                 footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 rounded-2xl">取消</button><button onClick={onTransfer} className="flex-1 py-3 bg-orange-500 text-white rounded-2xl">确认</button></>}
@@ -379,6 +420,10 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                         </label>
                         <p className="text-[10px] leading-relaxed text-slate-500">开启：核心指令留空时使用“你是一个温柔、拟人化的AI伴侣。”。关闭：按人物设定扮演角色，不补入这句默认身份；已有角色指令和世界观继续使用。</p>
                         <p className="text-[10px] text-slate-400">仅对当前角色生效，切换立即保存。导入酒馆卡默认关闭。</p>
+                    </ChatSettingsSection>
+                    <ChatSettingsSection title="角色自动发图" summary={activeCharacter?.chatImageGenerationEnabled ? "已开启" : "默认关闭"}>
+                        <label className="flex justify-between gap-3 text-xs font-bold text-slate-700">允许角色主动生成图片<input type="checkbox" role="switch" checked={activeCharacter?.chatImageGenerationEnabled === true} onChange={e => { if (activeCharacter) updateCharacter(activeCharacter.id, { chatImageGenerationEnabled: e.target.checked }); }} /></label>
+                        <p className="mt-2 text-xs text-slate-500">仅对当前角色生效，切换立即保存。关闭时仍可从加号手动生图。接口与提示词版本在神经链接选择。</p>
                     </ChatSettingsSection>
                     <ChatSettingsSection title="消息显示" summary="系统日志显示设置">
                         <div className="pt-2 border-t border-slate-100">

@@ -227,7 +227,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     // Reply Logic
     const [replyTarget, setReplyTarget] = useState<Message | null>(null);
 
-    const [modalType, setModalType] = useState<'none' | 'transfer' | 'emoji-import' | 'chat-settings' | 'message-options' | 'edit-message' | 'delete-emoji' | 'delete-category' | 'add-category' | 'history-manager' | 'archive-settings' | 'archive-legacy-warning' | 'prompt-editor' | 'category-options' | 'category-visibility' | 'emoji-options' | 'rename-emoji' | 'rename-category' | 'schedule' | 'chrome-css' | 'chrome-sound' | 'memory-vectorize-confirm' | 'memory-vectorize-result'>('none');
+    const [modalType, setModalType] = useState<'none' | 'transfer' | 'emoji-import' | 'generate-image' | 'chat-settings' | 'message-options' | 'edit-message' | 'delete-emoji' | 'delete-category' | 'add-category' | 'history-manager' | 'archive-settings' | 'archive-legacy-warning' | 'prompt-editor' | 'category-options' | 'category-visibility' | 'emoji-options' | 'rename-emoji' | 'rename-category' | 'schedule' | 'chrome-css' | 'chrome-sound' | 'memory-vectorize-confirm' | 'memory-vectorize-result'>('none');
     // 「聊天装扮」悬浮态：不走全屏 modal——圆气泡挂在聊天上，点开小面板边看真聊天边调。
     const [decorationTab, setDecorationTab] = useState<DecorationTab>('layout');
     // 切换角色时收掉装扮气泡：定制是 per-character 的，避免误改到下一个角色
@@ -1883,6 +1883,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             case 'poke': handleSendText('[戳一戳]', 'interaction'); break;
             case 'archive': setModalType(char?.memoryPalaceEnabled ? 'archive-legacy-warning' : 'archive-settings'); break;
             case 'settings': setModalType('chat-settings'); break;
+            case 'generate-image': setShowPanel('none'); setModalType('generate-image'); break;
             case 'chrome-css': setShowPanel('none'); setDecorationTab('library'); setModalType('chrome-css'); break;
             case 'chrome-sound': setShowPanel('none'); setDecorationTab('sound'); setModalType('chrome-css'); break;
             case 'fine-tune': setShowPanel('none'); setDecorationTab('layout'); setModalType('chrome-css'); break;
@@ -3990,6 +3991,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 onCreatePrompt={createNewPrompt} onEditPrompt={editSelectedPrompt} onSavePrompt={handleSavePrompt} onDeletePrompt={handleDeletePrompt}
                 onSetHistoryStart={handleSetHistoryStart} onRestoreAdaptiveContext={restoreAdaptiveContext} onEnterSelectionMode={handleEnterSelectionMode}
                 onReplyMessage={handleReplyMessage} onEditMessageStart={() => { if (selectedMessage) { setEditContent(selectedMessage.content); setModalType('edit-message'); } }}
+                onSendGeneratedImage={async imageRef => { await handleSendText(imageRef, 'image'); setModalType('none'); addToast('图片已发送到聊天', 'success'); }}
                 onConfirmEditMessage={confirmEditMessage} onDeleteMessage={handleDeleteMessage} onCopyMessage={handleCopyMessage}
                 messageFavorited={!!(selectedMessage && contentFavoriteIds.has(contentFavoriteIdForMessage(selectedMessage)))}
                 onToggleMessageFavorite={selectedMessage ? () => handleToggleContentFavorite(selectedMessage) : undefined}

@@ -375,7 +375,7 @@ interface OSContextType {
   
   characters: CharacterProfile[];
   activeCharacterId: string;
-  addCharacter: () => Promise<CharacterProfile>;
+  addCharacter: (imported?: CharacterProfile) => Promise<CharacterProfile>;
   updateCharacter: (id: string, updates: Partial<CharacterProfile> | ((prev: CharacterProfile) => Partial<CharacterProfile>)) => void;
   /**
    * 删角色。名下有 amsg2 任务的角色会先 await 云端任务取消 + client_state 清理，
@@ -3390,14 +3390,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const updateApiPreset = (id: string, name: string, config: APIConfig, group?: string) => { setApiPresets(prev => { const next = prev.map(p => p.id === id ? normalizeApiPreset({ ...p, name, config, group: group === undefined ? p.group : group.trim() }) : p); localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
   const removeApiPreset = (id: string) => { setApiPresets(prev => { const next = prev.filter(p => p.id !== id); localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
   const savePresets = (presets: ApiPreset[]) => { const normalized = presets.map(normalizeApiPreset); setApiPresets(normalized); localStorage.setItem('os_api_presets', JSON.stringify(normalized)); };
-  const addCharacter = async () => {
+  const addCharacter = async (imported?: CharacterProfile) => {
     const name = 'New Character';
     // 默认开启 emotionConfig.enabled，让"开日程 = 开情绪"这条隐含约定对新角色也成立。
     // 真正的闸门是 (isScheduleFeatureOn && emotionConfig.enabled)，schedule 没开
     // 时副 API 不会触发，所以这里默认 true 安全。
     // 注意：memoryPalaceEnabled 不在这里默认开 —— 那是用户在记忆宫殿 App 显式 opt-in
     // 的功能，自动开会替用户决策。
-    const newChar: CharacterProfile = {
+    const newChar: CharacterProfile = imported ? migrateCharacterContextRange(normalizeCharacterDefaults(normalizeCharacterImpression(imported))).character : {
       id: `char-${Date.now()}`,
       name,
       avatar: generateAvatar(name),
@@ -3409,9 +3409,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       contextRangePolicyVersion: CONTEXT_RANGE_POLICY_VERSION,
       emotionConfig: { enabled: true },
     };
+    await DB.saveCharacter(newChar);
     setCharacters(prev => [...prev, newChar]);
     setActiveCharacterId(newChar.id);
-    await DB.saveCharacter(newChar);
     return newChar;
   };
   const updateCharacter = async (id: string, updates: Partial<CharacterProfile> | ((prev: CharacterProfile) => Partial<CharacterProfile>)) => {

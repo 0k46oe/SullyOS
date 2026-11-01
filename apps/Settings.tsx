@@ -3,6 +3,7 @@ import {cleanCharacterWeatherCities} from '../utils/characterWeather';
 import NavigationBallSettings from '../components/settings/NavigationBallSettings';
 import { useSettingsFocus } from '../utils/settingsNavigation';
 import ApiPresetGroups from '../components/settings/ApiPresetGroups';
+import ImageGenerationSettings from '../components/settings/ImageGenerationSettings';
 import DialogueApiFields from '../components/settings/DialogueApiFields';
 import { llmApiType, normalizeLlmBaseUrl, type LlmApiType } from '../utils/llmEndpoint';
 import { fetchLlm } from '../utils/anthropicApi';
@@ -528,6 +529,7 @@ const Settings: React.FC = () => {
   const [visionStatusMsg, setVisionStatusMsg] = useState('');
   const [testingVisionApi, setTestingVisionApi] = useState(false);
   const [visionTestResult, setVisionTestResult] = useState<string | null>(null);
+  const [localImageGeneration, setLocalImageGeneration] = useState(apiConfig.imageGeneration || {});
   const [localMiniMaxKey, setLocalMiniMaxKey] = useState(apiConfig.minimaxApiKey || '');
   const [localMiniMaxGroupId, setLocalMiniMaxGroupId] = useState(apiConfig.minimaxGroupId || '');
   const [localMiniMaxRegion, setLocalMiniMaxRegion] = useState<'domestic' | 'overseas'>(
@@ -1025,6 +1027,7 @@ const Settings: React.FC = () => {
   }, [apiConfig.visionApi?.baseUrl || '', apiConfig.visionApi?.apiKey || '', apiConfig.visionApi?.model || '']);
 
   useEffect(() => {
+      setLocalImageGeneration(apiConfig.imageGeneration || {});
       setLocalMiniMaxKey(apiConfig.minimaxApiKey || '');
       setLocalMiniMaxGroupId(apiConfig.minimaxGroupId || '');
       setLocalMiniMaxRegion(apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic');
@@ -1376,6 +1379,7 @@ const Settings: React.FC = () => {
   };
 
   const buildOtherApiConfig = (overrides: Partial<APIConfig> = {}): Partial<APIConfig> => ({
+      imageGeneration: localImageGeneration,
       minimaxApiKey: localMiniMaxKey,
       minimaxGroupId: localMiniMaxGroupId,
       minimaxRegion: localMiniMaxRegion,
@@ -2939,6 +2943,7 @@ const Settings: React.FC = () => {
         </button>
 
         {/* 其他 API 区域 — 非 LLM 类（语音、写歌等），不会跟随预设切换 */}
+        <SettingsSection icon={<span aria-hidden="true">🖼️</span>} title="聊天生图"><ImageGenerationSettings value={localImageGeneration} onChange={setLocalImageGeneration} /><button type="button" onClick={handleSaveOtherApis} className="mt-3 w-full rounded-xl bg-primary p-3 text-white text-sm">{otherStatusMsg || '保存生图与其他 API'}</button></SettingsSection>
         <SettingsSection
             title="其他 API"
             icon={
