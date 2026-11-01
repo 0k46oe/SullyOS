@@ -62,7 +62,21 @@ describe('Anthropic native transport',()=>{
   expect(result.choices[0].message.anthropic_thinking[0].signature).toBe('signed');expect(result.usage.prompt_tokens).toBe(1005);expect(result.usage.completion_tokens).toBe(20);
   const continuation={role:'assistant',content:'UI placeholder',tool_calls:result.choices[0].message.tool_calls,...anthropicContinuation(result.choices[0].message)};
   const next=toAnthropicRequest({model:'claude-test',messages:[{role:'user',content:'x'},continuation,{role:'tool',tool_call_id:'t1',content:'结果'}]});
-  expect(next.messages[1].content).toEqual([{type:'thinking',thinking:'想一想',signature:'signed'},{type:'text',text:'中文🙂'},{type:'tool_use',id:'t1',name:'lookup',input:{q:'城市'}}]);
+  expect(next.messages[1].content.map(({cache_control,...block}:any)=>block)).toEqual([{type:'thinking',thinking:'想一想',signature:'signed'},{type:'text',text:'中文🙂'},{type:'tool_use',id:'t1',name:'lookup',input:{q:'城市'}}]);
+  expect(next.messages[1].content[0]).not.toHaveProperty('cache_control');
+ });
+ it('keeps history cache across turns when the last user turn changes or system blocks sit mid-history',()=>{
+  const marks=(out:any)=>out.messages.flatMap((m:any)=>m.content.filter((b:any)=>b.cache_control).map((b:any)=>b.text));
+  // 最后一条用户消息带「距离上一条消息」提示，下一轮会变：倒数第二条也要有断点
+  const turn=toAnthropicRequest({model:'claude-test',messages:[{role:'system',content:'稳定'},{role:'user',content:'早'},{role:'assistant',content:'早呀'},{role:'user',content:'吃了吗\n\n[间隔提示]'},{role:'system',content:'现在几点'}]});
+  expect(marks(turn)).toEqual(['早呀','吃了吗\n\n[间隔提示]']);
+  // 历史中间的 system（好友圈卡片、世界书深度条目）不再让后面的历史失去缓存
+  const mid=toAnthropicRequest({model:'claude-test',tools:[{type:'function',function:{name:'t'}}],messages:[{role:'system',content:'稳定'},{role:'user',content:'一'},{role:'assistant',content:'二'},{role:'system',content:'深度条目'},{role:'user',content:'三'},{role:'assistant',content:'四'},{role:'user',content:'五'},{role:'system',content:'尾部'}]});
+  expect(marks(mid)).toEqual(['二','四','五']);
+  expect(mid.system.at(-1).cache_control).toEqual({type:'ephemeral'});
+  // 4 个名额用完时让出工具定义断点
+  expect(mid.tools[0]).not.toHaveProperty('cache_control');
+  expect(toAnthropicRequest({model:'claude-test',messages:[{role:'user',content:'x'}],__sullyAnthropicOptions:{cache:false}} as any).messages[0].content[0]).not.toHaveProperty('cache_control');
  });
  it.each(['error','truncated'])('fails %s streams without a second paid request',async mode=>{
   const events=[{type:'message_start',message:{id:'m',model:'claude-test',usage:{input_tokens:1}}},{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'半句话'}},{type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:2}},...(mode==='error'?[{type:'error',error:{type:'overloaded_error',message:'overloaded'}}]:[])];

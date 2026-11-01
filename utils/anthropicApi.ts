@@ -39,7 +39,13 @@ export function toAnthropicRequest(body: any): any {
     const ephemeral = { type: 'ephemeral', ...(settings?.ttl === '1h' ? {ttl:'1h'} : {}) };
     const system: Block[] = [];
     const messages: Array<{role:'user'|'assistant';content:Block[]}> = [];
-    let lastHistoryBlock: Block | undefined;
+    // 最后一条对话消息之后的 system 是每轮都变的尾部提醒；夹在历史中间的 system
+    // （好友圈卡片、世界书深度条目）也转成提醒块，但不再让后面的历史失去缓存。
+    const isSystem = (m: any) => m.role === 'system' || m.role === 'developer';
+    let lastDialogueIndex = body.messages.length - 1;
+    while (lastDialogueIndex >= 0 && isSystem(body.messages[lastDialogueIndex])) lastDialogueIndex--;
+    const lastBlockAt = new Map<number, Block>();
+    let firstMidSystemIndex = -1;
     let sawReminder = false;
     const append = (role: 'user'|'assistant', blocks: Block[]) => {
         if (!blocks.length) return;
@@ -47,12 +53,13 @@ export function toAnthropicRequest(body: any): any {
         if (previous?.role === role) previous.content.push(...blocks);
         else messages.push({role,content:blocks});
     };
-    for (const message of body.messages) {
-        if (message.role === 'system' || message.role === 'developer') {
+    for (const [messageIndex, message] of body.messages.entries()) {
+        if (isSystem(message)) {
             const blocks = contentBlocks(message.content);
             if (!messages.length) system.push(...blocks);
             else {
                 sawReminder = true;
+                if (messageIndex < lastDialogueIndex && firstMidSystemIndex < 0) firstMidSystemIndex = messageIndex;
                 append('user', [{type:'text',text:'<system-reminder>\n' + blocks.map(block => block.text || '').join('\n') + '\n</system-reminder>'}]);
             }
             continue;
@@ -66,7 +73,7 @@ export function toAnthropicRequest(body: any): any {
             if (message.role === 'assistant' && Array.isArray(message.anthropic_content)) {
                 blocks = structuredClone(message.anthropic_content);
                 append('assistant',blocks);
-                if (!sawReminder && blocks.length) lastHistoryBlock=blocks.at(-1);
+                if (blocks.length) lastBlockAt.set(messageIndex, blocks.at(-1)!);
                 continue;
             }
             blocks = contentBlocks(message.content);
@@ -79,7 +86,7 @@ export function toAnthropicRequest(body: any): any {
             }
         }
         append(message.role === 'assistant' ? 'assistant' : 'user', blocks);
-        if (!sawReminder && blocks.length) lastHistoryBlock = blocks.at(-1);
+        if (blocks.length) lastBlockAt.set(messageIndex, blocks.at(-1)!);
     }
     if (!messages.length) throw Error('Anthropic 请求没有对话内容');
     // This standard payload keeps system at the top level. Explain the annotation once
@@ -89,10 +96,32 @@ export function toAnthropicRequest(body: any): any {
         if (tool.type !== 'function' || !tool.function?.name) throw Error('Anthropic 暂仅支持 function 工具');
         return {name:tool.function.name,description:tool.function.description || '',input_schema:tool.function.parameters || {type:'object',properties:{}}};
     });
-    // Up to three breakpoints with the selected TTL: tools, stable system and history before reminders.
-    if (cacheEnabled && tools.length) tools.at(-1).cache_control = {...ephemeral};
-    if (cacheEnabled && system.length) system.at(-1)!.cache_control = {...ephemeral};
-    if (cacheEnabled && lastHistoryBlock && !['thinking','redacted_thinking'].includes(lastHistoryBlock.type)) lastHistoryBlock.cache_control = {...ephemeral};
+    if (cacheEnabled) {
+        // Anthropic 一次最多 4 个断点，按优先级取：
+        //  1. 稳定 system 末尾；
+        //  2. 历史末尾（尾部提醒之前）；
+        //  3. 倒数第二条历史消息末尾：最后一条用户消息下一轮会去掉「距离上一条消息」提示，
+        //     只缓存到历史末尾的话下一轮整段历史都对不上；
+        //  4. 第一条夹在历史中间的 system 之前：世界书深度条目每轮往后挪，挪动点之后的内容
+        //     下一轮必然变化，这个断点保住它前面那一大段；
+        //  5. 工具定义（排在 system 前面，system 断点已覆盖它，名额不够时最先让出）。
+        const usable = (block?: Block) => block && !['thinking','redacted_thinking'].includes(block.type) ? block : undefined;
+        const lastBlockBefore = (end: number) => {
+            for (let i = end - 1; i >= 0; i--) { const block = usable(lastBlockAt.get(i)); if (block) return { index: i, block }; }
+            return undefined;
+        };
+        const historyEnd = lastBlockBefore(lastDialogueIndex + 1);
+        const candidates = [
+            system.at(-1),
+            historyEnd?.block,
+            historyEnd ? lastBlockBefore(historyEnd.index)?.block : undefined,
+            firstMidSystemIndex >= 0 ? lastBlockBefore(firstMidSystemIndex)?.block : undefined,
+            tools.at(-1),
+        ];
+        const picked = new Set<Block>();
+        for (const block of candidates) if (block && picked.size < 4) picked.add(block);
+        for (const block of picked) block.cache_control = {...ephemeral};
+    }
     const thinking = body.thinking || body.extra_body?.thinking;
     const request: any = {
         model: body.model,
