@@ -88,6 +88,7 @@ import { DB } from '../db';
 import { isMessageSemanticallyRelevant, formatMessageForPrompt } from '../messageFormat';
 import { sanitizeQuerySourceMessages } from './querySanitizer';
 import { getLocalDateKey } from '../localDate';
+import { loadStoryTimeForChar, memoryShortDate } from './storyTime';
 import { extractExternalMemoryText } from './externalMemory';
 import {
     analyzeLocalContext,
@@ -1112,7 +1113,9 @@ export async function retrieveMemories(
         const anticipations = await tRetrieve('AnticipationDB.getByCharId', 'IDB', AnticipationDB.getByCharId(charId));
 
         // 10. 格式化
-        const formatted = await tRetrieve('expandAndFormat', 'IDB', expandAndFormat(results, charId, anticipations, userName, formatterCap));
+        // 酒馆角色开启剧情时间时，召回日期显示剧情日期；普通角色为 null，格式不变
+        const storyTime = await loadStoryTimeForChar(charId);
+        const formatted = await tRetrieve('expandAndFormat', 'IDB', expandAndFormat(results, charId, anticipations, userName, formatterCap, storyTime));
 
         // ── 汇总打印 ──
         const perfTotal = Math.round(performance.now() - perfRetrieveT0);
@@ -1530,6 +1533,10 @@ export async function ingestDiaryToPalace(
         if (!isNaN(d.getTime())) createdAt = d.getTime();
     }
 
+    // 酒馆角色剧情时间：日记标题里的日期也换成剧情日期，副 API 看不到现实日期
+    const storyTime = await loadStoryTimeForChar(char.id);
+    const diaryDate = storyTime ? memoryShortDate(storyTime, createdAt) : dateStr;
+
     // 把日记伪装成两条 Message 喂给 extractMemoriesFromBuffer（id 给负数，不入库不冲突）
     const fakeMessages: Message[] = [];
     if (userDiaryText?.trim()) {
@@ -1538,7 +1545,7 @@ export async function ingestDiaryToPalace(
             charId: char.id,
             role: 'user',
             type: 'text',
-            content: `【交换日记 ${dateStr}】我今天写道：\n${userDiaryText.trim()}`,
+            content: `【交换日记 ${diaryDate}】我今天写道：\n${userDiaryText.trim()}`,
             timestamp: createdAt,
         } as Message);
     }
@@ -1548,7 +1555,7 @@ export async function ingestDiaryToPalace(
             charId: char.id,
             role: 'assistant',
             type: 'text',
-            content: `【交换日记 ${dateStr}】我（${char.name}）的回复日记：\n${charDiaryText.trim()}`,
+            content: `【交换日记 ${diaryDate}】我（${char.name}）的回复日记：\n${charDiaryText.trim()}`,
             timestamp: createdAt + 1000,
         } as Message);
     }
@@ -1568,6 +1575,7 @@ export async function ingestDiaryToPalace(
         userName || '用户',
         [], // 不喂相关记忆，避免一次归档把 LLM 拉去做跨时间纠正
         [], // 不喂便利贴
+        storyTime,
     );
 
     if (extracted.memories.length === 0) {
@@ -1840,6 +1848,8 @@ async function extractAndStoreMemories(
 
         // 6. 收集当前便利贴（供 LLM 判断是否需要提前摘除）
         const now = Date.now();
+        // 酒馆角色剧情时间：提取提示词只给剧情日期；普通角色为 null
+        const storyTime = await loadStoryTimeForChar(charId);
         const allCharNodes = await MemoryNodeDB.getByCharId(charId);
         const pinnedRefs: PinnedMemoryRef[] = allCharNodes
             .filter(n => n.pinnedUntil && n.pinnedUntil > now)
@@ -1869,7 +1879,7 @@ async function extractAndStoreMemories(
 
             try {
                 const extractionResult = await extractMemoriesFromBuffer(
-                    chunk, charId, charName, llmConfig, charContext, userName, relatedMemoryRefs, pinnedRefs,
+                    chunk, charId, charName, llmConfig, charContext, userName, relatedMemoryRefs, pinnedRefs, storyTime,
                 );
                 allMemories.push(...extractionResult.memories);
                 allCrossTimeLinks.push(...extractionResult.crossTimeLinks);
@@ -2013,7 +2023,8 @@ async function applyMemorySideEffects(
                     merged.set(c.targetId, arr);
                 }
 
-                const dateStr = getLocalDateKey();
+                // 纠正日期写进正文：酒馆角色写剧情日期，普通角色仍是 YYYY-MM-DD
+                const dateStr = memoryShortDate(await loadStoryTimeForChar(charId));
                 const toRevectorize: import('./types').MemoryNode[] = [];
                 for (const [targetId, notes] of merged) {
                     const node = await MemoryNodeDB.getById(targetId);

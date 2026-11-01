@@ -33,6 +33,8 @@ import { fulfillAnticipation, disappointAnticipation, createAnticipation } from 
 import { vectorizeAndStore } from './vectorStore';
 import { safeFetchJson } from '../safeApi';
 import { safeParseJsonArray } from './jsonUtils';
+import { loadStoryTimeForChar } from './storyTime';
+import { formatStoryDate, type ActiveStoryTime } from '../tavernStoryTime';
 
 /** 从 localStorage 读取远程向量配置（与 pipeline.ts 同一份来源） */
 function getRemoteVectorConfig(): RemoteVectorConfig | undefined {
@@ -260,6 +262,8 @@ async function callDigestLLM(
     },
     llmConfig: LightLLMConfig,
     userName?: string,
+    /** 酒馆角色剧情时间；普通角色为 null */
+    storyTime: ActiveStoryTime | null = null,
 ): Promise<DigestAction[]> {
 
     // 如果没有任何待消化的内容，跳过
@@ -274,6 +278,7 @@ async function callDigestLLM(
 
     const userLabel = userName || '用户';
     const fmtDate = (ts: number) => {
+        if (storyTime) return formatStoryDate(storyTime, ts);
         const d = new Date(ts);
         return `${d.getMonth() + 1}/${d.getDate()}`;
     };
@@ -897,7 +902,7 @@ export async function runCognitiveDigestion(
 
     // LLM 统一消化
     onProgress?.('正在审视记忆…');
-    const actions = await callDigestLLM(charName, charPersona, material, llmConfig, userName);
+    const actions = await callDigestLLM(charName, charPersona, material, llmConfig, userName, await loadStoryTimeForChar(charId));
 
     // 执行动作：状态机改现有节点；概括类产出汇集为门牌蒸馏候选
     const { result, plateSubmissions } = await executeActions(actions, charId, material);

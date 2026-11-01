@@ -14,6 +14,7 @@ import { buildSARMemoryBoundaryInstruction, formatMessageForPrompt } from '../me
 import { readRecallRuntimeSnapshot } from './trace';
 import { hasRelativeTime, hasMatchingRelativeSource, relativeTimeEnabled } from './relativeTime';
 import { getLocalDateKey } from '../localDate';
+import { formatStoryDateTime, storyDayNumber, type ActiveStoryTime } from '../tavernStoryTime';
 
 function generateId(): string {
     return `mn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -48,7 +49,7 @@ export function splitExtractionMessages(messages: Message[], charName: string, u
 // 会让 embedding 语义轻微漂移。保持 palace 内置风格稳定，手动归档路径提供
 // 风格化的自由度——职责分离。
 
-function buildRulesBlock(charName: string, userLabel: string, includeEntities: boolean): string {
+function buildRulesBlock(charName: string, userLabel: string, includeEntities: boolean, storyMode = false): string {
     const entityRule = includeEntities
         ? `.
    **明确实体**（entities）：把对话中明确出现的人名、昵称、地点、组织、项目、产品、账号或域名单独列出。只收录专名，不要写“朋友”“他”“那个项目”等泛称，也不要猜别名。格式为 {"name":"雾岚","type":"person"}（虚构示例）。`
@@ -89,19 +90,36 @@ function buildRulesBlock(charName: string, userLabel: string, includeEntities: b
    - 身体状态："${userLabel}感冒了" → pinDays: 5
    不适用：长期事实（生日、喜好）、已经过去的事件、情感记忆。大多数记忆不需要置顶。
 
-**日期标注（date，必填）**：每条消息前缀都带了 \`[YYYY-MM-DD HH:MM]\` 时间戳。每条记忆必须根据**该事件实际发生的那一天**填 date 字段（"YYYY-MM-DD"），而不是套用整批的某一天。同一批对话跨多天时，跨日的记忆要分别标各自的日期。`;
+${storyMode ? STORY_DATE_RULE : `**日期标注（date，必填）**：每条消息前缀都带了 \`[YYYY-MM-DD HH:MM]\` 时间戳。每条记忆必须根据**该事件实际发生的那一天**填 date 字段（"YYYY-MM-DD"），而不是套用整批的某一天。同一批对话跨多天时，跨日的记忆要分别标各自的日期。`}`;
 }
 
-function buildConversationText(messages: Message[], charName: string, userLabel: string, linkDates = false): string {
+// 酒馆角色剧情时间：消息行首只给剧情日编号 + 剧情时间，副 API 完全看不到现实日期；
+// date 字段填 D 编号，由代码映射回真实时间戳存 createdAt（排序/衰减/置顶期限不受影响）。
+const STORY_DATE_RULE = `**日期标注（date，必填）**：这是一段架空剧情，每条消息前缀是 \`[D编号 · 剧情时间]\`，例如 \`[D1 · 3777年11月1日 14:20]\`。剧情时间就是故事里的真实时间，以它为准。每条记忆按**该事件实际发生的那一天**填 date 字段，只写 D 编号（如 "D1"）。同一批对话跨多天时，跨日的记忆要分别标各自的 D 编号。记忆正文如果需要提到日期或年份，只能使用剧情时间里的写法。`;
+
+/** 剧情模式下每条消息所属的剧情日编号（D1、D2…，按出现顺序），无时间戳的消息为 null */
+function storyDayLabels(messages: Message[], story: ActiveStoryTime): (number | null)[] {
+    const order = new Map<number, number>();
+    return messages.map(m => {
+        if (!m.timestamp || m.timestamp <= 0) return null;
+        const day = storyDayNumber(story, m.timestamp);
+        if (!order.has(day)) order.set(day, order.size + 1);
+        return order.get(day)!;
+    });
+}
+
+function buildConversationText(messages: Message[], charName: string, userLabel: string, linkDates = false, story: ActiveStoryTime | null = null): string {
     // 每行带 [YYYY-MM-DD HH:MM] 时间戳前缀。
     // 没有这个 LLM 完全看不到日期，多日 batch 提取出来的记忆全部会被压到一个时间点
     // （见 parseMemoryNodesFromBuffer 的 midTime 兜底），跨日时间线就乱了。
     const pad2 = (n: number) => String(n).padStart(2, '0');
+    const storyDays = story ? storyDayLabels(messages, story) : [];
     return messages
         .map((m, index) => {
             const body = (linkDates ? `[M${index}] ` : '') + formatMessageForPrompt(m, charName, userLabel);
             const ts = m.timestamp;
             if (!ts || ts <= 0) return body;
+            if (story) return `[D${storyDays[index]} · ${formatStoryDateTime(story, ts)}] ${body}`;
             const d = new Date(ts);
             const stamp = `[${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}]`;
             return `${stamp} ${body}`;
@@ -117,6 +135,7 @@ const VALID_ROOMS: MemoryRoom[] = [
 /** 从消息缓冲区直接解析记忆节点（不依赖 TopicBox） */
 function parseMemoryNodesFromBuffer(
     parsed: any[], charId: string, messages: Message[], _batchLabel: string, includeEntities: boolean, linkDates = false,
+    story: ActiveStoryTime | null = null,
 ): MemoryNode[] {
     if (parsed.length === 0) return [];
 
@@ -130,8 +149,26 @@ function parseMemoryNodesFromBuffer(
     const minTs = firstTs - dayMs;
     const maxTs = lastTs + dayMs;
 
+    // 剧情模式：D 编号 → 该剧情日消息真实时间的中点
+    const storyDayTimes = new Map<number, number>();
+    if (story) {
+        const labels = storyDayLabels(messages, story);
+        const ranges = new Map<number, [number, number]>();
+        labels.forEach((label, index) => {
+            if (label === null) return;
+            const ts = messages[index].timestamp;
+            const range = ranges.get(label);
+            ranges.set(label, range ? [Math.min(range[0], ts), Math.max(range[1], ts)] : [ts, ts]);
+        });
+        ranges.forEach(([first, last], label) => storyDayTimes.set(label, Math.round((first + last) / 2)));
+    }
+
     /** 解析 LLM 写的 date 字段 → 该日 12:00 本地时间。失败 / 越界则回到 midTime。 */
     const resolveCreatedAt = (raw: unknown): number => {
+        if (story) {
+            const match = typeof raw === 'string' ? /^\s*D(\d+)\s*$/i.exec(raw) : null;
+            return (match && storyDayTimes.get(Number(match[1]))) || midTime;
+        }
         if (typeof raw !== 'string') return midTime;
         const s = raw.trim();
         if (!s) return midTime;
@@ -419,6 +456,8 @@ export async function extractMemoriesFromBuffer(
     userName?: string,
     relatedMemories?: RelatedMemoryRef[],
     pinnedMemories?: PinnedMemoryRef[],
+    /** 酒馆角色剧情时间；null/undefined = 普通角色，走原有现实日期提示词 */
+    storyTime?: ActiveStoryTime | null,
 ): Promise<BufferExtractionResult> {
     if (messages.length === 0) return { memories: [], crossTimeLinks: [], eventBoxHints: [], unpinIds: [], corrections: [] };
 
@@ -426,7 +465,7 @@ export async function extractMemoriesFromBuffer(
     if (batches.length > 1) {
         const result: BufferExtractionResult = { memories: [], crossTimeLinks: [], eventBoxHints: [], unpinIds: [], corrections: [] };
         for (const batch of batches) {
-            const next = await extractMemoriesFromBuffer(batch, charId, charName, llmConfig, charContext, userName, relatedMemories, pinnedMemories);
+            const next = await extractMemoriesFromBuffer(batch, charId, charName, llmConfig, charContext, userName, relatedMemories, pinnedMemories, storyTime);
             result.memories.push(...next.memories);
             result.crossTimeLinks.push(...next.crossTimeLinks);
             result.eventBoxHints.push(...next.eventBoxHints);
@@ -437,9 +476,11 @@ export async function extractMemoriesFromBuffer(
     }
 
     const includeEntities = readRecallRuntimeSnapshot().featureFlagsSnapshot.recallRouter;
-    const linkDates = relativeTimeEnabled();
+    const story = storyTime || null;
+    // 相对时间补注按现实日期计算，剧情模式下关闭，避免把现实日期写进记忆
+    const linkDates = !story && relativeTimeEnabled();
     const userLabel = userName || '用户';
-    const conversationText = buildConversationText(messages, charName, userLabel, linkDates);
+    const conversationText = buildConversationText(messages, charName, userLabel, linkDates, story);
     const sarMemoryBoundary = buildSARMemoryBoundaryInstruction(conversationText);
 
     const contextBlock = charContext
@@ -468,7 +509,7 @@ export async function extractMemoriesFromBuffer(
 
     const systemPrompt = `你是 ${charName}。根据给定的对话内容，以你的第一人称视角（"我"）提取值得记住的记忆。${contextBlock}${relatedBlock}${pinnedBlock}
 
-${buildRulesBlock(charName, userLabel, includeEntities)}${relatedToRule}${unpinRule}${sarMemoryBoundary ? `\n\n${sarMemoryBoundary}` : ''}${linkDates ? `
+${buildRulesBlock(charName, userLabel, includeEntities, !!story)}${relatedToRule}${unpinRule}${sarMemoryBoundary ? `\n\n${sarMemoryBoundary}` : ''}${linkDates ? `
 
 ## 相对时间来源
 content 保留原消息的相对时间措辞，不要自行添加日期括号。含“昨天、前天、几天前、上周、上个月、去年”等措辞时，额外输出 relativeTimeSource 字段，值为说出该措辞的原消息编号（例如 "M0"）。系统将以该消息的发送日补注，不使用 date 事件日。不同说话日期的相对时间应拆成不同记忆。没有可靠来源、跨时区语义不明或无法使用同一个参照日时，省略该字段，禁止猜测。` : ''}
@@ -486,12 +527,12 @@ content 保留原消息的相对时间措辞，不要自行添加日期括号。
     "arousal": 0,
     "tags": ["标签1", "标签2"],${includeEntities ? `
     "entities": [{"name": "明确出现的专名", "type": "person"}],` : ''}
-    "date": "YYYY-MM-DD",
+    "date": "${story ? 'D1' : 'YYYY-MM-DD'}",
     "pinDays": 3${relatedToFormat}
   }
 ]
 
-date 必填，按该记忆实际发生当天填（参考消息行首的时间戳）。
+date 必填，按该记忆实际发生当天填（参考消息行首的${story ? '剧情日编号' : '时间戳'}）。
 pinDays 仅在需要置顶时才写，大多数记忆不需要。
 如果对话过于琐碎无值得记忆的内容，返回空数组 []。`;
 
@@ -540,7 +581,7 @@ pinDays 仅在需要置顶时才写，大多数记忆不需要。
         const fmt = (d: Date) => `${d.getMonth() + 1}/${d.getDate()}`;
         const batchLabel = fmt(d1) === fmt(d2) ? fmt(d1) : `${fmt(d1)}-${fmt(d2)}`;
 
-        const memories = parseMemoryNodesFromBuffer(parsed, charId, messages, batchLabel, includeEntities, linkDates);
+        const memories = parseMemoryNodesFromBuffer(parsed, charId, messages, batchLabel, includeEntities, linkDates, story);
 
         // 解析跨时间关联（→ EventBox 绑定信号）+ eventName/eventTags 提示
         const { crossTimeLinks, eventBoxHints } = parseRelatedToAndHints(

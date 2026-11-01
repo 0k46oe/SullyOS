@@ -31,6 +31,8 @@ import { safeFetchJson, extractContent, extractJson } from '../safeApi';
 import { enforceSummaryLengthBudget } from './summaryLengthBudget';
 import { buildSARMemoryBoundaryInstruction } from '../messageFormat';
 import { hasSummaryReasoningLeak } from '../summaryReasoning';
+import { loadStoryTimeForChar } from './storyTime';
+import { formatStoryDate } from '../tavernStoryTime';
 export { hasSummaryReasoningLeak } from '../summaryReasoning';
 
 const VALID_ROOMS: MemoryRoom[] = [
@@ -151,7 +153,10 @@ async function callCompressionLLM(
 ): Promise<CompressionLLMResult | null> {
     const userLabel = userName || '用户';
 
+    // 酒馆角色剧情时间：给副 API 的日期换成剧情日期，整合回忆里就不会写进现实年份
+    const storyTime = await loadStoryTimeForChar(box.charId);
     const formatDate = (ts: number): string => {
+        if (storyTime) return formatStoryDate(storyTime, ts);
         const d = new Date(ts);
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     };
@@ -172,7 +177,7 @@ async function callCompressionLLM(
 1. **第一人称**（用「我」），从 ${charName} 的视角写。${userLabel} 用名字直接称呼。
 2. **字数目标 ${EVENT_BOX_SUMMARY_TARGET_MIN_CHARS}-${EVENT_BOX_SUMMARY_TARGET_MAX_CHARS} 字**。紧凑、务实、不口水；事实较多时允许超出，不能为了凑字数省略事实或截断句子。
 3. **只保留关键信息**：具体人物、动作、对象、场景、转折、情绪。**去掉所有语气填充、修辞铺陈、重复感慨**（如「真是的」、「怎么说呢」、「不过话说回来」等）。事实先行。
-4. **带时间点但不冗余**：每件事标一次日期就够（「3 月 20 日…4 月 5 日…」），不要每句都重复时间。
+4. **带时间点但不冗余**：每件事标一次日期就够（「3 月 20 日…4 月 5 日…」），不要每句都重复时间。${storyTime ? '这是架空剧情，日期一律照抄碎片里给出的剧情日期写法，不要换算成其他年份或历法。' : ''}
 5. **连贯但简洁**：不套「起因/经过/结果」模板，但要让读者能按顺序看懂事情怎么发展的。
 6. **覆盖所有关键词**（这是给向量检索用的）—— 每条新增的旧记忆里出现过的具体名词、地点、人物必须在 content 里出现一次。
 7. **content 字符串内严禁使用半角双引号 \`"\`**。要引用人物原话、书名、外号、术语，一律用中文方角引号「」、《》或单引号 \`'\`。否则会破坏外层 JSON 解析、整批记忆白丢。

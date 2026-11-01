@@ -39,6 +39,7 @@ import { stripSensitiveCardFields } from '../utils/characterCard';
 import { shareOrDownloadFile } from '../utils/shareExport';
 import { readImportedCharacterCard } from '../utils/tavernImport';
 import CharacterImageSettings from '../components/character/CharacterImageSettings';
+import TavernStoryTimeSettings from '../components/character/TavernStoryTimeSettings';
 import { confirmExportSafety } from '../utils/exportGuard';
 import { trackEvent } from '../utils/analytics';
 import { sortCharacterGroups, GROUP_FILTER_UNGROUPED } from '../components/character/CharacterGroupFilter';
@@ -1500,6 +1501,8 @@ ${isInitialGeneration ? `
                                    </>}
                                </div>
                            </CharacterSettingsSection>}
+
+                           {formData.tavernImport && <TavernStoryTimeSettings character={formData} onChange={value => handleChange('tavernStoryTime', value)} />}
 
                            {formData.tavernImport && (
                                <CharacterSettingsSection title="酒馆卡附加资料" summary="开场白 · 作者备注">

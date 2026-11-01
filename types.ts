@@ -2766,6 +2766,30 @@ export interface MemoryPalaceWaterlineConfig {
   bufferThreshold?: number;
 }
 
+/**
+ * 酒馆剧情时间的一段：从 realAnchor（现实时间）起，剧情时间从用户填写的值开始 1:1 流逝。
+ * 用户每次手动改剧情时间就追加一段，旧段不改，所以之前的消息和记忆日期不会跟着平移。
+ */
+export interface TavernStoryTimeSegment {
+  /** 用户保存这段剧情时间时的现实时间（ms） */
+  realAnchor: number;
+  /** calendar：标准年月日自动推进；label：纪年是用户填写的文本（如庚辰年），只推进时分 */
+  mode: 'calendar' | 'label';
+  /** calendar 模式：剧情日期 YYYY-MM-DD，年份可以是 3777 这类架空年份 */
+  storyDate?: string;
+  /** 剧情时刻 HH:MM */
+  storyClock: string;
+  /** label 模式：纪年文本 */
+  label?: string;
+}
+
+/** 酒馆导入角色的剧情时间。真实消息时间戳不变，只在给 AI / 记忆显示时换算。见 utils/tavernStoryTime.ts */
+export interface TavernStoryTimeConfig {
+  enabled: boolean;
+  /** 按 realAnchor 升序；最后一段是当前剧情时间 */
+  segments: TavernStoryTimeSegment[];
+}
+
 export interface CharacterProfile {
   /** Local default for this character's dialogue; absent means follow Settings. Never shared in cards. */
   dialogueApi?: DialogueApiConfig;
@@ -2953,6 +2977,8 @@ export interface CharacterProfile {
       characterVersion: string;
       tags: string[];
   };
+  /** 酒馆导入角色专属剧情时间；只在 tavernImport 存在且 enabled 时生效，普通角色忽略。见 utils/tavernStoryTime.ts */
+  tavernStoryTime?: TavernStoryTimeConfig;
   /** 角色分组：指向 CharacterGroup.id；空或指向已删分组 = 未分组。仅本地组织用，不随角色卡导出 */
   groupId?: string;
   memories: MemoryFragment[];

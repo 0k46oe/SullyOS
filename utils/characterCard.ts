@@ -20,6 +20,7 @@ export const CARD_STRIPPED_FIELDS = [
   // 1) 凭据（含 apiKey，灾难级泄漏）
   'dialogueApi',
   'characterUserProfile',
+  'tavernStoryTime',          // 本机的剧情进度，接收方从自己的剧情时间开始
     'imageGenerationSelection',
     'imageTextApiPresetId',
   'chatImageGenerationEnabled',

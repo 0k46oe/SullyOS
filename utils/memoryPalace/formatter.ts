@@ -16,8 +16,9 @@ import type { Anticipation, EventBox, MemoryNode, ScoredMemory } from './types';
 import { ROOM_CONFIGS, getRoomLabel } from './types';
 import { MemoryNodeDB, EventBoxDB } from './db';
 import { recordRecallReceipt } from './recallReceipts';
-import { formatMemoryDateWithDistance } from './memoryDate';
 import { memoryContentWithDates } from './relativeTime';
+import { memoryDateLabel } from './storyTime';
+import type { ActiveStoryTime } from '../tavernStoryTime';
 
 const DEFAULT_MAX_OUTPUT_ITEMS = 15;
 const MAX_LIVE_NODES_PER_BOX = 8; // 单盒最多展开多少条活节点（防止超大盒污染）
@@ -57,10 +58,15 @@ export async function expandAndFormat(
     userName?: string,
     /** 注入上限。rerank 启用时传 15 + topN，让 rerank 额外召回的不被切。 */
     maxOutputItems: number = DEFAULT_MAX_OUTPUT_ITEMS,
+    /** 酒馆角色剧情时间：有值时记忆日期显示为剧情日期、不加现实日期补注；普通角色不传 */
+    storyTime: ActiveStoryTime | null = null,
 ): Promise<string> {
     const MAX_OUTPUT_ITEMS = maxOutputItems;
     // 0. 加载便利贴置顶记忆（pinnedUntil > now，不占 15 条名额）
     const now = Date.now();
+    // 相对时间补注按现实日期计算，剧情模式下不补注
+    const contentOf: ContentOf = node => storyTime ? node.content : memoryContentWithDates(node);
+    const dateOf: DateOf = ts => memoryDateLabel(storyTime, ts, now);
     const allCharNodes = await MemoryNodeDB.getByCharId(charId);
     const pinnedNodes = allCharNodes.filter(n => n.pinnedUntil && n.pinnedUntil > now && !n.archived);
     const pinnedIds = new Set(pinnedNodes.map(n => n.id));
@@ -104,15 +110,15 @@ export async function expandAndFormat(
         const box = await EventBoxDB.getById(boxId);
         if (!box) {
             // box 丢失 → 退化为单条命中
-            renderItems.push(buildStandaloneItem(hit.sample, now));
+            renderItems.push(buildStandaloneItem(hit.sample, dateOf, contentOf));
             continue;
         }
-        const item = await buildBoxItem(box, hit.topScore, localNodeMap, now, hit.guaranteed);
+        const item = await buildBoxItem(box, hit.topScore, localNodeMap, dateOf, contentOf, hit.guaranteed);
         if (item) renderItems.push(item);
     }
 
     for (const r of standaloneItems) {
-        renderItems.push(buildStandaloneItem(r, now));
+        renderItems.push(buildStandaloneItem(r, dateOf, contentOf));
     }
 
     // 3. 排序（finalScore 降序，同分时较新者优先）+ 截断到 MAX_OUTPUT_ITEMS
@@ -209,7 +215,7 @@ export async function expandAndFormat(
         output += `（这些是你这几天一直记着的事。记着不等于要一直说——话赶到那儿了顺口提一句就够了，没赶到就让它待在心里；同一件事不必每次聊天都追问进展，也不必替 ta 安排什么时候去做。）\n`;
         for (const node of pinnedNodes) {
             const daysLeft = Math.ceil((node.pinnedUntil! - now) / (24 * 60 * 60 * 1000));
-            output += `- [${formatMemoryDateWithDistance(node.createdAt, now)}] ${memoryContentWithDates(node)}（剩余 ${daysLeft} 天）\n`;
+            output += `- [${dateOf(node.createdAt)}] ${contentOf(node)}（剩余 ${daysLeft} 天）\n`;
         }
         output += `\n`;
         console.log(`📌 [MemoryPalace] 便利贴置顶 ${pinnedNodes.length} 条`);
@@ -253,10 +259,13 @@ export async function expandAndFormat(
 
 // ─── 子渲染：单条独立记忆 ──────────────────────────────
 
-function buildStandaloneItem(r: ScoredMemory, now: number): RenderItem {
+type DateOf = (ts: number) => string;
+type ContentOf = (node: MemoryNode) => string;
+
+function buildStandaloneItem(r: ScoredMemory, dateOf: DateOf, contentOf: ContentOf): RenderItem {
     const node = r.node;
-    const date = formatMemoryDateWithDistance(node.createdAt, now);
-    const body = `(${date}, 重要性: ${node.importance})\n${memoryContentWithDates(node)}`;
+    const date = dateOf(node.createdAt);
+    const body = `(${date}, 重要性: ${node.importance})\n${contentOf(node)}`;
     return {
         guaranteed: r.recallGuarantee === 'explicit_entity',
         score: r.finalScore,
@@ -275,7 +284,8 @@ async function buildBoxItem(
     box: EventBox,
     topScore: number,
     localNodeMap: Map<string, MemoryNode>,
-    now: number,
+    dateOf: DateOf,
+    contentOf: ContentOf,
     guaranteed: boolean = false,
 ): Promise<RenderItem | null> {
     // 加载 summary（如有）
@@ -309,7 +319,7 @@ async function buildBoxItem(
     body += '\n';
 
     if (summary) {
-        const sDate = formatMemoryDateWithDistance(summary.createdAt, now);
+        const sDate = dateOf(summary.createdAt);
         body += `_整合回忆_ (${sDate}, 重要性 ${summary.importance}, 已压缩 ${box.compressionCount} 次)\n`;
         body += `${summary.content}\n`;
     }
@@ -317,8 +327,8 @@ async function buildBoxItem(
     if (liveToShow.length > 0) {
         body += summary ? `_新增片段_：\n` : '';
         for (const n of liveToShow) {
-            const d = formatMemoryDateWithDistance(n.createdAt, now);
-            body += `- [${d}] ${memoryContentWithDates(n)}\n`;
+            const d = dateOf(n.createdAt);
+            body += `- [${d}] ${contentOf(n)}\n`;
         }
         if (omitted > 0) body += `（另有 ${omitted} 条同盒活节点未展示）\n`;
     }
