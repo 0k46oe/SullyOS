@@ -11,6 +11,6 @@ export default function CharacterSettingsSection({ title, summary, children }: {
       </span>
       <span aria-hidden="true" className="text-slate-400 transition-transform group-open/section:rotate-90">›</span>
     </summary>
-    <div className="border-t border-slate-100 [&>div]:border-0 [&>div]:shadow-none">{children}</div>
+    <div className="min-w-0 overflow-hidden border-t border-slate-100 p-4 [&>div]:border-0 [&>div]:shadow-none">{children}</div>
   </details>;
 }

@@ -362,16 +362,25 @@ const ChatModals: React.FC<ChatModalsProps> = ({
 
     return (
         <>
-            <Modal isOpen={modalType === 'generate-image'} title="生成图片" onClose={() => setModalType('none')} footer={<button type="button" onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl">关闭</button>}>
-                <div className="space-y-3 rounded-2xl bg-[#faf7f1] p-4 text-[#5d5547]">
-                    <p className="text-xs text-[#9a8e7b]">图片会先保存到本机生图记录，不会自动发进聊天。</p>
-                    <textarea value={imageRequirement} onChange={e => setImageRequirement(e.target.value)} placeholder="填写你想生成的画面、人物、动作、场景或风格…" className="w-full h-28 resize-none rounded-xl border border-[#e5dece] bg-[#fffcf7] p-3 text-sm outline-none" disabled={imageBusy} />
-                    <button type="button" onClick={generateImage} disabled={imageBusy || !imageRequirement.trim()} className="w-full rounded-xl bg-[#8a917c] p-3 text-sm font-bold text-white disabled:opacity-40">{imageBusy ? imageStatus || '生成中…' : '生成并保存'}</button>
-                    {imageStatus && <p role="status" className="text-xs text-[#8f8475]">{imageStatus}</p>}
-                </div>
-                {selectedSavedImage && <div className="mt-4 rounded-2xl border border-[#e5dece] bg-[#fffcf7] p-3"><GeneratedImagePreview imageRef={selectedSavedImage.imageRef} /><div className="mt-3 grid grid-cols-2 gap-2"><button type="button" onClick={() => onSendGeneratedImage?.(selectedSavedImage.imageRef)} className="rounded-xl border border-[#b9b09f] p-2 text-xs font-bold">发送到聊天</button><button type="button" onClick={() => setSelectedSavedImage(null)} className="rounded-xl border border-[#e5dece] p-2 text-xs">继续生成</button></div></div>}
-                <div className="mt-4"><div className="mb-2 flex justify-between text-xs font-bold"><span>最近生图</span><button type="button" onClick={() => void loadSavedImages()} className="text-[#8a917c]">刷新</button></div><div className="grid grid-cols-4 gap-2">{savedImages.map(image => <button type="button" key={image.id} onClick={() => setSelectedSavedImage(image)} className="overflow-hidden rounded-lg border border-[#e5dece]"><GeneratedImagePreview imageRef={image.thumbnailRef || image.imageRef} compact /></button>)}</div></div>
-            </Modal>
+            {modalType === 'generate-image' && <div className="fixed inset-0 z-[110] flex min-h-0 flex-col bg-[#f6f1e8] text-[#4f493f]" style={{ paddingTop: 'var(--safe-top, 0px)', paddingBottom: 'var(--safe-bottom, 0px)' }}>
+                <header className="flex shrink-0 items-center border-b border-[#e5dece] bg-[#fbf8f2] px-5 py-4">
+                    <button type="button" onClick={() => setModalType('none')} className="-ml-2 flex h-10 w-10 items-center justify-center rounded-full text-2xl text-[#756b5d]" aria-label="返回">‹</button>
+                    <h2 className="min-w-0 flex-1 text-center text-lg font-bold">生成图片</h2>
+                    <div className="h-10 w-10" aria-hidden="true" />
+                </header>
+                <main className="min-h-0 flex-1 overflow-y-auto px-5 py-6">
+                    <div className="mx-auto w-full max-w-2xl space-y-5">
+                        <section className="space-y-3 rounded-3xl bg-[#faf7f1] p-5 text-[#5d5547] shadow-sm">
+                            <p className="break-words text-sm leading-relaxed text-[#9a8e7b]">图片会先保存到本机生图记录，不会自动发进聊天。</p>
+                            <textarea value={imageRequirement} onChange={e => setImageRequirement(e.target.value)} placeholder="填写你想生成的画面、人物、动作、场景或风格…" className="min-h-36 w-full resize-y rounded-2xl border border-[#e5dece] bg-[#fffcf7] p-4 text-sm leading-relaxed outline-none" disabled={imageBusy} />
+                            <button type="button" onClick={generateImage} disabled={imageBusy || !imageRequirement.trim()} className="w-full rounded-2xl bg-[#8a917c] p-4 text-sm font-bold text-white disabled:opacity-40">{imageBusy ? imageStatus || '生成中…' : '生成并保存'}</button>
+                            {imageStatus && <p role="status" className="break-words text-sm leading-relaxed text-[#8f8475]">{imageStatus}</p>}
+                        </section>
+                        {selectedSavedImage && <section className="rounded-3xl border border-[#e5dece] bg-[#fffcf7] p-4 shadow-sm"><GeneratedImagePreview imageRef={selectedSavedImage.imageRef} /><div className="mt-4 grid grid-cols-2 gap-3"><button type="button" onClick={() => onSendGeneratedImage?.(selectedSavedImage.imageRef)} className="rounded-2xl border border-[#b9b09f] p-3 text-sm font-bold">发送到聊天</button><button type="button" onClick={() => setSelectedSavedImage(null)} className="rounded-2xl border border-[#e5dece] p-3 text-sm">继续生成</button></div></section>}
+                        <section><div className="mb-3 flex items-center justify-between"><h3 className="text-base font-bold">最近生图</h3><button type="button" onClick={() => void loadSavedImages()} className="text-sm font-bold text-[#8a917c]">刷新</button></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{savedImages.map(image => <button type="button" key={image.id} onClick={() => setSelectedSavedImage(image)} className="overflow-hidden rounded-2xl border border-[#e5dece] bg-[#fffcf7] shadow-sm"><GeneratedImagePreview imageRef={image.thumbnailRef || image.imageRef} compact /></button>)}</div></section>
+                    </div>
+                </main>
+            </div>}
             <Modal 
                 isOpen={modalType === 'transfer'} title="Credits 转账" onClose={() => setModalType('none')}
                 footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 rounded-2xl">取消</button><button onClick={onTransfer} className="flex-1 py-3 bg-orange-500 text-white rounded-2xl">确认</button></>}
