@@ -13,7 +13,7 @@ import { ContextBuilder } from './context';
 import { DB } from './db';
 import { formatLifeSimResetCardForContext } from './lifeSimChatCard';
 import { formatQixiEventCardForContext, tryParseQixiEventChatCard } from './qixiChatCard';
-import { normalizeMessageContent, stickerNameFromUrl, theaterWhenPhrase } from './messageFormat';
+import { normalizeMessageContent, recentUserStickerMessages, stickerNameFromUrl, theaterWhenPhrase } from './messageFormat';
 import { formatTransferRecord } from './transferFormat';
 import { computeCurrentListening, getCurrentSlot } from './charMusicSchedule';
 import { getCharLyricSnippet } from './charLyricCache';
@@ -1134,6 +1134,8 @@ ${voiceActingGuide()}`;
         const charTz = resolveCharTimeZone(char);
         const timeAwarenessOn = options?.timeAwarenessEnabled ?? (char.timeAwarenessEnabled !== false);
         const storyTime = options?.tavernStoryTime ? getActiveTavernStoryTime(char) : null;
+        // 用户发的最近几张表情包带图；表情包库清单和角色自己发的仍只给名字
+        const stickerImageMsgs = recentUserStickerMessages(historySlice);
 
         let timeGapHint = "";
         if (historySlice.length >= 2) {
@@ -1405,6 +1407,15 @@ ${voiceActingGuide()}`;
                 else if (m.type === 'emoji') {
                      const stickerName = stickerNameFromUrl(emojis, m.content);
                      content = `${timeStr} [${m.role === 'user' ? '用户' : '你'} 发送了表情包: ${stickerName}]`;
+                     if (stickerImageMsgs.has(m)) {
+                         // 开了识图 API 时给文字描述（主模型可能看不了图），否则直接附图
+                         const visionDescription = options?.useVisionDescriptions && typeof m.metadata?.visionDescription === 'string'
+                             ? m.metadata.visionDescription.trim() : '';
+                         if (visionDescription) content = `${content}\n[表情包画面：${visionDescription}]`;
+                         else if (!options?.useVisionDescriptions) {
+                             return { role: m.role, content: [{ type: 'text', text: content.trimStart() }, { type: 'image_url', image_url: { url: m.content } }] };
+                         }
+                     }
                 }
                 else if ((m.type as string) === 'chat_forward') {
                     try {

@@ -17,6 +17,7 @@ import { formatQixiEventCardForContext, tryParseQixiEventChatCard } from './qixi
 import { formatTransferRecord } from './transferFormat';
 import { formatStatCount } from './videoParser';
 import {secretNoteContext} from './secretNote';
+import { isBlobRef } from './blobRef';
 import {friendFeedShareContext} from './friendFeedShareContext';
 import { formatSARModuleEventsForContext } from './vrWorld/sarModuleRuntime';
 
@@ -39,6 +40,25 @@ export function buildSARMemoryBoundaryInstruction(sourceText: string): string {
  */
 export function stickerNameFromUrl(emojis: Emoji[], url: string): string {
     return emojis.find(e => e.url === url)?.name || '未知表情';
+}
+
+/** 用户发的表情包里，最近几张给模型看图（或识图描述）；更早的、角色自己发的只给名字。 */
+export const USER_STICKER_IMAGE_LIMIT = 5;
+
+const isStickerImageValue = (value: unknown): value is string =>
+    typeof value === 'string' && (/^(data:image\/|https?:\/\/)/i.test(value) || isBlobRef(value));
+
+/** 按时间顺序挑出最近 limit 条「用户发的、图片数据还在」的表情包消息。 */
+export function recentUserStickerMessages<T extends Pick<Message, 'role' | 'type' | 'content'>>(
+    messages: readonly T[],
+    limit: number = USER_STICKER_IMAGE_LIMIT,
+): Set<T> {
+    const picked = new Set<T>();
+    for (let i = messages.length - 1; i >= 0 && picked.size < limit; i--) {
+        const m = messages[i];
+        if (m.role === 'user' && m.type === 'emoji' && isStickerImageValue(m.content)) picked.add(m);
+    }
+    return picked;
 }
 
 /**

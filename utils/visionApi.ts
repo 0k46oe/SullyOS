@@ -3,6 +3,7 @@ import { DB } from './db';
 import { extractContent, safeFetchJson } from './safeApi';
 import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from './apiConfigNormalize';
 import { isBlobRef } from './blobRef';
+import { recentUserStickerMessages } from './messageFormat';
 
 export const VISION_DESCRIPTION_METADATA_KEY = 'visionDescription';
 
@@ -120,8 +121,19 @@ export async function materializeVisionDescriptions(
 
   const descriptionByImage = new Map<string, string>();
   const prepared: Message[] = [];
+  // 调用方传进来的批次不一定按时间排；按时间挑出用户最近发的几张表情包，跟 buildMessageHistory 同一口径
+  const stickersToDescribe = recentUserStickerMessages([...messages].sort((a, b) => a.timestamp - b.timestamp));
 
   for (const message of messages) {
+    if (message.type === 'emoji') {
+      if (!stickersToDescribe.has(message) || readVisionDescription(message)) { prepared.push(message); continue; }
+      const description = descriptionByImage.get(message.content) || await describeImageWithVisionApi(message.content, config);
+      descriptionByImage.set(message.content, description);
+      const metadata = { ...(message.metadata || {}), [VISION_DESCRIPTION_METADATA_KEY]: description, visionRecognizedAt: Date.now(), visionModel: config.model.trim() };
+      await DB.updateMessageMetadata(message.id, prev => ({ ...(prev || {}), ...metadata }));
+      prepared.push({ ...message, metadata });
+      continue;
+    }
     if(message.type==='friend_feed_share_card') {
       const share=message.metadata?.friendFeedShare;
       if(!share?.imagesEnabled || !Array.isArray(share.imageRefs) || readVisionDescription(message)) {prepared.push(message);continue;}
