@@ -1265,10 +1265,38 @@ export const DB = {
     // （iOS Safari 常见）时写入静默丢失，「一键优化」还会照报「已转 N 张」。
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORE_EMOJIS, 'readwrite');
-      transaction.objectStore(STORE_EMOJIS).put({ name, url, categoryId });
+      const store = transaction.objectStore(STORE_EMOJIS);
+      // 图片没换（比如迁移存储格式、换分类）时保留画面描述；换了图描述就作废
+      const existing = store.get(name);
+      existing.onsuccess = () => {
+        const previous = existing.result as Emoji | undefined;
+        const keep = previous?.visionDescription && previous.url === url ? { visionDescription: previous.visionDescription } : {};
+        store.put({ name, url, categoryId, ...keep });
+      };
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
       transaction.onabort = () => reject(transaction.error || new Error('saveEmoji transaction aborted'));
+    });
+  },
+
+  /** 写入或清空一张表情包的画面描述。传空字符串 = 清空，下次发送前重新识别。 */
+  setEmojiDescription: async (name: string, description: string): Promise<void> => {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_EMOJIS, 'readwrite');
+      const store = tx.objectStore(STORE_EMOJIS);
+      const getReq = store.get(name);
+      getReq.onsuccess = () => {
+        const record = getReq.result as Emoji | undefined;
+        if (!record) { reject(new Error('未找到这个表情包')); return; }
+        const { visionDescription: _old, ...rest } = record;
+        const text = description.trim();
+        store.put(text ? { ...rest, visionDescription: text } : rest);
+      };
+      getReq.onerror = () => reject(getReq.error);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
     });
   },
 

@@ -11,6 +11,7 @@ import ChatWordFrequencyPanel from './ChatWordFrequencyPanel';
 import { isDefaultAiCompanionEnabled } from '../../utils/characterInstructions';
 import { useOS } from '../../context/OSContext';
 import SecretNote from './SecretNote';
+import EmojiDescriptionModal from './EmojiDescriptionModal';
 import type { ChatInputPreferences } from '../../utils/chatInputPreferences';
 import { isTranslationLangPreset, normalizeTranslationLangLabel, TRANSLATION_LANG_MAX_LENGTH, TRANSLATION_LANG_PRESETS } from '../../utils/translationLang';
 import type { ContextRangeMode, ContextRangeSnapshot } from '../../utils/chatContextRange';
@@ -63,6 +64,8 @@ interface ChatModalsProps {
     newEmojiName: string;
     setNewEmojiName: (v: string) => void;
     onRenameEmoji: () => void;
+    /** 改了表情包画面描述后重新读取表情包库 */
+    onEmojiLibraryChanged?: () => void;
 
     // Archive Props
     archivePrompts: {id: string, name: string, content: string}[];
@@ -75,7 +78,7 @@ interface ChatModalsProps {
 
     // Selection Props
     selectedMessage: Message | null;
-    selectedEmoji: {name: string, url: string} | null;
+    selectedEmoji: {name: string, url: string, visionDescription?: string} | null;
     selectedCategory: EmojiCategory | null;
     activeCharacter: CharacterProfile;
     messages: Message[];
@@ -269,7 +272,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     contextSuiteAnyEnabled, contextSuiteAllEnabled, onToggleContextSuite,
     editContent, setEditContent,
     newCategoryName, setNewCategoryName, onAddCategory,
-    newEmojiName, setNewEmojiName, onRenameEmoji,
+    newEmojiName, setNewEmojiName, onRenameEmoji, onEmojiLibraryChanged,
     archivePrompts, selectedPromptId, setSelectedPromptId,
     editingPrompt, setEditingPrompt, isSummarizing, archiveProgress,
     selectedMessage, selectedEmoji, selectedCategory, activeCharacter, messages,
@@ -1096,6 +1099,12 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                             修改名称
                         </button>
                         <button
+                            onClick={() => setModalType('emoji-description')}
+                            className="w-full py-3 bg-slate-50 text-slate-700 font-medium rounded-2xl active:bg-slate-100 transition-colors flex items-center justify-center gap-2"
+                        >
+                            画面描述（识图）
+                        </button>
+                        <button
                             onClick={() => setModalType('delete-emoji')}
                             className="w-full py-3 bg-red-50 text-red-500 font-medium rounded-2xl active:bg-red-100 transition-colors flex items-center justify-center gap-2"
                         >
@@ -1107,6 +1116,13 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                     </div>
                 </div>
             </Modal>
+
+            <EmojiDescriptionModal
+                isOpen={modalType === 'emoji-description'}
+                emoji={selectedEmoji && !Array.isArray(selectedEmoji) ? selectedEmoji : null}
+                onClose={() => setModalType('none')}
+                onSaved={() => onEmojiLibraryChanged?.()}
+            />
 
             {/* Rename Emoji Modal */}
             <Modal

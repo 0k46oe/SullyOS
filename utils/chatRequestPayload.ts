@@ -37,7 +37,7 @@ import type { MusicCfg, Song, LyricLine, MusicPlaybackSnapshot, RecentTrackChang
 import { isPromptBuildSkipped, isSystemMessageMergeEnabled } from './devDebug';
 import { mergeSystemMessages } from './systemMessageMerge';
 import { cleanApiMessages, flattenImageContentParts } from './promptMessageCleanup';
-import { materializeVisionDescriptions } from './visionApi';
+import { describeRecentStickers, materializeVisionDescriptions } from './visionApi';
 import type { RecallEntryPoint, RecallTrace } from './memoryPalace/trace';
 import { isChatConversationEntry } from './memoryPalace/trace';
 import { loadCollaborationFileCabinetBlock } from '../features/collaboration/chatLibrary';
@@ -252,7 +252,7 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
     // 彼方/小小窝等调用方各自维护筛选很容易漏掉一条路径；一旦把全量表情传进来，
     // 模型既会看到其他角色的专属表情，历史里的同名表情也可能反查到错误 URL。
     // 即使调用方已经过滤过，重复过滤仍是幂等的。
-    const { emojis, categories } = ChatPrompts.filterVisibleEmojis(
+    let { emojis, categories } = ChatPrompts.filterVisibleEmojis(
         input.emojis,
         input.categories,
         char.id,
@@ -283,6 +283,8 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
         const preparedById = new Map(prepared.map(message => [message.id, message]));
         historyMsgsForPrompt = selectedHistory.map(message => preparedById.get(message.id) || message);
         recentMsgsHint = rawRecentMsgsHint.map(message => preparedById.get(message.id) || message);
+        // 表情包的画面描述按表情包库一张一份；只补这轮会带图的那几张
+        emojis = await prepare('vision', () => describeRecentStickers(selectedHistory, emojis, input.visionApiConfig));
     }
 
     // Range/vision processing must retain database IDs. Only after those steps may

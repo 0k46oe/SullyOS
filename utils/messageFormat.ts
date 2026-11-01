@@ -42,23 +42,32 @@ export function stickerNameFromUrl(emojis: Emoji[], url: string): string {
     return emojis.find(e => e.url === url)?.name || '未知表情';
 }
 
-/** 用户发的表情包里，最近几张给模型看图（或识图描述）；更早的、角色自己发的只给名字。 */
-export const USER_STICKER_IMAGE_LIMIT = 5;
+/** 用户和角色各自最近发的几张表情包给模型看图（或画面描述）；更早的只给名字。 */
+export const STICKER_IMAGE_LIMIT = 5;
 
 const isStickerImageValue = (value: unknown): value is string =>
     typeof value === 'string' && (/^(data:image\/|https?:\/\/)/i.test(value) || isBlobRef(value));
 
-/** 按时间顺序挑出最近 limit 条「用户发的、图片数据还在」的表情包消息。 */
-export function recentUserStickerMessages<T extends Pick<Message, 'role' | 'type' | 'content'>>(
+/** 按时间顺序，用户、角色各挑出最近 limit 条「图片数据还在」的表情包消息。 */
+export function recentStickerMessages<T extends Pick<Message, 'role' | 'type' | 'content'>>(
     messages: readonly T[],
-    limit: number = USER_STICKER_IMAGE_LIMIT,
+    limit: number = STICKER_IMAGE_LIMIT,
 ): Set<T> {
     const picked = new Set<T>();
-    for (let i = messages.length - 1; i >= 0 && picked.size < limit; i--) {
+    const count = { user: 0, assistant: 0 };
+    for (let i = messages.length - 1; i >= 0; i--) {
         const m = messages[i];
-        if (m.role === 'user' && m.type === 'emoji' && isStickerImageValue(m.content)) picked.add(m);
+        if ((m.role !== 'user' && m.role !== 'assistant') || m.type !== 'emoji' || !isStickerImageValue(m.content)) continue;
+        if (count[m.role] >= limit) continue;
+        count[m.role]++;
+        picked.add(m);
     }
     return picked;
+}
+
+/** 消息里的表情包 URL 对应表情包库里的哪一张；库里删了就是 undefined。 */
+export function stickerFromUrl(emojis: Emoji[], url: string): Emoji | undefined {
+    return emojis.find(e => e.url === url);
 }
 
 /**

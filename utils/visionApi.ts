@@ -3,7 +3,8 @@ import { DB } from './db';
 import { extractContent, safeFetchJson } from './safeApi';
 import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from './apiConfigNormalize';
 import { isBlobRef } from './blobRef';
-import { recentUserStickerMessages } from './messageFormat';
+import type { Emoji } from '../types';
+import { recentStickerMessages, stickerFromUrl } from './messageFormat';
 
 export const VISION_DESCRIPTION_METADATA_KEY = 'visionDescription';
 
@@ -121,19 +122,10 @@ export async function materializeVisionDescriptions(
 
   const descriptionByImage = new Map<string, string>();
   const prepared: Message[] = [];
-  // 调用方传进来的批次不一定按时间排；按时间挑出用户最近发的几张表情包，跟 buildMessageHistory 同一口径
-  const stickersToDescribe = recentUserStickerMessages([...messages].sort((a, b) => a.timestamp - b.timestamp));
 
   for (const message of messages) {
-    if (message.type === 'emoji') {
-      if (!stickersToDescribe.has(message) || readVisionDescription(message)) { prepared.push(message); continue; }
-      const description = descriptionByImage.get(message.content) || await describeImageWithVisionApi(message.content, config);
-      descriptionByImage.set(message.content, description);
-      const metadata = { ...(message.metadata || {}), [VISION_DESCRIPTION_METADATA_KEY]: description, visionRecognizedAt: Date.now(), visionModel: config.model.trim() };
-      await DB.updateMessageMetadata(message.id, prev => ({ ...(prev || {}), ...metadata }));
-      prepared.push({ ...message, metadata });
-      continue;
-    }
+    // 表情包的画面描述存在表情包库里（describeRecentStickers），不写进消息
+    if (message.type === 'emoji') { prepared.push(message); continue; }
     if(message.type==='friend_feed_share_card') {
       const share=message.metadata?.friendFeedShare;
       if(!share?.imagesEnabled || !Array.isArray(share.imageRefs) || readVisionDescription(message)) {prepared.push(message);continue;}
@@ -182,4 +174,35 @@ export async function materializeVisionDescriptions(
   }
 
   return prepared;
+}
+
+/**
+ * 给上下文里会带图的那几张表情包补画面描述，存回表情包库：一张表情包只识别一次，
+ * 用户和角色发的共用。已有描述（包括用户手动改过的）不重新识别。
+ * 识别失败不阻断聊天，这张表情包这一轮只给名字。返回补好描述的表情包列表。
+ */
+export async function describeRecentStickers(
+  history: Message[],
+  emojis: Emoji[],
+  config?: VisionApiConfig | null,
+): Promise<Emoji[]> {
+  if (!isVisionApiReady(config)) return emojis;
+  const sorted = [...history].sort((a, b) => a.timestamp - b.timestamp);
+  const pending = new Map<string, Emoji>();
+  for (const message of recentStickerMessages(sorted)) {
+    const sticker = stickerFromUrl(emojis, message.content);
+    if (sticker && !sticker.visionDescription?.trim()) pending.set(sticker.name, sticker);
+  }
+  if (!pending.size) return emojis;
+  const described = new Map<string, string>();
+  for (const sticker of pending.values()) {
+    try {
+      const description = await describeImageWithVisionApi(sticker.url, config);
+      await DB.setEmojiDescription(sticker.name, description);
+      described.set(sticker.name, description);
+    } catch (error) {
+      console.warn(`[Vision] 表情包「${sticker.name}」识别失败，这一轮只给名字`, error);
+    }
+  }
+  return emojis.map(e => described.has(e.name) ? { ...e, visionDescription: described.get(e.name) } : e);
 }

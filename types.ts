@@ -4020,7 +4020,9 @@ export interface EmojiCategory {
 export interface Emoji {
     name: string;
     url: string;
-    categoryId?: string; 
+    categoryId?: string;
+    /** 识图 API 给这张表情包写的画面描述，用户可以手动改；空着时下次发送前自动识别。 */
+    visionDescription?: string;
 }
 
 export interface FullBackupData {
