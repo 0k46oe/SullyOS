@@ -92,3 +92,30 @@ describe('parseAndExecuteActions 落库时间戳', () => {
         expect(msgs[0].timestamp).toBeGreaterThanOrEqual(before);
     }, 20000);
 });
+
+describe('[schedule_message] 酒馆角色剧情年份', () => {
+    const storyChar = { tavernImport: true, tavernStoryTime: { enabled: true, yearLabel: '3777年', baseRealYear: new Date().getFullYear() } } as any;
+    const runStory = (content: string) =>
+        ChatParser.parseAndExecuteActions(content, `c-story-${Date.now()}`, '阿一', noop, undefined, undefined, undefined, undefined, undefined, undefined, storyChar);
+    const p2 = (n: number) => String(n).padStart(2, '0');
+
+    it('写了剧情年份 3777 → 按现实年份排，不会排到几千年后', async () => {
+        const save = vi.spyOn(DB, 'saveScheduledMessage').mockResolvedValue(undefined as any);
+        const future = new Date(Date.now() + 3600_000);
+        await runStory(`好
+[schedule_message | 3777-${p2(future.getMonth() + 1)}-${p2(future.getDate())} ${p2(future.getHours())}:${p2(future.getMinutes())}:00 | fixed | 该出门了]`);
+        expect(save).toHaveBeenCalledTimes(1);
+        const dueAt = save.mock.calls[0][0].dueAt;
+        expect(dueAt).toBeGreaterThan(Date.now());
+        expect(dueAt - Date.now()).toBeLessThan(2 * 3600_000);
+    });
+
+    it('只写月日时刻 → 补现实年份；今年已过的推到明年', async () => {
+        const save = vi.spyOn(DB, 'saveScheduledMessage').mockResolvedValue(undefined as any);
+        const past = new Date(Date.now() - 3600_000);
+        await runStory(`好
+[schedule_message | ${p2(past.getMonth() + 1)}-${p2(past.getDate())} ${p2(past.getHours())}:${p2(past.getMinutes())} | fixed | 明年见]`);
+        expect(save).toHaveBeenCalledTimes(1);
+        expect(new Date(save.mock.calls[0][0].dueAt).getFullYear()).toBe(past.getFullYear() + 1);
+    });
+});

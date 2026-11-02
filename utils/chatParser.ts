@@ -6,7 +6,7 @@ import { CharacterProfile, CharPlaylistSong } from '../types';
 import { sanitizeForBubble } from './sanitize';
 import { extractTransferCommands } from './transferFormat';
 import { executeLifeDirectives } from './lifeRecords';
-import { wallClockToTimestamp } from './timezone';
+import { nowInTimeZone, wallClockToTimestamp } from './timezone';
 import { getActiveTavernStoryTime } from './tavernStoryTime';
 import { CollaborationStore } from '../features/collaboration/store';
 import {
@@ -139,8 +139,6 @@ export const ChatParser = {
         musicHooks?: MusicActionHooks,
         /** 角色自定义时区；定时消息里的时间是角色照着自己的钟写的，要按这个还原成真实时刻。 */
         charTz?: string,
-        /** 角色档案（用于读取剧情年份设定） */
-        charProfile?: CharacterProfile,
         /**
          * 这一轮消息该落的时间戳（离线补收时是原始发送时刻）。不传则各条按写库当刻。
          *
@@ -166,6 +164,8 @@ export const ChatParser = {
          */
         frozenMusicSong?: FrozenMusicSong,
         replyRun?: ReplyRun,
+        /** 角色档案：开了剧情年份的酒馆角色，定时消息里的年份要换回现实年份。 */
+        charProfile?: CharacterProfile,
     ) => {
         const replyStep = <T>(operation: () => Promise<T>) => withReplyCancellation(replyRun, operation);
         replyRun?.check();
@@ -472,23 +472,19 @@ export const ChatParser = {
         while ((match = scheduleRegex.exec(content)) !== null) {
             let timeStr = match[1].trim();
             const msgContent = match[2].trim();
-            // 剧情年份模式：角色可能写了故事年份（如 3777-11-02）或只写月日（11-02 20:00），
-            // 需要换算成现实年份。月日时分跟现实一致，只有年份标签不同。
+            // 剧情年份模式：角色看到的「现在」是剧情年份（3777年 / 庚辰年…），月日时分跟现实一样。
+            // 它写的年份不能直接用（3777 年会排到几千年后永远不触发），所以只认月日时分，
+            // 按角色那边的现实年份补齐；这个时刻今年已经过了就算明年（12-31 排 01-01）。
             const storyTime = charProfile ? getActiveTavernStoryTime(charProfile) : null;
             if (storyTime) {
-                // 匹配 MM-DD HH:MM 或 MM-DD HH:MM:SS 格式（无年份）
-                const shortMatch = /^(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})(:\d{2})?$/.exec(timeStr);
-                if (shortMatch) {
-                    const [, month, day, hour, minute, second] = shortMatch;
-                    const now = new Date();
-                    let year = now.getFullYear();
-                    const testDate = new Date(year, Number(month) - 1, Number(day), Number(hour), Number(minute));
-                    // 如果这个月日时刻今年已过，推到明年
-                    if (testDate.getTime() <= Date.now()) year++;
-                    timeStr = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')} ${hour.padStart(2, '0')}:${minute}${second || ''}`;
-                } else {
-                    // 替换掉故事年份（前四位或更多位数字）为当前现实年份
-                    timeStr = timeStr.replace(/^\d{4,}/, String(new Date().getFullYear()));
+                const parts = /(\d{1,2})[-/月](\d{1,2})日?\s*(\d{1,2})[:：](\d{2})(?:[:：](\d{2}))?\s*$/.exec(timeStr);
+                if (parts) {
+                    const [, month, day, hour, minute, second = '00'] = parts;
+                    const p2 = (v: string) => v.padStart(2, '0');
+                    const build = (year: number) => `${year}-${p2(month)}-${p2(day)} ${p2(hour)}:${minute}:${second}`;
+                    const year = nowInTimeZone(charTz).getFullYear();
+                    timeStr = build(year);
+                    if (wallClockToTimestamp(timeStr, charTz) <= Date.now()) timeStr = build(year + 1);
                 }
             }
             // 角色照着自己那边的钟写时间，按设备时区解释会整体偏一个时差：
