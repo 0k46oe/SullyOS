@@ -2379,7 +2379,7 @@ export async function applyAssistantPostProcessing(
         (d): d is Extract<PostProcessDirective, { type: 'music_action' }> =>
             d.type === 'music_action' && !!d.song,
     )?.song;
-    aiContent = await replyStep(async () => ChatParser.parseAndExecuteActions(aiContent, char.id, char.name, addToast, musicHooks, resolveCharTimeZone(char), messageTimestamp, mcdInheritMeta, frozenMusicSong, ctx.replyRun));
+    aiContent = await replyStep(async () => ChatParser.parseAndExecuteActions(aiContent, char.id, char.name, addToast, musicHooks, resolveCharTimeZone(char), char, messageTimestamp, mcdInheritMeta, frozenMusicSong, ctx.replyRun));
 
     // ─── Step 4: thinking chain 抽取 (本轮末尾展示用) ───
     // 跑过二轮 (data !== initialData) → 取二轮 data 的 reasoning; 没跑二轮 → 取一轮 (round1ThinkingChain,

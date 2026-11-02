@@ -7,6 +7,7 @@ import { sanitizeForBubble } from './sanitize';
 import { extractTransferCommands } from './transferFormat';
 import { executeLifeDirectives } from './lifeRecords';
 import { wallClockToTimestamp } from './timezone';
+import { getActiveTavernStoryTime } from './tavernStoryTime';
 import { CollaborationStore } from '../features/collaboration/store';
 import {
     collaborationFileMessageMetadata,
@@ -138,6 +139,8 @@ export const ChatParser = {
         musicHooks?: MusicActionHooks,
         /** 角色自定义时区；定时消息里的时间是角色照着自己的钟写的，要按这个还原成真实时刻。 */
         charTz?: string,
+        /** 角色档案（用于读取剧情年份设定） */
+        charProfile?: CharacterProfile,
         /**
          * 这一轮消息该落的时间戳（离线补收时是原始发送时刻）。不传则各条按写库当刻。
          *
@@ -467,8 +470,27 @@ export const ChatParser = {
         const scheduleRegex = /\[schedule_message \| (.*?) \| fixed \| (.*?)\]/g;
         let match;
         while ((match = scheduleRegex.exec(content)) !== null) {
-            const timeStr = match[1].trim();
+            let timeStr = match[1].trim();
             const msgContent = match[2].trim();
+            // 剧情年份模式：角色可能写了故事年份（如 3777-11-02）或只写月日（11-02 20:00），
+            // 需要换算成现实年份。月日时分跟现实一致，只有年份标签不同。
+            const storyTime = charProfile ? getActiveTavernStoryTime(charProfile) : null;
+            if (storyTime) {
+                // 匹配 MM-DD HH:MM 或 MM-DD HH:MM:SS 格式（无年份）
+                const shortMatch = /^(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})(:\d{2})?$/.exec(timeStr);
+                if (shortMatch) {
+                    const [, month, day, hour, minute, second] = shortMatch;
+                    const now = new Date();
+                    let year = now.getFullYear();
+                    const testDate = new Date(year, Number(month) - 1, Number(day), Number(hour), Number(minute));
+                    // 如果这个月日时刻今年已过，推到明年
+                    if (testDate.getTime() <= Date.now()) year++;
+                    timeStr = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')} ${hour.padStart(2, '0')}:${minute}${second || ''}`;
+                } else {
+                    // 替换掉故事年份（前四位或更多位数字）为当前现实年份
+                    timeStr = timeStr.replace(/^\d{4,}/, String(new Date().getFullYear()));
+                }
+            }
             // 角色照着自己那边的钟写时间，按设备时区解释会整体偏一个时差：
             // 纽约角色在自己上午说「今晚 21:00 找你」，设备在中国就会算成已经过期。
             const dueTime = wallClockToTimestamp(timeStr, charTz);
