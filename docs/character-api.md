@@ -12,6 +12,8 @@ OpenAI 兼容接口使用单独的通用缓存路径：聊天载荷沿用 `chatR
 
 调用记录会读取 OpenAI 常见的 `prompt_tokens_details.cached_tokens`，也兼容部分代理使用的 `input_tokens_details.cached_tokens`；未返回时保持“未报告”，不补零、不伪造命中。
 
+请求 `include_usage` 时，流式接收不会在 `finish_reason` 后立即截断下一包用量；缺少结束事件的异常中转最多额外等待 1 秒，保留原有收口能力。流式兼容响应同样读取 `usageMetadata` / `usage_metadata`，包括只有用量、没有 choices 内容的末尾事件；完整响应和调用记录遵循同一口径。OAI 的 `input_tokens` 已含缓存输入时不再重复累加；仅 Anthropic 独立的缓存读写字段追加到其未缓存输入数。回归：`utils/geminiCacheUsage.test.ts`。
+
 ## Anthropic 原生接口
 
 统一使用原作者的 [Messages 通用传输](./anthropic-messages.md)，覆盖本地聊天、其它 App 与支持该能力的 Worker。`utils/dialogueTransport.ts` 只负责私聊的选项与诊断，消息、图片、工具续答和 SSE 转换统一由 `utils/anthropicApi.ts` 完成，不再保留另一套本地转换器。

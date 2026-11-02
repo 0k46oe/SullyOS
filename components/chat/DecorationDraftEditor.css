@@ -43,6 +43,12 @@
 
 /* The outfit viewer keeps its full height; browsing lives beside it. */
 .decoration-composer-body{display:flex;flex-direction:column;flex:1;min-height:0;position:relative}
+/* Give the code field the remaining visible height instead of reserving a
+   200px preview plus 135px controls when a phone keyboard is open. */
+.decoration-maker{overflow:hidden}
+.decoration-maker[data-css-editing=true] .decoration-composer-preview{display:none}
+.decoration-maker[data-css-editing=true] .decoration-composer-controls{flex:1;min-height:0;max-height:none;width:100%;box-sizing:border-box}
+.decoration-maker[data-css-editing=true] textarea{height:clamp(72px,28dvh,220px);min-height:72px;max-height:100%;resize:none;overflow:auto;overflow-wrap:normal;white-space:pre}
 .decoration-current .decoration-composer-body{flex-direction:row}
 .decoration-current .decoration-composer-preview{flex:1;min-width:0;min-height:0;container-type:normal;padding:16px 66px 20px 16px}
 .decoration-current .decoration-composer-preview>.beauty-preset-preview{width:100%;max-width:420px}

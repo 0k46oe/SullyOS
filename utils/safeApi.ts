@@ -124,6 +124,8 @@ class SseAssembler {
     private finishReason: string | null = null;
     private firstChunk: any = null;
     private usage: any = undefined;
+    terminalDone = false;
+    get hasUsage() { return this.usage != null; }
     private gotAnyChunk = false;
     // tool_calls 流式分片: OpenAI 约定按 index 分组, id/name 在首片, arguments 逐片拼接。
     // 不拼的话开了 stream 的工具模式(瑞幸/MCP)会静默丢掉全部工具调用。
@@ -143,7 +145,7 @@ class SseAssembler {
         if (!line.startsWith('data:')) return { content: '', reasoning: '', done: false };
         const payload = line.slice(5).trim();
         if (!payload) return { content: '', reasoning: '', done: false };
-        if (payload === '[DONE]') return { content: '', reasoning: '', done: true };
+        if (payload === '[DONE]') { this.terminalDone = true; return { content: '', reasoning: '', done: true }; }
         let chunk: any;
         try { chunk = JSON.parse(payload); } catch { return { content: '', reasoning: '', done: false }; }
         return this.feedChunk(chunk);
@@ -154,7 +156,8 @@ class SseAssembler {
         if (!this.firstChunk) this.firstChunk = chunk;
         // OpenAI 流式 usage 在最后一个 chunk（include_usage=true 时），也可能出现在中途；
         // 始终取最后一个非空的 usage，兼容各家代理。
-        if (chunk.usage) this.usage = chunk.usage;
+        const usage = chunk.usage ?? chunk.usageMetadata ?? chunk.usage_metadata;
+        if (usage && typeof usage === 'object') this.usage = usage;
         const choice = chunk.choices?.[0];
         if (!choice) return { content: '', reasoning: '', done: false };
         let delta = '';
@@ -285,6 +288,7 @@ async function readBodyWithStreaming(
     hooks: StreamHooks,
     timing?: { firstDeltaMs?: number },
     startedAt?: number,
+    expectTrailingUsage = false,
 ): Promise<any> {
     if (!response.body?.getReader) return safeResponseJson(response);
     const reader = response.body.getReader();
@@ -295,6 +299,7 @@ async function readBodyWithStreaming(
     let mode: 'undecided' | 'sse' | 'raw' = 'undecided';
     let sawFirstDelta = false;
     let sawTerminalEvent = false;
+    let usageDeadline = 0;
     const contentType = response.headers.get('content-type');
 
     const emit = (delta: SseFeedDelta) => {
@@ -321,7 +326,13 @@ async function readBodyWithStreaming(
     };
 
     while (true) {
-        const { done, value } = await reader.read();
+        let readTimer: ReturnType<typeof setTimeout> | undefined;
+        const next = await (usageDeadline ? Promise.race([
+            reader.read(),
+            new Promise<null>(resolve => { readTimer = setTimeout(() => resolve(null), Math.max(0, usageDeadline - Date.now())); }),
+        ]).finally(() => { if (readTimer) clearTimeout(readTimer); }) : reader.read());
+        if (!next) { try { await reader.cancel(); } catch { /* use the completed reply */ } break; }
+        const { done, value } = next;
         if (done) break;
         const textChunk = decoder.decode(value, { stream: true });
         raw += textChunk;
@@ -343,6 +354,12 @@ async function readBodyWithStreaming(
         }
         if (mode === 'sse') consumeLines();
         if (sawTerminalEvent) {
+            // Requested usage can arrive in a separate read after finish_reason.
+            // Bound the drain so broken proxies can still finish without [DONE].
+            if (expectTrailingUsage && !asm.terminalDone && !asm.hasUsage) {
+                if (!usageDeadline) usageDeadline = Date.now() + 1000;
+                continue;
+            }
             // A few OpenAI-compatible Claude proxies send [DONE]/finish_reason but
             // keep the HTTP socket alive. The completion is already whole; waiting
             // for reader.done would leave the Qixi loader spinning forever.
@@ -517,7 +534,7 @@ export async function safeFetchJson(
             const data = streamHooks?.responseParser
                 ? await streamHooks.responseParser(response, streamHooks, timing, attemptStartedAt)
                 : streamHooks
-                    ? await readBodyWithStreaming(response, streamHooks, timing, attemptStartedAt)
+                    ? await readBodyWithStreaming(response, streamHooks, timing, attemptStartedAt, (() => { try { return JSON.parse(String(options.body)).stream_options?.include_usage === true; } catch { return false; } })())
                     : await safeResponseJson(response);
             if (isChatCompletionUrl(urlStr) || /\/messages(?:[?#]|$)/.test(urlStr)) {
                 // TTFT 拆分埋点：headers = 首包响应头到达（≈排队+prefill 起点），

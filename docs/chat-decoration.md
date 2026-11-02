@@ -114,3 +114,9 @@ HTML 卡片仍在独立 iframe 沙盒中；白框控制其外壳和排版，不�
 回归：`pnpm vitest run utils/chatWhitebox.test.ts utils/chatDecoration.test.ts utils/collaborationMakers.test.ts utils/beautyShare.test.ts`；另做手机宽度下的心象、转账、长卡片、滚动和旧预设验证。
 
 内置白框新增「星轨 · 深空」「星轨 · 雾紫」，在聊天装扮的全部/白框分类和「我的搭配」选择器中展示。入口通过 `utils/builtinWhitebox.ts` 读取 `presets/chat/*.json`，只使用本地静态素材，不写入收藏库或替换用户已有设置；应用沿用角色选择确认流程。两款源文件与构建脚本在 `art/acid-orbit`：依次执行 `build-lace.mjs`、`build.mjs`、`build-builtins.mjs`、`build-preview.mjs` 可同步 CSS、导入文件和内置包。蕾丝为用户提供的 CC0 scallop2（来源见 `art/acid-orbit/SCALLOP-LICENSE.txt`）。
+
+## 手机代码编辑与长 CSS
+
+白框制作器的主 CSS 和「追加 CSS」共用 `CssCodeEditor`，内嵌图片仅在编辑框中显示短标记，保存仍保留完整图片内容。制作器 body portal 跟随 VisualViewport 高度和 offsetTop；聚焦代码时让出预览区，控件区可独立滚动，不改全局键盘或状态栏逻辑。
+
+代码框有焦点时暂停重建预览，离开后防抖 300ms 更新；保存直接使用最新 draft，不等待预览。旧 `ChromeCssEditor` 的保存防抖不能替代制作器的这条路径。回归：`utils/decorationEditorInput.test.ts`，覆盖缩小视口、浏览器平移、输入框滚动、预览暂停及两百万字符图片 CSS 无损编辑。

@@ -351,7 +351,7 @@ export function extractApiTokenUsage(response: unknown): { prompt?: number; comp
     const cacheCreation = num(usage.cache_creation_input_tokens);
     const nativeInput = num(usage.input_tokens);
     const prompt = num(usage.prompt_tokens ?? usage.promptTokenCount)
-        ?? (nativeInput == null ? undefined : nativeInput + (cacheRead ?? 0) + (cacheCreation ?? 0));
+        ?? (nativeInput == null ? undefined : nativeInput + (num(usage.cache_read_input_tokens) ?? 0) + (cacheCreation ?? 0));
     const completion = num(usage.completion_tokens ?? usage.output_tokens ?? usage.candidatesTokenCount);
     return {
         prompt,
@@ -380,8 +380,9 @@ export function scanSseForLog(text: string): { model?: string; usage?: unknown }
         const start = chunk?.type === 'message_start' ? chunk.message : undefined;
         if (!model && typeof (start?.model ?? chunk?.model) === 'string') model = start?.model || chunk.model;
         if (start?.usage && typeof start.usage === 'object') usage = start.usage;
-        if (chunk?.usage && typeof chunk.usage === 'object') usage = chunk.type === 'message_delta'
-            ? { ...(usage as object || {}), ...chunk.usage } : chunk.usage;
+        const chunkUsage = chunk?.usage ?? chunk?.usageMetadata ?? chunk?.usage_metadata;
+        if (chunkUsage && typeof chunkUsage === 'object') usage = chunk.type === 'message_delta'
+            ? { ...(usage as object || {}), ...chunkUsage } : chunkUsage;
     }
     return { model, usage };
 }
@@ -1083,7 +1084,7 @@ export function updateApiRequestCaptureUsage(input: {
                 let chunk: any;
                 try { chunk = JSON.parse(line.slice(5).trim()); } catch { continue; }
                 if (chunk?.type === 'message_start') append(snapshotApiRawUsage('message_start', chunk.message?.usage));
-                else append(snapshotApiRawUsage(chunk?.type === 'message_delta' ? 'message_delta' : 'stream_chunk', chunk?.usage));
+                else append(snapshotApiRawUsage(chunk?.type === 'message_delta' ? 'message_delta' : 'stream_chunk', chunk?.usage ?? chunk?.usageMetadata ?? chunk?.usage_metadata));
             }
             if (scanned.model) responseForUsage = { ...(responseForUsage as object || {}), model: scanned.model };
         }
