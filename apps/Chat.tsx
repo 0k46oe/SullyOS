@@ -1,4 +1,5 @@
 import { resolveCharacterUserProfile } from '../utils/characterUserProfile';
+import { paperStyle } from '../utils/paperStyle';
 import { getActiveTavernStoryTime } from '../utils/tavernStoryTime';
 import {avatarFrameLayer} from '../utils/avatarFrameTarget';
 import ChatRuntimeStyle from '../components/chat/ChatRuntimeStyle';
@@ -3853,31 +3854,35 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                      onClick={() => setMemoryPalaceResult(null)}
                  >
                      <div
+                         data-paper-ui="dialog"
+                         data-paper-dialog="memory-result"
+                         role="dialog" aria-modal="true" aria-label="记忆整理完成"
                          className="w-full max-w-sm max-h-[82vh] overflow-hidden flex flex-col relative"
-                         style={{
+                         style={paperStyle({
                              background: 'linear-gradient(160deg, #ffffff 0%, #f8fafc 100%)',
                              borderRadius: 28,
                              border: '1px solid rgba(148,163,184,0.18)',
                              boxShadow: '0 20px 50px -20px rgba(15,23,42,0.35)',
-                         }}
+                         })}
                          onClick={(e) => e.stopPropagation()}
                      >
                          <div
                              className="absolute top-0 left-0 right-0 h-[2px] pointer-events-none"
-                             style={{ background: 'linear-gradient(90deg, transparent, #6366f1, #a5b4fc, #6366f1, transparent)' }}
+                             style={paperStyle({ background: 'linear-gradient(90deg, transparent, #6366f1, #a5b4fc, #6366f1, transparent)' })}
                          />
                          <div className="px-6 pt-7 pb-4 text-center">
                              <div
+                                 data-paper-memory-surface="icon"
                                  className="w-14 h-14 mx-auto rounded-2xl flex items-center justify-center mb-3"
-                                 style={{
+                                 style={paperStyle({
                                      background: 'linear-gradient(135deg, rgba(99,102,241,0.12), rgba(129,140,248,0.06))',
                                      border: '1px solid rgba(99,102,241,0.15)',
-                                 }}
+                                 })}
                              >
                                  <span style={{ fontSize: 26 }}>🗂️</span>
                              </div>
-                             <div className="text-[10px] tracking-[0.25em] uppercase font-semibold" style={{ color: '#6366f1' }}>Memory Palace</div>
-                             <p className="text-[17px] font-bold mt-1" style={{ color: '#0f172a' }}>记忆整理完成</p>
+                             <div className="text-[10px] tracking-[0.25em] uppercase font-semibold" style={paperStyle({ color: '#6366f1' })}>Memory Palace</div>
+                             <p className="text-[17px] font-bold mt-1" style={paperStyle({ color: '#0f172a' })}>记忆整理完成</p>
                              <p className="text-[11px] text-slate-400 mt-1">
                                  新增 {memoryPalaceResult.stored} 条 · 去重跳过 {memoryPalaceResult.skipped} 条
                                  {memoryPalaceResult.batches.length > 1 && ` · ${memoryPalaceResult.batches.length} 批`}
@@ -3905,27 +3910,27 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                      <div
                                          key={i}
                                          className="p-3 rounded-2xl"
-                                         style={{
+                                         style={paperStyle({
                                              background: 'rgba(255,255,255,0.75)',
                                              border: `1px solid ${meta.color}22`,
                                              boxShadow: `0 2px 8px ${meta.color}14, inset 0 1px 0 rgba(255,255,255,0.8)`,
-                                         }}
+                                         })}
                                      >
                                          <div className="flex items-center gap-2 mb-1.5">
                                              <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold"
-                                                 style={{ background: `${meta.color}18`, color: meta.color }}
+                                                 style={paperStyle({ background: `${meta.color}18`, color: meta.color })}
                                              >
                                                  {roomLabel}
                                              </span>
                                              <span className="text-[10px] text-slate-400">{m.mood}</span>
-                                             <span className="text-[10px] font-bold ml-auto" style={{ color: '#f59e0b' }}>{'★'.repeat(Math.min(m.importance, 5))}</span>
+                                             <span className="text-[10px] font-bold ml-auto" style={paperStyle({ color: '#f59e0b' })}>{'★'.repeat(Math.min(m.importance, 5))}</span>
                                          </div>
                                          <p className="text-[12px] text-slate-700 leading-relaxed">{m.content}</p>
                                          {m.tags.length > 0 && (
                                              <div className="flex gap-1 mt-2 flex-wrap">
                                                  {m.tags.map((t, j) => (
                                                      <span key={j} className="text-[9px] px-1.5 py-0.5 rounded-full"
-                                                         style={{ background: 'rgba(148,163,184,0.15)', color: '#64748b' }}
+                                                         style={paperStyle({ background: 'rgba(148,163,184,0.15)', color: '#64748b' })}
                                                      >{t}</span>
                                                  ))}
                                              </div>
@@ -3939,12 +3944,13 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                          </div>
                          <div className="px-6 pb-6 pt-2">
                              <button
+                                 data-paper-memory-action="confirm"
                                  onClick={() => setMemoryPalaceResult(null)}
                                  className="w-full py-3 text-white text-[13px] font-bold rounded-2xl active:scale-[0.98] transition-transform"
-                                 style={{
+                                 style={paperStyle({
                                      background: 'linear-gradient(135deg, #6366f1, #4f46e5)',
                                      boxShadow: '0 6px 18px -6px rgba(79,70,229,0.5)',
-                                 }}
+                                 })}
                              >
                                  确认
                              </button>

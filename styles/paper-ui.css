@@ -142,3 +142,13 @@ html[data-paper-ui-style="sage-cream"] .avatar-crop-dialog .avatar-crop-confirm 
 html[data-paper-ui-style="sage-cream"] .avatar-crop-dialog button:focus-visible,
 html[data-paper-ui-style="sage-cream"] .avatar-crop-dialog input:focus-visible { outline-color: var(--sp-active); }
 html[data-paper-ui-style="sage-cream"] .avatar-crop-zoom input { accent-color: var(--sp-active); }
+
+/* Chat automatic-summary results are independent of the shared Modal. */
+html[data-paper-ui-style="sage-cream"] [data-paper-dialog="memory-result"] [data-paper-memory-surface="icon"] {
+  background: var(--sp-yellow) !important; border-color: #e9ddb7 !important;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-dialog="memory-result"] [data-paper-memory-action="confirm"] {
+  background: linear-gradient(135deg, var(--sp-green-soft), var(--sp-green-line)) !important;
+  color: var(--sp-green-ink);
+  box-shadow: 0 6px 18px -6px rgba(67, 86, 58, .2) !important;
+}
