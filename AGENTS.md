@@ -19,6 +19,8 @@ For future Codex windows working on this repository:
 
 ## 文档地图
 
+默认风格「暖米白纸」的可选鼠尾草奶油界面配色、原色恢复、作用域和生成脚本：先读 [docs/paper-ui-palette.md](./docs/paper-ui-palette.md)。仅改界面控件，不染用户装扮、聊天气泡和图片。
+
 用户头像、角色头像及分角色聊天头像的本地上传与裁剪：先读 [docs/avatar-upload.md](./docs/avatar-upload.md)。取消不写入，GIF 明确区分原动图与静态裁剪，继续沿用图片令牌存储。
 
 静态资源、Service Worker 缓存、离线启动或网页更新：先读 [`docs/static-resource-cache.md`](./docs/static-resource-cache.md)。不得注销推送 SW、清应用数据库或按整个 `/assets/` 目录设置 immutable。

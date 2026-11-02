@@ -31,7 +31,7 @@ const ThinkingChainSettingsModal: React.FC<Props> = ({ isOpen, onClose, value, o
             onClick={onClose}
         >
             <div
-                className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-3xl max-h-[85vh] overflow-y-auto no-scrollbar shadow-2xl"
+                data-paper-ui="dialog" className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-3xl max-h-[85vh] overflow-y-auto no-scrollbar shadow-2xl"
                 onClick={e => e.stopPropagation()}
             >
                 <div className="sticky top-0 z-10 bg-white px-5 pt-5 pb-3 border-b border-slate-100">

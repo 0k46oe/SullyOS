@@ -1090,6 +1090,28 @@ const Appearance: React.FC = () => {
                     </section>
                 )}
 
+                {(!theme.skin || theme.skin === 'default') && theme.desktopVariant !== 'nostalgia' && (
+                    <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100" data-paper-ui="palette-picker">
+                        <h2 className="text-sm font-bold text-slate-700 mb-2">默认风格 · 界面配色</h2>
+                        <p className="text-[11px] text-slate-500 leading-relaxed mb-4">仅调整弹窗、选项及神经链接、记忆宫殿、世界书、设置的界面配色。随时可切回原色。</p>
+                        <div className="grid grid-cols-2 gap-3" role="group" aria-label="暖米白纸界面配色">
+                            {([
+                                { id: 'original', name: '原始暖米白纸', colors: ['#f8f6f1', '#a5a28f', '#ede9fe'] },
+                                { id: 'sage-cream', name: '鼠尾草奶油', colors: ['#fbf8f0', '#dce5cd', '#f6eccb'] },
+                            ] as const).map(style => {
+                                const selected = (theme.paperUiStyle === 'sage-cream' ? 'sage-cream' : 'original') === style.id;
+                                return <button key={style.id} type="button" aria-pressed={selected}
+                                    onClick={() => updateTheme({ paperUiStyle: style.id })}
+                                    className="rounded-2xl border p-3 text-left transition-colors"
+                                    style={{ background: selected ? '#f1f3e8' : '#fffdf8', borderColor: selected ? '#82966c' : '#e3e2d5', color: '#43563a' }}>
+                                    <span className="flex gap-1.5 mb-2" aria-hidden="true">{style.colors.map(color => <span key={color} className="h-5 w-5 rounded-full border border-black/5" style={{ background: color }} />)}</span>
+                                    <span className="text-xs font-semibold">{style.name}{selected ? ' ✓' : ''}</span>
+                                </button>;
+                            })}
+                        </div>
+                    </section>
+                )}
+
                 <section className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
                     <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4">Preset Themes</h2>
                     <div className="flex gap-3 mb-6 overflow-x-auto no-scrollbar pb-1">

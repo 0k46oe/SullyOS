@@ -1,0 +1,31 @@
+# 暖米白纸 · 可选界面配色
+
+外观 → 主题 → 默认风格 · 界面配色，可选择「原始暖米白纸」或「鼠尾草奶油」。旧存档默认保留原始配色，不自动替用户改色。
+
+## 范围与恢复
+
+- 鼠尾草奶油使用暖纸白底、浅鼠尾草绿主操作、奶油黄次操作，文字使用深绿/深褐。开启的开关使用较深灰绿，区别于关闭状态。
+- 覆盖神经链接（含手办柜的界面）、记忆宫殿、世界书、设置和外观中的界面控件，以及通用 Modal / ConfirmDialog、头像裁剪和心象设置。
+- 聊天气泡长按面板：收藏为淡绿、删除为奶油黄；上下文与记忆采用黄绿；扩展功能中小红书开启为灰黄、HTML 开启为灰绿。
+- 手办柜使用奶油白柜体、浅黄射灯和底座，绿色只用于主操作；同步/素材入口用奶油黄。只改界面，不改手办、头像或 3D 素材本身。
+- 世界书大背景为暖纸白，避免整个页面铺绿；记忆宫殿的模型费用建议为奶黄提示，真实请求失败和危险操作保留警示色。
+- 真实错误、数据破坏风险的确认、连接失败等仍保留警示语义。实际聊天气泡、用户追加 CSS、图片、日程装扮和像素场景不改色。
+- 只在默认桌面且非 nostalgia 版本生效。其他皮肤暂时停用，返回纸感桌面时保留选择。壁纸或主题色自定义不影响开关判断。
+- 切回原始暖米白纸直接移除根节点配色标记，原有类名、颜色和行内样式回退立即恢复，不用还原备份。
+
+## 保存与实现
+
+OSTheme.paperUiStyle 是可选的 original / sage-cream，沿用 updateTheme 的 localStorage / IndexedDB 与完整外观预设、备份保存流程。切换只写此字段，不改 hue / saturation / lightness、壁纸或角色聊天装扮。
+
+utils/paperUiStyle.ts 统一决定 html 的 data-paper-ui-style 标记。PhoneShell 在指定 App 容器上放 data-paper-ui，独立弹窗在自己的表面放同一标记；不要把整个聊天页面加入配色范围。
+
+styles/paper-ui.css 定义纸白/黄绿变量和语义例外。styles/paper-ui-utilities.css 由 scripts/build-paper-ui.mjs 从界面使用的 Tailwind 类名生成精确别名，只在显式界面范围内生效。pnpm dev / pnpm build 会重新生成；新增界面色类后也可单独运行 node scripts/build-paper-ui.mjs。不要手改生成文件。
+
+记忆宫殿和手办柜大量使用行内样式，utils/paperStyle.ts 只适配颜色属性，用 CSS var 的原色 fallback 保留恢复路径；不会修改原对象、布局数值、图片 URL 或存储数据。data-paper-ui-exempt 用于日程装扮/像素场景等原色区域。
+
+## 验收
+
+- pnpm vitest run utils/paperUiStyle.test.ts utils/wallpaperCompat.test.ts utils/avatarCrop.test.ts
+- test/fixtures/paper-ui.html 是使用真实 OSProvider 和真实页面的独立浏览器验收入口；可用 window.paperQA 切页、开消息面板、操作主题。测试浏览器使用独立存储，勿在用户正式数据上灌入测试角色。
+- 确认原色 → 鼠尾草 → 原色后计算颜色一致；验证消息收藏/删除、上下文、两个扩展开关，以及世界书编辑页、记忆全局配置和设置展开项。
+- 检查 320px 窄屏、切换其他桌面/怀旧版自动停用、刷新仍保存所选配色，并确认主题色原值与聊天装扮未改。

@@ -86,7 +86,7 @@ const CreatorPartsUploader: React.FC<{ onClose: () => void }> = ({ onClose }) =>
     parts.forEach(p => { (grouped[p.categoryKey] = grouped[p.categoryKey] || []).push(p); });
 
     return (
-        <div className="fixed inset-0 z-[65] flex flex-col" style={{ background: 'linear-gradient(180deg, #241b3f 0%, #171130 55%, #120d24 100%)' }}>
+        <div data-paper-ui="chibi" className="fixed inset-0 z-[65] flex flex-col" style={{ background: 'var(--sp-paper, linear-gradient(180deg, #241b3f 0%, #171130 55%, #120d24 100%))' }}>
             {/* 顶栏：全屏浮层统一用 --chrome-top（安全区 + SullyOS 状态栏；状态栏隐藏时自动塌回 --safe-top），
                 与 ChibiStudio / 彼方 ChibiEditor 同一套约定，避免怼进状态栏时钟/电量条 */}
             <div className="shrink-0 px-4 pb-3 flex items-center gap-2 text-white" style={{ paddingTop: 'var(--chrome-top)' }}>

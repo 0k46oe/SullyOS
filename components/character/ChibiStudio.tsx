@@ -1,3 +1,4 @@
+import { paperStyle } from '../../utils/paperStyle';
 import React, { useMemo, useState } from 'react';
 import { useOS } from '../../context/OSContext';
 import { CharacterProfile, ChibiStudioSlotId } from '../../types';
@@ -78,14 +79,14 @@ const DisplayCase: React.FC<{
 }> = ({ view, onEdit, onSync }) => {
     const { meta, url } = view;
     return (
-        <div className="relative rounded-2xl overflow-hidden border border-white/10 shadow-[0_10px_30px_rgba(0,0,0,0.45)]"
-            style={{ background: 'linear-gradient(180deg, rgba(58,48,96,0.85) 0%, rgba(28,22,52,0.95) 100%)' }}>
+        <div data-paper-chibi="case" className="relative rounded-2xl overflow-hidden border border-white/10 shadow-[0_10px_30px_rgba(0,0,0,0.45)]"
+            style={paperStyle({ background: 'linear-gradient(180deg, rgba(58,48,96,0.85) 0%, rgba(28,22,52,0.95) 100%)' })}>
             {/* 顶部射灯 */}
-            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-40 h-36 pointer-events-none"
-                style={{ background: `radial-gradient(60% 100% at 50% 0%, ${meta.accent}33 0%, transparent 70%)` }} />
+            <div data-paper-chibi="lamp" className="absolute top-0 left-1/2 -translate-x-1/2 w-40 h-36 pointer-events-none"
+                style={paperStyle({ background: `radial-gradient(60% 100% at 50% 0%, ${meta.accent}33 0%, transparent 70%)` })} />
             {/* 玻璃反光斜带 */}
             <div className="absolute inset-y-0 w-16 pointer-events-none opacity-[0.07]"
-                style={{ background: 'linear-gradient(90deg, transparent, #fff, transparent)', animation: 'chibistudio-shine 5.5s ease-in-out infinite' }} />
+                style={paperStyle({ background: 'linear-gradient(90deg, transparent, #fff, transparent)', animation: 'chibistudio-shine 5.5s ease-in-out infinite' })} />
             {CASE_SPARKLES.map((sp, i) => (
                 <span key={i} className="absolute text-white pointer-events-none select-none"
                     style={{ top: sp.top, left: sp.left, fontSize: sp.s, animation: `chibistudio-twinkle 2.6s ease-in-out ${sp.d} infinite` }}>✦</span>
@@ -105,27 +106,27 @@ const DisplayCase: React.FC<{
                     </div>
                 )}
                 {/* 底座：圆盘 + 投影 */}
-                <div className="absolute bottom-3 left-1/2 -translate-x-1/2 w-[104px] h-[22px] rounded-[50%]"
-                    style={{ background: `linear-gradient(180deg, ${meta.accent}55, rgba(255,255,255,0.08))`, boxShadow: `0 2px 10px ${meta.accent}44 inset, 0 4px 14px rgba(0,0,0,.4)` }} />
-                <div className="absolute bottom-[10px] left-1/2 -translate-x-1/2 w-24 h-3 rounded-[50%] bg-black/50 blur-[2px]" />
+                <div data-paper-chibi="base" className="absolute bottom-3 left-1/2 -translate-x-1/2 w-[104px] h-[22px] rounded-[50%]"
+                    style={paperStyle({ background: `linear-gradient(180deg, ${meta.accent}55, rgba(255,255,255,0.08))`, boxShadow: `0 2px 10px ${meta.accent}44 inset, 0 4px 14px rgba(0,0,0,.4)` })} />
+                <div data-paper-chibi="shadow" className="absolute bottom-[10px] left-1/2 -translate-x-1/2 w-24 h-3 rounded-[50%] bg-black/50 blur-[2px]" />
             </div>
 
             {/* 铭牌 + 操作 */}
             <div className="relative px-4 pb-3.5 pt-1">
                 <div className="flex items-baseline gap-2">
                     <span className="font-serif text-[15px] font-bold text-white tracking-wide">{meta.label}</span>
-                    <span className="text-[9px] tracking-[3px] font-medium" style={{ color: meta.accent }}>{meta.en}</span>
+                    <span data-paper-chibi="caption" className="text-[9px] tracking-[3px] font-medium" style={paperStyle({ color: meta.accent })}>{meta.en}</span>
                     <span className="ml-auto text-[10px] text-indigo-200/50">{view.updatedAt ? new Date(view.updatedAt).toLocaleDateString() : ''}</span>
                 </div>
                 <p className="text-[10.5px] text-indigo-200/55 mt-0.5 mb-2.5">{meta.desc}</p>
                 <div className="flex gap-2">
-                    <button onClick={onEdit}
+                    <button data-paper-chibi="primary" onClick={onEdit}
                         className="flex-1 rounded-lg py-2 text-[11.5px] font-bold text-white flex items-center justify-center gap-1.5 active:scale-95 transition-transform"
-                        style={{ background: `linear-gradient(135deg, ${meta.accent}cc, ${meta.accent}88)` }}>
+                        style={paperStyle({ background: `linear-gradient(135deg, ${meta.accent}cc, ${meta.accent}88)` })}>
                         <PencilSimple size={13} weight="bold" /> {url ? '重新捏' : '捏这只'}
                     </button>
                     {url && (
-                        <button onClick={onSync}
+                        <button data-paper-chibi="secondary" onClick={onSync}
                             className="flex-1 rounded-lg py-2 text-[11.5px] font-medium text-indigo-100 border border-white/20 flex items-center justify-center gap-1.5 active:bg-white/10 transition-colors">
                             <ArrowsClockwise size={13} weight="bold" /> 同步到全部
                         </button>
@@ -153,14 +154,14 @@ export const ChibiShelfPanel: React.FC<{ charId: string; onOpen: () => void }> =
     const dressed = SLOTS.filter(s => !!urlOf[s.id]).length;
 
     return (
-        <div className="animate-fade-in space-y-4">
+        <div data-paper-ui="chibi" className="animate-fade-in space-y-4">
             <StudioStyle />
             {/* 迷你展示柜（点整柜也能进） */}
-            <div onClick={onOpen}
+            <div data-paper-chibi="shelf" onClick={onOpen}
                 className="relative rounded-3xl overflow-hidden border border-white/10 shadow-[0_10px_30px_rgba(40,30,80,0.35)] cursor-pointer active:scale-[0.99] transition-transform"
-                style={{ background: 'linear-gradient(180deg, #2b2150 0%, #171130 100%)' }}>
+                style={paperStyle({ background: 'linear-gradient(180deg, #2b2150 0%, #171130 100%)' })}>
                 <div className="absolute inset-y-0 w-14 pointer-events-none opacity-[0.06]"
-                    style={{ background: 'linear-gradient(90deg, transparent, #fff, transparent)', animation: 'chibistudio-shine 5.5s ease-in-out infinite' }} />
+                    style={paperStyle({ background: 'linear-gradient(90deg, transparent, #fff, transparent)', animation: 'chibistudio-shine 5.5s ease-in-out infinite' })} />
                 {CASE_SPARKLES.map((sp, i) => (
                     <span key={i} className="absolute text-white pointer-events-none select-none"
                         style={{ top: sp.top, left: sp.left, fontSize: sp.s, animation: `chibistudio-twinkle 2.6s ease-in-out ${sp.d} infinite` }}>✦</span>
@@ -175,9 +176,9 @@ export const ChibiShelfPanel: React.FC<{ charId: string; onOpen: () => void }> =
                     {SLOTS.map(meta => {
                         const url = urlOf[meta.id];
                         return (
-                            <div key={meta.id} className="relative rounded-xl overflow-hidden border border-white/10 bg-white/[0.03]">
-                                <div className="absolute top-0 left-1/2 -translate-x-1/2 w-20 h-16 pointer-events-none"
-                                    style={{ background: `radial-gradient(60% 100% at 50% 0%, ${meta.accent}30 0%, transparent 70%)` }} />
+                            <div data-paper-chibi="mini-case" key={meta.id} className="relative rounded-xl overflow-hidden border border-white/10 bg-white/[0.03]">
+                                <div data-paper-chibi="lamp" className="absolute top-0 left-1/2 -translate-x-1/2 w-20 h-16 pointer-events-none"
+                                    style={paperStyle({ background: `radial-gradient(60% 100% at 50% 0%, ${meta.accent}30 0%, transparent 70%)` })} />
                                 <div className="relative h-[88px] flex items-end justify-center">
                                     {url ? (
                                         <img src={url} alt={meta.label} className="relative z-10 object-contain mb-2.5 max-w-[80%]"
@@ -187,8 +188,8 @@ export const ChibiShelfPanel: React.FC<{ charId: string; onOpen: () => void }> =
                                             <Sparkle size={13} />
                                         </div>
                                     )}
-                                    <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 w-12 h-[9px] rounded-[50%]"
-                                        style={{ background: `linear-gradient(180deg, ${meta.accent}50, rgba(255,255,255,0.07))` }} />
+                                    <div data-paper-chibi="base" className="absolute bottom-1.5 left-1/2 -translate-x-1/2 w-12 h-[9px] rounded-[50%]"
+                                        style={paperStyle({ background: `linear-gradient(180deg, ${meta.accent}50, rgba(255,255,255,0.07))` })} />
                                 </div>
                                 <div className="relative text-center pb-1.5">
                                     <span className="text-[9.5px] font-bold text-indigo-100/85">{meta.label}</span>
@@ -199,9 +200,9 @@ export const ChibiShelfPanel: React.FC<{ charId: string; onOpen: () => void }> =
                 </div>
             </div>
 
-            <button onClick={onOpen}
+            <button data-paper-chibi="primary" onClick={onOpen}
                 className="w-full rounded-2xl py-3 text-[13px] font-bold text-white flex items-center justify-center gap-2 shadow-[0_6px_18px_rgba(140,120,200,0.30)] active:scale-[0.98] transition-transform"
-                style={{ background: 'linear-gradient(135deg, #a78bda, #8f9bf4)' }}>
+                style={paperStyle({ background: 'linear-gradient(135deg, #a78bda, #8f9bf4)', color: '#fff', boxShadow: '0 6px 18px var(--sp-chibi-shadow, rgba(140,120,200,0.30))' })}>
                 🧸 进入手办柜
             </button>
             <p className="text-[10.5px] text-slate-400 leading-relaxed px-1">
@@ -372,9 +373,9 @@ const ChibiStudio: React.FC<{ charId: string; onClose: () => void }> = ({ charId
         const slotMeta = SLOTS.find(s => s.id === editing)!;
         const slotView = views.find(v => v.meta.id === editing);
         return (
-            <div className="fixed inset-0 z-[70] flex flex-col bg-black">
+            <div data-paper-ui="chibi" className="fixed inset-0 z-[70] flex flex-col bg-black">
                 <div className="flex items-center gap-2 px-4 pb-2 shrink-0 text-white"
-                    style={{ background: 'linear-gradient(180deg,#241b3f 0%,#120d24 100%)', paddingTop: STUDIO_TOP }}>
+                    style={paperStyle({ background: 'linear-gradient(180deg,#241b3f 0%,#120d24 100%)', paddingTop: STUDIO_TOP })}>
                     <button onClick={() => setEditing(null)} className="p-1.5 -ml-1.5 rounded-full active:bg-white/10"><CaretLeft size={20} weight="bold" /></button>
                     <span className="text-[14px] font-bold">捏 {char.name} 的{slotMeta.label}形象</span>
                 </div>
@@ -397,7 +398,7 @@ const ChibiStudio: React.FC<{ charId: string; onClose: () => void }> = ({ charId
 
     // ── 展示柜主页 ──
     return (
-        <div className="fixed inset-0 z-[60] flex flex-col" style={{ background: 'linear-gradient(180deg, #241b3f 0%, #171130 55%, #120d24 100%)' }}>
+        <div data-paper-ui="chibi" className="fixed inset-0 z-[60] flex flex-col" style={paperStyle({ background: 'linear-gradient(180deg, #241b3f 0%, #171130 55%, #120d24 100%)' })}>
             <StudioStyle />
             {/* 顶栏 */}
             <div className="shrink-0 px-5 pb-3" style={{ paddingTop: STUDIO_TOP }}>
@@ -416,9 +417,9 @@ const ChibiStudio: React.FC<{ charId: string; onClose: () => void }> = ({ charId
                     同一只角色在三个地方的 Q 版形象——可以各捏各的，也可以挑一只「同步到全部」。
                 </p>
                 {/* 自定义素材工坊入口：PSD 批量导入自己的部件（正式站用户也能用） */}
-                <button onClick={() => setShowUploader(true)}
+                <button data-paper-chibi="secondary" onClick={() => setShowUploader(true)}
                     className="mt-3 w-full flex items-center gap-2 rounded-xl px-3.5 py-2.5 border border-amber-300/25 active:scale-[0.99] transition-transform"
-                    style={{ background: 'linear-gradient(135deg, rgba(251,191,36,0.14), rgba(245,158,11,0.06))' }}>
+                    style={paperStyle({ background: 'linear-gradient(135deg, rgba(251,191,36,0.14), rgba(245,158,11,0.06))' })}>
                     <FileArrowUp size={16} weight="bold" className="text-amber-300 shrink-0" />
                     <span className="text-[12px] font-bold text-amber-100 tracking-wide">上传自定义素材（PSD 批量导入）</span>
                     <CaretRight size={15} weight="bold" className="ml-auto text-amber-200/50" />
@@ -428,7 +429,7 @@ const ChibiStudio: React.FC<{ charId: string; onClose: () => void }> = ({ charId
             {/* 展示柜（三层展台）——底部给 home 条留白（iOS 全屏 PWA 用 --safe-bottom 兜底） */}
             <div className="flex-1 overflow-y-auto no-scrollbar px-4 space-y-4"
                 style={{ paddingBottom: STUDIO_BOTTOM }}>
-                <button onClick={() => setShowHomeFigure(true)} className="w-full min-h-[64px] rounded-2xl border border-white/20 bg-white/10 px-5 py-4 text-left text-white">3D 家园形象 <span className="block text-xs opacity-60 mt-1">{studio?.home3D?.state ? '编辑形象、衣服与体型' : '基于已有手办，捏出家园里的你'}</span></button>
+                <button data-paper-chibi="home-entry" onClick={() => setShowHomeFigure(true)} className="w-full min-h-[64px] rounded-2xl border border-white/20 bg-white/10 px-5 py-4 text-left text-white">3D 家园形象 <span className="block text-xs opacity-60 mt-1">{studio?.home3D?.state ? '编辑形象、衣服与体型' : '基于已有手办，捏出家园里的你'}</span></button>
                 {views.map(v => (
                     <DisplayCase key={v.meta.id} view={v}
                         onEdit={() => setEditing(v.meta.id)}
@@ -446,8 +447,8 @@ const ChibiStudio: React.FC<{ charId: string; onClose: () => void }> = ({ charId
                 const meta = SLOTS.find(s => s.id === syncConfirm)!;
                 return (
                     <div className="absolute inset-0 z-10 flex items-end justify-center bg-black/60" onClick={() => !syncing && setSyncConfirm(null)}>
-                        <div className="w-full max-w-md rounded-t-2xl p-5 border-t border-white/10"
-                            style={{ background: 'linear-gradient(180deg,#2b2150 0%,#171130 100%)', paddingBottom: STUDIO_SHEET_BOTTOM }}
+                        <div data-paper-chibi="sheet" className="w-full max-w-md rounded-t-2xl p-5 border-t border-white/10"
+                            style={paperStyle({ background: 'linear-gradient(180deg,#2b2150 0%,#171130 100%)', paddingBottom: STUDIO_SHEET_BOTTOM })}
                             onClick={e => e.stopPropagation()}>
                             <div className="flex items-center mb-2">
                                 <span className="text-[14px] font-bold text-white">以「{meta.label}」这只为准？</span>
@@ -456,9 +457,9 @@ const ChibiStudio: React.FC<{ charId: string; onClose: () => void }> = ({ charId
                             <p className="text-[11px] text-indigo-200/60 leading-relaxed mb-4">
                                 小小窝、彼方、特别时光三处会全部换成这套造型，另外两处现在的手办会被替换掉。
                             </p>
-                            <button disabled={syncing} onClick={() => { void syncFrom(syncConfirm); }}
+                            <button data-paper-chibi="primary" disabled={syncing} onClick={() => { void syncFrom(syncConfirm); }}
                                 className="w-full rounded-xl py-2.5 text-[13px] font-bold text-white active:scale-[0.98] transition-transform disabled:opacity-60"
-                                style={{ background: `linear-gradient(135deg, ${meta.accent}dd, ${meta.accent}99)` }}>
+                                style={paperStyle({ background: `linear-gradient(135deg, ${meta.accent}dd, ${meta.accent}99)` })}>
                                 {syncing ? '同步中…' : '确认同步 ✓'}
                             </button>
                         </div>

@@ -132,6 +132,8 @@ export interface OSTheme {
   homelyLockedCharacterId?: string;
   /** 默认桌面的视觉版本：纸感是现行默认，nostalgia 是用户主动选择的最初粉绿白玻璃界面。 */
   desktopVariant?: 'paper' | 'nostalgia';
+  /** 暖米白纸的界面配色；旧存档保留原色，切换不覆盖主题色或聊天装扮。 */
+  paperUiStyle?: 'original' | 'sage-cream';
   desktopClockStyle?: 'serif' | 'bold' | 'system';
   /** 动森皮肤下，聊天 App 是否也跟随换成动森界面。默认 true（undefined 视为 true）。关掉则聊天保持原样式。 */
   acnhChatSync?: boolean;

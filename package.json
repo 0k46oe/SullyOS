@@ -4,8 +4,8 @@
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "scripts": {
-    "dev": "node scripts/build-chat-preview-css.mjs && vite",
-    "build": "node scripts/build-chat-preview-css.mjs && pnpm run build:workers && vite build",
+    "dev": "node scripts/build-chat-preview-css.mjs && node scripts/build-paper-ui.mjs && vite",
+    "build": "node scripts/build-chat-preview-css.mjs && node scripts/build-paper-ui.mjs && pnpm run build:workers && vite build",
     "build:capacitor": "powershell -ExecutionPolicy Bypass -File scripts/sync-tiao-capacitor.ps1",
     "preview": "vite preview",
     "cap:sync": "cap sync",

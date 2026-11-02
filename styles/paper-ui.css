@@ -1,0 +1,144 @@
+@import './paper-ui-utilities.css';
+
+/* Opt-in UI palette. Remove the root attribute to restore all original rules.
+   Scopes intentionally exclude chat bubbles, decoration previews and artwork. */
+html[data-paper-ui-style="sage-cream"] {
+  --sp-source-primary-hue: var(--primary-hue);
+  --sp-source-primary-sat: var(--primary-sat);
+  --sp-source-primary-lightness: var(--primary-lightness);
+  --sp-paper: #fbf8f0; --sp-paper-rgb: 251, 248, 240;
+  --sp-surface: #fffdf8; --sp-surface-rgb: 255, 253, 248;
+  --sp-ink: #444a3c; --sp-ink-rgb: 68, 74, 60;
+  --sp-muted: #717364; --sp-muted-rgb: 113, 115, 100;
+  --sp-green-soft: #dce5cd; --sp-green-soft-rgb: 220, 229, 205;
+  --sp-green-line: #c7d3b7; --sp-green-line-rgb: 199, 211, 183;
+  --sp-green-ink: #43563a; --sp-green-ink-rgb: 67, 86, 58;
+  --sp-yellow: #f6eccb; --sp-yellow-rgb: 246, 236, 203;
+  --sp-yellow-ink: #6a5935; --sp-yellow-ink-rgb: 106, 89, 53;
+  --sp-line: #e3e2d5; --sp-line-rgb: 227, 226, 213;
+  --sp-neutral: #efeee5;
+  --sp-active: #82966c;
+}
+
+/* Pixel scenes, user decoration previews and images keep their authored colors. */
+html[data-paper-ui-style="sage-cream"] [data-paper-ui-exempt] {
+  --primary-hue: var(--sp-source-primary-hue);
+  --primary-sat: var(--sp-source-primary-sat);
+  --primary-lightness: var(--sp-source-primary-lightness);
+  --sp-paper: initial; --sp-paper-rgb: initial;
+  --sp-surface: initial; --sp-surface-rgb: initial;
+  --sp-ink: initial; --sp-ink-rgb: initial;
+  --sp-muted: initial; --sp-muted-rgb: initial;
+  --sp-green-soft: initial; --sp-green-soft-rgb: initial;
+  --sp-green-line: initial; --sp-green-line-rgb: initial;
+  --sp-green-ink: initial; --sp-green-ink-rgb: initial;
+  --sp-yellow: initial; --sp-yellow-rgb: initial;
+  --sp-yellow-ink: initial; --sp-yellow-ink-rgb: initial;
+  --sp-line: initial; --sp-line-rgb: initial;
+  --sp-neutral: initial; --sp-active: initial;
+}
+
+html[data-paper-ui-style="sage-cream"] :is([data-paper-ui], [data-paper-ui] *):not([data-paper-ui-exempt], [data-paper-ui-exempt] *) {
+  --primary-hue: 88; --primary-sat: 17%; --primary-lightness: 51%;
+}
+html[data-paper-ui-style="sage-cream"] :is([data-paper-ui], [data-paper-ui] *):is(.bg-primary, .bg-primary-focus):not([data-paper-ui-exempt], [data-paper-ui-exempt] *) {
+  background-color: var(--sp-green-soft) !important; color: var(--sp-green-ink) !important;
+}
+html[data-paper-ui-style="sage-cream"] :is([data-paper-ui], [data-paper-ui] *):is(.bg-white, .bg-\[\#fffefe\]):not([data-paper-ui-exempt], [data-paper-ui-exempt] *) { background-color: var(--sp-surface) !important; }
+html[data-paper-ui-style="sage-cream"] :is([data-paper-ui], [data-paper-ui] *):is(.bg-slate-50, .bg-slate-100, .bg-gray-50, .bg-\[\#f5f6fa\]):not([data-paper-ui-exempt], [data-paper-ui-exempt] *) { background-color: var(--sp-paper) !important; }
+html[data-paper-ui-style="sage-cream"] :is([data-paper-ui], [data-paper-ui] *):is(.text-slate-700, .text-slate-800, .text-gray-700, .text-gray-800):not([data-paper-ui-exempt], [data-paper-ui-exempt] *) { color: var(--sp-ink) !important; }
+html[data-paper-ui-style="sage-cream"] :is([data-paper-ui], [data-paper-ui] *):is(.text-slate-400, .text-slate-500, .text-gray-400, .text-gray-500):not([data-paper-ui-exempt], [data-paper-ui-exempt] *) { color: var(--sp-muted) !important; }
+
+html[data-paper-ui-style="sage-cream"] :is([data-paper-ui], .avatar-crop-dialog) {
+  color: var(--sp-ink);
+  accent-color: var(--sp-active);
+}
+html[data-paper-ui-style="sage-cream"] :is([data-paper-ui="dialog"], .avatar-crop-dialog) {
+  background-color: var(--sp-surface);
+  border-color: var(--sp-line);
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="settings"] .sully-settings,
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="worldbook"] > div,
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="memory"] {
+  background-color: var(--sp-paper);
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-surface="character-list"] {
+  background: linear-gradient(180deg, var(--sp-paper), #edf0e3) !important;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-surface="worldbook-atmosphere"] { background: linear-gradient(155deg, var(--sp-paper), #f3f1e7 65%, #edf0e3) !important; }
+html[data-paper-ui-style="sage-cream"] [data-paper-notice="cost"] { background: var(--sp-yellow) !important; border-color: #e9ddb7 !important; color: var(--sp-yellow-ink) !important; }
+html[data-paper-ui-style="sage-cream"] [data-paper-notice="cost"] * { color: inherit !important; }
+html[data-paper-ui-style="sage-cream"] [data-paper-surface="character-detail"] { background: var(--sp-paper); }
+html[data-paper-ui-style="sage-cream"] :where([data-paper-ui], [data-paper-ui] *):is(.bg-slate-50\/50, .bg-slate-50\/60, .bg-slate-50\/80):not(:where([data-paper-ui-exempt], [data-paper-ui-exempt] *)) { background-color: rgba(var(--sp-paper-rgb), .8) !important; }
+html[data-paper-ui-style="sage-cream"] :where([data-paper-ui], [data-paper-ui] *):is(.bg-white\/70, .bg-white\/80, .bg-white\/90):not(:where([data-paper-ui-exempt], [data-paper-ui-exempt] *)) { background-color: rgba(var(--sp-surface-rgb), .9) !important; }
+
+/* Semantic exceptions: message removal is a cream action in this palette;
+   actual errors/danger confirmations retain their warning colors. */
+html[data-paper-ui-style="sage-cream"] [data-paper-action="favorite"] {
+  background: var(--sp-green-soft) !important; color: var(--sp-green-ink) !important;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-action="delete"] {
+  background: var(--sp-yellow) !important; color: var(--sp-yellow-ink) !important;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-action="favorite"]:active { background: var(--sp-green-line) !important; }
+html[data-paper-ui-style="sage-cream"] [data-paper-action="delete"]:active { background: #ece0b4 !important; }
+html[data-paper-ui-style="sage-cream"] [data-paper-switch="green"] { background-color: var(--sp-active) !important; }
+html[data-paper-ui-style="sage-cream"] [data-paper-switch="yellow"] { background-color: #b5a66a !important; }
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="memory"] input:checked + span { background: var(--sp-active) !important; }
+
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="settings"] .character-awareness { --ca-accent: var(--sp-green-ink); --ca-tint: var(--sp-green-soft); }
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="settings"] .ca-segments { background: var(--sp-neutral); }
+html[data-paper-ui-style="sage-cream"] :where([data-paper-ui], [data-paper-ui] *) .bg-primary.rounded-full:not(:where([data-paper-ui-exempt], [data-paper-ui-exempt] *)) { background-color: var(--sp-active) !important; }
+
+/* Quieten the large memory backdrop while retaining sage selection fills. */
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="memory"] > div:not([data-paper-ui-exempt]) {
+  background: linear-gradient(180deg, var(--sp-paper), #f0f2e8 45%, var(--sp-surface)) !important;
+}
+
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="chibi"] .text-white { color: var(--sp-green-ink); }
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="chibi"] { --sp-chibi-shadow: rgba(130, 150, 108, .18); }
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="chibi"] > .shadow-\[0_10px_30px_rgba\(40\,30\,80\,0\.35\)\] { box-shadow: 0 8px 24px rgba(67, 86, 58, .12); }
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="chibi"] :is(.text-white\/90, .text-white\/85, .text-white\/80, .text-white\/70, .text-white\/60, .text-white\/50, .text-white\/40, .text-white\/30, .text-white\/25) { color: var(--sp-muted); }
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="chibi"] > .fixed,
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="chibi"].fixed { background: var(--sp-paper) !important; }
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="chibi"] .shadow-\[0_10px_30px_rgba\(0\,0\,0\,0\.45\)\] { box-shadow: 0 8px 24px rgba(67, 86, 58, .12); }
+
+/* A cream display cabinet with warm lighting; sage is reserved for actions. */
+html[data-paper-ui-style="sage-cream"] [data-paper-chibi="shelf"] {
+  background: linear-gradient(180deg, #fffdf8, #f5eedb) !important;
+  border-color: #e7dec6;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-chibi="case"],
+html[data-paper-ui-style="sage-cream"] [data-paper-chibi="mini-case"] {
+  background: linear-gradient(180deg, #fffdf8 18%, #fcf7e9 100%) !important;
+  border-color: #e7dec6;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-chibi="lamp"] {
+  background: radial-gradient(60% 100% at 50% 0%, rgba(238, 213, 145, .45), rgba(246, 236, 203, 0) 75%) !important;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-chibi="base"] {
+  background: linear-gradient(180deg, #f6eccb, #e9d9a6) !important;
+  box-shadow: 0 1px 3px rgba(255, 253, 248, .8) inset, 0 3px 8px rgba(106, 89, 53, .12) !important;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-chibi="shadow"] { background: rgba(106, 89, 53, .12); }
+html[data-paper-ui-style="sage-cream"] [data-paper-chibi="caption"] { color: var(--sp-yellow-ink) !important; }
+html[data-paper-ui-style="sage-cream"] [data-paper-chibi="primary"] {
+  background: linear-gradient(135deg, #dce5cd, #cbd9ba) !important;
+  color: var(--sp-green-ink) !important;
+  box-shadow: 0 4px 12px rgba(67, 86, 58, .09) !important;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-chibi="secondary"] {
+  background: var(--sp-yellow) !important; color: var(--sp-yellow-ink) !important; border-color: #e9ddb7;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-chibi="secondary"] * { color: inherit !important; }
+html[data-paper-ui-style="sage-cream"] [data-paper-chibi="home-entry"],
+html[data-paper-ui-style="sage-cream"] [data-paper-chibi="sheet"] {
+  background: var(--sp-surface) !important; border-color: var(--sp-line); color: var(--sp-ink);
+}
+
+html[data-paper-ui-style="sage-cream"] .avatar-crop-dialog .avatar-crop-confirm {
+  background: var(--sp-green-soft); color: var(--sp-green-ink);
+}
+html[data-paper-ui-style="sage-cream"] .avatar-crop-dialog button:focus-visible,
+html[data-paper-ui-style="sage-cream"] .avatar-crop-dialog input:focus-visible { outline-color: var(--sp-active); }
+html[data-paper-ui-style="sage-cream"] .avatar-crop-zoom input { accent-color: var(--sp-active); }

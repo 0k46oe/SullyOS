@@ -1,4 +1,5 @@
 import { handleLocalBack } from '../utils/localBackHandlers';
+import { applyPaperUiStyle } from '../utils/paperUiStyle';
 import {isHomeAssetDisposal} from '../utils/homeAssetCancellation';
 import { processHomeMemoryAfterSave } from '../utils/homeMemoryPostHook';
 import { homeSharedRecipients } from '../utils/homeSharedEvents';
@@ -1931,6 +1932,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
       // 桌面皮肤：写到 <html data-skin>，供全局 CSS（index.html）与组件读取。
       root.dataset.skin = theme.skin || 'default';
+      applyPaperUiStyle(root, theme);
   }, [theme]);
 
   // --- Update: Handle Scheduled Messages with Unread Flags & Web Notifications ---

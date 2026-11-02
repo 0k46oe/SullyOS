@@ -1230,7 +1230,7 @@ ${isInitialGeneration ? `
        </Modal>
        {view === 'list' ? (
            <div className="flex flex-col h-full animate-fade-in relative"
-                style={{ background: 'linear-gradient(180deg, #f5f2fb 0%, #ece6f6 100%)' }}>
+                data-paper-surface="character-list" style={{ background: 'linear-gradient(180deg, #f5f2fb 0%, #ece6f6 100%)' }}>
                {/* safe-area: pt 用 max(3.5rem, 刘海高度)，保呼吸感同时更高刘海设备不被挡 */}
                <div className="px-6 pb-4 shrink-0 flex items-start justify-between" style={{ paddingTop: 'max(3.5rem, var(--safe-top))' }}>
                    <div className="relative">
@@ -1359,7 +1359,7 @@ ${isInitialGeneration ? `
                </div>
            </div>
        ) : formData && (
-           <div className="flex flex-col h-full animate-fade-in bg-slate-50/50 relative">
+           <div data-paper-surface="character-detail" className="flex flex-col h-full animate-fade-in bg-slate-50/50 relative">
                {/* safe-area: OUTER 保留渐变背景 + 模糊 + sticky，刘海高度由 paddingTop 让位；
                    INNER 不再用 h-32 沉底——那是老的「做高栏 + 内容沉底」状态栏预留写法，会和 safe-top 叠加出一大块空白。
                    改为内容自然高度、直接贴在 safe-top 下方。 */}

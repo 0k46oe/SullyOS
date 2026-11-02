@@ -1052,7 +1052,7 @@ const PhoneShell: React.FC = () => {
                     关键：只动 opacity、不做 scale/translate —— 否则会把整棵（常含大量头像图片的）
                     App 子树栅格化进 transform 图层，角色列表类 App 首帧会卡顿一下（停顿一秒）。
                     时长也压短，进重 App 时不至于多等。 */}
-                <div key={activeApp} className="w-full h-full" style={{ animation: 'appEnterFade 200ms ease-out both' }}>
+                <div key={activeApp} className="w-full h-full" data-paper-ui={activeApp === AppID.Character ? 'character' : activeApp === AppID.MemoryPalace ? 'memory' : activeApp === AppID.Worldbook ? 'worldbook' : activeApp === AppID.Settings ? 'settings' : activeApp === AppID.Appearance ? 'appearance' : undefined} style={{ animation: 'appEnterFade 200ms ease-out both' }}>
                   <style>{`@keyframes appEnterFade{from{opacity:0}to{opacity:1}}`}</style>
                   {renderApp()}
                 </div>
