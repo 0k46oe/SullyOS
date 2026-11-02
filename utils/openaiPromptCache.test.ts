@@ -30,4 +30,13 @@ describe('OpenAI-compatible prompt caching', () => {
     expect(result.body).not.toHaveProperty('prompt_cache_key');
     expect(result.diagnostic).toBeUndefined();
   });
+
+  it('keeps one cache key per character while the system prompt changes', async () => {
+    const scope = { endpoint: 'https://api.example.com/v1/chat/completions', model: 'gpt-x', charId: 'char-1', purpose: 'chat' };
+    const a = await decorateOpenAIPromptCache({ model: 'gpt-x', messages: [{ role: 'system', content: '人设 A' }, { role: 'user', content: 'hi' }] }, scope);
+    const b = await decorateOpenAIPromptCache({ model: 'gpt-x', messages: [{ role: 'system', content: '人设 A，世界书更新了' }, { role: 'user', content: 'hi' }] }, scope);
+    const other = await decorateOpenAIPromptCache({ model: 'gpt-x', messages: [{ role: 'system', content: '人设 A' }, { role: 'user', content: 'hi' }] }, { ...scope, charId: 'char-2' });
+    expect(b.body.prompt_cache_key).toBe(a.body.prompt_cache_key);
+    expect(other.body.prompt_cache_key).not.toBe(a.body.prompt_cache_key);
+  });
 });

@@ -344,7 +344,10 @@ export function extractApiTokenUsage(response: unknown): { prompt?: number; comp
     const cacheRead = num(usage.cache_read_input_tokens
         ?? usage.prompt_tokens_details?.cached_tokens
         ?? usage.input_tokens_details?.cached_tokens
-        ?? usage.input_token_details?.cached_tokens);
+        ?? usage.input_token_details?.cached_tokens
+        // Gemini 原生 usageMetadata 的命名
+        ?? usage.cachedContentTokenCount
+        ?? usage.cached_content_token_count);
     const cacheCreation = num(usage.cache_creation_input_tokens);
     const nativeInput = num(usage.input_tokens);
     const prompt = num(usage.prompt_tokens ?? usage.promptTokenCount)

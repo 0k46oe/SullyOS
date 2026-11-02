@@ -61,13 +61,24 @@ export async function decorateOpenAIPromptCache(
   const prefix = stableText(first.content);
   if (!prefix) return { body };
 
-  const signature = JSON.stringify({
-    endpoint: scope.endpoint,
-    model: body.model || scope.model || '',
-    prefix,
-    tools: body.tools || null,
-    tool_choice: body.tool_choice || null,
-  });
+  // prompt_cache_key 只是路由提示：同一个 key 的请求会尽量落到同一台机器，再由服务商自己按
+  // 前缀逐段比对。key 跟着提示词内容变的话，system 里改一个字（世界书、记忆更新）就会换到
+  // 另一台机器，前面没变的大段也命中不了。所以有角色时按「接口 + 模型 + 角色 + 用途」固定一个 key；
+  // 没有角色的零散请求仍按内容区分，避免不相干的请求挤在同一个 key 上。
+  const signature = scope.charId
+    ? JSON.stringify({
+      endpoint: scope.endpoint,
+      model: body.model || scope.model || '',
+      charId: scope.charId,
+      purpose: scope.purpose || '',
+    })
+    : JSON.stringify({
+      endpoint: scope.endpoint,
+      model: body.model || scope.model || '',
+      prefix,
+      tools: body.tools || null,
+      tool_choice: body.tool_choice || null,
+    });
   const cacheKey = `oai-${(await digest(signature)).slice(0, 60)}`;
   const checkpoints = prefixCheckpoints(prefix);
   const stableRequestShape = {
