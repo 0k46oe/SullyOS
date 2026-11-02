@@ -106,26 +106,29 @@ const matchVendor = (raw: string): string => {
     return 'generic';
 };
 
+// 跟随用户在美化里导入的字体；写死的日文明朝体缺很多汉字，回退后同一段粗细不一。
+const APP_FONT = "var(--app-font, system-ui, sans-serif)";
+
 // 偷看会话的厂商皮肤（claude 服务恒为 Claude 皮，tavern 走自己的暗色酒馆皮）
 const getVendorTheme = (name: string, service: AiServiceKind): VendorTheme => {
     if (service === 'tavern') return { key: 'tavern', label: name || '酒馆', dark: true,
         bg: 'radial-gradient(140% 90% at 50% 0%, #241319 0%, #120a0f 70%)', text: '#fbe9ef', sub: 'rgba(251,233,239,0.5)', accent: '#fb7185',
         userBg: 'linear-gradient(135deg,#fb7185,#fb7185bb)', userText: '#fff', aiBg: 'rgba(255,255,255,0.07)', aiText: 'rgba(255,255,255,0.92)',
-        font: "'Shippori Mincho','Noto Serif SC',serif" };
+        font: APP_FONT };
     const v = service === 'claude' ? 'claude' : matchVendor(name);
     switch (v) {
         case 'gemini': return { key: 'gemini', label: 'Gemini', dark: false,
             bg: 'linear-gradient(180deg,#ffffff,#f6f8fd)', text: '#1f1f1f', sub: '#5f6368', accent: '#1a73e8',
             userBg: 'linear-gradient(135deg,#4285F4,#9b72cb)', userText: '#fff', aiBg: '#f0f4f9', aiText: '#1f1f1f',
-            font: "'Google Sans','Noto Sans SC',sans-serif" };
+            font: APP_FONT };
         case 'claude': return { key: 'claude', label: service === 'claude' ? (name || 'Claude') : 'Claude', dark: false,
             bg: 'linear-gradient(180deg,#f4f1ea,#efe9dd)', text: '#2b2a26', sub: '#8a857a', accent: '#c9683e',
             userBg: '#e7decd', userText: '#2b2a26', aiBg: 'transparent', aiText: '#2b2a26',
-            font: "'Shippori Mincho','Noto Serif SC',serif" };
+            font: APP_FONT };
         case 'gpt': return { key: 'gpt', label: 'ChatGPT', dark: true,
             bg: '#212121', text: '#ececec', sub: '#9a9a9a', accent: '#19c37d',
             userBg: '#2f2f2f', userText: '#ececec', aiBg: 'transparent', aiText: '#ececec',
-            font: "'Noto Sans SC',sans-serif" };
+            font: APP_FONT };
         case 'doubao': return { key: 'doubao', label: '豆包', dark: false,
             bg: 'linear-gradient(180deg,#eef3ff,#e4ecff)', text: '#1b2540', sub: '#6b7691', accent: '#4d6fff',
             userBg: '#4d6fff', userText: '#fff', aiBg: '#ffffff', aiText: '#1b2540' };
@@ -150,10 +153,10 @@ const getVendorTheme = (name: string, service: AiServiceKind): VendorTheme => {
 // 酒馆阅读皮肤：让喜欢素 / 小说风 / 暗色的 user 各取所需。layout: card=楼层卡片，flat=纯文素排
 type TavernStyle = { key: string; label: string; dark: boolean; bg: string; text: string; sub: string; accent: string; font?: string; layout: 'card' | 'flat'; indent?: boolean };
 const TAVERN_STYLES: TavernStyle[] = [
-    { key: 'dark', label: '暗夜', dark: true, bg: 'radial-gradient(140% 90% at 50% 0%, #241319 0%, #120a0f 70%)', text: '#fbe9ef', sub: 'rgba(251,233,239,0.5)', accent: '#fb7185', font: "'Shippori Mincho','Noto Serif SC',serif", layout: 'card' },
-    { key: 'plain', label: '素白', dark: false, bg: '#f7f6f4', text: '#2b2b2b', sub: '#9a9a9a', accent: '#b06a6a', font: "'Noto Sans SC',sans-serif", layout: 'flat' },
-    { key: 'book', label: '书页', dark: false, bg: 'linear-gradient(180deg,#f5efe2,#efe7d6)', text: '#3a3328', sub: '#a89a82', accent: '#a8794a', font: "'Shippori Mincho','Noto Serif SC',serif", layout: 'flat', indent: true },
-    { key: 'midnight', label: '午夜', dark: true, bg: '#0c0d10', text: '#d8dae0', sub: '#6b6f78', accent: '#7c8cff', font: "'Noto Sans SC',sans-serif", layout: 'flat' },
+    { key: 'dark', label: '暗夜', dark: true, bg: 'radial-gradient(140% 90% at 50% 0%, #241319 0%, #120a0f 70%)', text: '#fbe9ef', sub: 'rgba(251,233,239,0.5)', accent: '#fb7185', font: APP_FONT, layout: 'card' },
+    { key: 'plain', label: '素白', dark: false, bg: '#f7f6f4', text: '#2b2b2b', sub: '#9a9a9a', accent: '#b06a6a', font: APP_FONT, layout: 'flat' },
+    { key: 'book', label: '书页', dark: false, bg: 'linear-gradient(180deg,#f5efe2,#efe7d6)', text: '#3a3328', sub: '#a89a82', accent: '#a8794a', font: APP_FONT, layout: 'flat', indent: true },
+    { key: 'midnight', label: '午夜', dark: true, bg: '#0c0d10', text: '#d8dae0', sub: '#6b6f78', accent: '#7c8cff', font: APP_FONT, layout: 'flat' },
 ];
 
 // ============================================================
