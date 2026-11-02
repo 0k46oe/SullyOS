@@ -187,6 +187,19 @@ export async function describeRecentStickers(
   config?: VisionApiConfig | null,
 ): Promise<Emoji[]> {
   if (!isVisionApiReady(config)) return emojis;
+  // 调用方传进来的表情包列表是聊天页打开时读的，之后识别出的描述只写进了库、没刷新到页面里。
+  // 直接用它判断「有没有描述」的话，每一轮都会把同一张表情包再识别一遍，所以先拿库里的最新描述补上。
+  try {
+    const stored = new Map((await DB.getEmojis()).map(e => [e.name, e] as const));
+    emojis = emojis.map(e => {
+      const latest = stored.get(e.name);
+      if (!latest || latest.url !== e.url) return e;
+      const { visionDescription: _old, ...rest } = e;
+      return latest.visionDescription?.trim() ? { ...rest, visionDescription: latest.visionDescription } : rest;
+    });
+  } catch (error) {
+    console.warn('[Vision] 读取表情包库失败，按当前列表判断', error);
+  }
   const sorted = [...history].sort((a, b) => a.timestamp - b.timestamp);
   const pending = new Map<string, Emoji>();
   for (const message of recentStickerMessages(sorted)) {

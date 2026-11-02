@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CharacterProfile, Message, UserProfile, VisionApiConfig } from '../types';
 import { ChatPrompts } from './chatPrompts';
 import { DB } from './db';
-import { materializeVisionDescriptions, visionApiConfigFromPreset } from './visionApi';
+import { describeRecentStickers, materializeVisionDescriptions, visionApiConfigFromPreset } from './visionApi';
 
 const config: VisionApiConfig = {
   enabled: true,
@@ -99,5 +99,32 @@ describe('independent vision API', () => {
     expect(Array.isArray(apiMessages[0].content)).toBe(true);
     expect(JSON.stringify(apiMessages)).toContain('image_url');
     expect(JSON.stringify(apiMessages)).toContain(image);
+  });
+});
+
+describe('表情包识图只识别一次', () => {
+  const sticker = { name: '猫猫点头', url: 'data:image/png;base64,BBBB', categoryId: 'default' };
+  const stickerMsg: Message = { id: 900, charId: 'char-1', role: 'user', type: 'emoji', content: sticker.url, timestamp: 1_700_000_000_900 };
+
+  it('页面里的列表还没有描述、库里已经有了 → 不再调用识图', async () => {
+    vi.spyOn(DB, 'getEmojis').mockResolvedValue([{ ...sticker, visionDescription: '一只猫在点头' }] as any);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const out = await describeRecentStickers([stickerMsg], [sticker] as any, config);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(out[0].visionDescription).toBe('一只猫在点头');
+  });
+
+  it('库里也没有 → 识别一次并写回表情包库', async () => {
+    vi.spyOn(DB, 'getEmojis').mockResolvedValue([sticker] as any);
+    const save = vi.spyOn(DB, 'setEmojiDescription').mockResolvedValue(undefined);
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: '一只猫在点头' } }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const out = await describeRecentStickers([stickerMsg], [sticker] as any, config);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(save).toHaveBeenCalledWith('猫猫点头', '一只猫在点头');
+    expect(out[0].visionDescription).toBe('一只猫在点头');
   });
 });

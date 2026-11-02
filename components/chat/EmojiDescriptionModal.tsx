@@ -21,7 +21,17 @@ export default function EmojiDescriptionModal({ emoji, isOpen, onClose, onSaved 
     const [busy, setBusy] = useState(false);
     const visionReady = isVisionApiReady(apiConfig.visionApi);
 
-    useEffect(() => { if (isOpen) setDraft(emoji?.visionDescription || ''); }, [isOpen, emoji?.name]);
+    useEffect(() => {
+        if (!isOpen) return;
+        setDraft(emoji?.visionDescription || '');
+        // 聊天页手里的表情包列表不会随识图刷新，打开时以库里的最新描述为准
+        let alive = true;
+        if (emoji) DB.getEmojis().then(list => {
+            const latest = list.find(e => e.name === emoji.name);
+            if (alive && latest) setDraft(latest.visionDescription || '');
+        }).catch(() => {});
+        return () => { alive = false; };
+    }, [isOpen, emoji?.name]);
 
     const recognize = async () => {
         if (!emoji || !apiConfig.visionApi) return;
