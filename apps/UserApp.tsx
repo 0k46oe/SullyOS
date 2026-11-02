@@ -1,7 +1,7 @@
 
 import React, { useRef, useState } from 'react';
 import { useOS } from '../context/OSContext';
-import { processImage } from '../utils/file';
+import { useAvatarCrop } from '../hooks/useAvatarCrop';
 import { migrateDataUrlToRef } from '../utils/blobRef';
 import LifeRecordPanel from '../components/lifeRecord/LifeRecordPanel';
 import PerCharAvatarPicker from '../components/user/PerCharAvatarPicker';
@@ -14,12 +14,15 @@ const UserApp: React.FC = () => {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [tab, setTab] = useState<'profile' | 'life'>('profile');
     const [showFigures, setShowFigures] = useState(false);
+    const {chooseAvatar, avatarCropDialog} = useAvatarCrop();
 
     const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
+        e.target.value = '';
         if (file) {
             try {
-                const base64 = await processImage(file);
+                const base64 = await chooseAvatar(file);
+                if (!base64) return;
                 // 头像存令牌，二进制单独躺在 blob_assets 里（省掉 base64 那 ~33% 的膨胀）。
                 // 同一张图之前存过就复用它的令牌；转不动时原样还回这条 data URL，图不会丢。
                 updateUserProfile({ avatar: await migrateDataUrlToRef(base64) });
@@ -33,6 +36,7 @@ const UserApp: React.FC = () => {
     if (showFigures) return <HomeFigureStudio onClose={() => setShowFigures(false)} />;
     return (
         <div className="h-full w-full bg-slate-50 flex flex-col animate-fade-in">
+            {avatarCropDialog}
             {/* Header */}
             <div className="bg-white/70 backdrop-blur-md border-b border-slate-100 shrink-0 sticky top-0 z-10" style={{ paddingTop: 'var(--safe-top)' }}>
                 <div className="flex items-center px-4 py-3 gap-2">

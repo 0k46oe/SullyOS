@@ -10,6 +10,7 @@ import { AppID, CharacterProfile, CharacterExportData, UserImpression, MemoryFra
 import { SlidersHorizontal, SpeakerHigh, Books, BookOpen } from '@phosphor-icons/react';
 import Modal from '../components/os/Modal';
 import { processImage } from '../utils/file';
+import { useAvatarCrop } from '../hooks/useAvatarCrop';
 import { DB } from '../utils/db';
 import { ContextBuilder } from '../utils/context';
 import { buildSARMemoryBoundaryInstruction, formatMessageWithTime, formatMessageForPrompt } from '../utils/messageFormat';
@@ -148,6 +149,7 @@ const Character: React.FC = () => {
   }, []);
   const [expandedMountedBookIds, setExpandedMountedBookIds] = useState<Set<string>>(new Set());
   const [isCompressing, setIsCompressing] = useState(false);
+  const {chooseAvatar, avatarCropDialog} = useAvatarCrop();
   // 头像 URL 输入的 draft, 不逐字 commit 到 formData.avatar —— 否则每输入一个字符,
   // 所有引用 char.avatar 的 <img> 都会拿到不完整字符串当相对路径请求根目录,
   // 导致打字时疯狂 GET / 和满屏破图. 失焦 / 回车才校验 + commit.
@@ -509,10 +511,13 @@ const Character: React.FC = () => {
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
+      e.target.value = '';
+      const targetId = editingId;
       if (file) {
           try {
               setIsCompressing(true);
-              const processedBase64 = await processImage(file);
+              const processedBase64 = await chooseAvatar(file);
+              if (!processedBase64 || editingIdRef.current !== targetId) return;
               // 头像存令牌，二进制单独躺在 blob_assets 里（省掉 base64 那 ~33% 的膨胀）。
               // 同一张图之前存过就复用它的令牌；转不动时原样还回这条 data URL，图不会丢。
               handleChange('avatar', await migrateDataUrlToRef(processedBase64));
@@ -1214,6 +1219,7 @@ ${isInitialGeneration ? `
 
   return (
     <div className="h-full w-full bg-slate-50/30 font-light relative">
+       {avatarCropDialog}
        <Modal isOpen={showCardImportModal} title="导入角色卡" onClose={() => setShowCardImportModal(false)}
            footer={<button disabled={isImportingCard} onClick={() => { setShowCardImportModal(false); cardImportRef.current?.click(); }} className="w-full py-3 rounded-2xl bg-primary text-white font-bold disabled:opacity-50">{isImportingCard ? '正在导入…' : '选择 PNG / JSON 文件'}</button>}>
            <div className="space-y-3 text-sm text-slate-600 leading-relaxed">

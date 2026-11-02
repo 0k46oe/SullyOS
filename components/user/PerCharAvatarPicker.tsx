@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { useOS } from '../../context/OSContext';
-import { processImage } from '../../utils/file';
+import { useAvatarCrop } from '../../hooks/useAvatarCrop';
 import { migrateDataUrlToRef } from '../../utils/blobRef';
 import TokenImg from '../os/TokenImg';
 
@@ -36,6 +36,7 @@ const PerCharAvatarPicker: React.FC = () => {
     const [editingId, setEditingId] = useState<string | null>(null);
     const [urlDraft, setUrlDraft] = useState('');
     const uploadRef = useRef<HTMLInputElement>(null);
+    const {chooseAvatar, avatarCropDialog} = useAvatarCrop();
 
     const filtered = useMemo(() => {
         const q = query.trim().toLowerCase();
@@ -86,7 +87,8 @@ const PerCharAvatarPicker: React.FC = () => {
         e.target.value = '';
         if (!file || !editingId) return;
         try {
-            const base64 = await processImage(file);
+            const base64 = await chooseAvatar(file);
+            if (!base64) return;
             // 本地上传的图存令牌（图床外链那条路不经过这里，原样存字符串即可）
             setOverride(editingId, await migrateDataUrlToRef(base64));
             setUrlDraft('');
@@ -100,6 +102,7 @@ const PerCharAvatarPicker: React.FC = () => {
 
     return (
         <div className="bg-white rounded-[1.75rem] shadow-[0_10px_30px_-12px_rgba(80,70,120,0.18)] border border-slate-100 p-5">
+            {avatarCropDialog}
             {/* 翻页滑入动效（组件私有，不进全局 tailwind 配置） */}
             <style>{`
                 @keyframes pcaSlideL { from { opacity: .35; transform: translateX(26px); } to { opacity: 1; transform: none; } }
