@@ -236,7 +236,35 @@ const copyText = async (text: string): Promise<boolean> => {
     } catch { return false; }
 };
 
-const ChromeCssEditor: React.FC<{ value: string; onChange: (css: string) => void }> = ({ value, onChange }) => {
+const ChromeCssEditor: React.FC<{ value: string; onChange: (css: string) => void }> = ({ value: savedValue, onChange }) => {
+    // 打字时只改本地草稿，停手 600ms / 失焦 / 关闭时才真正保存。
+    // 之前每敲一个字都整段写库 + 聊天页重套整段样式，CSS 很长时手机会卡死闪退。
+    const [draft, setDraft] = useState(savedValue);
+    const draftRef = useRef(savedValue);
+    const lastSentRef = useRef(savedValue);
+    const timerRef = useRef<number | null>(null);
+    const onChangeRef = useRef(onChange);
+    onChangeRef.current = onChange;
+    useEffect(() => {
+        // 外部改了（还原、切换范围等）才同步回草稿，避免覆盖正在输入的内容
+        if (savedValue !== lastSentRef.current) { lastSentRef.current = savedValue; draftRef.current = savedValue; setDraft(savedValue); }
+    }, [savedValue]);
+    const clearTimer = () => { if (timerRef.current !== null) { window.clearTimeout(timerRef.current); timerRef.current = null; } };
+    const flush = () => {
+        clearTimer();
+        if (draftRef.current !== lastSentRef.current) { lastSentRef.current = draftRef.current; onChangeRef.current(draftRef.current); }
+    };
+    const commit = (css: string) => { draftRef.current = css; setDraft(css); flush(); };
+    const handleType = (css: string) => {
+        draftRef.current = css; setDraft(css);
+        clearTimer();
+        timerRef.current = window.setTimeout(flush, 600);
+    };
+    useEffect(() => () => flush(), []); // 关闭面板时把没存的草稿存掉
+    const value = draft;
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    // 键盘弹出后把输入框滚到可见区域中间
+    const revealTextarea = () => window.setTimeout(() => textareaRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 350);
     const [exportMode,setExportMode]=useState<'current'|'batch'|null>(null);
     const [exportCredit,setExportCredit]=useState(()=>{try{return JSON.parse(localStorage.getItem('sully-beauty-author-defaults-v1')||'{}').credit||'';}catch{return '';}});
     const [exportNotice,setExportNotice]=useState('');
@@ -275,7 +303,7 @@ const ChromeCssEditor: React.FC<{ value: string; onChange: (css: string) => void
                 window.alert('TXT 文件内容为空。');
                 return;
             }
-            onChange(css);
+            commit(css);
         } catch (error: any) {
             window.alert(error?.message || '样式导入失败，请确认文件可以正常读取。');
         } finally {
@@ -336,7 +364,7 @@ const ChromeCssEditor: React.FC<{ value: string; onChange: (css: string) => void
                 <div className="mb-2 text-[11px] font-bold text-slate-500">内置风格 <span className="font-normal text-slate-400">· 点一下套用</span></div>
                 <div className="flex flex-wrap gap-2">
                     {PRESETS.map((p) => (
-                        <button key={p.name} onClick={() => onChange(p.code)} title={p.name} className={cardCls}>
+                        <button key={p.name} onClick={() => commit(p.code)} title={p.name} className={cardCls}>
                             <span className="absolute inset-0" style={{ background: p.swatch }} />
                             <span className={cardLabelCls} style={{ background: 'linear-gradient(to top, rgba(0,0,0,.5), transparent)' }}>{p.name}</span>
                         </button>
@@ -366,7 +394,7 @@ const ChromeCssEditor: React.FC<{ value: string; onChange: (css: string) => void
                 <div className="flex flex-wrap gap-2">
                     {custom.map((p) => (
                         <div key={p.name} className={cardCls}>
-                            <button onClick={() => onChange(p.code)} title={p.name} className="absolute inset-0">
+                            <button onClick={() => commit(p.code)} title={p.name} className="absolute inset-0">
                                 <span className="absolute inset-0" style={{ background: extractSwatch(p.code) }} />
                                 <span className={cardLabelCls} style={{ background: 'linear-gradient(to top, rgba(0,0,0,.5), transparent)' }}>{p.name}</span>
                             </button>
@@ -389,12 +417,15 @@ const ChromeCssEditor: React.FC<{ value: string; onChange: (css: string) => void
                     <div className="flex items-center gap-1">
                         <FileOrImageImport onChange={handleTxtImport} className="rounded-lg px-2 py-1 text-[10px] font-semibold text-indigo-500 hover:bg-indigo-50" />
                         <button onClick={handleTxtExport} disabled={!value.trim()} className={`rounded-lg px-2 py-1 text-[10px] font-semibold ${value.trim() ? 'text-indigo-500 hover:bg-indigo-50' : 'text-slate-300'}`}>导出分享</button>
-                        {value && <button onClick={() => onChange('')} className="rounded-lg px-2 py-1 text-[10px] font-semibold text-rose-400 hover:bg-rose-50 hover:text-rose-500">清空</button>}
+                        {value && <button onClick={() => commit('')} className="rounded-lg px-2 py-1 text-[10px] font-semibold text-rose-400 hover:bg-rose-50 hover:text-rose-500">清空</button>}
                     </div>
                 </div>
                 <textarea
                     value={value}
-                    onChange={(e) => onChange(e.target.value)}
+                    ref={textareaRef}
+                    onChange={(e) => handleType(e.target.value)}
+                    onBlur={flush}
+                    onFocus={revealTextarea}
                     placeholder={'/* 点上面任一套，或在这里直接写 / 粘贴 CSS */\n.sully-chat-header{\n  background: linear-gradient(135deg,#ffe3ef,#f1e7ff) !important;\n  border-bottom: none !important;\n}'}
                     spellCheck={false}
                     rows={8}

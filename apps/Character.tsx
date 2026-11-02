@@ -184,6 +184,8 @@ const Character: React.FC = () => {
   const [showExportModal, setShowExportModal] = useState(false);
   const [showBatchModal, setShowBatchModal] = useState(false); 
   const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<string | null>(null);
+  // 底部「+」容易误触：先弹确认，点「新建」才真正建卡。
+  const [showAddConfirm, setShowAddConfirm] = useState(false);
   // 云端 amsg2 任务没清干净、本地删除被拦下的角色 → 弹「重试 / 仍然删除」二次确认。
   const [cloudCleanupFailTarget, setCloudCleanupFailTarget] = useState<string | null>(null);
   // 删除要先 await 云端任务取消（名下有 amsg2 任务时），期间锁住按钮防连点。
@@ -1305,7 +1307,7 @@ ${isInitialGeneration ? `
                                            </div>
                                        );
                                    })}
-                                   <button onClick={handleAddCharacter} className="w-full py-4 rounded-3xl border border-dashed border-violet-300/70 text-violet-400 text-sm bg-white/50 hover:bg-white transition-colors flex items-center justify-center gap-2 shrink-0">
+                                   <button onClick={() => setShowAddConfirm(true)} className="w-full py-4 rounded-3xl border border-dashed border-violet-300/70 text-violet-400 text-sm bg-white/50 hover:bg-white transition-colors flex items-center justify-center gap-2 shrink-0">
                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>新建链接
                                    </button>
                                </>
@@ -1329,7 +1331,7 @@ ${isInitialGeneration ? `
                                        }}
                                    />
                                ))}
-                               <button onClick={handleAddCharacter} className="w-full py-4 rounded-3xl border border-dashed border-violet-300/70 text-violet-400 text-sm bg-white/50 hover:bg-white transition-colors flex items-center justify-center gap-2 shrink-0">
+                               <button onClick={() => setShowAddConfirm(true)} className="w-full py-4 rounded-3xl border border-dashed border-violet-300/70 text-violet-400 text-sm bg-white/50 hover:bg-white transition-colors flex items-center justify-center gap-2 shrink-0">
                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>新建链接
                                </button>
                                {totalPages > 1 && (
@@ -2196,6 +2198,15 @@ ${isInitialGeneration ? `
                 )}
                 <p className="text-[10px] text-slate-400 leading-relaxed bg-slate-50 p-2.5 rounded-xl">删除分组不会删除角色，组内角色会回到「未分组」。给角色指派分组：进入角色的「设定」页。</p>
             </div>
+        </Modal>
+
+        <Modal
+            isOpen={showAddConfirm}
+            title="新建角色"
+            onClose={() => setShowAddConfirm(false)}
+            footer={<div className="flex gap-2 w-full"><button onClick={() => setShowAddConfirm(false)} className="flex-1 py-3 bg-slate-100 text-slate-500 rounded-2xl font-bold">取消</button><button onClick={() => { setShowAddConfirm(false); void handleAddCharacter(); }} className="flex-1 py-3 bg-violet-500 text-white font-bold rounded-2xl shadow-lg shadow-violet-200">新建</button></div>}
+        >
+            <p className="text-sm text-slate-600 text-center leading-relaxed py-4">要新建一个空白角色吗？</p>
         </Modal>
 
         <Modal
