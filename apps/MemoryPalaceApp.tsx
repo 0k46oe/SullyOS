@@ -5229,6 +5229,7 @@ create table if not exists memory_vectors (
                                 return (
                                     <div
                                         key={room}
+                                        data-memory-room={room}
                                         onClick={() => openRoom(room)}
                                         style={paperStyle({
                                             padding: 14,
@@ -5239,12 +5240,12 @@ create table if not exists memory_vectors (
                                             transition: 'transform 0.15s',
                                         })}
                                     >
-                                        <div style={paperStyle({ marginBottom: 6, color })}><RoomIcon room={room} size={26} /></div>
-                                        <div style={paperStyle({ fontSize: 14, fontWeight: 600, color })}>{getRoomLabel(room, userProfile?.name)}</div>
-                                        <div style={paperStyle({ fontSize: 11, color: '#9ca3af', marginTop: 2 })}>{config.description}</div>
-                                        <div style={paperStyle({ fontSize: 20, fontWeight: 700, marginTop: 8, color })}>
+                                        <div data-memory-room-tone="accent" style={paperStyle({ marginBottom: 6, color })}><RoomIcon room={room} size={26} /></div>
+                                        <div data-memory-room-tone="accent" style={paperStyle({ fontSize: 14, fontWeight: 600, color })}>{getRoomLabel(room, userProfile?.name)}</div>
+                                        <div data-memory-room-tone="muted" style={paperStyle({ fontSize: 11, color: '#9ca3af', marginTop: 2 })}>{config.description}</div>
+                                        <div data-memory-room-tone="accent" style={paperStyle({ fontSize: 20, fontWeight: 700, marginTop: 8, color })}>
                                             {count}
-                                            <span style={paperStyle({ fontSize: 11, fontWeight: 400, color: '#9ca3af', marginLeft: 4 })}>
+                                            <span data-memory-room-tone="muted" style={paperStyle({ fontSize: 11, fontWeight: 400, color: '#9ca3af', marginLeft: 4 })}>
                                                 {config.capacity ? `/ ${config.capacity}` : '条'}
                                             </span>
                                         </div>

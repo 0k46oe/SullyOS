@@ -95,6 +95,40 @@ html[data-paper-ui-style="sage-cream"] [data-paper-ui="memory"] > div:not([data-
   background: linear-gradient(180deg, var(--sp-paper), #f0f2e8 45%, var(--sp-surface)) !important;
 }
 
+/* Room identities keep their own hues instead of collapsing into sage.
+   Palette C: translucent surfaces, matching accents, neutral secondary text. */
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="memory"] [data-memory-room="living_room"] {
+  --sp-room-fill: rgba(110, 150, 105, .09); --sp-room-ink: #62805b; --sp-room-line: #62805b26;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="memory"] [data-memory-room="bedroom"] {
+  --sp-room-fill: rgba(191, 112, 147, .085); --sp-room-ink: #a06a82; --sp-room-line: #a06a8226;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="memory"] [data-memory-room="study"] {
+  --sp-room-fill: rgba(91, 140, 189, .085); --sp-room-ink: #6286a2; --sp-room-line: #6286a226;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="memory"] [data-memory-room="user_room"] {
+  --sp-room-fill: rgba(213, 172, 69, .10); --sp-room-ink: #9a803e; --sp-room-line: #9a803e26;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="memory"] [data-memory-room="self_room"] {
+  --sp-room-fill: rgba(150, 119, 180, .085); --sp-room-ink: #8d739f; --sp-room-line: #8d739f26;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="memory"] [data-memory-room="attic"] {
+  --sp-room-fill: rgba(140, 134, 122, .065); --sp-room-ink: #878175; --sp-room-line: #87817526;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="memory"] [data-memory-room="windowsill"] {
+  --sp-room-fill: rgba(216, 145, 94, .09); --sp-room-ink: #ac7e55; --sp-room-line: #ac7e5526;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="memory"] [data-memory-room] {
+  background-color: var(--sp-room-fill) !important;
+  border-color: var(--sp-room-line) !important;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="memory"] [data-memory-room] [data-memory-room-tone="accent"] {
+  color: var(--sp-room-ink) !important;
+}
+html[data-paper-ui-style="sage-cream"] [data-paper-ui="memory"] [data-memory-room] [data-memory-room-tone="muted"] {
+  color: #9a9e94 !important;
+}
+
 html[data-paper-ui-style="sage-cream"] [data-paper-ui="chibi"] .text-white { color: var(--sp-green-ink); }
 html[data-paper-ui-style="sage-cream"] [data-paper-ui="chibi"] { --sp-chibi-shadow: rgba(130, 150, 108, .18); }
 html[data-paper-ui-style="sage-cream"] [data-paper-ui="chibi"] > .shadow-\[0_10px_30px_rgba\(40\,30\,80\,0\.35\)\] { box-shadow: 0 8px 24px rgba(67, 86, 58, .12); }
