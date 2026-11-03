@@ -7,7 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     toast: vi.fn(), updateCharacter: vi.fn(), fetch: vi.fn(),
     session: null as any, rows: [] as any[],
-    characters: [{ id: 'c', name: '测试角色', avatar: '', savedDateState: { currentText: '旧快照' } }],
+    characters: [{ id: 'c', name: '测试角色', avatar: '', savedDateState: { currentText: '旧快照' } }] as any[],
 }));
 vi.mock('../context/OSContext', async () => {
     const React = await import('react');
