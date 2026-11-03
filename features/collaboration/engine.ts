@@ -7,12 +7,17 @@ import type { CollaborationApiProfile, CollaborationAttachment, CollaborationCon
 import { parseCollaborationReply, visibleCollaborationStreamText, type ParsedCollaborationReply } from './reasoning';
 import {buildMcpOpenAITools,buildMcpSystemBlock} from '../../utils/mcpToolBridge';
 import {completeCollaborationWithMcp} from './mcp';
+import type { Emoji, EmojiCategory, VisionApiConfig } from '../../types';
+import { prepareCollaborationStickerContext } from './stickers';
 
 export const isCollaborationApiConfigured = (profile: CollaborationApiProfile): boolean => (
   !!profile.baseUrl.trim() && !!profile.model.trim()
 );
 
 export interface RunCollaborationTurnInput {
+  emojis?: Emoji[];
+  emojiCategories?: EmojiCategory[];
+  visionApiConfig?: VisionApiConfig;
   profile: CollaborationApiProfile;
   contextSnapshot: string;
   messages: CollaborationMessage[];
@@ -88,6 +93,9 @@ export const attachCollaborationImageInputs = async (
 };
 
 export const runCollaborationTurn = async ({
+  emojis,
+  emojiCategories,
+  visionApiConfig,
   profile,
   contextSnapshot,
   messages,
@@ -105,10 +113,11 @@ export const runCollaborationTurn = async ({
   const baseUrl = profile.baseUrl.trim().replace(/\/+$/, '');
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (profile.apiKey.trim()) headers.Authorization = `Bearer ${profile.apiKey.trim()}`;
+  const stickerContext = await prepareCollaborationStickerContext(messages, emojis, emojiCategories, visionApiConfig);
   const requestBody: Record<string, unknown> = {
     model: profile.model.trim(),
     messages: await attachCollaborationImageInputs(
-      buildCollaborationModelMessages(contextSnapshot, messages, makerKind, chatContextSnapshot, turnContext),
+      buildCollaborationModelMessages(contextSnapshot, stickerContext, makerKind, chatContextSnapshot, turnContext),
       messages,
     ),
     temperature: Math.max(0, Math.min(2, Number(profile.temperature) || 0.7)),

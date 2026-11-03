@@ -1,5 +1,5 @@
 import { resolveCharacterUserProfile } from '../../utils/characterUserProfile';
-import type { CharacterProfile, Emoji, EmojiCategory, GroupProfile, Message, RealtimeConfig, UserProfile } from '../../types';
+import type { CharacterProfile, Emoji, EmojiCategory, GroupProfile, Message, RealtimeConfig, UserProfile, VisionApiConfig } from '../../types';
 import { ContextBuilder } from '../../utils/context';
 import { buildChatRequestPayload } from '../../utils/chatRequestPayload';
 import { ChatPrompts } from '../../utils/chatPrompts';
@@ -159,6 +159,7 @@ export const buildCollaborationContextSnapshot = async ({
 };
 
 export interface BuildLiveCollaborationChatContextInput {
+  visionApiConfig?: VisionApiConfig;
   char: CharacterProfile;
   user: UserProfile;
   groups: GroupProfile[];
@@ -177,6 +178,7 @@ export interface BuildLiveCollaborationChatContextInput {
  * an increasingly stale chat transcript.
  */
 export const buildLiveCollaborationChatContext = async ({
+  visionApiConfig,
   char,
   user,
   groups,
@@ -219,6 +221,7 @@ export const buildLiveCollaborationChatContext = async ({
       customPrompt: (char as CharacterProfile & { thinkingChainCustomPrompt?: string }).thinkingChainCustomPrompt,
     },
     stripImages: true,
+    visionApiConfig,
   });
 
   const fullChatContext: CollaborationContextMessage[] = payload.fullMessages

@@ -13,7 +13,7 @@ import { ContextBuilder } from './context';
 import { DB } from './db';
 import { formatLifeSimResetCardForContext } from './lifeSimChatCard';
 import { formatQixiEventCardForContext, tryParseQixiEventChatCard } from './qixiChatCard';
-import { normalizeMessageContent, recentStickerMessages, stickerFromUrl, stickerNameFromUrl, theaterWhenPhrase } from './messageFormat';
+import { normalizeMessageContent, stickerFromUrl, stickerNameFromUrl, theaterWhenPhrase } from './messageFormat';
 import { formatTransferRecord } from './transferFormat';
 import { computeCurrentListening, getCurrentSlot } from './charMusicSchedule';
 import { getCharLyricSnippet } from './charLyricCache';
@@ -1134,8 +1134,7 @@ ${voiceActingGuide()}`;
         const charTz = resolveCharTimeZone(char);
         const timeAwarenessOn = options?.timeAwarenessEnabled ?? (char.timeAwarenessEnabled !== false);
         const storyTime = options?.tavernStoryTime ? getActiveTavernStoryTime(char) : null;
-        // 用户发的最近几张表情包带图；表情包库清单和角色自己发的仍只给名字
-        const stickerImageMsgs = recentStickerMessages(historySlice);
+        // 表情包最多只给名称，识图开启后才附上表情包库里的文字描述；原图不进入聊天请求。
 
         let timeGapHint = "";
         if (historySlice.length >= 2) {
@@ -1166,28 +1165,8 @@ ${voiceActingGuide()}`;
             return apiMessage;
         };
 
-        // 角色自己发的表情包：OpenAI / Anthropic 都不允许 assistant 消息带图，没开识图时把图片
-        // 附到它后面第一条用户消息的开头，注明是「你刚才发的」。后面还没有用户消息的（最后一轮
-        // 刚发的）这一轮不附，等用户回了下一轮自然带上。
-        const attachAssistantStickers = (apiMessages: Array<{ role: string; content: any }>) => {
-            if (options?.useVisionDescriptions) return apiMessages;
-            let pending: Array<{ name: string; url: string }> = [];
-            return apiMessages.map((apiMessage, index) => {
-                const m = historySlice[index];
-                if (m?.role === 'assistant' && m.type === 'emoji' && stickerImageMsgs.has(m)) {
-                    pending.push({ name: stickerNameFromUrl(emojis, m.content), url: m.content });
-                    return apiMessage;
-                }
-                if (apiMessage.role !== 'user' || !pending.length) return apiMessage;
-                const parts = pending.flatMap(s => [{ type: 'text', text: `[你刚才发的表情包「${s.name}」的样子：]` }, { type: 'image_url', image_url: { url: s.url } }]);
-                pending = [];
-                const own = typeof apiMessage.content === 'string' ? [{ type: 'text', text: apiMessage.content }] : Array.isArray(apiMessage.content) ? apiMessage.content : [];
-                return { ...apiMessage, content: [...parts, ...own] };
-            });
-        };
-
         return {
-            apiMessages: attachAssistantStickers(historySlice.map((m, index) => withAction(m, (() => {
+            apiMessages: historySlice.map((m, index) => withAction(m, (() => {
                 if (m.type === 'secret_note') return {role: m.role, content: secretNoteContext(m.content)};
                 if (m.type === 'friend_feed_card') return {role: 'system', content: m.content};
                 if (m.type === 'friend_feed_share_card') {
@@ -1440,15 +1419,9 @@ ${voiceActingGuide()}`;
                 else if (m.type === 'emoji') {
                      const stickerName = stickerNameFromUrl(emojis, m.content);
                      content = `${timeStr} [${m.role === 'user' ? '用户' : '你'} 发送了表情包: ${stickerName}]`;
-                     if (stickerImageMsgs.has(m)) {
-                         // 开了识图 API：用表情包库里这张的画面描述（主模型可能看不了图）。
-                         // 没开：用户发的直接附图；角色发的附在下一条用户消息里（assistant 消息不能带图，见下方）
-                         if (options?.useVisionDescriptions) {
-                             const description = stickerFromUrl(emojis, m.content)?.visionDescription?.trim();
-                             if (description) content = `${content}\n[表情包画面：${description}]`;
-                         } else if (m.role === 'user') {
-                             return { role: m.role, content: [{ type: 'text', text: content.trimStart() }, { type: 'image_url', image_url: { url: m.content } }] };
-                         }
+                     if (options?.useVisionDescriptions) {
+                         const description = stickerFromUrl(emojis, m.content)?.visionDescription?.trim();
+                         if (description) content = `${content}\n[表情包画面：${description}]`;
                      }
                 }
                 else if ((m.type as string) === 'chat_forward') {
@@ -1514,7 +1487,7 @@ ${voiceActingGuide()}`;
                 else content = `${timeStr} ${sourceTag} ${content}`;
 
                 return { role: m.role, content: typeof content === 'string' ? content.trimStart() : content };
-            })()))),
+            })())),
             historySlice // Return original slice for Quote lookup
         };
     }

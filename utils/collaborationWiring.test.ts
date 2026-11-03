@@ -258,7 +258,7 @@ describe('collaboration sidecar wiring', () => {
     expect(windowSource).toContain('onLongPress={openMessageActions}');
     expect(windowSource).toContain("secondaryLabel: canEdit && canCopy ? '复制内容'");
     expect(windowSource).toContain("destructiveLabel: message.role === 'user' ? '删除这一轮'");
-    expect(windowSource).toContain('保存并重新生成');
+    expect(windowSource).toContain('保存修改');
     expect(windowSource).toContain('await CollaborationStore.saveMessage(updatedMessage)');
     expect(windowSource).toContain("message.role === 'user' ? '删除这一轮协同？'");
     expect(windowSource).toContain("tone: 'danger'");

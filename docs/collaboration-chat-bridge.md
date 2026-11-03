@@ -28,6 +28,16 @@
 
 `utils/collaborationMakerSelection.test.ts` 覆盖误触取消、手动清空、保留草稿、切换类型，以及取消后的实际模型消息。
 
+## 用户消息暂存、编辑与表情包
+
+协同复用 ChatApp 的 `useChatAutoReply`：发送先保存并显示用户气泡，所有操作面板关闭且空闲两秒后才调用模型。输入框焦点或草稿、待上传附件、上传/保存、长按、消息菜单、编辑器、表情面板、设置、窗口列表、文件柜、制作/作品预览、转发页均阻止倒计时；解除阻止后重新等待完整两秒。切窗口、关闭页面、取消自动发送不会重放历史消息。顶部手动重生成仍是明确的立即调用入口。
+
+长按编辑本来已有；现在对尚未回复的消息只改正文，保留同批后续待发消息和附件，保存后重新等待两秒。编辑已经回复过的旧用户消息仍沿用原分支移除规则。表情入口显示当前角色可用表情；选择后生成用户表情气泡，面板未关闭前不自动调用模型。
+
+用户和 AI 的表情包都只给主模型文字：识图关闭时只有名称，已有缓存描述也不带入；开启时独立识图 API 补充/复用表情库描述，再提供名称和画面描述。识别失败仅回退名称，不能回退为主模型直看原图。协同的 ChatApp 原文衔接沿用同一识图开关；普通上传参考图仍使用原附件识图逻辑。
+
+`utils/collaborationApiWindow.test.ts` 通过真实组件验证多条待发消息、长按编辑、面板暂停、两秒延迟和用户表情发送；`utils/collaborationStickers.test.ts` 验证双方表情名称/描述和缓存隔离。
+
 ## 回归验证
 
 协同 MCP 工具接入见 `docs/mcp-client.md` 的「协同工作」段：两种模式都使用当前角色的工具绑定，工具结果只供当前工作轮次继续生成，不扩大私聊读取范围、不自动转发到 ChatApp。`collaborationMcp.test.ts` 覆盖调用与停止链路。
@@ -35,5 +45,6 @@
 - `utils/collaborationChatBridge.test.ts`：每次读取最新 DB、固定条数、最新手动断点、空自适应范围、角色／群聊隔离与选择转发。
 - 既有 collaborationContext / collaborationWiring 回归。
 - `scripts/test-worldbook-cowork.mjs`：真实协同 UI → 本地 mock API，检查最终请求包含私聊；窗口打开后追加私聊，再选「最近 20 条」生成，仍读到新内容；只选一条转发时回调只收到该条。
+- `scripts/test-collaboration-drafts.mjs`：`test/fixtures/collaboration-drafts.html` 的真实组件 → 拦截的本地测试 API，验证发送前编辑、面板暂停、用户表情、用户/AI 双方开关识图以及关闭后缓存描述不泄漏。默认图片输出到 `output/collaboration-drafts`，可用 `COLLABORATION_QA_OUTPUT` 指定独立验收目录。
 
 浏览器测试入口 `test/fixtures/worldbook-cowork.html`，Vite 端口 5183；使用仓库 Playwright loader。测试素材及模型请求只在隔离浏览器和本地 mock 服务里运行。

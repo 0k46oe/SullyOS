@@ -50,7 +50,7 @@ import WhiteboxSoundEditor from '../components/chat/WhiteboxSoundEditor';
 import HtmlCard from '../components/chat/HtmlCard';
 import { WhiteboxSound, parseWhiteboxSound, upsertWhiteboxSound, stripWhiteboxSoundDirective, resolveActiveSound, playWhiteboxSound, unlockWhiteboxAudio } from '../utils/whiteboxSound';
 import { buildHtmlPrompt } from '../utils/htmlPrompt';
-import { materializeVisionDescriptions } from '../utils/visionApi';
+import { describeRecentStickers, materializeVisionDescriptions } from '../utils/visionApi';
 import {
     buildGroupTopicContext,
     buildGroupTopicPrompt,
@@ -1422,10 +1422,11 @@ ${memberTimeline || '(暂无互动记录)'}
             const liveHistoryMsgs = currentMsgs.filter(m => m.id > (activeGroup.archivedThroughMessageId || 0));
             const historyWindow = liveHistoryMsgs.slice(-contextLimit);
             const preparedHistory = await materializeVisionDescriptions(historyWindow, apiConfig.visionApi);
+            const preparedEmojis = await describeRecentStickers(preparedHistory, emojis, apiConfig.visionApi);
             const history = buildGroupHistoryBlock(
                 preparedHistory,
                 characters,
-                emojis,
+                preparedEmojis,
                 userProfile.name,
                 3,
                 { useVisionDescriptions: apiConfig.visionApi?.enabled === true },
@@ -1535,13 +1536,14 @@ ${memberTimeline || '(暂无互动记录)'}
                     const liveRoundMsgs = roundMsgs.filter(m => m.id > (activeGroup.archivedThroughMessageId || 0));
                     const historyWindow = liveRoundMsgs.slice(-contextLimit);
                     const preparedHistory = await materializeVisionDescriptions(historyWindow, apiConfig.visionApi);
+                    const preparedEmojis = await describeRecentStickers(preparedHistory, emojis, apiConfig.visionApi);
                     const preparedById = new Map(preparedHistory.map(message => [message.id, message]));
                     // 轮询模式后续成员继续复用本轮刚写回的描述，不能每位成员各识图一次。
                     roundMsgs = roundMsgs.map(message => preparedById.get(message.id) || message);
                     const history = buildGroupHistoryBlock(
                         preparedHistory,
                         characters,
-                        emojis,
+                        preparedEmojis,
                         userProfile.name,
                         3,
                         { useVisionDescriptions: apiConfig.visionApi?.enabled === true },

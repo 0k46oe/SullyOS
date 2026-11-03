@@ -119,18 +119,18 @@ const ImpressionPanel: React.FC<ImpressionPanelProps> = ({ impression, isGenerat
                 </div>
             </div>
 
-            <div className="relative bg-gradient-to-br from-indigo-500 to-purple-600 rounded-3xl p-6 text-white shadow-lg overflow-hidden">
-                <div className="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-white/10 rounded-full blur-2xl"></div>
-                <h3 className="text-xs font-bold text-white/60 uppercase tracking-widest mb-3">核心印象</h3>
-                <p className="text-lg font-light leading-relaxed italic opacity-95">"{safeImpression.personality_core.summary}"</p>
+            <div className="relative bg-white rounded-3xl p-6 text-[#365314] border border-[#c8d6b0] shadow-sm overflow-hidden">
+                <div className="absolute inset-x-0 top-0 h-1.5 bg-[#4f6f37]"></div>
+                <h3 className="text-xs font-bold text-[#4f6f37] uppercase tracking-widest mb-3">核心印象</h3>
+                <p className="text-lg font-medium leading-relaxed italic">"{safeImpression.personality_core.summary}"</p>
 
-                <div className="mt-6 pt-4 border-t border-white/20 grid grid-cols-2 gap-4">
+                <div className="mt-6 pt-4 border-t border-[#e3e8d9] grid grid-cols-2 gap-4">
                     <div>
-                        <div className="text-[10px] text-white/60 uppercase mb-1">互动模式</div>
+                        <div className="text-[10px] text-[#717364] uppercase mb-1">互动模式</div>
                         <div className="text-sm font-medium">{safeImpression.personality_core.interaction_style}</div>
                     </div>
                     <div>
-                        <div className="text-[10px] text-white/60 uppercase mb-1">语气感知</div>
+                        <div className="text-[10px] text-[#717364] uppercase mb-1">语气感知</div>
                         <div className="text-sm font-medium">{safeImpression.behavior_profile.tone_style}</div>
                     </div>
                 </div>

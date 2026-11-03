@@ -48,6 +48,15 @@ describe('buildGroupHistoryBlock 时间跳变分隔行', () => {
 });
 
 describe('buildGroupHistoryBlock 识图 API', () => {
+    it.each([false, true])('双方表情包在识图 %s 时严格遵守名称/描述规则，不附原图', enabled => {
+        const library = [{ name: '贴贴', url: 'https://example.test/cat.png', visionDescription: '两只小猫拥抱' }];
+        const stickers = ['user', 'assistant'].map((role, index) => ({ ...msg(index, role as Message['role'], library[0].url, Date.now(), 'c1'), type: 'emoji' as const }));
+        const history = buildGroupHistoryBlock(stickers, [char('c1', '小夏')], library, '用户', 3, { useVisionDescriptions: enabled });
+        expect(history.text).toContain('贴贴');
+        expect(history.text.includes('两只小猫拥抱')).toBe(enabled);
+        expect(history.text).not.toContain(library[0].url);
+        expect(history.attachedImages).toEqual([]);
+    });
     it('接入时使用文字描述，不再附带 image_url 原图', () => {
         const image = {
             ...msg(10, 'user', 'data:image/jpeg;base64,AAAA', Date.now()),

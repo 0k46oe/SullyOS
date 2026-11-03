@@ -1,12 +1,12 @@
 // 群聊提示词构建 —— 从 GroupChat.tsx 抽出的纯函数，导演模式模板"搬家不改字"，
 // 供导演模式与轮询模式（每成员一次调用）共用。
 import { Message, CharacterProfile, EmojiCategory } from '../../types';
-import { stickerNameFromUrl } from '../messageFormat';
+import { stickerFromUrl, stickerNameFromUrl } from '../messageFormat';
 import { isBlobRef } from '../blobRef';
 import { packetHistoryLine } from './redpacket';
 import { formatRelativeAge } from './relativeTime';
 
-interface EmojiItem { name: string; url: string; categoryId?: string }
+interface EmojiItem { name: string; url: string; categoryId?: string; visionDescription?: string }
 
 /**
  * 这个值是「一张图 / 一段媒体」而不是正文吗？认三种形态：内嵌 data URL、http(s) 外链、
@@ -147,6 +147,8 @@ export function buildGroupHistoryBlock(
             }
         } else if (m.type === 'emoji') {
             content = `[表情包: ${stickerNameFromUrl(emojis, rawText.trim())}]`;
+            const description = options?.useVisionDescriptions ? stickerFromUrl(emojis, rawText.trim())?.visionDescription?.trim() : '';
+            if (description) content += `\n[表情包画面：${description}]`;
         } else if (m.type === 'transfer') {
             // 回执行自带完整句子（[系统: X 领取了 Y 的红包]），不加名字前缀
             if (m.metadata?.packetReceipt) { lines.push(`${timePrefix}${packetHistoryLine(m, nameOf, now)}`); return; }

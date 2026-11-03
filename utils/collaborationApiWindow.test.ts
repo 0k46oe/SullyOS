@@ -33,6 +33,7 @@ let root: Root;
 let host: HTMLDivElement;
 let props: any;
 beforeEach(async () => {
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
     vi.mocked(safeFetchJson).mockReset();
     vi.mocked(safeFetchJson).mockResolvedValue({ choices: [{ message: { content: '已完成。' } }] });
     HTMLElement.prototype.scrollTo = vi.fn();
@@ -83,7 +84,8 @@ async function send() {
         input.dispatchEvent(new Event('input', { bubbles: true }));
     });
     await click('[aria-label="发送"]');
-    await vi.waitFor(() => expect(safeFetchJson).toHaveBeenCalled());
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 2150)); });
+    await vi.waitFor(() => expect(safeFetchJson).toHaveBeenCalled(), { timeout: 5000 });
     return JSON.parse(vi.mocked(safeFetchJson).mock.calls.at(-1)![1]!.body as string);
 }
 
@@ -105,6 +107,58 @@ it('中度窗口打开对应模式，修改模型后保存、发送及重新打�
     await click('[aria-label="协同设置"]');
     expect(host.querySelector<HTMLSelectElement>('[aria-label="中度协同模型"]')?.value).toBe('gemini-model');
 });
+
+it('未发送给 AI 的消息可改错字，保留后续待发消息；选项、编辑器、草稿和设置均暂停倒计时', async () => {
+    await chooseFocused();
+    const type = async (value: string) => act(async () => {
+        const input = host.querySelector('.collab-composer-field textarea')!;
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const wait = async (ms = 2150) => act(async () => { await new Promise(resolve => setTimeout(resolve, ms)); });
+    await type('错自'); await click('[aria-label="发送"]');
+    await type('下一条也保留'); await click('[aria-label="发送"]');
+    expect(safeFetchJson).not.toHaveBeenCalled();
+    await act(async () => { host.querySelector('.collab-message-row-user')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })); });
+    await wait(); expect(safeFetchJson).not.toHaveBeenCalled();
+    await button('编辑内容');
+    await wait(); expect(safeFetchJson).not.toHaveBeenCalled();
+    await act(async () => {
+        const editor = host.querySelector('[aria-labelledby="collaboration-message-editor-title"] textarea')!;
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(editor, '错字已修正');
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await button('保存修改');
+    expect(host.querySelectorAll('.collab-message-row-user')).toHaveLength(2);
+    await type('正在继续打字'); await wait(); expect(safeFetchJson).not.toHaveBeenCalled();
+    await click('[aria-label="协同设置"]'); await type('');
+    await wait(); expect(safeFetchJson).not.toHaveBeenCalled();
+    await button('保存');
+    await wait(1100); expect(safeFetchJson).not.toHaveBeenCalled();
+    await wait(1100);
+    expect(safeFetchJson).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(vi.mocked(safeFetchJson).mock.calls[0][1]!.body as string);
+    expect(JSON.stringify(body.messages)).toContain('错字已修正');
+    expect(JSON.stringify(body.messages)).toContain('下一条也保留');
+    expect(JSON.stringify(body.messages)).not.toContain('错自');
+}, 20000);
+
+it('用户能发表情包；表情面板打开时等待，关闭后只发送名称', async () => {
+    props.emojis = [{ name: '小猫贴贴', url: 'data:image/png;base64,qa-only', visionDescription: '缓存画面不得外泄' }];
+    await chooseFocused();
+    await click('[aria-label="表情包"]');
+    await click('[aria-label="发送表情包：小猫贴贴"]');
+    expect(host.querySelector('.collab-message-row-user img[alt="小猫贴贴"]')).not.toBeNull();
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 2150)); });
+    expect(safeFetchJson).not.toHaveBeenCalled();
+    await click('[aria-label="关闭表情包"]');
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 2150)); });
+    expect(safeFetchJson).toHaveBeenCalledTimes(1);
+    const body = vi.mocked(safeFetchJson).mock.calls[0][1]!.body as string;
+    expect(body).toContain('小猫贴贴');
+    expect(body).not.toContain('缓存画面不得外泄');
+    expect(body).not.toContain('data:image');
+}, 12000);
 
 it.each(['chat', 'preset'] as const)('保持窗口挂载时更新 %s 连接，下一轮发送新地址、Key 和模型', async source => {
     if (source === 'preset') {

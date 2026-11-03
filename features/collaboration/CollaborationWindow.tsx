@@ -2,6 +2,7 @@ import CollaborationBeautyLibrary from './CollaborationBeautyLibrary';
 import type {CollaborationAppearance} from './appearance';
 import {COLLABORATION_UI_THEME_CSS} from './themeCss';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useChatAutoReply } from '../../hooks/useChatAutoReply';
 import {
   Archive,
   ArrowLeft,
@@ -25,6 +26,7 @@ import {
   PaperPlaneRight,
   Plus,
   SpinnerGap,
+  Smiley,
   Stop,
   Trash,
   X,
@@ -341,7 +343,7 @@ const CollaborationMessageEditor: React.FC<{
       <section className="relative mx-3 mb-[max(.75rem,env(safe-area-inset-bottom))] w-[calc(100%-1.5rem)] max-w-[520px] rounded-[26px] border border-white/70 bg-white p-5 shadow-[0_28px_90px_rgba(15,23,42,.28)] sm:mb-0">
         <h2 id="collaboration-message-editor-title" className="text-[17px] font-semibold text-slate-900">编辑{regenerates ? '自己的消息' : '这条回复'}</h2>
         <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
-          {regenerates ? '保存后会从这里重新生成，后面的旧回复与后续分支会移除。' : '只修改显示内容，不会重新调用模型。'}
+          {regenerates ? '尚未回复的消息可先改错字；关闭所有操作面板后，空闲两秒才会发送给 AI。已回复的旧消息修改后会移除后续分支。' : '只修改显示内容，不会重新调用模型。'}
         </p>
         <textarea
           autoFocus
@@ -352,7 +354,7 @@ const CollaborationMessageEditor: React.FC<{
         <div className="mt-4 flex gap-2.5">
           <button type="button" onClick={onCancel} disabled={saving} className="flex-1 rounded-2xl bg-slate-100 px-4 py-3 text-xs font-semibold text-slate-700 disabled:opacity-45">取消</button>
           <button type="button" onClick={onSave} disabled={saving || !value.trim()} className="flex-[1.5] rounded-2xl bg-slate-900 px-4 py-3 text-xs font-semibold text-white disabled:opacity-45">
-            {saving ? '保存中…' : regenerates ? '保存并重新生成' : '保存修改'}
+            {saving ? '保存中…' : '保存修改'}
           </button>
         </div>
       </section>
@@ -1146,7 +1148,7 @@ const CollaborationEmojiCard: React.FC<{ name: string; emoji?: Emoji }> = ({ nam
     : <div className="mt-2 rounded-xl border border-dashed border-current/15 px-3 py-2 text-[10px] opacity-55">表情包未找到：{name}</div>
 );
 
-const useCollaborationLongPress = (onLongPress: () => void) => {
+const useCollaborationLongPress = (onLongPress: () => void, onHolding?: (holding: boolean) => void) => {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressedRef = useRef(false);
   const originRef = useRef<{ x: number; y: number } | null>(null);
@@ -1154,7 +1156,8 @@ const useCollaborationLongPress = (onLongPress: () => void) => {
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = null;
     originRef.current = null;
-  }, []);
+    onHolding?.(false);
+  }, [onHolding]);
   useEffect(() => clearTimer, [clearTimer]);
   const isInteractiveTarget = (target: EventTarget | null) => (
     target instanceof Element && !!target.closest('button, a, input, textarea, select, label')
@@ -1165,6 +1168,7 @@ const useCollaborationLongPress = (onLongPress: () => void) => {
       clearTimer();
       longPressedRef.current = false;
       originRef.current = { x: event.clientX, y: event.clientY };
+      onHolding?.(true);
       timerRef.current = setTimeout(() => {
         longPressedRef.current = true;
         originRef.current = null;
@@ -1207,13 +1211,19 @@ const MessageBubble: React.FC<{
   onPlayVoice: (message: CollaborationMessage) => void;
   onOpenAttachment: (attachment: CollaborationAttachment) => void;
   onLongPress: (message: CollaborationMessage) => void;
-}> = ({ message, character, user, theme, uiTheme, emojis, emojiCategories, voiceState, onPlayVoice, onOpenAttachment, onLongPress }) => {
-  const longPressHandlers = useCollaborationLongPress(() => onLongPress(message));
+  onHolding?: (holding: boolean) => void;
+}> = ({ message, character, user, theme, uiTheme, emojis, emojiCategories, voiceState, onPlayVoice, onOpenAttachment, onLongPress, onHolding }) => {
+  const longPressHandlers = useCollaborationLongPress(() => onLongPress(message), onHolding);
   if (message.role === 'system') {
     return <div {...longPressHandlers} className="collab-message-system mx-auto my-3 max-w-[82%] rounded-full bg-slate-900/6 px-4 py-2 text-center text-[11px] leading-relaxed text-slate-500">{message.content}</div>;
   }
   const isUser = message.role === 'user';
-  const richOutput = isUser ? null : parseCollaborationRichOutput(message.content);
+  const userStickerPattern = /\[\[SEND_EMOJI\s*[:：]\s*([^\]\r\n]+?)\s*\]\]/gi;
+  const richOutput = isUser ? {
+    text: message.content.replace(userStickerPattern, '').trim(),
+    emojiNames: [...message.content.matchAll(userStickerPattern)].map(match => match[1].trim()),
+    voice: undefined,
+  } : parseCollaborationRichOutput(message.content);
   const style = isUser ? theme.user : theme.ai;
   const avatar = isUser ? (user.perCharAvatars?.[character.id] || user.avatar) : character.avatar;
   return (
@@ -1230,7 +1240,7 @@ const MessageBubble: React.FC<{
         >
           {!isUser && message.thinkingChain && <CollaborationThinkingBlock chain={message.thinkingChain} />}
           {isUser && message.requestedFormat && <div className="mb-1.5 text-[9px] font-semibold opacity-65">交付格式 · {OUTPUT_FORMAT_LABELS[message.requestedFormat]}</div>}
-          {isUser && message.content && <CollaborationMarkdownView content={message.content} />}
+          {isUser && richOutput.text && <CollaborationMarkdownView content={richOutput.text} />}
           {!isUser && richOutput?.text && <CollaborationMarkdownView content={richOutput.text} />}
           {!isUser && richOutput?.voice && (
             <CollaborationVoiceBar
@@ -1240,7 +1250,7 @@ const MessageBubble: React.FC<{
               onPlay={() => onPlayVoice(message)}
             />
           )}
-          {!isUser && richOutput?.emojiNames.map((name, index) => (
+          {richOutput.emojiNames.map((name, index) => (
             <CollaborationEmojiCard key={`${name}-${index}`} name={name} emoji={resolveCollaborationEmoji(name, emojis, emojiCategories)} />
           ))}
           {(message.attachments || []).map(attachment => (
@@ -1549,6 +1559,12 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
   const [editingMessage, setEditingMessage] = useState<CollaborationMessage | null>(null);
   const [editDraft, setEditDraft] = useState('');
   const [editSaving, setEditSaving] = useState(false);
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const [composerFocused, setComposerFocused] = useState(false);
+  const [holdingMessage, setHoldingMessage] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [filePickerOpen, setFilePickerOpen] = useState(false);
+  const sendingRef = useRef(false);
   const [voiceAudioUrls, setVoiceAudioUrls] = useState<Record<string, string>>({});
   const [voiceLoadingIds, setVoiceLoadingIds] = useState<Set<string>>(() => new Set());
   const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
@@ -1560,6 +1576,14 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
   const collaborationAudioRef = useRef<HTMLAudioElement | null>(null);
   const collaborationVoiceBlobUrlsRef = useRef<Set<string>>(new Set());
   const previousOpenRef = useRef(false);
+
+  useEffect(() => {
+    const input = fileInputRef.current;
+    if (!filePickerOpen || !input) return;
+    const cancelled = () => setFilePickerOpen(false);
+    input.addEventListener('cancel', cancelled);
+    return () => input.removeEventListener('cancel', cancelled);
+  }, [filePickerOpen]);
 
   const requestActionDialog = useCallback((request: CollaborationDialogRequest): Promise<CollaborationDialogResult> => (
     new Promise(resolve => {
@@ -1597,6 +1621,10 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
     setPreviewArtifact(null);
     setEditingMessage(null);
     setEditDraft('');
+    setEmojiOpen(false);
+    setComposerFocused(false);
+    setHoldingMessage(false);
+    setFilePickerOpen(false);
     setShowEntryChooser(sessions.length > 0);
     setShowModePicker(sessions.length === 0);
   }, [loaded, open, sessions.length]);
@@ -1666,6 +1694,21 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
       emojis: emojis.filter(emoji => !emoji.categoryId || visibleIds.has(emoji.categoryId)),
     };
   }, [character.id, emojiCategories, emojis]);
+
+  const autoReply = useChatAutoReply({
+    enabled: true,
+    conversationId: activeSessionId ? `${character.id}:${activeSessionId}` : null,
+    active: open && !!activeSession,
+    blocked: composerFocused || !!draft.trim() || pendingAttachments.length > 0 || !!uploadStatus
+      || sending || filePickerOpen || makerSaving || holdingMessage || editSaving || !!editingMessage || !!actionDialog
+      || emojiOpen || settingsOpen || drawerOpen || libraryOpen || makerOpen || !!previewArtifact
+      || transferOpen || transferring || showModePicker || showEntryChooser,
+    generating: isGenerating,
+    onGenerate: () => {
+      const latestUserMessage = [...messages].reverse().find(message => message.role === 'user');
+      if (activeSession && latestUserMessage) void generateCollaborationReply(activeSession, messages, latestUserMessage);
+    },
+  });
 
   const playCollaborationVoice = async (message: CollaborationMessage) => {
     const parsed = parseCollaborationRichOutput(message.content).voice;
@@ -2164,6 +2207,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
       setChatReadReceipt({ sessionId: sessionAtStart.id, count: chatContextLimit });
       if (sessionAtStart.mode === 'immersive') {
         const immersiveContext = await buildLiveCollaborationChatContext({
+          visionApiConfig: chatApi.visionApi,
           char: liveHistory.character,
           user,
           groups,
@@ -2179,6 +2223,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
       } else {
         if (chatContextLimit > 0) {
           const focusedChatContext = await buildLiveCollaborationChatContext({
+            visionApiConfig: chatApi.visionApi,
             char: liveHistory.character,
             user,
             groups,
@@ -2228,6 +2273,9 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
       await updateSession(startedSession);
 
       const reply = await runCollaborationTurn({
+        emojis: visibleEmojiLibrary.emojis,
+        emojiCategories: visibleEmojiLibrary.categories,
+        visionApiConfig: chatApi.visionApi,
         profile,
         contextSnapshot,
         messages: requestMessages,
@@ -2305,9 +2353,9 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
     }
   };
 
-  const send = async () => {
-    if (!activeSession || isGenerating || uploadStatus || makerSavingRef.current) return;
-    const content = draft.trim();
+  const send = async (sticker?: Emoji) => {
+    if (!activeSession || isGenerating || uploadStatus || makerSavingRef.current || sendingRef.current) return;
+    const content = sticker ? `[[SEND_EMOJI: ${sticker.name}]]` : draft.trim();
     if (!content && pendingAttachments.length === 0) return;
     const profile = settings[activeSession.mode];
     if (!isCollaborationApiConfigured(profile)) {
@@ -2322,22 +2370,37 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
       sessionId: activeSession.id,
       role: 'user',
       content,
-      ...(requestedOutputFormat ? { requestedFormat: requestedOutputFormat } : {}),
+      ...(!sticker && requestedOutputFormat ? { requestedFormat: requestedOutputFormat } : {}),
       createdAt: now,
-      attachments: pendingAttachments.map(item => item.attachment),
+      attachments: sticker ? [] : pendingAttachments.map(item => item.attachment),
     };
-    await persistPendingAttachments();
-    await CollaborationStore.saveMessage(userMessage);
-    const nextMessages = [...messages, userMessage];
-    setMessages(nextMessages);
-    setDraft('');
-    setPendingAttachments([]);
-    setRequestedOutputFormat(null);
-
-    await generateCollaborationReply(activeSession, nextMessages, userMessage);
+    sendingRef.current = true;
+    setSending(true);
+    const finishSend = autoReply.beginSend(`${character.id}:${activeSession.id}`);
+    try {
+      if (!sticker) await persistPendingAttachments();
+      await CollaborationStore.saveMessage(userMessage);
+      setMessages(previous => [...previous, userMessage]);
+      if (!sticker) {
+        setDraft('');
+        setPendingAttachments([]);
+        setRequestedOutputFormat(null);
+      }
+      if (document.activeElement instanceof HTMLTextAreaElement) document.activeElement.blur();
+      setComposerFocused(false);
+      await updateSession({ ...activeSession, updatedAt: now, lastMessagePreview: collaborationMessagePreview(userMessage) });
+      finishSend(true);
+    } catch (error: any) {
+      finishSend(false);
+      notify(error?.message || '消息保存失败，请重试', 'error');
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+    }
   };
 
   const rerollLatestReply = async () => {
+    autoReply.cancel();
     if (!activeSession || isGenerating || uploadStatus || makerSavingRef.current) return;
     let lastUserIndex = -1;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -2398,9 +2461,11 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
       const updatedMessage: CollaborationMessage = { ...editingMessage, content };
       await CollaborationStore.saveMessage(updatedMessage);
       if (updatedMessage.role === 'user') {
-        const droppedMessages = messages.slice(messageIndex + 1);
+        const hasReply = messages.slice(messageIndex + 1).some(message => message.role === 'assistant');
+        const droppedMessages = hasReply ? messages.slice(messageIndex + 1) : [];
         await CollaborationStore.deleteMessages(droppedMessages.map(message => message.id));
-        const requestMessages = [...messages.slice(0, messageIndex), updatedMessage];
+        const requestMessages = hasReply ? [...messages.slice(0, messageIndex), updatedMessage]
+          : messages.map(message => message.id === updatedMessage.id ? updatedMessage : message);
         setMessages(requestMessages);
         const updatedSession = {
           ...activeSession,
@@ -2412,8 +2477,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
         setEditDraft('');
         if (libraryOpen) void refreshLibrary();
         trackEvent('编辑协同消息', { 角色: 'user', 后续移除: bucketFewCount(droppedMessages.length) });
-        notify('消息已修改，正在重新生成', 'success');
-        await generateCollaborationReply(updatedSession, requestMessages, updatedMessage);
+        notify('消息已修改，关闭操作面板后空闲两秒再发送给 AI', 'success');
+        autoReply.beginSend(`${character.id}:${activeSession.id}`)(true);
         return;
       }
 
@@ -2466,6 +2531,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
     const remainingMessages = messages.filter(row => !deletedIds.has(row.id));
     setMessages(remainingMessages);
     const lastMessage = remainingMessages[remainingMessages.length - 1];
+    if ([...remainingMessages].reverse().find(row => row.role === 'user' || row.role === 'assistant')?.role !== 'user') autoReply.cancel();
     await updateSession({
       ...activeSession,
       updatedAt: Date.now(),
@@ -2486,10 +2552,10 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
     const choice = await requestActionDialog({
       title: message.role === 'user' ? '处理自己的消息' : message.role === 'assistant' ? `处理 ${character.name} 的回复` : '处理这条提示',
       description: canEdit && message.role === 'user'
-        ? '可以修改后从这一条重新生成，也可以复制或删除。'
+        ? '可以先修改错字。关闭所有操作面板后，空闲两秒才会发送给 AI。'
         : '选择要对刚刚长按的这条内容执行的操作。',
       detail: (message.attachments || []).length > 0 ? '编辑正文不会移除这条消息里已有的附件。' : undefined,
-      confirmLabel: canEdit ? (message.role === 'user' ? '编辑并重新生成' : '编辑内容') : canCopy ? '复制内容' : undefined,
+      confirmLabel: canEdit ? '编辑内容' : canCopy ? '复制内容' : undefined,
       secondaryLabel: canEdit && canCopy ? '复制内容' : undefined,
       destructiveLabel: message.role === 'user' ? '删除这一轮' : '删除这条内容',
       cancelLabel: '取消',
@@ -2642,6 +2708,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
                 onPlayVoice={playCollaborationVoice}
                 onOpenAttachment={openAttachment}
                 onLongPress={openMessageActions}
+                onHolding={setHoldingMessage}
               />
             ))}
             {isGenerating && (
@@ -2659,10 +2726,18 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
           </div>
 
           <div className="collab-ui-composer relative z-20 shrink-0 border-t border-white/70 bg-white/82 px-3 pb-[max(.75rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur-xl">
+            {autoReply.seconds !== null && <div role="status" className="mb-2 flex items-center justify-between px-2 text-[11px] text-slate-500"><span>空闲 {autoReply.seconds} 秒后发送给 AI</span><button type="button" onClick={autoReply.cancel}>取消自动发送</button></div>}
+            {emojiOpen && <section role="dialog" aria-label="选择表情包" className="mb-3 rounded-2xl border border-slate-200 bg-white p-3">
+              <div className="mb-2 flex items-center justify-between text-xs text-slate-600"><span>表情包</span><button type="button" aria-label="关闭表情包" onClick={() => setEmojiOpen(false)}><X size={18} /></button></div>
+              <div className="grid max-h-52 grid-cols-4 gap-2 overflow-y-auto">{visibleEmojiLibrary.emojis.map(emoji => <button key={emoji.name} type="button" disabled={sending || isGenerating} aria-label={`发送表情包：${emoji.name}`} onClick={() => void send(emoji)} className="flex min-w-0 flex-col items-center gap-1 rounded-xl p-1 active:bg-slate-100"><TokenImg value={emoji.url} alt={emoji.name} className="h-14 w-14 object-contain" /><span className="w-full truncate text-[10px] text-slate-500">{emoji.name}</span></button>)}</div>
+              {!visibleEmojiLibrary.emojis.length && <p className="py-4 text-center text-xs text-slate-400">当前角色没有可用表情包</p>}
+            </section>}
             <div className="collab-composer-tools mb-2 flex items-center gap-2 overflow-x-auto no-scrollbar">
               <button type="button" onClick={() => setMakerOpen(true)} disabled={isGenerating} className="collab-primary-action flex shrink-0 items-center gap-1.5 rounded-full bg-slate-900 px-3 py-1.5 text-[10px] font-semibold text-white disabled:opacity-40"><Plus size={12} weight="bold" />制作</button>
               <select
                 value={requestedOutputFormat || ''}
+                onFocus={() => setComposerFocused(true)}
+                onBlur={() => setComposerFocused(false)}
                 onChange={event => setRequestedOutputFormat((event.target.value || null) as CollaborationArtifactFormat | null)}
                 disabled={isGenerating}
                 aria-label="选择文件交付格式"
@@ -2689,14 +2764,17 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
               </div>
             )}
             <div className="collab-composer-field flex items-end gap-2 rounded-[24px] border border-slate-200/90 bg-white px-2 py-2 shadow-[0_8px_30px_rgba(15,23,42,.08)]">
-              <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isGenerating || !!uploadStatus} className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-slate-500 active:bg-slate-100 disabled:opacity-40" aria-label="上传文件或参考图片" title="支持图片、PDF、Word 与文本资料"><FileArrowUp size={21} /></button>
-              <input ref={fileInputRef} type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.docx,.doc,.txt,.md,.markdown,.json,application/json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml" className="hidden" onChange={event => void handleFiles(event.target.files)} />
+              <button type="button" aria-label="表情包" aria-expanded={emojiOpen} onClick={() => setEmojiOpen(value => !value)} disabled={isGenerating} className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-slate-500 disabled:opacity-40"><Smiley size={21} /></button>
+              <button type="button" onClick={() => { setFilePickerOpen(true); fileInputRef.current?.click(); }} disabled={isGenerating || !!uploadStatus} className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-slate-500 active:bg-slate-100 disabled:opacity-40" aria-label="上传文件或参考图片" title="支持图片、PDF、Word 与文本资料"><FileArrowUp size={21} /></button>
+              <input ref={fileInputRef} type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.docx,.doc,.txt,.md,.markdown,.json,application/json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml" className="hidden" onChange={event => { setFilePickerOpen(false); void handleFiles(event.target.files); event.target.value = ''; }} />
               <textarea
                 value={draft}
+                onFocus={() => setComposerFocused(true)}
+                onBlur={() => setComposerFocused(false)}
                 disabled={makerSaving}
                 onChange={event => changeComposerDraft(event.target.value)}
                 onKeyDown={event => {
-                  if (event.key === 'Enter' && !event.shiftKey) {
+                  if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                     event.preventDefault();
                     void send();
                   }

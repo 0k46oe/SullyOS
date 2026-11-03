@@ -44,7 +44,7 @@ describe('buildMessageHistory 私聊表情包带名字', () => {
     });
 });
 
-describe('用户发的表情包给模型看图', () => {
+describe('表情包上下文只用名称或识图文字', () => {
     const char = { id: 'c1', name: '小角色' } as any;
     const userProfile = { name: '我' } as any;
     const t0 = Date.now() - 600_000;
@@ -53,14 +53,21 @@ describe('用户发的表情包给模型看图', () => {
 
     const images = (content: any) => Array.isArray(content) ? content.filter((p: any) => p.type === 'image_url').map((p: any) => p.image_url.url) : [];
 
-    it('只给最近 5 张用户表情包附图，更早的只给名字', () => {
-        const history = [1, 2, 3, 4, 5, 6, 7].map(id => sticker(id, 'user', `https://img.example/${id}.png`)) as any[];
-        const { apiMessages } = ChatPrompts.buildMessageHistory(history, 20, char, userProfile, emojis);
-        expect(apiMessages.map((m: any) => images(m.content).length)).toEqual([0, 0, 1, 1, 1, 1, 1]);
-        expect(images(apiMessages[2].content)).toEqual(['https://img.example/3.png']);
+    it('识图关闭时，用户和角色发的表情包都只传名称，不传图片', () => {
+        const history = [
+            sticker(1, 'user'),
+            sticker(2, 'assistant'),
+            { id: 3, charId: 'c1', role: 'user', type: 'text', content: '哈哈，收到', timestamp: t0 + 3000 },
+        ] as any[];
+        const { apiMessages } = ChatPrompts.buildMessageHistory(history, 20, char, userProfile, [{ ...emojis[0], visionDescription: '缓存的详细画面不得泄漏' }]);
+        expect(apiMessages.every((m: any) => images(m.content).length === 0)).toBe(true);
+        expect(JSON.stringify(apiMessages)).not.toContain('缓存的详细画面不得泄漏');
+        expect(JSON.stringify(apiMessages)).not.toContain(DOGE_URL);
+        expect(JSON.stringify(apiMessages)).toContain('柴犬贴贴');
+        expect(JSON.stringify(apiMessages)).toContain('收到');
     });
 
-    it('角色发的表情包：自己那条只有名字，图附在下一条用户消息开头；最近 5 张单独计数', () => {
+    it('角色发的表情包不会附到下一条用户消息，也不发送原图', () => {
         const history = [
             ...[1, 2, 3, 4, 5, 6].map(id => sticker(id, 'assistant', `https://img.example/a${id}.png`)),
             { id: 9, charId: 'c1', role: 'user', type: 'text', content: '哈哈', timestamp: t0 + 9000 },
@@ -69,11 +76,11 @@ describe('用户发的表情包给模型看图', () => {
         const { apiMessages } = ChatPrompts.buildMessageHistory(history, 20, char, userProfile, emojis);
         // assistant 消息不带图
         expect(apiMessages.filter((m: any) => m.role === 'assistant').every((m: any) => typeof m.content === 'string')).toBe(true);
-        // 最近 5 张是 a3..a6 和最后那张；a3..a6 后面有用户消息，附在它开头；最后那张还没有用户回，不附
         const userMsg = apiMessages.find((m: any) => m.role === 'user')!;
-        expect(images(userMsg.content)).toEqual(['https://img.example/a3.png', 'https://img.example/a4.png', 'https://img.example/a5.png', 'https://img.example/a6.png']);
-        expect(JSON.stringify(userMsg.content)).toContain('你刚才发的表情包');
+        expect(images(userMsg.content)).toEqual([]);
+        expect(typeof userMsg.content).toBe('string');
         expect(JSON.stringify(userMsg.content)).toContain('哈哈');
+        expect(JSON.stringify(apiMessages)).toContain('柴犬贴贴');
     });
 
     it('开了识图 API 时用表情包库里的画面描述，不附原图，也不用消息上的旧描述', () => {
@@ -86,6 +93,7 @@ describe('用户发的表情包给模型看图', () => {
         for (const m of apiMessages) {
             expect(m.content).toContain('一只柴犬歪头');
             expect(m.content).not.toContain('认错的旧描述');
+            expect(images(m.content)).toEqual([]);
         }
     });
 });
