@@ -24,7 +24,8 @@ import {
 } from '../types';
 import { getLastRealUserMessageAt } from './amsg2ExpireGuard';
 import { AMSG_BUNDLE_VERSION } from './amsgBundleVersion';
-import { parseAmsgSelfUpdateState, type AmsgSelfUpdateReport } from './amsgSelfUpdateState';
+import { describeD1LimitCode } from './amsgD1Limits';
+import { explainCfTokenRejection, parseAmsgSelfUpdateState, type AmsgSelfUpdateReport } from './amsgSelfUpdateState';
 import { buildTaskInstruction, resolveSendAtMs } from './amsgFireSchedule';
 import {
   getPendingTasks, isAmsg2EnabledForChar,
@@ -1197,6 +1198,8 @@ const formatAmsgErrorCause = (cause: unknown): string => {
   if (!cause || typeof cause !== 'object' || Array.isArray(cause)) return '';
   const c = cause as Record<string, unknown>;
   const code = typeof c.code === 'string' ? c.code.trim() : '';
+  const limitText = describeD1LimitCode(code);
+  if (limitText) return `${limitText}（${code}）`;
   const name = typeof c.name === 'string' ? c.name.trim() : '';
   const message = typeof c.message === 'string' ? c.message.trim() : '';
   const head = code
@@ -3657,7 +3660,7 @@ export const ActiveMsgClient = {
     return {
       ok: false,
       supported: true,
-      message: formatAmsgServerError(body, `更新没成功（HTTP ${status}）。`),
+      message: explainCfTokenRejection(formatAmsgServerError(body, `更新没成功（HTTP ${status}）。`)),
       code: typeof body?.error?.code === 'string' ? body.error.code : undefined,
     };
   },
@@ -3726,7 +3729,7 @@ export const ActiveMsgClient = {
     }
     return {
       ok: false,
-      message: formatAmsgServerError(body, `${enabled ? '恢复' : '暂停'}没成功（HTTP ${status}）。`),
+      message: explainCfTokenRejection(formatAmsgServerError(body, `${enabled ? '恢复' : '暂停'}没成功（HTTP ${status}）。`)),
       code: typeof body?.error?.code === 'string' ? body.error.code : undefined,
     };
   },

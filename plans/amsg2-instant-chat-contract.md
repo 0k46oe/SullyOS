@@ -63,7 +63,7 @@
      `credentialsSynced:true`。之前落下但没有任务引用的输入由 TTL 清理。
   5. 唤醒按租户分组的 `InstantTickDO`，alarm 点名执行已落库的 uuid；每分钟 cron 继续兜底。
 
-  独立输入保留 30 天，按角色归属参与云端清理。大值继续走 client_state 的 5 MiB 分块能力，
+  独立输入保留 7 天，按角色归属参与云端清理。大值继续走 client_state 的 5 MiB 分块能力，
   不受任务行约 996 KB 明文容量限制，现有 `chat.messages` 2 MiB 预算保持不变。
   Worker 使用 `readState(namespace,{key})` 定点读取，不能扫描同命名空间下的全部历史输入。
 - `export default` 的 `fetch` / `scheduled` 签名补上第三个参数 `ctx`

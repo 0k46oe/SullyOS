@@ -1753,7 +1753,7 @@ const formatTimestamp = (ts: number) => {
                         className={`absolute -right-10 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full flex items-center justify-center pointer-events-none transition-all duration-150 ${isReplyReady ? 'bg-indigo-500 text-white shadow-md shadow-indigo-200' : 'bg-white/90 text-slate-400 shadow-sm'}`}
                         style={{
                             opacity: Math.min(1, Math.abs(replyOffset) / 36),
-                            transform: `translateY(-50%) scale(${isReplyReady ? 1 : 0.86})`,
+                            transform: replyOffset !== 0 ? `translateY(-50%) scale(${isReplyReady ? 1 : 0.86})` : undefined,
                         }}
                     >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
@@ -1764,7 +1764,7 @@ const formatTimestamp = (ts: number) => {
                     <div
                         className={`relative flex flex-col ${isModuleCard && centerModules ? 'items-center' : (isUser ? 'items-end' : 'items-start')} min-w-0`}
                         style={{
-                            transform: `translateX(${replyOffset}px)`,
+                            transform: replyOffset !== 0 ? `translateX(${replyOffset}px)` : undefined,
                             transition: isReplyGestureActive ? 'none' : 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1)',
                             touchAction: 'pan-y',
                             userSelect: 'none',
