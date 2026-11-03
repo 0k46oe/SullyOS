@@ -21,6 +21,7 @@ export type HalloweenNpc = 'caian' | 'aiven';
 export interface KanataHalloweenState {
     version: 1; disabled: boolean; costumes: Record<string, string | null>;
     collectedCostumes: string[]; candies: Record<string, number>; completed: HalloweenNpc[];
+    catchUp?: 'active' | 'collecting' | 'ended';
 }
 export const freshHalloween = (): KanataHalloweenState => ({ version: 1, disabled: false, costumes: {}, collectedCostumes: [], candies: {}, completed: [] });
 export function validateHalloween(value: KanataHalloweenState) {
@@ -29,10 +30,29 @@ export function validateHalloween(value: KanataHalloweenState) {
         || Object.values(value.costumes).some(id => id !== null && !HALLOWEEN_COSTUMES.some(c => c.id === id))
         || Object.entries(value.candies).some(([id, n]) => !HALLOWEEN_CANDIES.some(c => c.id === id) || !Number.isSafeInteger(n) || (n as number) < 0)
         || !Array.isArray(value.collectedCostumes) || value.collectedCostumes.some(id => !HALLOWEEN_COSTUMES.some(c => c.id === id))
-        || !Array.isArray(value.completed) || value.completed.some(id => id !== 'caian' && id !== 'aiven')) throw new Error('万圣节收藏无法读取，请先备份；没有覆盖原存档');
+        || !Array.isArray(value.completed) || value.completed.some(id => id !== 'caian' && id !== 'aiven')
+        || (value.catchUp !== undefined && !['active', 'collecting', 'ended'].includes(value.catchUp))) throw new Error('万圣节收藏无法读取，请先备份；没有覆盖原存档');
 }
+export const isHalloweenCatchUpActive = (event?: KanataHalloweenState) => event?.catchUp === 'active' || event?.catchUp === 'collecting';
 export function halloweenActive(state: FishingMarketState, at = Date.now()) {
-    return isKanataHalloween(getLocalDateKey(new Date(at))) && !state.kanataHalloween?.disabled;
+    return (isKanataHalloween(getLocalDateKey(new Date(at))) || isHalloweenCatchUpActive(state.kanataHalloween)) && !state.kanataHalloween?.disabled;
+}
+/** Explicit local opt-in; receipts and collections survive ending and reopening. */
+export function startHalloweenCatchUp(state: FishingMarketState): FishingMarketState {
+    const event = state.kanataHalloween || freshHalloween();
+    if (isHalloweenCatchUpActive(event) && !event.disabled) return state;
+    return { ...state, kanataHalloween: { ...event, disabled: false, catchUp: 'active' } };
+}
+export function shouldOfferHalloweenCatchUpEnd(event?: KanataHalloweenState): boolean {
+    return !!event && !event.disabled && event.catchUp === 'active' && ['caian', 'aiven'].every(npc => event.completed.includes(npc as HalloweenNpc));
+}
+export function continueHalloweenCatchUp(state: FishingMarketState): FishingMarketState {
+    if (!shouldOfferHalloweenCatchUpEnd(state.kanataHalloween)) return state;
+    return { ...state, kanataHalloween: { ...state.kanataHalloween!, catchUp: 'collecting' } };
+}
+export function endHalloweenCatchUp(state: FishingMarketState): FishingMarketState {
+    if (!isHalloweenCatchUpActive(state.kanataHalloween)) return state;
+    return { ...state, kanataHalloween: { ...state.kanataHalloween!, disabled: true, costumes: {}, catchUp: 'ended' } };
 }
 const pick = <T,>(items: readonly T[], random: () => number) => items[Math.min(items.length - 1, Math.max(0, Math.floor(random() * items.length)))];
 export function assignHalloweenCostume(state: FishingMarketState, actorId: string, mode: 'initial' | 'change' | 'remove', at = Date.now(), random = Math.random): FishingMarketState {
@@ -54,7 +74,7 @@ export function giveHalloweenCandy(state: FishingMarketState, at = Date.now(), r
 export function finishHalloweenDialogue(state: FishingMarketState, npc: HalloweenNpc, userName: string, withdraw = false, at = Date.now(), random = Math.random): FishingMarketState {
     if (!halloweenActive(state, at)) return state;
     const event = state.kanataHalloween || freshHalloween();
-    if (withdraw) return { ...state, kanataHalloween: { ...event, disabled: true, costumes: {}, completed: [...new Set([...event.completed, npc])] } };
+    if (withdraw) return { ...state, kanataHalloween: { ...event, disabled: true, costumes: {}, ...(isHalloweenCatchUpActive(event) ? { catchUp: 'ended' as const } : {}), completed: [...new Set([...event.completed, npc])] } };
     if (event.completed.includes(npc)) return state;
     let next = npc === 'caian' ? giveHalloweenCandy(state, at, random).state : state;
     if (npc === 'aiven') next = addCatchToState(next, {

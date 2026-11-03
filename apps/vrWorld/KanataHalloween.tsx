@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import TokenImg from '../../components/os/TokenImg';
 import { useLocalDateKey } from '../../hooks/useLocalDateKey';
 import { FISHING_MARKET_STORAGE_KEY, mutateFishingMarket, readFishingMarketState } from '../../utils/vrWorld/fishingMarket';
-import { assignHalloweenCostume, finishHalloweenDialogue, freshHalloween, giveHalloweenCandy, halloweenActive, HALLOWEEN_CANDIES, HALLOWEEN_COSTUMES, type HalloweenNpc, type KanataHalloweenState } from '../../utils/vrWorld/kanataHalloween';
+import { assignHalloweenCostume, continueHalloweenCatchUp, endHalloweenCatchUp, finishHalloweenDialogue, freshHalloween, giveHalloweenCandy, halloweenActive, HALLOWEEN_CANDIES, HALLOWEEN_COSTUMES, isHalloweenCatchUpActive, shouldOfferHalloweenCatchUpEnd, startHalloweenCatchUp, type HalloweenNpc, type KanataHalloweenState } from '../../utils/vrWorld/kanataHalloween';
 import { isKanataHalloween } from '../../utils/vrWorld/halloweenCalendar';
 import { SARDialogueCast } from './SARNpcArt';
 import { SARDialogueBackdrop } from './SARDialogueBackdrop';
@@ -24,7 +24,58 @@ export function KanataHalloweenProvider({ children }: { children: React.ReactNod
         sync(); window.addEventListener('vr-fishing-market-updated', sync); window.addEventListener('storage', storage);
         return () => { window.removeEventListener('vr-fishing-market-updated', sync); window.removeEventListener('storage', storage); };
     }, []);
-    return <HalloweenContext.Provider value={{ state, active: isKanataHalloween(day) && !state.disabled && !error, error }}>{children}</HalloweenContext.Provider>;
+    return <HalloweenContext.Provider value={{ state, active: (isKanataHalloween(day) || isHalloweenCatchUpActive(state)) && !state.disabled && !error, error }}>{children}</HalloweenContext.Provider>;
+}
+
+function useHalloweenCatchUpActions() {
+    const [busy, setBusy] = useState(false), [error, setError] = useState('');
+    const lock = useRef(false);
+    const run = async (action: typeof startHalloweenCatchUp) => {
+        if (lock.current) return;
+        lock.current = true; setBusy(true); setError('');
+        try { await mutateFishingMarket(action); }
+        catch (cause) { setError(cause instanceof Error ? cause.message : '活动进度保存失败，请重试'); }
+        finally { lock.current = false; setBusy(false); }
+    };
+    return { busy, error, run };
+}
+
+/** Lives in SAR settings; no date spoofing or clearing existing rewards. */
+export function HalloweenCatchUpSettings({ npcEnabled }: { npcEnabled: boolean }) {
+    const { state, error: readError } = useKanataHalloween();
+    const { busy, error, run } = useHalloweenCatchUpActions();
+    const catchingUp = isHalloweenCatchUpActive(state) && !state.disabled;
+    return <section aria-label="万圣节补体验">
+        <div className="sar-hub-setting-row"><div><h3>往期节日 · 万圣节</h3><p>{catchingUp
+            ? '补体验已开启，可以继续换装、讨糖和体验节日剧情。'
+            : '补体验错过的换装、讨糖和两段节日剧情。已有收藏和奖励会保留。'}</p></div>
+            <button className="sar-hub-setting-action" type="button" disabled={busy || !!readError} onClick={() => void run(catchingUp ? endHalloweenCatchUp : startHalloweenCatchUp)}>{catchingUp ? '结束活动' : '开启补体验'}</button>
+        </div>
+        <p className="sar-hub-muted">两段剧情完成后可选择结束活动或继续收集，随时可以回到这里结束。结束后临时装扮与节日交互撤下，糖果、小恐龙和剧情回看保留。{!npcEnabled && <><br/>体验凯恩与艾文的剧情需先开启「常驻 NPC」。</>}</p>
+        {(readError || error) && <p className="sar-hub-error" role="alert">{readError || error}</p>}
+    </section>;
+}
+
+/** Mount after the NPC reward view closes, so the last gift is never covered. */
+export function HalloweenCatchUpCompletion() {
+    const { state, active, error: readError } = useKanataHalloween();
+    const { busy, error, run } = useHalloweenCatchUpActions();
+    const dialog = useRef<HTMLDialogElement>(null);
+    const visible = active && !readError && shouldOfferHalloweenCatchUpEnd(state);
+    useEffect(() => {
+        if (!visible) return;
+        const element = dialog.current;
+        element?.showModal();
+        return () => element?.close();
+    }, [visible]);
+    if (!visible) return null;
+    return createPortal(<dialog ref={dialog} className="kanata-halloween-completion" aria-labelledby="halloween-catch-up-title" onCancel={event => { event.preventDefault(); if (!busy) void run(continueHalloweenCatchUp); }}>
+        <h2 id="halloween-catch-up-title">万圣夜的故事已收好</h2>
+        <p>凯恩与艾文的节日剧情都已完成。想结束这次活动，还是继续换装、讨糖？</p>
+        <p>结束后临时装扮、南瓜和节日交互会撤下，已获得的糖果、小恐龙、收藏和剧情回看都会保留。</p>
+        <div><button type="button" disabled={busy} onClick={() => void run(endHalloweenCatchUp)}>结束活动</button><button type="button" disabled={busy} onClick={() => void run(continueHalloweenCatchUp)}>继续收集</button></div>
+        {error && <p role="alert">{error}</p>}
+    </dialog>, document.body);
 }
 
 /** User artwork shares the creator's original 472px canvas; transforms apply to both layers. */

@@ -2,6 +2,14 @@
 
 活动按用户设备的本地日期在 **2026-10-29 至 2026-10-31** 开启。10 月 31 日是万圣节，29 日提前开场。`useLocalDateKey` 处理跨午夜与回到前台，角色自定义时区不改变活动日期。
 
+## 错过后的补体验
+
+「彼方 → SAR → 设置 → 往期节日 · 万圣节」可手动开启本机补体验，恢复临时换装、南瓜、讨糖及尚未完成的两段节日剧情。默认关闭，不修改设备日期、消息时间或原活动日历。常驻 NPC 关闭时仍保持隐藏，体验凯恩与艾文的剧情需手动开启常驻 NPC。
+
+两段剧情完成并关闭最后的奖励界面后，活动室提示「结束活动 / 继续收集」。继续收集会保存选择，刷新不反复提示；随时可回到设置结束，不要求先完成剧情。结束撤下临时装扮与节日交互，保留糖果、装扮收藏、小恐龙、对话完成记录与图鉴回看。重新开启不重置奖励收据、不重复发放 NPC 礼物。凯恩原来的撤下活动分支仍生效，之后可从设置主动重新开启。
+
+补体验使用现有 `kanataHalloween.catchUp` 可选字段（`active / collecting / ended`），兼容旧存档，沿用市场写锁和完整备份。鱼帽仍只在原活动日期钓获时生成。
+
 ## 玩法
 
 - 进入房间的 chibi 自动随机分配一套装扮；凯恩、艾文的小人也参与，正式立绘不变。角色弹窗提供「更换万圣节装扮」（排除当前款）、「去除万圣节装扮」与「不给糖就捣蛋！！」。普通房间和 SAR 共用状态。去除后再次进入不会自动穿回，原始 chibi 图片、缩放、镜像和捏人存档不被修改。
@@ -23,5 +31,7 @@
 ## 验证
 
 `pnpm vitest run utils/vrWorld/kanataHalloween.test.ts utils/sarCollection.test.ts utils/vrWorld/fishingCollection.test.ts utils/vrWorld/dinosaurGarden.test.ts utils/sarReleaseBackup.test.ts`
+
+补体验聚焦回归：`pnpm vitest run utils/kanataHalloweenCatchUp.test.ts utils/vrWorld/kanataHalloween.test.ts`，覆盖过期后主动开启、换装/讨糖、最后奖励后的提示、继续收集与刷新、手动结束、重开不重复领奖、跨页结束及写入失败保留原档。
 
 启动 `pnpm exec vite --host 127.0.0.1 --port 5177` 后运行 `scripts/test-kanata-halloween.mjs`。脚本使用隔离 Edge、本地测试档与固定日期，无模型请求；`PLAYWRIGHT_MODULE` 可指定外部 Playwright 的 `index.mjs`。覆盖换装、脱下、糖果、两个 NPC、撤下、收藏、手机小屏及 3D 模型实际加载。`test/fixtures/kanata-halloween.html` 是原画叠合、九种鱼帽子和恐龙的隔离验收页，会写入该测试浏览器的彼方存档，不在用户正式环境打开。

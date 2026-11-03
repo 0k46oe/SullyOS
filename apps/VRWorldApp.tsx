@@ -109,7 +109,7 @@ import type { CharacterProfile, UserProfile, VRWorldNovel, VRWorldNovelSummary, 
 
 // ============ chibi 形象解析（vrState.chibi → 立绘 → 头像） ============
 import { getChibi } from '../utils/vrWorld/chibi';
-import { HalloweenActions, HalloweenChibi, HalloweenDialogue, HalloweenPumpkins, KanataHalloweenProvider, useKanataHalloween } from './vrWorld/KanataHalloween';
+import { HalloweenActions, HalloweenCatchUpCompletion, HalloweenChibi, HalloweenDialogue, HalloweenPumpkins, KanataHalloweenProvider, useKanataHalloween } from './vrWorld/KanataHalloween';
 import type { HalloweenNpc } from '../utils/vrWorld/kanataHalloween';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent } from '../utils/analytics';
@@ -670,6 +670,7 @@ const VRWorldApp: React.FC = () => {
                 <SARUpdateModal step={sarPromptStep} onContinue={() => setSarPromptStep('preference')} onChoose={chooseSarNpcPreference} />
             )}
             {halloweenNpc && sarState.npcPreference === 'show' && <HalloweenDialogue key={halloweenNpc} npc={halloweenNpc} userName={userName} onClose={() => setHalloweenNpc(null)}/>}
+            {tab === 'sar' && sarState.npcPreference === 'show' && !halloweenNpc && !halloweenCharacter && !sarHubPanel && !familiarity && !showSarDialogue && !sarPromptStep && !showSarGacha && !showSarCabinet && !showSarModuleShop && !showFishingMarket && <HalloweenCatchUpCompletion/>}
             {halloweenCharacter && halloween.active && <div className="fixed inset-0 z-[550] flex items-end bg-black/50" role="presentation" onClick={() => setHalloweenCharacter(null)}><section role="dialog" aria-modal="true" aria-label={`${halloweenCharacter.name}的万圣节`} className="w-full rounded-t-2xl p-5 text-white bg-[#1a2236]" style={{ paddingBottom: vrBottomPad('1rem') }} onClick={e => e.stopPropagation()}><div className="flex items-center justify-between"><strong>{halloweenCharacter.name}</strong><button className="p-3" onClick={() => setHalloweenCharacter(null)} aria-label="关闭角色弹窗"><X size={20}/></button></div><HalloweenActions actorId={halloweenCharacter.id} name={halloweenCharacter.name}/><button className="mt-3 min-h-[44px] w-full" onClick={() => { setSarModuleTargetCharId(halloweenCharacter.id); setShowSarModuleShop(true); setHalloweenCharacter(null); }}>抓住 TA · 使用模块</button></section></div>}
             {showSarDialogue && sarState.npcPreference === 'show' && (
                 <SARCaianDialogue onClose={() => setShowSarDialogue(false)} onComplete={completeSarIntro} />

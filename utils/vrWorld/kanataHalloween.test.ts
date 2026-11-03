@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assignHalloweenCostume, finishHalloweenDialogue, giveHalloweenCandy, HALLOWEEN_COSTUMES } from './kanataHalloween';
+import { assignHalloweenCostume, continueHalloweenCatchUp, endHalloweenCatchUp, finishHalloweenDialogue, giveHalloweenCandy, halloweenActive, HALLOWEEN_COSTUMES, shouldOfferHalloweenCatchUpEnd, startHalloweenCatchUp, validateHalloween } from './kanataHalloween';
 import { isKanataHalloween } from './halloweenCalendar';
 import { addCatchToState, buyListing, createFishingMarketState, createListing, ensureActorAccounts, marketCatchSnapshot, mutateFishingMarket, readFishingMarketState, rollFishingCatch, saveFishingMarketState } from './fishingMarket';
 import { collectSARLocalBackup, restoreSARLocalBackup } from './sarBackup';
@@ -74,5 +74,80 @@ describe('Kanata Halloween', () => {
         expect(c.withdraw.lines[0]).toContain('既然小雨不喜欢');
         expect(c.dislike.choices!.map(c=>c.next)).toEqual(['withdraw','end']);
         expect(a.portrait.lines).toEqual(['……………………','据说真正的管理员没有档期','不能再说了']);
+    });
+    it('requires an explicit catch-up opt-in after the event and keeps original calendar rules', () => {
+        const later = new Date(2026, 10, 3, 12).getTime();
+        expect(halloweenActive(init(), later)).toBe(false);
+        const s = startHalloweenCatchUp(init());
+        expect(halloweenActive(s, later)).toBe(true);
+        expect(startHalloweenCatchUp(s)).toBe(s);
+        const dressed = assignHalloweenCostume(s, 'char', 'initial', later, () => 0);
+        expect(dressed.kanataHalloween?.costumes.char).toBe('black-cat');
+        expect(giveHalloweenCandy(dressed, later, () => 0).state.kanataHalloween?.candies['pumpkin-caramel']).toBe(1);
+        expect(isKanataHalloween('2026-11-03')).toBe(false);
+    });
+    it('offers an ending after both stories, remembers continuing to collect, and backs it up', () => {
+        const later = new Date(2026, 10, 3, 12).getTime();
+        let s = finishHalloweenDialogue(startHalloweenCatchUp(init()), 'aiven', '我', false, later);
+        expect(shouldOfferHalloweenCatchUpEnd(s.kanataHalloween)).toBe(false);
+        s = finishHalloweenDialogue(s, 'caian', '我', false, later);
+        expect(shouldOfferHalloweenCatchUpEnd(s.kanataHalloween)).toBe(true);
+        s = continueHalloweenCatchUp(s);
+        expect(halloweenActive(s, later)).toBe(true);
+        expect(shouldOfferHalloweenCatchUpEnd(s.kanataHalloween)).toBe(false);
+        const src = storage(), dst = storage();
+        saveFishingMarketState(s, src);
+        restoreSARLocalBackup(collectSARLocalBackup(src), { replaceMissing: true }, dst);
+        expect(readFishingMarketState(dst).kanataHalloween).toEqual(s.kanataHalloween);
+        expect(halloweenActive(readFishingMarketState(dst), later)).toBe(true);
+    });
+    it('ends at any point, removes costumes, retains all rewards and never grants duplicate gifts on reopening', () => {
+        const later = new Date(2026, 10, 3, 12).getTime();
+        let s = assignHalloweenCostume(startHalloweenCatchUp(init()), 'char', 'initial', later);
+        s = finishHalloweenDialogue(s, 'caian', '我', false, later, () => 0);
+        s = finishHalloweenDialogue(s, 'aiven', '我', false, later);
+        const before = s;
+        s = endHalloweenCatchUp(s);
+        expect(s.kanataHalloween).toMatchObject({ catchUp: 'ended', disabled: true, costumes: {}, candies: before.kanataHalloween!.candies, completed: ['caian', 'aiven'], collectedCostumes: before.kanataHalloween!.collectedCostumes });
+        expect(s.inventory).toEqual(before.inventory);
+        expect(halloweenActive(s, later)).toBe(false);
+        expect(assignHalloweenCostume(s, 'other', 'initial', later)).toBe(s);
+        expect(() => giveHalloweenCandy(s, later)).toThrow();
+        const resumed = startHalloweenCatchUp(s);
+        expect(finishHalloweenDialogue(resumed, 'caian', '我', false, later)).toBe(resumed);
+        expect(finishHalloweenDialogue(resumed, 'aiven', '我', false, later)).toBe(resumed);
+        expect(resumed.inventory).toHaveLength(1);
+        expect(resumed.kanataHalloween!.candies['pumpkin-caramel']).toBe(1);
+    });
+    it('preserves the authored withdrawal branch during catch-up and permits deliberate reopening', () => {
+        const later = new Date(2026, 10, 3, 12).getTime();
+        const withdrawn = finishHalloweenDialogue(startHalloweenCatchUp(init()), 'caian', '我', true, later);
+        expect(withdrawn.kanataHalloween).toMatchObject({ catchUp: 'ended', disabled: true, costumes: {} });
+        expect(halloweenActive(withdrawn, later)).toBe(false);
+        const resumed = startHalloweenCatchUp(withdrawn);
+        expect(halloweenActive(resumed, later)).toBe(true);
+        expect(finishHalloweenDialogue(resumed, 'aiven', '我', false, later).inventory).toHaveLength(1);
+    });
+    it('accepts legacy saves and rejects malformed catch-up flags without overwriting them', () => {
+        const legacy = assignHalloweenCostume(init(), 'char', 'initial', at);
+        expect(() => validateHalloween(legacy.kanataHalloween!)).not.toThrow();
+        expect(shouldOfferHalloweenCatchUpEnd(legacy.kanataHalloween)).toBe(false);
+        const st = storage();
+        const raw = JSON.stringify({ ...legacy, kanataHalloween: { ...legacy.kanataHalloween, catchUp: 'unknown' } });
+        st.setItem('vr_fishing_market_v1', raw);
+        expect(() => readFishingMarketState(st)).toThrow('万圣节收藏无法读取');
+        expect(st.getItem('vr_fishing_market_v1')).toBe(raw);
+    });
+    it('serializes catch-up rewards together with ending and reopening', async () => {
+        const later = new Date(2026, 10, 3, 12).getTime(), st = storage();
+        saveFishingMarketState(startHalloweenCatchUp(init()), st);
+        await Promise.all([
+            mutateFishingMarket(s => finishHalloweenDialogue(s, 'aiven', '我', false, later), st),
+            mutateFishingMarket(endHalloweenCatchUp, st),
+            mutateFishingMarket(startHalloweenCatchUp, st),
+            mutateFishingMarket(s => finishHalloweenDialogue(s, 'aiven', '我', false, later), st),
+        ]);
+        expect(readFishingMarketState(st).inventory).toHaveLength(1);
+        expect(readFishingMarketState(st).kanataHalloween?.completed).toEqual(['aiven']);
     });
 });

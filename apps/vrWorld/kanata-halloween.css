@@ -25,3 +25,12 @@
 .kanata-fish-hat{position:absolute;z-index:4;width:43%;height:68%;top:-20%;left:43%;transform:rotate(10deg);pointer-events:none}
 @keyframes kanata-candy-in{from{opacity:0;transform:translateY(7px) scale(.96)}to{opacity:1;transform:none}}
 @media(prefers-reduced-motion:reduce){.kanata-candy-reward{animation:none}}
+.kanata-halloween-completion{box-sizing:border-box;width:min(420px,calc(100% - 32px));max-height:calc(100dvh - 48px);margin:auto;padding:24px;border:1px solid #d0dac5;border-radius:20px;background:#fffaf1;color:#403e35;overflow-y:auto;line-height:1.7}
+.kanata-halloween-completion::backdrop{background:#151b2466}
+.kanata-halloween-completion h2{margin:0 0 14px;font-size:19px;font-weight:500}
+.kanata-halloween-completion p{margin:12px 0;font-size:13px}
+.kanata-halloween-completion>div{display:flex;gap:12px;margin-top:20px;flex-wrap:wrap}
+.kanata-halloween-completion button{flex:1;min-width:100px;min-height:44px;padding:10px 14px;border:1px solid #d0dac5;border-radius:12px;background:#f1f5e9;color:#526848;font-size:13px}
+.kanata-halloween-completion button+button{background:#fff1d0;color:#695934;border-color:#e0d3ad}
+.kanata-halloween-completion button:disabled{opacity:.5;cursor:wait}
+.kanata-halloween-completion [role=alert]{color:#843d32}

@@ -1,4 +1,4 @@
-import { HalloweenCandyArt } from './KanataHalloween';
+import { HalloweenCandyArt, HalloweenCatchUpSettings } from './KanataHalloween';
 import { SARFacilityGuide } from './SARFacilityGuide';
 import { SARPageNav } from './SARCharacterPicker';
 import { SARFamiliarityKeepsake } from './SARFamiliarityKeepsake';
@@ -107,6 +107,7 @@ export function SARHubPanels({ panel, onClose, npcEnabled, onChangeNpc, caianMet
                     <button className="sar-hub-toggle" type="button" role="switch" aria-label="显示常驻 NPC" aria-checked={npcEnabled} onClick={() => onChangeNpc(npcEnabled ? 'hide' : 'show')}><span/></button>
                 </div>
                 <p className="sar-hub-muted">{npcEnabled ? '点击房间里的他们，就能聊聊天。' : 'NPC、称号、名册与专属纪念已关闭，进度会保留。'}<br/>扭蛋、模块、布告板和水域始终开放。</p>
+                <HalloweenCatchUpSettings npcEnabled={npcEnabled}/>
                 {npcEnabled && <div className="sar-hub-setting-row"><div><h3>初见回档</h3><p>重新遇见凯恩，用其他选择再走一遍初见。</p></div>
                     <button className="sar-hub-setting-action" type="button" onClick={onRequestRewind} disabled={!caianMet}>{caianMet?'回到初见前':'剧情未完成'}</button>
                 </div>}
