@@ -761,7 +761,7 @@ export const useChatAI = ({
                     ...hooks,
                     onDelta: (delta, fullText) => { navigationPet.phase('typing'); hooks?.onDelta?.(delta, fullText); },
                     onReasoningDelta: (delta, fullText) => { navigationPet.phase('thinking'); hooks?.onReasoningDelta?.(delta, fullText); },
-                } : hooks);
+                } : hooks).finally(() => navigationPet.phase('thinking'));
             };
 
             // ── 分段计时（从用户发送到 API 发出）──
@@ -2165,6 +2165,7 @@ export const useChatAI = ({
             }));
             replyRun.markCompleted();
             navigationPetOutcome = 'success';
+            navigationPet.finish('success');
             // 最后一批正式消息已交给 setMessages；同一轮更新撤掉预览，不再逐条补弹。
             setStreamingBubbles([]);
             setStreamingThinking('');
@@ -2201,6 +2202,7 @@ export const useChatAI = ({
         } catch (e: any) {
             if (replyRun.signal.aborted) return;
             navigationPetOutcome = 'error';
+            navigationPet.finish('error');
             // 注意: 这个 catch 兜的是「拿到 API 响应之后」的整条后处理管线 (applyAssistantPostProcessing,
             // 13 步)。这里抛错多半不是网络问题, 而是解析/正则/落库异常。别再叫"连接中断"误导排查。
             const errMsg = e?.message || String(e);

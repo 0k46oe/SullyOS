@@ -1,8 +1,8 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 
 // Only this pinned public asset directory is used; never send credentials or chat data.
-export const CLAWD_ASSET_BASE = 'https://raw.githubusercontent.com/0k46oe/clawd-on-desk/ea846be1182ed387cde628b28f53244edc840ce5/assets/gif/';
-const CLAWD_CDN_BASE = 'https://cdn.jsdelivr.net/gh/0k46oe/clawd-on-desk@ea846be1182ed387cde628b28f53244edc840ce5/assets/gif/';
+export const CLAWD_ASSET_BASE = 'https://cdn.jsdelivr.net/gh/0k46oe/clawd-on-desk@ea846be1182ed387cde628b28f53244edc840ce5/assets/gif/';
+const CLAWD_FALLBACK_BASE = 'https://raw.githubusercontent.com/0k46oe/clawd-on-desk/ea846be1182ed387cde628b28f53244edc840ce5/assets/gif/';
 export const CLAWD_STANDARD_FORM_SCALE = 1.25;
 export const CLAWD_FORM_SCALE_MIN = 0.25;
 export const CLAWD_FORM_SCALE_MAX = 2;
@@ -72,7 +72,7 @@ export function normalizeNavigationPet(value: unknown): NavigationPetPreferences
   return { enabled: source.enabled === true, selection: validForm(source.selection) ? source.selection : 'auto', scales: normalizeClawdScales(source.scales) };
 }
 export function clawdImageUrl(form: ClawdForm): string { return `${CLAWD_ASSET_BASE}clawd-${validForm(form) ? form : 'idle'}.gif`; }
-export function clawdFallbackUrl(form: ClawdForm): string { return `${CLAWD_CDN_BASE}clawd-${validForm(form) ? form : 'idle'}.gif`; }
+export function clawdFallbackUrl(form: ClawdForm): string { return `${CLAWD_FALLBACK_BASE}clawd-${validForm(form) ? form : 'idle'}.gif`; }
 let preferences: NavigationPetPreferences | undefined;
 const preferenceListeners = new Set<() => void>();
 function snapshot() {

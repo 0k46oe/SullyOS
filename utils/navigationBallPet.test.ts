@@ -3,7 +3,7 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Simulate } from 'react-dom/test-utils';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { beginNavigationPetChat, CLAWD_FORMS, clawdFallbackUrl, clawdFrameStyle, clawdImageUrl, NAVIGATION_PET_KEY, normalizeNavigationPet, setNavigationPet } from './navigationBallPet';
+import { beginNavigationPetChat, CLAWD_ASSET_BASE, CLAWD_FORMS, clawdFallbackUrl, clawdFrameStyle, clawdImageUrl, NAVIGATION_PET_KEY, normalizeNavigationPet, setNavigationPet } from './navigationBallPet';
 import NavigationBallSettings from '../components/settings/NavigationBallSettings';
 import { DraggableNavigationBall } from '../components/os/NavigationBall';
 import { DEFAULT_NAVIGATION_BALL_APPEARANCE, normalizeNavigationBallAppearance, resetNavigationBallAppearance, setNavigationBallAppearance } from './navigationBallAppearance';
@@ -43,7 +43,11 @@ it('uses only pinned Clawd URLs and validates every selectable form', () => {
   expect(normalizeNavigationPet(null)).toMatchObject({ enabled: false, selection: 'auto' });
   expect(normalizeNavigationPet({ enabled: true, selection: 'https://unsafe.test' })).toMatchObject({ enabled: true, selection: 'auto' });
   expect(CLAWD_FORMS.length).toBe(24);
-  for (const [form] of CLAWD_FORMS) expect(clawdImageUrl(form)).toMatch(/^https:\/\/raw\.githubusercontent\.com\/0k46oe\/clawd-on-desk\/[a-f0-9]{40}\/assets\/gif\/clawd-[a-z-]+\.gif$/);
+  expect(CLAWD_ASSET_BASE).toContain('cdn.jsdelivr.net');
+  for (const [form] of CLAWD_FORMS) {
+    expect(clawdImageUrl(form)).toMatch(/^https:\/\/cdn\.jsdelivr\.net\/gh\/0k46oe\/clawd-on-desk@[a-f0-9]{40}\/assets\/gif\/clawd-[a-z-]+\.gif$/);
+    expect(clawdFallbackUrl(form)).toMatch(/^https:\/\/raw\.githubusercontent\.com\/0k46oe\/clawd-on-desk\/[a-f0-9]{40}\/assets\/gif\/clawd-[a-z-]+\.gif$/);
+  }
   expect(clawdFrameStyle('idle')).toMatchObject({
     width: `${302 / 102 * 0.5 * 100}%`, height: `${300 / 102 * 0.5 * 100}%`,
     left: `${(1 - 201 / 102 * 0.5) * 100}%`, top: `${(1 - 273 / 102 * 0.5) * 100}%`,
