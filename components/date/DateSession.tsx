@@ -118,6 +118,8 @@ interface DateSessionProps {
     messages: Message[]; // The DB messages for history/novel mode
     peekStatus: string;  // Initial text from the Peek phase
     initialState?: DateState; // Resume state
+    /** 最近一次见面的最后一条回复；只从消息重建，不恢复旧版重快照。 */
+    resumeMessage?: Message;
     encounterId?: string;
     onSendMessage: (text: string, kind?: 'continue') => Promise<string>; // Returns AI content
     onReroll: () => Promise<string>;
@@ -187,6 +189,7 @@ const DateSession: React.FC<DateSessionProps> = ({
     messages: historyMessages,
     peekStatus, 
     initialState,
+    resumeMessage,
     encounterId,
     onSendMessage, 
     onReroll, 
@@ -646,7 +649,7 @@ const DateSession: React.FC<DateSessionProps> = ({
             setCurrentSpriteKey(initialSprite.key);
             
             // Parse Peek Status as opening — 先剥出观测块（开了 OBSERVE 才有）
-            const startText = peekStatus || "Waiting for connection...";
+            const startText = resumeMessage ? (getSARSurface(resumeMessage) || resumeMessage.content) : peekStatus;
             const { observation: peekObs, rest: peekRest } = extractObservation(startText, { lenient: observeEnabled, custom: char.dateObserve?.custom });
             if (hasObservation(peekObs)) setObservation(peekObs);
             const items = parseDialogue(peekRest, 'normal');
@@ -658,6 +661,15 @@ const DateSession: React.FC<DateSessionProps> = ({
                 const first = items[0];
                 setCurrentText(first.text);
                 currentLineEmotionRef.current = first.voiceEmotion;
+                if (resumeMessage) {
+                    const emotionKey = (first.emotion || '').toLowerCase();
+                    const matchedEmotion = dateEmotionKeys.includes(emotionKey)
+                        ? emotionKey
+                        : dateEmotionKeys.find(key => emotionKey.includes(key));
+                    const restoredSprite = resolveSpriteByKey(matchedEmotion);
+                    setCurrentSprite(restoredSprite.src);
+                    setCurrentSpriteKey(restoredSprite.key);
+                }
                 // Note: Not setting sprite here because useEffect below will handle emotion->sprite mapping if needed,
                 // or we rely on default.
                 setDialogueQueue(items.slice(1));

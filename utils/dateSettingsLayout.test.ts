@@ -56,3 +56,16 @@ it('scrolls the preview with the editor, collapses it, and keeps focused input a
         expect(scroll.scrollTop).toBe(208);
     } finally { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks(); }
 });
+
+it('uses the character-specific player name in the third-person POV example', async () => {
+    const host = document.createElement('div'); document.body.append(host);
+    const root = createRoot(host);
+    try {
+        await act(async () => root.render(React.createElement(DateSettings, {
+            char: { id: 'test', name: '角色', characterUserProfile: { enabled: true, name: '专属玩家', bio: '' } } as any,
+            onBack: vi.fn(),
+        })));
+        expect(host.textContent).toContain('角色看着专属玩家');
+        expect(host.textContent).not.toContain('角色看着用户');
+    } finally { act(() => root.unmount()); host.remove(); }
+});

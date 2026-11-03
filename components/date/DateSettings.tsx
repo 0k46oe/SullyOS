@@ -12,6 +12,7 @@ import { DATE_STYLE_PRESETS } from '../../utils/datePrompts';
 import ObserveSettings from './ObserveSettings';
 import DateExtraPresets from './DateExtraPresets';
 import DateExtraEditor from './DateExtraEditor';
+import { resolveCharacterUserProfile } from '../../utils/characterUserProfile';
 
 // 标准情绪列表
 const REQUIRED_EMOTIONS = ['normal', 'happy', 'angry', 'sad', 'shy'];
@@ -91,7 +92,7 @@ const DateSettings: React.FC<DateSettingsProps> = ({ char, onBack }) => {
         addToast(trimmed ? '补充要求已保存' : '补充要求已清空', 'success');
     };
     const readingAppearance = meetingAppearance(char.dateAppearance);
-    const userName = userProfile?.name || '用户';
+    const userName = resolveCharacterUserProfile(userProfile, char).name || '用户';
     const POV_OPTIONS: { id: DateStyleConfig['pov']; label: string; example: string }[] = [
         { id: undefined, label: '默认', example: '不额外指定，随模型发挥' },
         { id: 'third-name', label: '第三人称 · 称名字', example: `${char.name}看着${userName}` },

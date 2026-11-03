@@ -49,6 +49,7 @@ let container: HTMLDivElement;
 beforeEach(() => {
     vi.clearAllMocks();
     localStorage.setItem('sully-date-entry-guide-v1', 'seen');
+    mocks.characters = [{ id: 'c', name: '测试角色', avatar: '', savedDateState: { currentText: '旧快照' } }];
     mocks.rows = [];
     mocks.session = null;
     mocks.fetch.mockResolvedValue({ ok: true });
@@ -87,30 +88,30 @@ const clickText = async (text: string) => {
 it('首次到达三个选项才展示说明，确认后重新打开也不再提示', async () => {
     localStorage.removeItem('sully-date-entry-guide-v1');
     await act(async () => root.render(React.createElement(DateApp)));
-    expect(container.textContent).not.toContain('选择这次见面的开场方式');
+    expect(container.textContent).not.toContain('开始或继续这次见面');
     await clickText('测试角色');
-    expect(container.textContent).toContain('选择这次见面的开场方式');
+    expect(container.textContent).toContain('开始或继续这次见面');
     expect(container.textContent).toContain('你主动走过去');
     expect(container.textContent).toContain('他主动来见你');
     expect(container.textContent).toContain('直接见面 · 不生成开场白');
     await clickText('知道了');
     expect(localStorage.getItem('sully-date-entry-guide-v1')).toBe('seen');
-    expect(container.textContent).not.toContain('选择这次见面的开场方式');
+    expect(container.textContent).not.toContain('开始或继续这次见面');
     await act(async () => root.unmount());
     root = createRoot(container);
     await act(async () => root.render(React.createElement(DateApp)));
     await clickText('测试角色');
-    expect(container.textContent).not.toContain('选择这次见面的开场方式');
+    expect(container.textContent).not.toContain('开始或继续这次见面');
     expect(mocks.fetch).not.toHaveBeenCalled();
 });
 
-it('有旧快照仍显示三个入口；直接见面不请求开场，退出无弹窗，再进入是独立场次', async () => {
+it('有旧快照仍显示三个开场入口；直接见面不请求开场，退出后可另开独立场次', async () => {
     await act(async () => root.render(React.createElement(DateApp)));
     await clickText('测试角色');
     expect(container.textContent).toContain('靠近他');
     expect(container.textContent).toContain('让他靠近');
     expect(container.textContent).toContain('直接见面');
-    expect(container.textContent).not.toContain('继续上次');
+    expect(container.textContent).not.toContain('继续上次见面');
     await clickText('直接见面');
     const firstId = mocks.session.encounterId;
     expect(firstId).toBeTruthy();
@@ -126,4 +127,27 @@ it('有旧快照仍显示三个入口；直接见面不请求开场，退出无�
     await clickText('直接见面');
     expect(mocks.session.encounterId).not.toBe(firstId);
     expect(mocks.session.messages.map((message: any) => message.content)).toEqual(['上一场']);
+});
+
+it.each([
+    ['原生角色', { id: 'native', name: '原生角色', avatar: '' }],
+    ['酒馆角色', { id: 'tavern', name: '酒馆角色', avatar: '', tavernImport: { firstMessage: '卡片开场', alternateGreetings: [] } }],
+])('%s 都能继续最近一次见面而跳过重新开场', async (_label, character) => {
+    mocks.characters = [character];
+    mocks.rows = [
+        { id: 10, charId: character.id, role: 'assistant', type: 'text', content: '上次的开场', timestamp: 10,
+            metadata: { source: 'date', isOpening: true, dateEncounterId: 'last-encounter' } },
+        { id: 11, charId: character.id, role: 'user', type: 'text', content: '上次的回应', timestamp: 11,
+            metadata: { source: 'date', dateEncounterId: 'last-encounter' } },
+    ];
+    await act(async () => root.render(React.createElement(DateApp)));
+    await clickText(character.name);
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain('继续上次见面');
+    await clickText('继续上次见面');
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(mocks.session.encounterId).toBe('last-encounter');
+    expect(mocks.session.peekStatus).toBe('');
+    expect(mocks.session.resumeMessage.content).toBe('上次的开场');
+    expect(mocks.session.messages.map((message: any) => message.content)).toEqual(['上次的开场', '上次的回应']);
 });

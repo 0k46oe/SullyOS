@@ -1,4 +1,5 @@
 import { resolveDialogueApi } from '../utils/characterApi';
+import { resolveCharacterUserProfile } from '../utils/characterUserProfile';
 import { useDateMessageHistory } from '../utils/useDateMessageHistory';
 import { loadCharacterContextMessages } from '../utils/chatContextRange';
 
@@ -109,6 +110,9 @@ const DateApp: React.FC = () => {
 
     const [peekStatus, setPeekStatus] = useState<string>('');
     const [peekLoading, setPeekLoading] = useState(false);
+    const [lastDateEncounter, setLastDateEncounter] = useState<DateHistoryGroup | null>(null);
+    const [checkingLastDateEncounter, setCheckingLastDateEncounter] = useState(false);
+    const [resumedDateMessage, setResumedDateMessage] = useState<Message | undefined>();
     
     // History State
     const [historyMessages, setHistoryMessages] = useState<Message[]>([]);
@@ -139,6 +143,7 @@ const DateApp: React.FC = () => {
         try { localStorage.setItem('sully-date-entry-guide-v1', 'seen'); } catch { /* 当前打开期间仍不重复提示 */ }
     };
     const peekRequestRef = useRef(0);
+    const entryRequestRef = useRef(0);
     const enteringSessionRef = useRef(false);
 
     // --- NEW: Editing State lifted to here for DB sync ---
@@ -177,12 +182,13 @@ const DateApp: React.FC = () => {
             .sort((a, b) => a.timestamp - b.timestamp);
     };
 
-    useEffect(() => () => { peekRequestRef.current++; }, []);
+    useEffect(() => () => { peekRequestRef.current++; entryRequestRef.current++; }, []);
 
     // --- Navigation Helpers ---
     const handleBack = () => {
         if (mode === 'peek' || mode === 'entry') {
             peekRequestRef.current++;
+            entryRequestRef.current++;
             encounterIdRef.current = '';
             // 来自聊天：从感知页退出直接回聊天，不落在见面选择页
             if (cameFromChat) { returnToChat(); return; }
@@ -223,16 +229,45 @@ const DateApp: React.FC = () => {
         return content;
     };
 
-    // 每次进入独立记次；模型上下文仍由共享管线决定。
+    // 新开场独立记次；继续时复用最近互动所在的场次，模型上下文仍由共享管线决定。
     const handleCharClick = (c: CharacterProfile) => {
+        const requestId = ++entryRequestRef.current;
         clearDateResumeAttempt();
         setActiveCharacterId(c.id);
         encounterIdRef.current = crypto.randomUUID();
         setDateMessages([]);
         setPeekStatus('');
+        setResumedDateMessage(undefined);
         setHasSavedOpening(false);
+        setLastDateEncounter(null);
+        setCheckingLastDateEncounter(true);
         if (c.savedDateState) updateCharacter(c.id, { savedDateState: undefined });
         setMode('entry');
+        void loadRecentDateMessages(c.id).then(messages => {
+            if (entryRequestRef.current !== requestId) return;
+            const latest = messages[messages.length - 1];
+            setLastDateEncounter(buildDateHistoryGroups(messages, 'encounter', 'newest')
+                .find(group => group.messages.some(message => message.id === latest?.id)) || null);
+        }).catch(() => {
+            if (entryRequestRef.current !== requestId) return;
+            setLastDateEncounter(null);
+            addToast('最近的见面记录读取失败，请返回重试', 'error');
+        }).finally(() => {
+            if (entryRequestRef.current === requestId) setCheckingLastDateEncounter(false);
+        });
+    };
+
+    const continueLastDateEncounter = () => {
+        if (!lastDateEncounter) return;
+        const storedEncounterId = lastDateEncounter.messages
+            .map(message => message.metadata?.dateEncounterId)
+            .find((id): id is string => typeof id === 'string' && !!id);
+        encounterIdRef.current = storedEncounterId || crypto.randomUUID();
+        setDateMessages(lastDateEncounter.messages);
+        setResumedDateMessage([...lastDateEncounter.messages].reverse().find(message => message.role === 'assistant'));
+        setPeekStatus('');
+        setHasSavedOpening(true);
+        setMode('session');
     };
 
     // 从聊天「见面」按钮跳进来，同样选择本次开场方式。
@@ -1031,12 +1066,19 @@ const DateApp: React.FC = () => {
 
     if (mode === 'entry' && char) {
         return (
-            <div className="h-full w-full bg-black text-white flex flex-col px-8 pb-12 pt-16">
+            <div className="h-full w-full overflow-y-auto bg-black text-white flex flex-col px-8 pb-12 pt-16">
                 <button onClick={handleBack} className="self-start p-3 text-neutral-400" aria-label="返回"><CaretLeft size={22} /></button>
-                <div className="flex-1 flex flex-col justify-center max-w-sm w-full mx-auto gap-4">
+                <div className="flex-1 shrink-0 flex flex-col justify-center max-w-sm w-full mx-auto gap-4">
                     <TokenImg value={char.avatar} className="w-20 h-20 rounded-full object-cover mb-3" alt={char.name} />
                     <h2 className="text-3xl font-light mb-2">{char.name}</h2>
                     <p className="text-sm text-neutral-400 mb-6">这次，怎样见面？</p>
+                    {lastDateEncounter && (
+                        <button onClick={continueLastDateEncounter} className="text-left rounded-2xl border border-emerald-800 bg-emerald-950/40 px-6 py-5 hover:bg-emerald-950/70">
+                            <span className="block text-lg">继续上次见面</span>
+                            <span className="block text-xs text-neutral-400 mt-2">从最近一次见面的记录接着聊，不重新生成开场白</span>
+                        </button>
+                    )}
+                    {checkingLastDateEncounter && <p className="text-xs text-neutral-500">正在读取最近的见面记录…</p>}
                     <button onClick={() => startPeek(char, 'approach')} className="text-left rounded-2xl border border-neutral-700 px-6 py-5 hover:bg-neutral-900">
                         <span className="block text-lg">靠近他</span><span className="block text-xs text-neutral-400 mt-2">看看他此刻在做什么，再走过去</span>
                     </button>
@@ -1047,9 +1089,10 @@ const DateApp: React.FC = () => {
                         <span className="block text-lg">直接见面</span><span className="block text-xs text-neutral-400 mt-2">不生成开场白，直接开始互动</span>
                     </button>
                 </div>
-                <Modal isOpen={showEntryNotice} title="选择这次见面的开场方式" onClose={dismissEntryNotice}
+                <Modal isOpen={showEntryNotice} title="开始或继续这次见面" onClose={dismissEntryNotice}
                     footer={<button onClick={dismissEntryNotice} className="w-full py-3 rounded-2xl bg-slate-800 text-white font-bold">知道了</button>}>
                     <div className="space-y-4 text-sm leading-6 text-slate-600">
+                        <p><strong className="block text-slate-800">继续上次见面 · 接着聊</strong>有见面记录时可直接回到最近一次互动，不重新生成开场白。</p>
                         <p><strong className="block text-slate-800">靠近他 · 你主动走过去</strong>先生成一段开场，看看他此刻在做什么，再由你走过去与他互动。</p>
                         <p><strong className="block text-slate-800">让他靠近 · 他主动来见你</strong>由角色结合上下文，以合理的方式来到你面前并开场，接下来由你回应。</p>
                         <p><strong className="block text-slate-800">直接见面 · 不生成开场白</strong>直接进入对话，你可以输入内容，也可以点“继续”让他先回应。</p>
@@ -1106,9 +1149,10 @@ const DateApp: React.FC = () => {
             <>
                 <DateSession
                     char={char}
-                    userProfile={userProfile}
+                    userProfile={resolveCharacterUserProfile(userProfile, char)}
                     messages={dateMessages}
                     peekStatus={peekStatus}
+                    resumeMessage={resumedDateMessage}
                     encounterId={encounterIdRef.current}
                     onSendMessage={handleSendMessage}
                     onReroll={handleReroll}
