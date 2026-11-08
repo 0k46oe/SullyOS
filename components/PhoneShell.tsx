@@ -483,7 +483,7 @@ const PhoneShell: React.FC = () => {
   // 每次严格等待当前 chunk 下载 + 解析完成，再空一拍取下一个。用户一按屏幕或进入 App，
   // 立刻取消所有尚未开始的任务；已经在飞的一个 import 无法中止，但最多只会与目标 App 并行一个。
   useEffect(() => {
-    if (deploymentNotice.blocked || !bootDone || !isDataLoaded || activeApp !== AppID.Launcher) return;
+    if (!bootDone || !isDataLoaded || activeApp !== AppID.Launcher) return;
     if (!shouldUseIdleAppPreload() || idlePreloadCursor >= APP_IDLE_PRELOAD_ORDER.length) return;
 
     let stoppedByInteraction = false;
@@ -554,7 +554,7 @@ const PhoneShell: React.FC = () => {
       window.removeEventListener('pointerdown', stopForInteraction, { capture: true });
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [activeApp, bootDone, isDataLoaded, deploymentNotice.blocked]);
+  }, [activeApp, bootDone, isDataLoaded]);
 
   // Disclaimer popup for first-time users
   const [showDisclaimer, setShowDisclaimer] = useState(() => {
@@ -574,7 +574,7 @@ const PhoneShell: React.FC = () => {
     } catch { /* ignore */ }
   }, [isDataLoaded]);
 
-  const startupNoticesBlocked = deploymentNotice.blocked || showDisclaimer;
+  const startupNoticesBlocked = showDisclaimer;
 
   const handleAcceptDisclaimer = () => {
     try {
@@ -760,17 +760,17 @@ const PhoneShell: React.FC = () => {
 
       // Re-arm before navigating inside the OS so another quick swipe is safe too.
       armGuard();
-      if (!deploymentNotice.blocked) handleBack();
+      handleBack();
     };
 
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
-  }, [activeApp, handleBack, deploymentNotice.blocked]);
+  }, [activeApp, handleBack]);
 
   // Capacitor Native Handling
   useEffect(() => {
     const initNative = async () => {
-        if (!deploymentNotice.blocked && Capacitor.isNativePlatform()) {
+        if (Capacitor.isNativePlatform()) {
             try {
                 await CapStatusBar.setOverlaysWebView({ overlay: true });
                 await CapStatusBar.hide();
@@ -793,7 +793,6 @@ const PhoneShell: React.FC = () => {
             try {
                 await CapApp.removeAllListeners();
                 CapApp.addListener('backButton', ({ canGoBack }) => {
-                    if (deploymentNotice.blocked) return;
                     if (isLocked) {
                         CapApp.exitApp();
                     } else {
@@ -811,7 +810,7 @@ const PhoneShell: React.FC = () => {
             CapApp.removeAllListeners().catch(() => {});
         }
     };
-  }, [activeApp, isLocked, closeApp, handleBack, deploymentNotice.blocked]);
+  }, [activeApp, isLocked, closeApp, handleBack]);
 
   // Force scroll to top when app changes to prevent "push up" glitches on iOS
   useEffect(() => {
