@@ -14,6 +14,10 @@ OpenAI 兼容接口使用单独的通用缓存路径：聊天载荷沿用 `chatR
 
 请求 `include_usage` 时，流式接收不会在 `finish_reason` 后立即截断下一包用量；缺少结束事件的异常中转最多额外等待 1 秒，保留原有收口能力。流式兼容响应同样读取 `usageMetadata` / `usage_metadata`，包括只有用量、没有 choices 内容的末尾事件；完整响应和调用记录遵循同一口径。OAI 的 `input_tokens` 已含缓存输入时不再重复累加；仅 Anthropic 独立的缓存读写字段追加到其未缓存输入数。回归：`utils/geminiCacheUsage.test.ts`。
 
+## Gemini 原生接口
+
+设置、角色独立 API 和 API 预设可选择「Gemini 原生」，填写官方根地址、/v1beta 或完整生成地址。图文、流式、工具续答和缓存统计共用统一网络出口；开头稳定 system/developer 按原文、原顺序进入首条 user Content，中途和尾部提醒保留原位置。隐式缓存由服务商自动处理，不发送 prompt_cache_key、cache_control 或创建显式缓存。后台请求需新版 Worker 的 geminiNative 能力。详见 [Gemini 原生接口](./gemini-native.md)。
+
 ## Anthropic 原生接口
 
 统一使用原作者的 [Messages 通用传输](./anthropic-messages.md)，覆盖本地聊天、其它 App 与支持该能力的 Worker。`utils/dialogueTransport.ts` 只负责私聊的选项与诊断，消息、图片、工具续答和 SSE 转换统一由 `utils/anthropicApi.ts` 完成，不再保留另一套本地转换器。

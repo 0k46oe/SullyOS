@@ -17,6 +17,8 @@ describe('API config normalization', () => {
     expect(normalizeApiConfig(api)).not.toHaveProperty('protocol');
     expect(normalizeApiConfig({ ...api, protocol: 'anthropic' }).protocol).toBe('anthropic');
     expect(normalizeApiConfig({ ...api, protocol: 'unknown' as any }).protocol).toBe('openai');
+    expect(normalizeApiConfig({ ...api, apiType: 'gemini' })).toMatchObject({ apiType: 'gemini', baseUrl: '' });
+    expect(normalizeApiConfig({ ...api, protocol: 'gemini' }).protocol).toBe('gemini');
   });
   it('removes pasted whitespace and invisible edge characters from credentials', () => {
     expect(normalizeApiCredential(' \n\u200Bsk-example\u2060\r ')).toBe('sk-example');

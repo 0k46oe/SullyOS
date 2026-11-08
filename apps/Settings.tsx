@@ -7,7 +7,7 @@ import ImageGenerationSettings from '../components/settings/ImageGenerationSetti
 import DialogueApiFields from '../components/settings/DialogueApiFields';
 import { llmApiType, normalizeLlmBaseUrl, type LlmApiType } from '../utils/llmEndpoint';
 import { fetchLlm } from '../utils/anthropicApi';
-import { anthropicRequestOptions } from '../utils/dialogueTransport';
+import { testDialogueConnection } from '../utils/dialogueConnectionTest';
 import ModelPicker from '../components/settings/ModelPicker';
 import { buildModelPickerView } from '../utils/modelPickerView';
 
@@ -2721,21 +2721,13 @@ const Settings: React.FC = () => {
                         setTestingApi(true);
                         setTestApiResult(null);
                         try {
-                            const res = await fetchLlm(`${normalizeLlmBaseUrl(localUrl, localApiType)}/chat/completions`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localKey.trim()}` },
-                                body: JSON.stringify({
-                                    model: localModel.trim(),
-                                    messages: [{ role: 'user', content: 'Hi' }],
-                                    max_tokens: 5,
-                                    stream: localStream,
-                                      temperature: localTemperature,
-                                      ...(localApiType === 'anthropic' ? { __sullyAnthropicOptions: anthropicRequestOptions({ baseUrl: localUrl, apiKey: localKey, model: localModel, anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl, anthropicCustomTemperature: localAnthropicCustomTemperature }) } : {}),
-                                }),
+                            const reply = await testDialogueConnection({
+                                baseUrl: localUrl, apiKey: localKey, model: localModel, apiType: localApiType,
+                                stream: localStream, temperature: localTemperature, maxTokens: localMaxTokens,
+                                anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl,
+                                anthropicCustomTemperature: localAnthropicCustomTemperature, openaiPromptCache: localOpenaiPromptCache,
                             });
                             {
-                                const data = await safeResponseJson(res);
-                                const reply = extractContent(data);
                                 setTestApiResult(`✅ 连接成功 — 模型回复: "${reply.slice(0, 30)}"`);
                             }
                         } catch (err: any) {
@@ -4213,7 +4205,8 @@ const Settings: React.FC = () => {
               </div>
               <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">URL</label>
-                  <select aria-label="预设接口类型" value={editPresetApiType} onChange={e => setEditPresetApiType(e.target.value as LlmApiType)} className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 原生 Messages</option></select>
+                  <select aria-label="预设接口类型" value={editPresetApiType} onChange={e => setEditPresetApiType(e.target.value as LlmApiType)} className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 原生 Messages</option><option value="gemini">Gemini 原生</option></select>
+                  {editPresetApiType === 'gemini' && <p className="mt-1 text-[10px] text-slate-400">使用 Gemini Developer API 的 API Key；不支持 Vertex AI service account / OAuth，需经已认证代理接入。</p>}
                   <input value={editPresetUrl} onChange={e => setEditPresetUrl(e.target.value)} placeholder="https://..." className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary" />
               </div>
               <div className="space-y-1.5">
@@ -4274,7 +4267,7 @@ const Settings: React.FC = () => {
                       <option value="5m">5 分钟</option><option value="1h">1 小时</option>
                     </select>
                   </label>}
-                  {editPresetApiType !== 'anthropic' && <label className="flex items-center gap-2 text-xs text-slate-500">
+                  {editPresetApiType === 'openai' && <label className="flex items-center gap-2 text-xs text-slate-500">
                     <input type="checkbox" aria-label="预设 OpenAI 提示词缓存" checked={editPresetOpenaiPromptCache} onChange={event => setEditPresetOpenaiPromptCache(event.target.checked)} />
                     OpenAI 提示词缓存（prompt_cache_key）
                   </label>}
@@ -4303,6 +4296,23 @@ const Settings: React.FC = () => {
                   className="w-full py-2 bg-slate-100 text-slate-500 text-xs font-bold rounded-xl active:scale-95 transition-transform"
               >
                   用当前完整配置填入
+              </button>
+              <button type="button" disabled={testingApi || !editPresetUrl.trim() || !editPresetModel.trim()}
+                  onClick={async () => {
+                      setTestingApi(true);
+                      try {
+                          const reply = await testDialogueConnection({
+                              baseUrl: editPresetUrl, apiKey: editPresetKey, model: editPresetModel, apiType: editPresetApiType,
+                              stream: editPresetStream, temperature: editPresetTemperature, maxTokens: editPresetMaxTokens,
+                              anthropicPromptCache: editPresetPromptCache, anthropicPromptCacheTtl: editPresetPromptCacheTtl,
+                              anthropicCustomTemperature: editPresetCustomTemperature, openaiPromptCache: editPresetOpenaiPromptCache,
+                          });
+                          addToast(reply ? '预设连接成功：' + reply.slice(0, 30) : '接口已响应，但回复为空', 'info');
+                      } catch (error) {
+                          addToast('预设连接失败：' + (error instanceof Error ? error.message : '请检查配置'), 'error');
+                      } finally { setTestingApi(false); }
+                  }} className="w-full py-2 bg-slate-100 text-slate-500 text-xs font-bold rounded-xl disabled:opacity-40">
+                  {testingApi ? '测试中...' : '测试预设连接'}
               </button>
               <p className="text-[10px] text-slate-400 leading-relaxed">
                   {editingPresetId && activePresetId === editingPresetId

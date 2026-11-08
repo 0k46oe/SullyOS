@@ -38,7 +38,7 @@ export function configFromPreset(preset: ApiPreset): PresetSwitchPatch {
     patch.anthropicCustomTemperature = preset.config.anthropicCustomTemperature === true;
   }
   if (typeof preset.config.anthropicPromptCache === 'boolean' || patch.apiType === 'anthropic') patch.anthropicPromptCache = preset.config.anthropicPromptCache !== false;
-  if (typeof preset.config.openaiPromptCache === 'boolean' || patch.apiType !== 'anthropic') patch.openaiPromptCache = preset.config.openaiPromptCache !== false;
+  if (typeof preset.config.openaiPromptCache === 'boolean' || patch.apiType === 'openai') patch.openaiPromptCache = preset.config.openaiPromptCache !== false;
   if (Number.isSafeInteger(preset.config.maxTokens) && preset.config.maxTokens! > 0) patch.maxTokens = preset.config.maxTokens;
   if (patch.apiType === 'anthropic') patch.anthropicPromptCacheTtl = preset.config.anthropicPromptCacheTtl === '1h' ? '1h' : '5m';
   return patch;
@@ -69,7 +69,7 @@ export function presetDiffersFromConfig(
   if ((preset.config.maxTokens ?? 8000) !== (config.maxTokens ?? 8000)) return true;
   if ((preset.config.anthropicPromptCacheTtl ?? '5m') !== (config.anthropicPromptCacheTtl ?? '5m')) return true;
   if (llmApiType(preset.config) === 'anthropic' && (preset.config.anthropicPromptCache !== false) !== (config.anthropicPromptCache !== false)) return true;
-  if (llmApiType(preset.config) !== 'anthropic' && (preset.config.openaiPromptCache !== false) !== (config.openaiPromptCache !== false)) return true;
+  if (llmApiType(preset.config) === 'openai' && (preset.config.openaiPromptCache !== false) !== (config.openaiPromptCache !== false)) return true;
   if (llmApiType(preset.config) === 'anthropic'
     && (preset.config.anthropicCustomTemperature === true) !== (config.anthropicCustomTemperature === true)) return true;
   if (typeof preset.config.stream === 'boolean' && preset.config.stream !== (config.stream === true)) return true;

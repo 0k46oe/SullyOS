@@ -10,9 +10,11 @@ let _sid = 0;
 it('恢复备份不会把旧 Worker 原生能力结论当成当前状态', async () => {
   const previous=await ActiveMsgStore.getGlobalConfig();
   try {
-    await importAmsg2GlobalConfig({userId:'restore-test',workerUrl:'https://worker.test',anthropicMessagesSupported:true,anthropicMessagesWorkerUrl:'https://worker.test'},{allowBackendConnection:true});
+    await importAmsg2GlobalConfig({userId:'restore-test',workerUrl:'https://worker.test',geminiNativeSupported:true,geminiNativeWorkerUrl:'https://worker.test',anthropicMessagesSupported:true,anthropicMessagesWorkerUrl:'https://worker.test'},{allowBackendConnection:true});
     const config=await ActiveMsgStore.getGlobalConfig();
     expect(config.workerUrl).toBe('https://worker.test');
+    expect(config.geminiNativeSupported).toBeUndefined();
+    expect(config.geminiNativeWorkerUrl).toBeUndefined();
     expect(config.anthropicMessagesSupported).toBeUndefined();
     expect(config.anthropicMessagesWorkerUrl).toBeUndefined();
   } finally {await ActiveMsgStore.saveGlobalConfig(previous);}

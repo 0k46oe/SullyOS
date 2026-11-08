@@ -3661,6 +3661,7 @@ export default {
           ...inspectWorkerEnv(env),
           instantChat: true,
           anthropicMessages: true,
+          geminiNative: true,
           instantTick: !!env.INSTANT_TICK,
           // 这份代码认不认识「后台任务」（metadata.amsgKind → handler，见 fireKinds.ts）。
           // 老 bundle 没有这个字段，前端据此不去建那种任务——老 worker 会把它当聊天任务

@@ -121,7 +121,7 @@ const TASK_HINT = '八点了，叫对方起床去赶早班车';
 
 interface LlmCall { kind: 'scheduled' | 'instant'; at: number; prompt: string }
 
-const createWorld = async (startClock: string, native = false) => {
+const createWorld = async (startClock: string, native: boolean | 'gemini' = false) => {
   vi.useFakeTimers();
   vi.setSystemTime(at(startClock));
 
@@ -215,11 +215,21 @@ const createWorld = async (startClock: string, native = false) => {
     }
     if (url.startsWith('https://llm.test/')) {
       const req = JSON.parse(init.body);
-      const prompt = [...(req.system || []), ...req.messages].map((m: any) => m.text || (typeof m.content === 'string' ? m.content : m.content.map((b: any) => b.text || '').join('\n'))).join('\n');
+      const prompt = native === 'gemini'
+        ? [...(req.systemInstruction?.parts || []), ...req.contents.flatMap((c: any) => c.parts)].map((p: any) => p.text || '').join('\n')
+        : [...(req.system || []), ...req.messages].map((m: any) => m.text || (typeof m.content === 'string' ? m.content : m.content.map((b: any) => b.text || '').join('\n'))).join('\n');
       const kind: LlmCall['kind'] = prompt.includes('【本次任务】') ? 'scheduled' : 'instant';
       llmCalls.push({ kind, at: Date.now(), prompt });
       const next = replies[kind].shift() ?? '（场景没给这一次的回复）';
       const content = await (typeof next === 'function' ? next() : next);
+      if (native === 'gemini') {
+        expect(url).toBe('https://llm.test/v1beta/models/sim-model:generateContent');
+        expect(new Headers(init.headers).get('x-goog-api-key')).toBe('sk-sim');
+        expect(new Headers(init.headers).has('authorization')).toBe(false);
+        expect(req).not.toHaveProperty('prompt_cache_key');
+        expect(JSON.stringify(req)).not.toContain('cache_control');
+        return Response.json({ candidates: [{ content: { role: 'model', parts: [{ text: content }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 1100, candidatesTokenCount: 5, cachedContentTokenCount: 1024, totalTokenCount: 1105 } });
+      }
       if (native) {
         expect(url).toBe('https://llm.test/v1/messages');
         expect(new Headers(init.headers).get('x-api-key')).toBe('sk-sim');
@@ -407,7 +417,7 @@ const createWorld = async (startClock: string, native = false) => {
       recurrenceType,
       tzId: 'Asia/Shanghai',
       messages: [{ role: 'user', content: '（占位）' }],
-      apiUrl: native ? 'https://llm.test/v1/messages' : 'https://llm.test/v1/chat/completions',
+      apiUrl: native === 'gemini' ? 'https://llm.test/v1beta/models' : native ? 'https://llm.test/v1/messages' : 'https://llm.test/v1/chat/completions',
       apiKey: 'sk-sim',
       primaryModel: 'sim-model',
       metadata: {
@@ -500,7 +510,7 @@ const createWorld = async (startClock: string, native = false) => {
       messageType: 'auto', messageSubtype: 'instant-chat', immediate: true,
       recurrenceType: 'none', tzId: 'Asia/Shanghai',
       messages: [{ role: 'user', content: '（占位）' }],
-      apiUrl: native ? 'https://llm.test/v1/messages' : 'https://llm.test/v1/chat/completions', apiKey: 'sk-sim', primaryModel: 'sim-model',
+      apiUrl: native === 'gemini' ? 'https://llm.test/v1beta/models' : native ? 'https://llm.test/v1/messages' : 'https://llm.test/v1/chat/completions', apiKey: 'sk-sim', primaryModel: 'sim-model',
       metadata: {
         charId: CHAR_ID, charName: CHAR_NAME, source: 'active_msg_2', amsgMode: 'instant',
         amsgInstantChat: true, amsgClientTaskId: nodeCrypto.randomUUID(),
@@ -688,8 +698,8 @@ describe.skipIf(!sqlite)('到点时用户正在聊天（全链路模拟）', () 
 
   const TIMEOUT = 60_000;
 
-  it('Anthropic 原生：真实 Worker 排程、D1、即时对话和推送均可贯通', async () => {
-    const w = await createWorld('07:30:00', true);
+  it.each([true, 'gemini'] as const)('原生接口 %s：真实 Worker 排程、D1、即时对话和推送均可贯通', async protocol => {
+    const w = await createWorld('07:30:00', protocol);
     const task = await w.scheduleTask({clock:'08:00:00'});
     await w.uploadPack('原生接口上下文');
     w.watch.task = task; w.watch.from = at('08:00:00');

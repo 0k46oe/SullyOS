@@ -64,7 +64,7 @@ export default function NavigationApiSwitcher({ onClose, onOpenSettings }: { onC
         <button type="button" disabled={busy} aria-pressed={!forCharacter} onClick={() => setScope('global')}><GlobeHemisphereWest size={17} />全局默认</button>
       </div>
       <section className="navigation-api-current" aria-label="当前 API 配置">
-        <div className="navigation-api-current-label"><span className="navigation-api-status-dot" /><span>{forCharacter ? character!.name : '全局默认 API'}</span><span className="navigation-api-protocol">{llmApiType(current) === 'anthropic' ? 'Anthropic' : 'OpenAI'}</span></div>
+        <div className="navigation-api-current-label"><span className="navigation-api-status-dot" /><span>{forCharacter ? character!.name : '全局默认 API'}</span><span className="navigation-api-protocol">{llmApiType(current) === 'gemini' ? 'Gemini' : llmApiType(current) === 'anthropic' ? 'Anthropic' : 'OpenAI'}</span></div>
         <p className="navigation-api-current-name">{apiPresets.find(preset => preset.id === activeId)?.name || '当前配置'}</p>
         <p className="navigation-api-current-detail" title={describeDialogueApi(current)}>{describeDialogueApi(current)}</p>
         {forCharacter && (character!.dialogueApi
@@ -77,13 +77,14 @@ export default function NavigationApiSwitcher({ onClose, onOpenSettings }: { onC
           <h3>{name}<span>{presets.length}</span></h3>
           <div className="navigation-api-grid">{presets.map(preset => {
             const active = activeId === preset.id;
-            const native = llmApiType(preset.config) === 'anthropic';
+            const protocol = llmApiType(preset.config);
+            const native = protocol === 'anthropic';
             return <button key={preset.id} type="button" disabled={busy || !preset.config.baseUrl?.trim() || !preset.config.model?.trim()}
               aria-pressed={active} onClick={() => { void apply(preset); }} className="navigation-api-preset" title={`${preset.name} · ${preset.config.model}`}>
-              <span className="navigation-api-preset-top"><span className="navigation-api-avatar" data-protocol={native ? 'anthropic' : 'openai'} aria-hidden="true">{native ? 'A' : 'O'}</span><span className="navigation-api-selection">{active ? <><Check size={12} weight="bold" />使用中</> : <ArrowRight size={15} aria-hidden="true" />}</span></span>
+              <span className="navigation-api-preset-top"><span className="navigation-api-avatar" data-protocol={protocol} aria-hidden="true">{protocol === 'gemini' ? 'G' : native ? 'A' : 'O'}</span><span className="navigation-api-selection">{active ? <><Check size={12} weight="bold" />使用中</> : <ArrowRight size={15} aria-hidden="true" />}</span></span>
               <span className="navigation-api-preset-name">{preset.name}</span>
               <span className="navigation-api-model">{preset.config.model || '未填写模型'}</span>
-              <span className="navigation-api-preset-protocol">{native ? 'Anthropic' : 'OpenAI 兼容'}</span>
+              <span className="navigation-api-preset-protocol">{protocol === 'gemini' ? 'Gemini 原生' : native ? 'Anthropic' : 'OpenAI 兼容'}</span>
             </button>;
           })}</div>
         </section>)}

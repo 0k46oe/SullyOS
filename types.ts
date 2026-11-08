@@ -279,7 +279,7 @@ export interface VisionApiConfig {
 }
 
 /** A complete dialogue endpoint, separate from TTS/vision configuration. */
-export type ApiProtocol = 'openai' | 'anthropic';
+export type ApiProtocol = 'openai' | 'anthropic' | 'gemini';
 export type AnthropicPromptCacheTtl = '5m' | '1h';
 export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'stream' | 'temperature' | 'maxTokens' | 'apiType' | 'protocol' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'anthropicPromptCacheTtl' | 'openaiPromptCache'>;
 
@@ -326,7 +326,7 @@ export interface APIConfig {
   imageGeneration?: ImageGenerationConfig;
   /** Legacy fork format; read for migration. New settings use apiType. */
   protocol?: ApiProtocol;
-  apiType?: 'openai' | 'anthropic';
+  apiType?: 'openai' | 'anthropic' | 'gemini';
   /** 私聊单次生成上限；未设置沿用 8000，不改变历史范围。 */
   maxTokens?: number;
   baseUrl: string;
@@ -391,6 +391,9 @@ export type ActiveMsg2Mode = 'fixed' | 'auto' | 'prompted';
 export type ActiveMsg2Recurrence = 'none' | 'daily' | 'weekly';
 
 export interface ActiveMsg2GlobalConfig {
+  /** Native Gemini support is confirmed for this Worker URL. */
+  geminiNativeSupported?: boolean;
+  geminiNativeWorkerUrl?: string;
   /** Confirmed by /config-check, scoped to the Worker URL that was checked. */
   anthropicMessagesSupported?: boolean;
   anthropicMessagesWorkerUrl?: string;

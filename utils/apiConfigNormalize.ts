@@ -1,7 +1,7 @@
 import type { APIConfig, ApiPreset, ApiProtocol } from '../types';
 
 export const normalizeApiProtocol = (value: unknown): ApiProtocol =>
-  value === 'anthropic' ? 'anthropic' : 'openai';
+  value === 'gemini' ? 'gemini' : value === 'anthropic' ? 'anthropic' : 'openai';
 import { normalizeLlmBaseUrl, llmApiType } from './llmEndpoint';
 
 // Clipboard contents can carry zero-width characters that String.trim() does not

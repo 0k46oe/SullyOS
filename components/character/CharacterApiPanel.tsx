@@ -5,13 +5,12 @@ import { useOS } from '../../context/OSContext';
 import { describeDialogueApi, pickDialogueApi } from '../../utils/characterApi';
 import { configFromPreset, findActivePresetId } from '../../utils/apiPresetSwitch';
 import { extractModelIds } from '../../utils/modelList';
-import { extractContent, safeResponseJson } from '../../utils/safeApi';
 import Modal from '../os/Modal';
 import DialogueApiFields from '../settings/DialogueApiFields';
 import ModelPicker from '../settings/ModelPicker';
 import ApiPresetGroups from '../settings/ApiPresetGroups';
 import { fetchLlm } from '../../utils/anthropicApi';
-import { anthropicRequestOptions } from '../../utils/dialogueTransport';
+import { testDialogueConnection } from '../../utils/dialogueConnectionTest';
 
 export default function CharacterApiPanel({ character, onChange }: {
   character: CharacterProfile;
@@ -67,15 +66,7 @@ export default function CharacterApiPanel({ character, onChange }: {
     const version = ++requestVersion.current;
     setTesting(true); setStatus('');
     try {
-      const response = await fetchLlm(`${api.baseUrl}/chat/completions`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${api.apiKey || 'sk-none'}` },
-        body: JSON.stringify({ model: api.model, messages: [{ role: 'user', content: 'Hi' }], max_tokens: 5, stream: api.stream ?? false,
-          temperature: api.temperature,
-          ...(api.apiType === 'anthropic' ? { __sullyAnthropicOptions: anthropicRequestOptions(api) } : {}),
-        }),
-      });
-      const data = await safeResponseJson(response);
-      const content = extractContent(data);
+      const content = await testDialogueConnection(api);
       if (version === requestVersion.current) setStatus(content ? '连接成功' : '接口已响应，但回复为空');
     } catch (error) {
       if (version === requestVersion.current) setStatus(`连接失败：${error instanceof Error ? error.message : '请检查配置'}`);

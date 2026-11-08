@@ -25,10 +25,294 @@ function isAnthropicEndpoint(value) {
     return false;
   }
 }
+function isGeminiEndpoint(value) {
+  try {
+    return /\/v1(?:beta)?\/models(?:\/(?:chat\/completions|models|[^/]+:(?:streamGenerateContent|generateContent)))?\/?$/.test(new URL(value).pathname);
+  } catch {
+    return false;
+  }
+}
 function nativeRequestUrl(value) {
   const url = new URL(value);
   url.pathname = url.pathname.replace(/\/messages\/chat\/completions\/?$/, "/messages").replace(/\/messages\/models\/?$/, "/models");
   return url.href;
+}
+
+// utils/geminiApi.ts
+function contentParts(value) {
+  if (value == null || value === "") return [];
+  if (typeof value === "string") return [{ text: value }];
+  if (!Array.isArray(value)) throw Error("Gemini \u6D88\u606F\u5185\u5BB9\u5FC5\u987B\u4E3A\u6587\u672C\u6216\u5185\u5BB9\u5757");
+  return value.flatMap((part) => {
+    if (part.type === "text") return typeof part.text === "string" ? [{ text: part.text }] : [];
+    if (part.type === "image_url") {
+      const uri = typeof part.image_url === "string" ? part.image_url : part.image_url?.url;
+      const data = typeof uri === "string" && uri.match(/^data:(image\/[\w.+-]+);base64,([\s\S]+)$/i);
+      if (data) return [{ inlineData: { mimeType: data[1].toLowerCase(), data: data[2] } }];
+      if (typeof uri === "string" && /^(https:\/\/|gs:\/\/)/i.test(uri)) {
+        const ext = uri.split(/[?#]/)[0].match(/\.(png|jpe?g|webp|gif)$/i)?.[1].toLowerCase();
+        const mimeType = part.image_url?.mime_type || (ext ? `image/${ext === "jpg" ? "jpeg" : ext}` : void 0);
+        if (!mimeType) throw Error("Gemini URI \u56FE\u7247\u7F3A\u5C11 MIME \u7C7B\u578B\uFF0C\u8BF7\u4F7F\u7528 base64 \u56FE\u7247\u6216\u5E26\u7C7B\u578B\u7684\u6587\u4EF6 URI");
+        return [{ fileData: { mimeType, fileUri: uri } }];
+      }
+      throw Error("Gemini \u56FE\u7247\u9700\u4E3A base64 \u56FE\u7247\u6216\u53D7\u652F\u6301\u7684\u6587\u4EF6 URI");
+    }
+    throw Error(`Gemini \u6682\u4E0D\u652F\u6301\u5185\u5BB9\u5757\uFF1A${String(part.type)}`);
+  });
+}
+function toGeminiRequest(body) {
+  if (!Array.isArray(body.messages)) throw Error("Gemini \u8BF7\u6C42\u7F3A\u5C11 messages");
+  const contents = [];
+  const calls = /* @__PURE__ */ new Map();
+  let leading = true;
+  const append = (role, parts) => {
+    if (!parts.length) return;
+    const last = contents.at(-1);
+    if (last?.role === role) last.parts.push(...parts);
+    else contents.push({ role, parts });
+  };
+  for (const message of body.messages) {
+    if (message.role === "system" || message.role === "developer") {
+      const parts2 = contentParts(message.content);
+      if (leading) append("user", parts2);
+      else {
+        append("user", [{ text: `<system-reminder>
+${parts2.map((p) => p.text).join("\n")}
+</system-reminder>` }]);
+      }
+      continue;
+    }
+    leading = false;
+    if (message.role === "tool") {
+      const call = calls.get(message.tool_call_id);
+      if (!call) throw Error("Gemini \u5DE5\u5177\u7ED3\u679C\u7F3A\u5C11\u5BF9\u5E94\u7684\u5DE5\u5177\u8C03\u7528");
+      append("user", [{ functionResponse: { name: call.name, ...call.id ? { id: call.id } : {}, response: { result: message.content ?? "" } } }]);
+      continue;
+    }
+    if (message.role !== "assistant" && message.role !== "user") throw Error(`Gemini \u4E0D\u652F\u6301\u6D88\u606F\u89D2\u8272\uFF1A${String(message.role)}`);
+    const nativeParts = message.gemini_content;
+    const parts = message.role === "assistant" && Array.isArray(nativeParts) ? structuredClone(nativeParts) : contentParts(message.content);
+    for (const [index, call] of (message.tool_calls || []).entries()) {
+      if (!call.id || !call.function?.name) throw Error("Gemini \u5DE5\u5177\u8C03\u7528\u7F3A\u5C11 ID \u6216\u540D\u79F0");
+      const nativeCall = Array.isArray(nativeParts) ? nativeParts.filter((p) => p.functionCall)[index]?.functionCall : void 0;
+      calls.set(call.id, { name: call.function.name, ...nativeCall?.id ? { id: nativeCall.id } : {} });
+      if (Array.isArray(nativeParts)) continue;
+      const args = typeof call.function.arguments === "string" ? JSON.parse(call.function.arguments || "{}") : call.function.arguments || {};
+      const signature = call.extra_content?.google?.thought_signature;
+      parts.push({ functionCall: { name: call.function.name, args }, ...signature ? { thoughtSignature: signature } : {} });
+    }
+    append(message.role === "assistant" ? "model" : "user", parts);
+  }
+  if (!contents.length) throw Error("Gemini \u8BF7\u6C42\u6CA1\u6709\u5BF9\u8BDD\u5185\u5BB9");
+  const generationConfig = {};
+  for (const [from, to] of [["temperature", "temperature"], ["top_p", "topP"], ["top_k", "topK"], ["max_completion_tokens", "maxOutputTokens"], ["max_tokens", "maxOutputTokens"]]) {
+    if (typeof body[from] === "number") generationConfig[to] = body[from];
+  }
+  if (body.stop) generationConfig.stopSequences = Array.isArray(body.stop) ? body.stop : [body.stop];
+  if (body.response_format?.type === "json_object" || body.response_format?.type === "json_schema") generationConfig.responseMimeType = "application/json";
+  if (body.response_format?.type === "json_schema") generationConfig.responseJsonSchema = body.response_format.json_schema?.schema;
+  if (body.thinking?.type === "enabled" || body.reasoning_effort && body.reasoning_effort !== "none") generationConfig.thinkingConfig = { includeThoughts: true };
+  const request = { contents, ...Object.keys(generationConfig).length ? { generationConfig } : {} };
+  if (body.tools?.length) {
+    request.tools = [{ functionDeclarations: body.tools.map((tool) => {
+      if (tool.type !== "function" || !tool.function?.name) throw Error("Gemini \u6682\u4EC5\u652F\u6301 function \u5DE5\u5177");
+      return { name: tool.function.name, description: tool.function.description || "", parametersJsonSchema: tool.function.parameters || { type: "object", properties: {} } };
+    }) }];
+    const choice = body.tool_choice;
+    request.toolConfig = { functionCallingConfig: { mode: choice === "none" ? "NONE" : choice === "required" || choice?.type === "function" ? "ANY" : "AUTO", ...choice?.type === "function" ? { allowedFunctionNames: [choice.function.name] } : {} } };
+  }
+  return request;
+}
+function geminiUsage(usage = {}) {
+  const prompt = usage.promptTokenCount ?? 0;
+  const completion = (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0);
+  return {
+    ...usage,
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: usage.totalTokenCount ?? prompt + completion,
+    ...typeof usage.cachedContentTokenCount === "number" ? { prompt_tokens_details: { cached_tokens: usage.cachedContentTokenCount } } : {},
+    ...typeof usage.thoughtsTokenCount === "number" ? { completion_tokens_details: { reasoning_tokens: usage.thoughtsTokenCount } } : {}
+  };
+}
+var finishReason = (reason, tools = false) => reason === "MAX_TOKENS" ? "length" : tools ? "tool_calls" : "stop";
+var blocked = /* @__PURE__ */ new Set(["SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "IMAGE_SAFETY"]);
+function checkResponse(data) {
+  if (data.error) throw Error(data.error.message || "Gemini \u8FD4\u56DE\u9519\u8BEF");
+  if (data.promptFeedback?.blockReason) throw Error(`Gemini \u62D2\u7EDD\u4E86\u8BF7\u6C42\uFF1A${data.promptFeedback.blockReason}`);
+  const reason = data.candidates?.[0]?.finishReason;
+  if (blocked.has(reason)) throw Error(`Gemini \u672A\u5B8C\u6210\u56DE\u590D\uFF1A${reason}`);
+}
+function toolCalls(parts) {
+  return parts.filter((p) => p.functionCall).map((part, index) => ({
+    id: part.functionCall.id || `call_gemini_${index}`,
+    type: "function",
+    function: { name: part.functionCall.name, arguments: JSON.stringify(part.functionCall.args || {}) },
+    ...part.thoughtSignature ? { extra_content: { google: { thought_signature: part.thoughtSignature } } } : {}
+  }));
+}
+function fromGeminiResponse(data) {
+  checkResponse(data);
+  const candidate = data.candidates?.[0];
+  if (!candidate || !Array.isArray(candidate.content?.parts)) throw Error("Gemini \u8FD4\u56DE\u4E86\u65E0\u6548\u7684\u751F\u6210\u54CD\u5E94");
+  const parts = candidate.content.parts, calls = toolCalls(parts);
+  const reasoning = parts.filter((p) => p.thought).map((p) => p.text || "").join("");
+  return { id: data.responseId || "gemini-response", object: "chat.completion", model: data.modelVersion || "", choices: [{ index: 0, finish_reason: finishReason(candidate.finishReason, calls.length > 0), message: {
+    role: "assistant",
+    content: parts.filter((p) => !p.thought).map((p) => p.text || "").join(""),
+    gemini_content: parts,
+    ...reasoning ? { reasoning_content: reasoning } : {},
+    ...calls.length ? { tool_calls: calls } : {}
+  } }], ...data.usageMetadata ? { usage: geminiUsage(data.usageMetadata) } : {} };
+}
+function convertGeminiStream(response, signal) {
+  if (!response.body) throw Error("Gemini \u8FD4\u56DE\u4E86\u7A7A\u6D41");
+  const reader = response.body.getReader(), decoder = new TextDecoder(), encoder2 = new TextEncoder();
+  let pending = "", eventData = [], finished = false, ended = false, callCount = 0;
+  let id = "gemini-stream", model = "", reason = "STOP", emitted = 0;
+  const parts = [];
+  let cancellation;
+  const cancel = (reason2) => cancellation ??= reader.cancel(reason2).catch(() => {
+  });
+  const onAbort = () => {
+    void cancel(signal?.reason);
+  };
+  const detach = () => signal?.removeEventListener("abort", onAbort);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  const stream = new ReadableStream({
+    async pull(controller) {
+      const emit = (value) => {
+        emitted++;
+        controller.enqueue(encoder2.encode(`data: ${JSON.stringify(value)}
+
+`));
+      };
+      const flush = () => {
+        if (!eventData.length) return;
+        const raw = eventData.join("\n");
+        eventData = [];
+        if (raw === "[DONE]") return;
+        const data = JSON.parse(raw);
+        checkResponse(data);
+        id = data.responseId || id;
+        model = data.modelVersion || model;
+        const candidate = data.candidates?.[0];
+        const delta = {};
+        for (const part of candidate?.content?.parts || []) {
+          const last = parts.at(-1);
+          if (typeof part.text === "string" && typeof last?.text === "string" && !!last.thought === !!part.thought && !last.thoughtSignature) Object.assign(last, { text: last.text + part.text }, part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {});
+          else parts.push(structuredClone(part));
+          if (typeof part.text === "string") {
+            const field = part.thought ? "reasoning_content" : "content";
+            delta[field] = (delta[field] || "") + part.text;
+          }
+          if (part.functionCall) {
+            const call = toolCalls([part])[0];
+            if (!part.functionCall.id) call.id = `call_gemini_${callCount}`;
+            (delta.tool_calls ||= []).push({ ...call, index: callCount++ });
+          }
+        }
+        if (candidate?.finishReason) {
+          finished = true;
+          reason = candidate.finishReason;
+        }
+        emit({ id, model, choices: candidate ? [{ index: 0, delta, finish_reason: null }] : [], ...data.usageMetadata ? { usage: geminiUsage(data.usageMetadata) } : {} });
+      };
+      const line = (value) => {
+        if (!value) flush();
+        else if (value.startsWith("data:")) eventData.push(value.slice(5).replace(/^ /, ""));
+      };
+      try {
+        const before = emitted;
+        while (!ended && emitted === before) {
+          signal?.throwIfAborted();
+          const next = await reader.read();
+          signal?.throwIfAborted();
+          pending += decoder.decode(next.value, { stream: !next.done });
+          let index;
+          while ((index = pending.indexOf("\n")) >= 0) {
+            line(pending.slice(0, index).replace(/\r$/, ""));
+            pending = pending.slice(index + 1);
+          }
+          if (next.done) {
+            if (pending) line(pending.replace(/\r$/, ""));
+            flush();
+            if (!finished) throw Error("Gemini \u6D41\u5F0F\u54CD\u5E94\u63D0\u524D\u7ED3\u675F\uFF0C\u672A\u6536\u5230\u5B8C\u6210\u6807\u8BB0");
+            ended = true;
+            detach();
+            emit({ id, model, choices: [{ index: 0, delta: { gemini_content: parts }, finish_reason: finishReason(reason, callCount > 0) }] });
+            controller.enqueue(encoder2.encode("data: [DONE]\n\n"));
+            controller.close();
+          }
+        }
+      } catch (error) {
+        ended = true;
+        detach();
+        controller.error(error);
+        await cancel(error);
+      }
+    },
+    async cancel(reason2) {
+      if (!ended) {
+        ended = true;
+        detach();
+        await cancel(reason2);
+      }
+    }
+  });
+  return new Response(stream, { status: response.status, statusText: response.statusText, headers: { "content-type": "text/event-stream" } });
+}
+async function fetchGemini(resource, init, transport) {
+  const request = resource instanceof Request ? resource : void 0;
+  const input = typeof resource === "string" ? resource : resource instanceof URL ? resource.href : resource.url;
+  if (!isGeminiEndpoint(input)) return transport(resource, init);
+  const url = new URL(input), method = (init?.method || request?.method || "GET").toUpperCase();
+  const inherited = request ? { credentials: request.credentials, cache: request.cache, mode: request.mode, redirect: request.redirect, signal: request.signal } : {};
+  const headers = new Headers(init?.headers || request?.headers);
+  const key = headers.get("x-goog-api-key") || headers.get("authorization")?.replace(/^Bearer\s+/i, "") || "";
+  headers.delete("authorization");
+  headers.delete("x-api-key");
+  headers.delete("anthropic-version");
+  headers.delete("anthropic-dangerous-direct-browser-access");
+  headers.set("x-goog-api-key", key);
+  const options = { ...inherited, ...init, method, headers };
+  url.pathname = url.pathname.replace(/\/models\/[^/]+:(?:streamGenerateContent|generateContent)\/?$/, "/models").replace(/\/(?:chat\/completions|models)\/?$/, "");
+  if (!url.pathname.endsWith("/models")) url.pathname += "/models";
+  if (method === "GET" && /\/models\/models\/?$/.test(new URL(input).pathname)) {
+    const models = [], pages = /* @__PURE__ */ new Set();
+    for (; ; ) {
+      const response2 = await transport(url.href, options);
+      if (!response2.ok) return response2;
+      const data = await response2.json();
+      if (!Array.isArray(data.models)) throw Error("Gemini \u8FD4\u56DE\u4E86\u65E0\u6548\u6A21\u578B\u5217\u8868");
+      models.push(...data.models.filter((m) => m.supportedGenerationMethods?.includes("generateContent")).map((m) => ({ ...m, id: String(m.name).replace(/^models\//, "") })));
+      if (!data.nextPageToken) break;
+      if (pages.has(data.nextPageToken)) throw Error("Gemini \u6A21\u578B\u5217\u8868\u5206\u9875\u91CD\u590D");
+      pages.add(data.nextPageToken);
+      url.searchParams.set("pageToken", data.nextPageToken);
+    }
+    return new Response(JSON.stringify({ object: "list", data: models }), { headers: { "content-type": "application/json" } });
+  }
+  if (method !== "POST") return transport(resource, init);
+  const raw = init?.body ?? (request ? await request.clone().text() : void 0);
+  let body;
+  try {
+    body = typeof raw === "string" ? JSON.parse(raw) : void 0;
+  } catch {
+  }
+  if (typeof body?.model !== "string" || !Array.isArray(body.messages)) return transport(resource, init);
+  const model = body.model.replace(/^models\//, "").trim();
+  if (!model || /[/?#]/.test(model)) throw Error("Gemini \u6A21\u578B\u540D\u79F0\u65E0\u6548");
+  url.pathname += `/${encodeURIComponent(model)}:${body.stream ? "streamGenerateContent" : "generateContent"}`;
+  if (body.stream) url.searchParams.set("alt", "sse");
+  else url.searchParams.delete("alt");
+  headers.set("content-type", "application/json");
+  headers.delete("content-length");
+  options.body = JSON.stringify(toGeminiRequest(body));
+  const response = await transport(url.href, options);
+  if (!response.ok) return response;
+  if (response.headers.get("content-type")?.includes("text/event-stream")) return convertGeminiStream(response, options.signal);
+  return new Response(JSON.stringify(fromGeminiResponse(await response.json())), { status: response.status, statusText: response.statusText, headers: { "content-type": "application/json" } });
 }
 
 // utils/samplingParamCompat.ts
@@ -50,7 +334,7 @@ var observeUsage = (observer, source, usage) => {
   } catch {
   }
 };
-var finishReason = (reason) => reason === "tool_use" ? "tool_calls" : reason === "max_tokens" ? "length" : "stop";
+var finishReason2 = (reason) => reason === "tool_use" ? "tool_calls" : reason === "max_tokens" ? "length" : "stop";
 function contentBlocks(content) {
   if (content == null || content === "") return [];
   if (typeof content === "string") return [{ type: "text", text: content }];
@@ -75,7 +359,11 @@ function toAnthropicRequest(body) {
   const ephemeral = { type: "ephemeral", ...settings?.ttl === "1h" ? { ttl: "1h" } : {} };
   const system = [];
   const messages = [];
-  let lastHistoryBlock;
+  const isSystem = (m) => m.role === "system" || m.role === "developer";
+  let lastDialogueIndex = body.messages.length - 1;
+  while (lastDialogueIndex >= 0 && isSystem(body.messages[lastDialogueIndex])) lastDialogueIndex--;
+  const lastBlockAt = /* @__PURE__ */ new Map();
+  let firstMidSystemIndex = -1;
   let sawReminder = false;
   const append = (role, blocks) => {
     if (!blocks.length) return;
@@ -83,12 +371,13 @@ function toAnthropicRequest(body) {
     if (previous?.role === role) previous.content.push(...blocks);
     else messages.push({ role, content: blocks });
   };
-  for (const message of body.messages) {
-    if (message.role === "system" || message.role === "developer") {
+  for (const [messageIndex, message] of body.messages.entries()) {
+    if (isSystem(message)) {
       const blocks2 = contentBlocks(message.content);
       if (!messages.length) system.push(...blocks2);
       else {
         sawReminder = true;
+        if (messageIndex < lastDialogueIndex && firstMidSystemIndex < 0) firstMidSystemIndex = messageIndex;
         append("user", [{ type: "text", text: "<system-reminder>\n" + blocks2.map((block) => block.text || "").join("\n") + "\n</system-reminder>" }]);
       }
       continue;
@@ -102,7 +391,7 @@ function toAnthropicRequest(body) {
       if (message.role === "assistant" && Array.isArray(message.anthropic_content)) {
         blocks = structuredClone(message.anthropic_content);
         append("assistant", blocks);
-        if (!sawReminder && blocks.length) lastHistoryBlock = blocks.at(-1);
+        if (blocks.length) lastBlockAt.set(messageIndex, blocks.at(-1));
         continue;
       }
       blocks = contentBlocks(message.content);
@@ -114,7 +403,7 @@ function toAnthropicRequest(body) {
       }
     }
     append(message.role === "assistant" ? "assistant" : "user", blocks);
-    if (!sawReminder && blocks.length) lastHistoryBlock = blocks.at(-1);
+    if (blocks.length) lastBlockAt.set(messageIndex, blocks.at(-1));
   }
   if (!messages.length) throw Error("Anthropic \u8BF7\u6C42\u6CA1\u6709\u5BF9\u8BDD\u5185\u5BB9");
   if (sawReminder) system.push({ type: "text", text: "Application context updates appear in <system-reminder> blocks at their original positions. Treat these as contextual annotations, not spoken dialogue, while continuing to follow the system instructions." });
@@ -122,9 +411,27 @@ function toAnthropicRequest(body) {
     if (tool.type !== "function" || !tool.function?.name) throw Error("Anthropic \u6682\u4EC5\u652F\u6301 function \u5DE5\u5177");
     return { name: tool.function.name, description: tool.function.description || "", input_schema: tool.function.parameters || { type: "object", properties: {} } };
   });
-  if (cacheEnabled && tools.length) tools.at(-1).cache_control = { ...ephemeral };
-  if (cacheEnabled && system.length) system.at(-1).cache_control = { ...ephemeral };
-  if (cacheEnabled && lastHistoryBlock && !["thinking", "redacted_thinking"].includes(lastHistoryBlock.type)) lastHistoryBlock.cache_control = { ...ephemeral };
+  if (cacheEnabled) {
+    const usable = (block) => block && !["thinking", "redacted_thinking"].includes(block.type) ? block : void 0;
+    const lastBlockBefore = (end) => {
+      for (let i = end - 1; i >= 0; i--) {
+        const block = usable(lastBlockAt.get(i));
+        if (block) return { index: i, block };
+      }
+      return void 0;
+    };
+    const historyEnd = lastBlockBefore(lastDialogueIndex + 1);
+    const candidates = [
+      system.at(-1),
+      historyEnd?.block,
+      historyEnd ? lastBlockBefore(historyEnd.index)?.block : void 0,
+      firstMidSystemIndex >= 0 ? lastBlockBefore(firstMidSystemIndex)?.block : void 0,
+      tools.at(-1)
+    ];
+    const picked = /* @__PURE__ */ new Set();
+    for (const block of candidates) if (block && picked.size < 4) picked.add(block);
+    for (const block of picked) block.cache_control = { ...ephemeral };
+  }
   const thinking = body.thinking || body.extra_body?.thinking;
   const request = {
     model: body.model,
@@ -166,7 +473,7 @@ function fromAnthropicMessage(message) {
   const text2 = message.content.filter((b) => b.type === "text").map((b) => b.text).join("");
   const thinking = message.content.filter((b) => b.type === "thinking" || b.type === "redacted_thinking");
   const calls = message.content.filter((b) => b.type === "tool_use").map((b) => ({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input) } }));
-  return { id: message.id, object: "chat.completion", model: message.model, choices: [{ index: 0, finish_reason: finishReason(message.stop_reason), message: {
+  return { id: message.id, object: "chat.completion", model: message.model, choices: [{ index: 0, finish_reason: finishReason2(message.stop_reason), message: {
     role: "assistant",
     content: text2,
     ...thinking.length ? { reasoning_content: thinking.map((b) => b.thinking || "").join(""), anthropic_thinking: thinking } : {},
@@ -244,7 +551,7 @@ function convertAnthropicStream(response, observer, signal) {
     }
     if (event.delta?.stop_reason) usage.__stop_reason = event.delta.stop_reason;
     if (stopped) {
-      end = finishReason(usage.__stop_reason);
+      end = finishReason2(usage.__stop_reason);
       for (const [index, json] of toolJson) blocks.get(index).input = JSON.parse(json || "{}");
       if (thinking.size) delta.anthropic_thinking = [...thinking.values()];
       if (thinking.size || toolIndices.size) delta.anthropic_content = [...blocks.values()];
@@ -307,6 +614,7 @@ function convertAnthropicStream(response, observer, signal) {
 async function fetchLlm(resource, init, transport = globalThis.fetch, browser = typeof window !== "undefined") {
   if (transport.__sullyAnthropic) return transport(resource, init);
   const inputUrl = typeof resource === "string" ? resource : resource instanceof URL ? resource.href : resource.url;
+  if (isGeminiEndpoint(inputUrl)) return fetchGemini(resource, init, transport);
   if (!isAnthropicEndpoint(inputUrl)) return transport(resource, init);
   const request = resource instanceof Request ? resource : void 0;
   const method = (init?.method || request?.method || "GET").toUpperCase();
@@ -1520,7 +1828,7 @@ function pickStaleStoppedReplyKeys(rows, nowMs = Date.now(), protectKey) {
 // worker/amsg/src/index.ts
 import { DurableObject } from "cloudflare:workers";
 
-// node_modules/.pnpm/@rei-standard+amsg-server@3.1.0_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
+// locked-amsg:node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
 var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
   "user_id",
   "uuid",
@@ -1539,7 +1847,7 @@ var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
 var TASK_DELIVERY_COLUMNS = "id, user_id, uuid, encrypted_payload, message_type, next_send_at, retry_after, status, retry_count";
 var TASK_DETAIL_COLUMNS = "id, user_id, uuid, encrypted_payload, message_type, next_send_at, status, retry_count, last_error, created_at, updated_at";
 
-// node_modules/.pnpm/@rei-standard+amsg-shared@0.4.0/node_modules/@rei-standard/amsg-shared/dist/index.mjs
+// locked-amsg:node_modules/@rei-standard/amsg-shared/dist/index.mjs
 var TEXT_ENCODER = new TextEncoder();
 var TEXT_DECODER = new TextDecoder("utf-8", { fatal: false });
 function toUint8(buf) {
@@ -2651,15 +2959,15 @@ function assertValidDecision(decision, options = {}) {
     return;
   }
   if (tag2 === "tool-request" && inlineToolCalls && Object.prototype.hasOwnProperty.call(decision, "toolCalls")) {
-    const toolCalls = (
+    const toolCalls2 = (
       /** @type {{ toolCalls?: unknown }} */
       decision.toolCalls
     );
-    if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
+    if (!Array.isArray(toolCalls2) || toolCalls2.length === 0) {
       throw new TypeError('decision:"tool-request" toolCalls must be a non-empty array when set');
     }
-    for (let i = 0; i < toolCalls.length; i++) {
-      const t = toolCalls[i];
+    for (let i = 0; i < toolCalls2.length; i++) {
+      const t = toolCalls2[i];
       if (!t || typeof t !== "object" || Array.isArray(t)) {
         throw new TypeError(`toolCalls[${i}] must be a plain object, got ${stringifyDecisionForError(t)}`);
       }
@@ -2732,7 +3040,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@3.1.0_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-A4LPROFY.mjs
+// locked-amsg:node_modules/@rei-standard/amsg-server/dist/chunk-A4LPROFY.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -5011,7 +5319,7 @@ async function runFireChain({
     const nativeCalls = Array.isArray(assistantMessage.tool_calls) ? assistantMessage.tool_calls : [];
     const usedIds = new Set([...rawCalls, ...nativeCalls].filter(validId).map((call) => call.id));
     const malformedIds = /* @__PURE__ */ new Set();
-    const toolCalls = rawCalls.map((call, index) => {
+    const toolCalls2 = rawCalls.map((call, index) => {
       let id = validId(call) ? call.id : `call_${iteration + 1}_${index + 1}`;
       if (!validId(call)) {
         while (usedIds.has(id)) id += "_";
@@ -5023,7 +5331,7 @@ async function runFireChain({
       }
       return { ...call, id };
     });
-    const validationDecision = decision?.decision === "tool-request" && Array.isArray(decision.toolCalls) && decision.toolCalls.length > 0 ? { ...decision, toolCalls } : decision;
+    const validationDecision = decision?.decision === "tool-request" && Array.isArray(decision.toolCalls) && decision.toolCalls.length > 0 ? { ...decision, toolCalls: toolCalls2 } : decision;
     try {
       assertValidDecision(validationDecision, { inlineToolCalls: true });
     } catch (error) {
@@ -5056,14 +5364,14 @@ async function runFireChain({
       });
       return { handled: true, result: { success: true, messagesSent, status: "finished", iterations: iteration + 1 } };
     }
-    if (toolCalls.length === 0) {
+    if (toolCalls2.length === 0) {
       throw taggedRetryableError(
         "AGENTIC_EMPTY_TOOL_REQUEST: tool-request decision carried no toolCalls (neither decision.toolCalls nor pushPayloads[].toolCalls)",
         "AGENTIC_EMPTY_TOOL_REQUEST"
       );
     }
-    const permittedCalls = toolCalls.filter((call) => !malformedIds.has(call.id) && (normalized.allowedToolNames === void 0 || normalized.allowedToolNames.has(call.function.name)));
-    const deniedResults = toolCalls.filter((call) => !permittedCalls.includes(call)).map((call) => ({
+    const permittedCalls = toolCalls2.filter((call) => !malformedIds.has(call.id) && (normalized.allowedToolNames === void 0 || normalized.allowedToolNames.has(call.function.name)));
+    const deniedResults = toolCalls2.filter((call) => !permittedCalls.includes(call)).map((call) => ({
       role: "tool",
       tool_call_id: call.id,
       content: JSON.stringify({ error: malformedIds.has(call.id) ? { code: "INVALID_TOOL_CALL", message: "Tool call requires a function name" } : { code: "TOOL_NOT_ALLOWED", message: "Tool execution is not allowed for this fire" } })
@@ -5095,9 +5403,9 @@ async function runFireChain({
       }));
     }
     toolResults = [...toolResults, ...deniedResults];
-    const declared = nativeCalls.filter(validId).map((call) => toolCalls.find((item) => item.id === call.id) || call);
+    const declared = nativeCalls.filter(validId).map((call) => toolCalls2.find((item) => item.id === call.id) || call);
     const nativeIds = new Set(declared.map((call) => call.id));
-    const synthesized = toolCalls.filter((call) => !nativeIds.has(call.id));
+    const synthesized = toolCalls2.filter((call) => !nativeIds.has(call.id));
     const assistantWithTools = { ...assistantMessage, tool_calls: [...declared, ...synthesized] };
     messages = [...messages.slice(0, -1), assistantWithTools, ...toolResults];
   }
@@ -11618,7 +11926,7 @@ function createSingleUserCloudflareWorker(buildConfig, options = {}) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-11-02";
+var AMSG_BUNDLE_VERSION = "2026-11-08";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -13745,8 +14053,8 @@ var classifyOverdueTasks = (tasks, nowMs) => {
     if (verdict.state !== "ready" || verdict.unfinishedAttempt) return verdict;
     const key = tasks[index].serializeKey;
     if (!key) return verdict;
-    const blocked = verdicts.some((other, otherIndex) => otherIndex !== index && other.state === "sending" && tasks[otherIndex].serializeKey === key);
-    return blocked ? { ...verdict, queuedBehind: true, stuck: false } : verdict;
+    const blocked2 = verdicts.some((other, otherIndex) => otherIndex !== index && other.state === "sending" && tasks[otherIndex].serializeKey === key);
+    return blocked2 ? { ...verdict, queuedBehind: true, stuck: false } : verdict;
   });
 };
 var judgeOverdueTasks = (tasks) => {
@@ -16732,7 +17040,7 @@ function extractFriendFeedReplyTags(raw, namespace = "FRIEND_FEED_REPLY") {
   return { text: text2 + raw.slice(cursor), actions };
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-instant@0.11.0/node_modules/@rei-standard/amsg-instant/dist/index.mjs
+// locked-amsg:node_modules/@rei-standard/amsg-instant/dist/index.mjs
 var WEB_PUSH_MAX_BODY_BYTES2 = 4096;
 var WEB_PUSH_ENCRYPTION_OVERHEAD_BYTES2 = 16 + 4 + 1 + 65 + 1 + 16;
 var MAX_PUSH_PAYLOAD_BYTES2 = WEB_PUSH_MAX_BODY_BYTES2 - WEB_PUSH_ENCRYPTION_OVERHEAD_BYTES2;
@@ -17453,27 +17761,27 @@ function classifyLLMOutput(text2) {
   const social = extractFriendFeedReplyTags(text2);
   const visits = extractFriendFeedReplyTags(social.text, "HOME_VISIT_REPLY");
   text2 = visits.text;
-  const toolCalls = [];
+  const toolCalls2 = [];
   for (const spec of DATA_TAGS) {
     const matches = Array.from(text2.matchAll(spec.re));
     for (const m of matches) {
       const args = spec.toArgs(m);
       if (!args) continue;
-      toolCalls.push({
-        id: `call_${spec.toolName}_${toolCalls.length}_${Date.now().toString(36)}`,
+      toolCalls2.push({
+        id: `call_${spec.toolName}_${toolCalls2.length}_${Date.now().toString(36)}`,
         type: "function",
         function: { name: spec.toolName, arguments: JSON.stringify(args) }
       });
     }
   }
-  if (toolCalls.length > 0) {
+  if (toolCalls2.length > 0) {
     let prefix = text2;
     for (const spec of DATA_TAGS) prefix = prefix.replace(spec.re, "");
     prefix = prefix.trim();
     if (social.actions.length) prefix += "\n" + social.actions.map((action) => "[[FRIEND_FEED_REPLY:" + JSON.stringify(action) + "]]").join("\n");
     if (visits.actions.length) prefix += "\n" + visits.actions.map((action) => "[[HOME_VISIT_REPLY:" + JSON.stringify(action) + "]]").join("\n");
     const sanitizedPrefix = sanitizeForNotification(prefix);
-    return { kind: "tool-request", prefix, sanitizedPrefix, toolCalls };
+    return { kind: "tool-request", prefix, sanitizedPrefix, toolCalls: toolCalls2 };
   }
   const directives = social.actions.map((action) => ({ type: "friend_feed_reply", action }));
   directives.push(...visits.actions.map((action) => ({ type: "home_visit_reply", action })));
@@ -19642,7 +19950,7 @@ ${userHoliday}` });
    * 服务端工具执行：客户端在 fire 时刻离线，数据工具全部在 worker 内跑完。
    * 单个工具失败（含抛错）都以失败 JSON 回填给 LLM 让它圆场，不失败整条链。
    */
-  async executeToolCalls(toolCalls, ctx) {
+  async executeToolCalls(toolCalls2, ctx) {
     const stash = getFireStash(ctx.scratch);
     if (!stash) {
       throw new Error("AMSG2_FIRE_STASH_MISSING: executeToolCalls \u8BFB\u4E0D\u5230 ctx.scratch.fire\uFF0C\u68C0\u67E5 amsg-server \u662F\u5426\u4ECD\u5171\u4EAB scratch");
@@ -19650,7 +19958,7 @@ ${userHoliday}` });
     if (stash.proxyWorkerUrl) setProxyWorkerUrlOverride(stash.proxyWorkerUrl);
     if (stash.xhsCookie) XhsMcpClient.setCookie(stash.xhsCookie);
     const results = [];
-    for (const toolCall of toolCalls) {
+    for (const toolCall of toolCalls2) {
       ctx.throwIfCancelled?.();
       const name = toolCall?.function?.name || "";
       if (stash.allowedToolNames && !stash.allowedToolNames.has(name)) {
@@ -20011,6 +20319,7 @@ var src_default = {
           ...inspectWorkerEnv(env),
           instantChat: true,
           anthropicMessages: true,
+          geminiNative: true,
           instantTick: !!env.INSTANT_TICK,
           // 这份代码认不认识「后台任务」（metadata.amsgKind → handler，见 fireKinds.ts）。
           // 老 bundle 没有这个字段，前端据此不去建那种任务——老 worker 会把它当聊天任务

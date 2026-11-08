@@ -1,5 +1,5 @@
 import { resolveDialogueApi } from './characterApi';
-import { isAnthropicEndpoint, normalizeLlmBaseUrl, type LlmApiType } from './llmEndpoint';
+import { isGeminiEndpoint, isAnthropicEndpoint, normalizeLlmBaseUrl, type LlmApiType } from './llmEndpoint';
 /**
  * 主动消息 2.0 的「LLM 凭据引用」（credRefs）：本地这一侧的命名、取值与变更侦测。
  *
@@ -56,7 +56,7 @@ export const supportsLlmCredentials = (features: string[] | null | undefined): b
  */
 export const normalizeChatApiUrl = (baseUrl: string, apiType?: LlmApiType): string => {
   const normalized = normalizeLlmBaseUrl(baseUrl, apiType);
-  return isAnthropicEndpoint(normalized) ? normalized : `${normalized}/chat/completions`;
+  return isAnthropicEndpoint(normalized) || isGeminiEndpoint(normalized) ? normalized : `${normalized}/chat/completions`;
 };
 
 /**

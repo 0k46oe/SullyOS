@@ -111,6 +111,39 @@ describe('character API draft transaction', () => {
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({baseUrl:'https://global.test/v1/messages',apiType:'anthropic'}));
     expect(os.apiConfig.baseUrl).toBe('https://global.test/v1');
   });
+  it('tests and saves a Gemini native role draft with implicit cache information', async () => {
+    const network = vi.fn(async () => Response.json({ candidates: [{ content: { parts: [{ text: '你好' }] }, finishReason: 'STOP' }] }));
+    vi.stubGlobal('fetch', network);
+    await click('为角色使用独立 API');
+    await act(async () => { const select = host.querySelector('select')!; select.value = 'gemini'; Simulate.change(select); });
+    expect(host.textContent).toContain('隐式缓存');
+    expect(host.querySelector('[aria-label="OpenAI 提示词缓存"]')).toBeNull();
+    expect(host.querySelector('[aria-label="Anthropic 提示词缓存"]')).toBeNull();
+    expect(host.querySelector('[aria-label="流式输出"]')).toBeTruthy();
+    await click('测试连接');
+    expect(host.textContent).toContain('连接成功');
+    const [url, init] = network.mock.calls[0] as any;
+    expect(url).toBe('https://global.test/v1/models/global-model:generateContent');
+    expect(new Headers(init.headers).get('x-goog-api-key')).toBe('global');
+    expect(JSON.parse(init.body)).toHaveProperty('contents');
+    expect(onChange).not.toHaveBeenCalled();
+    await click('确定');
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ apiType: 'gemini', baseUrl: 'https://global.test/v1/models' }));
+    expect(os.apiConfig.baseUrl).toBe('https://global.test/v1');
+  });
+  it.each(['apiType', 'protocol'] as const)('tests a saved Gemini %s role draft with its own generation settings', async alias => {
+    const network = vi.fn(async () => Response.json({ candidates: [{ content: { parts: [{ text: '你好' }] }, finishReason: 'STOP' }] }));
+    vi.stubGlobal('fetch', network);
+    await render({ ...char, dialogueApi: { ...os.apiConfig, [alias]: 'gemini', temperature: 0, maxTokens: 6144 } });
+    await click('修改独立 API');
+    expect(host.textContent).toContain('Gemini Developer API');
+    expect(host.textContent).toContain('Vertex AI');
+    await click('测试连接');
+    expect(host.textContent).toContain('连接成功');
+    expect(JSON.parse((network.mock.calls[0] as any)[1].body).generationConfig).toEqual({ temperature: 0, maxOutputTokens: 6144 });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(os.apiConfig.model).toBe('global-model');
+  });
   it('loads grouped presets as drafts; cancellation never mutates the role or global config', async () => {
     expect(host.textContent).toContain('目前跟随设置中的 API：global.test · global-model');
     await click('为角色使用独立 API');

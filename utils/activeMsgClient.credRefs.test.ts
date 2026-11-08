@@ -84,6 +84,8 @@ beforeEach(() => {
   postedBodies = [];
   scheduleResponses = [{ status: 200, body: { success: true, data: { uuid: 'remote-uuid', status: 'pending' } } }];
   globalConfig.llmCredentialsSupported = true;
+  delete globalConfig.geminiNativeSupported;
+  delete globalConfig.geminiNativeWorkerUrl;
   delete globalConfig.anthropicMessagesSupported;
   delete globalConfig.anthropicMessagesWorkerUrl;
   delete globalConfig.initializedAt;
@@ -127,6 +129,28 @@ it('原生接口只提交给已确认支持且地址一致的 Worker，OpenAI �
   await expect(requireAnthropicWorker(['https://api.anthropic.com/v1/messages'])).rejects.toThrow('尚未就绪');
   globalConfig.anthropicMessagesWorkerUrl=globalConfig.workerUrl;
   await expect(requireAnthropicWorker(['https://api.anthropic.com/v1/messages'])).resolves.toBeUndefined();
+});
+
+it('Gemini 原生任务要求同地址 Worker 的独立能力位，不能借用 Anthropic 能力', async () => {
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models';
+  globalConfig.anthropicMessagesSupported = true;
+  globalConfig.anthropicMessagesWorkerUrl = globalConfig.workerUrl;
+  await expect(requireAnthropicWorker([url])).rejects.toThrow('Gemini');
+  globalConfig.geminiNativeSupported = true;
+  globalConfig.geminiNativeWorkerUrl = 'https://other-worker.test';
+  await expect(requireAnthropicWorker([url])).rejects.toThrow('Gemini');
+  globalConfig.geminiNativeWorkerUrl = globalConfig.workerUrl;
+  const probe = vi.spyOn(ActiveMsgClient, 'probeInstantChatSupportDetailed');
+  await expect(requireAnthropicWorker([url])).resolves.toBeUndefined();
+  expect(probe).not.toHaveBeenCalled();
+});
+
+it('Worker 更新后限时复查 Gemini 能力并保存到本次地址', async () => {
+  vi.spyOn(ActiveMsgStore, 'saveGlobalConfig').mockImplementation(async patch => Object.assign(globalConfig, patch) as any);
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ success: true, data: { workerVersion: AMSG_BUNDLE_VERSION, geminiNative: true } })));
+  await expect(requireAnthropicWorker(['https://generativelanguage.googleapis.com/v1beta/models'])).resolves.toBeUndefined();
+  expect(globalConfig.geminiNativeSupported).toBe(true);
+  expect(globalConfig.geminiNativeWorkerUrl).toBe(globalConfig.workerUrl);
 });
 
 it('旧 Worker 的存量内联任务不会被更新成它不支持的原生凭据', async () => {

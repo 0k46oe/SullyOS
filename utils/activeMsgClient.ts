@@ -1,7 +1,7 @@
 import { resolveCharacterUserProfile } from './characterUserProfile';
 import { buildChatOutputStylePrompt, readChatTranslationConfig } from './chatOutputStylePrompt';
 import { resolveDialogueApi } from './characterApi';
-import { isAnthropicEndpoint } from './llmEndpoint';
+import { isGeminiEndpoint, isAnthropicEndpoint } from './llmEndpoint';
 import { ackStoppedReplyReceipts, stoppedReplyStateEntries } from './amsgStoppedReplyClient';
 import { loadCharacterContextMessages } from './chatContextRange';
 import { ReiClient, classifyClientStateWrite } from '@rei-standard/amsg-client';
@@ -624,18 +624,23 @@ export const isLlmCredentialsReady = async (): Promise<boolean> => {
   }
 };
 
-export const requireAnthropicWorker = async (urls: string[]): Promise<void> => {
-  if (!urls.some(isAnthropicEndpoint)) return;
+export const requireNativeLlmWorker = async (urls: string[]): Promise<void> => {
+  const anthropic = urls.some(isAnthropicEndpoint), gemini = urls.some(isGeminiEndpoint);
+  if (!anthropic && !gemini) return;
+  const ready = (config: ActiveMsg2GlobalConfig) => (!anthropic || config.anthropicMessagesSupported === true && config.anthropicMessagesWorkerUrl === config.workerUrl)
+    && (!gemini || config.geminiNativeSupported === true && config.geminiNativeWorkerUrl === config.workerUrl);
   let config = await ActiveMsgStore.getGlobalConfig();
-  if (config.anthropicMessagesSupported === true && config.anthropicMessagesWorkerUrl === config.workerUrl) return;
-  // An automatic deployment can finish after the startup probe. Recheck the
-  // current Worker instead of making users reconnect to clear a stale negative.
+  if (ready(config)) return;
+  // A deployment may finish after startup; recheck before refusing a native request.
   await ActiveMsgClient.probeInstantChatSupportDetailed({ timeoutMs: 5000 });
   config = await ActiveMsgStore.getGlobalConfig();
-  if (config.anthropicMessagesSupported !== true || config.anthropicMessagesWorkerUrl !== config.workerUrl) {
-    throw new Error('主动消息 2.0 的 Anthropic 支持尚未就绪，已自动检查。请稍后重试；若持续失败，请检查网络或 Worker 自动更新设置。');
+  if (!ready(config)) {
+    throw new Error(`主动消息 2.0 的 ${gemini ? 'Gemini' : 'Anthropic'} 原生支持尚未就绪，已自动检查。请稍后重试；若持续失败，请检查网络或 Worker 自动更新设置。`);
   }
 };
+
+// Kept for existing integrations; the guard now covers both native protocols.
+export const requireAnthropicWorker = requireNativeLlmWorker;
 
 /**
  * 这台 worker 现在认不认 `PUT /client-state` 里 `value: null` 的删行语义
@@ -664,7 +669,7 @@ const putLlmCredentialRows = async (
 ): Promise<number> => {
   const assertWriteCurrent = captureCloudWriteCheck(rows.flatMap(row => { const owner = parseCharCredId(row.credId); return owner ? [owner.charId] : []; }));
   const pending = options.force ? rows : pickChangedCredRows(rows);
-  await requireAnthropicWorker(rows.map(row => row.value.apiUrl));
+  await requireNativeLlmWorker(rows.map(row => row.value.apiUrl));
   if (pending.length === 0) return 0;
   const client = options.client ?? await initializeClient(await ensureWorkerReady());
   assertWriteCurrent();
@@ -1841,7 +1846,7 @@ const rememberWorkerBundleVersion = async (body: any, checkedWorkerUrl?: string)
   try {
     const current = await ActiveMsgStore.getGlobalConfig();
     if (checkedWorkerUrl && current.workerUrl !== checkedWorkerUrl) return;
-    await ActiveMsgStore.saveGlobalConfig({ workerBundleVersion: deployed, anthropicMessagesSupported: body?.data?.anthropicMessages === true, anthropicMessagesWorkerUrl: checkedWorkerUrl || current.workerUrl });
+    await ActiveMsgStore.saveGlobalConfig({ workerBundleVersion: deployed, geminiNativeSupported: body?.data?.geminiNative === true, geminiNativeWorkerUrl: checkedWorkerUrl || current.workerUrl, anthropicMessagesSupported: body?.data?.anthropicMessages === true, anthropicMessagesWorkerUrl: checkedWorkerUrl || current.workerUrl });
   } catch (error) {
     console.warn('[AmsgInstantChat] Worker 的 bundle 版本没存下来（下次探测再补）', error);
   }
@@ -2309,6 +2314,8 @@ export const ActiveMsgClient = {
     const {
       instantChatSupported: _staleSupported,
       workerBundleVersion: _staleBundleVersion,
+      geminiNativeSupported: _staleGeminiSupported,
+      geminiNativeWorkerUrl: _staleGeminiWorkerUrl,
       anthropicMessagesSupported: _staleAnthropicSupported,
       anthropicMessagesWorkerUrl: _staleAnthropicWorkerUrl,
       ...handshakeConfig
@@ -2681,7 +2688,7 @@ export const ActiveMsgClient = {
       payload.userMessage = userMessage;
     } else {
       const activeApi = resolveApiConfig(char, config, apiConfig);
-      await requireAnthropicWorker([normalizeChatApiUrl(activeApi.baseUrl, activeApi.apiType)]);
+      await requireNativeLlmWorker([normalizeChatApiUrl(activeApi.baseUrl, activeApi.apiType)]);
       // 「本次任务」指令随任务 metadata 走，worker 到点拿它填 fire_pack 的指令槽。
       payload.metadata.amsgTaskInstruction = buildTaskInstruction(task.mode, task.promptHint);
       // 服务端要求「completePrompt 或 messages」二选一，且 messages 必须非空、
@@ -3029,7 +3036,7 @@ export const ActiveMsgClient = {
     params.signal?.throwIfAborted();
     const assertWriteCurrent = captureCloudWriteCheck([params.char.id]);
     const { char, chatMessages, api, userProfile, groups, realtimeConfig } = params;
-    await requireAnthropicWorker([api.baseUrl, params.emotionEval?.api?.baseUrl || '']);
+    await requireNativeLlmWorker([api.baseUrl, params.emotionEval?.api?.baseUrl || '']);
     if (!api.baseUrl?.trim() || !api.apiKey?.trim() || !api.model?.trim()) {
       throw new Error('即时对话没发出去：聊天 API 地址、密钥或模型没配齐。');
     }
@@ -3816,7 +3823,7 @@ export const ActiveMsgClient = {
     if (aiTaskUuids.length === 0) return { status: 'no-tasks', updated: 0, failed: 0 };
 
     const inlineUpdates = resolveTaskCredentialUpdates(params.char, params.config, params.apiConfig);
-    await requireAnthropicWorker([String(inlineUpdates.apiUrl || '')]);
+    await requireNativeLlmWorker([String(inlineUpdates.apiUrl || '')]);
     const remoteTasks = params.remoteTasks ?? await this.listAllTasks();
     const remoteByUuid = new Map(remoteTasks.map((task) => [task.uuid, task]));
     const credRow = buildCharChatCredRow(params.char, params.config, params.apiConfig)!;

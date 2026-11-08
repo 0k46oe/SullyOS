@@ -542,12 +542,14 @@ export async function importAmsg2GlobalConfig(
 ): Promise<void> {
   if (!config || typeof config !== 'object') return;
   const { instantChatSupported: _dropped, workerBundleVersion: _droppedVersion,
+    geminiNativeSupported: _droppedGemini, geminiNativeWorkerUrl: _droppedGeminiUrl,
     anthropicMessagesSupported: _droppedAnthropic, anthropicMessagesWorkerUrl: _droppedAnthropicUrl, ...restorable } = config;
   if (!options.allowBackendConnection) {
     for (const key of BACKEND_CONNECTION_KEYS) delete restorable[key];
   }
   if (Object.keys(restorable).length === 0) return;
   await ActiveMsgStore.saveGlobalConfig({ ...restorable, instantChatSupported: undefined, workerBundleVersion: undefined,
+    geminiNativeSupported: undefined, geminiNativeWorkerUrl: undefined,
     anthropicMessagesSupported: undefined, anthropicMessagesWorkerUrl: undefined });
 }
 

@@ -15,12 +15,12 @@ import { getApiCallAmbientContext, recordApiCall, type ApiCallMeta } from './api
 import { resolveBlobRefsInRequestBody } from './apiBlobRefs';
 import { waitForPalaceRequest } from './memoryPalace/maintenanceMode';
 import { fetchLlm } from './anthropicApi';
-import { isAnthropicEndpoint } from './llmEndpoint';
+import { isGeminiEndpoint, isAnthropicEndpoint } from './llmEndpoint';
 
 const log = makeDebugLogger('api', 'SafeAPI');
 
 export function isChatCompletionUrl(url: string): boolean {
-    return url.includes('/chat/completions') || isAnthropicEndpoint(url);
+    return url.includes('/chat/completions') || isAnthropicEndpoint(url) || isGeminiEndpoint(url);
 }
 
 /** Parse a fetch Response as JSON safely (text-first, then JSON.parse) */
@@ -117,6 +117,7 @@ interface SseFeedDelta {
 }
 
 class SseAssembler {
+    private geminiContent: any[] | undefined;
     private anthropicContent: any[] | undefined;
     private anthropicThinking: any[] | undefined;
     content = '';
@@ -164,6 +165,7 @@ class SseAssembler {
         let reasoningDelta = '';
         // delta 路径（OpenAI 流式常见）
         if (choice.delta) {
+            if (Array.isArray(choice.delta.gemini_content)) this.geminiContent = choice.delta.gemini_content;
             if (Array.isArray(choice.delta.anthropic_content)) this.anthropicContent = choice.delta.anthropic_content;
             if (Array.isArray(choice.delta.anthropic_thinking)) this.anthropicThinking = choice.delta.anthropic_thinking;
             for (const k of Object.keys(choice.delta)) this.deltaKeys.add(k);
@@ -242,6 +244,7 @@ class SseAssembler {
                     content: this.content,
                     ...(this.reasoning ? { reasoning_content: this.reasoning } : {}),
                     ...(this.anthropicThinking ? { anthropic_thinking: this.anthropicThinking } : {}),
+                    ...(this.geminiContent ? { gemini_content: this.geminiContent } : {}),
                     ...(this.anthropicContent ? { anthropic_content: this.anthropicContent } : {}),
                     ...(this.toolCalls.length ? {
                         tool_calls: this.toolCalls.filter(Boolean).map((tc, i) => ({ ...tc, id: tc.id || `call_sse_${i}` })),

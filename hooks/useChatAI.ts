@@ -1461,7 +1461,7 @@ export const useChatAI = ({
                 // 组合在一起却在上游适配层失败。只对这一条高度特征化的 502 降级一次：
                 // tools 和正文完整保留，system 合到开头，thinking 参数让步。普通网络 502、
                 // 非 Claude、没工具的请求一律不重发，避免无依据地重复计费。
-                if (!nativeAnthropic && shouldRetryClaudeProxyCompatibility(requestError, attemptedBody)) {
+                if (llmApiType(effectiveApi) === 'openai' && shouldRetryClaudeProxyCompatibility(requestError, attemptedBody)) {
                     console.warn('🧩 [Claude compat] 中转拒绝 thinking + tools 组合，使用兼容请求体重试一次');
                     try {
                         data = await replyStep(async () => fetchChatJson(`${baseUrl}/chat/completions`, {
