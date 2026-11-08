@@ -16,7 +16,7 @@ import { createPortal } from 'react-dom';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { isVisibleChatMessage } from '../utils/chatMessageVisibility';
-import { formatChatElapsed, meetingHistoryByNextChat } from '../utils/chatMeetingHistory';
+import { cleanMeetingHistoryText, formatChatElapsed, meetingHistoryByNextChat } from '../utils/chatMeetingHistory';
 import { nowInTimeZone } from '../utils/timezone';
 import { chatCharacterDisplayName } from '../utils/characterRemark';
 import { AppID, Message, MessageType, MemoryFragment, Emoji, EmojiCategory, DailySchedule, ScheduleSlot } from '../types';
@@ -152,14 +152,15 @@ const HISTORY_WINDOW_BATCH_SIZE = 30;
 const INSTANT_VOICE_SCAN_WINDOW_MS = 30_000;
 
 export interface HomePhoneChatProps {characterId:string;getContext:()=>string;onBack:()=>void}
-function MeetingHistoryBlock({ items, title, charName, userName, timezone }: { items: Message[]; title: string; charName: string; userName: string; timezone?: string }) {
+function MeetingHistoryBlock({ items, title, charName, userName, timezone, lightReading, customEmotions }: { items: Message[]; title: string; charName: string; userName: string; timezone?: string; lightReading: boolean; customEmotions?: string[] }) {
     const [expanded, setExpanded] = useState(false);
     return <div className="sully-chat-meeting-history sully-chat-action-description w-full px-6 py-2 text-center text-xs leading-relaxed text-slate-500 whitespace-pre-wrap">
         <button type="button" className="sully-chat-meeting-history-title" aria-expanded={expanded} onClick={event => { event.stopPropagation(); setExpanded(value => !value); }}>{title || '我们的见面'}</button>
         {expanded && <div className="sully-chat-meeting-history-content">{items.map(item => {
             const date = nowInTimeZone(timezone, new Date(item.timestamp));
             const time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-            return <div className="sully-chat-meeting-history-message mt-3" key={item.id}><div>{item.role === 'user' ? userName : charName}　{time}</div><div>{item.content}</div></div>;
+            const user = item.role === 'user';
+            return <div className={`sully-chat-meeting-history-message mt-4 font-serif text-[14px] leading-loose ${user ? 'text-right italic' : 'text-left'} ${user ? (lightReading ? 'text-stone-400' : 'text-slate-400') : (lightReading ? 'text-stone-700' : 'text-slate-200')}`} key={item.id}><div className="not-italic font-sans text-[10px] opacity-70">{user ? userName : charName}　{time}</div><div className="whitespace-pre-wrap">{cleanMeetingHistoryText(item.content, customEmotions)}</div></div>;
         })}</div>}
     </div>;
 }
@@ -4364,7 +4365,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                 if (animatingIds.has(m.id)) setAnimatingIds(prev => { const next = new Set(prev); next.delete(m.id); return next; });
                             }}
                         >
-                        {meetingBefore?.length ? <MeetingHistoryBlock items={meetingBefore} title={char.chatMeetingHistoryTitle ?? '我们的见面'} charName={char.name} userName={chatUserProfile.name || '我'} timezone={resolveCharTimeZone(char)}/> : null}
+                        {meetingBefore?.length ? <MeetingHistoryBlock items={meetingBefore} title={char.chatMeetingHistoryTitle ?? '我们的见面'} charName={char.name} userName={chatUserProfile.name || '我'} timezone={resolveCharTimeZone(char)} lightReading={char.dateAppearance?.preset && char.dateAppearance.preset !== 'none' ? char.dateAppearance.preset !== 'night' : char.dateLightReading !== false} customEmotions={char.customDateSprites}/> : null}
                         {showElapsed && <div className="sully-chat-elapsed-time w-full text-center text-xs text-slate-400 pt-2 pb-1">距离上次聊天已经过去 {formatChatElapsed(elapsed)}</div>}
                         <MessageItem
                             msg={m}
@@ -4419,7 +4420,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                         </div>
                     );
                 })}
-                {char.chatShowMeetingHistory && windowedFocusMsgId === null && meetingGroups.get(null)?.length ? <MeetingHistoryBlock items={meetingGroups.get(null)!} title={char.chatMeetingHistoryTitle ?? '我们的见面'} charName={char.name} userName={chatUserProfile.name || '我'} timezone={resolveCharTimeZone(char)}/> : null}
+                {char.chatShowMeetingHistory && windowedFocusMsgId === null && meetingGroups.get(null)?.length ? <MeetingHistoryBlock items={meetingGroups.get(null)!} title={char.chatMeetingHistoryTitle ?? '我们的见面'} charName={char.name} userName={chatUserProfile.name || '我'} timezone={resolveCharTimeZone(char)} lightReading={char.dateAppearance?.preset && char.dateAppearance.preset !== 'none' ? char.dateAppearance.preset !== 'night' : char.dateLightReading !== false} customEmotions={char.customDateSprites}/> : null}
                 {windowedFocusMsgId !== null && (
                     <div className="flex justify-center mt-2 mb-4 px-4">
                         {hasNewerHistoryWindow ? (

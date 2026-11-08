@@ -1015,6 +1015,7 @@ const PhoneShell: React.FC = () => {
        
        <div className={`absolute inset-0 transition-all duration-500 ${activeApp === AppID.Launcher ? 'bg-transparent' : 'bg-white/50 backdrop-blur-3xl'}`} />
        
+       <style>{`.sully-shell-content:has(.date-companion-visual) { bottom: 0 !important; }`}</style>
        {/* 外壳安全区两种策略：
           - 未迁移 App：外壳铺满 body（含 --app-height 多出的 +safe-bottom 溢出区），用 padding 让位安全区，
             内容只画到可见 viewport 内，home 条上方留出 safe-bottom 视觉间隙。

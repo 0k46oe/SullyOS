@@ -939,7 +939,7 @@ const DateSession: React.FC<DateSessionProps> = ({
     const canReroll = messages.length > 0 && messages[messages.length - 1].role === 'assistant';
 
     return (
-        <div className={`h-full w-full relative bg-black overflow-hidden font-sans select-none ${decoratedReading ? 'meeting-reading' : ''}`} data-reading-preset={readingStyle.id} onPointerDownCapture={() => { if (voiceEnabled && apiConfig.ttsProvider === 'elevenlabs') streamingVoice.prime(); }} onClick={handleScreenClick}><style>{MEETING_READING_CSS + '\n' + meetingCustomCss(char.dateAppearance)}</style>
+        <div className={`h-full w-full relative bg-black overflow-hidden font-sans select-none ${!isNovelMode ? 'date-companion-visual' : ''} ${decoratedReading ? 'meeting-reading' : ''}`} data-reading-preset={readingStyle.id} onPointerDownCapture={() => { if (voiceEnabled && apiConfig.ttsProvider === 'elevenlabs') streamingVoice.prime(); }} onClick={handleScreenClick}><style>{MEETING_READING_CSS + '\n' + meetingCustomCss(char.dateAppearance)}</style>
             <div className="absolute inset-x-0 bottom-28 z-[105] pointer-events-auto">
                 <StreamingVoiceBar state={streamingVoice.state} onStop={stopDateStream} />
             </div>
@@ -1278,7 +1278,7 @@ const DateSession: React.FC<DateSessionProps> = ({
                         {currentSprite && <TokenImg value={currentSprite} className={`${!currentSpriteKey && currentSprite === char.avatar ? 'h-full w-full object-cover' : 'max-h-full max-w-full object-contain'} drop-shadow-[0_10px_20px_rgba(0,0,0,0.5)] transition-all duration-300 origin-bottom`} style={{ filter: showInputBox ? 'brightness(1)' : (isTextAnimating ? 'brightness(1.05)' : 'brightness(1)'), transform: `translate(${spriteConfig.x}%, ${spriteConfig.y}%) scale(${isTextAnimating ? spriteConfig.scale * 1.02 : spriteConfig.scale})` }} />}
                     </div>
                     {!isTyping && (
-                        <div className="absolute inset-x-0 bottom-8 z-30 flex justify-center">
+                        <div className="absolute inset-x-0 bottom-8 z-30 flex justify-center" style={{ marginBottom: 'var(--standalone-safe-area-bottom, 0px)' }}>
                             <div
                                 className="w-[90%] max-w-lg bg-black/60 backdrop-blur-xl rounded-2xl border border-white/10 p-6 min-h-[140px] shadow-2xl animate-slide-up hover:bg-black/70 cursor-pointer"
                                 onTouchStart={voiceEnabled && !isTextAnimating && !isShowingOpening && isDialogueLine(galShownText) ? (e) => startDateVoiceLongPress(e, resolveCurrentDateVoiceTarget()) : undefined}
@@ -1332,7 +1332,7 @@ const DateSession: React.FC<DateSessionProps> = ({
             )}
 
             {/* Input Layer */}
-            <div className={`absolute inset-x-0 bottom-0 z-40 flex justify-center pointer-events-none transition-all duration-300 ${isTyping || showInputBox ? 'opacity-100' : 'opacity-0'}`}>
+            <div className={`absolute inset-x-0 bottom-0 z-40 flex justify-center pointer-events-none transition-all duration-300 ${isTyping || showInputBox ? 'opacity-100' : 'opacity-0'}`} style={!isNovelMode ? { marginBottom: 'var(--standalone-safe-area-bottom, 0px)' } : undefined}>
                 {isTyping && (
                     <div className="absolute bottom-1/2 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 pointer-events-auto">
                         <div className="bg-black/80 backdrop-blur-md px-6 py-3 rounded-full border border-white/20 shadow-2xl animate-pulse flex items-center gap-3">

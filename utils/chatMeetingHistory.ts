@@ -1,6 +1,11 @@
 import type { Message } from '../types';
 import { isVisibleChatMessage } from './chatMessageVisibility';
 
+export function cleanMeetingHistoryText(text: string, customEmotions: string[] = []): string {
+    const emotions = new Set(['normal', 'happy', 'angry', 'sad', 'shy', ...customEmotions].map(value => value.toLowerCase()));
+    return text.replace(/\[([^\]\r\n]+)\]/g, (tag, name: string) => emotions.has(name.trim().toLowerCase()) || /^v:\s*[a-z]+$/i.test(name) ? '' : tag).trim();
+}
+
 /** Group meeting messages between successive visible online messages. */
 export function meetingHistoryByNextChat(messages: Message[], hideSystemLogs = false): Map<number | null, Message[]> {
     const ordered = [...messages].sort((a, b) => a.timestamp - b.timestamp || a.id - b.id);
