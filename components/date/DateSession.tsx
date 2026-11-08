@@ -122,6 +122,7 @@ interface DateSessionProps {
     resumeMessage?: Message;
     encounterId?: string;
     onSendMessage: (text: string, kind?: 'continue') => Promise<string>; // Returns AI content
+    externalGenerating?: boolean;
     onReroll: () => Promise<string>;
     onExit: () => void;
     onEditMessage: (msg: Message) => void;
@@ -191,7 +192,8 @@ const DateSession: React.FC<DateSessionProps> = ({
     initialState,
     resumeMessage,
     encounterId,
-    onSendMessage, 
+    onSendMessage,
+    externalGenerating = false,
     onReroll, 
     onExit,
     onEditMessage,
@@ -229,7 +231,8 @@ const DateSession: React.FC<DateSessionProps> = ({
     const messages = React.useMemo(() => encounterId ? historyMessages.filter(message => message.metadata?.dateEncounterId === encounterId) : historyMessages, [historyMessages, encounterId]);
     const [input, setInput] = useState('');
     const [showInputBox, setShowInputBox] = useState(!peekStatus && !initialState);
-    const [isTyping, setIsTyping] = useState(false); // Waiting for API
+    const [localTyping, setIsTyping] = useState(false);
+    const isTyping = localTyping || externalGenerating;
     const [isShowingOpening, setIsShowingOpening] = useState(!!peekStatus && !initialState); // True until first user interaction
     // API 失败时本地记住本轮输入，不依赖父组件的 DB 刷新是否已经完成；用户可直接点重试。
     const [pendingRetryText, setPendingRetryText] = useState('');

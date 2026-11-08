@@ -558,6 +558,18 @@ const OneShotCapturePanel: React.FC<{
 
                 {capture && (
                     <div className="mt-3">
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                            <span className="text-[10px] font-semibold text-primary">{copyNotice}</span>
+                            <button type="button" onClick={onClear} className="ml-auto text-[10px] font-semibold text-rose-500">清除本次详情</button>
+                        </div>
+                        <div className="mb-3 overflow-hidden rounded-xl border border-slate-200/70 bg-white/80">
+                            <button type="button" onClick={() => setExpandedSectionId(expandedSectionId === rawId ? null : rawId)} className="flex w-full items-center gap-2 px-3 py-2 text-left">
+                                <span className="shrink-0 rounded-md bg-slate-800 px-1.5 py-0.5 text-[9px] font-semibold text-white">原始</span>
+                                <span className="min-w-0 flex-1 truncate text-[10px] text-slate-600">完整请求 JSON（核对所有字段）</span>
+                                <span className="shrink-0 text-[9px] text-slate-300">{expandedSectionId === rawId ? '▲' : '▼'}</span>
+                            </button>
+                            {expandedSectionId === rawId && <CaptureSectionContent content={JSON.stringify(capture.payload, null, 2)} mono onCopy={value => copy(value, '完整请求已复制')} />}
+                        </div>
                         <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[10px]">
                             <Field label="时间" value={`${capturedTime?.day} ${capturedTime?.time}`} />
                             <Field label="App" value={capture.meta.appName} />
@@ -696,31 +708,9 @@ const OneShotCapturePanel: React.FC<{
                             <div className="space-y-1.5">
                             {detailSections.map(renderSection)}
 
-                            <div className="overflow-hidden rounded-xl border border-slate-200/70 bg-white/80">
-                                <button
-                                    type="button"
-                                    onClick={() => setExpandedSectionId(expandedSectionId === rawId ? null : rawId)}
-                                    className="flex w-full items-center gap-2 px-3 py-2 text-left"
-                                >
-                                    <span className="shrink-0 rounded-md bg-slate-800 px-1.5 py-0.5 text-[9px] font-semibold text-white">原始</span>
-                                    <span className="min-w-0 flex-1 truncate text-[10px] text-slate-600">完整请求 JSON（核对所有字段）</span>
-                                    <span className="shrink-0 text-[9px] text-slate-300">{expandedSectionId === rawId ? '▲' : '▼'}</span>
-                                </button>
-                                {expandedSectionId === rawId && (
-                                    <CaptureSectionContent
-                                        content={JSON.stringify(capture.payload, null, 2)}
-                                        mono
-                                        onCopy={value => copy(value, '完整请求已复制')}
-                                    />
-                                )}
-                            </div>
                             </div>
                         </div>
 
-                        <div className="mt-3 flex items-center justify-between gap-3">
-                            <span className="text-[10px] font-semibold text-primary">{copyNotice}</span>
-                            <button type="button" onClick={onClear} className="ml-auto text-[10px] font-semibold text-rose-500">清除本次详情</button>
-                        </div>
                     </div>
                 )}
             </div>

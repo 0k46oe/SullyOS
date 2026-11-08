@@ -1,5 +1,6 @@
 import {meetingAppearance} from '../../../utils/meetingAppearance';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { meetingGeneration } from '../../../utils/meetingGeneration';
 import { loadStoryActorContext, replaceStoryTheaterReply, STORY_REROLL_INSTRUCTION } from '../../../utils/storyTheaterReply';
 import { generateStoryArchiveSummary } from '../../../utils/storyTheaterArchive';
 import { injectStoryPresetDepth } from '../../../utils/storyPresetDepth';
@@ -295,7 +296,9 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
     const canStart = hasStoryTheaterParticipant(entry, characters);
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
-    const [sending, setSending] = useState(false);
+    const [localSending, setSending] = useState(false);
+    const activeGenerations = React.useSyncExternalStore(meetingGeneration.subscribe, meetingGeneration.getSnapshot, meetingGeneration.getSnapshot);
+    const sending = localSending || activeGenerations.some(job => job.key === `story:${entry.id}`);
     const [memoryStatus, setMemoryStatus] = useState('');
     const [contextTokens, setContextTokens] = useState(0);
     const [contextTokensExact, setContextTokensExact] = useState(false);
@@ -326,7 +329,9 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
         setMessages(rows.filter(message => message.metadata?.source === 'story_theater').sort((a, b) => a.id - b.id));
     }, [threadId]);
 
-    useEffect(() => { void loadMessages(); }, [loadMessages]);
+    useEffect(() => {
+        if (!sending) void loadMessages();
+    }, [sending, loadMessages]);
     useEffect(() => {
         setContextTokens(0);
         setContextTokensExact(false);
@@ -635,6 +640,8 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
 
     const send = useCallback(async (rerollTarget?: Message, continueRequested = false) => {
         if (sendLock.current || !canStart) return;
+        const finishGeneration = meetingGeneration.begin({ key: `story:${entry.id}`, label: entry.title || '剧情', surface: 'story' });
+        if (!finishGeneration) { addToast('这段剧情正在生成，请稍候', 'info'); return; }
         sendLock.current = true;
         setSending(true);
         setRerollingId(rerollTarget?.id || null);
@@ -800,6 +807,7 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                 'error',
             );
         } finally {
+            finishGeneration();
             sendLock.current = false;
             setSending(false);
             setRerollingId(null);

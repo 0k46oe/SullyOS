@@ -1,6 +1,4 @@
 import FirstUseGuide from './FirstUseGuide';
-import DeploymentNotice from './os/DeploymentNotice';
-import { useDeploymentNotice } from '../hooks/useDeploymentNotice';
 import FeedbackInvitation from './FeedbackInvitation';
 import BeautyRepoInvitation from './share/BeautyRepoInvitation';
 import { useFirstUseGuideStep } from '../utils/firstUseGuide';
@@ -464,7 +462,6 @@ const AppLoadingFallback: React.FC<{ onReturn?: () => void; animationEnabled?: b
 const PhoneShell: React.FC = () => {
   const { theme, isLocked, unlock, activeApp, closeApp, openApp, virtualTime, isDataLoaded, toasts, unreadMessages, characters, handleBack, suspendedCall, resumeCall, activeCharacterId, errorDialog, dismissError, sysOperation } = useOS();
   const useIOSStandaloneLayout = isIOSStandaloneWebApp();
-  const deploymentNotice = useDeploymentNotice();
 
   // 三档顶部状态栏：安全显示 / 紧凑显示 / 隐藏。旧存档仍由 hideStatusBar 兼容解析。
   // compact 把时间放进 safe-area，本体顶栏只让出 max(safe-area, 1.5rem)，避免顶部再多一整行。
@@ -848,16 +845,6 @@ const PhoneShell: React.FC = () => {
   // 关闭开机动画时的数据等待兜底；启用动画时由 BootSequence 等待就绪。
   if (!isDataLoaded) {
     return <div className="w-full h-full" style={{ background: '#05060f' }} />;
-  }
-
-  // Before the lock screen and all startup prompts. The dialog's own mount starts
-  // the countdown, so neither the boot animation nor native identity lookup counts.
-  if (deploymentNotice.blocked) {
-    return <div className="w-full h-full" style={{ background: '#05060f' }}>
-      {deploymentNotice.source === 'checking'
-        ? <p role="status" className="p-6 text-center text-sm text-slate-300">正在确认版本来源…</p>
-        : deploymentNotice.source !== 'official' && <DeploymentNotice source={deploymentNotice.source} onAccept={deploymentNotice.accept} />}
-    </div>;
   }
 
   const getBgStyle = (wp: string) => {

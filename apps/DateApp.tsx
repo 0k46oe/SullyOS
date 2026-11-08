@@ -29,6 +29,7 @@ import { getLocalDateKey } from '../utils/localDate';
 import { materializeVisionDescriptions } from '../utils/visionApi';
 import { shareOrDownloadFile } from '../utils/shareExport';
 import { buildInPersonContinueInstruction } from '../utils/meetingContinue';
+import { meetingGeneration } from '../utils/meetingGeneration';
 import {
     advanceSARModuleAfterReply,
     createSARModuleEventMeta,
@@ -159,6 +160,11 @@ const DateApp: React.FC = () => {
     const [editContent, setEditContent] = useState('');
 
     const char = characters.find(c => c.id === activeCharacterId);
+    const activeGenerations = React.useSyncExternalStore(meetingGeneration.subscribe, meetingGeneration.getSnapshot, meetingGeneration.getSnapshot);
+    const sessionGenerating = activeGenerations.some(job => job.key === `date:${activeCharacterId}:${encounterIdRef.current}`);
+    useEffect(() => {
+        if (mode === 'session' && !sessionGenerating) void loadDateMessages();
+    }, [mode, sessionGenerating, loadDateMessages]);
     const historyGroups = useMemo(
         () => buildDateHistoryGroups(historyMessages, historyView, historySortOrder),
         [historyMessages, historyView, historySortOrder],
@@ -1154,8 +1160,17 @@ const DateApp: React.FC = () => {
                     peekStatus={peekStatus}
                     resumeMessage={resumedDateMessage}
                     encounterId={encounterIdRef.current}
-                    onSendMessage={handleSendMessage}
-                    onReroll={handleReroll}
+                    externalGenerating={sessionGenerating}
+                    onSendMessage={async (text, kind) => {
+                        const finish = meetingGeneration.begin({ key: `date:${char.id}:${encounterIdRef.current}`, label: char.name, surface: 'companion' });
+                        if (!finish) throw new Error('这场见面正在生成，请稍候');
+                        try { return await handleSendMessage(text, kind); } finally { finish(); }
+                    }}
+                    onReroll={async () => {
+                        const finish = meetingGeneration.begin({ key: `date:${char.id}:${encounterIdRef.current}`, label: char.name, surface: 'companion' });
+                        if (!finish) throw new Error('这场见面正在生成，请稍候');
+                        try { return await handleReroll(); } finally { finish(); }
+                    }}
                     onExit={onExitSession}
                     onEditMessage={(msg) => { setEditTargetMsg(msg); setEditContent(msg.content); setIsEditModalOpen(true); }}
                     onDeleteMessage={handleDeleteMessage}

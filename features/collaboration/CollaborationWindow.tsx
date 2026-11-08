@@ -3,6 +3,8 @@ import type {CollaborationAppearance} from './appearance';
 import {COLLABORATION_UI_THEME_CSS} from './themeCss';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useChatAutoReply } from '../../hooks/useChatAutoReply';
+import { findEmojiSuggestions } from '../../utils/emojiSuggestions';
+import { loadChatInputPreferences } from '../../utils/chatInputPreferences';
 import {
   Archive,
   ArrowLeft,
@@ -1560,6 +1562,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
   const [editDraft, setEditDraft] = useState('');
   const [editSaving, setEditSaving] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [dismissedEmojiDraft, setDismissedEmojiDraft] = useState<string | null>(null);
+  const [composingEmojiDraft, setComposingEmojiDraft] = useState(false);
   const [composerFocused, setComposerFocused] = useState(false);
   const [holdingMessage, setHoldingMessage] = useState(false);
   const [sending, setSending] = useState(false);
@@ -1694,6 +1698,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
       emojis: emojis.filter(emoji => !emoji.categoryId || visibleIds.has(emoji.categoryId)),
     };
   }, [character.id, emojiCategories, emojis]);
+  const suggestedEmojis = !emojiOpen && !composingEmojiDraft && dismissedEmojiDraft !== draft && loadChatInputPreferences().emojiSuggestions
+    ? findEmojiSuggestions(visibleEmojiLibrary.emojis, draft) : [];
 
   const autoReply = useChatAutoReply({
     enabled: true,
@@ -2726,6 +2732,10 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
           </div>
 
           <div className="collab-ui-composer relative z-20 shrink-0 border-t border-white/70 bg-white/82 px-3 pb-[max(.75rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur-xl">
+            {suggestedEmojis.length > 0 && <section aria-label="表情包联想" className="mb-2 border-b border-slate-100 pb-2">
+              <div className="flex items-center justify-between text-[10px] text-slate-500"><span>表情联想 · 点击发送</span><button type="button" aria-label="收起表情联想" onClick={() => setDismissedEmojiDraft(draft)}><X size={16} /></button></div>
+              <div className="flex gap-2 overflow-x-auto">{suggestedEmojis.map(emoji => <button key={emoji.url} type="button" disabled={sending || isGenerating} aria-label={`发送表情：${emoji.name}`} title={emoji.name} onMouseDown={event => event.preventDefault()} onClick={() => { setDismissedEmojiDraft(draft); void send(emoji); }} className="flex w-16 shrink-0 flex-col items-center gap-1 p-1"><TokenImg value={emoji.url} alt={emoji.name} className="h-12 w-12 object-contain" /><span className="w-full truncate text-center text-[10px]">{emoji.name}</span></button>)}</div>
+            </section>}
             {autoReply.seconds !== null && <div role="status" className="mb-2 flex items-center justify-between px-2 text-[11px] text-slate-500"><span>空闲 {autoReply.seconds} 秒后发送给 AI</span><button type="button" onClick={autoReply.cancel}>取消自动发送</button></div>}
             {emojiOpen && <section role="dialog" aria-label="选择表情包" className="mb-3 rounded-2xl border border-slate-200 bg-white p-3">
               <div className="mb-2 flex items-center justify-between text-xs text-slate-600"><span>表情包</span><button type="button" aria-label="关闭表情包" onClick={() => setEmojiOpen(false)}><X size={18} /></button></div>
@@ -2773,6 +2783,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
                 onBlur={() => setComposerFocused(false)}
                 disabled={makerSaving}
                 onChange={event => changeComposerDraft(event.target.value)}
+                onCompositionStart={() => setComposingEmojiDraft(true)}
+                onCompositionEnd={() => setComposingEmojiDraft(false)}
                 onKeyDown={event => {
                   if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                     event.preventDefault();
