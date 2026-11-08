@@ -42,13 +42,13 @@ it('story novel mode keeps prose outside a collapsed supplement; none keeps the 
     expect(host.textContent).not.toContain('场景与补充');
 });
 
-it('reading shows previous encounters, prepends without jumping to the bottom, and keeps scroll position for new replies', async () => {
+it('reading isolates the current encounter and keeps its scroll position as messages load', async () => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     const host = document.createElement('div'); document.body.append(host);
     const root = createRoot(host), loadOlder = vi.fn(async () => {});
     const makeRows = (start: number, end: number) => Array.from({length:end-start+1},(_,i)=>({
         id:start+i, charId:'c', role:'assistant', type:'text', timestamp:1, content:`历史正文 ${start+i}`,
-        metadata:{source:'date', dateEncounterId:'previous'},
+        metadata:{source:'date', dateEncounterId:'new'},
     }));
     const props = {
         char:{id:'c',name:'角色',avatar:'',dateAppearance:{preset:'novel'}},userProfile:{name:'用户'},
@@ -58,6 +58,13 @@ it('reading shows previous encounters, prepends without jumping to the bottom, a
     };
     const height = vi.spyOn(HTMLElement.prototype,'scrollHeight','get').mockImplementation(function(this:HTMLElement){return this.querySelectorAll('[data-date-message-id]').length*100;});
     const viewport = vi.spyOn(HTMLElement.prototype,'clientHeight','get').mockReturnValue(500);
+    const bounds = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function(this: HTMLElement) {
+        const page = this.closest('.meeting-reading-page') as HTMLElement | null;
+        const rows = page ? Array.from(page.querySelectorAll('[data-date-message-id]')) : [];
+        const index = rows.indexOf(this);
+        const top = index < 0 ? 0 : index * 100 - (page?.scrollTop || 0);
+        return { top, bottom: top + (index < 0 ? 500 : 100), left: 0, right: 300, width: 300, height: index < 0 ? 500 : 100, x: 0, y: top, toJSON: () => ({}) } as DOMRect;
+    });
     let beforePaint=0;
     function Reading({messages}:{messages:any[]}){
         React.useLayoutEffect(()=>{beforePaint=host.querySelector<HTMLDivElement>('.meeting-reading-page')?.scrollTop??0;});
@@ -65,11 +72,13 @@ it('reading shows previous encounters, prepends without jumping to the bottom, a
     }
     try {
         await act(async () => root.render(React.createElement(Reading,{messages:[]})));
-        await act(async () => root.render(React.createElement(Reading,{messages:makeRows(51,100)})));
+        const previous = {...makeRows(1,1)[0], id: 1000, content:'旧会面', metadata:{source:'date',dateEncounterId:'previous'}};
+        await act(async () => root.render(React.createElement(Reading,{messages:[previous,...makeRows(51,100)]})));
         expect(beforePaint).toBe(5000);
         const page = host.querySelector('.meeting-reading-page') as HTMLDivElement;
         expect(page.querySelectorAll('[data-date-message-id]')).toHaveLength(50);
         expect(page.textContent).toContain('历史正文 51');
+        expect(page.textContent).not.toContain('旧会面');
         page.scrollTop=200;
         await act(async()=>page.dispatchEvent(new Event('scroll')));
         page.scrollTop=40;
@@ -79,7 +88,5 @@ it('reading shows previous encounters, prepends without jumping to the bottom, a
         expect(page.scrollTop).toBe(5040);
         await act(async()=>root.render(React.createElement(Reading,{messages:makeRows(1,101)})));
         expect(page.scrollTop).toBe(5040);
-        // Current encounter has no reply: old history must not enable reroll.
-        expect(host.querySelector('button[title="重新生成"]')).toBeNull();
-    } finally { await act(async()=>root.unmount()); host.remove(); height.mockRestore(); viewport.mockRestore(); }
+    } finally { await act(async()=>root.unmount()); host.remove(); height.mockRestore(); viewport.mockRestore(); bounds.mockRestore(); }
 });

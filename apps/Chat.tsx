@@ -16,6 +16,8 @@ import { createPortal } from 'react-dom';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { isVisibleChatMessage } from '../utils/chatMessageVisibility';
+import { formatChatElapsed, meetingHistoryByNextChat } from '../utils/chatMeetingHistory';
+import { nowInTimeZone } from '../utils/timezone';
 import { chatCharacterDisplayName } from '../utils/characterRemark';
 import { AppID, Message, MessageType, MemoryFragment, Emoji, EmojiCategory, DailySchedule, ScheduleSlot } from '../types';
 import { processImageToBlob } from '../utils/file';
@@ -150,6 +152,17 @@ const HISTORY_WINDOW_BATCH_SIZE = 30;
 const INSTANT_VOICE_SCAN_WINDOW_MS = 30_000;
 
 export interface HomePhoneChatProps {characterId:string;getContext:()=>string;onBack:()=>void}
+function MeetingHistoryBlock({ items, title, charName, userName, timezone }: { items: Message[]; title: string; charName: string; userName: string; timezone?: string }) {
+    const [expanded, setExpanded] = useState(false);
+    return <div className="sully-chat-meeting-history sully-chat-action-description w-full px-6 py-2 text-center text-xs leading-relaxed text-slate-500 whitespace-pre-wrap">
+        <button type="button" className="sully-chat-meeting-history-title" aria-expanded={expanded} onClick={event => { event.stopPropagation(); setExpanded(value => !value); }}>{title || '我们的见面'}</button>
+        {expanded && <div className="sully-chat-meeting-history-content">{items.map(item => {
+            const date = nowInTimeZone(timezone, new Date(item.timestamp));
+            const time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+            return <div className="sully-chat-meeting-history-message mt-3" key={item.id}><div>{item.role === 'user' ? userName : charName}　{time}</div><div>{item.content}</div></div>;
+        })}</div>}
+    </div>;
+}
 const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const { activeApp, characters, activeCharacterId: osActiveCharacterId, setActiveCharacterId, addCharacter, updateCharacter, updateUserProfile, apiConfig, apiPresets, availableModels, addApiPreset, closeApp, openApp, customThemes, addCustomTheme, removeCustomTheme, addWorldbook, updateTheme, saveAppearancePreset, addToast, showError, userProfile, lastMsgTimestamp, groups, characterGroups, clearUnread, unreadMessages, realtimeConfig, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, syncEmotionApiToAllCharacters, theme: baseOsTheme, proactiveComposingChars, openDateWithChar } = useOS();
     const activeCharacterId=homePhone?.characterId??osActiveCharacterId;
@@ -165,6 +178,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         } catch { return 0; }
     }, []);
     const [messages, setMessages] = useState<Message[]>([]);
+    const [meetingHistory, setMeetingHistory] = useState<Message[]>([]);
     // 即时对话：这一轮已经交给云端、还没等到回复。它跟 isTyping 不一样——生成不在这台
     // 设备上跑，所以要扛得住关页面重开（记录落在 localStorage，见 amsgInstantChat）。
     const [instantChatPending, setInstantChatPending] = useState(false);
@@ -337,6 +351,15 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const [showingTargetIds, setShowingTargetIds] = useState<Set<number>>(new Set());
 
     const char = characters.find(c => c.id === activeCharacterId) || characters[0];
+    useEffect(() => { setMeetingHistory([]); }, [activeCharacterId]);
+    useEffect(() => {
+        let active = true;
+        if (activeCharacterId && (char?.chatShowMeetingHistory || char?.chatShowElapsedTime) && (activeApp === AppID.Chat || homePhone)) {
+            void DB.getMessagesByCharId(activeCharacterId, true).then(rows => { if (active) setMeetingHistory(rows); }).catch(() => { if (active) setMeetingHistory([]); });
+        }
+        return () => { active = false; };
+    }, [activeCharacterId, char?.chatShowMeetingHistory, char?.chatShowElapsedTime, activeApp, !!homePhone, lastMsgTimestamp, messages.length]);
+    const meetingGroups = useMemo(() => meetingHistoryByNextChat(meetingHistory, !!char?.hideSystemLogs), [meetingHistory, char?.hideSystemLogs]);
     const chatUserProfile = resolveCharacterUserProfile(userProfile, char);
     // 酒馆角色剧情年份：分组时间默认显示剧情年份，点一下整页切到现实时间（只改显示，换角色时恢复默认）
     const storyTime = useMemo(() => getActiveTavernStoryTime(char), [char?.tavernImport, char?.tavernStoryTime, char?.customTimezoneEnabled, char?.customTimezone]);
@@ -3543,6 +3566,15 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         () => messages.filter(message => isVisibleChatMessage(message, !!char?.hideSystemLogs)),
         [messages, char?.id, char?.hideSystemLogs],
     );
+    const previousOnlineById = useMemo(() => {
+        const byId = new Map(meetingHistory.map(message => [message.id, message]));
+        chatDisplayMessages.forEach(message => byId.set(message.id, message));
+        const ordered = [...byId.values()].filter(message => (message.role === 'user' || message.role === 'assistant') && isVisibleChatMessage(message, !!char?.hideSystemLogs))
+            .sort((a, b) => a.timestamp - b.timestamp || a.id - b.id);
+        const previous = new Map<number, Message>();
+        for (let i = 1; i < ordered.length; i++) previous.set(ordered[i].id, ordered[i - 1]);
+        return previous;
+    }, [meetingHistory, chatDisplayMessages, char?.hideSystemLogs]);
 
     useEffect(() => {
         if (windowedFocusMsgId !== null) historyWindowTotalRef.current = chatDisplayMessages.length;
@@ -4303,6 +4335,10 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     const nextMessage = i < renderedMessages.length - 1 ? renderedMessages[i + 1] : null;
                     const breaksWithPrevious = startsNewMessageGroup(prevMessage, m);
                     const breaksWithNext = !nextMessage || startsNewMessageGroup(m, nextMessage);
+                    const previousOnline = previousOnlineById.get(m.id);
+                    const elapsed = previousOnline && (m.role === 'user' || m.role === 'assistant') ? m.timestamp - previousOnline.timestamp : 0;
+                    const showElapsed = char.chatShowElapsedTime && elapsed >= (char.chatElapsedThresholdHours ?? 0.5) * 3600000;
+                    const meetingBefore = char.chatShowMeetingHistory ? meetingGroups.get(m.id) : undefined;
                     const suppressEntranceAnimation = streamPreviewHandoverIdsRef.current.has(m.id);
                     // 这一轮在云端跑过哪些工具（即时对话才有，worker 挂在最后一条推送上）。
                     // 一条推送拆出的每条气泡都继承了同一份（metadata 是整份往下铺的，见
@@ -4328,6 +4364,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                 if (animatingIds.has(m.id)) setAnimatingIds(prev => { const next = new Set(prev); next.delete(m.id); return next; });
                             }}
                         >
+                        {meetingBefore?.length ? <MeetingHistoryBlock items={meetingBefore} title={char.chatMeetingHistoryTitle ?? '我们的见面'} charName={char.name} userName={chatUserProfile.name || '我'} timezone={resolveCharTimeZone(char)}/> : null}
+                        {showElapsed && <div className="sully-chat-elapsed-time w-full text-center text-xs text-slate-400 pt-2 pb-1">距离上次聊天已经过去 {formatChatElapsed(elapsed)}</div>}
                         <MessageItem
                             msg={m}
                             isFirstInGroup={breaksWithPrevious}
@@ -4381,6 +4419,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                         </div>
                     );
                 })}
+                {char.chatShowMeetingHistory && windowedFocusMsgId === null && meetingGroups.get(null)?.length ? <MeetingHistoryBlock items={meetingGroups.get(null)!} title={char.chatMeetingHistoryTitle ?? '我们的见面'} charName={char.name} userName={chatUserProfile.name || '我'} timezone={resolveCharTimeZone(char)}/> : null}
                 {windowedFocusMsgId !== null && (
                     <div className="flex justify-center mt-2 mb-4 px-4">
                         {hasNewerHistoryWindow ? (

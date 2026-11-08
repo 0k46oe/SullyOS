@@ -9,7 +9,8 @@ import { SARFamiliarityRoster } from './SARFamiliarityRoster';
 import { SARExclusiveKeepsakes } from './SARExclusiveKeepsakes';
 import type { FamiliarityNpc } from '../../utils/vrWorld/sarFamiliarity/types';
 import { HalloweenCandyArt, HalloweenDialogue } from './KanataHalloween';
-import { HALLOWEEN_COSTUMES, type HalloweenNpc } from '../../utils/vrWorld/kanataHalloween';
+import { completeHalloweenCollection, HALLOWEEN_COSTUMES, type HalloweenNpc } from '../../utils/vrWorld/kanataHalloween';
+import { mutateFishingMarket } from '../../utils/vrWorld/fishingMarket';
 
 const Icons = { fish: Fish, dinosaur: PawPrint, chip: Stack, module: Cpu, halloween: BookOpen };
 const PAGE_SIZE = 12;
@@ -34,6 +35,7 @@ export function SARCollectionView({ market, owner, actors, onOwnerChange, onClos
     const keepsakeBack = useRef<(() => boolean) | null>(null);
     const [keepsakeTitle,setKeepsakeTitle]=useState<string|null>(null);
     const [category, setCategory] = useState<SARCollectionCategory | null>(null);
+    const [completionError, setCompletionError] = useState('');
     useEffect(() => { if (category === 'halloween') trackHalloweenFeature('collection'); }, [category]);
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [query, setQuery] = useState('');
@@ -97,6 +99,7 @@ export function SARCollectionView({ market, owner, actors, onOwnerChange, onClos
                 <p className="sar-hub-muted sar-collection-footnote">同一种物品只点亮一次。用掉或转让后，收录记录仍会留下。</p>
             </> : <>
                 <div className="sar-collection-category-progress"><strong>{current?.collected}<small> / {current?.total} 种已收录</small></strong>{category === 'chip' && <span>变体 {chipProgress('变体芯片')} · 故事 {chipProgress('故事芯片')}</span>}</div>
+                {category === 'halloween' && owner.id === 'user' && <><button type="button" className="sar-hub-setting-action" onClick={() => { setCompletionError(''); void mutateFishingMarket(completeHalloweenCollection).catch(error => setCompletionError(error instanceof Error ? error.message : '补齐失败')); }}>补齐糖果和装扮</button>{completionError && <p role="alert">{completionError}</p>}</>}
                 {category === 'chip' && owner.id !== 'user' && <p className="sar-hub-muted">角色短篇演绎使用的临时芯片不计入永久收集。</p>}
                 <div className="sar-collection-controls"><label><MagnifyingGlass size={16}/><input aria-label="搜索图鉴" placeholder="找一找…" value={query} onChange={event => setQuery(event.target.value)}/></label><select aria-label="图鉴收录状态" value={filter} onChange={event => setFilter(event.target.value as typeof filter)}><option value="all">全部</option><option value="collected">已收录</option><option value="missing">未收录</option></select></div>
                 {shown.length ? <div className="sar-hub-items">{shown.map(entry => <button type="button" key={entry.id} className={`sar-hub-item sar-collection-item ${entry.collected ? 'is-collected' : 'is-missing'}`} onClick={() => setSelectedId(entry.id)} aria-label={`${entry.title} · ${entry.collected ? '已收录' : '尚未收录'}`}>

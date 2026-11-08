@@ -34,6 +34,7 @@ import { useStreamingVoice } from '../../hooks/useStreamingVoice';
 import StreamingVoiceBar from '../voice/StreamingVoiceBar';
 import type { StreamedVoice } from '../../utils/elevenLabsStream';
 import { useDateReadingScroll } from '../../utils/useDateReadingScroll';
+import { nowInTimeZone, resolveCharTimeZone } from '../../utils/timezone';
 
 // 语音情绪标记 [v:xxx]：跟立绘情绪 [emotion] 分开的独立通道。立绘的 happy 是
 // 夸张的表情、语音的 happy 是音色情绪，两者强度/语义差异大，不能一概而论。
@@ -213,6 +214,8 @@ const DateSession: React.FC<DateSessionProps> = ({
     // bgImage state 里存的一直是原始字段值（令牌 / data: / 外链），只在渲染这一刻解析成能喂 CSS 的 url
     const bgImageUrl = useBlobRefUrl(bgImage);
     const [currentSprite, setCurrentSprite] = useState<string>('');
+    const [timestampMessageId, setTimestampMessageId] = useState<number | null>(null);
+    const messageLongPressed = useRef(false);
     const [currentSpriteKey, setCurrentSpriteKey] = useState<string>('');
     const [spriteConfig, setSpriteConfig] = useState(char.spriteConfig || { scale: 1, x: 0, y: 0 });
     
@@ -630,7 +633,7 @@ const DateSession: React.FC<DateSessionProps> = ({
         return { key: fallback.key, src: state.currentSprite || fallback.src };
     };
 
-    const visibleSessionMessages = historyMessages;
+    const visibleSessionMessages = messages;
 
     // Initialization
     useEffect(() => {
@@ -871,6 +874,7 @@ const DateSession: React.FC<DateSessionProps> = ({
         if (!isNovelMode) return;
         // If already in batch select mode, don't start a new long press timer
         if (isBatchSelectMode) return;
+        messageLongPressed.current = false;
         if ('touches' in e) {
             touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
         } else {
@@ -878,7 +882,8 @@ const DateSession: React.FC<DateSessionProps> = ({
         }
 
         longPressTimer.current = setTimeout(() => {
-                setSelectedMessage(msg);
+            messageLongPressed.current = true;
+            setSelectedMessage(msg);
             setModalType('options');
         }, 600);
     };
@@ -1128,9 +1133,10 @@ const DateSession: React.FC<DateSessionProps> = ({
                                     style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 240px' }}
                                     className={`group relative rounded-xl transition-colors -mx-4 px-4 py-2 ${isBatchSelectMode ? 'pl-10' : ''} ${lightReading ? 'active:bg-stone-100' : 'active:bg-white/5'}`}
                                     onClick={(e) => {
-                                        if (!isBatchSelectMode) return;
                                         e.stopPropagation();
-                                        toggleSelectedMsg(msg.id);
+                                        if (isBatchSelectMode) toggleSelectedMsg(msg.id);
+                                        else if (messageLongPressed.current) messageLongPressed.current = false;
+                                        else setTimestampMessageId(previous => previous === msg.id ? null : msg.id);
                                     }}
                                     onTouchStart={(e) => handleMsgTouchStart(e, msg)}
                                     onTouchEnd={handleMsgTouchEnd}
@@ -1255,6 +1261,9 @@ const DateSession: React.FC<DateSessionProps> = ({
                                                 })} />
                                         </div>
                                     )}
+                                    <div className={`meeting-message-timestamp text-[10px] mt-1 px-4 ${msg.role === 'user' ? 'text-right' : 'text-left'} ${lightReading ? 'text-stone-400' : 'text-slate-400'} ${timestampMessageId === msg.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity`}>
+                                        {(() => { const date = nowInTimeZone(resolveCharTimeZone(char), new Date(msg.timestamp)); return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`; })()}
+                                    </div>
                                 </div>
                             ))}
                         </div>
@@ -1265,8 +1274,8 @@ const DateSession: React.FC<DateSessionProps> = ({
             {/* Visual Mode View */}
             {!isNovelMode && (
                 <>
-                    <div className="absolute inset-x-0 bottom-0 h-[90%] flex items-end justify-center pointer-events-none z-10 overflow-hidden">
-                        {currentSprite && <TokenImg value={currentSprite} className="max-h-full max-w-full object-contain drop-shadow-[0_10px_20px_rgba(0,0,0,0.5)] transition-all duration-300 origin-bottom" style={{ filter: showInputBox ? 'brightness(1)' : (isTextAnimating ? 'brightness(1.05)' : 'brightness(1)'), transform: `translate(${spriteConfig.x}%, ${spriteConfig.y}%) scale(${isTextAnimating ? spriteConfig.scale * 1.02 : spriteConfig.scale})` }} />}
+                    <div className={`absolute inset-x-0 bottom-0 ${!currentSpriteKey && currentSprite === char.avatar ? 'h-full' : 'h-[90%]'} flex items-end justify-center pointer-events-none z-10 overflow-hidden`}>
+                        {currentSprite && <TokenImg value={currentSprite} className={`${!currentSpriteKey && currentSprite === char.avatar ? 'h-full w-full object-cover' : 'max-h-full max-w-full object-contain'} drop-shadow-[0_10px_20px_rgba(0,0,0,0.5)] transition-all duration-300 origin-bottom`} style={{ filter: showInputBox ? 'brightness(1)' : (isTextAnimating ? 'brightness(1.05)' : 'brightness(1)'), transform: `translate(${spriteConfig.x}%, ${spriteConfig.y}%) scale(${isTextAnimating ? spriteConfig.scale * 1.02 : spriteConfig.scale})` }} />}
                     </div>
                     {!isTyping && (
                         <div className="absolute inset-x-0 bottom-8 z-30 flex justify-center">

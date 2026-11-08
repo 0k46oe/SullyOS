@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assignHalloweenCostume, continueHalloweenCatchUp, endHalloweenCatchUp, finishHalloweenDialogue, giveHalloweenCandy, halloweenActive, HALLOWEEN_COSTUMES, shouldOfferHalloweenCatchUpEnd, startHalloweenCatchUp, validateHalloween } from './kanataHalloween';
+import { assignHalloweenCostume, completeHalloweenCollection, continueHalloweenCatchUp, endHalloweenCatchUp, finishHalloweenDialogue, giveHalloweenCandy, halloweenActive, HALLOWEEN_CANDIES, HALLOWEEN_COSTUMES, shouldOfferHalloweenCatchUpEnd, startHalloweenCatchUp, validateHalloween } from './kanataHalloween';
 import { isKanataHalloween } from './halloweenCalendar';
 import { addCatchToState, buyListing, createFishingMarketState, createListing, ensureActorAccounts, marketCatchSnapshot, mutateFishingMarket, readFishingMarketState, rollFishingCatch, saveFishingMarketState } from './fishingMarket';
 import { collectSARLocalBackup, restoreSARLocalBackup } from './sarBackup';
@@ -11,6 +11,16 @@ const at = new Date(2026, 9, 29, 12).getTime();
 const init = () => createFishingMarketState(42);
 const storage = () => { const map = new Map<string,string>(); return { getItem: (k:string) => map.get(k) ?? null, setItem: (k:string,v:string) => {map.set(k,v);}, removeItem: (k:string) => {map.delete(k);} }; };
 describe('Kanata Halloween', () => {
+    it('fills only missing candy and costumes while preserving existing quantities and dialogue records', () => {
+        let state = finishHalloweenDialogue(init(), 'caian', '我', false, at, () => 0);
+        state = giveHalloweenCandy(state, at, () => 0).state;
+        const next = completeHalloweenCollection(state);
+        expect(next.kanataHalloween!.candies['pumpkin-caramel']).toBe(2);
+        expect(Object.keys(next.kanataHalloween!.candies)).toHaveLength(HALLOWEEN_CANDIES.length);
+        expect(next.kanataHalloween!.collectedCostumes).toHaveLength(HALLOWEEN_COSTUMES.length);
+        expect(next.kanataHalloween!.completed).toEqual(['caian']);
+        expect(next.inventory).toEqual(state.inventory);
+    });
     it('opens only on the three local calendar dates', () => {
         expect(['2026-10-28','2026-10-29','2026-10-30','2026-10-31','2026-11-01','2027-10-31'].map(isKanataHalloween)).toEqual([false,true,true,true,false,false]);
     });

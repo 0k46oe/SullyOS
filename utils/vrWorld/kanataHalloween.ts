@@ -24,6 +24,13 @@ export interface KanataHalloweenState {
     catchUp?: 'active' | 'collecting' | 'ended';
 }
 export const freshHalloween = (): KanataHalloweenState => ({ version: 1, disabled: false, costumes: {}, collectedCostumes: [], candies: {}, completed: [] });
+export function completeHalloweenCollection(state: FishingMarketState): FishingMarketState {
+    const event = state.kanataHalloween || freshHalloween();
+    return { ...state, kanataHalloween: { ...event,
+        candies: Object.fromEntries(HALLOWEEN_CANDIES.map(candy => [candy.id, Math.max(1, event.candies[candy.id] || 0)])),
+        collectedCostumes: [...new Set([...event.collectedCostumes, ...HALLOWEEN_COSTUMES.map(costume => costume.id)])],
+    } };
+}
 export function validateHalloween(value: KanataHalloweenState) {
     const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
     if (!value || value.version !== 1 || typeof value.disabled !== 'boolean' || !record(value.costumes) || !record(value.candies)

@@ -3045,6 +3045,10 @@ export interface CharacterProfile {
    */
   contextUserStartMessageId?: number;
   hideSystemLogs?: boolean; 
+  chatShowMeetingHistory?: boolean;
+  chatMeetingHistoryTitle?: string;
+  chatShowElapsedTime?: boolean;
+  chatElapsedThresholdHours?: number;
   /** 旧版归档内部隐藏线；新版 AI 原文范围不再拿它当用户断点。 */
   hideBeforeMessageId?: number; 
   
