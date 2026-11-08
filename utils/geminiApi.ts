@@ -216,7 +216,10 @@ export async function fetchGemini(resource: RequestInfo | URL, init: RequestInit
             if (!response.ok) return response;
             const data = await response.json();
             if (!Array.isArray(data.models)) throw Error('Gemini 返回了无效模型列表');
-            models.push(...data.models.filter((m: any) => m.supportedGenerationMethods?.includes('generateContent')).map((m: any) => ({ ...m, id: String(m.name).replace(/^models\//, '') })));
+            models.push(...data.models.filter((m: any) =>
+                typeof m?.name === 'string' && m.name.trim() &&
+                (m.supportedGenerationMethods == null || (Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent')))
+            ).map((m: any) => ({ ...m, id: m.name.trim().replace(/^models\//, '') })).filter((m: any) => m.id));
             if (!data.nextPageToken) break;
             if (pages.has(data.nextPageToken)) throw Error('Gemini 模型列表分页重复');
             pages.add(data.nextPageToken); url.searchParams.set('pageToken', data.nextPageToken);

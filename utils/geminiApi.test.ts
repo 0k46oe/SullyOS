@@ -87,6 +87,19 @@ describe('Gemini native transport', () => {
         const response = await fetchLlm(`${base}/models`, { headers: { Authorization: 'Bearer key' } }, network);
         expect((await response.json()).data.map((m: any) => m.id)).toEqual(['gemini-a', 'gemini-b']); expect(network.mock.calls[1][0]).toBe(`${base}?pageToken=next`);
     });
+    it('accepts proxy models with missing capability metadata while excluding known non-generative models', async () => {
+        const network = vi.fn(async () => Response.json({ models: [
+            { name: 'gemini-4-argon', supportedGenerationMethods: null },
+            { name: 'models/gemini-3.1-flash-lite' },
+            { name: 'models/embed', supportedGenerationMethods: ['embedContent'] },
+            { name: 'models/empty', supportedGenerationMethods: [] },
+            { name: 'models/invalid', supportedGenerationMethods: 'generateContent' },
+            { name: null, supportedGenerationMethods: null },
+            { name: 'models/' },
+        ] }));
+        const response = await fetchLlm(`${base}/models`, { headers: { Authorization: 'Bearer key' } }, network);
+        expect((await response.json()).data.map((m: any) => m.id)).toEqual(['gemini-4-argon', 'gemini-3.1-flash-lite']);
+    });
     it('keeps signatures through the real amsg SDK tool continuation', async () => {
         const signed = [{ text: '检查', thought: true, thoughtSignature: 'sig' }, { functionCall: { name: 'lookup', args: { q: '城市' } }, thoughtSignature: 'tool-sig' }];
         const network = vi.fn(async (..._args: any[]) => Response.json(network.mock.calls.length === 1 ? result(signed) : result())); globalThis.fetch = network; installAnthropicFetch(false);

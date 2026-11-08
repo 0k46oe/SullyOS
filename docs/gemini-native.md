@@ -9,7 +9,7 @@
 - `utils/llmEndpoint.ts` 将配置规范为 `/v1beta/models`（或用户指定的 `/v1/models`）。这个地址同时表达后台加密三字段凭据的协议，无需新增凭据字段。
 - `utils/anthropicApi.ts` 的共享 `fetchLlm` 将 Gemini 请求交给 `utils/geminiApi.ts`，覆盖 safeApi、OSContext、连接测试、模型列表和 Worker SDK 内部出口。按请求选择协议，不注册全局凭据。
 - 发送 `POST /models/<model>:generateContent`，流式使用 `:streamGenerateContent?alt=sse`。Key 放入 `x-goog-api-key`，不放进 URL。不会发送 OAI 的 prompt_cache_key、stream_options 或 Anthropic cache_control。
-- 模型列表按 nextPageToken 拉取，返回支持 generateContent 的模型。模型 ID 可以带 models/ 前缀，发送时去掉一层。
+- 模型列表按 nextPageToken 拉取；明确提供能力列表时只保留支持 generateContent 的模型，中转未提供能力列表时保留有名称的模型（具体能否生成由中转决定）。模型 ID 可以带 models/ 前缀，发送时去掉一层。
 - 开头连续的 system/developer 按原文、原顺序放入首条 user Content 的 parts，不添加或改写稳定提示词；历史中途和尾部动态提醒保持原位置，以 system-reminder 上下文块表达。当前未能从可访问的官方资料确认 systemInstruction 的隐式缓存语义，因此不使用该字段，也不据此保证命中率。此映射让稳定设定处于 user 内容中，而非独立 systemInstruction。
 - 支持文本、base64 图片及带 MIME 类型的 Gemini 可用文件 URI、函数工具、工具结果、JSON 输出意图和 JSON schema。文件 URI 是否可读取由上游决定；不在客户端下载外部图片。未知内容块明确报错。
 - 将原生响应 parts 保存在 gemini_content，工具续答原样带回 thoughtSignature 与内容顺序。签名不伪造、不丢弃；本地工具循环与真实 amsg SDK 使用同一转换器。
