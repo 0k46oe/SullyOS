@@ -20,7 +20,7 @@ import { CANTONESE_VOICE_SUPPORT_NOTE, VOICE_LANGUAGE_OPTIONS } from '../../util
 import { chatMessageFuzzyMatchesKeyword } from '../../utils/chatMessageSearch';
 import { useBlobRefUrl } from '../../utils/blobRef';
 import { generateAndSaveChatImage } from '../../utils/chatImageTask';
-import { listGeneratedChatImages, removeGeneratedChatImage, type GeneratedChatImage } from '../../utils/chatImageLibrary';
+import { cleanupGeneratedChatImageBlobs, listGeneratedChatImages, removeGeneratedChatImages, type GeneratedChatImage } from '../../utils/chatImageLibrary';
 import { DB } from '../../utils/db';
 
 const GeneratedImagePreview: React.FC<{ imageRef: string; compact?: boolean }> = ({ imageRef, compact }) => {
@@ -307,6 +307,8 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     const [hasMoreImages, setHasMoreImages] = useState(false);
     const [imageLibraryBusy, setImageLibraryBusy] = useState(false);
     const [imageLibraryStatus, setImageLibraryStatus] = useState('');
+    const [selectingImages, setSelectingImages] = useState(false);
+    const [selectedImageIds, setSelectedImageIds] = useState<Set<string>>(new Set());
     const loadSavedImages = async (limit = 8) => {
         try {
             const rows = await listGeneratedChatImages(undefined, limit + 1);
@@ -323,14 +325,25 @@ const ChatModals: React.FC<ChatModalsProps> = ({
         } catch { setImageLibraryStatus('生图记录读取失败，请重试'); }
         finally { setImageLibraryBusy(false); }
     };
-    const deleteSavedImage = async () => {
-        const image = selectedSavedImage;
-        if (!image || imageLibraryBusy || !window.confirm('删除这条本机生图记录？聊天中已发送的图片不受影响。')) return;
+    const selectAllImages = async () => {
+        if (imageLibraryBusy) return;
         setImageLibraryBusy(true); setImageLibraryStatus('');
         try {
-            await removeGeneratedChatImage(image);
-            setSelectedSavedImage(current => current?.id === image.id ? null : current);
-            setSavedImages(current => current.filter(item => item.id !== image.id));
+            const all = await listGeneratedChatImages(undefined, Number.MAX_SAFE_INTEGER);
+            setSelectedImageIds(new Set(all.map(image => image.id)));
+        } catch { setImageLibraryStatus('生图记录读取失败，请重试'); }
+        finally { setImageLibraryBusy(false); }
+    };
+    const deleteSavedImages = async (ids: string[]) => {
+        if (!ids.length || imageLibraryBusy || !window.confirm(`删除选中的 ${ids.length} 条本机生图记录？聊天中已发送的图片不受影响。`)) return;
+        setImageLibraryBusy(true); setImageLibraryStatus('');
+        try {
+            const removed = await removeGeneratedChatImages(ids);
+            const deleted = new Set(removed.map(image => image.id));
+            setSelectedSavedImage(current => current && deleted.has(current.id) ? null : current);
+            setSavedImages(current => current.filter(item => !deleted.has(item.id)));
+            setSelectedImageIds(new Set()); setSelectingImages(false);
+            void cleanupGeneratedChatImageBlobs(removed).catch(() => {});
             await loadSavedImages(Math.max(8, savedImages.length));
         } catch { setImageLibraryStatus('删除失败，请重试'); }
         finally { setImageLibraryBusy(false); }
@@ -409,8 +422,10 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                             <button type="button" onClick={generateImage} disabled={imageBusy || !imageRequirement.trim()} className="w-full rounded-2xl bg-[#8a917c] p-4 text-sm font-bold text-white disabled:opacity-40">{imageBusy ? imageStatus || '生成中…' : '生成并保存'}</button>
                             {imageStatus && <p role="status" className="break-words text-sm leading-relaxed text-[#8f8475]">{imageStatus}</p>}
                         </section>
-                        {selectedSavedImage && <section className="rounded-3xl border border-[#e5dece] bg-[#fffcf7] p-4 shadow-sm"><GeneratedImagePreview imageRef={selectedSavedImage.imageRef} /><div className="mt-4 grid grid-cols-2 gap-3"><button type="button" onClick={() => onSendGeneratedImage?.(selectedSavedImage.imageRef)} className="rounded-2xl border border-[#b9b09f] p-3 text-sm font-bold">发送到聊天</button><button type="button" onClick={() => setSelectedSavedImage(null)} className="rounded-2xl border border-[#e5dece] p-3 text-sm">继续生成</button><button type="button" disabled={imageLibraryBusy} onClick={() => void deleteSavedImage()} className="col-span-2 rounded-2xl border border-rose-200 p-3 text-sm text-rose-600 disabled:opacity-40">删除生图记录</button></div></section>}
-                        <section><div className="mb-3 flex items-center justify-between"><h3 className="text-base font-bold">最近生图</h3><button type="button" disabled={imageLibraryBusy} onClick={() => void loadSavedImages()} className="text-sm font-bold text-[#8a917c]">刷新</button></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{savedImages.map(image => <button type="button" key={image.id} onClick={() => setSelectedSavedImage(image)} className="overflow-hidden rounded-2xl border border-[#e5dece] bg-[#fffcf7] shadow-sm"><GeneratedImagePreview imageRef={image.thumbnailRef || image.imageRef} compact /></button>)}</div>{hasMoreImages && <button type="button" disabled={imageLibraryBusy} onClick={() => void loadMoreImages()} className="mt-3 w-full rounded-2xl border border-[#e5dece] p-3 text-sm disabled:opacity-40">查看更多</button>}{imageLibraryStatus && <p role="status" className="mt-2 text-sm text-rose-600">{imageLibraryStatus}</p>}</section>
+                        {selectedSavedImage && !selectingImages && <section className="rounded-3xl border border-[#e5dece] bg-[#fffcf7] p-4 shadow-sm"><GeneratedImagePreview imageRef={selectedSavedImage.imageRef} /><div className="mt-4 grid grid-cols-2 gap-3"><button type="button" onClick={() => onSendGeneratedImage?.(selectedSavedImage.imageRef)} className="rounded-2xl border border-[#b9b09f] p-3 text-sm font-bold">发送到聊天</button><button type="button" onClick={() => setSelectedSavedImage(null)} className="rounded-2xl border border-[#e5dece] p-3 text-sm">继续生成</button><button type="button" disabled={imageLibraryBusy} onClick={() => void deleteSavedImages([selectedSavedImage.id])} className="col-span-2 rounded-2xl border border-rose-200 p-3 text-sm text-rose-600 disabled:opacity-40">删除生图记录</button></div></section>}
+                        <section><div className="mb-3 flex items-center justify-between gap-3"><h3 className="text-base font-bold">最近生图</h3><div className="flex items-center gap-3"><button type="button" disabled={imageLibraryBusy} onClick={() => { setSelectingImages(!selectingImages); setSelectedImageIds(new Set()); }} className="text-sm font-bold text-[#8a917c]">{selectingImages ? '取消' : '多选'}</button><button type="button" disabled={imageLibraryBusy} onClick={() => void loadSavedImages()} className="text-sm font-bold text-[#8a917c]">刷新</button></div></div>
+                            {selectingImages && <div className="mb-3 flex items-center justify-between gap-3"><button type="button" disabled={imageLibraryBusy} onClick={() => void selectAllImages()} className="text-sm text-[#8a917c]">全选所有生图</button><button type="button" disabled={imageLibraryBusy || !selectedImageIds.size} onClick={() => void deleteSavedImages([...selectedImageIds])} className="text-sm text-rose-600 disabled:opacity-40">删除所选（{selectedImageIds.size}）</button></div>}
+                            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{savedImages.map(image => selectingImages ? <label key={image.id} className="relative overflow-hidden rounded-2xl border border-[#e5dece] bg-[#fffcf7] shadow-sm"><GeneratedImagePreview imageRef={image.thumbnailRef || image.imageRef} compact /><input type="checkbox" aria-label="选择生图" checked={selectedImageIds.has(image.id)} disabled={imageLibraryBusy} onChange={e => { const checked = e.target.checked; setSelectedImageIds(current => { const next = new Set(current); if (checked) next.add(image.id); else next.delete(image.id); return next; }); }} className="absolute right-2 top-2 h-5 w-5 accent-[#8a917c]" /></label> : <button type="button" key={image.id} onClick={() => setSelectedSavedImage(image)} className="overflow-hidden rounded-2xl border border-[#e5dece] bg-[#fffcf7] shadow-sm"><GeneratedImagePreview imageRef={image.thumbnailRef || image.imageRef} compact /></button>)}</div>{hasMoreImages && <button type="button" disabled={imageLibraryBusy} onClick={() => void loadMoreImages()} className="mt-3 w-full rounded-2xl border border-[#e5dece] p-3 text-sm disabled:opacity-40">查看更多</button>}{imageLibraryStatus && <p role="status" className="mt-2 text-sm text-rose-600">{imageLibraryStatus}</p>}</section>
                     </div>
                 </main>
             </div>}

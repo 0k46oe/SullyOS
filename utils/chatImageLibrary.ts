@@ -47,6 +47,29 @@ export async function removeGeneratedChatImage(record: GeneratedChatImage): Prom
     await deleteBlobRefIfUnreferenced(record.imageRef);
     await deleteBlobRefIfUnreferenced(record.thumbnailRef);
 }
+export async function removeGeneratedChatImages(ids: string[]): Promise<GeneratedChatImage[]> {
+    const keys = Array.from(new Set(ids)).filter(id => id.startsWith(PREFIX));
+    if (!keys.length) return [];
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const removed: GeneratedChatImage[] = [];
+        const tx = db.transaction('assets', 'readwrite');
+        const store = tx.objectStore('assets');
+        for (const id of keys) {
+            const request = store.get(id);
+            request.onsuccess = () => {
+                if (request.result?.data) { removed.push(request.result.data); store.delete(id); }
+            };
+        }
+        tx.oncomplete = () => resolve(removed);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error || new Error('生图记录删除失败'));
+    });
+}
+export async function cleanupGeneratedChatImageBlobs(records: GeneratedChatImage[]): Promise<void> {
+    const refs = new Set(records.flatMap(record => [record.imageRef, record.thumbnailRef]).filter((ref): ref is string => !!ref));
+    for (const ref of refs) await deleteBlobRefIfUnreferenced(ref);
+}
 /** A persisted claim prevents inbox replay from issuing the same paid request twice. */
 export async function claimAutomaticImage(key: string): Promise<boolean> {
     const db = await openDB();
