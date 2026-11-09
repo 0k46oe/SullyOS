@@ -38,6 +38,7 @@ import { isPromptBuildSkipped, isSystemMessageMergeEnabled } from './devDebug';
 import { mergeSystemMessages } from './systemMessageMerge';
 import { cleanApiMessages, flattenImageContentParts } from './promptMessageCleanup';
 import { describeRecentStickers, materializeVisionDescriptions } from './visionApi';
+import { listGeneratedChatImages } from './chatImageLibrary';
 import type { RecallEntryPoint, RecallTrace } from './memoryPalace/trace';
 import { isChatConversationEntry } from './memoryPalace/trace';
 import { loadCollaborationFileCabinetBlock } from '../features/collaboration/chatLibrary';
@@ -261,7 +262,17 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
     const contextHighWaterMark = input.contextHighWaterMark ?? getMemoryPalaceHighWaterMarkForContext(char.id);
     // 酒馆角色剧情年份只在线上聊天生效；主动消息、家园、彼方等入口保持现实时间
     const tavernStoryTime = input.recallEntryPoint === 'chat_app';
-    const selectedHistory = selectCharacterContextMessages(historyMsgs, char, contextHighWaterMark);
+    let selectedHistory = selectCharacterContextMessages(historyMsgs, char, contextHighWaterMark);
+    if (char.generatedImageContextMode === 'prompt' && selectedHistory.some(message => message.role === 'assistant' && message.metadata?.generatedImage && !message.metadata?.generatedImagePrompt)) {
+        try {
+            const records = await listGeneratedChatImages(undefined, Number.MAX_SAFE_INTEGER);
+            selectedHistory = selectedHistory.map(message => {
+                if (message.role !== 'assistant' || !message.metadata?.generatedImage || message.metadata.generatedImagePrompt) return message;
+                const matches = records.filter(record => record.characterId === char.id && record.imageRef === message.content && record.prompt?.trim());
+                return matches.length === 1 ? { ...message, metadata: { ...message.metadata, generatedImagePrompt: matches[0].prompt } } : message;
+            });
+        } catch { /* Old images without a retained record use an explicit placeholder. */ }
+    }
     const visibleIds = new Set(selectedHistory.map(message => message.id));
     const rawRecentMsgsHint = input.recentMsgsHint && !isChatConversationEntry(input.recallEntryPoint)
         ? input.recentMsgsHint.filter(message => visibleIds.has(message.id))
@@ -277,7 +288,7 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
         for (const message of rawRecentMsgsHint) uniqueMessages.set(message.id, message);
         for (const message of selectedHistory) uniqueMessages.set(message.id, message);
         const prepared = await prepare('vision',()=>materializeVisionDescriptions(
-            [...uniqueMessages.values()],
+            [...uniqueMessages.values()].filter(message => !(message.role === 'assistant' && message.metadata?.generatedImage && char.generatedImageContextMode)),
             input.visionApiConfig,
         ));
         const preparedById = new Map(prepared.map(message => [message.id, message]));

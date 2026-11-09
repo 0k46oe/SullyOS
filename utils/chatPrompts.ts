@@ -1220,7 +1220,12 @@ ${voiceActingGuide()}`;
                 }
                 
                 if (m.type === 'image') {
+                     if (m.role === 'assistant' && m.metadata?.generatedImage && char.generatedImageContextMode === 'prompt') {
+                         const prompt = typeof m.metadata.generatedImagePrompt === 'string' ? m.metadata.generatedImagePrompt : '';
+                         return { role: m.role, content: `${timeStr} ${prompt.trim() ? `[生成图片的画面描述：${prompt}]` : '[生成的图片，原始画面描述不可用]'}`.trimStart() };
+                     }
                      const visionDescription = options?.useVisionDescriptions
+                         && !(m.role === 'assistant' && m.metadata?.generatedImage && char.generatedImageContextMode === 'image')
                          && typeof m.metadata?.visionDescription === 'string'
                          ? m.metadata.visionDescription.trim()
                          : '';

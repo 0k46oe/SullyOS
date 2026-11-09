@@ -6,6 +6,8 @@ import { RealtimeContextManager } from './realtimeContext';
 import { installSARModuleOnCharacter, installSARModuleOnUser } from './vrWorld/sarModuleRuntime';
 import { SAR_MODULE_CATALOG } from './vrWorld/sarModuleShop';
 import { ChatPrompts } from './chatPrompts';
+import * as imageLibrary from './chatImageLibrary';
+import * as visionApi from './visionApi';
 
 // 即时对话（这一轮交给用户自己的 amsg worker 生成）那份 prompt 里，凡是 worker 到点
 // 会自己补一遍的时效段，前端就不再烤进去：当前时间块、【真实世界感知系统】（节日 /
@@ -36,6 +38,23 @@ const baseInput = (): BuildChatPayloadInput => ({
 
 const joinMessages = (messages: Array<{ content: any }>): string =>
     messages.map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
+
+it('recovers old generated image descriptions and skips independent vision for explicit modes', async () => {
+    const input = baseInput();
+    input.historyMsgs = [{ id: 8, charId: input.char.id, role: 'assistant', type: 'image', content: 'blobref:generated', timestamp: Date.now(), metadata: { generatedImage: true } }] as any;
+    input.visionApiConfig = { enabled: true, baseUrl: 'https://example.com', apiKey: 'key', model: 'vision' };
+    vi.spyOn(imageLibrary, 'listGeneratedChatImages').mockResolvedValue([{ characterId: input.char.id, imageRef: 'blobref:generated', prompt: '旧的中文画面' }] as any);
+    const vision = vi.spyOn(visionApi, 'materializeVisionDescriptions').mockImplementation(async messages => messages);
+    input.char = { ...input.char, generatedImageContextMode: 'prompt' };
+    const described = await buildChatRequestPayload(input);
+    expect(joinMessages(described.cleanedApiMessages)).toContain('旧的中文画面');
+    expect(joinMessages(described.cleanedApiMessages)).not.toContain('image_url');
+    expect(vision).toHaveBeenCalledWith([], input.visionApiConfig);
+    input.char = { ...input.char, generatedImageContextMode: 'image' };
+    const actualImage = await buildChatRequestPayload(input);
+    expect(joinMessages(actualImage.cleanedApiMessages)).toContain('image_url');
+    expect(vision).toHaveBeenLastCalledWith([], input.visionApiConfig);
+});
 
 it.each([false,true])('adds home phone background only to this request (worker=%s) and retains normal chat history', async timelyByWorker => {
     const input={...baseInput(),timelyByWorker};

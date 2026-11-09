@@ -2987,6 +2987,7 @@ export interface CharacterProfile {
   characterUserProfile?: { enabled: boolean; name: string; bio: string };
   chatActionDescriptionEnabled?: boolean;
   chatImageGenerationEnabled?: boolean;
+  generatedImageContextMode?: 'image' | 'prompt';
   imageGenerationSelection?: { provider: ImageGenerationProvider; presetId?: string };
   imageTextApiPresetId?: string;
   tavernImport?: {

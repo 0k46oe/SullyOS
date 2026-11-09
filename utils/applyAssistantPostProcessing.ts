@@ -2453,7 +2453,7 @@ export async function applyAssistantPostProcessing(
                 prompt: pendingImage!,
                 imageRef: content,
             }));
-            await replyStep(() => persistMessage({ charId: char.id, role: 'assistant', type: 'image', content, metadata: { generatedImage: true } }));
+            await replyStep(() => persistMessage({ charId: char.id, role: 'assistant', type: 'image', content, metadata: { generatedImage: true, generatedImagePrompt: pendingImage! } }));
             setMessages(await replyStep(() => DB.getRecentMessagesByCharId(char.id, 200)));
         } catch (error) {
             ctx.replyRun?.check();

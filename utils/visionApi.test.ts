@@ -28,6 +28,19 @@ afterEach(() => {
 });
 
 describe('independent vision API', () => {
+  it('uses the original generated scene or the actual image according to the character setting', () => {
+    const generated: Message = { ...message(10), role: 'assistant', metadata: { generatedImage: true, generatedImagePrompt: '窗前的白衬衫', visionDescription: '识图模型的旧描述' } };
+    const build = (mode: 'image' | 'prompt', item = generated) => ChatPrompts.buildMessageHistory(
+      [item], 10, { id: 'char-1', name: 'Sully', generatedImageContextMode: mode } as CharacterProfile,
+      { name: 'User' } as UserProfile, [], undefined, { useVisionDescriptions: true },
+    ).apiMessages[0].content;
+    expect(build('prompt')).toContain('窗前的白衬衫');
+    expect(JSON.stringify(build('prompt'))).not.toContain('image_url');
+    expect(JSON.stringify(build('image'))).toContain('image_url');
+    expect(JSON.stringify(build('image'))).not.toContain('识图模型的旧描述');
+    expect(build('prompt', { ...generated, metadata: { generatedImage: true } })).toContain('原始画面描述不可用');
+    expect(build('prompt', { ...message(11), metadata: { visionDescription: '用户图片' } })).toContain('用户图片');
+  });
   it('can load a generic model preset into vision without carrying unrelated main-model options', () => {
     expect(visionApiConfigFromPreset({
       id: 'preset-1',

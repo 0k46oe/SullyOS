@@ -483,6 +483,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                     </ChatSettingsSection>
                     <ChatSettingsSection title="角色自动发图" summary={activeCharacter?.chatImageGenerationEnabled ? "已开启" : "默认关闭"}>
                         <label className="flex justify-between gap-3 text-xs font-bold text-slate-700">允许角色主动生成图片<input type="checkbox" role="switch" checked={activeCharacter?.chatImageGenerationEnabled === true} onChange={e => { if (activeCharacter) updateCharacter(activeCharacter.id, { chatImageGenerationEnabled: e.target.checked }); }} /></label>
+                        <label className="mt-3 block text-xs font-bold text-slate-700">角色生成图片的上下文<select aria-label="角色生成图片的上下文" className="mt-2 block w-full rounded-xl border border-slate-200 bg-white p-2 text-sm" value={activeCharacter?.generatedImageContextMode || ''} onChange={e => { if (activeCharacter) updateCharacter(activeCharacter.id, { generatedImageContextMode: e.target.value === 'image' ? 'image' : e.target.value === 'prompt' ? 'prompt' : undefined }); }}><option value="">沿用当前识图设置</option><option value="image">角色自己看原图</option><option value="prompt">只看原始画面描述</option></select></label>
                         <p className="mt-2 text-xs text-slate-500">仅对当前角色生效，切换立即保存。关闭时仍可从加号手动生图。接口与提示词版本在神经链接选择。</p>
                     </ChatSettingsSection>
                     <ChatSettingsSection title="消息显示" summary="系统日志显示设置">
