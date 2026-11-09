@@ -5,6 +5,8 @@ import { DEFAULT_IMAGE_CAPABILITY, DEFAULT_IMAGE_INSTRUCTION } from '../../utils
 import { normalizeApiBaseUrl, normalizeApiCredential } from '../../utils/apiConfigNormalize';
 import { extractModelIds } from '../../utils/modelList';
 import { safeResponseJson } from '../../utils/safeApi';
+import Modal from '../os/Modal';
+import ModelPicker from './ModelPicker';
 import {
     DEFAULT_NAI_MODEL, DEFAULT_OAI_MODEL, NAI_DEFAULTS, NAI_MAX_SEED, NAI_MODEL_OPTIONS, NAI_SAMPLER_OPTIONS, NAI_SIZE_PRESETS, NAI_UC_PRESET_OPTIONS,
     OAI_MODEL_SUGGESTIONS, OAI_RETIRED_MODELS, isNaiV4, naiCostWarning, naiNoiseSchedule, naiNoiseScheduleOptions, naiParamError,
@@ -125,6 +127,8 @@ export default function ImageGenerationSettings({ value, onChange }: { value: Im
     const [models, setModels] = useState<string[]>([]);
     const [loadingModels, setLoadingModels] = useState(false);
     const [modelStatus, setModelStatus] = useState('');
+    const [showModelPicker, setShowModelPicker] = useState(false);
+    const [pickerModel, setPickerModel] = useState('');
     const api: ImageGenerationApi = value[provider] || { baseUrl: provider === 'oai' ? 'https://api.openai.com/v1' : 'https://image.novelai.net', apiKey: '', model: provider === 'oai' ? DEFAULT_OAI_MODEL : DEFAULT_NAI_MODEL };
     const set = (patch: Partial<ImageGenerationApi>) => onChange({ ...value, [provider]: { ...api, ...patch } });
     const presets = value.presets?.[provider] || [];
@@ -139,6 +143,7 @@ export default function ImageGenerationSettings({ value, onChange }: { value: Im
             const result = extractModelIds(await safeResponseJson(response));
             setModels(result);
             setModelStatus(result.length ? `获取到 ${result.length} 个模型` : '模型列表为空或格式不兼容');
+            if (result.length) { setPickerModel(api.model); setShowModelPicker(true); }
         } catch (error) { setModelStatus('拉取模型失败：' + (error instanceof Error ? error.message : '网络错误')); }
         finally { setLoadingModels(false); }
     };
@@ -156,6 +161,10 @@ export default function ImageGenerationSettings({ value, onChange }: { value: Im
             <span className={hint}>可以从列表里选，也可以手填中转服务商给的模型名。</span>
             {provider === 'oai' && modelStatus && <span role="status" className={hint}>{modelStatus}</span>}
         </label>
+        {provider === 'oai' && models.length > 0 && <button type="button" className="text-xs text-primary" onClick={() => { setPickerModel(api.model); setShowModelPicker(true); }}>选择已拉取的模型</button>}
+        <Modal isOpen={provider === 'oai' && showModelPicker} title="选择 OAI 生图模型" onClose={() => setShowModelPicker(false)}>
+            <ModelPicker availableModels={models} localModel={pickerModel} setLocalModel={setPickerModel} confirmModelPicker={model => { set({ model }); setShowModelPicker(false); }} />
+        </Modal>
         <div className="space-y-3 rounded-xl bg-slate-50 p-3">
             <h4 className="text-xs font-bold">{provider === 'oai' ? 'OAI 生图参数' : 'NovelAI 生图参数'}</h4>
             {provider === 'oai' ? <OaiParams api={api} set={set} /> : <NaiParams api={api} set={set} />}
