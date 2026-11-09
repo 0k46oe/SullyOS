@@ -17,7 +17,8 @@ export function resolveImageSelection(config: ImageGenerationConfig, char: Chara
 export function imageInstruction(config: ImageGenerationConfig, char: CharacterProfile): string {
     const selection = resolveImageSelection(config, char);
     if (!selection || selection.missingPreset) throw new Error('请在神经链接重新选择生图提示词版本');
-    return selection.preset?.content.trim() || DEFAULT_IMAGE_INSTRUCTION;
+    if (selection.provider === 'oai') return '根据当前角色与情境，用中文写出具体、清晰的画面描述，包含人物、动作和场景。不要拼接、翻译或改写风格预设。';
+    return selection.preset?.content?.trim() || DEFAULT_IMAGE_INSTRUCTION;
 }
 export function resolveImageTextApi(config: ImageGenerationConfig, char: CharacterProfile, presets: ApiPreset[]) {
     const id = char.imageTextApiPresetId || config.textApiPresetId;

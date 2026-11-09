@@ -2,6 +2,9 @@ import React, { useState } from 'react';
 import { useOS } from '../../context/OSContext';
 import type { ImageGenerationApi, ImageGenerationConfig, ImageGenerationProvider, ImagePromptPreset } from '../../types';
 import { DEFAULT_IMAGE_CAPABILITY, DEFAULT_IMAGE_INSTRUCTION } from '../../utils/chatImageConfig';
+import { normalizeApiBaseUrl, normalizeApiCredential } from '../../utils/apiConfigNormalize';
+import { extractModelIds } from '../../utils/modelList';
+import { safeResponseJson } from '../../utils/safeApi';
 import {
     DEFAULT_NAI_MODEL, DEFAULT_OAI_MODEL, NAI_DEFAULTS, NAI_MAX_SEED, NAI_MODEL_OPTIONS, NAI_SAMPLER_OPTIONS, NAI_SIZE_PRESETS, NAI_UC_PRESET_OPTIONS,
     OAI_MODEL_SUGGESTIONS, OAI_RETIRED_MODELS, isNaiV4, naiCostWarning, naiNoiseSchedule, naiNoiseScheduleOptions, naiParamError,
@@ -119,10 +122,26 @@ export default function ImageGenerationSettings({ value, onChange }: { value: Im
     const { apiPresets } = useOS();
     const [provider, setProvider] = useState<ImageGenerationProvider>('oai');
     const [editing, setEditing] = useState<ImagePromptPreset | null>(null);
+    const [models, setModels] = useState<string[]>([]);
+    const [loadingModels, setLoadingModels] = useState(false);
+    const [modelStatus, setModelStatus] = useState('');
     const api: ImageGenerationApi = value[provider] || { baseUrl: provider === 'oai' ? 'https://api.openai.com/v1' : 'https://image.novelai.net', apiKey: '', model: provider === 'oai' ? DEFAULT_OAI_MODEL : DEFAULT_NAI_MODEL };
     const set = (patch: Partial<ImageGenerationApi>) => onChange({ ...value, [provider]: { ...api, ...patch } });
     const presets = value.presets?.[provider] || [];
     const modelListId = 'image-model-' + provider;
+    const fetchModels = async () => {
+        const base = normalizeApiBaseUrl(api.baseUrl).replace(/\/images\/generations$/, '');
+        if (!base) { setModelStatus('请先填写 API 地址'); return; }
+        setLoadingModels(true); setModelStatus('正在拉取模型...'); setModels([]);
+        try {
+            const response = await fetch(base + '/models', { method: 'GET', headers: { Authorization: 'Bearer ' + normalizeApiCredential(api.apiKey) } });
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            const result = extractModelIds(await safeResponseJson(response));
+            setModels(result);
+            setModelStatus(result.length ? `获取到 ${result.length} 个模型` : '模型列表为空或格式不兼容');
+        } catch (error) { setModelStatus('拉取模型失败：' + (error instanceof Error ? error.message : '网络错误')); }
+        finally { setLoadingModels(false); }
+    };
     return <div className="space-y-3 rounded-2xl border border-slate-200 p-4">
         <h3 className="text-sm font-bold">聊天生图 API 与提示词预设</h3>
         <p className="text-xs text-slate-500">两套接口分别保存。在神经链接为角色选择提示词，在聊天设置开启自动发图；加号中可手动生图。修改后点下方“保存其他 API”。</p>
@@ -131,18 +150,23 @@ export default function ImageGenerationSettings({ value, onChange }: { value: Im
         <div className="flex gap-2">{(['oai', 'nai'] as const).map(p => <button type="button" key={p} aria-pressed={provider === p} className={'px-4 py-2 rounded-xl text-sm ' + (provider === p ? 'bg-primary text-white' : 'bg-slate-100')} onClick={() => { setProvider(p); setEditing(null); }}>{p === 'oai' ? 'OAI 兼容接口' : 'NovelAI'}</button>)}</div>
         <label className="block text-xs">API 地址<input aria-label={provider + ' baseUrl'} type="text" autoComplete="off" spellCheck={false} className={field + ' mt-1'} value={api.baseUrl} onChange={e => set({ baseUrl: e.target.value })} /></label>
         <label className="block text-xs">API Key<input aria-label={provider + ' apiKey'} type="password" autoComplete="off" spellCheck={false} className={field + ' mt-1'} value={api.apiKey} onChange={e => set({ apiKey: e.target.value })} /></label>
-        <label className="block text-xs">模型名称<input aria-label={provider + ' model'} type="text" list={modelListId} autoComplete="off" spellCheck={false} className={field + ' mt-1'} value={api.model} onChange={e => set({ model: e.target.value })} />
-            <datalist id={modelListId}>{(provider === 'oai' ? OAI_MODEL_SUGGESTIONS.map(m => ({ value: m, label: m })) : NAI_MODEL_OPTIONS).map(m => <option key={m.value} value={m.value}>{m.label}</option>)}</datalist>
+        <label className="block text-xs">模型名称<span className="flex items-center gap-2"><input aria-label={provider + ' model'} type="text" list={modelListId} autoComplete="off" spellCheck={false} className={field + ' mt-1 min-w-0'} value={api.model} onChange={e => set({ model: e.target.value })} />
+            {provider === 'oai' && <button type="button" className="shrink-0 text-xs text-primary" disabled={loadingModels} onClick={fetchModels}>{loadingModels ? '拉取中...' : '拉取模型'}</button>}</span>
+            <datalist id={modelListId}>{(provider === 'oai' ? Array.from(new Set([...models, ...OAI_MODEL_SUGGESTIONS])).map(m => ({ value: m, label: m })) : NAI_MODEL_OPTIONS).map(m => <option key={m.value} value={m.value}>{m.label}</option>)}</datalist>
             <span className={hint}>可以从列表里选，也可以手填中转服务商给的模型名。</span>
+            {provider === 'oai' && modelStatus && <span role="status" className={hint}>{modelStatus}</span>}
         </label>
         <div className="space-y-3 rounded-xl bg-slate-50 p-3">
             <h4 className="text-xs font-bold">{provider === 'oai' ? 'OAI 生图参数' : 'NovelAI 生图参数'}</h4>
             {provider === 'oai' ? <OaiParams api={api} set={set} /> : <NaiParams api={api} set={set} />}
         </div>
         <p className="text-xs text-slate-500">官方接口使用网络代理转发，需要代理同步更新。自定义地址须支持浏览器跨域。不自动换模型或重试付费请求。</p>
-        <div className="flex justify-between items-center"><h4 className="text-xs font-bold">{provider.toUpperCase()} 生成要求 · 多版预设</h4><button type="button" className="text-xs text-primary" onClick={() => setEditing({ id: crypto.randomUUID(), name: '', content: '' })}>＋ 新建版本</button></div>
+        <div className="flex justify-between items-center"><h4 className="text-xs font-bold">{provider.toUpperCase()} 生成要求 · 多版预设</h4><button type="button" className="text-xs text-primary" onClick={() => setEditing(provider === 'oai' ? { id: crypto.randomUUID(), name: '', positivePrompt: '', negativePrompt: '' } : { id: crypto.randomUUID(), name: '', content: '' })}>＋ 新建版本</button></div>
         {presets.map(p => <div key={p.id} className="flex items-center gap-2 p-2 bg-slate-50 rounded-xl"><span className="flex-1 text-xs break-all">{p.name}</span><button type="button" className="text-xs text-primary" onClick={() => setEditing({ ...p })}>编辑</button><button type="button" className="text-xs text-rose-500" onClick={() => { if (window.confirm('删除这个提示词版本？已选择它的角色需要重新选择。')) onChange({ ...value, presets: { ...value.presets, [provider]: presets.filter(item => item.id !== p.id) } }); }}>删除</button></div>)}
         {!presets.length && <p className="text-xs text-slate-400">暂无版本，可先新建；角色也可使用内置默认要求。</p>}
-        {editing && <div className="space-y-2 p-3 border rounded-xl"><input aria-label="生图提示词版本名称" className={field} placeholder="版本名称" value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} /><textarea aria-label="生图生成要求" className={field + ' h-40'} placeholder={DEFAULT_IMAGE_INSTRUCTION} value={editing.content} onChange={e => setEditing({ ...editing, content: e.target.value })} /><div className="flex gap-3"><button type="button" disabled={!editing.name.trim() || !editing.content.trim()} className="text-primary text-xs disabled:opacity-40" onClick={() => { onChange({ ...value, [provider]: api, presets: { ...value.presets, [provider]: [...presets.filter(p => p.id !== editing.id), { ...editing, name: editing.name.trim() }] } }); setEditing(null); }}>保存到草稿</button><button type="button" className="text-xs" onClick={() => setEditing(null)}>取消</button></div></div>}
+        {editing && <div className="space-y-2 p-3 border rounded-xl"><input aria-label="生图提示词版本名称" className={field} placeholder="版本名称" value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} />{provider === 'oai' ? <>
+            <label className="block text-xs">正向提示词（Positive Prompt）<textarea aria-label="OAI 正向提示词" className={field + ' h-40 mt-1'} value={editing.positivePrompt ?? editing.content ?? ''} onChange={e => setEditing({ ...editing, positivePrompt: e.target.value })} /></label>
+            <label className="block text-xs">反向提示词（Negative Prompt）<textarea aria-label="OAI 反向提示词" className={field + ' h-40 mt-1'} value={editing.negativePrompt ?? ''} onChange={e => setEditing({ ...editing, negativePrompt: e.target.value })} /></label>
+        </> : <textarea aria-label="生图生成要求" className={field + ' h-40'} placeholder={DEFAULT_IMAGE_INSTRUCTION} value={editing.content ?? ''} onChange={e => setEditing({ ...editing, content: e.target.value })} />}<div className="flex gap-3"><button type="button" disabled={!editing.name.trim() || (provider === 'nai' && !editing.content?.trim())} className="text-primary text-xs disabled:opacity-40" onClick={() => { const saved = provider === 'oai' ? { id: editing.id, name: editing.name.trim(), positivePrompt: editing.positivePrompt ?? editing.content ?? '', negativePrompt: editing.negativePrompt ?? '' } : { ...editing, name: editing.name.trim() }; onChange({ ...value, [provider]: api, presets: { ...value.presets, [provider]: [...presets.filter(p => p.id !== editing.id), saved] } }); setEditing(null); }}>保存到草稿</button><button type="button" className="text-xs" onClick={() => setEditing(null)}>取消</button></div></div>}
     </div>;
 }

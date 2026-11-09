@@ -284,7 +284,7 @@ export type AnthropicPromptCacheTtl = '5m' | '1h';
 export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'stream' | 'temperature' | 'maxTokens' | 'apiType' | 'protocol' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'anthropicPromptCacheTtl' | 'openaiPromptCache'>;
 
 export type ImageGenerationProvider = 'oai' | 'nai';
-export interface ImagePromptPreset { id: string; name: string; content: string }
+export interface ImagePromptPreset { id: string; name: string; content?: string; positivePrompt?: string; negativePrompt?: string }
 /** 生图接口配置。未填写的参数不发送或使用默认值，规则见 utils/imageGenerationParams.ts */
 export interface ImageGenerationApi {
   baseUrl: string; apiKey: string; model: string;

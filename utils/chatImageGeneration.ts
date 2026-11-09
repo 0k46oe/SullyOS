@@ -1,4 +1,4 @@
-import type { CharacterProfile, ImageGenerationConfig, ImageGenerationProvider } from '../types';
+import type { CharacterProfile, ImageGenerationConfig, ImageGenerationProvider, ImagePromptPreset } from '../types';
 import { getProxyWorkerUrl } from './proxyWorker';
 import { putImageBlob } from './blobRef';
 import { readImageGenerationConfig, resolveImageSelection } from './chatImageConfig';
@@ -20,15 +20,23 @@ export function buildImageRequest(provider: ImageGenerationProvider, api: NonNul
     if (!prompt.trim()) throw new Error('请填写图片生成要求');
     if (!api.apiKey.trim() || !api.model.trim()) throw new Error('请先在设置中填写所选生图接口的 Key 和模型');
     return provider === 'oai'
-        ? buildOaiRequest(api, prompt.trim())
+        ? buildOaiRequest(api, prompt)
         : buildNaiRequest(api, prompt.trim(), () => crypto.getRandomValues(new Uint32Array(1))[0]);
+}
+export function composeOaiImagePrompt(prompt: string, preset?: ImagePromptPreset): string {
+    if (!preset) return prompt;
+    const positive = preset.positivePrompt ?? preset.content ?? '';
+    const negative = preset.negativePrompt ?? '';
+    if (!positive.trim() && !negative.trim()) return prompt;
+    return ['角色画面描述：\n' + prompt, ...(positive.trim() ? ['正向提示词：\n' + positive] : []), ...(negative.trim() ? ['反向约束：\n' + negative] : [])].join('\n\n');
 }
 export async function generateChatImage(char: CharacterProfile, prompt: string, options: { config?: ImageGenerationConfig; signal?: AbortSignal } = {}): Promise<string> {
     const config = options.config || readImageGenerationConfig();
     const selection = resolveImageSelection(config, char);
     if (!selection?.api) throw new Error('请先在神经链接选择生图接口和提示词');
     if (selection.missingPreset) throw new Error('选择的生图提示词已删除，请重新选择');
-    const body = buildImageRequest(selection.provider, selection.api, prompt);
+    if (!prompt.trim()) throw new Error('请填写图片生成要求');
+    const body = buildImageRequest(selection.provider, selection.api, selection.provider === 'oai' ? composeOaiImagePrompt(prompt, selection.preset) : prompt);
     options.signal?.throwIfAborted();
     let response: Response;
     try {
