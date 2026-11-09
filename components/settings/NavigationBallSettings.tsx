@@ -108,7 +108,7 @@ export default function NavigationBallSettings({ characters = [], loadWorlds, re
             }} className={`rounded-xl border px-3 py-2 text-xs ${pet.enabled === enabled ? 'border-primary text-primary bg-primary/5' : 'border-slate-200 text-slate-500'}`}>{label}</button>)}
         </div>
       </fieldset>
-      {pet.enabled && <><NavigationPetControls /><p className="text-[11px] leading-relaxed text-slate-400">动图从 <a href="https://github.com/0k46oe/clawd-on-desk" target="_blank" rel="noopener noreferrer" className="underline">Clawd on Desk</a> 仓库的固定版本加载；加载失败时显示默认球。点开悬浮球也能快速切换形态。</p></>}
+      {pet.enabled && <><NavigationPetControls /><p className="text-[11px] leading-relaxed text-slate-400">动图随 SullyOS 一起提供，来源于 <a href="https://github.com/0k46oe/clawd-on-desk" target="_blank" rel="noopener noreferrer" className="underline">Clawd on Desk</a>；加载失败时显示默认球。点开悬浮球也能快速切换形态。</p></>}
       <div className="flex items-center gap-4">
         <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl bg-slate-100" aria-label="悬浮球外观预览">
           <div className="navigation-ball-face-preview" data-custom-image={pet.enabled || !!appearance.image} data-pet={pet.enabled} data-image-border={appearance.imageBorder}

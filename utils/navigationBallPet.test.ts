@@ -3,7 +3,9 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Simulate } from 'react-dom/test-utils';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { beginNavigationPetChat, CLAWD_ASSET_BASE, CLAWD_FORMS, clawdFallbackUrl, clawdFrameStyle, clawdImageUrl, NAVIGATION_PET_KEY, normalizeNavigationPet, setNavigationPet } from './navigationBallPet';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { beginNavigationPetChat, CLAWD_ASSET_BASE, CLAWD_FORMS, clawdFrameStyle, clawdImageUrl, NAVIGATION_PET_KEY, normalizeNavigationPet, setNavigationPet } from './navigationBallPet';
 import NavigationBallSettings from '../components/settings/NavigationBallSettings';
 import { DraggableNavigationBall } from '../components/os/NavigationBall';
 import { DEFAULT_NAVIGATION_BALL_APPEARANCE, normalizeNavigationBallAppearance, resetNavigationBallAppearance, setNavigationBallAppearance } from './navigationBallAppearance';
@@ -39,15 +41,20 @@ const selectForm = (value: string) => act(async () => {
   Simulate.change(select, { target: { value } } as any);
 });
 
-it('uses only pinned Clawd URLs and validates every selectable form', () => {
+it('serves every selectable Clawd form from the site assets', () => {
   expect(normalizeNavigationPet(null)).toMatchObject({ enabled: false, selection: 'auto' });
   expect(normalizeNavigationPet({ enabled: true, selection: 'https://unsafe.test' })).toMatchObject({ enabled: true, selection: 'auto' });
   expect(CLAWD_FORMS.length).toBe(24);
-  expect(CLAWD_ASSET_BASE).toContain('cdn.jsdelivr.net');
+  expect(CLAWD_ASSET_BASE).toBe(`${import.meta.env.BASE_URL}assets/clawd/`);
   for (const [form] of CLAWD_FORMS) {
-    expect(clawdImageUrl(form)).toMatch(/^https:\/\/cdn\.jsdelivr\.net\/gh\/0k46oe\/clawd-on-desk@[a-f0-9]{40}\/assets\/gif\/clawd-[a-z-]+\.gif$/);
-    expect(clawdFallbackUrl(form)).toMatch(/^https:\/\/raw\.githubusercontent\.com\/0k46oe\/clawd-on-desk\/[a-f0-9]{40}\/assets\/gif\/clawd-[a-z-]+\.gif$/);
+    expect(clawdImageUrl(form)).toBe(`${CLAWD_ASSET_BASE}clawd-${form}.gif`);
+    const asset = resolve(process.cwd(), 'public/assets/clawd', `clawd-${form}.gif`);
+    expect(existsSync(asset)).toBe(true);
+    expect(readFileSync(asset).subarray(0, 6).toString()).toMatch(/^GIF8[79]a$/);
   }
+});
+
+it('calculates Clawd frame styles', () => {
   expect(clawdFrameStyle('idle')).toMatchObject({
     width: `${302 / 102 * 0.5 * 100}%`, height: `${300 / 102 * 0.5 * 100}%`,
     left: `${(1 - 201 / 102 * 0.5) * 100}%`, top: `${(1 - 273 / 102 * 0.5) * 100}%`,
@@ -96,8 +103,6 @@ it('keeps concurrent replies active, distinguishes cancellation from failure, an
 
 it('falls back to a visible clickable face on asset failure without changing the saved selection', async () => {
   setNavigationPet({ enabled: true, selection: 'building' }); await render();
-  await act(async () => Simulate.error(host.querySelector('.navigation-ball-toggle img')!));
-  expect(ballImage()).toBe(clawdFallbackUrl('building'));
   await act(async () => Simulate.error(host.querySelector('.navigation-ball-toggle img')!));
   expect(host.querySelector('.navigation-ball-image-fallback')).toBeTruthy();
   await act(async () => (host.querySelector('.navigation-ball-toggle') as HTMLButtonElement).click());
