@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => {
 vi.mock('../context/OSContext', () => ({ useOS: () => ({ updateCharacter: vi.fn() }) }));
 vi.mock('../components/chat/EmojiDescriptionModal', () => ({ default: () => null }));
 vi.mock('../utils/chatImageLibrary', () => ({ listGeneratedChatImages: mocks.list, removeGeneratedChatImages: mocks.remove, cleanupGeneratedChatImageBlobs: mocks.cleanup }));
-vi.mock('../utils/blobRef', async importOriginal => ({ ...(await importOriginal<typeof import('../utils/blobRef')>()), useBlobRefUrl: () => undefined }));
+vi.mock('../utils/blobRef', async importOriginal => ({ ...(await importOriginal<typeof import('../utils/blobRef')>()), useBlobRefUrl: () => 'data:image/png;base64,AA==' }));
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); document.body.innerHTML = ''; });
 
 it('selects all stored images, including images not yet displayed, and deletes them together', async () => {
@@ -22,6 +22,17 @@ it('selects all stored images, including images not yet displayed, and deletes t
     const props: any = { modalType: 'generate-image', setModalType: vi.fn(), activeCharacter: { id: 'c', name: '角色' }, archivePrompts: [], apiPresets: [], allCharacters: [], messages: [], emojis: [], categories: [] };
     await act(async () => { root.render(React.createElement(ChatModals, props)); });
     const button = (text: string) => Array.from(container.querySelectorAll('button')).find(el => el.textContent === text)!;
+    expect(button('多选')).toBeUndefined();
+    await act(async () => { button('最近生图').click(); });
+    const thumbnails = container.querySelectorAll('img[alt="已保存的生图"]');
+    expect(thumbnails).toHaveLength(8);
+    expect(thumbnails[0].className).toContain('object-contain');
+    await act(async () => { (thumbnails[0].parentElement as HTMLButtonElement).click(); });
+    const preview = container.querySelector('img[alt="已保存的生图"]')!;
+    expect(preview.className).toContain('object-contain');
+    expect(preview.className).not.toContain('object-cover');
+    expect(button('发送到聊天')).toBeDefined();
+    await act(async () => { button('最近生图').click(); });
     await act(async () => { button('多选').click(); });
     expect(container.querySelectorAll('input[aria-label="选择生图"]')).toHaveLength(8);
     await act(async () => { button('全选所有生图').click(); });
