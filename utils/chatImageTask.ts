@@ -3,7 +3,8 @@ import { ContextBuilder } from './context';
 import { createDialogueFetch } from './dialogueTransport';
 import { extractContent } from './safeApi';
 import { imageInstruction, readImageGenerationConfig, resolveImageSelection, resolveImageTextApi } from './chatImageConfig';
-import { buildImageRequest, generateChatImage } from './chatImageGeneration';
+import { buildImageRequest } from './chatImageGeneration';
+import { generateImageWithFallback } from './chatImageWithFallback';
 import { saveGeneratedChatImage } from './chatImageLibrary';
 
 const pending = new Set<string>();
@@ -35,8 +36,8 @@ export async function generateAndSaveChatImage(char: CharacterProfile, user: Use
         const prompt = extractContent(data).trim();
         if (!prompt) throw new Error('生图文字 API 返回了空提示词，未调用生图接口');
         options.signal?.throwIfAborted(); options.onProgress?.('正在生成图片…');
-        const imageRef = await generateChatImage(char, prompt, { config, signal: options.signal, presetId: selection.provider === 'oai' ? options.imagePresetId : undefined });
+        const result = await generateImageWithFallback(char, prompt, { config, signal: options.signal, presetId: selection.provider === 'oai' ? options.imagePresetId : undefined });
         options.onProgress?.('正在保存到本机…');
-        return await saveGeneratedChatImage({ characterId: char.id, provider: selection.provider, requirement: requirement.trim(), prompt, imageRef });
+        return await saveGeneratedChatImage({ characterId: char.id, provider: selection.provider, requirement: requirement.trim(), prompt, imageRef: result.imageRef, generatedImageFailed: result.failed });
     } finally { pending.delete(char.id); }
 }

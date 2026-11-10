@@ -17,6 +17,7 @@ import { buildReplySnapshotContent } from '../../utils/applyAssistantPostProcess
 import { stripLeakedSourceTags } from '../../utils/sanitize';
 import TokenImg from '../os/TokenImg';
 import ChatImage from './ChatImage';
+import GeneratedImagePair from './GeneratedImagePair';
 import { SARSpeechSwitch } from '../sar/SARSpeechSwitch';
 import McdCard from './McdCard';
 import HtmlCard from './HtmlCard';
@@ -3165,7 +3166,7 @@ const formatTimestamp = (ts: number) => {
         return commonLayout(
             <div className="relative group">
                 {m.content ? (
-                    <ChatImage
+                    m.metadata?.generatedImage && !m.metadata?.generatedImageFailed && typeof m.metadata?.generatedImagePrompt === 'string' && m.metadata.generatedImagePrompt.trim() ? <GeneratedImagePair value={m.content} prompt={m.metadata.generatedImagePrompt} isUser={isUser} selectionMode={selectionMode} onLoad={() => onMediaLoad?.(m.id)} /> : <ChatImage
                         value={m.content}
                         selectionMode={selectionMode}
                         eager={isLatestMessage}

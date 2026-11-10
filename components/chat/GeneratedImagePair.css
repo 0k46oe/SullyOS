@@ -1,0 +1,13 @@
+.sully-chat-generated-pair{display:flex;align-items:center;gap:12px;max-width:calc(100vw - 100px)}
+.sully-chat-generated-pair.is-user{flex-direction:row-reverse}
+.sully-chat-generated-cards{display:flex;align-items:center;gap:8px;min-width:0}
+.sully-chat-generated-stack,.sully-chat-generated-card{position:relative;display:block;padding:0;border:0;background:transparent;cursor:pointer;flex:none}
+.sully-chat-generated-stack{width:min(180px,calc(72vw - 115px));aspect-ratio:2/3;margin:8px}
+.sully-chat-generated-face{display:block;overflow:hidden;width:100%;height:100%;border-radius:16px;background:white;box-shadow:0 1px 4px #0003}
+.sully-chat-generated-face img{display:block;width:100%;height:100%;object-fit:contain}
+.sully-chat-generated-stack .sully-chat-generated-face{position:absolute;inset:0}
+.sully-chat-generated-stack .is-back{transform:rotate(8deg)}
+.sully-chat-generated-pair.is-user .is-back{transform:rotate(-8deg)}
+.sully-chat-generated-stack .is-front{z-index:1}
+.sully-chat-generated-card{width:min(120px,calc((72vw - 100px)/2));aspect-ratio:2/3}
+.sully-chat-image-expand{flex:none;border:1px solid #ded8cd;border-radius:999px;background:#fff;color:#5d554b;padding:6px 12px;font-size:12px;white-space:nowrap;cursor:pointer}

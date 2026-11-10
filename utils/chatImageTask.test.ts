@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { generateAndSaveChatImage } from './chatImageTask';
 
-const mocks = vi.hoisted(() => ({ build: vi.fn(async (..._args: any[]) => []), text: vi.fn(async () => ({ choices: [{ message: { content: '中文画面' } }] })), image: vi.fn(async () => 'image-ref'), save: vi.fn(async () => 'saved') }));
+const mocks = vi.hoisted(() => ({ build: vi.fn(async (..._args: any[]) => []), text: vi.fn(async () => ({ choices: [{ message: { content: '中文画面' } }] })), image: vi.fn(async () => ({ imageRef: 'image-ref', failed: false })), save: vi.fn(async () => 'saved') }));
 vi.mock('./context', () => ({ ContextBuilder: { buildCharacterRequest: mocks.build } }));
 vi.mock('./dialogueTransport', () => ({ createDialogueFetch: () => mocks.text }));
-vi.mock('./chatImageGeneration', () => ({ buildImageRequest: vi.fn(), generateChatImage: mocks.image }));
+vi.mock('./chatImageGeneration', () => ({ buildImageRequest: vi.fn() }));
+vi.mock('./chatImageWithFallback', () => ({ generateImageWithFallback: mocks.image }));
 vi.mock('./chatImageLibrary', () => ({ saveGeneratedChatImage: mocks.save }));
 vi.mock('./chatImageConfig', async importOriginal => ({ ...(await importOriginal<typeof import('./chatImageConfig')>()), resolveImageTextApi: () => ({ baseUrl: 'https://example.com/v1', apiKey: 'k', model: 'text' }) }));
 

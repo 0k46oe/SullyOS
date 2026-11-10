@@ -5,7 +5,7 @@ import type { ImageGenerationProvider } from '../types';
 const PREFIX = 'chat_generated_image:';
 export interface GeneratedChatImage {
     id: string; createdAt: number; characterId: string; provider: ImageGenerationProvider;
-    requirement: string; prompt: string; imageRef: string; thumbnailRef?: string;
+    requirement: string; prompt: string; imageRef: string; thumbnailRef?: string; generatedImageFailed?: boolean;
 }
 export async function listGeneratedChatImages(before?: string, limit = 12): Promise<GeneratedChatImage[]> {
     const db = await openDB();

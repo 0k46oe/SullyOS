@@ -48,6 +48,7 @@ export const WHITEBOX_SELECTOR_GROUPS = [
       '.sully-chat-turn-avatar', '.sully-chat-avatar-wrap', '.sully-chat-avatar-frame',
     ],
   },
+  { label: '生图与文字图', selectors: ['.sully-chat-generated-pair', '.sully-chat-generated-cards', '.sully-chat-generated-stack', '.sully-chat-generated-card', '.sully-chat-generated-face', '.sully-chat-image-expand'] },
   {
     label: '气泡、表情与语音',
     selectors: [

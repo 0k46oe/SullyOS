@@ -4037,7 +4037,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 onCreatePrompt={createNewPrompt} onEditPrompt={editSelectedPrompt} onSavePrompt={handleSavePrompt} onDeletePrompt={handleDeletePrompt}
                 onSetHistoryStart={handleSetHistoryStart} onRestoreAdaptiveContext={restoreAdaptiveContext} onEnterSelectionMode={handleEnterSelectionMode}
                 onReplyMessage={handleReplyMessage} onEditMessageStart={() => { if (selectedMessage) { setEditContent(selectedMessage.content); setModalType('edit-message'); } }}
-                onSendGeneratedImage={async imageRef => { await handleSendText(imageRef, 'image'); setModalType('none'); addToast('图片已发送到聊天', 'success'); }}
+                onSendGeneratedImage={async record => { await handleSendText(record.imageRef, 'image', { generatedImage: true, generatedImagePrompt: record.prompt, generatedImageFailed: record.generatedImageFailed === true }); setModalType('none'); addToast('图片已发送到聊天', 'success'); }}
                 onConfirmEditMessage={confirmEditMessage} onDeleteMessage={handleDeleteMessage} onCopyMessage={handleCopyMessage}
                 messageFavorited={!!(selectedMessage && contentFavoriteIds.has(contentFavoriteIdForMessage(selectedMessage)))}
                 onToggleMessageFavorite={selectedMessage ? () => handleToggleContentFavorite(selectedMessage) : undefined}

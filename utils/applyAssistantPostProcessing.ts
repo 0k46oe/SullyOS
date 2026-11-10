@@ -30,7 +30,7 @@ import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, RealtimeC
 import { resolveCharacterUserProfile } from './characterUserProfile';
 import { extractChatExtras } from './chatExtras';
 import { readImageGenerationConfig } from './chatImageConfig';
-import { generateChatImage } from './chatImageGeneration';
+import { generateImageWithFallback } from './chatImageWithFallback';
 import { saveGeneratedChatImage } from './chatImageLibrary';
 import { DB } from './db';
 import { ChatParser, type FrozenMusicSong } from './chatParser';
@@ -2449,15 +2449,18 @@ export async function applyAssistantPostProcessing(
             const resolved = await replyStep(() => resolveAutomaticImagePreset(char, imageConfig, pendingImage!, ctx.replyRun?.signal));
             if (!resolved) return;
             pendingImage = resolved.prompt;
-            const content = await replyStep(() => generateChatImage(char, pendingImage!, { config: imageConfig, signal: ctx.replyRun?.signal, presetId: resolved.presetId }));
+            const result = await replyStep(() => generateImageWithFallback(char, pendingImage!, { config: imageConfig, signal: ctx.replyRun?.signal, presetId: resolved.presetId }));
+            const content = result.imageRef;
+            if (result.failed) addToast('图片生成失败，已显示画面描述图。' + (result.error || ''), 'error');
             await replyStep(() => saveGeneratedChatImage({
                 characterId: char.id,
                 provider: char.imageGenerationSelection!.provider,
                 requirement: pendingImage!,
                 prompt: pendingImage!,
                 imageRef: content,
+                generatedImageFailed: result.failed,
             }));
-            await replyStep(() => persistMessage({ charId: char.id, role: 'assistant', type: 'image', content, metadata: { generatedImage: true, generatedImagePrompt: pendingImage! } }));
+            await replyStep(() => persistMessage({ charId: char.id, role: 'assistant', type: 'image', content, metadata: { generatedImage: true, generatedImagePrompt: pendingImage!, generatedImageFailed: result.failed } }));
             setMessages(await replyStep(() => DB.getRecentMessagesByCharId(char.id, 200)));
         } catch (error) {
             ctx.replyRun?.check();

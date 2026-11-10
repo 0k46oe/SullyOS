@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { composeOaiImagePrompt, generateChatImage } from './chatImageGeneration';
+import { composeOaiImagePrompt, generateChatImage, ImageGenerationFailure } from './chatImageGeneration';
 
 vi.mock('./blobRef', () => ({ putImageBlob: vi.fn(async () => 'image-ref') }));
 
@@ -30,5 +30,13 @@ describe('OAI image preset composition', () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1]!.body as string);
     expect(body.prompt).toContain('PRESET_B');
     expect(body.prompt).not.toContain('PRESET_A');
+  });
+  it('distinguishes an API failure from invalid local configuration', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 503 })));
+    const config: any = { oai: { baseUrl: 'https://example.com/v1', apiKey: 'key', model: 'gpt-image-2.5-flare' } };
+    const char: any = { imageGenerationSelection: { provider: 'oai' } };
+    await expect(generateChatImage(char, '画面', { config })).rejects.toBeInstanceOf(ImageGenerationFailure);
+    config.oai.baseUrl = 'not a URL';
+    await expect(generateChatImage(char, '画面', { config })).rejects.not.toBeInstanceOf(ImageGenerationFailure);
   });
 });
