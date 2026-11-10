@@ -30,6 +30,7 @@ export default function MeetingAppearanceControl({ surface, characterId }: { sur
             <button onClick={() => setOpen(true)} className="text-xs text-violet-600 py-2">聊天装扮 →</button>
         </div>
         <p className="text-xs text-slate-400">{current.description}</p>
+        <p className="mt-1 text-[10px] leading-relaxed text-slate-400">阅读界面 CSS 类名：meeting-reading（整体）、meeting-reading-page（页面）、meeting-prose（正文）、meeting-user-label（用户名称）、meeting-message-timestamp（时间）。</p>
         {open && createPortal(<div className="fixed inset-0 z-[250] bg-white" role="dialog" aria-modal="true" aria-label="界面美化" onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); if (!busy) setOpen(false); } }}>
             <BeautyShareChannel presets={appearancePresets} onExport={exportAppearancePreset} onImport={importAppearancePreset}
                 initialCategory={surface} targetCharacterId={characterId} onBusyChange={setBusy} onBack={() => { if (!busy) setOpen(false); }} />
