@@ -18,6 +18,7 @@ import { stripLeakedSourceTags } from '../../utils/sanitize';
 import TokenImg from '../os/TokenImg';
 import ChatImage from './ChatImage';
 import GeneratedImagePair from './GeneratedImagePair';
+import GeneratedImageSaveStatus from './GeneratedImageSaveStatus';
 import { SARSpeechSwitch } from '../sar/SARSpeechSwitch';
 import McdCard from './McdCard';
 import HtmlCard from './HtmlCard';
@@ -3175,6 +3176,7 @@ const formatTimestamp = (ts: number) => {
                 ) : (
                     <div className="px-4 py-6 rounded-2xl bg-slate-100 text-slate-400 text-xs italic text-center min-w-[120px]">[图片已丢失]</div>
                 )}
+                {m.metadata?.generatedImageGalleryState === 'pending' && <GeneratedImageSaveStatus messageId={m.id} />}
             </div>
         );
     }

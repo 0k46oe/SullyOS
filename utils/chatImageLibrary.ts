@@ -34,13 +34,45 @@ async function makeThumbnail(imageRef: string): Promise<string | undefined> {
         return thumb ? putImageBlob(thumb) : undefined;
     } finally { URL.revokeObjectURL(url); }
 }
-export async function saveGeneratedChatImage(record: Omit<GeneratedChatImage, 'id' | 'createdAt' | 'thumbnailRef'>): Promise<GeneratedChatImage> {
+export async function saveGeneratedChatImage(record: Omit<GeneratedChatImage, 'id' | 'createdAt' | 'thumbnailRef'>, options: { skipThumbnail?: boolean } = {}): Promise<GeneratedChatImage> {
     const createdAt = Date.now();
     const saved: GeneratedChatImage = { ...record, id: PREFIX + createdAt + ':' + crypto.randomUUID(), createdAt };
     // Persist the original first: a thumbnail failure must not lose a paid result.
     await DB.saveAssetRaw(saved.id, saved);
+    if (options.skipThumbnail) return saved;
     try { saved.thumbnailRef = await makeThumbnail(saved.imageRef); if (saved.thumbnailRef) await DB.saveAssetRaw(saved.id, saved); } catch { /* Original remains available. */ }
     return saved;
+}
+/** Complete a pending automatic-image save atomically with its message marker.
+ * Reopening a chat can safely retry this without creating duplicates or reviving deletions. */
+export async function savePendingAutomaticImage(messageId: number): Promise<'saved' | 'missing'> {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(['messages', 'assets'], 'readwrite');
+        const messages = tx.objectStore('messages');
+        let outcome: 'saved' | 'missing' = 'missing';
+        const request = messages.get(messageId);
+        request.onsuccess = () => {
+            const message = request.result;
+            if (!message) return;
+            const metadata = message.metadata || {};
+            if (metadata.generatedImageGalleryState === 'saved') { outcome = 'saved'; return; }
+            if (metadata.generatedImageGalleryState !== 'pending' || !['oai', 'nai'].includes(metadata.generatedImageProvider) || !message.content) return;
+            const id = PREFIX + message.timestamp + ':message-' + messageId;
+            const record: GeneratedChatImage = {
+                id, createdAt: message.timestamp, characterId: message.charId,
+                provider: metadata.generatedImageProvider, requirement: metadata.generatedImagePrompt || '',
+                prompt: metadata.generatedImagePrompt || '', imageRef: message.content,
+                generatedImageFailed: metadata.generatedImageFailed === true,
+            };
+            tx.objectStore('assets').put({ id, data: record });
+            messages.put({ ...message, metadata: { ...metadata, generatedImageGalleryState: 'saved' } });
+            outcome = 'saved';
+        };
+        tx.oncomplete = () => resolve(outcome);
+        tx.onerror = () => reject(tx.error || new Error('生图库保存失败'));
+        tx.onabort = () => reject(tx.error || new Error('生图库保存失败'));
+    });
 }
 export async function removeGeneratedChatImage(record: GeneratedChatImage): Promise<void> {
     await DB.deleteAsset(record.id);

@@ -18,5 +18,6 @@ describe('manual OAI image generation', () => {
     expect(instructions).not.toMatch(/正向秘密|反向秘密/);
     expect(instructions).toContain('中文');
     expect(mocks.image).toHaveBeenCalledWith(char, '中文画面', expect.objectContaining({ config }));
+    expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ imageRef: 'image-ref' }), { skipThumbnail: true });
   });
 });

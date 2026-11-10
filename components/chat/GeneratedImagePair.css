@@ -11,3 +11,11 @@
 .sully-chat-generated-stack .is-front{z-index:1}
 .sully-chat-generated-card{width:min(120px,calc((72vw - 100px)/2));aspect-ratio:2/3}
 .sully-chat-image-expand{flex:none;border:1px solid #ded8cd;border-radius:999px;background:#fff;color:#5d554b;padding:6px 12px;font-size:12px;white-space:nowrap;cursor:pointer}
+.sully-chat-image-save-status {
+    display: block;
+    margin-top: 6px;
+    color: #928b80;
+    font-size: 11px;
+    line-height: 1.4;
+}
+.sully-chat-image-save-status.is-failed { color: #b65c57; cursor: pointer; }

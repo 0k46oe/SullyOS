@@ -38,6 +38,6 @@ export async function generateAndSaveChatImage(char: CharacterProfile, user: Use
         options.signal?.throwIfAborted(); options.onProgress?.('正在生成图片…');
         const result = await generateImageWithFallback(char, prompt, { config, signal: options.signal, presetId: selection.provider === 'oai' ? options.imagePresetId : undefined });
         options.onProgress?.('正在保存到本机…');
-        return await saveGeneratedChatImage({ characterId: char.id, provider: selection.provider, requirement: requirement.trim(), prompt, imageRef: result.imageRef, generatedImageFailed: result.failed });
+        return await saveGeneratedChatImage({ characterId: char.id, provider: selection.provider, requirement: requirement.trim(), prompt, imageRef: result.imageRef, generatedImageFailed: result.failed }, { skipThumbnail: true });
     } finally { pending.delete(char.id); }
 }

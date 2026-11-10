@@ -4,7 +4,7 @@ import { DB } from './db';
 
 const mocks = vi.hoisted(() => ({ image: vi.fn(), save: vi.fn() }));
 vi.mock('./chatImageWithFallback', () => ({ generateImageWithFallback: mocks.image }));
-vi.mock('./chatImageLibrary', () => ({ saveGeneratedChatImage: mocks.save }));
+vi.mock('./chatImageLibrary', () => ({ savePendingAutomaticImage: mocks.save }));
 
 describe('automatic image delivery', () => {
     it('shows the image while gallery thumbnail processing is still pending', async () => {

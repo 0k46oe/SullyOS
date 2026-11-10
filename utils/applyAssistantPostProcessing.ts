@@ -32,7 +32,7 @@ import { resolveCharacterUserProfile } from './characterUserProfile';
 import { extractChatExtras } from './chatExtras';
 import { readImageGenerationConfig } from './chatImageConfig';
 import { generateImageWithFallback } from './chatImageWithFallback';
-import { saveGeneratedChatImage } from './chatImageLibrary';
+import { savePendingAutomaticImage } from './chatImageLibrary';
 import { DB } from './db';
 import { ChatParser, type FrozenMusicSong } from './chatParser';
 import { resolveCharTimeZone } from './timezone';
@@ -2453,22 +2453,15 @@ export async function applyAssistantPostProcessing(
             const result = await replyStep(() => generateImageWithFallback(char, pendingImage!, { config: imageConfig, signal: ctx.replyRun?.signal, presetId: resolved.presetId }));
             const content = result.imageRef;
             if (result.failed) addToast('图片生成失败，已显示画面描述图。' + (result.error || ''), 'error');
-            await replyStep(() => persistMessage({ charId: char.id, role: 'assistant', type: 'image', content, metadata: { generatedImage: true, generatedImagePrompt: pendingImage!, generatedImageFailed: result.failed } }));
+            const imageMessageId = await replyStep(() => persistMessage({ charId: char.id, role: 'assistant', type: 'image', content, metadata: { generatedImage: true, generatedImagePrompt: pendingImage!, generatedImageFailed: result.failed, generatedImageGalleryState: 'pending', generatedImageProvider: char.imageGenerationSelection!.provider } }));
             setMessages(await replyStep(() => DB.getRecentMessagesByCharId(char.id, 200)));
             appendDevDebugLog('api', { label: '生图耗时', data: { stage: '图片消息已写入并刷新聊天' } });
-            // Show the paid image before waiting for its gallery thumbnail.
-            try { await replyStep(() => saveGeneratedChatImage({
-                characterId: char.id,
-                provider: char.imageGenerationSelection!.provider,
-                requirement: pendingImage!,
-                prompt: pendingImage!,
-                imageRef: content,
-                generatedImageFailed: result.failed,
-            }));
+            // The message itself carries a durable pending marker for recovery after a reload.
+            try {
+                await savePendingAutomaticImage(imageMessageId);
                 appendDevDebugLog('api', { label: '生图耗时', data: { stage: '生图库保存完成' } });
-            } catch (error) {
-                ctx.replyRun?.check();
-                addToast('图片已发送，但保存到生图库失败。', 'error');
+            } catch {
+                addToast('图片已发送，但保存到生图库失败，可在图片下方重试。', 'error');
             }
         } catch (error) {
             ctx.replyRun?.check();
