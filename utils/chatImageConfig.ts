@@ -31,9 +31,11 @@ export function resolveImageTextApi(config: ImageGenerationConfig, char: Charact
 export function buildChatImagePrompt(char: CharacterProfile, config = readImageGenerationConfig()): string {
     const selection = resolveImageSelection(config, char);
     if (!char.chatImageGenerationEnabled || !selection?.api?.apiKey?.trim() || !selection.api.model.trim() || selection.missingPreset) return '';
+    const faceRouting = selection.provider === 'oai' && char.imageGenerationSelection?.faceRouting;
     return '\n\n[图片生成能力]\n' + (config.systemPrompt?.trim() || DEFAULT_IMAGE_CAPABILITY)
         + '\n当前生图服务：' + selection.provider.toUpperCase()
         + '\n图片生成要求：\n' + imageInstruction(config, char)
+        + (faceRouting ? '\n发图时必须在标签内容开头标明构图：[露脸] 或 [不露脸]，紧接具体画面描述。例如 <生成图片>[露脸]在窗边拍一张自拍</生成图片>。自拍、人物照或拍自己的照片默认露脸；明确只拍手、背影、遮住脸或其他没有脸的画面用不露脸。' : '')
         + '\n需要发图时，每轮最多输出一次完整标签 <生成图片>想展示的画面、人物、动作和场景要求</生成图片>，放在普通聊天正文之外。标签只用于实际生成图片，不要只声称已经发图。不要把标签写在代码块里。';
 }
 export const CHAT_ACTION_PROMPT = '\n\n[线上聊天动作描写]\n每轮回复另写一段第三人称的动作与神态描写，使用 <线上动描>描写文字</线上动描>，仅写一次，放在聊天正文之前。每段动描首次提及角色时，主语使用角色的名字，不要用“他”或“她”等代称；之后再次提及时，可根据角色的性别和语境使用合适的代称。例如角色名为崔二时：<线上动描>崔二看到这条消息后怔了下，他垂下眼，看着屏幕笑了笑。</线上动描>。示例中的名字仅作示意，实际使用当前角色的名字。不加括号，不把动作混进聊天台词，不代写用户动作。与双语、语音或其他输出格式并用时，该标签独立放在其外部。';

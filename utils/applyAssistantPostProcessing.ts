@@ -2445,7 +2445,11 @@ export async function applyAssistantPostProcessing(
     }
     if (pendingImage && char.chatImageGenerationEnabled) {
         try {
-            const content = await replyStep(() => generateChatImage(char, pendingImage!, { config: imageConfig, signal: ctx.replyRun?.signal }));
+            const { resolveAutomaticImagePreset } = await import('./chatImageFaceRouting');
+            const resolved = await replyStep(() => resolveAutomaticImagePreset(char, imageConfig, pendingImage!, ctx.replyRun?.signal));
+            if (!resolved) return;
+            pendingImage = resolved.prompt;
+            const content = await replyStep(() => generateChatImage(char, pendingImage!, { config: imageConfig, signal: ctx.replyRun?.signal, presetId: resolved.presetId }));
             await replyStep(() => saveGeneratedChatImage({
                 characterId: char.id,
                 provider: char.imageGenerationSelection!.provider,

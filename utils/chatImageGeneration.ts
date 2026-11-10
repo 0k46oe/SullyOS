@@ -30,13 +30,15 @@ export function composeOaiImagePrompt(prompt: string, preset?: ImagePromptPreset
     if (!positive.trim() && !negative.trim()) return prompt;
     return ['角色画面描述：\n' + prompt, ...(positive.trim() ? ['正向提示词：\n' + positive] : []), ...(negative.trim() ? ['反向约束：\n' + negative] : [])].join('\n\n');
 }
-export async function generateChatImage(char: CharacterProfile, prompt: string, options: { config?: ImageGenerationConfig; signal?: AbortSignal } = {}): Promise<string> {
+export async function generateChatImage(char: CharacterProfile, prompt: string, options: { config?: ImageGenerationConfig; signal?: AbortSignal; presetId?: string } = {}): Promise<string> {
     const config = options.config || readImageGenerationConfig();
     const selection = resolveImageSelection(config, char);
     if (!selection?.api) throw new Error('请先在神经链接选择生图接口和提示词');
-    if (selection.missingPreset) throw new Error('选择的生图提示词已删除，请重新选择');
+    if (selection.missingPreset && options.presetId === undefined) throw new Error('选择的生图提示词已删除，请重新选择');
     if (!prompt.trim()) throw new Error('请填写图片生成要求');
-    const body = buildImageRequest(selection.provider, selection.api, selection.provider === 'oai' ? composeOaiImagePrompt(prompt, selection.preset) : prompt);
+    const preset = options.presetId === undefined ? selection.preset : config.presets?.[selection.provider]?.find(p => p.id === options.presetId);
+    if (options.presetId !== undefined && !preset) throw new Error('所选生图预设已删除，请重新选择');
+    const body = buildImageRequest(selection.provider, selection.api, selection.provider === 'oai' ? composeOaiImagePrompt(prompt, preset) : prompt);
     options.signal?.throwIfAborted();
     let response: Response;
     try {

@@ -295,11 +295,13 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     retainRecentForVectorize, setRetainRecentForVectorize, vectorizeResult, onForceVectorize,
     apiPresets, onAddApiPreset, onSaveEmotion, onClearBuffs,
 }) => {
-    const { updateCharacter } = useOS();
+    const { updateCharacter, apiConfig } = useOS();
     const [visibilitySelection, setVisibilitySelection] = useState<Set<string>>(new Set());
     const [historyPage, setHistoryPage] = useState(0);
     const [historySearch, setHistorySearch] = useState('');
     const [imageRequirement, setImageRequirement] = useState('');
+    const [manualImagePreset, setManualImagePreset] = useState('');
+    useEffect(() => { setManualImagePreset(''); }, [activeCharacter.id]);
     const [imageBusy, setImageBusy] = useState(false);
     const [imageStatus, setImageStatus] = useState('');
     const [savedImages, setSavedImages] = useState<GeneratedChatImage[]>([]);
@@ -356,7 +358,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
         setImageBusy(true); setImageStatus('正在整理提示词…');
         try {
             const user = (await DB.getUserProfile()) || { name: userName, avatar: '', bio: '' };
-            const record = await generateAndSaveChatImage(activeCharacter, user, imageRequirement, { presets: apiPresets, onProgress: setImageStatus });
+            const record = await generateAndSaveChatImage(activeCharacter, user, imageRequirement, { presets: apiPresets, imagePresetId: manualImagePreset || undefined, onProgress: setImageStatus });
             setSelectedSavedImage(record); setImageRequirement(''); setImageStatus('已保存到本机生图记录，可发送到聊天。');
             await loadSavedImages();
         } catch (error) { setImageStatus(error instanceof Error ? error.message : '生图失败'); }
@@ -422,6 +424,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                         {!showImageLibrary && <><section className="space-y-3 rounded-3xl bg-[#faf7f1] p-5 text-[#5d5547] shadow-sm">
                             <p className="break-words text-sm leading-relaxed text-[#9a8e7b]">图片会先保存到本机生图记录，不会自动发进聊天。</p>
                             <textarea value={imageRequirement} onChange={e => setImageRequirement(e.target.value)} placeholder="填写你想生成的画面、人物、动作、场景或风格…" className="min-h-36 w-full resize-y rounded-2xl border border-[#e5dece] bg-[#fffcf7] p-4 text-sm leading-relaxed outline-none" disabled={imageBusy} />
+                            {activeCharacter.imageGenerationSelection?.provider === 'oai' && <label className="block text-sm">生图提示词预设<select aria-label="手动生图预设" value={manualImagePreset} onChange={e => setManualImagePreset(e.target.value)} disabled={imageBusy} className="mt-2 w-full rounded-2xl border border-[#e5dece] bg-[#fffcf7] p-3"><option value="">使用角色当前预设</option>{(apiConfig.imageGeneration?.presets?.oai || []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>}
                             <button type="button" onClick={generateImage} disabled={imageBusy || !imageRequirement.trim()} className="w-full rounded-2xl bg-[#8a917c] p-4 text-sm font-bold text-white disabled:opacity-40">{imageBusy ? imageStatus || '生成中…' : '生成并保存'}</button>
                             {imageStatus && <p role="status" className="break-words text-sm leading-relaxed text-[#8f8475]">{imageStatus}</p>}
                         </section>

@@ -22,4 +22,13 @@ describe('OAI image preset composition', () => {
     expect(body.prompt).toBe('角色画面描述：\n 中文画面 \n\n正向提示词：\n 正向 \n\n反向约束：\n 反向 ');
     expect(body).not.toHaveProperty('negative_prompt');
   });
+  it('sends the explicitly selected preset rather than the character default', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ data: [{ b64_json: 'YQ==' }] }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const config: any = { oai: { baseUrl: 'https://example.com/v1', apiKey: 'key', model: 'gpt-image-2.5-flare' }, presets: { oai: [{ id: 'a', name: '露脸', positivePrompt: 'PRESET_A' }, { id: 'b', name: '不露脸', positivePrompt: 'PRESET_B' }] } };
+    await generateChatImage({ imageGenerationSelection: { provider: 'oai', presetId: 'a' } } as any, '手部特写', { config, presetId: 'b' });
+    const body = JSON.parse(fetchMock.mock.calls[0][1]!.body as string);
+    expect(body.prompt).toContain('PRESET_B');
+    expect(body.prompt).not.toContain('PRESET_A');
+  });
 });

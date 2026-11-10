@@ -8,7 +8,7 @@ import { saveGeneratedChatImage } from './chatImageLibrary';
 
 const pending = new Set<string>();
 export async function generateAndSaveChatImage(char: CharacterProfile, user: UserProfile, requirement: string, options: {
-    config?: ImageGenerationConfig; presets?: ApiPreset[]; signal?: AbortSignal;
+    config?: ImageGenerationConfig; presets?: ApiPreset[]; signal?: AbortSignal; imagePresetId?: string;
     onProgress?: (text: string) => void;
 } = {}) {
     if (pending.has(char.id)) throw new Error('这个角色已有图片正在生成，请等待完成');
@@ -35,7 +35,7 @@ export async function generateAndSaveChatImage(char: CharacterProfile, user: Use
         const prompt = extractContent(data).trim();
         if (!prompt) throw new Error('生图文字 API 返回了空提示词，未调用生图接口');
         options.signal?.throwIfAborted(); options.onProgress?.('正在生成图片…');
-        const imageRef = await generateChatImage(char, prompt, { config, signal: options.signal });
+        const imageRef = await generateChatImage(char, prompt, { config, signal: options.signal, presetId: selection.provider === 'oai' ? options.imagePresetId : undefined });
         options.onProgress?.('正在保存到本机…');
         return await saveGeneratedChatImage({ characterId: char.id, provider: selection.provider, requirement: requirement.trim(), prompt, imageRef });
     } finally { pending.delete(char.id); }
