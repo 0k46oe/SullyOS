@@ -1,4 +1,5 @@
 import { withReplyCancellation, type ReplyRun } from './chatReplyCancellation';
+import { appendDevDebugLog } from './devDebug';
 import { dialogueMaxTokens } from './characterApi';
 /**
  * applyAssistantPostProcessing — 抽自 hooks/useChatAI.ts 的 sendMessage 后处理管线
@@ -2452,7 +2453,11 @@ export async function applyAssistantPostProcessing(
             const result = await replyStep(() => generateImageWithFallback(char, pendingImage!, { config: imageConfig, signal: ctx.replyRun?.signal, presetId: resolved.presetId }));
             const content = result.imageRef;
             if (result.failed) addToast('图片生成失败，已显示画面描述图。' + (result.error || ''), 'error');
-            await replyStep(() => saveGeneratedChatImage({
+            await replyStep(() => persistMessage({ charId: char.id, role: 'assistant', type: 'image', content, metadata: { generatedImage: true, generatedImagePrompt: pendingImage!, generatedImageFailed: result.failed } }));
+            setMessages(await replyStep(() => DB.getRecentMessagesByCharId(char.id, 200)));
+            appendDevDebugLog('api', { label: '生图耗时', data: { stage: '图片消息已写入并刷新聊天' } });
+            // Show the paid image before waiting for its gallery thumbnail.
+            try { await replyStep(() => saveGeneratedChatImage({
                 characterId: char.id,
                 provider: char.imageGenerationSelection!.provider,
                 requirement: pendingImage!,
@@ -2460,8 +2465,11 @@ export async function applyAssistantPostProcessing(
                 imageRef: content,
                 generatedImageFailed: result.failed,
             }));
-            await replyStep(() => persistMessage({ charId: char.id, role: 'assistant', type: 'image', content, metadata: { generatedImage: true, generatedImagePrompt: pendingImage!, generatedImageFailed: result.failed } }));
-            setMessages(await replyStep(() => DB.getRecentMessagesByCharId(char.id, 200)));
+                appendDevDebugLog('api', { label: '生图耗时', data: { stage: '生图库保存完成' } });
+            } catch (error) {
+                ctx.replyRun?.check();
+                addToast('图片已发送，但保存到生图库失败。', 'error');
+            }
         } catch (error) {
             ctx.replyRun?.check();
             addToast(error instanceof Error ? error.message : '图片生成失败', 'error');

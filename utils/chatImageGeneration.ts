@@ -1,5 +1,6 @@
 import type { CharacterProfile, ImageGenerationConfig, ImageGenerationProvider, ImagePromptPreset } from '../types';
 import { getProxyWorkerUrl } from './proxyWorker';
+import { appendDevDebugLog } from './devDebug';
 import { putImageBlob } from './blobRef';
 import { readImageGenerationConfig, resolveImageSelection } from './chatImageConfig';
 import { buildNaiRequest, buildOaiRequest, oaiImageMime } from './imageGenerationParams';
@@ -42,6 +43,9 @@ export async function generateChatImage(char: CharacterProfile, prompt: string, 
     const body = buildImageRequest(selection.provider, selection.api, selection.provider === 'oai' ? composeOaiImagePrompt(prompt, preset) : prompt);
     const endpoint = imageEndpoint(selection.provider, selection.api.baseUrl);
     options.signal?.throwIfAborted();
+    const startedAt = performance.now();
+    const trace = (stage: string) => appendDevDebugLog('api', { label: '生图耗时', data: { stage, elapsedMs: Math.round(performance.now() - startedAt) } });
+    trace('请求发出');
     let response: Response;
     try {
         response = await fetch(endpoint, {
@@ -51,6 +55,7 @@ export async function generateChatImage(char: CharacterProfile, prompt: string, 
         options.signal?.throwIfAborted();
         throw new ImageGenerationFailure('生图连接失败，请检查接口与网络；官方接口需要已更新的网络代理，自定义接口需要允许跨域。');
     }
+    trace('收到响应头');
     if (!response.ok) throw new ImageGenerationFailure('生图失败（HTTP ' + response.status + '），请检查模型、额度和接口配置；未自动重试。');
     let blob: Blob;
     try {
@@ -62,15 +67,18 @@ export async function generateChatImage(char: CharacterProfile, prompt: string, 
         blob = new Blob([await entry.async('uint8array')], { type: 'image/png' });
     } else {
         const data = await response.json();
+        trace('响应体读取完成');
         const item = data?.data?.[0];
         if (typeof item?.b64_json === 'string' && item.b64_json) {
             const binary = atob(item.b64_json);
             const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
             blob = new Blob([bytes], { type: oaiImageMime(selection.api) });
         } else if (typeof item?.url === 'string' && /^https:\/\//i.test(item.url)) {
+            trace('开始下载图片');
             const download = await fetch(item.url, { signal: options.signal, credentials: 'omit' });
             if (!download.ok) throw new Error('图片已生成，但下载失败；未重新发起生图');
             blob = await download.blob();
+            trace('图片下载完成');
         } else throw new Error('OAI 没有返回图片数据或 HTTPS 图片地址');
     }
     if (!blob.size || blob.size > 32 * 1024 * 1024) throw new Error('图片为空或超过 32 MB');
@@ -78,6 +86,9 @@ export async function generateChatImage(char: CharacterProfile, prompt: string, 
         options.signal?.throwIfAborted();
         throw new ImageGenerationFailure(error instanceof Error ? error.message : '生图返回的图片无法读取');
     }
+    trace('图片解码完成');
     options.signal?.throwIfAborted();
-    return putImageBlob(blob);
+    const ref = await putImageBlob(blob);
+    trace('图片本地保存完成');
+    return ref;
 }
